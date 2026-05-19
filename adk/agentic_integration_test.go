@@ -62,7 +62,7 @@ func TestAgenticIntegration_ChatModelSingleShot(t *testing.T) {
 
 	dummyTool := newSlowTool("calculator", 0, "42")
 
-	agent, err := NewTypedChatModelAgent[*schema.AgenticMessage](ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
+	agent, err := NewTypedChatModelAgent(ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
 		Name:        "ToolCallAgent",
 		Description: "Agent with tools for agentic model",
 		Instruction: "You are a calculator.",
@@ -75,7 +75,7 @@ func TestAgenticIntegration_ChatModelSingleShot(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	runner := NewTypedRunner[*schema.AgenticMessage](TypedRunnerConfig[*schema.AgenticMessage]{
+	runner := NewTypedRunner(TypedRunnerConfig[*schema.AgenticMessage]{
 		Agent: agent,
 	})
 
@@ -114,7 +114,7 @@ func TestAgenticIntegration_ChatModelToolsPassedViaOptions(t *testing.T) {
 
 	dummyTool := newSlowTool("my_tool", 0, "result")
 
-	agent, err := NewTypedChatModelAgent[*schema.AgenticMessage](ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
+	agent, err := NewTypedChatModelAgent(ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
 		Name:        "ToolOptAgent",
 		Description: "Agent verifying tools are passed via options",
 		Model:       m,
@@ -126,7 +126,7 @@ func TestAgenticIntegration_ChatModelToolsPassedViaOptions(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	runner := NewTypedRunner[*schema.AgenticMessage](TypedRunnerConfig[*schema.AgenticMessage]{
+	runner := NewTypedRunner(TypedRunnerConfig[*schema.AgenticMessage]{
 		Agent: agent,
 	})
 	iter := runner.Query(ctx, "test tools")
@@ -170,14 +170,14 @@ func TestAgenticIntegration_StreamingWithRunner(t *testing.T) {
 		},
 	}
 
-	agent, err := NewTypedChatModelAgent[*schema.AgenticMessage](ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
+	agent, err := NewTypedChatModelAgent(ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
 		Name:        "StreamRunner",
 		Description: "Streaming runner agent",
 		Model:       m,
 	})
 	require.NoError(t, err)
 
-	runner := NewTypedRunner[*schema.AgenticMessage](TypedRunnerConfig[*schema.AgenticMessage]{
+	runner := NewTypedRunner(TypedRunnerConfig[*schema.AgenticMessage]{
 		Agent:           agent,
 		EnableStreaming: true,
 	})
@@ -230,7 +230,7 @@ func TestAgenticIntegration_CancelDuringExecution(t *testing.T) {
 		},
 	}
 
-	agent, err := NewTypedChatModelAgent[*schema.AgenticMessage](ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
+	agent, err := NewTypedChatModelAgent(ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
 		Name:        "CancelAgent",
 		Description: "cancel test",
 		Model:       m,
@@ -240,7 +240,7 @@ func TestAgenticIntegration_CancelDuringExecution(t *testing.T) {
 	cancelCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	runner := NewTypedRunner[*schema.AgenticMessage](TypedRunnerConfig[*schema.AgenticMessage]{
+	runner := NewTypedRunner(TypedRunnerConfig[*schema.AgenticMessage]{
 		Agent: agent,
 	})
 	iter := runner.Run(cancelCtx, []*schema.AgenticMessage{
@@ -295,7 +295,7 @@ func TestAgenticIntegration_CancelWithTimeout(t *testing.T) {
 	timeoutCtx, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
 	defer cancel()
 
-	runner := NewTypedRunner[*schema.AgenticMessage](TypedRunnerConfig[*schema.AgenticMessage]{
+	runner := NewTypedRunner(TypedRunnerConfig[*schema.AgenticMessage]{
 		Agent: sa,
 	})
 	iter := runner.Run(timeoutCtx, []*schema.AgenticMessage{
@@ -325,7 +325,7 @@ func TestAgenticIntegration_AgentTool(t *testing.T) {
 		},
 	}
 
-	innerAgent, err := NewTypedChatModelAgent[*schema.AgenticMessage](ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
+	innerAgent, err := NewTypedChatModelAgent(ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
 		Name:        "InnerAgent",
 		Description: "An agent used as a tool",
 		Model:       innerModel,
@@ -346,7 +346,7 @@ func TestAgenticIntegration_AgentTool(t *testing.T) {
 		},
 	}
 
-	outerAgent, err := NewTypedChatModelAgent[*schema.AgenticMessage](ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
+	outerAgent, err := NewTypedChatModelAgent(ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
 		Name:        "OuterAgent",
 		Description: "Outer agent with agent tool",
 		Model:       outerModel,
@@ -358,7 +358,7 @@ func TestAgenticIntegration_AgentTool(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	runner := NewTypedRunner[*schema.AgenticMessage](TypedRunnerConfig[*schema.AgenticMessage]{
+	runner := NewTypedRunner(TypedRunnerConfig[*schema.AgenticMessage]{
 		Agent: outerAgent,
 	})
 	iter := runner.Query(ctx, "delegate to inner")
@@ -396,7 +396,7 @@ func TestAgenticIntegration_InterruptEventFormation(t *testing.T) {
 			},
 		}
 
-		runner := NewTypedRunner[*schema.AgenticMessage](TypedRunnerConfig[*schema.AgenticMessage]{
+		runner := NewTypedRunner(TypedRunnerConfig[*schema.AgenticMessage]{
 			Agent: agent,
 		})
 		iter := runner.Query(ctx, "interrupt test")
@@ -435,7 +435,7 @@ func TestAgenticIntegration_InterruptEventFormation(t *testing.T) {
 			},
 		}
 
-		runner := NewTypedRunner[*schema.AgenticMessage](TypedRunnerConfig[*schema.AgenticMessage]{
+		runner := NewTypedRunner(TypedRunnerConfig[*schema.AgenticMessage]{
 			Agent: agent,
 		})
 		iter := runner.Query(ctx, "stateful test")
@@ -500,7 +500,7 @@ func TestAgenticIntegration_CheckpointInterruptResume(t *testing.T) {
 	}
 
 	store := newMyStore()
-	runner := NewTypedRunner[*schema.AgenticMessage](TypedRunnerConfig[*schema.AgenticMessage]{
+	runner := NewTypedRunner(TypedRunnerConfig[*schema.AgenticMessage]{
 		Agent:           agent,
 		CheckPointStore: store,
 	})
@@ -623,7 +623,7 @@ func TestAgenticIntegration_CheckpointWithMCPListToolsResult(t *testing.T) {
 	}
 
 	store := newMyStore()
-	runner := NewTypedRunner[*schema.AgenticMessage](TypedRunnerConfig[*schema.AgenticMessage]{
+	runner := NewTypedRunner(TypedRunnerConfig[*schema.AgenticMessage]{
 		Agent:           agent,
 		CheckPointStore: store,
 	})

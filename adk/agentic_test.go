@@ -91,7 +91,7 @@ func TestAgenticChatModelAgentRun_NoTools(t *testing.T) {
 		},
 	}
 
-	agent, err := NewTypedChatModelAgent[*schema.AgenticMessage](ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
+	agent, err := NewTypedChatModelAgent(ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
 		Name:        "AgenticTestAgent",
 		Description: "Agentic test agent",
 		Instruction: "You are helpful.",
@@ -146,7 +146,7 @@ func TestAgenticChatModelAgentRun_WithTools(t *testing.T) {
 
 	dummyTool := newSlowTool("dummy_tool", 0, "ok")
 
-	agent, err := NewTypedChatModelAgent[*schema.AgenticMessage](ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
+	agent, err := NewTypedChatModelAgent(ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
 		Name:        "AgenticToolAgent",
 		Description: "Agentic agent with tools",
 		Instruction: "You are helpful.",
@@ -207,7 +207,7 @@ func TestAgenticChatModelAgentRun_Streaming(t *testing.T) {
 		},
 	}
 
-	agent, err := NewTypedChatModelAgent[*schema.AgenticMessage](ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
+	agent, err := NewTypedChatModelAgent(ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
 		Name:        "AgenticStreamAgent",
 		Description: "Agentic streaming agent",
 		Instruction: "You are helpful.",
@@ -280,7 +280,7 @@ func TestAgenticRunnerQuery(t *testing.T) {
 		},
 	}
 
-	agent, err := NewTypedChatModelAgent[*schema.AgenticMessage](ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
+	agent, err := NewTypedChatModelAgent(ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
 		Name:        "QueryAgent",
 		Description: "Query test agent",
 		Instruction: "Be helpful.",
@@ -288,7 +288,7 @@ func TestAgenticRunnerQuery(t *testing.T) {
 	})
 	assert.NoError(t, err)
 
-	runner := NewTypedRunner[*schema.AgenticMessage](TypedRunnerConfig[*schema.AgenticMessage]{
+	runner := NewTypedRunner(TypedRunnerConfig[*schema.AgenticMessage]{
 		Agent: agent,
 	})
 
@@ -412,7 +412,7 @@ func TestAgenticChatModelAgentRun_WithMiddleware(t *testing.T) {
 		},
 	}
 
-	agent, err := NewTypedChatModelAgent[*schema.AgenticMessage](ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
+	agent, err := NewTypedChatModelAgent(ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
 		Name:        "AgenticMiddlewareAgent",
 		Description: "Agentic agent with middleware",
 		Instruction: "You are helpful.",
@@ -450,7 +450,7 @@ func TestAgenticAfterModel_NoTools_ModifyDoesNotAffectEvent(t *testing.T) {
 
 	var capturedMessages []*schema.AgenticMessage
 
-	agent, err := NewTypedChatModelAgent[*schema.AgenticMessage](ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
+	agent, err := NewTypedChatModelAgent(ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
 		Name:        "AgenticAfterModelAgent",
 		Description: "Test AfterModelRewriteState",
 		Instruction: "You are helpful.",
@@ -505,7 +505,7 @@ func TestAgenticGetComposeOptions_WithChatModelOptions(t *testing.T) {
 		},
 	}
 
-	agent, err := NewTypedChatModelAgent[*schema.AgenticMessage](ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
+	agent, err := NewTypedChatModelAgent(ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
 		Name:        "AgenticOptionsAgent",
 		Description: "Test agent",
 		Model:       m,
@@ -537,7 +537,7 @@ func TestAgenticChatModelAgent_PrepareExecContextError(t *testing.T) {
 		},
 	}
 
-	agent, err := NewTypedChatModelAgent[*schema.AgenticMessage](ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
+	agent, err := NewTypedChatModelAgent(ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
 		Name:        "AgenticErrToolAgent",
 		Description: "Test agent",
 		Model:       m,
@@ -570,7 +570,7 @@ func TestAgenticChatModelAgentOutputKey(t *testing.T) {
 			},
 		}
 
-		agent, err := NewTypedChatModelAgent[*schema.AgenticMessage](ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
+		agent, err := NewTypedChatModelAgent(ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
 			Name:        "AgenticOutputKeyAgent",
 			Description: "Test agent for output key",
 			Instruction: "You are helpful.",
@@ -584,7 +584,7 @@ func TestAgenticChatModelAgentOutputKey(t *testing.T) {
 				schema.UserAgenticMessage("Hello"),
 			},
 		}
-		ctx, runCtx := initTypedRunCtx[*schema.AgenticMessage](ctx, "AgenticOutputKeyAgent", input)
+		ctx, runCtx := initTypedRunCtx(ctx, "AgenticOutputKeyAgent", input)
 		require.NotNil(t, runCtx)
 		require.NotNil(t, runCtx.Session)
 
@@ -623,7 +623,7 @@ func TestAgenticChatModelAgentOutputKey(t *testing.T) {
 			},
 		}
 
-		agent, err := NewTypedChatModelAgent[*schema.AgenticMessage](ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
+		agent, err := NewTypedChatModelAgent(ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
 			Name:        "AgenticStreamOutputKeyAgent",
 			Description: "Test agent for streaming output key",
 			Instruction: "You are helpful.",
@@ -638,7 +638,7 @@ func TestAgenticChatModelAgentOutputKey(t *testing.T) {
 			},
 			EnableStreaming: true,
 		}
-		ctx, runCtx := initTypedRunCtx[*schema.AgenticMessage](ctx, "AgenticStreamOutputKeyAgent", input)
+		ctx, runCtx := initTypedRunCtx(ctx, "AgenticStreamOutputKeyAgent", input)
 		require.NotNil(t, runCtx)
 		require.NotNil(t, runCtx.Session)
 
@@ -659,7 +659,7 @@ func TestAgenticChatModelAgentOutputKey(t *testing.T) {
 		input := &TypedAgentInput[*schema.AgenticMessage]{
 			Messages: []*schema.AgenticMessage{schema.UserAgenticMessage("test")},
 		}
-		ctx, runCtx := initTypedRunCtx[*schema.AgenticMessage](ctx, "TestAgent", input)
+		ctx, runCtx := initTypedRunCtx(ctx, "TestAgent", input)
 		require.NotNil(t, runCtx)
 		require.NotNil(t, runCtx.Session)
 
@@ -694,7 +694,7 @@ func TestAgenticRunner_Run_WithStreaming(t *testing.T) {
 		},
 	}
 
-	runner := NewTypedRunner[*schema.AgenticMessage](TypedRunnerConfig[*schema.AgenticMessage]{EnableStreaming: true, Agent: mockAgent_})
+	runner := NewTypedRunner(TypedRunnerConfig[*schema.AgenticMessage]{EnableStreaming: true, Agent: mockAgent_})
 
 	msgs := []*schema.AgenticMessage{
 		schema.UserAgenticMessage("Hello, agent!"),
@@ -738,7 +738,7 @@ func TestAgenticRunner_Query_WithStreaming(t *testing.T) {
 		},
 	}
 
-	runner := NewTypedRunner[*schema.AgenticMessage](TypedRunnerConfig[*schema.AgenticMessage]{EnableStreaming: true, Agent: mockAgent_})
+	runner := NewTypedRunner(TypedRunnerConfig[*schema.AgenticMessage]{EnableStreaming: true, Agent: mockAgent_})
 
 	iterator := runner.Query(ctx, "Test query")
 
@@ -793,7 +793,7 @@ func TestAgenticSimpleInterrupt(t *testing.T) {
 	}
 	store := newMyStore()
 	ctx := context.Background()
-	runner := NewTypedRunner[*schema.AgenticMessage](TypedRunnerConfig[*schema.AgenticMessage]{
+	runner := NewTypedRunner(TypedRunnerConfig[*schema.AgenticMessage]{
 		Agent:           agent,
 		EnableStreaming: true,
 		CheckPointStore: store,
@@ -836,7 +836,7 @@ func TestCascadingFrom_NewChatModelAgentFrom(t *testing.T) {
 		},
 	}
 
-	agent, err := NewTypedChatModelAgent[*schema.AgenticMessage](ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
+	agent, err := NewTypedChatModelAgent(ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
 		Name:        "FromAgent",
 		Description: "Test cascading constructor",
 		Instruction: "Be helpful.",
@@ -963,7 +963,7 @@ func TestCoverage_ChatModelAgent_OnSetSubAgents_FrozenError(t *testing.T) {
 		},
 	}
 
-	agent, err := NewTypedChatModelAgent[*schema.AgenticMessage](ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
+	agent, err := NewTypedChatModelAgent(ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
 		Name:        "freeze-test",
 		Description: "frozen test agent",
 		Model:       m,
@@ -997,7 +997,7 @@ func TestCoverage_ChatModelAgent_OnSetAsSubAgent_FrozenError(t *testing.T) {
 		},
 	}
 
-	agent, err := NewTypedChatModelAgent[*schema.AgenticMessage](ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
+	agent, err := NewTypedChatModelAgent(ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
 		Name:        "freeze-child",
 		Description: "frozen child agent",
 		Model:       m,
@@ -1029,7 +1029,7 @@ func TestCoverage_ChatModelAgent_OnSetAsSubAgent_DuplicateError(t *testing.T) {
 		},
 	}
 
-	agent, err := NewTypedChatModelAgent[*schema.AgenticMessage](ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
+	agent, err := NewTypedChatModelAgent(ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
 		Name:        "dup-child",
 		Description: "duplicate child agent",
 		Model:       m,
@@ -1053,7 +1053,7 @@ func TestCoverage_ChatModelAgent_OnDisallowTransferToParent_FrozenError(t *testi
 		},
 	}
 
-	agent, err := NewTypedChatModelAgent[*schema.AgenticMessage](ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
+	agent, err := NewTypedChatModelAgent(ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
 		Name:        "disallow-test",
 		Description: "disallow transfer test",
 		Model:       m,
@@ -1183,7 +1183,7 @@ func TestCoverage_NewTypedAgentTool_Agentic(t *testing.T) {
 		},
 	}
 
-	agent, err := NewTypedChatModelAgent[*schema.AgenticMessage](ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
+	agent, err := NewTypedChatModelAgent(ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
 		Name:        "tool-agent",
 		Description: "agent wrapped as tool",
 		Model:       m,
@@ -1233,14 +1233,14 @@ func TestCoverage_ChatModelAgent_ModelGenerateError(t *testing.T) {
 		},
 	}
 
-	agent, err := NewTypedChatModelAgent[*schema.AgenticMessage](ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
+	agent, err := NewTypedChatModelAgent(ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
 		Name:        "error-model-agent",
 		Description: "tests model generate error",
 		Model:       m,
 	})
 	require.NoError(t, err)
 
-	runner := NewTypedRunner[*schema.AgenticMessage](TypedRunnerConfig[*schema.AgenticMessage]{
+	runner := NewTypedRunner(TypedRunnerConfig[*schema.AgenticMessage]{
 		Agent: agent,
 	})
 
@@ -1431,7 +1431,7 @@ func TestAgenticRetryWithShouldRetry_Generate(t *testing.T) {
 		},
 	}
 
-	agent, err := NewTypedChatModelAgent[*schema.AgenticMessage](ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
+	agent, err := NewTypedChatModelAgent(ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
 		Name:        "retry-gen-agent",
 		Description: "test retry generate",
 		Model:       m,
@@ -1452,7 +1452,7 @@ func TestAgenticRetryWithShouldRetry_Generate(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	runner := NewTypedRunner[*schema.AgenticMessage](TypedRunnerConfig[*schema.AgenticMessage]{Agent: agent})
+	runner := NewTypedRunner(TypedRunnerConfig[*schema.AgenticMessage]{Agent: agent})
 	iter := runner.Run(ctx, []*schema.AgenticMessage{schema.UserAgenticMessage("hello")})
 
 	msg := drainTypedAgenticEvents(t, iter)
@@ -1485,7 +1485,7 @@ func TestAgenticRetryWithShouldRetry_Stream(t *testing.T) {
 		},
 	}
 
-	agent, err := NewTypedChatModelAgent[*schema.AgenticMessage](ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
+	agent, err := NewTypedChatModelAgent(ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
 		Name:        "retry-stream-agent",
 		Description: "test retry stream",
 		Model:       m,
@@ -1505,7 +1505,7 @@ func TestAgenticRetryWithShouldRetry_Stream(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	runner := NewTypedRunner[*schema.AgenticMessage](TypedRunnerConfig[*schema.AgenticMessage]{
+	runner := NewTypedRunner(TypedRunnerConfig[*schema.AgenticMessage]{
 		Agent:          agent,
 		EnableStreaming: true,
 	})
@@ -1563,7 +1563,7 @@ func TestAgenticFailoverGenerate(t *testing.T) {
 		},
 	}
 
-	agent, err := NewTypedChatModelAgent[*schema.AgenticMessage](ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
+	agent, err := NewTypedChatModelAgent(ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
 		Name:        "failover-gen-agent",
 		Description: "test failover generate",
 		Model:       m1,
@@ -1582,7 +1582,7 @@ func TestAgenticFailoverGenerate(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	runner := NewTypedRunner[*schema.AgenticMessage](TypedRunnerConfig[*schema.AgenticMessage]{Agent: agent})
+	runner := NewTypedRunner(TypedRunnerConfig[*schema.AgenticMessage]{Agent: agent})
 	iter := runner.Run(ctx, []*schema.AgenticMessage{schema.UserAgenticMessage("hello")})
 
 	msg := drainTypedAgenticEvents(t, iter)
@@ -1621,7 +1621,7 @@ func TestAgenticFailoverStream_MidStreamError(t *testing.T) {
 		},
 	}
 
-	agent, err := NewTypedChatModelAgent[*schema.AgenticMessage](ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
+	agent, err := NewTypedChatModelAgent(ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
 		Name:        "failover-stream-agent",
 		Description: "test failover stream",
 		Model:       m1,
@@ -1638,7 +1638,7 @@ func TestAgenticFailoverStream_MidStreamError(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	runner := NewTypedRunner[*schema.AgenticMessage](TypedRunnerConfig[*schema.AgenticMessage]{
+	runner := NewTypedRunner(TypedRunnerConfig[*schema.AgenticMessage]{
 		Agent:          agent,
 		EnableStreaming: true,
 	})

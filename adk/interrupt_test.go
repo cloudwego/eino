@@ -1016,9 +1016,10 @@ func TestWorkflowInterrupt(t *testing.T) {
 
 		var sa1InfoFound, sa2InfoFound bool
 		for _, ctx := range interruptEvent.Action.Interrupted.InterruptContexts {
-			if ctx.Info == "sa1 interrupt data" {
+			switch ctx.Info {
+			case "sa1 interrupt data":
 				sa1InfoFound = true
-			} else if ctx.Info == "sa2 interrupt data" {
+			case "sa2 interrupt data":
 				sa2InfoFound = true
 			}
 		}
@@ -1029,9 +1030,10 @@ func TestWorkflowInterrupt(t *testing.T) {
 
 		var parallelInterruptID1, parallelInterruptID2 string
 		for _, ctx := range interruptEvent.Action.Interrupted.InterruptContexts {
-			if ctx.Info == "sa1 interrupt data" {
+			switch ctx.Info {
+			case "sa1 interrupt data":
 				parallelInterruptID1 = ctx.ID
-			} else if ctx.Info == "sa2 interrupt data" {
+			case "sa2 interrupt data":
 				parallelInterruptID2 = ctx.ID
 			}
 		}
@@ -1088,9 +1090,9 @@ func TestChatModelInterrupt(t *testing.T) {
 		CheckPointStore: newMyStore(),
 	})
 	iter := runner.Query(ctx, "hello world", WithCheckPointID("1"))
-	event, ok := iter.Next()
+	_, ok := iter.Next()
 	assert.True(t, ok)
-	event, ok = iter.Next()
+	event, ok := iter.Next()
 	assert.True(t, ok)
 	assert.NoError(t, event.Err)
 	assert.NotNil(t, event.Action.Interrupted)
@@ -1115,7 +1117,7 @@ func TestChatModelInterrupt(t *testing.T) {
 		intCtx = intCtx.Parent
 	}
 
-	event, ok = iter.Next()
+	_, ok = iter.Next()
 	assert.False(t, ok)
 
 	iter, err = runner.ResumeWithParams(ctx, "1", &ResumeParams{
@@ -1204,13 +1206,13 @@ func TestChatModelAgentToolInterrupt(t *testing.T) {
 	})
 
 	iter := runner.Query(ctx, "hello world", WithCheckPointID("1"))
-	event, ok := iter.Next()
+	_, ok := iter.Next()
 	assert.True(t, ok)
-	event, ok = iter.Next()
+	event, ok := iter.Next()
 	assert.True(t, ok)
 	assert.NoError(t, event.Err)
 	assert.NotNil(t, event.Action.Interrupted)
-	event, ok = iter.Next()
+	_, ok = iter.Next()
 	assert.False(t, ok)
 
 	iter, err = runner.Resume(ctx, "1")
@@ -1240,7 +1242,7 @@ func TestChatModelAgentToolInterrupt(t *testing.T) {
 	}
 	assert.NotEmpty(t, toolInterruptID)
 
-	event, ok = iter.Next()
+	_, ok = iter.Next()
 	assert.False(t, ok)
 
 	iter, err = runner.ResumeWithParams(ctx, "1", &ResumeParams{
@@ -1282,8 +1284,6 @@ func (m *myStore) Get(_ context.Context, key string) ([]byte, bool, error) {
 }
 
 type myAgentOptions struct {
-	interrupt bool
-
 	value string
 }
 
@@ -1593,10 +1593,11 @@ func TestChatModelParallelToolInterruptAndResume(t *testing.T) {
 
 	var toolAInterruptID, toolBInterruptID string
 	for _, info := range interruptEvent.Action.Interrupted.InterruptContexts {
-		if info.Info == "interrupt from toolA" {
+		switch info.Info {
+		case "interrupt from toolA":
 			toolAInterruptID = info.ID
 			assert.True(t, info.IsRootCause)
-		} else if info.Info == "interrupt from toolB" {
+		case "interrupt from toolB":
 			toolBInterruptID = info.ID
 			assert.True(t, info.IsRootCause)
 		}
@@ -1791,9 +1792,10 @@ func TestNestedChatModelAgentWithAgentTool(t *testing.T) {
 		if event.Output != nil && event.Output.MessageOutput != nil {
 			if event.Output.MessageOutput.Message != nil {
 				content := event.Output.MessageOutput.Message.Content
-				if content == "inner agent completed" {
+				switch content {
+				case "inner agent completed":
 					foundInnerCompletion = true
-				} else if content == "outer agent completed" {
+				case "outer agent completed":
 					foundOuterCompletion = true
 				}
 			}

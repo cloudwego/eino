@@ -307,7 +307,7 @@ func (f *failoverModelWrapper[M]) Generate(ctx context.Context, input []M, opts 
 		lastErr = err
 
 		if err == nil {
-			typedSetFailoverLastSuccessModel[M](ctx, currentModel)
+			typedSetFailoverLastSuccessModel(ctx, currentModel)
 			return result, nil
 		}
 
@@ -448,7 +448,7 @@ func (f *failoverModelWrapper[M]) Stream(ctx context.Context, input []M, opts ..
 			continue
 		}
 
-		typedSetFailoverLastSuccessModel[M](ctx, currentModel)
+		typedSetFailoverLastSuccessModel(ctx, currentModel)
 		return returnCopy, nil
 	}
 

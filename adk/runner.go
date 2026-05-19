@@ -87,7 +87,7 @@ type ResumeParams struct {
 
 // NewRunner creates a new Runner with the given config.
 func NewRunner(_ context.Context, conf RunnerConfig) *Runner {
-	return NewTypedRunner[*schema.Message](conf)
+	return NewTypedRunner(conf)
 }
 
 // NewTypedRunner creates a new TypedRunner with the given config.

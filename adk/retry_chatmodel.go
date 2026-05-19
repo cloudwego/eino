@@ -443,7 +443,7 @@ func generateWithShouldRetry[M MessageType](r *typedRetryModelWrapper[M], ctx co
 				return zero, err
 			}
 			if execCtx != nil && execCtx.generator != nil && out != nil {
-				event := typedModelOutputEvent[M](out, nil)
+				event := typedModelOutputEvent(out, nil)
 				execCtx.send(event)
 			}
 			return out, nil
@@ -734,7 +734,7 @@ func (r *typedRetryModelWrapper[M]) streamLegacy(ctx context.Context, input []M,
 		checkCopy := copies[0]
 		returnCopy := copies[1]
 
-		streamErr := consumeStreamForError[M](checkCopy)
+		streamErr := consumeStreamForError(checkCopy)
 		if streamErr == nil {
 			return returnCopy, nil
 		}

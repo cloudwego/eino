@@ -193,7 +193,7 @@ func (at *typedAgentTool[M]) InvokableRun(ctx context.Context, argumentsInJSON s
 			input = newTypedUserMessages[M](argumentsInJSON)
 		}
 
-		runner := newTypedInvokableAgentToolRunner[M](at.agent, ms, enableStreaming)
+		runner := newTypedInvokableAgentToolRunner(at.agent, ms, enableStreaming)
 		iter = runner.Run(ctx, input,
 			append(extractAndDeriveAgentToolCancelCtx(ctx, at.agent.Name(ctx), opts), WithCheckPointID(bridgeCheckpointID), withSharedParentSession())...)
 	} else {
@@ -206,7 +206,7 @@ func (at *typedAgentTool[M]) InvokableRun(ctx context.Context, argumentsInJSON s
 		agentOpts := extractAndDeriveAgentToolCancelCtx(ctx, at.agent.Name(ctx), opts)
 		agentOpts = append(agentOpts, withSharedParentSession())
 
-		runner := newTypedInvokableAgentToolRunner[M](at.agent, ms, enableStreaming)
+		runner := newTypedInvokableAgentToolRunner(at.agent, ms, enableStreaming)
 		iter, err = runner.Resume(ctx, bridgeCheckpointID, agentOpts...)
 		if err != nil {
 			return "", err

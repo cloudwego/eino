@@ -543,7 +543,7 @@ func TestReact(t *testing.T) {
 		assert.NotNil(t, compiled)
 
 		// Test with a user message
-		result, err = compiled.Invoke(ctx, &reactInput{Messages: []Message{
+		_, err = compiled.Invoke(ctx, &reactInput{Messages: []Message{
 			{
 				Role:    schema.User,
 				Content: "Use the test tool to say hello",

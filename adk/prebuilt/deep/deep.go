@@ -148,7 +148,7 @@ func NewTyped[M adk.MessageType](ctx context.Context, cfg *TypedConfig[M]) (adk.
 		handlers = append(handlers, tt)
 	}
 
-	return adk.NewTypedChatModelAgent[M](ctx, &adk.TypedChatModelAgentConfig[M]{
+	return adk.NewTypedChatModelAgent(ctx, &adk.TypedChatModelAgentConfig[M]{
 		Name:          cfg.Name,
 		Description:   cfg.Description,
 		Instruction:   instruction,
@@ -169,7 +169,7 @@ func NewTyped[M adk.MessageType](ctx context.Context, cfg *TypedConfig[M]) (adk.
 // This function initializes built-in tools, creates a task tool for subagent orchestration,
 // and returns a fully configured ChatModelAgent ready for execution.
 func New(ctx context.Context, cfg *Config) (adk.ResumableAgent, error) {
-	return NewTyped[*schema.Message](ctx, cfg)
+	return NewTyped(ctx, cfg)
 }
 
 func typedGenModelInput[M adk.MessageType](_ context.Context, instruction string, input *adk.TypedAgentInput[M]) ([]M, error) {

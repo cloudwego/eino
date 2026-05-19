@@ -1199,10 +1199,7 @@ func copyMessages(msgs []*schema.Message) []*schema.Message {
 			Extra:                    nil,
 		}
 		if msg.ToolCalls != nil {
-			copied.ToolCalls = make([]schema.ToolCall, 0, len(msg.ToolCalls))
-			for _, tc := range msg.ToolCalls {
-				copied.ToolCalls = append(copied.ToolCalls, tc)
-			}
+			copied.ToolCalls = append(make([]schema.ToolCall, 0, len(msg.ToolCalls)), msg.ToolCalls...)
 		}
 		if msg.Extra != nil {
 			copied.Extra = make(map[string]any, len(msg.Extra))

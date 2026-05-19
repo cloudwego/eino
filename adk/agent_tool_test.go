@@ -1176,7 +1176,7 @@ func TestCrossTypeAgentToolGracefulError(t *testing.T) {
 		},
 	}
 
-	innerAgent, err := NewTypedChatModelAgent[*schema.AgenticMessage](ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
+	innerAgent, err := NewTypedChatModelAgent(ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
 		Name:        "AgenticInner",
 		Description: "An agentic agent used as a tool",
 		Model:       innerModel,

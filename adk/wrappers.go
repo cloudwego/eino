@@ -542,8 +542,6 @@ type typedEventSenderToolWrapper[M MessageType] struct {
 	*TypedBaseChatModelAgentMiddleware[M]
 }
 
-type eventSenderToolWrapper = typedEventSenderToolWrapper[*schema.Message]
-
 func (*typedEventSenderToolWrapper[M]) isEventSenderToolWrapper() {}
 
 // eventSenderToolWrapperMarker enables cross-type detection of eventSenderToolWrapper

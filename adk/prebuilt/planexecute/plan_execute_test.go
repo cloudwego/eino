@@ -134,7 +134,7 @@ func TestPlannerRunWithFormattedOutput(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, planMsg.Content, msg.Content)
 
-	event, ok = iterator.Next()
+	_, ok = iterator.Next()
 	assert.False(t, ok)
 
 	plan := defaultNewPlan(ctx)
@@ -780,41 +780,6 @@ func (s *checkpointStore) Set(_ context.Context, key string, value []byte) error
 func (s *checkpointStore) Get(_ context.Context, key string) ([]byte, bool, error) {
 	v, ok := s.data[key]
 	return v, ok, nil
-}
-
-func formatRunPath(runPath []adk.RunStep) string {
-	if len(runPath) == 0 {
-		return "[]"
-	}
-	var parts []string
-	for _, step := range runPath {
-		parts = append(parts, step.String())
-	}
-	return "[" + strings.Join(parts, " -> ") + "]"
-}
-
-func formatAgentEvent(event *adk.AgentEvent) string {
-	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("{AgentName: %q, RunPath: %s", event.AgentName, formatRunPath(event.RunPath)))
-	if event.Output != nil {
-		if event.Output.MessageOutput != nil && event.Output.MessageOutput.Message != nil {
-			msg := event.Output.MessageOutput.Message
-			sb.WriteString(fmt.Sprintf(", Output.Message: {Role: %q, Content: %q}", msg.Role, msg.Content))
-		}
-	}
-	if event.Action != nil {
-		if event.Action.Interrupted != nil {
-			sb.WriteString(fmt.Sprintf(", Action.Interrupted: {%d contexts}", len(event.Action.Interrupted.InterruptContexts)))
-		}
-		if event.Action.BreakLoop != nil {
-			sb.WriteString(fmt.Sprintf(", Action.BreakLoop: {From: %q, Done: %v}", event.Action.BreakLoop.From, event.Action.BreakLoop.Done))
-		}
-	}
-	if event.Err != nil {
-		sb.WriteString(fmt.Sprintf(", Err: %v", event.Err))
-	}
-	sb.WriteString("}")
-	return sb.String()
 }
 
 func TestPlanExecuteAgentInterruptResume(t *testing.T) {
