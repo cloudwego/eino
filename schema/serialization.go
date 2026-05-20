@@ -29,6 +29,8 @@ func init() {
 	RegisterName[[]*Message]("_eino_message_slice")
 	RegisterName[*AgenticMessage]("_eino_agentic_message")
 	RegisterName[[]*AgenticMessage]("_eino_agentic_message_slice")
+	RegisterName[*ToolInfo]("_eino_tool_info")
+	RegisterName[[]*ToolInfo]("_eino_tool_info_slice")
 	RegisterName[Document]("_eino_document")
 	RegisterName[RoleType]("_eino_role_type")
 	RegisterName[ToolCall]("_eino_tool_call")
