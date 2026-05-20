@@ -22,12 +22,18 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
+// messageType is the sealed type constraint for message types used in BaseModel.
+// Only *schema.Message and *schema.AgenticMessage satisfy this constraint.
+type messageType interface {
+	*schema.Message | *schema.AgenticMessage
+}
+
 // BaseModel is the generic base model interface parameterized by message type M.
 // It exposes two modes of interaction:
 //   - [BaseModel.Generate]: blocks until the model returns a complete response.
 //   - [BaseModel.Stream]: returns a [schema.StreamReader] that yields message
 //     chunks incrementally as the model generates them.
-type BaseModel[M any] interface {
+type BaseModel[M messageType] interface {
 	Generate(ctx context.Context, input []M, opts ...Option) (M, error)
 	Stream(ctx context.Context, input []M, opts ...Option) (*schema.StreamReader[M], error)
 }
