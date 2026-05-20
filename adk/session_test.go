@@ -43,6 +43,7 @@ type sessionHelperStore struct {
 	turnExists       bool
 	turnErr          error
 	appendErr        error
+	deleteErr        error
 }
 
 type runnerSessionAgent struct {
@@ -130,6 +131,9 @@ func (s *sessionHelperStore) Get(_ context.Context, key string) ([]byte, bool, e
 func (s *sessionHelperStore) Delete(_ context.Context, key string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.deleteErr != nil {
+		return s.deleteErr
+	}
 	delete(s.checkpoints, key)
 	return nil
 }
@@ -291,6 +295,64 @@ func TestRunnerSessionModeRejectsPendingCheckpoint(t *testing.T) {
 	require.ErrorIs(t, event.Err, ErrPendingSessionCheckpoint)
 	_, ok = iter.Next()
 	require.False(t, ok)
+}
+
+func TestRunnerSessionModeDeleteCheckpointFailureIsReported(t *testing.T) {
+	ctx := context.Background()
+	store := newSessionHelperStore()
+	persister := newSessionEventPersister[*schema.Message](
+		ctx,
+		store,
+		"delete-fail-session",
+		&SessionPersistenceConfig{EventFlushBatchSize: 1},
+	)
+	checkPointID := "delete-fail-checkpoint"
+	store.deleteErr = errors.New("delete failed")
+
+	res := &sessionTurnResult[*schema.Message]{
+		persister:    persister,
+		turnEndBytes: []byte("turn-end"),
+		sessionState: &runnerSessionRunState[*schema.Message]{
+			enabled:      true,
+			sessionID:    "delete-fail-session",
+			sessionStore: store,
+		},
+		store:        store,
+		checkPointID: &checkPointID,
+	}
+
+	err := res.finalize(ctx)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to delete session checkpoint")
+	assert.True(t, store.turnExists, "turn snapshot is committed before stale checkpoint cleanup")
+}
+
+func TestTurnEndStateSessionValues_JSONLikeRoundTrip(t *testing.T) {
+	state := &TurnEndState[*schema.Message]{
+		Messages: []*schema.Message{schema.UserMessage("hello")},
+		ToolInfos: []*schema.ToolInfo{
+			{
+				Name:        "lookup",
+				Desc:        "lookup tool",
+				ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{"q": {Type: schema.String}}),
+			},
+		},
+		SessionValues: map[string]any{
+			"nested": map[string]any{"count": int64(9007199254740993)},
+			"list":   []any{"a", int64(7), true},
+		},
+	}
+
+	data, err := encodeTurnEndState(state)
+	require.NoError(t, err)
+	decoded, err := decodeTurnEndState[*schema.Message](data)
+	require.NoError(t, err)
+	require.NotNil(t, decoded)
+	require.Len(t, decoded.Messages, 1)
+	assert.Equal(t, "hello", decoded.Messages[0].Content)
+	require.Len(t, decoded.ToolInfos, 1)
+	assert.Equal(t, "lookup", decoded.ToolInfos[0].Name)
+	assert.Equal(t, state.SessionValues, decoded.SessionValues)
 }
 
 func TestRunnerSessionStreamingDoesNotBlockLiveEvent(t *testing.T) {
