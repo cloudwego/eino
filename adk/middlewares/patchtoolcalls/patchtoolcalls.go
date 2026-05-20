@@ -109,7 +109,20 @@ func patchToolCallsForMessage[M adk.MessageType](ctx context.Context,
 			if err != nil {
 				return ctx, nil, err
 			}
+			adk.EnsureMessageID(toolMsg)
 			patched = append(patched, toolMsg)
+
+			// Emit MessageInserted so the synthetic tool result is persisted to the
+			// session event log. On reconstruction it will be present, and the
+			// dangling-call check below will skip re-insertion.
+			if msgEvent, ok := any(&adk.TypedAgentEvent[*schema.Message]{
+				MessageInserted: &adk.MessageInsertedEvent[*schema.Message]{
+					Message:         toolMsg,
+					BeforeMessageID: "",
+				},
+			}).(*adk.TypedAgentEvent[M]); ok {
+				_ = adk.TypedSendEvent(ctx, msgEvent)
+			}
 		}
 	}
 
@@ -158,7 +171,17 @@ func patchToolCallsForAgenticMessage[M adk.MessageType](ctx context.Context,
 			if err != nil {
 				return ctx, nil, err
 			}
+			adk.EnsureMessageID(toolMsg)
 			patched = append(patched, toolMsg)
+
+			if msgEvent, ok := any(&adk.TypedAgentEvent[*schema.AgenticMessage]{
+				MessageInserted: &adk.MessageInsertedEvent[*schema.AgenticMessage]{
+					Message:         toolMsg,
+					BeforeMessageID: "",
+				},
+			}).(*adk.TypedAgentEvent[M]); ok {
+				_ = adk.TypedSendEvent(ctx, msgEvent)
+			}
 		}
 	}
 

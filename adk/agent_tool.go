@@ -19,10 +19,12 @@ package adk
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 
 	"github.com/bytedance/sonic"
+	"github.com/google/uuid"
 
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
@@ -151,6 +153,15 @@ func (at *typedAgentTool[M]) Info(ctx context.Context) (*schema.ToolInfo, error)
 	}, nil
 }
 
+// agentToolInterruptState is the JSON-encoded state captured when an AgentTool
+// invocation is interrupted. It wraps the bridge checkpoint bytes alongside
+// the synthetic child session ID so resume preserves SessionID-based event
+// filtering across interrupt/resume.
+type agentToolInterruptState struct {
+	ChildSessionID   string `json:"child_session_id"`
+	BridgeCheckpoint []byte `json:"bridge_checkpoint"`
+}
+
 func (at *typedAgentTool[M]) InvokableRun(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (string, error) {
 	if cancelCtx := getCancelContext(ctx); cancelCtx != nil {
 		cancelCtx.markAgentToolDescendant()
@@ -161,7 +172,29 @@ func (at *typedAgentTool[M]) InvokableRun(ctx context.Context, argumentsInJSON s
 	var iter *AsyncIterator[*TypedAgentEvent[M]]
 	var err error
 
-	wasInterrupted, hasState, state := tool.GetInterruptState[[]byte](ctx)
+	wasInterrupted, hasState, rawState := tool.GetInterruptState[[]byte](ctx)
+
+	var childSessionID string
+	var bridgeCheckpoint []byte
+
+	if !wasInterrupted {
+		// First invocation — generate a globally-unique child session ID.
+		// Synthetic UUID avoids collisions with model-assigned tool call IDs
+		// (which may be reused across turns) and with user-assigned session IDs.
+		childSessionID = "agent_tool:" + uuid.NewString()
+	} else if !hasState {
+		return "", fmt.Errorf("agent tool '%s' interrupt has happened, but cannot find interrupt state", at.agent.Name(ctx))
+	} else {
+		// Resume — JSON-decode the wrapped state to recover both the bridge checkpoint
+		// and the original childSessionID.
+		var wrapped agentToolInterruptState
+		if err := json.Unmarshal(rawState, &wrapped); err != nil {
+			return "", fmt.Errorf("agent tool '%s': failed to decode interrupt state: %w", at.agent.Name(ctx), err)
+		}
+		childSessionID = wrapped.ChildSessionID
+		bridgeCheckpoint = wrapped.BridgeCheckpoint
+	}
+
 	if !wasInterrupted {
 		ms = newBridgeStore()
 
@@ -169,11 +202,6 @@ func (at *typedAgentTool[M]) InvokableRun(ctx context.Context, argumentsInJSON s
 		if at.fullChatHistoryAsInput {
 			var zero M
 			if _, ok := any(zero).(*schema.Message); !ok {
-				// fullChatHistoryAsInput is only supported for *schema.Message agents and will not
-				// be extended to *schema.AgenticMessage. The chat history format and role semantics
-				// differ fundamentally between Message and AgenticMessage, and the history rewriting
-				// logic (role attribution, system message filtering, transfer messages) is specific
-				// to the Message model.
 				return "", fmt.Errorf("fullChatHistoryAsInput is only supported for *schema.Message agents")
 			}
 			msgInput, histErr := getReactChatHistory(ctx, at.agent.Name(ctx))
@@ -197,11 +225,7 @@ func (at *typedAgentTool[M]) InvokableRun(ctx context.Context, argumentsInJSON s
 		iter = runner.Run(ctx, input,
 			append(extractAndDeriveAgentToolCancelCtx(ctx, at.agent.Name(ctx), opts), WithCheckPointID(bridgeCheckpointID), withSharedParentSession())...)
 	} else {
-		if !hasState {
-			return "", fmt.Errorf("agent tool '%s' interrupt has happened, but cannot find interrupt state", at.agent.Name(ctx))
-		}
-
-		ms = newResumeBridgeStore(bridgeCheckpointID, state)
+		ms = newResumeBridgeStore(bridgeCheckpointID, bridgeCheckpoint)
 
 		agentOpts := extractAndDeriveAgentToolCancelCtx(ctx, at.agent.Name(ctx), opts)
 		agentOpts = append(agentOpts, withSharedParentSession())
@@ -239,15 +263,15 @@ func (at *typedAgentTool[M]) InvokableRun(ctx context.Context, argumentsInJSON s
 					rp = append(rp, event.RunPath...)
 					event.RunPath = rp
 				}
+				// Tag forwarded events with the child session ID so the parent's
+				// persistence loop knows to skip them (parent persists only events
+				// for its own session). The tag is stripped before user-facing delivery.
+				event.SessionID = childSessionID
 				if msgEvent, ok := any(event).(*AgentEvent); ok {
 					tmp := copyTypedAgentEvent(msgEvent)
 					gen.Send(msgEvent)
 					event = any(tmp).(*TypedAgentEvent[M])
 				} else {
-					// Cross-message-type agent tools are not supported and will not be supported.
-					// An AgenticMessage agent cannot be used as a tool within a Message agent's
-					// event stream. The agent tool still executes correctly and returns its text
-					// result; only real-time event streaming to the parent is blocked.
 					return "", fmt.Errorf("cross-message-type agent tools are not supported: cannot use an AgenticMessage agent as a tool of a Message agent")
 				}
 			}
@@ -265,7 +289,17 @@ func (at *typedAgentTool[M]) InvokableRun(ctx context.Context, argumentsInJSON s
 			return "", fmt.Errorf("interrupt has happened, but cannot find interrupt info")
 		}
 
-		return "", tool.CompositeInterrupt(ctx, "agent tool interrupt", data,
+		// Wrap bridge checkpoint with childSessionID so resume can recover it.
+		wrapped := agentToolInterruptState{
+			ChildSessionID:   childSessionID,
+			BridgeCheckpoint: data,
+		}
+		wrappedBytes, mErr := json.Marshal(wrapped)
+		if mErr != nil {
+			return "", fmt.Errorf("agent_tool: failed to encode interrupt state: %w", mErr)
+		}
+
+		return "", tool.CompositeInterrupt(ctx, "agent tool interrupt", wrappedBytes,
 			lastEvent.Action.internalInterrupted)
 	}
 

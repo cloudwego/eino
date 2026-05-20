@@ -15,9 +15,10 @@
  */
 
 // Package agentsmd provides a middleware that automatically injects Agents.md
-// file contents into model input messages. The injection is transient — content
-// is prepended at model call time and never persisted to conversation state,
-// so it is naturally excluded from summarization / compression.
+// file contents into model input messages. The injected message is appended to
+// state.Messages once per session (idempotent via an Extra marker) and persisted
+// in the session event log so subsequent turns reuse it without regenerating
+// (which would invalidate the prompt cache).
 package agentsmd
 
 import (
@@ -111,8 +112,30 @@ func (m *typedMiddleware[M]) BeforeModelRewriteState(ctx context.Context, state 
 	}
 
 	nState := *state
-	nState.Messages = typedInsertBeforeFirstUser(state.Messages, fmt.Sprintf("<system-reminder>\n%s\n</system-reminder>", content))
+	newMessages, insertedMsg, anchorMsg := typedInsertBeforeFirstUser(state.Messages, fmt.Sprintf("<system-reminder>\n%s\n</system-reminder>", content))
+	nState.Messages = newMessages
+
+	// Emit MessageInserted so the persisted event log reflects the inserted
+	// agentsmd message. On the next turn, reconstruction includes it, the
+	// idempotent marker suppresses re-insertion, and the prompt-cache prefix
+	// remains byte-identical.
+	var beforeID string
+	if !isNilMessage(anchorMsg) {
+		beforeID = adk.GetMessageID(anchorMsg)
+	}
+	_ = adk.TypedSendEvent(ctx, &adk.TypedAgentEvent[M]{
+		MessageInserted: &adk.MessageInsertedEvent[M]{
+			Message:         insertedMsg,
+			BeforeMessageID: beforeID,
+		},
+	})
+
 	return ctx, &nState, nil
+}
+
+func isNilMessage[M adk.MessageType](msg M) bool {
+	var zero M
+	return any(msg) == any(zero)
 }
 
 // hasAgentsMDExtra checks whether a message has the agentsmd extra key set.
@@ -134,20 +157,26 @@ func hasAgentsMDExtra[M adk.MessageType](msg M) bool {
 	return false
 }
 
-// typedInsertBeforeFirstUser inserts a user message with agentsmd content before the first User message.
-func typedInsertBeforeFirstUser[M adk.MessageType](msgs []M, content string) []M {
-	newMsg := makeUserMsgWithExtra[M](content)
-	result := make([]M, 0, len(msgs)+1)
+// typedInsertBeforeFirstUser inserts a user message with agentsmd content before
+// the first User message. Returns the updated slice, the inserted message (with
+// an assigned eino message ID), and the anchor message (the first user message
+// the inserted message was placed before; zero value if no user message exists
+// and the inserted message was appended at the end).
+func typedInsertBeforeFirstUser[M adk.MessageType](msgs []M, content string) (result []M, insertedMsg M, anchorMsg M) {
+	insertedMsg = makeUserMsgWithExtra[M](content)
+	adk.EnsureMessageID(insertedMsg)
+	result = make([]M, 0, len(msgs)+1)
 	for i, msg := range msgs {
 		if isUserRole(msg) {
-			result = append(result, newMsg)
+			result = append(result, insertedMsg)
 			result = append(result, msgs[i:]...)
-			return result
+			anchorMsg = msg
+			return result, insertedMsg, anchorMsg
 		}
 		result = append(result, msg)
 	}
-	result = append(result, newMsg)
-	return result
+	result = append(result, insertedMsg)
+	return result, insertedMsg, anchorMsg
 }
 
 func isUserRole[M adk.MessageType](msg M) bool {
