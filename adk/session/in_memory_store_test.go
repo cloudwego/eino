@@ -17,7 +17,11 @@
 package session_test
 
 import (
+	"context"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/adk/session"
@@ -27,4 +31,30 @@ func TestInMemoryStoreConformance(t *testing.T) {
 	session.RunConformanceTests(t, func(testing.TB) adk.SessionStore {
 		return session.NewInMemoryStore()
 	})
+}
+
+func TestInMemoryStoreCheckpointSetGetDelete(t *testing.T) {
+	ctx := context.Background()
+	store := session.NewInMemoryStore()
+
+	_, exists, err := store.Get(ctx, "missing")
+	require.NoError(t, err)
+	assert.False(t, exists)
+
+	require.NoError(t, store.Set(ctx, "k", []byte("payload")))
+
+	got, exists, err := store.Get(ctx, "k")
+	require.NoError(t, err)
+	require.True(t, exists)
+	assert.Equal(t, []byte("payload"), got)
+
+	got[0] = 'X'
+	again, _, err := store.Get(ctx, "k")
+	require.NoError(t, err)
+	assert.Equal(t, []byte("payload"), again, "Get must return an independent copy")
+
+	require.NoError(t, store.Delete(ctx, "k"))
+	_, exists, err = store.Get(ctx, "k")
+	require.NoError(t, err)
+	assert.False(t, exists)
 }
