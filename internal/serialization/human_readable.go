@@ -421,9 +421,9 @@ func hrUnmarshalTyped(data map[string]any, typeStr string) (any, error) {
 
 	value, hasValue := data["value"]
 	if hasValue && len(data) == 2 {
-		result, err := hrUnmarshal(value, actualType)
-		if err != nil {
-			return nil, err
+		result, unmarshalErr := hrUnmarshal(value, actualType)
+		if unmarshalErr != nil {
+			return nil, unmarshalErr
 		}
 		return wrapPointers(result, ptrNum), nil
 	}
