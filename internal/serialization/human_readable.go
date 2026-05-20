@@ -114,7 +114,21 @@ func hrMarshal(v any, fieldType reflect.Type) (any, error) {
 
 func hrMarshalStruct(rv reflect.Value, rt reflect.Type, typeUnspecific bool, pointerNum uint32) (any, error) {
 	if checkMarshaler(rt) {
-		jsonBytes, err := json.Marshal(rv.Interface())
+		// Use the addressable form when possible so pointer-receiver MarshalJSON
+		// methods are invoked. Without this, custom marshalers defined on *T are
+		// silently bypassed because rv.Interface() returns a non-addressable copy
+		// and the standard json package only checks Marshaler on the value type.
+		// Symptom: types like ToolInfo that store data behind unexported fields
+		// (ParamsOneOf.params / .jsonschema) round-trip with those fields lost.
+		var marshalTarget any
+		if rv.CanAddr() {
+			marshalTarget = rv.Addr().Interface()
+		} else {
+			tmp := reflect.New(rt)
+			tmp.Elem().Set(rv)
+			marshalTarget = tmp.Interface()
+		}
+		jsonBytes, err := json.Marshal(marshalTarget)
 		if err != nil {
 			return nil, err
 		}
@@ -302,7 +316,15 @@ func wrapSliceWithType(value []any, rt reflect.Type, pointerNum uint32) (any, er
 		return nil, err
 	}
 
-	typeName := fmt.Sprintf("[]%s", elemTypeName)
+	// Preserve array vs slice distinction on the wire so the type round-trips
+	// exactly. Without this branch, a [N]T value placed in an interface field
+	// would silently come back as []T.
+	var typeName string
+	if rt.Kind() == reflect.Array {
+		typeName = fmt.Sprintf("[%d]%s", rt.Len(), elemTypeName)
+	} else {
+		typeName = fmt.Sprintf("[]%s", elemTypeName)
+	}
 	if pointerNum > 0 {
 		typeName = strings.Repeat("*", int(pointerNum)) + typeName
 	}
