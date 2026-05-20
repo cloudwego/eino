@@ -96,18 +96,18 @@ func TestStreamPersistence_CopyAndConcat(t *testing.T) {
 	}
 	assert.Equal(t, "hello world", liveContent, "live stream must yield concatenated content")
 
-	// Find the persisted streaming event in the log: skip the input event, find the assistant output.
-	var foundAssistant bool
+	// Find the persisted streaming event in the log: exactly one assistant output should be persisted.
+	var assistantMessages []*schema.Message
 	for _, raw := range store.events {
 		se, err := decodeSessionEvent[*schema.Message](raw)
 		require.NoError(t, err)
 		if se.Message != nil && se.Message.Role == schema.Assistant {
-			foundAssistant = true
-			assert.Equal(t, "hello world", se.Message.Content,
-				"persisted stream message must be the fully concatenated content")
+			assistantMessages = append(assistantMessages, se.Message)
 		}
 	}
-	assert.True(t, foundAssistant, "streaming assistant output must be persisted as a SessionEvent")
+	require.Len(t, assistantMessages, 1, "streaming assistant output must be persisted exactly once")
+	assert.Equal(t, "hello world", assistantMessages[0].Content,
+		"persisted stream message must be the fully concatenated content")
 }
 
 // TestStreamPersistence_GetMessageError_NotEnqueued verifies that a stream
@@ -556,11 +556,8 @@ func TestPartialInterrupted_ThenNewRun(t *testing.T) {
 	for _, m := range captured.inputs[0] {
 		contents = append(contents, m.Content)
 	}
-	assert.Contains(t, contents, "first")
-	assert.Contains(t, contents, "answer1")
-	assert.Contains(t, contents, "partial",
-		"partial-turn message must survive via tail replay even though SaveTurnEnd did not run")
-	assert.Contains(t, contents, "second")
+	assert.Equal(t, []string{"first", "answer1", "partial", "second"}, contents,
+		"partial-turn message must survive via tail replay in stable order without duplicates")
 }
 
 // TestSessionEvent_StreamCopyConcat_ByteIdentical verifies the round-trip of a

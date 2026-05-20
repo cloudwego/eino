@@ -196,22 +196,20 @@ func encodeGob(v any) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-// TurnEndState is intentionally encoded as gob, not HumanReadableSerializer.
-// HumanReadableSerializer is reserved for SessionEvent payloads, which are the
-// human-readable, cross-language event log. TurnEndState is internal Runner
-// fast-path metadata: it carries unexported tooling references (ToolInfos,
-// DeferredToolInfos), it's never consumed by external readers, and gob keeps
-// the snapshot-vs-event-log encoding decoupled from the event-log evolution.
 func encodeTurnEndState[M MessageType](state *TurnEndState[M]) ([]byte, error) {
-	return encodeGob(state)
+	return sessionSerializer.Marshal(state)
 }
 
 func decodeTurnEndState[M MessageType](payload []byte) (*TurnEndState[M], error) {
 	var state TurnEndState[M]
-	if err := gob.NewDecoder(bytes.NewReader(payload)).Decode(&state); err != nil {
+	if err := sessionSerializer.Unmarshal(payload, &state); err == nil {
+		return &state, nil
+	}
+	if err := gob.NewDecoder(bytes.NewReader(payload)).Decode(&state); err == nil {
+		return &state, nil
+	} else {
 		return nil, err
 	}
-	return &state, nil
 }
 
 func encodeRunnerSessionCheckpoint(c *runnerSessionCheckpoint) ([]byte, error) {
