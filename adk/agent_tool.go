@@ -188,8 +188,8 @@ func (at *typedAgentTool[M]) InvokableRun(ctx context.Context, argumentsInJSON s
 		// Resume — JSON-decode the wrapped state to recover both the bridge checkpoint
 		// and the original childSessionID.
 		var wrapped agentToolInterruptState
-		if err := json.Unmarshal(rawState, &wrapped); err != nil {
-			return "", fmt.Errorf("agent tool '%s': failed to decode interrupt state: %w", at.agent.Name(ctx), err)
+		if unmarshalErr := json.Unmarshal(rawState, &wrapped); unmarshalErr != nil {
+			return "", fmt.Errorf("agent tool '%s': failed to decode interrupt state: %w", at.agent.Name(ctx), unmarshalErr)
 		}
 		childSessionID = wrapped.ChildSessionID
 		bridgeCheckpoint = wrapped.BridgeCheckpoint
