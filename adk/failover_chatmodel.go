@@ -59,30 +59,39 @@ func getFailoverHasMoreAttempts(ctx context.Context) bool {
 type typedFailoverProxyModel[M MessageType] struct {
 }
 
-func (m *typedFailoverProxyModel[M]) prepareCallbacks(ctx context.Context) (context.Context, model.BaseModel[M], error) {
+func (m *typedFailoverProxyModel[M]) prepareTarget(ctx context.Context) (model.BaseModel[M], error) {
 	target, ok := typedGetFailoverCurrentModel[M](ctx)
 	if !ok {
-		return nil, nil, errors.New("failover current model not found in context")
+		return nil, errors.New("failover current model not found in context")
 	}
-
-	typ, _ := components.GetType(target)
-	ctx = callbacks.EnsureRunInfo(ctx, typ, components.ComponentOfChatModel)
 
 	if !components.IsCallbacksEnabled(target) {
 		target = typedCallbackInjectionModelWrapper[M]{}.wrapModel(target)
 	}
 
-	return ctx, target, nil
+	return target, nil
 }
 
 func (m *typedFailoverProxyModel[M]) Generate(ctx context.Context, input []M, opts ...model.Option) (M, error) {
-	nCtx, target, err := m.prepareCallbacks(ctx)
+	target, err := m.prepareTarget(ctx)
 	if err != nil {
 		var zero M
 		return zero, err
 	}
 
+	// Override compose-level RunInfo with FailoverChatModel identity for the outer span.
+	ctx = callbacks.ReuseHandlers(ctx, &callbacks.RunInfo{
+		Type:      "FailoverChatModel",
+		Component: components.ComponentOfChatModel,
+	})
 	ctx = callbacks.OnStart(ctx, input)
+
+	// Create child RunInfo for the target model.
+	targetType, _ := components.GetType(target)
+	nCtx := callbacks.ReuseHandlers(ctx, &callbacks.RunInfo{
+		Type:      targetType,
+		Component: components.ComponentOfChatModel,
+	})
 
 	result, err := target.Generate(nCtx, input, opts...)
 	if err != nil {
@@ -96,12 +105,24 @@ func (m *typedFailoverProxyModel[M]) Generate(ctx context.Context, input []M, op
 }
 
 func (m *typedFailoverProxyModel[M]) Stream(ctx context.Context, input []M, opts ...model.Option) (*schema.StreamReader[M], error) {
-	nCtx, target, err := m.prepareCallbacks(ctx)
+	target, err := m.prepareTarget(ctx)
 	if err != nil {
 		return nil, err
 	}
 
+	// Override compose-level RunInfo with FailoverChatModel identity for the outer span.
+	ctx = callbacks.ReuseHandlers(ctx, &callbacks.RunInfo{
+		Type:      "FailoverChatModel",
+		Component: components.ComponentOfChatModel,
+	})
 	ctx = callbacks.OnStart(ctx, input)
+
+	// Create child RunInfo for the target model.
+	targetType, _ := components.GetType(target)
+	nCtx := callbacks.ReuseHandlers(ctx, &callbacks.RunInfo{
+		Type:      targetType,
+		Component: components.ComponentOfChatModel,
+	})
 
 	result, err := target.Stream(nCtx, input, opts...)
 	if err != nil {
