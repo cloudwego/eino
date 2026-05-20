@@ -1102,10 +1102,28 @@ func (t *typedToolReductionMiddleware[M]) beforeModelRewriteStateGeneric(ctx con
 
 				setToolCallArguments(toolCallMsg, tc.BlockIndex, offloadInfo.ToolArgument.Text)
 				setToolResultContent(resultMsg, offloadInfo.ToolResult, fromContent)
+
+				// Emit MessageUpdated for the tool-result message (content replaced).
+				_ = adk.TypedSendEvent(ctx, &adk.TypedAgentEvent[M]{
+					MessageUpdated: &adk.MessageUpdatedEvent[M]{
+						MessageID: adk.GetMessageID(resultMsg),
+						Message:   resultMsg,
+					},
+				})
 			}
 
 			// set dedup flag
 			setMsgClearedFlagGeneric(toolCallMsg)
+
+			// Emit MessageUpdated for the assistant tool-call message (arguments
+			// rewritten + cleared flag set). Reconstruction must see this so the
+			// cleared flag suppresses double-reduction.
+			_ = adk.TypedSendEvent(ctx, &adk.TypedAgentEvent[M]{
+				MessageUpdated: &adk.MessageUpdatedEvent[M]{
+					MessageID: adk.GetMessageID(toolCallMsg),
+					Message:   toolCallMsg,
+				},
+			})
 		}
 		toolCallMsgIndex++
 	}

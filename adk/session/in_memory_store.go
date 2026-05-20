@@ -17,10 +17,10 @@
 package session
 
 import (
-	"bytes"
 	"context"
+	"encoding/base64"
 	"fmt"
-	"sort"
+	"strconv"
 	"sync"
 
 	"github.com/cloudwego/eino/adk"
@@ -31,16 +31,22 @@ import (
 type InMemoryStore struct {
 	mu          sync.Mutex
 	checkpoints map[string][]byte
-	events      map[string]map[int]map[int64]adk.EventRecord
-	turnEnds    map[string]map[int][]byte
+	events      map[string][][]byte
+	turnEnds    map[string]turnEndRecord
+}
+
+type turnEndRecord struct {
+	afterMessageID   string
+	afterEventCursor string
+	data             []byte
 }
 
 // NewInMemoryStore creates a new in-memory store.
 func NewInMemoryStore() *InMemoryStore {
 	return &InMemoryStore{
 		checkpoints: make(map[string][]byte),
-		events:      make(map[string]map[int]map[int64]adk.EventRecord),
-		turnEnds:    make(map[string]map[int][]byte),
+		events:      make(map[string][][]byte),
+		turnEnds:    make(map[string]turnEndRecord),
 	}
 }
 
@@ -68,77 +74,170 @@ func (s *InMemoryStore) Delete(_ context.Context, key string) error {
 	return nil
 }
 
-func (s *InMemoryStore) AppendEvents(_ context.Context, sessionID string, turnIndex int, entries []adk.EventRecord) error {
+// AppendEvents appends JSON-encoded SessionEvent payloads to the session log.
+func (s *InMemoryStore) AppendEvents(_ context.Context, sessionID string, events [][]byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.events[sessionID] == nil {
-		s.events[sessionID] = make(map[int]map[int64]adk.EventRecord)
+	for _, e := range events {
+		s.events[sessionID] = append(s.events[sessionID], append([]byte{}, e...))
 	}
-	if s.events[sessionID][turnIndex] == nil {
-		s.events[sessionID][turnIndex] = make(map[int64]adk.EventRecord)
+	return nil
+}
+
+// LoadEvents loads session events with pagination support.
+func (s *InMemoryStore) LoadEvents(_ context.Context, sessionID string, opts *adk.LoadEventsOptions) (*adk.LoadEventsResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	all := s.events[sessionID]
+	total := len(all)
+
+	if opts == nil {
+		opts = &adk.LoadEventsOptions{}
 	}
-	for _, entry := range entries {
-		if existing, ok := s.events[sessionID][turnIndex][entry.Seq]; ok {
-			if !sameRecord(existing, entry) {
-				return fmt.Errorf("conflicting event record for turn=%d seq=%d", turnIndex, entry.Seq)
+
+	// AfterCursor: forward, bounded below by cursor.
+	if opts.AfterCursor != "" {
+		startOffset, err := decodeOffset(opts.AfterCursor)
+		if err != nil {
+			return nil, fmt.Errorf("invalid AfterCursor: %w", err)
+		}
+		if startOffset < 0 {
+			startOffset = 0
+		}
+		if startOffset > total {
+			startOffset = total
+		}
+		// PageToken from a previous AfterCursor-initiated paged load may already
+		// encode a position past startOffset; if so, prefer the larger.
+		if opts.PageToken != "" {
+			pageOffset, err := decodeOffset(opts.PageToken)
+			if err != nil {
+				return nil, fmt.Errorf("invalid PageToken: %w", err)
 			}
-			continue
+			if pageOffset > startOffset {
+				startOffset = pageOffset
+			}
 		}
-		s.events[sessionID][turnIndex][entry.Seq] = entry
+		return paginateForward(all, startOffset, opts.Limit), nil
+	}
+
+	if opts.Reverse {
+		// Reverse pagination: PageToken encodes the offset of the next event
+		// to return when reading backwards. Initial state: total (read total-1 first).
+		var nextOffset int
+		if opts.PageToken == "" {
+			nextOffset = total
+		} else {
+			parsed, err := decodeOffset(opts.PageToken)
+			if err != nil {
+				return nil, fmt.Errorf("invalid PageToken: %w", err)
+			}
+			nextOffset = parsed
+		}
+		if nextOffset < 0 {
+			nextOffset = 0
+		}
+		if nextOffset > total {
+			nextOffset = total
+		}
+		limit := opts.Limit
+		if limit <= 0 || limit > nextOffset {
+			limit = nextOffset
+		}
+		out := make([][]byte, 0, limit)
+		for i := 0; i < limit; i++ {
+			idx := nextOffset - 1 - i
+			if idx < 0 {
+				break
+			}
+			out = append(out, append([]byte{}, all[idx]...))
+		}
+		newOffset := nextOffset - limit
+		var nextToken string
+		if newOffset > 0 {
+			nextToken = encodeOffset(newOffset)
+		}
+		return &adk.LoadEventsResult{Events: out, NextPageToken: nextToken}, nil
+	}
+
+	// Forward pagination from PageToken.
+	startOffset := 0
+	if opts.PageToken != "" {
+		parsed, err := decodeOffset(opts.PageToken)
+		if err != nil {
+			return nil, fmt.Errorf("invalid PageToken: %w", err)
+		}
+		startOffset = parsed
+	}
+	if startOffset < 0 {
+		startOffset = 0
+	}
+	if startOffset > total {
+		startOffset = total
+	}
+	return paginateForward(all, startOffset, opts.Limit), nil
+}
+
+// paginateForward returns up to limit events starting at startOffset.
+// limit <= 0 means no limit.
+func paginateForward(all [][]byte, startOffset, limit int) *adk.LoadEventsResult {
+	total := len(all)
+	end := total
+	if limit > 0 && startOffset+limit < total {
+		end = startOffset + limit
+	}
+	out := make([][]byte, 0, end-startOffset)
+	for i := startOffset; i < end; i++ {
+		out = append(out, append([]byte{}, all[i]...))
+	}
+	var nextToken string
+	if end < total {
+		nextToken = encodeOffset(end)
+	}
+	return &adk.LoadEventsResult{Events: out, NextPageToken: nextToken}
+}
+
+// SaveTurnEnd persists a TurnEndState snapshot. The store captures the current
+// event-log tail position internally so tail replay can reload events appended
+// after this snapshot via AfterCursor.
+func (s *InMemoryStore) SaveTurnEnd(_ context.Context, sessionID string, afterMessageID string, turnEnd []byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cursor := encodeOffset(len(s.events[sessionID]))
+	s.turnEnds[sessionID] = turnEndRecord{
+		afterMessageID:   afterMessageID,
+		afterEventCursor: cursor,
+		data:             append([]byte{}, turnEnd...),
 	}
 	return nil
 }
 
-func (s *InMemoryStore) LoadEvents(_ context.Context, sessionID string, fromTurnIndex, toTurnIndex int) ([]adk.EventRecord, error) {
+// LoadLatestTurnEnd loads the most recent TurnEndState snapshot for the session.
+func (s *InMemoryStore) LoadLatestTurnEnd(_ context.Context, sessionID string) (string, string, []byte, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	var records []adk.EventRecord
-	sessionEvents := s.events[sessionID]
-	for turn := fromTurnIndex; turn <= toTurnIndex; turn++ {
-		turnEvents := sessionEvents[turn]
-		seqs := make([]int64, 0, len(turnEvents))
-		for seq := range turnEvents {
-			seqs = append(seqs, seq)
-		}
-		sort.Slice(seqs, func(i, j int) bool {
-			return seqs[i] < seqs[j]
-		})
-		for _, seq := range seqs {
-			records = append(records, turnEvents[seq])
-		}
+	rec, ok := s.turnEnds[sessionID]
+	if !ok {
+		return "", "", nil, false, nil
 	}
-	return records, nil
+	return rec.afterMessageID, rec.afterEventCursor, append([]byte{}, rec.data...), true, nil
 }
 
-func (s *InMemoryStore) LoadLatestTurnEnd(_ context.Context, sessionID string) (int, []byte, bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	latest := 0
-	sessionTurnEnds := s.turnEnds[sessionID]
-	for turnIndex := range sessionTurnEnds {
-		if turnIndex > latest {
-			latest = turnIndex
-		}
-	}
-	if latest == 0 {
-		return 0, nil, false, nil
-	}
-	return latest, append([]byte{}, sessionTurnEnds[latest]...), true, nil
+// encodeOffset encodes an integer offset as an opaque base64-encoded cursor.
+func encodeOffset(offset int) string {
+	return base64.StdEncoding.EncodeToString([]byte(strconv.Itoa(offset)))
 }
 
-func (s *InMemoryStore) SaveTurnEnd(_ context.Context, sessionID string, turnIndex int, turnEnd []byte) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.turnEnds[sessionID] == nil {
-		s.turnEnds[sessionID] = make(map[int][]byte)
+// decodeOffset decodes a cursor produced by encodeOffset.
+func decodeOffset(s string) (int, error) {
+	raw, err := base64.StdEncoding.DecodeString(s)
+	if err != nil {
+		return 0, err
 	}
-	s.turnEnds[sessionID][turnIndex] = append([]byte{}, turnEnd...)
-	return nil
-}
-
-func sameRecord(a, b adk.EventRecord) bool {
-	return a.TurnIndex == b.TurnIndex &&
-		a.Seq == b.Seq &&
-		a.Kind == b.Kind &&
-		bytes.Equal(a.Payload, b.Payload)
+	n, err := strconv.Atoi(string(raw))
+	if err != nil {
+		return 0, err
+	}
+	return n, nil
 }

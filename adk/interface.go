@@ -434,6 +434,24 @@ type TypedAgentEvent[M MessageType] struct {
 	Err error
 
 	TurnEndState *TurnEndState[M]
+
+	// MessagesReplaced is a session-internal mutation event emitted by middlewares
+	// (e.g. summarization) when they replace state.Messages wholesale. nil = absent;
+	// non-nil (including &[]M{}) = active replacement.
+	MessagesReplaced *[]M
+
+	// MessageUpdated is a session-internal mutation event emitted by middlewares
+	// (e.g. reduction) when they replace a single message in state.Messages.
+	MessageUpdated *MessageUpdatedEvent[M]
+
+	// MessageInserted is a session-internal mutation event emitted by middlewares
+	// (AgentsMD, ToolSearch, PatchToolCalls) when they insert a message into state.Messages.
+	MessageInserted *MessageInsertedEvent[M]
+
+	// SessionID identifies the owning session for routing/filtering in nested-agent
+	// scenarios (e.g. AgentTool). Empty = current runner's session. This field is
+	// stripped from all events before user-facing delivery.
+	SessionID string
 }
 
 // AgentEvent is the default event type using *schema.Message.
