@@ -31,7 +31,7 @@ import (
 //
 // The contract assumes single-writer-per-session: tests do NOT exercise
 // concurrent AppendEvents/SaveTurnEnd for the same sessionID.
-func RunConformanceTests(t *testing.T, factory func(testing.TB) adk.SessionStore) {
+func RunConformanceTests(t *testing.T, factory func(testing.TB) adk.SessionStore) { //nolint:funlen // keep the store contract checks in one public helper
 	t.Helper()
 
 	t.Run("AppendEvents and forward LoadEvents", func(t *testing.T) {
