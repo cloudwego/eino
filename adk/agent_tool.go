@@ -185,14 +185,20 @@ func (at *typedAgentTool[M]) InvokableRun(ctx context.Context, argumentsInJSON s
 	} else if !hasState {
 		return "", fmt.Errorf("agent tool '%s' interrupt has happened, but cannot find interrupt state", at.agent.Name(ctx))
 	} else {
-		// Resume — JSON-decode the wrapped state to recover both the bridge checkpoint
-		// and the original childSessionID.
+		// Resume — try the JSON envelope (introduced when SessionID-based event
+		// filtering landed). If the envelope does not parse or carries no bridge
+		// checkpoint, the rawState is from a pre-envelope version: treat the
+		// raw bytes as the bridge checkpoint and synthesize a fresh
+		// childSessionID. Pre-envelope checkpoints predate session persistence,
+		// so the synthesized ID has no parent-session filter to coordinate with.
 		var wrapped agentToolInterruptState
-		if unmarshalErr := json.Unmarshal(rawState, &wrapped); unmarshalErr != nil {
-			return "", fmt.Errorf("agent tool '%s': failed to decode interrupt state: %w", at.agent.Name(ctx), unmarshalErr)
+		if json.Unmarshal(rawState, &wrapped) == nil && len(wrapped.BridgeCheckpoint) > 0 {
+			childSessionID = wrapped.ChildSessionID
+			bridgeCheckpoint = wrapped.BridgeCheckpoint
+		} else {
+			childSessionID = "agent_tool:" + uuid.NewString()
+			bridgeCheckpoint = rawState
 		}
-		childSessionID = wrapped.ChildSessionID
-		bridgeCheckpoint = wrapped.BridgeCheckpoint
 	}
 
 	if !wasInterrupted {
