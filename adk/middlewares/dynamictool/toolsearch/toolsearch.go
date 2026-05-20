@@ -166,27 +166,34 @@ func (m *typedMiddleware[M]) markInitialized(ctx context.Context) {
 	_ = adk.SetRunLocalValue(ctx, toolSearchInitializedKey, true)
 }
 
-func (m *typedMiddleware[M]) ensureReminder(msgs []M) []M {
+func (m *typedMiddleware[M]) ensureReminder(msgs []M) (result []M, insertedMsg M, anchorMsg M, didInsert bool) {
 	for _, msg := range msgs {
 		if hasToolSearchReminderExtra(msg) {
-			return msgs
+			return msgs, insertedMsg, anchorMsg, false
 		}
 	}
 
-	reminder := makeReminderMsg[M](m.sr)
-	result := make([]M, 0, len(msgs)+1)
+	insertedMsg = makeReminderMsg[M](m.sr)
+	adk.EnsureMessageID(insertedMsg)
+	result = make([]M, 0, len(msgs)+1)
 	inserted := false
 	for _, msg := range msgs {
 		if !inserted && !isSystemRoleTS(msg) {
 			inserted = true
-			result = append(result, reminder)
+			result = append(result, insertedMsg)
+			anchorMsg = msg
 		}
 		result = append(result, msg)
 	}
 	if !inserted {
-		result = append(result, reminder)
+		result = append(result, insertedMsg)
 	}
-	return result
+	return result, insertedMsg, anchorMsg, true
+}
+
+func isNilTSMessage[M adk.MessageType](msg M) bool {
+	var zero M
+	return any(msg) == any(zero)
 }
 
 func isSystemRoleTS[M adk.MessageType](msg M) bool {
@@ -275,7 +282,21 @@ func toolNameSet(tools []*schema.ToolInfo) map[string]bool {
 }
 
 func (m *typedMiddleware[M]) BeforeModelRewriteState(ctx context.Context, state *adk.TypedChatModelAgentState[M], _ *adk.TypedModelContext[M]) (context.Context, *adk.TypedChatModelAgentState[M], error) {
-	state.Messages = m.ensureReminder(state.Messages)
+	newMsgs, insertedMsg, anchorMsg, didInsert := m.ensureReminder(state.Messages)
+	state.Messages = newMsgs
+
+	if didInsert {
+		var beforeID string
+		if !isNilTSMessage(anchorMsg) {
+			beforeID = adk.GetMessageID(anchorMsg)
+		}
+		_ = adk.TypedSendEvent(ctx, &adk.TypedAgentEvent[M]{
+			MessageInserted: &adk.MessageInsertedEvent[M]{
+				Message:         insertedMsg,
+				BeforeMessageID: beforeID,
+			},
+		})
+	}
 
 	if !m.isInitialized(ctx) {
 		m.markInitialized(ctx)
