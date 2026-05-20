@@ -977,8 +977,8 @@ func TestRunnerSessionReconstructsFromEventLog(t *testing.T) {
 	})
 	drainSessionEvents(t, runner.Query(ctx, "first"))
 
-	// Verify events were captured.
-	require.GreaterOrEqual(t, len(store.events), 1, "input event should be in event log")
+	// Verify events were captured: caller input + assistant output for the first turn.
+	require.Len(t, store.events, 2, "input event + assistant event should be in event log")
 
 	// Wipe the snapshot to force fallback reconstruction.
 	store.turnExists = false
@@ -1003,8 +1003,8 @@ func TestRunnerSessionReconstructsFromEventLog(t *testing.T) {
 
 	// The agent should have received the reconstructed history before "second".
 	require.Len(t, capturedAgent.inputs, 1)
-	// Input order: reconstructed input messages (from event log) + "second".
-	require.GreaterOrEqual(t, len(capturedAgent.inputs[0]), 2)
+	// Input order: reconstructed user "first" + reconstructed assistant "ok" + new user "second".
+	require.Len(t, capturedAgent.inputs[0], 3)
 	// The last message must be the new "second" input.
 	assert.Equal(t, "second", capturedAgent.inputs[0][len(capturedAgent.inputs[0])-1].Content)
 	// And the first reconstructed message must be the original "first" input.
@@ -1032,7 +1032,8 @@ func TestRunnerSessionInputEventsPersisted(t *testing.T) {
 	})
 	drainSessionEvents(t, runner.Query(ctx, "user-question"))
 
-	require.GreaterOrEqual(t, len(store.events), 1)
+	// Single-turn run: 1 user input event + 1 assistant output event.
+	require.Len(t, store.events, 2)
 	// The first event should be the user input.
 	first, err := decodeSessionEvent[*schema.Message](store.events[0])
 	require.NoError(t, err)
@@ -1041,4 +1042,153 @@ func TestRunnerSessionInputEventsPersisted(t *testing.T) {
 	assert.Equal(t, schema.User, first.Message.Role)
 	// And it should have a message ID.
 	assert.NotEmpty(t, GetMessageID(first.Message))
+}
+
+// recordingHelperStore wraps sessionHelperStore to record the order of
+// AppendEvents and Set calls so tests can assert durability ordering.
+type recordingHelperStore struct {
+	*sessionHelperStore
+	mu        sync.Mutex
+	calls     []string // "append" or "set:<key>"
+	delaySet  time.Duration
+}
+
+func newRecordingHelperStore() *recordingHelperStore {
+	return &recordingHelperStore{sessionHelperStore: newSessionHelperStore()}
+}
+
+func (s *recordingHelperStore) AppendEvents(ctx context.Context, sid string, events [][]byte) error {
+	s.mu.Lock()
+	if s.sessionHelperStore.appendErr != nil {
+		err := s.sessionHelperStore.appendErr
+		s.mu.Unlock()
+		return err
+	}
+	s.calls = append(s.calls, "append")
+	s.mu.Unlock()
+	return s.sessionHelperStore.AppendEvents(ctx, sid, events)
+}
+
+func (s *recordingHelperStore) Set(ctx context.Context, key string, value []byte) error {
+	if s.delaySet > 0 {
+		time.Sleep(s.delaySet)
+	}
+	s.mu.Lock()
+	s.calls = append(s.calls, "set:"+key)
+	s.mu.Unlock()
+	return s.sessionHelperStore.Set(ctx, key, value)
+}
+
+func (s *recordingHelperStore) callsSnapshot() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]string, len(s.calls))
+	copy(out, s.calls)
+	return out
+}
+
+// TestRunnerSessionInterruptCheckpointSkippedOnPersistFailure proves the
+// fail-closed invariant: if AppendEvents fails during a turn that ends in an
+// interrupt, the checkpoint MUST NOT be written — otherwise resume would load
+// a checkpoint referencing events that were never persisted.
+func TestRunnerSessionInterruptCheckpointSkippedOnPersistFailure(t *testing.T) {
+	ctx := context.Background()
+	store := newRecordingHelperStore()
+	store.sessionHelperStore.appendErr = errors.New("simulated append failure")
+
+	runner := NewRunner(ctx, RunnerConfig{
+		Agent:           &runnerInterruptAgent{},
+		CheckPointStore: store,
+		SessionID:       "interrupt-persist-fail",
+		SessionStore:    store,
+	})
+	iter := runner.Query(ctx, "go")
+	var sawErr bool
+	for {
+		ev, ok := iter.Next()
+		if !ok {
+			break
+		}
+		if ev.Err != nil {
+			sawErr = true
+		}
+	}
+	require.True(t, sawErr, "expected runner to surface the persistence error")
+
+	cpKey := sessionRunnerCheckpointID("interrupt-persist-fail")
+	calls := store.callsSnapshot()
+	for _, c := range calls {
+		if c == "set:"+cpKey {
+			t.Fatalf("checkpoint was written despite event persistence failure: calls=%v", calls)
+		}
+	}
+}
+
+// TestRunnerSessionCheckpointAfterPersisterFlush proves that on the interrupt
+// path, the checkpoint is written ONLY after the persister has flushed events
+// (AppendEvents before Set on checkpoint key).
+func TestRunnerSessionCheckpointAfterPersisterFlush(t *testing.T) {
+	ctx := context.Background()
+	store := newRecordingHelperStore()
+
+	runner := NewRunner(ctx, RunnerConfig{
+		Agent:           &runnerInterruptAgent{},
+		CheckPointStore: store,
+		SessionID:       "interrupt-order",
+		SessionStore:    store,
+	})
+	iter := runner.Query(ctx, "hi")
+	for {
+		_, ok := iter.Next()
+		if !ok {
+			break
+		}
+	}
+	calls := store.callsSnapshot()
+
+	cpKey := sessionRunnerCheckpointID("interrupt-order")
+	var lastAppend, firstSet int = -1, -1
+	for i, c := range calls {
+		if c == "append" {
+			lastAppend = i
+		}
+		if c == "set:"+cpKey && firstSet == -1 {
+			firstSet = i
+		}
+	}
+	require.NotEqual(t, -1, lastAppend, "expected at least one AppendEvents call")
+	require.NotEqual(t, -1, firstSet, "expected the runner-session checkpoint to be written")
+	require.Greater(t, firstSet, lastAppend,
+		"checkpoint Set must follow the final AppendEvents flush; got calls=%v", calls)
+}
+
+// TestSessionPersister_EnqueueAfterAppendError verifies that once AppendEvents
+// has failed, subsequent enqueue calls return that error rather than silently
+// succeeding.
+func TestSessionPersister_EnqueueAfterAppendError(t *testing.T) {
+	ctx := context.Background()
+	store := newSessionHelperStore()
+	store.appendErr = errors.New("append failed")
+
+	cfg := &SessionPersistenceConfig{
+		EventFlushBatchSize: 1,
+		EventFlushInterval:  10 * time.Millisecond,
+		EventBufferSize:     8,
+	}
+	p := newSessionEventPersister[*schema.Message](ctx, store, "sid", cfg)
+	defer p.closeAndWait()
+
+	require.NoError(t, p.enqueue([]byte(`{"i":1}`)))
+	// Wait for the run loop to attempt AppendEvents and record the error.
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if p.getErr() != nil {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	require.Error(t, p.getErr(), "persister must record the AppendEvents failure")
+
+	err := p.enqueue([]byte(`{"i":2}`))
+	require.Error(t, err, "enqueue after persist failure must return an error")
 }
