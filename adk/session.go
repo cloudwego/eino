@@ -73,7 +73,9 @@ type SessionStore interface {
 	// SaveTurnEnd persists a TurnEndState snapshot linked to the current event-log position.
 	// afterMessageID is the eino message ID of the last message in the snapshot's Messages
 	// array (empty string if Messages is empty). Retained for informational/debugging purposes
-	// only — it is NOT used for replay boundary detection (afterEventCursor serves that role).
+	// only — stores MUST NOT use it for replay boundary detection. afterEventCursor (captured
+	// internally and returned by LoadLatestTurnEnd) is the sole source of truth for the
+	// event-log boundary.
 	// The store MUST also capture the current event-log tail position internally. This position
 	// is returned by LoadLatestTurnEnd as afterEventCursor, enabling precise tail replay without
 	// message-ID scanning when afterMessageID is empty or ambiguous.
@@ -204,6 +206,10 @@ func decodeTurnEndState[M MessageType](payload []byte) (*TurnEndState[M], error)
 	if err := sessionSerializer.Unmarshal(payload, &state); err == nil {
 		return &state, nil
 	}
+	// Gob fallback retained so snapshots written before the switch to
+	// HumanReadableSerializer (PR #1019, harden-managed-session-persistence
+	// commit) remain loadable. Do not remove without a migration plan for
+	// existing on-disk snapshots.
 	if err := gob.NewDecoder(bytes.NewReader(payload)).Decode(&state); err == nil {
 		return &state, nil
 	} else {
