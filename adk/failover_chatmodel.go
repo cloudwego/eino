@@ -59,21 +59,23 @@ func getFailoverHasMoreAttempts(ctx context.Context) bool {
 type typedFailoverProxyModel[M MessageType] struct {
 }
 
-func (m *typedFailoverProxyModel[M]) prepareTarget(ctx context.Context) (model.BaseModel[M], error) {
+func (m *typedFailoverProxyModel[M]) prepareTarget(ctx context.Context) (model.BaseModel[M], string, error) {
 	target, ok := typedGetFailoverCurrentModel[M](ctx)
 	if !ok {
-		return nil, errors.New("failover current model not found in context")
+		return nil, "", errors.New("failover current model not found in context")
 	}
+
+	targetType, _ := components.GetType(target)
 
 	if !components.IsCallbacksEnabled(target) {
 		target = typedCallbackInjectionModelWrapper[M]{}.wrapModel(target)
 	}
 
-	return target, nil
+	return target, targetType, nil
 }
 
 func (m *typedFailoverProxyModel[M]) Generate(ctx context.Context, input []M, opts ...model.Option) (M, error) {
-	target, err := m.prepareTarget(ctx)
+	target, targetType, err := m.prepareTarget(ctx)
 	if err != nil {
 		var zero M
 		return zero, err
@@ -87,7 +89,6 @@ func (m *typedFailoverProxyModel[M]) Generate(ctx context.Context, input []M, op
 	ctx = callbacks.OnStart(ctx, input)
 
 	// Create child RunInfo for the target model.
-	targetType, _ := components.GetType(target)
 	nCtx := callbacks.ReuseHandlers(ctx, &callbacks.RunInfo{
 		Type:      targetType,
 		Component: components.ComponentOfChatModel,
@@ -105,7 +106,7 @@ func (m *typedFailoverProxyModel[M]) Generate(ctx context.Context, input []M, op
 }
 
 func (m *typedFailoverProxyModel[M]) Stream(ctx context.Context, input []M, opts ...model.Option) (*schema.StreamReader[M], error) {
-	target, err := m.prepareTarget(ctx)
+	target, targetType, err := m.prepareTarget(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -118,7 +119,6 @@ func (m *typedFailoverProxyModel[M]) Stream(ctx context.Context, input []M, opts
 	ctx = callbacks.OnStart(ctx, input)
 
 	// Create child RunInfo for the target model.
-	targetType, _ := components.GetType(target)
 	nCtx := callbacks.ReuseHandlers(ctx, &callbacks.RunInfo{
 		Type:      targetType,
 		Component: components.ComponentOfChatModel,
