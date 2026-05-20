@@ -822,7 +822,9 @@ func (r *sessionTurnResult[M]) finalize(ctx context.Context) error {
 		return fmt.Errorf("failed to save session turn end: %w", err)
 	}
 	if r.checkPointID != nil && r.store != nil {
-		_ = deleteCheckPointIfSupported(ctx, r.store, *r.checkPointID)
+		if err := deleteCheckPointIfSupported(ctx, r.store, *r.checkPointID); err != nil {
+			return fmt.Errorf("failed to delete session checkpoint: %w", err)
+		}
 	}
 	return nil
 }
