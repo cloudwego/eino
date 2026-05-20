@@ -172,44 +172,31 @@ func TestDeepAgentCheckpointCompat_V0_8_Resume(t *testing.T) {
 		name         string
 		checkpointID string
 		filename     string
-		// brokenByAgentToolInterruptStateChange marks fixtures that were captured
-		// before the AgentTool interrupt state format was changed to wrap the
-		// bridge checkpoint bytes inside a JSON envelope (agentToolInterruptState)
-		// to carry the synthetic child SessionID. The change is documented as
-		// backward-incompatible in the session event-log reconstruction plan.
-		brokenByAgentToolInterruptStateChange bool
 	}{
 		{
-			name:                                  "v0.7.37",
-			checkpointID:                          "checkpoint_compat_v0_7_37",
-			filename:                              "checkpoint_data_v0.7.37.bin",
-			brokenByAgentToolInterruptStateChange: true,
+			name:         "v0.7.37",
+			checkpointID: "checkpoint_compat_v0_7_37",
+			filename:     "checkpoint_data_v0.7.37.bin",
 		},
 		{
-			name:                                  "v0.8.2",
-			checkpointID:                          "checkpoint_compat_v0_8_2",
-			filename:                              "checkpoint_data_v0.8.2.bin",
-			brokenByAgentToolInterruptStateChange: true,
+			name:         "v0.8.2",
+			checkpointID: "checkpoint_compat_v0_8_2",
+			filename:     "checkpoint_data_v0.8.2.bin",
 		},
 		{
-			name:                                  "v0.8.3",
-			checkpointID:                          "checkpoint_compat_v0_8_3",
-			filename:                              "checkpoint_data_v0.8.3.bin",
-			brokenByAgentToolInterruptStateChange: true,
+			name:         "v0.8.3",
+			checkpointID: "checkpoint_compat_v0_8_3",
+			filename:     "checkpoint_data_v0.8.3.bin",
 		},
 		{
-			name:                                  "v0.8.4",
-			checkpointID:                          "checkpoint_compat_v0_8_4",
-			filename:                              "checkpoint_data_v0.8.4.bin",
-			brokenByAgentToolInterruptStateChange: true,
+			name:         "v0.8.4",
+			checkpointID: "checkpoint_compat_v0_8_4",
+			filename:     "checkpoint_data_v0.8.4.bin",
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if tc.brokenByAgentToolInterruptStateChange {
-				t.Skip("AgentTool interrupt state format changed for SessionID-based event filtering; pre-change checkpoint fixtures are not resumable. See plan-session-event-log-reconstruction.md.")
-			}
 			runDeepAgentCheckpointCompat(t, tc.checkpointID, tc.filename)
 		})
 	}
