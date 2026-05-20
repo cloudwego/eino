@@ -591,6 +591,10 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 		afterMessageID  string
 		persister       *sessionEventPersister[M]
 		persistErr      error
+		// pendingCheckpoint defers checkpoint save to finalize() so the persister
+		// can flush enqueued events first. Writing the checkpoint before the flush
+		// completes risks a checkpoint that references events not yet durable.
+		pendingCheckpoint *deferredRunnerCheckpoint
 	)
 	if sessionState != nil && sessionState.enabled {
 		persister = newSessionEventPersister[M](ctx, sessionState.sessionStore, sessionState.sessionID, sessionState.persistence)
@@ -598,6 +602,22 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 	setPersistErr := func(err error) {
 		if err != nil && persistErr == nil {
 			persistErr = err
+		}
+	}
+	// saveCheckpointNow is the path used when no session persister is active —
+	// the checkpoint is written immediately because there are no queued events
+	// to flush. In session mode, the same payload is captured into
+	// pendingCheckpoint and committed inside finalize() after persister.closeAndWait.
+	saveCheckpointNow := func(info *InterruptInfo, sig *core.InterruptSignal, errLabel string) {
+		if checkPointID == nil {
+			return
+		}
+		if persister != nil {
+			pendingCheckpoint = &deferredRunnerCheckpoint{info: info, signal: sig, errLabel: errLabel}
+			return
+		}
+		if err := saveRunnerCheckpoint(enableStreaming, store, ctx, *checkPointID, info, sig, sessionState); err != nil {
+			gen.Send(&TypedAgentEvent[M]{Err: fmt.Errorf("%s: %w", errLabel, err)})
 		}
 	}
 
@@ -633,10 +653,7 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 				}
 				if cancelErr.interruptSignal != nil && checkPointID != nil {
 					cancelErr.InterruptContexts = core.ToInterruptContexts(cancelErr.interruptSignal, allowedAddressSegmentTypes)
-					err := saveRunnerCheckpoint(enableStreaming, store, ctx, *checkPointID, &InterruptInfo{}, cancelErr.interruptSignal, sessionState)
-					if err != nil {
-						gen.Send(&TypedAgentEvent[M]{Err: fmt.Errorf("failed to save checkpoint on cancel: %w", err)})
-					}
+					saveCheckpointNow(&InterruptInfo{}, cancelErr.interruptSignal, "failed to save checkpoint on cancel")
 				}
 				if !enableSessionEvents {
 					event = stripSessionEventFields(event)
@@ -671,12 +688,7 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 			interrupted = true
 
 			if checkPointID != nil {
-				err := saveRunnerCheckpoint(enableStreaming, store, ctx, *checkPointID, &InterruptInfo{
-					Data: legacyData,
-				}, interruptSignal, sessionState)
-				if err != nil {
-					gen.Send(&TypedAgentEvent[M]{Err: fmt.Errorf("failed to save checkpoint: %w", err)})
-				}
+				saveCheckpointNow(&InterruptInfo{Data: legacyData}, interruptSignal, "failed to save checkpoint")
 			}
 		}
 
@@ -700,6 +712,13 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 			fromOtherSession := event.SessionID != "" && event.SessionID != sessionState.sessionID
 
 			if !fromOtherSession {
+				// Streaming output is split into two stream copies: copies[1] is
+				// rewritten onto the live event and sent immediately so live
+				// consumers see no extra latency, copies[0] is then drained
+				// synchronously to materialize the persisted SessionEvent. The
+				// live send MUST happen first — the AsyncIterator's send buffer
+				// keeps the consumer un-blocked while this loop drains the
+				// persistence copy.
 				if event.Output != nil && event.Output.MessageOutput != nil &&
 					event.Output.MessageOutput.IsStreaming && event.Output.MessageOutput.MessageStream != nil {
 					copies := event.Output.MessageOutput.MessageStream.Copy(2)
@@ -775,15 +794,17 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 	}
 	if persister != nil {
 		res := &sessionTurnResult[M]{
-			persister:      persister,
-			persistErr:     persistErr,
-			interrupted:    interrupted,
-			cancelled:      cancelled,
-			turnEndBytes:   turnEndBytes,
-			afterMessageID: afterMessageID,
-			sessionState:   sessionState,
-			store:          store,
-			checkPointID:   checkPointID,
+			persister:         persister,
+			persistErr:        persistErr,
+			interrupted:       interrupted,
+			cancelled:         cancelled,
+			turnEndBytes:      turnEndBytes,
+			afterMessageID:    afterMessageID,
+			sessionState:      sessionState,
+			store:             store,
+			checkPointID:      checkPointID,
+			enableStreaming:   enableStreaming,
+			pendingCheckpoint: pendingCheckpoint,
 		}
 		if err := res.finalize(ctx); err != nil {
 			gen.Send(&TypedAgentEvent[M]{Err: err})
@@ -791,23 +812,47 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 	}
 }
 
+// deferredRunnerCheckpoint captures the arguments needed to persist a runner
+// checkpoint after the session event persister has flushed. Saving the
+// checkpoint earlier would risk a checkpoint that references events not yet
+// durable in the SessionStore.
+type deferredRunnerCheckpoint struct {
+	info     *InterruptInfo
+	signal   *core.InterruptSignal
+	errLabel string
+}
+
 // sessionTurnResult bundles the accumulated state from a Runner turn's event
 // loop and drives the session commit-or-abort decision.
 type sessionTurnResult[M MessageType] struct {
-	persister      *sessionEventPersister[M]
-	persistErr     error
-	interrupted    bool
-	cancelled      bool
-	turnEndBytes   []byte
-	afterMessageID string
-	sessionState   *runnerSessionRunState[M]
-	store          CheckPointStore
-	checkPointID   *string
+	persister         *sessionEventPersister[M]
+	persistErr        error
+	interrupted       bool
+	cancelled         bool
+	turnEndBytes      []byte
+	afterMessageID    string
+	sessionState      *runnerSessionRunState[M]
+	store             CheckPointStore
+	checkPointID      *string
+	enableStreaming   bool
+	pendingCheckpoint *deferredRunnerCheckpoint
 }
 
 func (r *sessionTurnResult[M]) finalize(ctx context.Context) error {
 	if err := r.persister.closeAndWait(); err != nil && r.persistErr == nil {
 		r.persistErr = err
+	}
+	// For interrupt/cancel paths, the checkpoint write is deferred until here so
+	// the persister's queued events are durable BEFORE the checkpoint references
+	// them. If event persistence failed, skip the checkpoint write entirely so
+	// resume cannot load a checkpoint that points to a corrupt event log.
+	if r.pendingCheckpoint != nil && r.checkPointID != nil {
+		if r.persistErr != nil {
+			return fmt.Errorf("%s: skipped because session event persistence failed: %w", r.pendingCheckpoint.errLabel, r.persistErr)
+		}
+		if err := saveRunnerCheckpoint(r.enableStreaming, r.store, ctx, *r.checkPointID, r.pendingCheckpoint.info, r.pendingCheckpoint.signal, r.sessionState); err != nil {
+			return fmt.Errorf("%s: %w", r.pendingCheckpoint.errLabel, err)
+		}
 	}
 	if r.interrupted || r.cancelled {
 		return nil
