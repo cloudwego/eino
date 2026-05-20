@@ -446,7 +446,7 @@ func TestEnsureReminder(t *testing.T) {
 			{Role: schema.System, Content: "sys"},
 			{Role: schema.User, Content: "hi"},
 		}
-		got := m.ensureReminder(input)
+		got, _, _, _ := m.ensureReminder(input)
 		require.Len(t, got, 3)
 		assert.Equal(t, schema.System, got[0].Role)
 		assert.Equal(t, schema.User, got[1].Role)
@@ -461,7 +461,7 @@ func TestEnsureReminder(t *testing.T) {
 			{Role: schema.System, Content: "sys1"},
 			{Role: schema.System, Content: "sys2"},
 		}
-		got := m.ensureReminder(input)
+		got, _, _, _ := m.ensureReminder(input)
 		require.Len(t, got, 3)
 		assert.Equal(t, schema.System, got[0].Role)
 		assert.Equal(t, schema.System, got[1].Role)
@@ -469,7 +469,7 @@ func TestEnsureReminder(t *testing.T) {
 	})
 
 	t.Run("empty input", func(t *testing.T) {
-		got := m.ensureReminder(nil)
+		got, _, _, _ := m.ensureReminder(nil)
 		require.Len(t, got, 1)
 		assert.Equal(t, "<reminder>", got[0].Content)
 	})
@@ -479,7 +479,7 @@ func TestEnsureReminder(t *testing.T) {
 			{Role: schema.User, Content: "hi"},
 			{Role: schema.Assistant, Content: "hello"},
 		}
-		got := m.ensureReminder(input)
+		got, _, _, _ := m.ensureReminder(input)
 		require.Len(t, got, 3)
 		assert.Equal(t, "<reminder>", got[0].Content)
 		assert.Equal(t, "hi", got[1].Content)
@@ -491,7 +491,7 @@ func TestEnsureReminder(t *testing.T) {
 			{Role: schema.User, Content: "<reminder>", Extra: map[string]any{toolSearchReminderExtraKey: true}},
 			{Role: schema.User, Content: "hi"},
 		}
-		got := m.ensureReminder(input)
+		got, _, _, _ := m.ensureReminder(input)
 		require.Len(t, got, 2)
 		assert.Equal(t, "<reminder>", got[0].Content)
 		assert.Equal(t, "hi", got[1].Content)
