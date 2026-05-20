@@ -17,9 +17,11 @@
 package serialization
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"strconv"
 	"strings"
 
 	"github.com/bytedance/sonic"
@@ -43,8 +45,8 @@ func (h *HumanReadableSerializer) Unmarshal(data []byte, v any) error {
 		return fmt.Errorf("failed to unmarshal: value must be a non-nil pointer")
 	}
 
-	var raw any
-	if err := sonic.Unmarshal(data, &raw); err != nil {
+	raw, err := decodeJSONAny(data)
+	if err != nil {
 		return fmt.Errorf("failed to unmarshal JSON: %w", err)
 	}
 
@@ -120,8 +122,8 @@ func hrMarshalStruct(rv reflect.Value, rt reflect.Type, typeUnspecific bool, poi
 		if err != nil {
 			return nil, err
 		}
-		var result any
-		if err := sonic.Unmarshal(jsonBytes, &result); err != nil {
+		result, err := decodeJSONAny(jsonBytes)
+		if err != nil {
 			return nil, err
 		}
 		if typeUnspecific {
@@ -261,8 +263,10 @@ func wrapWithType(value any, rt reflect.Type, pointerNum uint32, isSimple bool) 
 	}
 
 	if m, ok := value.(map[string]any); ok {
-		m[typeFieldName] = typeName
-		return m, nil
+		if _, exists := m[typeFieldName]; !exists {
+			m[typeFieldName] = typeName
+			return m, nil
+		}
 	}
 
 	return map[string]any{
@@ -289,8 +293,10 @@ func wrapMapWithType(value map[string]any, rt reflect.Type, pointerNum uint32) (
 		typeName = strings.Repeat("*", int(pointerNum)) + typeName
 	}
 
-	value[typeFieldName] = typeName
-	return value, nil
+	return map[string]any{
+		typeFieldName: typeName,
+		"value":       value,
+	}, nil
 }
 
 func wrapSliceWithType(value []any, rt reflect.Type, pointerNum uint32) (any, error) {
@@ -372,7 +378,9 @@ func hrUnmarshal(data any, targetType reflect.Type) (any, error) {
 
 func hrUnmarshalMap(data map[string]any, targetType, baseType reflect.Type, ptrNum uint32) (any, error) {
 	if typeStr, hasType := data[typeFieldName].(string); hasType {
-		return hrUnmarshalTyped(data, typeStr)
+		if _, _, err := parseTypeName(typeStr); err == nil {
+			return hrUnmarshalTyped(data, typeStr)
+		}
 	}
 
 	if baseType.Kind() == reflect.Struct {
@@ -570,6 +578,35 @@ func hrUnmarshalPrimitive(data any, targetType, baseType reflect.Type, ptrNum ui
 		return convertJSONPrimitive(data), nil
 	}
 
+	if n, ok := data.(json.Number); ok {
+		switch baseType.Kind() {
+		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+			i, err := strconv.ParseInt(n.String(), 10, baseType.Bits())
+			if err != nil {
+				return nil, fmt.Errorf("failed to parse %q as %v: %w", n.String(), baseType, err)
+			}
+			result := reflect.New(baseType).Elem()
+			result.SetInt(i)
+			return wrapPointers(result.Interface(), ptrNum), nil
+		case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+			u, err := strconv.ParseUint(n.String(), 10, baseType.Bits())
+			if err != nil {
+				return nil, fmt.Errorf("failed to parse %q as %v: %w", n.String(), baseType, err)
+			}
+			result := reflect.New(baseType).Elem()
+			result.SetUint(u)
+			return wrapPointers(result.Interface(), ptrNum), nil
+		case reflect.Float32, reflect.Float64:
+			f, err := strconv.ParseFloat(n.String(), baseType.Bits())
+			if err != nil {
+				return nil, fmt.Errorf("failed to parse %q as %v: %w", n.String(), baseType, err)
+			}
+			result := reflect.New(baseType).Elem()
+			result.SetFloat(f)
+			return wrapPointers(result.Interface(), ptrNum), nil
+		}
+	}
+
 	dataValue := reflect.ValueOf(data)
 	if dataValue.Type().AssignableTo(baseType) {
 		return wrapPointers(data, ptrNum), nil
@@ -745,6 +782,21 @@ func wrapPointers(value any, ptrNum uint32) any {
 
 func convertJSONPrimitive(data any) any {
 	switch v := data.(type) {
+	case json.Number:
+		s := v.String()
+		if strings.ContainsAny(s, ".eE") {
+			if f, err := strconv.ParseFloat(s, 64); err == nil {
+				return f
+			}
+			return s
+		}
+		if i, err := strconv.ParseInt(s, 10, 0); err == nil {
+			return int(i)
+		}
+		if u, err := strconv.ParseUint(s, 10, 64); err == nil {
+			return u
+		}
+		return s
 	case float64:
 		if v == float64(int64(v)) {
 			return int(v)
@@ -820,6 +872,16 @@ func setValueWithConversion(target, source reflect.Value) bool {
 	}
 
 	return false
+}
+
+func decodeJSONAny(data []byte) (any, error) {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.UseNumber()
+	var raw any
+	if err := dec.Decode(&raw); err != nil {
+		return nil, err
+	}
+	return raw, nil
 }
 
 func getJSONFieldName(fieldName, jsonTag string) string {

@@ -168,13 +168,14 @@ func (r *TypedRunner[M]) resumeInternal(ctx context.Context, checkPointID string
 type runnerSessionRunState[M MessageType] struct {
 	enabled         bool
 	sessionID       string
-	turnIndex       int
-	nextEventSeq    int64
 	checkPointID    *string
 	latestState     *TurnEndState[M]
 	persistence     *SessionPersistenceConfig
 	sessionStore    SessionStore
 	checkPointStore CheckPointStore
+	// inputMessages are the caller-provided messages for this turn (before history prepend).
+	// Captured so the Runner can persist them as session events at turn start.
+	inputMessages []M
 }
 
 func mergeSessionValues(restored, overrides map[string]any) map[string]any {
@@ -209,24 +210,39 @@ func prepareRunnerSessionRun[M MessageType]( //nolint:revive // argument-limit
 	state.sessionStore = sessionStore
 	state.checkPointStore = checkPointStore
 	state.persistence = sessionPersistence
-	state.nextEventSeq = 1
 	state.latestState = &TurnEndState[M]{}
 
-	latestTurnIndex, payload, exists, err := sessionStore.LoadLatestTurnEnd(ctx, sessionID)
+	afterMessageID, afterEventCursor, payload, exists, err := sessionStore.LoadLatestTurnEnd(ctx, sessionID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load latest TurnEnd state for session[%s]: %w", sessionID, err)
 	}
+	_ = afterMessageID // informational/debug-only; afterEventCursor drives replay
+
 	if exists {
 		latestState, decodeErr := decodeTurnEndState[M](payload)
 		if decodeErr != nil {
 			return nil, fmt.Errorf("failed to decode latest TurnEnd state for session[%s]: %w", sessionID, decodeErr)
 		}
 		state.latestState = latestState
-	}
 
-	state.turnIndex = latestTurnIndex + 1
-	if state.turnIndex <= 0 {
-		state.turnIndex = 1
+		// Tail replay: recover events appended after this snapshot (e.g., SaveTurnEnd
+		// failed on a subsequent turn or partial-turn events were appended).
+		tailMessages, tailErr := replayTailEvents[M](ctx, sessionStore, sessionID, afterEventCursor, latestState.Messages)
+		if tailErr != nil {
+			return nil, fmt.Errorf("failed to replay tail events for session[%s]: %w", sessionID, tailErr)
+		}
+		if tailMessages != nil {
+			state.latestState.Messages = tailMessages
+		}
+	} else {
+		// Fallback: reconstruct from event log.
+		messages, reconstructErr := reconstructFromEventLog[M](ctx, sessionStore, sessionID)
+		if reconstructErr != nil {
+			return nil, fmt.Errorf("failed to reconstruct session[%s] from event log: %w", sessionID, reconstructErr)
+		}
+		if len(messages) > 0 {
+			state.latestState = &TurnEndState[M]{Messages: messages}
+		}
 	}
 
 	if checkPointStore == nil {
@@ -234,18 +250,14 @@ func prepareRunnerSessionRun[M MessageType]( //nolint:revive // argument-limit
 	}
 	checkPointID := sessionRunnerCheckpointID(sessionID)
 	state.checkPointID = &checkPointID
-	cp, existed, err := loadRunnerSessionCheckpoint(ctx, checkPointStore, checkPointID)
+	_, existed, err := loadRunnerSessionCheckpoint(ctx, checkPointStore, checkPointID)
 	if err != nil {
 		return nil, err
 	}
 	if !existed {
 		return state, nil
 	}
-	if cp.TurnIndex <= latestTurnIndex {
-		_ = deleteCheckPointIfSupported(ctx, checkPointStore, checkPointID)
-		return state, nil
-	}
-	return nil, fmt.Errorf("%w: session %q has pending turn %d; resume or discard the pending checkpoint before new input", ErrPendingSessionCheckpoint, sessionID, cp.TurnIndex)
+	return nil, fmt.Errorf("%w: session %q has a pending checkpoint; resume or discard it before new input", ErrPendingSessionCheckpoint, sessionID)
 }
 
 func prepareRunnerSessionResume[M MessageType](
@@ -257,10 +269,12 @@ func prepareRunnerSessionResume[M MessageType](
 	checkPointID string,
 ) (*runnerSessionRunState[M], string, error) {
 	state := &runnerSessionRunState[M]{}
-	if checkPointID != "" {
+	// Non-session-mode resume: explicit checkpoint ID, no session boot needed.
+	if checkPointID != "" && (sessionID == "" || sessionStore == nil) {
 		return state, checkPointID, nil
 	}
-	if sessionID == "" || sessionStore == nil {
+	// Implicit session-mode resume requires both sessionID and sessionStore.
+	if checkPointID == "" && (sessionID == "" || sessionStore == nil) {
 		return nil, "", errors.New("failed to resume: checkpoint ID is empty")
 	}
 	state.enabled = true
@@ -270,34 +284,57 @@ func prepareRunnerSessionResume[M MessageType](
 	state.persistence = sessionPersistence
 	state.latestState = &TurnEndState[M]{}
 
-	latestTurnIndex, payload, exists, err := sessionStore.LoadLatestTurnEnd(ctx, sessionID)
+	afterMessageID, afterEventCursor, payload, exists, err := sessionStore.LoadLatestTurnEnd(ctx, sessionID)
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to load latest TurnEnd state for session[%s]: %w", sessionID, err)
 	}
+	_ = afterMessageID
+
 	if exists {
 		latestState, decodeErr := decodeTurnEndState[M](payload)
 		if decodeErr != nil {
 			return nil, "", fmt.Errorf("failed to decode latest TurnEnd state for session[%s]: %w", sessionID, decodeErr)
 		}
 		state.latestState = latestState
+
+		tailMessages, tailErr := replayTailEvents[M](ctx, sessionStore, sessionID, afterEventCursor, latestState.Messages)
+		if tailErr != nil {
+			return nil, "", fmt.Errorf("failed to replay tail events for session[%s]: %w", sessionID, tailErr)
+		}
+		if tailMessages != nil {
+			state.latestState.Messages = tailMessages
+		}
+	} else {
+		messages, reconstructErr := reconstructFromEventLog[M](ctx, sessionStore, sessionID)
+		if reconstructErr != nil {
+			return nil, "", fmt.Errorf("failed to reconstruct session[%s] from event log: %w", sessionID, reconstructErr)
+		}
+		if len(messages) > 0 {
+			state.latestState = &TurnEndState[M]{Messages: messages}
+		}
 	}
-	effectiveCheckPointID := sessionRunnerCheckpointID(sessionID)
+
+	// Pick the checkpoint ID: caller-provided takes precedence over the implicit
+	// session-scoped one. The session-scoped key still drives existence checks
+	// when the caller did not supply a checkpoint.
+	effectiveCheckPointID := checkPointID
+	if effectiveCheckPointID == "" {
+		effectiveCheckPointID = sessionRunnerCheckpointID(sessionID)
+	}
 	state.checkPointID = &effectiveCheckPointID
-	cp, existed, err := loadRunnerSessionCheckpoint(ctx, checkPointStore, effectiveCheckPointID)
-	if err != nil {
-		return nil, "", err
-	}
-	if !existed {
-		return nil, "", fmt.Errorf("no pending session checkpoint for session %q", sessionID)
-	}
-	if cp.TurnIndex <= latestTurnIndex {
-		_ = deleteCheckPointIfSupported(ctx, checkPointStore, effectiveCheckPointID)
-		return nil, "", fmt.Errorf("no pending session checkpoint for session %q", sessionID)
-	}
-	state.turnIndex = cp.TurnIndex
-	state.nextEventSeq = cp.NextEventSeq
-	if state.nextEventSeq <= 0 {
-		state.nextEventSeq = 1
+
+	// Existence check is only required for implicit session resume — the caller
+	// passing an explicit checkpoint ID has asserted the checkpoint should exist
+	// and any error will surface from the subsequent load. For implicit resume,
+	// the absence of a pending checkpoint is fatal and reported here.
+	if checkPointID == "" {
+		_, existed, err := loadRunnerSessionCheckpoint(ctx, checkPointStore, effectiveCheckPointID)
+		if err != nil {
+			return nil, "", err
+		}
+		if !existed {
+			return nil, "", fmt.Errorf("no pending session checkpoint for session %q", sessionID)
+		}
 	}
 	return state, effectiveCheckPointID, nil
 }
@@ -374,9 +411,7 @@ func saveRunnerCheckpoint[M MessageType]( //nolint:revive // argument-limit
 		return err
 	}
 	data, err := encodeRunnerSessionCheckpoint(&runnerSessionCheckpoint{
-		TurnIndex:    sessionState.turnIndex,
-		NextEventSeq: sessionState.nextEventSeq,
-		Payload:      payload,
+		Payload: payload,
 	})
 	if err != nil {
 		return err
@@ -393,7 +428,15 @@ func typedRunnerRunImpl[M MessageType](a TypedAgent[M], enableStreaming bool, st
 		return errorIterator[M](err)
 	}
 	if sessionState.enabled {
-		messages = append(append([]M{}, sessionState.latestState.Messages...), messages...)
+		// Capture caller-provided messages BEFORE prepending history. These will be
+		// emitted as session events at turn start so they appear in the event log.
+		sessionState.inputMessages = append([]M{}, messages...)
+		// Assign eino message IDs to input messages (needed for BeforeMessageID references
+		// emitted by middlewares that anchor on user messages).
+		for _, msg := range sessionState.inputMessages {
+			EnsureMessageID(msg)
+		}
+		messages = append(append([]M{}, sessionState.latestState.Messages...), sessionState.inputMessages...)
 		o.sessionValues = mergeSessionValues(sessionState.latestState.SessionValues, o.sessionValues)
 		opts = append(opts, withEnableSessionEvents())
 	}
@@ -551,18 +594,34 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 		interrupted     bool
 		cancelled       bool
 		turnEndBytes    []byte
+		afterMessageID  string
 		persister       *sessionEventPersister[M]
 		persistErr      error
 	)
 	if sessionState != nil && sessionState.enabled {
-		persister = newSessionEventPersister[M](ctx, sessionState.sessionStore, sessionState.sessionID, sessionState.turnIndex, sessionState.persistence)
-		if sessionState.nextEventSeq <= 0 {
-			sessionState.nextEventSeq = 1
-		}
+		persister = newSessionEventPersister[M](ctx, sessionState.sessionStore, sessionState.sessionID, sessionState.persistence)
 	}
 	setPersistErr := func(err error) {
 		if err != nil && persistErr == nil {
 			persistErr = err
+		}
+	}
+
+	// Emit caller-provided input messages as session events at turn start, so the
+	// event log carries the user's input alongside the agent's output. Skipped on
+	// resume (sessionState.inputMessages is nil).
+	if persister != nil && len(sessionState.inputMessages) > 0 {
+		for _, msg := range sessionState.inputMessages {
+			se := makeInputSessionEvent[M](msg)
+			data, err := encodeSessionEvent(se)
+			if err != nil {
+				setPersistErr(err)
+				break
+			}
+			if err := persister.enqueue(data); err != nil {
+				setPersistErr(err)
+				break
+			}
 		}
 	}
 	for {
@@ -627,27 +686,89 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 			}
 		}
 
+		liveDelivered := false
 		if persister != nil {
-			persistedEvent, liveEvent := splitPersistentAndLiveEvent(event)
-			event = liveEvent
-			if persistedEvent != nil && persistedEvent.TurnEndState != nil {
-				data, err := encodeTurnEndState(persistedEvent.TurnEndState)
+			// Capture TurnEndState BEFORE filtering — it's metadata for SaveTurnEnd,
+			// not a SessionEvent. Captured independently of toSessionEvent so a
+			// TurnEndState-only event still drives the snapshot.
+			if event.TurnEndState != nil {
+				data, err := encodeTurnEndState(event.TurnEndState)
 				if err != nil {
 					setPersistErr(err)
 				} else {
 					turnEndBytes = data
+					afterMessageID = lastMessageID(event.TurnEndState.Messages)
 				}
 			}
-			if persistedEvent != nil && eventHasPersistedPayload(persistedEvent) {
-				record, err := makeEventRecord(sessionState.turnIndex, sessionState.nextEventSeq, persistedEvent)
-				if err != nil {
-					setPersistErr(err)
-				} else if err := persister.enqueue(record); err != nil {
-					setPersistErr(err)
+
+			// Skip persistence (but not live delivery) for events tagged with a
+			// different SessionID (inner agent events forwarded via AgentTool).
+			fromOtherSession := event.SessionID != "" && event.SessionID != sessionState.sessionID
+
+			if !fromOtherSession {
+				if event.Output != nil && event.Output.MessageOutput != nil &&
+					event.Output.MessageOutput.IsStreaming && event.Output.MessageOutput.MessageStream != nil {
+					copies := event.Output.MessageOutput.MessageStream.Copy(2)
+					liveOutput := *event.Output
+					liveMV := *event.Output.MessageOutput
+					liveMV.MessageStream = copies[1]
+
+					// Rewrite the live event to the second stream copy and send it
+					// before materializing the persisted copy. This keeps managed
+					// sessions from delaying live stream delivery on persistence.
+					liveOutput.MessageOutput = &liveMV
+					event.Output = &liveOutput
+					liveEvent := event
+					if !enableSessionEvents {
+						liveEvent = stripSessionEventFields(liveEvent)
+					}
+					if liveEvent != nil {
+						gen.Send(liveEvent)
+					}
+					liveDelivered = true
+
+					persistCopy := &TypedMessageVariant[M]{IsStreaming: true, MessageStream: copies[0]}
+					persistedMsg, err := persistCopy.GetMessage()
+					if err != nil {
+						setPersistErr(err)
+						continue
+					}
+
+					persistMV := *event.Output.MessageOutput
+					persistMV.Message = persistedMsg
+					persistMV.MessageStream = nil
+					persistMV.IsStreaming = false
+					persistOutput := *event.Output
+					persistOutput.MessageOutput = &persistMV
+					persistEvent := *event
+					persistEvent.Output = &persistOutput
+
+					se := toSessionEvent(&persistEvent)
+					if se != nil {
+						data, err := encodeSessionEvent(se)
+						if err != nil {
+							setPersistErr(err)
+						} else if err := persister.enqueue(data); err != nil {
+							setPersistErr(err)
+						}
+					}
 				} else {
-					sessionState.nextEventSeq++
+					// Non-streaming events go through toSessionEvent directly.
+					se := toSessionEvent(event)
+					if se != nil {
+						data, err := encodeSessionEvent(se)
+						if err != nil {
+							setPersistErr(err)
+						} else if err := persister.enqueue(data); err != nil {
+							setPersistErr(err)
+						}
+					}
 				}
 			}
+		}
+
+		if liveDelivered {
+			continue
 		}
 
 		if !enableSessionEvents {
@@ -660,14 +781,15 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 	}
 	if persister != nil {
 		res := &sessionTurnResult[M]{
-			persister:    persister,
-			persistErr:   persistErr,
-			interrupted:  interrupted,
-			cancelled:    cancelled,
-			turnEndBytes: turnEndBytes,
-			sessionState: sessionState,
-			store:        store,
-			checkPointID: checkPointID,
+			persister:      persister,
+			persistErr:     persistErr,
+			interrupted:    interrupted,
+			cancelled:      cancelled,
+			turnEndBytes:   turnEndBytes,
+			afterMessageID: afterMessageID,
+			sessionState:   sessionState,
+			store:          store,
+			checkPointID:   checkPointID,
 		}
 		if err := res.finalize(ctx); err != nil {
 			gen.Send(&TypedAgentEvent[M]{Err: err})
@@ -678,14 +800,15 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 // sessionTurnResult bundles the accumulated state from a Runner turn's event
 // loop and drives the session commit-or-abort decision.
 type sessionTurnResult[M MessageType] struct {
-	persister    *sessionEventPersister[M]
-	persistErr   error
-	interrupted  bool
-	cancelled    bool
-	turnEndBytes []byte
-	sessionState *runnerSessionRunState[M]
-	store        CheckPointStore
-	checkPointID *string
+	persister      *sessionEventPersister[M]
+	persistErr     error
+	interrupted    bool
+	cancelled      bool
+	turnEndBytes   []byte
+	afterMessageID string
+	sessionState   *runnerSessionRunState[M]
+	store          CheckPointStore
+	checkPointID   *string
 }
 
 func (r *sessionTurnResult[M]) finalize(ctx context.Context) error {
@@ -699,9 +822,9 @@ func (r *sessionTurnResult[M]) finalize(ctx context.Context) error {
 		return fmt.Errorf("failed to persist session events: %w", r.persistErr)
 	}
 	if len(r.turnEndBytes) == 0 {
-		return fmt.Errorf("failed to commit session[%s] turn %d: missing TurnEndState", r.sessionState.sessionID, r.sessionState.turnIndex)
+		return fmt.Errorf("failed to commit session[%s]: missing TurnEndState", r.sessionState.sessionID)
 	}
-	if err := r.sessionState.sessionStore.SaveTurnEnd(ctx, r.sessionState.sessionID, r.sessionState.turnIndex, r.turnEndBytes); err != nil {
+	if err := r.sessionState.sessionStore.SaveTurnEnd(ctx, r.sessionState.sessionID, r.afterMessageID, r.turnEndBytes); err != nil {
 		return fmt.Errorf("failed to save session turn end: %w", err)
 	}
 	if r.checkPointID != nil && r.store != nil {

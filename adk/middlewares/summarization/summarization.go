@@ -354,6 +354,15 @@ func (m *TypedMiddleware[M]) BeforeModelRewriteState(ctx context.Context, state 
 	afterState := *state
 	afterState.Messages = finalMsgs
 
+	// Emit a session mutation event so the persisted event log reflects the new
+	// message state at the summarization boundary. Independent of EmitInternalEvents.
+	// Error is ignored: when not in an execution context (e.g. unit tests), the
+	// event simply has no consumer.
+	msgs := afterState.Messages
+	_ = adk.TypedSendEvent(ctx, &adk.TypedAgentEvent[M]{
+		MessagesReplaced: &msgs,
+	})
+
 	return ctx, &afterState, nil
 }
 

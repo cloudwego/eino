@@ -44,11 +44,24 @@ type hrWrapper struct {
 	Inner hrTestStruct `json:"inner"`
 }
 
+type hrLargeIntegerStruct struct {
+	I int64  `json:"i"`
+	U uint64 `json:"u"`
+	A any    `json:"a"`
+}
+
+type hrReservedTypeStruct struct {
+	Type string `json:"$type"`
+	Name string `json:"name"`
+}
+
 func init() {
 	_ = GenericRegister[hrTestStruct]("hr_test_struct")
 	_ = GenericRegister[hrTestStructWithExtra]("hr_test_struct_with_extra")
 	_ = GenericRegister[hrStructWithInterface]("hr_struct_with_interface")
 	_ = GenericRegister[hrWrapper]("hr_wrapper")
+	_ = GenericRegister[hrLargeIntegerStruct]("hr_large_integer_struct")
+	_ = GenericRegister[hrReservedTypeStruct]("hr_reserved_type_struct")
 }
 
 func TestHumanReadableSerializer_OmitemptyBehavior(t *testing.T) {
@@ -186,5 +199,56 @@ func TestHumanReadableSerializer_TypeAnnotationOnlyForInterfaceFields(t *testing
 		aMap := jsonMap["A"].(map[string]any)
 		_, hasType := aMap["$type"]
 		assert.True(t, hasType, "interface field should have $type annotation")
+	})
+}
+
+func TestHumanReadableSerializer_PreservesLargeIntegers(t *testing.T) {
+	s := &HumanReadableSerializer{}
+	input := hrLargeIntegerStruct{
+		I: 9007199254740993,
+		U: 1<<63 + 123,
+		A: int64(9007199254740993),
+	}
+
+	data, err := s.Marshal(input)
+	require.NoError(t, err)
+
+	var result hrLargeIntegerStruct
+	err = s.Unmarshal(data, &result)
+	require.NoError(t, err)
+	assert.Equal(t, input, result)
+}
+
+func TestHumanReadableSerializer_PreservesUserTypeKey(t *testing.T) {
+	s := &HumanReadableSerializer{}
+
+	t.Run("map key", func(t *testing.T) {
+		input := map[string]any{
+			"$type": "user-controlled",
+			"value": int64(7),
+		}
+
+		data, err := s.Marshal(input)
+		require.NoError(t, err)
+
+		var result map[string]any
+		err = s.Unmarshal(data, &result)
+		require.NoError(t, err)
+		assert.Equal(t, input, result)
+	})
+
+	t.Run("struct field", func(t *testing.T) {
+		input := hrReservedTypeStruct{
+			Type: "user-controlled",
+			Name: "kept",
+		}
+
+		data, err := s.Marshal(input)
+		require.NoError(t, err)
+
+		var result hrReservedTypeStruct
+		err = s.Unmarshal(data, &result)
+		require.NoError(t, err)
+		assert.Equal(t, input, result)
 	})
 }

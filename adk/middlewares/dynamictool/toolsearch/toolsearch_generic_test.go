@@ -213,7 +213,7 @@ func testEnsureReminderGeneric[M adk.MessageType](t *testing.T) {
 			makeSystemMsg[M]("sys"),
 			makeUserMsg[M]("hi"),
 		}
-		got := m.ensureReminder(input)
+		got, _, _, _ := m.ensureReminder(input)
 		require.Len(t, got, 3)
 		assert.Equal(t, "system", getMsgRole(got[0]))
 		// Reminder inserted after system
@@ -228,7 +228,7 @@ func testEnsureReminderGeneric[M adk.MessageType](t *testing.T) {
 			makeSystemMsg[M]("sys1"),
 			makeSystemMsg[M]("sys2"),
 		}
-		got := m.ensureReminder(input)
+		got, _, _, _ := m.ensureReminder(input)
 		require.Len(t, got, 3)
 		assert.Equal(t, "system", getMsgRole(got[0]))
 		assert.Equal(t, "system", getMsgRole(got[1]))
@@ -239,7 +239,7 @@ func testEnsureReminderGeneric[M adk.MessageType](t *testing.T) {
 	})
 
 	t.Run("empty input", func(t *testing.T) {
-		got := m.ensureReminder(nil)
+		got, _, _, _ := m.ensureReminder(nil)
 		require.Len(t, got, 1)
 		extra := getMsgExtra(got[0])
 		require.NotNil(t, extra)
@@ -250,7 +250,7 @@ func testEnsureReminderGeneric[M adk.MessageType](t *testing.T) {
 		input := []M{
 			makeUserMsg[M]("hi"),
 		}
-		got := m.ensureReminder(input)
+		got, _, _, _ := m.ensureReminder(input)
 		require.Len(t, got, 2)
 		// Reminder inserted at position 0
 		extra := getMsgExtra(got[0])
@@ -266,7 +266,7 @@ func testEnsureReminderGeneric[M adk.MessageType](t *testing.T) {
 			reminder,
 			makeUserMsg[M]("hi"),
 		}
-		got := m.ensureReminder(input)
+		got, _, _, _ := m.ensureReminder(input)
 		require.Len(t, got, 2)
 		assert.Equal(t, "hi", getMsgContent(got[1]))
 	})
