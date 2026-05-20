@@ -87,10 +87,6 @@ func hrMarshal(v any, fieldType reflect.Type) (any, error) {
 		return nil, nil
 	}
 
-	if rv.IsZero() && fieldType != nil && fieldType.Kind() != reflect.Interface {
-		return nil, nil
-	}
-
 	rt := rv.Type()
 	typeUnspecific := fieldType == nil || fieldType.Kind() == reflect.Interface
 
@@ -378,7 +374,7 @@ func hrUnmarshal(data any, targetType reflect.Type) (any, error) {
 
 func hrUnmarshalMap(data map[string]any, targetType, baseType reflect.Type, ptrNum uint32) (any, error) {
 	if typeStr, hasType := data[typeFieldName].(string); hasType {
-		if _, _, err := parseTypeName(typeStr); err == nil {
+		if shouldTreatAsTypeEnvelope(data, baseType, typeStr) {
 			return hrUnmarshalTyped(data, typeStr)
 		}
 	}
@@ -404,6 +400,17 @@ func hrUnmarshalMap(data map[string]any, targetType, baseType reflect.Type, ptrN
 	}
 
 	return nil, fmt.Errorf("cannot unmarshal map to %v", targetType)
+}
+
+func shouldTreatAsTypeEnvelope(data map[string]any, baseType reflect.Type, typeStr string) bool {
+	if _, _, err := parseTypeName(typeStr); err != nil {
+		return false
+	}
+	if baseType.Kind() == reflect.Interface {
+		return true
+	}
+	_, hasValue := data["value"]
+	return hasValue && len(data) == 2
 }
 
 func hrUnmarshalTyped(data map[string]any, typeStr string) (any, error) {

@@ -55,6 +55,12 @@ type hrReservedTypeStruct struct {
 	Name string `json:"name"`
 }
 
+type hrZeroValueStruct struct {
+	S string `json:"s"`
+	I int    `json:"i"`
+	B bool   `json:"b"`
+}
+
 func init() {
 	_ = GenericRegister[hrTestStruct]("hr_test_struct")
 	_ = GenericRegister[hrTestStructWithExtra]("hr_test_struct_with_extra")
@@ -62,6 +68,7 @@ func init() {
 	_ = GenericRegister[hrWrapper]("hr_wrapper")
 	_ = GenericRegister[hrLargeIntegerStruct]("hr_large_integer_struct")
 	_ = GenericRegister[hrReservedTypeStruct]("hr_reserved_type_struct")
+	_ = GenericRegister[hrZeroValueStruct]("hr_zero_value_struct")
 }
 
 func TestHumanReadableSerializer_OmitemptyBehavior(t *testing.T) {
@@ -251,4 +258,39 @@ func TestHumanReadableSerializer_PreservesUserTypeKey(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, input, result)
 	})
+
+	t.Run("struct field with registered value", func(t *testing.T) {
+		input := hrReservedTypeStruct{
+			Type: "_eino_string",
+			Name: "kept",
+		}
+
+		data, err := s.Marshal(input)
+		require.NoError(t, err)
+
+		var result hrReservedTypeStruct
+		err = s.Unmarshal(data, &result)
+		require.NoError(t, err)
+		assert.Equal(t, input, result)
+	})
+}
+
+func TestHumanReadableSerializer_NonOmitEmptyZeroValuesAreScalars(t *testing.T) {
+	s := &HumanReadableSerializer{}
+	input := hrZeroValueStruct{}
+
+	data, err := s.Marshal(input)
+	require.NoError(t, err)
+
+	var raw map[string]any
+	err = json.Unmarshal(data, &raw)
+	require.NoError(t, err)
+	assert.Equal(t, "", raw["s"])
+	assert.Equal(t, float64(0), raw["i"])
+	assert.Equal(t, false, raw["b"])
+
+	var result hrZeroValueStruct
+	err = s.Unmarshal(data, &result)
+	require.NoError(t, err)
+	assert.Equal(t, input, result)
 }
