@@ -22,7 +22,6 @@ import (
 	"encoding/gob"
 	"errors"
 	"fmt"
-	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -484,7 +483,10 @@ func applySessionEvent[M MessageType](messages *[]M, event *SessionEvent[M]) err
 			inserted := false
 			for j, msg := range *messages {
 				if GetMessageID(msg) == ins.BeforeMessageID {
-					*messages = slices.Insert(*messages, j, ins.Message)
+					var zero M
+					*messages = append(*messages, zero)
+					copy((*messages)[j+1:], (*messages)[j:])
+					(*messages)[j] = ins.Message
 					inserted = true
 					break
 				}
@@ -564,7 +566,7 @@ func reconstructFromEventLog[M MessageType](
 	}
 
 	// allEvents is in reverse-chronological order. Reverse to get chronological.
-	slices.Reverse(allEvents)
+	reverseSessionEvents(allEvents)
 	if boundaryIdx >= 0 {
 		boundaryIdx = len(allEvents) - 1 - boundaryIdx
 	}
@@ -584,6 +586,12 @@ func reconstructFromEventLog[M MessageType](
 	}
 
 	return messages, nil
+}
+
+func reverseSessionEvents[M MessageType](events []*SessionEvent[M]) {
+	for i, j := 0, len(events)-1; i < j; i, j = i+1, j-1 {
+		events[i], events[j] = events[j], events[i]
+	}
 }
 
 // replayTailEvents applies events appended after the snapshot's afterEventCursor
