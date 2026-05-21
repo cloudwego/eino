@@ -150,7 +150,7 @@ func (s *sessionHelperStore) AppendEvents(_ context.Context, _ string, events []
 	return nil
 }
 
-func (s *sessionHelperStore) LoadEvents(_ context.Context, _ string, opts *LoadEventsOptions) (*LoadEventsResult, error) {
+func (s *sessionHelperStore) LoadEvents(_ context.Context, _ string, opts *LoadEventsRequest) (*LoadEventsResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.loadErr != nil {
