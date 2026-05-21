@@ -85,7 +85,7 @@ func (s *InMemoryStore) AppendEvents(_ context.Context, sessionID string, events
 }
 
 // LoadEvents loads session events with pagination support.
-func (s *InMemoryStore) LoadEvents(_ context.Context, sessionID string, opts *adk.LoadEventsOptions) (*adk.LoadEventsResult, error) {
+func (s *InMemoryStore) LoadEvents(_ context.Context, sessionID string, opts *adk.LoadEventsRequest) (*adk.LoadEventsResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -93,7 +93,7 @@ func (s *InMemoryStore) LoadEvents(_ context.Context, sessionID string, opts *ad
 	total := len(all)
 
 	if opts == nil {
-		opts = &adk.LoadEventsOptions{}
+		opts = &adk.LoadEventsRequest{}
 	}
 
 	if opts.Reverse {
@@ -176,7 +176,7 @@ func paginateForward(all [][]byte, startOffset, limit int) *adk.LoadEventsResult
 
 // SaveTurnEnd persists a TurnEndState snapshot. The store captures the current
 // event-log tail position internally so tail replay can reload events appended
-// after this snapshot via the After field in LoadEventsOptions.
+// after this snapshot via the After field in LoadEventsRequest.
 func (s *InMemoryStore) SaveTurnEnd(_ context.Context, sessionID string, afterMessageID string, turnEnd []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
