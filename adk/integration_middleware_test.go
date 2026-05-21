@@ -108,7 +108,7 @@ func TestAgentsMDIntegration_PersistsMessageInserted(t *testing.T) {
 	}
 
 	// Read the persisted event log.
-	res, err := store.LoadEvents(ctx, "agentsmd-test", &adk.LoadEventsOptions{})
+	res, err := store.LoadEvents(ctx, "agentsmd-test", &adk.LoadEventsRequest{})
 	require.NoError(t, err)
 
 	var sawInsertedAgentsmd bool
@@ -176,7 +176,7 @@ func TestAgentsMDIntegration_NextTurnSkipsReinsertion(t *testing.T) {
 
 	// Count agentsmd MessageInserted events after turn 1.
 	countAgentsmdInserts := func() int {
-		res, err := store.LoadEvents(ctx, sid, &adk.LoadEventsOptions{})
+		res, err := store.LoadEvents(ctx, sid, &adk.LoadEventsRequest{})
 		require.NoError(t, err)
 		count := 0
 		for _, raw := range res.Events {
@@ -275,7 +275,7 @@ func TestToolSearchIntegration_PersistsMessageInserted(t *testing.T) {
 		require.NoError(t, ev.Err)
 	}
 
-	res, err := store.LoadEvents(ctx, sid, &adk.LoadEventsOptions{})
+	res, err := store.LoadEvents(ctx, sid, &adk.LoadEventsRequest{})
 	require.NoError(t, err)
 
 	var sawInsertedReminder bool
@@ -366,7 +366,7 @@ func TestPatchToolCallsIntegration_PersistsMessageInserted(t *testing.T) {
 
 	// Read events back; among the events appended on this turn there should be
 	// a MessageInserted carrying a Tool-role synthetic message.
-	res, err := store.LoadEvents(ctx, sid, &adk.LoadEventsOptions{})
+	res, err := store.LoadEvents(ctx, sid, &adk.LoadEventsRequest{})
 	require.NoError(t, err)
 	var sawInsertedToolResult bool
 	for _, raw := range res.Events {
@@ -488,7 +488,7 @@ func TestReductionIntegration_PersistsBothMessageUpdated(t *testing.T) {
 		require.NoError(t, ev.Err)
 	}
 
-	res, err := store.LoadEvents(ctx, sid, &adk.LoadEventsOptions{})
+	res, err := store.LoadEvents(ctx, sid, &adk.LoadEventsRequest{})
 	require.NoError(t, err)
 
 	var sawAssistantUpdated, sawToolUpdated bool
