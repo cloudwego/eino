@@ -212,11 +212,11 @@ func prepareRunnerSessionRun[M MessageType]( //nolint:revive // argument-limit
 	state.persistence = sessionPersistence
 	state.latestState = &TurnEndState[M]{}
 
-	afterMessageID, afterEventCursor, payload, exists, err := sessionStore.LoadLatestTurnEnd(ctx, sessionID)
+	afterMessageID, afterCursor, payload, exists, err := sessionStore.LoadLatestTurnEnd(ctx, sessionID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load latest TurnEnd state for session[%s]: %w", sessionID, err)
 	}
-	_ = afterMessageID // informational/debug-only; afterEventCursor drives replay
+	_ = afterMessageID // informational/debug-only; afterCursor drives replay
 
 	if exists {
 		latestState, decodeErr := decodeTurnEndState[M](payload)
@@ -227,7 +227,7 @@ func prepareRunnerSessionRun[M MessageType]( //nolint:revive // argument-limit
 
 		// Tail replay: recover events appended after this snapshot (e.g., SaveTurnEnd
 		// failed on a subsequent turn or partial-turn events were appended).
-		tailMessages, tailErr := replayTailEvents[M](ctx, sessionStore, sessionID, afterEventCursor, latestState.Messages)
+		tailMessages, tailErr := replayTailEvents[M](ctx, sessionStore, sessionID, afterCursor, latestState.Messages)
 		if tailErr != nil {
 			return nil, fmt.Errorf("failed to replay tail events for session[%s]: %w", sessionID, tailErr)
 		}
@@ -284,7 +284,7 @@ func prepareRunnerSessionResume[M MessageType](
 	state.persistence = sessionPersistence
 	state.latestState = &TurnEndState[M]{}
 
-	afterMessageID, afterEventCursor, payload, exists, err := sessionStore.LoadLatestTurnEnd(ctx, sessionID)
+	afterMessageID, afterCursor, payload, exists, err := sessionStore.LoadLatestTurnEnd(ctx, sessionID)
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to load latest TurnEnd state for session[%s]: %w", sessionID, err)
 	}
@@ -297,7 +297,7 @@ func prepareRunnerSessionResume[M MessageType](
 		}
 		state.latestState = latestState
 
-		tailMessages, tailErr := replayTailEvents[M](ctx, sessionStore, sessionID, afterEventCursor, latestState.Messages)
+		tailMessages, tailErr := replayTailEvents[M](ctx, sessionStore, sessionID, afterCursor, latestState.Messages)
 		if tailErr != nil {
 			return nil, "", fmt.Errorf("failed to replay tail events for session[%s]: %w", sessionID, tailErr)
 		}
