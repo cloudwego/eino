@@ -67,19 +67,19 @@ func RunConformanceTests(t *testing.T, factory func(testing.TB) adk.SessionStore
 		var pageToken string
 		for {
 			res, err := store.LoadEvents(ctx, "s", &adk.LoadEventsOptions{
-				Reverse:   true,
-				Limit:     2,
-				PageToken: pageToken,
+				Reverse: true,
+				Limit:   2,
+				After:   pageToken,
 			})
 			requireNoError(t, err)
 			if res == nil || len(res.Events) == 0 {
 				break
 			}
 			collected = append(collected, res.Events...)
-			if res.NextPageToken == "" {
+			if res.Next == "" {
 				break
 			}
-			pageToken = res.NextPageToken
+			pageToken = res.Next
 		}
 
 		// Expect newest first.
@@ -87,7 +87,7 @@ func RunConformanceTests(t *testing.T, factory func(testing.TB) adk.SessionStore
 		requireEventsEqual(t, expected, collected)
 	})
 
-	t.Run("AfterCursor loads only post-snapshot events", func(t *testing.T) {
+	t.Run("After loads only post-snapshot events", func(t *testing.T) {
 		store := newStore(t, factory)
 		ctx := context.Background()
 
@@ -108,7 +108,7 @@ func RunConformanceTests(t *testing.T, factory func(testing.TB) adk.SessionStore
 			t.Fatalf("payload=%q, want %q", payload, []byte("snap"))
 		}
 		if afterCursor == "" {
-			t.Fatalf("afterEventCursor must be non-empty after SaveTurnEnd")
+			t.Fatalf("afterCursor must be non-empty after SaveTurnEnd")
 		}
 
 		// Append more events after snapshot.
@@ -116,14 +116,14 @@ func RunConformanceTests(t *testing.T, factory func(testing.TB) adk.SessionStore
 			requireNoError(t, store.AppendEvents(ctx, "s", [][]byte{{byte('x' + i)}}))
 		}
 
-		// AfterCursor should return only post-snapshot events.
-		res, err := store.LoadEvents(ctx, "s", &adk.LoadEventsOptions{AfterCursor: afterCursor})
+		// After should return only post-snapshot events.
+		res, err := store.LoadEvents(ctx, "s", &adk.LoadEventsOptions{After: afterCursor})
 		requireNoError(t, err)
 		expected := [][]byte{{'x'}, {'y'}, {'z'}, {'{'}}
 		requireEventsEqual(t, expected, res.Events)
 	})
 
-	t.Run("AfterCursor with multi-page pagination", func(t *testing.T) {
+	t.Run("After with multi-page pagination", func(t *testing.T) {
 		store := newStore(t, factory)
 		ctx := context.Background()
 
@@ -140,7 +140,7 @@ func RunConformanceTests(t *testing.T, factory func(testing.TB) adk.SessionStore
 		}
 
 		var collected [][]byte
-		opts := &adk.LoadEventsOptions{AfterCursor: afterCursor, Limit: 10}
+		opts := &adk.LoadEventsOptions{After: afterCursor, Limit: 10}
 		for {
 			res, err := store.LoadEvents(ctx, "s", opts)
 			requireNoError(t, err)
@@ -148,10 +148,10 @@ func RunConformanceTests(t *testing.T, factory func(testing.TB) adk.SessionStore
 				break
 			}
 			collected = append(collected, res.Events...)
-			if res.NextPageToken == "" {
+			if res.Next == "" {
 				break
 			}
-			opts = &adk.LoadEventsOptions{Limit: 10, PageToken: res.NextPageToken}
+			opts = &adk.LoadEventsOptions{Limit: 10, After: res.Next}
 		}
 		if len(collected) != 30 {
 			t.Fatalf("expected 30 events, got %d", len(collected))
@@ -202,11 +202,11 @@ func RunConformanceTests(t *testing.T, factory func(testing.TB) adk.SessionStore
 			t.Fatalf("cursor changed after appends: original=%q new=%q", originalCursor, sameCursor)
 		}
 
-		// AfterCursor should return exactly the 20 new events.
-		res, err := store.LoadEvents(ctx, "s", &adk.LoadEventsOptions{AfterCursor: originalCursor})
+		// After should return exactly the 20 new events.
+		res, err := store.LoadEvents(ctx, "s", &adk.LoadEventsOptions{After: originalCursor})
 		requireNoError(t, err)
 		if len(res.Events) != 20 {
-			t.Fatalf("AfterCursor returned %d events, want 20", len(res.Events))
+			t.Fatalf("After returned %d events, want 20", len(res.Events))
 		}
 	})
 

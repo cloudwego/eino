@@ -431,7 +431,7 @@ func NewInMemoryStoreLocal(t *testing.T) SessionStore {
 
 // inMemoryAdapter is a minimal in-package SessionStore used by tail-replay
 // tests. It implements just enough of the cursor semantics: SaveTurnEnd captures
-// the current event count as the cursor, AfterCursor decodes that decimal index.
+// the current event count as the cursor, After decodes that decimal index.
 type inMemoryAdapter struct {
 	events   map[string][][]byte
 	turnEnds map[string]inMemoryTurnEnd
@@ -439,7 +439,7 @@ type inMemoryAdapter struct {
 
 type inMemoryTurnEnd struct {
 	afterMessageID   string
-	afterEventCursor string
+	afterCursor string
 	data             []byte
 }
 
@@ -455,9 +455,9 @@ func (s *inMemoryAdapter) LoadEvents(_ context.Context, sid string, opts *LoadEv
 	if opts == nil {
 		opts = &LoadEventsOptions{}
 	}
-	if opts.AfterCursor != "" {
+	if opts.After != "" {
 		var idx int
-		_, _ = fmtSscan(opts.AfterCursor, &idx)
+		_, _ = fmtSscan(opts.After, &idx)
 		if idx > len(all) {
 			idx = len(all)
 		}
@@ -484,7 +484,7 @@ func (s *inMemoryAdapter) LoadEvents(_ context.Context, sid string, opts *LoadEv
 func (s *inMemoryAdapter) SaveTurnEnd(_ context.Context, sid string, afterMessageID string, turnEnd []byte) error {
 	s.turnEnds[sid] = inMemoryTurnEnd{
 		afterMessageID:   afterMessageID,
-		afterEventCursor: itoa(len(s.events[sid])),
+		afterCursor: itoa(len(s.events[sid])),
 		data:             append([]byte{}, turnEnd...),
 	}
 	return nil
@@ -495,7 +495,7 @@ func (s *inMemoryAdapter) LoadLatestTurnEnd(_ context.Context, sid string) (stri
 	if !ok {
 		return "", "", nil, false, nil
 	}
-	return rec.afterMessageID, rec.afterEventCursor, append([]byte{}, rec.data...), true, nil
+	return rec.afterMessageID, rec.afterCursor, append([]byte{}, rec.data...), true, nil
 }
 
 // TestPartialInterrupted_ThenNewRun verifies that when a turn is interrupted
