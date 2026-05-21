@@ -19,7 +19,6 @@ package adk
 import (
 	"bytes"
 	"context"
-	"encoding/gob"
 	"errors"
 	"fmt"
 	"math"
@@ -36,6 +35,9 @@ import (
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/internal/safe"
+
+	iSerializer "github.com/cloudwego/eino/internal/serialization"
+
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -357,9 +359,10 @@ type TypedChatModelAgentConfig[M MessageType] struct {
 	//  1. eventSenderToolWrapper (internal ToolMiddleware - sends tool result events after all processing)
 	//  2. ToolsConfig.ToolCallMiddlewares (ToolMiddleware)
 	//  3. AgentMiddleware.WrapToolCall (ToolMiddleware)
-	//  4. ChatModelAgentMiddleware.WrapToolCall (wrapper, first registered is outermost)
-	//  5. callbackInjectedToolCall (internal - injects callbacks if tool doesn't handle them)
-	//  6. Tool.InvokableRun/StreamableRun
+	//  4. cancelMonitoredToolHandler (internal - sets up cancel monitoring for stream tools)
+	//  5. ChatModelAgentMiddleware.WrapToolCall (wrapper, first registered is outermost)
+	//  6. callbackInjectedToolCall (internal - injects callbacks if tool doesn't handle them)
+	//  7. Tool.InvokableRun/StreamableRun
 	//
 	// Custom Tool Event Sender Position:
 	// By default, tool result events are emitted by an internal event sender placed before
@@ -516,18 +519,19 @@ func NewTypedChatModelAgent[M MessageType](_ context.Context, config *TypedChatM
 	// 1. eventSenderToolWrapper (internal - sends tool result events after all modifications)
 	// 2. User-provided ToolsConfig.ToolCallMiddlewares (original order preserved)
 	// 3. Middlewares' WrapToolCall (in registration order)
-	// 4. ChatModelAgentMiddleware.WrapToolCall (in registration order)
-	// 5. callbackInjectedToolCall (internal - injects callbacks if tool doesn't handle them)
+	// 4. cancelMonitoredToolHandler (internal - cancel monitoring for stream tools)
+	// 5. ChatModelAgentMiddleware.WrapToolCall (in registration order)
+	// 6. callbackInjectedToolCall (internal - injects callbacks if tool doesn't handle them)
 	if !hasUserEventSenderToolWrapper(config.Handlers) {
 		defaultToolEventSender := handlersToToolMiddlewares([]TypedChatModelAgentMiddleware[M]{newTypedEventSenderToolWrapper[M]()})
 		tc.ToolCallMiddlewares = append(defaultToolEventSender, tc.ToolCallMiddlewares...)
 	}
 	tc.ToolCallMiddlewares = append(tc.ToolCallMiddlewares, collectToolMiddlewaresFromMiddlewares(config.Middlewares)...)
 
-	// Cancel monitoring middleware (innermost — close to the tool endpoint).
-	// This allows early abort of the raw tool result stream when immediateChan fires
-	// (CancelImmediate or timeout escalation), while requiring outer wrappers to
-	// propagate stream errors such as ErrStreamCanceled without swallowing them.
+	// Cancel monitoring middleware — wraps around ChatModelAgentMiddleware handlers.
+	// Pre-processing sets up cancel signals; when immediateChan fires
+	// (CancelImmediate or timeout escalation), the raw tool result stream is aborted.
+	// Outer wrappers must propagate stream errors such as ErrStreamCanceled without swallowing them.
 	cancelToolHandler := &cancelMonitoredToolHandler{}
 	tc.ToolCallMiddlewares = append(tc.ToolCallMiddlewares, compose.ToolMiddleware{
 		Streamable:         cancelToolHandler.WrapStreamableToolCall,
@@ -1053,7 +1057,7 @@ func (a *TypedChatModelAgent[M]) buildNoToolsRunFunc(_ context.Context) (typedRu
 		compileOptions = append(compileOptions,
 			compose.WithGraphName(a.name),
 			compose.WithCheckPointStore(p.store),
-			compose.WithSerializer(&gobSerializer{}))
+			compose.WithSerializer(&iSerializer.GobSerializer{}))
 
 		if cancelCtx != nil {
 			var interrupt func(...compose.GraphInterruptOption)
@@ -1199,7 +1203,7 @@ func (a *TypedChatModelAgent[M]) buildMessageReActRunFunc(_ context.Context, bc 
 		compileOptions = append(compileOptions,
 			compose.WithGraphName(a.name),
 			compose.WithCheckPointStore(mp.store),
-			compose.WithSerializer(&gobSerializer{}),
+			compose.WithSerializer(&iSerializer.GobSerializer{}),
 			compose.WithMaxRunSteps(math.MaxInt))
 
 		if cancelCtx != nil {
@@ -1346,7 +1350,7 @@ func (a *TypedChatModelAgent[M]) buildAgenticReActRunFunc(_ context.Context, bc 
 		compileOptions = append(compileOptions,
 			compose.WithGraphName(a.name),
 			compose.WithCheckPointStore(ap.store),
-			compose.WithSerializer(&gobSerializer{}),
+			compose.WithSerializer(&iSerializer.GobSerializer{}),
 			compose.WithMaxRunSteps(math.MaxInt))
 
 		if cancelCtx != nil {
@@ -1724,22 +1728,6 @@ func getComposeOptions(opts []AgentRunOption) []compose.Option {
 	return co
 }
 
-type gobSerializer struct{}
-
-func (g *gobSerializer) Marshal(v any) ([]byte, error) {
-	buf := new(bytes.Buffer)
-	err := gob.NewEncoder(buf).Encode(v)
-	if err != nil {
-		return nil, err
-	}
-	return buf.Bytes(), nil
-}
-
-func (g *gobSerializer) Unmarshal(data []byte, v any) error {
-	buf := bytes.NewBuffer(data)
-	return gob.NewDecoder(buf).Decode(v)
-}
-
 // preprocessComposeCheckpoint migrates legacy compose checkpoints to the current format.
 // It handles the v0.8.0-v0.8.3 format:
 //   - gob name "_eino_adk_state_v080_" (already byte-patched by preprocessADKCheckpoint
@@ -1753,7 +1741,7 @@ func preprocessComposeCheckpoint(data []byte) ([]byte, error) {
 	const lenPrefixedCompatName = "\x15" + stateGobNameV080
 	if bytes.Contains(data, []byte(lenPrefixedCompatName)) {
 		// v0.8.0-v0.8.3: already byte-patched by preprocessADKCheckpoint; decode as *stateV080.
-		migrated, err := compose.MigrateCheckpointState(data, &gobSerializer{}, func(state any) (any, bool, error) {
+		migrated, err := compose.MigrateCheckpointState(data, &iSerializer.GobSerializer{}, func(state any) (any, bool, error) {
 			sc, ok := state.(*stateV080)
 			if !ok {
 				return state, false, nil
