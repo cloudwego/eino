@@ -44,7 +44,7 @@ func RunConformanceTests(t *testing.T, factory func(testing.TB) adk.SessionStore
 		requireNoError(t, store.AppendEvents(ctx, "s", [][]byte{first, second}))
 		requireNoError(t, store.AppendEvents(ctx, "s", [][]byte{third}))
 
-		res, err := store.LoadEvents(ctx, "s", &adk.LoadEventsOptions{})
+		res, err := store.LoadEvents(ctx, "s", &adk.LoadEventsRequest{})
 		requireNoError(t, err)
 		if res == nil {
 			t.Fatalf("LoadEvents returned nil result")
@@ -56,17 +56,15 @@ func RunConformanceTests(t *testing.T, factory func(testing.TB) adk.SessionStore
 		store := newStore(t, factory)
 		ctx := context.Background()
 
-		var all [][]byte
 		for i := 0; i < 5; i++ {
 			b := []byte{byte('a' + i)}
-			all = append(all, b)
 			requireNoError(t, store.AppendEvents(ctx, "s", [][]byte{b}))
 		}
 
 		var collected [][]byte
 		var pageToken string
 		for {
-			res, err := store.LoadEvents(ctx, "s", &adk.LoadEventsOptions{
+			res, err := store.LoadEvents(ctx, "s", &adk.LoadEventsRequest{
 				Reverse: true,
 				Limit:   2,
 				After:   pageToken,
@@ -117,7 +115,7 @@ func RunConformanceTests(t *testing.T, factory func(testing.TB) adk.SessionStore
 		}
 
 		// After should return only post-snapshot events.
-		res, err := store.LoadEvents(ctx, "s", &adk.LoadEventsOptions{After: afterCursor})
+		res, err := store.LoadEvents(ctx, "s", &adk.LoadEventsRequest{After: afterCursor})
 		requireNoError(t, err)
 		expected := [][]byte{{'x'}, {'y'}, {'z'}, {'{'}}
 		requireEventsEqual(t, expected, res.Events)
@@ -140,7 +138,7 @@ func RunConformanceTests(t *testing.T, factory func(testing.TB) adk.SessionStore
 		}
 
 		var collected [][]byte
-		opts := &adk.LoadEventsOptions{After: afterCursor, Limit: 10}
+		opts := &adk.LoadEventsRequest{After: afterCursor, Limit: 10}
 		for {
 			res, err := store.LoadEvents(ctx, "s", opts)
 			requireNoError(t, err)
@@ -151,7 +149,7 @@ func RunConformanceTests(t *testing.T, factory func(testing.TB) adk.SessionStore
 			if res.Next == "" {
 				break
 			}
-			opts = &adk.LoadEventsOptions{Limit: 10, After: res.Next}
+			opts = &adk.LoadEventsRequest{Limit: 10, After: res.Next}
 		}
 		if len(collected) != 30 {
 			t.Fatalf("expected 30 events, got %d", len(collected))
@@ -203,7 +201,7 @@ func RunConformanceTests(t *testing.T, factory func(testing.TB) adk.SessionStore
 		}
 
 		// After should return exactly the 20 new events.
-		res, err := store.LoadEvents(ctx, "s", &adk.LoadEventsOptions{After: originalCursor})
+		res, err := store.LoadEvents(ctx, "s", &adk.LoadEventsRequest{After: originalCursor})
 		requireNoError(t, err)
 		if len(res.Events) != 20 {
 			t.Fatalf("After returned %d events, want 20", len(res.Events))
@@ -219,11 +217,11 @@ func RunConformanceTests(t *testing.T, factory func(testing.TB) adk.SessionStore
 		requireNoError(t, store.AppendEvents(ctx, "alpha", [][]byte{alpha}))
 		requireNoError(t, store.AppendEvents(ctx, "beta", [][]byte{beta}))
 
-		alphaRes, err := store.LoadEvents(ctx, "alpha", &adk.LoadEventsOptions{})
+		alphaRes, err := store.LoadEvents(ctx, "alpha", &adk.LoadEventsRequest{})
 		requireNoError(t, err)
 		requireEventsEqual(t, [][]byte{alpha}, alphaRes.Events)
 
-		betaRes, err := store.LoadEvents(ctx, "beta", &adk.LoadEventsOptions{})
+		betaRes, err := store.LoadEvents(ctx, "beta", &adk.LoadEventsRequest{})
 		requireNoError(t, err)
 		requireEventsEqual(t, [][]byte{beta}, betaRes.Events)
 
