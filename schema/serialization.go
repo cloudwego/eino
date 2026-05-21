@@ -169,27 +169,3 @@ func Register[T any]() {
 // Note: All custom types stored in interface{} fields must be registered using
 // schema.RegisterName[T]() or schema.Register[T]() for proper deserialization.
 type HumanReadableSerializer = serialization.HumanReadableSerializer
-
-// GobSerializer uses Go's encoding/gob package for serialization.
-// It produces compact binary output that is efficient for Go-to-Go communication.
-//
-// Gob is a binary format that is:
-//   - Compact: produces smaller output than JSON-based serializers
-//   - Fast: efficient encoding/decoding for Go types
-//   - Type-safe: preserves Go type information
-//
-// However, gob has some limitations:
-//   - Not human-readable (binary format)
-//   - Go-specific (not interoperable with other languages)
-//   - Requires type registration for interface{} fields
-//
-// Example usage:
-//
-//	graph, err := compose.NewGraph[Input, Output](
-//	    compose.WithCheckPointStore(store),
-//	    compose.WithSerializer(&schema.GobSerializer{}),
-//	)
-//
-// Note: All custom types stored in interface{} fields must be registered using
-// schema.RegisterName[T]() or schema.Register[T]() for proper deserialization.
-type GobSerializer = serialization.GobSerializer
