@@ -38,7 +38,7 @@ type sessionHelperStore struct {
 	events           [][]byte
 	loadErr          error
 	afterMessageID   string
-	afterEventCursor string
+	afterCursor string
 	turnPayload      []byte
 	turnExists       bool
 	turnErr          error
@@ -157,10 +157,10 @@ func (s *sessionHelperStore) LoadEvents(_ context.Context, _ string, opts *LoadE
 		return nil, s.loadErr
 	}
 	all := append([][]byte{}, s.events...)
-	if opts != nil && opts.AfterCursor != "" {
-		// AfterCursor encoded as decimal index for simplicity in test helper.
+	if opts != nil && opts.After != "" {
+		// After encoded as decimal index for simplicity in test helper.
 		var idx int
-		_, err := fmtSscan(opts.AfterCursor, &idx)
+		_, err := fmtSscan(opts.After, &idx)
 		if err != nil {
 			return nil, err
 		}
@@ -204,14 +204,14 @@ func (s *sessionHelperStore) LoadLatestTurnEnd(_ context.Context, _ string) (str
 	if s.turnErr != nil {
 		return "", "", nil, false, s.turnErr
 	}
-	return s.afterMessageID, s.afterEventCursor, append([]byte{}, s.turnPayload...), s.turnExists, nil
+	return s.afterMessageID, s.afterCursor, append([]byte{}, s.turnPayload...), s.turnExists, nil
 }
 
 func (s *sessionHelperStore) SaveTurnEnd(_ context.Context, _ string, afterMessageID string, turnEnd []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.afterMessageID = afterMessageID
-	s.afterEventCursor = itoa(len(s.events))
+	s.afterCursor = itoa(len(s.events))
 	s.turnPayload = append([]byte{}, turnEnd...)
 	s.turnExists = true
 	return nil
@@ -984,7 +984,7 @@ func TestRunnerSessionReconstructsFromEventLog(t *testing.T) {
 	store.turnExists = false
 	store.turnPayload = nil
 	store.afterMessageID = ""
-	store.afterEventCursor = ""
+	store.afterCursor = ""
 
 	// Capture the prepared session state before agent runs.
 	capturedAgent := &runnerSessionAgent{
