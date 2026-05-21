@@ -62,12 +62,12 @@ func RunConformanceTests(t *testing.T, factory func(testing.TB) adk.SessionStore
 		}
 
 		var collected [][]byte
-		var pageToken string
+		var after string
 		for {
 			res, err := store.LoadEvents(ctx, "s", &adk.LoadEventsRequest{
 				Reverse: true,
 				Limit:   2,
-				After:   pageToken,
+				After:   after,
 			})
 			requireNoError(t, err)
 			if res == nil || len(res.Events) == 0 {
@@ -77,7 +77,7 @@ func RunConformanceTests(t *testing.T, factory func(testing.TB) adk.SessionStore
 			if res.Next == "" {
 				break
 			}
-			pageToken = res.Next
+			after = res.Next
 		}
 
 		// Expect newest first.
@@ -138,9 +138,9 @@ func RunConformanceTests(t *testing.T, factory func(testing.TB) adk.SessionStore
 		}
 
 		var collected [][]byte
-		opts := &adk.LoadEventsRequest{After: afterCursor, Limit: 10}
+		req := &adk.LoadEventsRequest{After: afterCursor, Limit: 10}
 		for {
-			res, err := store.LoadEvents(ctx, "s", opts)
+			res, err := store.LoadEvents(ctx, "s", req)
 			requireNoError(t, err)
 			if res == nil || len(res.Events) == 0 {
 				break
@@ -149,7 +149,7 @@ func RunConformanceTests(t *testing.T, factory func(testing.TB) adk.SessionStore
 			if res.Next == "" {
 				break
 			}
-			opts = &adk.LoadEventsRequest{Limit: 10, After: res.Next}
+			req = &adk.LoadEventsRequest{Limit: 10, After: res.Next}
 		}
 		if len(collected) != 30 {
 			t.Fatalf("expected 30 events, got %d", len(collected))
