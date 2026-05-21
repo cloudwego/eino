@@ -872,7 +872,7 @@ func TestStripSessionEventFields(t *testing.T) {
 func TestReconstructFromEventLog_EmptySession(t *testing.T) {
 	store := newSessionHelperStore()
 	ctx := context.Background()
-	msgs, err := reconstructFromEventLog[*schema.Message](ctx, store, "empty")
+	msgs, err := reconstructFromEventLog[*schema.Message](ctx, store, "empty", defaultLoadPageSize)
 	require.NoError(t, err)
 	assert.Nil(t, msgs)
 }
@@ -906,13 +906,22 @@ func TestReconstructFromEventLog_MultiTurn(t *testing.T) {
 		require.NoError(t, store.AppendEvents(ctx, sid, [][]byte{data}))
 	}
 
-	msgs, err := reconstructFromEventLog[*schema.Message](ctx, store, sid)
+	msgs, err := reconstructFromEventLog[*schema.Message](ctx, store, sid, defaultLoadPageSize)
 	require.NoError(t, err)
 	require.Len(t, msgs, 4)
 	assert.Equal(t, "Q1", msgs[0].Content)
 	assert.Equal(t, "A1", msgs[1].Content)
 	assert.Equal(t, "Q2", msgs[2].Content)
 	assert.Equal(t, "A2", msgs[3].Content)
+
+	// Verify pagination: use page size 2 so that 4 events require multiple pages.
+	msgs2, err := reconstructFromEventLog[*schema.Message](ctx, store, sid, 2)
+	require.NoError(t, err)
+	require.Len(t, msgs2, 4)
+	assert.Equal(t, "Q1", msgs2[0].Content)
+	assert.Equal(t, "A1", msgs2[1].Content)
+	assert.Equal(t, "Q2", msgs2[2].Content)
+	assert.Equal(t, "A2", msgs2[3].Content)
 }
 
 // TestReconstructFromEventLog_WithSummarizationBoundary: events before
@@ -949,7 +958,7 @@ func TestReconstructFromEventLog_WithSummarizationBoundary(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, store.AppendEvents(ctx, sid, [][]byte{data}))
 
-	msgs, err := reconstructFromEventLog[*schema.Message](ctx, store, sid)
+	msgs, err := reconstructFromEventLog[*schema.Message](ctx, store, sid, defaultLoadPageSize)
 	require.NoError(t, err)
 	require.Len(t, msgs, 2)
 	assert.Equal(t, "summary", msgs[0].Content)
@@ -1174,6 +1183,7 @@ func TestSessionPersister_EnqueueAfterAppendError(t *testing.T) {
 		EventFlushBatchSize: 1,
 		EventFlushInterval:  10 * time.Millisecond,
 		EventBufferSize:     8,
+		MaxFlushRetries:     -1, // disable retries for fast failure
 	}
 	p := newSessionEventPersister[*schema.Message](ctx, store, "sid", cfg)
 	defer p.closeAndWait()
@@ -1191,4 +1201,123 @@ func TestSessionPersister_EnqueueAfterAppendError(t *testing.T) {
 
 	err := p.enqueue([]byte(`{"i":2}`))
 	require.Error(t, err, "enqueue after persist failure must return an error")
+}
+
+// transientFailStore fails the first N AppendEvents calls then succeeds.
+type transientFailStore struct {
+	sessionHelperStore
+	retryMu      sync.Mutex
+	failsLeft    int
+	appendCalls  int
+	appendErrVal error
+}
+
+func (s *transientFailStore) AppendEvents(ctx context.Context, sessionID string, events [][]byte) error {
+	s.retryMu.Lock()
+	s.appendCalls++
+	if s.failsLeft > 0 {
+		s.failsLeft--
+		s.retryMu.Unlock()
+		return s.appendErrVal
+	}
+	s.retryMu.Unlock()
+	return s.sessionHelperStore.AppendEvents(ctx, sessionID, events)
+}
+
+func (s *transientFailStore) getAppendCalls() int {
+	s.retryMu.Lock()
+	defer s.retryMu.Unlock()
+	return s.appendCalls
+}
+
+// TestSessionPersister_FlushRetryTransientRecovery verifies that transient
+// AppendEvents failures are retried and the persister recovers on success.
+func TestSessionPersister_FlushRetryTransientRecovery(t *testing.T) {
+	ctx := context.Background()
+	store := &transientFailStore{
+		sessionHelperStore: *newSessionHelperStore(),
+		failsLeft:          2,
+		appendErrVal:       errors.New("transient"),
+	}
+
+	cfg := &SessionPersistenceConfig{
+		EventFlushBatchSize:      1,
+		EventFlushInterval:       10 * time.Millisecond,
+		EventBufferSize:          8,
+		MaxFlushRetries:          3,
+		FlushRetryInitialBackoff: 5 * time.Millisecond,
+	}
+	p := newSessionEventPersister[*schema.Message](ctx, store, "sid", cfg)
+
+	require.NoError(t, p.enqueue([]byte(`{"i":1}`)))
+
+	err := p.closeAndWait()
+	require.NoError(t, err, "persister should recover after transient failures")
+	assert.Nil(t, p.getErr())
+	// Should have called AppendEvents 3 times (2 failures + 1 success).
+	assert.Equal(t, 3, store.getAppendCalls())
+	// Event should be persisted.
+	store.sessionHelperStore.mu.Lock()
+	assert.Equal(t, 1, len(store.sessionHelperStore.events))
+	store.sessionHelperStore.mu.Unlock()
+}
+
+// TestSessionPersister_FlushRetryPermanentFailure verifies that after exhausting
+// all retries, the error is latched.
+func TestSessionPersister_FlushRetryPermanentFailure(t *testing.T) {
+	ctx := context.Background()
+	store := &transientFailStore{
+		sessionHelperStore: *newSessionHelperStore(),
+		failsLeft:          100, // always fail
+		appendErrVal:       errors.New("permanent"),
+	}
+
+	cfg := &SessionPersistenceConfig{
+		EventFlushBatchSize:      1,
+		EventFlushInterval:       10 * time.Millisecond,
+		EventBufferSize:          8,
+		MaxFlushRetries:          2,
+		FlushRetryInitialBackoff: 5 * time.Millisecond,
+	}
+	p := newSessionEventPersister[*schema.Message](ctx, store, "sid", cfg)
+
+	require.NoError(t, p.enqueue([]byte(`{"i":1}`)))
+
+	err := p.closeAndWait()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "permanent")
+	// Should have called AppendEvents exactly MaxFlushRetries+1 = 3 times.
+	assert.Equal(t, 3, store.getAppendCalls())
+}
+
+// TestSessionPersister_FlushRetryContextCancellation verifies that the retry
+// loop exits promptly when the context is cancelled during backoff.
+func TestSessionPersister_FlushRetryContextCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	store := &transientFailStore{
+		sessionHelperStore: *newSessionHelperStore(),
+		failsLeft:          100, // always fail
+		appendErrVal:       errors.New("failing"),
+	}
+
+	cfg := &SessionPersistenceConfig{
+		EventFlushBatchSize:      1,
+		EventFlushInterval:       10 * time.Millisecond,
+		EventBufferSize:          8,
+		MaxFlushRetries:          5,
+		FlushRetryInitialBackoff: 500 * time.Millisecond, // long backoff to ensure cancel fires during wait
+	}
+	p := newSessionEventPersister[*schema.Message](ctx, store, "sid", cfg)
+
+	require.NoError(t, p.enqueue([]byte(`{"i":1}`)))
+
+	// Wait for the first attempt to fail, then cancel during backoff.
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+
+	err := p.closeAndWait()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, context.Canceled)
+	// Should NOT have exhausted all retries.
+	assert.Less(t, store.getAppendCalls(), 5)
 }
