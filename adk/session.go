@@ -22,6 +22,7 @@ import (
 	"encoding/gob"
 	"errors"
 	"fmt"
+	"math/rand"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -34,6 +35,9 @@ const (
 	defaultSessionEventFlushBatchSize = 16
 	defaultSessionEventFlushInterval  = 100 * time.Millisecond
 	defaultSessionEventBufferSize     = 64
+	defaultMaxFlushRetries            = 3
+	defaultFlushRetryInitialBackoff   = 50 * time.Millisecond
+	defaultLoadPageSize               = 100
 )
 
 // ErrPendingSessionCheckpoint is returned when a managed session has an
@@ -41,8 +45,7 @@ const (
 var ErrPendingSessionCheckpoint = errors.New("adk: pending session checkpoint")
 
 const (
-	sessionRunnerCheckpointSuffix   = "/runner_checkpoint"
-	sessionTurnLoopCheckpointSuffix = "/turn_loop_checkpoint"
+	sessionRunnerCheckpointSuffix = "/runner_checkpoint"
 )
 
 // SessionStore persists Runner-managed session data.
@@ -160,6 +163,17 @@ type SessionPersistenceConfig struct {
 	// EventBufferSize is the capacity of the in-memory event channel between
 	// the event producer and the background flush goroutine. Defaults to 64.
 	EventBufferSize int
+	// MaxFlushRetries is the maximum number of retry attempts when AppendEvents
+	// fails. After exhausting retries, the error is latched and the turn fails.
+	// Defaults to 3. Set to 0 to disable retries (fail on first error).
+	MaxFlushRetries int
+	// FlushRetryInitialBackoff is the base delay before the first retry.
+	// Subsequent retries use exponential backoff (2x multiplier) with jitter.
+	// Defaults to 50ms.
+	FlushRetryInitialBackoff time.Duration
+	// LoadPageSize is the number of events fetched per page when loading events
+	// for reconstruction or tail replay. Defaults to 100.
+	LoadPageSize int
 }
 
 // TurnEndState is the agent-visible state materialized at a successful turn boundary.
@@ -203,13 +217,6 @@ func decodeTurnEndState[M MessageType](payload []byte) (*TurnEndState[M], error)
 	var state TurnEndState[M]
 	if err := sessionSerializer.Unmarshal(payload, &state); err == nil {
 		return &state, nil
-	}
-	// Gob fallback retained so snapshots written before the switch to
-	// HumanReadableSerializer (PR #1019, harden-managed-session-persistence
-	// commit) remain loadable. Do not remove without a migration plan for
-	// existing on-disk snapshots.
-	if err := gob.NewDecoder(bytes.NewReader(payload)).Decode(&state); err == nil {
-		return &state, nil
 	} else {
 		return nil, err
 	}
@@ -229,10 +236,6 @@ func decodeRunnerSessionCheckpoint(payload []byte) (*runnerSessionCheckpoint, er
 
 func sessionRunnerCheckpointID(sessionID string) string {
 	return "session/" + sessionID + sessionRunnerCheckpointSuffix
-}
-
-func sessionTurnLoopCheckpointID(sessionID string) string {
-	return "session/" + sessionID + sessionTurnLoopCheckpointSuffix
 }
 
 var sessionSerializer = &einoserial.HumanReadableSerializer{}
@@ -298,9 +301,12 @@ func toSessionEvent[M MessageType](event *TypedAgentEvent[M]) *SessionEvent[M] {
 
 func normalizeSessionPersistenceConfig(cfg *SessionPersistenceConfig) SessionPersistenceConfig {
 	normalized := SessionPersistenceConfig{
-		EventFlushBatchSize: defaultSessionEventFlushBatchSize,
-		EventFlushInterval:  defaultSessionEventFlushInterval,
-		EventBufferSize:     defaultSessionEventBufferSize,
+		EventFlushBatchSize:      defaultSessionEventFlushBatchSize,
+		EventFlushInterval:       defaultSessionEventFlushInterval,
+		EventBufferSize:          defaultSessionEventBufferSize,
+		MaxFlushRetries:          defaultMaxFlushRetries,
+		FlushRetryInitialBackoff: defaultFlushRetryInitialBackoff,
+		LoadPageSize:             defaultLoadPageSize,
 	}
 	if cfg == nil {
 		return normalized
@@ -313,6 +319,18 @@ func normalizeSessionPersistenceConfig(cfg *SessionPersistenceConfig) SessionPer
 	}
 	if cfg.EventBufferSize > 0 {
 		normalized.EventBufferSize = cfg.EventBufferSize
+	}
+	if cfg.MaxFlushRetries > 0 {
+		normalized.MaxFlushRetries = cfg.MaxFlushRetries
+	} else if cfg.MaxFlushRetries < 0 {
+		// Explicitly set to 0 to disable retries.
+		normalized.MaxFlushRetries = 0
+	}
+	if cfg.FlushRetryInitialBackoff > 0 {
+		normalized.FlushRetryInitialBackoff = cfg.FlushRetryInitialBackoff
+	}
+	if cfg.LoadPageSize > 0 {
+		normalized.LoadPageSize = cfg.LoadPageSize
 	}
 	return normalized
 }
@@ -388,9 +406,26 @@ func (p *sessionEventPersister[M]) run() {
 		entries := make([][]byte, len(batch))
 		copy(entries, batch)
 		batch = nil
-		if err := p.store.AppendEvents(p.ctx, p.sessionID, entries); err != nil {
-			p.setErr(err)
+
+		var lastErr error
+		for attempt := 0; attempt <= p.cfg.MaxFlushRetries; attempt++ {
+			if attempt > 0 {
+				backoff := p.cfg.FlushRetryInitialBackoff << uint(attempt-1)
+				jitter := time.Duration(rand.Int63n(int64(backoff)/4 + 1))
+				select {
+				case <-time.After(backoff + jitter):
+				case <-p.ctx.Done():
+					p.setErr(p.ctx.Err())
+					return
+				}
+			}
+			if err := p.store.AppendEvents(p.ctx, p.sessionID, entries); err != nil {
+				lastErr = err
+				continue
+			}
+			return // success
 		}
+		p.setErr(lastErr)
 	}
 
 	for {
@@ -525,6 +560,7 @@ func reconstructFromEventLog[M MessageType](
 	ctx context.Context,
 	store SessionStore,
 	sessionID string,
+	pageSize int,
 ) ([]M, error) {
 	var allEvents []*SessionEvent[M]
 	var after string
@@ -533,7 +569,7 @@ func reconstructFromEventLog[M MessageType](
 	for {
 		result, err := store.LoadEvents(ctx, sessionID, &LoadEventsRequest{
 			After:   after,
-			Limit:   100,
+			Limit:   pageSize,
 			Reverse: true,
 		})
 		if err != nil {
@@ -550,7 +586,7 @@ func reconstructFromEventLog[M MessageType](
 				return nil, err
 			}
 			allEvents = append(allEvents, event)
-			if event.MessagesReplaced != nil && boundaryIdx == -1 {
+			if event.MessagesReplaced != nil {
 				boundaryIdx = len(allEvents) - 1
 				stop = true
 				break
@@ -606,6 +642,7 @@ func replayTailEvents[M MessageType](
 	sessionID string,
 	afterCursor string,
 	baseMessages []M,
+	pageSize int,
 ) ([]M, error) {
 	var tailEvents []*SessionEvent[M]
 	after := afterCursor
@@ -613,7 +650,7 @@ func replayTailEvents[M MessageType](
 	for {
 		result, err := store.LoadEvents(ctx, sessionID, &LoadEventsRequest{
 			After: after,
-			Limit: 100,
+			Limit: pageSize,
 		})
 		if err != nil {
 			return nil, err
