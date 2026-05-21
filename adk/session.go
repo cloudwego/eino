@@ -68,7 +68,7 @@ type SessionStore interface {
 	// LoadEvents loads session events with pagination support.
 	// Returns events in chronological order (oldest first) or reverse chronological
 	// order (newest first) depending on opts.Reverse.
-	LoadEvents(ctx context.Context, sessionID string, opts *LoadEventsOptions) (*LoadEventsResult, error)
+	LoadEvents(ctx context.Context, sessionID string, opts *LoadEventsRequest) (*LoadEventsResult, error)
 
 	// SaveTurnEnd persists a TurnEndState snapshot linked to the current event-log position.
 	// afterMessageID is the eino message ID of the last message in the snapshot's Messages
@@ -90,8 +90,8 @@ type SessionStore interface {
 	LoadLatestTurnEnd(ctx context.Context, sessionID string) (afterMessageID string, afterCursor string, turnEnd []byte, exists bool, err error)
 }
 
-// LoadEventsOptions configures event loading pagination and direction.
-type LoadEventsOptions struct {
+// LoadEventsRequest configures event loading pagination and direction.
+type LoadEventsRequest struct {
 	// After is an opaque position cursor. Events strictly after this position
 	// are returned. On the first call, pass the afterCursor from LoadLatestTurnEnd
 	// (or empty to start from the beginning). On subsequent pages, pass the Next
@@ -112,7 +112,7 @@ type LoadEventsResult struct {
 	// Events are the JSON-encoded SessionEvent payloads.
 	Events [][]byte
 	// Next is the opaque cursor for the next page. Empty means no more pages.
-	// Pass it back as LoadEventsOptions.After to continue pagination.
+	// Pass it back as LoadEventsRequest.After to continue pagination.
 	Next string
 }
 
@@ -531,7 +531,7 @@ func reconstructFromEventLog[M MessageType](
 	boundaryIdx := -1
 
 	for {
-		result, err := store.LoadEvents(ctx, sessionID, &LoadEventsOptions{
+		result, err := store.LoadEvents(ctx, sessionID, &LoadEventsRequest{
 			After:   after,
 			Limit:   100,
 			Reverse: true,
@@ -611,7 +611,7 @@ func replayTailEvents[M MessageType](
 	after := afterCursor
 
 	for {
-		result, err := store.LoadEvents(ctx, sessionID, &LoadEventsOptions{
+		result, err := store.LoadEvents(ctx, sessionID, &LoadEventsRequest{
 			After: after,
 			Limit: 100,
 		})

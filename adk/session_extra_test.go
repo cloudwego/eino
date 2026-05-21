@@ -450,10 +450,10 @@ func (s *inMemoryAdapter) AppendEvents(_ context.Context, sid string, events [][
 	return nil
 }
 
-func (s *inMemoryAdapter) LoadEvents(_ context.Context, sid string, opts *LoadEventsOptions) (*LoadEventsResult, error) {
+func (s *inMemoryAdapter) LoadEvents(_ context.Context, sid string, opts *LoadEventsRequest) (*LoadEventsResult, error) {
 	all := s.events[sid]
 	if opts == nil {
-		opts = &LoadEventsOptions{}
+		opts = &LoadEventsRequest{}
 	}
 	if opts.After != "" {
 		var idx int
@@ -717,7 +717,7 @@ func TestRunnerPersists_MessagesReplaced(t *testing.T) {
 	drainSessionEvents(t, runner.Query(ctx, "anything"))
 
 	// Read events back via the store.
-	res, err := store.LoadEvents(ctx, sid, &LoadEventsOptions{})
+	res, err := store.LoadEvents(ctx, sid, &LoadEventsRequest{})
 	require.NoError(t, err)
 
 	var foundReplaced bool
@@ -797,7 +797,7 @@ func TestRunnerPersists_MessageUpdated_BothMessages(t *testing.T) {
 	})
 	drainSessionEvents(t, runner.Query(ctx, "go"))
 
-	res, err := store.LoadEvents(ctx, sid, &LoadEventsOptions{})
+	res, err := store.LoadEvents(ctx, sid, &LoadEventsRequest{})
 	require.NoError(t, err)
 
 	var updates int
@@ -887,7 +887,7 @@ func TestRunnerPersists_MessageInserted_AnchorAndAppend(t *testing.T) {
 	// so reconstruction's anchor lookup succeeds.
 	drainSessionEvents(t, runner.Run(ctx, []*schema.Message{userMsg}))
 
-	res, err := store.LoadEvents(ctx, sid, &LoadEventsOptions{})
+	res, err := store.LoadEvents(ctx, sid, &LoadEventsRequest{})
 	require.NoError(t, err)
 
 	var inserts int
@@ -975,7 +975,7 @@ func TestAgentTool_ChildSessionID_FiltersFromParentLog(t *testing.T) {
 	drainSessionEvents(t, runner.Query(ctx, "go"))
 
 	// Verify that childMsg is NOT in the parent's persistent log, but parentMsg is.
-	res, err := parentStore.LoadEvents(ctx, sid, &LoadEventsOptions{})
+	res, err := parentStore.LoadEvents(ctx, sid, &LoadEventsRequest{})
 	require.NoError(t, err)
 	var sawChild, sawParent bool
 	for _, raw := range res.Events {
