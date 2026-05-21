@@ -73,49 +73,47 @@ type SessionStore interface {
 	// SaveTurnEnd persists a TurnEndState snapshot linked to the current event-log position.
 	// afterMessageID is the eino message ID of the last message in the snapshot's Messages
 	// array (empty string if Messages is empty). Retained for informational/debugging purposes
-	// only — stores MUST NOT use it for replay boundary detection. afterEventCursor (captured
+	// only — stores MUST NOT use it for replay boundary detection. afterCursor (captured
 	// internally and returned by LoadLatestTurnEnd) is the sole source of truth for the
 	// event-log boundary.
 	// The store MUST also capture the current event-log tail position internally. This position
-	// is returned by LoadLatestTurnEnd as afterEventCursor, enabling precise tail replay without
+	// is returned by LoadLatestTurnEnd as afterCursor, enabling precise tail replay without
 	// message-ID scanning when afterMessageID is empty or ambiguous.
 	// TurnEndState is NEVER persisted as a SessionEvent in the event log.
 	SaveTurnEnd(ctx context.Context, sessionID string, afterMessageID string, turnEnd []byte) error
 
 	// LoadLatestTurnEnd loads the most recent TurnEndState snapshot for the session.
 	// Returns exists=false if no snapshot has been saved yet.
-	// afterEventCursor is an opaque store-internal cursor marking the event-log position
-	// at the time SaveTurnEnd was called. Pass it to LoadEvents via opts.AfterCursor to
-	// load only events appended AFTER the snapshot.
-	LoadLatestTurnEnd(ctx context.Context, sessionID string) (afterMessageID string, afterEventCursor string, turnEnd []byte, exists bool, err error)
+	// afterCursor is an opaque position marking the event-log tail at the time
+	// SaveTurnEnd was called. Pass it to LoadEvents as opts.After to load only
+	// events appended after the snapshot.
+	LoadLatestTurnEnd(ctx context.Context, sessionID string) (afterMessageID string, afterCursor string, turnEnd []byte, exists bool, err error)
 }
 
 // LoadEventsOptions configures event loading pagination and direction.
 type LoadEventsOptions struct {
-	// PageToken is an opaque cursor from a previous LoadEventsResult.
-	// Empty string means start from the beginning (or end, if Reverse=true).
-	PageToken string
+	// After is an opaque position cursor. Events strictly after this position
+	// are returned. On the first call, pass the afterCursor from LoadLatestTurnEnd
+	// (or empty to start from the beginning). On subsequent pages, pass the Next
+	// value from the previous LoadEventsResult.
+	// When non-empty and Reverse is false, only events after this position are
+	// returned (forward/chronological). When Reverse is true and After is empty,
+	// events are returned newest-first from the log tail.
+	After string
 	// Limit is the maximum number of events to return. 0 means no limit (load all).
 	Limit int
 	// Reverse, when true, returns events in newest-first order.
 	// Useful for finding the latest MessagesReplaced boundary efficiently.
 	Reverse bool
-	// AfterCursor, when non-empty, loads only events appended AFTER this position.
-	// The cursor value comes from LoadLatestTurnEnd's afterEventCursor return.
-	// AfterCursor sets a lower bound; Reverse is ignored (always forward/chronological).
-	// On the FIRST page after a snapshot, callers pass AfterCursor (and may pass
-	// PageToken left empty). On follow-up pages, callers pass the NextPageToken
-	// returned by the previous page; stores MAY also accept AfterCursor on
-	// follow-up pages (treated as a lower bound combined with PageToken).
-	AfterCursor string
 }
 
 // LoadEventsResult is the response from LoadEvents.
 type LoadEventsResult struct {
 	// Events are the JSON-encoded SessionEvent payloads.
 	Events [][]byte
-	// NextPageToken is the cursor for the next page. Empty means no more pages.
-	NextPageToken string
+	// Next is the opaque cursor for the next page. Empty means no more pages.
+	// Pass it back as LoadEventsOptions.After to continue pagination.
+	Next string
 }
 
 // SessionEvent is the JSON-serializable persistence format for session events.
@@ -529,14 +527,14 @@ func reconstructFromEventLog[M MessageType](
 	sessionID string,
 ) ([]M, error) {
 	var allEvents []*SessionEvent[M]
-	var pageToken string
+	var after string
 	boundaryIdx := -1
 
 	for {
 		result, err := store.LoadEvents(ctx, sessionID, &LoadEventsOptions{
-			PageToken: pageToken,
-			Limit:     100,
-			Reverse:   true,
+			After:   after,
+			Limit:   100,
+			Reverse: true,
 		})
 		if err != nil {
 			return nil, err
@@ -561,10 +559,10 @@ func reconstructFromEventLog[M MessageType](
 		if stop {
 			break
 		}
-		if result.NextPageToken == "" {
+		if result.Next == "" {
 			break
 		}
-		pageToken = result.NextPageToken
+		after = result.Next
 	}
 
 	if len(allEvents) == 0 {
@@ -600,29 +598,23 @@ func reverseSessionEvents[M MessageType](events []*SessionEvent[M]) {
 	}
 }
 
-// replayTailEvents applies events appended after the snapshot's afterEventCursor
+// replayTailEvents applies events appended after the snapshot's afterCursor
 // on top of baseMessages. Returns nil if no tail events exist.
 func replayTailEvents[M MessageType](
 	ctx context.Context,
 	store SessionStore,
 	sessionID string,
-	afterEventCursor string,
+	afterCursor string,
 	baseMessages []M,
 ) ([]M, error) {
 	var tailEvents []*SessionEvent[M]
-	var pageToken string
-	first := true
+	after := afterCursor
 
 	for {
-		opts := &LoadEventsOptions{Limit: 100}
-		if first {
-			opts.AfterCursor = afterEventCursor
-			first = false
-		} else {
-			opts.PageToken = pageToken
-		}
-
-		result, err := store.LoadEvents(ctx, sessionID, opts)
+		result, err := store.LoadEvents(ctx, sessionID, &LoadEventsOptions{
+			After: after,
+			Limit: 100,
+		})
 		if err != nil {
 			return nil, err
 		}
@@ -638,10 +630,10 @@ func replayTailEvents[M MessageType](
 			tailEvents = append(tailEvents, event)
 		}
 
-		if result.NextPageToken == "" {
+		if result.Next == "" {
 			break
 		}
-		pageToken = result.NextPageToken
+		after = result.Next
 	}
 
 	if len(tailEvents) == 0 {

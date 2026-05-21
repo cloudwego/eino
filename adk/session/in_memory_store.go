@@ -36,9 +36,9 @@ type InMemoryStore struct {
 }
 
 type turnEndRecord struct {
-	afterMessageID   string
-	afterEventCursor string
-	data             []byte
+	afterMessageID string
+	afterCursor    string
+	data           []byte
 }
 
 // NewInMemoryStore creates a new in-memory store.
@@ -96,42 +96,16 @@ func (s *InMemoryStore) LoadEvents(_ context.Context, sessionID string, opts *ad
 		opts = &adk.LoadEventsOptions{}
 	}
 
-	// AfterCursor: forward, bounded below by cursor.
-	if opts.AfterCursor != "" {
-		startOffset, err := decodeOffset(opts.AfterCursor)
-		if err != nil {
-			return nil, fmt.Errorf("invalid AfterCursor: %w", err)
-		}
-		if startOffset < 0 {
-			startOffset = 0
-		}
-		if startOffset > total {
-			startOffset = total
-		}
-		// PageToken from a previous AfterCursor-initiated paged load may already
-		// encode a position past startOffset; if so, prefer the larger.
-		if opts.PageToken != "" {
-			pageOffset, err := decodeOffset(opts.PageToken)
-			if err != nil {
-				return nil, fmt.Errorf("invalid PageToken: %w", err)
-			}
-			if pageOffset > startOffset {
-				startOffset = pageOffset
-			}
-		}
-		return paginateForward(all, startOffset, opts.Limit), nil
-	}
-
 	if opts.Reverse {
-		// Reverse pagination: PageToken encodes the offset of the next event
+		// Reverse pagination: After encodes the offset of the next event
 		// to return when reading backwards. Initial state: total (read total-1 first).
 		var nextOffset int
-		if opts.PageToken == "" {
+		if opts.After == "" {
 			nextOffset = total
 		} else {
-			parsed, err := decodeOffset(opts.PageToken)
+			parsed, err := decodeOffset(opts.After)
 			if err != nil {
-				return nil, fmt.Errorf("invalid PageToken: %w", err)
+				return nil, fmt.Errorf("invalid After cursor: %w", err)
 			}
 			nextOffset = parsed
 		}
@@ -158,15 +132,17 @@ func (s *InMemoryStore) LoadEvents(_ context.Context, sessionID string, opts *ad
 		if newOffset > 0 {
 			nextToken = encodeOffset(newOffset)
 		}
-		return &adk.LoadEventsResult{Events: out, NextPageToken: nextToken}, nil
+		return &adk.LoadEventsResult{Events: out, Next: nextToken}, nil
 	}
 
-	// Forward pagination from PageToken.
+	// Forward pagination from After. When After is non-empty, only events
+	// strictly after that position are returned (used for both initial
+	// afterCursor loads and continuation pages).
 	startOffset := 0
-	if opts.PageToken != "" {
-		parsed, err := decodeOffset(opts.PageToken)
+	if opts.After != "" {
+		parsed, err := decodeOffset(opts.After)
 		if err != nil {
-			return nil, fmt.Errorf("invalid PageToken: %w", err)
+			return nil, fmt.Errorf("invalid After cursor: %w", err)
 		}
 		startOffset = parsed
 	}
@@ -195,20 +171,20 @@ func paginateForward(all [][]byte, startOffset, limit int) *adk.LoadEventsResult
 	if end < total {
 		nextToken = encodeOffset(end)
 	}
-	return &adk.LoadEventsResult{Events: out, NextPageToken: nextToken}
+	return &adk.LoadEventsResult{Events: out, Next: nextToken}
 }
 
 // SaveTurnEnd persists a TurnEndState snapshot. The store captures the current
 // event-log tail position internally so tail replay can reload events appended
-// after this snapshot via AfterCursor.
+// after this snapshot via the After field in LoadEventsOptions.
 func (s *InMemoryStore) SaveTurnEnd(_ context.Context, sessionID string, afterMessageID string, turnEnd []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	cursor := encodeOffset(len(s.events[sessionID]))
 	s.turnEnds[sessionID] = turnEndRecord{
-		afterMessageID:   afterMessageID,
-		afterEventCursor: cursor,
-		data:             append([]byte{}, turnEnd...),
+		afterMessageID: afterMessageID,
+		afterCursor:    cursor,
+		data:           append([]byte{}, turnEnd...),
 	}
 	return nil
 }
@@ -221,7 +197,7 @@ func (s *InMemoryStore) LoadLatestTurnEnd(_ context.Context, sessionID string) (
 	if !ok {
 		return "", "", nil, false, nil
 	}
-	return rec.afterMessageID, rec.afterEventCursor, append([]byte{}, rec.data...), true, nil
+	return rec.afterMessageID, rec.afterCursor, append([]byte{}, rec.data...), true, nil
 }
 
 // encodeOffset encodes an integer offset as an opaque base64-encoded cursor.
