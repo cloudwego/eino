@@ -212,6 +212,8 @@ func prepareRunnerSessionRun[M MessageType]( //nolint:revive // argument-limit
 	state.persistence = sessionPersistence
 	state.latestState = &TurnEndState[M]{}
 
+	pageSize := normalizeSessionPersistenceConfig(sessionPersistence).LoadPageSize
+
 	afterMessageID, afterCursor, payload, exists, err := sessionStore.LoadLatestTurnEnd(ctx, sessionID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load latest TurnEnd state for session[%s]: %w", sessionID, err)
@@ -227,7 +229,7 @@ func prepareRunnerSessionRun[M MessageType]( //nolint:revive // argument-limit
 
 		// Tail replay: recover events appended after this snapshot (e.g., SaveTurnEnd
 		// failed on a subsequent turn or partial-turn events were appended).
-		tailMessages, tailErr := replayTailEvents[M](ctx, sessionStore, sessionID, afterCursor, latestState.Messages)
+		tailMessages, tailErr := replayTailEvents(ctx, sessionStore, sessionID, afterCursor, latestState.Messages, pageSize)
 		if tailErr != nil {
 			return nil, fmt.Errorf("failed to replay tail events for session[%s]: %w", sessionID, tailErr)
 		}
@@ -236,7 +238,7 @@ func prepareRunnerSessionRun[M MessageType]( //nolint:revive // argument-limit
 		}
 	} else {
 		// Fallback: reconstruct from event log.
-		messages, reconstructErr := reconstructFromEventLog[M](ctx, sessionStore, sessionID)
+		messages, reconstructErr := reconstructFromEventLog[M](ctx, sessionStore, sessionID, pageSize)
 		if reconstructErr != nil {
 			return nil, fmt.Errorf("failed to reconstruct session[%s] from event log: %w", sessionID, reconstructErr)
 		}
@@ -284,6 +286,8 @@ func prepareRunnerSessionResume[M MessageType](
 	state.persistence = sessionPersistence
 	state.latestState = &TurnEndState[M]{}
 
+	pageSize := normalizeSessionPersistenceConfig(sessionPersistence).LoadPageSize
+
 	afterMessageID, afterCursor, payload, exists, err := sessionStore.LoadLatestTurnEnd(ctx, sessionID)
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to load latest TurnEnd state for session[%s]: %w", sessionID, err)
@@ -297,7 +301,7 @@ func prepareRunnerSessionResume[M MessageType](
 		}
 		state.latestState = latestState
 
-		tailMessages, tailErr := replayTailEvents[M](ctx, sessionStore, sessionID, afterCursor, latestState.Messages)
+		tailMessages, tailErr := replayTailEvents[M](ctx, sessionStore, sessionID, afterCursor, latestState.Messages, pageSize)
 		if tailErr != nil {
 			return nil, "", fmt.Errorf("failed to replay tail events for session[%s]: %w", sessionID, tailErr)
 		}
@@ -305,7 +309,7 @@ func prepareRunnerSessionResume[M MessageType](
 			state.latestState.Messages = tailMessages
 		}
 	} else {
-		messages, reconstructErr := reconstructFromEventLog[M](ctx, sessionStore, sessionID)
+		messages, reconstructErr := reconstructFromEventLog[M](ctx, sessionStore, sessionID, pageSize)
 		if reconstructErr != nil {
 			return nil, "", fmt.Errorf("failed to reconstruct session[%s] from event log: %w", sessionID, reconstructErr)
 		}

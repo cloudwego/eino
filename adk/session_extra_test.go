@@ -815,7 +815,7 @@ func TestRunnerPersists_MessageUpdated_BothMessages(t *testing.T) {
 	if mem, ok := store.(*inMemoryAdapter); ok {
 		delete(mem.turnEnds, sid)
 	}
-	msgs, err := reconstructFromEventLog[*schema.Message](ctx, store, sid)
+	msgs, err := reconstructFromEventLog[*schema.Message](ctx, store, sid, defaultLoadPageSize)
 	require.NoError(t, err)
 	// Find updated content among reconstructed messages.
 	var sawClearedAssistant, sawPlaceholderTool bool
@@ -904,7 +904,7 @@ func TestRunnerPersists_MessageInserted_AnchorAndAppend(t *testing.T) {
 	if mem, ok := store.(*inMemoryAdapter); ok {
 		delete(mem.turnEnds, sid)
 	}
-	msgs, err := reconstructFromEventLog[*schema.Message](ctx, store, sid)
+	msgs, err := reconstructFromEventLog[*schema.Message](ctx, store, sid, defaultLoadPageSize)
 	require.NoError(t, err)
 	require.GreaterOrEqual(t, len(msgs), 3)
 	// The agentsmd message should appear before the user input.
