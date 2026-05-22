@@ -586,6 +586,10 @@ func TestWorkflowInterrupt(t *testing.T) {
 		}
 
 		assert.Equal(t, 2, len(events))
+		for i := range messageEvents {
+			assert.False(t, events[i].Timestamp.IsZero())
+			messageEvents[i].Timestamp = events[i].Timestamp
+		}
 		assert.Equal(t, messageEvents, events)
 	})
 
@@ -931,6 +935,10 @@ func TestWorkflowInterrupt(t *testing.T) {
 			},
 		}
 		assert.Equal(t, 2, len(events))
+		for i := range loopFinalMessageEvents {
+			assert.False(t, events[i].Timestamp.IsZero())
+			loopFinalMessageEvents[i].Timestamp = events[i].Timestamp
+		}
 		assert.Equal(t, loopFinalMessageEvents, events)
 	})
 
@@ -991,8 +999,23 @@ func TestWorkflowInterrupt(t *testing.T) {
 			},
 		}
 
-		assert.Contains(t, events, parallelMessageEvents[0])
-		assert.Contains(t, events, parallelMessageEvents[1])
+		assertParallelMessageEvent := func(want *AgentEvent) {
+			t.Helper()
+			for _, event := range events {
+				if event.AgentName == want.AgentName &&
+					assert.ObjectsAreEqual(want.RunPath, event.RunPath) &&
+					event.Output != nil && event.Output.MessageOutput != nil &&
+					event.Output.MessageOutput.Message != nil &&
+					event.Output.MessageOutput.Message.Content == want.Output.MessageOutput.Message.Content {
+					assert.False(t, event.Timestamp.IsZero())
+					return
+				}
+			}
+			assert.Failf(t, "missing parallel message event", "want=%v", want)
+		}
+
+		assertParallelMessageEvent(parallelMessageEvents[0])
+		assertParallelMessageEvent(parallelMessageEvents[1])
 
 		assert.NotNil(t, interruptEvent)
 		assert.Equal(t, "parallel agent", interruptEvent.AgentName)
