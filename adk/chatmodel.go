@@ -35,9 +35,7 @@ import (
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/internal/safe"
-
 	iSerializer "github.com/cloudwego/eino/internal/serialization"
-
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -177,7 +175,7 @@ type TypedGenModelInput[M MessageType] func(ctx context.Context, instruction str
 type GenModelInput = TypedGenModelInput[*schema.Message]
 
 func defaultGenModelInput(ctx context.Context, instruction string, input *AgentInput) ([]Message, error) {
-	msgs := make([]Message, 0, len(input.Messages)+1)
+	inputMessages := input.Messages
 
 	if instruction != "" {
 		sp := schema.SystemMessage(instruction)
@@ -196,11 +194,22 @@ func defaultGenModelInput(ctx context.Context, instruction string, input *AgentI
 			sp = ms[0]
 		}
 
+		// Strip any existing leading system message from history to avoid
+		// duplication when session state carries the previous turn's system
+		// message. The fresh instruction (potentially re-formatted with current
+		// SessionValues) always takes precedence.
+		if len(inputMessages) > 0 && inputMessages[0].Role == schema.System {
+			inputMessages = inputMessages[1:]
+		}
+
+		msgs := make([]Message, 0, len(inputMessages)+1)
 		msgs = append(msgs, sp)
+		msgs = append(msgs, inputMessages...)
+		return msgs, nil
 	}
 
-	msgs = append(msgs, input.Messages...)
-
+	msgs := make([]Message, 0, len(inputMessages))
+	msgs = append(msgs, inputMessages...)
 	return msgs, nil
 }
 
@@ -211,11 +220,21 @@ func newDefaultGenModelInput[M MessageType]() TypedGenModelInput[M] {
 		return any(GenModelInput(defaultGenModelInput)).(TypedGenModelInput[M])
 	case *schema.AgenticMessage:
 		return any(TypedGenModelInput[*schema.AgenticMessage](func(_ context.Context, instruction string, input *TypedAgentInput[*schema.AgenticMessage]) ([]*schema.AgenticMessage, error) {
-			msgs := make([]*schema.AgenticMessage, 0, len(input.Messages)+1)
+			inputMessages := input.Messages
 			if instruction != "" {
+				// Strip any existing leading system message from history to avoid
+				// duplication when session state carries the previous turn's system
+				// message.
+				if len(inputMessages) > 0 && inputMessages[0].Role == schema.AgenticRoleTypeSystem {
+					inputMessages = inputMessages[1:]
+				}
+				msgs := make([]*schema.AgenticMessage, 0, len(inputMessages)+1)
 				msgs = append(msgs, schema.SystemAgenticMessage(instruction))
+				msgs = append(msgs, inputMessages...)
+				return msgs, nil
 			}
-			msgs = append(msgs, input.Messages...)
+			msgs := make([]*schema.AgenticMessage, 0, len(inputMessages))
+			msgs = append(msgs, inputMessages...)
 			return msgs, nil
 		})).(TypedGenModelInput[M])
 	default:
