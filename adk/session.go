@@ -50,19 +50,14 @@ const (
 
 // SessionStore persists Runner-managed session data.
 // Events are stored as an append-only ordered log of JSON-encoded SessionEvent payloads.
+// TurnEndState is persisted as a regular SessionEvent variant (with TurnEnd field set),
+// not as a separate entity.
 //
 // Concurrency contract: A single session (identified by sessionID) MUST have at most one
 // active writer (Runner turn) at a time. The Runner enforces this via ErrPendingSessionCheckpoint
 // (new Run while a checkpoint is pending) and the single-goroutine event loop within a turn.
-// Store implementations are NOT required to handle concurrent AppendEvents/SaveTurnEnd calls
+// Store implementations are NOT required to handle concurrent AppendEvents calls
 // for the same sessionID. Different sessionIDs may be written concurrently without restriction.
-//
-// Atomicity: SaveTurnEnd MUST capture the event-log tail position atomically with respect
-// to the session's own AppendEvents calls. Since only one writer exists per session at a time,
-// this is trivially satisfied by reading the current event count within SaveTurnEnd. The
-// captured position must remain stable: subsequent AppendEvents calls (from the next turn)
-// append AFTER this position, so the cursor returned by LoadLatestTurnEnd always correctly
-// partitions pre-snapshot from post-snapshot events.
 type SessionStore interface {
 	// AppendEvents appends one or more JSON-encoded SessionEvent payloads to the session log.
 	// Events are appended in the order given. The store assigns ordering internally.
@@ -72,27 +67,13 @@ type SessionStore interface {
 	// Returns events in chronological order (oldest first) or reverse chronological
 	// order (newest first) depending on opts.Reverse.
 	LoadEvents(ctx context.Context, sessionID string, opts *LoadEventsRequest) (*LoadEventsResult, error)
-
-	// SaveTurnEnd persists a TurnEndState snapshot linked to the current event-log position.
-	// The store MUST also capture the current event-log tail position internally. This position
-	// is returned by LoadLatestTurnEnd as afterCursor, enabling precise tail replay.
-	// TurnEndState is NEVER persisted as a SessionEvent in the event log.
-	SaveTurnEnd(ctx context.Context, sessionID string, turnEnd []byte) error
-
-	// LoadLatestTurnEnd loads the most recent TurnEndState snapshot for the session.
-	// Returns exists=false if no snapshot has been saved yet.
-	// afterCursor is an opaque position marking the event-log tail at the time
-	// SaveTurnEnd was called. Pass it to LoadEvents as opts.After to load only
-	// events appended after the snapshot.
-	LoadLatestTurnEnd(ctx context.Context, sessionID string) (afterCursor string, turnEnd []byte, exists bool, err error)
 }
 
 // LoadEventsRequest configures event loading pagination and direction.
 type LoadEventsRequest struct {
 	// After is an opaque position cursor. Events strictly after this position
-	// are returned. On the first call, pass the afterCursor from LoadLatestTurnEnd
-	// (or empty to start from the beginning). On subsequent pages, pass the Next
-	// value from the previous LoadEventsResult.
+	// are returned. On the first call, pass empty to start from the beginning.
+	// On subsequent pages, pass the Next value from the previous LoadEventsResult.
 	// When non-empty and Reverse is false, only events after this position are
 	// returned (forward/chronological). When Reverse is true and After is empty,
 	// events are returned newest-first from the log tail.
@@ -117,8 +98,9 @@ type LoadEventsResult struct {
 // Exactly one semantic content field is active per event. The MessagesReplaced field
 // uses pointer-to-slice semantics (nil = absent, non-nil = active replacement).
 //
-// TurnEndState is intentionally NOT part of SessionEvent. It is persisted exclusively
-// through SaveTurnEnd and never enters the append-only event log.
+// TurnEndState is persisted as a SessionEvent with the TurnEnd field set. The Messages
+// field within TurnEnd is intentionally left nil — messages are reconstructed from the
+// event log on read.
 type SessionEvent[M MessageType] struct {
 	// Timestamp is inherited from the source AgentEvent and represents the event
 	// occurrence time, not the SessionStore persistence time.
@@ -128,6 +110,7 @@ type SessionEvent[M MessageType] struct {
 	MessagesReplaced *[]M                     `json:"messages_replaced"`
 	MessageUpdated   *MessageUpdatedEvent[M]  `json:"message_updated,omitempty"`
 	MessageInserted  *MessageInsertedEvent[M] `json:"message_inserted,omitempty"`
+	TurnEnd          *TurnEndState[M]         `json:"turn_end,omitempty"`
 }
 
 // MessageUpdatedEvent represents a single message replacement within the messages array.
@@ -207,19 +190,6 @@ func encodeGob(v any) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-func encodeTurnEndState[M MessageType](state *TurnEndState[M]) ([]byte, error) {
-	return sessionSerializer.Marshal(state)
-}
-
-func decodeTurnEndState[M MessageType](payload []byte) (*TurnEndState[M], error) {
-	var state TurnEndState[M]
-	if err := sessionSerializer.Unmarshal(payload, &state); err == nil {
-		return &state, nil
-	} else {
-		return nil, err
-	}
-}
-
 func encodeRunnerSessionCheckpoint(c *runnerSessionCheckpoint) ([]byte, error) {
 	return encodeGob(c)
 }
@@ -271,14 +241,20 @@ func makeInputSessionEvent[M MessageType](msg M) *SessionEvent[M] {
 }
 
 // toSessionEvent converts an internal TypedAgentEvent into the persistence format.
-// Returns nil if the event has no persistable content. TurnEndState is NOT included
-// — it is extracted separately and persisted via SaveTurnEnd.
+// Returns nil if the event has no persistable content.
 func toSessionEvent[M MessageType](event *TypedAgentEvent[M]) *SessionEvent[M] {
 	if event == nil {
 		return nil
 	}
 	se := &SessionEvent[M]{Timestamp: event.Timestamp}
 	switch {
+	case event.TurnEndState != nil:
+		se.TurnEnd = &TurnEndState[M]{
+			ToolInfos:         event.TurnEndState.ToolInfos,
+			DeferredToolInfos: event.TurnEndState.DeferredToolInfos,
+			SessionValues:     event.TurnEndState.SessionValues,
+			// Messages intentionally omitted — reconstructed from event log on read.
+		}
 	case event.MessagesReplaced != nil:
 		se.MessagesReplaced = event.MessagesReplaced
 	case event.MessageUpdated != nil:
@@ -497,9 +473,13 @@ func stripSessionEventFields[M MessageType](event *TypedAgentEvent[M]) *TypedAge
 }
 
 // applySessionEvent applies a single SessionEvent to the message array, mutating in place.
-// Shared by both full reconstruction and tail replay so the semantics stay aligned.
+// TurnEnd events are metadata-only and do not mutate messages.
 func applySessionEvent[M MessageType](messages *[]M, event *SessionEvent[M]) error {
 	switch {
+	case event.TurnEnd != nil:
+		// TurnEnd is metadata-only; does not affect the message array.
+		return nil
+
 	case event.MessagesReplaced != nil:
 		*messages = append([]M{}, *event.MessagesReplaced...)
 
@@ -552,14 +532,18 @@ func replaceMessageByID[M MessageType](messages *[]M, msgID string, newMsg M) er
 	return fmt.Errorf("reconstruct: target message %q not found for update", msgID)
 }
 
-// reconstructFromEventLog rebuilds session message history by reverse-scanning the
-// event log to find the latest MessagesReplaced boundary, then applying events forward.
-func reconstructFromEventLog[M MessageType](
+// reconstructSessionState rebuilds session state by:
+// 1. Reverse-scanning to find the latest TurnEnd (stash metadata) and MessagesReplaced.
+// 2. Forward-replaying from the MessagesReplaced boundary to rebuild messages.
+// Returns a TurnEndState with Messages populated from replay, plus ToolInfos/SessionValues
+// from the stashed TurnEnd event. Returns nil if no events exist.
+func reconstructSessionState[M MessageType](
 	ctx context.Context,
 	store SessionStore,
 	sessionID string,
 	pageSize int,
-) ([]M, error) {
+) (*TurnEndState[M], error) {
+	var stashedTurnEnd *TurnEndState[M]
 	var allEvents []*SessionEvent[M]
 	var after string
 	boundaryIdx := -1
@@ -582,6 +566,9 @@ func reconstructFromEventLog[M MessageType](
 			event, err := decodeSessionEvent[M](data)
 			if err != nil {
 				return nil, err
+			}
+			if event.TurnEnd != nil && stashedTurnEnd == nil {
+				stashedTurnEnd = event.TurnEnd
 			}
 			allEvents = append(allEvents, event)
 			if event.MessagesReplaced != nil {
@@ -623,63 +610,17 @@ func reconstructFromEventLog[M MessageType](
 		}
 	}
 
-	return messages, nil
+	state := &TurnEndState[M]{Messages: messages}
+	if stashedTurnEnd != nil {
+		state.ToolInfos = stashedTurnEnd.ToolInfos
+		state.DeferredToolInfos = stashedTurnEnd.DeferredToolInfos
+		state.SessionValues = stashedTurnEnd.SessionValues
+	}
+	return state, nil
 }
 
 func reverseSessionEvents[M MessageType](events []*SessionEvent[M]) {
 	for i, j := 0, len(events)-1; i < j; i, j = i+1, j-1 {
 		events[i], events[j] = events[j], events[i]
 	}
-}
-
-// replayTailEvents applies events appended after the snapshot's afterCursor
-// on top of baseMessages. Returns nil if no tail events exist.
-func replayTailEvents[M MessageType](
-	ctx context.Context,
-	store SessionStore,
-	sessionID string,
-	afterCursor string,
-	baseMessages []M,
-	pageSize int,
-) ([]M, error) {
-	var tailEvents []*SessionEvent[M]
-	after := afterCursor
-
-	for {
-		result, err := store.LoadEvents(ctx, sessionID, &LoadEventsRequest{
-			After: after,
-			Limit: pageSize,
-		})
-		if err != nil {
-			return nil, err
-		}
-		if result == nil || len(result.Events) == 0 {
-			break
-		}
-
-		for _, data := range result.Events {
-			event, err := decodeSessionEvent[M](data)
-			if err != nil {
-				return nil, err
-			}
-			tailEvents = append(tailEvents, event)
-		}
-
-		if result.Next == "" {
-			break
-		}
-		after = result.Next
-	}
-
-	if len(tailEvents) == 0 {
-		return nil, nil
-	}
-
-	messages := append([]M{}, baseMessages...)
-	for _, event := range tailEvents {
-		if err := applySessionEvent(&messages, event); err != nil {
-			return nil, fmt.Errorf("tail replay: %w", err)
-		}
-	}
-	return messages, nil
 }
