@@ -819,13 +819,16 @@ func setMessageIDForTest(msg *schema.Message, id string) {
 // TestStripSessionEventFields verifies all session-internal fields are stripped.
 func TestStripSessionEventFields(t *testing.T) {
 	t.Run("non-session-internal event passes through", func(t *testing.T) {
+		ts := time.Date(2026, 5, 22, 10, 0, 0, 0, time.UTC)
 		ev := &AgentEvent{
+			Timestamp: ts,
 			Output: &AgentOutput{
 				MessageOutput: &MessageVariant{Message: schema.AssistantMessage("hi", nil), Role: schema.Assistant},
 			},
 		}
 		stripped := stripSessionEventFields(ev)
 		require.NotNil(t, stripped)
+		assert.Equal(t, ts, stripped.Timestamp)
 		assert.Equal(t, "hi", stripped.Output.MessageOutput.Message.Content)
 	})
 
@@ -847,7 +850,9 @@ func TestStripSessionEventFields(t *testing.T) {
 	})
 
 	t.Run("Err with TurnEndState keeps Err", func(t *testing.T) {
+		ts := time.Date(2026, 5, 22, 10, 1, 0, 0, time.UTC)
 		ev := &AgentEvent{
+			Timestamp:    ts,
 			Err:          errors.New("visible"),
 			TurnEndState: &TurnEndState[*schema.Message]{},
 			SessionID:    "child-1",
@@ -856,6 +861,7 @@ func TestStripSessionEventFields(t *testing.T) {
 		require.NotNil(t, stripped)
 		assert.Nil(t, stripped.TurnEndState)
 		assert.Empty(t, stripped.SessionID)
+		assert.Equal(t, ts, stripped.Timestamp)
 		assert.EqualError(t, stripped.Err, "visible")
 	})
 
@@ -864,6 +870,28 @@ func TestStripSessionEventFields(t *testing.T) {
 		stripped := stripSessionEventFields(ev)
 		assert.Nil(t, stripped)
 	})
+}
+
+func TestSessionEventTimestamp(t *testing.T) {
+	ts := time.Date(2026, 5, 22, 10, 2, 0, 0, time.UTC)
+	msg := schema.AssistantMessage("hi", nil)
+	EnsureMessageID(msg)
+	event := &AgentEvent{
+		Timestamp: ts,
+		Output: &AgentOutput{
+			MessageOutput: &MessageVariant{Message: msg, Role: schema.Assistant},
+		},
+	}
+
+	se := toSessionEvent(event)
+	require.NotNil(t, se)
+	assert.Equal(t, ts, se.Timestamp)
+
+	data, err := encodeSessionEvent(se)
+	require.NoError(t, err)
+	decoded, err := decodeSessionEvent[*schema.Message](data)
+	require.NoError(t, err)
+	assert.Equal(t, ts, decoded.Timestamp)
 }
 
 // TestReconstructFromEventLog_EmptySession verifies empty-session reconstruction.
@@ -1054,9 +1082,9 @@ func TestRunnerSessionInputEventsPersisted(t *testing.T) {
 // AppendEvents and Set calls so tests can assert durability ordering.
 type recordingHelperStore struct {
 	*sessionHelperStore
-	mu        sync.Mutex
-	calls     []string // "append" or "set:<key>"
-	delaySet  time.Duration
+	mu       sync.Mutex
+	calls    []string // "append" or "set:<key>"
+	delaySet time.Duration
 }
 
 func newRecordingHelperStore() *recordingHelperStore {
