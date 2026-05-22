@@ -120,6 +120,10 @@ type LoadEventsResult struct {
 // TurnEndState is intentionally NOT part of SessionEvent. It is persisted exclusively
 // through SaveTurnEnd and never enters the append-only event log.
 type SessionEvent[M MessageType] struct {
+	// Timestamp is inherited from the source AgentEvent and represents the event
+	// occurrence time, not the SessionStore persistence time.
+	Timestamp time.Time `json:"timestamp,omitempty"`
+
 	Message          M                        `json:"message,omitempty"`
 	MessagesReplaced *[]M                     `json:"messages_replaced"`
 	MessageUpdated   *MessageUpdatedEvent[M]  `json:"message_updated,omitempty"`
@@ -263,7 +267,7 @@ func DecodeSessionEvent[M MessageType](data []byte) (*SessionEvent[M], error) {
 
 // makeInputSessionEvent wraps an input message as a SessionEvent.
 func makeInputSessionEvent[M MessageType](msg M) *SessionEvent[M] {
-	return &SessionEvent[M]{Message: msg}
+	return &SessionEvent[M]{Timestamp: newEventTimestamp(), Message: msg}
 }
 
 // toSessionEvent converts an internal TypedAgentEvent into the persistence format.
@@ -273,7 +277,7 @@ func toSessionEvent[M MessageType](event *TypedAgentEvent[M]) *SessionEvent[M] {
 	if event == nil {
 		return nil
 	}
-	se := &SessionEvent[M]{}
+	se := &SessionEvent[M]{Timestamp: event.Timestamp}
 	switch {
 	case event.MessagesReplaced != nil:
 		se.MessagesReplaced = event.MessagesReplaced
