@@ -300,6 +300,7 @@ func (m *typedEventSenderModel[M]) Generate(ctx context.Context, input []M, opts
 		var zero M
 		return zero, err
 	}
+	timestamp := newEventTimestamp()
 
 	execCtx := getTypedChatModelAgentExecCtx[M](ctx)
 	if execCtx != nil && execCtx.suppressEventSend {
@@ -311,6 +312,7 @@ func (m *typedEventSenderModel[M]) Generate(ctx context.Context, input []M, opts
 	}
 
 	event := typedModelOutputEvent(copyMessage(result), nil)
+	event.Timestamp = timestamp
 	execCtx.send(event)
 
 	return result, nil
@@ -321,6 +323,7 @@ func (m *typedEventSenderModel[M]) Stream(ctx context.Context, input []M, opts .
 	if err != nil {
 		return nil, err
 	}
+	timestamp := newEventTimestamp()
 
 	execCtx := getTypedChatModelAgentExecCtx[M](ctx)
 	if execCtx == nil || execCtx.generator == nil {
@@ -339,6 +342,7 @@ func (m *typedEventSenderModel[M]) Stream(ctx context.Context, input []M, opts .
 
 	var zero M
 	event := typedModelOutputEvent[M](zero, eventStream)
+	event.Timestamp = timestamp
 	execCtx.send(event)
 
 	return streams[1], nil
@@ -833,6 +837,7 @@ func (w *typedEventSenderToolWrapper[M]) WrapInvokableToolCall(_ context.Context
 		if err != nil {
 			return "", err
 		}
+		timestamp := newEventTimestamp()
 
 		toolName := tCtx.Name
 		callID := tCtx.CallID
@@ -840,6 +845,7 @@ func (w *typedEventSenderToolWrapper[M]) WrapInvokableToolCall(_ context.Context
 		prePopAction := typedPopToolGenAction[M](ctx, toolName)
 		toolMsgID := uuid.NewString()
 		event := typedToolInvokeEvent[M](callID, toolName, result, toolMsgID)
+		event.Timestamp = timestamp
 		if prePopAction != nil {
 			event.Action = prePopAction
 		}
@@ -865,6 +871,7 @@ func (w *typedEventSenderToolWrapper[M]) WrapStreamableToolCall(_ context.Contex
 		if err != nil {
 			return nil, err
 		}
+		timestamp := newEventTimestamp()
 
 		toolName := tCtx.Name
 		callID := tCtx.CallID
@@ -874,6 +881,7 @@ func (w *typedEventSenderToolWrapper[M]) WrapStreamableToolCall(_ context.Contex
 
 		toolMsgID := uuid.NewString()
 		event := typedToolStreamEvent[M](callID, toolName, toolMsgID, streams[0])
+		event.Timestamp = timestamp
 		event.Action = prePopAction
 
 		execCtx := getTypedChatModelAgentExecCtx[M](ctx)
@@ -897,6 +905,7 @@ func (w *typedEventSenderToolWrapper[M]) WrapEnhancedInvokableToolCall(_ context
 		if err != nil {
 			return nil, err
 		}
+		timestamp := newEventTimestamp()
 
 		toolName := tCtx.Name
 		callID := tCtx.CallID
@@ -907,6 +916,7 @@ func (w *typedEventSenderToolWrapper[M]) WrapEnhancedInvokableToolCall(_ context
 		if eventErr != nil {
 			return nil, eventErr
 		}
+		event.Timestamp = timestamp
 		if prePopAction != nil {
 			event.Action = prePopAction
 		}
@@ -932,6 +942,7 @@ func (w *typedEventSenderToolWrapper[M]) WrapEnhancedStreamableToolCall(_ contex
 		if err != nil {
 			return nil, err
 		}
+		timestamp := newEventTimestamp()
 
 		toolName := tCtx.Name
 		callID := tCtx.CallID
@@ -941,6 +952,7 @@ func (w *typedEventSenderToolWrapper[M]) WrapEnhancedStreamableToolCall(_ contex
 
 		toolMsgID := uuid.NewString()
 		event := typedToolEnhancedStreamEvent[M](callID, toolName, toolMsgID, streams[0])
+		event.Timestamp = timestamp
 		event.Action = prePopAction
 
 		execCtx := getTypedChatModelAgentExecCtx[M](ctx)

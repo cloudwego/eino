@@ -32,7 +32,7 @@ import (
 
 func errorIterator[M MessageType](err error) *AsyncIterator[*TypedAgentEvent[M]] {
 	iter, gen := NewAsyncIteratorPair[*TypedAgentEvent[M]]()
-	gen.Send(&TypedAgentEvent[M]{Err: err})
+	gen.Send(&TypedAgentEvent[M]{Timestamp: newEventTimestamp(), Err: err})
 	gen.Close()
 	return iter
 }
@@ -583,7 +583,7 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 		panicErr := recover()
 		if panicErr != nil {
 			e := safe.NewPanicErr(panicErr, debug.Stack())
-			gen.Send(&TypedAgentEvent[M]{Err: e})
+			gen.Send(&TypedAgentEvent[M]{Timestamp: newEventTimestamp(), Err: e})
 		}
 
 		gen.Close()
@@ -622,7 +622,7 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 			return
 		}
 		if err := saveRunnerCheckpoint(enableStreaming, store, ctx, *checkPointID, info, sig, sessionState); err != nil {
-			gen.Send(&TypedAgentEvent[M]{Err: fmt.Errorf("%s: %w", errLabel, err)})
+			gen.Send(&TypedAgentEvent[M]{Timestamp: newEventTimestamp(), Err: fmt.Errorf("%s: %w", errLabel, err)})
 		}
 	}
 
@@ -647,6 +647,9 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 		event, ok := aIter.Next()
 		if !ok {
 			break
+		}
+		if event.Timestamp.IsZero() {
+			event.Timestamp = newEventTimestamp()
 		}
 
 		if event.Err != nil {
@@ -678,6 +681,7 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 			interruptSignal = event.Action.internalInterrupted
 			interruptContexts := core.ToInterruptContexts(interruptSignal, allowedAddressSegmentTypes)
 			event = &TypedAgentEvent[M]{
+				Timestamp: event.Timestamp,
 				AgentName: event.AgentName,
 				RunPath:   event.RunPath,
 				Output:    event.Output,
@@ -810,7 +814,7 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 			pendingCheckpoint: pendingCheckpoint,
 		}
 		if err := res.finalize(ctx); err != nil {
-			gen.Send(&TypedAgentEvent[M]{Err: err})
+			gen.Send(&TypedAgentEvent[M]{Timestamp: newEventTimestamp(), Err: err})
 		}
 	}
 }
