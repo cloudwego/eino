@@ -36,9 +36,8 @@ type InMemoryStore struct {
 }
 
 type turnEndRecord struct {
-	afterMessageID string
-	afterCursor    string
-	data           []byte
+	afterCursor string
+	data        []byte
 }
 
 // NewInMemoryStore creates a new in-memory store.
@@ -177,27 +176,26 @@ func paginateForward(all [][]byte, startOffset, limit int) *adk.LoadEventsResult
 // SaveTurnEnd persists a TurnEndState snapshot. The store captures the current
 // event-log tail position internally so tail replay can reload events appended
 // after this snapshot via the After field in LoadEventsRequest.
-func (s *InMemoryStore) SaveTurnEnd(_ context.Context, sessionID string, afterMessageID string, turnEnd []byte) error {
+func (s *InMemoryStore) SaveTurnEnd(_ context.Context, sessionID string, turnEnd []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	cursor := encodeOffset(len(s.events[sessionID]))
 	s.turnEnds[sessionID] = turnEndRecord{
-		afterMessageID: afterMessageID,
-		afterCursor:    cursor,
-		data:           append([]byte{}, turnEnd...),
+		afterCursor: cursor,
+		data:        append([]byte{}, turnEnd...),
 	}
 	return nil
 }
 
 // LoadLatestTurnEnd loads the most recent TurnEndState snapshot for the session.
-func (s *InMemoryStore) LoadLatestTurnEnd(_ context.Context, sessionID string) (string, string, []byte, bool, error) {
+func (s *InMemoryStore) LoadLatestTurnEnd(_ context.Context, sessionID string) (string, []byte, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	rec, ok := s.turnEnds[sessionID]
 	if !ok {
-		return "", "", nil, false, nil
+		return "", nil, false, nil
 	}
-	return rec.afterMessageID, rec.afterCursor, append([]byte{}, rec.data...), true, nil
+	return rec.afterCursor, append([]byte{}, rec.data...), true, nil
 }
 
 // encodeOffset encodes an integer offset as an opaque base64-encoded cursor.
