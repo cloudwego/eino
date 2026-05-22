@@ -329,7 +329,7 @@ func TestTailReplay_AfterSaveTurnEndFailure(t *testing.T) {
 	turnEnd := &TurnEndState[*schema.Message]{Messages: []*schema.Message{a1, r1}}
 	teBytes, err := encodeTurnEndState(turnEnd)
 	require.NoError(t, err)
-	require.NoError(t, store.SaveTurnEnd(ctx, sid, GetMessageID(r1), teBytes))
+	require.NoError(t, store.SaveTurnEnd(ctx, sid, teBytes))
 
 	// Phase 2: simulate a partial second turn where events were appended but
 	// SaveTurnEnd failed (i.e. snapshot was NOT updated).
@@ -346,7 +346,7 @@ func TestTailReplay_AfterSaveTurnEndFailure(t *testing.T) {
 
 	// Boot: prepareRunnerSessionRun should load the snapshot AND tail-replay the
 	// post-snapshot events.
-	state, err := prepareRunnerSessionRun[*schema.Message](ctx, nil, sid, store, nil, nil, nil)
+	state, err := prepareRunnerSessionRun[*schema.Message](ctx, nil, sid, store, nil)
 	require.NoError(t, err)
 	require.True(t, state.enabled)
 	require.Len(t, state.latestState.Messages, 4)
@@ -373,9 +373,9 @@ func TestTailReplay_NoTailEvents(t *testing.T) {
 	turnEnd := &TurnEndState[*schema.Message]{Messages: []*schema.Message{q}}
 	teBytes, err := encodeTurnEndState(turnEnd)
 	require.NoError(t, err)
-	require.NoError(t, store.SaveTurnEnd(ctx, sid, GetMessageID(q), teBytes))
+	require.NoError(t, store.SaveTurnEnd(ctx, sid, teBytes))
 
-	state, err := prepareRunnerSessionRun[*schema.Message](ctx, nil, sid, store, nil, nil, nil)
+	state, err := prepareRunnerSessionRun[*schema.Message](ctx, nil, sid, store, nil)
 	require.NoError(t, err)
 	require.Len(t, state.latestState.Messages, 1)
 	assert.Equal(t, "Q", state.latestState.Messages[0].Content)
@@ -398,10 +398,10 @@ func TestTailReplay_EmptySnapshotCursor(t *testing.T) {
 		require.NoError(t, err)
 		require.NoError(t, store.AppendEvents(ctx, sid, [][]byte{data}))
 	}
-	// Snapshot with empty Messages and empty afterMessageID.
+	// Snapshot with empty Messages.
 	teBytes, err := encodeTurnEndState(&TurnEndState[*schema.Message]{})
 	require.NoError(t, err)
-	require.NoError(t, store.SaveTurnEnd(ctx, sid, "", teBytes))
+	require.NoError(t, store.SaveTurnEnd(ctx, sid, teBytes))
 
 	// Post-snapshot events.
 	postMsg := schema.UserMessage("post")
@@ -411,7 +411,7 @@ func TestTailReplay_EmptySnapshotCursor(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, store.AppendEvents(ctx, sid, [][]byte{data}))
 
-	state, err := prepareRunnerSessionRun[*schema.Message](ctx, nil, sid, store, nil, nil, nil)
+	state, err := prepareRunnerSessionRun[*schema.Message](ctx, nil, sid, store, nil)
 	require.NoError(t, err)
 	require.Len(t, state.latestState.Messages, 1)
 	assert.Equal(t, "post", state.latestState.Messages[0].Content,
@@ -438,9 +438,8 @@ type inMemoryAdapter struct {
 }
 
 type inMemoryTurnEnd struct {
-	afterMessageID   string
 	afterCursor string
-	data             []byte
+	data        []byte
 }
 
 func (s *inMemoryAdapter) AppendEvents(_ context.Context, sid string, events [][]byte) error {
@@ -481,21 +480,20 @@ func (s *inMemoryAdapter) LoadEvents(_ context.Context, sid string, opts *LoadEv
 	return &LoadEventsResult{Events: out}, nil
 }
 
-func (s *inMemoryAdapter) SaveTurnEnd(_ context.Context, sid string, afterMessageID string, turnEnd []byte) error {
+func (s *inMemoryAdapter) SaveTurnEnd(_ context.Context, sid string, turnEnd []byte) error {
 	s.turnEnds[sid] = inMemoryTurnEnd{
-		afterMessageID:   afterMessageID,
 		afterCursor: itoa(len(s.events[sid])),
-		data:             append([]byte{}, turnEnd...),
+		data:        append([]byte{}, turnEnd...),
 	}
 	return nil
 }
 
-func (s *inMemoryAdapter) LoadLatestTurnEnd(_ context.Context, sid string) (string, string, []byte, bool, error) {
+func (s *inMemoryAdapter) LoadLatestTurnEnd(_ context.Context, sid string) (string, []byte, bool, error) {
 	rec, ok := s.turnEnds[sid]
 	if !ok {
-		return "", "", nil, false, nil
+		return "", nil, false, nil
 	}
-	return rec.afterMessageID, rec.afterCursor, append([]byte{}, rec.data...), true, nil
+	return rec.afterCursor, append([]byte{}, rec.data...), true, nil
 }
 
 // TestPartialInterrupted_ThenNewRun verifies that when a turn is interrupted
@@ -523,7 +521,7 @@ func TestPartialInterrupted_ThenNewRun(t *testing.T) {
 	turnEnd := &TurnEndState[*schema.Message]{Messages: []*schema.Message{q1, r1}}
 	teBytes, err := encodeTurnEndState(turnEnd)
 	require.NoError(t, err)
-	require.NoError(t, store.SaveTurnEnd(ctx, sid, GetMessageID(r1), teBytes))
+	require.NoError(t, store.SaveTurnEnd(ctx, sid, teBytes))
 
 	// Phase 2: simulate an interrupted turn — events appended, no new SaveTurnEnd.
 	q2 := schema.UserMessage("partial")
@@ -605,7 +603,7 @@ func TestExplicitCheckpointResume_WithSessionMode(t *testing.T) {
 	}
 	teBytes, err := encodeTurnEndState(prior)
 	require.NoError(t, err)
-	require.NoError(t, store.SaveTurnEnd(ctx, sid, "", teBytes))
+	require.NoError(t, store.SaveTurnEnd(ctx, sid, teBytes))
 
 	// Seed an arbitrary checkpoint ID with a runner-session-checkpoint wrapper
 	// so runnerLoadCheckPointForSession can decode it.
@@ -643,7 +641,7 @@ func TestResumePath_TailReplay(t *testing.T) {
 	}
 	teBytes, err := encodeTurnEndState(&TurnEndState[*schema.Message]{Messages: []*schema.Message{q1, r1}})
 	require.NoError(t, err)
-	require.NoError(t, store.SaveTurnEnd(ctx, sid, GetMessageID(r1), teBytes))
+	require.NoError(t, store.SaveTurnEnd(ctx, sid, teBytes))
 
 	// Append a tail event after the snapshot.
 	tailMsg := schema.UserMessage("post-snapshot")
