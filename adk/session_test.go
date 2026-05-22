@@ -35,14 +35,10 @@ type sessionHelperStore struct {
 	mu          sync.Mutex
 	checkpoints map[string][]byte
 
-	events      [][]byte
-	loadErr     error
-	afterCursor string
-	turnPayload []byte
-	turnExists  bool
-	turnErr     error
-	appendErr   error
-	deleteErr   error
+	events    [][]byte
+	loadErr   error
+	appendErr error
+	deleteErr error
 }
 
 type runnerSessionAgent struct {
@@ -197,38 +193,6 @@ func fmtSscan(s string, out *int) (int, error) {
 
 var errInvalidCursor = errors.New("invalid cursor")
 
-func (s *sessionHelperStore) LoadLatestTurnEnd(_ context.Context, _ string) (string, []byte, bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.turnErr != nil {
-		return "", nil, false, s.turnErr
-	}
-	return s.afterCursor, append([]byte{}, s.turnPayload...), s.turnExists, nil
-}
-
-func (s *sessionHelperStore) SaveTurnEnd(_ context.Context, _ string, turnEnd []byte) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.afterCursor = itoa(len(s.events))
-	s.turnPayload = append([]byte{}, turnEnd...)
-	s.turnExists = true
-	return nil
-}
-
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	var buf [16]byte
-	i := len(buf)
-	for n > 0 {
-		i--
-		buf[i] = byte('0' + n%10)
-		n /= 10
-	}
-	return string(buf[i:])
-}
-
 func TestRunnerSessionModePrependsCommittedMessagesOnce(t *testing.T) {
 	ctx := context.Background()
 	store := newSessionHelperStore()
@@ -266,7 +230,7 @@ func TestRunnerSessionModePrependsCommittedMessagesOnce(t *testing.T) {
 	require.Len(t, secondAgent.inputs, 1)
 	require.Len(t, secondAgent.inputs[0], 3)
 	assert.Equal(t, "first", secondAgent.inputs[0][0].Content)
-	assert.Equal(t, "answer1", secondAgent.inputs[0][1].Content)
+	assert.Equal(t, "ok", secondAgent.inputs[0][1].Content)
 	assert.Equal(t, "second", secondAgent.inputs[0][2].Content)
 	require.Len(t, secondAgent.values, 1)
 	assert.Equal(t, "restored", secondAgent.values[0]["k"])
@@ -308,8 +272,8 @@ func TestRunnerSessionModeDeleteCheckpointFailureIsReported(t *testing.T) {
 	store.deleteErr = errors.New("delete failed")
 
 	res := &sessionTurnResult[*schema.Message]{
-		persister:    persister,
-		turnEndBytes: []byte("turn-end"),
+		persister:  persister,
+		sawTurnEnd: true,
 		sessionState: &runnerSessionRunState[*schema.Message]{
 			enabled:      true,
 			sessionID:    "delete-fail-session",
@@ -322,7 +286,7 @@ func TestRunnerSessionModeDeleteCheckpointFailureIsReported(t *testing.T) {
 	err := res.finalize(ctx)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to delete session checkpoint")
-	assert.True(t, store.turnExists, "turn snapshot is committed before stale checkpoint cleanup")
+	assert.True(t, res.sawTurnEnd, "turn must have been seen before stale checkpoint cleanup")
 }
 
 func TestTurnEndStateSessionValues_JSONLikeRoundTrip(t *testing.T) {
@@ -341,16 +305,17 @@ func TestTurnEndStateSessionValues_JSONLikeRoundTrip(t *testing.T) {
 		},
 	}
 
-	data, err := encodeTurnEndState(state)
+	se := &SessionEvent[*schema.Message]{TurnEnd: state}
+	data, err := encodeSessionEvent(se)
 	require.NoError(t, err)
-	decoded, err := decodeTurnEndState[*schema.Message](data)
+	decoded, err := decodeSessionEvent[*schema.Message](data)
 	require.NoError(t, err)
-	require.NotNil(t, decoded)
-	require.Len(t, decoded.Messages, 1)
-	assert.Equal(t, "hello", decoded.Messages[0].Content)
-	require.Len(t, decoded.ToolInfos, 1)
-	assert.Equal(t, "lookup", decoded.ToolInfos[0].Name)
-	assert.Equal(t, state.SessionValues, decoded.SessionValues)
+	require.NotNil(t, decoded.TurnEnd)
+	require.Len(t, decoded.TurnEnd.Messages, 1)
+	assert.Equal(t, "hello", decoded.TurnEnd.Messages[0].Content)
+	require.Len(t, decoded.TurnEnd.ToolInfos, 1)
+	assert.Equal(t, "lookup", decoded.TurnEnd.ToolInfos[0].Name)
+	assert.Equal(t, state.SessionValues, decoded.TurnEnd.SessionValues)
 }
 
 func TestRunnerSessionStreamingDoesNotBlockLiveEvent(t *testing.T) {
@@ -538,7 +503,6 @@ func TestRunnerSessionModeFlushFailurePreventsCommit(t *testing.T) {
 
 	require.Error(t, lastErr)
 	assert.Contains(t, lastErr.Error(), "failed to persist session events")
-	assert.False(t, store.turnExists, "SaveTurnEnd must not be called when event flush fails")
 }
 
 // TestSessionPersister_EnqueueAfterClose verifies that calling enqueue after
@@ -591,14 +555,16 @@ func TestSessionPersister_EmptyPayloadSkipped(t *testing.T) {
 // TestTurnEndState_GobRoundtripNilFields verifies gob roundtrip preserves nil semantics.
 func TestTurnEndState_GobRoundtripNilFields(t *testing.T) {
 	original := &TurnEndState[*schema.Message]{}
-	encoded, err := encodeTurnEndState(original)
+	se := &SessionEvent[*schema.Message]{TurnEnd: original}
+	encoded, err := encodeSessionEvent(se)
 	require.NoError(t, err)
-	decoded, err := decodeTurnEndState[*schema.Message](encoded)
+	decoded, err := decodeSessionEvent[*schema.Message](encoded)
 	require.NoError(t, err)
-	assert.Nil(t, decoded.Messages)
-	assert.Nil(t, decoded.ToolInfos)
-	assert.Nil(t, decoded.DeferredToolInfos)
-	assert.Nil(t, decoded.SessionValues)
+	require.NotNil(t, decoded.TurnEnd)
+	assert.Nil(t, decoded.TurnEnd.Messages)
+	assert.Nil(t, decoded.TurnEnd.ToolInfos)
+	assert.Nil(t, decoded.TurnEnd.DeferredToolInfos)
+	assert.Nil(t, decoded.TurnEnd.SessionValues)
 }
 
 func TestNormalizeSessionPersistenceConfig_Variations(t *testing.T) {
@@ -898,9 +864,9 @@ func TestSessionEventTimestamp(t *testing.T) {
 func TestReconstructFromEventLog_EmptySession(t *testing.T) {
 	store := newSessionHelperStore()
 	ctx := context.Background()
-	msgs, err := reconstructFromEventLog[*schema.Message](ctx, store, "empty", defaultLoadPageSize)
+	state, err := reconstructSessionState[*schema.Message](ctx, store, "empty", defaultLoadPageSize)
 	require.NoError(t, err)
-	assert.Nil(t, msgs)
+	assert.Nil(t, state)
 }
 
 // TestReconstructFromEventLog_MultiTurn verifies multi-turn reconstruction.
@@ -932,22 +898,24 @@ func TestReconstructFromEventLog_MultiTurn(t *testing.T) {
 		require.NoError(t, store.AppendEvents(ctx, sid, [][]byte{data}))
 	}
 
-	msgs, err := reconstructFromEventLog[*schema.Message](ctx, store, sid, defaultLoadPageSize)
+	state, err := reconstructSessionState[*schema.Message](ctx, store, sid, defaultLoadPageSize)
 	require.NoError(t, err)
-	require.Len(t, msgs, 4)
-	assert.Equal(t, "Q1", msgs[0].Content)
-	assert.Equal(t, "A1", msgs[1].Content)
-	assert.Equal(t, "Q2", msgs[2].Content)
-	assert.Equal(t, "A2", msgs[3].Content)
+	require.NotNil(t, state)
+	require.Len(t, state.Messages, 4)
+	assert.Equal(t, "Q1", state.Messages[0].Content)
+	assert.Equal(t, "A1", state.Messages[1].Content)
+	assert.Equal(t, "Q2", state.Messages[2].Content)
+	assert.Equal(t, "A2", state.Messages[3].Content)
 
 	// Verify pagination: use page size 2 so that 4 events require multiple pages.
-	msgs2, err := reconstructFromEventLog[*schema.Message](ctx, store, sid, 2)
+	state2, err := reconstructSessionState[*schema.Message](ctx, store, sid, 2)
 	require.NoError(t, err)
-	require.Len(t, msgs2, 4)
-	assert.Equal(t, "Q1", msgs2[0].Content)
-	assert.Equal(t, "A1", msgs2[1].Content)
-	assert.Equal(t, "Q2", msgs2[2].Content)
-	assert.Equal(t, "A2", msgs2[3].Content)
+	require.NotNil(t, state2)
+	require.Len(t, state2.Messages, 4)
+	assert.Equal(t, "Q1", state2.Messages[0].Content)
+	assert.Equal(t, "A1", state2.Messages[1].Content)
+	assert.Equal(t, "Q2", state2.Messages[2].Content)
+	assert.Equal(t, "A2", state2.Messages[3].Content)
 }
 
 // TestReconstructFromEventLog_WithSummarizationBoundary: events before
@@ -984,11 +952,12 @@ func TestReconstructFromEventLog_WithSummarizationBoundary(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, store.AppendEvents(ctx, sid, [][]byte{data}))
 
-	msgs, err := reconstructFromEventLog[*schema.Message](ctx, store, sid, defaultLoadPageSize)
+	state, err := reconstructSessionState[*schema.Message](ctx, store, sid, defaultLoadPageSize)
 	require.NoError(t, err)
-	require.Len(t, msgs, 2)
-	assert.Equal(t, "summary", msgs[0].Content)
-	assert.Equal(t, "post", msgs[1].Content)
+	require.NotNil(t, state)
+	require.Len(t, state.Messages, 2)
+	assert.Equal(t, "summary", state.Messages[0].Content)
+	assert.Equal(t, "post", state.Messages[1].Content)
 }
 
 // TestRunnerSessionReconstructsFromEventLog: Delete TurnEndState from store,
@@ -1012,13 +981,8 @@ func TestRunnerSessionReconstructsFromEventLog(t *testing.T) {
 	})
 	drainSessionEvents(t, runner.Query(ctx, "first"))
 
-	// Verify events were captured: caller input + assistant output for the first turn.
-	require.Len(t, store.events, 2, "input event + assistant event should be in event log")
-
-	// Wipe the snapshot to force fallback reconstruction.
-	store.turnExists = false
-	store.turnPayload = nil
-	store.afterCursor = ""
+	// Verify events were captured: caller input + assistant output + turn-end for the first turn.
+	require.Len(t, store.events, 3, "input event + assistant event + turn-end event should be in event log")
 
 	// Capture the prepared session state before agent runs.
 	capturedAgent := &runnerSessionAgent{
@@ -1066,8 +1030,8 @@ func TestRunnerSessionInputEventsPersisted(t *testing.T) {
 	})
 	drainSessionEvents(t, runner.Query(ctx, "user-question"))
 
-	// Single-turn run: 1 user input event + 1 assistant output event.
-	require.Len(t, store.events, 2)
+	// Single-turn run: 1 user input event + 1 assistant output event + 1 TurnEnd event.
+	require.Len(t, store.events, 3)
 	// The first event should be the user input.
 	first, err := decodeSessionEvent[*schema.Message](store.events[0])
 	require.NoError(t, err)
