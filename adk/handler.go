@@ -326,6 +326,12 @@ func processTypedState(ctx context.Context, fn func(extra map[string]any) map[st
 	})
 }
 
+// ToolInfosPreSeededKey is the RunLocalValue key set to true when the Runner injects
+// persisted TurnEndState.ToolInfos into the compose-level options for prompt cache preservation.
+// Middlewares (e.g., ToolSearch) should check this key to skip their initialization logic
+// that would otherwise re-derive or strip the tool list.
+const ToolInfosPreSeededKey = "__tool_infos_pre_seeded__"
+
 // SetRunLocalValue sets a key-value pair that persists for the duration of the current agent Run() invocation.
 // The value is scoped to this specific execution and is not shared across different Run() calls or agent instances.
 //

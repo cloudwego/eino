@@ -35,15 +35,14 @@ type sessionHelperStore struct {
 	mu          sync.Mutex
 	checkpoints map[string][]byte
 
-	events           [][]byte
-	loadErr          error
-	afterMessageID   string
+	events      [][]byte
+	loadErr     error
 	afterCursor string
-	turnPayload      []byte
-	turnExists       bool
-	turnErr          error
-	appendErr        error
-	deleteErr        error
+	turnPayload []byte
+	turnExists  bool
+	turnErr     error
+	appendErr   error
+	deleteErr   error
 }
 
 type runnerSessionAgent struct {
@@ -198,19 +197,18 @@ func fmtSscan(s string, out *int) (int, error) {
 
 var errInvalidCursor = errors.New("invalid cursor")
 
-func (s *sessionHelperStore) LoadLatestTurnEnd(_ context.Context, _ string) (string, string, []byte, bool, error) {
+func (s *sessionHelperStore) LoadLatestTurnEnd(_ context.Context, _ string) (string, []byte, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.turnErr != nil {
-		return "", "", nil, false, s.turnErr
+		return "", nil, false, s.turnErr
 	}
-	return s.afterMessageID, s.afterCursor, append([]byte{}, s.turnPayload...), s.turnExists, nil
+	return s.afterCursor, append([]byte{}, s.turnPayload...), s.turnExists, nil
 }
 
-func (s *sessionHelperStore) SaveTurnEnd(_ context.Context, _ string, afterMessageID string, turnEnd []byte) error {
+func (s *sessionHelperStore) SaveTurnEnd(_ context.Context, _ string, turnEnd []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.afterMessageID = afterMessageID
 	s.afterCursor = itoa(len(s.events))
 	s.turnPayload = append([]byte{}, turnEnd...)
 	s.turnExists = true
@@ -304,7 +302,7 @@ func TestRunnerSessionModeDeleteCheckpointFailureIsReported(t *testing.T) {
 		ctx,
 		store,
 		"delete-fail-session",
-		&SessionPersistenceConfig{EventFlushBatchSize: 1},
+		normalizeSessionPersistenceConfig(&SessionPersistenceConfig{EventFlushBatchSize: 1}),
 	)
 	checkPointID := "delete-fail-checkpoint"
 	store.deleteErr = errors.New("delete failed")
@@ -551,11 +549,11 @@ func TestSessionPersister_EnqueueAfterClose(t *testing.T) {
 
 	persister := newSessionEventPersister[*schema.Message](
 		ctx, store, "enqueue-after-close",
-		&SessionPersistenceConfig{
+		normalizeSessionPersistenceConfig(&SessionPersistenceConfig{
 			EventFlushBatchSize: 1,
 			EventFlushInterval:  time.Millisecond,
 			EventBufferSize:     8,
-		},
+		}),
 	)
 
 	require.NoError(t, persister.closeAndWait())
@@ -571,11 +569,11 @@ func TestSessionPersister_EmptyPayloadSkipped(t *testing.T) {
 
 	persister := newSessionEventPersister[*schema.Message](
 		ctx, store, "empty-payload",
-		&SessionPersistenceConfig{
+		normalizeSessionPersistenceConfig(&SessionPersistenceConfig{
 			EventFlushBatchSize: 1,
 			EventFlushInterval:  time.Millisecond,
 			EventBufferSize:     8,
-		},
+		}),
 	)
 
 	assert.NoError(t, persister.enqueue(nil))
@@ -992,7 +990,6 @@ func TestRunnerSessionReconstructsFromEventLog(t *testing.T) {
 	// Wipe the snapshot to force fallback reconstruction.
 	store.turnExists = false
 	store.turnPayload = nil
-	store.afterMessageID = ""
 	store.afterCursor = ""
 
 	// Capture the prepared session state before agent runs.
@@ -1179,12 +1176,12 @@ func TestSessionPersister_EnqueueAfterAppendError(t *testing.T) {
 	store := newSessionHelperStore()
 	store.appendErr = errors.New("append failed")
 
-	cfg := &SessionPersistenceConfig{
+	cfg := normalizeSessionPersistenceConfig(&SessionPersistenceConfig{
 		EventFlushBatchSize: 1,
 		EventFlushInterval:  10 * time.Millisecond,
 		EventBufferSize:     8,
 		MaxFlushRetries:     -1, // disable retries for fast failure
-	}
+	})
 	p := newSessionEventPersister[*schema.Message](ctx, store, "sid", cfg)
 	defer p.closeAndWait()
 
@@ -1240,13 +1237,13 @@ func TestSessionPersister_FlushRetryTransientRecovery(t *testing.T) {
 		appendErrVal:       errors.New("transient"),
 	}
 
-	cfg := &SessionPersistenceConfig{
+	cfg := normalizeSessionPersistenceConfig(&SessionPersistenceConfig{
 		EventFlushBatchSize:      1,
 		EventFlushInterval:       10 * time.Millisecond,
 		EventBufferSize:          8,
 		MaxFlushRetries:          3,
 		FlushRetryInitialBackoff: 5 * time.Millisecond,
-	}
+	})
 	p := newSessionEventPersister[*schema.Message](ctx, store, "sid", cfg)
 
 	require.NoError(t, p.enqueue([]byte(`{"i":1}`)))
@@ -1272,13 +1269,13 @@ func TestSessionPersister_FlushRetryPermanentFailure(t *testing.T) {
 		appendErrVal:       errors.New("permanent"),
 	}
 
-	cfg := &SessionPersistenceConfig{
+	cfg := normalizeSessionPersistenceConfig(&SessionPersistenceConfig{
 		EventFlushBatchSize:      1,
 		EventFlushInterval:       10 * time.Millisecond,
 		EventBufferSize:          8,
 		MaxFlushRetries:          2,
 		FlushRetryInitialBackoff: 5 * time.Millisecond,
-	}
+	})
 	p := newSessionEventPersister[*schema.Message](ctx, store, "sid", cfg)
 
 	require.NoError(t, p.enqueue([]byte(`{"i":1}`)))
@@ -1300,13 +1297,13 @@ func TestSessionPersister_FlushRetryContextCancellation(t *testing.T) {
 		appendErrVal:       errors.New("failing"),
 	}
 
-	cfg := &SessionPersistenceConfig{
+	cfg := normalizeSessionPersistenceConfig(&SessionPersistenceConfig{
 		EventFlushBatchSize:      1,
 		EventFlushInterval:       10 * time.Millisecond,
 		EventBufferSize:          8,
 		MaxFlushRetries:          5,
 		FlushRetryInitialBackoff: 500 * time.Millisecond, // long backoff to ensure cancel fires during wait
-	}
+	})
 	p := newSessionEventPersister[*schema.Message](ctx, store, "sid", cfg)
 
 	require.NoError(t, p.enqueue([]byte(`{"i":1}`)))

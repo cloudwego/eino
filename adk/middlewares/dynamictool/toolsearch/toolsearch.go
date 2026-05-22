@@ -155,11 +155,19 @@ const toolSearchReminderExtraKey = "__toolsearch_reminder__"
 
 func (m *typedMiddleware[M]) isInitialized(ctx context.Context) bool {
 	val, ok, err := adk.GetRunLocalValue(ctx, toolSearchInitializedKey)
-	if err != nil || !ok {
-		return false
+	if err == nil && ok {
+		if b, _ := val.(bool); b {
+			return true
+		}
 	}
-	b, _ := val.(bool)
-	return b
+	// Tool infos pre-seeded from previous turn's TurnEndState — skip initialization strip logic.
+	val, ok, err = adk.GetRunLocalValue(ctx, adk.ToolInfosPreSeededKey)
+	if err == nil && ok {
+		if b, _ := val.(bool); b {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *typedMiddleware[M]) markInitialized(ctx context.Context) {

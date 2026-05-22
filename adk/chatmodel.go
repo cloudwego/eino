@@ -93,6 +93,16 @@ type chatModelAgentRunOptions struct {
 	historyModifier func(context.Context, []Message) []Message
 
 	afterToolCallsHook func(ctx context.Context) error
+
+	previousTurnToolInfos         []*schema.ToolInfo
+	previousTurnDeferredToolInfos []*schema.ToolInfo
+}
+
+func withPreviousTurnToolInfos(toolInfos, deferredToolInfos []*schema.ToolInfo) AgentRunOption {
+	return WrapImplSpecificOptFn(func(t *chatModelAgentRunOptions) {
+		t.previousTurnToolInfos = toolInfos
+		t.previousTurnDeferredToolInfos = deferredToolInfos
+	})
 }
 
 // WithChatModelOptions sets options for the underlying chat model.
@@ -472,6 +482,8 @@ type typedRunParams[M MessageType] struct {
 	sessionEvents  bool
 
 	afterToolCallsHook func(ctx context.Context) error
+
+	toolInfosPreSeeded bool
 }
 
 type typedRunFunc[M MessageType] func(ctx context.Context, p *typedRunParams[M])
@@ -1206,6 +1218,9 @@ func (a *TypedChatModelAgent[M]) buildMessageReActRunFunc(_ context.Context, bc 
 		chain := compose.NewChain[reactRunInput, Message]().
 			AppendLambda(
 				compose.InvokableLambda(func(ctx context.Context, in reactRunInput) (*reactInput, error) {
+					if mp.toolInfosPreSeeded {
+						_ = SetRunLocalValue(ctx, ToolInfosPreSeededKey, true)
+					}
 					messages, genErr := genModelInputFn(ctx, in.instruction, in.input)
 					if genErr != nil {
 						return nil, genErr
@@ -1346,6 +1361,9 @@ func (a *TypedChatModelAgent[M]) buildAgenticReActRunFunc(_ context.Context, bc 
 		chain := compose.NewChain[agenticReactRunInput, *schema.AgenticMessage]().
 			AppendLambda(
 				compose.InvokableLambda(func(ctx context.Context, in agenticReactRunInput) (*agenticReactInput, error) {
+					if ap.toolInfosPreSeeded {
+						_ = SetRunLocalValue(ctx, ToolInfosPreSeededKey, true)
+					}
 					messages, genErr := genModelInputFn(ctx, in.instruction, in.input)
 					if genErr != nil {
 						return nil, genErr
@@ -1540,7 +1558,24 @@ func (a *TypedChatModelAgent[M]) Run(ctx context.Context, input *TypedAgentInput
 	co = append(co, compose.WithCheckPointID(bridgeCheckpointID))
 	runOps := GetImplSpecificOptions[chatModelAgentRunOptions](nil, opts...)
 
-	if bc != nil {
+	var toolInfosPreSeeded bool
+	if len(runOps.previousTurnToolInfos) > 0 {
+		// Use the exact tool list persisted at the previous turn's end for prompt cache preservation.
+		co = append(co, compose.WithChatModelOption(model.WithTools(runOps.previousTurnToolInfos)))
+		if len(runOps.previousTurnDeferredToolInfos) > 0 {
+			co = append(co, compose.WithChatModelOption(model.WithDeferredTools(runOps.previousTurnDeferredToolInfos)))
+		}
+		toolInfosPreSeeded = true
+		// Still apply tool execution configuration from bc.
+		if bc != nil {
+			if bc.toolSearchTool != nil {
+				co = append(co, compose.WithChatModelOption(model.WithToolSearchTool(bc.toolSearchTool)))
+			}
+			if bc.toolUpdated {
+				co = append(co, compose.WithToolsNodeOption(compose.WithToolList(bc.toolsNodeConf.Tools...)))
+			}
+		}
+	} else if bc != nil {
 		if len(bc.toolInfos) > 0 {
 			co = append(co, compose.WithChatModelOption(model.WithTools(bc.toolInfos)))
 		}
@@ -1587,6 +1622,7 @@ func (a *TypedChatModelAgent[M]) Run(ctx context.Context, input *TypedAgentInput
 			composeOpts:        co,
 			sessionEvents:      o.enableSessionEvents,
 			afterToolCallsHook: runOps.afterToolCallsHook,
+			toolInfosPreSeeded: toolInfosPreSeeded,
 		})
 	}()
 
