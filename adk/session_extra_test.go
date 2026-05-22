@@ -167,8 +167,6 @@ func TestStreamPersistence_GetMessageError_NotEnqueued(t *testing.T) {
 				"failed stream must not produce a persisted assistant event")
 		}
 	}
-	// Snapshot must NOT have been committed.
-	assert.False(t, store.turnExists, "SaveTurnEnd must not run when persistence fails")
 }
 
 // streamingAgentRaw lets the test inject an arbitrary stream reader (including
@@ -258,10 +256,10 @@ func TestRunnerInputEvents_MixedRoles(t *testing.T) {
 	assert.Equal(t, "hello", second.Message.Content)
 }
 
-// TestTurnEndStateOnly_CapturedNotPersisted verifies that an event carrying
-// only TurnEndState (no message output, no mutations) drives SaveTurnEnd but
-// does NOT add a SessionEvent to the log.
-func TestTurnEndStateOnly_CapturedNotPersisted(t *testing.T) {
+// TestTurnEndStateOnly_PersistedAsSessionEvent verifies that an event carrying
+// only TurnEndState (no message output, no mutations) persists the TurnEnd as
+// a SessionEvent variant in the log.
+func TestTurnEndStateOnly_PersistedAsSessionEvent(t *testing.T) {
 	ctx := context.Background()
 	store := newSessionHelperStore()
 	sid := "turn-end-only"
@@ -281,15 +279,16 @@ func TestTurnEndStateOnly_CapturedNotPersisted(t *testing.T) {
 	})
 	drainSessionEvents(t, runner.Query(ctx, "input"))
 
-	require.True(t, store.turnExists, "TurnEndState must be saved")
-
-	// The only event in the log should be the input event we provided.
+	// The log should contain: the input event + a TurnEnd event.
+	var sawTurnEnd bool
 	for _, raw := range store.events {
 		se, err := decodeSessionEvent[*schema.Message](raw)
 		require.NoError(t, err)
-		// All events should be input message events (Role=User), never TurnEndState payloads.
-		require.NotNil(t, se.Message, "TurnEndState event must not be persisted as SessionEvent")
+		if se.TurnEnd != nil {
+			sawTurnEnd = true
+		}
 	}
+	assert.True(t, sawTurnEnd, "TurnEndState must be persisted as a SessionEvent")
 }
 
 type turnEndOnlyAgent struct {
@@ -307,15 +306,14 @@ func (a *turnEndOnlyAgent) Run(_ context.Context, _ *AgentInput, _ ...AgentRunOp
 	return iter
 }
 
-// TestTailReplay_AfterSaveTurnEndFailure verifies that events appended after the
-// last successful snapshot survive a SaveTurnEnd failure on a subsequent turn.
-// On boot, tail replay layers post-snapshot events on top of the snapshot's Messages.
-func TestTailReplay_AfterSaveTurnEndFailure(t *testing.T) {
+// TestTailReplay_PartialTurnWithoutTurnEnd verifies that events appended after
+// the last TurnEnd event are replayed on reconstruction (partial/interrupted turn).
+func TestTailReplay_PartialTurnWithoutTurnEnd(t *testing.T) {
 	ctx := context.Background()
 	store := NewInMemoryStoreLocal(t)
 	sid := "tail-replay"
 
-	// Phase 1: a normal turn. Snapshot committed.
+	// Phase 1: a normal completed turn (messages + TurnEnd event).
 	a1 := schema.UserMessage("Q1")
 	EnsureMessageID(a1)
 	r1 := schema.AssistantMessage("A1", nil)
@@ -326,13 +324,16 @@ func TestTailReplay_AfterSaveTurnEndFailure(t *testing.T) {
 		require.NoError(t, err)
 		require.NoError(t, store.AppendEvents(ctx, sid, [][]byte{data}))
 	}
-	turnEnd := &TurnEndState[*schema.Message]{Messages: []*schema.Message{a1, r1}}
-	teBytes, err := encodeTurnEndState(turnEnd)
+	// Persist TurnEnd as a SessionEvent.
+	turnEndSE := &SessionEvent[*schema.Message]{TurnEnd: &TurnEndState[*schema.Message]{
+		Messages: []*schema.Message{a1, r1},
+	}}
+	teData, err := encodeSessionEvent(turnEndSE)
 	require.NoError(t, err)
-	require.NoError(t, store.SaveTurnEnd(ctx, sid, teBytes))
+	require.NoError(t, store.AppendEvents(ctx, sid, [][]byte{teData}))
 
 	// Phase 2: simulate a partial second turn where events were appended but
-	// SaveTurnEnd failed (i.e. snapshot was NOT updated).
+	// no TurnEnd was persisted (interrupted).
 	a2 := schema.UserMessage("Q2")
 	EnsureMessageID(a2)
 	r2 := schema.AssistantMessage("A2", nil)
@@ -344,8 +345,8 @@ func TestTailReplay_AfterSaveTurnEndFailure(t *testing.T) {
 		require.NoError(t, store.AppendEvents(ctx, sid, [][]byte{data}))
 	}
 
-	// Boot: prepareRunnerSessionRun should load the snapshot AND tail-replay the
-	// post-snapshot events.
+	// Boot: prepareRunnerSessionRun should reconstruct all messages including
+	// the partial turn's events.
 	state, err := prepareRunnerSessionRun[*schema.Message](ctx, nil, sid, store, nil)
 	require.NoError(t, err)
 	require.True(t, state.enabled)
@@ -370,10 +371,13 @@ func TestTailReplay_NoTailEvents(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, store.AppendEvents(ctx, sid, [][]byte{data}))
 
-	turnEnd := &TurnEndState[*schema.Message]{Messages: []*schema.Message{q}}
-	teBytes, err := encodeTurnEndState(turnEnd)
+	// Persist TurnEnd as a SessionEvent.
+	turnEndSE := &SessionEvent[*schema.Message]{TurnEnd: &TurnEndState[*schema.Message]{
+		Messages: []*schema.Message{q},
+	}}
+	teData, err := encodeSessionEvent(turnEndSE)
 	require.NoError(t, err)
-	require.NoError(t, store.SaveTurnEnd(ctx, sid, teBytes))
+	require.NoError(t, store.AppendEvents(ctx, sid, [][]byte{teData}))
 
 	state, err := prepareRunnerSessionRun[*schema.Message](ctx, nil, sid, store, nil)
 	require.NoError(t, err)
@@ -383,13 +387,13 @@ func TestTailReplay_NoTailEvents(t *testing.T) {
 
 // TestTailReplay_EmptySnapshotCursor verifies cursor-based replay correctly
 // handles a snapshot that committed an empty Messages array — the cursor still
-// excludes pre-snapshot events.
+// excludes pre-boundary events.
 func TestTailReplay_EmptySnapshotCursor(t *testing.T) {
 	ctx := context.Background()
 	store := NewInMemoryStoreLocal(t)
 	sid := "empty-snapshot"
 
-	// Pre-snapshot events that should NOT be replayed.
+	// Pre-boundary events.
 	for i := 0; i < 3; i++ {
 		m := schema.UserMessage("pre")
 		EnsureMessageID(m)
@@ -398,12 +402,14 @@ func TestTailReplay_EmptySnapshotCursor(t *testing.T) {
 		require.NoError(t, err)
 		require.NoError(t, store.AppendEvents(ctx, sid, [][]byte{data}))
 	}
-	// Snapshot with empty Messages.
-	teBytes, err := encodeTurnEndState(&TurnEndState[*schema.Message]{})
+	// MessagesReplaced boundary with empty slice — supersedes pre-boundary events.
+	empty := []*schema.Message{}
+	boundarySE := &SessionEvent[*schema.Message]{MessagesReplaced: &empty}
+	bData, err := encodeSessionEvent(boundarySE)
 	require.NoError(t, err)
-	require.NoError(t, store.SaveTurnEnd(ctx, sid, teBytes))
+	require.NoError(t, store.AppendEvents(ctx, sid, [][]byte{bData}))
 
-	// Post-snapshot events.
+	// Post-boundary events.
 	postMsg := schema.UserMessage("post")
 	EnsureMessageID(postMsg)
 	se := &SessionEvent[*schema.Message]{Message: postMsg}
@@ -414,32 +420,21 @@ func TestTailReplay_EmptySnapshotCursor(t *testing.T) {
 	state, err := prepareRunnerSessionRun[*schema.Message](ctx, nil, sid, store, nil)
 	require.NoError(t, err)
 	require.Len(t, state.latestState.Messages, 1)
-	assert.Equal(t, "post", state.latestState.Messages[0].Content,
-		"only post-snapshot events must be replayed; pre-snapshot events must stay excluded")
+	assert.Equal(t, "post", state.latestState.Messages[0].Content)
 }
 
-// NewInMemoryStoreLocal returns the InMemoryStore implementation from the
-// session subpackage, accessed via its public constructor through the test
-// helper SessionStore interface.
+// NewInMemoryStoreLocal returns a minimal in-package SessionStore for tests.
 func NewInMemoryStoreLocal(t *testing.T) SessionStore {
 	t.Helper()
 	return &inMemoryAdapter{
-		events:   map[string][][]byte{},
-		turnEnds: map[string]inMemoryTurnEnd{},
+		events: map[string][][]byte{},
 	}
 }
 
-// inMemoryAdapter is a minimal in-package SessionStore used by tail-replay
-// tests. It implements just enough of the cursor semantics: SaveTurnEnd captures
-// the current event count as the cursor, After decodes that decimal index.
+// inMemoryAdapter is a minimal in-package SessionStore used by integration
+// tests. Uses decimal index as opaque cursor.
 type inMemoryAdapter struct {
-	events   map[string][][]byte
-	turnEnds map[string]inMemoryTurnEnd
-}
-
-type inMemoryTurnEnd struct {
-	afterCursor string
-	data        []byte
+	events map[string][][]byte
 }
 
 func (s *inMemoryAdapter) AppendEvents(_ context.Context, sid string, events [][]byte) error {
@@ -480,22 +475,6 @@ func (s *inMemoryAdapter) LoadEvents(_ context.Context, sid string, opts *LoadEv
 	return &LoadEventsResult{Events: out}, nil
 }
 
-func (s *inMemoryAdapter) SaveTurnEnd(_ context.Context, sid string, turnEnd []byte) error {
-	s.turnEnds[sid] = inMemoryTurnEnd{
-		afterCursor: itoa(len(s.events[sid])),
-		data:        append([]byte{}, turnEnd...),
-	}
-	return nil
-}
-
-func (s *inMemoryAdapter) LoadLatestTurnEnd(_ context.Context, sid string) (string, []byte, bool, error) {
-	rec, ok := s.turnEnds[sid]
-	if !ok {
-		return "", nil, false, nil
-	}
-	return rec.afterCursor, append([]byte{}, rec.data...), true, nil
-}
-
 // TestPartialInterrupted_ThenNewRun verifies that when a turn is interrupted
 // after some events have been appended (but before SaveTurnEnd commits), a new
 // Run with NO CheckPointStore (i.e. session-only mode) recovers the in-flight
@@ -518,10 +497,13 @@ func TestPartialInterrupted_ThenNewRun(t *testing.T) {
 		require.NoError(t, err)
 		require.NoError(t, store.AppendEvents(ctx, sid, [][]byte{data}))
 	}
-	turnEnd := &TurnEndState[*schema.Message]{Messages: []*schema.Message{q1, r1}}
-	teBytes, err := encodeTurnEndState(turnEnd)
+	// Persist TurnEnd as a SessionEvent (marks end of completed turn).
+	turnEndSE := &SessionEvent[*schema.Message]{TurnEnd: &TurnEndState[*schema.Message]{
+		Messages: []*schema.Message{q1, r1},
+	}}
+	teData, err := encodeSessionEvent(turnEndSE)
 	require.NoError(t, err)
-	require.NoError(t, store.SaveTurnEnd(ctx, sid, teBytes))
+	require.NoError(t, store.AppendEvents(ctx, sid, [][]byte{teData}))
 
 	// Phase 2: simulate an interrupted turn — events appended, no new SaveTurnEnd.
 	q2 := schema.UserMessage("partial")
@@ -597,13 +579,22 @@ func TestExplicitCheckpointResume_WithSessionMode(t *testing.T) {
 	store := newSessionHelperStore()
 	sid := "explicit-cp-session"
 
-	// Seed the session store with a snapshot.
+	// Seed the session store with events and a TurnEnd.
 	prior := &TurnEndState[*schema.Message]{
 		Messages: []*schema.Message{schema.UserMessage("seed"), schema.AssistantMessage("seed-ans", nil)},
 	}
-	teBytes, err := encodeTurnEndState(prior)
+	// Seed session events (messages + TurnEnd).
+	for _, m := range prior.Messages {
+		EnsureMessageID(m)
+		se := &SessionEvent[*schema.Message]{Message: m}
+		data, err := encodeSessionEvent(se)
+		require.NoError(t, err)
+		require.NoError(t, store.AppendEvents(ctx, sid, [][]byte{data}))
+	}
+	turnEndSE := &SessionEvent[*schema.Message]{TurnEnd: prior}
+	teData, err := encodeSessionEvent(turnEndSE)
 	require.NoError(t, err)
-	require.NoError(t, store.SaveTurnEnd(ctx, sid, teBytes))
+	require.NoError(t, store.AppendEvents(ctx, sid, [][]byte{teData}))
 
 	// Seed an arbitrary checkpoint ID with a runner-session-checkpoint wrapper
 	// so runnerLoadCheckPointForSession can decode it.
@@ -639,9 +630,13 @@ func TestResumePath_TailReplay(t *testing.T) {
 		require.NoError(t, err)
 		require.NoError(t, store.AppendEvents(ctx, sid, [][]byte{data}))
 	}
-	teBytes, err := encodeTurnEndState(&TurnEndState[*schema.Message]{Messages: []*schema.Message{q1, r1}})
+	// Persist TurnEnd as a SessionEvent.
+	turnEndSE := &SessionEvent[*schema.Message]{TurnEnd: &TurnEndState[*schema.Message]{
+		Messages: []*schema.Message{q1, r1},
+	}}
+	teData, err := encodeSessionEvent(turnEndSE)
 	require.NoError(t, err)
-	require.NoError(t, store.SaveTurnEnd(ctx, sid, teBytes))
+	require.NoError(t, store.AppendEvents(ctx, sid, [][]byte{teData}))
 
 	// Append a tail event after the snapshot.
 	tailMsg := schema.UserMessage("post-snapshot")
@@ -808,16 +803,13 @@ func TestRunnerPersists_MessageUpdated_BothMessages(t *testing.T) {
 	}
 	assert.Equal(t, 2, updates, "both MessageUpdated events must be persisted")
 
-	// Reconstruction (no snapshot path) must apply both updates correctly.
-	// We simulate by deleting the snapshot from the store.
-	if mem, ok := store.(*inMemoryAdapter); ok {
-		delete(mem.turnEnds, sid)
-	}
-	msgs, err := reconstructFromEventLog[*schema.Message](ctx, store, sid, defaultLoadPageSize)
+	// Reconstruction must apply both updates correctly.
+	state, err := reconstructSessionState[*schema.Message](ctx, store, sid, defaultLoadPageSize)
 	require.NoError(t, err)
+	require.NotNil(t, state)
 	// Find updated content among reconstructed messages.
 	var sawClearedAssistant, sawPlaceholderTool bool
-	for _, m := range msgs {
+	for _, m := range state.Messages {
 		if m.Role == schema.Assistant && m.Content == "call me [cleared]" {
 			sawClearedAssistant = true
 		}
@@ -898,17 +890,15 @@ func TestRunnerPersists_MessageInserted_AnchorAndAppend(t *testing.T) {
 	}
 	assert.Equal(t, 2, inserts, "both MessageInserted events must be persisted")
 
-	// Force fallback reconstruction.
-	if mem, ok := store.(*inMemoryAdapter); ok {
-		delete(mem.turnEnds, sid)
-	}
-	msgs, err := reconstructFromEventLog[*schema.Message](ctx, store, sid, defaultLoadPageSize)
+	// Verify reconstruction applies insertions correctly.
+	state, err := reconstructSessionState[*schema.Message](ctx, store, sid, defaultLoadPageSize)
 	require.NoError(t, err)
-	require.GreaterOrEqual(t, len(msgs), 3)
+	require.NotNil(t, state)
+	require.GreaterOrEqual(t, len(state.Messages), 3)
 	// The agentsmd message should appear before the user input.
 	var idxAgentsmd, idxUser, idxPatched int
 	idxAgentsmd, idxUser, idxPatched = -1, -1, -1
-	for i, m := range msgs {
+	for i, m := range state.Messages {
 		switch GetMessageID(m) {
 		case GetMessageID(agentsmdMsg):
 			idxAgentsmd = i
