@@ -1190,6 +1190,9 @@ func (w *typedStateModelWrapper[M]) Generate(ctx context.Context, _ []M, opts ..
 		} else {
 			stateToolInfos = w.toolInfos
 		}
+		if stateDeferredToolInfos == nil && composeLevelOpts.DeferredTools != nil {
+			stateDeferredToolInfos = composeLevelOpts.DeferredTools
+		}
 	}
 
 	state := &TypedChatModelAgentState[M]{
@@ -1314,6 +1317,9 @@ func (w *typedStateModelWrapper[M]) Stream(ctx context.Context, _ []M, opts ...m
 			stateToolInfos = composeLevelOpts.Tools
 		} else {
 			stateToolInfos = w.toolInfos
+		}
+		if stateDeferredToolInfos == nil && composeLevelOpts.DeferredTools != nil {
+			stateDeferredToolInfos = composeLevelOpts.DeferredTools
 		}
 	}
 
