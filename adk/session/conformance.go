@@ -92,15 +92,12 @@ func RunConformanceTests(t *testing.T, factory func(testing.TB) adk.SessionStore
 		for i := 0; i < 3; i++ {
 			requireNoError(t, store.AppendEvents(ctx, "s", [][]byte{{byte('p' + i)}}))
 		}
-		requireNoError(t, store.SaveTurnEnd(ctx, "s", "", []byte("snap")))
+		requireNoError(t, store.SaveTurnEnd(ctx, "s", []byte("snap")))
 
-		afterMsgID, afterCursor, payload, exists, err := store.LoadLatestTurnEnd(ctx, "s")
+		afterCursor, payload, exists, err := store.LoadLatestTurnEnd(ctx, "s")
 		requireNoError(t, err)
 		if !exists {
 			t.Fatalf("LoadLatestTurnEnd exists=false after SaveTurnEnd")
-		}
-		if afterMsgID != "" {
-			t.Fatalf("afterMessageID=%q, want empty", afterMsgID)
 		}
 		if !bytes.Equal(payload, []byte("snap")) {
 			t.Fatalf("payload=%q, want %q", payload, []byte("snap"))
@@ -128,8 +125,8 @@ func RunConformanceTests(t *testing.T, factory func(testing.TB) adk.SessionStore
 		for i := 0; i < 50; i++ {
 			requireNoError(t, store.AppendEvents(ctx, "s", [][]byte{{byte(i)}}))
 		}
-		requireNoError(t, store.SaveTurnEnd(ctx, "s", "", []byte("snap")))
-		_, afterCursor, _, _, err := store.LoadLatestTurnEnd(ctx, "s")
+		requireNoError(t, store.SaveTurnEnd(ctx, "s", []byte("snap")))
+		afterCursor, _, _, err := store.LoadLatestTurnEnd(ctx, "s")
 		requireNoError(t, err)
 
 		// Append 30 more events after snapshot.
@@ -165,7 +162,7 @@ func RunConformanceTests(t *testing.T, factory func(testing.TB) adk.SessionStore
 		store := newStore(t, factory)
 		ctx := context.Background()
 
-		_, _, _, exists, err := store.LoadLatestTurnEnd(ctx, "s")
+		_, _, exists, err := store.LoadLatestTurnEnd(ctx, "s")
 		requireNoError(t, err)
 		if exists {
 			t.Fatalf("LoadLatestTurnEnd exists=true before any SaveTurnEnd")
@@ -179,8 +176,8 @@ func RunConformanceTests(t *testing.T, factory func(testing.TB) adk.SessionStore
 		for i := 0; i < 5; i++ {
 			requireNoError(t, store.AppendEvents(ctx, "s", [][]byte{{byte(i)}}))
 		}
-		requireNoError(t, store.SaveTurnEnd(ctx, "s", "msg-5", []byte("snap")))
-		_, originalCursor, _, _, err := store.LoadLatestTurnEnd(ctx, "s")
+		requireNoError(t, store.SaveTurnEnd(ctx, "s", []byte("snap")))
+		originalCursor, _, _, err := store.LoadLatestTurnEnd(ctx, "s")
 		requireNoError(t, err)
 
 		for i := 5; i < 25; i++ {
@@ -188,13 +185,10 @@ func RunConformanceTests(t *testing.T, factory func(testing.TB) adk.SessionStore
 		}
 
 		// Cursor returned by LoadLatestTurnEnd should still be the same value.
-		afterMsgID, sameCursor, _, exists, err := store.LoadLatestTurnEnd(ctx, "s")
+		sameCursor, _, exists, err := store.LoadLatestTurnEnd(ctx, "s")
 		requireNoError(t, err)
 		if !exists {
 			t.Fatalf("snapshot disappeared after appends")
-		}
-		if afterMsgID != "msg-5" {
-			t.Fatalf("afterMessageID=%q, want %q", afterMsgID, "msg-5")
 		}
 		if sameCursor != originalCursor {
 			t.Fatalf("cursor changed after appends: original=%q new=%q", originalCursor, sameCursor)
@@ -225,26 +219,26 @@ func RunConformanceTests(t *testing.T, factory func(testing.TB) adk.SessionStore
 		requireNoError(t, err)
 		requireEventsEqual(t, [][]byte{beta}, betaRes.Events)
 
-		requireNoError(t, store.SaveTurnEnd(ctx, "alpha", "alpha-msg", []byte("alpha-turn")))
-		requireNoError(t, store.SaveTurnEnd(ctx, "beta", "beta-msg", []byte("beta-turn")))
+		requireNoError(t, store.SaveTurnEnd(ctx, "alpha", []byte("alpha-turn")))
+		requireNoError(t, store.SaveTurnEnd(ctx, "beta", []byte("beta-turn")))
 
-		afterMsgID, _, payload, exists, err := store.LoadLatestTurnEnd(ctx, "alpha")
+		_, payload, exists, err := store.LoadLatestTurnEnd(ctx, "alpha")
 		requireNoError(t, err)
-		requireTurnEnd(t, "alpha-msg", []byte("alpha-turn"), afterMsgID, payload, exists)
+		requireTurnEnd(t, []byte("alpha-turn"), payload, exists)
 
-		afterMsgID, _, payload, exists, err = store.LoadLatestTurnEnd(ctx, "beta")
+		_, payload, exists, err = store.LoadLatestTurnEnd(ctx, "beta")
 		requireNoError(t, err)
-		requireTurnEnd(t, "beta-msg", []byte("beta-turn"), afterMsgID, payload, exists)
+		requireTurnEnd(t, []byte("beta-turn"), payload, exists)
 	})
 
 	t.Run("SaveTurnEnd overwrites previous snapshot", func(t *testing.T) {
 		store := newStore(t, factory)
 		ctx := context.Background()
-		requireNoError(t, store.SaveTurnEnd(ctx, "s", "first", []byte("first-turn")))
-		requireNoError(t, store.SaveTurnEnd(ctx, "s", "second", []byte("second-turn")))
-		afterMsgID, _, payload, exists, err := store.LoadLatestTurnEnd(ctx, "s")
+		requireNoError(t, store.SaveTurnEnd(ctx, "s", []byte("first-turn")))
+		requireNoError(t, store.SaveTurnEnd(ctx, "s", []byte("second-turn")))
+		_, payload, exists, err := store.LoadLatestTurnEnd(ctx, "s")
 		requireNoError(t, err)
-		requireTurnEnd(t, "second", []byte("second-turn"), afterMsgID, payload, exists)
+		requireTurnEnd(t, []byte("second-turn"), payload, exists)
 	})
 }
 
@@ -276,13 +270,10 @@ func requireEventsEqual(t testing.TB, want, got [][]byte) {
 	}
 }
 
-func requireTurnEnd(t testing.TB, wantAfterMsgID string, wantPayload []byte, gotAfterMsgID string, gotPayload []byte, exists bool) {
+func requireTurnEnd(t testing.TB, wantPayload []byte, gotPayload []byte, exists bool) {
 	t.Helper()
 	if !exists {
 		t.Fatalf("LoadLatestTurnEnd exists=false")
-	}
-	if gotAfterMsgID != wantAfterMsgID {
-		t.Fatalf("LoadLatestTurnEnd afterMessageID=%q, want %q", gotAfterMsgID, wantAfterMsgID)
 	}
 	if !bytes.Equal(gotPayload, wantPayload) {
 		t.Fatalf("LoadLatestTurnEnd payload=%q, want %q", gotPayload, wantPayload)

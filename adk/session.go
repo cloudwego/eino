@@ -74,23 +74,17 @@ type SessionStore interface {
 	LoadEvents(ctx context.Context, sessionID string, opts *LoadEventsRequest) (*LoadEventsResult, error)
 
 	// SaveTurnEnd persists a TurnEndState snapshot linked to the current event-log position.
-	// afterMessageID is the eino message ID of the last message in the snapshot's Messages
-	// array (empty string if Messages is empty). Retained for informational/debugging purposes
-	// only — stores MUST NOT use it for replay boundary detection. afterCursor (captured
-	// internally and returned by LoadLatestTurnEnd) is the sole source of truth for the
-	// event-log boundary.
 	// The store MUST also capture the current event-log tail position internally. This position
-	// is returned by LoadLatestTurnEnd as afterCursor, enabling precise tail replay without
-	// message-ID scanning when afterMessageID is empty or ambiguous.
+	// is returned by LoadLatestTurnEnd as afterCursor, enabling precise tail replay.
 	// TurnEndState is NEVER persisted as a SessionEvent in the event log.
-	SaveTurnEnd(ctx context.Context, sessionID string, afterMessageID string, turnEnd []byte) error
+	SaveTurnEnd(ctx context.Context, sessionID string, turnEnd []byte) error
 
 	// LoadLatestTurnEnd loads the most recent TurnEndState snapshot for the session.
 	// Returns exists=false if no snapshot has been saved yet.
 	// afterCursor is an opaque position marking the event-log tail at the time
 	// SaveTurnEnd was called. Pass it to LoadEvents as opts.After to load only
 	// events appended after the snapshot.
-	LoadLatestTurnEnd(ctx context.Context, sessionID string) (afterMessageID string, afterCursor string, turnEnd []byte, exists bool, err error)
+	LoadLatestTurnEnd(ctx context.Context, sessionID string) (afterCursor string, turnEnd []byte, exists bool, err error)
 }
 
 // LoadEventsRequest configures event loading pagination and direction.
@@ -353,13 +347,13 @@ func newSessionEventPersister[M MessageType](
 	ctx context.Context,
 	store SessionStore,
 	sessionID string,
-	cfg *SessionPersistenceConfig,
+	cfg SessionPersistenceConfig,
 ) *sessionEventPersister[M] {
 	p := &sessionEventPersister[M]{
 		ctx:       ctx,
 		store:     store,
 		sessionID: sessionID,
-		cfg:       normalizeSessionPersistenceConfig(cfg),
+		cfg:       cfg,
 		done:      make(chan struct{}),
 	}
 	p.ch = make(chan []byte, p.cfg.EventBufferSize)
@@ -684,12 +678,4 @@ func replayTailEvents[M MessageType](
 		}
 	}
 	return messages, nil
-}
-
-// lastMessageID returns the eino message ID of the last message in messages, or empty.
-func lastMessageID[M MessageType](messages []M) string {
-	if len(messages) == 0 {
-		return ""
-	}
-	return GetMessageID(messages[len(messages)-1])
 }
