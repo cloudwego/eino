@@ -17,201 +17,147 @@
 package session
 
 import (
-	"context"
-	"encoding/base64"
-	"fmt"
-	"strconv"
-	"sync"
+    "context"
+    "strconv"
+    "sync"
 
-	"github.com/cloudwego/eino/adk"
+    "github.com/cloudwego/eino/adk"
 )
 
-// InMemoryStore is an in-memory SessionStore and CheckPointStore implementation
-// suitable for development, testing, and quick prototyping.
+// InMemoryStore is a thread-safe, in-memory implementation of adk.SessionStore
+// and CheckPointStore (with Delete support). Suitable for testing and
+// single-process deployments where durability is not required.
 type InMemoryStore struct {
-	mu          sync.Mutex
-	checkpoints map[string][]byte
-	events      map[string][][]byte
-	turnEnds    map[string]turnEndRecord
+    mu          sync.Mutex
+    events      map[string][][]byte
+    checkpoints map[string][]byte
 }
 
-type turnEndRecord struct {
-	afterCursor string
-	data        []byte
-}
-
-// NewInMemoryStore creates a new in-memory store.
+// NewInMemoryStore creates a new InMemoryStore.
 func NewInMemoryStore() *InMemoryStore {
-	return &InMemoryStore{
-		checkpoints: make(map[string][]byte),
-		events:      make(map[string][][]byte),
-		turnEnds:    make(map[string]turnEndRecord),
-	}
+    return &InMemoryStore{
+        events:      make(map[string][][]byte),
+        checkpoints: make(map[string][]byte),
+    }
 }
 
-func (s *InMemoryStore) Set(_ context.Context, key string, value []byte) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.checkpoints[key] = append([]byte{}, value...)
-	return nil
-}
-
-func (s *InMemoryStore) Get(_ context.Context, key string) ([]byte, bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	value, ok := s.checkpoints[key]
-	if !ok {
-		return nil, false, nil
-	}
-	return append([]byte{}, value...), true, nil
-}
-
-func (s *InMemoryStore) Delete(_ context.Context, key string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	delete(s.checkpoints, key)
-	return nil
-}
-
-// AppendEvents appends JSON-encoded SessionEvent payloads to the session log.
+// AppendEvents appends events to the session's event log.
 func (s *InMemoryStore) AppendEvents(_ context.Context, sessionID string, events [][]byte) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for _, e := range events {
-		s.events[sessionID] = append(s.events[sessionID], append([]byte{}, e...))
-	}
-	return nil
+    s.mu.Lock()
+    defer s.mu.Unlock()
+    for _, e := range events {
+        s.events[sessionID] = append(s.events[sessionID], append([]byte{}, e...))
+    }
+    return nil
 }
 
-// LoadEvents loads session events with pagination support.
+// LoadEvents loads events with pagination and direction support.
 func (s *InMemoryStore) LoadEvents(_ context.Context, sessionID string, opts *adk.LoadEventsRequest) (*adk.LoadEventsResult, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+    s.mu.Lock()
+    defer s.mu.Unlock()
 
-	all := s.events[sessionID]
-	total := len(all)
+    all := s.events[sessionID]
+    if opts == nil {
+        opts = &adk.LoadEventsRequest{}
+    }
 
-	if opts == nil {
-		opts = &adk.LoadEventsRequest{}
-	}
-
-	if opts.Reverse {
-		// Reverse pagination: After encodes the offset of the next event
-		// to return when reading backwards. Initial state: total (read total-1 first).
-		var nextOffset int
-		if opts.After == "" {
-			nextOffset = total
-		} else {
-			parsed, err := decodeOffset(opts.After)
-			if err != nil {
-				return nil, fmt.Errorf("invalid After cursor: %w", err)
-			}
-			nextOffset = parsed
-		}
-		if nextOffset < 0 {
-			nextOffset = 0
-		}
-		if nextOffset > total {
-			nextOffset = total
-		}
-		limit := opts.Limit
-		if limit <= 0 || limit > nextOffset {
-			limit = nextOffset
-		}
-		out := make([][]byte, 0, limit)
-		for i := 0; i < limit; i++ {
-			idx := nextOffset - 1 - i
-			if idx < 0 {
-				break
-			}
-			out = append(out, append([]byte{}, all[idx]...))
-		}
-		newOffset := nextOffset - limit
-		var nextToken string
-		if newOffset > 0 {
-			nextToken = encodeOffset(newOffset)
-		}
-		return &adk.LoadEventsResult{Events: out, Next: nextToken}, nil
-	}
-
-	// Forward pagination from After. When After is non-empty, only events
-	// strictly after that position are returned (used for both initial
-	// afterCursor loads and continuation pages).
-	startOffset := 0
-	if opts.After != "" {
-		parsed, err := decodeOffset(opts.After)
-		if err != nil {
-			return nil, fmt.Errorf("invalid After cursor: %w", err)
-		}
-		startOffset = parsed
-	}
-	if startOffset < 0 {
-		startOffset = 0
-	}
-	if startOffset > total {
-		startOffset = total
-	}
-	return paginateForward(all, startOffset, opts.Limit), nil
+    if opts.Reverse {
+        return s.loadReverse(all, opts)
+    }
+    return s.loadForward(all, opts)
 }
 
-// paginateForward returns up to limit events starting at startOffset.
-// limit <= 0 means no limit.
-func paginateForward(all [][]byte, startOffset, limit int) *adk.LoadEventsResult {
-	total := len(all)
-	end := total
-	if limit > 0 && startOffset+limit < total {
-		end = startOffset + limit
-	}
-	out := make([][]byte, 0, end-startOffset)
-	for i := startOffset; i < end; i++ {
-		out = append(out, append([]byte{}, all[i]...))
-	}
-	var nextToken string
-	if end < total {
-		nextToken = encodeOffset(end)
-	}
-	return &adk.LoadEventsResult{Events: out, Next: nextToken}
+func (s *InMemoryStore) loadForward(all [][]byte, opts *adk.LoadEventsRequest) (*adk.LoadEventsResult, error) {
+    start := 0
+    if opts.After != "" {
+        idx, err := strconv.Atoi(opts.After)
+        if err != nil {
+            return nil, err
+        }
+        start = idx
+    }
+    if start > len(all) {
+        start = len(all)
+    }
+
+    end := len(all)
+    if opts.Limit > 0 && start+opts.Limit < end {
+        end = start + opts.Limit
+    }
+
+    out := make([][]byte, end-start)
+    for i := range out {
+        out[i] = append([]byte{}, all[start+i]...)
+    }
+
+    var next string
+    if end < len(all) {
+        next = strconv.Itoa(end)
+    }
+    return &adk.LoadEventsResult{Events: out, Next: next}, nil
 }
 
-// SaveTurnEnd persists a TurnEndState snapshot. The store captures the current
-// event-log tail position internally so tail replay can reload events appended
-// after this snapshot via the After field in LoadEventsRequest.
-func (s *InMemoryStore) SaveTurnEnd(_ context.Context, sessionID string, turnEnd []byte) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	cursor := encodeOffset(len(s.events[sessionID]))
-	s.turnEnds[sessionID] = turnEndRecord{
-		afterCursor: cursor,
-		data:        append([]byte{}, turnEnd...),
-	}
-	return nil
+func (s *InMemoryStore) loadReverse(all [][]byte, opts *adk.LoadEventsRequest) (*adk.LoadEventsResult, error) {
+    // In reverse mode, After is the cursor indicating how far back we've read.
+    // It represents the index of the last element returned (exclusive from the top).
+    // First call (After=""): start from the end.
+    // Subsequent calls: start from the After position (exclusive, moving backwards).
+    end := len(all)
+    if opts.After != "" {
+        idx, err := strconv.Atoi(opts.After)
+        if err != nil {
+            return nil, err
+        }
+        end = idx
+    }
+    if end > len(all) {
+        end = len(all)
+    }
+    if end <= 0 {
+        return &adk.LoadEventsResult{}, nil
+    }
+
+    count := end
+    if opts.Limit > 0 && opts.Limit < count {
+        count = opts.Limit
+    }
+
+    start := end - count
+    out := make([][]byte, count)
+    for i := 0; i < count; i++ {
+        out[i] = append([]byte{}, all[end-1-i]...)
+    }
+
+    var next string
+    if start > 0 {
+        next = strconv.Itoa(start)
+    }
+    return &adk.LoadEventsResult{Events: out, Next: next}, nil
 }
 
-// LoadLatestTurnEnd loads the most recent TurnEndState snapshot for the session.
-func (s *InMemoryStore) LoadLatestTurnEnd(_ context.Context, sessionID string) (string, []byte, bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	rec, ok := s.turnEnds[sessionID]
-	if !ok {
-		return "", nil, false, nil
-	}
-	return rec.afterCursor, append([]byte{}, rec.data...), true, nil
+// Set stores a checkpoint value.
+func (s *InMemoryStore) Set(_ context.Context, checkPointID string, checkPoint []byte) error {
+    s.mu.Lock()
+    defer s.mu.Unlock()
+    s.checkpoints[checkPointID] = append([]byte{}, checkPoint...)
+    return nil
 }
 
-// encodeOffset encodes an integer offset as an opaque base64-encoded cursor.
-func encodeOffset(offset int) string {
-	return base64.StdEncoding.EncodeToString([]byte(strconv.Itoa(offset)))
+// Get retrieves a checkpoint value. Returns an independent copy.
+func (s *InMemoryStore) Get(_ context.Context, checkPointID string) ([]byte, bool, error) {
+    s.mu.Lock()
+    defer s.mu.Unlock()
+    v, ok := s.checkpoints[checkPointID]
+    if !ok {
+        return nil, false, nil
+    }
+    return append([]byte{}, v...), true, nil
 }
 
-// decodeOffset decodes a cursor produced by encodeOffset.
-func decodeOffset(s string) (int, error) {
-	raw, err := base64.StdEncoding.DecodeString(s)
-	if err != nil {
-		return 0, err
-	}
-	n, err := strconv.Atoi(string(raw))
-	if err != nil {
-		return 0, err
-	}
-	return n, nil
+// Delete removes a checkpoint.
+func (s *InMemoryStore) Delete(_ context.Context, checkPointID string) error {
+    s.mu.Lock()
+    defer s.mu.Unlock()
+    delete(s.checkpoints, checkPointID)
+    return nil
 }
