@@ -170,7 +170,7 @@ type runnerSessionRunState[M MessageType] struct {
 	sessionID       string
 	checkPointID    *string
 	latestState     *TurnEndState[M]
-	persistence     *SessionPersistenceConfig
+	persistence     SessionPersistenceConfig
 	sessionStore    SessionStore
 	checkPointStore CheckPointStore
 	// inputMessages are the caller-provided messages for this turn (before history prepend).
@@ -198,8 +198,6 @@ func prepareRunnerSessionRun[M MessageType]( //nolint:revive // argument-limit
 	sessionID string,
 	sessionStore SessionStore,
 	sessionPersistence *SessionPersistenceConfig,
-	_ []M,
-	_ map[string]any,
 ) (*runnerSessionRunState[M], error) {
 	state := &runnerSessionRunState[M]{}
 	if sessionID == "" || sessionStore == nil {
@@ -209,16 +207,15 @@ func prepareRunnerSessionRun[M MessageType]( //nolint:revive // argument-limit
 	state.sessionID = sessionID
 	state.sessionStore = sessionStore
 	state.checkPointStore = checkPointStore
-	state.persistence = sessionPersistence
+	state.persistence = normalizeSessionPersistenceConfig(sessionPersistence)
 	state.latestState = &TurnEndState[M]{}
 
-	pageSize := normalizeSessionPersistenceConfig(sessionPersistence).LoadPageSize
+	pageSize := state.persistence.LoadPageSize
 
-	afterMessageID, afterCursor, payload, exists, err := sessionStore.LoadLatestTurnEnd(ctx, sessionID)
+	afterCursor, payload, exists, err := sessionStore.LoadLatestTurnEnd(ctx, sessionID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load latest TurnEnd state for session[%s]: %w", sessionID, err)
 	}
-	_ = afterMessageID // informational/debug-only; afterCursor drives replay
 
 	if exists {
 		latestState, decodeErr := decodeTurnEndState[M](payload)
@@ -283,16 +280,15 @@ func prepareRunnerSessionResume[M MessageType](
 	state.sessionID = sessionID
 	state.sessionStore = sessionStore
 	state.checkPointStore = checkPointStore
-	state.persistence = sessionPersistence
+	state.persistence = normalizeSessionPersistenceConfig(sessionPersistence)
 	state.latestState = &TurnEndState[M]{}
 
-	pageSize := normalizeSessionPersistenceConfig(sessionPersistence).LoadPageSize
+	pageSize := state.persistence.LoadPageSize
 
-	afterMessageID, afterCursor, payload, exists, err := sessionStore.LoadLatestTurnEnd(ctx, sessionID)
+	afterCursor, payload, exists, err := sessionStore.LoadLatestTurnEnd(ctx, sessionID)
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to load latest TurnEnd state for session[%s]: %w", sessionID, err)
 	}
-	_ = afterMessageID
 
 	if exists {
 		latestState, decodeErr := decodeTurnEndState[M](payload)
@@ -427,7 +423,7 @@ func typedRunnerRunImpl[M MessageType](a TypedAgent[M], enableStreaming bool, st
 	o := getCommonOptions(nil, opts...)
 	exposeSessionEvents := o.enableSessionEvents
 
-	sessionState, err := prepareRunnerSessionRun(ctx, store, sessionID, sessionStore, sessionPersistence, messages, o.sessionValues)
+	sessionState, err := prepareRunnerSessionRun[M](ctx, store, sessionID, sessionStore, sessionPersistence)
 	if err != nil {
 		return errorIterator[M](err)
 	}
@@ -443,6 +439,12 @@ func typedRunnerRunImpl[M MessageType](a TypedAgent[M], enableStreaming bool, st
 		messages = append(append([]M{}, sessionState.latestState.Messages...), sessionState.inputMessages...)
 		o.sessionValues = mergeSessionValues(sessionState.latestState.SessionValues, o.sessionValues)
 		opts = append(opts, withEnableSessionEvents())
+		if !o.refreshToolInfos && len(sessionState.latestState.ToolInfos) > 0 {
+			opts = append(opts, withPreviousTurnToolInfos(
+				sessionState.latestState.ToolInfos,
+				sessionState.latestState.DeferredToolInfos,
+			))
+		}
 	}
 
 	input := &TypedAgentInput[M]{
@@ -598,7 +600,6 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 		interrupted     bool
 		cancelled       bool
 		turnEndBytes    []byte
-		afterMessageID  string
 		persister       *sessionEventPersister[M]
 		persistErr      error
 		// pendingCheckpoint defers checkpoint save to finalize() so the persister
@@ -713,7 +714,6 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 					setPersistErr(err)
 				} else {
 					turnEndBytes = data
-					afterMessageID = lastMessageID(event.TurnEndState.Messages)
 				}
 			}
 
@@ -809,7 +809,6 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 			interrupted:       interrupted,
 			cancelled:         cancelled,
 			turnEndBytes:      turnEndBytes,
-			afterMessageID:    afterMessageID,
 			sessionState:      sessionState,
 			store:             store,
 			checkPointID:      checkPointID,
@@ -840,7 +839,6 @@ type sessionTurnResult[M MessageType] struct {
 	interrupted       bool
 	cancelled         bool
 	turnEndBytes      []byte
-	afterMessageID    string
 	sessionState      *runnerSessionRunState[M]
 	store             CheckPointStore
 	checkPointID      *string
@@ -873,7 +871,7 @@ func (r *sessionTurnResult[M]) finalize(ctx context.Context) error {
 	if len(r.turnEndBytes) == 0 {
 		return fmt.Errorf("failed to commit session[%s]: missing TurnEndState", r.sessionState.sessionID)
 	}
-	if err := r.sessionState.sessionStore.SaveTurnEnd(ctx, r.sessionState.sessionID, r.afterMessageID, r.turnEndBytes); err != nil {
+	if err := r.sessionState.sessionStore.SaveTurnEnd(ctx, r.sessionState.sessionID, r.turnEndBytes); err != nil {
 		return fmt.Errorf("failed to save session turn end: %w", err)
 	}
 	if r.checkPointID != nil && r.store != nil {
