@@ -22,11 +22,16 @@ import (
 	"encoding/gob"
 	"fmt"
 	"io"
+	"time"
 
 	"github.com/cloudwego/eino/components"
 	"github.com/cloudwego/eino/internal/core"
 	"github.com/cloudwego/eino/schema"
 )
+
+func newEventTimestamp() time.Time {
+	return time.Now().UTC()
+}
 
 // ComponentOfAgent is the component type identifier for ADK agents in callbacks.
 // Use this to filter callback events to only agent-related events.
@@ -247,6 +252,7 @@ func gobDecodeAgenticMessageVariant(mv *TypedMessageVariant[*schema.AgenticMessa
 func typedEventFromMessage[M MessageType](msg M, msgStream *schema.StreamReader[M],
 	role schema.RoleType, toolName string) *TypedAgentEvent[M] {
 	return &TypedAgentEvent[M]{
+		Timestamp: newEventTimestamp(),
 		Output: &TypedAgentOutput[M]{
 			MessageOutput: &TypedMessageVariant[M]{
 				IsStreaming:   msgStream != nil,
@@ -297,6 +303,7 @@ func EventFromMessage(msg Message, msgStream *schema.StreamReader[Message],
 // In streaming mode, the role is available on the event before consuming the stream.
 func EventFromAgenticMessage(msg AgenticMessage, msgStream AgenticMessageStream, agenticRole schema.AgenticRoleType) *TypedAgentEvent[AgenticMessage] {
 	return &TypedAgentEvent[AgenticMessage]{
+		Timestamp: newEventTimestamp(),
 		Output: &TypedAgentOutput[AgenticMessage]{
 			MessageOutput: &TypedMessageVariant[AgenticMessage]{
 				IsStreaming:   msgStream != nil,
@@ -417,6 +424,11 @@ type runStepSerialization struct {
 // TypedAgentEvent represents a single event emitted during agent execution.
 // CheckpointSchema: persisted via serialization.RunCtx (gob).
 type TypedAgentEvent[M MessageType] struct {
+	// Timestamp is the wall-clock time when this event occurred at the ADK-visible
+	// emission boundary. The runtime fills it when unset; built-in wrappers set it
+	// at their semantic source boundary before sending the event.
+	Timestamp time.Time
+
 	AgentName string
 
 	// RunPath represents the execution path from root agent to the current event source.

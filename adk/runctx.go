@@ -241,7 +241,11 @@ func GetSessionValue(ctx context.Context, key string) (any, bool) {
 }
 
 func (rs *runSession) addEvent(event *AgentEvent) {
-	wrapper := &agentEventWrapper{AgentEvent: event, TS: time.Now().UnixNano()}
+	now := time.Now()
+	if event.Timestamp.IsZero() {
+		event.Timestamp = now.UTC()
+	}
+	wrapper := &agentEventWrapper{AgentEvent: event, TS: now.UnixNano()}
 	// If LaneEvents is not nil, we are in a parallel lane.
 	// Append to the lane's local event slice (lock-free).
 	if rs.LaneEvents != nil {
@@ -298,9 +302,13 @@ func addTypedEvent[M MessageType](session *runSession, event *TypedAgentEvent[M]
 		session.addEvent(any(event).(*AgentEvent))
 		return
 	}
+	now := time.Now()
+	if event.Timestamp.IsZero() {
+		event.Timestamp = now.UTC()
+	}
 	session.mtx.Lock()
 	defer session.mtx.Unlock()
-	wrapper := &typedAgentEventWrapper[M]{event: event, TS: time.Now().UnixNano()}
+	wrapper := &typedAgentEventWrapper[M]{event: event, TS: now.UnixNano()}
 	store, _ := session.TypedEvents.(*[]*typedAgentEventWrapper[M])
 	if store == nil {
 		s := make([]*typedAgentEventWrapper[M], 0)
