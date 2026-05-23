@@ -20,7 +20,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -320,7 +322,7 @@ func TestTailReplay_PartialTurnWithoutTurnEnd(t *testing.T) {
 	EnsureMessageID(r1)
 	for _, m := range []*schema.Message{a1, r1} {
 		se := &SessionEvent[*schema.Message]{Message: m}
-		data, err := encodeSessionEvent(se)
+		data, err := encodeSessionEvent(withTestEventID(se))
 		require.NoError(t, err)
 		require.NoError(t, store.AppendEvents(ctx, sid, [][]byte{data}))
 	}
@@ -328,7 +330,7 @@ func TestTailReplay_PartialTurnWithoutTurnEnd(t *testing.T) {
 	turnEndSE := &SessionEvent[*schema.Message]{TurnEnd: &TurnEndState[*schema.Message]{
 		Messages: []*schema.Message{a1, r1},
 	}}
-	teData, err := encodeSessionEvent(turnEndSE)
+	teData, err := encodeSessionEvent(withTestEventID(turnEndSE))
 	require.NoError(t, err)
 	require.NoError(t, store.AppendEvents(ctx, sid, [][]byte{teData}))
 
@@ -340,7 +342,7 @@ func TestTailReplay_PartialTurnWithoutTurnEnd(t *testing.T) {
 	EnsureMessageID(r2)
 	for _, m := range []*schema.Message{a2, r2} {
 		se := &SessionEvent[*schema.Message]{Message: m}
-		data, err := encodeSessionEvent(se)
+		data, err := encodeSessionEvent(withTestEventID(se))
 		require.NoError(t, err)
 		require.NoError(t, store.AppendEvents(ctx, sid, [][]byte{data}))
 	}
@@ -367,7 +369,7 @@ func TestTailReplay_NoTailEvents(t *testing.T) {
 	q := schema.UserMessage("Q")
 	EnsureMessageID(q)
 	se := &SessionEvent[*schema.Message]{Message: q}
-	data, err := encodeSessionEvent(se)
+	data, err := encodeSessionEvent(withTestEventID(se))
 	require.NoError(t, err)
 	require.NoError(t, store.AppendEvents(ctx, sid, [][]byte{data}))
 
@@ -375,7 +377,7 @@ func TestTailReplay_NoTailEvents(t *testing.T) {
 	turnEndSE := &SessionEvent[*schema.Message]{TurnEnd: &TurnEndState[*schema.Message]{
 		Messages: []*schema.Message{q},
 	}}
-	teData, err := encodeSessionEvent(turnEndSE)
+	teData, err := encodeSessionEvent(withTestEventID(turnEndSE))
 	require.NoError(t, err)
 	require.NoError(t, store.AppendEvents(ctx, sid, [][]byte{teData}))
 
@@ -398,14 +400,14 @@ func TestTailReplay_EmptySnapshotCursor(t *testing.T) {
 		m := schema.UserMessage("pre")
 		EnsureMessageID(m)
 		se := &SessionEvent[*schema.Message]{Message: m}
-		data, err := encodeSessionEvent(se)
+		data, err := encodeSessionEvent(withTestEventID(se))
 		require.NoError(t, err)
 		require.NoError(t, store.AppendEvents(ctx, sid, [][]byte{data}))
 	}
 	// MessagesReplaced boundary with empty slice — supersedes pre-boundary events.
 	empty := []*schema.Message{}
 	boundarySE := &SessionEvent[*schema.Message]{MessagesReplaced: &empty}
-	bData, err := encodeSessionEvent(boundarySE)
+	bData, err := encodeSessionEvent(withTestEventID(boundarySE))
 	require.NoError(t, err)
 	require.NoError(t, store.AppendEvents(ctx, sid, [][]byte{bData}))
 
@@ -413,7 +415,7 @@ func TestTailReplay_EmptySnapshotCursor(t *testing.T) {
 	postMsg := schema.UserMessage("post")
 	EnsureMessageID(postMsg)
 	se := &SessionEvent[*schema.Message]{Message: postMsg}
-	data, err := encodeSessionEvent(se)
+	data, err := encodeSessionEvent(withTestEventID(se))
 	require.NoError(t, err)
 	require.NoError(t, store.AppendEvents(ctx, sid, [][]byte{data}))
 
@@ -426,53 +428,115 @@ func TestTailReplay_EmptySnapshotCursor(t *testing.T) {
 // NewInMemoryStoreLocal returns a minimal in-package SessionStore for tests.
 func NewInMemoryStoreLocal(t *testing.T) SessionStore {
 	t.Helper()
-	return &inMemoryAdapter{
-		events: map[string][][]byte{},
-	}
+	return &inMemoryAdapter{}
 }
 
 // inMemoryAdapter is a minimal in-package SessionStore used by integration
-// tests. Uses decimal index as opaque cursor.
+// tests. Implements the EventID-based cursor contract (mirrors session.InMemoryStore).
 type inMemoryAdapter struct {
-	events map[string][][]byte
+	mu         sync.Mutex
+	events     map[string][][]byte
+	eventIDs   map[string][]string
+	eventIDIdx map[string]map[string]int
 }
 
 func (s *inMemoryAdapter) AppendEvents(_ context.Context, sid string, events [][]byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.events == nil {
+		s.events = map[string][][]byte{}
+	}
+	if s.eventIDs == nil {
+		s.eventIDs = map[string][]string{}
+	}
+	if s.eventIDIdx == nil {
+		s.eventIDIdx = map[string]map[string]int{}
+	}
+	idx, ok := s.eventIDIdx[sid]
+	if !ok {
+		idx = map[string]int{}
+		s.eventIDIdx[sid] = idx
+	}
 	for _, e := range events {
+		var h testEventHeader
+		if err := json.Unmarshal(e, &h); err != nil {
+			return fmt.Errorf("%w: %v", ErrInvalidEventID, err)
+		}
+		if h.EventID == "" {
+			return ErrInvalidEventID
+		}
+		if _, dup := idx[h.EventID]; dup {
+			continue
+		}
 		s.events[sid] = append(s.events[sid], append([]byte{}, e...))
+		s.eventIDs[sid] = append(s.eventIDs[sid], h.EventID)
+		idx[h.EventID] = len(s.events[sid]) - 1
 	}
 	return nil
 }
 
 func (s *inMemoryAdapter) LoadEvents(_ context.Context, sid string, opts *LoadEventsRequest) (*LoadEventsResult, error) {
-	all := s.events[sid]
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if opts == nil {
 		opts = &LoadEventsRequest{}
 	}
-	if opts.After != "" {
-		var idx int
-		_, _ = fmtSscan(opts.After, &idx)
-		if idx > len(all) {
-			idx = len(all)
-		}
-		out := make([][]byte, len(all)-idx)
-		for i := range out {
-			out[i] = append([]byte{}, all[idx+i]...)
-		}
-		return &LoadEventsResult{Events: out}, nil
-	}
+	all := s.events[sid]
+	ids := s.eventIDs[sid]
+	idx := s.eventIDIdx[sid]
+
 	if opts.Reverse {
-		out := make([][]byte, 0, len(all))
-		for i := len(all) - 1; i >= 0; i-- {
-			out = append(out, append([]byte{}, all[i]...))
+		end := len(all)
+		if opts.After != "" {
+			pos, ok := idx[opts.After]
+			if !ok {
+				return nil, ErrEventIDOutOfRange
+			}
+			end = pos
 		}
-		return &LoadEventsResult{Events: out}, nil
+		if end <= 0 {
+			return &LoadEventsResult{}, nil
+		}
+		count := end
+		if opts.Limit > 0 && opts.Limit < count {
+			count = opts.Limit
+		}
+		start := end - count
+		out := make([][]byte, count)
+		for i := 0; i < count; i++ {
+			out[i] = append([]byte{}, all[end-1-i]...)
+		}
+		var next string
+		if start > 0 {
+			next = ids[start]
+		}
+		return &LoadEventsResult{Events: out, Next: next}, nil
 	}
-	out := make([][]byte, len(all))
-	for i := range all {
-		out[i] = append([]byte{}, all[i]...)
+
+	start := 0
+	if opts.After != "" {
+		pos, ok := idx[opts.After]
+		if !ok {
+			return nil, ErrEventIDOutOfRange
+		}
+		start = pos + 1
 	}
-	return &LoadEventsResult{Events: out}, nil
+	if start > len(all) {
+		start = len(all)
+	}
+	end := len(all)
+	if opts.Limit > 0 && start+opts.Limit < end {
+		end = start + opts.Limit
+	}
+	out := make([][]byte, end-start)
+	for i := range out {
+		out[i] = append([]byte{}, all[start+i]...)
+	}
+	var next string
+	if end < len(all) && end > 0 {
+		next = ids[end-1]
+	}
+	return &LoadEventsResult{Events: out, Next: next}, nil
 }
 
 // TestPartialInterrupted_ThenNewRun verifies that when a turn is interrupted
@@ -493,7 +557,7 @@ func TestPartialInterrupted_ThenNewRun(t *testing.T) {
 	EnsureMessageID(r1)
 	for _, m := range []*schema.Message{q1, r1} {
 		se := &SessionEvent[*schema.Message]{Message: m}
-		data, err := encodeSessionEvent(se)
+		data, err := encodeSessionEvent(withTestEventID(se))
 		require.NoError(t, err)
 		require.NoError(t, store.AppendEvents(ctx, sid, [][]byte{data}))
 	}
@@ -501,7 +565,7 @@ func TestPartialInterrupted_ThenNewRun(t *testing.T) {
 	turnEndSE := &SessionEvent[*schema.Message]{TurnEnd: &TurnEndState[*schema.Message]{
 		Messages: []*schema.Message{q1, r1},
 	}}
-	teData, err := encodeSessionEvent(turnEndSE)
+	teData, err := encodeSessionEvent(withTestEventID(turnEndSE))
 	require.NoError(t, err)
 	require.NoError(t, store.AppendEvents(ctx, sid, [][]byte{teData}))
 
@@ -510,7 +574,7 @@ func TestPartialInterrupted_ThenNewRun(t *testing.T) {
 	EnsureMessageID(q2)
 	for _, m := range []*schema.Message{q2} {
 		se := &SessionEvent[*schema.Message]{Message: m}
-		data, err := encodeSessionEvent(se)
+		data, err := encodeSessionEvent(withTestEventID(se))
 		require.NoError(t, err)
 		require.NoError(t, store.AppendEvents(ctx, sid, [][]byte{data}))
 	}
@@ -587,12 +651,12 @@ func TestExplicitCheckpointResume_WithSessionMode(t *testing.T) {
 	for _, m := range prior.Messages {
 		EnsureMessageID(m)
 		se := &SessionEvent[*schema.Message]{Message: m}
-		data, err := encodeSessionEvent(se)
+		data, err := encodeSessionEvent(withTestEventID(se))
 		require.NoError(t, err)
 		require.NoError(t, store.AppendEvents(ctx, sid, [][]byte{data}))
 	}
 	turnEndSE := &SessionEvent[*schema.Message]{TurnEnd: prior}
-	teData, err := encodeSessionEvent(turnEndSE)
+	teData, err := encodeSessionEvent(withTestEventID(turnEndSE))
 	require.NoError(t, err)
 	require.NoError(t, store.AppendEvents(ctx, sid, [][]byte{teData}))
 
@@ -626,7 +690,7 @@ func TestResumePath_TailReplay(t *testing.T) {
 	EnsureMessageID(r1)
 	for _, m := range []*schema.Message{q1, r1} {
 		se := &SessionEvent[*schema.Message]{Message: m}
-		data, err := encodeSessionEvent(se)
+		data, err := encodeSessionEvent(withTestEventID(se))
 		require.NoError(t, err)
 		require.NoError(t, store.AppendEvents(ctx, sid, [][]byte{data}))
 	}
@@ -634,7 +698,7 @@ func TestResumePath_TailReplay(t *testing.T) {
 	turnEndSE := &SessionEvent[*schema.Message]{TurnEnd: &TurnEndState[*schema.Message]{
 		Messages: []*schema.Message{q1, r1},
 	}}
-	teData, err := encodeSessionEvent(turnEndSE)
+	teData, err := encodeSessionEvent(withTestEventID(turnEndSE))
 	require.NoError(t, err)
 	require.NoError(t, store.AppendEvents(ctx, sid, [][]byte{teData}))
 
@@ -642,7 +706,7 @@ func TestResumePath_TailReplay(t *testing.T) {
 	tailMsg := schema.UserMessage("post-snapshot")
 	EnsureMessageID(tailMsg)
 	se := &SessionEvent[*schema.Message]{Message: tailMsg}
-	data, err := encodeSessionEvent(se)
+	data, err := encodeSessionEvent(withTestEventID(se))
 	require.NoError(t, err)
 	require.NoError(t, store.AppendEvents(ctx, sid, [][]byte{data}))
 
