@@ -424,6 +424,14 @@ type runStepSerialization struct {
 // TypedAgentEvent represents a single event emitted during agent execution.
 // CheckpointSchema: persisted via serialization.RunCtx (gob).
 type TypedAgentEvent[M MessageType] struct {
+	// EventID is the run-unique identity of this event, allocated once at the
+	// first emission boundary by execCtx.send. Live (user-land) and persisted
+	// (SessionStore) copies of the same logical event share this ID, allowing
+	// SSE adapters to use it as `id:` and resume via SessionStore.LoadEvents.
+	// Format: UUIDv4 string when allocated by the runtime. Leave empty to let
+	// the runtime allocate; an explicitly set non-empty value is preserved.
+	EventID string
+
 	// Timestamp is the wall-clock time when this event occurred at the ADK-visible
 	// emission boundary. The runtime fills it when unset; built-in wrappers set it
 	// at their semantic source boundary before sending the event.
