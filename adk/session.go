@@ -27,6 +27,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/google/uuid"
+
 	einoserial "github.com/cloudwego/eino/internal/serialization"
 	"github.com/cloudwego/eino/schema"
 )
@@ -44,6 +46,39 @@ const (
 // interrupted in-flight turn that must be resumed before accepting new input.
 var ErrPendingSessionCheckpoint = errors.New("adk: pending session checkpoint")
 
+// ErrInvalidEventID is returned by AppendEvents when a payload's event_id is
+// empty or the payload bytes are not valid JSON / cannot be parsed for an
+// event_id field. Protocol-level: persisters MUST NOT retry.
+//
+// Note: stores accept any non-empty string as event_id. UUIDv4 is the
+// Runner-side allocation format (see SessionEvent.EventID) but is NOT
+// validated at the SessionStore boundary; downstream stores MAY accept other
+// non-empty identifiers (e.g. for migration or testing).
+var ErrInvalidEventID = errors.New("adk: session event has invalid event_id")
+
+// ErrEventIDOutOfRange is returned by LoadEvents when LoadEventsRequest.After
+// references an event_id that does not exist in the session log (e.g. due to
+// log compaction or a stale SSE Last-Event-ID). Callers can detect this and
+// fall back to a full reload.
+var ErrEventIDOutOfRange = errors.New("adk: session event id out of range")
+
+// protocolErrors enumerates protocol-level sentinels that persisters MUST
+// fail-fast on. Future protocol-level sentinels MUST be added here so that
+// isProtocolError stays the single source of truth.
+var protocolErrors = []error{ErrInvalidEventID}
+
+// isProtocolError reports whether err matches any protocol-level sentinel.
+// Used by the persister flush loop to bypass retry/backoff for protocol
+// violations while still applying the policy to infrastructure errors.
+func isProtocolError(err error) bool {
+	for _, target := range protocolErrors {
+		if errors.Is(err, target) {
+			return true
+		}
+	}
+	return false
+}
+
 const (
 	sessionRunnerCheckpointSuffix = "/runner_checkpoint"
 )
@@ -58,9 +93,49 @@ const (
 // (new Run while a checkpoint is pending) and the single-goroutine event loop within a turn.
 // Store implementations are NOT required to handle concurrent AppendEvents calls
 // for the same sessionID. Different sessionIDs may be written concurrently without restriction.
+//
+// Identity vs ordering: the Runner assigns each SessionEvent a session-unique
+// event_id (UUIDv4 — see SessionEvent.EventID). The SessionStore owns append
+// ordering and is responsible for resolving event_id ↔ position when servicing
+// LoadEvents.After / .Next. From the store's perspective, event_id is an
+// opaque non-empty string identity; UUIDv4 is the Runner allocation format,
+// not a store-enforced validation rule. External consumers (SSE) treat
+// event_id as the canonical event identity for de-duplication and
+// Last-Event-ID resume.
+//
+// Errors are split into two classes:
+//   - Protocol-level (e.g. ErrInvalidEventID): the input payload violates the
+//     wire contract (empty event_id or unparsable JSON). Stores MUST return
+//     such errors immediately; persisters MUST NOT retry them. Use
+//     isProtocolError(err) to test membership.
+//   - Infrastructure-level (e.g. network/db unavailable): transient; persisters
+//     apply the configured retry/backoff policy.
+//
+// SSE consumer contract:
+//   - SSE adapters MUST emit each SessionEvent's event_id as the SSE `id:` line
+//     so browsers/clients can populate Last-Event-ID on reconnect.
+//   - On reconnect, the SSE adapter passes Last-Event-ID as
+//     LoadEventsRequest.After (with Reverse=false) to resume forward delivery.
+//   - If LoadEvents returns ErrEventIDOutOfRange, the adapter SHOULD treat the
+//     client's cursor as expired and fall back to a full reload (After="").
 type SessionStore interface {
 	// AppendEvents appends one or more JSON-encoded SessionEvent payloads to the session log.
 	// Events are appended in the order given. The store assigns ordering internally.
+	//
+	// Each event payload MUST carry a non-empty event_id. If the payload's event_id
+	// is empty OR the payload bytes are not valid JSON / cannot be parsed for an
+	// event_id field, the store MUST return ErrInvalidEventID (a sentinel;
+	// persisters will not retry it). Stores treat event_id as an opaque non-empty
+	// string and MUST NOT validate format (UUIDv4 is the Runner allocation
+	// convention, not a store-enforced contract). If a payload with an event_id
+	// already present in the session is appended, the store MUST silently skip it
+	// (no error, no duplicate entry); payload bytes are NOT compared —
+	// first-write-wins.
+	//
+	// Batch atomicity is NOT required: on a mid-batch ErrInvalidEventID, earlier
+	// valid payloads MAY have been persisted. Callers MUST treat AppendEvents as
+	// best-effort batch + idempotent retry — re-issuing the same batch is safe
+	// because already-stored event_ids are silently skipped.
 	AppendEvents(ctx context.Context, sessionID string, events [][]byte) error
 
 	// LoadEvents loads session events with pagination support.
@@ -71,12 +146,15 @@ type SessionStore interface {
 
 // LoadEventsRequest configures event loading pagination and direction.
 type LoadEventsRequest struct {
-	// After is an opaque position cursor. Events strictly after this position
-	// are returned. On the first call, pass empty to start from the beginning.
-	// On subsequent pages, pass the Next value from the previous LoadEventsResult.
-	// When non-empty and Reverse is false, only events after this position are
-	// returned (forward/chronological). When Reverse is true and After is empty,
-	// events are returned newest-first from the log tail.
+	// After is the last-seen event_id used as a directional cursor:
+	//   - When Reverse=false: returns events strictly NEWER than the event with
+	//     this id (in append order). Empty means start from the head.
+	//   - When Reverse=true: returns events strictly OLDER than the event with
+	//     this id. Empty means start from the tail.
+	//
+	// If the supplied event_id is not found in the session log, the store MUST
+	// return ErrEventIDOutOfRange (a sentinel). Callers (e.g. SSE adapters) can
+	// catch this to fall back to a full re-load instead of failing the request.
 	After string
 	// Limit is the maximum number of events to return. 0 means no limit (load all).
 	Limit int
@@ -89,8 +167,10 @@ type LoadEventsRequest struct {
 type LoadEventsResult struct {
 	// Events are the JSON-encoded SessionEvent payloads.
 	Events [][]byte
-	// Next is the opaque cursor for the next page. Empty means no more pages.
-	// Pass it back as LoadEventsRequest.After to continue pagination.
+	// Next is the event_id of the LAST event in this page in the direction of
+	// travel — i.e. the newest event for forward, the oldest event for reverse.
+	// Pass it back as LoadEventsRequest.After (with the same Reverse flag) to
+	// continue. Empty when the page reached the corresponding end of the log.
 	Next string
 }
 
@@ -102,6 +182,19 @@ type LoadEventsResult struct {
 // field within TurnEnd is intentionally left nil — messages are reconstructed from the
 // event log on read.
 type SessionEvent[M MessageType] struct {
+	// EventID is the canonical, session-unique identity of this event.
+	// Assigned exactly once by the Runner at event materialization
+	// (in makeInputSessionEvent / toSessionEvent). Persister-level retries
+	// re-send the same payload bytes and therefore the same EventID, which is
+	// what enables AppendEvents idempotency. Runner-allocated EventIDs are
+	// UUIDv4 strings; SessionStore implementations treat EventID as an opaque
+	// non-empty string and do NOT enforce UUIDv4 format (see SessionStore docs).
+	//
+	// Distinct from MessageUpdatedEvent.MessageID: EventID identifies the
+	// session event envelope; MessageID identifies a logical message inside
+	// the session message array.
+	EventID string `json:"event_id"`
+
 	// Timestamp is inherited from the source AgentEvent and represents the event
 	// occurrence time, not the SessionStore persistence time.
 	Timestamp time.Time `json:"timestamp,omitempty"`
@@ -237,7 +330,7 @@ func DecodeSessionEvent[M MessageType](data []byte) (*SessionEvent[M], error) {
 
 // makeInputSessionEvent wraps an input message as a SessionEvent.
 func makeInputSessionEvent[M MessageType](msg M) *SessionEvent[M] {
-	return &SessionEvent[M]{Timestamp: newEventTimestamp(), Message: msg}
+	return &SessionEvent[M]{EventID: uuid.NewString(), Timestamp: newEventTimestamp(), Message: msg}
 }
 
 // toSessionEvent converts an internal TypedAgentEvent into the persistence format.
@@ -270,6 +363,7 @@ func toSessionEvent[M MessageType](event *TypedAgentEvent[M]) *SessionEvent[M] {
 	default:
 		return nil
 	}
+	se.EventID = uuid.NewString()
 	return se
 }
 
@@ -395,6 +489,11 @@ func (p *sessionEventPersister[M]) run() {
 			}
 			if err := p.store.AppendEvents(p.ctx, p.sessionID, entries); err != nil {
 				lastErr = err
+				if isProtocolError(err) {
+					// Protocol-level: fail fast, no retry, no backoff.
+					p.setErr(err)
+					return
+				}
 				continue
 			}
 			return // success
