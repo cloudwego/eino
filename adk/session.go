@@ -334,7 +334,8 @@ func makeInputSessionEvent[M MessageType](msg M) *SessionEvent[M] {
 }
 
 // toSessionEvent converts an internal TypedAgentEvent into the persistence format.
-// Returns nil if the event has no persistable content.
+// Returns nil if the event has no persistable content. Reuses event.EventID
+// allocated upstream by execCtx.send so live and persisted views share identity.
 func toSessionEvent[M MessageType](event *TypedAgentEvent[M]) *SessionEvent[M] {
 	if event == nil {
 		return nil
@@ -363,7 +364,15 @@ func toSessionEvent[M MessageType](event *TypedAgentEvent[M]) *SessionEvent[M] {
 	default:
 		return nil
 	}
-	se.EventID = uuid.NewString()
+	// Reuse the EventID allocated at the AgentEvent emission boundary (execCtx.send).
+	// Defensive fallback: if the upstream did not allocate (e.g. test fixtures
+	// constructing events directly), allocate here so the persisted record always
+	// carries identity.
+	if event.EventID != "" {
+		se.EventID = event.EventID
+	} else {
+		se.EventID = uuid.NewString()
+	}
 	return se
 }
 
