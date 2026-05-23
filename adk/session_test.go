@@ -18,12 +18,15 @@ package adk
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -31,14 +34,41 @@ import (
 )
 
 // sessionHelperStore is a single-session in-memory SessionStore for unit tests.
+// Mirrors the EventID-based cursor semantics of session.InMemoryStore so the
+// in-package tests exercise the same protocol contract.
 type sessionHelperStore struct {
 	mu          sync.Mutex
 	checkpoints map[string][]byte
 
-	events    [][]byte
-	loadErr   error
-	appendErr error
-	deleteErr error
+	events     [][]byte
+	eventIDs   []string
+	eventIDIdx map[string]int
+	loadErr    error
+	appendErr  error
+	deleteErr  error
+}
+
+// testEventHeader is the minimal envelope used to extract event_id without
+// fully decoding the payload.
+type testEventHeader struct {
+	EventID string `json:"event_id"`
+}
+
+// withTestEventID assigns a fresh UUIDv4 to the SessionEvent if its EventID is
+// empty. Tests that construct SessionEvent literals directly bypass the Runner
+// allocation paths, so they must still satisfy the AppendEvents wire contract.
+func withTestEventID[M MessageType](se *SessionEvent[M]) *SessionEvent[M] {
+	if se != nil && se.EventID == "" {
+		se.EventID = uuid.NewString()
+	}
+	return se
+}
+
+// validTestPayload returns a JSON payload that satisfies the AppendEvents
+// wire contract (non-empty event_id) for persister-level tests that don't
+// care about the SessionEvent body.
+func validTestPayload() []byte {
+	return []byte(`{"event_id":"` + uuid.NewString() + `"}`)
 }
 
 type runnerSessionAgent struct {
@@ -106,7 +136,10 @@ func (a *streamingSessionAgent) Run(_ context.Context, _ *AgentInput, _ ...Agent
 }
 
 func newSessionHelperStore() *sessionHelperStore {
-	return &sessionHelperStore{checkpoints: make(map[string][]byte)}
+	return &sessionHelperStore{
+		checkpoints: make(map[string][]byte),
+		eventIDIdx:  make(map[string]int),
+	}
 }
 
 func (s *sessionHelperStore) Set(_ context.Context, key string, value []byte) error {
@@ -140,7 +173,19 @@ func (s *sessionHelperStore) AppendEvents(_ context.Context, _ string, events []
 		return s.appendErr
 	}
 	for _, e := range events {
+		var h testEventHeader
+		if err := json.Unmarshal(e, &h); err != nil {
+			return fmt.Errorf("%w: %v", ErrInvalidEventID, err)
+		}
+		if h.EventID == "" {
+			return ErrInvalidEventID
+		}
+		if _, dup := s.eventIDIdx[h.EventID]; dup {
+			continue
+		}
 		s.events = append(s.events, append([]byte{}, e...))
+		s.eventIDs = append(s.eventIDs, h.EventID)
+		s.eventIDIdx[h.EventID] = len(s.events) - 1
 	}
 	return nil
 }
@@ -151,47 +196,65 @@ func (s *sessionHelperStore) LoadEvents(_ context.Context, _ string, opts *LoadE
 	if s.loadErr != nil {
 		return nil, s.loadErr
 	}
-	all := append([][]byte{}, s.events...)
-	if opts != nil && opts.After != "" {
-		// After encoded as decimal index for simplicity in test helper.
-		var idx int
-		_, err := fmtSscan(opts.After, &idx)
-		if err != nil {
-			return nil, err
-		}
-		if idx < 0 {
-			idx = 0
-		}
-		if idx > len(all) {
-			idx = len(all)
-		}
-		return &LoadEventsResult{Events: all[idx:]}, nil
+	if opts == nil {
+		opts = &LoadEventsRequest{}
 	}
-	if opts != nil && opts.Reverse {
-		out := make([][]byte, 0, len(all))
-		for i := len(all) - 1; i >= 0; i-- {
-			out = append(out, all[i])
-		}
-		return &LoadEventsResult{Events: out}, nil
-	}
-	return &LoadEventsResult{Events: all}, nil
-}
+	all := s.events
+	ids := s.eventIDs
 
-// fmtSscan is a tiny helper to parse the decimal cursor used by the helper store.
-func fmtSscan(s string, out *int) (int, error) {
-	n := 0
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if c < '0' || c > '9' {
-			return 0, errInvalidCursor
+	if opts.Reverse {
+		end := len(all)
+		if opts.After != "" {
+			pos, ok := s.eventIDIdx[opts.After]
+			if !ok {
+				return nil, ErrEventIDOutOfRange
+			}
+			end = pos
 		}
-		n = n*10 + int(c-'0')
+		if end <= 0 {
+			return &LoadEventsResult{}, nil
+		}
+		count := end
+		if opts.Limit > 0 && opts.Limit < count {
+			count = opts.Limit
+		}
+		start := end - count
+		out := make([][]byte, count)
+		for i := 0; i < count; i++ {
+			out[i] = append([]byte{}, all[end-1-i]...)
+		}
+		var next string
+		if start > 0 {
+			next = ids[start]
+		}
+		return &LoadEventsResult{Events: out, Next: next}, nil
 	}
-	*out = n
-	return 1, nil
-}
 
-var errInvalidCursor = errors.New("invalid cursor")
+	start := 0
+	if opts.After != "" {
+		pos, ok := s.eventIDIdx[opts.After]
+		if !ok {
+			return nil, ErrEventIDOutOfRange
+		}
+		start = pos + 1
+	}
+	if start > len(all) {
+		start = len(all)
+	}
+	end := len(all)
+	if opts.Limit > 0 && start+opts.Limit < end {
+		end = start + opts.Limit
+	}
+	out := make([][]byte, end-start)
+	for i := range out {
+		out[i] = append([]byte{}, all[start+i]...)
+	}
+	var next string
+	if end < len(all) && end > 0 {
+		next = ids[end-1]
+	}
+	return &LoadEventsResult{Events: out, Next: next}, nil
+}
 
 func TestRunnerSessionModePrependsCommittedMessagesOnce(t *testing.T) {
 	ctx := context.Background()
@@ -306,7 +369,7 @@ func TestTurnEndStateSessionValues_JSONLikeRoundTrip(t *testing.T) {
 	}
 
 	se := &SessionEvent[*schema.Message]{TurnEnd: state}
-	data, err := encodeSessionEvent(se)
+	data, err := encodeSessionEvent(withTestEventID(se))
 	require.NoError(t, err)
 	decoded, err := decodeSessionEvent[*schema.Message](data)
 	require.NoError(t, err)
@@ -522,7 +585,7 @@ func TestSessionPersister_EnqueueAfterClose(t *testing.T) {
 
 	require.NoError(t, persister.closeAndWait())
 	// Must not panic.
-	assert.NoError(t, persister.enqueue([]byte(`{"x":1}`)))
+	assert.NoError(t, persister.enqueue(validTestPayload()))
 }
 
 // TestSessionPersister_EmptyPayloadSkipped verifies enqueue silently discards
@@ -556,7 +619,7 @@ func TestSessionPersister_EmptyPayloadSkipped(t *testing.T) {
 func TestTurnEndState_GobRoundtripNilFields(t *testing.T) {
 	original := &TurnEndState[*schema.Message]{}
 	se := &SessionEvent[*schema.Message]{TurnEnd: original}
-	encoded, err := encodeSessionEvent(se)
+	encoded, err := encodeSessionEvent(withTestEventID(se))
 	require.NoError(t, err)
 	decoded, err := decodeSessionEvent[*schema.Message](encoded)
 	require.NoError(t, err)
@@ -882,7 +945,7 @@ func TestReconstructFromEventLog_MultiTurn(t *testing.T) {
 	EnsureMessageID(a1)
 	for _, m := range []*schema.Message{q1, a1} {
 		se := &SessionEvent[*schema.Message]{Message: m}
-		data, err := encodeSessionEvent(se)
+		data, err := encodeSessionEvent(withTestEventID(se))
 		require.NoError(t, err)
 		require.NoError(t, store.AppendEvents(ctx, sid, [][]byte{data}))
 	}
@@ -893,7 +956,7 @@ func TestReconstructFromEventLog_MultiTurn(t *testing.T) {
 	EnsureMessageID(a2)
 	for _, m := range []*schema.Message{q2, a2} {
 		se := &SessionEvent[*schema.Message]{Message: m}
-		data, err := encodeSessionEvent(se)
+		data, err := encodeSessionEvent(withTestEventID(se))
 		require.NoError(t, err)
 		require.NoError(t, store.AppendEvents(ctx, sid, [][]byte{data}))
 	}
@@ -930,7 +993,7 @@ func TestReconstructFromEventLog_WithSummarizationBoundary(t *testing.T) {
 		m := schema.UserMessage("pre")
 		EnsureMessageID(m)
 		se := &SessionEvent[*schema.Message]{Message: m}
-		data, err := encodeSessionEvent(se)
+		data, err := encodeSessionEvent(withTestEventID(se))
 		require.NoError(t, err)
 		require.NoError(t, store.AppendEvents(ctx, sid, [][]byte{data}))
 	}
@@ -940,7 +1003,7 @@ func TestReconstructFromEventLog_WithSummarizationBoundary(t *testing.T) {
 	EnsureMessageID(summary)
 	repl := []*schema.Message{summary}
 	se := &SessionEvent[*schema.Message]{MessagesReplaced: &repl}
-	data, err := encodeSessionEvent(se)
+	data, err := encodeSessionEvent(withTestEventID(se))
 	require.NoError(t, err)
 	require.NoError(t, store.AppendEvents(ctx, sid, [][]byte{data}))
 
@@ -948,7 +1011,7 @@ func TestReconstructFromEventLog_WithSummarizationBoundary(t *testing.T) {
 	post := schema.AssistantMessage("post", nil)
 	EnsureMessageID(post)
 	se = &SessionEvent[*schema.Message]{Message: post}
-	data, err = encodeSessionEvent(se)
+	data, err = encodeSessionEvent(withTestEventID(se))
 	require.NoError(t, err)
 	require.NoError(t, store.AppendEvents(ctx, sid, [][]byte{data}))
 
@@ -1177,7 +1240,7 @@ func TestSessionPersister_EnqueueAfterAppendError(t *testing.T) {
 	p := newSessionEventPersister[*schema.Message](ctx, store, "sid", cfg)
 	defer p.closeAndWait()
 
-	require.NoError(t, p.enqueue([]byte(`{"i":1}`)))
+	require.NoError(t, p.enqueue(validTestPayload()))
 	// Wait for the run loop to attempt AppendEvents and record the error.
 	deadline := time.Now().Add(500 * time.Millisecond)
 	for time.Now().Before(deadline) {
@@ -1188,7 +1251,7 @@ func TestSessionPersister_EnqueueAfterAppendError(t *testing.T) {
 	}
 	require.Error(t, p.getErr(), "persister must record the AppendEvents failure")
 
-	err := p.enqueue([]byte(`{"i":2}`))
+	err := p.enqueue(validTestPayload())
 	require.Error(t, err, "enqueue after persist failure must return an error")
 }
 
@@ -1238,7 +1301,7 @@ func TestSessionPersister_FlushRetryTransientRecovery(t *testing.T) {
 	})
 	p := newSessionEventPersister[*schema.Message](ctx, store, "sid", cfg)
 
-	require.NoError(t, p.enqueue([]byte(`{"i":1}`)))
+	require.NoError(t, p.enqueue(validTestPayload()))
 
 	err := p.closeAndWait()
 	require.NoError(t, err, "persister should recover after transient failures")
@@ -1270,7 +1333,7 @@ func TestSessionPersister_FlushRetryPermanentFailure(t *testing.T) {
 	})
 	p := newSessionEventPersister[*schema.Message](ctx, store, "sid", cfg)
 
-	require.NoError(t, p.enqueue([]byte(`{"i":1}`)))
+	require.NoError(t, p.enqueue(validTestPayload()))
 
 	err := p.closeAndWait()
 	require.Error(t, err)
@@ -1298,7 +1361,7 @@ func TestSessionPersister_FlushRetryContextCancellation(t *testing.T) {
 	})
 	p := newSessionEventPersister[*schema.Message](ctx, store, "sid", cfg)
 
-	require.NoError(t, p.enqueue([]byte(`{"i":1}`)))
+	require.NoError(t, p.enqueue(validTestPayload()))
 
 	// Wait for the first attempt to fail, then cancel during backoff.
 	time.Sleep(50 * time.Millisecond)
