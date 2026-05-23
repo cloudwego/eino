@@ -22,6 +22,7 @@ import (
 	"os"
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -329,7 +330,7 @@ func TestPatchToolCallsIntegration_PersistsMessageInserted(t *testing.T) {
 	}
 
 	for _, m := range []*schema.Message{user, dangling} {
-		se := &adk.SessionEvent[*schema.Message]{Message: m}
+		se := &adk.SessionEvent[*schema.Message]{EventID: uuid.NewString(), Message: m}
 		data, err := adk.EncodeSessionEvent(se)
 		require.NoError(t, err)
 		require.NoError(t, store.AppendEvents(ctx, sid, [][]byte{data}))
@@ -431,7 +432,7 @@ func TestReductionIntegration_PersistsBothMessageUpdated(t *testing.T) {
 		Extra:      map[string]any{"_eino_msg_id": "tool-B-id"},
 	}
 	for _, m := range []*schema.Message{user, assistantA, toolResultA, assistantB, toolResultB} {
-		se := &adk.SessionEvent[*schema.Message]{Message: m}
+		se := &adk.SessionEvent[*schema.Message]{EventID: uuid.NewString(), Message: m}
 		data, err := adk.EncodeSessionEvent(se)
 		require.NoError(t, err)
 		require.NoError(t, store.AppendEvents(ctx, sid, [][]byte{data}))
