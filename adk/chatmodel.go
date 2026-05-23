@@ -28,6 +28,7 @@ import (
 	"sync/atomic"
 
 	"github.com/bytedance/sonic"
+	"github.com/google/uuid"
 
 	"github.com/cloudwego/eino/adk/internal"
 	"github.com/cloudwego/eino/components/model"
@@ -64,6 +65,12 @@ func (e *typedChatModelAgentExecCtx[M]) send(event *TypedAgentEvent[M]) {
 	}
 	if e.cancelCtx != nil && e.cancelCtx.isImmediateCancelled() {
 		return
+	}
+	// Allocate EventID at the first emission boundary so live (user-land) and
+	// persisted (SessionStore) copies of the same logical event share identity.
+	// User-supplied non-empty IDs (e.g. replay scenarios) are preserved.
+	if event != nil && event.EventID == "" {
+		event.EventID = uuid.NewString()
 	}
 	e.generator.trySend(event)
 }
