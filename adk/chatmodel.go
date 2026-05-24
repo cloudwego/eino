@@ -1285,6 +1285,9 @@ func (a *TypedChatModelAgent[M]) buildMessageReActRunFunc(_ context.Context, bc 
 			cancelCtx:                cancelCtx,
 			failoverLastSuccessModel: msgModel,
 			afterToolCallsHook:       mp.afterToolCallsHook,
+			sessionEvents:            mp.sessionEvents,
+			timelineEvents:           mp.timelineEvents,
+			internalTimelineEvents:   mp.internalTimelineEvents,
 		})
 
 		// Pre-execution cancel check
@@ -1619,6 +1622,7 @@ func (a *TypedChatModelAgent[M]) Run(ctx context.Context, input *TypedAgentInput
 			co = append(co, compose.WithToolsNodeOption(compose.WithToolList(bc.toolsNodeConf.Tools...)))
 		}
 	}
+	ctx = contextWithToolPermissionDecisionStore(ctx)
 
 	go func() {
 		defer func() {
@@ -1747,6 +1751,7 @@ func (a *TypedChatModelAgent[M]) Resume(ctx context.Context, info *ResumeInfo, o
 			return nil
 		}))
 	}
+	ctx = contextWithToolPermissionDecisionStore(ctx)
 
 	go func() {
 		defer func() {
