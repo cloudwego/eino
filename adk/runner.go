@@ -226,7 +226,7 @@ func prepareRunnerSessionRun[M MessageType]( //nolint:revive // argument-limit
 
 	pageSize := state.persistence.LoadPageSize
 
-	reconstructed, err := reconstructSessionState[M](ctx, sessionStore, sessionID, pageSize)
+	reconstructed, err := reconstructSessionState[M](ctx, sessionStore, sessionID, pageSize, state.persistence.EventSerializer)
 	if err != nil {
 		return nil, fmt.Errorf("failed to reconstruct session[%s]: %w", sessionID, err)
 	}
@@ -280,7 +280,7 @@ func prepareRunnerSessionResume[M MessageType](
 
 	pageSize := state.persistence.LoadPageSize
 
-	reconstructed, err := reconstructSessionState[M](ctx, sessionStore, sessionID, pageSize)
+	reconstructed, err := reconstructSessionState[M](ctx, sessionStore, sessionID, pageSize, state.persistence.EventSerializer)
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to reconstruct session[%s]: %w", sessionID, err)
 	}
@@ -612,7 +612,7 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 			setPersistErr(err)
 			return
 		}
-		data, err := encodeSessionEvent(se)
+		data, err := encodeSessionEventWithSerializer(se, sessionState.persistence.EventSerializer)
 		if err != nil {
 			setPersistErr(err)
 			return
