@@ -25,10 +25,14 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/mock/gomock"
 
 	"github.com/cloudwego/eino/adk"
+	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
+	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/internal/core"
+	mockModel "github.com/cloudwego/eino/internal/mock/components/model"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -64,6 +68,26 @@ func TestWrapInvokableToolCall_AllowWithUpdatedInput(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "ok", result)
 	assert.Equal(t, `{"path":"/tmp/safe.txt"}`, received)
+}
+
+func TestWrapInvokableToolCall_AllowWithExplicitEmptyUpdatedInput(t *testing.T) {
+	m := NewTyped[*schema.Message](func(ctx context.Context, tCtx *adk.ToolContext, args *schema.ToolArgument) (*GateCheckResult, error) {
+		return &GateCheckResult{Decision: GateAllow, HasUpdatedInput: true}, nil
+	})
+
+	received := "not called"
+	endpoint := adk.InvokableToolCallEndpoint(func(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (string, error) {
+		received = argumentsInJSON
+		return "ok", nil
+	})
+
+	wrapped, err := m.WrapInvokableToolCall(context.Background(), endpoint, &adk.ToolContext{Name: "WriteFile", CallID: "call_empty_update"})
+	require.NoError(t, err)
+
+	result, err := wrapped(context.Background(), `{"path":"/tmp/file"}`)
+	require.NoError(t, err)
+	assert.Equal(t, "ok", result)
+	assert.Empty(t, received)
 }
 
 func TestWrapStreamableToolCall_Deny(t *testing.T) {
@@ -122,6 +146,58 @@ func TestWrapInvokableToolCall_Respond(t *testing.T) {
 	assert.False(t, endpointCalled)
 	assert.Equal(t, formatRespondResult(tCtx.Name, "Explain first."), result)
 	assert.NotContains(t, result, "Permission denied")
+}
+
+func TestWrapInvokableToolCall_ResumeApproveUsesSavedInterruptedArguments(t *testing.T) {
+	m := NewTyped[*schema.Message](func(ctx context.Context, tCtx *adk.ToolContext, args *schema.ToolArgument) (*GateCheckResult, error) {
+		return &GateCheckResult{Decision: GateAsk, Message: "approve write?"}, nil
+	})
+
+	var received string
+	endpoint := adk.InvokableToolCallEndpoint(func(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (string, error) {
+		received = argumentsInJSON
+		return "ok", nil
+	})
+
+	tCtx := &adk.ToolContext{Name: "WriteFile", CallID: "call_saved_args"}
+	wrapped, err := m.WrapInvokableToolCall(context.Background(), endpoint, tCtx)
+	require.NoError(t, err)
+
+	_, err = wrapped(withAddress(context.Background()), `{"path":"/tmp/approved"}`)
+	require.Error(t, err)
+	var signal *core.InterruptSignal
+	require.True(t, errors.As(err, &signal))
+
+	result, err := wrapped(resumeContext(signal, &ResumeResponse{Action: ResumeActionApprove}), `{"path":"/etc/passwd"}`)
+	require.NoError(t, err)
+	assert.Equal(t, "ok", result)
+	assert.Equal(t, `{"path":"/tmp/approved"}`, received)
+}
+
+func TestWrapInvokableToolCall_ResumeApproveWithExplicitEmptyUpdatedInput(t *testing.T) {
+	m := NewTyped[*schema.Message](func(ctx context.Context, tCtx *adk.ToolContext, args *schema.ToolArgument) (*GateCheckResult, error) {
+		return &GateCheckResult{Decision: GateAsk, Message: "approve empty override?"}, nil
+	})
+
+	received := "not called"
+	endpoint := adk.InvokableToolCallEndpoint(func(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (string, error) {
+		received = argumentsInJSON
+		return "ok", nil
+	})
+
+	tCtx := &adk.ToolContext{Name: "WriteFile", CallID: "call_resume_empty_update"}
+	wrapped, err := m.WrapInvokableToolCall(context.Background(), endpoint, tCtx)
+	require.NoError(t, err)
+
+	_, err = wrapped(withAddress(context.Background()), `{"path":"/tmp/approved"}`)
+	require.Error(t, err)
+	var signal *core.InterruptSignal
+	require.True(t, errors.As(err, &signal))
+
+	result, err := wrapped(resumeContext(signal, &ResumeResponse{Action: ResumeActionApprove, HasUpdatedInput: true}), `{"path":"/etc/passwd"}`)
+	require.NoError(t, err)
+	assert.Equal(t, "ok", result)
+	assert.Empty(t, received)
 }
 
 func TestPermissionGate_AskThenResumeApprovedWithUpdatedInput(t *testing.T) {
@@ -428,6 +504,106 @@ func TestRespondFormattingIsByteIdenticalAcrossResultTypes(t *testing.T) {
 	want := formatRespondResult("ToolA", "continue without running")
 	assert.True(t, strings.HasPrefix(want, "Tool ToolA was not executed. User response: "))
 	assert.Equal(t, want, denyToolResult(want).Parts[0].Text)
+}
+
+func TestPermissionDecisionAppearsInToolUseTimeline(t *testing.T) {
+	ctx := context.Background()
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	cm := mockModel.NewMockToolCallingChatModel(ctrl)
+	captureTool := &permissionCaptureTool{name: "permission_tool"}
+	info, err := captureTool.Info(ctx)
+	require.NoError(t, err)
+
+	generateCount := 0
+	cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(func(ctx context.Context, msgs []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+			generateCount++
+			if generateCount == 1 {
+				return schema.AssistantMessage("calling tool", []schema.ToolCall{
+					{ID: "permission_call", Function: schema.FunctionCall{Name: info.Name, Arguments: `{"path":"/tmp/file"}`}},
+				}), nil
+			}
+			return schema.AssistantMessage("done", nil), nil
+		}).AnyTimes()
+	cm.EXPECT().WithTools(gomock.Any()).Return(cm, nil).AnyTimes()
+
+	checkerCalled := false
+	agent, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
+		Name:        "PermissionTimelineAgent",
+		Instruction: "use tools",
+		Model:       cm,
+		ToolsConfig: adk.ToolsConfig{
+			ToolsNodeConfig: compose.ToolsNodeConfig{
+				Tools: []tool.BaseTool{captureTool},
+			},
+		},
+		Handlers: []adk.ChatModelAgentMiddleware{
+			New(func(ctx context.Context, tCtx *adk.ToolContext, args *schema.ToolArgument) (*GateCheckResult, error) {
+				checkerCalled = true
+				return &GateCheckResult{Decision: GateAllow}, nil
+			}),
+		},
+	})
+	require.NoError(t, err)
+
+	var evaluatedPermission string
+	runner := adk.NewRunner(ctx, adk.RunnerConfig{
+		Agent:              agent,
+		SessionID:          "permission-timeline",
+		SessionStore:       &permissionSessionStore{},
+		SessionPersistence: &adk.SessionPersistenceConfig{EventFlushBatchSize: 1},
+	})
+	iter := runner.Query(ctx, "use the tool", adk.WithTimelineEvents())
+	for {
+		event, ok := iter.Next()
+		if !ok {
+			break
+		}
+		require.NoError(t, event.Err)
+		if event.SessionEvent == nil || event.SessionEvent.AgentObservation == nil || event.SessionEvent.AgentObservation.ToolUse == nil {
+			continue
+		}
+		evaluatedPermission = event.SessionEvent.AgentObservation.ToolUse.EvaluatedPermission
+	}
+
+	assert.True(t, checkerCalled)
+	assert.Equal(t, string(GateAllow), evaluatedPermission)
+	assert.Equal(t, `{"path":"/tmp/file"}`, captureTool.received)
+}
+
+type permissionCaptureTool struct {
+	name     string
+	received string
+}
+
+func (t *permissionCaptureTool) Info(_ context.Context) (*schema.ToolInfo, error) {
+	return &schema.ToolInfo{
+		Name: t.name,
+		Desc: "permission capture tool",
+		ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
+			"path": {Type: schema.String, Desc: "path"},
+		}),
+	}, nil
+}
+
+func (t *permissionCaptureTool) InvokableRun(_ context.Context, argumentsInJSON string, _ ...tool.Option) (string, error) {
+	t.received = argumentsInJSON
+	return "ok", nil
+}
+
+type permissionSessionStore struct {
+	events [][]byte
+}
+
+func (s *permissionSessionStore) AppendEvents(_ context.Context, _ string, events [][]byte) error {
+	s.events = append(s.events, events...)
+	return nil
+}
+
+func (s *permissionSessionStore) LoadEvents(_ context.Context, _ string, _ *adk.LoadEventsRequest) (*adk.LoadEventsResult, error) {
+	return &adk.LoadEventsResult{Events: nil}, nil
 }
 
 func withAddress(ctx context.Context) context.Context {
