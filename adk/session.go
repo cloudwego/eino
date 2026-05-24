@@ -972,11 +972,12 @@ func replaceMessageByID[M MessageType](messages *[]M, msgID string, newMsg M) er
 	return fmt.Errorf("reconstruct: target message %q not found for update", msgID)
 }
 
-// reconstructSessionState rebuilds committed session state from the append log.
-// A turn is committed only after its TurnEnd event is durable. Fresh runs ignore
-// context mutations after the latest TurnEnd, because those belong to an
-// interrupted or otherwise partial turn that must be owned by checkpoint resume.
-// Legacy logs without any TurnEnd are replayed fully for compatibility.
+// reconstructSessionState rebuilds session state from the append log.
+// Durable context events are replayed through the log tail, including messages
+// after the latest TurnEnd. The latest TurnEnd remains the metadata boundary for
+// tool infos, deferred tool infos, and session values. This preserves framework
+// context fidelity; provider-specific sanitization for dangling tool-call
+// structures remains a caller or middleware concern.
 func reconstructSessionState[M MessageType](
 	ctx context.Context,
 	store SessionStore,
@@ -1017,27 +1018,34 @@ func reconstructSessionState[M MessageType](
 	}
 
 	committedEndIdx := latestCommittedTurnEnd(allEvents)
+	contextTailIdx := len(allEvents) - 1
 	if committedEndIdx < 0 {
 		// Compatibility for historical/session-fixture logs written before
 		// TurnEnd became the explicit commit boundary.
-		committedEndIdx = len(allEvents) - 1
+		committedEndIdx = contextTailIdx
 	}
 
-	return replayCommittedContextEvents(allEvents, committedEndIdx)
+	return replayDurableContextEvents(allEvents, committedEndIdx, contextTailIdx)
 }
 
-func replayCommittedContextEvents[M MessageType](events []*SessionEvent[M], committedTurnEndPos int) (*TurnEndState[M], error) {
-	if len(events) == 0 || committedTurnEndPos < 0 {
+func replayDurableContextEvents[M MessageType](events []*SessionEvent[M], metadataTurnEndPos int, contextTailPos int) (*TurnEndState[M], error) {
+	if len(events) == 0 || metadataTurnEndPos < 0 || contextTailPos < 0 {
 		return nil, nil
 	}
-	if committedTurnEndPos >= len(events) {
-		committedTurnEndPos = len(events) - 1
+	if metadataTurnEndPos >= len(events) {
+		metadataTurnEndPos = len(events) - 1
+	}
+	if contextTailPos >= len(events) {
+		contextTailPos = len(events) - 1
+	}
+	if contextTailPos < metadataTurnEndPos {
+		contextTailPos = metadataTurnEndPos
 	}
 
 	var messages []M
 	startIdx := 0
 	boundaryIdx := -1
-	for i := 0; i <= committedTurnEndPos; i++ {
+	for i := 0; i <= contextTailPos; i++ {
 		if events[i].MessagesReplaced != nil {
 			boundaryIdx = i
 		}
@@ -1048,14 +1056,14 @@ func replayCommittedContextEvents[M MessageType](events []*SessionEvent[M], comm
 		startIdx = boundaryIdx + 1
 	}
 
-	for i := startIdx; i <= committedTurnEndPos; i++ {
+	for i := startIdx; i <= contextTailPos; i++ {
 		if err := applySessionEvent(&messages, events[i]); err != nil {
 			return nil, fmt.Errorf("reconstruct: %w", err)
 		}
 	}
 
 	state := &TurnEndState[M]{Messages: messages}
-	state = applyTurnEndSessionEvent(state, events[committedTurnEndPos])
+	state = applyTurnEndSessionEvent(state, events[metadataTurnEndPos])
 	return state, nil
 }
 
