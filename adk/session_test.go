@@ -71,6 +71,28 @@ func validTestPayload() []byte {
 	return []byte(`{"event_id":"` + uuid.NewString() + `"}`)
 }
 
+func decodeStoredSessionEvents(t *testing.T, raw [][]byte) []*SessionEvent[*schema.Message] {
+	t.Helper()
+	out := make([]*SessionEvent[*schema.Message], 0, len(raw))
+	for _, data := range raw {
+		se, err := decodeSessionEvent[*schema.Message](data)
+		require.NoError(t, err)
+		out = append(out, se)
+	}
+	return out
+}
+
+func filterStoredSessionEvents(t *testing.T, raw [][]byte, pred func(*SessionEvent[*schema.Message]) bool) []*SessionEvent[*schema.Message] {
+	t.Helper()
+	var out []*SessionEvent[*schema.Message]
+	for _, se := range decodeStoredSessionEvents(t, raw) {
+		if pred(se) {
+			out = append(out, se)
+		}
+	}
+	return out
+}
+
 type runnerSessionAgent struct {
 	name    string
 	inputs  [][]*schema.Message
@@ -906,6 +928,7 @@ func TestSessionEventTimestamp(t *testing.T) {
 	msg := schema.AssistantMessage("hi", nil)
 	EnsureMessageID(msg)
 	event := &AgentEvent{
+		EventID:   uuid.NewString(),
 		Timestamp: ts,
 		Output: &AgentOutput{
 			MessageOutput: &MessageVariant{Message: msg, Role: schema.Assistant},
@@ -1044,8 +1067,11 @@ func TestRunnerSessionReconstructsFromEventLog(t *testing.T) {
 	})
 	drainSessionEvents(t, runner.Query(ctx, "first"))
 
-	// Verify events were captured: caller input + assistant output + turn-end for the first turn.
-	require.Len(t, store.events, 3, "input event + assistant event + turn-end event should be in event log")
+	// Verify context-commit events were captured: caller input + assistant output + turn-end.
+	commitEvents := filterStoredSessionEvents(t, store.events, func(se *SessionEvent[*schema.Message]) bool {
+		return se.Kind == SessionEventMessage || se.Kind == SessionEventTurnEnd
+	})
+	require.Len(t, commitEvents, 3, "input event + assistant event + turn-end event should be in event log")
 
 	// Capture the prepared session state before agent runs.
 	capturedAgent := &runnerSessionAgent{
@@ -1093,11 +1119,14 @@ func TestRunnerSessionInputEventsPersisted(t *testing.T) {
 	})
 	drainSessionEvents(t, runner.Query(ctx, "user-question"))
 
-	// Single-turn run: 1 user input event + 1 assistant output event + 1 TurnEnd event.
-	require.Len(t, store.events, 3)
-	// The first event should be the user input.
-	first, err := decodeSessionEvent[*schema.Message](store.events[0])
-	require.NoError(t, err)
+	// Single-turn run: 1 user input event + 1 assistant output event + 1 TurnEnd event,
+	// plus non-context lifecycle timeline records.
+	commitEvents := filterStoredSessionEvents(t, store.events, func(se *SessionEvent[*schema.Message]) bool {
+		return se.Kind == SessionEventMessage || se.Kind == SessionEventTurnEnd
+	})
+	require.Len(t, commitEvents, 3)
+	// The first message event should be the user input.
+	first := commitEvents[0]
 	require.NotNil(t, first.Message)
 	assert.Equal(t, "user-question", first.Message.Content)
 	assert.Equal(t, schema.User, first.Message.Role)

@@ -19,14 +19,16 @@ package adk
 import "github.com/cloudwego/eino/callbacks"
 
 type options struct {
-	sharedParentSession  bool
-	sessionValues        map[string]any
-	checkPointID         *string
-	skipTransferMessages bool
-	enableSessionEvents  bool
-	handlers             []callbacks.Handler
-	cancelCtx            *cancelContext
-	refreshToolInfos     bool
+	sharedParentSession          bool
+	sessionValues                map[string]any
+	checkPointID                 *string
+	skipTransferMessages         bool
+	enableSessionEvents          bool
+	enableTimelineEvents         bool
+	enableInternalTimelineEvents bool
+	handlers                     []callbacks.Handler
+	cancelCtx                    *cancelContext
+	refreshToolInfos             bool
 }
 
 // AgentRunOption is the call option for adk Agent.
@@ -60,6 +62,22 @@ func WithSessionValues(v map[string]any) AgentRunOption {
 func withEnableSessionEvents() AgentRunOption {
 	return WrapImplSpecificOptFn(func(o *options) {
 		o.enableSessionEvents = true
+	})
+}
+
+// WithTimelineEvents exposes the first-class SessionEvent timeline envelope on
+// live AgentEvents. Without this option, lifecycle/span/observation-only events
+// are still produced for managed-session persistence but are stripped from the
+// user-facing stream.
+func WithTimelineEvents() AgentRunOption {
+	return WrapImplSpecificOptFn(func(o *options) {
+		o.enableTimelineEvents = true
+	})
+}
+
+func withEnableInternalTimelineEvents() AgentRunOption {
+	return WrapImplSpecificOptFn(func(o *options) {
+		o.enableInternalTimelineEvents = true
 	})
 }
 
