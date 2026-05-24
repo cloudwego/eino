@@ -14,8 +14,8 @@
  * limitations under the License.
  */
 
-// Package session provides a memory-based SessionStore implementation and a
-// reusable conformance test suite for validating SessionStore implementations.
+// Package session provides SessionStore implementations and a reusable
+// conformance test suite for validating SessionStore implementations.
 package session
 
 import (
@@ -43,6 +43,7 @@ func RunConformanceTests(t *testing.T, factory func(testing.TB) adk.SessionStore
 	t.Run("sessionID isolates events", func(t *testing.T) { testSessionIsolation(t, factory) })
 	t.Run("Empty session returns no events", func(t *testing.T) { testEmptySession(t, factory) })
 	t.Run("AppendEvents is idempotent on duplicate EventID", func(t *testing.T) { testIdempotentAppend(t, factory) })
+	t.Run("AppendEvents skips duplicate EventID within same batch", func(t *testing.T) { testIdempotentAppendWithinBatch(t, factory) })
 	t.Run("AppendEvents rejects empty EventID with ErrInvalidEventID", func(t *testing.T) { testRejectEmptyEventID(t, factory) })
 	t.Run("AppendEvents rejects unparsable payload with ErrInvalidEventID", func(t *testing.T) { testRejectUnparsablePayload(t, factory) })
 	t.Run("After resumes by EventID forward", func(t *testing.T) { testAfterForward(t, factory) })
@@ -194,6 +195,19 @@ func testIdempotentAppend(t *testing.T, factory func(testing.TB) adk.SessionStor
 	dup := []byte(`{"event_id":"dup-1","payload":"second"}`)
 	requireNoError(t, store.AppendEvents(ctx, "s", [][]byte{first}))
 	requireNoError(t, store.AppendEvents(ctx, "s", [][]byte{dup}))
+
+	res, err := store.LoadEvents(ctx, "s", &adk.LoadEventsRequest{})
+	requireNoError(t, err)
+	requireEventsEqual(t, [][]byte{first}, res.Events)
+}
+
+func testIdempotentAppendWithinBatch(t *testing.T, factory func(testing.TB) adk.SessionStore) {
+	store := newStore(t, factory)
+	ctx := context.Background()
+
+	first := []byte(`{"event_id":"dup-batch-1","payload":"first"}`)
+	dup := []byte(`{"event_id":"dup-batch-1","payload":"second"}`)
+	requireNoError(t, store.AppendEvents(ctx, "s", [][]byte{first, dup}))
 
 	res, err := store.LoadEvents(ctx, "s", &adk.LoadEventsRequest{})
 	requireNoError(t, err)

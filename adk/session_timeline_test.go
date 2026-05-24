@@ -118,7 +118,7 @@ func TestSessionTimeline_ReconstructionIgnoresNonContextVariants(t *testing.T) {
 		require.NoError(t, store.AppendEvents(ctx, sid, [][]byte{data}))
 	}
 
-	state, err := reconstructSessionState[*schema.Message](ctx, store, sid, defaultLoadPageSize)
+	state, err := reconstructSessionState[*schema.Message](ctx, store, sid, defaultLoadPageSize, nil)
 	require.NoError(t, err)
 	require.Len(t, state.Messages, 1)
 	assert.Equal(t, "hello", state.Messages[0].Content)
@@ -153,7 +153,7 @@ func TestSessionTimeline_ReconstructionIncludesPartialContextAfterLatestTurnEnd(
 		require.NoError(t, store.AppendEvents(ctx, sid, [][]byte{data}))
 	}
 
-	state, err := reconstructSessionState[*schema.Message](ctx, store, sid, defaultLoadPageSize)
+	state, err := reconstructSessionState[*schema.Message](ctx, store, sid, defaultLoadPageSize, nil)
 	require.NoError(t, err)
 	require.Len(t, state.Messages, 4)
 	assert.Equal(t, "committed user", state.Messages[0].Content)
@@ -187,7 +187,7 @@ func TestSessionTimeline_ReconstructionPartialContextMissingAnchorFails(t *testi
 		require.NoError(t, store.AppendEvents(ctx, sid, [][]byte{data}))
 	}
 
-	_, err := reconstructSessionState[*schema.Message](ctx, store, sid, defaultLoadPageSize)
+	_, err := reconstructSessionState[*schema.Message](ctx, store, sid, defaultLoadPageSize, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "missing-anchor")
 }

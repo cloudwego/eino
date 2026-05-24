@@ -29,7 +29,6 @@ import (
 
 	"github.com/google/uuid"
 
-	einoserial "github.com/cloudwego/eino/internal/serialization"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -397,6 +396,13 @@ type SessionPersistenceConfig struct {
 	// LoadPageSize is the number of events fetched per page when loading events
 	// for reconstruction or tail replay. Defaults to 100.
 	LoadPageSize int
+	// EventSerializer encodes and decodes SessionEvent payloads persisted
+	// through SessionStore. Defaults to schema.HumanReadableSerializer.
+	//
+	// The serializer must emit JSON payload bytes accepted by the configured
+	// SessionStore. For JSONL-framed stores, this means one compact record per
+	// payload without raw CR/LF delimiters.
+	EventSerializer schema.Serializer
 }
 
 // TurnEndState is the agent-visible state materialized at a successful turn boundary.
@@ -460,15 +466,23 @@ func sessionRunnerCheckpointID(sessionID string) string {
 	return "session/" + sessionID + sessionRunnerCheckpointSuffix
 }
 
-var sessionSerializer = &einoserial.HumanReadableSerializer{}
+var sessionSerializer schema.Serializer = &schema.HumanReadableSerializer{}
 
 func encodeSessionEvent[M MessageType](event *SessionEvent[M]) ([]byte, error) {
-	return sessionSerializer.Marshal(event)
+	return encodeSessionEventWithSerializer(event, sessionSerializer)
 }
 
 func decodeSessionEvent[M MessageType](data []byte) (*SessionEvent[M], error) {
+	return decodeSessionEventWithSerializer[M](data, sessionSerializer)
+}
+
+func encodeSessionEventWithSerializer[M MessageType](event *SessionEvent[M], serializer schema.Serializer) ([]byte, error) {
+	return normalizeSerializer(serializer).Marshal(event)
+}
+
+func decodeSessionEventWithSerializer[M MessageType](data []byte, serializer schema.Serializer) (*SessionEvent[M], error) {
 	var event SessionEvent[M]
-	if err := sessionSerializer.Unmarshal(data, &event); err != nil {
+	if err := normalizeSerializer(serializer).Unmarshal(data, &event); err != nil {
 		return nil, err
 	}
 	if err := NormalizeSessionEventKind(&event); err != nil {
@@ -477,19 +491,11 @@ func decodeSessionEvent[M MessageType](data []byte) (*SessionEvent[M], error) {
 	return &event, nil
 }
 
-// EncodeSessionEvent encodes a SessionEvent into the same JSON wire format used
-// by the Runner when persisting events. Symmetric to DecodeSessionEvent. Public
-// for external SessionStore implementations that need to construct payloads
-// (e.g. for migration tooling, test fixtures).
-func EncodeSessionEvent[M MessageType](event *SessionEvent[M]) ([]byte, error) {
-	return encodeSessionEvent(event)
-}
-
-// DecodeSessionEvent decodes a raw JSON session event payload (as stored by SessionStore)
-// into a typed SessionEvent. Public entry point for Go consumers needing type-exact
-// deserialization. External (Python/JS) consumers can use plain JSON parsing.
-func DecodeSessionEvent[M MessageType](data []byte) (*SessionEvent[M], error) {
-	return decodeSessionEvent[M](data)
+func normalizeSerializer(serializer schema.Serializer) schema.Serializer {
+	if serializer == nil {
+		return sessionSerializer
+	}
+	return serializer
 }
 
 // makeInputSessionEvent wraps an input message as a SessionEvent.
@@ -703,6 +709,7 @@ func normalizeSessionPersistenceConfig(cfg *SessionPersistenceConfig) SessionPer
 		MaxFlushRetries:          defaultMaxFlushRetries,
 		FlushRetryInitialBackoff: defaultFlushRetryInitialBackoff,
 		LoadPageSize:             defaultLoadPageSize,
+		EventSerializer:          sessionSerializer,
 	}
 	if cfg == nil {
 		return normalized
@@ -727,6 +734,9 @@ func normalizeSessionPersistenceConfig(cfg *SessionPersistenceConfig) SessionPer
 	}
 	if cfg.LoadPageSize > 0 {
 		normalized.LoadPageSize = cfg.LoadPageSize
+	}
+	if cfg.EventSerializer != nil {
+		normalized.EventSerializer = cfg.EventSerializer
 	}
 	return normalized
 }
@@ -1004,6 +1014,7 @@ func reconstructSessionState[M MessageType](
 	store SessionStore,
 	sessionID string,
 	pageSize int,
+	serializer schema.Serializer,
 ) (*TurnEndState[M], error) {
 	var allEvents []*SessionEvent[M]
 	var after string
@@ -1022,7 +1033,7 @@ func reconstructSessionState[M MessageType](
 		}
 
 		for _, data := range result.Events {
-			event, err := decodeSessionEvent[M](data)
+			event, err := decodeSessionEventWithSerializer[M](data, serializer)
 			if err != nil {
 				return nil, err
 			}

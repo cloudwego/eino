@@ -907,7 +907,7 @@ func TestRunnerPersists_MessageUpdated_BothMessages(t *testing.T) {
 	assert.Equal(t, 2, updates, "both MessageUpdated events must be persisted")
 
 	// Reconstruction must apply both updates correctly.
-	state, err := reconstructSessionState[*schema.Message](ctx, store, sid, defaultLoadPageSize)
+	state, err := reconstructSessionState[*schema.Message](ctx, store, sid, defaultLoadPageSize, nil)
 	require.NoError(t, err)
 	require.NotNil(t, state)
 	// Find updated content among reconstructed messages.
@@ -1000,7 +1000,7 @@ func TestRunnerPersists_MessageInserted_AnchorAndAppend(t *testing.T) {
 	assert.Equal(t, 2, inserts, "both MessageInserted events must be persisted")
 
 	// Verify reconstruction applies insertions correctly.
-	state, err := reconstructSessionState[*schema.Message](ctx, store, sid, defaultLoadPageSize)
+	state, err := reconstructSessionState[*schema.Message](ctx, store, sid, defaultLoadPageSize, nil)
 	require.NoError(t, err)
 	require.NotNil(t, state)
 	require.GreaterOrEqual(t, len(state.Messages), 3)

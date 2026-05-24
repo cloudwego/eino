@@ -149,6 +149,12 @@ func Register[T any]() {
 	}
 }
 
+// Serializer encodes and decodes persisted Eino values.
+type Serializer interface {
+	Marshal(v any) ([]byte, error)
+	Unmarshal(data []byte, v any) error
+}
+
 // HumanReadableSerializer produces clean, human-readable JSON output for serialization.
 // It can be used with compose.WithSerializer() to store checkpoints in a human-readable format.
 //
@@ -169,3 +175,7 @@ func Register[T any]() {
 // Note: All custom types stored in interface{} fields must be registered using
 // schema.RegisterName[T]() or schema.Register[T]() for proper deserialization.
 type HumanReadableSerializer = serialization.HumanReadableSerializer
+
+// GobSerializer serializes values using Go's encoding/gob package.
+// It can be used with compose.WithSerializer and other serializer hooks.
+type GobSerializer = serialization.GobSerializer

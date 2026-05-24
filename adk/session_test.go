@@ -669,6 +669,7 @@ func TestNormalizeSessionPersistenceConfig_Variations(t *testing.T) {
 	assert.Equal(t, defaultSessionEventFlushBatchSize, cfg.EventFlushBatchSize)
 	assert.Equal(t, defaultSessionEventFlushInterval, cfg.EventFlushInterval)
 	assert.Equal(t, defaultSessionEventBufferSize, cfg.EventBufferSize)
+	assert.NotNil(t, cfg.EventSerializer)
 
 	cfg = normalizeSessionPersistenceConfig(&SessionPersistenceConfig{})
 	assert.Equal(t, defaultSessionEventFlushBatchSize, cfg.EventFlushBatchSize)
@@ -692,6 +693,100 @@ func TestNormalizeSessionPersistenceConfig_Variations(t *testing.T) {
 		EventBufferSize:     -5,
 	})
 	assert.Equal(t, defaultSessionEventFlushBatchSize, cfg.EventFlushBatchSize)
+}
+
+type countingSerializer struct {
+	inner          schema.Serializer
+	marshalCalls   int32
+	unmarshalCalls int32
+}
+
+func newCountingSerializer() *countingSerializer {
+	return &countingSerializer{inner: &schema.HumanReadableSerializer{}}
+}
+
+func (s *countingSerializer) Marshal(v any) ([]byte, error) {
+	atomic.AddInt32(&s.marshalCalls, 1)
+	return s.inner.Marshal(v)
+}
+
+func (s *countingSerializer) Unmarshal(data []byte, v any) error {
+	atomic.AddInt32(&s.unmarshalCalls, 1)
+	return s.inner.Unmarshal(data, v)
+}
+
+func TestSessionPersistenceConfig_DefaultSerializer(t *testing.T) {
+	cfg := normalizeSessionPersistenceConfig(nil)
+	require.NotNil(t, cfg.EventSerializer)
+
+	se := &SessionEvent[*schema.Message]{
+		EventID: "serializer-default",
+		Kind:    SessionEventSessionStatusRunning,
+		Lifecycle: &LifecycleEvent{
+			State: SessionRunStateRunning,
+		},
+	}
+	data, err := cfg.EventSerializer.Marshal(se)
+	require.NoError(t, err)
+
+	var decoded SessionEvent[*schema.Message]
+	require.NoError(t, cfg.EventSerializer.Unmarshal(data, &decoded))
+	require.NoError(t, NormalizeSessionEventKind(&decoded))
+	assert.Equal(t, se.EventID, decoded.EventID)
+	assert.Equal(t, SessionEventSessionStatusRunning, decoded.Kind)
+}
+
+func TestSessionEvent_HumanReadableSerializerDirectRoundTrip(t *testing.T) {
+	serializer := &schema.HumanReadableSerializer{}
+	se := &SessionEvent[*schema.Message]{
+		EventID: "serializer-direct",
+		Kind:    SessionEventSessionStatusIdle,
+		Lifecycle: &LifecycleEvent{
+			State: SessionRunStateIdle,
+		},
+	}
+
+	data, err := serializer.Marshal(se)
+	require.NoError(t, err)
+
+	var decoded SessionEvent[*schema.Message]
+	require.NoError(t, serializer.Unmarshal(data, &decoded))
+	require.NoError(t, NormalizeSessionEventKind(&decoded))
+	assert.Equal(t, se.EventID, decoded.EventID)
+	assert.Equal(t, se.Kind, decoded.Kind)
+}
+
+func TestSessionPersistenceConfig_CustomSerializerUsedForEncodeAndReconstruct(t *testing.T) {
+	ctx := context.Background()
+	store := newSessionHelperStore()
+	serializer := newCountingSerializer()
+	cfg := &SessionPersistenceConfig{
+		EventFlushBatchSize: 1,
+		EventSerializer:     serializer,
+	}
+
+	first := NewRunner(ctx, RunnerConfig{
+		Agent:              &runnerSessionAgent{name: "first"},
+		SessionID:          "serializer-custom",
+		SessionStore:       store,
+		SessionPersistence: cfg,
+	})
+	drainSessionEvents(t, first.Query(ctx, "hello"))
+	require.Greater(t, atomic.LoadInt32(&serializer.marshalCalls), int32(0))
+
+	secondAgent := &runnerSessionAgent{name: "second"}
+	second := NewRunner(ctx, RunnerConfig{
+		Agent:              secondAgent,
+		SessionID:          "serializer-custom",
+		SessionStore:       store,
+		SessionPersistence: cfg,
+	})
+	drainSessionEvents(t, second.Query(ctx, "again"))
+
+	assert.Greater(t, atomic.LoadInt32(&serializer.unmarshalCalls), int32(0))
+	require.NotEmpty(t, secondAgent.inputs)
+	require.NotEmpty(t, secondAgent.inputs[0])
+	assert.Equal(t, "hello", secondAgent.inputs[0][0].Content)
 }
 
 // --- New tests covering the design doc ---
@@ -971,7 +1066,7 @@ func TestSessionEventTimestamp(t *testing.T) {
 func TestReconstructFromEventLog_EmptySession(t *testing.T) {
 	store := newSessionHelperStore()
 	ctx := context.Background()
-	state, err := reconstructSessionState[*schema.Message](ctx, store, "empty", defaultLoadPageSize)
+	state, err := reconstructSessionState[*schema.Message](ctx, store, "empty", defaultLoadPageSize, nil)
 	require.NoError(t, err)
 	assert.Nil(t, state)
 }
@@ -1005,7 +1100,7 @@ func TestReconstructFromEventLog_MultiTurn(t *testing.T) {
 		require.NoError(t, store.AppendEvents(ctx, sid, [][]byte{data}))
 	}
 
-	state, err := reconstructSessionState[*schema.Message](ctx, store, sid, defaultLoadPageSize)
+	state, err := reconstructSessionState[*schema.Message](ctx, store, sid, defaultLoadPageSize, nil)
 	require.NoError(t, err)
 	require.NotNil(t, state)
 	require.Len(t, state.Messages, 4)
@@ -1015,7 +1110,7 @@ func TestReconstructFromEventLog_MultiTurn(t *testing.T) {
 	assert.Equal(t, "A2", state.Messages[3].Content)
 
 	// Verify pagination: use page size 2 so that 4 events require multiple pages.
-	state2, err := reconstructSessionState[*schema.Message](ctx, store, sid, 2)
+	state2, err := reconstructSessionState[*schema.Message](ctx, store, sid, 2, nil)
 	require.NoError(t, err)
 	require.NotNil(t, state2)
 	require.Len(t, state2.Messages, 4)
@@ -1047,7 +1142,7 @@ func TestReconstructFromEventLog_CorruptEventReturnsError(t *testing.T) {
 	store.eventIDIdx[store.eventIDs[len(store.eventIDs)-1]] = len(store.events) - 1
 	store.mu.Unlock()
 
-	_, err = reconstructSessionState[*schema.Message](ctx, store, sid, defaultLoadPageSize)
+	_, err = reconstructSessionState[*schema.Message](ctx, store, sid, defaultLoadPageSize, nil)
 	require.Error(t, err, "corrupt event must cause reconstruction failure")
 }
 
@@ -1085,7 +1180,7 @@ func TestReconstructFromEventLog_WithSummarizationBoundary(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, store.AppendEvents(ctx, sid, [][]byte{data}))
 
-	state, err := reconstructSessionState[*schema.Message](ctx, store, sid, defaultLoadPageSize)
+	state, err := reconstructSessionState[*schema.Message](ctx, store, sid, defaultLoadPageSize, nil)
 	require.NoError(t, err)
 	require.NotNil(t, state)
 	require.Len(t, state.Messages, 2)

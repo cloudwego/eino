@@ -38,6 +38,21 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
+func marshalSessionEvent(t *testing.T, se *adk.SessionEvent[*schema.Message]) []byte {
+	t.Helper()
+	data, err := (&schema.HumanReadableSerializer{}).Marshal(se)
+	require.NoError(t, err)
+	return data
+}
+
+func unmarshalSessionEvent(t *testing.T, data []byte) *adk.SessionEvent[*schema.Message] {
+	t.Helper()
+	var se adk.SessionEvent[*schema.Message]
+	require.NoError(t, (&schema.HumanReadableSerializer{}).Unmarshal(data, &se))
+	require.NoError(t, adk.NormalizeSessionEventKind(&se))
+	return &se
+}
+
 // stubChatModel returns a fixed final assistant message and stops the React loop.
 type stubChatModel struct {
 	reply string
@@ -114,8 +129,7 @@ func TestAgentsMDIntegration_PersistsMessageInserted(t *testing.T) {
 
 	var sawInsertedAgentsmd bool
 	for _, raw := range res.Events {
-		se, err := adk.DecodeSessionEvent[*schema.Message](raw)
-		require.NoError(t, err)
+		se := unmarshalSessionEvent(t, raw)
 		if se.MessageInserted == nil {
 			continue
 		}
@@ -181,8 +195,7 @@ func TestAgentsMDIntegration_NextTurnSkipsReinsertion(t *testing.T) {
 		require.NoError(t, err)
 		count := 0
 		for _, raw := range res.Events {
-			se, err := adk.DecodeSessionEvent[*schema.Message](raw)
-			require.NoError(t, err)
+			se := unmarshalSessionEvent(t, raw)
 			if se.MessageInserted == nil {
 				continue
 			}
@@ -281,8 +294,7 @@ func TestToolSearchIntegration_PersistsMessageInserted(t *testing.T) {
 
 	var sawInsertedReminder bool
 	for _, raw := range res.Events {
-		se, err := adk.DecodeSessionEvent[*schema.Message](raw)
-		require.NoError(t, err)
+		se := unmarshalSessionEvent(t, raw)
 		if se.MessageInserted == nil {
 			continue
 		}
@@ -331,8 +343,7 @@ func TestPatchToolCallsIntegration_PersistsMessageInserted(t *testing.T) {
 
 	for _, m := range []*schema.Message{user, dangling} {
 		se := &adk.SessionEvent[*schema.Message]{EventID: uuid.NewString(), Message: m}
-		data, err := adk.EncodeSessionEvent(se)
-		require.NoError(t, err)
+		data := marshalSessionEvent(t, se)
 		require.NoError(t, store.AppendEvents(ctx, sid, [][]byte{data}))
 	}
 
@@ -371,8 +382,7 @@ func TestPatchToolCallsIntegration_PersistsMessageInserted(t *testing.T) {
 	require.NoError(t, err)
 	var sawInsertedToolResult bool
 	for _, raw := range res.Events {
-		se, err := adk.DecodeSessionEvent[*schema.Message](raw)
-		require.NoError(t, err)
+		se := unmarshalSessionEvent(t, raw)
 		if se.MessageInserted == nil {
 			continue
 		}
@@ -433,8 +443,7 @@ func TestReductionIntegration_PersistsBothMessageUpdated(t *testing.T) {
 	}
 	for _, m := range []*schema.Message{user, assistantA, toolResultA, assistantB, toolResultB} {
 		se := &adk.SessionEvent[*schema.Message]{EventID: uuid.NewString(), Message: m}
-		data, err := adk.EncodeSessionEvent(se)
-		require.NoError(t, err)
+		data := marshalSessionEvent(t, se)
 		require.NoError(t, store.AppendEvents(ctx, sid, [][]byte{data}))
 	}
 
@@ -494,8 +503,7 @@ func TestReductionIntegration_PersistsBothMessageUpdated(t *testing.T) {
 
 	var sawAssistantUpdated, sawToolUpdated bool
 	for _, raw := range res.Events {
-		se, err := adk.DecodeSessionEvent[*schema.Message](raw)
-		require.NoError(t, err)
+		se := unmarshalSessionEvent(t, raw)
 		if se.MessageUpdated == nil {
 			continue
 		}
