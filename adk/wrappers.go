@@ -1037,12 +1037,13 @@ func typedToolEnhancedStreamEvent[M MessageType](callID, toolName, toolMsgID str
 
 func (w *typedEventSenderToolWrapper[M]) WrapInvokableToolCall(_ context.Context, endpoint InvokableToolCallEndpoint, tCtx *ToolContext) (InvokableToolCallEndpoint, error) {
 	return func(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (string, error) {
-		sendToolUseObservation[M](ctx, tCtx, argumentsInJSON)
 		result, err := endpoint(ctx, argumentsInJSON, opts...)
 		if err != nil {
+			sendToolUseObservation[M](ctx, tCtx, argumentsInJSON)
 			sendToolResultObservation[M](ctx, tCtx.CallID, err.Error(), true)
 			return "", err
 		}
+		sendToolUseObservation[M](ctx, tCtx, argumentsInJSON)
 		sendToolResultObservation[M](ctx, tCtx.CallID, result, false)
 		timestamp := newEventTimestamp()
 
@@ -1074,12 +1075,13 @@ func (w *typedEventSenderToolWrapper[M]) WrapInvokableToolCall(_ context.Context
 
 func (w *typedEventSenderToolWrapper[M]) WrapStreamableToolCall(_ context.Context, endpoint StreamableToolCallEndpoint, tCtx *ToolContext) (StreamableToolCallEndpoint, error) {
 	return func(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (*schema.StreamReader[string], error) {
-		sendToolUseObservation[M](ctx, tCtx, argumentsInJSON)
 		result, err := endpoint(ctx, argumentsInJSON, opts...)
 		if err != nil {
+			sendToolUseObservation[M](ctx, tCtx, argumentsInJSON)
 			sendToolResultObservation[M](ctx, tCtx.CallID, err.Error(), true)
 			return nil, err
 		}
+		sendToolUseObservation[M](ctx, tCtx, argumentsInJSON)
 		timestamp := newEventTimestamp()
 
 		toolName := tCtx.Name
@@ -1111,12 +1113,13 @@ func (w *typedEventSenderToolWrapper[M]) WrapStreamableToolCall(_ context.Contex
 
 func (w *typedEventSenderToolWrapper[M]) WrapEnhancedInvokableToolCall(_ context.Context, endpoint EnhancedInvokableToolCallEndpoint, tCtx *ToolContext) (EnhancedInvokableToolCallEndpoint, error) {
 	return func(ctx context.Context, toolArgument *schema.ToolArgument, opts ...tool.Option) (*schema.ToolResult, error) {
-		sendToolUseObservation[M](ctx, tCtx, toolArgument)
 		result, err := endpoint(ctx, toolArgument, opts...)
 		if err != nil {
+			sendToolUseObservation[M](ctx, tCtx, toolArgument)
 			sendToolResultObservation[M](ctx, tCtx.CallID, err.Error(), true)
 			return nil, err
 		}
+		sendToolUseObservation[M](ctx, tCtx, toolArgument)
 		sendToolResultObservation[M](ctx, tCtx.CallID, result, false)
 		timestamp := newEventTimestamp()
 
@@ -1151,12 +1154,13 @@ func (w *typedEventSenderToolWrapper[M]) WrapEnhancedInvokableToolCall(_ context
 
 func (w *typedEventSenderToolWrapper[M]) WrapEnhancedStreamableToolCall(_ context.Context, endpoint EnhancedStreamableToolCallEndpoint, tCtx *ToolContext) (EnhancedStreamableToolCallEndpoint, error) {
 	return func(ctx context.Context, toolArgument *schema.ToolArgument, opts ...tool.Option) (*schema.StreamReader[*schema.ToolResult], error) {
-		sendToolUseObservation[M](ctx, tCtx, toolArgument)
 		result, err := endpoint(ctx, toolArgument, opts...)
 		if err != nil {
+			sendToolUseObservation[M](ctx, tCtx, toolArgument)
 			sendToolResultObservation[M](ctx, tCtx.CallID, err.Error(), true)
 			return nil, err
 		}
+		sendToolUseObservation[M](ctx, tCtx, toolArgument)
 		timestamp := newEventTimestamp()
 
 		toolName := tCtx.Name
