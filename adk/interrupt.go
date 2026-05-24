@@ -49,6 +49,11 @@ type ResumeInfo struct {
 type InterruptInfo struct {
 	Data any
 
+	// CheckPointID is the checkpoint key used to persist this interrupted run,
+	// when checkpoint persistence is enabled. Pass this ID to Runner.Resume or
+	// Runner.ResumeWithParams to continue the same suspended execution.
+	CheckPointID string
+
 	// InterruptContexts provides a structured, user-facing view of the interrupt chain.
 	// Each context represents a step in the agent hierarchy that was interrupted.
 	InterruptContexts []*InterruptCtx
