@@ -111,7 +111,7 @@ func (m *typedMiddleware[M]) BeforeModelRewriteState(ctx context.Context, state 
 	}
 
 	nState := *state
-	nState.Messages = typedInsertBeforeFirstUser(state.Messages, fmt.Sprintf("<system-reminder>\n%s\n</system-reminder>", content))
+	nState.Messages = typedInsertBeforeFirstUser(state.Messages, content)
 	return ctx, &nState, nil
 }
 

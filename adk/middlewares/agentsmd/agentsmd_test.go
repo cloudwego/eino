@@ -127,6 +127,12 @@ func TestMiddleware_BasicInjection(t *testing.T) {
 	if !strings.Contains(state.Messages[0].Content, "<system-reminder>") {
 		t.Fatalf("expected system-reminder tag, got %q", state.Messages[0].Content)
 	}
+	if count := strings.Count(state.Messages[0].Content, "<system-reminder>"); count != 1 {
+		t.Fatalf("expected exactly one opening system-reminder tag, got %d in %q", count, state.Messages[0].Content)
+	}
+	if count := strings.Count(state.Messages[0].Content, "</system-reminder>"); count != 1 {
+		t.Fatalf("expected exactly one closing system-reminder tag, got %d in %q", count, state.Messages[0].Content)
+	}
 	if state.Messages[1].Content != "hello" {
 		t.Fatalf("expected original message preserved, got %q", state.Messages[1].Content)
 	}

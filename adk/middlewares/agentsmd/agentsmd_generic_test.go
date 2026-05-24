@@ -149,6 +149,12 @@ func testAgentsMDGeneric[M adk.MessageType](t *testing.T) {
 				if !strings.Contains(getMsgContent(state.Messages[0]), "<system-reminder>") {
 					t.Fatalf("expected system-reminder tag, got %q", getMsgContent(state.Messages[0]))
 				}
+				if count := strings.Count(getMsgContent(state.Messages[0]), "<system-reminder>"); count != 1 {
+					t.Fatalf("expected exactly one opening system-reminder tag, got %d in %q", count, getMsgContent(state.Messages[0]))
+				}
+				if count := strings.Count(getMsgContent(state.Messages[0]), "</system-reminder>"); count != 1 {
+					t.Fatalf("expected exactly one closing system-reminder tag, got %d in %q", count, getMsgContent(state.Messages[0]))
+				}
 				if getMsgContent(state.Messages[1]) != "hello" {
 					t.Fatalf("expected original message preserved, got %q", getMsgContent(state.Messages[1]))
 				}
