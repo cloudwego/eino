@@ -48,6 +48,10 @@ func (m *fakeChatModel) IsCallbacksEnabled() bool {
 	return m.callbacksEnabled
 }
 
+func (m *fakeChatModel) GetType() string {
+	return "fake_chat_model"
+}
+
 func drainMessageStream(sr *schema.StreamReader[*schema.Message]) ([]*schema.Message, error) {
 	defer sr.Close()
 	var out []*schema.Message

@@ -242,17 +242,18 @@ func TestRunnerInputEvents_MixedRoles(t *testing.T) {
 	userMsg := schema.UserMessage("hello")
 	drainSessionEvents(t, runner.Run(ctx, []*schema.Message{systemMsg, userMsg}))
 
-	// Find the first two persisted events: they must be the input messages with
-	// preserved roles.
-	require.GreaterOrEqual(t, len(store.events), 2)
-	first, err := decodeSessionEvent[*schema.Message](store.events[0])
-	require.NoError(t, err)
+	// Find the first two message events: they must be the input messages with
+	// preserved roles. Lifecycle timeline records may surround them.
+	messageEvents := filterStoredSessionEvents(t, store.events, func(se *SessionEvent[*schema.Message]) bool {
+		return se.Kind == SessionEventMessage
+	})
+	require.GreaterOrEqual(t, len(messageEvents), 2)
+	first := messageEvents[0]
 	require.NotNil(t, first.Message)
 	assert.Equal(t, schema.System, first.Message.Role)
 	assert.Equal(t, "system instruction", first.Message.Content)
 
-	second, err := decodeSessionEvent[*schema.Message](store.events[1])
-	require.NoError(t, err)
+	second := messageEvents[1]
 	require.NotNil(t, second.Message)
 	assert.Equal(t, schema.User, second.Message.Role)
 	assert.Equal(t, "hello", second.Message.Content)
@@ -347,16 +348,15 @@ func TestTailReplay_PartialTurnWithoutTurnEnd(t *testing.T) {
 		require.NoError(t, store.AppendEvents(ctx, sid, [][]byte{data}))
 	}
 
-	// Boot: prepareRunnerSessionRun should reconstruct all messages including
-	// the partial turn's events.
+	// Boot: prepareRunnerSessionRun reconstructs only committed messages. Events
+	// after the latest TurnEnd belong to an uncommitted partial turn and must not
+	// leak into a fresh Run.
 	state, err := prepareRunnerSessionRun[*schema.Message](ctx, nil, sid, store, nil)
 	require.NoError(t, err)
 	require.True(t, state.enabled)
-	require.Len(t, state.latestState.Messages, 4)
+	require.Len(t, state.latestState.Messages, 2)
 	assert.Equal(t, "Q1", state.latestState.Messages[0].Content)
 	assert.Equal(t, "A1", state.latestState.Messages[1].Content)
-	assert.Equal(t, "Q2", state.latestState.Messages[2].Content)
-	assert.Equal(t, "A2", state.latestState.Messages[3].Content)
 }
 
 // TestTailReplay_NoTailEvents verifies that the fast path is not disturbed when
@@ -594,14 +594,14 @@ func TestPartialInterrupted_ThenNewRun(t *testing.T) {
 	})
 	drainSessionEvents(t, runner.Query(ctx, "second"))
 
-	// The reconstructed history fed to the agent must include the partial turn's "partial" input.
+	// Fresh Run must not include the uncommitted partial turn.
 	require.Len(t, captured.inputs, 1)
 	contents := []string{}
 	for _, m := range captured.inputs[0] {
 		contents = append(contents, m.Content)
 	}
-	assert.Equal(t, []string{"first", "answer1", "partial", "second"}, contents,
-		"partial-turn message must survive via tail replay in stable order without duplicates")
+	assert.Equal(t, []string{"first", "answer1", "second"}, contents,
+		"partial-turn message after latest turn_end must not leak into fresh Run")
 }
 
 // TestSessionEvent_StreamCopyConcat_ByteIdentical verifies the round-trip of a
@@ -718,9 +718,10 @@ func TestResumePath_TailReplay(t *testing.T) {
 
 	state, _, err := prepareRunnerSessionResume[*schema.Message](ctx, cpStore, sid, store, nil, "")
 	require.NoError(t, err)
-	require.Len(t, state.latestState.Messages, 3,
-		"resume path must apply tail replay on top of the snapshot")
-	assert.Equal(t, "post-snapshot", state.latestState.Messages[2].Content)
+	require.Len(t, state.latestState.Messages, 2,
+		"resume boot state should use committed session log; checkpoint owns any in-flight partial turn")
+	assert.Equal(t, "Q", state.latestState.Messages[0].Content)
+	assert.Equal(t, "A", state.latestState.Messages[1].Content)
 }
 
 // Ensure the io package import is used (for compile when chunks are empty).

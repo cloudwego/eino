@@ -18,10 +18,12 @@ package adk
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"reflect"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -294,8 +296,128 @@ type typedEventSenderModel[M MessageType] struct {
 	modelFailoverConfig *ModelFailoverConfig[M]
 }
 
+func sendSessionTimelineEvent[M MessageType](ctx context.Context, se *SessionEvent[M]) {
+	execCtx := getTypedChatModelAgentExecCtx[M](ctx)
+	if execCtx == nil || execCtx.generator == nil || se == nil {
+		return
+	}
+	if !execCtx.timelineEvents && !execCtx.internalTimelineEvents {
+		return
+	}
+	if se.EventID == "" {
+		se.EventID = uuid.NewString()
+	}
+	if se.Timestamp.IsZero() {
+		se.Timestamp = newEventTimestamp()
+	}
+	if err := ValidateEmittedSessionEventKind(se); err != nil {
+		execCtx.send(&TypedAgentEvent[M]{Timestamp: newEventTimestamp(), Err: err})
+		return
+	}
+	execCtx.send(&TypedAgentEvent[M]{EventID: se.EventID, Timestamp: se.Timestamp, SessionEvent: se})
+}
+
+func newModelSpanStartEvent[M MessageType](ctx context.Context, spanID string, started time.Time, opts ...model.Option) *SessionEvent[M] {
+	meta := modelSpanMetaFromContext[M](ctx, opts...)
+	meta.Model.Accepted = false
+	return &SessionEvent[M]{
+		EventID:   uuid.NewString(),
+		Timestamp: started,
+		Kind:      SessionEventSpanModelRequestStart,
+		Span: &SpanEvent{
+			SpanID:       spanID,
+			Kind:         SpanKindModel,
+			Name:         "model_request",
+			StartedAt:    started,
+			ParentSpanID: meta.ParentSpanID,
+			Model:        meta.Model,
+		},
+	}
+}
+
+func newModelSpanEndEvent[M MessageType](ctx context.Context, spanID, startEventID string, started, ended time.Time, msg M, err error, accepted bool, firstChunk time.Duration, opts ...model.Option) *SessionEvent[M] {
+	status := "ok"
+	errStr := ""
+	if err != nil {
+		status = "error"
+		errStr = err.Error()
+		if errors.Is(err, context.Canceled) || errors.Is(err, ErrStreamCanceled) {
+			status = "cancelled"
+		}
+	}
+	return &SessionEvent[M]{
+		EventID:   uuid.NewString(),
+		Timestamp: ended,
+		Kind:      SessionEventSpanModelRequestEnd,
+		Span: &SpanEvent{
+			SpanID:               spanID,
+			Kind:                 SpanKindModel,
+			Name:                 "model_request",
+			StartedAt:            started,
+			EndedAt:              ended,
+			DurationMS:           ended.Sub(started).Milliseconds(),
+			FirstChunkDurationMS: firstChunk.Milliseconds(),
+			Status:               status,
+			Err:                  errStr,
+			ParentSpanID:         modelSpanMetaFromContext[M](ctx, opts...).ParentSpanID,
+			Model:                modelSpanCompletionMeta(ctx, startEventID, msg, accepted && err == nil, opts...),
+		},
+	}
+}
+
+type modelSpanContextMeta struct {
+	ParentSpanID string
+	Model        *ModelSpanMeta
+}
+
+func modelSpanMetaFromContext[M MessageType](ctx context.Context, opts ...model.Option) modelSpanContextMeta {
+	meta := &ModelSpanMeta{Attempt: 1}
+	if common := model.GetCommonOptions(nil, opts...); common != nil && common.Model != nil {
+		meta.Model = *common.Model
+	}
+	if currentModel, ok := typedGetFailoverCurrentModel[M](ctx); ok {
+		if provider, ok := components.GetType(currentModel); ok {
+			meta.Provider = provider
+		}
+	}
+	parentSpanID := ""
+	if failoverMeta, ok := getFailoverTimeline(ctx); ok {
+		parentSpanID = failoverMeta.ParentSpanID
+		if failoverMeta.Attempt > 0 {
+			meta.Attempt = failoverMeta.Attempt
+		}
+	} else {
+		_ = compose.ProcessState(ctx, func(_ context.Context, st *typedState[M]) error {
+			meta.Attempt = st.getRetryAttempt() + 1
+			return nil
+		})
+	}
+	return modelSpanContextMeta{ParentSpanID: parentSpanID, Model: meta}
+}
+
+func modelSpanCompletionMeta[M MessageType](ctx context.Context, startEventID string, msg M, accepted bool, opts ...model.Option) *ModelSpanMeta {
+	meta := modelSpanMetaFromContext[M](ctx, opts...).Model
+	meta.ModelRequestStartEventID = startEventID
+	meta.Usage = modelUsageFromAssistant(msg)
+	meta.FinishReason = assistantFinishReason(msg)
+	meta.Accepted = accepted
+	return meta
+}
+
 func (m *typedEventSenderModel[M]) Generate(ctx context.Context, input []M, opts ...model.Option) (M, error) {
+	started := newEventTimestamp()
+	spanID := uuid.NewString()
+	startEvent := newModelSpanStartEvent[M](ctx, spanID, started, opts...)
+	sendSessionTimelineEvent(ctx, startEvent)
+	sendSessionTimelineEvent(ctx, &SessionEvent[M]{
+		EventID:          uuid.NewString(),
+		Timestamp:        started,
+		Kind:             SessionEventAgentThinking,
+		AgentObservation: &AgentObservationEvent{Thinking: &AgentThinkingEvent{}},
+	})
 	result, err := m.inner.Generate(ctx, input, opts...)
+	ended := newEventTimestamp()
+	sendSessionTimelineEvent(ctx, newModelSpanEndEvent(ctx, spanID, startEvent.EventID, started, ended, result, err, err == nil, 0, opts...))
 	if err != nil {
 		var zero M
 		return zero, err
@@ -319,10 +441,21 @@ func (m *typedEventSenderModel[M]) Generate(ctx context.Context, input []M, opts
 }
 
 func (m *typedEventSenderModel[M]) Stream(ctx context.Context, input []M, opts ...model.Option) (*schema.StreamReader[M], error) {
+	started := newEventTimestamp()
+	spanID := uuid.NewString()
+	startEvent := newModelSpanStartEvent[M](ctx, spanID, started, opts...)
+	sendSessionTimelineEvent(ctx, startEvent)
 	result, err := m.inner.Stream(ctx, input, opts...)
 	if err != nil {
+		sendSessionTimelineEvent(ctx, newModelSpanEndEvent(ctx, spanID, startEvent.EventID, started, newEventTimestamp(), *new(M), err, false, 0, opts...))
 		return nil, err
 	}
+	sendSessionTimelineEvent(ctx, &SessionEvent[M]{
+		EventID:          uuid.NewString(),
+		Timestamp:        newEventTimestamp(),
+		Kind:             SessionEventAgentThinking,
+		AgentObservation: &AgentObservationEvent{Thinking: &AgentThinkingEvent{}},
+	})
 	timestamp := newEventTimestamp()
 
 	execCtx := getTypedChatModelAgentExecCtx[M](ctx)
@@ -331,7 +464,7 @@ func (m *typedEventSenderModel[M]) Stream(ctx context.Context, input []M, opts .
 		return nil, errors.New("generator is nil when sending event in Stream: ensure agent state is properly initialized")
 	}
 
-	streams := result.Copy(2)
+	streams := result.Copy(3)
 
 	eventStream := streams[0]
 	if convertOpts := m.buildStreamConvertOptions(ctx); len(convertOpts) > 0 {
@@ -345,7 +478,64 @@ func (m *typedEventSenderModel[M]) Stream(ctx context.Context, input []M, opts .
 	event.Timestamp = timestamp
 	execCtx.send(event)
 
+	spanStream := streams[2]
+	go func() {
+		firstChunk := time.Duration(0)
+		firstAt := time.Time{}
+		var chunks []M
+		var streamErr error
+		for {
+			msg, recvErr := spanStream.Recv()
+			if recvErr == io.EOF {
+				break
+			}
+			if recvErr != nil {
+				streamErr = recvErr
+				break
+			}
+			if firstAt.IsZero() {
+				firstAt = newEventTimestamp()
+				firstChunk = firstAt.Sub(started)
+			}
+			chunks = append(chunks, msg)
+		}
+		spanStream.Close()
+		var final M
+		if len(chunks) > 0 && streamErr == nil {
+			final, streamErr = concatMessagesForSpan(chunks)
+		}
+		sendSessionTimelineEvent(ctx, newModelSpanEndEvent(ctx, spanID, startEvent.EventID, started, newEventTimestamp(), final, streamErr, streamErr == nil, firstChunk, opts...))
+	}()
+
 	return streams[1], nil
+}
+
+func concatMessagesForSpan[M MessageType](chunks []M) (M, error) {
+	var zero M
+	switch any(zero).(type) {
+	case *schema.Message:
+		msgs := make([]*schema.Message, 0, len(chunks))
+		for _, chunk := range chunks {
+			msgs = append(msgs, any(chunk).(*schema.Message))
+		}
+		msg, err := schema.ConcatMessages(msgs)
+		if err != nil {
+			return zero, err
+		}
+		return any(msg).(M), nil
+	case *schema.AgenticMessage:
+		msgs := make([]*schema.AgenticMessage, 0, len(chunks))
+		for _, chunk := range chunks {
+			msgs = append(msgs, any(chunk).(*schema.AgenticMessage))
+		}
+		msg, err := schema.ConcatAgenticMessages(msgs)
+		if err != nil {
+			return zero, err
+		}
+		return any(msg).(M), nil
+	default:
+		return zero, nil
+	}
 }
 
 // buildStreamConvertOptions constructs ConvertOption hooks that gate stream termination behind
@@ -847,10 +1037,13 @@ func typedToolEnhancedStreamEvent[M MessageType](callID, toolName, toolMsgID str
 
 func (w *typedEventSenderToolWrapper[M]) WrapInvokableToolCall(_ context.Context, endpoint InvokableToolCallEndpoint, tCtx *ToolContext) (InvokableToolCallEndpoint, error) {
 	return func(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (string, error) {
+		sendToolUseObservation[M](ctx, tCtx, argumentsInJSON)
 		result, err := endpoint(ctx, argumentsInJSON, opts...)
 		if err != nil {
+			sendToolResultObservation[M](ctx, tCtx.CallID, err.Error(), true)
 			return "", err
 		}
+		sendToolResultObservation[M](ctx, tCtx.CallID, result, false)
 		timestamp := newEventTimestamp()
 
 		toolName := tCtx.Name
@@ -881,8 +1074,10 @@ func (w *typedEventSenderToolWrapper[M]) WrapInvokableToolCall(_ context.Context
 
 func (w *typedEventSenderToolWrapper[M]) WrapStreamableToolCall(_ context.Context, endpoint StreamableToolCallEndpoint, tCtx *ToolContext) (StreamableToolCallEndpoint, error) {
 	return func(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (*schema.StreamReader[string], error) {
+		sendToolUseObservation[M](ctx, tCtx, argumentsInJSON)
 		result, err := endpoint(ctx, argumentsInJSON, opts...)
 		if err != nil {
+			sendToolResultObservation[M](ctx, tCtx.CallID, err.Error(), true)
 			return nil, err
 		}
 		timestamp := newEventTimestamp()
@@ -891,7 +1086,7 @@ func (w *typedEventSenderToolWrapper[M]) WrapStreamableToolCall(_ context.Contex
 		callID := tCtx.CallID
 
 		prePopAction := typedPopToolGenAction[M](ctx, toolName)
-		streams := result.Copy(2)
+		streams := result.Copy(3)
 
 		toolMsgID := uuid.NewString()
 		event := typedToolStreamEvent[M](callID, toolName, toolMsgID, streams[0])
@@ -909,16 +1104,20 @@ func (w *typedEventSenderToolWrapper[M]) WrapStreamableToolCall(_ context.Contex
 			return nil
 		})
 
+		go drainStringToolResultForObservation[M](ctx, callID, streams[2])
 		return streams[1], nil
 	}, nil
 }
 
 func (w *typedEventSenderToolWrapper[M]) WrapEnhancedInvokableToolCall(_ context.Context, endpoint EnhancedInvokableToolCallEndpoint, tCtx *ToolContext) (EnhancedInvokableToolCallEndpoint, error) {
 	return func(ctx context.Context, toolArgument *schema.ToolArgument, opts ...tool.Option) (*schema.ToolResult, error) {
+		sendToolUseObservation[M](ctx, tCtx, toolArgument)
 		result, err := endpoint(ctx, toolArgument, opts...)
 		if err != nil {
+			sendToolResultObservation[M](ctx, tCtx.CallID, err.Error(), true)
 			return nil, err
 		}
+		sendToolResultObservation[M](ctx, tCtx.CallID, result, false)
 		timestamp := newEventTimestamp()
 
 		toolName := tCtx.Name
@@ -952,8 +1151,10 @@ func (w *typedEventSenderToolWrapper[M]) WrapEnhancedInvokableToolCall(_ context
 
 func (w *typedEventSenderToolWrapper[M]) WrapEnhancedStreamableToolCall(_ context.Context, endpoint EnhancedStreamableToolCallEndpoint, tCtx *ToolContext) (EnhancedStreamableToolCallEndpoint, error) {
 	return func(ctx context.Context, toolArgument *schema.ToolArgument, opts ...tool.Option) (*schema.StreamReader[*schema.ToolResult], error) {
+		sendToolUseObservation[M](ctx, tCtx, toolArgument)
 		result, err := endpoint(ctx, toolArgument, opts...)
 		if err != nil {
+			sendToolResultObservation[M](ctx, tCtx.CallID, err.Error(), true)
 			return nil, err
 		}
 		timestamp := newEventTimestamp()
@@ -962,7 +1163,7 @@ func (w *typedEventSenderToolWrapper[M]) WrapEnhancedStreamableToolCall(_ contex
 		callID := tCtx.CallID
 
 		prePopAction := typedPopToolGenAction[M](ctx, toolName)
-		streams := result.Copy(2)
+		streams := result.Copy(3)
 
 		toolMsgID := uuid.NewString()
 		event := typedToolEnhancedStreamEvent[M](callID, toolName, toolMsgID, streams[0])
@@ -980,8 +1181,107 @@ func (w *typedEventSenderToolWrapper[M]) WrapEnhancedStreamableToolCall(_ contex
 			return nil
 		})
 
+		go drainEnhancedToolResultForObservation[M](ctx, callID, streams[2])
 		return streams[1], nil
 	}, nil
+}
+
+func sendToolUseObservation[M MessageType](ctx context.Context, tCtx *ToolContext, input any) {
+	if tCtx == nil {
+		return
+	}
+	sendSessionTimelineEvent(ctx, &SessionEvent[M]{
+		EventID:   uuid.NewString(),
+		Timestamp: newEventTimestamp(),
+		Kind:      SessionEventAgentToolUse,
+		AgentObservation: &AgentObservationEvent{ToolUse: &AgentToolUseEvent{
+			ToolUseID:           tCtx.CallID,
+			Name:                tCtx.Name,
+			Input:               toolObservationInput(input),
+			EvaluatedPermission: GetToolPermissionDecision(ctx, tCtx.CallID),
+		}},
+	})
+}
+
+func sendToolResultObservation[M MessageType](ctx context.Context, toolUseID string, content any, isErr bool) {
+	sendSessionTimelineEvent(ctx, &SessionEvent[M]{
+		EventID:   uuid.NewString(),
+		Timestamp: newEventTimestamp(),
+		Kind:      SessionEventAgentToolResult,
+		AgentObservation: &AgentObservationEvent{ToolResult: &AgentToolResultEvent{
+			ToolUseID: toolUseID,
+			Content:   content,
+			IsError:   isErr,
+		}},
+	})
+}
+
+func toolObservationInput(input any) map[string]any {
+	switch v := input.(type) {
+	case string:
+		if v == "" {
+			return nil
+		}
+		var m map[string]any
+		if err := json.Unmarshal([]byte(v), &m); err == nil {
+			return m
+		}
+		return map[string]any{"text": v}
+	case *schema.ToolArgument:
+		if v == nil {
+			return nil
+		}
+		return toolObservationInput(v.Text)
+	default:
+		if input == nil {
+			return nil
+		}
+		return map[string]any{"value": input}
+	}
+}
+
+func drainStringToolResultForObservation[M MessageType](ctx context.Context, toolUseID string, stream *schema.StreamReader[string]) {
+	var parts []string
+	var err error
+	for {
+		part, recvErr := stream.Recv()
+		if recvErr == io.EOF {
+			break
+		}
+		if recvErr != nil {
+			err = recvErr
+			break
+		}
+		parts = append(parts, part)
+	}
+	stream.Close()
+	if err != nil {
+		sendToolResultObservation[M](ctx, toolUseID, err.Error(), true)
+		return
+	}
+	sendToolResultObservation[M](ctx, toolUseID, parts, false)
+}
+
+func drainEnhancedToolResultForObservation[M MessageType](ctx context.Context, toolUseID string, stream *schema.StreamReader[*schema.ToolResult]) {
+	var parts []*schema.ToolResult
+	var err error
+	for {
+		part, recvErr := stream.Recv()
+		if recvErr == io.EOF {
+			break
+		}
+		if recvErr != nil {
+			err = recvErr
+			break
+		}
+		parts = append(parts, part)
+	}
+	stream.Close()
+	if err != nil {
+		sendToolResultObservation[M](ctx, toolUseID, err.Error(), true)
+		return
+	}
+	sendToolResultObservation[M](ctx, toolUseID, parts, false)
 }
 
 func hasUserEventSenderToolWrapper[M MessageType](handlers []TypedChatModelAgentMiddleware[M]) bool {

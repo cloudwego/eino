@@ -25,6 +25,8 @@ import (
 	"runtime/debug"
 	"sync"
 
+	"github.com/google/uuid"
+
 	"github.com/cloudwego/eino/internal/core"
 	"github.com/cloudwego/eino/internal/safe"
 	"github.com/cloudwego/eino/schema"
@@ -173,6 +175,8 @@ type runnerSessionRunState[M MessageType] struct {
 	persistence     SessionPersistenceConfig
 	sessionStore    SessionStore
 	checkPointStore CheckPointStore
+	runID           string
+	turnID          string
 	// inputMessages are the caller-provided messages for this turn (before history prepend).
 	// Captured so the Runner can persist them as session events at turn start.
 	inputMessages []M
@@ -205,6 +209,8 @@ func prepareRunnerSessionRun[M MessageType]( //nolint:revive // argument-limit
 	}
 	state.enabled = true
 	state.sessionID = sessionID
+	state.runID = uuid.NewString()
+	state.turnID = uuid.NewString()
 	state.sessionStore = sessionStore
 	state.checkPointStore = checkPointStore
 	state.persistence = normalizeSessionPersistenceConfig(sessionPersistence)
@@ -254,6 +260,8 @@ func prepareRunnerSessionResume[M MessageType](
 	}
 	state.enabled = true
 	state.sessionID = sessionID
+	state.runID = uuid.NewString()
+	state.turnID = uuid.NewString()
 	state.sessionStore = sessionStore
 	state.checkPointStore = checkPointStore
 	state.persistence = normalizeSessionPersistenceConfig(sessionPersistence)
@@ -376,7 +384,7 @@ func saveRunnerCheckpoint[M MessageType]( //nolint:revive // argument-limit
 
 func typedRunnerRunImpl[M MessageType](a TypedAgent[M], enableStreaming bool, store CheckPointStore, sessionID string, sessionStore SessionStore, sessionPersistence *SessionPersistenceConfig, ctx context.Context, messages []M, opts ...AgentRunOption) *AsyncIterator[*TypedAgentEvent[M]] { //nolint:revive // argument-limit
 	o := getCommonOptions(nil, opts...)
-	exposeSessionEvents := o.enableSessionEvents
+	exposeTimelineEvents := o.enableTimelineEvents
 
 	sessionState, err := prepareRunnerSessionRun[M](ctx, store, sessionID, sessionStore, sessionPersistence)
 	if err != nil {
@@ -394,6 +402,7 @@ func typedRunnerRunImpl[M MessageType](a TypedAgent[M], enableStreaming bool, st
 		messages = append(append([]M{}, sessionState.latestState.Messages...), sessionState.inputMessages...)
 		o.sessionValues = mergeSessionValues(sessionState.latestState.SessionValues, o.sessionValues)
 		opts = append(opts, withEnableSessionEvents())
+		opts = append(opts, withEnableInternalTimelineEvents())
 		if !o.refreshToolInfos && len(sessionState.latestState.ToolInfos) > 0 {
 			opts = append(opts, withPreviousTurnToolInfos(
 				sessionState.latestState.ToolInfos,
@@ -416,6 +425,7 @@ func typedRunnerRunImpl[M MessageType](a TypedAgent[M], enableStreaming bool, st
 		}
 		concreteInput := any(input).(*AgentInput)
 		ctx = ctxWithNewTypedRunCtx(ctx, input, o.sharedParentSession)
+		ctx = contextWithToolPermissionDecisionStore(ctx)
 		AddSessionValues(ctx, o.sessionValues)
 
 		iter := fa.Run(ctx, concreteInput, opts...)
@@ -423,7 +433,7 @@ func typedRunnerRunImpl[M MessageType](a TypedAgent[M], enableStreaming bool, st
 		// Short-circuit: no checkpoint to save, no cancel to handle, and no need to
 		// strip session-internal fields (enableSessionEvents means the caller wants
 		// them). The intermediate iterator pair adds no value in this case.
-		if store == nil && o.cancelCtx == nil && exposeSessionEvents && !sessionState.enabled {
+		if store == nil && o.cancelCtx == nil && exposeTimelineEvents && !sessionState.enabled {
 			return any(iter).(*AsyncIterator[*TypedAgentEvent[M]])
 		}
 
@@ -432,7 +442,7 @@ func typedRunnerRunImpl[M MessageType](a TypedAgent[M], enableStreaming bool, st
 		if sessionState.checkPointID != nil {
 			checkPointID = sessionState.checkPointID
 		}
-		go typedRunnerHandleIterImpl(enableStreaming, store, ctx, any(iter).(*AsyncIterator[*TypedAgentEvent[M]]), gen, checkPointID, o.cancelCtx, exposeSessionEvents, sessionState)
+		go typedRunnerHandleIterImpl(enableStreaming, store, ctx, any(iter).(*AsyncIterator[*TypedAgentEvent[M]]), gen, checkPointID, o.cancelCtx, exposeTimelineEvents, sessionState)
 		return niter
 	}
 
@@ -442,6 +452,7 @@ func typedRunnerRunImpl[M MessageType](a TypedAgent[M], enableStreaming bool, st
 	}
 
 	ctx = ctxWithNewTypedRunCtx(ctx, input, o.sharedParentSession)
+	ctx = contextWithToolPermissionDecisionStore(ctx)
 	AddSessionValues(ctx, o.sessionValues)
 
 	iter := fa.Run(ctx, input, opts...)
@@ -449,7 +460,7 @@ func typedRunnerRunImpl[M MessageType](a TypedAgent[M], enableStreaming bool, st
 	// Short-circuit: no checkpoint to save, no cancel to handle, and no need to
 	// strip session-internal fields (enableSessionEvents means the caller wants
 	// them). The intermediate iterator pair adds no value in this case.
-	if store == nil && o.cancelCtx == nil && exposeSessionEvents && !sessionState.enabled {
+	if store == nil && o.cancelCtx == nil && exposeTimelineEvents && !sessionState.enabled {
 		return iter
 	}
 
@@ -458,7 +469,7 @@ func typedRunnerRunImpl[M MessageType](a TypedAgent[M], enableStreaming bool, st
 	if sessionState.checkPointID != nil {
 		checkPointID = sessionState.checkPointID
 	}
-	go typedRunnerHandleIterImpl(enableStreaming, store, ctx, iter, gen, checkPointID, o.cancelCtx, exposeSessionEvents, sessionState)
+	go typedRunnerHandleIterImpl(enableStreaming, store, ctx, iter, gen, checkPointID, o.cancelCtx, exposeTimelineEvents, sessionState)
 	return niter
 }
 
@@ -469,7 +480,7 @@ func typedRunnerResumeInternalImpl[M MessageType](a TypedAgent[M], store CheckPo
 	}
 
 	o := getCommonOptions(nil, opts...)
-	exposeSessionEvents := o.enableSessionEvents
+	exposeTimelineEvents := o.enableTimelineEvents
 	sessionState, effectiveCheckPointID, err := prepareRunnerSessionResume[M](ctx, store, sessionID, sessionStore, sessionPersistence, checkPointID)
 	if err != nil {
 		return nil, err
@@ -477,6 +488,7 @@ func typedRunnerResumeInternalImpl[M MessageType](a TypedAgent[M], store CheckPo
 	checkPointID = effectiveCheckPointID
 	if sessionState.enabled {
 		opts = append(opts, withEnableSessionEvents())
+		opts = append(opts, withEnableInternalTimelineEvents())
 	}
 
 	ctx, runCtx, resumeInfo, err := runnerLoadCheckPointForSession(store, ctx, checkPointID, sessionState.enabled)
@@ -505,6 +517,7 @@ func typedRunnerResumeInternalImpl[M MessageType](a TypedAgent[M], store CheckPo
 	}
 
 	ctx = setRunCtx(ctx, runCtx)
+	ctx = contextWithToolPermissionDecisionStore(ctx)
 	AddSessionValues(ctx, o.sessionValues)
 
 	if len(resumeData) > 0 {
@@ -522,7 +535,7 @@ func typedRunnerResumeInternalImpl[M MessageType](a TypedAgent[M], store CheckPo
 		aIter := ra.Resume(ctx, resumeInfo, opts...)
 
 		niter, gen := NewAsyncIteratorPair[*TypedAgentEvent[M]]()
-		go typedRunnerHandleIterImpl(enableStreaming, store, ctx, any(aIter).(*AsyncIterator[*TypedAgentEvent[M]]), gen, &checkPointID, o.cancelCtx, exposeSessionEvents, sessionState)
+		go typedRunnerHandleIterImpl(enableStreaming, store, ctx, any(aIter).(*AsyncIterator[*TypedAgentEvent[M]]), gen, &checkPointID, o.cancelCtx, exposeTimelineEvents, sessionState)
 		return niter, nil
 	}
 
@@ -534,12 +547,12 @@ func typedRunnerResumeInternalImpl[M MessageType](a TypedAgent[M], store CheckPo
 	aIter := ra.Resume(ctx, resumeInfo, opts...)
 
 	niter, gen := NewAsyncIteratorPair[*TypedAgentEvent[M]]()
-	go typedRunnerHandleIterImpl(enableStreaming, store, ctx, aIter, gen, &checkPointID, o.cancelCtx, exposeSessionEvents, sessionState)
+	go typedRunnerHandleIterImpl(enableStreaming, store, ctx, aIter, gen, &checkPointID, o.cancelCtx, exposeTimelineEvents, sessionState)
 	return niter, nil
 }
 
 func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckPointStore, ctx context.Context, aIter *AsyncIterator[*TypedAgentEvent[M]], //nolint:revive,cyclop,funlen // argument-limit; event loop branches by event kind
-	gen *AsyncGenerator[*TypedAgentEvent[M]], checkPointID *string, cancelCtx *cancelContext, enableSessionEvents bool, sessionState *runnerSessionRunState[M]) {
+	gen *AsyncGenerator[*TypedAgentEvent[M]], checkPointID *string, cancelCtx *cancelContext, enableTimelineEvents bool, sessionState *runnerSessionRunState[M]) {
 	defer func() {
 		panicErr := recover()
 		if panicErr != nil {
@@ -554,6 +567,7 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 		legacyData      any
 		interrupted     bool
 		cancelled       bool
+		retryExhausted  bool
 		sawTurnEnd      bool
 		persister       *sessionEventPersister[M]
 		persistErr      error
@@ -568,6 +582,53 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 	setPersistErr := func(err error) {
 		if err != nil && persistErr == nil {
 			persistErr = err
+		}
+	}
+	annotateSessionEvent := func(se *SessionEvent[M]) *SessionEvent[M] {
+		if se == nil || sessionState == nil || !sessionState.enabled {
+			return se
+		}
+		se.RunID = sessionState.runID
+		se.TurnID = sessionState.turnID
+		return se
+	}
+	enqueueSessionEvent := func(se *SessionEvent[M]) {
+		if persister == nil || se == nil {
+			return
+		}
+		annotateSessionEvent(se)
+		if err := ValidateEmittedSessionEventKind(se); err != nil {
+			setPersistErr(err)
+			return
+		}
+		data, err := encodeSessionEvent(se)
+		if err != nil {
+			setPersistErr(err)
+			return
+		}
+		if err := persister.enqueue(data); err != nil {
+			setPersistErr(err)
+		}
+	}
+	sendTimelineEvent := func(se *SessionEvent[M]) {
+		if se == nil {
+			return
+		}
+		annotateSessionEvent(se)
+		if se.EventID == "" {
+			se.EventID = uuid.NewString()
+		}
+		if se.Timestamp.IsZero() {
+			se.Timestamp = newEventTimestamp()
+		}
+		if err := ValidateEmittedSessionEventKind(se); err != nil {
+			setPersistErr(err)
+			return
+		}
+		event := &TypedAgentEvent[M]{EventID: se.EventID, Timestamp: se.Timestamp, SessionEvent: se}
+		enqueueSessionEvent(se)
+		if enableTimelineEvents {
+			gen.Send(event)
 		}
 	}
 	// saveCheckpointNow is the path used when no session persister is active —
@@ -590,18 +651,18 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 	// Emit caller-provided input messages as session events at turn start, so the
 	// event log carries the user's input alongside the agent's output. Skipped on
 	// resume (sessionState.inputMessages is nil).
+	if persister != nil {
+		sendTimelineEvent(&SessionEvent[M]{
+			EventID:   uuid.NewString(),
+			Timestamp: newEventTimestamp(),
+			Kind:      SessionEventSessionStatusRunning,
+			Lifecycle: &LifecycleEvent{Scope: LifecycleScopeSession, State: SessionRunStateRunning},
+		})
+	}
 	if persister != nil && len(sessionState.inputMessages) > 0 {
 		for _, msg := range sessionState.inputMessages {
 			se := makeInputSessionEvent[M](msg)
-			data, err := encodeSessionEvent(se)
-			if err != nil {
-				setPersistErr(err)
-				break
-			}
-			if err := persister.enqueue(data); err != nil {
-				setPersistErr(err)
-				break
-			}
+			enqueueSessionEvent(se)
 		}
 	}
 	for {
@@ -612,8 +673,24 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 		if event.Timestamp.IsZero() {
 			event.Timestamp = newEventTimestamp()
 		}
+		if event.SessionEvent != nil && event.SessionEvent.EventID == "" {
+			if event.EventID == "" {
+				event.EventID = uuid.NewString()
+			}
+			event.SessionEvent.EventID = event.EventID
+		} else if event.SessionEvent != nil && event.EventID == "" {
+			event.EventID = event.SessionEvent.EventID
+		}
+		if err := validateAgentSessionEventIdentity(event); err != nil {
+			setPersistErr(err)
+			event.Err = err
+		}
 
 		if event.Err != nil {
+			var retryErr *RetryExhaustedError
+			if errors.As(event.Err, &retryErr) {
+				retryExhausted = true
+			}
 			var cancelErr *CancelError
 			if errors.As(event.Err, &cancelErr) {
 				cancelled = true
@@ -624,7 +701,7 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 					cancelErr.InterruptContexts = core.ToInterruptContexts(cancelErr.interruptSignal, allowedAddressSegmentTypes)
 					saveCheckpointNow(&InterruptInfo{}, cancelErr.interruptSignal, "failed to save checkpoint on cancel")
 				}
-				if !enableSessionEvents {
+				if !enableTimelineEvents {
 					event = stripSessionEventFields(event)
 					if event == nil {
 						break
@@ -674,6 +751,9 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 			fromOtherSession := event.SessionID != "" && event.SessionID != sessionState.sessionID
 
 			if !fromOtherSession {
+				if event.EventID == "" {
+					event.EventID = uuid.NewString()
+				}
 				// Streaming output is split into two stream copies: copies[1] is
 				// rewritten onto the live event and sent immediately so live
 				// consumers see no extra latency, copies[0] is then drained
@@ -694,7 +774,7 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 					liveOutput.MessageOutput = &liveMV
 					event.Output = &liveOutput
 					liveEvent := event
-					if !enableSessionEvents {
+					if !enableTimelineEvents {
 						liveEvent = stripSessionEventFields(liveEvent)
 					}
 					if liveEvent != nil {
@@ -718,25 +798,23 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 					persistEvent := *event
 					persistEvent.Output = &persistOutput
 
-					se := toSessionEvent(&persistEvent)
+					se, err := toSessionEventChecked(&persistEvent)
+					if err != nil {
+						setPersistErr(err)
+						continue
+					}
 					if se != nil {
-						data, err := encodeSessionEvent(se)
-						if err != nil {
-							setPersistErr(err)
-						} else if err := persister.enqueue(data); err != nil {
-							setPersistErr(err)
-						}
+						enqueueSessionEvent(se)
 					}
 				} else {
 					// Non-streaming events go through toSessionEvent directly.
-					se := toSessionEvent(event)
+					se, err := toSessionEventChecked(event)
+					if err != nil {
+						setPersistErr(err)
+						se = nil
+					}
 					if se != nil {
-						data, err := encodeSessionEvent(se)
-						if err != nil {
-							setPersistErr(err)
-						} else if err := persister.enqueue(data); err != nil {
-							setPersistErr(err)
-						}
+						enqueueSessionEvent(se)
 					}
 				}
 			}
@@ -746,7 +824,7 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 			continue
 		}
 
-		if !enableSessionEvents {
+		if !enableTimelineEvents {
 			event = stripSessionEventFields(event)
 			if event == nil {
 				continue
@@ -755,6 +833,33 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 		gen.Send(event)
 	}
 	if persister != nil {
+		stopReason := "end_turn"
+		switch {
+		case interrupted:
+			stopReason = "interrupted"
+		case cancelled:
+			stopReason = "cancelled"
+		case retryExhausted:
+			stopReason = "retries_exhausted"
+		case persistErr != nil:
+			stopReason = "failed"
+		case !sawTurnEnd:
+			stopReason = "failed"
+		}
+		if interrupted {
+			sendTimelineEvent(&SessionEvent[M]{
+				EventID:         uuid.NewString(),
+				Timestamp:       newEventTimestamp(),
+				Kind:            SessionEventUserInterrupt,
+				UserObservation: &UserObservationEvent{Interrupt: &UserInterruptEvent{Reason: "interrupted"}},
+			})
+		}
+		sendTimelineEvent(&SessionEvent[M]{
+			EventID:   uuid.NewString(),
+			Timestamp: newEventTimestamp(),
+			Kind:      SessionEventSessionStatusIdle,
+			Lifecycle: &LifecycleEvent{Scope: LifecycleScopeSession, State: SessionRunStateIdle, StopReason: &StopReason{Type: stopReason}},
+		})
 		res := &sessionTurnResult[M]{
 			persister:         persister,
 			persistErr:        persistErr,
