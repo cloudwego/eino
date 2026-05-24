@@ -36,7 +36,6 @@ import (
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/internal/safe"
-	iSerializer "github.com/cloudwego/eino/internal/serialization"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -1138,7 +1137,7 @@ func (a *TypedChatModelAgent[M]) buildNoToolsRunFunc(_ context.Context) (typedRu
 		compileOptions = append(compileOptions,
 			compose.WithGraphName(a.name),
 			compose.WithCheckPointStore(p.store),
-			compose.WithSerializer(&iSerializer.GobSerializer{}))
+			compose.WithSerializer(&schema.GobSerializer{}))
 
 		if cancelCtx != nil {
 			var interrupt func(...compose.GraphInterruptOption)
@@ -1282,7 +1281,7 @@ func (a *TypedChatModelAgent[M]) buildMessageReActRunFunc(_ context.Context, bc 
 		compileOptions = append(compileOptions,
 			compose.WithGraphName(a.name),
 			compose.WithCheckPointStore(mp.store),
-			compose.WithSerializer(&iSerializer.GobSerializer{}),
+			compose.WithSerializer(&schema.GobSerializer{}),
 			compose.WithMaxRunSteps(math.MaxInt))
 
 		if cancelCtx != nil {
@@ -1428,7 +1427,7 @@ func (a *TypedChatModelAgent[M]) buildAgenticReActRunFunc(_ context.Context, bc 
 		compileOptions = append(compileOptions,
 			compose.WithGraphName(a.name),
 			compose.WithCheckPointStore(ap.store),
-			compose.WithSerializer(&iSerializer.GobSerializer{}),
+			compose.WithSerializer(&schema.GobSerializer{}),
 			compose.WithMaxRunSteps(math.MaxInt))
 
 		if cancelCtx != nil {
@@ -1872,7 +1871,7 @@ func preprocessComposeCheckpoint(data []byte) ([]byte, error) {
 	const lenPrefixedCompatName = "\x15" + stateGobNameV080
 	if bytes.Contains(data, []byte(lenPrefixedCompatName)) {
 		// v0.8.0-v0.8.3: already byte-patched by preprocessADKCheckpoint; decode as *stateV080.
-		migrated, err := compose.MigrateCheckpointState(data, &iSerializer.GobSerializer{}, func(state any) (any, bool, error) {
+		migrated, err := compose.MigrateCheckpointState(data, &schema.GobSerializer{}, func(state any) (any, bool, error) {
 			sc, ok := state.(*stateV080)
 			if !ok {
 				return state, false, nil
