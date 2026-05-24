@@ -51,10 +51,7 @@ func RegisterSerializableType[T any](name string) (err error) {
 
 type CheckPointStore = core.CheckPointStore
 
-type Serializer interface {
-	Marshal(v any) ([]byte, error)
-	Unmarshal(data []byte, v any) error
-}
+type Serializer = schema.Serializer
 
 // WithCheckPointStore sets the checkpoint store implementation for a graph.
 func WithCheckPointStore(store CheckPointStore) GraphCompileOption {
