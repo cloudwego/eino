@@ -453,30 +453,17 @@ type TypedAgentEvent[M MessageType] struct {
 
 	Err error
 
-	TurnEndState *TurnEndState[M]
-
-	// SessionEvent is the first-class live timeline envelope. It carries
-	// lifecycle, error, span, observation, and session mutation records when
-	// WithTimelineEvents is enabled. For durable managed-session events,
-	// EventID and SessionEvent.EventID must be identical.
+	// SessionEvent is the first-class live timeline envelope. All session-semantic
+	// payloads, including lifecycle, error, span, observation, message mutation,
+	// and turn-end records, must be carried here. For durable managed-session
+	// events, EventID and SessionEvent.EventID must be identical after runtime
+	// materialization.
 	SessionEvent *SessionEvent[M]
 
-	// MessagesReplaced is a session-internal mutation event emitted by middlewares
-	// (e.g. summarization) when they replace state.Messages wholesale. nil = absent;
-	// non-nil (including &[]M{}) = active replacement.
-	MessagesReplaced *[]M
-
-	// MessageUpdated is a session-internal mutation event emitted by middlewares
-	// (e.g. reduction) when they replace a single message in state.Messages.
-	MessageUpdated *MessageUpdatedEvent[M]
-
-	// MessageInserted is a session-internal mutation event emitted by middlewares
-	// (AgentsMD, ToolSearch, PatchToolCalls) when they insert a message into state.Messages.
-	MessageInserted *MessageInsertedEvent[M]
-
 	// SessionID identifies the owning session for routing/filtering in nested-agent
-	// scenarios (e.g. AgentTool). Empty = current runner's session. This field is
-	// stripped from all events before user-facing delivery.
+	// scenarios (e.g. AgentTool). Empty = current runner's session. This is routing
+	// metadata, not session payload content, and is stripped from all events before
+	// user-facing delivery.
 	SessionID string
 }
 
