@@ -118,7 +118,13 @@ func (a *runnerSessionAgent) Run(ctx context.Context, input *AgentInput, _ ...Ag
 				MessageOutput: &MessageVariant{Message: schema.AssistantMessage("ok", nil), Role: schema.Assistant},
 			},
 		})
-		gen.Send(&AgentEvent{AgentName: a.name, TurnEndState: turnEnd})
+		gen.Send(&AgentEvent{
+			AgentName: a.name,
+			SessionEvent: &SessionEvent[*schema.Message]{
+				Kind:    SessionEventTurnEnd,
+				TurnEnd: turnEnd,
+			},
+		})
 	}()
 	return iter
 }
@@ -149,8 +155,11 @@ func (a *streamingSessionAgent) Run(_ context.Context, _ *AgentInput, _ ...Agent
 		sw.Close()
 		gen.Send(&AgentEvent{
 			AgentName: a.Name(context.Background()),
-			TurnEndState: &TurnEndState[*schema.Message]{
-				Messages: []*schema.Message{schema.AssistantMessage("partial", nil)},
+			SessionEvent: &SessionEvent[*schema.Message]{
+				Kind: SessionEventTurnEnd,
+				TurnEnd: &TurnEndState[*schema.Message]{
+					Messages: []*schema.Message{schema.AssistantMessage("partial", nil)},
+				},
 			},
 		})
 	}()
@@ -503,8 +512,11 @@ func (a *runnerInterruptAgent) Resume(ctx context.Context, info *ResumeInfo, _ .
 		})
 		gen.Send(&AgentEvent{
 			AgentName: "InterruptAgent",
-			TurnEndState: &TurnEndState[*schema.Message]{
-				Messages: []*schema.Message{schema.AssistantMessage("resumed ok", nil)},
+			SessionEvent: &SessionEvent[*schema.Message]{
+				Kind: SessionEventTurnEnd,
+				TurnEnd: &TurnEndState[*schema.Message]{
+					Messages: []*schema.Message{schema.AssistantMessage("resumed ok", nil)},
+				},
 			},
 		})
 	}()
@@ -883,34 +895,43 @@ func TestStripSessionEventFields(t *testing.T) {
 		assert.Equal(t, "hi", stripped.Output.MessageOutput.Message.Content)
 	})
 
-	t.Run("TurnEndState-only event drops to nil", func(t *testing.T) {
+	t.Run("SessionEvent-only event drops to nil", func(t *testing.T) {
 		ev := &AgentEvent{
-			TurnEndState: &TurnEndState[*schema.Message]{},
+			SessionEvent: &SessionEvent[*schema.Message]{
+				Kind:    SessionEventTurnEnd,
+				TurnEnd: &TurnEndState[*schema.Message]{},
+			},
 		}
 		stripped := stripSessionEventFields(ev)
 		assert.Nil(t, stripped)
 	})
 
-	t.Run("MessagesReplaced-only event drops to nil", func(t *testing.T) {
+	t.Run("message mutation SessionEvent-only event drops to nil", func(t *testing.T) {
 		msgs := []*schema.Message{schema.UserMessage("x")}
 		ev := &AgentEvent{
-			MessagesReplaced: &msgs,
+			SessionEvent: &SessionEvent[*schema.Message]{
+				Kind:             SessionEventMessagesReplaced,
+				MessagesReplaced: &msgs,
+			},
 		}
 		stripped := stripSessionEventFields(ev)
 		assert.Nil(t, stripped)
 	})
 
-	t.Run("Err with TurnEndState keeps Err", func(t *testing.T) {
+	t.Run("Err with SessionEvent keeps Err", func(t *testing.T) {
 		ts := time.Date(2026, 5, 22, 10, 1, 0, 0, time.UTC)
 		ev := &AgentEvent{
-			Timestamp:    ts,
-			Err:          errors.New("visible"),
-			TurnEndState: &TurnEndState[*schema.Message]{},
-			SessionID:    "child-1",
+			Timestamp: ts,
+			Err:       errors.New("visible"),
+			SessionEvent: &SessionEvent[*schema.Message]{
+				Kind:    SessionEventTurnEnd,
+				TurnEnd: &TurnEndState[*schema.Message]{},
+			},
+			SessionID: "child-1",
 		}
 		stripped := stripSessionEventFields(ev)
 		require.NotNil(t, stripped)
-		assert.Nil(t, stripped.TurnEndState)
+		assert.Nil(t, stripped.SessionEvent)
 		assert.Empty(t, stripped.SessionID)
 		assert.Equal(t, ts, stripped.Timestamp)
 		assert.EqualError(t, stripped.Err, "visible")

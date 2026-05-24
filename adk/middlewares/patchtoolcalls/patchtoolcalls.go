@@ -116,9 +116,12 @@ func patchToolCallsForMessage[M adk.MessageType](ctx context.Context,
 			// session event log. On reconstruction it will be present, and the
 			// dangling-call check below will skip re-insertion.
 			if msgEvent, ok := any(&adk.TypedAgentEvent[*schema.Message]{
-				MessageInserted: &adk.MessageInsertedEvent[*schema.Message]{
-					Message:         toolMsg,
-					BeforeMessageID: "",
+				SessionEvent: &adk.SessionEvent[*schema.Message]{
+					Kind: adk.SessionEventMessageInserted,
+					MessageInserted: &adk.MessageInsertedEvent[*schema.Message]{
+						Message:         toolMsg,
+						BeforeMessageID: "",
+					},
 				},
 			}).(*adk.TypedAgentEvent[M]); ok {
 				_ = adk.TypedSendEvent(ctx, msgEvent)
@@ -175,9 +178,12 @@ func patchToolCallsForAgenticMessage[M adk.MessageType](ctx context.Context,
 			patched = append(patched, toolMsg)
 
 			if msgEvent, ok := any(&adk.TypedAgentEvent[*schema.AgenticMessage]{
-				MessageInserted: &adk.MessageInsertedEvent[*schema.AgenticMessage]{
-					Message:         toolMsg,
-					BeforeMessageID: "",
+				SessionEvent: &adk.SessionEvent[*schema.AgenticMessage]{
+					Kind: adk.SessionEventMessageInserted,
+					MessageInserted: &adk.MessageInsertedEvent[*schema.AgenticMessage]{
+						Message:         toolMsg,
+						BeforeMessageID: "",
+					},
 				},
 			}).(*adk.TypedAgentEvent[M]); ok {
 				_ = adk.TypedSendEvent(ctx, msgEvent)
