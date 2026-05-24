@@ -56,7 +56,10 @@ type typedChatModelAgentExecCtx[M MessageType] struct {
 	suppressEventSend  bool
 	retryVerdictSignal *retryVerdictSignal
 
-	afterToolCallsHook func(ctx context.Context) error
+	afterToolCallsHook     func(ctx context.Context) error
+	sessionEvents          bool
+	timelineEvents         bool
+	internalTimelineEvents bool
 }
 
 func (e *typedChatModelAgentExecCtx[M]) send(event *TypedAgentEvent[M]) {
@@ -71,6 +74,13 @@ func (e *typedChatModelAgentExecCtx[M]) send(event *TypedAgentEvent[M]) {
 	// User-supplied non-empty IDs (e.g. replay scenarios) are preserved.
 	if event != nil && event.EventID == "" {
 		event.EventID = uuid.NewString()
+	}
+	if event != nil && event.SessionEvent != nil {
+		if event.SessionEvent.EventID == "" {
+			event.SessionEvent.EventID = event.EventID
+		} else if event.EventID == "" {
+			event.EventID = event.SessionEvent.EventID
+		}
 	}
 	e.generator.trySend(event)
 }
@@ -497,15 +507,17 @@ type ChatModelAgent = TypedChatModelAgent[*schema.Message]
 
 // typedRunParams holds the parameters for a typedRunFunc invocation.
 type typedRunParams[M MessageType] struct {
-	input          *TypedAgentInput[M]
-	generator      *AsyncGenerator[*TypedAgentEvent[M]]
-	store          *bridgeStore
-	instruction    string
-	returnDirectly map[string]bool
-	cancelCtx      *cancelContext
-	cancelCtxOwned bool
-	composeOpts    []compose.Option
-	sessionEvents  bool
+	input                  *TypedAgentInput[M]
+	generator              *AsyncGenerator[*TypedAgentEvent[M]]
+	store                  *bridgeStore
+	instruction            string
+	returnDirectly         map[string]bool
+	cancelCtx              *cancelContext
+	cancelCtxOwned         bool
+	composeOpts            []compose.Option
+	sessionEvents          bool
+	timelineEvents         bool
+	internalTimelineEvents bool
 
 	afterToolCallsHook func(ctx context.Context) error
 
@@ -1113,6 +1125,9 @@ func (a *TypedChatModelAgent[M]) buildNoToolsRunFunc(_ context.Context) (typedRu
 			generator:                p.generator,
 			cancelCtx:                cancelCtx,
 			failoverLastSuccessModel: a.model,
+			sessionEvents:            p.sessionEvents,
+			timelineEvents:           p.timelineEvents,
+			internalTimelineEvents:   p.internalTimelineEvents,
 		})
 
 		// Pre-execution cancel check
@@ -1410,10 +1425,13 @@ func (a *TypedChatModelAgent[M]) buildAgenticReActRunFunc(_ context.Context, bc 
 		}
 
 		ctx = withTypedChatModelAgentExecCtx(ctx, &typedChatModelAgentExecCtx[*schema.AgenticMessage]{
-			runtimeReturnDirectly: ap.returnDirectly,
-			generator:             ap.generator,
-			cancelCtx:             cancelCtx,
-			afterToolCallsHook:    ap.afterToolCallsHook,
+			runtimeReturnDirectly:  ap.returnDirectly,
+			generator:              ap.generator,
+			cancelCtx:              cancelCtx,
+			afterToolCallsHook:     ap.afterToolCallsHook,
+			sessionEvents:          ap.sessionEvents,
+			timelineEvents:         ap.timelineEvents,
+			internalTimelineEvents: ap.internalTimelineEvents,
 		})
 
 		// Pre-execution cancel check
@@ -1619,17 +1637,19 @@ func (a *TypedChatModelAgent[M]) Run(ctx context.Context, input *TypedAgentInput
 		}
 
 		run(ctx, &typedRunParams[M]{
-			input:              input,
-			generator:          generator,
-			store:              newBridgeStore(),
-			instruction:        instruction,
-			returnDirectly:     returnDirectly,
-			cancelCtx:          cancelCtx,
-			cancelCtxOwned:     cancelCtxOwned,
-			composeOpts:        co,
-			sessionEvents:      o.enableSessionEvents,
-			afterToolCallsHook: runOps.afterToolCallsHook,
-			toolInfosPreSeeded: toolInfosPreSeeded,
+			input:                  input,
+			generator:              generator,
+			store:                  newBridgeStore(),
+			instruction:            instruction,
+			returnDirectly:         returnDirectly,
+			cancelCtx:              cancelCtx,
+			cancelCtxOwned:         cancelCtxOwned,
+			composeOpts:            co,
+			sessionEvents:          o.enableSessionEvents,
+			timelineEvents:         o.enableTimelineEvents,
+			internalTimelineEvents: o.enableInternalTimelineEvents,
+			afterToolCallsHook:     runOps.afterToolCallsHook,
+			toolInfosPreSeeded:     toolInfosPreSeeded,
 		})
 	}()
 
@@ -1745,16 +1765,18 @@ func (a *TypedChatModelAgent[M]) Resume(ctx context.Context, info *ResumeInfo, o
 		}
 
 		run(ctx, &typedRunParams[M]{
-			input:              &TypedAgentInput[M]{EnableStreaming: info.EnableStreaming},
-			generator:          generator,
-			store:              newResumeBridgeStore(bridgeCheckpointID, stateByte),
-			instruction:        instruction,
-			returnDirectly:     returnDirectly,
-			cancelCtx:          cancelCtx,
-			cancelCtxOwned:     cancelCtxOwned,
-			composeOpts:        co,
-			sessionEvents:      o.enableSessionEvents,
-			afterToolCallsHook: resumeRunOps.afterToolCallsHook,
+			input:                  &TypedAgentInput[M]{EnableStreaming: info.EnableStreaming},
+			generator:              generator,
+			store:                  newResumeBridgeStore(bridgeCheckpointID, stateByte),
+			instruction:            instruction,
+			returnDirectly:         returnDirectly,
+			cancelCtx:              cancelCtx,
+			cancelCtxOwned:         cancelCtxOwned,
+			composeOpts:            co,
+			sessionEvents:          o.enableSessionEvents,
+			timelineEvents:         o.enableTimelineEvents,
+			internalTimelineEvents: o.enableInternalTimelineEvents,
+			afterToolCallsHook:     resumeRunOps.afterToolCallsHook,
 		})
 	}()
 
