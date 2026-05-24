@@ -86,7 +86,7 @@ func TestChatModelAgentRun(t *testing.T) {
 		assert.False(t, ok)
 	})
 
-	t.Run("SessionEvents_NoTools_EmitsTurnEndState", func(t *testing.T) {
+	t.Run("SessionEvents_NoTools_EmitsTurnEnd", func(t *testing.T) {
 		ctx := context.Background()
 
 		ctrl := gomock.NewController(t)
@@ -122,12 +122,11 @@ func TestChatModelAgentRun(t *testing.T) {
 		require.NotNil(t, events[0].Output)
 		assert.Equal(t, "session answer", events[0].Output.MessageOutput.Message.Content)
 
-		turnEnd := events[1].TurnEndState
+		require.NotNil(t, events[1].SessionEvent)
+		assert.Equal(t, SessionEventTurnEnd, events[1].SessionEvent.Kind)
+		turnEnd := events[1].SessionEvent.TurnEnd
 		require.NotNil(t, turnEnd)
-		require.Len(t, turnEnd.Messages, 3)
-		assert.Equal(t, schema.System, turnEnd.Messages[0].Role)
-		assert.Equal(t, "remember this", turnEnd.Messages[1].Content)
-		assert.Equal(t, "session answer", turnEnd.Messages[2].Content)
+		assert.Nil(t, turnEnd.Messages)
 		assert.Equal(t, "session answer", turnEnd.SessionValues["answer"])
 	})
 
@@ -249,7 +248,7 @@ func TestChatModelAgentRun(t *testing.T) {
 		assert.Len(t, capturedMessages, 3)
 	})
 
-	t.Run("SessionEvents_ReAct_EmitsToolAwareTurnEndState", func(t *testing.T) {
+	t.Run("SessionEvents_ReAct_EmitsToolAwareTurnEnd", func(t *testing.T) {
 		ctx := context.Background()
 
 		ctrl := gomock.NewController(t)
@@ -298,15 +297,12 @@ func TestChatModelAgentRun(t *testing.T) {
 
 		require.Len(t, events, 4)
 		assert.Equal(t, 2, generateCount)
-		require.NotNil(t, events[3].TurnEndState)
+		require.NotNil(t, events[3].SessionEvent)
+		assert.Equal(t, SessionEventTurnEnd, events[3].SessionEvent.Kind)
 
-		turnEnd := events[3].TurnEndState
-		require.Len(t, turnEnd.Messages, 5)
-		assert.Equal(t, schema.System, turnEnd.Messages[0].Role)
-		assert.Equal(t, "use tool", turnEnd.Messages[1].Content)
-		assert.Len(t, turnEnd.Messages[2].ToolCalls, 1)
-		assert.Equal(t, schema.Tool, turnEnd.Messages[3].Role)
-		assert.Equal(t, "final with tool", turnEnd.Messages[4].Content)
+		turnEnd := events[3].SessionEvent.TurnEnd
+		require.NotNil(t, turnEnd)
+		assert.Nil(t, turnEnd.Messages)
 		require.Len(t, turnEnd.ToolInfos, 1)
 		assert.Equal(t, "test_tool", turnEnd.ToolInfos[0].Name)
 		assert.Equal(t, "final with tool", turnEnd.SessionValues["answer"])

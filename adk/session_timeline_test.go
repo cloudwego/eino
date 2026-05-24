@@ -586,6 +586,89 @@ func TestSessionTimeline_EventIDMismatchRejectedAtPersistenceBoundary(t *testing
 	assert.Contains(t, err.Error(), "session event identity mismatch")
 }
 
+func TestSessionTimeline_NormalizeAgentSessionEventMaterializesEnvelope(t *testing.T) {
+	t.Run("both ids empty", func(t *testing.T) {
+		original := &SessionEvent[*schema.Message]{
+			Kind: SessionEventAgentThinking,
+			AgentObservation: &AgentObservationEvent{
+				Thinking: &AgentThinkingEvent{},
+			},
+		}
+		event := &AgentEvent{SessionEvent: original}
+		se, err := normalizeAgentSessionEvent(event)
+		require.NoError(t, err)
+		require.NotEmpty(t, event.EventID)
+		assert.Equal(t, event.EventID, se.EventID)
+		assert.Equal(t, event.EventID, event.SessionEvent.EventID)
+		require.False(t, event.Timestamp.IsZero())
+		assert.Equal(t, event.Timestamp, se.Timestamp)
+		assert.Equal(t, event.Timestamp, event.SessionEvent.Timestamp)
+		assert.Empty(t, original.EventID)
+		assert.True(t, original.Timestamp.IsZero())
+	})
+
+	t.Run("envelope id and timestamp backfill session event", func(t *testing.T) {
+		ts := time.Date(2026, 5, 24, 12, 0, 0, 0, time.UTC)
+		id := uuid.NewString()
+		event := &AgentEvent{
+			EventID:   id,
+			Timestamp: ts,
+			SessionEvent: &SessionEvent[*schema.Message]{
+				Kind: SessionEventAgentThinking,
+				AgentObservation: &AgentObservationEvent{
+					Thinking: &AgentThinkingEvent{},
+				},
+			},
+		}
+		se, err := normalizeAgentSessionEvent(event)
+		require.NoError(t, err)
+		assert.Equal(t, id, se.EventID)
+		assert.Equal(t, ts, se.Timestamp)
+	})
+
+	t.Run("session event id and timestamp backfill envelope", func(t *testing.T) {
+		ts := time.Date(2026, 5, 24, 12, 1, 0, 0, time.UTC)
+		id := uuid.NewString()
+		event := &AgentEvent{
+			SessionEvent: &SessionEvent[*schema.Message]{
+				EventID:   id,
+				Timestamp: ts,
+				Kind:      SessionEventAgentThinking,
+				AgentObservation: &AgentObservationEvent{
+					Thinking: &AgentThinkingEvent{},
+				},
+			},
+		}
+		se, err := normalizeAgentSessionEvent(event)
+		require.NoError(t, err)
+		assert.Equal(t, id, event.EventID)
+		assert.Equal(t, ts, event.Timestamp)
+		assert.Equal(t, id, se.EventID)
+		assert.Equal(t, ts, se.Timestamp)
+	})
+
+	t.Run("turn end messages stripped without mutating producer event", func(t *testing.T) {
+		msg := schema.AssistantMessage("kept only by producer", nil)
+		original := &SessionEvent[*schema.Message]{
+			Kind: SessionEventTurnEnd,
+			TurnEnd: &TurnEndState[*schema.Message]{
+				Messages:      []*schema.Message{msg},
+				SessionValues: map[string]any{"answer": "ok"},
+			},
+		}
+		event := &AgentEvent{SessionEvent: original}
+		se, err := normalizeAgentSessionEvent(event)
+		require.NoError(t, err)
+		require.NotNil(t, se.TurnEnd)
+		assert.Nil(t, se.TurnEnd.Messages)
+		require.NotNil(t, event.SessionEvent.TurnEnd)
+		assert.Nil(t, event.SessionEvent.TurnEnd.Messages)
+		require.NotNil(t, original.TurnEnd)
+		require.Len(t, original.TurnEnd.Messages, 1)
+		assert.Equal(t, "ok", se.TurnEnd.SessionValues["answer"])
+	})
+}
+
 func TestRetryOnlyModelSpansHaveNoParentSpanID(t *testing.T) {
 	iter, gen := NewAsyncIteratorPair[*AgentEvent]()
 	var calls int

@@ -688,13 +688,11 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 		if event.Timestamp.IsZero() {
 			event.Timestamp = newEventTimestamp()
 		}
-		if event.SessionEvent != nil && event.SessionEvent.EventID == "" {
-			if event.EventID == "" {
-				event.EventID = uuid.NewString()
+		if event.SessionEvent != nil {
+			if _, err := normalizeAgentSessionEvent(event); err != nil {
+				setPersistErr(err)
+				event.Err = err
 			}
-			event.SessionEvent.EventID = event.EventID
-		} else if event.SessionEvent != nil && event.EventID == "" {
-			event.EventID = event.SessionEvent.EventID
 		}
 		if err := validateAgentSessionEventIdentity(event); err != nil {
 			setPersistErr(err)
@@ -758,7 +756,7 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 		liveDelivered := false
 		if persister != nil {
 			// Track TurnEnd presence for commit validation.
-			if event.TurnEndState != nil {
+			if isTurnEndAgentEvent(event) {
 				sawTurnEnd = true
 			}
 
@@ -942,7 +940,7 @@ func (r *sessionTurnResult[M]) finalize(ctx context.Context) error {
 		return fmt.Errorf("failed to persist session events: %w", r.persistErr)
 	}
 	if !r.sawTurnEnd {
-		return fmt.Errorf("failed to commit session[%s]: missing TurnEndState", r.sessionState.sessionID)
+		return fmt.Errorf("failed to commit session[%s]: missing SessionEventTurnEnd", r.sessionState.sessionID)
 	}
 	if r.checkPointID != nil && r.store != nil {
 		if err := deleteCheckPointIfSupported(ctx, r.store, *r.checkPointID); err != nil {
