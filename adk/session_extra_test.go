@@ -32,7 +32,7 @@ import (
 )
 
 // sessionStreamingAgent emits a single streaming assistant output followed by a
-// TurnEndState. Used to verify the runner's stream-copy/persist path.
+// SessionEventTurnEnd. Used to verify the runner's stream-copy/persist path.
 type sessionStreamingAgent struct {
 	chunks  []*schema.Message
 	turnEnd *TurnEndState[*schema.Message]
@@ -47,7 +47,13 @@ func (a *sessionStreamingAgent) Run(_ context.Context, _ *AgentInput, _ ...Agent
 		stream := schema.StreamReaderFromArray(a.chunks)
 		mv := &MessageVariant{IsStreaming: true, MessageStream: stream, Role: schema.Assistant}
 		gen.Send(&AgentEvent{AgentName: "session-stream-agent", Output: &AgentOutput{MessageOutput: mv}})
-		gen.Send(&AgentEvent{AgentName: "session-stream-agent", TurnEndState: a.turnEnd})
+		gen.Send(&AgentEvent{
+			AgentName: "session-stream-agent",
+			SessionEvent: &SessionEvent[*schema.Message]{
+				Kind:    SessionEventTurnEnd,
+				TurnEnd: a.turnEnd,
+			},
+		})
 	}()
 	return iter
 }
@@ -186,7 +192,13 @@ func (a *streamingAgentRaw) Run(_ context.Context, _ *AgentInput, _ ...AgentRunO
 		defer gen.Close()
 		mv := &MessageVariant{IsStreaming: true, MessageStream: a.stream, Role: schema.Assistant}
 		gen.Send(&AgentEvent{AgentName: "streaming-raw", Output: &AgentOutput{MessageOutput: mv}})
-		gen.Send(&AgentEvent{AgentName: "streaming-raw", TurnEndState: a.turnEnd})
+		gen.Send(&AgentEvent{
+			AgentName: "streaming-raw",
+			SessionEvent: &SessionEvent[*schema.Message]{
+				Kind:    SessionEventTurnEnd,
+				TurnEnd: a.turnEnd,
+			},
+		})
 	}()
 	return iter
 }
@@ -259,15 +271,15 @@ func TestRunnerInputEvents_MixedRoles(t *testing.T) {
 	assert.Equal(t, "hello", second.Message.Content)
 }
 
-// TestTurnEndStateOnly_PersistedAsSessionEvent verifies that an event carrying
-// only TurnEndState (no message output, no mutations) persists the TurnEnd as
+// TestTurnEndOnly_PersistedAsSessionEvent verifies that an event carrying only
+// SessionEventTurnEnd (no message output, no mutations) persists the TurnEnd as
 // a SessionEvent variant in the log.
-func TestTurnEndStateOnly_PersistedAsSessionEvent(t *testing.T) {
+func TestTurnEndOnly_PersistedAsSessionEvent(t *testing.T) {
 	ctx := context.Background()
 	store := newSessionHelperStore()
 	sid := "turn-end-only"
 
-	// Custom agent that emits ONLY a TurnEndState event (no output, no mutations).
+	// Custom agent that emits ONLY a TurnEnd event (no output, no mutations).
 	agent := &turnEndOnlyAgent{
 		turnEnd: &TurnEndState[*schema.Message]{
 			Messages: []*schema.Message{schema.UserMessage("x")},
@@ -291,7 +303,7 @@ func TestTurnEndStateOnly_PersistedAsSessionEvent(t *testing.T) {
 			sawTurnEnd = true
 		}
 	}
-	assert.True(t, sawTurnEnd, "TurnEndState must be persisted as a SessionEvent")
+	assert.True(t, sawTurnEnd, "TurnEnd must be persisted as a SessionEvent")
 }
 
 type turnEndOnlyAgent struct {
@@ -304,7 +316,13 @@ func (a *turnEndOnlyAgent) Run(_ context.Context, _ *AgentInput, _ ...AgentRunOp
 	iter, gen := NewAsyncIteratorPair[*AgentEvent]()
 	go func() {
 		defer gen.Close()
-		gen.Send(&AgentEvent{AgentName: "turn-end-only", TurnEndState: a.turnEnd})
+		gen.Send(&AgentEvent{
+			AgentName: "turn-end-only",
+			SessionEvent: &SessionEvent[*schema.Message]{
+				Kind:    SessionEventTurnEnd,
+				TurnEnd: a.turnEnd,
+			},
+		})
 	}()
 	return iter
 }
@@ -730,7 +748,7 @@ func TestResumePath_TailReplay(t *testing.T) {
 var _ = io.EOF
 
 // mutationAgent emits a sequence of caller-provided TypedAgentEvents and a
-// final TurnEndState. Used to verify the runner persists each session-mutation
+// final SessionEventTurnEnd. Used to verify the runner persists each session-mutation
 // event variant (MessagesReplaced, MessageUpdated, MessageInserted) faithfully.
 type mutationAgent struct {
 	events  []*AgentEvent
@@ -746,7 +764,13 @@ func (a *mutationAgent) Run(_ context.Context, _ *AgentInput, _ ...AgentRunOptio
 		for _, ev := range a.events {
 			gen.Send(ev)
 		}
-		gen.Send(&AgentEvent{AgentName: "mutation-agent", TurnEndState: a.turnEnd})
+		gen.Send(&AgentEvent{
+			AgentName: "mutation-agent",
+			SessionEvent: &SessionEvent[*schema.Message]{
+				Kind:    SessionEventTurnEnd,
+				TurnEnd: a.turnEnd,
+			},
+		})
 	}()
 	return iter
 }
@@ -764,7 +788,13 @@ func TestRunnerPersists_MessagesReplaced(t *testing.T) {
 
 	agent := &mutationAgent{
 		events: []*AgentEvent{
-			{AgentName: "mutation-agent", MessagesReplaced: &repl},
+			{
+				AgentName: "mutation-agent",
+				SessionEvent: &SessionEvent[*schema.Message]{
+					Kind:             SessionEventMessagesReplaced,
+					MessagesReplaced: &repl,
+				},
+			},
 		},
 		turnEnd: &TurnEndState[*schema.Message]{Messages: []*schema.Message{summary}},
 	}
@@ -832,16 +862,22 @@ func TestRunnerPersists_MessageUpdated_BothMessages(t *testing.T) {
 			},
 			{
 				AgentName: "mutation-agent",
-				MessageUpdated: &MessageUpdatedEvent[*schema.Message]{
-					MessageID: GetMessageID(toolResultMsg),
-					Message:   updatedTool,
+				SessionEvent: &SessionEvent[*schema.Message]{
+					Kind: SessionEventMessageUpdated,
+					MessageUpdated: &MessageUpdatedEvent[*schema.Message]{
+						MessageID: GetMessageID(toolResultMsg),
+						Message:   updatedTool,
+					},
 				},
 			},
 			{
 				AgentName: "mutation-agent",
-				MessageUpdated: &MessageUpdatedEvent[*schema.Message]{
-					MessageID: GetMessageID(toolCallMsg),
-					Message:   updatedAssistant,
+				SessionEvent: &SessionEvent[*schema.Message]{
+					Kind: SessionEventMessageUpdated,
+					MessageUpdated: &MessageUpdatedEvent[*schema.Message]{
+						MessageID: GetMessageID(toolCallMsg),
+						Message:   updatedAssistant,
+					},
 				},
 			},
 		},
@@ -917,17 +953,23 @@ func TestRunnerPersists_MessageInserted_AnchorAndAppend(t *testing.T) {
 			// MessageInserted before the user message:
 			{
 				AgentName: "mutation-agent",
-				MessageInserted: &MessageInsertedEvent[*schema.Message]{
-					Message:         agentsmdMsg,
-					BeforeMessageID: GetMessageID(userMsg),
+				SessionEvent: &SessionEvent[*schema.Message]{
+					Kind: SessionEventMessageInserted,
+					MessageInserted: &MessageInsertedEvent[*schema.Message]{
+						Message:         agentsmdMsg,
+						BeforeMessageID: GetMessageID(userMsg),
+					},
 				},
 			},
 			// MessageInserted appended at end:
 			{
 				AgentName: "mutation-agent",
-				MessageInserted: &MessageInsertedEvent[*schema.Message]{
-					Message:         patchedTool,
-					BeforeMessageID: "",
+				SessionEvent: &SessionEvent[*schema.Message]{
+					Kind: SessionEventMessageInserted,
+					MessageInserted: &MessageInsertedEvent[*schema.Message]{
+						Message:         patchedTool,
+						BeforeMessageID: "",
+					},
 				},
 			},
 		},

@@ -360,7 +360,10 @@ func (m *TypedMiddleware[M]) BeforeModelRewriteState(ctx context.Context, state 
 	// event simply has no consumer.
 	msgs := afterState.Messages
 	_ = adk.TypedSendEvent(ctx, &adk.TypedAgentEvent[M]{
-		MessagesReplaced: &msgs,
+		SessionEvent: &adk.SessionEvent[M]{
+			Kind:             adk.SessionEventMessagesReplaced,
+			MessagesReplaced: &msgs,
+		},
 	})
 
 	return ctx, &afterState, nil
