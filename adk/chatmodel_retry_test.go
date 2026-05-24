@@ -2602,7 +2602,7 @@ func TestErrStreamCanceled(t *testing.T) {
 	})
 }
 
-func TestAttack_ShouldRetry_NilDecisionOnEveryCall(t *testing.T) {
+func TestRetryChatModel_ShouldRetryNilDecisionOnEveryCall(t *testing.T) {
 	ctx := context.Background()
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
@@ -2645,7 +2645,7 @@ func TestAttack_ShouldRetry_NilDecisionOnEveryCall(t *testing.T) {
 	assert.True(t, foundOK, "nil decision should accept the message as-is")
 }
 
-func TestAttack_ShouldRetry_MaxRetriesZero_RejectFirstAttempt(t *testing.T) {
+func TestRetryChatModel_ShouldRetryMaxRetriesZeroRejectFirstAttempt(t *testing.T) {
 	ctx := context.Background()
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
@@ -2685,7 +2685,7 @@ func TestAttack_ShouldRetry_MaxRetriesZero_RejectFirstAttempt(t *testing.T) {
 	assert.True(t, foundExhausted, "MaxRetries=0 with Retry:true should produce RetryExhaustedError")
 }
 
-func TestAttack_ShouldRetry_RetryTrueWithRewriteError_IgnoresRewrite(t *testing.T) {
+func TestRetryChatModel_ShouldRetryTrueWithRewriteErrorIgnoresRewrite(t *testing.T) {
 	ctx := context.Background()
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
@@ -2738,7 +2738,7 @@ func TestAttack_ShouldRetry_RetryTrueWithRewriteError_IgnoresRewrite(t *testing.
 	assert.True(t, foundSuccess, "should eventually succeed after retry, ignoring RewriteError")
 }
 
-func TestAttack_ShouldRetry_OptionsAccumulateAcrossRetries(t *testing.T) {
+func TestRetryChatModel_ShouldRetryOptionsAccumulateAcrossRetries(t *testing.T) {
 	ctx := context.Background()
 
 	var capturedOpts [][]model.Option
@@ -2789,7 +2789,7 @@ func TestAttack_ShouldRetry_OptionsAccumulateAcrossRetries(t *testing.T) {
 		"third call should have more options than second (accumulated AdditionalOptions)")
 }
 
-func TestAttack_ShouldRetry_Stream_NilDecisionAccepts(t *testing.T) {
+func TestRetryChatModel_ShouldRetryStreamNilDecisionAccepts(t *testing.T) {
 	ctx := context.Background()
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
@@ -2835,7 +2835,7 @@ func TestAttack_ShouldRetry_Stream_NilDecisionAccepts(t *testing.T) {
 	}
 }
 
-func TestAttack_ShouldRetry_Stream_MaxRetriesZero_Exhausted(t *testing.T) {
+func TestRetryChatModel_ShouldRetryStreamMaxRetriesZeroExhausted(t *testing.T) {
 	ctx := context.Background()
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
@@ -2893,7 +2893,7 @@ func TestAttack_ShouldRetry_Stream_MaxRetriesZero_Exhausted(t *testing.T) {
 	assert.True(t, foundExhausted, "MaxRetries=0 stream reject should produce RetryExhaustedError")
 }
 
-func TestAttack_ShouldRetry_Stream_RewriteErrorOnCleanStream(t *testing.T) {
+func TestRetryChatModel_ShouldRetryStreamRewriteErrorOnCleanStream(t *testing.T) {
 	ctx := context.Background()
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
@@ -2949,7 +2949,7 @@ func TestAttack_ShouldRetry_Stream_RewriteErrorOnCleanStream(t *testing.T) {
 	assert.True(t, foundFatal, "RewriteError on clean stream should propagate the fatal error")
 }
 
-func TestAttack_ShouldRetry_ConcatMessagesFails_EmptyStream(t *testing.T) {
+func TestRetryChatModel_ShouldRetryConcatMessagesFailsEmptyStream(t *testing.T) {
 	ctx := context.Background()
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
@@ -3003,7 +3003,7 @@ func TestAttack_ShouldRetry_ConcatMessagesFails_EmptyStream(t *testing.T) {
 	assert.Nil(t, capturedCtx.Err, "empty stream should have nil Err")
 }
 
-func TestAttack_ShouldRetry_Stream_MidStreamError_VerdictDoubleRead(t *testing.T) {
+func TestRetryChatModel_ShouldRetryStreamMidStreamErrorVerdictDoubleRead(t *testing.T) {
 	ctx := context.Background()
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()

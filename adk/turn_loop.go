@@ -1895,16 +1895,14 @@ func (l *TurnLoop[T, M]) run(ctx context.Context) {
 			return
 		}
 
-		if isResume && !plan.spec.isResume && l.loadCheckpointID != "" {
-			_ = l.deleteTurnLoopCheckpoint(ctx, l.loadCheckpointID)
-			l.loadCheckpointID = ""
-		}
-
 		agent, err := l.config.PrepareAgent(plan.turnCtx, l, plan.spec.consumed)
 		if err != nil {
 			abortPlanning()
 			if len(pushBack) > 0 {
 				l.buffer.PushFront(pushBack)
+			}
+			if isResume && !plan.spec.isResume {
+				l.loadCheckpointID = ""
 			}
 			l.runErr = err
 			return
@@ -1920,6 +1918,20 @@ func (l *TurnLoop[T, M]) run(ctx context.Context) {
 				l.buffer.PushFront(pushBack)
 			}
 			return
+		}
+
+		if isResume && !plan.spec.isResume && l.loadCheckpointID != "" {
+			checkpointID := l.loadCheckpointID
+			if err := l.deleteTurnLoopCheckpoint(ctx, checkpointID); err != nil {
+				abortPlanning()
+				if len(pushBack) > 0 {
+					l.buffer.PushFront(pushBack)
+				}
+				l.loadCheckpointID = ""
+				l.runErr = fmt.Errorf("failed to abandon checkpoint[%s] before fresh turn: %w", checkpointID, err)
+				return
+			}
+			l.loadCheckpointID = ""
 		}
 
 		l.buffer.PushFront(plan.remaining)
