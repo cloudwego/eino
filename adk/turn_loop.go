@@ -38,6 +38,38 @@ const (
 	stopCommitted
 )
 
+// TurnLoopInterruptMode controls how TurnLoop reacts to business interrupts
+// emitted as AgentAction.Interrupted.
+type TurnLoopInterruptMode int
+
+const (
+	// TurnLoopInterruptExits preserves the legacy behavior: a business interrupt
+	// exits the loop with *InterruptError and persists a checkpoint when configured.
+	TurnLoopInterruptExits TurnLoopInterruptMode = iota
+	// TurnLoopInterruptWaitsForExplicitResume keeps the loop alive after a
+	// business interrupt and waits for Resume(...) to provide explicit intent.
+	TurnLoopInterruptWaitsForExplicitResume
+)
+
+// TurnLoopResumeDecision is returned by GenResume to choose what to do with a
+// pending runner checkpoint.
+type TurnLoopResumeDecision int
+
+const (
+	// TurnLoopResumeDecisionResume resumes the suspended runner checkpoint.
+	TurnLoopResumeDecisionResume TurnLoopResumeDecision = iota
+	// TurnLoopResumeDecisionStartNewTurn abandons the checkpoint and starts a
+	// fresh Runner.Run turn using GenResumeResult.Input.
+	TurnLoopResumeDecisionStartNewTurn
+)
+
+var (
+	ErrTurnLoopStopped          = errors.New("adk: turn loop stopped")
+	ErrTurnLoopNoPendingResume  = errors.New("adk: no pending resume")
+	ErrTurnLoopResumeInProgress = errors.New("adk: resume already submitted")
+	ErrTurnLoopEmptyResume      = errors.New("adk: resume items are empty")
+)
+
 type preemptTurnPhase uint8
 
 const (
@@ -566,21 +598,20 @@ type TurnLoopConfig[T any, M MessageType] struct {
 	// Required.
 	GenInput func(ctx context.Context, loop *TurnLoop[T, M], items []T) (*GenInputResult[T, M], error)
 
-	// GenResume is called at most once during Run(). When CheckpointID is
-	// configured, Run() queries Store for the checkpoint:
-	//   - If the checkpoint contains runner state (i.e. an agent was interrupted
-	//     or canceled mid-turn), Run() calls GenResume to plan a resume turn.
-	//   - Otherwise (no checkpoint, or between-turns checkpoint), GenResume is
-	//     never called and the loop proceeds via GenInput.
+	// GenResume is called when the loop has a pending runner checkpoint and
+	// needs user policy to continue. This can happen when restoring a TurnLoop
+	// checkpoint from Store, or in TurnLoopInterruptWaitsForExplicitResume mode
+	// after Resume(...) accepts explicit interrupt-response items.
 	//
 	// It receives:
 	//   - interruptedItems: the items being processed when the prior run was interrupted / canceled
-	//   - unhandledItems: items buffered but not processed when the prior run exited
-	//   - newItems: items that were Push()-ed before Run() was called
+	//   - unhandledItems: normal items buffered but not processed
+	//   - newItems: restored-checkpoint legacy items, or explicit Resume(...) items
+	//     in managed-interrupt mode. Normal Push(...) items never become resume
+	//     intent in managed-interrupt mode.
 	//
-	// It returns a GenResumeResult describing how to resume the interrupted agent
-	// turn (optional ResumeParams) and how to manipulate the buffer
-	// (Consumed/Remaining) before continuing.
+	// It returns a GenResumeResult choosing whether to resume the suspended
+	// runner checkpoint or abandon it and start a fresh turn.
 	GenResume func(ctx context.Context, loop *TurnLoop[T, M], interruptedItems, unhandledItems, newItems []T) (*GenResumeResult[T, M], error)
 
 	// PrepareAgent returns an Agent configured to handle the consumed items.
@@ -630,6 +661,17 @@ type TurnLoopConfig[T any, M MessageType] struct {
 	// same CheckpointID. On clean exit (no checkpoint saved), the existing
 	// checkpoint under CheckpointID is deleted to prevent stale resumption.
 	CheckpointID string
+
+	// InterruptMode controls whether business interrupts exit the loop or keep
+	// it alive waiting for an explicit Resume(...) call. The zero value exits.
+	InterruptMode TurnLoopInterruptMode
+
+	// Session fields are passed through to the internal Runner used by TurnLoop.
+	// They let fresh turns after managed interrupts reconstruct context from the
+	// same managed session without TurnLoop inspecting SessionStore events.
+	SessionID          string
+	SessionStore       SessionStore
+	SessionPersistence *SessionPersistenceConfig
 }
 
 // GenInputResult contains the result of GenInput processing.
@@ -680,6 +722,13 @@ type GenResumeResult[T any, M MessageType] struct {
 	// ResumeParams are optional parameters for resuming an interrupted agent.
 	ResumeParams *ResumeParams
 
+	// Decision selects whether to resume the suspended checkpoint or abandon it
+	// and start a fresh turn. The zero value resumes for compatibility.
+	Decision TurnLoopResumeDecision
+
+	// Input is required when Decision is TurnLoopResumeDecisionStartNewTurn.
+	Input *TypedAgentInput[M]
+
 	// Consumed are the items selected for this resumed turn.
 	// They are removed from the buffer and passed to PrepareAgent.
 	Consumed []T
@@ -687,19 +736,20 @@ type GenResumeResult[T any, M MessageType] struct {
 	// Remaining are the items to keep in the buffer for a future turn.
 	// TurnLoop pushes Remaining back into the buffer before resuming the agent.
 	//
-	// Items from (interruptedItems, unhandledItems, newItems) that are in neither Consumed
+	// Items from (interruptedItems, unhandledItems, resume items) that are in neither Consumed
 	// nor Remaining are dropped by the loop.
 	Remaining []T
 }
 
 type turnRunSpec[T any, M MessageType] struct {
-	runCtx       context.Context
-	input        *TypedAgentInput[M]
-	runOpts      []AgentRunOption
-	resumeParams *ResumeParams
-	isResume     bool
-	consumed     []T
-	resumeBytes  []byte
+	runCtx             context.Context
+	input              *TypedAgentInput[M]
+	runOpts            []AgentRunOption
+	resumeParams       *ResumeParams
+	isResume           bool
+	consumed           []T
+	resumeCheckpointID string
+	resumeBytes        []byte
 }
 
 type turnPlan[T any, M MessageType] struct {
@@ -746,7 +796,7 @@ func (l *TurnLoop[T, M]) planTurn(
 	if l.config.GenResume == nil {
 		return nil, errors.New("GenResume is required for resume")
 	}
-	resumeResult, err := l.config.GenResume(ctx, l, pr.interrupted, pr.unhandled, pr.newItems)
+	resumeResult, err := l.config.GenResume(ctx, l, pr.interrupted, pr.unhandled, pr.resumeItems)
 	if err != nil {
 		return nil, err
 	}
@@ -757,18 +807,48 @@ func (l *TurnLoop[T, M]) planTurn(
 	if resumeResult.RunCtx != nil {
 		turnCtx = resumeResult.RunCtx
 	}
-	return &turnPlan[T, M]{
-		turnCtx:   turnCtx,
-		remaining: resumeResult.Remaining,
-		spec: &turnRunSpec[T, M]{
-			runCtx:       resumeResult.RunCtx,
-			runOpts:      resumeResult.RunOpts,
-			resumeParams: resumeResult.ResumeParams,
-			isResume:     true,
-			consumed:     resumeResult.Consumed,
-			resumeBytes:  pr.resumeBytes,
-		},
-	}, nil
+	switch resumeResult.Decision {
+	case TurnLoopResumeDecisionResume:
+		if resumeResult.Input != nil {
+			return nil, errors.New("GenResumeResult.Input must be nil when resuming")
+		}
+		if len(pr.resumeBytes) == 0 {
+			return nil, errors.New("resume checkpoint is empty")
+		}
+		resumeCheckpointID := pr.resumeCheckpointID
+		if resumeCheckpointID == "" {
+			resumeCheckpointID = bridgeCheckpointID
+		}
+		return &turnPlan[T, M]{
+			turnCtx:   turnCtx,
+			remaining: resumeResult.Remaining,
+			spec: &turnRunSpec[T, M]{
+				runCtx:             resumeResult.RunCtx,
+				runOpts:            resumeResult.RunOpts,
+				resumeParams:       resumeResult.ResumeParams,
+				isResume:           true,
+				consumed:           resumeResult.Consumed,
+				resumeCheckpointID: resumeCheckpointID,
+				resumeBytes:        pr.resumeBytes,
+			},
+		}, nil
+	case TurnLoopResumeDecisionStartNewTurn:
+		if resumeResult.Input == nil {
+			return nil, errors.New("GenResumeResult.Input is nil for fresh turn")
+		}
+		return &turnPlan[T, M]{
+			turnCtx:   turnCtx,
+			remaining: resumeResult.Remaining,
+			spec: &turnRunSpec[T, M]{
+				runCtx:   resumeResult.RunCtx,
+				input:    resumeResult.Input,
+				runOpts:  resumeResult.RunOpts,
+				consumed: resumeResult.Consumed,
+			},
+		}, nil
+	default:
+		return nil, fmt.Errorf("unknown GenResume decision: %d", resumeResult.Decision)
+	}
 }
 
 // InterruptError is the ExitReason when the TurnLoop exits due to a business
@@ -916,10 +996,12 @@ type TurnLoop[T any, M MessageType] struct {
 	interruptedItems []T
 
 	checkPointRunnerBytes []byte
+	checkPointRunnerID    string
 	interruptContexts     []*InterruptCtx
 	capturedCancelErr     *CancelError
 
 	pendingResume *turnLoopPendingResume[T]
+	resumeMu      sync.Mutex
 
 	loadCheckpointID string
 
@@ -940,12 +1022,14 @@ func (l *TurnLoop[T, M]) appendLate(item T) {
 }
 
 type turnLoopCheckpoint[T any] struct {
-	RunnerCheckpoint []byte
+	RunnerCheckpointID string
+	RunnerCheckpoint   []byte
 	// HasRunnerState reports whether RunnerCheckpoint contains resumable runner state.
 	// It is false for "between turns" checkpoints where no agent execution was
 	// interrupted (e.g. Stop() before the first turn or between turns).
 	HasRunnerState bool
 	UnhandledItems []T
+	ResumeItems    []T
 	CanceledItems  []T // gob-compat: kept as CanceledItems for deserialization of existing checkpoints
 }
 
@@ -1018,11 +1102,28 @@ func (l *TurnLoop[T, M]) tryLoadCheckpoint(ctx context.Context) error {
 			l.buffer.PushFront(newItems)
 			return fmt.Errorf("checkpoint[%s] has runner state but bytes are empty", checkPointID)
 		}
+		resumeCheckpointID := cp.RunnerCheckpointID
+		if resumeCheckpointID == "" {
+			resumeCheckpointID = bridgeCheckpointID
+		}
+		resumeItems := append([]T{}, cp.ResumeItems...)
+		resumeSubmitted := len(resumeItems) > 0
+		if !resumeSubmitted {
+			resumeItems = append(resumeItems, newItems...)
+		} else {
+			unhandled := make([]T, 0, len(cp.UnhandledItems)+len(newItems))
+			unhandled = append(unhandled, cp.UnhandledItems...)
+			unhandled = append(unhandled, newItems...)
+			cp.UnhandledItems = unhandled
+		}
 		l.pendingResume = &turnLoopPendingResume[T]{
-			interrupted: append([]T{}, cp.CanceledItems...),
-			unhandled:   append([]T{}, cp.UnhandledItems...),
-			newItems:    append([]T{}, newItems...),
-			resumeBytes: append([]byte{}, cp.RunnerCheckpoint...),
+			interrupted:        append([]T{}, cp.CanceledItems...),
+			unhandled:          append([]T{}, cp.UnhandledItems...),
+			resumeItems:        resumeItems,
+			resumeSubmitted:    resumeSubmitted,
+			source:             turnLoopPendingResumeSourceRestoredCheckpoint,
+			resumeCheckpointID: resumeCheckpointID,
+			resumeBytes:        append([]byte{}, cp.RunnerCheckpoint...),
 		}
 	} else {
 		items := make([]T, 0, len(cp.UnhandledItems)+len(newItems))
@@ -1034,11 +1135,21 @@ func (l *TurnLoop[T, M]) tryLoadCheckpoint(ctx context.Context) error {
 	return nil
 }
 
+type turnLoopPendingResumeSource uint8
+
+const (
+	turnLoopPendingResumeSourceRestoredCheckpoint turnLoopPendingResumeSource = iota
+	turnLoopPendingResumeSourceManagedInterrupt
+)
+
 type turnLoopPendingResume[T any] struct {
-	interrupted []T
-	unhandled   []T
-	newItems    []T
-	resumeBytes []byte
+	interrupted        []T
+	unhandled          []T
+	resumeItems        []T
+	resumeSubmitted    bool
+	source             turnLoopPendingResumeSource
+	resumeCheckpointID string
+	resumeBytes        []byte
 }
 
 // SafePoint describes at which boundary the agent may be cancelled.
@@ -1391,6 +1502,33 @@ func (l *TurnLoop[T, M]) Push(item T, opts ...PushOption[T, M]) (bool, <-chan st
 	return l.pushWithConfig(item, cfg)
 }
 
+// Resume submits an explicit response to a pending managed business interrupt.
+// Unlike Push, Resume is not normal input and does not preempt an active turn.
+// It synchronously accepts the items or returns an error explaining why they
+// could not be accepted.
+func (l *TurnLoop[T, M]) Resume(items ...T) error {
+	if len(items) == 0 {
+		return ErrTurnLoopEmptyResume
+	}
+
+	l.resumeMu.Lock()
+	defer l.resumeMu.Unlock()
+
+	if atomic.LoadInt32(&l.stopped) != 0 || l.buffer.IsClosed() {
+		return ErrTurnLoopStopped
+	}
+	if l.pendingResume == nil {
+		return ErrTurnLoopNoPendingResume
+	}
+	if l.pendingResume.resumeSubmitted {
+		return ErrTurnLoopResumeInProgress
+	}
+	l.pendingResume.resumeItems = append([]T{}, items...)
+	l.pendingResume.resumeSubmitted = true
+	l.buffer.Wakeup()
+	return nil
+}
+
 // pushWithStrategy snapshots the current target turn while the strategy decides
 // how to enqueue the item. If it requests preempt, that request is bound to the
 // captured turn identity, including delayed preempt requests.
@@ -1567,6 +1705,52 @@ func (l *TurnLoop[T, M]) Wait() *TurnLoopExitState[T, M] {
 	return l.result
 }
 
+func (l *TurnLoop[T, M]) takePendingResume(ctx context.Context) (*turnLoopPendingResume[T], bool) {
+	for {
+		l.resumeMu.Lock()
+		pr := l.pendingResume
+		if pr == nil {
+			l.resumeMu.Unlock()
+			return nil, false
+		}
+		if pr.source != turnLoopPendingResumeSourceManagedInterrupt || pr.resumeSubmitted {
+			l.pendingResume = nil
+			l.resumeMu.Unlock()
+			return pr, true
+		}
+		l.resumeMu.Unlock()
+
+		first, ok := l.buffer.Receive()
+		if !ok {
+			if err := ctx.Err(); err != nil {
+				l.runErr = err
+				return nil, false
+			}
+			if l.stopCtrl.isCommitted() || l.buffer.IsClosed() {
+				return nil, false
+			}
+			continue
+		}
+		normalItems := append([]T{first}, l.buffer.TakeAll()...)
+		l.resumeMu.Lock()
+		if l.pendingResume != nil {
+			l.pendingResume.unhandled = append(l.pendingResume.unhandled, normalItems...)
+		} else {
+			l.buffer.PushFront(normalItems)
+		}
+		l.resumeMu.Unlock()
+	}
+}
+
+func (l *TurnLoop[T, M]) restorePendingResume(pr *turnLoopPendingResume[T]) {
+	if pr == nil {
+		return
+	}
+	l.resumeMu.Lock()
+	defer l.resumeMu.Unlock()
+	l.pendingResume = pr
+}
+
 func (l *TurnLoop[T, M]) run(ctx context.Context) {
 	defer l.cleanup(ctx)
 
@@ -1597,16 +1781,24 @@ func (l *TurnLoop[T, M]) run(ctx context.Context) {
 
 		if l.pendingResume != nil {
 			isResume = true
-			pr = l.pendingResume
-			l.pendingResume = nil
+			var ok bool
+			pr, ok = l.takePendingResume(ctx)
+			if !ok {
+				return
+			}
 
 			l.preemptCtrl.waitForPushes()
-			pr.newItems = append(pr.newItems, l.buffer.TakeAll()...)
+			buffered := l.buffer.TakeAll()
+			if pr.source == turnLoopPendingResumeSourceRestoredCheckpoint && !pr.resumeSubmitted {
+				pr.resumeItems = append(pr.resumeItems, buffered...)
+			} else {
+				pr.unhandled = append(pr.unhandled, buffered...)
+			}
 
-			pushBack = make([]T, 0, len(pr.interrupted)+len(pr.unhandled)+len(pr.newItems))
+			pushBack = make([]T, 0, len(pr.interrupted)+len(pr.unhandled)+len(pr.resumeItems))
 			pushBack = append(pushBack, pr.interrupted...)
 			pushBack = append(pushBack, pr.unhandled...)
-			pushBack = append(pushBack, pr.newItems...)
+			pushBack = append(pushBack, pr.resumeItems...)
 		} else {
 			var first T
 			var ok bool
@@ -1671,6 +1863,11 @@ func (l *TurnLoop[T, M]) run(ctx context.Context) {
 			pushBack = items
 		}
 
+		if isResume && l.stopCtrl.isCommitted() {
+			l.restorePendingResume(pr)
+			return
+		}
+
 		l.preemptCtrl.beginPlanningTurn()
 		abortPlanning := func() {
 			l.preemptCtrl.abortPlanningTurn().ack()
@@ -1688,10 +1885,19 @@ func (l *TurnLoop[T, M]) run(ctx context.Context) {
 
 		if l.stopCtrl.isCommitted() {
 			abortPlanning()
+			if isResume && plan.spec.isResume {
+				l.restorePendingResume(pr)
+				return
+			}
 			if len(pushBack) > 0 {
 				l.buffer.PushFront(pushBack)
 			}
 			return
+		}
+
+		if isResume && !plan.spec.isResume && l.loadCheckpointID != "" {
+			_ = l.deleteTurnLoopCheckpoint(ctx, l.loadCheckpointID)
+			l.loadCheckpointID = ""
 		}
 
 		agent, err := l.config.PrepareAgent(plan.turnCtx, l, plan.spec.consumed)
@@ -1706,6 +1912,10 @@ func (l *TurnLoop[T, M]) run(ctx context.Context) {
 
 		if l.stopCtrl.isCommitted() {
 			abortPlanning()
+			if isResume && plan.spec.isResume {
+				l.restorePendingResume(pr)
+				return
+			}
 			if len(pushBack) > 0 {
 				l.buffer.PushFront(pushBack)
 			}
@@ -1729,27 +1939,45 @@ func (l *TurnLoop[T, M]) run(ctx context.Context) {
 
 		// Business interrupt: agent produced an Interrupted action, exit to persist checkpoint.
 		if l.interruptContexts != nil {
-			l.interruptedItems = append([]T{}, plan.spec.consumed...)
-			l.runErr = &InterruptError{InterruptContexts: l.interruptContexts}
-			return
+			if l.config.InterruptMode != TurnLoopInterruptWaitsForExplicitResume {
+				l.interruptedItems = append([]T{}, plan.spec.consumed...)
+				l.runErr = &InterruptError{InterruptContexts: l.interruptContexts}
+				return
+			}
+			l.resumeMu.Lock()
+			l.pendingResume = &turnLoopPendingResume[T]{
+				interrupted:        append([]T{}, plan.spec.consumed...),
+				unhandled:          append([]T{}, l.buffer.TakeAll()...),
+				source:             turnLoopPendingResumeSourceManagedInterrupt,
+				resumeCheckpointID: l.checkPointRunnerID,
+				resumeBytes:        append([]byte{}, l.checkPointRunnerBytes...),
+			}
+			l.resumeMu.Unlock()
+			l.interruptContexts = nil
+			l.interruptedItems = nil
+			l.checkPointRunnerID = ""
+			l.checkPointRunnerBytes = nil
+			l.capturedCancelErr = nil
+			continue
 		}
 	}
 }
 
 func (l *TurnLoop[T, M]) setupBridgeStore(spec *turnRunSpec[T, M], runOpts []AgentRunOption) ([]AgentRunOption, *bridgeStore, error) {
-	store := l.config.Store
-	if store == nil && spec.isResume {
-		return nil, nil, fmt.Errorf("failed to resume agent: checkpoint store is nil")
-	}
-	if store == nil {
+	needsBridge := l.config.Store != nil || l.config.InterruptMode == TurnLoopInterruptWaitsForExplicitResume || spec.isResume
+	if !needsBridge {
 		return runOpts, nil, nil
 	}
-	runOpts = append(runOpts, WithCheckPointID(bridgeCheckpointID))
+	checkpointID := bridgeCheckpointID
+	if spec.resumeCheckpointID != "" {
+		checkpointID = spec.resumeCheckpointID
+	}
+	runOpts = append(runOpts, WithCheckPointID(checkpointID))
 	if spec.isResume {
 		if len(spec.resumeBytes) == 0 {
 			return nil, nil, fmt.Errorf("resume checkpoint is empty")
 		}
-		return runOpts, newResumeBridgeStore(bridgeCheckpointID, spec.resumeBytes), nil
+		return runOpts, newResumeBridgeStore(checkpointID, spec.resumeBytes), nil
 	}
 	return runOpts, newBridgeStore(), nil
 }
@@ -1814,6 +2042,7 @@ func (l *TurnLoop[T, M]) runAgentAndHandleEvents(
 	l.interruptContexts = nil
 	l.capturedCancelErr = nil
 	l.checkPointRunnerBytes = nil
+	l.checkPointRunnerID = ""
 
 	var iter *AsyncIterator[*TypedAgentEvent[M]]
 
@@ -1822,7 +2051,6 @@ func (l *TurnLoop[T, M]) runAgentAndHandleEvents(
 		l.preemptCtrl.abortPlanningTurn().ack()
 		return err
 	}
-	store := l.config.Store
 	cancelOpt, agentCancelFunc := WithCancel()
 	runOpts = append(runOpts, cancelOpt)
 
@@ -1834,9 +2062,12 @@ func (l *TurnLoop[T, M]) runAgentAndHandleEvents(
 		enableStreaming = spec.input.EnableStreaming
 	}
 	runner := NewTypedRunner(TypedRunnerConfig[M]{
-		EnableStreaming: enableStreaming,
-		Agent:           agent,
-		CheckPointStore: ms,
+		EnableStreaming:    enableStreaming,
+		Agent:              agent,
+		CheckPointStore:    ms,
+		SessionID:          l.config.SessionID,
+		SessionStore:       l.config.SessionStore,
+		SessionPersistence: l.config.SessionPersistence,
 	})
 
 	preemptDone := make(chan struct{})
@@ -1859,9 +2090,9 @@ func (l *TurnLoop[T, M]) runAgentAndHandleEvents(
 	if spec.isResume {
 		var err error
 		if spec.resumeParams != nil {
-			iter, err = runner.ResumeWithParams(ctx, bridgeCheckpointID, spec.resumeParams, runOpts...)
+			iter, err = runner.ResumeWithParams(ctx, spec.resumeCheckpointID, spec.resumeParams, runOpts...)
 		} else {
-			iter, err = runner.Resume(ctx, bridgeCheckpointID, runOpts...)
+			iter, err = runner.Resume(ctx, spec.resumeCheckpointID, runOpts...)
 		}
 		if err != nil {
 			return fmt.Errorf("failed to resume agent: %w", err)
@@ -1919,12 +2150,10 @@ func (l *TurnLoop[T, M]) runAgentAndHandleEvents(
 	go l.watchStop(done, agentCancelFunc, stoppedDone)
 
 	finalizeCheckpoint := func() error {
-		if store != nil && ms != nil {
-			data, ok, err := ms.Get(ctx, bridgeCheckpointID)
-			if err != nil {
-				return fmt.Errorf("failed to read runner checkpoint: %w", err)
-			}
+		if ms != nil {
+			key, data, ok := ms.LastCheckpoint()
 			if ok {
+				l.checkPointRunnerID = key
 				l.checkPointRunnerBytes = append([]byte{}, data...)
 			}
 		}
@@ -1995,12 +2224,26 @@ func (l *TurnLoop[T, M]) applyFrameworkCapturedError(handleErr error) error {
 	return nil
 }
 
+func interruptedItemsForExit[T any](items []T, pending *turnLoopPendingResume[T]) []T {
+	if pending != nil {
+		return pending.interrupted
+	}
+	return items
+}
+
 func (l *TurnLoop[T, M]) cleanup(ctx context.Context) {
 	atomic.StoreInt32(&l.stopped, 1)
 
 	unhandled := l.buffer.TakeAll()
+	l.resumeMu.Lock()
+	pending := l.pendingResume
+	l.resumeMu.Unlock()
+	if pending != nil {
+		unhandled = append(append([]T{}, pending.unhandled...), unhandled...)
+	}
 	checkpointID := l.config.CheckpointID
-	isIdle := len(l.checkPointRunnerBytes) == 0 && len(unhandled) == 0 && len(l.interruptedItems) == 0
+	hasPendingRunnerState := pending != nil && len(pending.resumeBytes) > 0
+	isIdle := len(l.checkPointRunnerBytes) == 0 && !hasPendingRunnerState && len(unhandled) == 0 && len(l.interruptedItems) == 0
 
 	// Only save checkpoint when the loop exited due to an explicit Stop(),
 	// a CancelError, or a business interrupt (InterruptError).
@@ -2008,19 +2251,34 @@ func (l *TurnLoop[T, M]) cleanup(ctx context.Context) {
 	// but the user's callback returned a custom error (the items were still in-flight).
 	exitCausedByStop := l.runErr == nil || errors.As(l.runErr, new(*CancelError)) || l.capturedCancelErr != nil
 	businessInterrupt := errors.As(l.runErr, new(*InterruptError)) || l.interruptContexts != nil
+	pendingResume := pending != nil
 	shouldSaveCheckpoint := l.config.Store != nil && checkpointID != "" &&
-		((l.stopCtrl.isCommitted() && exitCausedByStop) || businessInterrupt) &&
+		((l.stopCtrl.isCommitted() && exitCausedByStop) || businessInterrupt || pendingResume) &&
 		!isIdle && !l.stopCtrl.skipCheckpointEnabled()
 
 	var checkpointed bool
 	var checkpointErr error
 
 	if shouldSaveCheckpoint {
+		runnerCheckpointID := l.checkPointRunnerID
+		runnerCheckpoint := l.checkPointRunnerBytes
+		interruptedItems := l.interruptedItems
+		var resumeItems []T
+		if pending != nil {
+			runnerCheckpointID = pending.resumeCheckpointID
+			runnerCheckpoint = pending.resumeBytes
+			interruptedItems = pending.interrupted
+			if pending.resumeSubmitted {
+				resumeItems = append([]T{}, pending.resumeItems...)
+			}
+		}
 		cp := &turnLoopCheckpoint[T]{
-			RunnerCheckpoint: l.checkPointRunnerBytes,
-			HasRunnerState:   len(l.checkPointRunnerBytes) > 0,
-			UnhandledItems:   unhandled,
-			CanceledItems:    l.interruptedItems,
+			RunnerCheckpointID: runnerCheckpointID,
+			RunnerCheckpoint:   runnerCheckpoint,
+			HasRunnerState:     len(runnerCheckpoint) > 0,
+			UnhandledItems:     unhandled,
+			ResumeItems:        resumeItems,
+			CanceledItems:      interruptedItems,
 		}
 		checkpointed = true
 		checkpointErr = l.saveTurnLoopCheckpoint(ctx, checkpointID, cp)
@@ -2034,7 +2292,7 @@ func (l *TurnLoop[T, M]) cleanup(ctx context.Context) {
 	l.result = &TurnLoopExitState[T, M]{
 		ExitReason:          l.runErr,
 		UnhandledItems:      unhandled,
-		InterruptedItems:    l.interruptedItems,
+		InterruptedItems:    interruptedItemsForExit(l.interruptedItems, pending),
 		StopCause:           l.stopCtrl.cause(),
 		CheckpointAttempted: checkpointed,
 		CheckpointErr:       checkpointErr,

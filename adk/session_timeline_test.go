@@ -125,7 +125,7 @@ func TestSessionTimeline_ReconstructionIgnoresNonContextVariants(t *testing.T) {
 	assert.Equal(t, map[string]any{"k": "v"}, state.SessionValues)
 }
 
-func TestSessionTimeline_ReconstructionIgnoresPartialTurnAfterLatestTurnEnd(t *testing.T) {
+func TestSessionTimeline_ReconstructionIncludesPartialContextAfterLatestTurnEnd(t *testing.T) {
 	ctx := context.Background()
 	store := newSessionHelperStore()
 	sid := "timeline-partial"
@@ -155,10 +155,41 @@ func TestSessionTimeline_ReconstructionIgnoresPartialTurnAfterLatestTurnEnd(t *t
 
 	state, err := reconstructSessionState[*schema.Message](ctx, store, sid, defaultLoadPageSize)
 	require.NoError(t, err)
-	require.Len(t, state.Messages, 2)
+	require.Len(t, state.Messages, 4)
 	assert.Equal(t, "committed user", state.Messages[0].Content)
 	assert.Equal(t, "committed assistant", state.Messages[1].Content)
+	assert.Equal(t, "partial user", state.Messages[2].Content)
+	assert.Equal(t, "partial assistant", state.Messages[3].Content)
 	assert.Equal(t, map[string]any{"turn": "committed"}, state.SessionValues)
+}
+
+func TestSessionTimeline_ReconstructionPartialContextMissingAnchorFails(t *testing.T) {
+	ctx := context.Background()
+	store := newSessionHelperStore()
+	sid := "timeline-partial-missing-anchor"
+
+	committedUser := schema.UserMessage("committed user")
+	EnsureMessageID(committedUser)
+	inserted := schema.SystemMessage("inserted")
+	EnsureMessageID(inserted)
+
+	events := []*SessionEvent[*schema.Message]{
+		{EventID: uuid.NewString(), Kind: SessionEventMessage, Message: committedUser},
+		{EventID: uuid.NewString(), Kind: SessionEventTurnEnd, TurnID: "turn-1", TurnEnd: &TurnEndState[*schema.Message]{}},
+		{EventID: uuid.NewString(), Kind: SessionEventMessageInserted, MessageInserted: &MessageInsertedEvent[*schema.Message]{
+			Message:         inserted,
+			BeforeMessageID: "missing-anchor",
+		}},
+	}
+	for _, se := range events {
+		data, err := encodeSessionEvent(se)
+		require.NoError(t, err)
+		require.NoError(t, store.AppendEvents(ctx, sid, [][]byte{data}))
+	}
+
+	_, err := reconstructSessionState[*schema.Message](ctx, store, sid, defaultLoadPageSize)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "missing-anchor")
 }
 
 func TestSessionTimeline_LatestCommittedTurnEndPrefersTurnIDBoundary(t *testing.T) {
@@ -178,7 +209,7 @@ func TestSessionTimeline_LatestCommittedTurnEndPrefersTurnIDBoundary(t *testing.
 	idx := latestCommittedTurnEnd(events)
 	require.Equal(t, 1, idx)
 
-	state, err := replayCommittedContextEvents(events, idx)
+	state, err := replayDurableContextEvents(events, idx, idx)
 	require.NoError(t, err)
 	require.Len(t, state.Messages, 1)
 	assert.Equal(t, "committed user", state.Messages[0].Content)

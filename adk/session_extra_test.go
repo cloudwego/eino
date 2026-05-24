@@ -348,15 +348,16 @@ func TestTailReplay_PartialTurnWithoutTurnEnd(t *testing.T) {
 		require.NoError(t, store.AppendEvents(ctx, sid, [][]byte{data}))
 	}
 
-	// Boot: prepareRunnerSessionRun reconstructs only committed messages. Events
-	// after the latest TurnEnd belong to an uncommitted partial turn and must not
-	// leak into a fresh Run.
-	state, err := prepareRunnerSessionRun[*schema.Message](ctx, nil, sid, store, nil)
+	// Boot: prepareRunnerSessionRun reconstructs durable context through the log
+	// tail. The latest TurnEnd remains the metadata boundary.
+	state, err := prepareRunnerSessionRun[*schema.Message](ctx, nil, nil, sid, store, nil)
 	require.NoError(t, err)
 	require.True(t, state.enabled)
-	require.Len(t, state.latestState.Messages, 2)
+	require.Len(t, state.latestState.Messages, 4)
 	assert.Equal(t, "Q1", state.latestState.Messages[0].Content)
 	assert.Equal(t, "A1", state.latestState.Messages[1].Content)
+	assert.Equal(t, "Q2", state.latestState.Messages[2].Content)
+	assert.Equal(t, "A2", state.latestState.Messages[3].Content)
 }
 
 // TestTailReplay_NoTailEvents verifies that the fast path is not disturbed when
@@ -381,7 +382,7 @@ func TestTailReplay_NoTailEvents(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, store.AppendEvents(ctx, sid, [][]byte{teData}))
 
-	state, err := prepareRunnerSessionRun[*schema.Message](ctx, nil, sid, store, nil)
+	state, err := prepareRunnerSessionRun[*schema.Message](ctx, nil, nil, sid, store, nil)
 	require.NoError(t, err)
 	require.Len(t, state.latestState.Messages, 1)
 	assert.Equal(t, "Q", state.latestState.Messages[0].Content)
@@ -419,7 +420,7 @@ func TestTailReplay_EmptySnapshotCursor(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, store.AppendEvents(ctx, sid, [][]byte{data}))
 
-	state, err := prepareRunnerSessionRun[*schema.Message](ctx, nil, sid, store, nil)
+	state, err := prepareRunnerSessionRun[*schema.Message](ctx, nil, nil, sid, store, nil)
 	require.NoError(t, err)
 	require.Len(t, state.latestState.Messages, 1)
 	assert.Equal(t, "post", state.latestState.Messages[0].Content)
@@ -594,14 +595,14 @@ func TestPartialInterrupted_ThenNewRun(t *testing.T) {
 	})
 	drainSessionEvents(t, runner.Query(ctx, "second"))
 
-	// Fresh Run must not include the uncommitted partial turn.
+	// Fresh Run includes durable partial-turn context because Session
+	// reconstruction replays context events through the log tail.
 	require.Len(t, captured.inputs, 1)
 	contents := []string{}
 	for _, m := range captured.inputs[0] {
 		contents = append(contents, m.Content)
 	}
-	assert.Equal(t, []string{"first", "answer1", "second"}, contents,
-		"partial-turn message after latest turn_end must not leak into fresh Run")
+	assert.Equal(t, []string{"first", "answer1", "partial", "second"}, contents)
 }
 
 // TestSessionEvent_StreamCopyConcat_ByteIdentical verifies the round-trip of a
@@ -718,10 +719,11 @@ func TestResumePath_TailReplay(t *testing.T) {
 
 	state, _, err := prepareRunnerSessionResume[*schema.Message](ctx, cpStore, sid, store, nil, "")
 	require.NoError(t, err)
-	require.Len(t, state.latestState.Messages, 2,
-		"resume boot state should use committed session log; checkpoint owns any in-flight partial turn")
+	require.Len(t, state.latestState.Messages, 3,
+		"resume boot state should include durable context events through the log tail")
 	assert.Equal(t, "Q", state.latestState.Messages[0].Content)
 	assert.Equal(t, "A", state.latestState.Messages[1].Content)
+	assert.Equal(t, "post-snapshot", state.latestState.Messages[2].Content)
 }
 
 // Ensure the io package import is used (for compile when chunks are empty).

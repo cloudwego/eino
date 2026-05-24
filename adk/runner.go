@@ -196,9 +196,17 @@ func mergeSessionValues(restored, overrides map[string]any) map[string]any {
 	return merged
 }
 
+func valueOrEmpty(v *string) string {
+	if v == nil {
+		return ""
+	}
+	return *v
+}
+
 func prepareRunnerSessionRun[M MessageType]( //nolint:revive // argument-limit
 	ctx context.Context,
 	checkPointStore CheckPointStore,
+	requestedCheckPointID *string,
 	sessionID string,
 	sessionStore SessionStore,
 	sessionPersistence *SessionPersistenceConfig,
@@ -230,6 +238,9 @@ func prepareRunnerSessionRun[M MessageType]( //nolint:revive // argument-limit
 		return state, nil
 	}
 	checkPointID := sessionRunnerCheckpointID(sessionID)
+	if requestedCheckPointID != nil && *requestedCheckPointID != "" {
+		checkPointID = *requestedCheckPointID
+	}
 	state.checkPointID = &checkPointID
 	_, existed, err := loadRunnerSessionCheckpoint(ctx, checkPointStore, checkPointID)
 	if err != nil {
@@ -386,7 +397,7 @@ func typedRunnerRunImpl[M MessageType](a TypedAgent[M], enableStreaming bool, st
 	o := getCommonOptions(nil, opts...)
 	exposeTimelineEvents := o.enableTimelineEvents
 
-	sessionState, err := prepareRunnerSessionRun[M](ctx, store, sessionID, sessionStore, sessionPersistence)
+	sessionState, err := prepareRunnerSessionRun[M](ctx, store, o.checkPointID, sessionID, sessionStore, sessionPersistence)
 	if err != nil {
 		return errorIterator[M](err)
 	}
@@ -639,6 +650,10 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 		if checkPointID == nil {
 			return
 		}
+		if info == nil {
+			info = &InterruptInfo{}
+		}
+		info.CheckPointID = *checkPointID
 		if persister != nil {
 			pendingCheckpoint = &deferredRunnerCheckpoint{info: info, signal: sig, errLabel: errLabel}
 			return
@@ -726,6 +741,7 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 				Action: &AgentAction{
 					Interrupted: &InterruptInfo{
 						Data:              event.Action.Interrupted.Data,
+						CheckPointID:      valueOrEmpty(checkPointID),
 						InterruptContexts: interruptContexts,
 					},
 					internalInterrupted: interruptSignal,
