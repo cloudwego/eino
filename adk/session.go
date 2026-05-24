@@ -510,10 +510,10 @@ func toSessionEventChecked[M MessageType](event *TypedAgentEvent[M]) (*SessionEv
 		return nil, nil
 	}
 	if event.SessionEvent != nil {
-		if err := validateAgentSessionEventIdentity(event); err != nil {
+		se, err := normalizeAgentSessionEvent(event)
+		if err != nil {
 			return nil, err
 		}
-		se := *event.SessionEvent
 		if err := ValidateEmittedSessionEventKind(&se); err != nil {
 			return nil, err
 		}
@@ -521,23 +521,6 @@ func toSessionEventChecked[M MessageType](event *TypedAgentEvent[M]) (*SessionEv
 	}
 	se := &SessionEvent[M]{Timestamp: event.Timestamp}
 	switch {
-	case event.TurnEndState != nil:
-		se.Kind = SessionEventTurnEnd
-		se.TurnEnd = &TurnEndState[M]{
-			ToolInfos:         event.TurnEndState.ToolInfos,
-			DeferredToolInfos: event.TurnEndState.DeferredToolInfos,
-			SessionValues:     event.TurnEndState.SessionValues,
-			// Messages intentionally omitted — reconstructed from event log on read.
-		}
-	case event.MessagesReplaced != nil:
-		se.Kind = SessionEventMessagesReplaced
-		se.MessagesReplaced = event.MessagesReplaced
-	case event.MessageUpdated != nil:
-		se.Kind = SessionEventMessageUpdated
-		se.MessageUpdated = event.MessageUpdated
-	case event.MessageInserted != nil:
-		se.Kind = SessionEventMessageInserted
-		se.MessageInserted = event.MessageInserted
 	case event.Output != nil && event.Output.MessageOutput != nil:
 		if !isNilMessage(event.Output.MessageOutput.Message) {
 			se.Kind = SessionEventMessage
@@ -554,6 +537,45 @@ func toSessionEventChecked[M MessageType](event *TypedAgentEvent[M]) (*SessionEv
 		return nil, errors.New("persistable AgentEvent has empty EventID")
 	}
 	return se, NormalizeSessionEventKind(se)
+}
+
+func normalizeAgentSessionEvent[M MessageType](event *TypedAgentEvent[M]) (SessionEvent[M], error) {
+	if event == nil || event.SessionEvent == nil {
+		return SessionEvent[M]{}, errors.New("missing session event")
+	}
+	se := *event.SessionEvent
+	if event.EventID != "" && se.EventID != "" && event.EventID != se.EventID {
+		return SessionEvent[M]{}, fmt.Errorf("session event identity mismatch: agent event %q session event %q", event.EventID, se.EventID)
+	}
+	switch {
+	case event.EventID != "":
+		se.EventID = event.EventID
+	case se.EventID != "":
+		event.EventID = se.EventID
+	default:
+		id := uuid.NewString()
+		event.EventID = id
+		se.EventID = id
+	}
+	switch {
+	case !event.Timestamp.IsZero() && se.Timestamp.IsZero():
+		se.Timestamp = event.Timestamp
+	case event.Timestamp.IsZero() && !se.Timestamp.IsZero():
+		event.Timestamp = se.Timestamp
+	case event.Timestamp.IsZero() && se.Timestamp.IsZero():
+		ts := newEventTimestamp()
+		event.Timestamp = ts
+		se.Timestamp = ts
+	}
+	if se.TurnEnd != nil {
+		turnEnd := *se.TurnEnd
+		turnEnd.Messages = nil
+		se.TurnEnd = &turnEnd
+	}
+	event.EventID = se.EventID
+	event.Timestamp = se.Timestamp
+	event.SessionEvent = &se
+	return se, nil
 }
 
 func validateAgentSessionEventIdentity[M MessageType](event *TypedAgentEvent[M]) error {
@@ -860,17 +882,11 @@ func stripSessionEventFields[M MessageType](event *TypedAgentEvent[M]) *TypedAge
 	if event == nil {
 		return nil
 	}
-	if event.TurnEndState == nil && event.MessagesReplaced == nil &&
-		event.MessageUpdated == nil && event.MessageInserted == nil &&
-		event.SessionEvent == nil && event.SessionID == "" {
+	if event.SessionEvent == nil && event.SessionID == "" {
 		return event
 	}
 	stripped := *event
-	stripped.TurnEndState = nil
 	stripped.SessionEvent = nil
-	stripped.MessagesReplaced = nil
-	stripped.MessageUpdated = nil
-	stripped.MessageInserted = nil
 	stripped.SessionID = ""
 	if stripped.Output == nil && stripped.Action == nil && stripped.Err == nil {
 		return nil
@@ -897,6 +913,11 @@ func isContextSessionEvent[M MessageType](event *SessionEvent[M]) bool {
 
 func isTurnEndSessionEvent[M MessageType](event *SessionEvent[M]) bool {
 	return event != nil && event.TurnEnd != nil
+}
+
+func isTurnEndAgentEvent[M MessageType](event *TypedAgentEvent[M]) bool {
+	return event != nil && event.SessionEvent != nil &&
+		event.SessionEvent.Kind == SessionEventTurnEnd && event.SessionEvent.TurnEnd != nil
 }
 
 func applyContextSessionEvent[M MessageType](messages []M, event *SessionEvent[M]) ([]M, error) {

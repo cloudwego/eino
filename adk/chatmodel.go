@@ -76,10 +76,8 @@ func (e *typedChatModelAgentExecCtx[M]) send(event *TypedAgentEvent[M]) {
 		event.EventID = uuid.NewString()
 	}
 	if event != nil && event.SessionEvent != nil {
-		if event.SessionEvent.EventID == "" {
-			event.SessionEvent.EventID = event.EventID
-		} else if event.EventID == "" {
-			event.EventID = event.SessionEvent.EventID
+		if _, err := normalizeAgentSessionEvent(event); err != nil {
+			event.Err = err
 		}
 	}
 	e.generator.trySend(event)
@@ -932,8 +930,15 @@ func (a *TypedChatModelAgent[M]) emitTurnEndState(ctx context.Context, state *Tu
 		state.SessionValues = GetSessionValues(ctx)
 	}
 	execCtx.send(&TypedAgentEvent[M]{
-		AgentName:    a.name,
-		TurnEndState: state,
+		AgentName: a.name,
+		SessionEvent: &SessionEvent[M]{
+			Kind: SessionEventTurnEnd,
+			TurnEnd: &TurnEndState[M]{
+				ToolInfos:         state.ToolInfos,
+				DeferredToolInfos: state.DeferredToolInfos,
+				SessionValues:     state.SessionValues,
+			},
+		},
 	})
 }
 
