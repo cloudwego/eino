@@ -1105,9 +1105,12 @@ func (t *typedToolReductionMiddleware[M]) beforeModelRewriteStateGeneric(ctx con
 
 				// Emit MessageUpdated for the tool-result message (content replaced).
 				_ = adk.TypedSendEvent(ctx, &adk.TypedAgentEvent[M]{
-					MessageUpdated: &adk.MessageUpdatedEvent[M]{
-						MessageID: adk.GetMessageID(resultMsg),
-						Message:   resultMsg,
+					SessionEvent: &adk.SessionEvent[M]{
+						Kind: adk.SessionEventMessageUpdated,
+						MessageUpdated: &adk.MessageUpdatedEvent[M]{
+							MessageID: adk.GetMessageID(resultMsg),
+							Message:   resultMsg,
+						},
 					},
 				})
 			}
@@ -1119,9 +1122,12 @@ func (t *typedToolReductionMiddleware[M]) beforeModelRewriteStateGeneric(ctx con
 			// rewritten + cleared flag set). Reconstruction must see this so the
 			// cleared flag suppresses double-reduction.
 			_ = adk.TypedSendEvent(ctx, &adk.TypedAgentEvent[M]{
-				MessageUpdated: &adk.MessageUpdatedEvent[M]{
-					MessageID: adk.GetMessageID(toolCallMsg),
-					Message:   toolCallMsg,
+				SessionEvent: &adk.SessionEvent[M]{
+					Kind: adk.SessionEventMessageUpdated,
+					MessageUpdated: &adk.MessageUpdatedEvent[M]{
+						MessageID: adk.GetMessageID(toolCallMsg),
+						Message:   toolCallMsg,
+					},
 				},
 			})
 		}
