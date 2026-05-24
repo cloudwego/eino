@@ -455,6 +455,12 @@ type TypedAgentEvent[M MessageType] struct {
 
 	TurnEndState *TurnEndState[M]
 
+	// SessionEvent is the first-class live timeline envelope. It carries
+	// lifecycle, error, span, observation, and session mutation records when
+	// WithTimelineEvents is enabled. For durable managed-session events,
+	// EventID and SessionEvent.EventID must be identical.
+	SessionEvent *SessionEvent[M]
+
 	// MessagesReplaced is a session-internal mutation event emitted by middlewares
 	// (e.g. summarization) when they replace state.Messages wholesale. nil = absent;
 	// non-nil (including &[]M{}) = active replacement.

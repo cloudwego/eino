@@ -23,6 +23,9 @@ import (
 	"io"
 	"log"
 
+	"github.com/google/uuid"
+
+	"github.com/cloudwego/eino/callbacks"
 	"github.com/cloudwego/eino/components"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/compose"
@@ -56,39 +59,98 @@ func getFailoverHasMoreAttempts(ctx context.Context) bool {
 	return v
 }
 
+type failoverTimelineKey struct{}
+
+type failoverTimelineMeta struct {
+	ParentSpanID string
+	Attempt      int
+}
+
+func withFailoverTimeline(ctx context.Context, parentSpanID string, attempt int) context.Context {
+	return context.WithValue(ctx, failoverTimelineKey{}, failoverTimelineMeta{ParentSpanID: parentSpanID, Attempt: attempt})
+}
+
+func getFailoverTimeline(ctx context.Context) (failoverTimelineMeta, bool) {
+	v, ok := ctx.Value(failoverTimelineKey{}).(failoverTimelineMeta)
+	return v, ok
+}
+
 type typedFailoverProxyModel[M MessageType] struct {
 }
 
-func (m *typedFailoverProxyModel[M]) prepareTarget(ctx context.Context) (model.BaseModel[M], error) {
+func (m *typedFailoverProxyModel[M]) prepareTarget(ctx context.Context) (model.BaseModel[M], string, error) {
 	target, ok := typedGetFailoverCurrentModel[M](ctx)
 	if !ok {
-		return nil, errors.New("failover current model not found in context")
+		return nil, "", errors.New("failover current model not found in context")
 	}
+
+	targetType, _ := components.GetType(target)
 
 	if !components.IsCallbacksEnabled(target) {
 		target = typedCallbackInjectionModelWrapper[M]{}.wrapModel(target)
 	}
 
-	return target, nil
+	return target, targetType, nil
 }
 
 func (m *typedFailoverProxyModel[M]) Generate(ctx context.Context, input []M, opts ...model.Option) (M, error) {
-	target, err := m.prepareTarget(ctx)
+	target, targetType, err := m.prepareTarget(ctx)
 	if err != nil {
 		var zero M
 		return zero, err
 	}
 
-	return target.Generate(ctx, input, opts...)
+	// Override compose-level RunInfo with FailoverChatModel identity for the outer span.
+	ctx = callbacks.ReuseHandlers(ctx, &callbacks.RunInfo{
+		Type:      "FailoverChatModel",
+		Component: components.ComponentOfChatModel,
+	})
+	ctx = callbacks.OnStart(ctx, input)
+
+	// Create child RunInfo for the target model.
+	nCtx := callbacks.ReuseHandlers(ctx, &callbacks.RunInfo{
+		Type:      targetType,
+		Component: components.ComponentOfChatModel,
+	})
+
+	result, err := target.Generate(nCtx, input, opts...)
+	if err != nil {
+		callbacks.OnError(ctx, err)
+		return result, err
+	}
+
+	callbacks.OnEnd(ctx, result)
+
+	return result, nil
 }
 
 func (m *typedFailoverProxyModel[M]) Stream(ctx context.Context, input []M, opts ...model.Option) (*schema.StreamReader[M], error) {
-	target, err := m.prepareTarget(ctx)
+	target, targetType, err := m.prepareTarget(ctx)
 	if err != nil {
 		return nil, err
 	}
 
-	return target.Stream(ctx, input, opts...)
+	// Override compose-level RunInfo with FailoverChatModel identity for the outer span.
+	ctx = callbacks.ReuseHandlers(ctx, &callbacks.RunInfo{
+		Type:      "FailoverChatModel",
+		Component: components.ComponentOfChatModel,
+	})
+	ctx = callbacks.OnStart(ctx, input)
+
+	// Create child RunInfo for the target model.
+	nCtx := callbacks.ReuseHandlers(ctx, &callbacks.RunInfo{
+		Type:      targetType,
+		Component: components.ComponentOfChatModel,
+	})
+
+	result, err := target.Stream(nCtx, input, opts...)
+	if err != nil {
+		callbacks.OnError(ctx, err)
+		return nil, err
+	}
+
+	_, wrappedStream := callbacks.OnEndWithStreamOutput(ctx, result)
+	return wrappedStream, nil
 }
 
 func (m *typedFailoverProxyModel[M]) IsCallbacksEnabled() bool {
@@ -230,6 +292,8 @@ func (f *failoverModelWrapper[M]) Generate(ctx context.Context, input []M, opts 
 
 	var lastOutputMessage M
 	var lastErr error
+	parentSpanID := uuid.NewString()
+	timelineAttempt := 1
 
 	// Try lastSuccessModel first if available.
 	if lastSuccess := typedGetFailoverLastSuccessModel[M](ctx); lastSuccess != nil {
@@ -240,6 +304,7 @@ func (f *failoverModelWrapper[M]) Generate(ctx context.Context, input []M, opts 
 
 		modelCtx := typedSetFailoverCurrentModel(ctx, lastSuccess)
 		modelCtx = withFailoverHasMoreAttempts(modelCtx, f.config.MaxRetries > 0)
+		modelCtx = withFailoverTimeline(modelCtx, parentSpanID, timelineAttempt)
 		result, err := f.inner.Generate(modelCtx, input, opts...)
 		if err == nil {
 			return result, nil
@@ -252,7 +317,9 @@ func (f *failoverModelWrapper[M]) Generate(ctx context.Context, input []M, opts 
 			return result, err
 		}
 
+		emitFailoverRetryingTimeline[M](ctx, err)
 		log.Printf("failover ChatModel.Generate lastSuccessModel failed: %v", err)
+		timelineAttempt++
 	}
 
 	for attempt := uint(1); attempt <= f.config.MaxRetries; attempt++ {
@@ -284,6 +351,7 @@ func (f *failoverModelWrapper[M]) Generate(ctx context.Context, input []M, opts 
 
 		modelCtx := typedSetFailoverCurrentModel(ctx, currentModel)
 		modelCtx = withFailoverHasMoreAttempts(modelCtx, attempt < f.config.MaxRetries)
+		modelCtx = withFailoverTimeline(modelCtx, parentSpanID, timelineAttempt)
 		result, err := f.inner.Generate(modelCtx, currentInput, opts...)
 		lastOutputMessage = result
 		lastErr = err
@@ -298,10 +366,13 @@ func (f *failoverModelWrapper[M]) Generate(ctx context.Context, input []M, opts 
 		}
 
 		if attempt < f.config.MaxRetries {
+			emitFailoverRetryingTimeline[M](ctx, err)
 			log.Printf("failover ChatModel.Generate attempt %d failed: %v", attempt, err)
 		}
+		timelineAttempt++
 	}
 
+	emitFailoverExhaustedTimeline[M](ctx, lastErr)
 	return lastOutputMessage, lastErr
 }
 
@@ -314,6 +385,8 @@ func (f *failoverModelWrapper[M]) Stream(ctx context.Context, input []M, opts ..
 
 	var lastOutputMessage M
 	var lastErr error
+	parentSpanID := uuid.NewString()
+	timelineAttempt := 1
 
 	// Try lastSuccessModel first if available.
 	if lastSuccess := typedGetFailoverLastSuccessModel[M](ctx); lastSuccess != nil {
@@ -323,6 +396,7 @@ func (f *failoverModelWrapper[M]) Stream(ctx context.Context, input []M, opts ..
 
 		modelCtx := typedSetFailoverCurrentModel(ctx, lastSuccess)
 		modelCtx = withFailoverHasMoreAttempts(modelCtx, f.config.MaxRetries > 0)
+		modelCtx = withFailoverTimeline(modelCtx, parentSpanID, timelineAttempt)
 		stream, err := f.inner.Stream(modelCtx, input, opts...)
 		if err != nil {
 			lastErr = err
@@ -330,7 +404,9 @@ func (f *failoverModelWrapper[M]) Stream(ctx context.Context, input []M, opts ..
 			if !f.needFailover(ctx, zero, err) {
 				return nil, err
 			}
+			emitFailoverRetryingTimeline[M](ctx, err)
 			log.Printf("failover ChatModel.Stream lastSuccessModel failed: %v", err)
+			timelineAttempt++
 		} else {
 			copies := stream.Copy(2)
 			checkCopy := copies[0]
@@ -345,7 +421,9 @@ func (f *failoverModelWrapper[M]) Stream(ctx context.Context, input []M, opts ..
 				if !f.needFailover(ctx, outMsg, streamErr) {
 					return nil, streamErr
 				}
+				emitFailoverRetryingTimeline[M](ctx, streamErr)
 				log.Printf("failover ChatModel.Stream lastSuccessModel failed: %v", streamErr)
+				timelineAttempt++
 			} else {
 				return returnCopy, nil
 			}
@@ -378,6 +456,7 @@ func (f *failoverModelWrapper[M]) Stream(ctx context.Context, input []M, opts ..
 
 		modelCtx := typedSetFailoverCurrentModel(ctx, currentModel)
 		modelCtx = withFailoverHasMoreAttempts(modelCtx, attempt < f.config.MaxRetries)
+		modelCtx = withFailoverTimeline(modelCtx, parentSpanID, timelineAttempt)
 		stream, err := f.inner.Stream(modelCtx, currentInput, opts...)
 		if err != nil {
 			lastErr = err
@@ -389,8 +468,10 @@ func (f *failoverModelWrapper[M]) Stream(ctx context.Context, input []M, opts ..
 			}
 
 			if attempt < f.config.MaxRetries {
+				emitFailoverRetryingTimeline[M](ctx, err)
 				log.Printf("failover ChatModel.Stream attempt %d failed: %v", attempt, err)
 			}
+			timelineAttempt++
 			continue
 		}
 
@@ -425,8 +506,10 @@ func (f *failoverModelWrapper[M]) Stream(ctx context.Context, input []M, opts ..
 			}
 
 			if attempt < f.config.MaxRetries {
+				emitFailoverRetryingTimeline[M](ctx, streamErr)
 				log.Printf("failover ChatModel.Stream attempt %d failed: %v", attempt, streamErr)
 			}
+			timelineAttempt++
 			continue
 		}
 
@@ -434,7 +517,35 @@ func (f *failoverModelWrapper[M]) Stream(ctx context.Context, input []M, opts ..
 		return returnCopy, nil
 	}
 
+	emitFailoverExhaustedTimeline[M](ctx, lastErr)
 	return nil, lastErr
+}
+
+func emitFailoverRetryingTimeline[M MessageType](ctx context.Context, err error) {
+	sendSessionTimelineEvent(ctx, &SessionEvent[M]{
+		Timestamp: newEventTimestamp(),
+		Kind:      SessionEventSessionError,
+		Error: &SessionErrorEvent{
+			Type:        SessionErrorTypeModelFailover,
+			Message:     timelineErrorMessage(err, nil),
+			RetryStatus: &RetryStatus{Type: "retrying"},
+		},
+	})
+}
+
+func emitFailoverExhaustedTimeline[M MessageType](ctx context.Context, err error) {
+	if err == nil {
+		return
+	}
+	sendSessionTimelineEvent(ctx, &SessionEvent[M]{
+		Timestamp: newEventTimestamp(),
+		Kind:      SessionEventSessionError,
+		Error: &SessionErrorEvent{
+			Type:        SessionErrorTypeModelFailover,
+			Message:     timelineErrorMessage(err, nil),
+			RetryStatus: &RetryStatus{Type: "exhausted"},
+		},
+	})
 }
 
 func typedConsumeStream[M MessageType](stream *schema.StreamReader[M]) (M, error) {

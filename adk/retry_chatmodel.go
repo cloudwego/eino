@@ -292,6 +292,56 @@ func genErrWrapper(ctx context.Context, maxRetries, attempt int, isRetryAbleFunc
 	}
 }
 
+func timelineErrorMessage(err error, rejectReason any) string {
+	if rejectReason != nil {
+		if msg := fmt.Sprint(rejectReason); msg != "" {
+			return msg
+		}
+	}
+	if err != nil {
+		return err.Error()
+	}
+	return ""
+}
+
+func emitRetryingTimeline[M MessageType](ctx context.Context, err error, rejectReason ...any) {
+	var reason any
+	if len(rejectReason) > 0 {
+		reason = rejectReason[0]
+	}
+	sendSessionTimelineEvent(ctx, &SessionEvent[M]{
+		Timestamp: newEventTimestamp(),
+		Kind:      SessionEventSessionError,
+		Error: &SessionErrorEvent{
+			Type:        SessionErrorTypeModelRetry,
+			Message:     timelineErrorMessage(err, reason),
+			RetryStatus: &RetryStatus{Type: "retrying"},
+		},
+	})
+	sendSessionTimelineEvent(ctx, &SessionEvent[M]{
+		Timestamp: newEventTimestamp(),
+		Kind:      SessionEventSessionStatusRescheduled,
+		Lifecycle: &LifecycleEvent{Scope: LifecycleScopeSession, State: SessionRunStateRescheduled},
+	})
+	sendSessionTimelineEvent(ctx, &SessionEvent[M]{
+		Timestamp: newEventTimestamp(),
+		Kind:      SessionEventSessionStatusRunning,
+		Lifecycle: &LifecycleEvent{Scope: LifecycleScopeSession, State: SessionRunStateRunning},
+	})
+}
+
+func emitRetryExhaustedTimeline[M MessageType](ctx context.Context, err error) {
+	sendSessionTimelineEvent(ctx, &SessionEvent[M]{
+		Timestamp: newEventTimestamp(),
+		Kind:      SessionEventSessionError,
+		Error: &SessionErrorEvent{
+			Type:        SessionErrorTypeModelRetry,
+			Message:     timelineErrorMessage(err, nil),
+			RetryStatus: &RetryStatus{Type: "exhausted"},
+		},
+	})
+}
+
 func consumeStreamForError[M any](stream *schema.StreamReader[M]) error {
 	defer stream.Close()
 	for {
@@ -367,12 +417,14 @@ func (r *typedRetryModelWrapper[M]) generateLegacy(ctx context.Context, input []
 
 		lastErr = err
 		if attempt < r.config.MaxRetries {
+			emitRetryingTimeline[M](ctx, err)
 			if err := r.contextAwareSleep(ctx, backoffFunc(ctx, attempt+1)); err != nil {
 				return zero, err
 			}
 		}
 	}
 
+	emitRetryExhaustedTimeline[M](ctx, lastErr)
 	return zero, &RetryExhaustedError{LastErr: lastErr, TotalRetries: r.config.MaxRetries}
 }
 
@@ -458,6 +510,7 @@ func generateWithShouldRetry[M MessageType](r *typedRetryModelWrapper[M], ctx co
 			break
 		}
 
+		emitRetryingTimeline[M](ctx, lastErr, decision.RejectReason)
 		applyDecisionForRetry(&currentInput, &currentOpts, ctx, decision)
 
 		delay := decision.Backoff
@@ -470,6 +523,7 @@ func generateWithShouldRetry[M MessageType](r *typedRetryModelWrapper[M], ctx co
 		}
 	}
 
+	emitRetryExhaustedTimeline[M](ctx, lastErr)
 	return zero, &RetryExhaustedError{LastErr: lastErr, TotalRetries: r.config.MaxRetries}
 }
 
@@ -572,6 +626,7 @@ func streamWithShouldRetry[M MessageType](r *typedRetryModelWrapper[M], ctx cont
 
 			lastErr = err
 			if attempt < r.config.MaxRetries {
+				emitRetryingTimeline[M](ctx, err)
 				applyDecisionForRetry(&currentInput, &currentOpts, ctx, decision)
 				delay := decision.Backoff
 				if delay == 0 {
@@ -642,6 +697,7 @@ func streamWithShouldRetry[M MessageType](r *typedRetryModelWrapper[M], ctx cont
 		lastErr = verdictErr
 
 		if attempt < r.config.MaxRetries {
+			emitRetryingTimeline[M](ctx, verdictErr, decision.RejectReason)
 			applyDecisionForRetry(&currentInput, &currentOpts, ctx, decision)
 			delay := decision.Backoff
 			if delay == 0 {
@@ -653,6 +709,7 @@ func streamWithShouldRetry[M MessageType](r *typedRetryModelWrapper[M], ctx cont
 		}
 	}
 
+	emitRetryExhaustedTimeline[M](ctx, lastErr)
 	return nil, &RetryExhaustedError{LastErr: lastErr, TotalRetries: r.config.MaxRetries}
 }
 
@@ -723,6 +780,7 @@ func (r *typedRetryModelWrapper[M]) streamLegacy(ctx context.Context, input []M,
 			}
 			lastErr = err
 			if attempt < r.config.MaxRetries {
+				emitRetryingTimeline[M](ctx, err)
 				if err := r.contextAwareSleep(ctx, backoffFunc(ctx, attempt+1)); err != nil {
 					return nil, err
 				}
@@ -749,11 +807,13 @@ func (r *typedRetryModelWrapper[M]) streamLegacy(ctx context.Context, input []M,
 
 		lastErr = streamErr
 		if attempt < r.config.MaxRetries {
+			emitRetryingTimeline[M](ctx, streamErr)
 			if err := r.contextAwareSleep(ctx, backoffFunc(ctx, attempt+1)); err != nil {
 				return nil, err
 			}
 		}
 	}
 
+	emitRetryExhaustedTimeline[M](ctx, lastErr)
 	return nil, &RetryExhaustedError{LastErr: lastErr, TotalRetries: r.config.MaxRetries}
 }
