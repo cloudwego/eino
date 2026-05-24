@@ -2148,6 +2148,147 @@ func TestTurnLoop_ManagedInterrupt_StopWhileWaitingForExplicitResumePersistsChec
 	assert.Empty(t, cp.ResumeItems)
 }
 
+func TestTurnLoop_ManagedInterrupt_GenResumeErrorExitsLoop(t *testing.T) {
+	ctx := context.Background()
+	interruptObserved := make(chan struct{})
+	genResumeErr := errors.New("policy: cannot resume this interrupt")
+
+	loop := newAndRunTurnLoop(ctx, TurnLoopConfig[string, *schema.Message]{
+		InterruptMode: TurnLoopInterruptWaitsForExplicitResume,
+		GenInput:      genInputConsumeAllWithMsg,
+		GenResume: func(_ context.Context, _ *TurnLoop[string, *schema.Message], _, _, _ []string) (*GenResumeResult[string, *schema.Message], error) {
+			return nil, genResumeErr
+		},
+		PrepareAgent: func(_ context.Context, _ *TurnLoop[string, *schema.Message], _ []string) (Agent, error) {
+			return &turnLoopInterruptAgent{interruptInfo: "test_resume_err"}, nil
+		},
+		OnAgentEvents: func(_ context.Context, _ *TurnContext[string, *schema.Message], events *AsyncIterator[*AgentEvent]) error {
+			for {
+				event, ok := events.Next()
+				if !ok {
+					break
+				}
+				if event.Action != nil && event.Action.Interrupted != nil {
+					close(interruptObserved)
+				}
+			}
+			return nil
+		},
+	})
+
+	loop.Push("trigger")
+	waitOrFail(t, interruptObserved, "interrupt not observed")
+
+	require.Eventually(t, func() bool {
+		return loop.Resume("response") == nil
+	}, 2*time.Second, 10*time.Millisecond, "Resume should eventually be accepted")
+
+	exit := loop.Wait()
+	require.Error(t, exit.ExitReason, "loop should exit with GenResume error")
+	assert.ErrorIs(t, exit.ExitReason, genResumeErr)
+}
+
+func TestTurnLoop_ManagedInterrupt_StartNewTurnPrepareErrorPreservesLoadedCheckpoint(t *testing.T) {
+	ctx := context.Background()
+	store := &deletableCheckpointStore{
+		turnLoopCheckpointStore: turnLoopCheckpointStore{m: make(map[string][]byte)},
+	}
+	cpID := "fresh-turn-prepare-error"
+	cp := &turnLoopCheckpoint[string]{
+		RunnerCheckpointID: "runner-cp",
+		RunnerCheckpoint:   []byte("runner-state"),
+		HasRunnerState:     true,
+		ResumeItems:        []string{"approval"},
+		CanceledItems:      []string{"interrupted"},
+	}
+	data, err := marshalTurnLoopCheckpoint(cp)
+	require.NoError(t, err)
+	store.m[cpID] = data
+
+	loop := NewTurnLoop(TurnLoopConfig[string, *schema.Message]{
+		InterruptMode: TurnLoopInterruptWaitsForExplicitResume,
+		Store:         store,
+		CheckpointID:  cpID,
+		GenInput:      genInputConsumeAllWithMsg,
+		GenResume: func(ctx context.Context, _ *TurnLoop[string, *schema.Message], interruptedItems, unhandledItems, resumeItems []string) (*GenResumeResult[string, *schema.Message], error) {
+			return &GenResumeResult[string, *schema.Message]{
+				Decision: TurnLoopResumeDecisionStartNewTurn,
+				Input:    &AgentInput{Messages: []Message{schema.UserMessage("fresh")}},
+				Consumed: append(append([]string{}, interruptedItems...), resumeItems...),
+			}, nil
+		},
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string, *schema.Message], consumed []string) (Agent, error) {
+			return nil, fmt.Errorf("prepare failed")
+		},
+	})
+
+	loop.Run(ctx)
+	exit := loop.Wait()
+	require.Error(t, exit.ExitReason)
+	assert.Contains(t, exit.ExitReason.Error(), "prepare failed")
+
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	assert.False(t, store.deleteCalled)
+	_, exists := store.m[cpID]
+	assert.True(t, exists, "loaded checkpoint must remain resumable when fresh-turn preparation fails")
+}
+
+func TestTurnLoop_ManagedInterrupt_StartNewTurnDeleteFailureStopsBeforeRun(t *testing.T) {
+	ctx := context.Background()
+	store := &deletableCheckpointStore{
+		turnLoopCheckpointStore: turnLoopCheckpointStore{m: make(map[string][]byte)},
+		deleteErr:               fmt.Errorf("delete failed"),
+	}
+	cpID := "fresh-turn-delete-error"
+	cp := &turnLoopCheckpoint[string]{
+		RunnerCheckpointID: "runner-cp",
+		RunnerCheckpoint:   []byte("runner-state"),
+		HasRunnerState:     true,
+		ResumeItems:        []string{"approval"},
+		CanceledItems:      []string{"interrupted"},
+	}
+	data, err := marshalTurnLoopCheckpoint(cp)
+	require.NoError(t, err)
+	store.m[cpID] = data
+
+	agentRan := false
+	loop := NewTurnLoop(TurnLoopConfig[string, *schema.Message]{
+		InterruptMode: TurnLoopInterruptWaitsForExplicitResume,
+		Store:         store,
+		CheckpointID:  cpID,
+		GenInput:      genInputConsumeAllWithMsg,
+		GenResume: func(ctx context.Context, _ *TurnLoop[string, *schema.Message], interruptedItems, unhandledItems, resumeItems []string) (*GenResumeResult[string, *schema.Message], error) {
+			return &GenResumeResult[string, *schema.Message]{
+				Decision: TurnLoopResumeDecisionStartNewTurn,
+				Input:    &AgentInput{Messages: []Message{schema.UserMessage("fresh")}},
+				Consumed: append(append([]string{}, interruptedItems...), resumeItems...),
+			}, nil
+		},
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string, *schema.Message], consumed []string) (Agent, error) {
+			return &turnLoopMockAgent{name: "fresh", events: []*AgentEvent{{Output: &AgentOutput{}}}}, nil
+		},
+		OnAgentEvents: func(ctx context.Context, tc *TurnContext[string, *schema.Message], events *AsyncIterator[*AgentEvent]) error {
+			agentRan = true
+			return nil
+		},
+	})
+
+	loop.Run(ctx)
+	exit := loop.Wait()
+	require.Error(t, exit.ExitReason)
+	assert.Contains(t, exit.ExitReason.Error(), "failed to abandon checkpoint")
+	assert.Contains(t, exit.ExitReason.Error(), "delete failed")
+	assert.False(t, agentRan)
+
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	assert.True(t, store.deleteCalled)
+	assert.Equal(t, cpID, store.deletedKey)
+	_, exists := store.m[cpID]
+	assert.True(t, exists, "checkpoint must remain when deletion fails")
+}
+
 func TestTurnLoop_ManagedInterrupt_StartNewTurnUsesConfiguredSessionStore(t *testing.T) {
 	ctx := context.Background()
 	sessionStore := newSessionHelperStore()
@@ -2703,6 +2844,7 @@ type deletableCheckpointStore struct {
 	turnLoopCheckpointStore
 	deleteCalled bool
 	deletedKey   string
+	deleteErr    error
 }
 
 func (s *deletableCheckpointStore) Delete(_ context.Context, key string) error {
@@ -2710,6 +2852,9 @@ func (s *deletableCheckpointStore) Delete(_ context.Context, key string) error {
 	defer s.mu.Unlock()
 	s.deleteCalled = true
 	s.deletedKey = key
+	if s.deleteErr != nil {
+		return s.deleteErr
+	}
 	delete(s.m, key)
 	return nil
 }
@@ -6057,7 +6202,7 @@ func TestStopController_CloseForLoopExitClearsPendingCancel(t *testing.T) {
 	assert.False(t, ok)
 }
 
-func TestAttack_UntilIdleFor_ConcurrentPushDuringIdleTimer(t *testing.T) {
+func TestTurnLoop_UntilIdleFor_ConcurrentPushDuringIdleTimer(t *testing.T) {
 	turnCount := int32(0)
 	turnDone := make(chan struct{}, 10)
 
@@ -6098,7 +6243,7 @@ func TestAttack_UntilIdleFor_ConcurrentPushDuringIdleTimer(t *testing.T) {
 	assert.Equal(t, int32(6), finalCount, "all 6 pushes should have been processed")
 }
 
-func TestAttack_UntilIdleFor_MultipleStopCallsFirstWins(t *testing.T) {
+func TestTurnLoop_UntilIdleFor_MultipleStopCallsFirstWins(t *testing.T) {
 	turnDone := make(chan struct{})
 	loop := newAndRunTurnLoop(context.Background(), TurnLoopConfig[string, *schema.Message]{
 		GenInput: genInputConsumeAllWithMsg,
@@ -6128,7 +6273,7 @@ func TestAttack_UntilIdleFor_MultipleStopCallsFirstWins(t *testing.T) {
 	waitOrFail(t, done, "second UntilIdleFor should have been ignored; loop should have exited with 100ms timer")
 }
 
-func TestAttack_BareStopOverridesUntilIdleFor(t *testing.T) {
+func TestTurnLoop_Stop_BareStopOverridesUntilIdleFor(t *testing.T) {
 	agentStarted := make(chan struct{})
 	agentDone := make(chan struct{})
 
@@ -6166,7 +6311,7 @@ func TestAttack_BareStopOverridesUntilIdleFor(t *testing.T) {
 	assert.NoError(t, exit.ExitReason, "bare Stop should exit cleanly")
 }
 
-func TestAttack_BareStopDoesNotDeescalateExistingCancelIntent(t *testing.T) {
+func TestTurnLoop_Stop_BareStopDoesNotDeescalateExistingCancelIntent(t *testing.T) {
 	agentStarted := make(chan *cancelContext, 1)
 	probe := &turnLoopStopModeProbeAgent{ccCh: agentStarted}
 	loop := newAndRunTurnLoop(context.Background(), TurnLoopConfig[string, *schema.Message]{
@@ -6195,7 +6340,7 @@ func TestAttack_BareStopDoesNotDeescalateExistingCancelIntent(t *testing.T) {
 	assert.Equal(t, CancelImmediate, ce.Info.Mode)
 }
 
-func TestAttack_InterruptedItems_EmptyWhenAgentFinishesNormally(t *testing.T) {
+func TestTurnLoop_InterruptedItems_EmptyWhenAgentFinishesNormally(t *testing.T) {
 	agentStarted := make(chan struct{})
 	loop := newAndRunTurnLoop(context.Background(), TurnLoopConfig[string, *schema.Message]{
 		GenInput: genInputConsumeAllWithMsg,
@@ -6220,7 +6365,7 @@ func TestAttack_InterruptedItems_EmptyWhenAgentFinishesNormally(t *testing.T) {
 	assert.Empty(t, exit.InterruptedItems, "InterruptedItems must be empty when agent finished normally")
 }
 
-func TestAttack_TurnBuffer_WakeupDoesNotLoseItems(t *testing.T) {
+func TestTurnBuffer_WakeupDoesNotLoseItems(t *testing.T) {
 	tb := newTurnBuffer[string]()
 
 	tb.Send("a")
@@ -6238,7 +6383,7 @@ func TestAttack_TurnBuffer_WakeupDoesNotLoseItems(t *testing.T) {
 	assert.Equal(t, []string{"a", "b", "c"}, got, "Wakeup must not cause items to be lost")
 }
 
-func TestAttack_TurnBuffer_ClearWakeupPreventsSpuriousReturn(t *testing.T) {
+func TestTurnBuffer_ClearWakeupPreventsSpuriousReturn(t *testing.T) {
 	tb := newTurnBuffer[string]()
 
 	tb.Wakeup()
@@ -6263,7 +6408,7 @@ func TestAttack_TurnBuffer_ClearWakeupPreventsSpuriousReturn(t *testing.T) {
 	}
 }
 
-func TestAttack_StopBeforeRun_UntilIdleFor_ExitsImmediately(t *testing.T) {
+func TestTurnLoop_StopBeforeRun_UntilIdleForExitsImmediately(t *testing.T) {
 	loop := NewTurnLoop(TurnLoopConfig[string, *schema.Message]{
 		GenInput:     genInputConsumeAllWithMsg,
 		PrepareAgent: prepareTestAgent,
@@ -6283,7 +6428,7 @@ func TestAttack_StopBeforeRun_UntilIdleFor_ExitsImmediately(t *testing.T) {
 	waitOrFail(t, done, "loop should exit immediately when Stop() called before Run()")
 }
 
-func TestAttack_PushAfterStop_UntilIdleFor_RoutedToLateItems(t *testing.T) {
+func TestTurnLoop_PushAfterStop_UntilIdleForRoutedToLateItems(t *testing.T) {
 	turnDone := make(chan struct{})
 	loop := newAndRunTurnLoop(context.Background(), TurnLoopConfig[string, *schema.Message]{
 		GenInput: genInputConsumeAllWithMsg,
@@ -6312,7 +6457,7 @@ func TestAttack_PushAfterStop_UntilIdleFor_RoutedToLateItems(t *testing.T) {
 	assert.Equal(t, []string{"after-stop"}, late)
 }
 
-func TestAttack_ConcurrentStopEscalation_RaceDetector(t *testing.T) {
+func TestTurnLoop_Stop_ConcurrentEscalation(t *testing.T) {
 	agentStarted := make(chan struct{})
 	loop := newAndRunTurnLoop(context.Background(), TurnLoopConfig[string, *schema.Message]{
 		GenInput: genInputConsumeAllWithMsg,
@@ -6354,7 +6499,7 @@ func TestAttack_ConcurrentStopEscalation_RaceDetector(t *testing.T) {
 	t.Log("ExitReason:", exit.ExitReason)
 }
 
-func TestAttack_SkipCheckpoint_Sticky(t *testing.T) {
+func TestTurnLoop_Stop_SkipCheckpointSticky(t *testing.T) {
 	agentStarted := make(chan struct{})
 	loop := newAndRunTurnLoop(context.Background(), TurnLoopConfig[string, *schema.Message]{
 		GenInput: genInputConsumeAllWithMsg,
@@ -6598,7 +6743,7 @@ func TestTurnLoop_Preempt_LoopStalledAfterSecondPreemptPush(t *testing.T) {
 	assert.Equal(t, int32(3), atomic.LoadInt32(&turnCount), "expected 3 turns to be processed")
 }
 
-func TestAttack_BusinessInterrupt_NoStore_ExitsWithoutPanic(t *testing.T) {
+func TestTurnLoop_BusinessInterrupt_NoStoreExitsWithoutPanic(t *testing.T) {
 	ctx := context.Background()
 	interruptAgent := &turnLoopInterruptAgent{interruptInfo: "no_store_test"}
 
@@ -6618,7 +6763,7 @@ func TestAttack_BusinessInterrupt_NoStore_ExitsWithoutPanic(t *testing.T) {
 	assert.False(t, exit.CheckpointAttempted, "no store → no checkpoint attempt")
 }
 
-func TestAttack_BusinessInterrupt_EmptyConsumed_NoCheckpoint(t *testing.T) {
+func TestTurnLoop_BusinessInterrupt_EmptyConsumedNoCheckpoint(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore()
 	interruptAgent := &turnLoopInterruptAgent{interruptInfo: "idle_test"}
