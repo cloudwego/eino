@@ -54,7 +54,11 @@ type GateCheckResult struct {
 	Message string
 
 	// UpdatedInput replaces ToolArgument.Text when the tool is allowed.
+	// Non-empty values are treated as replacements for backward compatibility.
 	UpdatedInput string
+	// HasUpdatedInput allows UpdatedInput to intentionally replace arguments with
+	// an empty string.
+	HasUpdatedInput bool
 
 	// Reason is optional user-defined metadata for logging or auditing.
 	Reason string
@@ -97,7 +101,11 @@ type ResumeResponse struct {
 	Action ResumeAction
 
 	// UpdatedInput replaces the original arguments when Action is ResumeActionApprove.
+	// Non-empty values are treated as replacements for backward compatibility.
 	UpdatedInput string
+	// HasUpdatedInput allows UpdatedInput to intentionally replace arguments with
+	// an empty string.
+	HasUpdatedInput bool
 
 	// Message is used as the rejection reason or model-visible response text.
 	Message string
@@ -148,7 +156,10 @@ func (m *Middleware[M]) permissionGate(
 	}
 
 	if isTarget && hasData {
-		return handleResumeResponse(tCtx, argument, response)
+		if !hasState || savedState == nil || savedState.Info == nil {
+			return nil, fmt.Errorf("permission: missing AskState for targeted resume of tool %q (call_id=%s)", tCtx.Name, tCtx.CallID)
+		}
+		return handleResumeResponse(ctx, tCtx, &schema.ToolArgument{Text: savedState.Info.Arguments}, response)
 	}
 
 	if isTarget && !hasData {
@@ -177,13 +188,16 @@ func (m *Middleware[M]) permissionGate(
 
 	switch decision.Decision {
 	case GateAllow:
+		adk.SetToolPermissionDecision(ctx, tCtx.CallID, string(GateAllow))
 		return &gateResult{
 			allowed:  true,
-			argument: withUpdatedInput(argument, decision.UpdatedInput),
+			argument: withUpdatedInput(argument, decision.UpdatedInput, decision.HasUpdatedInput || decision.UpdatedInput != ""),
 		}, nil
 	case GateDeny:
+		adk.SetToolPermissionDecision(ctx, tCtx.CallID, string(GateDeny))
 		return &gateResult{denyResult: formatDenyResult(tCtx.Name, decision.Message)}, nil
 	case GateAsk:
+		adk.SetToolPermissionDecision(ctx, tCtx.CallID, string(GateAsk))
 		info := &AskInfo{
 			ToolName:  tCtx.Name,
 			CallID:    tCtx.CallID,
@@ -202,6 +216,7 @@ func (m *Middleware[M]) permissionGate(
 }
 
 func handleResumeResponse(
+	ctx context.Context,
 	tCtx *adk.ToolContext,
 	argument *schema.ToolArgument,
 	response *ResumeResponse,
@@ -212,17 +227,20 @@ func handleResumeResponse(
 
 	switch response.Action {
 	case ResumeActionApprove:
+		adk.SetToolPermissionDecision(ctx, tCtx.CallID, string(ResumeActionApprove))
 		return &gateResult{
 			allowed:  true,
-			argument: withUpdatedInput(argument, response.UpdatedInput),
+			argument: withUpdatedInput(argument, response.UpdatedInput, response.HasUpdatedInput || response.UpdatedInput != ""),
 		}, nil
 	case ResumeActionReject:
+		adk.SetToolPermissionDecision(ctx, tCtx.CallID, string(ResumeActionReject))
 		message := response.Message
 		if message == "" {
 			message = "rejected by user"
 		}
 		return &gateResult{denyResult: formatDenyResult(tCtx.Name, message)}, nil
 	case ResumeActionRespond:
+		adk.SetToolPermissionDecision(ctx, tCtx.CallID, string(ResumeActionRespond))
 		if response.Message == "" {
 			return nil, fmt.Errorf("permission: empty response message for respond action on tool %q (call_id=%s)",
 				tCtx.Name, tCtx.CallID)
@@ -305,8 +323,8 @@ func (m *Middleware[M]) WrapEnhancedStreamableToolCall(
 	}, nil
 }
 
-func withUpdatedInput(argument *schema.ToolArgument, updatedInput string) *schema.ToolArgument {
-	if updatedInput == "" {
+func withUpdatedInput(argument *schema.ToolArgument, updatedInput string, hasUpdatedInput bool) *schema.ToolArgument {
+	if !hasUpdatedInput {
 		return argument
 	}
 	cloned := *argument
