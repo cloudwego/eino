@@ -33,21 +33,22 @@ func init() {
 	schema.RegisterName[*AskState]("_eino_adk_permission_ask_state")
 }
 
-// Decision is the result of a permission check.
-type Decision string
+// GateDecision is the result of a pre-execution permission check.
+type GateDecision string
 
 const (
-	// Allow executes the tool call.
-	Allow Decision = "allow"
-	// Deny skips tool execution and returns Message as the tool result.
-	Deny Decision = "deny"
-	// Ask interrupts the agent run for external approval.
-	Ask Decision = "ask"
+	// GateAllow bypasses the permission UI and executes the tool call.
+	GateAllow GateDecision = "allow"
+	// GateDeny skips tool execution and uses Message as the denial reason
+	// formatted through formatDenyResult.
+	GateDeny GateDecision = "deny"
+	// GateAsk interrupts the agent run for external approval.
+	GateAsk GateDecision = "ask"
 )
 
-// ToolCallDecision determines how a tool call should proceed.
-type ToolCallDecision struct {
-	Decision Decision
+// GateCheckResult determines how a tool call should proceed before execution.
+type GateCheckResult struct {
+	Decision GateDecision
 
 	// Message is used as the deny reason or approval prompt.
 	Message string
@@ -59,11 +60,12 @@ type ToolCallDecision struct {
 	Reason string
 }
 
-// Checker evaluates a tool call before execution.
+// Checker evaluates whether a tool call should be gated before execution.
 //
 // Returning an error signals an infrastructure failure and aborts the agent loop.
-// Permission rejections should return Decision: Deny instead.
-type Checker func(ctx context.Context, tCtx *adk.ToolContext, args *schema.ToolArgument) (*ToolCallDecision, error)
+// Permission rejections should return GateDeny instead. Remembered preferences
+// such as "always allow this action" should return GateAllow.
+type Checker func(ctx context.Context, tCtx *adk.ToolContext, args *schema.ToolArgument) (*GateCheckResult, error)
 
 // AskInfo is the user-facing interrupt payload emitted for Ask decisions.
 type AskInfo struct {
@@ -78,15 +80,27 @@ type AskState struct {
 	Info *AskInfo
 }
 
+// ResumeAction resolves a previously interrupted permission ask.
+type ResumeAction string
+
+const (
+	// ResumeActionApprove executes the pending tool call.
+	ResumeActionApprove ResumeAction = "approve"
+	// ResumeActionReject rejects the pending tool call without execution.
+	ResumeActionReject ResumeAction = "reject"
+	// ResumeActionRespond returns alternate model-visible text without executing the tool.
+	ResumeActionRespond ResumeAction = "respond"
+)
+
 // ResumeResponse is the data expected when resuming an Ask interrupt.
 type ResumeResponse struct {
-	Approved bool
+	Action ResumeAction
 
-	// UpdatedInput replaces the original arguments when Approved is true.
+	// UpdatedInput replaces the original arguments when Action is ResumeActionApprove.
 	UpdatedInput string
 
-	// DenyMessage is returned as the tool result when Approved is false.
-	DenyMessage string
+	// Message is used as the rejection reason or model-visible response text.
+	Message string
 }
 
 // Middleware gates tool calls with a permission Checker.
@@ -134,13 +148,7 @@ func (m *Middleware[M]) permissionGate(
 	}
 
 	if isTarget && hasData {
-		if !response.Approved {
-			return &gateResult{denyResult: formatDenyResult(tCtx.Name, response.DenyMessage)}, nil
-		}
-		return &gateResult{
-			allowed:  true,
-			argument: withUpdatedInput(argument, response.UpdatedInput),
-		}, nil
+		return handleResumeResponse(tCtx, argument, response)
 	}
 
 	if isTarget && !hasData {
@@ -162,20 +170,20 @@ func (m *Middleware[M]) permissionGate(
 	}
 	if decision == nil {
 		return nil, fmt.Errorf(
-			"permission: checker returned nil ToolCallDecision for tool %q (call_id=%s); "+
-				"return a valid *ToolCallDecision with Decision set to Allow, Deny, or Ask",
+			"permission: checker returned nil GateCheckResult for tool %q (call_id=%s); "+
+				"return a valid *GateCheckResult with Decision set to GateAllow, GateDeny, or GateAsk",
 			tCtx.Name, tCtx.CallID)
 	}
 
 	switch decision.Decision {
-	case Allow:
+	case GateAllow:
 		return &gateResult{
 			allowed:  true,
 			argument: withUpdatedInput(argument, decision.UpdatedInput),
 		}, nil
-	case Deny:
+	case GateDeny:
 		return &gateResult{denyResult: formatDenyResult(tCtx.Name, decision.Message)}, nil
-	case Ask:
+	case GateAsk:
 		info := &AskInfo{
 			ToolName:  tCtx.Name,
 			CallID:    tCtx.CallID,
@@ -184,9 +192,48 @@ func (m *Middleware[M]) permissionGate(
 		}
 		state := &AskState{Info: info}
 		return nil, tool.StatefulInterrupt(ctx, info, state)
+	case "":
+		return nil, fmt.Errorf("permission: empty gate decision for tool %q (call_id=%s); expected allow, deny, or ask",
+			tCtx.Name, tCtx.CallID)
 	default:
-		return &gateResult{denyResult: formatDenyResult(tCtx.Name,
-			fmt.Sprintf("unknown permission decision %q; expected allow, deny, or ask", decision.Decision))}, nil
+		return nil, fmt.Errorf("permission: unknown gate decision %q for tool %q (call_id=%s); expected allow, deny, or ask",
+			decision.Decision, tCtx.Name, tCtx.CallID)
+	}
+}
+
+func handleResumeResponse(
+	tCtx *adk.ToolContext,
+	argument *schema.ToolArgument,
+	response *ResumeResponse,
+) (*gateResult, error) {
+	if response == nil {
+		return nil, fmt.Errorf("permission: nil ResumeResponse for tool %q (call_id=%s)", tCtx.Name, tCtx.CallID)
+	}
+
+	switch response.Action {
+	case ResumeActionApprove:
+		return &gateResult{
+			allowed:  true,
+			argument: withUpdatedInput(argument, response.UpdatedInput),
+		}, nil
+	case ResumeActionReject:
+		message := response.Message
+		if message == "" {
+			message = "rejected by user"
+		}
+		return &gateResult{denyResult: formatDenyResult(tCtx.Name, message)}, nil
+	case ResumeActionRespond:
+		if response.Message == "" {
+			return nil, fmt.Errorf("permission: empty response message for respond action on tool %q (call_id=%s)",
+				tCtx.Name, tCtx.CallID)
+		}
+		return &gateResult{denyResult: formatRespondResult(tCtx.Name, response.Message)}, nil
+	case "":
+		return nil, fmt.Errorf("permission: empty resume action for tool %q (call_id=%s); expected approve, reject, or respond",
+			tCtx.Name, tCtx.CallID)
+	default:
+		return nil, fmt.Errorf("permission: unknown resume action %q for tool %q (call_id=%s); expected approve, reject, or respond",
+			response.Action, tCtx.Name, tCtx.CallID)
 	}
 }
 
@@ -279,6 +326,14 @@ func formatDenyResult(toolName, message string) string {
 	tpl := internal.SelectPrompt(internal.I18nPrompts{
 		English: "Permission denied for tool %s: %s",
 		Chinese: "工具 %s 权限被拒绝: %s",
+	})
+	return fmt.Sprintf(tpl, toolName, message)
+}
+
+func formatRespondResult(toolName, message string) string {
+	tpl := internal.SelectPrompt(internal.I18nPrompts{
+		English: "Tool %s was not executed. User response: %s",
+		Chinese: "工具 %s 未执行。用户回复: %s",
 	})
 	return fmt.Sprintf(tpl, toolName, message)
 }
