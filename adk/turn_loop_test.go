@@ -1846,6 +1846,583 @@ func TestTurnLoop_BusinessInterrupt_PersistAndResume(t *testing.T) {
 	assert.Equal(t, []string{"msg1"}, resumeInterruptedItems, "interruptedItems should contain the original items")
 }
 
+func TestTurnLoop_ManagedInterrupt_WaitsForExplicitResume(t *testing.T) {
+	ctx := context.Background()
+	interruptObserved := make(chan struct{})
+	genResumeCalled := make(chan struct{})
+	var genResumeOnce sync.Once
+
+	var prepareCount int32
+	var gotUnhandled []string
+	var gotResumeItems []string
+
+	loop := newAndRunTurnLoop(ctx, TurnLoopConfig[string, *schema.Message]{
+		InterruptMode: TurnLoopInterruptWaitsForExplicitResume,
+		GenInput:      genInputConsumeAllWithMsg,
+		GenResume: func(ctx context.Context, _ *TurnLoop[string, *schema.Message], interruptedItems, unhandledItems, resumeItems []string) (*GenResumeResult[string, *schema.Message], error) {
+			gotUnhandled = append([]string{}, unhandledItems...)
+			gotResumeItems = append([]string{}, resumeItems...)
+			genResumeOnce.Do(func() { close(genResumeCalled) })
+			return &GenResumeResult[string, *schema.Message]{
+				Decision:  TurnLoopResumeDecisionStartNewTurn,
+				Input:     &AgentInput{Messages: []Message{schema.UserMessage("fresh")}},
+				Consumed:  append(append([]string{}, interruptedItems...), resumeItems...),
+				Remaining: unhandledItems,
+			}, nil
+		},
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string, *schema.Message], consumed []string) (Agent, error) {
+			if atomic.AddInt32(&prepareCount, 1) == 1 {
+				return &turnLoopInterruptAgent{interruptInfo: "approval_needed"}, nil
+			}
+			return &turnLoopMockAgent{name: "fresh", events: []*AgentEvent{{Output: &AgentOutput{}}}}, nil
+		},
+		OnAgentEvents: func(ctx context.Context, tc *TurnContext[string, *schema.Message], events *AsyncIterator[*AgentEvent]) error {
+			for {
+				event, ok := events.Next()
+				if !ok {
+					break
+				}
+				if event.Action != nil && event.Action.Interrupted != nil {
+					close(interruptObserved)
+				}
+			}
+			if atomic.LoadInt32(&prepareCount) > 1 {
+				tc.Loop.Stop()
+			}
+			return nil
+		},
+	})
+
+	loop.Push("msg1")
+	waitOrFail(t, interruptObserved, "interrupt was not observed")
+	ok, ack := loop.Push("normal-later")
+	require.True(t, ok)
+	require.Nil(t, ack)
+
+	select {
+	case <-genResumeCalled:
+		t.Fatal("normal Push must not trigger GenResume while managed interrupt is pending")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	require.Eventually(t, func() bool {
+		return loop.Resume("resume-response") == nil
+	}, time.Second, 10*time.Millisecond)
+
+	exit := loop.Wait()
+	require.NoError(t, exit.ExitReason)
+	assert.Equal(t, []string{"normal-later"}, gotUnhandled)
+	assert.Equal(t, []string{"resume-response"}, gotResumeItems)
+}
+
+func TestTurnLoop_ResumeErrorContracts(t *testing.T) {
+	t.Run("empty", func(t *testing.T) {
+		loop := NewTurnLoop(TurnLoopConfig[string, *schema.Message]{
+			GenInput:     genInputConsumeAll,
+			PrepareAgent: prepareTestAgent,
+		})
+		assert.ErrorIs(t, loop.Resume(), ErrTurnLoopEmptyResume)
+	})
+
+	t.Run("no pending resume", func(t *testing.T) {
+		loop := NewTurnLoop(TurnLoopConfig[string, *schema.Message]{
+			GenInput:     genInputConsumeAll,
+			PrepareAgent: prepareTestAgent,
+		})
+		assert.ErrorIs(t, loop.Resume("resume"), ErrTurnLoopNoPendingResume)
+	})
+
+	t.Run("stopped", func(t *testing.T) {
+		loop := NewTurnLoop(TurnLoopConfig[string, *schema.Message]{
+			GenInput:     genInputConsumeAll,
+			PrepareAgent: prepareTestAgent,
+		})
+		loop.pendingResume = &turnLoopPendingResume[string]{
+			source:      turnLoopPendingResumeSourceManagedInterrupt,
+			resumeBytes: []byte("runner"),
+		}
+		loop.Stop()
+		assert.ErrorIs(t, loop.Resume("resume"), ErrTurnLoopStopped)
+	})
+
+	t.Run("duplicate", func(t *testing.T) {
+		loop := NewTurnLoop(TurnLoopConfig[string, *schema.Message]{
+			GenInput:     genInputConsumeAll,
+			PrepareAgent: prepareTestAgent,
+		})
+		loop.pendingResume = &turnLoopPendingResume[string]{
+			source:      turnLoopPendingResumeSourceManagedInterrupt,
+			resumeBytes: []byte("runner"),
+		}
+		require.NoError(t, loop.Resume("first"))
+		assert.ErrorIs(t, loop.Resume("second"), ErrTurnLoopResumeInProgress)
+		assert.Equal(t, []string{"first"}, loop.pendingResume.resumeItems)
+	})
+}
+
+func TestTurnLoop_ResumeConcurrentDuplicateAndSliceCopy(t *testing.T) {
+	t.Run("slice copy", func(t *testing.T) {
+		loop := NewTurnLoop(TurnLoopConfig[string, *schema.Message]{
+			GenInput:     genInputConsumeAll,
+			PrepareAgent: prepareTestAgent,
+		})
+		loop.pendingResume = &turnLoopPendingResume[string]{
+			source:      turnLoopPendingResumeSourceManagedInterrupt,
+			resumeBytes: []byte("runner"),
+		}
+		items := []string{"accepted", "second"}
+		require.NoError(t, loop.Resume(items...))
+		items[0] = "mutated"
+		assert.Equal(t, []string{"accepted", "second"}, loop.pendingResume.resumeItems)
+	})
+
+	loop := NewTurnLoop(TurnLoopConfig[string, *schema.Message]{
+		GenInput:     genInputConsumeAll,
+		PrepareAgent: prepareTestAgent,
+	})
+	loop.pendingResume = &turnLoopPendingResume[string]{
+		source:      turnLoopPendingResumeSourceManagedInterrupt,
+		resumeBytes: []byte("runner"),
+	}
+
+	const workers = 16
+	results := make(chan error, workers)
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			results <- loop.Resume(fmt.Sprintf("resume-%d", i))
+		}(i)
+	}
+	wg.Wait()
+	close(results)
+
+	var accepted int
+	var duplicates int
+	for err := range results {
+		if err == nil {
+			accepted++
+			continue
+		}
+		if errors.Is(err, ErrTurnLoopResumeInProgress) {
+			duplicates++
+		}
+	}
+	require.Equal(t, 1, accepted)
+	require.Equal(t, workers-1, duplicates)
+	require.Len(t, loop.pendingResume.resumeItems, 1)
+}
+
+func TestTurnLoop_ResumeRacingStopAllowsOnlyAcceptedOrStopped(t *testing.T) {
+	newPendingLoop := func() *TurnLoop[string, *schema.Message] {
+		loop := NewTurnLoop(TurnLoopConfig[string, *schema.Message]{
+			GenInput:     genInputConsumeAll,
+			PrepareAgent: prepareTestAgent,
+		})
+		loop.pendingResume = &turnLoopPendingResume[string]{
+			source:      turnLoopPendingResumeSourceManagedInterrupt,
+			resumeBytes: []byte("runner"),
+		}
+		return loop
+	}
+
+	t.Run("accepted first", func(t *testing.T) {
+		loop := newPendingLoop()
+		require.NoError(t, loop.Resume("accepted"))
+		loop.Stop()
+
+		require.NotNil(t, loop.pendingResume)
+		assert.True(t, loop.pendingResume.resumeSubmitted)
+		assert.Equal(t, []string{"accepted"}, loop.pendingResume.resumeItems)
+	})
+
+	t.Run("stopped first", func(t *testing.T) {
+		loop := newPendingLoop()
+		loop.Stop()
+
+		assert.ErrorIs(t, loop.Resume("late"), ErrTurnLoopStopped)
+		require.NotNil(t, loop.pendingResume)
+		assert.False(t, loop.pendingResume.resumeSubmitted)
+		assert.Empty(t, loop.pendingResume.resumeItems)
+	})
+
+	t.Run("concurrent", func(t *testing.T) {
+		const iterations = 200
+		var accepted int
+		var stopped int
+
+		for i := 0; i < iterations; i++ {
+			loop := newPendingLoop()
+			start := make(chan struct{})
+			errCh := make(chan error, 1)
+			var wg sync.WaitGroup
+			wg.Add(2)
+
+			go func(i int) {
+				defer wg.Done()
+				<-start
+				errCh <- loop.Resume(fmt.Sprintf("resume-%d", i))
+			}(i)
+			go func() {
+				defer wg.Done()
+				<-start
+				loop.Stop()
+			}()
+
+			close(start)
+			wg.Wait()
+			err := <-errCh
+			switch {
+			case err == nil:
+				accepted++
+				require.NotNil(t, loop.pendingResume)
+				assert.True(t, loop.pendingResume.resumeSubmitted)
+				assert.Len(t, loop.pendingResume.resumeItems, 1)
+			case errors.Is(err, ErrTurnLoopStopped):
+				stopped++
+				require.NotNil(t, loop.pendingResume)
+				assert.False(t, loop.pendingResume.resumeSubmitted)
+				assert.Empty(t, loop.pendingResume.resumeItems)
+			default:
+				t.Fatalf("unexpected Resume error while racing Stop: %v", err)
+			}
+		}
+
+		assert.Equal(t, iterations, accepted+stopped)
+	})
+}
+
+func TestTurnLoop_ManagedInterrupt_StopWhileWaitingForExplicitResumePersistsCheckpoint(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore()
+	cpID := "managed-stop-waiting"
+	interruptObserved := make(chan struct{})
+
+	loop := newAndRunTurnLoop(ctx, TurnLoopConfig[string, *schema.Message]{
+		InterruptMode: TurnLoopInterruptWaitsForExplicitResume,
+		Store:         store,
+		CheckpointID:  cpID,
+		GenInput:      genInputConsumeAllWithMsg,
+		PrepareAgent:  prepareAgent(&turnLoopInterruptAgent{interruptInfo: "approval_needed"}),
+		OnAgentEvents: func(ctx context.Context, tc *TurnContext[string, *schema.Message], events *AsyncIterator[*AgentEvent]) error {
+			for {
+				event, ok := events.Next()
+				if !ok {
+					break
+				}
+				if event.Action != nil && event.Action.Interrupted != nil {
+					close(interruptObserved)
+				}
+			}
+			return nil
+		},
+	})
+
+	loop.Push("msg1")
+	waitOrFail(t, interruptObserved, "interrupt was not observed")
+	ok, ack := loop.Push("normal-later")
+	require.True(t, ok)
+	require.Nil(t, ack)
+	loop.Stop()
+
+	exit := loop.Wait()
+	require.NoError(t, exit.ExitReason)
+	require.True(t, exit.CheckpointAttempted)
+	require.NoError(t, exit.CheckpointErr)
+
+	store.mu.Lock()
+	data, ok := store.m[cpID]
+	store.mu.Unlock()
+	require.True(t, ok)
+	cp, err := unmarshalTurnLoopCheckpoint[string](data)
+	require.NoError(t, err)
+	assert.True(t, cp.HasRunnerState)
+	assert.NotEmpty(t, cp.RunnerCheckpoint)
+	assert.NotEmpty(t, cp.RunnerCheckpointID)
+	assert.Equal(t, []string{"msg1"}, cp.CanceledItems)
+	assert.Equal(t, []string{"normal-later"}, cp.UnhandledItems)
+	assert.Empty(t, cp.ResumeItems)
+}
+
+func TestTurnLoop_ManagedInterrupt_StartNewTurnUsesConfiguredSessionStore(t *testing.T) {
+	ctx := context.Background()
+	sessionStore := newSessionHelperStore()
+	sessionID := "managed-session-passthrough"
+	committedUser := schema.UserMessage("committed-user")
+	committedAssistant := schema.AssistantMessage("committed-assistant", nil)
+	partialUser := schema.UserMessage("partial-after-turn-end")
+	for _, se := range []*SessionEvent[*schema.Message]{
+		withTestEventID(&SessionEvent[*schema.Message]{Kind: SessionEventMessage, Message: committedUser}),
+		withTestEventID(&SessionEvent[*schema.Message]{Kind: SessionEventMessage, Message: committedAssistant}),
+		withTestEventID(&SessionEvent[*schema.Message]{
+			Kind: SessionEventTurnEnd,
+			TurnEnd: &TurnEndState[*schema.Message]{
+				Messages: []*schema.Message{committedUser, committedAssistant},
+			},
+		}),
+		withTestEventID(&SessionEvent[*schema.Message]{Kind: SessionEventMessage, Message: partialUser}),
+	} {
+		data, err := encodeSessionEvent(se)
+		require.NoError(t, err)
+		require.NoError(t, sessionStore.AppendEvents(ctx, sessionID, [][]byte{data}))
+	}
+	initialEventCount := len(sessionStore.events)
+
+	interruptObserved := make(chan struct{})
+	var prepareCount int32
+	captureAgent := &runnerSessionAgent{name: "session-capture"}
+	loop := newAndRunTurnLoop(ctx, TurnLoopConfig[string, *schema.Message]{
+		InterruptMode:      TurnLoopInterruptWaitsForExplicitResume,
+		SessionID:          sessionID,
+		SessionStore:       sessionStore,
+		SessionPersistence: &SessionPersistenceConfig{EventFlushBatchSize: 1},
+		GenInput:           genInputConsumeAllWithMsg,
+		GenResume: func(ctx context.Context, _ *TurnLoop[string, *schema.Message], interruptedItems, unhandledItems, resumeItems []string) (*GenResumeResult[string, *schema.Message], error) {
+			return &GenResumeResult[string, *schema.Message]{
+				Decision: TurnLoopResumeDecisionStartNewTurn,
+				Input:    &AgentInput{Messages: []Message{schema.UserMessage("fresh-after-interrupt")}},
+				Consumed: append(append([]string{}, interruptedItems...), resumeItems...),
+			}, nil
+		},
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string, *schema.Message], consumed []string) (Agent, error) {
+			if atomic.AddInt32(&prepareCount, 1) == 1 {
+				return &turnLoopInterruptAgent{interruptInfo: "approval_needed"}, nil
+			}
+			return captureAgent, nil
+		},
+		OnAgentEvents: func(ctx context.Context, tc *TurnContext[string, *schema.Message], events *AsyncIterator[*AgentEvent]) error {
+			for {
+				event, ok := events.Next()
+				if !ok {
+					break
+				}
+				if event.Action != nil && event.Action.Interrupted != nil {
+					close(interruptObserved)
+				}
+			}
+			if atomic.LoadInt32(&prepareCount) > 1 {
+				tc.Loop.Stop()
+			}
+			return nil
+		},
+	})
+
+	loop.Push("trigger-interrupt")
+	waitOrFail(t, interruptObserved, "interrupt was not observed")
+	require.Eventually(t, func() bool {
+		return loop.Resume("choose-new-turn") == nil
+	}, time.Second, 10*time.Millisecond)
+	exit := loop.Wait()
+	require.NoError(t, exit.ExitReason)
+
+	require.Len(t, captureAgent.inputs, 1)
+	var contents []string
+	for _, msg := range captureAgent.inputs[0] {
+		contents = append(contents, msg.Content)
+	}
+	assert.Contains(t, contents, "committed-user")
+	assert.Contains(t, contents, "committed-assistant")
+	assert.Contains(t, contents, "partial-after-turn-end")
+	assert.Contains(t, contents, "trigger-interrupt")
+	assert.Contains(t, contents, "fresh-after-interrupt")
+	assert.Greater(t, len(sessionStore.events), initialEventCount, "fresh turn should append session events to configured SessionStore")
+	assert.Empty(t, sessionStore.checkpoints, "runner checkpoint bridge must not use SessionStore checkpoint map")
+}
+
+func TestTurnLoop_ManagedInterrupt_DecisionResumeUsesCapturedCheckpointIDAndParams(t *testing.T) {
+	ctx := context.Background()
+	interruptObserved := make(chan struct{})
+	resumeObserved := make(chan *ResumeInfo, 1)
+
+	agent := &turnLoopManagedResumeAgent{
+		interruptInfo: "approval_needed",
+		onResume: func(info *ResumeInfo) {
+			resumeObserved <- info
+		},
+	}
+
+	var interruptCheckpointID string
+	var interruptTargetID string
+	loop := newAndRunTurnLoop(ctx, TurnLoopConfig[string, *schema.Message]{
+		InterruptMode: TurnLoopInterruptWaitsForExplicitResume,
+		GenInput:      genInputConsumeAllWithMsg,
+		GenResume: func(ctx context.Context, _ *TurnLoop[string, *schema.Message], interruptedItems, unhandledItems, resumeItems []string) (*GenResumeResult[string, *schema.Message], error) {
+			require.NotEmpty(t, interruptTargetID)
+			return &GenResumeResult[string, *schema.Message]{
+				Decision: TurnLoopResumeDecisionResume,
+				ResumeParams: &ResumeParams{
+					Targets: map[string]any{interruptTargetID: "approved"},
+				},
+				Consumed: append(append([]string{}, interruptedItems...), resumeItems...),
+			}, nil
+		},
+		PrepareAgent: prepareAgent(agent),
+		OnAgentEvents: func(ctx context.Context, tc *TurnContext[string, *schema.Message], events *AsyncIterator[*AgentEvent]) error {
+			for {
+				event, ok := events.Next()
+				if !ok {
+					break
+				}
+				if event.Action != nil && event.Action.Interrupted != nil {
+					interruptCheckpointID = event.Action.Interrupted.CheckPointID
+					require.NotEmpty(t, event.Action.Interrupted.InterruptContexts)
+					interruptTargetID = event.Action.Interrupted.InterruptContexts[0].ID
+					close(interruptObserved)
+				}
+				if event.Output != nil {
+					tc.Loop.Stop()
+				}
+			}
+			return nil
+		},
+	})
+
+	loop.Push("trigger-interrupt")
+	waitOrFail(t, interruptObserved, "interrupt was not observed")
+	require.Eventually(t, func() bool {
+		return loop.Resume("approve") == nil
+	}, time.Second, 10*time.Millisecond)
+	exit := loop.Wait()
+	require.NoError(t, exit.ExitReason)
+
+	require.NotEmpty(t, interruptCheckpointID)
+	select {
+	case info := <-resumeObserved:
+		require.NotNil(t, info)
+		require.NotNil(t, info.InterruptInfo)
+		assert.Equal(t, interruptCheckpointID, info.CheckPointID)
+		assert.True(t, info.WasInterrupted)
+		assert.True(t, info.IsResumeTarget)
+		assert.Equal(t, "approved", info.ResumeData)
+	case <-time.After(time.Second):
+		t.Fatal("agent resume was not observed")
+	}
+}
+
+func TestTurnLoop_RestoredPendingResumeDistinguishesLegacyAndAcceptedResumeItems(t *testing.T) {
+	ctx := context.Background()
+
+	run := func(t *testing.T, checkpoint *turnLoopCheckpoint[string], pushedBeforeRun string) (resumeItems []string, unhandledItems []string) {
+		t.Helper()
+
+		store := newTestStore()
+		cpID := "restored-pending-" + pushedBeforeRun
+		data, err := marshalTurnLoopCheckpoint(checkpoint)
+		require.NoError(t, err)
+		require.NoError(t, store.Set(ctx, cpID, data))
+
+		loop := NewTurnLoop(TurnLoopConfig[string, *schema.Message]{
+			Store:        store,
+			CheckpointID: cpID,
+			GenInput:     genInputConsumeAll,
+			GenResume: func(ctx context.Context, _ *TurnLoop[string, *schema.Message], interruptedItems, unhandledItems, resumeItems []string) (*GenResumeResult[string, *schema.Message], error) {
+				return &GenResumeResult[string, *schema.Message]{
+					Decision: TurnLoopResumeDecisionStartNewTurn,
+					Input:    &AgentInput{},
+					Consumed: interruptedItems,
+				}, nil
+			},
+			PrepareAgent: prepareTestAgent,
+			OnAgentEvents: func(ctx context.Context, tc *TurnContext[string, *schema.Message], events *AsyncIterator[*AgentEvent]) error {
+				for {
+					if _, ok := events.Next(); !ok {
+						break
+					}
+				}
+				tc.Loop.Stop()
+				return nil
+			},
+		})
+		ok, ack := loop.Push(pushedBeforeRun)
+		require.True(t, ok)
+		require.Nil(t, ack)
+
+		loop.config.GenResume = func(ctx context.Context, _ *TurnLoop[string, *schema.Message], interruptedItems, gotUnhandledItems, gotResumeItems []string) (*GenResumeResult[string, *schema.Message], error) {
+			unhandledItems = append([]string{}, gotUnhandledItems...)
+			resumeItems = append([]string{}, gotResumeItems...)
+			return &GenResumeResult[string, *schema.Message]{
+				Decision: TurnLoopResumeDecisionStartNewTurn,
+				Input:    &AgentInput{},
+				Consumed: interruptedItems,
+			}, nil
+		}
+
+		loop.Run(ctx)
+		exit := loop.Wait()
+		require.NoError(t, exit.ExitReason)
+		return resumeItems, unhandledItems
+	}
+
+	t.Run("legacy restored checkpoint treats pre-run buffered item as resume intent", func(t *testing.T) {
+		resumeItems, unhandledItems := run(t, &turnLoopCheckpoint[string]{
+			HasRunnerState:     true,
+			RunnerCheckpointID: "runner-cp",
+			RunnerCheckpoint:   []byte("runner-bytes"),
+			CanceledItems:      []string{"interrupted"},
+			UnhandledItems:     []string{"normal-before-stop"},
+		}, "legacy-resume")
+
+		assert.Equal(t, []string{"legacy-resume"}, resumeItems)
+		assert.Equal(t, []string{"normal-before-stop"}, unhandledItems)
+	})
+
+	t.Run("persisted resume items keep pre-run buffered item as normal unhandled input", func(t *testing.T) {
+		resumeItems, unhandledItems := run(t, &turnLoopCheckpoint[string]{
+			HasRunnerState:     true,
+			RunnerCheckpointID: "runner-cp",
+			RunnerCheckpoint:   []byte("runner-bytes"),
+			CanceledItems:      []string{"interrupted"},
+			UnhandledItems:     []string{"normal-before-stop"},
+			ResumeItems:        []string{"accepted-resume"},
+		}, "future-normal")
+
+		assert.Equal(t, []string{"accepted-resume"}, resumeItems)
+		assert.Equal(t, []string{"normal-before-stop", "future-normal"}, unhandledItems)
+	})
+}
+
+func TestTurnLoop_ResumeAcceptedThenStop_PersistsResumeItems(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore()
+	cpID := "resume-items-session"
+
+	loop := NewTurnLoop(TurnLoopConfig[string, *schema.Message]{
+		Store:        store,
+		CheckpointID: cpID,
+		GenInput:     genInputConsumeAll,
+		PrepareAgent: prepareTestAgent,
+	})
+	loop.pendingResume = &turnLoopPendingResume[string]{
+		interrupted:        []string{"interrupted"},
+		unhandled:          []string{"normal"},
+		source:             turnLoopPendingResumeSourceManagedInterrupt,
+		resumeCheckpointID: "runner-cp",
+		resumeBytes:        []byte("runner-bytes"),
+	}
+
+	require.NoError(t, loop.Resume("accepted-resume"))
+	loop.Stop()
+	loop.Run(ctx)
+	exit := loop.Wait()
+	require.NoError(t, exit.ExitReason)
+	require.True(t, exit.CheckpointAttempted)
+	require.NoError(t, exit.CheckpointErr)
+
+	store.mu.Lock()
+	data, ok := store.m[cpID]
+	store.mu.Unlock()
+	require.True(t, ok)
+
+	cp, err := unmarshalTurnLoopCheckpoint[string](data)
+	require.NoError(t, err)
+	assert.Equal(t, "runner-cp", cp.RunnerCheckpointID)
+	assert.Equal(t, []byte("runner-bytes"), cp.RunnerCheckpoint)
+	assert.Equal(t, []string{"accepted-resume"}, cp.ResumeItems)
+	assert.Equal(t, []string{"normal"}, cp.UnhandledItems)
+	assert.Equal(t, []string{"interrupted"}, cp.CanceledItems)
+}
+
 // turnLoopInterruptAgent is a test agent that produces a business interrupt event.
 type turnLoopInterruptAgent struct {
 	interruptInfo any
@@ -1861,6 +2438,43 @@ func (a *turnLoopInterruptAgent) Run(ctx context.Context, _ *AgentInput, _ ...Ag
 		defer gen.Close()
 		event := Interrupt(ctx, a.interruptInfo)
 		gen.Send(event)
+	}()
+	return iter
+}
+
+type turnLoopManagedResumeAgent struct {
+	interruptInfo any
+	onResume      func(*ResumeInfo)
+}
+
+func (a *turnLoopManagedResumeAgent) Name(_ context.Context) string { return "ManagedResumeAgent" }
+func (a *turnLoopManagedResumeAgent) Description(_ context.Context) string {
+	return "agent that interrupts and resumes"
+}
+func (a *turnLoopManagedResumeAgent) Run(ctx context.Context, _ *AgentInput, _ ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+	iter, gen := NewAsyncIteratorPair[*AgentEvent]()
+	go func() {
+		defer gen.Close()
+		gen.Send(Interrupt(ctx, a.interruptInfo))
+	}()
+	return iter
+}
+func (a *turnLoopManagedResumeAgent) Resume(ctx context.Context, info *ResumeInfo, _ ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+	iter, gen := NewAsyncIteratorPair[*AgentEvent]()
+	if a.onResume != nil {
+		a.onResume(info)
+	}
+	go func() {
+		defer gen.Close()
+		gen.Send(&AgentEvent{
+			AgentName: a.Name(ctx),
+			Output: &AgentOutput{
+				MessageOutput: &MessageVariant{
+					Message: schema.AssistantMessage("resumed", nil),
+					Role:    schema.Assistant,
+				},
+			},
+		})
 	}()
 	return iter
 }
@@ -2367,7 +2981,7 @@ func TestTurnLoop_ResumeWaitsForInFlightPushBeforePlanning(t *testing.T) {
 	})
 	loop.pendingResume = &turnLoopPendingResume[string]{
 		interrupted: []string{"interrupted"},
-		newItems:    []string{"pre-existing"},
+		resumeItems: []string{"pre-existing"},
 	}
 
 	go func() {
@@ -5897,10 +6511,15 @@ func TestSaveTurnLoopCheckpoint_NilStore(t *testing.T) {
 
 func TestSetupBridgeStore_NilStore_Resume(t *testing.T) {
 	l := &TurnLoop[string, *schema.Message]{config: TurnLoopConfig[string, *schema.Message]{Store: nil}}
-	spec := &turnRunSpec[string, *schema.Message]{isResume: true}
-	_, _, err := l.setupBridgeStore(spec, nil)
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "checkpoint store is nil")
+	spec := &turnRunSpec[string, *schema.Message]{isResume: true, resumeCheckpointID: "runner-cp", resumeBytes: []byte("runner-bytes")}
+	opts, ms, err := l.setupBridgeStore(spec, nil)
+	require.NoError(t, err)
+	require.NotNil(t, ms)
+	assert.Len(t, opts, 1)
+	data, ok, err := ms.Get(context.Background(), "runner-cp")
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, []byte("runner-bytes"), data)
 }
 
 // TestTurnLoop_Preempt_LoopStalledAfterSecondPreemptPush covers a liveness
