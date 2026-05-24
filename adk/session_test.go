@@ -1025,6 +1025,32 @@ func TestReconstructFromEventLog_MultiTurn(t *testing.T) {
 	assert.Equal(t, "A2", state2.Messages[3].Content)
 }
 
+func TestReconstructFromEventLog_CorruptEventReturnsError(t *testing.T) {
+	store := newSessionHelperStore()
+	ctx := context.Background()
+	sid := "corrupt-event"
+
+	msg := schema.UserMessage("valid")
+	EnsureMessageID(msg)
+	data, err := encodeSessionEvent(withTestEventID(&SessionEvent[*schema.Message]{
+		Kind:    SessionEventMessage,
+		Message: msg,
+	}))
+	require.NoError(t, err)
+	require.NoError(t, store.AppendEvents(ctx, sid, [][]byte{data}))
+
+	corruptPayload := []byte(`{"event_id":"` + uuid.NewString() + `","kind":"message","message":` + "\x00\xff invalid json")
+	require.False(t, json.Valid(corruptPayload), "payload must be invalid JSON")
+	store.mu.Lock()
+	store.events = append(store.events, corruptPayload)
+	store.eventIDs = append(store.eventIDs, uuid.NewString())
+	store.eventIDIdx[store.eventIDs[len(store.eventIDs)-1]] = len(store.events) - 1
+	store.mu.Unlock()
+
+	_, err = reconstructSessionState[*schema.Message](ctx, store, sid, defaultLoadPageSize)
+	require.Error(t, err, "corrupt event must cause reconstruction failure")
+}
+
 // TestReconstructFromEventLog_WithSummarizationBoundary: events before
 // MessagesReplaced are ignored; reconstruction starts from boundary.
 func TestReconstructFromEventLog_WithSummarizationBoundary(t *testing.T) {
@@ -1303,6 +1329,13 @@ func TestSessionPersister_EnqueueAfterAppendError(t *testing.T) {
 
 	err := p.enqueue(validTestPayload())
 	require.Error(t, err, "enqueue after persist failure must return an error")
+	assert.Contains(t, err.Error(), "append failed")
+
+	for i := 0; i < 4; i++ {
+		err = p.enqueue(validTestPayload())
+		require.Error(t, err, "latched error must be returned consistently")
+		assert.Contains(t, err.Error(), "append failed")
+	}
 }
 
 // transientFailStore fails the first N AppendEvents calls then succeeds.

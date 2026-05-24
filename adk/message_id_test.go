@@ -566,7 +566,7 @@ func TestMessageID_SendEvent_MiddlewareMustEnsureID(t *testing.T) {
 		middlewareEventMsgID, middlewareMsgID)
 }
 
-func TestAttack_ConcatCorruptsIDIfMultipleChunksCarryIt(t *testing.T) {
+func TestMessageID_ConcatCorruptsIDIfMultipleChunksCarryIt(t *testing.T) {
 	id := "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 	msgs := []*schema.Message{
 		{Role: schema.Assistant, Content: "chunk1", Extra: map[string]any{internal.EinoMsgIDKey: id}},
@@ -583,7 +583,7 @@ func TestAttack_ConcatCorruptsIDIfMultipleChunksCarryIt(t *testing.T) {
 	assert.Equal(t, "chunk1chunk2chunk3", concatenated.Content)
 }
 
-func TestAttack_ConcatPreservesIDIfOnlyFirstChunkHasIt(t *testing.T) {
+func TestMessageID_ConcatPreservesIDIfOnlyFirstChunkHasIt(t *testing.T) {
 	id := "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 	msgs := []*schema.Message{
 		{Role: schema.Assistant, Content: "chunk1", Extra: map[string]any{internal.EinoMsgIDKey: id}},
@@ -598,7 +598,7 @@ func TestAttack_ConcatPreservesIDIfOnlyFirstChunkHasIt(t *testing.T) {
 	assert.Equal(t, "chunk1chunk2chunk3", concatenated.Content)
 }
 
-func TestAttack_ConcurrentGenerate_NoSharedExtraMutation(t *testing.T) {
+func TestMessageID_ConcurrentGenerateNoSharedExtraMutation(t *testing.T) {
 	ctx := context.Background()
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
@@ -651,7 +651,7 @@ func TestAttack_ConcurrentGenerate_NoSharedExtraMutation(t *testing.T) {
 	// The important thing is no panic and unique IDs
 }
 
-func TestAttack_GenerateCopyDoesNotAffectOriginal(t *testing.T) {
+func TestMessageID_GenerateCopyDoesNotAffectOriginal(t *testing.T) {
 	ctx := context.Background()
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
@@ -870,7 +870,7 @@ func TestMessageID_AgenticPublicAPIHelpers(t *testing.T) {
 
 // TestAttack_PopToolMsgID_DoublePop tests that calling popToolMsgID twice for the
 // same key returns "" on second call.
-func TestAttack_PopToolMsgID_DoublePop(t *testing.T) {
+func TestMessageID_PopToolMsgIDDoublePop(t *testing.T) {
 	st := &typedState[*schema.Message]{}
 	st.setToolMsgID("myTool", "call-1", "uuid-abc")
 
@@ -913,7 +913,7 @@ func (t *namedFakeToolForTest) InvokableRun(_ context.Context, _ string, _ ...to
 // TestAttack_ToolMsgIDConsistency_MultipleTools is an integration test: when an agent
 // has multiple tools called in one turn, verify that EACH tool's event message ID
 // matches its corresponding state message ID.
-func TestAttack_ToolMsgIDConsistency_MultipleTools(t *testing.T) {
+func TestMessageID_ToolMsgIDConsistencyMultipleTools(t *testing.T) {
 	ctx := context.Background()
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
@@ -1008,7 +1008,7 @@ func TestAttack_ToolMsgIDConsistency_MultipleTools(t *testing.T) {
 
 // TestAttack_ToolResultToBlocks_EdgeCases verifies toolResultToBlocks handles
 // nil ToolResult, empty Parts, and Parts with nil media fields.
-func TestAttack_ToolResultToBlocks_EdgeCases(t *testing.T) {
+func TestMessageID_ToolResultToBlocksEdgeCases(t *testing.T) {
 	t.Run("nil ToolResult", func(t *testing.T) {
 		blocks := toolResultToBlocks(nil)
 		assert.Nil(t, blocks, "nil ToolResult should produce nil blocks")
