@@ -800,6 +800,43 @@ func TestSessionPersistenceConfig_CustomSerializerUsedForEncodeAndReconstruct(t 
 	assert.Equal(t, "hello", secondAgent.inputs[0][0].Content)
 }
 
+// TestAttack_GobSerializerEndToEnd verifies the full session persistence
+// pipeline with encoding/gob: Runner → Gob encode → InMemoryStore → load →
+// Gob decode → reconstructSessionState. Proves format agnosticism end-to-end.
+func TestAttack_GobSerializerEndToEnd(t *testing.T) {
+	ctx := context.Background()
+	store := newSessionHelperStore()
+	gobSerializer := &schema.GobSerializer{}
+	cfg := &SessionPersistenceConfig{
+		EventFlushBatchSize: 1,
+		EventSerializer:     gobSerializer,
+	}
+
+	firstAgent := &runnerSessionAgent{name: "first"}
+	first := NewRunner(ctx, RunnerConfig{
+		Agent:              firstAgent,
+		SessionID:          "gob-e2e",
+		SessionStore:       store,
+		SessionPersistence: cfg,
+	})
+	drainSessionEvents(t, first.Query(ctx, "hello from gob"))
+
+	secondAgent := &runnerSessionAgent{name: "second"}
+	second := NewRunner(ctx, RunnerConfig{
+		Agent:              secondAgent,
+		SessionID:          "gob-e2e",
+		SessionStore:       store,
+		SessionPersistence: cfg,
+	})
+	drainSessionEvents(t, second.Query(ctx, "second gob turn"))
+
+	// The second agent should have received the reconstructed message history
+	// from the first turn, decoded from Gob-encoded event payloads.
+	require.NotEmpty(t, secondAgent.inputs)
+	require.NotEmpty(t, secondAgent.inputs[0])
+	assert.Equal(t, "hello from gob", secondAgent.inputs[0][0].Content)
+}
+
 // --- New tests covering the design doc ---
 
 func TestSessionEvent_HumanReadableRoundTrip(t *testing.T) {
