@@ -335,32 +335,43 @@ func newModelSpanStartEvent[M MessageType](ctx context.Context, spanID string, s
 	}
 }
 
-func newModelSpanEndEvent[M MessageType](ctx context.Context, spanID, startEventID string, started, ended time.Time, msg M, err error, accepted bool, firstChunk time.Duration, opts ...model.Option) *SessionEvent[M] {
+type modelSpanEndEventInput[M MessageType] struct {
+	spanID       string
+	startEventID string
+	started      time.Time
+	ended        time.Time
+	msg          M
+	err          error
+	accepted     bool
+	firstChunk   time.Duration
+}
+
+func newModelSpanEndEvent[M MessageType](ctx context.Context, in modelSpanEndEventInput[M], opts ...model.Option) *SessionEvent[M] {
 	status := "ok"
 	errStr := ""
-	if err != nil {
+	if in.err != nil {
 		status = "error"
-		errStr = err.Error()
-		if errors.Is(err, context.Canceled) || errors.Is(err, ErrStreamCanceled) {
+		errStr = in.err.Error()
+		if errors.Is(in.err, context.Canceled) || errors.Is(in.err, ErrStreamCanceled) {
 			status = "cancelled"
 		}
 	}
 	return &SessionEvent[M]{
 		EventID:   uuid.NewString(),
-		Timestamp: ended,
+		Timestamp: in.ended,
 		Kind:      SessionEventSpanModelRequestEnd,
 		Span: &SpanEvent{
-			SpanID:               spanID,
+			SpanID:               in.spanID,
 			Kind:                 SpanKindModel,
 			Name:                 "model_request",
-			StartedAt:            started,
-			EndedAt:              ended,
-			DurationMS:           ended.Sub(started).Milliseconds(),
-			FirstChunkDurationMS: firstChunk.Milliseconds(),
+			StartedAt:            in.started,
+			EndedAt:              in.ended,
+			DurationMS:           in.ended.Sub(in.started).Milliseconds(),
+			FirstChunkDurationMS: in.firstChunk.Milliseconds(),
 			Status:               status,
 			Err:                  errStr,
 			ParentSpanID:         modelSpanMetaFromContext[M](ctx, opts...).ParentSpanID,
-			Model:                modelSpanCompletionMeta(ctx, startEventID, msg, accepted && err == nil, opts...),
+			Model:                modelSpanCompletionMeta(ctx, in.startEventID, in.msg, in.accepted && in.err == nil, opts...),
 		},
 	}
 }
@@ -417,7 +428,15 @@ func (m *typedEventSenderModel[M]) Generate(ctx context.Context, input []M, opts
 	})
 	result, err := m.inner.Generate(ctx, input, opts...)
 	ended := newEventTimestamp()
-	sendSessionTimelineEvent(ctx, newModelSpanEndEvent(ctx, spanID, startEvent.EventID, started, ended, result, err, err == nil, 0, opts...))
+	sendSessionTimelineEvent(ctx, newModelSpanEndEvent(ctx, modelSpanEndEventInput[M]{
+		spanID:       spanID,
+		startEventID: startEvent.EventID,
+		started:      started,
+		ended:        ended,
+		msg:          result,
+		err:          err,
+		accepted:     err == nil,
+	}, opts...))
 	if err != nil {
 		var zero M
 		return zero, err
@@ -447,7 +466,14 @@ func (m *typedEventSenderModel[M]) Stream(ctx context.Context, input []M, opts .
 	sendSessionTimelineEvent(ctx, startEvent)
 	result, err := m.inner.Stream(ctx, input, opts...)
 	if err != nil {
-		sendSessionTimelineEvent(ctx, newModelSpanEndEvent(ctx, spanID, startEvent.EventID, started, newEventTimestamp(), *new(M), err, false, 0, opts...))
+		sendSessionTimelineEvent(ctx, newModelSpanEndEvent(ctx, modelSpanEndEventInput[M]{
+			spanID:       spanID,
+			startEventID: startEvent.EventID,
+			started:      started,
+			ended:        newEventTimestamp(),
+			msg:          *new(M),
+			err:          err,
+		}, opts...))
 		return nil, err
 	}
 	sendSessionTimelineEvent(ctx, &SessionEvent[M]{
@@ -504,7 +530,16 @@ func (m *typedEventSenderModel[M]) Stream(ctx context.Context, input []M, opts .
 		if len(chunks) > 0 && streamErr == nil {
 			final, streamErr = concatMessagesForSpan(chunks)
 		}
-		sendSessionTimelineEvent(ctx, newModelSpanEndEvent(ctx, spanID, startEvent.EventID, started, newEventTimestamp(), final, streamErr, streamErr == nil, firstChunk, opts...))
+		sendSessionTimelineEvent(ctx, newModelSpanEndEvent(ctx, modelSpanEndEventInput[M]{
+			spanID:       spanID,
+			startEventID: startEvent.EventID,
+			started:      started,
+			ended:        newEventTimestamp(),
+			msg:          final,
+			err:          streamErr,
+			accepted:     streamErr == nil,
+			firstChunk:   firstChunk,
+		}, opts...))
 	}()
 
 	return streams[1], nil
