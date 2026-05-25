@@ -253,7 +253,6 @@ const (
 type LifecycleEvent struct {
 	Scope      LifecycleScope  `json:"scope,omitempty"`
 	State      SessionRunState `json:"state,omitempty"`
-	Reason     string          `json:"reason,omitempty"`
 	StopReason *StopReason     `json:"stop_reason,omitempty"`
 }
 
@@ -277,7 +276,7 @@ type StopReason struct {
 
 type SessionErrorEvent struct {
 	// Type identifies the timeline error category. Known values are
-	// SessionErrorTypeModelRetry and SessionErrorTypeModelFailover.
+	// SessionErrorTypeModelRetry, SessionErrorTypeModelFailover, and SessionErrorTypeFatal.
 	Type        string       `json:"type,omitempty"`
 	Message     string       `json:"message,omitempty"`
 	RetryStatus *RetryStatus `json:"retry_status,omitempty"`
@@ -286,6 +285,7 @@ type SessionErrorEvent struct {
 const (
 	SessionErrorTypeModelRetry    = "model_retry"
 	SessionErrorTypeModelFailover = "model_failover"
+	SessionErrorTypeFatal         = "fatal"
 )
 
 type RetryStatus struct {
@@ -302,8 +302,7 @@ type SpanEvent struct {
 	StartedAt time.Time `json:"started_at,omitempty"`
 	EndedAt   time.Time `json:"ended_at,omitempty"`
 
-	DurationMS           int64 `json:"duration_ms,omitempty"`
-	FirstChunkDurationMS int64 `json:"first_chunk_duration_ms,omitempty"`
+	TTFTMS int64 `json:"ttft_ms,omitempty"`
 
 	Status string `json:"status,omitempty"`
 	Err    string `json:"err,omitempty"`
@@ -318,7 +317,10 @@ const (
 )
 
 type ModelSpanMeta struct {
-	Provider                 string      `json:"provider,omitempty"`
+	Provider string `json:"provider,omitempty"`
+	// Model is the model name from options (model.WithModel). Best-effort: empty
+	// if the user configures model name directly on the ChatModel implementation
+	// without passing model.WithModel in call-site options.
 	Model                    string      `json:"model,omitempty"`
 	Attempt                  int         `json:"attempt,omitempty"`
 	ModelRequestStartEventID string      `json:"model_request_start_event_id,omitempty"`
