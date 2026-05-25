@@ -18,7 +18,6 @@ package session_test
 
 import (
 	"context"
-	"encoding/base64"
 	"errors"
 	"net/url"
 	"os"
@@ -75,20 +74,16 @@ func TestFileStoreWritesOneEvlogLinePerEvent(t *testing.T) {
 	lines := strings.Split(strings.TrimSuffix(string(data), "\n"), "\n")
 	require.Len(t, lines, 2)
 
-	// Each line is: <EventID>\t<base64url(Data)>
+	// Each line is: <EventID>\t<raw Data>
 	parts0 := strings.SplitN(lines[0], "\t", 2)
 	require.Len(t, parts0, 2)
 	assert.Equal(t, "line-1", parts0[0])
-	decoded0, err := base64.RawURLEncoding.DecodeString(parts0[1])
-	require.NoError(t, err)
-	assert.Equal(t, first.Data, decoded0)
+	assert.Equal(t, `{"payload":"first"}`, parts0[1])
 
 	parts1 := strings.SplitN(lines[1], "\t", 2)
 	require.Len(t, parts1, 2)
 	assert.Equal(t, "line-2", parts1[0])
-	decoded1, err := base64.RawURLEncoding.DecodeString(parts1[1])
-	require.NoError(t, err)
-	assert.Equal(t, second.Data, decoded1)
+	assert.Equal(t, `{"payload":"second"}`, parts1[1])
 }
 
 func TestFileStoreRejectsInvalidDir(t *testing.T) {
@@ -97,18 +92,30 @@ func TestFileStoreRejectsInvalidDir(t *testing.T) {
 	assert.Nil(t, store)
 }
 
-func TestAttack_FileStoreAcceptsEscapedLineDelimiters(t *testing.T) {
+func TestAttack_FileStoreRejectsRawLineDelimitersInData(t *testing.T) {
 	ctx := context.Background()
 	store, err := session.NewFileStore(t.TempDir())
 	require.NoError(t, err)
 
-	// Data with newlines is safe because it's base64-encoded on disk.
-	payload := adk.SessionEventPayload{EventID: "escaped-line", Data: []byte("first\nsecond\rthird")}
-	require.NoError(t, store.AppendEvents(ctx, "s", []adk.SessionEventPayload{payload}))
+	// Data containing \n must be rejected.
+	err = store.AppendEvents(ctx, "s", []adk.SessionEventPayload{
+		{EventID: "bad-lf", Data: []byte("first\nsecond")},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "without raw CR/LF")
 
-	res, err := store.LoadEvents(ctx, "s", &adk.LoadEventsRequest{})
+	// Data containing \r must be rejected.
+	err = store.AppendEvents(ctx, "s", []adk.SessionEventPayload{
+		{EventID: "bad-cr", Data: []byte("first\rsecond")},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "without raw CR/LF")
+
+	// Valid JSON (no raw newlines) should succeed.
+	err = store.AppendEvents(ctx, "s", []adk.SessionEventPayload{
+		{EventID: "good", Data: []byte(`{"msg":"hello\\nworld"}`)},
+	})
 	require.NoError(t, err)
-	require.Equal(t, []adk.SessionEventPayload{payload}, res.Events)
 }
 
 func TestFileStoreDuplicateEventIDWithinBatchFirstWriteWins(t *testing.T) {
