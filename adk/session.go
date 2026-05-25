@@ -385,8 +385,8 @@ type MessageInsertedEvent[M MessageType] struct {
 	BeforeMessageID string `json:"before_message_id,omitempty"`
 }
 
-// SessionPersistenceConfig tunes managed-session event flushing.
-type SessionPersistenceConfig struct {
+// SessionConfig tunes managed-session event persistence and loading.
+type SessionConfig struct {
 	// EventFlushBatchSize is the maximum number of events accumulated before
 	// triggering a flush to the SessionStore. Defaults to 16.
 	EventFlushBatchSize int
@@ -718,8 +718,8 @@ func ValidateEmittedSessionEventKind[M MessageType](event *SessionEvent[M]) erro
 	return NormalizeSessionEventKind(event)
 }
 
-func normalizeSessionPersistenceConfig(cfg *SessionPersistenceConfig) SessionPersistenceConfig {
-	normalized := SessionPersistenceConfig{
+func normalizeSessionConfig(cfg *SessionConfig) SessionConfig {
+	normalized := SessionConfig{
 		EventFlushBatchSize:      defaultSessionEventFlushBatchSize,
 		EventFlushInterval:       defaultSessionEventFlushInterval,
 		EventBufferSize:          defaultSessionEventBufferSize,
@@ -762,7 +762,7 @@ type sessionEventPersister[M MessageType] struct {
 	ctx       context.Context
 	store     SessionStore
 	sessionID string
-	cfg       SessionPersistenceConfig
+	cfg       SessionConfig
 
 	ch     chan SessionEventPayload
 	done   chan struct{}
@@ -776,7 +776,7 @@ func newSessionEventPersister[M MessageType](
 	ctx context.Context,
 	store SessionStore,
 	sessionID string,
-	cfg SessionPersistenceConfig,
+	cfg SessionConfig,
 ) *sessionEventPersister[M] {
 	p := &sessionEventPersister[M]{
 		ctx:       ctx,
