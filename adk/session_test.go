@@ -339,18 +339,31 @@ func TestRunnerSessionModeRejectsPendingCheckpoint(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, store.Set(ctx, sessionRunnerCheckpointID(sessionID), cpBytes))
 
+	agent := &runnerSessionAgent{name: "runner-session-agent"}
 	runner := NewRunner(ctx, RunnerConfig{
-		Agent:           &runnerSessionAgent{name: "runner-session-agent"},
+		Agent:           agent,
 		SessionID:       sessionID,
 		SessionStore:    store,
 		CheckPointStore: store,
 	})
 	iter := runner.Query(ctx, "new input")
-	event, ok := iter.Next()
-	require.True(t, ok)
-	require.ErrorIs(t, event.Err, ErrPendingSessionCheckpoint)
-	_, ok = iter.Next()
-	require.False(t, ok)
+	// Run should succeed — pending checkpoint is auto-abandoned.
+	var sawErr bool
+	for {
+		event, ok := iter.Next()
+		if !ok {
+			break
+		}
+		if event.Err != nil {
+			sawErr = true
+		}
+	}
+	require.False(t, sawErr, "Run should not return any error when pending checkpoint exists")
+
+	// Verify agent received the input messages (no prior history to reconstruct).
+	require.Len(t, agent.inputs, 1)
+	require.Len(t, agent.inputs[0], 1)
+	assert.Equal(t, "new input", agent.inputs[0][0].Content)
 }
 
 func TestRunnerSessionModeDeleteCheckpointFailureIsReported(t *testing.T) {
