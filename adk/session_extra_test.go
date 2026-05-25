@@ -563,7 +563,8 @@ func (s *inMemoryAdapter) LoadEvents(_ context.Context, sid string, opts *LoadEv
 // Run with NO CheckPointStore (i.e. session-only mode) recovers the in-flight
 // events via tail replay rather than treating the session as fresh.
 //
-// This test does not use CheckPointStore so we sidestep ErrPendingSessionCheckpoint.
+// This test does not use CheckPointStore — Runner skips pending checkpoints
+// on fresh Run, so checkpoint presence would not block regardless.
 func TestPartialInterrupted_ThenNewRun(t *testing.T) {
 	ctx := context.Background()
 	store := NewInMemoryStoreLocal(t)
@@ -598,7 +599,7 @@ func TestPartialInterrupted_ThenNewRun(t *testing.T) {
 		require.NoError(t, store.AppendEvents(ctx, sid, [][]byte{data}))
 	}
 
-	// Phase 3: new Run (no CheckPointStore so ErrPendingSessionCheckpoint cannot fire).
+	// Phase 3: new Run (no CheckPointStore; Runner skips pending checkpoints on fresh Run).
 	captured := &runnerSessionAgent{
 		name: "ra",
 		turnEnd: &TurnEndState[*schema.Message]{
