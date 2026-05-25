@@ -18,8 +18,8 @@ package session
 
 import (
 	"bufio"
+	"bytes"
 	"context"
-	"encoding/base64"
 	"fmt"
 	"io"
 	"net/url"
@@ -36,10 +36,19 @@ import (
 //
 //	<root>/<url.PathEscape(sessionID)>.evlog
 //
-// Each line is formatted as: <EventID>\t<base64url(Data)>\n
-// This format is binary-safe regardless of serializer output. FileStore does
-// not implement CheckPointStore; runner checkpoints should use a dedicated
-// checkpoint store.
+// Each line is formatted as: <EventID>\t<Data>\n
+// where Data is the raw serialized bytes written directly to the line.
+//
+// IMPORTANT: FileStore requires that SessionEventPayload.Data does NOT contain
+// raw newline (\n) or carriage-return (\r) characters, because these would
+// corrupt the line-oriented file format. The default HumanReadableSerializer
+// (compact JSON) satisfies this constraint. Serializers that may emit \n or \r
+// in their output (e.g. GobSerializer, raw protobuf) are NOT compatible with
+// FileStore — use InMemoryStore or a custom store implementation instead.
+// AppendEvents will return an error if Data contains \n or \r.
+//
+// FileStore does not implement CheckPointStore; runner checkpoints should use
+// a dedicated checkpoint store.
 //
 // FileStore synchronizes access within the current process. It does not provide
 // cross-process write safety.
@@ -117,7 +126,10 @@ func (s *FileStore) AppendEvents(_ context.Context, sessionID string, events []a
 		if _, dup := existing[event.EventID]; dup {
 			continue
 		}
-		line := fmt.Sprintf("%s\t%s\n", event.EventID, base64.RawURLEncoding.EncodeToString(event.Data))
+		if bytes.ContainsAny(event.Data, "\r\n") {
+			return fmt.Errorf("adk/session: FileStore requires Data without raw CR/LF; use a line-safe serializer (e.g. HumanReadableSerializer)")
+		}
+		line := fmt.Sprintf("%s\t%s\n", event.EventID, event.Data)
 		if _, err := out.WriteString(line); err != nil {
 			return err
 		}
@@ -189,11 +201,7 @@ func (s *FileStore) readAllEventsLocked(path string) ([]fileEvent, map[string]in
 			if eventID == "" {
 				return nil, nil, fmt.Errorf("%w: empty event_id at line %d", adk.ErrInvalidEventID, lineNo)
 			}
-			encodedData := lineStr[tabIdx+1:]
-			data, decErr := base64.RawURLEncoding.DecodeString(encodedData)
-			if decErr != nil {
-				return nil, nil, fmt.Errorf("%w: base64 decode error at line %d: %v", adk.ErrInvalidEventID, lineNo, decErr)
-			}
+			data := []byte(lineStr[tabIdx+1:])
 
 			if _, dup := idx[eventID]; dup {
 				return nil, nil, fmt.Errorf("%w: duplicate event_id %q at line %d", adk.ErrInvalidEventID, eventID, lineNo)
