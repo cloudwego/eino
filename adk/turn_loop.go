@@ -671,7 +671,7 @@ type TurnLoopConfig[T any, M MessageType] struct {
 	// same managed session without TurnLoop inspecting SessionStore events.
 	SessionID          string
 	SessionStore       SessionStore
-	SessionPersistence *SessionPersistenceConfig
+	Session *SessionConfig
 }
 
 // GenInputResult contains the result of GenInput processing.
@@ -2102,7 +2102,7 @@ func (l *TurnLoop[T, M]) runAgentAndHandleEvents(
 		CheckPointStore:    ms,
 		SessionID:          l.config.SessionID,
 		SessionStore:       l.config.SessionStore,
-		SessionPersistence: l.config.SessionPersistence,
+		Session: l.config.Session,
 	})
 
 	preemptDone := make(chan struct{})

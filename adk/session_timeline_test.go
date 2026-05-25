@@ -229,7 +229,7 @@ func TestWithTimelineEvents_LiveExposure(t *testing.T) {
 
 	t.Run("stripped by default", func(t *testing.T) {
 		store := newSessionHelperStore()
-		runner := NewRunner(ctx, RunnerConfig{Agent: agent, SessionID: "timeline-default", SessionStore: store, SessionPersistence: &SessionPersistenceConfig{EventFlushBatchSize: 1}})
+		runner := NewRunner(ctx, RunnerConfig{Agent: agent, SessionID: "timeline-default", SessionStore: store, Session: &SessionConfig{EventFlushBatchSize: 1}})
 		iter := runner.Query(ctx, "hello")
 		for {
 			event, ok := iter.Next()
@@ -247,7 +247,7 @@ func TestWithTimelineEvents_LiveExposure(t *testing.T) {
 
 	t.Run("exposed when requested", func(t *testing.T) {
 		store := newSessionHelperStore()
-		runner := NewRunner(ctx, RunnerConfig{Agent: agent, SessionID: "timeline-visible", SessionStore: store, SessionPersistence: &SessionPersistenceConfig{EventFlushBatchSize: 1}})
+		runner := NewRunner(ctx, RunnerConfig{Agent: agent, SessionID: "timeline-visible", SessionStore: store, Session: &SessionConfig{EventFlushBatchSize: 1}})
 		var kinds []SessionEventKind
 		iter := runner.Query(ctx, "hello", WithTimelineEvents())
 		for {
@@ -808,7 +808,7 @@ func TestRunnerTimelineRetryExhaustedStopReason(t *testing.T) {
 		Agent:              &timelineErrorAgent{name: "retry-exhausted", err: &RetryExhaustedError{LastErr: errors.New("still failing"), TotalRetries: 1}},
 		SessionID:          "timeline-retry-exhausted",
 		SessionStore:       store,
-		SessionPersistence: &SessionPersistenceConfig{EventFlushBatchSize: 1},
+		Session: &SessionConfig{EventFlushBatchSize: 1},
 	})
 
 	iter := runner.Query(ctx, "hi")
@@ -834,7 +834,7 @@ func TestRunnerTimelineFailedStopReason(t *testing.T) {
 		Agent:              &timelineErrorAgent{name: "failed", err: errors.New("boom")},
 		SessionID:          "timeline-failed",
 		SessionStore:       store,
-		SessionPersistence: &SessionPersistenceConfig{EventFlushBatchSize: 1},
+		Session: &SessionConfig{EventFlushBatchSize: 1},
 	})
 
 	iter := runner.Query(ctx, "hi")
