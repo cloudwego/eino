@@ -249,7 +249,12 @@ func prepareRunnerSessionRun[M MessageType]( //nolint:revive // argument-limit
 	if !existed {
 		return state, nil
 	}
-	return nil, fmt.Errorf("%w: session %q has a pending checkpoint; resume or discard it before new input", ErrPendingSessionCheckpoint, sessionID)
+	// Pending checkpoint exists but caller chose Run (fresh turn) instead of Resume.
+	// We intentionally do NOT delete the checkpoint here — it remains available for a
+	// future Resume call. Session correctness is guaranteed by event log replay regardless
+	// of checkpoint presence. If this fresh turn completes successfully, finalize() will
+	// clean up the stale checkpoint at that point.
+	return state, nil
 }
 
 func prepareRunnerSessionResume[M MessageType](
