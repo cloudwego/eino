@@ -553,7 +553,7 @@ func TestPermissionDecisionAppearsInToolUseTimeline(t *testing.T) {
 		Agent:              agent,
 		SessionID:          "permission-timeline",
 		SessionStore:       &permissionSessionStore{},
-		SessionPersistence: &adk.SessionPersistenceConfig{EventFlushBatchSize: 1},
+		Session: &adk.SessionConfig{EventFlushBatchSize: 1},
 	})
 	iter := runner.Query(ctx, "use the tool", adk.WithTimelineEvents())
 	for {
