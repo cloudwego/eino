@@ -41,10 +41,6 @@ const (
 	defaultLoadPageSize               = 100
 )
 
-// ErrPendingSessionCheckpoint is returned when a managed session has an
-// interrupted in-flight turn that must be resumed before accepting new input.
-var ErrPendingSessionCheckpoint = errors.New("adk: pending session checkpoint")
-
 // ErrInvalidEventID is returned by AppendEvents when a payload's event_id is
 // empty or the payload bytes are not valid JSON / cannot be parsed for an
 // event_id field. Protocol-level: persisters MUST NOT retry.
@@ -88,8 +84,9 @@ const (
 // not as a separate entity.
 //
 // Concurrency contract: A single session (identified by sessionID) MUST have at most one
-// active writer (Runner turn) at a time. The Runner enforces this via ErrPendingSessionCheckpoint
-// (new Run while a checkpoint is pending) and the single-goroutine event loop within a turn.
+// active writer (Runner turn) at a time. The Runner skips any pending checkpoint
+// on fresh Run (rather than blocking), so this constraint is caller-enforced:
+// callers must serialize Run/Resume calls for the same sessionID.
 // Store implementations are NOT required to handle concurrent AppendEvents calls
 // for the same sessionID. Different sessionIDs may be written concurrently without restriction.
 //
