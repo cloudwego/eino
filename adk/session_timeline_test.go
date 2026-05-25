@@ -449,14 +449,14 @@ func TestModelSpanMetaFromContextPopulatesFailoverAndModelFields(t *testing.T) {
 
 	end := newModelSpanEndEvent[*schema.Message](
 		ctx,
-		start.Span.SpanID,
-		start.EventID,
-		started,
-		started.Add(time.Millisecond),
-		schema.AssistantMessage("ok", nil),
-		nil,
-		true,
-		0,
+		modelSpanEndEventInput[*schema.Message]{
+			spanID:       start.Span.SpanID,
+			startEventID: start.EventID,
+			started:      started,
+			ended:        started.Add(time.Millisecond),
+			msg:          schema.AssistantMessage("ok", nil),
+			accepted:     true,
+		},
 		model.WithModel("claude-sonnet"),
 	)
 	require.NotNil(t, end.Span)
