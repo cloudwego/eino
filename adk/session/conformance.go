@@ -21,7 +21,6 @@ package session
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"testing"
@@ -45,39 +44,39 @@ func RunConformanceTests(t *testing.T, factory func(testing.TB) adk.SessionStore
 	t.Run("AppendEvents is idempotent on duplicate EventID", func(t *testing.T) { testIdempotentAppend(t, factory) })
 	t.Run("AppendEvents skips duplicate EventID within same batch", func(t *testing.T) { testIdempotentAppendWithinBatch(t, factory) })
 	t.Run("AppendEvents rejects empty EventID with ErrInvalidEventID", func(t *testing.T) { testRejectEmptyEventID(t, factory) })
-	t.Run("AppendEvents rejects unparsable payload with ErrInvalidEventID", func(t *testing.T) { testRejectUnparsablePayload(t, factory) })
 	t.Run("After resumes by EventID forward", func(t *testing.T) { testAfterForward(t, factory) })
 	t.Run("After resumes by EventID reverse", func(t *testing.T) { testAfterReverse(t, factory) })
 	t.Run("Unknown After returns ErrEventIDOutOfRange", func(t *testing.T) { testUnknownAfter(t, factory) })
 	t.Run("Empty page when After=last forward and After=first reverse", func(t *testing.T) { testEmptyPageBoundary(t, factory) })
+	t.Run("Opaque binary Data round-trips correctly", func(t *testing.T) { testOpaqueDataRoundTrip(t, factory) })
 }
 
 func testAppendAndForwardLoad(t *testing.T, factory func(testing.TB) adk.SessionStore) {
 	store := newStore(t, factory)
 	ctx := context.Background()
 
-	first := []byte(`{"event_id":"e1","i":1}`)
-	second := []byte(`{"event_id":"e2","i":2}`)
-	third := []byte(`{"event_id":"e3","i":3}`)
-	requireNoError(t, store.AppendEvents(ctx, "s", [][]byte{first, second}))
-	requireNoError(t, store.AppendEvents(ctx, "s", [][]byte{third}))
+	first := adk.SessionEventPayload{EventID: "e1", Data: []byte(`{"i":1}`)}
+	second := adk.SessionEventPayload{EventID: "e2", Data: []byte(`{"i":2}`)}
+	third := adk.SessionEventPayload{EventID: "e3", Data: []byte(`{"i":3}`)}
+	requireNoError(t, store.AppendEvents(ctx, "s", []adk.SessionEventPayload{first, second}))
+	requireNoError(t, store.AppendEvents(ctx, "s", []adk.SessionEventPayload{third}))
 
 	res, err := store.LoadEvents(ctx, "s", &adk.LoadEventsRequest{})
 	requireNoError(t, err)
 	if res == nil {
 		t.Fatalf("LoadEvents returned nil result")
 	}
-	requireEventsEqual(t, [][]byte{first, second, third}, res.Events)
+	requireEventsEqual(t, []adk.SessionEventPayload{first, second, third}, res.Events)
 }
 
 func testReversePagination(t *testing.T, factory func(testing.TB) adk.SessionStore) {
 	store := newStore(t, factory)
 	ctx := context.Background()
 
-	payloads := make([][]byte, 5)
+	payloads := make([]adk.SessionEventPayload, 5)
 	for i := 0; i < 5; i++ {
-		payloads[i] = []byte(fmt.Sprintf(`{"event_id":"r%d","ch":"%c"}`, i, 'a'+i))
-		requireNoError(t, store.AppendEvents(ctx, "s", [][]byte{payloads[i]}))
+		payloads[i] = adk.SessionEventPayload{EventID: fmt.Sprintf("r%d", i), Data: []byte(fmt.Sprintf(`{"ch":"%c"}`, 'a'+i))}
+		requireNoError(t, store.AppendEvents(ctx, "s", []adk.SessionEventPayload{payloads[i]}))
 	}
 
 	var collected []string
@@ -92,14 +91,8 @@ func testReversePagination(t *testing.T, factory func(testing.TB) adk.SessionSto
 		if res == nil || len(res.Events) == 0 {
 			break
 		}
-		for _, raw := range res.Events {
-			var h struct {
-				EventID string `json:"event_id"`
-			}
-			if err := json.Unmarshal(raw, &h); err != nil {
-				t.Fatalf("decode page event: %v", err)
-			}
-			collected = append(collected, h.EventID)
+		for _, ep := range res.Events {
+			collected = append(collected, ep.EventID)
 		}
 		if res.Next == "" {
 			break
@@ -123,11 +116,11 @@ func testForwardPagination(t *testing.T, factory func(testing.TB) adk.SessionSto
 	ctx := context.Background()
 
 	for i := 0; i < 80; i++ {
-		payload := []byte(fmt.Sprintf(`{"event_id":"f%d","i":%d}`, i, i))
-		requireNoError(t, store.AppendEvents(ctx, "s", [][]byte{payload}))
+		payload := adk.SessionEventPayload{EventID: fmt.Sprintf("f%d", i), Data: []byte(fmt.Sprintf(`{"i":%d}`, i))}
+		requireNoError(t, store.AppendEvents(ctx, "s", []adk.SessionEventPayload{payload}))
 	}
 
-	var collected [][]byte
+	var collected []adk.SessionEventPayload
 	req := &adk.LoadEventsRequest{Limit: 10}
 	for {
 		res, err := store.LoadEvents(ctx, "s", req)
@@ -144,16 +137,10 @@ func testForwardPagination(t *testing.T, factory func(testing.TB) adk.SessionSto
 	if len(collected) != 80 {
 		t.Fatalf("expected 80 events, got %d", len(collected))
 	}
-	for i, raw := range collected {
-		var h struct {
-			EventID string `json:"event_id"`
-			I       int    `json:"i"`
-		}
-		if err := json.Unmarshal(raw, &h); err != nil {
-			t.Fatalf("decode forward[%d]: %v", i, err)
-		}
-		if h.I != i || h.EventID != fmt.Sprintf("f%d", i) {
-			t.Fatalf("event[%d]=%+v, want event_id=f%d i=%d", i, h, i, i)
+	for i, ep := range collected {
+		expectedID := fmt.Sprintf("f%d", i)
+		if ep.EventID != expectedID {
+			t.Fatalf("event[%d].EventID=%q, want=%q", i, ep.EventID, expectedID)
 		}
 	}
 }
@@ -162,18 +149,18 @@ func testSessionIsolation(t *testing.T, factory func(testing.TB) adk.SessionStor
 	store := newStore(t, factory)
 	ctx := context.Background()
 
-	alpha := []byte(`{"event_id":"alpha-1","tag":"alpha"}`)
-	beta := []byte(`{"event_id":"beta-1","tag":"beta"}`)
-	requireNoError(t, store.AppendEvents(ctx, "alpha", [][]byte{alpha}))
-	requireNoError(t, store.AppendEvents(ctx, "beta", [][]byte{beta}))
+	alpha := adk.SessionEventPayload{EventID: "alpha-1", Data: []byte(`{"tag":"alpha"}`)}
+	beta := adk.SessionEventPayload{EventID: "beta-1", Data: []byte(`{"tag":"beta"}`)}
+	requireNoError(t, store.AppendEvents(ctx, "alpha", []adk.SessionEventPayload{alpha}))
+	requireNoError(t, store.AppendEvents(ctx, "beta", []adk.SessionEventPayload{beta}))
 
 	alphaRes, err := store.LoadEvents(ctx, "alpha", &adk.LoadEventsRequest{})
 	requireNoError(t, err)
-	requireEventsEqual(t, [][]byte{alpha}, alphaRes.Events)
+	requireEventsEqual(t, []adk.SessionEventPayload{alpha}, alphaRes.Events)
 
 	betaRes, err := store.LoadEvents(ctx, "beta", &adk.LoadEventsRequest{})
 	requireNoError(t, err)
-	requireEventsEqual(t, [][]byte{beta}, betaRes.Events)
+	requireEventsEqual(t, []adk.SessionEventPayload{beta}, betaRes.Events)
 }
 
 func testEmptySession(t *testing.T, factory func(testing.TB) adk.SessionStore) {
@@ -191,44 +178,34 @@ func testIdempotentAppend(t *testing.T, factory func(testing.TB) adk.SessionStor
 	store := newStore(t, factory)
 	ctx := context.Background()
 
-	first := []byte(`{"event_id":"dup-1","payload":"first"}`)
-	dup := []byte(`{"event_id":"dup-1","payload":"second"}`)
-	requireNoError(t, store.AppendEvents(ctx, "s", [][]byte{first}))
-	requireNoError(t, store.AppendEvents(ctx, "s", [][]byte{dup}))
+	first := adk.SessionEventPayload{EventID: "dup-1", Data: []byte(`{"payload":"first"}`)}
+	dup := adk.SessionEventPayload{EventID: "dup-1", Data: []byte(`{"payload":"second"}`)}
+	requireNoError(t, store.AppendEvents(ctx, "s", []adk.SessionEventPayload{first}))
+	requireNoError(t, store.AppendEvents(ctx, "s", []adk.SessionEventPayload{dup}))
 
 	res, err := store.LoadEvents(ctx, "s", &adk.LoadEventsRequest{})
 	requireNoError(t, err)
-	requireEventsEqual(t, [][]byte{first}, res.Events)
+	requireEventsEqual(t, []adk.SessionEventPayload{first}, res.Events)
 }
 
 func testIdempotentAppendWithinBatch(t *testing.T, factory func(testing.TB) adk.SessionStore) {
 	store := newStore(t, factory)
 	ctx := context.Background()
 
-	first := []byte(`{"event_id":"dup-batch-1","payload":"first"}`)
-	dup := []byte(`{"event_id":"dup-batch-1","payload":"second"}`)
-	requireNoError(t, store.AppendEvents(ctx, "s", [][]byte{first, dup}))
+	first := adk.SessionEventPayload{EventID: "dup-batch-1", Data: []byte(`{"payload":"first"}`)}
+	dup := adk.SessionEventPayload{EventID: "dup-batch-1", Data: []byte(`{"payload":"second"}`)}
+	requireNoError(t, store.AppendEvents(ctx, "s", []adk.SessionEventPayload{first, dup}))
 
 	res, err := store.LoadEvents(ctx, "s", &adk.LoadEventsRequest{})
 	requireNoError(t, err)
-	requireEventsEqual(t, [][]byte{first}, res.Events)
+	requireEventsEqual(t, []adk.SessionEventPayload{first}, res.Events)
 }
 
 func testRejectEmptyEventID(t *testing.T, factory func(testing.TB) adk.SessionStore) {
 	store := newStore(t, factory)
 	ctx := context.Background()
 
-	err := store.AppendEvents(ctx, "s", [][]byte{[]byte(`{"event_id":""}`)})
-	if !errors.Is(err, adk.ErrInvalidEventID) {
-		t.Fatalf("expected ErrInvalidEventID, got %v", err)
-	}
-}
-
-func testRejectUnparsablePayload(t *testing.T, factory func(testing.TB) adk.SessionStore) {
-	store := newStore(t, factory)
-	ctx := context.Background()
-
-	err := store.AppendEvents(ctx, "s", [][]byte{[]byte("not-json")})
+	err := store.AppendEvents(ctx, "s", []adk.SessionEventPayload{{EventID: "", Data: []byte(`{}`)}})
 	if !errors.Is(err, adk.ErrInvalidEventID) {
 		t.Fatalf("expected ErrInvalidEventID, got %v", err)
 	}
@@ -238,38 +215,38 @@ func testAfterForward(t *testing.T, factory func(testing.TB) adk.SessionStore) {
 	store := newStore(t, factory)
 	ctx := context.Background()
 
-	payloads := make([][]byte, 5)
+	payloads := make([]adk.SessionEventPayload, 5)
 	for i := 0; i < 5; i++ {
-		payloads[i] = []byte(fmt.Sprintf(`{"event_id":"fwd-%d","i":%d}`, i, i))
-		requireNoError(t, store.AppendEvents(ctx, "s", [][]byte{payloads[i]}))
+		payloads[i] = adk.SessionEventPayload{EventID: fmt.Sprintf("fwd-%d", i), Data: []byte(fmt.Sprintf(`{"i":%d}`, i))}
+		requireNoError(t, store.AppendEvents(ctx, "s", []adk.SessionEventPayload{payloads[i]}))
 	}
 
 	res, err := store.LoadEvents(ctx, "s", &adk.LoadEventsRequest{After: "fwd-2"})
 	requireNoError(t, err)
-	requireEventsEqual(t, [][]byte{payloads[3], payloads[4]}, res.Events)
+	requireEventsEqual(t, []adk.SessionEventPayload{payloads[3], payloads[4]}, res.Events)
 }
 
 func testAfterReverse(t *testing.T, factory func(testing.TB) adk.SessionStore) {
 	store := newStore(t, factory)
 	ctx := context.Background()
 
-	payloads := make([][]byte, 5)
+	payloads := make([]adk.SessionEventPayload, 5)
 	for i := 0; i < 5; i++ {
-		payloads[i] = []byte(fmt.Sprintf(`{"event_id":"rev-%d","i":%d}`, i, i))
-		requireNoError(t, store.AppendEvents(ctx, "s", [][]byte{payloads[i]}))
+		payloads[i] = adk.SessionEventPayload{EventID: fmt.Sprintf("rev-%d", i), Data: []byte(fmt.Sprintf(`{"i":%d}`, i))}
+		requireNoError(t, store.AppendEvents(ctx, "s", []adk.SessionEventPayload{payloads[i]}))
 	}
 
 	res, err := store.LoadEvents(ctx, "s", &adk.LoadEventsRequest{Reverse: true, After: "rev-2"})
 	requireNoError(t, err)
-	requireEventsEqual(t, [][]byte{payloads[1], payloads[0]}, res.Events)
+	requireEventsEqual(t, []adk.SessionEventPayload{payloads[1], payloads[0]}, res.Events)
 }
 
 func testUnknownAfter(t *testing.T, factory func(testing.TB) adk.SessionStore) {
 	store := newStore(t, factory)
 	ctx := context.Background()
 
-	requireNoError(t, store.AppendEvents(ctx, "s", [][]byte{
-		[]byte(`{"event_id":"only-1"}`),
+	requireNoError(t, store.AppendEvents(ctx, "s", []adk.SessionEventPayload{
+		{EventID: "only-1", Data: []byte(`{}`)},
 	}))
 
 	_, err := store.LoadEvents(ctx, "s", &adk.LoadEventsRequest{After: "ghost"})
@@ -289,7 +266,7 @@ func testEmptyPageBoundary(t *testing.T, factory func(testing.TB) adk.SessionSto
 	ids := []string{"e0", "e1", "e2"}
 	for _, id := range ids {
 		requireNoError(t, store.AppendEvents(ctx, "s",
-			[][]byte{[]byte(fmt.Sprintf(`{"event_id":%q}`, id))}))
+			[]adk.SessionEventPayload{{EventID: id, Data: []byte(`{}`)}}))
 	}
 
 	res, err := store.LoadEvents(ctx, "s", &adk.LoadEventsRequest{After: "e2"})
@@ -302,6 +279,27 @@ func testEmptyPageBoundary(t *testing.T, factory func(testing.TB) adk.SessionSto
 	requireNoError(t, err)
 	if res == nil || len(res.Events) != 0 || res.Next != "" {
 		t.Fatalf("reverse empty page expected, got events=%d next=%q", len(res.Events), res.Next)
+	}
+}
+
+func testOpaqueDataRoundTrip(t *testing.T, factory func(testing.TB) adk.SessionStore) {
+	store := newStore(t, factory)
+	ctx := context.Background()
+
+	binaryData := []byte{0x00, 0xFF, '\n', '\r', '\t', 0x80}
+	event := adk.SessionEventPayload{EventID: "binary-test-1", Data: binaryData}
+	requireNoError(t, store.AppendEvents(ctx, "s", []adk.SessionEventPayload{event}))
+
+	res, err := store.LoadEvents(ctx, "s", &adk.LoadEventsRequest{})
+	requireNoError(t, err)
+	if res == nil || len(res.Events) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(res.Events))
+	}
+	if res.Events[0].EventID != "binary-test-1" {
+		t.Fatalf("EventID mismatch: got=%q want=%q", res.Events[0].EventID, "binary-test-1")
+	}
+	if !bytes.Equal(res.Events[0].Data, binaryData) {
+		t.Fatalf("Data mismatch: got=%v want=%v", res.Events[0].Data, binaryData)
 	}
 }
 
@@ -321,14 +319,17 @@ func requireNoError(t testing.TB, err error) {
 	}
 }
 
-func requireEventsEqual(t testing.TB, want, got [][]byte) {
+func requireEventsEqual(t testing.TB, want, got []adk.SessionEventPayload) {
 	t.Helper()
 	if len(want) != len(got) {
-		t.Fatalf("events length mismatch: got=%d want=%d (got=%v want=%v)", len(got), len(want), got, want)
+		t.Fatalf("events length mismatch: got=%d want=%d", len(got), len(want))
 	}
 	for i := range want {
-		if !bytes.Equal(got[i], want[i]) {
-			t.Fatalf("event[%d] mismatch: got=%q want=%q", i, got[i], want[i])
+		if got[i].EventID != want[i].EventID {
+			t.Fatalf("event[%d].EventID mismatch: got=%q want=%q", i, got[i].EventID, want[i].EventID)
+		}
+		if !bytes.Equal(got[i].Data, want[i].Data) {
+			t.Fatalf("event[%d].Data mismatch: got=%q want=%q", i, got[i].Data, want[i].Data)
 		}
 	}
 }

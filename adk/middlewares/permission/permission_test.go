@@ -594,10 +594,10 @@ func (t *permissionCaptureTool) InvokableRun(_ context.Context, argumentsInJSON 
 }
 
 type permissionSessionStore struct {
-	events [][]byte
+	events []adk.SessionEventPayload
 }
 
-func (s *permissionSessionStore) AppendEvents(_ context.Context, _ string, events [][]byte) error {
+func (s *permissionSessionStore) AppendEvents(_ context.Context, _ string, events []adk.SessionEventPayload) error {
 	s.events = append(s.events, events...)
 	return nil
 }
