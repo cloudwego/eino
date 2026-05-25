@@ -18,10 +18,12 @@ package session_test
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -46,30 +48,47 @@ func TestFileStorePersistsAcrossInstances(t *testing.T) {
 	store, err := session.NewFileStore(dir)
 	require.NoError(t, err)
 
-	first := []byte(`{"event_id":"persist-1","payload":"first"}`)
-	second := []byte(`{"event_id":"persist-2","payload":"second"}`)
-	require.NoError(t, store.AppendEvents(ctx, "s", [][]byte{first, second}))
+	first := adk.SessionEventPayload{EventID: "persist-1", Data: []byte(`{"payload":"first"}`)}
+	second := adk.SessionEventPayload{EventID: "persist-2", Data: []byte(`{"payload":"second"}`)}
+	require.NoError(t, store.AppendEvents(ctx, "s", []adk.SessionEventPayload{first, second}))
 
 	reopened, err := session.NewFileStore(dir)
 	require.NoError(t, err)
 	res, err := reopened.LoadEvents(ctx, "s", &adk.LoadEventsRequest{})
 	require.NoError(t, err)
-	require.Equal(t, [][]byte{first, second}, res.Events)
+	require.Equal(t, []adk.SessionEventPayload{first, second}, res.Events)
 }
 
-func TestFileStoreWritesOneJSONLinePerEvent(t *testing.T) {
+func TestFileStoreWritesOneEvlogLinePerEvent(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
 	store, err := session.NewFileStore(dir)
 	require.NoError(t, err)
 
-	first := []byte(`{"event_id":"line-1","payload":"first"}`)
-	second := []byte(`{"event_id":"line-2","payload":"second"}`)
-	require.NoError(t, store.AppendEvents(ctx, "s", [][]byte{first, second}))
+	first := adk.SessionEventPayload{EventID: "line-1", Data: []byte(`{"payload":"first"}`)}
+	second := adk.SessionEventPayload{EventID: "line-2", Data: []byte(`{"payload":"second"}`)}
+	require.NoError(t, store.AppendEvents(ctx, "s", []adk.SessionEventPayload{first, second}))
 
-	data, err := os.ReadFile(filepath.Join(dir, url.PathEscape("s")+".jsonl"))
+	data, err := os.ReadFile(filepath.Join(dir, url.PathEscape("s")+".evlog"))
 	require.NoError(t, err)
-	assert.Equal(t, string(first)+"\n"+string(second)+"\n", string(data))
+
+	lines := strings.Split(strings.TrimSuffix(string(data), "\n"), "\n")
+	require.Len(t, lines, 2)
+
+	// Each line is: <EventID>\t<base64url(Data)>
+	parts0 := strings.SplitN(lines[0], "\t", 2)
+	require.Len(t, parts0, 2)
+	assert.Equal(t, "line-1", parts0[0])
+	decoded0, err := base64.RawURLEncoding.DecodeString(parts0[1])
+	require.NoError(t, err)
+	assert.Equal(t, first.Data, decoded0)
+
+	parts1 := strings.SplitN(lines[1], "\t", 2)
+	require.Len(t, parts1, 2)
+	assert.Equal(t, "line-2", parts1[0])
+	decoded1, err := base64.RawURLEncoding.DecodeString(parts1[1])
+	require.NoError(t, err)
+	assert.Equal(t, second.Data, decoded1)
 }
 
 func TestFileStoreRejectsInvalidDir(t *testing.T) {
@@ -78,40 +97,18 @@ func TestFileStoreRejectsInvalidDir(t *testing.T) {
 	assert.Nil(t, store)
 }
 
-func TestFileStoreRejectsRawLineDelimiters(t *testing.T) {
-	ctx := context.Background()
-	dir := t.TempDir()
-	store, err := session.NewFileStore(dir)
-	require.NoError(t, err)
-
-	initial := []byte(`{"event_id":"line-ok","payload":"ok"}`)
-	require.NoError(t, store.AppendEvents(ctx, "s", [][]byte{initial}))
-
-	for _, payload := range [][]byte{
-		[]byte("{\"event_id\":\"line-bad\n\",\"payload\":\"bad\"}"),
-		[]byte("{\"event_id\":\"line-bad\r\",\"payload\":\"bad\"}"),
-	} {
-		err = store.AppendEvents(ctx, "s", [][]byte{payload})
-		require.Error(t, err)
-		assert.True(t, errors.Is(err, adk.ErrInvalidEventID))
-	}
-
-	res, err := store.LoadEvents(ctx, "s", &adk.LoadEventsRequest{})
-	require.NoError(t, err)
-	require.Equal(t, [][]byte{initial}, res.Events)
-}
-
 func TestAttack_FileStoreAcceptsEscapedLineDelimiters(t *testing.T) {
 	ctx := context.Background()
 	store, err := session.NewFileStore(t.TempDir())
 	require.NoError(t, err)
 
-	payload := []byte(`{"event_id":"escaped-line","payload":"first\nsecond\rthird"}`)
-	require.NoError(t, store.AppendEvents(ctx, "s", [][]byte{payload}))
+	// Data with newlines is safe because it's base64-encoded on disk.
+	payload := adk.SessionEventPayload{EventID: "escaped-line", Data: []byte("first\nsecond\rthird")}
+	require.NoError(t, store.AppendEvents(ctx, "s", []adk.SessionEventPayload{payload}))
 
 	res, err := store.LoadEvents(ctx, "s", &adk.LoadEventsRequest{})
 	require.NoError(t, err)
-	require.Equal(t, [][]byte{payload}, res.Events)
+	require.Equal(t, []adk.SessionEventPayload{payload}, res.Events)
 }
 
 func TestFileStoreDuplicateEventIDWithinBatchFirstWriteWins(t *testing.T) {
@@ -119,13 +116,13 @@ func TestFileStoreDuplicateEventIDWithinBatchFirstWriteWins(t *testing.T) {
 	store, err := session.NewFileStore(t.TempDir())
 	require.NoError(t, err)
 
-	first := []byte(`{"event_id":"dup-batch","payload":"first"}`)
-	dup := []byte(`{"event_id":"dup-batch","payload":"second"}`)
-	require.NoError(t, store.AppendEvents(ctx, "s", [][]byte{first, dup}))
+	first := adk.SessionEventPayload{EventID: "dup-batch", Data: []byte(`{"payload":"first"}`)}
+	dup := adk.SessionEventPayload{EventID: "dup-batch", Data: []byte(`{"payload":"second"}`)}
+	require.NoError(t, store.AppendEvents(ctx, "s", []adk.SessionEventPayload{first, dup}))
 
 	res, err := store.LoadEvents(ctx, "s", &adk.LoadEventsRequest{})
 	require.NoError(t, err)
-	require.Equal(t, [][]byte{first}, res.Events)
+	require.Equal(t, []adk.SessionEventPayload{first}, res.Events)
 }
 
 type fileStoreRunnerAgent struct {
@@ -213,16 +210,17 @@ func TestFileStoreAppendFailsOnCorruptedExistingLog(t *testing.T) {
 	store, err := session.NewFileStore(dir)
 	require.NoError(t, err)
 
-	path := filepath.Join(dir, url.PathEscape("s")+".jsonl")
-	require.NoError(t, os.WriteFile(path, []byte("not-json\n"), 0o644))
+	// Write a corrupted evlog line (missing tab separator).
+	path := filepath.Join(dir, url.PathEscape("s")+".evlog")
+	require.NoError(t, os.WriteFile(path, []byte("corrupted-no-tab\n"), 0o644))
 
-	err = store.AppendEvents(ctx, "s", [][]byte{[]byte(`{"event_id":"new","payload":"new"}`)})
+	err = store.AppendEvents(ctx, "s", []adk.SessionEventPayload{{EventID: "new", Data: []byte(`{"payload":"new"}`)}})
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, adk.ErrInvalidEventID))
 
 	data, err := os.ReadFile(path)
 	require.NoError(t, err)
-	assert.Equal(t, "not-json\n", string(data))
+	assert.Equal(t, "corrupted-no-tab\n", string(data))
 }
 
 func TestFileStoreRejectsEmptySessionID(t *testing.T) {
@@ -231,13 +229,13 @@ func TestFileStoreRejectsEmptySessionID(t *testing.T) {
 	store, err := session.NewFileStore(dir)
 	require.NoError(t, err)
 
-	err = store.AppendEvents(ctx, "", [][]byte{[]byte(`{"event_id":"empty-session"}`)})
+	err = store.AppendEvents(ctx, "", []adk.SessionEventPayload{{EventID: "empty-session", Data: []byte(`{}`)}})
 	require.Error(t, err)
 
 	_, err = store.LoadEvents(ctx, "", &adk.LoadEventsRequest{})
 	require.Error(t, err)
 
-	_, statErr := os.Stat(filepath.Join(dir, ".jsonl"))
+	_, statErr := os.Stat(filepath.Join(dir, ".evlog"))
 	assert.True(t, os.IsNotExist(statErr))
 }
 
@@ -248,15 +246,15 @@ func TestFileStoreEscapedSessionIDPath(t *testing.T) {
 	require.NoError(t, err)
 
 	sessionID := "a/b %雪"
-	payload := []byte(`{"event_id":"escaped","payload":"ok"}`)
-	require.NoError(t, store.AppendEvents(ctx, sessionID, [][]byte{payload}))
+	payload := adk.SessionEventPayload{EventID: "escaped", Data: []byte(`{"payload":"ok"}`)}
+	require.NoError(t, store.AppendEvents(ctx, sessionID, []adk.SessionEventPayload{payload}))
 
 	res, err := store.LoadEvents(ctx, sessionID, &adk.LoadEventsRequest{})
 	require.NoError(t, err)
-	require.Equal(t, [][]byte{payload}, res.Events)
+	require.Equal(t, []adk.SessionEventPayload{payload}, res.Events)
 
 	entries, err := os.ReadDir(dir)
 	require.NoError(t, err)
 	require.Len(t, entries, 1)
-	assert.Equal(t, url.PathEscape(sessionID)+".jsonl", entries[0].Name())
+	assert.Equal(t, url.PathEscape(sessionID)+".evlog", entries[0].Name())
 }
