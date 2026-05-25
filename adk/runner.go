@@ -868,12 +868,24 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 		case !sawTurnEnd:
 			stopReason = "failed"
 		}
-		if interrupted {
+		if stopReason == "failed" {
+			errMsg := ""
+			if persistErr != nil {
+				errMsg = persistErr.Error()
+			}
+			sendTimelineEvent(&SessionEvent[M]{
+				EventID:   uuid.NewString(),
+				Timestamp: newEventTimestamp(),
+				Kind:      SessionEventSessionError,
+				Error:     &SessionErrorEvent{Type: SessionErrorTypeFatal, Message: errMsg},
+			})
+		}
+		if cancelled {
 			sendTimelineEvent(&SessionEvent[M]{
 				EventID:         uuid.NewString(),
 				Timestamp:       newEventTimestamp(),
 				Kind:            SessionEventUserInterrupt,
-				UserObservation: &UserObservationEvent{Interrupt: &UserInterruptEvent{Reason: "interrupted"}},
+				UserObservation: &UserObservationEvent{Interrupt: &UserInterruptEvent{Reason: "cancelled"}},
 			})
 		}
 		sendTimelineEvent(&SessionEvent[M]{
