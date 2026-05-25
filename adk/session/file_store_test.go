@@ -191,7 +191,7 @@ func TestAttack_FileStoreSupportsRunnerDefaultSessionEncoding(t *testing.T) {
 		Agent:              firstAgent,
 		SessionID:          "runner-jsonl",
 		SessionStore:       store,
-		SessionPersistence: &adk.SessionPersistenceConfig{EventFlushBatchSize: 1},
+		Session: &adk.SessionConfig{EventFlushBatchSize: 1},
 	})
 	drainFileStoreRunnerEvents(t, first.Query(ctx, "hello"))
 
@@ -202,7 +202,7 @@ func TestAttack_FileStoreSupportsRunnerDefaultSessionEncoding(t *testing.T) {
 		Agent:              secondAgent,
 		SessionID:          "runner-jsonl",
 		SessionStore:       reopened,
-		SessionPersistence: &adk.SessionPersistenceConfig{EventFlushBatchSize: 1},
+		Session: &adk.SessionConfig{EventFlushBatchSize: 1},
 	})
 	drainFileStoreRunnerEvents(t, second.Query(ctx, "again"))
 

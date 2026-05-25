@@ -300,7 +300,7 @@ func TestRunnerSessionModePrependsCommittedMessagesOnce(t *testing.T) {
 		Agent:              firstAgent,
 		SessionID:          sessionID,
 		SessionStore:       store,
-		SessionPersistence: &SessionPersistenceConfig{EventFlushBatchSize: 1},
+		Session: &SessionConfig{EventFlushBatchSize: 1},
 	})
 	drainSessionEvents(t, runner.Query(ctx, "first"))
 
@@ -315,7 +315,7 @@ func TestRunnerSessionModePrependsCommittedMessagesOnce(t *testing.T) {
 		Agent:              secondAgent,
 		SessionID:          sessionID,
 		SessionStore:       store,
-		SessionPersistence: &SessionPersistenceConfig{EventFlushBatchSize: 1},
+		Session: &SessionConfig{EventFlushBatchSize: 1},
 	})
 	drainSessionEvents(t, runner.Query(ctx, "second", WithSessionValues(map[string]any{"override": "value"})))
 
@@ -371,7 +371,7 @@ func TestRunnerSessionModeDeleteCheckpointFailureIsReported(t *testing.T) {
 		ctx,
 		store,
 		"delete-fail-session",
-		normalizeSessionPersistenceConfig(&SessionPersistenceConfig{EventFlushBatchSize: 1}),
+		normalizeSessionConfig(&SessionConfig{EventFlushBatchSize: 1}),
 	)
 	checkPointID := "delete-fail-checkpoint"
 	store.deleteErr = errors.New("delete failed")
@@ -441,7 +441,7 @@ func TestRunnerSessionStreamingDoesNotBlockLiveEvent(t *testing.T) {
 		EnableStreaming:    true,
 		SessionID:          "streaming-session",
 		SessionStore:       store,
-		SessionPersistence: &SessionPersistenceConfig{EventFlushBatchSize: 1},
+		Session: &SessionConfig{EventFlushBatchSize: 1},
 	})
 
 	iter := runner.Query(ctx, "start")
@@ -594,7 +594,7 @@ func TestRunnerSessionModeFlushFailurePreventsCommit(t *testing.T) {
 		Agent:              agent,
 		SessionID:          "flush-fail-session",
 		SessionStore:       store,
-		SessionPersistence: &SessionPersistenceConfig{EventFlushBatchSize: 1},
+		Session: &SessionConfig{EventFlushBatchSize: 1},
 	})
 
 	iter := runner.Query(ctx, "trigger")
@@ -621,7 +621,7 @@ func TestSessionPersister_EnqueueAfterClose(t *testing.T) {
 
 	persister := newSessionEventPersister[*schema.Message](
 		ctx, store, "enqueue-after-close",
-		normalizeSessionPersistenceConfig(&SessionPersistenceConfig{
+		normalizeSessionConfig(&SessionConfig{
 			EventFlushBatchSize: 1,
 			EventFlushInterval:  time.Millisecond,
 			EventBufferSize:     8,
@@ -641,7 +641,7 @@ func TestSessionPersister_EmptyPayloadSkipped(t *testing.T) {
 
 	persister := newSessionEventPersister[*schema.Message](
 		ctx, store, "empty-payload",
-		normalizeSessionPersistenceConfig(&SessionPersistenceConfig{
+		normalizeSessionConfig(&SessionConfig{
 			EventFlushBatchSize: 1,
 			EventFlushInterval:  time.Millisecond,
 			EventBufferSize:     8,
@@ -675,21 +675,21 @@ func TestTurnEndState_GobRoundtripNilFields(t *testing.T) {
 	assert.Nil(t, decoded.TurnEnd.SessionValues)
 }
 
-func TestNormalizeSessionPersistenceConfig_Variations(t *testing.T) {
-	cfg := normalizeSessionPersistenceConfig(nil)
+func TestNormalizeSessionConfig_Variations(t *testing.T) {
+	cfg := normalizeSessionConfig(nil)
 	assert.Equal(t, defaultSessionEventFlushBatchSize, cfg.EventFlushBatchSize)
 	assert.Equal(t, defaultSessionEventFlushInterval, cfg.EventFlushInterval)
 	assert.Equal(t, defaultSessionEventBufferSize, cfg.EventBufferSize)
 	assert.NotNil(t, cfg.EventSerializer)
 
-	cfg = normalizeSessionPersistenceConfig(&SessionPersistenceConfig{})
+	cfg = normalizeSessionConfig(&SessionConfig{})
 	assert.Equal(t, defaultSessionEventFlushBatchSize, cfg.EventFlushBatchSize)
 
-	cfg = normalizeSessionPersistenceConfig(&SessionPersistenceConfig{EventFlushBatchSize: 32})
+	cfg = normalizeSessionConfig(&SessionConfig{EventFlushBatchSize: 32})
 	assert.Equal(t, 32, cfg.EventFlushBatchSize)
 	assert.Equal(t, defaultSessionEventFlushInterval, cfg.EventFlushInterval)
 
-	cfg = normalizeSessionPersistenceConfig(&SessionPersistenceConfig{
+	cfg = normalizeSessionConfig(&SessionConfig{
 		EventFlushBatchSize: 8,
 		EventFlushInterval:  200 * time.Millisecond,
 		EventBufferSize:     128,
@@ -698,7 +698,7 @@ func TestNormalizeSessionPersistenceConfig_Variations(t *testing.T) {
 	assert.Equal(t, 200*time.Millisecond, cfg.EventFlushInterval)
 	assert.Equal(t, 128, cfg.EventBufferSize)
 
-	cfg = normalizeSessionPersistenceConfig(&SessionPersistenceConfig{
+	cfg = normalizeSessionConfig(&SessionConfig{
 		EventFlushBatchSize: -1,
 		EventFlushInterval:  -time.Second,
 		EventBufferSize:     -5,
@@ -726,8 +726,8 @@ func (s *countingSerializer) Unmarshal(data []byte, v any) error {
 	return s.inner.Unmarshal(data, v)
 }
 
-func TestSessionPersistenceConfig_DefaultSerializer(t *testing.T) {
-	cfg := normalizeSessionPersistenceConfig(nil)
+func TestSessionConfig_DefaultSerializer(t *testing.T) {
+	cfg := normalizeSessionConfig(nil)
 	require.NotNil(t, cfg.EventSerializer)
 
 	se := &SessionEvent[*schema.Message]{
@@ -767,11 +767,11 @@ func TestSessionEvent_HumanReadableSerializerDirectRoundTrip(t *testing.T) {
 	assert.Equal(t, se.Kind, decoded.Kind)
 }
 
-func TestSessionPersistenceConfig_CustomSerializerUsedForEncodeAndReconstruct(t *testing.T) {
+func TestSessionConfig_CustomSerializerUsedForEncodeAndReconstruct(t *testing.T) {
 	ctx := context.Background()
 	store := newSessionHelperStore()
 	serializer := newCountingSerializer()
-	cfg := &SessionPersistenceConfig{
+	cfg := &SessionConfig{
 		EventFlushBatchSize: 1,
 		EventSerializer:     serializer,
 	}
@@ -780,7 +780,7 @@ func TestSessionPersistenceConfig_CustomSerializerUsedForEncodeAndReconstruct(t 
 		Agent:              &runnerSessionAgent{name: "first"},
 		SessionID:          "serializer-custom",
 		SessionStore:       store,
-		SessionPersistence: cfg,
+		Session: cfg,
 	})
 	drainSessionEvents(t, first.Query(ctx, "hello"))
 	require.Greater(t, atomic.LoadInt32(&serializer.marshalCalls), int32(0))
@@ -790,7 +790,7 @@ func TestSessionPersistenceConfig_CustomSerializerUsedForEncodeAndReconstruct(t 
 		Agent:              secondAgent,
 		SessionID:          "serializer-custom",
 		SessionStore:       store,
-		SessionPersistence: cfg,
+		Session: cfg,
 	})
 	drainSessionEvents(t, second.Query(ctx, "again"))
 
@@ -807,7 +807,7 @@ func TestAttack_GobSerializerEndToEnd(t *testing.T) {
 	ctx := context.Background()
 	store := newSessionHelperStore()
 	gobSerializer := &schema.GobSerializer{}
-	cfg := &SessionPersistenceConfig{
+	cfg := &SessionConfig{
 		EventFlushBatchSize: 1,
 		EventSerializer:     gobSerializer,
 	}
@@ -817,7 +817,7 @@ func TestAttack_GobSerializerEndToEnd(t *testing.T) {
 		Agent:              firstAgent,
 		SessionID:          "gob-e2e",
 		SessionStore:       store,
-		SessionPersistence: cfg,
+		Session: cfg,
 	})
 	drainSessionEvents(t, first.Query(ctx, "hello from gob"))
 
@@ -826,7 +826,7 @@ func TestAttack_GobSerializerEndToEnd(t *testing.T) {
 		Agent:              secondAgent,
 		SessionID:          "gob-e2e",
 		SessionStore:       store,
-		SessionPersistence: cfg,
+		Session: cfg,
 	})
 	drainSessionEvents(t, second.Query(ctx, "second gob turn"))
 
@@ -1258,7 +1258,7 @@ func TestRunnerSessionReconstructsFromEventLog(t *testing.T) {
 		Agent:              firstAgent,
 		SessionID:          sid,
 		SessionStore:       store,
-		SessionPersistence: &SessionPersistenceConfig{EventFlushBatchSize: 1},
+		Session: &SessionConfig{EventFlushBatchSize: 1},
 	})
 	drainSessionEvents(t, runner.Query(ctx, "first"))
 
@@ -1279,7 +1279,7 @@ func TestRunnerSessionReconstructsFromEventLog(t *testing.T) {
 		Agent:              capturedAgent,
 		SessionID:          sid,
 		SessionStore:       store,
-		SessionPersistence: &SessionPersistenceConfig{EventFlushBatchSize: 1},
+		Session: &SessionConfig{EventFlushBatchSize: 1},
 	})
 	drainSessionEvents(t, runner.Query(ctx, "second"))
 
@@ -1310,7 +1310,7 @@ func TestRunnerSessionInputEventsPersisted(t *testing.T) {
 		Agent:              agent,
 		SessionID:          sid,
 		SessionStore:       store,
-		SessionPersistence: &SessionPersistenceConfig{EventFlushBatchSize: 1},
+		Session: &SessionConfig{EventFlushBatchSize: 1},
 	})
 	drainSessionEvents(t, runner.Query(ctx, "user-question"))
 
@@ -1455,7 +1455,7 @@ func TestSessionPersister_EnqueueAfterAppendError(t *testing.T) {
 	store := newSessionHelperStore()
 	store.appendErr = errors.New("append failed")
 
-	cfg := normalizeSessionPersistenceConfig(&SessionPersistenceConfig{
+	cfg := normalizeSessionConfig(&SessionConfig{
 		EventFlushBatchSize: 1,
 		EventFlushInterval:  10 * time.Millisecond,
 		EventBufferSize:     8,
@@ -1523,7 +1523,7 @@ func TestSessionPersister_FlushRetryTransientRecovery(t *testing.T) {
 		appendErrVal:       errors.New("transient"),
 	}
 
-	cfg := normalizeSessionPersistenceConfig(&SessionPersistenceConfig{
+	cfg := normalizeSessionConfig(&SessionConfig{
 		EventFlushBatchSize:      1,
 		EventFlushInterval:       10 * time.Millisecond,
 		EventBufferSize:          8,
@@ -1555,7 +1555,7 @@ func TestSessionPersister_FlushRetryPermanentFailure(t *testing.T) {
 		appendErrVal:       errors.New("permanent"),
 	}
 
-	cfg := normalizeSessionPersistenceConfig(&SessionPersistenceConfig{
+	cfg := normalizeSessionConfig(&SessionConfig{
 		EventFlushBatchSize:      1,
 		EventFlushInterval:       10 * time.Millisecond,
 		EventBufferSize:          8,
@@ -1583,7 +1583,7 @@ func TestSessionPersister_FlushRetryContextCancellation(t *testing.T) {
 		appendErrVal:       errors.New("failing"),
 	}
 
-	cfg := normalizeSessionPersistenceConfig(&SessionPersistenceConfig{
+	cfg := normalizeSessionConfig(&SessionConfig{
 		EventFlushBatchSize:      1,
 		EventFlushInterval:       10 * time.Millisecond,
 		EventBufferSize:          8,
@@ -1752,7 +1752,7 @@ func TestAttack_ResumePreservesTurnIDFromInterruptedRun(t *testing.T) {
 		SessionID:          sessionID,
 		SessionStore:       store,
 		CheckPointStore:    store,
-		SessionPersistence: &SessionPersistenceConfig{EventFlushBatchSize: 1},
+		Session: &SessionConfig{EventFlushBatchSize: 1},
 	})
 	drainSessionEvents(t, firstRunner.Query(ctx, "first question"))
 
@@ -1763,7 +1763,7 @@ func TestAttack_ResumePreservesTurnIDFromInterruptedRun(t *testing.T) {
 		SessionID:          sessionID,
 		SessionStore:       store,
 		CheckPointStore:    store,
-		SessionPersistence: &SessionPersistenceConfig{EventFlushBatchSize: 1},
+		Session: &SessionConfig{EventFlushBatchSize: 1},
 	})
 
 	iter := runner.Query(ctx, "trigger interrupt")
@@ -1854,7 +1854,7 @@ func TestAttack_FreshRunIgnoresInFlightTurnID(t *testing.T) {
 		SessionID:          sessionID,
 		SessionStore:       store,
 		CheckPointStore:    store,
-		SessionPersistence: &SessionPersistenceConfig{EventFlushBatchSize: 1},
+		Session: &SessionConfig{EventFlushBatchSize: 1},
 	})
 	drainSessionEvents(t, baselineRunner.Query(ctx, "baseline"))
 
@@ -1865,7 +1865,7 @@ func TestAttack_FreshRunIgnoresInFlightTurnID(t *testing.T) {
 		SessionID:          sessionID,
 		SessionStore:       store,
 		CheckPointStore:    store,
-		SessionPersistence: &SessionPersistenceConfig{EventFlushBatchSize: 1},
+		Session: &SessionConfig{EventFlushBatchSize: 1},
 	})
 
 	iter := runner.Query(ctx, "trigger interrupt")
@@ -1909,7 +1909,7 @@ func TestAttack_FreshRunIgnoresInFlightTurnID(t *testing.T) {
 		SessionID:          sessionID,
 		SessionStore:       store,
 		CheckPointStore:    store,
-		SessionPersistence: &SessionPersistenceConfig{EventFlushBatchSize: 1},
+		Session: &SessionConfig{EventFlushBatchSize: 1},
 	})
 	drainSessionEvents(t, freshRunner.Query(ctx, "new question"))
 

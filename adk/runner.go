@@ -62,7 +62,7 @@ type TypedRunner[M MessageType] struct {
 	store           CheckPointStore
 	sessionID       string
 	sessionStore    SessionStore
-	sessionPersist  *SessionPersistenceConfig
+	sessionPersist  *SessionConfig
 }
 
 // Runner is the default runner type using *schema.Message.
@@ -78,9 +78,9 @@ type TypedRunnerConfig[M MessageType] struct {
 
 	CheckPointStore CheckPointStore
 
-	SessionID          string
-	SessionStore       SessionStore
-	SessionPersistence *SessionPersistenceConfig
+	SessionID    string
+	SessionStore SessionStore
+	Session      *SessionConfig
 }
 
 // RunnerConfig is the default runner config type using *schema.Message.
@@ -109,7 +109,7 @@ func NewTypedRunner[M MessageType](conf TypedRunnerConfig[M]) *TypedRunner[M] {
 		store:           conf.CheckPointStore,
 		sessionID:       conf.SessionID,
 		sessionStore:    conf.SessionStore,
-		sessionPersist:  conf.SessionPersistence,
+		sessionPersist:  conf.Session,
 	}
 }
 
@@ -172,7 +172,7 @@ type runnerSessionRunState[M MessageType] struct {
 	sessionID       string
 	checkPointID    *string
 	latestState     *TurnEndState[M]
-	persistence     SessionPersistenceConfig
+	persistence     SessionConfig
 	sessionStore    SessionStore
 	checkPointStore CheckPointStore
 	turnID          string
@@ -208,7 +208,7 @@ func prepareRunnerSessionRun[M MessageType]( //nolint:revive // argument-limit
 	requestedCheckPointID *string,
 	sessionID string,
 	sessionStore SessionStore,
-	sessionPersistence *SessionPersistenceConfig,
+	sessionPersistence *SessionConfig,
 ) (*runnerSessionRunState[M], error) {
 	state := &runnerSessionRunState[M]{}
 	if sessionID == "" || sessionStore == nil {
@@ -219,7 +219,7 @@ func prepareRunnerSessionRun[M MessageType]( //nolint:revive // argument-limit
 	state.turnID = uuid.NewString()
 	state.sessionStore = sessionStore
 	state.checkPointStore = checkPointStore
-	state.persistence = normalizeSessionPersistenceConfig(sessionPersistence)
+	state.persistence = normalizeSessionConfig(sessionPersistence)
 	state.latestState = &TurnEndState[M]{}
 
 	pageSize := state.persistence.LoadPageSize
@@ -262,7 +262,7 @@ func prepareRunnerSessionResume[M MessageType](
 	checkPointStore CheckPointStore,
 	sessionID string,
 	sessionStore SessionStore,
-	sessionPersistence *SessionPersistenceConfig,
+	sessionPersistence *SessionConfig,
 	checkPointID string,
 ) (*runnerSessionRunState[M], string, error) {
 	state := &runnerSessionRunState[M]{}
@@ -279,7 +279,7 @@ func prepareRunnerSessionResume[M MessageType](
 	state.turnID = uuid.NewString()
 	state.sessionStore = sessionStore
 	state.checkPointStore = checkPointStore
-	state.persistence = normalizeSessionPersistenceConfig(sessionPersistence)
+	state.persistence = normalizeSessionConfig(sessionPersistence)
 	state.latestState = &TurnEndState[M]{}
 
 	pageSize := state.persistence.LoadPageSize
@@ -402,7 +402,7 @@ func saveRunnerCheckpoint[M MessageType]( //nolint:revive // argument-limit
 	return store.Set(ctx, checkPointID, data)
 }
 
-func typedRunnerRunImpl[M MessageType](a TypedAgent[M], enableStreaming bool, store CheckPointStore, sessionID string, sessionStore SessionStore, sessionPersistence *SessionPersistenceConfig, ctx context.Context, messages []M, opts ...AgentRunOption) *AsyncIterator[*TypedAgentEvent[M]] { //nolint:revive // argument-limit
+func typedRunnerRunImpl[M MessageType](a TypedAgent[M], enableStreaming bool, store CheckPointStore, sessionID string, sessionStore SessionStore, sessionPersistence *SessionConfig, ctx context.Context, messages []M, opts ...AgentRunOption) *AsyncIterator[*TypedAgentEvent[M]] { //nolint:revive // argument-limit
 	o := getCommonOptions(nil, opts...)
 	exposeTimelineEvents := o.enableTimelineEvents
 
@@ -493,7 +493,7 @@ func typedRunnerRunImpl[M MessageType](a TypedAgent[M], enableStreaming bool, st
 	return niter
 }
 
-func typedRunnerResumeInternalImpl[M MessageType](a TypedAgent[M], store CheckPointStore, sessionID string, sessionStore SessionStore, sessionPersistence *SessionPersistenceConfig, ctx context.Context, checkPointID string, resumeData map[string]any, //nolint:revive // argument-limit
+func typedRunnerResumeInternalImpl[M MessageType](a TypedAgent[M], store CheckPointStore, sessionID string, sessionStore SessionStore, sessionPersistence *SessionConfig, ctx context.Context, checkPointID string, resumeData map[string]any, //nolint:revive // argument-limit
 	opts ...AgentRunOption) (*AsyncIterator[*TypedAgentEvent[M]], error) {
 	if store == nil {
 		return nil, fmt.Errorf("failed to resume: store is nil")
