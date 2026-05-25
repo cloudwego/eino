@@ -2320,7 +2320,7 @@ func TestTurnLoop_ManagedInterrupt_StartNewTurnUsesConfiguredSessionStore(t *tes
 		InterruptMode:      TurnLoopInterruptWaitsForExplicitResume,
 		SessionID:          sessionID,
 		SessionStore:       sessionStore,
-		SessionPersistence: &SessionPersistenceConfig{EventFlushBatchSize: 1},
+		Session: &SessionConfig{EventFlushBatchSize: 1},
 		GenInput:           genInputConsumeAllWithMsg,
 		GenResume: func(ctx context.Context, _ *TurnLoop[string, *schema.Message], interruptedItems, unhandledItems, resumeItems []string) (*GenResumeResult[string, *schema.Message], error) {
 			return &GenResumeResult[string, *schema.Message]{
