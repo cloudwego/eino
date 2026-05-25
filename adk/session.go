@@ -594,6 +594,8 @@ func validateAgentSessionEventIdentity[M MessageType](event *TypedAgentEvent[M])
 	return nil
 }
 
+// ClassifySessionEvent derives the canonical event kind from the single active
+// payload carried by event.
 func ClassifySessionEvent[M MessageType](event *SessionEvent[M]) (SessionEventKind, error) {
 	if event == nil {
 		return "", errors.New("nil session event")
@@ -679,6 +681,8 @@ func ClassifySessionEvent[M MessageType](event *SessionEvent[M]) (SessionEventKi
 	return kinds[0], nil
 }
 
+// NormalizeSessionEventKind fills an empty Kind from the active payload and
+// rejects mismatches between Kind and payload shape.
 func NormalizeSessionEventKind[M MessageType](event *SessionEvent[M]) error {
 	kind, err := ClassifySessionEvent(event)
 	if err != nil {
@@ -691,6 +695,8 @@ func NormalizeSessionEventKind[M MessageType](event *SessionEvent[M]) error {
 	return nil
 }
 
+// ValidateEmittedSessionEventKind enforces that runtime-emitted session events
+// carry an explicit Kind matching their active payload.
 func ValidateEmittedSessionEventKind[M MessageType](event *SessionEvent[M]) error {
 	if event == nil {
 		return errors.New("nil session event")

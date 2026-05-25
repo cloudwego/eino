@@ -1751,6 +1751,110 @@ func (l *TurnLoop[T, M]) restorePendingResume(pr *turnLoopPendingResume[T]) {
 	l.pendingResume = pr
 }
 
+type turnLoopNextItems[T any] struct {
+	isResume bool
+	pr       *turnLoopPendingResume[T]
+	items    []T
+	pushBack []T
+}
+
+func (l *TurnLoop[T, M]) collectNextTurnItems(ctx context.Context) (*turnLoopNextItems[T], bool) {
+	next := &turnLoopNextItems[T]{}
+	if l.pendingResume != nil {
+		next.isResume = true
+		var ok bool
+		next.pr, ok = l.takePendingResume(ctx)
+		if !ok {
+			return nil, false
+		}
+
+		l.preemptCtrl.waitForPushes()
+		buffered := l.buffer.TakeAll()
+		if next.pr.source == turnLoopPendingResumeSourceRestoredCheckpoint && !next.pr.resumeSubmitted {
+			next.pr.resumeItems = append(next.pr.resumeItems, buffered...)
+		} else {
+			next.pr.unhandled = append(next.pr.unhandled, buffered...)
+		}
+
+		next.pushBack = make([]T, 0, len(next.pr.interrupted)+len(next.pr.unhandled)+len(next.pr.resumeItems))
+		next.pushBack = append(next.pushBack, next.pr.interrupted...)
+		next.pushBack = append(next.pushBack, next.pr.unhandled...)
+		next.pushBack = append(next.pushBack, next.pr.resumeItems...)
+		return next, true
+	}
+
+	first, ok := l.receiveNextTurnItem(ctx)
+	if !ok {
+		return nil, false
+	}
+
+	if err := ctx.Err(); err != nil {
+		l.buffer.PushFront([]T{first})
+		l.runErr = err
+		return nil, false
+	}
+
+	if l.stopCtrl.isCommitted() {
+		l.buffer.PushFront([]T{first})
+		return nil, false
+	}
+
+	l.preemptCtrl.waitForPushes()
+	rest := l.buffer.TakeAll()
+	next.items = append([]T{first}, rest...)
+	next.pushBack = next.items
+	return next, true
+}
+
+func (l *TurnLoop[T, M]) receiveNextTurnItem(ctx context.Context) (T, bool) {
+	if idleFor := l.stopCtrl.idleDuration(); idleFor > 0 {
+		return l.receiveNextTurnItemUntilIdle(ctx, idleFor)
+	}
+	first, ok := l.buffer.Receive()
+	// Woken up by Stop(UntilIdleFor); re-enter loop to start the idle timer.
+	if !ok && l.stopCtrl.idleDuration() > 0 {
+		var zero T
+		return zero, false
+	}
+	if !ok {
+		if err := ctx.Err(); err != nil {
+			l.runErr = err
+		}
+	}
+	return first, ok
+}
+
+func (l *TurnLoop[T, M]) receiveNextTurnItemUntilIdle(ctx context.Context, idleFor time.Duration) (T, bool) {
+	l.buffer.ClearWakeup()
+	idleTimer := time.NewTimer(idleFor)
+	cancelIdle := make(chan struct{})
+	// When the idle timer fires, commitStop closes the buffer via buffer.Close(),
+	// which broadcasts to unblock the pending Receive() call below.
+	go func() {
+		select {
+		case <-idleTimer.C:
+			l.commitStop()
+		case <-cancelIdle:
+		}
+	}()
+
+	first, ok := l.buffer.Receive()
+
+	idleTimer.Stop()
+	close(cancelIdle)
+
+	if !ok {
+		if err := ctx.Err(); err != nil {
+			l.runErr = err
+		}
+		if !l.buffer.IsClosed() {
+			var zero T
+			return zero, false
+		}
+	}
+	return first, ok
+}
+
 func (l *TurnLoop[T, M]) run(ctx context.Context) {
 	defer l.cleanup(ctx)
 
@@ -1774,97 +1878,16 @@ func (l *TurnLoop[T, M]) run(ctx context.Context) {
 			return
 		}
 
-		isResume := false
-		var pr *turnLoopPendingResume[T]
-		var items []T
-		var pushBack []T
-
-		if l.pendingResume != nil {
-			isResume = true
-			var ok bool
-			pr, ok = l.takePendingResume(ctx)
-			if !ok {
-				return
+		next, ok := l.collectNextTurnItems(ctx)
+		if !ok {
+			if l.stopCtrl.idleDuration() > 0 && !l.stopCtrl.isCommitted() && !l.buffer.IsClosed() && ctx.Err() == nil {
+				continue
 			}
-
-			l.preemptCtrl.waitForPushes()
-			buffered := l.buffer.TakeAll()
-			if pr.source == turnLoopPendingResumeSourceRestoredCheckpoint && !pr.resumeSubmitted {
-				pr.resumeItems = append(pr.resumeItems, buffered...)
-			} else {
-				pr.unhandled = append(pr.unhandled, buffered...)
-			}
-
-			pushBack = make([]T, 0, len(pr.interrupted)+len(pr.unhandled)+len(pr.resumeItems))
-			pushBack = append(pushBack, pr.interrupted...)
-			pushBack = append(pushBack, pr.unhandled...)
-			pushBack = append(pushBack, pr.resumeItems...)
-		} else {
-			var first T
-			var ok bool
-
-			if idleFor := l.stopCtrl.idleDuration(); idleFor > 0 {
-				l.buffer.ClearWakeup()
-				idleTimer := time.NewTimer(idleFor)
-				cancelIdle := make(chan struct{})
-				// When the idle timer fires, commitStop closes the buffer via
-				// buffer.Close(), which broadcasts to unblock the pending
-				// Receive() call below.
-				go func() {
-					select {
-					case <-idleTimer.C:
-						l.commitStop()
-					case <-cancelIdle:
-					}
-				}()
-
-				first, ok = l.buffer.Receive()
-
-				idleTimer.Stop()
-				close(cancelIdle)
-
-				// A spurious wakeup can occur if Stop(UntilIdleFor) called
-				// buffer.Wakeup() after ClearWakeup() above but before
-				// Receive() entered its wait. In that case, Receive returns
-				// !ok from the woken flag, not from buffer closure.
-				// Re-enter the loop so the idle timer restarts cleanly.
-				if !ok && !l.buffer.IsClosed() {
-					continue
-				}
-			} else {
-				first, ok = l.buffer.Receive()
-				// Woken up by Stop(UntilIdleFor); re-enter loop to start the idle timer.
-				if !ok && l.stopCtrl.idleDuration() > 0 {
-					continue
-				}
-			}
-
-			if !ok {
-				if err := ctx.Err(); err != nil {
-					l.runErr = err
-				}
-				return
-			}
-
-			if err := ctx.Err(); err != nil {
-				l.buffer.PushFront([]T{first})
-				l.runErr = err
-				return
-			}
-
-			if l.stopCtrl.isCommitted() {
-				l.buffer.PushFront([]T{first})
-				return
-			}
-
-			l.preemptCtrl.waitForPushes()
-			rest := l.buffer.TakeAll()
-			items = append([]T{first}, rest...)
-			pushBack = items
+			return
 		}
 
-		if isResume && l.stopCtrl.isCommitted() {
-			l.restorePendingResume(pr)
+		if next.isResume && l.stopCtrl.isCommitted() {
+			l.restorePendingResume(next.pr)
 			return
 		}
 
@@ -1873,11 +1896,11 @@ func (l *TurnLoop[T, M]) run(ctx context.Context) {
 			l.preemptCtrl.abortPlanningTurn().ack()
 		}
 
-		plan, err := l.planTurn(ctx, isResume, items, pr)
+		plan, err := l.planTurn(ctx, next.isResume, next.items, next.pr)
 		if err != nil {
 			abortPlanning()
-			if len(pushBack) > 0 {
-				l.buffer.PushFront(pushBack)
+			if len(next.pushBack) > 0 {
+				l.buffer.PushFront(next.pushBack)
 			}
 			l.runErr = err
 			return
@@ -1885,12 +1908,12 @@ func (l *TurnLoop[T, M]) run(ctx context.Context) {
 
 		if l.stopCtrl.isCommitted() {
 			abortPlanning()
-			if isResume && plan.spec.isResume {
-				l.restorePendingResume(pr)
+			if next.isResume && plan.spec.isResume {
+				l.restorePendingResume(next.pr)
 				return
 			}
-			if len(pushBack) > 0 {
-				l.buffer.PushFront(pushBack)
+			if len(next.pushBack) > 0 {
+				l.buffer.PushFront(next.pushBack)
 			}
 			return
 		}
@@ -1898,10 +1921,10 @@ func (l *TurnLoop[T, M]) run(ctx context.Context) {
 		agent, err := l.config.PrepareAgent(plan.turnCtx, l, plan.spec.consumed)
 		if err != nil {
 			abortPlanning()
-			if len(pushBack) > 0 {
-				l.buffer.PushFront(pushBack)
+			if len(next.pushBack) > 0 {
+				l.buffer.PushFront(next.pushBack)
 			}
-			if isResume && !plan.spec.isResume {
+			if next.isResume && !plan.spec.isResume {
 				l.loadCheckpointID = ""
 			}
 			l.runErr = err
@@ -1910,22 +1933,22 @@ func (l *TurnLoop[T, M]) run(ctx context.Context) {
 
 		if l.stopCtrl.isCommitted() {
 			abortPlanning()
-			if isResume && plan.spec.isResume {
-				l.restorePendingResume(pr)
+			if next.isResume && plan.spec.isResume {
+				l.restorePendingResume(next.pr)
 				return
 			}
-			if len(pushBack) > 0 {
-				l.buffer.PushFront(pushBack)
+			if len(next.pushBack) > 0 {
+				l.buffer.PushFront(next.pushBack)
 			}
 			return
 		}
 
-		if isResume && !plan.spec.isResume && l.loadCheckpointID != "" {
+		if next.isResume && !plan.spec.isResume && l.loadCheckpointID != "" {
 			checkpointID := l.loadCheckpointID
 			if err := l.deleteTurnLoopCheckpoint(ctx, checkpointID); err != nil {
 				abortPlanning()
-				if len(pushBack) > 0 {
-					l.buffer.PushFront(pushBack)
+				if len(next.pushBack) > 0 {
+					l.buffer.PushFront(next.pushBack)
 				}
 				l.loadCheckpointID = ""
 				l.runErr = fmt.Errorf("failed to abandon checkpoint[%s] before fresh turn: %w", checkpointID, err)
