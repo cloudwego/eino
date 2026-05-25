@@ -20,7 +20,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"sync"
 	"testing"
@@ -106,8 +105,8 @@ func TestStreamPersistence_CopyAndConcat(t *testing.T) {
 
 	// Find the persisted streaming event in the log: exactly one assistant output should be persisted.
 	var assistantMessages []*schema.Message
-	for _, raw := range store.events {
-		se, err := decodeSessionEvent[*schema.Message](raw)
+	for _, ep := range store.events {
+		se, err := decodeSessionEvent[*schema.Message](ep.Data)
 		require.NoError(t, err)
 		if se.Message != nil && se.Message.Role == schema.Assistant {
 			assistantMessages = append(assistantMessages, se.Message)
@@ -167,8 +166,8 @@ func TestStreamPersistence_GetMessageError_NotEnqueued(t *testing.T) {
 	assert.Contains(t, lastErr.Error(), "failed to persist session events")
 
 	// Verify no assistant SessionEvent is in the log.
-	for _, raw := range store.events {
-		se, err := decodeSessionEvent[*schema.Message](raw)
+	for _, ep := range store.events {
+		se, err := decodeSessionEvent[*schema.Message](ep.Data)
 		require.NoError(t, err)
 		if se.Message != nil {
 			assert.NotEqual(t, schema.Assistant, se.Message.Role,
@@ -296,8 +295,8 @@ func TestTurnEndOnly_PersistedAsSessionEvent(t *testing.T) {
 
 	// The log should contain: the input event + a TurnEnd event.
 	var sawTurnEnd bool
-	for _, raw := range store.events {
-		se, err := decodeSessionEvent[*schema.Message](raw)
+	for _, ep := range store.events {
+		se, err := decodeSessionEvent[*schema.Message](ep.Data)
 		require.NoError(t, err)
 		if se.TurnEnd != nil {
 			sawTurnEnd = true
@@ -340,18 +339,18 @@ func TestTailReplay_PartialTurnWithoutTurnEnd(t *testing.T) {
 	r1 := schema.AssistantMessage("A1", nil)
 	EnsureMessageID(r1)
 	for _, m := range []*schema.Message{a1, r1} {
-		se := &SessionEvent[*schema.Message]{Message: m}
-		data, err := encodeSessionEvent(withTestEventID(se))
+		se := withTestEventID(&SessionEvent[*schema.Message]{Message: m})
+		data, err := encodeSessionEvent(se)
 		require.NoError(t, err)
-		require.NoError(t, store.AppendEvents(ctx, sid, [][]byte{data}))
+		require.NoError(t, store.AppendEvents(ctx, sid, []SessionEventPayload{{EventID: se.EventID, Data: data}}))
 	}
 	// Persist TurnEnd as a SessionEvent.
-	turnEndSE := &SessionEvent[*schema.Message]{TurnEnd: &TurnEndState[*schema.Message]{
+	turnEndSE := withTestEventID(&SessionEvent[*schema.Message]{TurnEnd: &TurnEndState[*schema.Message]{
 		Messages: []*schema.Message{a1, r1},
-	}}
-	teData, err := encodeSessionEvent(withTestEventID(turnEndSE))
+	}})
+	teData, err := encodeSessionEvent(turnEndSE)
 	require.NoError(t, err)
-	require.NoError(t, store.AppendEvents(ctx, sid, [][]byte{teData}))
+	require.NoError(t, store.AppendEvents(ctx, sid, []SessionEventPayload{{EventID: turnEndSE.EventID, Data: teData}}))
 
 	// Phase 2: simulate a partial second turn where events were appended but
 	// no TurnEnd was persisted (interrupted).
@@ -360,10 +359,10 @@ func TestTailReplay_PartialTurnWithoutTurnEnd(t *testing.T) {
 	r2 := schema.AssistantMessage("A2", nil)
 	EnsureMessageID(r2)
 	for _, m := range []*schema.Message{a2, r2} {
-		se := &SessionEvent[*schema.Message]{Message: m}
-		data, err := encodeSessionEvent(withTestEventID(se))
+		se := withTestEventID(&SessionEvent[*schema.Message]{Message: m})
+		data, err := encodeSessionEvent(se)
 		require.NoError(t, err)
-		require.NoError(t, store.AppendEvents(ctx, sid, [][]byte{data}))
+		require.NoError(t, store.AppendEvents(ctx, sid, []SessionEventPayload{{EventID: se.EventID, Data: data}}))
 	}
 
 	// Boot: prepareRunnerSessionRun reconstructs durable context through the log
@@ -387,18 +386,18 @@ func TestTailReplay_NoTailEvents(t *testing.T) {
 
 	q := schema.UserMessage("Q")
 	EnsureMessageID(q)
-	se := &SessionEvent[*schema.Message]{Message: q}
-	data, err := encodeSessionEvent(withTestEventID(se))
+	se := withTestEventID(&SessionEvent[*schema.Message]{Message: q})
+	data, err := encodeSessionEvent(se)
 	require.NoError(t, err)
-	require.NoError(t, store.AppendEvents(ctx, sid, [][]byte{data}))
+	require.NoError(t, store.AppendEvents(ctx, sid, []SessionEventPayload{{EventID: se.EventID, Data: data}}))
 
 	// Persist TurnEnd as a SessionEvent.
-	turnEndSE := &SessionEvent[*schema.Message]{TurnEnd: &TurnEndState[*schema.Message]{
+	turnEndSE := withTestEventID(&SessionEvent[*schema.Message]{TurnEnd: &TurnEndState[*schema.Message]{
 		Messages: []*schema.Message{q},
-	}}
-	teData, err := encodeSessionEvent(withTestEventID(turnEndSE))
+	}})
+	teData, err := encodeSessionEvent(turnEndSE)
 	require.NoError(t, err)
-	require.NoError(t, store.AppendEvents(ctx, sid, [][]byte{teData}))
+	require.NoError(t, store.AppendEvents(ctx, sid, []SessionEventPayload{{EventID: turnEndSE.EventID, Data: teData}}))
 
 	state, err := prepareRunnerSessionRun[*schema.Message](ctx, nil, nil, sid, store, nil)
 	require.NoError(t, err)
@@ -418,25 +417,25 @@ func TestTailReplay_EmptySnapshotCursor(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		m := schema.UserMessage("pre")
 		EnsureMessageID(m)
-		se := &SessionEvent[*schema.Message]{Message: m}
-		data, err := encodeSessionEvent(withTestEventID(se))
+		se := withTestEventID(&SessionEvent[*schema.Message]{Message: m})
+		data, err := encodeSessionEvent(se)
 		require.NoError(t, err)
-		require.NoError(t, store.AppendEvents(ctx, sid, [][]byte{data}))
+		require.NoError(t, store.AppendEvents(ctx, sid, []SessionEventPayload{{EventID: se.EventID, Data: data}}))
 	}
 	// MessagesReplaced boundary with empty slice — supersedes pre-boundary events.
 	empty := []*schema.Message{}
-	boundarySE := &SessionEvent[*schema.Message]{MessagesReplaced: &empty}
-	bData, err := encodeSessionEvent(withTestEventID(boundarySE))
+	boundarySE := withTestEventID(&SessionEvent[*schema.Message]{MessagesReplaced: &empty})
+	bData, err := encodeSessionEvent(boundarySE)
 	require.NoError(t, err)
-	require.NoError(t, store.AppendEvents(ctx, sid, [][]byte{bData}))
+	require.NoError(t, store.AppendEvents(ctx, sid, []SessionEventPayload{{EventID: boundarySE.EventID, Data: bData}}))
 
 	// Post-boundary events.
 	postMsg := schema.UserMessage("post")
 	EnsureMessageID(postMsg)
-	se := &SessionEvent[*schema.Message]{Message: postMsg}
-	data, err := encodeSessionEvent(withTestEventID(se))
+	se := withTestEventID(&SessionEvent[*schema.Message]{Message: postMsg})
+	data, err := encodeSessionEvent(se)
 	require.NoError(t, err)
-	require.NoError(t, store.AppendEvents(ctx, sid, [][]byte{data}))
+	require.NoError(t, store.AppendEvents(ctx, sid, []SessionEventPayload{{EventID: se.EventID, Data: data}}))
 
 	state, err := prepareRunnerSessionRun[*schema.Message](ctx, nil, nil, sid, store, nil)
 	require.NoError(t, err)
@@ -454,16 +453,16 @@ func NewInMemoryStoreLocal(t *testing.T) SessionStore {
 // tests. Implements the EventID-based cursor contract (mirrors session.InMemoryStore).
 type inMemoryAdapter struct {
 	mu         sync.Mutex
-	events     map[string][][]byte
+	events     map[string][]SessionEventPayload
 	eventIDs   map[string][]string
 	eventIDIdx map[string]map[string]int
 }
 
-func (s *inMemoryAdapter) AppendEvents(_ context.Context, sid string, events [][]byte) error {
+func (s *inMemoryAdapter) AppendEvents(_ context.Context, sid string, events []SessionEventPayload) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.events == nil {
-		s.events = map[string][][]byte{}
+		s.events = map[string][]SessionEventPayload{}
 	}
 	if s.eventIDs == nil {
 		s.eventIDs = map[string][]string{}
@@ -477,19 +476,18 @@ func (s *inMemoryAdapter) AppendEvents(_ context.Context, sid string, events [][
 		s.eventIDIdx[sid] = idx
 	}
 	for _, e := range events {
-		var h testEventHeader
-		if err := json.Unmarshal(e, &h); err != nil {
-			return fmt.Errorf("%w: %v", ErrInvalidEventID, err)
-		}
-		if h.EventID == "" {
+		if e.EventID == "" {
 			return ErrInvalidEventID
 		}
-		if _, dup := idx[h.EventID]; dup {
+		if _, dup := idx[e.EventID]; dup {
 			continue
 		}
-		s.events[sid] = append(s.events[sid], append([]byte{}, e...))
-		s.eventIDs[sid] = append(s.eventIDs[sid], h.EventID)
-		idx[h.EventID] = len(s.events[sid]) - 1
+		s.events[sid] = append(s.events[sid], SessionEventPayload{
+			EventID: e.EventID,
+			Data:    append([]byte{}, e.Data...),
+		})
+		s.eventIDs[sid] = append(s.eventIDs[sid], e.EventID)
+		idx[e.EventID] = len(s.events[sid]) - 1
 	}
 	return nil
 }
@@ -521,9 +519,12 @@ func (s *inMemoryAdapter) LoadEvents(_ context.Context, sid string, opts *LoadEv
 			count = opts.Limit
 		}
 		start := end - count
-		out := make([][]byte, count)
+		out := make([]SessionEventPayload, count)
 		for i := 0; i < count; i++ {
-			out[i] = append([]byte{}, all[end-1-i]...)
+			out[i] = SessionEventPayload{
+				EventID: all[end-1-i].EventID,
+				Data:    append([]byte{}, all[end-1-i].Data...),
+			}
 		}
 		var next string
 		if start > 0 {
@@ -547,9 +548,12 @@ func (s *inMemoryAdapter) LoadEvents(_ context.Context, sid string, opts *LoadEv
 	if opts.Limit > 0 && start+opts.Limit < end {
 		end = start + opts.Limit
 	}
-	out := make([][]byte, end-start)
+	out := make([]SessionEventPayload, end-start)
 	for i := range out {
-		out[i] = append([]byte{}, all[start+i]...)
+		out[i] = SessionEventPayload{
+			EventID: all[start+i].EventID,
+			Data:    append([]byte{}, all[start+i].Data...),
+		}
 	}
 	var next string
 	if end < len(all) && end > 0 {
@@ -576,27 +580,27 @@ func TestPartialInterrupted_ThenNewRun(t *testing.T) {
 	r1 := schema.AssistantMessage("answer1", nil)
 	EnsureMessageID(r1)
 	for _, m := range []*schema.Message{q1, r1} {
-		se := &SessionEvent[*schema.Message]{Message: m}
-		data, err := encodeSessionEvent(withTestEventID(se))
+		se := withTestEventID(&SessionEvent[*schema.Message]{Message: m})
+		data, err := encodeSessionEvent(se)
 		require.NoError(t, err)
-		require.NoError(t, store.AppendEvents(ctx, sid, [][]byte{data}))
+		require.NoError(t, store.AppendEvents(ctx, sid, []SessionEventPayload{{EventID: se.EventID, Data: data}}))
 	}
 	// Persist TurnEnd as a SessionEvent (marks end of completed turn).
-	turnEndSE := &SessionEvent[*schema.Message]{TurnEnd: &TurnEndState[*schema.Message]{
+	turnEndSE := withTestEventID(&SessionEvent[*schema.Message]{TurnEnd: &TurnEndState[*schema.Message]{
 		Messages: []*schema.Message{q1, r1},
-	}}
-	teData, err := encodeSessionEvent(withTestEventID(turnEndSE))
+	}})
+	teData, err := encodeSessionEvent(turnEndSE)
 	require.NoError(t, err)
-	require.NoError(t, store.AppendEvents(ctx, sid, [][]byte{teData}))
+	require.NoError(t, store.AppendEvents(ctx, sid, []SessionEventPayload{{EventID: turnEndSE.EventID, Data: teData}}))
 
 	// Phase 2: simulate an interrupted turn — events appended, no new SaveTurnEnd.
 	q2 := schema.UserMessage("partial")
 	EnsureMessageID(q2)
 	for _, m := range []*schema.Message{q2} {
-		se := &SessionEvent[*schema.Message]{Message: m}
-		data, err := encodeSessionEvent(withTestEventID(se))
+		se := withTestEventID(&SessionEvent[*schema.Message]{Message: m})
+		data, err := encodeSessionEvent(se)
 		require.NoError(t, err)
-		require.NoError(t, store.AppendEvents(ctx, sid, [][]byte{data}))
+		require.NoError(t, store.AppendEvents(ctx, sid, []SessionEventPayload{{EventID: se.EventID, Data: data}}))
 	}
 
 	// Phase 3: new Run (no CheckPointStore; Runner skips pending checkpoints on fresh Run).
@@ -670,15 +674,15 @@ func TestExplicitCheckpointResume_WithSessionMode(t *testing.T) {
 	// Seed session events (messages + TurnEnd).
 	for _, m := range prior.Messages {
 		EnsureMessageID(m)
-		se := &SessionEvent[*schema.Message]{Message: m}
-		data, err := encodeSessionEvent(withTestEventID(se))
+		se := withTestEventID(&SessionEvent[*schema.Message]{Message: m})
+		data, err := encodeSessionEvent(se)
 		require.NoError(t, err)
-		require.NoError(t, store.AppendEvents(ctx, sid, [][]byte{data}))
+		require.NoError(t, store.AppendEvents(ctx, sid, []SessionEventPayload{{EventID: se.EventID, Data: data}}))
 	}
-	turnEndSE := &SessionEvent[*schema.Message]{TurnEnd: prior}
-	teData, err := encodeSessionEvent(withTestEventID(turnEndSE))
+	turnEndSE := withTestEventID(&SessionEvent[*schema.Message]{TurnEnd: prior})
+	teData, err := encodeSessionEvent(turnEndSE)
 	require.NoError(t, err)
-	require.NoError(t, store.AppendEvents(ctx, sid, [][]byte{teData}))
+	require.NoError(t, store.AppendEvents(ctx, sid, []SessionEventPayload{{EventID: turnEndSE.EventID, Data: teData}}))
 
 	// Seed an arbitrary checkpoint ID with a runner-session-checkpoint wrapper
 	// so runnerLoadCheckPointForSession can decode it.
@@ -709,26 +713,26 @@ func TestResumePath_TailReplay(t *testing.T) {
 	r1 := schema.AssistantMessage("A", nil)
 	EnsureMessageID(r1)
 	for _, m := range []*schema.Message{q1, r1} {
-		se := &SessionEvent[*schema.Message]{Message: m}
-		data, err := encodeSessionEvent(withTestEventID(se))
+		se := withTestEventID(&SessionEvent[*schema.Message]{Message: m})
+		data, err := encodeSessionEvent(se)
 		require.NoError(t, err)
-		require.NoError(t, store.AppendEvents(ctx, sid, [][]byte{data}))
+		require.NoError(t, store.AppendEvents(ctx, sid, []SessionEventPayload{{EventID: se.EventID, Data: data}}))
 	}
 	// Persist TurnEnd as a SessionEvent.
-	turnEndSE := &SessionEvent[*schema.Message]{TurnEnd: &TurnEndState[*schema.Message]{
+	turnEndSE := withTestEventID(&SessionEvent[*schema.Message]{TurnEnd: &TurnEndState[*schema.Message]{
 		Messages: []*schema.Message{q1, r1},
-	}}
-	teData, err := encodeSessionEvent(withTestEventID(turnEndSE))
+	}})
+	teData, err := encodeSessionEvent(turnEndSE)
 	require.NoError(t, err)
-	require.NoError(t, store.AppendEvents(ctx, sid, [][]byte{teData}))
+	require.NoError(t, store.AppendEvents(ctx, sid, []SessionEventPayload{{EventID: turnEndSE.EventID, Data: teData}}))
 
 	// Append a tail event after the snapshot.
 	tailMsg := schema.UserMessage("post-snapshot")
 	EnsureMessageID(tailMsg)
-	se := &SessionEvent[*schema.Message]{Message: tailMsg}
-	data, err := encodeSessionEvent(withTestEventID(se))
+	se := withTestEventID(&SessionEvent[*schema.Message]{Message: tailMsg})
+	data, err := encodeSessionEvent(se)
 	require.NoError(t, err)
-	require.NoError(t, store.AppendEvents(ctx, sid, [][]byte{data}))
+	require.NoError(t, store.AppendEvents(ctx, sid, []SessionEventPayload{{EventID: se.EventID, Data: data}}))
 
 	// Seed a runner session checkpoint so the resume path finds something to load.
 	cpStore := newSessionHelperStore()
@@ -812,8 +816,8 @@ func TestRunnerPersists_MessagesReplaced(t *testing.T) {
 	require.NoError(t, err)
 
 	var foundReplaced bool
-	for _, raw := range res.Events {
-		se, err := decodeSessionEvent[*schema.Message](raw)
+	for _, ep := range res.Events {
+		se, err := decodeSessionEvent[*schema.Message](ep.Data)
 		require.NoError(t, err)
 		if se.MessagesReplaced != nil {
 			foundReplaced = true
@@ -898,8 +902,8 @@ func TestRunnerPersists_MessageUpdated_BothMessages(t *testing.T) {
 	require.NoError(t, err)
 
 	var updates int
-	for _, raw := range res.Events {
-		se, err := decodeSessionEvent[*schema.Message](raw)
+	for _, ep := range res.Events {
+		se, err := decodeSessionEvent[*schema.Message](ep.Data)
 		require.NoError(t, err)
 		if se.MessageUpdated != nil {
 			updates++
@@ -991,8 +995,8 @@ func TestRunnerPersists_MessageInserted_AnchorAndAppend(t *testing.T) {
 	require.NoError(t, err)
 
 	var inserts int
-	for _, raw := range res.Events {
-		se, err := decodeSessionEvent[*schema.Message](raw)
+	for _, ep := range res.Events {
+		se, err := decodeSessionEvent[*schema.Message](ep.Data)
 		require.NoError(t, err)
 		if se.MessageInserted != nil {
 			inserts++
@@ -1076,8 +1080,8 @@ func TestAgentTool_ChildSessionID_FiltersFromParentLog(t *testing.T) {
 	res, err := parentStore.LoadEvents(ctx, sid, &LoadEventsRequest{})
 	require.NoError(t, err)
 	var sawChild, sawParent bool
-	for _, raw := range res.Events {
-		se, err := decodeSessionEvent[*schema.Message](raw)
+	for _, ep := range res.Events {
+		se, err := decodeSessionEvent[*schema.Message](ep.Data)
 		require.NoError(t, err)
 		if se.Message != nil {
 			if GetMessageID(se.Message) == GetMessageID(childMsg) {

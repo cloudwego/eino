@@ -20,7 +20,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -40,18 +39,12 @@ type sessionHelperStore struct {
 	mu          sync.Mutex
 	checkpoints map[string][]byte
 
-	events     [][]byte
+	events     []SessionEventPayload
 	eventIDs   []string
 	eventIDIdx map[string]int
 	loadErr    error
 	appendErr  error
 	deleteErr  error
-}
-
-// testEventHeader is the minimal envelope used to extract event_id without
-// fully decoding the payload.
-type testEventHeader struct {
-	EventID string `json:"event_id"`
 }
 
 // withTestEventID assigns a fresh UUIDv4 to the SessionEvent if its EventID is
@@ -64,25 +57,25 @@ func withTestEventID[M MessageType](se *SessionEvent[M]) *SessionEvent[M] {
 	return se
 }
 
-// validTestPayload returns a JSON payload that satisfies the AppendEvents
-// wire contract (non-empty event_id) for persister-level tests that don't
+// validTestPayload returns a SessionEventPayload that satisfies the AppendEvents
+// wire contract (non-empty EventID) for persister-level tests that don't
 // care about the SessionEvent body.
-func validTestPayload() []byte {
-	return []byte(`{"event_id":"` + uuid.NewString() + `"}`)
+func validTestPayload() SessionEventPayload {
+	return SessionEventPayload{EventID: uuid.NewString(), Data: []byte(`{}`)}
 }
 
-func decodeStoredSessionEvents(t *testing.T, raw [][]byte) []*SessionEvent[*schema.Message] {
+func decodeStoredSessionEvents(t *testing.T, raw []SessionEventPayload) []*SessionEvent[*schema.Message] {
 	t.Helper()
 	out := make([]*SessionEvent[*schema.Message], 0, len(raw))
-	for _, data := range raw {
-		se, err := decodeSessionEvent[*schema.Message](data)
+	for _, ep := range raw {
+		se, err := decodeSessionEvent[*schema.Message](ep.Data)
 		require.NoError(t, err)
 		out = append(out, se)
 	}
 	return out
 }
 
-func filterStoredSessionEvents(t *testing.T, raw [][]byte, pred func(*SessionEvent[*schema.Message]) bool) []*SessionEvent[*schema.Message] {
+func filterStoredSessionEvents(t *testing.T, raw []SessionEventPayload, pred func(*SessionEvent[*schema.Message]) bool) []*SessionEvent[*schema.Message] {
 	t.Helper()
 	var out []*SessionEvent[*schema.Message]
 	for _, se := range decodeStoredSessionEvents(t, raw) {
@@ -197,26 +190,25 @@ func (s *sessionHelperStore) Delete(_ context.Context, key string) error {
 	return nil
 }
 
-func (s *sessionHelperStore) AppendEvents(_ context.Context, _ string, events [][]byte) error {
+func (s *sessionHelperStore) AppendEvents(_ context.Context, _ string, events []SessionEventPayload) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.appendErr != nil {
 		return s.appendErr
 	}
 	for _, e := range events {
-		var h testEventHeader
-		if err := json.Unmarshal(e, &h); err != nil {
-			return fmt.Errorf("%w: %v", ErrInvalidEventID, err)
-		}
-		if h.EventID == "" {
+		if e.EventID == "" {
 			return ErrInvalidEventID
 		}
-		if _, dup := s.eventIDIdx[h.EventID]; dup {
+		if _, dup := s.eventIDIdx[e.EventID]; dup {
 			continue
 		}
-		s.events = append(s.events, append([]byte{}, e...))
-		s.eventIDs = append(s.eventIDs, h.EventID)
-		s.eventIDIdx[h.EventID] = len(s.events) - 1
+		s.events = append(s.events, SessionEventPayload{
+			EventID: e.EventID,
+			Data:    append([]byte{}, e.Data...),
+		})
+		s.eventIDs = append(s.eventIDs, e.EventID)
+		s.eventIDIdx[e.EventID] = len(s.events) - 1
 	}
 	return nil
 }
@@ -250,9 +242,12 @@ func (s *sessionHelperStore) LoadEvents(_ context.Context, _ string, opts *LoadE
 			count = opts.Limit
 		}
 		start := end - count
-		out := make([][]byte, count)
+		out := make([]SessionEventPayload, count)
 		for i := 0; i < count; i++ {
-			out[i] = append([]byte{}, all[end-1-i]...)
+			out[i] = SessionEventPayload{
+				EventID: all[end-1-i].EventID,
+				Data:    append([]byte{}, all[end-1-i].Data...),
+			}
 		}
 		var next string
 		if start > 0 {
@@ -276,9 +271,12 @@ func (s *sessionHelperStore) LoadEvents(_ context.Context, _ string, opts *LoadE
 	if opts.Limit > 0 && start+opts.Limit < end {
 		end = start + opts.Limit
 	}
-	out := make([][]byte, end-start)
+	out := make([]SessionEventPayload, end-start)
 	for i := range out {
-		out[i] = append([]byte{}, all[start+i]...)
+		out[i] = SessionEventPayload{
+			EventID: all[start+i].EventID,
+			Data:    append([]byte{}, all[start+i].Data...),
+		}
 	}
 	var next string
 	if end < len(all) && end > 0 {
@@ -650,13 +648,13 @@ func TestSessionPersister_EmptyPayloadSkipped(t *testing.T) {
 		}),
 	)
 
-	assert.NoError(t, persister.enqueue(nil))
-	assert.NoError(t, persister.enqueue([]byte{}))
+	assert.NoError(t, persister.enqueue(SessionEventPayload{}))
+	assert.NoError(t, persister.enqueue(SessionEventPayload{EventID: ""}))
 
 	se := makeInputSessionEvent(schema.UserMessage("real"))
 	data, err := encodeSessionEvent(se)
 	require.NoError(t, err)
-	require.NoError(t, persister.enqueue(data))
+	require.NoError(t, persister.enqueue(SessionEventPayload{EventID: se.EventID, Data: data}))
 
 	require.NoError(t, persister.closeAndWait())
 	require.Len(t, store.events, 1, "only the real event should be persisted")
@@ -1099,7 +1097,7 @@ func TestReconstructFromEventLog_MultiTurn(t *testing.T) {
 		se := &SessionEvent[*schema.Message]{Message: m}
 		data, err := encodeSessionEvent(withTestEventID(se))
 		require.NoError(t, err)
-		require.NoError(t, store.AppendEvents(ctx, sid, [][]byte{data}))
+		require.NoError(t, store.AppendEvents(ctx, sid, []SessionEventPayload{{EventID: se.EventID, Data: data}}))
 	}
 	// Turn 2: input "Q2" + output "A2"
 	q2 := schema.UserMessage("Q2")
@@ -1110,7 +1108,7 @@ func TestReconstructFromEventLog_MultiTurn(t *testing.T) {
 		se := &SessionEvent[*schema.Message]{Message: m}
 		data, err := encodeSessionEvent(withTestEventID(se))
 		require.NoError(t, err)
-		require.NoError(t, store.AppendEvents(ctx, sid, [][]byte{data}))
+		require.NoError(t, store.AppendEvents(ctx, sid, []SessionEventPayload{{EventID: se.EventID, Data: data}}))
 	}
 
 	state, err := reconstructSessionState[*schema.Message](ctx, store, sid, defaultLoadPageSize, nil)
@@ -1140,19 +1138,21 @@ func TestReconstructFromEventLog_CorruptEventReturnsError(t *testing.T) {
 
 	msg := schema.UserMessage("valid")
 	EnsureMessageID(msg)
-	data, err := encodeSessionEvent(withTestEventID(&SessionEvent[*schema.Message]{
+	se := withTestEventID(&SessionEvent[*schema.Message]{
 		Kind:    SessionEventMessage,
 		Message: msg,
-	}))
+	})
+	data, err := encodeSessionEvent(se)
 	require.NoError(t, err)
-	require.NoError(t, store.AppendEvents(ctx, sid, [][]byte{data}))
+	require.NoError(t, store.AppendEvents(ctx, sid, []SessionEventPayload{{EventID: se.EventID, Data: data}}))
 
 	corruptPayload := []byte(`{"event_id":"` + uuid.NewString() + `","kind":"message","message":` + "\x00\xff invalid json")
 	require.False(t, json.Valid(corruptPayload), "payload must be invalid JSON")
+	corruptID := uuid.NewString()
 	store.mu.Lock()
-	store.events = append(store.events, corruptPayload)
-	store.eventIDs = append(store.eventIDs, uuid.NewString())
-	store.eventIDIdx[store.eventIDs[len(store.eventIDs)-1]] = len(store.events) - 1
+	store.events = append(store.events, SessionEventPayload{EventID: corruptID, Data: corruptPayload})
+	store.eventIDs = append(store.eventIDs, corruptID)
+	store.eventIDIdx[corruptID] = len(store.events) - 1
 	store.mu.Unlock()
 
 	_, err = reconstructSessionState[*schema.Message](ctx, store, sid, defaultLoadPageSize, nil)
@@ -1173,7 +1173,7 @@ func TestReconstructFromEventLog_WithSummarizationBoundary(t *testing.T) {
 		se := &SessionEvent[*schema.Message]{Message: m}
 		data, err := encodeSessionEvent(withTestEventID(se))
 		require.NoError(t, err)
-		require.NoError(t, store.AppendEvents(ctx, sid, [][]byte{data}))
+		require.NoError(t, store.AppendEvents(ctx, sid, []SessionEventPayload{{EventID: se.EventID, Data: data}}))
 	}
 
 	// Boundary: summary of all messages.
@@ -1183,7 +1183,7 @@ func TestReconstructFromEventLog_WithSummarizationBoundary(t *testing.T) {
 	se := &SessionEvent[*schema.Message]{MessagesReplaced: &repl}
 	data, err := encodeSessionEvent(withTestEventID(se))
 	require.NoError(t, err)
-	require.NoError(t, store.AppendEvents(ctx, sid, [][]byte{data}))
+	require.NoError(t, store.AppendEvents(ctx, sid, []SessionEventPayload{{EventID: se.EventID, Data: data}}))
 
 	// Post-boundary events.
 	post := schema.AssistantMessage("post", nil)
@@ -1191,7 +1191,7 @@ func TestReconstructFromEventLog_WithSummarizationBoundary(t *testing.T) {
 	se = &SessionEvent[*schema.Message]{Message: post}
 	data, err = encodeSessionEvent(withTestEventID(se))
 	require.NoError(t, err)
-	require.NoError(t, store.AppendEvents(ctx, sid, [][]byte{data}))
+	require.NoError(t, store.AppendEvents(ctx, sid, []SessionEventPayload{{EventID: se.EventID, Data: data}}))
 
 	state, err := reconstructSessionState[*schema.Message](ctx, store, sid, defaultLoadPageSize, nil)
 	require.NoError(t, err)
@@ -1302,7 +1302,7 @@ func newRecordingHelperStore() *recordingHelperStore {
 	return &recordingHelperStore{sessionHelperStore: newSessionHelperStore()}
 }
 
-func (s *recordingHelperStore) AppendEvents(ctx context.Context, sid string, events [][]byte) error {
+func (s *recordingHelperStore) AppendEvents(ctx context.Context, sid string, events []SessionEventPayload) error {
 	s.mu.Lock()
 	if s.sessionHelperStore.appendErr != nil {
 		err := s.sessionHelperStore.appendErr
@@ -1455,7 +1455,7 @@ type transientFailStore struct {
 	appendErrVal error
 }
 
-func (s *transientFailStore) AppendEvents(ctx context.Context, sessionID string, events [][]byte) error {
+func (s *transientFailStore) AppendEvents(ctx context.Context, sessionID string, events []SessionEventPayload) error {
 	s.retryMu.Lock()
 	s.appendCalls++
 	if s.failsLeft > 0 {

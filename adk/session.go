@@ -41,11 +41,10 @@ const (
 	defaultLoadPageSize               = 100
 )
 
-// ErrInvalidEventID is returned by AppendEvents when a payload's event_id is
-// empty or the payload bytes are not valid JSON / cannot be parsed for an
-// event_id field. Protocol-level: persisters MUST NOT retry.
+// ErrInvalidEventID is returned by AppendEvents when a SessionEventPayload's
+// EventID field is empty. Protocol-level: persisters MUST NOT retry.
 //
-// Note: stores accept any non-empty string as event_id. UUIDv4 is the
+// Note: stores accept any non-empty string as EventID. UUIDv4 is the
 // Runner-side allocation format (see SessionEvent.EventID) but is NOT
 // validated at the SessionStore boundary; downstream stores MAY accept other
 // non-empty identifiers (e.g. for migration or testing).
@@ -56,6 +55,18 @@ var ErrInvalidEventID = errors.New("adk: session event has invalid event_id")
 // log compaction or a stale SSE Last-Event-ID). Callers can detect this and
 // fall back to a full reload.
 var ErrEventIDOutOfRange = errors.New("adk: session event id out of range")
+
+// SessionEventPayload is the storage-layer representation of a single session event.
+// The framework pre-extracts EventID from the typed SessionEvent before
+// serialization so that stores can dedup and index without parsing Data.
+type SessionEventPayload struct {
+	// EventID is the canonical, session-unique identity. Pre-extracted by
+	// the framework; stores MUST NOT parse Data to obtain it.
+	EventID string
+	// Data is the serialized SessionEvent payload produced by the configured
+	// EventSerializer. Stores treat this as opaque bytes.
+	Data []byte
+}
 
 // protocolErrors enumerates protocol-level sentinels that persisters MUST
 // fail-fast on. Future protocol-level sentinels MUST be added here so that
@@ -79,7 +90,7 @@ const (
 )
 
 // SessionStore persists Runner-managed session data.
-// Events are stored as an append-only ordered log of JSON-encoded SessionEvent payloads.
+// Events are stored as an append-only ordered log of serialized SessionEvent payloads (as SessionEventPayload).
 // TurnEndState is persisted as a regular SessionEvent variant (with TurnEnd field set),
 // not as a separate entity.
 //
@@ -101,7 +112,7 @@ const (
 //
 // Errors are split into two classes:
 //   - Protocol-level (e.g. ErrInvalidEventID): the input payload violates the
-//     wire contract (empty event_id or unparsable JSON). Stores MUST return
+//     wire contract (empty EventID). Stores MUST return
 //     such errors immediately; persisters MUST NOT retry them. Use
 //     isProtocolError(err) to test membership.
 //   - Infrastructure-level (e.g. network/db unavailable): transient; persisters
@@ -115,12 +126,11 @@ const (
 //   - If LoadEvents returns ErrEventIDOutOfRange, the adapter SHOULD treat the
 //     client's cursor as expired and fall back to a full reload (After="").
 type SessionStore interface {
-	// AppendEvents appends one or more JSON-encoded SessionEvent payloads to the session log.
+	// AppendEvents appends one or more SessionEventPayload entries to the session log.
 	// Events are appended in the order given. The store assigns ordering internally.
 	//
-	// Each event payload MUST carry a non-empty event_id. If the payload's event_id
-	// is empty OR the payload bytes are not valid JSON / cannot be parsed for an
-	// event_id field, the store MUST return ErrInvalidEventID (a sentinel;
+	// Each SessionEventPayload.EventID MUST be non-empty. If the EventID field
+	// is empty, the store MUST return ErrInvalidEventID (a sentinel;
 	// persisters will not retry it). Stores treat event_id as an opaque non-empty
 	// string and MUST NOT validate format (UUIDv4 is the Runner allocation
 	// convention, not a store-enforced contract). If a payload with an event_id
@@ -132,7 +142,7 @@ type SessionStore interface {
 	// valid payloads MAY have been persisted. Callers MUST treat AppendEvents as
 	// best-effort batch + idempotent retry — re-issuing the same batch is safe
 	// because already-stored event_ids are silently skipped.
-	AppendEvents(ctx context.Context, sessionID string, events [][]byte) error
+	AppendEvents(ctx context.Context, sessionID string, events []SessionEventPayload) error
 
 	// LoadEvents loads session events with pagination support.
 	// Returns events in chronological order (oldest first) or reverse chronological
@@ -161,8 +171,8 @@ type LoadEventsRequest struct {
 
 // LoadEventsResult is the response from LoadEvents.
 type LoadEventsResult struct {
-	// Events are the JSON-encoded SessionEvent payloads.
-	Events [][]byte
+	// Events are the serialized SessionEvent payloads.
+	Events []SessionEventPayload
 	// Next is the event_id of the LAST event in this page in the direction of
 	// travel — i.e. the newest event for forward, the oldest event for reverse.
 	// Pass it back as LoadEventsRequest.After (with the same Reverse flag) to
@@ -396,9 +406,8 @@ type SessionPersistenceConfig struct {
 	// EventSerializer encodes and decodes SessionEvent payloads persisted
 	// through SessionStore. Defaults to schema.HumanReadableSerializer.
 	//
-	// The serializer must emit JSON payload bytes accepted by the configured
-	// SessionStore. For JSONL-framed stores, this means one compact record per
-	// payload without raw CR/LF delimiters.
+	// The serializer output is stored opaquely by SessionStore implementations;
+	// no format constraint is imposed on the byte representation.
 	EventSerializer schema.Serializer
 }
 
@@ -750,7 +759,7 @@ type sessionEventPersister[M MessageType] struct {
 	sessionID string
 	cfg       SessionPersistenceConfig
 
-	ch     chan []byte
+	ch     chan SessionEventPayload
 	done   chan struct{}
 	closed int32 // atomic: 1 after closeAndWait is called
 
@@ -771,13 +780,13 @@ func newSessionEventPersister[M MessageType](
 		cfg:       cfg,
 		done:      make(chan struct{}),
 	}
-	p.ch = make(chan []byte, p.cfg.EventBufferSize)
+	p.ch = make(chan SessionEventPayload, p.cfg.EventBufferSize)
 	go p.run()
 	return p
 }
 
-func (p *sessionEventPersister[M]) enqueue(payload []byte) error {
-	if len(payload) == 0 {
+func (p *sessionEventPersister[M]) enqueue(payload SessionEventPayload) error {
+	if payload.EventID == "" {
 		return p.getErr()
 	}
 	if err := p.getErr(); err != nil {
@@ -806,13 +815,13 @@ func (p *sessionEventPersister[M]) run() {
 	timer := time.NewTimer(p.cfg.EventFlushInterval)
 	defer timer.Stop()
 
-	var batch [][]byte
+	var batch []SessionEventPayload
 	flush := func() {
 		if len(batch) == 0 || p.getErr() != nil {
 			batch = nil
 			return
 		}
-		entries := make([][]byte, len(batch))
+		entries := make([]SessionEventPayload, len(batch))
 		copy(entries, batch)
 		batch = nil
 
@@ -1035,8 +1044,8 @@ func reconstructSessionState[M MessageType](
 			break
 		}
 
-		for _, data := range result.Events {
-			event, err := decodeSessionEventWithSerializer[M](data, serializer)
+		for _, ep := range result.Events {
+			event, err := decodeSessionEventWithSerializer[M](ep.Data, serializer)
 			if err != nil {
 				return nil, err
 			}

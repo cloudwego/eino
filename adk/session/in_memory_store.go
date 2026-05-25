@@ -18,8 +18,6 @@ package session
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
 	"sync"
 
 	"github.com/cloudwego/eino/adk"
@@ -32,25 +30,19 @@ import (
 // Memory cost note: in addition to the raw payload bytes, the store maintains
 // a parallel slice of event IDs and an event_id → position map per session
 // (~50–80 bytes per event for the index entry); this is the trade-off for
-// supporting EventID-based cursors without re-parsing JSON on every page load.
+// supporting EventID-based cursors without re-parsing payloads on every page load.
 type InMemoryStore struct {
 	mu          sync.Mutex
-	events      map[string][][]byte       // sessionID -> ordered payloads
-	eventIDs    map[string][]string       // sessionID -> ordered event_ids (parallel to events)
-	eventIDIdx  map[string]map[string]int // sessionID -> event_id -> position
+	events      map[string][]adk.SessionEventPayload // sessionID -> ordered payloads
+	eventIDs    map[string][]string                  // sessionID -> ordered event_ids (parallel to events)
+	eventIDIdx  map[string]map[string]int            // sessionID -> event_id -> position
 	checkpoints map[string][]byte
-}
-
-// eventHeader is the minimal envelope used to pull event_id out of a payload
-// without fully decoding it.
-type eventHeader struct {
-	EventID string `json:"event_id"`
 }
 
 // NewInMemoryStore creates a new InMemoryStore.
 func NewInMemoryStore() *InMemoryStore {
 	return &InMemoryStore{
-		events:      make(map[string][][]byte),
+		events:      make(map[string][]adk.SessionEventPayload),
 		eventIDs:    make(map[string][]string),
 		eventIDIdx:  make(map[string]map[string]int),
 		checkpoints: make(map[string][]byte),
@@ -59,11 +51,11 @@ func NewInMemoryStore() *InMemoryStore {
 
 // AppendEvents appends events to the session's event log.
 //
-// Each payload MUST carry a non-empty event_id. Empty / unparsable / missing
-// event_id payloads cause AppendEvents to return adk.ErrInvalidEventID. If a
-// payload's event_id is already present in the session, it is silently
-// skipped (first-write-wins; payload bytes are not compared).
-func (s *InMemoryStore) AppendEvents(_ context.Context, sessionID string, events [][]byte) error {
+// Each payload MUST carry a non-empty EventID. Empty EventID causes
+// AppendEvents to return adk.ErrInvalidEventID. If a payload's EventID is
+// already present in the session, it is silently skipped (first-write-wins;
+// payload bytes are not compared).
+func (s *InMemoryStore) AppendEvents(_ context.Context, sessionID string, events []adk.SessionEventPayload) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	idx, ok := s.eventIDIdx[sessionID]
@@ -72,20 +64,19 @@ func (s *InMemoryStore) AppendEvents(_ context.Context, sessionID string, events
 		s.eventIDIdx[sessionID] = idx
 	}
 	for _, e := range events {
-		var h eventHeader
-		if err := json.Unmarshal(e, &h); err != nil {
-			return fmt.Errorf("%w: %v", adk.ErrInvalidEventID, err)
-		}
-		if h.EventID == "" {
+		if e.EventID == "" {
 			return adk.ErrInvalidEventID
 		}
-		if _, dup := idx[h.EventID]; dup {
+		if _, dup := idx[e.EventID]; dup {
 			continue // idempotent skip; first-write-wins
 		}
-		cp := append([]byte{}, e...)
+		cp := adk.SessionEventPayload{
+			EventID: e.EventID,
+			Data:    append([]byte{}, e.Data...),
+		}
 		s.events[sessionID] = append(s.events[sessionID], cp)
-		s.eventIDs[sessionID] = append(s.eventIDs[sessionID], h.EventID)
-		idx[h.EventID] = len(s.events[sessionID]) - 1
+		s.eventIDs[sessionID] = append(s.eventIDs[sessionID], e.EventID)
+		idx[e.EventID] = len(s.events[sessionID]) - 1
 	}
 	return nil
 }
@@ -127,9 +118,12 @@ func (s *InMemoryStore) loadForward(sessionID string, opts *adk.LoadEventsReques
 		end = start + opts.Limit
 	}
 
-	out := make([][]byte, end-start)
+	out := make([]adk.SessionEventPayload, end-start)
 	for i := range out {
-		out[i] = append([]byte{}, all[start+i]...)
+		out[i] = adk.SessionEventPayload{
+			EventID: all[start+i].EventID,
+			Data:    append([]byte{}, all[start+i].Data...),
+		}
 	}
 
 	var next string
@@ -162,9 +156,12 @@ func (s *InMemoryStore) loadReverse(sessionID string, opts *adk.LoadEventsReques
 	}
 
 	start := end - count
-	out := make([][]byte, count)
+	out := make([]adk.SessionEventPayload, count)
 	for i := 0; i < count; i++ {
-		out[i] = append([]byte{}, all[end-1-i]...)
+		out[i] = adk.SessionEventPayload{
+			EventID: all[end-1-i].EventID,
+			Data:    append([]byte{}, all[end-1-i].Data...),
+		}
 	}
 
 	var next string
