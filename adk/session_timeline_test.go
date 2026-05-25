@@ -115,7 +115,7 @@ func TestSessionTimeline_ReconstructionIgnoresNonContextVariants(t *testing.T) {
 	for _, se := range events {
 		data, err := encodeSessionEvent(se)
 		require.NoError(t, err)
-		require.NoError(t, store.AppendEvents(ctx, sid, [][]byte{data}))
+		require.NoError(t, store.AppendEvents(ctx, sid, []SessionEventPayload{{EventID: se.EventID, Data: data}}))
 	}
 
 	state, err := reconstructSessionState[*schema.Message](ctx, store, sid, defaultLoadPageSize, nil)
@@ -150,7 +150,7 @@ func TestSessionTimeline_ReconstructionIncludesPartialContextAfterLatestTurnEnd(
 	for _, se := range events {
 		data, err := encodeSessionEvent(se)
 		require.NoError(t, err)
-		require.NoError(t, store.AppendEvents(ctx, sid, [][]byte{data}))
+		require.NoError(t, store.AppendEvents(ctx, sid, []SessionEventPayload{{EventID: se.EventID, Data: data}}))
 	}
 
 	state, err := reconstructSessionState[*schema.Message](ctx, store, sid, defaultLoadPageSize, nil)
@@ -184,7 +184,7 @@ func TestSessionTimeline_ReconstructionPartialContextMissingAnchorFails(t *testi
 	for _, se := range events {
 		data, err := encodeSessionEvent(se)
 		require.NoError(t, err)
-		require.NoError(t, store.AppendEvents(ctx, sid, [][]byte{data}))
+		require.NoError(t, store.AppendEvents(ctx, sid, []SessionEventPayload{{EventID: se.EventID, Data: data}}))
 	}
 
 	_, err := reconstructSessionState[*schema.Message](ctx, store, sid, defaultLoadPageSize, nil)

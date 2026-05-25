@@ -18,41 +18,38 @@ package session
 
 import (
 	"bufio"
-	"bytes"
 	"context"
-	"encoding/json"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/cloudwego/eino/adk"
 )
 
 // FileStore is a process-local, file-backed implementation of adk.SessionStore.
-// Each session is stored as one JSONL file under the configured directory:
+// Each session is stored as one event log file under the configured directory:
 //
-//	<root>/<url.PathEscape(sessionID)>.jsonl
+//	<root>/<url.PathEscape(sessionID)>.evlog
 //
-// Each line is exactly one JSON-encoded SessionEvent payload. AppendEvents
-// rejects raw CR/LF bytes in payloads to preserve JSONL framing. FileStore does
+// Each line is formatted as: <EventID>\t<base64url(Data)>\n
+// This format is binary-safe regardless of serializer output. FileStore does
 // not implement CheckPointStore; runner checkpoints should use a dedicated
 // checkpoint store.
 //
 // FileStore synchronizes access within the current process. It does not provide
-// cross-process write safety. A crash or OS write failure may leave a trailing
-// partial line; future LoadEvents or AppendEvents calls report that as log
-// corruption with adk.ErrInvalidEventID.
+// cross-process write safety.
 type FileStore struct {
 	dir string
 	mu  sync.Mutex
 }
 
 type fileEvent struct {
-	payload []byte
-	eventID string
+	payload adk.SessionEventPayload
 }
 
 // NewFileStore creates a file-backed SessionStore rooted at dir.
@@ -74,12 +71,12 @@ func errorsNewEmptySessionID() error {
 	return fmt.Errorf("adk/session: sessionID is empty")
 }
 
-// AppendEvents appends events to the session's JSONL event log.
+// AppendEvents appends events to the session's event log.
 //
-// Payloads must be valid single-line JSON objects with a non-empty event_id.
-// Duplicate event IDs are skipped with first-write-wins semantics, including
-// duplicates within the same batch.
-func (s *FileStore) AppendEvents(_ context.Context, sessionID string, events [][]byte) error {
+// Each SessionEventPayload.EventID MUST be non-empty. Duplicate event IDs are
+// skipped with first-write-wins semantics, including duplicates within the
+// same batch.
+func (s *FileStore) AppendEvents(_ context.Context, sessionID string, events []adk.SessionEventPayload) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -87,13 +84,24 @@ func (s *FileStore) AppendEvents(_ context.Context, sessionID string, events [][
 	if err != nil {
 		return err
 	}
-	pending, err := preflightFileEvents(events)
-	if err != nil {
-		return err
+
+	// Validate incoming events and dedup within batch.
+	seen := make(map[string]struct{}, len(events))
+	pending := make([]adk.SessionEventPayload, 0, len(events))
+	for _, e := range events {
+		if e.EventID == "" {
+			return adk.ErrInvalidEventID
+		}
+		if _, dup := seen[e.EventID]; dup {
+			continue
+		}
+		seen[e.EventID] = struct{}{}
+		pending = append(pending, e)
 	}
 	if len(pending) == 0 {
 		return nil
 	}
+
 	_, existing, err := s.readAllEventsLocked(path)
 	if err != nil {
 		return err
@@ -106,16 +114,14 @@ func (s *FileStore) AppendEvents(_ context.Context, sessionID string, events [][
 	defer out.Close()
 
 	for _, event := range pending {
-		if _, dup := existing[event.eventID]; dup {
+		if _, dup := existing[event.EventID]; dup {
 			continue
 		}
-		if _, err := out.Write(event.payload); err != nil {
+		line := fmt.Sprintf("%s\t%s\n", event.EventID, base64.RawURLEncoding.EncodeToString(event.Data))
+		if _, err := out.WriteString(line); err != nil {
 			return err
 		}
-		if _, err := out.Write([]byte("\n")); err != nil {
-			return err
-		}
-		existing[event.eventID] = len(existing)
+		existing[event.EventID] = len(existing)
 	}
 	return nil
 }
@@ -146,41 +152,7 @@ func (s *FileStore) sessionPath(sessionID string) (string, error) {
 	if sessionID == "" {
 		return "", errorsNewEmptySessionID()
 	}
-	return filepath.Join(s.dir, url.PathEscape(sessionID)+".jsonl"), nil
-}
-
-func preflightFileEvents(events [][]byte) ([]fileEvent, error) {
-	seen := make(map[string]struct{}, len(events))
-	pending := make([]fileEvent, 0, len(events))
-	for _, payload := range events {
-		eventID, err := parseFileEventPayload(payload)
-		if err != nil {
-			return nil, err
-		}
-		if _, dup := seen[eventID]; dup {
-			continue
-		}
-		seen[eventID] = struct{}{}
-		pending = append(pending, fileEvent{
-			payload: append([]byte{}, payload...),
-			eventID: eventID,
-		})
-	}
-	return pending, nil
-}
-
-func parseFileEventPayload(payload []byte) (string, error) {
-	if bytes.ContainsAny(payload, "\r\n") {
-		return "", fmt.Errorf("%w: payload contains raw line delimiter", adk.ErrInvalidEventID)
-	}
-	var h eventHeader
-	if err := json.Unmarshal(payload, &h); err != nil {
-		return "", fmt.Errorf("%w: %v", adk.ErrInvalidEventID, err)
-	}
-	if h.EventID == "" {
-		return "", adk.ErrInvalidEventID
-	}
-	return h.EventID, nil
+	return filepath.Join(s.dir, url.PathEscape(sessionID)+".evlog"), nil
 }
 
 func (s *FileStore) readAllEventsLocked(path string) ([]fileEvent, map[string]int, error) {
@@ -204,19 +176,30 @@ func (s *FileStore) readAllEventsLocked(path string) ([]fileEvent, map[string]in
 			if line[len(line)-1] != '\n' {
 				return nil, nil, fmt.Errorf("%w: corrupted trailing record at line %d", adk.ErrInvalidEventID, lineNo)
 			}
-			if line[len(line)-1] == '\n' {
-				line = line[:len(line)-1]
+			// Strip trailing newline
+			line = line[:len(line)-1]
+			lineStr := string(line)
+
+			// Split on first tab
+			tabIdx := strings.IndexByte(lineStr, '\t')
+			if tabIdx < 0 {
+				return nil, nil, fmt.Errorf("%w: missing tab separator at line %d", adk.ErrInvalidEventID, lineNo)
 			}
-			eventID, err := parseFileEventPayload(line)
-			if err != nil {
-				return nil, nil, fmt.Errorf("%w: corrupted record at line %d", err, lineNo)
+			eventID := lineStr[:tabIdx]
+			if eventID == "" {
+				return nil, nil, fmt.Errorf("%w: empty event_id at line %d", adk.ErrInvalidEventID, lineNo)
 			}
+			encodedData := lineStr[tabIdx+1:]
+			data, decErr := base64.RawURLEncoding.DecodeString(encodedData)
+			if decErr != nil {
+				return nil, nil, fmt.Errorf("%w: base64 decode error at line %d: %v", adk.ErrInvalidEventID, lineNo, decErr)
+			}
+
 			if _, dup := idx[eventID]; dup {
 				return nil, nil, fmt.Errorf("%w: duplicate event_id %q at line %d", adk.ErrInvalidEventID, eventID, lineNo)
 			}
 			events = append(events, fileEvent{
-				payload: append([]byte{}, line...),
-				eventID: eventID,
+				payload: adk.SessionEventPayload{EventID: eventID, Data: data},
 			})
 			idx[eventID] = len(events) - 1
 		}
@@ -249,14 +232,18 @@ func loadFileEventsForward(events []fileEvent, idx map[string]int, opts *adk.Loa
 		end = start + opts.Limit
 	}
 
-	out := make([][]byte, end-start)
+	out := make([]adk.SessionEventPayload, end-start)
 	for i := range out {
-		out[i] = append([]byte{}, events[start+i].payload...)
+		src := events[start+i].payload
+		out[i] = adk.SessionEventPayload{
+			EventID: src.EventID,
+			Data:    append([]byte{}, src.Data...),
+		}
 	}
 
 	var next string
 	if end < len(events) && end > 0 {
-		next = events[end-1].eventID
+		next = events[end-1].payload.EventID
 	}
 	return &adk.LoadEventsResult{Events: out, Next: next}, nil
 }
@@ -280,14 +267,18 @@ func loadFileEventsReverse(events []fileEvent, idx map[string]int, opts *adk.Loa
 	}
 
 	start := end - count
-	out := make([][]byte, count)
+	out := make([]adk.SessionEventPayload, count)
 	for i := 0; i < count; i++ {
-		out[i] = append([]byte{}, events[end-1-i].payload...)
+		src := events[end-1-i].payload
+		out[i] = adk.SessionEventPayload{
+			EventID: src.EventID,
+			Data:    append([]byte{}, src.Data...),
+		}
 	}
 
 	var next string
 	if start > 0 {
-		next = events[start].eventID
+		next = events[start].payload.EventID
 	}
 	return &adk.LoadEventsResult{Events: out, Next: next}, nil
 }
