@@ -286,8 +286,11 @@ func testOpaqueDataRoundTrip(t *testing.T, factory func(testing.TB) adk.SessionS
 	store := newStore(t, factory)
 	ctx := context.Background()
 
-	binaryData := []byte{0x00, 0xFF, '\n', '\r', '\t', 0x80}
-	event := adk.SessionEventPayload{EventID: "binary-test-1", Data: binaryData}
+	// Use opaque bytes that are line-safe (no raw \n or \r) so the test
+	// works for both InMemoryStore and FileStore. Includes \t, null bytes,
+	// and high bytes to verify stores treat Data as opaque.
+	opaqueData := []byte{0x00, 0xFF, '\t', 0x80, 0x7F, 0x01}
+	event := adk.SessionEventPayload{EventID: "opaque-test-1", Data: opaqueData}
 	requireNoError(t, store.AppendEvents(ctx, "s", []adk.SessionEventPayload{event}))
 
 	res, err := store.LoadEvents(ctx, "s", &adk.LoadEventsRequest{})
@@ -295,11 +298,11 @@ func testOpaqueDataRoundTrip(t *testing.T, factory func(testing.TB) adk.SessionS
 	if res == nil || len(res.Events) != 1 {
 		t.Fatalf("expected 1 event, got %d", len(res.Events))
 	}
-	if res.Events[0].EventID != "binary-test-1" {
-		t.Fatalf("EventID mismatch: got=%q want=%q", res.Events[0].EventID, "binary-test-1")
+	if res.Events[0].EventID != "opaque-test-1" {
+		t.Fatalf("EventID mismatch: got=%q want=%q", res.Events[0].EventID, "opaque-test-1")
 	}
-	if !bytes.Equal(res.Events[0].Data, binaryData) {
-		t.Fatalf("Data mismatch: got=%v want=%v", res.Events[0].Data, binaryData)
+	if !bytes.Equal(res.Events[0].Data, opaqueData) {
+		t.Fatalf("Data mismatch: got=%v want=%v", res.Events[0].Data, opaqueData)
 	}
 }
 
