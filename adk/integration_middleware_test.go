@@ -128,8 +128,8 @@ func TestAgentsMDIntegration_PersistsMessageInserted(t *testing.T) {
 	require.NoError(t, err)
 
 	var sawInsertedAgentsmd bool
-	for _, raw := range res.Events {
-		se := unmarshalSessionEvent(t, raw)
+	for _, ep := range res.Events {
+		se := unmarshalSessionEvent(t, ep.Data)
 		if se.MessageInserted == nil {
 			continue
 		}
@@ -194,8 +194,8 @@ func TestAgentsMDIntegration_NextTurnSkipsReinsertion(t *testing.T) {
 		res, err := store.LoadEvents(ctx, sid, &adk.LoadEventsRequest{})
 		require.NoError(t, err)
 		count := 0
-		for _, raw := range res.Events {
-			se := unmarshalSessionEvent(t, raw)
+		for _, ep := range res.Events {
+			se := unmarshalSessionEvent(t, ep.Data)
 			if se.MessageInserted == nil {
 				continue
 			}
@@ -293,8 +293,8 @@ func TestToolSearchIntegration_PersistsMessageInserted(t *testing.T) {
 	require.NoError(t, err)
 
 	var sawInsertedReminder bool
-	for _, raw := range res.Events {
-		se := unmarshalSessionEvent(t, raw)
+	for _, ep := range res.Events {
+		se := unmarshalSessionEvent(t, ep.Data)
 		if se.MessageInserted == nil {
 			continue
 		}
@@ -344,7 +344,7 @@ func TestPatchToolCallsIntegration_PersistsMessageInserted(t *testing.T) {
 	for _, m := range []*schema.Message{user, dangling} {
 		se := &adk.SessionEvent[*schema.Message]{EventID: uuid.NewString(), Message: m}
 		data := marshalSessionEvent(t, se)
-		require.NoError(t, store.AppendEvents(ctx, sid, [][]byte{data}))
+		require.NoError(t, store.AppendEvents(ctx, sid, []adk.SessionEventPayload{{EventID: se.EventID, Data: data}}))
 	}
 
 	// Wire patchtoolcalls into a ChatModelAgent.
@@ -381,8 +381,8 @@ func TestPatchToolCallsIntegration_PersistsMessageInserted(t *testing.T) {
 	res, err := store.LoadEvents(ctx, sid, &adk.LoadEventsRequest{})
 	require.NoError(t, err)
 	var sawInsertedToolResult bool
-	for _, raw := range res.Events {
-		se := unmarshalSessionEvent(t, raw)
+	for _, ep := range res.Events {
+		se := unmarshalSessionEvent(t, ep.Data)
 		if se.MessageInserted == nil {
 			continue
 		}
@@ -444,7 +444,7 @@ func TestReductionIntegration_PersistsBothMessageUpdated(t *testing.T) {
 	for _, m := range []*schema.Message{user, assistantA, toolResultA, assistantB, toolResultB} {
 		se := &adk.SessionEvent[*schema.Message]{EventID: uuid.NewString(), Message: m}
 		data := marshalSessionEvent(t, se)
-		require.NoError(t, store.AppendEvents(ctx, sid, [][]byte{data}))
+		require.NoError(t, store.AppendEvents(ctx, sid, []adk.SessionEventPayload{{EventID: se.EventID, Data: data}}))
 	}
 
 	// Reduction config: token counter always exceeds threshold; clear handler always clears.
@@ -502,8 +502,8 @@ func TestReductionIntegration_PersistsBothMessageUpdated(t *testing.T) {
 	require.NoError(t, err)
 
 	var sawAssistantUpdated, sawToolUpdated bool
-	for _, raw := range res.Events {
-		se := unmarshalSessionEvent(t, raw)
+	for _, ep := range res.Events {
+		se := unmarshalSessionEvent(t, ep.Data)
 		if se.MessageUpdated == nil {
 			continue
 		}
