@@ -175,7 +175,6 @@ type runnerSessionRunState[M MessageType] struct {
 	persistence     SessionPersistenceConfig
 	sessionStore    SessionStore
 	checkPointStore CheckPointStore
-	runID           string
 	turnID          string
 	// inputMessages are the caller-provided messages for this turn (before history prepend).
 	// Captured so the Runner can persist them as session events at turn start.
@@ -217,7 +216,6 @@ func prepareRunnerSessionRun[M MessageType]( //nolint:revive // argument-limit
 	}
 	state.enabled = true
 	state.sessionID = sessionID
-	state.runID = uuid.NewString()
 	state.turnID = uuid.NewString()
 	state.sessionStore = sessionStore
 	state.checkPointStore = checkPointStore
@@ -226,12 +224,14 @@ func prepareRunnerSessionRun[M MessageType]( //nolint:revive // argument-limit
 
 	pageSize := state.persistence.LoadPageSize
 
-	reconstructed, err := reconstructSessionState[M](ctx, sessionStore, sessionID, pageSize, state.persistence.EventSerializer)
+	reconstructResult, err := reconstructSessionState[M](ctx, sessionStore, sessionID, pageSize, state.persistence.EventSerializer)
 	if err != nil {
 		return nil, fmt.Errorf("failed to reconstruct session[%s]: %w", sessionID, err)
 	}
-	if reconstructed != nil {
-		state.latestState = reconstructed
+	// In Run, only the reconstructed state matters; inFlightTurnID is
+	// deliberately unused because fresh turns always get new TurnIDs.
+	if reconstructResult != nil && reconstructResult.state != nil {
+		state.latestState = reconstructResult.state
 	}
 
 	if checkPointStore == nil {
@@ -276,7 +276,6 @@ func prepareRunnerSessionResume[M MessageType](
 	}
 	state.enabled = true
 	state.sessionID = sessionID
-	state.runID = uuid.NewString()
 	state.turnID = uuid.NewString()
 	state.sessionStore = sessionStore
 	state.checkPointStore = checkPointStore
@@ -285,12 +284,17 @@ func prepareRunnerSessionResume[M MessageType](
 
 	pageSize := state.persistence.LoadPageSize
 
-	reconstructed, err := reconstructSessionState[M](ctx, sessionStore, sessionID, pageSize, state.persistence.EventSerializer)
+	reconstructResult, err := reconstructSessionState[M](ctx, sessionStore, sessionID, pageSize, state.persistence.EventSerializer)
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to reconstruct session[%s]: %w", sessionID, err)
 	}
-	if reconstructed != nil {
-		state.latestState = reconstructed
+	if reconstructResult != nil {
+		if reconstructResult.state != nil {
+			state.latestState = reconstructResult.state
+		}
+		if reconstructResult.inFlightTurnID != "" {
+			state.turnID = reconstructResult.inFlightTurnID
+		}
 	}
 
 	// Pick the checkpoint ID: caller-provided takes precedence over the implicit
@@ -604,7 +608,6 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 		if se == nil || sessionState == nil || !sessionState.enabled {
 			return se
 		}
-		se.RunID = sessionState.runID
 		se.TurnID = sessionState.turnID
 		return se
 	}

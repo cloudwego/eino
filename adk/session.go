@@ -207,7 +207,10 @@ type SessionEvent[M MessageType] struct {
 
 	Kind SessionEventKind `json:"kind,omitempty"`
 
-	RunID  string `json:"run_id,omitempty"`
+	// TurnID groups all events belonging to a single logical turn. A fresh Run
+	// assigns a new UUID; a Resume preserves the original TurnID so downstream
+	// consumers can correlate the entire turn (including the interrupted prefix
+	// and the resumed suffix) as one unit.
 	TurnID string `json:"turn_id,omitempty"`
 
 	Message          M                        `json:"message,omitempty"`
@@ -1015,6 +1018,11 @@ func replaceMessageByID[M MessageType](messages *[]M, msgID string, newMsg M) er
 	return fmt.Errorf("reconstruct: target message %q not found for update", msgID)
 }
 
+type sessionReconstructResult[M MessageType] struct {
+	state          *TurnEndState[M]
+	inFlightTurnID string // TurnID from events after the last committed TurnEnd (the interrupted turn)
+}
+
 // reconstructSessionState rebuilds session state from the append log.
 // Durable context events are replayed through the log tail, including messages
 // after the latest TurnEnd. The latest TurnEnd remains the metadata boundary for
@@ -1027,7 +1035,7 @@ func reconstructSessionState[M MessageType](
 	sessionID string,
 	pageSize int,
 	serializer schema.Serializer,
-) (*TurnEndState[M], error) {
+) (*sessionReconstructResult[M], error) {
 	var allEvents []*SessionEvent[M]
 	var after string
 
@@ -1069,7 +1077,22 @@ func reconstructSessionState[M MessageType](
 		committedEndIdx = contextTailIdx
 	}
 
-	return replayDurableContextEvents(allEvents, committedEndIdx, contextTailIdx)
+	// After the last committed TurnEnd, any events belong to an interrupted
+	// turn. The first TurnID found identifies that turn — all events within a
+	// single turn share the same TurnID, so only the first match is needed.
+	var inFlightTurnID string
+	for i := committedEndIdx + 1; i <= contextTailIdx; i++ {
+		if allEvents[i] != nil && allEvents[i].TurnID != "" {
+			inFlightTurnID = allEvents[i].TurnID
+			break
+		}
+	}
+
+	state, err := replayDurableContextEvents(allEvents, committedEndIdx, contextTailIdx)
+	if err != nil {
+		return nil, err
+	}
+	return &sessionReconstructResult[M]{state: state, inFlightTurnID: inFlightTurnID}, nil
 }
 
 func replayDurableContextEvents[M MessageType](events []*SessionEvent[M], metadataTurnEndPos int, contextTailPos int) (*TurnEndState[M], error) {
@@ -1117,6 +1140,7 @@ func latestCommittedTurnEnd[M MessageType](events []*SessionEvent[M]) int {
 			return i
 		}
 	}
+	// Fallback for legacy logs that lack Kind/TurnID on TurnEnd events.
 	for i := len(events) - 1; i >= 0; i-- {
 		if events[i] != nil && events[i].TurnEnd != nil {
 			return i

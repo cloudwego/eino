@@ -1114,9 +1114,9 @@ func TestSessionEventTimestamp(t *testing.T) {
 func TestReconstructFromEventLog_EmptySession(t *testing.T) {
 	store := newSessionHelperStore()
 	ctx := context.Background()
-	state, err := reconstructSessionState[*schema.Message](ctx, store, "empty", defaultLoadPageSize, nil)
+	result, err := reconstructSessionState[*schema.Message](ctx, store, "empty", defaultLoadPageSize, nil)
 	require.NoError(t, err)
-	assert.Nil(t, state)
+	assert.Nil(t, result)
 }
 
 // TestReconstructFromEventLog_MultiTurn verifies multi-turn reconstruction.
@@ -1148,24 +1148,26 @@ func TestReconstructFromEventLog_MultiTurn(t *testing.T) {
 		require.NoError(t, store.AppendEvents(ctx, sid, []SessionEventPayload{{EventID: se.EventID, Data: data}}))
 	}
 
-	state, err := reconstructSessionState[*schema.Message](ctx, store, sid, defaultLoadPageSize, nil)
+	result, err := reconstructSessionState[*schema.Message](ctx, store, sid, defaultLoadPageSize, nil)
 	require.NoError(t, err)
-	require.NotNil(t, state)
-	require.Len(t, state.Messages, 4)
-	assert.Equal(t, "Q1", state.Messages[0].Content)
-	assert.Equal(t, "A1", state.Messages[1].Content)
-	assert.Equal(t, "Q2", state.Messages[2].Content)
-	assert.Equal(t, "A2", state.Messages[3].Content)
+	require.NotNil(t, result)
+	require.NotNil(t, result.state)
+	require.Len(t, result.state.Messages, 4)
+	assert.Equal(t, "Q1", result.state.Messages[0].Content)
+	assert.Equal(t, "A1", result.state.Messages[1].Content)
+	assert.Equal(t, "Q2", result.state.Messages[2].Content)
+	assert.Equal(t, "A2", result.state.Messages[3].Content)
 
 	// Verify pagination: use page size 2 so that 4 events require multiple pages.
-	state2, err := reconstructSessionState[*schema.Message](ctx, store, sid, 2, nil)
+	result2, err := reconstructSessionState[*schema.Message](ctx, store, sid, 2, nil)
 	require.NoError(t, err)
-	require.NotNil(t, state2)
-	require.Len(t, state2.Messages, 4)
-	assert.Equal(t, "Q1", state2.Messages[0].Content)
-	assert.Equal(t, "A1", state2.Messages[1].Content)
-	assert.Equal(t, "Q2", state2.Messages[2].Content)
-	assert.Equal(t, "A2", state2.Messages[3].Content)
+	require.NotNil(t, result2)
+	require.NotNil(t, result2.state)
+	require.Len(t, result2.state.Messages, 4)
+	assert.Equal(t, "Q1", result2.state.Messages[0].Content)
+	assert.Equal(t, "A1", result2.state.Messages[1].Content)
+	assert.Equal(t, "Q2", result2.state.Messages[2].Content)
+	assert.Equal(t, "A2", result2.state.Messages[3].Content)
 }
 
 func TestReconstructFromEventLog_CorruptEventReturnsError(t *testing.T) {
@@ -1230,12 +1232,13 @@ func TestReconstructFromEventLog_WithSummarizationBoundary(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, store.AppendEvents(ctx, sid, []SessionEventPayload{{EventID: se.EventID, Data: data}}))
 
-	state, err := reconstructSessionState[*schema.Message](ctx, store, sid, defaultLoadPageSize, nil)
+	result, err := reconstructSessionState[*schema.Message](ctx, store, sid, defaultLoadPageSize, nil)
 	require.NoError(t, err)
-	require.NotNil(t, state)
-	require.Len(t, state.Messages, 2)
-	assert.Equal(t, "summary", state.Messages[0].Content)
-	assert.Equal(t, "post", state.Messages[1].Content)
+	require.NotNil(t, result)
+	require.NotNil(t, result.state)
+	require.Len(t, result.state.Messages, 2)
+	assert.Equal(t, "summary", result.state.Messages[0].Content)
+	assert.Equal(t, "post", result.state.Messages[1].Content)
 }
 
 // TestRunnerSessionReconstructsFromEventLog: Delete TurnEndState from store,
@@ -1600,4 +1603,327 @@ func TestSessionPersister_FlushRetryContextCancellation(t *testing.T) {
 	assert.ErrorIs(t, err, context.Canceled)
 	// Should NOT have exhausted all retries.
 	assert.Less(t, store.getAppendCalls(), 5)
+}
+
+// --- Attack tests for TurnID / inFlightTurnID recovery ---
+
+// TestAttack_InFlightTurnIDRecoveryOnResume verifies that reconstructSessionState
+// correctly identifies an in-flight (interrupted) turn's TurnID from events
+// after the last committed TurnEnd.
+func TestAttack_InFlightTurnIDRecoveryOnResume(t *testing.T) {
+	ctx := context.Background()
+	store := newSessionHelperStore()
+	sid := "inflight-recovery"
+
+	committedMsg := schema.UserMessage("committed-msg")
+	EnsureMessageID(committedMsg)
+
+	// A committed turn: TurnStart (lifecycle running) + Message + TurnEnd, all with TurnID "turn-committed"
+	events := []*SessionEvent[*schema.Message]{
+		{EventID: uuid.NewString(), Kind: SessionEventSessionStatusRunning, TurnID: "turn-committed", Lifecycle: &LifecycleEvent{Scope: LifecycleScopeSession, State: SessionRunStateRunning}},
+		{EventID: uuid.NewString(), Kind: SessionEventMessage, TurnID: "turn-committed", Message: committedMsg},
+		{EventID: uuid.NewString(), Kind: SessionEventTurnEnd, TurnID: "turn-committed", TurnEnd: &TurnEndState[*schema.Message]{SessionValues: map[string]any{"k": "v"}}},
+	}
+
+	// An interrupted turn: a Message event with TurnID "turn-interrupted" and NO TurnEnd
+	interruptedMsg := schema.AssistantMessage("interrupted-msg", nil)
+	EnsureMessageID(interruptedMsg)
+	events = append(events, &SessionEvent[*schema.Message]{
+		EventID: uuid.NewString(), Kind: SessionEventMessage, TurnID: "turn-interrupted", Message: interruptedMsg,
+	})
+
+	for _, se := range events {
+		data, err := encodeSessionEventWithSerializer(se, nil)
+		require.NoError(t, err)
+		require.NoError(t, store.AppendEvents(ctx, sid, []SessionEventPayload{{EventID: se.EventID, Data: data}}))
+	}
+
+	result, err := reconstructSessionState[*schema.Message](ctx, store, sid, defaultLoadPageSize, nil)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, "turn-interrupted", result.inFlightTurnID)
+	require.NotNil(t, result.state)
+	// State should have messages from committed turn (1) + interrupted turn (1).
+	require.Len(t, result.state.Messages, 2)
+	assert.Equal(t, "committed-msg", result.state.Messages[0].Content)
+	assert.Equal(t, "interrupted-msg", result.state.Messages[1].Content)
+}
+
+// TestAttack_InFlightTurnIDEmptyWhenNoPostTurnEndEvents verifies that when
+// the last event is a TurnEnd (complete turn), inFlightTurnID is empty.
+func TestAttack_InFlightTurnIDEmptyWhenNoPostTurnEndEvents(t *testing.T) {
+	ctx := context.Background()
+	store := newSessionHelperStore()
+	sid := "no-inflight"
+
+	msg := schema.UserMessage("hello")
+	EnsureMessageID(msg)
+
+	events := []*SessionEvent[*schema.Message]{
+		{EventID: uuid.NewString(), Kind: SessionEventMessage, TurnID: "turn-1", Message: msg},
+		{EventID: uuid.NewString(), Kind: SessionEventTurnEnd, TurnID: "turn-1", TurnEnd: &TurnEndState[*schema.Message]{SessionValues: map[string]any{"done": true}}},
+	}
+
+	for _, se := range events {
+		data, err := encodeSessionEventWithSerializer(se, nil)
+		require.NoError(t, err)
+		require.NoError(t, store.AppendEvents(ctx, sid, []SessionEventPayload{{EventID: se.EventID, Data: data}}))
+	}
+
+	result, err := reconstructSessionState[*schema.Message](ctx, store, sid, defaultLoadPageSize, nil)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, "", result.inFlightTurnID)
+}
+
+// TestAttack_InFlightTurnIDMultipleTurnIDsInTail verifies that when multiple
+// post-TurnEnd events have different TurnIDs, only the first one is used.
+func TestAttack_InFlightTurnIDMultipleTurnIDsInTail(t *testing.T) {
+	ctx := context.Background()
+	store := newSessionHelperStore()
+	sid := "multi-turnid-tail"
+
+	committedMsg := schema.UserMessage("committed")
+	EnsureMessageID(committedMsg)
+
+	msgA := schema.UserMessage("msg-A")
+	EnsureMessageID(msgA)
+	msgB := schema.AssistantMessage("msg-B", nil)
+	EnsureMessageID(msgB)
+
+	events := []*SessionEvent[*schema.Message]{
+		{EventID: uuid.NewString(), Kind: SessionEventMessage, TurnID: "turn-committed", Message: committedMsg},
+		{EventID: uuid.NewString(), Kind: SessionEventTurnEnd, TurnID: "turn-committed", TurnEnd: &TurnEndState[*schema.Message]{}},
+		// Post-TurnEnd events with different TurnIDs
+		{EventID: uuid.NewString(), Kind: SessionEventMessage, TurnID: "turn-A", Message: msgA},
+		{EventID: uuid.NewString(), Kind: SessionEventMessage, TurnID: "turn-B", Message: msgB},
+	}
+
+	for _, se := range events {
+		data, err := encodeSessionEventWithSerializer(se, nil)
+		require.NoError(t, err)
+		require.NoError(t, store.AppendEvents(ctx, sid, []SessionEventPayload{{EventID: se.EventID, Data: data}}))
+	}
+
+	result, err := reconstructSessionState[*schema.Message](ctx, store, sid, defaultLoadPageSize, nil)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, "turn-A", result.inFlightTurnID, "should take the first TurnID found after committed TurnEnd")
+}
+
+// TestAttack_OldRunIDFieldIgnoredOnDeserialization verifies that a JSON payload
+// containing a legacy "run_id" field is deserialized without error, and the
+// field is silently ignored (no RunID field on the struct).
+func TestAttack_OldRunIDFieldIgnoredOnDeserialization(t *testing.T) {
+	// Manually craft JSON with a legacy "run_id" field alongside valid fields.
+	rawJSON := []byte(`{
+		"event_id": "evt-legacy",
+		"run_id": "old-run",
+		"turn_id": "turn-1",
+		"kind": "message",
+		"message": {"role": "user", "content": "hello from legacy"}
+	}`)
+
+	event, err := decodeSessionEventWithSerializer[*schema.Message](rawJSON, nil)
+	require.NoError(t, err, "deserialization must not fail on unknown run_id field")
+	require.NotNil(t, event)
+	assert.Equal(t, "turn-1", event.TurnID)
+	assert.Equal(t, "evt-legacy", event.EventID)
+	require.NotNil(t, event.Message)
+	assert.Equal(t, "hello from legacy", event.Message.Content)
+}
+
+// TestAttack_ResumePreservesTurnIDFromInterruptedRun verifies that Resume
+// carries the same TurnID as the interrupted run's events.
+func TestAttack_ResumePreservesTurnIDFromInterruptedRun(t *testing.T) {
+	ctx := context.Background()
+	store := newSessionHelperStore()
+	sessionID := "resume-turnid-preserve"
+
+	// First, run a normal turn that completes (provides a committed TurnEnd baseline).
+	normalAgent := &runnerSessionAgent{
+		name: "normal-agent",
+		turnEnd: &TurnEndState[*schema.Message]{
+			Messages: []*schema.Message{schema.AssistantMessage("first answer", nil)},
+		},
+	}
+	firstRunner := NewRunner(ctx, RunnerConfig{
+		Agent:              normalAgent,
+		SessionID:          sessionID,
+		SessionStore:       store,
+		CheckPointStore:    store,
+		SessionPersistence: &SessionPersistenceConfig{EventFlushBatchSize: 1},
+	})
+	drainSessionEvents(t, firstRunner.Query(ctx, "first question"))
+
+	// Now run a query that interrupts (building on the committed session).
+	agent := &runnerInterruptAgent{}
+	runner := NewRunner(ctx, RunnerConfig{
+		Agent:              agent,
+		SessionID:          sessionID,
+		SessionStore:       store,
+		CheckPointStore:    store,
+		SessionPersistence: &SessionPersistenceConfig{EventFlushBatchSize: 1},
+	})
+
+	iter := runner.Query(ctx, "trigger interrupt")
+	for {
+		_, ok := iter.Next()
+		if !ok {
+			break
+		}
+	}
+
+	// Find the TurnID used by the interrupted run. It must differ from the first run's TurnID.
+	// Collect all unique TurnIDs from the store.
+	turnIDSet := make(map[string]bool)
+	for _, ep := range store.events {
+		se, err := decodeSessionEvent[*schema.Message](ep.Data)
+		require.NoError(t, err)
+		if se.TurnID != "" {
+			turnIDSet[se.TurnID] = true
+		}
+	}
+	require.GreaterOrEqual(t, len(turnIDSet), 2, "must have at least 2 distinct TurnIDs (committed + interrupted)")
+
+	// The interrupted TurnID is the one on events AFTER the last TurnEnd.
+	// We can identify it by looking at events after the committed turn.
+	var lastTurnEndIdx int
+	for i, ep := range store.events {
+		se, err := decodeSessionEvent[*schema.Message](ep.Data)
+		require.NoError(t, err)
+		if se.Kind == SessionEventTurnEnd && se.TurnID != "" {
+			lastTurnEndIdx = i
+		}
+	}
+	var interruptedTurnID string
+	for i := lastTurnEndIdx + 1; i < len(store.events); i++ {
+		se, err := decodeSessionEvent[*schema.Message](store.events[i].Data)
+		require.NoError(t, err)
+		if se.TurnID != "" {
+			interruptedTurnID = se.TurnID
+			break
+		}
+	}
+	require.NotEmpty(t, interruptedTurnID, "interrupted run must have events with a TurnID after the last TurnEnd")
+
+	// Record event count before resume.
+	eventsBeforeResume := len(store.events)
+
+	// Resume the runner.
+	resumeIter, err := runner.Resume(ctx, "")
+	require.NoError(t, err)
+	for {
+		_, ok := resumeIter.Next()
+		if !ok {
+			break
+		}
+	}
+
+	// Check that resume events (added after the interrupted run) carry the same TurnID.
+	var resumeTurnIDs []string
+	for i := eventsBeforeResume; i < len(store.events); i++ {
+		se, err := decodeSessionEvent[*schema.Message](store.events[i].Data)
+		require.NoError(t, err)
+		if se.TurnID != "" {
+			resumeTurnIDs = append(resumeTurnIDs, se.TurnID)
+		}
+	}
+	require.NotEmpty(t, resumeTurnIDs, "resume must produce events with TurnIDs")
+	for _, tid := range resumeTurnIDs {
+		assert.Equal(t, interruptedTurnID, tid, "resume events must carry the same TurnID as the interrupted run")
+	}
+}
+
+// TestAttack_FreshRunIgnoresInFlightTurnID verifies that a fresh Run on a
+// session with an interrupted turn does NOT reuse the interrupted TurnID.
+func TestAttack_FreshRunIgnoresInFlightTurnID(t *testing.T) {
+	ctx := context.Background()
+	store := newSessionHelperStore()
+	sessionID := "fresh-run-ignores-inflight"
+
+	// First, run a normal turn that completes (provides a committed TurnEnd baseline).
+	normalAgent := &runnerSessionAgent{
+		name: "normal-agent",
+		turnEnd: &TurnEndState[*schema.Message]{
+			Messages: []*schema.Message{schema.AssistantMessage("baseline", nil)},
+		},
+	}
+	baselineRunner := NewRunner(ctx, RunnerConfig{
+		Agent:              normalAgent,
+		SessionID:          sessionID,
+		SessionStore:       store,
+		CheckPointStore:    store,
+		SessionPersistence: &SessionPersistenceConfig{EventFlushBatchSize: 1},
+	})
+	drainSessionEvents(t, baselineRunner.Query(ctx, "baseline"))
+
+	// Now run a query that interrupts.
+	agent := &runnerInterruptAgent{}
+	runner := NewRunner(ctx, RunnerConfig{
+		Agent:              agent,
+		SessionID:          sessionID,
+		SessionStore:       store,
+		CheckPointStore:    store,
+		SessionPersistence: &SessionPersistenceConfig{EventFlushBatchSize: 1},
+	})
+
+	iter := runner.Query(ctx, "trigger interrupt")
+	for {
+		_, ok := iter.Next()
+		if !ok {
+			break
+		}
+	}
+
+	// Identify the interrupted TurnID (events after the last committed TurnEnd).
+	var lastTurnEndIdx int
+	for i, ep := range store.events {
+		se, err := decodeSessionEvent[*schema.Message](ep.Data)
+		require.NoError(t, err)
+		if se.Kind == SessionEventTurnEnd && se.TurnID != "" {
+			lastTurnEndIdx = i
+		}
+	}
+	var interruptedTurnID string
+	for i := lastTurnEndIdx + 1; i < len(store.events); i++ {
+		se, err := decodeSessionEvent[*schema.Message](store.events[i].Data)
+		require.NoError(t, err)
+		if se.TurnID != "" {
+			interruptedTurnID = se.TurnID
+			break
+		}
+	}
+	require.NotEmpty(t, interruptedTurnID)
+
+	// Instead of resuming, create a NEW runner on the same session and run a new query (fresh Run).
+	eventsBeforeFresh := len(store.events)
+	freshAgent := &runnerSessionAgent{
+		name: "fresh-agent",
+		turnEnd: &TurnEndState[*schema.Message]{
+			Messages: []*schema.Message{schema.AssistantMessage("fresh answer", nil)},
+		},
+	}
+	freshRunner := NewRunner(ctx, RunnerConfig{
+		Agent:              freshAgent,
+		SessionID:          sessionID,
+		SessionStore:       store,
+		CheckPointStore:    store,
+		SessionPersistence: &SessionPersistenceConfig{EventFlushBatchSize: 1},
+	})
+	drainSessionEvents(t, freshRunner.Query(ctx, "new question"))
+
+	// Collect TurnIDs from the fresh run's events.
+	var freshTurnIDs []string
+	for i := eventsBeforeFresh; i < len(store.events); i++ {
+		se, err := decodeSessionEvent[*schema.Message](store.events[i].Data)
+		require.NoError(t, err)
+		if se.TurnID != "" {
+			freshTurnIDs = append(freshTurnIDs, se.TurnID)
+		}
+	}
+	require.NotEmpty(t, freshTurnIDs, "fresh run must have events with TurnIDs")
+	for _, tid := range freshTurnIDs {
+		assert.NotEqual(t, interruptedTurnID, tid, "fresh run must NOT reuse the interrupted TurnID")
+	}
 }

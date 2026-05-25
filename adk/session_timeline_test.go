@@ -118,11 +118,13 @@ func TestSessionTimeline_ReconstructionIgnoresNonContextVariants(t *testing.T) {
 		require.NoError(t, store.AppendEvents(ctx, sid, []SessionEventPayload{{EventID: se.EventID, Data: data}}))
 	}
 
-	state, err := reconstructSessionState[*schema.Message](ctx, store, sid, defaultLoadPageSize, nil)
+	result, err := reconstructSessionState[*schema.Message](ctx, store, sid, defaultLoadPageSize, nil)
 	require.NoError(t, err)
-	require.Len(t, state.Messages, 1)
-	assert.Equal(t, "hello", state.Messages[0].Content)
-	assert.Equal(t, map[string]any{"k": "v"}, state.SessionValues)
+	require.NotNil(t, result)
+	require.NotNil(t, result.state)
+	require.Len(t, result.state.Messages, 1)
+	assert.Equal(t, "hello", result.state.Messages[0].Content)
+	assert.Equal(t, map[string]any{"k": "v"}, result.state.SessionValues)
 }
 
 func TestSessionTimeline_ReconstructionIncludesPartialContextAfterLatestTurnEnd(t *testing.T) {
@@ -153,14 +155,16 @@ func TestSessionTimeline_ReconstructionIncludesPartialContextAfterLatestTurnEnd(
 		require.NoError(t, store.AppendEvents(ctx, sid, []SessionEventPayload{{EventID: se.EventID, Data: data}}))
 	}
 
-	state, err := reconstructSessionState[*schema.Message](ctx, store, sid, defaultLoadPageSize, nil)
+	result, err := reconstructSessionState[*schema.Message](ctx, store, sid, defaultLoadPageSize, nil)
 	require.NoError(t, err)
-	require.Len(t, state.Messages, 4)
-	assert.Equal(t, "committed user", state.Messages[0].Content)
-	assert.Equal(t, "committed assistant", state.Messages[1].Content)
-	assert.Equal(t, "partial user", state.Messages[2].Content)
-	assert.Equal(t, "partial assistant", state.Messages[3].Content)
-	assert.Equal(t, map[string]any{"turn": "committed"}, state.SessionValues)
+	require.NotNil(t, result)
+	require.NotNil(t, result.state)
+	require.Len(t, result.state.Messages, 4)
+	assert.Equal(t, "committed user", result.state.Messages[0].Content)
+	assert.Equal(t, "committed assistant", result.state.Messages[1].Content)
+	assert.Equal(t, "partial user", result.state.Messages[2].Content)
+	assert.Equal(t, "partial assistant", result.state.Messages[3].Content)
+	assert.Equal(t, map[string]any{"turn": "committed"}, result.state.SessionValues)
 }
 
 func TestSessionTimeline_ReconstructionPartialContextMissingAnchorFails(t *testing.T) {
