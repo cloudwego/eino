@@ -912,12 +912,13 @@ func TestRunnerPersists_MessageUpdated_BothMessages(t *testing.T) {
 	assert.Equal(t, 2, updates, "both MessageUpdated events must be persisted")
 
 	// Reconstruction must apply both updates correctly.
-	state, err := reconstructSessionState[*schema.Message](ctx, store, sid, defaultLoadPageSize, nil)
+	result, err := reconstructSessionState[*schema.Message](ctx, store, sid, defaultLoadPageSize, nil)
 	require.NoError(t, err)
-	require.NotNil(t, state)
+	require.NotNil(t, result)
+	require.NotNil(t, result.state)
 	// Find updated content among reconstructed messages.
 	var sawClearedAssistant, sawPlaceholderTool bool
-	for _, m := range state.Messages {
+	for _, m := range result.state.Messages {
 		if m.Role == schema.Assistant && m.Content == "call me [cleared]" {
 			sawClearedAssistant = true
 		}
@@ -1005,14 +1006,15 @@ func TestRunnerPersists_MessageInserted_AnchorAndAppend(t *testing.T) {
 	assert.Equal(t, 2, inserts, "both MessageInserted events must be persisted")
 
 	// Verify reconstruction applies insertions correctly.
-	state, err := reconstructSessionState[*schema.Message](ctx, store, sid, defaultLoadPageSize, nil)
+	result, err := reconstructSessionState[*schema.Message](ctx, store, sid, defaultLoadPageSize, nil)
 	require.NoError(t, err)
-	require.NotNil(t, state)
-	require.GreaterOrEqual(t, len(state.Messages), 3)
+	require.NotNil(t, result)
+	require.NotNil(t, result.state)
+	require.GreaterOrEqual(t, len(result.state.Messages), 3)
 	// The agentsmd message should appear before the user input.
 	var idxAgentsmd, idxUser, idxPatched int
 	idxAgentsmd, idxUser, idxPatched = -1, -1, -1
-	for i, m := range state.Messages {
+	for i, m := range result.state.Messages {
 		switch GetMessageID(m) {
 		case GetMessageID(agentsmdMsg):
 			idxAgentsmd = i
