@@ -214,7 +214,7 @@ type SessionEvent[M MessageType] struct {
 	TurnID string `json:"turn_id,omitempty"`
 
 	Message          M                        `json:"message,omitempty"`
-	MessagesReplaced *[]M                     `json:"messages_replaced"`
+	MessagesReplaced *[]M                     `json:"messages_replaced,omitempty"`
 	MessageUpdated   *MessageUpdatedEvent[M]  `json:"message_updated,omitempty"`
 	MessageInserted  *MessageInsertedEvent[M] `json:"message_inserted,omitempty"`
 	TurnEnd          *TurnEndState[M]         `json:"turn_end,omitempty"`
