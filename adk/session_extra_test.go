@@ -82,7 +82,7 @@ func TestStreamPersistence_CopyAndConcat(t *testing.T) {
 		EnableStreaming:    true,
 		SessionID:          sid,
 		SessionStore:       store,
-		SessionPersistence: &SessionPersistenceConfig{EventFlushBatchSize: 1},
+		Session: &SessionConfig{EventFlushBatchSize: 1},
 	})
 
 	// Drain live events and verify the live stream still produces the concatenated content.
@@ -143,7 +143,7 @@ func TestStreamPersistence_GetMessageError_NotEnqueued(t *testing.T) {
 		EnableStreaming:    true,
 		SessionID:          sid,
 		SessionStore:       store,
-		SessionPersistence: &SessionPersistenceConfig{EventFlushBatchSize: 1},
+		Session: &SessionConfig{EventFlushBatchSize: 1},
 	})
 
 	iter := runner.Query(ctx, "trigger")
@@ -246,7 +246,7 @@ func TestRunnerInputEvents_MixedRoles(t *testing.T) {
 		Agent:              agent,
 		SessionID:          sid,
 		SessionStore:       store,
-		SessionPersistence: &SessionPersistenceConfig{EventFlushBatchSize: 1},
+		Session: &SessionConfig{EventFlushBatchSize: 1},
 	})
 
 	systemMsg := schema.SystemMessage("system instruction")
@@ -289,7 +289,7 @@ func TestTurnEndOnly_PersistedAsSessionEvent(t *testing.T) {
 		Agent:              agent,
 		SessionID:          sid,
 		SessionStore:       store,
-		SessionPersistence: &SessionPersistenceConfig{EventFlushBatchSize: 1},
+		Session: &SessionConfig{EventFlushBatchSize: 1},
 	})
 	drainSessionEvents(t, runner.Query(ctx, "input"))
 
@@ -614,7 +614,7 @@ func TestPartialInterrupted_ThenNewRun(t *testing.T) {
 		Agent:              captured,
 		SessionID:          sid,
 		SessionStore:       store,
-		SessionPersistence: &SessionPersistenceConfig{EventFlushBatchSize: 1},
+		Session: &SessionConfig{EventFlushBatchSize: 1},
 	})
 	drainSessionEvents(t, runner.Query(ctx, "second"))
 
@@ -807,7 +807,7 @@ func TestRunnerPersists_MessagesReplaced(t *testing.T) {
 		Agent:              agent,
 		SessionID:          sid,
 		SessionStore:       store,
-		SessionPersistence: &SessionPersistenceConfig{EventFlushBatchSize: 1},
+		Session: &SessionConfig{EventFlushBatchSize: 1},
 	})
 	drainSessionEvents(t, runner.Query(ctx, "anything"))
 
@@ -894,7 +894,7 @@ func TestRunnerPersists_MessageUpdated_BothMessages(t *testing.T) {
 		Agent:              agent,
 		SessionID:          sid,
 		SessionStore:       store,
-		SessionPersistence: &SessionPersistenceConfig{EventFlushBatchSize: 1},
+		Session: &SessionConfig{EventFlushBatchSize: 1},
 	})
 	drainSessionEvents(t, runner.Query(ctx, "go"))
 
@@ -986,7 +986,7 @@ func TestRunnerPersists_MessageInserted_AnchorAndAppend(t *testing.T) {
 		Agent:              agent,
 		SessionID:          sid,
 		SessionStore:       store,
-		SessionPersistence: &SessionPersistenceConfig{EventFlushBatchSize: 1},
+		Session: &SessionConfig{EventFlushBatchSize: 1},
 	})
 	// We must pass the user message as input, with its existing ID already assigned,
 	// so reconstruction's anchor lookup succeeds.
@@ -1074,7 +1074,7 @@ func TestAgentTool_ChildSessionID_FiltersFromParentLog(t *testing.T) {
 		Agent:              agent,
 		SessionID:          sid,
 		SessionStore:       parentStore,
-		SessionPersistence: &SessionPersistenceConfig{EventFlushBatchSize: 1},
+		Session: &SessionConfig{EventFlushBatchSize: 1},
 	})
 	drainSessionEvents(t, runner.Query(ctx, "go"))
 
