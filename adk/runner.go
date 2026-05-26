@@ -601,6 +601,8 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 	if sessionState != nil && sessionState.enabled {
 		persister = newSessionEventPersister[M](ctx, sessionState.sessionStore, sessionState.sessionID, sessionState.persistence)
 	}
+	syncPersistence := sessionState != nil && sessionState.enabled &&
+		sessionState.persistence.PersistenceMode == SessionPersistenceModeSync
 	setPersistErr := func(err error) {
 		if err != nil && persistErr == nil {
 			persistErr = err
@@ -613,23 +615,25 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 		se.TurnID = sessionState.turnID
 		return se
 	}
-	enqueueSessionEvent := func(se *SessionEvent[M]) {
+	enqueueSessionEvent := func(se *SessionEvent[M]) error {
 		if persister == nil || se == nil {
-			return
+			return nil
 		}
 		annotateSessionEvent(se)
 		if err := ValidateEmittedSessionEventKind(se); err != nil {
 			setPersistErr(err)
-			return
+			return err
 		}
 		data, err := encodeSessionEventWithSerializer(se, sessionState.persistence.EventSerializer)
 		if err != nil {
 			setPersistErr(err)
-			return
+			return err
 		}
 		if err := persister.enqueue(SessionEventPayload{EventID: se.EventID, Kind: se.Kind, Data: data}); err != nil {
 			setPersistErr(err)
+			return err
 		}
+		return nil
 	}
 	sendTimelineEvent := func(se *SessionEvent[M]) {
 		if se == nil {
@@ -647,7 +651,9 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 			return
 		}
 		event := &TypedAgentEvent[M]{EventID: se.EventID, Timestamp: se.Timestamp, SessionEvent: se}
-		enqueueSessionEvent(se)
+		if err := enqueueSessionEvent(se); err != nil && syncPersistence {
+			return
+		}
 		if enableTimelineEvents {
 			gen.Send(event)
 		}
@@ -788,57 +794,79 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 				if event.EventID == "" {
 					event.EventID = uuid.NewString()
 				}
-				// Streaming output is split into two stream copies: copies[1] is
-				// rewritten onto the live event and sent immediately so live
-				// consumers see no extra latency, copies[0] is then drained
-				// synchronously to materialize the persisted SessionEvent. The
-				// live send MUST happen first — the AsyncIterator's send buffer
-				// keeps the consumer un-blocked while this loop drains the
-				// persistence copy.
 				if event.Output != nil && event.Output.MessageOutput != nil &&
 					event.Output.MessageOutput.IsStreaming && event.Output.MessageOutput.MessageStream != nil {
-					copies := event.Output.MessageOutput.MessageStream.Copy(2)
-					liveOutput := *event.Output
-					liveMV := *event.Output.MessageOutput
-					liveMV.MessageStream = copies[1]
+					if syncPersistence {
+						persistedMsg, err := event.Output.MessageOutput.GetMessage()
+						if err != nil {
+							setPersistErr(err)
+							continue
+						}
+						persistMV := *event.Output.MessageOutput
+						persistMV.Message = persistedMsg
+						persistMV.MessageStream = nil
+						persistMV.IsStreaming = false
+						persistOutput := *event.Output
+						persistOutput.MessageOutput = &persistMV
+						persistEvent := *event
+						persistEvent.Output = &persistOutput
 
-					// Rewrite the live event to the second stream copy and send it
-					// before materializing the persisted copy. This keeps managed
-					// sessions from delaying live stream delivery on persistence.
-					liveOutput.MessageOutput = &liveMV
-					event.Output = &liveOutput
-					liveEvent := event
-					if !enableTimelineEvents {
-						liveEvent = stripSessionEventFields(liveEvent)
-					}
-					if liveEvent != nil {
-						gen.Send(liveEvent)
-					}
-					liveDelivered = true
+						se, err := toSessionEventChecked(&persistEvent)
+						if err != nil {
+							setPersistErr(err)
+							continue
+						}
+						if se != nil {
+							if err := enqueueSessionEvent(se); err != nil {
+								continue
+							}
+						}
+						event = &persistEvent
+					} else {
+						// Streaming output is split into two stream copies: copies[1] is
+						// rewritten onto the live event and sent immediately so live
+						// consumers see no extra latency, copies[0] is then drained
+						// synchronously to materialize the persisted SessionEvent.
+						copies := event.Output.MessageOutput.MessageStream.Copy(2)
+						liveOutput := *event.Output
+						liveMV := *event.Output.MessageOutput
+						liveMV.MessageStream = copies[1]
 
-					persistCopy := &TypedMessageVariant[M]{IsStreaming: true, MessageStream: copies[0]}
-					persistedMsg, err := persistCopy.GetMessage()
-					if err != nil {
-						setPersistErr(err)
-						continue
-					}
+						liveOutput.MessageOutput = &liveMV
+						event.Output = &liveOutput
+						liveEvent := event
+						if !enableTimelineEvents {
+							liveEvent = stripSessionEventFields(liveEvent)
+						}
+						if liveEvent != nil {
+							gen.Send(liveEvent)
+						}
+						liveDelivered = true
 
-					persistMV := *event.Output.MessageOutput
-					persistMV.Message = persistedMsg
-					persistMV.MessageStream = nil
-					persistMV.IsStreaming = false
-					persistOutput := *event.Output
-					persistOutput.MessageOutput = &persistMV
-					persistEvent := *event
-					persistEvent.Output = &persistOutput
+						persistCopy := &TypedMessageVariant[M]{IsStreaming: true, MessageStream: copies[0]}
+						persistedMsg, err := persistCopy.GetMessage()
+						if err != nil {
+							setPersistErr(err)
+							continue
+						}
 
-					se, err := toSessionEventChecked(&persistEvent)
-					if err != nil {
-						setPersistErr(err)
-						continue
-					}
-					if se != nil {
-						enqueueSessionEvent(se)
+						persistMV := *event.Output.MessageOutput
+						persistMV.Message = persistedMsg
+						persistMV.MessageStream = nil
+						persistMV.IsStreaming = false
+						persistOutput := *event.Output
+						persistOutput.MessageOutput = &persistMV
+						persistEvent := *event
+						persistEvent.Output = &persistOutput
+
+						se, err := toSessionEventChecked(&persistEvent)
+						if err != nil {
+							setPersistErr(err)
+							continue
+						}
+						if se != nil {
+							_ = enqueueSessionEvent(se)
+						}
 					}
 				} else {
 					// Non-streaming events go through toSessionEvent directly.
@@ -848,7 +876,9 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 						se = nil
 					}
 					if se != nil {
-						enqueueSessionEvent(se)
+						if err := enqueueSessionEvent(se); err != nil && syncPersistence {
+							continue
+						}
 					}
 				}
 			}
