@@ -164,6 +164,12 @@ type LoadEventsRequest struct {
 	//   - When Reverse=true: returns events strictly OLDER than the event with
 	//     this id. Empty means start from the tail.
 	//
+	// After is an exclusive append-position cursor, not a comparable event_id.
+	// Stores MUST resolve the supplied event_id to its internal log position
+	// before scanning and MUST NOT interpret After as a lexical or numeric range
+	// predicate over event_id values. This matters because Runner-assigned
+	// UUIDv4 event_ids do not embed append order.
+	//
 	// After is resolved against the full session log regardless of Kinds filter.
 	// If the supplied event_id is not found in the session log, the store MUST
 	// return ErrEventIDOutOfRange (a sentinel). Callers (e.g. SSE adapters) can
