@@ -55,9 +55,9 @@ func testAppendAndForwardLoad(t *testing.T, factory func(testing.TB) adk.Session
 	store := newStore(t, factory)
 	ctx := context.Background()
 
-	first := adk.SessionEventPayload{EventID: "e1", Data: []byte(`{"i":1}`)}
-	second := adk.SessionEventPayload{EventID: "e2", Data: []byte(`{"i":2}`)}
-	third := adk.SessionEventPayload{EventID: "e3", Data: []byte(`{"i":3}`)}
+	first := adk.SessionEventPayload{EventID: "e1", Kind: adk.SessionEventMessage, Data: []byte(`{"i":1}`)}
+	second := adk.SessionEventPayload{EventID: "e2", Kind: adk.SessionEventTurnEnd, Data: []byte(`{"i":2}`)}
+	third := adk.SessionEventPayload{EventID: "e3", Kind: adk.SessionEventMessage, Data: []byte(`{"i":3}`)}
 	requireNoError(t, store.AppendEvents(ctx, "s", []adk.SessionEventPayload{first, second}))
 	requireNoError(t, store.AppendEvents(ctx, "s", []adk.SessionEventPayload{third}))
 
@@ -75,7 +75,7 @@ func testReversePagination(t *testing.T, factory func(testing.TB) adk.SessionSto
 
 	payloads := make([]adk.SessionEventPayload, 5)
 	for i := 0; i < 5; i++ {
-		payloads[i] = adk.SessionEventPayload{EventID: fmt.Sprintf("r%d", i), Data: []byte(fmt.Sprintf(`{"ch":"%c"}`, 'a'+i))}
+		payloads[i] = adk.SessionEventPayload{EventID: fmt.Sprintf("r%d", i), Kind: adk.SessionEventMessage, Data: []byte(fmt.Sprintf(`{"ch":"%c"}`, 'a'+i))}
 		requireNoError(t, store.AppendEvents(ctx, "s", []adk.SessionEventPayload{payloads[i]}))
 	}
 
@@ -116,7 +116,7 @@ func testForwardPagination(t *testing.T, factory func(testing.TB) adk.SessionSto
 	ctx := context.Background()
 
 	for i := 0; i < 80; i++ {
-		payload := adk.SessionEventPayload{EventID: fmt.Sprintf("f%d", i), Data: []byte(fmt.Sprintf(`{"i":%d}`, i))}
+		payload := adk.SessionEventPayload{EventID: fmt.Sprintf("f%d", i), Kind: adk.SessionEventMessage, Data: []byte(fmt.Sprintf(`{"i":%d}`, i))}
 		requireNoError(t, store.AppendEvents(ctx, "s", []adk.SessionEventPayload{payload}))
 	}
 
@@ -149,8 +149,8 @@ func testSessionIsolation(t *testing.T, factory func(testing.TB) adk.SessionStor
 	store := newStore(t, factory)
 	ctx := context.Background()
 
-	alpha := adk.SessionEventPayload{EventID: "alpha-1", Data: []byte(`{"tag":"alpha"}`)}
-	beta := adk.SessionEventPayload{EventID: "beta-1", Data: []byte(`{"tag":"beta"}`)}
+	alpha := adk.SessionEventPayload{EventID: "alpha-1", Kind: adk.SessionEventMessage, Data: []byte(`{"tag":"alpha"}`)}
+	beta := adk.SessionEventPayload{EventID: "beta-1", Kind: adk.SessionEventTurnEnd, Data: []byte(`{"tag":"beta"}`)}
 	requireNoError(t, store.AppendEvents(ctx, "alpha", []adk.SessionEventPayload{alpha}))
 	requireNoError(t, store.AppendEvents(ctx, "beta", []adk.SessionEventPayload{beta}))
 
@@ -178,8 +178,8 @@ func testIdempotentAppend(t *testing.T, factory func(testing.TB) adk.SessionStor
 	store := newStore(t, factory)
 	ctx := context.Background()
 
-	first := adk.SessionEventPayload{EventID: "dup-1", Data: []byte(`{"payload":"first"}`)}
-	dup := adk.SessionEventPayload{EventID: "dup-1", Data: []byte(`{"payload":"second"}`)}
+	first := adk.SessionEventPayload{EventID: "dup-1", Kind: adk.SessionEventMessage, Data: []byte(`{"payload":"first"}`)}
+	dup := adk.SessionEventPayload{EventID: "dup-1", Kind: adk.SessionEventMessage, Data: []byte(`{"payload":"second"}`)}
 	requireNoError(t, store.AppendEvents(ctx, "s", []adk.SessionEventPayload{first}))
 	requireNoError(t, store.AppendEvents(ctx, "s", []adk.SessionEventPayload{dup}))
 
@@ -192,8 +192,8 @@ func testIdempotentAppendWithinBatch(t *testing.T, factory func(testing.TB) adk.
 	store := newStore(t, factory)
 	ctx := context.Background()
 
-	first := adk.SessionEventPayload{EventID: "dup-batch-1", Data: []byte(`{"payload":"first"}`)}
-	dup := adk.SessionEventPayload{EventID: "dup-batch-1", Data: []byte(`{"payload":"second"}`)}
+	first := adk.SessionEventPayload{EventID: "dup-batch-1", Kind: adk.SessionEventMessage, Data: []byte(`{"payload":"first"}`)}
+	dup := adk.SessionEventPayload{EventID: "dup-batch-1", Kind: adk.SessionEventMessage, Data: []byte(`{"payload":"second"}`)}
 	requireNoError(t, store.AppendEvents(ctx, "s", []adk.SessionEventPayload{first, dup}))
 
 	res, err := store.LoadEvents(ctx, "s", &adk.LoadEventsRequest{})
@@ -217,7 +217,7 @@ func testAfterForward(t *testing.T, factory func(testing.TB) adk.SessionStore) {
 
 	payloads := make([]adk.SessionEventPayload, 5)
 	for i := 0; i < 5; i++ {
-		payloads[i] = adk.SessionEventPayload{EventID: fmt.Sprintf("fwd-%d", i), Data: []byte(fmt.Sprintf(`{"i":%d}`, i))}
+		payloads[i] = adk.SessionEventPayload{EventID: fmt.Sprintf("fwd-%d", i), Kind: adk.SessionEventMessage, Data: []byte(fmt.Sprintf(`{"i":%d}`, i))}
 		requireNoError(t, store.AppendEvents(ctx, "s", []adk.SessionEventPayload{payloads[i]}))
 	}
 
@@ -232,7 +232,7 @@ func testAfterReverse(t *testing.T, factory func(testing.TB) adk.SessionStore) {
 
 	payloads := make([]adk.SessionEventPayload, 5)
 	for i := 0; i < 5; i++ {
-		payloads[i] = adk.SessionEventPayload{EventID: fmt.Sprintf("rev-%d", i), Data: []byte(fmt.Sprintf(`{"i":%d}`, i))}
+		payloads[i] = adk.SessionEventPayload{EventID: fmt.Sprintf("rev-%d", i), Kind: adk.SessionEventMessage, Data: []byte(fmt.Sprintf(`{"i":%d}`, i))}
 		requireNoError(t, store.AppendEvents(ctx, "s", []adk.SessionEventPayload{payloads[i]}))
 	}
 
@@ -246,7 +246,7 @@ func testUnknownAfter(t *testing.T, factory func(testing.TB) adk.SessionStore) {
 	ctx := context.Background()
 
 	requireNoError(t, store.AppendEvents(ctx, "s", []adk.SessionEventPayload{
-		{EventID: "only-1", Data: []byte(`{}`)},
+		{EventID: "only-1", Kind: adk.SessionEventMessage, Data: []byte(`{}`)},
 	}))
 
 	_, err := store.LoadEvents(ctx, "s", &adk.LoadEventsRequest{After: "ghost"})
@@ -266,7 +266,7 @@ func testEmptyPageBoundary(t *testing.T, factory func(testing.TB) adk.SessionSto
 	ids := []string{"e0", "e1", "e2"}
 	for _, id := range ids {
 		requireNoError(t, store.AppendEvents(ctx, "s",
-			[]adk.SessionEventPayload{{EventID: id, Data: []byte(`{}`)}}))
+			[]adk.SessionEventPayload{{EventID: id, Kind: adk.SessionEventMessage, Data: []byte(`{}`)}}))
 	}
 
 	res, err := store.LoadEvents(ctx, "s", &adk.LoadEventsRequest{After: "e2"})
@@ -290,7 +290,7 @@ func testOpaqueDataRoundTrip(t *testing.T, factory func(testing.TB) adk.SessionS
 	// works for both InMemoryStore and FileStore. Includes \t, null bytes,
 	// and high bytes to verify stores treat Data as opaque.
 	opaqueData := []byte{0x00, 0xFF, '\t', 0x80, 0x7F, 0x01}
-	event := adk.SessionEventPayload{EventID: "opaque-test-1", Data: opaqueData}
+	event := adk.SessionEventPayload{EventID: "opaque-test-1", Kind: adk.SessionEventMessage, Data: opaqueData}
 	requireNoError(t, store.AppendEvents(ctx, "s", []adk.SessionEventPayload{event}))
 
 	res, err := store.LoadEvents(ctx, "s", &adk.LoadEventsRequest{})
@@ -330,6 +330,9 @@ func requireEventsEqual(t testing.TB, want, got []adk.SessionEventPayload) {
 	for i := range want {
 		if got[i].EventID != want[i].EventID {
 			t.Fatalf("event[%d].EventID mismatch: got=%q want=%q", i, got[i].EventID, want[i].EventID)
+		}
+		if got[i].Kind != want[i].Kind {
+			t.Fatalf("event[%d].Kind mismatch: got=%q want=%q", i, got[i].Kind, want[i].Kind)
 		}
 		if !bytes.Equal(got[i].Data, want[i].Data) {
 			t.Fatalf("event[%d].Data mismatch: got=%q want=%q", i, got[i].Data, want[i].Data)

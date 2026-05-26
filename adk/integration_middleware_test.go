@@ -342,9 +342,9 @@ func TestPatchToolCallsIntegration_PersistsMessageInserted(t *testing.T) {
 	}
 
 	for _, m := range []*schema.Message{user, dangling} {
-		se := &adk.SessionEvent[*schema.Message]{EventID: uuid.NewString(), Message: m}
+		se := &adk.SessionEvent[*schema.Message]{EventID: uuid.NewString(), Kind: adk.SessionEventMessage, Message: m}
 		data := marshalSessionEvent(t, se)
-		require.NoError(t, store.AppendEvents(ctx, sid, []adk.SessionEventPayload{{EventID: se.EventID, Data: data}}))
+		require.NoError(t, store.AppendEvents(ctx, sid, []adk.SessionEventPayload{{EventID: se.EventID, Kind: se.Kind, Data: data}}))
 	}
 
 	// Wire patchtoolcalls into a ChatModelAgent.
@@ -442,9 +442,9 @@ func TestReductionIntegration_PersistsBothMessageUpdated(t *testing.T) {
 		Extra:      map[string]any{"_eino_msg_id": "tool-B-id"},
 	}
 	for _, m := range []*schema.Message{user, assistantA, toolResultA, assistantB, toolResultB} {
-		se := &adk.SessionEvent[*schema.Message]{EventID: uuid.NewString(), Message: m}
+		se := &adk.SessionEvent[*schema.Message]{EventID: uuid.NewString(), Kind: adk.SessionEventMessage, Message: m}
 		data := marshalSessionEvent(t, se)
-		require.NoError(t, store.AppendEvents(ctx, sid, []adk.SessionEventPayload{{EventID: se.EventID, Data: data}}))
+		require.NoError(t, store.AppendEvents(ctx, sid, []adk.SessionEventPayload{{EventID: se.EventID, Kind: se.Kind, Data: data}}))
 	}
 
 	// Reduction config: token counter always exceeds threshold; clear handler always clears.

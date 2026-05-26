@@ -72,6 +72,7 @@ func (s *InMemoryStore) AppendEvents(_ context.Context, sessionID string, events
 		}
 		cp := adk.SessionEventPayload{
 			EventID: e.EventID,
+			Kind:    e.Kind,
 			Data:    append([]byte{}, e.Data...),
 		}
 		s.events[sessionID] = append(s.events[sessionID], cp)
@@ -98,7 +99,6 @@ func (s *InMemoryStore) LoadEvents(_ context.Context, sessionID string, opts *ad
 
 func (s *InMemoryStore) loadForward(sessionID string, opts *adk.LoadEventsRequest) (*adk.LoadEventsResult, error) {
 	all := s.events[sessionID]
-	ids := s.eventIDs[sessionID]
 	idx := s.eventIDIdx[sessionID]
 
 	start := 0
@@ -113,29 +113,36 @@ func (s *InMemoryStore) loadForward(sessionID string, opts *adk.LoadEventsReques
 		start = len(all)
 	}
 
-	end := len(all)
-	if opts.Limit > 0 && start+opts.Limit < end {
-		end = start + opts.Limit
-	}
+	kindSet := buildKindSet(opts.Kinds)
 
-	out := make([]adk.SessionEventPayload, end-start)
-	for i := range out {
-		out[i] = adk.SessionEventPayload{
-			EventID: all[start+i].EventID,
-			Data:    append([]byte{}, all[start+i].Data...),
+	var out []adk.SessionEventPayload
+	hasMore := false
+	for i := start; i < len(all); i++ {
+		if kindSet != nil {
+			if _, match := kindSet[all[i].Kind]; !match {
+				continue
+			}
 		}
+		if opts.Limit > 0 && len(out) >= opts.Limit {
+			hasMore = true
+			break
+		}
+		out = append(out, adk.SessionEventPayload{
+			EventID: all[i].EventID,
+			Kind:    all[i].Kind,
+			Data:    append([]byte{}, all[i].Data...),
+		})
 	}
 
 	var next string
-	if end < len(all) && end > 0 {
-		next = ids[end-1]
+	if hasMore && len(out) > 0 {
+		next = out[len(out)-1].EventID
 	}
 	return &adk.LoadEventsResult{Events: out, Next: next}, nil
 }
 
 func (s *InMemoryStore) loadReverse(sessionID string, opts *adk.LoadEventsRequest) (*adk.LoadEventsResult, error) {
 	all := s.events[sessionID]
-	ids := s.eventIDs[sessionID]
 	idx := s.eventIDIdx[sessionID]
 
 	end := len(all)
@@ -150,25 +157,43 @@ func (s *InMemoryStore) loadReverse(sessionID string, opts *adk.LoadEventsReques
 		return &adk.LoadEventsResult{}, nil
 	}
 
-	count := end
-	if opts.Limit > 0 && opts.Limit < count {
-		count = opts.Limit
-	}
+	kindSet := buildKindSet(opts.Kinds)
 
-	start := end - count
-	out := make([]adk.SessionEventPayload, count)
-	for i := 0; i < count; i++ {
-		out[i] = adk.SessionEventPayload{
-			EventID: all[end-1-i].EventID,
-			Data:    append([]byte{}, all[end-1-i].Data...),
+	var out []adk.SessionEventPayload
+	hasMore := false
+	for i := end - 1; i >= 0; i-- {
+		if kindSet != nil {
+			if _, match := kindSet[all[i].Kind]; !match {
+				continue
+			}
 		}
+		if opts.Limit > 0 && len(out) >= opts.Limit {
+			hasMore = true
+			break
+		}
+		out = append(out, adk.SessionEventPayload{
+			EventID: all[i].EventID,
+			Kind:    all[i].Kind,
+			Data:    append([]byte{}, all[i].Data...),
+		})
 	}
 
 	var next string
-	if start > 0 {
-		next = ids[start]
+	if hasMore && len(out) > 0 {
+		next = out[len(out)-1].EventID
 	}
 	return &adk.LoadEventsResult{Events: out, Next: next}, nil
+}
+
+func buildKindSet(kinds []adk.SessionEventKind) map[adk.SessionEventKind]struct{} {
+	if len(kinds) == 0 {
+		return nil
+	}
+	set := make(map[adk.SessionEventKind]struct{}, len(kinds))
+	for _, k := range kinds {
+		set[k] = struct{}{}
+	}
+	return set
 }
 
 // Set stores a checkpoint value.

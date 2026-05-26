@@ -36,7 +36,7 @@ import (
 //
 //	<root>/<url.PathEscape(sessionID)>.evlog
 //
-// Each line is formatted as: <EventID>\t<Data>\n
+// Each line is formatted as: <EventID>\t<Kind>\t<Data>\n
 // where Data is the raw serialized bytes written directly to the line.
 //
 // IMPORTANT: FileStore requires that SessionEventPayload.Data does NOT contain
@@ -129,7 +129,7 @@ func (s *FileStore) AppendEvents(_ context.Context, sessionID string, events []a
 		if bytes.ContainsAny(event.Data, "\r\n") {
 			return fmt.Errorf("adk/session: FileStore requires Data without raw CR/LF; use a line-safe serializer (e.g. HumanReadableSerializer)")
 		}
-		line := fmt.Sprintf("%s\t%s\n", event.EventID, event.Data)
+		line := fmt.Sprintf("%s\t%s\t%s\n", event.EventID, event.Kind, event.Data)
 		if _, err := out.WriteString(line); err != nil {
 			return err
 		}
@@ -192,22 +192,31 @@ func (s *FileStore) readAllEventsLocked(path string) ([]fileEvent, map[string]in
 			line = line[:len(line)-1]
 			lineStr := string(line)
 
-			// Split on first tab
-			tabIdx := strings.IndexByte(lineStr, '\t')
-			if tabIdx < 0 {
+			// Parse three-field format: <EventID>\t<Kind>\t<Data>
+			// Find first tab for EventID
+			firstTab := strings.IndexByte(lineStr, '\t')
+			if firstTab < 0 {
 				return nil, nil, fmt.Errorf("%w: missing tab separator at line %d", adk.ErrInvalidEventID, lineNo)
 			}
-			eventID := lineStr[:tabIdx]
+			eventID := lineStr[:firstTab]
 			if eventID == "" {
 				return nil, nil, fmt.Errorf("%w: empty event_id at line %d", adk.ErrInvalidEventID, lineNo)
 			}
-			data := []byte(lineStr[tabIdx+1:])
+
+			// Find second tab for Kind; everything after is Data (may contain tabs)
+			rest := lineStr[firstTab+1:]
+			secondTab := strings.IndexByte(rest, '\t')
+			if secondTab < 0 {
+				return nil, nil, fmt.Errorf("%w: missing kind tab separator at line %d", adk.ErrInvalidEventID, lineNo)
+			}
+			kind := rest[:secondTab]
+			data := []byte(rest[secondTab+1:])
 
 			if _, dup := idx[eventID]; dup {
 				return nil, nil, fmt.Errorf("%w: duplicate event_id %q at line %d", adk.ErrInvalidEventID, eventID, lineNo)
 			}
 			events = append(events, fileEvent{
-				payload: adk.SessionEventPayload{EventID: eventID, Data: data},
+				payload: adk.SessionEventPayload{EventID: eventID, Kind: adk.SessionEventKind(kind), Data: data},
 			})
 			idx[eventID] = len(events) - 1
 		}
@@ -235,23 +244,31 @@ func loadFileEventsForward(events []fileEvent, idx map[string]int, opts *adk.Loa
 		start = len(events)
 	}
 
-	end := len(events)
-	if opts.Limit > 0 && start+opts.Limit < end {
-		end = start + opts.Limit
-	}
+	kindSet := buildKindSet(opts.Kinds)
 
-	out := make([]adk.SessionEventPayload, end-start)
-	for i := range out {
-		src := events[start+i].payload
-		out[i] = adk.SessionEventPayload{
-			EventID: src.EventID,
-			Data:    append([]byte{}, src.Data...),
+	var out []adk.SessionEventPayload
+	hasMore := false
+	for i := start; i < len(events); i++ {
+		if kindSet != nil {
+			if _, match := kindSet[events[i].payload.Kind]; !match {
+				continue
+			}
 		}
+		if opts.Limit > 0 && len(out) >= opts.Limit {
+			hasMore = true
+			break
+		}
+		src := events[i].payload
+		out = append(out, adk.SessionEventPayload{
+			EventID: src.EventID,
+			Kind:    src.Kind,
+			Data:    append([]byte{}, src.Data...),
+		})
 	}
 
 	var next string
-	if end < len(events) && end > 0 {
-		next = events[end-1].payload.EventID
+	if hasMore && len(out) > 0 {
+		next = out[len(out)-1].EventID
 	}
 	return &adk.LoadEventsResult{Events: out, Next: next}, nil
 }
@@ -269,24 +286,31 @@ func loadFileEventsReverse(events []fileEvent, idx map[string]int, opts *adk.Loa
 		return &adk.LoadEventsResult{}, nil
 	}
 
-	count := end
-	if opts.Limit > 0 && opts.Limit < count {
-		count = opts.Limit
-	}
+	kindSet := buildKindSet(opts.Kinds)
 
-	start := end - count
-	out := make([]adk.SessionEventPayload, count)
-	for i := 0; i < count; i++ {
-		src := events[end-1-i].payload
-		out[i] = adk.SessionEventPayload{
-			EventID: src.EventID,
-			Data:    append([]byte{}, src.Data...),
+	var out []adk.SessionEventPayload
+	hasMore := false
+	for i := end - 1; i >= 0; i-- {
+		if kindSet != nil {
+			if _, match := kindSet[events[i].payload.Kind]; !match {
+				continue
+			}
 		}
+		if opts.Limit > 0 && len(out) >= opts.Limit {
+			hasMore = true
+			break
+		}
+		src := events[i].payload
+		out = append(out, adk.SessionEventPayload{
+			EventID: src.EventID,
+			Kind:    src.Kind,
+			Data:    append([]byte{}, src.Data...),
+		})
 	}
 
 	var next string
-	if start > 0 {
-		next = events[start].payload.EventID
+	if hasMore && len(out) > 0 {
+		next = out[len(out)-1].EventID
 	}
 	return &adk.LoadEventsResult{Events: out, Next: next}, nil
 }
