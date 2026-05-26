@@ -343,8 +343,16 @@ type ModelUsage struct {
 // ToolSpanMeta carries the operational metadata of a single tool call span.
 // Inputs and outputs are NOT recorded here — they live on the assistant
 // message and the tool result message respectively. The span is a stable
-// identity envelope that joins those two messages together with timing,
-// status, and the resolved permission decision.
+// identity envelope that joins those two messages together with timing
+// and status.
+//
+// Tool spans for permission-gated calls may straddle multiple Run/Resume
+// invocations: the start span fires on the run where the call begins
+// (typically before the user is asked), and the end span fires on the run
+// where the call completes (after the user has approved/rejected/responded).
+// Both spans share the same SpanID. Consumers correlating a start span to
+// its eventual end span should follow SessionEvent.Span.SpanID (or use
+// ToolUseID for cross-event correlation across resume boundaries).
 type ToolSpanMeta struct {
 	// ToolUseID is the model-assigned call ID; joins to the assistant
 	// message's tool-call entry and the tool result message's call ID.
@@ -354,17 +362,15 @@ type ToolSpanMeta struct {
 	// the span without resolving the assistant message.
 	Name string `json:"name,omitempty"`
 
-	// EvaluatedPermission records the resolved permission decision at
-	// invocation time. No equivalent exists on the assistant message.
-	EvaluatedPermission string `json:"evaluated_permission,omitempty"`
-
 	// ToolCallStartEventID links the end span back to its start (mirrors
 	// ModelSpanMeta.ModelRequestStartEventID). Set only on the end span.
 	ToolCallStartEventID string `json:"tool_call_start_event_id,omitempty"`
 
 	// AssistantMessageEventID is the SessionEvent ID of the assistant
 	// message that emitted this tool call. Lets consumers fetch arguments
-	// without scanning.
+	// without scanning. Stable across interrupt/resume; the assistant message
+	// ID established in the original turn is preserved on the eventual end
+	// span via the in-flight span snapshot.
 	AssistantMessageEventID string `json:"assistant_message_event_id,omitempty"`
 
 	// ToolResultMessageEventID is the SessionEvent ID of the tool result
