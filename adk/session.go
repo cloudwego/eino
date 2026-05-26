@@ -57,12 +57,18 @@ var ErrInvalidEventID = errors.New("adk: session event has invalid event_id")
 var ErrEventIDOutOfRange = errors.New("adk: session event id out of range")
 
 // SessionEventPayload is the storage-layer representation of a single session event.
-// The framework pre-extracts EventID from the typed SessionEvent before
-// serialization so that stores can dedup and index without parsing Data.
+// The framework pre-extracts EventID and Kind from the typed SessionEvent before
+// serialization so that stores can dedup, index, and filter without parsing Data.
+//
+// EventID and Kind are envelope metadata; Data remains the serialized full event.
 type SessionEventPayload struct {
 	// EventID is the canonical, session-unique identity. Pre-extracted by
 	// the framework; stores MUST NOT parse Data to obtain it.
 	EventID string
+	// Kind is the pre-extracted event kind from SessionEvent.Kind. Stores MUST
+	// use Kind as opaque indexed metadata for filtering and MUST NOT parse Data
+	// to determine it.
+	Kind SessionEventKind
 	// Data is the serialized SessionEvent payload produced by the configured
 	// EventSerializer. Stores treat this as opaque bytes.
 	Data []byte
@@ -91,7 +97,7 @@ const (
 
 // SessionStore persists Runner-managed session data.
 // Events are stored as an append-only ordered log of serialized SessionEvent payloads (as SessionEventPayload).
-// TurnEndState is persisted as a regular SessionEvent variant (with TurnEnd field set),
+// SessionEventTurnEnd is persisted as a regular SessionEvent variant (with TurnEnd field set),
 // not as a separate entity.
 //
 // Concurrency contract: A single session (identified by sessionID) MUST have at most one
@@ -158,15 +164,21 @@ type LoadEventsRequest struct {
 	//   - When Reverse=true: returns events strictly OLDER than the event with
 	//     this id. Empty means start from the tail.
 	//
+	// After is resolved against the full session log regardless of Kinds filter.
 	// If the supplied event_id is not found in the session log, the store MUST
 	// return ErrEventIDOutOfRange (a sentinel). Callers (e.g. SSE adapters) can
 	// catch this to fall back to a full re-load instead of failing the request.
 	After string
 	// Limit is the maximum number of events to return. 0 means no limit (load all).
+	// Limit applies after kind filtering.
 	Limit int
 	// Reverse, when true, returns events in newest-first order.
 	// Useful for finding the latest MessagesReplaced boundary efficiently.
 	Reverse bool
+	// Kinds filters events by their Kind field. Empty means no kind filter
+	// (return all events). Non-empty returns only events whose Kind is in
+	// the set.
+	Kinds []SessionEventKind
 }
 
 // LoadEventsResult is the response from LoadEvents.
@@ -1041,6 +1053,17 @@ type sessionReconstructResult[M MessageType] struct {
 	inFlightTurnID string // TurnID from events after the last committed TurnEnd (the interrupted turn)
 }
 
+// modelContextSessionEventKinds is the set of event kinds required to reconstruct
+// model-facing session state (messages + turn metadata). Timeline-only events
+// (lifecycle, span, error, interrupt) are excluded.
+var modelContextSessionEventKinds = []SessionEventKind{
+	SessionEventMessage,
+	SessionEventMessagesReplaced,
+	SessionEventMessageUpdated,
+	SessionEventMessageInserted,
+	SessionEventTurnEnd,
+}
+
 // reconstructSessionState rebuilds session state from the append log.
 // Durable context events are replayed through the log tail, including messages
 // after the latest TurnEnd. The latest TurnEnd remains the metadata boundary for
@@ -1062,6 +1085,7 @@ func reconstructSessionState[M MessageType](
 			After:   after,
 			Limit:   pageSize,
 			Reverse: false,
+			Kinds:   modelContextSessionEventKinds,
 		})
 		if err != nil {
 			return nil, err
