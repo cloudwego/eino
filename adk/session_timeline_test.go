@@ -118,7 +118,7 @@ func TestSessionTimeline_ReconstructionIgnoresNonContextVariants(t *testing.T) {
 	for _, se := range events {
 		data, err := encodeSessionEvent(se)
 		require.NoError(t, err)
-		require.NoError(t, store.AppendEvents(ctx, sid, []SessionEventPayload{{EventID: se.EventID, Data: data}}))
+		require.NoError(t, store.AppendEvents(ctx, sid, []SessionEventPayload{{EventID: se.EventID, Kind: se.Kind, Data: data}}))
 	}
 
 	result, err := reconstructSessionState[*schema.Message](ctx, store, sid, defaultLoadPageSize, nil)
@@ -155,7 +155,7 @@ func TestSessionTimeline_ReconstructionIncludesPartialContextAfterLatestTurnEnd(
 	for _, se := range events {
 		data, err := encodeSessionEvent(se)
 		require.NoError(t, err)
-		require.NoError(t, store.AppendEvents(ctx, sid, []SessionEventPayload{{EventID: se.EventID, Data: data}}))
+		require.NoError(t, store.AppendEvents(ctx, sid, []SessionEventPayload{{EventID: se.EventID, Kind: se.Kind, Data: data}}))
 	}
 
 	result, err := reconstructSessionState[*schema.Message](ctx, store, sid, defaultLoadPageSize, nil)
@@ -191,7 +191,7 @@ func TestSessionTimeline_ReconstructionPartialContextMissingAnchorFails(t *testi
 	for _, se := range events {
 		data, err := encodeSessionEvent(se)
 		require.NoError(t, err)
-		require.NoError(t, store.AppendEvents(ctx, sid, []SessionEventPayload{{EventID: se.EventID, Data: data}}))
+		require.NoError(t, store.AppendEvents(ctx, sid, []SessionEventPayload{{EventID: se.EventID, Kind: se.Kind, Data: data}}))
 	}
 
 	_, err := reconstructSessionState[*schema.Message](ctx, store, sid, defaultLoadPageSize, nil)
@@ -943,6 +943,59 @@ func TestToolSpan_PersistedAroundToolCallAndLinksToMessages(t *testing.T) {
 	}
 	assert.NotEmpty(t, toolStart.Span.ParentSpanID, "parent should be the model request span")
 	assert.Equal(t, toolStart.Span.ParentSpanID, toolEnd.Span.ParentSpanID)
+}
+
+type kindsRecordingStore struct {
+	SessionStore
+	recordedKinds [][]SessionEventKind
+}
+
+func (s *kindsRecordingStore) LoadEvents(ctx context.Context, sessionID string, opts *LoadEventsRequest) (*LoadEventsResult, error) {
+	if opts != nil {
+		s.recordedKinds = append(s.recordedKinds, opts.Kinds)
+	}
+	return s.SessionStore.LoadEvents(ctx, sessionID, opts)
+}
+
+func TestSessionTimeline_ReconstructionUsesKindFilter(t *testing.T) {
+	ctx := context.Background()
+	inner := newSessionHelperStore()
+	wrapper := &kindsRecordingStore{SessionStore: inner}
+	sid := "timeline-kind-filter"
+
+	msg1 := schema.UserMessage("hello")
+	EnsureMessageID(msg1)
+	msg2 := schema.AssistantMessage("world", nil)
+	EnsureMessageID(msg2)
+
+	events := []*SessionEvent[*schema.Message]{
+		{EventID: uuid.NewString(), Kind: SessionEventMessage, Message: msg1},
+		{EventID: uuid.NewString(), Kind: SessionEventMessage, Message: msg2},
+		{EventID: uuid.NewString(), Kind: SessionEventSpanModelRequestStart, Span: &SpanEvent{SpanID: uuid.NewString(), Kind: SpanKindModel, StartedAt: time.Now().UTC(), Model: &ModelSpanMeta{}}},
+		{EventID: uuid.NewString(), Kind: SessionEventTurnEnd, TurnEnd: &TurnEndState[*schema.Message]{SessionValues: map[string]any{"done": true}}},
+	}
+	for _, se := range events {
+		data, err := encodeSessionEvent(se)
+		require.NoError(t, err)
+		require.NoError(t, inner.AppendEvents(ctx, sid, []SessionEventPayload{{EventID: se.EventID, Kind: se.Kind, Data: data}}))
+	}
+
+	result, err := reconstructSessionState[*schema.Message](ctx, wrapper, sid, defaultLoadPageSize, nil)
+	require.NoError(t, err)
+
+	// All recorded Kinds slices should equal modelContextSessionEventKinds.
+	require.NotEmpty(t, wrapper.recordedKinds)
+	for _, kinds := range wrapper.recordedKinds {
+		assert.Equal(t, modelContextSessionEventKinds, kinds)
+	}
+
+	// Verify reconstruction result.
+	require.NotNil(t, result)
+	require.NotNil(t, result.state)
+	require.Len(t, result.state.Messages, 2)
+	assert.Equal(t, "hello", result.state.Messages[0].Content)
+	assert.Equal(t, "world", result.state.Messages[1].Content)
+	assert.Equal(t, map[string]any{"done": true}, result.state.SessionValues)
 }
 
 func TestToolSpan_StreamableToolEmitsEndAfterEOF(t *testing.T) {

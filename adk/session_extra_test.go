@@ -342,7 +342,7 @@ func TestTailReplay_PartialTurnWithoutTurnEnd(t *testing.T) {
 		se := withTestEventID(&SessionEvent[*schema.Message]{Message: m})
 		data, err := encodeSessionEvent(se)
 		require.NoError(t, err)
-		require.NoError(t, store.AppendEvents(ctx, sid, []SessionEventPayload{{EventID: se.EventID, Data: data}}))
+		require.NoError(t, store.AppendEvents(ctx, sid, []SessionEventPayload{{EventID: se.EventID, Kind: se.Kind, Data: data}}))
 	}
 	// Persist TurnEnd as a SessionEvent.
 	turnEndSE := withTestEventID(&SessionEvent[*schema.Message]{TurnEnd: &TurnEndState[*schema.Message]{
@@ -350,7 +350,7 @@ func TestTailReplay_PartialTurnWithoutTurnEnd(t *testing.T) {
 	}})
 	teData, err := encodeSessionEvent(turnEndSE)
 	require.NoError(t, err)
-	require.NoError(t, store.AppendEvents(ctx, sid, []SessionEventPayload{{EventID: turnEndSE.EventID, Data: teData}}))
+	require.NoError(t, store.AppendEvents(ctx, sid, []SessionEventPayload{{EventID: turnEndSE.EventID, Kind: turnEndSE.Kind, Data: teData}}))
 
 	// Phase 2: simulate a partial second turn where events were appended but
 	// no TurnEnd was persisted (interrupted).
@@ -362,7 +362,7 @@ func TestTailReplay_PartialTurnWithoutTurnEnd(t *testing.T) {
 		se := withTestEventID(&SessionEvent[*schema.Message]{Message: m})
 		data, err := encodeSessionEvent(se)
 		require.NoError(t, err)
-		require.NoError(t, store.AppendEvents(ctx, sid, []SessionEventPayload{{EventID: se.EventID, Data: data}}))
+		require.NoError(t, store.AppendEvents(ctx, sid, []SessionEventPayload{{EventID: se.EventID, Kind: se.Kind, Data: data}}))
 	}
 
 	// Boot: prepareRunnerSessionRun reconstructs durable context through the log
@@ -389,7 +389,7 @@ func TestTailReplay_NoTailEvents(t *testing.T) {
 	se := withTestEventID(&SessionEvent[*schema.Message]{Message: q})
 	data, err := encodeSessionEvent(se)
 	require.NoError(t, err)
-	require.NoError(t, store.AppendEvents(ctx, sid, []SessionEventPayload{{EventID: se.EventID, Data: data}}))
+	require.NoError(t, store.AppendEvents(ctx, sid, []SessionEventPayload{{EventID: se.EventID, Kind: se.Kind, Data: data}}))
 
 	// Persist TurnEnd as a SessionEvent.
 	turnEndSE := withTestEventID(&SessionEvent[*schema.Message]{TurnEnd: &TurnEndState[*schema.Message]{
@@ -397,7 +397,7 @@ func TestTailReplay_NoTailEvents(t *testing.T) {
 	}})
 	teData, err := encodeSessionEvent(turnEndSE)
 	require.NoError(t, err)
-	require.NoError(t, store.AppendEvents(ctx, sid, []SessionEventPayload{{EventID: turnEndSE.EventID, Data: teData}}))
+	require.NoError(t, store.AppendEvents(ctx, sid, []SessionEventPayload{{EventID: turnEndSE.EventID, Kind: turnEndSE.Kind, Data: teData}}))
 
 	state, err := prepareRunnerSessionRun[*schema.Message](ctx, nil, nil, sid, store, nil)
 	require.NoError(t, err)
@@ -420,14 +420,14 @@ func TestTailReplay_EmptySnapshotCursor(t *testing.T) {
 		se := withTestEventID(&SessionEvent[*schema.Message]{Message: m})
 		data, err := encodeSessionEvent(se)
 		require.NoError(t, err)
-		require.NoError(t, store.AppendEvents(ctx, sid, []SessionEventPayload{{EventID: se.EventID, Data: data}}))
+		require.NoError(t, store.AppendEvents(ctx, sid, []SessionEventPayload{{EventID: se.EventID, Kind: se.Kind, Data: data}}))
 	}
 	// MessagesReplaced boundary with empty slice — supersedes pre-boundary events.
 	empty := []*schema.Message{}
 	boundarySE := withTestEventID(&SessionEvent[*schema.Message]{MessagesReplaced: &empty})
 	bData, err := encodeSessionEvent(boundarySE)
 	require.NoError(t, err)
-	require.NoError(t, store.AppendEvents(ctx, sid, []SessionEventPayload{{EventID: boundarySE.EventID, Data: bData}}))
+	require.NoError(t, store.AppendEvents(ctx, sid, []SessionEventPayload{{EventID: boundarySE.EventID, Kind: boundarySE.Kind, Data: bData}}))
 
 	// Post-boundary events.
 	postMsg := schema.UserMessage("post")
@@ -435,7 +435,7 @@ func TestTailReplay_EmptySnapshotCursor(t *testing.T) {
 	se := withTestEventID(&SessionEvent[*schema.Message]{Message: postMsg})
 	data, err := encodeSessionEvent(se)
 	require.NoError(t, err)
-	require.NoError(t, store.AppendEvents(ctx, sid, []SessionEventPayload{{EventID: se.EventID, Data: data}}))
+	require.NoError(t, store.AppendEvents(ctx, sid, []SessionEventPayload{{EventID: se.EventID, Kind: se.Kind, Data: data}}))
 
 	state, err := prepareRunnerSessionRun[*schema.Message](ctx, nil, nil, sid, store, nil)
 	require.NoError(t, err)
@@ -484,6 +484,7 @@ func (s *inMemoryAdapter) AppendEvents(_ context.Context, sid string, events []S
 		}
 		s.events[sid] = append(s.events[sid], SessionEventPayload{
 			EventID: e.EventID,
+			Kind:    e.Kind,
 			Data:    append([]byte{}, e.Data...),
 		})
 		s.eventIDs[sid] = append(s.eventIDs[sid], e.EventID)
@@ -523,6 +524,7 @@ func (s *inMemoryAdapter) LoadEvents(_ context.Context, sid string, opts *LoadEv
 		for i := 0; i < count; i++ {
 			out[i] = SessionEventPayload{
 				EventID: all[end-1-i].EventID,
+				Kind:    all[end-1-i].Kind,
 				Data:    append([]byte{}, all[end-1-i].Data...),
 			}
 		}
@@ -552,6 +554,7 @@ func (s *inMemoryAdapter) LoadEvents(_ context.Context, sid string, opts *LoadEv
 	for i := range out {
 		out[i] = SessionEventPayload{
 			EventID: all[start+i].EventID,
+			Kind:    all[start+i].Kind,
 			Data:    append([]byte{}, all[start+i].Data...),
 		}
 	}
@@ -583,7 +586,7 @@ func TestPartialInterrupted_ThenNewRun(t *testing.T) {
 		se := withTestEventID(&SessionEvent[*schema.Message]{Message: m})
 		data, err := encodeSessionEvent(se)
 		require.NoError(t, err)
-		require.NoError(t, store.AppendEvents(ctx, sid, []SessionEventPayload{{EventID: se.EventID, Data: data}}))
+		require.NoError(t, store.AppendEvents(ctx, sid, []SessionEventPayload{{EventID: se.EventID, Kind: se.Kind, Data: data}}))
 	}
 	// Persist TurnEnd as a SessionEvent (marks end of completed turn).
 	turnEndSE := withTestEventID(&SessionEvent[*schema.Message]{TurnEnd: &TurnEndState[*schema.Message]{
@@ -591,7 +594,7 @@ func TestPartialInterrupted_ThenNewRun(t *testing.T) {
 	}})
 	teData, err := encodeSessionEvent(turnEndSE)
 	require.NoError(t, err)
-	require.NoError(t, store.AppendEvents(ctx, sid, []SessionEventPayload{{EventID: turnEndSE.EventID, Data: teData}}))
+	require.NoError(t, store.AppendEvents(ctx, sid, []SessionEventPayload{{EventID: turnEndSE.EventID, Kind: turnEndSE.Kind, Data: teData}}))
 
 	// Phase 2: simulate an interrupted turn — events appended, no new SaveTurnEnd.
 	q2 := schema.UserMessage("partial")
@@ -600,7 +603,7 @@ func TestPartialInterrupted_ThenNewRun(t *testing.T) {
 		se := withTestEventID(&SessionEvent[*schema.Message]{Message: m})
 		data, err := encodeSessionEvent(se)
 		require.NoError(t, err)
-		require.NoError(t, store.AppendEvents(ctx, sid, []SessionEventPayload{{EventID: se.EventID, Data: data}}))
+		require.NoError(t, store.AppendEvents(ctx, sid, []SessionEventPayload{{EventID: se.EventID, Kind: se.Kind, Data: data}}))
 	}
 
 	// Phase 3: new Run (no CheckPointStore; Runner skips pending checkpoints on fresh Run).
@@ -677,12 +680,12 @@ func TestExplicitCheckpointResume_WithSessionMode(t *testing.T) {
 		se := withTestEventID(&SessionEvent[*schema.Message]{Message: m})
 		data, err := encodeSessionEvent(se)
 		require.NoError(t, err)
-		require.NoError(t, store.AppendEvents(ctx, sid, []SessionEventPayload{{EventID: se.EventID, Data: data}}))
+		require.NoError(t, store.AppendEvents(ctx, sid, []SessionEventPayload{{EventID: se.EventID, Kind: se.Kind, Data: data}}))
 	}
 	turnEndSE := withTestEventID(&SessionEvent[*schema.Message]{TurnEnd: prior})
 	teData, err := encodeSessionEvent(turnEndSE)
 	require.NoError(t, err)
-	require.NoError(t, store.AppendEvents(ctx, sid, []SessionEventPayload{{EventID: turnEndSE.EventID, Data: teData}}))
+	require.NoError(t, store.AppendEvents(ctx, sid, []SessionEventPayload{{EventID: turnEndSE.EventID, Kind: turnEndSE.Kind, Data: teData}}))
 
 	// Seed an arbitrary checkpoint ID with a runner-session-checkpoint wrapper
 	// so runnerLoadCheckPointForSession can decode it.
@@ -716,7 +719,7 @@ func TestResumePath_TailReplay(t *testing.T) {
 		se := withTestEventID(&SessionEvent[*schema.Message]{Message: m})
 		data, err := encodeSessionEvent(se)
 		require.NoError(t, err)
-		require.NoError(t, store.AppendEvents(ctx, sid, []SessionEventPayload{{EventID: se.EventID, Data: data}}))
+		require.NoError(t, store.AppendEvents(ctx, sid, []SessionEventPayload{{EventID: se.EventID, Kind: se.Kind, Data: data}}))
 	}
 	// Persist TurnEnd as a SessionEvent.
 	turnEndSE := withTestEventID(&SessionEvent[*schema.Message]{TurnEnd: &TurnEndState[*schema.Message]{
@@ -724,7 +727,7 @@ func TestResumePath_TailReplay(t *testing.T) {
 	}})
 	teData, err := encodeSessionEvent(turnEndSE)
 	require.NoError(t, err)
-	require.NoError(t, store.AppendEvents(ctx, sid, []SessionEventPayload{{EventID: turnEndSE.EventID, Data: teData}}))
+	require.NoError(t, store.AppendEvents(ctx, sid, []SessionEventPayload{{EventID: turnEndSE.EventID, Kind: turnEndSE.Kind, Data: teData}}))
 
 	// Append a tail event after the snapshot.
 	tailMsg := schema.UserMessage("post-snapshot")
@@ -732,7 +735,7 @@ func TestResumePath_TailReplay(t *testing.T) {
 	se := withTestEventID(&SessionEvent[*schema.Message]{Message: tailMsg})
 	data, err := encodeSessionEvent(se)
 	require.NoError(t, err)
-	require.NoError(t, store.AppendEvents(ctx, sid, []SessionEventPayload{{EventID: se.EventID, Data: data}}))
+	require.NoError(t, store.AppendEvents(ctx, sid, []SessionEventPayload{{EventID: se.EventID, Kind: se.Kind, Data: data}}))
 
 	// Seed a runner session checkpoint so the resume path finds something to load.
 	cpStore := newSessionHelperStore()

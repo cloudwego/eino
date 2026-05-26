@@ -625,7 +625,7 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 			setPersistErr(err)
 			return
 		}
-		if err := persister.enqueue(SessionEventPayload{EventID: se.EventID, Data: data}); err != nil {
+		if err := persister.enqueue(SessionEventPayload{EventID: se.EventID, Kind: se.Kind, Data: data}); err != nil {
 			setPersistErr(err)
 		}
 	}
