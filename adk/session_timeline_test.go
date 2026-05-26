@@ -21,7 +21,6 @@ import (
 	"context"
 	"encoding/gob"
 	"errors"
-	"reflect"
 	"testing"
 	"time"
 
@@ -30,6 +29,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cloudwego/eino/components/model"
+	"github.com/cloudwego/eino/components/tool"
+	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -53,28 +54,30 @@ func TestSessionTimeline_ClassifyAndSerializeVariants(t *testing.T) {
 		},
 		{
 			name: "span start",
-			se:   &SessionEvent[*schema.Message]{Span: &SpanEvent{SpanID: spanID, Kind: SpanKindModel, StartedAt: now}},
+			se:   &SessionEvent[*schema.Message]{Span: &SpanEvent{SpanID: spanID, Kind: SpanKindModel, StartedAt: now, Model: &ModelSpanMeta{}}},
 			kind: SessionEventSpanModelRequestStart,
 		},
 		{
 			name: "span end",
-			se:   &SessionEvent[*schema.Message]{Span: &SpanEvent{SpanID: spanID, Kind: SpanKindModel, StartedAt: now, EndedAt: now.Add(time.Millisecond)}},
+			se:   &SessionEvent[*schema.Message]{Span: &SpanEvent{SpanID: spanID, Kind: SpanKindModel, StartedAt: now, EndedAt: now.Add(time.Millisecond), Model: &ModelSpanMeta{}}},
 			kind: SessionEventSpanModelRequestEnd,
 		},
 		{
-			name: "thinking",
-			se:   &SessionEvent[*schema.Message]{AgentObservation: &AgentObservationEvent{Thinking: &AgentThinkingEvent{}}},
-			kind: SessionEventAgentThinking,
+			name: "tool span start",
+			se: &SessionEvent[*schema.Message]{Span: &SpanEvent{
+				SpanID: spanID, Kind: SpanKindTool, StartedAt: now,
+				Tool: &ToolSpanMeta{ToolUseID: "call_1", Name: "lookup"},
+			}},
+			kind: SessionEventSpanToolCallStart,
 		},
 		{
-			name: "tool use",
-			se:   &SessionEvent[*schema.Message]{AgentObservation: &AgentObservationEvent{ToolUse: &AgentToolUseEvent{ToolUseID: "call_1", Name: "lookup", Input: map[string]any{"q": "x"}}}},
-			kind: SessionEventAgentToolUse,
-		},
-		{
-			name: "tool result",
-			se:   &SessionEvent[*schema.Message]{AgentObservation: &AgentObservationEvent{ToolResult: &AgentToolResultEvent{ToolUseID: "call_1", Content: "ok"}}},
-			kind: SessionEventAgentToolResult,
+			name: "tool span end",
+			se: &SessionEvent[*schema.Message]{Span: &SpanEvent{
+				SpanID: spanID, Kind: SpanKindTool, StartedAt: now, EndedAt: now.Add(time.Millisecond),
+				Status: "ok",
+				Tool:   &ToolSpanMeta{ToolUseID: "call_1", Name: "lookup", ToolCallStartEventID: uuid.NewString()},
+			}},
+			kind: SessionEventSpanToolCallEnd,
 		},
 		{
 			name: "interrupt",
@@ -108,7 +111,7 @@ func TestSessionTimeline_ReconstructionIgnoresNonContextVariants(t *testing.T) {
 	events := []*SessionEvent[*schema.Message]{
 		{EventID: uuid.NewString(), Kind: SessionEventSessionStatusRunning, Lifecycle: &LifecycleEvent{Scope: LifecycleScopeSession, State: SessionRunStateRunning}},
 		{EventID: uuid.NewString(), Kind: SessionEventMessage, Message: msg},
-		{EventID: uuid.NewString(), Kind: SessionEventAgentThinking, AgentObservation: &AgentObservationEvent{Thinking: &AgentThinkingEvent{}}},
+		{EventID: uuid.NewString(), Kind: SessionEventSpanModelRequestStart, Span: &SpanEvent{SpanID: uuid.NewString(), Kind: SpanKindModel, StartedAt: time.Now().UTC(), Model: &ModelSpanMeta{}}},
 		{EventID: uuid.NewString(), Kind: SessionEventSessionError, Error: &SessionErrorEvent{Type: "transient", RetryStatus: &RetryStatus{Type: "retrying"}}},
 		{EventID: uuid.NewString(), Kind: SessionEventTurnEnd, TurnEnd: &TurnEndState[*schema.Message]{SessionValues: map[string]any{"k": "v"}}},
 	}
@@ -266,18 +269,21 @@ func TestWithTimelineEvents_LiveExposure(t *testing.T) {
 	})
 }
 
-func TestSessionTimeline_AgentObservationMustBeOneOf(t *testing.T) {
+func TestSessionTimeline_SpanMetaMustBeOneOf(t *testing.T) {
 	se := &SessionEvent[*schema.Message]{
 		EventID: uuid.NewString(),
-		AgentObservation: &AgentObservationEvent{
-			Thinking: &AgentThinkingEvent{},
-			ToolUse:  &AgentToolUseEvent{ToolUseID: "call_1", Name: "lookup"},
+		Span: &SpanEvent{
+			SpanID:    uuid.NewString(),
+			Kind:      SpanKindModel,
+			StartedAt: time.Now().UTC(),
+			Model:     &ModelSpanMeta{},
+			Tool:      &ToolSpanMeta{ToolUseID: "call_1"},
 		},
 	}
 
 	err := NormalizeSessionEventKind(se)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "agent observation must have exactly one active payload")
+	assert.Contains(t, err.Error(), "exactly one of Model or Tool")
 }
 
 func TestToolPermissionDecisionScopedByToolUseID(t *testing.T) {
@@ -288,10 +294,6 @@ func TestToolPermissionDecisionScopedByToolUseID(t *testing.T) {
 	assert.Equal(t, "allowed", GetToolPermissionDecision(ctx, "call_1"))
 	assert.Equal(t, "denied", GetToolPermissionDecision(ctx, "call_2"))
 	assert.Empty(t, GetToolPermissionDecision(ctx, "missing"))
-}
-
-func TestAgentThinkingEventIsMarkerOnly(t *testing.T) {
-	assert.Equal(t, 0, reflect.TypeOf(AgentThinkingEvent{}).NumField())
 }
 
 func TestRetryTimelineEmitsRescheduleSequence(t *testing.T) {
@@ -412,14 +414,21 @@ func TestSessionTimeline_EmittedKindMustBeExplicit(t *testing.T) {
 }
 
 func TestSessionTimeline_TypedAgentEventGobRoundTripPreservesSessionEvent(t *testing.T) {
+	now := time.Now().UTC()
+	spanID := uuid.NewString()
 	original := &AgentEvent{
 		EventID:   uuid.NewString(),
 		Timestamp: newEventTimestamp(),
 		SessionEvent: &SessionEvent[*schema.Message]{
-			EventID: uuid.NewString(),
-			Kind:    SessionEventAgentThinking,
-			AgentObservation: &AgentObservationEvent{
-				Thinking: &AgentThinkingEvent{},
+			EventID:   uuid.NewString(),
+			Timestamp: now,
+			Kind:      SessionEventSpanToolCallStart,
+			Span: &SpanEvent{
+				SpanID:    spanID,
+				Kind:      SpanKindTool,
+				Name:      "tool_call",
+				StartedAt: now,
+				Tool:      &ToolSpanMeta{ToolUseID: "call_1", Name: "lookup"},
 			},
 		},
 	}
@@ -433,7 +442,7 @@ func TestSessionTimeline_TypedAgentEventGobRoundTripPreservesSessionEvent(t *tes
 	require.NotNil(t, decoded.SessionEvent)
 	assert.Equal(t, original.EventID, decoded.EventID)
 	assert.Equal(t, original.EventID, decoded.SessionEvent.EventID)
-	assert.Equal(t, SessionEventAgentThinking, decoded.SessionEvent.Kind)
+	assert.Equal(t, SessionEventSpanToolCallStart, decoded.SessionEvent.Kind)
 }
 
 func TestModelSpanMetaFromContextPopulatesFailoverAndModelFields(t *testing.T) {
@@ -576,13 +585,18 @@ func TestFailoverTimelineLinksAttemptsAndEmitsSessionErrors(t *testing.T) {
 }
 
 func TestSessionTimeline_EventIDMismatchRejectedAtPersistenceBoundary(t *testing.T) {
+	now := time.Now().UTC()
 	_, err := toSessionEventChecked(&AgentEvent{
 		EventID: uuid.NewString(),
 		SessionEvent: &SessionEvent[*schema.Message]{
-			EventID: uuid.NewString(),
-			Kind:    SessionEventAgentThinking,
-			AgentObservation: &AgentObservationEvent{
-				Thinking: &AgentThinkingEvent{},
+			EventID:   uuid.NewString(),
+			Timestamp: now,
+			Kind:      SessionEventSpanToolCallStart,
+			Span: &SpanEvent{
+				SpanID:    uuid.NewString(),
+				Kind:      SpanKindTool,
+				StartedAt: now,
+				Tool:      &ToolSpanMeta{ToolUseID: "call_1"},
 			},
 		},
 	})
@@ -591,13 +605,21 @@ func TestSessionTimeline_EventIDMismatchRejectedAtPersistenceBoundary(t *testing
 }
 
 func TestSessionTimeline_NormalizeAgentSessionEventMaterializesEnvelope(t *testing.T) {
-	t.Run("both ids empty", func(t *testing.T) {
-		original := &SessionEvent[*schema.Message]{
-			Kind: SessionEventAgentThinking,
-			AgentObservation: &AgentObservationEvent{
-				Thinking: &AgentThinkingEvent{},
+	now := time.Now().UTC()
+	makeToolStartSpan := func() *SessionEvent[*schema.Message] {
+		return &SessionEvent[*schema.Message]{
+			Kind: SessionEventSpanToolCallStart,
+			Span: &SpanEvent{
+				SpanID:    uuid.NewString(),
+				Kind:      SpanKindTool,
+				StartedAt: now,
+				Tool:      &ToolSpanMeta{ToolUseID: "call_1"},
 			},
 		}
+	}
+
+	t.Run("both ids empty", func(t *testing.T) {
+		original := makeToolStartSpan()
 		event := &AgentEvent{SessionEvent: original}
 		se, err := normalizeAgentSessionEvent(event)
 		require.NoError(t, err)
@@ -608,47 +630,38 @@ func TestSessionTimeline_NormalizeAgentSessionEventMaterializesEnvelope(t *testi
 		assert.Equal(t, event.Timestamp, se.Timestamp)
 		assert.Equal(t, event.Timestamp, event.SessionEvent.Timestamp)
 		assert.Empty(t, original.EventID)
-		assert.True(t, original.Timestamp.IsZero())
 	})
 
 	t.Run("envelope id and timestamp backfill session event", func(t *testing.T) {
 		ts := time.Date(2026, 5, 24, 12, 0, 0, 0, time.UTC)
 		id := uuid.NewString()
+		se := makeToolStartSpan()
+		se.Span.StartedAt = ts
 		event := &AgentEvent{
-			EventID:   id,
-			Timestamp: ts,
-			SessionEvent: &SessionEvent[*schema.Message]{
-				Kind: SessionEventAgentThinking,
-				AgentObservation: &AgentObservationEvent{
-					Thinking: &AgentThinkingEvent{},
-				},
-			},
+			EventID:      id,
+			Timestamp:    ts,
+			SessionEvent: se,
 		}
-		se, err := normalizeAgentSessionEvent(event)
+		out, err := normalizeAgentSessionEvent(event)
 		require.NoError(t, err)
-		assert.Equal(t, id, se.EventID)
-		assert.Equal(t, ts, se.Timestamp)
+		assert.Equal(t, id, out.EventID)
+		assert.Equal(t, ts, out.Timestamp)
 	})
 
 	t.Run("session event id and timestamp backfill envelope", func(t *testing.T) {
 		ts := time.Date(2026, 5, 24, 12, 1, 0, 0, time.UTC)
 		id := uuid.NewString()
-		event := &AgentEvent{
-			SessionEvent: &SessionEvent[*schema.Message]{
-				EventID:   id,
-				Timestamp: ts,
-				Kind:      SessionEventAgentThinking,
-				AgentObservation: &AgentObservationEvent{
-					Thinking: &AgentThinkingEvent{},
-				},
-			},
-		}
-		se, err := normalizeAgentSessionEvent(event)
+		se := makeToolStartSpan()
+		se.EventID = id
+		se.Timestamp = ts
+		se.Span.StartedAt = ts
+		event := &AgentEvent{SessionEvent: se}
+		out, err := normalizeAgentSessionEvent(event)
 		require.NoError(t, err)
 		assert.Equal(t, id, event.EventID)
 		assert.Equal(t, ts, event.Timestamp)
-		assert.Equal(t, id, se.EventID)
-		assert.Equal(t, ts, se.Timestamp)
+		assert.Equal(t, id, out.EventID)
+		assert.Equal(t, ts, out.Timestamp)
 	})
 
 	t.Run("turn end messages stripped without mutating producer event", func(t *testing.T) {
@@ -805,10 +818,10 @@ func TestRunnerTimelineRetryExhaustedStopReason(t *testing.T) {
 	ctx := context.Background()
 	store := newSessionHelperStore()
 	runner := NewRunner(ctx, RunnerConfig{
-		Agent:              &timelineErrorAgent{name: "retry-exhausted", err: &RetryExhaustedError{LastErr: errors.New("still failing"), TotalRetries: 1}},
-		SessionID:          "timeline-retry-exhausted",
-		SessionStore:       store,
-		Session: &SessionConfig{EventFlushBatchSize: 1},
+		Agent:        &timelineErrorAgent{name: "retry-exhausted", err: &RetryExhaustedError{LastErr: errors.New("still failing"), TotalRetries: 1}},
+		SessionID:    "timeline-retry-exhausted",
+		SessionStore: store,
+		Session:      &SessionConfig{EventFlushBatchSize: 1},
 	})
 
 	iter := runner.Query(ctx, "hi")
@@ -831,10 +844,10 @@ func TestRunnerTimelineFailedStopReason(t *testing.T) {
 	ctx := context.Background()
 	store := newSessionHelperStore()
 	runner := NewRunner(ctx, RunnerConfig{
-		Agent:              &timelineErrorAgent{name: "failed", err: errors.New("boom")},
-		SessionID:          "timeline-failed",
-		SessionStore:       store,
-		Session: &SessionConfig{EventFlushBatchSize: 1},
+		Agent:        &timelineErrorAgent{name: "failed", err: errors.New("boom")},
+		SessionID:    "timeline-failed",
+		SessionStore: store,
+		Session:      &SessionConfig{EventFlushBatchSize: 1},
 	})
 
 	iter := runner.Query(ctx, "hi")
@@ -851,4 +864,125 @@ func TestRunnerTimelineFailedStopReason(t *testing.T) {
 	require.NotNil(t, idleEvents[len(idleEvents)-1].Lifecycle)
 	require.NotNil(t, idleEvents[len(idleEvents)-1].Lifecycle.StopReason)
 	assert.Equal(t, "failed", idleEvents[len(idleEvents)-1].Lifecycle.StopReason.Type)
+}
+
+func TestToolSpan_PersistedAroundToolCallAndLinksToMessages(t *testing.T) {
+	ctx := context.Background()
+	testTool := &invokableTestTool{name: "tool_span_tool", result: "tool result"}
+	mockModel := &mockToolCallingModel{toolCallName: "tool_span_tool"}
+
+	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "ToolSpanAgent",
+		Description: "tool span agent",
+		Model:       mockModel,
+		ToolsConfig: ToolsConfig{
+			ToolsNodeConfig: compose.ToolsNodeConfig{Tools: []tool.BaseTool{testTool}},
+		},
+	})
+	require.NoError(t, err)
+
+	store := newSessionHelperStore()
+	runner := NewRunner(ctx, RunnerConfig{
+		Agent:        agent,
+		SessionID:    "tool-span-around",
+		SessionStore: store,
+		Session:      &SessionConfig{EventFlushBatchSize: 1},
+	})
+	iter := runner.Query(ctx, "go")
+	for {
+		event, ok := iter.Next()
+		if !ok {
+			break
+		}
+		require.NoError(t, event.Err)
+	}
+
+	stored := filterStoredSessionEvents(t, store.events, func(_ *SessionEvent[*schema.Message]) bool { return true })
+	var (
+		assistantMsgEventID string
+		toolResultEventID   string
+		toolStart           *SessionEvent[*schema.Message]
+		toolEnd             *SessionEvent[*schema.Message]
+		toolUseObservations int
+	)
+	for _, se := range stored {
+		switch se.Kind {
+		case SessionEventMessage:
+			if se.Message != nil && se.Message.Role == schema.Assistant && len(se.Message.ToolCalls) > 0 {
+				assistantMsgEventID = se.EventID
+			}
+			if se.Message != nil && se.Message.Role == schema.Tool {
+				toolResultEventID = se.EventID
+			}
+		case SessionEventSpanToolCallStart:
+			toolStart = se
+		case SessionEventSpanToolCallEnd:
+			toolEnd = se
+		case "agent.tool_use", "agent.tool_result", "agent.thinking":
+			toolUseObservations++
+		}
+	}
+
+	require.NotNil(t, toolStart, "expected tool_call_start span")
+	require.NotNil(t, toolEnd, "expected tool_call_end span")
+	require.NotNil(t, toolStart.Span.Tool)
+	require.NotNil(t, toolEnd.Span.Tool)
+	assert.Equal(t, "tool_span_tool", toolStart.Span.Tool.Name)
+	assert.Equal(t, "tool_span_tool", toolEnd.Span.Tool.Name)
+	assert.Equal(t, "tc-1", toolStart.Span.Tool.ToolUseID)
+	assert.Equal(t, toolStart.EventID, toolEnd.Span.Tool.ToolCallStartEventID)
+	assert.Equal(t, "ok", toolEnd.Span.Status)
+	assert.Equal(t, 0, toolUseObservations, "no observation kinds should be persisted")
+
+	if assistantMsgEventID != "" {
+		assert.Equal(t, assistantMsgEventID, toolStart.Span.Tool.AssistantMessageEventID)
+		assert.Equal(t, assistantMsgEventID, toolEnd.Span.Tool.AssistantMessageEventID)
+	}
+	if toolResultEventID != "" {
+		assert.Equal(t, toolResultEventID, toolEnd.Span.Tool.ToolResultMessageEventID)
+	}
+	assert.NotEmpty(t, toolStart.Span.ParentSpanID, "parent should be the model request span")
+	assert.Equal(t, toolStart.Span.ParentSpanID, toolEnd.Span.ParentSpanID)
+}
+
+func TestToolSpan_StreamableToolEmitsEndAfterEOF(t *testing.T) {
+	ctx := context.Background()
+	streamTool := &streamableTestTool{name: "stream_span_tool", result: "stream chunk"}
+	mockModel := &mockToolCallingModel{toolCallName: "stream_span_tool"}
+
+	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "StreamSpanAgent",
+		Description: "stream span agent",
+		Model:       mockModel,
+		ToolsConfig: ToolsConfig{
+			ToolsNodeConfig: compose.ToolsNodeConfig{Tools: []tool.BaseTool{streamTool}},
+		},
+	})
+	require.NoError(t, err)
+
+	store := newSessionHelperStore()
+	runner := NewRunner(ctx, RunnerConfig{
+		Agent:        agent,
+		SessionID:    "tool-span-stream",
+		SessionStore: store,
+		Session:      &SessionConfig{EventFlushBatchSize: 1},
+	})
+	iter := runner.Query(ctx, "stream go")
+	for {
+		event, ok := iter.Next()
+		if !ok {
+			break
+		}
+		require.NoError(t, event.Err)
+	}
+
+	stored := filterStoredSessionEvents(t, store.events, func(se *SessionEvent[*schema.Message]) bool {
+		return se.Kind == SessionEventSpanToolCallStart || se.Kind == SessionEventSpanToolCallEnd
+	})
+	require.Len(t, stored, 2)
+	assert.Equal(t, SessionEventSpanToolCallStart, stored[0].Kind)
+	assert.Equal(t, SessionEventSpanToolCallEnd, stored[1].Kind)
+	assert.Equal(t, "ok", stored[1].Span.Status)
+	require.NotNil(t, stored[1].Span.Tool)
+	assert.NotEmpty(t, stored[1].Span.Tool.ToolResultMessageEventID)
 }

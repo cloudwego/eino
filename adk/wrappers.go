@@ -18,7 +18,6 @@ package adk
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"io"
 	"reflect"
@@ -414,17 +413,109 @@ func modelSpanCompletionMeta[M MessageType](ctx context.Context, startEventID st
 	return meta
 }
 
+// toolBoundarySpan carries the IDs that the assistant-message-emit path
+// stashes for the downstream tool wrappers to read when emitting tool spans.
+// Stored on the typedChatModelAgentExecCtx (per-turn, run-scoped) rather than
+// in context.Value because the model wrapper's local context modifications are
+// not visible to the tool wrappers, which run in sibling-derived contexts off
+// the same exec ctx pointer.
+type toolBoundarySpan struct {
+	ModelSpanID             string
+	AssistantMessageEventID string
+}
+
+func stashToolBoundarySpan[M MessageType](ctx context.Context, modelSpanID, assistantMessageEventID string) {
+	execCtx := getTypedChatModelAgentExecCtx[M](ctx)
+	if execCtx == nil {
+		return
+	}
+	execCtx.toolBoundaryMu.Lock()
+	execCtx.toolBoundary = toolBoundarySpan{ModelSpanID: modelSpanID, AssistantMessageEventID: assistantMessageEventID}
+	execCtx.toolBoundaryMu.Unlock()
+}
+
+func getToolBoundarySpan[M MessageType](ctx context.Context) toolBoundarySpan {
+	execCtx := getTypedChatModelAgentExecCtx[M](ctx)
+	if execCtx == nil {
+		return toolBoundarySpan{}
+	}
+	execCtx.toolBoundaryMu.Lock()
+	defer execCtx.toolBoundaryMu.Unlock()
+	return execCtx.toolBoundary
+}
+
+func newToolSpanStartEvent[M MessageType](ctx context.Context, spanID string, started time.Time, tCtx *ToolContext) *SessionEvent[M] {
+	boundary := getToolBoundarySpan[M](ctx)
+	return &SessionEvent[M]{
+		EventID:   uuid.NewString(),
+		Timestamp: started,
+		Kind:      SessionEventSpanToolCallStart,
+		Span: &SpanEvent{
+			SpanID:       spanID,
+			ParentSpanID: boundary.ModelSpanID,
+			Kind:         SpanKindTool,
+			Name:         "tool_call",
+			StartedAt:    started,
+			Tool: &ToolSpanMeta{
+				ToolUseID:               tCtx.CallID,
+				Name:                    tCtx.Name,
+				EvaluatedPermission:     GetToolPermissionDecision(ctx, tCtx.CallID),
+				AssistantMessageEventID: boundary.AssistantMessageEventID,
+			},
+		},
+	}
+}
+
+type toolSpanEndEventInput struct {
+	spanID        string
+	startEventID  string
+	started       time.Time
+	ended         time.Time
+	err           error
+	resultEventID string
+}
+
+func newToolSpanEndEvent[M MessageType](ctx context.Context, in toolSpanEndEventInput, tCtx *ToolContext) *SessionEvent[M] {
+	status := "ok"
+	errStr := ""
+	if in.err != nil {
+		status = "error"
+		errStr = in.err.Error()
+		if errors.Is(in.err, context.Canceled) || errors.Is(in.err, ErrStreamCanceled) {
+			status = "cancelled"
+		}
+	}
+	boundary := getToolBoundarySpan[M](ctx)
+	return &SessionEvent[M]{
+		EventID:   uuid.NewString(),
+		Timestamp: in.ended,
+		Kind:      SessionEventSpanToolCallEnd,
+		Span: &SpanEvent{
+			SpanID:       in.spanID,
+			ParentSpanID: boundary.ModelSpanID,
+			Kind:         SpanKindTool,
+			Name:         "tool_call",
+			StartedAt:    in.started,
+			EndedAt:      in.ended,
+			Status:       status,
+			Err:          errStr,
+			Tool: &ToolSpanMeta{
+				ToolUseID:                tCtx.CallID,
+				Name:                     tCtx.Name,
+				EvaluatedPermission:      GetToolPermissionDecision(ctx, tCtx.CallID),
+				ToolCallStartEventID:     in.startEventID,
+				AssistantMessageEventID:  boundary.AssistantMessageEventID,
+				ToolResultMessageEventID: in.resultEventID,
+			},
+		},
+	}
+}
+
 func (m *typedEventSenderModel[M]) Generate(ctx context.Context, input []M, opts ...model.Option) (M, error) {
 	started := newEventTimestamp()
 	spanID := uuid.NewString()
 	startEvent := newModelSpanStartEvent[M](ctx, spanID, started, opts...)
 	sendSessionTimelineEvent(ctx, startEvent)
-	sendSessionTimelineEvent(ctx, &SessionEvent[M]{
-		EventID:          uuid.NewString(),
-		Timestamp:        started,
-		Kind:             SessionEventAgentThinking,
-		AgentObservation: &AgentObservationEvent{Thinking: &AgentThinkingEvent{}},
-	})
 	result, err := m.inner.Generate(ctx, input, opts...)
 	ended := newEventTimestamp()
 	sendSessionTimelineEvent(ctx, newModelSpanEndEvent(ctx, modelSpanEndEventInput[M]{
@@ -451,7 +542,11 @@ func (m *typedEventSenderModel[M]) Generate(ctx context.Context, input []M, opts
 		return zero, errors.New("generator is nil when sending event in Generate: ensure agent state is properly initialized")
 	}
 
+	assistantMsgEventID := uuid.NewString()
+	stashToolBoundarySpan[M](ctx, spanID, assistantMsgEventID)
+
 	event := typedModelOutputEvent(copyMessage(result), nil)
+	event.EventID = assistantMsgEventID
 	event.Timestamp = timestamp
 	execCtx.send(event)
 
@@ -475,12 +570,6 @@ func (m *typedEventSenderModel[M]) Stream(ctx context.Context, input []M, opts .
 		}, opts...))
 		return nil, err
 	}
-	sendSessionTimelineEvent(ctx, &SessionEvent[M]{
-		EventID:          uuid.NewString(),
-		Timestamp:        newEventTimestamp(),
-		Kind:             SessionEventAgentThinking,
-		AgentObservation: &AgentObservationEvent{Thinking: &AgentThinkingEvent{}},
-	})
 	timestamp := newEventTimestamp()
 
 	execCtx := getTypedChatModelAgentExecCtx[M](ctx)
@@ -498,8 +587,12 @@ func (m *typedEventSenderModel[M]) Stream(ctx context.Context, input []M, opts .
 			convertOpts...)
 	}
 
+	assistantMsgEventID := uuid.NewString()
+	stashToolBoundarySpan[M](ctx, spanID, assistantMsgEventID)
+
 	var zero M
 	event := typedModelOutputEvent[M](zero, eventStream)
+	event.EventID = assistantMsgEventID
 	event.Timestamp = timestamp
 	execCtx.send(event)
 
@@ -1071,14 +1164,22 @@ func typedToolEnhancedStreamEvent[M MessageType](callID, toolName, toolMsgID str
 
 func (w *typedEventSenderToolWrapper[M]) WrapInvokableToolCall(_ context.Context, endpoint InvokableToolCallEndpoint, tCtx *ToolContext) (InvokableToolCallEndpoint, error) {
 	return func(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (string, error) {
+		started := newEventTimestamp()
+		spanID := uuid.NewString()
+		startEvent := newToolSpanStartEvent[M](ctx, spanID, started, tCtx)
+		sendSessionTimelineEvent(ctx, startEvent)
+
 		result, err := endpoint(ctx, argumentsInJSON, opts...)
 		if err != nil {
-			sendToolUseObservation[M](ctx, tCtx, argumentsInJSON)
-			sendToolResultObservation[M](ctx, tCtx.CallID, err.Error(), true)
+			sendSessionTimelineEvent(ctx, newToolSpanEndEvent[M](ctx, toolSpanEndEventInput{
+				spanID:       spanID,
+				startEventID: startEvent.EventID,
+				started:      started,
+				ended:        newEventTimestamp(),
+				err:          err,
+			}, tCtx))
 			return "", err
 		}
-		sendToolUseObservation[M](ctx, tCtx, argumentsInJSON)
-		sendToolResultObservation[M](ctx, tCtx.CallID, result, false)
 		timestamp := newEventTimestamp()
 
 		toolName := tCtx.Name
@@ -1086,7 +1187,9 @@ func (w *typedEventSenderToolWrapper[M]) WrapInvokableToolCall(_ context.Context
 
 		prePopAction := typedPopToolGenAction[M](ctx, toolName)
 		toolMsgID := uuid.NewString()
+		resultEventID := uuid.NewString()
 		event := typedToolInvokeEvent[M](callID, toolName, result, toolMsgID)
+		event.EventID = resultEventID
 		event.Timestamp = timestamp
 		if prePopAction != nil {
 			event.Action = prePopAction
@@ -1102,6 +1205,14 @@ func (w *typedEventSenderToolWrapper[M]) WrapInvokableToolCall(_ context.Context
 			}
 			return nil
 		})
+
+		sendSessionTimelineEvent(ctx, newToolSpanEndEvent[M](ctx, toolSpanEndEventInput{
+			spanID:        spanID,
+			startEventID:  startEvent.EventID,
+			started:       started,
+			ended:         newEventTimestamp(),
+			resultEventID: resultEventID,
+		}, tCtx))
 
 		return result, nil
 	}, nil
@@ -1109,23 +1220,52 @@ func (w *typedEventSenderToolWrapper[M]) WrapInvokableToolCall(_ context.Context
 
 func (w *typedEventSenderToolWrapper[M]) WrapStreamableToolCall(_ context.Context, endpoint StreamableToolCallEndpoint, tCtx *ToolContext) (StreamableToolCallEndpoint, error) {
 	return func(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (*schema.StreamReader[string], error) {
+		started := newEventTimestamp()
+		spanID := uuid.NewString()
+		startEvent := newToolSpanStartEvent[M](ctx, spanID, started, tCtx)
+		sendSessionTimelineEvent(ctx, startEvent)
+
 		result, err := endpoint(ctx, argumentsInJSON, opts...)
 		if err != nil {
-			sendToolUseObservation[M](ctx, tCtx, argumentsInJSON)
-			sendToolResultObservation[M](ctx, tCtx.CallID, err.Error(), true)
+			sendSessionTimelineEvent(ctx, newToolSpanEndEvent[M](ctx, toolSpanEndEventInput{
+				spanID:       spanID,
+				startEventID: startEvent.EventID,
+				started:      started,
+				ended:        newEventTimestamp(),
+				err:          err,
+			}, tCtx))
 			return nil, err
 		}
-		sendToolUseObservation[M](ctx, tCtx, argumentsInJSON)
 		timestamp := newEventTimestamp()
 
 		toolName := tCtx.Name
 		callID := tCtx.CallID
 
 		prePopAction := typedPopToolGenAction[M](ctx, toolName)
-		streams := result.Copy(3)
+		streams := result.Copy(2)
 
 		toolMsgID := uuid.NewString()
+		resultEventID := uuid.NewString()
+
+		var spanEndOnce sync.Once
+		emitEnd := func(streamErr error) {
+			spanEndOnce.Do(func() {
+				in := toolSpanEndEventInput{
+					spanID:       spanID,
+					startEventID: startEvent.EventID,
+					started:      started,
+					ended:        newEventTimestamp(),
+					err:          streamErr,
+				}
+				if streamErr == nil {
+					in.resultEventID = resultEventID
+				}
+				sendSessionTimelineEvent(ctx, newToolSpanEndEvent[M](ctx, in, tCtx))
+			})
+		}
+
 		event := typedToolStreamEvent[M](callID, toolName, toolMsgID, streams[0])
+		event.EventID = resultEventID
 		event.Timestamp = timestamp
 		event.Action = prePopAction
 
@@ -1140,21 +1280,39 @@ func (w *typedEventSenderToolWrapper[M]) WrapStreamableToolCall(_ context.Contex
 			return nil
 		})
 
-		go drainStringToolResultForObservation[M](ctx, callID, streams[2])
-		return streams[1], nil
+		callerStream := schema.StreamReaderWithConvert(streams[1],
+			func(s string) (string, error) { return s, nil },
+			schema.WithOnEOF(func() (any, error) {
+				emitEnd(nil)
+				return nil, io.EOF
+			}),
+			schema.WithErrWrapper(func(streamErr error) error {
+				emitEnd(streamErr)
+				return streamErr
+			}),
+		)
+		return callerStream, nil
 	}, nil
 }
 
 func (w *typedEventSenderToolWrapper[M]) WrapEnhancedInvokableToolCall(_ context.Context, endpoint EnhancedInvokableToolCallEndpoint, tCtx *ToolContext) (EnhancedInvokableToolCallEndpoint, error) {
 	return func(ctx context.Context, toolArgument *schema.ToolArgument, opts ...tool.Option) (*schema.ToolResult, error) {
+		started := newEventTimestamp()
+		spanID := uuid.NewString()
+		startEvent := newToolSpanStartEvent[M](ctx, spanID, started, tCtx)
+		sendSessionTimelineEvent(ctx, startEvent)
+
 		result, err := endpoint(ctx, toolArgument, opts...)
 		if err != nil {
-			sendToolUseObservation[M](ctx, tCtx, toolArgument)
-			sendToolResultObservation[M](ctx, tCtx.CallID, err.Error(), true)
+			sendSessionTimelineEvent(ctx, newToolSpanEndEvent[M](ctx, toolSpanEndEventInput{
+				spanID:       spanID,
+				startEventID: startEvent.EventID,
+				started:      started,
+				ended:        newEventTimestamp(),
+				err:          err,
+			}, tCtx))
 			return nil, err
 		}
-		sendToolUseObservation[M](ctx, tCtx, toolArgument)
-		sendToolResultObservation[M](ctx, tCtx.CallID, result, false)
 		timestamp := newEventTimestamp()
 
 		toolName := tCtx.Name
@@ -1162,10 +1320,19 @@ func (w *typedEventSenderToolWrapper[M]) WrapEnhancedInvokableToolCall(_ context
 
 		prePopAction := typedPopToolGenAction[M](ctx, toolName)
 		toolMsgID := uuid.NewString()
+		resultEventID := uuid.NewString()
 		event, eventErr := typedToolEnhancedInvokeEvent[M](callID, toolName, toolMsgID, result)
 		if eventErr != nil {
+			sendSessionTimelineEvent(ctx, newToolSpanEndEvent[M](ctx, toolSpanEndEventInput{
+				spanID:       spanID,
+				startEventID: startEvent.EventID,
+				started:      started,
+				ended:        newEventTimestamp(),
+				err:          eventErr,
+			}, tCtx))
 			return nil, eventErr
 		}
+		event.EventID = resultEventID
 		event.Timestamp = timestamp
 		if prePopAction != nil {
 			event.Action = prePopAction
@@ -1182,29 +1349,66 @@ func (w *typedEventSenderToolWrapper[M]) WrapEnhancedInvokableToolCall(_ context
 			return nil
 		})
 
+		sendSessionTimelineEvent(ctx, newToolSpanEndEvent[M](ctx, toolSpanEndEventInput{
+			spanID:        spanID,
+			startEventID:  startEvent.EventID,
+			started:       started,
+			ended:         newEventTimestamp(),
+			resultEventID: resultEventID,
+		}, tCtx))
+
 		return result, nil
 	}, nil
 }
 
 func (w *typedEventSenderToolWrapper[M]) WrapEnhancedStreamableToolCall(_ context.Context, endpoint EnhancedStreamableToolCallEndpoint, tCtx *ToolContext) (EnhancedStreamableToolCallEndpoint, error) {
 	return func(ctx context.Context, toolArgument *schema.ToolArgument, opts ...tool.Option) (*schema.StreamReader[*schema.ToolResult], error) {
+		started := newEventTimestamp()
+		spanID := uuid.NewString()
+		startEvent := newToolSpanStartEvent[M](ctx, spanID, started, tCtx)
+		sendSessionTimelineEvent(ctx, startEvent)
+
 		result, err := endpoint(ctx, toolArgument, opts...)
 		if err != nil {
-			sendToolUseObservation[M](ctx, tCtx, toolArgument)
-			sendToolResultObservation[M](ctx, tCtx.CallID, err.Error(), true)
+			sendSessionTimelineEvent(ctx, newToolSpanEndEvent[M](ctx, toolSpanEndEventInput{
+				spanID:       spanID,
+				startEventID: startEvent.EventID,
+				started:      started,
+				ended:        newEventTimestamp(),
+				err:          err,
+			}, tCtx))
 			return nil, err
 		}
-		sendToolUseObservation[M](ctx, tCtx, toolArgument)
 		timestamp := newEventTimestamp()
 
 		toolName := tCtx.Name
 		callID := tCtx.CallID
 
 		prePopAction := typedPopToolGenAction[M](ctx, toolName)
-		streams := result.Copy(3)
+		streams := result.Copy(2)
 
 		toolMsgID := uuid.NewString()
+		resultEventID := uuid.NewString()
+
+		var spanEndOnce sync.Once
+		emitEnd := func(streamErr error) {
+			spanEndOnce.Do(func() {
+				in := toolSpanEndEventInput{
+					spanID:       spanID,
+					startEventID: startEvent.EventID,
+					started:      started,
+					ended:        newEventTimestamp(),
+					err:          streamErr,
+				}
+				if streamErr == nil {
+					in.resultEventID = resultEventID
+				}
+				sendSessionTimelineEvent(ctx, newToolSpanEndEvent[M](ctx, in, tCtx))
+			})
+		}
+
 		event := typedToolEnhancedStreamEvent[M](callID, toolName, toolMsgID, streams[0])
+		event.EventID = resultEventID
 		event.Timestamp = timestamp
 		event.Action = prePopAction
 
@@ -1219,108 +1423,27 @@ func (w *typedEventSenderToolWrapper[M]) WrapEnhancedStreamableToolCall(_ contex
 			return nil
 		})
 
-		go drainEnhancedToolResultForObservation[M](ctx, callID, streams[2])
-		return streams[1], nil
+		callerStream := schema.StreamReaderWithConvert(streams[1],
+			func(tr *schema.ToolResult) (*schema.ToolResult, error) { return tr, nil },
+			schema.WithOnEOF(func() (any, error) {
+				emitEnd(nil)
+				return nil, io.EOF
+			}),
+			schema.WithErrWrapper(func(streamErr error) error {
+				emitEnd(streamErr)
+				return streamErr
+			}),
+		)
+		return callerStream, nil
 	}, nil
 }
 
-func sendToolUseObservation[M MessageType](ctx context.Context, tCtx *ToolContext, input any) {
-	if tCtx == nil {
-		return
-	}
-	sendSessionTimelineEvent(ctx, &SessionEvent[M]{
-		EventID:   uuid.NewString(),
-		Timestamp: newEventTimestamp(),
-		Kind:      SessionEventAgentToolUse,
-		AgentObservation: &AgentObservationEvent{ToolUse: &AgentToolUseEvent{
-			ToolUseID:           tCtx.CallID,
-			Name:                tCtx.Name,
-			Input:               toolObservationInput(input),
-			EvaluatedPermission: GetToolPermissionDecision(ctx, tCtx.CallID),
-		}},
-	})
-}
-
-func sendToolResultObservation[M MessageType](ctx context.Context, toolUseID string, content any, isErr bool) {
-	sendSessionTimelineEvent(ctx, &SessionEvent[M]{
-		EventID:   uuid.NewString(),
-		Timestamp: newEventTimestamp(),
-		Kind:      SessionEventAgentToolResult,
-		AgentObservation: &AgentObservationEvent{ToolResult: &AgentToolResultEvent{
-			ToolUseID: toolUseID,
-			Content:   content,
-			IsError:   isErr,
-		}},
-	})
-}
-
-func toolObservationInput(input any) map[string]any {
-	switch v := input.(type) {
-	case string:
-		if v == "" {
-			return nil
-		}
-		var m map[string]any
-		if err := json.Unmarshal([]byte(v), &m); err == nil {
-			return m
-		}
-		return map[string]any{"text": v}
-	case *schema.ToolArgument:
-		if v == nil {
-			return nil
-		}
-		return toolObservationInput(v.Text)
-	default:
-		if input == nil {
-			return nil
-		}
-		return map[string]any{"value": input}
-	}
-}
-
-func drainStringToolResultForObservation[M MessageType](ctx context.Context, toolUseID string, stream *schema.StreamReader[string]) {
-	var parts []string
-	var err error
-	for {
-		part, recvErr := stream.Recv()
-		if recvErr == io.EOF {
-			break
-		}
-		if recvErr != nil {
-			err = recvErr
-			break
-		}
-		parts = append(parts, part)
-	}
-	stream.Close()
-	if err != nil {
-		sendToolResultObservation[M](ctx, toolUseID, err.Error(), true)
-		return
-	}
-	sendToolResultObservation[M](ctx, toolUseID, parts, false)
-}
-
-func drainEnhancedToolResultForObservation[M MessageType](ctx context.Context, toolUseID string, stream *schema.StreamReader[*schema.ToolResult]) {
-	var parts []*schema.ToolResult
-	var err error
-	for {
-		part, recvErr := stream.Recv()
-		if recvErr == io.EOF {
-			break
-		}
-		if recvErr != nil {
-			err = recvErr
-			break
-		}
-		parts = append(parts, part)
-	}
-	stream.Close()
-	if err != nil {
-		sendToolResultObservation[M](ctx, toolUseID, err.Error(), true)
-		return
-	}
-	sendToolResultObservation[M](ctx, toolUseID, parts, false)
-}
+// drainStringToolResultForSpan and drainEnhancedToolResultForSpan are no
+// longer needed; the streamable wrappers attach end-span emission via
+// schema.WithOnEOF / schema.WithErrWrapper hooks on the caller's stream copy
+// instead. The hook approach fires synchronously during the consumer's read
+// loop, eliminating the goroutine race where the agent's event generator
+// could close before the drainer's emission landed.
 
 func hasUserEventSenderToolWrapper[M MessageType](handlers []TypedChatModelAgentMiddleware[M]) bool {
 	for _, handler := range handlers {

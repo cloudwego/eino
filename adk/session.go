@@ -223,8 +223,7 @@ type SessionEvent[M MessageType] struct {
 	Error     *SessionErrorEvent `json:"error,omitempty"`
 	Span      *SpanEvent         `json:"span,omitempty"`
 
-	AgentObservation *AgentObservationEvent `json:"agent_observation,omitempty"`
-	UserObservation  *UserObservationEvent  `json:"user_observation,omitempty"`
+	UserObservation *UserObservationEvent `json:"user_observation,omitempty"`
 }
 
 type SessionEventKind string
@@ -243,11 +242,10 @@ const (
 
 	SessionEventSpanModelRequestStart SessionEventKind = "span.model_request_start"
 	SessionEventSpanModelRequestEnd   SessionEventKind = "span.model_request_end"
+	SessionEventSpanToolCallStart     SessionEventKind = "span.tool_call_start"
+	SessionEventSpanToolCallEnd       SessionEventKind = "span.tool_call_end"
 
-	SessionEventAgentThinking   SessionEventKind = "agent.thinking"
-	SessionEventAgentToolUse    SessionEventKind = "agent.tool_use"
-	SessionEventAgentToolResult SessionEventKind = "agent.tool_result"
-	SessionEventUserInterrupt   SessionEventKind = "user.interrupt"
+	SessionEventUserInterrupt SessionEventKind = "user.interrupt"
 )
 
 type LifecycleEvent struct {
@@ -307,13 +305,18 @@ type SpanEvent struct {
 	Status string `json:"status,omitempty"`
 	Err    string `json:"err,omitempty"`
 
+	// Model and Tool are mutually exclusive: exactly one must be non-nil for
+	// every Span-carrying SessionEvent. ClassifySessionEvent enforces this
+	// invariant.
 	Model *ModelSpanMeta `json:"model,omitempty"`
+	Tool  *ToolSpanMeta  `json:"tool,omitempty"`
 }
 
 type SpanKind string
 
 const (
 	SpanKindModel SpanKind = "model"
+	SpanKindTool  SpanKind = "tool"
 )
 
 type ModelSpanMeta struct {
@@ -337,25 +340,37 @@ type ModelUsage struct {
 	Raw                      *schema.TokenUsage `json:"raw,omitempty"`
 }
 
-type AgentObservationEvent struct {
-	Thinking   *AgentThinkingEvent   `json:"thinking,omitempty"`
-	ToolUse    *AgentToolUseEvent    `json:"tool_use,omitempty"`
-	ToolResult *AgentToolResultEvent `json:"tool_result,omitempty"`
-}
+// ToolSpanMeta carries the operational metadata of a single tool call span.
+// Inputs and outputs are NOT recorded here — they live on the assistant
+// message and the tool result message respectively. The span is a stable
+// identity envelope that joins those two messages together with timing,
+// status, and the resolved permission decision.
+type ToolSpanMeta struct {
+	// ToolUseID is the model-assigned call ID; joins to the assistant
+	// message's tool-call entry and the tool result message's call ID.
+	ToolUseID string `json:"tool_use_id"`
 
-type AgentThinkingEvent struct{}
+	// Name is the tool name. Carried on both start and end so UIs can render
+	// the span without resolving the assistant message.
+	Name string `json:"name,omitempty"`
 
-type AgentToolUseEvent struct {
-	ToolUseID           string         `json:"tool_use_id,omitempty"`
-	Name                string         `json:"name,omitempty"`
-	Input               map[string]any `json:"input,omitempty"`
-	EvaluatedPermission string         `json:"evaluated_permission,omitempty"`
-}
+	// EvaluatedPermission records the resolved permission decision at
+	// invocation time. No equivalent exists on the assistant message.
+	EvaluatedPermission string `json:"evaluated_permission,omitempty"`
 
-type AgentToolResultEvent struct {
-	ToolUseID string `json:"tool_use_id,omitempty"`
-	Content   any    `json:"content,omitempty"`
-	IsError   bool   `json:"is_error,omitempty"`
+	// ToolCallStartEventID links the end span back to its start (mirrors
+	// ModelSpanMeta.ModelRequestStartEventID). Set only on the end span.
+	ToolCallStartEventID string `json:"tool_call_start_event_id,omitempty"`
+
+	// AssistantMessageEventID is the SessionEvent ID of the assistant
+	// message that emitted this tool call. Lets consumers fetch arguments
+	// without scanning.
+	AssistantMessageEventID string `json:"assistant_message_event_id,omitempty"`
+
+	// ToolResultMessageEventID is the SessionEvent ID of the tool result
+	// message. Set only on the end span; empty when the call errored before
+	// producing one.
+	ToolResultMessageEventID string `json:"tool_result_message_event_id,omitempty"`
 }
 
 type UserObservationEvent struct {
@@ -445,10 +460,7 @@ func init() {
 	schema.RegisterName[*SpanEvent]("_eino_adk_span_event")
 	schema.RegisterName[*ModelSpanMeta]("_eino_adk_model_span_meta")
 	schema.RegisterName[*ModelUsage]("_eino_adk_model_usage")
-	schema.RegisterName[*AgentObservationEvent]("_eino_adk_agent_observation_event")
-	schema.RegisterName[*AgentThinkingEvent]("_eino_adk_agent_thinking_event")
-	schema.RegisterName[*AgentToolUseEvent]("_eino_adk_agent_tool_use_event")
-	schema.RegisterName[*AgentToolResultEvent]("_eino_adk_agent_tool_result_event")
+	schema.RegisterName[*ToolSpanMeta]("_eino_adk_tool_span_meta")
 	schema.RegisterName[*UserObservationEvent]("_eino_adk_user_observation_event")
 	schema.RegisterName[*UserInterruptEvent]("_eino_adk_user_interrupt_event")
 }
@@ -646,38 +658,36 @@ func ClassifySessionEvent[M MessageType](event *SessionEvent[M]) (SessionEventKi
 		add(SessionEventSessionError)
 	}
 	if event.Span != nil {
-		switch {
-		case event.Span.Kind != SpanKindModel:
-			return "", fmt.Errorf("unknown span kind %q", event.Span.Kind)
-		case !event.Span.StartedAt.IsZero() && event.Span.EndedAt.IsZero():
-			add(SessionEventSpanModelRequestStart)
-		case !event.Span.EndedAt.IsZero():
-			add(SessionEventSpanModelRequestEnd)
+		if (event.Span.Model != nil) == (event.Span.Tool != nil) {
+			return "", errors.New("span event must populate exactly one of Model or Tool")
+		}
+		switch event.Span.Kind {
+		case SpanKindModel:
+			if event.Span.Model == nil {
+				return "", errors.New("model span requires Span.Model meta")
+			}
+			switch {
+			case !event.Span.StartedAt.IsZero() && event.Span.EndedAt.IsZero():
+				add(SessionEventSpanModelRequestStart)
+			case !event.Span.EndedAt.IsZero():
+				add(SessionEventSpanModelRequestEnd)
+			default:
+				return "", errors.New("model span must have start or end timestamp")
+			}
+		case SpanKindTool:
+			if event.Span.Tool == nil {
+				return "", errors.New("tool span requires Span.Tool meta")
+			}
+			switch {
+			case !event.Span.StartedAt.IsZero() && event.Span.EndedAt.IsZero():
+				add(SessionEventSpanToolCallStart)
+			case !event.Span.EndedAt.IsZero():
+				add(SessionEventSpanToolCallEnd)
+			default:
+				return "", errors.New("tool span must have start or end timestamp")
+			}
 		default:
-			return "", errors.New("model span must have start or end timestamp")
-		}
-	}
-	if event.AgentObservation != nil {
-		var observationKinds []SessionEventKind
-		if event.AgentObservation.Thinking != nil {
-			observationKinds = append(observationKinds, SessionEventAgentThinking)
-		}
-		if event.AgentObservation.ToolUse != nil {
-			observationKinds = append(observationKinds, SessionEventAgentToolUse)
-		}
-		if event.AgentObservation.ToolResult != nil {
-			observationKinds = append(observationKinds, SessionEventAgentToolResult)
-		}
-		if len(observationKinds) != 1 {
-			return "", fmt.Errorf("agent observation must have exactly one active payload, got %d", len(observationKinds))
-		}
-		switch observationKinds[0] {
-		case SessionEventAgentThinking:
-			add(SessionEventAgentThinking)
-		case SessionEventAgentToolUse:
-			add(SessionEventAgentToolUse)
-		case SessionEventAgentToolResult:
-			add(SessionEventAgentToolResult)
+			return "", fmt.Errorf("unknown span kind %q", event.Span.Kind)
 		}
 	}
 	if event.UserObservation != nil {

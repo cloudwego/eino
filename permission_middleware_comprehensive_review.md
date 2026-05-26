@@ -15,7 +15,7 @@
 | # | Dimension | Severity | Finding | Fix Applied | Files |
 |---|-----------|----------|---------|-------------|-------|
 | 1 | API Safety | P1 | Targeted resume approval executed the current invocation arguments instead of the arguments shown in the persisted `AskState`. | Targeted resumes now require `AskState` and approve the saved interrupted arguments by default. | `adk/middlewares/permission/permission.go` |
-| 2 | Observability | P1 | `AgentToolUseEvent.EvaluatedPermission` was exposed but permission decisions were never recorded by the middleware. | Permission decisions are now stored for allow, deny, ask, approve, reject, and respond paths; tool-use observation is emitted after decision evaluation. | `adk/middlewares/permission/permission.go`, `adk/wrappers.go` |
+| 2 | Observability | P1 | `ToolSpanMeta.EvaluatedPermission` was exposed but permission decisions were never recorded by the middleware. | Permission decisions are now stored for allow, deny, ask, approve, reject, and respond paths; tool span start/end events carry the resolved permission decision. | `adk/middlewares/permission/permission.go`, `adk/wrappers.go` |
 | 3 | API Expressiveness | P2 | `UpdatedInput string` could not intentionally replace arguments with an empty string. | Added `HasUpdatedInput` flags while preserving existing non-empty `UpdatedInput` behavior for compatibility. | `adk/middlewares/permission/permission.go` |
 | 4 | Timeline Propagation | P1 | The `*schema.Message` ReAct exec context did not copy session/timeline flags, suppressing tool-use timeline observations. | Propagated `sessionEvents`, `timelineEvents`, and `internalTimelineEvents` into the message-path exec context. | `adk/chatmodel.go` |
 
