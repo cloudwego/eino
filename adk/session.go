@@ -236,6 +236,7 @@ type SessionEvent[M MessageType] struct {
 	Span      *SpanEvent         `json:"span,omitempty"`
 
 	UserObservation *UserObservationEvent `json:"user_observation,omitempty"`
+	AgentInterrupt  *AgentInterruptEvent  `json:"agent_interrupt,omitempty"`
 }
 
 type SessionEventKind string
@@ -257,7 +258,8 @@ const (
 	SessionEventSpanToolCallStart     SessionEventKind = "span.tool_call_start"
 	SessionEventSpanToolCallEnd       SessionEventKind = "span.tool_call_end"
 
-	SessionEventUserInterrupt SessionEventKind = "user.interrupt"
+	SessionEventUserInterrupt  SessionEventKind = "user.interrupt"
+	SessionEventAgentInterrupt SessionEventKind = "agent.interrupt"
 )
 
 type LifecycleEvent struct {
@@ -399,6 +401,32 @@ type UserInterruptEvent struct {
 	Reason string `json:"reason,omitempty"`
 }
 
+// AgentInterruptCause identifies why the agent paused execution.
+type AgentInterruptCause string
+
+const (
+	// AgentInterruptCauseToolPermission indicates a tool call required user approval.
+	AgentInterruptCauseToolPermission AgentInterruptCause = "tool_permission"
+	// AgentInterruptCauseCustomTool indicates a custom or external tool requires a user-provided result.
+	AgentInterruptCauseCustomTool AgentInterruptCause = "custom_tool"
+	// AgentInterruptCauseGeneric indicates a generic interrupt from any component.
+	AgentInterruptCauseGeneric AgentInterruptCause = "generic"
+)
+
+// AgentInterruptEvent records a business interrupt in the durable session timeline.
+type AgentInterruptEvent struct {
+	// Cause categorizes why the interrupt happened for UI rendering.
+	Cause AgentInterruptCause `json:"cause,omitempty"`
+	// CheckPointID is the checkpoint key used by Runner.Resume or Runner.ResumeWithParams.
+	CheckPointID string `json:"checkpoint_id,omitempty"`
+	// InterruptContexts is the public interrupt context shape exposed on live events.
+	InterruptContexts []*InterruptCtx `json:"interrupt_contexts,omitempty"`
+	// ToolUseID is set when the interrupt source is a specific tool call.
+	ToolUseID string `json:"tool_use_id,omitempty"`
+	// SpanEventID is the SessionEvent ID of the related tool span start event.
+	SpanEventID string `json:"span_event_id,omitempty"`
+}
+
 // MessageUpdatedEvent represents a single message replacement within the messages array.
 type MessageUpdatedEvent[M MessageType] struct {
 	// MessageID identifies the target message via its eino-internal message ID
@@ -481,6 +509,7 @@ func init() {
 	schema.RegisterName[*ToolSpanMeta]("_eino_adk_tool_span_meta")
 	schema.RegisterName[*UserObservationEvent]("_eino_adk_user_observation_event")
 	schema.RegisterName[*UserInterruptEvent]("_eino_adk_user_interrupt_event")
+	schema.RegisterName[*AgentInterruptEvent]("_eino_adk_agent_interrupt_event")
 }
 
 func encodeGob(v any) ([]byte, error) {
@@ -713,6 +742,9 @@ func ClassifySessionEvent[M MessageType](event *SessionEvent[M]) (SessionEventKi
 			return "", errors.New("user observation has no active payload")
 		}
 		add(SessionEventUserInterrupt)
+	}
+	if event.AgentInterrupt != nil {
+		add(SessionEventAgentInterrupt)
 	}
 	if len(kinds) != 1 {
 		return "", fmt.Errorf("session event must have exactly one active payload, got %d", len(kinds))
@@ -1113,9 +1145,11 @@ func reconstructSessionState[M MessageType](
 
 	committedEndIdx := latestCommittedTurnEnd(allEvents)
 	contextTailIdx := len(allEvents) - 1
+	inFlightStartIdx := committedEndIdx + 1
 	if committedEndIdx < 0 {
 		// Compatibility for historical/session-fixture logs written before
 		// TurnEnd became the explicit commit boundary.
+		inFlightStartIdx = 0
 		committedEndIdx = contextTailIdx
 	}
 
@@ -1123,7 +1157,7 @@ func reconstructSessionState[M MessageType](
 	// turn. The first TurnID found identifies that turn — all events within a
 	// single turn share the same TurnID, so only the first match is needed.
 	var inFlightTurnID string
-	for i := committedEndIdx + 1; i <= contextTailIdx; i++ {
+	for i := inFlightStartIdx; i <= contextTailIdx; i++ {
 		if allEvents[i] != nil && allEvents[i].TurnID != "" {
 			inFlightTurnID = allEvents[i].TurnID
 			break
