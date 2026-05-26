@@ -452,8 +452,37 @@ type MessageInsertedEvent[M MessageType] struct {
 	BeforeMessageID string `json:"before_message_id,omitempty"`
 }
 
+// SessionPersistenceMode controls when session events are appended relative to
+// consumer-visible AgentEvents.
+type SessionPersistenceMode string
+
+const (
+	// SessionPersistenceModeAsync preserves the default low-latency behavior:
+	// AgentEvent delivery is decoupled from durable persistence and events are
+	// appended by a background batch persister.
+	SessionPersistenceModeAsync SessionPersistenceMode = "async"
+	// SessionPersistenceModeSync appends every persistable SessionEvent before
+	// the corresponding AgentEvent is delivered. Streaming message outputs are
+	// materialized and delivered as non-streaming events after persistence.
+	SessionPersistenceModeSync SessionPersistenceMode = "sync"
+)
+
 // SessionConfig tunes managed-session event persistence and loading.
 type SessionConfig struct {
+	// PersistenceMode controls when session events are appended relative to
+	// consumer-visible AgentEvents. Defaults to SessionPersistenceModeAsync.
+	//
+	// In async mode, AgentEvent delivery is decoupled from durable persistence;
+	// events are appended by a background persister according to batch/interval
+	// settings, while finalization still waits for pending flushes before
+	// committing checkpoints or successful turns.
+	//
+	// In sync mode, every persistable SessionEvent is encoded and appended before
+	// the corresponding AgentEvent is sent to the consumer. Protocol errors fail
+	// fast, infrastructure errors use MaxFlushRetries and
+	// FlushRetryInitialBackoff, and EventFlushBatchSize, EventFlushInterval, and
+	// EventBufferSize are ignored for writes.
+	PersistenceMode SessionPersistenceMode
 	// EventFlushBatchSize is the maximum number of events accumulated before
 	// triggering a flush to the SessionStore. Defaults to 16.
 	EventFlushBatchSize int
@@ -466,7 +495,7 @@ type SessionConfig struct {
 	EventBufferSize int
 	// MaxFlushRetries is the maximum number of retry attempts when AppendEvents
 	// fails. After exhausting retries, the error is latched and the turn fails.
-	// Defaults to 3. Set to 0 to disable retries (fail on first error).
+	// Defaults to 3. Set a negative value to disable retries (fail on first error).
 	MaxFlushRetries int
 	// FlushRetryInitialBackoff is the base delay before the first retry.
 	// Subsequent retries use exponential backoff (2x multiplier) with jitter.
@@ -786,6 +815,7 @@ func ValidateEmittedSessionEventKind[M MessageType](event *SessionEvent[M]) erro
 
 func normalizeSessionConfig(cfg *SessionConfig) SessionConfig {
 	normalized := SessionConfig{
+		PersistenceMode:          SessionPersistenceModeAsync,
 		EventFlushBatchSize:      defaultSessionEventFlushBatchSize,
 		EventFlushInterval:       defaultSessionEventFlushInterval,
 		EventBufferSize:          defaultSessionEventBufferSize,
@@ -796,6 +826,9 @@ func normalizeSessionConfig(cfg *SessionConfig) SessionConfig {
 	}
 	if cfg == nil {
 		return normalized
+	}
+	if cfg.PersistenceMode == SessionPersistenceModeSync {
+		normalized.PersistenceMode = SessionPersistenceModeSync
 	}
 	if cfg.EventFlushBatchSize > 0 {
 		normalized.EventFlushBatchSize = cfg.EventFlushBatchSize
@@ -851,6 +884,10 @@ func newSessionEventPersister[M MessageType](
 		cfg:       cfg,
 		done:      make(chan struct{}),
 	}
+	if p.cfg.PersistenceMode == SessionPersistenceModeSync {
+		close(p.done)
+		return p
+	}
 	p.ch = make(chan SessionEventPayload, p.cfg.EventBufferSize)
 	go p.run()
 	return p
@@ -866,6 +903,13 @@ func (p *sessionEventPersister[M]) enqueue(payload SessionEventPayload) error {
 	if atomic.LoadInt32(&p.closed) != 0 {
 		return p.getErr()
 	}
+	if p.cfg.PersistenceMode == SessionPersistenceModeSync {
+		if err := p.appendEventsWithRetry([]SessionEventPayload{payload}); err != nil {
+			p.setErr(err)
+			return err
+		}
+		return nil
+	}
 	select {
 	case p.ch <- payload:
 		return nil
@@ -876,6 +920,9 @@ func (p *sessionEventPersister[M]) enqueue(payload SessionEventPayload) error {
 
 func (p *sessionEventPersister[M]) closeAndWait() error {
 	atomic.StoreInt32(&p.closed, 1)
+	if p.cfg.PersistenceMode == SessionPersistenceModeSync {
+		return p.getErr()
+	}
 	close(p.ch)
 	<-p.done
 	return p.getErr()
@@ -896,30 +943,9 @@ func (p *sessionEventPersister[M]) run() {
 		copy(entries, batch)
 		batch = nil
 
-		var lastErr error
-		for attempt := 0; attempt <= p.cfg.MaxFlushRetries; attempt++ {
-			if attempt > 0 {
-				backoff := p.cfg.FlushRetryInitialBackoff << uint(attempt-1)
-				jitter := time.Duration(rand.Int63n(int64(backoff)/4 + 1))
-				select {
-				case <-time.After(backoff + jitter):
-				case <-p.ctx.Done():
-					p.setErr(p.ctx.Err())
-					return
-				}
-			}
-			if err := p.store.AppendEvents(p.ctx, p.sessionID, entries); err != nil {
-				lastErr = err
-				if isProtocolError(err) {
-					// Protocol-level: fail fast, no retry, no backoff.
-					p.setErr(err)
-					return
-				}
-				continue
-			}
-			return // success
+		if err := p.appendEventsWithRetry(entries); err != nil {
+			p.setErr(err)
 		}
-		p.setErr(lastErr)
 	}
 
 	for {
@@ -942,6 +968,30 @@ func (p *sessionEventPersister[M]) run() {
 			resetTimer(timer, p.cfg.EventFlushInterval)
 		}
 	}
+}
+
+func (p *sessionEventPersister[M]) appendEventsWithRetry(events []SessionEventPayload) error {
+	var lastErr error
+	for attempt := 0; attempt <= p.cfg.MaxFlushRetries; attempt++ {
+		if attempt > 0 {
+			backoff := p.cfg.FlushRetryInitialBackoff << uint(attempt-1)
+			jitter := time.Duration(rand.Int63n(int64(backoff)/4 + 1))
+			select {
+			case <-time.After(backoff + jitter):
+			case <-p.ctx.Done():
+				return p.ctx.Err()
+			}
+		}
+		if err := p.store.AppendEvents(p.ctx, p.sessionID, events); err != nil {
+			lastErr = err
+			if isProtocolError(err) {
+				return err
+			}
+			continue
+		}
+		return nil
+	}
+	return lastErr
 }
 
 func (p *sessionEventPersister[M]) setErr(err error) {
