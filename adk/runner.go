@@ -810,6 +810,7 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 							if err := enqueueSessionEvent(se); err != nil {
 								continue
 							}
+							persistEvent.SessionEvent = se
 						}
 						event = &persistEvent
 					} else {
@@ -824,6 +825,15 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 
 						liveOutput.MessageOutput = &liveMV
 						event.Output = &liveOutput
+						// Attach a SessionEvent shell so downstream consumers know
+						// this streaming event's persisted identity (Kind + EventID)
+						// before the message is fully materialized. The Message field
+						// is nil; consumers should read content from MessageOutput.
+						event.SessionEvent = &SessionEvent[M]{
+							EventID:   event.EventID,
+							Timestamp: event.Timestamp,
+							Kind:      SessionEventMessage,
+						}
 						liveEvent := event
 						if !enableTimelineEvents {
 							liveEvent = stripSessionEventFields(liveEvent)
@@ -848,6 +858,7 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 						persistOutput.MessageOutput = &persistMV
 						persistEvent := *event
 						persistEvent.Output = &persistOutput
+						persistEvent.SessionEvent = nil
 
 						se, err := toSessionEventChecked(&persistEvent)
 						if err != nil {
@@ -869,6 +880,11 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 						if err := enqueueSessionEvent(se); err != nil && syncPersistence {
 							continue
 						}
+						// Backfill SessionEvent onto the live event so downstream
+						// consumers (TurnLoop/onAgentEvents) see message events
+						// with their persisted SessionEvent identity, consistent
+						// with how span events are already delivered.
+						event.SessionEvent = se
 					}
 				}
 			}
