@@ -47,6 +47,33 @@ type sessionHelperStore struct {
 	deleteErr  error
 }
 
+type blockingAppendStore struct {
+	sessionHelperStore
+	appendStarted chan struct{}
+	releaseAppend chan struct{}
+	startOnce     sync.Once
+}
+
+func newBlockingAppendStore() *blockingAppendStore {
+	return &blockingAppendStore{
+		sessionHelperStore: *newSessionHelperStore(),
+		appendStarted:      make(chan struct{}),
+		releaseAppend:      make(chan struct{}),
+	}
+}
+
+func (s *blockingAppendStore) AppendEvents(ctx context.Context, sessionID string, events []SessionEventPayload) error {
+	s.startOnce.Do(func() {
+		close(s.appendStarted)
+	})
+	select {
+	case <-s.releaseAppend:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	return s.sessionHelperStore.AppendEvents(ctx, sessionID, events)
+}
+
 // withTestEventID assigns a fresh UUIDv4 to the SessionEvent if its EventID is
 // empty. Tests that construct SessionEvent literals directly bypass the Runner
 // allocation paths, so they must still satisfy the AppendEvents wire contract.
@@ -614,6 +641,109 @@ func TestRunnerSessionModeFlushFailurePreventsCommit(t *testing.T) {
 	assert.Contains(t, lastErr.Error(), "failed to persist session events")
 }
 
+func TestRunnerSessionSyncModeBlocksDeliveryUntilAppendCompletes(t *testing.T) {
+	ctx := context.Background()
+	store := newBlockingAppendStore()
+	agent := &runnerSessionAgent{
+		name: "sync-block-agent",
+		turnEnd: &TurnEndState[*schema.Message]{
+			Messages: []*schema.Message{schema.AssistantMessage("ok", nil)},
+		},
+	}
+	runner := NewRunner(ctx, RunnerConfig{
+		Agent:        agent,
+		SessionID:    "sync-block-session",
+		SessionStore: store,
+		Session:      &SessionConfig{PersistenceMode: SessionPersistenceModeSync},
+	})
+
+	iter := runner.Query(ctx, "trigger")
+	events := make(chan *AgentEvent, 1)
+	go func() {
+		ev, ok := iter.Next()
+		if !ok {
+			events <- nil
+			return
+		}
+		events <- ev
+	}()
+
+	select {
+	case <-store.appendStarted:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("sync persistence did not start appending")
+	}
+	select {
+	case ev := <-events:
+		t.Fatalf("observed event before sync append completed: %#v", ev)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(store.releaseAppend)
+	firstEvent := <-events
+	var sawOutput bool
+	if firstEvent != nil {
+		require.NoError(t, firstEvent.Err)
+		if firstEvent.Output != nil && firstEvent.Output.MessageOutput != nil &&
+			firstEvent.Output.MessageOutput.Message != nil &&
+			firstEvent.Output.MessageOutput.Message.Content == "ok" {
+			sawOutput = true
+		}
+	}
+	for {
+		ev, ok := iter.Next()
+		if !ok {
+			break
+		}
+		require.NoError(t, ev.Err)
+		if ev.Output != nil && ev.Output.MessageOutput != nil &&
+			ev.Output.MessageOutput.Message != nil &&
+			ev.Output.MessageOutput.Message.Content == "ok" {
+			sawOutput = true
+			break
+		}
+	}
+	assert.True(t, sawOutput, "expected output after sync append completed")
+}
+
+func TestRunnerSessionSyncModeAppendFailureSuppressesOutput(t *testing.T) {
+	ctx := context.Background()
+	store := newSessionHelperStore()
+	store.appendErr = errors.New("sync append failed")
+	agent := &runnerSessionAgent{
+		name: "sync-fail-agent",
+		turnEnd: &TurnEndState[*schema.Message]{
+			Messages: []*schema.Message{schema.AssistantMessage("ok", nil)},
+		},
+	}
+	runner := NewRunner(ctx, RunnerConfig{
+		Agent:        agent,
+		SessionID:    "sync-fail-session",
+		SessionStore: store,
+		Session:      &SessionConfig{PersistenceMode: SessionPersistenceModeSync, MaxFlushRetries: -1},
+	})
+
+	iter := runner.Query(ctx, "trigger")
+	var lastErr error
+	var sawOutput bool
+	for {
+		ev, ok := iter.Next()
+		if !ok {
+			break
+		}
+		if ev.Err != nil {
+			lastErr = ev.Err
+		}
+		if ev.Output != nil && ev.Output.MessageOutput != nil {
+			sawOutput = true
+		}
+	}
+
+	require.Error(t, lastErr)
+	assert.Contains(t, lastErr.Error(), "failed to persist session events")
+	assert.False(t, sawOutput, "sync mode must not deliver output after append failure")
+}
+
 // TestSessionPersister_EnqueueAfterClose verifies that calling enqueue after
 // closeAndWait does not panic (send on closed channel).
 func TestSessionPersister_EnqueueAfterClose(t *testing.T) {
@@ -661,6 +791,70 @@ func TestSessionPersister_EmptyPayloadSkipped(t *testing.T) {
 	require.Len(t, store.events, 1, "only the real event should be persisted")
 }
 
+func TestSessionPersister_SyncModeAppendDuringEnqueue(t *testing.T) {
+	ctx := context.Background()
+	store := newSessionHelperStore()
+	cfg := normalizeSessionConfig(&SessionConfig{PersistenceMode: SessionPersistenceModeSync})
+	persister := newSessionEventPersister[*schema.Message](ctx, store, "sync-enqueue", cfg)
+
+	require.NoError(t, persister.enqueue(validTestPayload()))
+	store.mu.Lock()
+	assert.Len(t, store.events, 1, "sync mode must append during enqueue")
+	store.mu.Unlock()
+
+	require.NoError(t, persister.closeAndWait())
+	store.mu.Lock()
+	assert.Len(t, store.events, 1, "sync closeAndWait must not flush again")
+	store.mu.Unlock()
+}
+
+func TestSessionPersister_SyncModeRetryAndLatch(t *testing.T) {
+	t.Run("transient recovery", func(t *testing.T) {
+		ctx := context.Background()
+		store := &transientFailStore{
+			sessionHelperStore: *newSessionHelperStore(),
+			failsLeft:          2,
+			appendErrVal:       errors.New("transient"),
+		}
+		cfg := normalizeSessionConfig(&SessionConfig{
+			PersistenceMode:          SessionPersistenceModeSync,
+			MaxFlushRetries:          3,
+			FlushRetryInitialBackoff: time.Millisecond,
+		})
+		persister := newSessionEventPersister[*schema.Message](ctx, store, "sync-retry", cfg)
+
+		require.NoError(t, persister.enqueue(validTestPayload()))
+		assert.Equal(t, 3, store.getAppendCalls())
+		assert.NoError(t, persister.closeAndWait())
+	})
+
+	t.Run("permanent failure latched", func(t *testing.T) {
+		ctx := context.Background()
+		store := &transientFailStore{
+			sessionHelperStore: *newSessionHelperStore(),
+			failsLeft:          100,
+			appendErrVal:       errors.New("permanent"),
+		}
+		cfg := normalizeSessionConfig(&SessionConfig{
+			PersistenceMode:          SessionPersistenceModeSync,
+			MaxFlushRetries:          1,
+			FlushRetryInitialBackoff: time.Millisecond,
+		})
+		persister := newSessionEventPersister[*schema.Message](ctx, store, "sync-latch", cfg)
+
+		err := persister.enqueue(validTestPayload())
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "permanent")
+		assert.Equal(t, 2, store.getAppendCalls())
+
+		err = persister.enqueue(validTestPayload())
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "permanent")
+		assert.Equal(t, 2, store.getAppendCalls(), "latched failure must prevent later appends")
+		assert.Error(t, persister.closeAndWait())
+	})
+}
+
 // TestTurnEndState_GobRoundtripNilFields verifies gob roundtrip preserves nil semantics.
 func TestTurnEndState_GobRoundtripNilFields(t *testing.T) {
 	original := &TurnEndState[*schema.Message]{}
@@ -678,13 +872,21 @@ func TestTurnEndState_GobRoundtripNilFields(t *testing.T) {
 
 func TestNormalizeSessionConfig_Variations(t *testing.T) {
 	cfg := normalizeSessionConfig(nil)
+	assert.Equal(t, SessionPersistenceModeAsync, cfg.PersistenceMode)
 	assert.Equal(t, defaultSessionEventFlushBatchSize, cfg.EventFlushBatchSize)
 	assert.Equal(t, defaultSessionEventFlushInterval, cfg.EventFlushInterval)
 	assert.Equal(t, defaultSessionEventBufferSize, cfg.EventBufferSize)
 	assert.NotNil(t, cfg.EventSerializer)
 
 	cfg = normalizeSessionConfig(&SessionConfig{})
+	assert.Equal(t, SessionPersistenceModeAsync, cfg.PersistenceMode)
 	assert.Equal(t, defaultSessionEventFlushBatchSize, cfg.EventFlushBatchSize)
+
+	cfg = normalizeSessionConfig(&SessionConfig{PersistenceMode: SessionPersistenceModeSync})
+	assert.Equal(t, SessionPersistenceModeSync, cfg.PersistenceMode)
+
+	cfg = normalizeSessionConfig(&SessionConfig{PersistenceMode: SessionPersistenceMode("unknown")})
+	assert.Equal(t, SessionPersistenceModeAsync, cfg.PersistenceMode)
 
 	cfg = normalizeSessionConfig(&SessionConfig{EventFlushBatchSize: 32})
 	assert.Equal(t, 32, cfg.EventFlushBatchSize)

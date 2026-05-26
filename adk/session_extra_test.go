@@ -35,6 +35,8 @@ import (
 type sessionStreamingAgent struct {
 	chunks  []*schema.Message
 	turnEnd *TurnEndState[*schema.Message]
+	role    schema.RoleType
+	tool    string
 }
 
 func (a *sessionStreamingAgent) Name(_ context.Context) string        { return "session-stream-agent" }
@@ -44,7 +46,11 @@ func (a *sessionStreamingAgent) Run(_ context.Context, _ *AgentInput, _ ...Agent
 	go func() {
 		defer gen.Close()
 		stream := schema.StreamReaderFromArray(a.chunks)
-		mv := &MessageVariant{IsStreaming: true, MessageStream: stream, Role: schema.Assistant}
+		role := a.role
+		if role == "" {
+			role = schema.Assistant
+		}
+		mv := &MessageVariant{IsStreaming: true, MessageStream: stream, Role: role, ToolName: a.tool}
 		gen.Send(&AgentEvent{AgentName: "session-stream-agent", Output: &AgentOutput{MessageOutput: mv}})
 		gen.Send(&AgentEvent{
 			AgentName: "session-stream-agent",
@@ -78,11 +84,11 @@ func TestStreamPersistence_CopyAndConcat(t *testing.T) {
 	}
 
 	runner := NewRunner(ctx, RunnerConfig{
-		Agent:              agent,
-		EnableStreaming:    true,
-		SessionID:          sid,
-		SessionStore:       store,
-		Session: &SessionConfig{EventFlushBatchSize: 1},
+		Agent:           agent,
+		EnableStreaming: true,
+		SessionID:       sid,
+		SessionStore:    store,
+		Session:         &SessionConfig{EventFlushBatchSize: 1},
 	})
 
 	// Drain live events and verify the live stream still produces the concatenated content.
@@ -117,6 +123,113 @@ func TestStreamPersistence_CopyAndConcat(t *testing.T) {
 		"persisted stream message must be the fully concatenated content")
 }
 
+func TestStreamPersistence_SyncModeMaterializesBeforeDelivery(t *testing.T) {
+	ctx := context.Background()
+	store := newSessionHelperStore()
+	sid := "sync-stream-session"
+
+	agent := &sessionStreamingAgent{
+		chunks: []*schema.Message{
+			schema.AssistantMessage("hello ", nil),
+			schema.AssistantMessage("sync", nil),
+		},
+		turnEnd: &TurnEndState[*schema.Message]{
+			Messages: []*schema.Message{schema.UserMessage("q"), schema.AssistantMessage("hello sync", nil)},
+		},
+	}
+
+	runner := NewRunner(ctx, RunnerConfig{
+		Agent:           agent,
+		EnableStreaming: true,
+		SessionID:       sid,
+		SessionStore:    store,
+		Session:         &SessionConfig{PersistenceMode: SessionPersistenceModeSync},
+	})
+
+	iter := runner.Query(ctx, "q")
+	var observed *MessageVariant
+	for {
+		ev, ok := iter.Next()
+		if !ok {
+			break
+		}
+		require.NoError(t, ev.Err)
+		if ev.Output != nil && ev.Output.MessageOutput != nil {
+			observed = ev.Output.MessageOutput
+			var stored bool
+			for _, ep := range store.events {
+				se, err := decodeSessionEvent[*schema.Message](ep.Data)
+				require.NoError(t, err)
+				if se.Message != nil && se.Message.Role == schema.Assistant && se.Message.Content == "hello sync" {
+					stored = true
+				}
+			}
+			assert.True(t, stored, "sync stream message must be stored before delivery")
+		}
+	}
+
+	require.NotNil(t, observed)
+	assert.False(t, observed.IsStreaming, "sync mode must deliver materialized non-streaming output")
+	require.NotNil(t, observed.Message)
+	assert.Equal(t, "hello sync", observed.Message.Content)
+	assert.Nil(t, observed.MessageStream)
+}
+
+func TestStreamPersistence_SyncModeToolResultMaterializesBeforeDelivery(t *testing.T) {
+	ctx := context.Background()
+	store := newSessionHelperStore()
+	sid := "sync-tool-stream-session"
+
+	agent := &sessionStreamingAgent{
+		chunks: []*schema.Message{
+			schema.ToolMessage("tool ", "tc-1", schema.WithToolName("t1")),
+			schema.ToolMessage("result", "tc-1", schema.WithToolName("t1")),
+		},
+		turnEnd: &TurnEndState[*schema.Message]{
+			Messages: []*schema.Message{schema.ToolMessage("tool result", "tc-1", schema.WithToolName("t1"))},
+		},
+		role: schema.Tool,
+		tool: "t1",
+	}
+
+	runner := NewRunner(ctx, RunnerConfig{
+		Agent:           agent,
+		EnableStreaming: true,
+		SessionID:       sid,
+		SessionStore:    store,
+		Session:         &SessionConfig{PersistenceMode: SessionPersistenceModeSync},
+	})
+
+	iter := runner.Query(ctx, "q")
+	var observed *MessageVariant
+	for {
+		ev, ok := iter.Next()
+		if !ok {
+			break
+		}
+		require.NoError(t, ev.Err)
+		if ev.Output != nil && ev.Output.MessageOutput != nil {
+			observed = ev.Output.MessageOutput
+			var stored bool
+			for _, ep := range store.events {
+				se, err := decodeSessionEvent[*schema.Message](ep.Data)
+				require.NoError(t, err)
+				if se.Message != nil && se.Message.Role == schema.Tool && se.Message.Content == "tool result" {
+					stored = true
+				}
+			}
+			assert.True(t, stored, "sync tool-result stream must be stored before delivery")
+		}
+	}
+
+	require.NotNil(t, observed)
+	assert.False(t, observed.IsStreaming)
+	require.NotNil(t, observed.Message)
+	assert.Equal(t, schema.Tool, observed.Message.Role)
+	assert.Equal(t, "tool result", observed.Message.Content)
+	assert.Nil(t, observed.MessageStream)
+}
+
 // TestStreamPersistence_GetMessageError_NotEnqueued verifies that a stream
 // materialization error sets persistErr (failing the turn commit) and does NOT
 // enqueue a corrupt SessionEvent.
@@ -139,11 +252,11 @@ func TestStreamPersistence_GetMessageError_NotEnqueued(t *testing.T) {
 	}
 
 	runner := NewRunner(ctx, RunnerConfig{
-		Agent:              agent,
-		EnableStreaming:    true,
-		SessionID:          sid,
-		SessionStore:       store,
-		Session: &SessionConfig{EventFlushBatchSize: 1},
+		Agent:           agent,
+		EnableStreaming: true,
+		SessionID:       sid,
+		SessionStore:    store,
+		Session:         &SessionConfig{EventFlushBatchSize: 1},
 	})
 
 	iter := runner.Query(ctx, "trigger")
@@ -172,6 +285,60 @@ func TestStreamPersistence_GetMessageError_NotEnqueued(t *testing.T) {
 		if se.Message != nil {
 			assert.NotEqual(t, schema.Assistant, se.Message.Role,
 				"failed stream must not produce a persisted assistant event")
+		}
+	}
+}
+
+func TestStreamPersistence_SyncModeGetMessageErrorSuppressesOutput(t *testing.T) {
+	ctx := context.Background()
+	store := newSessionHelperStore()
+	sid := "sync-stream-err-session"
+
+	streamReader, streamWriter := schema.Pipe[*schema.Message](2)
+	streamWriter.Send(schema.AssistantMessage("partial ", nil), nil)
+	streamWriter.Send(nil, errors.New("simulated stream failure"))
+	streamWriter.Close()
+
+	agent := &streamingAgentRaw{
+		stream: streamReader,
+		turnEnd: &TurnEndState[*schema.Message]{
+			Messages: []*schema.Message{schema.AssistantMessage("ok", nil)},
+		},
+	}
+
+	runner := NewRunner(ctx, RunnerConfig{
+		Agent:           agent,
+		EnableStreaming: true,
+		SessionID:       sid,
+		SessionStore:    store,
+		Session:         &SessionConfig{PersistenceMode: SessionPersistenceModeSync},
+	})
+
+	iter := runner.Query(ctx, "trigger")
+	var lastErr error
+	var sawOutput bool
+	for {
+		ev, ok := iter.Next()
+		if !ok {
+			break
+		}
+		if ev.Err != nil {
+			lastErr = ev.Err
+		}
+		if ev.Output != nil && ev.Output.MessageOutput != nil {
+			sawOutput = true
+		}
+	}
+	require.Error(t, lastErr)
+	assert.Contains(t, lastErr.Error(), "failed to persist session events")
+	assert.False(t, sawOutput, "sync stream materialization failure must suppress the output event")
+
+	for _, ep := range store.events {
+		se, err := decodeSessionEvent[*schema.Message](ep.Data)
+		require.NoError(t, err)
+		if se.Message != nil {
+			assert.NotEqual(t, schema.Assistant, se.Message.Role,
+				"failed sync stream must not produce a persisted assistant event")
 		}
 	}
 }
@@ -243,10 +410,10 @@ func TestRunnerInputEvents_MixedRoles(t *testing.T) {
 		},
 	}
 	runner := NewRunner(ctx, RunnerConfig{
-		Agent:              agent,
-		SessionID:          sid,
-		SessionStore:       store,
-		Session: &SessionConfig{EventFlushBatchSize: 1},
+		Agent:        agent,
+		SessionID:    sid,
+		SessionStore: store,
+		Session:      &SessionConfig{EventFlushBatchSize: 1},
 	})
 
 	systemMsg := schema.SystemMessage("system instruction")
@@ -286,10 +453,10 @@ func TestTurnEndOnly_PersistedAsSessionEvent(t *testing.T) {
 	}
 
 	runner := NewRunner(ctx, RunnerConfig{
-		Agent:              agent,
-		SessionID:          sid,
-		SessionStore:       store,
-		Session: &SessionConfig{EventFlushBatchSize: 1},
+		Agent:        agent,
+		SessionID:    sid,
+		SessionStore: store,
+		Session:      &SessionConfig{EventFlushBatchSize: 1},
 	})
 	drainSessionEvents(t, runner.Query(ctx, "input"))
 
@@ -614,10 +781,10 @@ func TestPartialInterrupted_ThenNewRun(t *testing.T) {
 		},
 	}
 	runner := NewRunner(ctx, RunnerConfig{
-		Agent:              captured,
-		SessionID:          sid,
-		SessionStore:       store,
-		Session: &SessionConfig{EventFlushBatchSize: 1},
+		Agent:        captured,
+		SessionID:    sid,
+		SessionStore: store,
+		Session:      &SessionConfig{EventFlushBatchSize: 1},
 	})
 	drainSessionEvents(t, runner.Query(ctx, "second"))
 
@@ -807,10 +974,10 @@ func TestRunnerPersists_MessagesReplaced(t *testing.T) {
 		turnEnd: &TurnEndState[*schema.Message]{Messages: []*schema.Message{summary}},
 	}
 	runner := NewRunner(ctx, RunnerConfig{
-		Agent:              agent,
-		SessionID:          sid,
-		SessionStore:       store,
-		Session: &SessionConfig{EventFlushBatchSize: 1},
+		Agent:        agent,
+		SessionID:    sid,
+		SessionStore: store,
+		Session:      &SessionConfig{EventFlushBatchSize: 1},
 	})
 	drainSessionEvents(t, runner.Query(ctx, "anything"))
 
@@ -894,10 +1061,10 @@ func TestRunnerPersists_MessageUpdated_BothMessages(t *testing.T) {
 		},
 	}
 	runner := NewRunner(ctx, RunnerConfig{
-		Agent:              agent,
-		SessionID:          sid,
-		SessionStore:       store,
-		Session: &SessionConfig{EventFlushBatchSize: 1},
+		Agent:        agent,
+		SessionID:    sid,
+		SessionStore: store,
+		Session:      &SessionConfig{EventFlushBatchSize: 1},
 	})
 	drainSessionEvents(t, runner.Query(ctx, "go"))
 
@@ -986,10 +1153,10 @@ func TestRunnerPersists_MessageInserted_AnchorAndAppend(t *testing.T) {
 	}
 
 	runner := NewRunner(ctx, RunnerConfig{
-		Agent:              agent,
-		SessionID:          sid,
-		SessionStore:       store,
-		Session: &SessionConfig{EventFlushBatchSize: 1},
+		Agent:        agent,
+		SessionID:    sid,
+		SessionStore: store,
+		Session:      &SessionConfig{EventFlushBatchSize: 1},
 	})
 	// We must pass the user message as input, with its existing ID already assigned,
 	// so reconstruction's anchor lookup succeeds.
@@ -1074,10 +1241,10 @@ func TestAgentTool_ChildSessionID_FiltersFromParentLog(t *testing.T) {
 	}
 
 	runner := NewRunner(ctx, RunnerConfig{
-		Agent:              agent,
-		SessionID:          sid,
-		SessionStore:       parentStore,
-		Session: &SessionConfig{EventFlushBatchSize: 1},
+		Agent:        agent,
+		SessionID:    sid,
+		SessionStore: parentStore,
+		Session:      &SessionConfig{EventFlushBatchSize: 1},
 	})
 	drainSessionEvents(t, runner.Query(ctx, "go"))
 
