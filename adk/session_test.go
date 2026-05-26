@@ -298,10 +298,10 @@ func TestRunnerSessionModePrependsCommittedMessagesOnce(t *testing.T) {
 		},
 	}
 	runner := NewRunner(ctx, RunnerConfig{
-		Agent:              firstAgent,
-		SessionID:          sessionID,
-		SessionStore:       store,
-		Session: &SessionConfig{EventFlushBatchSize: 1},
+		Agent:        firstAgent,
+		SessionID:    sessionID,
+		SessionStore: store,
+		Session:      &SessionConfig{EventFlushBatchSize: 1},
 	})
 	drainSessionEvents(t, runner.Query(ctx, "first"))
 
@@ -313,10 +313,10 @@ func TestRunnerSessionModePrependsCommittedMessagesOnce(t *testing.T) {
 		},
 	}
 	runner = NewRunner(ctx, RunnerConfig{
-		Agent:              secondAgent,
-		SessionID:          sessionID,
-		SessionStore:       store,
-		Session: &SessionConfig{EventFlushBatchSize: 1},
+		Agent:        secondAgent,
+		SessionID:    sessionID,
+		SessionStore: store,
+		Session:      &SessionConfig{EventFlushBatchSize: 1},
 	})
 	drainSessionEvents(t, runner.Query(ctx, "second", WithSessionValues(map[string]any{"override": "value"})))
 
@@ -438,11 +438,11 @@ func TestRunnerSessionStreamingDoesNotBlockLiveEvent(t *testing.T) {
 	defer release()
 
 	runner := NewRunner(ctx, RunnerConfig{
-		Agent:              agent,
-		EnableStreaming:    true,
-		SessionID:          "streaming-session",
-		SessionStore:       store,
-		Session: &SessionConfig{EventFlushBatchSize: 1},
+		Agent:           agent,
+		EnableStreaming: true,
+		SessionID:       "streaming-session",
+		SessionStore:    store,
+		Session:         &SessionConfig{EventFlushBatchSize: 1},
 	})
 
 	iter := runner.Query(ctx, "start")
@@ -592,10 +592,10 @@ func TestRunnerSessionModeFlushFailurePreventsCommit(t *testing.T) {
 	}
 
 	runner := NewRunner(ctx, RunnerConfig{
-		Agent:              agent,
-		SessionID:          "flush-fail-session",
-		SessionStore:       store,
-		Session: &SessionConfig{EventFlushBatchSize: 1},
+		Agent:        agent,
+		SessionID:    "flush-fail-session",
+		SessionStore: store,
+		Session:      &SessionConfig{EventFlushBatchSize: 1},
 	})
 
 	iter := runner.Query(ctx, "trigger")
@@ -778,20 +778,20 @@ func TestSessionConfig_CustomSerializerUsedForEncodeAndReconstruct(t *testing.T)
 	}
 
 	first := NewRunner(ctx, RunnerConfig{
-		Agent:              &runnerSessionAgent{name: "first"},
-		SessionID:          "serializer-custom",
-		SessionStore:       store,
-		Session: cfg,
+		Agent:        &runnerSessionAgent{name: "first"},
+		SessionID:    "serializer-custom",
+		SessionStore: store,
+		Session:      cfg,
 	})
 	drainSessionEvents(t, first.Query(ctx, "hello"))
 	require.Greater(t, atomic.LoadInt32(&serializer.marshalCalls), int32(0))
 
 	secondAgent := &runnerSessionAgent{name: "second"}
 	second := NewRunner(ctx, RunnerConfig{
-		Agent:              secondAgent,
-		SessionID:          "serializer-custom",
-		SessionStore:       store,
-		Session: cfg,
+		Agent:        secondAgent,
+		SessionID:    "serializer-custom",
+		SessionStore: store,
+		Session:      cfg,
 	})
 	drainSessionEvents(t, second.Query(ctx, "again"))
 
@@ -815,19 +815,19 @@ func TestAttack_GobSerializerEndToEnd(t *testing.T) {
 
 	firstAgent := &runnerSessionAgent{name: "first"}
 	first := NewRunner(ctx, RunnerConfig{
-		Agent:              firstAgent,
-		SessionID:          "gob-e2e",
-		SessionStore:       store,
-		Session: cfg,
+		Agent:        firstAgent,
+		SessionID:    "gob-e2e",
+		SessionStore: store,
+		Session:      cfg,
 	})
 	drainSessionEvents(t, first.Query(ctx, "hello from gob"))
 
 	secondAgent := &runnerSessionAgent{name: "second"}
 	second := NewRunner(ctx, RunnerConfig{
-		Agent:              secondAgent,
-		SessionID:          "gob-e2e",
-		SessionStore:       store,
-		Session: cfg,
+		Agent:        secondAgent,
+		SessionID:    "gob-e2e",
+		SessionStore: store,
+		Session:      cfg,
 	})
 	drainSessionEvents(t, second.Query(ctx, "second gob turn"))
 
@@ -1256,10 +1256,10 @@ func TestRunnerSessionReconstructsFromEventLog(t *testing.T) {
 		},
 	}
 	runner := NewRunner(ctx, RunnerConfig{
-		Agent:              firstAgent,
-		SessionID:          sid,
-		SessionStore:       store,
-		Session: &SessionConfig{EventFlushBatchSize: 1},
+		Agent:        firstAgent,
+		SessionID:    sid,
+		SessionStore: store,
+		Session:      &SessionConfig{EventFlushBatchSize: 1},
 	})
 	drainSessionEvents(t, runner.Query(ctx, "first"))
 
@@ -1277,10 +1277,10 @@ func TestRunnerSessionReconstructsFromEventLog(t *testing.T) {
 		},
 	}
 	runner = NewRunner(ctx, RunnerConfig{
-		Agent:              capturedAgent,
-		SessionID:          sid,
-		SessionStore:       store,
-		Session: &SessionConfig{EventFlushBatchSize: 1},
+		Agent:        capturedAgent,
+		SessionID:    sid,
+		SessionStore: store,
+		Session:      &SessionConfig{EventFlushBatchSize: 1},
 	})
 	drainSessionEvents(t, runner.Query(ctx, "second"))
 
@@ -1308,10 +1308,10 @@ func TestRunnerSessionInputEventsPersisted(t *testing.T) {
 		},
 	}
 	runner := NewRunner(ctx, RunnerConfig{
-		Agent:              agent,
-		SessionID:          sid,
-		SessionStore:       store,
-		Session: &SessionConfig{EventFlushBatchSize: 1},
+		Agent:        agent,
+		SessionID:    sid,
+		SessionStore: store,
+		Session:      &SessionConfig{EventFlushBatchSize: 1},
 	})
 	drainSessionEvents(t, runner.Query(ctx, "user-question"))
 
@@ -1650,6 +1650,43 @@ func TestAttack_InFlightTurnIDRecoveryOnResume(t *testing.T) {
 	assert.Equal(t, "interrupted-msg", result.state.Messages[1].Content)
 }
 
+func TestAttack_InFlightTurnIDRecoveryWithoutCommittedTurnEnd(t *testing.T) {
+	ctx := context.Background()
+	store := newSessionHelperStore()
+	sid := "inflight-no-committed-turn"
+
+	msg := schema.UserMessage("first-turn")
+	EnsureMessageID(msg)
+	events := []*SessionEvent[*schema.Message]{
+		{EventID: uuid.NewString(), Kind: SessionEventMessage, TurnID: "turn-interrupted", Message: msg},
+		{EventID: uuid.NewString(), Kind: SessionEventAgentInterrupt, TurnID: "turn-interrupted", AgentInterrupt: &AgentInterruptEvent{
+			Cause:        AgentInterruptCauseGeneric,
+			CheckPointID: "cp-1",
+			InterruptContexts: []*InterruptCtx{
+				{
+					ID:          "agent:InterruptAgent",
+					Address:     Address{{Type: AddressSegmentAgent, ID: "InterruptAgent"}},
+					Info:        "approval_needed",
+					IsRootCause: true,
+				},
+			},
+		}},
+	}
+	for _, se := range events {
+		data, err := encodeSessionEventWithSerializer(se, nil)
+		require.NoError(t, err)
+		require.NoError(t, store.AppendEvents(ctx, sid, []SessionEventPayload{{EventID: se.EventID, Kind: se.Kind, Data: data}}))
+	}
+
+	result, err := reconstructSessionState[*schema.Message](ctx, store, sid, defaultLoadPageSize, nil)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, "turn-interrupted", result.inFlightTurnID)
+	require.NotNil(t, result.state)
+	require.Len(t, result.state.Messages, 1)
+	assert.Equal(t, "first-turn", result.state.Messages[0].Content)
+}
+
 // TestAttack_InFlightTurnIDEmptyWhenNoPostTurnEndEvents verifies that when
 // the last event is a TurnEnd (complete turn), inFlightTurnID is empty.
 func TestAttack_InFlightTurnIDEmptyWhenNoPostTurnEndEvents(t *testing.T) {
@@ -1749,22 +1786,22 @@ func TestAttack_ResumePreservesTurnIDFromInterruptedRun(t *testing.T) {
 		},
 	}
 	firstRunner := NewRunner(ctx, RunnerConfig{
-		Agent:              normalAgent,
-		SessionID:          sessionID,
-		SessionStore:       store,
-		CheckPointStore:    store,
-		Session: &SessionConfig{EventFlushBatchSize: 1},
+		Agent:           normalAgent,
+		SessionID:       sessionID,
+		SessionStore:    store,
+		CheckPointStore: store,
+		Session:         &SessionConfig{EventFlushBatchSize: 1},
 	})
 	drainSessionEvents(t, firstRunner.Query(ctx, "first question"))
 
 	// Now run a query that interrupts (building on the committed session).
 	agent := &runnerInterruptAgent{}
 	runner := NewRunner(ctx, RunnerConfig{
-		Agent:              agent,
-		SessionID:          sessionID,
-		SessionStore:       store,
-		CheckPointStore:    store,
-		Session: &SessionConfig{EventFlushBatchSize: 1},
+		Agent:           agent,
+		SessionID:       sessionID,
+		SessionStore:    store,
+		CheckPointStore: store,
+		Session:         &SessionConfig{EventFlushBatchSize: 1},
 	})
 
 	iter := runner.Query(ctx, "trigger interrupt")
@@ -1851,22 +1888,22 @@ func TestAttack_FreshRunIgnoresInFlightTurnID(t *testing.T) {
 		},
 	}
 	baselineRunner := NewRunner(ctx, RunnerConfig{
-		Agent:              normalAgent,
-		SessionID:          sessionID,
-		SessionStore:       store,
-		CheckPointStore:    store,
-		Session: &SessionConfig{EventFlushBatchSize: 1},
+		Agent:           normalAgent,
+		SessionID:       sessionID,
+		SessionStore:    store,
+		CheckPointStore: store,
+		Session:         &SessionConfig{EventFlushBatchSize: 1},
 	})
 	drainSessionEvents(t, baselineRunner.Query(ctx, "baseline"))
 
 	// Now run a query that interrupts.
 	agent := &runnerInterruptAgent{}
 	runner := NewRunner(ctx, RunnerConfig{
-		Agent:              agent,
-		SessionID:          sessionID,
-		SessionStore:       store,
-		CheckPointStore:    store,
-		Session: &SessionConfig{EventFlushBatchSize: 1},
+		Agent:           agent,
+		SessionID:       sessionID,
+		SessionStore:    store,
+		CheckPointStore: store,
+		Session:         &SessionConfig{EventFlushBatchSize: 1},
 	})
 
 	iter := runner.Query(ctx, "trigger interrupt")
@@ -1906,11 +1943,11 @@ func TestAttack_FreshRunIgnoresInFlightTurnID(t *testing.T) {
 		},
 	}
 	freshRunner := NewRunner(ctx, RunnerConfig{
-		Agent:              freshAgent,
-		SessionID:          sessionID,
-		SessionStore:       store,
-		CheckPointStore:    store,
-		Session: &SessionConfig{EventFlushBatchSize: 1},
+		Agent:           freshAgent,
+		SessionID:       sessionID,
+		SessionStore:    store,
+		CheckPointStore: store,
+		Session:         &SessionConfig{EventFlushBatchSize: 1},
 	})
 	drainSessionEvents(t, freshRunner.Query(ctx, "new question"))
 
