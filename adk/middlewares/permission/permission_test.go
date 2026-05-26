@@ -550,10 +550,10 @@ func TestPermissionDecisionAppearsInToolUseTimeline(t *testing.T) {
 
 	var evaluatedPermission string
 	runner := adk.NewRunner(ctx, adk.RunnerConfig{
-		Agent:              agent,
-		SessionID:          "permission-timeline",
-		SessionStore:       &permissionSessionStore{},
-		Session: &adk.SessionConfig{EventFlushBatchSize: 1},
+		Agent:        agent,
+		SessionID:    "permission-timeline",
+		SessionStore: &permissionSessionStore{},
+		Session:      &adk.SessionConfig{EventFlushBatchSize: 1},
 	})
 	iter := runner.Query(ctx, "use the tool", adk.WithTimelineEvents())
 	for {
@@ -562,10 +562,10 @@ func TestPermissionDecisionAppearsInToolUseTimeline(t *testing.T) {
 			break
 		}
 		require.NoError(t, event.Err)
-		if event.SessionEvent == nil || event.SessionEvent.AgentObservation == nil || event.SessionEvent.AgentObservation.ToolUse == nil {
+		if event.SessionEvent == nil || event.SessionEvent.Span == nil || event.SessionEvent.Span.Tool == nil {
 			continue
 		}
-		evaluatedPermission = event.SessionEvent.AgentObservation.ToolUse.EvaluatedPermission
+		evaluatedPermission = event.SessionEvent.Span.Tool.EvaluatedPermission
 	}
 
 	assert.True(t, checkerCalled)
