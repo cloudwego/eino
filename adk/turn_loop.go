@@ -669,9 +669,9 @@ type TurnLoopConfig[T any, M MessageType] struct {
 	// Session fields are passed through to the internal Runner used by TurnLoop.
 	// They let fresh turns after managed interrupts reconstruct context from the
 	// same managed session without TurnLoop inspecting SessionStore events.
-	SessionID          string
-	SessionStore       SessionStore
-	Session *SessionConfig
+	SessionID    string
+	SessionStore SessionStore
+	Session      *SessionConfig
 }
 
 // GenInputResult contains the result of GenInput processing.
@@ -2097,12 +2097,12 @@ func (l *TurnLoop[T, M]) runAgentAndHandleEvents(
 		enableStreaming = spec.input.EnableStreaming
 	}
 	runner := NewTypedRunner(TypedRunnerConfig[M]{
-		EnableStreaming:    enableStreaming,
-		Agent:              agent,
-		CheckPointStore:    ms,
-		SessionID:          l.config.SessionID,
-		SessionStore:       l.config.SessionStore,
-		Session: l.config.Session,
+		EnableStreaming: enableStreaming,
+		Agent:           agent,
+		CheckPointStore: ms,
+		SessionID:       l.config.SessionID,
+		SessionStore:    l.config.SessionStore,
+		Session:         l.config.Session,
 	})
 
 	preemptDone := make(chan struct{})
