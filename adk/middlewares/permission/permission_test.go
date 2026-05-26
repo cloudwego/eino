@@ -548,7 +548,15 @@ func TestPermissionDecisionAppearsInToolUseTimeline(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	var evaluatedPermission string
+	// In v3 the EvaluatedPermission field is removed from ToolSpanMeta. The gate
+	// decision is no longer surfaced on the tool span; for non-interrupted calls
+	// (gate=allow here), the decision is implicit in the tool result message
+	// content (a real tool invocation, not the deny prefix). We verify the
+	// real tool received its arguments and a tool_call_end span with status=ok
+	// was emitted.
+	var (
+		sawToolCallEndOK bool
+	)
 	runner := adk.NewRunner(ctx, adk.RunnerConfig{
 		Agent:        agent,
 		SessionID:    "permission-timeline",
@@ -565,12 +573,106 @@ func TestPermissionDecisionAppearsInToolUseTimeline(t *testing.T) {
 		if event.SessionEvent == nil || event.SessionEvent.Span == nil || event.SessionEvent.Span.Tool == nil {
 			continue
 		}
-		evaluatedPermission = event.SessionEvent.Span.Tool.EvaluatedPermission
+		if event.SessionEvent.Kind == adk.SessionEventSpanToolCallEnd && event.SessionEvent.Span.Status == "ok" {
+			sawToolCallEndOK = true
+		}
 	}
 
 	assert.True(t, checkerCalled)
-	assert.Equal(t, string(GateAllow), evaluatedPermission)
+	assert.True(t, sawToolCallEndOK, "expected a tool_call_end span with status=ok for the allow path")
 	assert.Equal(t, `{"path":"/tmp/file"}`, captureTool.received)
+}
+
+// TestToolSpan_PermissionDenyEmitsBothSpansOnSameRun verifies plan §4.5.1 #6:
+// when the permission gate denies on first invocation (no interrupt), the
+// tool wrapper emits a tool_call_start + tool_call_end pair on the SAME run.
+// The end span carries Status="ok" with a populated ToolResultMessageEventID
+// — the deny content is the tool result, not an error.
+func TestToolSpan_PermissionDenyEmitsBothSpansOnSameRun(t *testing.T) {
+	ctx := context.Background()
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	cm := mockModel.NewMockToolCallingChatModel(ctrl)
+	captureTool := &permissionCaptureTool{name: "denied_tool"}
+	info, err := captureTool.Info(ctx)
+	require.NoError(t, err)
+
+	generateCount := 0
+	cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(func(ctx context.Context, msgs []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+			generateCount++
+			if generateCount == 1 {
+				return schema.AssistantMessage("calling", []schema.ToolCall{
+					{ID: "deny_call", Function: schema.FunctionCall{Name: info.Name, Arguments: `{"path":"/etc/passwd"}`}},
+				}), nil
+			}
+			return schema.AssistantMessage("done", nil), nil
+		}).AnyTimes()
+	cm.EXPECT().WithTools(gomock.Any()).Return(cm, nil).AnyTimes()
+
+	agent, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
+		Name:        "PermissionDenyAgent",
+		Instruction: "use tools",
+		Model:       cm,
+		ToolsConfig: adk.ToolsConfig{
+			ToolsNodeConfig: compose.ToolsNodeConfig{
+				Tools: []tool.BaseTool{captureTool},
+			},
+		},
+		Handlers: []adk.ChatModelAgentMiddleware{
+			New(func(ctx context.Context, tCtx *adk.ToolContext, args *schema.ToolArgument) (*GateCheckResult, error) {
+				return &GateCheckResult{Decision: GateDeny, Message: "blocked"}, nil
+			}),
+		},
+	})
+	require.NoError(t, err)
+
+	runner := adk.NewRunner(ctx, adk.RunnerConfig{
+		Agent:        agent,
+		SessionID:    "permission-deny-span",
+		SessionStore: &permissionSessionStore{},
+		Session:      &adk.SessionConfig{EventFlushBatchSize: 1},
+	})
+
+	var (
+		startSpanID  string
+		startEventID string
+		endSpan      *adk.SessionEvent[*schema.Message]
+		startCount   int
+		endCount     int
+	)
+
+	iter := runner.Query(ctx, "use the tool", adk.WithTimelineEvents())
+	for {
+		event, ok := iter.Next()
+		if !ok {
+			break
+		}
+		require.NoError(t, event.Err)
+		if event.SessionEvent == nil || event.SessionEvent.Span == nil || event.SessionEvent.Span.Tool == nil {
+			continue
+		}
+		switch event.SessionEvent.Kind {
+		case adk.SessionEventSpanToolCallStart:
+			startCount++
+			startSpanID = event.SessionEvent.Span.SpanID
+			startEventID = event.SessionEvent.EventID
+		case adk.SessionEventSpanToolCallEnd:
+			endCount++
+			endSpan = event.SessionEvent
+		}
+	}
+
+	assert.Equal(t, 1, startCount, "expected exactly one tool_call_start span on the deny run")
+	assert.Equal(t, 1, endCount, "expected exactly one tool_call_end span on the deny run")
+	require.NotNil(t, endSpan)
+	assert.Equal(t, startSpanID, endSpan.Span.SpanID, "end span shares SpanID with start span on the same run")
+	assert.Equal(t, startEventID, endSpan.Span.Tool.ToolCallStartEventID, "end span links back to start via ToolCallStartEventID")
+	assert.Equal(t, "ok", endSpan.Span.Status, "deny path produces a tool result (not an error); end span status is ok")
+	assert.NotEmpty(t, endSpan.Span.Tool.ToolResultMessageEventID, "deny end span must carry the ToolResultMessageEventID")
+	// The real tool must NOT have been invoked when the gate denies.
+	assert.Empty(t, captureTool.received, "deny path must not invoke the underlying tool")
 }
 
 type permissionCaptureTool struct {

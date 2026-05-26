@@ -59,15 +59,6 @@ type typedChatModelAgentExecCtx[M MessageType] struct {
 	sessionEvents          bool
 	timelineEvents         bool
 	internalTimelineEvents bool
-
-	// toolBoundary carries the parent model span ID and the assistant message
-	// SessionEvent EventID emitted in the current turn. The event-sender model
-	// writes it after a successful Generate/Stream and the tool span emitters
-	// read it when constructing tool start/end spans. Guarded by toolBoundaryMu
-	// because the model emit path writes once per turn while parallel tool
-	// wrappers read it concurrently from drainer goroutines.
-	toolBoundaryMu sync.Mutex
-	toolBoundary   toolBoundarySpan
 }
 
 func (e *typedChatModelAgentExecCtx[M]) send(event *TypedAgentEvent[M]) {
@@ -572,7 +563,9 @@ func NewTypedChatModelAgent[M MessageType](_ context.Context, config *TypedChatM
 	tc := config.ToolsConfig
 
 	// Tool call middleware execution order (outermost to innermost):
-	// 1. eventSenderToolWrapper (internal - sends tool result events after all modifications)
+	// 1. eventSenderToolWrapper (internal — emits tool result AgentEvents and
+	//    tool_call_start/end SessionEvents; persistence-aware so a tool call's
+	//    start and end may straddle interrupt/resume boundaries)
 	// 2. User-provided ToolsConfig.ToolCallMiddlewares (original order preserved)
 	// 3. Middlewares' WrapToolCall (in registration order)
 	// 4. cancelMonitoredToolHandler (internal - cancel monitoring for stream tools)
