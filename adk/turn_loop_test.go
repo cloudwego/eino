@@ -2453,9 +2453,8 @@ func TestTurnLoop_ManagedInterrupt_DecisionResumeUsesCapturedCheckpointIDAndPara
 	})
 	require.Len(t, interruptEvents, 1)
 	require.NotNil(t, interruptEvents[0].AgentInterrupt)
-	assert.Equal(t, interruptCheckpointID, interruptEvents[0].AgentInterrupt.CheckPointID)
-	require.NotEmpty(t, interruptEvents[0].AgentInterrupt.InterruptContexts)
-	assert.Equal(t, interruptTargetID, interruptEvents[0].AgentInterrupt.InterruptContexts[0].ID)
+	require.NotEmpty(t, interruptEvents[0].AgentInterrupt.Contexts)
+	assert.Equal(t, interruptTargetID, interruptEvents[0].AgentInterrupt.Contexts[0].InterruptID)
 
 	turnEndEvents := filterStoredSessionEvents(t, sessionStore.events, func(se *SessionEvent[*schema.Message]) bool {
 		return se.Kind == SessionEventTurnEnd
