@@ -59,6 +59,15 @@ type typedChatModelAgentExecCtx[M MessageType] struct {
 	sessionEvents          bool
 	timelineEvents         bool
 	internalTimelineEvents bool
+
+	// toolBoundary carries the parent model span ID and the assistant message
+	// SessionEvent EventID emitted in the current turn. The event-sender model
+	// writes it after a successful Generate/Stream and the tool span emitters
+	// read it when constructing tool start/end spans. Guarded by toolBoundaryMu
+	// because the model emit path writes once per turn while parallel tool
+	// wrappers read it concurrently from drainer goroutines.
+	toolBoundaryMu sync.Mutex
+	toolBoundary   toolBoundarySpan
 }
 
 func (e *typedChatModelAgentExecCtx[M]) send(event *TypedAgentEvent[M]) {
