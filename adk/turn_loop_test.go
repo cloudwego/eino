@@ -2317,11 +2317,11 @@ func TestTurnLoop_ManagedInterrupt_StartNewTurnUsesConfiguredSessionStore(t *tes
 	var prepareCount int32
 	captureAgent := &runnerSessionAgent{name: "session-capture"}
 	loop := newAndRunTurnLoop(ctx, TurnLoopConfig[string, *schema.Message]{
-		InterruptMode:      TurnLoopInterruptWaitsForExplicitResume,
-		SessionID:          sessionID,
-		SessionStore:       sessionStore,
-		Session: &SessionConfig{EventFlushBatchSize: 1},
-		GenInput:           genInputConsumeAllWithMsg,
+		InterruptMode: TurnLoopInterruptWaitsForExplicitResume,
+		SessionID:     sessionID,
+		SessionStore:  sessionStore,
+		Session:       &SessionConfig{EventFlushBatchSize: 1},
+		GenInput:      genInputConsumeAllWithMsg,
 		GenResume: func(ctx context.Context, _ *TurnLoop[string, *schema.Message], interruptedItems, unhandledItems, resumeItems []string) (*GenResumeResult[string, *schema.Message], error) {
 			return &GenResumeResult[string, *schema.Message]{
 				Decision: TurnLoopResumeDecisionStartNewTurn,
@@ -2376,6 +2376,8 @@ func TestTurnLoop_ManagedInterrupt_StartNewTurnUsesConfiguredSessionStore(t *tes
 
 func TestTurnLoop_ManagedInterrupt_DecisionResumeUsesCapturedCheckpointIDAndParams(t *testing.T) {
 	ctx := context.Background()
+	sessionStore := newSessionHelperStore()
+	sessionID := "managed-interrupt-resume-session"
 	interruptObserved := make(chan struct{})
 	resumeObserved := make(chan *ResumeInfo, 1)
 
@@ -2390,6 +2392,9 @@ func TestTurnLoop_ManagedInterrupt_DecisionResumeUsesCapturedCheckpointIDAndPara
 	var interruptTargetID string
 	loop := newAndRunTurnLoop(ctx, TurnLoopConfig[string, *schema.Message]{
 		InterruptMode: TurnLoopInterruptWaitsForExplicitResume,
+		SessionID:     sessionID,
+		SessionStore:  sessionStore,
+		Session:       &SessionConfig{EventFlushBatchSize: 1},
 		GenInput:      genInputConsumeAllWithMsg,
 		GenResume: func(ctx context.Context, _ *TurnLoop[string, *schema.Message], interruptedItems, unhandledItems, resumeItems []string) (*GenResumeResult[string, *schema.Message], error) {
 			require.NotEmpty(t, interruptTargetID)
@@ -2442,6 +2447,21 @@ func TestTurnLoop_ManagedInterrupt_DecisionResumeUsesCapturedCheckpointIDAndPara
 	case <-time.After(time.Second):
 		t.Fatal("agent resume was not observed")
 	}
+
+	interruptEvents := filterStoredSessionEvents(t, sessionStore.events, func(se *SessionEvent[*schema.Message]) bool {
+		return se.Kind == SessionEventAgentInterrupt
+	})
+	require.Len(t, interruptEvents, 1)
+	require.NotNil(t, interruptEvents[0].AgentInterrupt)
+	assert.Equal(t, interruptCheckpointID, interruptEvents[0].AgentInterrupt.CheckPointID)
+	require.NotEmpty(t, interruptEvents[0].AgentInterrupt.InterruptContexts)
+	assert.Equal(t, interruptTargetID, interruptEvents[0].AgentInterrupt.InterruptContexts[0].ID)
+
+	turnEndEvents := filterStoredSessionEvents(t, sessionStore.events, func(se *SessionEvent[*schema.Message]) bool {
+		return se.Kind == SessionEventTurnEnd
+	})
+	require.Len(t, turnEndEvents, 1)
+	assert.Equal(t, interruptEvents[0].TurnID, turnEndEvents[0].TurnID)
 }
 
 func TestTurnLoop_RestoredPendingResumeDistinguishesLegacyAndAcceptedResumeItems(t *testing.T) {
@@ -2617,6 +2637,13 @@ func (a *turnLoopManagedResumeAgent) Resume(ctx context.Context, info *ResumeInf
 					Message: schema.AssistantMessage("resumed", nil),
 					Role:    schema.Assistant,
 				},
+			},
+		})
+		gen.Send(&AgentEvent{
+			AgentName: a.Name(ctx),
+			SessionEvent: &SessionEvent[*schema.Message]{
+				Kind:    SessionEventTurnEnd,
+				TurnEnd: &TurnEndState[*schema.Message]{Messages: []*schema.Message{schema.AssistantMessage("resumed", nil)}},
 			},
 		})
 	}()

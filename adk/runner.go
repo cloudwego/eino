@@ -583,14 +583,16 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 		gen.Close()
 	}()
 	var (
-		interruptSignal *core.InterruptSignal
-		legacyData      any
-		interrupted     bool
-		cancelled       bool
-		retryExhausted  bool
-		sawTurnEnd      bool
-		persister       *sessionEventPersister[M]
-		persistErr      error
+		interruptSignal                 *core.InterruptSignal
+		interruptContexts               []*InterruptCtx
+		legacyData                      any
+		interrupted                     bool
+		cancelled                       bool
+		retryExhausted                  bool
+		sawTurnEnd                      bool
+		persister                       *sessionEventPersister[M]
+		persistErr                      error
+		toolSpanStartEventIDByToolUseID map[string]string
 		// pendingCheckpoint defers checkpoint save to finalize() so the persister
 		// can flush enqueued events first. Writing the checkpoint before the flush
 		// completes risks a checkpoint that references events not yet durable.
@@ -706,6 +708,16 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 			setPersistErr(err)
 			event.Err = err
 		}
+		if event.SessionEvent != nil &&
+			event.SessionEvent.Kind == SessionEventSpanToolCallStart &&
+			event.SessionEvent.Span != nil &&
+			event.SessionEvent.Span.Tool != nil &&
+			event.SessionEvent.Span.Tool.ToolUseID != "" {
+			if toolSpanStartEventIDByToolUseID == nil {
+				toolSpanStartEventIDByToolUseID = map[string]string{}
+			}
+			toolSpanStartEventIDByToolUseID[event.SessionEvent.Span.Tool.ToolUseID] = event.SessionEvent.EventID
+		}
 
 		if event.Err != nil {
 			var retryErr *RetryExhaustedError
@@ -738,7 +750,7 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 				panic("multiple interrupt actions should not happen in Runner")
 			}
 			interruptSignal = event.Action.internalInterrupted
-			interruptContexts := core.ToInterruptContexts(interruptSignal, allowedAddressSegmentTypes)
+			interruptContexts = core.ToInterruptContexts(interruptSignal, allowedAddressSegmentTypes)
 			event = &TypedAgentEvent[M]{
 				Timestamp: event.Timestamp,
 				AgentName: event.AgentName,
@@ -880,6 +892,14 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 				Error:     &SessionErrorEvent{Type: SessionErrorTypeFatal, Message: errMsg},
 			})
 		}
+		if interrupted {
+			sendTimelineEvent(&SessionEvent[M]{
+				EventID:        uuid.NewString(),
+				Timestamp:      newEventTimestamp(),
+				Kind:           SessionEventAgentInterrupt,
+				AgentInterrupt: buildAgentInterruptEvent(interruptContexts, valueOrEmpty(checkPointID), toolSpanStartEventIDByToolUseID),
+			})
+		}
 		if cancelled {
 			sendTimelineEvent(&SessionEvent[M]{
 				EventID:         uuid.NewString(),
@@ -910,6 +930,44 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 			gen.Send(&TypedAgentEvent[M]{Timestamp: newEventTimestamp(), Err: err})
 		}
 	}
+}
+
+func buildAgentInterruptEvent(
+	contexts []*InterruptCtx,
+	checkPointID string,
+	toolSpanStartEventIDByToolUseID map[string]string,
+) *AgentInterruptEvent {
+	event := &AgentInterruptEvent{
+		Cause:             AgentInterruptCauseGeneric,
+		CheckPointID:      checkPointID,
+		InterruptContexts: contexts,
+	}
+	toolUseID := rootCauseToolUseID(contexts)
+	if toolUseID == "" {
+		return event
+	}
+	event.Cause = AgentInterruptCauseToolPermission
+	event.ToolUseID = toolUseID
+	event.SpanEventID = toolSpanStartEventIDByToolUseID[toolUseID]
+	return event
+}
+
+func rootCauseToolUseID(contexts []*InterruptCtx) string {
+	for _, ctx := range contexts {
+		if ctx == nil || !ctx.IsRootCause {
+			continue
+		}
+		for _, segment := range ctx.Address {
+			if segment.Type != AddressSegmentTool {
+				continue
+			}
+			if segment.SubID != "" {
+				return segment.SubID
+			}
+			return segment.ID
+		}
+	}
+	return ""
 }
 
 // deferredRunnerCheckpoint captures the arguments needed to persist a runner
