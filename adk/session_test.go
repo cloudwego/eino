@@ -1862,14 +1862,11 @@ func TestAttack_InFlightTurnIDRecoveryWithoutCommittedTurnEnd(t *testing.T) {
 	events := []*SessionEvent[*schema.Message]{
 		{EventID: uuid.NewString(), Kind: SessionEventMessage, TurnID: "turn-interrupted", Message: msg},
 		{EventID: uuid.NewString(), Kind: SessionEventAgentInterrupt, TurnID: "turn-interrupted", AgentInterrupt: &AgentInterruptEvent{
-			Cause:        AgentInterruptCauseGeneric,
-			CheckPointID: "cp-1",
-			InterruptContexts: []*InterruptCtx{
+			Contexts: []*AgentInterruptContext{
 				{
-					ID:          "agent:InterruptAgent",
-					Address:     Address{{Type: AddressSegmentAgent, ID: "InterruptAgent"}},
+					Cause:       AgentInterruptCauseGeneric,
+					InterruptID: "agent:InterruptAgent",
 					Info:        "approval_needed",
-					IsRootCause: true,
 				},
 			},
 		}},

@@ -100,14 +100,11 @@ func TestSessionTimeline_ClassifyAndSerializeVariants(t *testing.T) {
 		{
 			name: "agent interrupt",
 			se: &SessionEvent[*schema.Message]{AgentInterrupt: &AgentInterruptEvent{
-				Cause:        AgentInterruptCauseGeneric,
-				CheckPointID: "cp-1",
-				InterruptContexts: []*InterruptCtx{
+				Contexts: []*AgentInterruptContext{
 					{
-						ID:          "agent:timeline-agent",
-						Address:     Address{{Type: AddressSegmentAgent, ID: "timeline-agent"}},
+						Cause:       AgentInterruptCauseGeneric,
+						InterruptID: "agent:timeline-agent",
 						Info:        "confirm?",
-						IsRootCause: true,
 					},
 				},
 			}},
@@ -142,14 +139,11 @@ func TestSessionTimeline_ReconstructionIgnoresNonContextVariants(t *testing.T) {
 		{EventID: uuid.NewString(), Kind: SessionEventMessage, Message: msg},
 		{EventID: uuid.NewString(), Kind: SessionEventSpanModelRequestStart, Span: &SpanEvent{SpanID: uuid.NewString(), Kind: SpanKindModel, StartedAt: time.Now().UTC(), Model: &ModelSpanMeta{}}},
 		{EventID: uuid.NewString(), Kind: SessionEventAgentInterrupt, AgentInterrupt: &AgentInterruptEvent{
-			Cause:        AgentInterruptCauseGeneric,
-			CheckPointID: "cp-1",
-			InterruptContexts: []*InterruptCtx{
+			Contexts: []*AgentInterruptContext{
 				{
-					ID:          "agent:timeline-agent",
-					Address:     Address{{Type: AddressSegmentAgent, ID: "timeline-agent"}},
+					Cause:       AgentInterruptCauseGeneric,
+					InterruptID: "agent:timeline-agent",
 					Info:        "confirm?",
-					IsRootCause: true,
 				},
 			},
 		}},
@@ -172,26 +166,17 @@ func TestSessionTimeline_ReconstructionIgnoresNonContextVariants(t *testing.T) {
 }
 
 func TestSessionTimeline_AgentInterruptRoundTripPreservesContexts(t *testing.T) {
-	parent := &InterruptCtx{
-		ID:      "agent:timeline-agent",
-		Address: Address{{Type: AddressSegmentAgent, ID: "timeline-agent"}},
-		Info:    "parent info",
-	}
-	root := &InterruptCtx{
-		ID:          "agent:timeline-agent;tool:lookup:call_1",
-		Address:     Address{{Type: AddressSegmentAgent, ID: "timeline-agent"}, {Type: AddressSegmentTool, ID: "lookup", SubID: "call_1"}},
-		Info:        "tool info",
-		IsRootCause: true,
-		Parent:      parent,
-	}
 	se := &SessionEvent[*schema.Message]{
 		EventID: uuid.NewString(),
 		AgentInterrupt: &AgentInterruptEvent{
-			Cause:             AgentInterruptCauseToolPermission,
-			CheckPointID:      "cp-1",
-			InterruptContexts: []*InterruptCtx{root},
-			ToolUseID:         "call_1",
-			SpanEventID:       "span-start-event",
+			Contexts: []*AgentInterruptContext{
+				{
+					Cause:       AgentInterruptCauseToolPermission,
+					InterruptID: "agent:timeline-agent;tool:lookup:call_1",
+					Info:        "tool info",
+					ToolUseID:   "call_1",
+				},
+			},
 		},
 	}
 	require.NoError(t, NormalizeSessionEventKind(se))
@@ -203,20 +188,15 @@ func TestSessionTimeline_AgentInterruptRoundTripPreservesContexts(t *testing.T) 
 	require.NoError(t, err)
 	require.NotNil(t, decoded.AgentInterrupt)
 	assert.Equal(t, SessionEventAgentInterrupt, decoded.Kind)
-	assert.Equal(t, AgentInterruptCauseToolPermission, decoded.AgentInterrupt.Cause)
-	assert.Equal(t, "cp-1", decoded.AgentInterrupt.CheckPointID)
-	assert.Equal(t, "call_1", decoded.AgentInterrupt.ToolUseID)
-	assert.Equal(t, "span-start-event", decoded.AgentInterrupt.SpanEventID)
-	require.Len(t, decoded.AgentInterrupt.InterruptContexts, 1)
-	assert.Equal(t, root.ID, decoded.AgentInterrupt.InterruptContexts[0].ID)
-	assert.Equal(t, root.Info, decoded.AgentInterrupt.InterruptContexts[0].Info)
-	require.NotNil(t, decoded.AgentInterrupt.InterruptContexts[0].Parent)
-	assert.Equal(t, parent.ID, decoded.AgentInterrupt.InterruptContexts[0].Parent.ID)
-	assert.Equal(t, parent.Info, decoded.AgentInterrupt.InterruptContexts[0].Parent.Info)
+	require.Len(t, decoded.AgentInterrupt.Contexts, 1)
+	ctx0 := decoded.AgentInterrupt.Contexts[0]
+	assert.Equal(t, AgentInterruptCauseToolPermission, ctx0.Cause)
+	assert.Equal(t, "agent:timeline-agent;tool:lookup:call_1", ctx0.InterruptID)
+	assert.Equal(t, "tool info", ctx0.Info)
+	assert.Equal(t, "call_1", ctx0.ToolUseID)
 }
 
-func TestBuildAgentInterruptEvent_ToolCauseAndSpanLink(t *testing.T) {
-	const spanEventID = "span-start-event"
+func TestBuildAgentInterruptEvent_ToolCauseAndToolUseID(t *testing.T) {
 	contexts := []*InterruptCtx{
 		{
 			ID: "agent:timeline-agent;tool:lookup:call_1",
@@ -229,19 +209,19 @@ func TestBuildAgentInterruptEvent_ToolCauseAndSpanLink(t *testing.T) {
 		},
 	}
 
-	event := buildAgentInterruptEvent(contexts, "cp-1", map[string]string{"call_1": spanEventID})
+	event := buildAgentInterruptEvent(contexts)
 	require.NotNil(t, event)
-	assert.Equal(t, AgentInterruptCauseToolPermission, event.Cause)
-	assert.Equal(t, "cp-1", event.CheckPointID)
-	assert.Equal(t, contexts, event.InterruptContexts)
-	assert.Equal(t, "call_1", event.ToolUseID)
-	assert.Equal(t, spanEventID, event.SpanEventID)
+	require.Len(t, event.Contexts, 1)
+	assert.Equal(t, AgentInterruptCauseToolPermission, event.Contexts[0].Cause)
+	assert.Equal(t, "agent:timeline-agent;tool:lookup:call_1", event.Contexts[0].InterruptID)
+	assert.Equal(t, "tool info", event.Contexts[0].Info)
+	assert.Equal(t, "call_1", event.Contexts[0].ToolUseID)
 
+	// Fallback to segment ID when SubID is empty.
 	contexts[0].Address[1].SubID = ""
 	contexts[0].Address[1].ID = "legacy-call-id"
-	event = buildAgentInterruptEvent(contexts, "cp-2", map[string]string{"legacy-call-id": "legacy-span"})
-	assert.Equal(t, "legacy-call-id", event.ToolUseID)
-	assert.Equal(t, "legacy-span", event.SpanEventID)
+	event = buildAgentInterruptEvent(contexts)
+	assert.Equal(t, "legacy-call-id", event.Contexts[0].ToolUseID)
 }
 
 func TestRunner_PersistsAgentInterruptSessionEvent(t *testing.T) {
@@ -291,12 +271,11 @@ func TestRunner_PersistsAgentInterruptSessionEvent(t *testing.T) {
 	})
 	require.Len(t, interrupts, 1)
 	require.NotNil(t, interrupts[0].AgentInterrupt)
-	assert.Equal(t, AgentInterruptCauseGeneric, interrupts[0].AgentInterrupt.Cause)
-	assert.Equal(t, checkpointID, interrupts[0].AgentInterrupt.CheckPointID)
-	require.Len(t, interrupts[0].AgentInterrupt.InterruptContexts, 1)
-	assert.Equal(t, liveInterruptContexts[0].ID, interrupts[0].AgentInterrupt.InterruptContexts[0].ID)
-	assert.Equal(t, liveInterruptContexts[0].Info, interrupts[0].AgentInterrupt.InterruptContexts[0].Info)
-	assert.True(t, interrupts[0].AgentInterrupt.InterruptContexts[0].IsRootCause)
+	require.Len(t, interrupts[0].AgentInterrupt.Contexts, 1)
+	ctx0 := interrupts[0].AgentInterrupt.Contexts[0]
+	assert.Equal(t, AgentInterruptCauseGeneric, ctx0.Cause)
+	assert.Equal(t, liveInterruptContexts[0].ID, ctx0.InterruptID)
+	assert.Equal(t, liveInterruptContexts[0].Info, ctx0.Info)
 	requireStoredIdleStopReason(t, store.events, "interrupted")
 
 	turnEnds := filterStoredSessionEvents(t, store.events, func(se *SessionEvent[*schema.Message]) bool {
