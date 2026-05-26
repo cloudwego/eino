@@ -101,7 +101,7 @@ func (m *middleware) BeforeModelRewriteState(ctx context.Context, state *adk.Cha
 		return ctx, state, nil
 	}
 
-	msg := schema.UserMessage(fmt.Sprintf("<system-reminder>\n%s\n</system-reminder>", content))
+	msg := schema.UserMessage(content)
 	msg.Extra = map[string]any{agentsMDExtraKey: true}
 
 	nState := *state
