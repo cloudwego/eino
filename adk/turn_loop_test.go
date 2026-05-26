@@ -2306,7 +2306,7 @@ func TestTurnLoop_ManagedInterrupt_StartNewTurnUsesConfiguredSessionStore(t *tes
 	} {
 		data, err := encodeSessionEvent(se)
 		require.NoError(t, err)
-		require.NoError(t, sessionStore.AppendEvents(ctx, sessionID, []SessionEventPayload{{EventID: se.EventID, Data: data}}))
+		require.NoError(t, sessionStore.AppendEvents(ctx, sessionID, []SessionEventPayload{{EventID: se.EventID, Kind: se.Kind, Data: data}}))
 	}
 	initialEventCount := len(sessionStore.events)
 
