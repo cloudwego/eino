@@ -421,16 +421,22 @@ const (
 
 // AgentInterruptEvent records a business interrupt in the durable session timeline.
 type AgentInterruptEvent struct {
-	// Cause categorizes why the interrupt happened for UI rendering.
+	// Contexts is the set of interrupt contexts that caused the agent to pause.
+	// Each element represents a single root-cause interrupt point.
+	Contexts []*AgentInterruptContext `json:"contexts,omitempty"`
+}
+
+// AgentInterruptContext describes a single interrupt point within a batch.
+type AgentInterruptContext struct {
+	// Cause categorizes why this particular interrupt happened.
 	Cause AgentInterruptCause `json:"cause,omitempty"`
-	// CheckPointID is the checkpoint key used by Runner.Resume or Runner.ResumeWithParams.
-	CheckPointID string `json:"checkpoint_id,omitempty"`
-	// InterruptContexts is the public interrupt context shape exposed on live events.
-	InterruptContexts []*InterruptCtx `json:"interrupt_contexts,omitempty"`
+	// InterruptID is the fully-qualified address of the interrupt point
+	// (e.g. "agent:A;tool:lookup:call_1"). Use this as the key in ResumeParams.Targets.
+	InterruptID string `json:"interrupt_id,omitempty"`
+	// Info is the user-facing information associated with the interrupt.
+	Info any `json:"info,omitempty"`
 	// ToolUseID is set when the interrupt source is a specific tool call.
 	ToolUseID string `json:"tool_use_id,omitempty"`
-	// SpanEventID is the SessionEvent ID of the related tool span start event.
-	SpanEventID string `json:"span_event_id,omitempty"`
 }
 
 // MessageUpdatedEvent represents a single message replacement within the messages array.
@@ -545,6 +551,7 @@ func init() {
 	schema.RegisterName[*UserObservationEvent]("_eino_adk_user_observation_event")
 	schema.RegisterName[*UserInterruptEvent]("_eino_adk_user_interrupt_event")
 	schema.RegisterName[*AgentInterruptEvent]("_eino_adk_agent_interrupt_event")
+	schema.RegisterName[*AgentInterruptContext]("_eino_adk_agent_interrupt_context")
 }
 
 func encodeGob(v any) ([]byte, error) {
