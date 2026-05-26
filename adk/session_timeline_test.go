@@ -34,6 +34,19 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
+func requireStoredIdleStopReason(t *testing.T, raw []SessionEventPayload, want string) *SessionEvent[*schema.Message] {
+	t.Helper()
+	idleEvents := filterStoredSessionEvents(t, raw, func(se *SessionEvent[*schema.Message]) bool {
+		return se.Kind == SessionEventSessionStatusIdle
+	})
+	require.NotEmpty(t, idleEvents)
+	last := idleEvents[len(idleEvents)-1]
+	require.NotNil(t, last.Lifecycle)
+	require.NotNil(t, last.Lifecycle.StopReason)
+	assert.Equal(t, want, last.Lifecycle.StopReason.Type)
+	return last
+}
+
 func TestSessionTimeline_ClassifyAndSerializeVariants(t *testing.T) {
 	now := time.Now().UTC()
 	spanID := uuid.NewString()
@@ -284,6 +297,12 @@ func TestRunner_PersistsAgentInterruptSessionEvent(t *testing.T) {
 	assert.Equal(t, liveInterruptContexts[0].ID, interrupts[0].AgentInterrupt.InterruptContexts[0].ID)
 	assert.Equal(t, liveInterruptContexts[0].Info, interrupts[0].AgentInterrupt.InterruptContexts[0].Info)
 	assert.True(t, interrupts[0].AgentInterrupt.InterruptContexts[0].IsRootCause)
+	requireStoredIdleStopReason(t, store.events, "interrupted")
+
+	turnEnds := filterStoredSessionEvents(t, store.events, func(se *SessionEvent[*schema.Message]) bool {
+		return se.Kind == SessionEventTurnEnd
+	})
+	assert.Empty(t, turnEnds, "business interrupt should remain an in-flight turn without TurnEnd")
 }
 
 func TestSessionTimeline_ReconstructionIncludesPartialContextAfterLatestTurnEnd(t *testing.T) {
@@ -402,6 +421,7 @@ func TestWithTimelineEvents_LiveExposure(t *testing.T) {
 			return se.Kind == SessionEventSessionStatusRunning || se.Kind == SessionEventSessionStatusIdle
 		})
 		require.Len(t, lifecycle, 2)
+		requireStoredIdleStopReason(t, store.events, "end_turn")
 	})
 
 	t.Run("exposed when requested", func(t *testing.T) {
@@ -987,13 +1007,12 @@ func TestRunnerTimelineRetryExhaustedStopReason(t *testing.T) {
 		}
 	}
 
-	idleEvents := filterStoredSessionEvents(t, store.events, func(se *SessionEvent[*schema.Message]) bool {
-		return se.Kind == SessionEventSessionStatusIdle
+	requireStoredIdleStopReason(t, store.events, "retries_exhausted")
+
+	turnEnds := filterStoredSessionEvents(t, store.events, func(se *SessionEvent[*schema.Message]) bool {
+		return se.Kind == SessionEventTurnEnd
 	})
-	require.NotEmpty(t, idleEvents)
-	require.NotNil(t, idleEvents[len(idleEvents)-1].Lifecycle)
-	require.NotNil(t, idleEvents[len(idleEvents)-1].Lifecycle.StopReason)
-	assert.Equal(t, "retries_exhausted", idleEvents[len(idleEvents)-1].Lifecycle.StopReason.Type)
+	assert.Empty(t, turnEnds, "retry exhaustion should not commit a TurnEnd")
 }
 
 func TestRunnerTimelineFailedStopReason(t *testing.T) {
@@ -1013,13 +1032,85 @@ func TestRunnerTimelineFailedStopReason(t *testing.T) {
 		}
 	}
 
-	idleEvents := filterStoredSessionEvents(t, store.events, func(se *SessionEvent[*schema.Message]) bool {
-		return se.Kind == SessionEventSessionStatusIdle
+	sessionErrors := filterStoredSessionEvents(t, store.events, func(se *SessionEvent[*schema.Message]) bool {
+		return se.Kind == SessionEventSessionError
 	})
-	require.NotEmpty(t, idleEvents)
-	require.NotNil(t, idleEvents[len(idleEvents)-1].Lifecycle)
-	require.NotNil(t, idleEvents[len(idleEvents)-1].Lifecycle.StopReason)
-	assert.Equal(t, "failed", idleEvents[len(idleEvents)-1].Lifecycle.StopReason.Type)
+	require.NotEmpty(t, sessionErrors)
+	require.NotNil(t, sessionErrors[len(sessionErrors)-1].Error)
+	assert.Equal(t, SessionErrorTypeFatal, sessionErrors[len(sessionErrors)-1].Error.Type)
+	requireStoredIdleStopReason(t, store.events, "failed")
+
+	turnEnds := filterStoredSessionEvents(t, store.events, func(se *SessionEvent[*schema.Message]) bool {
+		return se.Kind == SessionEventTurnEnd
+	})
+	assert.Empty(t, turnEnds, "failed turn should not commit a TurnEnd")
+}
+
+func TestRunnerTimelineCancelStopReasonAndUserInterruptPersisted(t *testing.T) {
+	ctx := context.Background()
+	store := newSessionHelperStore()
+	started := make(chan struct{})
+	release := make(chan struct{})
+
+	agent := &myAgent{
+		name: "timeline-cancel",
+		runFn: func(ctx context.Context, _ *AgentInput, _ ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+			iter, gen := NewAsyncIteratorPair[*AgentEvent]()
+			go func() {
+				defer gen.Close()
+				close(started)
+				<-release
+				gen.Send(Interrupt(ctx, "cancel point"))
+			}()
+			return iter
+		},
+	}
+	runner := NewRunner(ctx, RunnerConfig{
+		Agent:           agent,
+		CheckPointStore: store,
+		SessionID:       "timeline-cancel",
+		SessionStore:    store,
+		Session:         &SessionConfig{EventFlushBatchSize: 1},
+	})
+	cancelOpt, cancelFn := WithCancel()
+	iter := runner.Query(ctx, "hi", cancelOpt, WithCheckPointID("timeline-cancel-cp"))
+
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("agent did not start")
+	}
+	cancelHandle, contributed := cancelFn(WithAgentCancelMode(CancelImmediate))
+	require.True(t, contributed)
+	close(release)
+
+	var sawCancelErr bool
+	for {
+		event, ok := iter.Next()
+		if !ok {
+			break
+		}
+		var cancelErr *CancelError
+		if event.Err != nil && errors.As(event.Err, &cancelErr) {
+			sawCancelErr = true
+		}
+	}
+	require.True(t, sawCancelErr, "expected CancelError in event stream")
+	require.NoError(t, cancelHandle.Wait())
+
+	userInterrupts := filterStoredSessionEvents(t, store.events, func(se *SessionEvent[*schema.Message]) bool {
+		return se.Kind == SessionEventUserInterrupt
+	})
+	require.Len(t, userInterrupts, 1)
+	require.NotNil(t, userInterrupts[0].UserObservation)
+	require.NotNil(t, userInterrupts[0].UserObservation.Interrupt)
+	assert.Equal(t, "cancelled", userInterrupts[0].UserObservation.Interrupt.Reason)
+	requireStoredIdleStopReason(t, store.events, "cancelled")
+
+	turnEnds := filterStoredSessionEvents(t, store.events, func(se *SessionEvent[*schema.Message]) bool {
+		return se.Kind == SessionEventTurnEnd
+	})
+	assert.Empty(t, turnEnds, "cancelled turn should not commit a TurnEnd")
 }
 
 func TestToolSpan_PersistedAroundToolCallAndLinksToMessages(t *testing.T) {
