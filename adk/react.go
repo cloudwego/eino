@@ -22,6 +22,7 @@ import (
 	"encoding/gob"
 	"errors"
 	"io"
+	"time"
 
 	"github.com/cloudwego/eino/adk/internal"
 	"github.com/cloudwego/eino/components/model"
@@ -54,6 +55,49 @@ type typedState[M MessageType] struct {
 	ReturnDirectlyEvent      *TypedAgentEvent[M]
 	RetryAttempt             int
 	ToolMsgIDs               map[string]map[string]string // toolName → callID → eino message ID
+
+	// CurrentModelSpanID is the SpanID of the model request span that emitted
+	// the most recent assistant message containing tool calls. The tool wrapper
+	// snapshots this value into ToolSpansInFlight when emitting a tool_call_start
+	// span; the snapshot survives interrupt/resume so the matching tool_call_end
+	// span (which may be emitted on a later run) preserves the link.
+	CurrentModelSpanID string
+
+	// CurrentAssistantMessageEventID is the SessionEvent EventID of the most
+	// recent assistant message that emitted tool calls. Snapshotted into
+	// ToolSpansInFlight at start emission time, same lifecycle as CurrentModelSpanID.
+	CurrentAssistantMessageEventID string
+
+	// ToolSpansInFlight tracks tool calls whose tool_call_start span has been
+	// emitted but whose tool_call_end span has not yet fired (typically because
+	// the call is paused on an interrupt awaiting user resume). Keyed by
+	// tCtx.CallID. Entries are inserted at start emission, retained across
+	// interrupt boundaries, and deleted when the matching end span fires.
+	ToolSpansInFlight map[string]*toolSpanInFlight
+}
+
+// toolSpanInFlight holds identity for a tool_call_start span that has been
+// emitted but whose matching tool_call_end span has not yet fired. The
+// typical reason is that the call is paused on a permission interrupt
+// awaiting user resume.
+//
+// The wrapper at typedEventSenderToolWrapper persists one entry per
+// tCtx.CallID at start emission. On every subsequent invocation of the
+// wrapper for the same CallID (i.e. on resume), the entry is reused so
+// that the matching end span carries the same SpanID / StartEventID /
+// parent IDs — preserving the temporal semantics that one logical tool
+// call corresponds to one logical span pair, even when start and end
+// straddle an interrupt boundary.
+//
+// The entry is deleted when the matching end span is emitted (success,
+// hard error, or cancellation). It is NOT deleted on interrupt-shape
+// errors; those leave the entry intact for the next resume.
+type toolSpanInFlight struct {
+	SpanID                  string
+	StartEventID            string
+	StartedAt               time.Time
+	ParentSpanID            string
+	AssistantMessageEventID string
 }
 
 // State is the internal state of the ChatModelAgent.
