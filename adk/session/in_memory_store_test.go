@@ -58,3 +58,130 @@ func TestInMemoryStoreCheckpointSetGetDelete(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, exists)
 }
+
+func TestInMemoryStoreForwardKindFilter(t *testing.T) {
+	ctx := context.Background()
+	store := session.NewInMemoryStore()
+
+	events := []adk.SessionEventPayload{
+		{EventID: "e1", Kind: adk.SessionEventMessage, Data: []byte("d1")},
+		{EventID: "e2", Kind: adk.SessionEventSpanModelRequestStart, Data: []byte("d2")},
+		{EventID: "e3", Kind: adk.SessionEventTurnEnd, Data: []byte("d3")},
+		{EventID: "e4", Kind: adk.SessionEventSessionStatusIdle, Data: []byte("d4")},
+		{EventID: "e5", Kind: adk.SessionEventMessage, Data: []byte("d5")},
+	}
+	require.NoError(t, store.AppendEvents(ctx, "s", events))
+
+	res, err := store.LoadEvents(ctx, "s", &adk.LoadEventsRequest{
+		Kinds: []adk.SessionEventKind{adk.SessionEventMessage, adk.SessionEventTurnEnd},
+	})
+	require.NoError(t, err)
+	require.Len(t, res.Events, 3)
+	assert.Equal(t, "e1", res.Events[0].EventID)
+	assert.Equal(t, adk.SessionEventMessage, res.Events[0].Kind)
+	assert.Equal(t, "e3", res.Events[1].EventID)
+	assert.Equal(t, adk.SessionEventTurnEnd, res.Events[1].Kind)
+	assert.Equal(t, "e5", res.Events[2].EventID)
+	assert.Equal(t, adk.SessionEventMessage, res.Events[2].Kind)
+}
+
+func TestInMemoryStoreReverseKindFilter(t *testing.T) {
+	ctx := context.Background()
+	store := session.NewInMemoryStore()
+
+	events := []adk.SessionEventPayload{
+		{EventID: "e1", Kind: adk.SessionEventMessage, Data: []byte("d1")},
+		{EventID: "e2", Kind: adk.SessionEventSpanModelRequestStart, Data: []byte("d2")},
+		{EventID: "e3", Kind: adk.SessionEventTurnEnd, Data: []byte("d3")},
+		{EventID: "e4", Kind: adk.SessionEventSessionStatusIdle, Data: []byte("d4")},
+		{EventID: "e5", Kind: adk.SessionEventMessage, Data: []byte("d5")},
+	}
+	require.NoError(t, store.AppendEvents(ctx, "s", events))
+
+	res, err := store.LoadEvents(ctx, "s", &adk.LoadEventsRequest{
+		Reverse: true,
+		Kinds:   []adk.SessionEventKind{adk.SessionEventMessage, adk.SessionEventTurnEnd},
+	})
+	require.NoError(t, err)
+	require.Len(t, res.Events, 3)
+	assert.Equal(t, "e5", res.Events[0].EventID)
+	assert.Equal(t, adk.SessionEventMessage, res.Events[0].Kind)
+	assert.Equal(t, "e3", res.Events[1].EventID)
+	assert.Equal(t, adk.SessionEventTurnEnd, res.Events[1].Kind)
+	assert.Equal(t, "e1", res.Events[2].EventID)
+	assert.Equal(t, adk.SessionEventMessage, res.Events[2].Kind)
+}
+
+func TestInMemoryStoreCursorOverFullLogWithKindFilter(t *testing.T) {
+	ctx := context.Background()
+	store := session.NewInMemoryStore()
+
+	events := []adk.SessionEventPayload{
+		{EventID: "e1", Kind: adk.SessionEventMessage, Data: []byte("d1")},
+		{EventID: "e2", Kind: adk.SessionEventSpanModelRequestStart, Data: []byte("d2")},
+		{EventID: "e3", Kind: adk.SessionEventTurnEnd, Data: []byte("d3")},
+		{EventID: "e4", Kind: adk.SessionEventMessage, Data: []byte("d4")},
+	}
+	require.NoError(t, store.AppendEvents(ctx, "s", events))
+
+	res, err := store.LoadEvents(ctx, "s", &adk.LoadEventsRequest{
+		After: "e2",
+		Kinds: []adk.SessionEventKind{adk.SessionEventMessage, adk.SessionEventTurnEnd},
+	})
+	require.NoError(t, err)
+	require.Len(t, res.Events, 2)
+	assert.Equal(t, "e3", res.Events[0].EventID)
+	assert.Equal(t, adk.SessionEventTurnEnd, res.Events[0].Kind)
+	assert.Equal(t, "e4", res.Events[1].EventID)
+	assert.Equal(t, adk.SessionEventMessage, res.Events[1].Kind)
+}
+
+func TestInMemoryStoreFilteredPagination(t *testing.T) {
+	ctx := context.Background()
+	store := session.NewInMemoryStore()
+
+	events := []adk.SessionEventPayload{
+		{EventID: "e1", Kind: adk.SessionEventMessage, Data: []byte("d1")},
+		{EventID: "e2", Kind: adk.SessionEventSpanModelRequestStart, Data: []byte("d2")},
+		{EventID: "e3", Kind: adk.SessionEventTurnEnd, Data: []byte("d3")},
+		{EventID: "e4", Kind: adk.SessionEventSpanToolCallStart, Data: []byte("d4")},
+		{EventID: "e5", Kind: adk.SessionEventMessage, Data: []byte("d5")},
+	}
+	require.NoError(t, store.AppendEvents(ctx, "s", events))
+
+	kinds := []adk.SessionEventKind{adk.SessionEventMessage, adk.SessionEventTurnEnd}
+
+	// First page
+	res, err := store.LoadEvents(ctx, "s", &adk.LoadEventsRequest{
+		Limit: 1,
+		Kinds: kinds,
+	})
+	require.NoError(t, err)
+	require.Len(t, res.Events, 1)
+	assert.Equal(t, "e1", res.Events[0].EventID)
+	assert.Equal(t, "e1", res.Next)
+
+	// Second page
+	res, err = store.LoadEvents(ctx, "s", &adk.LoadEventsRequest{
+		Limit: 1,
+		After: "e1",
+		Kinds: kinds,
+	})
+	require.NoError(t, err)
+	require.Len(t, res.Events, 1)
+	assert.Equal(t, "e3", res.Events[0].EventID)
+	assert.Equal(t, adk.SessionEventTurnEnd, res.Events[0].Kind)
+	assert.Equal(t, "e3", res.Next)
+
+	// Third page
+	res, err = store.LoadEvents(ctx, "s", &adk.LoadEventsRequest{
+		Limit: 1,
+		After: "e3",
+		Kinds: kinds,
+	})
+	require.NoError(t, err)
+	require.Len(t, res.Events, 1)
+	assert.Equal(t, "e5", res.Events[0].EventID)
+	assert.Equal(t, adk.SessionEventMessage, res.Events[0].Kind)
+	assert.Equal(t, "", res.Next)
+}

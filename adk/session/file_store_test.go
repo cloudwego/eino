@@ -47,8 +47,8 @@ func TestFileStorePersistsAcrossInstances(t *testing.T) {
 	store, err := session.NewFileStore(dir)
 	require.NoError(t, err)
 
-	first := adk.SessionEventPayload{EventID: "persist-1", Data: []byte(`{"payload":"first"}`)}
-	second := adk.SessionEventPayload{EventID: "persist-2", Data: []byte(`{"payload":"second"}`)}
+	first := adk.SessionEventPayload{EventID: "persist-1", Kind: adk.SessionEventMessage, Data: []byte(`{"payload":"first"}`)}
+	second := adk.SessionEventPayload{EventID: "persist-2", Kind: adk.SessionEventTurnEnd, Data: []byte(`{"payload":"second"}`)}
 	require.NoError(t, store.AppendEvents(ctx, "s", []adk.SessionEventPayload{first, second}))
 
 	reopened, err := session.NewFileStore(dir)
@@ -64,8 +64,8 @@ func TestFileStoreWritesOneEvlogLinePerEvent(t *testing.T) {
 	store, err := session.NewFileStore(dir)
 	require.NoError(t, err)
 
-	first := adk.SessionEventPayload{EventID: "line-1", Data: []byte(`{"payload":"first"}`)}
-	second := adk.SessionEventPayload{EventID: "line-2", Data: []byte(`{"payload":"second"}`)}
+	first := adk.SessionEventPayload{EventID: "line-1", Kind: adk.SessionEventMessage, Data: []byte(`{"payload":"first"}`)}
+	second := adk.SessionEventPayload{EventID: "line-2", Kind: adk.SessionEventTurnEnd, Data: []byte(`{"payload":"second"}`)}
 	require.NoError(t, store.AppendEvents(ctx, "s", []adk.SessionEventPayload{first, second}))
 
 	data, err := os.ReadFile(filepath.Join(dir, url.PathEscape("s")+".evlog"))
@@ -74,16 +74,18 @@ func TestFileStoreWritesOneEvlogLinePerEvent(t *testing.T) {
 	lines := strings.Split(strings.TrimSuffix(string(data), "\n"), "\n")
 	require.Len(t, lines, 2)
 
-	// Each line is: <EventID>\t<raw Data>
-	parts0 := strings.SplitN(lines[0], "\t", 2)
-	require.Len(t, parts0, 2)
+	// Each line is: <EventID>\t<Kind>\t<raw Data>
+	parts0 := strings.SplitN(lines[0], "\t", 3)
+	require.Len(t, parts0, 3)
 	assert.Equal(t, "line-1", parts0[0])
-	assert.Equal(t, `{"payload":"first"}`, parts0[1])
+	assert.Equal(t, "message", parts0[1])
+	assert.Equal(t, `{"payload":"first"}`, parts0[2])
 
-	parts1 := strings.SplitN(lines[1], "\t", 2)
-	require.Len(t, parts1, 2)
+	parts1 := strings.SplitN(lines[1], "\t", 3)
+	require.Len(t, parts1, 3)
 	assert.Equal(t, "line-2", parts1[0])
-	assert.Equal(t, `{"payload":"second"}`, parts1[1])
+	assert.Equal(t, "turn_end", parts1[1])
+	assert.Equal(t, `{"payload":"second"}`, parts1[2])
 }
 
 func TestFileStoreRejectsInvalidDir(t *testing.T) {
@@ -123,8 +125,8 @@ func TestFileStoreDuplicateEventIDWithinBatchFirstWriteWins(t *testing.T) {
 	store, err := session.NewFileStore(t.TempDir())
 	require.NoError(t, err)
 
-	first := adk.SessionEventPayload{EventID: "dup-batch", Data: []byte(`{"payload":"first"}`)}
-	dup := adk.SessionEventPayload{EventID: "dup-batch", Data: []byte(`{"payload":"second"}`)}
+	first := adk.SessionEventPayload{EventID: "dup-batch", Kind: adk.SessionEventMessage, Data: []byte(`{"payload":"first"}`)}
+	dup := adk.SessionEventPayload{EventID: "dup-batch", Kind: adk.SessionEventMessage, Data: []byte(`{"payload":"second"}`)}
 	require.NoError(t, store.AppendEvents(ctx, "s", []adk.SessionEventPayload{first, dup}))
 
 	res, err := store.LoadEvents(ctx, "s", &adk.LoadEventsRequest{})
@@ -253,7 +255,7 @@ func TestFileStoreEscapedSessionIDPath(t *testing.T) {
 	require.NoError(t, err)
 
 	sessionID := "a/b %雪"
-	payload := adk.SessionEventPayload{EventID: "escaped", Data: []byte(`{"payload":"ok"}`)}
+	payload := adk.SessionEventPayload{EventID: "escaped", Kind: adk.SessionEventMessage, Data: []byte(`{"payload":"ok"}`)}
 	require.NoError(t, store.AppendEvents(ctx, sessionID, []adk.SessionEventPayload{payload}))
 
 	res, err := store.LoadEvents(ctx, sessionID, &adk.LoadEventsRequest{})
@@ -264,4 +266,82 @@ func TestFileStoreEscapedSessionIDPath(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, entries, 1)
 	assert.Equal(t, url.PathEscape(sessionID)+".evlog", entries[0].Name())
+}
+
+func TestFileStorePersistenceFormatWithTabInData(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	store, err := session.NewFileStore(dir)
+	require.NoError(t, err)
+
+	first := adk.SessionEventPayload{EventID: "tab-1", Kind: adk.SessionEventMessage, Data: []byte("hello\tworld")}
+	second := adk.SessionEventPayload{EventID: "tab-2", Kind: adk.SessionEventTurnEnd, Data: []byte("end")}
+	require.NoError(t, store.AppendEvents(ctx, "s", []adk.SessionEventPayload{first, second}))
+
+	// Reopen the store.
+	reopened, err := session.NewFileStore(dir)
+	require.NoError(t, err)
+
+	res, err := reopened.LoadEvents(ctx, "s", &adk.LoadEventsRequest{})
+	require.NoError(t, err)
+	require.Len(t, res.Events, 2)
+
+	assert.Equal(t, "tab-1", res.Events[0].EventID)
+	assert.Equal(t, adk.SessionEventMessage, res.Events[0].Kind)
+	assert.Equal(t, []byte("hello\tworld"), res.Events[0].Data)
+
+	assert.Equal(t, "tab-2", res.Events[1].EventID)
+	assert.Equal(t, adk.SessionEventTurnEnd, res.Events[1].Kind)
+	assert.Equal(t, []byte("end"), res.Events[1].Data)
+
+	// Read the raw file and verify line format.
+	data, err := os.ReadFile(filepath.Join(dir, url.PathEscape("s")+".evlog"))
+	require.NoError(t, err)
+	lines := strings.Split(strings.TrimSuffix(string(data), "\n"), "\n")
+	require.Len(t, lines, 2)
+
+	// Each line: <EventID>\t<Kind>\t<Data> — split by first 2 tabs only.
+	parts0 := strings.SplitN(lines[0], "\t", 3)
+	require.Len(t, parts0, 3)
+	// The Data part should contain the tab byte.
+	assert.Contains(t, parts0[2], "\t")
+
+	parts1 := strings.SplitN(lines[1], "\t", 3)
+	require.Len(t, parts1, 3)
+}
+
+func TestFileStoreKindFilter(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	store, err := session.NewFileStore(dir)
+	require.NoError(t, err)
+
+	e1 := adk.SessionEventPayload{EventID: "e1", Kind: adk.SessionEventMessage, Data: []byte(`{"m":1}`)}
+	e2 := adk.SessionEventPayload{EventID: "e2", Kind: adk.SessionEventSpanModelRequestStart, Data: []byte(`{"s":1}`)}
+	e3 := adk.SessionEventPayload{EventID: "e3", Kind: adk.SessionEventTurnEnd, Data: []byte(`{"t":1}`)}
+	e4 := adk.SessionEventPayload{EventID: "e4", Kind: adk.SessionEventMessage, Data: []byte(`{"m":2}`)}
+	require.NoError(t, store.AppendEvents(ctx, "s", []adk.SessionEventPayload{e1, e2, e3, e4}))
+
+	// Load with kind filter: message + turn_end only.
+	kinds := []adk.SessionEventKind{adk.SessionEventMessage, adk.SessionEventTurnEnd}
+	res, err := store.LoadEvents(ctx, "s", &adk.LoadEventsRequest{Kinds: kinds})
+	require.NoError(t, err)
+	require.Len(t, res.Events, 3)
+	assert.Equal(t, "e1", res.Events[0].EventID)
+	assert.Equal(t, "e3", res.Events[1].EventID)
+	assert.Equal(t, "e4", res.Events[2].EventID)
+
+	// Load with Limit=1 and same Kinds.
+	res, err = store.LoadEvents(ctx, "s", &adk.LoadEventsRequest{Kinds: kinds, Limit: 1})
+	require.NoError(t, err)
+	require.Len(t, res.Events, 1)
+	assert.Equal(t, "e1", res.Events[0].EventID)
+	assert.Equal(t, "e1", res.Next)
+
+	// Load with After="e1", Limit=1, same Kinds.
+	res, err = store.LoadEvents(ctx, "s", &adk.LoadEventsRequest{After: "e1", Kinds: kinds, Limit: 1})
+	require.NoError(t, err)
+	require.Len(t, res.Events, 1)
+	assert.Equal(t, "e3", res.Events[0].EventID)
+	assert.Equal(t, "e3", res.Next)
 }

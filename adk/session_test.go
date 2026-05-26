@@ -205,6 +205,7 @@ func (s *sessionHelperStore) AppendEvents(_ context.Context, _ string, events []
 		}
 		s.events = append(s.events, SessionEventPayload{
 			EventID: e.EventID,
+			Kind:    e.Kind,
 			Data:    append([]byte{}, e.Data...),
 		})
 		s.eventIDs = append(s.eventIDs, e.EventID)
@@ -654,7 +655,7 @@ func TestSessionPersister_EmptyPayloadSkipped(t *testing.T) {
 	se := makeInputSessionEvent(schema.UserMessage("real"))
 	data, err := encodeSessionEvent(se)
 	require.NoError(t, err)
-	require.NoError(t, persister.enqueue(SessionEventPayload{EventID: se.EventID, Data: data}))
+	require.NoError(t, persister.enqueue(SessionEventPayload{EventID: se.EventID, Kind: se.Kind, Data: data}))
 
 	require.NoError(t, persister.closeAndWait())
 	require.Len(t, store.events, 1, "only the real event should be persisted")
@@ -1134,7 +1135,7 @@ func TestReconstructFromEventLog_MultiTurn(t *testing.T) {
 		se := &SessionEvent[*schema.Message]{Message: m}
 		data, err := encodeSessionEvent(withTestEventID(se))
 		require.NoError(t, err)
-		require.NoError(t, store.AppendEvents(ctx, sid, []SessionEventPayload{{EventID: se.EventID, Data: data}}))
+		require.NoError(t, store.AppendEvents(ctx, sid, []SessionEventPayload{{EventID: se.EventID, Kind: se.Kind, Data: data}}))
 	}
 	// Turn 2: input "Q2" + output "A2"
 	q2 := schema.UserMessage("Q2")
@@ -1145,7 +1146,7 @@ func TestReconstructFromEventLog_MultiTurn(t *testing.T) {
 		se := &SessionEvent[*schema.Message]{Message: m}
 		data, err := encodeSessionEvent(withTestEventID(se))
 		require.NoError(t, err)
-		require.NoError(t, store.AppendEvents(ctx, sid, []SessionEventPayload{{EventID: se.EventID, Data: data}}))
+		require.NoError(t, store.AppendEvents(ctx, sid, []SessionEventPayload{{EventID: se.EventID, Kind: se.Kind, Data: data}}))
 	}
 
 	result, err := reconstructSessionState[*schema.Message](ctx, store, sid, defaultLoadPageSize, nil)
@@ -1183,13 +1184,13 @@ func TestReconstructFromEventLog_CorruptEventReturnsError(t *testing.T) {
 	})
 	data, err := encodeSessionEvent(se)
 	require.NoError(t, err)
-	require.NoError(t, store.AppendEvents(ctx, sid, []SessionEventPayload{{EventID: se.EventID, Data: data}}))
+	require.NoError(t, store.AppendEvents(ctx, sid, []SessionEventPayload{{EventID: se.EventID, Kind: se.Kind, Data: data}}))
 
 	corruptPayload := []byte(`{"event_id":"` + uuid.NewString() + `","kind":"message","message":` + "\x00\xff invalid json")
 	require.False(t, json.Valid(corruptPayload), "payload must be invalid JSON")
 	corruptID := uuid.NewString()
 	store.mu.Lock()
-	store.events = append(store.events, SessionEventPayload{EventID: corruptID, Data: corruptPayload})
+	store.events = append(store.events, SessionEventPayload{EventID: corruptID, Kind: SessionEventMessage, Data: corruptPayload})
 	store.eventIDs = append(store.eventIDs, corruptID)
 	store.eventIDIdx[corruptID] = len(store.events) - 1
 	store.mu.Unlock()
@@ -1212,7 +1213,7 @@ func TestReconstructFromEventLog_WithSummarizationBoundary(t *testing.T) {
 		se := &SessionEvent[*schema.Message]{Message: m}
 		data, err := encodeSessionEvent(withTestEventID(se))
 		require.NoError(t, err)
-		require.NoError(t, store.AppendEvents(ctx, sid, []SessionEventPayload{{EventID: se.EventID, Data: data}}))
+		require.NoError(t, store.AppendEvents(ctx, sid, []SessionEventPayload{{EventID: se.EventID, Kind: se.Kind, Data: data}}))
 	}
 
 	// Boundary: summary of all messages.
@@ -1222,7 +1223,7 @@ func TestReconstructFromEventLog_WithSummarizationBoundary(t *testing.T) {
 	se := &SessionEvent[*schema.Message]{MessagesReplaced: &repl}
 	data, err := encodeSessionEvent(withTestEventID(se))
 	require.NoError(t, err)
-	require.NoError(t, store.AppendEvents(ctx, sid, []SessionEventPayload{{EventID: se.EventID, Data: data}}))
+	require.NoError(t, store.AppendEvents(ctx, sid, []SessionEventPayload{{EventID: se.EventID, Kind: se.Kind, Data: data}}))
 
 	// Post-boundary events.
 	post := schema.AssistantMessage("post", nil)
@@ -1230,7 +1231,7 @@ func TestReconstructFromEventLog_WithSummarizationBoundary(t *testing.T) {
 	se = &SessionEvent[*schema.Message]{Message: post}
 	data, err = encodeSessionEvent(withTestEventID(se))
 	require.NoError(t, err)
-	require.NoError(t, store.AppendEvents(ctx, sid, []SessionEventPayload{{EventID: se.EventID, Data: data}}))
+	require.NoError(t, store.AppendEvents(ctx, sid, []SessionEventPayload{{EventID: se.EventID, Kind: se.Kind, Data: data}}))
 
 	result, err := reconstructSessionState[*schema.Message](ctx, store, sid, defaultLoadPageSize, nil)
 	require.NoError(t, err)
@@ -1635,7 +1636,7 @@ func TestAttack_InFlightTurnIDRecoveryOnResume(t *testing.T) {
 	for _, se := range events {
 		data, err := encodeSessionEventWithSerializer(se, nil)
 		require.NoError(t, err)
-		require.NoError(t, store.AppendEvents(ctx, sid, []SessionEventPayload{{EventID: se.EventID, Data: data}}))
+		require.NoError(t, store.AppendEvents(ctx, sid, []SessionEventPayload{{EventID: se.EventID, Kind: se.Kind, Data: data}}))
 	}
 
 	result, err := reconstructSessionState[*schema.Message](ctx, store, sid, defaultLoadPageSize, nil)
@@ -1667,7 +1668,7 @@ func TestAttack_InFlightTurnIDEmptyWhenNoPostTurnEndEvents(t *testing.T) {
 	for _, se := range events {
 		data, err := encodeSessionEventWithSerializer(se, nil)
 		require.NoError(t, err)
-		require.NoError(t, store.AppendEvents(ctx, sid, []SessionEventPayload{{EventID: se.EventID, Data: data}}))
+		require.NoError(t, store.AppendEvents(ctx, sid, []SessionEventPayload{{EventID: se.EventID, Kind: se.Kind, Data: data}}))
 	}
 
 	result, err := reconstructSessionState[*schema.Message](ctx, store, sid, defaultLoadPageSize, nil)
@@ -1702,7 +1703,7 @@ func TestAttack_InFlightTurnIDMultipleTurnIDsInTail(t *testing.T) {
 	for _, se := range events {
 		data, err := encodeSessionEventWithSerializer(se, nil)
 		require.NoError(t, err)
-		require.NoError(t, store.AppendEvents(ctx, sid, []SessionEventPayload{{EventID: se.EventID, Data: data}}))
+		require.NoError(t, store.AppendEvents(ctx, sid, []SessionEventPayload{{EventID: se.EventID, Kind: se.Kind, Data: data}}))
 	}
 
 	result, err := reconstructSessionState[*schema.Message](ctx, store, sid, defaultLoadPageSize, nil)
