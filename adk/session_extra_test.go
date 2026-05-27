@@ -157,7 +157,10 @@ func TestStreamPersistence_SyncModeMaterializesBeforeDelivery(t *testing.T) {
 		if ev.Output != nil && ev.Output.MessageOutput != nil {
 			observed = ev.Output.MessageOutput
 			var stored bool
-			for _, ep := range store.events {
+			store.mu.Lock()
+			snapshot := append([]SessionEventPayload{}, store.events...)
+			store.mu.Unlock()
+			for _, ep := range snapshot {
 				se, err := decodeSessionEvent[*schema.Message](ep.Data)
 				require.NoError(t, err)
 				if se.Message != nil && se.Message.Role == schema.Assistant && se.Message.Content == "hello sync" {
@@ -211,7 +214,10 @@ func TestStreamPersistence_SyncModeToolResultMaterializesBeforeDelivery(t *testi
 		if ev.Output != nil && ev.Output.MessageOutput != nil {
 			observed = ev.Output.MessageOutput
 			var stored bool
-			for _, ep := range store.events {
+			store.mu.Lock()
+			snapshot := append([]SessionEventPayload{}, store.events...)
+			store.mu.Unlock()
+			for _, ep := range snapshot {
 				se, err := decodeSessionEvent[*schema.Message](ep.Data)
 				require.NoError(t, err)
 				if se.Message != nil && se.Message.Role == schema.Tool && se.Message.Content == "tool result" {
