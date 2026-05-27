@@ -85,6 +85,30 @@ func TestInMemoryStoreForwardKindFilter(t *testing.T) {
 	assert.Equal(t, adk.SessionEventMessage, res.Events[2].Kind)
 }
 
+func TestInMemoryStoreExtensionKindFilter(t *testing.T) {
+	ctx := context.Background()
+	store := session.NewInMemoryStore()
+	extensionKind := adk.SessionEventKind("x.outcome.started")
+
+	events := []adk.SessionEventPayload{
+		{EventID: "e1", Kind: adk.SessionEventMessage, Data: []byte("d1")},
+		{EventID: "e2", Kind: extensionKind, Data: []byte("d2")},
+		{EventID: "e3", Kind: adk.SessionEventKind("x.ticket.updated"), Data: []byte("d3")},
+		{EventID: "e4", Kind: extensionKind, Data: []byte("d4")},
+	}
+	require.NoError(t, store.AppendEvents(ctx, "s", events))
+
+	res, err := store.LoadEvents(ctx, "s", &adk.LoadEventsRequest{
+		Kinds: []adk.SessionEventKind{extensionKind},
+	})
+	require.NoError(t, err)
+	require.Len(t, res.Events, 2)
+	assert.Equal(t, "e2", res.Events[0].EventID)
+	assert.Equal(t, extensionKind, res.Events[0].Kind)
+	assert.Equal(t, "e4", res.Events[1].EventID)
+	assert.Equal(t, extensionKind, res.Events[1].Kind)
+}
+
 func TestInMemoryStoreReverseKindFilter(t *testing.T) {
 	ctx := context.Background()
 	store := session.NewInMemoryStore()

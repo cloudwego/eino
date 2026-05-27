@@ -49,6 +49,7 @@ func RunConformanceTests(t *testing.T, factory func(testing.TB) adk.SessionStore
 	t.Run("Unknown After returns ErrEventIDOutOfRange", func(t *testing.T) { testUnknownAfter(t, factory) })
 	t.Run("Empty page when After=last forward and After=first reverse", func(t *testing.T) { testEmptyPageBoundary(t, factory) })
 	t.Run("Opaque binary Data round-trips correctly", func(t *testing.T) { testOpaqueDataRoundTrip(t, factory) })
+	t.Run("Opaque extension kind filters correctly", func(t *testing.T) { testOpaqueExtensionKindFilter(t, factory) })
 }
 
 func testAppendAndForwardLoad(t *testing.T, factory func(testing.TB) adk.SessionStore) {
@@ -67,6 +68,25 @@ func testAppendAndForwardLoad(t *testing.T, factory func(testing.TB) adk.Session
 		t.Fatalf("LoadEvents returned nil result")
 	}
 	requireEventsEqual(t, []adk.SessionEventPayload{first, second, third}, res.Events)
+}
+
+func testOpaqueExtensionKindFilter(t *testing.T, factory func(testing.TB) adk.SessionStore) {
+	store := newStore(t, factory)
+	ctx := context.Background()
+
+	first := adk.SessionEventPayload{EventID: "custom-1", Kind: adk.SessionEventKind("x.conformance.custom"), Data: []byte(`{"custom":1}`)}
+	second := adk.SessionEventPayload{EventID: "message-1", Kind: adk.SessionEventMessage, Data: []byte(`{"message":1}`)}
+	third := adk.SessionEventPayload{EventID: "custom-2", Kind: adk.SessionEventKind("x.conformance.custom"), Data: []byte(`{"custom":2}`)}
+	requireNoError(t, store.AppendEvents(ctx, "s", []adk.SessionEventPayload{first, second, third}))
+
+	res, err := store.LoadEvents(ctx, "s", &adk.LoadEventsRequest{
+		Kinds: []adk.SessionEventKind{adk.SessionEventKind("x.conformance.custom")},
+	})
+	requireNoError(t, err)
+	if res == nil {
+		t.Fatalf("LoadEvents returned nil result")
+	}
+	requireEventsEqual(t, []adk.SessionEventPayload{first, third}, res.Events)
 }
 
 func testReversePagination(t *testing.T, factory func(testing.TB) adk.SessionStore) {

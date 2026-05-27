@@ -110,6 +110,14 @@ func TestSessionTimeline_ClassifyAndSerializeVariants(t *testing.T) {
 			}},
 			kind: SessionEventAgentInterrupt,
 		},
+		{
+			name: "extension",
+			se: &SessionEvent[*schema.Message]{
+				Kind:      SessionEventKind("x.outcome.started"),
+				Extension: &SessionExtensionEvent{Data: []byte(`{"outcome_name":"code_review"}`)},
+			},
+			kind: SessionEventKind("x.outcome.started"),
+		},
 	}
 
 	for _, tc := range cases {
@@ -123,8 +131,105 @@ func TestSessionTimeline_ClassifyAndSerializeVariants(t *testing.T) {
 			decoded, err := decodeSessionEvent[*schema.Message](data)
 			require.NoError(t, err)
 			assert.Equal(t, tc.kind, decoded.Kind)
+			if tc.se.Extension != nil {
+				require.NotNil(t, decoded.Extension)
+				assert.Equal(t, []byte(`{"outcome_name":"code_review"}`), []byte(decoded.Extension.Data))
+			}
 		})
 	}
+}
+
+func TestSessionTimeline_ExtensionValidation(t *testing.T) {
+	t.Run("empty kind rejected", func(t *testing.T) {
+		err := NormalizeSessionEventKind(&SessionEvent[*schema.Message]{
+			Extension: &SessionExtensionEvent{},
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "must set kind")
+	})
+
+	t.Run("non extension kind rejected", func(t *testing.T) {
+		err := NormalizeSessionEventKind(&SessionEvent[*schema.Message]{
+			Kind:      SessionEventKind("outcome.started"),
+			Extension: &SessionExtensionEvent{},
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "must start with")
+	})
+
+	t.Run("built in kind rejected", func(t *testing.T) {
+		err := NormalizeSessionEventKind(&SessionEvent[*schema.Message]{
+			Kind:      SessionEventMessage,
+			Extension: &SessionExtensionEvent{},
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "must start with")
+	})
+
+	t.Run("built in payload cannot use extension namespace", func(t *testing.T) {
+		err := NormalizeSessionEventKind(&SessionEvent[*schema.Message]{
+			Kind:    SessionEventKind("x.message"),
+			Message: schema.UserMessage("hello"),
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "does not match payload")
+	})
+
+	t.Run("one active payload invariant", func(t *testing.T) {
+		err := NormalizeSessionEventKind(&SessionEvent[*schema.Message]{
+			Kind:      SessionEventKind("x.outcome.started"),
+			Message:   schema.UserMessage("hello"),
+			Extension: &SessionExtensionEvent{},
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "exactly one active payload")
+	})
+
+	t.Run("invalid data rejected", func(t *testing.T) {
+		err := NormalizeSessionEventKind(&SessionEvent[*schema.Message]{
+			Kind:      SessionEventKind("x.outcome.started"),
+			Extension: &SessionExtensionEvent{Data: []byte(`{"broken"`)},
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "must be valid JSON")
+	})
+
+	t.Run("zero length data becomes marker", func(t *testing.T) {
+		se := &SessionEvent[*schema.Message]{
+			Kind:      SessionEventKind("x.outcome.started"),
+			Extension: &SessionExtensionEvent{Data: []byte{}},
+		}
+		require.NoError(t, NormalizeSessionEventKind(se))
+		assert.Nil(t, se.Extension.Data)
+	})
+
+	t.Run("pretty data is compacted", func(t *testing.T) {
+		se := &SessionEvent[*schema.Message]{
+			Kind: SessionEventKind("x.outcome.started"),
+			Extension: &SessionExtensionEvent{
+				Data: []byte("{\n  \"outcome_name\": \"code_review\",\n  \"attempt\": 1\n}"),
+			},
+		}
+		require.NoError(t, NormalizeSessionEventKind(se))
+		assert.Equal(t, []byte(`{"outcome_name":"code_review","attempt":1}`), []byte(se.Extension.Data))
+	})
+
+	t.Run("human readable round trip", func(t *testing.T) {
+		se := &SessionEvent[*schema.Message]{
+			EventID:   uuid.NewString(),
+			Timestamp: time.Now().UTC(),
+			Kind:      SessionEventKind("x.outcome.grading"),
+			Extension: &SessionExtensionEvent{Data: []byte(`{"attempt":1}`)},
+		}
+		require.NoError(t, NormalizeSessionEventKind(se))
+		data, err := encodeSessionEvent(se)
+		require.NoError(t, err)
+		decoded, err := decodeSessionEvent[*schema.Message](data)
+		require.NoError(t, err)
+		require.NotNil(t, decoded.Extension)
+		assert.Equal(t, se.Kind, decoded.Kind)
+		assert.Equal(t, []byte(`{"attempt":1}`), []byte(decoded.Extension.Data))
+	})
 }
 
 func TestSessionTimeline_ReconstructionIgnoresNonContextVariants(t *testing.T) {
@@ -138,6 +243,7 @@ func TestSessionTimeline_ReconstructionIgnoresNonContextVariants(t *testing.T) {
 		{EventID: uuid.NewString(), Kind: SessionEventSessionStatusRunning, Lifecycle: &LifecycleEvent{Scope: LifecycleScopeSession, State: SessionRunStateRunning}},
 		{EventID: uuid.NewString(), Kind: SessionEventMessage, Message: msg},
 		{EventID: uuid.NewString(), Kind: SessionEventSpanModelRequestStart, Span: &SpanEvent{SpanID: uuid.NewString(), Kind: SpanKindModel, StartedAt: time.Now().UTC(), Model: &ModelSpanMeta{}}},
+		{EventID: uuid.NewString(), Kind: SessionEventKind("x.outcome.started"), Extension: &SessionExtensionEvent{Data: []byte(`{"attempt":1}`)}},
 		{EventID: uuid.NewString(), Kind: SessionEventAgentInterrupt, AgentInterrupt: &AgentInterruptEvent{
 			Contexts: []*AgentInterruptContext{
 				{
@@ -434,6 +540,132 @@ func TestWithTimelineEvents_LiveExposure(t *testing.T) {
 		})
 		require.Len(t, storedUserInput, 1)
 	})
+}
+
+type extensionEventModel struct{}
+
+func (m *extensionEventModel) Generate(context.Context, []*schema.Message, ...model.Option) (*schema.Message, error) {
+	return schema.AssistantMessage("ok", nil), nil
+}
+
+func (m *extensionEventModel) Stream(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+	msg, err := m.Generate(ctx, input, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return schema.StreamReaderFromArray([]*schema.Message{msg}), nil
+}
+
+func TestRunner_ExtensionEventSentWithTypedSendEventIsLiveAndPersisted(t *testing.T) {
+	ctx := context.Background()
+	extensionKind := SessionEventKind("x.outcome.grading")
+	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "extension-event-agent",
+		Instruction: "test",
+		Model:       &extensionEventModel{},
+		Middlewares: []AgentMiddleware{
+			{
+				AfterChatModel: func(ctx context.Context, _ *ChatModelAgentState) error {
+					return SendEvent(ctx, &AgentEvent{
+						SessionEvent: &SessionEvent[*schema.Message]{
+							Kind: extensionKind,
+							Extension: &SessionExtensionEvent{
+								Data: []byte("{\n  \"outcome_name\": \"code_review\",\n  \"attempt\": 1\n}"),
+							},
+						},
+					})
+				},
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	t.Run("visible when timeline requested", func(t *testing.T) {
+		store := newSessionHelperStore()
+		runner := NewRunner(ctx, RunnerConfig{
+			Agent:        agent,
+			SessionID:    "extension-event-session-visible",
+			SessionStore: store,
+			Session:      &SessionConfig{EventFlushBatchSize: 1},
+		})
+
+		var liveExtension *SessionEvent[*schema.Message]
+		iter := runner.Query(ctx, "hello", WithTimelineEvents())
+		for {
+			event, ok := iter.Next()
+			if !ok {
+				break
+			}
+			require.NoError(t, event.Err)
+			if event.SessionEvent != nil && event.SessionEvent.Kind == extensionKind {
+				liveExtension = event.SessionEvent
+			}
+		}
+
+		require.NotNil(t, liveExtension)
+		require.NotEmpty(t, liveExtension.EventID)
+		require.NotEmpty(t, liveExtension.TurnID)
+		require.NotNil(t, liveExtension.Extension)
+		assert.Equal(t, []byte(`{"outcome_name":"code_review","attempt":1}`), []byte(liveExtension.Extension.Data))
+
+		stored := filterStoredSessionEvents(t, store.events, func(se *SessionEvent[*schema.Message]) bool {
+			return se.Kind == extensionKind
+		})
+		require.Len(t, stored, 1)
+		assert.Equal(t, liveExtension.EventID, stored[0].EventID)
+		assert.Equal(t, liveExtension.TurnID, stored[0].TurnID)
+		require.NotNil(t, stored[0].Extension)
+		assert.Equal(t, []byte(`{"outcome_name":"code_review","attempt":1}`), []byte(stored[0].Extension.Data))
+
+		var extensionIndex, idleIndex = -1, -1
+		for i, payload := range store.events {
+			switch payload.Kind {
+			case extensionKind:
+				extensionIndex = i
+			case SessionEventSessionStatusIdle:
+				idleIndex = i
+			}
+		}
+		require.NotEqual(t, -1, extensionIndex)
+		require.NotEqual(t, -1, idleIndex)
+		assert.Less(t, extensionIndex, idleIndex, "extension event should enter Runner persistence before the closing idle lifecycle event")
+	})
+
+	t.Run("stripped from live stream by default", func(t *testing.T) {
+		store := newSessionHelperStore()
+		runner := NewRunner(ctx, RunnerConfig{
+			Agent:        agent,
+			SessionID:    "extension-event-session-stripped",
+			SessionStore: store,
+			Session:      &SessionConfig{EventFlushBatchSize: 1},
+		})
+
+		iter := runner.Query(ctx, "hello")
+		for {
+			event, ok := iter.Next()
+			if !ok {
+				break
+			}
+			require.NoError(t, event.Err)
+			assert.Nil(t, event.SessionEvent)
+		}
+
+		stored := filterStoredSessionEvents(t, store.events, func(se *SessionEvent[*schema.Message]) bool {
+			return se.Kind == extensionKind
+		})
+		require.Len(t, stored, 1)
+	})
+}
+
+func TestTypedSendEventOutsideExecutionReturnsError(t *testing.T) {
+	err := SendEvent(context.Background(), &AgentEvent{
+		SessionEvent: &SessionEvent[*schema.Message]{
+			Kind:      SessionEventKind("x.outcome.started"),
+			Extension: &SessionExtensionEvent{},
+		},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "must be called within")
 }
 
 func TestSessionTimeline_SpanMetaMustBeOneOf(t *testing.T) {
