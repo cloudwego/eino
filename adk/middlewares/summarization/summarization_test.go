@@ -1177,64 +1177,12 @@ func TestPopulateUserMessagesInternal(t *testing.T) {
 		result, err := replaceUserMessagesInSummary(ctx, &replaceUserMessagesInSummaryParams[*schema.Message]{
 			contextMsgs: msgs,
 			summaryText: summary,
-			maxTokens:   1000,
 		})
 		assert.NoError(t, err)
 		assert.Contains(t, result, "msg1")
 		assert.Contains(t, result, "msg2")
 		assert.NotContains(t, result, "old message")
 		assert.Contains(t, result, "7. Pending Tasks:")
-	})
-
-	t.Run("filters user messages", func(t *testing.T) {
-		msgs := []adk.Message{
-			schema.UserMessage("drop_me_1"),
-			schema.AssistantMessage("response1", nil),
-			schema.UserMessage("keep_me"),
-			schema.UserMessage("drop_me_2"),
-		}
-
-		summary := `1. Primary Request:
-   test
-
-6. All user messages:
-<all_user_messages>
-    - [old message]
-</all_user_messages>
-
-7. Pending Tasks:
-   - task1`
-
-		result, err := replaceUserMessagesInSummary(ctx, &replaceUserMessagesInSummaryParams[*schema.Message]{
-			contextMsgs: msgs,
-			summaryText: summary,
-			maxTokens:   1000,
-			filter: func(ctx context.Context, msg adk.Message) (bool, error) {
-				return msg.Content == "keep_me", nil
-			},
-		})
-		assert.NoError(t, err)
-		assert.Contains(t, result, "keep_me")
-		assert.NotContains(t, result, "drop_me_1")
-		assert.NotContains(t, result, "drop_me_2")
-		assert.NotContains(t, result, "old message")
-	})
-
-	t.Run("filter error", func(t *testing.T) {
-		msgs := []adk.Message{
-			schema.UserMessage("msg"),
-		}
-
-		_, err := replaceUserMessagesInSummary(ctx, &replaceUserMessagesInSummaryParams[*schema.Message]{
-			contextMsgs: msgs,
-			summaryText: "summary",
-			maxTokens:   1000,
-			filter: func(ctx context.Context, msg adk.Message) (bool, error) {
-				return false, errors.New("filter error")
-			},
-		})
-		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "filter error")
 	})
 
 	t.Run("returns original if no matching sections", func(t *testing.T) {
@@ -1246,7 +1194,6 @@ func TestPopulateUserMessagesInternal(t *testing.T) {
 		result, err := replaceUserMessagesInSummary(ctx, &replaceUserMessagesInSummaryParams[*schema.Message]{
 			contextMsgs: msgs,
 			summaryText: summary,
-			maxTokens:   1000,
 		})
 		assert.NoError(t, err)
 		assert.Equal(t, summary, result)
@@ -1275,28 +1222,10 @@ func TestPopulateUserMessagesInternal(t *testing.T) {
 		result, err := replaceUserMessagesInSummary(ctx, &replaceUserMessagesInSummaryParams[*schema.Message]{
 			contextMsgs: msgs,
 			summaryText: summary,
-			maxTokens:   1000,
 		})
 		assert.NoError(t, err)
 		assert.Contains(t, result, "regular message")
 		assert.NotContains(t, result, "    - summary")
-	})
-
-	t.Run("token counter error", func(t *testing.T) {
-		msgs := []adk.Message{
-			schema.UserMessage("test1"),
-			schema.UserMessage("test2"),
-		}
-
-		_, err := replaceUserMessagesInSummary(ctx, &replaceUserMessagesInSummaryParams[*schema.Message]{
-			contextMsgs: msgs,
-			summaryText: "summary",
-			maxTokens:   1000,
-			tokenCounter: func(ctx context.Context, input *TokenCounterInput) (int, error) {
-				return 0, errors.New("count error")
-			},
-		})
-		assert.Error(t, err)
 	})
 
 	t.Run("returns original if empty user messages", func(t *testing.T) {
@@ -1313,7 +1242,6 @@ func TestPopulateUserMessagesInternal(t *testing.T) {
 		result, err := replaceUserMessagesInSummary(ctx, &replaceUserMessagesInSummaryParams[*schema.Message]{
 			contextMsgs: msgs,
 			summaryText: summary,
-			maxTokens:   1000,
 		})
 		assert.NoError(t, err)
 		assert.Equal(t, summary, result)
@@ -1483,51 +1411,15 @@ func TestPostProcessSummary(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("with transcript path", func(t *testing.T) {
-		mw := &TypedMiddleware[*schema.Message]{
-			cfg: &Config{
-				TranscriptFilePath: "/path/to/transcript.txt",
-			},
-		}
-
-		summary := &schema.Message{
-			Role:    schema.User,
-			Content: "summary content",
-		}
-
-		result, err := mw.postProcessSummary(ctx, []adk.Message{}, summary)
+		result, err := postProcessSummary(ctx, &postProcessSummaryParams[*schema.Message]{
+			contextMsgs:    []adk.Message{},
+			summaryContent: "summary content",
+			transcriptPath: "/path/to/transcript.txt",
+		})
 		assert.NoError(t, err)
-		assert.Len(t, result.UserInputMultiContent, 2)
-		assert.Contains(t, result.UserInputMultiContent[0].Text, "/path/to/transcript.txt")
+		assert.Contains(t, result.Content, "/path/to/transcript.txt")
+		assert.Contains(t, result.Content, getContinueInstruction())
 	})
-}
-
-func TestPopulateUserMessages_FilterRemovesAll(t *testing.T) {
-	ctx := context.Background()
-
-	msgs := []adk.Message{
-		schema.UserMessage("drop_me"),
-		schema.AssistantMessage("response", nil),
-	}
-
-	summary := `6. All user messages:
-<all_user_messages>
-    - [old message]
-</all_user_messages>
-
-7. Pending Tasks:
-   - task`
-
-	result, err := replaceUserMessagesInSummary(ctx, &replaceUserMessagesInSummaryParams[*schema.Message]{
-		contextMsgs: msgs,
-		summaryText: summary,
-		maxTokens:   1000,
-		filter: func(ctx context.Context, msg adk.Message) (bool, error) {
-			return false, nil
-		},
-	})
-	assert.NoError(t, err)
-	assert.NotContains(t, result, "old message")
-	assert.Contains(t, result, "<all_user_messages>\n\n</all_user_messages>")
 }
 
 func TestEventHelpers(t *testing.T) {
@@ -1660,14 +1552,6 @@ func TestGetFailoverModel(t *testing.T) {
 }
 
 func TestHelperBranches(t *testing.T) {
-	t.Run("get user message context tokens", func(t *testing.T) {
-		mw := &TypedMiddleware[*schema.Message]{cfg: &Config{Trigger: &TriggerCondition{ContextTokens: 90}}}
-		assert.Equal(t, 30, mw.getUserMessageContextTokens())
-
-		mw.cfg.PreserveUserMessages = &PreserveUserMessages{MaxTokens: 12}
-		assert.Equal(t, 12, mw.getUserMessageContextTokens())
-	})
-
 	t.Run("should failover branches", func(t *testing.T) {
 		assert.False(t, typedShouldFailover(context.Background(), (*FailoverConfig)(nil), nil, errors.New("x")))
 		assert.False(t, typedShouldFailover(context.Background(), &FailoverConfig{}, nil, nil))
@@ -2136,55 +2020,19 @@ func testSummarizationHelpers[M adk.MessageType](t *testing.T) {
 		assert.Equal(t, "user input", getUserMsgTextContent(msg))
 	})
 
-	t.Run("overwriteMsgContent", func(t *testing.T) {
-		msg := smakeUserMsg[M]("original")
-		msg = overwriteMsgContent(msg, "summary part", "continue part")
+	t.Run("newTypedSummaryMessage", func(t *testing.T) {
+		msg := newTypedSummaryMessage[M]("summary content")
+
+		assert.True(t, isUserRole(msg))
 
 		switch m := any(msg).(type) {
-		case *schema.Message:
-			require.Len(t, m.UserInputMultiContent, 2)
-			assert.Equal(t, "summary part", m.UserInputMultiContent[0].Text)
-			assert.Equal(t, "continue part", m.UserInputMultiContent[1].Text)
-			assert.Empty(t, m.Content)
-		case *schema.AgenticMessage:
-			require.Len(t, m.ContentBlocks, 2)
-			assert.Equal(t, "summary part", m.ContentBlocks[0].UserInputText.Text)
-			assert.Equal(t, "continue part", m.ContentBlocks[1].UserInputText.Text)
-		}
-	})
-
-	t.Run("overwriteMsgContent sets role to user when input is assistant", func(t *testing.T) {
-		msg := smakeAssistantMsg[M]("assistant response")
-		result := overwriteMsgContent(msg, "summary", "continue")
-
-		assert.True(t, isUserRole(result))
-
-		switch m := any(result).(type) {
 		case *schema.Message:
 			assert.Equal(t, schema.User, m.Role)
-			require.Len(t, m.UserInputMultiContent, 2)
-			assert.Equal(t, "summary", m.UserInputMultiContent[0].Text)
-			assert.Equal(t, "continue", m.UserInputMultiContent[1].Text)
+			assert.Equal(t, "summary content", m.Content)
 		case *schema.AgenticMessage:
 			assert.Equal(t, schema.AgenticRoleTypeUser, m.Role)
-			require.Len(t, m.ContentBlocks, 2)
-			assert.Equal(t, "summary", m.ContentBlocks[0].UserInputText.Text)
-			assert.Equal(t, "continue", m.ContentBlocks[1].UserInputText.Text)
-		}
-	})
-
-	t.Run("overwriteMsgContent does not mutate original message", func(t *testing.T) {
-		msg := smakeAssistantMsg[M]("original content")
-		_ = overwriteMsgContent(msg, "new summary", "new continue")
-
-		switch m := any(msg).(type) {
-		case *schema.Message:
-			assert.Equal(t, schema.Assistant, m.Role)
-			assert.Equal(t, "original content", m.Content)
-		case *schema.AgenticMessage:
-			assert.Equal(t, schema.AgenticRoleTypeAssistant, m.Role)
 			require.Len(t, m.ContentBlocks, 1)
-			assert.Equal(t, "original content", m.ContentBlocks[0].AssistantGenText.Text)
+			assert.Equal(t, "summary content", m.ContentBlocks[0].UserInputText.Text)
 		}
 	})
 }
@@ -2295,4 +2143,88 @@ func testTokenCounterReceivesStateToolInfos[M adk.MessageType](t *testing.T) {
 	require.Len(t, receivedTools, 2)
 	assert.Equal(t, "state_tool_a", receivedTools[0].Name)
 	assert.Equal(t, "state_tool_b", receivedTools[1].Name)
+}
+
+func TestGetAssistantTextContent(t *testing.T) {
+	t.Run("schema.Message with MultiContent", func(t *testing.T) {
+		msg := &schema.Message{
+			Role:    schema.Assistant,
+			Content: "fallback content",
+			AssistantGenMultiContent: []schema.MessageOutputPart{
+				{Type: schema.ChatMessagePartTypeText, Text: "hello"},
+				{Type: schema.ChatMessagePartTypeText, Text: "world"},
+			},
+		}
+		got := getAssistantTextContent(msg)
+		assert.Equal(t, "hello\nworld", got)
+	})
+
+	t.Run("schema.Message with MultiContent skips non-text parts", func(t *testing.T) {
+		msg := &schema.Message{
+			Role:    schema.Assistant,
+			Content: "fallback",
+			AssistantGenMultiContent: []schema.MessageOutputPart{
+				{Type: schema.ChatMessagePartTypeText, Text: "text part"},
+				{Type: schema.ChatMessagePartTypeImageURL},
+				{Type: schema.ChatMessagePartTypeText, Text: ""},
+			},
+		}
+		got := getAssistantTextContent(msg)
+		assert.Equal(t, "text part", got)
+	})
+
+	t.Run("schema.Message falls back to Content when MultiContent is empty", func(t *testing.T) {
+		msg := &schema.Message{
+			Role:    schema.Assistant,
+			Content: "plain content",
+		}
+		got := getAssistantTextContent(msg)
+		assert.Equal(t, "plain content", got)
+	})
+
+	t.Run("schema.Message falls back to Content when MultiContent has no text", func(t *testing.T) {
+		msg := &schema.Message{
+			Role:    schema.Assistant,
+			Content: "fallback",
+			AssistantGenMultiContent: []schema.MessageOutputPart{
+				{Type: schema.ChatMessagePartTypeImageURL},
+			},
+		}
+		got := getAssistantTextContent(msg)
+		assert.Equal(t, "fallback", got)
+	})
+
+	t.Run("schema.AgenticMessage with multiple text blocks", func(t *testing.T) {
+		msg := &schema.AgenticMessage{
+			Role: schema.AgenticRoleTypeAssistant,
+			ContentBlocks: []*schema.ContentBlock{
+				schema.NewContentBlock(&schema.AssistantGenText{Text: "first"}),
+				schema.NewContentBlock(&schema.AssistantGenText{Text: "second"}),
+			},
+		}
+		got := getAssistantTextContent(msg)
+		assert.Equal(t, "first\nsecond", got)
+	})
+
+	t.Run("schema.AgenticMessage with nil blocks", func(t *testing.T) {
+		msg := &schema.AgenticMessage{
+			Role: schema.AgenticRoleTypeAssistant,
+			ContentBlocks: []*schema.ContentBlock{
+				nil,
+				schema.NewContentBlock(&schema.AssistantGenText{Text: "only"}),
+				nil,
+			},
+		}
+		got := getAssistantTextContent(msg)
+		assert.Equal(t, "only", got)
+	})
+
+	t.Run("schema.AgenticMessage with no text blocks", func(t *testing.T) {
+		msg := &schema.AgenticMessage{
+			Role:          schema.AgenticRoleTypeAssistant,
+			ContentBlocks: []*schema.ContentBlock{},
+		}
+		got := getAssistantTextContent(msg)
+		assert.Equal(t, "", got)
+	})
 }

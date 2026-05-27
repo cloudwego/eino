@@ -44,14 +44,12 @@ type TypedGenModelInputFunc[M adk.MessageType] func(ctx context.Context, sysInst
 type TypedGetFailoverModelFunc[M adk.MessageType] func(ctx context.Context, failoverCtx *TypedFailoverContext[M]) (failoverModel model.BaseModel[M], failoverModelInputMsgs []M, failoverErr error)
 type TypedFinalizeFunc[M adk.MessageType] func(ctx context.Context, originalMessages []M, summary M) ([]M, error)
 type TypedCallbackFunc[M adk.MessageType] func(ctx context.Context, before, after adk.TypedChatModelAgentState[M]) error
-type TypedUserMessageFilterFunc[M adk.MessageType] func(ctx context.Context, msg M) (bool, error)
 
 type TokenCounterFunc = TypedTokenCounterFunc[*schema.Message]
 type GenModelInputFunc = TypedGenModelInputFunc[*schema.Message]
 type GetFailoverModelFunc = TypedGetFailoverModelFunc[*schema.Message]
 type FinalizeFunc = TypedFinalizeFunc[*schema.Message]
 type CallbackFunc = TypedCallbackFunc[*schema.Message]
-type UserMessageFilterFunc = TypedUserMessageFilterFunc[*schema.Message]
 
 // TypedConfig defines the configuration for the summarization middleware,
 // generic over message type M.
@@ -120,9 +118,8 @@ type TypedConfig[M adk.MessageType] struct {
 
 	// Finalize is called after summary generation.
 	// The returned messages are used as the final conversation history.
-	// When set, the middleware does not perform any post-processing on the summary
-	// (e.g. PreserveUserMessages will not be applied).
-	// Use DefaultFinalizer to apply the same post-processing as the default path.
+	// When set, the middleware does not perform any post-processing on the summary.
+	// Use DefaultFinalize to apply the same post-processing as the default path.
 	//
 	// Parameters:
 	//   - originalMessages: the original conversation messages before summarization.
@@ -143,14 +140,6 @@ type TypedConfig[M adk.MessageType] struct {
 	//
 	// Optional.
 	Callback TypedCallbackFunc[M]
-
-	// PreserveUserMessages controls whether to preserve original user messages in the summary.
-	// When enabled, replaces the <all_user_messages>...</all_user_messages> section in the
-	// model-generated summary with recent original user messages from the conversation.
-	// When disabled, the model-generated content is kept unchanged.
-	// This field takes effect only when Finalize is not set.
-	// Optional. Enabled by default.
-	PreserveUserMessages *TypedPreserveUserMessages[M]
 
 	// Retry configures retry behavior for summary generation on the primary model.
 	// Optional. Defaults to no retries.
@@ -183,24 +172,6 @@ type TriggerCondition struct {
 	// ContextMessages triggers summarization when total messages count exceeds this threshold.
 	ContextMessages int
 }
-
-// TypedPreserveUserMessages controls whether to preserve original user messages in the summary.
-type TypedPreserveUserMessages[M adk.MessageType] struct {
-	Enabled bool
-
-	// MaxTokens limits the maximum token count for preserved user messages.
-	// When set, only the most recent user messages within this limit are preserved.
-	// Optional. Defaults to 1/3 of TriggerCondition.ContextTokens if not specified.
-	MaxTokens int
-
-	// Filter determines whether a specific user message should be preserved.
-	// It is called for each user message. If it returns false, the message will not be preserved.
-	// Optional.
-	Filter TypedUserMessageFilterFunc[M]
-}
-
-// PreserveUserMessages is a backward-compatible alias for TypedPreserveUserMessages specialized with *schema.Message.
-type PreserveUserMessages = TypedPreserveUserMessages[*schema.Message]
 
 type TypedRetryConfig[M adk.MessageType] struct {
 	// MaxRetries specifies the maximum number of retry attempts.
@@ -329,7 +300,11 @@ func (m *TypedMiddleware[M]) Summarize(ctx context.Context, state *adk.TypedChat
 
 	finalizeCtx := context.WithValue(ctx, ctxKeyModelInput{}, modelInput)
 
-	_, finalMsgs, err := m.finalizeSummary(finalizeCtx, beforeState.Messages, rawSummary)
+	finalizer := m.cfg.Finalize
+	if finalizer == nil {
+		finalizer = buildInternalFinalizer(m.cfg)
+	}
+	finalMsgs, err := finalizer(finalizeCtx, beforeState.Messages, rawSummary)
 	if err != nil {
 		return nil, err
 	}
@@ -382,52 +357,6 @@ func (m *TypedMiddleware[M]) BeforeModelRewriteState(ctx context.Context, state 
 	return ctx, &afterState, nil
 }
 
-func (m *TypedMiddleware[M]) finalizeSummary(ctx context.Context, originalMsgs []M, rawSummary M) (context.Context, []M, error) {
-	var summaryContent string
-	switch r := any(rawSummary).(type) {
-	case *schema.Message:
-		var parts []string
-		for _, part := range r.AssistantGenMultiContent {
-			if part.Type == schema.ChatMessagePartTypeText && part.Text != "" {
-				parts = append(parts, part.Text)
-			}
-		}
-		if len(parts) > 0 {
-			summaryContent = strings.Join(parts, "\n")
-		} else {
-			summaryContent = r.Content
-		}
-	case *schema.AgenticMessage:
-		var parts []string
-		for _, block := range r.ContentBlocks {
-			if block != nil && block.AssistantGenText != nil {
-				parts = append(parts, block.AssistantGenText.Text)
-			}
-		}
-		summaryContent = strings.Join(parts, "\n")
-	}
-
-	systemMsgs, contextMsgs := m.splitSystemAndContextMsgs(originalMsgs)
-
-	var finalMsgs []M
-	var err error
-	if m.cfg.Finalize != nil {
-		finalMsgs, err = m.cfg.Finalize(ctx, originalMsgs, rawSummary)
-		if err != nil {
-			return nil, nil, err
-		}
-	} else {
-		summary := newTypedSummaryMessage[M](summaryContent)
-		processed, pErr := m.postProcessSummary(ctx, contextMsgs, summary)
-		if pErr != nil {
-			return nil, nil, pErr
-		}
-		finalMsgs = append(systemMsgs, processed)
-	}
-
-	return ctx, finalMsgs, nil
-}
-
 func (m *TypedMiddleware[M]) shouldSummarize(ctx context.Context, input *TypedTokenCounterInput[M]) (bool, error) {
 	if m.cfg.Trigger != nil && m.cfg.Trigger.ContextMessages > 0 {
 		if len(input.Messages) > m.cfg.Trigger.ContextMessages {
@@ -447,13 +376,6 @@ func (m *TypedMiddleware[M]) getTriggerContextTokens() int {
 		return m.cfg.Trigger.ContextTokens
 	}
 	return defaultTriggerContextTokens
-}
-
-func (m *TypedMiddleware[M]) getUserMessageContextTokens() int {
-	if m.cfg.PreserveUserMessages != nil && m.cfg.PreserveUserMessages.MaxTokens > 0 {
-		return m.cfg.PreserveUserMessages.MaxTokens
-	}
-	return m.getTriggerContextTokens() / 3
 }
 
 func (m *TypedMiddleware[M]) emitEvent(ctx context.Context, action *TypedCustomizedAction[M]) error {
@@ -533,21 +455,20 @@ func defaultTypedTokenCounter[M adk.MessageType](_ context.Context, input *Typed
 }
 
 func getAssistantTotalTokens[M adk.MessageType](msg M) int {
+	if msg == nil {
+		return 0
+	}
 	switch m := any(msg).(type) {
 	case *schema.Message:
-		if m == nil {
+		if m.Role != schema.Assistant || m.ResponseMeta == nil || m.ResponseMeta.Usage == nil {
 			return 0
 		}
-		if m.Role == schema.Assistant && m.ResponseMeta != nil && m.ResponseMeta.Usage != nil {
-			return m.ResponseMeta.Usage.TotalTokens
-		}
+		return m.ResponseMeta.Usage.TotalTokens
 	case *schema.AgenticMessage:
-		if m == nil {
+		if m.Role != schema.AgenticRoleTypeAssistant || m.ResponseMeta == nil || m.ResponseMeta.TokenUsage == nil {
 			return 0
 		}
-		if m.Role == schema.AgenticRoleTypeAssistant && m.ResponseMeta != nil && m.ResponseMeta.TokenUsage != nil {
-			return m.ResponseMeta.TokenUsage.TotalTokens
-		}
+		return m.ResponseMeta.TokenUsage.TotalTokens
 	}
 	return 0
 }
@@ -562,7 +483,7 @@ func estimateTokenBytes(tokens int) int {
 
 func (m *TypedMiddleware[M]) summarize(ctx context.Context, originalMsgs []M) (M, []M, error) {
 	var zero M
-	_, contextMsgs := m.splitSystemAndContextMsgs(originalMsgs)
+	_, contextMsgs := splitSystemAndContextMsgs(originalMsgs)
 
 	modelInput, err := m.buildSummarizationModelInput(ctx, originalMsgs, contextMsgs)
 	if err != nil {
@@ -582,7 +503,7 @@ func (m *TypedMiddleware[M]) summarize(ctx context.Context, originalMsgs []M) (M
 	return rawSummary, modelInput, nil
 }
 
-func (m *TypedMiddleware[M]) splitSystemAndContextMsgs(msgs []M) ([]M, []M) {
+func splitSystemAndContextMsgs[M adk.MessageType](msgs []M) ([]M, []M) {
 	var systemMsgs []M
 	for _, msg := range msgs {
 		if isSystemRole(msg) {
@@ -710,79 +631,101 @@ func (m *TypedMiddleware[M]) getModelInstructions() (M, M) {
 	return makeSystemMsg[M](getSystemInstruction()), makeUserMsg[M](userInstruction)
 }
 
-func (m *TypedMiddleware[M]) postProcessSummary(ctx context.Context, contextMsgs []M, summary M) (M, error) {
-	content := getUserMsgTextContent(summary)
+func buildInternalFinalizer[M adk.MessageType](cfg *TypedConfig[M]) TypedFinalizeFunc[M] {
+	return func(ctx context.Context, originalMessages []M, rawSummary M) ([]M, error) {
+		systemMsgs, contextMsgs := splitSystemAndContextMsgs(originalMessages)
 
-	if m.cfg.PreserveUserMessages == nil || m.cfg.PreserveUserMessages.Enabled {
-		maxUserMsgTokens := m.getUserMessageContextTokens()
-
-		var filter TypedUserMessageFilterFunc[M]
-		if m.cfg.PreserveUserMessages != nil {
-			filter = m.cfg.PreserveUserMessages.Filter
+		processed, err := postProcessSummary(ctx, &postProcessSummaryParams[M]{
+			contextMsgs:    contextMsgs,
+			summaryContent: getAssistantTextContent(rawSummary),
+			transcriptPath: cfg.TranscriptFilePath,
+		})
+		if err != nil {
+			return nil, err
 		}
 
+		return append(systemMsgs, processed), nil
+	}
+}
+
+func getAssistantTextContent[M adk.MessageType](msg M) string {
+	switch r := any(msg).(type) {
+	case *schema.Message:
+		var parts []string
+		for _, part := range r.AssistantGenMultiContent {
+			if part.Type == schema.ChatMessagePartTypeText && part.Text != "" {
+				parts = append(parts, part.Text)
+			}
+		}
+		if len(parts) > 0 {
+			return strings.Join(parts, "\n")
+		}
+		return r.Content
+	case *schema.AgenticMessage:
+		var parts []string
+		for _, block := range r.ContentBlocks {
+			if block != nil && block.AssistantGenText != nil {
+				parts = append(parts, block.AssistantGenText.Text)
+			}
+		}
+		return strings.Join(parts, "\n")
+	default:
+		return ""
+	}
+}
+
+type postProcessSummaryParams[M adk.MessageType] struct {
+	contextMsgs    []M
+	summaryContent string
+	transcriptPath string
+}
+
+func postProcessSummary[M adk.MessageType](ctx context.Context, p *postProcessSummaryParams[M]) (M, error) {
+	content := p.summaryContent
+
+	if len(p.contextMsgs) > 0 {
 		newContent, err := replaceUserMessagesInSummary(ctx, &replaceUserMessagesInSummaryParams[M]{
-			contextMsgs:  contextMsgs,
-			summaryText:  content,
-			maxTokens:    maxUserMsgTokens,
-			filter:       filter,
-			tokenCounter: m.cfg.TokenCounter,
+			contextMsgs: p.contextMsgs,
+			summaryText: content,
 		})
 		if err != nil {
 			var zero M
 			return zero, fmt.Errorf("failed to populate user messages in summary: %w", err)
 		}
-
 		content = newContent
 	}
 
-	if path := m.cfg.TranscriptFilePath; path != "" {
-		content = appendSection(content, fmt.Sprintf(getTranscriptPathInstruction(), path))
+	if p.transcriptPath != "" {
+		content = appendSection(content, fmt.Sprintf(getTranscriptPathInstruction(), p.transcriptPath))
 	}
 
 	content = appendSection(getSummaryPreamble(), content)
+	content = appendSection(content, getContinueInstruction())
 
-	newSummary := overwriteMsgContent(summary, content, getContinueInstruction())
+	newSummary := newTypedSummaryMessage[M](content)
 
 	return newSummary, nil
 }
 
 type replaceUserMessagesInSummaryParams[M adk.MessageType] struct {
-	contextMsgs  []M
-	summaryText  string
-	maxTokens    int
-	filter       TypedUserMessageFilterFunc[M]
-	tokenCounter TypedTokenCounterFunc[M]
+	contextMsgs []M
+	summaryText string
 }
 
 func replaceUserMessagesInSummary[M adk.MessageType](ctx context.Context, p *replaceUserMessagesInSummaryParams[M]) (string, error) {
-	countTokens := p.tokenCounter
-	if countTokens == nil {
-		countTokens = defaultTypedTokenCounter[M]
-	}
-
 	var userMsgs []M
-	var hasUserMsgsBeforeFilter bool
+	var hasUserMsgs bool
 	for _, msg := range p.contextMsgs {
 		if typedGetContentType(msg) == contentTypeSummary {
 			continue
 		}
 		if isUserRole(msg) {
-			hasUserMsgsBeforeFilter = true
-			if p.filter != nil {
-				keep, err := p.filter(ctx, msg)
-				if err != nil {
-					return "", fmt.Errorf("failed to filter user message: %w", err)
-				}
-				if !keep {
-					continue
-				}
-			}
+			hasUserMsgs = true
 			userMsgs = append(userMsgs, msg)
 		}
 	}
 
-	if !hasUserMsgsBeforeFilter {
+	if !hasUserMsgs {
 		return p.summaryText, nil
 	}
 
@@ -794,14 +737,14 @@ func replaceUserMessagesInSummary[M adk.MessageType](ctx context.Context, p *rep
 		for i := len(userMsgs) - 1; i >= 0; i-- {
 			msg := userMsgs[i]
 
-			tokens, err := countTokens(ctx, &TypedTokenCounterInput[M]{
+			tokens, err := defaultTypedTokenCounter(ctx, &TypedTokenCounterInput[M]{
 				Messages: []M{msg},
 			})
 			if err != nil {
 				return "", fmt.Errorf("failed to count tokens: %w", err)
 			}
 
-			remaining := p.maxTokens - totalTokens
+			remaining := preserveUserMsgsMaxTokens - totalTokens
 			if tokens <= remaining {
 				totalTokens += tokens
 				selected = append(selected, msg)
@@ -1323,35 +1266,4 @@ func defaultTypedTrimUserMessage[M adk.MessageType](msg M, remainingTokens int) 
 	}
 
 	return makeUserMsg[M](trimmed)
-}
-
-func overwriteMsgContent[M adk.MessageType](msg M, summaryContent, continueInstruction string) M {
-	switch m := any(msg).(type) {
-	case *schema.Message:
-		copied := *m
-		copied.Role = schema.User
-		copied.Content = ""
-		copied.AssistantGenMultiContent = nil
-		copied.UserInputMultiContent = []schema.MessageInputPart{
-			{
-				Type: schema.ChatMessagePartTypeText,
-				Text: summaryContent,
-			},
-			{
-				Type: schema.ChatMessagePartTypeText,
-				Text: continueInstruction,
-			},
-		}
-		return any(&copied).(M)
-	case *schema.AgenticMessage:
-		copied := *m
-		copied.Role = schema.AgenticRoleTypeUser
-		copied.ContentBlocks = []*schema.ContentBlock{
-			schema.NewContentBlock(&schema.UserInputText{Text: summaryContent}),
-			schema.NewContentBlock(&schema.UserInputText{Text: continueInstruction}),
-		}
-		return any(&copied).(M)
-	default:
-		panic("unreachable")
-	}
 }

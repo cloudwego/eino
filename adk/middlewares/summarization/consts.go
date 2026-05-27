@@ -25,7 +25,8 @@ const (
 )
 
 const (
-	extraKeyContentType = "_eino_summarization_content_type"
+	extraKeyContentType       = "_eino_summarization_content_type"
+	preserveUserMsgsMaxTokens = 30000
 )
 
 type summarizationContentType string
