@@ -134,6 +134,44 @@ func TestFileStoreDuplicateEventIDWithinBatchFirstWriteWins(t *testing.T) {
 	require.Equal(t, []adk.SessionEventPayload{first}, res.Events)
 }
 
+func TestFileStoreExtensionEventCompactPayloadAndFilter(t *testing.T) {
+	ctx := context.Background()
+	store, err := session.NewFileStore(t.TempDir())
+	require.NoError(t, err)
+
+	extensionKind := adk.SessionEventKind("x.outcome.grading")
+	se := &adk.SessionEvent[*schema.Message]{
+		EventID: "extension-1",
+		Kind:    extensionKind,
+		Extension: &adk.SessionExtensionEvent{
+			Data: []byte("{\n  \"outcome_name\": \"code_review\",\n  \"attempt\": 1\n}"),
+		},
+	}
+	require.NoError(t, adk.NormalizeSessionEventKind(se))
+	require.Equal(t, []byte(`{"outcome_name":"code_review","attempt":1}`), []byte(se.Extension.Data))
+
+	data, err := (&schema.HumanReadableSerializer{}).Marshal(se)
+	require.NoError(t, err)
+	require.NotContains(t, string(data), "\n")
+	payload := adk.SessionEventPayload{EventID: se.EventID, Kind: se.Kind, Data: data}
+	require.NoError(t, store.AppendEvents(ctx, "s", []adk.SessionEventPayload{
+		{EventID: "message-1", Kind: adk.SessionEventMessage, Data: []byte(`{"message":1}`)},
+		payload,
+	}))
+
+	res, err := store.LoadEvents(ctx, "s", &adk.LoadEventsRequest{
+		Kinds: []adk.SessionEventKind{extensionKind},
+	})
+	require.NoError(t, err)
+	require.Equal(t, []adk.SessionEventPayload{payload}, res.Events)
+
+	var decoded adk.SessionEvent[*schema.Message]
+	require.NoError(t, (&schema.HumanReadableSerializer{}).Unmarshal(res.Events[0].Data, &decoded))
+	require.NoError(t, adk.NormalizeSessionEventKind(&decoded))
+	require.NotNil(t, decoded.Extension)
+	assert.Equal(t, []byte(`{"outcome_name":"code_review","attempt":1}`), []byte(decoded.Extension.Data))
+}
+
 type fileStoreRunnerAgent struct {
 	name   string
 	inputs [][]*schema.Message
@@ -190,10 +228,10 @@ func TestAttack_FileStoreSupportsRunnerDefaultSessionEncoding(t *testing.T) {
 
 	firstAgent := &fileStoreRunnerAgent{name: "first"}
 	first := adk.NewRunner(ctx, adk.RunnerConfig{
-		Agent:              firstAgent,
-		SessionID:          "runner-jsonl",
-		SessionStore:       store,
-		Session: &adk.SessionConfig{EventFlushBatchSize: 1},
+		Agent:        firstAgent,
+		SessionID:    "runner-jsonl",
+		SessionStore: store,
+		Session:      &adk.SessionConfig{EventFlushBatchSize: 1},
 	})
 	drainFileStoreRunnerEvents(t, first.Query(ctx, "hello"))
 
@@ -201,10 +239,10 @@ func TestAttack_FileStoreSupportsRunnerDefaultSessionEncoding(t *testing.T) {
 	require.NoError(t, err)
 	secondAgent := &fileStoreRunnerAgent{name: "second"}
 	second := adk.NewRunner(ctx, adk.RunnerConfig{
-		Agent:              secondAgent,
-		SessionID:          "runner-jsonl",
-		SessionStore:       reopened,
-		Session: &adk.SessionConfig{EventFlushBatchSize: 1},
+		Agent:        secondAgent,
+		SessionID:    "runner-jsonl",
+		SessionStore: reopened,
+		Session:      &adk.SessionConfig{EventFlushBatchSize: 1},
 	})
 	drainFileStoreRunnerEvents(t, second.Query(ctx, "again"))
 
