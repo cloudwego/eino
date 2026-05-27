@@ -404,6 +404,10 @@ func DeleteRunLocalValue(ctx context.Context, key string) error {
 // TypedSendEvent sends a custom TypedAgentEvent to the event stream during agent execution.
 // This allows TypedChatModelAgentMiddleware implementations to emit custom events that will be
 // received by the caller iterating over the agent's event stream.
+// To emit custom session timeline events during a Runner run, wrap a SessionEvent
+// with Extension set and an x.* Kind in TypedAgentEvent.SessionEvent. This is the
+// canonical in-run path because Runner materializes identity, emits the live
+// event, and persists it through the ordered session event pipeline.
 //
 // Note: TypedSendEvent is a pure transport — it does NOT auto-assign message IDs.
 // Framework-created messages (model output, tool results) receive IDs automatically
@@ -425,6 +429,8 @@ func TypedSendEvent[M MessageType](ctx context.Context, event *TypedAgentEvent[M
 // SendEvent sends a custom AgentEvent to the event stream during agent execution.
 // This allows ChatModelAgentMiddleware implementations to emit custom events that will be
 // received by the caller iterating over the agent's event stream.
+// For custom session timeline events during a Runner run, set AgentEvent.SessionEvent
+// to an extension SessionEvent with an x.* Kind and send it through this function.
 //
 // This function can only be called from within a ChatModelAgentMiddleware during agent execution.
 // Returns an error if called outside of an agent execution context.

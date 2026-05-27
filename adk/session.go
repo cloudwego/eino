@@ -20,9 +20,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/gob"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math/rand"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -241,8 +243,9 @@ type SessionEvent[M MessageType] struct {
 	Error     *SessionErrorEvent `json:"error,omitempty"`
 	Span      *SpanEvent         `json:"span,omitempty"`
 
-	UserObservation *UserObservationEvent `json:"user_observation,omitempty"`
-	AgentInterrupt  *AgentInterruptEvent  `json:"agent_interrupt,omitempty"`
+	UserObservation *UserObservationEvent  `json:"user_observation,omitempty"`
+	AgentInterrupt  *AgentInterruptEvent   `json:"agent_interrupt,omitempty"`
+	Extension       *SessionExtensionEvent `json:"extension,omitempty"`
 }
 
 type SessionEventKind string
@@ -266,6 +269,8 @@ const (
 
 	SessionEventUserInterrupt  SessionEventKind = "user.interrupt"
 	SessionEventAgentInterrupt SessionEventKind = "agent.interrupt"
+
+	SessionEventExtensionPrefix = "x."
 )
 
 type LifecycleEvent struct {
@@ -439,6 +444,14 @@ type AgentInterruptContext struct {
 	ToolUseID string `json:"tool_use_id,omitempty"`
 }
 
+// SessionExtensionEvent carries application-owned timeline event payloads.
+// The SessionEvent.Kind field is the application event type and must use the
+// SessionEventExtensionPrefix namespace. Data is raw JSON and is not
+// schema-decoded by ADK.
+type SessionExtensionEvent struct {
+	Data json.RawMessage `json:"data,omitempty"`
+}
+
 // MessageUpdatedEvent represents a single message replacement within the messages array.
 type MessageUpdatedEvent[M MessageType] struct {
 	// MessageID identifies the target message via its eino-internal message ID
@@ -552,6 +565,7 @@ func init() {
 	schema.RegisterName[*UserInterruptEvent]("_eino_adk_user_interrupt_event")
 	schema.RegisterName[*AgentInterruptEvent]("_eino_adk_agent_interrupt_event")
 	schema.RegisterName[*AgentInterruptContext]("_eino_adk_agent_interrupt_context")
+	schema.RegisterName[*SessionExtensionEvent]("_eino_adk_session_extension_event")
 }
 
 func encodeGob(v any) ([]byte, error) {
@@ -788,6 +802,15 @@ func ClassifySessionEvent[M MessageType](event *SessionEvent[M]) (SessionEventKi
 	if event.AgentInterrupt != nil {
 		add(SessionEventAgentInterrupt)
 	}
+	if event.Extension != nil {
+		if event.Kind == "" {
+			return "", errors.New("session extension event must set kind")
+		}
+		if !strings.HasPrefix(string(event.Kind), SessionEventExtensionPrefix) {
+			return "", fmt.Errorf("session extension event kind %q must start with %q", event.Kind, SessionEventExtensionPrefix)
+		}
+		add(event.Kind)
+	}
 	if len(kinds) != 1 {
 		return "", fmt.Errorf("session event must have exactly one active payload, got %d", len(kinds))
 	}
@@ -805,6 +828,28 @@ func NormalizeSessionEventKind[M MessageType](event *SessionEvent[M]) error {
 		return fmt.Errorf("session event kind %q does not match payload %q", event.Kind, kind)
 	}
 	event.Kind = kind
+	if err := normalizeSessionExtensionEvent(event.Extension); err != nil {
+		return err
+	}
+	return nil
+}
+
+func normalizeSessionExtensionEvent(event *SessionExtensionEvent) error {
+	if event == nil {
+		return nil
+	}
+	if len(event.Data) == 0 {
+		event.Data = nil
+		return nil
+	}
+	if !json.Valid(event.Data) {
+		return errors.New("session extension event data must be valid JSON")
+	}
+	var compact bytes.Buffer
+	if err := json.Compact(&compact, event.Data); err != nil {
+		return err
+	}
+	event.Data = append(event.Data[:0], compact.Bytes()...)
 	return nil
 }
 
