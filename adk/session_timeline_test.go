@@ -407,6 +407,7 @@ func TestWithTimelineEvents_LiveExposure(t *testing.T) {
 		store := newSessionHelperStore()
 		runner := NewRunner(ctx, RunnerConfig{Agent: agent, SessionID: "timeline-visible", SessionStore: store, Session: &SessionConfig{EventFlushBatchSize: 1}})
 		var kinds []SessionEventKind
+		var liveUserInput bool
 		iter := runner.Query(ctx, "hello", WithTimelineEvents())
 		for {
 			event, ok := iter.Next()
@@ -417,10 +418,21 @@ func TestWithTimelineEvents_LiveExposure(t *testing.T) {
 			if event.SessionEvent != nil {
 				assert.Equal(t, event.EventID, event.SessionEvent.EventID)
 				kinds = append(kinds, event.SessionEvent.Kind)
+				if event.SessionEvent.Kind == SessionEventMessage && event.SessionEvent.Message != nil &&
+					event.SessionEvent.Message.Role == schema.User && event.SessionEvent.Message.Content == "hello" {
+					liveUserInput = true
+				}
 			}
 		}
 		assert.Contains(t, kinds, SessionEventSessionStatusRunning)
+		assert.True(t, liveUserInput, "caller input should be emitted on the live timeline")
 		assert.Contains(t, kinds, SessionEventSessionStatusIdle)
+
+		storedUserInput := filterStoredSessionEvents(t, store.events, func(se *SessionEvent[*schema.Message]) bool {
+			return se.Kind == SessionEventMessage && se.Message != nil &&
+				se.Message.Role == schema.User && se.Message.Content == "hello"
+		})
+		require.Len(t, storedUserInput, 1)
 	})
 }
 

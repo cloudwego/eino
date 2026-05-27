@@ -680,8 +680,8 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 	}
 
 	// Emit caller-provided input messages as session events at turn start, so the
-	// event log carries the user's input alongside the agent's output. Skipped on
-	// resume (sessionState.inputMessages is nil).
+	// live timeline and persisted log carry the user's input alongside the
+	// agent's output. Skipped on resume (sessionState.inputMessages is nil).
 	if persister != nil {
 		sendTimelineEvent(&SessionEvent[M]{
 			EventID:   uuid.NewString(),
@@ -693,7 +693,7 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 	if persister != nil && len(sessionState.inputMessages) > 0 {
 		for _, msg := range sessionState.inputMessages {
 			se := makeInputSessionEvent[M](msg)
-			enqueueSessionEvent(se)
+			sendTimelineEvent(se)
 		}
 	}
 	for {
