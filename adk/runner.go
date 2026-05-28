@@ -78,9 +78,9 @@ type TypedRunnerConfig[M MessageType] struct {
 
 	CheckPointStore CheckPointStore
 
-	SessionID    string
-	SessionStore SessionStore
-	Session      *SessionConfig
+	SessionID     string
+	SessionStore  SessionStore
+	SessionConfig *SessionConfig
 }
 
 // RunnerConfig is the default runner config type using *schema.Message.
@@ -109,7 +109,7 @@ func NewTypedRunner[M MessageType](conf TypedRunnerConfig[M]) *TypedRunner[M] {
 		store:           conf.CheckPointStore,
 		sessionID:       conf.SessionID,
 		sessionStore:    conf.SessionStore,
-		sessionPersist:  conf.Session,
+		sessionPersist:  conf.SessionConfig,
 	}
 }
 
