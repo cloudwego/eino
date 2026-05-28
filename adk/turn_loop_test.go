@@ -1915,6 +1915,366 @@ func TestTurnLoop_ManagedInterrupt_WaitsForExplicitResume(t *testing.T) {
 	assert.Equal(t, []string{"resume-response"}, gotResumeItems)
 }
 
+func TestTurnLoop_ManagedInterrupt_ImmediateResumeAfterInterruptAccepted(t *testing.T) {
+	ctx := context.Background()
+	interruptObserved := make(chan struct{})
+	releaseCallback := make(chan struct{})
+	var interruptOnce sync.Once
+
+	var prepareCount int32
+
+	loop := newAndRunTurnLoop(ctx, TurnLoopConfig[string, *schema.Message]{
+		InterruptMode: TurnLoopInterruptWaitsForExplicitResume,
+		GenInput:      genInputConsumeAllWithMsg,
+		GenResume: func(_ context.Context, _ *TurnLoop[string, *schema.Message], interruptedItems, _, resumeItems []string) (*GenResumeResult[string, *schema.Message], error) {
+			return &GenResumeResult[string, *schema.Message]{
+				Decision: TurnLoopResumeDecisionStartNewTurn,
+				Input:    &AgentInput{Messages: []Message{schema.UserMessage("fresh")}},
+				Consumed: append(append([]string{}, interruptedItems...), resumeItems...),
+			}, nil
+		},
+		PrepareAgent: func(_ context.Context, _ *TurnLoop[string, *schema.Message], _ []string) (Agent, error) {
+			if atomic.AddInt32(&prepareCount, 1) == 1 {
+				return &turnLoopInterruptAgent{interruptInfo: "approval_needed"}, nil
+			}
+			return &turnLoopMockAgent{name: "fresh", events: []*AgentEvent{{Output: &AgentOutput{}}}}, nil
+		},
+		OnAgentEvents: func(_ context.Context, tc *TurnContext[string, *schema.Message], events *AsyncIterator[*AgentEvent]) error {
+			for {
+				event, ok := events.Next()
+				if !ok {
+					break
+				}
+				if event.Action != nil && event.Action.Interrupted != nil {
+					interruptOnce.Do(func() {
+						close(interruptObserved)
+						<-releaseCallback
+					})
+				}
+			}
+			if atomic.LoadInt32(&prepareCount) > 1 {
+				tc.Loop.Stop()
+			}
+			return nil
+		},
+	})
+
+	loop.Push("msg1")
+	waitOrFail(t, interruptObserved, "interrupt was not observed")
+	require.NoError(t, loop.Resume("approval"))
+	close(releaseCallback)
+
+	exit := loop.Wait()
+	require.NoError(t, exit.ExitReason)
+}
+
+func TestTurnLoop_ManagedInterrupt_EarlyResumeSurvivesPhase2(t *testing.T) {
+	ctx := context.Background()
+	interruptObserved := make(chan struct{})
+	releaseCallback := make(chan struct{})
+	genResumeCalled := make(chan struct{})
+	var interruptOnce sync.Once
+	var genResumeOnce sync.Once
+
+	var prepareCount int32
+	var gotResumeItems []string
+
+	loop := newAndRunTurnLoop(ctx, TurnLoopConfig[string, *schema.Message]{
+		InterruptMode: TurnLoopInterruptWaitsForExplicitResume,
+		GenInput:      genInputConsumeAllWithMsg,
+		GenResume: func(_ context.Context, _ *TurnLoop[string, *schema.Message], interruptedItems, _, resumeItems []string) (*GenResumeResult[string, *schema.Message], error) {
+			gotResumeItems = append([]string{}, resumeItems...)
+			genResumeOnce.Do(func() { close(genResumeCalled) })
+			return &GenResumeResult[string, *schema.Message]{
+				Decision: TurnLoopResumeDecisionStartNewTurn,
+				Input:    &AgentInput{Messages: []Message{schema.UserMessage("fresh")}},
+				Consumed: append(append([]string{}, interruptedItems...), resumeItems...),
+			}, nil
+		},
+		PrepareAgent: func(_ context.Context, _ *TurnLoop[string, *schema.Message], _ []string) (Agent, error) {
+			if atomic.AddInt32(&prepareCount, 1) == 1 {
+				return &turnLoopInterruptAgent{interruptInfo: "approval_needed"}, nil
+			}
+			return &turnLoopMockAgent{name: "fresh", events: []*AgentEvent{{Output: &AgentOutput{}}}}, nil
+		},
+		OnAgentEvents: func(_ context.Context, tc *TurnContext[string, *schema.Message], events *AsyncIterator[*AgentEvent]) error {
+			for {
+				event, ok := events.Next()
+				if !ok {
+					break
+				}
+				if event.Action != nil && event.Action.Interrupted != nil {
+					interruptOnce.Do(func() {
+						close(interruptObserved)
+						<-releaseCallback
+					})
+				}
+			}
+			if atomic.LoadInt32(&prepareCount) > 1 {
+				tc.Loop.Stop()
+			}
+			return nil
+		},
+	})
+
+	loop.Push("msg1")
+	waitOrFail(t, interruptObserved, "interrupt was not observed")
+	require.NoError(t, loop.Resume("approval"))
+	close(releaseCallback)
+	waitOrFail(t, genResumeCalled, "GenResume was not called")
+
+	exit := loop.Wait()
+	require.NoError(t, exit.ExitReason)
+	assert.Equal(t, []string{"approval"}, gotResumeItems)
+}
+
+func TestTurnLoop_ManagedInterrupt_CallbackErrorClearsPhase1PendingResume(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore()
+	cpID := "managed-callback-error"
+	interruptObserved := make(chan struct{})
+	callbackErr := errors.New("callback failed after interrupt")
+	var interruptOnce sync.Once
+
+	loop := newAndRunTurnLoop(ctx, TurnLoopConfig[string, *schema.Message]{
+		InterruptMode: TurnLoopInterruptWaitsForExplicitResume,
+		Store:         store,
+		CheckpointID:  cpID,
+		GenInput:      genInputConsumeAllWithMsg,
+		PrepareAgent:  prepareAgent(&turnLoopInterruptAgent{interruptInfo: "approval_needed"}),
+		OnAgentEvents: func(_ context.Context, _ *TurnContext[string, *schema.Message], events *AsyncIterator[*AgentEvent]) error {
+			for {
+				event, ok := events.Next()
+				if !ok {
+					break
+				}
+				if event.Action != nil && event.Action.Interrupted != nil {
+					interruptOnce.Do(func() { close(interruptObserved) })
+					return callbackErr
+				}
+			}
+			return nil
+		},
+	})
+
+	loop.Push("msg1")
+	waitOrFail(t, interruptObserved, "interrupt was not observed")
+	exit := loop.Wait()
+	require.ErrorIs(t, exit.ExitReason, callbackErr)
+
+	loop.resumeMu.Lock()
+	pending := loop.pendingResume
+	loop.resumeMu.Unlock()
+	require.Nil(t, pending, "Phase-1-only pendingResume must be cleared when Phase 2 cannot run")
+
+	store.mu.Lock()
+	data, ok := store.m[cpID]
+	store.mu.Unlock()
+	if ok {
+		cp, err := unmarshalTurnLoopCheckpoint[string](data)
+		require.NoError(t, err)
+		assert.Empty(t, cp.ResumeItems)
+		assert.Equal(t, []string{"msg1"}, cp.CanceledItems)
+		if !cp.HasRunnerState {
+			assert.Empty(t, cp.RunnerCheckpoint)
+		}
+	}
+}
+
+func TestTurnLoop_ManagedInterrupt_PreemptAfterPhase1BeforePhase2(t *testing.T) {
+	ctx := context.Background()
+	interruptObserved := make(chan struct{})
+	releaseCallback := make(chan struct{})
+	genResumeCalled := make(chan struct{})
+	var interruptOnce sync.Once
+	var genResumeOnce sync.Once
+
+	var prepareCount int32
+	var gotUnhandled []string
+	var gotResumeItems []string
+
+	loop := newAndRunTurnLoop(ctx, TurnLoopConfig[string, *schema.Message]{
+		InterruptMode: TurnLoopInterruptWaitsForExplicitResume,
+		GenInput:      genInputConsumeAllWithMsg,
+		GenResume: func(_ context.Context, _ *TurnLoop[string, *schema.Message], interruptedItems, unhandledItems, resumeItems []string) (*GenResumeResult[string, *schema.Message], error) {
+			gotUnhandled = append([]string{}, unhandledItems...)
+			gotResumeItems = append([]string{}, resumeItems...)
+			genResumeOnce.Do(func() { close(genResumeCalled) })
+			return &GenResumeResult[string, *schema.Message]{
+				Decision: TurnLoopResumeDecisionStartNewTurn,
+				Input:    &AgentInput{Messages: []Message{schema.UserMessage("fresh")}},
+				Consumed: append(append([]string{}, interruptedItems...), resumeItems...),
+			}, nil
+		},
+		PrepareAgent: func(_ context.Context, _ *TurnLoop[string, *schema.Message], _ []string) (Agent, error) {
+			if atomic.AddInt32(&prepareCount, 1) == 1 {
+				return &turnLoopInterruptAgent{interruptInfo: "approval_needed"}, nil
+			}
+			return &turnLoopMockAgent{name: "fresh", events: []*AgentEvent{{Output: &AgentOutput{}}}}, nil
+		},
+		OnAgentEvents: func(_ context.Context, tc *TurnContext[string, *schema.Message], events *AsyncIterator[*AgentEvent]) error {
+			for {
+				event, ok := events.Next()
+				if !ok {
+					break
+				}
+				if event.Action != nil && event.Action.Interrupted != nil {
+					interruptOnce.Do(func() {
+						close(interruptObserved)
+						<-releaseCallback
+					})
+				}
+			}
+			if atomic.LoadInt32(&prepareCount) > 1 {
+				tc.Loop.Stop()
+			}
+			return nil
+		},
+	})
+
+	loop.Push("msg1")
+	waitOrFail(t, interruptObserved, "interrupt was not observed")
+	ok, ack := loop.Push("urgent", WithPreempt[string, *schema.Message](AfterChatModel))
+	require.True(t, ok)
+	require.NotNil(t, ack)
+	waitOrFail(t, ack, "preempt ack was not resolved")
+	close(releaseCallback)
+	require.Eventually(t, func() bool {
+		return loop.Resume("approval") == nil
+	}, time.Second, 10*time.Millisecond)
+	waitOrFail(t, genResumeCalled, "GenResume was not called")
+
+	exit := loop.Wait()
+	require.NoError(t, exit.ExitReason)
+	assert.Equal(t, []string{"urgent"}, gotUnhandled)
+	assert.Equal(t, []string{"approval"}, gotResumeItems)
+}
+
+func TestTurnLoop_ManagedInterrupt_StopAfterPhase1BeforePhase2(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore()
+	cpID := "managed-stop-before-phase2"
+	interruptObserved := make(chan struct{})
+	releaseCallback := make(chan struct{})
+	var interruptOnce sync.Once
+
+	loop := newAndRunTurnLoop(ctx, TurnLoopConfig[string, *schema.Message]{
+		InterruptMode: TurnLoopInterruptWaitsForExplicitResume,
+		Store:         store,
+		CheckpointID:  cpID,
+		GenInput:      genInputConsumeAllWithMsg,
+		PrepareAgent:  prepareAgent(&turnLoopInterruptAgent{interruptInfo: "approval_needed"}),
+		OnAgentEvents: func(_ context.Context, _ *TurnContext[string, *schema.Message], events *AsyncIterator[*AgentEvent]) error {
+			for {
+				event, ok := events.Next()
+				if !ok {
+					break
+				}
+				if event.Action != nil && event.Action.Interrupted != nil {
+					interruptOnce.Do(func() {
+						close(interruptObserved)
+						<-releaseCallback
+					})
+				}
+			}
+			return nil
+		},
+	})
+
+	loop.Push("msg1")
+	waitOrFail(t, interruptObserved, "interrupt was not observed")
+	loop.Stop(WithImmediate())
+	close(releaseCallback)
+
+	exit := loop.Wait()
+	require.NoError(t, exit.CheckpointErr)
+
+	loop.resumeMu.Lock()
+	pending := loop.pendingResume
+	loop.resumeMu.Unlock()
+	if pending != nil {
+		assert.False(t, isPhase1ManagedPendingResume(pending), "Stop must not leave Phase-1-only pendingResume in cleanup")
+	}
+
+	store.mu.Lock()
+	data, ok := store.m[cpID]
+	store.mu.Unlock()
+	if ok {
+		cp, err := unmarshalTurnLoopCheckpoint[string](data)
+		require.NoError(t, err)
+		assert.Equal(t, []string{"msg1"}, cp.CanceledItems)
+		assert.Empty(t, cp.ResumeItems)
+	}
+}
+
+func TestTurnLoop_ManagedInterrupt_CallbackErrorAfterEarlyResumeClearsPhase1PendingResume(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore()
+	cpID := "managed-callback-error-after-resume"
+	interruptObserved := make(chan struct{})
+	releaseCallback := make(chan struct{})
+	callbackErr := errors.New("callback failed after early resume")
+	var interruptOnce sync.Once
+
+	loop := newAndRunTurnLoop(ctx, TurnLoopConfig[string, *schema.Message]{
+		InterruptMode: TurnLoopInterruptWaitsForExplicitResume,
+		Store:         store,
+		CheckpointID:  cpID,
+		GenInput:      genInputConsumeAllWithMsg,
+		PrepareAgent:  prepareAgent(&turnLoopInterruptAgent{interruptInfo: "approval_needed"}),
+		OnAgentEvents: func(_ context.Context, _ *TurnContext[string, *schema.Message], events *AsyncIterator[*AgentEvent]) error {
+			for {
+				event, ok := events.Next()
+				if !ok {
+					break
+				}
+				if event.Action != nil && event.Action.Interrupted != nil {
+					interruptOnce.Do(func() {
+						close(interruptObserved)
+						<-releaseCallback
+					})
+					return callbackErr
+				}
+			}
+			return nil
+		},
+	})
+
+	loop.Push("msg1")
+	waitOrFail(t, interruptObserved, "interrupt was not observed")
+	require.NoError(t, loop.Resume("approval"))
+	close(releaseCallback)
+
+	exit := loop.Wait()
+	require.ErrorIs(t, exit.ExitReason, callbackErr)
+
+	loop.resumeMu.Lock()
+	pending := loop.pendingResume
+	loop.resumeMu.Unlock()
+	require.Nil(t, pending, "Phase-1-only pendingResume must be cleared even after early Resume")
+
+	store.mu.Lock()
+	data, ok := store.m[cpID]
+	store.mu.Unlock()
+	if ok {
+		cp, err := unmarshalTurnLoopCheckpoint[string](data)
+		require.NoError(t, err)
+		assert.Empty(t, cp.ResumeItems)
+	}
+}
+
+func TestTurnLoop_ManagedInterrupt_EmptyResumeBytesMarksPhase2Complete(t *testing.T) {
+	pr := &turnLoopPendingResume[string]{
+		source: turnLoopPendingResumeSourceManagedInterrupt,
+	}
+	require.True(t, isPhase1ManagedPendingResume(pr))
+
+	pr.resumeBytes = append([]byte{}, []byte(nil)...)
+	require.NotNil(t, pr.resumeBytes)
+	require.Empty(t, pr.resumeBytes)
+	assert.False(t, isPhase1ManagedPendingResume(pr))
+}
+
 func TestTurnLoop_ResumeErrorContracts(t *testing.T) {
 	t.Run("empty", func(t *testing.T) {
 		loop := NewTurnLoop(TurnLoopConfig[string, *schema.Message]{
