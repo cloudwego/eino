@@ -526,9 +526,52 @@ func TestConcatAgenticMessages(t *testing.T) {
 		assert.Len(t, result.ContentBlocks, 1)
 		assert.Equal(t, "call_123", result.ContentBlocks[0].FunctionToolResult.CallID)
 		assert.Equal(t, "get_weather", result.ContentBlocks[0].FunctionToolResult.Name)
-		assert.Equal(t, 2, len(result.ContentBlocks[0].FunctionToolResult.Content))
-		assert.Equal(t, `{"temp`, result.ContentBlocks[0].FunctionToolResult.Content[0].Text.Text)
-		assert.Equal(t, `":72}`, result.ContentBlocks[0].FunctionToolResult.Content[1].Text.Text)
+		assert.Equal(t, 1, len(result.ContentBlocks[0].FunctionToolResult.Content))
+		assert.Equal(t, `{"temp":72}`, result.ContentBlocks[0].FunctionToolResult.Content[0].Text.Text)
+	})
+
+	t.Run("concat function tool result without streaming meta", func(t *testing.T) {
+		msgs := []*AgenticMessage{
+			{
+				Role: AgenticRoleTypeUser,
+				ContentBlocks: []*ContentBlock{
+					{
+						Type: ContentBlockTypeFunctionToolResult,
+						FunctionToolResult: &FunctionToolResult{
+							CallID: "call_stream",
+							Name:   "execute",
+							Content: []*FunctionToolResultContentBlock{
+								{Type: FunctionToolResultContentBlockTypeText, Text: &UserInputText{Text: "first\n"}},
+							},
+						},
+					},
+				},
+			},
+			{
+				Role: AgenticRoleTypeUser,
+				ContentBlocks: []*ContentBlock{
+					{
+						Type: ContentBlockTypeFunctionToolResult,
+						FunctionToolResult: &FunctionToolResult{
+							CallID: "call_stream",
+							Name:   "execute",
+							Content: []*FunctionToolResultContentBlock{
+								{Type: FunctionToolResultContentBlockTypeText, Text: &UserInputText{Text: "second\n"}},
+							},
+						},
+					},
+				},
+			},
+		}
+
+		result, err := ConcatAgenticMessages(msgs)
+		assert.NoError(t, err)
+		assert.Len(t, result.ContentBlocks, 1)
+		require.NotNil(t, result.ContentBlocks[0].FunctionToolResult)
+		assert.Equal(t, "call_stream", result.ContentBlocks[0].FunctionToolResult.CallID)
+		assert.Equal(t, "execute", result.ContentBlocks[0].FunctionToolResult.Name)
+		require.Len(t, result.ContentBlocks[0].FunctionToolResult.Content, 1)
+		assert.Equal(t, "first\nsecond\n", result.ContentBlocks[0].FunctionToolResult.Content[0].Text.Text)
 	})
 
 	t.Run("concat server tool call", func(t *testing.T) {
@@ -1725,5 +1768,20 @@ func TestConcatFunctionToolResults(t *testing.T) {
 		assert.Len(t, got.Content, 2)
 		assert.Equal(t, "hello", got.Content[0].Text.Text)
 		assert.Equal(t, "http://img.png", got.Content[1].Image.URL)
+	})
+
+	t.Run("text chunks", func(t *testing.T) {
+		results := []*FunctionToolResult{
+			{CallID: "c1", Name: "tool1", Content: []*FunctionToolResultContentBlock{
+				{Type: FunctionToolResultContentBlockTypeText, Text: &UserInputText{Text: "hello "}},
+			}},
+			{CallID: "c1", Name: "tool1", Content: []*FunctionToolResultContentBlock{
+				{Type: FunctionToolResultContentBlockTypeText, Text: &UserInputText{Text: "world"}},
+			}},
+		}
+		got, err := concatFunctionToolResults(results)
+		require.NoError(t, err)
+		require.Len(t, got.Content, 1)
+		assert.Equal(t, "hello world", got.Content[0].Text.Text)
 	})
 }

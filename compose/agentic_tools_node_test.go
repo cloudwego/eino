@@ -17,6 +17,7 @@
 package compose
 
 import (
+	"context"
 	"io"
 	"testing"
 
@@ -24,6 +25,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -343,6 +345,57 @@ func TestStreamToolMessageToAgenticMessage(t *testing.T) {
 	})
 }
 
+func TestAgenticToolsNodeStreamSetsStreamingMeta(t *testing.T) {
+	ctx := context.Background()
+	node, err := NewAgenticToolsNode(ctx, &ToolsNodeConfig{
+		Tools: []tool.BaseTool{&mockTool{}},
+	})
+	require.NoError(t, err)
+
+	stream, err := node.Stream(ctx, &schema.AgenticMessage{
+		ContentBlocks: []*schema.ContentBlock{
+			{
+				Type: schema.ContentBlockTypeFunctionToolCall,
+				FunctionToolCall: &schema.FunctionToolCall{
+					CallID:    "call_1",
+					Name:      "mock_tool",
+					Arguments: `{"name":"jack"}`,
+				},
+			},
+		},
+	})
+	require.NoError(t, err)
+	defer stream.Close()
+
+	var chunks [][]*schema.AgenticMessage
+	for {
+		chunk, err := stream.Recv()
+		if err == io.EOF {
+			break
+		}
+		require.NoError(t, err)
+		require.Len(t, chunk, 1)
+		require.Len(t, chunk[0].ContentBlocks, 1)
+		block := chunk[0].ContentBlocks[0]
+		assert.Equal(t, schema.ContentBlockTypeFunctionToolResult, block.Type)
+		assert.Equal(t, &schema.StreamingMeta{Index: 0}, block.StreamingMeta)
+		chunks = append(chunks, chunk)
+	}
+	require.NotEmpty(t, chunks)
+
+	result, err := schema.ConcatAgenticMessagesArray(chunks)
+	require.NoError(t, err)
+	require.Len(t, result, 1)
+	require.Len(t, result[0].ContentBlocks, 1)
+	block := result[0].ContentBlocks[0]
+	assert.Nil(t, block.StreamingMeta)
+	require.NotNil(t, block.FunctionToolResult)
+	assert.Equal(t, "call_1", block.FunctionToolResult.CallID)
+	assert.Equal(t, "mock_tool", block.FunctionToolResult.Name)
+	require.Len(t, block.FunctionToolResult.Content, 1)
+	assert.JSONEq(t, `{"echo":"jack: 0"}`, block.FunctionToolResult.Content[0].Text.Text)
+}
+
 func testStreamToolMessageTextOnly(t *testing.T) {
 	input := schema.StreamReaderFromArray([][]*schema.Message{
 		{
@@ -435,8 +488,7 @@ func testStreamToolMessageTextOnly(t *testing.T) {
 						CallID: "2",
 						Name:   "name2",
 						Content: []*schema.FunctionToolResultContentBlock{
-							{Type: schema.FunctionToolResultContentBlockTypeText, Text: &schema.UserInputText{Text: "content2-1"}},
-							{Type: schema.FunctionToolResultContentBlockTypeText, Text: &schema.UserInputText{Text: "content2-2"}},
+							{Type: schema.FunctionToolResultContentBlockTypeText, Text: &schema.UserInputText{Text: "content2-1content2-2"}},
 						},
 					},
 				},
@@ -451,8 +503,7 @@ func testStreamToolMessageTextOnly(t *testing.T) {
 						CallID: "3",
 						Name:   "name3",
 						Content: []*schema.FunctionToolResultContentBlock{
-							{Type: schema.FunctionToolResultContentBlockTypeText, Text: &schema.UserInputText{Text: "content3-1"}},
-							{Type: schema.FunctionToolResultContentBlockTypeText, Text: &schema.UserInputText{Text: "content3-2"}},
+							{Type: schema.FunctionToolResultContentBlockTypeText, Text: &schema.UserInputText{Text: "content3-1content3-2"}},
 						},
 					},
 				},
