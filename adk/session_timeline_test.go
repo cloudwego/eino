@@ -1249,10 +1249,20 @@ func TestRunnerTimelineFailedStopReason(t *testing.T) {
 	})
 
 	iter := runner.Query(ctx, "hi")
+	var gotErrs []error
 	for {
-		if _, ok := iter.Next(); !ok {
+		event, ok := iter.Next()
+		if !ok {
 			break
 		}
+		if event.Err != nil {
+			gotErrs = append(gotErrs, event.Err)
+		}
+	}
+	require.NotEmpty(t, gotErrs)
+	assert.EqualError(t, gotErrs[0], "boom")
+	for _, err := range gotErrs {
+		assert.NotContains(t, err.Error(), "missing SessionEventTurnEnd")
 	}
 
 	sessionErrors := filterStoredSessionEvents(t, store.events, func(se *SessionEvent[*schema.Message]) bool {
@@ -1261,12 +1271,65 @@ func TestRunnerTimelineFailedStopReason(t *testing.T) {
 	require.NotEmpty(t, sessionErrors)
 	require.NotNil(t, sessionErrors[len(sessionErrors)-1].Error)
 	assert.Equal(t, SessionErrorTypeFatal, sessionErrors[len(sessionErrors)-1].Error.Type)
+	assert.Equal(t, "boom", sessionErrors[len(sessionErrors)-1].Error.Message)
 	requireStoredIdleStopReason(t, store.events, "failed")
 
 	turnEnds := filterStoredSessionEvents(t, store.events, func(se *SessionEvent[*schema.Message]) bool {
 		return se.Kind == SessionEventTurnEnd
 	})
 	assert.Empty(t, turnEnds, "failed turn should not commit a TurnEnd")
+}
+
+func TestRunnerTimelineModelCallFatalDoesNotRequireTurnEnd(t *testing.T) {
+	ctx := context.Background()
+	modelErr := errors.New("model exploded")
+	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name: "fatal-model-agent",
+		Model: newFakeChatModel(func(context.Context, []*schema.Message, ...model.Option) (*schema.Message, error) {
+			return nil, modelErr
+		}, nil),
+	})
+	require.NoError(t, err)
+
+	store := newSessionHelperStore()
+	runner := NewRunner(ctx, RunnerConfig{
+		Agent:         agent,
+		SessionID:     "timeline-fatal-model",
+		SessionStore:  store,
+		SessionConfig: &SessionConfig{EventFlushBatchSize: 1},
+	})
+
+	var gotErrs []error
+	iter := runner.Query(ctx, "hi")
+	for {
+		event, ok := iter.Next()
+		if !ok {
+			break
+		}
+		if event.Err != nil {
+			gotErrs = append(gotErrs, event.Err)
+		}
+	}
+
+	require.NotEmpty(t, gotErrs)
+	assert.ErrorIs(t, gotErrs[0], modelErr)
+	for _, err := range gotErrs {
+		assert.NotContains(t, err.Error(), "missing SessionEventTurnEnd")
+	}
+
+	sessionErrors := filterStoredSessionEvents(t, store.events, func(se *SessionEvent[*schema.Message]) bool {
+		return se.Kind == SessionEventSessionError
+	})
+	require.NotEmpty(t, sessionErrors)
+	require.NotNil(t, sessionErrors[len(sessionErrors)-1].Error)
+	assert.Equal(t, SessionErrorTypeFatal, sessionErrors[len(sessionErrors)-1].Error.Type)
+	assert.Contains(t, sessionErrors[len(sessionErrors)-1].Error.Message, modelErr.Error())
+	requireStoredIdleStopReason(t, store.events, "failed")
+
+	turnEnds := filterStoredSessionEvents(t, store.events, func(se *SessionEvent[*schema.Message]) bool {
+		return se.Kind == SessionEventTurnEnd
+	})
+	assert.Empty(t, turnEnds, "fatal model call should abort without committing a TurnEnd")
 }
 
 func TestRunnerTimelineCancelStopReasonAndUserInterruptPersisted(t *testing.T) {
