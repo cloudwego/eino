@@ -589,6 +589,7 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 		interrupted       bool
 		cancelled         bool
 		retryExhausted    bool
+		terminalErr       error
 		sawTurnEnd        bool
 		persister         *sessionEventPersister[M]
 		persistErr        error
@@ -738,6 +739,9 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 				}
 				gen.Send(event)
 				break
+			}
+			if terminalErr == nil {
+				terminalErr = event.Err
 			}
 		}
 
@@ -913,6 +917,8 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 			stopReason = "retries_exhausted"
 		case persistErr != nil:
 			stopReason = "failed"
+		case terminalErr != nil:
+			stopReason = "failed"
 		case !sawTurnEnd:
 			stopReason = "failed"
 		}
@@ -920,6 +926,8 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 			errMsg := ""
 			if persistErr != nil {
 				errMsg = persistErr.Error()
+			} else if terminalErr != nil {
+				errMsg = terminalErr.Error()
 			}
 			sendTimelineEvent(&SessionEvent[M]{
 				EventID:   uuid.NewString(),
@@ -955,6 +963,7 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 			persistErr:        persistErr,
 			interrupted:       interrupted,
 			cancelled:         cancelled,
+			terminalErr:       terminalErr,
 			sawTurnEnd:        sawTurnEnd,
 			sessionState:      sessionState,
 			store:             store,
@@ -1022,6 +1031,7 @@ type sessionTurnResult[M MessageType] struct {
 	persistErr        error
 	interrupted       bool
 	cancelled         bool
+	terminalErr       error
 	sawTurnEnd        bool
 	sessionState      *runnerSessionRunState[M]
 	store             CheckPointStore
@@ -1051,6 +1061,9 @@ func (r *sessionTurnResult[M]) finalize(ctx context.Context) error {
 	}
 	if r.persistErr != nil {
 		return fmt.Errorf("failed to persist session events: %w", r.persistErr)
+	}
+	if r.terminalErr != nil {
+		return nil
 	}
 	if !r.sawTurnEnd {
 		return fmt.Errorf("failed to commit session[%s]: missing SessionEventTurnEnd", r.sessionState.sessionID)
