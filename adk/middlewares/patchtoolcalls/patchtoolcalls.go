@@ -135,17 +135,16 @@ func patchToolCallsForAgenticMessage[M adk.MessageType](ctx context.Context,
 	// Iterate messages in reverse order to track existing tool call IDs
 	for i := len(state.Messages) - 1; i >= 0; i-- {
 		msg := state.Messages[i]
-		currentToolIDs := make(map[string]struct{})
 
 		for _, block := range msg.ContentBlocks {
 			if block == nil {
 				continue
 			}
 			if block.Type == schema.ContentBlockTypeFunctionToolResult && block.FunctionToolResult != nil {
-				currentToolIDs[block.FunctionToolResult.CallID] = struct{}{}
+				seenIDs[block.FunctionToolResult.CallID] = struct{}{}
 			}
 			if block.Type == schema.ContentBlockTypeToolSearchResult && block.ToolSearchFunctionToolResult != nil {
-				currentToolIDs[block.ToolSearchFunctionToolResult.CallID] = struct{}{}
+				seenIDs[block.ToolSearchFunctionToolResult.CallID] = struct{}{}
 			}
 			if block.Type == schema.ContentBlockTypeFunctionToolCall && block.FunctionToolCall != nil {
 				if _, exists := seenIDs[block.FunctionToolCall.CallID]; !exists {
@@ -159,9 +158,6 @@ func patchToolCallsForAgenticMessage[M adk.MessageType](ctx context.Context,
 		}
 
 		patched = append(patched, msg)
-		for k, v := range currentToolIDs {
-			seenIDs[k] = v
-		}
 	}
 
 	nState := *state
