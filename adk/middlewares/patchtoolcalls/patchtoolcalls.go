@@ -20,7 +20,6 @@ package patchtoolcalls
 import (
 	"context"
 	"fmt"
-	"maps"
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/adk/internal"
@@ -160,7 +159,9 @@ func patchToolCallsForAgenticMessage[M adk.MessageType](ctx context.Context,
 		}
 
 		patched = append(patched, msg)
-		maps.Copy(seenIDs, currentToolIDs)
+		for k, v := range currentToolIDs {
+			seenIDs[k] = v
+		}
 	}
 
 	nState := *state
