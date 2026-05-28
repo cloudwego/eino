@@ -22,7 +22,7 @@ import (
 	"github.com/cloudwego/eino/adk/internal"
 )
 
-var allUserMessagesTagRegex = regexp.MustCompile(`(?s)<all_user_messages>.*</all_user_messages>`)
+var allUserMessagesTagRegex = regexp.MustCompile(`(?s)<all_user_messages>.*?</all_user_messages>`)
 
 func getSystemInstruction() string {
 	return internal.SelectPrompt(internal.I18nPrompts{

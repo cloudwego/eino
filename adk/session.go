@@ -237,6 +237,7 @@ type SessionEvent[M MessageType] struct {
 	MessagesReplaced *[]M                     `json:"messages_replaced,omitempty"`
 	MessageUpdated   *MessageUpdatedEvent[M]  `json:"message_updated,omitempty"`
 	MessageInserted  *MessageInsertedEvent[M] `json:"message_inserted,omitempty"`
+	MessagesDeleted  *MessagesDeletedEvent    `json:"messages_deleted,omitempty"`
 	TurnEnd          *TurnEndState[M]         `json:"turn_end,omitempty"`
 
 	Lifecycle *LifecycleEvent    `json:"lifecycle,omitempty"`
@@ -255,6 +256,7 @@ const (
 	SessionEventMessagesReplaced SessionEventKind = "messages_replaced"
 	SessionEventMessageUpdated   SessionEventKind = "message_updated"
 	SessionEventMessageInserted  SessionEventKind = "message_inserted"
+	SessionEventMessagesDeleted  SessionEventKind = "messages_deleted"
 	SessionEventTurnEnd          SessionEventKind = "turn_end"
 
 	SessionEventSessionStatusRunning     SessionEventKind = "session.status_running"
@@ -471,6 +473,12 @@ type MessageInsertedEvent[M MessageType] struct {
 	BeforeMessageID string `json:"before_message_id,omitempty"`
 }
 
+// MessagesDeletedEvent represents a batch deletion within the messages array.
+type MessagesDeletedEvent struct {
+	// MessageIDs identifies the messages to delete via their eino-internal message IDs.
+	MessageIDs []string `json:"message_ids"`
+}
+
 // SessionPersistenceMode controls when session events are appended relative to
 // consumer-visible AgentEvents.
 type SessionPersistenceMode string
@@ -554,6 +562,7 @@ func init() {
 	schema.RegisterName[*MessageUpdatedEvent[*schema.AgenticMessage]]("_eino_adk_agentic_message_updated_event")
 	schema.RegisterName[*MessageInsertedEvent[*schema.Message]]("_eino_adk_message_inserted_event")
 	schema.RegisterName[*MessageInsertedEvent[*schema.AgenticMessage]]("_eino_adk_agentic_message_inserted_event")
+	schema.RegisterName[*MessagesDeletedEvent]("_eino_adk_messages_deleted_event")
 	schema.RegisterName[*LifecycleEvent]("_eino_adk_lifecycle_event")
 	schema.RegisterName[*SessionErrorEvent]("_eino_adk_session_error_event")
 	schema.RegisterName[*RetryStatus]("_eino_adk_retry_status")
@@ -741,6 +750,12 @@ func ClassifySessionEvent[M MessageType](event *SessionEvent[M]) (SessionEventKi
 	}
 	if event.MessageInserted != nil {
 		add(SessionEventMessageInserted)
+	}
+	if event.MessagesDeleted != nil {
+		if err := validateMessageIDs("MessagesDeleted.MessageIDs", event.MessagesDeleted.MessageIDs); err != nil {
+			return "", err
+		}
+		add(SessionEventMessagesDeleted)
 	}
 	if event.TurnEnd != nil {
 		add(SessionEventTurnEnd)
@@ -1103,7 +1118,7 @@ func isContextSessionEvent[M MessageType](event *SessionEvent[M]) bool {
 		return false
 	}
 	return !isNilMessage(event.Message) || event.MessagesReplaced != nil ||
-		event.MessageUpdated != nil || event.MessageInserted != nil
+		event.MessageUpdated != nil || event.MessageInserted != nil || event.MessagesDeleted != nil
 }
 
 func isTurnEndSessionEvent[M MessageType](event *SessionEvent[M]) bool {
@@ -1156,6 +1171,11 @@ func applyContextSessionEventInPlace[M MessageType](event *SessionEvent[M], out 
 			}
 		}
 
+	case event.MessagesDeleted != nil:
+		if err := deleteMessagesByID(out, event.MessagesDeleted.MessageIDs); err != nil {
+			return err
+		}
+
 	default:
 		if !isNilMessage(event.Message) {
 			*out = append(*out, event.Message)
@@ -1188,6 +1208,55 @@ func replaceMessageByID[M MessageType](messages *[]M, msgID string, newMsg M) er
 	return fmt.Errorf("reconstruct: target message %q not found for update", msgID)
 }
 
+func deleteMessagesByID[M MessageType](messages *[]M, ids []string) error {
+	if err := validateMessageIDs("MessagesDeleted.MessageIDs", ids); err != nil {
+		return err
+	}
+	targets := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		targets[id] = struct{}{}
+	}
+	found := make(map[string]struct{}, len(ids))
+	for _, msg := range *messages {
+		id := GetMessageID(msg)
+		if _, ok := targets[id]; ok {
+			found[id] = struct{}{}
+		}
+	}
+	for _, id := range ids {
+		if _, ok := found[id]; !ok {
+			return fmt.Errorf("reconstruct: target message %q not found for deletion", id)
+		}
+	}
+
+	retained := (*messages)[:0]
+	for _, msg := range *messages {
+		if _, ok := targets[GetMessageID(msg)]; ok {
+			continue
+		}
+		retained = append(retained, msg)
+	}
+	*messages = retained
+	return nil
+}
+
+func validateMessageIDs(field string, ids []string) error {
+	if len(ids) == 0 {
+		return fmt.Errorf("%s must not be empty", field)
+	}
+	seen := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		if id == "" {
+			return fmt.Errorf("%s must not contain empty message ID", field)
+		}
+		if _, ok := seen[id]; ok {
+			return fmt.Errorf("%s contains duplicate message ID %q", field, id)
+		}
+		seen[id] = struct{}{}
+	}
+	return nil
+}
+
 type sessionReconstructResult[M MessageType] struct {
 	state          *TurnEndState[M]
 	inFlightTurnID string // TurnID from events after the last committed TurnEnd (the interrupted turn)
@@ -1201,6 +1270,7 @@ var modelContextSessionEventKinds = []SessionEventKind{
 	SessionEventMessagesReplaced,
 	SessionEventMessageUpdated,
 	SessionEventMessageInserted,
+	SessionEventMessagesDeleted,
 	SessionEventTurnEnd,
 }
 

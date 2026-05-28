@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"unicode/utf8"
 
@@ -31,6 +32,7 @@ import (
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/adk/filesystem"
+	"github.com/cloudwego/eino/adk/internal"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/schema"
 )
@@ -365,6 +367,10 @@ type typedToolReductionMiddleware[M adk.MessageType] struct {
 
 	excludeTruncTools map[string]struct{}
 	excludeClearTools map[string]struct{}
+}
+
+type clearRewriteDelta[M adk.MessageType] struct {
+	events []*adk.SessionEvent[M]
 }
 
 // getDefaultTokenCounter returns a default token counter function that operates on []M.
@@ -997,6 +1003,9 @@ func (t *typedToolReductionMiddleware[M]) beforeModelRewriteStateGeneric(ctx con
 	if estimatedTokens < t.config.MaxTokensForClear {
 		return ctx, state, nil
 	}
+	for _, msg := range state.Messages {
+		adk.EnsureMessageID(msg)
+	}
 
 	// calc range
 	var (
@@ -1027,9 +1036,10 @@ func (t *typedToolReductionMiddleware[M]) beforeModelRewriteStateGeneric(ctx con
 		editTarget         []M
 		clearAtLeastTokens = t.config.ClearAtLeastTokens
 		offloadStash       []*offloadStashItem
+		pendingEvents      []*adk.SessionEvent[M]
 	)
 
-	editTarget, end, err = t.applyClearRewriteGeneric(ctx, state, start, end, clearAtLeastTokens)
+	editTarget, end, pendingEvents, err = t.applyClearRewriteGeneric(ctx, state, start, end, clearAtLeastTokens)
 	if err != nil {
 		return ctx, state, err
 	}
@@ -1103,14 +1113,14 @@ func (t *typedToolReductionMiddleware[M]) beforeModelRewriteStateGeneric(ctx con
 				setToolCallArguments(toolCallMsg, tc.BlockIndex, offloadInfo.ToolArgument.Text)
 				setToolResultContent(resultMsg, offloadInfo.ToolResult, fromContent)
 
-				// Emit MessageUpdated for the tool-result message (content replaced).
-				_ = adk.TypedSendEvent(ctx, &adk.TypedAgentEvent[M]{
-					SessionEvent: &adk.SessionEvent[M]{
-						Kind: adk.SessionEventMessageUpdated,
-						MessageUpdated: &adk.MessageUpdatedEvent[M]{
-							MessageID: adk.GetMessageID(resultMsg),
-							Message:   resultMsg,
-						},
+				// Queue MessageUpdated for the tool-result message (content replaced).
+				// ClearAtLeastTokens may still abort the clear, so persistence events
+				// must be emitted only after that threshold is satisfied.
+				pendingEvents = append(pendingEvents, &adk.SessionEvent[M]{
+					Kind: adk.SessionEventMessageUpdated,
+					MessageUpdated: &adk.MessageUpdatedEvent[M]{
+						MessageID: adk.GetMessageID(resultMsg),
+						Message:   resultMsg,
 					},
 				})
 			}
@@ -1118,16 +1128,14 @@ func (t *typedToolReductionMiddleware[M]) beforeModelRewriteStateGeneric(ctx con
 			// set dedup flag
 			setMsgClearedFlagGeneric(toolCallMsg)
 
-			// Emit MessageUpdated for the assistant tool-call message (arguments
+			// Queue MessageUpdated for the assistant tool-call message (arguments
 			// rewritten + cleared flag set). Reconstruction must see this so the
 			// cleared flag suppresses double-reduction.
-			_ = adk.TypedSendEvent(ctx, &adk.TypedAgentEvent[M]{
-				SessionEvent: &adk.SessionEvent[M]{
-					Kind: adk.SessionEventMessageUpdated,
-					MessageUpdated: &adk.MessageUpdatedEvent[M]{
-						MessageID: adk.GetMessageID(toolCallMsg),
-						Message:   toolCallMsg,
-					},
+			pendingEvents = append(pendingEvents, &adk.SessionEvent[M]{
+				Kind: adk.SessionEventMessageUpdated,
+				MessageUpdated: &adk.MessageUpdatedEvent[M]{
+					MessageID: adk.GetMessageID(toolCallMsg),
+					Message:   toolCallMsg,
 				},
 			})
 		}
@@ -1155,6 +1163,12 @@ func (t *typedToolReductionMiddleware[M]) beforeModelRewriteStateGeneric(ctx con
 		}
 	}
 
+	for _, event := range pendingEvents {
+		if err := sendClearRewriteSessionEvent(ctx, event); err != nil {
+			return ctx, state, err
+		}
+	}
+
 	state.Messages = editTarget // replace original state messages
 
 	if t.config.ClearPostProcess != nil {
@@ -1165,10 +1179,11 @@ func (t *typedToolReductionMiddleware[M]) beforeModelRewriteStateGeneric(ctx con
 }
 
 func (t *typedToolReductionMiddleware[M]) applyClearRewriteGeneric(ctx context.Context, state *adk.TypedChatModelAgentState[M], start, end int, clearAtLeastTokens int64) (
-	[]M, int, error) {
+	[]M, int, []*adk.SessionEvent[M], error) {
 	var (
 		editTarget      []M
 		needProcessPart []M
+		delta           clearRewriteDelta[M]
 	)
 
 	editTarget = append(editTarget, state.Messages[:start]...)
@@ -1209,15 +1224,25 @@ func (t *typedToolReductionMiddleware[M]) applyClearRewriteGeneric(ctx context.C
 				} else {
 					toolResponseMessages = needProcessPart[trStart:trEnd]
 				}
+				spanEnd := trEnd
+				if spanEnd > len(needProcessPart) {
+					spanEnd = len(needProcessPart)
+				}
+				originalMessages := needProcessPart[i:spanEnd]
 
 				rewrittenMessages, rewriteErr := t.config.ClearMessageRewriter(ctx, msg, toolResponseMessages)
 				if rewriteErr != nil {
-					return nil, 0, rewriteErr
+					return nil, 0, nil, rewriteErr
 				}
+				events, rewriteErr := buildClearRewriteEvents(originalMessages, rewrittenMessages)
+				if rewriteErr != nil {
+					return nil, 0, nil, rewriteErr
+				}
+				delta.events = append(delta.events, events...)
 				rewritten = append(rewritten, rewrittenMessages...)
 				i = trEnd
 			} else { // unexpected
-				return nil, 0, fmt.Errorf("[applyClearRewrite] unexpected message: %v", any(msg))
+				return nil, 0, nil, fmt.Errorf("[applyClearRewrite] unexpected message: %v", any(msg))
 			}
 		}
 		editTarget = append(editTarget, rewritten...)
@@ -1228,7 +1253,138 @@ func (t *typedToolReductionMiddleware[M]) applyClearRewriteGeneric(ctx context.C
 		editTarget = append(editTarget, state.Messages[end:]...)
 	}
 
-	return editTarget, end, nil
+	return editTarget, end, delta.events, nil
+}
+
+func sendClearRewriteSessionEvent[M adk.MessageType](ctx context.Context, event *adk.SessionEvent[M]) error {
+	err := adk.TypedSendEvent(ctx, &adk.TypedAgentEvent[M]{SessionEvent: event})
+	if err != nil && strings.Contains(err.Error(), "must be called within a ChatModelAgent Run() or Resume() execution context") {
+		return nil
+	}
+	return err
+}
+
+func buildClearRewriteEvents[M adk.MessageType](originalMessages []M, rewrittenMessages []M) ([]*adk.SessionEvent[M], error) {
+	originalIDs, err := messageIDsForRewrite("original", originalMessages, false)
+	if err != nil {
+		return nil, err
+	}
+	if len(rewrittenMessages) == 0 {
+		return []*adk.SessionEvent[M]{{
+			Kind: adk.SessionEventMessagesDeleted,
+			MessagesDeleted: &adk.MessagesDeletedEvent{
+				MessageIDs: originalIDs,
+			},
+		}}, nil
+	}
+	rewrittenIDs, err := messageIDsForRewrite("rewritten", rewrittenMessages, true)
+	if err != nil {
+		return nil, err
+	}
+	if sameStringSlice(originalIDs, rewrittenIDs) {
+		var events []*adk.SessionEvent[M]
+		for i, msg := range rewrittenMessages {
+			if reflect.DeepEqual(originalMessages[i], msg) {
+				continue
+			}
+			events = append(events, &adk.SessionEvent[M]{
+				Kind: adk.SessionEventMessageUpdated,
+				MessageUpdated: &adk.MessageUpdatedEvent[M]{
+					MessageID: rewrittenIDs[i],
+					Message:   msg,
+				},
+			})
+		}
+		return events, nil
+	}
+
+	originalIDSet := make(map[string]struct{}, len(originalIDs))
+	for _, id := range originalIDs {
+		originalIDSet[id] = struct{}{}
+	}
+	var events []*adk.SessionEvent[M]
+	anchorID := originalIDs[0]
+	for i, msg := range rewrittenMessages {
+		if _, conflicts := originalIDSet[rewrittenIDs[i]]; conflicts {
+			msg = cloneMessageWithFreshID(msg)
+			rewrittenMessages[i] = msg
+			rewrittenIDs[i] = adk.GetMessageID(msg)
+		}
+		events = append(events, &adk.SessionEvent[M]{
+			Kind: adk.SessionEventMessageInserted,
+			MessageInserted: &adk.MessageInsertedEvent[M]{
+				Message:         msg,
+				BeforeMessageID: anchorID,
+			},
+		})
+	}
+	if err := validateUniqueIDs("rewritten", rewrittenIDs); err != nil {
+		return nil, err
+	}
+	events = append(events, &adk.SessionEvent[M]{
+		Kind: adk.SessionEventMessagesDeleted,
+		MessagesDeleted: &adk.MessagesDeletedEvent{
+			MessageIDs: originalIDs,
+		},
+	})
+	return events, nil
+}
+
+func messageIDsForRewrite[M adk.MessageType](label string, messages []M, ensure bool) ([]string, error) {
+	ids := make([]string, len(messages))
+	for i, msg := range messages {
+		if ensure {
+			adk.EnsureMessageID(msg)
+		}
+		id := adk.GetMessageID(msg)
+		if id == "" {
+			return nil, fmt.Errorf("clear rewrite: %s message at index %d has empty message ID", label, i)
+		}
+		ids[i] = id
+	}
+	if err := validateUniqueIDs(label, ids); err != nil {
+		return nil, err
+	}
+	return ids, nil
+}
+
+func validateUniqueIDs(label string, ids []string) error {
+	seen := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		if _, ok := seen[id]; ok {
+			return fmt.Errorf("clear rewrite: %s messages contain duplicate message ID %q", label, id)
+		}
+		seen[id] = struct{}{}
+	}
+	return nil
+}
+
+func sameStringSlice(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func cloneMessageWithFreshID[M adk.MessageType](msg M) M {
+	cloned := copyMessagesGeneric([]M{msg})[0]
+	switch m := any(cloned).(type) {
+	case *schema.Message:
+		if m.Extra != nil {
+			delete(m.Extra, internal.EinoMsgIDKey)
+		}
+	case *schema.AgenticMessage:
+		if m.Extra != nil {
+			delete(m.Extra, internal.EinoMsgIDKey)
+		}
+	}
+	adk.EnsureMessageID(cloned)
+	return cloned
 }
 
 func agenticResultCallID(block *schema.ContentBlock) (string, bool) {
