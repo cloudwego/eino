@@ -1415,6 +1415,120 @@ func TestRunnerPersists_MessageInserted_AnchorAndAppend(t *testing.T) {
 	assert.Greater(t, idxPatched, idxUser, "patched tool message must be appended at the end")
 }
 
+func TestRunnerPersists_MessagesDeleted_Reconstructs(t *testing.T) {
+	ctx := context.Background()
+	store := NewInMemoryStoreLocal(t)
+	sid := "md-session"
+
+	a := schema.UserMessage("a")
+	b := schema.AssistantMessage("b", nil)
+	c := schema.UserMessage("c")
+	for _, msg := range []*schema.Message{a, b, c} {
+		EnsureMessageID(msg)
+	}
+
+	agent := &mutationAgent{
+		events: []*AgentEvent{
+			{
+				AgentName: "mutation-agent",
+				Output: &AgentOutput{
+					MessageOutput: &MessageVariant{Message: a, Role: schema.User},
+				},
+			},
+			{
+				AgentName: "mutation-agent",
+				Output: &AgentOutput{
+					MessageOutput: &MessageVariant{Message: b, Role: schema.Assistant},
+				},
+			},
+			{
+				AgentName: "mutation-agent",
+				Output: &AgentOutput{
+					MessageOutput: &MessageVariant{Message: c, Role: schema.User},
+				},
+			},
+			{
+				AgentName: "mutation-agent",
+				SessionEvent: &SessionEvent[*schema.Message]{
+					Kind: SessionEventMessagesDeleted,
+					MessagesDeleted: &MessagesDeletedEvent{
+						MessageIDs: []string{GetMessageID(b)},
+					},
+				},
+			},
+		},
+		turnEnd: &TurnEndState[*schema.Message]{Messages: []*schema.Message{a, c}},
+	}
+	runner := NewRunner(ctx, RunnerConfig{
+		Agent:         agent,
+		SessionID:     sid,
+		SessionStore:  store,
+		SessionConfig: &SessionConfig{EventFlushBatchSize: 1},
+	})
+	drainSessionEvents(t, runner.Run(ctx, nil))
+
+	res, err := store.LoadEvents(ctx, sid, &LoadEventsRequest{})
+	require.NoError(t, err)
+
+	var foundDeleted bool
+	for _, ep := range res.Events {
+		se, err := decodeSessionEvent[*schema.Message](ep.Data)
+		require.NoError(t, err)
+		if se.MessagesDeleted != nil {
+			foundDeleted = true
+			assert.Equal(t, []string{GetMessageID(b)}, se.MessagesDeleted.MessageIDs)
+		}
+	}
+	assert.True(t, foundDeleted, "MessagesDeleted must be persisted")
+
+	result, err := reconstructSessionState[*schema.Message](ctx, store, sid, defaultLoadPageSize, nil)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Len(t, result.state.Messages, 2)
+	assert.Equal(t, "a", result.state.Messages[0].Content)
+	assert.Equal(t, "c", result.state.Messages[1].Content)
+}
+
+func TestReconstructSessionState_MessagesDeletedMissingTargetFails(t *testing.T) {
+	ctx := context.Background()
+	store := NewInMemoryStoreLocal(t)
+	sid := "md-missing-target"
+
+	a := schema.UserMessage("a")
+	EnsureMessageID(a)
+	msgEvent := withTestEventID(&SessionEvent[*schema.Message]{Message: a})
+	msgData, err := encodeSessionEvent(msgEvent)
+	require.NoError(t, err)
+	require.NoError(t, store.AppendEvents(ctx, sid, []SessionEventPayload{
+		{EventID: msgEvent.EventID, Kind: msgEvent.Kind, Data: msgData},
+	}))
+
+	deleteEvent := withTestEventID(&SessionEvent[*schema.Message]{
+		MessagesDeleted: &MessagesDeletedEvent{MessageIDs: []string{"ghost-id"}},
+	})
+	deleteData, err := encodeSessionEvent(deleteEvent)
+	require.NoError(t, err)
+	require.NoError(t, store.AppendEvents(ctx, sid, []SessionEventPayload{
+		{EventID: deleteEvent.EventID, Kind: deleteEvent.Kind, Data: deleteData},
+	}))
+
+	turnEndEvent := withTestEventID(&SessionEvent[*schema.Message]{
+		TurnID: "turn-1",
+		TurnEnd: &TurnEndState[*schema.Message]{
+			Messages: []*schema.Message{a},
+		},
+	})
+	turnEndData, err := encodeSessionEvent(turnEndEvent)
+	require.NoError(t, err)
+	require.NoError(t, store.AppendEvents(ctx, sid, []SessionEventPayload{
+		{EventID: turnEndEvent.EventID, Kind: turnEndEvent.Kind, Data: turnEndData},
+	}))
+
+	_, err = reconstructSessionState[*schema.Message](ctx, store, sid, defaultLoadPageSize, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "ghost-id")
+}
+
 // TestAgentTool_ChildSessionID_FiltersFromParentLog verifies that events
 // forwarded from an inner agent (via AgentTool) are tagged with the child
 // SessionID and are NOT persisted into the parent's session event log. The
