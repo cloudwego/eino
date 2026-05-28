@@ -1152,6 +1152,20 @@ type turnLoopPendingResume[T any] struct {
 	resumeBytes        []byte
 }
 
+func isPhase1ManagedPendingResume[T any](pr *turnLoopPendingResume[T]) bool {
+	return pr != nil &&
+		pr.source == turnLoopPendingResumeSourceManagedInterrupt &&
+		pr.resumeBytes == nil
+}
+
+func (l *TurnLoop[T, M]) clearPhase1PendingResume() {
+	l.resumeMu.Lock()
+	if isPhase1ManagedPendingResume(l.pendingResume) {
+		l.pendingResume = nil
+	}
+	l.resumeMu.Unlock()
+}
+
 // SafePoint describes at which boundary the agent may be cancelled.
 // It is a bitmask: values can be combined with bitwise OR to accept multiple
 // safe points (e.g. AfterToolCalls | AfterChatModel). Internally, SafePoint
@@ -1979,14 +1993,20 @@ func (l *TurnLoop[T, M]) run(ctx context.Context) {
 				l.runErr = &InterruptError{InterruptContexts: l.interruptContexts}
 				return
 			}
+			unhandled := append([]T{}, l.buffer.TakeAll()...)
 			l.resumeMu.Lock()
-			l.pendingResume = &turnLoopPendingResume[T]{
-				interrupted:        append([]T{}, plan.spec.consumed...),
-				unhandled:          append([]T{}, l.buffer.TakeAll()...),
-				source:             turnLoopPendingResumeSourceManagedInterrupt,
-				resumeCheckpointID: l.checkPointRunnerID,
-				resumeBytes:        append([]byte{}, l.checkPointRunnerBytes...),
+			pr := l.pendingResume
+			if pr == nil {
+				pr = &turnLoopPendingResume[T]{
+					source: turnLoopPendingResumeSourceManagedInterrupt,
+				}
+				l.pendingResume = pr
 			}
+			pr.interrupted = append([]T{}, plan.spec.consumed...)
+			pr.unhandled = append(pr.unhandled, unhandled...)
+			pr.source = turnLoopPendingResumeSourceManagedInterrupt
+			pr.resumeCheckpointID = l.checkPointRunnerID
+			pr.resumeBytes = append([]byte{}, l.checkPointRunnerBytes...)
 			l.resumeMu.Unlock()
 			l.interruptContexts = nil
 			l.interruptedItems = nil
@@ -2161,6 +2181,14 @@ func (l *TurnLoop[T, M]) runAgentAndHandleEvents(
 				}
 				if event.Action != nil && event.Action.Interrupted != nil {
 					l.interruptContexts = event.Action.Interrupted.InterruptContexts
+					if l.config.InterruptMode == TurnLoopInterruptWaitsForExplicitResume {
+						l.resumeMu.Lock()
+						l.pendingResume = &turnLoopPendingResume[T]{
+							interrupted: append([]T{}, spec.consumed...),
+							source:      turnLoopPendingResumeSourceManagedInterrupt,
+						}
+						l.resumeMu.Unlock()
+					}
 				}
 			}
 			proxyGen.Send(event)
@@ -2199,6 +2227,13 @@ func (l *TurnLoop[T, M]) runAgentAndHandleEvents(
 		return nil
 	}
 
+	finish := func(err error) error {
+		if err != nil {
+			l.clearPhase1PendingResume()
+		}
+		return err
+	}
+
 	// Wait for the turn to end. Three outcomes:
 	//
 	// done:         Events fully handled (normal or error). If Stop() was
@@ -2227,7 +2262,7 @@ func (l *TurnLoop[T, M]) runAgentAndHandleEvents(
 				handleErr = err
 			}
 		}
-		return l.applyFrameworkCapturedError(handleErr)
+		return finish(l.applyFrameworkCapturedError(handleErr))
 	case <-preemptDone:
 		<-done
 		return nil
@@ -2240,7 +2275,7 @@ func (l *TurnLoop[T, M]) runAgentAndHandleEvents(
 				handleErr = err
 			}
 		}
-		return l.applyFrameworkCapturedError(handleErr)
+		return finish(l.applyFrameworkCapturedError(handleErr))
 	}
 }
 
