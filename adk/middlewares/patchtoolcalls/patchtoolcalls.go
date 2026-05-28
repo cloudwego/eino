@@ -20,6 +20,7 @@ package patchtoolcalls
 import (
 	"context"
 	"fmt"
+	"maps"
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/adk/internal"
@@ -69,8 +70,8 @@ type typedMiddleware[M adk.MessageType] struct {
 }
 
 func (m *typedMiddleware[M]) BeforeModelRewriteState(ctx context.Context, state *adk.TypedChatModelAgentState[M],
-	mc *adk.TypedModelContext[M]) (context.Context, *adk.TypedChatModelAgentState[M], error) {
-
+	mc *adk.TypedModelContext[M],
+) (context.Context, *adk.TypedChatModelAgentState[M], error) {
 	if len(state.Messages) == 0 {
 		return ctx, state, nil
 	}
@@ -89,28 +90,41 @@ func (m *typedMiddleware[M]) BeforeModelRewriteState(ctx context.Context, state 
 func patchToolCallsForMessage[M adk.MessageType](ctx context.Context,
 	gen func(ctx context.Context, toolName, toolCallID string) (string, error),
 	state *adk.TypedChatModelAgentState[*schema.Message],
-	_ *adk.TypedModelContext[M]) (context.Context, *adk.TypedChatModelAgentState[M], error) {
+	_ *adk.TypedModelContext[M],
+) (context.Context, *adk.TypedChatModelAgentState[M], error) {
+	// seenIDs stores unique tool call IDs collected by reverse traversal
+	seenIDs := make(map[string]struct{})
+	groupedMessages := make([][]*schema.Message, 0, len(state.Messages))
+	totalMsgCount := 0
 
-	patched := make([]*schema.Message, 0, len(state.Messages))
+	// Iterate messages in reverse order to track existing tool call IDs
+	for i := len(state.Messages) - 1; i >= 0; i-- {
+		msg := state.Messages[i]
+		currentMessages := []*schema.Message{msg}
 
-	for i, msg := range state.Messages {
-		patched = append(patched, msg)
-
-		if msg.Role != schema.Assistant || len(msg.ToolCalls) == 0 {
-			continue
+		if msg.Role == schema.Tool {
+			seenIDs[msg.ToolCallID] = struct{}{}
 		}
 
-		for _, tc := range msg.ToolCalls {
-			if hasCorrespondingToolMessage(state.Messages[i+1:], tc.ID) {
-				continue
+		if msg.Role == schema.Assistant && len(msg.ToolCalls) > 0 {
+			for _, tc := range msg.ToolCalls {
+				if _, exists := seenIDs[tc.ID]; !exists {
+					toolMsg, err := createPatchedToolMessage(ctx, gen, tc)
+					if err != nil {
+						return ctx, nil, err
+					}
+					currentMessages = append(currentMessages, toolMsg)
+				}
 			}
-
-			toolMsg, err := createPatchedToolMessage(ctx, gen, tc)
-			if err != nil {
-				return ctx, nil, err
-			}
-			patched = append(patched, toolMsg)
 		}
+
+		groupedMessages = append(groupedMessages, currentMessages)
+		totalMsgCount += len(currentMessages)
+	}
+
+	patched := make([]*schema.Message, 0, totalMsgCount)
+	for i := len(groupedMessages) - 1; i >= 0; i-- {
+		patched = append(patched, groupedMessages[i]...)
 	}
 
 	nState := *state
@@ -121,78 +135,52 @@ func patchToolCallsForMessage[M adk.MessageType](ctx context.Context,
 func patchToolCallsForAgenticMessage[M adk.MessageType](ctx context.Context,
 	gen func(ctx context.Context, toolName, toolCallID string) (string, error),
 	state *adk.TypedChatModelAgentState[*schema.AgenticMessage],
-	_ *adk.TypedModelContext[M]) (context.Context, *adk.TypedChatModelAgentState[M], error) {
+	_ *adk.TypedModelContext[M],
+) (context.Context, *adk.TypedChatModelAgentState[M], error) {
+	// seenIDs stores unique tool call IDs collected by reverse traversal
+	seenIDs := make(map[string]struct{})
+	groupedMessages := make([][]*schema.AgenticMessage, 0, len(state.Messages))
+	totalMsgCount := 0
 
-	patched := make([]*schema.AgenticMessage, 0, len(state.Messages))
+	// Iterate messages in reverse order to track existing tool call IDs
+	for i := len(state.Messages) - 1; i >= 0; i-- {
+		msg := state.Messages[i]
+		currentMessages := []*schema.AgenticMessage{msg}
+		currentToolIDs := make(map[string]struct{})
 
-	for i, msg := range state.Messages {
-		patched = append(patched, msg)
-
-		if msg.Role != schema.AgenticRoleTypeAssistant {
-			continue
-		}
-
-		// Collect tool call IDs from this assistant message.
-		var toolCalls []struct {
-			callID string
-			name   string
-		}
 		for _, block := range msg.ContentBlocks {
-			if block != nil && block.Type == schema.ContentBlockTypeFunctionToolCall && block.FunctionToolCall != nil {
-				toolCalls = append(toolCalls, struct {
-					callID string
-					name   string
-				}{callID: block.FunctionToolCall.CallID, name: block.FunctionToolCall.Name})
-			}
-		}
-		if len(toolCalls) == 0 {
-			continue
-		}
-
-		for _, tc := range toolCalls {
-			if hasCorrespondingAgenticToolResult(state.Messages[i+1:], tc.callID) {
+			if block == nil {
 				continue
 			}
-
-			toolMsg, err := createPatchedAgenticToolMessage(ctx, gen, tc.name, tc.callID)
-			if err != nil {
-				return ctx, nil, err
+			if block.Type == schema.ContentBlockTypeFunctionToolResult && block.FunctionToolResult != nil {
+				currentToolIDs[block.FunctionToolResult.CallID] = struct{}{}
 			}
-			patched = append(patched, toolMsg)
+			if block.Type == schema.ContentBlockTypeToolSearchResult && block.ToolSearchFunctionToolResult != nil {
+				currentToolIDs[block.ToolSearchFunctionToolResult.CallID] = struct{}{}
+			}
+			if block.Type == schema.ContentBlockTypeFunctionToolCall && block.FunctionToolCall != nil {
+				if _, exists := seenIDs[block.FunctionToolCall.CallID]; !exists {
+					toolMsg, err := createPatchedAgenticToolMessage(ctx, gen, block.FunctionToolCall.Name, block.FunctionToolCall.CallID)
+					if err != nil {
+						return ctx, nil, err
+					}
+					currentMessages = append(currentMessages, toolMsg)
+				}
+			}
 		}
+		maps.Copy(seenIDs, currentToolIDs)
+		groupedMessages = append(groupedMessages, currentMessages)
+		totalMsgCount += len(currentMessages)
+	}
+
+	patched := make([]*schema.AgenticMessage, 0, totalMsgCount)
+	for i := len(groupedMessages) - 1; i >= 0; i-- {
+		patched = append(patched, groupedMessages[i]...)
 	}
 
 	nState := *state
 	nState.Messages = patched
 	return ctx, any(&nState).(*adk.TypedChatModelAgentState[M]), nil
-}
-
-func hasCorrespondingToolMessage(messages []*schema.Message, toolCallID string) bool {
-	for _, msg := range messages {
-		if msg.Role == schema.Tool && msg.ToolCallID == toolCallID {
-			return true
-		}
-	}
-	return false
-}
-
-func hasCorrespondingAgenticToolResult(messages []*schema.AgenticMessage, toolCallID string) bool {
-	for _, msg := range messages {
-		for _, block := range msg.ContentBlocks {
-			if block == nil {
-				continue
-			}
-			if block.Type == schema.ContentBlockTypeFunctionToolResult &&
-				block.FunctionToolResult != nil && block.FunctionToolResult.CallID == toolCallID {
-				return true
-			}
-			if block.Type == schema.ContentBlockTypeToolSearchResult &&
-				block.ToolSearchFunctionToolResult != nil && block.ToolSearchFunctionToolResult.CallID == toolCallID {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 func createPatchedToolMessage(ctx context.Context, gen func(ctx context.Context, toolName, toolCallID string) (string, error), tc schema.ToolCall) (*schema.Message, error) {
