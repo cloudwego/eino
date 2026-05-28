@@ -1106,6 +1106,19 @@ func TestSessionEvent_HumanReadableRoundTrip(t *testing.T) {
 		assert.Equal(t, "anchor-id", decoded.MessageInserted.BeforeMessageID)
 		assert.Equal(t, "agentsmd content", decoded.MessageInserted.Message.Content)
 	})
+
+	t.Run("MessagesDeleted", func(t *testing.T) {
+		se := &SessionEvent[*schema.Message]{
+			MessagesDeleted: &MessagesDeletedEvent{MessageIDs: []string{"m1", "m2"}},
+		}
+		data, err := encodeSessionEvent(se)
+		require.NoError(t, err)
+		decoded, err := decodeSessionEvent[*schema.Message](data)
+		require.NoError(t, err)
+		require.NotNil(t, decoded.MessagesDeleted)
+		assert.Equal(t, SessionEventMessagesDeleted, decoded.Kind)
+		assert.Equal(t, []string{"m1", "m2"}, decoded.MessagesDeleted.MessageIDs)
+	})
 }
 
 // TestApplySessionEvent verifies all variants of the event-applier.
@@ -1215,6 +1228,49 @@ func TestApplySessionEvent(t *testing.T) {
 		})
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "not found for update")
+	})
+
+	t.Run("MessagesDeleted removes multiple messages", func(t *testing.T) {
+		a := makeMsg("a")
+		b := makeMsg("b")
+		c := makeMsg("c")
+		d := makeMsg("d")
+		msgs := []*schema.Message{a, b, c, d}
+		err := applySessionEvent(&msgs, &SessionEvent[*schema.Message]{
+			MessagesDeleted: &MessagesDeletedEvent{MessageIDs: []string{GetMessageID(b), GetMessageID(d)}},
+		})
+		require.NoError(t, err)
+		require.Len(t, msgs, 2)
+		assert.Equal(t, "a", msgs[0].Content)
+		assert.Equal(t, "c", msgs[1].Content)
+	})
+
+	t.Run("MessagesDeleted missing target errors", func(t *testing.T) {
+		a := makeMsg("a")
+		b := makeMsg("b")
+		c := makeMsg("c")
+		msgs := []*schema.Message{a, b, c}
+		err := applySessionEvent(&msgs, &SessionEvent[*schema.Message]{
+			MessagesDeleted: &MessagesDeletedEvent{MessageIDs: []string{GetMessageID(b), "ghost-id"}},
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "ghost-id")
+		assert.Equal(t, []*schema.Message{a, b, c}, msgs)
+	})
+
+	t.Run("MessagesDeleted rejects empty and duplicate ids", func(t *testing.T) {
+		msgs := []*schema.Message{makeMsg("a")}
+		err := applySessionEvent(&msgs, &SessionEvent[*schema.Message]{
+			MessagesDeleted: &MessagesDeletedEvent{},
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "must not be empty")
+
+		err = applySessionEvent(&msgs, &SessionEvent[*schema.Message]{
+			MessagesDeleted: &MessagesDeletedEvent{MessageIDs: []string{"dup", "dup"}},
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "duplicate")
 	})
 }
 
