@@ -25,7 +25,10 @@ import (
 
 var validTaskIDRegex = regexp.MustCompile(`^\d+$`)
 
-const highWatermarkFileName = ".highwatermark"
+const (
+	highWatermarkFileName = ".highwatermark"
+	reminderMessageFlag   = "_plantask_mw_reminded"
+)
 
 type task struct {
 	ID          string         `json:"id"`
@@ -50,10 +53,12 @@ const (
 	taskStatusDeleted    = "deleted"
 )
 
-type FileInfo = filesystem.FileInfo
-type LsInfoRequest = filesystem.LsInfoRequest
-type ReadRequest = filesystem.ReadRequest
-type WriteRequest = filesystem.WriteRequest
+type (
+	FileInfo      = filesystem.FileInfo
+	LsInfoRequest = filesystem.LsInfoRequest
+	ReadRequest   = filesystem.ReadRequest
+	WriteRequest  = filesystem.WriteRequest
+)
 
 type DeleteRequest struct {
 	FilePath string
