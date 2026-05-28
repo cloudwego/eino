@@ -2317,7 +2317,7 @@ func TestTurnLoop_ManagedInterrupt_StartNewTurnUsesConfiguredSessionStore(t *tes
 		InterruptMode: TurnLoopInterruptWaitsForExplicitResume,
 		SessionID:     sessionID,
 		SessionStore:  sessionStore,
-		Session:       &SessionConfig{EventFlushBatchSize: 1},
+		SessionConfig: &SessionConfig{EventFlushBatchSize: 1},
 		GenInput:      genInputConsumeAllWithMsg,
 		GenResume: func(ctx context.Context, _ *TurnLoop[string, *schema.Message], interruptedItems, unhandledItems, resumeItems []string) (*GenResumeResult[string, *schema.Message], error) {
 			return &GenResumeResult[string, *schema.Message]{
@@ -2391,7 +2391,7 @@ func TestTurnLoop_ManagedInterrupt_DecisionResumeUsesCapturedCheckpointIDAndPara
 		InterruptMode: TurnLoopInterruptWaitsForExplicitResume,
 		SessionID:     sessionID,
 		SessionStore:  sessionStore,
-		Session:       &SessionConfig{EventFlushBatchSize: 1},
+		SessionConfig: &SessionConfig{EventFlushBatchSize: 1},
 		GenInput:      genInputConsumeAllWithMsg,
 		GenResume: func(ctx context.Context, _ *TurnLoop[string, *schema.Message], interruptedItems, unhandledItems, resumeItems []string) (*GenResumeResult[string, *schema.Message], error) {
 			require.NotEmpty(t, interruptTargetID)
@@ -3588,6 +3588,78 @@ func TestNewTurnLoop_WaitBeforeRun(t *testing.T) {
 	case <-time.After(1 * time.Second):
 		t.Fatal("Wait did not return after Run + Stop")
 	}
+}
+
+type mockSessionStore struct {
+	mu     sync.Mutex
+	events map[string][]SessionEventPayload
+}
+
+func (m *mockSessionStore) AppendEvents(_ context.Context, sessionID string, events []SessionEventPayload) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.events == nil {
+		m.events = make(map[string][]SessionEventPayload)
+	}
+	m.events[sessionID] = append(m.events[sessionID], events...)
+	return nil
+}
+
+func (m *mockSessionStore) LoadEvents(_ context.Context, sessionID string, opts *LoadEventsRequest) (*LoadEventsResult, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return &LoadEventsResult{}, nil
+}
+
+func TestTurnLoop_SessionStoreWithoutCheckpointStore(t *testing.T) {
+	// Test that TurnLoop works correctly when SessionStore is configured but CheckpointStore is not
+	ctx := context.Background()
+	sessionStore := &mockSessionStore{}
+	sessionID := "test-session-id"
+
+	var processed bool
+	loop := NewTurnLoop(TurnLoopConfig[string, *schema.Message]{
+		GenInput: func(ctx context.Context, _ *TurnLoop[string, *schema.Message], items []string) (*GenInputResult[string, *schema.Message], error) {
+			return &GenInputResult[string, *schema.Message]{
+				Input:    &TypedAgentInput[*schema.Message]{Messages: []*schema.Message{schema.UserMessage(items[0])}},
+				Consumed: items,
+			}, nil
+		},
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string, *schema.Message], consumed []string) (TypedAgent[*schema.Message], error) {
+			return &turnLoopMockAgent{
+				name: "test",
+				runFunc: func(ctx context.Context, input *AgentInput) (*AgentOutput, error) {
+					processed = true
+					return &AgentOutput{
+						MessageOutput: &MessageVariant{
+							Message: schema.AssistantMessage("response", nil),
+							Role:    schema.Assistant,
+						},
+					}, nil
+				},
+			}, nil
+		},
+		OnAgentEvents: func(ctx context.Context, tc *TurnContext[string, *schema.Message], events *AsyncIterator[*TypedAgentEvent[*schema.Message]]) error {
+			for {
+				_, ok := events.Next()
+				if !ok {
+					break
+				}
+			}
+			tc.Loop.Stop()
+			return nil
+		},
+		SessionID:    sessionID,
+		SessionStore: sessionStore,
+		// Store (CheckpointStore) is intentionally not set
+	})
+
+	loop.Push("test-message")
+	loop.Run(ctx)
+	exit := loop.Wait()
+
+	assert.NoError(t, exit.ExitReason)
+	assert.True(t, processed, "Agent should have processed the message")
 }
 
 func TestNewTurnLoop_RunIsIdempotent(t *testing.T) {
