@@ -558,10 +558,10 @@ func TestPermissionDecisionAppearsInToolUseTimeline(t *testing.T) {
 		sawToolCallEndOK bool
 	)
 	runner := adk.NewRunner(ctx, adk.RunnerConfig{
-		Agent:        agent,
-		SessionID:    "permission-timeline",
-		SessionStore: &permissionSessionStore{},
-		Session:      &adk.SessionConfig{EventFlushBatchSize: 1},
+		Agent:         agent,
+		SessionID:     "permission-timeline",
+		SessionStore:  &permissionSessionStore{},
+		SessionConfig: &adk.SessionConfig{EventFlushBatchSize: 1},
 	})
 	iter := runner.Query(ctx, "use the tool", adk.WithTimelineEvents())
 	for {
@@ -629,10 +629,10 @@ func TestToolSpan_PermissionDenyEmitsBothSpansOnSameRun(t *testing.T) {
 	require.NoError(t, err)
 
 	runner := adk.NewRunner(ctx, adk.RunnerConfig{
-		Agent:        agent,
-		SessionID:    "permission-deny-span",
-		SessionStore: &permissionSessionStore{},
-		Session:      &adk.SessionConfig{EventFlushBatchSize: 1},
+		Agent:         agent,
+		SessionID:     "permission-deny-span",
+		SessionStore:  &permissionSessionStore{},
+		SessionConfig: &adk.SessionConfig{EventFlushBatchSize: 1},
 	})
 
 	var (
