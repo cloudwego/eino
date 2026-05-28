@@ -499,6 +499,28 @@ func getHitKey(tasks []*task, keys []string) []string {
 	return ret
 }
 
+// isNilCheckpointInput reports whether v should be omitted from cp.Inputs.
+// It catches both untyped nil and typed-nil values (e.g. (*T)(nil) boxed in
+// an interface{}). Typed-nil pointers compare unequal to nil at the interface
+// level but cannot be encoded by gob ("cannot encode nil pointer of type T
+// inside interface"), so they must be filtered out before persistence.
+//
+// Skipping a typed-nil entry is equivalent to omitting it: on resume,
+// restoreTasks reconstructs a zero-valued input via inputZeroValue() /
+// inputEmptyStream() for any rerun node that has no entry in cp.Inputs,
+// which yields the same nil-pointer value the producer originally captured.
+func isNilCheckpointInput(v any) bool {
+	if v == nil {
+		return true
+	}
+	rv := reflect.ValueOf(v)
+	switch rv.Kind() {
+	case reflect.Ptr, reflect.Interface, reflect.Map, reflect.Slice, reflect.Chan, reflect.Func:
+		return rv.IsNil()
+	}
+	return false
+}
+
 func (r *runner) handleInterrupt(
 	ctx context.Context,
 	tempInfo *interruptTempInfo,
@@ -545,7 +567,9 @@ func (r *runner) handleInterrupt(
 	cp.InterruptID2Addr, cp.InterruptID2State = core.SignalToPersistenceMaps(is)
 
 	for _, t := range nextTasks {
-		cp.Inputs[t.nodeKey] = t.input
+		if !isNilCheckpointInput(t.input) {
+			cp.Inputs[t.nodeKey] = t.input
+		}
 	}
 	err = r.checkPointer.convertCheckPoint(cp, isStream)
 	if err != nil {
@@ -683,7 +707,7 @@ func (r *runner) handleInterruptWithSubGraphAndRerunNodes(
 	}
 	for _, t := range rerunTasks {
 		cp.RerunNodes = append(cp.RerunNodes, t.nodeKey)
-		if t.originalInput != nil {
+		if !isNilCheckpointInput(t.originalInput) {
 			cp.Inputs[t.nodeKey] = t.originalInput
 		}
 	}
