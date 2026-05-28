@@ -2002,9 +2002,8 @@ func TestTypedToolStreamEventAgenticMessageSetsStreamingMeta(t *testing.T) {
 	require.Len(t, result.ContentBlocks, 1)
 	assert.Nil(t, result.ContentBlocks[0].StreamingMeta)
 	require.NotNil(t, result.ContentBlocks[0].FunctionToolResult)
-	require.Len(t, result.ContentBlocks[0].FunctionToolResult.Content, 2)
-	assert.Equal(t, "first\n", result.ContentBlocks[0].FunctionToolResult.Content[0].Text.Text)
-	assert.Equal(t, "second\n", result.ContentBlocks[0].FunctionToolResult.Content[1].Text.Text)
+	require.Len(t, result.ContentBlocks[0].FunctionToolResult.Content, 1)
+	assert.Equal(t, "first\nsecond\n", result.ContentBlocks[0].FunctionToolResult.Content[0].Text.Text)
 }
 
 func TestTypedToolEnhancedStreamEventAgenticMessageSetsStreamingMeta(t *testing.T) {
@@ -2038,9 +2037,8 @@ func TestTypedToolEnhancedStreamEventAgenticMessageSetsStreamingMeta(t *testing.
 	require.Len(t, result.ContentBlocks, 1)
 	assert.Nil(t, result.ContentBlocks[0].StreamingMeta)
 	require.NotNil(t, result.ContentBlocks[0].FunctionToolResult)
-	require.Len(t, result.ContentBlocks[0].FunctionToolResult.Content, 2)
-	assert.Equal(t, "first\n", result.ContentBlocks[0].FunctionToolResult.Content[0].Text.Text)
-	assert.Equal(t, "second\n", result.ContentBlocks[0].FunctionToolResult.Content[1].Text.Text)
+	require.Len(t, result.ContentBlocks[0].FunctionToolResult.Content, 1)
+	assert.Equal(t, "first\nsecond\n", result.ContentBlocks[0].FunctionToolResult.Content[0].Text.Text)
 }
 
 // multimodalEnhancedInvokableTestTool returns a pre-built multimodal ToolResult.

@@ -63,6 +63,48 @@ func (a *sessionStreamingAgent) Run(_ context.Context, _ *AgentInput, _ ...Agent
 	return iter
 }
 
+type agenticSessionStreamingAgent struct {
+	chunks  []*schema.AgenticMessage
+	turnEnd *TurnEndState[*schema.AgenticMessage]
+}
+
+func (a *agenticSessionStreamingAgent) Name(_ context.Context) string {
+	return "agentic-session-stream-agent"
+}
+
+func (a *agenticSessionStreamingAgent) Description(_ context.Context) string {
+	return "agentic stream test agent"
+}
+
+func (a *agenticSessionStreamingAgent) Run(
+	_ context.Context,
+	_ *TypedAgentInput[*schema.AgenticMessage],
+	_ ...AgentRunOption,
+) *AsyncIterator[*TypedAgentEvent[*schema.AgenticMessage]] {
+	iter, gen := NewAsyncIteratorPair[*TypedAgentEvent[*schema.AgenticMessage]]()
+	go func() {
+		defer gen.Close()
+		gen.Send(&TypedAgentEvent[*schema.AgenticMessage]{
+			AgentName: "agentic-session-stream-agent",
+			Output: &TypedAgentOutput[*schema.AgenticMessage]{
+				MessageOutput: &TypedMessageVariant[*schema.AgenticMessage]{
+					IsStreaming:   true,
+					MessageStream: schema.StreamReaderFromArray(a.chunks),
+					AgenticRole:   schema.AgenticRoleTypeUser,
+				},
+			},
+		})
+		gen.Send(&TypedAgentEvent[*schema.AgenticMessage]{
+			AgentName: "agentic-session-stream-agent",
+			SessionEvent: &SessionEvent[*schema.AgenticMessage]{
+				Kind:    SessionEventTurnEnd,
+				TurnEnd: a.turnEnd,
+			},
+		})
+	}()
+	return iter
+}
+
 // TestStreamPersistence_CopyAndConcat verifies that streaming assistant outputs
 // produce a durable, fully-concatenated SessionEvent.Message AND remain consumable
 // from the live stream. Regression test for the pre-evaluation bug where
@@ -234,6 +276,172 @@ func TestStreamPersistence_SyncModeToolResultMaterializesBeforeDelivery(t *testi
 	assert.Equal(t, schema.Tool, observed.Message.Role)
 	assert.Equal(t, "tool result", observed.Message.Content)
 	assert.Nil(t, observed.MessageStream)
+}
+
+func TestStreamPersistence_AgenticToolResultChunksConcat(t *testing.T) {
+	ctx := context.Background()
+	store := newSessionHelperStore()
+	sid := "agentic-tool-stream-session"
+
+	agent := &agenticSessionStreamingAgent{
+		chunks: []*schema.AgenticMessage{
+			agenticToolResultMessage("call_1", "execute", "first\n"),
+			agenticToolResultMessage("call_1", "execute", "second\n"),
+		},
+		turnEnd: &TurnEndState[*schema.AgenticMessage]{
+			Messages: []*schema.AgenticMessage{
+				schema.UserAgenticMessage("q"),
+				agenticToolResultMessage("call_1", "execute", "first\nsecond\n"),
+			},
+		},
+	}
+
+	runner := NewTypedRunner(TypedRunnerConfig[*schema.AgenticMessage]{
+		Agent:           agent,
+		EnableStreaming: true,
+		SessionID:       sid,
+		SessionStore:    store,
+		SessionConfig:   &SessionConfig{EventFlushBatchSize: 1},
+	})
+
+	iter := runner.Run(ctx, []*schema.AgenticMessage{schema.UserAgenticMessage("q")})
+	for {
+		ev, ok := iter.Next()
+		if !ok {
+			break
+		}
+		require.NoError(t, ev.Err)
+		if ev.Output != nil && ev.Output.MessageOutput != nil &&
+			ev.Output.MessageOutput.IsStreaming && ev.Output.MessageOutput.MessageStream != nil {
+			for {
+				_, err := ev.Output.MessageOutput.MessageStream.Recv()
+				if err == io.EOF {
+					break
+				}
+				require.NoError(t, err)
+			}
+		}
+	}
+
+	var stored *SessionEvent[*schema.AgenticMessage]
+	store.mu.Lock()
+	snapshot := append([]SessionEventPayload{}, store.events...)
+	store.mu.Unlock()
+	for _, ep := range snapshot {
+		se, err := decodeSessionEvent[*schema.AgenticMessage](ep.Data)
+		require.NoError(t, err)
+		if se.Kind == SessionEventMessage && se.Message != nil &&
+			len(se.Message.ContentBlocks) == 1 &&
+			se.Message.ContentBlocks[0].Type == schema.ContentBlockTypeFunctionToolResult {
+			stored = se
+			break
+		}
+	}
+
+	require.NotNil(t, stored)
+	require.NotNil(t, stored.Message)
+	require.Len(t, stored.Message.ContentBlocks, 1)
+	ftr := stored.Message.ContentBlocks[0].FunctionToolResult
+	require.NotNil(t, ftr)
+	assert.Equal(t, "call_1", ftr.CallID)
+	assert.Equal(t, "execute", ftr.Name)
+	require.Len(t, ftr.Content, 1)
+	assert.Equal(t, "first\nsecond\n", ftr.Content[0].Text.Text)
+	assert.Nil(t, stored.Message.ContentBlocks[0].StreamingMeta)
+}
+
+func TestStreamPersistence_AgenticToolResultChunksWithStreamingMeta(t *testing.T) {
+	ctx := context.Background()
+	store := newSessionHelperStore()
+	sid := "agentic-tool-stream-meta-session"
+
+	first := agenticToolResultMessage("call_1", "execute", "first\n")
+	second := agenticToolResultMessage("call_1", "execute", "second\n")
+	first.ContentBlocks[0].StreamingMeta = &schema.StreamingMeta{Index: 0}
+	second.ContentBlocks[0].StreamingMeta = &schema.StreamingMeta{Index: 0}
+
+	agent := &agenticSessionStreamingAgent{
+		chunks: []*schema.AgenticMessage{first, second},
+		turnEnd: &TurnEndState[*schema.AgenticMessage]{
+			Messages: []*schema.AgenticMessage{
+				schema.UserAgenticMessage("q"),
+				agenticToolResultMessage("call_1", "execute", "first\nsecond\n"),
+			},
+		},
+	}
+
+	runner := NewTypedRunner(TypedRunnerConfig[*schema.AgenticMessage]{
+		Agent:           agent,
+		EnableStreaming: true,
+		SessionID:       sid,
+		SessionStore:    store,
+		SessionConfig:   &SessionConfig{EventFlushBatchSize: 1},
+	})
+
+	iter := runner.Run(ctx, []*schema.AgenticMessage{schema.UserAgenticMessage("q")})
+	for {
+		ev, ok := iter.Next()
+		if !ok {
+			break
+		}
+		require.NoError(t, ev.Err)
+		if ev.Output != nil && ev.Output.MessageOutput != nil &&
+			ev.Output.MessageOutput.IsStreaming && ev.Output.MessageOutput.MessageStream != nil {
+			for {
+				_, err := ev.Output.MessageOutput.MessageStream.Recv()
+				if err == io.EOF {
+					break
+				}
+				require.NoError(t, err)
+			}
+		}
+	}
+
+	var stored *schema.AgenticMessage
+	store.mu.Lock()
+	snapshot := append([]SessionEventPayload{}, store.events...)
+	store.mu.Unlock()
+	for _, ep := range snapshot {
+		se, err := decodeSessionEvent[*schema.AgenticMessage](ep.Data)
+		require.NoError(t, err)
+		if se.Kind == SessionEventMessage && se.Message != nil &&
+			len(se.Message.ContentBlocks) == 1 &&
+			se.Message.ContentBlocks[0].Type == schema.ContentBlockTypeFunctionToolResult {
+			stored = se.Message
+			break
+		}
+	}
+
+	require.NotNil(t, stored)
+	require.Len(t, stored.ContentBlocks, 1)
+	block := stored.ContentBlocks[0]
+	assert.Nil(t, block.StreamingMeta)
+	require.NotNil(t, block.FunctionToolResult)
+	assert.Equal(t, "call_1", block.FunctionToolResult.CallID)
+	assert.Equal(t, "execute", block.FunctionToolResult.Name)
+	require.Len(t, block.FunctionToolResult.Content, 1)
+	assert.Equal(t, "first\nsecond\n", block.FunctionToolResult.Content[0].Text.Text)
+}
+
+func agenticToolResultMessage(callID, name, text string) *schema.AgenticMessage {
+	return &schema.AgenticMessage{
+		Role: schema.AgenticRoleTypeUser,
+		ContentBlocks: []*schema.ContentBlock{
+			{
+				Type: schema.ContentBlockTypeFunctionToolResult,
+				FunctionToolResult: &schema.FunctionToolResult{
+					CallID: callID,
+					Name:   name,
+					Content: []*schema.FunctionToolResultContentBlock{
+						{
+							Type: schema.FunctionToolResultContentBlockTypeText,
+							Text: &schema.UserInputText{Text: text},
+						},
+					},
+				},
+			},
+		},
+	}
 }
 
 // TestStreamPersistence_GetMessageError_NotEnqueued verifies that a stream
