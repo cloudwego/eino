@@ -355,7 +355,7 @@ func TestRunner_PersistsAgentInterruptSessionEvent(t *testing.T) {
 		CheckPointStore: store,
 		SessionID:       "agent-interrupt-session",
 		SessionStore:    store,
-		Session:         &SessionConfig{EventFlushBatchSize: 1},
+		SessionConfig:   &SessionConfig{EventFlushBatchSize: 1},
 	})
 
 	var liveInterruptContexts []*InterruptCtx
@@ -492,7 +492,7 @@ func TestWithTimelineEvents_LiveExposure(t *testing.T) {
 
 	t.Run("stripped by default", func(t *testing.T) {
 		store := newSessionHelperStore()
-		runner := NewRunner(ctx, RunnerConfig{Agent: agent, SessionID: "timeline-default", SessionStore: store, Session: &SessionConfig{EventFlushBatchSize: 1}})
+		runner := NewRunner(ctx, RunnerConfig{Agent: agent, SessionID: "timeline-default", SessionStore: store, SessionConfig: &SessionConfig{EventFlushBatchSize: 1}})
 		iter := runner.Query(ctx, "hello")
 		for {
 			event, ok := iter.Next()
@@ -511,7 +511,7 @@ func TestWithTimelineEvents_LiveExposure(t *testing.T) {
 
 	t.Run("exposed when requested", func(t *testing.T) {
 		store := newSessionHelperStore()
-		runner := NewRunner(ctx, RunnerConfig{Agent: agent, SessionID: "timeline-visible", SessionStore: store, Session: &SessionConfig{EventFlushBatchSize: 1}})
+		runner := NewRunner(ctx, RunnerConfig{Agent: agent, SessionID: "timeline-visible", SessionStore: store, SessionConfig: &SessionConfig{EventFlushBatchSize: 1}})
 		var kinds []SessionEventKind
 		var liveUserInput bool
 		iter := runner.Query(ctx, "hello", WithTimelineEvents())
@@ -583,10 +583,10 @@ func TestRunner_ExtensionEventSentWithTypedSendEventIsLiveAndPersisted(t *testin
 	t.Run("visible when timeline requested", func(t *testing.T) {
 		store := newSessionHelperStore()
 		runner := NewRunner(ctx, RunnerConfig{
-			Agent:        agent,
-			SessionID:    "extension-event-session-visible",
-			SessionStore: store,
-			Session:      &SessionConfig{EventFlushBatchSize: 1},
+			Agent:         agent,
+			SessionID:     "extension-event-session-visible",
+			SessionStore:  store,
+			SessionConfig: &SessionConfig{EventFlushBatchSize: 1},
 		})
 
 		var liveExtension *SessionEvent[*schema.Message]
@@ -634,10 +634,10 @@ func TestRunner_ExtensionEventSentWithTypedSendEventIsLiveAndPersisted(t *testin
 	t.Run("stripped from live stream by default", func(t *testing.T) {
 		store := newSessionHelperStore()
 		runner := NewRunner(ctx, RunnerConfig{
-			Agent:        agent,
-			SessionID:    "extension-event-session-stripped",
-			SessionStore: store,
-			Session:      &SessionConfig{EventFlushBatchSize: 1},
+			Agent:         agent,
+			SessionID:     "extension-event-session-stripped",
+			SessionStore:  store,
+			SessionConfig: &SessionConfig{EventFlushBatchSize: 1},
 		})
 
 		iter := runner.Query(ctx, "hello")
@@ -1217,10 +1217,10 @@ func TestRunnerTimelineRetryExhaustedStopReason(t *testing.T) {
 	ctx := context.Background()
 	store := newSessionHelperStore()
 	runner := NewRunner(ctx, RunnerConfig{
-		Agent:        &timelineErrorAgent{name: "retry-exhausted", err: &RetryExhaustedError{LastErr: errors.New("still failing"), TotalRetries: 1}},
-		SessionID:    "timeline-retry-exhausted",
-		SessionStore: store,
-		Session:      &SessionConfig{EventFlushBatchSize: 1},
+		Agent:         &timelineErrorAgent{name: "retry-exhausted", err: &RetryExhaustedError{LastErr: errors.New("still failing"), TotalRetries: 1}},
+		SessionID:     "timeline-retry-exhausted",
+		SessionStore:  store,
+		SessionConfig: &SessionConfig{EventFlushBatchSize: 1},
 	})
 
 	iter := runner.Query(ctx, "hi")
@@ -1242,10 +1242,10 @@ func TestRunnerTimelineFailedStopReason(t *testing.T) {
 	ctx := context.Background()
 	store := newSessionHelperStore()
 	runner := NewRunner(ctx, RunnerConfig{
-		Agent:        &timelineErrorAgent{name: "failed", err: errors.New("boom")},
-		SessionID:    "timeline-failed",
-		SessionStore: store,
-		Session:      &SessionConfig{EventFlushBatchSize: 1},
+		Agent:         &timelineErrorAgent{name: "failed", err: errors.New("boom")},
+		SessionID:     "timeline-failed",
+		SessionStore:  store,
+		SessionConfig: &SessionConfig{EventFlushBatchSize: 1},
 	})
 
 	iter := runner.Query(ctx, "hi")
@@ -1293,7 +1293,7 @@ func TestRunnerTimelineCancelStopReasonAndUserInterruptPersisted(t *testing.T) {
 		CheckPointStore: store,
 		SessionID:       "timeline-cancel",
 		SessionStore:    store,
-		Session:         &SessionConfig{EventFlushBatchSize: 1},
+		SessionConfig:   &SessionConfig{EventFlushBatchSize: 1},
 	})
 	cancelOpt, cancelFn := WithCancel()
 	iter := runner.Query(ctx, "hi", cancelOpt, WithCheckPointID("timeline-cancel-cp"))
@@ -1353,10 +1353,10 @@ func TestToolSpan_PersistedAroundToolCallAndLinksToMessages(t *testing.T) {
 
 	store := newSessionHelperStore()
 	runner := NewRunner(ctx, RunnerConfig{
-		Agent:        agent,
-		SessionID:    "tool-span-around",
-		SessionStore: store,
-		Session:      &SessionConfig{EventFlushBatchSize: 1},
+		Agent:         agent,
+		SessionID:     "tool-span-around",
+		SessionStore:  store,
+		SessionConfig: &SessionConfig{EventFlushBatchSize: 1},
 	})
 	iter := runner.Query(ctx, "go")
 	for {
@@ -1485,10 +1485,10 @@ func TestToolSpan_StreamableToolEmitsEndAfterEOF(t *testing.T) {
 
 	store := newSessionHelperStore()
 	runner := NewRunner(ctx, RunnerConfig{
-		Agent:        agent,
-		SessionID:    "tool-span-stream",
-		SessionStore: store,
-		Session:      &SessionConfig{EventFlushBatchSize: 1},
+		Agent:         agent,
+		SessionID:     "tool-span-stream",
+		SessionStore:  store,
+		SessionConfig: &SessionConfig{EventFlushBatchSize: 1},
 	})
 	iter := runner.Query(ctx, "stream go")
 	for {
