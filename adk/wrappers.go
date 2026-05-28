@@ -594,6 +594,18 @@ func functionToolResultAgenticMessage(callID, name string, content []*schema.Fun
 	}
 }
 
+func markAgenticMessageStreamingMeta(msg *schema.AgenticMessage, index int) {
+	if msg == nil {
+		return
+	}
+	for _, block := range msg.ContentBlocks {
+		if block == nil {
+			continue
+		}
+		block.StreamingMeta = &schema.StreamingMeta{Index: index}
+	}
+}
+
 func toolSearchResultAgenticMessage(callID, name string, tr *schema.ToolResult) (*schema.AgenticMessage, bool) {
 	if tr == nil || len(tr.Parts) != 1 {
 		return nil, false
@@ -745,6 +757,7 @@ func typedToolStreamEvent[M MessageType](callID, toolName, toolMsgID string, str
 		first := true
 		cvt := func(in string) (*schema.AgenticMessage, error) {
 			msg := functionToolResultAgenticMessage(callID, toolName, textToFunctionToolResultBlocks(in))
+			markAgenticMessageStreamingMeta(msg, 0)
 			if first {
 				first = false
 				msg.Extra = internal.SetMessageID(msg.Extra, toolMsgID)
@@ -813,6 +826,7 @@ func typedToolEnhancedStreamEvent[M MessageType](callID, toolName, toolMsgID str
 		first := true
 		cvt := func(in *schema.ToolResult) (*schema.AgenticMessage, error) {
 			msg := toolResultAgenticMessage(callID, toolName, in)
+			markAgenticMessageStreamingMeta(msg, 0)
 			if first {
 				first = false
 				msg.Extra = internal.SetMessageID(msg.Extra, toolMsgID)

@@ -1974,6 +1974,75 @@ func TestAgenticEventSenderToolHandler(t *testing.T) {
 	})
 }
 
+func TestTypedToolStreamEventAgenticMessageSetsStreamingMeta(t *testing.T) {
+	event := typedToolStreamEvent[*schema.AgenticMessage](
+		"call_1",
+		"execute",
+		"msg_1",
+		schema.StreamReaderFromArray([]string{"first\n", "second\n"}),
+	)
+	require.NotNil(t, event)
+	require.NotNil(t, event.Output)
+	require.NotNil(t, event.Output.MessageOutput)
+	require.True(t, event.Output.MessageOutput.IsStreaming)
+	require.NotNil(t, event.Output.MessageOutput.MessageStream)
+
+	first, err := event.Output.MessageOutput.MessageStream.Recv()
+	require.NoError(t, err)
+	require.Len(t, first.ContentBlocks, 1)
+	assert.Equal(t, &schema.StreamingMeta{Index: 0}, first.ContentBlocks[0].StreamingMeta)
+
+	second, err := event.Output.MessageOutput.MessageStream.Recv()
+	require.NoError(t, err)
+	require.Len(t, second.ContentBlocks, 1)
+	assert.Equal(t, &schema.StreamingMeta{Index: 0}, second.ContentBlocks[0].StreamingMeta)
+
+	result, err := schema.ConcatAgenticMessages([]*schema.AgenticMessage{first, second})
+	require.NoError(t, err)
+	require.Len(t, result.ContentBlocks, 1)
+	assert.Nil(t, result.ContentBlocks[0].StreamingMeta)
+	require.NotNil(t, result.ContentBlocks[0].FunctionToolResult)
+	require.Len(t, result.ContentBlocks[0].FunctionToolResult.Content, 2)
+	assert.Equal(t, "first\n", result.ContentBlocks[0].FunctionToolResult.Content[0].Text.Text)
+	assert.Equal(t, "second\n", result.ContentBlocks[0].FunctionToolResult.Content[1].Text.Text)
+}
+
+func TestTypedToolEnhancedStreamEventAgenticMessageSetsStreamingMeta(t *testing.T) {
+	event := typedToolEnhancedStreamEvent[*schema.AgenticMessage](
+		"call_1",
+		"execute",
+		"msg_1",
+		schema.StreamReaderFromArray([]*schema.ToolResult{
+			{Parts: []schema.ToolOutputPart{{Type: schema.ToolPartTypeText, Text: "first\n"}}},
+			{Parts: []schema.ToolOutputPart{{Type: schema.ToolPartTypeText, Text: "second\n"}}},
+		}),
+	)
+	require.NotNil(t, event)
+	require.NotNil(t, event.Output)
+	require.NotNil(t, event.Output.MessageOutput)
+	require.True(t, event.Output.MessageOutput.IsStreaming)
+	require.NotNil(t, event.Output.MessageOutput.MessageStream)
+
+	first, err := event.Output.MessageOutput.MessageStream.Recv()
+	require.NoError(t, err)
+	require.Len(t, first.ContentBlocks, 1)
+	assert.Equal(t, &schema.StreamingMeta{Index: 0}, first.ContentBlocks[0].StreamingMeta)
+
+	second, err := event.Output.MessageOutput.MessageStream.Recv()
+	require.NoError(t, err)
+	require.Len(t, second.ContentBlocks, 1)
+	assert.Equal(t, &schema.StreamingMeta{Index: 0}, second.ContentBlocks[0].StreamingMeta)
+
+	result, err := schema.ConcatAgenticMessages([]*schema.AgenticMessage{first, second})
+	require.NoError(t, err)
+	require.Len(t, result.ContentBlocks, 1)
+	assert.Nil(t, result.ContentBlocks[0].StreamingMeta)
+	require.NotNil(t, result.ContentBlocks[0].FunctionToolResult)
+	require.Len(t, result.ContentBlocks[0].FunctionToolResult.Content, 2)
+	assert.Equal(t, "first\n", result.ContentBlocks[0].FunctionToolResult.Content[0].Text.Text)
+	assert.Equal(t, "second\n", result.ContentBlocks[0].FunctionToolResult.Content[1].Text.Text)
+}
+
 // multimodalEnhancedInvokableTestTool returns a pre-built multimodal ToolResult.
 type multimodalEnhancedInvokableTestTool struct {
 	name   string
@@ -2091,6 +2160,7 @@ func TestTypedToolEnhancedEventAgenticToolSearchResult(t *testing.T) {
 		require.Len(t, msg.ContentBlocks, 1)
 		block := msg.ContentBlocks[0]
 		assert.Equal(t, schema.ContentBlockTypeToolSearchResult, block.Type)
+		assert.Equal(t, &schema.StreamingMeta{Index: 0}, block.StreamingMeta)
 		require.NotNil(t, block.ToolSearchFunctionToolResult)
 		assert.Equal(t, "call_2", block.ToolSearchFunctionToolResult.CallID)
 		assert.Equal(t, "tool_search", block.ToolSearchFunctionToolResult.Name)
