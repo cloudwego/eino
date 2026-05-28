@@ -30,8 +30,9 @@ import (
 // the implementation generates vectors before storing — the same embedder
 // must be used by the paired [retriever.Retriever].
 //
-// Use [Options.SubIndexes] to write documents into logical sub-partitions
-// within the same store.
+// Use [Options.Index] to choose a backend index at call time, and
+// [Options.SubIndexes] to write documents into logical sub-partitions within
+// the same store.
 //
 //go:generate  mockgen -destination ../../internal/mock/components/indexer/indexer_mock.go --package indexer -source interface.go
 type Indexer interface {
