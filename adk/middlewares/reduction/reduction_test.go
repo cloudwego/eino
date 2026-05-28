@@ -29,8 +29,11 @@ import (
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/adk/filesystem"
+	"github.com/cloudwego/eino/adk/session"
+	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/components/tool/utils"
+	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -2760,4 +2763,302 @@ func TestNewTypedAgenticMessage(t *testing.T) {
 	assert.NotNil(t, mw)
 
 	var _ adk.TypedChatModelAgentMiddleware[*schema.AgenticMessage] = mw
+}
+
+func TestBuildClearRewriteEvents(t *testing.T) {
+	assistant := schema.AssistantMessage("", []schema.ToolCall{
+		{ID: "call_1", Type: "function", Function: schema.FunctionCall{Name: "write_file", Arguments: `{"file":"a"}`}},
+	})
+	toolMsg := schema.ToolMessage("ok", "call_1")
+	adk.EnsureMessageID(assistant)
+	adk.EnsureMessageID(toolMsg)
+	original := []adk.Message{assistant, toolMsg}
+
+	t.Run("deletion", func(t *testing.T) {
+		events, err := buildClearRewriteEvents(original, nil)
+		assert.NoError(t, err)
+		assert.Len(t, events, 1)
+		assert.Equal(t, adk.SessionEventMessagesDeleted, events[0].Kind)
+		assert.Equal(t, []string{adk.GetMessageID(assistant), adk.GetMessageID(toolMsg)}, events[0].MessagesDeleted.MessageIDs)
+	})
+
+	t.Run("replacement inserts before delete", func(t *testing.T) {
+		replacement := schema.UserMessage("<system-reminder>done</system-reminder>")
+		events, err := buildClearRewriteEvents(original, []adk.Message{replacement})
+		assert.NoError(t, err)
+		assert.Len(t, events, 2)
+		assert.Equal(t, adk.SessionEventMessageInserted, events[0].Kind)
+		assert.Equal(t, adk.GetMessageID(assistant), events[0].MessageInserted.BeforeMessageID)
+		assert.NotEmpty(t, adk.GetMessageID(events[0].MessageInserted.Message))
+		assert.Equal(t, adk.SessionEventMessagesDeleted, events[1].Kind)
+	})
+
+	t.Run("same id content rewrite emits update", func(t *testing.T) {
+		updatedAssistant := schema.AssistantMessage("cleared", nil)
+		updatedAssistant.Extra = map[string]any{"_eino_msg_id": adk.GetMessageID(assistant)}
+		updatedTool := schema.ToolMessage("[placeholder]", "call_1")
+		updatedTool.Extra = map[string]any{"_eino_msg_id": adk.GetMessageID(toolMsg)}
+		events, err := buildClearRewriteEvents(original, []adk.Message{updatedAssistant, updatedTool})
+		assert.NoError(t, err)
+		assert.Len(t, events, 2)
+		assert.Equal(t, adk.SessionEventMessageUpdated, events[0].Kind)
+		assert.Equal(t, adk.GetMessageID(assistant), events[0].MessageUpdated.MessageID)
+		assert.Equal(t, adk.SessionEventMessageUpdated, events[1].Kind)
+		assert.Equal(t, adk.GetMessageID(toolMsg), events[1].MessageUpdated.MessageID)
+	})
+
+	t.Run("duplicate replacement id errors", func(t *testing.T) {
+		a := schema.UserMessage("a")
+		b := schema.UserMessage("b")
+		dupID := "duplicate-id"
+		a.Extra = map[string]any{"_eino_msg_id": dupID}
+		b.Extra = map[string]any{"_eino_msg_id": dupID}
+		_, err := buildClearRewriteEvents(original, []adk.Message{a, b})
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "duplicate")
+	})
+
+	t.Run("agentic deletion", func(t *testing.T) {
+		agenticAssistant := &schema.AgenticMessage{
+			Role: schema.AgenticRoleTypeAssistant,
+			ContentBlocks: []*schema.ContentBlock{
+				{
+					Type: schema.ContentBlockTypeFunctionToolCall,
+					FunctionToolCall: &schema.FunctionToolCall{
+						CallID: "agentic-call",
+						Name:   "write_file",
+					},
+				},
+			},
+		}
+		agenticTool := &schema.AgenticMessage{
+			Role: schema.AgenticRoleTypeUser,
+			ContentBlocks: []*schema.ContentBlock{
+				{
+					Type: schema.ContentBlockTypeFunctionToolResult,
+					FunctionToolResult: &schema.FunctionToolResult{
+						CallID: "agentic-call",
+						Name:   "write_file",
+					},
+				},
+			},
+		}
+		adk.EnsureMessageID(agenticAssistant)
+		adk.EnsureMessageID(agenticTool)
+		events, err := buildClearRewriteEvents([]*schema.AgenticMessage{agenticAssistant, agenticTool}, nil)
+		assert.NoError(t, err)
+		assert.Len(t, events, 1)
+		assert.Equal(t, adk.SessionEventMessagesDeleted, events[0].Kind)
+	})
+}
+
+type reductionRewritePersistModel struct {
+	calls  int
+	inputs [][]*schema.Message
+}
+
+func (m *reductionRewritePersistModel) Generate(_ context.Context, input []*schema.Message, _ ...model.Option) (*schema.Message, error) {
+	m.calls++
+	m.inputs = append(m.inputs, copyMessages(input))
+	if m.calls == 1 {
+		return schema.AssistantMessage("", []schema.ToolCall{
+			{
+				ID:       "call_1",
+				Type:     "function",
+				Function: schema.FunctionCall{Name: "mock_invokable_tool", Arguments: `{"value":"x"}`},
+			},
+		}), nil
+	}
+	return schema.AssistantMessage("done", nil), nil
+}
+
+func (m *reductionRewritePersistModel) Stream(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+	msg, err := m.Generate(ctx, input, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return schema.StreamReaderFromArray([]*schema.Message{msg}), nil
+}
+
+func TestClearMessageRewriterPersistsMessagesDeletedThroughRunner(t *testing.T) {
+	ctx := context.Background()
+	store := session.NewInMemoryStore()
+	model := &reductionRewritePersistModel{}
+	mw, err := New(ctx, &Config{
+		SkipTruncation:            true,
+		MaxTokensForClear:         1,
+		ClearRetentionSuffixLimit: -1,
+		TokenCounter: func(context.Context, []adk.Message, []*schema.ToolInfo) (int64, error) {
+			return 1000, nil
+		},
+		ClearMessageRewriter: func(context.Context, adk.Message, []adk.Message) ([]adk.Message, error) {
+			return nil, nil
+		},
+	})
+	assert.NoError(t, err)
+	agent, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
+		Name:        "reduction-delete-agent",
+		Description: "reduction delete test agent",
+		Model:       model,
+		ToolsConfig: adk.ToolsConfig{ToolsNodeConfig: compose.ToolsNodeConfig{Tools: []tool.BaseTool{mockInvokableTool()}}},
+		Handlers:    []adk.ChatModelAgentMiddleware{mw},
+	})
+	assert.NoError(t, err)
+
+	runner := adk.NewRunner(ctx, adk.RunnerConfig{
+		Agent:         agent,
+		SessionID:     "reduction-delete-session",
+		SessionStore:  store,
+		SessionConfig: &adk.SessionConfig{EventFlushBatchSize: 1},
+	})
+	drainReductionEvents(t, runner.Query(ctx, "please call the tool"))
+
+	events := loadReductionSessionEvents(t, ctx, store, "reduction-delete-session")
+	var deletedIDs []string
+	for _, event := range events {
+		if event.MessagesDeleted != nil {
+			deletedIDs = event.MessagesDeleted.MessageIDs
+		}
+	}
+	assert.Len(t, deletedIDs, 2)
+
+	nextModel := &reductionRewritePersistModel{}
+	nextAgent, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
+		Name:        "reduction-delete-agent",
+		Description: "reduction delete test agent",
+		Model:       nextModel,
+		ToolsConfig: adk.ToolsConfig{ToolsNodeConfig: compose.ToolsNodeConfig{Tools: []tool.BaseTool{mockInvokableTool()}}},
+		Handlers:    []adk.ChatModelAgentMiddleware{mw},
+	})
+	assert.NoError(t, err)
+	nextRunner := adk.NewRunner(ctx, adk.RunnerConfig{
+		Agent:        nextAgent,
+		SessionID:    "reduction-delete-session",
+		SessionStore: store,
+	})
+	drainReductionEvents(t, nextRunner.Query(ctx, "next turn"))
+
+	if assert.NotEmpty(t, nextModel.inputs) {
+		for _, msg := range nextModel.inputs[0] {
+			assert.False(t, msg.Role == schema.Tool && msg.ToolCallID == "call_1")
+			for _, tc := range msg.ToolCalls {
+				assert.NotEqual(t, "call_1", tc.ID)
+			}
+		}
+	}
+}
+
+func TestClearMessageRewriterAbortDoesNotPersistStructuralEvents(t *testing.T) {
+	ctx := context.Background()
+	store := session.NewInMemoryStore()
+	model := &reductionRewritePersistModel{}
+	callCount := 0
+	mw, err := New(ctx, &Config{
+		SkipTruncation:            true,
+		MaxTokensForClear:         1,
+		ClearRetentionSuffixLimit: -1,
+		ClearAtLeastTokens:        10,
+		TokenCounter: func(context.Context, []adk.Message, []*schema.ToolInfo) (int64, error) {
+			callCount++
+			if callCount == 1 {
+				return 1000, nil
+			}
+			return 999, nil
+		},
+		ClearMessageRewriter: func(context.Context, adk.Message, []adk.Message) ([]adk.Message, error) {
+			return nil, nil
+		},
+	})
+	assert.NoError(t, err)
+	agent, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
+		Name:        "reduction-abort-agent",
+		Description: "reduction abort test agent",
+		Model:       model,
+		ToolsConfig: adk.ToolsConfig{ToolsNodeConfig: compose.ToolsNodeConfig{Tools: []tool.BaseTool{mockInvokableTool()}}},
+		Handlers:    []adk.ChatModelAgentMiddleware{mw},
+	})
+	assert.NoError(t, err)
+	runner := adk.NewRunner(ctx, adk.RunnerConfig{
+		Agent:         agent,
+		SessionID:     "reduction-abort-session",
+		SessionStore:  store,
+		SessionConfig: &adk.SessionConfig{EventFlushBatchSize: 1},
+	})
+	drainReductionEvents(t, runner.Query(ctx, "please call the tool"))
+
+	events := loadReductionSessionEvents(t, ctx, store, "reduction-abort-session")
+	for _, event := range events {
+		assert.Nil(t, event.MessageUpdated)
+		assert.Nil(t, event.MessageInserted)
+		assert.Nil(t, event.MessagesDeleted)
+	}
+}
+
+func TestClearAtLeastTokensAbortDoesNotPersistMessageUpdates(t *testing.T) {
+	ctx := context.Background()
+	store := session.NewInMemoryStore()
+	backend := filesystem.NewInMemoryBackend()
+	model := &reductionRewritePersistModel{}
+	callCount := 0
+	mw, err := New(ctx, &Config{
+		Backend:                   backend,
+		SkipTruncation:            true,
+		MaxTokensForClear:         1,
+		ClearRetentionSuffixLimit: -1,
+		ClearAtLeastTokens:        10,
+		TokenCounter: func(context.Context, []adk.Message, []*schema.ToolInfo) (int64, error) {
+			callCount++
+			if callCount == 1 {
+				return 1000, nil
+			}
+			return 999, nil
+		},
+	})
+	assert.NoError(t, err)
+	agent, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
+		Name:        "reduction-clear-abort-agent",
+		Description: "reduction clear abort test agent",
+		Model:       model,
+		ToolsConfig: adk.ToolsConfig{ToolsNodeConfig: compose.ToolsNodeConfig{Tools: []tool.BaseTool{mockInvokableTool()}}},
+		Handlers:    []adk.ChatModelAgentMiddleware{mw},
+	})
+	assert.NoError(t, err)
+	runner := adk.NewRunner(ctx, adk.RunnerConfig{
+		Agent:         agent,
+		SessionID:     "reduction-clear-abort-session",
+		SessionStore:  store,
+		SessionConfig: &adk.SessionConfig{EventFlushBatchSize: 1},
+	})
+	drainReductionEvents(t, runner.Query(ctx, "please call the tool"))
+
+	events := loadReductionSessionEvents(t, ctx, store, "reduction-clear-abort-session")
+	for _, event := range events {
+		assert.Nil(t, event.MessageUpdated)
+	}
+}
+
+func drainReductionEvents(t *testing.T, iter *adk.AsyncIterator[*adk.AgentEvent]) {
+	t.Helper()
+	for {
+		event, ok := iter.Next()
+		if !ok {
+			return
+		}
+		assert.NoError(t, event.Err)
+	}
+}
+
+func loadReductionSessionEvents(t *testing.T, ctx context.Context, store adk.SessionStore, sessionID string) []*adk.SessionEvent[*schema.Message] {
+	t.Helper()
+	res, err := store.LoadEvents(ctx, sessionID, &adk.LoadEventsRequest{})
+	assert.NoError(t, err)
+	events := make([]*adk.SessionEvent[*schema.Message], 0, len(res.Events))
+	for _, payload := range res.Events {
+		var event adk.SessionEvent[*schema.Message]
+		err = (&schema.HumanReadableSerializer{}).Unmarshal(payload.Data, &event)
+		assert.NoError(t, err)
+		assert.NoError(t, adk.NormalizeSessionEventKind(&event))
+		events = append(events, &event)
+	}
+	return events
 }
