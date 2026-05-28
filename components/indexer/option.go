@@ -20,10 +20,21 @@ import "github.com/cloudwego/eino/components/embedding"
 
 // Options is the options for the indexer.
 type Options struct {
+	// Index is the index for the indexer, index in different indexers may be different.
+	Index *string
 	// SubIndexes is the sub indexes to be indexed.
 	SubIndexes []string
 	// Embedding is the embedding component.
 	Embedding embedding.Embedder
+}
+
+// WithIndex wraps the index option.
+func WithIndex(index string) Option {
+	return Option{
+		apply: func(opts *Options) {
+			opts.Index = &index
+		},
+	}
 }
 
 // WithSubIndexes is the option to set the sub indexes for the indexer.

@@ -27,17 +27,20 @@ import (
 func TestOptions(t *testing.T) {
 	convey.Convey("test options", t, func() {
 		var (
+			index      = "index"
 			subIndexes = []string{"index_1", "index_2"}
 			e          = &embedding.MockEmbedder{}
 		)
 
 		opts := GetCommonOptions(
 			&Options{},
+			WithIndex(index),
 			WithSubIndexes(subIndexes),
 			WithEmbedding(e),
 		)
 
 		convey.So(opts, convey.ShouldResemble, &Options{
+			Index:      &index,
 			SubIndexes: subIndexes,
 			Embedding:  e,
 		})
