@@ -986,6 +986,11 @@ func ConcatAgenticMessages(msgs []*AgenticMessage) (*AgenticMessage, error) {
 		for _, idx := range blockIndices {
 			blocks = append(blocks, indexToBlock[idx])
 		}
+	} else if len(blocks) > 1 {
+		blocks, err = concatAdjacentFunctionToolResultBlocks(blocks)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	if len(extraList) > 0 {
@@ -1642,12 +1647,134 @@ func concatFunctionToolResults(results []*FunctionToolResult) (*FunctionToolResu
 			return nil, fmt.Errorf("expected tool name '%s' for function tool result, but got '%s'", ret.Name, r.Name)
 		}
 
-		for _, b := range r.Content {
-			if b == nil {
-				continue
-			}
-			ret.Content = append(ret.Content, b)
+		var err error
+		ret.Content, err = concatFunctionToolResultContent(ret.Content, r.Content)
+		if err != nil {
+			return nil, err
 		}
+	}
+
+	return ret, nil
+}
+
+func concatAdjacentFunctionToolResultBlocks(blocks []*ContentBlock) ([]*ContentBlock, error) {
+	if len(blocks) <= 1 {
+		return blocks, nil
+	}
+
+	ret := make([]*ContentBlock, 0, len(blocks))
+	for _, block := range blocks {
+		if len(ret) == 0 || !canConcatFunctionToolResultBlocks(ret[len(ret)-1], block) {
+			ret = append(ret, block)
+			continue
+		}
+
+		merged, err := concatFunctionToolResultBlocks(ret[len(ret)-1], block)
+		if err != nil {
+			return nil, err
+		}
+		ret[len(ret)-1] = merged
+	}
+
+	return ret, nil
+}
+
+func canConcatFunctionToolResultBlocks(a, b *ContentBlock) bool {
+	if a == nil || b == nil ||
+		a.Type != ContentBlockTypeFunctionToolResult ||
+		b.Type != ContentBlockTypeFunctionToolResult ||
+		a.FunctionToolResult == nil ||
+		b.FunctionToolResult == nil {
+		return false
+	}
+
+	if a.FunctionToolResult.CallID != "" && b.FunctionToolResult.CallID != "" &&
+		a.FunctionToolResult.CallID != b.FunctionToolResult.CallID {
+		return false
+	}
+	if a.FunctionToolResult.Name != "" && b.FunctionToolResult.Name != "" &&
+		a.FunctionToolResult.Name != b.FunctionToolResult.Name {
+		return false
+	}
+
+	return a.FunctionToolResult.CallID != "" || b.FunctionToolResult.CallID != "" ||
+		(a.FunctionToolResult.Name != "" && a.FunctionToolResult.Name == b.FunctionToolResult.Name)
+}
+
+func concatFunctionToolResultBlocks(a, b *ContentBlock) (*ContentBlock, error) {
+	result, err := concatFunctionToolResults([]*FunctionToolResult{a.FunctionToolResult, b.FunctionToolResult})
+	if err != nil {
+		return nil, err
+	}
+
+	block := NewContentBlock(result)
+	var extras []map[string]any
+	if len(a.Extra) > 0 {
+		extras = append(extras, a.Extra)
+	}
+	if len(b.Extra) > 0 {
+		extras = append(extras, b.Extra)
+	}
+	if len(extras) > 0 {
+		block.Extra, err = concatExtra(extras)
+		if err != nil {
+			return nil, fmt.Errorf("failed to concat function tool result block extras: %w", err)
+		}
+	}
+
+	return block, nil
+}
+
+func concatFunctionToolResultContent(
+	left, right []*FunctionToolResultContentBlock,
+) ([]*FunctionToolResultContentBlock, error) {
+	ret := append([]*FunctionToolResultContentBlock(nil), left...)
+	for _, block := range right {
+		if block == nil {
+			continue
+		}
+		if len(ret) > 0 && canConcatFunctionToolResultTextBlocks(ret[len(ret)-1], block) {
+			merged, err := concatFunctionToolResultTextBlocks(ret[len(ret)-1], block)
+			if err != nil {
+				return nil, err
+			}
+			ret[len(ret)-1] = merged
+			continue
+		}
+		ret = append(ret, block)
+	}
+
+	return ret, nil
+}
+
+func canConcatFunctionToolResultTextBlocks(a, b *FunctionToolResultContentBlock) bool {
+	return a != nil && b != nil &&
+		a.Type == FunctionToolResultContentBlockTypeText &&
+		b.Type == FunctionToolResultContentBlockTypeText &&
+		a.Text != nil && b.Text != nil
+}
+
+func concatFunctionToolResultTextBlocks(
+	a, b *FunctionToolResultContentBlock,
+) (*FunctionToolResultContentBlock, error) {
+	ret := &FunctionToolResultContentBlock{
+		Type: FunctionToolResultContentBlockTypeText,
+		Text: &UserInputText{Text: a.Text.Text + b.Text.Text},
+	}
+
+	var extras []map[string]any
+	if len(a.Extra) > 0 {
+		extras = append(extras, a.Extra)
+	}
+	if len(b.Extra) > 0 {
+		extras = append(extras, b.Extra)
+	}
+	if len(extras) > 0 {
+		extra, err := concatExtra(extras)
+		if err != nil {
+			return nil, fmt.Errorf("failed to concat function tool result content extras: %w", err)
+		}
+		ret.Extra = extra
 	}
 
 	return ret, nil
