@@ -94,13 +94,11 @@ func patchToolCallsForMessage[M adk.MessageType](ctx context.Context,
 ) (context.Context, *adk.TypedChatModelAgentState[M], error) {
 	// seenIDs stores unique tool call IDs collected by reverse traversal
 	seenIDs := make(map[string]struct{})
-	groupedMessages := make([][]*schema.Message, 0, len(state.Messages))
-	totalMsgCount := 0
+	patched := make([]*schema.Message, 0, len(state.Messages))
 
 	// Iterate messages in reverse order to track existing tool call IDs
 	for i := len(state.Messages) - 1; i >= 0; i-- {
 		msg := state.Messages[i]
-		currentMessages := []*schema.Message{msg}
 
 		if msg.Role == schema.Tool {
 			seenIDs[msg.ToolCallID] = struct{}{}
@@ -113,22 +111,16 @@ func patchToolCallsForMessage[M adk.MessageType](ctx context.Context,
 					if err != nil {
 						return ctx, nil, err
 					}
-					currentMessages = append(currentMessages, toolMsg)
+					patched = append(patched, toolMsg)
 				}
 			}
 		}
 
-		groupedMessages = append(groupedMessages, currentMessages)
-		totalMsgCount += len(currentMessages)
-	}
-
-	patched := make([]*schema.Message, 0, totalMsgCount)
-	for i := len(groupedMessages) - 1; i >= 0; i-- {
-		patched = append(patched, groupedMessages[i]...)
+		patched = append(patched, msg)
 	}
 
 	nState := *state
-	nState.Messages = patched
+	nState.Messages = reverse(patched)
 	return ctx, any(&nState).(*adk.TypedChatModelAgentState[M]), nil
 }
 
@@ -139,13 +131,11 @@ func patchToolCallsForAgenticMessage[M adk.MessageType](ctx context.Context,
 ) (context.Context, *adk.TypedChatModelAgentState[M], error) {
 	// seenIDs stores unique tool call IDs collected by reverse traversal
 	seenIDs := make(map[string]struct{})
-	groupedMessages := make([][]*schema.AgenticMessage, 0, len(state.Messages))
-	totalMsgCount := 0
+	patched := make([]*schema.AgenticMessage, 0, len(state.Messages))
 
 	// Iterate messages in reverse order to track existing tool call IDs
 	for i := len(state.Messages) - 1; i >= 0; i-- {
 		msg := state.Messages[i]
-		currentMessages := []*schema.AgenticMessage{msg}
 		currentToolIDs := make(map[string]struct{})
 
 		for _, block := range msg.ContentBlocks {
@@ -164,22 +154,17 @@ func patchToolCallsForAgenticMessage[M adk.MessageType](ctx context.Context,
 					if err != nil {
 						return ctx, nil, err
 					}
-					currentMessages = append(currentMessages, toolMsg)
+					patched = append(patched, toolMsg)
 				}
 			}
 		}
-		maps.Copy(seenIDs, currentToolIDs)
-		groupedMessages = append(groupedMessages, currentMessages)
-		totalMsgCount += len(currentMessages)
-	}
 
-	patched := make([]*schema.AgenticMessage, 0, totalMsgCount)
-	for i := len(groupedMessages) - 1; i >= 0; i-- {
-		patched = append(patched, groupedMessages[i]...)
+		patched = append(patched, msg)
+		maps.Copy(seenIDs, currentToolIDs)
 	}
 
 	nState := *state
-	nState.Messages = patched
+	nState.Messages = reverse(patched)
 	return ctx, any(&nState).(*adk.TypedChatModelAgentState[M]), nil
 }
 
@@ -227,6 +212,13 @@ func createPatchedAgenticToolMessage(ctx context.Context, gen func(ctx context.C
 			}),
 		},
 	}, nil
+}
+
+func reverse[M adk.MessageType](s []M) []M {
+	for i, j := 0, len(s)-1; i < j; i, j = i+1, j-1 {
+		s[i], s[j] = s[j], s[i]
+	}
+	return s
 }
 
 const (
