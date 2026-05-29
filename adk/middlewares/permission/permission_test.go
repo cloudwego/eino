@@ -18,6 +18,7 @@ package permission
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"strings"
@@ -220,8 +221,8 @@ func TestPermissionGate_AskThenResumeApprovedWithUpdatedInput(t *testing.T) {
 	require.True(t, ok)
 	require.NotNil(t, askState.Info)
 	assert.Equal(t, "WriteFile", askState.Info.ToolName)
-	assert.Equal(t, "call_ask", askState.Info.CallID)
-	assert.Equal(t, `{"path":"/etc/passwd"}`, askState.Info.Arguments)
+	assert.Equal(t, "call_ask", askState.CallID)
+	assert.Equal(t, `{"path":"/etc/passwd"}`, askState.Arguments)
 
 	resumeCtx := resumeContext(signal, &ResumeResponse{
 		Action:       ResumeActionApprove,
@@ -233,6 +234,113 @@ func TestPermissionGate_AskThenResumeApprovedWithUpdatedInput(t *testing.T) {
 	require.NotNil(t, result)
 	assert.True(t, result.allowed)
 	assert.Equal(t, `{"path":"/tmp/safe.txt"}`, result.argument.Text)
+}
+
+func TestPermissionGate_AskPublicInfoOmitsPrivateFields(t *testing.T) {
+	m := NewTyped[*schema.Message](func(ctx context.Context, tCtx *adk.ToolContext, args *schema.ToolArgument) (*GateCheckResult, error) {
+		return &GateCheckResult{Decision: GateAsk, Message: `approve call_public_info with {"path":"/etc/passwd"}?`}, nil
+	})
+
+	tCtx := &adk.ToolContext{Name: "WriteFile", CallID: "call_public_info"}
+	_, err := m.permissionGate(withAddress(context.Background()), tCtx, &schema.ToolArgument{Text: `{"path":"/etc/passwd"}`})
+	require.Error(t, err)
+
+	info := requireAskInfo(t, err)
+	assert.Equal(t, "WriteFile", info.ToolName)
+
+	data, err := json.Marshal(info)
+	require.NoError(t, err)
+	got := string(data)
+	assert.Contains(t, got, "ToolName")
+	assert.NotContains(t, got, "CallID")
+	assert.NotContains(t, got, "Arguments")
+	assert.NotContains(t, got, "Message")
+	assert.NotContains(t, got, "call_public_info")
+	assert.NotContains(t, got, `{"path":"/etc/passwd"}`)
+}
+
+func TestPermissionGate_AskPublicInfoIncludesSafeSummary(t *testing.T) {
+	m := NewTyped[*schema.Message](func(ctx context.Context, tCtx *adk.ToolContext, args *schema.ToolArgument) (*GateCheckResult, error) {
+		return &GateCheckResult{Decision: GateAsk, Message: "Approve running execute?"}, nil
+	})
+
+	tCtx := &adk.ToolContext{Name: "execute", CallID: "call_safe_summary"}
+	_, err := m.permissionGate(withAddress(context.Background()), tCtx, &schema.ToolArgument{Text: `{"cmd":"date"}`})
+	require.Error(t, err)
+
+	info := requireAskInfo(t, err)
+	assert.Equal(t, "execute", info.ToolName)
+	assert.Equal(t, "Approve running execute?", info.Summary)
+
+	data, err := json.Marshal(info)
+	require.NoError(t, err)
+	got := string(data)
+	assert.Contains(t, got, "Summary")
+	assert.NotContains(t, got, "call_safe_summary")
+	assert.NotContains(t, got, `{"cmd":"date"}`)
+}
+
+func TestPermissionGate_AskPublicInfoOmitsDuplicateSummary(t *testing.T) {
+	tests := []struct {
+		name    string
+		message string
+	}{
+		{
+			name:    "call id",
+			message: "Approve call call_duplicate_summary?",
+		},
+		{
+			name:    "arguments",
+			message: `Approve running {"cmd":"rm -rf /"}?`,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			m := NewTyped[*schema.Message](func(ctx context.Context, tCtx *adk.ToolContext, args *schema.ToolArgument) (*GateCheckResult, error) {
+				return &GateCheckResult{Decision: GateAsk, Message: tt.message}, nil
+			})
+
+			tCtx := &adk.ToolContext{Name: "Shell", CallID: "call_duplicate_summary"}
+			_, err := m.permissionGate(withAddress(context.Background()), tCtx, &schema.ToolArgument{Text: `{"cmd":"rm -rf /"}`})
+			require.Error(t, err)
+
+			info := requireAskInfo(t, err)
+			assert.Empty(t, info.Summary)
+
+			data, err := json.Marshal(info)
+			require.NoError(t, err)
+			got := string(data)
+			assert.NotContains(t, got, "Summary")
+			assert.NotContains(t, got, "call_duplicate_summary")
+			assert.NotContains(t, got, `{"cmd":"rm -rf /"}`)
+		})
+	}
+}
+
+func TestPermissionGate_ResumeApproveUsesAskStateArguments(t *testing.T) {
+	m := NewTyped[*schema.Message](func(ctx context.Context, tCtx *adk.ToolContext, args *schema.ToolArgument) (*GateCheckResult, error) {
+		return &GateCheckResult{Decision: GateAsk, Message: `Approve call_private_args with {"path":"/tmp/approved"}?`}, nil
+	})
+
+	tCtx := &adk.ToolContext{Name: "WriteFile", CallID: "call_private_args"}
+	_, err := m.permissionGate(withAddress(context.Background()), tCtx, &schema.ToolArgument{Text: `{"path":"/tmp/approved"}`})
+	require.Error(t, err)
+
+	var signal *core.InterruptSignal
+	require.True(t, errors.As(err, &signal))
+	askState, ok := signal.InterruptState.State.(*AskState)
+	require.True(t, ok)
+	require.NotNil(t, askState.Info)
+	require.Empty(t, askState.Info.Summary)
+	assert.Equal(t, `{"path":"/tmp/approved"}`, askState.Arguments)
+
+	result, err := m.permissionGate(resumeContext(signal, &ResumeResponse{Action: ResumeActionApprove}), tCtx, &schema.ToolArgument{Text: `{"path":"/etc/passwd"}`})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.True(t, result.allowed)
+	assert.Equal(t, `{"path":"/tmp/approved"}`, result.argument.Text)
 }
 
 func TestPermissionGate_AskThenResumeDenied(t *testing.T) {
@@ -675,6 +783,116 @@ func TestToolSpan_PermissionDenyEmitsBothSpansOnSameRun(t *testing.T) {
 	assert.Empty(t, captureTool.received, "deny path must not invoke the underlying tool")
 }
 
+func TestPermissionGate_PersistedAgentInterruptOmitsPrivateInfo(t *testing.T) {
+	tests := []struct {
+		name        string
+		message     string
+		wantSummary bool
+	}{
+		{
+			name:        "safe summary",
+			message:     "Approve running permission_tool?",
+			wantSummary: true,
+		},
+		{
+			name:        "duplicate message",
+			message:     `Approve permission_call with {"path":"/etc/passwd"}?`,
+			wantSummary: false,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			ctrl := gomock.NewController(t)
+			defer ctrl.Finish()
+
+			cm := mockModel.NewMockToolCallingChatModel(ctrl)
+			captureTool := &permissionCaptureTool{name: "permission_tool"}
+			info, err := captureTool.Info(ctx)
+			require.NoError(t, err)
+
+			cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+				Return(schema.AssistantMessage("calling tool", []schema.ToolCall{
+					{ID: "permission_call", Function: schema.FunctionCall{Name: info.Name, Arguments: `{"path":"/etc/passwd"}`}},
+				}), nil).AnyTimes()
+			cm.EXPECT().WithTools(gomock.Any()).Return(cm, nil).AnyTimes()
+
+			agent, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
+				Name:        "PermissionInterruptAgent",
+				Instruction: "use tools",
+				Model:       cm,
+				ToolsConfig: adk.ToolsConfig{
+					ToolsNodeConfig: compose.ToolsNodeConfig{
+						Tools: []tool.BaseTool{captureTool},
+					},
+				},
+				Handlers: []adk.ChatModelAgentMiddleware{
+					New(func(ctx context.Context, tCtx *adk.ToolContext, args *schema.ToolArgument) (*GateCheckResult, error) {
+						return &GateCheckResult{Decision: GateAsk, Message: tt.message}, nil
+					}),
+				},
+			})
+			require.NoError(t, err)
+
+			store := &permissionSessionStore{}
+			runner := adk.NewRunner(ctx, adk.RunnerConfig{
+				Agent:         agent,
+				SessionID:     "permission-agent-interrupt-" + strings.ReplaceAll(tt.name, " ", "-"),
+				SessionStore:  store,
+				SessionConfig: &adk.SessionConfig{EventFlushBatchSize: 1},
+			})
+			iter := runner.Query(ctx, "use the tool", adk.WithTimelineEvents())
+			for {
+				event, ok := iter.Next()
+				if !ok {
+					break
+				}
+				require.NoError(t, event.Err)
+			}
+
+			var interrupt *adk.SessionEvent[*schema.Message]
+			for _, payload := range store.events {
+				if payload.Kind != adk.SessionEventAgentInterrupt {
+					continue
+				}
+				var decoded adk.SessionEvent[*schema.Message]
+				require.NoError(t, (&schema.HumanReadableSerializer{}).Unmarshal(payload.Data, &decoded))
+				require.NoError(t, adk.NormalizeSessionEventKind(&decoded))
+				interrupt = &decoded
+				break
+			}
+			require.NotNil(t, interrupt)
+			require.NotNil(t, interrupt.AgentInterrupt)
+			require.Len(t, interrupt.AgentInterrupt.Contexts, 1)
+
+			ctx0 := interrupt.AgentInterrupt.Contexts[0]
+			assert.Equal(t, adk.AgentInterruptCauseToolPermission, ctx0.Cause)
+			assert.Equal(t, "permission_call", ctx0.ToolUseID)
+
+			infoJSON, err := json.Marshal(ctx0.Info)
+			require.NoError(t, err)
+			infoText := string(infoJSON)
+			assert.Contains(t, infoText, "ToolName")
+			assert.Contains(t, infoText, "permission_tool")
+			assert.NotContains(t, infoText, "CallID")
+			assert.NotContains(t, infoText, "Arguments")
+			assert.NotContains(t, infoText, "Message")
+			assert.NotContains(t, infoText, "permission_call")
+			assert.NotContains(t, infoText, `{"path":"/etc/passwd"}`)
+			if tt.wantSummary {
+				assert.Contains(t, infoText, "Summary")
+				assert.Contains(t, infoText, tt.message)
+			} else {
+				assert.NotContains(t, infoText, "Summary")
+				assert.NotContains(t, infoText, tt.message)
+			}
+			assert.Empty(t, captureTool.received, "ask path must interrupt before invoking the underlying tool")
+		})
+	}
+}
+
 type permissionCaptureTool struct {
 	name     string
 	received string
@@ -706,6 +924,16 @@ func (s *permissionSessionStore) AppendEvents(_ context.Context, _ string, event
 
 func (s *permissionSessionStore) LoadEvents(_ context.Context, _ string, _ *adk.LoadEventsRequest) (*adk.LoadEventsResult, error) {
 	return &adk.LoadEventsResult{Events: nil}, nil
+}
+
+func requireAskInfo(t *testing.T, err error) *AskInfo {
+	t.Helper()
+	var signal *core.InterruptSignal
+	require.True(t, errors.As(err, &signal))
+	info, ok := signal.InterruptInfo.Info.(*AskInfo)
+	require.True(t, ok)
+	require.NotNil(t, info)
+	return info
 }
 
 func withAddress(ctx context.Context) context.Context {
