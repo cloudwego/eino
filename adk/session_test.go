@@ -113,6 +113,51 @@ func filterStoredSessionEvents(t *testing.T, raw []SessionEventPayload, pred fun
 	return out
 }
 
+func appendTestSessionEvent(t *testing.T, ctx context.Context, store SessionStore, sid string, se *SessionEvent[*schema.Message]) *SessionEvent[*schema.Message] {
+	t.Helper()
+	se = withTestEventID(se)
+	data, err := encodeSessionEvent(se)
+	require.NoError(t, err)
+	require.NoError(t, store.AppendEvents(ctx, sid, []SessionEventPayload{{
+		EventID: se.EventID,
+		Kind:    se.Kind,
+		Data:    data,
+	}}))
+	return se
+}
+
+func testMessageWithID(content string, role schema.RoleType) *schema.Message {
+	var msg *schema.Message
+	switch role {
+	case schema.Assistant:
+		msg = schema.AssistantMessage(content, nil)
+	default:
+		msg = schema.UserMessage(content)
+	}
+	EnsureMessageID(msg)
+	return msg
+}
+
+func appendCommittedTestTurn(t *testing.T, ctx context.Context, store SessionStore, sid string, turnID string, contents ...string) *SessionEvent[*schema.Message] {
+	t.Helper()
+	for i, content := range contents {
+		role := schema.User
+		if i%2 == 1 {
+			role = schema.Assistant
+		}
+		appendTestSessionEvent(t, ctx, store, sid, &SessionEvent[*schema.Message]{
+			Kind:    SessionEventMessage,
+			TurnID:  turnID,
+			Message: testMessageWithID(content, role),
+		})
+	}
+	return appendTestSessionEvent(t, ctx, store, sid, &SessionEvent[*schema.Message]{
+		Kind:    SessionEventTurnEnd,
+		TurnID:  turnID,
+		TurnEnd: &TurnEndState[*schema.Message]{SessionValues: map[string]any{"turn": turnID}},
+	})
+}
+
 type runnerSessionAgent struct {
 	name    string
 	inputs  [][]*schema.Message
@@ -251,7 +296,6 @@ func (s *sessionHelperStore) LoadEvents(_ context.Context, _ string, opts *LoadE
 		opts = &LoadEventsRequest{}
 	}
 	all := s.events
-	ids := s.eventIDs
 
 	if opts.Reverse {
 		end := len(all)
@@ -265,21 +309,28 @@ func (s *sessionHelperStore) LoadEvents(_ context.Context, _ string, opts *LoadE
 		if end <= 0 {
 			return &LoadEventsResult{}, nil
 		}
-		count := end
-		if opts.Limit > 0 && opts.Limit < count {
-			count = opts.Limit
-		}
-		start := end - count
-		out := make([]SessionEventPayload, count)
-		for i := 0; i < count; i++ {
-			out[i] = SessionEventPayload{
-				EventID: all[end-1-i].EventID,
-				Data:    append([]byte{}, all[end-1-i].Data...),
+		kindSet := buildTestKindSet(opts.Kinds)
+		var out []SessionEventPayload
+		hasMore := false
+		for i := end - 1; i >= 0; i-- {
+			if kindSet != nil {
+				if _, ok := kindSet[all[i].Kind]; !ok {
+					continue
+				}
 			}
+			if opts.Limit > 0 && len(out) >= opts.Limit {
+				hasMore = true
+				break
+			}
+			out = append(out, SessionEventPayload{
+				EventID: all[i].EventID,
+				Kind:    all[i].Kind,
+				Data:    append([]byte{}, all[i].Data...),
+			})
 		}
 		var next string
-		if start > 0 {
-			next = ids[start]
+		if hasMore && len(out) > 0 {
+			next = out[len(out)-1].EventID
 		}
 		return &LoadEventsResult{Events: out, Next: next}, nil
 	}
@@ -295,22 +346,41 @@ func (s *sessionHelperStore) LoadEvents(_ context.Context, _ string, opts *LoadE
 	if start > len(all) {
 		start = len(all)
 	}
-	end := len(all)
-	if opts.Limit > 0 && start+opts.Limit < end {
-		end = start + opts.Limit
-	}
-	out := make([]SessionEventPayload, end-start)
-	for i := range out {
-		out[i] = SessionEventPayload{
-			EventID: all[start+i].EventID,
-			Data:    append([]byte{}, all[start+i].Data...),
+	kindSet := buildTestKindSet(opts.Kinds)
+	var out []SessionEventPayload
+	hasMore := false
+	for i := start; i < len(all); i++ {
+		if kindSet != nil {
+			if _, ok := kindSet[all[i].Kind]; !ok {
+				continue
+			}
 		}
+		if opts.Limit > 0 && len(out) >= opts.Limit {
+			hasMore = true
+			break
+		}
+		out = append(out, SessionEventPayload{
+			EventID: all[i].EventID,
+			Kind:    all[i].Kind,
+			Data:    append([]byte{}, all[i].Data...),
+		})
 	}
 	var next string
-	if end < len(all) && end > 0 {
-		next = ids[end-1]
+	if hasMore && len(out) > 0 {
+		next = out[len(out)-1].EventID
 	}
 	return &LoadEventsResult{Events: out, Next: next}, nil
+}
+
+func buildTestKindSet(kinds []SessionEventKind) map[SessionEventKind]struct{} {
+	if len(kinds) == 0 {
+		return nil
+	}
+	set := make(map[SessionEventKind]struct{}, len(kinds))
+	for _, kind := range kinds {
+		set[kind] = struct{}{}
+	}
+	return set
 }
 
 func TestRunnerSessionModePrependsCommittedMessagesOnce(t *testing.T) {
@@ -1500,6 +1570,263 @@ func TestReconstructFromEventLog_WithSummarizationBoundary(t *testing.T) {
 	assert.Equal(t, "post", result.state.Messages[1].Content)
 }
 
+func TestSessionRollbackEventRoundTrip(t *testing.T) {
+	se := &SessionEvent[*schema.Message]{
+		EventID: uuid.NewString(),
+		Kind:    SessionEventRollback,
+		Rollback: &SessionRollbackEvent{
+			ToEventID:             "turn-end-1",
+			ToTurnID:              "turn-1",
+			PreviousHeadTurnEndID: "turn-end-2",
+			PreviousHeadTurnID:    "turn-2",
+		},
+	}
+	data, err := encodeSessionEvent(se)
+	require.NoError(t, err)
+
+	decoded, err := decodeSessionEvent[*schema.Message](data)
+	require.NoError(t, err)
+	require.NotNil(t, decoded.Rollback)
+	assert.Equal(t, SessionEventRollback, decoded.Kind)
+	assert.Equal(t, "turn-end-1", decoded.Rollback.ToEventID)
+	assert.Equal(t, "turn-1", decoded.Rollback.ToTurnID)
+	assert.Equal(t, "turn-end-2", decoded.Rollback.PreviousHeadTurnEndID)
+	assert.Equal(t, "turn-2", decoded.Rollback.PreviousHeadTurnID)
+}
+
+func TestRollbackSessionReconstructionHidesDeadBranchAndKeepsNewSuffix(t *testing.T) {
+	ctx := context.Background()
+	store := newSessionHelperStore()
+	sid := "rollback-reconstruct"
+
+	t1 := appendCommittedTestTurn(t, ctx, store, sid, "turn-1", "Q1", "A1")
+	t2 := appendCommittedTestTurn(t, ctx, store, sid, "turn-2", "Q2", "A2")
+	require.NoError(t, RollbackSession[*schema.Message](
+		ctx,
+		store,
+		sid,
+		"turn-1",
+		WithRollbackSessionCheckPointStore(store),
+		WithRollbackSessionExpectedHeadTurnID("turn-2"),
+	))
+	appendCommittedTestTurn(t, ctx, store, sid, "turn-3", "Q3", "A3")
+
+	result, err := reconstructSessionState[*schema.Message](ctx, store, sid, 2, nil)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.NotNil(t, result.state)
+	require.Len(t, result.state.Messages, 4)
+	assert.Equal(t, "Q1", result.state.Messages[0].Content)
+	assert.Equal(t, "A1", result.state.Messages[1].Content)
+	assert.Equal(t, "Q3", result.state.Messages[2].Content)
+	assert.Equal(t, "A3", result.state.Messages[3].Content)
+	assert.Equal(t, "turn-3", result.state.SessionValues["turn"])
+
+	rollbackEvents := filterStoredSessionEvents(t, store.events, func(se *SessionEvent[*schema.Message]) bool {
+		return se.Kind == SessionEventRollback
+	})
+	require.Len(t, rollbackEvents, 1)
+	require.NotNil(t, rollbackEvents[0].Rollback)
+	assert.Equal(t, t1.EventID, rollbackEvents[0].Rollback.ToEventID)
+	assert.Equal(t, "turn-1", rollbackEvents[0].Rollback.ToTurnID)
+	assert.Equal(t, t2.EventID, rollbackEvents[0].Rollback.PreviousHeadTurnEndID)
+	assert.Equal(t, "turn-2", rollbackEvents[0].Rollback.PreviousHeadTurnID)
+	assert.NotContains(t, store.checkpoints, sessionRunnerCheckpointID(sid))
+}
+
+func TestRollbackSessionMultipleRollbacksProjectActiveBranch(t *testing.T) {
+	ctx := context.Background()
+	store := newSessionHelperStore()
+	sid := "rollback-multiple"
+
+	appendCommittedTestTurn(t, ctx, store, sid, "turn-1", "Q1", "A1")
+	appendCommittedTestTurn(t, ctx, store, sid, "turn-2", "Q2", "A2")
+	require.NoError(t, RollbackSession[*schema.Message](ctx, store, sid, "turn-1"))
+	appendCommittedTestTurn(t, ctx, store, sid, "turn-3", "Q3", "A3")
+	require.NoError(t, RollbackSession[*schema.Message](ctx, store, sid, "turn-1"))
+
+	result, err := reconstructSessionState[*schema.Message](ctx, store, sid, defaultLoadPageSize, nil)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.NotNil(t, result.state)
+	require.Len(t, result.state.Messages, 2)
+	assert.Equal(t, "Q1", result.state.Messages[0].Content)
+	assert.Equal(t, "A1", result.state.Messages[1].Content)
+	assert.Equal(t, "turn-1", result.state.SessionValues["turn"])
+
+	rollbackEvents := filterStoredSessionEvents(t, store.events, func(se *SessionEvent[*schema.Message]) bool {
+		return se.Kind == SessionEventRollback
+	})
+	require.Len(t, rollbackEvents, 2)
+}
+
+func TestRunnerQueryAfterRollbackUsesActiveProjection(t *testing.T) {
+	ctx := context.Background()
+	store := newSessionHelperStore()
+	sid := "runner-query-after-rollback"
+
+	firstAgent := &runnerSessionAgent{
+		name: "runner-session-agent",
+		turnEnd: &TurnEndState[*schema.Message]{
+			Messages: []*schema.Message{schema.UserMessage("first"), schema.AssistantMessage("answer1", nil)},
+		},
+	}
+	firstRunner := NewRunner(ctx, RunnerConfig{
+		Agent:         firstAgent,
+		SessionID:     sid,
+		SessionStore:  store,
+		SessionConfig: &SessionConfig{EventFlushBatchSize: 1},
+	})
+	drainSessionEvents(t, firstRunner.Query(ctx, "first"))
+	firstTurnEndEvents := filterStoredSessionEvents(t, store.events, func(se *SessionEvent[*schema.Message]) bool {
+		return se.Kind == SessionEventTurnEnd
+	})
+	require.Len(t, firstTurnEndEvents, 1)
+	firstTurnID := firstTurnEndEvents[0].TurnID
+
+	secondAgent := &runnerSessionAgent{
+		name: "runner-session-agent",
+		turnEnd: &TurnEndState[*schema.Message]{
+			Messages: []*schema.Message{schema.UserMessage("first"), schema.AssistantMessage("answer1", nil), schema.UserMessage("second"), schema.AssistantMessage("answer2", nil)},
+		},
+	}
+	secondRunner := NewRunner(ctx, RunnerConfig{
+		Agent:         secondAgent,
+		SessionID:     sid,
+		SessionStore:  store,
+		SessionConfig: &SessionConfig{EventFlushBatchSize: 1},
+	})
+	drainSessionEvents(t, secondRunner.Query(ctx, "second"))
+
+	require.NoError(t, RollbackSession[*schema.Message](ctx, store, sid, firstTurnID))
+
+	thirdAgent := &runnerSessionAgent{
+		name: "runner-session-agent",
+		turnEnd: &TurnEndState[*schema.Message]{
+			Messages: []*schema.Message{schema.UserMessage("first"), schema.AssistantMessage("answer1", nil), schema.UserMessage("third"), schema.AssistantMessage("answer3", nil)},
+		},
+	}
+	thirdRunner := NewRunner(ctx, RunnerConfig{
+		Agent:         thirdAgent,
+		SessionID:     sid,
+		SessionStore:  store,
+		SessionConfig: &SessionConfig{EventFlushBatchSize: 1},
+	})
+	drainSessionEvents(t, thirdRunner.Query(ctx, "third"))
+
+	require.Len(t, thirdAgent.inputs, 1)
+	require.Len(t, thirdAgent.inputs[0], 3)
+	assert.Equal(t, "first", thirdAgent.inputs[0][0].Content)
+	assert.Equal(t, "ok", thirdAgent.inputs[0][1].Content)
+	assert.Equal(t, "third", thirdAgent.inputs[0][2].Content)
+}
+
+func TestRollbackSessionTargetResolutionErrors(t *testing.T) {
+	ctx := context.Background()
+	store := newSessionHelperStore()
+	sid := "rollback-target-errors"
+
+	appendCommittedTestTurn(t, ctx, store, sid, "turn-1", "Q1", "A1")
+	appendCommittedTestTurn(t, ctx, store, sid, "turn-2", "Q2", "A2")
+	appendTestSessionEvent(t, ctx, store, sid, &SessionEvent[*schema.Message]{
+		Kind:    SessionEventMessage,
+		TurnID:  "turn-pending",
+		Message: testMessageWithID("pending", schema.User),
+	})
+
+	err := RollbackSession[*schema.Message](ctx, store, sid, "turn-pending")
+	require.ErrorIs(t, err, ErrInvalidRollbackTarget)
+
+	err = RollbackSession[*schema.Message](ctx, store, sid, "missing")
+	require.ErrorIs(t, err, ErrRollbackTargetNotFound)
+
+	err = RollbackSession[*schema.Message](
+		ctx,
+		store,
+		sid,
+		"turn-1",
+		WithRollbackSessionExpectedHeadTurnID("stale-head"),
+	)
+	require.ErrorIs(t, err, ErrSessionHeadChanged)
+	rollbackEvents := filterStoredSessionEvents(t, store.events, func(se *SessionEvent[*schema.Message]) bool {
+		return se.Kind == SessionEventRollback
+	})
+	require.Empty(t, rollbackEvents)
+
+	require.NoError(t, RollbackSession[*schema.Message](
+		ctx,
+		store,
+		sid,
+		"turn-1",
+		WithRollbackSessionExpectedHeadTurnID("turn-2"),
+	))
+	err = RollbackSession[*schema.Message](
+		ctx,
+		store,
+		sid,
+		"turn-2",
+		WithRollbackSessionExpectedHeadTurnID("turn-2"),
+	)
+	require.ErrorIs(t, err, ErrRollbackTargetInactive)
+}
+
+func TestReconstructRollbackMalformedRecordsFailClosed(t *testing.T) {
+	ctx := context.Background()
+	store := newSessionHelperStore()
+	sid := "rollback-malformed"
+
+	msg := appendTestSessionEvent(t, ctx, store, sid, &SessionEvent[*schema.Message]{
+		Kind:    SessionEventMessage,
+		TurnID:  "turn-1",
+		Message: testMessageWithID("Q1", schema.User),
+	})
+	appendCommittedTestTurn(t, ctx, store, sid, "turn-1", "A1")
+
+	appendTestSessionEvent(t, ctx, store, sid, &SessionEvent[*schema.Message]{
+		Kind: SessionEventRollback,
+		Rollback: &SessionRollbackEvent{
+			ToEventID: msg.EventID,
+			ToTurnID:  "turn-1",
+		},
+	})
+	_, err := reconstructSessionState[*schema.Message](ctx, store, sid, defaultLoadPageSize, nil)
+	require.ErrorIs(t, err, ErrInvalidRollbackTarget)
+
+	store = newSessionHelperStore()
+	appendCommittedTestTurn(t, ctx, store, sid, "turn-1", "Q1", "A1")
+	payloadEvent := &SessionEvent[*schema.Message]{
+		EventID: uuid.NewString(),
+		Kind:    SessionEventRollback,
+		Rollback: &SessionRollbackEvent{
+			ToEventID: "missing-turn-end-event",
+			ToTurnID:  "turn-1",
+		},
+	}
+	data, encodeErr := encodeSessionEvent(payloadEvent)
+	require.NoError(t, encodeErr)
+	require.NoError(t, store.AppendEvents(ctx, sid, []SessionEventPayload{{
+		EventID: uuid.NewString(),
+		Kind:    SessionEventRollback,
+		Data:    data,
+	}}))
+	_, err = reconstructSessionState[*schema.Message](ctx, store, sid, defaultLoadPageSize, nil)
+	require.ErrorIs(t, err, ErrInvalidRollbackTarget)
+
+	store = newSessionHelperStore()
+	appendCommittedTestTurn(t, ctx, store, sid, "turn-1", "Q1", "A1")
+	staleTarget := appendCommittedTestTurn(t, ctx, store, sid, "turn-2", "Q2", "A2")
+	require.NoError(t, RollbackSession[*schema.Message](ctx, store, sid, "turn-1"))
+	appendTestSessionEvent(t, ctx, store, sid, &SessionEvent[*schema.Message]{
+		Kind: SessionEventRollback,
+		Rollback: &SessionRollbackEvent{
+			ToEventID: staleTarget.EventID,
+			ToTurnID:  "turn-2",
+		},
+	})
+	_, err = reconstructSessionState[*schema.Message](ctx, store, sid, defaultLoadPageSize, nil)
+	require.ErrorIs(t, err, ErrRollbackTargetInactive)
+}
+
 // TestRunnerSessionReconstructsFromEventLog: Delete TurnEndState from store,
 // next turn should reconstruct from events.
 func TestRunnerSessionReconstructsFromEventLog(t *testing.T) {
@@ -2079,8 +2406,8 @@ func TestAttack_ResumePreservesTurnIDFromInterruptedRun(t *testing.T) {
 	}
 	require.GreaterOrEqual(t, len(turnIDSet), 2, "must have at least 2 distinct TurnIDs (committed + interrupted)")
 
-	// The interrupted TurnID is the one on events AFTER the last TurnEnd.
-	// We can identify it by looking at events after the committed turn.
+	// The interrupted TurnID is the one on reconstructable model-context events
+	// after the last TurnEnd. Timeline status events are not replay anchors.
 	var lastTurnEndIdx int
 	for i, ep := range store.events {
 		se, err := decodeSessionEvent[*schema.Message](ep.Data)
@@ -2093,7 +2420,7 @@ func TestAttack_ResumePreservesTurnIDFromInterruptedRun(t *testing.T) {
 	for i := lastTurnEndIdx + 1; i < len(store.events); i++ {
 		se, err := decodeSessionEvent[*schema.Message](store.events[i].Data)
 		require.NoError(t, err)
-		if se.TurnID != "" {
+		if se.Kind == SessionEventMessage && se.TurnID != "" {
 			interruptedTurnID = se.TurnID
 			break
 		}
