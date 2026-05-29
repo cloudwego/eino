@@ -909,6 +909,7 @@ func (r *runner) restoreTasks(
 	isStream bool,
 	optMap map[string][]any) ([]*task, error) {
 	ret := make([]*task, 0, len(inputs))
+	syntheticInputs := make(map[string]struct{})
 	for _, key := range rerunNodes {
 		if _, hasInput := inputs[key]; hasInput {
 			continue
@@ -923,6 +924,7 @@ func (r *runner) restoreTasks(
 		} else {
 			inputs[key] = call.action.inputZeroValue()
 		}
+		syntheticInputs[key] = struct{}{}
 	}
 	for key, input := range inputs {
 		call, ok := r.chanSubscribeTo[key]
@@ -942,6 +944,9 @@ func (r *runner) restoreTasks(
 			input:          input,
 			option:         nil,
 			skipPreHandler: skipPreHandler[key],
+		}
+		if _, ok := syntheticInputs[key]; ok {
+			newTask.syntheticRerunInput = true
 		}
 		if opt, ok := optMap[key]; ok {
 			newTask.option = opt
