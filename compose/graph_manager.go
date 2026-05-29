@@ -255,15 +255,16 @@ func appendIfNotExist(s []string, elem string) []string {
 }
 
 type task struct {
-	ctx            context.Context
-	nodeKey        string
-	call           *chanCall
-	input          any
-	originalInput  any
-	output         any
-	option         []any
-	err            error
-	skipPreHandler bool
+	ctx                 context.Context
+	nodeKey             string
+	call                *chanCall
+	input               any
+	originalInput       any
+	output              any
+	option              []any
+	err                 error
+	skipPreHandler      bool
+	syntheticRerunInput bool
 }
 
 type taskManager struct {
@@ -308,7 +309,7 @@ func (t *taskManager) submit(tasks []*task) error {
 	for i := 0; i < len(tasks); i++ {
 		currentTask := tasks[i]
 
-		if t.persistRerunInput {
+		if t.persistRerunInput && !currentTask.syntheticRerunInput {
 			if sr, ok := currentTask.input.(streamReader); ok {
 				copies := sr.copy(2)
 				currentTask.originalInput, currentTask.input = copies[0], copies[1]
