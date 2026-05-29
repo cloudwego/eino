@@ -27,6 +27,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/cloudwego/eino/adk"
 )
@@ -53,12 +54,20 @@ import (
 // FileStore synchronizes access within the current process. It does not provide
 // cross-process write safety.
 type FileStore struct {
-	dir string
-	mu  sync.Mutex
+	dir     string
+	mu      sync.Mutex
+	indexes map[string]*fileSessionIndex
 }
 
 type fileEvent struct {
 	payload adk.SessionEventPayload
+}
+
+type fileSessionIndex struct {
+	size          int64
+	modTime       time.Time
+	offsets       []int64
+	eventIDToLine map[string]int
 }
 
 // NewFileStore creates a file-backed SessionStore rooted at dir.
@@ -69,7 +78,7 @@ func NewFileStore(dir string) (*FileStore, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, err
 	}
-	return &FileStore{dir: dir}, nil
+	return &FileStore{dir: dir, indexes: make(map[string]*fileSessionIndex)}, nil
 }
 
 func errorsNewEmptySessionStoreDir() error {
@@ -111,29 +120,42 @@ func (s *FileStore) AppendEvents(_ context.Context, sessionID string, events []a
 		return nil
 	}
 
-	_, existing, err := s.readAllEventsLocked(path)
+	idx, err := s.ensureIndexLocked(path)
 	if err != nil {
 		return err
 	}
 
-	out, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
-	if err != nil {
-		return err
-	}
-	defer out.Close()
-
+	var out *os.File
 	for _, event := range pending {
-		if _, dup := existing[event.EventID]; dup {
+		if _, dup := idx.eventIDToLine[event.EventID]; dup {
 			continue
 		}
 		if bytes.ContainsAny(event.Data, "\r\n") {
 			return fmt.Errorf("adk/session: FileStore requires Data without raw CR/LF; use a line-safe serializer (e.g. HumanReadableSerializer)")
 		}
+		if out == nil {
+			out, err = os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+			if err != nil {
+				return err
+			}
+			defer out.Close()
+		}
 		line := fmt.Sprintf("%s\t%s\t%s\n", event.EventID, event.Kind, event.Data)
-		if _, err := out.WriteString(line); err != nil {
+		n, err := out.WriteString(line)
+		if err != nil {
 			return err
 		}
-		existing[event.EventID] = len(existing)
+		idx.eventIDToLine[event.EventID] = len(idx.offsets)
+		idx.offsets = append(idx.offsets, idx.size)
+		idx.size += int64(n)
+	}
+	if out != nil {
+		info, err := out.Stat()
+		if err != nil {
+			return err
+		}
+		idx.size = info.Size()
+		idx.modTime = info.ModTime()
 	}
 	return nil
 }
@@ -147,17 +169,17 @@ func (s *FileStore) LoadEvents(_ context.Context, sessionID string, opts *adk.Lo
 	if err != nil {
 		return nil, err
 	}
-	events, idx, err := s.readAllEventsLocked(path)
-	if err != nil {
-		return nil, err
-	}
 	if opts == nil {
 		opts = &adk.LoadEventsRequest{}
 	}
-	if opts.Reverse {
-		return loadFileEventsReverse(events, idx, opts)
+	idx, err := s.ensureIndexLocked(path)
+	if err != nil {
+		return nil, err
 	}
-	return loadFileEventsForward(events, idx, opts)
+	if opts.Reverse {
+		return s.loadFileEventsReverseLocked(path, idx, opts)
+	}
+	return s.loadFileEventsForwardLocked(path, idx, opts)
 }
 
 func (s *FileStore) sessionPath(sessionID string) (string, error) {
@@ -167,58 +189,58 @@ func (s *FileStore) sessionPath(sessionID string) (string, error) {
 	return filepath.Join(s.dir, url.PathEscape(sessionID)+".evlog"), nil
 }
 
-func (s *FileStore) readAllEventsLocked(path string) ([]fileEvent, map[string]int, error) {
-	f, err := os.Open(path)
+func (s *FileStore) ensureIndexLocked(path string) (*fileSessionIndex, error) {
+	info, err := os.Stat(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, map[string]int{}, nil
+			idx := &fileSessionIndex{eventIDToLine: make(map[string]int)}
+			s.indexes[path] = idx
+			return idx, nil
 		}
-		return nil, nil, err
+		return nil, err
+	}
+	if idx := s.indexes[path]; idx != nil && idx.size == info.Size() && idx.modTime.Equal(info.ModTime()) {
+		return idx, nil
+	}
+	idx, err := s.rebuildIndexLocked(path, info)
+	if err != nil {
+		delete(s.indexes, path)
+		return nil, err
+	}
+	s.indexes[path] = idx
+	return idx, nil
+}
+
+func (s *FileStore) rebuildIndexLocked(path string, info os.FileInfo) (*fileSessionIndex, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
 	}
 	defer f.Close()
 
 	reader := bufio.NewReader(f)
-	events := make([]fileEvent, 0)
-	idx := make(map[string]int)
+	idx := &fileSessionIndex{
+		size:          info.Size(),
+		modTime:       info.ModTime(),
+		eventIDToLine: make(map[string]int),
+	}
 	lineNo := 0
+	var offset int64
 	for {
+		lineOffset := offset
 		line, readErr := reader.ReadBytes('\n')
 		if len(line) > 0 {
+			offset += int64(len(line))
 			lineNo++
-			if line[len(line)-1] != '\n' {
-				return nil, nil, fmt.Errorf("%w: corrupted trailing record at line %d", adk.ErrInvalidEventID, lineNo)
+			event, err := parseFileEventLine(line, lineNo)
+			if err != nil {
+				return nil, err
 			}
-			// Strip trailing newline
-			line = line[:len(line)-1]
-			lineStr := string(line)
-
-			// Parse three-field format: <EventID>\t<Kind>\t<Data>
-			// Find first tab for EventID
-			firstTab := strings.IndexByte(lineStr, '\t')
-			if firstTab < 0 {
-				return nil, nil, fmt.Errorf("%w: missing tab separator at line %d", adk.ErrInvalidEventID, lineNo)
+			if _, dup := idx.eventIDToLine[event.payload.EventID]; dup {
+				return nil, fmt.Errorf("%w: duplicate event_id %q at line %d", adk.ErrInvalidEventID, event.payload.EventID, lineNo)
 			}
-			eventID := lineStr[:firstTab]
-			if eventID == "" {
-				return nil, nil, fmt.Errorf("%w: empty event_id at line %d", adk.ErrInvalidEventID, lineNo)
-			}
-
-			// Find second tab for Kind; everything after is Data (may contain tabs)
-			rest := lineStr[firstTab+1:]
-			secondTab := strings.IndexByte(rest, '\t')
-			if secondTab < 0 {
-				return nil, nil, fmt.Errorf("%w: missing kind tab separator at line %d", adk.ErrInvalidEventID, lineNo)
-			}
-			kind := rest[:secondTab]
-			data := []byte(rest[secondTab+1:])
-
-			if _, dup := idx[eventID]; dup {
-				return nil, nil, fmt.Errorf("%w: duplicate event_id %q at line %d", adk.ErrInvalidEventID, eventID, lineNo)
-			}
-			events = append(events, fileEvent{
-				payload: adk.SessionEventPayload{EventID: eventID, Kind: adk.SessionEventKind(kind), Data: data},
-			})
-			idx[eventID] = len(events) - 1
+			idx.eventIDToLine[event.payload.EventID] = len(idx.offsets)
+			idx.offsets = append(idx.offsets, lineOffset)
 		}
 		if readErr == nil {
 			continue
@@ -226,31 +248,73 @@ func (s *FileStore) readAllEventsLocked(path string) ([]fileEvent, map[string]in
 		if readErr == io.EOF {
 			break
 		}
-		return nil, nil, readErr
+		return nil, readErr
 	}
-	return events, idx, nil
+	return idx, nil
 }
 
-func loadFileEventsForward(events []fileEvent, idx map[string]int, opts *adk.LoadEventsRequest) (*adk.LoadEventsResult, error) {
+func parseFileEventLine(line []byte, lineNo int) (fileEvent, error) {
+	if len(line) == 0 || line[len(line)-1] != '\n' {
+		return fileEvent{}, fmt.Errorf("%w: corrupted trailing record at line %d", adk.ErrInvalidEventID, lineNo)
+	}
+	line = line[:len(line)-1]
+	lineStr := string(line)
+
+	firstTab := strings.IndexByte(lineStr, '\t')
+	if firstTab < 0 {
+		return fileEvent{}, fmt.Errorf("%w: missing tab separator at line %d", adk.ErrInvalidEventID, lineNo)
+	}
+	eventID := lineStr[:firstTab]
+	if eventID == "" {
+		return fileEvent{}, fmt.Errorf("%w: empty event_id at line %d", adk.ErrInvalidEventID, lineNo)
+	}
+
+	rest := lineStr[firstTab+1:]
+	secondTab := strings.IndexByte(rest, '\t')
+	if secondTab < 0 {
+		return fileEvent{}, fmt.Errorf("%w: missing kind tab separator at line %d", adk.ErrInvalidEventID, lineNo)
+	}
+	return fileEvent{
+		payload: adk.SessionEventPayload{
+			EventID: eventID,
+			Kind:    adk.SessionEventKind(rest[:secondTab]),
+			Data:    []byte(rest[secondTab+1:]),
+		},
+	}, nil
+}
+
+func (s *FileStore) loadFileEventsForwardLocked(path string, idx *fileSessionIndex, opts *adk.LoadEventsRequest) (*adk.LoadEventsResult, error) {
 	start := 0
 	if opts.After != "" {
-		pos, ok := idx[opts.After]
+		pos, ok := idx.eventIDToLine[opts.After]
 		if !ok {
 			return nil, adk.ErrEventIDOutOfRange
 		}
 		start = pos + 1
 	}
-	if start > len(events) {
-		start = len(events)
+	if start > len(idx.offsets) {
+		start = len(idx.offsets)
 	}
 
+	f, err := os.Open(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return &adk.LoadEventsResult{}, nil
+		}
+		return nil, err
+	}
+	defer f.Close()
 	kindSet := buildKindSet(opts.Kinds)
 
 	var out []adk.SessionEventPayload
 	hasMore := false
-	for i := start; i < len(events); i++ {
+	for i := start; i < len(idx.offsets); i++ {
+		event, err := readFileEventAt(f, idx.offsets[i], i+1)
+		if err != nil {
+			return nil, err
+		}
 		if kindSet != nil {
-			if _, match := kindSet[events[i].payload.Kind]; !match {
+			if _, match := kindSet[event.payload.Kind]; !match {
 				continue
 			}
 		}
@@ -258,12 +322,7 @@ func loadFileEventsForward(events []fileEvent, idx map[string]int, opts *adk.Loa
 			hasMore = true
 			break
 		}
-		src := events[i].payload
-		out = append(out, adk.SessionEventPayload{
-			EventID: src.EventID,
-			Kind:    src.Kind,
-			Data:    append([]byte{}, src.Data...),
-		})
+		out = append(out, copyFilePayload(event.payload))
 	}
 
 	var next string
@@ -273,10 +332,10 @@ func loadFileEventsForward(events []fileEvent, idx map[string]int, opts *adk.Loa
 	return &adk.LoadEventsResult{Events: out, Next: next}, nil
 }
 
-func loadFileEventsReverse(events []fileEvent, idx map[string]int, opts *adk.LoadEventsRequest) (*adk.LoadEventsResult, error) {
-	end := len(events)
+func (s *FileStore) loadFileEventsReverseLocked(path string, idx *fileSessionIndex, opts *adk.LoadEventsRequest) (*adk.LoadEventsResult, error) {
+	end := len(idx.offsets)
 	if opts.After != "" {
-		pos, ok := idx[opts.After]
+		pos, ok := idx.eventIDToLine[opts.After]
 		if !ok {
 			return nil, adk.ErrEventIDOutOfRange
 		}
@@ -286,13 +345,25 @@ func loadFileEventsReverse(events []fileEvent, idx map[string]int, opts *adk.Loa
 		return &adk.LoadEventsResult{}, nil
 	}
 
+	f, err := os.Open(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return &adk.LoadEventsResult{}, nil
+		}
+		return nil, err
+	}
+	defer f.Close()
 	kindSet := buildKindSet(opts.Kinds)
 
 	var out []adk.SessionEventPayload
 	hasMore := false
 	for i := end - 1; i >= 0; i-- {
+		event, err := readFileEventAt(f, idx.offsets[i], i+1)
+		if err != nil {
+			return nil, err
+		}
 		if kindSet != nil {
-			if _, match := kindSet[events[i].payload.Kind]; !match {
+			if _, match := kindSet[event.payload.Kind]; !match {
 				continue
 			}
 		}
@@ -300,12 +371,7 @@ func loadFileEventsReverse(events []fileEvent, idx map[string]int, opts *adk.Loa
 			hasMore = true
 			break
 		}
-		src := events[i].payload
-		out = append(out, adk.SessionEventPayload{
-			EventID: src.EventID,
-			Kind:    src.Kind,
-			Data:    append([]byte{}, src.Data...),
-		})
+		out = append(out, copyFilePayload(event.payload))
 	}
 
 	var next string
@@ -313,4 +379,24 @@ func loadFileEventsReverse(events []fileEvent, idx map[string]int, opts *adk.Loa
 		next = out[len(out)-1].EventID
 	}
 	return &adk.LoadEventsResult{Events: out, Next: next}, nil
+}
+
+func readFileEventAt(f *os.File, offset int64, lineNo int) (fileEvent, error) {
+	if _, err := f.Seek(offset, io.SeekStart); err != nil {
+		return fileEvent{}, err
+	}
+	reader := bufio.NewReader(f)
+	line, err := reader.ReadBytes('\n')
+	if err != nil {
+		return fileEvent{}, err
+	}
+	return parseFileEventLine(line, lineNo)
+}
+
+func copyFilePayload(src adk.SessionEventPayload) adk.SessionEventPayload {
+	return adk.SessionEventPayload{
+		EventID: src.EventID,
+		Kind:    src.Kind,
+		Data:    append([]byte{}, src.Data...),
+	}
 }
