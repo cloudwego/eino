@@ -221,6 +221,38 @@ func testPatchToolCallsGeneric[M adk.MessageType](t *testing.T) {
 			wantToolName:   "tool_b",
 			wantContent:    "123 tool_b call_2",
 		},
+		{
+			name:   "two consecutive assistant messages with tool calls",
+			config: nil,
+			messages: []M{
+				makeUserMsg[M]("hello"),
+				makeAssistantMsgWithToolCalls[M]("", []testToolCall{
+					{ID: "call_1", Name: "tool_a", Arguments: "{}"},
+				}),
+				makeAssistantMsgWithToolCalls[M]("continued...", nil),
+			},
+			wantLen:        4,
+			checkPatchedAt: 2,
+			wantCallID:     "call_1",
+			wantToolName:   "tool_a",
+			wantContent:    fmt.Sprintf(defaultPatchedToolMessageTemplate, "tool_a", "call_1"),
+		},
+		{
+			name:   "assistant message followed by user message without tool result",
+			config: nil,
+			messages: []M{
+				makeUserMsg[M]("hello"),
+				makeAssistantMsgWithToolCalls[M]("", []testToolCall{
+					{ID: "call_1", Name: "tool_a", Arguments: "{}"},
+				}),
+				makeUserMsg[M]("continued..."),
+			},
+			wantLen:        4,
+			checkPatchedAt: 2,
+			wantCallID:     "call_1",
+			wantToolName:   "tool_a",
+			wantContent:    fmt.Sprintf(defaultPatchedToolMessageTemplate, "tool_a", "call_1"),
+		},
 	}
 
 	for _, tt := range tests {
@@ -316,6 +348,46 @@ func TestPatchToolCalls_NilFunctionToolCallInBlock(t *testing.T) {
 		if block != nil && block.Type == schema.ContentBlockTypeFunctionToolResult &&
 			block.FunctionToolResult != nil && block.FunctionToolResult.CallID == "call_1" {
 			foundResult = true
+		}
+	}
+	assert.True(t, foundResult, "patched message should contain tool result for call_1")
+}
+
+// TestPatchToolCalls_AgenticMessage_NilBlockInUserMessage verifies the middleware handles
+// a User Agentic Message with nil ContentBlock without panicking.
+func TestPatchToolCalls_AgenticMessage_NilBlockInUserMessage(t *testing.T) {
+	ctx := context.Background()
+	mw, err := NewTyped[*schema.AgenticMessage](ctx, nil)
+	require.NoError(t, err)
+
+	msgs := []*schema.AgenticMessage{
+		schema.UserAgenticMessage("hello"),
+		makeAssistantMsgWithToolCalls[*schema.AgenticMessage]("", []testToolCall{
+			{ID: "call_1", Name: "tool_a", Arguments: "{}"},
+		}),
+		{
+			Role: schema.AgenticRoleTypeUser,
+			ContentBlocks: []*schema.ContentBlock{
+				nil, // nil block to test robustness
+			},
+		},
+	}
+
+	state := &adk.TypedChatModelAgentState[*schema.AgenticMessage]{Messages: msgs}
+	_, newState, err := mw.BeforeModelRewriteState(ctx, state, nil)
+	assert.NoError(t, err, "should not panic when encountering nil block in user message")
+	assert.Len(t, newState.Messages, 4, "should patch call_1 and insert tool response")
+
+	// Verify the patched message is inserted at index 2
+	patchMsg := newState.Messages[2]
+	assert.Equal(t, schema.AgenticRoleTypeUser, patchMsg.Role)
+
+	foundResult := false
+	for _, block := range patchMsg.ContentBlocks {
+		if block != nil && block.Type == schema.ContentBlockTypeFunctionToolResult &&
+			block.FunctionToolResult != nil && block.FunctionToolResult.CallID == "call_1" {
+			foundResult = true
+			break
 		}
 	}
 	assert.True(t, foundResult, "patched message should contain tool result for call_1")
