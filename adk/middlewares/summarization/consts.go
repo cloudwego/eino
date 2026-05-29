@@ -33,6 +33,7 @@ type summarizationContentType string
 
 const (
 	contentTypeSummary summarizationContentType = "summary"
+	contentTypeSkills  summarizationContentType = "skills"
 )
 
 type ctxKeyModelInput struct{}
