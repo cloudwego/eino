@@ -21,6 +21,8 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"runtime/debug"
+	"sort"
 	"strings"
 
 	"github.com/cloudwego/eino/internal"
@@ -560,7 +562,7 @@ func (r *runner) handleInterrupt(
 	} else if checkPointID != nil {
 		err := r.checkPointer.set(ctx, *checkPointID, cp)
 		if err != nil {
-			return fmt.Errorf("failed to set checkpoint: %w, checkPointID: %s", err, *checkPointID)
+			return newCheckpointSetError("interrupt", *checkPointID, cp, err)
 		}
 	}
 
@@ -700,11 +702,136 @@ func (r *runner) handleInterruptWithSubGraphAndRerunNodes(
 	} else if checkPointID != nil {
 		err = r.checkPointer.set(ctx, *checkPointID, cp)
 		if err != nil {
-			return fmt.Errorf("failed to set checkpoint: %w, checkPointID: %s", err, *checkPointID)
+			return newCheckpointSetError("interrupt_with_subgraph_and_rerun_nodes", *checkPointID, cp, err)
 		}
 	}
 	intInfo.InterruptContexts = core.ToInterruptContexts(is, nil)
 	return &interruptError{Info: intInfo}
+}
+
+const checkpointDebugEntryLimit = 8
+
+func newCheckpointSetError(stage string, checkPointID string, cp *checkpoint, err error) error {
+	return fmt.Errorf("failed to set checkpoint during %s: %w, checkPointID: %s, checkpoint: %s, stack:\n%s",
+		stage, err, checkPointID, checkpointDebugSummary(cp), string(debug.Stack()))
+}
+
+func checkpointDebugSummary(cp *checkpoint) string {
+	if cp == nil {
+		return "<nil>"
+	}
+
+	var b strings.Builder
+	appendCheckpointDebug(&b, "root", cp, 0)
+	return b.String()
+}
+
+func appendCheckpointDebug(b *strings.Builder, path string, cp *checkpoint, depth int) {
+	if cp == nil {
+		fmt.Fprintf(b, "%s=<nil>", path)
+		return
+	}
+
+	fmt.Fprintf(b, "%s{state=%s rerunNodes=%v skipPreHandler=%v interruptAddr=%d interruptState=%d ",
+		path,
+		valueDebugSummary(cp.State),
+		cp.RerunNodes,
+		cp.SkipPreHandler,
+		len(cp.InterruptID2Addr),
+		len(cp.InterruptID2State))
+	appendAnyMapDebug(b, "inputs", cp.Inputs)
+	b.WriteByte(' ')
+	appendChannelsDebug(b, cp.Channels)
+	b.WriteByte(' ')
+	appendSubGraphsDebug(b, cp.SubGraphs, path, depth)
+	b.WriteByte('}')
+}
+
+func appendAnyMapDebug(b *strings.Builder, label string, values map[string]any) {
+	fmt.Fprintf(b, "%s(count=%d", label, len(values))
+	for _, key := range sortedKeys(values, checkpointDebugEntryLimit) {
+		fmt.Fprintf(b, " %s=%s", key, valueDebugSummary(values[key]))
+	}
+	appendOmittedCount(b, len(values))
+	b.WriteByte(')')
+}
+
+func appendChannelsDebug(b *strings.Builder, channels map[string]channel) {
+	fmt.Fprintf(b, "channels(count=%d", len(channels))
+	for _, key := range sortedKeys(channels, checkpointDebugEntryLimit) {
+		ch := channels[key]
+		fmt.Fprintf(b, " %s=%T", key, ch)
+		if ch == nil {
+			continue
+		}
+
+		err := ch.convertValues(func(values map[string]any) error {
+			b.WriteByte('[')
+			for _, valueKey := range sortedKeys(values, checkpointDebugEntryLimit) {
+				fmt.Fprintf(b, "%s=%s", valueKey, valueDebugSummary(values[valueKey]))
+			}
+			appendOmittedCount(b, len(values))
+			b.WriteByte(']')
+			return nil
+		})
+		if err != nil {
+			fmt.Fprintf(b, "[convertValuesErr=%v]", err)
+		}
+	}
+	appendOmittedCount(b, len(channels))
+	b.WriteByte(')')
+}
+
+func appendSubGraphsDebug(b *strings.Builder, subGraphs map[string]*checkpoint, path string, depth int) {
+	fmt.Fprintf(b, "subGraphs(count=%d", len(subGraphs))
+	if depth >= 2 {
+		if len(subGraphs) > 0 {
+			b.WriteString(" ...")
+		}
+		b.WriteByte(')')
+		return
+	}
+
+	for _, key := range sortedKeys(subGraphs, checkpointDebugEntryLimit) {
+		b.WriteByte(' ')
+		appendCheckpointDebug(b, path+"."+key, subGraphs[key], depth+1)
+	}
+	appendOmittedCount(b, len(subGraphs))
+	b.WriteByte(')')
+}
+
+func valueDebugSummary(v any) string {
+	if v == nil {
+		return "<nil>"
+	}
+
+	rv := reflect.ValueOf(v)
+	nilLike := false
+	switch rv.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Ptr, reflect.Slice:
+		nilLike = rv.IsNil()
+	}
+
+	_, isStream := v.(streamReader)
+	return fmt.Sprintf("%T(nil=%t stream=%t)", v, nilLike, isStream)
+}
+
+func sortedKeys[V any](m map[string]V, limit int) []string {
+	keys := make([]string, 0, len(m))
+	for key := range m {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	if len(keys) > limit {
+		return keys[:limit]
+	}
+	return keys
+}
+
+func appendOmittedCount(b *strings.Builder, total int) {
+	if total > checkpointDebugEntryLimit {
+		fmt.Fprintf(b, " ...+%d", total-checkpointDebugEntryLimit)
+	}
 }
 
 func (r *runner) calculateNextTasks(ctx context.Context, completedTasks []*task, isStream bool, cm *channelManager, optMap map[string][]any) ([]*task, any, bool, error) {
