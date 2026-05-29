@@ -169,7 +169,7 @@ func patchToolCallsForAgenticMessage[M adk.MessageType](ctx context.Context,
 
 func hasCorrespondingToolMessage(messages []*schema.Message, toolCallID string) bool {
 	for _, msg := range messages {
-		// Only consider subsequent tool messages after the tool call message
+		// Only consider successive tool messages after the tool call message
 		if msg.Role != schema.Tool {
 			return false
 		}
@@ -182,7 +182,7 @@ func hasCorrespondingToolMessage(messages []*schema.Message, toolCallID string) 
 
 func hasCorrespondingAgenticToolResult(messages []*schema.AgenticMessage, toolCallID string) bool {
 	for _, msg := range messages {
-		// Only consider subsequent tool messages after the tool call message
+		// Only consider successive tool messages after the tool call message
 		if msg.Role != schema.AgenticRoleTypeUser {
 			return false
 		}
