@@ -69,8 +69,8 @@ type typedMiddleware[M adk.MessageType] struct {
 }
 
 func (m *typedMiddleware[M]) BeforeModelRewriteState(ctx context.Context, state *adk.TypedChatModelAgentState[M],
-	mc *adk.TypedModelContext[M]) (context.Context, *adk.TypedChatModelAgentState[M], error) {
-
+	mc *adk.TypedModelContext[M],
+) (context.Context, *adk.TypedChatModelAgentState[M], error) {
 	if len(state.Messages) == 0 {
 		return ctx, state, nil
 	}
@@ -89,8 +89,8 @@ func (m *typedMiddleware[M]) BeforeModelRewriteState(ctx context.Context, state 
 func patchToolCallsForMessage[M adk.MessageType](ctx context.Context,
 	gen func(ctx context.Context, toolName, toolCallID string) (string, error),
 	state *adk.TypedChatModelAgentState[*schema.Message],
-	_ *adk.TypedModelContext[M]) (context.Context, *adk.TypedChatModelAgentState[M], error) {
-
+	_ *adk.TypedModelContext[M],
+) (context.Context, *adk.TypedChatModelAgentState[M], error) {
 	patched := make([]*schema.Message, 0, len(state.Messages))
 
 	for i, msg := range state.Messages {
@@ -121,8 +121,8 @@ func patchToolCallsForMessage[M adk.MessageType](ctx context.Context,
 func patchToolCallsForAgenticMessage[M adk.MessageType](ctx context.Context,
 	gen func(ctx context.Context, toolName, toolCallID string) (string, error),
 	state *adk.TypedChatModelAgentState[*schema.AgenticMessage],
-	_ *adk.TypedModelContext[M]) (context.Context, *adk.TypedChatModelAgentState[M], error) {
-
+	_ *adk.TypedModelContext[M],
+) (context.Context, *adk.TypedChatModelAgentState[M], error) {
 	patched := make([]*schema.AgenticMessage, 0, len(state.Messages))
 
 	for i, msg := range state.Messages {
@@ -169,7 +169,11 @@ func patchToolCallsForAgenticMessage[M adk.MessageType](ctx context.Context,
 
 func hasCorrespondingToolMessage(messages []*schema.Message, toolCallID string) bool {
 	for _, msg := range messages {
-		if msg.Role == schema.Tool && msg.ToolCallID == toolCallID {
+		// Only consider subsequent tool messages after the tool call message
+		if msg.Role != schema.Tool {
+			return false
+		}
+		if msg.ToolCallID == toolCallID {
 			return true
 		}
 	}
@@ -178,18 +182,30 @@ func hasCorrespondingToolMessage(messages []*schema.Message, toolCallID string) 
 
 func hasCorrespondingAgenticToolResult(messages []*schema.AgenticMessage, toolCallID string) bool {
 	for _, msg := range messages {
+		// Only consider subsequent tool messages after the tool call message
+		if msg.Role != schema.AgenticRoleTypeUser {
+			return false
+		}
+		hasToolResult := false
 		for _, block := range msg.ContentBlocks {
 			if block == nil {
 				continue
 			}
-			if block.Type == schema.ContentBlockTypeFunctionToolResult &&
-				block.FunctionToolResult != nil && block.FunctionToolResult.CallID == toolCallID {
-				return true
+			if block.Type == schema.ContentBlockTypeFunctionToolResult {
+				hasToolResult = true
+				if block.FunctionToolResult != nil && block.FunctionToolResult.CallID == toolCallID {
+					return true
+				}
 			}
-			if block.Type == schema.ContentBlockTypeToolSearchResult &&
-				block.ToolSearchFunctionToolResult != nil && block.ToolSearchFunctionToolResult.CallID == toolCallID {
-				return true
+			if block.Type == schema.ContentBlockTypeToolSearchResult {
+				hasToolResult = true
+				if block.ToolSearchFunctionToolResult != nil && block.ToolSearchFunctionToolResult.CallID == toolCallID {
+					return true
+				}
 			}
+		}
+		if !hasToolResult {
+			return false
 		}
 	}
 	return false
