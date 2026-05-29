@@ -35,6 +35,57 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
+type cancelAlwaysToolCallModel struct{}
+
+func (m *cancelAlwaysToolCallModel) Generate(_ context.Context, _ []*schema.AgenticMessage, _ ...model.Option) (*schema.AgenticMessage, error) {
+	return agenticToolCallMsg("cancel_stream_tool", "call-1", `{"input":"x"}`), nil
+}
+
+func (m *cancelAlwaysToolCallModel) Stream(ctx context.Context, input []*schema.AgenticMessage, opts ...model.Option) (*schema.StreamReader[*schema.AgenticMessage], error) {
+	msg, err := m.Generate(ctx, input, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return schema.StreamReaderFromArray([]*schema.AgenticMessage{msg}), nil
+}
+
+type cancelInterruptThenHangingStreamTool struct {
+	name        string
+	interrupted chan struct{}
+	resumed     chan struct{}
+	gate        chan struct{}
+	seen        int32
+	resumeOnce  sync.Once
+}
+
+func (t *cancelInterruptThenHangingStreamTool) Info(_ context.Context) (*schema.ToolInfo, error) {
+	return &schema.ToolInfo{
+		Name: t.name,
+		Desc: "interrupt then hanging stream tool",
+		ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
+			"input": {Type: schema.String},
+		}),
+	}, nil
+}
+
+func (t *cancelInterruptThenHangingStreamTool) StreamableRun(ctx context.Context, argumentsInJSON string, _ ...tool.Option) (*schema.StreamReader[string], error) {
+	if atomic.CompareAndSwapInt32(&t.seen, 0, 1) {
+		close(t.interrupted)
+		return nil, tool.StatefulInterrupt(ctx, "approval_needed", argumentsInJSON)
+	}
+
+	t.resumeOnce.Do(func() { close(t.resumed) })
+	r, w := schema.Pipe[string](1)
+	go func() {
+		defer w.Close()
+		if closed := w.Send("resumed:"+argumentsInJSON, nil); closed {
+			return
+		}
+		<-t.gate
+	}()
+	return r, nil
+}
+
 type cancelTestChatModel struct {
 	delayNs     int64
 	response    *schema.Message
@@ -202,6 +253,130 @@ func drainEventsAndAssertNoCancelError(t *testing.T, iter *AsyncIterator[*AgentE
 		events = append(events, event)
 	}
 	return events
+}
+
+func TestWithCancel_AgenticResumeStreamableToolTimeout_DoesNotPersistTypedNil(t *testing.T) {
+	ctx := context.Background()
+	store := newCancelTestStore()
+	checkpointID := "agentic-resume-streamable-tool-timeout"
+	streamTool := &cancelInterruptThenHangingStreamTool{
+		name:        "cancel_stream_tool",
+		interrupted: make(chan struct{}),
+		resumed:     make(chan struct{}),
+		gate:        make(chan struct{}),
+	}
+	t.Cleanup(func() {
+		close(streamTool.gate)
+	})
+
+	agent, err := NewTypedChatModelAgent(ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
+		Name:        "CancelAgenticResumeRepro",
+		Description: "repro agent",
+		Model:       &cancelAlwaysToolCallModel{},
+		ToolsConfig: ToolsConfig{
+			ToolsNodeConfig: compose.ToolsNodeConfig{Tools: []tool.BaseTool{streamTool}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("create agent: %v", err)
+	}
+
+	runner := NewTypedRunner(TypedRunnerConfig[*schema.AgenticMessage]{
+		Agent:           agent,
+		EnableStreaming: true,
+		CheckPointStore: store,
+	})
+	iter := runner.Run(ctx, []*schema.AgenticMessage{schema.UserAgenticMessage("go")}, WithCheckPointID(checkpointID))
+
+	var interruptID string
+	for {
+		event, ok := iter.Next()
+		if !ok {
+			break
+		}
+		if event.Err != nil {
+			t.Fatalf("initial run error: %v", event.Err)
+		}
+		if event.Action == nil || event.Action.Interrupted == nil {
+			continue
+		}
+		for _, ictx := range event.Action.Interrupted.InterruptContexts {
+			if ictx.IsRootCause {
+				interruptID = ictx.ID
+				break
+			}
+		}
+		if interruptID != "" {
+			break
+		}
+	}
+	if interruptID == "" {
+		t.Fatal("root interrupt ID was not captured")
+	}
+	select {
+	case <-streamTool.interrupted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("streamable tool did not interrupt")
+	}
+	if _, ok, getErr := store.Get(ctx, checkpointID); getErr != nil || !ok {
+		t.Fatalf("initial checkpoint missing: ok=%v err=%v", ok, getErr)
+	}
+
+	resumeCancelOpt, resumeCancelFn := WithCancel()
+	resumeIter, err := runner.ResumeWithParams(ctx, checkpointID, &ResumeParams{
+		Targets: map[string]any{interruptID: "approved"},
+	}, resumeCancelOpt)
+	if err != nil {
+		t.Fatalf("resume with params: %v", err)
+	}
+	select {
+	case <-streamTool.resumed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("streamable tool did not resume")
+	}
+
+	cancelHandle, contributed := resumeCancelFn(
+		WithAgentCancelMode(CancelAfterToolCalls),
+		WithRecursive(),
+		WithAgentCancelTimeout(20*time.Millisecond),
+	)
+	if !contributed {
+		t.Fatal("resume cancel did not contribute to active run")
+	}
+	if cancelHandle == nil {
+		t.Fatal("resume cancel handle is nil")
+	}
+
+	cancelDone := make(chan error, 1)
+	go func() {
+		cancelDone <- cancelHandle.Wait()
+	}()
+	select {
+	case err = <-cancelDone:
+		assert.True(t, err == nil || errors.Is(err, ErrCancelTimeout), "unexpected cancel wait error: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("resume cancel handle did not complete")
+	}
+
+	var hasCancelError bool
+	for {
+		event, ok := resumeIter.Next()
+		if !ok {
+			break
+		}
+		if event.Err == nil {
+			continue
+		}
+		var ce *CancelError
+		if errors.As(event.Err, &ce) {
+			hasCancelError = true
+		}
+		errText := event.Err.Error()
+		assert.NotContains(t, errText, "gob marshal error")
+		assert.NotContains(t, errText, "cannot encode nil pointer")
+		assert.NotContains(t, errText, "*adk.agenticReactInput(nil=true")
+	}
+	assert.True(t, hasCancelError, "expected CancelError in resume event stream")
 }
 
 func TestCancelContext(t *testing.T) {

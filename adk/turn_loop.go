@@ -1158,6 +1158,28 @@ func isPhase1ManagedPendingResume[T any](pr *turnLoopPendingResume[T]) bool {
 		pr.resumeBytes == nil
 }
 
+func isManagedPendingResumeReady[T any](pr *turnLoopPendingResume[T]) bool {
+	return pr != nil &&
+		pr.source == turnLoopPendingResumeSourceManagedInterrupt &&
+		pr.resumeSubmitted &&
+		pr.resumeBytes != nil
+}
+
+func (l *TurnLoop[T, M]) ensureManagedPendingResumeLocked(interrupted []T) *turnLoopPendingResume[T] {
+	pr := l.pendingResume
+	if pr == nil || pr.source != turnLoopPendingResumeSourceManagedInterrupt {
+		pr = &turnLoopPendingResume[T]{
+			source: turnLoopPendingResumeSourceManagedInterrupt,
+		}
+		l.pendingResume = pr
+	}
+	if interrupted != nil {
+		pr.interrupted = append([]T{}, interrupted...)
+	}
+	pr.source = turnLoopPendingResumeSourceManagedInterrupt
+	return pr
+}
+
 func (l *TurnLoop[T, M]) clearPhase1PendingResume() {
 	l.resumeMu.Lock()
 	if isPhase1ManagedPendingResume(l.pendingResume) {
@@ -1727,7 +1749,7 @@ func (l *TurnLoop[T, M]) takePendingResume(ctx context.Context) (*turnLoopPendin
 			l.resumeMu.Unlock()
 			return nil, false
 		}
-		if pr.source != turnLoopPendingResumeSourceManagedInterrupt || pr.resumeSubmitted {
+		if pr.source == turnLoopPendingResumeSourceRestoredCheckpoint || isManagedPendingResumeReady(pr) {
 			l.pendingResume = nil
 			l.resumeMu.Unlock()
 			return pr, true
@@ -1995,16 +2017,8 @@ func (l *TurnLoop[T, M]) run(ctx context.Context) {
 			}
 			unhandled := append([]T{}, l.buffer.TakeAll()...)
 			l.resumeMu.Lock()
-			pr := l.pendingResume
-			if pr == nil {
-				pr = &turnLoopPendingResume[T]{
-					source: turnLoopPendingResumeSourceManagedInterrupt,
-				}
-				l.pendingResume = pr
-			}
-			pr.interrupted = append([]T{}, plan.spec.consumed...)
+			pr := l.ensureManagedPendingResumeLocked(plan.spec.consumed)
 			pr.unhandled = append(pr.unhandled, unhandled...)
-			pr.source = turnLoopPendingResumeSourceManagedInterrupt
 			pr.resumeCheckpointID = l.checkPointRunnerID
 			pr.resumeBytes = append([]byte{}, l.checkPointRunnerBytes...)
 			l.resumeMu.Unlock()
@@ -2183,10 +2197,7 @@ func (l *TurnLoop[T, M]) runAgentAndHandleEvents(
 					l.interruptContexts = event.Action.Interrupted.InterruptContexts
 					if l.config.InterruptMode == TurnLoopInterruptWaitsForExplicitResume {
 						l.resumeMu.Lock()
-						l.pendingResume = &turnLoopPendingResume[T]{
-							interrupted: append([]T{}, spec.consumed...),
-							source:      turnLoopPendingResumeSourceManagedInterrupt,
-						}
+						l.ensureManagedPendingResumeLocked(spec.consumed)
 						l.resumeMu.Unlock()
 					}
 				}
