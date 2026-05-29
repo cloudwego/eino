@@ -110,12 +110,12 @@ func (m *typedMiddleware[M]) BeforeModelRewriteState(ctx context.Context, state 
 	}
 
 	// Task information is already present in the conversation history.
-	if hasTaskMessagesInHistory(state.Messages) {
+	if hasTaskInfoInContext(state) {
 		return ctx, state, nil
 	}
 
-	// A reminder message has already been injected — avoid duplicate warnings.
-	if hasReminderMessageInHistory(state.Messages) {
+	// Idempotent: if we already injected, return early.
+	if taskReminderAlreadyInjected(state) {
 		return ctx, state, nil
 	}
 
@@ -125,22 +125,20 @@ func (m *typedMiddleware[M]) BeforeModelRewriteState(ctx context.Context, state 
 	return ctx, &nState, nil
 }
 
-// hasTaskMessagesInHistory checks whether the conversation history already contains task-related messages.
-func hasTaskMessagesInHistory[M adk.MessageType](messages []M) bool {
-	for _, msg := range messages {
-		if hasTaskInMessage(msg) {
+// hasTaskInfoInContext checks whether the conversation history already contains task-related messages.
+func hasTaskInfoInContext[M adk.MessageType](state *adk.TypedChatModelAgentState[M]) bool {
+	for _, msg := range state.Messages {
+		if hasTaskInfo(msg) {
 			return true
 		}
 	}
 	return false
 }
 
-// hasTaskInMessage checks whether a single message contains task-related content.
-func hasTaskInMessage[M adk.MessageType](msg M) bool {
-	var zero M
-	switch any(zero).(type) {
+// hasTaskInfo checks whether a single message contains task-related content.
+func hasTaskInfo[M adk.MessageType](msg M) bool {
+	switch m := any(msg).(type) {
 	case *schema.Message:
-		m := any(msg).(*schema.Message)
 		if m.Role == schema.Tool && m.ToolName == TaskListToolName {
 			return true
 		}
@@ -152,7 +150,6 @@ func hasTaskInMessage[M adk.MessageType](msg M) bool {
 			}
 		}
 	case *schema.AgenticMessage:
-		m := any(msg).(*schema.AgenticMessage)
 		for _, block := range m.ContentBlocks {
 			if block == nil {
 				continue
@@ -172,28 +169,27 @@ func hasTaskInMessage[M adk.MessageType](msg M) bool {
 	return false
 }
 
-// hasReminderMessageInHistory checks whether any message in the history is a reminder injected by this middleware.
-func hasReminderMessageInHistory[M adk.MessageType](messages []M) bool {
-	for _, msg := range messages {
-		if hasReminderMessage(msg) {
+// taskReminderAlreadyInjected checks whether any message in the history is a reminder injected by this middleware.
+func taskReminderAlreadyInjected[M adk.MessageType](state *adk.TypedChatModelAgentState[M]) bool {
+	for _, msg := range state.Messages {
+		if hasTaskReminderExtra(msg) {
 			return true
 		}
 	}
 	return false
 }
 
-// hasReminderMessage checks whether a message is a reminder injected by this middleware.
-func hasReminderMessage[M adk.MessageType](msg M) bool {
-	var zero M
-	switch any(zero).(type) {
+// hasTaskReminderExtra checks whether a message is a reminder injected by this middleware.
+func hasTaskReminderExtra[M adk.MessageType](msg M) bool {
+	switch m := any(msg).(type) {
 	case *schema.Message:
-		if m := any(msg).(*schema.Message); m.Extra != nil {
+		if m.Extra != nil {
 			if _, ok := m.Extra[reminderMessageFlag]; ok {
 				return true
 			}
 		}
 	case *schema.AgenticMessage:
-		if m := any(msg).(*schema.AgenticMessage); m.Extra != nil {
+		if m.Extra != nil {
 			if _, ok := m.Extra[reminderMessageFlag]; ok {
 				return true
 			}
