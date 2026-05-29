@@ -21,6 +21,7 @@ package permission
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/adk/internal"
@@ -73,15 +74,17 @@ type Checker func(ctx context.Context, tCtx *adk.ToolContext, args *schema.ToolA
 
 // AskInfo is the user-facing interrupt payload emitted for Ask decisions.
 type AskInfo struct {
+	ToolName string
+	Summary  string `json:",omitempty"`
+}
+
+// AskState is the private persisted interrupt state used to resume Ask decisions.
+type AskState struct {
+	Info *AskInfo
+
 	ToolName  string
 	CallID    string
 	Arguments string
-	Message   string
-}
-
-// AskState is the persisted interrupt state used to re-interrupt non-targeted resumes.
-type AskState struct {
-	Info *AskInfo
 }
 
 // ResumeAction resolves a previously interrupted permission ask.
@@ -152,14 +155,14 @@ func (m *Middleware[M]) permissionGate(
 		if !hasState || savedState == nil {
 			return nil, fmt.Errorf("permission: missing AskState for resumed tool %q (call_id=%s)", tCtx.Name, tCtx.CallID)
 		}
-		return nil, tool.StatefulInterrupt(ctx, savedState.Info, savedState)
+		return nil, tool.StatefulInterrupt(ctx, savedState.publicInfo(), savedState)
 	}
 
 	if isTarget && hasData {
-		if !hasState || savedState == nil || savedState.Info == nil {
+		if !hasState || savedState == nil {
 			return nil, fmt.Errorf("permission: missing AskState for targeted resume of tool %q (call_id=%s)", tCtx.Name, tCtx.CallID)
 		}
-		return handleResumeResponse(ctx, tCtx, &schema.ToolArgument{Text: savedState.Info.Arguments}, response)
+		return handleResumeResponse(ctx, tCtx, &schema.ToolArgument{Text: savedState.Arguments}, response)
 	}
 
 	if isTarget && !hasData {
@@ -199,12 +202,15 @@ func (m *Middleware[M]) permissionGate(
 	case GateAsk:
 		adk.SetToolPermissionDecision(ctx, tCtx.CallID, string(GateAsk))
 		info := &AskInfo{
+			ToolName: tCtx.Name,
+			Summary:  publicSummary(decision.Message, tCtx.CallID, argument.Text),
+		}
+		state := &AskState{
+			Info:      info,
 			ToolName:  tCtx.Name,
 			CallID:    tCtx.CallID,
 			Arguments: argument.Text,
-			Message:   decision.Message,
 		}
-		state := &AskState{Info: info}
 		return nil, tool.StatefulInterrupt(ctx, info, state)
 	case "":
 		return nil, fmt.Errorf("permission: empty gate decision for tool %q (call_id=%s); expected allow, deny, or ask",
@@ -213,6 +219,29 @@ func (m *Middleware[M]) permissionGate(
 		return nil, fmt.Errorf("permission: unknown gate decision %q for tool %q (call_id=%s); expected allow, deny, or ask",
 			decision.Decision, tCtx.Name, tCtx.CallID)
 	}
+}
+
+func (s *AskState) publicInfo() *AskInfo {
+	if s == nil {
+		return nil
+	}
+	if s.Info != nil {
+		return s.Info
+	}
+	return &AskInfo{ToolName: s.ToolName}
+}
+
+func publicSummary(message, callID, arguments string) string {
+	if message == "" {
+		return ""
+	}
+	if callID != "" && strings.Contains(message, callID) {
+		return ""
+	}
+	if arguments != "" && strings.Contains(message, arguments) {
+		return ""
+	}
+	return message
 }
 
 func handleResumeResponse(
