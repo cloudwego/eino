@@ -88,10 +88,80 @@ func TestFileStoreWritesOneEvlogLinePerEvent(t *testing.T) {
 	assert.Equal(t, `{"payload":"second"}`, parts1[2])
 }
 
+func TestFileStoreRollbackPreservesPhysicalAuditLog(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	store, err := session.NewFileStore(dir)
+	require.NoError(t, err)
+	sessionID := "rollback-audit"
+
+	firstTurnID := "turn-1"
+	secondTurnID := "turn-2"
+	appendFileStoreSessionEvent(t, ctx, store, sessionID, &adk.SessionEvent[*schema.Message]{
+		EventID: "msg-1",
+		Kind:    adk.SessionEventMessage,
+		TurnID:  firstTurnID,
+		Message: schema.UserMessage("Q1"),
+	})
+	appendFileStoreSessionEvent(t, ctx, store, sessionID, &adk.SessionEvent[*schema.Message]{
+		EventID: "end-1",
+		Kind:    adk.SessionEventTurnEnd,
+		TurnID:  firstTurnID,
+		TurnEnd: &adk.TurnEndState[*schema.Message]{},
+	})
+	appendFileStoreSessionEvent(t, ctx, store, sessionID, &adk.SessionEvent[*schema.Message]{
+		EventID: "msg-2",
+		Kind:    adk.SessionEventMessage,
+		TurnID:  secondTurnID,
+		Message: schema.UserMessage("Q2"),
+	})
+	appendFileStoreSessionEvent(t, ctx, store, sessionID, &adk.SessionEvent[*schema.Message]{
+		EventID: "end-2",
+		Kind:    adk.SessionEventTurnEnd,
+		TurnID:  secondTurnID,
+		TurnEnd: &adk.TurnEndState[*schema.Message]{},
+	})
+
+	require.NoError(t, adk.RollbackSession[*schema.Message](ctx, store, sessionID, firstTurnID))
+
+	res, err := store.LoadEvents(ctx, sessionID, &adk.LoadEventsRequest{})
+	require.NoError(t, err)
+	require.Len(t, res.Events, 5)
+	assert.Equal(t, "msg-2", res.Events[2].EventID, "dead-branch payload remains physically auditable")
+	assert.Equal(t, "end-2", res.Events[3].EventID, "dead-branch turn_end remains physically auditable")
+	assert.Equal(t, adk.SessionEventRollback, res.Events[4].Kind)
+
+	data, err := os.ReadFile(filepath.Join(dir, url.PathEscape(sessionID)+".evlog"))
+	require.NoError(t, err)
+	lines := strings.Split(strings.TrimSuffix(string(data), "\n"), "\n")
+	require.Len(t, lines, 5)
+	assert.Contains(t, lines[2], "msg-2\tmessage\t")
+	assert.Contains(t, lines[3], "end-2\tturn_end\t")
+	assert.Contains(t, lines[4], "\trollback\t")
+}
+
 func TestFileStoreRejectsInvalidDir(t *testing.T) {
 	store, err := session.NewFileStore("")
 	require.Error(t, err)
 	assert.Nil(t, store)
+}
+
+func appendFileStoreSessionEvent(
+	t *testing.T,
+	ctx context.Context,
+	store adk.SessionStore,
+	sessionID string,
+	event *adk.SessionEvent[*schema.Message],
+) {
+	t.Helper()
+	require.NoError(t, adk.NormalizeSessionEventKind(event))
+	data, err := (&schema.HumanReadableSerializer{}).Marshal(event)
+	require.NoError(t, err)
+	require.NoError(t, store.AppendEvents(ctx, sessionID, []adk.SessionEventPayload{{
+		EventID: event.EventID,
+		Kind:    event.Kind,
+		Data:    data,
+	}}))
 }
 
 func TestAttack_FileStoreRejectsRawLineDelimitersInData(t *testing.T) {
@@ -382,4 +452,61 @@ func TestFileStoreKindFilter(t *testing.T) {
 	require.Len(t, res.Events, 1)
 	assert.Equal(t, "e3", res.Events[0].EventID)
 	assert.Equal(t, "e3", res.Next)
+}
+
+func TestFileStoreIndexInvalidatesAfterExternalAppend(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	store, err := session.NewFileStore(dir)
+	require.NoError(t, err)
+
+	e1 := adk.SessionEventPayload{EventID: "external-1", Kind: adk.SessionEventMessage, Data: []byte(`{"m":1}`)}
+	e2 := adk.SessionEventPayload{EventID: "external-2", Kind: adk.SessionEventTurnEnd, Data: []byte(`{"t":1}`)}
+	require.NoError(t, store.AppendEvents(ctx, "s", []adk.SessionEventPayload{e1, e2}))
+
+	// Build and cache the in-process index.
+	res, err := store.LoadEvents(ctx, "s", &adk.LoadEventsRequest{After: "external-1"})
+	require.NoError(t, err)
+	require.Equal(t, []adk.SessionEventPayload{e2}, res.Events)
+
+	e3 := adk.SessionEventPayload{EventID: "external-3", Kind: adk.SessionEventMessage, Data: []byte(`{"m":2}`)}
+	path := filepath.Join(dir, url.PathEscape("s")+".evlog")
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0o644)
+	require.NoError(t, err)
+	_, err = f.WriteString("external-3\tmessage\t{\"m\":2}\n")
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+
+	res, err = store.LoadEvents(ctx, "s", &adk.LoadEventsRequest{After: "external-2"})
+	require.NoError(t, err)
+	require.Equal(t, []adk.SessionEventPayload{e3}, res.Events)
+}
+
+func TestFileStoreIndexedReversePaginationWithKindFilter(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	store, err := session.NewFileStore(dir)
+	require.NoError(t, err)
+
+	e1 := adk.SessionEventPayload{EventID: "rev-1", Kind: adk.SessionEventMessage, Data: []byte(`{"m":1}`)}
+	e2 := adk.SessionEventPayload{EventID: "rev-2", Kind: adk.SessionEventSpanModelRequestStart, Data: []byte(`{"s":1}`)}
+	e3 := adk.SessionEventPayload{EventID: "rev-3", Kind: adk.SessionEventTurnEnd, Data: []byte(`{"t":1}`)}
+	e4 := adk.SessionEventPayload{EventID: "rev-4", Kind: adk.SessionEventMessage, Data: []byte(`{"m":2}`)}
+	require.NoError(t, store.AppendEvents(ctx, "s", []adk.SessionEventPayload{e1, e2, e3, e4}))
+
+	kinds := []adk.SessionEventKind{adk.SessionEventMessage, adk.SessionEventTurnEnd}
+	res, err := store.LoadEvents(ctx, "s", &adk.LoadEventsRequest{Kinds: kinds, Reverse: true, Limit: 1})
+	require.NoError(t, err)
+	require.Equal(t, []adk.SessionEventPayload{e4}, res.Events)
+	assert.Equal(t, "rev-4", res.Next)
+
+	res, err = store.LoadEvents(ctx, "s", &adk.LoadEventsRequest{After: res.Next, Kinds: kinds, Reverse: true, Limit: 1})
+	require.NoError(t, err)
+	require.Equal(t, []adk.SessionEventPayload{e3}, res.Events)
+	assert.Equal(t, "rev-3", res.Next)
+
+	res, err = store.LoadEvents(ctx, "s", &adk.LoadEventsRequest{After: res.Next, Kinds: kinds, Reverse: true, Limit: 1})
+	require.NoError(t, err)
+	require.Equal(t, []adk.SessionEventPayload{e1}, res.Events)
+	assert.Empty(t, res.Next)
 }
