@@ -666,10 +666,10 @@ func TestPermissionDecisionAppearsInToolUseTimeline(t *testing.T) {
 		sawToolCallEndOK bool
 	)
 	runner := adk.NewRunner(ctx, adk.RunnerConfig{
-		Agent:         agent,
-		SessionID:     "permission-timeline",
-		SessionStore:  &permissionSessionStore{},
-		SessionConfig: &adk.SessionConfig{EventFlushBatchSize: 1},
+		Agent:          agent,
+		SessionID:      "permission-timeline",
+		SessionService: &permissionSessionService{},
+		SessionConfig:  &adk.SessionConfig{EventFlushBatchSize: 1},
 	})
 	iter := runner.Query(ctx, "use the tool", adk.WithTimelineEvents())
 	for {
@@ -737,10 +737,10 @@ func TestToolSpan_PermissionDenyEmitsBothSpansOnSameRun(t *testing.T) {
 	require.NoError(t, err)
 
 	runner := adk.NewRunner(ctx, adk.RunnerConfig{
-		Agent:         agent,
-		SessionID:     "permission-deny-span",
-		SessionStore:  &permissionSessionStore{},
-		SessionConfig: &adk.SessionConfig{EventFlushBatchSize: 1},
+		Agent:          agent,
+		SessionID:      "permission-deny-span",
+		SessionService: &permissionSessionService{},
+		SessionConfig:  &adk.SessionConfig{EventFlushBatchSize: 1},
 	})
 
 	var (
@@ -836,11 +836,11 @@ func TestPermissionGate_PersistedAgentInterruptOmitsPrivateInfo(t *testing.T) {
 			})
 			require.NoError(t, err)
 
-			store := &permissionSessionStore{}
+			store := &permissionSessionService{}
 			runner := adk.NewRunner(ctx, adk.RunnerConfig{
 				Agent:         agent,
 				SessionID:     "permission-agent-interrupt-" + strings.ReplaceAll(tt.name, " ", "-"),
-				SessionStore:  store,
+				SessionService: store,
 				SessionConfig: &adk.SessionConfig{EventFlushBatchSize: 1},
 			})
 			iter := runner.Query(ctx, "use the tool", adk.WithTimelineEvents())
@@ -857,10 +857,7 @@ func TestPermissionGate_PersistedAgentInterruptOmitsPrivateInfo(t *testing.T) {
 				if payload.Kind != adk.SessionEventAgentInterrupt {
 					continue
 				}
-				var decoded adk.SessionEvent[*schema.Message]
-				require.NoError(t, (&schema.HumanReadableSerializer{}).Unmarshal(payload.Data, &decoded))
-				require.NoError(t, adk.NormalizeSessionEventKind(&decoded))
-				interrupt = &decoded
+				interrupt = payload
 				break
 			}
 			require.NotNil(t, interrupt)
@@ -913,17 +910,17 @@ func (t *permissionCaptureTool) InvokableRun(_ context.Context, argumentsInJSON 
 	return "ok", nil
 }
 
-type permissionSessionStore struct {
-	events []adk.SessionEventPayload
+type permissionSessionService struct {
+	events []*adk.SessionEvent[*schema.Message]
 }
 
-func (s *permissionSessionStore) AppendEvents(_ context.Context, _ string, events []adk.SessionEventPayload) error {
+func (s *permissionSessionService) AppendEvents(_ context.Context, _ string, events []*adk.SessionEvent[*schema.Message]) error {
 	s.events = append(s.events, events...)
 	return nil
 }
 
-func (s *permissionSessionStore) LoadEvents(_ context.Context, _ string, _ *adk.LoadEventsRequest) (*adk.LoadEventsResult, error) {
-	return &adk.LoadEventsResult{Events: nil}, nil
+func (s *permissionSessionService) LoadEvents(_ context.Context, _ string, _ *adk.LoadSessionEventsRequest) (*adk.LoadSessionEventsResult[*schema.Message], error) {
+	return &adk.LoadSessionEventsResult[*schema.Message]{Events: nil}, nil
 }
 
 func requireAskInfo(t *testing.T, err error) *AskInfo {
