@@ -18,44 +18,47 @@ package session
 
 import (
 	"context"
+	"fmt"
 	"sync"
 
 	"github.com/cloudwego/eino/adk"
+	"github.com/cloudwego/eino/schema"
 )
 
-// InMemoryStore is a thread-safe, in-memory implementation of adk.SessionStore
+// InMemoryStoreConfig configures InMemoryStore.
+type InMemoryStoreConfig struct {
+	// EventSerializer encodes typed session events before storage. Defaults to
+	// schema.HumanReadableSerializer.
+	EventSerializer schema.Serializer
+}
+
+// InMemoryStore is a thread-safe, in-memory implementation of adk.SessionService
 // and CheckPointStore (with Delete support). Suitable for testing and
 // single-process deployments where durability is not required.
-//
-// Memory cost note: in addition to the raw payload bytes, the store maintains
-// a parallel slice of event IDs and an event_id → position map per session
-// (~50–80 bytes per event for the index entry); this is the trade-off for
-// supporting EventID-based cursors without re-parsing payloads on every page load.
-type InMemoryStore struct {
+type InMemoryStore[M adk.MessageType] struct {
 	mu          sync.Mutex
-	events      map[string][]adk.SessionEventPayload // sessionID -> ordered payloads
-	eventIDs    map[string][]string                  // sessionID -> ordered event_ids (parallel to events)
-	eventIDIdx  map[string]map[string]int            // sessionID -> event_id -> position
+	events      map[string][][]byte
+	eventIDs    map[string][]string
+	eventKinds  map[string][]adk.SessionEventKind
+	eventIDIdx  map[string]map[string]int
+	serializer  schema.Serializer
 	checkpoints map[string][]byte
 }
 
 // NewInMemoryStore creates a new InMemoryStore.
-func NewInMemoryStore() *InMemoryStore {
-	return &InMemoryStore{
-		events:      make(map[string][]adk.SessionEventPayload),
+func NewInMemoryStore[M adk.MessageType](cfg *InMemoryStoreConfig) *InMemoryStore[M] {
+	return &InMemoryStore[M]{
+		events:      make(map[string][][]byte),
 		eventIDs:    make(map[string][]string),
+		eventKinds:  make(map[string][]adk.SessionEventKind),
 		eventIDIdx:  make(map[string]map[string]int),
+		serializer:  normalizeSerializer(cfg),
 		checkpoints: make(map[string][]byte),
 	}
 }
 
 // AppendEvents appends events to the session's event log.
-//
-// Each payload MUST carry a non-empty EventID. Empty EventID causes
-// AppendEvents to return adk.ErrInvalidEventID. If a payload's EventID is
-// already present in the session, it is silently skipped (first-write-wins;
-// payload bytes are not compared).
-func (s *InMemoryStore) AppendEvents(_ context.Context, sessionID string, events []adk.SessionEventPayload) error {
+func (s *InMemoryStore[M]) AppendEvents(_ context.Context, sessionID string, events []*adk.SessionEvent[M]) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	idx, ok := s.eventIDIdx[sessionID]
@@ -64,31 +67,34 @@ func (s *InMemoryStore) AppendEvents(_ context.Context, sessionID string, events
 		s.eventIDIdx[sessionID] = idx
 	}
 	for _, e := range events {
-		if e.EventID == "" {
+		if e == nil || e.EventID == "" {
 			return adk.ErrInvalidEventID
 		}
 		if _, dup := idx[e.EventID]; dup {
 			continue // idempotent skip; first-write-wins
 		}
-		cp := adk.SessionEventPayload{
-			EventID: e.EventID,
-			Kind:    e.Kind,
-			Data:    append([]byte{}, e.Data...),
+		if err := adk.NormalizeSessionEventKind(e); err != nil {
+			return err
 		}
-		s.events[sessionID] = append(s.events[sessionID], cp)
+		data, err := s.serializer.Marshal(e)
+		if err != nil {
+			return err
+		}
+		s.events[sessionID] = append(s.events[sessionID], append([]byte{}, data...))
 		s.eventIDs[sessionID] = append(s.eventIDs[sessionID], e.EventID)
+		s.eventKinds[sessionID] = append(s.eventKinds[sessionID], e.Kind)
 		idx[e.EventID] = len(s.events[sessionID]) - 1
 	}
 	return nil
 }
 
 // LoadEvents loads events with pagination and direction support.
-func (s *InMemoryStore) LoadEvents(_ context.Context, sessionID string, opts *adk.LoadEventsRequest) (*adk.LoadEventsResult, error) {
+func (s *InMemoryStore[M]) LoadEvents(_ context.Context, sessionID string, opts *adk.LoadSessionEventsRequest) (*adk.LoadSessionEventsResult[M], error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	if opts == nil {
-		opts = &adk.LoadEventsRequest{}
+		opts = &adk.LoadSessionEventsRequest{}
 	}
 
 	if opts.Reverse {
@@ -97,9 +103,10 @@ func (s *InMemoryStore) LoadEvents(_ context.Context, sessionID string, opts *ad
 	return s.loadForward(sessionID, opts)
 }
 
-func (s *InMemoryStore) loadForward(sessionID string, opts *adk.LoadEventsRequest) (*adk.LoadEventsResult, error) {
+func (s *InMemoryStore[M]) loadForward(sessionID string, opts *adk.LoadSessionEventsRequest) (*adk.LoadSessionEventsResult[M], error) {
 	all := s.events[sessionID]
 	idx := s.eventIDIdx[sessionID]
+	kinds := s.eventKinds[sessionID]
 
 	start := 0
 	if opts.After != "" {
@@ -115,11 +122,11 @@ func (s *InMemoryStore) loadForward(sessionID string, opts *adk.LoadEventsReques
 
 	kindSet := buildKindSet(opts.Kinds)
 
-	var out []adk.SessionEventPayload
+	var out []*adk.SessionEvent[M]
 	hasMore := false
 	for i := start; i < len(all); i++ {
 		if kindSet != nil {
-			if _, match := kindSet[all[i].Kind]; !match {
+			if _, match := kindSet[kinds[i]]; !match {
 				continue
 			}
 		}
@@ -127,23 +134,24 @@ func (s *InMemoryStore) loadForward(sessionID string, opts *adk.LoadEventsReques
 			hasMore = true
 			break
 		}
-		out = append(out, adk.SessionEventPayload{
-			EventID: all[i].EventID,
-			Kind:    all[i].Kind,
-			Data:    append([]byte{}, all[i].Data...),
-		})
+		event, err := s.decodeEvent(all[i], s.eventIDs[sessionID][i], kinds[i])
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, event)
 	}
 
 	var next string
 	if hasMore && len(out) > 0 {
 		next = out[len(out)-1].EventID
 	}
-	return &adk.LoadEventsResult{Events: out, Next: next}, nil
+	return &adk.LoadSessionEventsResult[M]{Events: out, Next: next}, nil
 }
 
-func (s *InMemoryStore) loadReverse(sessionID string, opts *adk.LoadEventsRequest) (*adk.LoadEventsResult, error) {
+func (s *InMemoryStore[M]) loadReverse(sessionID string, opts *adk.LoadSessionEventsRequest) (*adk.LoadSessionEventsResult[M], error) {
 	all := s.events[sessionID]
 	idx := s.eventIDIdx[sessionID]
+	kinds := s.eventKinds[sessionID]
 
 	end := len(all)
 	if opts.After != "" {
@@ -154,16 +162,16 @@ func (s *InMemoryStore) loadReverse(sessionID string, opts *adk.LoadEventsReques
 		end = pos // strictly older: [0, pos)
 	}
 	if end <= 0 {
-		return &adk.LoadEventsResult{}, nil
+		return &adk.LoadSessionEventsResult[M]{}, nil
 	}
 
 	kindSet := buildKindSet(opts.Kinds)
 
-	var out []adk.SessionEventPayload
+	var out []*adk.SessionEvent[M]
 	hasMore := false
 	for i := end - 1; i >= 0; i-- {
 		if kindSet != nil {
-			if _, match := kindSet[all[i].Kind]; !match {
+			if _, match := kindSet[kinds[i]]; !match {
 				continue
 			}
 		}
@@ -171,18 +179,39 @@ func (s *InMemoryStore) loadReverse(sessionID string, opts *adk.LoadEventsReques
 			hasMore = true
 			break
 		}
-		out = append(out, adk.SessionEventPayload{
-			EventID: all[i].EventID,
-			Kind:    all[i].Kind,
-			Data:    append([]byte{}, all[i].Data...),
-		})
+		event, err := s.decodeEvent(all[i], s.eventIDs[sessionID][i], kinds[i])
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, event)
 	}
 
 	var next string
 	if hasMore && len(out) > 0 {
 		next = out[len(out)-1].EventID
 	}
-	return &adk.LoadEventsResult{Events: out, Next: next}, nil
+	return &adk.LoadSessionEventsResult[M]{Events: out, Next: next}, nil
+}
+
+func (s *InMemoryStore[M]) decodeEvent(data []byte, eventID string, kind adk.SessionEventKind) (*adk.SessionEvent[M], error) {
+	var event adk.SessionEvent[M]
+	if err := s.serializer.Unmarshal(data, &event); err != nil {
+		return nil, err
+	}
+	if err := adk.NormalizeSessionEventKind(&event); err != nil {
+		return nil, err
+	}
+	if event.EventID != eventID || event.Kind != kind {
+		return nil, fmt.Errorf("adk/session: in-memory event index mismatch for event_id %q", eventID)
+	}
+	return &event, nil
+}
+
+func normalizeSerializer(cfg *InMemoryStoreConfig) schema.Serializer {
+	if cfg != nil && cfg.EventSerializer != nil {
+		return cfg.EventSerializer
+	}
+	return &schema.HumanReadableSerializer{}
 }
 
 func buildKindSet(kinds []adk.SessionEventKind) map[adk.SessionEventKind]struct{} {
@@ -197,7 +226,7 @@ func buildKindSet(kinds []adk.SessionEventKind) map[adk.SessionEventKind]struct{
 }
 
 // Set stores a checkpoint value.
-func (s *InMemoryStore) Set(_ context.Context, checkPointID string, checkPoint []byte) error {
+func (s *InMemoryStore[M]) Set(_ context.Context, checkPointID string, checkPoint []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.checkpoints[checkPointID] = append([]byte{}, checkPoint...)
@@ -205,7 +234,7 @@ func (s *InMemoryStore) Set(_ context.Context, checkPointID string, checkPoint [
 }
 
 // Get retrieves a checkpoint value. Returns an independent copy.
-func (s *InMemoryStore) Get(_ context.Context, checkPointID string) ([]byte, bool, error) {
+func (s *InMemoryStore[M]) Get(_ context.Context, checkPointID string) ([]byte, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	v, ok := s.checkpoints[checkPointID]
@@ -216,7 +245,7 @@ func (s *InMemoryStore) Get(_ context.Context, checkPointID string) ([]byte, boo
 }
 
 // Delete removes a checkpoint.
-func (s *InMemoryStore) Delete(_ context.Context, checkPointID string) error {
+func (s *InMemoryStore[M]) Delete(_ context.Context, checkPointID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.checkpoints, checkPointID)

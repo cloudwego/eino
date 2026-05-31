@@ -34,7 +34,7 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
-func requireStoredIdleStopReason(t *testing.T, raw []SessionEventPayload, want string) *SessionEvent[*schema.Message] {
+func requireStoredIdleStopReason(t *testing.T, raw []storedSessionEvent, want string) *SessionEvent[*schema.Message] {
 	t.Helper()
 	idleEvents := filterStoredSessionEvents(t, raw, func(se *SessionEvent[*schema.Message]) bool {
 		return se.Kind == SessionEventSessionStatusIdle
@@ -257,12 +257,10 @@ func TestSessionTimeline_ReconstructionIgnoresNonContextVariants(t *testing.T) {
 		{EventID: uuid.NewString(), Kind: SessionEventTurnEnd, TurnEnd: &TurnEndState[*schema.Message]{SessionValues: map[string]any{"k": "v"}}},
 	}
 	for _, se := range events {
-		data, err := encodeSessionEvent(se)
-		require.NoError(t, err)
-		require.NoError(t, store.AppendEvents(ctx, sid, []SessionEventPayload{{EventID: se.EventID, Kind: se.Kind, Data: data}}))
+		require.NoError(t, store.AppendEvents(ctx, sid, []*SessionEvent[*schema.Message]{se}))
 	}
 
-	result, err := reconstructSessionState[*schema.Message](ctx, store, sid, defaultLoadPageSize, nil)
+	result, err := reconstructSessionState[*schema.Message](ctx, store, sid, defaultLoadPageSize)
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	require.NotNil(t, result.state)
@@ -354,7 +352,7 @@ func TestRunner_PersistsAgentInterruptSessionEvent(t *testing.T) {
 		Agent:           agent,
 		CheckPointStore: store,
 		SessionID:       "agent-interrupt-session",
-		SessionStore:    store,
+		SessionService:  store,
 		SessionConfig:   &SessionConfig{EventFlushBatchSize: 1},
 	})
 
@@ -413,12 +411,10 @@ func TestSessionTimeline_ReconstructionIncludesPartialContextAfterLatestTurnEnd(
 		{EventID: uuid.NewString(), Kind: SessionEventSessionError, Error: &SessionErrorEvent{Type: SessionErrorTypeModelRetry, RetryStatus: &RetryStatus{Type: "retrying"}}},
 	}
 	for _, se := range events {
-		data, err := encodeSessionEvent(se)
-		require.NoError(t, err)
-		require.NoError(t, store.AppendEvents(ctx, sid, []SessionEventPayload{{EventID: se.EventID, Kind: se.Kind, Data: data}}))
+		require.NoError(t, store.AppendEvents(ctx, sid, []*SessionEvent[*schema.Message]{se}))
 	}
 
-	result, err := reconstructSessionState[*schema.Message](ctx, store, sid, defaultLoadPageSize, nil)
+	result, err := reconstructSessionState[*schema.Message](ctx, store, sid, defaultLoadPageSize)
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	require.NotNil(t, result.state)
@@ -449,12 +445,10 @@ func TestSessionTimeline_ReconstructionPartialContextMissingAnchorFails(t *testi
 		}},
 	}
 	for _, se := range events {
-		data, err := encodeSessionEvent(se)
-		require.NoError(t, err)
-		require.NoError(t, store.AppendEvents(ctx, sid, []SessionEventPayload{{EventID: se.EventID, Kind: se.Kind, Data: data}}))
+		require.NoError(t, store.AppendEvents(ctx, sid, []*SessionEvent[*schema.Message]{se}))
 	}
 
-	_, err := reconstructSessionState[*schema.Message](ctx, store, sid, defaultLoadPageSize, nil)
+	_, err := reconstructSessionState[*schema.Message](ctx, store, sid, defaultLoadPageSize)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "missing-anchor")
 }
@@ -492,7 +486,7 @@ func TestWithTimelineEvents_LiveExposure(t *testing.T) {
 
 	t.Run("stripped by default", func(t *testing.T) {
 		store := newSessionHelperStore()
-		runner := NewRunner(ctx, RunnerConfig{Agent: agent, SessionID: "timeline-default", SessionStore: store, SessionConfig: &SessionConfig{EventFlushBatchSize: 1}})
+		runner := NewRunner(ctx, RunnerConfig{Agent: agent, SessionID: "timeline-default", SessionService: store, SessionConfig: &SessionConfig{EventFlushBatchSize: 1}})
 		iter := runner.Query(ctx, "hello")
 		for {
 			event, ok := iter.Next()
@@ -511,7 +505,7 @@ func TestWithTimelineEvents_LiveExposure(t *testing.T) {
 
 	t.Run("exposed when requested", func(t *testing.T) {
 		store := newSessionHelperStore()
-		runner := NewRunner(ctx, RunnerConfig{Agent: agent, SessionID: "timeline-visible", SessionStore: store, SessionConfig: &SessionConfig{EventFlushBatchSize: 1}})
+		runner := NewRunner(ctx, RunnerConfig{Agent: agent, SessionID: "timeline-visible", SessionService: store, SessionConfig: &SessionConfig{EventFlushBatchSize: 1}})
 		var kinds []SessionEventKind
 		var liveUserInput bool
 		iter := runner.Query(ctx, "hello", WithTimelineEvents())
@@ -583,10 +577,10 @@ func TestRunner_ExtensionEventSentWithTypedSendEventIsLiveAndPersisted(t *testin
 	t.Run("visible when timeline requested", func(t *testing.T) {
 		store := newSessionHelperStore()
 		runner := NewRunner(ctx, RunnerConfig{
-			Agent:         agent,
-			SessionID:     "extension-event-session-visible",
-			SessionStore:  store,
-			SessionConfig: &SessionConfig{EventFlushBatchSize: 1},
+			Agent:          agent,
+			SessionID:      "extension-event-session-visible",
+			SessionService: store,
+			SessionConfig:  &SessionConfig{EventFlushBatchSize: 1},
 		})
 
 		var liveExtension *SessionEvent[*schema.Message]
@@ -634,10 +628,10 @@ func TestRunner_ExtensionEventSentWithTypedSendEventIsLiveAndPersisted(t *testin
 	t.Run("stripped from live stream by default", func(t *testing.T) {
 		store := newSessionHelperStore()
 		runner := NewRunner(ctx, RunnerConfig{
-			Agent:         agent,
-			SessionID:     "extension-event-session-stripped",
-			SessionStore:  store,
-			SessionConfig: &SessionConfig{EventFlushBatchSize: 1},
+			Agent:          agent,
+			SessionID:      "extension-event-session-stripped",
+			SessionService: store,
+			SessionConfig:  &SessionConfig{EventFlushBatchSize: 1},
 		})
 
 		iter := runner.Query(ctx, "hello")
@@ -1217,10 +1211,10 @@ func TestRunnerTimelineRetryExhaustedStopReason(t *testing.T) {
 	ctx := context.Background()
 	store := newSessionHelperStore()
 	runner := NewRunner(ctx, RunnerConfig{
-		Agent:         &timelineErrorAgent{name: "retry-exhausted", err: &RetryExhaustedError{LastErr: errors.New("still failing"), TotalRetries: 1}},
-		SessionID:     "timeline-retry-exhausted",
-		SessionStore:  store,
-		SessionConfig: &SessionConfig{EventFlushBatchSize: 1},
+		Agent:          &timelineErrorAgent{name: "retry-exhausted", err: &RetryExhaustedError{LastErr: errors.New("still failing"), TotalRetries: 1}},
+		SessionID:      "timeline-retry-exhausted",
+		SessionService: store,
+		SessionConfig:  &SessionConfig{EventFlushBatchSize: 1},
 	})
 
 	iter := runner.Query(ctx, "hi")
@@ -1242,10 +1236,10 @@ func TestRunnerTimelineFailedStopReason(t *testing.T) {
 	ctx := context.Background()
 	store := newSessionHelperStore()
 	runner := NewRunner(ctx, RunnerConfig{
-		Agent:         &timelineErrorAgent{name: "failed", err: errors.New("boom")},
-		SessionID:     "timeline-failed",
-		SessionStore:  store,
-		SessionConfig: &SessionConfig{EventFlushBatchSize: 1},
+		Agent:          &timelineErrorAgent{name: "failed", err: errors.New("boom")},
+		SessionID:      "timeline-failed",
+		SessionService: store,
+		SessionConfig:  &SessionConfig{EventFlushBatchSize: 1},
 	})
 
 	iter := runner.Query(ctx, "hi")
@@ -1293,10 +1287,10 @@ func TestRunnerTimelineModelCallFatalDoesNotRequireTurnEnd(t *testing.T) {
 
 	store := newSessionHelperStore()
 	runner := NewRunner(ctx, RunnerConfig{
-		Agent:         agent,
-		SessionID:     "timeline-fatal-model",
-		SessionStore:  store,
-		SessionConfig: &SessionConfig{EventFlushBatchSize: 1},
+		Agent:          agent,
+		SessionID:      "timeline-fatal-model",
+		SessionService: store,
+		SessionConfig:  &SessionConfig{EventFlushBatchSize: 1},
 	})
 
 	var gotErrs []error
@@ -1355,7 +1349,7 @@ func TestRunnerTimelineCancelStopReasonAndUserInterruptPersisted(t *testing.T) {
 		Agent:           agent,
 		CheckPointStore: store,
 		SessionID:       "timeline-cancel",
-		SessionStore:    store,
+		SessionService:  store,
 		SessionConfig:   &SessionConfig{EventFlushBatchSize: 1},
 	})
 	cancelOpt, cancelFn := WithCancel()
@@ -1416,10 +1410,10 @@ func TestToolSpan_PersistedAroundToolCallAndLinksToMessages(t *testing.T) {
 
 	store := newSessionHelperStore()
 	runner := NewRunner(ctx, RunnerConfig{
-		Agent:         agent,
-		SessionID:     "tool-span-around",
-		SessionStore:  store,
-		SessionConfig: &SessionConfig{EventFlushBatchSize: 1},
+		Agent:          agent,
+		SessionID:      "tool-span-around",
+		SessionService: store,
+		SessionConfig:  &SessionConfig{EventFlushBatchSize: 1},
 	})
 	iter := runner.Query(ctx, "go")
 	for {
@@ -1479,21 +1473,21 @@ func TestToolSpan_PersistedAroundToolCallAndLinksToMessages(t *testing.T) {
 }
 
 type kindsRecordingStore struct {
-	SessionStore
+	SessionService[*schema.Message]
 	recordedKinds [][]SessionEventKind
 }
 
-func (s *kindsRecordingStore) LoadEvents(ctx context.Context, sessionID string, opts *LoadEventsRequest) (*LoadEventsResult, error) {
+func (s *kindsRecordingStore) LoadEvents(ctx context.Context, sessionID string, opts *LoadSessionEventsRequest) (*LoadSessionEventsResult[*schema.Message], error) {
 	if opts != nil {
 		s.recordedKinds = append(s.recordedKinds, opts.Kinds)
 	}
-	return s.SessionStore.LoadEvents(ctx, sessionID, opts)
+	return s.SessionService.LoadEvents(ctx, sessionID, opts)
 }
 
 func TestSessionTimeline_ReconstructionUsesKindFilter(t *testing.T) {
 	ctx := context.Background()
 	inner := newSessionHelperStore()
-	wrapper := &kindsRecordingStore{SessionStore: inner}
+	wrapper := &kindsRecordingStore{SessionService: inner}
 	sid := "timeline-kind-filter"
 
 	msg1 := schema.UserMessage("hello")
@@ -1508,12 +1502,10 @@ func TestSessionTimeline_ReconstructionUsesKindFilter(t *testing.T) {
 		{EventID: uuid.NewString(), Kind: SessionEventTurnEnd, TurnEnd: &TurnEndState[*schema.Message]{SessionValues: map[string]any{"done": true}}},
 	}
 	for _, se := range events {
-		data, err := encodeSessionEvent(se)
-		require.NoError(t, err)
-		require.NoError(t, inner.AppendEvents(ctx, sid, []SessionEventPayload{{EventID: se.EventID, Kind: se.Kind, Data: data}}))
+		require.NoError(t, inner.AppendEvents(ctx, sid, []*SessionEvent[*schema.Message]{se}))
 	}
 
-	result, err := reconstructSessionState[*schema.Message](ctx, wrapper, sid, defaultLoadPageSize, nil)
+	result, err := reconstructSessionState[*schema.Message](ctx, wrapper, sid, defaultLoadPageSize)
 	require.NoError(t, err)
 
 	// All recorded Kinds slices should equal modelContextSessionEventKinds.
@@ -1548,10 +1540,10 @@ func TestToolSpan_StreamableToolEmitsEndAfterEOF(t *testing.T) {
 
 	store := newSessionHelperStore()
 	runner := NewRunner(ctx, RunnerConfig{
-		Agent:         agent,
-		SessionID:     "tool-span-stream",
-		SessionStore:  store,
-		SessionConfig: &SessionConfig{EventFlushBatchSize: 1},
+		Agent:          agent,
+		SessionID:      "tool-span-stream",
+		SessionService: store,
+		SessionConfig:  &SessionConfig{EventFlushBatchSize: 1},
 	})
 	iter := runner.Query(ctx, "stream go")
 	for {

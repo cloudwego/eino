@@ -61,8 +61,8 @@ type TypedRunner[M MessageType] struct {
 	enableStreaming bool
 	store           CheckPointStore
 	sessionID       string
-	sessionStore    SessionStore
-	sessionPersist  *SessionConfig
+	sessionService  SessionService[M]
+	sessionConfig   *SessionConfig
 }
 
 // Runner is the default runner type using *schema.Message.
@@ -78,9 +78,9 @@ type TypedRunnerConfig[M MessageType] struct {
 
 	CheckPointStore CheckPointStore
 
-	SessionID     string
-	SessionStore  SessionStore
-	SessionConfig *SessionConfig
+	SessionID      string
+	SessionService SessionService[M]
+	SessionConfig  *SessionConfig
 }
 
 // RunnerConfig is the default runner config type using *schema.Message.
@@ -108,14 +108,14 @@ func NewTypedRunner[M MessageType](conf TypedRunnerConfig[M]) *TypedRunner[M] {
 		a:               conf.Agent,
 		store:           conf.CheckPointStore,
 		sessionID:       conf.SessionID,
-		sessionStore:    conf.SessionStore,
-		sessionPersist:  conf.SessionConfig,
+		sessionService:  conf.SessionService,
+		sessionConfig:   conf.SessionConfig,
 	}
 }
 
 func (r *TypedRunner[M]) Run(ctx context.Context, messages []M,
 	opts ...AgentRunOption) *AsyncIterator[*TypedAgentEvent[M]] {
-	return typedRunnerRunImpl(r.a, r.enableStreaming, r.store, r.sessionID, r.sessionStore, r.sessionPersist, ctx, messages, opts...)
+	return typedRunnerRunImpl(r.a, r.enableStreaming, r.store, r.sessionID, r.sessionService, r.sessionConfig, ctx, messages, opts...)
 }
 
 // Query is a convenience method that starts a new execution with a single user query string.
@@ -164,7 +164,7 @@ func (r *TypedRunner[M]) ResumeWithParams(ctx context.Context, checkPointID stri
 
 func (r *TypedRunner[M]) resumeInternal(ctx context.Context, checkPointID string, resumeData map[string]any,
 	opts ...AgentRunOption) (*AsyncIterator[*TypedAgentEvent[M]], error) {
-	return typedRunnerResumeInternalImpl(r.a, r.store, r.sessionID, r.sessionStore, r.sessionPersist, ctx, checkPointID, resumeData, opts...)
+	return typedRunnerResumeInternalImpl(r.a, r.store, r.sessionID, r.sessionService, r.sessionConfig, ctx, checkPointID, resumeData, opts...)
 }
 
 type runnerSessionRunState[M MessageType] struct {
@@ -172,8 +172,8 @@ type runnerSessionRunState[M MessageType] struct {
 	sessionID       string
 	checkPointID    *string
 	latestState     *TurnEndState[M]
-	persistence     SessionConfig
-	sessionStore    SessionStore
+	sessionConfig   SessionConfig
+	sessionService  SessionService[M]
 	checkPointStore CheckPointStore
 	turnID          string
 	// inputMessages are the caller-provided messages for this turn (before history prepend).
@@ -207,24 +207,24 @@ func prepareRunnerSessionRun[M MessageType]( //nolint:revive // argument-limit
 	checkPointStore CheckPointStore,
 	requestedCheckPointID *string,
 	sessionID string,
-	sessionStore SessionStore,
-	sessionPersistence *SessionConfig,
+	sessionService SessionService[M],
+	sessionConfig *SessionConfig,
 ) (*runnerSessionRunState[M], error) {
 	state := &runnerSessionRunState[M]{}
-	if sessionID == "" || sessionStore == nil {
+	if sessionID == "" || sessionService == nil {
 		return state, nil
 	}
 	state.enabled = true
 	state.sessionID = sessionID
 	state.turnID = uuid.NewString()
-	state.sessionStore = sessionStore
+	state.sessionService = sessionService
 	state.checkPointStore = checkPointStore
-	state.persistence = normalizeSessionConfig(sessionPersistence)
+	state.sessionConfig = normalizeSessionConfig(sessionConfig)
 	state.latestState = &TurnEndState[M]{}
 
-	pageSize := state.persistence.LoadPageSize
+	pageSize := state.sessionConfig.LoadPageSize
 
-	reconstructResult, err := reconstructSessionState[M](ctx, sessionStore, sessionID, pageSize, state.persistence.EventSerializer)
+	reconstructResult, err := reconstructSessionState[M](ctx, sessionService, sessionID, pageSize)
 	if err != nil {
 		return nil, fmt.Errorf("failed to reconstruct session[%s]: %w", sessionID, err)
 	}
@@ -261,30 +261,30 @@ func prepareRunnerSessionResume[M MessageType](
 	ctx context.Context,
 	checkPointStore CheckPointStore,
 	sessionID string,
-	sessionStore SessionStore,
-	sessionPersistence *SessionConfig,
+	sessionService SessionService[M],
+	sessionConfig *SessionConfig,
 	checkPointID string,
 ) (*runnerSessionRunState[M], string, error) {
 	state := &runnerSessionRunState[M]{}
 	// Non-session-mode resume: explicit checkpoint ID, no session boot needed.
-	if checkPointID != "" && (sessionID == "" || sessionStore == nil) {
+	if checkPointID != "" && (sessionID == "" || sessionService == nil) {
 		return state, checkPointID, nil
 	}
-	// Implicit session-mode resume requires both sessionID and sessionStore.
-	if checkPointID == "" && (sessionID == "" || sessionStore == nil) {
+	// Implicit session-mode resume requires both sessionID and sessionService.
+	if checkPointID == "" && (sessionID == "" || sessionService == nil) {
 		return nil, "", errors.New("failed to resume: checkpoint ID is empty")
 	}
 	state.enabled = true
 	state.sessionID = sessionID
 	state.turnID = uuid.NewString()
-	state.sessionStore = sessionStore
+	state.sessionService = sessionService
 	state.checkPointStore = checkPointStore
-	state.persistence = normalizeSessionConfig(sessionPersistence)
+	state.sessionConfig = normalizeSessionConfig(sessionConfig)
 	state.latestState = &TurnEndState[M]{}
 
-	pageSize := state.persistence.LoadPageSize
+	pageSize := state.sessionConfig.LoadPageSize
 
-	reconstructResult, err := reconstructSessionState[M](ctx, sessionStore, sessionID, pageSize, state.persistence.EventSerializer)
+	reconstructResult, err := reconstructSessionState[M](ctx, sessionService, sessionID, pageSize)
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to reconstruct session[%s]: %w", sessionID, err)
 	}
@@ -402,11 +402,11 @@ func saveRunnerCheckpoint[M MessageType]( //nolint:revive // argument-limit
 	return store.Set(ctx, checkPointID, data)
 }
 
-func typedRunnerRunImpl[M MessageType](a TypedAgent[M], enableStreaming bool, store CheckPointStore, sessionID string, sessionStore SessionStore, sessionPersistence *SessionConfig, ctx context.Context, messages []M, opts ...AgentRunOption) *AsyncIterator[*TypedAgentEvent[M]] { //nolint:revive // argument-limit
+func typedRunnerRunImpl[M MessageType](a TypedAgent[M], enableStreaming bool, store CheckPointStore, sessionID string, sessionService SessionService[M], sessionConfig *SessionConfig, ctx context.Context, messages []M, opts ...AgentRunOption) *AsyncIterator[*TypedAgentEvent[M]] { //nolint:revive // argument-limit
 	o := getCommonOptions(nil, opts...)
 	exposeTimelineEvents := o.enableTimelineEvents
 
-	sessionState, err := prepareRunnerSessionRun[M](ctx, store, o.checkPointID, sessionID, sessionStore, sessionPersistence)
+	sessionState, err := prepareRunnerSessionRun[M](ctx, store, o.checkPointID, sessionID, sessionService, sessionConfig)
 	if err != nil {
 		return errorIterator[M](err)
 	}
@@ -493,7 +493,7 @@ func typedRunnerRunImpl[M MessageType](a TypedAgent[M], enableStreaming bool, st
 	return niter
 }
 
-func typedRunnerResumeInternalImpl[M MessageType](a TypedAgent[M], store CheckPointStore, sessionID string, sessionStore SessionStore, sessionPersistence *SessionConfig, ctx context.Context, checkPointID string, resumeData map[string]any, //nolint:revive // argument-limit
+func typedRunnerResumeInternalImpl[M MessageType](a TypedAgent[M], store CheckPointStore, sessionID string, sessionService SessionService[M], sessionConfig *SessionConfig, ctx context.Context, checkPointID string, resumeData map[string]any, //nolint:revive // argument-limit
 	opts ...AgentRunOption) (*AsyncIterator[*TypedAgentEvent[M]], error) {
 	if store == nil {
 		return nil, fmt.Errorf("failed to resume: store is nil")
@@ -501,7 +501,7 @@ func typedRunnerResumeInternalImpl[M MessageType](a TypedAgent[M], store CheckPo
 
 	o := getCommonOptions(nil, opts...)
 	exposeTimelineEvents := o.enableTimelineEvents
-	sessionState, effectiveCheckPointID, err := prepareRunnerSessionResume[M](ctx, store, sessionID, sessionStore, sessionPersistence, checkPointID)
+	sessionState, effectiveCheckPointID, err := prepareRunnerSessionResume[M](ctx, store, sessionID, sessionService, sessionConfig, checkPointID)
 	if err != nil {
 		return nil, err
 	}
@@ -600,10 +600,10 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 		pendingCheckpoint *deferredRunnerCheckpoint
 	)
 	if sessionState != nil && sessionState.enabled {
-		persister = newSessionEventPersister[M](ctx, sessionState.sessionStore, sessionState.sessionID, sessionState.persistence)
+		persister = newSessionEventPersister[M](ctx, sessionState.sessionService, sessionState.sessionID, sessionState.sessionConfig)
 	}
 	syncPersistence := sessionState != nil && sessionState.enabled &&
-		sessionState.persistence.PersistenceMode == SessionPersistenceModeSync
+		sessionState.sessionConfig.PersistenceMode == SessionPersistenceModeSync
 	setPersistErr := func(err error) {
 		if err != nil && persistErr == nil {
 			persistErr = err
@@ -625,12 +625,7 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 			setPersistErr(err)
 			return err
 		}
-		data, err := encodeSessionEventWithSerializer(se, sessionState.persistence.EventSerializer)
-		if err != nil {
-			setPersistErr(err)
-			return err
-		}
-		if err := persister.enqueue(SessionEventPayload{EventID: se.EventID, Kind: se.Kind, Data: data}); err != nil {
+		if err := persister.enqueue(se); err != nil {
 			setPersistErr(err)
 			return err
 		}
@@ -1017,7 +1012,7 @@ func extractToolUseID(ctx *InterruptCtx) string {
 // deferredRunnerCheckpoint captures the arguments needed to persist a runner
 // checkpoint after the session event persister has flushed. Saving the
 // checkpoint earlier would risk a checkpoint that references events not yet
-// durable in the SessionStore.
+// durable in the SessionService.
 type deferredRunnerCheckpoint struct {
 	info     *InterruptInfo
 	signal   *core.InterruptSignal
@@ -1065,10 +1060,10 @@ func (r *sessionTurnResult[M]) finalize(ctx context.Context) error {
 	if r.terminalErr != nil {
 		return nil
 	}
-	if !r.sawTurnEnd {
-		return fmt.Errorf("failed to commit session[%s]: missing SessionEventTurnEnd", r.sessionState.sessionID)
-	}
 	if r.checkPointID != nil && r.store != nil {
+		if !r.sawTurnEnd {
+			return fmt.Errorf("failed to commit session[%s]: missing SessionEventTurnEnd", r.sessionState.sessionID)
+		}
 		if err := deleteCheckPointIfSupported(ctx, r.store, *r.checkPointID); err != nil {
 			return fmt.Errorf("failed to delete session checkpoint: %w", err)
 		}

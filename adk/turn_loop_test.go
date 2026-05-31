@@ -51,6 +51,16 @@ func (a *turnLoopMockAgent) Run(ctx context.Context, input *AgentInput, _ ...Age
 				return
 			}
 			gen.Send(&AgentEvent{Output: output})
+			if output != nil && output.MessageOutput != nil && output.MessageOutput.Message != nil {
+				gen.Send(&AgentEvent{
+					SessionEvent: &SessionEvent[*schema.Message]{
+						Kind: SessionEventTurnEnd,
+						TurnEnd: &TurnEndState[*schema.Message]{
+							Messages: []*schema.Message{output.MessageOutput.Message},
+						},
+					},
+				})
+			}
 		}()
 		return iter
 	}
@@ -2649,7 +2659,7 @@ func TestTurnLoop_ManagedInterrupt_StartNewTurnDeleteFailureStopsBeforeRun(t *te
 	assert.True(t, exists, "checkpoint must remain when deletion fails")
 }
 
-func TestTurnLoop_ManagedInterrupt_StartNewTurnUsesConfiguredSessionStore(t *testing.T) {
+func TestTurnLoop_ManagedInterrupt_StartNewTurnUsesConfiguredSessionService(t *testing.T) {
 	ctx := context.Background()
 	sessionStore := newSessionHelperStore()
 	sessionID := "managed-session-passthrough"
@@ -2667,9 +2677,7 @@ func TestTurnLoop_ManagedInterrupt_StartNewTurnUsesConfiguredSessionStore(t *tes
 		}),
 		withTestEventID(&SessionEvent[*schema.Message]{Kind: SessionEventMessage, Message: partialUser}),
 	} {
-		data, err := encodeSessionEvent(se)
-		require.NoError(t, err)
-		require.NoError(t, sessionStore.AppendEvents(ctx, sessionID, []SessionEventPayload{{EventID: se.EventID, Kind: se.Kind, Data: data}}))
+		require.NoError(t, sessionStore.AppendEvents(ctx, sessionID, []*SessionEvent[*schema.Message]{se}))
 	}
 	initialEventCount := len(sessionStore.events)
 
@@ -2677,11 +2685,11 @@ func TestTurnLoop_ManagedInterrupt_StartNewTurnUsesConfiguredSessionStore(t *tes
 	var prepareCount int32
 	captureAgent := &runnerSessionAgent{name: "session-capture"}
 	loop := newAndRunTurnLoop(ctx, TurnLoopConfig[string, *schema.Message]{
-		InterruptMode: TurnLoopInterruptWaitsForExplicitResume,
-		SessionID:     sessionID,
-		SessionStore:  sessionStore,
-		SessionConfig: &SessionConfig{EventFlushBatchSize: 1},
-		GenInput:      genInputConsumeAllWithMsg,
+		InterruptMode:  TurnLoopInterruptWaitsForExplicitResume,
+		SessionID:      sessionID,
+		SessionService: sessionStore,
+		SessionConfig:  &SessionConfig{EventFlushBatchSize: 1},
+		GenInput:       genInputConsumeAllWithMsg,
 		GenResume: func(ctx context.Context, _ *TurnLoop[string, *schema.Message], interruptedItems, unhandledItems, resumeItems []string) (*GenResumeResult[string, *schema.Message], error) {
 			return &GenResumeResult[string, *schema.Message]{
 				Decision: TurnLoopResumeDecisionStartNewTurn,
@@ -2730,8 +2738,8 @@ func TestTurnLoop_ManagedInterrupt_StartNewTurnUsesConfiguredSessionStore(t *tes
 	assert.Contains(t, contents, "partial-after-turn-end")
 	assert.Contains(t, contents, "trigger-interrupt")
 	assert.Contains(t, contents, "fresh-after-interrupt")
-	assert.Greater(t, len(sessionStore.events), initialEventCount, "fresh turn should append session events to configured SessionStore")
-	assert.Empty(t, sessionStore.checkpoints, "runner checkpoint bridge must not use SessionStore checkpoint map")
+	assert.Greater(t, len(sessionStore.events), initialEventCount, "fresh turn should append session events to configured SessionService")
+	assert.Empty(t, sessionStore.checkpoints, "runner checkpoint bridge must not use SessionService checkpoint map")
 }
 
 func TestTurnLoop_ManagedInterrupt_DecisionResumeUsesCapturedCheckpointIDAndParams(t *testing.T) {
@@ -2751,11 +2759,11 @@ func TestTurnLoop_ManagedInterrupt_DecisionResumeUsesCapturedCheckpointIDAndPara
 	var interruptCheckpointID string
 	var interruptTargetID string
 	loop := newAndRunTurnLoop(ctx, TurnLoopConfig[string, *schema.Message]{
-		InterruptMode: TurnLoopInterruptWaitsForExplicitResume,
-		SessionID:     sessionID,
-		SessionStore:  sessionStore,
-		SessionConfig: &SessionConfig{EventFlushBatchSize: 1},
-		GenInput:      genInputConsumeAllWithMsg,
+		InterruptMode:  TurnLoopInterruptWaitsForExplicitResume,
+		SessionID:      sessionID,
+		SessionService: sessionStore,
+		SessionConfig:  &SessionConfig{EventFlushBatchSize: 1},
+		GenInput:       genInputConsumeAllWithMsg,
 		GenResume: func(ctx context.Context, _ *TurnLoop[string, *schema.Message], interruptedItems, unhandledItems, resumeItems []string) (*GenResumeResult[string, *schema.Message], error) {
 			require.NotEmpty(t, interruptTargetID)
 			return &GenResumeResult[string, *schema.Message]{
@@ -3953,45 +3961,120 @@ func TestNewTurnLoop_WaitBeforeRun(t *testing.T) {
 	}
 }
 
-type mockSessionStore struct {
+type mockSessionService struct {
 	mu     sync.Mutex
-	events map[string][]SessionEventPayload
+	events map[string][]storedSessionEvent
 }
 
-func (m *mockSessionStore) AppendEvents(_ context.Context, sessionID string, events []SessionEventPayload) error {
+func (m *mockSessionService) AppendEvents(_ context.Context, sessionID string, events []*SessionEvent[*schema.Message]) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.events == nil {
-		m.events = make(map[string][]SessionEventPayload)
+		m.events = make(map[string][]storedSessionEvent)
 	}
-	m.events[sessionID] = append(m.events[sessionID], events...)
+	for _, event := range events {
+		if event == nil || event.EventID == "" {
+			return ErrInvalidEventID
+		}
+		if err := NormalizeSessionEventKind(event); err != nil {
+			return err
+		}
+		data, err := encodeSessionEvent(event)
+		if err != nil {
+			return err
+		}
+		m.events[sessionID] = append(m.events[sessionID], storedSessionEvent{
+			EventID: event.EventID,
+			Kind:    event.Kind,
+			Data:    data,
+		})
+	}
 	return nil
 }
 
-func (m *mockSessionStore) LoadEvents(_ context.Context, sessionID string, opts *LoadEventsRequest) (*LoadEventsResult, error) {
+func (m *mockSessionService) LoadEvents(_ context.Context, sessionID string, opts *LoadSessionEventsRequest) (*LoadSessionEventsResult[*schema.Message], error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return &LoadEventsResult{}, nil
+	if opts == nil {
+		opts = &LoadSessionEventsRequest{}
+	}
+	events := m.events[sessionID]
+	findAfter := func() (int, error) {
+		if opts.After == "" {
+			return -1, nil
+		}
+		for i, event := range events {
+			if event.EventID == opts.After {
+				return i, nil
+			}
+		}
+		return -1, ErrEventIDOutOfRange
+	}
+	after, err := findAfter()
+	if err != nil {
+		return nil, err
+	}
+	kindSet := buildTestKindSet(opts.Kinds)
+	var out []*SessionEvent[*schema.Message]
+	hasMore := false
+	if opts.Reverse {
+		end := len(events)
+		if opts.After != "" {
+			end = after
+		}
+		for i := end - 1; i >= 0; i-- {
+			if kindSet != nil {
+				if _, ok := kindSet[events[i].Kind]; !ok {
+					continue
+				}
+			}
+			if opts.Limit > 0 && len(out) >= opts.Limit {
+				hasMore = true
+				break
+			}
+			event, err := decodeSessionEvent[*schema.Message](events[i].Data)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, event)
+		}
+	} else {
+		for i := after + 1; i < len(events); i++ {
+			if kindSet != nil {
+				if _, ok := kindSet[events[i].Kind]; !ok {
+					continue
+				}
+			}
+			if opts.Limit > 0 && len(out) >= opts.Limit {
+				hasMore = true
+				break
+			}
+			event, err := decodeSessionEvent[*schema.Message](events[i].Data)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, event)
+		}
+	}
+	var next string
+	if hasMore && len(out) > 0 {
+		next = out[len(out)-1].EventID
+	}
+	return &LoadSessionEventsResult[*schema.Message]{Events: out, Next: next}, nil
 }
 
-func TestTurnLoop_SessionStoreWithoutCheckpointStore(t *testing.T) {
-	// Test that TurnLoop works correctly when SessionStore is configured but CheckpointStore is not
+func TestTurnLoop_SessionServiceWithCheckpointIDWithoutStore(t *testing.T) {
 	ctx := context.Background()
-	sessionStore := &mockSessionStore{}
 	sessionID := "test-session-id"
-
+	sessionStore := &mockSessionService{}
 	var processed bool
+
 	loop := NewTurnLoop(TurnLoopConfig[string, *schema.Message]{
-		GenInput: func(ctx context.Context, _ *TurnLoop[string, *schema.Message], items []string) (*GenInputResult[string, *schema.Message], error) {
-			return &GenInputResult[string, *schema.Message]{
-				Input:    &TypedAgentInput[*schema.Message]{Messages: []*schema.Message{schema.UserMessage(items[0])}},
-				Consumed: items,
-			}, nil
-		},
-		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string, *schema.Message], consumed []string) (TypedAgent[*schema.Message], error) {
+		GenInput: genInputConsumeFirst,
+		PrepareAgent: func(context.Context, *TurnLoop[string, *schema.Message], []string) (Agent, error) {
 			return &turnLoopMockAgent{
 				name: "test",
-				runFunc: func(ctx context.Context, input *AgentInput) (*AgentOutput, error) {
+				runFunc: func(context.Context, *AgentInput) (*AgentOutput, error) {
 					processed = true
 					return &AgentOutput{
 						MessageOutput: &MessageVariant{
@@ -4002,7 +4085,7 @@ func TestTurnLoop_SessionStoreWithoutCheckpointStore(t *testing.T) {
 				},
 			}, nil
 		},
-		OnAgentEvents: func(ctx context.Context, tc *TurnContext[string, *schema.Message], events *AsyncIterator[*TypedAgentEvent[*schema.Message]]) error {
+		OnAgentEvents: func(_ context.Context, tc *TurnContext[string, *schema.Message], events *AsyncIterator[*AgentEvent]) error {
 			for {
 				_, ok := events.Next()
 				if !ok {
@@ -4012,9 +4095,9 @@ func TestTurnLoop_SessionStoreWithoutCheckpointStore(t *testing.T) {
 			tc.Loop.Stop()
 			return nil
 		},
-		SessionID:    sessionID,
-		SessionStore: sessionStore,
-		// Store (CheckpointStore) is intentionally not set
+		SessionID:      sessionID,
+		SessionService: sessionStore,
+		CheckpointID:   "test-checkpoint-id",
 	})
 
 	loop.Push("test-message")
@@ -4022,7 +4105,8 @@ func TestTurnLoop_SessionStoreWithoutCheckpointStore(t *testing.T) {
 	exit := loop.Wait()
 
 	assert.NoError(t, exit.ExitReason)
-	assert.True(t, processed, "Agent should have processed the message")
+	assert.True(t, processed)
+	assert.NotEmpty(t, sessionStore.events[sessionID])
 }
 
 func TestNewTurnLoop_RunIsIdempotent(t *testing.T) {
