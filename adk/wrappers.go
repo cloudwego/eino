@@ -1869,6 +1869,7 @@ func (w *typedStateModelWrapper[M]) Generate(ctx context.Context, _ []M, opts ..
 		})
 	}
 
+	EnsureMessageID(result)
 	state.Messages = append(state.Messages, result)
 
 	for _, handler := range w.handlers {
@@ -1996,6 +1997,7 @@ func (w *typedStateModelWrapper[M]) Stream(ctx context.Context, _ []M, opts ...m
 		})
 	}
 
+	EnsureMessageID(result)
 	state.Messages = append(state.Messages, result)
 
 	for _, handler := range w.handlers {

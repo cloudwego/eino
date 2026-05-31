@@ -69,7 +69,7 @@ func (e *typedChatModelAgentExecCtx[M]) send(event *TypedAgentEvent[M]) {
 		return
 	}
 	// Allocate EventID at the first emission boundary so live (user-land) and
-	// persisted (SessionStore) copies of the same logical event share identity.
+	// persisted (SessionService) copies of the same logical event share identity.
 	// User-supplied non-empty IDs (e.g. replay scenarios) are preserved.
 	if event != nil && event.EventID == "" {
 		event.EventID = uuid.NewString()
