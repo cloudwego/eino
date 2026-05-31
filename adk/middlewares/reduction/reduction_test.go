@@ -643,7 +643,7 @@ func TestReductionMiddlewareClear(t *testing.T) {
 				Function: schema.FunctionCall{Name: "get_weather", Arguments: `{"location": "London, UK", "unit": "c"}`},
 			},
 		}, s.Messages[2].ToolCalls)
-		assert.NotNil(t, msgs[2].Extra[msgClearedFlag])
+		assert.NotNil(t, s.Messages[2].Extra[msgClearedFlag])
 		assert.Equal(t, []schema.ToolCall{
 			{
 				ID:       "call_123456789",
@@ -678,7 +678,7 @@ func TestReductionMiddlewareClear(t *testing.T) {
 				Function: schema.FunctionCall{Name: "get_weather", Arguments: `{"location": "London, UK", "unit": "c"}`},
 			},
 		}, s.Messages[2].ToolCalls)
-		assert.NotNil(t, msgs[2].Extra[msgClearedFlag])
+		assert.NotNil(t, s.Messages[2].Extra[msgClearedFlag])
 		assert.Equal(t, []schema.ToolCall{
 			{
 				ID:       "call_123456789",
@@ -686,7 +686,7 @@ func TestReductionMiddlewareClear(t *testing.T) {
 				Function: schema.FunctionCall{Name: "get_weather", Arguments: `{"location": "London, UK", "unit": "c"}`},
 			},
 		}, s.Messages[4].ToolCalls)
-		assert.NotNil(t, msgs[4].Extra[msgClearedFlag])
+		assert.NotNil(t, s.Messages[4].Extra[msgClearedFlag])
 		assert.Equal(t, "<persisted-output>Tool result saved to: /tmp/clear/call_987654321\nUse read_file to view</persisted-output>", s.Messages[3].Content)
 		assert.Equal(t, "<persisted-output>Tool result saved to: /tmp/clear/call_123456789\nUse read_file to view</persisted-output>", s.Messages[5].Content)
 	})
@@ -2882,7 +2882,7 @@ func (m *reductionRewritePersistModel) Stream(ctx context.Context, input []*sche
 
 func TestClearMessageRewriterPersistsMessagesDeletedThroughRunner(t *testing.T) {
 	ctx := context.Background()
-	store := session.NewInMemoryStore()
+	store := session.NewInMemoryStore[*schema.Message](nil)
 	model := &reductionRewritePersistModel{}
 	mw, err := New(ctx, &Config{
 		SkipTruncation:            true,
@@ -2906,10 +2906,10 @@ func TestClearMessageRewriterPersistsMessagesDeletedThroughRunner(t *testing.T) 
 	assert.NoError(t, err)
 
 	runner := adk.NewRunner(ctx, adk.RunnerConfig{
-		Agent:         agent,
-		SessionID:     "reduction-delete-session",
-		SessionStore:  store,
-		SessionConfig: &adk.SessionConfig{EventFlushBatchSize: 1},
+		Agent:          agent,
+		SessionID:      "reduction-delete-session",
+		SessionService: store,
+		SessionConfig:  &adk.SessionConfig{EventFlushBatchSize: 1},
 	})
 	drainReductionEvents(t, runner.Query(ctx, "please call the tool"))
 
@@ -2932,9 +2932,9 @@ func TestClearMessageRewriterPersistsMessagesDeletedThroughRunner(t *testing.T) 
 	})
 	assert.NoError(t, err)
 	nextRunner := adk.NewRunner(ctx, adk.RunnerConfig{
-		Agent:        nextAgent,
-		SessionID:    "reduction-delete-session",
-		SessionStore: store,
+		Agent:          nextAgent,
+		SessionID:      "reduction-delete-session",
+		SessionService: store,
 	})
 	drainReductionEvents(t, nextRunner.Query(ctx, "next turn"))
 
@@ -2950,7 +2950,7 @@ func TestClearMessageRewriterPersistsMessagesDeletedThroughRunner(t *testing.T) 
 
 func TestClearMessageRewriterAbortDoesNotPersistStructuralEvents(t *testing.T) {
 	ctx := context.Background()
-	store := session.NewInMemoryStore()
+	store := session.NewInMemoryStore[*schema.Message](nil)
 	model := &reductionRewritePersistModel{}
 	callCount := 0
 	mw, err := New(ctx, &Config{
@@ -2979,10 +2979,10 @@ func TestClearMessageRewriterAbortDoesNotPersistStructuralEvents(t *testing.T) {
 	})
 	assert.NoError(t, err)
 	runner := adk.NewRunner(ctx, adk.RunnerConfig{
-		Agent:         agent,
-		SessionID:     "reduction-abort-session",
-		SessionStore:  store,
-		SessionConfig: &adk.SessionConfig{EventFlushBatchSize: 1},
+		Agent:          agent,
+		SessionID:      "reduction-abort-session",
+		SessionService: store,
+		SessionConfig:  &adk.SessionConfig{EventFlushBatchSize: 1},
 	})
 	drainReductionEvents(t, runner.Query(ctx, "please call the tool"))
 
@@ -2996,7 +2996,7 @@ func TestClearMessageRewriterAbortDoesNotPersistStructuralEvents(t *testing.T) {
 
 func TestClearAtLeastTokensAbortDoesNotPersistMessageUpdates(t *testing.T) {
 	ctx := context.Background()
-	store := session.NewInMemoryStore()
+	store := session.NewInMemoryStore[*schema.Message](nil)
 	backend := filesystem.NewInMemoryBackend()
 	model := &reductionRewritePersistModel{}
 	callCount := 0
@@ -3024,10 +3024,10 @@ func TestClearAtLeastTokensAbortDoesNotPersistMessageUpdates(t *testing.T) {
 	})
 	assert.NoError(t, err)
 	runner := adk.NewRunner(ctx, adk.RunnerConfig{
-		Agent:         agent,
-		SessionID:     "reduction-clear-abort-session",
-		SessionStore:  store,
-		SessionConfig: &adk.SessionConfig{EventFlushBatchSize: 1},
+		Agent:          agent,
+		SessionID:      "reduction-clear-abort-session",
+		SessionService: store,
+		SessionConfig:  &adk.SessionConfig{EventFlushBatchSize: 1},
 	})
 	drainReductionEvents(t, runner.Query(ctx, "please call the tool"))
 
@@ -3048,17 +3048,9 @@ func drainReductionEvents(t *testing.T, iter *adk.AsyncIterator[*adk.AgentEvent]
 	}
 }
 
-func loadReductionSessionEvents(t *testing.T, ctx context.Context, store adk.SessionStore, sessionID string) []*adk.SessionEvent[*schema.Message] {
+func loadReductionSessionEvents(t *testing.T, ctx context.Context, store adk.SessionService[*schema.Message], sessionID string) []*adk.SessionEvent[*schema.Message] {
 	t.Helper()
-	res, err := store.LoadEvents(ctx, sessionID, &adk.LoadEventsRequest{})
+	res, err := store.LoadEvents(ctx, sessionID, &adk.LoadSessionEventsRequest{})
 	assert.NoError(t, err)
-	events := make([]*adk.SessionEvent[*schema.Message], 0, len(res.Events))
-	for _, payload := range res.Events {
-		var event adk.SessionEvent[*schema.Message]
-		err = (&schema.HumanReadableSerializer{}).Unmarshal(payload.Data, &event)
-		assert.NoError(t, err)
-		assert.NoError(t, adk.NormalizeSessionEventKind(&event))
-		events = append(events, &event)
-	}
-	return events
+	return res.Events
 }
