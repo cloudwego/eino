@@ -668,10 +668,10 @@ type TurnLoopConfig[T any, M MessageType] struct {
 
 	// Session fields are passed through to the internal Runner used by TurnLoop.
 	// They let fresh turns after managed interrupts reconstruct context from the
-	// same managed session without TurnLoop inspecting SessionStore events.
-	SessionID     string
-	SessionStore  SessionStore
-	SessionConfig *SessionConfig
+	// same managed session without TurnLoop inspecting typed session events.
+	SessionID      string
+	SessionService SessionService[M]
+	SessionConfig  *SessionConfig
 }
 
 // GenInputResult contains the result of GenInput processing.
@@ -2139,7 +2139,7 @@ func (l *TurnLoop[T, M]) runAgentAndHandleEvents(
 		Agent:           agent,
 		CheckPointStore: runnerStore,
 		SessionID:       l.config.SessionID,
-		SessionStore:    l.config.SessionStore,
+		SessionService:  l.config.SessionService,
 		SessionConfig:   l.config.SessionConfig,
 	})
 

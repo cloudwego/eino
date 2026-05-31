@@ -24,66 +24,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/schema"
 )
-
-type postProcessSummaryParams[M adk.MessageType] struct {
-	contextMsgs    []M
-	summaryContent string
-}
-
-func getAssistantTextContent[M adk.MessageType](msg M) string {
-	switch m := any(msg).(type) {
-	case *schema.Message:
-		var parts []string
-		for _, part := range m.AssistantGenMultiContent {
-			if part.Type == schema.ChatMessagePartTypeText && part.Text != "" {
-				parts = append(parts, part.Text)
-			}
-		}
-		if len(parts) > 0 {
-			return strings.Join(parts, "\n")
-		}
-		return m.Content
-	case *schema.AgenticMessage:
-		var parts []string
-		for _, block := range m.ContentBlocks {
-			if block != nil && block.AssistantGenText != nil {
-				parts = append(parts, block.AssistantGenText.Text)
-			}
-		}
-		return strings.Join(parts, "\n")
-	}
-	return ""
-}
-
-func postProcessSummary[M adk.MessageType](ctx context.Context, p *postProcessSummaryParams[M]) (M, error) {
-	mw := &TypedMiddleware[M]{cfg: &TypedConfig[M]{}}
-	return mw.postProcessSummary(ctx, p.contextMsgs, newTypedSummaryMessage[M](p.summaryContent))
-}
-
-func buildInternalFinalizer(cfg *TypedConfig[*schema.Message]) TypedFinalizeFunc[*schema.Message] {
-	return func(ctx context.Context, originalMessages []*schema.Message, summary *schema.Message) ([]*schema.Message, error) {
-		mw := &TypedMiddleware[*schema.Message]{cfg: &TypedConfig[*schema.Message]{
-			TranscriptFilePath: cfg.TranscriptFilePath,
-		}}
-		systemMsgs, contextMsgs := mw.splitSystemAndContextMsgs(originalMessages)
-		processed, err := mw.postProcessSummary(ctx, contextMsgs, newTypedSummaryMessage[*schema.Message](getAssistantTextContent(summary)))
-		if err != nil {
-			return nil, err
-		}
-		return append(systemMsgs, processed), nil
-	}
-}
-
-func DefaultFinalize(ctx context.Context, originalMessages []*schema.Message, summary *schema.Message) ([]*schema.Message, error) {
-	finalizer, err := DefaultFinalizer[*schema.Message](nil)
-	if err != nil {
-		return nil, err
-	}
-	return finalizer(ctx, originalMessages, newTypedSummaryMessage[*schema.Message](getAssistantTextContent(summary)))
-}
 
 // =============================================================================
 // Attack tests for getAssistantTextContent
@@ -586,13 +528,9 @@ func TestAttack_DefaultFinalize_EmptySummaryContent(t *testing.T) {
 		Content: "",
 	}
 
-	result, err := DefaultFinalize(ctx, originalMsgs, summary)
-	require.NoError(t, err)
-	require.NotEmpty(t, result)
-
-	// Even with empty content, it should still have preamble + continue instruction
-	text := getUserMsgTextContent(result[0])
-	assert.Contains(t, text, getContinueInstruction())
+	_, err := DefaultFinalize(ctx, originalMsgs, summary)
+	require.Error(t, err, "empty summary content should return an error")
+	assert.Contains(t, err.Error(), "summary content is empty")
 }
 
 // =============================================================================

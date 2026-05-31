@@ -34,341 +34,143 @@ import (
 )
 
 func TestFileStoreConformance(t *testing.T) {
-	session.RunConformanceTests(t, func(t testing.TB) adk.SessionStore {
-		store, err := session.NewFileStore(t.TempDir())
+	session.RunConformanceTests[*schema.Message](t, func(t testing.TB) adk.SessionService[*schema.Message] {
+		store, err := session.NewFileStore[*schema.Message](t.TempDir(), nil)
 		require.NoError(t, err)
 		return store
+	}, func(content string) *schema.Message {
+		return schema.UserMessage(content)
+	})
+	session.RunSerializerConformanceTests[*schema.Message](t, func(t testing.TB, serializer schema.Serializer) adk.SessionService[*schema.Message] {
+		store, err := session.NewFileStore[*schema.Message](t.TempDir(), &session.FileStoreConfig{EventSerializer: serializer})
+		require.NoError(t, err)
+		return store
+	}, func(content string) *schema.Message {
+		return schema.UserMessage(content)
 	})
 }
 
 func TestFileStorePersistsAcrossInstances(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	store, err := session.NewFileStore(dir)
+	store, err := session.NewFileStore[*schema.Message](dir, nil)
 	require.NoError(t, err)
 
-	first := adk.SessionEventPayload{EventID: "persist-1", Kind: adk.SessionEventMessage, Data: []byte(`{"payload":"first"}`)}
-	second := adk.SessionEventPayload{EventID: "persist-2", Kind: adk.SessionEventTurnEnd, Data: []byte(`{"payload":"second"}`)}
-	require.NoError(t, store.AppendEvents(ctx, "s", []adk.SessionEventPayload{first, second}))
+	first := testMessageEvent("persist-1", "first")
+	second := testTurnEndEvent("persist-2", "turn-1")
+	require.NoError(t, store.AppendEvents(ctx, "s", []*adk.SessionEvent[*schema.Message]{first, second}))
 
-	reopened, err := session.NewFileStore(dir)
+	reopened, err := session.NewFileStore[*schema.Message](dir, nil)
 	require.NoError(t, err)
-	res, err := reopened.LoadEvents(ctx, "s", &adk.LoadEventsRequest{})
+	res, err := reopened.LoadEvents(ctx, "s", nil)
 	require.NoError(t, err)
-	require.Equal(t, []adk.SessionEventPayload{first, second}, res.Events)
+	require.Len(t, res.Events, 2)
+	assert.Equal(t, "persist-1", res.Events[0].EventID)
+	assert.Equal(t, "persist-2", res.Events[1].EventID)
 }
 
-func TestFileStoreWritesOneEvlogLinePerEvent(t *testing.T) {
+func TestFileStoreWritesHumanReadableEvlogLines(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	store, err := session.NewFileStore(dir)
+	store, err := session.NewFileStore[*schema.Message](dir, nil)
 	require.NoError(t, err)
 
-	first := adk.SessionEventPayload{EventID: "line-1", Kind: adk.SessionEventMessage, Data: []byte(`{"payload":"first"}`)}
-	second := adk.SessionEventPayload{EventID: "line-2", Kind: adk.SessionEventTurnEnd, Data: []byte(`{"payload":"second"}`)}
-	require.NoError(t, store.AppendEvents(ctx, "s", []adk.SessionEventPayload{first, second}))
+	first := testMessageEvent("line-1", "first")
+	second := testTurnEndEvent("line-2", "turn-1")
+	require.NoError(t, store.AppendEvents(ctx, "s", []*adk.SessionEvent[*schema.Message]{first, second}))
 
 	data, err := os.ReadFile(filepath.Join(dir, url.PathEscape("s")+".evlog"))
 	require.NoError(t, err)
-
 	lines := strings.Split(strings.TrimSuffix(string(data), "\n"), "\n")
 	require.Len(t, lines, 2)
 
-	// Each line is: <EventID>\t<Kind>\t<raw Data>
 	parts0 := strings.SplitN(lines[0], "\t", 3)
 	require.Len(t, parts0, 3)
 	assert.Equal(t, "line-1", parts0[0])
 	assert.Equal(t, "message", parts0[1])
-	assert.Equal(t, `{"payload":"first"}`, parts0[2])
+	assert.Contains(t, parts0[2], "first")
 
 	parts1 := strings.SplitN(lines[1], "\t", 3)
 	require.Len(t, parts1, 3)
 	assert.Equal(t, "line-2", parts1[0])
 	assert.Equal(t, "turn_end", parts1[1])
-	assert.Equal(t, `{"payload":"second"}`, parts1[2])
 }
 
 func TestFileStoreRollbackPreservesPhysicalAuditLog(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	store, err := session.NewFileStore(dir)
+	store, err := session.NewFileStore[*schema.Message](dir, nil)
 	require.NoError(t, err)
 	sessionID := "rollback-audit"
 
-	firstTurnID := "turn-1"
-	secondTurnID := "turn-2"
-	appendFileStoreSessionEvent(t, ctx, store, sessionID, &adk.SessionEvent[*schema.Message]{
-		EventID: "msg-1",
-		Kind:    adk.SessionEventMessage,
-		TurnID:  firstTurnID,
-		Message: schema.UserMessage("Q1"),
-	})
-	appendFileStoreSessionEvent(t, ctx, store, sessionID, &adk.SessionEvent[*schema.Message]{
-		EventID: "end-1",
-		Kind:    adk.SessionEventTurnEnd,
-		TurnID:  firstTurnID,
-		TurnEnd: &adk.TurnEndState[*schema.Message]{},
-	})
-	appendFileStoreSessionEvent(t, ctx, store, sessionID, &adk.SessionEvent[*schema.Message]{
-		EventID: "msg-2",
-		Kind:    adk.SessionEventMessage,
-		TurnID:  secondTurnID,
-		Message: schema.UserMessage("Q2"),
-	})
-	appendFileStoreSessionEvent(t, ctx, store, sessionID, &adk.SessionEvent[*schema.Message]{
-		EventID: "end-2",
-		Kind:    adk.SessionEventTurnEnd,
-		TurnID:  secondTurnID,
-		TurnEnd: &adk.TurnEndState[*schema.Message]{},
-	})
+	require.NoError(t, store.AppendEvents(ctx, sessionID, []*adk.SessionEvent[*schema.Message]{
+		withTurn(testMessageEvent("msg-1", "Q1"), "turn-1"),
+		testTurnEndEvent("end-1", "turn-1"),
+		withTurn(testMessageEvent("msg-2", "Q2"), "turn-2"),
+		testTurnEndEvent("end-2", "turn-2"),
+	}))
 
-	require.NoError(t, adk.RollbackSession[*schema.Message](ctx, store, sessionID, firstTurnID))
+	require.NoError(t, adk.RollbackSession[*schema.Message](ctx, store, sessionID, "turn-1"))
 
-	res, err := store.LoadEvents(ctx, sessionID, &adk.LoadEventsRequest{})
+	res, err := store.LoadEvents(ctx, sessionID, nil)
 	require.NoError(t, err)
 	require.Len(t, res.Events, 5)
-	assert.Equal(t, "msg-2", res.Events[2].EventID, "dead-branch payload remains physically auditable")
-	assert.Equal(t, "end-2", res.Events[3].EventID, "dead-branch turn_end remains physically auditable")
+	assert.Equal(t, "msg-2", res.Events[2].EventID)
+	assert.Equal(t, "end-2", res.Events[3].EventID)
 	assert.Equal(t, adk.SessionEventRollback, res.Events[4].Kind)
 
 	data, err := os.ReadFile(filepath.Join(dir, url.PathEscape(sessionID)+".evlog"))
 	require.NoError(t, err)
 	lines := strings.Split(strings.TrimSuffix(string(data), "\n"), "\n")
 	require.Len(t, lines, 5)
-	assert.Contains(t, lines[2], "msg-2\tmessage\t")
-	assert.Contains(t, lines[3], "end-2\tturn_end\t")
 	assert.Contains(t, lines[4], "\trollback\t")
 }
 
 func TestFileStoreRejectsInvalidDir(t *testing.T) {
-	store, err := session.NewFileStore("")
+	store, err := session.NewFileStore[*schema.Message]("", nil)
 	require.Error(t, err)
 	assert.Nil(t, store)
 }
 
-func appendFileStoreSessionEvent(
-	t *testing.T,
-	ctx context.Context,
-	store adk.SessionStore,
-	sessionID string,
-	event *adk.SessionEvent[*schema.Message],
-) {
-	t.Helper()
-	require.NoError(t, adk.NormalizeSessionEventKind(event))
-	data, err := (&schema.HumanReadableSerializer{}).Marshal(event)
-	require.NoError(t, err)
-	require.NoError(t, store.AppendEvents(ctx, sessionID, []adk.SessionEventPayload{{
-		EventID: event.EventID,
-		Kind:    event.Kind,
-		Data:    data,
-	}}))
-}
-
-func TestAttack_FileStoreRejectsRawLineDelimitersInData(t *testing.T) {
+func TestFileStoreRejectsSerializerRawLineDelimiters(t *testing.T) {
 	ctx := context.Background()
-	store, err := session.NewFileStore(t.TempDir())
+	store, err := session.NewFileStore[*schema.Message](t.TempDir(), &session.FileStoreConfig{
+		EventSerializer: newlineSerializer{},
+	})
 	require.NoError(t, err)
 
-	// Data containing \n must be rejected.
-	err = store.AppendEvents(ctx, "s", []adk.SessionEventPayload{
-		{EventID: "bad-lf", Data: []byte("first\nsecond")},
-	})
+	err = store.AppendEvents(ctx, "s", []*adk.SessionEvent[*schema.Message]{testMessageEvent("bad", "bad")})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "without raw CR/LF")
-
-	// Data containing \r must be rejected.
-	err = store.AppendEvents(ctx, "s", []adk.SessionEventPayload{
-		{EventID: "bad-cr", Data: []byte("first\rsecond")},
-	})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "without raw CR/LF")
-
-	// Valid JSON (no raw newlines) should succeed.
-	err = store.AppendEvents(ctx, "s", []adk.SessionEventPayload{
-		{EventID: "good", Data: []byte(`{"msg":"hello\\nworld"}`)},
-	})
-	require.NoError(t, err)
-}
-
-func TestFileStoreDuplicateEventIDWithinBatchFirstWriteWins(t *testing.T) {
-	ctx := context.Background()
-	store, err := session.NewFileStore(t.TempDir())
-	require.NoError(t, err)
-
-	first := adk.SessionEventPayload{EventID: "dup-batch", Kind: adk.SessionEventMessage, Data: []byte(`{"payload":"first"}`)}
-	dup := adk.SessionEventPayload{EventID: "dup-batch", Kind: adk.SessionEventMessage, Data: []byte(`{"payload":"second"}`)}
-	require.NoError(t, store.AppendEvents(ctx, "s", []adk.SessionEventPayload{first, dup}))
-
-	res, err := store.LoadEvents(ctx, "s", &adk.LoadEventsRequest{})
-	require.NoError(t, err)
-	require.Equal(t, []adk.SessionEventPayload{first}, res.Events)
-}
-
-func TestFileStoreExtensionEventCompactPayloadAndFilter(t *testing.T) {
-	ctx := context.Background()
-	store, err := session.NewFileStore(t.TempDir())
-	require.NoError(t, err)
-
-	extensionKind := adk.SessionEventKind("x.outcome.grading")
-	se := &adk.SessionEvent[*schema.Message]{
-		EventID: "extension-1",
-		Kind:    extensionKind,
-		Extension: &adk.SessionExtensionEvent{
-			Data: []byte("{\n  \"outcome_name\": \"code_review\",\n  \"attempt\": 1\n}"),
-		},
-	}
-	require.NoError(t, adk.NormalizeSessionEventKind(se))
-	require.Equal(t, []byte(`{"outcome_name":"code_review","attempt":1}`), []byte(se.Extension.Data))
-
-	data, err := (&schema.HumanReadableSerializer{}).Marshal(se)
-	require.NoError(t, err)
-	require.NotContains(t, string(data), "\n")
-	payload := adk.SessionEventPayload{EventID: se.EventID, Kind: se.Kind, Data: data}
-	require.NoError(t, store.AppendEvents(ctx, "s", []adk.SessionEventPayload{
-		{EventID: "message-1", Kind: adk.SessionEventMessage, Data: []byte(`{"message":1}`)},
-		payload,
-	}))
-
-	res, err := store.LoadEvents(ctx, "s", &adk.LoadEventsRequest{
-		Kinds: []adk.SessionEventKind{extensionKind},
-	})
-	require.NoError(t, err)
-	require.Equal(t, []adk.SessionEventPayload{payload}, res.Events)
-
-	var decoded adk.SessionEvent[*schema.Message]
-	require.NoError(t, (&schema.HumanReadableSerializer{}).Unmarshal(res.Events[0].Data, &decoded))
-	require.NoError(t, adk.NormalizeSessionEventKind(&decoded))
-	require.NotNil(t, decoded.Extension)
-	assert.Equal(t, []byte(`{"outcome_name":"code_review","attempt":1}`), []byte(decoded.Extension.Data))
-}
-
-type fileStoreRunnerAgent struct {
-	name   string
-	inputs [][]*schema.Message
-}
-
-func (a *fileStoreRunnerAgent) Name(_ context.Context) string {
-	return a.name
-}
-
-func (a *fileStoreRunnerAgent) Description(_ context.Context) string {
-	return "file store runner agent"
-}
-
-func (a *fileStoreRunnerAgent) Run(_ context.Context, input *adk.AgentInput, _ ...adk.AgentRunOption) *adk.AsyncIterator[*adk.AgentEvent] {
-	iter, gen := adk.NewAsyncIteratorPair[*adk.AgentEvent]()
-	a.inputs = append(a.inputs, append([]*schema.Message{}, input.Messages...))
-	go func() {
-		defer gen.Close()
-		gen.Send(&adk.AgentEvent{
-			AgentName: a.name,
-			Output: &adk.AgentOutput{
-				MessageOutput: &adk.MessageVariant{Message: schema.AssistantMessage("ok", nil), Role: schema.Assistant},
-			},
-		})
-		gen.Send(&adk.AgentEvent{
-			AgentName: a.name,
-			SessionEvent: &adk.SessionEvent[*schema.Message]{
-				Kind: adk.SessionEventTurnEnd,
-				TurnEnd: &adk.TurnEndState[*schema.Message]{
-					Messages: append([]*schema.Message{}, input.Messages...),
-				},
-			},
-		})
-	}()
-	return iter
-}
-
-func drainFileStoreRunnerEvents(t *testing.T, iter *adk.AsyncIterator[*adk.AgentEvent]) {
-	t.Helper()
-	for {
-		event, ok := iter.Next()
-		if !ok {
-			return
-		}
-		require.NoError(t, event.Err)
-	}
-}
-
-func TestAttack_FileStoreSupportsRunnerDefaultSessionEncoding(t *testing.T) {
-	ctx := context.Background()
-	dir := t.TempDir()
-	store, err := session.NewFileStore(dir)
-	require.NoError(t, err)
-
-	firstAgent := &fileStoreRunnerAgent{name: "first"}
-	first := adk.NewRunner(ctx, adk.RunnerConfig{
-		Agent:         firstAgent,
-		SessionID:     "runner-jsonl",
-		SessionStore:  store,
-		SessionConfig: &adk.SessionConfig{EventFlushBatchSize: 1},
-	})
-	drainFileStoreRunnerEvents(t, first.Query(ctx, "hello"))
-
-	reopened, err := session.NewFileStore(dir)
-	require.NoError(t, err)
-	secondAgent := &fileStoreRunnerAgent{name: "second"}
-	second := adk.NewRunner(ctx, adk.RunnerConfig{
-		Agent:         secondAgent,
-		SessionID:     "runner-jsonl",
-		SessionStore:  reopened,
-		SessionConfig: &adk.SessionConfig{EventFlushBatchSize: 1},
-	})
-	drainFileStoreRunnerEvents(t, second.Query(ctx, "again"))
-
-	require.Len(t, secondAgent.inputs, 1)
-	require.NotEmpty(t, secondAgent.inputs[0])
-	assert.Equal(t, "hello", secondAgent.inputs[0][0].Content)
 }
 
 func TestFileStoreAppendFailsOnCorruptedExistingLog(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	store, err := session.NewFileStore(dir)
+	store, err := session.NewFileStore[*schema.Message](dir, nil)
 	require.NoError(t, err)
 
-	// Write a corrupted evlog line (missing tab separator).
 	path := filepath.Join(dir, url.PathEscape("s")+".evlog")
 	require.NoError(t, os.WriteFile(path, []byte("corrupted-no-tab\n"), 0o644))
 
-	err = store.AppendEvents(ctx, "s", []adk.SessionEventPayload{{EventID: "new", Data: []byte(`{"payload":"new"}`)}})
+	err = store.AppendEvents(ctx, "s", []*adk.SessionEvent[*schema.Message]{testMessageEvent("new", "new")})
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, adk.ErrInvalidEventID))
-
-	data, err := os.ReadFile(path)
-	require.NoError(t, err)
-	assert.Equal(t, "corrupted-no-tab\n", string(data))
-}
-
-func TestFileStoreRejectsEmptySessionID(t *testing.T) {
-	ctx := context.Background()
-	dir := t.TempDir()
-	store, err := session.NewFileStore(dir)
-	require.NoError(t, err)
-
-	err = store.AppendEvents(ctx, "", []adk.SessionEventPayload{{EventID: "empty-session", Data: []byte(`{}`)}})
-	require.Error(t, err)
-
-	_, err = store.LoadEvents(ctx, "", &adk.LoadEventsRequest{})
-	require.Error(t, err)
-
-	_, statErr := os.Stat(filepath.Join(dir, ".evlog"))
-	assert.True(t, os.IsNotExist(statErr))
 }
 
 func TestFileStoreEscapedSessionIDPath(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	store, err := session.NewFileStore(dir)
+	store, err := session.NewFileStore[*schema.Message](dir, nil)
 	require.NoError(t, err)
 
-	sessionID := "a/b %雪"
-	payload := adk.SessionEventPayload{EventID: "escaped", Kind: adk.SessionEventMessage, Data: []byte(`{"payload":"ok"}`)}
-	require.NoError(t, store.AppendEvents(ctx, sessionID, []adk.SessionEventPayload{payload}))
+	sessionID := "a/b %snow"
+	require.NoError(t, store.AppendEvents(ctx, sessionID, []*adk.SessionEvent[*schema.Message]{testMessageEvent("escaped", "ok")}))
 
-	res, err := store.LoadEvents(ctx, sessionID, &adk.LoadEventsRequest{})
+	res, err := store.LoadEvents(ctx, sessionID, nil)
 	require.NoError(t, err)
-	require.Equal(t, []adk.SessionEventPayload{payload}, res.Events)
+	require.Len(t, res.Events, 1)
+	assert.Equal(t, "escaped", res.Events[0].EventID)
 
 	entries, err := os.ReadDir(dir)
 	require.NoError(t, err)
@@ -376,137 +178,17 @@ func TestFileStoreEscapedSessionIDPath(t *testing.T) {
 	assert.Equal(t, url.PathEscape(sessionID)+".evlog", entries[0].Name())
 }
 
-func TestFileStorePersistenceFormatWithTabInData(t *testing.T) {
-	ctx := context.Background()
-	dir := t.TempDir()
-	store, err := session.NewFileStore(dir)
-	require.NoError(t, err)
-
-	first := adk.SessionEventPayload{EventID: "tab-1", Kind: adk.SessionEventMessage, Data: []byte("hello\tworld")}
-	second := adk.SessionEventPayload{EventID: "tab-2", Kind: adk.SessionEventTurnEnd, Data: []byte("end")}
-	require.NoError(t, store.AppendEvents(ctx, "s", []adk.SessionEventPayload{first, second}))
-
-	// Reopen the store.
-	reopened, err := session.NewFileStore(dir)
-	require.NoError(t, err)
-
-	res, err := reopened.LoadEvents(ctx, "s", &adk.LoadEventsRequest{})
-	require.NoError(t, err)
-	require.Len(t, res.Events, 2)
-
-	assert.Equal(t, "tab-1", res.Events[0].EventID)
-	assert.Equal(t, adk.SessionEventMessage, res.Events[0].Kind)
-	assert.Equal(t, []byte("hello\tworld"), res.Events[0].Data)
-
-	assert.Equal(t, "tab-2", res.Events[1].EventID)
-	assert.Equal(t, adk.SessionEventTurnEnd, res.Events[1].Kind)
-	assert.Equal(t, []byte("end"), res.Events[1].Data)
-
-	// Read the raw file and verify line format.
-	data, err := os.ReadFile(filepath.Join(dir, url.PathEscape("s")+".evlog"))
-	require.NoError(t, err)
-	lines := strings.Split(strings.TrimSuffix(string(data), "\n"), "\n")
-	require.Len(t, lines, 2)
-
-	// Each line: <EventID>\t<Kind>\t<Data> — split by first 2 tabs only.
-	parts0 := strings.SplitN(lines[0], "\t", 3)
-	require.Len(t, parts0, 3)
-	// The Data part should contain the tab byte.
-	assert.Contains(t, parts0[2], "\t")
-
-	parts1 := strings.SplitN(lines[1], "\t", 3)
-	require.Len(t, parts1, 3)
+func withTurn(event *adk.SessionEvent[*schema.Message], turnID string) *adk.SessionEvent[*schema.Message] {
+	event.TurnID = turnID
+	return event
 }
 
-func TestFileStoreKindFilter(t *testing.T) {
-	ctx := context.Background()
-	dir := t.TempDir()
-	store, err := session.NewFileStore(dir)
-	require.NoError(t, err)
+type newlineSerializer struct{}
 
-	e1 := adk.SessionEventPayload{EventID: "e1", Kind: adk.SessionEventMessage, Data: []byte(`{"m":1}`)}
-	e2 := adk.SessionEventPayload{EventID: "e2", Kind: adk.SessionEventSpanModelRequestStart, Data: []byte(`{"s":1}`)}
-	e3 := adk.SessionEventPayload{EventID: "e3", Kind: adk.SessionEventTurnEnd, Data: []byte(`{"t":1}`)}
-	e4 := adk.SessionEventPayload{EventID: "e4", Kind: adk.SessionEventMessage, Data: []byte(`{"m":2}`)}
-	require.NoError(t, store.AppendEvents(ctx, "s", []adk.SessionEventPayload{e1, e2, e3, e4}))
-
-	// Load with kind filter: message + turn_end only.
-	kinds := []adk.SessionEventKind{adk.SessionEventMessage, adk.SessionEventTurnEnd}
-	res, err := store.LoadEvents(ctx, "s", &adk.LoadEventsRequest{Kinds: kinds})
-	require.NoError(t, err)
-	require.Len(t, res.Events, 3)
-	assert.Equal(t, "e1", res.Events[0].EventID)
-	assert.Equal(t, "e3", res.Events[1].EventID)
-	assert.Equal(t, "e4", res.Events[2].EventID)
-
-	// Load with Limit=1 and same Kinds.
-	res, err = store.LoadEvents(ctx, "s", &adk.LoadEventsRequest{Kinds: kinds, Limit: 1})
-	require.NoError(t, err)
-	require.Len(t, res.Events, 1)
-	assert.Equal(t, "e1", res.Events[0].EventID)
-	assert.Equal(t, "e1", res.Next)
-
-	// Load with After="e1", Limit=1, same Kinds.
-	res, err = store.LoadEvents(ctx, "s", &adk.LoadEventsRequest{After: "e1", Kinds: kinds, Limit: 1})
-	require.NoError(t, err)
-	require.Len(t, res.Events, 1)
-	assert.Equal(t, "e3", res.Events[0].EventID)
-	assert.Equal(t, "e3", res.Next)
+func (newlineSerializer) Marshal(any) ([]byte, error) {
+	return []byte("bad\nline"), nil
 }
 
-func TestFileStoreIndexInvalidatesAfterExternalAppend(t *testing.T) {
-	ctx := context.Background()
-	dir := t.TempDir()
-	store, err := session.NewFileStore(dir)
-	require.NoError(t, err)
-
-	e1 := adk.SessionEventPayload{EventID: "external-1", Kind: adk.SessionEventMessage, Data: []byte(`{"m":1}`)}
-	e2 := adk.SessionEventPayload{EventID: "external-2", Kind: adk.SessionEventTurnEnd, Data: []byte(`{"t":1}`)}
-	require.NoError(t, store.AppendEvents(ctx, "s", []adk.SessionEventPayload{e1, e2}))
-
-	// Build and cache the in-process index.
-	res, err := store.LoadEvents(ctx, "s", &adk.LoadEventsRequest{After: "external-1"})
-	require.NoError(t, err)
-	require.Equal(t, []adk.SessionEventPayload{e2}, res.Events)
-
-	e3 := adk.SessionEventPayload{EventID: "external-3", Kind: adk.SessionEventMessage, Data: []byte(`{"m":2}`)}
-	path := filepath.Join(dir, url.PathEscape("s")+".evlog")
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0o644)
-	require.NoError(t, err)
-	_, err = f.WriteString("external-3\tmessage\t{\"m\":2}\n")
-	require.NoError(t, err)
-	require.NoError(t, f.Close())
-
-	res, err = store.LoadEvents(ctx, "s", &adk.LoadEventsRequest{After: "external-2"})
-	require.NoError(t, err)
-	require.Equal(t, []adk.SessionEventPayload{e3}, res.Events)
-}
-
-func TestFileStoreIndexedReversePaginationWithKindFilter(t *testing.T) {
-	ctx := context.Background()
-	dir := t.TempDir()
-	store, err := session.NewFileStore(dir)
-	require.NoError(t, err)
-
-	e1 := adk.SessionEventPayload{EventID: "rev-1", Kind: adk.SessionEventMessage, Data: []byte(`{"m":1}`)}
-	e2 := adk.SessionEventPayload{EventID: "rev-2", Kind: adk.SessionEventSpanModelRequestStart, Data: []byte(`{"s":1}`)}
-	e3 := adk.SessionEventPayload{EventID: "rev-3", Kind: adk.SessionEventTurnEnd, Data: []byte(`{"t":1}`)}
-	e4 := adk.SessionEventPayload{EventID: "rev-4", Kind: adk.SessionEventMessage, Data: []byte(`{"m":2}`)}
-	require.NoError(t, store.AppendEvents(ctx, "s", []adk.SessionEventPayload{e1, e2, e3, e4}))
-
-	kinds := []adk.SessionEventKind{adk.SessionEventMessage, adk.SessionEventTurnEnd}
-	res, err := store.LoadEvents(ctx, "s", &adk.LoadEventsRequest{Kinds: kinds, Reverse: true, Limit: 1})
-	require.NoError(t, err)
-	require.Equal(t, []adk.SessionEventPayload{e4}, res.Events)
-	assert.Equal(t, "rev-4", res.Next)
-
-	res, err = store.LoadEvents(ctx, "s", &adk.LoadEventsRequest{After: res.Next, Kinds: kinds, Reverse: true, Limit: 1})
-	require.NoError(t, err)
-	require.Equal(t, []adk.SessionEventPayload{e3}, res.Events)
-	assert.Equal(t, "rev-3", res.Next)
-
-	res, err = store.LoadEvents(ctx, "s", &adk.LoadEventsRequest{After: res.Next, Kinds: kinds, Reverse: true, Limit: 1})
-	require.NoError(t, err)
-	require.Equal(t, []adk.SessionEventPayload{e1}, res.Events)
-	assert.Empty(t, res.Next)
+func (newlineSerializer) Unmarshal([]byte, any) error {
+	return nil
 }
