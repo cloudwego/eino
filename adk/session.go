@@ -43,43 +43,22 @@ const (
 	defaultLoadPageSize               = 100
 )
 
-// ErrInvalidEventID is returned by AppendEvents when a SessionEventPayload's
-// EventID field is empty. Protocol-level: persisters MUST NOT retry.
+// ErrInvalidEventID is returned by AppendEvents when a SessionEvent has an
+// empty EventID. Protocol-level: persisters MUST NOT retry.
 //
-// Note: stores accept any non-empty string as EventID. UUIDv4 is the
-// Runner-side allocation format (see SessionEvent.EventID) but is NOT
-// validated at the SessionStore boundary; downstream stores MAY accept other
-// non-empty identifiers (e.g. for migration or testing).
+// Services accept any non-empty string as EventID. UUIDv4 is the Runner-side
+// allocation format, but service implementations treat EventID as opaque.
 var ErrInvalidEventID = errors.New("adk: session event has invalid event_id")
 
-// ErrEventIDOutOfRange is returned by LoadEvents when LoadEventsRequest.After
-// references an event_id that does not exist in the session log (e.g. due to
-// log compaction or a stale SSE Last-Event-ID). Callers can detect this and
-// fall back to a full reload.
+// ErrEventIDOutOfRange is returned by LoadEvents when
+// LoadSessionEventsRequest.After references an event_id that does not exist in
+// the session log. Callers can detect this and fall back to a full reload.
 var ErrEventIDOutOfRange = errors.New("adk: session event id out of range")
 
 var ErrRollbackTargetNotFound = errors.New("adk: rollback target turn not found")
 var ErrInvalidRollbackTarget = errors.New("adk: invalid rollback target")
 var ErrRollbackTargetInactive = errors.New("adk: rollback target is not active")
 var ErrSessionHeadChanged = errors.New("adk: session committed turn_end head changed")
-
-// SessionEventPayload is the storage-layer representation of a single session event.
-// The framework pre-extracts EventID and Kind from the typed SessionEvent before
-// serialization so that stores can dedup, index, and filter without parsing Data.
-//
-// EventID and Kind are envelope metadata; Data remains the serialized full event.
-type SessionEventPayload struct {
-	// EventID is the canonical, session-unique identity. Pre-extracted by
-	// the framework; stores MUST NOT parse Data to obtain it.
-	EventID string
-	// Kind is the pre-extracted event kind from SessionEvent.Kind. Stores MUST
-	// use Kind as opaque indexed metadata for filtering and MUST NOT parse Data
-	// to determine it.
-	Kind SessionEventKind
-	// Data is the serialized SessionEvent payload produced by the configured
-	// EventSerializer. Stores treat this as opaque bytes.
-	Data []byte
-}
 
 // protocolErrors enumerates protocol-level sentinels that persisters MUST
 // fail-fast on. Future protocol-level sentinels MUST be added here so that
@@ -102,108 +81,54 @@ const (
 	sessionRunnerCheckpointSuffix = "/runner_checkpoint"
 )
 
-// SessionStore persists Runner-managed session data.
-// Events are stored as an append-only ordered log of serialized SessionEvent payloads (as SessionEventPayload).
-// SessionEventTurnEnd is persisted as a regular SessionEvent variant (with TurnEnd field set),
-// not as a separate entity.
+// SessionService persists Runner-managed typed session events.
 //
-// Concurrency contract: A single session (identified by sessionID) MUST have at most one
-// active writer at a time. Runner Run/Resume and RollbackSession all append to
-// the same physical session log, so this constraint is caller-enforced: callers
-// must serialize Run, Resume, and RollbackSession calls for the same sessionID.
-// WithRollbackSessionExpectedHeadTurnID can guard retries and stale rollback
-// requests, but it is not a cross-writer lock.
-// Store implementations are NOT required to handle concurrent AppendEvents calls
-// for the same sessionID. Different sessionIDs may be written concurrently without restriction.
+// Concurrency contract: a single session (identified by sessionID) MUST have at
+// most one active writer at a time. Runner Run/Resume and RollbackSession all
+// append to the same physical session log, so callers must serialize those
+// operations for the same sessionID. Different sessionIDs may be written
+// concurrently without restriction.
 //
 // Identity vs ordering: the Runner assigns each SessionEvent a session-unique
-// event_id (UUIDv4 — see SessionEvent.EventID). The SessionStore owns append
-// ordering and is responsible for resolving event_id ↔ position when servicing
-// LoadEvents.After / .Next. From the store's perspective, event_id is an
-// opaque non-empty string identity; UUIDv4 is the Runner allocation format,
-// not a store-enforced validation rule. External consumers (SSE) treat
-// event_id as the canonical event identity for de-duplication and
-// Last-Event-ID resume.
+// event_id. The service owns append ordering and resolves event_id to append
+// position when servicing LoadSessionEventsRequest.After / .Next.
 //
-// Errors are split into two classes:
-//   - Protocol-level (e.g. ErrInvalidEventID): the input payload violates the
-//     wire contract (empty EventID). Stores MUST return
-//     such errors immediately; persisters MUST NOT retry them. Use
-//     isProtocolError(err) to test membership.
-//   - Infrastructure-level (e.g. network/db unavailable): transient; persisters
-//     apply the configured retry/backoff policy.
+// Ownership contract: AppendEvents receives caller-owned events and
+// implementations must not retain mutable pointers without copying. LoadEvents
+// returns caller-owned event values; mutating loaded events must not mutate
+// service state or future load results.
 //
-// SSE consumer contract:
-//   - SSE adapters MUST emit each SessionEvent's event_id as the SSE `id:` line
-//     so browsers/clients can populate Last-Event-ID on reconnect.
-//   - On reconnect, the SSE adapter passes Last-Event-ID as
-//     LoadEventsRequest.After (with Reverse=false) to resume forward delivery.
-//   - If LoadEvents returns ErrEventIDOutOfRange, the adapter SHOULD treat the
-//     client's cursor as expired and fall back to a full reload (After="").
-type SessionStore interface {
-	// AppendEvents appends one or more SessionEventPayload entries to the session log.
-	// Events are appended in the order given. The store assigns ordering internally.
-	//
-	// Each SessionEventPayload.EventID MUST be non-empty. If the EventID field
-	// is empty, the store MUST return ErrInvalidEventID (a sentinel;
-	// persisters will not retry it). Stores treat event_id as an opaque non-empty
-	// string and MUST NOT validate format (UUIDv4 is the Runner allocation
-	// convention, not a store-enforced contract). If a payload with an event_id
-	// already present in the session is appended, the store MUST silently skip it
-	// (no error, no duplicate entry); payload bytes are NOT compared —
-	// first-write-wins.
-	//
-	// Batch atomicity is NOT required: on a mid-batch ErrInvalidEventID, earlier
-	// valid payloads MAY have been persisted. Callers MUST treat AppendEvents as
-	// best-effort batch + idempotent retry — re-issuing the same batch is safe
-	// because already-stored event_ids are silently skipped.
-	AppendEvents(ctx context.Context, sessionID string, events []SessionEventPayload) error
+// Errors are split into protocol-level errors such as ErrInvalidEventID, which
+// persisters do not retry, and infrastructure-level errors, which use the
+// configured retry/backoff policy.
+type SessionService[M MessageType] interface {
+	// AppendEvents appends one or more typed SessionEvent entries in caller order.
+	// Each event must have a non-empty EventID. Duplicate EventID values within a
+	// session are idempotently skipped with first-write-wins semantics.
+	AppendEvents(ctx context.Context, sessionID string, events []*SessionEvent[M]) error
 
-	// LoadEvents loads session events with pagination support.
-	// Returns events in chronological order (oldest first) or reverse chronological
-	// order (newest first) depending on opts.Reverse.
-	LoadEvents(ctx context.Context, sessionID string, opts *LoadEventsRequest) (*LoadEventsResult, error)
+	// LoadEvents loads session events with pagination support. Events are returned
+	// in chronological order or reverse chronological order depending on opts.Reverse.
+	LoadEvents(ctx context.Context, sessionID string, opts *LoadSessionEventsRequest) (*LoadSessionEventsResult[M], error)
 }
 
-// LoadEventsRequest configures event loading pagination and direction.
-type LoadEventsRequest struct {
-	// After is the last-seen event_id used as a directional cursor:
-	//   - When Reverse=false: returns events strictly NEWER than the event with
-	//     this id (in append order). Empty means start from the head.
-	//   - When Reverse=true: returns events strictly OLDER than the event with
-	//     this id. Empty means start from the tail.
-	//
-	// After is an exclusive append-position cursor, not a comparable event_id.
-	// Stores MUST resolve the supplied event_id to its internal log position
-	// before scanning and MUST NOT interpret After as a lexical or numeric range
-	// predicate over event_id values. This matters because Runner-assigned
-	// UUIDv4 event_ids do not embed append order.
-	//
-	// After is resolved against the full session log regardless of Kinds filter.
-	// If the supplied event_id is not found in the session log, the store MUST
-	// return ErrEventIDOutOfRange (a sentinel). Callers (e.g. SSE adapters) can
-	// catch this to fall back to a full re-load instead of failing the request.
+// LoadSessionEventsRequest configures typed event loading pagination and direction.
+type LoadSessionEventsRequest struct {
+	// After is the last-seen event_id used as an exclusive append-position cursor.
 	After string
-	// Limit is the maximum number of events to return. 0 means no limit (load all).
-	// Limit applies after kind filtering.
+	// Limit is the maximum number of events to return. 0 means no limit.
 	Limit int
 	// Reverse, when true, returns events in newest-first order.
-	// Useful for finding the latest MessagesReplaced boundary efficiently.
 	Reverse bool
-	// Kinds filters events by their Kind field. Empty means no kind filter
-	// (return all events). Non-empty returns only events whose Kind is in
-	// the set.
+	// Kinds filters events by their Kind field. Empty means no kind filter.
 	Kinds []SessionEventKind
 }
 
-// LoadEventsResult is the response from LoadEvents.
-type LoadEventsResult struct {
-	// Events are the serialized SessionEvent payloads.
-	Events []SessionEventPayload
-	// Next is the event_id of the LAST event in this page in the direction of
-	// travel — i.e. the newest event for forward, the oldest event for reverse.
-	// Pass it back as LoadEventsRequest.After (with the same Reverse flag) to
-	// continue. Empty when the page reached the corresponding end of the log.
+// LoadSessionEventsResult is the response from SessionService.LoadEvents.
+type LoadSessionEventsResult[M MessageType] struct {
+	// Events are typed SessionEvent values owned by the caller.
+	Events []*SessionEvent[M]
+	// Next is the event_id of the last event in this page in the direction of travel.
 	Next string
 }
 
@@ -220,8 +145,8 @@ type SessionEvent[M MessageType] struct {
 	// (in makeInputSessionEvent / toSessionEvent). Persister-level retries
 	// re-send the same payload bytes and therefore the same EventID, which is
 	// what enables AppendEvents idempotency. Runner-allocated EventIDs are
-	// UUIDv4 strings; SessionStore implementations treat EventID as an opaque
-	// non-empty string and do NOT enforce UUIDv4 format (see SessionStore docs).
+	// UUIDv4 strings; SessionService implementations treat EventID as an opaque
+	// non-empty string and do NOT enforce UUIDv4 format.
 	//
 	// Distinct from MessageUpdatedEvent.MessageID: EventID identifies the
 	// session event envelope; MessageID identifies a logical message inside
@@ -229,7 +154,7 @@ type SessionEvent[M MessageType] struct {
 	EventID string `json:"event_id"`
 
 	// Timestamp is inherited from the source AgentEvent and represents the event
-	// occurrence time, not the SessionStore persistence time.
+	// occurrence time, not the SessionService persistence time.
 	Timestamp time.Time `json:"timestamp,omitempty"`
 
 	Kind SessionEventKind `json:"kind,omitempty"`
@@ -520,14 +445,14 @@ type SessionConfig struct {
 	// settings, while finalization still waits for pending flushes before
 	// committing checkpoints or successful turns.
 	//
-	// In sync mode, every persistable SessionEvent is encoded and appended before
-	// the corresponding AgentEvent is sent to the consumer. Protocol errors fail
+	// In sync mode, every persistable SessionEvent is appended before the
+	// corresponding AgentEvent is sent to the consumer. Protocol errors fail
 	// fast, infrastructure errors use MaxFlushRetries and
 	// FlushRetryInitialBackoff, and EventFlushBatchSize, EventFlushInterval, and
 	// EventBufferSize are ignored for writes.
 	PersistenceMode SessionPersistenceMode
 	// EventFlushBatchSize is the maximum number of events accumulated before
-	// triggering a flush to the SessionStore. Defaults to 16.
+	// triggering a flush to the SessionService. Defaults to 16.
 	EventFlushBatchSize int
 	// EventFlushInterval is how often the background goroutine flushes
 	// buffered events, even if the batch size has not been reached.
@@ -547,12 +472,6 @@ type SessionConfig struct {
 	// LoadPageSize is the number of events fetched per page when loading events
 	// for reconstruction or tail replay. Defaults to 100.
 	LoadPageSize int
-	// EventSerializer encodes and decodes SessionEvent payloads persisted
-	// through SessionStore. Defaults to schema.HumanReadableSerializer.
-	//
-	// The serializer output is stored opaquely by SessionStore implementations;
-	// no format constraint is imposed on the byte representation.
-	EventSerializer schema.Serializer
 }
 
 // TurnEndState is the agent-visible state materialized at a successful turn boundary.
@@ -644,6 +563,14 @@ func decodeSessionEventWithSerializer[M MessageType](data []byte, serializer sch
 		return nil, err
 	}
 	return &event, nil
+}
+
+func snapshotSessionEvent[M MessageType](event *SessionEvent[M]) (*SessionEvent[M], error) {
+	data, err := encodeSessionEvent(event)
+	if err != nil {
+		return nil, err
+	}
+	return decodeSessionEvent[M](data)
 }
 
 func normalizeSerializer(serializer schema.Serializer) schema.Serializer {
@@ -918,7 +845,6 @@ func normalizeSessionConfig(cfg *SessionConfig) SessionConfig {
 		MaxFlushRetries:          defaultMaxFlushRetries,
 		FlushRetryInitialBackoff: defaultFlushRetryInitialBackoff,
 		LoadPageSize:             defaultLoadPageSize,
-		EventSerializer:          sessionSerializer,
 	}
 	if cfg == nil {
 		return normalized
@@ -947,19 +873,16 @@ func normalizeSessionConfig(cfg *SessionConfig) SessionConfig {
 	if cfg.LoadPageSize > 0 {
 		normalized.LoadPageSize = cfg.LoadPageSize
 	}
-	if cfg.EventSerializer != nil {
-		normalized.EventSerializer = cfg.EventSerializer
-	}
 	return normalized
 }
 
 type sessionEventPersister[M MessageType] struct {
 	ctx       context.Context
-	store     SessionStore
+	service   SessionService[M]
 	sessionID string
 	cfg       SessionConfig
 
-	ch     chan SessionEventPayload
+	ch     chan *SessionEvent[M]
 	done   chan struct{}
 	closed int32 // atomic: 1 after closeAndWait is called
 
@@ -969,13 +892,13 @@ type sessionEventPersister[M MessageType] struct {
 
 func newSessionEventPersister[M MessageType](
 	ctx context.Context,
-	store SessionStore,
+	service SessionService[M],
 	sessionID string,
 	cfg SessionConfig,
 ) *sessionEventPersister[M] {
 	p := &sessionEventPersister[M]{
 		ctx:       ctx,
-		store:     store,
+		service:   service,
 		sessionID: sessionID,
 		cfg:       cfg,
 		done:      make(chan struct{}),
@@ -984,14 +907,19 @@ func newSessionEventPersister[M MessageType](
 		close(p.done)
 		return p
 	}
-	p.ch = make(chan SessionEventPayload, p.cfg.EventBufferSize)
+	p.ch = make(chan *SessionEvent[M], p.cfg.EventBufferSize)
 	go p.run()
 	return p
 }
 
-func (p *sessionEventPersister[M]) enqueue(payload SessionEventPayload) error {
-	if payload.EventID == "" {
+func (p *sessionEventPersister[M]) enqueue(event *SessionEvent[M]) error {
+	if event == nil || event.EventID == "" {
 		return p.getErr()
+	}
+	snapshot, err := snapshotSessionEvent(event)
+	if err != nil {
+		p.setErr(err)
+		return err
 	}
 	if err := p.getErr(); err != nil {
 		return err
@@ -1000,14 +928,14 @@ func (p *sessionEventPersister[M]) enqueue(payload SessionEventPayload) error {
 		return p.getErr()
 	}
 	if p.cfg.PersistenceMode == SessionPersistenceModeSync {
-		if err := p.appendEventsWithRetry([]SessionEventPayload{payload}); err != nil {
+		if err := p.appendEventsWithRetry([]*SessionEvent[M]{snapshot}); err != nil {
 			p.setErr(err)
 			return err
 		}
 		return nil
 	}
 	select {
-	case p.ch <- payload:
+	case p.ch <- snapshot:
 		return nil
 	case <-p.ctx.Done():
 		return p.ctx.Err()
@@ -1029,13 +957,13 @@ func (p *sessionEventPersister[M]) run() {
 	timer := time.NewTimer(p.cfg.EventFlushInterval)
 	defer timer.Stop()
 
-	var batch []SessionEventPayload
+	var batch []*SessionEvent[M]
 	flush := func() {
 		if len(batch) == 0 || p.getErr() != nil {
 			batch = nil
 			return
 		}
-		entries := make([]SessionEventPayload, len(batch))
+		entries := make([]*SessionEvent[M], len(batch))
 		copy(entries, batch)
 		batch = nil
 
@@ -1046,7 +974,7 @@ func (p *sessionEventPersister[M]) run() {
 
 	for {
 		select {
-		case payload, ok := <-p.ch:
+		case event, ok := <-p.ch:
 			if !ok {
 				flush()
 				return
@@ -1054,7 +982,7 @@ func (p *sessionEventPersister[M]) run() {
 			if p.getErr() != nil {
 				continue
 			}
-			batch = append(batch, payload)
+			batch = append(batch, event)
 			if len(batch) >= p.cfg.EventFlushBatchSize {
 				flush()
 				resetTimer(timer, p.cfg.EventFlushInterval)
@@ -1066,7 +994,7 @@ func (p *sessionEventPersister[M]) run() {
 	}
 }
 
-func (p *sessionEventPersister[M]) appendEventsWithRetry(events []SessionEventPayload) error {
+func (p *sessionEventPersister[M]) appendEventsWithRetry(events []*SessionEvent[M]) error {
 	var lastErr error
 	for attempt := 0; attempt <= p.cfg.MaxFlushRetries; attempt++ {
 		if attempt > 0 {
@@ -1078,7 +1006,7 @@ func (p *sessionEventPersister[M]) appendEventsWithRetry(events []SessionEventPa
 				return p.ctx.Err()
 			}
 		}
-		if err := p.store.AppendEvents(p.ctx, p.sessionID, events); err != nil {
+		if err := p.service.AppendEvents(p.ctx, p.sessionID, events); err != nil {
 			lastErr = err
 			if isProtocolError(err) {
 				return err
@@ -1305,40 +1233,36 @@ var modelContextSessionEventKinds = []SessionEventKind{
 }
 
 type RollbackSessionOptions struct {
-	Serializer         schema.Serializer
 	CheckPointStore    CheckPointStore
 	ExpectedHeadTurnID string
 }
 
 type RollbackSessionOption func(*RollbackSessionOptions)
 
-func WithRollbackSessionSerializer(serializer schema.Serializer) RollbackSessionOption {
-	return func(opts *RollbackSessionOptions) {
-		opts.Serializer = serializer
-	}
-}
-
+// WithRollbackSessionCheckPointStore deletes session-derived checkpoints after a successful rollback.
 func WithRollbackSessionCheckPointStore(store CheckPointStore) RollbackSessionOption {
 	return func(opts *RollbackSessionOptions) {
 		opts.CheckPointStore = store
 	}
 }
 
+// WithRollbackSessionExpectedHeadTurnID requires the current active head turn to match turnID before rollback.
 func WithRollbackSessionExpectedHeadTurnID(turnID string) RollbackSessionOption {
 	return func(opts *RollbackSessionOptions) {
 		opts.ExpectedHeadTurnID = turnID
 	}
 }
 
+// RollbackSession appends a rollback marker that makes targetTurnID the latest active committed turn.
 func RollbackSession[M MessageType](
 	ctx context.Context,
-	store SessionStore,
+	service SessionService[M],
 	sessionID string,
 	targetTurnID string,
 	opts ...RollbackSessionOption,
 ) error {
-	if store == nil {
-		return errors.New("adk: rollback session store is nil")
+	if service == nil {
+		return errors.New("adk: rollback session service is nil")
 	}
 	if sessionID == "" {
 		return errors.New("adk: rollback sessionID is empty")
@@ -1347,21 +1271,20 @@ func RollbackSession[M MessageType](
 		return ErrRollbackTargetNotFound
 	}
 
-	cfg := RollbackSessionOptions{Serializer: sessionSerializer}
+	var cfg RollbackSessionOptions
 	for _, opt := range opts {
 		if opt != nil {
 			opt(&cfg)
 		}
 	}
-	serializer := normalizeSerializer(cfg.Serializer)
-	activePayloads, err := loadActiveSessionPayloadsReverse[M](ctx, store, sessionID, defaultLoadPageSize, serializer)
+	activeEvents, err := loadActiveSessionEventsReverse[M](ctx, service, sessionID, defaultLoadPageSize)
 	if err != nil {
 		return err
 	}
-	target, head, err := resolveRollbackTarget[M](activePayloads, targetTurnID, serializer)
+	target, head, err := resolveRollbackTarget[M](activeEvents, targetTurnID)
 	if err != nil {
 		if errors.Is(err, ErrRollbackTargetNotFound) {
-			evidence, evidenceErr := findPhysicalRollbackTargetEvidence[M](ctx, store, sessionID, targetTurnID, defaultLoadPageSize, serializer)
+			evidence, evidenceErr := findPhysicalRollbackTargetEvidence[M](ctx, service, sessionID, targetTurnID, defaultLoadPageSize)
 			if evidenceErr != nil {
 				return evidenceErr
 			}
@@ -1389,15 +1312,7 @@ func RollbackSession[M MessageType](
 			PreviousHeadTurnID:    head.TurnID,
 		},
 	}
-	data, err := encodeSessionEventWithSerializer(rb, serializer)
-	if err != nil {
-		return err
-	}
-	if err := store.AppendEvents(ctx, sessionID, []SessionEventPayload{{
-		EventID: rb.EventID,
-		Kind:    rb.Kind,
-		Data:    data,
-	}}); err != nil {
+	if err := service.AppendEvents(ctx, sessionID, []*SessionEvent[M]{rb}); err != nil {
 		return err
 	}
 	if cfg.CheckPointStore != nil {
@@ -1418,25 +1333,16 @@ func RollbackSession[M MessageType](
 // structures remains a caller or middleware concern.
 func reconstructSessionState[M MessageType](
 	ctx context.Context,
-	store SessionStore,
+	service SessionService[M],
 	sessionID string,
 	pageSize int,
-	serializer schema.Serializer,
 ) (*sessionReconstructResult[M], error) {
-	activePayloads, err := loadActiveSessionPayloadsReverse[M](ctx, store, sessionID, pageSize, serializer)
+	allEvents, err := loadActiveSessionEventsReverse[M](ctx, service, sessionID, pageSize)
 	if err != nil {
 		return nil, err
 	}
-	if len(activePayloads) == 0 {
+	if len(allEvents) == 0 {
 		return nil, nil
-	}
-	allEvents := make([]*SessionEvent[M], 0, len(activePayloads))
-	for _, ep := range activePayloads {
-		event, decodeErr := decodeSessionEventWithSerializer[M](ep.Data, serializer)
-		if decodeErr != nil {
-			return nil, decodeErr
-		}
-		allEvents = append(allEvents, event)
 	}
 
 	committedEndIdx := latestCommittedTurnEnd(allEvents)
@@ -1467,21 +1373,19 @@ func reconstructSessionState[M MessageType](
 	return &sessionReconstructResult[M]{state: state, inFlightTurnID: inFlightTurnID}, nil
 }
 
-func loadActiveSessionPayloadsReverse[M MessageType](
+func loadActiveSessionEventsReverse[M MessageType](
 	ctx context.Context,
-	store SessionStore,
+	service SessionService[M],
 	sessionID string,
 	pageSize int,
-	serializer schema.Serializer,
-) ([]SessionEventPayload, error) {
+) ([]*SessionEvent[M], error) {
 	if pageSize <= 0 {
 		pageSize = defaultLoadPageSize
 	}
-	serializer = normalizeSerializer(serializer)
-	var physicalReverse []SessionEventPayload
+	var physicalReverse []*SessionEvent[M]
 	var after string
 	for {
-		result, err := store.LoadEvents(ctx, sessionID, &LoadEventsRequest{
+		result, err := service.LoadEvents(ctx, sessionID, &LoadSessionEventsRequest{
 			After:   after,
 			Limit:   pageSize,
 			Reverse: true,
@@ -1493,51 +1397,44 @@ func loadActiveSessionPayloadsReverse[M MessageType](
 		if result == nil || len(result.Events) == 0 {
 			break
 		}
-		for _, payload := range result.Events {
-			physicalReverse = append(physicalReverse, copySessionEventPayload(payload))
-		}
+		physicalReverse = append(physicalReverse, result.Events...)
 		if result.Next == "" {
 			break
 		}
 		after = result.Next
 	}
-	if err := validateRollbackTargetsForwardFromReverse[M](physicalReverse, serializer); err != nil {
+	if err := validateRollbackTargetsForwardFromReverse[M](physicalReverse); err != nil {
 		return nil, err
 	}
-	return projectActivePayloadsFromReverse[M](physicalReverse, serializer)
+	return projectActiveEventsFromReverse[M](physicalReverse)
 }
 
-func projectActivePayloadsFromReverse[M MessageType](
-	physicalReverse []SessionEventPayload,
-	serializer schema.Serializer,
-) ([]SessionEventPayload, error) {
-	var activeReverse []SessionEventPayload
+func projectActiveEventsFromReverse[M MessageType](
+	physicalReverse []*SessionEvent[M],
+) ([]*SessionEvent[M], error) {
+	var activeReverse []*SessionEvent[M]
 	var skipUntilEventID string
 	var skipUntilTurnID string
-	for _, payload := range physicalReverse {
+	for _, event := range physicalReverse {
 		if skipUntilEventID != "" {
-			if payload.EventID != skipUntilEventID {
+			if event.EventID != skipUntilEventID {
 				continue
 			}
-			if payload.Kind != SessionEventTurnEnd {
+			if event.Kind != SessionEventTurnEnd {
 				return nil, ErrInvalidRollbackTarget
 			}
 			if skipUntilTurnID != "" {
-				event, err := decodeSessionEventWithSerializer[M](payload.Data, serializer)
-				if err != nil {
-					return nil, err
-				}
 				if event.Kind != SessionEventTurnEnd || event.TurnEnd == nil || event.TurnID != skipUntilTurnID {
 					return nil, ErrInvalidRollbackTarget
 				}
 			}
-			activeReverse = append(activeReverse, copySessionEventPayload(payload))
+			activeReverse = append(activeReverse, event)
 			skipUntilEventID = ""
 			skipUntilTurnID = ""
 			continue
 		}
-		if payload.Kind == SessionEventRollback {
-			rb, err := decodeRollbackSessionPayload[M](payload, serializer)
+		if event.Kind == SessionEventRollback {
+			rb, err := decodeRollbackSessionEvent(event)
 			if err != nil {
 				return nil, err
 			}
@@ -1545,7 +1442,7 @@ func projectActivePayloadsFromReverse[M MessageType](
 			skipUntilTurnID = rb.ToTurnID
 			continue
 		}
-		activeReverse = append(activeReverse, copySessionEventPayload(payload))
+		activeReverse = append(activeReverse, event)
 	}
 	if skipUntilEventID != "" {
 		return nil, ErrRollbackTargetInactive
@@ -1557,16 +1454,15 @@ func projectActivePayloadsFromReverse[M MessageType](
 }
 
 func validateRollbackTargetsForwardFromReverse[M MessageType](
-	physicalReverse []SessionEventPayload,
-	serializer schema.Serializer,
+	physicalReverse []*SessionEvent[M],
 ) error {
-	active := make([]SessionEventPayload, 0, len(physicalReverse))
+	active := make([]*SessionEvent[M], 0, len(physicalReverse))
 	activeLen := 0
 	posByEventID := make(map[string]int, len(physicalReverse))
 	for i := len(physicalReverse) - 1; i >= 0; i-- {
-		payload := physicalReverse[i]
-		if payload.Kind == SessionEventRollback {
-			rb, err := decodeRollbackSessionPayload[M](payload, serializer)
+		event := physicalReverse[i]
+		if event.Kind == SessionEventRollback {
+			rb, err := decodeRollbackSessionEvent(event)
 			if err != nil {
 				return err
 			}
@@ -1578,10 +1474,7 @@ func validateRollbackTargetsForwardFromReverse[M MessageType](
 				return ErrInvalidRollbackTarget
 			}
 			if rb.ToTurnID != "" {
-				target, err := decodeSessionEventWithSerializer[M](active[pos].Data, serializer)
-				if err != nil {
-					return err
-				}
+				target := active[pos]
 				if target.Kind != SessionEventTurnEnd || target.TurnEnd == nil || target.TurnID != rb.ToTurnID {
 					return ErrInvalidRollbackTarget
 				}
@@ -1590,12 +1483,12 @@ func validateRollbackTargetsForwardFromReverse[M MessageType](
 			continue
 		}
 		if activeLen < len(active) {
-			active[activeLen] = copySessionEventPayload(payload)
+			active[activeLen] = event
 			active = active[:activeLen+1]
 		} else {
-			active = append(active, copySessionEventPayload(payload))
+			active = append(active, event)
 		}
-		posByEventID[payload.EventID] = activeLen
+		posByEventID[event.EventID] = activeLen
 		activeLen++
 	}
 	return nil
@@ -1611,11 +1504,10 @@ const (
 
 func findPhysicalRollbackTargetEvidence[M MessageType](
 	ctx context.Context,
-	store SessionStore,
+	service SessionService[M],
 	sessionID string,
 	targetTurnID string,
 	pageSize int,
-	serializer schema.Serializer,
 ) (rollbackTargetEvidence, error) {
 	if pageSize <= 0 {
 		pageSize = defaultLoadPageSize
@@ -1623,7 +1515,7 @@ func findPhysicalRollbackTargetEvidence[M MessageType](
 	var after string
 	var evidence rollbackTargetEvidence
 	for {
-		result, err := store.LoadEvents(ctx, sessionID, &LoadEventsRequest{
+		result, err := service.LoadEvents(ctx, sessionID, &LoadSessionEventsRequest{
 			After:   after,
 			Limit:   pageSize,
 			Reverse: false,
@@ -1635,13 +1527,9 @@ func findPhysicalRollbackTargetEvidence[M MessageType](
 		if result == nil || len(result.Events) == 0 {
 			break
 		}
-		for _, payload := range result.Events {
-			if payload.Kind == SessionEventRollback {
+		for _, event := range result.Events {
+			if event.Kind == SessionEventRollback {
 				continue
-			}
-			event, err := decodeSessionEventWithSerializer[M](payload.Data, serializer)
-			if err != nil {
-				return rollbackTargetEvidenceNone, err
 			}
 			if event.TurnID != targetTurnID {
 				continue
@@ -1659,15 +1547,8 @@ func findPhysicalRollbackTargetEvidence[M MessageType](
 	return evidence, nil
 }
 
-func decodeRollbackSessionPayload[M MessageType](payload SessionEventPayload, serializer schema.Serializer) (*SessionRollbackEvent, error) {
-	if payload.EventID == "" || payload.Kind != SessionEventRollback {
-		return nil, ErrInvalidRollbackTarget
-	}
-	event, err := decodeSessionEventWithSerializer[M](payload.Data, serializer)
-	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrInvalidRollbackTarget, err)
-	}
-	if event.EventID != payload.EventID || event.Kind != payload.Kind || event.Rollback == nil {
+func decodeRollbackSessionEvent[M MessageType](event *SessionEvent[M]) (*SessionRollbackEvent, error) {
+	if event == nil || event.EventID == "" || event.Kind != SessionEventRollback || event.Rollback == nil {
 		return nil, ErrInvalidRollbackTarget
 	}
 	if event.Rollback.ToEventID == "" {
@@ -1677,27 +1558,18 @@ func decodeRollbackSessionPayload[M MessageType](payload SessionEventPayload, se
 }
 
 func resolveRollbackTarget[M MessageType](
-	activePayloads []SessionEventPayload,
+	activeEvents []*SessionEvent[M],
 	targetTurnID string,
-	serializer schema.Serializer,
 ) (target *SessionEvent[M], head *SessionEvent[M], err error) {
 	var sawTargetTurnEvidence bool
-	for _, payload := range activePayloads {
-		if payload.Kind != SessionEventTurnEnd {
+	for _, event := range activeEvents {
+		if event.Kind != SessionEventTurnEnd {
 			if !sawTargetTurnEvidence {
-				event, decodeErr := decodeSessionEventWithSerializer[M](payload.Data, serializer)
-				if decodeErr != nil {
-					return nil, nil, decodeErr
-				}
 				if event.TurnID == targetTurnID {
 					sawTargetTurnEvidence = true
 				}
 			}
 			continue
-		}
-		event, decodeErr := decodeSessionEventWithSerializer[M](payload.Data, serializer)
-		if decodeErr != nil {
-			return nil, nil, decodeErr
 		}
 		if event.Kind != SessionEventTurnEnd || event.TurnEnd == nil || event.TurnID == "" {
 			return nil, nil, ErrInvalidRollbackTarget
@@ -1715,14 +1587,6 @@ func resolveRollbackTarget[M MessageType](
 		return nil, nil, ErrInvalidRollbackTarget
 	}
 	return nil, nil, ErrRollbackTargetNotFound
-}
-
-func copySessionEventPayload(payload SessionEventPayload) SessionEventPayload {
-	return SessionEventPayload{
-		EventID: payload.EventID,
-		Kind:    payload.Kind,
-		Data:    append([]byte{}, payload.Data...),
-	}
 }
 
 func replayDurableContextEvents[M MessageType](events []*SessionEvent[M], metadataTurnEndPos int, contextTailPos int) (*TurnEndState[M], error) {

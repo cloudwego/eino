@@ -442,7 +442,7 @@ func newTypedUserMessages[M MessageType](text string) []M {
 }
 
 // newTypedInvokableAgentToolRunner creates a runner for the inner agent without
-// SessionStore. The child's events are forwarded to the parent's live stream
+// SessionService. The child's events are forwarded to the parent's live stream
 // (tagged with childSessionID) and filtered out of the parent's persistence.
 // The child's durability relies solely on the bridge checkpoint stored inside
 // agentToolInterruptState — there is no independent child session log.
