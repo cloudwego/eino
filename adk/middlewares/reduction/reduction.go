@@ -1003,9 +1003,7 @@ func (t *typedToolReductionMiddleware[M]) beforeModelRewriteStateGeneric(ctx con
 	if estimatedTokens < t.config.MaxTokensForClear {
 		return ctx, state, nil
 	}
-	for _, msg := range state.Messages {
-		adk.EnsureMessageID(msg)
-	}
+	state.Messages = ensureMessageIDsOnCopiedMessages(state.Messages)
 
 	// calc range
 	var (
@@ -1430,6 +1428,23 @@ func getToolResultCallID[M adk.MessageType](msg M) string {
 		}
 	}
 	return ""
+}
+
+func ensureMessageIDsOnCopiedMessages[M adk.MessageType](msgs []M) []M {
+	var copied []M
+	for i, msg := range msgs {
+		if adk.GetMessageID(msg) != "" {
+			continue
+		}
+		if copied == nil {
+			copied = copyMessagesGeneric(msgs)
+		}
+		adk.EnsureMessageID(copied[i])
+	}
+	if copied != nil {
+		return copied
+	}
+	return msgs
 }
 
 type offloadStashItem struct {

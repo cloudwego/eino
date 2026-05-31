@@ -14,95 +14,131 @@
  * limitations under the License.
  */
 
-// Package session provides SessionStore implementations and a reusable
-// conformance test suite for validating SessionStore implementations.
+// Package session provides SessionService implementations and a reusable
+// conformance test suite for validating SessionService implementations.
 package session
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"testing"
 
 	"github.com/cloudwego/eino/adk"
+	"github.com/cloudwego/eino/schema"
 )
 
-// RunConformanceTests validates the SessionStore contract shared by
+// RunConformanceTests validates the SessionService contract shared by
 // Runner-managed session persistence implementations.
 //
 // The contract assumes single-writer-per-session: tests do NOT exercise
 // concurrent AppendEvents calls for the same sessionID.
-func RunConformanceTests(t *testing.T, factory func(testing.TB) adk.SessionStore) {
+func RunConformanceTests[M adk.MessageType](
+	t *testing.T,
+	factory func(testing.TB) adk.SessionService[M],
+	makeMessage func(content string) M,
+) {
 	t.Helper()
 
-	t.Run("AppendEvents and forward LoadEvents", func(t *testing.T) { testAppendAndForwardLoad(t, factory) })
-	t.Run("LoadEvents reverse pagination", func(t *testing.T) { testReversePagination(t, factory) })
-	t.Run("After forward pagination", func(t *testing.T) { testForwardPagination(t, factory) })
-	t.Run("sessionID isolates events", func(t *testing.T) { testSessionIsolation(t, factory) })
+	t.Run("AppendEvents and forward LoadEvents", func(t *testing.T) { testAppendAndForwardLoad(t, factory, makeMessage) })
+	t.Run("LoadEvents reverse pagination", func(t *testing.T) { testReversePagination(t, factory, makeMessage) })
+	t.Run("After forward pagination", func(t *testing.T) { testForwardPagination(t, factory, makeMessage) })
+	t.Run("sessionID isolates events", func(t *testing.T) { testSessionIsolation(t, factory, makeMessage) })
 	t.Run("Empty session returns no events", func(t *testing.T) { testEmptySession(t, factory) })
-	t.Run("AppendEvents is idempotent on duplicate EventID", func(t *testing.T) { testIdempotentAppend(t, factory) })
-	t.Run("AppendEvents skips duplicate EventID within same batch", func(t *testing.T) { testIdempotentAppendWithinBatch(t, factory) })
-	t.Run("AppendEvents rejects empty EventID with ErrInvalidEventID", func(t *testing.T) { testRejectEmptyEventID(t, factory) })
-	t.Run("After resumes by EventID forward", func(t *testing.T) { testAfterForward(t, factory) })
-	t.Run("After resumes by EventID reverse", func(t *testing.T) { testAfterReverse(t, factory) })
-	t.Run("Unknown After returns ErrEventIDOutOfRange", func(t *testing.T) { testUnknownAfter(t, factory) })
-	t.Run("Empty page when After=last forward and After=first reverse", func(t *testing.T) { testEmptyPageBoundary(t, factory) })
-	t.Run("Opaque binary Data round-trips correctly", func(t *testing.T) { testOpaqueDataRoundTrip(t, factory) })
-	t.Run("Opaque extension kind filters correctly", func(t *testing.T) { testOpaqueExtensionKindFilter(t, factory) })
+	t.Run("AppendEvents is idempotent on duplicate EventID", func(t *testing.T) { testIdempotentAppend(t, factory, makeMessage) })
+	t.Run("AppendEvents skips duplicate EventID within same batch", func(t *testing.T) { testIdempotentAppendWithinBatch(t, factory, makeMessage) })
+	t.Run("AppendEvents rejects empty EventID with ErrInvalidEventID", func(t *testing.T) { testRejectEmptyEventID(t, factory, makeMessage) })
+	t.Run("After resumes by EventID forward", func(t *testing.T) { testAfterForward(t, factory, makeMessage) })
+	t.Run("After resumes by EventID reverse", func(t *testing.T) { testAfterReverse(t, factory, makeMessage) })
+	t.Run("Unknown After returns ErrEventIDOutOfRange", func(t *testing.T) { testUnknownAfter(t, factory, makeMessage) })
+	t.Run("Empty page when After=last forward and After=first reverse", func(t *testing.T) { testEmptyPageBoundary(t, factory, makeMessage) })
+	t.Run("Extension kind filters correctly", func(t *testing.T) { testExtensionKindFilter(t, factory) })
+	t.Run("event body round-trips", func(t *testing.T) { testEventBodyRoundTrip(t, factory, makeMessage) })
 }
 
-func testAppendAndForwardLoad(t *testing.T, factory func(testing.TB) adk.SessionStore) {
+// RunSerializerConformanceTests validates that a concrete SessionService
+// implementation honors its implementation-local serializer configuration.
+func RunSerializerConformanceTests[M adk.MessageType](
+	t *testing.T,
+	factory func(testing.TB, schema.Serializer) adk.SessionService[M],
+	makeMessage func(content string) M,
+) {
+	t.Helper()
+	t.Run("custom serializer is honored", func(t *testing.T) {
+		serializer := &countingEventSerializer{inner: &schema.HumanReadableSerializer{}}
+		store := factory(t, serializer)
+		if store == nil {
+			t.Fatalf("factory returned nil SessionService")
+		}
+
+		ctx := context.Background()
+		event := messageEvent("custom-serializer-1", makeMessage("custom serializer"))
+		requireNoError(t, store.AppendEvents(ctx, "s", []*adk.SessionEvent[M]{event}))
+		if serializer.marshalCount == 0 {
+			t.Fatalf("custom serializer Marshal was not called")
+		}
+
+		res, err := store.LoadEvents(ctx, "s", nil)
+		requireNoError(t, err)
+		if serializer.unmarshalCount == 0 {
+			t.Fatalf("custom serializer Unmarshal was not called")
+		}
+		requireEventsEqual(t, []*adk.SessionEvent[M]{event}, res.Events)
+	})
+}
+
+func testAppendAndForwardLoad[M adk.MessageType](t *testing.T, factory func(testing.TB) adk.SessionService[M], makeMessage func(string) M) {
 	store := newStore(t, factory)
 	ctx := context.Background()
 
-	first := adk.SessionEventPayload{EventID: "e1", Kind: adk.SessionEventMessage, Data: []byte(`{"i":1}`)}
-	second := adk.SessionEventPayload{EventID: "e2", Kind: adk.SessionEventTurnEnd, Data: []byte(`{"i":2}`)}
-	third := adk.SessionEventPayload{EventID: "e3", Kind: adk.SessionEventMessage, Data: []byte(`{"i":3}`)}
-	requireNoError(t, store.AppendEvents(ctx, "s", []adk.SessionEventPayload{first, second}))
-	requireNoError(t, store.AppendEvents(ctx, "s", []adk.SessionEventPayload{third}))
+	first := messageEvent("e1", makeMessage("first"))
+	second := turnEndEvent[M]("e2", "turn-1")
+	third := messageEvent("e3", makeMessage("third"))
+	requireNoError(t, store.AppendEvents(ctx, "s", []*adk.SessionEvent[M]{first, second}))
+	requireNoError(t, store.AppendEvents(ctx, "s", []*adk.SessionEvent[M]{third}))
 
-	res, err := store.LoadEvents(ctx, "s", &adk.LoadEventsRequest{})
+	res, err := store.LoadEvents(ctx, "s", &adk.LoadSessionEventsRequest{})
 	requireNoError(t, err)
 	if res == nil {
 		t.Fatalf("LoadEvents returned nil result")
 	}
-	requireEventsEqual(t, []adk.SessionEventPayload{first, second, third}, res.Events)
+	requireEventsEqual(t, []*adk.SessionEvent[M]{first, second, third}, res.Events)
 }
 
-func testOpaqueExtensionKindFilter(t *testing.T, factory func(testing.TB) adk.SessionStore) {
+func testExtensionKindFilter[M adk.MessageType](t *testing.T, factory func(testing.TB) adk.SessionService[M]) {
 	store := newStore(t, factory)
 	ctx := context.Background()
 
-	first := adk.SessionEventPayload{EventID: "custom-1", Kind: adk.SessionEventKind("x.conformance.custom"), Data: []byte(`{"custom":1}`)}
-	second := adk.SessionEventPayload{EventID: "message-1", Kind: adk.SessionEventMessage, Data: []byte(`{"message":1}`)}
-	third := adk.SessionEventPayload{EventID: "custom-2", Kind: adk.SessionEventKind("x.conformance.custom"), Data: []byte(`{"custom":2}`)}
-	requireNoError(t, store.AppendEvents(ctx, "s", []adk.SessionEventPayload{first, second, third}))
+	first := extensionEvent[M]("custom-1", "x.conformance.custom")
+	second := turnEndEvent[M]("turn-1", "turn-1")
+	third := extensionEvent[M]("custom-2", "x.conformance.custom")
+	requireNoError(t, store.AppendEvents(ctx, "s", []*adk.SessionEvent[M]{first, second, third}))
 
-	res, err := store.LoadEvents(ctx, "s", &adk.LoadEventsRequest{
+	res, err := store.LoadEvents(ctx, "s", &adk.LoadSessionEventsRequest{
 		Kinds: []adk.SessionEventKind{adk.SessionEventKind("x.conformance.custom")},
 	})
 	requireNoError(t, err)
 	if res == nil {
 		t.Fatalf("LoadEvents returned nil result")
 	}
-	requireEventsEqual(t, []adk.SessionEventPayload{first, third}, res.Events)
+	requireEventsEqual(t, []*adk.SessionEvent[M]{first, third}, res.Events)
 }
 
-func testReversePagination(t *testing.T, factory func(testing.TB) adk.SessionStore) {
+func testReversePagination[M adk.MessageType](t *testing.T, factory func(testing.TB) adk.SessionService[M], makeMessage func(string) M) {
 	store := newStore(t, factory)
 	ctx := context.Background()
 
-	payloads := make([]adk.SessionEventPayload, 5)
+	events := make([]*adk.SessionEvent[M], 5)
 	for i := 0; i < 5; i++ {
-		payloads[i] = adk.SessionEventPayload{EventID: fmt.Sprintf("r%d", i), Kind: adk.SessionEventMessage, Data: []byte(fmt.Sprintf(`{"ch":"%c"}`, 'a'+i))}
-		requireNoError(t, store.AppendEvents(ctx, "s", []adk.SessionEventPayload{payloads[i]}))
+		events[i] = messageEvent(fmt.Sprintf("r%d", i), makeMessage(fmt.Sprintf("%c", 'a'+i)))
+		requireNoError(t, store.AppendEvents(ctx, "s", []*adk.SessionEvent[M]{events[i]}))
 	}
 
 	var collected []string
 	var after string
 	for {
-		res, err := store.LoadEvents(ctx, "s", &adk.LoadEventsRequest{
+		res, err := store.LoadEvents(ctx, "s", &adk.LoadSessionEventsRequest{
 			Reverse: true,
 			Limit:   2,
 			After:   after,
@@ -131,17 +167,17 @@ func testReversePagination(t *testing.T, factory func(testing.TB) adk.SessionSto
 	}
 }
 
-func testForwardPagination(t *testing.T, factory func(testing.TB) adk.SessionStore) {
+func testForwardPagination[M adk.MessageType](t *testing.T, factory func(testing.TB) adk.SessionService[M], makeMessage func(string) M) {
 	store := newStore(t, factory)
 	ctx := context.Background()
 
 	for i := 0; i < 80; i++ {
-		payload := adk.SessionEventPayload{EventID: fmt.Sprintf("f%d", i), Kind: adk.SessionEventMessage, Data: []byte(fmt.Sprintf(`{"i":%d}`, i))}
-		requireNoError(t, store.AppendEvents(ctx, "s", []adk.SessionEventPayload{payload}))
+		event := messageEvent(fmt.Sprintf("f%d", i), makeMessage(fmt.Sprintf("%d", i)))
+		requireNoError(t, store.AppendEvents(ctx, "s", []*adk.SessionEvent[M]{event}))
 	}
 
-	var collected []adk.SessionEventPayload
-	req := &adk.LoadEventsRequest{Limit: 10}
+	var collected []*adk.SessionEvent[M]
+	req := &adk.LoadSessionEventsRequest{Limit: 10}
 	for {
 		res, err := store.LoadEvents(ctx, "s", req)
 		requireNoError(t, err)
@@ -152,7 +188,7 @@ func testForwardPagination(t *testing.T, factory func(testing.TB) adk.SessionSto
 		if res.Next == "" {
 			break
 		}
-		req = &adk.LoadEventsRequest{Limit: 10, After: res.Next}
+		req = &adk.LoadSessionEventsRequest{Limit: 10, After: res.Next}
 	}
 	if len(collected) != 80 {
 		t.Fatalf("expected 80 events, got %d", len(collected))
@@ -165,172 +201,160 @@ func testForwardPagination(t *testing.T, factory func(testing.TB) adk.SessionSto
 	}
 }
 
-func testSessionIsolation(t *testing.T, factory func(testing.TB) adk.SessionStore) {
+func testSessionIsolation[M adk.MessageType](t *testing.T, factory func(testing.TB) adk.SessionService[M], makeMessage func(string) M) {
 	store := newStore(t, factory)
 	ctx := context.Background()
 
-	alpha := adk.SessionEventPayload{EventID: "alpha-1", Kind: adk.SessionEventMessage, Data: []byte(`{"tag":"alpha"}`)}
-	beta := adk.SessionEventPayload{EventID: "beta-1", Kind: adk.SessionEventTurnEnd, Data: []byte(`{"tag":"beta"}`)}
-	requireNoError(t, store.AppendEvents(ctx, "alpha", []adk.SessionEventPayload{alpha}))
-	requireNoError(t, store.AppendEvents(ctx, "beta", []adk.SessionEventPayload{beta}))
+	alpha := messageEvent("alpha-1", makeMessage("alpha"))
+	beta := turnEndEvent[M]("beta-1", "beta-turn")
+	requireNoError(t, store.AppendEvents(ctx, "alpha", []*adk.SessionEvent[M]{alpha}))
+	requireNoError(t, store.AppendEvents(ctx, "beta", []*adk.SessionEvent[M]{beta}))
 
-	alphaRes, err := store.LoadEvents(ctx, "alpha", &adk.LoadEventsRequest{})
+	alphaRes, err := store.LoadEvents(ctx, "alpha", &adk.LoadSessionEventsRequest{})
 	requireNoError(t, err)
-	requireEventsEqual(t, []adk.SessionEventPayload{alpha}, alphaRes.Events)
+	requireEventsEqual(t, []*adk.SessionEvent[M]{alpha}, alphaRes.Events)
 
-	betaRes, err := store.LoadEvents(ctx, "beta", &adk.LoadEventsRequest{})
+	betaRes, err := store.LoadEvents(ctx, "beta", &adk.LoadSessionEventsRequest{})
 	requireNoError(t, err)
-	requireEventsEqual(t, []adk.SessionEventPayload{beta}, betaRes.Events)
+	requireEventsEqual(t, []*adk.SessionEvent[M]{beta}, betaRes.Events)
 }
 
-func testEmptySession(t *testing.T, factory func(testing.TB) adk.SessionStore) {
+func testEmptySession[M adk.MessageType](t *testing.T, factory func(testing.TB) adk.SessionService[M]) {
 	store := newStore(t, factory)
 	ctx := context.Background()
 
-	res, err := store.LoadEvents(ctx, "nonexistent", &adk.LoadEventsRequest{})
+	res, err := store.LoadEvents(ctx, "nonexistent", &adk.LoadSessionEventsRequest{})
 	requireNoError(t, err)
 	if res != nil && len(res.Events) != 0 {
 		t.Fatalf("expected empty result for nonexistent session, got %d events", len(res.Events))
 	}
 }
 
-func testIdempotentAppend(t *testing.T, factory func(testing.TB) adk.SessionStore) {
+func testIdempotentAppend[M adk.MessageType](t *testing.T, factory func(testing.TB) adk.SessionService[M], makeMessage func(string) M) {
 	store := newStore(t, factory)
 	ctx := context.Background()
 
-	first := adk.SessionEventPayload{EventID: "dup-1", Kind: adk.SessionEventMessage, Data: []byte(`{"payload":"first"}`)}
-	dup := adk.SessionEventPayload{EventID: "dup-1", Kind: adk.SessionEventMessage, Data: []byte(`{"payload":"second"}`)}
-	requireNoError(t, store.AppendEvents(ctx, "s", []adk.SessionEventPayload{first}))
-	requireNoError(t, store.AppendEvents(ctx, "s", []adk.SessionEventPayload{dup}))
+	first := messageEvent("dup-1", makeMessage("first"))
+	dup := messageEvent("dup-1", makeMessage("second"))
+	requireNoError(t, store.AppendEvents(ctx, "s", []*adk.SessionEvent[M]{first}))
+	requireNoError(t, store.AppendEvents(ctx, "s", []*adk.SessionEvent[M]{dup}))
 
-	res, err := store.LoadEvents(ctx, "s", &adk.LoadEventsRequest{})
+	res, err := store.LoadEvents(ctx, "s", &adk.LoadSessionEventsRequest{})
 	requireNoError(t, err)
-	requireEventsEqual(t, []adk.SessionEventPayload{first}, res.Events)
+	requireEventsEqual(t, []*adk.SessionEvent[M]{first}, res.Events)
 }
 
-func testIdempotentAppendWithinBatch(t *testing.T, factory func(testing.TB) adk.SessionStore) {
+func testIdempotentAppendWithinBatch[M adk.MessageType](t *testing.T, factory func(testing.TB) adk.SessionService[M], makeMessage func(string) M) {
 	store := newStore(t, factory)
 	ctx := context.Background()
 
-	first := adk.SessionEventPayload{EventID: "dup-batch-1", Kind: adk.SessionEventMessage, Data: []byte(`{"payload":"first"}`)}
-	dup := adk.SessionEventPayload{EventID: "dup-batch-1", Kind: adk.SessionEventMessage, Data: []byte(`{"payload":"second"}`)}
-	requireNoError(t, store.AppendEvents(ctx, "s", []adk.SessionEventPayload{first, dup}))
+	first := messageEvent("dup-batch-1", makeMessage("first"))
+	dup := messageEvent("dup-batch-1", makeMessage("second"))
+	requireNoError(t, store.AppendEvents(ctx, "s", []*adk.SessionEvent[M]{first, dup}))
 
-	res, err := store.LoadEvents(ctx, "s", &adk.LoadEventsRequest{})
+	res, err := store.LoadEvents(ctx, "s", &adk.LoadSessionEventsRequest{})
 	requireNoError(t, err)
-	requireEventsEqual(t, []adk.SessionEventPayload{first}, res.Events)
+	requireEventsEqual(t, []*adk.SessionEvent[M]{first}, res.Events)
 }
 
-func testRejectEmptyEventID(t *testing.T, factory func(testing.TB) adk.SessionStore) {
+func testRejectEmptyEventID[M adk.MessageType](t *testing.T, factory func(testing.TB) adk.SessionService[M], makeMessage func(string) M) {
 	store := newStore(t, factory)
 	ctx := context.Background()
 
-	err := store.AppendEvents(ctx, "s", []adk.SessionEventPayload{{EventID: "", Data: []byte(`{}`)}})
+	err := store.AppendEvents(ctx, "s", []*adk.SessionEvent[M]{{Kind: adk.SessionEventMessage, Message: makeMessage("empty")}})
 	if !errors.Is(err, adk.ErrInvalidEventID) {
 		t.Fatalf("expected ErrInvalidEventID, got %v", err)
 	}
 }
 
-func testAfterForward(t *testing.T, factory func(testing.TB) adk.SessionStore) {
+func testAfterForward[M adk.MessageType](t *testing.T, factory func(testing.TB) adk.SessionService[M], makeMessage func(string) M) {
 	store := newStore(t, factory)
 	ctx := context.Background()
 
-	payloads := make([]adk.SessionEventPayload, 5)
+	events := make([]*adk.SessionEvent[M], 5)
 	for i := 0; i < 5; i++ {
-		payloads[i] = adk.SessionEventPayload{EventID: fmt.Sprintf("fwd-%d", i), Kind: adk.SessionEventMessage, Data: []byte(fmt.Sprintf(`{"i":%d}`, i))}
-		requireNoError(t, store.AppendEvents(ctx, "s", []adk.SessionEventPayload{payloads[i]}))
+		events[i] = messageEvent(fmt.Sprintf("fwd-%d", i), makeMessage(fmt.Sprintf("%d", i)))
+		requireNoError(t, store.AppendEvents(ctx, "s", []*adk.SessionEvent[M]{events[i]}))
 	}
 
-	res, err := store.LoadEvents(ctx, "s", &adk.LoadEventsRequest{After: "fwd-2"})
+	res, err := store.LoadEvents(ctx, "s", &adk.LoadSessionEventsRequest{After: "fwd-2"})
 	requireNoError(t, err)
-	requireEventsEqual(t, []adk.SessionEventPayload{payloads[3], payloads[4]}, res.Events)
+	requireEventsEqual(t, []*adk.SessionEvent[M]{events[3], events[4]}, res.Events)
 }
 
-func testAfterReverse(t *testing.T, factory func(testing.TB) adk.SessionStore) {
+func testAfterReverse[M adk.MessageType](t *testing.T, factory func(testing.TB) adk.SessionService[M], makeMessage func(string) M) {
 	store := newStore(t, factory)
 	ctx := context.Background()
 
-	payloads := make([]adk.SessionEventPayload, 5)
+	events := make([]*adk.SessionEvent[M], 5)
 	for i := 0; i < 5; i++ {
-		payloads[i] = adk.SessionEventPayload{EventID: fmt.Sprintf("rev-%d", i), Kind: adk.SessionEventMessage, Data: []byte(fmt.Sprintf(`{"i":%d}`, i))}
-		requireNoError(t, store.AppendEvents(ctx, "s", []adk.SessionEventPayload{payloads[i]}))
+		events[i] = messageEvent(fmt.Sprintf("rev-%d", i), makeMessage(fmt.Sprintf("%d", i)))
+		requireNoError(t, store.AppendEvents(ctx, "s", []*adk.SessionEvent[M]{events[i]}))
 	}
 
-	res, err := store.LoadEvents(ctx, "s", &adk.LoadEventsRequest{Reverse: true, After: "rev-2"})
+	res, err := store.LoadEvents(ctx, "s", &adk.LoadSessionEventsRequest{Reverse: true, After: "rev-2"})
 	requireNoError(t, err)
-	requireEventsEqual(t, []adk.SessionEventPayload{payloads[1], payloads[0]}, res.Events)
+	requireEventsEqual(t, []*adk.SessionEvent[M]{events[1], events[0]}, res.Events)
 }
 
-func testUnknownAfter(t *testing.T, factory func(testing.TB) adk.SessionStore) {
+func testUnknownAfter[M adk.MessageType](t *testing.T, factory func(testing.TB) adk.SessionService[M], makeMessage func(string) M) {
 	store := newStore(t, factory)
 	ctx := context.Background()
 
-	requireNoError(t, store.AppendEvents(ctx, "s", []adk.SessionEventPayload{
-		{EventID: "only-1", Kind: adk.SessionEventMessage, Data: []byte(`{}`)},
-	}))
+	requireNoError(t, store.AppendEvents(ctx, "s", []*adk.SessionEvent[M]{messageEvent("only-1", makeMessage("only"))}))
 
-	_, err := store.LoadEvents(ctx, "s", &adk.LoadEventsRequest{After: "ghost"})
+	_, err := store.LoadEvents(ctx, "s", &adk.LoadSessionEventsRequest{After: "ghost"})
 	if !errors.Is(err, adk.ErrEventIDOutOfRange) {
 		t.Fatalf("forward unknown After expected ErrEventIDOutOfRange, got %v", err)
 	}
-	_, err = store.LoadEvents(ctx, "s", &adk.LoadEventsRequest{After: "ghost", Reverse: true})
+	_, err = store.LoadEvents(ctx, "s", &adk.LoadSessionEventsRequest{After: "ghost", Reverse: true})
 	if !errors.Is(err, adk.ErrEventIDOutOfRange) {
 		t.Fatalf("reverse unknown After expected ErrEventIDOutOfRange, got %v", err)
 	}
 }
 
-func testEmptyPageBoundary(t *testing.T, factory func(testing.TB) adk.SessionStore) {
+func testEmptyPageBoundary[M adk.MessageType](t *testing.T, factory func(testing.TB) adk.SessionService[M], makeMessage func(string) M) {
 	store := newStore(t, factory)
 	ctx := context.Background()
 
 	ids := []string{"e0", "e1", "e2"}
 	for _, id := range ids {
-		requireNoError(t, store.AppendEvents(ctx, "s",
-			[]adk.SessionEventPayload{{EventID: id, Kind: adk.SessionEventMessage, Data: []byte(`{}`)}}))
+		requireNoError(t, store.AppendEvents(ctx, "s", []*adk.SessionEvent[M]{messageEvent(id, makeMessage(id))}))
 	}
 
-	res, err := store.LoadEvents(ctx, "s", &adk.LoadEventsRequest{After: "e2"})
+	res, err := store.LoadEvents(ctx, "s", &adk.LoadSessionEventsRequest{After: "e2"})
 	requireNoError(t, err)
 	if res == nil || len(res.Events) != 0 || res.Next != "" {
 		t.Fatalf("forward empty page expected, got events=%d next=%q", len(res.Events), res.Next)
 	}
 
-	res, err = store.LoadEvents(ctx, "s", &adk.LoadEventsRequest{Reverse: true, After: "e0"})
+	res, err = store.LoadEvents(ctx, "s", &adk.LoadSessionEventsRequest{Reverse: true, After: "e0"})
 	requireNoError(t, err)
 	if res == nil || len(res.Events) != 0 || res.Next != "" {
 		t.Fatalf("reverse empty page expected, got events=%d next=%q", len(res.Events), res.Next)
 	}
 }
 
-func testOpaqueDataRoundTrip(t *testing.T, factory func(testing.TB) adk.SessionStore) {
+func testEventBodyRoundTrip[M adk.MessageType](t *testing.T, factory func(testing.TB) adk.SessionService[M], makeMessage func(string) M) {
 	store := newStore(t, factory)
 	ctx := context.Background()
 
-	// Use opaque bytes that are line-safe (no raw \n or \r) so the test
-	// works for both InMemoryStore and FileStore. Includes \t, null bytes,
-	// and high bytes to verify stores treat Data as opaque.
-	opaqueData := []byte{0x00, 0xFF, '\t', 0x80, 0x7F, 0x01}
-	event := adk.SessionEventPayload{EventID: "opaque-test-1", Kind: adk.SessionEventMessage, Data: opaqueData}
-	requireNoError(t, store.AppendEvents(ctx, "s", []adk.SessionEventPayload{event}))
+	event := messageEvent("body-test-1", makeMessage("body"))
+	requireNoError(t, store.AppendEvents(ctx, "s", []*adk.SessionEvent[M]{event}))
 
-	res, err := store.LoadEvents(ctx, "s", &adk.LoadEventsRequest{})
+	res, err := store.LoadEvents(ctx, "s", &adk.LoadSessionEventsRequest{})
 	requireNoError(t, err)
 	if res == nil || len(res.Events) != 1 {
 		t.Fatalf("expected 1 event, got %d", len(res.Events))
 	}
-	if res.Events[0].EventID != "opaque-test-1" {
-		t.Fatalf("EventID mismatch: got=%q want=%q", res.Events[0].EventID, "opaque-test-1")
-	}
-	if !bytes.Equal(res.Events[0].Data, opaqueData) {
-		t.Fatalf("Data mismatch: got=%v want=%v", res.Events[0].Data, opaqueData)
-	}
+	requireEventsEqual(t, []*adk.SessionEvent[M]{event}, res.Events)
 }
 
-func newStore(t testing.TB, factory func(testing.TB) adk.SessionStore) adk.SessionStore {
+func newStore[M adk.MessageType](t testing.TB, factory func(testing.TB) adk.SessionService[M]) adk.SessionService[M] {
 	t.Helper()
 	store := factory(t)
 	if store == nil {
-		t.Fatalf("factory returned nil SessionStore")
+		t.Fatalf("factory returned nil SessionService")
 	}
 	return store
 }
@@ -342,20 +366,53 @@ func requireNoError(t testing.TB, err error) {
 	}
 }
 
-func requireEventsEqual(t testing.TB, want, got []adk.SessionEventPayload) {
+func requireEventsEqual[M adk.MessageType](t testing.TB, want, got []*adk.SessionEvent[M]) {
 	t.Helper()
 	if len(want) != len(got) {
 		t.Fatalf("events length mismatch: got=%d want=%d", len(got), len(want))
 	}
 	for i := range want {
-		if got[i].EventID != want[i].EventID {
-			t.Fatalf("event[%d].EventID mismatch: got=%q want=%q", i, got[i].EventID, want[i].EventID)
+		if !reflect.DeepEqual(got[i], want[i]) {
+			t.Fatalf("event[%d] mismatch:\n got: %#v\nwant: %#v", i, got[i], want[i])
 		}
-		if got[i].Kind != want[i].Kind {
-			t.Fatalf("event[%d].Kind mismatch: got=%q want=%q", i, got[i].Kind, want[i].Kind)
-		}
-		if !bytes.Equal(got[i].Data, want[i].Data) {
-			t.Fatalf("event[%d].Data mismatch: got=%q want=%q", i, got[i].Data, want[i].Data)
-		}
+	}
+}
+
+type countingEventSerializer struct {
+	inner          schema.Serializer
+	marshalCount   int
+	unmarshalCount int
+}
+
+func (s *countingEventSerializer) Marshal(v any) ([]byte, error) {
+	s.marshalCount++
+	return s.inner.Marshal(v)
+}
+
+func (s *countingEventSerializer) Unmarshal(data []byte, v any) error {
+	s.unmarshalCount++
+	return s.inner.Unmarshal(data, v)
+}
+
+func messageEvent[M adk.MessageType](id string, msg M) *adk.SessionEvent[M] {
+	return &adk.SessionEvent[M]{EventID: id, Kind: adk.SessionEventMessage, Message: msg}
+}
+
+func turnEndEvent[M adk.MessageType](id, turnID string) *adk.SessionEvent[M] {
+	return &adk.SessionEvent[M]{
+		EventID: id,
+		Kind:    adk.SessionEventTurnEnd,
+		TurnID:  turnID,
+		TurnEnd: &adk.TurnEndState[M]{},
+	}
+}
+
+func extensionEvent[M adk.MessageType](id, kind string) *adk.SessionEvent[M] {
+	return &adk.SessionEvent[M]{
+		EventID: id,
+		Kind:    adk.SessionEventKind(kind),
+		Extension: &adk.SessionExtensionEvent{
+			Data: []byte(`{"ok":true}`),
+		},
 	}
 }
