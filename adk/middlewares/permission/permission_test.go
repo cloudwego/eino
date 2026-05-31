@@ -838,10 +838,10 @@ func TestPermissionGate_PersistedAgentInterruptOmitsPrivateInfo(t *testing.T) {
 
 			store := &permissionSessionService{}
 			runner := adk.NewRunner(ctx, adk.RunnerConfig{
-				Agent:         agent,
-				SessionID:     "permission-agent-interrupt-" + strings.ReplaceAll(tt.name, " ", "-"),
+				Agent:          agent,
+				SessionID:      "permission-agent-interrupt-" + strings.ReplaceAll(tt.name, " ", "-"),
 				SessionService: store,
-				SessionConfig: &adk.SessionConfig{EventFlushBatchSize: 1},
+				SessionConfig:  &adk.SessionConfig{EventFlushBatchSize: 1},
 			})
 			iter := runner.Query(ctx, "use the tool", adk.WithTimelineEvents())
 			for {
@@ -853,11 +853,11 @@ func TestPermissionGate_PersistedAgentInterruptOmitsPrivateInfo(t *testing.T) {
 			}
 
 			var interrupt *adk.SessionEvent[*schema.Message]
-			for _, payload := range store.events {
-				if payload.Kind != adk.SessionEventAgentInterrupt {
+			for _, event := range store.events {
+				if event.Kind != adk.SessionEventAgentInterrupt {
 					continue
 				}
-				interrupt = payload
+				interrupt = event
 				break
 			}
 			require.NotNil(t, interrupt)
