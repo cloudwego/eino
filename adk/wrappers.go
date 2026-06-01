@@ -310,10 +310,10 @@ func sendSessionTimelineEvent[M MessageType](ctx context.Context, se *SessionEve
 		se.Timestamp = newEventTimestamp()
 	}
 	if err := ValidateEmittedSessionEventKind(se); err != nil {
-		execCtx.send(&TypedAgentEvent[M]{Timestamp: newEventTimestamp(), Err: err})
+		execCtx.send(ctx, &TypedAgentEvent[M]{Timestamp: newEventTimestamp(), Err: err})
 		return
 	}
-	execCtx.send(&TypedAgentEvent[M]{EventID: se.EventID, Timestamp: se.Timestamp, SessionEvent: se})
+	execCtx.send(ctx, &TypedAgentEvent[M]{EventID: se.EventID, Timestamp: se.Timestamp, SessionEvent: se})
 }
 
 func newModelSpanStartEvent[M MessageType](ctx context.Context, spanID string, started time.Time, opts ...model.Option) *SessionEvent[M] {
@@ -582,7 +582,7 @@ func (m *typedEventSenderModel[M]) Generate(ctx context.Context, input []M, opts
 	event := typedModelOutputEvent(copyMessage(result), nil)
 	event.EventID = assistantMsgEventID
 	event.Timestamp = timestamp
-	execCtx.send(event)
+	execCtx.send(ctx, event)
 
 	return result, nil
 }
@@ -639,7 +639,7 @@ func (m *typedEventSenderModel[M]) Stream(ctx context.Context, input []M, opts .
 	event := typedModelOutputEvent[M](zero, eventStream)
 	event.EventID = assistantMsgEventID
 	event.Timestamp = timestamp
-	execCtx.send(event)
+	execCtx.send(ctx, event)
 
 	spanStream := streams[2]
 	go func() {
@@ -1255,7 +1255,7 @@ func (w *typedEventSenderToolWrapper[M]) WrapInvokableToolCall(_ context.Context
 			if st.getReturnDirectlyToolCallID() == callID {
 				st.setReturnDirectlyEvent(event)
 			} else {
-				execCtx.send(event)
+				execCtx.send(ctx, event)
 			}
 			return nil
 		})
@@ -1360,7 +1360,7 @@ func (w *typedEventSenderToolWrapper[M]) WrapStreamableToolCall(_ context.Contex
 			if st.getReturnDirectlyToolCallID() == callID {
 				st.setReturnDirectlyEvent(event)
 			} else {
-				execCtx.send(event)
+				execCtx.send(ctx, event)
 			}
 			return nil
 		})
@@ -1432,7 +1432,7 @@ func (w *typedEventSenderToolWrapper[M]) WrapEnhancedInvokableToolCall(_ context
 			if st.getReturnDirectlyToolCallID() == callID {
 				st.setReturnDirectlyEvent(event)
 			} else {
-				execCtx.send(event)
+				execCtx.send(ctx, event)
 			}
 			return nil
 		})
@@ -1537,7 +1537,7 @@ func (w *typedEventSenderToolWrapper[M]) WrapEnhancedStreamableToolCall(_ contex
 			if st.getReturnDirectlyToolCallID() == callID {
 				st.setReturnDirectlyEvent(event)
 			} else {
-				execCtx.send(event)
+				execCtx.send(ctx, event)
 			}
 			return nil
 		})
