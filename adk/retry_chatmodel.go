@@ -256,6 +256,9 @@ type TypedModelRetryConfig[M MessageType] struct {
 type ModelRetryConfig = TypedModelRetryConfig[*schema.Message]
 
 func defaultIsRetryAble(_ context.Context, err error) bool {
+	if timeoutErr, ok := AsModelTimeout(err); ok {
+		return timeoutErr.ChunksReceived == 0
+	}
 	return err != nil
 }
 
