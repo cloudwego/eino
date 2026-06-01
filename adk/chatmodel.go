@@ -381,11 +381,12 @@ type TypedChatModelAgentConfig[M MessageType] struct {
 	//  3. failoverModelWrapper (internal - failover between models, if configured)
 	//  4. retryModelWrapper (internal - retries on failure, if configured)
 	//  5. eventSenderModelWrapper (internal - sends model response events)
-	//  6. ChatModelAgentMiddleware.WrapModel (wrapper, first registered is outermost)
-	//  7. callbackInjectionModelWrapper (internal - injects callbacks if not enabled; when failover is enabled, this is handled per-model inside failoverProxyModel instead)
-	//  8. failoverProxyModel (internal - dispatches to selected failover model, if configured) / Model.Generate/Stream
-	//  9. ChatModelAgentMiddleware.AfterModelRewriteState (hook, can modify state after model call)
-	// 10. AgentMiddleware.AfterChatModel (hook, runs after model call)
+	//  6. typedTimeoutModelWrapper (internal - opt-in model call timeout, if configured)
+	//  7. ChatModelAgentMiddleware.WrapModel (wrapper, first registered is outermost)
+	//  8. callbackInjectionModelWrapper (internal - injects callbacks if not enabled; when failover is enabled, this is handled per-model inside failoverProxyModel instead)
+	//  9. failoverProxyModel (internal - dispatches to selected failover model, if configured) / Model.Generate/Stream
+	// 10. ChatModelAgentMiddleware.AfterModelRewriteState (hook, can modify state after model call)
+	// 11. AgentMiddleware.AfterChatModel (hook, runs after model call)
 	//
 	// Custom Event Sender Position:
 	// By default, events are sent after all user middlewares (WrapModel) have processed the output,
@@ -466,6 +467,12 @@ type TypedChatModelAgentConfig[M MessageType] struct {
 	// Model field is still required as it serves as the initial model.
 	// Optional. If nil, no failover will be performed.
 	ModelFailoverConfig *ModelFailoverConfig[M]
+
+	// ModelTimeoutConfig configures opt-in timeout enforcement for ChatModel calls.
+	// Timeout errors are surfaced as *ModelTimeoutError and can be handled by
+	// ModelRetryConfig.ShouldRetry/IsRetryAble and ModelFailoverConfig.ShouldFailover.
+	// Optional. If nil or all durations are <= 0, no timeout wrapper is installed.
+	ModelTimeoutConfig *ModelTimeoutConfig
 }
 
 type ChatModelAgentConfig = TypedChatModelAgentConfig[*schema.Message]
@@ -501,6 +508,7 @@ type TypedChatModelAgent[M MessageType] struct {
 
 	modelRetryConfig    *TypedModelRetryConfig[M]
 	modelFailoverConfig *ModelFailoverConfig[M]
+	modelTimeoutConfig  *ModelTimeoutConfig
 
 	once   sync.Once
 	run    typedRunFunc[M]
@@ -628,6 +636,7 @@ func NewTypedChatModelAgent[M MessageType](_ context.Context, config *TypedChatM
 		middlewares:         config.Middlewares,
 		modelRetryConfig:    config.ModelRetryConfig,
 		modelFailoverConfig: config.ModelFailoverConfig,
+		modelTimeoutConfig:  config.ModelTimeoutConfig,
 	}, nil
 }
 
@@ -1108,6 +1117,7 @@ func (a *TypedChatModelAgent[M]) buildNoToolsRunFunc(_ context.Context) (typedRu
 			middlewares:    a.middlewares,
 			retryConfig:    a.modelRetryConfig,
 			failoverConfig: a.modelFailoverConfig,
+			timeoutConfig:  a.modelTimeoutConfig,
 			cancelContext:  cancelCtx,
 		})
 
@@ -1236,6 +1246,7 @@ func (a *TypedChatModelAgent[M]) buildMessageReActRunFunc(_ context.Context, bc 
 			middlewares:    a.middlewares,
 			retryConfig:    any(a.modelRetryConfig).(*ModelRetryConfig),
 			failoverConfig: any(a.modelFailoverConfig).(*ModelFailoverConfig[*schema.Message]),
+			timeoutConfig:  a.modelTimeoutConfig,
 			toolInfos:      bc.toolInfos,
 		},
 		toolsReturnDirectly: bc.returnDirectly,
@@ -1383,6 +1394,7 @@ func (a *TypedChatModelAgent[M]) buildAgenticReActRunFunc(_ context.Context, bc 
 			middlewares:    a.middlewares,
 			retryConfig:    any(a.modelRetryConfig).(*TypedModelRetryConfig[*schema.AgenticMessage]),
 			failoverConfig: any(a.modelFailoverConfig).(*ModelFailoverConfig[*schema.AgenticMessage]),
+			timeoutConfig:  a.modelTimeoutConfig,
 			toolInfos:      bc.toolInfos,
 		},
 		toolsReturnDirectly: bc.returnDirectly,

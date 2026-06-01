@@ -44,6 +44,7 @@ type typedModelWrapperConfig[M MessageType] struct {
 	middlewares    []AgentMiddleware
 	retryConfig    *TypedModelRetryConfig[M]
 	failoverConfig *ModelFailoverConfig[M]
+	timeoutConfig  *ModelTimeoutConfig
 	toolInfos      []*schema.ToolInfo
 	cancelContext  *cancelContext
 }
@@ -73,6 +74,7 @@ func buildModelWrappersImpl[M MessageType](m model.BaseModel[M], config *typedMo
 		toolInfos:           config.toolInfos,
 		modelRetryConfig:    config.retryConfig,
 		modelFailoverConfig: config.failoverConfig,
+		modelTimeoutConfig:  config.timeoutConfig,
 		cancelContext:       config.cancelContext,
 	}
 
@@ -286,13 +288,18 @@ func (w *typedEventSenderModelWrapper[M]) WrapModel(_ context.Context, m model.B
 	if mc != nil {
 		failoverConfig = mc.ModelFailoverConfig
 	}
-	return &typedEventSenderModel[M]{inner: inner, modelRetryConfig: retryConfig, modelFailoverConfig: failoverConfig}, nil
+	var timeoutConfig *ModelTimeoutConfig
+	if mc != nil {
+		timeoutConfig = mc.ModelTimeoutConfig
+	}
+	return &typedEventSenderModel[M]{inner: inner, modelRetryConfig: retryConfig, modelFailoverConfig: failoverConfig, modelTimeoutConfig: timeoutConfig}, nil
 }
 
 type typedEventSenderModel[M MessageType] struct {
 	inner               model.BaseModel[M]
 	modelRetryConfig    *TypedModelRetryConfig[M]
 	modelFailoverConfig *ModelFailoverConfig[M]
+	modelTimeoutConfig  *ModelTimeoutConfig
 }
 
 func sendSessionTimelineEvent[M MessageType](ctx context.Context, se *SessionEvent[M]) {
@@ -369,7 +376,7 @@ func newModelSpanEndEvent[M MessageType](ctx context.Context, in modelSpanEndEve
 			Status:       status,
 			Err:          errStr,
 			ParentSpanID: modelSpanMetaFromContext[M](ctx, opts...).ParentSpanID,
-			Model:        modelSpanCompletionMeta(ctx, in.startEventID, in.msg, in.accepted && in.err == nil, opts...),
+			Model:        modelSpanCompletionMeta(ctx, in.startEventID, in.msg, in.accepted && in.err == nil, in.err, opts...),
 		},
 	}
 }
@@ -404,12 +411,20 @@ func modelSpanMetaFromContext[M MessageType](ctx context.Context, opts ...model.
 	return modelSpanContextMeta{ParentSpanID: parentSpanID, Model: meta}
 }
 
-func modelSpanCompletionMeta[M MessageType](ctx context.Context, startEventID string, msg M, accepted bool, opts ...model.Option) *ModelSpanMeta {
+func modelSpanCompletionMeta[M MessageType](ctx context.Context, startEventID string, msg M, accepted bool, err error, opts ...model.Option) *ModelSpanMeta {
 	meta := modelSpanMetaFromContext[M](ctx, opts...).Model
 	meta.ModelRequestStartEventID = startEventID
 	meta.Usage = modelUsageFromAssistant(msg)
 	meta.FinishReason = assistantFinishReason(msg)
 	meta.Accepted = accepted
+	if timeoutErr, ok := AsModelTimeout(err); ok {
+		meta.Timeout = &ModelTimeoutMeta{
+			Phase:          string(timeoutErr.Phase),
+			TimeoutMS:      timeoutErr.Timeout.Milliseconds(),
+			ElapsedMS:      timeoutErr.Elapsed.Milliseconds(),
+			ChunksReceived: timeoutErr.ChunksReceived,
+		}
+	}
 	return meta
 }
 
@@ -1581,6 +1596,7 @@ type typedStateModelWrapper[M MessageType] struct {
 	toolInfos           []*schema.ToolInfo
 	modelRetryConfig    *TypedModelRetryConfig[M]
 	modelFailoverConfig *ModelFailoverConfig[M]
+	modelTimeoutConfig  *ModelTimeoutConfig
 	cancelContext       *cancelContext
 }
 
@@ -1628,6 +1644,7 @@ func (w *typedStateModelWrapper[M]) wrapGenerateEndpoint(endpoint typedGenerateE
 	hasUserEventSender := w.hasUserEventSender()
 	retryConfig := w.modelRetryConfig
 	failoverConfig := w.modelFailoverConfig
+	timeoutConfig := w.modelTimeoutConfig
 	cc := w.cancelContext
 
 	for i := len(w.handlers) - 1; i >= 0; i-- {
@@ -1637,13 +1654,21 @@ func (w *typedStateModelWrapper[M]) wrapGenerateEndpoint(endpoint typedGenerateE
 		endpoint = func(ctx context.Context, input []M, opts ...model.Option) (M, error) {
 			baseOpts := &model.Options{Tools: baseToolInfos}
 			commonOpts := model.GetCommonOptions(baseOpts, opts...)
-			mc := &TypedModelContext[M]{Tools: commonOpts.Tools, ModelRetryConfig: retryConfig, cancelContext: cc}
+			mc := &TypedModelContext[M]{Tools: commonOpts.Tools, ModelRetryConfig: retryConfig, ModelTimeoutConfig: timeoutConfig, cancelContext: cc}
 			wrappedModel, err := handler.WrapModel(ctx, &typedEndpointModel[M]{generate: innerEndpoint}, mc)
 			if err != nil {
 				var zero M
 				return zero, err
 			}
 			return wrappedModel.Generate(ctx, input, opts...)
+		}
+	}
+
+	if isModelTimeoutConfigActive(timeoutConfig) {
+		innerEndpoint := endpoint
+		endpoint = func(ctx context.Context, input []M, opts ...model.Option) (M, error) {
+			timeoutWrapper := newTypedTimeoutModelWrapper[M](&typedEndpointModel[M]{generate: innerEndpoint}, timeoutConfig)
+			return timeoutWrapper.Generate(ctx, input, opts...)
 		}
 	}
 
@@ -1657,7 +1682,7 @@ func (w *typedStateModelWrapper[M]) wrapGenerateEndpoint(endpoint typedGenerateE
 			if execCtx == nil || execCtx.generator == nil {
 				return innerEndpoint(ctx, input, opts...)
 			}
-			mc := &TypedModelContext[M]{ModelRetryConfig: retryConfig, ModelFailoverConfig: failoverConfig, cancelContext: cc}
+			mc := &TypedModelContext[M]{ModelRetryConfig: retryConfig, ModelFailoverConfig: failoverConfig, ModelTimeoutConfig: timeoutConfig, cancelContext: cc}
 			wrappedModel, err := eventSender.WrapModel(ctx, &typedEndpointModel[M]{generate: innerEndpoint}, mc)
 			if err != nil {
 				var zero M
@@ -1716,6 +1741,7 @@ func (w *typedStateModelWrapper[M]) wrapStreamEndpoint(endpoint typedStreamEndpo
 	hasUserEventSender := w.hasUserEventSender()
 	retryConfig := w.modelRetryConfig
 	failoverConfig := w.modelFailoverConfig
+	timeoutConfig := w.modelTimeoutConfig
 	cc := w.cancelContext
 
 	for i := len(w.handlers) - 1; i >= 0; i-- {
@@ -1725,12 +1751,20 @@ func (w *typedStateModelWrapper[M]) wrapStreamEndpoint(endpoint typedStreamEndpo
 		endpoint = func(ctx context.Context, input []M, opts ...model.Option) (*schema.StreamReader[M], error) {
 			baseOpts := &model.Options{Tools: baseToolInfos}
 			commonOpts := model.GetCommonOptions(baseOpts, opts...)
-			mc := &TypedModelContext[M]{Tools: commonOpts.Tools, ModelRetryConfig: retryConfig, cancelContext: cc}
+			mc := &TypedModelContext[M]{Tools: commonOpts.Tools, ModelRetryConfig: retryConfig, ModelTimeoutConfig: timeoutConfig, cancelContext: cc}
 			wrappedModel, err := handler.WrapModel(ctx, &typedEndpointModel[M]{stream: innerEndpoint}, mc)
 			if err != nil {
 				return nil, err
 			}
 			return wrappedModel.Stream(ctx, input, opts...)
+		}
+	}
+
+	if isModelTimeoutConfigActive(timeoutConfig) {
+		innerEndpoint := endpoint
+		endpoint = func(ctx context.Context, input []M, opts ...model.Option) (*schema.StreamReader[M], error) {
+			timeoutWrapper := newTypedTimeoutModelWrapper[M](&typedEndpointModel[M]{stream: innerEndpoint}, timeoutConfig)
+			return timeoutWrapper.Stream(ctx, input, opts...)
 		}
 	}
 
@@ -1744,7 +1778,7 @@ func (w *typedStateModelWrapper[M]) wrapStreamEndpoint(endpoint typedStreamEndpo
 			if execCtx == nil || execCtx.generator == nil {
 				return innerEndpoint(ctx, input, opts...)
 			}
-			mc := &TypedModelContext[M]{ModelRetryConfig: retryConfig, ModelFailoverConfig: failoverConfig, cancelContext: cc}
+			mc := &TypedModelContext[M]{ModelRetryConfig: retryConfig, ModelFailoverConfig: failoverConfig, ModelTimeoutConfig: timeoutConfig, cancelContext: cc}
 			wrappedModel, err := eventSender.WrapModel(ctx, &typedEndpointModel[M]{stream: innerEndpoint}, mc)
 			if err != nil {
 				return nil, err
@@ -1820,7 +1854,7 @@ func (w *typedStateModelWrapper[M]) Generate(ctx context.Context, _ []M, opts ..
 
 	baseOpts := &model.Options{Tools: w.toolInfos}
 	commonOpts := model.GetCommonOptions(baseOpts, opts...)
-	mc := &TypedModelContext[M]{Tools: commonOpts.Tools, ModelRetryConfig: w.modelRetryConfig, cancelContext: w.cancelContext}
+	mc := &TypedModelContext[M]{Tools: commonOpts.Tools, ModelRetryConfig: w.modelRetryConfig, ModelTimeoutConfig: w.modelTimeoutConfig, cancelContext: w.cancelContext}
 	for _, handler := range w.handlers {
 		var err error
 		ctx, state, err = handler.BeforeModelRewriteState(ctx, state, mc)
@@ -1948,7 +1982,7 @@ func (w *typedStateModelWrapper[M]) Stream(ctx context.Context, _ []M, opts ...m
 
 	baseOpts := &model.Options{Tools: w.toolInfos}
 	commonOpts := model.GetCommonOptions(baseOpts, opts...)
-	mc := &TypedModelContext[M]{Tools: commonOpts.Tools, ModelRetryConfig: w.modelRetryConfig, cancelContext: w.cancelContext}
+	mc := &TypedModelContext[M]{Tools: commonOpts.Tools, ModelRetryConfig: w.modelRetryConfig, ModelTimeoutConfig: w.modelTimeoutConfig, cancelContext: w.cancelContext}
 	for _, handler := range w.handlers {
 		var err error
 		ctx, state, err = handler.BeforeModelRewriteState(ctx, state, mc)
