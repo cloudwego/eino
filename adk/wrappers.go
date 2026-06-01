@@ -304,7 +304,7 @@ func sendSessionTimelineEvent[M MessageType](ctx context.Context, se *SessionEve
 		return
 	}
 	if se.EventID == "" {
-		se.EventID = uuid.NewString()
+		se.EventID = genEventIDFromContext(ctx)
 	}
 	if se.Timestamp.IsZero() {
 		se.Timestamp = newEventTimestamp()
@@ -320,7 +320,7 @@ func newModelSpanStartEvent[M MessageType](ctx context.Context, spanID string, s
 	meta := modelSpanMetaFromContext[M](ctx, opts...)
 	meta.Model.Accepted = false
 	return &SessionEvent[M]{
-		EventID:   uuid.NewString(),
+		EventID:   genEventIDFromContext(ctx),
 		Timestamp: started,
 		Kind:      SessionEventSpanModelRequestStart,
 		Span: &SpanEvent{
@@ -356,7 +356,7 @@ func newModelSpanEndEvent[M MessageType](ctx context.Context, in modelSpanEndEve
 		}
 	}
 	return &SessionEvent[M]{
-		EventID:   uuid.NewString(),
+		EventID:   genEventIDFromContext(ctx),
 		Timestamp: in.ended,
 		Kind:      SessionEventSpanModelRequestEnd,
 		Span: &SpanEvent{
@@ -470,9 +470,9 @@ func clearToolSpanInFlight[M MessageType](ctx context.Context, callID string) {
 	})
 }
 
-func newToolSpanStartEvent[M MessageType](_ context.Context, inFlight *toolSpanInFlight, tCtx *ToolContext) *SessionEvent[M] {
+func newToolSpanStartEvent[M MessageType](ctx context.Context, inFlight *toolSpanInFlight, tCtx *ToolContext) *SessionEvent[M] {
 	return &SessionEvent[M]{
-		EventID:   uuid.NewString(),
+		EventID:   genEventIDFromContext(ctx),
 		Timestamp: inFlight.StartedAt,
 		Kind:      SessionEventSpanToolCallStart,
 		Span: &SpanEvent{
@@ -496,7 +496,7 @@ type toolSpanEndEventInput struct {
 	resultEventID string
 }
 
-func newToolSpanEndEvent[M MessageType](_ context.Context, inFlight *toolSpanInFlight, tCtx *ToolContext, in toolSpanEndEventInput) *SessionEvent[M] {
+func newToolSpanEndEvent[M MessageType](ctx context.Context, inFlight *toolSpanInFlight, tCtx *ToolContext, in toolSpanEndEventInput) *SessionEvent[M] {
 	status := "ok"
 	errStr := ""
 	if in.err != nil {
@@ -511,7 +511,7 @@ func newToolSpanEndEvent[M MessageType](_ context.Context, inFlight *toolSpanInF
 		ended = newEventTimestamp()
 	}
 	return &SessionEvent[M]{
-		EventID:   uuid.NewString(),
+		EventID:   genEventIDFromContext(ctx),
 		Timestamp: ended,
 		Kind:      SessionEventSpanToolCallEnd,
 		Span: &SpanEvent{
@@ -565,7 +565,7 @@ func (m *typedEventSenderModel[M]) Generate(ctx context.Context, input []M, opts
 		return zero, errors.New("generator is nil when sending event in Generate: ensure agent state is properly initialized")
 	}
 
-	assistantMsgEventID := uuid.NewString()
+	assistantMsgEventID := genEventIDFromContext(ctx)
 
 	// Persist the model span ID and assistant message event ID into typedState
 	// so the tool wrapper can snapshot them into per-call ToolSpansInFlight
@@ -621,7 +621,7 @@ func (m *typedEventSenderModel[M]) Stream(ctx context.Context, input []M, opts .
 			convertOpts...)
 	}
 
-	assistantMsgEventID := uuid.NewString()
+	assistantMsgEventID := genEventIDFromContext(ctx)
 
 	// Persist the model span ID and assistant message event ID into typedState
 	// so the tool wrapper can snapshot them into per-call ToolSpansInFlight
@@ -1241,7 +1241,7 @@ func (w *typedEventSenderToolWrapper[M]) WrapInvokableToolCall(_ context.Context
 
 		prePopAction := typedPopToolGenAction[M](ctx, toolName)
 		toolMsgID := uuid.NewString()
-		resultEventID := uuid.NewString()
+		resultEventID := genEventIDFromContext(ctx)
 		event := typedToolInvokeEvent[M](callID, toolName, result, toolMsgID)
 		event.EventID = resultEventID
 		event.Timestamp = timestamp
@@ -1302,7 +1302,7 @@ func (w *typedEventSenderToolWrapper[M]) WrapStreamableToolCall(_ context.Contex
 		streams := result.Copy(2)
 
 		toolMsgID := uuid.NewString()
-		resultEventID := uuid.NewString()
+		resultEventID := genEventIDFromContext(ctx)
 
 		// End-span emission for streamable tools attaches to the caller's
 		// stream copy via schema.WithOnEOF (success path) and
@@ -1410,7 +1410,7 @@ func (w *typedEventSenderToolWrapper[M]) WrapEnhancedInvokableToolCall(_ context
 
 		prePopAction := typedPopToolGenAction[M](ctx, toolName)
 		toolMsgID := uuid.NewString()
-		resultEventID := uuid.NewString()
+		resultEventID := genEventIDFromContext(ctx)
 		event, eventErr := typedToolEnhancedInvokeEvent[M](callID, toolName, toolMsgID, result)
 		if eventErr != nil {
 			sendSessionTimelineEvent(ctx, newToolSpanEndEvent[M](ctx, inFlight, tCtx, toolSpanEndEventInput{
@@ -1479,7 +1479,7 @@ func (w *typedEventSenderToolWrapper[M]) WrapEnhancedStreamableToolCall(_ contex
 		streams := result.Copy(2)
 
 		toolMsgID := uuid.NewString()
-		resultEventID := uuid.NewString()
+		resultEventID := genEventIDFromContext(ctx)
 
 		// End-span emission for streamable tools attaches to the caller's
 		// stream copy via schema.WithOnEOF (success path) and
