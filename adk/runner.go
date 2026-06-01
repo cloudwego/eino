@@ -668,7 +668,7 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 		}
 		annotateSessionEvent(se)
 		if se.EventID == "" {
-			se.EventID = sessionState.sessionConfig.EventIDGenerator()
+			se.EventID = sessionState.sessionConfig.EventIDGenerator(ctx)
 		}
 		if se.Timestamp.IsZero() {
 			se.Timestamp = newEventTimestamp()
@@ -711,7 +711,7 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 	// agent's output. Skipped on resume (sessionState.inputMessages is nil).
 	if persister != nil {
 		sendTimelineEvent(&SessionEvent[M]{
-			EventID:   sessionState.sessionConfig.EventIDGenerator(),
+			EventID:   sessionState.sessionConfig.EventIDGenerator(ctx),
 			Timestamp: newEventTimestamp(),
 			Kind:      SessionEventSessionStatusRunning,
 			Lifecycle: &LifecycleEvent{Scope: LifecycleScopeSession, State: SessionRunStateRunning},
@@ -719,7 +719,7 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 	}
 	if persister != nil && len(sessionState.inputMessages) > 0 {
 		for _, msg := range sessionState.inputMessages {
-			se := makeInputSessionEvent[M](msg, sessionState.sessionConfig.EventIDGenerator)
+			se := makeInputSessionEvent[M](ctx, msg, sessionState.sessionConfig.EventIDGenerator)
 			sendTimelineEvent(se)
 		}
 	}
@@ -732,7 +732,7 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 			event.Timestamp = newEventTimestamp()
 		}
 		if event.SessionEvent != nil {
-			if _, err := normalizeAgentSessionEventWithGenerator(event, sessionState.sessionConfig.EventIDGenerator); err != nil {
+			if _, err := normalizeAgentSessionEventWithGenerator(event, func() string { return sessionState.sessionConfig.EventIDGenerator(ctx) }); err != nil {
 				setPersistErr(err)
 				event.Err = err
 			}
@@ -812,7 +812,7 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 
 			if !fromOtherSession {
 				if event.EventID == "" {
-					event.EventID = sessionState.sessionConfig.EventIDGenerator()
+					event.EventID = sessionState.sessionConfig.EventIDGenerator(ctx)
 				}
 				if event.Output != nil && event.Output.MessageOutput != nil &&
 					event.Output.MessageOutput.IsStreaming && event.Output.MessageOutput.MessageStream != nil {
@@ -956,7 +956,7 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 				errMsg = terminalErr.Error()
 			}
 			sendTimelineEvent(&SessionEvent[M]{
-				EventID:   sessionState.sessionConfig.EventIDGenerator(),
+				EventID:   sessionState.sessionConfig.EventIDGenerator(ctx),
 				Timestamp: newEventTimestamp(),
 				Kind:      SessionEventSessionError,
 				Error:     &SessionErrorEvent{Type: SessionErrorTypeFatal, Message: errMsg},
@@ -964,7 +964,7 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 		}
 		if interrupted {
 			sendTimelineEvent(&SessionEvent[M]{
-				EventID:        sessionState.sessionConfig.EventIDGenerator(),
+				EventID:        sessionState.sessionConfig.EventIDGenerator(ctx),
 				Timestamp:      newEventTimestamp(),
 				Kind:           SessionEventAgentInterrupt,
 				AgentInterrupt: buildAgentInterruptEvent(interruptContexts),
@@ -972,14 +972,14 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 		}
 		if cancelled {
 			sendTimelineEvent(&SessionEvent[M]{
-				EventID:         sessionState.sessionConfig.EventIDGenerator(),
+				EventID:         sessionState.sessionConfig.EventIDGenerator(ctx),
 				Timestamp:       newEventTimestamp(),
 				Kind:            SessionEventUserInterrupt,
 				UserObservation: &UserObservationEvent{Interrupt: &UserInterruptEvent{Reason: "cancelled"}},
 			})
 		}
 		sendTimelineEvent(&SessionEvent[M]{
-			EventID:   sessionState.sessionConfig.EventIDGenerator(),
+			EventID:   sessionState.sessionConfig.EventIDGenerator(ctx),
 			Timestamp: newEventTimestamp(),
 			Kind:      SessionEventSessionStatusIdle,
 			Lifecycle: &LifecycleEvent{Scope: LifecycleScopeSession, State: SessionRunStateIdle, StopReason: &StopReason{Type: stopReason}},
