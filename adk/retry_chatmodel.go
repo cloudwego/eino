@@ -496,7 +496,7 @@ func generateWithShouldRetry[M MessageType](r *typedRetryModelWrapper[M], ctx co
 			}
 			if execCtx != nil && execCtx.generator != nil && out != nil {
 				event := typedModelOutputEvent(out, nil)
-				execCtx.send(event)
+				execCtx.send(ctx, event)
 			}
 			return out, nil
 		}
