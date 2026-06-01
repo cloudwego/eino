@@ -22,6 +22,7 @@ import (
 	"encoding/gob"
 	"errors"
 	"fmt"
+	"reflect"
 	"runtime/debug"
 	"sync"
 
@@ -202,6 +203,19 @@ func valueOrEmpty(v *string) string {
 	return *v
 }
 
+func isNilCheckPointStore(store CheckPointStore) bool {
+	if store == nil {
+		return true
+	}
+	v := reflect.ValueOf(store)
+	switch v.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Ptr, reflect.Slice:
+		return v.IsNil()
+	default:
+		return false
+	}
+}
+
 func prepareRunnerSessionRun[M MessageType]( //nolint:revive // argument-limit
 	ctx context.Context,
 	checkPointStore CheckPointStore,
@@ -211,6 +225,9 @@ func prepareRunnerSessionRun[M MessageType]( //nolint:revive // argument-limit
 	sessionConfig *SessionConfig,
 ) (*runnerSessionRunState[M], error) {
 	state := &runnerSessionRunState[M]{}
+	if isNilCheckPointStore(checkPointStore) {
+		checkPointStore = nil
+	}
 	if sessionID == "" || sessionService == nil {
 		return state, nil
 	}
@@ -234,7 +251,7 @@ func prepareRunnerSessionRun[M MessageType]( //nolint:revive // argument-limit
 		state.latestState = reconstructResult.state
 	}
 
-	if checkPointStore == nil {
+	if isNilCheckPointStore(checkPointStore) {
 		return state, nil
 	}
 	checkPointID := sessionRunnerCheckpointID(sessionID)
@@ -266,6 +283,9 @@ func prepareRunnerSessionResume[M MessageType](
 	checkPointID string,
 ) (*runnerSessionRunState[M], string, error) {
 	state := &runnerSessionRunState[M]{}
+	if isNilCheckPointStore(checkPointStore) {
+		checkPointStore = nil
+	}
 	// Non-session-mode resume: explicit checkpoint ID, no session boot needed.
 	if checkPointID != "" && (sessionID == "" || sessionService == nil) {
 		return state, checkPointID, nil
@@ -368,6 +388,9 @@ func runnerLoadCheckPointBytes(ctx context.Context, data []byte) (
 }
 
 func deleteCheckPointIfSupported(ctx context.Context, store CheckPointStore, checkPointID string) error {
+	if isNilCheckPointStore(store) {
+		return nil
+	}
 	if deleter, ok := store.(CheckPointDeleter); ok {
 		return deleter.Delete(ctx, checkPointID)
 	}
@@ -386,7 +409,7 @@ func saveRunnerCheckpoint[M MessageType]( //nolint:revive // argument-limit
 	if sessionState == nil || !sessionState.enabled {
 		return runnerSaveCheckPointImpl(enableStreaming, store, ctx, checkPointID, info, is)
 	}
-	if store == nil {
+	if isNilCheckPointStore(store) {
 		return nil
 	}
 	payload, err := encodeRunnerCheckPointImpl(enableStreaming, ctx, info, is)
@@ -434,6 +457,10 @@ func typedRunnerRunImpl[M MessageType](a TypedAgent[M], enableStreaming bool, st
 	input := &TypedAgentInput[M]{
 		Messages:        messages,
 		EnableStreaming: enableStreaming,
+	}
+
+	if sessionState.enabled {
+		ctx = contextWithEventIDGenerator(ctx, sessionState.sessionConfig.EventIDGenerator)
 	}
 
 	var zero M
@@ -495,7 +522,7 @@ func typedRunnerRunImpl[M MessageType](a TypedAgent[M], enableStreaming bool, st
 
 func typedRunnerResumeInternalImpl[M MessageType](a TypedAgent[M], store CheckPointStore, sessionID string, sessionService SessionService[M], sessionConfig *SessionConfig, ctx context.Context, checkPointID string, resumeData map[string]any, //nolint:revive // argument-limit
 	opts ...AgentRunOption) (*AsyncIterator[*TypedAgentEvent[M]], error) {
-	if store == nil {
+	if isNilCheckPointStore(store) {
 		return nil, fmt.Errorf("failed to resume: store is nil")
 	}
 
@@ -539,6 +566,10 @@ func typedRunnerResumeInternalImpl[M MessageType](a TypedAgent[M], store CheckPo
 	ctx = setRunCtx(ctx, runCtx)
 	ctx = contextWithToolPermissionDecisionStore(ctx)
 	AddSessionValues(ctx, o.sessionValues)
+
+	if sessionState.enabled {
+		ctx = contextWithEventIDGenerator(ctx, sessionState.sessionConfig.EventIDGenerator)
+	}
 
 	if len(resumeData) > 0 {
 		ctx = core.BatchResumeWithData(ctx, resumeData)
@@ -637,7 +668,7 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 		}
 		annotateSessionEvent(se)
 		if se.EventID == "" {
-			se.EventID = uuid.NewString()
+			se.EventID = sessionState.sessionConfig.EventIDGenerator()
 		}
 		if se.Timestamp.IsZero() {
 			se.Timestamp = newEventTimestamp()
@@ -680,7 +711,7 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 	// agent's output. Skipped on resume (sessionState.inputMessages is nil).
 	if persister != nil {
 		sendTimelineEvent(&SessionEvent[M]{
-			EventID:   uuid.NewString(),
+			EventID:   sessionState.sessionConfig.EventIDGenerator(),
 			Timestamp: newEventTimestamp(),
 			Kind:      SessionEventSessionStatusRunning,
 			Lifecycle: &LifecycleEvent{Scope: LifecycleScopeSession, State: SessionRunStateRunning},
@@ -688,7 +719,7 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 	}
 	if persister != nil && len(sessionState.inputMessages) > 0 {
 		for _, msg := range sessionState.inputMessages {
-			se := makeInputSessionEvent[M](msg)
+			se := makeInputSessionEvent[M](msg, sessionState.sessionConfig.EventIDGenerator)
 			sendTimelineEvent(se)
 		}
 	}
@@ -701,7 +732,7 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 			event.Timestamp = newEventTimestamp()
 		}
 		if event.SessionEvent != nil {
-			if _, err := normalizeAgentSessionEvent(event); err != nil {
+			if _, err := normalizeAgentSessionEventWithGenerator(event, sessionState.sessionConfig.EventIDGenerator); err != nil {
 				setPersistErr(err)
 				event.Err = err
 			}
@@ -781,7 +812,7 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 
 			if !fromOtherSession {
 				if event.EventID == "" {
-					event.EventID = uuid.NewString()
+					event.EventID = sessionState.sessionConfig.EventIDGenerator()
 				}
 				if event.Output != nil && event.Output.MessageOutput != nil &&
 					event.Output.MessageOutput.IsStreaming && event.Output.MessageOutput.MessageStream != nil {
@@ -925,7 +956,7 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 				errMsg = terminalErr.Error()
 			}
 			sendTimelineEvent(&SessionEvent[M]{
-				EventID:   uuid.NewString(),
+				EventID:   sessionState.sessionConfig.EventIDGenerator(),
 				Timestamp: newEventTimestamp(),
 				Kind:      SessionEventSessionError,
 				Error:     &SessionErrorEvent{Type: SessionErrorTypeFatal, Message: errMsg},
@@ -933,7 +964,7 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 		}
 		if interrupted {
 			sendTimelineEvent(&SessionEvent[M]{
-				EventID:        uuid.NewString(),
+				EventID:        sessionState.sessionConfig.EventIDGenerator(),
 				Timestamp:      newEventTimestamp(),
 				Kind:           SessionEventAgentInterrupt,
 				AgentInterrupt: buildAgentInterruptEvent(interruptContexts),
@@ -941,14 +972,14 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 		}
 		if cancelled {
 			sendTimelineEvent(&SessionEvent[M]{
-				EventID:         uuid.NewString(),
+				EventID:         sessionState.sessionConfig.EventIDGenerator(),
 				Timestamp:       newEventTimestamp(),
 				Kind:            SessionEventUserInterrupt,
 				UserObservation: &UserObservationEvent{Interrupt: &UserInterruptEvent{Reason: "cancelled"}},
 			})
 		}
 		sendTimelineEvent(&SessionEvent[M]{
-			EventID:   uuid.NewString(),
+			EventID:   sessionState.sessionConfig.EventIDGenerator(),
 			Timestamp: newEventTimestamp(),
 			Kind:      SessionEventSessionStatusIdle,
 			Lifecycle: &LifecycleEvent{Scope: LifecycleScopeSession, State: SessionRunStateIdle, StopReason: &StopReason{Type: stopReason}},
@@ -1060,7 +1091,7 @@ func (r *sessionTurnResult[M]) finalize(ctx context.Context) error {
 	if r.terminalErr != nil {
 		return nil
 	}
-	if r.checkPointID != nil && r.store != nil {
+	if r.checkPointID != nil && !isNilCheckPointStore(r.store) {
 		if !r.sawTurnEnd {
 			return fmt.Errorf("failed to commit session[%s]: missing SessionEventTurnEnd", r.sessionState.sessionID)
 		}

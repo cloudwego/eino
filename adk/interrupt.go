@@ -300,7 +300,7 @@ func runnerSaveCheckPointImpl(
 	info *InterruptInfo,
 	is *core.InterruptSignal,
 ) error {
-	if store == nil {
+	if isNilCheckPointStore(store) {
 		return nil
 	}
 
