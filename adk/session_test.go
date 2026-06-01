@@ -20,6 +20,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -88,6 +90,13 @@ func withTestEventID[M MessageType](se *SessionEvent[M]) *SessionEvent[M] {
 		se.EventID = uuid.NewString()
 	}
 	return se
+}
+
+func testSequentialEventIDGenerator(prefix string) func() string {
+	var n int64
+	return func() string {
+		return fmt.Sprintf("%s%d", prefix, atomic.AddInt64(&n, 1))
+	}
 }
 
 // validTestPayload returns a storedSessionEvent that satisfies the AppendEvents
@@ -432,6 +441,31 @@ func TestRunnerSessionModePrependsCommittedMessagesOnce(t *testing.T) {
 	require.Len(t, secondAgent.values, 1)
 	assert.Equal(t, "restored", secondAgent.values[0]["k"])
 	assert.Equal(t, "value", secondAgent.values[0]["override"])
+}
+
+func TestAttack_SessionEventIDGeneratorCoversRunnerEvents(t *testing.T) {
+	ctx := context.Background()
+	store := newSessionHelperStore()
+	prefix := "attack-runner-"
+	agent := &runnerSessionAgent{name: "runner-event-id-agent"}
+	runner := NewRunner(ctx, RunnerConfig{
+		Agent:          agent,
+		SessionID:      "runner-event-id-session",
+		SessionService: store,
+		SessionConfig: &SessionConfig{
+			EventFlushBatchSize: 1,
+			EventIDGenerator:    testSequentialEventIDGenerator(prefix),
+		},
+	})
+
+	drainSessionEvents(t, runner.Query(ctx, "use configured ids"))
+
+	events := decodeStoredSessionEvents(t, store.events)
+	require.NotEmpty(t, events)
+	for _, event := range events {
+		require.NotEmpty(t, event.EventID)
+		assert.Truef(t, strings.HasPrefix(event.EventID, prefix), "event %s used unexpected ID %q", event.Kind, event.EventID)
+	}
 }
 
 func TestRunnerSessionModeRejectsPendingCheckpoint(t *testing.T) {
@@ -859,7 +893,7 @@ func TestSessionPersister_EmptyPayloadSkipped(t *testing.T) {
 	assert.NoError(t, persister.enqueue(nil))
 	assert.NoError(t, persister.enqueue(&SessionEvent[*schema.Message]{}))
 
-	se := makeInputSessionEvent(schema.UserMessage("real"))
+	se := makeInputSessionEvent(schema.UserMessage("real"), uuid.NewString)
 	require.NoError(t, persister.enqueue(se))
 
 	require.NoError(t, persister.closeAndWait())
@@ -1493,6 +1527,28 @@ func TestSessionRollbackEventRoundTrip(t *testing.T) {
 	assert.Equal(t, "turn-1", decoded.Rollback.ToTurnID)
 	assert.Equal(t, "turn-end-2", decoded.Rollback.PreviousHeadTurnEndID)
 	assert.Equal(t, "turn-2", decoded.Rollback.PreviousHeadTurnID)
+}
+
+func TestAttack_RollbackSessionUsesConfiguredEventIDGenerator(t *testing.T) {
+	ctx := context.Background()
+	store := newSessionHelperStore()
+	sid := "rollback-event-id-generator"
+	appendCommittedTestTurn(t, ctx, store, sid, "turn-1", "Q1", "A1")
+	appendCommittedTestTurn(t, ctx, store, sid, "turn-2", "Q2", "A2")
+
+	require.NoError(t, RollbackSession[*schema.Message](
+		ctx,
+		store,
+		sid,
+		"turn-1",
+		WithRollbackEventIDGenerator(testSequentialEventIDGenerator("attack-rollback-")),
+	))
+
+	rollbackEvents := filterStoredSessionEvents(t, store.events, func(se *SessionEvent[*schema.Message]) bool {
+		return se.Kind == SessionEventRollback
+	})
+	require.Len(t, rollbackEvents, 1)
+	assert.Equal(t, "attack-rollback-1", rollbackEvents[0].EventID)
 }
 
 func TestRollbackSessionReconstructionHidesDeadBranchAndKeepsNewSuffix(t *testing.T) {
