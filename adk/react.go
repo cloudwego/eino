@@ -471,7 +471,7 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 	}
 	toolPostHandle := func(ctx context.Context, out *schema.StreamReader[[]*schema.Message], st *State) (*schema.StreamReader[[]*schema.Message], error) {
 		if event := st.getReturnDirectlyEvent(); event != nil {
-			getTypedChatModelAgentExecCtx[*schema.Message](ctx).send(event)
+			getTypedChatModelAgentExecCtx[*schema.Message](ctx).send(ctx, event)
 			st.setReturnDirectlyEvent(nil)
 		}
 		return out, nil
@@ -719,7 +719,7 @@ func newAgenticReact(ctx context.Context, config *agenticReactConfig) (agenticRe
 	}
 	toolPostHandle := func(ctx context.Context, out *schema.StreamReader[[]*schema.AgenticMessage], st *agenticState) (*schema.StreamReader[[]*schema.AgenticMessage], error) {
 		if event := st.getReturnDirectlyEvent(); event != nil {
-			getTypedChatModelAgentExecCtx[*schema.AgenticMessage](ctx).send(event)
+			getTypedChatModelAgentExecCtx[*schema.AgenticMessage](ctx).send(ctx, event)
 			st.setReturnDirectlyEvent(nil)
 		}
 		return out, nil
