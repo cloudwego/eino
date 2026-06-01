@@ -92,9 +92,9 @@ func withTestEventID[M MessageType](se *SessionEvent[M]) *SessionEvent[M] {
 	return se
 }
 
-func testSequentialEventIDGenerator(prefix string) func() string {
+func testSequentialEventIDGenerator(prefix string) func(context.Context) string {
 	var n int64
-	return func() string {
+	return func(_ context.Context) string {
 		return fmt.Sprintf("%s%d", prefix, atomic.AddInt64(&n, 1))
 	}
 }
@@ -893,7 +893,7 @@ func TestSessionPersister_EmptyPayloadSkipped(t *testing.T) {
 	assert.NoError(t, persister.enqueue(nil))
 	assert.NoError(t, persister.enqueue(&SessionEvent[*schema.Message]{}))
 
-	se := makeInputSessionEvent(schema.UserMessage("real"), uuid.NewString)
+	se := makeInputSessionEvent(ctx, schema.UserMessage("real"), func(_ context.Context) string { return uuid.NewString() })
 	require.NoError(t, persister.enqueue(se))
 
 	require.NoError(t, persister.closeAndWait())

@@ -474,8 +474,9 @@ type SessionConfig struct {
 	LoadPageSize int
 	// EventIDGenerator produces unique IDs for session events. Each invocation
 	// must return a non-empty string that is unique within the session. If nil,
-	// uuid.NewString() (UUID v4) is used.
-	EventIDGenerator func() string
+	// uuid.NewString() (UUID v4) is used. The context carries request-scoped
+	// values (e.g. trace ID, tenant info) that may inform ID generation.
+	EventIDGenerator func(ctx context.Context) string
 }
 
 // TurnEndState is the agent-visible state materialized at a successful turn boundary.
@@ -585,8 +586,8 @@ func normalizeSerializer(serializer schema.Serializer) schema.Serializer {
 }
 
 // makeInputSessionEvent wraps an input message as a SessionEvent.
-func makeInputSessionEvent[M MessageType](msg M, genID func() string) *SessionEvent[M] {
-	return &SessionEvent[M]{EventID: genID(), Timestamp: newEventTimestamp(), Kind: SessionEventMessage, Message: msg}
+func makeInputSessionEvent[M MessageType](ctx context.Context, msg M, genID func(context.Context) string) *SessionEvent[M] {
+	return &SessionEvent[M]{EventID: genID(ctx), Timestamp: newEventTimestamp(), Kind: SessionEventMessage, Message: msg}
 }
 
 // toSessionEvent converts an internal TypedAgentEvent into the persistence format.
@@ -856,7 +857,7 @@ func normalizeSessionConfig(cfg *SessionConfig) SessionConfig {
 		MaxFlushRetries:          defaultMaxFlushRetries,
 		FlushRetryInitialBackoff: defaultFlushRetryInitialBackoff,
 		LoadPageSize:             defaultLoadPageSize,
-		EventIDGenerator:         uuid.NewString,
+		EventIDGenerator:         func(_ context.Context) string { return uuid.NewString() },
 	}
 	if cfg == nil {
 		return normalized
@@ -896,23 +897,23 @@ type eventIDGeneratorKey struct{}
 // contextWithEventIDGenerator stores the session EventID generator in ctx so
 // that deeply-nested wrappers can allocate session-event IDs without explicit
 // parameter threading.
-func contextWithEventIDGenerator(ctx context.Context, gen func() string) context.Context {
+func contextWithEventIDGenerator(ctx context.Context, gen func(context.Context) string) context.Context {
 	return context.WithValue(ctx, eventIDGeneratorKey{}, gen)
 }
 
 // genEventIDFromContext returns a new event ID using the generator stored in
 // ctx, falling back to uuid.NewString if none is present.
 func genEventIDFromContext(ctx context.Context) string {
-	if gen, ok := ctx.Value(eventIDGeneratorKey{}).(func() string); ok && gen != nil {
-		return gen()
+	if gen, ok := ctx.Value(eventIDGeneratorKey{}).(func(context.Context) string); ok && gen != nil {
+		return gen(ctx)
 	}
 	return uuid.NewString()
 }
 
 // eventIDGeneratorFromContext extracts the EventID generator function from ctx.
 // Returns nil if none is set (callers should fall back to uuid.NewString).
-func eventIDGeneratorFromContext(ctx context.Context) func() string {
-	if gen, ok := ctx.Value(eventIDGeneratorKey{}).(func() string); ok {
+func eventIDGeneratorFromContext(ctx context.Context) func(context.Context) string {
+	if gen, ok := ctx.Value(eventIDGeneratorKey{}).(func(context.Context) string); ok {
 		return gen
 	}
 	return nil
@@ -1277,7 +1278,7 @@ var modelContextSessionEventKinds = []SessionEventKind{
 type RollbackSessionOptions struct {
 	CheckPointStore    CheckPointStore
 	ExpectedHeadTurnID string
-	EventIDGenerator   func() string
+	EventIDGenerator   func(ctx context.Context) string
 }
 
 type RollbackSessionOption func(*RollbackSessionOptions)
@@ -1298,7 +1299,7 @@ func WithRollbackSessionExpectedHeadTurnID(turnID string) RollbackSessionOption 
 
 // WithRollbackEventIDGenerator overrides the EventID generator for the rollback
 // event. If nil or not set, uuid.NewString() is used.
-func WithRollbackEventIDGenerator(gen func() string) RollbackSessionOption {
+func WithRollbackEventIDGenerator(gen func(ctx context.Context) string) RollbackSessionOption {
 	return func(opts *RollbackSessionOptions) {
 		opts.EventIDGenerator = gen
 	}
@@ -1352,13 +1353,13 @@ func RollbackSession[M MessageType](
 		return ErrSessionHeadChanged
 	}
 
-	genID := uuid.NewString
+	genID := func(_ context.Context) string { return uuid.NewString() }
 	if cfg.EventIDGenerator != nil {
 		genID = cfg.EventIDGenerator
 	}
 
 	rb := &SessionEvent[M]{
-		EventID:   genID(),
+		EventID:   genID(ctx),
 		Timestamp: newEventTimestamp(),
 		Kind:      SessionEventRollback,
 		Rollback: &SessionRollbackEvent{
