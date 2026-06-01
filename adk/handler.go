@@ -422,7 +422,7 @@ func TypedSendEvent[M MessageType](ctx context.Context, event *TypedAgentEvent[M
 		return fmt.Errorf("TypedSendEvent failed: must be called within a ChatModelAgent Run() or Resume() execution context")
 	}
 
-	execCtx.send(event)
+	execCtx.send(ctx, event)
 	return nil
 }
 
