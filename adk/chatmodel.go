@@ -59,6 +59,7 @@ type typedChatModelAgentExecCtx[M MessageType] struct {
 	sessionEvents          bool
 	timelineEvents         bool
 	internalTimelineEvents bool
+	eventIDGenerator       func() string
 }
 
 func (e *typedChatModelAgentExecCtx[M]) send(event *TypedAgentEvent[M]) {
@@ -72,14 +73,21 @@ func (e *typedChatModelAgentExecCtx[M]) send(event *TypedAgentEvent[M]) {
 	// persisted (SessionService) copies of the same logical event share identity.
 	// User-supplied non-empty IDs (e.g. replay scenarios) are preserved.
 	if event != nil && event.EventID == "" {
-		event.EventID = uuid.NewString()
+		event.EventID = e.genEventID()
 	}
 	if event != nil && event.SessionEvent != nil {
-		if _, err := normalizeAgentSessionEvent(event); err != nil {
+		if _, err := normalizeAgentSessionEventWithGenerator(event, e.genEventID); err != nil {
 			event.Err = err
 		}
 	}
 	e.generator.trySend(event)
+}
+
+func (e *typedChatModelAgentExecCtx[M]) genEventID() string {
+	if e != nil && e.eventIDGenerator != nil {
+		return e.eventIDGenerator()
+	}
+	return uuid.NewString()
 }
 
 type chatModelAgentExecCtx = typedChatModelAgentExecCtx[*schema.Message]
@@ -1160,6 +1168,7 @@ func (a *TypedChatModelAgent[M]) buildNoToolsRunFunc(_ context.Context) (typedRu
 			sessionEvents:            p.sessionEvents,
 			timelineEvents:           p.timelineEvents,
 			internalTimelineEvents:   p.internalTimelineEvents,
+			eventIDGenerator:         eventIDGeneratorFromContext(ctx),
 		})
 
 		if checkPreExecCancel(cancelCtx, p.generator) {
@@ -1307,6 +1316,7 @@ func (a *TypedChatModelAgent[M]) buildMessageReActRunFunc(_ context.Context, bc 
 			sessionEvents:            mp.sessionEvents,
 			timelineEvents:           mp.timelineEvents,
 			internalTimelineEvents:   mp.internalTimelineEvents,
+			eventIDGenerator:         eventIDGeneratorFromContext(ctx),
 		})
 
 		if checkPreExecCancel(cancelCtx, mp.generator) {
@@ -1453,6 +1463,7 @@ func (a *TypedChatModelAgent[M]) buildAgenticReActRunFunc(_ context.Context, bc 
 			sessionEvents:            ap.sessionEvents,
 			timelineEvents:           ap.timelineEvents,
 			internalTimelineEvents:   ap.internalTimelineEvents,
+			eventIDGenerator:         eventIDGeneratorFromContext(ctx),
 		})
 
 		if checkPreExecCancel(cancelCtx, ap.generator) {

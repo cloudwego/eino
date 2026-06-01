@@ -4109,6 +4109,51 @@ func TestTurnLoop_SessionServiceWithCheckpointIDWithoutStore(t *testing.T) {
 	assert.NotEmpty(t, sessionStore.events[sessionID])
 }
 
+func TestTurnLoop_SessionServiceWithoutCheckpointStoreSkipsRunnerCheckpoint(t *testing.T) {
+	ctx := context.Background()
+	sessionID := "test-session-without-checkpoint-store"
+	sessionStore := &mockSessionService{}
+	var processed bool
+
+	loop := NewTurnLoop(TurnLoopConfig[string, *schema.Message]{
+		GenInput: genInputConsumeFirst,
+		PrepareAgent: func(context.Context, *TurnLoop[string, *schema.Message], []string) (Agent, error) {
+			return &turnLoopMockAgent{
+				name: "test",
+				runFunc: func(context.Context, *AgentInput) (*AgentOutput, error) {
+					processed = true
+					return &AgentOutput{
+						MessageOutput: &MessageVariant{
+							Message: schema.AssistantMessage("response", nil),
+							Role:    schema.Assistant,
+						},
+					}, nil
+				},
+			}, nil
+		},
+		OnAgentEvents: func(_ context.Context, tc *TurnContext[string, *schema.Message], events *AsyncIterator[*AgentEvent]) error {
+			for {
+				_, ok := events.Next()
+				if !ok {
+					break
+				}
+			}
+			tc.Loop.Stop()
+			return nil
+		},
+		SessionID:      sessionID,
+		SessionService: sessionStore,
+	})
+
+	loop.Push("test-message")
+	loop.Run(ctx)
+	exit := loop.Wait()
+
+	assert.NoError(t, exit.ExitReason)
+	assert.True(t, processed)
+	assert.NotEmpty(t, sessionStore.events[sessionID])
+}
+
 func TestNewTurnLoop_RunIsIdempotent(t *testing.T) {
 	var genInputCalls int32
 
