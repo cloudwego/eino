@@ -2472,7 +2472,7 @@ func TestCancelImmediate_OrphanedToolGoroutine_NoPanic(t *testing.T) {
 		}
 
 		assert.NotPanics(t, func() {
-			execCtx.send(&AgentEvent{AgentName: "test"})
+			execCtx.send(context.Background(), &AgentEvent{AgentName: "test"})
 		}, "send after generator.Close must not panic")
 	})
 
@@ -2485,21 +2485,21 @@ func TestCancelImmediate_OrphanedToolGoroutine_NoPanic(t *testing.T) {
 		}
 
 		assert.NotPanics(t, func() {
-			execCtx.send(&AgentEvent{AgentName: "test"})
+			execCtx.send(context.Background(), &AgentEvent{AgentName: "test"})
 		}, "send after generator.Close must not panic even without cancelCtx (trySend safety net)")
 	})
 
 	t.Run("unit_send_nil_execCtx", func(t *testing.T) {
 		var execCtx *chatModelAgentExecCtx
 		assert.NotPanics(t, func() {
-			execCtx.send(&AgentEvent{AgentName: "test"})
+			execCtx.send(context.Background(), &AgentEvent{AgentName: "test"})
 		}, "send on nil execCtx must not panic")
 	})
 
 	t.Run("unit_send_nil_generator", func(t *testing.T) {
 		execCtx := &chatModelAgentExecCtx{}
 		assert.NotPanics(t, func() {
-			execCtx.send(&AgentEvent{AgentName: "test"})
+			execCtx.send(context.Background(), &AgentEvent{AgentName: "test"})
 		}, "send with nil generator must not panic")
 	})
 
@@ -2520,7 +2520,7 @@ func TestCancelImmediate_OrphanedToolGoroutine_NoPanic(t *testing.T) {
 		}
 
 		assert.NotPanics(t, func() {
-			execCtx.send(&AgentEvent{AgentName: "test"})
+			execCtx.send(context.Background(), &AgentEvent{AgentName: "test"})
 		}, "trySend must handle the case where isImmediateCancelled is false but generator is closed")
 	})
 
