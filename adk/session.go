@@ -292,12 +292,25 @@ type ModelSpanMeta struct {
 	// Model is the model name from options (model.WithModel). Best-effort: empty
 	// if the user configures model name directly on the ChatModel implementation
 	// without passing model.WithModel in call-site options.
-	Model                    string      `json:"model,omitempty"`
-	Attempt                  int         `json:"attempt,omitempty"`
-	ModelRequestStartEventID string      `json:"model_request_start_event_id,omitempty"`
-	Usage                    *ModelUsage `json:"usage,omitempty"`
-	FinishReason             string      `json:"finish_reason,omitempty"`
-	Accepted                 bool        `json:"accepted"`
+	Model                    string            `json:"model,omitempty"`
+	Attempt                  int               `json:"attempt,omitempty"`
+	ModelRequestStartEventID string            `json:"model_request_start_event_id,omitempty"`
+	Usage                    *ModelUsage       `json:"usage,omitempty"`
+	FinishReason             string            `json:"finish_reason,omitempty"`
+	Timeout                  *ModelTimeoutMeta `json:"timeout,omitempty"`
+	Accepted                 bool              `json:"accepted"`
+}
+
+// ModelTimeoutMeta records timeout details for a model span that ended with a ModelTimeoutError.
+type ModelTimeoutMeta struct {
+	// Phase identifies which part of the model call exceeded its timeout budget.
+	Phase string `json:"phase,omitempty"`
+	// TimeoutMS is the configured timeout budget in milliseconds.
+	TimeoutMS int64 `json:"timeout_ms,omitempty"`
+	// ElapsedMS is the observed elapsed duration in milliseconds.
+	ElapsedMS int64 `json:"elapsed_ms,omitempty"`
+	// ChunksReceived is the number of stream chunks delivered before the timeout.
+	ChunksReceived int `json:"chunks_received,omitempty"`
 }
 
 type ModelUsage struct {
@@ -508,6 +521,7 @@ func init() {
 	schema.RegisterName[*RetryStatus]("_eino_adk_retry_status")
 	schema.RegisterName[*SpanEvent]("_eino_adk_span_event")
 	schema.RegisterName[*ModelSpanMeta]("_eino_adk_model_span_meta")
+	schema.RegisterName[*ModelTimeoutMeta]("_eino_adk_model_timeout_meta")
 	schema.RegisterName[*ModelUsage]("_eino_adk_model_usage")
 	schema.RegisterName[*ToolSpanMeta]("_eino_adk_tool_span_meta")
 	schema.RegisterName[*UserObservationEvent]("_eino_adk_user_observation_event")
