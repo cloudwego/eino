@@ -59,10 +59,10 @@ type typedChatModelAgentExecCtx[M MessageType] struct {
 	sessionEvents          bool
 	timelineEvents         bool
 	internalTimelineEvents bool
-	eventIDGenerator       func() string
+	eventIDGenerator       func(context.Context) string
 }
 
-func (e *typedChatModelAgentExecCtx[M]) send(event *TypedAgentEvent[M]) {
+func (e *typedChatModelAgentExecCtx[M]) send(ctx context.Context, event *TypedAgentEvent[M]) {
 	if e == nil || e.generator == nil {
 		return
 	}
@@ -73,19 +73,19 @@ func (e *typedChatModelAgentExecCtx[M]) send(event *TypedAgentEvent[M]) {
 	// persisted (SessionService) copies of the same logical event share identity.
 	// User-supplied non-empty IDs (e.g. replay scenarios) are preserved.
 	if event != nil && event.EventID == "" {
-		event.EventID = e.genEventID()
+		event.EventID = e.genEventID(ctx)
 	}
 	if event != nil && event.SessionEvent != nil {
-		if _, err := normalizeAgentSessionEventWithGenerator(event, e.genEventID); err != nil {
+		if _, err := normalizeAgentSessionEventWithGenerator(event, func() string { return e.genEventID(ctx) }); err != nil {
 			event.Err = err
 		}
 	}
 	e.generator.trySend(event)
 }
 
-func (e *typedChatModelAgentExecCtx[M]) genEventID() string {
+func (e *typedChatModelAgentExecCtx[M]) genEventID(ctx context.Context) string {
 	if e != nil && e.eventIDGenerator != nil {
-		return e.eventIDGenerator()
+		return e.eventIDGenerator(ctx)
 	}
 	return uuid.NewString()
 }
@@ -938,7 +938,7 @@ func (a *TypedChatModelAgent[M]) emitTurnEndState(ctx context.Context, state *Tu
 	} else {
 		state.SessionValues = GetSessionValues(ctx)
 	}
-	execCtx.send(&TypedAgentEvent[M]{
+	execCtx.send(ctx, &TypedAgentEvent[M]{
 		AgentName: a.name,
 		SessionEvent: &SessionEvent[M]{
 			Kind: SessionEventTurnEnd,
