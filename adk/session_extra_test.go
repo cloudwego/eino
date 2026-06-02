@@ -1434,15 +1434,16 @@ func TestReconstructSessionState_MessagesDeletedMissingTargetFails(t *testing.T)
 
 // TestAgentTool_ChildSessionID_FiltersFromParentLog verifies that events
 // forwarded from an inner agent (via AgentTool) are tagged with the child
-// SessionID and are NOT persisted into the parent's session event log. The
-// parent's log only contains events that belong to its own session.
+// SessionEvent.SessionID and are NOT persisted into the parent's session event
+// log. The parent's log only contains events that belong to its own session.
 func TestAgentTool_ChildSessionID_FiltersFromParentLog(t *testing.T) {
 	ctx := context.Background()
 	parentStore := NewInMemoryStoreLocal(t)
 	sid := "parent-session"
 
-	// Inner-agent forwarded event from AgentTool path. Tagging with a SessionID
-	// that does not match the parent session must be filtered out of persistence.
+	// Inner-agent forwarded event from AgentTool path. Tagging with a
+	// SessionEvent.SessionID that does not match the parent session must be
+	// filtered out of persistence.
 	childMsg := schema.AssistantMessage("inner-agent-output", nil)
 	EnsureMessageID(childMsg)
 	parentMsg := schema.AssistantMessage("parent-output", nil)
@@ -1453,7 +1454,9 @@ func TestAgentTool_ChildSessionID_FiltersFromParentLog(t *testing.T) {
 			// An event tagged as belonging to a different session — should not be persisted.
 			{
 				AgentName: "child",
-				SessionID: "agent_tool:abc-123",
+				SessionEvent: &SessionEvent[*schema.Message]{
+					SessionID: "agent_tool:abc-123",
+				},
 				Output: &AgentOutput{
 					MessageOutput: &MessageVariant{Message: childMsg, Role: schema.Assistant},
 				},
@@ -1493,7 +1496,7 @@ func TestAgentTool_ChildSessionID_FiltersFromParentLog(t *testing.T) {
 			}
 		}
 	}
-	assert.False(t, sawChild, "events tagged with a different SessionID must NOT enter the parent session log")
+	assert.False(t, sawChild, "events tagged with a different SessionEvent.SessionID must NOT enter the parent session log")
 	assert.True(t, sawParent, "parent's own events must be persisted")
 }
 

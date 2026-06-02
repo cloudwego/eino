@@ -937,6 +937,23 @@ func TestAgentTool_InvokableRun_StreamingVariant(t *testing.T) {
 	}
 }
 
+func TestStampAgentToolSessionEvent(t *testing.T) {
+	msg := schema.AssistantMessage("child", nil)
+	event := &AgentEvent{
+		Output: &AgentOutput{
+			MessageOutput: &MessageVariant{Message: msg, Role: schema.Assistant},
+		},
+	}
+
+	stampAgentToolSessionEvent(event, "agent_tool:child")
+
+	require.NotNil(t, event.SessionEvent)
+	assert.Equal(t, "agent_tool:child", event.SessionEvent.SessionID)
+	assert.Equal(t, event.EventID, event.SessionEvent.EventID)
+	assert.Equal(t, event.Timestamp, event.SessionEvent.Timestamp)
+	assert.Equal(t, SessionEventMessage, event.SessionEvent.Kind)
+}
+
 func TestSequentialWorkflow_WithChatModelAgentTool_NestedRunPathAndSessions(t *testing.T) {
 	ctx := context.Background()
 
