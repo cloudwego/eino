@@ -644,6 +644,9 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 		if se == nil || sessionState == nil || !sessionState.enabled {
 			return se
 		}
+		if se.SessionID == "" {
+			se.SessionID = sessionState.sessionID
+		}
 		se.TurnID = sessionState.turnID
 		return se
 	}
@@ -806,9 +809,11 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 				sawTurnEnd = true
 			}
 
-			// Skip persistence (but not live delivery) for events tagged with a
-			// different SessionID (inner agent events forwarded via AgentTool).
-			fromOtherSession := event.SessionID != "" && event.SessionID != sessionState.sessionID
+			// Skip persistence (but not live delivery) for events owned by a
+			// different session (inner agent events forwarded via AgentTool).
+			fromOtherSession := event.SessionEvent != nil &&
+				event.SessionEvent.SessionID != "" &&
+				event.SessionEvent.SessionID != sessionState.sessionID
 
 			if !fromOtherSession {
 				if event.EventID == "" {
@@ -860,6 +865,7 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 						// before the message is fully materialized. The Message field
 						// is nil; consumers should read content from MessageOutput.
 						event.SessionEvent = &SessionEvent[M]{
+							SessionID: sessionState.sessionID,
 							EventID:   event.EventID,
 							Timestamp: event.Timestamp,
 							Kind:      SessionEventMessage,

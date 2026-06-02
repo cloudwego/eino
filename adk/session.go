@@ -140,6 +140,11 @@ type LoadSessionEventsResult[M MessageType] struct {
 // field within TurnEnd is intentionally left nil — messages are reconstructed from the
 // event log on read.
 type SessionEvent[M MessageType] struct {
+	// SessionID identifies the session timeline this event belongs to. Runner-owned
+	// root events use the runner SessionID; nested AgentTool events use their
+	// synthetic child SessionID so live consumers can distinguish event ownership.
+	SessionID string `json:"session_id,omitempty"`
+
 	// EventID is the canonical, session-unique identity of this event.
 	// Assigned exactly once by the Runner at event materialization
 	// (in makeInputSessionEvent / toSessionEvent). Persister-level retries
@@ -1106,12 +1111,11 @@ func stripSessionEventFields[M MessageType](event *TypedAgentEvent[M]) *TypedAge
 	if event == nil {
 		return nil
 	}
-	if event.SessionEvent == nil && event.SessionID == "" {
+	if event.SessionEvent == nil {
 		return event
 	}
 	stripped := *event
 	stripped.SessionEvent = nil
-	stripped.SessionID = ""
 	if stripped.Output == nil && stripped.Action == nil && stripped.Err == nil {
 		return nil
 	}
