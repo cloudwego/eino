@@ -459,12 +459,6 @@ type TypedAgentEvent[M MessageType] struct {
 	// events, EventID and SessionEvent.EventID must be identical after runtime
 	// materialization.
 	SessionEvent *SessionEvent[M]
-
-	// SessionID identifies the owning session for routing/filtering in nested-agent
-	// scenarios (e.g. AgentTool). Empty = current runner's session. This is routing
-	// metadata, not session payload content, and is stripped from all events before
-	// user-facing delivery.
-	SessionID string
 }
 
 // AgentEvent is the default event type using *schema.Message.
