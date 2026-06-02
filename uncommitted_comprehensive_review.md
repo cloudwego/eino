@@ -2,92 +2,97 @@
 
 ## Overview
 
-- **Total iterations**: Stage 1: 2, Stage 2: 1, Stage 3: 1
-- **Scope**: uncommitted changes for session event serialization, `adk/session.FileStore`, session-store conformance, and related ADK tests.
-- **Primary review result**: one compatibility gap was fixed; no confirmed runtime bugs remain from the attack tests.
+- Review scope: uncommitted changes in `adk/middlewares/patchtoolcalls`, plus dirty submodules `examples` and `ext`.
+- Total iterations: Stage 1: 1, Stage 2: 1, Stage 3: 1.
+- Code changes applied by review: none.
+- Baseline full suite: `go test ./...` fails outside the reviewed package in `adk/prebuilt/deep/task_tool_test.go` because `typedNewTaskTool` call sites do not match the current signature.
+- Focused validation: `go test ./adk/middlewares/patchtoolcalls -count=1` passes.
+- Coverage validation: `go test ./adk/middlewares/patchtoolcalls -coverprofile=/tmp/patchtoolcalls_cover.out -count=1 && go tool cover -func=/tmp/patchtoolcalls_cover.out` reports 95.1% statement coverage.
 
-## Stage 1: Design Review Changes
+## Stage 1: Design Review
 
-### Findings Resolved
+### Scorecard
 
-| # | Dimension | Finding | Verdict | Fix Applied | Files |
-|---|-----------|---------|---------|-------------|-------|
-| 1 | Backward Compatibility | `session.InMemoryStore` no longer implemented `CheckPointStore`, removing previously public `Set`, `Get`, and `Delete` methods. | Fix | Restored checkpoint storage methods and their copy-safety regression test. | `adk/session/in_memory_store.go`, `adk/session/in_memory_store_test.go` |
+| Dimension | Rating | Notes |
+|---|---:|---|
+| Concept coherence | 5/5 | The new normalization options extend the existing dangling-tool-call repair concept without changing default behavior. |
+| API usability | 4/5 | `RemoveOrphanResults`, `RemoveDuplicateResults`, `Strict`, and `MarkSynthetic` are explicit opt-ins. `Strict` semantics are documented in code and skill docs. |
+| Minimum API surface | 4/5 | The new fields map directly to distinct history-normalization behaviors. No redundant public helper API was introduced. |
+| Backward compatibility | 5/5 | Nil config and default config still only synthesize missing non-empty tool results. Empty call IDs are skipped in non-strict mode. |
+| Layering | 5/5 | Normalization logic remains middleware-local and emits Runner-owned session events through `TypedSendEvent`. |
+| Cohesion | 5/5 | The implementation stays focused on mechanical history normalization for model compatibility. |
+| Complexity | 4/5 | Planning helpers add complexity, but they isolate mutation planning from event emission and make replay ordering testable. |
+| Naming | 4/5 | Public names are readable. `MarkSynthetic` is concise but specifically applies to generated `AgenticMessage` results, which the doc comment clarifies. |
+| Readability | 4/5 | The plan/build/analyze split is understandable. The hardest sections are insertion anchor selection and Agentic block-level rewrites. |
+| Duplication | 4/5 | Message and Agentic paths intentionally mirror each other; shared helpers exist where type shapes allow. |
+| Public documentation | 4/5 | Code comments and `ext/skills/eino-agent/reference/middleware.md` describe the new options. |
+| Internal comments | 4/5 | Non-obvious event emission behavior is largely self-evident from helper names; no blocking comment gaps found. |
 
-### Final Design Scorecard
+### Findings
 
-| Dimension | Final Rating | Notes |
-|-----------|--------------|-------|
-| Concept Coherence | 4/5 | `SessionStore` remains the business event-log abstraction; `FileStore` documents that checkpoints need a separate store. |
-| API Usability | 4/5 | `NewFileStore(dir)` is direct; session-event test fixtures use package-local serializer helpers while the feature remains unreleased. |
-| Minimum API Surface | 4/5 | `schema.Serializer` unifies serializer hooks; public surface added only for file store and serializer configuration. |
-| Backward Compatibility | 4/5 | Restored `InMemoryStore` checkpoint methods. |
-| Module Separation | 4/5 | File-backed store lives under `adk/session`; core ADK only depends on `SessionStore`. |
-| Cohesion | 4/5 | File-store code is isolated around JSONL framing, cursor indexing, and corruption detection. |
-| Complexity | 4/5 | Full-file scan on append is simple and acceptable for process-local durable storage. |
-| Naming | 4/5 | `FileStore`, `NewFileStore`, and `EventSerializer` align with existing conventions. |
-| Readability | 4/5 | The file-store path is linear; corruption and delimiter checks are explicit. |
-| Duplication | 4/5 | Shared conformance suite covers both store implementations; integration tests keep local serializer helpers because public encode/decode helpers are intentionally not exposed. |
-| Public Docs | 4/5 | Public store and serializer constraints are documented, including JSONL single-record payload requirements. |
-| Internal Comments | 4/5 | Non-obvious durability and cross-process limitations are captured in type comments. |
+No blocking design findings were confirmed.
 
-## Stage 2: Attack Review Changes
+| # | Dimension | Concern | Verdict | Rationale |
+|---|---|---|---|---|
+| 1 | API documentation | `MarkSynthetic` only affects generated `AgenticMessage` tool results, not classic `schema.Message` tool messages. | Won't Fix | The code comment explicitly scopes this to `AgenticMessage`. Classic messages have a different shape and existing `ToolCallID`/`ToolName` fields. |
+| 2 | Complexity | `buildMessageNormalizationPlan` and `buildAgenticNormalizationPlan` duplicate some flow. | Won't Fix | The two message representations differ enough that over-generalizing would reduce readability and increase generic complexity. |
 
-### Attack Tests Added
+## Stage 2: Attack Review
 
-| # | Severity | Probe | Result | Test |
-|---|----------|-------|--------|------|
-| 1 | High | Ensure escaped `\n`/`\r` inside JSON strings are accepted while raw CR/LF framing delimiters remain rejected. | Passed | `TestAttack_FileStoreAcceptsEscapedLineDelimiters` |
-| 2 | High | Ensure `FileStore` accepts the Runner's default `SessionEvent` encoding and supports reconstruction after reopening the store. | Passed | `TestAttack_FileStoreSupportsRunnerDefaultSessionEncoding` |
+### Attack Vectors Reviewed
 
-### Attack Test Results
+| Category | Result | Evidence |
+|---|---|---|
+| Missing results | OK | Existing tests verify deterministic patch insertion for both `schema.Message` and `schema.AgenticMessage`. |
+| Orphan results | OK | `RemoveOrphanResults` tests verify removal for both message types. |
+| Duplicate results | OK | `RemoveDuplicateResults` tests verify only the first result is kept for both message types. |
+| Empty call IDs | OK | Non-strict mode skips empty IDs; strict mode reports `empty_tool_call_id`. |
+| Strict validation | OK | Strict mode returns an error without returning a mutated state. |
+| Agentic mixed blocks | OK | Mixed content block rewrite emits `MessageUpdated` while preserving message identity. |
+| Replay ordering | OK | Inserted tool results anchor before the next kept message, preserving reconstructed order. |
+| Tool search results | OK | Agentic tool-search result blocks are recognized as corresponding results. |
+| Nil function tool calls | OK | Nil `FunctionToolCall` blocks are skipped without panic. |
+| Session event emission | OK | Middleware sends explicit `SessionEvent` kinds through `TypedSendEvent`, matching runtime validation expectations. |
 
-- `go test ./adk/session -run 'TestAttack_' -v -count=1`: passed.
-- Confirmed bugs from attack tests: none.
-- Design concerns from attack tests: none after restoring `InMemoryStore` checkpoint compatibility.
+### Bugs Fixed
 
-## Stage 3: Test Audit Changes
+No confirmed bugs were found, so no production fixes were applied.
 
-### Improvements Applied
+## Stage 3: Test Audit
 
-| # | Category | Change | LOC Impact |
-|---|----------|--------|------------|
-| 1 | Regression Coverage | Restored `TestInMemoryStoreCheckpointSetGetDelete` to preserve copy-safety and public method behavior. | +30 LOC |
-| 2 | Coverage Gap | Added Runner integration coverage for `FileStore` using default session-event encoding and reconstruction. | +~60 LOC |
-| 3 | Boundary Coverage | Added escaped CR/LF payload coverage for JSONL framing. | +12 LOC |
-| 4 | API Surface | Kept encode/decode helpers package-local because session event persistence is unreleased. | 0 LOC |
+### Test Quality
 
-### Coverage
+| Category | Result | Notes |
+|---|---|---|
+| Duplicates | OK | Generic helpers intentionally exercise both classic and Agentic message representations. |
+| Assertion quality | OK | Tests assert concrete IDs, names, event kinds, anchors, and state lengths. |
+| Boilerplate | OK | Shared helpers reduce repeated construction while keeping scenario bodies readable. |
+| Logical grouping | OK | Generic behavior is grouped via typed subtests; specific edge cases are individual tests. |
+| Semantic value | OK | Added tests cover distinct behavior: cleanup, strict validation, markers, block updates, event anchors, and nil blocks. |
+| Coverage gaps | OK | Package coverage is 95.1%; all changed functions except `New` exceed the 70% hard floor. `New` is a thin wrapper around `NewTyped`. |
 
-- `go test -coverprofile=cover.out ./adk/session && go tool cover -func=cover.out`: passed.
-- Package coverage: 91.7% statements.
-- `FileStore` function coverage: `AppendEvents` 84.6%, `LoadEvents` 84.6%, `readAllEventsLocked` 87.1%, cursor helpers above 94%.
-- Functions below 70% in implementation files: none.
-
-## Cumulative File Change List
+## Cumulative File Review
 
 | File | Stage(s) | Summary |
-|------|----------|---------|
-| `adk/session.go` | 1 | Added configurable session event serializer plumbing while keeping session-event encode/decode helpers unexported. |
-| `adk/integration_middleware_test.go` | 1, 3 | Uses package-local serializer helpers for session event fixtures. |
-| `adk/session/in_memory_store.go` | 1 | Restored `CheckPointStore` compatibility methods. |
-| `adk/session/in_memory_store_test.go` | 1, 3 | Restored checkpoint set/get/delete regression coverage. |
-| `adk/session/file_store.go` | 1, 2 | Added durable JSONL-backed `SessionStore` with idempotent append, cursor loading, and corruption detection. |
-| `adk/session/file_store_test.go` | 2, 3 | Added conformance, persistence, JSONL safety, attack, and Runner reconstruction tests. |
-| `adk/session/conformance.go` | 3 | Added duplicate event ID within-batch first-write-wins conformance coverage. |
-| `adk/runner.go` | 1 | Threads configured session serializer through persistence and reconstruction. |
-| `adk/chatmodel.go` | 1 | Uses public `schema.GobSerializer` alias for checkpoint serialization. |
-| `compose/checkpoint.go` | 1 | Aliases compose serializer to `schema.Serializer`. |
-| `schema/serialization.go` | 1 | Exposes serializer interface and serializer aliases from `schema`. |
+|---|---|---|
+| `adk/middlewares/patchtoolcalls/patchtoolcalls.go` | 1, 2 | Adds opt-in cleanup, strict validation, Agentic synthetic markers, normalization planning, and session mutation events. |
+| `adk/middlewares/patchtoolcalls/patchtoolcalls_test.go` | 2, 3 | Adds targeted tests for cleanup, strict mode, Agentic block rewrites, replay anchors, and nil blocks. |
+| `examples` submodule | 1 | Contains a docs-only wording update from `SessionStore` to `SessionService`. |
+| `ext` submodule | 1 | Contains middleware reference docs for the new `patchtoolcalls.Config` options. |
 
-## Verification
+## Validation Commands
 
-- Baseline before fixes: `go test ./...` passed.
-- Focused after fixes: `go test ./adk ./adk/session ./compose ./schema -count=1` passed.
-- Attack tests: `go test ./adk/session -run 'TestAttack_' -v -count=1` passed.
-- Coverage: `go test -coverprofile=cover.out ./adk/session && go tool cover -func=cover.out` passed at 91.7%.
+| Command | Result |
+|---|---|
+| `git diff --stat && git diff --name-only` | Identified reviewed uncommitted scope. |
+| `go test ./...` | Fails in `adk/prebuilt/deep` due to an unrelated `typedNewTaskTool` signature mismatch. |
+| `go test ./adk/middlewares/patchtoolcalls -count=1` | Passes. |
+| `go test ./adk/middlewares/patchtoolcalls -coverprofile=/tmp/patchtoolcalls_cover.out -count=1 && go tool cover -func=/tmp/patchtoolcalls_cover.out` | Passes, 95.1% statement coverage. |
+| `git diff --check` | Passes. |
+| VS Code diagnostics for changed Go files | No diagnostics. |
 
 ## Remaining Items
 
-- No unresolved blockers.
-- Residual limitation: `FileStore` is process-local and intentionally not cross-process write safe, as documented on the type.
+- Full-repo test failure remains unresolved in `adk/prebuilt/deep/task_tool_test.go`; it appears unrelated to the reviewed `patchtoolcalls` diff.
+- Submodules `examples` and `ext` contain dirty working tree changes. Ensure those nested changes are intentionally committed or excluded together with the parent submodule pointer updates.
+- No temporary attack-test files or review branches were created.
