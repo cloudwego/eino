@@ -55,6 +55,7 @@ reports/
 CLAUDE.md
 *.jsonl
 *.txt
+.agents/
 
 # Specs directories
 */specs

@@ -33,14 +33,17 @@ func TestNewFinalizer(t *testing.T) {
 	b := NewFinalizer()
 	assert.NotNil(t, b)
 	assert.Empty(t, b.handlers)
-	assert.Nil(t, b.custom)
+
+	tb := NewTypedFinalizer[*schema.Message]()
+	assert.NotNil(t, tb)
+	assert.Empty(t, tb.handlers)
 }
 
 func TestBuildEmpty(t *testing.T) {
 	finalizer, err := NewFinalizer().Build()
 	assert.Error(t, err)
 	assert.Nil(t, finalizer)
-	assert.Contains(t, err.Error(), "at least one handler or custom finalizer is required")
+	assert.Contains(t, err.Error(), "at least one handler is required")
 }
 
 func TestBuildConfigError(t *testing.T) {
@@ -67,46 +70,20 @@ func TestBuildConfigError(t *testing.T) {
 	})
 }
 
-func TestBuildWithCustomOnly(t *testing.T) {
+func TestDefaultFinalizeBasic(t *testing.T) {
 	ctx := context.Background()
 
-	finalizer, err := NewFinalizer().
-		Custom(func(ctx context.Context, originalMessages []adk.Message, summary adk.Message) ([]adk.Message, error) {
-			return []adk.Message{
-				schema.SystemMessage("system prompt"),
-				summary,
-			}, nil
-		}).
-		Build()
-	assert.NoError(t, err)
-
-	summary := schema.UserMessage("test summary")
-	result, err := finalizer(ctx, []adk.Message{}, summary)
+	result, err := DefaultFinalize(ctx, []adk.Message{
+		schema.SystemMessage("system prompt"),
+		schema.UserMessage("original user"),
+	}, schema.AssistantMessage("raw summary", nil))
 	assert.NoError(t, err)
 	assert.Len(t, result, 2)
+
 	assert.Equal(t, schema.System, result[0].Role)
-	assert.Equal(t, "system prompt", result[0].Content)
-	assert.Equal(t, "test summary", result[1].Content)
-}
-
-func TestBuildCustomOverrides(t *testing.T) {
-	ctx := context.Background()
-
-	finalizer, err := NewFinalizer().
-		Custom(func(ctx context.Context, originalMessages []adk.Message, summary adk.Message) ([]adk.Message, error) {
-			return []adk.Message{schema.UserMessage("first")}, nil
-		}).
-		Custom(func(ctx context.Context, originalMessages []adk.Message, summary adk.Message) ([]adk.Message, error) {
-			return []adk.Message{schema.UserMessage("second")}, nil
-		}).
-		Build()
-	assert.NoError(t, err)
-
-	summary := schema.UserMessage("test")
-	result, err := finalizer(ctx, []adk.Message{}, summary)
-	assert.NoError(t, err)
-	assert.Len(t, result, 1)
-	assert.Equal(t, "second", result[0].Content)
+	assert.Equal(t, schema.User, result[1].Role)
+	assert.Equal(t, contentTypeSummary, typedGetContentType(result[1]))
+	assert.Contains(t, result[1].Content, "raw summary")
 }
 
 func TestBuildStepChaining(t *testing.T) {
@@ -125,37 +102,12 @@ func TestBuildStepChaining(t *testing.T) {
 	finalizer, err := b.Build()
 	assert.NoError(t, err)
 
-	summary := schema.UserMessage("start")
+	summary := schema.AssistantMessage("start", nil)
 	result, err := finalizer(ctx, []adk.Message{}, summary)
 	assert.NoError(t, err)
 	assert.Len(t, result, 1)
-	assert.Equal(t, "start | step1 | step2", result[0].Content)
-}
-
-func TestBuildStepChainingWithCustom(t *testing.T) {
-	ctx := context.Background()
-
-	b := NewFinalizer()
-	b.handlers = append(b.handlers, func(ctx context.Context, originalMessages []adk.Message, summary adk.Message) ([]adk.Message, error) {
-		summary.Content = summary.Content + " | step1"
-		return []adk.Message{summary}, nil
-	})
-	b.Custom(func(ctx context.Context, originalMessages []adk.Message, summary adk.Message) ([]adk.Message, error) {
-		return []adk.Message{
-			schema.SystemMessage("sys"),
-			summary,
-		}, nil
-	})
-
-	finalizer, err := b.Build()
-	assert.NoError(t, err)
-
-	summary := schema.UserMessage("start")
-	result, err := finalizer(ctx, []adk.Message{}, summary)
-	assert.NoError(t, err)
-	assert.Len(t, result, 2)
-	assert.Equal(t, schema.System, result[0].Role)
-	assert.Equal(t, "start | step1", result[1].Content)
+	assert.Equal(t, schema.User, result[0].Role)
+	assert.Contains(t, result[0].Content, "start | step1 | step2")
 }
 
 func TestBuildStepError(t *testing.T) {
@@ -173,6 +125,48 @@ func TestBuildStepError(t *testing.T) {
 	_, err = finalizer(ctx, []adk.Message{}, summary)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "step failed")
+}
+
+func TestBuildHandlerReturnsEmpty(t *testing.T) {
+	ctx := context.Background()
+
+	b := NewFinalizer()
+	b.handlers = append(b.handlers, func(ctx context.Context, originalMessages []adk.Message, summary adk.Message) ([]adk.Message, error) {
+		return []adk.Message{}, nil
+	})
+
+	finalizer, err := b.Build()
+	assert.NoError(t, err)
+
+	_, err = finalizer(ctx, []adk.Message{}, schema.AssistantMessage("test", nil))
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "finalizer handler returned no messages")
+}
+
+func TestBuildPostProcessError(t *testing.T) {
+	ctx := context.Background()
+
+	b := NewFinalizer()
+	b.handlers = append(b.handlers, func(ctx context.Context, originalMessages []adk.Message, summary adk.Message) ([]adk.Message, error) {
+		return []adk.Message{schema.UserMessage("not assistant")}, nil
+	})
+
+	finalizer, err := b.Build()
+	assert.NoError(t, err)
+
+	_, err = finalizer(ctx, []adk.Message{}, schema.AssistantMessage("test", nil))
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "summary content is empty")
+}
+
+func TestDefaultFinalizeError(t *testing.T) {
+	ctx := context.Background()
+
+	_, err := DefaultFinalize(ctx, []adk.Message{
+		schema.UserMessage("original"),
+	}, schema.UserMessage("not an assistant message"))
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "summary content is empty")
 }
 
 func TestPreserveSkillsConfigCheck(t *testing.T) {
@@ -246,7 +240,11 @@ func TestPreserveSkillsViaBuilder(t *testing.T) {
 		Build()
 	assert.NoError(t, err)
 
-	messages := []adk.Message{
+	originalMessages := []adk.Message{
+		schema.SystemMessage("system prompt"),
+		schema.UserMessage("original"),
+	}
+	modelInput := []adk.Message{
 		{
 			Role: schema.Assistant,
 			ToolCalls: []schema.ToolCall{
@@ -265,76 +263,25 @@ func TestPreserveSkillsViaBuilder(t *testing.T) {
 			Content:    "skill content 1",
 		},
 	}
+	ctx = context.WithValue(ctx, ctxKeyModelInput{}, modelInput)
 
-	ctx = context.WithValue(ctx, ctxKeyModelInput{}, messages)
-
-	summary := &schema.Message{
-		Role: schema.Assistant,
-		UserInputMultiContent: []schema.MessageInputPart{
-			{Type: schema.ChatMessagePartTypeText, Text: "test summary"},
-		},
-	}
-
-	result, err := finalizer(ctx, []adk.Message{schema.UserMessage("original")}, summary)
-	assert.NoError(t, err)
-	assert.Len(t, result, 1)
-
-	assert.Empty(t, result[0].Content)
-	assert.Len(t, result[0].UserInputMultiContent, 2)
-	assert.Contains(t, result[0].UserInputMultiContent[0].Text, "test-skill")
-	assert.Contains(t, result[0].UserInputMultiContent[0].Text, "skill content 1")
-	assert.Equal(t, "test summary", result[0].UserInputMultiContent[1].Text)
-}
-
-func TestPreserveSkillsWithCustom(t *testing.T) {
-	ptr := func(i int) *int { return &i }
-	ctx := context.Background()
-
-	finalizer, err := NewFinalizer().
-		PreserveSkills(&PreserveSkillsConfig{
-			MaxSkills:     ptr(2),
-			SkillToolName: "load_skill",
-		}).
-		Custom(func(ctx context.Context, originalMessages []adk.Message, summary adk.Message) ([]adk.Message, error) {
-			return []adk.Message{
-				schema.SystemMessage("system prompt"),
-				summary,
-			}, nil
-		}).
-		Build()
-	assert.NoError(t, err)
-
-	messages := []adk.Message{
-		{
-			Role: schema.Assistant,
-			ToolCalls: []schema.ToolCall{
-				{
-					ID: "call_1",
-					Function: schema.FunctionCall{
-						Name:      "load_skill",
-						Arguments: `{"skill": "test-skill"}`,
-					},
-				},
-			},
-		},
-		{
-			Role:       schema.Tool,
-			ToolCallID: "call_1",
-			Content:    "skill content 1",
-		},
-	}
-
-	ctx = context.WithValue(ctx, ctxKeyModelInput{}, messages)
 	summary := schema.AssistantMessage("test summary", nil)
 
-	result, err := finalizer(ctx, []adk.Message{schema.UserMessage("original")}, summary)
+	result, err := finalizer(ctx, originalMessages, summary)
 	assert.NoError(t, err)
-	assert.Len(t, result, 2)
+	assert.Len(t, result, 3)
 
 	assert.Equal(t, schema.System, result[0].Role)
 	assert.Equal(t, "system prompt", result[0].Content)
 
-	assert.Contains(t, result[1].UserInputMultiContent[0].Text, "test-skill")
+	assert.Equal(t, schema.User, result[1].Role)
+	assert.Equal(t, contentTypeSkills, typedGetContentType(result[1]))
+	assert.Contains(t, result[1].Content, "test-skill")
+	assert.Contains(t, result[1].Content, "skill content 1")
+
+	assert.Equal(t, schema.User, result[2].Role)
+	assert.Equal(t, contentTypeSummary, typedGetContentType(result[2]))
+	assert.Contains(t, result[2].Content, "test summary")
 }
 
 func TestBuildPreservedSkillsText(t *testing.T) {

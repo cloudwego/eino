@@ -651,6 +651,9 @@ func buildInternalFinalizer[M adk.MessageType](cfg *TypedConfig[M]) TypedFinaliz
 func getAssistantTextContent[M adk.MessageType](msg M) string {
 	switch r := any(msg).(type) {
 	case *schema.Message:
+		if r.Role != schema.Assistant {
+			return ""
+		}
 		var parts []string
 		for _, part := range r.AssistantGenMultiContent {
 			if part.Type == schema.ChatMessagePartTypeText && part.Text != "" {
@@ -662,6 +665,9 @@ func getAssistantTextContent[M adk.MessageType](msg M) string {
 		}
 		return r.Content
 	case *schema.AgenticMessage:
+		if r.Role != schema.AgenticRoleTypeAssistant {
+			return ""
+		}
 		var parts []string
 		for _, block := range r.ContentBlocks {
 			if block != nil && block.AssistantGenText != nil {
@@ -680,8 +686,11 @@ type postProcessSummaryParams[M adk.MessageType] struct {
 	transcriptPath string
 }
 
-func postProcessSummary[M adk.MessageType](ctx context.Context, p *postProcessSummaryParams[M]) (M, error) {
+func postProcessSummary[M adk.MessageType](ctx context.Context, p *postProcessSummaryParams[M]) (processed M, err error) {
 	content := p.summaryContent
+	if content == "" {
+		return processed, fmt.Errorf("summary content is empty")
+	}
 
 	if len(p.contextMsgs) > 0 {
 		newContent, err := replaceUserMessagesInSummary(ctx, &replaceUserMessagesInSummaryParams[M]{
@@ -689,8 +698,7 @@ func postProcessSummary[M adk.MessageType](ctx context.Context, p *postProcessSu
 			summaryText: content,
 		})
 		if err != nil {
-			var zero M
-			return zero, fmt.Errorf("failed to populate user messages in summary: %w", err)
+			return processed, fmt.Errorf("failed to populate user messages in summary: %w", err)
 		}
 		content = newContent
 	}
@@ -702,9 +710,9 @@ func postProcessSummary[M adk.MessageType](ctx context.Context, p *postProcessSu
 	content = appendSection(getSummaryPreamble(), content)
 	content = appendSection(content, getContinueInstruction())
 
-	newSummary := newTypedSummaryMessage[M](content)
+	processed = newTypedSummaryMessage[M](content)
 
-	return newSummary, nil
+	return processed, nil
 }
 
 type replaceUserMessagesInSummaryParams[M adk.MessageType] struct {
@@ -716,7 +724,7 @@ func replaceUserMessagesInSummary[M adk.MessageType](ctx context.Context, p *rep
 	var userMsgs []M
 	var hasUserMsgs bool
 	for _, msg := range p.contextMsgs {
-		if typedGetContentType(msg) == contentTypeSummary {
+		if isInternalUserMessage(msg) {
 			continue
 		}
 		if isUserRole(msg) {
@@ -1205,6 +1213,14 @@ func typedGetContentType[M adk.MessageType](msg M) summarizationContentType {
 		return ""
 	}
 	return summarizationContentType(ct)
+}
+
+func isInternalUserMessage[M adk.MessageType](msg M) bool {
+	return typedGetContentType(msg) == contentTypeSummary || isPreservedMessage(msg)
+}
+
+func isPreservedMessage[M adk.MessageType](msg M) bool {
+	return typedGetContentType(msg) == contentTypeSkills
 }
 
 func typedShouldFailover[M adk.MessageType](ctx context.Context, cfg *TypedFailoverConfig[M], resp M, err error) bool {

@@ -2035,6 +2035,21 @@ func testSummarizationHelpers[M adk.MessageType](t *testing.T) {
 			assert.Equal(t, "summary content", m.ContentBlocks[0].UserInputText.Text)
 		}
 	})
+
+	t.Run("isInnerMessage", func(t *testing.T) {
+		summaryMsg := newTypedSummaryMessage[M]("summary content")
+		assert.True(t, isInternalUserMessage(summaryMsg))
+		assert.False(t, isPreservedMessage(summaryMsg))
+
+		skillsMsg := makeUserMsg[M]("skills content")
+		setMsgExtra(skillsMsg, extraKeyContentType, string(contentTypeSkills))
+		assert.True(t, isInternalUserMessage(skillsMsg))
+		assert.True(t, isPreservedMessage(skillsMsg))
+
+		normalMsg := makeUserMsg[M]("normal content")
+		assert.False(t, isInternalUserMessage(normalMsg))
+		assert.False(t, isPreservedMessage(normalMsg))
+	})
 }
 
 func testSummarizationFlow[M adk.MessageType](t *testing.T) {

@@ -45,59 +45,61 @@ func DefaultFinalize[M adk.MessageType](ctx context.Context, originalMessages []
 		return nil, err
 	}
 
-	return append(systemMsgs, processed), nil
+	result := make([]M, 0, len(systemMsgs)+1)
+	result = append(result, systemMsgs...)
+	result = append(result, processed)
+	return result, nil
 }
 
-// TypedFinalizerBuilder builds a TypedFinalizeFunc by chaining handlers
-// and an optional custom finalizer, generic over message type M.
+// TypedFinalizerBuilder builds a TypedFinalizeFunc by chaining handlers,
+// generic over message type M.
+type TypedFinalizerBuilder[M adk.MessageType] struct {
+	handlers []TypedFinalizeFunc[M]
+	errs     []error
+}
+
+// FinalizerBuilder is a backward-compatible alias for TypedFinalizerBuilder
+// specialized with *schema.Message.
 //
-// Handlers (e.g. PreserveSkills) transform the summary message sequentially,
-// and the custom finalizer (set via Custom) determines the final output messages.
+// Deprecated: use TypedFinalizerBuilder[*schema.Message] instead.
+type FinalizerBuilder = TypedFinalizerBuilder[*schema.Message]
+
+// NewTypedFinalizer creates a new TypedFinalizerBuilder.
+//
+// Handlers run in registration order, and the summary message is post-processed
+// as DefaultFinalize does after all handlers have run. For example, with
+// PreserveSkills and a system message in originalMessages, the final output is:
+//
+//	[system message, preserved skill message, processed summary]
 //
 // Example:
 //
-//	finalizer, err := NewFinalizer().
+//	finalizer, err := NewTypedFinalizer[*schema.Message]().
 //	    PreserveSkills(&PreserveSkillsConfig{}).
-//	    Custom(func(ctx context.Context, originalMessages []adk.Message, summary adk.Message) ([]adk.Message, error) {
-//	        return []adk.Message{schema.SystemMessage("system prompt"), summary}, nil
-//	    }).
 //	    Build()
 //
 //	cfg := &Config{
 //	    Finalize: finalizer,
 //	    // ...
 //	}
-type TypedFinalizerBuilder[M adk.MessageType] struct {
-	handlers []TypedFinalizeFunc[M]
-	custom   TypedFinalizeFunc[M]
-	errs     []error
-}
-
-// FinalizerBuilder is a backward-compatible alias for TypedFinalizerBuilder
-// specialized with *schema.Message.
-type FinalizerBuilder = TypedFinalizerBuilder[*schema.Message]
-
-// NewTypedFinalizer creates a new TypedFinalizerBuilder that builds a TypedFinalizeFunc
-// by chaining handlers and an optional custom finalizer.
 func NewTypedFinalizer[M adk.MessageType]() *TypedFinalizerBuilder[M] {
 	return &TypedFinalizerBuilder[M]{}
 }
 
 // NewFinalizer creates a new FinalizerBuilder that builds a FinalizeFunc
-// by chaining handlers and an optional custom finalizer.
+// by chaining handlers.
+//
+// Deprecated: use NewTypedFinalizer[*schema.Message] instead.
 func NewFinalizer() *FinalizerBuilder {
 	return &FinalizerBuilder{}
 }
 
-// Custom sets a custom finalizer that determines the final output messages.
-// If called multiple times, the last custom finalizer takes effect.
-func (b *TypedFinalizerBuilder[M]) Custom(fn TypedFinalizeFunc[M]) *TypedFinalizerBuilder[M] {
-	b.custom = fn
-	return b
-}
-
 // Build constructs the final TypedFinalizeFunc by chaining all registered handlers
-// and the optional custom finalizer.
+// and post-processing the summary message as DefaultFinalize does.
+// For example, with PreserveSkills and a system message in
+// originalMessages, the final output is:
+//
+//	[system message, preserved skill message, processed summary]
 func (b *TypedFinalizerBuilder[M]) Build() (TypedFinalizeFunc[M], error) {
 	if len(b.errs) > 0 {
 		msgs := make([]string, len(b.errs))
@@ -107,28 +109,42 @@ func (b *TypedFinalizerBuilder[M]) Build() (TypedFinalizeFunc[M], error) {
 		return nil, fmt.Errorf("failed to build finalizer:\n%s", strings.Join(msgs, "\n"))
 	}
 
-	if len(b.handlers) == 0 && b.custom == nil {
-		return nil, fmt.Errorf("at least one handler or custom finalizer is required")
+	if len(b.handlers) == 0 {
+		return nil, fmt.Errorf("at least one handler is required")
 	}
 
 	handlers := make([]TypedFinalizeFunc[M], len(b.handlers))
 	copy(handlers, b.handlers)
-	custom := b.custom
 
 	return func(ctx context.Context, originalMessages []M, summary M) ([]M, error) {
+		var extraMessages []M
 		for _, fn := range handlers {
 			result, err := fn(ctx, originalMessages, summary)
 			if err != nil {
 				return nil, err
 			}
-			summary = result[0]
+			if len(result) == 0 {
+				return nil, fmt.Errorf("finalizer handler returned no messages")
+			}
+			extraMessages = append(extraMessages, result[:len(result)-1]...)
+			summary = result[len(result)-1]
 		}
 
-		if custom != nil {
-			return custom(ctx, originalMessages, summary)
+		systemMsgs, contextMsgs := splitSystemAndContextMsgs(originalMessages)
+
+		processed, err := postProcessSummary(ctx, &postProcessSummaryParams[M]{
+			contextMsgs:    contextMsgs,
+			summaryContent: getAssistantTextContent(summary),
+		})
+		if err != nil {
+			return nil, err
 		}
 
-		return []M{summary}, nil
+		result := make([]M, 0, len(systemMsgs)+len(extraMessages)+1)
+		result = append(result, systemMsgs...)
+		result = append(result, extraMessages...)
+		result = append(result, processed)
+		return result, nil
 	}, nil
 }
 
@@ -159,9 +175,18 @@ type PreserveSkillsConfig struct {
 	SkillsTokenBudget *int
 }
 
-// PreserveSkills extracts skill contents loaded by the ADK skill middleware
-// from the conversation history and prepends them to the summary message,
-// ensuring the agent retains skill knowledge after the context window is compacted.
+// PreserveSkills preserves skill contents loaded by the ADK skill middleware.
+// It scans the conversation for matching skill tool calls and returns the preserved
+// skill content as a user message before the summary.
+//
+// Example:
+//
+//	messages: [assistant(tool_call: skill "foo"), tool(content: "bar")]
+//	summary:  S
+//
+// When skill content is found, PreserveSkills returns:
+//
+//	[]M{user("<preserved foo: bar>"), S}
 func (b *TypedFinalizerBuilder[M]) PreserveSkills(config *PreserveSkillsConfig) *TypedFinalizerBuilder[M] {
 	if err := config.check(); err != nil {
 		b.errs = append(b.errs, fmt.Errorf("PreserveSkills: %w", err))
@@ -184,33 +209,15 @@ func (b *TypedFinalizerBuilder[M]) PreserveSkills(config *PreserveSkillsConfig) 
 			return nil, err
 		}
 
-		if skillText != "" {
-			summary = prependMsgTextContent(summary, skillText)
+		if skillText == "" {
+			return []M{summary}, nil
 		}
 
-		return []M{summary}, nil
+		preserved := makeUserMsg[M](skillText)
+		setMsgExtra(preserved, extraKeyContentType, string(contentTypeSkills))
+		return []M{preserved, summary}, nil
 	})
 	return b
-}
-
-func prependMsgTextContent[M adk.MessageType](msg M, text string) M {
-	switch m := any(msg).(type) {
-	case *schema.Message:
-		m.UserInputMultiContent = append([]schema.MessageInputPart{
-			{
-				Type: schema.ChatMessagePartTypeText,
-				Text: text,
-			},
-		}, m.UserInputMultiContent...)
-		return any(m).(M)
-	case *schema.AgenticMessage:
-		m.ContentBlocks = append([]*schema.ContentBlock{
-			schema.NewContentBlock(&schema.UserInputText{Text: text}),
-		}, m.ContentBlocks...)
-		return any(m).(M)
-	default:
-		panic("unreachable")
-	}
 }
 
 func (c *PreserveSkillsConfig) check() error {
