@@ -21,6 +21,9 @@ import "github.com/cloudwego/eino/adk/internal"
 // Language represents the language setting for the ADK built-in prompts.
 type Language = internal.Language
 
+// I18nPrompts holds prompt strings for different languages.
+type I18nPrompts = internal.I18nPrompts
+
 const (
 	// LanguageEnglish represents English language.
 	LanguageEnglish Language = internal.LanguageEnglish
@@ -32,4 +35,9 @@ const (
 // The default language is English if not explicitly set.
 func SetLanguage(lang Language) error {
 	return internal.SetLanguage(lang)
+}
+
+// SelectPrompt returns the prompt string for the current ADK built-in prompt language.
+func SelectPrompt(prompts I18nPrompts) string {
+	return internal.SelectPrompt(prompts)
 }
