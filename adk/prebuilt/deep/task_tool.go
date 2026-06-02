@@ -44,10 +44,11 @@ func typedTaskToolMiddleware[M adk.MessageType](
 	maxIteration int,
 	middlewares []adk.AgentMiddleware,
 	handlers []adk.TypedChatModelAgentMiddleware[M],
+	modelRetryConfig *adk.TypedModelRetryConfig[M],
 	modelFailoverConfig *adk.ModelFailoverConfig[M],
 	modelTimeoutConfig *adk.ModelTimeoutConfig,
 ) (adk.TypedChatModelAgentMiddleware[M], error) {
-	t, err := typedNewTaskTool(ctx, taskToolDescriptionGenerator, subAgents, withoutGeneralSubAgent, cm, instruction, toolsConfig, maxIteration, middlewares, handlers, modelFailoverConfig, modelTimeoutConfig)
+	t, err := typedNewTaskTool(ctx, taskToolDescriptionGenerator, subAgents, withoutGeneralSubAgent, cm, instruction, toolsConfig, maxIteration, middlewares, handlers, modelRetryConfig, modelFailoverConfig, modelTimeoutConfig)
 	if err != nil {
 		return nil, err
 	}
@@ -71,6 +72,7 @@ func typedNewTaskTool[M adk.MessageType](
 	maxIteration int,
 	middlewares []adk.AgentMiddleware,
 	handlers []adk.TypedChatModelAgentMiddleware[M],
+	modelRetryConfig *adk.TypedModelRetryConfig[M],
 	modelFailoverConfig *adk.ModelFailoverConfig[M],
 	modelTimeoutConfig *adk.ModelTimeoutConfig,
 ) (tool.InvokableTool, error) {
@@ -99,6 +101,7 @@ func typedNewTaskTool[M adk.MessageType](
 			Middlewares:         middlewares,
 			Handlers:            handlers,
 			GenModelInput:       typedGenModelInput[M],
+			ModelRetryConfig:    modelRetryConfig,
 			ModelFailoverConfig: modelFailoverConfig,
 			ModelTimeoutConfig:  modelTimeoutConfig,
 		})
