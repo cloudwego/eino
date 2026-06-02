@@ -153,6 +153,31 @@ func assertToolResultName[M adk.MessageType](t *testing.T, msg M, expectedName s
 	}
 }
 
+func collectToolResultIDs[M adk.MessageType](messages []M) []string {
+	var ids []string
+	for _, msg := range messages {
+		switch m := any(msg).(type) {
+		case *schema.Message:
+			if m.Role == schema.Tool {
+				ids = append(ids, m.ToolCallID)
+			}
+		case *schema.AgenticMessage:
+			for _, block := range m.ContentBlocks {
+				if callID, ok := agenticResultCallID(block); ok {
+					ids = append(ids, callID)
+				}
+			}
+		}
+	}
+	return ids
+}
+
+func assertSyntheticMarker(t *testing.T, msg *schema.AgenticMessage, expected bool) {
+	t.Helper()
+	v, ok := msg.Extra[syntheticAgenticToolResultMarker]
+	assert.Equal(t, expected, ok && v == true)
+}
+
 func testPatchToolCallsGeneric[M adk.MessageType](t *testing.T) {
 	ctx := context.Background()
 
@@ -280,6 +305,182 @@ func testPatchToolCallsGeneric[M adk.MessageType](t *testing.T) {
 func TestPatchToolCallsGeneric(t *testing.T) {
 	t.Run("Message", testPatchToolCallsGeneric[*schema.Message])
 	t.Run("AgenticMessage", testPatchToolCallsGeneric[*schema.AgenticMessage])
+}
+
+func testPatchToolCallsRemoveOrphanResults[M adk.MessageType](t *testing.T) {
+	ctx := context.Background()
+	mw, err := NewTyped[M](ctx, &Config{RemoveOrphanResults: true})
+	require.NoError(t, err)
+
+	state := &adk.TypedChatModelAgentState[M]{Messages: []M{
+		makeToolResultMsg[M]("orphan", "call_orphan", "tool_orphan"),
+		makeAssistantMsgWithToolCalls[M]("", []testToolCall{{ID: "call_1", Name: "tool_a", Arguments: "{}"}}),
+		makeToolResultMsg[M]("result", "call_1", "tool_a"),
+	}}
+	_, newState, err := mw.BeforeModelRewriteState(ctx, state, nil)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"call_1"}, collectToolResultIDs(newState.Messages))
+}
+
+func TestPatchToolCallsRemoveOrphanResults(t *testing.T) {
+	t.Run("Message", testPatchToolCallsRemoveOrphanResults[*schema.Message])
+	t.Run("AgenticMessage", testPatchToolCallsRemoveOrphanResults[*schema.AgenticMessage])
+}
+
+func testPatchToolCallsRemoveDuplicateResults[M adk.MessageType](t *testing.T) {
+	ctx := context.Background()
+	mw, err := NewTyped[M](ctx, &Config{RemoveDuplicateResults: true})
+	require.NoError(t, err)
+
+	state := &adk.TypedChatModelAgentState[M]{Messages: []M{
+		makeAssistantMsgWithToolCalls[M]("", []testToolCall{{ID: "call_1", Name: "tool_a", Arguments: "{}"}}),
+		makeToolResultMsg[M]("result", "call_1", "tool_a"),
+		makeToolResultMsg[M]("duplicate", "call_1", "tool_a"),
+	}}
+	_, newState, err := mw.BeforeModelRewriteState(ctx, state, nil)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"call_1"}, collectToolResultIDs(newState.Messages))
+}
+
+func TestPatchToolCallsRemoveDuplicateResults(t *testing.T) {
+	t.Run("Message", testPatchToolCallsRemoveDuplicateResults[*schema.Message])
+	t.Run("AgenticMessage", testPatchToolCallsRemoveDuplicateResults[*schema.AgenticMessage])
+}
+
+func testPatchToolCallsSkipsEmptyIDInNonStrictMode[M adk.MessageType](t *testing.T) {
+	ctx := context.Background()
+	mw, err := NewTyped[M](ctx, nil)
+	require.NoError(t, err)
+
+	state := &adk.TypedChatModelAgentState[M]{Messages: []M{
+		makeAssistantMsgWithToolCalls[M]("", []testToolCall{{ID: "", Name: "tool_a", Arguments: "{}"}}),
+	}}
+	_, newState, err := mw.BeforeModelRewriteState(ctx, state, nil)
+	require.NoError(t, err)
+	assert.Len(t, newState.Messages, 1)
+	assert.Empty(t, collectToolResultIDs(newState.Messages))
+}
+
+func TestPatchToolCallsSkipsEmptyIDInNonStrictMode(t *testing.T) {
+	t.Run("Message", testPatchToolCallsSkipsEmptyIDInNonStrictMode[*schema.Message])
+	t.Run("AgenticMessage", testPatchToolCallsSkipsEmptyIDInNonStrictMode[*schema.AgenticMessage])
+}
+
+func testPatchToolCallsReportsEmptyIDInStrictMode[M adk.MessageType](t *testing.T) {
+	ctx := context.Background()
+	mw, err := NewTyped[M](ctx, &Config{Strict: true})
+	require.NoError(t, err)
+
+	messages := []M{
+		makeAssistantMsgWithToolCalls[M]("", []testToolCall{{ID: "", Name: "tool_a", Arguments: "{}"}}),
+	}
+	state := &adk.TypedChatModelAgentState[M]{Messages: messages}
+	_, newState, err := mw.BeforeModelRewriteState(ctx, state, nil)
+	require.Error(t, err)
+	assert.Nil(t, newState)
+	assert.Same(t, any(messages[0]), any(state.Messages[0]))
+	assert.Contains(t, err.Error(), "empty_tool_call_id=1")
+}
+
+func TestPatchToolCallsReportsEmptyIDInStrictMode(t *testing.T) {
+	t.Run("Message", testPatchToolCallsReportsEmptyIDInStrictMode[*schema.Message])
+	t.Run("AgenticMessage", testPatchToolCallsReportsEmptyIDInStrictMode[*schema.AgenticMessage])
+}
+
+func TestPatchToolCallsStrictCountsAllMismatchCategories(t *testing.T) {
+	ctx := context.Background()
+	mw, err := NewTyped[*schema.Message](ctx, &Config{Strict: true})
+	require.NoError(t, err)
+
+	messages := []*schema.Message{
+		makeToolResultMsg[*schema.Message]("orphan", "call_orphan", "tool_orphan"),
+		makeAssistantMsgWithToolCalls[*schema.Message]("", []testToolCall{
+			{ID: "call_missing", Name: "tool_missing", Arguments: "{}"},
+			{ID: "", Name: "tool_empty", Arguments: "{}"},
+			{ID: "call_dup", Name: "tool_dup", Arguments: "{}"},
+		}),
+		makeToolResultMsg[*schema.Message]("result", "call_dup", "tool_dup"),
+		makeToolResultMsg[*schema.Message]("duplicate", "call_dup", "tool_dup"),
+	}
+	state := &adk.TypedChatModelAgentState[*schema.Message]{Messages: messages}
+	_, newState, err := mw.BeforeModelRewriteState(ctx, state, nil)
+	require.Error(t, err)
+	assert.Nil(t, newState)
+	assert.Equal(t, messages, state.Messages)
+	assert.Contains(t, err.Error(), "missing=1")
+	assert.Contains(t, err.Error(), "orphan=1")
+	assert.Contains(t, err.Error(), "duplicate=1")
+	assert.Contains(t, err.Error(), "empty_tool_call_id=1")
+}
+
+func TestPatchToolCallsMarksSyntheticAgenticResult(t *testing.T) {
+	ctx := context.Background()
+	mw, err := NewTyped[*schema.AgenticMessage](ctx, &Config{MarkSynthetic: true})
+	require.NoError(t, err)
+
+	state := &adk.TypedChatModelAgentState[*schema.AgenticMessage]{Messages: []*schema.AgenticMessage{
+		makeAssistantMsgWithToolCalls[*schema.AgenticMessage]("", []testToolCall{{ID: "call_1", Name: "tool_a", Arguments: "{}"}}),
+	}}
+	_, newState, err := mw.BeforeModelRewriteState(ctx, state, nil)
+	require.NoError(t, err)
+	require.Len(t, newState.Messages, 2)
+	assertSyntheticMarker(t, newState.Messages[1], true)
+}
+
+func TestPatchToolCallsMixedAgenticBlockRemovalUpdatesMessage(t *testing.T) {
+	ctx := context.Background()
+	assistant := makeAssistantMsgWithToolCalls[*schema.AgenticMessage]("", []testToolCall{{ID: "call_1", Name: "tool_a", Arguments: "{}"}})
+	mixed := &schema.AgenticMessage{
+		Role: schema.AgenticRoleTypeUser,
+		ContentBlocks: []*schema.ContentBlock{
+			schema.NewContentBlock(&schema.UserInputText{Text: "keep"}),
+			schema.NewContentBlock(&schema.FunctionToolResult{CallID: "call_orphan", Name: "tool_orphan"}),
+			schema.NewContentBlock(&schema.FunctionToolResult{CallID: "call_1", Name: "tool_a"}),
+		},
+	}
+	adk.EnsureMessageID(mixed)
+	originalID := adk.GetMessageID(mixed)
+
+	plan, err := buildAgenticNormalizationPlan(ctx, Config{RemoveOrphanResults: true}, []*schema.AgenticMessage{assistant, mixed})
+	require.NoError(t, err)
+	require.Len(t, plan.messages, 2)
+	require.Len(t, plan.messages[1].ContentBlocks, 2)
+	assert.Equal(t, schema.ContentBlockTypeUserInputText, plan.messages[1].ContentBlocks[0].Type)
+	assert.Equal(t, "call_1", plan.messages[1].ContentBlocks[1].FunctionToolResult.CallID)
+	require.Len(t, plan.events, 1)
+	assert.Equal(t, adk.SessionEventMessageUpdated, plan.events[0].Kind)
+	assert.Equal(t, originalID, plan.events[0].MessageUpdated.MessageID)
+	assert.Equal(t, originalID, adk.GetMessageID(plan.events[0].MessageUpdated.Message))
+}
+
+func TestPatchToolCallsInsertionEventAnchorsReplayOrder(t *testing.T) {
+	ctx := context.Background()
+	assistant := makeAssistantMsgWithToolCalls[*schema.Message]("", []testToolCall{
+		{ID: "call_1", Name: "tool_a", Arguments: "{}"},
+		{ID: "call_2", Name: "tool_b", Arguments: "{}"},
+	})
+	result := makeToolResultMsg[*schema.Message]("result", "call_1", "tool_a")
+	messages := []*schema.Message{assistant, result}
+
+	plan, err := buildMessageNormalizationPlan(ctx, Config{}, messages)
+	require.NoError(t, err)
+	require.Len(t, plan.messages, 3)
+	require.Len(t, plan.events, 1)
+	event := plan.events[0]
+	require.Equal(t, adk.SessionEventMessageInserted, event.Kind)
+	assert.Equal(t, adk.GetMessageID(result), event.MessageInserted.BeforeMessageID)
+
+	replayed := append([]*schema.Message{}, messages...)
+	for i, msg := range replayed {
+		if adk.GetMessageID(msg) == event.MessageInserted.BeforeMessageID {
+			replayed = append(replayed, nil)
+			copy(replayed[i+1:], replayed[i:])
+			replayed[i] = event.MessageInserted.Message
+			break
+		}
+	}
+	assert.Equal(t, []string{"call_2", "call_1"}, collectToolResultIDs(replayed))
+	assert.Equal(t, []string{"call_2", "call_1"}, collectToolResultIDs(plan.messages))
 }
 
 func TestPatchToolCallsAgenticToolSearchResult(t *testing.T) {
