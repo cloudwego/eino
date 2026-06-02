@@ -269,10 +269,10 @@ func (at *typedAgentTool[M]) InvokableRun(ctx context.Context, argumentsInJSON s
 					rp = append(rp, event.RunPath...)
 					event.RunPath = rp
 				}
-				// Tag forwarded events with the child session ID so the parent's
-				// persistence loop knows to skip them (parent persists only events
-				// for its own session). The tag is stripped before user-facing delivery.
-				event.SessionID = childSessionID
+				// Tag forwarded events with the child session ID so live consumers
+				// can distinguish child timeline events and the parent's persistence
+				// loop can skip them.
+				stampAgentToolSessionEvent(event, childSessionID)
 				tmp := copyTypedAgentEvent(event)
 				gen.Send(event)
 				event = tmp
@@ -452,9 +452,39 @@ func newTypedUserMessages[M MessageType](text string) []M {
 	}
 }
 
+func stampAgentToolSessionEvent[M MessageType](event *TypedAgentEvent[M], childSessionID string) {
+	if event == nil || childSessionID == "" {
+		return
+	}
+	if event.EventID == "" {
+		event.EventID = uuid.NewString()
+	}
+	if event.Timestamp.IsZero() {
+		event.Timestamp = newEventTimestamp()
+	}
+	if event.SessionEvent == nil {
+		event.SessionEvent = &SessionEvent[M]{
+			SessionID: childSessionID,
+			EventID:   event.EventID,
+			Timestamp: event.Timestamp,
+		}
+		if event.Output != nil && event.Output.MessageOutput != nil {
+			event.SessionEvent.Kind = SessionEventMessage
+		}
+		return
+	}
+	event.SessionEvent.SessionID = childSessionID
+	if event.SessionEvent.EventID == "" {
+		event.SessionEvent.EventID = event.EventID
+	}
+	if event.SessionEvent.Timestamp.IsZero() {
+		event.SessionEvent.Timestamp = event.Timestamp
+	}
+}
+
 // newTypedInvokableAgentToolRunner creates a runner for the inner agent without
 // SessionService. The child's events are forwarded to the parent's live stream
-// (tagged with childSessionID) and filtered out of the parent's persistence.
+// (tagged with childSessionID on SessionEvent) and filtered out of the parent's persistence.
 // The child's durability relies solely on the bridge checkpoint stored inside
 // agentToolInterruptState — there is no independent child session log.
 // This may change in the future if AgentTool needs cross-turn context
