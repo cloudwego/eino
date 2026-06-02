@@ -144,6 +144,7 @@ func NewTyped[M adk.MessageType](ctx context.Context, cfg *TypedConfig[M]) (adk.
 			cfg.MaxIteration,
 			cfg.Middlewares,
 			append(handlers, cfg.Handlers...),
+			cfg.ModelRetryConfig,
 			cfg.ModelFailoverConfig,
 			cfg.ModelTimeoutConfig,
 		)
