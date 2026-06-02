@@ -1343,21 +1343,20 @@ func TestStripSessionEventFields(t *testing.T) {
 			Timestamp: ts,
 			Err:       errors.New("visible"),
 			SessionEvent: &SessionEvent[*schema.Message]{
-				Kind:    SessionEventTurnEnd,
-				TurnEnd: &TurnEndState[*schema.Message]{},
+				SessionID: "child-1",
+				Kind:      SessionEventTurnEnd,
+				TurnEnd:   &TurnEndState[*schema.Message]{},
 			},
-			SessionID: "child-1",
 		}
 		stripped := stripSessionEventFields(ev)
 		require.NotNil(t, stripped)
 		assert.Nil(t, stripped.SessionEvent)
-		assert.Empty(t, stripped.SessionID)
 		assert.Equal(t, ts, stripped.Timestamp)
 		assert.EqualError(t, stripped.Err, "visible")
 	})
 
-	t.Run("SessionID alone is stripped", func(t *testing.T) {
-		ev := &AgentEvent{SessionID: "child-1"}
+	t.Run("SessionEvent with SessionID alone is stripped", func(t *testing.T) {
+		ev := &AgentEvent{SessionEvent: &SessionEvent[*schema.Message]{SessionID: "child-1"}}
 		stripped := stripSessionEventFields(ev)
 		assert.Nil(t, stripped)
 	})
