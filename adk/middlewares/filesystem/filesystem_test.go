@@ -577,6 +577,127 @@ func TestExecuteTool(t *testing.T) {
 	}
 }
 
+func TestExecuteToolInputModes(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("default schema remains legacy command only", func(t *testing.T) {
+		executeTool, err := newExecuteTool(&mockShellBackend{resp: &filesystem.ExecuteResponse{Output: "ok"}}, "", "")
+		assert.NoError(t, err)
+
+		info, err := executeTool.Info(ctx)
+		assert.NoError(t, err)
+		js, err := info.ParamsOneOf.ToJSONSchema()
+		assert.NoError(t, err)
+		assert.NotNil(t, js)
+		assert.Equal(t, 1, js.Properties.Len())
+		_, ok := js.Properties.Get("command")
+		assert.True(t, ok)
+		_, ok = js.Properties.Get("mode")
+		assert.False(t, ok)
+		_, ok = js.Properties.Get("wait_ms")
+		assert.False(t, ok)
+	})
+
+	t.Run("legacy non-streaming forwards only command", func(t *testing.T) {
+		shell := &mockShellBackend{resp: &filesystem.ExecuteResponse{Output: "ok"}}
+		executeTool, err := newExecuteTool(shell, "", "", ExecuteToolInputModeLegacy)
+		assert.NoError(t, err)
+
+		result, err := invokeTool(t, executeTool, `{"command": "echo ok"}`)
+		assert.NoError(t, err)
+		assert.Equal(t, "ok", result)
+		assert.Equal(t, "echo ok", shell.req.Command)
+		assert.Empty(t, shell.req.Mode)
+		assert.Zero(t, shell.req.WaitMS)
+		assert.False(t, shell.req.RunInBackendGround)
+	})
+
+	t.Run("rich non-streaming forwards mode and wait_ms", func(t *testing.T) {
+		shell := &mockShellBackend{resp: &filesystem.ExecuteResponse{Output: "ok"}}
+		executeTool, err := newExecuteTool(shell, "", "", ExecuteToolInputModeRich)
+		assert.NoError(t, err)
+
+		result, err := invokeTool(t, executeTool, `{"command": "npm test", "mode": "foreground", "wait_ms": 1200}`)
+		assert.NoError(t, err)
+		assert.Equal(t, "ok", result)
+		assert.Equal(t, "npm test", shell.req.Command)
+		assert.Equal(t, filesystem.ExecuteModeForeground, shell.req.Mode)
+		assert.Equal(t, int64(1200), shell.req.WaitMS)
+		assert.False(t, shell.req.RunInBackendGround)
+	})
+
+	t.Run("rich background sets compatibility flag", func(t *testing.T) {
+		shell := &mockShellBackend{resp: &filesystem.ExecuteResponse{Output: "ok"}}
+		executeTool, err := newExecuteTool(shell, "", "", ExecuteToolInputModeRich)
+		assert.NoError(t, err)
+
+		_, err = invokeTool(t, executeTool, `{"command": "npm run dev", "mode": "background"}`)
+		assert.NoError(t, err)
+		assert.Equal(t, filesystem.ExecuteModeBackground, shell.req.Mode)
+		assert.True(t, shell.req.RunInBackendGround)
+	})
+
+	t.Run("rich auto forwards auto mode", func(t *testing.T) {
+		shell := &mockShellBackend{resp: &filesystem.ExecuteResponse{Output: "ok"}}
+		executeTool, err := newExecuteTool(shell, "", "", ExecuteToolInputModeRich)
+		assert.NoError(t, err)
+
+		_, err = invokeTool(t, executeTool, `{"command": "long command", "mode": "auto"}`)
+		assert.NoError(t, err)
+		assert.Equal(t, filesystem.ExecuteModeAuto, shell.req.Mode)
+		assert.False(t, shell.req.RunInBackendGround)
+	})
+
+	t.Run("rich empty mode preserves backend default", func(t *testing.T) {
+		shell := &mockShellBackend{resp: &filesystem.ExecuteResponse{Output: "ok"}}
+		executeTool, err := newExecuteTool(shell, "", "", ExecuteToolInputModeRich)
+		assert.NoError(t, err)
+
+		_, err = invokeTool(t, executeTool, `{"command": "echo ok"}`)
+		assert.NoError(t, err)
+		assert.Empty(t, shell.req.Mode)
+		assert.False(t, shell.req.RunInBackendGround)
+	})
+
+	t.Run("rich unknown mode is rejected before backend execution", func(t *testing.T) {
+		shell := &mockShellBackend{resp: &filesystem.ExecuteResponse{Output: "ok"}}
+		executeTool, err := newExecuteTool(shell, "", "", ExecuteToolInputModeRich)
+		assert.NoError(t, err)
+
+		_, err = invokeTool(t, executeTool, `{"command": "echo ok", "mode": "detached"}`)
+		assert.Error(t, err)
+		assert.Nil(t, shell.req)
+	})
+
+	t.Run("rich negative wait_ms is rejected before backend execution", func(t *testing.T) {
+		shell := &mockShellBackend{resp: &filesystem.ExecuteResponse{Output: "ok"}}
+		executeTool, err := newExecuteTool(shell, "", "", ExecuteToolInputModeRich)
+		assert.NoError(t, err)
+
+		_, err = invokeTool(t, executeTool, `{"command": "echo ok", "wait_ms": -1}`)
+		assert.Error(t, err)
+		assert.Nil(t, shell.req)
+	})
+
+	t.Run("rich schema exposes optional mode and wait_ms", func(t *testing.T) {
+		executeTool, err := newExecuteTool(&mockShellBackend{resp: &filesystem.ExecuteResponse{Output: "ok"}}, "", "", ExecuteToolInputModeRich)
+		assert.NoError(t, err)
+
+		info, err := executeTool.Info(ctx)
+		assert.NoError(t, err)
+		js, err := info.ParamsOneOf.ToJSONSchema()
+		assert.NoError(t, err)
+		assert.NotNil(t, js)
+		assert.Equal(t, 3, js.Properties.Len())
+		_, ok := js.Properties.Get("command")
+		assert.True(t, ok)
+		_, ok = js.Properties.Get("mode")
+		assert.True(t, ok)
+		_, ok = js.Properties.Get("wait_ms")
+		assert.True(t, ok)
+	})
+}
+
 func ptrOf[T any](t T) *T {
 	return &t
 }
@@ -584,9 +705,11 @@ func ptrOf[T any](t T) *T {
 type mockShellBackend struct {
 	filesystem.Backend
 	resp *filesystem.ExecuteResponse
+	req  *filesystem.ExecuteRequest
 }
 
 func (m *mockShellBackend) Execute(ctx context.Context, req *filesystem.ExecuteRequest) (*filesystem.ExecuteResponse, error) {
+	m.req = req
 	return m.resp, nil
 }
 
@@ -656,6 +779,113 @@ func TestGetFilesystemTools(t *testing.T) {
 	})
 }
 
+func TestExecuteToolConfig(t *testing.T) {
+	ctx := context.Background()
+	backend := setupTestBackend()
+
+	t.Run("unknown input mode rejected", func(t *testing.T) {
+		_, err := New(ctx, &MiddlewareConfig{
+			Shell: &mockShellBackend{resp: &filesystem.ExecuteResponse{Output: "ok"}},
+			ExecuteToolConfig: &ExecuteToolConfig{
+				InputMode: ExecuteToolInputMode("unknown"),
+			},
+		})
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "unknown execute tool input mode")
+	})
+
+	t.Run("disable skips execute registration", func(t *testing.T) {
+		tools, err := getFilesystemTools(ctx, &MiddlewareConfig{
+			Backend: backend,
+			Shell:   &mockShellBackend{resp: &filesystem.ExecuteResponse{Output: "ok"}},
+			ExecuteToolConfig: &ExecuteToolConfig{
+				ToolConfig: ToolConfig{Disable: true},
+			},
+		})
+		assert.NoError(t, err)
+		assert.Len(t, tools, 6)
+		for _, to := range tools {
+			info, err := to.Info(ctx)
+			assert.NoError(t, err)
+			assert.NotEqual(t, ToolNameExecute, info.Name)
+		}
+	})
+
+	t.Run("custom tool overrides built-in execute", func(t *testing.T) {
+		customTool, err := newLsTool(backend, "custom_execute", "custom execute")
+		assert.NoError(t, err)
+		tools, err := getFilesystemTools(ctx, &MiddlewareConfig{
+			Shell: &mockShellBackend{resp: &filesystem.ExecuteResponse{Output: "ok"}},
+			ExecuteToolConfig: &ExecuteToolConfig{
+				ToolConfig: ToolConfig{CustomTool: customTool},
+			},
+		})
+		assert.NoError(t, err)
+		assert.Len(t, tools, 1)
+		assert.Equal(t, customTool, tools[0])
+	})
+
+	t.Run("name and desc apply to built-in execute", func(t *testing.T) {
+		desc := "custom execute desc"
+		tools, err := getFilesystemTools(ctx, &MiddlewareConfig{
+			Shell: &mockShellBackend{resp: &filesystem.ExecuteResponse{Output: "ok"}},
+			ExecuteToolConfig: &ExecuteToolConfig{
+				ToolConfig: ToolConfig{
+					Name: "run",
+					Desc: &desc,
+				},
+			},
+		})
+		assert.NoError(t, err)
+		assert.Len(t, tools, 1)
+		info, err := tools[0].Info(ctx)
+		assert.NoError(t, err)
+		assert.Equal(t, "run", info.Name)
+		assert.Equal(t, desc, info.Desc)
+	})
+
+	t.Run("deprecated config passes execute tool config through", func(t *testing.T) {
+		m, err := NewMiddleware(ctx, &Config{
+			Shell: &mockShellBackend{resp: &filesystem.ExecuteResponse{Output: "ok"}},
+			ExecuteToolConfig: &ExecuteToolConfig{
+				ToolConfig: ToolConfig{Name: "run"},
+				InputMode:  ExecuteToolInputModeRich,
+			},
+		})
+		assert.NoError(t, err)
+		assert.Len(t, m.AdditionalTools, 1)
+		info, err := m.AdditionalTools[0].Info(ctx)
+		assert.NoError(t, err)
+		assert.Equal(t, "run", info.Name)
+		js, err := info.ParamsOneOf.ToJSONSchema()
+		assert.NoError(t, err)
+		_, ok := js.Properties.Get("wait_ms")
+		assert.True(t, ok)
+	})
+}
+
+func TestGetFilesystemTools_NoExecuteLifecycleTools(t *testing.T) {
+	ctx := context.Background()
+	tools, err := getFilesystemTools(ctx, &MiddlewareConfig{
+		Backend: setupTestBackend(),
+		Shell:   &mockShellBackend{resp: &filesystem.ExecuteResponse{Output: "ok"}},
+	})
+	assert.NoError(t, err)
+
+	toolNames := make(map[string]bool)
+	for _, to := range tools {
+		info, err := to.Info(ctx)
+		assert.NoError(t, err)
+		toolNames[info.Name] = true
+	}
+
+	assert.True(t, toolNames[ToolNameExecute])
+	assert.False(t, toolNames["execute_output"])
+	assert.False(t, toolNames["execute_wait"])
+	assert.False(t, toolNames["execute_stop"])
+	assert.False(t, toolNames["execute_list"])
+}
+
 func TestNew(t *testing.T) {
 	ctx := context.Background()
 	backend := setupTestBackend()
@@ -666,10 +896,24 @@ func TestNew(t *testing.T) {
 		assert.Contains(t, err.Error(), "config should not be nil")
 	})
 
-	t.Run("nil backend returns error", func(t *testing.T) {
+	t.Run("all execution backends nil returns error", func(t *testing.T) {
 		_, err := New(ctx, &MiddlewareConfig{Backend: nil})
 		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "backend should not be nil")
+		assert.Contains(t, err.Error(), "at least one of backend, shell, or streaming shell should be set")
+	})
+
+	t.Run("shell-only config registers execute tool", func(t *testing.T) {
+		m, err := New(ctx, &MiddlewareConfig{
+			Shell: &mockShellBackend{resp: &filesystem.ExecuteResponse{Output: "ok"}},
+		})
+		assert.NoError(t, err)
+
+		fm, ok := m.(*typedFilesystemMiddleware[*schema.Message])
+		assert.True(t, ok)
+		assert.Len(t, fm.additionalTools, 1)
+		info, err := fm.additionalTools[0].Info(ctx)
+		assert.NoError(t, err)
+		assert.Equal(t, ToolNameExecute, info.Name)
 	})
 
 	t.Run("valid config with default settings", func(t *testing.T) {
@@ -1637,7 +1881,7 @@ func TestGetFilesystemTools_NilBackend(t *testing.T) {
 			Backend:        nil,
 			StreamingShell: mockSS,
 		}
-		// Validate should fail, but getFilesystemTools itself handles nil backend gracefully
+		assert.NoError(t, config.Validate())
 		tools, err := getFilesystemTools(ctx, config)
 		assert.NoError(t, err)
 		// Only execute tool should be returned since backend is nil
@@ -1700,9 +1944,12 @@ func TestGetFilesystemTools_PartialDisable(t *testing.T) {
 	assert.Contains(t, toolNames, ToolNameGrep)
 }
 
-type mockStreamingShell struct{}
+type mockStreamingShell struct {
+	req *filesystem.ExecuteRequest
+}
 
 func (m *mockStreamingShell) ExecuteStreaming(ctx context.Context, input *filesystem.ExecuteRequest) (*schema.StreamReader[*filesystem.ExecuteResponse], error) {
+	m.req = input
 	sr, sw := schema.Pipe[*filesystem.ExecuteResponse](10)
 	go func() {
 		defer sw.Close()
@@ -1946,6 +2193,118 @@ func TestNewStreamingExecuteTool(t *testing.T) {
 		assert.Equal(t, "custom_execute", info.Name)
 		assert.Equal(t, "custom desc", info.Desc)
 	})
+
+	t.Run("legacy streaming forwards only command", func(t *testing.T) {
+		streamingShell := &mockStreamingShell{}
+		executeTool, err := newStreamingExecuteTool(streamingShell, "", "", ExecuteToolInputModeLegacy)
+		assert.NoError(t, err)
+
+		st := executeTool.(tool.StreamableTool)
+		sr, err := st.StreamableRun(context.Background(), `{"command": "echo hello"}`)
+		assert.NoError(t, err)
+		defer sr.Close()
+		for {
+			_, recvErr := sr.Recv()
+			if recvErr == io.EOF {
+				break
+			}
+			assert.NoError(t, recvErr)
+		}
+		assert.Equal(t, "echo hello", streamingShell.req.Command)
+		assert.Empty(t, streamingShell.req.Mode)
+		assert.Zero(t, streamingShell.req.WaitMS)
+		assert.False(t, streamingShell.req.RunInBackendGround)
+	})
+
+	t.Run("rich streaming forwards mode and wait_ms", func(t *testing.T) {
+		tests := []struct {
+			name                string
+			input               string
+			wantCommand         string
+			wantMode            filesystem.ExecuteMode
+			wantWaitMS          int64
+			wantBackendGround   bool
+			wantBackendExecuted bool
+			wantErr             bool
+		}{
+			{
+				name:                "background",
+				input:               `{"command": "npm run dev", "mode": "background", "wait_ms": 1500}`,
+				wantCommand:         "npm run dev",
+				wantMode:            filesystem.ExecuteModeBackground,
+				wantWaitMS:          1500,
+				wantBackendGround:   true,
+				wantBackendExecuted: true,
+			},
+			{
+				name:                "foreground",
+				input:               `{"command": "go test ./...", "mode": "foreground", "wait_ms": 500}`,
+				wantCommand:         "go test ./...",
+				wantMode:            filesystem.ExecuteModeForeground,
+				wantWaitMS:          500,
+				wantBackendExecuted: true,
+			},
+			{
+				name:                "auto",
+				input:               `{"command": "long command", "mode": "auto"}`,
+				wantCommand:         "long command",
+				wantMode:            filesystem.ExecuteModeAuto,
+				wantBackendExecuted: true,
+			},
+			{
+				name:                "empty mode",
+				input:               `{"command": "echo ok"}`,
+				wantCommand:         "echo ok",
+				wantBackendExecuted: true,
+			},
+			{
+				name:    "negative wait_ms",
+				input:   `{"command": "echo ok", "wait_ms": -1}`,
+				wantErr: true,
+			},
+		}
+
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				streamingShell := &mockStreamingShell{}
+				executeTool, err := newStreamingExecuteTool(streamingShell, "", "", ExecuteToolInputModeRich)
+				assert.NoError(t, err)
+
+				st := executeTool.(tool.StreamableTool)
+				sr, err := st.StreamableRun(context.Background(), tt.input)
+				if tt.wantErr {
+					assert.Error(t, err)
+					assert.Nil(t, streamingShell.req)
+					return
+				}
+				assert.NoError(t, err)
+				defer sr.Close()
+				for {
+					_, recvErr := sr.Recv()
+					if recvErr == io.EOF {
+						break
+					}
+					assert.NoError(t, recvErr)
+				}
+				assert.True(t, tt.wantBackendExecuted)
+				assert.Equal(t, tt.wantCommand, streamingShell.req.Command)
+				assert.Equal(t, tt.wantMode, streamingShell.req.Mode)
+				assert.Equal(t, tt.wantWaitMS, streamingShell.req.WaitMS)
+				assert.Equal(t, tt.wantBackendGround, streamingShell.req.RunInBackendGround)
+			})
+		}
+	})
+
+	t.Run("rich streaming rejects invalid input before backend execution", func(t *testing.T) {
+		streamingShell := &mockStreamingShell{}
+		executeTool, err := newStreamingExecuteTool(streamingShell, "", "", ExecuteToolInputModeRich)
+		assert.NoError(t, err)
+
+		st := executeTool.(tool.StreamableTool)
+		_, err = st.StreamableRun(context.Background(), `{"command": "echo hello", "mode": "invalid"}`)
+		assert.Error(t, err)
+		assert.Nil(t, streamingShell.req)
+	})
 }
 
 func TestNew_StreamingShell(t *testing.T) {
@@ -1984,10 +2343,10 @@ func TestNewMiddleware_Validation(t *testing.T) {
 		assert.Contains(t, err.Error(), "config should not be nil")
 	})
 
-	t.Run("nil backend returns error", func(t *testing.T) {
+	t.Run("all execution backends nil returns error", func(t *testing.T) {
 		_, err := NewMiddleware(ctx, &Config{Backend: nil})
 		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "backend should not be nil")
+		assert.Contains(t, err.Error(), "at least one of backend, shell, or streaming shell should be set")
 	})
 
 	t.Run("both Shell and StreamingShell returns error", func(t *testing.T) {
@@ -2010,11 +2369,11 @@ func TestMiddlewareConfig_Validate(t *testing.T) {
 		assert.Contains(t, err.Error(), "config should not be nil")
 	})
 
-	t.Run("nil backend returns error", func(t *testing.T) {
+	t.Run("all execution backends nil returns error", func(t *testing.T) {
 		c := &MiddlewareConfig{}
 		err := c.Validate()
 		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "backend should not be nil")
+		assert.Contains(t, err.Error(), "at least one of backend, shell, or streaming shell should be set")
 	})
 
 	t.Run("both shells returns error", func(t *testing.T) {
@@ -2031,6 +2390,14 @@ func TestMiddlewareConfig_Validate(t *testing.T) {
 	t.Run("valid config passes", func(t *testing.T) {
 		c := &MiddlewareConfig{
 			Backend: setupTestBackend(),
+		}
+		err := c.Validate()
+		assert.NoError(t, err)
+	})
+
+	t.Run("shell-only config passes", func(t *testing.T) {
+		c := &MiddlewareConfig{
+			Shell: &mockShellBackend{},
 		}
 		err := c.Validate()
 		assert.NoError(t, err)
@@ -2134,11 +2501,11 @@ func TestConfig_Validate(t *testing.T) {
 		assert.Error(t, err)
 	})
 
-	t.Run("nil backend returns error", func(t *testing.T) {
+	t.Run("all execution backends nil returns error", func(t *testing.T) {
 		c := &Config{}
 		err := c.Validate()
 		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "backend should not be nil")
+		assert.Contains(t, err.Error(), "at least one of backend, shell, or streaming shell should be set")
 	})
 
 	t.Run("both shells returns error", func(t *testing.T) {
@@ -2157,6 +2524,26 @@ func TestConfig_Validate(t *testing.T) {
 		}
 		err := c.Validate()
 		assert.NoError(t, err)
+	})
+
+	t.Run("shell-only config passes", func(t *testing.T) {
+		c := &Config{
+			Shell: &mockShellBackend{},
+		}
+		err := c.Validate()
+		assert.NoError(t, err)
+	})
+
+	t.Run("unknown execute input mode returns error", func(t *testing.T) {
+		c := &Config{
+			Shell: &mockShellBackend{},
+			ExecuteToolConfig: &ExecuteToolConfig{
+				InputMode: ExecuteToolInputMode("invalid"),
+			},
+		}
+		err := c.Validate()
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "unknown execute tool input mode")
 	})
 }
 
@@ -2255,6 +2642,30 @@ func TestNewMiddleware_WithShell(t *testing.T) {
 		})
 		assert.NoError(t, err)
 		assert.Len(t, m.AdditionalTools, 7)
+	})
+
+	t.Run("shell-only config skips large tool result offloading", func(t *testing.T) {
+		m, err := NewMiddleware(ctx, &Config{
+			Shell: &mockShellBackend{resp: &filesystem.ExecuteResponse{Output: "ok"}},
+		})
+		assert.NoError(t, err)
+		assert.Len(t, m.AdditionalTools, 1)
+		assert.Nil(t, m.WrapToolCall.Invokable)
+		assert.Nil(t, m.WrapToolCall.Streamable)
+		assert.Nil(t, m.WrapToolCall.EnhancedInvokable)
+		assert.Nil(t, m.WrapToolCall.EnhancedStreamable)
+	})
+
+	t.Run("streaming shell-only config skips large tool result offloading", func(t *testing.T) {
+		m, err := NewMiddleware(ctx, &Config{
+			StreamingShell: &mockStreamingShell{},
+		})
+		assert.NoError(t, err)
+		assert.Len(t, m.AdditionalTools, 1)
+		assert.Nil(t, m.WrapToolCall.Invokable)
+		assert.Nil(t, m.WrapToolCall.Streamable)
+		assert.Nil(t, m.WrapToolCall.EnhancedInvokable)
+		assert.Nil(t, m.WrapToolCall.EnhancedStreamable)
 	})
 }
 
