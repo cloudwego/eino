@@ -147,6 +147,10 @@ type GlobInfoRequest struct {
 
 	// Path is the base directory from which to start the search.
 	Path string
+
+	// FollowSymlinks requests traversal of symlink directories when supported.
+	// It does not change the matching semantics for symlink file entries.
+	FollowSymlinks bool
 }
 
 // WriteRequest contains parameters for writing file content.

@@ -97,8 +97,9 @@ func (b *filesystemBackend) list(ctx context.Context) ([]Skill, error) {
 
 	pattern := "*/" + skillFileName
 	entries, err := b.backend.GlobInfo(ctx, &filesystem.GlobInfoRequest{
-		Pattern: pattern,
-		Path:    b.baseDir,
+		Pattern:        pattern,
+		Path:           b.baseDir,
+		FollowSymlinks: true,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to glob skill files: %w", err)

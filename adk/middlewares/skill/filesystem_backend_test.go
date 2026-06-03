@@ -71,6 +71,23 @@ func TestNewBackendFromFilesystem(t *testing.T) {
 func TestFilesystemBackend_List(t *testing.T) {
 	ctx := context.Background()
 
+	t.Run("glob follows symlinks", func(t *testing.T) {
+		fsBackend := &recordingGlobBackend{}
+		backend, err := NewBackendFromFilesystem(ctx, &BackendFromFilesystemConfig{
+			Backend: fsBackend,
+			BaseDir: "/skills",
+		})
+		require.NoError(t, err)
+
+		skills, err := backend.List(ctx)
+		assert.NoError(t, err)
+		assert.Empty(t, skills)
+		require.NotNil(t, fsBackend.globReq)
+		assert.Equal(t, "/skills", fsBackend.globReq.Path)
+		assert.Equal(t, "*/SKILL.md", fsBackend.globReq.Pattern)
+		assert.True(t, fsBackend.globReq.FollowSymlinks)
+	})
+
 	t.Run("empty directory returns empty list", func(t *testing.T) {
 		fsBackend := filesystem.NewInMemoryBackend()
 		_ = fsBackend.Write(ctx, &filesystem.WriteRequest{
@@ -254,6 +271,35 @@ Content`,
 		assert.Len(t, skills, 1)
 		assert.Equal(t, "valid-skill", skills[0].Name)
 	})
+}
+
+type recordingGlobBackend struct {
+	globReq *filesystem.GlobInfoRequest
+}
+
+func (b *recordingGlobBackend) LsInfo(context.Context, *filesystem.LsInfoRequest) ([]filesystem.FileInfo, error) {
+	return nil, nil
+}
+
+func (b *recordingGlobBackend) Read(context.Context, *filesystem.ReadRequest) (*filesystem.FileContent, error) {
+	return nil, nil
+}
+
+func (b *recordingGlobBackend) GrepRaw(context.Context, *filesystem.GrepRequest) ([]filesystem.GrepMatch, error) {
+	return nil, nil
+}
+
+func (b *recordingGlobBackend) GlobInfo(_ context.Context, req *filesystem.GlobInfoRequest) ([]filesystem.FileInfo, error) {
+	b.globReq = req
+	return nil, nil
+}
+
+func (b *recordingGlobBackend) Write(context.Context, *filesystem.WriteRequest) error {
+	return nil
+}
+
+func (b *recordingGlobBackend) Edit(context.Context, *filesystem.EditRequest) error {
+	return nil
 }
 
 func TestFilesystemBackend_Get(t *testing.T) {
