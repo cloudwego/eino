@@ -267,4 +267,102 @@ Bad examples (avoid these):
 - execute(command="find . -name '*.py'")  # 改用 glob 工具
 - execute(command="grep -r 'pattern' .")  # 改用 grep 工具
 `
+
+	RichExecuteToolDesc = `
+Executes a given command in the sandbox environment with proper handling and security measures.
+
+Before executing the command, please follow these steps:
+
+1. Directory Verification:
+- If the command will create new directories or files, first use the ls tool to verify the parent directory exists and is the correct location
+- For example, before running "mkdir foo/bar", first use ls to check that "foo" exists and is the intended parent directory
+
+2. Command Execution:
+- Always quote file paths that contain spaces with double quotes (e.g., cd "path with spaces/file.txt")
+- Examples of proper quoting:
+- cd "/Users/name/My Documents" (correct)
+- cd /Users/name/My Documents (incorrect - will fail)
+- python "/path/with spaces/script.py" (correct)
+- python /path/with spaces/script.py (incorrect - will fail)
+- After ensuring proper quoting, execute the command
+- Capture the output of the command
+
+Usage notes:
+- The command parameter is required
+- The optional mode parameter can be "foreground", "background", or "auto"
+- Use mode "foreground" for commands expected to finish and not continue in the background
+- Use mode "background" for servers, watchers, and long-running commands
+- Use mode "auto" to let the backend decide whether to yield/background when supported
+- The optional wait_ms parameter is a hint for foreground wait or startup preview time and may be clamped or ignored by the backend
+- If the backend returns shell-visible handles, continue using ordinary execute calls with the returned commands
+- Commands run in an isolated sandbox environment
+- Returns combined stdout/stderr output with exit code
+- If the output is very large, it may be truncated
+- VERY IMPORTANT: You MUST avoid using search commands like find and grep. Instead use the grep, glob tools to search. You MUST avoid read tools like cat, head, tail, and use read_file to read files.
+- When issuing multiple commands, use the ';' or '&&' operator to separate them. DO NOT use newlines (newlines are ok in quoted strings)
+- Use '&&' when commands depend on each other (e.g., "mkdir dir && cd dir")
+- Use ';' only when you need to run commands sequentially but don't care if earlier commands fail
+- Try to maintain your current working directory throughout the session by using absolute paths and avoiding usage of cd
+
+Examples:
+Good examples:
+- execute(command="pytest /foo/bar/tests", mode="foreground")
+- execute(command="python /path/to/script.py", mode="foreground", wait_ms=1000)
+- execute(command="npm run dev", mode="background", wait_ms=1000)
+
+Bad examples (avoid these):
+- execute(command="cd /foo/bar && pytest tests")  # Use absolute path instead
+- execute(command="cat file.txt")  # Use read_file tool instead
+- execute(command="find . -name '*.py'")  # Use glob tool instead
+- execute(command="grep -r 'pattern' .")  # Use grep tool instead
+`
+
+	RichExecuteToolDescChinese = `
+在沙箱环境中执行给定命令，具有适当的处理和安全措施。
+
+执行命令前，请按照以下步骤操作：
+
+1. 目录验证：
+- 如果命令将创建新目录或文件，首先使用 ls 工具验证父目录是否存在且是正确的位置
+- 例如，在运行 "mkdir foo/bar" 之前，首先使用 ls 检查 "foo" 是否存在且是预期的父目录
+
+2. 命令执行：
+- 始终用双引号引用包含空格的文件路径（例如，cd "path with spaces/file.txt"）
+- 正确引用的示例：
+- cd "/Users/name/My Documents"（正确）
+- cd /Users/name/My Documents（错误 - 将失败）
+- python "/path/with spaces/script.py"（正确）
+- python /path/with spaces/script.py（错误 - 将失败）
+- 确保正确引用后，执行命令
+- 捕获命令的输出
+
+使用说明：
+- command 参数是必需的
+- 可选的 mode 参数可以是 "foreground"、"background" 或 "auto"
+- mode "foreground" 用于预期会完成且不应在后台继续运行的命令
+- mode "background" 用于服务器、监听器和长时间运行的命令
+- mode "auto" 让后端在支持时决定是否让出或转入后台
+- 可选的 wait_ms 参数是前台等待或启动预览时间提示，后端可能会限制或忽略它
+- 如果后端返回 shell 可见的句柄，请继续用普通 execute 调用执行返回的命令
+- 命令在隔离的沙箱环境中运行
+- 返回合并的 stdout/stderr 输出和退出代码
+- 如果输出非常大，可能会被截断
+- 非常重要：你必须避免使用 find 和 grep 等搜索命令。请改用 grep、glob 工具进行搜索。你必须避免使用 cat、head、tail 等读取工具，请使用 read_file 读取文件
+- 发出多个命令时，使用 ';' 或 '&&' 运算符分隔它们。不要使用换行符（引号字符串中的换行符是可以的）
+- 当命令相互依赖时使用 '&&'（例如，"mkdir dir && cd dir"）
+- 仅当你需要按顺序运行命令但不关心早期命令是否失败时使用 ';'
+- 尝试通过使用绝对路径并避免使用 cd 来在整个会话中保持当前工作目录
+
+示例：
+好的示例：
+- execute(command="pytest /foo/bar/tests", mode="foreground")
+- execute(command="python /path/to/script.py", mode="foreground", wait_ms=1000)
+- execute(command="npm run dev", mode="background", wait_ms=1000)
+
+不好的示例（避免这些）：
+- execute(command="cd /foo/bar && pytest tests")  # 改用绝对路径
+- execute(command="cat file.txt")  # 改用 read_file 工具
+- execute(command="find . -name '*.py'")  # 改用 glob 工具
+- execute(command="grep -r 'pattern' .")  # 改用 grep 工具
+`
 )

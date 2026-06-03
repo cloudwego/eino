@@ -27,6 +27,8 @@ import (
 	"go.uber.org/mock/gomock"
 
 	"github.com/cloudwego/eino/adk"
+	"github.com/cloudwego/eino/adk/filesystem"
+	filesystem2 "github.com/cloudwego/eino/adk/middlewares/filesystem"
 	"github.com/cloudwego/eino/adk/prebuilt/planexecute"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
@@ -102,6 +104,12 @@ func (m *mockSearchTool) InvokableRun(context.Context, string, ...tool.Option) (
 	return "latest news search result", nil
 }
 
+type deepMockShell struct{}
+
+func (m *deepMockShell) Execute(ctx context.Context, req *filesystem.ExecuteRequest) (*filesystem.ExecuteResponse, error) {
+	return &filesystem.ExecuteResponse{Output: "ok"}, nil
+}
+
 func TestGenModelInput(t *testing.T) {
 	ctx := context.Background()
 
@@ -148,6 +156,117 @@ func TestWriteTodos(t *testing.T) {
 	result, err := wt.InvokableRun(context.Background(), args)
 	assert.NoError(t, err)
 	assert.Equal(t, fmt.Sprintf("Updated todo list to %s", todos), result)
+}
+
+func TestDeepAgentFilesystemExecuteDefaults(t *testing.T) {
+	ctx := context.Background()
+	backend := filesystem.NewInMemoryBackend()
+
+	tests := []struct {
+		name        string
+		cfg         *Config
+		wantToolLen int
+	}{
+		{
+			name: "backend and shell",
+			cfg: &Config{
+				WithoutWriteTodos: true,
+				Backend:           backend,
+				Shell:             &deepMockShell{},
+			},
+			wantToolLen: 7,
+		},
+		{
+			name: "shell only",
+			cfg: &Config{
+				WithoutWriteTodos: true,
+				Shell:             &deepMockShell{},
+			},
+			wantToolLen: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			handlers, err := buildTypedBuiltinAgentMiddlewares(ctx, tt.cfg)
+			assert.NoError(t, err)
+			assert.Len(t, handlers, 1)
+
+			_, runCtx, err := handlers[0].BeforeAgent(ctx, &adk.ChatModelAgentContext{})
+			assert.NoError(t, err)
+			assert.NotNil(t, runCtx)
+			assert.Len(t, runCtx.Tools, tt.wantToolLen)
+
+			toolNames := make(map[string]bool)
+			var executeTool tool.BaseTool
+			for _, tl := range runCtx.Tools {
+				info, infoErr := tl.Info(ctx)
+				assert.NoError(t, infoErr)
+				toolNames[info.Name] = true
+				if info.Name == filesystem2.ToolNameExecute {
+					executeTool = tl
+				}
+			}
+
+			assert.NotNil(t, executeTool)
+			assert.False(t, toolNames["execute_output"])
+			assert.False(t, toolNames["execute_wait"])
+			assert.False(t, toolNames["execute_stop"])
+			assert.False(t, toolNames["execute_list"])
+
+			info, err := executeTool.Info(ctx)
+			assert.NoError(t, err)
+			js, err := info.ParamsOneOf.ToJSONSchema()
+			assert.NoError(t, err)
+			_, ok := js.Properties.Get("command")
+			assert.True(t, ok)
+			_, ok = js.Properties.Get("mode")
+			assert.False(t, ok)
+			_, ok = js.Properties.Get("wait_ms")
+			assert.False(t, ok)
+		})
+	}
+}
+
+func TestDeepAgentManualFilesystemMiddlewarePath(t *testing.T) {
+	ctx := context.Background()
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	cm := mockModel.NewMockToolCallingChatModel(ctrl)
+	cm.EXPECT().WithTools(gomock.Any()).Return(cm, nil).AnyTimes()
+
+	fsMW, err := filesystem2.New(ctx, &filesystem2.MiddlewareConfig{
+		Shell: &deepMockShell{},
+		ExecuteToolConfig: &filesystem2.ExecuteToolConfig{
+			InputMode: filesystem2.ExecuteToolInputModeRich,
+		},
+	})
+	assert.NoError(t, err)
+
+	_, runCtx, err := fsMW.BeforeAgent(ctx, &adk.ChatModelAgentContext{})
+	assert.NoError(t, err)
+	assert.Len(t, runCtx.Tools, 1)
+	info, err := runCtx.Tools[0].Info(ctx)
+	assert.NoError(t, err)
+	assert.Equal(t, filesystem2.ToolNameExecute, info.Name)
+	js, err := info.ParamsOneOf.ToJSONSchema()
+	assert.NoError(t, err)
+	_, ok := js.Properties.Get("mode")
+	assert.True(t, ok)
+	_, ok = js.Properties.Get("wait_ms")
+	assert.True(t, ok)
+
+	agent, err := New(ctx, &Config{
+		Name:                   "deep",
+		Description:            "deep agent",
+		ChatModel:              cm,
+		WithoutWriteTodos:      true,
+		WithoutGeneralSubAgent: true,
+		Handlers:               []adk.ChatModelAgentMiddleware{fsMW},
+	})
+	assert.NoError(t, err)
+	assert.NotNil(t, agent)
 }
 
 func TestDeepSubAgentSharesSessionValues(t *testing.T) {
