@@ -65,14 +65,20 @@ type TypedConfig[M adk.MessageType] struct {
 
 	// Backend provides filesystem operations used by tools and offloading.
 	// If set, filesystem tools (read_file, write_file, edit_file, glob, grep) will be registered.
+	// For advanced filesystem middleware configuration, leave Backend, Shell, and StreamingShell empty
+	// and pass a manually constructed filesystem middleware through Handlers.
 	// Optional.
 	Backend filesystem.Backend
 	// Shell provides shell command execution capability.
 	// If set, an execute tool will be registered to support shell command execution.
+	// For advanced filesystem middleware configuration, leave Backend, Shell, and StreamingShell empty
+	// and pass a manually constructed filesystem middleware through Handlers.
 	// Optional. Mutually exclusive with StreamingShell.
 	Shell filesystem.Shell
 	// StreamingShell provides streaming shell command execution capability.
 	// If set, a streaming execute tool will be registered to support streaming shell command execution.
+	// For advanced filesystem middleware configuration, leave Backend, Shell, and StreamingShell empty
+	// and pass a manually constructed filesystem middleware through Handlers.
 	// Optional. Mutually exclusive with Shell.
 	StreamingShell filesystem.StreamingShell
 

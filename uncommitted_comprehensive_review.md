@@ -1,98 +1,76 @@
 # Comprehensive Review Summary: Uncommitted Changes
 
 ## Overview
+- **Scope**: uncommitted changes in filesystem execution middleware and DeepAgent built-in filesystem wiring.
+- **Total iterations**: Stage 1: 1, Stage 2: 1, Stage 3: 1.
+- **Files modified after review**: 3 (`adk/prebuilt/deep/deep.go`, `adk/prebuilt/deep/deep_test.go`, `uncommitted_comprehensive_review.md`).
+- **Cumulative diff after review**: 8 files changed, 926 insertions, 148 deletions.
 
-- Review scope: uncommitted changes in `adk/middlewares/patchtoolcalls`, plus dirty submodules `examples` and `ext`.
-- Total iterations: Stage 1: 1, Stage 2: 1, Stage 3: 1.
-- Code changes applied by review: none.
-- Baseline full suite: `go test ./...` fails outside the reviewed package in `adk/prebuilt/deep/task_tool_test.go` because `typedNewTaskTool` call sites do not match the current signature.
-- Focused validation: `go test ./adk/middlewares/patchtoolcalls -count=1` passes.
-- Coverage validation: `go test ./adk/middlewares/patchtoolcalls -coverprofile=/tmp/patchtoolcalls_cover.out -count=1 && go tool cover -func=/tmp/patchtoolcalls_cover.out` reports 95.1% statement coverage.
+## Stage 1: Design Review Changes
 
-## Stage 1: Design Review
+### Findings Reviewed
+| # | Dimension | Finding | Verdict | Resolution | Files |
+|---|-----------|---------|---------|------------|-------|
+| 1 | API layering / long-term maintainability | `filesystem.ExecuteToolConfig` is one of many filesystem middleware options. Exposing it directly from `deep.TypedConfig[M]` would create pressure to mirror every future filesystem middleware knob in DeepAgent. | Won't Fix as passthrough | Documented the rule that DeepAgent's `Backend`, `Shell`, and `StreamingShell` are convenience defaults only. Advanced filesystem configuration should leave those fields empty and install a manually configured filesystem middleware through `Handlers`. | `adk/prebuilt/deep/deep.go`, `adk/prebuilt/deep/deep_test.go` |
 
-### Scorecard
+### Design Scorecard
+| Dimension | Final Rating | Notes |
+|-----------|--------------|-------|
+| Concept coherence | 5/5 | Advanced filesystem configuration remains owned by filesystem middleware. |
+| API usability | 4/5 | Built-in DeepAgent filesystem fields provide defaults; advanced users use explicit middleware installation. |
+| Minimum API surface | 5/5 | DeepAgent avoids mirroring filesystem middleware-specific configuration fields. |
+| Backward compatibility | 5/5 | Nil config preserves legacy command-only input and existing tool counts. |
+| Module separation | 5/5 | DeepAgent keeps advanced middleware options at the middleware layer. |
+| Naming | 5/5 | No new DeepAgent passthrough names were added. |
+| Tests | 5/5 | Manual middleware path verifies rich execute configuration remains reachable without expanding DeepAgent config. |
 
-| Dimension | Rating | Notes |
-|---|---:|---|
-| Concept coherence | 5/5 | The new normalization options extend the existing dangling-tool-call repair concept without changing default behavior. |
-| API usability | 4/5 | `RemoveOrphanResults`, `RemoveDuplicateResults`, `Strict`, and `MarkSynthetic` are explicit opt-ins. `Strict` semantics are documented in code and skill docs. |
-| Minimum API surface | 4/5 | The new fields map directly to distinct history-normalization behaviors. No redundant public helper API was introduced. |
-| Backward compatibility | 5/5 | Nil config and default config still only synthesize missing non-empty tool results. Empty call IDs are skipped in non-strict mode. |
-| Layering | 5/5 | Normalization logic remains middleware-local and emits Runner-owned session events through `TypedSendEvent`. |
-| Cohesion | 5/5 | The implementation stays focused on mechanical history normalization for model compatibility. |
-| Complexity | 4/5 | Planning helpers add complexity, but they isolate mutation planning from event emission and make replay ordering testable. |
-| Naming | 4/5 | Public names are readable. `MarkSynthetic` is concise but specifically applies to generated `AgenticMessage` results, which the doc comment clarifies. |
-| Readability | 4/5 | The plan/build/analyze split is understandable. The hardest sections are insertion anchor selection and Agentic block-level rewrites. |
-| Duplication | 4/5 | Message and Agentic paths intentionally mirror each other; shared helpers exist where type shapes allow. |
-| Public documentation | 4/5 | Code comments and `ext/skills/eino-agent/reference/middleware.md` describe the new options. |
-| Internal comments | 4/5 | Non-obvious event emission behavior is largely self-evident from helper names; no blocking comment gaps found. |
+## Stage 2: Attack Review Changes
 
-### Findings
+### Attack Cases Reviewed
+| # | Severity | Risk | Resolution | Result |
+|---|----------|------|------------|--------|
+| 1 | Medium | Advanced execute configuration could be assumed to work through DeepAgent built-in `Shell`. | Documented that advanced filesystem configuration must use a manually constructed filesystem middleware in `Handlers`. | Covered by `TestDeepAgentManualFilesystemMiddlewarePath`. |
+| 2 | Medium | Users might accidentally register duplicate filesystem middleware by setting both built-in fields and manual handlers. | Documented that `Backend`, `Shell`, and `StreamingShell` should remain empty when installing filesystem middleware manually. | Rule documented in `deep.TypedConfig[M]` field comments. |
 
-No blocking design findings were confirmed.
+### Attack Test Results
+- No confirmed production bug remains after adopting the manual-middleware layering rule.
 
-| # | Dimension | Concern | Verdict | Rationale |
-|---|---|---|---|---|
-| 1 | API documentation | `MarkSynthetic` only affects generated `AgenticMessage` tool results, not classic `schema.Message` tool messages. | Won't Fix | The code comment explicitly scopes this to `AgenticMessage`. Classic messages have a different shape and existing `ToolCallID`/`ToolName` fields. |
-| 2 | Complexity | `buildMessageNormalizationPlan` and `buildAgenticNormalizationPlan` duplicate some flow. | Won't Fix | The two message representations differ enough that over-generalizing would reduce readability and increase generic complexity. |
+## Stage 3: Test Audit Changes
 
-## Stage 2: Attack Review
+### Improvements Applied
+| # | Category | Change | Impact |
+|---|----------|--------|--------|
+| 1 | Documentation gap | Documented the manual filesystem middleware rule on DeepAgent built-in filesystem fields. | Prevents DeepAgent from accumulating middleware-specific config knobs. |
+| 2 | Coverage gap | Kept `TestDeepAgentManualFilesystemMiddlewarePath` to verify rich execute configuration is reachable through `Handlers`. | Guards the intended advanced configuration path. |
+| 3 | Assertion hygiene | Cleaned a local `err` shadowing diagnostic in the edited DeepAgent test loop. | Reduces linter noise in touched code. |
 
-### Attack Vectors Reviewed
+### Coverage
+- `go test -coverprofile=/tmp/eino2_comprehensive_review.cover ./adk/middlewares/filesystem ./adk/prebuilt/deep && go tool cover -func=/tmp/eino2_comprehensive_review.cover`: passing.
+- Combined changed-package coverage: 88.3%.
+- `adk/middlewares/filesystem`: 91.9%.
+- `adk/prebuilt/deep`: 72.4%; changed function `buildTypedBuiltinAgentMiddlewares`: 91.7%.
+- Residual note: package-level DeepAgent coverage includes broader task-tool and message-generation code outside this diff; changed-path coverage is above the review threshold.
 
-| Category | Result | Evidence |
-|---|---|---|
-| Missing results | OK | Existing tests verify deterministic patch insertion for both `schema.Message` and `schema.AgenticMessage`. |
-| Orphan results | OK | `RemoveOrphanResults` tests verify removal for both message types. |
-| Duplicate results | OK | `RemoveDuplicateResults` tests verify only the first result is kept for both message types. |
-| Empty call IDs | OK | Non-strict mode skips empty IDs; strict mode reports `empty_tool_call_id`. |
-| Strict validation | OK | Strict mode returns an error without returning a mutated state. |
-| Agentic mixed blocks | OK | Mixed content block rewrite emits `MessageUpdated` while preserving message identity. |
-| Replay ordering | OK | Inserted tool results anchor before the next kept message, preserving reconstructed order. |
-| Tool search results | OK | Agentic tool-search result blocks are recognized as corresponding results. |
-| Nil function tool calls | OK | Nil `FunctionToolCall` blocks are skipped without panic. |
-| Session event emission | OK | Middleware sends explicit `SessionEvent` kinds through `TypedSendEvent`, matching runtime validation expectations. |
+## Verification
+- `go build ./...`: passing.
+- `go test ./adk/prebuilt/deep -run 'TestDeepAgentFilesystemExecuteDefaults|TestDeepAgentManualFilesystemMiddlewarePath' -count=1`: passing.
+- `go test ./adk/prebuilt/deep ./adk/middlewares/filesystem`: passing.
+- `go test ./...`: passing.
+- Diagnostics on edited files: no errors; remaining `interface{} can be replaced by any` hints in `adk/prebuilt/deep/deep_test.go` are pre-existing style hints outside the touched test block.
 
-### Bugs Fixed
-
-No confirmed bugs were found, so no production fixes were applied.
-
-## Stage 3: Test Audit
-
-### Test Quality
-
-| Category | Result | Notes |
-|---|---|---|
-| Duplicates | OK | Generic helpers intentionally exercise both classic and Agentic message representations. |
-| Assertion quality | OK | Tests assert concrete IDs, names, event kinds, anchors, and state lengths. |
-| Boilerplate | OK | Shared helpers reduce repeated construction while keeping scenario bodies readable. |
-| Logical grouping | OK | Generic behavior is grouped via typed subtests; specific edge cases are individual tests. |
-| Semantic value | OK | Added tests cover distinct behavior: cleanup, strict validation, markers, block updates, event anchors, and nil blocks. |
-| Coverage gaps | OK | Package coverage is 95.1%; all changed functions except `New` exceed the 70% hard floor. `New` is a thin wrapper around `NewTyped`. |
-
-## Cumulative File Review
-
+## Cumulative File Change List
 | File | Stage(s) | Summary |
-|---|---|---|
-| `adk/middlewares/patchtoolcalls/patchtoolcalls.go` | 1, 2 | Adds opt-in cleanup, strict validation, Agentic synthetic markers, normalization planning, and session mutation events. |
-| `adk/middlewares/patchtoolcalls/patchtoolcalls_test.go` | 2, 3 | Adds targeted tests for cleanup, strict mode, Agentic block rewrites, replay anchors, and nil blocks. |
-| `examples` submodule | 1 | Contains a docs-only wording update from `SessionStore` to `SessionService`. |
-| `ext` submodule | 1 | Contains middleware reference docs for the new `patchtoolcalls.Config` options. |
-
-## Validation Commands
-
-| Command | Result |
-|---|---|
-| `git diff --stat && git diff --name-only` | Identified reviewed uncommitted scope. |
-| `go test ./...` | Fails in `adk/prebuilt/deep` due to an unrelated `typedNewTaskTool` signature mismatch. |
-| `go test ./adk/middlewares/patchtoolcalls -count=1` | Passes. |
-| `go test ./adk/middlewares/patchtoolcalls -coverprofile=/tmp/patchtoolcalls_cover.out -count=1 && go tool cover -func=/tmp/patchtoolcalls_cover.out` | Passes, 95.1% statement coverage. |
-| `git diff --check` | Passes. |
-| VS Code diagnostics for changed Go files | No diagnostics. |
+|------|----------|---------|
+| `adk/filesystem/backend.go` | Existing uncommitted | Adds shell execution mode and wait budget fields. |
+| `adk/middlewares/filesystem/filesystem.go` | Existing uncommitted | Adds shell-only middleware support, execute input modes, validation, and rich execute request conversion. |
+| `adk/middlewares/filesystem/filesystem_test.go` | Existing uncommitted | Adds tests for shell-only configs, execute input modes, streaming parity, validation, and offloading guards. |
+| `adk/middlewares/filesystem/prompt.go` | Existing uncommitted | Adds rich execute tool descriptions. |
+| `adk/prebuilt/deep/deep.go` | Review fix | Documents that advanced filesystem middleware configuration should use manually constructed handlers rather than DeepAgent passthrough fields. |
+| `adk/prebuilt/deep/deep_test.go` | Review fix | Adds DeepAgent filesystem default tests and manual middleware path test for rich execute configuration. |
+| `adk/prebuilt/deep/task_tool_test.go` | Existing uncommitted | Updates task tool constructor test arguments for changed signature. |
+| `uncommitted_comprehensive_review.md` | Review summary | Records the comprehensive review findings, fixes, tests, coverage, and remaining items. |
 
 ## Remaining Items
-
-- Full-repo test failure remains unresolved in `adk/prebuilt/deep/task_tool_test.go`; it appears unrelated to the reviewed `patchtoolcalls` diff.
-- Submodules `examples` and `ext` contain dirty working tree changes. Ensure those nested changes are intentionally committed or excluded together with the parent submodule pointer updates.
-- No temporary attack-test files or review branches were created.
+- No blockers remain.
+- DeepAgent intentionally does not expose `ExecuteToolConfig`; future filesystem middleware knobs should also stay in filesystem middleware configuration.
+- Optional follow-up: consider replacing older `interface{}` occurrences in `adk/prebuilt/deep/deep_test.go` with `any` if the project wants to eliminate existing diagnostics.

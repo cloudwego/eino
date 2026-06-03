@@ -282,10 +282,29 @@ type Backend interface {
 	Edit(ctx context.Context, req *EditRequest) error
 }
 
+// ExecuteMode is an optional shell execution hint.
+type ExecuteMode string
+
+const (
+	ExecuteModeAuto       ExecuteMode = "auto"
+	ExecuteModeForeground ExecuteMode = "foreground"
+	ExecuteModeBackground ExecuteMode = "background"
+)
+
 // ExecuteRequest contains parameters for executing a command.
 type ExecuteRequest struct {
-	Command            string // The command to execute
+	Command string // The command to execute
+
+	// RunInBackendGround is kept for source compatibility.
+	// If Mode is empty and this field is true, backends may treat the request as background execution.
 	RunInBackendGround bool
+
+	// Mode is an optional execution hint. Empty means legacy behavior.
+	Mode ExecuteMode
+
+	// WaitMS is an optional caller-requested foreground wait or startup preview budget.
+	// Backends may ignore or clamp this value.
+	WaitMS int64
 }
 
 // ExecuteResponse contains the response result of command execution.
