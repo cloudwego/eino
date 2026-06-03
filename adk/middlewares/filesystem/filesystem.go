@@ -72,6 +72,23 @@ type ToolConfig struct {
 	Disable bool
 }
 
+// ExecuteToolInputMode controls the JSON input schema for the execute tool.
+type ExecuteToolInputMode string
+
+const (
+	ExecuteToolInputModeLegacy ExecuteToolInputMode = "legacy"
+	ExecuteToolInputModeRich   ExecuteToolInputMode = "rich"
+)
+
+// ExecuteToolConfig configures the execute tool.
+type ExecuteToolConfig struct {
+	ToolConfig
+
+	// InputMode controls whether execute accepts only command or richer execution hints.
+	// Empty means legacy mode.
+	InputMode ExecuteToolInputMode
+}
+
 // Config is the configuration for the filesystem middleware
 type Config struct {
 	// Backend provides filesystem operations used by tools and offloading.
@@ -110,6 +127,9 @@ type Config struct {
 	// GrepToolConfig configures the grep tool
 	// optional
 	GrepToolConfig *ToolConfig
+	// ExecuteToolConfig configures the execute tool
+	// optional
+	ExecuteToolConfig *ExecuteToolConfig
 
 	// WithoutLargeToolResultOffloading disables automatic offloading of large tool result to Backend
 	// optional, false(enabled) by default
@@ -155,11 +175,14 @@ func (c *Config) Validate() error {
 	if c == nil {
 		return errors.New("config should not be nil")
 	}
-	if c.Backend == nil {
-		return errors.New("backend should not be nil")
+	if c.Backend == nil && c.Shell == nil && c.StreamingShell == nil {
+		return errors.New("at least one of backend, shell, or streaming shell should be set")
 	}
 	if c.StreamingShell != nil && c.Shell != nil {
 		return errors.New("shell and streaming shell should not be both set")
+	}
+	if err := validateExecuteToolInputMode(c.ExecuteToolConfig); err != nil {
+		return err
 	}
 	return nil
 }
@@ -185,6 +208,7 @@ func NewMiddleware(ctx context.Context, config *Config) (adk.AgentMiddleware, er
 		EditFileToolConfig:      config.EditFileToolConfig,
 		GlobToolConfig:          config.GlobToolConfig,
 		GrepToolConfig:          config.GrepToolConfig,
+		ExecuteToolConfig:       config.ExecuteToolConfig,
 		CustomSystemPrompt:      config.CustomSystemPrompt,
 		CustomLsToolDesc:        config.CustomLsToolDesc,
 		CustomReadFileToolDesc:  config.CustomReadFileToolDesc,
@@ -207,7 +231,7 @@ func NewMiddleware(ctx context.Context, config *Config) (adk.AgentMiddleware, er
 		AdditionalTools:       ts,
 	}
 
-	if !config.WithoutLargeToolResultOffloading {
+	if config.Backend != nil && !config.WithoutLargeToolResultOffloading {
 		m.WrapToolCall = newToolResultOffloading(ctx, &toolResultOffloadingConfig{
 			Backend:       config.Backend,
 			TokenLimit:    config.LargeToolResultOffloadingTokenLimit,
@@ -221,16 +245,18 @@ func NewMiddleware(ctx context.Context, config *Config) (adk.AgentMiddleware, er
 // MiddlewareConfig is the configuration for the filesystem middleware
 type MiddlewareConfig struct {
 	// Backend provides filesystem operations used by tools and offloading.
-	// required
+	// At least one of Backend, Shell, or StreamingShell must be set.
 	Backend filesystem.Backend
 
 	// Shell provides shell command execution capability.
 	// If set, an execute tool will be registered to support shell command execution.
-	// optional, mutually exclusive with StreamingShell
+	// At least one of Backend, Shell, or StreamingShell must be set.
+	// Mutually exclusive with StreamingShell.
 	Shell filesystem.Shell
 	// StreamingShell provides streaming shell command execution capability.
 	// If set, a streaming execute tool will be registered for real-time output.
-	// optional, mutually exclusive with Shell
+	// At least one of Backend, Shell, or StreamingShell must be set.
+	// Mutually exclusive with Shell.
 	StreamingShell filesystem.StreamingShell
 
 	// LsToolConfig configures the ls tool
@@ -253,6 +279,9 @@ type MiddlewareConfig struct {
 	// GrepToolConfig configures the grep tool
 	// optional
 	GrepToolConfig *ToolConfig
+	// ExecuteToolConfig configures the execute tool
+	// optional
+	ExecuteToolConfig *ExecuteToolConfig
 
 	// UseMultiModalRead enables multimodal read_file tool (EnhancedInvokableTool).
 	// When true, read_file returns results via schema.ToolResult.Parts instead of plain text string.
@@ -306,11 +335,14 @@ func (c *MiddlewareConfig) Validate() error {
 	if c == nil {
 		return errors.New("config should not be nil")
 	}
-	if c.Backend == nil {
-		return errors.New("backend should not be nil")
+	if c.Backend == nil && c.Shell == nil && c.StreamingShell == nil {
+		return errors.New("at least one of backend, shell, or streaming shell should be set")
 	}
 	if c.StreamingShell != nil && c.Shell != nil {
 		return errors.New("shell and streaming shell should not be both set")
+	}
+	if err := validateExecuteToolInputMode(c.ExecuteToolConfig); err != nil {
+		return err
 	}
 	return nil
 }
@@ -350,7 +382,7 @@ func (c *MiddlewareConfig) mergeToolConfigWithDesc(
 //   - More flexible extension points compared to the struct-based AgentMiddleware
 //
 // The middleware provides filesystem tools (ls, read_file, write_file, edit_file, glob, grep)
-// and optionally an execute tool if the Backend implements ShellBackend or StreamingShellBackend.
+// when Backend is set, and an execute tool when Shell or StreamingShell is set.
 func NewTyped[M adk.MessageType](ctx context.Context, config *MiddlewareConfig) (adk.TypedChatModelAgentMiddleware[M], error) {
 	err := config.Validate()
 	if err != nil {
@@ -381,7 +413,7 @@ func NewTyped[M adk.MessageType](ctx context.Context, config *MiddlewareConfig) 
 //   - More flexible extension points compared to the struct-based AgentMiddleware
 //
 // The middleware provides filesystem tools (ls, read_file, write_file, edit_file, glob, grep)
-// and optionally an execute tool if the Backend implements ShellBackend or StreamingShellBackend.
+// when Backend is set, and an execute tool when Shell or StreamingShell is set.
 //
 // Example usage:
 //
@@ -425,6 +457,10 @@ type toolSpec struct {
 }
 
 func getFilesystemTools(_ context.Context, middlewareConfig *MiddlewareConfig) ([]tool.BaseTool, error) {
+	if err := validateExecuteToolInputMode(middlewareConfig.ExecuteToolConfig); err != nil {
+		return nil, err
+	}
+
 	var tools []tool.BaseTool
 
 	toolSpecs := []toolSpec{
@@ -503,32 +539,57 @@ func getFilesystemTools(_ context.Context, middlewareConfig *MiddlewareConfig) (
 		}
 	}
 
-	// Create execute tool if Shell or StreamingShell is available
-	if middlewareConfig.StreamingShell != nil {
-		executeDesc, err := selectToolDesc("", ExecuteToolDesc, ExecuteToolDescChinese)
+	if middlewareConfig.StreamingShell != nil || middlewareConfig.Shell != nil {
+		executeTool, err := createExecuteTool(middlewareConfig)
 		if err != nil {
 			return nil, err
 		}
-
-		executeTool, err := newStreamingExecuteTool(middlewareConfig.StreamingShell, ToolNameExecute, executeDesc)
-		if err != nil {
-			return nil, err
+		if executeTool != nil {
+			tools = append(tools, executeTool)
 		}
-		tools = append(tools, executeTool)
-	} else if middlewareConfig.Shell != nil {
-		executeDesc, err := selectToolDesc("", ExecuteToolDesc, ExecuteToolDescChinese)
-		if err != nil {
-			return nil, err
-		}
-
-		executeTool, err := newExecuteTool(middlewareConfig.Shell, ToolNameExecute, executeDesc)
-		if err != nil {
-			return nil, err
-		}
-		tools = append(tools, executeTool)
 	}
 
 	return tools, nil
+}
+
+func validateExecuteToolInputMode(config *ExecuteToolConfig) error {
+	if config == nil {
+		return nil
+	}
+	switch config.InputMode {
+	case "", ExecuteToolInputModeLegacy, ExecuteToolInputModeRich:
+		return nil
+	default:
+		return fmt.Errorf("unknown execute tool input mode: %s", config.InputMode)
+	}
+}
+
+func normalizeExecuteToolInputMode(config *ExecuteToolConfig) ExecuteToolInputMode {
+	if config == nil || config.InputMode == "" {
+		return ExecuteToolInputModeLegacy
+	}
+	return config.InputMode
+}
+
+func createExecuteTool(middlewareConfig *MiddlewareConfig) (tool.BaseTool, error) {
+	executeConfig := middlewareConfig.ExecuteToolConfig
+	if executeConfig == nil {
+		executeConfig = &ExecuteToolConfig{}
+	}
+	if executeConfig.Disable {
+		return nil, nil
+	}
+	return getOrCreateTool(executeConfig.CustomTool, func() (tool.BaseTool, error) {
+		desc := ""
+		if executeConfig.Desc != nil {
+			desc = *executeConfig.Desc
+		}
+		inputMode := normalizeExecuteToolInputMode(executeConfig)
+		if middlewareConfig.StreamingShell != nil {
+			return newStreamingExecuteTool(middlewareConfig.StreamingShell, executeConfig.Name, desc, inputMode)
+		}
+		return newExecuteTool(middlewareConfig.Shell, executeConfig.Name, desc, inputMode)
+	})
 }
 
 // createToolFromSpec creates a tool instance based on the provided toolSpec.
@@ -996,38 +1057,122 @@ func newGrepTool(fs filesystem.Backend, name string, desc string) (tool.BaseTool
 	})
 }
 
-type executeArgs struct {
+type executeArgsLegacy struct {
 	Command string `json:"command"`
 }
 
-func newExecuteTool(sb filesystem.Shell, name string, desc string) (tool.BaseTool, error) {
-	toolName := selectToolName(name, ToolNameExecute)
-	d, err := selectToolDesc(desc, ExecuteToolDesc, ExecuteToolDescChinese)
-	if err != nil {
-		return nil, err
-	}
-	return utils.InferTool(toolName, d, func(ctx context.Context, input executeArgs) (string, error) {
-		result, err := sb.Execute(ctx, &filesystem.ExecuteRequest{
-			Command: input.Command,
-		})
-		if err != nil {
-			return "", err
-		}
-
-		return convExecuteResponse(result), nil
-	})
+type executeArgsRich struct {
+	Command string `json:"command"`
+	Mode    string `json:"mode,omitempty" jsonschema:"enum=auto,enum=foreground,enum=background"`
+	WaitMS  int64  `json:"wait_ms,omitempty"`
 }
 
-func newStreamingExecuteTool(sb filesystem.StreamingShell, name string, desc string) (tool.BaseTool, error) {
+func newExecuteRequestFromRich(input executeArgsRich) (*filesystem.ExecuteRequest, error) {
+	if input.WaitMS < 0 {
+		return nil, errors.New("wait_ms should not be negative")
+	}
+
+	req := &filesystem.ExecuteRequest{
+		Command: input.Command,
+		Mode:    filesystem.ExecuteMode(input.Mode),
+		WaitMS:  input.WaitMS,
+	}
+	switch req.Mode {
+	case "":
+		return req, nil
+	case filesystem.ExecuteModeAuto, filesystem.ExecuteModeForeground:
+		return req, nil
+	case filesystem.ExecuteModeBackground:
+		req.RunInBackendGround = true
+		return req, nil
+	default:
+		return nil, fmt.Errorf("unknown execute mode: %s", input.Mode)
+	}
+}
+
+func newExecuteTool(sb filesystem.Shell, name string, desc string, inputModes ...ExecuteToolInputMode) (tool.BaseTool, error) {
 	toolName := selectToolName(name, ToolNameExecute)
-	d, err := selectToolDesc(desc, ExecuteToolDesc, ExecuteToolDescChinese)
+	inputMode := ExecuteToolInputModeLegacy
+	if len(inputModes) > 0 && inputModes[0] != "" {
+		inputMode = inputModes[0]
+	}
+	defaultDesc, defaultDescChinese := executeToolDescs(inputMode)
+	d, err := selectToolDesc(desc, defaultDesc, defaultDescChinese)
 	if err != nil {
 		return nil, err
 	}
-	return utils.InferStreamTool(toolName, d, func(ctx context.Context, input executeArgs) (*schema.StreamReader[string], error) {
-		result, err := sb.ExecuteStreaming(ctx, &filesystem.ExecuteRequest{
-			Command: input.Command,
+
+	switch inputMode {
+	case ExecuteToolInputModeLegacy:
+		return utils.InferTool(toolName, d, func(ctx context.Context, input executeArgsLegacy) (string, error) {
+			result, err := sb.Execute(ctx, &filesystem.ExecuteRequest{Command: input.Command})
+			if err != nil {
+				return "", err
+			}
+
+			return convExecuteResponse(result), nil
 		})
+	case ExecuteToolInputModeRich:
+		return utils.InferTool(toolName, d, func(ctx context.Context, input executeArgsRich) (string, error) {
+			req, err := newExecuteRequestFromRich(input)
+			if err != nil {
+				return "", err
+			}
+			result, err := sb.Execute(ctx, req)
+			if err != nil {
+				return "", err
+			}
+
+			return convExecuteResponse(result), nil
+		})
+	default:
+		return nil, fmt.Errorf("unknown execute tool input mode: %s", inputMode)
+	}
+}
+
+func executeToolDescs(inputMode ExecuteToolInputMode) (string, string) {
+	if inputMode == ExecuteToolInputModeRich {
+		return RichExecuteToolDesc, RichExecuteToolDescChinese
+	}
+	return ExecuteToolDesc, ExecuteToolDescChinese
+}
+
+func newStreamingExecuteTool(sb filesystem.StreamingShell, name string, desc string, inputModes ...ExecuteToolInputMode) (tool.BaseTool, error) {
+	toolName := selectToolName(name, ToolNameExecute)
+	inputMode := ExecuteToolInputModeLegacy
+	if len(inputModes) > 0 && inputModes[0] != "" {
+		inputMode = inputModes[0]
+	}
+	defaultDesc, defaultDescChinese := executeToolDescs(inputMode)
+	d, err := selectToolDesc(desc, defaultDesc, defaultDescChinese)
+	if err != nil {
+		return nil, err
+	}
+
+	switch inputMode {
+	case ExecuteToolInputModeLegacy:
+		return newStreamingExecuteToolWithRun(sb, toolName, d, func(input executeArgsLegacy) (*filesystem.ExecuteRequest, error) {
+			return &filesystem.ExecuteRequest{Command: input.Command}, nil
+		})
+	case ExecuteToolInputModeRich:
+		return newStreamingExecuteToolWithRun(sb, toolName, d, newExecuteRequestFromRich)
+	default:
+		return nil, fmt.Errorf("unknown execute tool input mode: %s", inputMode)
+	}
+}
+
+func newStreamingExecuteToolWithRun[T any](
+	sb filesystem.StreamingShell,
+	toolName string,
+	desc string,
+	newRequest func(input T) (*filesystem.ExecuteRequest, error),
+) (tool.BaseTool, error) {
+	return utils.InferStreamTool(toolName, desc, func(ctx context.Context, input T) (*schema.StreamReader[string], error) {
+		req, err := newRequest(input)
+		if err != nil {
+			return nil, err
+		}
+		result, err := sb.ExecuteStreaming(ctx, req)
 		if err != nil {
 			return nil, err
 		}
