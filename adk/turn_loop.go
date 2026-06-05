@@ -1826,6 +1826,9 @@ func (l *TurnLoop[T, M]) runAgentAndHandleEvents(
 	cancelOpt, agentCancelFunc := WithCancel()
 	runOpts = append(runOpts, cancelOpt)
 
+	// For Run path the streaming mode comes from the input. For Resume path the
+	// runner reads the streaming mode persisted in the checkpoint, so the value we
+	// pass here is irrelevant.
 	enableStreaming := false
 	if spec.input != nil {
 		enableStreaming = spec.input.EnableStreaming
