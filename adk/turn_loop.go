@@ -2016,10 +2016,9 @@ func (l *TurnLoop[T, M]) cleanup(ctx context.Context) {
 	var checkpointErr error
 
 	if shouldSaveCheckpoint {
-		hasRunnerState := len(l.checkPointRunnerBytes) > 0
 		cp := &turnLoopCheckpoint[T]{
 			RunnerCheckpoint: l.checkPointRunnerBytes,
-			HasRunnerState:   hasRunnerState,
+			HasRunnerState:   len(l.checkPointRunnerBytes) > 0,
 			UnhandledItems:   unhandled,
 			CanceledItems:    l.interruptedItems,
 		}

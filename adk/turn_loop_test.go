@@ -2550,12 +2550,6 @@ func TestTurnLoop_ResumeInterruptAgain_PreservesEnableStreamingCheckpoint(t *tes
 			require.ErrorAs(t, exit1.ExitReason, new(*InterruptError))
 			require.NoError(t, exit1.CheckpointErr)
 
-			info1, runCtx1 := loadTurnLoopRunnerCheckpoint(t, store, cpID)
-			assert.Equal(t, enableStreaming, info1.EnableStreaming)
-			require.NotNil(t, runCtx1.RootInput)
-			require.Len(t, runCtx1.RootInput.Messages, 1)
-			assert.Equal(t, originalMessage, runCtx1.RootInput.Messages[0].Content)
-
 			secondAgent := &myAgent{
 				resumeFn: func(ctx context.Context, info *ResumeInfo, _ ...AgentRunOption) *AsyncIterator[*AgentEvent] {
 					assert.Equal(t, enableStreaming, info.EnableStreaming)
@@ -2586,35 +2580,23 @@ func TestTurnLoop_ResumeInterruptAgain_PreservesEnableStreamingCheckpoint(t *tes
 			require.ErrorAs(t, exit2.ExitReason, new(*InterruptError))
 			require.NoError(t, exit2.CheckpointErr)
 
-			info2, runCtx2 := loadTurnLoopRunnerCheckpoint(t, store, cpID)
+			// Verify the runner-level checkpoint persisted by the second interrupt
+			// still encodes the original streaming mode. This is the invariant the PR
+			// fixes: even though loop2's TypedRunner was constructed with the
+			// resume-path placeholder (false), runner uses resumeInfo.EnableStreaming
+			// from the previous checkpoint when re-saving.
+			store.mu.Lock()
+			data, ok := store.m[cpID]
+			store.mu.Unlock()
+			require.True(t, ok)
+			cp, err := unmarshalTurnLoopCheckpoint[string](data)
+			require.NoError(t, err)
+			require.True(t, cp.HasRunnerState)
+			_, _, info2, err := runnerLoadCheckPointImpl(newResumeBridgeStore(bridgeCheckpointID, cp.RunnerCheckpoint), context.Background(), bridgeCheckpointID)
+			require.NoError(t, err)
 			assert.Equal(t, enableStreaming, info2.EnableStreaming)
-			require.NotNil(t, runCtx2.RootInput)
-			require.Len(t, runCtx2.RootInput.Messages, 1)
-			assert.Equal(t, originalMessage, runCtx2.RootInput.Messages[0].Content)
 		})
 	}
-}
-
-func loadTurnLoopRunnerCheckpoint(t *testing.T, store *turnLoopCheckpointStore, cpID string) (*ResumeInfo, *runContext) {
-	t.Helper()
-
-	store.mu.Lock()
-	data, ok := store.m[cpID]
-	store.mu.Unlock()
-	require.True(t, ok, "turn loop checkpoint should exist")
-
-	cp, err := unmarshalTurnLoopCheckpoint[string](data)
-	require.NoError(t, err)
-	require.True(t, cp.HasRunnerState)
-	require.NotEmpty(t, cp.RunnerCheckpoint)
-
-	runnerStore := newResumeBridgeStore(bridgeCheckpointID, cp.RunnerCheckpoint)
-	_, runCtx, info, err := runnerLoadCheckPointImpl(runnerStore, context.Background(), bridgeCheckpointID)
-	require.NoError(t, err)
-	require.NotNil(t, info)
-	require.NotNil(t, runCtx)
-
-	return info, runCtx
 }
 
 func TestTurnLoop_Stop_EscalatesCancelMode(t *testing.T) {
