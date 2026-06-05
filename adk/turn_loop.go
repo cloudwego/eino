@@ -693,13 +693,14 @@ type GenResumeResult[T any, M MessageType] struct {
 }
 
 type turnRunSpec[T any, M MessageType] struct {
-	runCtx       context.Context
-	input        *TypedAgentInput[M]
-	runOpts      []AgentRunOption
-	resumeParams *ResumeParams
-	isResume     bool
-	consumed     []T
-	resumeBytes  []byte
+	runCtx                context.Context
+	input                 *TypedAgentInput[M]
+	runOpts               []AgentRunOption
+	resumeParams          *ResumeParams
+	resumeEnableStreaming bool
+	isResume              bool
+	consumed              []T
+	resumeBytes           []byte
 }
 
 type turnPlan[T any, M MessageType] struct {
@@ -761,12 +762,13 @@ func (l *TurnLoop[T, M]) planTurn(
 		turnCtx:   turnCtx,
 		remaining: resumeResult.Remaining,
 		spec: &turnRunSpec[T, M]{
-			runCtx:       resumeResult.RunCtx,
-			runOpts:      resumeResult.RunOpts,
-			resumeParams: resumeResult.ResumeParams,
-			isResume:     true,
-			consumed:     resumeResult.Consumed,
-			resumeBytes:  pr.resumeBytes,
+			runCtx:                resumeResult.RunCtx,
+			runOpts:               resumeResult.RunOpts,
+			resumeParams:          resumeResult.ResumeParams,
+			resumeEnableStreaming: pr.runnerEnableStreaming,
+			isResume:              true,
+			consumed:              resumeResult.Consumed,
+			resumeBytes:           pr.resumeBytes,
 		},
 	}, nil
 }
@@ -915,9 +917,10 @@ type TurnLoop[T any, M MessageType] struct {
 
 	interruptedItems []T
 
-	checkPointRunnerBytes []byte
-	interruptContexts     []*InterruptCtx
-	capturedCancelErr     *CancelError
+	checkPointRunnerBytes           []byte
+	checkPointRunnerEnableStreaming bool
+	interruptContexts               []*InterruptCtx
+	capturedCancelErr               *CancelError
 
 	pendingResume *turnLoopPendingResume[T]
 
@@ -944,9 +947,10 @@ type turnLoopCheckpoint[T any] struct {
 	// HasRunnerState reports whether RunnerCheckpoint contains resumable runner state.
 	// It is false for "between turns" checkpoints where no agent execution was
 	// interrupted (e.g. Stop() before the first turn or between turns).
-	HasRunnerState bool
-	UnhandledItems []T
-	CanceledItems  []T // gob-compat: kept as CanceledItems for deserialization of existing checkpoints
+	HasRunnerState        bool
+	UnhandledItems        []T
+	CanceledItems         []T // gob-compat: kept as CanceledItems for deserialization of existing checkpoints
+	RunnerEnableStreaming bool
 }
 
 func marshalTurnLoopCheckpoint[T any](c *turnLoopCheckpoint[T]) ([]byte, error) {
@@ -1019,10 +1023,11 @@ func (l *TurnLoop[T, M]) tryLoadCheckpoint(ctx context.Context) error {
 			return fmt.Errorf("checkpoint[%s] has runner state but bytes are empty", checkPointID)
 		}
 		l.pendingResume = &turnLoopPendingResume[T]{
-			interrupted: append([]T{}, cp.CanceledItems...),
-			unhandled:   append([]T{}, cp.UnhandledItems...),
-			newItems:    append([]T{}, newItems...),
-			resumeBytes: append([]byte{}, cp.RunnerCheckpoint...),
+			interrupted:           append([]T{}, cp.CanceledItems...),
+			unhandled:             append([]T{}, cp.UnhandledItems...),
+			newItems:              append([]T{}, newItems...),
+			resumeBytes:           append([]byte{}, cp.RunnerCheckpoint...),
+			runnerEnableStreaming: cp.RunnerEnableStreaming,
 		}
 	} else {
 		items := make([]T, 0, len(cp.UnhandledItems)+len(newItems))
@@ -1035,10 +1040,11 @@ func (l *TurnLoop[T, M]) tryLoadCheckpoint(ctx context.Context) error {
 }
 
 type turnLoopPendingResume[T any] struct {
-	interrupted []T
-	unhandled   []T
-	newItems    []T
-	resumeBytes []byte
+	interrupted           []T
+	unhandled             []T
+	newItems              []T
+	resumeBytes           []byte
+	runnerEnableStreaming bool
 }
 
 // SafePoint describes at which boundary the agent may be cancelled.
@@ -1814,6 +1820,7 @@ func (l *TurnLoop[T, M]) runAgentAndHandleEvents(
 	l.interruptContexts = nil
 	l.capturedCancelErr = nil
 	l.checkPointRunnerBytes = nil
+	l.checkPointRunnerEnableStreaming = false
 
 	var iter *AsyncIterator[*TypedAgentEvent[M]]
 
@@ -1829,7 +1836,10 @@ func (l *TurnLoop[T, M]) runAgentAndHandleEvents(
 	enableStreaming := false
 	if spec.input != nil {
 		enableStreaming = spec.input.EnableStreaming
+	} else {
+		enableStreaming = spec.resumeEnableStreaming
 	}
+	l.checkPointRunnerEnableStreaming = enableStreaming
 	runner := NewTypedRunner(TypedRunnerConfig[M]{
 		EnableStreaming: enableStreaming,
 		Agent:           agent,
@@ -2013,11 +2023,17 @@ func (l *TurnLoop[T, M]) cleanup(ctx context.Context) {
 	var checkpointErr error
 
 	if shouldSaveCheckpoint {
+		hasRunnerState := len(l.checkPointRunnerBytes) > 0
+		var runnerEnableStreaming bool
+		if hasRunnerState {
+			runnerEnableStreaming = l.checkPointRunnerEnableStreaming
+		}
 		cp := &turnLoopCheckpoint[T]{
-			RunnerCheckpoint: l.checkPointRunnerBytes,
-			HasRunnerState:   len(l.checkPointRunnerBytes) > 0,
-			UnhandledItems:   unhandled,
-			CanceledItems:    l.interruptedItems,
+			RunnerCheckpoint:      l.checkPointRunnerBytes,
+			HasRunnerState:        hasRunnerState,
+			UnhandledItems:        unhandled,
+			CanceledItems:         l.interruptedItems,
+			RunnerEnableStreaming: runnerEnableStreaming,
 		}
 		checkpointed = true
 		checkpointErr = l.saveTurnLoopCheckpoint(ctx, checkpointID, cp)

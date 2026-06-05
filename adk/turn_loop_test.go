@@ -2507,6 +2507,118 @@ func TestTurnLoop_ResumeWithParams(t *testing.T) {
 	_ = exit2
 }
 
+func TestTurnLoop_ResumeInterruptAgain_PreservesEnableStreamingCheckpoint(t *testing.T) {
+	for _, enableStreaming := range []bool{true, false} {
+		t.Run(fmt.Sprintf("enable_streaming_%t", enableStreaming), func(t *testing.T) {
+			ctx := context.Background()
+			store := newTestStore()
+			cpID := fmt.Sprintf("streaming-resume-%t", enableStreaming)
+			originalMessage := "msg1"
+
+			firstAgent := &myAgent{
+				runFn: func(ctx context.Context, input *AgentInput, _ ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+					assert.Equal(t, enableStreaming, input.EnableStreaming)
+					assert.Len(t, input.Messages, 1)
+					assert.Equal(t, originalMessage, input.Messages[0].Content)
+
+					iter, gen := NewAsyncIteratorPair[*AgentEvent]()
+					go func() {
+						defer gen.Close()
+						gen.Send(Interrupt(ctx, "first_interrupt"))
+					}()
+					return iter
+				},
+			}
+
+			loop1 := NewTurnLoop(TurnLoopConfig[string, *schema.Message]{
+				Store:        store,
+				CheckpointID: cpID,
+				GenInput: func(_ context.Context, _ *TurnLoop[string, *schema.Message], items []string) (*GenInputResult[string, *schema.Message], error) {
+					return &GenInputResult[string, *schema.Message]{
+						Input: &AgentInput{
+							Messages:        []Message{schema.UserMessage(items[0])},
+							EnableStreaming: enableStreaming,
+						},
+						Consumed: items,
+					}, nil
+				},
+				PrepareAgent: prepareAgent(firstAgent),
+			})
+			loop1.Push(originalMessage)
+			loop1.Run(ctx)
+			exit1 := loop1.Wait()
+			require.ErrorAs(t, exit1.ExitReason, new(*InterruptError))
+			require.NoError(t, exit1.CheckpointErr)
+
+			cp1, info1, runCtx1 := loadTurnLoopRunnerCheckpoint(t, store, cpID)
+			assert.Equal(t, enableStreaming, cp1.RunnerEnableStreaming)
+			assert.Equal(t, enableStreaming, info1.EnableStreaming)
+			require.NotNil(t, runCtx1.RootInput)
+			require.Len(t, runCtx1.RootInput.Messages, 1)
+			assert.Equal(t, originalMessage, runCtx1.RootInput.Messages[0].Content)
+
+			secondAgent := &myAgent{
+				resumeFn: func(ctx context.Context, info *ResumeInfo, _ ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+					assert.Equal(t, enableStreaming, info.EnableStreaming)
+
+					iter, gen := NewAsyncIteratorPair[*AgentEvent]()
+					go func() {
+						defer gen.Close()
+						gen.Send(Interrupt(ctx, "second_interrupt"))
+					}()
+					return iter
+				},
+			}
+
+			loop2 := NewTurnLoop(TurnLoopConfig[string, *schema.Message]{
+				Store:        store,
+				CheckpointID: cpID,
+				GenInput:     genInputConsumeAll,
+				GenResume: func(_ context.Context, _ *TurnLoop[string, *schema.Message], interrupted, unhandled, newItems []string) (*GenResumeResult[string, *schema.Message], error) {
+					return &GenResumeResult[string, *schema.Message]{
+						Consumed:  interrupted,
+						Remaining: append(append([]string{}, unhandled...), newItems...),
+					}, nil
+				},
+				PrepareAgent: prepareAgent(secondAgent),
+			})
+			loop2.Run(ctx)
+			exit2 := loop2.Wait()
+			require.ErrorAs(t, exit2.ExitReason, new(*InterruptError))
+			require.NoError(t, exit2.CheckpointErr)
+
+			cp2, info2, runCtx2 := loadTurnLoopRunnerCheckpoint(t, store, cpID)
+			assert.Equal(t, enableStreaming, cp2.RunnerEnableStreaming)
+			assert.Equal(t, enableStreaming, info2.EnableStreaming)
+			require.NotNil(t, runCtx2.RootInput)
+			require.Len(t, runCtx2.RootInput.Messages, 1)
+			assert.Equal(t, originalMessage, runCtx2.RootInput.Messages[0].Content)
+		})
+	}
+}
+
+func loadTurnLoopRunnerCheckpoint(t *testing.T, store *turnLoopCheckpointStore, cpID string) (*turnLoopCheckpoint[string], *ResumeInfo, *runContext) {
+	t.Helper()
+
+	store.mu.Lock()
+	data, ok := store.m[cpID]
+	store.mu.Unlock()
+	require.True(t, ok, "turn loop checkpoint should exist")
+
+	cp, err := unmarshalTurnLoopCheckpoint[string](data)
+	require.NoError(t, err)
+	require.True(t, cp.HasRunnerState)
+	require.NotEmpty(t, cp.RunnerCheckpoint)
+
+	runnerStore := newResumeBridgeStore(bridgeCheckpointID, cp.RunnerCheckpoint)
+	_, runCtx, info, err := runnerLoadCheckPointImpl(runnerStore, context.Background(), bridgeCheckpointID)
+	require.NoError(t, err)
+	require.NotNil(t, info)
+	require.NotNil(t, runCtx)
+
+	return cp, info, runCtx
+}
+
 func TestTurnLoop_Stop_EscalatesCancelMode(t *testing.T) {
 	ctx := context.Background()
 	agentStarted := make(chan *cancelContext, 1)
