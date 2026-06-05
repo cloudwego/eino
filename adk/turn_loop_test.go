@@ -2550,8 +2550,7 @@ func TestTurnLoop_ResumeInterruptAgain_PreservesEnableStreamingCheckpoint(t *tes
 			require.ErrorAs(t, exit1.ExitReason, new(*InterruptError))
 			require.NoError(t, exit1.CheckpointErr)
 
-			cp1, info1, runCtx1 := loadTurnLoopRunnerCheckpoint(t, store, cpID)
-			assert.Equal(t, enableStreaming, cp1.RunnerEnableStreaming)
+			info1, runCtx1 := loadTurnLoopRunnerCheckpoint(t, store, cpID)
 			assert.Equal(t, enableStreaming, info1.EnableStreaming)
 			require.NotNil(t, runCtx1.RootInput)
 			require.Len(t, runCtx1.RootInput.Messages, 1)
@@ -2587,8 +2586,7 @@ func TestTurnLoop_ResumeInterruptAgain_PreservesEnableStreamingCheckpoint(t *tes
 			require.ErrorAs(t, exit2.ExitReason, new(*InterruptError))
 			require.NoError(t, exit2.CheckpointErr)
 
-			cp2, info2, runCtx2 := loadTurnLoopRunnerCheckpoint(t, store, cpID)
-			assert.Equal(t, enableStreaming, cp2.RunnerEnableStreaming)
+			info2, runCtx2 := loadTurnLoopRunnerCheckpoint(t, store, cpID)
 			assert.Equal(t, enableStreaming, info2.EnableStreaming)
 			require.NotNil(t, runCtx2.RootInput)
 			require.Len(t, runCtx2.RootInput.Messages, 1)
@@ -2597,7 +2595,7 @@ func TestTurnLoop_ResumeInterruptAgain_PreservesEnableStreamingCheckpoint(t *tes
 	}
 }
 
-func loadTurnLoopRunnerCheckpoint(t *testing.T, store *turnLoopCheckpointStore, cpID string) (*turnLoopCheckpoint[string], *ResumeInfo, *runContext) {
+func loadTurnLoopRunnerCheckpoint(t *testing.T, store *turnLoopCheckpointStore, cpID string) (*ResumeInfo, *runContext) {
 	t.Helper()
 
 	store.mu.Lock()
@@ -2616,7 +2614,7 @@ func loadTurnLoopRunnerCheckpoint(t *testing.T, store *turnLoopCheckpointStore, 
 	require.NotNil(t, info)
 	require.NotNil(t, runCtx)
 
-	return cp, info, runCtx
+	return info, runCtx
 }
 
 func TestTurnLoop_Stop_EscalatesCancelMode(t *testing.T) {

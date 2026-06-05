@@ -150,7 +150,7 @@ func (r *TypedRunner[M]) ResumeWithParams(ctx context.Context, checkPointID stri
 
 func (r *TypedRunner[M]) resumeInternal(ctx context.Context, checkPointID string, resumeData map[string]any,
 	opts ...AgentRunOption) (*AsyncIterator[*TypedAgentEvent[M]], error) {
-	return typedRunnerResumeInternalImpl(r.a, r.enableStreaming, r.store, ctx, checkPointID, resumeData, opts...)
+	return typedRunnerResumeInternalImpl(r.a, r.store, ctx, checkPointID, resumeData, opts...)
 }
 
 func typedRunnerRunImpl[M MessageType](a TypedAgent[M], enableStreaming bool, store CheckPointStore, ctx context.Context, messages []M, opts ...AgentRunOption) *AsyncIterator[*TypedAgentEvent[M]] {
@@ -202,7 +202,7 @@ func typedRunnerRunImpl[M MessageType](a TypedAgent[M], enableStreaming bool, st
 	return niter
 }
 
-func typedRunnerResumeInternalImpl[M MessageType](a TypedAgent[M], enableStreaming bool, store CheckPointStore, ctx context.Context, checkPointID string, resumeData map[string]any, //nolint:revive // argument-limit
+func typedRunnerResumeInternalImpl[M MessageType](a TypedAgent[M], store CheckPointStore, ctx context.Context, checkPointID string, resumeData map[string]any, //nolint:revive // argument-limit
 	opts ...AgentRunOption) (*AsyncIterator[*TypedAgentEvent[M]], error) {
 	if store == nil {
 		return nil, fmt.Errorf("failed to resume: store is nil")
@@ -212,6 +212,12 @@ func typedRunnerResumeInternalImpl[M MessageType](a TypedAgent[M], enableStreami
 	if err != nil {
 		return nil, fmt.Errorf("failed to load from checkpoint: %w", err)
 	}
+
+	// Resume uses the streaming mode persisted in the checkpoint, not the value the
+	// caller passed when constructing the runner. This is the runner's own invariant:
+	// the checkpoint is the source of truth for what mode the original execution was
+	// running in, and any new checkpoint written during this resume must preserve it.
+	enableStreaming := resumeInfo.EnableStreaming
 
 	o := getCommonOptions(nil, opts...)
 	if o.sharedParentSession {
