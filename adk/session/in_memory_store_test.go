@@ -31,12 +31,12 @@ import (
 
 func TestInMemoryStoreConformance(t *testing.T) {
 	session.RunConformanceTests[*schema.Message](t, func(testing.TB) adk.SessionService[*schema.Message] {
-		return session.NewInMemoryStore[*schema.Message](nil)
+		return adk.NewLocalSessionService[*schema.Message](session.NewInMemoryStore[*schema.Message](nil))
 	}, func(content string) *schema.Message {
 		return schema.UserMessage(content)
 	})
 	session.RunSerializerConformanceTests[*schema.Message](t, func(_ testing.TB, serializer schema.Serializer) adk.SessionService[*schema.Message] {
-		return session.NewInMemoryStore[*schema.Message](&session.InMemoryStoreConfig{EventSerializer: serializer})
+		return adk.NewLocalSessionService[*schema.Message](session.NewInMemoryStore[*schema.Message](&session.InMemoryStoreConfig{EventSerializer: serializer}))
 	}, func(content string) *schema.Message {
 		return schema.UserMessage(content)
 	})
@@ -77,12 +77,14 @@ func TestInMemoryStoreKindFilterAndPagination(t *testing.T) {
 		testTurnEndEvent("e3", "turn-1"),
 		testMessageEvent("e4", "four"),
 	}
-	require.NoError(t, store.AppendEvents(ctx, "s", events))
+	_, err := store.AppendEvents(ctx, &adk.AppendSessionEventsRequest[*schema.Message]{SessionID: "s", Events: events})
+	require.NoError(t, err)
 
-	res, err := store.LoadEvents(ctx, "s", &adk.LoadSessionEventsRequest{
-		After: "e2",
-		Kinds: []adk.SessionEventKind{adk.SessionEventMessage, adk.SessionEventTurnEnd},
-		Limit: 1,
+	res, err := store.LoadEvents(ctx, &adk.LoadSessionEventsRequest{
+		SessionID: "s",
+		After:     "e2",
+		Kinds:     []adk.SessionEventKind{adk.SessionEventMessage, adk.SessionEventTurnEnd},
+		Limit:     1,
 	})
 	require.NoError(t, err)
 	require.Len(t, res.Events, 1)
@@ -93,17 +95,45 @@ func TestInMemoryStoreKindFilterAndPagination(t *testing.T) {
 func TestInMemoryStoreLoadReturnsIndependentEvents(t *testing.T) {
 	ctx := context.Background()
 	store := session.NewInMemoryStore[*schema.Message](nil)
-	require.NoError(t, store.AppendEvents(ctx, "s", []*adk.SessionEvent[*schema.Message]{
+	_, err := store.AppendEvents(ctx, &adk.AppendSessionEventsRequest[*schema.Message]{SessionID: "s", Events: []*adk.SessionEvent[*schema.Message]{
 		testMessageEvent("e1", "one"),
-	}))
+	}})
+	require.NoError(t, err)
 
-	first, err := store.LoadEvents(ctx, "s", nil)
+	first, err := store.LoadEvents(ctx, &adk.LoadSessionEventsRequest{SessionID: "s"})
 	require.NoError(t, err)
 	first.Events[0].EventID = "mutated"
 
-	second, err := store.LoadEvents(ctx, "s", nil)
+	second, err := store.LoadEvents(ctx, &adk.LoadSessionEventsRequest{SessionID: "s"})
 	require.NoError(t, err)
 	assert.Equal(t, "e1", second.Events[0].EventID)
+}
+
+func TestInMemoryStoreAppendEventsExactBatchReplay(t *testing.T) {
+	ctx := context.Background()
+	store := session.NewInMemoryStore[*schema.Message](nil)
+	events := []*adk.SessionEvent[*schema.Message]{
+		testMessageEvent("replay-1", "one"),
+		testMessageEvent("replay-2", "two"),
+	}
+	first, err := store.AppendEvents(ctx, &adk.AppendSessionEventsRequest[*schema.Message]{
+		SessionID: "s",
+		Events:    events,
+	})
+	require.NoError(t, err)
+	require.Equal(t, "replay-2", first.SessionTailEventID)
+
+	replayed, err := store.AppendEvents(ctx, &adk.AppendSessionEventsRequest[*schema.Message]{
+		SessionID:                  "s",
+		ExpectedSessionTailEventID: "",
+		Events:                     events,
+	})
+	require.NoError(t, err)
+	require.Equal(t, "replay-2", replayed.SessionTailEventID)
+
+	res, err := store.LoadEvents(ctx, &adk.LoadSessionEventsRequest{SessionID: "s"})
+	require.NoError(t, err)
+	require.Len(t, res.Events, 2)
 }
 
 func testMessageEvent(id, content string) *adk.SessionEvent[*schema.Message] {
