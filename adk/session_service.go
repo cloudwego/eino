@@ -41,7 +41,8 @@ func NewLocalSessionService[M MessageType](store SessionEventStore[M]) SessionSe
 }
 
 // NewFencedSessionService wraps a fenced event store as a sealed SessionService.
-// The returned handle keeps the fencing token internal to the adk package.
+// The returned handle obtains fencing tokens from the caller-provided token
+// function only at fenced append boundaries.
 func NewFencedSessionService[M MessageType](store FencedSessionEventStore[M], _ FencedSessionServiceOptions) SessionService[M] {
 	if store == nil {
 		return nil
@@ -60,8 +61,8 @@ func (s *localSessionService[M]) openSession(_ context.Context, req *openSession
 	if req == nil || req.sessionID == "" {
 		return nil, ErrSessionBusy
 	}
-	if req.requireFenced {
-		return nil, ErrSessionFencingRequired
+	if req.fencingToken != nil {
+		return nil, ErrSessionFencingTokenUnsupported
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -75,35 +76,7 @@ func (s *localSessionService[M]) openSession(_ context.Context, req *openSession
 			store:     s.store,
 			sessionID: req.sessionID,
 		},
-		fenced: false,
 	}, nil
-}
-
-func (s *localSessionService[M]) AppendEvents(ctx context.Context, sessionID string, events []*SessionEvent[M]) error {
-	res, err := s.openSession(ctx, &openSessionRequest{sessionID: sessionID})
-	if err != nil {
-		return err
-	}
-	defer res.handle.close(ctx)
-	if _, err := res.handle.loadEvents(ctx, &LoadSessionEventsRequest{SessionID: sessionID, Reverse: true, Limit: 1}); err != nil {
-		return err
-	}
-	_, err = res.handle.appendEvents(ctx, &AppendSessionEventsRequest[M]{SessionID: sessionID, Events: events})
-	return err
-}
-
-func (s *localSessionService[M]) LoadEvents(ctx context.Context, sessionID string, opts *LoadSessionEventsRequest) (*LoadSessionEventsResult[M], error) {
-	res, err := s.openSession(ctx, &openSessionRequest{sessionID: sessionID})
-	if err != nil {
-		return nil, err
-	}
-	defer res.handle.close(ctx)
-	if opts == nil {
-		opts = &LoadSessionEventsRequest{}
-	}
-	clone := *opts
-	clone.SessionID = sessionID
-	return res.handle.loadEvents(ctx, &clone)
 }
 
 func (s *localSessionService[M]) release(sessionID string) {
@@ -169,8 +142,6 @@ func (h *localSessionHandle[M]) appendEvents(ctx context.Context, req *AppendSes
 	return res, nil
 }
 
-func (h *localSessionHandle[M]) renew(context.Context) error { return nil }
-
 func (h *localSessionHandle[M]) currentTailEventID() string {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -197,53 +168,24 @@ func (s *fencedSessionService[M]) openSession(ctx context.Context, req *openSess
 	if req == nil || req.sessionID == "" {
 		return nil, ErrSessionBusy
 	}
-	token, err := s.store.AcquireFencingToken(ctx, req.sessionID)
-	if err != nil {
-		return nil, err
+	if req.fencingToken == nil {
+		return nil, ErrSessionFencingTokenRequired
 	}
 	return &openSessionResult[M]{
 		handle: &fencedSessionHandle[M]{
-			store:     s.store,
-			sessionID: req.sessionID,
-			token:     token,
+			store:        s.store,
+			sessionID:    req.sessionID,
+			fencingToken: req.fencingToken,
 		},
-		fenced: true,
 	}, nil
 }
 
-func (s *fencedSessionService[M]) AppendEvents(ctx context.Context, sessionID string, events []*SessionEvent[M]) error {
-	res, err := s.openSession(ctx, &openSessionRequest{sessionID: sessionID, requireFenced: true})
-	if err != nil {
-		return err
-	}
-	defer res.handle.close(ctx)
-	if _, err := res.handle.loadEvents(ctx, &LoadSessionEventsRequest{SessionID: sessionID, Reverse: true, Limit: 1}); err != nil {
-		return err
-	}
-	_, err = res.handle.appendEvents(ctx, &AppendSessionEventsRequest[M]{SessionID: sessionID, Events: events})
-	return err
-}
-
-func (s *fencedSessionService[M]) LoadEvents(ctx context.Context, sessionID string, opts *LoadSessionEventsRequest) (*LoadSessionEventsResult[M], error) {
-	res, err := s.openSession(ctx, &openSessionRequest{sessionID: sessionID, requireFenced: true})
-	if err != nil {
-		return nil, err
-	}
-	defer res.handle.close(ctx)
-	if opts == nil {
-		opts = &LoadSessionEventsRequest{}
-	}
-	clone := *opts
-	clone.SessionID = sessionID
-	return res.handle.loadEvents(ctx, &clone)
-}
-
 type fencedSessionHandle[M MessageType] struct {
-	store     FencedSessionEventStore[M]
-	sessionID string
+	store        FencedSessionEventStore[M]
+	sessionID    string
+	fencingToken SessionFencingTokenFunc
 
 	mu     sync.Mutex
-	token  *SessionFencingToken
 	tailID string
 	closed bool
 }
@@ -268,14 +210,21 @@ func (h *fencedSessionHandle[M]) loadEvents(ctx context.Context, req *LoadSessio
 
 func (h *fencedSessionHandle[M]) appendEvents(ctx context.Context, req *AppendSessionEventsRequest[M]) (*AppendSessionEventsResult, error) {
 	h.mu.Lock()
-	token := h.token
 	tailID := h.tailID
 	closed := h.closed
+	fencingToken := h.fencingToken
 	h.mu.Unlock()
 	if closed {
 		return nil, ErrSessionFencingTokenInvalid
 	}
-	if token == nil || token.Token == "" {
+	if fencingToken == nil {
+		return nil, ErrSessionFencingTokenInvalid
+	}
+	token, err := fencingToken(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if token == "" {
 		return nil, ErrSessionFencingTokenInvalid
 	}
 	if req == nil {
@@ -283,7 +232,7 @@ func (h *fencedSessionHandle[M]) appendEvents(ctx context.Context, req *AppendSe
 	}
 	freq := &FencedAppendSessionEventsRequest[M]{
 		SessionID:                  h.sessionID,
-		FencingToken:               token.Token,
+		FencingToken:               token,
 		ExpectedSessionTailEventID: req.ExpectedSessionTailEventID,
 		Events:                     req.Events,
 	}
@@ -302,23 +251,6 @@ func (h *fencedSessionHandle[M]) appendEvents(ctx context.Context, req *AppendSe
 	return res, nil
 }
 
-func (h *fencedSessionHandle[M]) renew(ctx context.Context) error {
-	h.mu.Lock()
-	token := h.token
-	h.mu.Unlock()
-	if token == nil {
-		return ErrSessionFencingTokenInvalid
-	}
-	next, err := h.store.RenewFencingToken(ctx, token)
-	if err != nil {
-		return err
-	}
-	h.mu.Lock()
-	h.token = next
-	h.mu.Unlock()
-	return nil
-}
-
 func (h *fencedSessionHandle[M]) currentTailEventID() string {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -332,10 +264,6 @@ func (h *fencedSessionHandle[M]) close(ctx context.Context) error {
 		return nil
 	}
 	h.closed = true
-	token := h.token
 	h.mu.Unlock()
-	if token == nil {
-		return nil
-	}
-	return h.store.ReleaseFencingToken(ctx, token)
+	return nil
 }
