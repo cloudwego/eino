@@ -61,7 +61,8 @@ var ErrInvalidRollbackTarget = errors.New("adk: invalid rollback target")
 var ErrRollbackTargetInactive = errors.New("adk: rollback target is not active")
 var ErrSessionHeadChanged = errors.New("adk: session committed turn_end head changed")
 var ErrSessionBusy = errors.New("adk: session already has an active handle")
-var ErrSessionFencingRequired = errors.New("adk: fenced session handle required")
+var ErrSessionFencingTokenRequired = errors.New("adk: session fencing token required")
+var ErrSessionFencingTokenUnsupported = errors.New("adk: session fencing token unsupported")
 var ErrSessionTailMismatch = errors.New("adk: session tail does not match expected tail")
 var ErrDuplicateEventID = errors.New("adk: duplicate session event_id")
 var ErrSessionFencingTokenInvalid = errors.New("adk: session handle fencing token is not current")
@@ -108,24 +109,39 @@ type SessionEventStore[M MessageType] interface {
 // the fencing token and expected tail in the same atomic append operation that
 // writes events.
 type FencedSessionEventStore[M MessageType] interface {
-	AcquireFencingToken(ctx context.Context, sessionID string) (*SessionFencingToken, error)
-	RenewFencingToken(ctx context.Context, token *SessionFencingToken) (*SessionFencingToken, error)
-	ReleaseFencingToken(ctx context.Context, token *SessionFencingToken) error
 	LoadEvents(ctx context.Context, req *LoadSessionEventsRequest) (*LoadSessionEventsResult[M], error)
 	AppendEventsFenced(ctx context.Context, req *FencedAppendSessionEventsRequest[M]) (*AppendSessionEventsResult, error)
 }
 
-type SessionFencingToken struct {
-	SessionID string
-	Token     string
-	ExpiresAt time.Time
-}
+// SessionFencingTokenFunc returns the current opaque fencing token for one
+// externally-owned session ownership epoch.
+//
+// Runner calls this function only when it is about to append events through a
+// fenced session service. It does not call the function while opening a session
+// or loading events, and it does not manage token renewal or release. The owner
+// that coordinates the session, such as a TurnLoop or application scheduler, is
+// responsible for the token lifecycle.
+type SessionFencingTokenFunc func(ctx context.Context) (string, error)
 
+// FencedAppendSessionEventsRequest is the provider-facing append request for a
+// fenced event store.
+//
+// AppendEventsFenced must validate FencingToken, ExpectedSessionTailEventID, and
+// the event append in the same atomic append operation. If the expected tail does
+// not match the current session tail, providers may return success only when the
+// already-persisted events after ExpectedSessionTailEventID exactly match the
+// requested EventID sequence and the current tail is the last requested EventID.
 type FencedAppendSessionEventsRequest[M MessageType] struct {
-	SessionID                  string
-	FencingToken               string
+	// SessionID identifies the session log to append to.
+	SessionID string
+	// FencingToken is an opaque owner proof supplied by SessionFencingTokenFunc.
+	FencingToken string
+	// ExpectedSessionTailEventID is the session tail that the caller observed
+	// before this append. Empty means the caller expects an empty session log.
 	ExpectedSessionTailEventID string
-	Events                     []*SessionEvent[M]
+	// Events are appended as one batch. Each EventID must be non-empty and
+	// unique within the session.
+	Events []*SessionEvent[M]
 }
 
 // SessionService is the sealed runtime adapter consumed by Runner.
@@ -134,25 +150,21 @@ type FencedAppendSessionEventsRequest[M MessageType] struct {
 // implementing SessionService directly.
 type SessionService[M MessageType] interface {
 	openSession(ctx context.Context, req *openSessionRequest) (*openSessionResult[M], error)
-	AppendEvents(ctx context.Context, sessionID string, events []*SessionEvent[M]) error
-	LoadEvents(ctx context.Context, sessionID string, opts *LoadSessionEventsRequest) (*LoadSessionEventsResult[M], error)
 }
 
 type openSessionRequest struct {
-	sessionID     string
-	requireFenced bool
+	sessionID    string
+	fencingToken SessionFencingTokenFunc
 }
 
 type openSessionResult[M MessageType] struct {
 	handle sessionHandle[M]
-	fenced bool
 }
 
 type sessionHandle[M MessageType] interface {
 	loadEvents(ctx context.Context, req *LoadSessionEventsRequest) (*LoadSessionEventsResult[M], error)
 	appendEvents(ctx context.Context, req *AppendSessionEventsRequest[M]) (*AppendSessionEventsResult, error)
 	currentTailEventID() string
-	renew(ctx context.Context) error
 	close(ctx context.Context) error
 }
 
@@ -170,7 +182,7 @@ type LoadSessionEventsRequest struct {
 	Kinds []SessionEventKind
 }
 
-// LoadSessionEventsResult is the response from SessionService.LoadEvents.
+// LoadSessionEventsResult is the response from SessionEventStore.LoadEvents.
 type LoadSessionEventsResult[M MessageType] struct {
 	// Events are typed SessionEvent values owned by the caller.
 	Events []*SessionEvent[M]
@@ -182,11 +194,18 @@ type LoadSessionEventsResult[M MessageType] struct {
 }
 
 type AppendSessionEventsRequest[M MessageType] struct {
-	SessionID                  string
+	// SessionID identifies the session log to append to.
+	SessionID string
+	// ExpectedSessionTailEventID is the session tail that the caller observed
+	// before this append. Empty means the caller expects an empty session log.
 	ExpectedSessionTailEventID string
-	Events                     []*SessionEvent[M]
+	// Events are appended as one batch. Each EventID must be non-empty and
+	// unique within the session.
+	Events []*SessionEvent[M]
 }
 
+// AppendSessionEventsResult reports the new durable session tail after an
+// append or exact batch replay.
 type AppendSessionEventsResult struct {
 	SessionTailEventID string
 }
@@ -554,15 +573,6 @@ type SessionConfig struct {
 	// uuid.NewString() (UUID v4) is used. The context carries request-scoped
 	// values (e.g. trace ID, tenant info) that may inform ID generation.
 	EventIDGenerator func(ctx context.Context) string
-	// RequireFenced requires session admission to produce a handle that is safe
-	// for multi-process session ownership.
-	//
-	// Use it when the same session can be resumed or run by multiple processes.
-	// The returned handle must validate a fencing token at side-effecting
-	// operation boundaries so stale owners cannot append after losing ownership.
-	// Leave it false for local development, tests, and single-process deployments
-	// where process-local serialization is sufficient.
-	RequireFenced bool
 	// OpenSessionTimeout bounds how long Runner may wait to acquire any session
 	// handle before failing the current Run/Resume/Rollback attempt.
 	//
@@ -988,7 +998,6 @@ func normalizeSessionConfig(cfg *SessionConfig) SessionConfig {
 	if cfg.EventIDGenerator != nil {
 		normalized.EventIDGenerator = cfg.EventIDGenerator
 	}
-	normalized.RequireFenced = cfg.RequireFenced
 	if cfg.OpenSessionTimeout > 0 {
 		normalized.OpenSessionTimeout = cfg.OpenSessionTimeout
 	}
@@ -1382,9 +1391,10 @@ var modelContextSessionEventKinds = []SessionEventKind{
 }
 
 type RollbackSessionOptions struct {
-	CheckPointStore    CheckPointStore
-	ExpectedHeadTurnID string
-	EventIDGenerator   func(ctx context.Context) string
+	CheckPointStore     CheckPointStore
+	ExpectedHeadTurnID  string
+	EventIDGenerator    func(ctx context.Context) string
+	SessionFencingToken SessionFencingTokenFunc
 }
 
 type RollbackSessionOption func(*RollbackSessionOptions)
@@ -1411,6 +1421,14 @@ func WithRollbackEventIDGenerator(gen func(ctx context.Context) string) Rollback
 	}
 }
 
+// WithRollbackSessionFencingToken supplies the external owner proof used when
+// rolling back through a fenced session service.
+func WithRollbackSessionFencingToken(fn SessionFencingTokenFunc) RollbackSessionOption {
+	return func(opts *RollbackSessionOptions) {
+		opts.SessionFencingToken = fn
+	}
+}
+
 // RollbackSession appends a rollback marker that makes targetTurnID the latest active committed turn.
 func RollbackSession[M MessageType](
 	ctx context.Context,
@@ -1428,7 +1446,13 @@ func RollbackSession[M MessageType](
 	if targetTurnID == "" {
 		return ErrRollbackTargetNotFound
 	}
-	openResult, err := service.openSession(ctx, &openSessionRequest{sessionID: sessionID})
+	var cfg RollbackSessionOptions
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&cfg)
+		}
+	}
+	openResult, err := service.openSession(ctx, &openSessionRequest{sessionID: sessionID, fencingToken: cfg.SessionFencingToken})
 	if err != nil {
 		return err
 	}
@@ -1437,12 +1461,6 @@ func RollbackSession[M MessageType](
 	}
 	defer openResult.handle.close(ctx)
 
-	var cfg RollbackSessionOptions
-	for _, opt := range opts {
-		if opt != nil {
-			opt(&cfg)
-		}
-	}
 	activeEvents, err := loadActiveSessionEventsReverse[M](ctx, openResult.handle, sessionID, defaultLoadPageSize)
 	if err != nil {
 		return err
