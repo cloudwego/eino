@@ -4061,8 +4061,8 @@ func (m *mockSessionService) LoadEvents(_ context.Context, sessionID string, opt
 }
 
 func (m *mockSessionService) openSession(_ context.Context, req *openSessionRequest) (*openSessionResult[*schema.Message], error) {
-	if req != nil && req.requireFenced {
-		return nil, ErrSessionFencingRequired
+	if req != nil && req.fencingToken != nil {
+		return nil, ErrSessionFencingTokenUnsupported
 	}
 	sessionID := ""
 	if req != nil {
@@ -4070,7 +4070,6 @@ func (m *mockSessionService) openSession(_ context.Context, req *openSessionRequ
 	}
 	return &openSessionResult[*schema.Message]{
 		handle: &mockSessionHandle{store: m, sessionID: sessionID},
-		fenced: false,
 	}, nil
 }
 
@@ -4096,9 +4095,52 @@ func (h *mockSessionHandle) appendEvents(ctx context.Context, req *AppendSession
 	return &AppendSessionEventsResult{}, nil
 }
 
-func (h *mockSessionHandle) renew(context.Context) error { return nil }
 func (h *mockSessionHandle) close(context.Context) error { return nil }
 func (h *mockSessionHandle) currentTailEventID() string  { return "" }
+
+func TestTurnLoop_PassesSessionFencingTokenToInternalRunner(t *testing.T) {
+	ctx := context.Background()
+	store := newTestFencedSessionStore("token-1")
+	var tokenCalls int32
+	eventsDone := make(chan struct{})
+	loop := NewTurnLoop(TurnLoopConfig[string, *schema.Message]{
+		GenInput: genInputConsumeAllWithMsg,
+		PrepareAgent: prepareAgent(&turnLoopMockAgent{
+			name: "fenced-turn-loop-agent",
+			runFunc: func(context.Context, *AgentInput) (*AgentOutput, error) {
+				return &AgentOutput{MessageOutput: &MessageVariant{Message: schema.AssistantMessage("ok", nil)}}, nil
+			},
+		}),
+		OnAgentEvents: func(_ context.Context, tc *TurnContext[string, *schema.Message], events *AsyncIterator[*TypedAgentEvent[*schema.Message]]) error {
+			defer close(eventsDone)
+			for {
+				_, ok := events.Next()
+				if !ok {
+					break
+				}
+			}
+			tc.Loop.Stop()
+			return nil
+		},
+		SessionID:      "turn-loop-fenced-session",
+		SessionService: NewFencedSessionService[*schema.Message](store, FencedSessionServiceOptions{}),
+		SessionFencingToken: func(context.Context) (string, error) {
+			atomic.AddInt32(&tokenCalls, 1)
+			return "token-1", nil
+		},
+		SessionConfig: &SessionConfig{PersistenceMode: SessionPersistenceModeSync},
+	})
+	loop.Run(ctx)
+	ok, _ := loop.Push("work")
+	require.True(t, ok)
+	waitOrFail(t, eventsDone, "turn loop did not process agent events")
+	result := loop.Wait()
+	require.NoError(t, result.ExitReason)
+	require.Greater(t, atomic.LoadInt32(&tokenCalls), int32(0))
+	for _, token := range store.appendedTokens() {
+		assert.Equal(t, "token-1", token)
+	}
+}
 
 func TestTurnLoop_SessionServiceWithCheckpointIDWithoutStore(t *testing.T) {
 	ctx := context.Background()
