@@ -60,8 +60,6 @@ type TypedFinalizerBuilder[M adk.MessageType] struct {
 
 // FinalizerBuilder is a backward-compatible alias for TypedFinalizerBuilder
 // specialized with *schema.Message.
-//
-// Deprecated: use TypedFinalizerBuilder[*schema.Message] instead.
 type FinalizerBuilder = TypedFinalizerBuilder[*schema.Message]
 
 // NewTypedFinalizer creates a new TypedFinalizerBuilder.
@@ -88,8 +86,6 @@ func NewTypedFinalizer[M adk.MessageType]() *TypedFinalizerBuilder[M] {
 
 // NewFinalizer creates a new FinalizerBuilder that builds a FinalizeFunc
 // by chaining handlers.
-//
-// Deprecated: use NewTypedFinalizer[*schema.Message] instead.
 func NewFinalizer() *FinalizerBuilder {
 	return &FinalizerBuilder{}
 }

@@ -165,6 +165,7 @@ type ContentBlock struct {
 	MCPToolApprovalResponse *MCPToolApprovalResponse `json:"mcp_tool_approval_response,omitempty"`
 
 	// StreamingMeta contains metadata for streaming responses.
+	// Only set for streaming responses.
 	StreamingMeta *StreamingMeta `json:"streaming_meta,omitempty"`
 
 	// Extra contains additional information for the content block.
@@ -285,6 +286,9 @@ type Reasoning struct {
 	// Signature contains encrypted reasoning tokens.
 	// Required by some models when passing reasoning text back.
 	Signature string `json:"signature,omitempty"`
+
+	// OpenAIExtension is the extension for OpenAI.
+	OpenAIExtension *openai.ReasoningExtension `json:"openai_extension,omitempty"`
 }
 
 type FunctionToolCall struct {
@@ -1303,19 +1307,34 @@ func genericGetTFromContentBlocks[T any](blocks []*ContentBlock, checkAndGetter 
 	return ret, nil
 }
 
-func concatReasoning(reasons []*Reasoning) (*Reasoning, error) {
+func concatReasoning(reasons []*Reasoning) (ret *Reasoning, err error) {
 	if len(reasons) == 0 {
 		return nil, fmt.Errorf("no reasoning found")
 	}
 
-	ret := &Reasoning{}
+	ret = &Reasoning{}
+
+	openaiExtensions := make([]*openai.ReasoningExtension, 0, len(reasons))
 
 	for _, r := range reasons {
+		if r == nil {
+			continue
+		}
 		if r.Text != "" {
 			ret.Text += r.Text
 		}
 		if r.Signature != "" {
 			ret.Signature += r.Signature
+		}
+		if r.OpenAIExtension != nil {
+			openaiExtensions = append(openaiExtensions, r.OpenAIExtension)
+		}
+	}
+
+	if len(openaiExtensions) > 0 {
+		ret.OpenAIExtension, err = openai.ConcatReasoningExtensions(openaiExtensions)
+		if err != nil {
+			return nil, fmt.Errorf("failed to concat openai reasoning extensions: %w", err)
 		}
 	}
 
