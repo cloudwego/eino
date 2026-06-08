@@ -46,8 +46,8 @@ func RunConformanceTests[M adk.MessageType](
 	t.Run("After forward pagination", func(t *testing.T) { testForwardPagination(t, factory, makeMessage) })
 	t.Run("sessionID isolates events", func(t *testing.T) { testSessionIsolation(t, factory, makeMessage) })
 	t.Run("Empty session returns no events", func(t *testing.T) { testEmptySession(t, factory) })
-	t.Run("AppendEvents is idempotent on duplicate EventID", func(t *testing.T) { testIdempotentAppend(t, factory, makeMessage) })
-	t.Run("AppendEvents skips duplicate EventID within same batch", func(t *testing.T) { testIdempotentAppendWithinBatch(t, factory, makeMessage) })
+	t.Run("AppendEvents rejects non-replay duplicate EventID", func(t *testing.T) { testRejectDuplicateEventID(t, factory, makeMessage) })
+	t.Run("AppendEvents rejects duplicate EventID within same batch", func(t *testing.T) { testRejectDuplicateEventIDWithinBatch(t, factory, makeMessage) })
 	t.Run("AppendEvents rejects empty EventID with ErrInvalidEventID", func(t *testing.T) { testRejectEmptyEventID(t, factory, makeMessage) })
 	t.Run("After resumes by EventID forward", func(t *testing.T) { testAfterForward(t, factory, makeMessage) })
 	t.Run("After resumes by EventID reverse", func(t *testing.T) { testAfterReverse(t, factory, makeMessage) })
@@ -230,31 +230,37 @@ func testEmptySession[M adk.MessageType](t *testing.T, factory func(testing.TB) 
 	}
 }
 
-func testIdempotentAppend[M adk.MessageType](t *testing.T, factory func(testing.TB) adk.SessionService[M], makeMessage func(string) M) {
+func testRejectDuplicateEventID[M adk.MessageType](t *testing.T, factory func(testing.TB) adk.SessionService[M], makeMessage func(string) M) {
 	store := newStore(t, factory)
 	ctx := context.Background()
 
 	first := messageEvent("dup-1", makeMessage("first"))
 	dup := messageEvent("dup-1", makeMessage("second"))
 	requireNoError(t, store.AppendEvents(ctx, "s", []*adk.SessionEvent[M]{first}))
-	requireNoError(t, store.AppendEvents(ctx, "s", []*adk.SessionEvent[M]{dup}))
+	err := store.AppendEvents(ctx, "s", []*adk.SessionEvent[M]{dup})
+	if !errors.Is(err, adk.ErrDuplicateEventID) {
+		t.Fatalf("expected ErrDuplicateEventID, got %v", err)
+	}
 
 	res, err := store.LoadEvents(ctx, "s", &adk.LoadSessionEventsRequest{})
 	requireNoError(t, err)
 	requireEventsEqual(t, []*adk.SessionEvent[M]{first}, res.Events)
 }
 
-func testIdempotentAppendWithinBatch[M adk.MessageType](t *testing.T, factory func(testing.TB) adk.SessionService[M], makeMessage func(string) M) {
+func testRejectDuplicateEventIDWithinBatch[M adk.MessageType](t *testing.T, factory func(testing.TB) adk.SessionService[M], makeMessage func(string) M) {
 	store := newStore(t, factory)
 	ctx := context.Background()
 
 	first := messageEvent("dup-batch-1", makeMessage("first"))
 	dup := messageEvent("dup-batch-1", makeMessage("second"))
-	requireNoError(t, store.AppendEvents(ctx, "s", []*adk.SessionEvent[M]{first, dup}))
+	err := store.AppendEvents(ctx, "s", []*adk.SessionEvent[M]{first, dup})
+	if !errors.Is(err, adk.ErrDuplicateEventID) {
+		t.Fatalf("expected ErrDuplicateEventID, got %v", err)
+	}
 
 	res, err := store.LoadEvents(ctx, "s", &adk.LoadSessionEventsRequest{})
 	requireNoError(t, err)
-	requireEventsEqual(t, []*adk.SessionEvent[M]{first}, res.Events)
+	requireEventsEqual(t, nil, res.Events)
 }
 
 func testRejectEmptyEventID[M adk.MessageType](t *testing.T, factory func(testing.TB) adk.SessionService[M], makeMessage func(string) M) {

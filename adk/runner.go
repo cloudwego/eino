@@ -25,6 +25,7 @@ import (
 	"reflect"
 	"runtime/debug"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -175,8 +176,11 @@ type runnerSessionRunState[M MessageType] struct {
 	latestState     *TurnEndState[M]
 	sessionConfig   SessionConfig
 	sessionService  SessionService[M]
+	sessionHandle   sessionHandle[M]
+	sessionFenced   bool
 	checkPointStore CheckPointStore
 	turnID          string
+	initialTimeline []*SessionEvent[M]
 	// inputMessages are the caller-provided messages for this turn (before history prepend).
 	// Captured so the Runner can persist them as session events at turn start.
 	inputMessages []M
@@ -216,6 +220,59 @@ func isNilCheckPointStore(store CheckPointStore) bool {
 	}
 }
 
+func openRunnerSession[M MessageType](
+	ctx context.Context,
+	service SessionService[M],
+	sessionID string,
+	cfg SessionConfig,
+) (*openSessionResult[M], error) {
+	if service == nil {
+		return nil, errors.New("adk: session service is nil")
+	}
+	deadline := timeNow().Add(cfg.OpenSessionTimeout)
+	var lastErr error
+	for {
+		result, err := service.openSession(ctx, &openSessionRequest{
+			sessionID:     sessionID,
+			requireFenced: cfg.RequireFenced,
+		})
+		if err == nil {
+			if result == nil || result.handle == nil {
+				return nil, ErrSessionBusy
+			}
+			if cfg.RequireFenced && !result.fenced {
+				_ = result.handle.close(ctx)
+				return nil, ErrSessionFencingRequired
+			}
+			return result, nil
+		}
+		if !errors.Is(err, ErrSessionBusy) {
+			return nil, err
+		}
+		lastErr = err
+		if !timeNow().Before(deadline) {
+			return nil, lastErr
+		}
+		wait := 10 * time.Millisecond
+		var busy *SessionBusyError
+		if errors.As(err, &busy) && busy.ExpiresAt.After(timeNow()) {
+			until := time.Until(busy.ExpiresAt)
+			if until < wait {
+				wait = until
+			}
+		}
+		select {
+		case <-time.After(wait):
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+}
+
+func timeNow() time.Time {
+	return time.Now()
+}
+
 func prepareRunnerSessionRun[M MessageType]( //nolint:revive // argument-limit
 	ctx context.Context,
 	checkPointStore CheckPointStore,
@@ -238,11 +295,18 @@ func prepareRunnerSessionRun[M MessageType]( //nolint:revive // argument-limit
 	state.checkPointStore = checkPointStore
 	state.sessionConfig = normalizeSessionConfig(sessionConfig)
 	state.latestState = &TurnEndState[M]{}
+	openResult, err := openRunnerSession[M](ctx, sessionService, sessionID, state.sessionConfig)
+	if err != nil {
+		return nil, err
+	}
+	state.sessionHandle = openResult.handle
+	state.sessionFenced = openResult.fenced
 
 	pageSize := state.sessionConfig.LoadPageSize
 
-	reconstructResult, err := reconstructSessionState[M](ctx, sessionService, sessionID, pageSize)
+	reconstructResult, err := reconstructSessionState[M](ctx, state.sessionHandle, sessionID, pageSize)
 	if err != nil {
+		_ = state.sessionHandle.close(ctx)
 		return nil, fmt.Errorf("failed to reconstruct session[%s]: %w", sessionID, err)
 	}
 	// In Run, only the reconstructed state matters; inFlightTurnID is
@@ -250,6 +314,18 @@ func prepareRunnerSessionRun[M MessageType]( //nolint:revive // argument-limit
 	if reconstructResult != nil && reconstructResult.state != nil {
 		state.latestState = reconstructResult.state
 	}
+	runningEvent := &SessionEvent[M]{
+		EventID:   state.sessionConfig.EventIDGenerator(ctx),
+		Timestamp: newEventTimestamp(),
+		Kind:      SessionEventSessionStatusRunning,
+		TurnID:    state.turnID,
+		Lifecycle: &LifecycleEvent{Scope: LifecycleScopeSession, State: SessionRunStateRunning},
+	}
+	if err := appendRunnerSessionControlEvent(ctx, state, runningEvent, ""); err != nil {
+		_ = state.sessionHandle.close(ctx)
+		return nil, err
+	}
+	state.initialTimeline = append(state.initialTimeline, runningEvent)
 
 	if isNilCheckPointStore(checkPointStore) {
 		return state, nil
@@ -301,11 +377,18 @@ func prepareRunnerSessionResume[M MessageType](
 	state.checkPointStore = checkPointStore
 	state.sessionConfig = normalizeSessionConfig(sessionConfig)
 	state.latestState = &TurnEndState[M]{}
+	openResult, err := openRunnerSession[M](ctx, sessionService, sessionID, state.sessionConfig)
+	if err != nil {
+		return nil, "", err
+	}
+	state.sessionHandle = openResult.handle
+	state.sessionFenced = openResult.fenced
 
 	pageSize := state.sessionConfig.LoadPageSize
 
-	reconstructResult, err := reconstructSessionState[M](ctx, sessionService, sessionID, pageSize)
+	reconstructResult, err := reconstructSessionState[M](ctx, state.sessionHandle, sessionID, pageSize)
 	if err != nil {
+		_ = state.sessionHandle.close(ctx)
 		return nil, "", fmt.Errorf("failed to reconstruct session[%s]: %w", sessionID, err)
 	}
 	if reconstructResult != nil {
@@ -330,16 +413,55 @@ func prepareRunnerSessionResume[M MessageType](
 	// passing an explicit checkpoint ID has asserted the checkpoint should exist
 	// and any error will surface from the subsequent load. For implicit resume,
 	// the absence of a pending checkpoint is fatal and reported here.
-	if checkPointID == "" {
-		_, existed, err := loadRunnerSessionCheckpoint(ctx, checkPointStore, effectiveCheckPointID)
-		if err != nil {
-			return nil, "", err
-		}
-		if !existed {
+	checkpoint, existed, err := loadRunnerSessionCheckpoint(ctx, checkPointStore, effectiveCheckPointID)
+	if err != nil {
+		return nil, "", err
+	}
+	if !existed {
+		if checkPointID == "" {
 			return nil, "", fmt.Errorf("no pending session checkpoint for session %q", sessionID)
 		}
+		return state, effectiveCheckPointID, nil
 	}
+	resumeEvent := &SessionEvent[M]{
+		EventID:   state.sessionConfig.EventIDGenerator(ctx),
+		Timestamp: newEventTimestamp(),
+		Kind:      SessionEventKind(SessionEventExtensionPrefix + "resume.request_started"),
+		TurnID:    state.turnID,
+		Extension: &SessionExtensionEvent{},
+	}
+	if err := appendRunnerSessionControlEvent(ctx, state, resumeEvent, checkpoint.SessionTailEventID); err != nil {
+		_ = state.sessionHandle.close(ctx)
+		return nil, "", err
+	}
+	state.initialTimeline = append(state.initialTimeline, resumeEvent)
 	return state, effectiveCheckPointID, nil
+}
+
+func appendRunnerSessionControlEvent[M MessageType](
+	ctx context.Context,
+	state *runnerSessionRunState[M],
+	event *SessionEvent[M],
+	expectedTail string,
+) error {
+	if state == nil || !state.enabled || state.sessionHandle == nil || event == nil {
+		return nil
+	}
+	if event.SessionID == "" {
+		event.SessionID = state.sessionID
+	}
+	if event.TurnID == "" {
+		event.TurnID = state.turnID
+	}
+	if err := ValidateEmittedSessionEventKind(event); err != nil {
+		return err
+	}
+	_, err := state.sessionHandle.appendEvents(ctx, &AppendSessionEventsRequest[M]{
+		SessionID:                  state.sessionID,
+		ExpectedSessionTailEventID: expectedTail,
+		Events:                     []*SessionEvent[M]{event},
+	})
+	return err
 }
 
 func loadRunnerSessionCheckpoint(ctx context.Context, store CheckPointStore, checkPointID string) (*runnerSessionCheckpoint, bool, error) {
@@ -417,7 +539,11 @@ func saveRunnerCheckpoint[M MessageType]( //nolint:revive // argument-limit
 		return err
 	}
 	data, err := encodeRunnerSessionCheckpoint(&runnerSessionCheckpoint{
-		Payload: payload,
+		SessionID:          sessionState.sessionID,
+		TurnID:             sessionState.turnID,
+		CheckPointID:       checkPointID,
+		SessionTailEventID: sessionState.sessionHandle.currentTailEventID(),
+		Payload:            payload,
 	})
 	if err != nil {
 		return err
@@ -631,7 +757,14 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 		pendingCheckpoint *deferredRunnerCheckpoint
 	)
 	if sessionState != nil && sessionState.enabled {
-		persister = newSessionEventPersister[M](ctx, sessionState.sessionService, sessionState.sessionID, sessionState.sessionConfig)
+		persister = newSessionEventPersister[M](ctx, sessionState.sessionHandle, sessionState.sessionID, sessionState.sessionConfig)
+	}
+	if enableTimelineEvents && sessionState != nil && sessionState.enabled {
+		for _, se := range sessionState.initialTimeline {
+			if se != nil {
+				gen.Send(&TypedAgentEvent[M]{EventID: se.EventID, Timestamp: se.Timestamp, SessionEvent: se})
+			}
+		}
 	}
 	syncPersistence := sessionState != nil && sessionState.enabled &&
 		sessionState.sessionConfig.PersistenceMode == SessionPersistenceModeSync
@@ -712,14 +845,6 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 	// Emit caller-provided input messages as session events at turn start, so the
 	// live timeline and persisted log carry the user's input alongside the
 	// agent's output. Skipped on resume (sessionState.inputMessages is nil).
-	if persister != nil {
-		sendTimelineEvent(&SessionEvent[M]{
-			EventID:   sessionState.sessionConfig.EventIDGenerator(ctx),
-			Timestamp: newEventTimestamp(),
-			Kind:      SessionEventSessionStatusRunning,
-			Lifecycle: &LifecycleEvent{Scope: LifecycleScopeSession, State: SessionRunStateRunning},
-		})
-	}
 	if persister != nil && len(sessionState.inputMessages) > 0 {
 		for _, msg := range sessionState.inputMessages {
 			se := makeInputSessionEvent[M](ctx, msg, sessionState.sessionConfig.EventIDGenerator)
@@ -1073,6 +1198,11 @@ type sessionTurnResult[M MessageType] struct {
 }
 
 func (r *sessionTurnResult[M]) finalize(ctx context.Context) error {
+	defer func() {
+		if r.sessionState != nil && r.sessionState.sessionHandle != nil {
+			_ = r.sessionState.sessionHandle.close(ctx)
+		}
+	}()
 	if err := r.persister.closeAndWait(); err != nil && r.persistErr == nil {
 		r.persistErr = err
 	}
