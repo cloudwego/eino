@@ -41,6 +41,7 @@ const (
 	defaultMaxFlushRetries            = 3
 	defaultFlushRetryInitialBackoff   = 50 * time.Millisecond
 	defaultLoadPageSize               = 100
+	defaultOpenSessionTimeout         = 5 * time.Second
 )
 
 // ErrInvalidEventID is returned by AppendEvents when a SessionEvent has an
@@ -59,11 +60,24 @@ var ErrRollbackTargetNotFound = errors.New("adk: rollback target turn not found"
 var ErrInvalidRollbackTarget = errors.New("adk: invalid rollback target")
 var ErrRollbackTargetInactive = errors.New("adk: rollback target is not active")
 var ErrSessionHeadChanged = errors.New("adk: session committed turn_end head changed")
+var ErrSessionBusy = errors.New("adk: session already has an active handle")
+var ErrSessionFencingRequired = errors.New("adk: fenced session handle required")
+var ErrSessionTailMismatch = errors.New("adk: session tail does not match expected tail")
+var ErrDuplicateEventID = errors.New("adk: duplicate session event_id")
+var ErrSessionFencingTokenInvalid = errors.New("adk: session handle fencing token is not current")
+var ErrSessionFencingTokenExpired = errors.New("adk: session handle fencing token expired")
+
+type SessionBusyError struct {
+	ExpiresAt time.Time
+}
+
+func (e *SessionBusyError) Error() string { return ErrSessionBusy.Error() }
+func (e *SessionBusyError) Unwrap() error { return ErrSessionBusy }
 
 // protocolErrors enumerates protocol-level sentinels that persisters MUST
 // fail-fast on. Future protocol-level sentinels MUST be added here so that
 // isProtocolError stays the single source of truth.
-var protocolErrors = []error{ErrInvalidEventID}
+var protocolErrors = []error{ErrInvalidEventID, ErrSessionTailMismatch, ErrDuplicateEventID, ErrSessionFencingTokenInvalid, ErrSessionFencingTokenExpired}
 
 // isProtocolError reports whether err matches any protocol-level sentinel.
 // Used by the persister flush loop to bypass retry/backoff for protocol
@@ -81,39 +95,71 @@ const (
 	sessionRunnerCheckpointSuffix = "/runner_checkpoint"
 )
 
-// SessionService persists Runner-managed typed session events.
-//
-// Concurrency contract: a single session (identified by sessionID) MUST have at
-// most one active writer at a time. Runner Run/Resume and RollbackSession all
-// append to the same physical session log, so callers must serialize those
-// operations for the same sessionID. Different sessionIDs may be written
-// concurrently without restriction.
-//
-// Identity vs ordering: the Runner assigns each SessionEvent a session-unique
-// event_id. The service owns append ordering and resolves event_id to append
-// position when servicing LoadSessionEventsRequest.After / .Next.
-//
-// Ownership contract: AppendEvents receives caller-owned events and
-// implementations must not retain mutable pointers without copying. LoadEvents
-// returns caller-owned event values; mutating loaded events must not mutate
-// service state or future load results.
-//
-// Errors are split into protocol-level errors such as ErrInvalidEventID, which
-// persisters do not retry, and infrastructure-level errors, which use the
-// configured retry/backoff policy.
-type SessionService[M MessageType] interface {
-	// AppendEvents appends one or more typed SessionEvent entries in caller order.
-	// Each event must have a non-empty EventID. Duplicate EventID values within a
-	// session are idempotently skipped with first-write-wins semantics.
-	AppendEvents(ctx context.Context, sessionID string, events []*SessionEvent[M]) error
+// SessionEventStore is the provider-facing interface for a typed session event log.
+// It is suitable for local development, tests, and single-process deployments
+// when wrapped by NewLocalSessionService.
+type SessionEventStore[M MessageType] interface {
+	LoadEvents(ctx context.Context, req *LoadSessionEventsRequest) (*LoadSessionEventsResult[M], error)
+	AppendEvents(ctx context.Context, req *AppendSessionEventsRequest[M]) (*AppendSessionEventsResult, error)
+}
 
-	// LoadEvents loads session events with pagination support. Events are returned
-	// in chronological order or reverse chronological order depending on opts.Reverse.
+// FencedSessionEventStore is the provider-facing event log interface for
+// production multi-process session ownership. AppendEventsFenced must validate
+// the fencing token and expected tail in the same atomic append operation that
+// writes events.
+type FencedSessionEventStore[M MessageType] interface {
+	AcquireFencingToken(ctx context.Context, sessionID string) (*SessionFencingToken, error)
+	RenewFencingToken(ctx context.Context, token *SessionFencingToken) (*SessionFencingToken, error)
+	ReleaseFencingToken(ctx context.Context, token *SessionFencingToken) error
+	LoadEvents(ctx context.Context, req *LoadSessionEventsRequest) (*LoadSessionEventsResult[M], error)
+	AppendEventsFenced(ctx context.Context, req *FencedAppendSessionEventsRequest[M]) (*AppendSessionEventsResult, error)
+}
+
+type SessionFencingToken struct {
+	SessionID string
+	Token     string
+	ExpiresAt time.Time
+}
+
+type FencedAppendSessionEventsRequest[M MessageType] struct {
+	SessionID                  string
+	FencingToken               string
+	ExpectedSessionTailEventID string
+	Events                     []*SessionEvent[M]
+}
+
+// SessionService is the sealed runtime adapter consumed by Runner.
+// External providers should implement SessionEventStore or FencedSessionEventStore
+// and use NewLocalSessionService or NewFencedSessionService instead of
+// implementing SessionService directly.
+type SessionService[M MessageType] interface {
+	openSession(ctx context.Context, req *openSessionRequest) (*openSessionResult[M], error)
+	AppendEvents(ctx context.Context, sessionID string, events []*SessionEvent[M]) error
 	LoadEvents(ctx context.Context, sessionID string, opts *LoadSessionEventsRequest) (*LoadSessionEventsResult[M], error)
+}
+
+type openSessionRequest struct {
+	sessionID     string
+	requireFenced bool
+}
+
+type openSessionResult[M MessageType] struct {
+	handle sessionHandle[M]
+	fenced bool
+}
+
+type sessionHandle[M MessageType] interface {
+	loadEvents(ctx context.Context, req *LoadSessionEventsRequest) (*LoadSessionEventsResult[M], error)
+	appendEvents(ctx context.Context, req *AppendSessionEventsRequest[M]) (*AppendSessionEventsResult, error)
+	currentTailEventID() string
+	renew(ctx context.Context) error
+	close(ctx context.Context) error
 }
 
 // LoadSessionEventsRequest configures typed event loading pagination and direction.
 type LoadSessionEventsRequest struct {
+	// SessionID identifies the session log to load.
+	SessionID string
 	// After is the last-seen event_id used as an exclusive append-position cursor.
 	After string
 	// Limit is the maximum number of events to return. 0 means no limit.
@@ -130,6 +176,19 @@ type LoadSessionEventsResult[M MessageType] struct {
 	Events []*SessionEvent[M]
 	// Next is the event_id of the last event in this page in the direction of travel.
 	Next string
+	// SessionTailEventID is the last event_id visible in the session log snapshot
+	// used for this load. Empty means the visible session log is empty.
+	SessionTailEventID string
+}
+
+type AppendSessionEventsRequest[M MessageType] struct {
+	SessionID                  string
+	ExpectedSessionTailEventID string
+	Events                     []*SessionEvent[M]
+}
+
+type AppendSessionEventsResult struct {
+	SessionTailEventID string
 }
 
 // SessionEvent is the JSON-serializable persistence format for session events.
@@ -495,6 +554,22 @@ type SessionConfig struct {
 	// uuid.NewString() (UUID v4) is used. The context carries request-scoped
 	// values (e.g. trace ID, tenant info) that may inform ID generation.
 	EventIDGenerator func(ctx context.Context) string
+	// RequireFenced requires session admission to produce a handle that is safe
+	// for multi-process session ownership.
+	//
+	// Use it when the same session can be resumed or run by multiple processes.
+	// The returned handle must validate a fencing token at side-effecting
+	// operation boundaries so stale owners cannot append after losing ownership.
+	// Leave it false for local development, tests, and single-process deployments
+	// where process-local serialization is sufficient.
+	RequireFenced bool
+	// OpenSessionTimeout bounds how long Runner may wait to acquire any session
+	// handle before failing the current Run/Resume/Rollback attempt.
+	//
+	// This is not a fenced-only option and does not configure the fenced handle's
+	// fencing token TTL. It applies to the session admission path in both local
+	// and fenced services.
+	OpenSessionTimeout time.Duration
 }
 
 // TurnEndState is the agent-visible state materialized at a successful turn boundary.
@@ -506,7 +581,11 @@ type TurnEndState[M MessageType] struct {
 }
 
 type runnerSessionCheckpoint struct {
-	Payload []byte
+	SessionID          string
+	TurnID             string
+	CheckPointID       string
+	SessionTailEventID string
+	Payload            []byte
 }
 
 func init() {
@@ -877,6 +956,7 @@ func normalizeSessionConfig(cfg *SessionConfig) SessionConfig {
 		FlushRetryInitialBackoff: defaultFlushRetryInitialBackoff,
 		LoadPageSize:             defaultLoadPageSize,
 		EventIDGenerator:         func(_ context.Context) string { return uuid.NewString() },
+		OpenSessionTimeout:       defaultOpenSessionTimeout,
 	}
 	if cfg == nil {
 		return normalized
@@ -907,6 +987,10 @@ func normalizeSessionConfig(cfg *SessionConfig) SessionConfig {
 	}
 	if cfg.EventIDGenerator != nil {
 		normalized.EventIDGenerator = cfg.EventIDGenerator
+	}
+	normalized.RequireFenced = cfg.RequireFenced
+	if cfg.OpenSessionTimeout > 0 {
+		normalized.OpenSessionTimeout = cfg.OpenSessionTimeout
 	}
 	return normalized
 }
@@ -940,7 +1024,7 @@ func eventIDGeneratorFromContext(ctx context.Context) func(context.Context) stri
 
 type sessionEventPersister[M MessageType] struct {
 	ctx       context.Context
-	service   SessionService[M]
+	handle    sessionHandle[M]
 	sessionID string
 	cfg       SessionConfig
 
@@ -954,13 +1038,13 @@ type sessionEventPersister[M MessageType] struct {
 
 func newSessionEventPersister[M MessageType](
 	ctx context.Context,
-	service SessionService[M],
+	handle sessionHandle[M],
 	sessionID string,
 	cfg SessionConfig,
 ) *sessionEventPersister[M] {
 	p := &sessionEventPersister[M]{
 		ctx:       ctx,
-		service:   service,
+		handle:    handle,
 		sessionID: sessionID,
 		cfg:       cfg,
 		done:      make(chan struct{}),
@@ -1068,7 +1152,11 @@ func (p *sessionEventPersister[M]) appendEventsWithRetry(events []*SessionEvent[
 				return p.ctx.Err()
 			}
 		}
-		if err := p.service.AppendEvents(p.ctx, p.sessionID, events); err != nil {
+		_, err := p.handle.appendEvents(p.ctx, &AppendSessionEventsRequest[M]{
+			SessionID: p.sessionID,
+			Events:    events,
+		})
+		if err != nil {
 			lastErr = err
 			if isProtocolError(err) {
 				return err
@@ -1340,6 +1428,14 @@ func RollbackSession[M MessageType](
 	if targetTurnID == "" {
 		return ErrRollbackTargetNotFound
 	}
+	openResult, err := service.openSession(ctx, &openSessionRequest{sessionID: sessionID})
+	if err != nil {
+		return err
+	}
+	if openResult == nil || openResult.handle == nil {
+		return ErrSessionBusy
+	}
+	defer openResult.handle.close(ctx)
 
 	var cfg RollbackSessionOptions
 	for _, opt := range opts {
@@ -1347,14 +1443,14 @@ func RollbackSession[M MessageType](
 			opt(&cfg)
 		}
 	}
-	activeEvents, err := loadActiveSessionEventsReverse[M](ctx, service, sessionID, defaultLoadPageSize)
+	activeEvents, err := loadActiveSessionEventsReverse[M](ctx, openResult.handle, sessionID, defaultLoadPageSize)
 	if err != nil {
 		return err
 	}
 	target, head, err := resolveRollbackTarget[M](activeEvents, targetTurnID)
 	if err != nil {
 		if errors.Is(err, ErrRollbackTargetNotFound) {
-			evidence, evidenceErr := findPhysicalRollbackTargetEvidence[M](ctx, service, sessionID, targetTurnID, defaultLoadPageSize)
+			evidence, evidenceErr := findPhysicalRollbackTargetEvidence[M](ctx, openResult.handle, sessionID, targetTurnID, defaultLoadPageSize)
 			if evidenceErr != nil {
 				return evidenceErr
 			}
@@ -1387,7 +1483,10 @@ func RollbackSession[M MessageType](
 			PreviousHeadTurnID:    head.TurnID,
 		},
 	}
-	if err := service.AppendEvents(ctx, sessionID, []*SessionEvent[M]{rb}); err != nil {
+	if _, err := openResult.handle.appendEvents(ctx, &AppendSessionEventsRequest[M]{
+		SessionID: sessionID,
+		Events:    []*SessionEvent[M]{rb},
+	}); err != nil {
 		return err
 	}
 	if cfg.CheckPointStore != nil {
@@ -1408,11 +1507,11 @@ func RollbackSession[M MessageType](
 // structures remains a caller or middleware concern.
 func reconstructSessionState[M MessageType](
 	ctx context.Context,
-	service SessionService[M],
+	handle sessionHandle[M],
 	sessionID string,
 	pageSize int,
 ) (*sessionReconstructResult[M], error) {
-	allEvents, err := loadActiveSessionEventsReverse[M](ctx, service, sessionID, pageSize)
+	allEvents, err := loadActiveSessionEventsReverse[M](ctx, handle, sessionID, pageSize)
 	if err != nil {
 		return nil, err
 	}
@@ -1450,7 +1549,7 @@ func reconstructSessionState[M MessageType](
 
 func loadActiveSessionEventsReverse[M MessageType](
 	ctx context.Context,
-	service SessionService[M],
+	handle sessionHandle[M],
 	sessionID string,
 	pageSize int,
 ) ([]*SessionEvent[M], error) {
@@ -1460,11 +1559,12 @@ func loadActiveSessionEventsReverse[M MessageType](
 	var physicalReverse []*SessionEvent[M]
 	var after string
 	for {
-		result, err := service.LoadEvents(ctx, sessionID, &LoadSessionEventsRequest{
-			After:   after,
-			Limit:   pageSize,
-			Reverse: true,
-			Kinds:   modelContextSessionEventKinds,
+		result, err := handle.loadEvents(ctx, &LoadSessionEventsRequest{
+			SessionID: sessionID,
+			After:     after,
+			Limit:     pageSize,
+			Reverse:   true,
+			Kinds:     modelContextSessionEventKinds,
 		})
 		if err != nil {
 			return nil, err
@@ -1579,7 +1679,7 @@ const (
 
 func findPhysicalRollbackTargetEvidence[M MessageType](
 	ctx context.Context,
-	service SessionService[M],
+	handle sessionHandle[M],
 	sessionID string,
 	targetTurnID string,
 	pageSize int,
@@ -1590,11 +1690,12 @@ func findPhysicalRollbackTargetEvidence[M MessageType](
 	var after string
 	var evidence rollbackTargetEvidence
 	for {
-		result, err := service.LoadEvents(ctx, sessionID, &LoadSessionEventsRequest{
-			After:   after,
-			Limit:   pageSize,
-			Reverse: false,
-			Kinds:   modelContextSessionEventKinds,
+		result, err := handle.loadEvents(ctx, &LoadSessionEventsRequest{
+			SessionID: sessionID,
+			After:     after,
+			Limit:     pageSize,
+			Reverse:   false,
+			Kinds:     modelContextSessionEventKinds,
 		})
 		if err != nil {
 			return rollbackTargetEvidenceNone, err

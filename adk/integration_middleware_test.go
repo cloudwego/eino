@@ -96,7 +96,7 @@ func TestAgentsMDIntegration_PersistsMessageInserted(t *testing.T) {
 	runner := adk.NewRunner(ctx, adk.RunnerConfig{
 		Agent:          agent,
 		SessionID:      "agentsmd-test",
-		SessionService: store,
+		SessionService: adk.NewLocalSessionService[*schema.Message](store),
 	})
 
 	iter := runner.Query(ctx, "hello")
@@ -109,7 +109,7 @@ func TestAgentsMDIntegration_PersistsMessageInserted(t *testing.T) {
 	}
 
 	// Read the persisted event log.
-	res, err := store.LoadEvents(ctx, "agentsmd-test", &adk.LoadSessionEventsRequest{})
+	res, err := store.LoadEvents(ctx, &adk.LoadSessionEventsRequest{SessionID: "agentsmd-test"})
 	require.NoError(t, err)
 
 	var sawInsertedAgentsmd bool
@@ -164,7 +164,7 @@ func TestAgentsMDIntegration_NextTurnSkipsReinsertion(t *testing.T) {
 	sid := "agentsmd-stable-session"
 
 	// Turn 1.
-	runner1 := adk.NewRunner(ctx, adk.RunnerConfig{Agent: agent, SessionID: sid, SessionService: store})
+	runner1 := adk.NewRunner(ctx, adk.RunnerConfig{Agent: agent, SessionID: sid, SessionService: adk.NewLocalSessionService[*schema.Message](store)})
 	for it := runner1.Query(ctx, "first"); ; {
 		ev, ok := it.Next()
 		if !ok {
@@ -175,7 +175,7 @@ func TestAgentsMDIntegration_NextTurnSkipsReinsertion(t *testing.T) {
 
 	// Count agentsmd MessageInserted events after turn 1.
 	countAgentsmdInserts := func() int {
-		res, err := store.LoadEvents(ctx, sid, &adk.LoadSessionEventsRequest{})
+		res, err := store.LoadEvents(ctx, &adk.LoadSessionEventsRequest{SessionID: sid})
 		require.NoError(t, err)
 		count := 0
 		for _, se := range res.Events {
@@ -195,7 +195,7 @@ func TestAgentsMDIntegration_NextTurnSkipsReinsertion(t *testing.T) {
 	require.Equal(t, 1, countAgentsmdInserts(), "first turn must insert exactly once")
 
 	// Turn 2.
-	runner2 := adk.NewRunner(ctx, adk.RunnerConfig{Agent: agent, SessionID: sid, SessionService: store})
+	runner2 := adk.NewRunner(ctx, adk.RunnerConfig{Agent: agent, SessionID: sid, SessionService: adk.NewLocalSessionService[*schema.Message](store)})
 	for it := runner2.Query(ctx, "second"); ; {
 		ev, ok := it.Next()
 		if !ok {
@@ -258,10 +258,11 @@ func TestToolSearchIntegration_PersistsMessageInserted(t *testing.T) {
 
 	store := session.NewInMemoryStore[*schema.Message](nil)
 	sid := "toolsearch-test"
+	sessionService := adk.NewLocalSessionService[*schema.Message](store)
 	runner := adk.NewRunner(ctx, adk.RunnerConfig{
 		Agent:          agent,
 		SessionID:      sid,
-		SessionService: store,
+		SessionService: sessionService,
 	})
 
 	for it := runner.Query(ctx, "anything"); ; {
@@ -272,7 +273,7 @@ func TestToolSearchIntegration_PersistsMessageInserted(t *testing.T) {
 		require.NoError(t, ev.Err)
 	}
 
-	res, err := store.LoadEvents(ctx, sid, &adk.LoadSessionEventsRequest{})
+	res, err := store.LoadEvents(ctx, &adk.LoadSessionEventsRequest{SessionID: sid})
 	require.NoError(t, err)
 
 	var sawInsertedReminder bool
@@ -303,6 +304,7 @@ func TestPatchToolCallsIntegration_PersistsMessageInserted(t *testing.T) {
 	ctx := context.Background()
 
 	store := session.NewInMemoryStore[*schema.Message](nil)
+	sessionService := adk.NewLocalSessionService[*schema.Message](store)
 	sid := "patchtoolcalls-test"
 
 	// Seed: an assistant message with a tool call but no corresponding tool result.
@@ -325,7 +327,8 @@ func TestPatchToolCallsIntegration_PersistsMessageInserted(t *testing.T) {
 
 	for _, m := range []*schema.Message{user, dangling} {
 		se := &adk.SessionEvent[*schema.Message]{EventID: uuid.NewString(), Kind: adk.SessionEventMessage, Message: m}
-		require.NoError(t, store.AppendEvents(ctx, sid, []*adk.SessionEvent[*schema.Message]{se}))
+		err := sessionService.AppendEvents(ctx, sid, []*adk.SessionEvent[*schema.Message]{se})
+		require.NoError(t, err)
 	}
 
 	// Wire patchtoolcalls into a ChatModelAgent.
@@ -346,7 +349,7 @@ func TestPatchToolCallsIntegration_PersistsMessageInserted(t *testing.T) {
 	runner := adk.NewRunner(ctx, adk.RunnerConfig{
 		Agent:          agent,
 		SessionID:      sid,
-		SessionService: store,
+		SessionService: sessionService,
 	})
 
 	for it := runner.Query(ctx, "go"); ; {
@@ -359,7 +362,7 @@ func TestPatchToolCallsIntegration_PersistsMessageInserted(t *testing.T) {
 
 	// Read events back; among the events appended on this turn there should be
 	// a MessageInserted carrying a Tool-role synthetic message.
-	res, err := store.LoadEvents(ctx, sid, &adk.LoadSessionEventsRequest{})
+	res, err := store.LoadEvents(ctx, &adk.LoadSessionEventsRequest{SessionID: sid})
 	require.NoError(t, err)
 	var sawInsertedToolResult bool
 	for _, se := range res.Events {
@@ -384,6 +387,7 @@ func TestPatchToolCallsIntegration_PersistsMessageInserted(t *testing.T) {
 func TestReductionIntegration_PersistsBothMessageUpdated(t *testing.T) {
 	ctx := context.Background()
 	store := session.NewInMemoryStore[*schema.Message](nil)
+	sessionService := adk.NewLocalSessionService[*schema.Message](store)
 	sid := "reduction-test"
 
 	// Seed the session: user → assistant call A → tool result A → assistant call B → tool result B.
@@ -423,7 +427,8 @@ func TestReductionIntegration_PersistsBothMessageUpdated(t *testing.T) {
 	}
 	for _, m := range []*schema.Message{user, assistantA, toolResultA, assistantB, toolResultB} {
 		se := &adk.SessionEvent[*schema.Message]{EventID: uuid.NewString(), Kind: adk.SessionEventMessage, Message: m}
-		require.NoError(t, store.AppendEvents(ctx, sid, []*adk.SessionEvent[*schema.Message]{se}))
+		err := sessionService.AppendEvents(ctx, sid, []*adk.SessionEvent[*schema.Message]{se})
+		require.NoError(t, err)
 	}
 
 	// Reduction config: token counter always exceeds threshold; clear handler always clears.
@@ -466,7 +471,7 @@ func TestReductionIntegration_PersistsBothMessageUpdated(t *testing.T) {
 	runner := adk.NewRunner(ctx, adk.RunnerConfig{
 		Agent:          agent,
 		SessionID:      sid,
-		SessionService: store,
+		SessionService: sessionService,
 	})
 
 	for it := runner.Query(ctx, "go"); ; {
@@ -477,7 +482,7 @@ func TestReductionIntegration_PersistsBothMessageUpdated(t *testing.T) {
 		require.NoError(t, ev.Err)
 	}
 
-	res, err := store.LoadEvents(ctx, sid, &adk.LoadSessionEventsRequest{})
+	res, err := store.LoadEvents(ctx, &adk.LoadSessionEventsRequest{SessionID: sid})
 	require.NoError(t, err)
 
 	var sawAssistantUpdated, sawToolUpdated bool

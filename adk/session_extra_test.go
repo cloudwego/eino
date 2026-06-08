@@ -885,6 +885,46 @@ func (s *agenticSessionHelperStore) LoadEvents(_ context.Context, _ string, opts
 	return &LoadSessionEventsResult[*schema.AgenticMessage]{Events: out}, nil
 }
 
+func (s *agenticSessionHelperStore) openSession(_ context.Context, req *openSessionRequest) (*openSessionResult[*schema.AgenticMessage], error) {
+	if req != nil && req.requireFenced {
+		return nil, ErrSessionFencingRequired
+	}
+	sessionID := ""
+	if req != nil {
+		sessionID = req.sessionID
+	}
+	return &openSessionResult[*schema.AgenticMessage]{
+		handle: &agenticTestSessionHandle{store: s, sessionID: sessionID},
+		fenced: false,
+	}, nil
+}
+
+type agenticTestSessionHandle struct {
+	store     *agenticSessionHelperStore
+	sessionID string
+}
+
+func (h *agenticTestSessionHandle) loadEvents(ctx context.Context, req *LoadSessionEventsRequest) (*LoadSessionEventsResult[*schema.AgenticMessage], error) {
+	if req == nil {
+		req = &LoadSessionEventsRequest{}
+	}
+	return h.store.LoadEvents(ctx, h.sessionID, req)
+}
+
+func (h *agenticTestSessionHandle) appendEvents(ctx context.Context, req *AppendSessionEventsRequest[*schema.AgenticMessage]) (*AppendSessionEventsResult, error) {
+	if req == nil {
+		req = &AppendSessionEventsRequest[*schema.AgenticMessage]{}
+	}
+	if err := h.store.AppendEvents(ctx, h.sessionID, req.Events); err != nil {
+		return nil, err
+	}
+	return &AppendSessionEventsResult{}, nil
+}
+
+func (h *agenticTestSessionHandle) renew(context.Context) error { return nil }
+func (h *agenticTestSessionHandle) close(context.Context) error { return nil }
+func (h *agenticTestSessionHandle) currentTailEventID() string  { return "" }
+
 // TestPartialInterrupted_ThenNewRun verifies that when a turn is interrupted
 // after some events have been appended (but before SaveTurnEnd commits), a new
 // Run with NO CheckPointStore (i.e. session-only mode) recovers the in-flight
@@ -1215,7 +1255,7 @@ func TestRunnerPersists_MessageUpdated_BothMessages(t *testing.T) {
 	assert.Equal(t, 2, updates, "both MessageUpdated events must be persisted")
 
 	// Reconstruction must apply both updates correctly.
-	result, err := reconstructSessionState[*schema.Message](ctx, store, sid, defaultLoadPageSize)
+	result, err := reconstructSessionState[*schema.Message](ctx, mustOpenTestSession[*schema.Message](t, ctx, store, sid), sid, defaultLoadPageSize)
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	require.NotNil(t, result.state)
@@ -1307,7 +1347,7 @@ func TestRunnerPersists_MessageInserted_AnchorAndAppend(t *testing.T) {
 	assert.Equal(t, 2, inserts, "both MessageInserted events must be persisted")
 
 	// Verify reconstruction applies insertions correctly.
-	result, err := reconstructSessionState[*schema.Message](ctx, store, sid, defaultLoadPageSize)
+	result, err := reconstructSessionState[*schema.Message](ctx, mustOpenTestSession[*schema.Message](t, ctx, store, sid), sid, defaultLoadPageSize)
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	require.NotNil(t, result.state)
@@ -1396,7 +1436,7 @@ func TestRunnerPersists_MessagesDeleted_Reconstructs(t *testing.T) {
 	}
 	assert.True(t, foundDeleted, "MessagesDeleted must be persisted")
 
-	result, err := reconstructSessionState[*schema.Message](ctx, store, sid, defaultLoadPageSize)
+	result, err := reconstructSessionState[*schema.Message](ctx, mustOpenTestSession[*schema.Message](t, ctx, store, sid), sid, defaultLoadPageSize)
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	require.Len(t, result.state.Messages, 2)
@@ -1427,7 +1467,7 @@ func TestReconstructSessionState_MessagesDeletedMissingTargetFails(t *testing.T)
 	})
 	require.NoError(t, store.AppendEvents(ctx, sid, []*SessionEvent[*schema.Message]{turnEndEvent}))
 
-	_, err := reconstructSessionState[*schema.Message](ctx, store, sid, defaultLoadPageSize)
+	_, err := reconstructSessionState[*schema.Message](ctx, mustOpenTestSession[*schema.Message](t, ctx, store, sid), sid, defaultLoadPageSize)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "ghost-id")
 }

@@ -1484,6 +1484,28 @@ func (s *kindsRecordingStore) LoadEvents(ctx context.Context, sessionID string, 
 	return s.SessionService.LoadEvents(ctx, sessionID, opts)
 }
 
+func (s *kindsRecordingStore) loadEvents(ctx context.Context, opts *LoadSessionEventsRequest) (*LoadSessionEventsResult[*schema.Message], error) {
+	sessionID := ""
+	if opts != nil {
+		sessionID = opts.SessionID
+	}
+	return s.LoadEvents(ctx, sessionID, opts)
+}
+
+func (s *kindsRecordingStore) appendEvents(ctx context.Context, req *AppendSessionEventsRequest[*schema.Message]) (*AppendSessionEventsResult, error) {
+	if req == nil {
+		req = &AppendSessionEventsRequest[*schema.Message]{}
+	}
+	if err := s.SessionService.AppendEvents(ctx, req.SessionID, req.Events); err != nil {
+		return nil, err
+	}
+	return &AppendSessionEventsResult{}, nil
+}
+
+func (s *kindsRecordingStore) renew(context.Context) error { return nil }
+func (s *kindsRecordingStore) close(context.Context) error { return nil }
+func (s *kindsRecordingStore) currentTailEventID() string  { return "" }
+
 func TestSessionTimeline_ReconstructionUsesKindFilter(t *testing.T) {
 	ctx := context.Background()
 	inner := newSessionHelperStore()
