@@ -82,6 +82,27 @@ func (s *blockingAppendStore) AppendEvents(ctx context.Context, sessionID string
 	return s.sessionHelperStore.AppendEvents(ctx, sessionID, events)
 }
 
+func (s *blockingAppendStore) openSession(_ context.Context, req *openSessionRequest) (*openSessionResult[*schema.Message], error) {
+	if req != nil && req.requireFenced {
+		return nil, ErrSessionFencingRequired
+	}
+	sessionID := ""
+	if req != nil {
+		sessionID = req.sessionID
+	}
+	return &openSessionResult[*schema.Message]{handle: &legacyMessageTestHandle{store: s, sessionID: sessionID}, fenced: false}, nil
+}
+
+func (s *blockingAppendStore) appendEvents(ctx context.Context, req *AppendSessionEventsRequest[*schema.Message]) (*AppendSessionEventsResult, error) {
+	if req == nil {
+		req = &AppendSessionEventsRequest[*schema.Message]{}
+	}
+	if err := s.AppendEvents(ctx, req.SessionID, req.Events); err != nil {
+		return nil, err
+	}
+	return &AppendSessionEventsResult{}, nil
+}
+
 // withTestEventID assigns a fresh UUIDv4 to the SessionEvent if its EventID is
 // empty. Tests that construct SessionEvent literals directly bypass the Runner
 // allocation paths, so they must still satisfy the AppendEvents wire contract.
@@ -386,6 +407,132 @@ func (s *sessionHelperStore) LoadEvents(_ context.Context, _ string, opts *LoadS
 		next = out[len(out)-1].EventID
 	}
 	return &LoadSessionEventsResult[*schema.Message]{Events: out, Next: next}, nil
+}
+
+func (s *sessionHelperStore) openSession(_ context.Context, req *openSessionRequest) (*openSessionResult[*schema.Message], error) {
+	if req != nil && req.requireFenced {
+		return nil, ErrSessionFencingRequired
+	}
+	sessionID := ""
+	if req != nil {
+		sessionID = req.sessionID
+	}
+	return &openSessionResult[*schema.Message]{
+		handle: &testSessionHandle{store: s, sessionID: sessionID},
+		fenced: false,
+	}, nil
+}
+
+func (s *sessionHelperStore) loadEvents(ctx context.Context, req *LoadSessionEventsRequest) (*LoadSessionEventsResult[*schema.Message], error) {
+	sessionID := ""
+	if req != nil {
+		sessionID = req.SessionID
+	}
+	return s.LoadEvents(ctx, sessionID, req)
+}
+
+func (s *sessionHelperStore) appendEvents(ctx context.Context, req *AppendSessionEventsRequest[*schema.Message]) (*AppendSessionEventsResult, error) {
+	if req == nil {
+		req = &AppendSessionEventsRequest[*schema.Message]{}
+	}
+	if err := s.AppendEvents(ctx, req.SessionID, req.Events); err != nil {
+		return nil, err
+	}
+	res, err := s.LoadEvents(ctx, req.SessionID, &LoadSessionEventsRequest{Reverse: true, Limit: 1})
+	if err != nil {
+		return nil, err
+	}
+	tail := ""
+	if res != nil && len(res.Events) > 0 {
+		tail = res.Events[0].EventID
+	}
+	return &AppendSessionEventsResult{SessionTailEventID: tail}, nil
+}
+
+func (s *sessionHelperStore) renew(context.Context) error { return nil }
+func (s *sessionHelperStore) close(context.Context) error { return nil }
+func (s *sessionHelperStore) currentTailEventID() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.eventIDs) == 0 {
+		return ""
+	}
+	return s.eventIDs[len(s.eventIDs)-1]
+}
+
+type testSessionHandle struct {
+	store     *sessionHelperStore
+	sessionID string
+}
+
+func (h *testSessionHandle) loadEvents(ctx context.Context, req *LoadSessionEventsRequest) (*LoadSessionEventsResult[*schema.Message], error) {
+	if req == nil {
+		req = &LoadSessionEventsRequest{}
+	}
+	return h.store.LoadEvents(ctx, h.sessionID, req)
+}
+
+func (h *testSessionHandle) appendEvents(ctx context.Context, req *AppendSessionEventsRequest[*schema.Message]) (*AppendSessionEventsResult, error) {
+	if req == nil {
+		req = &AppendSessionEventsRequest[*schema.Message]{}
+	}
+	if err := h.store.AppendEvents(ctx, h.sessionID, req.Events); err != nil {
+		return nil, err
+	}
+	res, err := h.store.LoadEvents(ctx, h.sessionID, &LoadSessionEventsRequest{Reverse: true, Limit: 1})
+	if err != nil {
+		return nil, err
+	}
+	tail := ""
+	if res != nil && len(res.Events) > 0 {
+		tail = res.Events[0].EventID
+	}
+	return &AppendSessionEventsResult{SessionTailEventID: tail}, nil
+}
+
+func (h *testSessionHandle) renew(context.Context) error { return nil }
+func (h *testSessionHandle) close(context.Context) error { return nil }
+func (h *testSessionHandle) currentTailEventID() string  { return h.store.currentTailEventID() }
+
+type legacyMessageTestStore interface {
+	AppendEvents(context.Context, string, []*SessionEvent[*schema.Message]) error
+	LoadEvents(context.Context, string, *LoadSessionEventsRequest) (*LoadSessionEventsResult[*schema.Message], error)
+}
+
+type legacyMessageTestHandle struct {
+	store     legacyMessageTestStore
+	sessionID string
+}
+
+func (h *legacyMessageTestHandle) loadEvents(ctx context.Context, req *LoadSessionEventsRequest) (*LoadSessionEventsResult[*schema.Message], error) {
+	if req == nil {
+		req = &LoadSessionEventsRequest{}
+	}
+	return h.store.LoadEvents(ctx, h.sessionID, req)
+}
+
+func (h *legacyMessageTestHandle) appendEvents(ctx context.Context, req *AppendSessionEventsRequest[*schema.Message]) (*AppendSessionEventsResult, error) {
+	if req == nil {
+		req = &AppendSessionEventsRequest[*schema.Message]{}
+	}
+	if err := h.store.AppendEvents(ctx, h.sessionID, req.Events); err != nil {
+		return nil, err
+	}
+	return &AppendSessionEventsResult{}, nil
+}
+
+func (h *legacyMessageTestHandle) renew(context.Context) error { return nil }
+func (h *legacyMessageTestHandle) close(context.Context) error { return nil }
+func (h *legacyMessageTestHandle) currentTailEventID() string  { return "" }
+
+func mustOpenTestSession[M MessageType](t testing.TB, ctx context.Context, service SessionService[M], sessionID string) sessionHandle[M] {
+	t.Helper()
+	res, err := service.openSession(ctx, &openSessionRequest{sessionID: sessionID})
+	require.NoError(t, err)
+	require.NotNil(t, res)
+	require.NotNil(t, res.handle)
+	t.Cleanup(func() { _ = res.handle.close(ctx) })
+	return res.handle
 }
 
 func buildTestKindSet(kinds []SessionEventKind) map[SessionEventKind]struct{} {
@@ -749,7 +896,7 @@ func TestRunnerSessionModeFlushFailurePreventsCommit(t *testing.T) {
 	}
 
 	require.Error(t, lastErr)
-	assert.Contains(t, lastErr.Error(), "failed to persist session events")
+	assert.Contains(t, lastErr.Error(), "disk full")
 }
 
 func TestRunnerSessionSyncModeBlocksDeliveryUntilAppendCompletes(t *testing.T) {
@@ -768,8 +915,24 @@ func TestRunnerSessionSyncModeBlocksDeliveryUntilAppendCompletes(t *testing.T) {
 		SessionConfig:  &SessionConfig{PersistenceMode: SessionPersistenceModeSync},
 	})
 
-	iter := runner.Query(ctx, "trigger")
+	iterCh := make(chan *AsyncIterator[*AgentEvent], 1)
+	go func() {
+		iterCh <- runner.Query(ctx, "trigger")
+	}()
+	select {
+	case <-iterCh:
+		t.Fatal("query returned before pre-run control append completed")
+	case <-time.After(50 * time.Millisecond):
+	}
 	events := make(chan *AgentEvent, 1)
+
+	select {
+	case <-store.appendStarted:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("sync persistence did not start appending")
+	}
+	close(store.releaseAppend)
+	iter := <-iterCh
 	go func() {
 		ev, ok := iter.Next()
 		if !ok {
@@ -778,19 +941,6 @@ func TestRunnerSessionSyncModeBlocksDeliveryUntilAppendCompletes(t *testing.T) {
 		}
 		events <- ev
 	}()
-
-	select {
-	case <-store.appendStarted:
-	case <-time.After(500 * time.Millisecond):
-		t.Fatal("sync persistence did not start appending")
-	}
-	select {
-	case ev := <-events:
-		t.Fatalf("observed event before sync append completed: %#v", ev)
-	case <-time.After(50 * time.Millisecond):
-	}
-
-	close(store.releaseAppend)
 	firstEvent := <-events
 	var sawOutput bool
 	if firstEvent != nil {
@@ -851,7 +1001,7 @@ func TestRunnerSessionSyncModeAppendFailureSuppressesOutput(t *testing.T) {
 	}
 
 	require.Error(t, lastErr)
-	assert.Contains(t, lastErr.Error(), "failed to persist session events")
+	assert.Contains(t, lastErr.Error(), "sync append failed")
 	assert.False(t, sawOutput, "sync mode must not deliver output after append failure")
 }
 
@@ -1900,6 +2050,27 @@ func (s *recordingHelperStore) AppendEvents(ctx context.Context, sid string, eve
 	return s.sessionHelperStore.AppendEvents(ctx, sid, events)
 }
 
+func (s *recordingHelperStore) openSession(_ context.Context, req *openSessionRequest) (*openSessionResult[*schema.Message], error) {
+	if req != nil && req.requireFenced {
+		return nil, ErrSessionFencingRequired
+	}
+	sessionID := ""
+	if req != nil {
+		sessionID = req.sessionID
+	}
+	return &openSessionResult[*schema.Message]{handle: &legacyMessageTestHandle{store: s, sessionID: sessionID}, fenced: false}, nil
+}
+
+func (s *recordingHelperStore) appendEvents(ctx context.Context, req *AppendSessionEventsRequest[*schema.Message]) (*AppendSessionEventsResult, error) {
+	if req == nil {
+		req = &AppendSessionEventsRequest[*schema.Message]{}
+	}
+	if err := s.AppendEvents(ctx, req.SessionID, req.Events); err != nil {
+		return nil, err
+	}
+	return &AppendSessionEventsResult{}, nil
+}
+
 func (s *recordingHelperStore) Set(ctx context.Context, key string, value []byte) error {
 	if s.delaySet > 0 {
 		time.Sleep(s.delaySet)
@@ -2051,6 +2222,16 @@ func (s *transientFailStore) AppendEvents(ctx context.Context, sessionID string,
 	}
 	s.retryMu.Unlock()
 	return s.sessionHelperStore.AppendEvents(ctx, sessionID, events)
+}
+
+func (s *transientFailStore) appendEvents(ctx context.Context, req *AppendSessionEventsRequest[*schema.Message]) (*AppendSessionEventsResult, error) {
+	if req == nil {
+		req = &AppendSessionEventsRequest[*schema.Message]{}
+	}
+	if err := s.AppendEvents(ctx, req.SessionID, req.Events); err != nil {
+		return nil, err
+	}
+	return &AppendSessionEventsResult{}, nil
 }
 
 func (s *transientFailStore) getAppendCalls() int {
