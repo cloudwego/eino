@@ -668,7 +668,7 @@ func TestPermissionDecisionAppearsInToolUseTimeline(t *testing.T) {
 	runner := adk.NewRunner(ctx, adk.RunnerConfig{
 		Agent:          agent,
 		SessionID:      "permission-timeline",
-		SessionService: &permissionSessionService{},
+		SessionService: adk.NewLocalSessionService[*schema.Message](&permissionSessionService{}),
 		SessionConfig:  &adk.SessionConfig{EventFlushBatchSize: 1},
 	})
 	iter := runner.Query(ctx, "use the tool", adk.WithTimelineEvents())
@@ -739,7 +739,7 @@ func TestToolSpan_PermissionDenyEmitsBothSpansOnSameRun(t *testing.T) {
 	runner := adk.NewRunner(ctx, adk.RunnerConfig{
 		Agent:          agent,
 		SessionID:      "permission-deny-span",
-		SessionService: &permissionSessionService{},
+		SessionService: adk.NewLocalSessionService[*schema.Message](&permissionSessionService{}),
 		SessionConfig:  &adk.SessionConfig{EventFlushBatchSize: 1},
 	})
 
@@ -840,7 +840,7 @@ func TestPermissionGate_PersistedAgentInterruptOmitsPrivateInfo(t *testing.T) {
 			runner := adk.NewRunner(ctx, adk.RunnerConfig{
 				Agent:          agent,
 				SessionID:      "permission-agent-interrupt-" + strings.ReplaceAll(tt.name, " ", "-"),
-				SessionService: store,
+				SessionService: adk.NewLocalSessionService[*schema.Message](store),
 				SessionConfig:  &adk.SessionConfig{EventFlushBatchSize: 1},
 			})
 			iter := runner.Query(ctx, "use the tool", adk.WithTimelineEvents())
@@ -914,12 +914,18 @@ type permissionSessionService struct {
 	events []*adk.SessionEvent[*schema.Message]
 }
 
-func (s *permissionSessionService) AppendEvents(_ context.Context, _ string, events []*adk.SessionEvent[*schema.Message]) error {
-	s.events = append(s.events, events...)
-	return nil
+func (s *permissionSessionService) AppendEvents(_ context.Context, req *adk.AppendSessionEventsRequest[*schema.Message]) (*adk.AppendSessionEventsResult, error) {
+	if req != nil {
+		s.events = append(s.events, req.Events...)
+	}
+	tail := ""
+	if len(s.events) > 0 {
+		tail = s.events[len(s.events)-1].EventID
+	}
+	return &adk.AppendSessionEventsResult{SessionTailEventID: tail}, nil
 }
 
-func (s *permissionSessionService) LoadEvents(_ context.Context, _ string, _ *adk.LoadSessionEventsRequest) (*adk.LoadSessionEventsResult[*schema.Message], error) {
+func (s *permissionSessionService) LoadEvents(_ context.Context, _ *adk.LoadSessionEventsRequest) (*adk.LoadSessionEventsResult[*schema.Message], error) {
 	return &adk.LoadSessionEventsResult[*schema.Message]{Events: nil}, nil
 }
 
