@@ -34,17 +34,17 @@ import (
 )
 
 func TestFileStoreConformance(t *testing.T) {
-	session.RunConformanceTests[*schema.Message](t, func(t testing.TB) adk.SessionService[*schema.Message] {
+	session.RunConformanceTests[*schema.Message](t, func(t testing.TB) adk.SessionEventStore[*schema.Message] {
 		store, err := session.NewFileStore[*schema.Message](t.TempDir(), nil)
 		require.NoError(t, err)
-		return adk.NewLocalSessionService[*schema.Message](store)
+		return store
 	}, func(content string) *schema.Message {
 		return schema.UserMessage(content)
 	})
-	session.RunSerializerConformanceTests[*schema.Message](t, func(t testing.TB, serializer schema.Serializer) adk.SessionService[*schema.Message] {
+	session.RunSerializerConformanceTests[*schema.Message](t, func(t testing.TB, serializer schema.Serializer) adk.SessionEventStore[*schema.Message] {
 		store, err := session.NewFileStore[*schema.Message](t.TempDir(), &session.FileStoreConfig{EventSerializer: serializer})
 		require.NoError(t, err)
-		return adk.NewLocalSessionService[*schema.Message](store)
+		return store
 	}, func(content string) *schema.Message {
 		return schema.UserMessage(content)
 	})
@@ -96,34 +96,6 @@ func TestFileStoreWritesHumanReadableEvlogLines(t *testing.T) {
 	require.Len(t, parts1, 3)
 	assert.Equal(t, "line-2", parts1[0])
 	assert.Equal(t, "turn_end", parts1[1])
-}
-
-func TestFileStoreAppendEventsExactBatchReplay(t *testing.T) {
-	ctx := context.Background()
-	store, err := session.NewFileStore[*schema.Message](t.TempDir(), nil)
-	require.NoError(t, err)
-	events := []*adk.SessionEvent[*schema.Message]{
-		testMessageEvent("replay-1", "one"),
-		testMessageEvent("replay-2", "two"),
-	}
-	first, err := store.AppendEvents(ctx, &adk.AppendSessionEventsRequest[*schema.Message]{
-		SessionID: "s",
-		Events:    events,
-	})
-	require.NoError(t, err)
-	require.Equal(t, "replay-2", first.SessionTailEventID)
-
-	replayed, err := store.AppendEvents(ctx, &adk.AppendSessionEventsRequest[*schema.Message]{
-		SessionID:                  "s",
-		ExpectedSessionTailEventID: "",
-		Events:                     events,
-	})
-	require.NoError(t, err)
-	require.Equal(t, "replay-2", replayed.SessionTailEventID)
-
-	res, err := store.LoadEvents(ctx, &adk.LoadSessionEventsRequest{SessionID: "s"})
-	require.NoError(t, err)
-	require.Len(t, res.Events, 2)
 }
 
 func TestFileStoreRollbackPreservesPhysicalAuditLog(t *testing.T) {

@@ -736,7 +736,7 @@ func TestTailReplay_PartialTurnWithoutTurnEnd(t *testing.T) {
 
 	// Boot: prepareRunnerSessionRun reconstructs durable context through the log
 	// tail. The latest TurnEnd remains the metadata boundary.
-	state, err := prepareRunnerSessionRun[*schema.Message](ctx, nil, nil, sid, store, nil)
+	state, err := prepareRunnerSessionRun[*schema.Message](ctx, nil, nil, sid, store, nil, nil)
 	require.NoError(t, err)
 	require.True(t, state.enabled)
 	require.Len(t, state.latestState.Messages, 4)
@@ -764,7 +764,7 @@ func TestTailReplay_NoTailEvents(t *testing.T) {
 	}})
 	require.NoError(t, store.AppendEvents(ctx, sid, []*SessionEvent[*schema.Message]{turnEndSE}))
 
-	state, err := prepareRunnerSessionRun[*schema.Message](ctx, nil, nil, sid, store, nil)
+	state, err := prepareRunnerSessionRun[*schema.Message](ctx, nil, nil, sid, store, nil, nil)
 	require.NoError(t, err)
 	require.Len(t, state.latestState.Messages, 1)
 	assert.Equal(t, "Q", state.latestState.Messages[0].Content)
@@ -796,14 +796,14 @@ func TestTailReplay_EmptySnapshotCursor(t *testing.T) {
 	se := withTestEventID(&SessionEvent[*schema.Message]{Message: postMsg})
 	require.NoError(t, store.AppendEvents(ctx, sid, []*SessionEvent[*schema.Message]{se}))
 
-	state, err := prepareRunnerSessionRun[*schema.Message](ctx, nil, nil, sid, store, nil)
+	state, err := prepareRunnerSessionRun[*schema.Message](ctx, nil, nil, sid, store, nil, nil)
 	require.NoError(t, err)
 	require.Len(t, state.latestState.Messages, 1)
 	assert.Equal(t, "post", state.latestState.Messages[0].Content)
 }
 
-// NewInMemoryStoreLocal returns a minimal in-package SessionService[*schema.Message] for tests.
-func NewInMemoryStoreLocal(t *testing.T) SessionService[*schema.Message] {
+// NewInMemoryStoreLocal returns a minimal in-package store for tests.
+func NewInMemoryStoreLocal(t *testing.T) *sessionHelperStore {
 	t.Helper()
 	return newSessionHelperStore()
 }
@@ -886,8 +886,8 @@ func (s *agenticSessionHelperStore) LoadEvents(_ context.Context, _ string, opts
 }
 
 func (s *agenticSessionHelperStore) openSession(_ context.Context, req *openSessionRequest) (*openSessionResult[*schema.AgenticMessage], error) {
-	if req != nil && req.requireFenced {
-		return nil, ErrSessionFencingRequired
+	if req != nil && req.fencingToken != nil {
+		return nil, ErrSessionFencingTokenUnsupported
 	}
 	sessionID := ""
 	if req != nil {
@@ -895,7 +895,6 @@ func (s *agenticSessionHelperStore) openSession(_ context.Context, req *openSess
 	}
 	return &openSessionResult[*schema.AgenticMessage]{
 		handle: &agenticTestSessionHandle{store: s, sessionID: sessionID},
-		fenced: false,
 	}, nil
 }
 
@@ -921,7 +920,6 @@ func (h *agenticTestSessionHandle) appendEvents(ctx context.Context, req *Append
 	return &AppendSessionEventsResult{}, nil
 }
 
-func (h *agenticTestSessionHandle) renew(context.Context) error { return nil }
 func (h *agenticTestSessionHandle) close(context.Context) error { return nil }
 func (h *agenticTestSessionHandle) currentTailEventID() string  { return "" }
 
@@ -1044,7 +1042,7 @@ func TestExplicitCheckpointResume_WithSessionMode(t *testing.T) {
 	explicitCheckpointID := "user-supplied-cp"
 	require.NoError(t, store.Set(ctx, explicitCheckpointID, cpBytes))
 
-	state, effective, err := prepareRunnerSessionResume[*schema.Message](ctx, store, sid, store, nil, explicitCheckpointID)
+	state, effective, err := prepareRunnerSessionResume[*schema.Message](ctx, store, sid, store, nil, nil, explicitCheckpointID)
 	require.NoError(t, err)
 	require.True(t, state.enabled, "session mode must remain enabled when an explicit checkpoint ID is supplied")
 	require.NotNil(t, state.latestState)
@@ -1087,7 +1085,7 @@ func TestResumePath_TailReplay(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, cpStore.Set(ctx, sessionRunnerCheckpointID(sid), cpBytes))
 
-	state, _, err := prepareRunnerSessionResume[*schema.Message](ctx, cpStore, sid, store, nil, "")
+	state, _, err := prepareRunnerSessionResume[*schema.Message](ctx, cpStore, sid, store, nil, nil, "")
 	require.NoError(t, err)
 	require.Len(t, state.latestState.Messages, 3,
 		"resume boot state should include durable context events through the log tail")

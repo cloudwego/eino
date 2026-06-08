@@ -59,12 +59,13 @@ func newUserMessage[M MessageType](query string) (M, error) {
 // Execution always goes through the flowAgent pipeline, which handles
 // multi-agent orchestration, callbacks, agent naming, run paths, and cancellation.
 type TypedRunner[M MessageType] struct {
-	a               TypedAgent[M]
-	enableStreaming bool
-	store           CheckPointStore
-	sessionID       string
-	sessionService  SessionService[M]
-	sessionConfig   *SessionConfig
+	a                   TypedAgent[M]
+	enableStreaming     bool
+	store               CheckPointStore
+	sessionID           string
+	sessionService      SessionService[M]
+	sessionFencingToken SessionFencingTokenFunc
+	sessionConfig       *SessionConfig
 }
 
 // Runner is the default runner type using *schema.Message.
@@ -80,9 +81,10 @@ type TypedRunnerConfig[M MessageType] struct {
 
 	CheckPointStore CheckPointStore
 
-	SessionID      string
-	SessionService SessionService[M]
-	SessionConfig  *SessionConfig
+	SessionID           string
+	SessionService      SessionService[M]
+	SessionFencingToken SessionFencingTokenFunc
+	SessionConfig       *SessionConfig
 }
 
 // RunnerConfig is the default runner config type using *schema.Message.
@@ -106,18 +108,19 @@ func NewRunner(_ context.Context, conf RunnerConfig) *Runner {
 // NewTypedRunner creates a new TypedRunner with the given config.
 func NewTypedRunner[M MessageType](conf TypedRunnerConfig[M]) *TypedRunner[M] {
 	return &TypedRunner[M]{
-		enableStreaming: conf.EnableStreaming,
-		a:               conf.Agent,
-		store:           conf.CheckPointStore,
-		sessionID:       conf.SessionID,
-		sessionService:  conf.SessionService,
-		sessionConfig:   conf.SessionConfig,
+		enableStreaming:     conf.EnableStreaming,
+		a:                   conf.Agent,
+		store:               conf.CheckPointStore,
+		sessionID:           conf.SessionID,
+		sessionService:      conf.SessionService,
+		sessionFencingToken: conf.SessionFencingToken,
+		sessionConfig:       conf.SessionConfig,
 	}
 }
 
 func (r *TypedRunner[M]) Run(ctx context.Context, messages []M,
 	opts ...AgentRunOption) *AsyncIterator[*TypedAgentEvent[M]] {
-	return typedRunnerRunImpl(r.a, r.enableStreaming, r.store, r.sessionID, r.sessionService, r.sessionConfig, ctx, messages, opts...)
+	return typedRunnerRunImpl(r.a, r.enableStreaming, r.store, r.sessionID, r.sessionService, r.sessionFencingToken, r.sessionConfig, ctx, messages, opts...)
 }
 
 // Query is a convenience method that starts a new execution with a single user query string.
@@ -166,7 +169,7 @@ func (r *TypedRunner[M]) ResumeWithParams(ctx context.Context, checkPointID stri
 
 func (r *TypedRunner[M]) resumeInternal(ctx context.Context, checkPointID string, resumeData map[string]any,
 	opts ...AgentRunOption) (*AsyncIterator[*TypedAgentEvent[M]], error) {
-	return typedRunnerResumeInternalImpl(r.a, r.store, r.sessionID, r.sessionService, r.sessionConfig, ctx, checkPointID, resumeData, opts...)
+	return typedRunnerResumeInternalImpl(r.a, r.store, r.sessionID, r.sessionService, r.sessionFencingToken, r.sessionConfig, ctx, checkPointID, resumeData, opts...)
 }
 
 type runnerSessionRunState[M MessageType] struct {
@@ -177,7 +180,6 @@ type runnerSessionRunState[M MessageType] struct {
 	sessionConfig   SessionConfig
 	sessionService  SessionService[M]
 	sessionHandle   sessionHandle[M]
-	sessionFenced   bool
 	checkPointStore CheckPointStore
 	turnID          string
 	initialTimeline []*SessionEvent[M]
@@ -224,6 +226,7 @@ func openRunnerSession[M MessageType](
 	ctx context.Context,
 	service SessionService[M],
 	sessionID string,
+	fencingToken SessionFencingTokenFunc,
 	cfg SessionConfig,
 ) (*openSessionResult[M], error) {
 	if service == nil {
@@ -233,16 +236,12 @@ func openRunnerSession[M MessageType](
 	var lastErr error
 	for {
 		result, err := service.openSession(ctx, &openSessionRequest{
-			sessionID:     sessionID,
-			requireFenced: cfg.RequireFenced,
+			sessionID:    sessionID,
+			fencingToken: fencingToken,
 		})
 		if err == nil {
 			if result == nil || result.handle == nil {
 				return nil, ErrSessionBusy
-			}
-			if cfg.RequireFenced && !result.fenced {
-				_ = result.handle.close(ctx)
-				return nil, ErrSessionFencingRequired
 			}
 			return result, nil
 		}
@@ -279,6 +278,7 @@ func prepareRunnerSessionRun[M MessageType]( //nolint:revive // argument-limit
 	requestedCheckPointID *string,
 	sessionID string,
 	sessionService SessionService[M],
+	sessionFencingToken SessionFencingTokenFunc,
 	sessionConfig *SessionConfig,
 ) (*runnerSessionRunState[M], error) {
 	state := &runnerSessionRunState[M]{}
@@ -295,12 +295,11 @@ func prepareRunnerSessionRun[M MessageType]( //nolint:revive // argument-limit
 	state.checkPointStore = checkPointStore
 	state.sessionConfig = normalizeSessionConfig(sessionConfig)
 	state.latestState = &TurnEndState[M]{}
-	openResult, err := openRunnerSession[M](ctx, sessionService, sessionID, state.sessionConfig)
+	openResult, err := openRunnerSession[M](ctx, sessionService, sessionID, sessionFencingToken, state.sessionConfig)
 	if err != nil {
 		return nil, err
 	}
 	state.sessionHandle = openResult.handle
-	state.sessionFenced = openResult.fenced
 
 	pageSize := state.sessionConfig.LoadPageSize
 
@@ -355,6 +354,7 @@ func prepareRunnerSessionResume[M MessageType](
 	checkPointStore CheckPointStore,
 	sessionID string,
 	sessionService SessionService[M],
+	sessionFencingToken SessionFencingTokenFunc,
 	sessionConfig *SessionConfig,
 	checkPointID string,
 ) (*runnerSessionRunState[M], string, error) {
@@ -377,12 +377,11 @@ func prepareRunnerSessionResume[M MessageType](
 	state.checkPointStore = checkPointStore
 	state.sessionConfig = normalizeSessionConfig(sessionConfig)
 	state.latestState = &TurnEndState[M]{}
-	openResult, err := openRunnerSession[M](ctx, sessionService, sessionID, state.sessionConfig)
+	openResult, err := openRunnerSession[M](ctx, sessionService, sessionID, sessionFencingToken, state.sessionConfig)
 	if err != nil {
 		return nil, "", err
 	}
 	state.sessionHandle = openResult.handle
-	state.sessionFenced = openResult.fenced
 
 	pageSize := state.sessionConfig.LoadPageSize
 
@@ -551,11 +550,11 @@ func saveRunnerCheckpoint[M MessageType]( //nolint:revive // argument-limit
 	return store.Set(ctx, checkPointID, data)
 }
 
-func typedRunnerRunImpl[M MessageType](a TypedAgent[M], enableStreaming bool, store CheckPointStore, sessionID string, sessionService SessionService[M], sessionConfig *SessionConfig, ctx context.Context, messages []M, opts ...AgentRunOption) *AsyncIterator[*TypedAgentEvent[M]] { //nolint:revive // argument-limit
+func typedRunnerRunImpl[M MessageType](a TypedAgent[M], enableStreaming bool, store CheckPointStore, sessionID string, sessionService SessionService[M], sessionFencingToken SessionFencingTokenFunc, sessionConfig *SessionConfig, ctx context.Context, messages []M, opts ...AgentRunOption) *AsyncIterator[*TypedAgentEvent[M]] { //nolint:revive // argument-limit
 	o := getCommonOptions(nil, opts...)
 	exposeTimelineEvents := o.enableTimelineEvents
 
-	sessionState, err := prepareRunnerSessionRun[M](ctx, store, o.checkPointID, sessionID, sessionService, sessionConfig)
+	sessionState, err := prepareRunnerSessionRun[M](ctx, store, o.checkPointID, sessionID, sessionService, sessionFencingToken, sessionConfig)
 	if err != nil {
 		return errorIterator[M](err)
 	}
@@ -646,7 +645,7 @@ func typedRunnerRunImpl[M MessageType](a TypedAgent[M], enableStreaming bool, st
 	return niter
 }
 
-func typedRunnerResumeInternalImpl[M MessageType](a TypedAgent[M], store CheckPointStore, sessionID string, sessionService SessionService[M], sessionConfig *SessionConfig, ctx context.Context, checkPointID string, resumeData map[string]any, //nolint:revive // argument-limit
+func typedRunnerResumeInternalImpl[M MessageType](a TypedAgent[M], store CheckPointStore, sessionID string, sessionService SessionService[M], sessionFencingToken SessionFencingTokenFunc, sessionConfig *SessionConfig, ctx context.Context, checkPointID string, resumeData map[string]any, //nolint:revive // argument-limit
 	opts ...AgentRunOption) (*AsyncIterator[*TypedAgentEvent[M]], error) {
 	if isNilCheckPointStore(store) {
 		return nil, fmt.Errorf("failed to resume: store is nil")
@@ -654,7 +653,7 @@ func typedRunnerResumeInternalImpl[M MessageType](a TypedAgent[M], store CheckPo
 
 	o := getCommonOptions(nil, opts...)
 	exposeTimelineEvents := o.enableTimelineEvents
-	sessionState, effectiveCheckPointID, err := prepareRunnerSessionResume[M](ctx, store, sessionID, sessionService, sessionConfig, checkPointID)
+	sessionState, effectiveCheckPointID, err := prepareRunnerSessionResume[M](ctx, store, sessionID, sessionService, sessionFencingToken, sessionConfig, checkPointID)
 	if err != nil {
 		return nil, err
 	}

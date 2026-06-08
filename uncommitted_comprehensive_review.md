@@ -2,91 +2,91 @@
 
 ## Overview
 
-- **Scope**: uncommitted `adk` session/runner changes, including new `adk/session_service.go`.
-- **Iterations**: Stage 1 design review: 1 review + 1 fix pass; Stage 2 attack review: 1 review + 1 fix pass; Stage 3 test audit: 1 audit + 1 coverage fix pass.
-- **Files modified by review**: `adk/runner.go`, `adk/session/conformance.go`, `adk/session/file_store.go`, `adk/session/file_store_test.go`, `adk/session/in_memory_store.go`, `adk/session/in_memory_store_test.go`, `adk/integration_middleware_test.go`.
-- **Current diff size**: 14 tracked files, `+910/-187`, plus untracked `adk/session_service.go` with 341 lines.
+- Total iterations: Stage 1: 1, Stage 2: 1, Stage 3: 1
+- Files modified by review: 4
+- Cumulative code diff after review: 13 files, +601 / -348
+- Cumulative diff including this report: 14 files, +657 / -405
+- Primary scope: ADK session fencing token ownership, append-time tail validation, store conformance, Runner and TurnLoop token propagation
 
-## Stage 1: Design Review
+## Stage 1: Design Review Changes
 
 ### Findings Resolved
 
-| # | Dimension | Finding | Fix Applied | Files |
-|---|-----------|---------|-------------|-------|
-| 1 | API contract conformance | Conformance tests still asserted old duplicate EventID first-write-wins behavior, conflicting with the new exact-batch-replay contract. | Updated conformance to require `ErrDuplicateEventID` for non-replay duplicates and duplicate IDs within one batch. | `adk/session/conformance.go` |
-| 2 | Public documentation | `FileStore.AppendEvents` comments still described duplicate skipping after the contract changed to expected-tail CAS plus exact replay. | Rewrote the comment to describe same-lock expected-tail validation and duplicate acceptance only for exact replay. | `adk/session/file_store.go` |
-| 3 | Live timeline coherence | `session.status_running` was persisted during session preparation before the public iterator existed, so `WithTimelineEvents()` did not expose the same lifecycle event it persisted. | Stored pre-run/pre-resume control events on `runnerSessionRunState` and emitted them to the live iterator without re-persisting. | `adk/runner.go` |
-| 4 | Test layering | Middleware integration tests seeded the provider store directly, bypassing `NewLocalSessionService` tail tracking and failing with `ErrSessionTailMismatch`. | Seeded via the local session service and reused that service in the runner. | `adk/integration_middleware_test.go` |
+| # | Dimension | Finding | Verdict | Fix Applied | Files |
+|---|-----------|---------|---------|-------------|-------|
+| 1 | Public API Documentation | `SessionFencingTokenFunc`, `FencedAppendSessionEventsRequest`, and append request/result types did not fully document write-boundary token lookup, external token lifecycle ownership, and atomic append / exact-replay requirements. | Fix | Expanded public comments to state that Runner calls the token function only at fenced append boundaries, does not manage token lifecycle, and providers must atomically validate token + expected tail + append. | `adk/session.go` |
+| 2 | Contract Coverage | CAS and exact batch replay were important Store contract rules but were only exercised through store-specific tests. | Fix | Added reusable conformance cases for stale expected tail rejection and exact batch replay. | `adk/session/conformance.go` |
 
 ### Design Scorecard
 
 | Dimension | Final Rating | Notes |
 |-----------|--------------|-------|
-| Concept coherence | 4/5 | `SessionService` sealing and provider-facing stores are coherent with the fencing model. |
-| API usability | 4/5 | Local/fenced adapters hide expected-tail mechanics from Runner users. |
-| Minimum API surface | 4/5 | New public store interfaces are focused; sealed runtime handle avoids exposing fencing token internals. |
-| Backward compatibility | 4/5 | Store implementers must migrate to request/result APIs; test helpers were updated accordingly. |
-| Layering | 5/5 | Runner owns execution policy; stores own persistence serialization and atomic append semantics. |
-| Naming | 5/5 | `SessionTailEventID`, `FencingToken`, and `ExpectedSessionTailEventID` reflect precise semantics. |
-| Readability | 4/5 | `session_service.go` is clear; tests have some helper boilerplate but remain explicit. |
-| Public documentation | 4/5 | Main contracts are documented; fenced store docs correctly state atomic append obligations. |
+| Concept Coherence | 5/5 | Fencing ownership is cleanly externalized through `SessionFencingTokenFunc`; Runner remains a token consumer. |
+| API Usability | 4/5 | The new token callback is simple; local services explicitly reject fencing tokens. |
+| Minimum API Surface | 5/5 | Removed token lifecycle methods from the service/handle path; no new interface was introduced. |
+| Backward Compatibility | 4/5 | Store-facing API has changed to request/result structs, but the runtime service remains sealed and adapter-based. |
+| Layering | 5/5 | Provider stores implement storage contracts; Runner/TurnLoop pass ownership proof without managing lifecycle. |
+| Complexity | 4/5 | Tail CAS plus exact replay is inherent complexity and now better documented/tested. |
+| Naming | 5/5 | `FencingToken`, `ExpectedSessionTailEventID`, and `SessionTailEventID` precisely describe semantics. |
+| Documentation | 4/5 | Public contract docs were improved in this review. |
 
 ## Stage 2: Attack Review
 
+### Attack Vectors Reviewed
+
+| # | Severity | Vector | Evidence | Status |
+|---|----------|--------|----------|--------|
+| 1 | Critical | Fenced append after token expiration must fail closed and skip checkpoint write. | `TestRunnerSession_FencingTokenExpiresAtNextAppendWithoutCheckpoint` | Passing |
+| 2 | Critical | Token function must not be called on open/load, only at append boundaries. | `TestFencedSessionService_TokenFunctionAdmissionAndWriteBoundary` | Passing |
+| 3 | Critical | Local session service must reject fencing-token configuration rather than silently running unfenced. | `TestLocalSessionService_RejectsFencingTokenFunction` | Passing |
+| 4 | Critical | Store stale-tail append must fail atomically without partially appending. | `testRejectStaleExpectedTail` in conformance | Passing |
+| 5 | Critical | Store timeout retry must accept only exact EventID sequence replay after expected tail. | `testExactBatchReplay` in conformance | Passing |
+| 6 | Medium | TurnLoop must pass the externally-owned fencing token to its internal Runner. | `TestTurnLoop_PassesSessionFencingTokenToInternalRunner` | Passing |
+
 ### Bugs Fixed
 
-| # | Severity | Bug | Evidence | Fix |
-|---|----------|-----|----------|-----|
-| 1 | High | `InMemoryStore.AppendEvents` mutated the log while validating a batch, so a duplicate EventID later in the same batch returned an error after partially appending earlier events. | Updated conformance duplicate-within-batch test failed with one persisted event. | Added a two-phase validate/marshal-then-append path in `adk/session/in_memory_store.go`. |
-| 2 | Medium | Exact-batch replay branch was untested for both built-in stores, leaving timeout-retry semantics vulnerable to regression. | Coverage showed `isExactBatchReplayLocked` at 0.0% for `InMemoryStore`. | Added direct provider-store replay tests for `InMemoryStore` and `FileStore`. |
-| 3 | Medium | Live timeline did not expose the pre-run lifecycle event even when requested, causing persisted/live parity drift. | `TestWithTimelineEvents_LiveExposure` failed because live kinds lacked `session.status_running`. | Emitted `initialTimeline` events at iterator handling start without duplicate persistence. |
+- No production-code bugs were confirmed during attack review.
+- The only changes were documentation hardening and conformance/test-suite hardening.
 
-### Attack Results
-
-- `go test ./adk ./adk/session`: passing after fixes.
-- `go test ./...`: passing after fixes.
-- `go test -coverprofile=/tmp/eino2-adk-session-cover.out ./adk/session`: 85.2% statement coverage.
-
-## Stage 3: Test Audit
+## Stage 3: Test Audit Changes
 
 ### Improvements Applied
 
-| # | Category | Change | LOC Impact |
-|---|----------|--------|------------|
-| 1 | Assertion contract | Replaced stale idempotent duplicate assertions with `ErrDuplicateEventID` assertions. | Small positive LOC; higher semantic value. |
-| 2 | Coverage gap | Added exact-batch-replay tests for file and in-memory stores. | `+69/-24` combined across store tests since existing tests were also adjusted. |
-| 3 | Integration setup | Changed middleware tests to seed through the same local service abstraction Runner uses. | Minimal LOC increase; avoids bypassing expected-tail semantics. |
+| # | Category | Finding | Fix Applied | LOC Impact |
+|---|----------|---------|-------------|------------|
+| 1 | Coverage Gap | Shared store conformance did not explicitly test stale expected tail rejection. | Added `testRejectStaleExpectedTail`. | +20 LOC |
+| 2 | Coverage Gap | Shared store conformance did not explicitly test exact batch replay. | Added `testExactBatchReplay`. | +32 LOC |
+| 3 | Duplicate Tests | `TestInMemoryStoreAppendEventsExactBatchReplay` and `TestFileStoreAppendEventsExactBatchReplay` duplicated behavior now covered by conformance. | Removed both store-specific duplicates. | -55 LOC |
 
 ### Coverage
 
-- `adk/session`: 85.2% statement coverage.
-- `InMemoryStore.isExactBatchReplayLocked`: improved from 0.0% to 53.3%.
-- Remaining lower-coverage function: `decodeEvent` at 62.5%, mostly defensive serializer/index-corruption branches.
+- `go test -coverprofile=/tmp/eino2_adk_session_cover.out ./adk/session`: 86.7% statements
+- `AppendEvents` coverage: in-memory 92.1%, file 86.2%
+- `isExactBatchReplayLocked` / `isExactFileBatchReplayLocked`: both above the 70% hard floor
+
+## Verification
+
+- `go test ./adk -run 'TestWithCancel_AgenticResumeStreamableToolTimeout_DoesNotPersistTypedNil|TestFencedSessionService_|TestRunnerSession_FencingTokenExpiresAtNextAppendWithoutCheckpoint|TestPrepareRunnerSessionRun_FencedServiceUsesTokenBeforeAgentSideEffects|TestRollbackSession_FencedServiceUsesTokenFunction' -count=1 -v`: pass
+- `go test ./adk -run 'TestFencedSessionService_|TestRunnerSession_FencingTokenExpiresAtNextAppendWithoutCheckpoint|TestPrepareRunnerSessionRun_FencedServiceUsesTokenBeforeAgentSideEffects|TestRollbackSession_FencedServiceUsesTokenFunction|TestTurnLoop_PassesSessionFencingTokenToInternalRunner' -count=1 -v`: pass
+- `go test ./adk/session -count=1`: pass
+- `go test ./adk/... -count=1`: pass
+- `go test ./... -count=1`: pass
+- `GetDiagnostics`: no diagnostics
+
+## Notes
+
+- An early interleaved test run reported `TestWithCancel_AgenticResumeStreamableToolTimeout_DoesNotPersistTypedNil` failing with `execution already ended`; the focused rerun and later full `go test ./adk/... -count=1` and `go test ./... -count=1` runs passed. Treat as a transient baseline flake unless it reproduces.
 
 ## Cumulative File Change List
 
 | File | Stage(s) | Summary |
 |------|----------|---------|
-| `adk/runner.go` | 1, 2 | Preserves pre-run/pre-resume control events for live timeline emission. |
-| `adk/session/conformance.go` | 1, 3 | Aligns reusable conformance tests with duplicate rejection semantics. |
-| `adk/session/in_memory_store.go` | 2 | Makes append validation atomic for duplicate-within-batch errors. |
-| `adk/session/in_memory_store_test.go` | 2, 3 | Adds exact-batch-replay coverage. |
-| `adk/session/file_store.go` | 1 | Updates duplicate/replay contract documentation. |
-| `adk/session/file_store_test.go` | 2, 3 | Adds exact-batch-replay coverage. |
-| `adk/integration_middleware_test.go` | 1, 3 | Seeds sessions through `NewLocalSessionService` to exercise tail tracking. |
-
-## Verification
-
-- `gofmt -w adk/runner.go adk/session/conformance.go adk/session/file_store.go adk/integration_middleware_test.go`
-- `gofmt -w adk/session/in_memory_store.go`
-- `gofmt -w adk/session/in_memory_store_test.go adk/session/file_store_test.go`
-- `go test ./adk ./adk/session`
-- `go test -coverprofile=/tmp/eino2-adk-session-cover.out ./adk/session`
-- `go tool cover -func=/tmp/eino2-adk-session-cover.out`
-- `go test ./...`
-- `GetDiagnostics`: no diagnostics.
+| `adk/session.go` | Design | Documented token callback lifecycle boundaries and atomic append/exact replay contract. |
+| `adk/session/conformance.go` | Design, Test Audit | Added stale-tail and exact-replay conformance cases against provider-facing stores. |
+| `adk/session/in_memory_store_test.go` | Test Audit | Removed duplicate exact replay test now covered by conformance. |
+| `adk/session/file_store_test.go` | Test Audit | Removed duplicate exact replay test now covered by conformance. |
 
 ## Remaining Items
 
 - No unresolved blockers.
-- Residual risk: `sessionHandle.appendEvents` treats empty `ExpectedSessionTailEventID` as "use current handle tail", which is convenient for normal appends but cannot represent an explicit "expect empty log" through the internal handle API. Current Runner paths appear safe because checkpoints are written after at least the running control event, but this semantic ambiguity should be revisited if explicit empty-tail CAS is needed at the handle layer.
+- Optional follow-up: if the cancel test flake recurs in CI, investigate timing around agentic resume stream timeout and cancellation observation.

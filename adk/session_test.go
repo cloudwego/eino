@@ -62,6 +62,15 @@ type blockingAppendStore struct {
 	startOnce     sync.Once
 }
 
+type testFencedSessionStore struct {
+	helper *sessionHelperStore
+
+	mu             sync.Mutex
+	validToken     string
+	appendTokens   []string
+	appendRequests int
+}
+
 func newBlockingAppendStore() *blockingAppendStore {
 	return &blockingAppendStore{
 		sessionHelperStore: *newSessionHelperStore(),
@@ -83,14 +92,14 @@ func (s *blockingAppendStore) AppendEvents(ctx context.Context, sessionID string
 }
 
 func (s *blockingAppendStore) openSession(_ context.Context, req *openSessionRequest) (*openSessionResult[*schema.Message], error) {
-	if req != nil && req.requireFenced {
-		return nil, ErrSessionFencingRequired
+	if req != nil && req.fencingToken != nil {
+		return nil, ErrSessionFencingTokenUnsupported
 	}
 	sessionID := ""
 	if req != nil {
 		sessionID = req.sessionID
 	}
-	return &openSessionResult[*schema.Message]{handle: &legacyMessageTestHandle{store: s, sessionID: sessionID}, fenced: false}, nil
+	return &openSessionResult[*schema.Message]{handle: &legacyMessageTestHandle{store: s, sessionID: sessionID}}, nil
 }
 
 func (s *blockingAppendStore) appendEvents(ctx context.Context, req *AppendSessionEventsRequest[*schema.Message]) (*AppendSessionEventsResult, error) {
@@ -149,7 +158,11 @@ func filterStoredSessionEvents(t *testing.T, raw []storedSessionEvent, pred func
 	return out
 }
 
-func appendTestSessionEvent(t *testing.T, ctx context.Context, store SessionService[*schema.Message], sid string, se *SessionEvent[*schema.Message]) *SessionEvent[*schema.Message] {
+type testSessionAppendStore interface {
+	AppendEvents(context.Context, string, []*SessionEvent[*schema.Message]) error
+}
+
+func appendTestSessionEvent(t *testing.T, ctx context.Context, store testSessionAppendStore, sid string, se *SessionEvent[*schema.Message]) *SessionEvent[*schema.Message] {
 	t.Helper()
 	se = withTestEventID(se)
 	require.NoError(t, store.AppendEvents(ctx, sid, []*SessionEvent[*schema.Message]{se}))
@@ -168,7 +181,7 @@ func testMessageWithID(content string, role schema.RoleType) *schema.Message {
 	return msg
 }
 
-func appendCommittedTestTurn(t *testing.T, ctx context.Context, store SessionService[*schema.Message], sid string, turnID string, contents ...string) *SessionEvent[*schema.Message] {
+func appendCommittedTestTurn(t *testing.T, ctx context.Context, store testSessionAppendStore, sid string, turnID string, contents ...string) *SessionEvent[*schema.Message] {
 	t.Helper()
 	for i, content := range contents {
 		role := schema.User
@@ -323,6 +336,55 @@ func (s *sessionHelperStore) AppendEvents(_ context.Context, _ string, events []
 	return nil
 }
 
+func newTestFencedSessionStore(validToken string) *testFencedSessionStore {
+	return &testFencedSessionStore{
+		helper:     newSessionHelperStore(),
+		validToken: validToken,
+	}
+}
+
+func (s *testFencedSessionStore) LoadEvents(ctx context.Context, req *LoadSessionEventsRequest) (*LoadSessionEventsResult[*schema.Message], error) {
+	sessionID := ""
+	if req != nil {
+		sessionID = req.SessionID
+	}
+	res, err := s.helper.LoadEvents(ctx, sessionID, req)
+	if err != nil {
+		return nil, err
+	}
+	if res != nil {
+		res.SessionTailEventID = s.helper.currentTailEventID()
+	}
+	return res, nil
+}
+
+func (s *testFencedSessionStore) AppendEventsFenced(ctx context.Context, req *FencedAppendSessionEventsRequest[*schema.Message]) (*AppendSessionEventsResult, error) {
+	if req == nil {
+		return nil, ErrSessionFencingTokenInvalid
+	}
+	s.mu.Lock()
+	s.appendTokens = append(s.appendTokens, req.FencingToken)
+	s.appendRequests++
+	s.mu.Unlock()
+	if req.FencingToken == "" || req.FencingToken != s.validToken {
+		return nil, ErrSessionFencingTokenInvalid
+	}
+	tail := s.helper.currentTailEventID()
+	if req.ExpectedSessionTailEventID != tail {
+		return nil, ErrSessionTailMismatch
+	}
+	if err := s.helper.AppendEvents(ctx, req.SessionID, req.Events); err != nil {
+		return nil, err
+	}
+	return &AppendSessionEventsResult{SessionTailEventID: s.helper.currentTailEventID()}, nil
+}
+
+func (s *testFencedSessionStore) appendedTokens() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string{}, s.appendTokens...)
+}
+
 func (s *sessionHelperStore) LoadEvents(_ context.Context, _ string, opts *LoadSessionEventsRequest) (*LoadSessionEventsResult[*schema.Message], error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -410,8 +472,8 @@ func (s *sessionHelperStore) LoadEvents(_ context.Context, _ string, opts *LoadS
 }
 
 func (s *sessionHelperStore) openSession(_ context.Context, req *openSessionRequest) (*openSessionResult[*schema.Message], error) {
-	if req != nil && req.requireFenced {
-		return nil, ErrSessionFencingRequired
+	if req != nil && req.fencingToken != nil {
+		return nil, ErrSessionFencingTokenUnsupported
 	}
 	sessionID := ""
 	if req != nil {
@@ -419,7 +481,6 @@ func (s *sessionHelperStore) openSession(_ context.Context, req *openSessionRequ
 	}
 	return &openSessionResult[*schema.Message]{
 		handle: &testSessionHandle{store: s, sessionID: sessionID},
-		fenced: false,
 	}, nil
 }
 
@@ -449,7 +510,6 @@ func (s *sessionHelperStore) appendEvents(ctx context.Context, req *AppendSessio
 	return &AppendSessionEventsResult{SessionTailEventID: tail}, nil
 }
 
-func (s *sessionHelperStore) renew(context.Context) error { return nil }
 func (s *sessionHelperStore) close(context.Context) error { return nil }
 func (s *sessionHelperStore) currentTailEventID() string {
 	s.mu.Lock()
@@ -490,7 +550,6 @@ func (h *testSessionHandle) appendEvents(ctx context.Context, req *AppendSession
 	return &AppendSessionEventsResult{SessionTailEventID: tail}, nil
 }
 
-func (h *testSessionHandle) renew(context.Context) error { return nil }
 func (h *testSessionHandle) close(context.Context) error { return nil }
 func (h *testSessionHandle) currentTailEventID() string  { return h.store.currentTailEventID() }
 
@@ -521,7 +580,6 @@ func (h *legacyMessageTestHandle) appendEvents(ctx context.Context, req *AppendS
 	return &AppendSessionEventsResult{}, nil
 }
 
-func (h *legacyMessageTestHandle) renew(context.Context) error { return nil }
 func (h *legacyMessageTestHandle) close(context.Context) error { return nil }
 func (h *legacyMessageTestHandle) currentTailEventID() string  { return "" }
 
@@ -533,6 +591,178 @@ func mustOpenTestSession[M MessageType](t testing.TB, ctx context.Context, servi
 	require.NotNil(t, res.handle)
 	t.Cleanup(func() { _ = res.handle.close(ctx) })
 	return res.handle
+}
+
+func TestFencedSessionService_TokenFunctionAdmissionAndWriteBoundary(t *testing.T) {
+	ctx := context.Background()
+	store := newTestFencedSessionStore("token-1")
+	service := NewFencedSessionService[*schema.Message](store, FencedSessionServiceOptions{})
+	var tokenCalls int32
+	tokenFn := func(context.Context) (string, error) {
+		atomic.AddInt32(&tokenCalls, 1)
+		return "token-1", nil
+	}
+
+	_, err := service.openSession(ctx, &openSessionRequest{sessionID: "sid"})
+	require.ErrorIs(t, err, ErrSessionFencingTokenRequired)
+
+	_, err = store.LoadEvents(ctx, &LoadSessionEventsRequest{SessionID: "sid"})
+	require.NoError(t, err)
+	assert.Equal(t, int32(0), atomic.LoadInt32(&tokenCalls), "provider LoadEvents must not call the token function")
+
+	res, err := service.openSession(ctx, &openSessionRequest{sessionID: "sid", fencingToken: tokenFn})
+	require.NoError(t, err)
+	require.NotNil(t, res)
+	require.NotNil(t, res.handle)
+	defer res.handle.close(ctx)
+	assert.Equal(t, int32(0), atomic.LoadInt32(&tokenCalls), "openSession must only bind the token function")
+
+	_, err = res.handle.loadEvents(ctx, &LoadSessionEventsRequest{SessionID: "sid"})
+	require.NoError(t, err)
+	assert.Equal(t, int32(0), atomic.LoadInt32(&tokenCalls), "handle load must not call the token function")
+
+	_, err = res.handle.appendEvents(ctx, &AppendSessionEventsRequest[*schema.Message]{
+		SessionID: "sid",
+		Events:    []*SessionEvent[*schema.Message]{validTestPayload()},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, int32(1), atomic.LoadInt32(&tokenCalls))
+
+	_, err = res.handle.appendEvents(ctx, &AppendSessionEventsRequest[*schema.Message]{
+		SessionID: "sid",
+		Events:    []*SessionEvent[*schema.Message]{validTestPayload()},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, int32(2), atomic.LoadInt32(&tokenCalls))
+	assert.Equal(t, []string{"token-1", "token-1"}, store.appendedTokens())
+}
+
+func TestFencedSessionService_TokenFunctionEmptyOrTerminalErrorFailsClosed(t *testing.T) {
+	ctx := context.Background()
+	store := newTestFencedSessionStore("token-1")
+	service := NewFencedSessionService[*schema.Message](store, FencedSessionServiceOptions{})
+
+	res, err := service.openSession(ctx, &openSessionRequest{
+		sessionID:    "sid",
+		fencingToken: func(context.Context) (string, error) { return "", nil },
+	})
+	require.NoError(t, err)
+	_, err = res.handle.appendEvents(ctx, &AppendSessionEventsRequest[*schema.Message]{
+		SessionID: "sid",
+		Events:    []*SessionEvent[*schema.Message]{validTestPayload()},
+	})
+	require.ErrorIs(t, err, ErrSessionFencingTokenInvalid)
+
+	res, err = service.openSession(ctx, &openSessionRequest{
+		sessionID:    "sid",
+		fencingToken: func(context.Context) (string, error) { return "", ErrSessionFencingTokenExpired },
+	})
+	require.NoError(t, err)
+	_, err = res.handle.appendEvents(ctx, &AppendSessionEventsRequest[*schema.Message]{
+		SessionID: "sid",
+		Events:    []*SessionEvent[*schema.Message]{validTestPayload()},
+	})
+	require.ErrorIs(t, err, ErrSessionFencingTokenExpired)
+}
+
+func TestLocalSessionService_RejectsFencingTokenFunction(t *testing.T) {
+	ctx := context.Background()
+	service := &localSessionService[*schema.Message]{locked: make(map[string]bool)}
+	_, err := service.openSession(ctx, &openSessionRequest{
+		sessionID:    "sid",
+		fencingToken: func(context.Context) (string, error) { return "token-1", nil },
+	})
+	require.ErrorIs(t, err, ErrSessionFencingTokenUnsupported)
+}
+
+func TestRollbackSession_FencedServiceUsesTokenFunction(t *testing.T) {
+	ctx := context.Background()
+	store := newTestFencedSessionStore("token-1")
+	local := store.helper
+	appendCommittedTestTurn(t, ctx, local, "sid", "turn-1", "q", "a")
+	appendCommittedTestTurn(t, ctx, local, "sid", "turn-2", "q2", "a2")
+
+	var tokenCalls int32
+	err := RollbackSession(ctx, NewFencedSessionService[*schema.Message](store, FencedSessionServiceOptions{}), "sid", "turn-1",
+		WithRollbackSessionFencingToken(func(context.Context) (string, error) {
+			atomic.AddInt32(&tokenCalls, 1)
+			return "token-1", nil
+		}),
+	)
+	require.NoError(t, err)
+	assert.Equal(t, int32(1), atomic.LoadInt32(&tokenCalls))
+
+	events := filterStoredSessionEvents(t, store.helper.events, func(se *SessionEvent[*schema.Message]) bool {
+		return se.Kind == SessionEventRollback
+	})
+	require.Len(t, events, 1)
+	assert.Equal(t, "turn-1", events[0].Rollback.ToTurnID)
+}
+
+func TestPrepareRunnerSessionRun_FencedServiceUsesTokenBeforeAgentSideEffects(t *testing.T) {
+	ctx := context.Background()
+	store := newTestFencedSessionStore("token-1")
+	var tokenCalls int32
+	state, err := prepareRunnerSessionRun[*schema.Message](
+		ctx,
+		nil,
+		nil,
+		"sid",
+		NewFencedSessionService[*schema.Message](store, FencedSessionServiceOptions{}),
+		func(context.Context) (string, error) {
+			atomic.AddInt32(&tokenCalls, 1)
+			return "token-1", nil
+		},
+		nil,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	assert.Equal(t, int32(1), atomic.LoadInt32(&tokenCalls))
+	assert.Equal(t, []string{"token-1"}, store.appendedTokens())
+	require.NoError(t, state.sessionHandle.close(ctx))
+}
+
+func TestRunnerSession_FencingTokenExpiresAtNextAppendWithoutCheckpoint(t *testing.T) {
+	ctx := context.Background()
+	store := newTestFencedSessionStore("token-1")
+	cpStore := newSessionHelperStore()
+	agent := &runnerInterruptAgent{}
+	var tokenCalls int32
+
+	runner := NewRunner(ctx, RunnerConfig{
+		Agent:           agent,
+		CheckPointStore: cpStore,
+		SessionID:       "token-expire-during-run",
+		SessionService:  NewFencedSessionService[*schema.Message](store, FencedSessionServiceOptions{}),
+		SessionFencingToken: func(context.Context) (string, error) {
+			if atomic.AddInt32(&tokenCalls, 1) == 1 {
+				return "token-1", nil
+			}
+			return "", ErrSessionFencingTokenExpired
+		},
+		SessionConfig: &SessionConfig{PersistenceMode: SessionPersistenceModeSync},
+	})
+
+	iter := runner.Query(ctx, "go")
+	var sawErr bool
+	for {
+		ev, ok := iter.Next()
+		if !ok {
+			break
+		}
+		if errors.Is(ev.Err, ErrSessionFencingTokenExpired) {
+			sawErr = true
+		}
+	}
+	require.True(t, sawErr, "next fenced append must fail closed after token expiry")
+	assert.Equal(t, int32(1), atomic.LoadInt32(&agent.callCount), "runner must not pre-cancel the agent before the append boundary")
+	_, existed, err := cpStore.Get(ctx, sessionRunnerCheckpointID("token-expire-during-run"))
+	require.NoError(t, err)
+	assert.False(t, existed, "checkpoint must not be written when fenced append fails")
+
+	persisted := decodeStoredSessionEvents(t, store.helper.events)
+	require.Len(t, persisted, 1, "only the initial running control event should be durable")
+	assert.Equal(t, SessionEventSessionStatusRunning, persisted[0].Kind)
 }
 
 func buildTestKindSet(kinds []SessionEventKind) map[SessionEventKind]struct{} {
@@ -2051,14 +2281,14 @@ func (s *recordingHelperStore) AppendEvents(ctx context.Context, sid string, eve
 }
 
 func (s *recordingHelperStore) openSession(_ context.Context, req *openSessionRequest) (*openSessionResult[*schema.Message], error) {
-	if req != nil && req.requireFenced {
-		return nil, ErrSessionFencingRequired
+	if req != nil && req.fencingToken != nil {
+		return nil, ErrSessionFencingTokenUnsupported
 	}
 	sessionID := ""
 	if req != nil {
 		sessionID = req.sessionID
 	}
-	return &openSessionResult[*schema.Message]{handle: &legacyMessageTestHandle{store: s, sessionID: sessionID}, fenced: false}, nil
+	return &openSessionResult[*schema.Message]{handle: &legacyMessageTestHandle{store: s, sessionID: sessionID}}, nil
 }
 
 func (s *recordingHelperStore) appendEvents(ctx context.Context, req *AppendSessionEventsRequest[*schema.Message]) (*AppendSessionEventsResult, error) {

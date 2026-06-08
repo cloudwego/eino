@@ -30,13 +30,13 @@ import (
 )
 
 func TestInMemoryStoreConformance(t *testing.T) {
-	session.RunConformanceTests[*schema.Message](t, func(testing.TB) adk.SessionService[*schema.Message] {
-		return adk.NewLocalSessionService[*schema.Message](session.NewInMemoryStore[*schema.Message](nil))
+	session.RunConformanceTests[*schema.Message](t, func(testing.TB) adk.SessionEventStore[*schema.Message] {
+		return session.NewInMemoryStore[*schema.Message](nil)
 	}, func(content string) *schema.Message {
 		return schema.UserMessage(content)
 	})
-	session.RunSerializerConformanceTests[*schema.Message](t, func(_ testing.TB, serializer schema.Serializer) adk.SessionService[*schema.Message] {
-		return adk.NewLocalSessionService[*schema.Message](session.NewInMemoryStore[*schema.Message](&session.InMemoryStoreConfig{EventSerializer: serializer}))
+	session.RunSerializerConformanceTests[*schema.Message](t, func(_ testing.TB, serializer schema.Serializer) adk.SessionEventStore[*schema.Message] {
+		return session.NewInMemoryStore[*schema.Message](&session.InMemoryStoreConfig{EventSerializer: serializer})
 	}, func(content string) *schema.Message {
 		return schema.UserMessage(content)
 	})
@@ -107,33 +107,6 @@ func TestInMemoryStoreLoadReturnsIndependentEvents(t *testing.T) {
 	second, err := store.LoadEvents(ctx, &adk.LoadSessionEventsRequest{SessionID: "s"})
 	require.NoError(t, err)
 	assert.Equal(t, "e1", second.Events[0].EventID)
-}
-
-func TestInMemoryStoreAppendEventsExactBatchReplay(t *testing.T) {
-	ctx := context.Background()
-	store := session.NewInMemoryStore[*schema.Message](nil)
-	events := []*adk.SessionEvent[*schema.Message]{
-		testMessageEvent("replay-1", "one"),
-		testMessageEvent("replay-2", "two"),
-	}
-	first, err := store.AppendEvents(ctx, &adk.AppendSessionEventsRequest[*schema.Message]{
-		SessionID: "s",
-		Events:    events,
-	})
-	require.NoError(t, err)
-	require.Equal(t, "replay-2", first.SessionTailEventID)
-
-	replayed, err := store.AppendEvents(ctx, &adk.AppendSessionEventsRequest[*schema.Message]{
-		SessionID:                  "s",
-		ExpectedSessionTailEventID: "",
-		Events:                     events,
-	})
-	require.NoError(t, err)
-	require.Equal(t, "replay-2", replayed.SessionTailEventID)
-
-	res, err := store.LoadEvents(ctx, &adk.LoadSessionEventsRequest{SessionID: "s"})
-	require.NoError(t, err)
-	require.Len(t, res.Events, 2)
 }
 
 func testMessageEvent(id, content string) *adk.SessionEvent[*schema.Message] {

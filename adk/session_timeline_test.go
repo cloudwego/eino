@@ -1473,43 +1473,38 @@ func TestToolSpan_PersistedAroundToolCallAndLinksToMessages(t *testing.T) {
 }
 
 type kindsRecordingStore struct {
-	SessionService[*schema.Message]
+	inner         *sessionHelperStore
 	recordedKinds [][]SessionEventKind
 }
 
-func (s *kindsRecordingStore) LoadEvents(ctx context.Context, sessionID string, opts *LoadSessionEventsRequest) (*LoadSessionEventsResult[*schema.Message], error) {
+func (s *kindsRecordingStore) loadEvents(ctx context.Context, opts *LoadSessionEventsRequest) (*LoadSessionEventsResult[*schema.Message], error) {
 	if opts != nil {
 		s.recordedKinds = append(s.recordedKinds, opts.Kinds)
 	}
-	return s.SessionService.LoadEvents(ctx, sessionID, opts)
-}
-
-func (s *kindsRecordingStore) loadEvents(ctx context.Context, opts *LoadSessionEventsRequest) (*LoadSessionEventsResult[*schema.Message], error) {
 	sessionID := ""
 	if opts != nil {
 		sessionID = opts.SessionID
 	}
-	return s.LoadEvents(ctx, sessionID, opts)
+	return s.inner.LoadEvents(ctx, sessionID, opts)
 }
 
 func (s *kindsRecordingStore) appendEvents(ctx context.Context, req *AppendSessionEventsRequest[*schema.Message]) (*AppendSessionEventsResult, error) {
 	if req == nil {
 		req = &AppendSessionEventsRequest[*schema.Message]{}
 	}
-	if err := s.SessionService.AppendEvents(ctx, req.SessionID, req.Events); err != nil {
+	if err := s.inner.AppendEvents(ctx, req.SessionID, req.Events); err != nil {
 		return nil, err
 	}
 	return &AppendSessionEventsResult{}, nil
 }
 
-func (s *kindsRecordingStore) renew(context.Context) error { return nil }
 func (s *kindsRecordingStore) close(context.Context) error { return nil }
 func (s *kindsRecordingStore) currentTailEventID() string  { return "" }
 
 func TestSessionTimeline_ReconstructionUsesKindFilter(t *testing.T) {
 	ctx := context.Background()
 	inner := newSessionHelperStore()
-	wrapper := &kindsRecordingStore{SessionService: inner}
+	wrapper := &kindsRecordingStore{inner: inner}
 	sid := "timeline-kind-filter"
 
 	msg1 := schema.UserMessage("hello")
