@@ -426,8 +426,8 @@ type runStepSerialization struct {
 type TypedAgentEvent[M MessageType] struct {
 	// EventID is the run-unique identity of this event, allocated once at the
 	// first emission boundary by execCtx.send. Live (user-land) and persisted
-	// (SessionService) copies of the same logical event share this ID, allowing
-	// SSE adapters to use it as `id:` and resume via SessionService.LoadEvents.
+	// (SessionEventStore) copies of the same logical event share this ID, allowing
+	// SSE adapters to use it as `id:` and resume from the session event log.
 	// Format: UUIDv4 string when allocated by the runtime. Leave empty to let
 	// the runtime allocate; an explicitly set non-empty value is preserved.
 	EventID string
