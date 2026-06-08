@@ -3711,7 +3711,7 @@ func TestClearMessageRewriterPersistsMessagesDeletedThroughRunner(t *testing.T) 
 	runner := adk.NewRunner(ctx, adk.RunnerConfig{
 		Agent:          agent,
 		SessionID:      "reduction-delete-session",
-		SessionService: store,
+		SessionService: adk.NewLocalSessionService[*schema.Message](store),
 		SessionConfig:  &adk.SessionConfig{EventFlushBatchSize: 1},
 	})
 	drainReductionEvents(t, runner.Query(ctx, "please call the tool"))
@@ -3737,7 +3737,7 @@ func TestClearMessageRewriterPersistsMessagesDeletedThroughRunner(t *testing.T) 
 	nextRunner := adk.NewRunner(ctx, adk.RunnerConfig{
 		Agent:          nextAgent,
 		SessionID:      "reduction-delete-session",
-		SessionService: store,
+		SessionService: adk.NewLocalSessionService[*schema.Message](store),
 	})
 	drainReductionEvents(t, nextRunner.Query(ctx, "next turn"))
 
@@ -3784,7 +3784,7 @@ func TestClearMessageRewriterAbortDoesNotPersistStructuralEvents(t *testing.T) {
 	runner := adk.NewRunner(ctx, adk.RunnerConfig{
 		Agent:          agent,
 		SessionID:      "reduction-abort-session",
-		SessionService: store,
+		SessionService: adk.NewLocalSessionService[*schema.Message](store),
 		SessionConfig:  &adk.SessionConfig{EventFlushBatchSize: 1},
 	})
 	drainReductionEvents(t, runner.Query(ctx, "please call the tool"))
@@ -3829,7 +3829,7 @@ func TestClearAtLeastTokensAbortDoesNotPersistMessageUpdates(t *testing.T) {
 	runner := adk.NewRunner(ctx, adk.RunnerConfig{
 		Agent:          agent,
 		SessionID:      "reduction-clear-abort-session",
-		SessionService: store,
+		SessionService: adk.NewLocalSessionService[*schema.Message](store),
 		SessionConfig:  &adk.SessionConfig{EventFlushBatchSize: 1},
 	})
 	drainReductionEvents(t, runner.Query(ctx, "please call the tool"))
@@ -3851,9 +3851,9 @@ func drainReductionEvents(t *testing.T, iter *adk.AsyncIterator[*adk.AgentEvent]
 	}
 }
 
-func loadReductionSessionEvents(t *testing.T, ctx context.Context, store adk.SessionService[*schema.Message], sessionID string) []*adk.SessionEvent[*schema.Message] {
+func loadReductionSessionEvents(t *testing.T, ctx context.Context, store adk.SessionEventStore[*schema.Message], sessionID string) []*adk.SessionEvent[*schema.Message] {
 	t.Helper()
-	res, err := store.LoadEvents(ctx, sessionID, &adk.LoadSessionEventsRequest{})
+	res, err := store.LoadEvents(ctx, &adk.LoadSessionEventsRequest{SessionID: sessionID})
 	assert.NoError(t, err)
 	return res.Events
 }
