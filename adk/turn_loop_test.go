@@ -4060,6 +4060,46 @@ func (m *mockSessionService) LoadEvents(_ context.Context, sessionID string, opt
 	return &LoadSessionEventsResult[*schema.Message]{Events: out, Next: next}, nil
 }
 
+func (m *mockSessionService) openSession(_ context.Context, req *openSessionRequest) (*openSessionResult[*schema.Message], error) {
+	if req != nil && req.requireFenced {
+		return nil, ErrSessionFencingRequired
+	}
+	sessionID := ""
+	if req != nil {
+		sessionID = req.sessionID
+	}
+	return &openSessionResult[*schema.Message]{
+		handle: &mockSessionHandle{store: m, sessionID: sessionID},
+		fenced: false,
+	}, nil
+}
+
+type mockSessionHandle struct {
+	store     *mockSessionService
+	sessionID string
+}
+
+func (h *mockSessionHandle) loadEvents(ctx context.Context, req *LoadSessionEventsRequest) (*LoadSessionEventsResult[*schema.Message], error) {
+	if req == nil {
+		req = &LoadSessionEventsRequest{}
+	}
+	return h.store.LoadEvents(ctx, h.sessionID, req)
+}
+
+func (h *mockSessionHandle) appendEvents(ctx context.Context, req *AppendSessionEventsRequest[*schema.Message]) (*AppendSessionEventsResult, error) {
+	if req == nil {
+		req = &AppendSessionEventsRequest[*schema.Message]{}
+	}
+	if err := h.store.AppendEvents(ctx, h.sessionID, req.Events); err != nil {
+		return nil, err
+	}
+	return &AppendSessionEventsResult{}, nil
+}
+
+func (h *mockSessionHandle) renew(context.Context) error { return nil }
+func (h *mockSessionHandle) close(context.Context) error { return nil }
+func (h *mockSessionHandle) currentTailEventID() string  { return "" }
+
 func TestTurnLoop_SessionServiceWithCheckpointIDWithoutStore(t *testing.T) {
 	ctx := context.Background()
 	sessionID := "test-session-id"
