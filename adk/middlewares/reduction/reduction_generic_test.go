@@ -621,8 +621,8 @@ func TestToolResultFromMsgGeneric_AgenticMessage(t *testing.T) {
 				{
 					Type: schema.ContentBlockTypeFunctionToolResult,
 					FunctionToolResult: &schema.FunctionToolResult{
-						CallID: "c1",
-						Name:   "tool1",
+						CallID:  "c1",
+						Name:    "tool1",
 						Content: nil,
 					},
 				},
