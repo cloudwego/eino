@@ -2909,7 +2909,7 @@ func TestClearMessageRewriterPersistsMessagesDeletedThroughRunner(t *testing.T) 
 		Agent:          agent,
 		SessionID:      "reduction-delete-session",
 		SessionService: adk.NewLocalSessionService[*schema.Message](store),
-		SessionConfig:  &adk.SessionConfig{EventFlushBatchSize: 1},
+		SessionConfig:  &adk.SessionConfig[*schema.Message]{EventFlushBatchSize: 1},
 	})
 	drainReductionEvents(t, runner.Query(ctx, "please call the tool"))
 
@@ -2982,7 +2982,7 @@ func TestClearMessageRewriterAbortDoesNotPersistStructuralEvents(t *testing.T) {
 		Agent:          agent,
 		SessionID:      "reduction-abort-session",
 		SessionService: adk.NewLocalSessionService[*schema.Message](store),
-		SessionConfig:  &adk.SessionConfig{EventFlushBatchSize: 1},
+		SessionConfig:  &adk.SessionConfig[*schema.Message]{EventFlushBatchSize: 1},
 	})
 	drainReductionEvents(t, runner.Query(ctx, "please call the tool"))
 
@@ -3027,7 +3027,7 @@ func TestClearAtLeastTokensAbortDoesNotPersistMessageUpdates(t *testing.T) {
 		Agent:          agent,
 		SessionID:      "reduction-clear-abort-session",
 		SessionService: adk.NewLocalSessionService[*schema.Message](store),
-		SessionConfig:  &adk.SessionConfig{EventFlushBatchSize: 1},
+		SessionConfig:  &adk.SessionConfig[*schema.Message]{EventFlushBatchSize: 1},
 	})
 	drainReductionEvents(t, runner.Query(ctx, "please call the tool"))
 

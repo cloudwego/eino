@@ -28,7 +28,6 @@ import (
 	"sync/atomic"
 
 	"github.com/bytedance/sonic"
-	"github.com/google/uuid"
 
 	"github.com/cloudwego/eino/adk/internal"
 	"github.com/cloudwego/eino/components/model"
@@ -59,7 +58,6 @@ type typedChatModelAgentExecCtx[M MessageType] struct {
 	sessionEvents          bool
 	timelineEvents         bool
 	internalTimelineEvents bool
-	eventIDGenerator       func(context.Context) string
 }
 
 func (e *typedChatModelAgentExecCtx[M]) send(ctx context.Context, event *TypedAgentEvent[M]) {
@@ -72,22 +70,40 @@ func (e *typedChatModelAgentExecCtx[M]) send(ctx context.Context, event *TypedAg
 	// Allocate EventID at the first emission boundary so live (user-land) and
 	// persisted (SessionService) copies of the same logical event share identity.
 	// User-supplied non-empty IDs (e.g. replay scenarios) are preserved.
-	if event != nil && event.EventID == "" {
-		event.EventID = e.genEventID(ctx)
+	//
+	// SessionEvent[M] drafts route ID allocation through the runner-installed
+	// SessionEventIDGenerator[M] via normalizeAgentSessionEventWithAssigner so
+	// producer-owned identity applies. Live-only TypedAgentEvent (no
+	// SessionEvent payload) calls the generator with a nil draft as the
+	// documented exception (see runner.go:944): no draft exists for the
+	// transport-level event, so the generator falls through to UUID by
+	// default while still respecting any application override.
+	if event == nil {
+		return
 	}
-	if event != nil && event.SessionEvent != nil {
-		if _, err := normalizeAgentSessionEventWithGenerator(event, func() string { return e.genEventID(ctx) }); err != nil {
-			event.Err = err
+	if event.EventID == "" || event.SessionEvent != nil {
+		gen := sessionEventIDGeneratorFromContext[M](ctx)
+		if gen == nil {
+			gen = DefaultSessionEventIDGenerator[M]
+		}
+		if event.SessionEvent != nil {
+			if _, err := normalizeAgentSessionEventWithAssigner(event, func(se *SessionEvent[M]) (string, error) {
+				return gen(ctx, se)
+			}); err != nil {
+				event.Err = err
+			}
+		} else if event.EventID == "" {
+			id, err := gen(ctx, nil)
+			if err != nil {
+				event.Err = err
+			} else if id == "" {
+				event.Err = ErrSessionEventIDGeneratorEmpty
+			} else {
+				event.EventID = id
+			}
 		}
 	}
 	e.generator.trySend(event)
-}
-
-func (e *typedChatModelAgentExecCtx[M]) genEventID(ctx context.Context) string {
-	if e != nil && e.eventIDGenerator != nil {
-		return e.eventIDGenerator(ctx)
-	}
-	return uuid.NewString()
 }
 
 type chatModelAgentExecCtx = typedChatModelAgentExecCtx[*schema.Message]
@@ -1152,7 +1168,6 @@ func (a *TypedChatModelAgent[M]) buildNoToolsRunFunc(_ context.Context) (typedRu
 			sessionEvents:            p.sessionEvents,
 			timelineEvents:           p.timelineEvents,
 			internalTimelineEvents:   p.internalTimelineEvents,
-			eventIDGenerator:         eventIDGeneratorFromContext(ctx),
 		})
 
 		// Pre-execution cancel check
@@ -1309,7 +1324,6 @@ func (a *TypedChatModelAgent[M]) buildMessageReActRunFunc(_ context.Context, bc 
 			sessionEvents:            mp.sessionEvents,
 			timelineEvents:           mp.timelineEvents,
 			internalTimelineEvents:   mp.internalTimelineEvents,
-			eventIDGenerator:         eventIDGeneratorFromContext(ctx),
 		})
 
 		// Pre-execution cancel check
@@ -1463,7 +1477,6 @@ func (a *TypedChatModelAgent[M]) buildAgenticReActRunFunc(_ context.Context, bc 
 			sessionEvents:          ap.sessionEvents,
 			timelineEvents:         ap.timelineEvents,
 			internalTimelineEvents: ap.internalTimelineEvents,
-			eventIDGenerator:       eventIDGeneratorFromContext(ctx),
 		})
 
 		// Pre-execution cancel check
