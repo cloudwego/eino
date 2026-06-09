@@ -672,7 +672,7 @@ type TurnLoopConfig[T any, M MessageType] struct {
 	SessionID           string
 	SessionService      SessionService[M]
 	SessionFencingToken SessionFencingTokenFunc
-	SessionConfig       *SessionConfig
+	SessionConfig       *SessionConfig[M]
 }
 
 // GenInputResult contains the result of GenInput processing.

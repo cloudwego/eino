@@ -65,7 +65,7 @@ type TypedRunner[M MessageType] struct {
 	sessionID           string
 	sessionService      SessionService[M]
 	sessionFencingToken SessionFencingTokenFunc
-	sessionConfig       *SessionConfig
+	sessionConfig       *SessionConfig[M]
 }
 
 // Runner is the default runner type using *schema.Message.
@@ -84,7 +84,7 @@ type TypedRunnerConfig[M MessageType] struct {
 	SessionID           string
 	SessionService      SessionService[M]
 	SessionFencingToken SessionFencingTokenFunc
-	SessionConfig       *SessionConfig
+	SessionConfig       *SessionConfig[M]
 }
 
 // RunnerConfig is the default runner config type using *schema.Message.
@@ -177,7 +177,7 @@ type runnerSessionRunState[M MessageType] struct {
 	sessionID       string
 	checkPointID    *string
 	latestState     *TurnEndState[M]
-	sessionConfig   SessionConfig
+	sessionConfig   SessionConfig[M]
 	sessionService  SessionService[M]
 	sessionHandle   sessionHandle[M]
 	checkPointStore CheckPointStore
@@ -227,7 +227,7 @@ func openRunnerSession[M MessageType](
 	service SessionService[M],
 	sessionID string,
 	fencingToken SessionFencingTokenFunc,
-	cfg SessionConfig,
+	cfg SessionConfig[M],
 ) (*openSessionResult[M], error) {
 	if service == nil {
 		return nil, errors.New("adk: session service is nil")
@@ -279,7 +279,7 @@ func prepareRunnerSessionRun[M MessageType]( //nolint:revive // argument-limit
 	sessionID string,
 	sessionService SessionService[M],
 	sessionFencingToken SessionFencingTokenFunc,
-	sessionConfig *SessionConfig,
+	sessionConfig *SessionConfig[M],
 ) (*runnerSessionRunState[M], error) {
 	state := &runnerSessionRunState[M]{}
 	if isNilCheckPointStore(checkPointStore) {
@@ -314,11 +314,14 @@ func prepareRunnerSessionRun[M MessageType]( //nolint:revive // argument-limit
 		state.latestState = reconstructResult.state
 	}
 	runningEvent := &SessionEvent[M]{
-		EventID:   state.sessionConfig.EventIDGenerator(ctx),
 		Timestamp: newEventTimestamp(),
 		Kind:      SessionEventSessionStatusRunning,
 		TurnID:    state.turnID,
 		Lifecycle: &LifecycleEvent{Scope: LifecycleScopeSession, State: SessionRunStateRunning},
+	}
+	if err := assignSessionEventID(ctx, runningEvent, state.sessionConfig.EventIDGenerator); err != nil {
+		_ = state.sessionHandle.close(ctx)
+		return nil, err
 	}
 	if err := appendRunnerSessionControlEvent(ctx, state, runningEvent, ""); err != nil {
 		_ = state.sessionHandle.close(ctx)
@@ -355,7 +358,7 @@ func prepareRunnerSessionResume[M MessageType](
 	sessionID string,
 	sessionService SessionService[M],
 	sessionFencingToken SessionFencingTokenFunc,
-	sessionConfig *SessionConfig,
+	sessionConfig *SessionConfig[M],
 	checkPointID string,
 ) (*runnerSessionRunState[M], string, error) {
 	state := &runnerSessionRunState[M]{}
@@ -423,11 +426,14 @@ func prepareRunnerSessionResume[M MessageType](
 		return state, effectiveCheckPointID, nil
 	}
 	resumeEvent := &SessionEvent[M]{
-		EventID:   state.sessionConfig.EventIDGenerator(ctx),
 		Timestamp: newEventTimestamp(),
 		Kind:      SessionEventKind(SessionEventExtensionPrefix + "resume.request_started"),
 		TurnID:    state.turnID,
 		Extension: &SessionExtensionEvent{},
+	}
+	if err := assignSessionEventID(ctx, resumeEvent, state.sessionConfig.EventIDGenerator); err != nil {
+		_ = state.sessionHandle.close(ctx)
+		return nil, "", err
 	}
 	if err := appendRunnerSessionControlEvent(ctx, state, resumeEvent, checkpoint.SessionTailEventID); err != nil {
 		_ = state.sessionHandle.close(ctx)
@@ -550,7 +556,7 @@ func saveRunnerCheckpoint[M MessageType]( //nolint:revive // argument-limit
 	return store.Set(ctx, checkPointID, data)
 }
 
-func typedRunnerRunImpl[M MessageType](a TypedAgent[M], enableStreaming bool, store CheckPointStore, sessionID string, sessionService SessionService[M], sessionFencingToken SessionFencingTokenFunc, sessionConfig *SessionConfig, ctx context.Context, messages []M, opts ...AgentRunOption) *AsyncIterator[*TypedAgentEvent[M]] { //nolint:revive // argument-limit
+func typedRunnerRunImpl[M MessageType](a TypedAgent[M], enableStreaming bool, store CheckPointStore, sessionID string, sessionService SessionService[M], sessionFencingToken SessionFencingTokenFunc, sessionConfig *SessionConfig[M], ctx context.Context, messages []M, opts ...AgentRunOption) *AsyncIterator[*TypedAgentEvent[M]] { //nolint:revive // argument-limit
 	o := getCommonOptions(nil, opts...)
 	exposeTimelineEvents := o.enableTimelineEvents
 
@@ -585,7 +591,7 @@ func typedRunnerRunImpl[M MessageType](a TypedAgent[M], enableStreaming bool, st
 	}
 
 	if sessionState.enabled {
-		ctx = contextWithEventIDGenerator(ctx, sessionState.sessionConfig.EventIDGenerator)
+		ctx = contextWithSessionEventIDGenerator[M](ctx, sessionState.sessionConfig.EventIDGenerator)
 	}
 
 	var zero M
@@ -645,7 +651,7 @@ func typedRunnerRunImpl[M MessageType](a TypedAgent[M], enableStreaming bool, st
 	return niter
 }
 
-func typedRunnerResumeInternalImpl[M MessageType](a TypedAgent[M], store CheckPointStore, sessionID string, sessionService SessionService[M], sessionFencingToken SessionFencingTokenFunc, sessionConfig *SessionConfig, ctx context.Context, checkPointID string, resumeData map[string]any, //nolint:revive // argument-limit
+func typedRunnerResumeInternalImpl[M MessageType](a TypedAgent[M], store CheckPointStore, sessionID string, sessionService SessionService[M], sessionFencingToken SessionFencingTokenFunc, sessionConfig *SessionConfig[M], ctx context.Context, checkPointID string, resumeData map[string]any, //nolint:revive // argument-limit
 	opts ...AgentRunOption) (*AsyncIterator[*TypedAgentEvent[M]], error) {
 	if isNilCheckPointStore(store) {
 		return nil, fmt.Errorf("failed to resume: store is nil")
@@ -693,7 +699,7 @@ func typedRunnerResumeInternalImpl[M MessageType](a TypedAgent[M], store CheckPo
 	AddSessionValues(ctx, o.sessionValues)
 
 	if sessionState.enabled {
-		ctx = contextWithEventIDGenerator(ctx, sessionState.sessionConfig.EventIDGenerator)
+		ctx = contextWithSessionEventIDGenerator[M](ctx, sessionState.sessionConfig.EventIDGenerator)
 	}
 
 	if len(resumeData) > 0 {
@@ -803,7 +809,10 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 		}
 		annotateSessionEvent(se)
 		if se.EventID == "" {
-			se.EventID = sessionState.sessionConfig.EventIDGenerator(ctx)
+			if err := assignSessionEventIDFromContext(ctx, se); err != nil {
+				setPersistErr(err)
+				return
+			}
 		}
 		if se.Timestamp.IsZero() {
 			se.Timestamp = newEventTimestamp()
@@ -846,7 +855,7 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 	// agent's output. Skipped on resume (sessionState.inputMessages is nil).
 	if persister != nil && len(sessionState.inputMessages) > 0 {
 		for _, msg := range sessionState.inputMessages {
-			se := makeInputSessionEvent[M](ctx, msg, sessionState.sessionConfig.EventIDGenerator)
+			se := makeInputSessionEvent[M](msg)
 			sendTimelineEvent(se)
 		}
 	}
@@ -859,7 +868,16 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 			event.Timestamp = newEventTimestamp()
 		}
 		if event.SessionEvent != nil {
-			if _, err := normalizeAgentSessionEventWithGenerator(event, func() string { return sessionState.sessionConfig.EventIDGenerator(ctx) }); err != nil {
+			gen := DefaultSessionEventIDGenerator[M]
+			if sessionState != nil && sessionState.enabled {
+				gen = sessionState.sessionConfig.EventIDGenerator
+				if gen == nil {
+					gen = DefaultSessionEventIDGenerator[M]
+				}
+			}
+			if _, err := normalizeAgentSessionEventWithAssigner(event, func(draft *SessionEvent[M]) (string, error) {
+				return gen(ctx, draft)
+			}); err != nil {
 				setPersistErr(err)
 				event.Err = err
 			}
@@ -941,7 +959,28 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 
 			if !fromOtherSession {
 				if event.EventID == "" {
-					event.EventID = sessionState.sessionConfig.EventIDGenerator(ctx)
+					// live-only TypedAgentEvent fallback; not a SessionEvent[M] draft,
+					// intentionally bypasses assignSessionEventIDFromContext. The
+					// helper assigns drafts; here we need an ID for the live-only
+					// transport-level TypedAgentEvent before any SessionEvent[M] is
+					// materialized. The application generator (or default) is
+					// invoked with a nil draft so producer-owned identity is still
+					// honored, and the eventual materialized SessionEvent[M] takes
+					// the same ID via the wrapper's draft path. Failures fail closed.
+					gen := sessionState.sessionConfig.EventIDGenerator
+					if gen == nil {
+						gen = DefaultSessionEventIDGenerator[M]
+					}
+					id, err := gen(ctx, nil)
+					if err != nil {
+						setPersistErr(err)
+						continue
+					}
+					if id == "" {
+						setPersistErr(ErrSessionEventIDGeneratorEmpty)
+						continue
+					}
+					event.EventID = id
 				}
 				if event.Output != nil && event.Output.MessageOutput != nil &&
 					event.Output.MessageOutput.IsStreaming && event.Output.MessageOutput.MessageStream != nil {
@@ -1086,7 +1125,6 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 				errMsg = terminalErr.Error()
 			}
 			sendTimelineEvent(&SessionEvent[M]{
-				EventID:   sessionState.sessionConfig.EventIDGenerator(ctx),
 				Timestamp: newEventTimestamp(),
 				Kind:      SessionEventSessionError,
 				Error:     &SessionErrorEvent{Type: SessionErrorTypeFatal, Message: errMsg},
@@ -1094,7 +1132,6 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 		}
 		if interrupted {
 			sendTimelineEvent(&SessionEvent[M]{
-				EventID:        sessionState.sessionConfig.EventIDGenerator(ctx),
 				Timestamp:      newEventTimestamp(),
 				Kind:           SessionEventAgentInterrupt,
 				AgentInterrupt: buildAgentInterruptEvent(interruptContexts),
@@ -1102,14 +1139,12 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 		}
 		if cancelled {
 			sendTimelineEvent(&SessionEvent[M]{
-				EventID:         sessionState.sessionConfig.EventIDGenerator(ctx),
 				Timestamp:       newEventTimestamp(),
 				Kind:            SessionEventUserInterrupt,
 				UserObservation: &UserObservationEvent{Interrupt: &UserInterruptEvent{Reason: "cancelled"}},
 			})
 		}
 		sendTimelineEvent(&SessionEvent[M]{
-			EventID:   sessionState.sessionConfig.EventIDGenerator(ctx),
 			Timestamp: newEventTimestamp(),
 			Kind:      SessionEventSessionStatusIdle,
 			Lifecycle: &LifecycleEvent{Scope: LifecycleScopeSession, State: SessionRunStateIdle, StopReason: &StopReason{Type: stopReason}},

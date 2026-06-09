@@ -669,7 +669,7 @@ func TestPermissionDecisionAppearsInToolUseTimeline(t *testing.T) {
 		Agent:          agent,
 		SessionID:      "permission-timeline",
 		SessionService: adk.NewLocalSessionService[*schema.Message](&permissionSessionService{}),
-		SessionConfig:  &adk.SessionConfig{EventFlushBatchSize: 1},
+		SessionConfig:  &adk.SessionConfig[*schema.Message]{EventFlushBatchSize: 1},
 	})
 	iter := runner.Query(ctx, "use the tool", adk.WithTimelineEvents())
 	for {
@@ -740,7 +740,7 @@ func TestToolSpan_PermissionDenyEmitsBothSpansOnSameRun(t *testing.T) {
 		Agent:          agent,
 		SessionID:      "permission-deny-span",
 		SessionService: adk.NewLocalSessionService[*schema.Message](&permissionSessionService{}),
-		SessionConfig:  &adk.SessionConfig{EventFlushBatchSize: 1},
+		SessionConfig:  &adk.SessionConfig[*schema.Message]{EventFlushBatchSize: 1},
 	})
 
 	var (
@@ -841,7 +841,7 @@ func TestPermissionGate_PersistedAgentInterruptOmitsPrivateInfo(t *testing.T) {
 				Agent:          agent,
 				SessionID:      "permission-agent-interrupt-" + strings.ReplaceAll(tt.name, " ", "-"),
 				SessionService: adk.NewLocalSessionService[*schema.Message](store),
-				SessionConfig:  &adk.SessionConfig{EventFlushBatchSize: 1},
+				SessionConfig:  &adk.SessionConfig[*schema.Message]{EventFlushBatchSize: 1},
 			})
 			iter := runner.Query(ctx, "use the tool", adk.WithTimelineEvents())
 			for {

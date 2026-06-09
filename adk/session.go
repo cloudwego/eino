@@ -51,6 +51,14 @@ const (
 // allocation format, but service implementations treat EventID as opaque.
 var ErrInvalidEventID = errors.New("adk: session event has invalid event_id")
 
+// ErrSessionEventIDGeneratorEmpty is returned by assignSessionEventID when the
+// configured SessionEventIDGenerator returns an empty event_id. This is a
+// generator-side contract violation surfaced before AppendEvents is called.
+// It is a separate sentinel from ErrInvalidEventID (store-side) so callers
+// can distinguish "application generator violated its contract" from "store
+// rejected an event_id".
+var ErrSessionEventIDGeneratorEmpty = errors.New("adk: session event id generator returned empty event id")
+
 // ErrEventIDOutOfRange is returned by LoadEvents when
 // LoadSessionEventsRequest.After references an event_id that does not exist in
 // the session log. Callers can detect this and fall back to a full reload.
@@ -531,8 +539,37 @@ const (
 	SessionPersistenceModeSync SessionPersistenceMode = "sync"
 )
 
+// SessionEventIDGenerator returns the EventID for a draft SessionEvent[M].
+//
+// Generators see the fully-populated draft (Kind, Message, Span, Extension,
+// SessionID, TurnID, ...) and may return a business-side identifier such as
+// the matching application order/job/result ID. When a generator does not
+// recognize a draft event, it should fall through to
+// DefaultSessionEventIDGenerator[M] rather than allocating a UUID directly,
+// so that the default behavior stays consistent with the framework default.
+//
+// A returned empty event_id is treated as a generator-side contract violation
+// (ErrSessionEventIDGeneratorEmpty); the runner fails closed before the
+// event is appended to the store.
+type SessionEventIDGenerator[M MessageType] func(ctx context.Context, event *SessionEvent[M]) (string, error)
+
+// DefaultSessionEventIDGenerator returns a UUID-based EventID for any draft.
+// It is exported so that application-side SessionEventIDGenerator[M]
+// implementations can fall through to default behavior when they do not
+// recognize a draft event, e.g.:
+//
+//	func myGen(ctx context.Context, e *SessionEvent[M]) (string, error) {
+//	    if id, ok := mapDraftToBusinessID(e); ok {
+//	        return id, nil
+//	    }
+//	    return DefaultSessionEventIDGenerator[M](ctx, e)
+//	}
+func DefaultSessionEventIDGenerator[M MessageType](_ context.Context, _ *SessionEvent[M]) (string, error) {
+	return uuid.NewString(), nil
+}
+
 // SessionConfig tunes managed-session event persistence and loading.
-type SessionConfig struct {
+type SessionConfig[M MessageType] struct {
 	// PersistenceMode controls when session events are appended relative to
 	// consumer-visible AgentEvents. Defaults to SessionPersistenceModeAsync.
 	//
@@ -568,11 +605,16 @@ type SessionConfig struct {
 	// LoadPageSize is the number of events fetched per page when loading events
 	// for reconstruction or tail replay. Defaults to 100.
 	LoadPageSize int
-	// EventIDGenerator produces unique IDs for session events. Each invocation
-	// must return a non-empty string that is unique within the session. If nil,
-	// uuid.NewString() (UUID v4) is used. The context carries request-scoped
-	// values (e.g. trace ID, tenant info) that may inform ID generation.
-	EventIDGenerator func(ctx context.Context) string
+	// EventIDGenerator decides the EventID of every SessionEvent[M] produced
+	// by the runner / wrappers. The generator sees the fully-populated draft
+	// before assignment and may map it to a business-side ID. If nil,
+	// DefaultSessionEventIDGenerator[M] (UUID v4) is used.
+	//
+	// The generator is the sole authority for runner-generated event IDs:
+	// drafts always have an empty EventID at the assignment boundary, and
+	// the generator is always invoked. Returning an empty string fails the
+	// turn closed (ErrSessionEventIDGeneratorEmpty).
+	EventIDGenerator SessionEventIDGenerator[M]
 	// OpenSessionTimeout bounds how long Runner may wait to acquire any session
 	// handle before failing the current Run/Resume/Rollback attempt.
 	//
@@ -693,9 +735,13 @@ func normalizeSerializer(serializer schema.Serializer) schema.Serializer {
 	return serializer
 }
 
-// makeInputSessionEvent wraps an input message as a SessionEvent.
-func makeInputSessionEvent[M MessageType](ctx context.Context, msg M, genID func(context.Context) string) *SessionEvent[M] {
-	return &SessionEvent[M]{EventID: genID(ctx), Timestamp: newEventTimestamp(), Kind: SessionEventMessage, Message: msg}
+// makeInputSessionEvent wraps an input message as a SessionEvent draft.
+//
+// The returned draft has an empty EventID; the caller must assign one via
+// assignSessionEventIDFromContext (or assignSessionEventID) before sending or
+// persisting the event.
+func makeInputSessionEvent[M MessageType](msg M) *SessionEvent[M] {
+	return &SessionEvent[M]{Timestamp: newEventTimestamp(), Kind: SessionEventMessage, Message: msg}
 }
 
 // toSessionEvent converts an internal TypedAgentEvent into the persistence format.
@@ -741,15 +787,24 @@ func toSessionEventChecked[M MessageType](event *TypedAgentEvent[M]) (*SessionEv
 }
 
 func normalizeAgentSessionEvent[M MessageType](event *TypedAgentEvent[M]) (SessionEvent[M], error) {
-	return normalizeAgentSessionEventWithGenerator(event, uuid.NewString)
+	return normalizeAgentSessionEventWithAssigner(event, func(*SessionEvent[M]) (string, error) {
+		return uuid.NewString(), nil
+	})
 }
 
-func normalizeAgentSessionEventWithGenerator[M MessageType](event *TypedAgentEvent[M], genID func() string) (SessionEvent[M], error) {
+// normalizeAgentSessionEventWithAssigner unifies the agent event / session
+// event identity, allocating a fresh ID via assign when neither side carries
+// one. The assigner is invoked with the (still-empty-ID) draft session event
+// so callers may route allocation through SessionEventIDGenerator[M].
+func normalizeAgentSessionEventWithAssigner[M MessageType](
+	event *TypedAgentEvent[M],
+	assign func(*SessionEvent[M]) (string, error),
+) (SessionEvent[M], error) {
 	if event == nil || event.SessionEvent == nil {
 		return SessionEvent[M]{}, errors.New("missing session event")
 	}
-	if genID == nil {
-		genID = uuid.NewString
+	if assign == nil {
+		assign = func(*SessionEvent[M]) (string, error) { return uuid.NewString(), nil }
 	}
 	se := *event.SessionEvent
 	if event.EventID != "" && se.EventID != "" && event.EventID != se.EventID {
@@ -761,7 +816,13 @@ func normalizeAgentSessionEventWithGenerator[M MessageType](event *TypedAgentEve
 	case se.EventID != "":
 		event.EventID = se.EventID
 	default:
-		id := genID()
+		id, err := assign(&se)
+		if err != nil {
+			return SessionEvent[M]{}, err
+		}
+		if id == "" {
+			return SessionEvent[M]{}, ErrSessionEventIDGeneratorEmpty
+		}
 		event.EventID = id
 		se.EventID = id
 	}
@@ -956,8 +1017,8 @@ func ValidateEmittedSessionEventKind[M MessageType](event *SessionEvent[M]) erro
 	return NormalizeSessionEventKind(event)
 }
 
-func normalizeSessionConfig(cfg *SessionConfig) SessionConfig {
-	normalized := SessionConfig{
+func normalizeSessionConfig[M MessageType](cfg *SessionConfig[M]) SessionConfig[M] {
+	normalized := SessionConfig[M]{
 		PersistenceMode:          SessionPersistenceModeAsync,
 		EventFlushBatchSize:      defaultSessionEventFlushBatchSize,
 		EventFlushInterval:       defaultSessionEventFlushInterval,
@@ -965,7 +1026,7 @@ func normalizeSessionConfig(cfg *SessionConfig) SessionConfig {
 		MaxFlushRetries:          defaultMaxFlushRetries,
 		FlushRetryInitialBackoff: defaultFlushRetryInitialBackoff,
 		LoadPageSize:             defaultLoadPageSize,
-		EventIDGenerator:         func(_ context.Context) string { return uuid.NewString() },
+		EventIDGenerator:         DefaultSessionEventIDGenerator[M],
 		OpenSessionTimeout:       defaultOpenSessionTimeout,
 	}
 	if cfg == nil {
@@ -1004,38 +1065,88 @@ func normalizeSessionConfig(cfg *SessionConfig) SessionConfig {
 	return normalized
 }
 
-type eventIDGeneratorKey struct{}
-
-// contextWithEventIDGenerator stores the session EventID generator in ctx so
-// that deeply-nested wrappers can allocate session-event IDs without explicit
-// parameter threading.
-func contextWithEventIDGenerator(ctx context.Context, gen func(context.Context) string) context.Context {
-	return context.WithValue(ctx, eventIDGeneratorKey{}, gen)
-}
-
-// genEventIDFromContext returns a new event ID using the generator stored in
-// ctx, falling back to uuid.NewString if none is present.
-func genEventIDFromContext(ctx context.Context) string {
-	if gen, ok := ctx.Value(eventIDGeneratorKey{}).(func(context.Context) string); ok && gen != nil {
-		return gen(ctx)
+// assignSessionEventID assigns the EventID of a draft SessionEvent[M] using
+// gen, falling back to DefaultSessionEventIDGenerator[M] when gen is nil. It
+// is the single authoritative entry point for SessionEvent[M] ID allocation
+// in ADK; runner / wrappers paths must route every draft through this helper
+// (or its context wrapper assignSessionEventIDFromContext) before sending or
+// persisting the event.
+//
+// Callers MUST construct the draft with EventID == "" and populate every
+// other relevant field (SessionID, TurnID, Kind, payload, timestamp) so the
+// generator sees a complete draft. A nil event is a no-op.
+//
+// On generator-side contract violations, the helper returns:
+//   - ErrSessionEventIDGeneratorEmpty when gen returns an empty id;
+//   - the generator's wrapped error otherwise.
+//
+// The runner is expected to fail closed on these errors and not append the
+// event to the store.
+func assignSessionEventID[M MessageType](
+	ctx context.Context,
+	event *SessionEvent[M],
+	gen SessionEventIDGenerator[M],
+) error {
+	if event == nil {
+		return nil
 	}
-	return uuid.NewString()
+	if gen == nil {
+		gen = DefaultSessionEventIDGenerator[M]
+	}
+	id, err := gen(ctx, event)
+	if err != nil {
+		return fmt.Errorf("adk: session event id generator: %w", err)
+	}
+	if id == "" {
+		return ErrSessionEventIDGeneratorEmpty
+	}
+	event.EventID = id
+	return nil
 }
 
-// eventIDGeneratorFromContext extracts the EventID generator function from ctx.
-// Returns nil if none is set (callers should fall back to uuid.NewString).
-func eventIDGeneratorFromContext(ctx context.Context) func(context.Context) string {
-	if gen, ok := ctx.Value(eventIDGeneratorKey{}).(func(context.Context) string); ok {
-		return gen
+type sessionEventIDGeneratorKey[M MessageType] struct{}
+
+// contextWithSessionEventIDGenerator stores the typed SessionEventIDGenerator[M]
+// in ctx so that deeply-nested wrappers (model / tool / middleware) can route
+// SessionEvent[M] draft ID allocation through the runner's configured
+// generator without explicit parameter threading.
+//
+// This is an internal plumbing escape hatch; the only payload allowed in ctx
+// under this key is the generator function itself. Storing business IDs,
+// per-event state, or anything else under this key is forbidden — see the
+// "scoped exception" note in the design plan.
+func contextWithSessionEventIDGenerator[M MessageType](ctx context.Context, gen SessionEventIDGenerator[M]) context.Context {
+	if gen == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, sessionEventIDGeneratorKey[M]{}, gen)
+}
+
+func sessionEventIDGeneratorFromContext[M MessageType](ctx context.Context) SessionEventIDGenerator[M] {
+	if v := ctx.Value(sessionEventIDGeneratorKey[M]{}); v != nil {
+		if gen, ok := v.(SessionEventIDGenerator[M]); ok {
+			return gen
+		}
 	}
 	return nil
+}
+
+// assignSessionEventIDFromContext assigns the EventID of a draft
+// SessionEvent[M] using the SessionEventIDGenerator[M] stored in ctx (falling
+// back to DefaultSessionEventIDGenerator[M] when none is set). Wrappers and
+// runner closures call this helper after populating the rest of the draft.
+func assignSessionEventIDFromContext[M MessageType](ctx context.Context, event *SessionEvent[M]) error {
+	if event == nil {
+		return nil
+	}
+	return assignSessionEventID(ctx, event, sessionEventIDGeneratorFromContext[M](ctx))
 }
 
 type sessionEventPersister[M MessageType] struct {
 	ctx       context.Context
 	handle    sessionHandle[M]
 	sessionID string
-	cfg       SessionConfig
+	cfg       SessionConfig[M]
 
 	ch     chan *SessionEvent[M]
 	done   chan struct{}
@@ -1049,7 +1160,7 @@ func newSessionEventPersister[M MessageType](
 	ctx context.Context,
 	handle sessionHandle[M],
 	sessionID string,
-	cfg SessionConfig,
+	cfg SessionConfig[M],
 ) *sessionEventPersister[M] {
 	p := &sessionEventPersister[M]{
 		ctx:       ctx,
@@ -1390,41 +1501,43 @@ var modelContextSessionEventKinds = []SessionEventKind{
 	SessionEventRollback,
 }
 
-type RollbackSessionOptions struct {
+type RollbackSessionOptions[M MessageType] struct {
 	CheckPointStore     CheckPointStore
 	ExpectedHeadTurnID  string
-	EventIDGenerator    func(ctx context.Context) string
+	EventIDGenerator    SessionEventIDGenerator[M]
 	SessionFencingToken SessionFencingTokenFunc
 }
 
-type RollbackSessionOption func(*RollbackSessionOptions)
+type RollbackSessionOption[M MessageType] func(*RollbackSessionOptions[M])
 
 // WithRollbackSessionCheckPointStore deletes session-derived checkpoints after a successful rollback.
-func WithRollbackSessionCheckPointStore(store CheckPointStore) RollbackSessionOption {
-	return func(opts *RollbackSessionOptions) {
+func WithRollbackSessionCheckPointStore[M MessageType](store CheckPointStore) RollbackSessionOption[M] {
+	return func(opts *RollbackSessionOptions[M]) {
 		opts.CheckPointStore = store
 	}
 }
 
 // WithRollbackSessionExpectedHeadTurnID requires the current active head turn to match turnID before rollback.
-func WithRollbackSessionExpectedHeadTurnID(turnID string) RollbackSessionOption {
-	return func(opts *RollbackSessionOptions) {
+func WithRollbackSessionExpectedHeadTurnID[M MessageType](turnID string) RollbackSessionOption[M] {
+	return func(opts *RollbackSessionOptions[M]) {
 		opts.ExpectedHeadTurnID = turnID
 	}
 }
 
 // WithRollbackEventIDGenerator overrides the EventID generator for the rollback
-// event. If nil or not set, uuid.NewString() is used.
-func WithRollbackEventIDGenerator(gen func(ctx context.Context) string) RollbackSessionOption {
-	return func(opts *RollbackSessionOptions) {
+// event. The generator sees the fully-populated rollback draft (kind, turn IDs,
+// SessionRollbackEvent payload) before assignment. If nil or not set,
+// DefaultSessionEventIDGenerator[M] (UUID v4) is used.
+func WithRollbackEventIDGenerator[M MessageType](gen SessionEventIDGenerator[M]) RollbackSessionOption[M] {
+	return func(opts *RollbackSessionOptions[M]) {
 		opts.EventIDGenerator = gen
 	}
 }
 
 // WithRollbackSessionFencingToken supplies the external owner proof used when
 // rolling back through a fenced session service.
-func WithRollbackSessionFencingToken(fn SessionFencingTokenFunc) RollbackSessionOption {
-	return func(opts *RollbackSessionOptions) {
+func WithRollbackSessionFencingToken[M MessageType](fn SessionFencingTokenFunc) RollbackSessionOption[M] {
+	return func(opts *RollbackSessionOptions[M]) {
 		opts.SessionFencingToken = fn
 	}
 }
@@ -1435,7 +1548,7 @@ func RollbackSession[M MessageType](
 	service SessionService[M],
 	sessionID string,
 	targetTurnID string,
-	opts ...RollbackSessionOption,
+	opts ...RollbackSessionOption[M],
 ) error {
 	if service == nil {
 		return errors.New("adk: rollback session service is nil")
@@ -1446,7 +1559,7 @@ func RollbackSession[M MessageType](
 	if targetTurnID == "" {
 		return ErrRollbackTargetNotFound
 	}
-	var cfg RollbackSessionOptions
+	var cfg RollbackSessionOptions[M]
 	for _, opt := range opts {
 		if opt != nil {
 			opt(&cfg)
@@ -1485,13 +1598,7 @@ func RollbackSession[M MessageType](
 		return ErrSessionHeadChanged
 	}
 
-	genID := func(_ context.Context) string { return uuid.NewString() }
-	if cfg.EventIDGenerator != nil {
-		genID = cfg.EventIDGenerator
-	}
-
 	rb := &SessionEvent[M]{
-		EventID:   genID(ctx),
 		Timestamp: newEventTimestamp(),
 		Kind:      SessionEventRollback,
 		Rollback: &SessionRollbackEvent{
@@ -1500,6 +1607,9 @@ func RollbackSession[M MessageType](
 			PreviousHeadTurnEndID: head.EventID,
 			PreviousHeadTurnID:    head.TurnID,
 		},
+	}
+	if err := assignSessionEventID(ctx, rb, cfg.EventIDGenerator); err != nil {
+		return err
 	}
 	if _, err := openResult.handle.appendEvents(ctx, &AppendSessionEventsRequest[M]{
 		SessionID: sessionID,

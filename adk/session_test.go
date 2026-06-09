@@ -122,10 +122,10 @@ func withTestEventID[M MessageType](se *SessionEvent[M]) *SessionEvent[M] {
 	return se
 }
 
-func testSequentialEventIDGenerator(prefix string) func(context.Context) string {
+func testSequentialEventIDGenerator(prefix string) SessionEventIDGenerator[*schema.Message] {
 	var n int64
-	return func(_ context.Context) string {
-		return fmt.Sprintf("%s%d", prefix, atomic.AddInt64(&n, 1))
+	return func(_ context.Context, _ *SessionEvent[*schema.Message]) (string, error) {
+		return fmt.Sprintf("%s%d", prefix, atomic.AddInt64(&n, 1)), nil
 	}
 }
 
@@ -684,7 +684,7 @@ func TestRollbackSession_FencedServiceUsesTokenFunction(t *testing.T) {
 
 	var tokenCalls int32
 	err := RollbackSession(ctx, NewFencedSessionService[*schema.Message](store, FencedSessionServiceOptions{}), "sid", "turn-1",
-		WithRollbackSessionFencingToken(func(context.Context) (string, error) {
+		WithRollbackSessionFencingToken[*schema.Message](func(context.Context) (string, error) {
 			atomic.AddInt32(&tokenCalls, 1)
 			return "token-1", nil
 		}),
@@ -740,7 +740,7 @@ func TestRunnerSession_FencingTokenExpiresAtNextAppendWithoutCheckpoint(t *testi
 			}
 			return "", ErrSessionFencingTokenExpired
 		},
-		SessionConfig: &SessionConfig{PersistenceMode: SessionPersistenceModeSync},
+		SessionConfig: &SessionConfig[*schema.Message]{PersistenceMode: SessionPersistenceModeSync},
 	})
 
 	iter := runner.Query(ctx, "go")
@@ -791,7 +791,7 @@ func TestRunnerSessionModePrependsCommittedMessagesOnce(t *testing.T) {
 		Agent:          firstAgent,
 		SessionID:      sessionID,
 		SessionService: store,
-		SessionConfig:  &SessionConfig{EventFlushBatchSize: 1},
+		SessionConfig:  &SessionConfig[*schema.Message]{EventFlushBatchSize: 1},
 	})
 	drainSessionEvents(t, runner.Query(ctx, "first"))
 
@@ -806,7 +806,7 @@ func TestRunnerSessionModePrependsCommittedMessagesOnce(t *testing.T) {
 		Agent:          secondAgent,
 		SessionID:      sessionID,
 		SessionService: store,
-		SessionConfig:  &SessionConfig{EventFlushBatchSize: 1},
+		SessionConfig:  &SessionConfig[*schema.Message]{EventFlushBatchSize: 1},
 	})
 	drainSessionEvents(t, runner.Query(ctx, "second", WithSessionValues(map[string]any{"override": "value"})))
 
@@ -829,7 +829,7 @@ func TestAttack_SessionEventIDGeneratorCoversRunnerEvents(t *testing.T) {
 		Agent:          agent,
 		SessionID:      "runner-event-id-session",
 		SessionService: store,
-		SessionConfig: &SessionConfig{
+		SessionConfig: &SessionConfig[*schema.Message]{
 			EventFlushBatchSize: 1,
 			EventIDGenerator:    testSequentialEventIDGenerator(prefix),
 		},
@@ -843,6 +843,209 @@ func TestAttack_SessionEventIDGeneratorCoversRunnerEvents(t *testing.T) {
 		require.NotEmpty(t, event.EventID)
 		assert.Truef(t, strings.HasPrefix(event.EventID, prefix), "event %s used unexpected ID %q", event.Kind, event.EventID)
 	}
+}
+
+func TestAttack_RunnerHandlesSessionEventWithoutSessionService(t *testing.T) {
+	ctx := context.Background()
+	runner := NewRunner(ctx, RunnerConfig{
+		Agent: &runnerSessionAgent{name: "runner-session-event-no-service-agent"},
+	})
+
+	iter := runner.Query(ctx, "no managed session")
+	var outputs []string
+	var errs []error
+	for {
+		event, ok := iter.Next()
+		if !ok {
+			break
+		}
+		if event.Err != nil {
+			errs = append(errs, event.Err)
+		}
+		if event.Output != nil && event.Output.MessageOutput != nil && event.Output.MessageOutput.Message != nil {
+			outputs = append(outputs, event.Output.MessageOutput.Message.Content)
+		}
+	}
+
+	require.Empty(t, errs, "session envelopes emitted outside managed-session mode must not panic or surface errors")
+	assert.Equal(t, []string{"ok"}, outputs)
+}
+
+// TestSessionEventIDGenerator_UserMessageBusinessID 验证：generator 可以在
+// 用户输入 message 草稿上识别业务身份并返回业务 ID（§8 UserMessage 验收）。
+func TestSessionEventIDGenerator_UserMessageBusinessID(t *testing.T) {
+	ctx := context.Background()
+	store := newSessionHelperStore()
+	const businessID = "user-order-id"
+	gen := func(_ context.Context, e *SessionEvent[*schema.Message]) (string, error) {
+		if e != nil && e.Kind == SessionEventMessage && e.Message != nil && e.Message.Role == schema.User {
+			return businessID, nil
+		}
+		return DefaultSessionEventIDGenerator[*schema.Message](ctx, e)
+	}
+	agent := &runnerSessionAgent{name: "user-msg-business-id-agent"}
+	runner := NewRunner(ctx, RunnerConfig{
+		Agent:          agent,
+		SessionID:      "user-msg-business-id-session",
+		SessionService: store,
+		SessionConfig: &SessionConfig[*schema.Message]{
+			EventFlushBatchSize: 1,
+			EventIDGenerator:    gen,
+		},
+	})
+
+	drainSessionEvents(t, runner.Query(ctx, "hello"))
+
+	userMsgs := filterStoredSessionEvents(t, store.events, func(se *SessionEvent[*schema.Message]) bool {
+		return se.Kind == SessionEventMessage && se.Message != nil && se.Message.Role == schema.User
+	})
+	require.Len(t, userMsgs, 1)
+	assert.Equal(t, businessID, userMsgs[0].EventID, "user input message must carry the generator-supplied business ID")
+}
+
+// TestSessionEventIDGenerator_ControlEventsDefaultFallthrough 验证：generator
+// 仅匹配业务事件时，控制事件（status_running/status_idle 等）应通过 default
+// fallthrough 拿到 UUID，而非业务 ID。
+func TestSessionEventIDGenerator_ControlEventsDefaultFallthrough(t *testing.T) {
+	ctx := context.Background()
+	store := newSessionHelperStore()
+	const businessID = "selective-user-id"
+	gen := func(_ context.Context, e *SessionEvent[*schema.Message]) (string, error) {
+		if e != nil && e.Kind == SessionEventMessage && e.Message != nil && e.Message.Role == schema.User {
+			return businessID, nil
+		}
+		return DefaultSessionEventIDGenerator[*schema.Message](ctx, e)
+	}
+	agent := &runnerSessionAgent{name: "control-fallthrough-agent"}
+	runner := NewRunner(ctx, RunnerConfig{
+		Agent:          agent,
+		SessionID:      "control-fallthrough-session",
+		SessionService: store,
+		SessionConfig: &SessionConfig[*schema.Message]{
+			EventFlushBatchSize: 1,
+			EventIDGenerator:    gen,
+		},
+	})
+
+	drainSessionEvents(t, runner.Query(ctx, "hi"))
+
+	controlKinds := map[SessionEventKind]struct{}{
+		SessionEventSessionStatusRunning: {},
+		SessionEventSessionStatusIdle:    {},
+	}
+	controlEvents := filterStoredSessionEvents(t, store.events, func(se *SessionEvent[*schema.Message]) bool {
+		_, ok := controlKinds[se.Kind]
+		return ok
+	})
+	require.NotEmpty(t, controlEvents, "expected control events (status_running / status_idle) in store")
+	for _, se := range controlEvents {
+		require.NotEmpty(t, se.EventID)
+		assert.NotEqual(t, businessID, se.EventID,
+			"control event %s must default to UUID, not adopt the user-input business ID", se.Kind)
+		// UUID v4 string length is 36; business ID is shorter and easily told apart.
+		assert.Lenf(t, se.EventID, 36, "control event %s should be a UUID (got %q)", se.Kind, se.EventID)
+	}
+}
+
+// TestSessionEventIDGenerator_FailClosedOnEmpty 验证：generator 返回空 ID 时
+// runner fail closed —— 抛出 ErrSessionEventIDGeneratorEmpty 且对应草稿 event
+// 不会落盘。
+func TestSessionEventIDGenerator_FailClosedOnEmpty(t *testing.T) {
+	ctx := context.Background()
+	store := newSessionHelperStore()
+	gen := func(_ context.Context, e *SessionEvent[*schema.Message]) (string, error) {
+		if e != nil && e.Kind == SessionEventMessage && e.Message != nil && e.Message.Role == schema.User {
+			return "", nil
+		}
+		return DefaultSessionEventIDGenerator[*schema.Message](ctx, e)
+	}
+	agent := &runnerSessionAgent{name: "fail-closed-empty-agent"}
+	runner := NewRunner(ctx, RunnerConfig{
+		Agent:          agent,
+		SessionID:      "fail-closed-empty-session",
+		SessionService: store,
+		SessionConfig: &SessionConfig[*schema.Message]{
+			EventFlushBatchSize: 1,
+			EventIDGenerator:    gen,
+		},
+	})
+
+	iter := runner.Query(ctx, "trigger")
+	var errs []error
+	for {
+		ev, ok := iter.Next()
+		if !ok {
+			break
+		}
+		if ev.Err != nil {
+			errs = append(errs, ev.Err)
+		}
+	}
+	require.NotEmpty(t, errs, "expected at least one error event from fail-closed turn")
+	var sawSentinel bool
+	for _, err := range errs {
+		if errors.Is(err, ErrSessionEventIDGeneratorEmpty) {
+			sawSentinel = true
+			break
+		}
+	}
+	require.True(t, sawSentinel, "expected ErrSessionEventIDGeneratorEmpty in error stream, got %v", errs)
+
+	// Fail-closed: the offending user-input message must NOT be persisted.
+	userMsgs := filterStoredSessionEvents(t, store.events, func(se *SessionEvent[*schema.Message]) bool {
+		return se.Kind == SessionEventMessage && se.Message != nil && se.Message.Role == schema.User
+	})
+	assert.Empty(t, userMsgs, "user input message must not be persisted when its ID allocation failed")
+}
+
+// TestSessionEventIDGenerator_FailClosedOnError 验证：generator 返回 error 时
+// runner 同样 fail closed，错误被包装并向上抛出。
+func TestSessionEventIDGenerator_FailClosedOnError(t *testing.T) {
+	ctx := context.Background()
+	store := newSessionHelperStore()
+	genErr := errors.New("custom generator failure")
+	gen := func(_ context.Context, e *SessionEvent[*schema.Message]) (string, error) {
+		if e != nil && e.Kind == SessionEventMessage && e.Message != nil && e.Message.Role == schema.User {
+			return "", genErr
+		}
+		return DefaultSessionEventIDGenerator[*schema.Message](ctx, e)
+	}
+	agent := &runnerSessionAgent{name: "fail-closed-err-agent"}
+	runner := NewRunner(ctx, RunnerConfig{
+		Agent:          agent,
+		SessionID:      "fail-closed-err-session",
+		SessionService: store,
+		SessionConfig: &SessionConfig[*schema.Message]{
+			EventFlushBatchSize: 1,
+			EventIDGenerator:    gen,
+		},
+	})
+
+	iter := runner.Query(ctx, "trigger")
+	var errs []error
+	for {
+		ev, ok := iter.Next()
+		if !ok {
+			break
+		}
+		if ev.Err != nil {
+			errs = append(errs, ev.Err)
+		}
+	}
+	require.NotEmpty(t, errs, "expected error event when generator returns error")
+	var sawWrapped bool
+	for _, err := range errs {
+		if errors.Is(err, genErr) {
+			sawWrapped = true
+			break
+		}
+	}
+	require.True(t, sawWrapped, "expected generator error to propagate via errors.Is, got %v", errs)
+
+	userMsgs := filterStoredSessionEvents(t, store.events, func(se *SessionEvent[*schema.Message]) bool {
+		return se.Kind == SessionEventMessage && se.Message != nil && se.Message.Role == schema.User
+	})
+	assert.Empty(t, userMsgs, "user input message must not be persisted on generator error")
 }
 
 func TestRunnerSessionModeRejectsPendingCheckpoint(t *testing.T) {
@@ -887,7 +1090,7 @@ func TestRunnerSessionModeDeleteCheckpointFailureIsReported(t *testing.T) {
 		ctx,
 		store,
 		"delete-fail-session",
-		normalizeSessionConfig(&SessionConfig{EventFlushBatchSize: 1}),
+		normalizeSessionConfig(&SessionConfig[*schema.Message]{EventFlushBatchSize: 1}),
 	)
 	checkPointID := "delete-fail-checkpoint"
 	store.deleteErr = errors.New("delete failed")
@@ -957,7 +1160,7 @@ func TestRunnerSessionStreamingDoesNotBlockLiveEvent(t *testing.T) {
 		EnableStreaming: true,
 		SessionID:       "streaming-session",
 		SessionService:  store,
-		SessionConfig:   &SessionConfig{EventFlushBatchSize: 1},
+		SessionConfig:   &SessionConfig[*schema.Message]{EventFlushBatchSize: 1},
 	})
 
 	iter := runner.Query(ctx, "start")
@@ -1110,7 +1313,7 @@ func TestRunnerSessionModeFlushFailurePreventsCommit(t *testing.T) {
 		Agent:          agent,
 		SessionID:      "flush-fail-session",
 		SessionService: store,
-		SessionConfig:  &SessionConfig{EventFlushBatchSize: 1},
+		SessionConfig:  &SessionConfig[*schema.Message]{EventFlushBatchSize: 1},
 	})
 
 	iter := runner.Query(ctx, "trigger")
@@ -1142,7 +1345,7 @@ func TestRunnerSessionSyncModeBlocksDeliveryUntilAppendCompletes(t *testing.T) {
 		Agent:          agent,
 		SessionID:      "sync-block-session",
 		SessionService: store,
-		SessionConfig:  &SessionConfig{PersistenceMode: SessionPersistenceModeSync},
+		SessionConfig:  &SessionConfig[*schema.Message]{PersistenceMode: SessionPersistenceModeSync},
 	})
 
 	iterCh := make(chan *AsyncIterator[*AgentEvent], 1)
@@ -1211,7 +1414,7 @@ func TestRunnerSessionSyncModeAppendFailureSuppressesOutput(t *testing.T) {
 		Agent:          agent,
 		SessionID:      "sync-fail-session",
 		SessionService: store,
-		SessionConfig:  &SessionConfig{PersistenceMode: SessionPersistenceModeSync, MaxFlushRetries: -1},
+		SessionConfig:  &SessionConfig[*schema.Message]{PersistenceMode: SessionPersistenceModeSync, MaxFlushRetries: -1},
 	})
 
 	iter := runner.Query(ctx, "trigger")
@@ -1243,7 +1446,7 @@ func TestSessionPersister_EnqueueAfterClose(t *testing.T) {
 
 	persister := newSessionEventPersister[*schema.Message](
 		ctx, store, "enqueue-after-close",
-		normalizeSessionConfig(&SessionConfig{
+		normalizeSessionConfig(&SessionConfig[*schema.Message]{
 			EventFlushBatchSize: 1,
 			EventFlushInterval:  time.Millisecond,
 			EventBufferSize:     8,
@@ -1263,7 +1466,7 @@ func TestSessionPersister_EmptyPayloadSkipped(t *testing.T) {
 
 	persister := newSessionEventPersister[*schema.Message](
 		ctx, store, "empty-payload",
-		normalizeSessionConfig(&SessionConfig{
+		normalizeSessionConfig(&SessionConfig[*schema.Message]{
 			EventFlushBatchSize: 1,
 			EventFlushInterval:  time.Millisecond,
 			EventBufferSize:     8,
@@ -1273,7 +1476,8 @@ func TestSessionPersister_EmptyPayloadSkipped(t *testing.T) {
 	assert.NoError(t, persister.enqueue(nil))
 	assert.NoError(t, persister.enqueue(&SessionEvent[*schema.Message]{}))
 
-	se := makeInputSessionEvent(ctx, schema.UserMessage("real"), func(_ context.Context) string { return uuid.NewString() })
+	se := makeInputSessionEvent(schema.UserMessage("real"))
+	se.EventID = uuid.NewString()
 	require.NoError(t, persister.enqueue(se))
 
 	require.NoError(t, persister.closeAndWait())
@@ -1283,7 +1487,7 @@ func TestSessionPersister_EmptyPayloadSkipped(t *testing.T) {
 func TestSessionPersister_SyncModeAppendDuringEnqueue(t *testing.T) {
 	ctx := context.Background()
 	store := newSessionHelperStore()
-	cfg := normalizeSessionConfig(&SessionConfig{PersistenceMode: SessionPersistenceModeSync})
+	cfg := normalizeSessionConfig(&SessionConfig[*schema.Message]{PersistenceMode: SessionPersistenceModeSync})
 	persister := newSessionEventPersister[*schema.Message](ctx, store, "sync-enqueue", cfg)
 
 	require.NoError(t, persister.enqueue(validTestPayload()))
@@ -1305,7 +1509,7 @@ func TestSessionPersister_SyncModeRetryAndLatch(t *testing.T) {
 			failsLeft:          2,
 			appendErrVal:       errors.New("transient"),
 		}
-		cfg := normalizeSessionConfig(&SessionConfig{
+		cfg := normalizeSessionConfig(&SessionConfig[*schema.Message]{
 			PersistenceMode:          SessionPersistenceModeSync,
 			MaxFlushRetries:          3,
 			FlushRetryInitialBackoff: time.Millisecond,
@@ -1324,7 +1528,7 @@ func TestSessionPersister_SyncModeRetryAndLatch(t *testing.T) {
 			failsLeft:          100,
 			appendErrVal:       errors.New("permanent"),
 		}
-		cfg := normalizeSessionConfig(&SessionConfig{
+		cfg := normalizeSessionConfig(&SessionConfig[*schema.Message]{
 			PersistenceMode:          SessionPersistenceModeSync,
 			MaxFlushRetries:          1,
 			FlushRetryInitialBackoff: time.Millisecond,
@@ -1360,27 +1564,27 @@ func TestTurnEndState_GobRoundtripNilFields(t *testing.T) {
 }
 
 func TestNormalizeSessionConfig_Variations(t *testing.T) {
-	cfg := normalizeSessionConfig(nil)
+	cfg := normalizeSessionConfig[*schema.Message](nil)
 	assert.Equal(t, SessionPersistenceModeAsync, cfg.PersistenceMode)
 	assert.Equal(t, defaultSessionEventFlushBatchSize, cfg.EventFlushBatchSize)
 	assert.Equal(t, defaultSessionEventFlushInterval, cfg.EventFlushInterval)
 	assert.Equal(t, defaultSessionEventBufferSize, cfg.EventBufferSize)
 
-	cfg = normalizeSessionConfig(&SessionConfig{})
+	cfg = normalizeSessionConfig(&SessionConfig[*schema.Message]{})
 	assert.Equal(t, SessionPersistenceModeAsync, cfg.PersistenceMode)
 	assert.Equal(t, defaultSessionEventFlushBatchSize, cfg.EventFlushBatchSize)
 
-	cfg = normalizeSessionConfig(&SessionConfig{PersistenceMode: SessionPersistenceModeSync})
+	cfg = normalizeSessionConfig(&SessionConfig[*schema.Message]{PersistenceMode: SessionPersistenceModeSync})
 	assert.Equal(t, SessionPersistenceModeSync, cfg.PersistenceMode)
 
-	cfg = normalizeSessionConfig(&SessionConfig{PersistenceMode: SessionPersistenceMode("unknown")})
+	cfg = normalizeSessionConfig(&SessionConfig[*schema.Message]{PersistenceMode: SessionPersistenceMode("unknown")})
 	assert.Equal(t, SessionPersistenceModeAsync, cfg.PersistenceMode)
 
-	cfg = normalizeSessionConfig(&SessionConfig{EventFlushBatchSize: 32})
+	cfg = normalizeSessionConfig(&SessionConfig[*schema.Message]{EventFlushBatchSize: 32})
 	assert.Equal(t, 32, cfg.EventFlushBatchSize)
 	assert.Equal(t, defaultSessionEventFlushInterval, cfg.EventFlushInterval)
 
-	cfg = normalizeSessionConfig(&SessionConfig{
+	cfg = normalizeSessionConfig(&SessionConfig[*schema.Message]{
 		EventFlushBatchSize: 8,
 		EventFlushInterval:  200 * time.Millisecond,
 		EventBufferSize:     128,
@@ -1389,7 +1593,7 @@ func TestNormalizeSessionConfig_Variations(t *testing.T) {
 	assert.Equal(t, 200*time.Millisecond, cfg.EventFlushInterval)
 	assert.Equal(t, 128, cfg.EventBufferSize)
 
-	cfg = normalizeSessionConfig(&SessionConfig{
+	cfg = normalizeSessionConfig(&SessionConfig[*schema.Message]{
 		EventFlushBatchSize: -1,
 		EventFlushInterval:  -time.Second,
 		EventBufferSize:     -5,
@@ -1942,8 +2146,8 @@ func TestRollbackSessionReconstructionHidesDeadBranchAndKeepsNewSuffix(t *testin
 		store,
 		sid,
 		"turn-1",
-		WithRollbackSessionCheckPointStore(store),
-		WithRollbackSessionExpectedHeadTurnID("turn-2"),
+		WithRollbackSessionCheckPointStore[*schema.Message](store),
+		WithRollbackSessionExpectedHeadTurnID[*schema.Message]("turn-2"),
 	))
 	appendCommittedTestTurn(t, ctx, store, sid, "turn-3", "Q3", "A3")
 
@@ -2011,7 +2215,7 @@ func TestRunnerQueryAfterRollbackUsesActiveProjection(t *testing.T) {
 		Agent:          firstAgent,
 		SessionID:      sid,
 		SessionService: store,
-		SessionConfig:  &SessionConfig{EventFlushBatchSize: 1},
+		SessionConfig:  &SessionConfig[*schema.Message]{EventFlushBatchSize: 1},
 	})
 	drainSessionEvents(t, firstRunner.Query(ctx, "first"))
 	firstTurnEndEvents := filterStoredSessionEvents(t, store.events, func(se *SessionEvent[*schema.Message]) bool {
@@ -2030,7 +2234,7 @@ func TestRunnerQueryAfterRollbackUsesActiveProjection(t *testing.T) {
 		Agent:          secondAgent,
 		SessionID:      sid,
 		SessionService: store,
-		SessionConfig:  &SessionConfig{EventFlushBatchSize: 1},
+		SessionConfig:  &SessionConfig[*schema.Message]{EventFlushBatchSize: 1},
 	})
 	drainSessionEvents(t, secondRunner.Query(ctx, "second"))
 
@@ -2046,7 +2250,7 @@ func TestRunnerQueryAfterRollbackUsesActiveProjection(t *testing.T) {
 		Agent:          thirdAgent,
 		SessionID:      sid,
 		SessionService: store,
-		SessionConfig:  &SessionConfig{EventFlushBatchSize: 1},
+		SessionConfig:  &SessionConfig[*schema.Message]{EventFlushBatchSize: 1},
 	})
 	drainSessionEvents(t, thirdRunner.Query(ctx, "third"))
 
@@ -2081,7 +2285,7 @@ func TestRollbackSessionTargetResolutionErrors(t *testing.T) {
 		store,
 		sid,
 		"turn-1",
-		WithRollbackSessionExpectedHeadTurnID("stale-head"),
+		WithRollbackSessionExpectedHeadTurnID[*schema.Message]("stale-head"),
 	)
 	require.ErrorIs(t, err, ErrSessionHeadChanged)
 	rollbackEvents := filterStoredSessionEvents(t, store.events, func(se *SessionEvent[*schema.Message]) bool {
@@ -2094,14 +2298,14 @@ func TestRollbackSessionTargetResolutionErrors(t *testing.T) {
 		store,
 		sid,
 		"turn-1",
-		WithRollbackSessionExpectedHeadTurnID("turn-2"),
+		WithRollbackSessionExpectedHeadTurnID[*schema.Message]("turn-2"),
 	))
 	err = RollbackSession[*schema.Message](
 		ctx,
 		store,
 		sid,
 		"turn-2",
-		WithRollbackSessionExpectedHeadTurnID("turn-2"),
+		WithRollbackSessionExpectedHeadTurnID[*schema.Message]("turn-2"),
 	)
 	require.ErrorIs(t, err, ErrRollbackTargetInactive)
 }
@@ -2184,7 +2388,7 @@ func TestRunnerSessionReconstructsFromEventLog(t *testing.T) {
 		Agent:          firstAgent,
 		SessionID:      sid,
 		SessionService: store,
-		SessionConfig:  &SessionConfig{EventFlushBatchSize: 1},
+		SessionConfig:  &SessionConfig[*schema.Message]{EventFlushBatchSize: 1},
 	})
 	drainSessionEvents(t, runner.Query(ctx, "first"))
 
@@ -2205,7 +2409,7 @@ func TestRunnerSessionReconstructsFromEventLog(t *testing.T) {
 		Agent:          capturedAgent,
 		SessionID:      sid,
 		SessionService: store,
-		SessionConfig:  &SessionConfig{EventFlushBatchSize: 1},
+		SessionConfig:  &SessionConfig[*schema.Message]{EventFlushBatchSize: 1},
 	})
 	drainSessionEvents(t, runner.Query(ctx, "second"))
 
@@ -2236,7 +2440,7 @@ func TestRunnerSessionInputEventsPersisted(t *testing.T) {
 		Agent:          agent,
 		SessionID:      sid,
 		SessionService: store,
-		SessionConfig:  &SessionConfig{EventFlushBatchSize: 1},
+		SessionConfig:  &SessionConfig[*schema.Message]{EventFlushBatchSize: 1},
 	})
 	drainSessionEvents(t, runner.Query(ctx, "user-question"))
 
@@ -2402,7 +2606,7 @@ func TestSessionPersister_EnqueueAfterAppendError(t *testing.T) {
 	store := newSessionHelperStore()
 	store.appendErr = errors.New("append failed")
 
-	cfg := normalizeSessionConfig(&SessionConfig{
+	cfg := normalizeSessionConfig(&SessionConfig[*schema.Message]{
 		EventFlushBatchSize: 1,
 		EventFlushInterval:  10 * time.Millisecond,
 		EventBufferSize:     8,
@@ -2480,7 +2684,7 @@ func TestSessionPersister_FlushRetryTransientRecovery(t *testing.T) {
 		appendErrVal:       errors.New("transient"),
 	}
 
-	cfg := normalizeSessionConfig(&SessionConfig{
+	cfg := normalizeSessionConfig(&SessionConfig[*schema.Message]{
 		EventFlushBatchSize:      1,
 		EventFlushInterval:       10 * time.Millisecond,
 		EventBufferSize:          8,
@@ -2512,7 +2716,7 @@ func TestSessionPersister_FlushRetryPermanentFailure(t *testing.T) {
 		appendErrVal:       errors.New("permanent"),
 	}
 
-	cfg := normalizeSessionConfig(&SessionConfig{
+	cfg := normalizeSessionConfig(&SessionConfig[*schema.Message]{
 		EventFlushBatchSize:      1,
 		EventFlushInterval:       10 * time.Millisecond,
 		EventBufferSize:          8,
@@ -2540,7 +2744,7 @@ func TestSessionPersister_FlushRetryContextCancellation(t *testing.T) {
 		appendErrVal:       errors.New("failing"),
 	}
 
-	cfg := normalizeSessionConfig(&SessionConfig{
+	cfg := normalizeSessionConfig(&SessionConfig[*schema.Message]{
 		EventFlushBatchSize:      1,
 		EventFlushInterval:       10 * time.Millisecond,
 		EventBufferSize:          8,
@@ -2735,7 +2939,7 @@ func TestAttack_ResumePreservesTurnIDFromInterruptedRun(t *testing.T) {
 		SessionID:       sessionID,
 		SessionService:  store,
 		CheckPointStore: store,
-		SessionConfig:   &SessionConfig{EventFlushBatchSize: 1},
+		SessionConfig:   &SessionConfig[*schema.Message]{EventFlushBatchSize: 1},
 	})
 	drainSessionEvents(t, firstRunner.Query(ctx, "first question"))
 
@@ -2746,7 +2950,7 @@ func TestAttack_ResumePreservesTurnIDFromInterruptedRun(t *testing.T) {
 		SessionID:       sessionID,
 		SessionService:  store,
 		CheckPointStore: store,
-		SessionConfig:   &SessionConfig{EventFlushBatchSize: 1},
+		SessionConfig:   &SessionConfig[*schema.Message]{EventFlushBatchSize: 1},
 	})
 
 	iter := runner.Query(ctx, "trigger interrupt")
@@ -2837,7 +3041,7 @@ func TestAttack_FreshRunIgnoresInFlightTurnID(t *testing.T) {
 		SessionID:       sessionID,
 		SessionService:  store,
 		CheckPointStore: store,
-		SessionConfig:   &SessionConfig{EventFlushBatchSize: 1},
+		SessionConfig:   &SessionConfig[*schema.Message]{EventFlushBatchSize: 1},
 	})
 	drainSessionEvents(t, baselineRunner.Query(ctx, "baseline"))
 
@@ -2848,7 +3052,7 @@ func TestAttack_FreshRunIgnoresInFlightTurnID(t *testing.T) {
 		SessionID:       sessionID,
 		SessionService:  store,
 		CheckPointStore: store,
-		SessionConfig:   &SessionConfig{EventFlushBatchSize: 1},
+		SessionConfig:   &SessionConfig[*schema.Message]{EventFlushBatchSize: 1},
 	})
 
 	iter := runner.Query(ctx, "trigger interrupt")
@@ -2892,7 +3096,7 @@ func TestAttack_FreshRunIgnoresInFlightTurnID(t *testing.T) {
 		SessionID:       sessionID,
 		SessionService:  store,
 		CheckPointStore: store,
-		SessionConfig:   &SessionConfig{EventFlushBatchSize: 1},
+		SessionConfig:   &SessionConfig[*schema.Message]{EventFlushBatchSize: 1},
 	})
 	drainSessionEvents(t, freshRunner.Query(ctx, "new question"))
 
