@@ -353,7 +353,7 @@ func TestRunner_PersistsAgentInterruptSessionEvent(t *testing.T) {
 		CheckPointStore: store,
 		SessionID:       "agent-interrupt-session",
 		SessionService:  store,
-		SessionConfig:   &SessionConfig{EventFlushBatchSize: 1},
+		SessionConfig:   &SessionConfig[*schema.Message]{EventFlushBatchSize: 1},
 	})
 
 	var liveInterruptContexts []*InterruptCtx
@@ -486,7 +486,7 @@ func TestWithTimelineEvents_LiveExposure(t *testing.T) {
 
 	t.Run("stripped by default", func(t *testing.T) {
 		store := newSessionHelperStore()
-		runner := NewRunner(ctx, RunnerConfig{Agent: agent, SessionID: "timeline-default", SessionService: store, SessionConfig: &SessionConfig{EventFlushBatchSize: 1}})
+		runner := NewRunner(ctx, RunnerConfig{Agent: agent, SessionID: "timeline-default", SessionService: store, SessionConfig: &SessionConfig[*schema.Message]{EventFlushBatchSize: 1}})
 		iter := runner.Query(ctx, "hello")
 		for {
 			event, ok := iter.Next()
@@ -505,7 +505,7 @@ func TestWithTimelineEvents_LiveExposure(t *testing.T) {
 
 	t.Run("exposed when requested", func(t *testing.T) {
 		store := newSessionHelperStore()
-		runner := NewRunner(ctx, RunnerConfig{Agent: agent, SessionID: "timeline-visible", SessionService: store, SessionConfig: &SessionConfig{EventFlushBatchSize: 1}})
+		runner := NewRunner(ctx, RunnerConfig{Agent: agent, SessionID: "timeline-visible", SessionService: store, SessionConfig: &SessionConfig[*schema.Message]{EventFlushBatchSize: 1}})
 		var kinds []SessionEventKind
 		var liveUserInput bool
 		iter := runner.Query(ctx, "hello", WithTimelineEvents())
@@ -580,7 +580,7 @@ func TestRunner_ExtensionEventSentWithTypedSendEventIsLiveAndPersisted(t *testin
 			Agent:          agent,
 			SessionID:      "extension-event-session-visible",
 			SessionService: store,
-			SessionConfig:  &SessionConfig{EventFlushBatchSize: 1},
+			SessionConfig:  &SessionConfig[*schema.Message]{EventFlushBatchSize: 1},
 		})
 
 		var liveExtension *SessionEvent[*schema.Message]
@@ -631,7 +631,7 @@ func TestRunner_ExtensionEventSentWithTypedSendEventIsLiveAndPersisted(t *testin
 			Agent:          agent,
 			SessionID:      "extension-event-session-stripped",
 			SessionService: store,
-			SessionConfig:  &SessionConfig{EventFlushBatchSize: 1},
+			SessionConfig:  &SessionConfig[*schema.Message]{EventFlushBatchSize: 1},
 		})
 
 		iter := runner.Query(ctx, "hello")
@@ -1214,7 +1214,7 @@ func TestRunnerTimelineRetryExhaustedStopReason(t *testing.T) {
 		Agent:          &timelineErrorAgent{name: "retry-exhausted", err: &RetryExhaustedError{LastErr: errors.New("still failing"), TotalRetries: 1}},
 		SessionID:      "timeline-retry-exhausted",
 		SessionService: store,
-		SessionConfig:  &SessionConfig{EventFlushBatchSize: 1},
+		SessionConfig:  &SessionConfig[*schema.Message]{EventFlushBatchSize: 1},
 	})
 
 	iter := runner.Query(ctx, "hi")
@@ -1239,7 +1239,7 @@ func TestRunnerTimelineFailedStopReason(t *testing.T) {
 		Agent:          &timelineErrorAgent{name: "failed", err: errors.New("boom")},
 		SessionID:      "timeline-failed",
 		SessionService: store,
-		SessionConfig:  &SessionConfig{EventFlushBatchSize: 1},
+		SessionConfig:  &SessionConfig[*schema.Message]{EventFlushBatchSize: 1},
 	})
 
 	iter := runner.Query(ctx, "hi")
@@ -1290,7 +1290,7 @@ func TestRunnerTimelineModelCallFatalDoesNotRequireTurnEnd(t *testing.T) {
 		Agent:          agent,
 		SessionID:      "timeline-fatal-model",
 		SessionService: store,
-		SessionConfig:  &SessionConfig{EventFlushBatchSize: 1},
+		SessionConfig:  &SessionConfig[*schema.Message]{EventFlushBatchSize: 1},
 	})
 
 	var gotErrs []error
@@ -1350,7 +1350,7 @@ func TestRunnerTimelineCancelStopReasonAndUserInterruptPersisted(t *testing.T) {
 		CheckPointStore: store,
 		SessionID:       "timeline-cancel",
 		SessionService:  store,
-		SessionConfig:   &SessionConfig{EventFlushBatchSize: 1},
+		SessionConfig:   &SessionConfig[*schema.Message]{EventFlushBatchSize: 1},
 	})
 	cancelOpt, cancelFn := WithCancel()
 	iter := runner.Query(ctx, "hi", cancelOpt, WithCheckPointID("timeline-cancel-cp"))
@@ -1413,7 +1413,7 @@ func TestToolSpan_PersistedAroundToolCallAndLinksToMessages(t *testing.T) {
 		Agent:          agent,
 		SessionID:      "tool-span-around",
 		SessionService: store,
-		SessionConfig:  &SessionConfig{EventFlushBatchSize: 1},
+		SessionConfig:  &SessionConfig[*schema.Message]{EventFlushBatchSize: 1},
 	})
 	iter := runner.Query(ctx, "go")
 	for {
@@ -1470,6 +1470,76 @@ func TestToolSpan_PersistedAroundToolCallAndLinksToMessages(t *testing.T) {
 	}
 	assert.NotEmpty(t, toolStart.Span.ParentSpanID, "parent should be the model request span")
 	assert.Equal(t, toolStart.Span.ParentSpanID, toolEnd.Span.ParentSpanID)
+}
+
+// TestSessionEventIDGenerator_CustomToolResultBusinessID 验证：configured
+// generator 看到 tool result message 草稿时返回业务 ID，持久化的 message
+// EventID 与对应 tool span end 的 ToolResultMessageEventID 必须等于该业务 ID
+// （§8 CustomToolResult 验收）。
+func TestSessionEventIDGenerator_CustomToolResultBusinessID(t *testing.T) {
+	ctx := context.Background()
+	testTool := &invokableTestTool{name: "tool_span_tool", result: "tool result"}
+	mockModel := &mockToolCallingModel{toolCallName: "tool_span_tool"}
+
+	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "ToolSpanGenAgent",
+		Description: "tool span agent with id generator",
+		Model:       mockModel,
+		ToolsConfig: ToolsConfig{
+			ToolsNodeConfig: compose.ToolsNodeConfig{Tools: []tool.BaseTool{testTool}},
+		},
+	})
+	require.NoError(t, err)
+
+	const toolResultBusinessID = "custom-result-id"
+	gen := func(_ context.Context, e *SessionEvent[*schema.Message]) (string, error) {
+		if e != nil && e.Kind == SessionEventMessage && e.Message != nil && e.Message.Role == schema.Tool {
+			return toolResultBusinessID, nil
+		}
+		return DefaultSessionEventIDGenerator[*schema.Message](ctx, e)
+	}
+
+	store := newSessionHelperStore()
+	runner := NewRunner(ctx, RunnerConfig{
+		Agent:          agent,
+		SessionID:      "tool-result-business-id",
+		SessionService: store,
+		SessionConfig: &SessionConfig[*schema.Message]{
+			EventFlushBatchSize: 1,
+			EventIDGenerator:    gen,
+		},
+	})
+	iter := runner.Query(ctx, "go")
+	for {
+		event, ok := iter.Next()
+		if !ok {
+			break
+		}
+		require.NoError(t, event.Err)
+	}
+
+	stored := filterStoredSessionEvents(t, store.events, func(_ *SessionEvent[*schema.Message]) bool { return true })
+	var (
+		toolResultMsg *SessionEvent[*schema.Message]
+		toolEnd       *SessionEvent[*schema.Message]
+	)
+	for _, se := range stored {
+		switch {
+		case se.Kind == SessionEventMessage && se.Message != nil && se.Message.Role == schema.Tool:
+			toolResultMsg = se
+		case se.Kind == SessionEventSpanToolCallEnd:
+			toolEnd = se
+		}
+	}
+	require.NotNil(t, toolResultMsg, "expected persisted tool result message")
+	require.NotNil(t, toolEnd, "expected tool_call_end span")
+	require.NotNil(t, toolEnd.Span)
+	require.NotNil(t, toolEnd.Span.Tool)
+
+	assert.Equal(t, toolResultBusinessID, toolResultMsg.EventID,
+		"tool result message must adopt the generator-supplied business ID")
+	assert.Equal(t, toolResultBusinessID, toolEnd.Span.Tool.ToolResultMessageEventID,
+		"tool span end ToolResultMessageEventID must match the tool result message business ID")
 }
 
 type kindsRecordingStore struct {
@@ -1560,7 +1630,7 @@ func TestToolSpan_StreamableToolEmitsEndAfterEOF(t *testing.T) {
 		Agent:          agent,
 		SessionID:      "tool-span-stream",
 		SessionService: store,
-		SessionConfig:  &SessionConfig{EventFlushBatchSize: 1},
+		SessionConfig:  &SessionConfig[*schema.Message]{EventFlushBatchSize: 1},
 	})
 	iter := runner.Query(ctx, "stream go")
 	for {
