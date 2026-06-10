@@ -45,6 +45,12 @@ type InMemoryStore[M adk.MessageType] struct {
 	checkpoints map[string][]byte
 }
 
+type pendingEvent struct {
+	eventID string
+	kind    adk.SessionEventKind
+	data    []byte
+}
+
 // NewInMemoryStore creates a new InMemoryStore.
 func NewInMemoryStore[M adk.MessageType](cfg *InMemoryStoreConfig) *InMemoryStore[M] {
 	return &InMemoryStore[M]{
@@ -84,11 +90,6 @@ func (s *InMemoryStore[M]) AppendEvents(_ context.Context, req *adk.AppendSessio
 		return nil, adk.ErrSessionTailMismatch
 	}
 	seen := make(map[string]struct{}, len(events))
-	type pendingEvent struct {
-		eventID string
-		kind    adk.SessionEventKind
-		data    []byte
-	}
 	pending := make([]pendingEvent, 0, len(events))
 	for _, e := range events {
 		if e == nil || e.EventID == "" {
