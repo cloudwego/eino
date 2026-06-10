@@ -2691,7 +2691,6 @@ func TestTurnLoop_ManagedInterrupt_StartNewTurnUsesConfiguredSessionService(t *t
 		InterruptMode:  TurnLoopInterruptWaitsForExplicitResume,
 		SessionID:      sessionID,
 		SessionService: sessionStore,
-		SessionConfig:  &SessionConfig[*schema.Message]{EventFlushBatchSize: 1},
 		GenInput:       genInputConsumeAllWithMsg,
 		GenResume: func(ctx context.Context, _ *TurnLoop[string, *schema.Message], interruptedItems, unhandledItems, resumeItems []string) (*GenResumeResult[string, *schema.Message], error) {
 			return &GenResumeResult[string, *schema.Message]{
@@ -2765,7 +2764,6 @@ func TestTurnLoop_ManagedInterrupt_DecisionResumeUsesCapturedCheckpointIDAndPara
 		InterruptMode:  TurnLoopInterruptWaitsForExplicitResume,
 		SessionID:      sessionID,
 		SessionService: sessionStore,
-		SessionConfig:  &SessionConfig[*schema.Message]{EventFlushBatchSize: 1},
 		GenInput:       genInputConsumeAllWithMsg,
 		GenResume: func(ctx context.Context, _ *TurnLoop[string, *schema.Message], interruptedItems, unhandledItems, resumeItems []string) (*GenResumeResult[string, *schema.Message], error) {
 			require.NotEmpty(t, interruptTargetID)
@@ -4134,7 +4132,6 @@ func TestTurnLoop_PassesSessionFencingTokenToInternalRunner(t *testing.T) {
 			atomic.AddInt32(&tokenCalls, 1)
 			return "token-1", nil
 		},
-		SessionConfig: &SessionConfig[*schema.Message]{PersistenceMode: SessionPersistenceModeSync},
 	})
 	loop.Run(ctx)
 	ok, _ := loop.Push("work")
