@@ -666,6 +666,16 @@ type TurnLoopConfig[T any, M MessageType] struct {
 	// it alive waiting for an explicit Resume(...) call. The zero value exits.
 	InterruptMode TurnLoopInterruptMode
 
+	// ResumeWaitTimeout, when positive, bounds how long TurnLoop will wait for
+	// Resume(...) after a managed business interrupt under
+	// TurnLoopInterruptWaitsForExplicitResume. On expiry the loop persists the
+	// pending runner checkpoint (when Store + CheckpointID are configured) and
+	// exits with *InterruptError. Push during the wait does not reset the timer.
+	// Zero (default) keeps the existing unbounded behavior.
+	//
+	// Has no effect unless InterruptMode is TurnLoopInterruptWaitsForExplicitResume.
+	ResumeWaitTimeout time.Duration
+
 	// Session fields are passed through to the internal Runner used by TurnLoop.
 	// They let fresh turns after managed interrupts reconstruct context from the
 	// same managed session without TurnLoop inspecting typed session events.
@@ -1004,6 +1014,16 @@ type TurnLoop[T any, M MessageType] struct {
 	pendingResume *turnLoopPendingResume[T]
 	resumeMu      sync.Mutex
 
+	// preLoadResumeItems holds items submitted via Resume() before the
+	// checkpoint has been loaded (pre-Run, or during the small window between
+	// Run() and tryLoadCheckpoint completing). tryLoadCheckpoint adopts them.
+	preLoadResumeItems []T
+
+	// checkpointLoaded is set by tryLoadCheckpoint under l.resumeMu after it
+	// has read and adopted preLoadResumeItems. After this, Resume() goes
+	// through the existing post-load path.
+	checkpointLoaded bool
+
 	loadCheckpointID string
 
 	onAgentEvents func(ctx context.Context, tc *TurnContext[T, M], events *AsyncIterator[*TypedAgentEvent[M]]) error
@@ -1032,6 +1052,12 @@ type turnLoopCheckpoint[T any] struct {
 	UnhandledItems []T
 	ResumeItems    []T
 	CanceledItems  []T // gob-compat: kept as CanceledItems for deserialization of existing checkpoints
+
+	// InterruptContexts, when non-empty, lets a managed-mode restore know the
+	// contexts of the original interrupt so that if the new session itself
+	// times out, cleanup can re-synthesize *InterruptError with them.
+	// Backward-compatible: missing field decodes to nil/empty.
+	InterruptContexts []*InterruptCtx
 }
 
 func marshalTurnLoopCheckpoint[T any](c *turnLoopCheckpoint[T]) ([]byte, error) {
@@ -1072,6 +1098,50 @@ func (l *TurnLoop[T, M]) deleteTurnLoopCheckpoint(ctx context.Context, checkPoin
 }
 
 func (l *TurnLoop[T, M]) tryLoadCheckpoint(ctx context.Context) error {
+	// Adopt any Resume() items submitted before the checkpoint finished loading.
+	// Registered as a defer so it runs on ALL exit paths, including the early
+	// returns below where l.pendingResume is never assigned (stays nil), and
+	// sets checkpointLoaded exactly once.
+	defer func() {
+		l.resumeMu.Lock()
+		defer l.resumeMu.Unlock()
+
+		preLoad := l.preLoadResumeItems
+		l.preLoadResumeItems = nil
+		pr := l.pendingResume
+
+		switch {
+		case pr != nil &&
+			pr.source == turnLoopPendingResumeSourceManagedInterrupt &&
+			!pr.resumeSubmitted &&
+			len(preLoad) > 0:
+			// Adopt pre-load Resume items. Do NOT touch pr.unhandled — any pre-Run
+			// Push items already routed there by the managed branch stay buffered.
+			pr.resumeItems = preLoad
+			pr.resumeSubmitted = true
+		case pr != nil &&
+			pr.source == turnLoopPendingResumeSourceRestoredCheckpoint &&
+			!pr.resumeSubmitted &&
+			len(preLoad) > 0:
+			// Legacy restored path with no accepted resume items: explicit pre-load
+			// Resume wins over the implicit Push-as-resume promotion. The body
+			// already moved pre-Run Push items into pr.resumeItems; preserve them by
+			// moving them to pr.unhandled rather than dropping them.
+			pr.unhandled = append(pr.unhandled, pr.resumeItems...)
+			pr.resumeItems = preLoad
+			pr.resumeSubmitted = true
+		case pr == nil && len(preLoad) > 0:
+			// No checkpoint to resume into; treat preLoad as Push items so they
+			// don't silently disappear.
+			l.buffer.PushFront(preLoad)
+		}
+		// If pr != nil && pr.resumeSubmitted (checkpoint carried accepted resume
+		// items), those win: the cases above skip, preLoad is left unused, and a
+		// later post-load Resume() would return ErrTurnLoopResumeInProgress.
+
+		l.checkpointLoaded = true
+	}()
+
 	checkPointID := l.config.CheckpointID
 	if checkPointID == "" || l.config.Store == nil {
 		return nil
@@ -1098,6 +1168,8 @@ func (l *TurnLoop[T, M]) tryLoadCheckpoint(ctx context.Context) error {
 
 	newItems := l.buffer.TakeAll()
 
+	managedRestore := l.config.InterruptMode == TurnLoopInterruptWaitsForExplicitResume
+
 	if cp.HasRunnerState {
 		if len(cp.RunnerCheckpoint) == 0 {
 			l.buffer.PushFront(newItems)
@@ -1109,7 +1181,20 @@ func (l *TurnLoop[T, M]) tryLoadCheckpoint(ctx context.Context) error {
 		}
 		resumeItems := append([]T{}, cp.ResumeItems...)
 		resumeSubmitted := len(resumeItems) > 0
-		if !resumeSubmitted {
+		source := turnLoopPendingResumeSourceRestoredCheckpoint
+		var interruptCtxSnapshot []*InterruptCtx
+		if !resumeSubmitted && managedRestore {
+			// Managed-mode restore: pre-Run Push items are buffering, not a resume
+			// response. Route them to unhandled and keep resumeItems empty, then
+			// park until explicit Resume() (or pre-load Resume adopted by the
+			// deferred adoption above).
+			unhandled := make([]T, 0, len(cp.UnhandledItems)+len(newItems))
+			unhandled = append(unhandled, cp.UnhandledItems...)
+			unhandled = append(unhandled, newItems...)
+			cp.UnhandledItems = unhandled
+			source = turnLoopPendingResumeSourceManagedInterrupt
+			interruptCtxSnapshot = cp.InterruptContexts
+		} else if !resumeSubmitted {
 			resumeItems = append(resumeItems, newItems...)
 		} else {
 			unhandled := make([]T, 0, len(cp.UnhandledItems)+len(newItems))
@@ -1118,13 +1203,14 @@ func (l *TurnLoop[T, M]) tryLoadCheckpoint(ctx context.Context) error {
 			cp.UnhandledItems = unhandled
 		}
 		l.pendingResume = &turnLoopPendingResume[T]{
-			interrupted:        append([]T{}, cp.CanceledItems...),
-			unhandled:          append([]T{}, cp.UnhandledItems...),
-			resumeItems:        resumeItems,
-			resumeSubmitted:    resumeSubmitted,
-			source:             turnLoopPendingResumeSourceRestoredCheckpoint,
-			resumeCheckpointID: resumeCheckpointID,
-			resumeBytes:        append([]byte{}, cp.RunnerCheckpoint...),
+			interrupted:          append([]T{}, cp.CanceledItems...),
+			unhandled:            append([]T{}, cp.UnhandledItems...),
+			resumeItems:          resumeItems,
+			resumeSubmitted:      resumeSubmitted,
+			source:               source,
+			resumeCheckpointID:   resumeCheckpointID,
+			resumeBytes:          append([]byte{}, cp.RunnerCheckpoint...),
+			interruptCtxSnapshot: interruptCtxSnapshot,
 		}
 	} else {
 		items := make([]T, 0, len(cp.UnhandledItems)+len(newItems))
@@ -1151,12 +1237,48 @@ type turnLoopPendingResume[T any] struct {
 	source             turnLoopPendingResumeSource
 	resumeCheckpointID string
 	resumeBytes        []byte
+
+	// interruptCtxSnapshot is captured at Phase 2 as a copy of the TurnLoop's
+	// l.interruptContexts ([]*InterruptCtx) so cleanup can synthesize
+	// *InterruptError as the exit reason when the resume wait times out, and
+	// so the persisted checkpoint can carry them for the next session.
+	//
+	// Named distinctly from the parent TurnLoop's l.interruptContexts field and
+	// from this struct's existing `interrupted` slice (the canceled-items list)
+	// to avoid confusion at the Phase 2 copy site and in cleanup, where
+	// l.interruptContexts and pr are both in scope.
+	interruptCtxSnapshot []*InterruptCtx
+
+	// timedOut is set by the resume-wait watcher under l.resumeMu when the
+	// timer fires for an unsubmitted managed pending resume. cleanup reads it
+	// (under l.resumeMu) to decide whether to synthesize *InterruptError.
+	timedOut bool
+
+	// timerCancel is closed under l.resumeMu when the watcher should stop:
+	//   - takePendingResume consumes this pr.
+	//   - cleanup begins.
+	// The watcher selects on this channel (and on its timer) and re-checks it
+	// after acquiring l.resumeMu to close the post-fire / pre-lock race.
+	timerCancel chan struct{}
 }
 
 func isPhase1ManagedPendingResume[T any](pr *turnLoopPendingResume[T]) bool {
 	return pr != nil &&
 		pr.source == turnLoopPendingResumeSourceManagedInterrupt &&
 		pr.resumeBytes == nil
+}
+
+// closeTimerCancelLocked idempotently closes pr.timerCancel. Callers must hold
+// l.resumeMu. Safe when pr is nil, pr.timerCancel is nil, or already closed.
+func closeTimerCancelLocked[T any](pr *turnLoopPendingResume[T]) {
+	if pr == nil || pr.timerCancel == nil {
+		return
+	}
+	select {
+	case <-pr.timerCancel:
+	default:
+		close(pr.timerCancel)
+	}
 }
 
 func isManagedPendingResumeReady[T any](pr *turnLoopPendingResume[T]) bool {
@@ -1464,6 +1586,9 @@ func NewTurnLoop[T any, M MessageType](cfg TurnLoopConfig[T, M]) *TurnLoop[T, M]
 	if cfg.PrepareAgent == nil {
 		panic("adk: NewTurnLoop: PrepareAgent is required")
 	}
+	if cfg.ResumeWaitTimeout < 0 {
+		panic("adk: NewTurnLoop: ResumeWaitTimeout must not be negative")
+	}
 
 	l := &TurnLoop[T, M]{
 		config:      cfg,
@@ -1550,6 +1675,23 @@ func (l *TurnLoop[T, M]) Resume(items ...T) error {
 
 	l.resumeMu.Lock()
 	defer l.resumeMu.Unlock()
+
+	if !l.checkpointLoaded && l.pendingResume == nil {
+		// Pre-load path: Resume() called before tryLoadCheckpoint produced a
+		// pending resume (e.g. before Run()). Buffer the items into
+		// preLoadResumeItems; the deferred adoption in tryLoadCheckpoint takes
+		// them once the final pendingResume state is known. When a pendingResume
+		// already exists, fall through to the normal post-load path below so it
+		// is targeted directly.
+		if len(l.preLoadResumeItems) > 0 {
+			return ErrTurnLoopResumeInProgress
+		}
+		if atomic.LoadInt32(&l.stopped) != 0 {
+			return ErrTurnLoopStopped
+		}
+		l.preLoadResumeItems = append([]T{}, items...)
+		return nil
+	}
 
 	if atomic.LoadInt32(&l.stopped) != 0 || l.buffer.IsClosed() {
 		return ErrTurnLoopStopped
@@ -1752,6 +1894,9 @@ func (l *TurnLoop[T, M]) takePendingResume(ctx context.Context) (*turnLoopPendin
 		}
 		if pr.source == turnLoopPendingResumeSourceRestoredCheckpoint || isManagedPendingResumeReady(pr) {
 			l.pendingResume = nil
+			// The pr is consumed (Resume submitted, fresh turn dispatching); the
+			// watcher must not act. Close under the same resumeMu critical section.
+			closeTimerCancelLocked(pr)
 			l.resumeMu.Unlock()
 			return pr, true
 		}
@@ -1900,6 +2045,11 @@ func (l *TurnLoop[T, M]) run(ctx context.Context) {
 		return
 	}
 
+	// A managed-mode restore parks in takePendingResume until explicit Resume().
+	// If ResumeWaitTimeout is configured, the restored wait must also be bounded,
+	// since the restored pending resume never passes through the Phase 2 arming.
+	l.armRestoredManagedWatcherIfNeeded()
+
 	// Monitor context cancellation: close the buffer so that a blocking
 	// Receive() unblocks. The loop will then check ctx.Err() and exit.
 	go func() {
@@ -2022,7 +2172,23 @@ func (l *TurnLoop[T, M]) run(ctx context.Context) {
 			pr.unhandled = append(pr.unhandled, unhandled...)
 			pr.resumeCheckpointID = l.checkPointRunnerID
 			pr.resumeBytes = append([]byte{}, l.checkPointRunnerBytes...)
+			// Copy direction: parent TurnLoop's l.interruptContexts -> this pr's
+			// snapshot. A fresh slice so the later `l.interruptContexts = nil`
+			// cannot alias-clear the captured snapshot.
+			pr.interruptCtxSnapshot = append([]*InterruptCtx(nil), l.interruptContexts...)
+			// Decide whether to arm the resume-wait watcher under the same
+			// resumeMu critical section. The !pr.resumeSubmitted guard (inside the
+			// helper) handles the path where Resume(...) landed during Phase 1
+			// before Phase 2 runs; the timerCancel == nil guard is defensive
+			// against any future double-Phase-2 path.
+			shouldArm := l.armResumeWaitWatcherLocked(pr)
 			l.resumeMu.Unlock()
+			if shouldArm {
+				// Spawn the watcher with the same pr pointer just assigned to
+				// l.pendingResume so cleanup's close (which closes
+				// l.pendingResume.timerCancel) targets the armed pr.
+				go l.watchResumeWait(pr, l.config.ResumeWaitTimeout)
+			}
 			l.interruptContexts = nil
 			l.interruptedItems = nil
 			l.checkPointRunnerID = ""
@@ -2031,6 +2197,70 @@ func (l *TurnLoop[T, M]) run(ctx context.Context) {
 			continue
 		}
 	}
+}
+
+// armResumeWaitWatcherLocked decides whether the resume-wait watcher should be
+// armed for pr and, if so, creates pr.timerCancel and reports true. Callers must
+// hold l.resumeMu and, on a true result, spawn watchResumeWait(pr, timeout)
+// AFTER releasing the lock. Arming requires a positive ResumeWaitTimeout, managed
+// interrupt mode, and a managed, unsubmitted pr that is not already armed.
+func (l *TurnLoop[T, M]) armResumeWaitWatcherLocked(pr *turnLoopPendingResume[T]) bool {
+	shouldArm := l.config.ResumeWaitTimeout > 0 &&
+		l.config.InterruptMode == TurnLoopInterruptWaitsForExplicitResume &&
+		pr != nil &&
+		pr.source == turnLoopPendingResumeSourceManagedInterrupt &&
+		!pr.resumeSubmitted && pr.timerCancel == nil
+	if shouldArm {
+		pr.timerCancel = make(chan struct{})
+	}
+	return shouldArm
+}
+
+// armRestoredManagedWatcherIfNeeded arms the resume-wait watcher for a managed
+// pending resume produced by tryLoadCheckpoint, so a restored managed-mode wait
+// is also bounded by ResumeWaitTimeout. No-op unless a managed, unsubmitted
+// pending resume exists and ResumeWaitTimeout is positive.
+func (l *TurnLoop[T, M]) armRestoredManagedWatcherIfNeeded() {
+	l.resumeMu.Lock()
+	pr := l.pendingResume
+	shouldArm := l.armResumeWaitWatcherLocked(pr)
+	l.resumeMu.Unlock()
+	if shouldArm {
+		go l.watchResumeWait(pr, l.config.ResumeWaitTimeout)
+	}
+}
+
+// watchResumeWait bounds how long a managed business interrupt waits for
+// Resume(...). On timer expiry it marks the pending resume as timed out and
+// commits a Stop so the loop unblocks; cleanup then synthesizes *InterruptError.
+func (l *TurnLoop[T, M]) watchResumeWait(pr *turnLoopPendingResume[T], timeout time.Duration) {
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
+	select {
+	case <-timer.C:
+	case <-pr.timerCancel:
+		return
+	}
+
+	l.resumeMu.Lock()
+	// Post-lock re-check on pr.timerCancel closes the race where the timer fires
+	// just before cleanup or takePendingResume closes the cancel channel.
+	select {
+	case <-pr.timerCancel:
+		l.resumeMu.Unlock()
+		return
+	default:
+	}
+	// If the pr was consumed/replaced, Resume already won, or an external Stop
+	// committed first, do not reclassify as an interrupt timeout.
+	if l.pendingResume != pr || pr.resumeSubmitted || l.stopCtrl.isCommitted() {
+		l.resumeMu.Unlock()
+		return
+	}
+	pr.timedOut = true
+	l.resumeMu.Unlock()
+	l.commitStop()
 }
 
 func (l *TurnLoop[T, M]) setupBridgeStore(spec *turnRunSpec[T, M], runOpts []AgentRunOption) ([]AgentRunOption, *bridgeStore, error) {
@@ -2324,6 +2554,17 @@ func (l *TurnLoop[T, M]) cleanup(ctx context.Context) {
 	unhandled := l.buffer.TakeAll()
 	l.resumeMu.Lock()
 	pending := l.pendingResume
+	if pending != nil {
+		// Synthesize the timeout interrupt error before exitCausedByStop /
+		// businessInterrupt are computed below, so businessInterrupt becomes true
+		// and the existing checkpoint-persistence path runs unchanged.
+		if l.runErr == nil && pending.timedOut && !pending.resumeSubmitted {
+			l.runErr = &InterruptError{InterruptContexts: pending.interruptCtxSnapshot}
+		}
+		// Idempotent close so the watcher's post-lock re-check sees it, before
+		// the lock is released.
+		closeTimerCancelLocked(pending)
+	}
 	l.resumeMu.Unlock()
 	if pending != nil {
 		unhandled = append(append([]T{}, pending.unhandled...), unhandled...)
@@ -2350,11 +2591,13 @@ func (l *TurnLoop[T, M]) cleanup(ctx context.Context) {
 		runnerCheckpointID := l.checkPointRunnerID
 		runnerCheckpoint := l.checkPointRunnerBytes
 		interruptedItems := l.interruptedItems
+		interruptContexts := l.interruptContexts
 		var resumeItems []T
 		if pending != nil {
 			runnerCheckpointID = pending.resumeCheckpointID
 			runnerCheckpoint = pending.resumeBytes
 			interruptedItems = pending.interrupted
+			interruptContexts = pending.interruptCtxSnapshot
 			if pending.resumeSubmitted {
 				resumeItems = append([]T{}, pending.resumeItems...)
 			}
@@ -2366,6 +2609,7 @@ func (l *TurnLoop[T, M]) cleanup(ctx context.Context) {
 			UnhandledItems:     unhandled,
 			ResumeItems:        resumeItems,
 			CanceledItems:      interruptedItems,
+			InterruptContexts:  interruptContexts,
 		}
 		checkpointed = true
 		checkpointErr = l.saveTurnLoopCheckpoint(ctx, checkpointID, cp)
