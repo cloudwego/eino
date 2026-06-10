@@ -164,6 +164,17 @@ type LoadSessionEventsRequest struct {
 	Reverse bool
 	// Kinds filters events by their Kind field. Empty means no kind filter.
 	Kinds []SessionEventKind
+	// IncludeSessionTail requests that the store populate
+	// LoadSessionEventsResult.SessionTailEventID for this load. Callers set it
+	// only when they will append based on this load and therefore need the
+	// authoritative log tail observed in the same snapshot as Events; the
+	// reconstruct path sets it on the first (newest) reverse page only.
+	//
+	// When false, a store may leave SessionTailEventID empty to avoid the extra
+	// work of resolving the tail (for example, a separate tail query in a
+	// SQL-backed store). Stores for which the tail is free to compute may ignore
+	// this flag and always populate it.
+	IncludeSessionTail bool
 }
 
 // LoadSessionEventsResult is the response from SessionEventStore.LoadEvents.
@@ -173,7 +184,14 @@ type LoadSessionEventsResult[M MessageType] struct {
 	// Next is the event_id of the last event in this page in the direction of travel.
 	Next string
 	// SessionTailEventID is the last event_id visible in the session log snapshot
-	// used for this load. Empty means the visible session log is empty.
+	// used for this load. It is the tail of the entire log snapshot, independent
+	// of the request's Kinds, Limit, Reverse, and After fields; do not infer it
+	// from Events.
+	//
+	// It is populated only when the request set IncludeSessionTail (a store may
+	// always populate it when the tail is free to compute). When
+	// IncludeSessionTail was set, empty means the visible session log is empty;
+	// when it was not set, empty carries no information about the log.
 	SessionTailEventID string
 }
 
@@ -1532,6 +1550,10 @@ func loadActiveSessionEventsReverse[M MessageType](
 			Limit:     pageSize,
 			Reverse:   true,
 			Kinds:     modelContextSessionEventKinds,
+			// The first reverse page is the newest page, so its snapshot tail is
+			// the log tail the caller appends against. Later (older) pages do not
+			// need it.
+			IncludeSessionTail: after == "",
 		})
 		if err != nil {
 			return nil, err
