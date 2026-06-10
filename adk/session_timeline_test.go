@@ -353,7 +353,6 @@ func TestRunner_PersistsAgentInterruptSessionEvent(t *testing.T) {
 		CheckPointStore: store,
 		SessionID:       "agent-interrupt-session",
 		SessionService:  store,
-		SessionConfig:   &SessionConfig[*schema.Message]{EventFlushBatchSize: 1},
 	})
 
 	var liveInterruptContexts []*InterruptCtx
@@ -486,7 +485,7 @@ func TestWithTimelineEvents_LiveExposure(t *testing.T) {
 
 	t.Run("stripped by default", func(t *testing.T) {
 		store := newSessionHelperStore()
-		runner := NewRunner(ctx, RunnerConfig{Agent: agent, SessionID: "timeline-default", SessionService: store, SessionConfig: &SessionConfig[*schema.Message]{EventFlushBatchSize: 1}})
+		runner := NewRunner(ctx, RunnerConfig{Agent: agent, SessionID: "timeline-default", SessionService: store})
 		iter := runner.Query(ctx, "hello")
 		for {
 			event, ok := iter.Next()
@@ -505,7 +504,7 @@ func TestWithTimelineEvents_LiveExposure(t *testing.T) {
 
 	t.Run("exposed when requested", func(t *testing.T) {
 		store := newSessionHelperStore()
-		runner := NewRunner(ctx, RunnerConfig{Agent: agent, SessionID: "timeline-visible", SessionService: store, SessionConfig: &SessionConfig[*schema.Message]{EventFlushBatchSize: 1}})
+		runner := NewRunner(ctx, RunnerConfig{Agent: agent, SessionID: "timeline-visible", SessionService: store})
 		var kinds []SessionEventKind
 		var liveUserInput bool
 		iter := runner.Query(ctx, "hello", WithTimelineEvents())
@@ -580,7 +579,6 @@ func TestRunner_ExtensionEventSentWithTypedSendEventIsLiveAndPersisted(t *testin
 			Agent:          agent,
 			SessionID:      "extension-event-session-visible",
 			SessionService: store,
-			SessionConfig:  &SessionConfig[*schema.Message]{EventFlushBatchSize: 1},
 		})
 
 		var liveExtension *SessionEvent[*schema.Message]
@@ -631,7 +629,6 @@ func TestRunner_ExtensionEventSentWithTypedSendEventIsLiveAndPersisted(t *testin
 			Agent:          agent,
 			SessionID:      "extension-event-session-stripped",
 			SessionService: store,
-			SessionConfig:  &SessionConfig[*schema.Message]{EventFlushBatchSize: 1},
 		})
 
 		iter := runner.Query(ctx, "hello")
@@ -1214,7 +1211,6 @@ func TestRunnerTimelineRetryExhaustedStopReason(t *testing.T) {
 		Agent:          &timelineErrorAgent{name: "retry-exhausted", err: &RetryExhaustedError{LastErr: errors.New("still failing"), TotalRetries: 1}},
 		SessionID:      "timeline-retry-exhausted",
 		SessionService: store,
-		SessionConfig:  &SessionConfig[*schema.Message]{EventFlushBatchSize: 1},
 	})
 
 	iter := runner.Query(ctx, "hi")
@@ -1239,7 +1235,6 @@ func TestRunnerTimelineFailedStopReason(t *testing.T) {
 		Agent:          &timelineErrorAgent{name: "failed", err: errors.New("boom")},
 		SessionID:      "timeline-failed",
 		SessionService: store,
-		SessionConfig:  &SessionConfig[*schema.Message]{EventFlushBatchSize: 1},
 	})
 
 	iter := runner.Query(ctx, "hi")
@@ -1290,7 +1285,6 @@ func TestRunnerTimelineModelCallFatalDoesNotRequireTurnEnd(t *testing.T) {
 		Agent:          agent,
 		SessionID:      "timeline-fatal-model",
 		SessionService: store,
-		SessionConfig:  &SessionConfig[*schema.Message]{EventFlushBatchSize: 1},
 	})
 
 	var gotErrs []error
@@ -1350,7 +1344,6 @@ func TestRunnerTimelineCancelStopReasonAndUserInterruptPersisted(t *testing.T) {
 		CheckPointStore: store,
 		SessionID:       "timeline-cancel",
 		SessionService:  store,
-		SessionConfig:   &SessionConfig[*schema.Message]{EventFlushBatchSize: 1},
 	})
 	cancelOpt, cancelFn := WithCancel()
 	iter := runner.Query(ctx, "hi", cancelOpt, WithCheckPointID("timeline-cancel-cp"))
@@ -1413,7 +1406,6 @@ func TestToolSpan_PersistedAroundToolCallAndLinksToMessages(t *testing.T) {
 		Agent:          agent,
 		SessionID:      "tool-span-around",
 		SessionService: store,
-		SessionConfig:  &SessionConfig[*schema.Message]{EventFlushBatchSize: 1},
 	})
 	iter := runner.Query(ctx, "go")
 	for {
@@ -1505,8 +1497,7 @@ func TestSessionEventIDGenerator_CustomToolResultBusinessID(t *testing.T) {
 		SessionID:      "tool-result-business-id",
 		SessionService: store,
 		SessionConfig: &SessionConfig[*schema.Message]{
-			EventFlushBatchSize: 1,
-			EventIDGenerator:    gen,
+			EventIDGenerator: gen,
 		},
 	})
 	iter := runner.Query(ctx, "go")
@@ -1630,7 +1621,6 @@ func TestToolSpan_StreamableToolEmitsEndAfterEOF(t *testing.T) {
 		Agent:          agent,
 		SessionID:      "tool-span-stream",
 		SessionService: store,
-		SessionConfig:  &SessionConfig[*schema.Message]{EventFlushBatchSize: 1},
 	})
 	iter := runner.Query(ctx, "stream go")
 	for {
