@@ -33,10 +33,11 @@ import (
 // sessionStreamingAgent emits a single streaming assistant output followed by a
 // SessionEventTurnEnd. Used to verify the runner's stream-copy/persist path.
 type sessionStreamingAgent struct {
-	chunks  []*schema.Message
-	turnEnd *TurnEndState[*schema.Message]
-	role    schema.RoleType
-	tool    string
+	chunks   []*schema.Message
+	turnEnd  *TurnEndState[*schema.Message]
+	role     schema.RoleType
+	tool     string
+	preEvent *SessionEvent[*schema.Message]
 }
 
 func (a *sessionStreamingAgent) Name(_ context.Context) string        { return "session-stream-agent" }
@@ -45,6 +46,9 @@ func (a *sessionStreamingAgent) Run(_ context.Context, _ *AgentInput, _ ...Agent
 	iter, gen := NewAsyncIteratorPair[*AgentEvent]()
 	go func() {
 		defer gen.Close()
+		if a.preEvent != nil {
+			gen.Send(&AgentEvent{AgentName: "session-stream-agent", SessionEvent: a.preEvent})
+		}
 		stream := schema.StreamReaderFromArray(a.chunks)
 		role := a.role
 		if role == "" {
@@ -130,7 +134,6 @@ func TestStreamPersistence_CopyAndConcat(t *testing.T) {
 		EnableStreaming: true,
 		SessionID:       sid,
 		SessionService:  store,
-		SessionConfig:   &SessionConfig[*schema.Message]{EventFlushBatchSize: 1},
 	})
 
 	// Drain live events and verify the live stream still produces the concatenated content.
@@ -165,7 +168,7 @@ func TestStreamPersistence_CopyAndConcat(t *testing.T) {
 		"persisted stream message must be the fully concatenated content")
 }
 
-func TestStreamPersistence_SyncModeMaterializesBeforeDelivery(t *testing.T) {
+func TestStreamPersistence_StreamingLiveBeforeMaterializedBoundary(t *testing.T) {
 	ctx := context.Background()
 	store := newSessionHelperStore()
 	sid := "sync-stream-session"
@@ -185,7 +188,6 @@ func TestStreamPersistence_SyncModeMaterializesBeforeDelivery(t *testing.T) {
 		EnableStreaming: true,
 		SessionID:       sid,
 		SessionService:  store,
-		SessionConfig:   &SessionConfig[*schema.Message]{PersistenceMode: SessionPersistenceModeSync},
 	})
 
 	iter := runner.Query(ctx, "q")
@@ -198,29 +200,66 @@ func TestStreamPersistence_SyncModeMaterializesBeforeDelivery(t *testing.T) {
 		require.NoError(t, ev.Err)
 		if ev.Output != nil && ev.Output.MessageOutput != nil {
 			observed = ev.Output.MessageOutput
-			var stored bool
-			store.mu.Lock()
-			snapshot := append([]storedSessionEvent{}, store.events...)
-			store.mu.Unlock()
-			for _, ep := range snapshot {
-				se, err := decodeSessionEvent[*schema.Message](ep.Data)
-				require.NoError(t, err)
-				if se.Message != nil && se.Message.Role == schema.Assistant && se.Message.Content == "hello sync" {
-					stored = true
-				}
-			}
-			assert.True(t, stored, "sync stream message must be stored before delivery")
 		}
 	}
 
 	require.NotNil(t, observed)
-	assert.False(t, observed.IsStreaming, "sync mode must deliver materialized non-streaming output")
-	require.NotNil(t, observed.Message)
-	assert.Equal(t, "hello sync", observed.Message.Content)
-	assert.Nil(t, observed.MessageStream)
+	assert.True(t, observed.IsStreaming, "streaming output remains live while persistence materializes a copy")
+	msg, err := observed.GetMessage()
+	require.NoError(t, err)
+	assert.Equal(t, "hello sync", msg.Content)
+
+	var stored bool
+	store.mu.Lock()
+	snapshot := append([]storedSessionEvent{}, store.events...)
+	store.mu.Unlock()
+	for _, ep := range snapshot {
+		se, err := decodeSessionEvent[*schema.Message](ep.Data)
+		require.NoError(t, err)
+		if se.Message != nil && se.Message.Role == schema.Assistant && se.Message.Content == "hello sync" {
+			stored = true
+		}
+	}
+	assert.True(t, stored, "materialized stream message must be persisted by finalization")
 }
 
-func TestStreamPersistence_SyncModeToolResultMaterializesBeforeDelivery(t *testing.T) {
+func TestStreamPersistence_PendingAnnotationFlushesBeforeMaterializedBoundary(t *testing.T) {
+	ctx := context.Background()
+	store := newSessionHelperStore()
+	annotationKind := SessionEventKind(SessionEventExtensionPrefix + "stream.annotation")
+	agent := &sessionStreamingAgent{
+		preEvent: &SessionEvent[*schema.Message]{
+			Kind:      annotationKind,
+			Extension: &SessionExtensionEvent{},
+		},
+		chunks: []*schema.Message{
+			schema.AssistantMessage("hello ", nil),
+			schema.AssistantMessage("stream", nil),
+		},
+		turnEnd: &TurnEndState[*schema.Message]{
+			Messages: []*schema.Message{schema.UserMessage("q"), schema.AssistantMessage("hello stream", nil)},
+		},
+	}
+	runner := NewRunner(ctx, RunnerConfig{
+		Agent:           agent,
+		EnableStreaming: true,
+		SessionID:       "stream-annotation-boundary",
+		SessionService:  store,
+	})
+
+	drainSessionEvents(t, runner.Query(ctx, "q"))
+
+	assert.Equal(t, [][]SessionEventKind{
+		{SessionEventSessionStatusRunning},
+		{SessionEventMessage},
+		{annotationKind},
+		{SessionEventMessage},
+		{SessionEventTurnEnd},
+		{SessionEventSessionStatusIdle},
+	}, store.appendBatches)
+}
+
+func TestStreamPersistence_ToolResultStreamingLiveBeforeMaterializedBoundary(t *testing.T) {
 	ctx := context.Background()
 	store := newSessionHelperStore()
 	sid := "sync-tool-stream-session"
@@ -242,7 +281,6 @@ func TestStreamPersistence_SyncModeToolResultMaterializesBeforeDelivery(t *testi
 		EnableStreaming: true,
 		SessionID:       sid,
 		SessionService:  store,
-		SessionConfig:   &SessionConfig[*schema.Message]{PersistenceMode: SessionPersistenceModeSync},
 	})
 
 	iter := runner.Query(ctx, "q")
@@ -255,27 +293,28 @@ func TestStreamPersistence_SyncModeToolResultMaterializesBeforeDelivery(t *testi
 		require.NoError(t, ev.Err)
 		if ev.Output != nil && ev.Output.MessageOutput != nil {
 			observed = ev.Output.MessageOutput
-			var stored bool
-			store.mu.Lock()
-			snapshot := append([]storedSessionEvent{}, store.events...)
-			store.mu.Unlock()
-			for _, ep := range snapshot {
-				se, err := decodeSessionEvent[*schema.Message](ep.Data)
-				require.NoError(t, err)
-				if se.Message != nil && se.Message.Role == schema.Tool && se.Message.Content == "tool result" {
-					stored = true
-				}
-			}
-			assert.True(t, stored, "sync tool-result stream must be stored before delivery")
 		}
 	}
 
 	require.NotNil(t, observed)
-	assert.False(t, observed.IsStreaming)
-	require.NotNil(t, observed.Message)
-	assert.Equal(t, schema.Tool, observed.Message.Role)
-	assert.Equal(t, "tool result", observed.Message.Content)
-	assert.Nil(t, observed.MessageStream)
+	assert.True(t, observed.IsStreaming)
+	msg, err := observed.GetMessage()
+	require.NoError(t, err)
+	assert.Equal(t, schema.Tool, msg.Role)
+	assert.Equal(t, "tool result", msg.Content)
+
+	var stored bool
+	store.mu.Lock()
+	snapshot := append([]storedSessionEvent{}, store.events...)
+	store.mu.Unlock()
+	for _, ep := range snapshot {
+		se, err := decodeSessionEvent[*schema.Message](ep.Data)
+		require.NoError(t, err)
+		if se.Message != nil && se.Message.Role == schema.Tool && se.Message.Content == "tool result" {
+			stored = true
+		}
+	}
+	assert.True(t, stored, "materialized tool-result stream must be persisted by finalization")
 }
 
 func TestStreamPersistence_AgenticToolResultChunksConcat(t *testing.T) {
@@ -301,7 +340,6 @@ func TestStreamPersistence_AgenticToolResultChunksConcat(t *testing.T) {
 		EnableStreaming: true,
 		SessionID:       sid,
 		SessionService:  store,
-		SessionConfig:   &SessionConfig[*schema.AgenticMessage]{EventFlushBatchSize: 1},
 	})
 
 	iter := runner.Run(ctx, []*schema.AgenticMessage{schema.UserAgenticMessage("q")})
@@ -372,7 +410,6 @@ func TestStreamPersistence_AgenticToolResultChunksWithStreamingMeta(t *testing.T
 		EnableStreaming: true,
 		SessionID:       sid,
 		SessionService:  store,
-		SessionConfig:   &SessionConfig[*schema.AgenticMessage]{EventFlushBatchSize: 1},
 	})
 
 	iter := runner.Run(ctx, []*schema.AgenticMessage{schema.UserAgenticMessage("q")})
@@ -464,7 +501,6 @@ func TestStreamPersistence_GetMessageError_NotEnqueued(t *testing.T) {
 		EnableStreaming: true,
 		SessionID:       sid,
 		SessionService:  store,
-		SessionConfig:   &SessionConfig[*schema.Message]{EventFlushBatchSize: 1},
 	})
 
 	iter := runner.Query(ctx, "trigger")
@@ -497,7 +533,7 @@ func TestStreamPersistence_GetMessageError_NotEnqueued(t *testing.T) {
 	}
 }
 
-func TestStreamPersistence_SyncModeGetMessageErrorSuppressesOutput(t *testing.T) {
+func TestStreamPersistence_GetMessageErrorSurfacesAfterLiveStreaming(t *testing.T) {
 	ctx := context.Background()
 	store := newSessionHelperStore()
 	sid := "sync-stream-err-session"
@@ -519,7 +555,6 @@ func TestStreamPersistence_SyncModeGetMessageErrorSuppressesOutput(t *testing.T)
 		EnableStreaming: true,
 		SessionID:       sid,
 		SessionService:  store,
-		SessionConfig:   &SessionConfig[*schema.Message]{PersistenceMode: SessionPersistenceModeSync},
 	})
 
 	iter := runner.Query(ctx, "trigger")
@@ -539,7 +574,7 @@ func TestStreamPersistence_SyncModeGetMessageErrorSuppressesOutput(t *testing.T)
 	}
 	require.Error(t, lastErr)
 	assert.Contains(t, lastErr.Error(), "failed to persist session events")
-	assert.False(t, sawOutput, "sync stream materialization failure must suppress the output event")
+	assert.True(t, sawOutput, "streaming output may already be live before materialization fails")
 
 	for _, ep := range store.events {
 		se, err := decodeSessionEvent[*schema.Message](ep.Data)
@@ -621,7 +656,6 @@ func TestRunnerInputEvents_MixedRoles(t *testing.T) {
 		Agent:          agent,
 		SessionID:      sid,
 		SessionService: store,
-		SessionConfig:  &SessionConfig[*schema.Message]{EventFlushBatchSize: 1},
 	})
 
 	systemMsg := schema.SystemMessage("system instruction")
@@ -664,7 +698,6 @@ func TestTurnEndOnly_PersistedAsSessionEvent(t *testing.T) {
 		Agent:          agent,
 		SessionID:      sid,
 		SessionService: store,
-		SessionConfig:  &SessionConfig[*schema.Message]{EventFlushBatchSize: 1},
 	})
 	drainSessionEvents(t, runner.Query(ctx, "input"))
 
@@ -969,7 +1002,6 @@ func TestPartialInterrupted_ThenNewRun(t *testing.T) {
 		Agent:          captured,
 		SessionID:      sid,
 		SessionService: store,
-		SessionConfig:  &SessionConfig[*schema.Message]{EventFlushBatchSize: 1},
 	})
 	drainSessionEvents(t, runner.Query(ctx, "second"))
 
@@ -1152,7 +1184,6 @@ func TestRunnerPersists_MessagesReplaced(t *testing.T) {
 		Agent:          agent,
 		SessionID:      sid,
 		SessionService: store,
-		SessionConfig:  &SessionConfig[*schema.Message]{EventFlushBatchSize: 1},
 	})
 	drainSessionEvents(t, runner.Query(ctx, "anything"))
 
@@ -1237,7 +1268,6 @@ func TestRunnerPersists_MessageUpdated_BothMessages(t *testing.T) {
 		Agent:          agent,
 		SessionID:      sid,
 		SessionService: store,
-		SessionConfig:  &SessionConfig[*schema.Message]{EventFlushBatchSize: 1},
 	})
 	drainSessionEvents(t, runner.Query(ctx, "go"))
 
@@ -1327,7 +1357,6 @@ func TestRunnerPersists_MessageInserted_AnchorAndAppend(t *testing.T) {
 		Agent:          agent,
 		SessionID:      sid,
 		SessionService: store,
-		SessionConfig:  &SessionConfig[*schema.Message]{EventFlushBatchSize: 1},
 	})
 	// We must pass the user message as input, with its existing ID already assigned,
 	// so reconstruction's anchor lookup succeeds.
@@ -1418,7 +1447,6 @@ func TestRunnerPersists_MessagesDeleted_Reconstructs(t *testing.T) {
 		Agent:          agent,
 		SessionID:      sid,
 		SessionService: store,
-		SessionConfig:  &SessionConfig[*schema.Message]{EventFlushBatchSize: 1},
 	})
 	drainSessionEvents(t, runner.Run(ctx, nil))
 
@@ -1516,7 +1544,6 @@ func TestAgentTool_ChildSessionID_FiltersFromParentLog(t *testing.T) {
 		Agent:          agent,
 		SessionID:      sid,
 		SessionService: parentStore,
-		SessionConfig:  &SessionConfig[*schema.Message]{EventFlushBatchSize: 1},
 	})
 	drainSessionEvents(t, runner.Query(ctx, "go"))
 

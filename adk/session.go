@@ -23,10 +23,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"math/rand"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -35,13 +33,8 @@ import (
 )
 
 const (
-	defaultSessionEventFlushBatchSize = 16
-	defaultSessionEventFlushInterval  = 100 * time.Millisecond
-	defaultSessionEventBufferSize     = 64
-	defaultMaxFlushRetries            = 3
-	defaultFlushRetryInitialBackoff   = 50 * time.Millisecond
-	defaultLoadPageSize               = 100
-	defaultOpenSessionTimeout         = 5 * time.Second
+	defaultLoadPageSize          = 100
+	defaultSessionAcquireTimeout = 5 * time.Second
 )
 
 // ErrInvalidEventID is returned by AppendEvents when a SessionEvent has an
@@ -82,23 +75,6 @@ type SessionBusyError struct {
 
 func (e *SessionBusyError) Error() string { return ErrSessionBusy.Error() }
 func (e *SessionBusyError) Unwrap() error { return ErrSessionBusy }
-
-// protocolErrors enumerates protocol-level sentinels that persisters MUST
-// fail-fast on. Future protocol-level sentinels MUST be added here so that
-// isProtocolError stays the single source of truth.
-var protocolErrors = []error{ErrInvalidEventID, ErrSessionTailMismatch, ErrDuplicateEventID, ErrSessionFencingTokenInvalid, ErrSessionFencingTokenExpired}
-
-// isProtocolError reports whether err matches any protocol-level sentinel.
-// Used by the persister flush loop to bypass retry/backoff for protocol
-// violations while still applying the policy to infrastructure errors.
-func isProtocolError(err error) bool {
-	for _, target := range protocolErrors {
-		if errors.Is(err, target) {
-			return true
-		}
-	}
-	return false
-}
 
 const (
 	sessionRunnerCheckpointSuffix = "/runner_checkpoint"
@@ -524,21 +500,6 @@ type MessagesDeletedEvent struct {
 	MessageIDs []string `json:"message_ids"`
 }
 
-// SessionPersistenceMode controls when session events are appended relative to
-// consumer-visible AgentEvents.
-type SessionPersistenceMode string
-
-const (
-	// SessionPersistenceModeAsync preserves the default low-latency behavior:
-	// AgentEvent delivery is decoupled from durable persistence and events are
-	// appended by a background batch persister.
-	SessionPersistenceModeAsync SessionPersistenceMode = "async"
-	// SessionPersistenceModeSync appends every persistable SessionEvent before
-	// the corresponding AgentEvent is delivered. Streaming message outputs are
-	// materialized and delivered as non-streaming events after persistence.
-	SessionPersistenceModeSync SessionPersistenceMode = "sync"
-)
-
 // SessionEventIDGenerator returns the EventID for a draft SessionEvent[M].
 //
 // Generators see the fully-populated draft (Kind, Message, Span, Extension,
@@ -568,43 +529,8 @@ func DefaultSessionEventIDGenerator[M MessageType](_ context.Context, _ *Session
 	return uuid.NewString(), nil
 }
 
-// SessionConfig tunes managed-session event persistence and loading.
+// SessionConfig tunes managed-session admission and event identity.
 type SessionConfig[M MessageType] struct {
-	// PersistenceMode controls when session events are appended relative to
-	// consumer-visible AgentEvents. Defaults to SessionPersistenceModeAsync.
-	//
-	// In async mode, AgentEvent delivery is decoupled from durable persistence;
-	// events are appended by a background persister according to batch/interval
-	// settings, while finalization still waits for pending flushes before
-	// committing checkpoints or successful turns.
-	//
-	// In sync mode, every persistable SessionEvent is appended before the
-	// corresponding AgentEvent is sent to the consumer. Protocol errors fail
-	// fast, infrastructure errors use MaxFlushRetries and
-	// FlushRetryInitialBackoff, and EventFlushBatchSize, EventFlushInterval, and
-	// EventBufferSize are ignored for writes.
-	PersistenceMode SessionPersistenceMode
-	// EventFlushBatchSize is the maximum number of events accumulated before
-	// triggering a flush to the SessionService. Defaults to 16.
-	EventFlushBatchSize int
-	// EventFlushInterval is how often the background goroutine flushes
-	// buffered events, even if the batch size has not been reached.
-	// Defaults to 100ms.
-	EventFlushInterval time.Duration
-	// EventBufferSize is the capacity of the in-memory event channel between
-	// the event producer and the background flush goroutine. Defaults to 64.
-	EventBufferSize int
-	// MaxFlushRetries is the maximum number of retry attempts when AppendEvents
-	// fails. After exhausting retries, the error is latched and the turn fails.
-	// Defaults to 3. Set a negative value to disable retries (fail on first error).
-	MaxFlushRetries int
-	// FlushRetryInitialBackoff is the base delay before the first retry.
-	// Subsequent retries use exponential backoff (2x multiplier) with jitter.
-	// Defaults to 50ms.
-	FlushRetryInitialBackoff time.Duration
-	// LoadPageSize is the number of events fetched per page when loading events
-	// for reconstruction or tail replay. Defaults to 100.
-	LoadPageSize int
 	// EventIDGenerator decides the EventID of every SessionEvent[M] produced
 	// by the runner / wrappers. The generator sees the fully-populated draft
 	// before assignment and may map it to a business-side ID. If nil,
@@ -615,13 +541,13 @@ type SessionConfig[M MessageType] struct {
 	// the generator is always invoked. Returning an empty string fails the
 	// turn closed (ErrSessionEventIDGeneratorEmpty).
 	EventIDGenerator SessionEventIDGenerator[M]
-	// OpenSessionTimeout bounds how long Runner may wait to acquire any session
+	// SessionAcquireTimeout bounds how long Runner may wait to acquire any session
 	// handle before failing the current Run/Resume/Rollback attempt.
 	//
 	// This is not a fenced-only option and does not configure the fenced handle's
 	// fencing token TTL. It applies to the session admission path in both local
 	// and fenced services.
-	OpenSessionTimeout time.Duration
+	SessionAcquireTimeout time.Duration
 }
 
 // TurnEndState is the agent-visible state materialized at a successful turn boundary.
@@ -1017,50 +943,28 @@ func ValidateEmittedSessionEventKind[M MessageType](event *SessionEvent[M]) erro
 	return NormalizeSessionEventKind(event)
 }
 
+func isSessionDurableBoundaryKind(kind SessionEventKind) bool {
+	switch kind {
+	case SessionEventMessage, SessionEventTurnEnd, SessionEventAgentInterrupt:
+		return true
+	default:
+		return false
+	}
+}
+
 func normalizeSessionConfig[M MessageType](cfg *SessionConfig[M]) SessionConfig[M] {
 	normalized := SessionConfig[M]{
-		PersistenceMode:          SessionPersistenceModeAsync,
-		EventFlushBatchSize:      defaultSessionEventFlushBatchSize,
-		EventFlushInterval:       defaultSessionEventFlushInterval,
-		EventBufferSize:          defaultSessionEventBufferSize,
-		MaxFlushRetries:          defaultMaxFlushRetries,
-		FlushRetryInitialBackoff: defaultFlushRetryInitialBackoff,
-		LoadPageSize:             defaultLoadPageSize,
-		EventIDGenerator:         DefaultSessionEventIDGenerator[M],
-		OpenSessionTimeout:       defaultOpenSessionTimeout,
+		EventIDGenerator:      DefaultSessionEventIDGenerator[M],
+		SessionAcquireTimeout: defaultSessionAcquireTimeout,
 	}
 	if cfg == nil {
 		return normalized
 	}
-	if cfg.PersistenceMode == SessionPersistenceModeSync {
-		normalized.PersistenceMode = SessionPersistenceModeSync
-	}
-	if cfg.EventFlushBatchSize > 0 {
-		normalized.EventFlushBatchSize = cfg.EventFlushBatchSize
-	}
-	if cfg.EventFlushInterval > 0 {
-		normalized.EventFlushInterval = cfg.EventFlushInterval
-	}
-	if cfg.EventBufferSize > 0 {
-		normalized.EventBufferSize = cfg.EventBufferSize
-	}
-	if cfg.MaxFlushRetries > 0 {
-		normalized.MaxFlushRetries = cfg.MaxFlushRetries
-	} else if cfg.MaxFlushRetries < 0 {
-		// Explicitly set to 0 to disable retries.
-		normalized.MaxFlushRetries = 0
-	}
-	if cfg.FlushRetryInitialBackoff > 0 {
-		normalized.FlushRetryInitialBackoff = cfg.FlushRetryInitialBackoff
-	}
-	if cfg.LoadPageSize > 0 {
-		normalized.LoadPageSize = cfg.LoadPageSize
-	}
 	if cfg.EventIDGenerator != nil {
 		normalized.EventIDGenerator = cfg.EventIDGenerator
 	}
-	if cfg.OpenSessionTimeout > 0 {
-		normalized.OpenSessionTimeout = cfg.OpenSessionTimeout
+	if cfg.SessionAcquireTimeout > 0 {
+		normalized.SessionAcquireTimeout = cfg.SessionAcquireTimeout
 	}
 	return normalized
 }
@@ -1146,11 +1050,7 @@ type sessionEventPersister[M MessageType] struct {
 	ctx       context.Context
 	handle    sessionHandle[M]
 	sessionID string
-	cfg       SessionConfig[M]
-
-	ch     chan *SessionEvent[M]
-	done   chan struct{}
-	closed int32 // atomic: 1 after closeAndWait is called
+	pending   []*SessionEvent[M]
 
 	mu  sync.Mutex
 	err error
@@ -1160,25 +1060,15 @@ func newSessionEventPersister[M MessageType](
 	ctx context.Context,
 	handle sessionHandle[M],
 	sessionID string,
-	cfg SessionConfig[M],
 ) *sessionEventPersister[M] {
-	p := &sessionEventPersister[M]{
+	return &sessionEventPersister[M]{
 		ctx:       ctx,
 		handle:    handle,
 		sessionID: sessionID,
-		cfg:       cfg,
-		done:      make(chan struct{}),
 	}
-	if p.cfg.PersistenceMode == SessionPersistenceModeSync {
-		close(p.done)
-		return p
-	}
-	p.ch = make(chan *SessionEvent[M], p.cfg.EventBufferSize)
-	go p.run()
-	return p
 }
 
-func (p *sessionEventPersister[M]) enqueue(event *SessionEvent[M]) error {
+func (p *sessionEventPersister[M]) enqueueAsync(event *SessionEvent[M]) error {
 	if event == nil || event.EventID == "" {
 		return p.getErr()
 	}
@@ -1190,102 +1080,61 @@ func (p *sessionEventPersister[M]) enqueue(event *SessionEvent[M]) error {
 	if err := p.getErr(); err != nil {
 		return err
 	}
-	if atomic.LoadInt32(&p.closed) != 0 {
+	p.mu.Lock()
+	p.pending = append(p.pending, snapshot)
+	p.mu.Unlock()
+	return nil
+}
+
+func (p *sessionEventPersister[M]) commitBoundary(event *SessionEvent[M]) error {
+	if event == nil || event.EventID == "" {
 		return p.getErr()
 	}
-	if p.cfg.PersistenceMode == SessionPersistenceModeSync {
-		if err := p.appendEventsWithRetry([]*SessionEvent[M]{snapshot}); err != nil {
-			p.setErr(err)
-			return err
-		}
+	snapshot, err := snapshotSessionEvent(event)
+	if err != nil {
+		p.setErr(err)
+		return err
+	}
+	if err := p.flushPending(); err != nil {
+		return err
+	}
+	return p.appendEvents([]*SessionEvent[M]{snapshot})
+}
+
+func (p *sessionEventPersister[M]) flushPending() error {
+	if err := p.getErr(); err != nil {
+		return err
+	}
+	p.mu.Lock()
+	events := make([]*SessionEvent[M], len(p.pending))
+	copy(events, p.pending)
+	p.mu.Unlock()
+	if len(events) == 0 {
 		return nil
 	}
-	select {
-	case p.ch <- snapshot:
-		return nil
-	case <-p.ctx.Done():
-		return p.ctx.Err()
+	if err := p.appendEvents(events); err != nil {
+		return err
 	}
+	p.mu.Lock()
+	p.pending = nil
+	p.mu.Unlock()
+	return nil
 }
 
 func (p *sessionEventPersister[M]) closeAndWait() error {
-	atomic.StoreInt32(&p.closed, 1)
-	if p.cfg.PersistenceMode == SessionPersistenceModeSync {
-		return p.getErr()
-	}
-	close(p.ch)
-	<-p.done
-	return p.getErr()
+	return p.flushPending()
 }
 
-func (p *sessionEventPersister[M]) run() {
-	defer close(p.done)
-	timer := time.NewTimer(p.cfg.EventFlushInterval)
-	defer timer.Stop()
-
-	var batch []*SessionEvent[M]
-	flush := func() {
-		if len(batch) == 0 || p.getErr() != nil {
-			batch = nil
-			return
-		}
-		entries := make([]*SessionEvent[M], len(batch))
-		copy(entries, batch)
-		batch = nil
-
-		if err := p.appendEventsWithRetry(entries); err != nil {
-			p.setErr(err)
-		}
+func (p *sessionEventPersister[M]) appendEvents(events []*SessionEvent[M]) error {
+	_, err := p.handle.appendEvents(p.ctx, &AppendSessionEventsRequest[M]{
+		SessionID: p.sessionID,
+		Events:    events,
+	})
+	if err != nil {
+		p.setErr(err)
+		return err
 	}
-
-	for {
-		select {
-		case event, ok := <-p.ch:
-			if !ok {
-				flush()
-				return
-			}
-			if p.getErr() != nil {
-				continue
-			}
-			batch = append(batch, event)
-			if len(batch) >= p.cfg.EventFlushBatchSize {
-				flush()
-				resetTimer(timer, p.cfg.EventFlushInterval)
-			}
-		case <-timer.C:
-			flush()
-			resetTimer(timer, p.cfg.EventFlushInterval)
-		}
-	}
-}
-
-func (p *sessionEventPersister[M]) appendEventsWithRetry(events []*SessionEvent[M]) error {
-	var lastErr error
-	for attempt := 0; attempt <= p.cfg.MaxFlushRetries; attempt++ {
-		if attempt > 0 {
-			backoff := p.cfg.FlushRetryInitialBackoff << uint(attempt-1)
-			jitter := time.Duration(rand.Int63n(int64(backoff)/4 + 1))
-			select {
-			case <-time.After(backoff + jitter):
-			case <-p.ctx.Done():
-				return p.ctx.Err()
-			}
-		}
-		_, err := p.handle.appendEvents(p.ctx, &AppendSessionEventsRequest[M]{
-			SessionID: p.sessionID,
-			Events:    events,
-		})
-		if err != nil {
-			lastErr = err
-			if isProtocolError(err) {
-				return err
-			}
-			continue
-		}
-		return nil
-	}
-	return lastErr
+	return nil
 }
 
 func (p *sessionEventPersister[M]) setErr(err error) {
@@ -1303,16 +1152,6 @@ func (p *sessionEventPersister[M]) getErr() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.err
-}
-
-func resetTimer(timer *time.Timer, d time.Duration) {
-	if !timer.Stop() {
-		select {
-		case <-timer.C:
-		default:
-		}
-	}
-	timer.Reset(d)
 }
 
 func stripSessionEventFields[M MessageType](event *TypedAgentEvent[M]) *TypedAgentEvent[M] {
