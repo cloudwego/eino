@@ -1329,6 +1329,9 @@ func (a *TypedChatModelAgent[M]) buildAgenticReActRunFunc(_ context.Context, bc 
 
 		var runOpts []compose.Option
 		runOpts = append(runOpts, ap.composeOpts...)
+		if a.toolsConfig.EmitInternalEvents {
+			runOpts = append(runOpts, compose.WithToolsNodeOption(compose.WithToolOption(withTypedAgentToolEventGenerator[*schema.AgenticMessage](ap.generator))))
+		}
 		if ap.input.EnableStreaming {
 			runOpts = append(runOpts, compose.WithToolsNodeOption(compose.WithToolOption(withAgentToolEnableStreaming(true))))
 		}
