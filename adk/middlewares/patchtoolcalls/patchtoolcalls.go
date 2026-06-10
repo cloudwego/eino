@@ -165,6 +165,8 @@ type normalizationPlan[M adk.MessageType] struct {
 }
 
 func buildMessageNormalizationPlan(ctx context.Context, cfg Config, messages []*schema.Message) (*normalizationPlan[*schema.Message], error) {
+	ensureMessageIDs(messages)
+
 	counts := analyzeMessages(messages)
 	if cfg.Strict && counts.hasMismatch() {
 		return nil, counts.strictError()
@@ -248,6 +250,12 @@ func analyzeMessages(messages []*schema.Message) mismatchCounts {
 	return counts
 }
 
+func ensureMessageIDs[M adk.MessageType](messages []M) {
+	for _, msg := range messages {
+		adk.EnsureMessageID(msg)
+	}
+}
+
 func keptMessages(messages []*schema.Message, cfg Config) []bool {
 	keep := make([]bool, len(messages))
 	previousCalls := make(map[string]struct{})
@@ -281,6 +289,8 @@ func keptMessages(messages []*schema.Message, cfg Config) []bool {
 }
 
 func buildAgenticNormalizationPlan(ctx context.Context, cfg Config, messages []*schema.AgenticMessage) (*normalizationPlan[*schema.AgenticMessage], error) {
+	ensureMessageIDs(messages)
+
 	counts := analyzeAgenticMessages(messages)
 	if cfg.Strict && counts.hasMismatch() {
 		return nil, counts.strictError()
