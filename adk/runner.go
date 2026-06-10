@@ -232,7 +232,7 @@ func openRunnerSession[M MessageType](
 	if service == nil {
 		return nil, errors.New("adk: session service is nil")
 	}
-	deadline := timeNow().Add(cfg.OpenSessionTimeout)
+	deadline := timeNow().Add(cfg.SessionAcquireTimeout)
 	var lastErr error
 	for {
 		result, err := service.openSession(ctx, &openSessionRequest{
@@ -301,9 +301,7 @@ func prepareRunnerSessionRun[M MessageType]( //nolint:revive // argument-limit
 	}
 	state.sessionHandle = openResult.handle
 
-	pageSize := state.sessionConfig.LoadPageSize
-
-	reconstructResult, err := reconstructSessionState[M](ctx, state.sessionHandle, sessionID, pageSize)
+	reconstructResult, err := reconstructSessionState[M](ctx, state.sessionHandle, sessionID, defaultLoadPageSize)
 	if err != nil {
 		_ = state.sessionHandle.close(ctx)
 		return nil, fmt.Errorf("failed to reconstruct session[%s]: %w", sessionID, err)
@@ -341,6 +339,7 @@ func prepareRunnerSessionRun[M MessageType]( //nolint:revive // argument-limit
 	state.checkPointID = &checkPointID
 	_, existed, err := loadRunnerSessionCheckpoint(ctx, checkPointStore, checkPointID)
 	if err != nil {
+		_ = state.sessionHandle.close(ctx)
 		return nil, err
 	}
 	if !existed {
@@ -388,9 +387,7 @@ func prepareRunnerSessionResume[M MessageType]( //nolint:revive // argument-limi
 	}
 	state.sessionHandle = openResult.handle
 
-	pageSize := state.sessionConfig.LoadPageSize
-
-	reconstructResult, err := reconstructSessionState[M](ctx, state.sessionHandle, sessionID, pageSize)
+	reconstructResult, err := reconstructSessionState[M](ctx, state.sessionHandle, sessionID, defaultLoadPageSize)
 	if err != nil {
 		_ = state.sessionHandle.close(ctx)
 		return nil, "", fmt.Errorf("failed to reconstruct session[%s]: %w", sessionID, err)
@@ -419,13 +416,15 @@ func prepareRunnerSessionResume[M MessageType]( //nolint:revive // argument-limi
 	// the absence of a pending checkpoint is fatal and reported here.
 	checkpoint, existed, err := loadRunnerSessionCheckpoint(ctx, checkPointStore, effectiveCheckPointID)
 	if err != nil {
+		_ = state.sessionHandle.close(ctx)
 		return nil, "", err
 	}
 	if !existed {
+		_ = state.sessionHandle.close(ctx)
 		if checkPointID == "" {
 			return nil, "", fmt.Errorf("no pending session checkpoint for session %q", sessionID)
 		}
-		return state, effectiveCheckPointID, nil
+		return nil, "", fmt.Errorf("checkpoint[%s] not exist", effectiveCheckPointID)
 	}
 	resumeEvent := &SessionEvent[M]{
 		Timestamp: newEventTimestamp(),
@@ -469,6 +468,35 @@ func appendRunnerSessionControlEvent[M MessageType](
 		Events:                     []*SessionEvent[M]{event},
 	})
 	return err
+}
+
+func appendRunnerSessionInputEvents[M MessageType](
+	ctx context.Context,
+	state *runnerSessionRunState[M],
+	messages []M,
+) error {
+	if state == nil || !state.enabled || state.sessionHandle == nil || len(messages) == 0 {
+		return nil
+	}
+	for _, msg := range messages {
+		se := makeInputSessionEvent[M](msg)
+		se.SessionID = state.sessionID
+		se.TurnID = state.turnID
+		if err := assignSessionEventID(ctx, se, state.sessionConfig.EventIDGenerator); err != nil {
+			return err
+		}
+		if err := ValidateEmittedSessionEventKind(se); err != nil {
+			return err
+		}
+		if _, err := state.sessionHandle.appendEvents(ctx, &AppendSessionEventsRequest[M]{
+			SessionID: state.sessionID,
+			Events:    []*SessionEvent[M]{se},
+		}); err != nil {
+			return err
+		}
+		state.initialTimeline = append(state.initialTimeline, se)
+	}
+	return nil
 }
 
 func loadRunnerSessionCheckpoint(ctx context.Context, store CheckPointStore, checkPointID string) (*runnerSessionCheckpoint, bool, error) {
@@ -576,6 +604,11 @@ func typedRunnerRunImpl[M MessageType](a TypedAgent[M], enableStreaming bool, st
 		for _, msg := range messages {
 			EnsureMessageID(msg)
 		}
+		if err := appendRunnerSessionInputEvents(ctx, sessionState, sessionState.inputMessages); err != nil {
+			_ = sessionState.sessionHandle.close(ctx)
+			return errorIterator[M](err)
+		}
+		sessionState.inputMessages = nil
 		o.sessionValues = mergeSessionValues(sessionState.latestState.SessionValues, o.sessionValues)
 		opts = append(opts, withEnableSessionEvents())
 		opts = append(opts, withEnableInternalTimelineEvents())
@@ -673,6 +706,9 @@ func typedRunnerResumeInternalImpl[M MessageType](a TypedAgent[M], store CheckPo
 
 	ctx, runCtx, resumeInfo, err := runnerLoadCheckPointForSession(store, ctx, checkPointID, sessionState.enabled)
 	if err != nil {
+		if sessionState != nil && sessionState.enabled && sessionState.sessionHandle != nil {
+			_ = sessionState.sessionHandle.close(ctx)
+		}
 		return nil, fmt.Errorf("failed to load from checkpoint: %w", err)
 	}
 
@@ -714,6 +750,9 @@ func typedRunnerResumeInternalImpl[M MessageType](a TypedAgent[M], store CheckPo
 		fa := toFlowAgent(ctx, concreteAgent)
 		ra, ok := any(fa).(ResumableAgent)
 		if !ok {
+			if sessionState.enabled && sessionState.sessionHandle != nil {
+				_ = sessionState.sessionHandle.close(ctx)
+			}
 			return nil, fmt.Errorf("agent %T does not support resume", a)
 		}
 		aIter := ra.Resume(ctx, resumeInfo, opts...)
@@ -726,6 +765,9 @@ func typedRunnerResumeInternalImpl[M MessageType](a TypedAgent[M], store CheckPo
 	fa := toTypedFlowAgent(a)
 	ra, ok := any(fa).(TypedResumableAgent[M])
 	if !ok {
+		if sessionState.enabled && sessionState.sessionHandle != nil {
+			_ = sessionState.sessionHandle.close(ctx)
+		}
 		return nil, fmt.Errorf("agent %T does not support resume", a)
 	}
 	aIter := ra.Resume(ctx, resumeInfo, opts...)
@@ -764,7 +806,7 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 		pendingCheckpoint *deferredRunnerCheckpoint
 	)
 	if sessionState != nil && sessionState.enabled {
-		persister = newSessionEventPersister[M](ctx, sessionState.sessionHandle, sessionState.sessionID, sessionState.sessionConfig)
+		persister = newSessionEventPersister[M](ctx, sessionState.sessionHandle, sessionState.sessionID)
 	}
 	if enableTimelineEvents && sessionState != nil && sessionState.enabled {
 		for _, se := range sessionState.initialTimeline {
@@ -773,8 +815,6 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 			}
 		}
 	}
-	syncPersistence := sessionState != nil && sessionState.enabled &&
-		sessionState.sessionConfig.PersistenceMode == SessionPersistenceModeSync
 	setPersistErr := func(err error) {
 		if err != nil && persistErr == nil {
 			persistErr = err
@@ -790,7 +830,27 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 		se.TurnID = sessionState.turnID
 		return se
 	}
-	enqueueSessionEvent := func(se *SessionEvent[M]) error {
+	enqueueAsyncSessionEvent := func(se *SessionEvent[M]) error {
+		if persister == nil || se == nil {
+			return nil
+		}
+		if err := persister.enqueueAsync(se); err != nil {
+			setPersistErr(err)
+			return err
+		}
+		return nil
+	}
+	commitSessionBoundary := func(se *SessionEvent[M]) error {
+		if persister == nil || se == nil {
+			return nil
+		}
+		if err := persister.commitBoundary(se); err != nil {
+			setPersistErr(err)
+			return err
+		}
+		return nil
+	}
+	persistSessionEvent := func(se *SessionEvent[M]) error {
 		if persister == nil || se == nil {
 			return nil
 		}
@@ -799,37 +859,69 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 			setPersistErr(err)
 			return err
 		}
-		if err := persister.enqueue(se); err != nil {
-			setPersistErr(err)
-			return err
+		if isSessionDurableBoundaryKind(se.Kind) {
+			return commitSessionBoundary(se)
 		}
-		return nil
+		return enqueueAsyncSessionEvent(se)
 	}
-	sendTimelineEvent := func(se *SessionEvent[M]) {
+	sendTimelineEvent := func(se *SessionEvent[M]) bool {
 		if se == nil {
-			return
+			return false
 		}
 		annotateSessionEvent(se)
 		if se.EventID == "" {
 			if err := assignSessionEventIDFromContext(ctx, se); err != nil {
 				setPersistErr(err)
-				return
+				return false
 			}
 		}
 		if se.Timestamp.IsZero() {
 			se.Timestamp = newEventTimestamp()
 		}
-		if err := ValidateEmittedSessionEventKind(se); err != nil {
-			setPersistErr(err)
-			return
+		if err := persistSessionEvent(se); err != nil {
+			return false
 		}
 		event := &TypedAgentEvent[M]{EventID: se.EventID, Timestamp: se.Timestamp, SessionEvent: se}
-		if err := enqueueSessionEvent(se); err != nil && syncPersistence {
-			return
-		}
 		if enableTimelineEvents {
 			gen.Send(event)
 		}
+		return true
+	}
+	assignStreamingShellEventID := func(event *TypedAgentEvent[M]) error {
+		if event == nil || event.EventID != "" {
+			return nil
+		}
+		shell := &SessionEvent[M]{
+			SessionID: sessionState.sessionID,
+			TurnID:    sessionState.turnID,
+			Timestamp: event.Timestamp,
+			Kind:      SessionEventMessage,
+		}
+		if err := assignSessionEventID(ctx, shell, sessionState.sessionConfig.EventIDGenerator); err != nil {
+			setPersistErr(err)
+			return err
+		}
+		event.EventID = shell.EventID
+		return nil
+	}
+	toSessionEventCheckedWithGenerator := func(event *TypedAgentEvent[M]) (*SessionEvent[M], error) {
+		se, err := toSessionEventChecked(event)
+		if err == nil || event == nil || event.EventID != "" || event.SessionEvent != nil ||
+			event.Output == nil || event.Output.MessageOutput == nil ||
+			isNilMessage(event.Output.MessageOutput.Message) {
+			return se, err
+		}
+		draft := &SessionEvent[M]{
+			Timestamp: event.Timestamp,
+			Kind:      SessionEventMessage,
+			Message:   event.Output.MessageOutput.Message,
+		}
+		annotateSessionEvent(draft)
+		if idErr := assignSessionEventID(ctx, draft, sessionState.sessionConfig.EventIDGenerator); idErr != nil {
+			return nil, idErr
+		}
+		event.EventID = draft.EventID
+		return draft, NormalizeSessionEventKind(draft)
 	}
 	// saveCheckpointNow is the path used when no session persister is active —
 	// the checkpoint is written immediately because there are no queued events
@@ -852,15 +944,6 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 		}
 	}
 
-	// Emit caller-provided input messages as session events at turn start, so the
-	// live timeline and persisted log carry the user's input alongside the
-	// agent's output. Skipped on resume (sessionState.inputMessages is nil).
-	if persister != nil && len(sessionState.inputMessages) > 0 {
-		for _, msg := range sessionState.inputMessages {
-			se := makeInputSessionEvent[M](msg)
-			sendTimelineEvent(se)
-		}
-	}
 	for {
 		event, ok := aIter.Next()
 		if !ok {
@@ -960,125 +1043,73 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 				event.SessionEvent.SessionID != sessionState.sessionID
 
 			if !fromOtherSession {
-				if event.EventID == "" {
-					// live-only TypedAgentEvent fallback; not a SessionEvent[M] draft,
-					// intentionally bypasses assignSessionEventIDFromContext. The
-					// helper assigns drafts; here we need an ID for the live-only
-					// transport-level TypedAgentEvent before any SessionEvent[M] is
-					// materialized. The application generator (or default) is
-					// invoked with a nil draft so producer-owned identity is still
-					// honored, and the eventual materialized SessionEvent[M] takes
-					// the same ID via the wrapper's draft path. Failures fail closed.
-					gen := sessionState.sessionConfig.EventIDGenerator
-					if gen == nil {
-						gen = DefaultSessionEventIDGenerator[M]
+				if event.Output != nil && event.Output.MessageOutput != nil &&
+					event.Output.MessageOutput.IsStreaming && event.Output.MessageOutput.MessageStream != nil {
+					if err := assignStreamingShellEventID(event); err != nil {
+						continue
 					}
-					id, err := gen(ctx, nil)
+					// Streaming output is split into two stream copies: copies[1] is
+					// rewritten onto the live event and sent immediately so live
+					// consumers see no extra latency. The message boundary is committed
+					// after copies[0] is drained and fully materialized.
+					copies := event.Output.MessageOutput.MessageStream.Copy(2)
+					liveOutput := *event.Output
+					liveMV := *event.Output.MessageOutput
+					liveMV.MessageStream = copies[1]
+
+					liveOutput.MessageOutput = &liveMV
+					event.Output = &liveOutput
+					// Attach a SessionEvent shell so downstream consumers know this
+					// streaming event's persisted identity before materialization.
+					event.SessionEvent = &SessionEvent[M]{
+						SessionID: sessionState.sessionID,
+						EventID:   event.EventID,
+						Timestamp: event.Timestamp,
+						Kind:      SessionEventMessage,
+					}
+					liveEvent := event
+					if !enableTimelineEvents {
+						liveEvent = stripSessionEventFields(liveEvent)
+					}
+					if liveEvent != nil {
+						gen.Send(liveEvent)
+					}
+					liveDelivered = true
+
+					persistCopy := &TypedMessageVariant[M]{IsStreaming: true, MessageStream: copies[0]}
+					persistedMsg, err := persistCopy.GetMessage()
 					if err != nil {
 						setPersistErr(err)
 						continue
 					}
-					if id == "" {
-						setPersistErr(ErrSessionEventIDGeneratorEmpty)
+
+					persistMV := *event.Output.MessageOutput
+					persistMV.Message = persistedMsg
+					persistMV.MessageStream = nil
+					persistMV.IsStreaming = false
+					persistOutput := *event.Output
+					persistOutput.MessageOutput = &persistMV
+					persistEvent := *event
+					persistEvent.Output = &persistOutput
+					persistEvent.SessionEvent = nil
+
+					se, err := toSessionEventChecked(&persistEvent)
+					if err != nil {
+						setPersistErr(err)
 						continue
 					}
-					event.EventID = id
-				}
-				if event.Output != nil && event.Output.MessageOutput != nil &&
-					event.Output.MessageOutput.IsStreaming && event.Output.MessageOutput.MessageStream != nil {
-					if syncPersistence {
-						persistedMsg, err := event.Output.MessageOutput.GetMessage()
-						if err != nil {
-							setPersistErr(err)
-							continue
-						}
-						persistMV := *event.Output.MessageOutput
-						persistMV.Message = persistedMsg
-						persistMV.MessageStream = nil
-						persistMV.IsStreaming = false
-						persistOutput := *event.Output
-						persistOutput.MessageOutput = &persistMV
-						persistEvent := *event
-						persistEvent.Output = &persistOutput
-
-						se, err := toSessionEventChecked(&persistEvent)
-						if err != nil {
-							setPersistErr(err)
-							continue
-						}
-						if se != nil {
-							if err := enqueueSessionEvent(se); err != nil {
-								continue
-							}
-							persistEvent.SessionEvent = se
-						}
-						event = &persistEvent
-					} else {
-						// Streaming output is split into two stream copies: copies[1] is
-						// rewritten onto the live event and sent immediately so live
-						// consumers see no extra latency, copies[0] is then drained
-						// synchronously to materialize the persisted SessionEvent.
-						copies := event.Output.MessageOutput.MessageStream.Copy(2)
-						liveOutput := *event.Output
-						liveMV := *event.Output.MessageOutput
-						liveMV.MessageStream = copies[1]
-
-						liveOutput.MessageOutput = &liveMV
-						event.Output = &liveOutput
-						// Attach a SessionEvent shell so downstream consumers know
-						// this streaming event's persisted identity (Kind + EventID)
-						// before the message is fully materialized. The Message field
-						// is nil; consumers should read content from MessageOutput.
-						event.SessionEvent = &SessionEvent[M]{
-							SessionID: sessionState.sessionID,
-							EventID:   event.EventID,
-							Timestamp: event.Timestamp,
-							Kind:      SessionEventMessage,
-						}
-						liveEvent := event
-						if !enableTimelineEvents {
-							liveEvent = stripSessionEventFields(liveEvent)
-						}
-						if liveEvent != nil {
-							gen.Send(liveEvent)
-						}
-						liveDelivered = true
-
-						persistCopy := &TypedMessageVariant[M]{IsStreaming: true, MessageStream: copies[0]}
-						persistedMsg, err := persistCopy.GetMessage()
-						if err != nil {
-							setPersistErr(err)
-							continue
-						}
-
-						persistMV := *event.Output.MessageOutput
-						persistMV.Message = persistedMsg
-						persistMV.MessageStream = nil
-						persistMV.IsStreaming = false
-						persistOutput := *event.Output
-						persistOutput.MessageOutput = &persistMV
-						persistEvent := *event
-						persistEvent.Output = &persistOutput
-						persistEvent.SessionEvent = nil
-
-						se, err := toSessionEventChecked(&persistEvent)
-						if err != nil {
-							setPersistErr(err)
-							continue
-						}
-						if se != nil {
-							_ = enqueueSessionEvent(se)
-						}
+					if se != nil {
+						_ = persistSessionEvent(se)
 					}
 				} else {
 					// Non-streaming events go through toSessionEvent directly.
-					se, err := toSessionEventChecked(event)
+					se, err := toSessionEventCheckedWithGenerator(event)
 					if err != nil {
 						setPersistErr(err)
 						se = nil
 					}
 					if se != nil {
-						if err := enqueueSessionEvent(se); err != nil && syncPersistence {
+						if err := persistSessionEvent(se); err != nil {
 							continue
 						}
 						// Backfill SessionEvent onto the live event so downstream
@@ -1254,11 +1285,11 @@ func (r *sessionTurnResult[M]) finalize(ctx context.Context) error {
 			return fmt.Errorf("%s: %w", r.pendingCheckpoint.errLabel, err)
 		}
 	}
-	if r.interrupted || r.cancelled {
-		return nil
-	}
 	if r.persistErr != nil {
 		return fmt.Errorf("failed to persist session events: %w", r.persistErr)
+	}
+	if r.interrupted || r.cancelled {
+		return nil
 	}
 	if r.terminalErr != nil {
 		return nil
