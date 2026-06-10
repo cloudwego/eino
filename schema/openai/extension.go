@@ -38,6 +38,19 @@ type AssistantGenTextExtension struct {
 	Annotations []*TextAnnotation `json:"annotations,omitempty"`
 }
 
+type ReasoningExtension struct {
+	// Content is the reasoning text content.
+	Content []*ReasoningContent `json:"content,omitempty"`
+}
+
+type ReasoningContent struct {
+	// Index specifies the index position of this content in the final response.
+	// Only available in streaming response.
+	Index *int `json:"index,omitempty"`
+
+	Text string `json:"text,omitempty"`
+}
+
 type ResponseError struct {
 	Code    ResponseErrorCode `json:"code,omitempty"`
 	Message string            `json:"message,omitempty"`
@@ -57,6 +70,8 @@ type OutputRefusal struct {
 }
 
 type TextAnnotation struct {
+	// Index specifies the index position of this annotation in the final response.
+	// Only available in streaming response.
 	Index int `json:"index,omitempty"`
 
 	Type TextAnnotationType `json:"type,omitempty"`
@@ -161,6 +176,62 @@ func ConcatAssistantGenTextExtensions(chunks []*AssistantGenTextExtension) (*Ass
 			ret.Refusal = ext.Refusal
 		} else {
 			ret.Refusal.Reason += ext.Refusal.Reason
+		}
+	}
+
+	return ret, nil
+}
+
+// ConcatReasoningExtensions concatenates multiple ReasoningExtension chunks into a single one.
+func ConcatReasoningExtensions(chunks []*ReasoningExtension) (*ReasoningExtension, error) {
+	if len(chunks) == 0 {
+		return nil, fmt.Errorf("no reasoning extension found")
+	}
+
+	ret := &ReasoningExtension{}
+
+	var (
+		indices        []int
+		indexToContent = map[int]*ReasoningContent{}
+		hasIndexed     bool
+		hasUnindexed   bool
+	)
+
+	for _, ext := range chunks {
+		if ext == nil {
+			continue
+		}
+		for _, c := range ext.Content {
+			if c == nil {
+				continue
+			}
+
+			if c.Index == nil {
+				hasUnindexed = true
+				ret.Content = append(ret.Content, &ReasoningContent{Text: c.Text})
+				continue
+			}
+
+			hasIndexed = true
+			idx := *c.Index
+			if existing, ok := indexToContent[idx]; ok {
+				existing.Text += c.Text
+			} else {
+				indexToContent[idx] = &ReasoningContent{Text: c.Text}
+				indices = append(indices, idx)
+			}
+		}
+	}
+
+	if hasIndexed && hasUnindexed {
+		return nil, fmt.Errorf("reasoning content chunks mix indexed and non-indexed content")
+	}
+
+	if hasIndexed {
+		sort.Ints(indices)
+		ret.Content = make([]*ReasoningContent, 0, len(indices))
+		for _, idx := range indices {
+			ret.Content = append(ret.Content, indexToContent[idx])
 		}
 	}
 

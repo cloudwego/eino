@@ -20,6 +20,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+
+	"github.com/cloudwego/eino/internal/generic"
 )
 
 func TestConcatResponseMetaExtensions(t *testing.T) {
@@ -188,6 +190,79 @@ func TestConcatAssistantGenTextExtensions(t *testing.T) {
 		}
 
 		_, err := ConcatAssistantGenTextExtensions(exts)
+		assert.Error(t, err)
+	})
+}
+
+func TestConcatReasoningExtensions(t *testing.T) {
+	t.Run("empty chunks - error", func(t *testing.T) {
+		_, err := ConcatReasoningExtensions(nil)
+		assert.Error(t, err)
+	})
+
+	t.Run("single extension", func(t *testing.T) {
+		ext := &ReasoningExtension{
+			Content: []*ReasoningContent{
+				{Text: "hello", Index: generic.PtrOf(0)},
+			},
+		}
+
+		result, err := ConcatReasoningExtensions([]*ReasoningExtension{ext})
+		assert.NoError(t, err)
+		assert.Len(t, result.Content, 1)
+		assert.Equal(t, "hello", result.Content[0].Text)
+	})
+
+	t.Run("streaming scenario - same index concatenated, ordered by index", func(t *testing.T) {
+		exts := []*ReasoningExtension{
+			{Content: []*ReasoningContent{{Text: "he", Index: generic.PtrOf(0)}}},
+			{Content: []*ReasoningContent{{Text: "first", Index: generic.PtrOf(1)}}},
+			{Content: []*ReasoningContent{{Text: "llo", Index: generic.PtrOf(0)}}},
+		}
+
+		result, err := ConcatReasoningExtensions(exts)
+		assert.NoError(t, err)
+		assert.Len(t, result.Content, 2)
+		assert.Nil(t, result.Content[0].Index)
+		assert.Equal(t, "hello", result.Content[0].Text)
+		assert.Nil(t, result.Content[1].Index)
+		assert.Equal(t, "first", result.Content[1].Text)
+	})
+
+	t.Run("nil extension and nil content skipped", func(t *testing.T) {
+		exts := []*ReasoningExtension{
+			nil,
+			{Content: []*ReasoningContent{nil, {Text: "ok", Index: generic.PtrOf(0)}}},
+		}
+
+		result, err := ConcatReasoningExtensions(exts)
+		assert.NoError(t, err)
+		assert.Len(t, result.Content, 1)
+		assert.Equal(t, "ok", result.Content[0].Text)
+	})
+
+	t.Run("all unindexed - appended in arrival order", func(t *testing.T) {
+		exts := []*ReasoningExtension{
+			{Content: []*ReasoningContent{{Text: "he"}}},
+			{Content: []*ReasoningContent{{Text: "llo"}}},
+		}
+
+		result, err := ConcatReasoningExtensions(exts)
+		assert.NoError(t, err)
+		assert.Len(t, result.Content, 2)
+		assert.Nil(t, result.Content[0].Index)
+		assert.Equal(t, "he", result.Content[0].Text)
+		assert.Nil(t, result.Content[1].Index)
+		assert.Equal(t, "llo", result.Content[1].Text)
+	})
+
+	t.Run("mixed indexed and unindexed - error", func(t *testing.T) {
+		exts := []*ReasoningExtension{
+			{Content: []*ReasoningContent{{Text: "indexed", Index: generic.PtrOf(0)}}},
+			{Content: []*ReasoningContent{{Text: "no meta"}}},
+		}
+
+		_, err := ConcatReasoningExtensions(exts)
 		assert.Error(t, err)
 	})
 }
