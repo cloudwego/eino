@@ -67,8 +67,6 @@ func init() {
 	gob.Register(benchFunctionCall{})
 	gob.Register(benchCustomType{})
 	gob.Register(benchStructWithInterface{})
-	gob.Register(map[string]any{})
-	gob.Register([]any{})
 }
 
 func createSimpleMessage() benchMessage {
