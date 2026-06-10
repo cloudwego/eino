@@ -26,6 +26,7 @@ import (
 	"github.com/cloudwego/eino/callbacks"
 	"github.com/cloudwego/eino/components"
 	"github.com/cloudwego/eino/components/model"
+	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -237,6 +238,10 @@ func newFailoverModelWrapper[M MessageType](inner model.BaseModel[M], config *Mo
 
 func (f *failoverModelWrapper[M]) needFailover(ctx context.Context, outputMessage M, outputErr error) bool {
 	if ctx.Err() != nil {
+		return false
+	}
+
+	if _, ok := compose.ExtractInterruptInfo(outputErr); ok {
 		return false
 	}
 
