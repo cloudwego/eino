@@ -94,11 +94,11 @@ func createComplexMessage() benchMessage {
 			"top_p":             0.95,
 			"frequency_penalty": 0.0,
 			"presence_penalty":  0.0,
-			"stop_sequences":    []any{"END", "STOP"},
-			"metadata": map[string]any{
-				"request_id": "req_abc123xyz",
-				"timestamp":  1234567890,
-				"user_id":    "user_456",
+			"stop_sequences":    []string{"END", "STOP"},
+			"metadata": benchCustomType{
+				Provider: "benchmark",
+				Model:    "metadata",
+				Version:  1,
 			},
 		},
 	}
@@ -128,14 +128,8 @@ func createLargeMessage() benchMessage {
 	for i := 0; i < 50; i++ {
 		extra[fmt.Sprintf("key_%d", i)] = fmt.Sprintf("value_%d", i)
 	}
-	extra["nested"] = map[string]any{
-		"level1": map[string]any{
-			"level2": map[string]any{
-				"level3": "deep value",
-			},
-		},
-	}
-	extra["list"] = []any{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}
+	extra["nested"] = benchCustomType{Provider: "benchmark", Model: "nested", Version: 3}
+	extra["list"] = []int{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}
 
 	return benchMessage{
 		Role:    "assistant",
