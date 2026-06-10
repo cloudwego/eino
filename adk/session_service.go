@@ -105,7 +105,10 @@ func (h *localSessionHandle[M]) loadEvents(ctx context.Context, req *LoadSession
 	if err != nil {
 		return nil, err
 	}
-	if res != nil {
+	// Capture the snapshot tail only when the store actually returned one. A
+	// load that did not request the tail (or a non-first reconstruct page) leaves
+	// it empty, and that empty value must not clobber a tail captured earlier.
+	if res != nil && res.SessionTailEventID != "" {
 		h.mu.Lock()
 		h.tailID = res.SessionTailEventID
 		h.mu.Unlock()
@@ -200,7 +203,10 @@ func (h *fencedSessionHandle[M]) loadEvents(ctx context.Context, req *LoadSessio
 	if err != nil {
 		return nil, err
 	}
-	if res != nil {
+	// Capture the snapshot tail only when the store actually returned one. A
+	// load that did not request the tail (or a non-first reconstruct page) leaves
+	// it empty, and that empty value must not clobber a tail captured earlier.
+	if res != nil && res.SessionTailEventID != "" {
 		h.mu.Lock()
 		h.tailID = res.SessionTailEventID
 		h.mu.Unlock()
