@@ -319,11 +319,13 @@ func prepareRunnerSessionRun[M MessageType]( //nolint:revive // argument-limit
 		TurnID:    state.turnID,
 		Lifecycle: &LifecycleEvent{Scope: LifecycleScopeSession, State: SessionRunStateRunning},
 	}
-	if err := assignSessionEventID(ctx, runningEvent, state.sessionConfig.EventIDGenerator); err != nil {
+	err = assignSessionEventID(ctx, runningEvent, state.sessionConfig.EventIDGenerator)
+	if err != nil {
 		_ = state.sessionHandle.close(ctx)
 		return nil, err
 	}
-	if err := appendRunnerSessionControlEvent(ctx, state, runningEvent, ""); err != nil {
+	err = appendRunnerSessionControlEvent(ctx, state, runningEvent, "")
+	if err != nil {
 		_ = state.sessionHandle.close(ctx)
 		return nil, err
 	}
@@ -352,7 +354,7 @@ func prepareRunnerSessionRun[M MessageType]( //nolint:revive // argument-limit
 	return state, nil
 }
 
-func prepareRunnerSessionResume[M MessageType](
+func prepareRunnerSessionResume[M MessageType]( //nolint:revive // argument-limit
 	ctx context.Context,
 	checkPointStore CheckPointStore,
 	sessionID string,
@@ -568,12 +570,12 @@ func typedRunnerRunImpl[M MessageType](a TypedAgent[M], enableStreaming bool, st
 		// Capture caller-provided messages BEFORE prepending history. These will be
 		// emitted as session events at turn start so they appear in the event log.
 		sessionState.inputMessages = append([]M{}, messages...)
-		// Assign eino message IDs to input messages (needed for BeforeMessageID references
-		// emitted by middlewares that anchor on user messages).
-		for _, msg := range sessionState.inputMessages {
+		messages = append(append([]M{}, sessionState.latestState.Messages...), sessionState.inputMessages...)
+		// Assign IDs before messages can be both persisted and inspected by
+		// middleware, avoiding concurrent lazy ID mutation during event snapshotting.
+		for _, msg := range messages {
 			EnsureMessageID(msg)
 		}
-		messages = append(append([]M{}, sessionState.latestState.Messages...), sessionState.inputMessages...)
 		o.sessionValues = mergeSessionValues(sessionState.latestState.SessionValues, o.sessionValues)
 		opts = append(opts, withEnableSessionEvents())
 		opts = append(opts, withEnableInternalTimelineEvents())

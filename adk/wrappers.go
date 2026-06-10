@@ -911,9 +911,13 @@ func GetMessageID[M MessageType](msg M) string {
 func EnsureMessageID[M MessageType](msg M) {
 	switch v := any(msg).(type) {
 	case *schema.Message:
-		v.Extra = internal.EnsureMessageID(v.Extra)
+		if internal.GetMessageID(v.Extra) == "" {
+			v.Extra = internal.EnsureMessageID(v.Extra)
+		}
 	case *schema.AgenticMessage:
-		v.Extra = internal.EnsureMessageID(v.Extra)
+		if internal.GetMessageID(v.Extra) == "" {
+			v.Extra = internal.EnsureMessageID(v.Extra)
+		}
 	}
 }
 
