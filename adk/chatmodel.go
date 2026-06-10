@@ -280,6 +280,12 @@ func newDefaultGenModelInput[M MessageType]() TypedGenModelInput[M] {
 	}
 }
 
+func ensureGeneratedMessageIDs[M MessageType](messages []M) {
+	for _, msg := range messages {
+		EnsureMessageID(msg)
+	}
+}
+
 // TypedChatModelAgentState represents the state of a chat model agent during conversation.
 // This is the primary state type for both TypedChatModelAgentMiddleware and AgentMiddleware callbacks.
 type TypedChatModelAgentState[M MessageType] struct {
@@ -1121,6 +1127,9 @@ func (a *TypedChatModelAgent[M]) buildNoToolsRunFunc(_ context.Context) (typedRu
 			if err != nil {
 				return nil, err
 			}
+			if p.sessionEvents {
+				ensureGeneratedMessageIDs(messages)
+			}
 			if err := compose.ProcessState(ctx, func(_ context.Context, st *typedState[M]) error {
 				st.Messages = append(st.Messages, messages...)
 				return nil
@@ -1289,6 +1298,9 @@ func (a *TypedChatModelAgent[M]) buildMessageReActRunFunc(_ context.Context, bc 
 					if genErr != nil {
 						return nil, genErr
 					}
+					if mp.sessionEvents {
+						ensureGeneratedMessageIDs(messages)
+					}
 					return &reactInput{
 						Messages: messages,
 					}, nil
@@ -1443,6 +1455,9 @@ func (a *TypedChatModelAgent[M]) buildAgenticReActRunFunc(_ context.Context, bc 
 					messages, genErr := genModelInputFn(ctx, in.instruction, in.input)
 					if genErr != nil {
 						return nil, genErr
+					}
+					if ap.sessionEvents {
+						ensureGeneratedMessageIDs(messages)
 					}
 					return &agenticReactInput{
 						Messages: messages,
