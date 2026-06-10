@@ -182,6 +182,140 @@ func TestFileStoreEscapedSessionIDPath(t *testing.T) {
 	assert.Equal(t, url.PathEscape(sessionID)+".evlog", entries[0].Name())
 }
 
+func TestFileStoreValidationReplayAndReversePagination(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	store, err := session.NewFileStore[*schema.Message](dir, nil)
+	require.NoError(t, err)
+
+	_, err = session.NewFileSessionService[*schema.Message]("", nil)
+	require.Error(t, err)
+
+	service, err := session.NewFileSessionService[*schema.Message](filepath.Join(dir, "svc"), nil)
+	require.NoError(t, err)
+	assert.NotNil(t, service)
+
+	_, err = store.AppendEvents(ctx, nil)
+	require.Error(t, err)
+
+	empty, err := store.LoadEvents(ctx, &adk.LoadSessionEventsRequest{SessionID: "empty", Reverse: true})
+	require.NoError(t, err)
+	assert.Empty(t, empty.Events)
+	assert.Empty(t, empty.SessionTailEventID)
+
+	events := []*adk.SessionEvent[*schema.Message]{
+		testMessageEvent("e1", "one"),
+		testSpanEvent("e2"),
+		testTurnEndEvent("e3", "turn-1"),
+	}
+	res, err := store.AppendEvents(ctx, &adk.AppendSessionEventsRequest[*schema.Message]{
+		SessionID: "s",
+		Events:    events,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "e3", res.SessionTailEventID)
+
+	replay, err := store.AppendEvents(ctx, &adk.AppendSessionEventsRequest[*schema.Message]{
+		SessionID:                  "s",
+		ExpectedSessionTailEventID: "",
+		Events:                     events,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "e3", replay.SessionTailEventID)
+
+	res, err = store.AppendEvents(ctx, &adk.AppendSessionEventsRequest[*schema.Message]{
+		SessionID:                  "s",
+		ExpectedSessionTailEventID: "e3",
+		Events:                     []*adk.SessionEvent[*schema.Message]{testMessageEvent("e4", "four")},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "e4", res.SessionTailEventID)
+
+	_, err = store.AppendEvents(ctx, &adk.AppendSessionEventsRequest[*schema.Message]{
+		SessionID:                  "s",
+		ExpectedSessionTailEventID: "missing",
+		Events:                     []*adk.SessionEvent[*schema.Message]{testMessageEvent("e5", "five")},
+	})
+	require.ErrorIs(t, err, adk.ErrSessionTailMismatch)
+
+	_, err = store.AppendEvents(ctx, &adk.AppendSessionEventsRequest[*schema.Message]{
+		SessionID:                  "s",
+		ExpectedSessionTailEventID: "e4",
+		Events:                     []*adk.SessionEvent[*schema.Message]{testMessageEvent("e1", "duplicate existing")},
+	})
+	require.ErrorIs(t, err, adk.ErrDuplicateEventID)
+
+	_, err = store.AppendEvents(ctx, &adk.AppendSessionEventsRequest[*schema.Message]{
+		SessionID: "s2",
+		Events: []*adk.SessionEvent[*schema.Message]{
+			testMessageEvent("dup", "one"),
+			testMessageEvent("dup", "two"),
+		},
+	})
+	require.ErrorIs(t, err, adk.ErrDuplicateEventID)
+
+	_, err = store.LoadEvents(ctx, &adk.LoadSessionEventsRequest{SessionID: "s", After: "missing"})
+	require.ErrorIs(t, err, adk.ErrEventIDOutOfRange)
+	_, err = store.LoadEvents(ctx, &adk.LoadSessionEventsRequest{SessionID: "s", Reverse: true, After: "missing"})
+	require.ErrorIs(t, err, adk.ErrEventIDOutOfRange)
+
+	forward, err := store.LoadEvents(ctx, &adk.LoadSessionEventsRequest{
+		SessionID: "s",
+		After:     "e1",
+		Kinds:     []adk.SessionEventKind{adk.SessionEventTurnEnd, adk.SessionEventMessage},
+		Limit:     1,
+	})
+	require.NoError(t, err)
+	require.Len(t, forward.Events, 1)
+	assert.Equal(t, "e3", forward.Events[0].EventID)
+	assert.Equal(t, "e3", forward.Next)
+
+	reverse, err := store.LoadEvents(ctx, &adk.LoadSessionEventsRequest{
+		SessionID: "s",
+		Reverse:   true,
+		After:     "e4",
+		Limit:     1,
+	})
+	require.NoError(t, err)
+	require.Len(t, reverse.Events, 1)
+	assert.Equal(t, "e3", reverse.Events[0].EventID)
+	assert.Equal(t, "e3", reverse.Next)
+	assert.Equal(t, "e4", reverse.SessionTailEventID)
+}
+
+func TestFileStoreRejectsCorruptedRecordsOnIndexRebuild(t *testing.T) {
+	ctx := context.Background()
+	cases := map[string]string{
+		"missing newline":     "e1\tmessage\t{}",
+		"empty event id":      "\tmessage\t{}\n",
+		"missing kind tab":    "e1\tmessage-only\n",
+		"duplicate event id":  "e1\tmessage\t{}\ne1\tmessage\t{}\n",
+		"metadata mismatches": "e1\tturn_end\t{\"event_id\":\"e1\",\"kind\":\"message\",\"message\":{\"role\":\"user\",\"content\":\"x\"}}\n",
+		"invalid event body":  "e1\tmessage\tnot-json\n",
+		"invalid event shape": "e1\tmessage\t{\"event_id\":\"e1\",\"kind\":\"message\"}\n",
+		"empty session id":    "",
+	}
+
+	for name, content := range cases {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			store, err := session.NewFileStore[*schema.Message](dir, nil)
+			require.NoError(t, err)
+
+			if name == "empty session id" {
+				_, err = store.LoadEvents(ctx, &adk.LoadSessionEventsRequest{})
+				require.Error(t, err)
+				return
+			}
+
+			path := filepath.Join(dir, url.PathEscape("s")+".evlog")
+			require.NoError(t, os.WriteFile(path, []byte(content), 0o644))
+			_, err = store.LoadEvents(ctx, &adk.LoadSessionEventsRequest{SessionID: "s"})
+			require.Error(t, err)
+		})
+	}
+}
+
 func withTurn(event *adk.SessionEvent[*schema.Message], turnID string) *adk.SessionEvent[*schema.Message] {
 	event.TurnID = turnID
 	return event
