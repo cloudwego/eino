@@ -261,6 +261,7 @@ func copyTypedAgentEvent[M MessageType](ae *TypedAgentEvent[M]) *TypedAgentEvent
 	copied.Output.MessageOutput = &TypedMessageVariant[M]{
 		IsStreaming: mv.IsStreaming,
 		Role:        mv.Role,
+		AgenticRole: mv.AgenticRole,
 		ToolName:    mv.ToolName,
 	}
 	if mv.IsStreaming {

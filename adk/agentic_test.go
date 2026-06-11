@@ -1206,7 +1206,8 @@ func TestCoverage_CopyAgenticEvent(t *testing.T) {
 		RunPath:   []RunStep{{agentName: "root"}, {agentName: "agent1"}},
 		Output: &TypedAgentOutput[*schema.AgenticMessage]{
 			MessageOutput: &TypedMessageVariant[*schema.AgenticMessage]{
-				Message: agenticMsg("hello"),
+				Message:     agenticMsg("hello"),
+				AgenticRole: schema.AgenticRoleTypeAssistant,
 			},
 		},
 		Action: &AgentAction{
@@ -1218,6 +1219,7 @@ func TestCoverage_CopyAgenticEvent(t *testing.T) {
 	assert.Equal(t, original.AgentName, copied.AgentName)
 	assert.Equal(t, len(original.RunPath), len(copied.RunPath))
 	assert.Equal(t, original.Action, copied.Action)
+	assert.Equal(t, schema.AgenticRoleTypeAssistant, copied.Output.MessageOutput.AgenticRole)
 
 	copied.RunPath[0].agentName = "mutated"
 	assert.NotEqual(t, original.RunPath[0].agentName, copied.RunPath[0].agentName)
@@ -1506,7 +1508,7 @@ func TestAgenticRetryWithShouldRetry_Stream(t *testing.T) {
 	require.NoError(t, err)
 
 	runner := NewTypedRunner(TypedRunnerConfig[*schema.AgenticMessage]{
-		Agent:          agent,
+		Agent:           agent,
 		EnableStreaming: true,
 	})
 	iter := runner.Run(ctx, []*schema.AgenticMessage{schema.UserAgenticMessage("hello")})
@@ -1639,7 +1641,7 @@ func TestAgenticFailoverStream_MidStreamError(t *testing.T) {
 	require.NoError(t, err)
 
 	runner := NewTypedRunner(TypedRunnerConfig[*schema.AgenticMessage]{
-		Agent:          agent,
+		Agent:           agent,
 		EnableStreaming: true,
 	})
 	iter := runner.Run(ctx, []*schema.AgenticMessage{schema.UserAgenticMessage("hello")})
