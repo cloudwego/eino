@@ -53,9 +53,11 @@ type cancelInterruptThenHangingStreamTool struct {
 	name        string
 	interrupted chan struct{}
 	resumed     chan struct{}
+	parked      chan struct{}
 	gate        chan struct{}
 	seen        int32
 	resumeOnce  sync.Once
+	parkOnce    sync.Once
 }
 
 func (t *cancelInterruptThenHangingStreamTool) Info(_ context.Context) (*schema.ToolInfo, error) {
@@ -80,6 +82,9 @@ func (t *cancelInterruptThenHangingStreamTool) StreamableRun(ctx context.Context
 		defer w.Close()
 		if closed := w.Send("resumed:"+argumentsInJSON, nil); closed {
 			return
+		}
+		if t.parked != nil {
+			t.parkOnce.Do(func() { close(t.parked) })
 		}
 		<-t.gate
 	}()
@@ -263,6 +268,7 @@ func TestWithCancel_AgenticResumeStreamableToolTimeout_DoesNotPersistTypedNil(t 
 		name:        "cancel_stream_tool",
 		interrupted: make(chan struct{}),
 		resumed:     make(chan struct{}),
+		parked:      make(chan struct{}),
 		gate:        make(chan struct{}),
 	}
 	t.Cleanup(func() {
@@ -333,6 +339,11 @@ func TestWithCancel_AgenticResumeStreamableToolTimeout_DoesNotPersistTypedNil(t 
 	case <-streamTool.resumed:
 	case <-time.After(5 * time.Second):
 		t.Fatal("streamable tool did not resume")
+	}
+	select {
+	case <-streamTool.parked:
+	case <-time.After(5 * time.Second):
+		t.Fatal("streamable tool did not park")
 	}
 
 	cancelHandle, contributed := resumeCancelFn(
