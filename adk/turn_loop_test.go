@@ -98,8 +98,6 @@ type turnLoopCancellableMockAgent struct {
 	name     string
 	runFunc  func(ctx context.Context, input *AgentInput) (*AgentOutput, error)
 	onCancel func(cc *cancelContext)
-	cancel   context.CancelFunc
-	mu       sync.Mutex
 }
 
 func (a *turnLoopCancellableMockAgent) Name(_ context.Context) string        { return a.name }
@@ -111,10 +109,8 @@ func (a *turnLoopCancellableMockAgent) Run(ctx context.Context, input *AgentInpu
 	o := getCommonOptions(nil, opts...)
 	cc := o.cancelCtx
 
-	a.mu.Lock()
 	var cancelCtx context.Context
-	cancelCtx, a.cancel = context.WithCancel(ctx)
-	a.mu.Unlock()
+	cancelCtx, cancel := context.WithCancel(ctx)
 
 	go func() {
 		defer gen.Close()
@@ -128,11 +124,7 @@ func (a *turnLoopCancellableMockAgent) Run(ctx context.Context, input *AgentInpu
 				if a.onCancel != nil {
 					a.onCancel(cc)
 				}
-				a.mu.Lock()
-				if a.cancel != nil {
-					a.cancel()
-				}
-				a.mu.Unlock()
+				cancel()
 			}()
 		}
 
