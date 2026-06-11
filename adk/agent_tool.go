@@ -156,7 +156,7 @@ func (at *typedAgentTool[M]) InvokableRun(ctx context.Context, argumentsInJSON s
 		cancelCtx.markAgentToolDescendant()
 	}
 
-	gen, enableStreaming := getEmitGeneratorAndEnableStreaming(opts)
+	gen, enableStreaming := getEmitGeneratorAndEnableStreaming[M](opts)
 	var ms *bridgeStore
 	var iter *AsyncIterator[*TypedAgentEvent[M]]
 	var err error
@@ -239,17 +239,9 @@ func (at *typedAgentTool[M]) InvokableRun(ctx context.Context, argumentsInJSON s
 					rp = append(rp, event.RunPath...)
 					event.RunPath = rp
 				}
-				if msgEvent, ok := any(event).(*AgentEvent); ok {
-					tmp := copyTypedAgentEvent(msgEvent)
-					gen.Send(msgEvent)
-					event = any(tmp).(*TypedAgentEvent[M])
-				} else {
-					// Cross-message-type agent tools are not supported and will not be supported.
-					// An AgenticMessage agent cannot be used as a tool within a Message agent's
-					// event stream. The agent tool still executes correctly and returns its text
-					// result; only real-time event streaming to the parent is blocked.
-					return "", fmt.Errorf("cross-message-type agent tools are not supported: cannot use an AgenticMessage agent as a tool of a Message agent")
-				}
+				tmp := copyTypedAgentEvent(event)
+				gen.Send(event)
+				event = tmp
 			}
 		}
 
@@ -292,8 +284,14 @@ func (at *typedAgentTool[M]) InvokableRun(ctx context.Context, argumentsInJSON s
 type agentToolOptions struct {
 	agentName       string
 	opts            []AgentRunOption
-	generator       *AsyncGenerator[*AgentEvent]
 	enableStreaming bool
+}
+
+// typedAgentToolEventOptions carries the parent runner's event generator for a
+// specific message type. This keeps forwarded internal events type-compatible
+// with the parent event stream.
+type typedAgentToolEventOptions[M MessageType] struct {
+	generator *AsyncGenerator[*TypedAgentEvent[M]]
 }
 
 func withAgentToolOptions(agentName string, opts []AgentRunOption) tool.Option {
@@ -304,7 +302,11 @@ func withAgentToolOptions(agentName string, opts []AgentRunOption) tool.Option {
 }
 
 func withAgentToolEventGenerator(gen *AsyncGenerator[*AgentEvent]) tool.Option {
-	return tool.WrapImplSpecificOptFn(func(o *agentToolOptions) {
+	return withTypedAgentToolEventGenerator(gen)
+}
+
+func withTypedAgentToolEventGenerator[M MessageType](gen *AsyncGenerator[*TypedAgentEvent[M]]) tool.Option {
+	return tool.WrapImplSpecificOptFn(func(o *typedAgentToolEventOptions[M]) {
 		o.generator = gen
 	})
 }
@@ -337,13 +339,24 @@ func extractAndDeriveAgentToolCancelCtx(ctx context.Context, agentName string, o
 	return agentOpts
 }
 
-func getEmitGeneratorAndEnableStreaming(opts []tool.Option) (*AsyncGenerator[*AgentEvent], bool) {
+func getEmitGeneratorAndEnableStreaming[M MessageType](opts []tool.Option) (*AsyncGenerator[*TypedAgentEvent[M]], bool) {
 	o := tool.GetImplSpecificOptions[agentToolOptions](nil, opts...)
-	if o == nil {
+	eventOptions := tool.GetImplSpecificOptions[typedAgentToolEventOptions[M]](nil, opts...)
+	if o == nil && eventOptions == nil {
 		return nil, false
 	}
 
-	return o.generator, o.enableStreaming
+	var gen *AsyncGenerator[*TypedAgentEvent[M]]
+	if eventOptions != nil {
+		gen = eventOptions.generator
+	}
+
+	var enableStreaming bool
+	if o != nil {
+		enableStreaming = o.enableStreaming
+	}
+
+	return gen, enableStreaming
 }
 
 func getReactChatHistory(ctx context.Context, destAgentName string) ([]Message, error) {
