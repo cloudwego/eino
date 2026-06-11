@@ -318,16 +318,6 @@ func TestWithCancel_AgenticResumeStreamableToolTimeout_DoesNotPersistTypedNil(t 
 	if err != nil {
 		t.Fatalf("resume with params: %v", err)
 	}
-	select {
-	case <-streamTool.resumed:
-	case <-time.After(5 * time.Second):
-		t.Fatal("streamable tool did not resume")
-	}
-	select {
-	case <-streamTool.parked:
-	case <-time.After(5 * time.Second):
-		t.Fatal("streamable tool did not park")
-	}
 
 	cancelHandle, contributed := resumeCancelFn(
 		WithAgentCancelMode(CancelAfterToolCalls),
@@ -339,6 +329,17 @@ func TestWithCancel_AgenticResumeStreamableToolTimeout_DoesNotPersistTypedNil(t 
 	}
 	if cancelHandle == nil {
 		t.Fatal("resume cancel handle is nil")
+	}
+
+	select {
+	case <-streamTool.resumed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("streamable tool did not resume")
+	}
+	select {
+	case <-streamTool.parked:
+	case <-time.After(5 * time.Second):
+		t.Fatal("streamable tool did not park")
 	}
 
 	cancelDone := make(chan error, 1)
