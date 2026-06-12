@@ -49,17 +49,17 @@ type Config[M adk.MessageType] struct {
 
 	MemoryBackend Backend
 
-	// Model is the default tool-calling model used by topic selection and memory extraction.
+	// Model is the default model used by topic selection and memory extraction.
 	// Per-read/per-write overrides can be configured in Read.Model / Write.Model.
-	Model model.ToolCallingChatModel
+	Model model.BaseModel[M]
 
 	// Read controls how memories are loaded and injected.
 	// Optional. Defaults to Sync load with topic selection enabled (if Model is set).
-	Read *ReadConfig
+	Read *ReadConfig[M]
 
 	// Write controls post-run memory extraction and persistence.
 	// Optional. Default: disabled.
-	Write *WriteConfig
+	Write *WriteConfig[M]
 
 	// Coordination controls session identity and distributed async extraction coordination.
 	// Optional. Defaults to a local in-process coordinator.
@@ -78,11 +78,11 @@ const (
 	ReadModeAsync ReadMode = "async"
 )
 
-type ReadConfig struct {
+type ReadConfig[M adk.MessageType] struct {
 	Mode ReadMode
 
 	// Model is used for topic selection. Defaults to Config.Model.
-	Model model.ToolCallingChatModel
+	Model model.BaseModel[M]
 
 	// Instruction overrides the default auto memory instruction block appended to system prompt.
 	// Optional.
@@ -126,11 +126,11 @@ const (
 	WriteModeSync     WriteMode = "sync"
 )
 
-type WriteConfig struct {
+type WriteConfig[M adk.MessageType] struct {
 	Mode WriteMode
 
 	// Model is used for memory extraction. Defaults to Config.Model.
-	Model model.ToolCallingChatModel
+	Model model.BaseModel[M]
 
 	// MaxTurns caps the extractor's tool-call loop.
 	MaxTurns int
@@ -144,7 +144,7 @@ type WriteConfig struct {
 	//
 	// If nil, automemory uses the default drain behavior: ignore all events and
 	// return the first ev.Err encountered (if any).
-	HandleExtractionIterator func(ctx context.Context, iter *adk.AsyncIterator[*adk.AgentEvent]) error
+	HandleExtractionIterator func(ctx context.Context, iter *adk.AsyncIterator[*adk.TypedAgentEvent[M]]) error
 }
 
 type middleware[M adk.MessageType] struct {
@@ -154,8 +154,8 @@ type middleware[M adk.MessageType] struct {
 
 	resolvedMemoryDirectory string
 
-	topicSelectionModel model.ToolCallingChatModel
-	extractionHandler   adk.ChatModelAgentMiddleware
+	topicSelectionModel model.BaseModel[M]
+	extractionHandler   adk.TypedChatModelAgentMiddleware[M]
 	topicSelectionTool  *schema.ToolInfo
 	coordination        *CoordinationConfig[M]
 }
@@ -201,7 +201,7 @@ func New[M adk.MessageType](ctx context.Context, config *Config[M]) (adk.TypedCh
 		return nil, fmt.Errorf("auto memory config: resolve memory directory: %w", err)
 	}
 	if cfg.Read == nil {
-		cfg.Read = &ReadConfig{}
+		cfg.Read = &ReadConfig[M]{}
 	}
 	applyReadDefaults(cfg)
 
@@ -214,11 +214,10 @@ func New[M adk.MessageType](ctx context.Context, config *Config[M]) (adk.TypedCh
 
 	m.topicSelectionTool = topicSelectionToolInfo()
 	if cfg.Read.TopicSelection != nil && cfg.Read.Model != nil {
-		bound, err := cfg.Read.Model.WithTools([]*schema.ToolInfo{m.topicSelectionTool})
-		if err != nil {
-			return nil, fmt.Errorf("auto memory topic selection model init failed: %w", err)
+		m.topicSelectionModel = &modelWithTools[M]{
+			base:  cfg.Read.Model,
+			tools: []*schema.ToolInfo{m.topicSelectionTool},
 		}
-		m.topicSelectionModel = bound
 	}
 
 	if cfg.Write.Mode != WriteModeDisabled && cfg.Write.Model != nil {
@@ -230,7 +229,7 @@ func New[M adk.MessageType](ctx context.Context, config *Config[M]) (adk.TypedCh
 		if err != nil {
 			return nil, err
 		}
-		fileSystemMiddleware, err := fsmw.New(ctx, &fsmw.MiddlewareConfig{
+		fileSystemMiddleware, err := fsmw.NewTyped[M](ctx, &fsmw.MiddlewareConfig{
 			Backend:        writeFSBackend,
 			LsToolConfig:   &fsmw.ToolConfig{Disable: true},
 			GrepToolConfig: &fsmw.ToolConfig{Disable: true},
@@ -412,7 +411,7 @@ func applyReadDefaults[M adk.MessageType](cfg *Config[M]) {
 	}
 
 	if cfg.Write == nil {
-		cfg.Write = &WriteConfig{Mode: WriteModeDisabled}
+		cfg.Write = &WriteConfig[M]{Mode: WriteModeDisabled}
 	}
 	if cfg.Write.Mode == "" {
 		cfg.Write.Mode = WriteModeDisabled
@@ -764,11 +763,11 @@ func (m *middleware[M]) selectTopicCandidates(
 	toolInfo := topicSelectionToolInfo()
 	resp, err := m.topicSelectionModel.Generate(
 		ctx,
-		[]*schema.Message{
-			schema.SystemMessage(getTopicSelectionSystemPrompt()),
-			schema.UserMessage(userMsg),
+		[]M{
+			makeSystemMsg[M](getTopicSelectionSystemPrompt()),
+			makeUserMsg[M](userMsg),
 		},
-		model.WithToolChoice(schema.ToolChoiceForced, toolInfo.Name),
+		makeToolChoiceForced[M](toolInfo.Name),
 	)
 	if err != nil {
 		return nil, err
@@ -864,11 +863,12 @@ func topicSelectionToolInfo() *schema.ToolInfo {
 	}
 }
 
-func parseTopicSelectionFromToolCall(msg *schema.Message, valid map[string]struct{}) ([]string, error) {
-	if msg == nil || len(msg.ToolCalls) == 0 {
+func parseTopicSelectionFromToolCall[M adk.MessageType](msg M, valid map[string]struct{}) ([]string, error) {
+	toolCalls := messageToolCalls(msg)
+	if len(toolCalls) == 0 {
 		return nil, fmt.Errorf("no tool calls")
 	}
-	tc := msg.ToolCalls[0]
+	tc := toolCalls[0]
 	if tc.Function.Name != topicSelectionToolName {
 		return nil, fmt.Errorf("unexpected tool call: %s", tc.Function.Name)
 	}
@@ -1002,6 +1002,31 @@ func setMsgExtra[M adk.MessageType](msg M, key string, value any) {
 	}
 }
 
+func copyMsgExtra[M adk.MessageType](dst, src M) {
+	srcExtra := getMsgExtra(src)
+	if len(srcExtra) == 0 {
+		return
+	}
+	switch d := any(dst).(type) {
+	case *schema.Message:
+		if d.Extra == nil {
+			d.Extra = make(map[string]any, len(srcExtra))
+		}
+		for k, v := range srcExtra {
+			d.Extra[k] = v
+		}
+	case *schema.AgenticMessage:
+		if d.Extra == nil {
+			d.Extra = make(map[string]any, len(srcExtra))
+		}
+		for k, v := range srcExtra {
+			d.Extra[k] = v
+		}
+	default:
+		panic("unreachable")
+	}
+}
+
 func makeUserMsg[M adk.MessageType](text string) M {
 	var zero M
 	switch any(zero).(type) {
@@ -1009,6 +1034,35 @@ func makeUserMsg[M adk.MessageType](text string) M {
 		return any(schema.UserMessage(text)).(M)
 	case *schema.AgenticMessage:
 		return any(schema.UserAgenticMessage(text)).(M)
+	default:
+		panic("unreachable")
+	}
+}
+
+func makeSystemMsg[M adk.MessageType](text string) M {
+	var zero M
+	switch any(zero).(type) {
+	case *schema.Message:
+		return any(schema.SystemMessage(text)).(M)
+	case *schema.AgenticMessage:
+		return any(schema.SystemAgenticMessage(text)).(M)
+	default:
+		panic("unreachable")
+	}
+}
+
+func makeToolChoiceForced[M adk.MessageType](name string) model.Option {
+	var zero M
+	switch any(zero).(type) {
+	case *schema.Message:
+		return model.WithToolChoice(schema.ToolChoiceForced, name)
+	case *schema.AgenticMessage:
+		return model.WithAgenticToolChoice(&schema.AgenticToolChoice{
+			Type: schema.ToolChoiceForced,
+			Forced: &schema.AgenticForcedToolChoice{
+				Tools: []*schema.AllowedTool{{FunctionName: name}},
+			},
+		})
 	default:
 		panic("unreachable")
 	}
@@ -1064,40 +1118,6 @@ func messageToolNames[M adk.MessageType](msg M) []string {
 			out = append(out, block.FunctionToolResult.Name)
 		}
 		return out
-	default:
-		panic("unreachable")
-	}
-}
-
-func projectMessagesToSchema[M adk.MessageType](msgs []M) []adk.Message {
-	out := make([]adk.Message, 0, len(msgs))
-	for _, msg := range msgs {
-		if projected := projectMessageToSchema(msg); projected != nil {
-			out = append(out, projected)
-		}
-	}
-	return out
-}
-
-func projectMessageToSchema[M adk.MessageType](msg M) adk.Message {
-	switch m := any(msg).(type) {
-	case *schema.Message:
-		return m
-	case *schema.AgenticMessage:
-		if m == nil {
-			return nil
-		}
-		text := m.String()
-		switch m.Role {
-		case schema.AgenticRoleTypeSystem:
-			return schema.SystemMessage(text)
-		case schema.AgenticRoleTypeAssistant:
-			return schema.AssistantMessage(text, messageToolCalls(msg))
-		case schema.AgenticRoleTypeUser:
-			return schema.UserMessage(text)
-		default:
-			return schema.UserMessage(text)
-		}
 	default:
 		panic("unreachable")
 	}
@@ -1464,7 +1484,7 @@ func countModelVisibleMessagesSince[M adk.MessageType](msgs []M, cursor int) int
 	return countModelVisibleMessages(msgs[cursor:])
 }
 
-func (m *middleware[M]) newExtractionAgent(ctx context.Context, toolInfos []*schema.ToolInfo) (*adk.ChatModelAgent, error) {
+func (m *middleware[M]) newExtractionAgent(ctx context.Context, toolInfos []*schema.ToolInfo) (*adk.TypedChatModelAgent[M], error) {
 	if m.cfg == nil || m.cfg.Write == nil || m.cfg.Write.Model == nil {
 		return nil, fmt.Errorf("auto memory extraction agent init failed: missing write model")
 	}
@@ -1472,13 +1492,12 @@ func (m *middleware[M]) newExtractionAgent(ctx context.Context, toolInfos []*sch
 		return nil, fmt.Errorf("auto memory extraction agent init failed: missing extraction handler")
 	}
 
-	agent, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
-		Name:        "automemory_extractor",
-		Description: "Internal auto memory extraction subagent",
-		Model:       m.cfg.Write.Model,
-		Handlers: []adk.ChatModelAgentMiddleware{
+	agent, err := adk.NewTypedChatModelAgent[M](ctx, &adk.TypedChatModelAgentConfig[M]{
+		Name:  "automemory_extractor",
+		Model: m.cfg.Write.Model,
+		Handlers: []adk.TypedChatModelAgentMiddleware[M]{
 			m.extractionHandler, // fs middleware
-			&toolInfoOverrideMiddleware{toolInfos: toolInfos}, // tool info override, for prefix cache
+			&toolInfoOverrideMiddleware[M]{toolInfos: toolInfos}, // tool info override, for prefix cache
 		},
 		ToolsConfig: adk.ToolsConfig{
 			ToolsNodeConfig: compose.ToolsNodeConfig{
@@ -1506,13 +1525,13 @@ func (m *middleware[M]) runMemoryExtractionAgent(ctx context.Context, snapshot [
 	}
 	newMessageCount := countModelVisibleMessagesSince(snapshot, cursor)
 	userPrompt := buildExtractAutoOnlyPrompt(m.resolvedMemoryDirectory, newMessageCount, manifest, m.cfg.Write.SkipIndex)
-	msgs := append(projectMessagesToSchema(snapshot), schema.UserMessage(userPrompt))
+	msgs := append(append([]M{}, snapshot...), makeUserMsg[M](userPrompt))
 	extractionAgent, err := m.newExtractionAgent(ctx, toolInfos)
 	if err != nil {
 		return err
 	}
 
-	iter := extractionAgent.Run(ctx, &adk.AgentInput{
+	iter := extractionAgent.Run(ctx, &adk.TypedAgentInput[M]{
 		Messages:        msgs,
 		EnableStreaming: true,
 	})
@@ -1583,30 +1602,46 @@ func parseRFC3339NanoBestEffort(s string) time.Time {
 	return time.Time{}
 }
 
-type toolInfoOverrideMiddleware struct {
-	adk.BaseChatModelAgentMiddleware
+type toolInfoOverrideMiddleware[M adk.MessageType] struct {
+	adk.TypedBaseChatModelAgentMiddleware[M]
 
-	once      sync.Once
 	toolInfos []*schema.ToolInfo
 }
 
-func (t *toolInfoOverrideMiddleware) BeforeModelRewriteState(ctx context.Context, state *adk.TypedChatModelAgentState[*schema.Message], _ *adk.TypedModelContext[*schema.Message]) (
-	context.Context, *adk.TypedChatModelAgentState[*schema.Message], error) {
+func (t *toolInfoOverrideMiddleware[M]) BeforeModelRewriteState(ctx context.Context, state *adk.TypedChatModelAgentState[M], _ *adk.TypedModelContext[M]) (
+	context.Context, *adk.TypedChatModelAgentState[M], error) {
 
-	t.once.Do(func() {
-		toolNameMapping := make(map[string]struct{}, len(t.toolInfos))
-		for _, tool := range t.toolInfos {
-			toolNameMapping[tool.Name] = struct{}{}
-		}
+	toolNameMapping := make(map[string]struct{}, len(t.toolInfos))
+	for _, tool := range t.toolInfos {
+		toolNameMapping[tool.Name] = struct{}{}
+	}
 
-		overrideTools := append([]*schema.ToolInfo{}, t.toolInfos...)
-		for _, tool := range state.ToolInfos {
-			if _, ok := toolNameMapping[tool.Name]; !ok { // add fs tools if not exists
-				overrideTools = append(overrideTools, tool)
-			}
+	overrideTools := append([]*schema.ToolInfo{}, t.toolInfos...)
+	for _, tool := range state.ToolInfos {
+		if _, ok := toolNameMapping[tool.Name]; !ok {
+			overrideTools = append(overrideTools, tool)
 		}
-		state.ToolInfos = overrideTools
-	})
+	}
+	state.ToolInfos = overrideTools
 
 	return ctx, state, nil
+}
+
+type modelWithTools[M adk.MessageType] struct {
+	base  model.BaseModel[M]
+	tools []*schema.ToolInfo
+}
+
+func (m *modelWithTools[M]) Generate(ctx context.Context, input []M, opts ...model.Option) (M, error) {
+	newOpts := make([]model.Option, len(opts)+1)
+	copy(newOpts, opts)
+	newOpts[len(opts)] = model.WithTools(m.tools)
+	return m.base.Generate(ctx, input, newOpts...)
+}
+
+func (m *modelWithTools[M]) Stream(ctx context.Context, input []M, opts ...model.Option) (*schema.StreamReader[M], error) {
+	newOpts := make([]model.Option, len(opts)+1)
+	copy(newOpts, opts)
+	newOpts[len(opts)] = model.WithTools(m.tools)
+	return m.base.Stream(ctx, input, newOpts...)
 }
