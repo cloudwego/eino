@@ -177,6 +177,10 @@ func (m *Middleware[M]) permissionGate(
 	wasInterrupted, hasState, savedState := tool.GetInterruptState[*AskState](ctx)
 	isTarget, hasData, response := tool.GetResumeContext[*ResumeResponse](ctx)
 
+	if wasInterrupted && !hasState {
+		return &gateResult{allowed: true, argument: argument}, nil
+	}
+
 	if wasInterrupted && !isTarget {
 		if !hasState || savedState == nil {
 			return nil, fmt.Errorf("permission: missing AskState for resumed tool %q (call_id=%s)", tCtx.Name, tCtx.CallID)
