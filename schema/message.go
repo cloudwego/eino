@@ -526,7 +526,14 @@ type Message struct {
 	// ReasoningContent is the thinking process of the model, which will be included when the model returns reasoning content.
 	ReasoningContent string `json:"reasoning_content,omitempty"`
 
-	// customized information for model implementation
+	// Extra is customized information for model implementation.
+	//
+	// Concurrency: a *Message received from a stream may be shared by multiple
+	// consumers (StreamReader.Copy duplicates readers, not elements). Never
+	// write to Extra on a message you did not create (msg.Extra[k] = v) — it
+	// can cause concurrent map read/write panics. Use copy-on-write instead:
+	// shallow-copy the message, clone Extra into a new map, modify the clone,
+	// and pass the copy downstream.
 	Extra map[string]any `json:"extra,omitempty"`
 }
 

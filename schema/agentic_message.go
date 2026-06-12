@@ -79,6 +79,13 @@ type AgenticMessage struct {
 	ResponseMeta *AgenticResponseMeta `json:"response_meta,omitempty"`
 
 	// Extra is the additional information.
+	//
+	// Concurrency: an *AgenticMessage received from a stream may be shared by
+	// multiple consumers (StreamReader.Copy duplicates readers, not elements).
+	// Never write to Extra on a message you did not create (msg.Extra[k] = v) —
+	// it can cause concurrent map read/write panics. Use copy-on-write instead:
+	// shallow-copy the message, clone Extra into a new map, modify the clone,
+	// and pass the copy downstream.
 	Extra map[string]any `json:"extra,omitempty"`
 }
 

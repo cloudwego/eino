@@ -257,6 +257,13 @@ func (sr *StreamReader[T]) Close() {
 //
 //	// sr1 and sr2 independently read the same elements
 //
+// Copy duplicates the reader, NOT the elements: every copy receives the same
+// element value. For pointer elements (e.g. *Message), all branches share one
+// underlying object and may consume it concurrently. Treat received elements
+// as read-only; to modify one, shallow-copy it and clone any map/slice field
+// you change (copy-on-write). Mutating in place — especially map fields such
+// as Message.Extra — can cause concurrent map read/write panics.
+//
 // n must be at least 1. If n < 2, the original reader is returned unchanged.
 func (sr *StreamReader[T]) Copy(n int) []*StreamReader[T] {
 	if n < 2 {
@@ -677,6 +684,13 @@ func WithOnEOF(fn func() (any, error)) ConvertOption {
 //
 // Error wrapping: use [WithErrWrapper] to wrap non-convert errors (e.g. those
 // arriving from an upstream source) before they reach the caller.
+//
+// Mutation: elements passed to convert may be shared with other stream
+// branches (see [StreamReader.Copy]), so convert must not modify its input in
+// place. To "modify" an element, return a new value instead: shallow-copy it
+// and clone any map/slice field you change (e.g. Message.Extra) before
+// writing to the clone. Writing to a shared element (e.g. msg.Extra[k] = v)
+// can cause concurrent map read/write panics.
 //
 //	intReader := schema.StreamReaderFromArray([]int{0, 1, 2, 3})
 //	strReader := schema.StreamReaderWithConvert(intReader,

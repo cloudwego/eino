@@ -248,6 +248,13 @@ type TypedChatModelAgentMiddleware[M MessageType] interface {
 	//   - Processing or transforming the response stream
 	//   - Changing call configurations (temperature, top_p, etc.)
 	//
+	// When transforming the response stream (e.g. via schema.StreamReaderWithConvert),
+	// never modify a received message in place: stream elements may be shared with
+	// other branches via StreamReader.Copy, and in-place writes — especially to map
+	// fields like Message.Extra — can cause concurrent map read/write panics.
+	// Instead, shallow-copy the message, clone any map/slice field you change,
+	// modify the clone, and return the copy.
+	//
 	// Discouraged use cases (use BeforeModelRewriteState instead):
 	//   - Modifying input messages: changes here are NOT persisted in state, only
 	//     affect a single model call, and break prompt cache across iterations.
