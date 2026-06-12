@@ -2561,7 +2561,7 @@ func TestCancelImmediate_OrphanedToolGoroutine_NoPanic(t *testing.T) {
 
 	t.Run("unit_SendEvent_no_execCtx", func(t *testing.T) {
 		err := SendEvent(context.Background(), &AgentEvent{AgentName: "test"})
-		assert.Error(t, err, "SendEvent without execCtx should return error")
+		assert.NoError(t, err, "SendEvent without execCtx should be a no-op")
 	})
 
 	t.Run("integration_cancel_escalation_orphans_tool", func(t *testing.T) {
