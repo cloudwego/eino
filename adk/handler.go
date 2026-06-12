@@ -419,12 +419,12 @@ func DeleteRunLocalValue(ctx context.Context, key string) error {
 // via internal wrapper layers. If your middleware constructs its own messages, call
 // EnsureMessageID before sending to assign an ID.
 //
-// This function can only be called from within a TypedChatModelAgentMiddleware during agent execution.
-// Returns an error if called outside of an agent execution context.
+// When called outside of an agent execution context, or from a path without an
+// event generator, this function is a no-op.
 func TypedSendEvent[M MessageType](ctx context.Context, event *TypedAgentEvent[M]) error {
 	execCtx := getTypedChatModelAgentExecCtx[M](ctx)
 	if execCtx == nil || execCtx.generator == nil {
-		return fmt.Errorf("TypedSendEvent failed: must be called within a ChatModelAgent Run() or Resume() execution context")
+		return nil
 	}
 
 	execCtx.send(ctx, event)
@@ -437,8 +437,8 @@ func TypedSendEvent[M MessageType](ctx context.Context, event *TypedAgentEvent[M
 // For custom session timeline events during a Runner run, set AgentEvent.SessionEvent
 // to an extension SessionEvent with an x.* Kind and send it through this function.
 //
-// This function can only be called from within a ChatModelAgentMiddleware during agent execution.
-// Returns an error if called outside of an agent execution context.
+// When called outside of an agent execution context, or from a path without an
+// event generator, this function is a no-op.
 func SendEvent(ctx context.Context, event *AgentEvent) error {
 	return TypedSendEvent(ctx, event)
 }

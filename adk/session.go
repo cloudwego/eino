@@ -20,7 +20,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/gob"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -487,10 +486,13 @@ type AgentInterruptContext struct {
 
 // SessionExtensionEvent carries application-owned timeline event payloads.
 // The SessionEvent.Kind field is the application event type and must use the
-// SessionEventExtensionPrefix namespace. Data is raw JSON and is not
-// schema-decoded by ADK.
+// SessionEventExtensionPrefix namespace. Data is application-owned typed payload
+// data. Custom payload types that need durable round-trip behavior must be
+// registered with schema.RegisterName before session events are encoded and
+// decoded. Consumers can inspect SessionEvent.Kind and type-assert Data to the
+// registered concrete payload type.
 type SessionExtensionEvent struct {
-	Data json.RawMessage `json:"data,omitempty"`
+	Data any `json:"data,omitempty"`
 }
 
 // MessageUpdatedEvent represents a single message replacement within the messages array.
@@ -924,28 +926,6 @@ func NormalizeSessionEventKind[M MessageType](event *SessionEvent[M]) error {
 		return fmt.Errorf("session event kind %q does not match payload %q", event.Kind, kind)
 	}
 	event.Kind = kind
-	if err := normalizeSessionExtensionEvent(event.Extension); err != nil {
-		return err
-	}
-	return nil
-}
-
-func normalizeSessionExtensionEvent(event *SessionExtensionEvent) error {
-	if event == nil {
-		return nil
-	}
-	if len(event.Data) == 0 {
-		event.Data = nil
-		return nil
-	}
-	if !json.Valid(event.Data) {
-		return errors.New("session extension event data must be valid JSON")
-	}
-	var compact bytes.Buffer
-	if err := json.Compact(&compact, event.Data); err != nil {
-		return err
-	}
-	event.Data = append(event.Data[:0], compact.Bytes()...)
 	return nil
 }
 
