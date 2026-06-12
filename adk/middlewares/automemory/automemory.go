@@ -985,43 +985,19 @@ func getMsgExtra[M adk.MessageType](msg M) map[string]any {
 	}
 }
 
-func setMsgExtra[M adk.MessageType](msg M, key string, value any) {
+func copyAndSetMsgExtra[M adk.MessageType](msg M, key string, value any) {
+	existing := getMsgExtra(msg)
+	newExtra := make(map[string]any, len(existing)+1)
+	for k, v := range existing {
+		newExtra[k] = v
+	}
+	newExtra[key] = value
+
 	switch m := any(msg).(type) {
 	case *schema.Message:
-		if m.Extra == nil {
-			m.Extra = map[string]any{}
-		}
-		m.Extra[key] = value
+		m.Extra = newExtra
 	case *schema.AgenticMessage:
-		if m.Extra == nil {
-			m.Extra = map[string]any{}
-		}
-		m.Extra[key] = value
-	default:
-		panic("unreachable")
-	}
-}
-
-func copyMsgExtra[M adk.MessageType](dst, src M) {
-	srcExtra := getMsgExtra(src)
-	if len(srcExtra) == 0 {
-		return
-	}
-	switch d := any(dst).(type) {
-	case *schema.Message:
-		if d.Extra == nil {
-			d.Extra = make(map[string]any, len(srcExtra))
-		}
-		for k, v := range srcExtra {
-			d.Extra[k] = v
-		}
-	case *schema.AgenticMessage:
-		if d.Extra == nil {
-			d.Extra = make(map[string]any, len(srcExtra))
-		}
-		for k, v := range srcExtra {
-			d.Extra[k] = v
-		}
+		m.Extra = newExtra
 	default:
 		panic("unreachable")
 	}
@@ -1151,7 +1127,7 @@ func hasInstructionInjected(instruction string) bool {
 
 func newMemoryMessage[M adk.MessageType](content string) M {
 	msg := makeUserMsg[M](content)
-	setMsgExtra(msg, memoryExtraKey, &memoryExtra{Type: "memory"})
+	copyAndSetMsgExtra(msg, memoryExtraKey, &memoryExtra{Type: "memory"})
 	return msg
 }
 
@@ -1348,7 +1324,7 @@ func markWriteCursor[M adk.MessageType](state *adk.TypedChatModelAgentState[M], 
 		return state
 	}
 
-	setMsgExtra(last, memoryExtraKey, &memoryExtra{
+	copyAndSetMsgExtra(last, memoryExtraKey, &memoryExtra{
 		Type:       "write_cursor",
 		Cursor:     cursor,
 		UpdatedAt:  time.Now().Format(time.RFC3339Nano),
