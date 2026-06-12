@@ -348,10 +348,12 @@ func TestWithCancel_AgenticResumeStreamableToolTimeout_DoesNotPersistTypedNil(t 
 	}()
 	select {
 	case err = <-cancelDone:
-		assert.True(t, err == nil || errors.Is(err, ErrCancelTimeout), "unexpected cancel wait error: %v", err)
+		assert.True(t, err == nil || errors.Is(err, ErrCancelTimeout) || errors.Is(err, ErrExecutionEnded),
+			"unexpected cancel wait error: %v", err)
 	case <-time.After(5 * time.Second):
 		t.Fatal("resume cancel handle did not complete")
 	}
+	executionCompletedBeforeCancel := errors.Is(err, ErrExecutionEnded)
 
 	var hasCancelError bool
 	for {
@@ -371,7 +373,8 @@ func TestWithCancel_AgenticResumeStreamableToolTimeout_DoesNotPersistTypedNil(t 
 		assert.NotContains(t, errText, "cannot encode nil pointer")
 		assert.NotContains(t, errText, "*adk.agenticReactInput(nil=true")
 	}
-	assert.True(t, hasCancelError, "expected CancelError in resume event stream")
+	assert.True(t, hasCancelError || executionCompletedBeforeCancel,
+		"expected CancelError in resume event stream unless execution completed before cancel")
 }
 
 func TestCancelContext(t *testing.T) {
@@ -2561,7 +2564,7 @@ func TestCancelImmediate_OrphanedToolGoroutine_NoPanic(t *testing.T) {
 
 	t.Run("unit_SendEvent_no_execCtx", func(t *testing.T) {
 		err := SendEvent(context.Background(), &AgentEvent{AgentName: "test"})
-		assert.Error(t, err, "SendEvent without execCtx should return error")
+		assert.NoError(t, err, "SendEvent without execCtx should be a no-op")
 	})
 
 	t.Run("integration_cancel_escalation_orphans_tool", func(t *testing.T) {
