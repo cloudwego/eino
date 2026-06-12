@@ -156,27 +156,6 @@ func TestCommonOptionsAndFilteringContracts(t *testing.T) {
 	assert.Len(t, filterOptions("parent", []AgentRunOption{nonCallback.DesignateAgent("parent"), otherCallback, {}}), 2)
 }
 
-func TestToolPermissionDecisionStoreContracts(t *testing.T) {
-	ctx := context.Background()
-	assert.Empty(t, GetToolPermissionDecision(ctx, "call-1"))
-	SetToolPermissionDecision(ctx, "call-1", "allowed")
-	assert.Empty(t, GetToolPermissionDecision(ctx, "call-1"))
-
-	ctx = contextWithToolPermissionDecisionStore(ctx)
-	same := contextWithToolPermissionDecisionStore(ctx)
-	assert.Same(t, ctx, same)
-
-	SetToolPermissionDecision(ctx, "", "allowed")
-	SetToolPermissionDecision(ctx, "call-1", "")
-	assert.Empty(t, GetToolPermissionDecision(ctx, "call-1"))
-
-	SetToolPermissionDecision(ctx, "call-1", "allowed")
-	SetToolPermissionDecision(ctx, "call-2", "denied")
-	assert.Equal(t, "allowed", GetToolPermissionDecision(ctx, "call-1"))
-	assert.Equal(t, "denied", GetToolPermissionDecision(ctx, "call-2"))
-	assert.Empty(t, GetToolPermissionDecision(ctx, ""))
-}
-
 func TestLocalSessionServiceHandleContracts(t *testing.T) {
 	ctx := context.Background()
 	assert.Nil(t, NewLocalSessionService[*schema.Message](nil))

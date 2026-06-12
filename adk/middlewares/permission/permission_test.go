@@ -690,6 +690,261 @@ func TestPermissionDecisionAppearsInToolUseTimeline(t *testing.T) {
 	assert.Equal(t, `{"path":"/tmp/file"}`, captureTool.received)
 }
 
+func TestPermissionDecisionEventResumeLiveAndPersisted(t *testing.T) {
+	tests := []struct {
+		name               string
+		response           *ResumeResponse
+		wantAction         ResumeAction
+		wantDecisionText   string
+		wantUpdatedInput   string
+		wantHasUpdated     bool
+		wantToolInput      string
+		wantToolNotInvoked bool
+	}{
+		{
+			name: "approve with updated input",
+			response: &ResumeResponse{
+				Action:       ResumeActionApprove,
+				UpdatedInput: `{"path":"/tmp/safe.txt"}`,
+			},
+			wantAction:       ResumeActionApprove,
+			wantUpdatedInput: `{"path":"/tmp/safe.txt"}`,
+			wantHasUpdated:   true,
+			wantToolInput:    `{"path":"/tmp/safe.txt"}`,
+		},
+		{
+			name:             "approve with explicit empty updated input",
+			response:         &ResumeResponse{Action: ResumeActionApprove, HasUpdatedInput: true},
+			wantAction:       ResumeActionApprove,
+			wantHasUpdated:   true,
+			wantToolInput:    "",
+			wantUpdatedInput: "",
+		},
+		{
+			name:               "reject with default text",
+			response:           &ResumeResponse{Action: ResumeActionReject},
+			wantAction:         ResumeActionReject,
+			wantDecisionText:   "rejected by user",
+			wantToolNotInvoked: true,
+		},
+		{
+			name: "respond with decision text",
+			response: &ResumeResponse{
+				Action:  ResumeActionRespond,
+				Message: "Please explain first.",
+			},
+			wantAction:         ResumeActionRespond,
+			wantDecisionText:   "Please explain first.",
+			wantToolNotInvoked: true,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			ctrl := gomock.NewController(t)
+			defer ctrl.Finish()
+
+			cm := mockModel.NewMockToolCallingChatModel(ctrl)
+			captureTool := &permissionCaptureTool{name: "permission_tool"}
+			info, err := captureTool.Info(ctx)
+			require.NoError(t, err)
+
+			generateCount := 0
+			cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+				DoAndReturn(func(ctx context.Context, msgs []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+					generateCount++
+					if generateCount == 1 {
+						return schema.AssistantMessage("calling tool", []schema.ToolCall{
+							{ID: "permission_call", Function: schema.FunctionCall{Name: info.Name, Arguments: `{"path":"/etc/passwd"}`}},
+						}), nil
+					}
+					return schema.AssistantMessage("done", nil), nil
+				}).AnyTimes()
+			cm.EXPECT().WithTools(gomock.Any()).Return(cm, nil).AnyTimes()
+
+			agent, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
+				Name:        "PermissionDecisionAgent",
+				Instruction: "use tools",
+				Model:       cm,
+				ToolsConfig: adk.ToolsConfig{
+					ToolsNodeConfig: compose.ToolsNodeConfig{
+						Tools: []tool.BaseTool{captureTool},
+					},
+				},
+				Handlers: []adk.ChatModelAgentMiddleware{
+					New(func(ctx context.Context, tCtx *adk.ToolContext, args *schema.ToolArgument) (*GateCheckResult, error) {
+						return &GateCheckResult{Decision: GateAsk, Message: `Approve permission_call with {"path":"/etc/passwd"}?`}, nil
+					}),
+				},
+			})
+			require.NoError(t, err)
+
+			sessionStore := &permissionSessionService{}
+			checkpointStore := newPermissionCheckpointStore()
+			checkpointID := "permission-decision-" + strings.ReplaceAll(tt.name, " ", "-")
+			runner := adk.NewRunner(ctx, adk.RunnerConfig{
+				Agent:           agent,
+				CheckPointStore: checkpointStore,
+				SessionID:       checkpointID,
+				SessionService:  adk.NewLocalSessionService[*schema.Message](sessionStore),
+			})
+
+			var interruptID string
+			iter := runner.Query(ctx, "use the tool", adk.WithCheckPointID(checkpointID), adk.WithTimelineEvents())
+			for {
+				event, ok := iter.Next()
+				if !ok {
+					break
+				}
+				require.NoError(t, event.Err)
+				if event.SessionEvent == nil || event.SessionEvent.Kind != adk.SessionEventAgentInterrupt {
+					continue
+				}
+				require.NotNil(t, event.SessionEvent.AgentInterrupt)
+				require.Len(t, event.SessionEvent.AgentInterrupt.Contexts, 1)
+				interruptID = event.SessionEvent.AgentInterrupt.Contexts[0].InterruptID
+			}
+			require.NotEmpty(t, interruptID)
+
+			resumeIter, err := runner.ResumeWithParams(ctx, checkpointID, &adk.ResumeParams{
+				Targets: map[string]any{interruptID: tt.response},
+			}, adk.WithTimelineEvents())
+			require.NoError(t, err)
+
+			var liveDecision *adk.SessionEvent[*schema.Message]
+			for {
+				event, ok := resumeIter.Next()
+				if !ok {
+					break
+				}
+				require.NoError(t, event.Err)
+				if event.SessionEvent != nil && event.SessionEvent.Kind == SessionEventPermissionDecision {
+					liveDecision = event.SessionEvent
+				}
+			}
+			requireDecisionEvent(t, liveDecision, tt.wantAction, tt.wantDecisionText, tt.wantUpdatedInput, tt.wantHasUpdated)
+
+			decisions := filterPermissionDecisionEvents(sessionStore.events)
+			require.Len(t, decisions, 1)
+			requireDecisionEvent(t, decisions[0], tt.wantAction, tt.wantDecisionText, tt.wantUpdatedInput, tt.wantHasUpdated)
+			assert.Equal(t, liveDecision.EventID, decisions[0].EventID)
+			assert.Equal(t, liveDecision.TurnID, decisions[0].TurnID)
+
+			decisionJSON, err := json.Marshal(decisions[0].Extension.Data)
+			require.NoError(t, err)
+			assert.NotContains(t, string(decisionJSON), `{"path":"/etc/passwd"}`)
+			assert.NotContains(t, string(decisionJSON), "Arguments")
+			assert.NotContains(t, string(decisionJSON), "CallID")
+
+			decisionIndex, idleAfterDecisionIndex := -1, -1
+			for i, event := range sessionStore.events {
+				if event.Kind == SessionEventPermissionDecision {
+					decisionIndex = i
+				}
+				if decisionIndex >= 0 && i > decisionIndex && event.Kind == adk.SessionEventSessionStatusIdle {
+					idleAfterDecisionIndex = i
+					break
+				}
+			}
+			require.NotEqual(t, -1, decisionIndex)
+			require.NotEqual(t, -1, idleAfterDecisionIndex)
+			assert.Less(t, decisionIndex, idleAfterDecisionIndex)
+
+			if tt.wantToolNotInvoked {
+				assert.Empty(t, captureTool.received)
+			} else {
+				assert.Equal(t, tt.wantToolInput, captureTool.received)
+			}
+		})
+	}
+}
+
+func TestAttack_InvalidRespondDoesNotPersistDecisionEvent(t *testing.T) {
+	ctx := context.Background()
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	cm := mockModel.NewMockToolCallingChatModel(ctrl)
+	captureTool := &permissionCaptureTool{name: "permission_tool"}
+	info, err := captureTool.Info(ctx)
+	require.NoError(t, err)
+
+	cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(schema.AssistantMessage("calling tool", []schema.ToolCall{
+			{ID: "permission_call", Function: schema.FunctionCall{Name: info.Name, Arguments: `{"path":"/etc/passwd"}`}},
+		}), nil).AnyTimes()
+	cm.EXPECT().WithTools(gomock.Any()).Return(cm, nil).AnyTimes()
+
+	agent, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
+		Name:        "PermissionInvalidRespondAgent",
+		Instruction: "use tools",
+		Model:       cm,
+		ToolsConfig: adk.ToolsConfig{
+			ToolsNodeConfig: compose.ToolsNodeConfig{
+				Tools: []tool.BaseTool{captureTool},
+			},
+		},
+		Handlers: []adk.ChatModelAgentMiddleware{
+			New(func(ctx context.Context, tCtx *adk.ToolContext, args *schema.ToolArgument) (*GateCheckResult, error) {
+				return &GateCheckResult{Decision: GateAsk, Message: "approve?"}, nil
+			}),
+		},
+	})
+	require.NoError(t, err)
+
+	sessionStore := &permissionSessionService{}
+	checkpointStore := newPermissionCheckpointStore()
+	const checkpointID = "permission-invalid-respond"
+	runner := adk.NewRunner(ctx, adk.RunnerConfig{
+		Agent:           agent,
+		CheckPointStore: checkpointStore,
+		SessionID:       checkpointID,
+		SessionService:  adk.NewLocalSessionService[*schema.Message](sessionStore),
+	})
+
+	var interruptID string
+	iter := runner.Query(ctx, "use the tool", adk.WithCheckPointID(checkpointID), adk.WithTimelineEvents())
+	for {
+		event, ok := iter.Next()
+		if !ok {
+			break
+		}
+		require.NoError(t, event.Err)
+		if event.SessionEvent != nil && event.SessionEvent.Kind == adk.SessionEventAgentInterrupt {
+			require.NotNil(t, event.SessionEvent.AgentInterrupt)
+			require.Len(t, event.SessionEvent.AgentInterrupt.Contexts, 1)
+			interruptID = event.SessionEvent.AgentInterrupt.Contexts[0].InterruptID
+		}
+	}
+	require.NotEmpty(t, interruptID)
+
+	resumeIter, err := runner.ResumeWithParams(ctx, checkpointID, &adk.ResumeParams{
+		Targets: map[string]any{interruptID: &ResumeResponse{Action: ResumeActionRespond}},
+	}, adk.WithTimelineEvents())
+	require.NoError(t, err)
+
+	var resumeErr error
+	for {
+		event, ok := resumeIter.Next()
+		if !ok {
+			break
+		}
+		if event.Err != nil {
+			resumeErr = event.Err
+			continue
+		}
+		if event.SessionEvent != nil {
+			assert.NotEqual(t, SessionEventPermissionDecision, event.SessionEvent.Kind)
+		}
+	}
+	require.Error(t, resumeErr)
+	assert.Contains(t, resumeErr.Error(), "empty response message")
+	assert.Empty(t, filterPermissionDecisionEvents(sessionStore.events))
+	assert.Empty(t, captureTool.received)
+}
+
 // TestToolSpan_PermissionDenyEmitsBothSpansOnSameRun verifies plan §4.5.1 #6:
 // when the permission gate denies on first invocation (no interrupt), the
 // tool wrapper emits a tool_call_start + tool_call_end pair on the SAME run.
@@ -924,6 +1179,60 @@ func (s *permissionSessionService) AppendEvents(_ context.Context, req *adk.Appe
 
 func (s *permissionSessionService) LoadEvents(_ context.Context, _ *adk.LoadSessionEventsRequest) (*adk.LoadSessionEventsResult[*schema.Message], error) {
 	return &adk.LoadSessionEventsResult[*schema.Message]{Events: nil}, nil
+}
+
+type permissionCheckpointStore struct {
+	data map[string][]byte
+}
+
+func newPermissionCheckpointStore() *permissionCheckpointStore {
+	return &permissionCheckpointStore{data: make(map[string][]byte)}
+}
+
+func (s *permissionCheckpointStore) Get(_ context.Context, key string) ([]byte, bool, error) {
+	data, ok := s.data[key]
+	if !ok {
+		return nil, false, nil
+	}
+	return append([]byte(nil), data...), true, nil
+}
+
+func (s *permissionCheckpointStore) Set(_ context.Context, key string, data []byte) error {
+	s.data[key] = append([]byte(nil), data...)
+	return nil
+}
+
+func filterPermissionDecisionEvents(events []*adk.SessionEvent[*schema.Message]) []*adk.SessionEvent[*schema.Message] {
+	var decisions []*adk.SessionEvent[*schema.Message]
+	for _, event := range events {
+		if event.Kind == SessionEventPermissionDecision {
+			decisions = append(decisions, event)
+		}
+	}
+	return decisions
+}
+
+func requireDecisionEvent(
+	t *testing.T,
+	event *adk.SessionEvent[*schema.Message],
+	action ResumeAction,
+	decisionText string,
+	updatedInput string,
+	hasUpdatedInput bool,
+) {
+	t.Helper()
+	require.NotNil(t, event)
+	require.NotEmpty(t, event.EventID)
+	require.NotEmpty(t, event.TurnID)
+	require.NotNil(t, event.Extension)
+	payload, ok := event.Extension.Data.(*DecisionEvent)
+	require.True(t, ok)
+	assert.Equal(t, action, payload.Action)
+	assert.Equal(t, "permission_tool", payload.ToolName)
+	assert.Equal(t, "permission_call", payload.ToolUseID)
+	assert.Equal(t, decisionText, payload.DecisionText)
+	assert.Equal(t, updatedInput, payload.UpdatedInput)
+	assert.Equal(t, hasUpdatedInput, payload.HasUpdatedInput)
 }
 
 func requireAskInfo(t *testing.T, err error) *AskInfo {

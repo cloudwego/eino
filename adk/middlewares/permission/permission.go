@@ -32,6 +32,7 @@ import (
 func init() {
 	schema.RegisterName[*AskInfo]("_eino_adk_permission_ask_info")
 	schema.RegisterName[*AskState]("_eino_adk_permission_ask_state")
+	schema.RegisterName[*DecisionEvent]("_eino_adk_permission_decision_event")
 }
 
 // GateDecision is the result of a pre-execution permission check.
@@ -45,6 +46,12 @@ const (
 	GateDeny GateDecision = "deny"
 	// GateAsk interrupts the agent run for external approval.
 	GateAsk GateDecision = "ask"
+)
+
+const (
+	// SessionEventPermissionDecision records a valid user resume decision for a
+	// previously interrupted permission ask.
+	SessionEventPermissionDecision adk.SessionEventKind = adk.SessionEventKind(adk.SessionEventExtensionPrefix + "permission.decision")
 )
 
 // GateCheckResult determines how a tool call should proceed before execution.
@@ -114,6 +121,18 @@ type ResumeResponse struct {
 	Message string
 }
 
+// DecisionEvent is the typed payload for SessionEventPermissionDecision.
+// It intentionally omits the original saved tool arguments; only user-provided
+// UpdatedInput is carried when it is part of an approval decision.
+type DecisionEvent struct {
+	Action          ResumeAction `json:"action"`
+	ToolName        string       `json:"tool_name"`
+	ToolUseID       string       `json:"tool_use_id,omitempty"`
+	DecisionText    string       `json:"decision_text,omitempty"`
+	UpdatedInput    string       `json:"updated_input,omitempty"`
+	HasUpdatedInput bool         `json:"has_updated_input,omitempty"`
+}
+
 // Middleware gates tool calls with a permission Checker.
 type Middleware[M adk.MessageType] struct {
 	*adk.TypedBaseChatModelAgentMiddleware[M]
@@ -139,6 +158,13 @@ type gateResult struct {
 	argument   *schema.ToolArgument
 }
 
+type normalizedResumeDecision struct {
+	Action          ResumeAction
+	UpdatedInput    string
+	HasUpdatedInput bool
+	DecisionText    string
+}
+
 func (m *Middleware[M]) permissionGate(
 	ctx context.Context,
 	tCtx *adk.ToolContext,
@@ -161,6 +187,9 @@ func (m *Middleware[M]) permissionGate(
 	if isTarget && hasData {
 		if !hasState || savedState == nil {
 			return nil, fmt.Errorf("permission: missing AskState for targeted resume of tool %q (call_id=%s)", tCtx.Name, tCtx.CallID)
+		}
+		if err := emitDecisionEvent[M](ctx, tCtx, savedState, response); err != nil {
+			return nil, err
 		}
 		return handleResumeResponse(ctx, tCtx, &schema.ToolArgument{Text: savedState.Arguments}, response)
 	}
@@ -191,16 +220,13 @@ func (m *Middleware[M]) permissionGate(
 
 	switch decision.Decision {
 	case GateAllow:
-		adk.SetToolPermissionDecision(ctx, tCtx.CallID, string(GateAllow))
 		return &gateResult{
 			allowed:  true,
 			argument: withUpdatedInput(argument, decision.UpdatedInput, decision.HasUpdatedInput || decision.UpdatedInput != ""),
 		}, nil
 	case GateDeny:
-		adk.SetToolPermissionDecision(ctx, tCtx.CallID, string(GateDeny))
 		return &gateResult{denyResult: formatDenyResult(tCtx.Name, decision.Message)}, nil
 	case GateAsk:
-		adk.SetToolPermissionDecision(ctx, tCtx.CallID, string(GateAsk))
 		info := &AskInfo{
 			ToolName: tCtx.Name,
 			Summary:  publicSummary(decision.Message, tCtx.CallID, argument.Text),
@@ -250,38 +276,92 @@ func handleResumeResponse(
 	argument *schema.ToolArgument,
 	response *ResumeResponse,
 ) (*gateResult, error) {
-	if response == nil {
-		return nil, fmt.Errorf("permission: nil ResumeResponse for tool %q (call_id=%s)", tCtx.Name, tCtx.CallID)
+	decision, err := normalizeResumeDecision(tCtx, response)
+	if err != nil {
+		return nil, err
 	}
 
-	switch response.Action {
+	switch decision.Action {
 	case ResumeActionApprove:
-		adk.SetToolPermissionDecision(ctx, tCtx.CallID, string(ResumeActionApprove))
 		return &gateResult{
 			allowed:  true,
-			argument: withUpdatedInput(argument, response.UpdatedInput, response.HasUpdatedInput || response.UpdatedInput != ""),
+			argument: withUpdatedInput(argument, decision.UpdatedInput, decision.HasUpdatedInput),
 		}, nil
 	case ResumeActionReject:
-		adk.SetToolPermissionDecision(ctx, tCtx.CallID, string(ResumeActionReject))
-		message := response.Message
-		if message == "" {
-			message = "rejected by user"
-		}
-		return &gateResult{denyResult: formatDenyResult(tCtx.Name, message)}, nil
+		return &gateResult{denyResult: formatDenyResult(tCtx.Name, decision.DecisionText)}, nil
 	case ResumeActionRespond:
-		adk.SetToolPermissionDecision(ctx, tCtx.CallID, string(ResumeActionRespond))
-		if response.Message == "" {
-			return nil, fmt.Errorf("permission: empty response message for respond action on tool %q (call_id=%s)",
-				tCtx.Name, tCtx.CallID)
-		}
-		return &gateResult{denyResult: formatRespondResult(tCtx.Name, response.Message)}, nil
-	case "":
-		return nil, fmt.Errorf("permission: empty resume action for tool %q (call_id=%s); expected approve, reject, or respond",
-			tCtx.Name, tCtx.CallID)
+		return &gateResult{denyResult: formatRespondResult(tCtx.Name, decision.DecisionText)}, nil
 	default:
 		return nil, fmt.Errorf("permission: unknown resume action %q for tool %q (call_id=%s); expected approve, reject, or respond",
-			response.Action, tCtx.Name, tCtx.CallID)
+			decision.Action, tCtx.Name, tCtx.CallID)
 	}
+}
+
+func normalizeResumeDecision(tCtx *adk.ToolContext, response *ResumeResponse) (*normalizedResumeDecision, error) {
+	toolName, callID := "", ""
+	if tCtx != nil {
+		toolName = tCtx.Name
+		callID = tCtx.CallID
+	}
+	if response == nil {
+		return nil, fmt.Errorf("permission: nil ResumeResponse for tool %q (call_id=%s)", toolName, callID)
+	}
+
+	decision := &normalizedResumeDecision{Action: response.Action}
+	switch response.Action {
+	case ResumeActionApprove:
+		decision.HasUpdatedInput = response.HasUpdatedInput || response.UpdatedInput != ""
+		if decision.HasUpdatedInput {
+			decision.UpdatedInput = response.UpdatedInput
+		}
+		return decision, nil
+	case ResumeActionReject:
+		decision.DecisionText = response.Message
+		if decision.DecisionText == "" {
+			decision.DecisionText = "rejected by user"
+		}
+		return decision, nil
+	case ResumeActionRespond:
+		if response.Message == "" {
+			return nil, fmt.Errorf("permission: empty response message for respond action on tool %q (call_id=%s)",
+				toolName, callID)
+		}
+		decision.DecisionText = response.Message
+		return decision, nil
+	case "":
+		return nil, fmt.Errorf("permission: empty resume action for tool %q (call_id=%s); expected approve, reject, or respond",
+			toolName, callID)
+	default:
+		return nil, fmt.Errorf("permission: unknown resume action %q for tool %q (call_id=%s); expected approve, reject, or respond",
+			response.Action, toolName, callID)
+	}
+}
+
+func emitDecisionEvent[M adk.MessageType](ctx context.Context, tCtx *adk.ToolContext, state *AskState, response *ResumeResponse) error {
+	if tCtx == nil {
+		return fmt.Errorf("permission: nil ToolContext for resume decision event")
+	}
+	if state == nil {
+		return fmt.Errorf("permission: nil AskState for resume decision event on tool %q (call_id=%s)", tCtx.Name, tCtx.CallID)
+	}
+	decision, err := normalizeResumeDecision(tCtx, response)
+	if err != nil {
+		return err
+	}
+	payload := &DecisionEvent{
+		Action:          decision.Action,
+		ToolName:        state.ToolName,
+		ToolUseID:       state.CallID,
+		DecisionText:    decision.DecisionText,
+		UpdatedInput:    decision.UpdatedInput,
+		HasUpdatedInput: decision.HasUpdatedInput,
+	}
+	return adk.TypedSendEvent[M](ctx, &adk.TypedAgentEvent[M]{
+		SessionEvent: &adk.SessionEvent[M]{
+			Kind:      SessionEventPermissionDecision,
+			Extension: &adk.SessionExtensionEvent{Data: payload},
+		},
+	})
 }
 
 func (m *Middleware[M]) WrapInvokableToolCall(

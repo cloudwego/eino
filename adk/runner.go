@@ -569,7 +569,12 @@ func saveRunnerCheckpoint[M MessageType]( //nolint:revive // argument-limit
 	if isNilCheckPointStore(store) {
 		return nil
 	}
-	payload, err := encodeRunnerCheckPointImpl(enableStreaming, ctx, info, is)
+	payload, err := encodeRunnerCheckPointWithRunCtx(
+		enableStreaming,
+		sanitizeRunContextForSessionCheckpoint[M](getRunCtx(ctx)),
+		info,
+		is,
+	)
 	if err != nil {
 		return err
 	}
@@ -638,7 +643,6 @@ func typedRunnerRunImpl[M MessageType](a TypedAgent[M], enableStreaming bool, st
 		}
 		concreteInput := any(input).(*AgentInput)
 		ctx = ctxWithNewTypedRunCtx(ctx, input, o.sharedParentSession)
-		ctx = contextWithToolPermissionDecisionStore(ctx)
 		AddSessionValues(ctx, o.sessionValues)
 
 		iter := fa.Run(ctx, concreteInput, opts...)
@@ -665,7 +669,6 @@ func typedRunnerRunImpl[M MessageType](a TypedAgent[M], enableStreaming bool, st
 	}
 
 	ctx = ctxWithNewTypedRunCtx(ctx, input, o.sharedParentSession)
-	ctx = contextWithToolPermissionDecisionStore(ctx)
 	AddSessionValues(ctx, o.sessionValues)
 
 	iter := fa.Run(ctx, input, opts...)
@@ -733,7 +736,6 @@ func typedRunnerResumeInternalImpl[M MessageType](a TypedAgent[M], store CheckPo
 	}
 
 	ctx = setRunCtx(ctx, runCtx)
-	ctx = contextWithToolPermissionDecisionStore(ctx)
 	AddSessionValues(ctx, o.sessionValues)
 
 	if sessionState.enabled {
