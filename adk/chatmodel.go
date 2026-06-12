@@ -1690,7 +1690,6 @@ func (a *TypedChatModelAgent[M]) Run(ctx context.Context, input *TypedAgentInput
 			co = append(co, compose.WithToolsNodeOption(compose.WithToolList(bc.toolsNodeConf.Tools...)))
 		}
 	}
-	ctx = contextWithToolPermissionDecisionStore(ctx)
 
 	go func() {
 		if abortOnlyCancel != nil {
@@ -1834,7 +1833,6 @@ func (a *TypedChatModelAgent[M]) Resume(ctx context.Context, info *ResumeInfo, o
 			return nil
 		}))
 	}
-	ctx = contextWithToolPermissionDecisionStore(ctx)
 
 	go func() {
 		if abortOnlyCancel != nil {

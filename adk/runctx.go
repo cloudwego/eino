@@ -377,6 +377,131 @@ func (rc *runContext) deepCopy() *runContext {
 	return copied
 }
 
+func sanitizeRunContextForSessionCheckpoint[M MessageType](rc *runContext) *runContext {
+	if rc == nil {
+		return nil
+	}
+	copied := &runContext{
+		RootInput:        rc.RootInput,
+		AgenticRootInput: rc.AgenticRootInput,
+		RunPath:          append([]RunStep(nil), rc.RunPath...),
+		Session:          sanitizeRunSessionForSessionCheckpoint[M](rc.Session),
+	}
+	return copied
+}
+
+func sanitizeRunSessionForSessionCheckpoint[M MessageType](rs *runSession) *runSession {
+	if rs == nil {
+		return nil
+	}
+
+	copied := &runSession{
+		Values:    make(map[string]any),
+		valuesMtx: &sync.Mutex{},
+	}
+
+	if rs.valuesMtx != nil {
+		rs.valuesMtx.Lock()
+		for k, v := range rs.Values {
+			copied.Values[k] = v
+		}
+		rs.valuesMtx.Unlock()
+	} else {
+		for k, v := range rs.Values {
+			copied.Values[k] = v
+		}
+	}
+
+	var events []*agentEventWrapper
+	var typedEvents any
+	rs.mtx.Lock()
+	events = append(events, rs.Events...)
+	typedEvents = rs.TypedEvents
+	rs.mtx.Unlock()
+
+	for _, event := range events {
+		if sanitized := sanitizeAgentEventWrapperForSessionCheckpoint(event); sanitized != nil {
+			copied.Events = append(copied.Events, sanitized)
+		}
+	}
+	copied.LaneEvents = sanitizeLaneEventsForSessionCheckpoint(rs.LaneEvents)
+
+	if store, ok := typedEvents.(*[]*typedAgentEventWrapper[M]); ok {
+		if store == nil {
+			copied.TypedEvents = store
+			return copied
+		}
+		sanitized := make([]*typedAgentEventWrapper[M], 0, len(*store))
+		for _, event := range *store {
+			if copiedEvent := sanitizeTypedAgentEventWrapperForSessionCheckpoint(event); copiedEvent != nil {
+				sanitized = append(sanitized, copiedEvent)
+			}
+		}
+		copied.TypedEvents = &sanitized
+	} else {
+		copied.TypedEvents = typedEvents
+	}
+
+	return copied
+}
+
+func sanitizeLaneEventsForSessionCheckpoint(le *laneEvents) *laneEvents {
+	if le == nil {
+		return nil
+	}
+	copied := &laneEvents{
+		Parent: sanitizeLaneEventsForSessionCheckpoint(le.Parent),
+	}
+	for _, event := range le.Events {
+		if sanitized := sanitizeAgentEventWrapperForSessionCheckpoint(event); sanitized != nil {
+			copied.Events = append(copied.Events, sanitized)
+		}
+	}
+	return copied
+}
+
+func sanitizeAgentEventWrapperForSessionCheckpoint(w *agentEventWrapper) *agentEventWrapper {
+	if w == nil || w.AgentEvent == nil {
+		return nil
+	}
+
+	event := *w.AgentEvent
+	event.RunPath = append([]RunStep(nil), w.AgentEvent.RunPath...)
+	event.SessionEvent = nil
+	if event.Output == nil && event.Action == nil && event.Err == nil {
+		return nil
+	}
+
+	return &agentEventWrapper{
+		AgentEvent:          &event,
+		concatenatedMessage: w.concatenatedMessage,
+		TS:                  w.TS,
+		StreamErr:           w.StreamErr,
+	}
+}
+
+func sanitizeTypedAgentEventWrapperForSessionCheckpoint[M MessageType](
+	w *typedAgentEventWrapper[M],
+) *typedAgentEventWrapper[M] {
+	if w == nil || w.event == nil {
+		return nil
+	}
+
+	event := *w.event
+	event.RunPath = append([]RunStep(nil), w.event.RunPath...)
+	event.SessionEvent = nil
+	if event.Output == nil && event.Action == nil && event.Err == nil {
+		return nil
+	}
+
+	return &typedAgentEventWrapper[M]{
+		event:               &event,
+		concatenatedMessage: w.concatenatedMessage,
+		TS:                  w.TS,
+		StreamErr:           w.StreamErr,
+	}
+}
+
 type runCtxKey struct{}
 
 func getRunCtx(ctx context.Context) *runContext {

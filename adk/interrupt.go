@@ -310,8 +310,15 @@ func encodeRunnerCheckPointImpl(
 	info *InterruptInfo,
 	is *core.InterruptSignal,
 ) ([]byte, error) {
-	runCtx := getRunCtx(ctx)
+	return encodeRunnerCheckPointWithRunCtx(enableStreaming, getRunCtx(ctx), info, is)
+}
 
+func encodeRunnerCheckPointWithRunCtx(
+	enableStreaming bool,
+	runCtx *runContext,
+	info *InterruptInfo,
+	is *core.InterruptSignal,
+) ([]byte, error) {
 	id2Addr, id2State := core.SignalToPersistenceMaps(is)
 
 	buf := &bytes.Buffer{}

@@ -29,6 +29,14 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
+type conformanceExtensionPayload struct {
+	OK bool `json:"ok"`
+}
+
+func init() {
+	schema.RegisterName[*conformanceExtensionPayload]("_eino_adk_session_conformance_extension_payload")
+}
+
 // RunConformanceTests validates the SessionEventStore contract shared by
 // provider-facing session persistence implementations.
 //
@@ -502,7 +510,7 @@ func extensionEvent[M adk.MessageType](id, kind string) *adk.SessionEvent[M] {
 		EventID: id,
 		Kind:    adk.SessionEventKind(kind),
 		Extension: &adk.SessionExtensionEvent{
-			Data: []byte(`{"ok":true}`),
+			Data: &conformanceExtensionPayload{OK: true},
 		},
 	}
 }

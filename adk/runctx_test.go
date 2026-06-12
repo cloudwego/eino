@@ -21,10 +21,12 @@ import (
 	"context"
 	"encoding/gob"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/cloudwego/eino/schema"
 )
@@ -631,4 +633,220 @@ func TestGobEncodeStreamErrors(t *testing.T) {
 		err := gob.NewEncoder(&buf).Encode(session)
 		assert.NoError(t, err, "encoding runSession with WillRetryError stream should succeed")
 	})
+}
+
+func TestSanitizeRunContextForSessionCheckpointStripsSessionEvents(t *testing.T) {
+	now := time.Now().UTC()
+	output := &AgentOutput{
+		MessageOutput: &MessageVariant{
+			Message: schema.AssistantMessage("kept", nil),
+			Role:    schema.Assistant,
+		},
+	}
+	kept := &agentEventWrapper{
+		AgentEvent: &AgentEvent{
+			EventID:   "event-output",
+			Timestamp: now,
+			AgentName: "agent",
+			RunPath:   []RunStep{{agentName: "root"}},
+			Output:    output,
+			SessionEvent: &SessionEvent[*schema.Message]{
+				EventID: "event-output",
+				Kind:    SessionEventMessage,
+				Message: schema.AssistantMessage("kept", nil),
+			},
+		},
+		TS: 10,
+	}
+	dropped := &agentEventWrapper{
+		AgentEvent: &AgentEvent{
+			EventID: "event-session-only",
+			SessionEvent: &SessionEvent[*schema.Message]{
+				EventID: "event-session-only",
+				Kind:    SessionEventSessionStatusRunning,
+			},
+		},
+		TS: 11,
+	}
+	interrupt := &agentEventWrapper{
+		AgentEvent: &AgentEvent{
+			EventID: "event-interrupt",
+			Action:  &AgentAction{Interrupted: &InterruptInfo{Data: "pause"}},
+			SessionEvent: &SessionEvent[*schema.Message]{
+				EventID: "event-interrupt",
+				Kind:    SessionEventAgentInterrupt,
+			},
+		},
+		TS: 12,
+	}
+	session := newRunSession()
+	session.Values["k"] = "v"
+	session.Events = []*agentEventWrapper{kept, dropped, interrupt}
+	rc := &runContext{
+		RootInput: &AgentInput{Messages: []*schema.Message{schema.UserMessage("q")}},
+		RunPath:   []RunStep{{agentName: "root"}},
+		Session:   session,
+	}
+
+	sanitized := sanitizeRunContextForSessionCheckpoint[*schema.Message](rc)
+
+	require.NotNil(t, sanitized)
+	require.NotSame(t, rc, sanitized)
+	require.NotSame(t, session, sanitized.Session)
+	require.Len(t, sanitized.Session.Events, 2)
+	assert.Equal(t, "event-output", sanitized.Session.Events[0].EventID)
+	assert.Nil(t, sanitized.Session.Events[0].SessionEvent)
+	assert.Same(t, output, sanitized.Session.Events[0].Output)
+	assert.Equal(t, "event-interrupt", sanitized.Session.Events[1].EventID)
+	assert.NotNil(t, sanitized.Session.Events[1].Action.Interrupted)
+	assert.Nil(t, sanitized.Session.Events[1].SessionEvent)
+	assert.Equal(t, map[string]any{"k": "v"}, sanitized.Session.Values)
+
+	assert.NotNil(t, kept.SessionEvent, "sanitizer must not mutate the original output event")
+	assert.NotNil(t, dropped.SessionEvent, "sanitizer must not mutate the original timeline event")
+	assert.NotNil(t, interrupt.SessionEvent, "sanitizer must not mutate the original interrupt event")
+}
+
+func TestSanitizeRunContextForSessionCheckpointTypedEvents(t *testing.T) {
+	output := &TypedAgentOutput[*schema.AgenticMessage]{
+		MessageOutput: &TypedMessageVariant[*schema.AgenticMessage]{
+			Message:     schema.UserAgenticMessage("kept"),
+			AgenticRole: schema.AgenticRoleTypeUser,
+		},
+	}
+	events := []*typedAgentEventWrapper[*schema.AgenticMessage]{
+		{
+			event: &TypedAgentEvent[*schema.AgenticMessage]{
+				EventID: "typed-output",
+				Output:  output,
+				SessionEvent: &SessionEvent[*schema.AgenticMessage]{
+					EventID: "typed-output",
+					Kind:    SessionEventMessage,
+					Message: schema.UserAgenticMessage("kept"),
+				},
+			},
+			TS: 20,
+		},
+		{
+			event: &TypedAgentEvent[*schema.AgenticMessage]{
+				EventID: "typed-session-only",
+				SessionEvent: &SessionEvent[*schema.AgenticMessage]{
+					EventID: "typed-session-only",
+					Kind:    SessionEventSessionStatusRunning,
+				},
+			},
+			TS: 21,
+		},
+	}
+	session := newRunSession()
+	session.TypedEvents = &events
+	rc := &runContext{Session: session}
+
+	sanitized := sanitizeRunContextForSessionCheckpoint[*schema.AgenticMessage](rc)
+
+	store, ok := sanitized.Session.TypedEvents.(*[]*typedAgentEventWrapper[*schema.AgenticMessage])
+	require.True(t, ok)
+	require.Len(t, *store, 1)
+	assert.Equal(t, "typed-output", (*store)[0].event.EventID)
+	assert.Nil(t, (*store)[0].event.SessionEvent)
+	assert.Same(t, output, (*store)[0].event.Output)
+	assert.NotNil(t, events[0].event.SessionEvent, "sanitizer must not mutate the original typed event")
+	assert.NotNil(t, events[1].event.SessionEvent, "sanitizer must not mutate the original typed timeline event")
+}
+
+func TestSanitizeRunContextForSessionCheckpointReducesEncodedPayload(t *testing.T) {
+	sessionEvent := &SessionEvent[*schema.Message]{
+		EventID: "large-session-event",
+		Kind:    SessionEventMessage,
+		Message: schema.AssistantMessage("large duplicated durable session payload", nil),
+	}
+	rc := &runContext{Session: newRunSession()}
+	rc.Session.Events = []*agentEventWrapper{
+		{
+			AgentEvent: &AgentEvent{
+				EventID:      "large-session-event",
+				SessionEvent: sessionEvent,
+			},
+		},
+		{
+			AgentEvent: &AgentEvent{
+				EventID: "mixed-event",
+				Output: &AgentOutput{
+					MessageOutput: &MessageVariant{
+						Message: schema.AssistantMessage("kept output", nil),
+						Role:    schema.Assistant,
+					},
+				},
+				SessionEvent: sessionEvent,
+			},
+		},
+	}
+
+	unsanitized, err := encodeRunnerCheckPointWithRunCtx(false, rc, nil, nil)
+	require.NoError(t, err)
+	sanitized, err := encodeRunnerCheckPointWithRunCtx(
+		false,
+		sanitizeRunContextForSessionCheckpoint[*schema.Message](rc),
+		nil,
+		nil,
+	)
+	require.NoError(t, err)
+	assert.Less(t, len(sanitized), len(unsanitized))
+
+	_, decoded, _, err := runnerLoadCheckPointBytes(context.Background(), sanitized)
+	require.NoError(t, err)
+	require.Len(t, decoded.Session.Events, 1)
+	assert.Nil(t, decoded.Session.Events[0].SessionEvent)
+	assert.NotNil(t, decoded.Session.Events[0].Output)
+}
+
+func TestSanitizeRunContextForSessionCheckpointPreservesLaneChain(t *testing.T) {
+	parentTimelineOnly := &agentEventWrapper{
+		AgentEvent: &AgentEvent{
+			EventID:      "parent-session-only",
+			SessionEvent: &SessionEvent[*schema.Message]{Kind: SessionEventSessionStatusRunning},
+		},
+	}
+	parentOutput := &agentEventWrapper{
+		AgentEvent: &AgentEvent{
+			EventID: "parent-output",
+			Output:  &AgentOutput{MessageOutput: &MessageVariant{Message: schema.AssistantMessage("parent", nil)}},
+			SessionEvent: &SessionEvent[*schema.Message]{
+				EventID: "parent-output",
+				Kind:    SessionEventMessage,
+			},
+		},
+	}
+	childTimelineOnly := &agentEventWrapper{
+		AgentEvent: &AgentEvent{
+			EventID:      "child-session-only",
+			SessionEvent: &SessionEvent[*schema.Message]{Kind: SessionEventSessionStatusIdle},
+		},
+	}
+	childOutput := &agentEventWrapper{
+		AgentEvent: &AgentEvent{
+			EventID: "child-output",
+			Output:  &AgentOutput{MessageOutput: &MessageVariant{Message: schema.AssistantMessage("child", nil)}},
+			SessionEvent: &SessionEvent[*schema.Message]{
+				EventID: "child-output",
+				Kind:    SessionEventMessage,
+			},
+		},
+	}
+	parent := &laneEvents{Events: []*agentEventWrapper{parentTimelineOnly, parentOutput}}
+	child := &laneEvents{Events: []*agentEventWrapper{childTimelineOnly, childOutput}, Parent: parent}
+	rc := &runContext{Session: &runSession{LaneEvents: child, valuesMtx: &sync.Mutex{}}}
+
+	sanitized := sanitizeRunContextForSessionCheckpoint[*schema.Message](rc)
+
+	require.NotNil(t, sanitized.Session.LaneEvents)
+	require.NotNil(t, sanitized.Session.LaneEvents.Parent)
+	require.Len(t, sanitized.Session.LaneEvents.Events, 1)
+	require.Len(t, sanitized.Session.LaneEvents.Parent.Events, 1)
+	assert.Equal(t, "child-output", sanitized.Session.LaneEvents.Events[0].EventID)
+	assert.Nil(t, sanitized.Session.LaneEvents.Events[0].SessionEvent)
+	assert.Equal(t, "parent-output", sanitized.Session.LaneEvents.Parent.Events[0].EventID)
+	assert.Nil(t, sanitized.Session.LaneEvents.Parent.Events[0].SessionEvent)
+	assert.NotNil(t, childTimelineOnly.SessionEvent, "sanitizer must not mutate original child lane")
+	assert.NotNil(t, parentTimelineOnly.SessionEvent, "sanitizer must not mutate original parent lane")
 }

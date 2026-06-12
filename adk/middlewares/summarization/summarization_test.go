@@ -1425,11 +1425,10 @@ func TestPostProcessSummary(t *testing.T) {
 func TestEventHelpers(t *testing.T) {
 	ctx := context.Background()
 
-	t.Run("emitEvent returns wrapped error outside execution context", func(t *testing.T) {
+	t.Run("emitEvent is no-op outside execution context", func(t *testing.T) {
 		mw := &TypedMiddleware[*schema.Message]{cfg: &Config{}}
 		err := mw.emitEvent(ctx, &CustomizedAction{Type: ActionTypeBeforeSummarize})
-		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "failed to send internal event")
+		assert.NoError(t, err)
 	})
 
 	t.Run("emitGenerateSummaryEvent is skipped when internal events are disabled", func(t *testing.T) {
@@ -1438,11 +1437,10 @@ func TestEventHelpers(t *testing.T) {
 		assert.NoError(t, err)
 	})
 
-	t.Run("emitGenerateSummaryEvent returns wrapped error when enabled outside execution context", func(t *testing.T) {
+	t.Run("emitGenerateSummaryEvent is no-op when enabled outside execution context", func(t *testing.T) {
 		mw := &TypedMiddleware[*schema.Message]{cfg: &Config{EmitInternalEvents: true}}
 		err := mw.emitGenerateSummaryEvent(ctx, 1, GenerateSummaryPhasePrimary, schema.AssistantMessage("ok", nil), nil)
-		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "failed to send internal event")
+		assert.NoError(t, err)
 	})
 }
 
@@ -1937,7 +1935,7 @@ func TestSummarizationGeneric(t *testing.T) {
 	})
 }
 
-func TestEmitInternalEvents_AgenticMessage_RequiresExecContext(t *testing.T) {
+func TestEmitInternalEvents_AgenticMessage_NoopOutsideExecContext(t *testing.T) {
 	ctx := context.Background()
 
 	longContent := strings.Repeat("x", 800000)
@@ -1967,9 +1965,12 @@ func TestEmitInternalEvents_AgenticMessage_RequiresExecContext(t *testing.T) {
 	require.NoError(t, err)
 
 	state := &adk.TypedChatModelAgentState[*schema.AgenticMessage]{Messages: msgs}
-	_, _, err = mw.BeforeModelRewriteState(ctx, state, nil)
-	assert.Error(t, err, "should error without exec context when EmitInternalEvents is true")
-	assert.Contains(t, err.Error(), "send internal event")
+	_, gotState, err := mw.BeforeModelRewriteState(ctx, state, nil)
+	require.NoError(t, err)
+	require.NotNil(t, gotState)
+	require.Len(t, gotState.Messages, 2)
+	assert.Equal(t, schema.AgenticRoleTypeSystem, gotState.Messages[0].Role)
+	assert.Equal(t, schema.AgenticRoleTypeUser, gotState.Messages[1].Role)
 }
 
 func testSummarizationHelpers[M adk.MessageType](t *testing.T) {
