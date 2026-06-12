@@ -111,7 +111,6 @@ func TestSessionTimeline_ClassifyAndSerializeVariants(t *testing.T) {
 			se: &SessionEvent[*schema.Message]{AgentInterrupt: &AgentInterruptEvent{
 				Contexts: []*AgentInterruptContext{
 					{
-						Cause:       AgentInterruptCauseGeneric,
 						InterruptID: "agent:timeline-agent",
 						Info:        "confirm?",
 					},
@@ -231,7 +230,6 @@ func TestSessionTimeline_ReconstructionIgnoresNonContextVariants(t *testing.T) {
 		{EventID: uuid.NewString(), Kind: SessionEventAgentInterrupt, AgentInterrupt: &AgentInterruptEvent{
 			Contexts: []*AgentInterruptContext{
 				{
-					Cause:       AgentInterruptCauseGeneric,
 					InterruptID: "agent:timeline-agent",
 					Info:        "confirm?",
 				},
@@ -259,7 +257,6 @@ func TestSessionTimeline_AgentInterruptRoundTripPreservesContexts(t *testing.T) 
 		AgentInterrupt: &AgentInterruptEvent{
 			Contexts: []*AgentInterruptContext{
 				{
-					Cause:       AgentInterruptCauseToolPermission,
 					InterruptID: "agent:timeline-agent;tool:lookup:call_1",
 					Info:        "tool info",
 					ToolUseID:   "call_1",
@@ -278,13 +275,12 @@ func TestSessionTimeline_AgentInterruptRoundTripPreservesContexts(t *testing.T) 
 	assert.Equal(t, SessionEventAgentInterrupt, decoded.Kind)
 	require.Len(t, decoded.AgentInterrupt.Contexts, 1)
 	ctx0 := decoded.AgentInterrupt.Contexts[0]
-	assert.Equal(t, AgentInterruptCauseToolPermission, ctx0.Cause)
 	assert.Equal(t, "agent:timeline-agent;tool:lookup:call_1", ctx0.InterruptID)
 	assert.Equal(t, "tool info", ctx0.Info)
 	assert.Equal(t, "call_1", ctx0.ToolUseID)
 }
 
-func TestBuildAgentInterruptEvent_ToolCauseAndToolUseID(t *testing.T) {
+func TestBuildAgentInterruptEvent_ToolUseID(t *testing.T) {
 	contexts := []*InterruptCtx{
 		{
 			ID: "agent:timeline-agent;tool:lookup:call_1",
@@ -300,7 +296,6 @@ func TestBuildAgentInterruptEvent_ToolCauseAndToolUseID(t *testing.T) {
 	event := buildAgentInterruptEvent(contexts)
 	require.NotNil(t, event)
 	require.Len(t, event.Contexts, 1)
-	assert.Equal(t, AgentInterruptCauseToolPermission, event.Contexts[0].Cause)
 	assert.Equal(t, "agent:timeline-agent;tool:lookup:call_1", event.Contexts[0].InterruptID)
 	assert.Equal(t, "tool info", event.Contexts[0].Info)
 	assert.Equal(t, "call_1", event.Contexts[0].ToolUseID)
@@ -360,7 +355,6 @@ func TestRunner_PersistsAgentInterruptSessionEvent(t *testing.T) {
 	require.NotNil(t, interrupts[0].AgentInterrupt)
 	require.Len(t, interrupts[0].AgentInterrupt.Contexts, 1)
 	ctx0 := interrupts[0].AgentInterrupt.Contexts[0]
-	assert.Equal(t, AgentInterruptCauseGeneric, ctx0.Cause)
 	assert.Equal(t, liveInterruptContexts[0].ID, ctx0.InterruptID)
 	assert.Equal(t, liveInterruptContexts[0].Info, ctx0.Info)
 	requireStoredIdleStopReason(t, store.events, "interrupted")

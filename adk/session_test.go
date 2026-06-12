@@ -3156,7 +3156,6 @@ func TestAttack_InFlightTurnIDRecoveryWithoutCommittedTurnEnd(t *testing.T) {
 		{EventID: uuid.NewString(), Kind: SessionEventAgentInterrupt, TurnID: "turn-interrupted", AgentInterrupt: &AgentInterruptEvent{
 			Contexts: []*AgentInterruptContext{
 				{
-					Cause:       AgentInterruptCauseGeneric,
 					InterruptID: "agent:InterruptAgent",
 					Info:        "approval_needed",
 				},
