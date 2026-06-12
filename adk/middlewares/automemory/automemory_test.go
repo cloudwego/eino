@@ -119,8 +119,8 @@ func TestNew_DoesNotMutateConfig(t *testing.T) {
 		MemoryDirectory: "/mem",
 		MemoryBackend:   b,
 		Model:           &fixedModel{out: `{"selected_memories":["debugging.md"]}`},
-		Read:            &ReadConfig{},
-		Write:           &WriteConfig{},
+		Read:            &ReadConfig[*schema.Message]{},
+		Write:           &WriteConfig[*schema.Message]{},
 		Coordination:    &CoordinationConfig[*schema.Message]{},
 	}
 	_, err = New(ctx, cfgExplicitNested)
@@ -182,7 +182,7 @@ func TestMiddleware_TopicSelection_AsyncInjectsInBeforeModel(t *testing.T) {
 		MemoryDirectory: "/mem",
 		MemoryBackend:   b,
 		Model:           &fixedModel{out: `{"selected_memories":["debugging.md"]}`},
-		Read:            &ReadConfig{Mode: ReadModeAsync},
+		Read:            &ReadConfig[*schema.Message]{Mode: ReadModeAsync},
 	})
 	require.NoError(t, err)
 
@@ -387,7 +387,7 @@ func TestMiddleware_TopicSelection_SmallCandidateSetBypassesModel(t *testing.T) 
 		MemoryDirectory: "/mem",
 		MemoryBackend:   b,
 		Model:           &panicModel{},
-		Read: &ReadConfig{
+		Read: &ReadConfig[*schema.Message]{
 			Mode: ReadModeSync,
 			TopicSelection: &TopicSelectionConfig{
 				TopK: 5,
@@ -419,7 +419,7 @@ func TestMiddleware_AfterAgent_SyncExtractionWritesMemoryFiles(t *testing.T) {
 	mw, err := New(ctx, &Config[*schema.Message]{
 		MemoryDirectory: "/mem",
 		MemoryBackend:   b,
-		Write: &WriteConfig{
+		Write: &WriteConfig[*schema.Message]{
 			Mode:  WriteModeSync,
 			Model: extModel,
 		},
@@ -481,7 +481,7 @@ func TestMiddleware_AfterAgent_SyncExtraction_IteratorHandlerCanDrain(t *testing
 	mw, err := New(ctx, &Config[*schema.Message]{
 		MemoryDirectory: "/mem",
 		MemoryBackend:   b,
-		Write: &WriteConfig{
+		Write: &WriteConfig[*schema.Message]{
 			Mode:  WriteModeSync,
 			Model: extModel,
 			HandleExtractionIterator: func(ctx context.Context, iter *adk.AsyncIterator[*adk.AgentEvent]) error {
@@ -534,7 +534,7 @@ func TestMiddleware_AfterAgent_SkipsExtractionWhenMainAgentAlreadyWroteMemory(t 
 	mw, err := New(ctx, &Config[*schema.Message]{
 		MemoryDirectory: "/mem",
 		MemoryBackend:   b,
-		Write: &WriteConfig{
+		Write: &WriteConfig[*schema.Message]{
 			Mode:  WriteModeSync,
 			Model: extModel,
 		},
@@ -590,7 +590,7 @@ func TestMiddleware_AfterAgent_AsyncExtractionKeepsLatestPendingSnapshot(t *test
 	mw, err := New(ctx, &Config[*schema.Message]{
 		MemoryDirectory: "/mem",
 		MemoryBackend:   b,
-		Write: &WriteConfig{
+		Write: &WriteConfig[*schema.Message]{
 			Mode:  WriteModeAsync,
 			Model: extModel,
 		},
@@ -749,7 +749,7 @@ func TestMiddleware_TopicSelection_ToolCallParsingAndFiltering(t *testing.T) {
 		MemoryDirectory: "/mem",
 		MemoryBackend:   b,
 		Model:           selModel,
-		Read: &ReadConfig{
+		Read: &ReadConfig[*schema.Message]{
 			Mode: ReadModeSync,
 			TopicSelection: &TopicSelectionConfig{
 				TopK: 1,
@@ -782,7 +782,7 @@ func TestMiddleware_TopicSelection_AsyncProtectsMemoryMessageFromMutation(t *tes
 		MemoryDirectory: "/mem",
 		MemoryBackend:   b,
 		Model:           &fixedModel{out: `{"selected_memories":["debugging.md"]}`},
-		Read:            &ReadConfig{Mode: ReadModeAsync},
+		Read:            &ReadConfig[*schema.Message]{Mode: ReadModeAsync},
 	})
 	require.NoError(t, err)
 
@@ -824,7 +824,7 @@ func TestMiddleware_AfterAgent_SyncExtraction_SkipIndexPrompt(t *testing.T) {
 	mw, err := New(ctx, &Config[*schema.Message]{
 		MemoryDirectory: "/mem",
 		MemoryBackend:   b,
-		Write: &WriteConfig{
+		Write: &WriteConfig[*schema.Message]{
 			Mode:      WriteModeSync,
 			Model:     extModel,
 			SkipIndex: true,
@@ -862,7 +862,7 @@ func TestMiddleware_AfterAgent_SyncExtraction_ChinesePrompt(t *testing.T) {
 	mw, err := New(ctx, &Config[*schema.Message]{
 		MemoryDirectory: "/mem",
 		MemoryBackend:   b,
-		Write: &WriteConfig{
+		Write: &WriteConfig[*schema.Message]{
 			Mode:  WriteModeSync,
 			Model: extModel,
 		},
@@ -903,7 +903,7 @@ func TestMiddleware_AfterAgent_RelativeMemoryDirRendersAbsolutePath(t *testing.T
 	mw, err := New(ctx, &Config[*schema.Message]{
 		MemoryDirectory: ".",
 		MemoryBackend:   NewLocalBackend(),
-		Write: &WriteConfig{
+		Write: &WriteConfig[*schema.Message]{
 			Mode:  WriteModeSync,
 			Model: extModel,
 		},
@@ -965,7 +965,7 @@ func TestMiddleware_AfterAgent_AsyncSetsPendingSnapshotWhenLockHeld(t *testing.T
 	mwI, err := New(ctx, &Config[*schema.Message]{
 		MemoryDirectory: "/mem",
 		MemoryBackend:   b,
-		Write: &WriteConfig{
+		Write: &WriteConfig[*schema.Message]{
 			Mode:  WriteModeAsync,
 			Model: extModel,
 		},

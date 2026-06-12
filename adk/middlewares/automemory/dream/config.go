@@ -42,7 +42,7 @@ type OnError func(ctx context.Context, stage string, err error)
 
 // HandleIterator handles the dream sub-agent event stream.
 // Optional. Nil means dream drains the iterator itself.
-type HandleIterator func(ctx context.Context, iter *adk.AsyncIterator[*adk.AgentEvent]) error
+type HandleIterator[M adk.MessageType] func(ctx context.Context, iter *adk.AsyncIterator[*adk.TypedAgentEvent[M]]) error
 
 // Config configures auto dream for both `New(...)` and `Run(...)`.
 type Config[M adk.MessageType] struct {
@@ -54,9 +54,9 @@ type Config[M adk.MessageType] struct {
 	// Required.
 	MemoryBackend automemory.Backend
 
-	// Model is the tool-calling model used by the internal dream agent.
+	// Model is the model used by the internal dream agent.
 	// Required.
-	Model model.ToolCallingChatModel
+	Model model.BaseModel[M]
 
 	// SessionIDFunc resolves the current session ID.
 	// Optional. Default: a generated session-scoped ID.
@@ -84,7 +84,7 @@ type Config[M adk.MessageType] struct {
 
 	// HandleIterator overrides iterator consumption.
 	// Optional. Default: nil.
-	HandleIterator HandleIterator
+	HandleIterator HandleIterator[M]
 }
 
 // ScheduleConfig controls middleware-triggered runs.

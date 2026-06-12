@@ -41,7 +41,7 @@ type middleware[M adk.MessageType] struct {
 
 	cfg               *Config[M]
 	resolvedMemoryDir string
-	fsHandler         adk.ChatModelAgentMiddleware
+	fsHandler         adk.TypedChatModelAgentMiddleware[M]
 	sessionSearchTool tool.BaseTool
 	now               func() time.Time
 }
@@ -99,7 +99,7 @@ func newMiddleware[M adk.MessageType](ctx context.Context, cfg *Config[M]) (*mid
 	if err != nil {
 		return nil, err
 	}
-	fsHandler, err := fsmw.New(ctx, &fsmw.MiddlewareConfig{
+	fsHandler, err := fsmw.NewTyped[M](ctx, &fsmw.MiddlewareConfig{
 		Backend:        writeFSBackend,
 		GrepToolConfig: &fsmw.ToolConfig{Disable: true},
 	})
@@ -215,7 +215,7 @@ func (m *middleware[M]) runDream(ctx context.Context, sessionID string, touchedS
 		SessionID:        sessionID,
 		SearchSessionIDs: append([]string(nil), searchSessionIDs...),
 	})
-	iter := agent.Run(runCtx, &adk.AgentInput{Messages: []adk.Message{schema.UserMessage(prompt)}})
+	iter := agent.Run(runCtx, &adk.TypedAgentInput[M]{Messages: []M{makeUserMsg[M](prompt)}})
 	if m.cfg.HandleIterator != nil {
 		return m.cfg.HandleIterator(runCtx, iter)
 	}
@@ -231,16 +231,16 @@ func (m *middleware[M]) runDream(ctx context.Context, sessionID string, touchedS
 	return nil
 }
 
-func (m *middleware[M]) newDreamAgent(ctx context.Context) (*adk.ChatModelAgent, error) {
+func (m *middleware[M]) newDreamAgent(ctx context.Context) (*adk.TypedChatModelAgent[M], error) {
 	tools := make([]tool.BaseTool, 0, 1)
 	if m.sessionSearchTool != nil {
 		tools = append(tools, m.sessionSearchTool)
 	}
-	agent, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
+	agent, err := adk.NewTypedChatModelAgent[M](ctx, &adk.TypedChatModelAgentConfig[M]{
 		Name:          "automemory_dream",
 		Description:   "Internal auto dream consolidation agent",
 		Model:         m.cfg.Model,
-		Handlers:      []adk.ChatModelAgentMiddleware{m.fsHandler},
+		Handlers:      []adk.TypedChatModelAgentMiddleware[M]{m.fsHandler},
 		ToolsConfig:   adk.ToolsConfig{ToolsNodeConfig: compose.ToolsNodeConfig{Tools: tools}},
 		MaxIterations: 12,
 	})
@@ -255,4 +255,16 @@ func (m *middleware[M]) onErr(ctx context.Context, stage string, err error) {
 		return
 	}
 	m.cfg.OnError(ctx, stage, err)
+}
+
+func makeUserMsg[M adk.MessageType](text string) M {
+	var zero M
+	switch any(zero).(type) {
+	case *schema.Message:
+		return any(schema.UserMessage(text)).(M)
+	case *schema.AgenticMessage:
+		return any(schema.UserAgenticMessage(text)).(M)
+	default:
+		panic("unreachable")
+	}
 }
