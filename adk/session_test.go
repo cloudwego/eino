@@ -1375,6 +1375,52 @@ func (a *runnerInterruptAgent) Resume(ctx context.Context, info *ResumeInfo, _ .
 	return iter
 }
 
+type runnerCheckpointSanitizeAgent struct{}
+
+func (a *runnerCheckpointSanitizeAgent) Name(_ context.Context) string {
+	return "CheckpointSanitizeAgent"
+}
+
+func (a *runnerCheckpointSanitizeAgent) Description(_ context.Context) string {
+	return "session checkpoint sanitizer test agent"
+}
+
+func (a *runnerCheckpointSanitizeAgent) Run(ctx context.Context, _ *AgentInput, _ ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+	iter, gen := NewAsyncIteratorPair[*AgentEvent]()
+	go func() {
+		defer gen.Close()
+		gen.Send(&AgentEvent{
+			EventID:   "checkpoint-session-only",
+			AgentName: "CheckpointSanitizeAgent",
+			SessionEvent: &SessionEvent[*schema.Message]{
+				EventID: "checkpoint-session-only",
+				Kind:    SessionEventSessionStatusRunning,
+				Lifecycle: &LifecycleEvent{
+					Scope: LifecycleScopeSession,
+					State: SessionRunStateRunning,
+				},
+			},
+		})
+		gen.Send(&AgentEvent{
+			EventID:   "checkpoint-output",
+			AgentName: "CheckpointSanitizeAgent",
+			Output: &AgentOutput{
+				MessageOutput: &MessageVariant{
+					Message: schema.AssistantMessage("mixed output", nil),
+					Role:    schema.Assistant,
+				},
+			},
+			SessionEvent: &SessionEvent[*schema.Message]{
+				EventID: "checkpoint-output",
+				Kind:    SessionEventMessage,
+				Message: schema.AssistantMessage("mixed output", nil),
+			},
+		})
+		gen.Send(Interrupt(ctx, "confirm?"))
+	}()
+	return iter
+}
+
 func TestRunnerSessionModeResumeWithEmptyCheckpointID(t *testing.T) {
 	ctx := context.Background()
 	store := newSessionHelperStore()
@@ -2795,6 +2841,80 @@ func TestRunnerSessionInterruptCheckpointTailIsFinalIdle(t *testing.T) {
 	store.sessionHelperStore.mu.Unlock()
 	assert.Equal(t, SessionEventSessionStatusIdle, tail.Kind)
 	assert.Equal(t, tail.EventID, cp.SessionTailEventID)
+
+	_, runCtx, _, err := runnerLoadCheckPointBytes(ctx, cp.Payload)
+	require.NoError(t, err)
+	require.NotNil(t, runCtx)
+	require.NotNil(t, runCtx.Session)
+	for _, event := range runCtx.Session.Events {
+		require.NotNil(t, event.AgentEvent)
+		assert.Nil(t, event.SessionEvent)
+	}
+}
+
+func TestRunnerSessionCheckpointPayloadStripsSessionEvents(t *testing.T) {
+	ctx := context.Background()
+	store := newRecordingHelperStore()
+	sid := "checkpoint-strip-session-events"
+
+	runner := NewRunner(ctx, RunnerConfig{
+		Agent:           &runnerCheckpointSanitizeAgent{},
+		CheckPointStore: store,
+		SessionID:       sid,
+		SessionService:  store,
+	})
+	iter := runner.Query(ctx, "hi", WithTimelineEvents())
+	var liveSessionEventIDs []string
+	for {
+		event, ok := iter.Next()
+		if !ok {
+			break
+		}
+		require.NoError(t, event.Err)
+		if event.SessionEvent != nil {
+			liveSessionEventIDs = append(liveSessionEventIDs, event.SessionEvent.EventID)
+		}
+	}
+	assert.Contains(t, liveSessionEventIDs, "checkpoint-session-only")
+	assert.Contains(t, liveSessionEventIDs, "checkpoint-output")
+
+	cpKey := sessionRunnerCheckpointID(sid)
+	raw, ok := store.checkpoints[cpKey]
+	require.True(t, ok, "expected interrupt checkpoint to be saved")
+	cp, err := decodeRunnerSessionCheckpoint(raw)
+	require.NoError(t, err)
+	assert.NotEmpty(t, cp.SessionTailEventID)
+
+	_, runCtx, _, err := runnerLoadCheckPointBytes(ctx, cp.Payload)
+	require.NoError(t, err)
+	require.NotNil(t, runCtx)
+	require.NotNil(t, runCtx.Session)
+
+	var checkpointEventIDs []string
+	var foundOutput bool
+	for _, event := range runCtx.Session.Events {
+		require.NotNil(t, event.AgentEvent)
+		assert.Nil(t, event.SessionEvent)
+		assert.True(t, event.Output != nil || event.Action != nil || event.Err != nil)
+		checkpointEventIDs = append(checkpointEventIDs, event.EventID)
+		if event.Output != nil &&
+			event.Output.MessageOutput != nil &&
+			event.Output.MessageOutput.Message != nil &&
+			event.Output.MessageOutput.Message.Content == "mixed output" {
+			foundOutput = true
+		}
+	}
+	assert.NotContains(t, checkpointEventIDs, "checkpoint-session-only")
+	assert.True(t, foundOutput)
+
+	var persistedKinds []SessionEventKind
+	store.sessionHelperStore.mu.Lock()
+	for _, event := range store.events {
+		persistedKinds = append(persistedKinds, event.Kind)
+	}
+	store.sessionHelperStore.mu.Unlock()
+	assert.Contains(t, persistedKinds, SessionEventSessionStatusRunning)
+	assert.Contains(t, persistedKinds, SessionEventMessage)
 }
 
 func TestRunnerSessionAgentInterruptBoundaryFailureNotExposed(t *testing.T) {

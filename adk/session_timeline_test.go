@@ -34,6 +34,15 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
+type sessionTimelineExtensionPayload struct {
+	OutcomeName string `json:"outcome_name,omitempty"`
+	Attempt     int    `json:"attempt,omitempty"`
+}
+
+func init() {
+	schema.RegisterName[*sessionTimelineExtensionPayload]("_eino_adk_session_timeline_extension_payload")
+}
+
 func requireStoredIdleStopReason(t *testing.T, raw []storedSessionEvent, want string) *SessionEvent[*schema.Message] {
 	t.Helper()
 	idleEvents := filterStoredSessionEvents(t, raw, func(se *SessionEvent[*schema.Message]) bool {
@@ -114,7 +123,7 @@ func TestSessionTimeline_ClassifyAndSerializeVariants(t *testing.T) {
 			name: "extension",
 			se: &SessionEvent[*schema.Message]{
 				Kind:      SessionEventKind("x.outcome.started"),
-				Extension: &SessionExtensionEvent{Data: []byte(`{"outcome_name":"code_review"}`)},
+				Extension: &SessionExtensionEvent{Data: &sessionTimelineExtensionPayload{OutcomeName: "code_review"}},
 			},
 			kind: SessionEventKind("x.outcome.started"),
 		},
@@ -133,7 +142,9 @@ func TestSessionTimeline_ClassifyAndSerializeVariants(t *testing.T) {
 			assert.Equal(t, tc.kind, decoded.Kind)
 			if tc.se.Extension != nil {
 				require.NotNil(t, decoded.Extension)
-				assert.Equal(t, []byte(`{"outcome_name":"code_review"}`), []byte(decoded.Extension.Data))
+				payload, ok := decoded.Extension.Data.(*sessionTimelineExtensionPayload)
+				require.True(t, ok)
+				assert.Equal(t, "code_review", payload.OutcomeName)
 			}
 		})
 	}
@@ -185,41 +196,12 @@ func TestSessionTimeline_ExtensionValidation(t *testing.T) {
 		assert.Contains(t, err.Error(), "exactly one active payload")
 	})
 
-	t.Run("invalid data rejected", func(t *testing.T) {
-		err := NormalizeSessionEventKind(&SessionEvent[*schema.Message]{
-			Kind:      SessionEventKind("x.outcome.started"),
-			Extension: &SessionExtensionEvent{Data: []byte(`{"broken"`)},
-		})
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "must be valid JSON")
-	})
-
-	t.Run("zero length data becomes marker", func(t *testing.T) {
-		se := &SessionEvent[*schema.Message]{
-			Kind:      SessionEventKind("x.outcome.started"),
-			Extension: &SessionExtensionEvent{Data: []byte{}},
-		}
-		require.NoError(t, NormalizeSessionEventKind(se))
-		assert.Nil(t, se.Extension.Data)
-	})
-
-	t.Run("pretty data is compacted", func(t *testing.T) {
-		se := &SessionEvent[*schema.Message]{
-			Kind: SessionEventKind("x.outcome.started"),
-			Extension: &SessionExtensionEvent{
-				Data: []byte("{\n  \"outcome_name\": \"code_review\",\n  \"attempt\": 1\n}"),
-			},
-		}
-		require.NoError(t, NormalizeSessionEventKind(se))
-		assert.Equal(t, []byte(`{"outcome_name":"code_review","attempt":1}`), []byte(se.Extension.Data))
-	})
-
-	t.Run("human readable round trip", func(t *testing.T) {
+	t.Run("human readable typed round trip", func(t *testing.T) {
 		se := &SessionEvent[*schema.Message]{
 			EventID:   uuid.NewString(),
 			Timestamp: time.Now().UTC(),
 			Kind:      SessionEventKind("x.outcome.grading"),
-			Extension: &SessionExtensionEvent{Data: []byte(`{"attempt":1}`)},
+			Extension: &SessionExtensionEvent{Data: &sessionTimelineExtensionPayload{Attempt: 1}},
 		}
 		require.NoError(t, NormalizeSessionEventKind(se))
 		data, err := encodeSessionEvent(se)
@@ -228,7 +210,9 @@ func TestSessionTimeline_ExtensionValidation(t *testing.T) {
 		require.NoError(t, err)
 		require.NotNil(t, decoded.Extension)
 		assert.Equal(t, se.Kind, decoded.Kind)
-		assert.Equal(t, []byte(`{"attempt":1}`), []byte(decoded.Extension.Data))
+		payload, ok := decoded.Extension.Data.(*sessionTimelineExtensionPayload)
+		require.True(t, ok)
+		assert.Equal(t, 1, payload.Attempt)
 	})
 }
 
@@ -243,7 +227,7 @@ func TestSessionTimeline_ReconstructionIgnoresNonContextVariants(t *testing.T) {
 		{EventID: uuid.NewString(), Kind: SessionEventSessionStatusRunning, Lifecycle: &LifecycleEvent{Scope: LifecycleScopeSession, State: SessionRunStateRunning}},
 		{EventID: uuid.NewString(), Kind: SessionEventMessage, Message: msg},
 		{EventID: uuid.NewString(), Kind: SessionEventSpanModelRequestStart, Span: &SpanEvent{SpanID: uuid.NewString(), Kind: SpanKindModel, StartedAt: time.Now().UTC(), Model: &ModelSpanMeta{}}},
-		{EventID: uuid.NewString(), Kind: SessionEventKind("x.outcome.started"), Extension: &SessionExtensionEvent{Data: []byte(`{"attempt":1}`)}},
+		{EventID: uuid.NewString(), Kind: SessionEventKind("x.outcome.started"), Extension: &SessionExtensionEvent{Data: &sessionTimelineExtensionPayload{Attempt: 1}}},
 		{EventID: uuid.NewString(), Kind: SessionEventAgentInterrupt, AgentInterrupt: &AgentInterruptEvent{
 			Contexts: []*AgentInterruptContext{
 				{
@@ -563,7 +547,10 @@ func TestRunner_ExtensionEventSentWithTypedSendEventIsLiveAndPersisted(t *testin
 						SessionEvent: &SessionEvent[*schema.Message]{
 							Kind: extensionKind,
 							Extension: &SessionExtensionEvent{
-								Data: []byte("{\n  \"outcome_name\": \"code_review\",\n  \"attempt\": 1\n}"),
+								Data: &sessionTimelineExtensionPayload{
+									OutcomeName: "code_review",
+									Attempt:     1,
+								},
 							},
 						},
 					})
@@ -598,7 +585,10 @@ func TestRunner_ExtensionEventSentWithTypedSendEventIsLiveAndPersisted(t *testin
 		require.NotEmpty(t, liveExtension.EventID)
 		require.NotEmpty(t, liveExtension.TurnID)
 		require.NotNil(t, liveExtension.Extension)
-		assert.Equal(t, []byte(`{"outcome_name":"code_review","attempt":1}`), []byte(liveExtension.Extension.Data))
+		livePayload, ok := liveExtension.Extension.Data.(*sessionTimelineExtensionPayload)
+		require.True(t, ok)
+		assert.Equal(t, "code_review", livePayload.OutcomeName)
+		assert.Equal(t, 1, livePayload.Attempt)
 
 		stored := filterStoredSessionEvents(t, store.events, func(se *SessionEvent[*schema.Message]) bool {
 			return se.Kind == extensionKind
@@ -607,7 +597,10 @@ func TestRunner_ExtensionEventSentWithTypedSendEventIsLiveAndPersisted(t *testin
 		assert.Equal(t, liveExtension.EventID, stored[0].EventID)
 		assert.Equal(t, liveExtension.TurnID, stored[0].TurnID)
 		require.NotNil(t, stored[0].Extension)
-		assert.Equal(t, []byte(`{"outcome_name":"code_review","attempt":1}`), []byte(stored[0].Extension.Data))
+		storedPayload, ok := stored[0].Extension.Data.(*sessionTimelineExtensionPayload)
+		require.True(t, ok)
+		assert.Equal(t, "code_review", storedPayload.OutcomeName)
+		assert.Equal(t, 1, storedPayload.Attempt)
 
 		var extensionIndex, idleIndex = -1, -1
 		for i, payload := range store.events {
@@ -648,15 +641,14 @@ func TestRunner_ExtensionEventSentWithTypedSendEventIsLiveAndPersisted(t *testin
 	})
 }
 
-func TestTypedSendEventOutsideExecutionReturnsError(t *testing.T) {
+func TestTypedSendEventOutsideExecutionIsNoop(t *testing.T) {
 	err := SendEvent(context.Background(), &AgentEvent{
 		SessionEvent: &SessionEvent[*schema.Message]{
 			Kind:      SessionEventKind("x.outcome.started"),
 			Extension: &SessionExtensionEvent{},
 		},
 	})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "must be called within")
+	require.NoError(t, err)
 }
 
 func TestSessionTimeline_SpanMetaMustBeOneOf(t *testing.T) {
@@ -674,16 +666,6 @@ func TestSessionTimeline_SpanMetaMustBeOneOf(t *testing.T) {
 	err := NormalizeSessionEventKind(se)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "exactly one of Model or Tool")
-}
-
-func TestToolPermissionDecisionScopedByToolUseID(t *testing.T) {
-	ctx := contextWithToolPermissionDecisionStore(context.Background())
-	SetToolPermissionDecision(ctx, "call_1", "allowed")
-	SetToolPermissionDecision(ctx, "call_2", "denied")
-
-	assert.Equal(t, "allowed", GetToolPermissionDecision(ctx, "call_1"))
-	assert.Equal(t, "denied", GetToolPermissionDecision(ctx, "call_2"))
-	assert.Empty(t, GetToolPermissionDecision(ctx, "missing"))
 }
 
 func TestRetryTimelineEmitsRescheduleSequence(t *testing.T) {
