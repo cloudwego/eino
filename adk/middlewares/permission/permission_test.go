@@ -175,6 +175,86 @@ func TestWrapInvokableToolCall_ResumeApproveUsesSavedInterruptedArguments(t *tes
 	assert.Equal(t, `{"path":"/tmp/approved"}`, received)
 }
 
+func TestWrapInvokableToolCall_PassesThroughBusinessInterruptResume(t *testing.T) {
+	checkerCalls := 0
+	m := NewTyped[*schema.Message](func(ctx context.Context, tCtx *adk.ToolContext, args *schema.ToolArgument) (*GateCheckResult, error) {
+		checkerCalls++
+		return &GateCheckResult{Decision: GateAsk, Message: "approve tool?"}, nil
+	})
+
+	endpointCalls := 0
+	endpoint := adk.InvokableToolCallEndpoint(func(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (string, error) {
+		endpointCalls++
+		wasInterrupted, hasState, state := tool.GetInterruptState[string](ctx)
+		isTarget, hasData, data := tool.GetResumeContext[string](ctx)
+		if wasInterrupted && hasState {
+			assert.Equal(t, "business-state", state)
+			require.True(t, isTarget)
+			require.True(t, hasData)
+			assert.Equal(t, "business-resume", data)
+			assert.Equal(t, `{"path":"/tmp/approved"}`, argumentsInJSON)
+			return "business resumed", nil
+		}
+		return "", tool.StatefulInterrupt(ctx, "business interrupt", "business-state")
+	})
+
+	tCtx := &adk.ToolContext{Name: "NestedTool", CallID: "call_nested_business"}
+	wrapped, err := m.WrapInvokableToolCall(context.Background(), endpoint, tCtx)
+	require.NoError(t, err)
+
+	_, err = wrapped(withAddress(context.Background()), `{"path":"/tmp/approved"}`)
+	require.Error(t, err)
+	var permissionSignal *core.InterruptSignal
+	require.True(t, errors.As(err, &permissionSignal))
+
+	_, err = wrapped(resumeContext(permissionSignal, &ResumeResponse{Action: ResumeActionApprove}), `{"path":"/tmp/ignored"}`)
+	require.Error(t, err)
+	var businessSignal *core.InterruptSignal
+	require.True(t, errors.As(err, &businessSignal))
+
+	result, err := wrapped(genericResumeContext(businessSignal, "business-resume"), `{"path":"/tmp/approved"}`)
+	require.NoError(t, err)
+	assert.Equal(t, "business resumed", result)
+	assert.Equal(t, 1, checkerCalls)
+	assert.Equal(t, 2, endpointCalls)
+}
+
+func TestAttack_BusinessInterruptNonTargetReplayPassesThrough(t *testing.T) {
+	m := NewTyped[*schema.Message](func(ctx context.Context, tCtx *adk.ToolContext, args *schema.ToolArgument) (*GateCheckResult, error) {
+		return &GateCheckResult{Decision: GateAllow}, nil
+	})
+
+	endpointCalls := 0
+	endpoint := adk.InvokableToolCallEndpoint(func(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (string, error) {
+		endpointCalls++
+		wasInterrupted, hasState, state := tool.GetInterruptState[string](ctx)
+		isTarget, _, _ := tool.GetResumeContext[string](ctx)
+		if wasInterrupted {
+			require.True(t, hasState)
+			assert.Equal(t, "business-state", state)
+			require.False(t, isTarget)
+			return "", tool.StatefulInterrupt(ctx, "business interrupt", state)
+		}
+		return "", tool.StatefulInterrupt(ctx, "business interrupt", "business-state")
+	})
+
+	tCtx := &adk.ToolContext{Name: "NestedTool", CallID: "call_nested_business_nontarget"}
+	wrapped, err := m.WrapInvokableToolCall(context.Background(), endpoint, tCtx)
+	require.NoError(t, err)
+
+	_, err = wrapped(withAddress(context.Background()), `{"path":"/tmp/approved"}`)
+	require.Error(t, err)
+	var businessSignal *core.InterruptSignal
+	require.True(t, errors.As(err, &businessSignal))
+
+	_, err = wrapped(nonTargetResumeContext(businessSignal), `{"path":"/tmp/approved"}`)
+	require.Error(t, err)
+	var replayedSignal *core.InterruptSignal
+	require.True(t, errors.As(err, &replayedSignal), "non-target replay should preserve the underlying business interrupt")
+	assert.NotContains(t, err.Error(), "missing AskState")
+	assert.Equal(t, 2, endpointCalls)
+}
+
 func TestWrapInvokableToolCall_ResumeApproveWithExplicitEmptyUpdatedInput(t *testing.T) {
 	m := NewTyped[*schema.Message](func(ctx context.Context, tCtx *adk.ToolContext, args *schema.ToolArgument) (*GateCheckResult, error) {
 		return &GateCheckResult{Decision: GateAsk, Message: "approve empty override?"}, nil
@@ -1249,9 +1329,20 @@ func withAddress(ctx context.Context) context.Context {
 }
 
 func resumeContext(signal *core.InterruptSignal, response *ResumeResponse) context.Context {
+	return genericResumeContext(signal, response)
+}
+
+func genericResumeContext(signal *core.InterruptSignal, response any) context.Context {
 	id2Addr, id2State := core.SignalToPersistenceMaps(signal)
 	ctx := context.Background()
 	ctx = core.PopulateInterruptState(ctx, id2Addr, id2State)
 	ctx = core.BatchResumeWithData(ctx, map[string]any{signal.ID: response})
+	return withAddress(ctx)
+}
+
+func nonTargetResumeContext(signal *core.InterruptSignal) context.Context {
+	id2Addr, id2State := core.SignalToPersistenceMaps(signal)
+	ctx := context.Background()
+	ctx = core.PopulateInterruptState(ctx, id2Addr, id2State)
 	return withAddress(ctx)
 }
