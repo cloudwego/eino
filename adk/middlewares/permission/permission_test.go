@@ -1117,7 +1117,6 @@ func TestPermissionGate_PersistedAgentInterruptOmitsPrivateInfo(t *testing.T) {
 			require.Len(t, interrupt.AgentInterrupt.Contexts, 1)
 
 			ctx0 := interrupt.AgentInterrupt.Contexts[0]
-			assert.Equal(t, adk.AgentInterruptCauseToolPermission, ctx0.Cause)
 			assert.Equal(t, "permission_call", ctx0.ToolUseID)
 
 			infoJSON, err := json.Marshal(ctx0.Info)

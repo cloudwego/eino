@@ -1214,12 +1214,10 @@ func buildAgentInterruptEvent(
 			continue
 		}
 		aic := &AgentInterruptContext{
-			Cause:       AgentInterruptCauseGeneric,
 			InterruptID: ctx.ID,
 			Info:        ctx.Info,
 		}
 		if toolUseID := extractToolUseID(ctx); toolUseID != "" {
-			aic.Cause = AgentInterruptCauseToolPermission
 			aic.ToolUseID = toolUseID
 		}
 		event.Contexts = append(event.Contexts, aic)

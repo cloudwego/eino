@@ -452,18 +452,6 @@ type UserInterruptEvent struct {
 	Reason string `json:"reason,omitempty"`
 }
 
-// AgentInterruptCause identifies why the agent paused execution.
-type AgentInterruptCause string
-
-const (
-	// AgentInterruptCauseToolPermission indicates a tool call required user approval.
-	AgentInterruptCauseToolPermission AgentInterruptCause = "tool_permission"
-	// AgentInterruptCauseCustomTool indicates a custom or external tool requires a user-provided result.
-	AgentInterruptCauseCustomTool AgentInterruptCause = "custom_tool"
-	// AgentInterruptCauseGeneric indicates a generic interrupt from any component.
-	AgentInterruptCauseGeneric AgentInterruptCause = "generic"
-)
-
 // AgentInterruptEvent records a business interrupt in the durable session timeline.
 type AgentInterruptEvent struct {
 	// Contexts is the set of interrupt contexts that caused the agent to pause.
@@ -473,14 +461,18 @@ type AgentInterruptEvent struct {
 
 // AgentInterruptContext describes a single interrupt point within a batch.
 type AgentInterruptContext struct {
-	// Cause categorizes why this particular interrupt happened.
-	Cause AgentInterruptCause `json:"cause,omitempty"`
 	// InterruptID is the fully-qualified address of the interrupt point
 	// (e.g. "agent:A;tool:lookup:call_1"). Use this as the key in ResumeParams.Targets.
 	InterruptID string `json:"interrupt_id,omitempty"`
-	// Info is the user-facing information associated with the interrupt.
+	// Info is the business-defined payload describing the interrupt, provided by
+	// the component that triggered it (e.g. a middleware or a custom tool).
+	// ADK treats it as opaque; consumers type-assert it to the concrete type the
+	// triggering component documents (e.g. *permission.AskInfo) to determine how
+	// to handle the interrupt.
 	Info any `json:"info,omitempty"`
-	// ToolUseID is set when the interrupt source is a specific tool call.
+	// ToolUseID is set when the interrupt source is a specific tool call. It is
+	// structural metadata derived from the interrupt address, identifying which
+	// tool call paused; it carries no business semantics.
 	ToolUseID string `json:"tool_use_id,omitempty"`
 }
 
