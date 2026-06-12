@@ -1274,7 +1274,7 @@ func (m *middleware[M]) AfterAgent(ctx context.Context, state *adk.TypedChatMode
 			}
 			return ctx, nil
 		}
-		go m.runExtractionDrain(context.Background(), sessionID, unlock, snap)
+		go m.runExtractionDrain(ctx, sessionID, unlock, snap)
 		return ctx, nil
 
 	default:
