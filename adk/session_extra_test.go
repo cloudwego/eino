@@ -769,7 +769,7 @@ func TestTailReplay_PartialTurnWithoutTurnEnd(t *testing.T) {
 
 	// Boot: prepareRunnerSessionRun reconstructs durable context through the log
 	// tail. The latest TurnEnd remains the metadata boundary.
-	state, err := prepareRunnerSessionRun[*schema.Message](ctx, nil, nil, sid, store, nil, nil)
+	state, err := prepareRunnerSessionRun[*schema.Message](ctx, nil, nil, sid, store, nil)
 	require.NoError(t, err)
 	require.True(t, state.enabled)
 	require.Len(t, state.latestState.Messages, 4)
@@ -797,7 +797,7 @@ func TestTailReplay_NoTailEvents(t *testing.T) {
 	}})
 	require.NoError(t, store.AppendEvents(ctx, sid, []*SessionEvent[*schema.Message]{turnEndSE}))
 
-	state, err := prepareRunnerSessionRun[*schema.Message](ctx, nil, nil, sid, store, nil, nil)
+	state, err := prepareRunnerSessionRun[*schema.Message](ctx, nil, nil, sid, store, nil)
 	require.NoError(t, err)
 	require.Len(t, state.latestState.Messages, 1)
 	assert.Equal(t, "Q", state.latestState.Messages[0].Content)
@@ -829,7 +829,7 @@ func TestTailReplay_EmptySnapshotCursor(t *testing.T) {
 	se := withTestEventID(&SessionEvent[*schema.Message]{Message: postMsg})
 	require.NoError(t, store.AppendEvents(ctx, sid, []*SessionEvent[*schema.Message]{se}))
 
-	state, err := prepareRunnerSessionRun[*schema.Message](ctx, nil, nil, sid, store, nil, nil)
+	state, err := prepareRunnerSessionRun[*schema.Message](ctx, nil, nil, sid, store, nil)
 	require.NoError(t, err)
 	require.Len(t, state.latestState.Messages, 1)
 	assert.Equal(t, "post", state.latestState.Messages[0].Content)
@@ -919,9 +919,6 @@ func (s *agenticSessionHelperStore) LoadEvents(_ context.Context, _ string, opts
 }
 
 func (s *agenticSessionHelperStore) openSession(_ context.Context, req *openSessionRequest) (*openSessionResult[*schema.AgenticMessage], error) {
-	if req != nil && req.fencingToken != nil {
-		return nil, ErrSessionFencingTokenUnsupported
-	}
 	sessionID := ""
 	if req != nil {
 		sessionID = req.sessionID
@@ -943,14 +940,11 @@ func (h *agenticTestSessionHandle) loadEvents(ctx context.Context, req *LoadSess
 	return h.store.LoadEvents(ctx, h.sessionID, req)
 }
 
-func (h *agenticTestSessionHandle) appendEvents(ctx context.Context, req *AppendSessionEventsRequest[*schema.AgenticMessage]) (*AppendSessionEventsResult, error) {
+func (h *agenticTestSessionHandle) appendEvents(ctx context.Context, req *AppendSessionEventsRequest[*schema.AgenticMessage]) error {
 	if req == nil {
 		req = &AppendSessionEventsRequest[*schema.AgenticMessage]{}
 	}
-	if err := h.store.AppendEvents(ctx, h.sessionID, req.Events); err != nil {
-		return nil, err
-	}
-	return &AppendSessionEventsResult{}, nil
+	return h.store.AppendEvents(ctx, h.sessionID, req.Events)
 }
 
 func (h *agenticTestSessionHandle) close(context.Context) error { return nil }
@@ -1069,12 +1063,15 @@ func TestExplicitCheckpointResume_WithSessionMode(t *testing.T) {
 
 	// Seed an arbitrary checkpoint ID with a runner-session-checkpoint wrapper
 	// so runnerLoadCheckPointForSession can decode it.
-	cpBytes, err := encodeRunnerSessionCheckpoint(&runnerSessionCheckpoint{Payload: []byte("opaque")})
+	cpBytes, err := encodeRunnerSessionCheckpoint(&runnerSessionCheckpoint{
+		SessionTailEventID: store.currentTailEventID(),
+		Payload:            []byte("opaque"),
+	})
 	require.NoError(t, err)
 	explicitCheckpointID := "user-supplied-cp"
 	require.NoError(t, store.Set(ctx, explicitCheckpointID, cpBytes))
 
-	state, effective, err := prepareRunnerSessionResume[*schema.Message](ctx, store, sid, store, nil, nil, explicitCheckpointID)
+	state, effective, err := prepareRunnerSessionResume[*schema.Message](ctx, store, sid, store, nil, explicitCheckpointID)
 	require.NoError(t, err)
 	require.True(t, state.enabled, "session mode must remain enabled when an explicit checkpoint ID is supplied")
 	require.NotNil(t, state.latestState)
@@ -1113,11 +1110,14 @@ func TestResumePath_TailReplay(t *testing.T) {
 
 	// Seed a runner session checkpoint so the resume path finds something to load.
 	cpStore := newSessionHelperStore()
-	cpBytes, err := encodeRunnerSessionCheckpoint(&runnerSessionCheckpoint{Payload: []byte("opaque")})
+	cpBytes, err := encodeRunnerSessionCheckpoint(&runnerSessionCheckpoint{
+		SessionTailEventID: store.currentTailEventID(),
+		Payload:            []byte("opaque"),
+	})
 	require.NoError(t, err)
 	require.NoError(t, cpStore.Set(ctx, sessionRunnerCheckpointID(sid), cpBytes))
 
-	state, _, err := prepareRunnerSessionResume[*schema.Message](ctx, cpStore, sid, store, nil, nil, "")
+	state, _, err := prepareRunnerSessionResume[*schema.Message](ctx, cpStore, sid, store, nil, "")
 	require.NoError(t, err)
 	require.Len(t, state.latestState.Messages, 3,
 		"resume boot state should include durable context events through the log tail")

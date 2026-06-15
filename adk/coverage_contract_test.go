@@ -34,7 +34,6 @@ type serviceContractStore struct {
 	appendReqs []*AppendSessionEventsRequest[*schema.Message]
 	loadErr    error
 	appendErr  error
-	tail       string
 }
 
 func (s *serviceContractStore) LoadEvents(_ context.Context, req *LoadSessionEventsRequest) (*LoadSessionEventsResult[*schema.Message], error) {
@@ -42,18 +41,15 @@ func (s *serviceContractStore) LoadEvents(_ context.Context, req *LoadSessionEve
 	if s.loadErr != nil {
 		return nil, s.loadErr
 	}
-	return &LoadSessionEventsResult[*schema.Message]{SessionTailEventID: s.tail}, nil
+	return &LoadSessionEventsResult[*schema.Message]{}, nil
 }
 
-func (s *serviceContractStore) AppendEvents(_ context.Context, req *AppendSessionEventsRequest[*schema.Message]) (*AppendSessionEventsResult, error) {
+func (s *serviceContractStore) AppendEvents(_ context.Context, req *AppendSessionEventsRequest[*schema.Message]) error {
 	s.appendReqs = append(s.appendReqs, req)
 	if s.appendErr != nil {
-		return nil, s.appendErr
+		return s.appendErr
 	}
-	if len(req.Events) > 0 {
-		s.tail = req.Events[len(req.Events)-1].EventID
-	}
-	return &AppendSessionEventsResult{SessionTailEventID: s.tail}, nil
+	return nil
 }
 
 func TestUsageHelpersExtractAssistantMetadata(t *testing.T) {
@@ -160,7 +156,7 @@ func TestLocalSessionServiceHandleContracts(t *testing.T) {
 	ctx := context.Background()
 	assert.Nil(t, NewLocalSessionService[*schema.Message](nil))
 
-	store := &serviceContractStore{tail: "tail-0"}
+	store := &serviceContractStore{}
 	service := NewLocalSessionService[*schema.Message](store)
 	require.NotNil(t, service)
 
@@ -178,32 +174,29 @@ func TestLocalSessionServiceHandleContracts(t *testing.T) {
 
 	res, err := opened.handle.loadEvents(ctx, nil)
 	require.NoError(t, err)
-	assert.Equal(t, "tail-0", res.SessionTailEventID)
+	require.NotNil(t, res)
 	require.Len(t, store.loadReqs, 1)
 	assert.Equal(t, "sid", store.loadReqs[0].SessionID)
-	assert.Equal(t, "tail-0", opened.handle.currentTailEventID())
+	assert.Empty(t, opened.handle.currentTailEventID())
 
 	event := validTestPayload()
-	resAppend, err := opened.handle.appendEvents(ctx, &AppendSessionEventsRequest[*schema.Message]{
+	err = opened.handle.appendEvents(ctx, &AppendSessionEventsRequest[*schema.Message]{
 		Events: []*SessionEvent[*schema.Message]{event},
 	})
 	require.NoError(t, err)
-	assert.Equal(t, event.EventID, resAppend.SessionTailEventID)
 	require.Len(t, store.appendReqs, 1)
 	assert.Equal(t, "sid", store.appendReqs[0].SessionID)
-	assert.Equal(t, "tail-0", store.appendReqs[0].ExpectedSessionTailEventID)
 	assert.Equal(t, event.EventID, opened.handle.currentTailEventID())
 
-	resAppend, err = opened.handle.appendEvents(ctx, nil)
+	err = opened.handle.appendEvents(ctx, nil)
 	require.NoError(t, err)
-	assert.Equal(t, event.EventID, resAppend.SessionTailEventID)
 	require.Len(t, store.appendReqs, 2)
 	assert.Equal(t, "sid", store.appendReqs[1].SessionID)
-	assert.Equal(t, event.EventID, store.appendReqs[1].ExpectedSessionTailEventID)
+	assert.Equal(t, event.EventID, opened.handle.currentTailEventID())
 
 	require.NoError(t, opened.handle.close(ctx))
 	require.NoError(t, opened.handle.close(ctx))
-	_, err = opened.handle.appendEvents(ctx, nil)
+	err = opened.handle.appendEvents(ctx, nil)
 	require.ErrorIs(t, err, ErrSessionBusy)
 
 	reopened, err := service.openSession(ctx, &openSessionRequest{sessionID: "sid"})
@@ -221,73 +214,9 @@ func TestLocalSessionServiceHandleContracts(t *testing.T) {
 	store.appendErr = errors.New("append failed")
 	opened, err = service.openSession(ctx, &openSessionRequest{sessionID: "sid-append-err"})
 	require.NoError(t, err)
-	_, err = opened.handle.appendEvents(ctx, &AppendSessionEventsRequest[*schema.Message]{
+	err = opened.handle.appendEvents(ctx, &AppendSessionEventsRequest[*schema.Message]{
 		Events: []*SessionEvent[*schema.Message]{validTestPayload()},
 	})
 	require.ErrorContains(t, err, "append failed")
 	require.NoError(t, opened.handle.close(ctx))
-}
-
-func TestFencedSessionServiceHandleContracts(t *testing.T) {
-	ctx := context.Background()
-	assert.Nil(t, NewFencedSessionService[*schema.Message](nil, FencedSessionServiceOptions{}))
-
-	store := newTestFencedSessionStore("token-1")
-	service := NewFencedSessionService[*schema.Message](store, FencedSessionServiceOptions{})
-
-	_, err := service.openSession(ctx, nil)
-	require.ErrorIs(t, err, ErrSessionBusy)
-	_, err = service.openSession(ctx, &openSessionRequest{sessionID: "sid"})
-	require.ErrorIs(t, err, ErrSessionFencingTokenRequired)
-
-	opened, err := service.openSession(ctx, &openSessionRequest{
-		sessionID:    "sid",
-		fencingToken: func(context.Context) (string, error) { return "token-1", nil },
-	})
-	require.NoError(t, err)
-
-	res, err := opened.handle.loadEvents(ctx, nil)
-	require.NoError(t, err)
-	assert.Empty(t, res.SessionTailEventID)
-	assert.Empty(t, opened.handle.currentTailEventID())
-
-	first := validTestPayload()
-	resAppend, err := opened.handle.appendEvents(ctx, &AppendSessionEventsRequest[*schema.Message]{
-		Events: []*SessionEvent[*schema.Message]{first},
-	})
-	require.NoError(t, err)
-	assert.Equal(t, first.EventID, resAppend.SessionTailEventID)
-	assert.Equal(t, first.EventID, opened.handle.currentTailEventID())
-	assert.Equal(t, []string{"token-1"}, store.appendedTokens())
-
-	store.helper.loadErr = errors.New("load failed")
-	_, err = opened.handle.loadEvents(ctx, &LoadSessionEventsRequest{})
-	require.ErrorContains(t, err, "load failed")
-	store.helper.loadErr = nil
-
-	require.NoError(t, opened.handle.close(ctx))
-	require.NoError(t, opened.handle.close(ctx))
-	_, err = opened.handle.appendEvents(ctx, nil)
-	require.ErrorIs(t, err, ErrSessionFencingTokenInvalid)
-
-	nilTokenHandle := &fencedSessionHandle[*schema.Message]{store: store, sessionID: "sid-nil-token"}
-	_, err = nilTokenHandle.appendEvents(ctx, nil)
-	require.ErrorIs(t, err, ErrSessionFencingTokenInvalid)
-
-	noToken, err := service.openSession(ctx, &openSessionRequest{
-		sessionID:    "sid-2",
-		fencingToken: func(context.Context) (string, error) { return "", nil },
-	})
-	require.NoError(t, err)
-	_, err = noToken.handle.appendEvents(ctx, nil)
-	require.ErrorIs(t, err, ErrSessionFencingTokenInvalid)
-
-	tokenErr := errors.New("token failed")
-	tokenFail, err := service.openSession(ctx, &openSessionRequest{
-		sessionID:    "sid-3",
-		fencingToken: func(context.Context) (string, error) { return "", tokenErr },
-	})
-	require.NoError(t, err)
-	_, err = tokenFail.handle.appendEvents(ctx, nil)
-	require.ErrorIs(t, err, tokenErr)
 }

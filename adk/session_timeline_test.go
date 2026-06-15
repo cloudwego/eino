@@ -1525,14 +1525,11 @@ func (s *kindsRecordingStore) loadEvents(ctx context.Context, opts *LoadSessionE
 	return s.inner.LoadEvents(ctx, sessionID, opts)
 }
 
-func (s *kindsRecordingStore) appendEvents(ctx context.Context, req *AppendSessionEventsRequest[*schema.Message]) (*AppendSessionEventsResult, error) {
+func (s *kindsRecordingStore) appendEvents(ctx context.Context, req *AppendSessionEventsRequest[*schema.Message]) error {
 	if req == nil {
 		req = &AppendSessionEventsRequest[*schema.Message]{}
 	}
-	if err := s.inner.AppendEvents(ctx, req.SessionID, req.Events); err != nil {
-		return nil, err
-	}
-	return &AppendSessionEventsResult{}, nil
+	return s.inner.AppendEvents(ctx, req.SessionID, req.Events)
 }
 
 func (s *kindsRecordingStore) close(context.Context) error { return nil }

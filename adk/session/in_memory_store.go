@@ -69,7 +69,7 @@ func NewInMemorySessionService[M adk.MessageType]() adk.SessionService[M] {
 }
 
 // AppendEvents appends events to the session's event log.
-func (s *InMemoryStore[M]) AppendEvents(_ context.Context, req *adk.AppendSessionEventsRequest[M]) (*adk.AppendSessionEventsResult, error) {
+func (s *InMemoryStore[M]) AppendEvents(_ context.Context, req *adk.AppendSessionEventsRequest[M]) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if req == nil {
@@ -82,32 +82,25 @@ func (s *InMemoryStore[M]) AppendEvents(_ context.Context, req *adk.AppendSessio
 		idx = make(map[string]int)
 		s.eventIDIdx[sessionID] = idx
 	}
-	currentTail := s.currentTailLocked(sessionID)
-	if currentTail != req.ExpectedSessionTailEventID {
-		if s.isExactBatchReplayLocked(sessionID, req.ExpectedSessionTailEventID, events) {
-			return &adk.AppendSessionEventsResult{SessionTailEventID: currentTail}, nil
-		}
-		return nil, adk.ErrSessionTailMismatch
-	}
 	seen := make(map[string]struct{}, len(events))
 	pending := make([]pendingEvent, 0, len(events))
 	for _, e := range events {
 		if e == nil || e.EventID == "" {
-			return nil, adk.ErrInvalidEventID
+			return adk.ErrInvalidEventID
 		}
 		if _, dup := seen[e.EventID]; dup {
-			return nil, adk.ErrDuplicateEventID
+			return adk.ErrDuplicateEventID
 		}
 		seen[e.EventID] = struct{}{}
 		if _, dup := idx[e.EventID]; dup {
-			return nil, adk.ErrDuplicateEventID
+			return adk.ErrDuplicateEventID
 		}
 		if err := adk.NormalizeSessionEventKind(e); err != nil {
-			return nil, err
+			return err
 		}
 		data, err := s.serializer.Marshal(e)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		pending = append(pending, pendingEvent{
 			eventID: e.EventID,
@@ -121,7 +114,7 @@ func (s *InMemoryStore[M]) AppendEvents(_ context.Context, req *adk.AppendSessio
 		s.eventKinds[sessionID] = append(s.eventKinds[sessionID], event.kind)
 		idx[event.eventID] = len(s.events[sessionID]) - 1
 	}
-	return &adk.AppendSessionEventsResult{SessionTailEventID: s.currentTailLocked(sessionID)}, nil
+	return nil
 }
 
 // LoadEvents loads events with pagination and direction support.
@@ -182,7 +175,7 @@ func (s *InMemoryStore[M]) loadForward(sessionID string, opts *adk.LoadSessionEv
 	if hasMore && len(out) > 0 {
 		next = out[len(out)-1].EventID
 	}
-	return &adk.LoadSessionEventsResult[M]{Events: out, Next: next, SessionTailEventID: s.currentTailLocked(sessionID)}, nil
+	return &adk.LoadSessionEventsResult[M]{Events: out, Next: next}, nil
 }
 
 func (s *InMemoryStore[M]) loadReverse(sessionID string, opts *adk.LoadSessionEventsRequest) (*adk.LoadSessionEventsResult[M], error) {
@@ -199,7 +192,7 @@ func (s *InMemoryStore[M]) loadReverse(sessionID string, opts *adk.LoadSessionEv
 		end = pos // strictly older: [0, pos)
 	}
 	if end <= 0 {
-		return &adk.LoadSessionEventsResult[M]{SessionTailEventID: s.currentTailLocked(sessionID)}, nil
+		return &adk.LoadSessionEventsResult[M]{}, nil
 	}
 
 	kindSet := buildKindSet(opts.Kinds)
@@ -227,7 +220,7 @@ func (s *InMemoryStore[M]) loadReverse(sessionID string, opts *adk.LoadSessionEv
 	if hasMore && len(out) > 0 {
 		next = out[len(out)-1].EventID
 	}
-	return &adk.LoadSessionEventsResult[M]{Events: out, Next: next, SessionTailEventID: s.currentTailLocked(sessionID)}, nil
+	return &adk.LoadSessionEventsResult[M]{Events: out, Next: next}, nil
 }
 
 func (s *InMemoryStore[M]) currentTailLocked(sessionID string) string {
@@ -236,30 +229,6 @@ func (s *InMemoryStore[M]) currentTailLocked(sessionID string) string {
 		return ""
 	}
 	return ids[len(ids)-1]
-}
-
-func (s *InMemoryStore[M]) isExactBatchReplayLocked(sessionID, expectedTail string, events []*adk.SessionEvent[M]) bool {
-	if len(events) == 0 {
-		return s.currentTailLocked(sessionID) == expectedTail
-	}
-	ids := s.eventIDs[sessionID]
-	start := 0
-	if expectedTail != "" {
-		pos, ok := s.eventIDIdx[sessionID][expectedTail]
-		if !ok {
-			return false
-		}
-		start = pos + 1
-	}
-	if start+len(events) != len(ids) {
-		return false
-	}
-	for i, event := range events {
-		if event == nil || event.EventID == "" || ids[start+i] != event.EventID {
-			return false
-		}
-	}
-	return true
 }
 
 func (s *InMemoryStore[M]) decodeEvent(data []byte, eventID string, kind adk.SessionEventKind) (*adk.SessionEvent[M], error) {

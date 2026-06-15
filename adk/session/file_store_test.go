@@ -58,7 +58,7 @@ func TestFileStorePersistsAcrossInstances(t *testing.T) {
 
 	first := testMessageEvent("persist-1", "first")
 	second := testTurnEndEvent("persist-2", "turn-1")
-	_, err = store.AppendEvents(ctx, &adk.AppendSessionEventsRequest[*schema.Message]{SessionID: "s", Events: []*adk.SessionEvent[*schema.Message]{first, second}})
+	err = store.AppendEvents(ctx, &adk.AppendSessionEventsRequest[*schema.Message]{SessionID: "s", Events: []*adk.SessionEvent[*schema.Message]{first, second}})
 	require.NoError(t, err)
 
 	reopened, err := session.NewFileStore[*schema.Message](dir, nil)
@@ -78,7 +78,7 @@ func TestFileStoreWritesHumanReadableEvlogLines(t *testing.T) {
 
 	first := testMessageEvent("line-1", "first")
 	second := testTurnEndEvent("line-2", "turn-1")
-	_, err = store.AppendEvents(ctx, &adk.AppendSessionEventsRequest[*schema.Message]{SessionID: "s", Events: []*adk.SessionEvent[*schema.Message]{first, second}})
+	err = store.AppendEvents(ctx, &adk.AppendSessionEventsRequest[*schema.Message]{SessionID: "s", Events: []*adk.SessionEvent[*schema.Message]{first, second}})
 	require.NoError(t, err)
 
 	data, err := os.ReadFile(filepath.Join(dir, url.PathEscape("s")+".evlog"))
@@ -105,7 +105,7 @@ func TestFileStoreRollbackPreservesPhysicalAuditLog(t *testing.T) {
 	require.NoError(t, err)
 	sessionID := "rollback-audit"
 
-	_, err = store.AppendEvents(ctx, &adk.AppendSessionEventsRequest[*schema.Message]{SessionID: sessionID, Events: []*adk.SessionEvent[*schema.Message]{
+	err = store.AppendEvents(ctx, &adk.AppendSessionEventsRequest[*schema.Message]{SessionID: sessionID, Events: []*adk.SessionEvent[*schema.Message]{
 		withTurn(testMessageEvent("msg-1", "Q1"), "turn-1"),
 		testTurnEndEvent("end-1", "turn-1"),
 		withTurn(testMessageEvent("msg-2", "Q2"), "turn-2"),
@@ -142,7 +142,7 @@ func TestFileStoreRejectsSerializerRawLineDelimiters(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	_, err = store.AppendEvents(ctx, &adk.AppendSessionEventsRequest[*schema.Message]{SessionID: "s", Events: []*adk.SessionEvent[*schema.Message]{testMessageEvent("bad", "bad")}})
+	err = store.AppendEvents(ctx, &adk.AppendSessionEventsRequest[*schema.Message]{SessionID: "s", Events: []*adk.SessionEvent[*schema.Message]{testMessageEvent("bad", "bad")}})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "without raw CR/LF")
 }
@@ -156,7 +156,7 @@ func TestFileStoreAppendFailsOnCorruptedExistingLog(t *testing.T) {
 	path := filepath.Join(dir, url.PathEscape("s")+".evlog")
 	require.NoError(t, os.WriteFile(path, []byte("corrupted-no-tab\n"), 0o644))
 
-	_, err = store.AppendEvents(ctx, &adk.AppendSessionEventsRequest[*schema.Message]{SessionID: "s", Events: []*adk.SessionEvent[*schema.Message]{testMessageEvent("new", "new")}})
+	err = store.AppendEvents(ctx, &adk.AppendSessionEventsRequest[*schema.Message]{SessionID: "s", Events: []*adk.SessionEvent[*schema.Message]{testMessageEvent("new", "new")}})
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, adk.ErrInvalidEventID))
 }
@@ -168,7 +168,7 @@ func TestFileStoreEscapedSessionIDPath(t *testing.T) {
 	require.NoError(t, err)
 
 	sessionID := "a/b %snow"
-	_, err = store.AppendEvents(ctx, &adk.AppendSessionEventsRequest[*schema.Message]{SessionID: sessionID, Events: []*adk.SessionEvent[*schema.Message]{testMessageEvent("escaped", "ok")}})
+	err = store.AppendEvents(ctx, &adk.AppendSessionEventsRequest[*schema.Message]{SessionID: sessionID, Events: []*adk.SessionEvent[*schema.Message]{testMessageEvent("escaped", "ok")}})
 	require.NoError(t, err)
 
 	res, err := store.LoadEvents(ctx, &adk.LoadSessionEventsRequest{SessionID: sessionID})
@@ -195,57 +195,36 @@ func TestFileStoreValidationReplayAndReversePagination(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotNil(t, service)
 
-	_, err = store.AppendEvents(ctx, nil)
-	require.Error(t, err)
+	require.Error(t, store.AppendEvents(ctx, nil))
 
 	empty, err := store.LoadEvents(ctx, &adk.LoadSessionEventsRequest{SessionID: "empty", Reverse: true})
 	require.NoError(t, err)
 	assert.Empty(t, empty.Events)
-	assert.Empty(t, empty.SessionTailEventID)
 
 	events := []*adk.SessionEvent[*schema.Message]{
 		testMessageEvent("e1", "one"),
 		testSpanEvent("e2"),
 		testTurnEndEvent("e3", "turn-1"),
 	}
-	res, err := store.AppendEvents(ctx, &adk.AppendSessionEventsRequest[*schema.Message]{
+	err = store.AppendEvents(ctx, &adk.AppendSessionEventsRequest[*schema.Message]{
 		SessionID: "s",
 		Events:    events,
 	})
 	require.NoError(t, err)
-	assert.Equal(t, "e3", res.SessionTailEventID)
 
-	replay, err := store.AppendEvents(ctx, &adk.AppendSessionEventsRequest[*schema.Message]{
-		SessionID:                  "s",
-		ExpectedSessionTailEventID: "",
-		Events:                     events,
+	err = store.AppendEvents(ctx, &adk.AppendSessionEventsRequest[*schema.Message]{
+		SessionID: "s",
+		Events:    []*adk.SessionEvent[*schema.Message]{testMessageEvent("e4", "four")},
 	})
 	require.NoError(t, err)
-	assert.Equal(t, "e3", replay.SessionTailEventID)
 
-	res, err = store.AppendEvents(ctx, &adk.AppendSessionEventsRequest[*schema.Message]{
-		SessionID:                  "s",
-		ExpectedSessionTailEventID: "e3",
-		Events:                     []*adk.SessionEvent[*schema.Message]{testMessageEvent("e4", "four")},
-	})
-	require.NoError(t, err)
-	assert.Equal(t, "e4", res.SessionTailEventID)
-
-	_, err = store.AppendEvents(ctx, &adk.AppendSessionEventsRequest[*schema.Message]{
-		SessionID:                  "s",
-		ExpectedSessionTailEventID: "missing",
-		Events:                     []*adk.SessionEvent[*schema.Message]{testMessageEvent("e5", "five")},
-	})
-	require.ErrorIs(t, err, adk.ErrSessionTailMismatch)
-
-	_, err = store.AppendEvents(ctx, &adk.AppendSessionEventsRequest[*schema.Message]{
-		SessionID:                  "s",
-		ExpectedSessionTailEventID: "e4",
-		Events:                     []*adk.SessionEvent[*schema.Message]{testMessageEvent("e1", "duplicate existing")},
+	err = store.AppendEvents(ctx, &adk.AppendSessionEventsRequest[*schema.Message]{
+		SessionID: "s",
+		Events:    []*adk.SessionEvent[*schema.Message]{testMessageEvent("e1", "duplicate existing")},
 	})
 	require.ErrorIs(t, err, adk.ErrDuplicateEventID)
 
-	_, err = store.AppendEvents(ctx, &adk.AppendSessionEventsRequest[*schema.Message]{
+	err = store.AppendEvents(ctx, &adk.AppendSessionEventsRequest[*schema.Message]{
 		SessionID: "s2",
 		Events: []*adk.SessionEvent[*schema.Message]{
 			testMessageEvent("dup", "one"),
@@ -280,7 +259,6 @@ func TestFileStoreValidationReplayAndReversePagination(t *testing.T) {
 	require.Len(t, reverse.Events, 1)
 	assert.Equal(t, "e3", reverse.Events[0].EventID)
 	assert.Equal(t, "e3", reverse.Next)
-	assert.Equal(t, "e4", reverse.SessionTailEventID)
 }
 
 func TestFileStoreRejectsCorruptedRecordsOnIndexRebuild(t *testing.T) {

@@ -1245,19 +1245,47 @@ type permissionSessionService struct {
 	events []*adk.SessionEvent[*schema.Message]
 }
 
-func (s *permissionSessionService) AppendEvents(_ context.Context, req *adk.AppendSessionEventsRequest[*schema.Message]) (*adk.AppendSessionEventsResult, error) {
+func (s *permissionSessionService) AppendEvents(_ context.Context, req *adk.AppendSessionEventsRequest[*schema.Message]) error {
 	if req != nil {
 		s.events = append(s.events, req.Events...)
 	}
-	tail := ""
-	if len(s.events) > 0 {
-		tail = s.events[len(s.events)-1].EventID
-	}
-	return &adk.AppendSessionEventsResult{SessionTailEventID: tail}, nil
+	return nil
 }
 
-func (s *permissionSessionService) LoadEvents(_ context.Context, _ *adk.LoadSessionEventsRequest) (*adk.LoadSessionEventsResult[*schema.Message], error) {
-	return &adk.LoadSessionEventsResult[*schema.Message]{Events: nil}, nil
+func (s *permissionSessionService) LoadEvents(_ context.Context, req *adk.LoadSessionEventsRequest) (*adk.LoadSessionEventsResult[*schema.Message], error) {
+	if req == nil {
+		req = &adk.LoadSessionEventsRequest{}
+	}
+	start, end, step := 0, len(s.events), 1
+	if req.Reverse {
+		start, end, step = len(s.events)-1, -1, -1
+	}
+	if req.After != "" {
+		for i, event := range s.events {
+			if event != nil && event.EventID == req.After {
+				if req.Reverse {
+					start = i - 1
+				} else {
+					start = i + 1
+				}
+				break
+			}
+		}
+	}
+	var out []*adk.SessionEvent[*schema.Message]
+	hasMore := false
+	for i := start; i != end && i >= 0 && i < len(s.events); i += step {
+		if req.Limit > 0 && len(out) >= req.Limit {
+			hasMore = true
+			break
+		}
+		out = append(out, s.events[i])
+	}
+	next := ""
+	if hasMore && len(out) > 0 {
+		next = out[len(out)-1].EventID
+	}
+	return &adk.LoadSessionEventsResult[*schema.Message]{Events: out, Next: next}, nil
 }
 
 type permissionCheckpointStore struct {

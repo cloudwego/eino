@@ -24,12 +24,9 @@ import (
 // LocalSessionServiceOptions configures the process-local session adapter.
 type LocalSessionServiceOptions struct{}
 
-// FencedSessionServiceOptions configures the fenced session adapter.
-type FencedSessionServiceOptions struct{}
-
 // NewLocalSessionService wraps a provider-facing event store as a sealed
 // SessionService. It serializes active handles for the same session within the
-// current process and does not provide cross-process fencing.
+// current process and does not provide cross-process write coordination.
 func NewLocalSessionService[M MessageType](store SessionEventStore[M]) SessionService[M] {
 	if store == nil {
 		return nil
@@ -38,16 +35,6 @@ func NewLocalSessionService[M MessageType](store SessionEventStore[M]) SessionSe
 		store:  store,
 		locked: make(map[string]bool),
 	}
-}
-
-// NewFencedSessionService wraps a fenced event store as a sealed SessionService.
-// The returned handle obtains fencing tokens from the caller-provided token
-// function only at fenced append boundaries.
-func NewFencedSessionService[M MessageType](store FencedSessionEventStore[M], _ FencedSessionServiceOptions) SessionService[M] {
-	if store == nil {
-		return nil
-	}
-	return &fencedSessionService[M]{store: store}
 }
 
 type localSessionService[M MessageType] struct {
@@ -60,9 +47,6 @@ type localSessionService[M MessageType] struct {
 func (s *localSessionService[M]) openSession(_ context.Context, req *openSessionRequest) (*openSessionResult[M], error) {
 	if req == nil || req.sessionID == "" {
 		return nil, ErrSessionBusy
-	}
-	if req.fencingToken != nil {
-		return nil, ErrSessionFencingTokenUnsupported
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -101,28 +85,15 @@ func (h *localSessionHandle[M]) loadEvents(ctx context.Context, req *LoadSession
 	}
 	clone := *req
 	clone.SessionID = h.sessionID
-	res, err := h.store.LoadEvents(ctx, &clone)
-	if err != nil {
-		return nil, err
-	}
-	// Capture the snapshot tail only when the store actually returned one. A
-	// load that did not request the tail (or a non-first reconstruct page) leaves
-	// it empty, and that empty value must not clobber a tail captured earlier.
-	if res != nil && res.SessionTailEventID != "" {
-		h.mu.Lock()
-		h.tailID = res.SessionTailEventID
-		h.mu.Unlock()
-	}
-	return res, nil
+	return h.store.LoadEvents(ctx, &clone)
 }
 
-func (h *localSessionHandle[M]) appendEvents(ctx context.Context, req *AppendSessionEventsRequest[M]) (*AppendSessionEventsResult, error) {
+func (h *localSessionHandle[M]) appendEvents(ctx context.Context, req *AppendSessionEventsRequest[M]) error {
 	h.mu.Lock()
 	if h.closed {
 		h.mu.Unlock()
-		return nil, ErrSessionBusy
+		return ErrSessionBusy
 	}
-	tailID := h.tailID
 	h.mu.Unlock()
 
 	if req == nil {
@@ -130,25 +101,27 @@ func (h *localSessionHandle[M]) appendEvents(ctx context.Context, req *AppendSes
 	}
 	clone := *req
 	clone.SessionID = h.sessionID
-	if clone.ExpectedSessionTailEventID == "" {
-		clone.ExpectedSessionTailEventID = tailID
+	if err := h.store.AppendEvents(ctx, &clone); err != nil {
+		return err
 	}
-	res, err := h.store.AppendEvents(ctx, &clone)
-	if err != nil {
-		return nil, err
-	}
-	if res != nil {
+	if len(clone.Events) > 0 {
 		h.mu.Lock()
-		h.tailID = res.SessionTailEventID
+		h.tailID = clone.Events[len(clone.Events)-1].EventID
 		h.mu.Unlock()
 	}
-	return res, nil
+	return nil
 }
 
 func (h *localSessionHandle[M]) currentTailEventID() string {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return h.tailID
+}
+
+func (h *localSessionHandle[M]) setCurrentTailEventID(tailID string) {
+	h.mu.Lock()
+	h.tailID = tailID
+	h.mu.Unlock()
 }
 
 func (h *localSessionHandle[M]) close(context.Context) error {
@@ -163,113 +136,21 @@ func (h *localSessionHandle[M]) close(context.Context) error {
 	return nil
 }
 
-type fencedSessionService[M MessageType] struct {
-	store FencedSessionEventStore[M]
-}
-
-func (s *fencedSessionService[M]) openSession(ctx context.Context, req *openSessionRequest) (*openSessionResult[M], error) {
-	if req == nil || req.sessionID == "" {
-		return nil, ErrSessionBusy
-	}
-	if req.fencingToken == nil {
-		return nil, ErrSessionFencingTokenRequired
-	}
-	return &openSessionResult[M]{
-		handle: &fencedSessionHandle[M]{
-			store:        s.store,
-			sessionID:    req.sessionID,
-			fencingToken: req.fencingToken,
-		},
-	}, nil
-}
-
-type fencedSessionHandle[M MessageType] struct {
-	store        FencedSessionEventStore[M]
-	sessionID    string
-	fencingToken SessionFencingTokenFunc
-
-	mu     sync.Mutex
-	tailID string
-	closed bool
-}
-
-func (h *fencedSessionHandle[M]) loadEvents(ctx context.Context, req *LoadSessionEventsRequest) (*LoadSessionEventsResult[M], error) {
-	if req == nil {
-		req = &LoadSessionEventsRequest{}
-	}
-	clone := *req
-	clone.SessionID = h.sessionID
-	res, err := h.store.LoadEvents(ctx, &clone)
+func refreshSessionTail[M MessageType](ctx context.Context, handle sessionHandle[M], sessionID string) (string, error) {
+	result, err := handle.loadEvents(ctx, &LoadSessionEventsRequest{
+		SessionID: sessionID,
+		Reverse:   true,
+		Limit:     1,
+	})
 	if err != nil {
-		return nil, err
+		return "", err
 	}
-	// Capture the snapshot tail only when the store actually returned one. A
-	// load that did not request the tail (or a non-first reconstruct page) leaves
-	// it empty, and that empty value must not clobber a tail captured earlier.
-	if res != nil && res.SessionTailEventID != "" {
-		h.mu.Lock()
-		h.tailID = res.SessionTailEventID
-		h.mu.Unlock()
+	tailID := ""
+	if result != nil && len(result.Events) > 0 && result.Events[0] != nil {
+		tailID = result.Events[0].EventID
 	}
-	return res, nil
-}
-
-func (h *fencedSessionHandle[M]) appendEvents(ctx context.Context, req *AppendSessionEventsRequest[M]) (*AppendSessionEventsResult, error) {
-	h.mu.Lock()
-	tailID := h.tailID
-	closed := h.closed
-	fencingToken := h.fencingToken
-	h.mu.Unlock()
-	if closed {
-		return nil, ErrSessionFencingTokenInvalid
+	if h, ok := handle.(*localSessionHandle[M]); ok {
+		h.setCurrentTailEventID(tailID)
 	}
-	if fencingToken == nil {
-		return nil, ErrSessionFencingTokenInvalid
-	}
-	token, err := fencingToken(ctx)
-	if err != nil {
-		return nil, err
-	}
-	if token == "" {
-		return nil, ErrSessionFencingTokenInvalid
-	}
-	if req == nil {
-		req = &AppendSessionEventsRequest[M]{}
-	}
-	freq := &FencedAppendSessionEventsRequest[M]{
-		SessionID:                  h.sessionID,
-		FencingToken:               token,
-		ExpectedSessionTailEventID: req.ExpectedSessionTailEventID,
-		Events:                     req.Events,
-	}
-	if freq.ExpectedSessionTailEventID == "" {
-		freq.ExpectedSessionTailEventID = tailID
-	}
-	res, err := h.store.AppendEventsFenced(ctx, freq)
-	if err != nil {
-		return nil, err
-	}
-	if res != nil {
-		h.mu.Lock()
-		h.tailID = res.SessionTailEventID
-		h.mu.Unlock()
-	}
-	return res, nil
-}
-
-func (h *fencedSessionHandle[M]) currentTailEventID() string {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	return h.tailID
-}
-
-func (h *fencedSessionHandle[M]) close(ctx context.Context) error {
-	h.mu.Lock()
-	if h.closed {
-		h.mu.Unlock()
-		return nil
-	}
-	h.closed = true
-	h.mu.Unlock()
-	return nil
+	return tailID, nil
 }
