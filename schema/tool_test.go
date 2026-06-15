@@ -181,6 +181,20 @@ func TestToolInfoSerialization(t *testing.T) {
 	err = gob.NewDecoder(buf).Decode(result)
 	assert.NoError(t, err)
 	assert.Equal(t, ti2, result)
+
+	// json roundtrip with empty-but-non-nil params map: must not collapse to nil,
+	// otherwise the params form is silently dropped.
+	tiEmpty := &ToolInfo{
+		ParamsOneOf: NewParamsOneOfByParams(map[string]*ParameterInfo{}),
+	}
+	b, err = json.Marshal(tiEmpty)
+	assert.NoError(t, err)
+	result = &ToolInfo{}
+	err = json.Unmarshal(b, result)
+	assert.NoError(t, err)
+	assert.NotNil(t, result.ParamsOneOf)
+	assert.NotNil(t, result.ParamsOneOf.params)
+	assert.Equal(t, tiEmpty, result)
 }
 
 func TestMCPToolResult_NilErrorCode(t *testing.T) {
