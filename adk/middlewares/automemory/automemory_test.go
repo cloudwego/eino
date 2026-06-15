@@ -448,7 +448,7 @@ func TestMiddleware_AfterAgent_SyncExtractionWritesMemoryFiles(t *testing.T) {
 	b.put("/mem/MEMORY.md", "", now)
 
 	extModel := &extractionModel{}
-	var onErrStages []string
+	var onErrStages []ErrorStage
 	mw, err := New(ctx, &Config[*schema.Message]{
 		MemoryDirectory: "/mem",
 		MemoryBackend:   b,
@@ -456,7 +456,7 @@ func TestMiddleware_AfterAgent_SyncExtractionWritesMemoryFiles(t *testing.T) {
 			Mode:  WriteModeSync,
 			Model: extModel,
 		},
-		OnError: func(ctx context.Context, stage string, err error) {
+		OnError: func(ctx context.Context, stage ErrorStage, err error) {
 			onErrStages = append(onErrStages, stage)
 		},
 	})
@@ -710,7 +710,7 @@ func TestMiddleware_BeforeAgent_InstructionIdempotent_NoTopicMemory(t *testing.T
 	require.Equal(t, 1, strings.Count(out2.Instruction, instructionMarker))
 }
 
-func TestMiddleware_BeforeAgent_SkipsWhenMessagesAlreadyContainMemory(t *testing.T) {
+func TestMiddleware_BeforeAgent_InjectsInstructionWhenMessagesAlreadyContainMemory(t *testing.T) {
 	ctx := context.Background()
 	b := NewInMemoryBackend()
 
@@ -728,7 +728,7 @@ func TestMiddleware_BeforeAgent_SkipsWhenMessagesAlreadyContainMemory(t *testing
 
 	_, out, err := mw.BeforeAgent(ctx, runCtx)
 	require.NoError(t, err)
-	require.Equal(t, "base", out.Instruction)
+	require.Contains(t, out.Instruction, instructionMarker)
 	require.Len(t, out.AgentInput.Messages, 2)
 }
 
@@ -761,6 +761,49 @@ func TestMiddleware_BeforeAgent_DistributedCursorSyncIntoMessageExtra(t *testing
 
 	_, out, err := mw.BeforeAgent(ctx, runCtx)
 	require.NoError(t, err)
+	last := out.AgentInput.Messages[len(out.AgentInput.Messages)-1]
+	require.NotNil(t, last.Extra)
+	meta, ok := last.Extra[memoryExtraKey].(*memoryExtra)
+	require.True(t, ok)
+	require.Equal(t, "write_cursor", meta.Type)
+	require.EqualValues(t, 5, meta.Cursor)
+}
+
+func TestMiddleware_BeforeAgent_WriteCursorDoesNotBlockInstructionInjection(t *testing.T) {
+	ctx := context.Background()
+	b := NewInMemoryBackend()
+	now := time.Now()
+	b.put("/mem/MEMORY.md", "remembered\n", now)
+
+	coord := &CoordinationConfig[*schema.Message]{
+		SessionIDFunc: func(ctx context.Context, state *adk.ChatModelAgentState) (string, error) {
+			return "sess-cursor", nil
+		},
+		Coordinator: NewLocalCoordinator(),
+		LockTTL:     time.Minute,
+	}
+	require.NoError(t, coord.Coordinator.SetCursor(ctx, "sess-cursor", 5))
+
+	mw, err := New(ctx, &Config[*schema.Message]{
+		MemoryDirectory: "/mem",
+		MemoryBackend:   b,
+		Coordination:    coord,
+	})
+	require.NoError(t, err)
+
+	runCtx := &adk.ChatModelAgentContext[*schema.Message]{
+		Instruction: "base",
+		AgentInput: &adk.AgentInput{Messages: []adk.Message{
+			schema.AssistantMessage("ack", nil),
+			schema.UserMessage("next turn"),
+		}},
+	}
+
+	_, out, err := mw.BeforeAgent(ctx, runCtx)
+	require.NoError(t, err)
+	require.Contains(t, out.Instruction, instructionMarker)
+	require.Contains(t, out.Instruction, "remembered")
+
 	last := out.AgentInput.Messages[len(out.AgentInput.Messages)-1]
 	require.NotNil(t, last.Extra)
 	meta, ok := last.Extra[memoryExtraKey].(*memoryExtra)
