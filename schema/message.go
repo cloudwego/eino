@@ -28,6 +28,7 @@ import (
 
 	"github.com/nikolalohinski/gonja"
 	"github.com/nikolalohinski/gonja/config"
+	"github.com/nikolalohinski/gonja/exec"
 	"github.com/nikolalohinski/gonja/nodes"
 	"github.com/nikolalohinski/gonja/parser"
 	"github.com/slongfield/pyfmt"
@@ -1868,6 +1869,8 @@ const (
 	jinjaExtends = "extends"
 	jinjaImport  = "import"
 	jinjaFrom    = "from"
+	jinjaFile    = "file"
+	jinjaFileSet = "fileset"
 )
 
 func getJinjaEnv() (*gonja.Environment, error) {
@@ -1905,6 +1908,24 @@ func getJinjaEnv() (*gonja.Environment, error) {
 		if jinjaEnv.Statements.Exists(jinjaImport) {
 			err = jinjaEnv.Statements.Replace(jinjaImport, func(parser *parser.Parser, args *parser.Parser) (nodes.Statement, error) {
 				return nil, fmt.Errorf("keyword[import] has been disabled")
+			})
+			if err != nil {
+				envInitErr = fmt.Errorf(formatInitError, err)
+				return
+			}
+		}
+		if jinjaEnv.Filters.Exists(jinjaFile) {
+			err = jinjaEnv.Filters.Replace(jinjaFile, func(e *exec.Evaluator, in *exec.Value, params *exec.VarArgs) *exec.Value {
+				return exec.AsValue(fmt.Errorf("keyword[file] has been disabled"))
+			})
+			if err != nil {
+				envInitErr = fmt.Errorf(formatInitError, err)
+				return
+			}
+		}
+		if jinjaEnv.Filters.Exists(jinjaFileSet) {
+			err = jinjaEnv.Filters.Replace(jinjaFileSet, func(e *exec.Evaluator, in *exec.Value, params *exec.VarArgs) *exec.Value {
+				return exec.AsValue(fmt.Errorf("keyword[fileset] has been disabled"))
 			})
 			if err != nil {
 				envInitErr = fmt.Errorf(formatInitError, err)
