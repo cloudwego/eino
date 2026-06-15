@@ -266,6 +266,39 @@ type countingBackend struct {
 	paths      []string
 }
 
+type outOfBoundsCandidateBackend struct {
+	outsideReadCalled int32
+}
+
+func (b *outOfBoundsCandidateBackend) Read(_ context.Context, req *ReadRequest) (*FileContent, error) {
+	if req == nil {
+		return nil, fmt.Errorf("read: invalid request")
+	}
+	if filepath.Clean(req.FilePath) == filepath.Clean("/outside/secret.md") {
+		atomic.StoreInt32(&b.outsideReadCalled, 1)
+		return &FileContent{Content: "secret"}, nil
+	}
+	return nil, fmt.Errorf("file not found: %s", req.FilePath)
+}
+
+func (b *outOfBoundsCandidateBackend) GlobInfo(_ context.Context, req *GlobInfoRequest) ([]FileInfo, error) {
+	if req == nil {
+		return nil, fmt.Errorf("glob: invalid request")
+	}
+	return []FileInfo{{
+		Path:       "/outside/secret.md",
+		ModifiedAt: time.Now().Format(time.RFC3339Nano),
+	}}, nil
+}
+
+func (b *outOfBoundsCandidateBackend) Write(context.Context, *WriteRequest) error {
+	return nil
+}
+
+func (b *outOfBoundsCandidateBackend) Edit(context.Context, *EditRequest) error {
+	return nil
+}
+
 func (b *countingBackend) Write(ctx context.Context, req *WriteRequest) error {
 	atomic.AddInt32(&b.writeCalls, 1)
 	b.mu.Lock()
@@ -929,6 +962,36 @@ func TestMiddleware_AfterAgent_RelativeMemoryDirRendersAbsolutePath(t *testing.T
 	require.Equal(t, "remember relative", string(raw))
 }
 
+func TestMiddleware_BeforeAgent_RelativeMemoryDirReadsResolvedDirectoryAfterCWDChange(t *testing.T) {
+	ctx := context.Background()
+	tmp := t.TempDir()
+	oldwd, err := os.Getwd()
+	require.NoError(t, err)
+	require.NoError(t, os.Chdir(tmp))
+	defer func() {
+		_ = os.Chdir(oldwd)
+	}()
+
+	require.NoError(t, os.WriteFile(filepath.Join(tmp, "MEMORY.md"), []byte("persisted index\n"), 0o644))
+
+	mw, err := New(ctx, &Config[*schema.Message]{
+		MemoryDirectory: ".",
+		MemoryBackend:   NewLocalBackend(),
+	})
+	require.NoError(t, err)
+
+	other := t.TempDir()
+	require.NoError(t, os.Chdir(other))
+
+	runCtx := &adk.ChatModelAgentContext[*schema.Message]{
+		Instruction: "base",
+		AgentInput:  &adk.AgentInput{Messages: []adk.Message{schema.UserMessage("hi")}},
+	}
+	_, out, err := mw.BeforeAgent(ctx, runCtx)
+	require.NoError(t, err)
+	require.Contains(t, out.Instruction, "persisted index")
+}
+
 func TestFSBackend_ReadMissingFileReturnsContentInsteadOfError(t *testing.T) {
 	ctx := context.Background()
 	tmp := t.TempDir()
@@ -941,6 +1004,27 @@ func TestFSBackend_ReadMissingFileReturnsContentInsteadOfError(t *testing.T) {
 	require.NotNil(t, content)
 	require.Contains(t, content.Content, "File not found:")
 	require.Contains(t, content.Content, filepath.Join(tmp, "missing.md"))
+}
+
+func TestMiddleware_TopicSelection_IgnoresOutOfBoundsCandidatePaths(t *testing.T) {
+	ctx := context.Background()
+	backend := &outOfBoundsCandidateBackend{}
+
+	mw, err := New(ctx, &Config[*schema.Message]{
+		MemoryDirectory: "/mem",
+		MemoryBackend:   backend,
+		Model:           &panicModel{},
+	})
+	require.NoError(t, err)
+
+	runCtx := &adk.ChatModelAgentContext[*schema.Message]{
+		Instruction: "base",
+		AgentInput:  &adk.AgentInput{Messages: []adk.Message{schema.UserMessage("show memories")}},
+	}
+	_, out, err := mw.BeforeAgent(ctx, runCtx)
+	require.NoError(t, err)
+	require.Len(t, out.AgentInput.Messages, 1)
+	require.Equal(t, int32(0), atomic.LoadInt32(&backend.outsideReadCalled))
 }
 
 func TestMiddleware_AfterAgent_AsyncSetsPendingSnapshotWhenLockHeld(t *testing.T) {

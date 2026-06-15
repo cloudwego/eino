@@ -175,11 +175,8 @@ func TestNew_DoesNotMutateConfig(t *testing.T) {
 		MemoryDirectory: "/mem",
 		MemoryBackend:   automemory.NewInMemoryBackend(),
 		Model:           &dreamModel{},
-		SessionStore: &SessionStoreProvider[*schema.Message]{
-			SessionStore: adksession.NewInMemoryStore[*schema.Message](nil),
-			Serializer:   &schema.HumanReadableSerializer{},
-		},
-		Schedule: &ScheduleConfig{},
+		SessionStore:    adksession.NewInMemoryStore[*schema.Message](nil),
+		Schedule:        &ScheduleConfig{},
 	}
 
 	_, err := New(ctx, cfg)
@@ -199,14 +196,7 @@ func TestMiddleware_AfterAgent_RunInlineWithSessionStore(t *testing.T) {
 	store := NewLocalStore()
 	model := &dreamModel{}
 	eventStore := &countingSessionStore{SessionEventStore: adksession.NewInMemoryStore[*schema.Message](nil)}
-	serializer := &schema.HumanReadableSerializer{}
-	payload, err := serializer.Marshal(&adk.SessionEvent[*schema.Message]{
-		EventID: "e1",
-		Kind:    adk.SessionEventMessage,
-		Message: schema.AssistantMessage("build failure: missing dependency", nil),
-	})
-	require.NoError(t, err)
-	_, err = eventStore.AppendEvents(ctx, &adk.AppendSessionEventsRequest[*schema.Message]{
+	_, err := eventStore.AppendEvents(ctx, &adk.AppendSessionEventsRequest[*schema.Message]{
 		SessionID: "session-a",
 		Events: []*adk.SessionEvent[*schema.Message]{{
 			EventID: "e1",
@@ -215,15 +205,11 @@ func TestMiddleware_AfterAgent_RunInlineWithSessionStore(t *testing.T) {
 		}},
 	})
 	require.NoError(t, err)
-	_ = payload
 	mw, err := New(ctx, &Config[*schema.Message]{
 		MemoryDirectory: tmp,
 		MemoryBackend:   automemory.NewLocalBackend(),
 		Model:           model,
-		SessionStore: &SessionStoreProvider[*schema.Message]{
-			SessionStore: eventStore,
-			Serializer:   serializer,
-		},
+		SessionStore:    eventStore,
 		Schedule: &ScheduleConfig{
 			RunInline:         true,
 			Store:             store,

@@ -76,7 +76,7 @@ type Config[M adk.MessageType] struct {
 	// the current run scope:
 	//   - middleware-triggered runs search the touched sessions selected by the scheduler
 	//   - manual `Run(...)` searches the provided/current session only
-	SessionStore *SessionStoreProvider[M]
+	SessionStore adk.SessionEventStore[M]
 
 	// Schedule controls middleware-triggered runs only.
 	// Optional. `Run(...)` ignores it.
@@ -133,10 +133,6 @@ func cloneConfig[M adk.MessageType](cfg *Config[M]) *Config[M] {
 	}
 
 	cp := *cfg
-	if cfg.SessionStore != nil {
-		sessionStoreCopy := *cfg.SessionStore
-		cp.SessionStore = &sessionStoreCopy
-	}
 	if cfg.Schedule != nil {
 		scheduleCopy := *cfg.Schedule
 		cp.Schedule = &scheduleCopy

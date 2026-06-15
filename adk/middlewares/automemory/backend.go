@@ -37,7 +37,7 @@ type FileInfo = filesystem.FileInfo
 type WriteRequest = filesystem.WriteRequest
 type EditRequest = filesystem.EditRequest
 
-func newFSBackend(backend Backend, baseDir string) (ainternal.Backend, error) {
+func newFSBackend(backend Backend, baseDir string) (*ainternal.FSBackend, error) {
 	return ainternal.NewFSBackend(backend, ainternal.FSBackendConfig{
 		BaseDir:           baseDir,
 		NotFoundAsContent: true,

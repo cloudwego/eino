@@ -28,20 +28,6 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
-// SessionStoreProvider supplies the session timeline dependencies required by
-// dream's optional session-history search tool.
-//
-// When configured, dream exposes a narrow grep-like tool that scans persisted
-// message events for the current session only.
-type SessionStoreProvider[M adk.MessageType] struct {
-	// SessionStore loads persisted session events for the current session.
-	// Required when SessionStoreProvider is configured.
-	SessionStore adk.SessionEventStore[M]
-	// Serializer decodes SessionEvent payload bytes returned by SessionStore.
-	// It must match the serializer used when the events were persisted.
-	Serializer schema.Serializer
-}
-
 type grepSessionHistoryInput struct {
 	Query string `json:"query" jsonschema:"required,description=the narrow term to search in current session history"`
 	Limit int    `json:"limit,omitempty" jsonschema:"description=maximum number of matching lines to return"`
@@ -68,8 +54,8 @@ func getDreamRunMeta(ctx context.Context) *dreamRunMeta {
 	return nil
 }
 
-func newSessionHistoryGrepTool[M adk.MessageType](provider *SessionStoreProvider[M]) (tool.BaseTool, error) {
-	if provider == nil || provider.SessionStore == nil || provider.Serializer == nil {
+func newSessionHistoryGrepTool[M adk.MessageType](store adk.SessionEventStore[M]) (tool.BaseTool, error) {
+	if store == nil {
 		return nil, nil
 	}
 
@@ -107,7 +93,7 @@ func newSessionHistoryGrepTool[M adk.MessageType](provider *SessionStoreProvider
 		for _, sessionID := range sessionIDs {
 			after = ""
 			for len(found) < limit {
-				result, err := provider.SessionStore.LoadEvents(ctx, &adk.LoadSessionEventsRequest{
+				result, err := store.LoadEvents(ctx, &adk.LoadSessionEventsRequest{
 					SessionID:          sessionID,
 					After:              after,
 					Limit:              pageSize,

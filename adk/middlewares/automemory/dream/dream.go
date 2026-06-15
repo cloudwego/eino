@@ -108,10 +108,7 @@ func newMiddleware[M adk.MessageType](ctx context.Context, cfg *Config[M]) (*mid
 	}
 	var sessionSearchTool tool.BaseTool
 	if cfg.SessionStore != nil {
-		sessionSearchTool, err = newSessionHistoryGrepTool[M](cfg.SessionStore)
-		if err != nil {
-			return nil, err
-		}
+		sessionSearchTool, err = newSessionHistoryGrepTool(cfg.SessionStore)
 	}
 	m := &middleware[M]{
 		TypedBaseChatModelAgentMiddleware: adk.TypedBaseChatModelAgentMiddleware[M]{},
@@ -205,7 +202,7 @@ func (m *middleware[M]) runDream(ctx context.Context, sessionID string, touchedS
 	if err != nil {
 		return err
 	}
-	prompt := buildConsolidationPrompt(m.resolvedMemoryDir, touchedSessions, m.cfg.SessionStore != nil)
+	prompt := buildConsolidationPrompt(m.resolvedMemoryDir, touchedSessions, m.sessionSearchTool != nil)
 	searchSessionIDs := touchedSessions
 	if len(searchSessionIDs) == 0 && sessionID != "" {
 		searchSessionIDs = []string{sessionID}

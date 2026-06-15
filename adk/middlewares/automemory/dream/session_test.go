@@ -31,7 +31,6 @@ import (
 func TestNewSessionHistoryGrepTool(t *testing.T) {
 	ctx := context.Background()
 	store := adksession.NewInMemoryStore[*schema.Message](nil)
-	serializer := &schema.HumanReadableSerializer{}
 	sessionID := "session-1"
 	tail := ""
 
@@ -53,10 +52,7 @@ func TestNewSessionHistoryGrepTool(t *testing.T) {
 	appendEvent("e2", schema.AssistantMessage("build failure: missing dependency", nil))
 	appendEvent("e3", schema.ToolMessage("Build Failure: retry later", "call-1"))
 
-	bt, err := newSessionHistoryGrepTool(&SessionStoreProvider[*schema.Message]{
-		SessionStore: store,
-		Serializer:   serializer,
-	})
+	bt, err := newSessionHistoryGrepTool[*schema.Message](store)
 	require.NoError(t, err)
 
 	result, err := bt.(tool.InvokableTool).InvokableRun(
@@ -70,7 +66,6 @@ func TestNewSessionHistoryGrepTool(t *testing.T) {
 func TestNewSessionHistoryGrepTool_SearchesRunScopedSessions(t *testing.T) {
 	ctx := context.Background()
 	store := adksession.NewInMemoryStore[*schema.Message](nil)
-	serializer := &schema.HumanReadableSerializer{}
 
 	appendEvent := func(sessionID, eventID string, msg *schema.Message) {
 		_, err := store.AppendEvents(ctx, &adk.AppendSessionEventsRequest[*schema.Message]{
@@ -88,10 +83,7 @@ func TestNewSessionHistoryGrepTool_SearchesRunScopedSessions(t *testing.T) {
 	appendEvent("session-b", "b1", schema.ToolMessage("build failure: retry later", "call-1"))
 	appendEvent("session-c", "c1", schema.AssistantMessage("build failure: should not be searched", nil))
 
-	bt, err := newSessionHistoryGrepTool(&SessionStoreProvider[*schema.Message]{
-		SessionStore: store,
-		Serializer:   serializer,
-	})
+	bt, err := newSessionHistoryGrepTool[*schema.Message](store)
 	require.NoError(t, err)
 
 	result, err := bt.(tool.InvokableTool).InvokableRun(
@@ -113,13 +105,16 @@ func TestNewSessionHistoryGrepTool_InfoUsesChineseDescription(t *testing.T) {
 		require.NoError(t, adk.SetLanguage(adk.LanguageEnglish))
 	}()
 
-	bt, err := newSessionHistoryGrepTool(&SessionStoreProvider[*schema.Message]{
-		SessionStore: adksession.NewInMemoryStore[*schema.Message](nil),
-		Serializer:   &schema.HumanReadableSerializer{},
-	})
+	bt, err := newSessionHistoryGrepTool[*schema.Message](adksession.NewInMemoryStore[*schema.Message](nil))
 	require.NoError(t, err)
 
 	info, err := bt.Info(context.Background())
 	require.NoError(t, err)
 	require.Contains(t, info.Desc, "在当前 dream 运行范围内的会话历史中按精确关键词搜索")
+}
+
+func TestNewSessionHistoryGrepTool_AllowsNilStore(t *testing.T) {
+	bt, err := newSessionHistoryGrepTool[*schema.Message](nil)
+	require.NoError(t, err)
+	require.Nil(t, bt)
 }

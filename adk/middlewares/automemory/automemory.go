@@ -153,6 +153,7 @@ type middleware[M adk.MessageType] struct {
 	cfg *Config[M]
 
 	resolvedMemoryDirectory string
+	boundedMemoryBackend    Backend
 
 	topicSelectionModel model.BaseModel[M]
 	extractionHandler   adk.TypedChatModelAgentMiddleware[M]
@@ -178,11 +179,8 @@ const (
 )
 
 type memoryExtra struct {
-	Type       string
-	Cursor     int
-	UpdatedAt  string
-	Visibility string
-	SchemaVer  int
+	Type   string
+	Cursor int
 }
 
 // New creates an automemory middleware from the provided configuration.
@@ -200,6 +198,14 @@ func New[M adk.MessageType](ctx context.Context, config *Config[M]) (adk.TypedCh
 	if err != nil {
 		return nil, fmt.Errorf("auto memory config: resolve memory directory: %w", err)
 	}
+	boundedMemoryBackend, err := ainternal.NewFSBackend(cfg.MemoryBackend, ainternal.FSBackendConfig{
+		BaseDir:           resolvedMemoryDir,
+		NotFoundAsContent: true,
+		ErrorPrefix:       "memory backend",
+	})
+	if err != nil {
+		return nil, err
+	}
 	if cfg.Read == nil {
 		cfg.Read = &ReadConfig[M]{}
 	}
@@ -209,6 +215,7 @@ func New[M adk.MessageType](ctx context.Context, config *Config[M]) (adk.TypedCh
 		TypedBaseChatModelAgentMiddleware: adk.TypedBaseChatModelAgentMiddleware[M]{},
 		cfg:                               cfg,
 		resolvedMemoryDirectory:           resolvedMemoryDir,
+		boundedMemoryBackend:              boundedMemoryBackend,
 		coordination:                      cfg.Coordination,
 	}
 
@@ -221,11 +228,7 @@ func New[M adk.MessageType](ctx context.Context, config *Config[M]) (adk.TypedCh
 	}
 
 	if cfg.Write.Mode != WriteModeDisabled && cfg.Write.Model != nil {
-		writeFSBackend, err := ainternal.NewFSBackend(cfg.MemoryBackend, ainternal.FSBackendConfig{
-			BaseDir:           resolvedMemoryDir,
-			NotFoundAsContent: true,
-			ErrorPrefix:       "fs backend",
-		})
+		writeFSBackend, err := newFSBackend(cfg.MemoryBackend, resolvedMemoryDir)
 		if err != nil {
 			return nil, err
 		}
@@ -486,14 +489,18 @@ func (m *middleware[M]) injectIndexIntoInstruction(ctx context.Context, baseInst
 		memDesc = s
 	}
 
-	indexPath := filepath.Join(m.cfg.MemoryDirectory, m.cfg.Read.Index.FileName)
+	indexPath := filepath.Join(m.resolvedMemoryDirectory, m.cfg.Read.Index.FileName)
 	indexContent := ""
 	totalLines := 0
 
-	fc, err := m.cfg.MemoryBackend.Read(ctx, &ReadRequest{FilePath: indexPath})
+	fc, err := m.boundedMemoryBackend.Read(ctx, &ReadRequest{FilePath: indexPath})
 	if err == nil && fc != nil {
-		indexContent = fc.Content
-		totalLines = strings.Count(indexContent, "\n") + 1
+		if isFileNotFoundContent(fc.Content) {
+			indexContent = ""
+		} else {
+			indexContent = fc.Content
+			totalLines = strings.Count(indexContent, "\n") + 1
+		}
 	} else {
 		// Missing index is not fatal; keep empty.
 		indexContent = ""
@@ -553,6 +560,10 @@ func linesOrSizeTrunc(content string, lines, size int) (newContent string, reaso
 		sizeTrunc(newContent, size)
 	}
 	return
+}
+
+func isFileNotFoundContent(content string) bool {
+	return strings.HasPrefix(strings.TrimSpace(content), "File not found: ")
 }
 
 func (m *middleware[M]) onErr(ctx context.Context, stage string, err error) {
@@ -657,15 +668,15 @@ func (m *middleware[M]) listTopicCandidates(ctx context.Context) (map[string]top
 }
 
 func (m *middleware[M]) topicSelectionCandidates(ctx context.Context) ([]FileInfo, error) {
-	files, err := m.cfg.MemoryBackend.GlobInfo(ctx, &GlobInfoRequest{
+	files, err := m.boundedMemoryBackend.GlobInfo(ctx, &GlobInfoRequest{
 		Pattern: m.cfg.Read.TopicSelection.CandidateGlob,
-		Path:    m.cfg.MemoryDirectory,
+		Path:    m.resolvedMemoryDirectory,
 	})
 	if err != nil || len(files) == 0 {
 		return nil, err
 	}
 
-	indexAbs := filepath.Join(m.cfg.MemoryDirectory, m.cfg.Read.Index.FileName)
+	indexAbs := filepath.Join(m.resolvedMemoryDirectory, m.cfg.Read.Index.FileName)
 	candidates := make([]FileInfo, 0, len(files))
 	for _, fi := range files {
 		if filepath.Clean(fi.Path) == filepath.Clean(indexAbs) {
@@ -687,17 +698,17 @@ func (m *middleware[M]) topicSelectionCandidates(ctx context.Context) ([]FileInf
 }
 
 func (m *middleware[M]) buildTopicCandidateBundle(ctx context.Context, fi FileInfo) (topicCandidateBundle, string, bool) {
-	rel, relErr := filepath.Rel(m.cfg.MemoryDirectory, fi.Path)
+	rel, relErr := filepath.Rel(m.resolvedMemoryDirectory, fi.Path)
 	if relErr != nil {
 		rel = filepath.Base(fi.Path)
 	}
 	rel = filepath.ToSlash(rel)
 
-	preview, err := m.cfg.MemoryBackend.Read(ctx, &ReadRequest{
+	preview, err := m.boundedMemoryBackend.Read(ctx, &ReadRequest{
 		FilePath: fi.Path,
 		Limit:    m.cfg.Read.TopicSelection.CandidatePreviewLines,
 	})
-	if err != nil || preview == nil {
+	if err != nil || preview == nil || isFileNotFoundContent(preview.Content) {
 		return topicCandidateBundle{}, "", false
 	}
 
@@ -824,8 +835,8 @@ func (m *middleware[M]) renderTopicMemories(
 }
 
 func (m *middleware[M]) renderTopicMemory(ctx context.Context, bundle topicCandidateBundle) (string, bool) {
-	full, err := m.cfg.MemoryBackend.Read(ctx, &ReadRequest{FilePath: bundle.AbsPath})
-	if err != nil || full == nil {
+	full, err := m.boundedMemoryBackend.Read(ctx, &ReadRequest{FilePath: bundle.AbsPath})
+	if err != nil || full == nil || isFileNotFoundContent(full.Content) {
 		return "", false
 	}
 
@@ -1359,11 +1370,8 @@ func markWriteCursor[M adk.MessageType](state *adk.TypedChatModelAgentState[M], 
 	}
 
 	copyAndSetMsgExtra(last, memoryExtraKey, &memoryExtra{
-		Type:       "write_cursor",
-		Cursor:     cursor,
-		UpdatedAt:  time.Now().Format(time.RFC3339Nano),
-		Visibility: "internal",
-		SchemaVer:  1,
+		Type:   "write_cursor",
+		Cursor: cursor,
 	})
 
 	return state
@@ -1565,17 +1573,17 @@ func (m *middleware[M]) runMemoryExtractionAgent(ctx context.Context, snapshot [
 }
 
 func (m *middleware[M]) buildMemoryManifest(ctx context.Context) (string, error) {
-	files, err := m.cfg.MemoryBackend.GlobInfo(ctx, &GlobInfoRequest{
+	files, err := m.boundedMemoryBackend.GlobInfo(ctx, &GlobInfoRequest{
 		Pattern: CandidateGlobPattern,
-		Path:    m.cfg.MemoryDirectory,
+		Path:    m.resolvedMemoryDirectory,
 	})
 	if err != nil {
 		return "", err
 	}
-	indexAbs := filepath.Join(m.cfg.MemoryDirectory, m.cfg.Read.Index.FileName)
+	indexAbs := filepath.Join(m.resolvedMemoryDirectory, m.cfg.Read.Index.FileName)
 	lines := make([]string, 0, len(files))
 	for _, fi := range files {
-		rel, relErr := filepath.Rel(m.cfg.MemoryDirectory, fi.Path)
+		rel, relErr := filepath.Rel(m.resolvedMemoryDirectory, fi.Path)
 		if relErr != nil {
 			rel = filepath.Base(fi.Path)
 		}
@@ -1584,8 +1592,8 @@ func (m *middleware[M]) buildMemoryManifest(ctx context.Context) (string, error)
 			rel = m.cfg.Read.Index.FileName
 		}
 		desc := ""
-		preview, rerr := m.cfg.MemoryBackend.Read(ctx, &ReadRequest{FilePath: fi.Path, Limit: defaultCandidatePreviewLine})
-		if rerr == nil && preview != nil {
+		preview, rerr := m.boundedMemoryBackend.Read(ctx, &ReadRequest{FilePath: fi.Path, Limit: defaultCandidatePreviewLine})
+		if rerr == nil && preview != nil && !isFileNotFoundContent(preview.Content) {
 			if fm, ok := parseFrontmatter(preview.Content); ok {
 				desc = strings.TrimSpace(fm.Description)
 			}
