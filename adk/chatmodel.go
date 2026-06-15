@@ -1241,10 +1241,11 @@ func (a *TypedChatModelAgent[M]) buildAgenticReActRunFunc(_ context.Context, bc 
 		model:       agenticModel,
 		toolsConfig: &bc.toolsNodeConf,
 		modelWrapperConf: &typedModelWrapperConfig[*schema.AgenticMessage]{
-			handlers:    agenticHandlers,
-			middlewares: a.middlewares,
-			retryConfig: any(a.modelRetryConfig).(*TypedModelRetryConfig[*schema.AgenticMessage]),
-			toolInfos:   bc.toolInfos,
+			handlers:       agenticHandlers,
+			middlewares:    a.middlewares,
+			retryConfig:    any(a.modelRetryConfig).(*TypedModelRetryConfig[*schema.AgenticMessage]),
+			failoverConfig: any(a.modelFailoverConfig).(*ModelFailoverConfig[*schema.AgenticMessage]),
+			toolInfos:      bc.toolInfos,
 		},
 		toolsReturnDirectly: bc.returnDirectly,
 		agentName:           a.name,
@@ -1307,10 +1308,11 @@ func (a *TypedChatModelAgent[M]) buildAgenticReActRunFunc(_ context.Context, bc 
 		}
 
 		ctx = withTypedChatModelAgentExecCtx(ctx, &typedChatModelAgentExecCtx[*schema.AgenticMessage]{
-			runtimeReturnDirectly: ap.returnDirectly,
-			generator:             ap.generator,
-			cancelCtx:             cancelCtx,
-			afterToolCallsHook:    ap.afterToolCallsHook,
+			runtimeReturnDirectly:    ap.returnDirectly,
+			generator:                ap.generator,
+			cancelCtx:                cancelCtx,
+			failoverLastSuccessModel: agenticModel,
+			afterToolCallsHook:       ap.afterToolCallsHook,
 		})
 
 		// Pre-execution cancel check

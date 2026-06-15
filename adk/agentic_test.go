@@ -1681,3 +1681,65 @@ func TestAgenticFailoverStream_MidStreamError(t *testing.T) {
 	assert.Equal(t, int32(1), atomic.LoadInt32(&m2Calls))
 	assert.NotNil(t, capturedLastOutput, "failoverCtx.LastOutputMessage should contain partial stream from m1")
 }
+
+// TestAgenticFailoverGenerate_WithTools verifies that ModelFailoverConfig is
+// honored on the ReAct (with-tools) path for *schema.AgenticMessage. This
+// guards against the regression where buildAgenticReActRunFunc dropped the
+// failover config, leaving ModelFailoverConfig as a no-op for typed agents
+// that have any tools configured.
+func TestAgenticFailoverGenerate_WithTools(t *testing.T) {
+	ctx := context.Background()
+
+	m1Err := errors.New("m1 generate failed")
+	var m1Calls, m2Calls, getFailoverCalls int32
+
+	m1 := &mockAgenticModel{
+		generateFn: func(_ context.Context, _ []*schema.AgenticMessage, _ ...model.Option) (*schema.AgenticMessage, error) {
+			atomic.AddInt32(&m1Calls, 1)
+			return nil, m1Err
+		},
+	}
+	m2 := &mockAgenticModel{
+		generateFn: func(_ context.Context, _ []*schema.AgenticMessage, _ ...model.Option) (*schema.AgenticMessage, error) {
+			atomic.AddInt32(&m2Calls, 1)
+			return agenticMsg("failover ok with tools"), nil
+		},
+	}
+
+	dummyTool := newSlowTool("dummy_tool", 0, "ok")
+
+	agent, err := NewTypedChatModelAgent(ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
+		Name:        "failover-react-agent",
+		Description: "test failover on ReAct path",
+		Model:       m1,
+		ToolsConfig: ToolsConfig{
+			ToolsNodeConfig: compose.ToolsNodeConfig{
+				Tools: []tool.BaseTool{dummyTool},
+			},
+		},
+		ModelFailoverConfig: &ModelFailoverConfig[*schema.AgenticMessage]{
+			MaxRetries: 1,
+			ShouldFailover: func(_ context.Context, _ *schema.AgenticMessage, err error) bool {
+				return err != nil
+			},
+			GetFailoverModel: func(_ context.Context, failoverCtx *FailoverContext[*schema.AgenticMessage]) (model.BaseModel[*schema.AgenticMessage], []*schema.AgenticMessage, error) {
+				atomic.AddInt32(&getFailoverCalls, 1)
+				assert.Equal(t, uint(1), failoverCtx.FailoverAttempt)
+				assert.ErrorIs(t, failoverCtx.LastErr, m1Err)
+				return m2, nil, nil
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	runner := NewTypedRunner(TypedRunnerConfig[*schema.AgenticMessage]{Agent: agent})
+	iter := runner.Run(ctx, []*schema.AgenticMessage{schema.UserAgenticMessage("hello")})
+
+	msg := drainTypedAgenticEvents(t, iter)
+	require.NotNil(t, msg)
+	assert.Equal(t, "failover ok with tools", agenticTextContent(msg))
+	assert.Equal(t, int32(1), atomic.LoadInt32(&m1Calls))
+	assert.Equal(t, int32(1), atomic.LoadInt32(&m2Calls))
+	assert.Equal(t, int32(1), atomic.LoadInt32(&getFailoverCalls),
+		"GetFailoverModel must be invoked on the ReAct path; if zero, the failover config was dropped by buildAgenticReActRunFunc")
+}
