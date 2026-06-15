@@ -1436,11 +1436,12 @@ func (a *TypedChatModelAgent[M]) buildAgenticReActRunFunc(_ context.Context, bc 
 		model:       agenticModel,
 		toolsConfig: &bc.toolsNodeConf,
 		modelWrapperConf: &typedModelWrapperConfig[*schema.AgenticMessage]{
-			handlers:      agenticHandlers,
-			middlewares:   a.middlewares,
-			retryConfig:   any(a.modelRetryConfig).(*TypedModelRetryConfig[*schema.AgenticMessage]),
-			timeoutConfig: a.modelTimeoutConfig,
-			toolInfos:     bc.toolInfos,
+			handlers:       agenticHandlers,
+			middlewares:    a.middlewares,
+			retryConfig:    any(a.modelRetryConfig).(*TypedModelRetryConfig[*schema.AgenticMessage]),
+			failoverConfig: any(a.modelFailoverConfig).(*ModelFailoverConfig[*schema.AgenticMessage]),
+			timeoutConfig:  a.modelTimeoutConfig,
+			toolInfos:      bc.toolInfos,
 		},
 		toolsReturnDirectly: bc.returnDirectly,
 		agentName:           a.name,
@@ -1516,6 +1517,7 @@ func (a *TypedChatModelAgent[M]) buildAgenticReActRunFunc(_ context.Context, bc 
 
 		ctx, execCtx := configureTypedChatModelAgentExecCtx(ctx, ap.generator, cancelCtx, ap.sessionEvents, ap.timelineEvents, ap.internalTimelineEvents)
 		execCtx.runtimeReturnDirectly = ap.returnDirectly
+		execCtx.failoverLastSuccessModel = agenticModel
 		execCtx.afterToolCallsHook = ap.afterToolCallsHook
 
 		// Pre-execution cancel check
