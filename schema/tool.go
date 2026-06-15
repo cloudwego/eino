@@ -187,6 +187,13 @@ func (t *ToolInfo) UnmarshalJSON(data []byte) error {
 			params:     tmp.Params,
 			jsonschema: tmp.JSONSchema,
 		}
+		// An empty-but-non-nil params map is dropped by `omitempty` during
+		// marshaling. When jsonschema is also absent, the params form was the
+		// chosen representation, so restore the empty map to preserve the
+		// roundtrip invariant.
+		if t.ParamsOneOf.params == nil && t.ParamsOneOf.jsonschema == nil {
+			t.ParamsOneOf.params = map[string]*ParameterInfo{}
+		}
 	}
 	return nil
 }
