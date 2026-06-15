@@ -434,7 +434,7 @@ type typedFilesystemMiddleware[M adk.MessageType] struct {
 	additionalTools       []tool.BaseTool
 }
 
-func (m *typedFilesystemMiddleware[M]) BeforeAgent(ctx context.Context, runCtx *adk.ChatModelAgentContext) (context.Context, *adk.ChatModelAgentContext, error) {
+func (m *typedFilesystemMiddleware[M]) BeforeAgent(ctx context.Context, runCtx *adk.ChatModelAgentContext[M]) (context.Context, *adk.ChatModelAgentContext[M], error) {
 	if runCtx == nil {
 		return ctx, runCtx, nil
 	}

@@ -63,7 +63,7 @@ type typedMiddleware[M adk.MessageType] struct {
 	baseDir string
 }
 
-func (m *typedMiddleware[M]) BeforeAgent(ctx context.Context, runCtx *adk.ChatModelAgentContext) (context.Context, *adk.ChatModelAgentContext, error) {
+func (m *typedMiddleware[M]) BeforeAgent(ctx context.Context, runCtx *adk.ChatModelAgentContext[M]) (context.Context, *adk.ChatModelAgentContext[M], error) {
 	if runCtx == nil {
 		return ctx, runCtx, nil
 	}
