@@ -883,9 +883,12 @@ type execContext struct {
 	toolUpdated  bool // whether needs to pass a compose.WithToolList option to ToolsNode due to tool list change
 }
 
-func (a *TypedChatModelAgent[M]) applyBeforeAgent(ctx context.Context, ec *execContext) (context.Context, *execContext, error) {
-	runCtx := &ChatModelAgentContext{
+func (a *TypedChatModelAgent[M]) applyBeforeAgent(ctx context.Context, ec *execContext, agentInput *TypedAgentInput[M]) (
+	context.Context, *execContext, *TypedAgentInput[M], error) {
+
+	runCtx := &ChatModelAgentContext[M]{
 		Instruction:    ec.instruction,
+		AgentInput:     agentInput,
 		Tools:          cloneSlice(ec.unwrappedTools),
 		ReturnDirectly: copyMap(ec.returnDirectly),
 	}
@@ -894,7 +897,7 @@ func (a *TypedChatModelAgent[M]) applyBeforeAgent(ctx context.Context, ec *execC
 	for i, handler := range a.handlers {
 		ctx, runCtx, err = handler.BeforeAgent(ctx, runCtx)
 		if err != nil {
-			return ctx, nil, fmt.Errorf("handler[%d] (%T) BeforeAgent failed: %w", i, handler, err)
+			return ctx, nil, nil, fmt.Errorf("handler[%d] (%T) BeforeAgent failed: %w", i, handler, err)
 		}
 	}
 
@@ -914,12 +917,12 @@ func (a *TypedChatModelAgent[M]) applyBeforeAgent(ctx context.Context, ec *execC
 
 	toolInfos, err := genToolInfos(ctx, &runtimeEC.toolsNodeConf)
 	if err != nil {
-		return ctx, nil, err
+		return ctx, nil, nil, err
 	}
 
 	runtimeEC.toolInfos = toolInfos
 
-	return ctx, runtimeEC, nil
+	return ctx, runtimeEC, runCtx.AgentInput, nil
 }
 
 func (a *TypedChatModelAgent[M]) applyAfterAgent(ctx context.Context) (context.Context, error) {
@@ -1583,12 +1586,12 @@ func (a *TypedChatModelAgent[M]) buildRunFunc(ctx context.Context) typedRunFunc[
 	return a.run
 }
 
-func (a *TypedChatModelAgent[M]) getRunFunc(ctx context.Context) (context.Context, typedRunFunc[M], *execContext, error) {
+func (a *TypedChatModelAgent[M]) getRunFunc(ctx context.Context, agentInput *TypedAgentInput[M]) (context.Context, typedRunFunc[M], *execContext, *TypedAgentInput[M], error) {
 	defaultRun := a.buildRunFunc(ctx)
 	bc := a.exeCtx
 
 	if bc == nil {
-		return ctx, defaultRun, bc, nil
+		return ctx, defaultRun, bc, agentInput, nil
 	}
 
 	if len(a.handlers) == 0 {
@@ -1598,32 +1601,32 @@ func (a *TypedChatModelAgent[M]) getRunFunc(ctx context.Context) (context.Contex
 			returnDirectly: bc.returnDirectly,
 			toolInfos:      bc.toolInfos,
 		}
-		return ctx, defaultRun, runtimeBC, nil
+		return ctx, defaultRun, runtimeBC, agentInput, nil
 	}
 
-	ctx, runtimeBC, err := a.applyBeforeAgent(ctx, bc)
+	ctx, runtimeBC, agentInput, err := a.applyBeforeAgent(ctx, bc, agentInput)
 	if err != nil {
-		return ctx, nil, nil, err
+		return ctx, nil, nil, nil, err
 	}
 
 	if !runtimeBC.rebuildGraph {
-		return ctx, defaultRun, runtimeBC, nil
+		return ctx, defaultRun, runtimeBC, agentInput, nil
 	}
 
 	var tempRun typedRunFunc[M]
 	if len(runtimeBC.toolsNodeConf.Tools) == 0 {
 		tempRun, err = a.buildNoToolsRunFunc(ctx)
 		if err != nil {
-			return ctx, nil, nil, err
+			return ctx, nil, nil, nil, err
 		}
 	} else {
 		tempRun, err = a.buildReActRunFunc(ctx, runtimeBC)
 		if err != nil {
-			return ctx, nil, nil, err
+			return ctx, nil, nil, nil, err
 		}
 	}
 
-	return ctx, tempRun, runtimeBC, nil
+	return ctx, tempRun, runtimeBC, agentInput, nil
 }
 
 func (a *TypedChatModelAgent[M]) Run(ctx context.Context, input *TypedAgentInput[M], opts ...AgentRunOption) *AsyncIterator[*TypedAgentEvent[M]] {
@@ -1632,7 +1635,7 @@ func (a *TypedChatModelAgent[M]) Run(ctx context.Context, input *TypedAgentInput
 	o := getCommonOptions(nil, opts...)
 	cancelCtx, cancelCtxOwned := resolveRunCancelContext(ctx, o)
 
-	ctx, run, bc, err := a.getRunFunc(ctx)
+	ctx, run, bc, input, err := a.getRunFunc(ctx, input)
 	if err != nil {
 		go func() {
 			if cancelCtxOwned && cancelCtx != nil {
@@ -1727,7 +1730,7 @@ func (a *TypedChatModelAgent[M]) Resume(ctx context.Context, info *ResumeInfo, o
 	o := getCommonOptions(nil, opts...)
 	cancelCtx, cancelCtxOwned := resolveRunCancelContext(ctx, o)
 
-	ctx, run, bc, err := a.getRunFunc(ctx)
+	ctx, run, bc, _, err := a.getRunFunc(ctx, nil)
 	if err != nil {
 		go func() {
 			if cancelCtxOwned && cancelCtx != nil {
