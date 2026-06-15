@@ -68,7 +68,7 @@ type Config[M adk.MessageType] struct {
 	// OnError is called when automemory encounters an error. Errors are best-effort by default:
 	// the middleware will skip memory injection and allow the agent to continue.
 	// Optional.
-	OnError func(ctx context.Context, stage string, err error)
+	OnError func(ctx context.Context, stage ErrorStage, err error)
 }
 
 type ReadMode string
@@ -269,14 +269,20 @@ func (m *middleware[M]) BeforeAgent(ctx context.Context, runCtx *adk.ChatModelAg
 		}
 	}
 
-	// If automemory was already injected into the instruction or message list,
-	// skip all memory-loading work for this run and let the agent continue.
-	if hasInstructionInjected(nRunCtx.Instruction) || (nRunCtx.AgentInput != nil && alreadyInjected(nRunCtx.AgentInput.Messages)) {
-		return ctx, &nRunCtx, nil
+	// System-prompt injection and transcript-memory injection are idempotent,
+	// but they are independent concerns: instruction should be rebuilt each run
+	// unless this exact instruction already carries the marker, while transcript
+	// memory messages should only be skipped when a real automemory reminder is
+	// already present in the message list.
+	// 1) System prompt: inject auto memory instruction + MEMORY.md content (best-effort).
+	if !hasInstructionInjected(nRunCtx.Instruction) {
+		nRunCtx.Instruction = m.injectIndexIntoInstruction(ctx, nRunCtx.Instruction)
 	}
 
-	// 1) System prompt: inject auto memory instruction + MEMORY.md content (best-effort).
-	nRunCtx.Instruction = m.injectIndexIntoInstruction(ctx, nRunCtx.Instruction)
+	// Skip topic memories injection if they already exist.
+	if nRunCtx.AgentInput == nil || alreadyInjected(nRunCtx.AgentInput.Messages) {
+		return ctx, &nRunCtx, nil
+	}
 
 	// 2) Topic memories: sync mode injects before the user's query.
 	if m.cfg.Read.Mode == ReadModeSync && m.cfg.Read.TopicSelection != nil && m.topicSelectionModel != nil {
@@ -287,11 +293,18 @@ func (m *middleware[M]) BeforeAgent(ctx context.Context, runCtx *adk.ChatModelAg
 			msgs := append([]M{}, nRunCtx.AgentInput.Messages...)
 			msgs = append(msgs, memMsg)
 			nRunCtx.AgentInput = &adk.TypedAgentInput[M]{Messages: msgs, EnableStreaming: nRunCtx.AgentInput.EnableStreaming}
+
+			if sendEventErr := adk.TypedSendEvent(ctx, &adk.TypedAgentEvent[M]{SessionEvent: &adk.SessionEvent[M]{
+				Kind:    adk.SessionEventMessage,
+				Message: memMsg,
+			}}); sendEventErr != nil {
+				m.onErr(ctx, OnErrorStageSendSessionEvent, err)
+			}
 		}
 	}
 
 	// 3) Topic memories: async mode starts selection here (cannot use RunLocalValue in BeforeAgent).
-	if m.cfg.Read.Mode == ReadModeAsync && m.cfg.Read.TopicSelection != nil && m.topicSelectionModel != nil && nRunCtx.AgentInput != nil {
+	if m.cfg.Read.Mode == ReadModeAsync && m.cfg.Read.TopicSelection != nil && m.topicSelectionModel != nil {
 		if existing, _ := ctx.Value(ctxKeySelectionFuture{}).(*selectionFuture); existing == nil {
 			fut := &selectionFuture{done: make(chan struct{})}
 			ctx = context.WithValue(ctx, ctxKeySelectionFuture{}, fut)
@@ -359,8 +372,16 @@ func (m *middleware[M]) BeforeModelRewriteState(ctx context.Context, state *adk.
 
 	var msgs []M
 	if strings.TrimSpace(content) != "" {
+		memMsg := newMemoryMessage[M](content)
 		msgs = append(msgs, state.Messages...)
-		msgs = append(msgs, newMemoryMessage[M](content))
+		msgs = append(msgs, memMsg)
+
+		if sendEventErr := adk.TypedSendEvent(ctx, &adk.TypedAgentEvent[M]{SessionEvent: &adk.SessionEvent[M]{
+			Kind:    adk.SessionEventMessage,
+			Message: memMsg,
+		}}); sendEventErr != nil {
+			m.onErr(ctx, OnErrorStageSendSessionEvent, err)
+		}
 	} else {
 		msgs = state.Messages
 	}
@@ -566,7 +587,7 @@ func isFileNotFoundContent(content string) bool {
 	return strings.HasPrefix(strings.TrimSpace(content), "File not found: ")
 }
 
-func (m *middleware[M]) onErr(ctx context.Context, stage string, err error) {
+func (m *middleware[M]) onErr(ctx context.Context, stage ErrorStage, err error) {
 	if err == nil {
 		return
 	}
@@ -1158,12 +1179,26 @@ func isMemoryMessage[M adk.MessageType](m M) bool {
 		return false
 	}
 	if extra := getMsgExtra(m); extra != nil {
-		if v, ok := extra[memoryExtraKey]; ok && v != nil {
-			return true
+		if v, ok := extra[memoryExtraKey]; ok {
+			if isAutomemoryMemoryExtra(v) {
+				return true
+			}
 		}
 	}
 	// Backward compatible marker (older versions).
 	return strings.Contains(userMessageTextContent(m), "<!-- automemory -->")
+}
+
+func isAutomemoryMemoryExtra(v any) bool {
+	switch meta := v.(type) {
+	case *memoryExtra:
+		return meta != nil && meta.Type == "memory"
+	case map[string]any:
+		typ, _ := meta["type"].(string)
+		return typ == "memory"
+	default:
+		return false
+	}
 }
 
 func hasInstructionInjected(instruction string) bool {
