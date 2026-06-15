@@ -37,19 +37,23 @@ const (
 	topicSelectionToolName = "select_memories"
 )
 
+// ErrorStage error stage during auto memory processing
+type ErrorStage string
+
 // OnError stage constants. These values are stable identifiers used to report
 // best-effort failures through Config.OnError.
 const (
-	OnErrorStageTopicSelectionSync    = "topic_selection_sync"
-	OnErrorStageTopicSelectionAsync   = "topic_selection_async"
-	OnErrorStageRenderInstruction     = "render_instruction"
-	OnErrorStageResolveSessionID      = "resolve_session_id"
-	OnErrorStageMemoryWriteSync       = "memory_write_sync"
-	OnErrorStageSnapshotMarshal       = "snapshot_marshal"
-	OnErrorStageAcquireExtractionLock = "acquire_extraction_lock"
-	OnErrorStageStashPendingSnapshot  = "stash_pending_snapshot"
-	OnErrorStageReleaseExtractionLock = "release_extraction_lock"
-	OnErrorStageDecodePendingSnapshot = "decode_pending_snapshot"
-	OnErrorStageMemoryWriteAsync      = "memory_write_async"
-	OnErrorStageLoadPendingSnapshot   = "load_pending_snapshot"
+	OnErrorStageTopicSelectionSync    ErrorStage = "topic_selection_sync"
+	OnErrorStageTopicSelectionAsync   ErrorStage = "topic_selection_async"
+	OnErrorStageRenderInstruction     ErrorStage = "render_instruction"
+	OnErrorStageResolveSessionID      ErrorStage = "resolve_session_id"
+	OnErrorStageMemoryWriteSync       ErrorStage = "memory_write_sync"
+	OnErrorStageSnapshotMarshal       ErrorStage = "snapshot_marshal"
+	OnErrorStageAcquireExtractionLock ErrorStage = "acquire_extraction_lock"
+	OnErrorStageStashPendingSnapshot  ErrorStage = "stash_pending_snapshot"
+	OnErrorStageReleaseExtractionLock ErrorStage = "release_extraction_lock"
+	OnErrorStageDecodePendingSnapshot ErrorStage = "decode_pending_snapshot"
+	OnErrorStageMemoryWriteAsync      ErrorStage = "memory_write_async"
+	OnErrorStageLoadPendingSnapshot   ErrorStage = "load_pending_snapshot"
+	OnErrorStageSendSessionEvent      ErrorStage = "send_session_event"
 )
