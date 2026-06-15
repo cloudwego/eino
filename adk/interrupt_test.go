@@ -78,7 +78,7 @@ func TestAttack_ResumeBridgeStoreRequiresFreshWrite(t *testing.T) {
 	assert.Equal(t, []byte("saved"), saved)
 }
 
-func (h *interruptTestToolsHandler) BeforeAgent(ctx context.Context, runCtx *ChatModelAgentContext) (context.Context, *ChatModelAgentContext, error) {
+func (h *interruptTestToolsHandler) BeforeAgent(ctx context.Context, runCtx *ChatModelAgentContext[*schema.Message]) (context.Context, *ChatModelAgentContext[*schema.Message], error) {
 	runCtx.Tools = append(runCtx.Tools, h.tools...)
 	return ctx, runCtx, nil
 }
