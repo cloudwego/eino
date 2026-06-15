@@ -290,16 +290,11 @@ func (m *middleware[M]) BeforeAgent(ctx context.Context, runCtx *adk.ChatModelAg
 		if err != nil {
 			m.onErr(ctx, OnErrorStageTopicSelectionSync, err)
 		} else if memMsg != nil && nRunCtx.AgentInput != nil && len(nRunCtx.AgentInput.Messages) > 0 {
+			m.sendTopicMemoryEvent(ctx, nRunCtx.AgentInput.Messages, memMsg)
 			msgs := append([]M{}, nRunCtx.AgentInput.Messages...)
 			msgs = append(msgs, memMsg)
 			nRunCtx.AgentInput = &adk.TypedAgentInput[M]{Messages: msgs, EnableStreaming: nRunCtx.AgentInput.EnableStreaming}
 
-			if sendEventErr := adk.TypedSendEvent(ctx, &adk.TypedAgentEvent[M]{SessionEvent: &adk.SessionEvent[M]{
-				Kind:    adk.SessionEventMessage,
-				Message: memMsg,
-			}}); sendEventErr != nil {
-				m.onErr(ctx, OnErrorStageSendSessionEvent, err)
-			}
 		}
 	}
 
@@ -373,15 +368,9 @@ func (m *middleware[M]) BeforeModelRewriteState(ctx context.Context, state *adk.
 	var msgs []M
 	if strings.TrimSpace(content) != "" {
 		memMsg := newMemoryMessage[M](content)
+		m.sendTopicMemoryEvent(ctx, state.Messages, memMsg)
 		msgs = append(msgs, state.Messages...)
 		msgs = append(msgs, memMsg)
-
-		if sendEventErr := adk.TypedSendEvent(ctx, &adk.TypedAgentEvent[M]{SessionEvent: &adk.SessionEvent[M]{
-			Kind:    adk.SessionEventMessage,
-			Message: memMsg,
-		}}); sendEventErr != nil {
-			m.onErr(ctx, OnErrorStageSendSessionEvent, err)
-		}
 	} else {
 		msgs = state.Messages
 	}
@@ -1697,4 +1686,20 @@ func (m *modelWithTools[M]) Stream(ctx context.Context, input []M, opts ...model
 	copy(newOpts, opts)
 	newOpts[len(opts)] = model.WithTools(m.tools)
 	return m.base.Stream(ctx, input, newOpts...)
+}
+
+func (m *middleware[M]) sendTopicMemoryEvent(ctx context.Context, msgs []M, memMsg M) {
+	var beforeID string
+	if len(msgs) > 0 && !isNilMessage(msgs[len(msgs)-1]) {
+		beforeID = adk.GetMessageID(msgs[len(msgs)-1])
+	}
+	if sendEventErr := adk.TypedSendEvent(ctx, &adk.TypedAgentEvent[M]{SessionEvent: &adk.SessionEvent[M]{
+		Kind: adk.SessionEventMessageInserted,
+		MessageInserted: &adk.MessageInsertedEvent[M]{
+			Message:         memMsg,
+			BeforeMessageID: beforeID,
+		},
+	}}); sendEventErr != nil {
+		m.onErr(ctx, OnErrorStageSendSessionEvent, sendEventErr)
+	}
 }
