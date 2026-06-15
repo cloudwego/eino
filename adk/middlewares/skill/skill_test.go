@@ -456,7 +456,7 @@ func TestBeforeAgent(t *testing.T) {
 	handler, err := NewMiddleware(ctx, &Config{Backend: backend})
 	require.NoError(t, err)
 
-	runCtx := &adk.ChatModelAgentContext{
+	runCtx := &adk.ChatModelAgentContext[*schema.Message]{
 		Instruction: "base instruction",
 		Tools:       []tool.BaseTool{},
 	}

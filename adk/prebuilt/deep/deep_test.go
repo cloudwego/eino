@@ -192,7 +192,7 @@ func TestDeepAgentFilesystemExecuteDefaults(t *testing.T) {
 			assert.NoError(t, err)
 			assert.Len(t, handlers, 1)
 
-			_, runCtx, err := handlers[0].BeforeAgent(ctx, &adk.ChatModelAgentContext{})
+			_, runCtx, err := handlers[0].BeforeAgent(ctx, &adk.ChatModelAgentContext[*schema.Message]{})
 			assert.NoError(t, err)
 			assert.NotNil(t, runCtx)
 			assert.Len(t, runCtx.Tools, tt.wantToolLen)
@@ -244,7 +244,7 @@ func TestDeepAgentManualFilesystemMiddlewarePath(t *testing.T) {
 	})
 	assert.NoError(t, err)
 
-	_, runCtx, err := fsMW.BeforeAgent(ctx, &adk.ChatModelAgentContext{})
+	_, runCtx, err := fsMW.BeforeAgent(ctx, &adk.ChatModelAgentContext[*schema.Message]{})
 	assert.NoError(t, err)
 	assert.Len(t, runCtx.Tools, 1)
 	info, err := runCtx.Tools[0].Info(ctx)
