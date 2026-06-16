@@ -68,7 +68,7 @@ func (e *typedChatModelAgentExecCtx[M]) send(ctx context.Context, event *TypedAg
 		return
 	}
 	// Allocate EventID at the first emission boundary so live (user-land) and
-	// persisted (SessionService) copies of the same logical event share identity.
+	// persisted (SessionEventStore) copies of the same logical event share identity.
 	// User-supplied non-empty IDs (e.g. replay scenarios) are preserved.
 	//
 	// SessionEvent[M] drafts route ID allocation through the runner-installed

@@ -152,24 +152,25 @@ func TestCommonOptionsAndFilteringContracts(t *testing.T) {
 	assert.Len(t, filterOptions("parent", []AgentRunOption{nonCallback.DesignateAgent("parent"), otherCallback, {}}), 2)
 }
 
-func TestLocalSessionServiceHandleContracts(t *testing.T) {
+func TestLocalSessionStoreHandleContracts(t *testing.T) {
 	ctx := context.Background()
-	assert.Nil(t, NewLocalSessionService[*schema.Message](nil))
+	var nilStore SessionEventStore[*schema.Message]
+	_, err := openLocalSession[*schema.Message](ctx, nilStore, &openSessionRequest{sessionID: "sid"})
+	require.ErrorIs(t, err, ErrSessionBusy)
 
 	store := &serviceContractStore{}
-	service := NewLocalSessionService[*schema.Message](store)
-	require.NotNil(t, service)
+	require.NotNil(t, store)
 
-	_, err := service.openSession(ctx, nil)
+	_, err = openLocalSession[*schema.Message](ctx, store, nil)
 	require.ErrorIs(t, err, ErrSessionBusy)
-	_, err = service.openSession(ctx, &openSessionRequest{})
+	_, err = openLocalSession[*schema.Message](ctx, store, &openSessionRequest{})
 	require.ErrorIs(t, err, ErrSessionBusy)
 
-	opened, err := service.openSession(ctx, &openSessionRequest{sessionID: "sid"})
+	opened, err := openLocalSession[*schema.Message](ctx, store, &openSessionRequest{sessionID: "sid"})
 	require.NoError(t, err)
 	require.NotNil(t, opened)
 
-	_, err = service.openSession(ctx, &openSessionRequest{sessionID: "sid"})
+	_, err = openLocalSession[*schema.Message](ctx, store, &openSessionRequest{sessionID: "sid"})
 	require.ErrorIs(t, err, ErrSessionBusy)
 
 	res, err := opened.handle.loadEvents(ctx, nil)
@@ -196,12 +197,12 @@ func TestLocalSessionServiceHandleContracts(t *testing.T) {
 	err = opened.handle.appendEvents(ctx, nil)
 	require.ErrorIs(t, err, ErrSessionBusy)
 
-	reopened, err := service.openSession(ctx, &openSessionRequest{sessionID: "sid"})
+	reopened, err := openLocalSession[*schema.Message](ctx, store, &openSessionRequest{sessionID: "sid"})
 	require.NoError(t, err)
 	require.NoError(t, reopened.handle.close(ctx))
 
 	store.loadErr = errors.New("load failed")
-	opened, err = service.openSession(ctx, &openSessionRequest{sessionID: "sid-load-err"})
+	opened, err = openLocalSession[*schema.Message](ctx, store, &openSessionRequest{sessionID: "sid-load-err"})
 	require.NoError(t, err)
 	_, err = opened.handle.loadEvents(ctx, &LoadSessionEventsRequest{})
 	require.ErrorContains(t, err, "load failed")
@@ -209,7 +210,7 @@ func TestLocalSessionServiceHandleContracts(t *testing.T) {
 
 	store.loadErr = nil
 	store.appendErr = errors.New("append failed")
-	opened, err = service.openSession(ctx, &openSessionRequest{sessionID: "sid-append-err"})
+	opened, err = openLocalSession[*schema.Message](ctx, store, &openSessionRequest{sessionID: "sid-append-err"})
 	require.NoError(t, err)
 	err = opened.handle.appendEvents(ctx, &AppendSessionEventsRequest[*schema.Message]{
 		Events: []*SessionEvent[*schema.Message]{validTestPayload()},

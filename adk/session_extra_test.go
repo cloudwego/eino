@@ -133,7 +133,7 @@ func TestStreamPersistence_CopyAndConcat(t *testing.T) {
 		Agent:           agent,
 		EnableStreaming: true,
 		SessionID:       sid,
-		SessionService:  store,
+		SessionStore:    store,
 	})
 
 	// Drain live events and verify the live stream still produces the concatenated content.
@@ -187,7 +187,7 @@ func TestStreamPersistence_StreamingLiveBeforeMaterializedBoundary(t *testing.T)
 		Agent:           agent,
 		EnableStreaming: true,
 		SessionID:       sid,
-		SessionService:  store,
+		SessionStore:    store,
 	})
 
 	iter := runner.Query(ctx, "q")
@@ -244,7 +244,7 @@ func TestStreamPersistence_PendingAnnotationFlushesBeforeMaterializedBoundary(t 
 		Agent:           agent,
 		EnableStreaming: true,
 		SessionID:       "stream-annotation-boundary",
-		SessionService:  store,
+		SessionStore:    store,
 	})
 
 	drainSessionEvents(t, runner.Query(ctx, "q"))
@@ -280,7 +280,7 @@ func TestStreamPersistence_ToolResultStreamingLiveBeforeMaterializedBoundary(t *
 		Agent:           agent,
 		EnableStreaming: true,
 		SessionID:       sid,
-		SessionService:  store,
+		SessionStore:    store,
 	})
 
 	iter := runner.Query(ctx, "q")
@@ -339,7 +339,7 @@ func TestStreamPersistence_AgenticToolResultChunksConcat(t *testing.T) {
 		Agent:           agent,
 		EnableStreaming: true,
 		SessionID:       sid,
-		SessionService:  store,
+		SessionStore:    store,
 	})
 
 	iter := runner.Run(ctx, []*schema.AgenticMessage{schema.UserAgenticMessage("q")})
@@ -362,7 +362,7 @@ func TestStreamPersistence_AgenticToolResultChunksConcat(t *testing.T) {
 	}
 
 	var stored *SessionEvent[*schema.AgenticMessage]
-	res, err := store.LoadEvents(ctx, sid, nil)
+	res, err := store.LoadEventsForSession(ctx, sid, nil)
 	require.NoError(t, err)
 	for _, se := range res.Events {
 		if se.Kind == SessionEventMessage && se.Message != nil &&
@@ -409,7 +409,7 @@ func TestStreamPersistence_AgenticToolResultChunksWithStreamingMeta(t *testing.T
 		Agent:           agent,
 		EnableStreaming: true,
 		SessionID:       sid,
-		SessionService:  store,
+		SessionStore:    store,
 	})
 
 	iter := runner.Run(ctx, []*schema.AgenticMessage{schema.UserAgenticMessage("q")})
@@ -432,7 +432,7 @@ func TestStreamPersistence_AgenticToolResultChunksWithStreamingMeta(t *testing.T
 	}
 
 	var stored *schema.AgenticMessage
-	res, err := store.LoadEvents(ctx, sid, nil)
+	res, err := store.LoadEventsForSession(ctx, sid, nil)
 	require.NoError(t, err)
 	for _, se := range res.Events {
 		if se.Kind == SessionEventMessage && se.Message != nil &&
@@ -500,7 +500,7 @@ func TestStreamPersistence_GetMessageError_NotEnqueued(t *testing.T) {
 		Agent:           agent,
 		EnableStreaming: true,
 		SessionID:       sid,
-		SessionService:  store,
+		SessionStore:    store,
 	})
 
 	iter := runner.Query(ctx, "trigger")
@@ -554,7 +554,7 @@ func TestStreamPersistence_GetMessageErrorSurfacesAfterLiveStreaming(t *testing.
 		Agent:           agent,
 		EnableStreaming: true,
 		SessionID:       sid,
-		SessionService:  store,
+		SessionStore:    store,
 	})
 
 	iter := runner.Query(ctx, "trigger")
@@ -653,9 +653,9 @@ func TestRunnerInputEvents_MixedRoles(t *testing.T) {
 		},
 	}
 	runner := NewRunner(ctx, RunnerConfig{
-		Agent:          agent,
-		SessionID:      sid,
-		SessionService: store,
+		Agent:        agent,
+		SessionID:    sid,
+		SessionStore: store,
 	})
 
 	systemMsg := schema.SystemMessage("system instruction")
@@ -695,9 +695,9 @@ func TestTurnEndOnly_PersistedAsSessionEvent(t *testing.T) {
 	}
 
 	runner := NewRunner(ctx, RunnerConfig{
-		Agent:          agent,
-		SessionID:      sid,
-		SessionService: store,
+		Agent:        agent,
+		SessionID:    sid,
+		SessionStore: store,
 	})
 	drainSessionEvents(t, runner.Query(ctx, "input"))
 
@@ -748,13 +748,13 @@ func TestTailReplay_PartialTurnWithoutTurnEnd(t *testing.T) {
 	EnsureMessageID(r1)
 	for _, m := range []*schema.Message{a1, r1} {
 		se := withTestEventID(&SessionEvent[*schema.Message]{Message: m})
-		require.NoError(t, store.AppendEvents(ctx, sid, []*SessionEvent[*schema.Message]{se}))
+		require.NoError(t, store.AppendEventsForSession(ctx, sid, []*SessionEvent[*schema.Message]{se}))
 	}
 	// Persist TurnEnd as a SessionEvent.
 	turnEndSE := withTestEventID(&SessionEvent[*schema.Message]{TurnEnd: &TurnEndState[*schema.Message]{
 		Messages: []*schema.Message{a1, r1},
 	}})
-	require.NoError(t, store.AppendEvents(ctx, sid, []*SessionEvent[*schema.Message]{turnEndSE}))
+	require.NoError(t, store.AppendEventsForSession(ctx, sid, []*SessionEvent[*schema.Message]{turnEndSE}))
 
 	// Phase 2: simulate a partial second turn where events were appended but
 	// no TurnEnd was persisted (interrupted).
@@ -764,7 +764,7 @@ func TestTailReplay_PartialTurnWithoutTurnEnd(t *testing.T) {
 	EnsureMessageID(r2)
 	for _, m := range []*schema.Message{a2, r2} {
 		se := withTestEventID(&SessionEvent[*schema.Message]{Message: m})
-		require.NoError(t, store.AppendEvents(ctx, sid, []*SessionEvent[*schema.Message]{se}))
+		require.NoError(t, store.AppendEventsForSession(ctx, sid, []*SessionEvent[*schema.Message]{se}))
 	}
 
 	// Boot: prepareRunnerSessionRun reconstructs durable context through the log
@@ -789,13 +789,13 @@ func TestTailReplay_NoTailEvents(t *testing.T) {
 	q := schema.UserMessage("Q")
 	EnsureMessageID(q)
 	se := withTestEventID(&SessionEvent[*schema.Message]{Message: q})
-	require.NoError(t, store.AppendEvents(ctx, sid, []*SessionEvent[*schema.Message]{se}))
+	require.NoError(t, store.AppendEventsForSession(ctx, sid, []*SessionEvent[*schema.Message]{se}))
 
 	// Persist TurnEnd as a SessionEvent.
 	turnEndSE := withTestEventID(&SessionEvent[*schema.Message]{TurnEnd: &TurnEndState[*schema.Message]{
 		Messages: []*schema.Message{q},
 	}})
-	require.NoError(t, store.AppendEvents(ctx, sid, []*SessionEvent[*schema.Message]{turnEndSE}))
+	require.NoError(t, store.AppendEventsForSession(ctx, sid, []*SessionEvent[*schema.Message]{turnEndSE}))
 
 	state, err := prepareRunnerSessionRun[*schema.Message](ctx, nil, nil, sid, store, nil)
 	require.NoError(t, err)
@@ -816,18 +816,18 @@ func TestTailReplay_EmptySnapshotCursor(t *testing.T) {
 		m := schema.UserMessage("pre")
 		EnsureMessageID(m)
 		se := withTestEventID(&SessionEvent[*schema.Message]{Message: m})
-		require.NoError(t, store.AppendEvents(ctx, sid, []*SessionEvent[*schema.Message]{se}))
+		require.NoError(t, store.AppendEventsForSession(ctx, sid, []*SessionEvent[*schema.Message]{se}))
 	}
 	// MessagesReplaced boundary with empty slice — supersedes pre-boundary events.
 	empty := []*schema.Message{}
 	boundarySE := withTestEventID(&SessionEvent[*schema.Message]{MessagesReplaced: &empty})
-	require.NoError(t, store.AppendEvents(ctx, sid, []*SessionEvent[*schema.Message]{boundarySE}))
+	require.NoError(t, store.AppendEventsForSession(ctx, sid, []*SessionEvent[*schema.Message]{boundarySE}))
 
 	// Post-boundary events.
 	postMsg := schema.UserMessage("post")
 	EnsureMessageID(postMsg)
 	se := withTestEventID(&SessionEvent[*schema.Message]{Message: postMsg})
-	require.NoError(t, store.AppendEvents(ctx, sid, []*SessionEvent[*schema.Message]{se}))
+	require.NoError(t, store.AppendEventsForSession(ctx, sid, []*SessionEvent[*schema.Message]{se}))
 
 	state, err := prepareRunnerSessionRun[*schema.Message](ctx, nil, nil, sid, store, nil)
 	require.NoError(t, err)
@@ -851,7 +851,15 @@ func newAgenticSessionHelperStore() *agenticSessionHelperStore {
 	return &agenticSessionHelperStore{eventIDIdx: make(map[string]int)}
 }
 
-func (s *agenticSessionHelperStore) AppendEvents(_ context.Context, _ string, events []*SessionEvent[*schema.AgenticMessage]) error {
+func (s *agenticSessionHelperStore) AppendEvents(ctx context.Context, req *AppendSessionEventsRequest[*schema.AgenticMessage]) error {
+	var events []*SessionEvent[*schema.AgenticMessage]
+	if req != nil {
+		events = req.Events
+	}
+	return s.AppendEventsForSession(ctx, "", events)
+}
+
+func (s *agenticSessionHelperStore) AppendEventsForSession(_ context.Context, _ string, events []*SessionEvent[*schema.AgenticMessage]) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, event := range events {
@@ -874,7 +882,11 @@ func (s *agenticSessionHelperStore) AppendEvents(_ context.Context, _ string, ev
 	return nil
 }
 
-func (s *agenticSessionHelperStore) LoadEvents(_ context.Context, _ string, opts *LoadSessionEventsRequest) (*LoadSessionEventsResult[*schema.AgenticMessage], error) {
+func (s *agenticSessionHelperStore) LoadEvents(ctx context.Context, req *LoadSessionEventsRequest) (*LoadSessionEventsResult[*schema.AgenticMessage], error) {
+	return s.LoadEventsForSession(ctx, "", req)
+}
+
+func (s *agenticSessionHelperStore) LoadEventsForSession(_ context.Context, _ string, opts *LoadSessionEventsRequest) (*LoadSessionEventsResult[*schema.AgenticMessage], error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if opts == nil {
@@ -937,14 +949,14 @@ func (h *agenticTestSessionHandle) loadEvents(ctx context.Context, req *LoadSess
 	if req == nil {
 		req = &LoadSessionEventsRequest{}
 	}
-	return h.store.LoadEvents(ctx, h.sessionID, req)
+	return h.store.LoadEventsForSession(ctx, h.sessionID, req)
 }
 
 func (h *agenticTestSessionHandle) appendEvents(ctx context.Context, req *AppendSessionEventsRequest[*schema.AgenticMessage]) error {
 	if req == nil {
 		req = &AppendSessionEventsRequest[*schema.AgenticMessage]{}
 	}
-	return h.store.AppendEvents(ctx, h.sessionID, req.Events)
+	return h.store.AppendEventsForSession(ctx, h.sessionID, req.Events)
 }
 
 func (h *agenticTestSessionHandle) close(context.Context) error { return nil }
@@ -968,20 +980,20 @@ func TestPartialInterrupted_ThenNewRun(t *testing.T) {
 	EnsureMessageID(r1)
 	for _, m := range []*schema.Message{q1, r1} {
 		se := withTestEventID(&SessionEvent[*schema.Message]{Message: m})
-		require.NoError(t, store.AppendEvents(ctx, sid, []*SessionEvent[*schema.Message]{se}))
+		require.NoError(t, store.AppendEventsForSession(ctx, sid, []*SessionEvent[*schema.Message]{se}))
 	}
 	// Persist TurnEnd as a SessionEvent (marks end of completed turn).
 	turnEndSE := withTestEventID(&SessionEvent[*schema.Message]{TurnEnd: &TurnEndState[*schema.Message]{
 		Messages: []*schema.Message{q1, r1},
 	}})
-	require.NoError(t, store.AppendEvents(ctx, sid, []*SessionEvent[*schema.Message]{turnEndSE}))
+	require.NoError(t, store.AppendEventsForSession(ctx, sid, []*SessionEvent[*schema.Message]{turnEndSE}))
 
 	// Phase 2: simulate an interrupted turn — events appended, no new SaveTurnEnd.
 	q2 := schema.UserMessage("partial")
 	EnsureMessageID(q2)
 	for _, m := range []*schema.Message{q2} {
 		se := withTestEventID(&SessionEvent[*schema.Message]{Message: m})
-		require.NoError(t, store.AppendEvents(ctx, sid, []*SessionEvent[*schema.Message]{se}))
+		require.NoError(t, store.AppendEventsForSession(ctx, sid, []*SessionEvent[*schema.Message]{se}))
 	}
 
 	// Phase 3: new Run (no CheckPointStore; Runner skips pending checkpoints on fresh Run).
@@ -992,9 +1004,9 @@ func TestPartialInterrupted_ThenNewRun(t *testing.T) {
 		},
 	}
 	runner := NewRunner(ctx, RunnerConfig{
-		Agent:          captured,
-		SessionID:      sid,
-		SessionService: store,
+		Agent:        captured,
+		SessionID:    sid,
+		SessionStore: store,
 	})
 	drainSessionEvents(t, runner.Query(ctx, "second"))
 
@@ -1040,7 +1052,7 @@ func TestSessionEvent_StreamCopyConcat_ByteIdentical(t *testing.T) {
 }
 
 // TestExplicitCheckpointResume_WithSessionMode verifies that when a caller passes
-// an explicit checkpoint ID alongside a configured SessionID/SessionService[*schema.Message], the
+// an explicit checkpoint ID alongside a configured SessionID/SessionStore[*schema.Message], the
 // resume path still loads the latest TurnEndState (and runs tail replay).
 func TestExplicitCheckpointResume_WithSessionMode(t *testing.T) {
 	ctx := context.Background()
@@ -1055,10 +1067,10 @@ func TestExplicitCheckpointResume_WithSessionMode(t *testing.T) {
 	for _, m := range prior.Messages {
 		EnsureMessageID(m)
 		se := withTestEventID(&SessionEvent[*schema.Message]{Message: m})
-		require.NoError(t, store.AppendEvents(ctx, sid, []*SessionEvent[*schema.Message]{se}))
+		require.NoError(t, store.AppendEventsForSession(ctx, sid, []*SessionEvent[*schema.Message]{se}))
 	}
 	turnEndSE := withTestEventID(&SessionEvent[*schema.Message]{TurnEnd: prior})
-	require.NoError(t, store.AppendEvents(ctx, sid, []*SessionEvent[*schema.Message]{turnEndSE}))
+	require.NoError(t, store.AppendEventsForSession(ctx, sid, []*SessionEvent[*schema.Message]{turnEndSE}))
 
 	// Seed an arbitrary checkpoint ID with a runner-session-checkpoint wrapper
 	// so runnerLoadCheckPointForSession can decode it.
@@ -1092,19 +1104,19 @@ func TestResumePath_TailReplay(t *testing.T) {
 	EnsureMessageID(r1)
 	for _, m := range []*schema.Message{q1, r1} {
 		se := withTestEventID(&SessionEvent[*schema.Message]{Message: m})
-		require.NoError(t, store.AppendEvents(ctx, sid, []*SessionEvent[*schema.Message]{se}))
+		require.NoError(t, store.AppendEventsForSession(ctx, sid, []*SessionEvent[*schema.Message]{se}))
 	}
 	// Persist TurnEnd as a SessionEvent.
 	turnEndSE := withTestEventID(&SessionEvent[*schema.Message]{TurnEnd: &TurnEndState[*schema.Message]{
 		Messages: []*schema.Message{q1, r1},
 	}})
-	require.NoError(t, store.AppendEvents(ctx, sid, []*SessionEvent[*schema.Message]{turnEndSE}))
+	require.NoError(t, store.AppendEventsForSession(ctx, sid, []*SessionEvent[*schema.Message]{turnEndSE}))
 
 	// Append a tail event after the snapshot.
 	tailMsg := schema.UserMessage("post-snapshot")
 	EnsureMessageID(tailMsg)
 	se := withTestEventID(&SessionEvent[*schema.Message]{Message: tailMsg})
-	require.NoError(t, store.AppendEvents(ctx, sid, []*SessionEvent[*schema.Message]{se}))
+	require.NoError(t, store.AppendEventsForSession(ctx, sid, []*SessionEvent[*schema.Message]{se}))
 
 	// Seed a runner session checkpoint so the resume path finds something to load.
 	cpStore := newSessionHelperStore()
@@ -1178,14 +1190,14 @@ func TestRunnerPersists_MessagesReplaced(t *testing.T) {
 		turnEnd: &TurnEndState[*schema.Message]{Messages: []*schema.Message{summary}},
 	}
 	runner := NewRunner(ctx, RunnerConfig{
-		Agent:          agent,
-		SessionID:      sid,
-		SessionService: store,
+		Agent:        agent,
+		SessionID:    sid,
+		SessionStore: store,
 	})
 	drainSessionEvents(t, runner.Query(ctx, "anything"))
 
 	// Read events back via the store.
-	res, err := store.LoadEvents(ctx, sid, &LoadSessionEventsRequest{})
+	res, err := store.LoadEventsForSession(ctx, sid, &LoadSessionEventsRequest{})
 	require.NoError(t, err)
 
 	var foundReplaced bool
@@ -1262,13 +1274,13 @@ func TestRunnerPersists_MessageUpdated_BothMessages(t *testing.T) {
 		},
 	}
 	runner := NewRunner(ctx, RunnerConfig{
-		Agent:          agent,
-		SessionID:      sid,
-		SessionService: store,
+		Agent:        agent,
+		SessionID:    sid,
+		SessionStore: store,
 	})
 	drainSessionEvents(t, runner.Query(ctx, "go"))
 
-	res, err := store.LoadEvents(ctx, sid, &LoadSessionEventsRequest{})
+	res, err := store.LoadEventsForSession(ctx, sid, &LoadSessionEventsRequest{})
 	require.NoError(t, err)
 
 	var updates int
@@ -1351,15 +1363,15 @@ func TestRunnerPersists_MessageInserted_AnchorAndAppend(t *testing.T) {
 	}
 
 	runner := NewRunner(ctx, RunnerConfig{
-		Agent:          agent,
-		SessionID:      sid,
-		SessionService: store,
+		Agent:        agent,
+		SessionID:    sid,
+		SessionStore: store,
 	})
 	// We must pass the user message as input, with its existing ID already assigned,
 	// so reconstruction's anchor lookup succeeds.
 	drainSessionEvents(t, runner.Run(ctx, []*schema.Message{userMsg}))
 
-	res, err := store.LoadEvents(ctx, sid, &LoadSessionEventsRequest{})
+	res, err := store.LoadEventsForSession(ctx, sid, &LoadSessionEventsRequest{})
 	require.NoError(t, err)
 
 	var inserts int
@@ -1441,13 +1453,13 @@ func TestRunnerPersists_MessagesDeleted_Reconstructs(t *testing.T) {
 		turnEnd: &TurnEndState[*schema.Message]{Messages: []*schema.Message{a, c}},
 	}
 	runner := NewRunner(ctx, RunnerConfig{
-		Agent:          agent,
-		SessionID:      sid,
-		SessionService: store,
+		Agent:        agent,
+		SessionID:    sid,
+		SessionStore: store,
 	})
 	drainSessionEvents(t, runner.Run(ctx, nil))
 
-	res, err := store.LoadEvents(ctx, sid, &LoadSessionEventsRequest{})
+	res, err := store.LoadEventsForSession(ctx, sid, &LoadSessionEventsRequest{})
 	require.NoError(t, err)
 
 	var foundDeleted bool
@@ -1475,12 +1487,12 @@ func TestReconstructSessionState_MessagesDeletedMissingTargetFails(t *testing.T)
 	a := schema.UserMessage("a")
 	EnsureMessageID(a)
 	msgEvent := withTestEventID(&SessionEvent[*schema.Message]{Message: a})
-	require.NoError(t, store.AppendEvents(ctx, sid, []*SessionEvent[*schema.Message]{msgEvent}))
+	require.NoError(t, store.AppendEventsForSession(ctx, sid, []*SessionEvent[*schema.Message]{msgEvent}))
 
 	deleteEvent := withTestEventID(&SessionEvent[*schema.Message]{
 		MessagesDeleted: &MessagesDeletedEvent{MessageIDs: []string{"ghost-id"}},
 	})
-	require.NoError(t, store.AppendEvents(ctx, sid, []*SessionEvent[*schema.Message]{deleteEvent}))
+	require.NoError(t, store.AppendEventsForSession(ctx, sid, []*SessionEvent[*schema.Message]{deleteEvent}))
 
 	turnEndEvent := withTestEventID(&SessionEvent[*schema.Message]{
 		TurnID: "turn-1",
@@ -1488,7 +1500,7 @@ func TestReconstructSessionState_MessagesDeletedMissingTargetFails(t *testing.T)
 			Messages: []*schema.Message{a},
 		},
 	})
-	require.NoError(t, store.AppendEvents(ctx, sid, []*SessionEvent[*schema.Message]{turnEndEvent}))
+	require.NoError(t, store.AppendEventsForSession(ctx, sid, []*SessionEvent[*schema.Message]{turnEndEvent}))
 
 	_, err := reconstructSessionState[*schema.Message](ctx, mustOpenTestSession[*schema.Message](t, ctx, store, sid), sid, defaultLoadPageSize)
 	require.Error(t, err)
@@ -1538,14 +1550,14 @@ func TestAgentTool_ChildSessionID_FiltersFromParentLog(t *testing.T) {
 	}
 
 	runner := NewRunner(ctx, RunnerConfig{
-		Agent:          agent,
-		SessionID:      sid,
-		SessionService: parentStore,
+		Agent:        agent,
+		SessionID:    sid,
+		SessionStore: parentStore,
 	})
 	drainSessionEvents(t, runner.Query(ctx, "go"))
 
 	// Verify that childMsg is NOT in the parent's persistent log, but parentMsg is.
-	res, err := parentStore.LoadEvents(ctx, sid, &LoadSessionEventsRequest{})
+	res, err := parentStore.LoadEventsForSession(ctx, sid, &LoadSessionEventsRequest{})
 	require.NoError(t, err)
 	var sawChild, sawParent bool
 	for _, se := range res.Events {

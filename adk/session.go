@@ -75,18 +75,11 @@ const (
 )
 
 // SessionEventStore is the provider-facing interface for a typed append-only
-// session event log. Runtime services coordinate single-writer access for a
-// session before calling AppendEvents.
+// session event log. Runner coordinates process-local single-writer access for
+// a session before calling AppendEvents.
 type SessionEventStore[M MessageType] interface {
 	LoadEvents(ctx context.Context, req *LoadSessionEventsRequest) (*LoadSessionEventsResult[M], error)
 	AppendEvents(ctx context.Context, req *AppendSessionEventsRequest[M]) error
-}
-
-// SessionService is the sealed runtime adapter consumed by Runner.
-// External providers should implement SessionEventStore and use
-// NewLocalSessionService instead of implementing SessionService directly.
-type SessionService[M MessageType] interface {
-	openSession(ctx context.Context, req *openSessionRequest) (*openSessionResult[M], error)
 }
 
 type openSessionRequest struct {
@@ -151,7 +144,7 @@ type SessionEvent[M MessageType] struct {
 	// (in makeInputSessionEvent / toSessionEvent). Persister-level retries
 	// re-send the same payload bytes and therefore the same EventID, which is
 	// what enables AppendEvents idempotency. Runner-allocated EventIDs are
-	// UUIDv4 strings; SessionService implementations treat EventID as an opaque
+	// UUIDv4 strings; SessionEventStore implementations treat EventID as an opaque
 	// non-empty string and do NOT enforce UUIDv4 format.
 	//
 	// Distinct from MessageUpdatedEvent.MessageID: EventID identifies the
@@ -160,7 +153,7 @@ type SessionEvent[M MessageType] struct {
 	EventID string `json:"event_id"`
 
 	// Timestamp is inherited from the source AgentEvent and represents the event
-	// occurrence time, not the SessionService persistence time.
+	// occurrence time, not the SessionEventStore persistence time.
 	Timestamp time.Time `json:"timestamp,omitempty"`
 
 	Kind SessionEventKind `json:"kind,omitempty"`
@@ -479,7 +472,7 @@ type SessionConfig[M MessageType] struct {
 	// handle before failing the current Run/Resume/Rollback attempt.
 	//
 	// It applies to the process-local admission path used by the built-in
-	// session service.
+	// session store.
 	SessionAcquireTimeout time.Duration
 }
 
@@ -1285,13 +1278,13 @@ func WithRollbackEventIDGenerator[M MessageType](gen SessionEventIDGenerator[M])
 // RollbackSession appends a rollback marker that makes targetTurnID the latest active committed turn.
 func RollbackSession[M MessageType](
 	ctx context.Context,
-	service SessionService[M],
+	store SessionEventStore[M],
 	sessionID string,
 	targetTurnID string,
 	opts ...RollbackSessionOption[M],
 ) error {
-	if service == nil {
-		return errors.New("adk: rollback session service is nil")
+	if store == nil {
+		return errors.New("adk: rollback session store is nil")
 	}
 	if sessionID == "" {
 		return errors.New("adk: rollback sessionID is empty")
@@ -1305,7 +1298,7 @@ func RollbackSession[M MessageType](
 			opt(&cfg)
 		}
 	}
-	openResult, err := service.openSession(ctx, &openSessionRequest{sessionID: sessionID})
+	openResult, err := openRunnerSession[M](ctx, store, sessionID, normalizeSessionConfig[M](nil))
 	if err != nil {
 		return err
 	}

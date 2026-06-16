@@ -63,11 +63,6 @@ func NewInMemoryStore[M adk.MessageType](cfg *InMemoryStoreConfig) *InMemoryStor
 	}
 }
 
-// NewInMemorySessionService creates a local, process-scoped session service.
-func NewInMemorySessionService[M adk.MessageType]() adk.SessionService[M] {
-	return adk.NewLocalSessionService[M](NewInMemoryStore[M](nil))
-}
-
 // AppendEvents appends events to the session's event log.
 func (s *InMemoryStore[M]) AppendEvents(_ context.Context, req *adk.AppendSessionEventsRequest[M]) error {
 	s.mu.Lock()

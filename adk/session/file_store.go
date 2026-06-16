@@ -81,7 +81,7 @@ type fileSessionIndex struct {
 	eventIDToLine map[string]int
 }
 
-// NewFileStore creates a file-backed SessionService rooted at dir.
+// NewFileStore creates a file-backed SessionEventStore rooted at dir.
 func NewFileStore[M adk.MessageType](dir string, cfg *FileStoreConfig) (*FileStore[M], error) {
 	if dir == "" {
 		return nil, errorsNewEmptyFileStoreDir()
@@ -94,15 +94,6 @@ func NewFileStore[M adk.MessageType](dir string, cfg *FileStoreConfig) (*FileSto
 		serializer: normalizeFileSerializer(cfg),
 		indexes:    make(map[string]*fileSessionIndex),
 	}, nil
-}
-
-// NewFileSessionService creates a local, process-scoped service backed by FileStore.
-func NewFileSessionService[M adk.MessageType](dir string, cfg *FileStoreConfig) (adk.SessionService[M], error) {
-	store, err := NewFileStore[M](dir, cfg)
-	if err != nil {
-		return nil, err
-	}
-	return adk.NewLocalSessionService[M](store), nil
 }
 
 func errorsNewEmptyFileStoreDir() error {

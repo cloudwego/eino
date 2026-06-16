@@ -113,7 +113,7 @@ func TestFileStoreRollbackPreservesPhysicalAuditLog(t *testing.T) {
 	}})
 	require.NoError(t, err)
 
-	require.NoError(t, adk.RollbackSession[*schema.Message](ctx, adk.NewLocalSessionService[*schema.Message](store), sessionID, "turn-1"))
+	require.NoError(t, adk.RollbackSession[*schema.Message](ctx, store, sessionID, "turn-1"))
 
 	res, err := store.LoadEvents(ctx, &adk.LoadSessionEventsRequest{SessionID: sessionID})
 	require.NoError(t, err)
@@ -188,10 +188,10 @@ func TestFileStoreValidationReplayAndReversePagination(t *testing.T) {
 	store, err := session.NewFileStore[*schema.Message](dir, nil)
 	require.NoError(t, err)
 
-	_, err = session.NewFileSessionService[*schema.Message]("", nil)
+	_, err = session.NewFileStore[*schema.Message]("", nil)
 	require.Error(t, err)
 
-	service, err := session.NewFileSessionService[*schema.Message](filepath.Join(dir, "svc"), nil)
+	service, err := session.NewFileStore[*schema.Message](filepath.Join(dir, "svc"), nil)
 	require.NoError(t, err)
 	assert.NotNil(t, service)
 

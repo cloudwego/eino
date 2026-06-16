@@ -34,7 +34,7 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
-// sessionHelperStore is a single-session in-memory typed session service for unit tests.
+// sessionHelperStore is a single-session in-memory typed session store for unit tests.
 // Mirrors the EventID-based cursor semantics of session.InMemoryStore so the
 // in-package tests exercise the same protocol contract.
 type sessionHelperStore struct {
@@ -74,7 +74,7 @@ func (s *publicSessionHelperStore) LoadEvents(ctx context.Context, req *LoadSess
 	if req != nil {
 		sessionID = req.SessionID
 	}
-	res, err := s.sessionHelperStore.LoadEvents(ctx, sessionID, req)
+	res, err := s.sessionHelperStore.LoadEventsForSession(ctx, sessionID, req)
 	if err != nil {
 		return nil, err
 	}
@@ -90,7 +90,7 @@ func (s *publicSessionHelperStore) AppendEvents(ctx context.Context, req *Append
 	if req != nil {
 		events = req.Events
 	}
-	return s.sessionHelperStore.AppendEvents(ctx, sessionID, events)
+	return s.sessionHelperStore.AppendEventsForSession(ctx, sessionID, events)
 }
 
 func newBlockingAppendStore() *blockingAppendStore {
@@ -101,7 +101,7 @@ func newBlockingAppendStore() *blockingAppendStore {
 	}
 }
 
-func (s *blockingAppendStore) AppendEvents(ctx context.Context, sessionID string, events []*SessionEvent[*schema.Message]) error {
+func (s *blockingAppendStore) AppendEventsForSession(ctx context.Context, sessionID string, events []*SessionEvent[*schema.Message]) error {
 	s.startOnce.Do(func() {
 		close(s.appendStarted)
 	})
@@ -110,7 +110,14 @@ func (s *blockingAppendStore) AppendEvents(ctx context.Context, sessionID string
 	case <-ctx.Done():
 		return ctx.Err()
 	}
-	return s.sessionHelperStore.AppendEvents(ctx, sessionID, events)
+	return s.sessionHelperStore.AppendEventsForSession(ctx, sessionID, events)
+}
+
+func (s *blockingAppendStore) AppendEvents(ctx context.Context, req *AppendSessionEventsRequest[*schema.Message]) error {
+	if req == nil {
+		req = &AppendSessionEventsRequest[*schema.Message]{}
+	}
+	return s.AppendEventsForSession(ctx, req.SessionID, req.Events)
 }
 
 func (s *blockingAppendStore) openSession(_ context.Context, req *openSessionRequest) (*openSessionResult[*schema.Message], error) {
@@ -125,7 +132,7 @@ func (s *blockingAppendStore) appendEvents(ctx context.Context, req *AppendSessi
 	if req == nil {
 		req = &AppendSessionEventsRequest[*schema.Message]{}
 	}
-	return s.AppendEvents(ctx, req.SessionID, req.Events)
+	return s.AppendEventsForSession(ctx, req.SessionID, req.Events)
 }
 
 // withTestEventID assigns a fresh UUIDv4 to the SessionEvent if its EventID is
@@ -175,13 +182,13 @@ func filterStoredSessionEvents(t *testing.T, raw []storedSessionEvent, pred func
 }
 
 type testSessionAppendStore interface {
-	AppendEvents(context.Context, string, []*SessionEvent[*schema.Message]) error
+	AppendEventsForSession(context.Context, string, []*SessionEvent[*schema.Message]) error
 }
 
 func appendTestSessionEvent(t *testing.T, ctx context.Context, store testSessionAppendStore, sid string, se *SessionEvent[*schema.Message]) *SessionEvent[*schema.Message] {
 	t.Helper()
 	se = withTestEventID(se)
-	require.NoError(t, store.AppendEvents(ctx, sid, []*SessionEvent[*schema.Message]{se}))
+	require.NoError(t, store.AppendEventsForSession(ctx, sid, []*SessionEvent[*schema.Message]{se}))
 	return se
 }
 
@@ -321,7 +328,17 @@ func (s *sessionHelperStore) Delete(_ context.Context, key string) error {
 	return nil
 }
 
-func (s *sessionHelperStore) AppendEvents(_ context.Context, _ string, events []*SessionEvent[*schema.Message]) error {
+func (s *sessionHelperStore) AppendEvents(ctx context.Context, req *AppendSessionEventsRequest[*schema.Message]) error {
+	sessionID := ""
+	var events []*SessionEvent[*schema.Message]
+	if req != nil {
+		sessionID = req.SessionID
+		events = req.Events
+	}
+	return s.AppendEventsForSession(ctx, sessionID, events)
+}
+
+func (s *sessionHelperStore) AppendEventsForSession(_ context.Context, _ string, events []*SessionEvent[*schema.Message]) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.appendErr != nil {
@@ -363,7 +380,15 @@ func (s *sessionHelperStore) AppendEvents(_ context.Context, _ string, events []
 	return nil
 }
 
-func (s *sessionHelperStore) LoadEvents(_ context.Context, _ string, opts *LoadSessionEventsRequest) (*LoadSessionEventsResult[*schema.Message], error) {
+func (s *sessionHelperStore) LoadEvents(ctx context.Context, req *LoadSessionEventsRequest) (*LoadSessionEventsResult[*schema.Message], error) {
+	sessionID := ""
+	if req != nil {
+		sessionID = req.SessionID
+	}
+	return s.LoadEventsForSession(ctx, sessionID, req)
+}
+
+func (s *sessionHelperStore) LoadEventsForSession(_ context.Context, _ string, opts *LoadSessionEventsRequest) (*LoadSessionEventsResult[*schema.Message], error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.loadErr != nil {
@@ -464,14 +489,14 @@ func (s *sessionHelperStore) loadEvents(ctx context.Context, req *LoadSessionEve
 	if req != nil {
 		sessionID = req.SessionID
 	}
-	return s.LoadEvents(ctx, sessionID, req)
+	return s.LoadEventsForSession(ctx, sessionID, req)
 }
 
 func (s *sessionHelperStore) appendEvents(ctx context.Context, req *AppendSessionEventsRequest[*schema.Message]) error {
 	if req == nil {
 		req = &AppendSessionEventsRequest[*schema.Message]{}
 	}
-	return s.AppendEvents(ctx, req.SessionID, req.Events)
+	return s.AppendEventsForSession(ctx, req.SessionID, req.Events)
 }
 
 func (s *sessionHelperStore) close(context.Context) error { return nil }
@@ -485,21 +510,21 @@ func (h *testSessionHandle) loadEvents(ctx context.Context, req *LoadSessionEven
 	if req == nil {
 		req = &LoadSessionEventsRequest{}
 	}
-	return h.store.LoadEvents(ctx, h.sessionID, req)
+	return h.store.LoadEventsForSession(ctx, h.sessionID, req)
 }
 
 func (h *testSessionHandle) appendEvents(ctx context.Context, req *AppendSessionEventsRequest[*schema.Message]) error {
 	if req == nil {
 		req = &AppendSessionEventsRequest[*schema.Message]{}
 	}
-	return h.store.AppendEvents(ctx, h.sessionID, req.Events)
+	return h.store.AppendEventsForSession(ctx, h.sessionID, req.Events)
 }
 
 func (h *testSessionHandle) close(context.Context) error { return nil }
 
 type legacyMessageTestStore interface {
-	AppendEvents(context.Context, string, []*SessionEvent[*schema.Message]) error
-	LoadEvents(context.Context, string, *LoadSessionEventsRequest) (*LoadSessionEventsResult[*schema.Message], error)
+	AppendEventsForSession(context.Context, string, []*SessionEvent[*schema.Message]) error
+	LoadEventsForSession(context.Context, string, *LoadSessionEventsRequest) (*LoadSessionEventsResult[*schema.Message], error)
 }
 
 type legacyMessageTestHandle struct {
@@ -511,21 +536,21 @@ func (h *legacyMessageTestHandle) loadEvents(ctx context.Context, req *LoadSessi
 	if req == nil {
 		req = &LoadSessionEventsRequest{}
 	}
-	return h.store.LoadEvents(ctx, h.sessionID, req)
+	return h.store.LoadEventsForSession(ctx, h.sessionID, req)
 }
 
 func (h *legacyMessageTestHandle) appendEvents(ctx context.Context, req *AppendSessionEventsRequest[*schema.Message]) error {
 	if req == nil {
 		req = &AppendSessionEventsRequest[*schema.Message]{}
 	}
-	return h.store.AppendEvents(ctx, h.sessionID, req.Events)
+	return h.store.AppendEventsForSession(ctx, h.sessionID, req.Events)
 }
 
 func (h *legacyMessageTestHandle) close(context.Context) error { return nil }
 
-func mustOpenTestSession[M MessageType](t testing.TB, ctx context.Context, service SessionService[M], sessionID string) sessionHandle[M] {
+func mustOpenTestSession[M MessageType](t testing.TB, ctx context.Context, store SessionEventStore[M], sessionID string) sessionHandle[M] {
 	t.Helper()
-	res, err := service.openSession(ctx, &openSessionRequest{sessionID: sessionID})
+	res, err := openLocalSession(ctx, store, &openSessionRequest{sessionID: sessionID})
 	require.NoError(t, err)
 	require.NotNil(t, res)
 	require.NotNil(t, res.handle)
@@ -556,9 +581,9 @@ func TestRunnerSessionModePrependsCommittedMessagesOnce(t *testing.T) {
 		},
 	}
 	runner := NewRunner(ctx, RunnerConfig{
-		Agent:          firstAgent,
-		SessionID:      sessionID,
-		SessionService: store,
+		Agent:        firstAgent,
+		SessionID:    sessionID,
+		SessionStore: store,
 	})
 	drainSessionEvents(t, runner.Query(ctx, "first"))
 
@@ -570,9 +595,9 @@ func TestRunnerSessionModePrependsCommittedMessagesOnce(t *testing.T) {
 		},
 	}
 	runner = NewRunner(ctx, RunnerConfig{
-		Agent:          secondAgent,
-		SessionID:      sessionID,
-		SessionService: store,
+		Agent:        secondAgent,
+		SessionID:    sessionID,
+		SessionStore: store,
 	})
 	drainSessionEvents(t, runner.Query(ctx, "second", WithSessionValues(map[string]any{"override": "value"})))
 
@@ -592,9 +617,9 @@ func TestAttack_SessionEventIDGeneratorCoversRunnerEvents(t *testing.T) {
 	prefix := "attack-runner-"
 	agent := &runnerSessionAgent{name: "runner-event-id-agent"}
 	runner := NewRunner(ctx, RunnerConfig{
-		Agent:          agent,
-		SessionID:      "runner-event-id-session",
-		SessionService: store,
+		Agent:        agent,
+		SessionID:    "runner-event-id-session",
+		SessionStore: store,
 		SessionConfig: &SessionConfig[*schema.Message]{
 			EventIDGenerator: testSequentialEventIDGenerator(prefix),
 		},
@@ -610,7 +635,7 @@ func TestAttack_SessionEventIDGeneratorCoversRunnerEvents(t *testing.T) {
 	}
 }
 
-func TestAttack_RunnerHandlesSessionEventWithoutSessionService(t *testing.T) {
+func TestAttack_RunnerHandlesSessionEventWithoutSessionStore(t *testing.T) {
 	ctx := context.Background()
 	runner := NewRunner(ctx, RunnerConfig{
 		Agent: &runnerSessionAgent{name: "runner-session-event-no-service-agent"},
@@ -650,9 +675,9 @@ func TestSessionEventIDGenerator_UserMessageBusinessID(t *testing.T) {
 	}
 	agent := &runnerSessionAgent{name: "user-msg-business-id-agent"}
 	runner := NewRunner(ctx, RunnerConfig{
-		Agent:          agent,
-		SessionID:      "user-msg-business-id-session",
-		SessionService: store,
+		Agent:        agent,
+		SessionID:    "user-msg-business-id-session",
+		SessionStore: store,
 		SessionConfig: &SessionConfig[*schema.Message]{
 			EventIDGenerator: gen,
 		},
@@ -679,9 +704,9 @@ func TestSessionEventIDGenerator_OutputMessageDraftBusinessID(t *testing.T) {
 	}
 	agent := &runnerSessionAgent{name: "assistant-msg-business-id-agent"}
 	runner := NewRunner(ctx, RunnerConfig{
-		Agent:          agent,
-		SessionID:      "assistant-msg-business-id-session",
-		SessionService: store,
+		Agent:        agent,
+		SessionID:    "assistant-msg-business-id-session",
+		SessionStore: store,
 		SessionConfig: &SessionConfig[*schema.Message]{
 			EventIDGenerator: gen,
 		},
@@ -711,9 +736,9 @@ func TestSessionEventIDGenerator_ControlEventsDefaultFallthrough(t *testing.T) {
 	}
 	agent := &runnerSessionAgent{name: "control-fallthrough-agent"}
 	runner := NewRunner(ctx, RunnerConfig{
-		Agent:          agent,
-		SessionID:      "control-fallthrough-session",
-		SessionService: store,
+		Agent:        agent,
+		SessionID:    "control-fallthrough-session",
+		SessionStore: store,
 		SessionConfig: &SessionConfig[*schema.Message]{
 			EventIDGenerator: gen,
 		},
@@ -753,9 +778,9 @@ func TestSessionEventIDGenerator_FailClosedOnEmpty(t *testing.T) {
 	}
 	agent := &runnerSessionAgent{name: "fail-closed-empty-agent"}
 	runner := NewRunner(ctx, RunnerConfig{
-		Agent:          agent,
-		SessionID:      "fail-closed-empty-session",
-		SessionService: store,
+		Agent:        agent,
+		SessionID:    "fail-closed-empty-session",
+		SessionStore: store,
 		SessionConfig: &SessionConfig[*schema.Message]{
 			EventIDGenerator: gen,
 		},
@@ -803,9 +828,9 @@ func TestSessionEventIDGenerator_FailClosedOnError(t *testing.T) {
 	}
 	agent := &runnerSessionAgent{name: "fail-closed-err-agent"}
 	runner := NewRunner(ctx, RunnerConfig{
-		Agent:          agent,
-		SessionID:      "fail-closed-err-session",
-		SessionService: store,
+		Agent:        agent,
+		SessionID:    "fail-closed-err-session",
+		SessionStore: store,
 		SessionConfig: &SessionConfig[*schema.Message]{
 			EventIDGenerator: gen,
 		},
@@ -850,7 +875,7 @@ func TestRunnerSessionModeRejectsPendingCheckpoint(t *testing.T) {
 	runner := NewRunner(ctx, RunnerConfig{
 		Agent:           agent,
 		SessionID:       sessionID,
-		SessionService:  store,
+		SessionStore:    store,
 		CheckPointStore: store,
 	})
 	iter := runner.Query(ctx, "new input")
@@ -876,7 +901,7 @@ func TestRunnerSessionModeRejectsPendingCheckpoint(t *testing.T) {
 func TestAttack_RunClosesSessionHandleWhenCheckpointDecodeFails(t *testing.T) {
 	ctx := context.Background()
 	store := &publicSessionHelperStore{sessionHelperStore: newSessionHelperStore()}
-	service := NewLocalSessionService[*schema.Message](store)
+	service := store
 	sessionID := "checkpoint-decode-failure-closes-handle"
 	cpKey := sessionRunnerCheckpointID(sessionID)
 	require.NoError(t, store.Set(ctx, cpKey, []byte("not a runner checkpoint")))
@@ -884,7 +909,7 @@ func TestAttack_RunClosesSessionHandleWhenCheckpointDecodeFails(t *testing.T) {
 	runner := NewRunner(ctx, RunnerConfig{
 		Agent:           &runnerSessionAgent{name: "checkpoint-decode-fail-agent"},
 		SessionID:       sessionID,
-		SessionService:  service,
+		SessionStore:    service,
 		CheckPointStore: store,
 		SessionConfig: &SessionConfig[*schema.Message]{
 			SessionAcquireTimeout: time.Millisecond,
@@ -934,9 +959,9 @@ func TestRunnerSessionModeDeleteCheckpointFailureIsReported(t *testing.T) {
 		persister:  persister,
 		sawTurnEnd: true,
 		sessionState: &runnerSessionRunState[*schema.Message]{
-			enabled:        true,
-			sessionID:      "delete-fail-session",
-			sessionService: store,
+			enabled:      true,
+			sessionID:    "delete-fail-session",
+			sessionStore: store,
 		},
 		store:        store,
 		checkPointID: &checkPointID,
@@ -994,7 +1019,7 @@ func TestRunnerSessionStreamingDoesNotBlockLiveEvent(t *testing.T) {
 		Agent:           agent,
 		EnableStreaming: true,
 		SessionID:       "streaming-session",
-		SessionService:  store,
+		SessionStore:    store,
 	})
 
 	iter := runner.Query(ctx, "start")
@@ -1142,7 +1167,7 @@ func TestRunnerSessionModeResumeWithEmptyCheckpointID(t *testing.T) {
 	runner := NewRunner(ctx, RunnerConfig{
 		Agent:           agent,
 		SessionID:       sessionID,
-		SessionService:  store,
+		SessionStore:    store,
 		CheckPointStore: store,
 	})
 
@@ -1190,9 +1215,9 @@ func TestRunnerSessionModeFlushFailurePreventsCommit(t *testing.T) {
 	}
 
 	runner := NewRunner(ctx, RunnerConfig{
-		Agent:          agent,
-		SessionID:      "flush-fail-session",
-		SessionService: store,
+		Agent:        agent,
+		SessionID:    "flush-fail-session",
+		SessionStore: store,
 	})
 
 	iter := runner.Query(ctx, "trigger")
@@ -1221,9 +1246,9 @@ func TestRunnerSessionSyncModeBlocksDeliveryUntilAppendCompletes(t *testing.T) {
 		},
 	}
 	runner := NewRunner(ctx, RunnerConfig{
-		Agent:          agent,
-		SessionID:      "sync-block-session",
-		SessionService: store,
+		Agent:        agent,
+		SessionID:    "sync-block-session",
+		SessionStore: store,
 	})
 
 	iterCh := make(chan *AsyncIterator[*AgentEvent], 1)
@@ -1289,9 +1314,9 @@ func TestRunnerSessionSyncModeAppendFailureSuppressesOutput(t *testing.T) {
 		},
 	}
 	runner := NewRunner(ctx, RunnerConfig{
-		Agent:          agent,
-		SessionID:      "sync-fail-session",
-		SessionService: store,
+		Agent:        agent,
+		SessionID:    "sync-fail-session",
+		SessionStore: store,
 	})
 
 	iter := runner.Query(ctx, "trigger")
@@ -1415,9 +1440,9 @@ func TestRunnerSessionDurableBoundaryBatchShape(t *testing.T) {
 	store := newSessionHelperStore()
 	agent := &runnerSessionAgent{name: "boundary-agent"}
 	runner := NewRunner(ctx, RunnerConfig{
-		Agent:          agent,
-		SessionID:      "boundary-session",
-		SessionService: store,
+		Agent:        agent,
+		SessionID:    "boundary-session",
+		SessionStore: store,
 	})
 
 	iter := runner.Query(ctx, "hello")
@@ -1444,9 +1469,9 @@ func TestRunnerSessionInputMessageBoundaryFailureStopsBeforeAgent(t *testing.T) 
 	store.userMsgErr = errors.New("input append failed")
 	agent := &runnerSessionAgent{name: "input-boundary-agent"}
 	runner := NewRunner(ctx, RunnerConfig{
-		Agent:          agent,
-		SessionID:      "input-boundary-session",
-		SessionService: store,
+		Agent:        agent,
+		SessionID:    "input-boundary-session",
+		SessionStore: store,
 	})
 
 	iter := runner.Query(ctx, "hello")
@@ -1925,7 +1950,7 @@ func TestReconstructFromEventLog_MultiTurn(t *testing.T) {
 	EnsureMessageID(a1)
 	for _, m := range []*schema.Message{q1, a1} {
 		se := withTestEventID(&SessionEvent[*schema.Message]{Message: m})
-		require.NoError(t, store.AppendEvents(ctx, sid, []*SessionEvent[*schema.Message]{se}))
+		require.NoError(t, store.AppendEventsForSession(ctx, sid, []*SessionEvent[*schema.Message]{se}))
 	}
 	// Turn 2: input "Q2" + output "A2"
 	q2 := schema.UserMessage("Q2")
@@ -1934,7 +1959,7 @@ func TestReconstructFromEventLog_MultiTurn(t *testing.T) {
 	EnsureMessageID(a2)
 	for _, m := range []*schema.Message{q2, a2} {
 		se := withTestEventID(&SessionEvent[*schema.Message]{Message: m})
-		require.NoError(t, store.AppendEvents(ctx, sid, []*SessionEvent[*schema.Message]{se}))
+		require.NoError(t, store.AppendEventsForSession(ctx, sid, []*SessionEvent[*schema.Message]{se}))
 	}
 
 	result, err := reconstructSessionState[*schema.Message](ctx, store, sid, defaultLoadPageSize)
@@ -1970,7 +1995,7 @@ func TestReconstructFromEventLog_CorruptEventReturnsError(t *testing.T) {
 		Kind:    SessionEventMessage,
 		Message: msg,
 	})
-	require.NoError(t, store.AppendEvents(ctx, sid, []*SessionEvent[*schema.Message]{se}))
+	require.NoError(t, store.AppendEventsForSession(ctx, sid, []*SessionEvent[*schema.Message]{se}))
 
 	corruptPayload := []byte(`{"event_id":"` + uuid.NewString() + `","kind":"message","message":` + "\x00\xff invalid json")
 	require.False(t, json.Valid(corruptPayload), "payload must be invalid JSON")
@@ -1997,7 +2022,7 @@ func TestReconstructFromEventLog_WithSummarizationBoundary(t *testing.T) {
 		m := schema.UserMessage("pre")
 		EnsureMessageID(m)
 		se := withTestEventID(&SessionEvent[*schema.Message]{Message: m})
-		require.NoError(t, store.AppendEvents(ctx, sid, []*SessionEvent[*schema.Message]{se}))
+		require.NoError(t, store.AppendEventsForSession(ctx, sid, []*SessionEvent[*schema.Message]{se}))
 	}
 
 	// Boundary: summary of all messages.
@@ -2005,13 +2030,13 @@ func TestReconstructFromEventLog_WithSummarizationBoundary(t *testing.T) {
 	EnsureMessageID(summary)
 	repl := []*schema.Message{summary}
 	se := withTestEventID(&SessionEvent[*schema.Message]{MessagesReplaced: &repl})
-	require.NoError(t, store.AppendEvents(ctx, sid, []*SessionEvent[*schema.Message]{se}))
+	require.NoError(t, store.AppendEventsForSession(ctx, sid, []*SessionEvent[*schema.Message]{se}))
 
 	// Post-boundary events.
 	post := schema.AssistantMessage("post", nil)
 	EnsureMessageID(post)
 	se = withTestEventID(&SessionEvent[*schema.Message]{Message: post})
-	require.NoError(t, store.AppendEvents(ctx, sid, []*SessionEvent[*schema.Message]{se}))
+	require.NoError(t, store.AppendEventsForSession(ctx, sid, []*SessionEvent[*schema.Message]{se}))
 
 	result, err := reconstructSessionState[*schema.Message](ctx, store, sid, defaultLoadPageSize)
 	require.NoError(t, err)
@@ -2146,9 +2171,9 @@ func TestRunnerQueryAfterRollbackUsesActiveProjection(t *testing.T) {
 		},
 	}
 	firstRunner := NewRunner(ctx, RunnerConfig{
-		Agent:          firstAgent,
-		SessionID:      sid,
-		SessionService: store,
+		Agent:        firstAgent,
+		SessionID:    sid,
+		SessionStore: store,
 	})
 	drainSessionEvents(t, firstRunner.Query(ctx, "first"))
 	firstTurnEndEvents := filterStoredSessionEvents(t, store.events, func(se *SessionEvent[*schema.Message]) bool {
@@ -2164,9 +2189,9 @@ func TestRunnerQueryAfterRollbackUsesActiveProjection(t *testing.T) {
 		},
 	}
 	secondRunner := NewRunner(ctx, RunnerConfig{
-		Agent:          secondAgent,
-		SessionID:      sid,
-		SessionService: store,
+		Agent:        secondAgent,
+		SessionID:    sid,
+		SessionStore: store,
 	})
 	drainSessionEvents(t, secondRunner.Query(ctx, "second"))
 
@@ -2179,9 +2204,9 @@ func TestRunnerQueryAfterRollbackUsesActiveProjection(t *testing.T) {
 		},
 	}
 	thirdRunner := NewRunner(ctx, RunnerConfig{
-		Agent:          thirdAgent,
-		SessionID:      sid,
-		SessionService: store,
+		Agent:        thirdAgent,
+		SessionID:    sid,
+		SessionStore: store,
 	})
 	drainSessionEvents(t, thirdRunner.Query(ctx, "third"))
 
@@ -2316,9 +2341,9 @@ func TestRunnerSessionReconstructsFromEventLog(t *testing.T) {
 		},
 	}
 	runner := NewRunner(ctx, RunnerConfig{
-		Agent:          firstAgent,
-		SessionID:      sid,
-		SessionService: store,
+		Agent:        firstAgent,
+		SessionID:    sid,
+		SessionStore: store,
 	})
 	drainSessionEvents(t, runner.Query(ctx, "first"))
 
@@ -2336,9 +2361,9 @@ func TestRunnerSessionReconstructsFromEventLog(t *testing.T) {
 		},
 	}
 	runner = NewRunner(ctx, RunnerConfig{
-		Agent:          capturedAgent,
-		SessionID:      sid,
-		SessionService: store,
+		Agent:        capturedAgent,
+		SessionID:    sid,
+		SessionStore: store,
 	})
 	drainSessionEvents(t, runner.Query(ctx, "second"))
 
@@ -2366,9 +2391,9 @@ func TestRunnerSessionInputEventsPersisted(t *testing.T) {
 		},
 	}
 	runner := NewRunner(ctx, RunnerConfig{
-		Agent:          agent,
-		SessionID:      sid,
-		SessionService: store,
+		Agent:        agent,
+		SessionID:    sid,
+		SessionStore: store,
 	})
 	drainSessionEvents(t, runner.Query(ctx, "user-question"))
 
@@ -2400,7 +2425,7 @@ func newRecordingHelperStore() *recordingHelperStore {
 	return &recordingHelperStore{sessionHelperStore: newSessionHelperStore()}
 }
 
-func (s *recordingHelperStore) AppendEvents(ctx context.Context, sid string, events []*SessionEvent[*schema.Message]) error {
+func (s *recordingHelperStore) AppendEventsForSession(ctx context.Context, sid string, events []*SessionEvent[*schema.Message]) error {
 	s.mu.Lock()
 	if s.sessionHelperStore.appendErr != nil {
 		err := s.sessionHelperStore.appendErr
@@ -2409,7 +2434,14 @@ func (s *recordingHelperStore) AppendEvents(ctx context.Context, sid string, eve
 	}
 	s.calls = append(s.calls, "append")
 	s.mu.Unlock()
-	return s.sessionHelperStore.AppendEvents(ctx, sid, events)
+	return s.sessionHelperStore.AppendEventsForSession(ctx, sid, events)
+}
+
+func (s *recordingHelperStore) AppendEvents(ctx context.Context, req *AppendSessionEventsRequest[*schema.Message]) error {
+	if req == nil {
+		req = &AppendSessionEventsRequest[*schema.Message]{}
+	}
+	return s.AppendEventsForSession(ctx, req.SessionID, req.Events)
 }
 
 func (s *recordingHelperStore) openSession(_ context.Context, req *openSessionRequest) (*openSessionResult[*schema.Message], error) {
@@ -2424,7 +2456,7 @@ func (s *recordingHelperStore) appendEvents(ctx context.Context, req *AppendSess
 	if req == nil {
 		req = &AppendSessionEventsRequest[*schema.Message]{}
 	}
-	return s.AppendEvents(ctx, req.SessionID, req.Events)
+	return s.AppendEventsForSession(ctx, req.SessionID, req.Events)
 }
 
 func (s *recordingHelperStore) Set(ctx context.Context, key string, value []byte) error {
@@ -2460,7 +2492,7 @@ func TestRunnerSessionInterruptCheckpointSkippedOnPersistFailure(t *testing.T) {
 		Agent:           &runnerInterruptAgent{},
 		CheckPointStore: store,
 		SessionID:       "interrupt-persist-fail",
-		SessionService:  store,
+		SessionStore:    store,
 	})
 	iter := runner.Query(ctx, "go")
 	var sawErr bool
@@ -2495,7 +2527,7 @@ func TestRunnerSessionCheckpointAfterPersisterFlush(t *testing.T) {
 		Agent:           &runnerInterruptAgent{},
 		CheckPointStore: store,
 		SessionID:       "interrupt-order",
-		SessionService:  store,
+		SessionStore:    store,
 	})
 	iter := runner.Query(ctx, "hi")
 	for {
@@ -2531,7 +2563,7 @@ func TestRunnerSessionInterruptCheckpointTailIsFinalIdle(t *testing.T) {
 		Agent:           &runnerInterruptAgent{},
 		CheckPointStore: store,
 		SessionID:       sid,
-		SessionService:  store,
+		SessionStore:    store,
 	})
 	drainSessionEvents(t, runner.Query(ctx, "hi"))
 
@@ -2566,7 +2598,7 @@ func TestRunnerSessionCheckpointPayloadStripsSessionEvents(t *testing.T) {
 		Agent:           &runnerCheckpointSanitizeAgent{},
 		CheckPointStore: store,
 		SessionID:       sid,
-		SessionService:  store,
+		SessionStore:    store,
 	})
 	iter := runner.Query(ctx, "hi", WithTimelineEvents())
 	var liveSessionEventIDs []string
@@ -2632,7 +2664,7 @@ func TestRunnerSessionAgentInterruptBoundaryFailureNotExposed(t *testing.T) {
 		Agent:           &runnerInterruptAgent{},
 		CheckPointStore: store,
 		SessionID:       "interrupt-not-exposed",
-		SessionService:  store,
+		SessionStore:    store,
 	})
 
 	iter := runner.Query(ctx, "hi", WithTimelineEvents())
@@ -2665,9 +2697,9 @@ func TestRunnerSessionInterruptPersistErrorSurfacesWithoutCheckpoint(t *testing.
 		SessionEventAgentInterrupt: errors.New("agent interrupt append failed"),
 	}
 	runner := NewRunner(ctx, RunnerConfig{
-		Agent:          &runnerInterruptAgent{},
-		SessionID:      "interrupt-no-checkpoint",
-		SessionService: store,
+		Agent:        &runnerInterruptAgent{},
+		SessionID:    "interrupt-no-checkpoint",
+		SessionStore: store,
 	})
 
 	iter := runner.Query(ctx, "hi")
@@ -2719,7 +2751,7 @@ type transientFailStore struct {
 	appendErrVal error
 }
 
-func (s *transientFailStore) AppendEvents(ctx context.Context, sessionID string, events []*SessionEvent[*schema.Message]) error {
+func (s *transientFailStore) AppendEventsForSession(ctx context.Context, sessionID string, events []*SessionEvent[*schema.Message]) error {
 	s.retryMu.Lock()
 	s.appendCalls++
 	if s.failsLeft > 0 {
@@ -2728,14 +2760,21 @@ func (s *transientFailStore) AppendEvents(ctx context.Context, sessionID string,
 		return s.appendErrVal
 	}
 	s.retryMu.Unlock()
-	return s.sessionHelperStore.AppendEvents(ctx, sessionID, events)
+	return s.sessionHelperStore.AppendEventsForSession(ctx, sessionID, events)
+}
+
+func (s *transientFailStore) AppendEvents(ctx context.Context, req *AppendSessionEventsRequest[*schema.Message]) error {
+	if req == nil {
+		req = &AppendSessionEventsRequest[*schema.Message]{}
+	}
+	return s.AppendEventsForSession(ctx, req.SessionID, req.Events)
 }
 
 func (s *transientFailStore) appendEvents(ctx context.Context, req *AppendSessionEventsRequest[*schema.Message]) error {
 	if req == nil {
 		req = &AppendSessionEventsRequest[*schema.Message]{}
 	}
-	return s.AppendEvents(ctx, req.SessionID, req.Events)
+	return s.AppendEventsForSession(ctx, req.SessionID, req.Events)
 }
 
 func (s *transientFailStore) getAppendCalls() int {
@@ -2831,7 +2870,7 @@ func TestAttack_InFlightTurnIDRecoveryOnResume(t *testing.T) {
 	})
 
 	for _, se := range events {
-		require.NoError(t, store.AppendEvents(ctx, sid, []*SessionEvent[*schema.Message]{se}))
+		require.NoError(t, store.AppendEventsForSession(ctx, sid, []*SessionEvent[*schema.Message]{se}))
 	}
 
 	result, err := reconstructSessionState[*schema.Message](ctx, store, sid, defaultLoadPageSize)
@@ -2864,7 +2903,7 @@ func TestAttack_InFlightTurnIDRecoveryWithoutCommittedTurnEnd(t *testing.T) {
 		}},
 	}
 	for _, se := range events {
-		require.NoError(t, store.AppendEvents(ctx, sid, []*SessionEvent[*schema.Message]{se}))
+		require.NoError(t, store.AppendEventsForSession(ctx, sid, []*SessionEvent[*schema.Message]{se}))
 	}
 
 	result, err := reconstructSessionState[*schema.Message](ctx, store, sid, defaultLoadPageSize)
@@ -2892,7 +2931,7 @@ func TestAttack_InFlightTurnIDEmptyWhenNoPostTurnEndEvents(t *testing.T) {
 	}
 
 	for _, se := range events {
-		require.NoError(t, store.AppendEvents(ctx, sid, []*SessionEvent[*schema.Message]{se}))
+		require.NoError(t, store.AppendEventsForSession(ctx, sid, []*SessionEvent[*schema.Message]{se}))
 	}
 
 	result, err := reconstructSessionState[*schema.Message](ctx, store, sid, defaultLoadPageSize)
@@ -2925,7 +2964,7 @@ func TestAttack_InFlightTurnIDMultipleTurnIDsInTail(t *testing.T) {
 	}
 
 	for _, se := range events {
-		require.NoError(t, store.AppendEvents(ctx, sid, []*SessionEvent[*schema.Message]{se}))
+		require.NoError(t, store.AppendEventsForSession(ctx, sid, []*SessionEvent[*schema.Message]{se}))
 	}
 
 	result, err := reconstructSessionState[*schema.Message](ctx, store, sid, defaultLoadPageSize)
@@ -2973,7 +3012,7 @@ func TestAttack_ResumePreservesTurnIDFromInterruptedRun(t *testing.T) {
 	firstRunner := NewRunner(ctx, RunnerConfig{
 		Agent:           normalAgent,
 		SessionID:       sessionID,
-		SessionService:  store,
+		SessionStore:    store,
 		CheckPointStore: store,
 	})
 	drainSessionEvents(t, firstRunner.Query(ctx, "first question"))
@@ -2983,7 +3022,7 @@ func TestAttack_ResumePreservesTurnIDFromInterruptedRun(t *testing.T) {
 	runner := NewRunner(ctx, RunnerConfig{
 		Agent:           agent,
 		SessionID:       sessionID,
-		SessionService:  store,
+		SessionStore:    store,
 		CheckPointStore: store,
 	})
 
@@ -3073,7 +3112,7 @@ func TestAttack_FreshRunIgnoresInFlightTurnID(t *testing.T) {
 	baselineRunner := NewRunner(ctx, RunnerConfig{
 		Agent:           normalAgent,
 		SessionID:       sessionID,
-		SessionService:  store,
+		SessionStore:    store,
 		CheckPointStore: store,
 	})
 	drainSessionEvents(t, baselineRunner.Query(ctx, "baseline"))
@@ -3083,7 +3122,7 @@ func TestAttack_FreshRunIgnoresInFlightTurnID(t *testing.T) {
 	runner := NewRunner(ctx, RunnerConfig{
 		Agent:           agent,
 		SessionID:       sessionID,
-		SessionService:  store,
+		SessionStore:    store,
 		CheckPointStore: store,
 	})
 
@@ -3126,7 +3165,7 @@ func TestAttack_FreshRunIgnoresInFlightTurnID(t *testing.T) {
 	freshRunner := NewRunner(ctx, RunnerConfig{
 		Agent:           freshAgent,
 		SessionID:       sessionID,
-		SessionService:  store,
+		SessionStore:    store,
 		CheckPointStore: store,
 	})
 	drainSessionEvents(t, freshRunner.Query(ctx, "new question"))

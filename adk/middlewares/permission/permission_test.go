@@ -746,9 +746,9 @@ func TestPermissionDecisionAppearsInToolUseTimeline(t *testing.T) {
 		sawToolCallEndOK bool
 	)
 	runner := adk.NewRunner(ctx, adk.RunnerConfig{
-		Agent:          agent,
-		SessionID:      "permission-timeline",
-		SessionService: adk.NewLocalSessionService[*schema.Message](&permissionSessionService{}),
+		Agent:        agent,
+		SessionID:    "permission-timeline",
+		SessionStore: &permissionSessionStore{},
 	})
 	iter := runner.Query(ctx, "use the tool", adk.WithTimelineEvents())
 	for {
@@ -861,14 +861,14 @@ func TestPermissionDecisionEventResumeLiveAndPersisted(t *testing.T) {
 			})
 			require.NoError(t, err)
 
-			sessionStore := &permissionSessionService{}
+			sessionStore := &permissionSessionStore{}
 			checkpointStore := newPermissionCheckpointStore()
 			checkpointID := "permission-decision-" + strings.ReplaceAll(tt.name, " ", "-")
 			runner := adk.NewRunner(ctx, adk.RunnerConfig{
 				Agent:           agent,
 				CheckPointStore: checkpointStore,
 				SessionID:       checkpointID,
-				SessionService:  adk.NewLocalSessionService[*schema.Message](sessionStore),
+				SessionStore:    sessionStore,
 			})
 
 			var interruptID string
@@ -974,14 +974,14 @@ func TestAttack_InvalidRespondDoesNotPersistDecisionEvent(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	sessionStore := &permissionSessionService{}
+	sessionStore := &permissionSessionStore{}
 	checkpointStore := newPermissionCheckpointStore()
 	const checkpointID = "permission-invalid-respond"
 	runner := adk.NewRunner(ctx, adk.RunnerConfig{
 		Agent:           agent,
 		CheckPointStore: checkpointStore,
 		SessionID:       checkpointID,
-		SessionService:  adk.NewLocalSessionService[*schema.Message](sessionStore),
+		SessionStore:    sessionStore,
 	})
 
 	var interruptID string
@@ -1071,9 +1071,9 @@ func TestToolSpan_PermissionDenyEmitsBothSpansOnSameRun(t *testing.T) {
 	require.NoError(t, err)
 
 	runner := adk.NewRunner(ctx, adk.RunnerConfig{
-		Agent:          agent,
-		SessionID:      "permission-deny-span",
-		SessionService: adk.NewLocalSessionService[*schema.Message](&permissionSessionService{}),
+		Agent:        agent,
+		SessionID:    "permission-deny-span",
+		SessionStore: &permissionSessionStore{},
 	})
 
 	var (
@@ -1169,11 +1169,11 @@ func TestPermissionGate_PersistedAgentInterruptOmitsPrivateInfo(t *testing.T) {
 			})
 			require.NoError(t, err)
 
-			store := &permissionSessionService{}
+			store := &permissionSessionStore{}
 			runner := adk.NewRunner(ctx, adk.RunnerConfig{
-				Agent:          agent,
-				SessionID:      "permission-agent-interrupt-" + strings.ReplaceAll(tt.name, " ", "-"),
-				SessionService: adk.NewLocalSessionService[*schema.Message](store),
+				Agent:        agent,
+				SessionID:    "permission-agent-interrupt-" + strings.ReplaceAll(tt.name, " ", "-"),
+				SessionStore: store,
 			})
 			iter := runner.Query(ctx, "use the tool", adk.WithTimelineEvents())
 			for {
@@ -1241,18 +1241,18 @@ func (t *permissionCaptureTool) InvokableRun(_ context.Context, argumentsInJSON 
 	return "ok", nil
 }
 
-type permissionSessionService struct {
+type permissionSessionStore struct {
 	events []*adk.SessionEvent[*schema.Message]
 }
 
-func (s *permissionSessionService) AppendEvents(_ context.Context, req *adk.AppendSessionEventsRequest[*schema.Message]) error {
+func (s *permissionSessionStore) AppendEvents(_ context.Context, req *adk.AppendSessionEventsRequest[*schema.Message]) error {
 	if req != nil {
 		s.events = append(s.events, req.Events...)
 	}
 	return nil
 }
 
-func (s *permissionSessionService) LoadEvents(_ context.Context, req *adk.LoadSessionEventsRequest) (*adk.LoadSessionEventsResult[*schema.Message], error) {
+func (s *permissionSessionStore) LoadEvents(_ context.Context, req *adk.LoadSessionEventsRequest) (*adk.LoadSessionEventsResult[*schema.Message], error) {
 	if req == nil {
 		req = &adk.LoadSessionEventsRequest{}
 	}

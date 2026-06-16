@@ -18,59 +18,63 @@ package adk
 
 import (
 	"context"
+	"fmt"
+	"reflect"
 	"sync"
 )
 
-// LocalSessionServiceOptions configures the process-local session adapter.
-type LocalSessionServiceOptions struct{}
-
-// NewLocalSessionService wraps a provider-facing event store as a sealed
-// SessionService. It serializes active handles for the same session within the
-// current process and does not provide cross-process write coordination.
-func NewLocalSessionService[M MessageType](store SessionEventStore[M]) SessionService[M] {
-	if store == nil {
-		return nil
-	}
-	return &localSessionService[M]{
-		store:  store,
-		locked: make(map[string]bool),
-	}
-}
-
-type localSessionService[M MessageType] struct {
-	store SessionEventStore[M]
-
+var localSessionAdmission = struct {
 	mu     sync.Mutex
 	locked map[string]bool
-}
+}{locked: make(map[string]bool)}
 
-func (s *localSessionService[M]) openSession(_ context.Context, req *openSessionRequest) (*openSessionResult[M], error) {
-	if req == nil || req.sessionID == "" {
+func openLocalSession[M MessageType](_ context.Context, store SessionEventStore[M], req *openSessionRequest) (*openSessionResult[M], error) {
+	if store == nil || req == nil || req.sessionID == "" {
 		return nil, ErrSessionBusy
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.locked[req.sessionID] {
+	key := localSessionAdmissionKey(store, req.sessionID)
+	if key == "" {
 		return nil, ErrSessionBusy
 	}
-	s.locked[req.sessionID] = true
+	localSessionAdmission.mu.Lock()
+	defer localSessionAdmission.mu.Unlock()
+	if localSessionAdmission.locked[key] {
+		return nil, ErrSessionBusy
+	}
+	localSessionAdmission.locked[key] = true
 	return &openSessionResult[M]{
 		handle: &localSessionHandle[M]{
-			service:   s,
-			store:     s.store,
+			key:       key,
+			store:     store,
 			sessionID: req.sessionID,
 		},
 	}, nil
 }
 
-func (s *localSessionService[M]) release(sessionID string) {
-	s.mu.Lock()
-	delete(s.locked, sessionID)
-	s.mu.Unlock()
+func localSessionAdmissionKey[M MessageType](store SessionEventStore[M], sessionID string) string {
+	v := reflect.ValueOf(store)
+	if !v.IsValid() {
+		return ""
+	}
+	switch v.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Map, reflect.Ptr, reflect.Slice:
+		if v.IsNil() {
+			return ""
+		}
+		return fmt.Sprintf("%T:%x/%s", store, v.Pointer(), sessionID)
+	default:
+		return fmt.Sprintf("%T:%v/%s", store, store, sessionID)
+	}
+}
+
+func releaseLocalSession(key string) {
+	localSessionAdmission.mu.Lock()
+	delete(localSessionAdmission.locked, key)
+	localSessionAdmission.mu.Unlock()
 }
 
 type localSessionHandle[M MessageType] struct {
-	service   *localSessionService[M]
+	key       string
 	store     SessionEventStore[M]
 	sessionID string
 
@@ -114,6 +118,6 @@ func (h *localSessionHandle[M]) close(context.Context) error {
 	}
 	h.closed = true
 	h.mu.Unlock()
-	h.service.release(h.sessionID)
+	releaseLocalSession(h.key)
 	return nil
 }
