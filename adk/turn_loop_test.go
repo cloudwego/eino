@@ -4086,7 +4086,6 @@ func (h *mockSessionHandle) appendEvents(ctx context.Context, req *AppendSession
 }
 
 func (h *mockSessionHandle) close(context.Context) error { return nil }
-func (h *mockSessionHandle) currentTailEventID() string  { return "" }
 
 func TestTurnLoop_SessionServiceWithCheckpointIDWithoutStore(t *testing.T) {
 	ctx := context.Background()

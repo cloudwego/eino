@@ -61,7 +61,6 @@ var ErrInvalidRollbackTarget = errors.New("adk: invalid rollback target")
 var ErrRollbackTargetInactive = errors.New("adk: rollback target is not active")
 var ErrSessionHeadChanged = errors.New("adk: session committed turn_end head changed")
 var ErrSessionBusy = errors.New("adk: session already has an active handle")
-var ErrSessionTailMismatch = errors.New("adk: session tail does not match expected tail")
 var ErrDuplicateEventID = errors.New("adk: duplicate session event_id")
 
 type SessionBusyError struct {
@@ -101,7 +100,6 @@ type openSessionResult[M MessageType] struct {
 type sessionHandle[M MessageType] interface {
 	loadEvents(ctx context.Context, req *LoadSessionEventsRequest) (*LoadSessionEventsResult[M], error)
 	appendEvents(ctx context.Context, req *AppendSessionEventsRequest[M]) error
-	currentTailEventID() string
 	close(ctx context.Context) error
 }
 
@@ -494,11 +492,10 @@ type TurnEndState[M MessageType] struct {
 }
 
 type runnerSessionCheckpoint struct {
-	SessionID          string
-	TurnID             string
-	CheckPointID       string
-	SessionTailEventID string
-	Payload            []byte
+	SessionID    string
+	TurnID       string
+	CheckPointID string
+	Payload      []byte
 }
 
 func init() {

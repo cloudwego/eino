@@ -75,7 +75,6 @@ type localSessionHandle[M MessageType] struct {
 	sessionID string
 
 	mu     sync.Mutex
-	tailID string
 	closed bool
 }
 
@@ -104,24 +103,7 @@ func (h *localSessionHandle[M]) appendEvents(ctx context.Context, req *AppendSes
 	if err := h.store.AppendEvents(ctx, &clone); err != nil {
 		return err
 	}
-	if len(clone.Events) > 0 {
-		h.mu.Lock()
-		h.tailID = clone.Events[len(clone.Events)-1].EventID
-		h.mu.Unlock()
-	}
 	return nil
-}
-
-func (h *localSessionHandle[M]) currentTailEventID() string {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	return h.tailID
-}
-
-func (h *localSessionHandle[M]) setCurrentTailEventID(tailID string) {
-	h.mu.Lock()
-	h.tailID = tailID
-	h.mu.Unlock()
 }
 
 func (h *localSessionHandle[M]) close(context.Context) error {
@@ -134,23 +116,4 @@ func (h *localSessionHandle[M]) close(context.Context) error {
 	h.mu.Unlock()
 	h.service.release(h.sessionID)
 	return nil
-}
-
-func refreshSessionTail[M MessageType](ctx context.Context, handle sessionHandle[M], sessionID string) (string, error) {
-	result, err := handle.loadEvents(ctx, &LoadSessionEventsRequest{
-		SessionID: sessionID,
-		Reverse:   true,
-		Limit:     1,
-	})
-	if err != nil {
-		return "", err
-	}
-	tailID := ""
-	if result != nil && len(result.Events) > 0 && result.Events[0] != nil {
-		tailID = result.Events[0].EventID
-	}
-	if h, ok := handle.(*localSessionHandle[M]); ok {
-		h.setCurrentTailEventID(tailID)
-	}
-	return tailID, nil
 }

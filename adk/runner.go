@@ -305,11 +305,6 @@ func prepareRunnerSessionRun[M MessageType]( //nolint:revive // argument-limit
 	if reconstructResult != nil && reconstructResult.state != nil {
 		state.latestState = reconstructResult.state
 	}
-	_, err = refreshSessionTail(ctx, state.sessionHandle, sessionID)
-	if err != nil {
-		_ = state.sessionHandle.close(ctx)
-		return nil, fmt.Errorf("failed to refresh session[%s] tail: %w", sessionID, err)
-	}
 	runningEvent := &SessionEvent[M]{
 		Timestamp: newEventTimestamp(),
 		Kind:      SessionEventSessionStatusRunning,
@@ -398,12 +393,6 @@ func prepareRunnerSessionResume[M MessageType]( //nolint:revive // argument-limi
 			state.turnID = reconstructResult.inFlightTurnID
 		}
 	}
-	_, err = refreshSessionTail(ctx, state.sessionHandle, sessionID)
-	if err != nil {
-		_ = state.sessionHandle.close(ctx)
-		return nil, "", fmt.Errorf("failed to refresh session[%s] tail: %w", sessionID, err)
-	}
-
 	// Pick the checkpoint ID: caller-provided takes precedence over the implicit
 	// session-scoped one. The session-scoped key still drives existence checks
 	// when the caller did not supply a checkpoint.
@@ -417,7 +406,7 @@ func prepareRunnerSessionResume[M MessageType]( //nolint:revive // argument-limi
 	// passing an explicit checkpoint ID has asserted the checkpoint should exist
 	// and any error will surface from the subsequent load. For implicit resume,
 	// the absence of a pending checkpoint is fatal and reported here.
-	checkpoint, existed, err := loadRunnerSessionCheckpoint(ctx, checkPointStore, effectiveCheckPointID)
+	_, existed, err := loadRunnerSessionCheckpoint(ctx, checkPointStore, effectiveCheckPointID)
 	if err != nil {
 		_ = state.sessionHandle.close(ctx)
 		return nil, "", err
@@ -428,10 +417,6 @@ func prepareRunnerSessionResume[M MessageType]( //nolint:revive // argument-limi
 			return nil, "", fmt.Errorf("no pending session checkpoint for session %q", sessionID)
 		}
 		return nil, "", fmt.Errorf("checkpoint[%s] not exist", effectiveCheckPointID)
-	}
-	if err := verifyRunnerSessionCheckpointTail(state, checkpoint); err != nil {
-		_ = state.sessionHandle.close(ctx)
-		return nil, "", err
 	}
 	resumeEvent := &SessionEvent[M]{
 		Timestamp: newEventTimestamp(),
@@ -473,18 +458,6 @@ func appendRunnerSessionControlEvent[M MessageType](
 		Events:    []*SessionEvent[M]{event},
 	})
 	return err
-}
-
-func verifyRunnerSessionCheckpointTail[M MessageType](state *runnerSessionRunState[M], checkpoint *runnerSessionCheckpoint) error {
-	if state == nil || state.sessionHandle == nil || checkpoint == nil {
-		return nil
-	}
-	currentTail := state.sessionHandle.currentTailEventID()
-	if checkpoint.SessionTailEventID != currentTail {
-		return fmt.Errorf("%w: session %q checkpoint tail %q current tail %q",
-			ErrSessionTailMismatch, state.sessionID, checkpoint.SessionTailEventID, currentTail)
-	}
-	return nil
 }
 
 func appendRunnerSessionInputEvents[M MessageType](
@@ -596,11 +569,10 @@ func saveRunnerCheckpoint[M MessageType]( //nolint:revive // argument-limit
 		return err
 	}
 	data, err := encodeRunnerSessionCheckpoint(&runnerSessionCheckpoint{
-		SessionID:          sessionState.sessionID,
-		TurnID:             sessionState.turnID,
-		CheckPointID:       checkPointID,
-		SessionTailEventID: sessionState.sessionHandle.currentTailEventID(),
-		Payload:            payload,
+		SessionID:    sessionState.sessionID,
+		TurnID:       sessionState.turnID,
+		CheckPointID: checkPointID,
+		Payload:      payload,
 	})
 	if err != nil {
 		return err

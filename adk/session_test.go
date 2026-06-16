@@ -475,14 +475,6 @@ func (s *sessionHelperStore) appendEvents(ctx context.Context, req *AppendSessio
 }
 
 func (s *sessionHelperStore) close(context.Context) error { return nil }
-func (s *sessionHelperStore) currentTailEventID() string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if len(s.eventIDs) == 0 {
-		return ""
-	}
-	return s.eventIDs[len(s.eventIDs)-1]
-}
 
 type testSessionHandle struct {
 	store     *sessionHelperStore
@@ -504,7 +496,6 @@ func (h *testSessionHandle) appendEvents(ctx context.Context, req *AppendSession
 }
 
 func (h *testSessionHandle) close(context.Context) error { return nil }
-func (h *testSessionHandle) currentTailEventID() string  { return h.store.currentTailEventID() }
 
 type legacyMessageTestStore interface {
 	AppendEvents(context.Context, string, []*SessionEvent[*schema.Message]) error
@@ -531,12 +522,6 @@ func (h *legacyMessageTestHandle) appendEvents(ctx context.Context, req *AppendS
 }
 
 func (h *legacyMessageTestHandle) close(context.Context) error { return nil }
-func (h *legacyMessageTestHandle) currentTailEventID() string {
-	if tailer, ok := h.store.(interface{ currentTailEventID() string }); ok {
-		return tailer.currentTailEventID()
-	}
-	return ""
-}
 
 func mustOpenTestSession[M MessageType](t testing.TB, ctx context.Context, service SessionService[M], sessionID string) sessionHandle[M] {
 	t.Helper()
@@ -2561,7 +2546,6 @@ func TestRunnerSessionInterruptCheckpointTailIsFinalIdle(t *testing.T) {
 	tail := store.events[len(store.events)-1]
 	store.sessionHelperStore.mu.Unlock()
 	assert.Equal(t, SessionEventSessionStatusIdle, tail.Kind)
-	assert.Equal(t, tail.EventID, cp.SessionTailEventID)
 
 	_, runCtx, _, err := runnerLoadCheckPointBytes(ctx, cp.Payload)
 	require.NoError(t, err)
@@ -2571,62 +2555,6 @@ func TestRunnerSessionInterruptCheckpointTailIsFinalIdle(t *testing.T) {
 		require.NotNil(t, event.AgentEvent)
 		assert.Nil(t, event.SessionEvent)
 	}
-}
-
-func TestPrepareRunnerSessionResumeRejectsStaleCheckpointTailBeforeResumeEvent(t *testing.T) {
-	ctx := context.Background()
-	sid := "resume-stale-tail"
-	store := newSessionHelperStore()
-
-	first := &SessionEvent[*schema.Message]{
-		EventID: "resume-tail-1",
-		Kind:    SessionEventMessage,
-		Message: schema.UserMessage("before checkpoint"),
-	}
-	require.NoError(t, store.AppendEvents(ctx, sid, []*SessionEvent[*schema.Message]{first}))
-	cpBytes, err := encodeRunnerSessionCheckpoint(&runnerSessionCheckpoint{
-		SessionTailEventID: first.EventID,
-		Payload:            []byte("opaque"),
-	})
-	require.NoError(t, err)
-	require.NoError(t, store.Set(ctx, sessionRunnerCheckpointID(sid), cpBytes))
-
-	require.NoError(t, store.AppendEvents(ctx, sid, []*SessionEvent[*schema.Message]{{
-		EventID: "resume-tail-2",
-		Kind:    SessionEventMessage,
-		Message: schema.UserMessage("after checkpoint"),
-	}}))
-
-	state, _, err := prepareRunnerSessionResume[*schema.Message](ctx, store, sid, store, nil, "")
-	require.ErrorIs(t, err, ErrSessionTailMismatch)
-	assert.Nil(t, state)
-	events := decodeStoredSessionEvents(t, store.events)
-	for _, event := range events {
-		assert.NotEqual(t, SessionEventKind(SessionEventExtensionPrefix+"resume.request_started"), event.Kind)
-	}
-
-	freshSID := "resume-matching-tail"
-	fresh := newSessionHelperStore()
-	tail := &SessionEvent[*schema.Message]{
-		EventID: "resume-tail-current",
-		Kind:    SessionEventMessage,
-		Message: schema.UserMessage("current"),
-	}
-	require.NoError(t, fresh.AppendEvents(ctx, freshSID, []*SessionEvent[*schema.Message]{tail}))
-	cpBytes, err = encodeRunnerSessionCheckpoint(&runnerSessionCheckpoint{
-		SessionTailEventID: tail.EventID,
-		Payload:            []byte("opaque"),
-	})
-	require.NoError(t, err)
-	require.NoError(t, fresh.Set(ctx, sessionRunnerCheckpointID(freshSID), cpBytes))
-
-	state, _, err = prepareRunnerSessionResume[*schema.Message](ctx, fresh, freshSID, fresh, nil, "")
-	require.NoError(t, err)
-	require.NotNil(t, state)
-	t.Cleanup(func() { _ = state.sessionHandle.close(ctx) })
-	events = decodeStoredSessionEvents(t, fresh.events)
-	require.NotEmpty(t, events)
-	assert.Equal(t, SessionEventKind(SessionEventExtensionPrefix+"resume.request_started"), events[len(events)-1].Kind)
 }
 
 func TestRunnerSessionCheckpointPayloadStripsSessionEvents(t *testing.T) {
@@ -2660,7 +2588,6 @@ func TestRunnerSessionCheckpointPayloadStripsSessionEvents(t *testing.T) {
 	require.True(t, ok, "expected interrupt checkpoint to be saved")
 	cp, err := decodeRunnerSessionCheckpoint(raw)
 	require.NoError(t, err)
-	assert.NotEmpty(t, cp.SessionTailEventID)
 
 	_, runCtx, _, err := runnerLoadCheckPointBytes(ctx, cp.Payload)
 	require.NoError(t, err)

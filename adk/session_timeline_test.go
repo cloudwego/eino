@@ -1533,7 +1533,6 @@ func (s *kindsRecordingStore) appendEvents(ctx context.Context, req *AppendSessi
 }
 
 func (s *kindsRecordingStore) close(context.Context) error { return nil }
-func (s *kindsRecordingStore) currentTailEventID() string  { return "" }
 
 func TestSessionTimeline_ReconstructionUsesKindFilter(t *testing.T) {
 	ctx := context.Background()

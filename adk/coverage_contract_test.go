@@ -177,7 +177,6 @@ func TestLocalSessionServiceHandleContracts(t *testing.T) {
 	require.NotNil(t, res)
 	require.Len(t, store.loadReqs, 1)
 	assert.Equal(t, "sid", store.loadReqs[0].SessionID)
-	assert.Empty(t, opened.handle.currentTailEventID())
 
 	event := validTestPayload()
 	err = opened.handle.appendEvents(ctx, &AppendSessionEventsRequest[*schema.Message]{
@@ -186,13 +185,11 @@ func TestLocalSessionServiceHandleContracts(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, store.appendReqs, 1)
 	assert.Equal(t, "sid", store.appendReqs[0].SessionID)
-	assert.Equal(t, event.EventID, opened.handle.currentTailEventID())
 
 	err = opened.handle.appendEvents(ctx, nil)
 	require.NoError(t, err)
 	require.Len(t, store.appendReqs, 2)
 	assert.Equal(t, "sid", store.appendReqs[1].SessionID)
-	assert.Equal(t, event.EventID, opened.handle.currentTailEventID())
 
 	require.NoError(t, opened.handle.close(ctx))
 	require.NoError(t, opened.handle.close(ctx))

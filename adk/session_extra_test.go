@@ -948,7 +948,6 @@ func (h *agenticTestSessionHandle) appendEvents(ctx context.Context, req *Append
 }
 
 func (h *agenticTestSessionHandle) close(context.Context) error { return nil }
-func (h *agenticTestSessionHandle) currentTailEventID() string  { return "" }
 
 // TestPartialInterrupted_ThenNewRun verifies that when a turn is interrupted
 // after some events have been appended (but before SaveTurnEnd commits), a new
@@ -1064,8 +1063,7 @@ func TestExplicitCheckpointResume_WithSessionMode(t *testing.T) {
 	// Seed an arbitrary checkpoint ID with a runner-session-checkpoint wrapper
 	// so runnerLoadCheckPointForSession can decode it.
 	cpBytes, err := encodeRunnerSessionCheckpoint(&runnerSessionCheckpoint{
-		SessionTailEventID: store.currentTailEventID(),
-		Payload:            []byte("opaque"),
+		Payload: []byte("opaque"),
 	})
 	require.NoError(t, err)
 	explicitCheckpointID := "user-supplied-cp"
@@ -1111,8 +1109,7 @@ func TestResumePath_TailReplay(t *testing.T) {
 	// Seed a runner session checkpoint so the resume path finds something to load.
 	cpStore := newSessionHelperStore()
 	cpBytes, err := encodeRunnerSessionCheckpoint(&runnerSessionCheckpoint{
-		SessionTailEventID: store.currentTailEventID(),
-		Payload:            []byte("opaque"),
+		Payload: []byte("opaque"),
 	})
 	require.NoError(t, err)
 	require.NoError(t, cpStore.Set(ctx, sessionRunnerCheckpointID(sid), cpBytes))
