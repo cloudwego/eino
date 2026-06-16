@@ -32,12 +32,10 @@ func TestNewSessionHistoryGrepTool(t *testing.T) {
 	ctx := context.Background()
 	store := adksession.NewInMemoryStore[*schema.Message](nil)
 	sessionID := "session-1"
-	tail := ""
 
 	appendEvent := func(eventID string, msg *schema.Message) {
-		res, err := store.AppendEvents(ctx, &adk.AppendSessionEventsRequest[*schema.Message]{
-			SessionID:                  sessionID,
-			ExpectedSessionTailEventID: tail,
+		err := store.AppendEvents(ctx, &adk.AppendSessionEventsRequest[*schema.Message]{
+			SessionID: sessionID,
 			Events: []*adk.SessionEvent[*schema.Message]{{
 				EventID: eventID,
 				Kind:    adk.SessionEventMessage,
@@ -45,7 +43,6 @@ func TestNewSessionHistoryGrepTool(t *testing.T) {
 			}},
 		})
 		require.NoError(t, err)
-		tail = res.SessionTailEventID
 	}
 
 	appendEvent("e1", schema.UserMessage("hello there"))
@@ -68,7 +65,7 @@ func TestNewSessionHistoryGrepTool_SearchesRunScopedSessions(t *testing.T) {
 	store := adksession.NewInMemoryStore[*schema.Message](nil)
 
 	appendEvent := func(sessionID, eventID string, msg *schema.Message) {
-		_, err := store.AppendEvents(ctx, &adk.AppendSessionEventsRequest[*schema.Message]{
+		err := store.AppendEvents(ctx, &adk.AppendSessionEventsRequest[*schema.Message]{
 			SessionID: sessionID,
 			Events: []*adk.SessionEvent[*schema.Message]{{
 				EventID: eventID,
