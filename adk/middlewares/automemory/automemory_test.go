@@ -30,6 +30,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cloudwego/eino/adk"
+	adksession "github.com/cloudwego/eino/adk/session"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
 )
@@ -168,6 +169,62 @@ func TestMiddleware_TopicSelection_InsertsMemoryMessage(t *testing.T) {
 	require.NotNil(t, out.AgentInput.Messages[1].Extra)
 	require.NotNil(t, out.AgentInput.Messages[1].Extra["__eino_automemory__"])
 	require.Contains(t, out.AgentInput.Messages[1].Content, "Contents of /mem/debugging.md")
+}
+
+func TestMiddleware_BeforeAgent_MessageInsertedEventPersistsToSessionStore(t *testing.T) {
+	ctx := context.Background()
+	b := NewInMemoryBackend()
+	now := time.Now()
+
+	b.put("/mem/MEMORY.md", "- [debugging.md](debugging.md) - notes\n", now)
+	b.put("/mem/debugging.md", "---\nname: Debugging\ndescription: build and test commands\ntype: project\n---\n\n# Debugging\npnpm test\n", now)
+
+	mw, err := New(ctx, &Config[*schema.Message]{
+		MemoryDirectory: "/mem",
+		MemoryBackend:   b,
+		Model:           &fixedModel{out: "ok"},
+	})
+	require.NoError(t, err)
+
+	agent, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
+		Name:        "automemory-session-event-agent",
+		Instruction: "base",
+		Model:       &fixedModel{out: "ok"},
+		Handlers:    []adk.ChatModelAgentMiddleware{mw},
+	})
+	require.NoError(t, err)
+
+	const sessionID = "automemory-message-inserted-session"
+	store := adksession.NewInMemoryStore[*schema.Message](nil)
+	runner := adk.NewRunner(ctx, adk.RunnerConfig{
+		Agent:          agent,
+		SessionID:      sessionID,
+		SessionService: adk.NewLocalSessionService[*schema.Message](store),
+	})
+
+	iter := runner.Query(ctx, "How to run tests?")
+	for {
+		event, ok := iter.Next()
+		if !ok {
+			break
+		}
+		require.NoError(t, event.Err)
+	}
+
+	loaded, err := store.LoadEvents(ctx, &adk.LoadSessionEventsRequest{
+		SessionID: sessionID,
+		Kinds:     []adk.SessionEventKind{adk.SessionEventMessageInserted},
+	})
+	require.NoError(t, err)
+	require.Len(t, loaded.Events, 1, "AutoMemory BeforeAgent MessageInserted event should be persisted in SessionStore")
+
+	inserted := loaded.Events[0].MessageInserted
+	require.NotNil(t, inserted)
+	require.NotEmpty(t, inserted.BeforeMessageID)
+	require.NotNil(t, inserted.Message)
+	require.Contains(t, inserted.Message.Content, "<!-- automemory -->")
+	require.Contains(t, inserted.Message.Content, "Contents of /mem/debugging.md")
+	require.NotNil(t, inserted.Message.Extra[memoryExtraKey])
 }
 
 func TestMiddleware_TopicSelection_AsyncInjectsInBeforeModel(t *testing.T) {
