@@ -81,6 +81,7 @@ func (e *typedChatModelAgentExecCtx[M]) send(ctx context.Context, event *TypedAg
 	if event == nil {
 		return
 	}
+	ensureTypedAgentEventMessageIDs(event)
 	if event.EventID == "" || event.SessionEvent != nil {
 		gen := sessionEventIDGeneratorFromContext[M](ctx)
 		if gen == nil {
@@ -119,6 +120,43 @@ func getTypedChatModelAgentExecCtx[M MessageType](ctx context.Context) *typedCha
 		return v.(*typedChatModelAgentExecCtx[M])
 	}
 	return nil
+}
+
+func newTypedChatModelAgentExecCtx[M MessageType](
+	generator *AsyncGenerator[*TypedAgentEvent[M]],
+	cancelCtx *cancelContext,
+	sessionEvents bool,
+	timelineEvents bool,
+	internalTimelineEvents bool,
+) *typedChatModelAgentExecCtx[M] {
+	return &typedChatModelAgentExecCtx[M]{
+		generator:              generator,
+		cancelCtx:              cancelCtx,
+		sessionEvents:          sessionEvents,
+		timelineEvents:         timelineEvents,
+		internalTimelineEvents: internalTimelineEvents,
+	}
+}
+
+func configureTypedChatModelAgentExecCtx[M MessageType](
+	ctx context.Context,
+	generator *AsyncGenerator[*TypedAgentEvent[M]],
+	cancelCtx *cancelContext,
+	sessionEvents bool,
+	timelineEvents bool,
+	internalTimelineEvents bool,
+) (context.Context, *typedChatModelAgentExecCtx[M]) {
+	execCtx := getTypedChatModelAgentExecCtx[M](ctx)
+	if execCtx == nil {
+		execCtx = &typedChatModelAgentExecCtx[M]{}
+		ctx = withTypedChatModelAgentExecCtx(ctx, execCtx)
+	}
+	execCtx.generator = generator
+	execCtx.cancelCtx = cancelCtx
+	execCtx.sessionEvents = sessionEvents
+	execCtx.timelineEvents = timelineEvents
+	execCtx.internalTimelineEvents = internalTimelineEvents
+	return ctx, execCtx
 }
 
 type chatModelAgentRunOptions struct {
@@ -1173,14 +1211,9 @@ func (a *TypedChatModelAgent[M]) buildNoToolsRunFunc(_ context.Context) (typedRu
 			return
 		}
 
-		ctx = withTypedChatModelAgentExecCtx(ctx, &typedChatModelAgentExecCtx[M]{
-			generator:                p.generator,
-			cancelCtx:                cancelCtx,
-			failoverLastSuccessModel: a.model,
-			sessionEvents:            p.sessionEvents,
-			timelineEvents:           p.timelineEvents,
-			internalTimelineEvents:   p.internalTimelineEvents,
-		})
+		var execCtx *typedChatModelAgentExecCtx[M]
+		ctx, execCtx = configureTypedChatModelAgentExecCtx(ctx, p.generator, cancelCtx, p.sessionEvents, p.timelineEvents, p.internalTimelineEvents)
+		execCtx.failoverLastSuccessModel = a.model
 
 		// Pre-execution cancel check
 		if cancelCtx != nil && cancelCtx.shouldCancel() {
@@ -1330,16 +1363,10 @@ func (a *TypedChatModelAgent[M]) buildMessageReActRunFunc(_ context.Context, bc 
 			return
 		}
 
-		ctx = withTypedChatModelAgentExecCtx(ctx, &chatModelAgentExecCtx{
-			runtimeReturnDirectly:    mp.returnDirectly,
-			generator:                mp.generator,
-			cancelCtx:                cancelCtx,
-			failoverLastSuccessModel: msgModel,
-			afterToolCallsHook:       mp.afterToolCallsHook,
-			sessionEvents:            mp.sessionEvents,
-			timelineEvents:           mp.timelineEvents,
-			internalTimelineEvents:   mp.internalTimelineEvents,
-		})
+		ctx, execCtx := configureTypedChatModelAgentExecCtx(ctx, mp.generator, cancelCtx, mp.sessionEvents, mp.timelineEvents, mp.internalTimelineEvents)
+		execCtx.runtimeReturnDirectly = mp.returnDirectly
+		execCtx.failoverLastSuccessModel = msgModel
+		execCtx.afterToolCallsHook = mp.afterToolCallsHook
 
 		// Pre-execution cancel check
 		if cancelCtx != nil && cancelCtx.shouldCancel() {
@@ -1488,16 +1515,10 @@ func (a *TypedChatModelAgent[M]) buildAgenticReActRunFunc(_ context.Context, bc 
 			return
 		}
 
-		ctx = withTypedChatModelAgentExecCtx(ctx, &typedChatModelAgentExecCtx[*schema.AgenticMessage]{
-			runtimeReturnDirectly:    ap.returnDirectly,
-			generator:                ap.generator,
-			cancelCtx:                cancelCtx,
-			failoverLastSuccessModel: agenticModel,
-			afterToolCallsHook:       ap.afterToolCallsHook,
-			sessionEvents:            ap.sessionEvents,
-			timelineEvents:           ap.timelineEvents,
-			internalTimelineEvents:   ap.internalTimelineEvents,
-		})
+		ctx, execCtx := configureTypedChatModelAgentExecCtx(ctx, ap.generator, cancelCtx, ap.sessionEvents, ap.timelineEvents, ap.internalTimelineEvents)
+		execCtx.runtimeReturnDirectly = ap.returnDirectly
+		execCtx.failoverLastSuccessModel = agenticModel
+		execCtx.afterToolCallsHook = ap.afterToolCallsHook
 
 		// Pre-execution cancel check
 		if cancelCtx != nil && cancelCtx.shouldCancel() {
@@ -1634,6 +1655,8 @@ func (a *TypedChatModelAgent[M]) Run(ctx context.Context, input *TypedAgentInput
 
 	o := getCommonOptions(nil, opts...)
 	cancelCtx, cancelCtxOwned := resolveRunCancelContext(ctx, o)
+	ctx = withTypedChatModelAgentExecCtx(ctx,
+		newTypedChatModelAgentExecCtx(generator, cancelCtx, o.enableSessionEvents, o.enableTimelineEvents, o.enableInternalTimelineEvents))
 
 	ctx, run, bc, input, err := a.getRunFunc(ctx, input)
 	if err != nil {
@@ -1729,6 +1752,8 @@ func (a *TypedChatModelAgent[M]) Resume(ctx context.Context, info *ResumeInfo, o
 
 	o := getCommonOptions(nil, opts...)
 	cancelCtx, cancelCtxOwned := resolveRunCancelContext(ctx, o)
+	ctx = withTypedChatModelAgentExecCtx(ctx,
+		newTypedChatModelAgentExecCtx(generator, cancelCtx, o.enableSessionEvents, o.enableTimelineEvents, o.enableInternalTimelineEvents))
 
 	ctx, run, bc, _, err := a.getRunFunc(ctx, nil)
 	if err != nil {

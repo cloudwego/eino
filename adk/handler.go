@@ -416,10 +416,10 @@ func DeleteRunLocalValue(ctx context.Context, key string) error {
 // canonical in-run path because Runner materializes identity, emits the live
 // event, and persists it through the ordered session event pipeline.
 //
-// Note: TypedSendEvent is a pure transport — it does NOT auto-assign message IDs.
-// Framework-created messages (model output, tool results) receive IDs automatically
-// via internal wrapper layers. If your middleware constructs its own messages, call
-// EnsureMessageID before sending to assign an ID.
+// TypedSendEvent assigns message IDs for message-bearing events before enqueueing
+// them. Middleware authors only need to call EnsureMessageID directly when they
+// need the ID before emitting the event, for example to build another event that
+// references the message by ID.
 //
 // When called outside of an agent execution context, or from a path without an
 // event generator, this function is a no-op.
