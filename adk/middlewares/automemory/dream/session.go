@@ -99,7 +99,6 @@ func newSessionHistoryGrepTool[M adk.MessageType](store adk.SessionEventStore[M]
 					Limit:              pageSize,
 					Reverse:            true,
 					Kinds:              []adk.SessionEventKind{adk.SessionEventMessage},
-					IncludeSessionTail: false,
 				})
 				if err != nil {
 					return "", err
