@@ -907,7 +907,9 @@ func GetMessageID[M MessageType](msg M) string {
 
 // EnsureMessageID assigns a UUID v4 message ID if the message doesn't have one.
 // Idempotent: if ID already set, no-op.
-// Middleware authors should call this before SendEvent if they create messages.
+// TypedSendEvent/SendEvent call this automatically for message-bearing events.
+// Middleware authors only need to call it directly when they need the ID before
+// emitting the event.
 func EnsureMessageID[M MessageType](msg M) {
 	switch v := any(msg).(type) {
 	case *schema.Message:
@@ -917,6 +919,48 @@ func EnsureMessageID[M MessageType](msg M) {
 	case *schema.AgenticMessage:
 		if internal.GetMessageID(v.Extra) == "" {
 			v.Extra = internal.EnsureMessageID(v.Extra)
+		}
+	}
+}
+
+func ensureTypedAgentEventMessageIDs[M MessageType](event *TypedAgentEvent[M]) {
+	if event == nil {
+		return
+	}
+	if event.Output != nil && event.Output.MessageOutput != nil && !isNilMessage(event.Output.MessageOutput.Message) {
+		EnsureMessageID(event.Output.MessageOutput.Message)
+	}
+	ensureSessionEventMessageIDs(event.SessionEvent)
+}
+
+func ensureSessionEventMessageIDs[M MessageType](event *SessionEvent[M]) {
+	if event == nil {
+		return
+	}
+	if !isNilMessage(event.Message) {
+		EnsureMessageID(event.Message)
+	}
+	if event.MessagesReplaced != nil {
+		for _, msg := range *event.MessagesReplaced {
+			if !isNilMessage(msg) {
+				EnsureMessageID(msg)
+			}
+		}
+	}
+	if event.MessageUpdated != nil && !isNilMessage(event.MessageUpdated.Message) {
+		msgID := GetMessageID(event.MessageUpdated.Message)
+		if msgID == "" && event.MessageUpdated.MessageID != "" {
+			typedSetMessageID(event.MessageUpdated.Message, event.MessageUpdated.MessageID)
+		}
+	}
+	if event.MessageInserted != nil && !isNilMessage(event.MessageInserted.Message) {
+		EnsureMessageID(event.MessageInserted.Message)
+	}
+	if event.TurnEnd != nil {
+		for _, msg := range event.TurnEnd.Messages {
+			if !isNilMessage(msg) {
+				EnsureMessageID(msg)
+			}
 		}
 	}
 }
