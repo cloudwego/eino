@@ -470,11 +470,10 @@ func TestMessageID_UserInputNoAutoID(t *testing.T) {
 	}
 }
 
-// Scenario 8: Middleware must call EnsureMessageID before SendEvent; pointer identity ensures state consistency
-// TestMessageID_SendEvent_MiddlewareMustEnsureID verifies that TypedSendEvent is a pure
-// transport and does NOT auto-assign message IDs. Middleware authors must call
-// EnsureMessageID themselves before sending.
-func TestMessageID_SendEvent_MiddlewareMustEnsureID(t *testing.T) {
+// Scenario 8: SendEvent assigns message IDs before enqueue; pointer identity ensures state consistency.
+// TestMessageID_SendEvent_AutoEnsuresID verifies that middleware-created messages
+// receive IDs at the SendEvent boundary.
+func TestMessageID_SendEvent_AutoEnsuresID(t *testing.T) {
 	ctx := context.Background()
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
@@ -498,21 +497,18 @@ func TestMessageID_SendEvent_MiddlewareMustEnsureID(t *testing.T) {
 					// Middleware creates a new message and writes the SAME pointer to both state and event
 					middlewareMsg = schema.AssistantMessage("middleware injected", nil)
 
-					// Middleware is responsible for assigning the ID before sending
-					EnsureMessageID(middlewareMsg)
-
 					// Write to state
 					state.Messages = append(state.Messages, middlewareMsg)
 
-					// Send as event — TypedSendEvent does NOT auto-assign ID
+					// Send as event — TypedSendEvent assigns ID on the shared pointer.
 					event := EventFromMessage(middlewareMsg, nil, schema.Assistant, "")
 					err := SendEvent(ctx, event)
 					if err != nil {
 						return err
 					}
 
-					// Because we called EnsureMessageID on the shared pointer,
-					// the state copy also has the ID (pointer identity)
+					// Because SendEvent ensures ID on the shared pointer, the state
+					// copy also has the ID (pointer identity).
 					stateMsgIDAfterSendEvent = internal.GetMessageID(middlewareMsg.Extra)
 
 					return nil
@@ -538,10 +534,10 @@ func TestMessageID_SendEvent_MiddlewareMustEnsureID(t *testing.T) {
 	// We expect at least 2 events: model response + middleware injected message
 	require.GreaterOrEqual(t, len(allEvents), 2)
 
-	// The middleware message pointer should have an ID (assigned by middleware via EnsureMessageID)
+	// The middleware message pointer should have an ID assigned at SendEvent time.
 	require.NotNil(t, middlewareMsg)
 	middlewareMsgID := GetMessageID(middlewareMsg)
-	assert.NotEmpty(t, middlewareMsgID, "middleware should have assigned an ID via EnsureMessageID")
+	assert.NotEmpty(t, middlewareMsgID, "SendEvent should assign an ID")
 	assert.True(t, isValidUUID(middlewareMsgID))
 
 	// The ID captured right after SendEvent (via pointer identity) should be the same
