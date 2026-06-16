@@ -1123,6 +1123,14 @@ func (a *TypedChatModelAgent[M]) handleRunFuncError(
 		return
 	}
 
+	if cancelCtxOwned && cancelCtx != nil && cancelCtx.shouldCancel() && errors.Is(err, ErrStreamCanceled) {
+		cancelErr, ok := cancelCtx.createAndMarkCancelHandled()
+		if ok {
+			generator.Send(&TypedAgentEvent[M]{Err: cancelErr})
+		}
+		return
+	}
+
 	if cancelCtxOwned && cancelCtx != nil {
 		cancelCtx.markDone()
 	}
