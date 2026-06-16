@@ -1693,7 +1693,6 @@ func (m *middleware[M]) sendTopicMemoryEvent(ctx context.Context, msgs []M, memM
 	if len(msgs) > 0 && !isNilMessage(msgs[len(msgs)-1]) {
 		beforeID = adk.GetMessageID(msgs[len(msgs)-1])
 	}
-	adk.EnsureMessageID(memMsg)
 	if sendEventErr := adk.TypedSendEvent(ctx, &adk.TypedAgentEvent[M]{SessionEvent: &adk.SessionEvent[M]{
 		Kind: adk.SessionEventMessageInserted,
 		MessageInserted: &adk.MessageInsertedEvent[M]{
