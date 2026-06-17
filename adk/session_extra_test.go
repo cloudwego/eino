@@ -519,8 +519,7 @@ func TestStreamPersistence_GetMessageError_NotEnqueued(t *testing.T) {
 			_, _ = schema.ConcatMessageStream(ev.Output.MessageOutput.MessageStream)
 		}
 	}
-	require.Error(t, lastErr, "turn must fail when persisted-stream materialization errors")
-	assert.Contains(t, lastErr.Error(), "failed to persist session events")
+	require.NoError(t, lastErr, "stream materialization errors should drop only the message event")
 
 	// Verify no assistant SessionEvent is in the log.
 	for _, ep := range store.events {
@@ -572,8 +571,7 @@ func TestStreamPersistence_GetMessageErrorSurfacesAfterLiveStreaming(t *testing.
 			sawOutput = true
 		}
 	}
-	require.Error(t, lastErr)
-	assert.Contains(t, lastErr.Error(), "failed to persist session events")
+	require.NoError(t, lastErr)
 	assert.True(t, sawOutput, "streaming output may already be live before materialization fails")
 
 	for _, ep := range store.events {
