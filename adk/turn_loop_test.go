@@ -2654,7 +2654,7 @@ func TestTurnLoop_ManagedInterrupt_StartNewTurnDeleteFailureStopsBeforeRun(t *te
 	assert.True(t, exists, "checkpoint must remain when deletion fails")
 }
 
-func TestTurnLoop_ManagedInterrupt_StartNewTurnUsesConfiguredSessionService(t *testing.T) {
+func TestTurnLoop_ManagedInterrupt_StartNewTurnUsesConfiguredSessionStore(t *testing.T) {
 	ctx := context.Background()
 	sessionStore := newSessionHelperStore()
 	sessionID := "managed-session-passthrough"
@@ -2672,7 +2672,7 @@ func TestTurnLoop_ManagedInterrupt_StartNewTurnUsesConfiguredSessionService(t *t
 		}),
 		withTestEventID(&SessionEvent[*schema.Message]{Kind: SessionEventMessage, Message: partialUser}),
 	} {
-		require.NoError(t, sessionStore.AppendEvents(ctx, sessionID, []*SessionEvent[*schema.Message]{se}))
+		require.NoError(t, sessionStore.AppendEventsForSession(ctx, sessionID, []*SessionEvent[*schema.Message]{se}))
 	}
 	initialEventCount := len(sessionStore.events)
 
@@ -2680,10 +2680,10 @@ func TestTurnLoop_ManagedInterrupt_StartNewTurnUsesConfiguredSessionService(t *t
 	var prepareCount int32
 	captureAgent := &runnerSessionAgent{name: "session-capture"}
 	loop := newAndRunTurnLoop(ctx, TurnLoopConfig[string, *schema.Message]{
-		InterruptMode:  TurnLoopInterruptWaitsForExplicitResume,
-		SessionID:      sessionID,
-		SessionService: sessionStore,
-		GenInput:       genInputConsumeAllWithMsg,
+		InterruptMode: TurnLoopInterruptWaitsForExplicitResume,
+		SessionID:     sessionID,
+		SessionStore:  sessionStore,
+		GenInput:      genInputConsumeAllWithMsg,
 		GenResume: func(ctx context.Context, _ *TurnLoop[string, *schema.Message], interruptedItems, unhandledItems, resumeItems []string) (*GenResumeResult[string, *schema.Message], error) {
 			return &GenResumeResult[string, *schema.Message]{
 				Decision: TurnLoopResumeDecisionStartNewTurn,
@@ -2732,8 +2732,8 @@ func TestTurnLoop_ManagedInterrupt_StartNewTurnUsesConfiguredSessionService(t *t
 	assert.Contains(t, contents, "partial-after-turn-end")
 	assert.Contains(t, contents, "trigger-interrupt")
 	assert.Contains(t, contents, "fresh-after-interrupt")
-	assert.Greater(t, len(sessionStore.events), initialEventCount, "fresh turn should append session events to configured SessionService")
-	assert.Empty(t, sessionStore.checkpoints, "runner checkpoint bridge must not use SessionService checkpoint map")
+	assert.Greater(t, len(sessionStore.events), initialEventCount, "fresh turn should append session events to configured SessionStore")
+	assert.Empty(t, sessionStore.checkpoints, "runner checkpoint bridge must not use SessionStore checkpoint map")
 }
 
 func TestTurnLoop_ManagedInterrupt_DecisionResumeUsesCapturedCheckpointIDAndParams(t *testing.T) {
@@ -2753,10 +2753,10 @@ func TestTurnLoop_ManagedInterrupt_DecisionResumeUsesCapturedCheckpointIDAndPara
 	var interruptCheckpointID string
 	var interruptTargetID string
 	loop := newAndRunTurnLoop(ctx, TurnLoopConfig[string, *schema.Message]{
-		InterruptMode:  TurnLoopInterruptWaitsForExplicitResume,
-		SessionID:      sessionID,
-		SessionService: sessionStore,
-		GenInput:       genInputConsumeAllWithMsg,
+		InterruptMode: TurnLoopInterruptWaitsForExplicitResume,
+		SessionID:     sessionID,
+		SessionStore:  sessionStore,
+		GenInput:      genInputConsumeAllWithMsg,
 		GenResume: func(ctx context.Context, _ *TurnLoop[string, *schema.Message], interruptedItems, unhandledItems, resumeItems []string) (*GenResumeResult[string, *schema.Message], error) {
 			require.NotEmpty(t, interruptTargetID)
 			return &GenResumeResult[string, *schema.Message]{
@@ -3954,12 +3954,22 @@ func TestNewTurnLoop_WaitBeforeRun(t *testing.T) {
 	}
 }
 
-type mockSessionService struct {
+type mockSessionStore struct {
 	mu     sync.Mutex
 	events map[string][]storedSessionEvent
 }
 
-func (m *mockSessionService) AppendEvents(_ context.Context, sessionID string, events []*SessionEvent[*schema.Message]) error {
+func (m *mockSessionStore) AppendEvents(ctx context.Context, req *AppendSessionEventsRequest[*schema.Message]) error {
+	sessionID := ""
+	var events []*SessionEvent[*schema.Message]
+	if req != nil {
+		sessionID = req.SessionID
+		events = req.Events
+	}
+	return m.AppendEventsForSession(ctx, sessionID, events)
+}
+
+func (m *mockSessionStore) AppendEventsForSession(_ context.Context, sessionID string, events []*SessionEvent[*schema.Message]) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.events == nil {
@@ -3985,7 +3995,15 @@ func (m *mockSessionService) AppendEvents(_ context.Context, sessionID string, e
 	return nil
 }
 
-func (m *mockSessionService) LoadEvents(_ context.Context, sessionID string, opts *LoadSessionEventsRequest) (*LoadSessionEventsResult[*schema.Message], error) {
+func (m *mockSessionStore) LoadEvents(ctx context.Context, req *LoadSessionEventsRequest) (*LoadSessionEventsResult[*schema.Message], error) {
+	sessionID := ""
+	if req != nil {
+		sessionID = req.SessionID
+	}
+	return m.LoadEventsForSession(ctx, sessionID, req)
+}
+
+func (m *mockSessionStore) LoadEventsForSession(_ context.Context, sessionID string, opts *LoadSessionEventsRequest) (*LoadSessionEventsResult[*schema.Message], error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if opts == nil {
@@ -4056,10 +4074,7 @@ func (m *mockSessionService) LoadEvents(_ context.Context, sessionID string, opt
 	return &LoadSessionEventsResult[*schema.Message]{Events: out, Next: next}, nil
 }
 
-func (m *mockSessionService) openSession(_ context.Context, req *openSessionRequest) (*openSessionResult[*schema.Message], error) {
-	if req != nil && req.fencingToken != nil {
-		return nil, ErrSessionFencingTokenUnsupported
-	}
+func (m *mockSessionStore) openSession(_ context.Context, req *openSessionRequest) (*openSessionResult[*schema.Message], error) {
 	sessionID := ""
 	if req != nil {
 		sessionID = req.sessionID
@@ -4070,7 +4085,7 @@ func (m *mockSessionService) openSession(_ context.Context, req *openSessionRequ
 }
 
 type mockSessionHandle struct {
-	store     *mockSessionService
+	store     *mockSessionStore
 	sessionID string
 }
 
@@ -4078,69 +4093,22 @@ func (h *mockSessionHandle) loadEvents(ctx context.Context, req *LoadSessionEven
 	if req == nil {
 		req = &LoadSessionEventsRequest{}
 	}
-	return h.store.LoadEvents(ctx, h.sessionID, req)
+	return h.store.LoadEventsForSession(ctx, h.sessionID, req)
 }
 
-func (h *mockSessionHandle) appendEvents(ctx context.Context, req *AppendSessionEventsRequest[*schema.Message]) (*AppendSessionEventsResult, error) {
+func (h *mockSessionHandle) appendEvents(ctx context.Context, req *AppendSessionEventsRequest[*schema.Message]) error {
 	if req == nil {
 		req = &AppendSessionEventsRequest[*schema.Message]{}
 	}
-	if err := h.store.AppendEvents(ctx, h.sessionID, req.Events); err != nil {
-		return nil, err
-	}
-	return &AppendSessionEventsResult{}, nil
+	return h.store.AppendEventsForSession(ctx, h.sessionID, req.Events)
 }
 
 func (h *mockSessionHandle) close(context.Context) error { return nil }
-func (h *mockSessionHandle) currentTailEventID() string  { return "" }
 
-func TestTurnLoop_PassesSessionFencingTokenToInternalRunner(t *testing.T) {
-	ctx := context.Background()
-	store := newTestFencedSessionStore("token-1")
-	var tokenCalls int32
-	eventsDone := make(chan struct{})
-	loop := NewTurnLoop(TurnLoopConfig[string, *schema.Message]{
-		GenInput: genInputConsumeAllWithMsg,
-		PrepareAgent: prepareAgent(&turnLoopMockAgent{
-			name: "fenced-turn-loop-agent",
-			runFunc: func(context.Context, *AgentInput) (*AgentOutput, error) {
-				return &AgentOutput{MessageOutput: &MessageVariant{Message: schema.AssistantMessage("ok", nil)}}, nil
-			},
-		}),
-		OnAgentEvents: func(_ context.Context, tc *TurnContext[string, *schema.Message], events *AsyncIterator[*TypedAgentEvent[*schema.Message]]) error {
-			defer close(eventsDone)
-			for {
-				_, ok := events.Next()
-				if !ok {
-					break
-				}
-			}
-			tc.Loop.Stop()
-			return nil
-		},
-		SessionID:      "turn-loop-fenced-session",
-		SessionService: NewFencedSessionService[*schema.Message](store, FencedSessionServiceOptions{}),
-		SessionFencingToken: func(context.Context) (string, error) {
-			atomic.AddInt32(&tokenCalls, 1)
-			return "token-1", nil
-		},
-	})
-	loop.Run(ctx)
-	ok, _ := loop.Push("work")
-	require.True(t, ok)
-	waitOrFail(t, eventsDone, "turn loop did not process agent events")
-	result := loop.Wait()
-	require.NoError(t, result.ExitReason)
-	require.Greater(t, atomic.LoadInt32(&tokenCalls), int32(0))
-	for _, token := range store.appendedTokens() {
-		assert.Equal(t, "token-1", token)
-	}
-}
-
-func TestTurnLoop_SessionServiceWithCheckpointIDWithoutStore(t *testing.T) {
+func TestTurnLoop_SessionStoreWithCheckpointIDWithoutStore(t *testing.T) {
 	ctx := context.Background()
 	sessionID := "test-session-id"
-	sessionStore := &mockSessionService{}
+	sessionStore := &mockSessionStore{}
 	var processed bool
 
 	loop := NewTurnLoop(TurnLoopConfig[string, *schema.Message]{
@@ -4169,9 +4137,9 @@ func TestTurnLoop_SessionServiceWithCheckpointIDWithoutStore(t *testing.T) {
 			tc.Loop.Stop()
 			return nil
 		},
-		SessionID:      sessionID,
-		SessionService: sessionStore,
-		CheckpointID:   "test-checkpoint-id",
+		SessionID:    sessionID,
+		SessionStore: sessionStore,
+		CheckpointID: "test-checkpoint-id",
 	})
 
 	loop.Push("test-message")
@@ -4183,10 +4151,10 @@ func TestTurnLoop_SessionServiceWithCheckpointIDWithoutStore(t *testing.T) {
 	assert.NotEmpty(t, sessionStore.events[sessionID])
 }
 
-func TestTurnLoop_SessionServiceWithoutCheckpointStoreSkipsRunnerCheckpoint(t *testing.T) {
+func TestTurnLoop_SessionStoreWithoutCheckpointStoreSkipsRunnerCheckpoint(t *testing.T) {
 	ctx := context.Background()
 	sessionID := "test-session-without-checkpoint-store"
-	sessionStore := &mockSessionService{}
+	sessionStore := &mockSessionStore{}
 	var processed bool
 
 	loop := NewTurnLoop(TurnLoopConfig[string, *schema.Message]{
@@ -4215,8 +4183,8 @@ func TestTurnLoop_SessionServiceWithoutCheckpointStoreSkipsRunnerCheckpoint(t *t
 			tc.Loop.Stop()
 			return nil
 		},
-		SessionID:      sessionID,
-		SessionService: sessionStore,
+		SessionID:    sessionID,
+		SessionStore: sessionStore,
 	})
 
 	loop.Push("test-message")
