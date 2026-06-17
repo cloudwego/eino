@@ -746,9 +746,9 @@ func TestPermissionDecisionAppearsInToolUseTimeline(t *testing.T) {
 		sawToolCallEndOK bool
 	)
 	runner := adk.NewRunner(ctx, adk.RunnerConfig{
-		Agent:          agent,
-		SessionID:      "permission-timeline",
-		SessionService: adk.NewLocalSessionService[*schema.Message](&permissionSessionService{}),
+		Agent:        agent,
+		SessionID:    "permission-timeline",
+		SessionStore: &permissionSessionStore{},
 	})
 	iter := runner.Query(ctx, "use the tool", adk.WithTimelineEvents())
 	for {
@@ -861,14 +861,14 @@ func TestPermissionDecisionEventResumeLiveAndPersisted(t *testing.T) {
 			})
 			require.NoError(t, err)
 
-			sessionStore := &permissionSessionService{}
+			sessionStore := &permissionSessionStore{}
 			checkpointStore := newPermissionCheckpointStore()
 			checkpointID := "permission-decision-" + strings.ReplaceAll(tt.name, " ", "-")
 			runner := adk.NewRunner(ctx, adk.RunnerConfig{
 				Agent:           agent,
 				CheckPointStore: checkpointStore,
 				SessionID:       checkpointID,
-				SessionService:  adk.NewLocalSessionService[*schema.Message](sessionStore),
+				SessionStore:    sessionStore,
 			})
 
 			var interruptID string
@@ -974,14 +974,14 @@ func TestAttack_InvalidRespondDoesNotPersistDecisionEvent(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	sessionStore := &permissionSessionService{}
+	sessionStore := &permissionSessionStore{}
 	checkpointStore := newPermissionCheckpointStore()
 	const checkpointID = "permission-invalid-respond"
 	runner := adk.NewRunner(ctx, adk.RunnerConfig{
 		Agent:           agent,
 		CheckPointStore: checkpointStore,
 		SessionID:       checkpointID,
-		SessionService:  adk.NewLocalSessionService[*schema.Message](sessionStore),
+		SessionStore:    sessionStore,
 	})
 
 	var interruptID string
@@ -1071,9 +1071,9 @@ func TestToolSpan_PermissionDenyEmitsBothSpansOnSameRun(t *testing.T) {
 	require.NoError(t, err)
 
 	runner := adk.NewRunner(ctx, adk.RunnerConfig{
-		Agent:          agent,
-		SessionID:      "permission-deny-span",
-		SessionService: adk.NewLocalSessionService[*schema.Message](&permissionSessionService{}),
+		Agent:        agent,
+		SessionID:    "permission-deny-span",
+		SessionStore: &permissionSessionStore{},
 	})
 
 	var (
@@ -1169,11 +1169,11 @@ func TestPermissionGate_PersistedAgentInterruptOmitsPrivateInfo(t *testing.T) {
 			})
 			require.NoError(t, err)
 
-			store := &permissionSessionService{}
+			store := &permissionSessionStore{}
 			runner := adk.NewRunner(ctx, adk.RunnerConfig{
-				Agent:          agent,
-				SessionID:      "permission-agent-interrupt-" + strings.ReplaceAll(tt.name, " ", "-"),
-				SessionService: adk.NewLocalSessionService[*schema.Message](store),
+				Agent:        agent,
+				SessionID:    "permission-agent-interrupt-" + strings.ReplaceAll(tt.name, " ", "-"),
+				SessionStore: store,
 			})
 			iter := runner.Query(ctx, "use the tool", adk.WithTimelineEvents())
 			for {
@@ -1241,23 +1241,51 @@ func (t *permissionCaptureTool) InvokableRun(_ context.Context, argumentsInJSON 
 	return "ok", nil
 }
 
-type permissionSessionService struct {
+type permissionSessionStore struct {
 	events []*adk.SessionEvent[*schema.Message]
 }
 
-func (s *permissionSessionService) AppendEvents(_ context.Context, req *adk.AppendSessionEventsRequest[*schema.Message]) (*adk.AppendSessionEventsResult, error) {
+func (s *permissionSessionStore) AppendEvents(_ context.Context, req *adk.AppendSessionEventsRequest[*schema.Message]) error {
 	if req != nil {
 		s.events = append(s.events, req.Events...)
 	}
-	tail := ""
-	if len(s.events) > 0 {
-		tail = s.events[len(s.events)-1].EventID
-	}
-	return &adk.AppendSessionEventsResult{SessionTailEventID: tail}, nil
+	return nil
 }
 
-func (s *permissionSessionService) LoadEvents(_ context.Context, _ *adk.LoadSessionEventsRequest) (*adk.LoadSessionEventsResult[*schema.Message], error) {
-	return &adk.LoadSessionEventsResult[*schema.Message]{Events: nil}, nil
+func (s *permissionSessionStore) LoadEvents(_ context.Context, req *adk.LoadSessionEventsRequest) (*adk.LoadSessionEventsResult[*schema.Message], error) {
+	if req == nil {
+		req = &adk.LoadSessionEventsRequest{}
+	}
+	start, end, step := 0, len(s.events), 1
+	if req.Reverse {
+		start, end, step = len(s.events)-1, -1, -1
+	}
+	if req.After != "" {
+		for i, event := range s.events {
+			if event != nil && event.EventID == req.After {
+				if req.Reverse {
+					start = i - 1
+				} else {
+					start = i + 1
+				}
+				break
+			}
+		}
+	}
+	var out []*adk.SessionEvent[*schema.Message]
+	hasMore := false
+	for i := start; i != end && i >= 0 && i < len(s.events); i += step {
+		if req.Limit > 0 && len(out) >= req.Limit {
+			hasMore = true
+			break
+		}
+		out = append(out, s.events[i])
+	}
+	next := ""
+	if hasMore && len(out) > 0 {
+		next = out[len(out)-1].EventID
+	}
+	return &adk.LoadSessionEventsResult[*schema.Message]{Events: out, Next: next}, nil
 }
 
 type permissionCheckpointStore struct {

@@ -472,7 +472,7 @@ func stampAgentToolSessionEvent[M MessageType](event *TypedAgentEvent[M], childS
 }
 
 // newTypedInvokableAgentToolRunner creates a runner for the inner agent without
-// SessionService. The child's events are forwarded to the parent's live stream
+// SessionEventStore. The child's events are forwarded to the parent's live stream
 // (tagged with childSessionID on SessionEvent) and filtered out of the parent's persistence.
 // The child's durability relies solely on the bridge checkpoint stored inside
 // agentToolInterruptState — there is no independent child session log.

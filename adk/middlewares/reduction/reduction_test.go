@@ -3734,9 +3734,9 @@ func TestClearMessageRewriterPersistsMessagesDeletedThroughRunner(t *testing.T) 
 	assert.NoError(t, err)
 
 	runner := adk.NewRunner(ctx, adk.RunnerConfig{
-		Agent:          agent,
-		SessionID:      "reduction-delete-session",
-		SessionService: adk.NewLocalSessionService[*schema.Message](store),
+		Agent:        agent,
+		SessionID:    "reduction-delete-session",
+		SessionStore: store,
 	})
 	drainReductionEvents(t, runner.Query(ctx, "please call the tool"))
 
@@ -3759,9 +3759,9 @@ func TestClearMessageRewriterPersistsMessagesDeletedThroughRunner(t *testing.T) 
 	})
 	assert.NoError(t, err)
 	nextRunner := adk.NewRunner(ctx, adk.RunnerConfig{
-		Agent:          nextAgent,
-		SessionID:      "reduction-delete-session",
-		SessionService: adk.NewLocalSessionService[*schema.Message](store),
+		Agent:        nextAgent,
+		SessionID:    "reduction-delete-session",
+		SessionStore: store,
 	})
 	drainReductionEvents(t, nextRunner.Query(ctx, "next turn"))
 
@@ -3806,9 +3806,9 @@ func TestClearMessageRewriterAbortDoesNotPersistStructuralEvents(t *testing.T) {
 	})
 	assert.NoError(t, err)
 	runner := adk.NewRunner(ctx, adk.RunnerConfig{
-		Agent:          agent,
-		SessionID:      "reduction-abort-session",
-		SessionService: adk.NewLocalSessionService[*schema.Message](store),
+		Agent:        agent,
+		SessionID:    "reduction-abort-session",
+		SessionStore: store,
 	})
 	drainReductionEvents(t, runner.Query(ctx, "please call the tool"))
 
@@ -3850,9 +3850,9 @@ func TestClearAtLeastTokensAbortDoesNotPersistMessageUpdates(t *testing.T) {
 	})
 	assert.NoError(t, err)
 	runner := adk.NewRunner(ctx, adk.RunnerConfig{
-		Agent:          agent,
-		SessionID:      "reduction-clear-abort-session",
-		SessionService: adk.NewLocalSessionService[*schema.Message](store),
+		Agent:        agent,
+		SessionID:    "reduction-clear-abort-session",
+		SessionStore: store,
 	})
 	drainReductionEvents(t, runner.Query(ctx, "please call the tool"))
 

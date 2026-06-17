@@ -54,8 +54,6 @@ func RunConformanceTests[M adk.MessageType](
 	t.Run("After forward pagination", func(t *testing.T) { testForwardPagination(t, factory, makeMessage) })
 	t.Run("sessionID isolates events", func(t *testing.T) { testSessionIsolation(t, factory, makeMessage) })
 	t.Run("Empty session returns no events", func(t *testing.T) { testEmptySession(t, factory) })
-	t.Run("AppendEvents rejects stale expected tail", func(t *testing.T) { testRejectStaleExpectedTail(t, factory, makeMessage) })
-	t.Run("AppendEvents accepts exact batch replay", func(t *testing.T) { testExactBatchReplay(t, factory, makeMessage) })
 	t.Run("AppendEvents rejects non-replay duplicate EventID", func(t *testing.T) { testRejectDuplicateEventID(t, factory, makeMessage) })
 	t.Run("AppendEvents rejects duplicate EventID within same batch", func(t *testing.T) { testRejectDuplicateEventIDWithinBatch(t, factory, makeMessage) })
 	t.Run("AppendEvents rejects empty EventID with ErrInvalidEventID", func(t *testing.T) { testRejectEmptyEventID(t, factory, makeMessage) })
@@ -242,58 +240,6 @@ func testEmptySession[M adk.MessageType](t *testing.T, factory func(testing.TB) 
 	}
 }
 
-func testRejectStaleExpectedTail[M adk.MessageType](t *testing.T, factory func(testing.TB) adk.SessionEventStore[M], makeMessage func(string) M) {
-	store := newStore(t, factory)
-	ctx := context.Background()
-
-	first := messageEvent("tail-1", makeMessage("first"))
-	appendEvents(t, ctx, store, "s", first)
-	_, err := store.AppendEvents(ctx, &adk.AppendSessionEventsRequest[M]{
-		SessionID:                  "s",
-		ExpectedSessionTailEventID: "stale-tail",
-		Events:                     []*adk.SessionEvent[M]{messageEvent("tail-2", makeMessage("second"))},
-	})
-	if !errors.Is(err, adk.ErrSessionTailMismatch) {
-		t.Fatalf("expected ErrSessionTailMismatch, got %v", err)
-	}
-
-	res, err := store.LoadEvents(ctx, &adk.LoadSessionEventsRequest{SessionID: "s"})
-	requireNoError(t, err)
-	requireEventsEqual(t, []*adk.SessionEvent[M]{first}, res.Events)
-}
-
-func testExactBatchReplay[M adk.MessageType](t *testing.T, factory func(testing.TB) adk.SessionEventStore[M], makeMessage func(string) M) {
-	store := newStore(t, factory)
-	ctx := context.Background()
-
-	events := []*adk.SessionEvent[M]{
-		messageEvent("replay-1", makeMessage("one")),
-		messageEvent("replay-2", makeMessage("two")),
-	}
-	first, err := store.AppendEvents(ctx, &adk.AppendSessionEventsRequest[M]{
-		SessionID: "s",
-		Events:    events,
-	})
-	requireNoError(t, err)
-	if first == nil || first.SessionTailEventID != "replay-2" {
-		t.Fatalf("first append tail=%v, want replay-2", first)
-	}
-
-	replayed, err := store.AppendEvents(ctx, &adk.AppendSessionEventsRequest[M]{
-		SessionID:                  "s",
-		ExpectedSessionTailEventID: "",
-		Events:                     events,
-	})
-	requireNoError(t, err)
-	if replayed == nil || replayed.SessionTailEventID != "replay-2" {
-		t.Fatalf("replay append tail=%v, want replay-2", replayed)
-	}
-
-	res, err := store.LoadEvents(ctx, &adk.LoadSessionEventsRequest{SessionID: "s"})
-	requireNoError(t, err)
-	requireEventsEqual(t, events, res.Events)
-}
-
 func testRejectDuplicateEventID[M adk.MessageType](t *testing.T, factory func(testing.TB) adk.SessionEventStore[M], makeMessage func(string) M) {
 	store := newStore(t, factory)
 	ctx := context.Background()
@@ -301,11 +247,7 @@ func testRejectDuplicateEventID[M adk.MessageType](t *testing.T, factory func(te
 	first := messageEvent("dup-1", makeMessage("first"))
 	dup := messageEvent("dup-1", makeMessage("second"))
 	appendEvents(t, ctx, store, "s", first)
-	_, err := store.AppendEvents(ctx, &adk.AppendSessionEventsRequest[M]{
-		SessionID:                  "s",
-		ExpectedSessionTailEventID: first.EventID,
-		Events:                     []*adk.SessionEvent[M]{dup},
-	})
+	err := store.AppendEvents(ctx, &adk.AppendSessionEventsRequest[M]{SessionID: "s", Events: []*adk.SessionEvent[M]{dup}})
 	if !errors.Is(err, adk.ErrDuplicateEventID) {
 		t.Fatalf("expected ErrDuplicateEventID, got %v", err)
 	}
@@ -321,7 +263,7 @@ func testRejectDuplicateEventIDWithinBatch[M adk.MessageType](t *testing.T, fact
 
 	first := messageEvent("dup-batch-1", makeMessage("first"))
 	dup := messageEvent("dup-batch-1", makeMessage("second"))
-	_, err := store.AppendEvents(ctx, &adk.AppendSessionEventsRequest[M]{SessionID: "s", Events: []*adk.SessionEvent[M]{first, dup}})
+	err := store.AppendEvents(ctx, &adk.AppendSessionEventsRequest[M]{SessionID: "s", Events: []*adk.SessionEvent[M]{first, dup}})
 	if !errors.Is(err, adk.ErrDuplicateEventID) {
 		t.Fatalf("expected ErrDuplicateEventID, got %v", err)
 	}
@@ -335,7 +277,7 @@ func testRejectEmptyEventID[M adk.MessageType](t *testing.T, factory func(testin
 	store := newStore(t, factory)
 	ctx := context.Background()
 
-	_, err := store.AppendEvents(ctx, &adk.AppendSessionEventsRequest[M]{
+	err := store.AppendEvents(ctx, &adk.AppendSessionEventsRequest[M]{
 		SessionID: "s",
 		Events:    []*adk.SessionEvent[M]{{Kind: adk.SessionEventMessage, Message: makeMessage("empty")}},
 	})
@@ -438,23 +380,8 @@ func newStore[M adk.MessageType](t testing.TB, factory func(testing.TB) adk.Sess
 
 func appendEvents[M adk.MessageType](t testing.TB, ctx context.Context, store adk.SessionEventStore[M], sessionID string, events ...*adk.SessionEvent[M]) {
 	t.Helper()
-	tail := currentTailEventID(t, ctx, store, sessionID)
-	_, err := store.AppendEvents(ctx, &adk.AppendSessionEventsRequest[M]{
-		SessionID:                  sessionID,
-		ExpectedSessionTailEventID: tail,
-		Events:                     events,
-	})
+	err := store.AppendEvents(ctx, &adk.AppendSessionEventsRequest[M]{SessionID: sessionID, Events: events})
 	requireNoError(t, err)
-}
-
-func currentTailEventID[M adk.MessageType](t testing.TB, ctx context.Context, store adk.SessionEventStore[M], sessionID string) string {
-	t.Helper()
-	res, err := store.LoadEvents(ctx, &adk.LoadSessionEventsRequest{SessionID: sessionID, Reverse: true, Limit: 1})
-	requireNoError(t, err)
-	if res == nil || len(res.Events) == 0 {
-		return ""
-	}
-	return res.Events[0].EventID
 }
 
 func requireNoError(t testing.TB, err error) {

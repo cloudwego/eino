@@ -196,7 +196,7 @@ func TestMiddleware_AfterAgent_RunInlineWithSessionStore(t *testing.T) {
 	store := NewLocalStore()
 	model := &dreamModel{}
 	eventStore := &countingSessionStore{SessionEventStore: adksession.NewInMemoryStore[*schema.Message](nil)}
-	_, err := eventStore.AppendEvents(ctx, &adk.AppendSessionEventsRequest[*schema.Message]{
+	err := eventStore.AppendEvents(ctx, &adk.AppendSessionEventsRequest[*schema.Message]{
 		SessionID: "session-a",
 		Events: []*adk.SessionEvent[*schema.Message]{{
 			EventID: "e1",
