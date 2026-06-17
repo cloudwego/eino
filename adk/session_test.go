@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -293,6 +294,41 @@ func (a *streamingSessionAgent) Run(_ context.Context, _ *AgentInput, _ ...Agent
 				},
 			},
 		})
+	}()
+	return iter
+}
+
+type erroredStreamingInterruptAgent struct {
+	streamErr error
+}
+
+func (a *erroredStreamingInterruptAgent) Name(_ context.Context) string {
+	return "errored-streaming-interrupt-agent"
+}
+
+func (a *erroredStreamingInterruptAgent) Description(_ context.Context) string {
+	return "errored streaming interrupt agent"
+}
+
+func (a *erroredStreamingInterruptAgent) Run(ctx context.Context, _ *AgentInput, _ ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+	iter, gen := NewAsyncIteratorPair[*AgentEvent]()
+	sr, sw := schema.Pipe[*schema.Message](2)
+	streamErr := a.streamErr
+	if streamErr == nil {
+		streamErr = errors.New("stream failed")
+	}
+	go func() {
+		defer gen.Close()
+		sw.Send(schema.AssistantMessage("partial", nil), nil)
+		sw.Send(nil, streamErr)
+		sw.Close()
+		gen.Send(&AgentEvent{
+			AgentName: a.Name(ctx),
+			Output: &AgentOutput{
+				MessageOutput: &MessageVariant{IsStreaming: true, MessageStream: sr, Role: schema.Assistant},
+			},
+		})
+		gen.Send(Interrupt(ctx, "checkpoint after errored stream"))
 	}()
 	return iter
 }
@@ -1053,6 +1089,73 @@ func TestRunnerSessionStreamingDoesNotBlockLiveEvent(t *testing.T) {
 
 	release()
 	drainSessionEvents(t, iter)
+}
+
+func TestRunnerSessionDropsErroredStreamingMessageBeforeCheckpoint(t *testing.T) {
+	ctx := context.Background()
+
+	tests := []struct {
+		name      string
+		streamErr error
+	}{
+		{name: "stream canceled", streamErr: ErrStreamCanceled},
+		{name: "will retry", streamErr: &WillRetryError{ErrStr: "retry", RetryAttempt: 1}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := newSessionHelperStore()
+			agent := &erroredStreamingInterruptAgent{streamErr: tt.streamErr}
+			checkpointID := "errored-stream-checkpoint-" + strings.ReplaceAll(tt.name, " ", "-")
+			runner := NewRunner(ctx, RunnerConfig{
+				Agent:           agent,
+				EnableStreaming: true,
+				SessionID:       "errored-stream-session-" + tt.name,
+				SessionStore:    store,
+				CheckPointStore: store,
+			})
+
+			iter := runner.Query(ctx, "start", WithCheckPointID(checkpointID))
+			var sawInterrupt bool
+			var sawStreamErr bool
+			for {
+				event, ok := iter.Next()
+				if !ok {
+					break
+				}
+				require.NoError(t, event.Err)
+				if event.Output != nil && event.Output.MessageOutput != nil &&
+					event.Output.MessageOutput.IsStreaming {
+					for {
+						_, err := event.Output.MessageOutput.MessageStream.Recv()
+						if err == nil {
+							continue
+						}
+						require.NotEqual(t, io.EOF, err)
+						sawStreamErr = true
+						break
+					}
+				}
+				if event.Action != nil && event.Action.Interrupted != nil {
+					sawInterrupt = true
+				}
+			}
+
+			require.True(t, sawStreamErr)
+			require.True(t, sawInterrupt)
+			_, exists, err := store.Get(ctx, checkpointID)
+			require.NoError(t, err)
+			require.True(t, exists, "checkpoint should still be saved after dropping errored message stream")
+
+			persistedPartialMessages := filterStoredSessionEvents(t, store.events, func(se *SessionEvent[*schema.Message]) bool {
+				return se.Kind == SessionEventMessage &&
+					se.Message != nil &&
+					se.Message.Role == schema.Assistant &&
+					se.Message.Content == "partial"
+			})
+			assert.Empty(t, persistedPartialMessages)
+		})
+	}
 }
 
 func drainSessionEvents(t *testing.T, iter *AsyncIterator[*AgentEvent]) {
