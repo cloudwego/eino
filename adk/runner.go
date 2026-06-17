@@ -1070,7 +1070,9 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 					persistCopy := &TypedMessageVariant[M]{IsStreaming: true, MessageStream: copies[0]}
 					persistedMsg, err := persistCopy.GetMessage()
 					if err != nil {
-						setPersistErr(err)
+						// A message-stream error means this message should not enter
+						// model context. Drop only this SessionEvent; the turn and any
+						// deferred checkpoint can still commit.
 						continue
 					}
 
