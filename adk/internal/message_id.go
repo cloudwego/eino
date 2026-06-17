@@ -31,14 +31,20 @@ func GetMessageID(extra map[string]any) string {
 	return id
 }
 
-// SetMessageID sets the message ID in Extra (initializing the map if nil).
-// Returns the (possibly newly created) Extra map.
+// SetMessageID sets the message ID in Extra and returns the resulting map.
+//
+// Copy-on-write: the input map is never mutated, because a message's Extra can
+// be shared across fan-out stream readers and an in-place write would race with
+// concurrent reads (fatal "concurrent map read and map write"). Reassigning the
+// returned map to a shared Extra field is still a field-level race that cannot
+// be eliminated while Extra is exported; COW only removes the map-level panic.
 func SetMessageID(extra map[string]any, id string) map[string]any {
-	if extra == nil {
-		extra = make(map[string]any)
+	next := make(map[string]any, len(extra)+1)
+	for k, v := range extra {
+		next[k] = v
 	}
-	extra[EinoMsgIDKey] = id
-	return extra
+	next[EinoMsgIDKey] = id
+	return next
 }
 
 // EnsureMessageID assigns a UUID v4 if no message ID is present.
