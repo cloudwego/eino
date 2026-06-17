@@ -197,9 +197,9 @@ func TestMiddleware_BeforeAgent_MessageInsertedEventPersistsToSessionStore(t *te
 	const sessionID = "automemory-message-inserted-session"
 	store := adksession.NewInMemoryStore[*schema.Message](nil)
 	runner := adk.NewRunner(ctx, adk.RunnerConfig{
-		Agent:          agent,
-		SessionID:      sessionID,
-		SessionService: adk.NewLocalSessionService[*schema.Message](store),
+		Agent:        agent,
+		SessionID:    sessionID,
+		SessionStore: store,
 	})
 
 	iter := runner.Query(ctx, "How to run tests?")

@@ -81,7 +81,7 @@ type fileSessionIndex struct {
 	eventIDToLine map[string]int
 }
 
-// NewFileStore creates a file-backed SessionService rooted at dir.
+// NewFileStore creates a file-backed SessionEventStore rooted at dir.
 func NewFileStore[M adk.MessageType](dir string, cfg *FileStoreConfig) (*FileStore[M], error) {
 	if dir == "" {
 		return nil, errorsNewEmptyFileStoreDir()
@@ -96,15 +96,6 @@ func NewFileStore[M adk.MessageType](dir string, cfg *FileStoreConfig) (*FileSto
 	}, nil
 }
 
-// NewFileSessionService creates a local, process-scoped service backed by FileStore.
-func NewFileSessionService[M adk.MessageType](dir string, cfg *FileStoreConfig) (adk.SessionService[M], error) {
-	store, err := NewFileStore[M](dir, cfg)
-	if err != nil {
-		return nil, err
-	}
-	return adk.NewLocalSessionService[M](store), nil
-}
-
 func errorsNewEmptyFileStoreDir() error {
 	return fmt.Errorf("adk/session: file store dir is empty")
 }
@@ -115,10 +106,8 @@ func errorsNewEmptySessionID() error {
 
 // AppendEvents appends events to the session's event log.
 //
-// Each SessionEvent.EventID MUST be non-empty. The expected tail and event
-// append are validated under the same process-local lock. Duplicate event IDs
-// are accepted only for exact batch replay after a successful prior append.
-func (s *FileStore[M]) AppendEvents(_ context.Context, req *adk.AppendSessionEventsRequest[M]) (*adk.AppendSessionEventsResult, error) {
+// Each SessionEvent.EventID MUST be non-empty. Duplicate event IDs are rejected.
+func (s *FileStore[M]) AppendEvents(_ context.Context, req *adk.AppendSessionEventsRequest[M]) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if req == nil {
@@ -129,7 +118,7 @@ func (s *FileStore[M]) AppendEvents(_ context.Context, req *adk.AppendSessionEve
 
 	path, err := s.sessionPath(sessionID)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	// Validate incoming events and dedup within batch.
@@ -137,56 +126,49 @@ func (s *FileStore[M]) AppendEvents(_ context.Context, req *adk.AppendSessionEve
 	pending := make([]fileEvent, 0, len(events))
 	for _, e := range events {
 		if e == nil || e.EventID == "" {
-			return nil, adk.ErrInvalidEventID
+			return adk.ErrInvalidEventID
 		}
 		if _, dup := seen[e.EventID]; dup {
-			return nil, adk.ErrDuplicateEventID
+			return adk.ErrDuplicateEventID
 		}
 		seen[e.EventID] = struct{}{}
 		if normalizeErr := adk.NormalizeSessionEventKind(e); normalizeErr != nil {
-			return nil, normalizeErr
+			return normalizeErr
 		}
 		data, marshalErr := s.serializer.Marshal(e)
 		if marshalErr != nil {
-			return nil, marshalErr
+			return marshalErr
 		}
 		if bytes.ContainsAny(data, "\r\n") {
-			return nil, fmt.Errorf("adk/session: FileStore requires serialized event data without raw CR/LF; use a line-safe serializer")
+			return fmt.Errorf("adk/session: FileStore requires serialized event data without raw CR/LF; use a line-safe serializer")
 		}
 		pending = append(pending, fileEvent{eventID: e.EventID, kind: e.Kind, data: data})
 	}
 	if len(pending) == 0 {
-		return &adk.AppendSessionEventsResult{SessionTailEventID: req.ExpectedSessionTailEventID}, nil
+		return nil
 	}
 
 	idx, err := s.ensureIndexLocked(path)
 	if err != nil {
-		return nil, err
-	}
-	currentTail := fileCurrentTailLocked(idx)
-	if currentTail != req.ExpectedSessionTailEventID {
-		if s.isExactFileBatchReplayLocked(path, idx, req.ExpectedSessionTailEventID, pending) {
-			return &adk.AppendSessionEventsResult{SessionTailEventID: currentTail}, nil
-		}
-		return nil, adk.ErrSessionTailMismatch
+		return err
 	}
 
 	var out *os.File
 	for _, event := range pending {
 		if _, dup := idx.eventIDToLine[event.eventID]; dup {
-			return nil, adk.ErrDuplicateEventID
+			return adk.ErrDuplicateEventID
 		}
 		if out == nil {
 			out, err = os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 			if err != nil {
-				return nil, err
+				return err
 			}
 			defer out.Close()
 		}
 		line := fmt.Sprintf("%s\t%s\t%s\n", event.eventID, event.kind, event.data)
 		n, err := out.WriteString(line)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		idx.eventIDToLine[event.eventID] = len(idx.offsets)
 		idx.offsets = append(idx.offsets, idx.size)
@@ -195,12 +177,12 @@ func (s *FileStore[M]) AppendEvents(_ context.Context, req *adk.AppendSessionEve
 	if out != nil {
 		info, err := out.Stat()
 		if err != nil {
-			return nil, err
+			return err
 		}
 		idx.size = info.Size()
 		idx.modTime = info.ModTime()
 	}
-	return &adk.AppendSessionEventsResult{SessionTailEventID: fileCurrentTailLocked(idx)}, nil
+	return nil
 }
 
 // LoadEvents loads events with pagination and direction support.
@@ -340,7 +322,7 @@ func (s *FileStore[M]) loadFileEventsForwardLocked(path string, idx *fileSession
 	f, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return &adk.LoadSessionEventsResult[M]{SessionTailEventID: fileCurrentTailLocked(idx)}, nil
+			return &adk.LoadSessionEventsResult[M]{}, nil
 		}
 		return nil, err
 	}
@@ -374,7 +356,7 @@ func (s *FileStore[M]) loadFileEventsForwardLocked(path string, idx *fileSession
 	if hasMore && len(out) > 0 {
 		next = out[len(out)-1].EventID
 	}
-	return &adk.LoadSessionEventsResult[M]{Events: out, Next: next, SessionTailEventID: fileCurrentTailLocked(idx)}, nil
+	return &adk.LoadSessionEventsResult[M]{Events: out, Next: next}, nil
 }
 
 func (s *FileStore[M]) loadFileEventsReverseLocked(path string, idx *fileSessionIndex, opts *adk.LoadSessionEventsRequest) (*adk.LoadSessionEventsResult[M], error) {
@@ -387,13 +369,13 @@ func (s *FileStore[M]) loadFileEventsReverseLocked(path string, idx *fileSession
 		end = pos
 	}
 	if end <= 0 {
-		return &adk.LoadSessionEventsResult[M]{SessionTailEventID: fileCurrentTailLocked(idx)}, nil
+		return &adk.LoadSessionEventsResult[M]{}, nil
 	}
 
 	f, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return &adk.LoadSessionEventsResult[M]{SessionTailEventID: fileCurrentTailLocked(idx)}, nil
+			return &adk.LoadSessionEventsResult[M]{}, nil
 		}
 		return nil, err
 	}
@@ -427,7 +409,7 @@ func (s *FileStore[M]) loadFileEventsReverseLocked(path string, idx *fileSession
 	if hasMore && len(out) > 0 {
 		next = out[len(out)-1].EventID
 	}
-	return &adk.LoadSessionEventsResult[M]{Events: out, Next: next, SessionTailEventID: fileCurrentTailLocked(idx)}, nil
+	return &adk.LoadSessionEventsResult[M]{Events: out, Next: next}, nil
 }
 
 func fileCurrentTailLocked(idx *fileSessionIndex) string {
@@ -440,35 +422,6 @@ func fileCurrentTailLocked(idx *fileSessionIndex) string {
 		}
 	}
 	return ""
-}
-
-func (s *FileStore[M]) isExactFileBatchReplayLocked(path string, idx *fileSessionIndex, expectedTail string, pending []fileEvent) bool {
-	if len(pending) == 0 {
-		return fileCurrentTailLocked(idx) == expectedTail
-	}
-	start := 0
-	if expectedTail != "" {
-		pos, ok := idx.eventIDToLine[expectedTail]
-		if !ok {
-			return false
-		}
-		start = pos + 1
-	}
-	if start+len(pending) != len(idx.offsets) {
-		return false
-	}
-	f, err := os.Open(path)
-	if err != nil {
-		return false
-	}
-	defer f.Close()
-	for i, event := range pending {
-		existing, err := readFileEventAt(f, idx.offsets[start+i], start+i+1)
-		if err != nil || existing.eventID != event.eventID {
-			return false
-		}
-	}
-	return true
 }
 
 func readFileEventAt(f *os.File, offset int64, lineNo int) (fileEvent, error) {
