@@ -94,9 +94,9 @@ func TestAgentsMDIntegration_PersistsMessageInserted(t *testing.T) {
 
 	store := session.NewInMemoryStore[*schema.Message](nil)
 	runner := adk.NewRunner(ctx, adk.RunnerConfig{
-		Agent:          agent,
-		SessionID:      "agentsmd-test",
-		SessionService: adk.NewLocalSessionService[*schema.Message](store),
+		Agent:        agent,
+		SessionID:    "agentsmd-test",
+		SessionStore: store,
 	})
 
 	iter := runner.Query(ctx, "hello")
@@ -164,7 +164,7 @@ func TestAgentsMDIntegration_NextTurnSkipsReinsertion(t *testing.T) {
 	sid := "agentsmd-stable-session"
 
 	// Turn 1.
-	runner1 := adk.NewRunner(ctx, adk.RunnerConfig{Agent: agent, SessionID: sid, SessionService: adk.NewLocalSessionService[*schema.Message](store)})
+	runner1 := adk.NewRunner(ctx, adk.RunnerConfig{Agent: agent, SessionID: sid, SessionStore: store})
 	for it := runner1.Query(ctx, "first"); ; {
 		ev, ok := it.Next()
 		if !ok {
@@ -195,7 +195,7 @@ func TestAgentsMDIntegration_NextTurnSkipsReinsertion(t *testing.T) {
 	require.Equal(t, 1, countAgentsmdInserts(), "first turn must insert exactly once")
 
 	// Turn 2.
-	runner2 := adk.NewRunner(ctx, adk.RunnerConfig{Agent: agent, SessionID: sid, SessionService: adk.NewLocalSessionService[*schema.Message](store)})
+	runner2 := adk.NewRunner(ctx, adk.RunnerConfig{Agent: agent, SessionID: sid, SessionStore: store})
 	for it := runner2.Query(ctx, "second"); ; {
 		ev, ok := it.Next()
 		if !ok {
@@ -258,11 +258,11 @@ func TestToolSearchIntegration_PersistsMessageInserted(t *testing.T) {
 
 	store := session.NewInMemoryStore[*schema.Message](nil)
 	sid := "toolsearch-test"
-	sessionService := adk.NewLocalSessionService[*schema.Message](store)
+	sessionStore := store
 	runner := adk.NewRunner(ctx, adk.RunnerConfig{
-		Agent:          agent,
-		SessionID:      sid,
-		SessionService: sessionService,
+		Agent:        agent,
+		SessionID:    sid,
+		SessionStore: sessionStore,
 	})
 
 	for it := runner.Query(ctx, "anything"); ; {
@@ -304,7 +304,7 @@ func TestPatchToolCallsIntegration_PersistsMessageInserted(t *testing.T) {
 	ctx := context.Background()
 
 	store := session.NewInMemoryStore[*schema.Message](nil)
-	sessionService := adk.NewLocalSessionService[*schema.Message](store)
+	sessionStore := store
 	sid := "patchtoolcalls-test"
 
 	// Seed: an assistant message with a tool call but no corresponding tool result.
@@ -325,16 +325,13 @@ func TestPatchToolCallsIntegration_PersistsMessageInserted(t *testing.T) {
 		Extra:   map[string]any{"_eino_msg_id": "user-msg-id"},
 	}
 
-	var seedTail string
 	for _, m := range []*schema.Message{user, dangling} {
 		se := &adk.SessionEvent[*schema.Message]{EventID: uuid.NewString(), Kind: adk.SessionEventMessage, Message: m}
-		res, err := store.AppendEvents(ctx, &adk.AppendSessionEventsRequest[*schema.Message]{
-			SessionID:                  sid,
-			ExpectedSessionTailEventID: seedTail,
-			Events:                     []*adk.SessionEvent[*schema.Message]{se},
+		err := store.AppendEvents(ctx, &adk.AppendSessionEventsRequest[*schema.Message]{
+			SessionID: sid,
+			Events:    []*adk.SessionEvent[*schema.Message]{se},
 		})
 		require.NoError(t, err)
-		seedTail = res.SessionTailEventID
 	}
 
 	// Wire patchtoolcalls into a ChatModelAgent.
@@ -353,9 +350,9 @@ func TestPatchToolCallsIntegration_PersistsMessageInserted(t *testing.T) {
 	require.NoError(t, err)
 
 	runner := adk.NewRunner(ctx, adk.RunnerConfig{
-		Agent:          agent,
-		SessionID:      sid,
-		SessionService: sessionService,
+		Agent:        agent,
+		SessionID:    sid,
+		SessionStore: sessionStore,
 	})
 
 	for it := runner.Query(ctx, "go"); ; {
@@ -393,7 +390,7 @@ func TestPatchToolCallsIntegration_PersistsMessageInserted(t *testing.T) {
 func TestReductionIntegration_PersistsBothMessageUpdated(t *testing.T) {
 	ctx := context.Background()
 	store := session.NewInMemoryStore[*schema.Message](nil)
-	sessionService := adk.NewLocalSessionService[*schema.Message](store)
+	sessionStore := store
 	sid := "reduction-test"
 
 	// Seed the session: user → assistant call A → tool result A → assistant call B → tool result B.
@@ -431,16 +428,13 @@ func TestReductionIntegration_PersistsBothMessageUpdated(t *testing.T) {
 		Content:    "raw content B",
 		Extra:      map[string]any{"_eino_msg_id": "tool-B-id"},
 	}
-	var seedTail string
 	for _, m := range []*schema.Message{user, assistantA, toolResultA, assistantB, toolResultB} {
 		se := &adk.SessionEvent[*schema.Message]{EventID: uuid.NewString(), Kind: adk.SessionEventMessage, Message: m}
-		res, err := store.AppendEvents(ctx, &adk.AppendSessionEventsRequest[*schema.Message]{
-			SessionID:                  sid,
-			ExpectedSessionTailEventID: seedTail,
-			Events:                     []*adk.SessionEvent[*schema.Message]{se},
+		err := store.AppendEvents(ctx, &adk.AppendSessionEventsRequest[*schema.Message]{
+			SessionID: sid,
+			Events:    []*adk.SessionEvent[*schema.Message]{se},
 		})
 		require.NoError(t, err)
-		seedTail = res.SessionTailEventID
 	}
 
 	// Reduction config: token counter always exceeds threshold; clear handler always clears.
@@ -481,9 +475,9 @@ func TestReductionIntegration_PersistsBothMessageUpdated(t *testing.T) {
 	require.NoError(t, err)
 
 	runner := adk.NewRunner(ctx, adk.RunnerConfig{
-		Agent:          agent,
-		SessionID:      sid,
-		SessionService: sessionService,
+		Agent:        agent,
+		SessionID:    sid,
+		SessionStore: sessionStore,
 	})
 
 	for it := runner.Query(ctx, "go"); ; {

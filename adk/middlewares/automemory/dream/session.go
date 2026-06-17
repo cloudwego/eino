@@ -94,12 +94,11 @@ func newSessionHistoryGrepTool[M adk.MessageType](store adk.SessionEventStore[M]
 			after = ""
 			for len(found) < limit {
 				result, err := store.LoadEvents(ctx, &adk.LoadSessionEventsRequest{
-					SessionID:          sessionID,
-					After:              after,
-					Limit:              pageSize,
-					Reverse:            true,
-					Kinds:              []adk.SessionEventKind{adk.SessionEventMessage},
-					IncludeSessionTail: false,
+					SessionID: sessionID,
+					After:     after,
+					Limit:     pageSize,
+					Reverse:   true,
+					Kinds:     []adk.SessionEventKind{adk.SessionEventMessage},
 				})
 				if err != nil {
 					return "", err
