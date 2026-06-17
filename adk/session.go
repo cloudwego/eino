@@ -61,12 +61,7 @@ var ErrInvalidRollbackTarget = errors.New("adk: invalid rollback target")
 var ErrRollbackTargetInactive = errors.New("adk: rollback target is not active")
 var ErrSessionHeadChanged = errors.New("adk: session committed turn_end head changed")
 var ErrSessionBusy = errors.New("adk: session already has an active handle")
-var ErrSessionFencingTokenRequired = errors.New("adk: session fencing token required")
-var ErrSessionFencingTokenUnsupported = errors.New("adk: session fencing token unsupported")
-var ErrSessionTailMismatch = errors.New("adk: session tail does not match expected tail")
 var ErrDuplicateEventID = errors.New("adk: duplicate session event_id")
-var ErrSessionFencingTokenInvalid = errors.New("adk: session handle fencing token is not current")
-var ErrSessionFencingTokenExpired = errors.New("adk: session handle fencing token expired")
 
 type SessionBusyError struct {
 	ExpiresAt time.Time
@@ -79,65 +74,16 @@ const (
 	sessionRunnerCheckpointSuffix = "/runner_checkpoint"
 )
 
-// SessionEventStore is the provider-facing interface for a typed session event log.
-// It is suitable for local development, tests, and single-process deployments
-// when wrapped by NewLocalSessionService.
+// SessionEventStore is the provider-facing interface for a typed append-only
+// session event log. Runner coordinates process-local single-writer access for
+// a session before calling AppendEvents.
 type SessionEventStore[M MessageType] interface {
 	LoadEvents(ctx context.Context, req *LoadSessionEventsRequest) (*LoadSessionEventsResult[M], error)
-	AppendEvents(ctx context.Context, req *AppendSessionEventsRequest[M]) (*AppendSessionEventsResult, error)
-}
-
-// FencedSessionEventStore is the provider-facing event log interface for
-// production multi-process session ownership. AppendEventsFenced must validate
-// the fencing token and expected tail in the same atomic append operation that
-// writes events.
-type FencedSessionEventStore[M MessageType] interface {
-	LoadEvents(ctx context.Context, req *LoadSessionEventsRequest) (*LoadSessionEventsResult[M], error)
-	AppendEventsFenced(ctx context.Context, req *FencedAppendSessionEventsRequest[M]) (*AppendSessionEventsResult, error)
-}
-
-// SessionFencingTokenFunc returns the current opaque fencing token for one
-// externally-owned session ownership epoch.
-//
-// Runner calls this function only when it is about to append events through a
-// fenced session service. It does not call the function while opening a session
-// or loading events, and it does not manage token renewal or release. The owner
-// that coordinates the session, such as a TurnLoop or application scheduler, is
-// responsible for the token lifecycle.
-type SessionFencingTokenFunc func(ctx context.Context) (string, error)
-
-// FencedAppendSessionEventsRequest is the provider-facing append request for a
-// fenced event store.
-//
-// AppendEventsFenced must validate FencingToken, ExpectedSessionTailEventID, and
-// the event append in the same atomic append operation. If the expected tail does
-// not match the current session tail, providers may return success only when the
-// already-persisted events after ExpectedSessionTailEventID exactly match the
-// requested EventID sequence and the current tail is the last requested EventID.
-type FencedAppendSessionEventsRequest[M MessageType] struct {
-	// SessionID identifies the session log to append to.
-	SessionID string
-	// FencingToken is an opaque owner proof supplied by SessionFencingTokenFunc.
-	FencingToken string
-	// ExpectedSessionTailEventID is the session tail that the caller observed
-	// before this append. Empty means the caller expects an empty session log.
-	ExpectedSessionTailEventID string
-	// Events are appended as one batch. Each EventID must be non-empty and
-	// unique within the session.
-	Events []*SessionEvent[M]
-}
-
-// SessionService is the sealed runtime adapter consumed by Runner.
-// External providers should implement SessionEventStore or FencedSessionEventStore
-// and use NewLocalSessionService or NewFencedSessionService instead of
-// implementing SessionService directly.
-type SessionService[M MessageType] interface {
-	openSession(ctx context.Context, req *openSessionRequest) (*openSessionResult[M], error)
+	AppendEvents(ctx context.Context, req *AppendSessionEventsRequest[M]) error
 }
 
 type openSessionRequest struct {
-	sessionID    string
-	fencingToken SessionFencingTokenFunc
+	sessionID string
 }
 
 type openSessionResult[M MessageType] struct {
@@ -146,8 +92,7 @@ type openSessionResult[M MessageType] struct {
 
 type sessionHandle[M MessageType] interface {
 	loadEvents(ctx context.Context, req *LoadSessionEventsRequest) (*LoadSessionEventsResult[M], error)
-	appendEvents(ctx context.Context, req *AppendSessionEventsRequest[M]) (*AppendSessionEventsResult, error)
-	currentTailEventID() string
+	appendEvents(ctx context.Context, req *AppendSessionEventsRequest[M]) error
 	close(ctx context.Context) error
 }
 
@@ -163,17 +108,6 @@ type LoadSessionEventsRequest struct {
 	Reverse bool
 	// Kinds filters events by their Kind field. Empty means no kind filter.
 	Kinds []SessionEventKind
-	// IncludeSessionTail requests that the store populate
-	// LoadSessionEventsResult.SessionTailEventID for this load. Callers set it
-	// only when they will append based on this load and therefore need the
-	// authoritative log tail observed in the same snapshot as Events; the
-	// reconstruct path sets it on the first (newest) reverse page only.
-	//
-	// When false, a store may leave SessionTailEventID empty to avoid the extra
-	// work of resolving the tail (for example, a separate tail query in a
-	// SQL-backed store). Stores for which the tail is free to compute may ignore
-	// this flag and always populate it.
-	IncludeSessionTail bool
 }
 
 // LoadSessionEventsResult is the response from SessionEventStore.LoadEvents.
@@ -182,33 +116,14 @@ type LoadSessionEventsResult[M MessageType] struct {
 	Events []*SessionEvent[M]
 	// Next is the event_id of the last event in this page in the direction of travel.
 	Next string
-	// SessionTailEventID is the last event_id visible in the session log snapshot
-	// used for this load. It is the tail of the entire log snapshot, independent
-	// of the request's Kinds, Limit, Reverse, and After fields; do not infer it
-	// from Events.
-	//
-	// It is populated only when the request set IncludeSessionTail (a store may
-	// always populate it when the tail is free to compute). When
-	// IncludeSessionTail was set, empty means the visible session log is empty;
-	// when it was not set, empty carries no information about the log.
-	SessionTailEventID string
 }
 
 type AppendSessionEventsRequest[M MessageType] struct {
 	// SessionID identifies the session log to append to.
 	SessionID string
-	// ExpectedSessionTailEventID is the session tail that the caller observed
-	// before this append. Empty means the caller expects an empty session log.
-	ExpectedSessionTailEventID string
 	// Events are appended as one batch. Each EventID must be non-empty and
 	// unique within the session.
 	Events []*SessionEvent[M]
-}
-
-// AppendSessionEventsResult reports the new durable session tail after an
-// append or exact batch replay.
-type AppendSessionEventsResult struct {
-	SessionTailEventID string
 }
 
 // SessionEvent is the JSON-serializable persistence format for session events.
@@ -229,7 +144,7 @@ type SessionEvent[M MessageType] struct {
 	// (in makeInputSessionEvent / toSessionEvent). Persister-level retries
 	// re-send the same payload bytes and therefore the same EventID, which is
 	// what enables AppendEvents idempotency. Runner-allocated EventIDs are
-	// UUIDv4 strings; SessionService implementations treat EventID as an opaque
+	// UUIDv4 strings; SessionEventStore implementations treat EventID as an opaque
 	// non-empty string and do NOT enforce UUIDv4 format.
 	//
 	// Distinct from MessageUpdatedEvent.MessageID: EventID identifies the
@@ -238,7 +153,7 @@ type SessionEvent[M MessageType] struct {
 	EventID string `json:"event_id"`
 
 	// Timestamp is inherited from the source AgentEvent and represents the event
-	// occurrence time, not the SessionService persistence time.
+	// occurrence time, not the SessionEventStore persistence time.
 	Timestamp time.Time `json:"timestamp,omitempty"`
 
 	Kind SessionEventKind `json:"kind,omitempty"`
@@ -556,9 +471,8 @@ type SessionConfig[M MessageType] struct {
 	// SessionAcquireTimeout bounds how long Runner may wait to acquire any session
 	// handle before failing the current Run/Resume/Rollback attempt.
 	//
-	// This is not a fenced-only option and does not configure the fenced handle's
-	// fencing token TTL. It applies to the session admission path in both local
-	// and fenced services.
+	// It applies to the process-local admission path used by the built-in
+	// session store.
 	SessionAcquireTimeout time.Duration
 }
 
@@ -571,11 +485,10 @@ type TurnEndState[M MessageType] struct {
 }
 
 type runnerSessionCheckpoint struct {
-	SessionID          string
-	TurnID             string
-	CheckPointID       string
-	SessionTailEventID string
-	Payload            []byte
+	SessionID    string
+	TurnID       string
+	CheckPointID string
+	Payload      []byte
 }
 
 func init() {
@@ -1116,7 +1029,7 @@ func (p *sessionEventPersister[M]) closeAndWait() error {
 }
 
 func (p *sessionEventPersister[M]) appendEvents(events []*SessionEvent[M]) error {
-	_, err := p.handle.appendEvents(p.ctx, &AppendSessionEventsRequest[M]{
+	err := p.handle.appendEvents(p.ctx, &AppendSessionEventsRequest[M]{
 		SessionID: p.sessionID,
 		Events:    events,
 	})
@@ -1331,10 +1244,9 @@ var modelContextSessionEventKinds = []SessionEventKind{
 }
 
 type RollbackSessionOptions[M MessageType] struct {
-	CheckPointStore     CheckPointStore
-	ExpectedHeadTurnID  string
-	EventIDGenerator    SessionEventIDGenerator[M]
-	SessionFencingToken SessionFencingTokenFunc
+	CheckPointStore    CheckPointStore
+	ExpectedHeadTurnID string
+	EventIDGenerator   SessionEventIDGenerator[M]
 }
 
 type RollbackSessionOption[M MessageType] func(*RollbackSessionOptions[M])
@@ -1363,24 +1275,16 @@ func WithRollbackEventIDGenerator[M MessageType](gen SessionEventIDGenerator[M])
 	}
 }
 
-// WithRollbackSessionFencingToken supplies the external owner proof used when
-// rolling back through a fenced session service.
-func WithRollbackSessionFencingToken[M MessageType](fn SessionFencingTokenFunc) RollbackSessionOption[M] {
-	return func(opts *RollbackSessionOptions[M]) {
-		opts.SessionFencingToken = fn
-	}
-}
-
 // RollbackSession appends a rollback marker that makes targetTurnID the latest active committed turn.
 func RollbackSession[M MessageType](
 	ctx context.Context,
-	service SessionService[M],
+	store SessionEventStore[M],
 	sessionID string,
 	targetTurnID string,
 	opts ...RollbackSessionOption[M],
 ) error {
-	if service == nil {
-		return errors.New("adk: rollback session service is nil")
+	if store == nil {
+		return errors.New("adk: rollback session store is nil")
 	}
 	if sessionID == "" {
 		return errors.New("adk: rollback sessionID is empty")
@@ -1394,7 +1298,7 @@ func RollbackSession[M MessageType](
 			opt(&cfg)
 		}
 	}
-	openResult, err := service.openSession(ctx, &openSessionRequest{sessionID: sessionID, fencingToken: cfg.SessionFencingToken})
+	openResult, err := openRunnerSession[M](ctx, store, sessionID, normalizeSessionConfig[M](nil))
 	if err != nil {
 		return err
 	}
@@ -1440,7 +1344,7 @@ func RollbackSession[M MessageType](
 	if err := assignSessionEventID(ctx, rb, cfg.EventIDGenerator); err != nil {
 		return err
 	}
-	if _, err := openResult.handle.appendEvents(ctx, &AppendSessionEventsRequest[M]{
+	if err := openResult.handle.appendEvents(ctx, &AppendSessionEventsRequest[M]{
 		SessionID: sessionID,
 		Events:    []*SessionEvent[M]{rb},
 	}); err != nil {
@@ -1522,10 +1426,6 @@ func loadActiveSessionEventsReverse[M MessageType](
 			Limit:     pageSize,
 			Reverse:   true,
 			Kinds:     modelContextSessionEventKinds,
-			// The first reverse page is the newest page, so its snapshot tail is
-			// the log tail the caller appends against. Later (older) pages do not
-			// need it.
-			IncludeSessionTail: after == "",
 		})
 		if err != nil {
 			return nil, err
