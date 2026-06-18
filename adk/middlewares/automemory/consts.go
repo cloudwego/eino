@@ -28,9 +28,10 @@ const (
 	defaultCandidateLimit       = 200
 	defaultCandidatePreviewLine = 30
 
-	defaultTopicTopK     = 5
-	defaultTopicMaxLines = 200
-	defaultTopicMaxBytes = 4 * 1024
+	defaultTopicTopK          = 5
+	defaultTopicMaxLines      = 200
+	defaultTopicMaxBytes      = 4 * 1024
+	defaultTopicMaxTotalBytes = 16 * 1024
 
 	defaultMemoryWriteMaxTurns = 5
 
