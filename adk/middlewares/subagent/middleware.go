@@ -58,24 +58,6 @@ type TypedConfig[M adk.MessageType] struct {
 	TaskMgr *TypedTaskMgr[M]
 }
 
-// Validate checks the Config for correctness.
-func (c *TypedConfig[M]) Validate() error {
-	if len(c.SubAgents) == 0 {
-		return fmt.Errorf("subagent: SubAgents must not be empty")
-	}
-
-	names := make(map[string]struct{}, len(c.SubAgents))
-	for _, a := range c.SubAgents {
-		name := a.Name(context.Background())
-		if _, exists := names[name]; exists {
-			return fmt.Errorf("subagent: duplicate agent name %q", name)
-		}
-		names[name] = struct{}{}
-	}
-
-	return nil
-}
-
 // New creates a ChatModelAgentMiddleware that injects sub-agent tools into the agent context.
 //
 // The middleware injects an Agent tool for spawning sub-agents. When Config.TaskMgr is
@@ -91,7 +73,7 @@ func New(ctx context.Context, config *Config) (adk.ChatModelAgentMiddleware, err
 // NewTyped creates a TypedChatModelAgentMiddleware that injects sub-agent tools into the
 // agent context, parameterized by message type. See New for behavior details.
 func NewTyped[M adk.MessageType](ctx context.Context, config *TypedConfig[M]) (adk.TypedChatModelAgentMiddleware[M], error) {
-	if err := config.Validate(); err != nil {
+	if err := validate(ctx, config); err != nil {
 		return nil, err
 	}
 
@@ -187,4 +169,21 @@ func (m *typedSubagentMiddleware[M]) BeforeAgent(ctx context.Context, runCtx *ad
 	nRunCtx.Instruction += "\n" + m.instruction
 	nRunCtx.Tools = append(nRunCtx.Tools, m.tools...)
 	return ctx, &nRunCtx, nil
+}
+
+func validate[M adk.MessageType](ctx context.Context, c *TypedConfig[M]) error {
+	if len(c.SubAgents) == 0 {
+		return fmt.Errorf("subagent: SubAgents must not be empty")
+	}
+
+	names := make(map[string]struct{}, len(c.SubAgents))
+	for _, a := range c.SubAgents {
+		name := a.Name(ctx)
+		if _, exists := names[name]; exists {
+			return fmt.Errorf("subagent: duplicate agent name %q", name)
+		}
+		names[name] = struct{}{}
+	}
+
+	return nil
 }

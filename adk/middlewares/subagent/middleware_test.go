@@ -123,7 +123,7 @@ func TestBeforeAgent_NilRunCtx(t *testing.T) {
 
 func TestBeforeAgent_WithTaskMgr_InjectsThreeTools(t *testing.T) {
 	ctx := context.Background()
-	mgr := NewTaskMgr()
+	mgr := NewTaskMgr(context.Background(), &TaskMgrConfig{})
 	defer func() {
 		closeCtx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 		defer cancel()
@@ -224,12 +224,14 @@ func TestAgentTool_NotFound(t *testing.T) {
 
 func TestAgentTool_Background(t *testing.T) {
 	ctx := context.Background()
-	mgr := NewTaskMgr()
+	mgr := NewTaskMgr(context.Background(), &TaskMgrConfig{})
 	defer func() {
 		closeCtx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
 		_ = mgr.Close(closeCtx)
 	}()
+
+	ch := mgr.Subscribe()
 
 	slowAgent := &mockAgent{
 		name: "slow",
@@ -255,17 +257,26 @@ func TestAgentTool_Background(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, result, "launched in background")
 
+	// Running notification.
+	select {
+	case n := <-ch:
+		assert.Equal(t, StatusRunning, n.Task.Status)
+		assert.NotNil(t, n.Events)
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for running notification")
+	}
+
 	// Wait for the background task to complete.
 	err = mgr.WaitAllDone(context.Background())
 	require.NoError(t, err)
 
-	// Check the notification.
+	// Completed notification.
 	select {
-	case n := <-mgr.Notifications():
+	case n := <-ch:
 		assert.Equal(t, StatusCompleted, n.Task.Status)
 		assert.Equal(t, "slow result", n.Task.Result)
 	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for notification")
+		t.Fatal("timed out waiting for completed notification")
 	}
 }
 
@@ -311,7 +322,7 @@ func TestAgentTool_CustomName(t *testing.T) {
 // --- TaskOutput Tool Tests ---
 
 func TestTaskOutputTool(t *testing.T) {
-	mgr := NewTaskMgr()
+	mgr := NewTaskMgr(context.Background(), &TaskMgrConfig{})
 	defer func() {
 		closeCtx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 		defer cancel()
@@ -344,7 +355,7 @@ func TestTaskOutputTool(t *testing.T) {
 }
 
 func TestTaskOutputTool_NotFound(t *testing.T) {
-	mgr := NewTaskMgr()
+	mgr := NewTaskMgr(context.Background(), &TaskMgrConfig{})
 	defer func() {
 		closeCtx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 		defer cancel()
@@ -361,7 +372,7 @@ func TestTaskOutputTool_NotFound(t *testing.T) {
 // --- TaskStop Tool Tests ---
 
 func TestTaskStopTool(t *testing.T) {
-	mgr := NewTaskMgr()
+	mgr := NewTaskMgr(context.Background(), &TaskMgrConfig{})
 	defer func() {
 		closeCtx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 		defer cancel()
@@ -399,7 +410,7 @@ func TestTaskStopTool(t *testing.T) {
 }
 
 func TestTaskStopTool_AlreadyDone(t *testing.T) {
-	mgr := NewTaskMgr()
+	mgr := NewTaskMgr(context.Background(), &TaskMgrConfig{})
 	defer func() {
 		closeCtx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 		defer cancel()
@@ -427,7 +438,7 @@ func TestTaskStopTool_AlreadyDone(t *testing.T) {
 
 func TestAgentTool_ForegroundWithTaskMgr(t *testing.T) {
 	ctx := context.Background()
-	mgr := NewTaskMgr()
+	mgr := NewTaskMgr(context.Background(), &TaskMgrConfig{})
 	defer func() {
 		closeCtx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
@@ -465,7 +476,7 @@ func TestAgentTool_ForegroundWithTaskMgr(t *testing.T) {
 
 func TestAgentTool_AutoBackground(t *testing.T) {
 	ctx := context.Background()
-	mgr := NewTaskMgr(WithAutoBackground[*schema.Message](50)) // 50ms timeout
+	mgr := NewTaskMgr(context.Background(), &TaskMgrConfig{AutoBackgroundMs: intPtr(50)}) // 50ms timeout
 	defer func() {
 		closeCtx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
@@ -513,7 +524,7 @@ func TestAgentTool_AutoBackground(t *testing.T) {
 
 func TestAgentTool_AutoBackground_FastAgent(t *testing.T) {
 	ctx := context.Background()
-	mgr := NewTaskMgr(WithAutoBackground[*schema.Message](5000)) // 5s timeout, agent finishes instantly
+	mgr := NewTaskMgr(context.Background(), &TaskMgrConfig{AutoBackgroundMs: intPtr(5000)}) // 5s timeout, agent finishes instantly
 	defer func() {
 		closeCtx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()

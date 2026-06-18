@@ -42,3 +42,49 @@ func extractTextContent[M adk.MessageType](msg M) string {
 		return ""
 	}
 }
+
+// copyAgentEvent returns a copy of the given event that is safe for independent
+// consumption by another reader. If the event carries a streaming message, the
+// MessageStream is duplicated so both the original and the copy can be read.
+// The Message itself, stream chunks, CustomizedOutput, and Action are shared
+// (not deep-copied); RunPath is deep-copied.
+func copyAgentEvent[M adk.MessageType](ae *adk.TypedAgentEvent[M]) *adk.TypedAgentEvent[M] {
+	rp := make([]adk.RunStep, len(ae.RunPath))
+	copy(rp, ae.RunPath)
+
+	copied := &adk.TypedAgentEvent[M]{
+		AgentName: ae.AgentName,
+		RunPath:   rp,
+		Action:    ae.Action,
+		Err:       ae.Err,
+	}
+
+	if ae.Output == nil {
+		return copied
+	}
+
+	copied.Output = &adk.TypedAgentOutput[M]{
+		CustomizedOutput: ae.Output.CustomizedOutput,
+	}
+
+	mv := ae.Output.MessageOutput
+	if mv == nil {
+		return copied
+	}
+
+	copied.Output.MessageOutput = &adk.TypedMessageVariant[M]{
+		IsStreaming: mv.IsStreaming,
+		Role:        mv.Role,
+		AgenticRole: mv.AgenticRole,
+		ToolName:    mv.ToolName,
+	}
+	if mv.IsStreaming {
+		streams := mv.MessageStream.Copy(2)
+		mv.MessageStream = streams[0]
+		copied.Output.MessageOutput.MessageStream = streams[1]
+	} else {
+		copied.Output.MessageOutput.Message = mv.Message
+	}
+
+	return copied
+}

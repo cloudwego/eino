@@ -37,6 +37,8 @@ func closeWithTimeout(mgr *TaskMgr) {
 	_ = mgr.Close(ctx)
 }
 
+func intPtr(v int) *int { return &v }
+
 // simpleAgent is a test helper implementing adk.Agent for TaskMgr tests.
 type simpleAgent struct {
 	name    string
@@ -97,7 +99,7 @@ func registerAndRun(mgr *TaskMgr, agent *simpleAgent, description string, backgr
 // --- Run (foreground) Tests ---
 
 func TestTaskMgr_RunForeground(t *testing.T) {
-	mgr := NewTaskMgr()
+	mgr := NewTaskMgr(context.Background(), &TaskMgrConfig{})
 	defer closeWithTimeout(mgr)
 
 	agent := &simpleAgent{name: "a1", result: "hello"}
@@ -109,7 +111,7 @@ func TestTaskMgr_RunForeground(t *testing.T) {
 }
 
 func TestTaskMgr_RunForegroundError(t *testing.T) {
-	mgr := NewTaskMgr()
+	mgr := NewTaskMgr(context.Background(), &TaskMgrConfig{})
 	defer closeWithTimeout(mgr)
 
 	agent := &simpleAgent{name: "a1", err: fmt.Errorf("something failed")}
@@ -122,8 +124,10 @@ func TestTaskMgr_RunForegroundError(t *testing.T) {
 // --- Run (background) Tests ---
 
 func TestTaskMgr_RunBackground(t *testing.T) {
-	mgr := NewTaskMgr()
+	mgr := NewTaskMgr(context.Background(), &TaskMgrConfig{})
 	defer closeWithTimeout(mgr)
+
+	ch := mgr.Subscribe()
 
 	agent := &simpleAgent{
 		name: "a1",
@@ -141,24 +145,34 @@ func TestTaskMgr_RunBackground(t *testing.T) {
 	// Task should be running.
 	assert.True(t, mgr.HasRunning())
 
+	// Running notification should arrive with Events iterator.
+	select {
+	case n := <-ch:
+		assert.Equal(t, StatusRunning, n.Task.Status)
+		assert.NotNil(t, n.Events)
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for running notification")
+	}
+
 	// Wait for completion.
 	err = mgr.WaitAllDone(context.Background())
 	require.NoError(t, err)
 
-	// Check notification.
+	// Completed notification.
 	select {
-	case n := <-mgr.Notifications():
+	case n := <-ch:
 		assert.Equal(t, StatusCompleted, n.Task.Status)
 		assert.Equal(t, "bg result", n.Task.Result)
+		assert.Nil(t, n.Events)
 	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for notification")
+		t.Fatal("timed out waiting for completed notification")
 	}
 }
 
 // --- Auto-background Tests ---
 
 func TestTaskMgr_AutoBackground_Slow(t *testing.T) {
-	mgr := NewTaskMgr(WithAutoBackground[*schema.Message](50))
+	mgr := NewTaskMgr(context.Background(), &TaskMgrConfig{AutoBackgroundMs: intPtr(50)})
 	defer closeWithTimeout(mgr)
 
 	agent := &simpleAgent{
@@ -184,7 +198,7 @@ func TestTaskMgr_AutoBackground_Slow(t *testing.T) {
 }
 
 func TestTaskMgr_AutoBackground_Fast(t *testing.T) {
-	mgr := NewTaskMgr(WithAutoBackground[*schema.Message](5000))
+	mgr := NewTaskMgr(context.Background(), &TaskMgrConfig{AutoBackgroundMs: intPtr(5000)})
 	defer closeWithTimeout(mgr)
 
 	agent := &simpleAgent{name: "fast", result: "fast result"}
@@ -199,7 +213,7 @@ func TestTaskMgr_AutoBackground_Fast(t *testing.T) {
 // --- Run with unregistered agent ---
 
 func TestTaskMgr_RunUnregistered(t *testing.T) {
-	mgr := NewTaskMgr()
+	mgr := NewTaskMgr(context.Background(), &TaskMgrConfig{})
 	defer closeWithTimeout(mgr)
 
 	_, err := mgr.Run(context.Background(), &RunInput{
@@ -214,7 +228,7 @@ func TestTaskMgr_RunUnregistered(t *testing.T) {
 // --- Get/List Tests ---
 
 func TestTaskMgr_GetNotFound(t *testing.T) {
-	mgr := NewTaskMgr()
+	mgr := NewTaskMgr(context.Background(), &TaskMgrConfig{})
 	defer closeWithTimeout(mgr)
 
 	task, ok := mgr.Get("nonexistent")
@@ -223,7 +237,7 @@ func TestTaskMgr_GetNotFound(t *testing.T) {
 }
 
 func TestTaskMgr_Get(t *testing.T) {
-	mgr := NewTaskMgr()
+	mgr := NewTaskMgr(context.Background(), &TaskMgrConfig{})
 	defer closeWithTimeout(mgr)
 
 	agent := &simpleAgent{name: "a1", result: "done"}
@@ -240,7 +254,7 @@ func TestTaskMgr_Get(t *testing.T) {
 }
 
 func TestTaskMgr_List(t *testing.T) {
-	mgr := NewTaskMgr()
+	mgr := NewTaskMgr(context.Background(), &TaskMgrConfig{})
 	defer closeWithTimeout(mgr)
 
 	a1 := &simpleAgent{name: "a1", result: "r1"}
@@ -263,7 +277,7 @@ func TestTaskMgr_List(t *testing.T) {
 // --- Cancel Tests ---
 
 func TestTaskMgr_Cancel(t *testing.T) {
-	mgr := NewTaskMgr()
+	mgr := NewTaskMgr(context.Background(), &TaskMgrConfig{})
 	defer closeWithTimeout(mgr)
 
 	agent := &simpleAgent{
@@ -288,7 +302,7 @@ func TestTaskMgr_Cancel(t *testing.T) {
 }
 
 func TestTaskMgr_CancelNotFound(t *testing.T) {
-	mgr := NewTaskMgr()
+	mgr := NewTaskMgr(context.Background(), &TaskMgrConfig{})
 	defer closeWithTimeout(mgr)
 
 	err := mgr.Cancel("nonexistent")
@@ -297,7 +311,7 @@ func TestTaskMgr_CancelNotFound(t *testing.T) {
 }
 
 func TestTaskMgr_CancelAlreadyDone(t *testing.T) {
-	mgr := NewTaskMgr()
+	mgr := NewTaskMgr(context.Background(), &TaskMgrConfig{})
 	defer closeWithTimeout(mgr)
 
 	agent := &simpleAgent{name: "a1", result: "done"}
@@ -311,8 +325,10 @@ func TestTaskMgr_CancelAlreadyDone(t *testing.T) {
 // --- Notifications ---
 
 func TestTaskMgr_Notifications(t *testing.T) {
-	mgr := NewTaskMgr()
+	mgr := NewTaskMgr(context.Background(), &TaskMgrConfig{})
 	defer closeWithTimeout(mgr)
+
+	ch := mgr.Subscribe()
 
 	a1 := &simpleAgent{name: "a1", result: "r1"}
 	a2 := &simpleAgent{name: "a2", err: fmt.Errorf("e2")}
@@ -320,29 +336,38 @@ func TestTaskMgr_Notifications(t *testing.T) {
 	r1, _ := registerAndRun(mgr, a1, "task1", false)
 	r2, _ := registerAndRun(mgr, a2, "task2", false)
 
+	// 2 tasks × 2 notifications (running + terminal) = 4.
 	var notifications []*Notification
 	timeout := time.After(time.Second)
-	for i := 0; i < 2; i++ {
+	for i := 0; i < 4; i++ {
 		select {
-		case n := <-mgr.Notifications():
+		case n := <-ch:
 			notifications = append(notifications, n)
 		case <-timeout:
 			t.Fatal("timed out waiting for notifications")
 		}
 	}
 
-	assert.Len(t, notifications, 2)
-	ids := map[string]bool{
-		notifications[0].Task.ID: true,
-		notifications[1].Task.ID: true,
+	assert.Len(t, notifications, 4)
+
+	// Verify both task IDs appear in terminal notifications.
+	var terminalIDs []string
+	for _, n := range notifications {
+		if n.Task.Status != StatusRunning {
+			terminalIDs = append(terminalIDs, n.Task.ID)
+		}
 	}
+	assert.Len(t, terminalIDs, 2)
+	ids := map[string]bool{terminalIDs[0]: true, terminalIDs[1]: true}
 	assert.True(t, ids[r1.TaskID])
 	assert.True(t, ids[r2.TaskID])
 }
 
 func TestTaskMgr_CancelNotification(t *testing.T) {
-	mgr := NewTaskMgr()
+	mgr := NewTaskMgr(context.Background(), &TaskMgrConfig{})
 	defer closeWithTimeout(mgr)
+
+	ch := mgr.Subscribe()
 
 	agent := &simpleAgent{
 		name: "a1",
@@ -353,10 +378,19 @@ func TestTaskMgr_CancelNotification(t *testing.T) {
 	}
 
 	result, _ := registerAndRun(mgr, agent, "task", true)
+
+	// Consume running notification.
+	select {
+	case n := <-ch:
+		assert.Equal(t, StatusRunning, n.Task.Status)
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for running notification")
+	}
+
 	_ = mgr.Cancel(result.TaskID)
 
 	select {
-	case n := <-mgr.Notifications():
+	case n := <-ch:
 		assert.Equal(t, StatusCanceled, n.Task.Status)
 		assert.Equal(t, result.TaskID, n.Task.ID)
 	case <-time.After(time.Second):
@@ -367,7 +401,7 @@ func TestTaskMgr_CancelNotification(t *testing.T) {
 // --- HasRunning ---
 
 func TestTaskMgr_HasRunning(t *testing.T) {
-	mgr := NewTaskMgr()
+	mgr := NewTaskMgr(context.Background(), &TaskMgrConfig{})
 	defer closeWithTimeout(mgr)
 
 	assert.False(t, mgr.HasRunning())
@@ -390,7 +424,7 @@ func TestTaskMgr_HasRunning(t *testing.T) {
 // --- WaitAllDone ---
 
 func TestTaskMgr_WaitAllDone(t *testing.T) {
-	mgr := NewTaskMgr()
+	mgr := NewTaskMgr(context.Background(), &TaskMgrConfig{})
 	defer closeWithTimeout(mgr)
 
 	a1 := &simpleAgent{
@@ -417,7 +451,7 @@ func TestTaskMgr_WaitAllDone(t *testing.T) {
 }
 
 func TestTaskMgr_WaitAllDoneTimeout(t *testing.T) {
-	mgr := NewTaskMgr()
+	mgr := NewTaskMgr(context.Background(), &TaskMgrConfig{})
 	defer closeWithTimeout(mgr)
 
 	agent := &simpleAgent{
@@ -437,7 +471,7 @@ func TestTaskMgr_WaitAllDoneTimeout(t *testing.T) {
 }
 
 func TestTaskMgr_WaitAllDoneNoTasks(t *testing.T) {
-	mgr := NewTaskMgr()
+	mgr := NewTaskMgr(context.Background(), &TaskMgrConfig{})
 	defer closeWithTimeout(mgr)
 
 	err := mgr.WaitAllDone(context.Background())
@@ -447,7 +481,7 @@ func TestTaskMgr_WaitAllDoneNoTasks(t *testing.T) {
 // --- Close ---
 
 func TestTaskMgr_Close(t *testing.T) {
-	mgr := NewTaskMgr()
+	mgr := NewTaskMgr(context.Background(), &TaskMgrConfig{})
 
 	agent := &simpleAgent{
 		name: "a1",
@@ -463,13 +497,6 @@ func TestTaskMgr_Close(t *testing.T) {
 	err := mgr.Close(ctx)
 	assert.NoError(t, err)
 
-	// Notifications channel should be closed.
-	_, ok := <-mgr.Notifications()
-	if ok {
-		for range mgr.Notifications() {
-		}
-	}
-
 	// Run after close should fail.
 	_, err = mgr.Run(context.Background(), &RunInput{
 		SubagentType: "a1",
@@ -481,7 +508,7 @@ func TestTaskMgr_Close(t *testing.T) {
 }
 
 func TestTaskMgr_RunAfterClose(t *testing.T) {
-	mgr := NewTaskMgr()
+	mgr := NewTaskMgr(context.Background(), &TaskMgrConfig{})
 	_ = mgr.Close(context.Background())
 
 	agent := &simpleAgent{name: "a1", result: "x"}
@@ -498,7 +525,7 @@ func TestTaskMgr_RunAfterClose(t *testing.T) {
 // --- Concurrency ---
 
 func TestTaskMgr_ConcurrentRuns(t *testing.T) {
-	mgr := NewTaskMgr()
+	mgr := NewTaskMgr(context.Background(), &TaskMgrConfig{})
 	defer closeWithTimeout(mgr)
 
 	const n = 50
@@ -532,7 +559,7 @@ func TestTaskMgr_ConcurrentRuns(t *testing.T) {
 // --- Unique IDs ---
 
 func TestTaskMgr_UniqueIDs(t *testing.T) {
-	mgr := NewTaskMgr()
+	mgr := NewTaskMgr(context.Background(), &TaskMgrConfig{})
 	defer closeWithTimeout(mgr)
 
 	agent := &simpleAgent{name: "a1", result: "x"}
@@ -554,7 +581,7 @@ func TestTaskMgr_UniqueIDs(t *testing.T) {
 // --- RunInBackground ---
 
 func TestTaskMgr_RunInBackground_Foreground(t *testing.T) {
-	mgr := NewTaskMgr()
+	mgr := NewTaskMgr(context.Background(), &TaskMgrConfig{})
 	defer closeWithTimeout(mgr)
 
 	agent := &simpleAgent{name: "a1", result: "done"}
@@ -567,7 +594,7 @@ func TestTaskMgr_RunInBackground_Foreground(t *testing.T) {
 }
 
 func TestTaskMgr_RunInBackground_Background(t *testing.T) {
-	mgr := NewTaskMgr()
+	mgr := NewTaskMgr(context.Background(), &TaskMgrConfig{})
 	defer closeWithTimeout(mgr)
 
 	agent := &simpleAgent{
@@ -591,7 +618,7 @@ func TestTaskMgr_RunInBackground_Background(t *testing.T) {
 // --- MarkQueried / ResultQueried ---
 
 func TestTaskMgr_MarkQueried(t *testing.T) {
-	mgr := NewTaskMgr()
+	mgr := NewTaskMgr(context.Background(), &TaskMgrConfig{})
 	defer closeWithTimeout(mgr)
 
 	agent := &simpleAgent{name: "a1", result: "done"}
@@ -613,9 +640,62 @@ func TestTaskMgr_MarkQueried(t *testing.T) {
 }
 
 func TestTaskMgr_MarkQueried_NonExistent(t *testing.T) {
-	mgr := NewTaskMgr()
+	mgr := NewTaskMgr(context.Background(), &TaskMgrConfig{})
 	defer closeWithTimeout(mgr)
 
 	// Should not panic on non-existent ID.
 	mgr.MarkQueried("nonexistent")
+}
+
+// --- Events Streaming ---
+
+func TestTaskMgr_EventsStreaming(t *testing.T) {
+	mgr := NewTaskMgr(context.Background(), &TaskMgrConfig{})
+	defer closeWithTimeout(mgr)
+
+	ch := mgr.Subscribe()
+
+	agent := &simpleAgent{
+		name: "a1",
+		runFunc: func(ctx context.Context) (string, error) {
+			time.Sleep(50 * time.Millisecond)
+			return "streamed result", nil
+		},
+	}
+
+	_, err := registerAndRun(mgr, agent, "streaming task", true)
+	require.NoError(t, err)
+
+	// Running notification should carry an Events iterator.
+	var events *adk.AsyncIterator[*adk.AgentEvent]
+	select {
+	case n := <-ch:
+		require.Equal(t, StatusRunning, n.Task.Status)
+		require.NotNil(t, n.Events)
+		events = n.Events
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for running notification")
+	}
+
+	// Consume events from the iterator.
+	var agentEvents []*adk.AgentEvent
+	for {
+		event, ok := events.Next()
+		if !ok {
+			break
+		}
+		agentEvents = append(agentEvents, event)
+	}
+
+	// The mock agent emits one event with the result message.
+	require.NotEmpty(t, agentEvents)
+
+	// Completed notification should have nil Events.
+	select {
+	case n := <-ch:
+		assert.Equal(t, StatusCompleted, n.Task.Status)
+		assert.Nil(t, n.Events)
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for completed notification")
+	}
 }
