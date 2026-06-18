@@ -31,40 +31,50 @@ import (
 type SessionIDFunc[M adk.MessageType] func(ctx context.Context, state *adk.TypedChatModelAgentState[M]) (string, error)
 
 // Coordinator abstracts distributed coordination for async memory extraction.
-// A Redis-backed implementation can map these methods to SETNX + TTL and plain KV get/set.
+// A Redis-backed implementation can map AcquireLock to SETNX + TTL, Set to SET,
+// Get to GET, and GetAndDelete to GETDEL.
 type Coordinator interface {
-	// AcquireLock tries to acquire a lock for a given session. When ok==true,
+	// AcquireLock tries to acquire a lock for key. When ok==true,
 	// it returns an unlock function that must be called exactly once.
-	AcquireLock(ctx context.Context, sessionID string, ttl time.Duration) (unlock func(context.Context) error, ok bool, err error)
+	AcquireLock(ctx context.Context, key string, ttl time.Duration) (unlock func(context.Context) error, ok bool, err error)
 
-	// PopPendingSnapshot returns and deletes the pending snapshot for a session.
-	// If there is no pending snapshot, it returns (nil, nil).
-	PopPendingSnapshot(ctx context.Context, sessionID string) (*PendingSnapshot, error)
-	SetPendingSnapshot(ctx context.Context, sessionID string, snapshot *PendingSnapshot) error
+	// Get returns the value for key. When the key does not exist, ok is false.
+	Get(ctx context.Context, key string) (value []byte, ok bool, err error)
 
-	GetCursor(ctx context.Context, sessionID string) (cursor int, ok bool, err error)
-	SetCursor(ctx context.Context, sessionID string, cursor int) error
+	// Set stores value for key. ttl<=0 means no expiration.
+	Set(ctx context.Context, key string, value []byte, ttl time.Duration) error
+
+	// GetAndDelete returns the value for key and deletes it atomically.
+	// When the key does not exist, ok is false.
+	GetAndDelete(ctx context.Context, key string) (value []byte, ok bool, err error)
 }
 
 type PendingSnapshot struct {
-	Cursor    int             `json:"cursor"`
-	Messages  json.RawMessage `json:"messages"`
-	ToolInfos json.RawMessage `json:"tool_infos,omitempty"`
+	Cursor    int    `json:"cursor"`
+	Messages  []byte `json:"messages"`
+	ToolInfos []byte `json:"tool_infos,omitempty"`
 }
 
 type CoordinationConfig[M adk.MessageType] struct {
+	// SessionIDFunc returns the logical session ID used to build the coordinator key.
+	// Optional. Defaults to an internal context-scoped session ID for write extraction.
 	SessionIDFunc SessionIDFunc[M]
-	Coordinator   Coordinator
-	LockTTL       time.Duration
+
+	// Coordinator stores cursor/pending state and coordinates async extraction locks.
+	// Optional. Defaults to NewLocalCoordinator().
+	Coordinator Coordinator
+
+	// LockTTL is the expiration duration for extraction locks and pending snapshots.
+	// Optional. Defaults to the package default lock TTL.
+	LockTTL time.Duration
 }
 
 // LocalCoordinator is the default in-process coordinator used in tests and single-instance deployments.
 // For distributed deployments, provide a Coordinator backed by Redis or another shared KV.
 type LocalCoordinator struct {
-	mu      sync.Mutex
-	locks   map[string]localLock
-	pending map[string]*PendingSnapshot
-	cursor  map[string]int
+	mu    sync.Mutex
+	locks map[string]localLock
+	kv    map[string]localValue
 }
 
 type localLock struct {
@@ -72,87 +82,124 @@ type localLock struct {
 	expiry time.Time
 }
 
+type localValue struct {
+	value  []byte
+	expiry time.Time
+}
+
 // NewLocalCoordinator returns the default in-process Coordinator implementation.
 func NewLocalCoordinator() *LocalCoordinator {
 	return &LocalCoordinator{
-		locks:   map[string]localLock{},
-		pending: map[string]*PendingSnapshot{},
-		cursor:  map[string]int{},
+		locks: map[string]localLock{},
+		kv:    map[string]localValue{},
 	}
 }
 
-func (c *LocalCoordinator) AcquireLock(_ context.Context, sessionID string, ttl time.Duration) (func(context.Context) error, bool, error) {
+func (c *LocalCoordinator) AcquireLock(_ context.Context, key string, ttl time.Duration) (func(context.Context) error, bool, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	now := time.Now()
-	if l, ok := c.locks[sessionID]; ok && now.Before(l.expiry) {
+	if l, ok := c.locks[key]; ok && now.Before(l.expiry) {
 		return nil, false, nil
 	}
 	token := randToken()
-	c.locks[sessionID] = localLock{token: token, expiry: now.Add(ttl)}
+	c.locks[key] = localLock{token: token, expiry: now.Add(ttl)}
 	return func(_ context.Context) error {
 		c.mu.Lock()
 		defer c.mu.Unlock()
-		l, ok := c.locks[sessionID]
+		l, ok := c.locks[key]
 		if !ok {
 			return nil
 		}
 		if l.token != token {
 			return fmt.Errorf("lock token mismatch")
 		}
-		delete(c.locks, sessionID)
+		delete(c.locks, key)
 		return nil
 	}, true, nil
 }
 
-func (c *LocalCoordinator) PopPendingSnapshot(_ context.Context, sessionID string) (*PendingSnapshot, error) {
+func (c *LocalCoordinator) Get(_ context.Context, key string) ([]byte, bool, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	s, ok := c.pending[sessionID]
-	if !ok || s == nil {
-		return nil, nil
+	v, ok := c.kv[key]
+	if !ok {
+		return nil, false, nil
 	}
-	cp := *s
-	if s.Messages != nil {
-		cp.Messages = append([]byte(nil), s.Messages...)
+	if !v.expiry.IsZero() && time.Now().After(v.expiry) {
+		delete(c.kv, key)
+		return nil, false, nil
 	}
-	if s.ToolInfos != nil {
-		cp.ToolInfos = append([]byte(nil), s.ToolInfos...)
-	}
-	delete(c.pending, sessionID)
-	return &cp, nil
+	return append([]byte(nil), v.value...), true, nil
 }
 
-func (c *LocalCoordinator) SetPendingSnapshot(_ context.Context, sessionID string, snapshot *PendingSnapshot) error {
+func (c *LocalCoordinator) Set(_ context.Context, key string, value []byte, ttl time.Duration) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if snapshot == nil {
-		delete(c.pending, sessionID)
-		return nil
+	var expiry time.Time
+	if ttl > 0 {
+		expiry = time.Now().Add(ttl)
 	}
-	cp := *snapshot
-	if snapshot.Messages != nil {
-		cp.Messages = append([]byte(nil), snapshot.Messages...)
-	}
-	if snapshot.ToolInfos != nil {
-		cp.ToolInfos = append([]byte(nil), snapshot.ToolInfos...)
-	}
-	c.pending[sessionID] = &cp
+	c.kv[key] = localValue{value: append([]byte(nil), value...), expiry: expiry}
 	return nil
 }
 
-func (c *LocalCoordinator) GetCursor(_ context.Context, sessionID string) (int, bool, error) {
+func (c *LocalCoordinator) GetAndDelete(_ context.Context, key string) ([]byte, bool, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	v, ok := c.cursor[sessionID]
-	return v, ok, nil
+	v, ok := c.kv[key]
+	if !ok {
+		return nil, false, nil
+	}
+	delete(c.kv, key)
+	if !v.expiry.IsZero() && time.Now().After(v.expiry) {
+		return nil, false, nil
+	}
+	return append([]byte(nil), v.value...), true, nil
 }
 
-func (c *LocalCoordinator) SetCursor(_ context.Context, sessionID string, cursor int) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.cursor[sessionID] = cursor
-	return nil
+func coordinatorCursorKey(key string) string {
+	return key + "::cursor"
+}
+
+func coordinatorPendingSnapshotKey(key string) string {
+	return key + "::pending_snapshot"
+}
+
+func getCoordinatorCursor(ctx context.Context, c Coordinator, key string) (int, bool, error) {
+	raw, ok, err := c.Get(ctx, coordinatorCursorKey(key))
+	if err != nil || !ok {
+		return 0, ok, err
+	}
+	var cursor int
+	if _, err := fmt.Sscanf(string(raw), "%d", &cursor); err != nil {
+		return 0, false, err
+	}
+	return cursor, true, nil
+}
+
+func setCoordinatorCursor(ctx context.Context, c Coordinator, key string, cursor int) error {
+	return c.Set(ctx, coordinatorCursorKey(key), []byte(fmt.Sprintf("%d", cursor)), 0)
+}
+
+func popCoordinatorPendingSnapshot(ctx context.Context, c Coordinator, key string) (*PendingSnapshot, error) {
+	raw, ok, err := c.GetAndDelete(ctx, coordinatorPendingSnapshotKey(key))
+	if err != nil || !ok {
+		return nil, err
+	}
+	var snapshot PendingSnapshot
+	if err := json.Unmarshal(raw, &snapshot); err != nil {
+		return nil, err
+	}
+	return &snapshot, nil
+}
+
+func setCoordinatorPendingSnapshot(ctx context.Context, c Coordinator, key string, snapshot *PendingSnapshot, ttl time.Duration) error {
+	raw, err := json.Marshal(snapshot)
+	if err != nil {
+		return err
+	}
+	return c.Set(ctx, coordinatorPendingSnapshotKey(key), raw, ttl)
 }
 
 func randToken() string {
