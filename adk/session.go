@@ -1439,59 +1439,12 @@ func loadActiveSessionEventsReverse[M MessageType](
 		}
 		after = result.Next
 	}
-	if err := validateRollbackTargetsForwardFromReverse[M](physicalReverse); err != nil {
-		return nil, err
-	}
-	return projectActiveEventsFromReverse[M](physicalReverse)
+	return projectActiveEventsFromReverse(physicalReverse)
 }
 
 func projectActiveEventsFromReverse[M MessageType](
 	physicalReverse []*SessionEvent[M],
 ) ([]*SessionEvent[M], error) {
-	var activeReverse []*SessionEvent[M]
-	var skipUntilEventID string
-	var skipUntilTurnID string
-	for _, event := range physicalReverse {
-		if skipUntilEventID != "" {
-			if event.EventID != skipUntilEventID {
-				continue
-			}
-			if event.Kind != SessionEventTurnEnd {
-				return nil, ErrInvalidRollbackTarget
-			}
-			if skipUntilTurnID != "" {
-				if event.Kind != SessionEventTurnEnd || event.TurnEnd == nil || event.TurnID != skipUntilTurnID {
-					return nil, ErrInvalidRollbackTarget
-				}
-			}
-			activeReverse = append(activeReverse, event)
-			skipUntilEventID = ""
-			skipUntilTurnID = ""
-			continue
-		}
-		if event.Kind == SessionEventRollback {
-			rb, err := decodeRollbackSessionEvent(event)
-			if err != nil {
-				return nil, err
-			}
-			skipUntilEventID = rb.ToEventID
-			skipUntilTurnID = rb.ToTurnID
-			continue
-		}
-		activeReverse = append(activeReverse, event)
-	}
-	if skipUntilEventID != "" {
-		return nil, ErrRollbackTargetInactive
-	}
-	for i, j := 0, len(activeReverse)-1; i < j; i, j = i+1, j-1 {
-		activeReverse[i], activeReverse[j] = activeReverse[j], activeReverse[i]
-	}
-	return activeReverse, nil
-}
-
-func validateRollbackTargetsForwardFromReverse[M MessageType](
-	physicalReverse []*SessionEvent[M],
-) error {
 	active := make([]*SessionEvent[M], 0, len(physicalReverse))
 	activeLen := 0
 	posByEventID := make(map[string]int, len(physicalReverse))
@@ -1500,19 +1453,19 @@ func validateRollbackTargetsForwardFromReverse[M MessageType](
 		if event.Kind == SessionEventRollback {
 			rb, err := decodeRollbackSessionEvent(event)
 			if err != nil {
-				return err
+				return nil, err
 			}
 			pos, ok := posByEventID[rb.ToEventID]
 			if !ok || pos >= activeLen || active[pos].EventID != rb.ToEventID {
-				return ErrRollbackTargetInactive
+				return nil, ErrRollbackTargetInactive
 			}
-			if active[pos].Kind != SessionEventTurnEnd {
-				return ErrInvalidRollbackTarget
+			target := active[pos]
+			if target.Kind != SessionEventTurnEnd {
+				return nil, ErrInvalidRollbackTarget
 			}
 			if rb.ToTurnID != "" {
-				target := active[pos]
-				if target.Kind != SessionEventTurnEnd || target.TurnEnd == nil || target.TurnID != rb.ToTurnID {
-					return ErrInvalidRollbackTarget
+				if target.TurnEnd == nil || target.TurnID != rb.ToTurnID {
+					return nil, ErrInvalidRollbackTarget
 				}
 			}
 			activeLen = pos + 1
@@ -1527,7 +1480,10 @@ func validateRollbackTargetsForwardFromReverse[M MessageType](
 		posByEventID[event.EventID] = activeLen
 		activeLen++
 	}
-	return nil
+	if activeLen < len(active) {
+		active = active[:activeLen]
+	}
+	return active, nil
 }
 
 type rollbackTargetEvidence int
