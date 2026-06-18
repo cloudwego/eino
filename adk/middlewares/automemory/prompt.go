@@ -57,7 +57,7 @@ As you work, consult your memory files to build on previous experience.
 - When the user corrects you on something you stated from memory, you MUST update or remove the incorrect entry. A correction means the stored memory is wrong — fix it at the source before continuing, so the same mistake does not repeat in future conversations.
 
 ## Searching past context
-- Search topic files inside the relevant memory store.
+- Search topic files inside the relevant memory store. Grep with pattern="<search term>" path="<memory store path>" glob="*.md
 - Use narrow search terms (error messages, file paths, function names) rather than broad keywords.
 
 `
@@ -93,7 +93,7 @@ As you work, consult your memory files to build on previous experience.
 - When the user corrects you on something you stated from memory, you MUST update or remove the incorrect entry. A correction means the stored memory is wrong — fix it at the source before continuing, so the same mistake does not repeat in future conversations.
 
 ## Searching past context
-- Search topic files inside the relevant memory store.
+- Search topic files inside the relevant memory store. Grep with pattern="<search term>" path="<memory store path>" glob="*.md
 - Use narrow search terms (error messages, file paths, function names) rather than broad keywords.
 
 `
@@ -154,7 +154,7 @@ Recently used tools:
 - 当用户指出你基于记忆给出的内容有误时，你必须更新或删除错误条目。纠正意味着原有记忆已经错误，必须先从源头修正，避免今后重复犯错
 
 ## 如何检索历史上下文
-- 在相关记忆存储中搜索主题文件
+- 在相关记忆存储中搜索主题文件。使用 pattern="<搜索词>" path="<记忆存储路径>" glob="*.md" 进行 grep 搜索。
 - 尽量使用更窄的检索词，例如报错信息、文件路径、函数名，而不是宽泛关键词
 
 `
@@ -190,7 +190,7 @@ Recently used tools:
 - 当用户指出你基于记忆给出的内容有误时，你必须更新或删除错误条目。纠正意味着原有记忆已经错误，必须先从源头修正，避免今后重复犯错
 
 ## 如何检索历史上下文
-- 在相关记忆存储中搜索主题文件
+- 在相关记忆存储中搜索主题文件。使用 pattern="<搜索词>" path="<记忆存储路径>" glob="*.md" 进行 grep 搜索。
 - 尽量使用更窄的检索词，例如报错信息、文件路径、函数名，而不是宽泛关键词
 
 `
