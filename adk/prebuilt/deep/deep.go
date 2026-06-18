@@ -27,6 +27,7 @@ import (
 	"github.com/cloudwego/eino/adk/filesystem"
 	"github.com/cloudwego/eino/adk/internal"
 	filesystem2 "github.com/cloudwego/eino/adk/middlewares/filesystem"
+	"github.com/cloudwego/eino/adk/middlewares/subagent"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool/utils"
 	"github.com/cloudwego/eino/schema"
@@ -138,26 +139,21 @@ func NewTyped[M adk.MessageType](ctx context.Context, cfg *TypedConfig[M]) (adk.
 	}
 
 	if !cfg.WithoutGeneralSubAgent || len(cfg.SubAgents) > 0 {
-		tt, err := typedTaskToolMiddleware(
-			ctx,
-			cfg.TaskToolDescriptionGenerator,
-			cfg.SubAgents,
-
-			cfg.WithoutGeneralSubAgent,
-			cfg.ChatModel,
-			instruction,
-			cfg.ToolsConfig,
-			cfg.MaxIteration,
-			cfg.Middlewares,
-			append(handlers, cfg.Handlers...),
-			cfg.ModelRetryConfig,
-			cfg.ModelFailoverConfig,
-			cfg.ModelTimeoutConfig,
-		)
+		allSubAgents, err := buildSubAgentsList(ctx, cfg, instruction, handlers)
 		if err != nil {
-			return nil, fmt.Errorf("failed to new task tool: %w", err)
+			return nil, err
 		}
-		handlers = append(handlers, tt)
+		if len(allSubAgents) > 0 {
+			subagentMW, err := subagent.NewTyped[M](ctx, &subagent.TypedConfig[M]{
+				SubAgents:                allSubAgents,
+				ToolName:                 taskToolName,
+				ToolDescriptionGenerator: cfg.TaskToolDescriptionGenerator,
+			})
+			if err != nil {
+				return nil, fmt.Errorf("failed to create subagent middleware: %w", err)
+			}
+			handlers = append(handlers, subagentMW)
+		}
 	}
 
 	return adk.NewTypedChatModelAgent(ctx, &adk.TypedChatModelAgentConfig[M]{
@@ -217,6 +213,38 @@ func typedGenModelInput[M adk.MessageType](_ context.Context, instruction string
 		return result, nil
 	}
 	panic("unreachable")
+}
+
+func buildSubAgentsList[M adk.MessageType](ctx context.Context, cfg *TypedConfig[M], instruction string, handlers []adk.TypedChatModelAgentMiddleware[M]) ([]adk.TypedAgent[M], error) {
+	var allSubAgents []adk.TypedAgent[M]
+
+	if !cfg.WithoutGeneralSubAgent {
+		agentDesc := internal.SelectPrompt(internal.I18nPrompts{
+			English: generalAgentDescription,
+			Chinese: generalAgentDescriptionChinese,
+		})
+		generalAgent, err := adk.NewTypedChatModelAgent(ctx, &adk.TypedChatModelAgentConfig[M]{
+			Name:                generalAgentName,
+			Description:         agentDesc,
+			Instruction:         instruction,
+			Model:               cfg.ChatModel,
+			ToolsConfig:         cfg.ToolsConfig,
+			MaxIterations:       cfg.MaxIteration,
+			Middlewares:         cfg.Middlewares,
+			Handlers:            append(handlers, cfg.Handlers...),
+			GenModelInput:       typedGenModelInput[M],
+			ModelRetryConfig:    cfg.ModelRetryConfig,
+			ModelFailoverConfig: cfg.ModelFailoverConfig,
+			ModelTimeoutConfig:  cfg.ModelTimeoutConfig,
+		})
+		if err != nil {
+			return nil, err
+		}
+		allSubAgents = append(allSubAgents, generalAgent)
+	}
+
+	allSubAgents = append(allSubAgents, cfg.SubAgents...)
+	return allSubAgents, nil
 }
 
 func buildTypedBuiltinAgentMiddlewares[M adk.MessageType](ctx context.Context, cfg *TypedConfig[M]) ([]adk.TypedChatModelAgentMiddleware[M], error) {
