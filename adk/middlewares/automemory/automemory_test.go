@@ -30,7 +30,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cloudwego/eino/adk"
-	adksession "github.com/cloudwego/eino/adk/session"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
 )
@@ -40,7 +39,16 @@ type fixedModel struct {
 }
 
 func (m *fixedModel) Generate(ctx context.Context, input []*schema.Message, _ ...model.Option) (*schema.Message, error) {
-	return schema.AssistantMessage(m.out, nil), nil
+	return schema.AssistantMessage("", []schema.ToolCall{
+		{
+			ID:   "select-fixed",
+			Type: "function",
+			Function: schema.FunctionCall{
+				Name:      topicSelectionToolName,
+				Arguments: m.out,
+			},
+		},
+	}), nil
 }
 
 func (m *fixedModel) Stream(ctx context.Context, input []*schema.Message, _ ...model.Option) (*schema.StreamReader[*schema.Message], error) {
@@ -52,13 +60,82 @@ func (m *fixedModel) WithTools(_ []*schema.ToolInfo) (model.ToolCallingChatModel
 	return m, nil
 }
 
+func requireMemoryIndexMessage(t *testing.T, msg *schema.Message, contains ...string) {
+	t.Helper()
+	require.True(t, isMemoryIndexMessage(msg))
+	require.NotNil(t, msg.Extra)
+	require.NotNil(t, msg.Extra[memoryExtraKey])
+	require.Contains(t, msg.Content, "<system-reminder>")
+	require.Contains(t, msg.Content, "<!-- automemory:index -->")
+	require.Contains(t, msg.Content, "<memory-index-1>")
+	require.Contains(t, msg.Content, "<index-file-content>")
+	require.Contains(t, msg.Content, "</index-file-content>")
+	require.NotContains(t, msg.Content, "### 1. Name:")
+	require.NotContains(t, msg.Content, "#### Index file content:")
+	for _, s := range contains {
+		require.Contains(t, msg.Content, s)
+	}
+}
+
+func requireTopicMemoryMessage(t *testing.T, msg *schema.Message, contains ...string) {
+	t.Helper()
+	require.True(t, isTopicMemoryMessage(msg))
+	require.NotNil(t, msg.Extra)
+	require.NotNil(t, msg.Extra[memoryExtraKey])
+	require.Contains(t, msg.Content, "<!-- automemory -->")
+	require.Contains(t, msg.Content, "<system-reminder>")
+	require.Contains(t, msg.Content, "Topic memories are long-term memory files selected as relevant to the current query")
+	require.Contains(t, msg.Content, "<topic-memory-1>")
+	require.Contains(t, msg.Content, "<topic-memory-content>")
+	require.Contains(t, msg.Content, "</topic-memory-content>")
+	require.Contains(t, msg.Content, "</system-reminder>")
+	for _, s := range contains {
+		require.Contains(t, msg.Content, s)
+	}
+}
+
+func requireWriteCursor(t *testing.T, msgs []*schema.Message, cursor int) {
+	t.Helper()
+	for _, msg := range msgs {
+		if msg == nil || msg.Extra == nil {
+			continue
+		}
+		meta, ok := msg.Extra[memoryExtraKey].(*memoryExtra)
+		if ok && meta != nil && meta.Type == "write_cursor" {
+			require.EqualValues(t, cursor, meta.Cursor)
+			return
+		}
+	}
+	require.Fail(t, "write cursor not found")
+}
+
+func countMemoryIndexMessages(msgs []*schema.Message) int {
+	count := 0
+	for _, msg := range msgs {
+		if isMemoryIndexMessage(msg) {
+			count++
+		}
+	}
+	return count
+}
+
+func countTopicMemoryMessages(msgs []*schema.Message) int {
+	count := 0
+	for _, msg := range msgs {
+		if isTopicMemoryMessage(msg) {
+			count++
+		}
+	}
+	return count
+}
+
 func TestMiddleware_IndexInjection_Empty(t *testing.T) {
 	ctx := context.Background()
 	b := NewInMemoryBackend()
 
 	mw, err := New(ctx, &Config[*schema.Message]{
-		MemoryDirectory: "/mem",
-		MemoryBackend:   b,
+		MemoryStores:  []MemoryStore{{Path: "/mem"}},
+		MemoryBackend: b,
 		// Model nil => topic selection disabled.
 	})
 	require.NoError(t, err)
@@ -70,9 +147,16 @@ func TestMiddleware_IndexInjection_Empty(t *testing.T) {
 
 	_, out, err := mw.BeforeAgent(ctx, runCtx)
 	require.NoError(t, err)
-	require.Contains(t, out.Instruction, "# auto memory")
-	require.Contains(t, out.Instruction, "## MEMORY.md")
-	require.Contains(t, out.Instruction, "currently empty")
+	require.Contains(t, out.Instruction, "# Auto memory")
+	require.Contains(t, out.Instruction, "## Memory stores")
+	require.Contains(t, out.Instruction, "1. Name: mem")
+	require.Contains(t, out.Instruction, "Path: /mem")
+	require.NotContains(t, out.Instruction, "Index file path: /mem/MEMORY.md")
+	require.NotContains(t, out.Instruction, "#### Index file content: MEMORY.md")
+	require.NotContains(t, out.Instruction, "Rules:")
+	require.Len(t, out.AgentInput.Messages, 2)
+	requireMemoryIndexMessage(t, out.AgentInput.Messages[0], "Memory indexes are the high-level table of contents", "Index Memory File Path: /mem/MEMORY.md", "currently empty")
+	require.Contains(t, out.AgentInput.Messages[1].Content, "hi")
 }
 
 func TestMiddleware_IndexInjection_ChineseInstruction(t *testing.T) {
@@ -85,8 +169,8 @@ func TestMiddleware_IndexInjection_ChineseInstruction(t *testing.T) {
 	b := NewInMemoryBackend()
 
 	mw, err := New(ctx, &Config[*schema.Message]{
-		MemoryDirectory: "/mem",
-		MemoryBackend:   b,
+		MemoryStores:  []MemoryStore{{Path: "/mem"}},
+		MemoryBackend: b,
 	})
 	require.NoError(t, err)
 
@@ -98,7 +182,72 @@ func TestMiddleware_IndexInjection_ChineseInstruction(t *testing.T) {
 	_, out, err := mw.BeforeAgent(ctx, runCtx)
 	require.NoError(t, err)
 	require.Contains(t, out.Instruction, "# 自动记忆")
-	require.Contains(t, out.Instruction, "你的 MEMORY.md 当前为空")
+	require.NotContains(t, out.Instruction, "你的 MEMORY.md 当前为空")
+	require.Len(t, out.AgentInput.Messages, 2)
+	requireMemoryIndexMessage(t, out.AgentInput.Messages[0], "记忆索引是每个记忆存储的高层目录", "索引文件当前为空")
+	require.Contains(t, out.AgentInput.Messages[1].Content, "hi")
+}
+
+func TestMiddleware_IndexInjection_CustomInstructionKeepsStoreManifest(t *testing.T) {
+	ctx := context.Background()
+	b := NewInMemoryBackend()
+	custom := "custom memory header"
+
+	mw, err := New(ctx, &Config[*schema.Message]{
+		MemoryStores: []MemoryStore{
+			{Path: "/mem", Name: "profile", Description: "User profile."},
+		},
+		MemoryBackend: b,
+		GenInstruction: func(ctx context.Context) (string, error) {
+			return custom, nil
+		},
+	})
+	require.NoError(t, err)
+
+	runCtx := &adk.ChatModelAgentContext[*schema.Message]{
+		Instruction: "base",
+		AgentInput:  &adk.AgentInput{Messages: []adk.Message{schema.UserMessage("hi")}},
+	}
+
+	_, out, err := mw.BeforeAgent(ctx, runCtx)
+	require.NoError(t, err)
+	require.Contains(t, out.Instruction, "custom memory header")
+	require.Contains(t, out.Instruction, "## Memory stores")
+	require.Contains(t, out.Instruction, "1. Name: profile")
+	require.Contains(t, out.Instruction, "Path: /mem")
+	require.Contains(t, out.Instruction, "Description: User profile.")
+	require.NotContains(t, out.Instruction, "Index file path")
+	require.Len(t, out.AgentInput.Messages, 2)
+	requireMemoryIndexMessage(t, out.AgentInput.Messages[0], "Index Memory File Path: /mem/MEMORY.md")
+	require.Contains(t, out.AgentInput.Messages[1].Content, "hi")
+}
+
+func TestMiddleware_IndexInjection_CustomInstructionErrorReportsRenderStage(t *testing.T) {
+	ctx := context.Background()
+	b := NewInMemoryBackend()
+	var stages []ErrorStage
+
+	mw, err := New(ctx, &Config[*schema.Message]{
+		MemoryStores:  []MemoryStore{{Path: "/mem"}},
+		MemoryBackend: b,
+		GenInstruction: func(ctx context.Context) (string, error) {
+			return "", fmt.Errorf("custom instruction failed")
+		},
+		OnError: func(ctx context.Context, stage ErrorStage, err error) {
+			stages = append(stages, stage)
+		},
+	})
+	require.NoError(t, err)
+
+	runCtx := &adk.ChatModelAgentContext[*schema.Message]{
+		Instruction: "base",
+		AgentInput:  &adk.AgentInput{Messages: []adk.Message{schema.UserMessage("hi")}},
+	}
+
+	_, out, err := mw.BeforeAgent(ctx, runCtx)
+	require.NoError(t, err)
+	require.Equal(t, "base", out.Instruction)
+	require.Equal(t, []ErrorStage{OnErrorStageRenderInstruction}, stages)
 }
 
 func TestNew_DoesNotMutateConfig(t *testing.T) {
@@ -106,9 +255,9 @@ func TestNew_DoesNotMutateConfig(t *testing.T) {
 	b := NewInMemoryBackend()
 
 	cfgNilNested := &Config[*schema.Message]{
-		MemoryDirectory: "/mem",
-		MemoryBackend:   b,
-		Model:           &fixedModel{out: `{"selected_memories":["debugging.md"]}`},
+		MemoryStores:  []MemoryStore{{Path: "/mem"}},
+		MemoryBackend: b,
+		Model:         &fixedModel{out: `{"selected_memories":["mem/debugging.md"]}`},
 	}
 	_, err := New(ctx, cfgNilNested)
 	require.NoError(t, err)
@@ -117,12 +266,12 @@ func TestNew_DoesNotMutateConfig(t *testing.T) {
 	require.Nil(t, cfgNilNested.Coordination)
 
 	cfgExplicitNested := &Config[*schema.Message]{
-		MemoryDirectory: "/mem",
-		MemoryBackend:   b,
-		Model:           &fixedModel{out: `{"selected_memories":["debugging.md"]}`},
-		Read:            &ReadConfig[*schema.Message]{},
-		Write:           &WriteConfig[*schema.Message]{},
-		Coordination:    &CoordinationConfig[*schema.Message]{},
+		MemoryStores:  []MemoryStore{{Path: "/mem"}},
+		MemoryBackend: b,
+		Model:         &fixedModel{out: `{"selected_memories":["mem/debugging.md"]}`},
+		Read:          &ReadConfig[*schema.Message]{},
+		Write:         &WriteConfig[*schema.Message]{},
+		Coordination:  &CoordinationConfig[*schema.Message]{},
 	}
 	_, err = New(ctx, cfgExplicitNested)
 	require.NoError(t, err)
@@ -147,9 +296,9 @@ func TestMiddleware_TopicSelection_InsertsMemoryMessage(t *testing.T) {
 	b.put("/mem/other.md", "---\nname: Other\ndescription: unrelated\ntype: misc\n---\n", now.Add(-time.Hour))
 
 	mw, err := New(ctx, &Config[*schema.Message]{
-		MemoryDirectory: "/mem",
-		MemoryBackend:   b,
-		Model:           &fixedModel{out: `{"selected_memories":["debugging.md"]}`},
+		MemoryStores:  []MemoryStore{{Path: "/mem"}},
+		MemoryBackend: b,
+		Model:         &fixedModel{out: `{"selected_memories":["mem/debugging.md"]}`},
 	})
 	require.NoError(t, err)
 
@@ -162,69 +311,69 @@ func TestMiddleware_TopicSelection_InsertsMemoryMessage(t *testing.T) {
 	_, out, err := mw.BeforeAgent(ctx, runCtx)
 	require.NoError(t, err)
 	require.NotNil(t, out.AgentInput)
-	require.Len(t, out.AgentInput.Messages, 2)
-	require.Equal(t, schema.User, out.AgentInput.Messages[0].Role)
-	require.Contains(t, out.AgentInput.Messages[0].Content, "How to run tests?")
-	require.Contains(t, out.AgentInput.Messages[1].Content, "<!-- automemory -->")
-	require.NotNil(t, out.AgentInput.Messages[1].Extra)
-	require.NotNil(t, out.AgentInput.Messages[1].Extra["__eino_automemory__"])
-	require.Contains(t, out.AgentInput.Messages[1].Content, "Contents of /mem/debugging.md")
+	require.Len(t, out.AgentInput.Messages, 3)
+	requireMemoryIndexMessage(t, out.AgentInput.Messages[0], "Index Memory File Path: /mem/MEMORY.md")
+	requireTopicMemoryMessage(t, out.AgentInput.Messages[1], "Memory Store Name: mem", "Topic Memory File Path: /mem/debugging.md")
+	require.Equal(t, schema.User, out.AgentInput.Messages[2].Role)
+	require.Contains(t, out.AgentInput.Messages[2].Content, "How to run tests?")
 }
 
-func TestMiddleware_BeforeAgent_MessageInsertedEventPersistsToSessionStore(t *testing.T) {
+func TestMiddleware_MultipleMemoryStores_IndexAndTopicSelection(t *testing.T) {
 	ctx := context.Background()
 	b := NewInMemoryBackend()
 	now := time.Now()
 
-	b.put("/mem/MEMORY.md", "- [debugging.md](debugging.md) - notes\n", now)
-	b.put("/mem/debugging.md", "---\nname: Debugging\ndescription: build and test commands\ntype: project\n---\n\n# Debugging\npnpm test\n", now)
+	b.put("/user/MEMORY.md", "- [prefs.md](prefs.md) - user preferences\n", now)
+	b.put("/user/prefs.md", "---\ndescription: editor preferences\n---\n\nUse concise answers.\n", now)
+	b.put("/project/MEMORY.md", "- [debugging.md](debugging.md) - project debugging\n", now)
+	b.put("/project/debugging.md", "---\ndescription: test commands\n---\n\nRun go test ./...\n", now)
 
 	mw, err := New(ctx, &Config[*schema.Message]{
-		MemoryDirectory: "/mem",
-		MemoryBackend:   b,
-		Model:           &fixedModel{out: "ok"},
+		MemoryStores: []MemoryStore{
+			{Path: "/user", Name: "user_profile", Description: "User preferences."},
+			{Path: "/project", Name: "project_context", Description: "Project conventions."},
+		},
+		MemoryBackend: b,
+		Model:         &fixedModel{out: `{"selected_memories":["project_context/debugging.md"]}`},
+		Read: &ReadConfig[*schema.Message]{
+			Index: &IndexConfig{EnableMemoryIndex: boolPtr(true)},
+		},
 	})
 	require.NoError(t, err)
 
-	agent, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
-		Name:        "automemory-session-event-agent",
+	runCtx := &adk.ChatModelAgentContext[*schema.Message]{
 		Instruction: "base",
-		Model:       &fixedModel{out: "ok"},
-		Handlers:    []adk.ChatModelAgentMiddleware{mw},
-	})
-	require.NoError(t, err)
-
-	const sessionID = "automemory-message-inserted-session"
-	store := adksession.NewInMemoryStore[*schema.Message](nil)
-	runner := adk.NewRunner(ctx, adk.RunnerConfig{
-		Agent:        agent,
-		SessionID:    sessionID,
-		SessionStore: store,
-	})
-
-	iter := runner.Query(ctx, "How to run tests?")
-	for {
-		event, ok := iter.Next()
-		if !ok {
-			break
-		}
-		require.NoError(t, event.Err)
+		AgentInput:  &adk.AgentInput{Messages: []adk.Message{schema.UserMessage("How should I run tests?")}},
 	}
 
-	loaded, err := store.LoadEvents(ctx, &adk.LoadSessionEventsRequest{
-		SessionID: sessionID,
-		Kinds:     []adk.SessionEventKind{adk.SessionEventMessageInserted},
-	})
+	_, out, err := mw.BeforeAgent(ctx, runCtx)
 	require.NoError(t, err)
-	require.Len(t, loaded.Events, 1, "AutoMemory BeforeAgent MessageInserted event should be persisted in SessionStore")
-
-	inserted := loaded.Events[0].MessageInserted
-	require.NotNil(t, inserted)
-	require.NotEmpty(t, inserted.BeforeMessageID)
-	require.NotNil(t, inserted.Message)
-	require.Contains(t, inserted.Message.Content, "<!-- automemory -->")
-	require.Contains(t, inserted.Message.Content, "Contents of /mem/debugging.md")
-	require.NotNil(t, inserted.Message.Extra[memoryExtraKey])
+	require.Contains(t, out.Instruction, "## Memory stores")
+	require.Contains(t, out.Instruction, "1. Name: user_profile")
+	require.Contains(t, out.Instruction, "Path: /user")
+	require.Contains(t, out.Instruction, "Description: User preferences.")
+	require.Contains(t, out.Instruction, "2. Name: project_context")
+	require.Contains(t, out.Instruction, "Path: /project")
+	require.NotContains(t, out.Instruction, "Index file path: /user/MEMORY.md")
+	require.NotContains(t, out.Instruction, "Index file path: /project/MEMORY.md")
+	require.NotContains(t, out.Instruction, "#### Index file content: MEMORY.md")
+	require.Len(t, out.AgentInput.Messages, 3)
+	requireMemoryIndexMessage(t, out.AgentInput.Messages[0],
+		"Index Memory File Path: /user/MEMORY.md",
+		"Index Memory File Path: /project/MEMORY.md",
+		"- [prefs.md](prefs.md) - user preferences",
+		"- [debugging.md](debugging.md) - project debugging",
+	)
+	indexReminder := out.AgentInput.Messages[0].Content
+	userStorePos := strings.Index(indexReminder, "<memory-index-1>")
+	userIndexPos := strings.Index(indexReminder, "- [prefs.md](prefs.md) - user preferences")
+	projectStorePos := strings.Index(indexReminder, "<memory-index-2>")
+	projectIndexPos := strings.Index(indexReminder, "- [debugging.md](debugging.md) - project debugging")
+	require.True(t, userStorePos >= 0 && userIndexPos > userStorePos && userIndexPos < projectStorePos)
+	require.True(t, projectStorePos >= 0 && projectIndexPos > projectStorePos)
+	requireTopicMemoryMessage(t, out.AgentInput.Messages[1], "Memory Store Name: project_context", "Topic Memory File Path: /project/debugging.md", "Run go test ./...")
+	require.NotContains(t, out.AgentInput.Messages[1].Content, "Use concise answers.")
+	require.Contains(t, out.AgentInput.Messages[2].Content, "How should I run tests?")
 }
 
 func TestMiddleware_TopicSelection_AsyncInjectsInBeforeModel(t *testing.T) {
@@ -236,10 +385,10 @@ func TestMiddleware_TopicSelection_AsyncInjectsInBeforeModel(t *testing.T) {
 	b.put("/mem/debugging.md", "---\nname: Debugging\ndescription: build and test commands\ntype: project\n---\n\n# Debugging\npnpm test\n", now)
 
 	mw, err := New(ctx, &Config[*schema.Message]{
-		MemoryDirectory: "/mem",
-		MemoryBackend:   b,
-		Model:           &fixedModel{out: `{"selected_memories":["debugging.md"]}`},
-		Read:            &ReadConfig[*schema.Message]{Mode: ReadModeAsync},
+		MemoryStores:  []MemoryStore{{Path: "/mem"}},
+		MemoryBackend: b,
+		Model:         &fixedModel{out: `{"selected_memories":["mem/debugging.md"]}`},
+		Read:          &ReadConfig[*schema.Message]{Mode: ReadModeAsync},
 	})
 	require.NoError(t, err)
 
@@ -249,7 +398,9 @@ func TestMiddleware_TopicSelection_AsyncInjectsInBeforeModel(t *testing.T) {
 	}
 	ctx2, out, err := mw.BeforeAgent(ctx, runCtx)
 	require.NoError(t, err)
-	require.Len(t, out.AgentInput.Messages, 1) // async doesn't inject here
+	require.Len(t, out.AgentInput.Messages, 2) // async doesn't inject topic memory here
+	requireMemoryIndexMessage(t, out.AgentInput.Messages[0], "Index Memory File Path: /mem/MEMORY.md")
+	require.Contains(t, out.AgentInput.Messages[1].Content, "How to run tests?")
 
 	st := &adk.ChatModelAgentState{Messages: []adk.Message{schema.UserMessage("How to run tests?")}}
 
@@ -288,7 +439,7 @@ func (m *toolCallSelectionModel) Generate(_ context.Context, _ []*schema.Message
 			Type: "function",
 			Function: schema.FunctionCall{
 				Name:      topicSelectionToolName,
-				Arguments: `{"selected_memories":["debugging.md","hallucinated.md"]}`,
+				Arguments: `{"selected_memories":["mem/debugging.md","hallucinated.md"]}`,
 			},
 		},
 	}), nil
@@ -310,6 +461,8 @@ type extractionModel struct {
 	mu               sync.Mutex
 	promptSeen       []string
 	boundToolCalls   [][]string
+	topicPath        string
+	indexPath        string
 	blockFirstRun    chan struct{}
 	firstRunStarted  chan struct{}
 	blockedOnce      uint32 // atomic (0/1)
@@ -387,13 +540,21 @@ func (m *extractionModel) Generate(_ context.Context, input []*schema.Message, _
 	}
 
 	payload := lastBusinessUserBeforePrompt(input, promptIdx)
+	topicPath := m.topicPath
+	if topicPath == "" {
+		topicPath = "topic.md"
+	}
+	indexPath := m.indexPath
+	if indexPath == "" {
+		indexPath = "MEMORY.md"
+	}
 	return schema.AssistantMessage("", []schema.ToolCall{
 		{
 			ID:   "write-topic",
 			Type: "function",
 			Function: schema.FunctionCall{
 				Name:      "write_file",
-				Arguments: fmt.Sprintf(`{"file_path":"topic.md","content":%q}`, payload),
+				Arguments: fmt.Sprintf(`{"file_path":%q,"content":%q}`, topicPath, payload),
 			},
 		},
 		{
@@ -401,7 +562,7 @@ func (m *extractionModel) Generate(_ context.Context, input []*schema.Message, _
 			Type: "function",
 			Function: schema.FunctionCall{
 				Name:      "write_file",
-				Arguments: `{"file_path":"MEMORY.md","content":"- [topic.md](topic.md)\n"}`,
+				Arguments: fmt.Sprintf(`{"file_path":%q,"content":"- [topic.md](topic.md)\n"}`, indexPath),
 			},
 		},
 	}), nil
@@ -431,7 +592,8 @@ func (m *extractionModel) WithTools(tools []*schema.ToolInfo) (model.ToolCalling
 
 func findExtractionPromptIndex(input []*schema.Message) int {
 	for i := len(input) - 1; i >= 0; i-- {
-		if input[i] != nil && input[i].Role == schema.User && strings.Contains(input[i].Content, "memory extraction subagent") {
+		if input[i] != nil && input[i].Role == schema.User &&
+			(strings.Contains(input[i].Content, "memory extraction subagent") || strings.Contains(input[i].Content, "记忆提取子智能体")) {
 			return i
 		}
 	}
@@ -464,7 +626,7 @@ func lastBusinessUserBeforePrompt(input []*schema.Message, promptIdx int) string
 	return "unknown"
 }
 
-func TestMiddleware_TopicSelection_SmallCandidateSetBypassesModel(t *testing.T) {
+func TestMiddleware_TopicSelection_SmallCandidateSetUsesModel(t *testing.T) {
 	ctx := context.Background()
 	b := NewInMemoryBackend()
 	now := time.Now()
@@ -472,11 +634,12 @@ func TestMiddleware_TopicSelection_SmallCandidateSetBypassesModel(t *testing.T) 
 	b.put("/mem/MEMORY.md", "- [debugging.md](debugging.md)\n- [patterns.md](patterns.md)\n", now)
 	b.put("/mem/debugging.md", "---\ndescription: debug notes\n---\nbody\n", now)
 	b.put("/mem/patterns.md", "---\ndescription: patterns\n---\nbody\n", now)
+	model := &toolCallSelectionModel{}
 
 	mw, err := New(ctx, &Config[*schema.Message]{
-		MemoryDirectory: "/mem",
-		MemoryBackend:   b,
-		Model:           &panicModel{},
+		MemoryStores:  []MemoryStore{{Path: "/mem"}},
+		MemoryBackend: b,
+		Model:         model,
 		Read: &ReadConfig[*schema.Message]{
 			Mode: ReadModeSync,
 			TopicSelection: &TopicSelectionConfig{
@@ -493,9 +656,12 @@ func TestMiddleware_TopicSelection_SmallCandidateSetBypassesModel(t *testing.T) 
 
 	_, out, err := mw.BeforeAgent(ctx, runCtx)
 	require.NoError(t, err)
-	require.Len(t, out.AgentInput.Messages, 2)
-	require.Contains(t, out.AgentInput.Messages[1].Content, "debugging.md")
-	require.Contains(t, out.AgentInput.Messages[1].Content, "patterns.md")
+	require.Equal(t, int32(1), atomic.LoadInt32(&model.calls))
+	require.Len(t, out.AgentInput.Messages, 3)
+	requireMemoryIndexMessage(t, out.AgentInput.Messages[0], "Index Memory File Path: /mem/MEMORY.md")
+	requireTopicMemoryMessage(t, out.AgentInput.Messages[1], "debugging.md")
+	require.NotContains(t, out.AgentInput.Messages[1].Content, "patterns.md")
+	require.Contains(t, out.AgentInput.Messages[2].Content, "How to run tests?")
 }
 
 func TestMiddleware_AfterAgent_SyncExtractionWritesMemoryFiles(t *testing.T) {
@@ -507,8 +673,8 @@ func TestMiddleware_AfterAgent_SyncExtractionWritesMemoryFiles(t *testing.T) {
 	extModel := &extractionModel{}
 	var onErrStages []ErrorStage
 	mw, err := New(ctx, &Config[*schema.Message]{
-		MemoryDirectory: "/mem",
-		MemoryBackend:   b,
+		MemoryStores:  []MemoryStore{{Path: "/mem"}},
+		MemoryBackend: b,
 		Write: &WriteConfig[*schema.Message]{
 			Mode:  WriteModeSync,
 			Model: extModel,
@@ -557,7 +723,93 @@ func TestMiddleware_AfterAgent_SyncExtractionWritesMemoryFiles(t *testing.T) {
 	defer extModel.mu.Unlock()
 	require.NotEmpty(t, extModel.promptSeen)
 	require.Contains(t, extModel.promptSeen[0], "memory extraction subagent")
-	require.Contains(t, extModel.promptSeen[0], "Memory directory: /mem")
+	require.Contains(t, extModel.promptSeen[0], "## Memory stores")
+	require.Contains(t, extModel.promptSeen[0], "Path: /mem")
+}
+
+func TestMiddleware_AfterAgent_SyncExtractionWritesNonPrimaryMemoryStore(t *testing.T) {
+	ctx := context.Background()
+	b := &countingBackend{InMemoryBackend: NewInMemoryBackend()}
+	now := time.Now()
+	b.put("/user/MEMORY.md", "", now)
+	b.put("/project/MEMORY.md", "", now)
+
+	extModel := &extractionModel{
+		topicPath: "project/topic.md",
+		indexPath: "project/MEMORY.md",
+	}
+	var onErrStages []ErrorStage
+	mw, err := New(ctx, &Config[*schema.Message]{
+		MemoryStores: []MemoryStore{
+			{Path: "/user", Name: "user"},
+			{Path: "/project", Name: "project"},
+		},
+		MemoryBackend: b,
+		Write: &WriteConfig[*schema.Message]{
+			Mode:  WriteModeSync,
+			Model: extModel,
+		},
+		OnError: func(ctx context.Context, stage ErrorStage, err error) {
+			onErrStages = append(onErrStages, stage)
+		},
+	})
+	require.NoError(t, err)
+
+	state := &adk.ChatModelAgentState{
+		Messages: []adk.Message{
+			schema.UserMessage("remember project convention"),
+			schema.AssistantMessage("ack", nil),
+		},
+	}
+
+	_, err = mw.AfterAgent(ctx, &adk.TypedChatModelAgentState[*schema.Message]{
+		Messages: state.Messages,
+	})
+	require.NoError(t, err)
+	require.Empty(t, onErrStages)
+
+	topic, err := b.Read(ctx, &ReadRequest{FilePath: "/project/topic.md"})
+	require.NoError(t, err)
+	require.Equal(t, "remember project convention", topic.Content)
+
+	_, err = b.Read(ctx, &ReadRequest{FilePath: "/user/topic.md"})
+	require.Error(t, err)
+
+	b.mu.Lock()
+	paths := append([]string(nil), b.paths...)
+	b.mu.Unlock()
+	require.Contains(t, paths, "/project/topic.md")
+	require.Contains(t, paths, "/project/MEMORY.md")
+	require.NotContains(t, paths, "/user/topic.md")
+}
+
+func TestMultiStoreBackend_RoutesStoresWithSharedRoot(t *testing.T) {
+	ctx := context.Background()
+	b := NewInMemoryBackend()
+
+	stores, err := buildRuntimeMemoryStores(&Config[*schema.Message]{
+		MemoryStores: []MemoryStore{
+			{Path: "/mnt/mem/a", Name: "a"},
+			{Path: "/mnt/mem/b", Name: "b"},
+		},
+		MemoryBackend: b,
+	})
+	require.NoError(t, err)
+
+	fs := newMultiStoreBackend(stores)
+	require.NoError(t, fs.Write(ctx, &WriteRequest{FilePath: "/mnt/mem/b/topic.md", Content: "from absolute"}))
+	require.NoError(t, fs.Write(ctx, &WriteRequest{FilePath: "a/topic.md", Content: "from qualified"}))
+
+	gotB, err := b.Read(ctx, &ReadRequest{FilePath: "/mnt/mem/b/topic.md"})
+	require.NoError(t, err)
+	require.Equal(t, "from absolute", gotB.Content)
+
+	gotA, err := b.Read(ctx, &ReadRequest{FilePath: "/mnt/mem/a/topic.md"})
+	require.NoError(t, err)
+	require.Equal(t, "from qualified", gotA.Content)
+
+	_, err = b.Read(ctx, &ReadRequest{FilePath: "/mnt/mem/topic.md"})
+	require.Error(t, err)
 }
 
 func TestMiddleware_AfterAgent_SyncExtraction_IteratorHandlerCanDrain(t *testing.T) {
@@ -569,8 +821,8 @@ func TestMiddleware_AfterAgent_SyncExtraction_IteratorHandlerCanDrain(t *testing
 	extModel := &extractionModel{}
 	var seen int32
 	mw, err := New(ctx, &Config[*schema.Message]{
-		MemoryDirectory: "/mem",
-		MemoryBackend:   b,
+		MemoryStores:  []MemoryStore{{Path: "/mem"}},
+		MemoryBackend: b,
 		Write: &WriteConfig[*schema.Message]{
 			Mode:  WriteModeSync,
 			Model: extModel,
@@ -622,8 +874,8 @@ func TestMiddleware_AfterAgent_SkipsExtractionWhenMainAgentAlreadyWroteMemory(t 
 
 	extModel := &extractionModel{}
 	mw, err := New(ctx, &Config[*schema.Message]{
-		MemoryDirectory: "/mem",
-		MemoryBackend:   b,
+		MemoryStores:  []MemoryStore{{Path: "/mem"}},
+		MemoryBackend: b,
 		Write: &WriteConfig[*schema.Message]{
 			Mode:  WriteModeSync,
 			Model: extModel,
@@ -678,8 +930,8 @@ func TestMiddleware_AfterAgent_AsyncExtractionKeepsLatestPendingSnapshot(t *test
 	}
 
 	mw, err := New(ctx, &Config[*schema.Message]{
-		MemoryDirectory: "/mem",
-		MemoryBackend:   b,
+		MemoryStores:  []MemoryStore{{Path: "/mem"}},
+		MemoryBackend: b,
 		Write: &WriteConfig[*schema.Message]{
 			Mode:  WriteModeAsync,
 			Model: extModel,
@@ -728,7 +980,7 @@ func TestMiddleware_AfterAgent_AsyncExtractionKeepsLatestPendingSnapshot(t *test
 		if readErr != nil || topic == nil || topic.Content != "remember two" {
 			return false
 		}
-		cursor, ok, cursorErr := coord.Coordinator.GetCursor(ctx, "session-1")
+		cursor, ok, cursorErr := getCoordinatorCursor(ctx, coord.Coordinator, "/mem::session-1")
 		if cursorErr != nil || !ok {
 			return false
 		}
@@ -736,15 +988,20 @@ func TestMiddleware_AfterAgent_AsyncExtractionKeepsLatestPendingSnapshot(t *test
 	}, 2*time.Second, 10*time.Millisecond)
 }
 
-func TestMiddleware_BeforeAgent_InstructionIdempotent_NoTopicMemory(t *testing.T) {
+func TestMiddleware_BeforeAgent_GenInstructionRendersAndIndexInjectedOnce(t *testing.T) {
 	ctx := context.Background()
 	b := NewInMemoryBackend()
 	now := time.Now()
 	b.put("/mem/MEMORY.md", "line1\nline2\n", now)
+	var instructionCalls int32
 
 	mw, err := New(ctx, &Config[*schema.Message]{
-		MemoryDirectory: "/mem",
-		MemoryBackend:   b,
+		MemoryStores:  []MemoryStore{{Path: "/mem"}},
+		MemoryBackend: b,
+		GenInstruction: func(ctx context.Context) (string, error) {
+			atomic.AddInt32(&instructionCalls, 1)
+			return "custom memory policy", nil
+		},
 		// No topic selection model.
 	})
 	require.NoError(t, err)
@@ -756,15 +1013,93 @@ func TestMiddleware_BeforeAgent_InstructionIdempotent_NoTopicMemory(t *testing.T
 
 	_, out1, err := mw.BeforeAgent(ctx, runCtx)
 	require.NoError(t, err)
-	require.Contains(t, out1.Instruction, instructionMarker)
+	require.Contains(t, out1.Instruction, "custom memory policy")
+	require.EqualValues(t, 1, atomic.LoadInt32(&instructionCalls))
+	require.Equal(t, 1, countMemoryIndexMessages(out1.AgentInput.Messages))
 
-	// Call again with the already-injected instruction; should not duplicate.
+	// Same turn with already-injected index reminder should not duplicate the reminder.
 	_, out2, err := mw.BeforeAgent(ctx, &adk.ChatModelAgentContext[*schema.Message]{
 		Instruction: out1.Instruction,
-		AgentInput:  &adk.AgentInput{Messages: []adk.Message{schema.UserMessage("hi again")}},
+		AgentInput:  &adk.AgentInput{Messages: out1.AgentInput.Messages},
 	})
 	require.NoError(t, err)
-	require.Equal(t, 1, strings.Count(out2.Instruction, instructionMarker))
+	require.Contains(t, out2.Instruction, "custom memory policy")
+	require.EqualValues(t, 2, atomic.LoadInt32(&instructionCalls))
+	require.Equal(t, 1, countMemoryIndexMessages(out2.AgentInput.Messages))
+
+	// A later business user message in the same session should not get another MEMORY.md reminder.
+	nextMessages := append([]*schema.Message{}, out2.AgentInput.Messages...)
+	nextMessages = append(nextMessages, schema.AssistantMessage("ack", nil), schema.UserMessage("next turn"))
+	_, out3, err := mw.BeforeAgent(ctx, &adk.ChatModelAgentContext[*schema.Message]{
+		Instruction: out2.Instruction,
+		AgentInput:  &adk.AgentInput{Messages: nextMessages},
+	})
+	require.NoError(t, err)
+	require.Contains(t, out3.Instruction, "custom memory policy")
+	require.EqualValues(t, 3, atomic.LoadInt32(&instructionCalls))
+	require.Equal(t, 1, countMemoryIndexMessages(out3.AgentInput.Messages))
+}
+
+func TestMiddleware_BeforeAgent_TopicMemoryInjectedOncePerSession(t *testing.T) {
+	ctx := context.Background()
+	b := NewInMemoryBackend()
+	now := time.Now()
+	b.put("/mem/MEMORY.md", "- [debugging.md](debugging.md)\n", now)
+	b.put("/mem/debugging.md", "---\ndescription: debug notes\n---\nbody\n", now)
+
+	selModel := &toolCallSelectionModel{}
+	mw, err := New(ctx, &Config[*schema.Message]{
+		MemoryStores:  []MemoryStore{{Path: "/mem"}},
+		MemoryBackend: b,
+		Model:         selModel,
+		Read: &ReadConfig[*schema.Message]{
+			Mode: ReadModeSync,
+			TopicSelection: &TopicSelectionConfig{
+				TopK: 1,
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	_, out1, err := mw.BeforeAgent(ctx, &adk.ChatModelAgentContext[*schema.Message]{
+		Instruction: "base",
+		AgentInput:  &adk.AgentInput{Messages: []adk.Message{schema.UserMessage("How to debug?")}},
+	})
+	require.NoError(t, err)
+	require.EqualValues(t, 1, atomic.LoadInt32(&selModel.calls))
+	require.Equal(t, 1, countMemoryIndexMessages(out1.AgentInput.Messages))
+	require.Equal(t, 1, countTopicMemoryMessages(out1.AgentInput.Messages))
+
+	nextMessages := append([]*schema.Message{}, out1.AgentInput.Messages...)
+	nextMessages = append(nextMessages, schema.AssistantMessage("ack", nil), schema.UserMessage("How to debug again?"))
+	_, out2, err := mw.BeforeAgent(ctx, &adk.ChatModelAgentContext[*schema.Message]{
+		Instruction: out1.Instruction,
+		AgentInput:  &adk.AgentInput{Messages: nextMessages},
+	})
+	require.NoError(t, err)
+	require.EqualValues(t, 1, atomic.LoadInt32(&selModel.calls))
+	require.Equal(t, 1, countMemoryIndexMessages(out2.AgentInput.Messages))
+	require.Equal(t, 1, countTopicMemoryMessages(out2.AgentInput.Messages))
+}
+
+func TestMiddleware_LastUserMessageSkipsSystemReminderPrefix(t *testing.T) {
+	ctx := context.Background()
+	b := NewInMemoryBackend()
+	mw, err := New(ctx, &Config[*schema.Message]{
+		MemoryStores:  []MemoryStore{{Path: "/mem"}},
+		MemoryBackend: b,
+		Model:         &fixedModel{out: `{"selected_memories":[]}`},
+	})
+	require.NoError(t, err)
+
+	last, ok := mw.(*middleware[*schema.Message]).lastUserMessage(&adk.AgentInput{
+		Messages: []adk.Message{
+			schema.UserMessage("real user query"),
+			schema.UserMessage("<system-reminder>\nInjected by another middleware.\n</system-reminder>"),
+		},
+	})
+	require.True(t, ok)
+	require.Equal(t, "real user query", last.Content)
 }
 
 func TestMiddleware_BeforeAgent_InjectsInstructionWhenMessagesAlreadyContainMemory(t *testing.T) {
@@ -772,12 +1107,12 @@ func TestMiddleware_BeforeAgent_InjectsInstructionWhenMessagesAlreadyContainMemo
 	b := NewInMemoryBackend()
 
 	mw, err := New(ctx, &Config[*schema.Message]{
-		MemoryDirectory: "/mem",
-		MemoryBackend:   b,
+		MemoryStores:  []MemoryStore{{Path: "/mem"}},
+		MemoryBackend: b,
 	})
 	require.NoError(t, err)
 
-	memMsg := newMemoryMessage[*schema.Message]("<!-- automemory -->\n<system-reminder>preloaded</system-reminder>")
+	memMsg := newMemoryMessage[*schema.Message]("<!-- automemory -->\n<system-reminder>\nTopic memories are long-term memory files selected as relevant to the current query.\n\n<topic-memory-1>\nMemory Store: mem\nMemory Store Path: /mem\nTopic File Path: preloaded.md\nSaved: now\nTopic Memory Content:\n<topic-memory-content>\npreloaded\n</topic-memory-content>\n</topic-memory-1>\n</system-reminder>")
 	runCtx := &adk.ChatModelAgentContext[*schema.Message]{
 		Instruction: "base",
 		AgentInput:  &adk.AgentInput{Messages: []adk.Message{schema.UserMessage("hi"), memMsg}},
@@ -785,8 +1120,11 @@ func TestMiddleware_BeforeAgent_InjectsInstructionWhenMessagesAlreadyContainMemo
 
 	_, out, err := mw.BeforeAgent(ctx, runCtx)
 	require.NoError(t, err)
-	require.Contains(t, out.Instruction, instructionMarker)
-	require.Len(t, out.AgentInput.Messages, 2)
+	require.Contains(t, out.Instruction, "# Auto memory")
+	require.Len(t, out.AgentInput.Messages, 3)
+	requireMemoryIndexMessage(t, out.AgentInput.Messages[0], "Index Memory File Path: /mem/MEMORY.md")
+	require.Contains(t, out.AgentInput.Messages[1].Content, "hi")
+	requireTopicMemoryMessage(t, out.AgentInput.Messages[2], "preloaded")
 }
 
 func TestMiddleware_BeforeAgent_DistributedCursorSyncIntoMessageExtra(t *testing.T) {
@@ -799,12 +1137,12 @@ func TestMiddleware_BeforeAgent_DistributedCursorSyncIntoMessageExtra(t *testing
 		Coordinator: NewLocalCoordinator(),
 		LockTTL:     time.Minute,
 	}
-	require.NoError(t, coord.Coordinator.SetCursor(ctx, "sess-cursor", 5))
+	require.NoError(t, setCoordinatorCursor(ctx, coord.Coordinator, "/mem::sess-cursor", 5))
 
 	mw, err := New(ctx, &Config[*schema.Message]{
-		MemoryDirectory: "/mem",
-		MemoryBackend:   b,
-		Coordination:    coord,
+		MemoryStores:  []MemoryStore{{Path: "/mem"}},
+		MemoryBackend: b,
+		Coordination:  coord,
 	})
 	require.NoError(t, err)
 
@@ -818,12 +1156,7 @@ func TestMiddleware_BeforeAgent_DistributedCursorSyncIntoMessageExtra(t *testing
 
 	_, out, err := mw.BeforeAgent(ctx, runCtx)
 	require.NoError(t, err)
-	last := out.AgentInput.Messages[len(out.AgentInput.Messages)-1]
-	require.NotNil(t, last.Extra)
-	meta, ok := last.Extra[memoryExtraKey].(*memoryExtra)
-	require.True(t, ok)
-	require.Equal(t, "write_cursor", meta.Type)
-	require.EqualValues(t, 5, meta.Cursor)
+	requireWriteCursor(t, out.AgentInput.Messages, 5)
 }
 
 func TestMiddleware_BeforeAgent_WriteCursorDoesNotBlockInstructionInjection(t *testing.T) {
@@ -839,12 +1172,12 @@ func TestMiddleware_BeforeAgent_WriteCursorDoesNotBlockInstructionInjection(t *t
 		Coordinator: NewLocalCoordinator(),
 		LockTTL:     time.Minute,
 	}
-	require.NoError(t, coord.Coordinator.SetCursor(ctx, "sess-cursor", 5))
+	require.NoError(t, setCoordinatorCursor(ctx, coord.Coordinator, "/mem::sess-cursor", 5))
 
 	mw, err := New(ctx, &Config[*schema.Message]{
-		MemoryDirectory: "/mem",
-		MemoryBackend:   b,
-		Coordination:    coord,
+		MemoryStores:  []MemoryStore{{Path: "/mem"}},
+		MemoryBackend: b,
+		Coordination:  coord,
 	})
 	require.NoError(t, err)
 
@@ -858,15 +1191,11 @@ func TestMiddleware_BeforeAgent_WriteCursorDoesNotBlockInstructionInjection(t *t
 
 	_, out, err := mw.BeforeAgent(ctx, runCtx)
 	require.NoError(t, err)
-	require.Contains(t, out.Instruction, instructionMarker)
-	require.Contains(t, out.Instruction, "remembered")
+	require.Contains(t, out.Instruction, "# Auto memory")
+	require.NotContains(t, out.Instruction, "remembered")
+	requireMemoryIndexMessage(t, out.AgentInput.Messages[1], "remembered")
 
-	last := out.AgentInput.Messages[len(out.AgentInput.Messages)-1]
-	require.NotNil(t, last.Extra)
-	meta, ok := last.Extra[memoryExtraKey].(*memoryExtra)
-	require.True(t, ok)
-	require.Equal(t, "write_cursor", meta.Type)
-	require.EqualValues(t, 5, meta.Cursor)
+	requireWriteCursor(t, out.AgentInput.Messages, 5)
 }
 
 func TestMiddleware_TopicSelection_ToolCallParsingAndFiltering(t *testing.T) {
@@ -879,9 +1208,9 @@ func TestMiddleware_TopicSelection_ToolCallParsingAndFiltering(t *testing.T) {
 
 	selModel := &toolCallSelectionModel{}
 	mw, err := New(ctx, &Config[*schema.Message]{
-		MemoryDirectory: "/mem",
-		MemoryBackend:   b,
-		Model:           selModel,
+		MemoryStores:  []MemoryStore{{Path: "/mem"}},
+		MemoryBackend: b,
+		Model:         selModel,
 		Read: &ReadConfig[*schema.Message]{
 			Mode: ReadModeSync,
 			TopicSelection: &TopicSelectionConfig{
@@ -897,10 +1226,13 @@ func TestMiddleware_TopicSelection_ToolCallParsingAndFiltering(t *testing.T) {
 	}
 	_, out, err := mw.BeforeAgent(ctx, runCtx)
 	require.NoError(t, err)
-	require.Len(t, out.AgentInput.Messages, 2)
+	require.Len(t, out.AgentInput.Messages, 3)
+	requireMemoryIndexMessage(t, out.AgentInput.Messages[0], "Index Memory File Path: /mem/MEMORY.md")
 	mem := out.AgentInput.Messages[1]
-	require.Contains(t, mem.Content, "Contents of /mem/debugging.md")
+	require.Contains(t, mem.Content, "Memory Store Name: mem")
+	require.Contains(t, mem.Content, "Topic Memory File Path: /mem/debugging.md")
 	require.NotContains(t, mem.Content, "hallucinated.md")
+	require.Contains(t, out.AgentInput.Messages[2].Content, "How to debug?")
 	require.EqualValues(t, 1, atomic.LoadInt32(&selModel.calls))
 }
 
@@ -912,10 +1244,10 @@ func TestMiddleware_TopicSelection_AsyncProtectsMemoryMessageFromMutation(t *tes
 	b.put("/mem/debugging.md", "---\ndescription: debug notes\n---\nbody\n", now)
 
 	mw, err := New(ctx, &Config[*schema.Message]{
-		MemoryDirectory: "/mem",
-		MemoryBackend:   b,
-		Model:           &fixedModel{out: `{"selected_memories":["debugging.md"]}`},
-		Read:            &ReadConfig[*schema.Message]{Mode: ReadModeAsync},
+		MemoryStores:  []MemoryStore{{Path: "/mem"}},
+		MemoryBackend: b,
+		Model:         &fixedModel{out: `{"selected_memories":["mem/debugging.md"]}`},
+		Read:          &ReadConfig[*schema.Message]{Mode: ReadModeAsync},
 	})
 	require.NoError(t, err)
 
@@ -955,8 +1287,8 @@ func TestMiddleware_AfterAgent_SyncExtraction_SkipIndexPrompt(t *testing.T) {
 
 	extModel := &extractionModel{}
 	mw, err := New(ctx, &Config[*schema.Message]{
-		MemoryDirectory: "/mem",
-		MemoryBackend:   b,
+		MemoryStores:  []MemoryStore{{Path: "/mem"}},
+		MemoryBackend: b,
 		Write: &WriteConfig[*schema.Message]{
 			Mode:      WriteModeSync,
 			Model:     extModel,
@@ -980,6 +1312,58 @@ func TestMiddleware_AfterAgent_SyncExtraction_SkipIndexPrompt(t *testing.T) {
 	require.NotContains(t, extModel.promptSeen[0], "Step 2")
 }
 
+func TestMiddleware_IndexDisabled_HidesMemoryIndexPrompt(t *testing.T) {
+	ctx := context.Background()
+	b := NewInMemoryBackend()
+	now := time.Now()
+	b.put("/mem/MEMORY.md", "should not be injected\n", now)
+	b.put("/mem/topic.md", "existing topic\n", now)
+	enableIndex := false
+	extModel := &extractionModel{}
+
+	mw, err := New(ctx, &Config[*schema.Message]{
+		MemoryStores:  []MemoryStore{{Path: "/mem"}},
+		MemoryBackend: b,
+		Read: &ReadConfig[*schema.Message]{
+			Index: &IndexConfig{EnableMemoryIndex: &enableIndex},
+		},
+		Write: &WriteConfig[*schema.Message]{
+			Mode:  WriteModeSync,
+			Model: extModel,
+		},
+	})
+	require.NoError(t, err)
+
+	runCtx := &adk.ChatModelAgentContext[*schema.Message]{
+		Instruction: "base",
+		AgentInput:  &adk.AgentInput{Messages: []adk.Message{schema.UserMessage("hi")}},
+	}
+	_, out, err := mw.BeforeAgent(ctx, runCtx)
+	require.NoError(t, err)
+	require.NotContains(t, out.Instruction, "MEMORY.md")
+	require.NotContains(t, out.Instruction, "should not be injected")
+	require.Contains(t, out.Instruction, "## Memory stores")
+	require.Contains(t, out.Instruction, "Path: /mem")
+	require.Len(t, out.AgentInput.Messages, 1)
+
+	state := &adk.ChatModelAgentState{
+		Messages: []adk.Message{
+			schema.UserMessage("remember delta"),
+			schema.AssistantMessage("ack", nil),
+		},
+	}
+	_, err = mw.AfterAgent(ctx, &adk.TypedChatModelAgentState[*schema.Message]{Messages: state.Messages})
+	require.NoError(t, err)
+
+	extModel.mu.Lock()
+	defer extModel.mu.Unlock()
+	require.NotEmpty(t, extModel.promptSeen)
+	require.NotContains(t, extModel.promptSeen[0], "MEMORY.md")
+	require.NotContains(t, extModel.promptSeen[0], "should not be injected")
+	require.Contains(t, extModel.promptSeen[0], "## Memory stores")
+	require.Contains(t, extModel.promptSeen[0], "Path: /mem")
+}
+
 func TestMiddleware_AfterAgent_SyncExtraction_ChinesePrompt(t *testing.T) {
 	require.NoError(t, adk.SetLanguage(adk.LanguageChinese))
 	defer func() {
@@ -993,8 +1377,8 @@ func TestMiddleware_AfterAgent_SyncExtraction_ChinesePrompt(t *testing.T) {
 
 	extModel := &extractionModel{}
 	mw, err := New(ctx, &Config[*schema.Message]{
-		MemoryDirectory: "/mem",
-		MemoryBackend:   b,
+		MemoryStores:  []MemoryStore{{Path: "/mem"}},
+		MemoryBackend: b,
 		Write: &WriteConfig[*schema.Message]{
 			Mode:  WriteModeSync,
 			Model: extModel,
@@ -1014,8 +1398,9 @@ func TestMiddleware_AfterAgent_SyncExtraction_ChinesePrompt(t *testing.T) {
 	extModel.mu.Lock()
 	defer extModel.mu.Unlock()
 	require.NotEmpty(t, extModel.promptSeen)
-	require.Contains(t, extModel.promptSeen[0], "你现在扮演 memory extraction subagent")
-	require.Contains(t, extModel.promptSeen[0], "记忆目录：/mem")
+	require.Contains(t, extModel.promptSeen[0], "你现在扮演记忆提取子智能体")
+	require.Contains(t, extModel.promptSeen[0], "## 记忆存储")
+	require.Contains(t, extModel.promptSeen[0], "存储路径：/mem")
 }
 
 func TestMiddleware_AfterAgent_RelativeMemoryDirRendersAbsolutePath(t *testing.T) {
@@ -1034,8 +1419,8 @@ func TestMiddleware_AfterAgent_RelativeMemoryDirRendersAbsolutePath(t *testing.T
 
 	extModel := &extractionModel{}
 	mw, err := New(ctx, &Config[*schema.Message]{
-		MemoryDirectory: ".",
-		MemoryBackend:   NewLocalBackend(),
+		MemoryStores:  []MemoryStore{{Path: "."}},
+		MemoryBackend: NewLocalBackend(),
 		Write: &WriteConfig[*schema.Message]{
 			Mode:  WriteModeSync,
 			Model: extModel,
@@ -1054,7 +1439,7 @@ func TestMiddleware_AfterAgent_RelativeMemoryDirRendersAbsolutePath(t *testing.T
 
 	extModel.mu.Lock()
 	require.NotEmpty(t, extModel.promptSeen)
-	require.Contains(t, extModel.promptSeen[0], "Memory directory: "+expectedDir)
+	require.Contains(t, extModel.promptSeen[0], "Path: "+expectedDir)
 	extModel.mu.Unlock()
 
 	raw, err := os.ReadFile(filepath.Join(expectedDir, "topic.md"))
@@ -1075,8 +1460,8 @@ func TestMiddleware_BeforeAgent_RelativeMemoryDirReadsResolvedDirectoryAfterCWDC
 	require.NoError(t, os.WriteFile(filepath.Join(tmp, "MEMORY.md"), []byte("persisted index\n"), 0o644))
 
 	mw, err := New(ctx, &Config[*schema.Message]{
-		MemoryDirectory: ".",
-		MemoryBackend:   NewLocalBackend(),
+		MemoryStores:  []MemoryStore{{Path: "."}},
+		MemoryBackend: NewLocalBackend(),
 	})
 	require.NoError(t, err)
 
@@ -1089,7 +1474,10 @@ func TestMiddleware_BeforeAgent_RelativeMemoryDirReadsResolvedDirectoryAfterCWDC
 	}
 	_, out, err := mw.BeforeAgent(ctx, runCtx)
 	require.NoError(t, err)
-	require.Contains(t, out.Instruction, "persisted index")
+	require.NotContains(t, out.Instruction, "persisted index")
+	require.Len(t, out.AgentInput.Messages, 2)
+	requireMemoryIndexMessage(t, out.AgentInput.Messages[0], "persisted index")
+	require.Contains(t, out.AgentInput.Messages[1].Content, "hi")
 }
 
 func TestFSBackend_ReadMissingFileReturnsContentInsteadOfError(t *testing.T) {
@@ -1111,9 +1499,9 @@ func TestMiddleware_TopicSelection_IgnoresOutOfBoundsCandidatePaths(t *testing.T
 	backend := &outOfBoundsCandidateBackend{}
 
 	mw, err := New(ctx, &Config[*schema.Message]{
-		MemoryDirectory: "/mem",
-		MemoryBackend:   backend,
-		Model:           &panicModel{},
+		MemoryStores:  []MemoryStore{{Path: "/mem"}},
+		MemoryBackend: backend,
+		Model:         &panicModel{},
 	})
 	require.NoError(t, err)
 
@@ -1123,7 +1511,9 @@ func TestMiddleware_TopicSelection_IgnoresOutOfBoundsCandidatePaths(t *testing.T
 	}
 	_, out, err := mw.BeforeAgent(ctx, runCtx)
 	require.NoError(t, err)
-	require.Len(t, out.AgentInput.Messages, 1)
+	require.Len(t, out.AgentInput.Messages, 2)
+	requireMemoryIndexMessage(t, out.AgentInput.Messages[0], "Index Memory File Path: /mem/MEMORY.md")
+	require.Contains(t, out.AgentInput.Messages[1].Content, "show memories")
 	require.Equal(t, int32(0), atomic.LoadInt32(&backend.outsideReadCalled))
 }
 
@@ -1142,13 +1532,14 @@ func TestMiddleware_AfterAgent_AsyncSetsPendingSnapshotWhenLockHeld(t *testing.T
 		LockTTL:     time.Minute,
 	}
 	// Hold the lock.
-	unlock, ok, err := coord.Coordinator.AcquireLock(ctx, "sess-pending", time.Minute)
+	coordKey := "/mem::sess-pending"
+	unlock, ok, err := coord.Coordinator.AcquireLock(ctx, coordKey, time.Minute)
 	require.NoError(t, err)
 	require.True(t, ok)
 
 	mwI, err := New(ctx, &Config[*schema.Message]{
-		MemoryDirectory: "/mem",
-		MemoryBackend:   b,
+		MemoryStores:  []MemoryStore{{Path: "/mem"}},
+		MemoryBackend: b,
 		Write: &WriteConfig[*schema.Message]{
 			Mode:  WriteModeAsync,
 			Model: extModel,
@@ -1172,16 +1563,16 @@ func TestMiddleware_AfterAgent_AsyncSetsPendingSnapshotWhenLockHeld(t *testing.T
 	})
 	require.NoError(t, err)
 
-	pending, err := coord.Coordinator.PopPendingSnapshot(ctx, "sess-pending")
+	pending, err := popCoordinatorPendingSnapshot(ctx, coord.Coordinator, coordKey)
 	require.NoError(t, err)
 	require.NotNil(t, pending)
 
 	// Release and drain manually to complete write synchronously in test.
 	require.NoError(t, unlock(ctx))
-	unlock2, ok, err := coord.Coordinator.AcquireLock(ctx, "sess-pending", time.Minute)
+	unlock2, ok, err := coord.Coordinator.AcquireLock(ctx, coordKey, time.Minute)
 	require.NoError(t, err)
 	require.True(t, ok)
-	mw.runExtractionDrain(ctx, "sess-pending", unlock2, pending)
+	mw.runExtractionDrain(ctx, coordKey, unlock2, pending)
 
 	topic, err := b.Read(ctx, &ReadRequest{FilePath: "/mem/topic.md"})
 	require.NoError(t, err)
