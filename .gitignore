@@ -61,6 +61,7 @@ CLAUDE.md
 */specs
 /todos
 /.claude/
+.claude-trace/
 
 # Internal dev setup (not for public repo)
 /scripts/dev_setup_internal.sh
