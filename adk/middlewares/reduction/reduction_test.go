@@ -24,6 +24,7 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 
@@ -52,6 +53,54 @@ func testClearOffloadPath(root string) func(context.Context, *ToolDetail) (strin
 		}
 		return fmt.Sprintf("%s/clear/%s", root, callID), nil
 	}
+}
+
+func stringStream(chunks ...string) *schema.StreamReader[string] {
+	sr, sw := schema.Pipe[string](len(chunks))
+	go func() {
+		defer sw.Close()
+		for _, chunk := range chunks {
+			sw.Send(chunk, nil)
+		}
+	}()
+	return sr
+}
+
+func stringStreamWithError(chunks []string, err error) *schema.StreamReader[string] {
+	sr, sw := schema.Pipe[string](len(chunks) + 1)
+	go func() {
+		defer sw.Close()
+		for _, chunk := range chunks {
+			sw.Send(chunk, nil)
+		}
+		var zero string
+		sw.Send(zero, err)
+	}()
+	return sr
+}
+
+func toolResultStream(chunks ...*schema.ToolResult) *schema.StreamReader[*schema.ToolResult] {
+	sr, sw := schema.Pipe[*schema.ToolResult](len(chunks))
+	go func() {
+		defer sw.Close()
+		for _, chunk := range chunks {
+			sw.Send(chunk, nil)
+		}
+	}()
+	return sr
+}
+
+func toolResultStreamWithError(chunks []*schema.ToolResult, err error) *schema.StreamReader[*schema.ToolResult] {
+	sr, sw := schema.Pipe[*schema.ToolResult](len(chunks) + 1)
+	go func() {
+		defer sw.Close()
+		for _, chunk := range chunks {
+			sw.Send(chunk, nil)
+		}
+		var zero *schema.ToolResult
+		sw.Send(zero, err)
+	}()
+	return sr
 }
 
 func TestReductionMiddlewareTrunc(t *testing.T) {
@@ -125,6 +174,451 @@ hello worldhello worldhello worldhello worldhello worldhello worldhello worldhel
 		expOrigContent := `hello worldhello worldhello worldhello worldhello worldhello worldhello worldhello worldhello worldhello world
 hello worldhello worldhello worldhello worldhello worldhello worldhello worldhello world`
 		assert.Equal(t, expOrigContent, content.Content)
+	})
+
+	t.Run("test streamable default truncation is nonblocking before source EOF", func(t *testing.T) {
+		tCtx := &adk.ToolContext{
+			Name:   "mock_streamable_tool",
+			CallID: "stream_nonblocking",
+		}
+		backend := filesystem.NewInMemoryBackend()
+		config := &Config{
+			Backend:           backend,
+			MaxLengthForTrunc: 30,
+		}
+		mw, err := New(ctx, config)
+		assert.NoError(t, err)
+
+		releaseOverflow := make(chan struct{})
+		releaseEOF := make(chan struct{})
+		endpoint := func(_ context.Context, _ string, _ ...tool.Option) (*schema.StreamReader[string], error) {
+			sr, sw := schema.Pipe[string](0)
+			go func() {
+				sw.Send("first chunk", nil)
+				<-releaseOverflow
+				sw.Send(strings.Repeat("x", 80), nil)
+				<-releaseEOF
+				sw.Close()
+			}()
+			return sr, nil
+		}
+
+		edp, err := mw.WrapStreamableToolCall(ctx, endpoint, tCtx)
+		assert.NoError(t, err)
+
+		respCh := make(chan *schema.StreamReader[string], 1)
+		errCh := make(chan error, 1)
+		go func() {
+			resp, runErr := edp(ctx, `{"value":"asd"}`)
+			if runErr != nil {
+				errCh <- runErr
+				return
+			}
+			respCh <- resp
+		}()
+
+		var resp *schema.StreamReader[string]
+		select {
+		case runErr := <-errCh:
+			close(releaseEOF)
+			assert.NoError(t, runErr)
+			return
+		case resp = <-respCh:
+		case <-time.After(2 * time.Second):
+			close(releaseEOF)
+			assert.Fail(t, "streamable truncation wrapper blocked until source EOF")
+			return
+		}
+		defer resp.Close()
+
+		first, err := resp.Recv()
+		assert.NoError(t, err)
+		assert.Equal(t, "first chunk", first)
+
+		close(releaseOverflow)
+		var remaining strings.Builder
+		noticeCh := make(chan string, 1)
+		noticeErrCh := make(chan error, 1)
+		go func() {
+			for {
+				chunk, recvErr := resp.Recv()
+				if recvErr != nil {
+					noticeErrCh <- recvErr
+					return
+				}
+				remaining.WriteString(chunk)
+				if strings.Contains(remaining.String(), "persisted-output") {
+					noticeCh <- remaining.String()
+					return
+				}
+			}
+		}()
+
+		select {
+		case got := <-noticeCh:
+			assert.Contains(t, got, "Output truncated after")
+			assert.NotContains(t, got, "Preview (first")
+			assert.NotContains(t, got, "Preview (last")
+		case recvErr := <-noticeErrCh:
+			close(releaseEOF)
+			assert.NoError(t, recvErr)
+			return
+		case <-time.After(2 * time.Second):
+			close(releaseEOF)
+			assert.Fail(t, "streamable truncation notice blocked until source EOF")
+			return
+		}
+
+		close(releaseEOF)
+		for {
+			chunk, recvErr := resp.Recv()
+			if recvErr != nil {
+				if recvErr == io.EOF {
+					break
+				}
+				assert.NoError(t, recvErr)
+				return
+			}
+			remaining.WriteString(chunk)
+		}
+		assert.Contains(t, remaining.String(), "persisted-output")
+
+		content, err := backend.Read(ctx, &filesystem.ReadRequest{FilePath: "/tmp/trunc/stream_nonblocking"})
+		assert.NoError(t, err)
+		assert.Equal(t, "first chunk"+strings.Repeat("x", 80), content.Content)
+	})
+
+	t.Run("test enhanced streamable default truncation is nonblocking before source EOF", func(t *testing.T) {
+		tCtx := &adk.ToolContext{
+			Name:   "mock_enhanced_streamable_tool",
+			CallID: "enhanced_stream_nonblocking",
+		}
+		backend := filesystem.NewInMemoryBackend()
+		config := &Config{
+			Backend:           backend,
+			MaxLengthForTrunc: 30,
+		}
+		mw, err := New(ctx, config)
+		assert.NoError(t, err)
+
+		releaseOverflow := make(chan struct{})
+		releaseEOF := make(chan struct{})
+		endpoint := func(_ context.Context, _ *schema.ToolArgument, _ ...tool.Option) (*schema.StreamReader[*schema.ToolResult], error) {
+			sr, sw := schema.Pipe[*schema.ToolResult](0)
+			go func() {
+				sw.Send(&schema.ToolResult{Parts: []schema.ToolOutputPart{{Type: schema.ToolPartTypeText, Text: "first chunk"}}}, nil)
+				<-releaseOverflow
+				sw.Send(&schema.ToolResult{Parts: []schema.ToolOutputPart{{Type: schema.ToolPartTypeText, Text: strings.Repeat("x", 80)}}}, nil)
+				<-releaseEOF
+				sw.Close()
+			}()
+			return sr, nil
+		}
+
+		edp, err := mw.WrapEnhancedStreamableToolCall(ctx, endpoint, tCtx)
+		assert.NoError(t, err)
+
+		respCh := make(chan *schema.StreamReader[*schema.ToolResult], 1)
+		errCh := make(chan error, 1)
+		go func() {
+			resp, runErr := edp(ctx, &schema.ToolArgument{Text: `{"value":"asd"}`})
+			if runErr != nil {
+				errCh <- runErr
+				return
+			}
+			respCh <- resp
+		}()
+
+		var resp *schema.StreamReader[*schema.ToolResult]
+		select {
+		case runErr := <-errCh:
+			close(releaseEOF)
+			assert.NoError(t, runErr)
+			return
+		case resp = <-respCh:
+		case <-time.After(2 * time.Second):
+			close(releaseEOF)
+			assert.Fail(t, "enhanced streamable truncation wrapper blocked until source EOF")
+			return
+		}
+		defer resp.Close()
+
+		first, err := resp.Recv()
+		assert.NoError(t, err)
+		assert.Equal(t, "first chunk", first.Parts[0].Text)
+
+		close(releaseOverflow)
+		var remaining strings.Builder
+		noticeCh := make(chan string, 1)
+		noticeErrCh := make(chan error, 1)
+		go func() {
+			for {
+				chunk, recvErr := resp.Recv()
+				if recvErr != nil {
+					noticeErrCh <- recvErr
+					return
+				}
+				for _, part := range chunk.Parts {
+					if part.Type == schema.ToolPartTypeText {
+						remaining.WriteString(part.Text)
+					}
+				}
+				if strings.Contains(remaining.String(), "persisted-output") {
+					noticeCh <- remaining.String()
+					return
+				}
+			}
+		}()
+
+		select {
+		case got := <-noticeCh:
+			assert.Contains(t, got, "Output truncated after")
+			assert.NotContains(t, got, "Preview (first")
+			assert.NotContains(t, got, "Preview (last")
+		case recvErr := <-noticeErrCh:
+			close(releaseEOF)
+			assert.NoError(t, recvErr)
+			return
+		case <-time.After(2 * time.Second):
+			close(releaseEOF)
+			assert.Fail(t, "enhanced streamable truncation notice blocked until source EOF")
+			return
+		}
+
+		close(releaseEOF)
+		for {
+			chunk, recvErr := resp.Recv()
+			if recvErr != nil {
+				if recvErr == io.EOF {
+					break
+				}
+				assert.NoError(t, recvErr)
+				return
+			}
+			for _, part := range chunk.Parts {
+				if part.Type == schema.ToolPartTypeText {
+					remaining.WriteString(part.Text)
+				}
+			}
+		}
+		assert.Contains(t, remaining.String(), "persisted-output")
+
+		content, err := backend.Read(ctx, &filesystem.ReadRequest{FilePath: "/tmp/trunc/enhanced_stream_nonblocking"})
+		assert.NoError(t, err)
+		assert.Equal(t, "first chunk"+strings.Repeat("x", 80), content.Content)
+	})
+
+	t.Run("test default streamable truncation terminal cases", func(t *testing.T) {
+		tCtx := &adk.ToolContext{Name: "mock_streamable_tool", CallID: "stream_branches"}
+		backend := filesystem.NewInMemoryBackend()
+		mw := &typedToolReductionMiddleware[*schema.Message]{
+			config: &TypedConfig[*schema.Message]{
+				MaxLengthForTrunc:       10,
+				GenTruncOffloadFilePath: testTruncOffloadPath("/tmp"),
+			},
+		}
+
+		t.Run("short output forwards and does not truncate", func(t *testing.T) {
+			cfg := &ToolReductionConfig{}
+			resp := mw.wrapDefaultStreamableTruncation(ctx, cfg, tCtx, `{}`, stringStream("short"))
+			defer resp.Close()
+
+			got, err := resp.Recv()
+			assert.NoError(t, err)
+			assert.Equal(t, "short", got)
+			_, err = resp.Recv()
+			assert.Equal(t, io.EOF, err)
+		})
+
+		t.Run("source error is forwarded", func(t *testing.T) {
+			wantErr := errors.New("source stream error")
+			cfg := &ToolReductionConfig{}
+			resp := mw.wrapDefaultStreamableTruncation(ctx, cfg, tCtx, `{}`, stringStreamWithError([]string{"ok"}, wantErr))
+			defer resp.Close()
+
+			got, err := resp.Recv()
+			assert.NoError(t, err)
+			assert.Equal(t, "ok", got)
+			_, err = resp.Recv()
+			assert.Equal(t, wantErr, err)
+		})
+
+		t.Run("path generation error is forwarded", func(t *testing.T) {
+			wantErr := errors.New("path generation error")
+			mwWithPathErr := &typedToolReductionMiddleware[*schema.Message]{
+				config: &TypedConfig[*schema.Message]{
+					MaxLengthForTrunc: 10,
+					GenTruncOffloadFilePath: func(context.Context, *ToolDetail) (string, error) {
+						return "", wantErr
+					},
+				},
+			}
+			cfg := &ToolReductionConfig{Backend: backend}
+			resp := mwWithPathErr.wrapDefaultStreamableTruncation(ctx, cfg, tCtx, `{}`, stringStream(strings.Repeat("x", 20)))
+			defer resp.Close()
+
+			got, err := resp.Recv()
+			assert.NoError(t, err)
+			assert.Equal(t, strings.Repeat("x", 10), got)
+			_, err = resp.Recv()
+			assert.Equal(t, wantErr, err)
+		})
+
+		t.Run("missing backend error is forwarded", func(t *testing.T) {
+			cfg := &ToolReductionConfig{}
+			resp := mw.wrapDefaultStreamableTruncation(ctx, cfg, tCtx, `{}`, stringStream(strings.Repeat("x", 20)))
+			defer resp.Close()
+
+			got, err := resp.Recv()
+			assert.NoError(t, err)
+			assert.Equal(t, strings.Repeat("x", 10), got)
+			_, err = resp.Recv()
+			assert.EqualError(t, err, "truncation: no backend for offload")
+		})
+
+		t.Run("truncates incrementally and writes full output", func(t *testing.T) {
+			cfg := &ToolReductionConfig{Backend: backend}
+			resp := mw.wrapDefaultStreamableTruncation(ctx, cfg, tCtx, `{}`, stringStream(strings.Repeat("x", 20)))
+			defer resp.Close()
+
+			got, err := resp.Recv()
+			assert.NoError(t, err)
+			assert.Equal(t, strings.Repeat("x", 10), got)
+			notice, err := resp.Recv()
+			assert.NoError(t, err)
+			assert.Contains(t, notice, "Output truncated after 10 bytes were streamed")
+			assert.NotContains(t, notice, "Preview (first")
+			assert.NotContains(t, notice, "Preview (last")
+			_, err = resp.Recv()
+			assert.Equal(t, io.EOF, err)
+
+			content, err := backend.Read(ctx, &filesystem.ReadRequest{FilePath: "/tmp/trunc/stream_branches"})
+			assert.NoError(t, err)
+			assert.Equal(t, strings.Repeat("x", 20), content.Content)
+		})
+	})
+
+	t.Run("test default enhanced streamable truncation terminal cases", func(t *testing.T) {
+		tCtx := &adk.ToolContext{Name: "mock_enhanced_streamable_tool", CallID: "enhanced_stream_branches"}
+		toolArg := &schema.ToolArgument{Text: `{}`}
+		backend := filesystem.NewInMemoryBackend()
+		mw := &typedToolReductionMiddleware[*schema.Message]{
+			config: &TypedConfig[*schema.Message]{
+				MaxLengthForTrunc:       10,
+				GenTruncOffloadFilePath: testTruncOffloadPath("/tmp"),
+			},
+		}
+		longResult := &schema.ToolResult{Parts: []schema.ToolOutputPart{{Type: schema.ToolPartTypeText, Text: strings.Repeat("x", 20)}}}
+
+		t.Run("short output forwards and does not truncate", func(t *testing.T) {
+			cfg := &ToolReductionConfig{}
+			resp := mw.wrapDefaultEnhancedStreamableTruncation(ctx, cfg, tCtx, toolArg, toolResultStream(
+				&schema.ToolResult{Parts: []schema.ToolOutputPart{{Type: schema.ToolPartTypeText, Text: "short"}}},
+			))
+			defer resp.Close()
+
+			got, err := resp.Recv()
+			assert.NoError(t, err)
+			assert.Equal(t, "short", got.Parts[0].Text)
+			_, err = resp.Recv()
+			assert.Equal(t, io.EOF, err)
+		})
+
+		t.Run("source error is forwarded", func(t *testing.T) {
+			wantErr := errors.New("enhanced source stream error")
+			cfg := &ToolReductionConfig{}
+			resp := mw.wrapDefaultEnhancedStreamableTruncation(ctx, cfg, tCtx, toolArg, toolResultStreamWithError(
+				[]*schema.ToolResult{{Parts: []schema.ToolOutputPart{{Type: schema.ToolPartTypeText, Text: "ok"}}}},
+				wantErr,
+			))
+			defer resp.Close()
+
+			got, err := resp.Recv()
+			assert.NoError(t, err)
+			assert.Equal(t, "ok", got.Parts[0].Text)
+			_, err = resp.Recv()
+			assert.Equal(t, wantErr, err)
+		})
+
+		t.Run("concat error is forwarded", func(t *testing.T) {
+			audioA := "YXVkaW8x"
+			audioB := "YXVkaW8y"
+			cfg := &ToolReductionConfig{Backend: backend}
+			resp := mw.wrapDefaultEnhancedStreamableTruncation(ctx, cfg, tCtx, toolArg, toolResultStream(
+				&schema.ToolResult{Parts: []schema.ToolOutputPart{
+					{Type: schema.ToolPartTypeText, Text: strings.Repeat("x", 20)},
+					{Type: schema.ToolPartTypeAudio, Audio: &schema.ToolOutputAudio{MessagePartCommon: schema.MessagePartCommon{Base64Data: &audioA}}},
+				}},
+				&schema.ToolResult{Parts: []schema.ToolOutputPart{
+					{Type: schema.ToolPartTypeAudio, Audio: &schema.ToolOutputAudio{MessagePartCommon: schema.MessagePartCommon{Base64Data: &audioB}}},
+				}},
+			))
+			defer resp.Close()
+
+			got, err := resp.Recv()
+			assert.NoError(t, err)
+			assert.Equal(t, strings.Repeat("x", 10), got.Parts[0].Text)
+			notice, err := resp.Recv()
+			assert.NoError(t, err)
+			assert.Contains(t, notice.Parts[0].Text, "Output truncated after 10 bytes were streamed")
+			_, err = resp.Recv()
+			assert.Error(t, err)
+			assert.Contains(t, err.Error(), "conflicting")
+		})
+
+		t.Run("path generation error is forwarded", func(t *testing.T) {
+			wantErr := errors.New("enhanced path generation error")
+			mwWithPathErr := &typedToolReductionMiddleware[*schema.Message]{
+				config: &TypedConfig[*schema.Message]{
+					MaxLengthForTrunc: 10,
+					GenTruncOffloadFilePath: func(context.Context, *ToolDetail) (string, error) {
+						return "", wantErr
+					},
+				},
+			}
+			cfg := &ToolReductionConfig{Backend: backend}
+			resp := mwWithPathErr.wrapDefaultEnhancedStreamableTruncation(ctx, cfg, tCtx, toolArg, toolResultStream(longResult))
+			defer resp.Close()
+
+			got, err := resp.Recv()
+			assert.NoError(t, err)
+			assert.Equal(t, strings.Repeat("x", 10), got.Parts[0].Text)
+			_, err = resp.Recv()
+			assert.Equal(t, wantErr, err)
+		})
+
+		t.Run("missing backend error is forwarded", func(t *testing.T) {
+			cfg := &ToolReductionConfig{}
+			resp := mw.wrapDefaultEnhancedStreamableTruncation(ctx, cfg, tCtx, toolArg, toolResultStream(longResult))
+			defer resp.Close()
+
+			got, err := resp.Recv()
+			assert.NoError(t, err)
+			assert.Equal(t, strings.Repeat("x", 10), got.Parts[0].Text)
+			_, err = resp.Recv()
+			assert.EqualError(t, err, "truncation: no backend for offload")
+		})
+
+		t.Run("truncates incrementally and writes full output", func(t *testing.T) {
+			cfg := &ToolReductionConfig{Backend: backend}
+			resp := mw.wrapDefaultEnhancedStreamableTruncation(ctx, cfg, tCtx, toolArg, toolResultStream(longResult))
+			defer resp.Close()
+
+			got, err := resp.Recv()
+			assert.NoError(t, err)
+			assert.Equal(t, strings.Repeat("x", 10), got.Parts[0].Text)
+			notice, err := resp.Recv()
+			assert.NoError(t, err)
+			assert.Contains(t, notice.Parts[0].Text, "Output truncated after 10 bytes were streamed")
+			assert.NotContains(t, notice.Parts[0].Text, "Preview (first")
+			assert.NotContains(t, notice.Parts[0].Text, "Preview (last")
+			_, err = resp.Recv()
+			assert.Equal(t, io.EOF, err)
+
+			content, err := backend.Read(ctx, &filesystem.ReadRequest{FilePath: "/tmp/trunc/enhanced_stream_branches"})
+			assert.NoError(t, err)
+			assert.Equal(t, strings.Repeat("x", 20), content.Content)
+		})
 	})
 
 	t.Run("test streamable line and bypass error", func(t *testing.T) {
@@ -902,6 +1396,62 @@ func TestReductionMiddlewareClear(t *testing.T) {
 			FilePath: "/tmp/clear/call_987654321",
 		})
 		assert.NoError(t, err)
+	})
+}
+
+func TestStreamTruncationHelpers(t *testing.T) {
+	t.Run("toolResultTextPrefix trims text and preserves leading non-text parts", func(t *testing.T) {
+		assert.Nil(t, toolResultTextPrefix(nil, 10))
+		assert.Nil(t, toolResultTextPrefix(&schema.ToolResult{}, 10))
+		assert.Nil(t, toolResultTextPrefix(&schema.ToolResult{Parts: []schema.ToolOutputPart{
+			{Type: schema.ToolPartTypeText, Text: "abc"},
+		}}, 0))
+
+		got := toolResultTextPrefix(&schema.ToolResult{Parts: []schema.ToolOutputPart{
+			{Type: schema.ToolPartTypeImage},
+			{Type: schema.ToolPartTypeText, Text: "abc"},
+			{Type: schema.ToolPartTypeText, Text: "def"},
+		}}, 5)
+		assert.NotNil(t, got)
+		assert.Equal(t, []schema.ToolOutputPart{
+			{Type: schema.ToolPartTypeImage},
+			{Type: schema.ToolPartTypeText, Text: "abc"},
+			{Type: schema.ToolPartTypeText, Text: "de"},
+		}, got.Parts)
+
+		got = toolResultTextPrefix(&schema.ToolResult{Parts: []schema.ToolOutputPart{
+			{Type: schema.ToolPartTypeText, Text: "abc"},
+			{Type: schema.ToolPartTypeText, Text: "def"},
+		}}, 3)
+		assert.NotNil(t, got)
+		assert.Equal(t, []schema.ToolOutputPart{
+			{Type: schema.ToolPartTypeText, Text: "abc"},
+		}, got.Parts)
+	})
+
+	t.Run("toolResultTextLength handles nil result", func(t *testing.T) {
+		assert.Equal(t, 0, toolResultTextLength(nil))
+	})
+
+	t.Run("writeTruncOffload handles disabled missing and successful offload", func(t *testing.T) {
+		ctx := context.Background()
+
+		err := writeTruncOffload(ctx, &ToolReductionConfig{}, &TruncResult{NeedOffload: false})
+		assert.NoError(t, err)
+
+		err = writeTruncOffload(ctx, &ToolReductionConfig{}, &TruncResult{NeedOffload: true})
+		assert.EqualError(t, err, "truncation: no backend for offload")
+
+		backend := filesystem.NewInMemoryBackend()
+		err = writeTruncOffload(ctx, &ToolReductionConfig{Backend: backend}, &TruncResult{
+			NeedOffload:     true,
+			OffloadFilePath: "/tmp/trunc/helper",
+			OffloadContent:  "full output",
+		})
+		assert.NoError(t, err)
+		content, err := backend.Read(ctx, &filesystem.ReadRequest{FilePath: "/tmp/trunc/helper"})
+		assert.NoError(t, err)
+		assert.Equal(t, "full output", content.Content)
 	})
 }
 
