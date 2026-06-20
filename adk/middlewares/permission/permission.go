@@ -177,32 +177,34 @@ func (m *Middleware[M]) permissionGate(
 	wasInterrupted, hasState, savedState := tool.GetInterruptState[*AskState](ctx)
 	isTarget, hasData, response := tool.GetResumeContext[*ResumeResponse](ctx)
 
-	if wasInterrupted && !hasState {
-		return &gateResult{allowed: true, argument: argument}, nil
-	}
-
-	if wasInterrupted && !isTarget {
+	if wasInterrupted {
+		// bussiness interrupt
 		if !hasState || savedState == nil {
-			return nil, fmt.Errorf("permission: missing AskState for resumed tool %q (call_id=%s)", tCtx.Name, tCtx.CallID)
+			return &gateResult{allowed: true, argument: argument}, nil
 		}
-		return nil, tool.StatefulInterrupt(ctx, savedState.publicInfo(), savedState)
-	}
 
-	if isTarget && hasData {
-		if !hasState || savedState == nil {
-			return nil, fmt.Errorf("permission: missing AskState for targeted resume of tool %q (call_id=%s)", tCtx.Name, tCtx.CallID)
+		// current tool call is not the resume target, interrupt again
+		if !isTarget {
+			return nil, tool.StatefulInterrupt(ctx, savedState.publicInfo(), savedState)
 		}
-		if err := emitDecisionEvent[M](ctx, tCtx, savedState, response); err != nil {
+
+		// caller do not provide ResumeResponse
+		if !hasData || response == nil {
+			return nil, fmt.Errorf(
+				"permission: tool %q (call_id=%s) was targeted for resume but received nil "+
+					"or type-mismatched ResumeResponse; the caller must supply a *permission.ResumeResponse "+
+					"via ResumeWithParams", tCtx.Name, tCtx.CallID)
+		}
+
+		// resume normally
+		decision, err := normalizeResumeDecision(tCtx, response)
+		if err != nil {
 			return nil, err
 		}
-		return handleResumeResponse(ctx, tCtx, &schema.ToolArgument{Text: savedState.Arguments}, response)
-	}
-
-	if isTarget && !hasData {
-		return nil, fmt.Errorf(
-			"permission: tool %q (call_id=%s) was targeted for resume but received nil "+
-				"or type-mismatched ResumeResponse; the caller must supply a *permission.ResumeResponse "+
-				"via ResumeWithParams", tCtx.Name, tCtx.CallID)
+		if err := emitDecisionEvent[M](ctx, tCtx, savedState, decision); err != nil {
+			return nil, err
+		}
+		return handleResumeResponse(ctx, tCtx, &schema.ToolArgument{Text: savedState.Arguments}, decision)
 	}
 
 	if m.checker == nil {
@@ -275,16 +277,11 @@ func publicSummary(message, callID, arguments string) string {
 }
 
 func handleResumeResponse(
-	ctx context.Context,
+	_ context.Context,
 	tCtx *adk.ToolContext,
 	argument *schema.ToolArgument,
-	response *ResumeResponse,
+	decision *normalizedResumeDecision,
 ) (*gateResult, error) {
-	decision, err := normalizeResumeDecision(tCtx, response)
-	if err != nil {
-		return nil, err
-	}
-
 	switch decision.Action {
 	case ResumeActionApprove:
 		return &gateResult{
@@ -341,16 +338,12 @@ func normalizeResumeDecision(tCtx *adk.ToolContext, response *ResumeResponse) (*
 	}
 }
 
-func emitDecisionEvent[M adk.MessageType](ctx context.Context, tCtx *adk.ToolContext, state *AskState, response *ResumeResponse) error {
+func emitDecisionEvent[M adk.MessageType](ctx context.Context, tCtx *adk.ToolContext, state *AskState, decision *normalizedResumeDecision) error {
 	if tCtx == nil {
 		return fmt.Errorf("permission: nil ToolContext for resume decision event")
 	}
 	if state == nil {
 		return fmt.Errorf("permission: nil AskState for resume decision event on tool %q (call_id=%s)", tCtx.Name, tCtx.CallID)
-	}
-	decision, err := normalizeResumeDecision(tCtx, response)
-	if err != nil {
-		return err
 	}
 	payload := &DecisionEvent{
 		Action:          decision.Action,
@@ -360,7 +353,7 @@ func emitDecisionEvent[M adk.MessageType](ctx context.Context, tCtx *adk.ToolCon
 		UpdatedInput:    decision.UpdatedInput,
 		HasUpdatedInput: decision.HasUpdatedInput,
 	}
-	return adk.TypedSendEvent[M](ctx, &adk.TypedAgentEvent[M]{
+	return adk.TypedSendEvent(ctx, &adk.TypedAgentEvent[M]{
 		SessionEvent: &adk.SessionEvent[M]{
 			Kind:      SessionEventPermissionDecision,
 			Extension: &adk.SessionExtensionEvent{Data: payload},
