@@ -178,7 +178,7 @@ func (m *Middleware[M]) permissionGate(
 	isTarget, hasData, response := tool.GetResumeContext[*ResumeResponse](ctx)
 
 	if wasInterrupted {
-		// bussiness interrupt
+		// business interrupt, not intercepted here
 		if !hasState || savedState == nil {
 			return &gateResult{allowed: true, argument: argument}, nil
 		}
@@ -188,7 +188,7 @@ func (m *Middleware[M]) permissionGate(
 			return nil, tool.StatefulInterrupt(ctx, savedState.publicInfo(), savedState)
 		}
 
-		// caller do not provide ResumeResponse
+		// caller did not provide ResumeResponse
 		if !hasData || response == nil {
 			return nil, fmt.Errorf(
 				"permission: tool %q (call_id=%s) was targeted for resume but received nil "+
@@ -207,6 +207,7 @@ func (m *Middleware[M]) permissionGate(
 		return handleResumeResponse(ctx, tCtx, &schema.ToolArgument{Text: savedState.Arguments}, decision)
 	}
 
+	// first run, decide by m.checker
 	if m.checker == nil {
 		return nil, fmt.Errorf("permission: checker is nil for tool %q (call_id=%s)", tCtx.Name, tCtx.CallID)
 	}
