@@ -101,16 +101,21 @@ type ToolResultConfig struct {
 //     which provides the read_file tool automatically, OR
 //   - Implement your own read_file tool that reads from the same Backend
 func NewToolResultMiddleware(ctx context.Context, cfg *ToolResultConfig) (adk.AgentMiddleware, error) {
+	readFileToolName := cfg.ReadFileToolName
+	if readFileToolName == "" {
+		readFileToolName = "read_file"
+	}
+	excludeTools := append(append([]string{}, cfg.ExcludeTools...), readFileToolName)
 	bc := newClearToolResult(ctx, &ClearToolResultConfig{
 		ToolResultTokenThreshold:   cfg.ClearingTokenThreshold,
 		KeepRecentTokens:           cfg.KeepRecentTokens,
 		ClearToolResultPlaceholder: cfg.ClearToolResultPlaceholder,
 		TokenCounter:               cfg.TokenCounter,
-		ExcludeTools:               cfg.ExcludeTools,
+		ExcludeTools:               excludeTools,
 	})
 	tm := newToolResultOffloading(ctx, &toolResultOffloadingConfig{
 		Backend:          cfg.Backend,
-		ReadFileToolName: cfg.ReadFileToolName,
+		ReadFileToolName: readFileToolName,
 		TokenLimit:       cfg.OffloadingTokenLimit,
 		PathGenerator:    cfg.PathGenerator,
 	})

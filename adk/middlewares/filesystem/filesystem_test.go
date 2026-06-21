@@ -235,6 +235,36 @@ func TestReadFileTool_DefaultLimit(t *testing.T) {
 	})
 }
 
+func TestReadFileTool_LongSingleLineColumnPagination(t *testing.T) {
+	backend := filesystem.NewInMemoryBackend()
+	longLine := strings.Repeat("a", 2500) + strings.Repeat("b", 500)
+	err := backend.Write(context.Background(), &filesystem.WriteRequest{
+		FilePath: "/long.txt",
+		Content:  longLine,
+	})
+	assert.NoError(t, err)
+
+	readTool, err := newReadFileTool(backend, "", "")
+	assert.NoError(t, err)
+
+	result, err := invokeTool(t, readTool, `{"file_path": "/long.txt", "offset": 1, "limit": 1}`)
+	assert.NoError(t, err)
+	assert.Contains(t, result, fmt.Sprintf("     1\t%s", strings.Repeat("a", 2000)))
+	assert.NotContains(t, result, strings.Repeat("a", 2001))
+	assert.Contains(t, result, "Line 1 truncated: showing columns 1-2000 of 3000")
+	assert.Contains(t, result, "column_offset=2001")
+
+	result, err = invokeTool(t, readTool, `{"file_path": "/long.txt", "offset": 1, "limit": 1, "column_offset": 2001, "column_limit": 500}`)
+	assert.NoError(t, err)
+	assert.Contains(t, result, fmt.Sprintf("     1\t%s", strings.Repeat("a", 500)))
+	assert.Contains(t, result, "Line 1 truncated: showing columns 2001-2500 of 3000")
+	assert.Contains(t, result, "column_offset=2501")
+
+	result, err = invokeTool(t, readTool, `{"file_path": "/long.txt", "offset": 1, "limit": 1, "column_offset": 2501, "column_limit": 500}`)
+	assert.NoError(t, err)
+	assert.Equal(t, fmt.Sprintf("     1\t%s\n[Line 1 starts at column 2501 of 3000.]", strings.Repeat("b", 500)), result)
+}
+
 func TestWriteFileTool(t *testing.T) {
 	backend := setupTestBackend()
 	writeTool, err := newWriteFileTool(backend, "", "")
@@ -2502,7 +2532,7 @@ func TestMultiModalReadFileTool_SchemaContainsAllFields(t *testing.T) {
 	assert.NotNil(t, js)
 	assert.NotNil(t, js.Properties, "schema should have properties")
 
-	for _, field := range []string{"file_path", "offset", "limit", "pages"} {
+	for _, field := range []string{"file_path", "offset", "limit", "column_offset", "column_limit", "pages"} {
 		_, ok := js.Properties.Get(field)
 		assert.True(t, ok, "expected JSON schema to contain field %q, schema=%+v", field, js.Properties)
 	}

@@ -37,6 +37,7 @@ const (
 	tooLargeToolMessage = `Tool result too large, the result of this tool call {tool_call_id} was saved in the filesystem at this path: {file_path}
 You can read the result from the filesystem by using the '{read_file_tool_name}' tool, but make sure to only read part of the result at a time.
 You can do this by specifying an offset and limit in the '{read_file_tool_name}' tool call.
+If a result contains very long single-line content, specify column_offset and column_limit to read a slice of that line.
 For example, to read the first 100 lines, you can use the '{read_file_tool_name}' tool with offset=0 and limit=100.
 
 Here are the first 10 lines of the result:
@@ -45,6 +46,7 @@ Here are the first 10 lines of the result:
 	tooLargeToolMessageChinese = `工具结果过大，此工具调用 {tool_call_id} 的结果已保存到文件系统的以下路径：{file_path}
 你可以使用 '{read_file_tool_name}' 工具从文件系统读取结果，但请确保每次只读取部分结果。
 你可以通过在 '{read_file_tool_name}' 工具调用中指定 offset 和 limit 来实现。
+如果结果包含很长的单行内容，请在 '{read_file_tool_name}' 工具调用中指定 column_offset 和 column_limit 来读取该行的一段。
 例如，要读取前 100 行，你可以使用 '{read_file_tool_name}' 工具，设置 offset=0 和 limit=100。
 
 以下是结果的前 10 行：
@@ -133,6 +135,9 @@ func (t *toolResultOffloading) stream(endpoint compose.StreamableToolEndpoint) c
 }
 
 func (t *toolResultOffloading) handleResult(ctx context.Context, result string, input *compose.ToolInput) (string, error) {
+	if input != nil && input.Name == t.toolName {
+		return result, nil
+	}
 	if t.counter(schema.ToolMessage(result, input.CallID, schema.WithToolName(input.Name))) > t.tokenLimit*4 {
 		path, err := t.pathGenerator(ctx, input)
 		if err != nil {

@@ -28,6 +28,7 @@ const (
 	tooLargeToolMessage = `Tool result too large, the result of this tool call {tool_call_id} was saved in the filesystem at this path: {file_path}
 You can read the result from the filesystem by using the read_file tool, but make sure to only read part of the result at a time.
 You can do this by specifying an offset and limit in the read_file tool call.
+If a result contains very long single-line content, specify column_offset and column_limit to read a slice of that line.
 For example, to read the first 100 lines, you can use the read_file tool with offset=0 and limit=100.
 
 Here are the first 10 lines of the result:
@@ -36,6 +37,7 @@ Here are the first 10 lines of the result:
 	tooLargeToolMessageChinese = `工具结果过大，此工具调用 {tool_call_id} 的结果已保存到文件系统的以下路径：{file_path}
 你可以使用 read_file 工具从文件系统读取结果，但请确保每次只读取部分结果。
 你可以通过在 read_file 工具调用中指定 offset 和 limit 来实现。
+如果结果包含很长的单行内容，请指定 column_offset 和 column_limit 来读取该行的一段。
 例如，要读取前 100 行，你可以使用 read_file 工具，设置 offset=0 和 limit=100。
 
 以下是结果的前 10 行：
@@ -66,8 +68,10 @@ Usage:
 - **IMPORTANT for large files and codebase exploration**: Use pagination with offset and limit parameters to avoid context overflow
 	- First scan: read_file(path, limit=100) to see file structure
 	- Read more sections: read_file(path, offset=100, limit=200) for next 200 lines
+	- For very long single-line files, use column_offset and column_limit to read the line in chunks
 	- Only omit limit (read full file) when necessary for editing
 - Specify offset and limit: read_file(path, offset=0, limit=100) reads first 100 lines
+- Specify column_offset and column_limit: read_file(path, offset=1, limit=1, column_offset=2001, column_limit=2000) reads columns 2001-4000 of line 1
 - Results are returned using cat -n format, with line numbers starting at 1
 - You have the capability to call multiple tools in a single response. It is always better to speculatively read multiple files as a batch that are potentially useful.
 - If you read a file that exists but has empty contents you will receive a system reminder warning in place of file contents.
@@ -82,8 +86,10 @@ Usage:
 - **大文件和代码库探索的重要提示**：使用 offset 和 limit 参数进行分页，以避免上下文溢出
 	- 首次扫描：read_file(path, limit=100) 查看文件结构
 	- 读取更多部分：read_file(path, offset=100, limit=200) 读取接下来的 200 行
+	- 对于很长的单行文件，使用 column_offset 和 column_limit 分块读取该行
 	- 仅在编辑必要时才省略 limit（读取完整文件）
 - 指定 offset 和 limit：read_file(path, offset=0, limit=100) 读取前 100 行
+- 指定 column_offset 和 column_limit：read_file(path, offset=1, limit=1, column_offset=2001, column_limit=2000) 读取第 1 行的第 2001-4000 列
 - 结果以 cat -n 格式返回，行号从 1 开始
 - 你可以在单个响应中调用多个工具。最好同时推测性地批量读取多个可能有用的文件
 - 如果你读取的文件存在但内容为空，你将收到系统提醒警告而不是文件内容
