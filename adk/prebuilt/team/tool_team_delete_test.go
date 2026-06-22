@@ -168,3 +168,89 @@ func TestTeamDeleteTool_InvokableRun_DeleteFailureReturnsError(t *testing.T) {
 	// Team name should NOT be cleared when deletion fails.
 	assert.Equal(t, "myteam", mw.getTeamName())
 }
+
+// TestTeamDeleteTool_AcquiresTeamOpLock verifies that TeamDelete takes the
+// shared teamOpLock so it is serialized against TeamCreate and the Agent spawn
+// path. While the lock is held by another lifecycle operation, TeamDelete must
+// block rather than racing on active-team state.
+func TestTeamDeleteTool_AcquiresTeamOpLock(t *testing.T) {
+	mw, _ := newTestTeamMiddleware()
+	ctx := context.Background()
+
+	createTool := newTeamCreateTool(mw)
+	_, err := createTool.InvokableRun(ctx, `{"team_name":"myteam"}`)
+	assert.NoError(t, err)
+
+	// Hold the lock to simulate an in-flight TeamCreate / Agent spawn.
+	mw.teamOpLock.Lock()
+
+	done := make(chan struct{})
+	go func() {
+		deleteTool := newTeamDeleteTool(mw)
+		_, _ = deleteTool.InvokableRun(ctx, "")
+		close(done)
+	}()
+
+	// TeamDelete must not complete while the lock is held.
+	select {
+	case <-done:
+		mw.teamOpLock.Unlock()
+		t.Fatal("TeamDelete ran while teamOpLock was held; it does not acquire the lock")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	// Release the lock; TeamDelete should now proceed and finish.
+	mw.teamOpLock.Unlock()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("TeamDelete did not finish after teamOpLock was released")
+	}
+	assert.Equal(t, "", mw.getTeamName())
+}
+
+// TestAgentTool_RunTeammate_AcquiresTeamOpLock verifies that the Agent spawn
+// path takes the shared teamOpLock so it is serialized against TeamDelete and
+// TeamCreate. While the lock is held, runTeammate must block before reading the
+// active-team state.
+func TestAgentTool_RunTeammate_AcquiresTeamOpLock(t *testing.T) {
+	mw, _ := newTestTeamMiddleware()
+	ctx := context.Background()
+
+	createTool := newTeamCreateTool(mw)
+	_, err := createTool.InvokableRun(ctx, `{"team_name":"myteam"}`)
+	assert.NoError(t, err)
+
+	mw.teamOpLock.Lock()
+
+	started := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		tool := newAgentTool(mw)
+		close(started)
+		// run_in_background forces the teammate path. It will ultimately fail to
+		// build a real agent (no model wired in the test middleware), but it must
+		// first block on teamOpLock — which is what this test asserts.
+		_, _ = tool.runTeammate(ctx, agentToolArgs{
+			Name:        "worker",
+			Prompt:      "do work",
+			Description: "desc",
+		})
+		close(done)
+	}()
+
+	<-started
+	select {
+	case <-done:
+		mw.teamOpLock.Unlock()
+		t.Fatal("runTeammate ran while teamOpLock was held; it does not acquire the lock")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	mw.teamOpLock.Unlock()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("runTeammate did not finish after teamOpLock was released")
+	}
+}

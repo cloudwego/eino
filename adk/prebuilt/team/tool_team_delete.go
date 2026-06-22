@@ -67,6 +67,15 @@ func (t *teamDeleteTool) InvokableRun(ctx context.Context, argumentsInJSON strin
 		}
 	}
 
+	// Serialize the whole "check running teammates → delete dirs → clear team
+	// name" sequence against the other leader-only lifecycle tools (TeamCreate,
+	// Agent spawn). Without this lock a concurrent Agent spawn could register a
+	// member and start a goroutine just after this tool observed an empty
+	// teammate registry, leaving a live teammate bound to a team whose
+	// directories are being deleted.
+	t.mw.teamOpLock.Lock()
+	defer t.mw.teamOpLock.Unlock()
+
 	teamName := t.mw.getTeamName()
 
 	if teamName != "" {
