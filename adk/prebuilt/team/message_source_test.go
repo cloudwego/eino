@@ -427,6 +427,47 @@ func TestHandleLeaderControlMessages_ShutdownResponseFalseNotIntercepted(t *test
 	assert.Equal(t, "agent1", result[0].From)
 }
 
+// TestHandleLeaderControlMessages_ShutdownResponseHandlerError verifies that when
+// OnShutdownResponse fails (graceful cleanup did not complete and is not retried
+// from the mailbox, since the snapshot was already marked read), the original
+// control message is forwarded to the leader instead of being silently dropped,
+// so the exit surfaces rather than disappearing.
+func TestHandleLeaderControlMessages_ShutdownResponseHandlerError(t *testing.T) {
+	backend := newInMemoryBackend()
+	locks := newNamedLockManager()
+	mb := &mailbox{
+		conf: &mailboxConfig{
+			Backend:      backend,
+			BaseDir:      "/tmp/test",
+			TeamName:     "myteam",
+			OwnerName:    "team-lead",
+			PollInterval: 10 * time.Millisecond,
+		},
+		inboxLocks: locks,
+		listMembers: func(ctx context.Context) ([]string, error) {
+			return []string{"team-lead", "agent1"}, nil
+		},
+	}
+
+	src := newMailboxMessageSource(mb, &mailboxSourceConfig{
+		OwnerName: "team-lead",
+		Role:      teamRoleLeader,
+		OnShutdownResponse: func(ctx context.Context, fromName string) (string, error) {
+			return "", errors.New("cleanup failed")
+		},
+	})
+
+	approvalJSON, _ := marshalShutdownResponse("agent1", "req-1", true, "done")
+	msg := InboxMessage{From: "agent1", Text: approvalJSON, Timestamp: utcNowMillis()}
+
+	result, err := src.handleLeaderControlMessages(context.Background(), []InboxMessage{msg})
+	assert.NoError(t, err)
+	// The original control message must be forwarded to the leader, not dropped.
+	assert.Len(t, result, 1)
+	assert.Equal(t, "agent1", result[0].From)
+	assert.Equal(t, approvalJSON, result[0].Text)
+}
+
 func TestHandleLeaderControlMessages_NonShutdownPassesThrough(t *testing.T) {
 	backend := newInMemoryBackend()
 	locks := newNamedLockManager()

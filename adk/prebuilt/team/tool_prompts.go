@@ -302,7 +302,9 @@ This operation:
 - Removes the task directory
 - Clears team context from the current session
 
-**IMPORTANT**: TeamDelete will fail if the team still has active members. Gracefully terminate teammates first, then call TeamDelete after all teammates have shut down.
+**IMPORTANT**: TeamDelete will fail if the team still has active members (running goroutines). Gracefully terminate teammates first, then call TeamDelete after all teammates have shut down.
+
+TeamDelete also refuses if config.json still lists members with no running goroutine (usually an incomplete cleanup). Verify those members are truly done, then retry with ` + "`force: true`" + ` to delete anyway. ` + "`force`" + ` does not bypass the running-teammate check.
 
 Use this when all teammates have finished their work and you want to clean up the team resources. The team name is automatically determined from the current session's team context.`
 
@@ -313,6 +315,8 @@ const teamDeleteToolDescChinese = `当团队工作完成后，删除团队和任
 - 删除任务目录
 - 清除当前会话中的团队上下文
 
-**重要**：如果团队仍有活跃成员，TeamDelete 将失败。请先优雅地终止队友，然后在所有队友关闭后调用 TeamDelete。
+**重要**：如果团队仍有活跃成员（运行中的协程），TeamDelete 将失败。请先优雅地终止队友，然后在所有队友关闭后调用 TeamDelete。
+
+如果 config.json 仍列有成员但没有运行中的协程（通常是清理未完成），TeamDelete 也会拒绝执行。请先确认这些成员确实已完成，然后使用 ` + "`force: true`" + ` 重试以强制删除。` + "`force`" + ` 不会绕过运行中队友的检查。
 
 当所有队友完成工作且你想清理团队资源时使用此工具。团队名称从当前会话的团队上下文自动确定。`

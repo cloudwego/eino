@@ -71,12 +71,25 @@ func TestSourceRouter_Push_RegisteredAgent(t *testing.T) {
 	assert.True(t, accepted)
 }
 
-func TestSourceRouter_Push_UnknownAgent_FallsBackToDefault(t *testing.T) {
+func TestSourceRouter_Push_UnknownAgent_Rejected(t *testing.T) {
 	r := newSourceRouter("leader", nopLogger{})
 	defaultLoop := newTestTurnLoop()
 	r.RegisterLoop("leader", defaultLoop)
 
-	accepted, _ := r.Push(TurnInput{TargetAgent: "unknown-agent", Messages: []string{"hello"}})
+	// An explicit but unknown target must be rejected, not rerouted to the leader,
+	// so a typo'd or stale target cannot silently pollute the leader's context.
+	accepted, ch := r.Push(TurnInput{TargetAgent: "unknown-agent", Messages: []string{"hello"}})
+	assert.False(t, accepted)
+	assert.Nil(t, ch)
+}
+
+func TestSourceRouter_Push_EmptyTarget_RoutesToDefault(t *testing.T) {
+	r := newSourceRouter("leader", nopLogger{})
+	defaultLoop := newTestTurnLoop()
+	r.RegisterLoop("leader", defaultLoop)
+
+	// An empty target is the documented default-routing case and still goes to leader.
+	accepted, _ := r.Push(TurnInput{Messages: []string{"hello"}})
 	assert.True(t, accepted)
 }
 

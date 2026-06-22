@@ -1052,6 +1052,60 @@ func TestTaskUpdateToolWithAssignedHookAndAgentNameResolver_InSharedTaskMode(t *
 	assert.Equal(t, "leader-agent", receivedAssignment.AssignedBy)
 }
 
+// TestTaskUpdateToolWithAssignedHook_NotificationFailureSurfaced verifies that
+// when the owner is persisted but the assignment notification fails, the tool
+// still succeeds (the owner write committed) yet surfaces the delivery failure in
+// the result so the model can re-send the message rather than assuming the
+// assignee was told.
+func TestTaskUpdateToolWithAssignedHook_NotificationFailureSurfaced(t *testing.T) {
+	ctx := context.Background()
+	backend := newInMemoryBackend()
+	baseDir := "/tmp/tasks"
+
+	mw := &middleware{
+		backend: backend,
+		baseDir: baseDir,
+		taskBaseDirResolver: func(ctx context.Context) string {
+			return baseDir
+		},
+		agentNameResolver: func(ctx context.Context) string {
+			return "leader-agent"
+		},
+		onTaskAssigned: func(ctx context.Context, assignment TaskAssignment) error {
+			return fmt.Errorf("mailbox unavailable")
+		},
+	}
+
+	taskData := &task{
+		ID:          "1",
+		Subject:     "Hook Task",
+		Description: "Task for hook test",
+		Status:      taskStatusPending,
+		Blocks:      []string{},
+		BlockedBy:   []string{},
+	}
+	taskJSON, _ := sonic.MarshalString(taskData)
+	_ = backend.Write(ctx, &WriteRequest{FilePath: filepath.Join(baseDir, "1.json"), Content: taskJSON})
+
+	tool := newTaskUpdateTool(mw, &sync.RWMutex{})
+
+	result, err := tool.InvokableRun(ctx, `{"taskId": "1", "owner": "worker-agent"}`)
+	assert.NoError(t, err)
+
+	var out taskOut
+	assert.NoError(t, sonic.UnmarshalString(result, &out))
+	assert.Contains(t, out.Result, "owner")
+	assert.NotEmpty(t, out.NotificationWarning, "notification failure must be surfaced")
+	assert.Contains(t, out.NotificationWarning, "worker-agent")
+	assert.Contains(t, out.NotificationWarning, "mailbox unavailable")
+
+	// The owner must still have been persisted despite the notification failure.
+	content, _ := backend.Read(ctx, &ReadRequest{FilePath: filepath.Join(baseDir, "1.json")})
+	var persisted task
+	_ = sonic.UnmarshalString(content.Content, &persisted)
+	assert.Equal(t, "worker-agent", persisted.Owner)
+}
+
 func TestTaskUpdateToolWithAssignedHook_DoesNotNotifyWhenOwnerUnchanged(t *testing.T) {
 	ctx := context.Background()
 	backend := newInMemoryBackend()

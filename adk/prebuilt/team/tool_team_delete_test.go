@@ -92,7 +92,7 @@ func TestTeamDeleteTool_InvokableRun_Success(t *testing.T) {
 	assert.Equal(t, "", mw.getTeamName())
 }
 
-func TestTeamDeleteTool_InvokableRun_NoRunningGoroutinesAllowed(t *testing.T) {
+func TestTeamDeleteTool_InvokableRun_ResidualConfigMemberRefused(t *testing.T) {
 	mw, conf := newTestTeamMiddleware()
 	ctx := context.Background()
 
@@ -101,15 +101,39 @@ func TestTeamDeleteTool_InvokableRun_NoRunningGoroutinesAllowed(t *testing.T) {
 	assert.NoError(t, err)
 
 	// Add a member in config but do NOT register it in the registry.
-	// This simulates a teammate that has already been shut down (goroutine exited)
-	// but its config entry was not yet cleaned up.
+	// This simulates a teammate whose goroutine has exited but whose config
+	// entry was not cleaned up (e.g. a failed teardown or a process restart).
 	cm := newConfigStore(conf)
 	err = cm.AddMember(ctx, mw.getTeamName(), teamMember{Name: "worker", JoinedAt: time.Now()})
 	assert.NoError(t, err)
 
-	// TeamDelete should succeed because no goroutine is running.
+	// TeamDelete must refuse: deleting would silently discard the recoverable
+	// member state still recorded in config.json (the persistent source of truth).
 	deleteTool := newTeamDeleteTool(mw)
 	result, err := deleteTool.InvokableRun(ctx, "")
+	assert.NoError(t, err)
+	assert.Contains(t, result, `"success":false`)
+	assert.Contains(t, result, "config.json")
+	assert.Contains(t, result, "worker")
+	// Team name must remain so the operation can be retried after verification.
+	assert.Equal(t, "myteam", mw.getTeamName())
+}
+
+func TestTeamDeleteTool_InvokableRun_ResidualConfigMemberForce(t *testing.T) {
+	mw, conf := newTestTeamMiddleware()
+	ctx := context.Background()
+
+	createTool := newTeamCreateTool(mw)
+	_, err := createTool.InvokableRun(ctx, `{"team_name":"myteam"}`)
+	assert.NoError(t, err)
+
+	cm := newConfigStore(conf)
+	err = cm.AddMember(ctx, mw.getTeamName(), teamMember{Name: "worker", JoinedAt: time.Now()})
+	assert.NoError(t, err)
+
+	// force=true overrides the residual-member guard and deletes anyway.
+	deleteTool := newTeamDeleteTool(mw)
+	result, err := deleteTool.InvokableRun(ctx, `{"force":true}`)
 	assert.NoError(t, err)
 	assert.Contains(t, result, `"success":true`)
 	assert.Equal(t, "", mw.getTeamName())

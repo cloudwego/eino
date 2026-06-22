@@ -125,15 +125,35 @@ func (t *taskUpdateTool) InvokableRun(ctx context.Context, argumentsInJSON strin
 	}
 
 	// Notify assignee outside the lock to avoid blocking other task operations
-	// during mailbox I/O.
+	// during mailbox I/O. The owner has already been persisted, so a notification
+	// failure must not be silently swallowed: the task would be assigned without the
+	// assignee ever being told. Surface the failure in the tool result so the model
+	// can re-send the message, instead of returning an unqualified success.
 	if assignment != nil && t.mw.onTaskAssigned != nil {
-		if err := t.mw.onTaskAssigned(ctx, *assignment); err != nil {
+		if notifyErr := t.mw.onTaskAssigned(ctx, *assignment); notifyErr != nil {
 			log.Printf("[plantask] notify task assignment (task %s -> %s) failed: %v",
-				assignment.TaskID, assignment.Owner, err)
+				assignment.TaskID, assignment.Owner, notifyErr)
+			warning := fmt.Sprintf("task #%s assigned to %q but the assignment notification could not be delivered (%v); the assignee may be unaware, consider re-sending the message",
+				assignment.TaskID, assignment.Owner, notifyErr)
+			withWarning, marshalErr := marshalTaskResponseWithWarning(extractTaskResult(result), warning)
+			if marshalErr != nil {
+				return result, nil
+			}
+			return withWarning, nil
 		}
 	}
 
 	return result, nil
+}
+
+// extractTaskResult parses the result string portion of a marshalled taskOut so a
+// notification warning can be attached without losing the original result text.
+func extractTaskResult(marshalled string) string {
+	out := &taskOut{}
+	if err := sonic.UnmarshalString(marshalled, out); err != nil {
+		return marshalled
+	}
+	return out.Result
 }
 
 // doUpdate performs the actual task update under lock and returns the result string
