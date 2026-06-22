@@ -94,16 +94,42 @@ func (t *agentTool) InvokableRun(ctx context.Context, argumentsInJSON string, _ 
 		return "", fmt.Errorf("prompt and description are required")
 	}
 
-	if t.shouldRunAsTeammate(args) {
+	// An explicit run_in_background request is always a teammate spawn (it
+	// hard-requires an active team, validated inside runTeammate).
+	if args.RunInBackground {
 		return t.runTeammate(ctx, args)
+	}
+
+	// A named agent becomes an addressable background teammate *when a team is
+	// active*. That team-state read is resolved under teamOpLock so it is
+	// serialized against TeamCreate/TeamDelete: tool calls in one assistant turn
+	// may run in parallel (see compose tool_node parallelRunToolCall), so reading
+	// the active team outside the lock could observe an empty team while a
+	// concurrent TeamCreate is mid-flight and silently downgrade the call to a
+	// one-shot foreground sub-agent (no team/plantask middleware, not addressable
+	// via SendMessage). When the team is active we run the teammate body while
+	// still holding the lock (mirroring runTeammate); otherwise we release the
+	// lock and fall through to the foreground path so a full synchronous sub-agent
+	// run never serializes against unrelated team-lifecycle operations.
+	if args.Name != "" {
+		t.mw.teamOpLock.Lock()
+		if t.mw.getTeamName() != "" {
+			defer t.mw.teamOpLock.Unlock()
+			return t.runTeammateLocked(ctx, args)
+		}
+		t.mw.teamOpLock.Unlock()
 	}
 
 	return t.runForeground(ctx, args)
 }
 
-// shouldRunAsTeammate decides whether an Agent call is dispatched as a
-// background teammate (mailbox-based, long-lived) instead of a synchronous
-// foreground sub-agent. A teammate is used when either:
+// shouldRunAsTeammate is retained for documentation of the dispatch policy and
+// is exercised by tests. The live dispatch decision in InvokableRun resolves the
+// team-active half of this predicate under teamOpLock to avoid a TOCTOU race with
+// TeamCreate/TeamDelete; this helper performs the same logic without the lock and
+// must not be used to gate execution on its own.
+//
+// A teammate is used when either:
 //   - run_in_background is explicitly requested, or
 //   - a team is active AND the caller named the agent. In team mode a named
 //     agent is addressable via SendMessage, so it is always spawned in the
@@ -150,14 +176,13 @@ func (t *agentTool) runForeground(ctx context.Context, args agentToolArgs) (stri
 // runTeammate spawns the agent as a background teammate with mailbox-based communication.
 // It requires team mode (a team must have been created via TeamCreate first); without an
 // active team context the call returns errTeamNotFound.
+//
+// This entry point acquires teamOpLock itself. It is used by the explicit
+// run_in_background path, where InvokableRun has not already taken the lock. The
+// named-agent path resolves the team-active decision under the lock and then
+// calls runTeammateLocked directly to avoid re-acquiring (and deadlocking on) the
+// non-reentrant teamOpLock.
 func (t *agentTool) runTeammate(ctx context.Context, args agentToolArgs) (string, error) {
-	if args.Name == "" {
-		args.Name = defaultTeammateName
-	}
-	if err := validateMemberName(args.Name); err != nil {
-		return "", err
-	}
-
 	// Serialize the whole "read active team name → register member → spawn
 	// teammate" sequence against the other leader-only lifecycle tools
 	// (TeamCreate, TeamDelete). Tool calls in one assistant turn may run in
@@ -167,6 +192,18 @@ func (t *agentTool) runTeammate(ctx context.Context, args agentToolArgs) (string
 	// bound to a team that no longer exists on disk.
 	t.mw.teamOpLock.Lock()
 	defer t.mw.teamOpLock.Unlock()
+	return t.runTeammateLocked(ctx, args)
+}
+
+// runTeammateLocked performs the teammate spawn. The caller MUST already hold
+// t.mw.teamOpLock for the full duration of the call.
+func (t *agentTool) runTeammateLocked(ctx context.Context, args agentToolArgs) (string, error) {
+	if args.Name == "" {
+		args.Name = defaultTeammateName
+	}
+	if err := validateMemberName(args.Name); err != nil {
+		return "", err
+	}
 
 	// The active team is whatever TeamCreate established on this leader middleware.
 	// We deliberately do NOT fall back to args.TeamName when no team is active: a

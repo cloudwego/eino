@@ -62,6 +62,15 @@ func noopOnAgentEvents(context.Context, *adk.TurnContext[TurnInput, adk.Message]
 	return nil
 }
 
+// TestNewRunner_NilConfig verifies that passing a nil *RunnerConfig returns an
+// error instead of panicking on a nil-pointer dereference. NewRunner is an
+// exported constructor, so a nil config must be reported as a validation error.
+func TestNewRunner_NilConfig(t *testing.T) {
+	_, err := NewRunner(context.Background(), nil)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "RunnerConfig is required")
+}
+
 func TestNewRunner_NilAgentConfig(t *testing.T) {
 	ctx := context.Background()
 	_, err := NewRunner(ctx, &RunnerConfig{

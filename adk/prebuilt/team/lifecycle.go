@@ -175,10 +175,21 @@ type teardownResult struct {
 // teardownTeammate is the single, idempotent removal path shared by the
 // graceful (removeTeammate), goroutine-exit (cleanupExitedTeammate), and
 // spawn-failure (cleanupFailedTeammateSpawn) flows. It performs, in order:
-// stop runtime (optional) → unassign tasks (optional) → RemoveMember →
-// delete inbox file. Each step is best-effort: errors are returned joined so the
+// stop runtime (optional) → unassign tasks (optional) → delete inbox file →
+// RemoveMember. Each step is best-effort: errors are returned joined so the
 // caller can log them, but later steps always run so a teammate can never linger
 // half-removed in config.
+//
+// Ordering note (inbox delete BEFORE RemoveMember): the goroutine-exit cleanup
+// path does NOT hold teamOpLock, so it can interleave with a concurrent Agent
+// spawn that reuses the same member name. If RemoveMember ran first, the freed
+// name could be re-registered and its inbox re-created (with the new teammate's
+// initial prompt) by the spawn before this path deleted the inbox — clobbering
+// the new inbox and silently dropping that prompt. Deleting the inbox while the
+// name is still reserved in config closes that window: a concurrent spawn either
+// observes the name as taken and deduplicates to a different inbox, or its
+// AddMember (and thus initInbox) is serialized by cfgLock to run strictly after
+// this RemoveMember, so the inbox it creates is never the one deleted here.
 func (lm *lifecycleManager) teardownTeammate(ctx context.Context, teamName, memberName string, opts teardownOptions) (teardownResult, error) {
 	var res teardownResult
 	var errs []error
@@ -200,16 +211,18 @@ func (lm *lifecycleManager) teardownTeammate(ctx context.Context, teamName, memb
 		res.unassigned = unassigned
 	}
 
-	if removeErr := lm.store.RemoveMember(ctx, teamName, memberName); removeErr != nil {
-		errs = append(errs, fmt.Errorf("remove member %q: %w", memberName, removeErr))
-	}
-
-	// Delete inbox file to prevent a same-name teammate from inheriting stale
-	// messages. The per-inbox lock is reference counted inside the mailbox
-	// operations (ForName/Release) and reclaimed automatically once no send/read
-	// holds it, so there is nothing to remove explicitly here.
+	// Delete inbox file before RemoveMember so a same-name teammate cannot be
+	// registered and have its fresh inbox clobbered by this delete (see the
+	// ordering note above). Deleting it also prevents a future same-name teammate
+	// from inheriting stale messages. The per-inbox lock is reference counted
+	// inside the mailbox operations (ForName/Release) and reclaimed automatically
+	// once no send/read holds it, so there is nothing to remove explicitly here.
 	if delErr := lm.teamCfg.Backend.Delete(ctx, &DeleteRequest{FilePath: lm.inboxPath(teamName, memberName)}); delErr != nil {
 		errs = append(errs, fmt.Errorf("delete inbox for %q: %w", memberName, delErr))
+	}
+
+	if removeErr := lm.store.RemoveMember(ctx, teamName, memberName); removeErr != nil {
+		errs = append(errs, fmt.Errorf("remove member %q: %w", memberName, removeErr))
 	}
 
 	return res, joinErrors(errs...)
