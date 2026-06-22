@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"reflect"
 	"runtime/debug"
 	"strings"
 	"sync"
@@ -322,6 +323,120 @@ func ensureGeneratedMessageIDs[M MessageType](messages []M) {
 	for _, msg := range messages {
 		EnsureMessageID(msg)
 	}
+}
+
+func leadingSystemMessage[M MessageType](messages []M) (M, bool) {
+	var zero M
+	if len(messages) == 0 || isNilMessage(messages[0]) {
+		return zero, false
+	}
+	switch msg := any(messages[0]).(type) {
+	case *schema.Message:
+		if msg.Role == schema.System {
+			return messages[0], true
+		}
+	case *schema.AgenticMessage:
+		if msg.Role == schema.AgenticRoleTypeSystem {
+			return messages[0], true
+		}
+	}
+	return zero, false
+}
+
+func sameSystemMessage[M MessageType](oldSys, newSys M) bool {
+	if isNilMessage(oldSys) || isNilMessage(newSys) {
+		return isNilMessage(oldSys) && isNilMessage(newSys)
+	}
+	switch oldMsg := any(oldSys).(type) {
+	case *schema.Message:
+		newMsg, ok := any(newSys).(*schema.Message)
+		if !ok {
+			return false
+		}
+		return oldMsg.Role == newMsg.Role &&
+			oldMsg.Content == newMsg.Content &&
+			reflect.DeepEqual(oldMsg.MultiContent, newMsg.MultiContent) &&
+			reflect.DeepEqual(oldMsg.UserInputMultiContent, newMsg.UserInputMultiContent) &&
+			reflect.DeepEqual(oldMsg.AssistantGenMultiContent, newMsg.AssistantGenMultiContent) &&
+			oldMsg.Name == newMsg.Name
+	case *schema.AgenticMessage:
+		newMsg, ok := any(newSys).(*schema.AgenticMessage)
+		return ok && oldMsg.Role == newMsg.Role &&
+			reflect.DeepEqual(oldMsg.ContentBlocks, newMsg.ContentBlocks)
+	default:
+		return false
+	}
+}
+
+func setMessageIDFromTarget[M MessageType](msg M, targetID string) {
+	if targetID == "" || isNilMessage(msg) {
+		return
+	}
+	typedSetMessageID(msg, targetID)
+}
+
+func syncLeadingSystemMessageSessionEvent[M MessageType](
+	ctx context.Context,
+	previous []M,
+	generated []M,
+) error {
+	execCtx := getTypedChatModelAgentExecCtx[M](ctx)
+	if execCtx == nil || !execCtx.sessionEvents {
+		return nil
+	}
+
+	newSys, ok := leadingSystemMessage(generated)
+	if !ok {
+		return nil
+	}
+
+	var event *TypedAgentEvent[M]
+	if oldSys, hasOldSys := leadingSystemMessage(previous); hasOldSys {
+		EnsureMessageID(oldSys)
+		oldID := GetMessageID(oldSys)
+		setMessageIDFromTarget(newSys, oldID)
+		if sameSystemMessage(oldSys, newSys) {
+			return nil
+		}
+		event = &TypedAgentEvent[M]{
+			SessionEvent: &SessionEvent[M]{
+				Kind: SessionEventMessageUpdated,
+				MessageUpdated: &MessageUpdatedEvent[M]{
+					MessageID: oldID,
+					Message:   newSys,
+				},
+			},
+		}
+	} else if len(previous) == 0 {
+		EnsureMessageID(newSys)
+		event = &TypedAgentEvent[M]{
+			SessionEvent: &SessionEvent[M]{
+				Kind:    SessionEventMessage,
+				Message: newSys,
+			},
+		}
+	} else {
+		if isNilMessage(previous[0]) {
+			return errors.New("sync leading system message: previous first message is nil")
+		}
+		EnsureMessageID(previous[0])
+		EnsureMessageID(newSys)
+		event = &TypedAgentEvent[M]{
+			SessionEvent: &SessionEvent[M]{
+				Kind: SessionEventMessageInserted,
+				MessageInserted: &MessageInsertedEvent[M]{
+					Message:         newSys,
+					BeforeMessageID: GetMessageID(previous[0]),
+				},
+			},
+		}
+	}
+
+	execCtx.send(ctx, event)
+	if event.Err != nil {
+		return event.Err
+	}
+	return nil
 }
 
 // TypedChatModelAgentState represents the state of a chat model agent during conversation.
@@ -1166,6 +1281,9 @@ func (a *TypedChatModelAgent[M]) buildNoToolsRunFunc(_ context.Context) (typedRu
 			if err != nil {
 				return nil, err
 			}
+			if err := syncLeadingSystemMessageSessionEvent(ctx, in.input.Messages, messages); err != nil {
+				return nil, err
+			}
 			if p.sessionEvents {
 				ensureGeneratedMessageIDs(messages)
 			}
@@ -1331,6 +1449,9 @@ func (a *TypedChatModelAgent[M]) buildMessageReActRunFunc(_ context.Context, bc 
 					if genErr != nil {
 						return nil, genErr
 					}
+					if genErr = syncLeadingSystemMessageSessionEvent(ctx, in.input.Messages, messages); genErr != nil {
+						return nil, genErr
+					}
 					if mp.sessionEvents {
 						ensureGeneratedMessageIDs(messages)
 					}
@@ -1480,6 +1601,9 @@ func (a *TypedChatModelAgent[M]) buildAgenticReActRunFunc(_ context.Context, bc 
 					}
 					messages, genErr := genModelInputFn(ctx, in.instruction, in.input)
 					if genErr != nil {
+						return nil, genErr
+					}
+					if genErr = syncLeadingSystemMessageSessionEvent(ctx, in.input.Messages, messages); genErr != nil {
 						return nil, genErr
 					}
 					if ap.sessionEvents {
