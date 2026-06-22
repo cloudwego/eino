@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/cloudwego/eino/adk"
+	adkinternal "github.com/cloudwego/eino/adk/internal"
 	"github.com/cloudwego/eino/internal"
 	"github.com/cloudwego/eino/schema"
 )
@@ -604,7 +605,7 @@ func drainEvents[M adk.MessageType](iter *adk.AsyncIterator[*adk.TypedAgentEvent
 		if err != nil {
 			return "", err
 		}
-		return extractTextContent[M](msg), nil
+		return adkinternal.ExtractTextContent(msg), nil
 	}
 
 	return "", nil
