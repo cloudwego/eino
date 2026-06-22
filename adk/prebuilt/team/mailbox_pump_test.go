@@ -38,8 +38,51 @@ func TestNewPumpManager(t *testing.T) {
 	assert.NotNil(t, pm)
 	assert.NotNil(t, pm.mailboxes)
 	assert.NotNil(t, pm.pumps)
+	assert.NotNil(t, pm.active)
 	assert.Equal(t, 0, len(pm.mailboxes))
 	assert.Equal(t, 0, len(pm.pumps))
+	assert.Equal(t, 0, len(pm.active))
+}
+
+// TestPumpManager_SetActiveIsInProcess verifies busy/idle status is tracked in
+// memory (not persisted) and is readable via isActive. The flips must never
+// touch a backend or config store, so setActive takes no context and there is no
+// configStore wired into the pump manager.
+func TestPumpManager_SetActiveIsInProcess(t *testing.T) {
+	router := newSourceRouter(LeaderAgentName, nopLogger{})
+	pm := newPumpManager(router, nopLogger{})
+
+	// Unknown teammate: no status recorded yet.
+	active, ok := pm.isActive("worker")
+	assert.False(t, ok)
+	assert.False(t, active)
+
+	pm.setActive("worker", true)
+	active, ok = pm.isActive("worker")
+	assert.True(t, ok)
+	assert.True(t, active)
+
+	pm.setActive("worker", false)
+	active, ok = pm.isActive("worker")
+	assert.True(t, ok)
+	assert.False(t, active)
+}
+
+// TestPumpManager_UnsetMailboxClearsActive ensures the in-process busy/idle entry
+// is removed when the teammate's mailbox is detached, so the map cannot grow
+// unboundedly as teammates come and go.
+func TestPumpManager_UnsetMailboxClearsActive(t *testing.T) {
+	pm, cleanup := newPumpTestFixture(t, "worker")
+	defer cleanup()
+
+	pm.setActive("worker", true)
+	_, ok := pm.isActive("worker")
+	assert.True(t, ok)
+
+	pm.UnsetMailbox("worker")
+
+	_, ok = pm.isActive("worker")
+	assert.False(t, ok, "active entry should be cleared after UnsetMailbox")
 }
 
 func TestPumpManager_SetMailbox(t *testing.T) {

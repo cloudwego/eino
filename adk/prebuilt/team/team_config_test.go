@@ -388,6 +388,42 @@ func TestReadConfig_InvalidJSON(t *testing.T) {
 	assert.Error(t, err)
 }
 
+// TestReadConfig_NilContent ensures readConfig does not panic when the backend
+// reports a missing file as (nil, nil) — a result the Backend.Read contract
+// permits — and instead surfaces a descriptive error.
+func TestReadConfig_NilContent(t *testing.T) {
+	backend := &nilContentBackend{inMemoryBackend: newInMemoryBackend()}
+	conf := &Config{Backend: backend, BaseDir: "/tmp/test"}
+	conf.ensureInit()
+	ctx := context.Background()
+
+	conf.state.cfgLock.RLock()
+	cfg, err := newConfigStore(conf).readConfig(ctx, "ghostteam")
+	conf.state.cfgLock.RUnlock()
+
+	assert.Nil(t, cfg)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "missing or empty")
+}
+
+// TestReadConfig_EmptyContent ensures an empty (but successfully read) config
+// file is treated as an error rather than unmarshalled into a zero-value team.
+func TestReadConfig_EmptyContent(t *testing.T) {
+	conf, backend := newTestConfig()
+	ctx := context.Background()
+
+	configPath := newConfigStore(conf).configFilePath("emptyteam")
+	backend.files[configPath] = ""
+
+	conf.state.cfgLock.RLock()
+	cfg, err := newConfigStore(conf).readConfig(ctx, "emptyteam")
+	conf.state.cfgLock.RUnlock()
+
+	assert.Nil(t, cfg)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "missing or empty")
+}
+
 func TestWriteConfig_BackendWriteError(t *testing.T) {
 	conf := newTestConfigWithErrBackend(errors.New("write failed"))
 

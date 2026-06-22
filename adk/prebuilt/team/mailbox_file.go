@@ -216,6 +216,12 @@ func (m *mailbox) sendToOne(ctx context.Context, to string, msg *outboxMessage) 
 // broadcastResult records exactly who received it and who did not so callers can
 // surface the breakdown (and retry if desired); the joined error is returned for
 // callers that only need a pass/fail signal.
+//
+// Cost: broadcast performs one full read-modify-write of each recipient's inbox
+// file, i.e. O(N) backend round-trips and O(N × inbox size) IO for N members.
+// It is deliberately expensive and the tool prompt (see tool_prompts.go) steers
+// the model toward targeted "message" sends; treat broadcast as a coarse,
+// infrequent fan-out rather than a hot path.
 func (m *mailbox) broadcast(ctx context.Context, msg *outboxMessage) (broadcastResult, error) {
 	res := broadcastResult{}
 

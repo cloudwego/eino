@@ -144,6 +144,18 @@ func (b *errBackend) Mkdir(_ context.Context, _ string) error {
 	return b.err
 }
 
+// nilContentBackend embeds an inMemoryBackend but returns (nil, nil) from Read,
+// which the Backend.Read contract permits for a missing file. It exists to verify
+// that readers (e.g. configStore.readConfig) tolerate a nil *FileContent without
+// dereferencing it.
+type nilContentBackend struct {
+	*inMemoryBackend
+}
+
+func (b *nilContentBackend) Read(_ context.Context, _ *ReadRequest) (*fspkg.FileContent, error) {
+	return nil, nil
+}
+
 // failingWriteBackend wraps an inMemoryBackend and fails Write for any path
 // whose file name ends with failPathSuffix. It is used to simulate a partial
 // broadcast where some recipients' inboxes cannot be written.

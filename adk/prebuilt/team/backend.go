@@ -44,6 +44,11 @@ import (
 //     config.json or inbox that the team can no longer parse, which permanently
 //     breaks routing and broadcast for that team. Implementations that cannot
 //     guarantee atomic replacement are unsuitable for team storage.
+//   - Read on a non-existent path may either return a non-nil error or a
+//     (nil, nil) result; the team package tolerates both. Callers therefore must
+//     not assume the returned *FileContent is non-nil when err is nil. To avoid
+//     ambiguity, prefer Exists before Read when the file may legitimately be
+//     absent.
 type Backend interface {
 	plantask.Backend
 
