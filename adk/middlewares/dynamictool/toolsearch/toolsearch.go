@@ -160,13 +160,6 @@ func (m *typedMiddleware[M]) isInitialized(ctx context.Context) bool {
 			return true
 		}
 	}
-	// Tool infos pre-seeded from previous turn's TurnEndState — skip initialization strip logic.
-	val, ok, err = adk.GetRunLocalValue(ctx, adk.ToolInfosPreSeededKey)
-	if err == nil && ok {
-		if b, _ := val.(bool); b {
-			return true
-		}
-	}
 	return false
 }
 

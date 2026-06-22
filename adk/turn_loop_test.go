@@ -55,16 +55,6 @@ func (a *turnLoopMockAgent) Run(ctx context.Context, input *AgentInput, _ ...Age
 				return
 			}
 			gen.Send(&AgentEvent{Output: output})
-			if output != nil && output.MessageOutput != nil && output.MessageOutput.Message != nil {
-				gen.Send(&AgentEvent{
-					SessionEvent: &SessionEvent[*schema.Message]{
-						Kind: SessionEventTurnEnd,
-						TurnEnd: &TurnEndState[*schema.Message]{
-							Messages: []*schema.Message{output.MessageOutput.Message},
-						},
-					},
-				})
-			}
 		}()
 		return iter
 	}
@@ -2670,12 +2660,7 @@ func TestTurnLoop_ManagedInterrupt_StartNewTurnUsesConfiguredSessionStore(t *tes
 	for _, se := range []*SessionEvent[*schema.Message]{
 		withTestEventID(&SessionEvent[*schema.Message]{Kind: SessionEventMessage, Message: committedUser}),
 		withTestEventID(&SessionEvent[*schema.Message]{Kind: SessionEventMessage, Message: committedAssistant}),
-		withTestEventID(&SessionEvent[*schema.Message]{
-			Kind: SessionEventTurnEnd,
-			TurnEnd: &TurnEndState[*schema.Message]{
-				Messages: []*schema.Message{committedUser, committedAssistant},
-			},
-		}),
+		withTestCommittedIdle[*schema.Message]("turn-committed"),
 		withTestEventID(&SessionEvent[*schema.Message]{Kind: SessionEventMessage, Message: partialUser}),
 	} {
 		require.NoError(t, sessionStore.AppendEventsForSession(ctx, sessionID, []*SessionEvent[*schema.Message]{se}))
@@ -2824,7 +2809,7 @@ func TestTurnLoop_ManagedInterrupt_DecisionResumeUsesCapturedCheckpointIDAndPara
 	assert.Equal(t, interruptTargetID, interruptEvents[0].AgentInterrupt.Contexts[0].InterruptID)
 
 	turnEndEvents := filterStoredSessionEvents(t, sessionStore.events, func(se *SessionEvent[*schema.Message]) bool {
-		return se.Kind == SessionEventTurnEnd
+		return isCommittedIdleEvent(se)
 	})
 	require.Len(t, turnEndEvents, 1)
 	assert.Equal(t, interruptEvents[0].TurnID, turnEndEvents[0].TurnID)
@@ -3003,13 +2988,6 @@ func (a *turnLoopManagedResumeAgent) Resume(ctx context.Context, info *ResumeInf
 					Message: schema.AssistantMessage("resumed", nil),
 					Role:    schema.Assistant,
 				},
-			},
-		})
-		gen.Send(&AgentEvent{
-			AgentName: a.Name(ctx),
-			SessionEvent: &SessionEvent[*schema.Message]{
-				Kind:    SessionEventTurnEnd,
-				TurnEnd: &TurnEndState[*schema.Message]{Messages: []*schema.Message{schema.AssistantMessage("resumed", nil)}},
 			},
 		})
 	}()
