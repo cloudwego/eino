@@ -122,9 +122,9 @@ type nopLogger struct{}
 
 func (nopLogger) Printf(string, ...any) {}
 
-// InboxMessage
-// Each message is stored as an element in a JSON array file per agent.
-type InboxMessage struct {
+// inboxMessage is the internal wire format for a mailbox message. Each message
+// is stored as an element in a JSON array file per agent.
+type inboxMessage struct {
 	ID        string `json:"id"`
 	From      string `json:"from"`
 	To        string `json:"to,omitempty"`

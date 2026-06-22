@@ -300,8 +300,8 @@ func buildTeammateTerminationMessage(name string, unassigned []string) string {
 
 // notifyLeaderTeammateTerminated sends a teammate_terminated message to the
 // leader's inbox so it learns about non-graceful teammate exits (crash,
-// context cancel, etc.). Errors are best-effort and silently ignored because
-// cleanup must not fail.
+// context cancel, etc.). Failures are best-effort because cleanup must not
+// fail, but they are logged so a dropped notification is observable.
 func (lm *lifecycleManager) notifyLeaderTeammateTerminated(ctx context.Context, teamName, memberName string, unassigned []string) {
 	if !lm.isLeader {
 		// Only the leader process owns the router and mailbox infra;
@@ -321,7 +321,11 @@ func (lm *lifecycleManager) notifyLeaderTeammateTerminated(ctx context.Context, 
 		TargetAgent: LeaderAgentName,
 		Messages:    []string{formatTeammateMessageEnvelope(sysMsg.From, sysMsg.Text, sysMsg.Summary)},
 	}
-	_, _ = lm.router.Push(item)
+	// A dropped push (leader loop already unregistered during teardown) is not
+	// fatal, but log it so the lost termination notice is not invisible.
+	if accepted, _ := lm.router.Push(item); !accepted {
+		lm.logger.Printf("notifyLeaderTeammateTerminated: leader loop unavailable, dropped termination notice for %q", memberName)
+	}
 }
 
 // setupMailbox initializes the inbox file, registers a mailboxMessageSource on the router,

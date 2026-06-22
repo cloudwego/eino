@@ -118,7 +118,7 @@ func TestTryReceive_WithMessages(t *testing.T) {
 	}
 
 	inboxPath := filepath.Join("/tmp/test", "teams", "myteam", "inboxes", "agent1.json")
-	msgJSON, _ := sonic.MarshalString([]InboxMessage{
+	msgJSON, _ := sonic.MarshalString([]inboxMessage{
 		{From: "sender", Text: "hello", Timestamp: utcNowMillis()},
 	})
 	backend.files[inboxPath] = msgJSON
@@ -166,12 +166,12 @@ func TestTryReceive_SendsIdleNotificationForTeammate(t *testing.T) {
 
 	inboxPath := filepath.Join("/tmp/test", "teams", "myteam", "inboxes", "agent1.json")
 	ts := utcNowMillis()
-	msgJSON, _ := sonic.MarshalString([]InboxMessage{
+	msgJSON, _ := sonic.MarshalString([]inboxMessage{
 		{From: "sender", Text: "work", Timestamp: ts},
 	})
 	backend.files[inboxPath] = msgJSON
 
-	_, _, err := src.consumeMessages(ctx, []InboxMessage{
+	_, _, err := src.consumeMessages(ctx, []inboxMessage{
 		{From: "sender", Text: "work", Timestamp: ts},
 	})
 	assert.NoError(t, err)
@@ -187,7 +187,7 @@ func TestTryReceive_SendsIdleNotificationForTeammate(t *testing.T) {
 	leaderInbox := backend.files[leaderInboxPath]
 	backend.mu.RUnlock()
 
-	var leaderMsgs []InboxMessage
+	var leaderMsgs []inboxMessage
 	err = sonic.UnmarshalString(leaderInbox, &leaderMsgs)
 	assert.NoError(t, err)
 	assert.Len(t, leaderMsgs, 1)
@@ -221,12 +221,12 @@ func TestTryReceive_DoesNotSendIdleForLeader(t *testing.T) {
 
 	inboxPath := filepath.Join("/tmp/test", "teams", "myteam", "inboxes", "team-lead.json")
 	ts := utcNowMillis()
-	msgJSON, _ := sonic.MarshalString([]InboxMessage{
+	msgJSON, _ := sonic.MarshalString([]inboxMessage{
 		{From: "agent1", Text: "update", Timestamp: ts},
 	})
 	backend.files[inboxPath] = msgJSON
 
-	_, _, err := src.consumeMessages(ctx, []InboxMessage{
+	_, _, err := src.consumeMessages(ctx, []inboxMessage{
 		{From: "agent1", Text: "update", Timestamp: ts},
 	})
 	assert.NoError(t, err)
@@ -269,7 +269,7 @@ func TestConsumeMessages_EmptyMsgs(t *testing.T) {
 		Role:      teamRoleTeammate,
 	})
 
-	item, ok, err := src.consumeMessages(context.Background(), []InboxMessage{})
+	item, ok, err := src.consumeMessages(context.Background(), []inboxMessage{})
 	assert.NoError(t, err)
 	assert.False(t, ok)
 	assert.Equal(t, TurnInput{}, item)
@@ -293,7 +293,7 @@ func TestConsumeMessages_MarksMessagesAsRead(t *testing.T) {
 	}
 
 	ts := utcNowMillis()
-	msgs := []InboxMessage{
+	msgs := []inboxMessage{
 		{From: "sender", Text: "msg1", Timestamp: ts},
 		{From: "sender2", Text: "msg2", Timestamp: ts},
 	}
@@ -342,7 +342,7 @@ func TestHandleLeaderControlMessages_NonLeader(t *testing.T) {
 	})
 
 	approvalJSON, _ := marshalShutdownResponse("agent1", "req-1", true, "done")
-	msgs := []InboxMessage{
+	msgs := []inboxMessage{
 		{From: "agent1", Text: approvalJSON, Timestamp: utcNowMillis()},
 	}
 
@@ -379,9 +379,9 @@ func TestHandleLeaderControlMessages_InterceptsShutdownResponse(t *testing.T) {
 	})
 
 	approvalJSON, _ := marshalShutdownResponse("agent1", "req-1", true, "done")
-	msg := InboxMessage{From: "agent1", Text: approvalJSON, Timestamp: utcNowMillis()}
+	msg := inboxMessage{From: "agent1", Text: approvalJSON, Timestamp: utcNowMillis()}
 
-	result, err := src.handleLeaderControlMessages(context.Background(), []InboxMessage{msg})
+	result, err := src.handleLeaderControlMessages(context.Background(), []inboxMessage{msg})
 	assert.NoError(t, err)
 	assert.Equal(t, "agent1", calledWith)
 	assert.Len(t, result, 1)
@@ -418,9 +418,9 @@ func TestHandleLeaderControlMessages_ShutdownResponseFalseNotIntercepted(t *test
 	})
 
 	approvalJSON, _ := marshalShutdownResponse("agent1", "req-1", false, "not done yet")
-	msg := InboxMessage{From: "agent1", Text: approvalJSON, Timestamp: utcNowMillis()}
+	msg := inboxMessage{From: "agent1", Text: approvalJSON, Timestamp: utcNowMillis()}
 
-	result, err := src.handleLeaderControlMessages(context.Background(), []InboxMessage{msg})
+	result, err := src.handleLeaderControlMessages(context.Background(), []inboxMessage{msg})
 	assert.NoError(t, err)
 	assert.False(t, called)
 	assert.Len(t, result, 1)
@@ -458,9 +458,9 @@ func TestHandleLeaderControlMessages_ShutdownResponseHandlerError(t *testing.T) 
 	})
 
 	approvalJSON, _ := marshalShutdownResponse("agent1", "req-1", true, "done")
-	msg := InboxMessage{From: "agent1", Text: approvalJSON, Timestamp: utcNowMillis()}
+	msg := inboxMessage{From: "agent1", Text: approvalJSON, Timestamp: utcNowMillis()}
 
-	result, err := src.handleLeaderControlMessages(context.Background(), []InboxMessage{msg})
+	result, err := src.handleLeaderControlMessages(context.Background(), []inboxMessage{msg})
 	assert.NoError(t, err)
 	// The original control message must be forwarded to the leader, not dropped.
 	assert.Len(t, result, 1)
@@ -495,7 +495,7 @@ func TestHandleLeaderControlMessages_NonShutdownPassesThrough(t *testing.T) {
 		},
 	})
 
-	msgs := []InboxMessage{
+	msgs := []inboxMessage{
 		{From: "agent1", Text: "just a regular message", Timestamp: utcNowMillis()},
 	}
 
@@ -531,11 +531,11 @@ func TestHandleLeaderControlMessages_IdleNotificationPassedThrough(t *testing.T)
 		protocolHeader: newProtocolHeader(messageTypeIdleNotification, "agent1", ""),
 		IdleReason:     "available",
 	})
-	msg := InboxMessage{From: "agent1", Text: idleJSON, Timestamp: utcNowMillis()}
+	msg := inboxMessage{From: "agent1", Text: idleJSON, Timestamp: utcNowMillis()}
 
-	result, err := src.handleLeaderControlMessages(context.Background(), []InboxMessage{msg})
+	result, err := src.handleLeaderControlMessages(context.Background(), []inboxMessage{msg})
 	assert.NoError(t, err)
-	assert.Equal(t, []InboxMessage{msg}, result)
+	assert.Equal(t, []inboxMessage{msg}, result)
 }
 
 func TestBuildTeammateTerminatedSystemMessage(t *testing.T) {
@@ -552,7 +552,7 @@ func TestBuildTeammateTerminatedSystemMessage(t *testing.T) {
 }
 
 func TestInboxMessagesToStrings_WithMessages(t *testing.T) {
-	msgs := []InboxMessage{
+	msgs := []inboxMessage{
 		{From: "agent1", Text: "hello", Summary: "greeting"},
 		{From: "agent2", Text: "", Summary: "empty"},
 		{From: "agent3", Text: "world", Summary: ""},
@@ -567,7 +567,7 @@ func TestInboxMessagesToStrings_WithMessages(t *testing.T) {
 }
 
 func TestInboxMessagesToStrings_EmptySlice(t *testing.T) {
-	result := inboxMessagesToStrings([]InboxMessage{})
+	result := inboxMessagesToStrings([]inboxMessage{})
 	assert.Empty(t, result)
 }
 
@@ -604,7 +604,7 @@ func TestWaitForItem_LeaderReceivesMessages(t *testing.T) {
 
 	go func() {
 		time.Sleep(50 * time.Millisecond)
-		msgs := []InboxMessage{{From: "worker", Text: "update", Timestamp: utcNowMillis()}}
+		msgs := []inboxMessage{{From: "worker", Text: "update", Timestamp: utcNowMillis()}}
 		msgJSON, _ := sonic.MarshalString(msgs)
 		_ = backend.Write(context.Background(), &WriteRequest{FilePath: inboxPath, Content: msgJSON})
 	}()
@@ -644,7 +644,7 @@ func TestWaitForItem_TeammateReceivesMessages(t *testing.T) {
 
 	go func() {
 		time.Sleep(50 * time.Millisecond)
-		msgs := []InboxMessage{{From: "leader", Text: "do this", Timestamp: utcNowMillis()}}
+		msgs := []inboxMessage{{From: "leader", Text: "do this", Timestamp: utcNowMillis()}}
 		msgJSON, _ := sonic.MarshalString(msgs)
 		_ = backend.Write(context.Background(), &WriteRequest{FilePath: inboxPath, Content: msgJSON})
 	}()
@@ -685,7 +685,7 @@ func TestConsumeMessages_MarkReadError(t *testing.T) {
 		Role:      teamRoleTeammate,
 	})
 
-	msgs := []InboxMessage{
+	msgs := []inboxMessage{
 		{From: "sender", Text: "hello", Timestamp: utcNowMillis()},
 	}
 
@@ -724,7 +724,7 @@ func TestConsumeMessages_MarksReadBeforeSideEffects(t *testing.T) {
 	}
 
 	approvalJSON, _ := marshalShutdownResponse("agent1", "req-1", true, "done")
-	msgs := []InboxMessage{
+	msgs := []inboxMessage{
 		{ID: "m1", From: "agent1", Text: approvalJSON, Timestamp: utcNowMillis()},
 	}
 	inboxPath := filepath.Join("/tmp/test", "teams", "myteam", "inboxes", "team-lead.json")

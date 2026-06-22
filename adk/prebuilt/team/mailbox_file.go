@@ -17,7 +17,7 @@
 // mailbox_file.go implements the file-system-backed mailbox: per-agent inbox
 // files stored as JSON arrays. Provides read, write, send, broadcast, and
 // polling operations with per-target locking to prevent lost updates.
-// Message types (outboxMessage, InboxMessage) are defined in protocol.go and types.go.
+// Message types (outboxMessage, inboxMessage) are defined in protocol.go and types.go.
 
 package team
 
@@ -111,7 +111,7 @@ func (m *mailbox) inboxFilePathForOwner(agentName string) string {
 // readInbox reads all messages from the given agent's inbox file.
 // Returns nil slice if the file doesn't exist or is empty.
 // NOTE: caller must hold the per-inbox lock when atomicity with writeInbox is required.
-func (m *mailbox) readInbox(ctx context.Context, agentName string) ([]InboxMessage, error) {
+func (m *mailbox) readInbox(ctx context.Context, agentName string) ([]inboxMessage, error) {
 	inboxPath := m.inboxFilePathForOwner(agentName)
 
 	exists, err := m.conf.Backend.Exists(ctx, inboxPath)
@@ -130,7 +130,7 @@ func (m *mailbox) readInbox(ctx context.Context, agentName string) ([]InboxMessa
 		return nil, nil
 	}
 
-	var msgs []InboxMessage
+	var msgs []inboxMessage
 	if err := sonic.UnmarshalString(content.Content, &msgs); err != nil {
 		return nil, fmt.Errorf("unmarshal inbox: %w", err)
 	}
@@ -139,7 +139,7 @@ func (m *mailbox) readInbox(ctx context.Context, agentName string) ([]InboxMessa
 
 // writeInbox writes the messages to the given agent's inbox file.
 // NOTE: caller must hold the per-inbox lock when atomicity with readInbox is required.
-func (m *mailbox) writeInbox(ctx context.Context, agentName string, msgs []InboxMessage) error {
+func (m *mailbox) writeInbox(ctx context.Context, agentName string, msgs []inboxMessage) error {
 	data, err := sonic.MarshalString(msgs)
 	if err != nil {
 		return fmt.Errorf("marshal inbox: %w", err)
@@ -181,7 +181,7 @@ type broadcastResult struct {
 func (m *mailbox) sendToOne(ctx context.Context, to string, msg *outboxMessage) error {
 	now := utcNowMillis()
 
-	inboxMsg := InboxMessage{
+	inboxMsg := inboxMessage{
 		ID:        uuid.New().String(),
 		From:      m.conf.OwnerName,
 		To:        to,
@@ -243,7 +243,7 @@ func (m *mailbox) broadcast(ctx context.Context, msg *outboxMessage) (broadcastR
 }
 
 // ReadUnread returns all unread messages from this agent's inbox file.
-func (m *mailbox) ReadUnread(ctx context.Context) ([]InboxMessage, error) {
+func (m *mailbox) ReadUnread(ctx context.Context) ([]inboxMessage, error) {
 	lock := m.inboxLocks.ForName(m.conf.OwnerName)
 	defer m.inboxLocks.Release(m.conf.OwnerName)
 	lock.RLock()
@@ -254,7 +254,7 @@ func (m *mailbox) ReadUnread(ctx context.Context) ([]InboxMessage, error) {
 		return nil, fmt.Errorf("read inbox: %w", err)
 	}
 
-	var unread []InboxMessage
+	var unread []inboxMessage
 	for _, msg := range all {
 		if !msg.Read {
 			unread = append(unread, msg)
@@ -267,7 +267,7 @@ func (m *mailbox) ReadUnread(ctx context.Context) ([]InboxMessage, error) {
 // only retain unread messages. This prevents the inbox file from growing
 // unboundedly over time.
 // Messages are matched by ID.
-func (m *mailbox) MarkRead(ctx context.Context, msgs []InboxMessage) error {
+func (m *mailbox) MarkRead(ctx context.Context, msgs []inboxMessage) error {
 	if len(msgs) == 0 {
 		return nil
 	}
@@ -288,7 +288,7 @@ func (m *mailbox) MarkRead(ctx context.Context, msgs []InboxMessage) error {
 		return fmt.Errorf("read inbox: %w", err)
 	}
 
-	remaining := make([]InboxMessage, 0, len(all))
+	remaining := make([]inboxMessage, 0, len(all))
 	for _, msg := range all {
 		if !toRemove[msg.ID] {
 			remaining = append(remaining, msg)
@@ -303,7 +303,7 @@ func (m *mailbox) MarkRead(ctx context.Context, msgs []InboxMessage) error {
 }
 
 // WaitForMessages blocks until new messages arrive or context is cancelled.
-func (m *mailbox) WaitForMessages(ctx context.Context) ([]InboxMessage, error) {
+func (m *mailbox) WaitForMessages(ctx context.Context) ([]inboxMessage, error) {
 	// check existing messages first
 	if msgs, err := m.ReadUnread(ctx); err != nil {
 		return nil, err
@@ -317,7 +317,7 @@ func (m *mailbox) WaitForMessages(ctx context.Context) ([]InboxMessage, error) {
 // waitForNewMessages blocks until new messages arrive, without checking existing
 // messages first. Use this when the caller has already verified no unread messages
 // exist, to avoid a redundant ReadUnread call.
-func (m *mailbox) waitForNewMessages(ctx context.Context) ([]InboxMessage, error) {
+func (m *mailbox) waitForNewMessages(ctx context.Context) ([]inboxMessage, error) {
 	ticker := time.NewTicker(m.conf.PollInterval)
 	defer ticker.Stop()
 

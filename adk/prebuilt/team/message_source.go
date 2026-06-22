@@ -123,7 +123,7 @@ func (s *mailboxMessageSource) waitForItem(ctx context.Context) (TurnInput, erro
 	}
 }
 
-func (s *mailboxMessageSource) consumeMessages(ctx context.Context, msgs []InboxMessage) (TurnInput, bool, error) {
+func (s *mailboxMessageSource) consumeMessages(ctx context.Context, msgs []inboxMessage) (TurnInput, bool, error) {
 	if len(msgs) == 0 {
 		return TurnInput{}, false, nil
 	}
@@ -155,13 +155,13 @@ func (s *mailboxMessageSource) consumeMessages(ctx context.Context, msgs []Inbox
 	return s.buildTurnInput(msgs), true, nil
 }
 
-func (s *mailboxMessageSource) handleLeaderControlMessages(ctx context.Context, msgs []InboxMessage) ([]InboxMessage, error) {
+func (s *mailboxMessageSource) handleLeaderControlMessages(ctx context.Context, msgs []inboxMessage) ([]inboxMessage, error) {
 	if s.conf.Role != teamRoleLeader {
 		return msgs, nil
 	}
 
-	var remaining []InboxMessage
-	var systemMsgs []InboxMessage
+	var remaining []inboxMessage
+	var systemMsgs []inboxMessage
 	for _, m := range msgs {
 		var header protocolHeader
 		if err := sonic.UnmarshalString(m.Text, &header); err != nil {
@@ -220,16 +220,16 @@ func (s *mailboxMessageSource) handleLeaderControlMessages(ctx context.Context, 
 	return append(systemMsgs, remaining...), nil
 }
 
-func buildTeammateTerminatedSystemMessage(notifyMsg string) (InboxMessage, error) {
+func buildTeammateTerminatedSystemMessage(notifyMsg string) (inboxMessage, error) {
 	terminatedPayload := teammateTerminatedPayload{
 		protocolHeader: newProtocolHeader(messageTypeTeammateTerminated, "", ""),
 		Message:        notifyMsg,
 	}
 	text, err := sonic.MarshalString(terminatedPayload)
 	if err != nil {
-		return InboxMessage{}, err
+		return inboxMessage{}, err
 	}
-	return InboxMessage{
+	return inboxMessage{
 		ID:        uuid.New().String(),
 		From:      systemSender,
 		Text:      text,
@@ -237,14 +237,14 @@ func buildTeammateTerminatedSystemMessage(notifyMsg string) (InboxMessage, error
 	}, nil
 }
 
-func (s *mailboxMessageSource) buildTurnInput(msgs []InboxMessage) TurnInput {
+func (s *mailboxMessageSource) buildTurnInput(msgs []inboxMessage) TurnInput {
 	return TurnInput{
 		TargetAgent: s.conf.OwnerName,
 		Messages:    inboxMessagesToStrings(msgs),
 	}
 }
 
-func inboxMessagesToStrings(msgs []InboxMessage) []string {
+func inboxMessagesToStrings(msgs []inboxMessage) []string {
 	result := make([]string, 0, len(msgs))
 	for _, m := range msgs {
 		if m.Text == "" {

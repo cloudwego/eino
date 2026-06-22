@@ -194,7 +194,7 @@ func TestSendMessageTool_InvokableRun_DM_Success(t *testing.T) {
 	content := backend.files[inboxPath]
 	backend.mu.RUnlock()
 
-	var msgs []InboxMessage
+	var msgs []inboxMessage
 	err = sonic.UnmarshalString(content, &msgs)
 	assert.NoError(t, err)
 	assert.Len(t, msgs, 1)
@@ -241,7 +241,7 @@ func TestSendMessageTool_InvokableRun_Broadcast(t *testing.T) {
 		content := backend.files[inboxPath]
 		backend.mu.RUnlock()
 
-		var msgs []InboxMessage
+		var msgs []inboxMessage
 		err = sonic.UnmarshalString(content, &msgs)
 		assert.NoError(t, err)
 		assert.Len(t, msgs, 1)
@@ -254,7 +254,7 @@ func TestSendMessageTool_InvokableRun_Broadcast(t *testing.T) {
 	leaderContent := backend.files[leaderInboxPath]
 	backend.mu.RUnlock()
 
-	var leaderMsgs []InboxMessage
+	var leaderMsgs []inboxMessage
 	err = sonic.UnmarshalString(leaderContent, &leaderMsgs)
 	assert.NoError(t, err)
 	assert.Len(t, leaderMsgs, 0)
@@ -693,7 +693,7 @@ func TestSendMessageTool_InvokableRun_DM_VerifyInboxContent(t *testing.T) {
 	content := backend.files[inboxPath]
 	backend.mu.RUnlock()
 
-	var msgs []InboxMessage
+	var msgs []inboxMessage
 	err = sonic.UnmarshalString(content, &msgs)
 	assert.NoError(t, err)
 	assert.Len(t, msgs, 2)
@@ -737,7 +737,7 @@ func TestSendMessageTool_InvokableRun_ShutdownRequest_VerifyResult(t *testing.T)
 	content := backend.files[inboxPath]
 	backend.mu.RUnlock()
 
-	var msgs []InboxMessage
+	var msgs []inboxMessage
 	err = sonic.UnmarshalString(content, &msgs)
 	assert.NoError(t, err)
 	assert.Len(t, msgs, 1)
@@ -808,7 +808,7 @@ func TestSendMessageTool_InvokableRun_Broadcast_ExcludesSender(t *testing.T) {
 	backend.mu.RLock()
 	workerContent := backend.files[workerInboxPath]
 	backend.mu.RUnlock()
-	var workerMsgs []InboxMessage
+	var workerMsgs []inboxMessage
 	err = sonic.UnmarshalString(workerContent, &workerMsgs)
 	assert.NoError(t, err)
 	assert.Len(t, workerMsgs, 1)
@@ -817,7 +817,7 @@ func TestSendMessageTool_InvokableRun_Broadcast_ExcludesSender(t *testing.T) {
 	backend.mu.RLock()
 	leaderContent := backend.files[leaderInboxPath]
 	backend.mu.RUnlock()
-	var leaderMsgs []InboxMessage
+	var leaderMsgs []inboxMessage
 	err = sonic.UnmarshalString(leaderContent, &leaderMsgs)
 	assert.NoError(t, err)
 	assert.Len(t, leaderMsgs, 0)
@@ -851,7 +851,7 @@ func TestSendMessageTool_InvokableRun_TeammateAsSender(t *testing.T) {
 	content := backend.files[leaderInboxPath]
 	backend.mu.RUnlock()
 
-	var msgs []InboxMessage
+	var msgs []inboxMessage
 	err = sonic.UnmarshalString(content, &msgs)
 	assert.NoError(t, err)
 	assert.Len(t, msgs, 1)

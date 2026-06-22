@@ -78,7 +78,7 @@ func TestNewTaskAssignedNotifier_ValidTeamName_SendsMessage(t *testing.T) {
 	backend.mu.RUnlock()
 	assert.True(t, ok)
 
-	var msgs []InboxMessage
+	var msgs []inboxMessage
 	err = sonic.UnmarshalString(content, &msgs)
 	assert.NoError(t, err)
 	assert.Len(t, msgs, 1)
@@ -116,7 +116,7 @@ func TestNewTaskAssignedNotifier_EmptyAssignedBy_DefaultsToLeader(t *testing.T) 
 	content := backend.files[inboxPath]
 	backend.mu.RUnlock()
 
-	var msgs []InboxMessage
+	var msgs []inboxMessage
 	err = sonic.UnmarshalString(content, &msgs)
 	assert.NoError(t, err)
 	assert.Len(t, msgs, 1)
@@ -151,7 +151,7 @@ func TestNewTaskAssignedNotifier_PayloadContainsCorrectFields(t *testing.T) {
 	content := backend.files[inboxPath]
 	backend.mu.RUnlock()
 
-	var msgs []InboxMessage
+	var msgs []inboxMessage
 	err = sonic.UnmarshalString(content, &msgs)
 	assert.NoError(t, err)
 	assert.Len(t, msgs, 1)
