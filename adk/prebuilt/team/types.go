@@ -73,11 +73,32 @@ const (
 	// generalAgentName is the default agent type when none is specified.
 	generalAgentName = "general-purpose"
 
+	// defaultTeammateName is the fallback teammate name used when the Agent tool
+	// spawns a background teammate without an explicit name. Deduplication may
+	// turn this into "agent-2", "agent-3", etc. for concurrent unnamed spawns.
+	defaultTeammateName = "agent"
+
 	// defaultShutdownTimeout is the maximum time to wait for teammates to exit.
 	defaultShutdownTimeout = 30 * time.Second
 
 	// defaultPollInterval is the fallback polling interval for mailbox reads.
 	defaultPollInterval = 500 * time.Millisecond
+
+	// defaultReminderInterval is the number of assistant turns between task
+	// reminders used when Config.Interval is left unset (the zero value).
+	defaultReminderInterval = 10
+
+	// broadcastTarget is the wildcard recipient that fans a message out to every
+	// other member of the team.
+	broadcastTarget = "*"
+
+	// systemSender is the From value used for messages the framework injects on
+	// behalf of the team rather than a real agent (e.g. teammate_terminated).
+	systemSender = "system"
+
+	// idleStatusAvailable is the idle-notification status a teammate reports when
+	// it has drained its inbox and is ready for more work.
+	idleStatusAvailable = "available"
 )
 
 // ─── Errors ──────────────────────────────────────────────────────────────────

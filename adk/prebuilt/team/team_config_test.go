@@ -50,20 +50,20 @@ func TestMakeAgentID(t *testing.T) {
 func TestConfigFilePath(t *testing.T) {
 	conf, _ := newTestConfig()
 	expected := filepath.Join("/tmp/test", "teams", "myteam", "config.json")
-	assert.Equal(t, expected, conf.configFilePath("myteam"))
+	assert.Equal(t, expected, newConfigStore(conf).configFilePath("myteam"))
 }
 
 func TestLeadAgentID(t *testing.T) {
 	conf, _ := newTestConfig()
-	assert.Equal(t, "team-lead@myteam", conf.LeadAgentID("myteam"))
-	assert.Equal(t, "team-lead@alpha", conf.LeadAgentID("alpha"))
+	assert.Equal(t, "team-lead@myteam", newConfigStore(conf).LeadAgentID("myteam"))
+	assert.Equal(t, "team-lead@alpha", newConfigStore(conf).LeadAgentID("alpha"))
 }
 
 func TestResolveTeamName_NotTaken(t *testing.T) {
 	conf, _ := newTestConfig()
 	ctx := context.Background()
 
-	name, err := conf.resolveTeamName(ctx, "fresh-team")
+	name, err := newConfigStore(conf).resolveTeamName(ctx, "fresh-team")
 	assert.NoError(t, err)
 	assert.Equal(t, "fresh-team", name)
 }
@@ -72,9 +72,9 @@ func TestResolveTeamName_Taken(t *testing.T) {
 	conf, backend := newTestConfig()
 	ctx := context.Background()
 
-	backend.files[conf.configFilePath("myteam")] = `{}`
+	backend.files[newConfigStore(conf).configFilePath("myteam")] = `{}`
 
-	name, err := conf.resolveTeamName(ctx, "myteam")
+	name, err := newConfigStore(conf).resolveTeamName(ctx, "myteam")
 	assert.NoError(t, err)
 	assert.NotEqual(t, "myteam", name)
 	assert.True(t, strings.HasPrefix(name, "myteam-"))
@@ -84,7 +84,7 @@ func TestCreateTeam(t *testing.T) {
 	conf, backend := newTestConfig()
 	ctx := context.Background()
 
-	cfg, err := conf.CreateTeam(ctx, "alpha", "test team", "leader1", "specialist")
+	cfg, err := newConfigStore(conf).CreateTeam(ctx, "alpha", "test team", "leader1", "specialist")
 	assert.NoError(t, err)
 	assert.NotNil(t, cfg)
 	assert.Equal(t, "alpha", cfg.Name)
@@ -97,7 +97,7 @@ func TestCreateTeam(t *testing.T) {
 	assert.False(t, cfg.CreatedAt.IsZero())
 	assert.False(t, cfg.Members[0].JoinedAt.IsZero())
 
-	configPath := conf.configFilePath("alpha")
+	configPath := newConfigStore(conf).configFilePath("alpha")
 	_, ok := backend.files[configPath]
 	assert.True(t, ok)
 
@@ -112,7 +112,7 @@ func TestCreateTeam_EmptyLeaderType(t *testing.T) {
 	conf, _ := newTestConfig()
 	ctx := context.Background()
 
-	cfg, err := conf.CreateTeam(ctx, "beta", "desc", "boss", "")
+	cfg, err := newConfigStore(conf).CreateTeam(ctx, "beta", "desc", "boss", "")
 	assert.NoError(t, err)
 	assert.Equal(t, generalAgentName, cfg.Members[0].AgentType)
 }
@@ -121,10 +121,10 @@ func TestCreateTeam_NameCollision(t *testing.T) {
 	conf, backend := newTestConfig()
 	ctx := context.Background()
 
-	backend.files[conf.configFilePath("taken")] = `{}`
+	backend.files[newConfigStore(conf).configFilePath("taken")] = `{}`
 
 	before := time.Now().UnixNano()
-	cfg, err := conf.CreateTeam(ctx, "taken", "desc", "lead", "general")
+	cfg, err := newConfigStore(conf).CreateTeam(ctx, "taken", "desc", "lead", "general")
 	assert.NoError(t, err)
 	assert.NotEqual(t, "taken", cfg.Name)
 	assert.True(t, strings.HasPrefix(cfg.Name, "taken-"))
@@ -132,7 +132,7 @@ func TestCreateTeam_NameCollision(t *testing.T) {
 	suffix := strings.TrimPrefix(cfg.Name, "taken-")
 	assert.NotEmpty(t, suffix)
 
-	configPath := conf.configFilePath(cfg.Name)
+	configPath := newConfigStore(conf).configFilePath(cfg.Name)
 	_, ok := backend.files[configPath]
 	assert.True(t, ok)
 	_ = before
@@ -142,10 +142,10 @@ func TestReadConfigLocked(t *testing.T) {
 	conf, _ := newTestConfig()
 	ctx := context.Background()
 
-	_, err := conf.CreateTeam(ctx, "gamma", "read test", "leader", "type1")
+	_, err := newConfigStore(conf).CreateTeam(ctx, "gamma", "read test", "leader", "type1")
 	assert.NoError(t, err)
 
-	cfg, err := conf.readConfigLocked(ctx, "gamma")
+	cfg, err := newConfigStore(conf).readConfigLocked(ctx, "gamma")
 	assert.NoError(t, err)
 	assert.Equal(t, "gamma", cfg.Name)
 	assert.Equal(t, "read test", cfg.Description)
@@ -157,16 +157,16 @@ func TestUpdateConfig(t *testing.T) {
 	conf, _ := newTestConfig()
 	ctx := context.Background()
 
-	_, err := conf.CreateTeam(ctx, "delta", "original", "lead", "type1")
+	_, err := newConfigStore(conf).CreateTeam(ctx, "delta", "original", "lead", "type1")
 	assert.NoError(t, err)
 
-	err = conf.updateConfig(ctx, "delta", func(cfg *teamConfig) error {
+	err = newConfigStore(conf).updateConfig(ctx, "delta", func(cfg *teamConfig) error {
 		cfg.Description = "updated"
 		return nil
 	})
 	assert.NoError(t, err)
 
-	cfg, err := conf.readConfigLocked(ctx, "delta")
+	cfg, err := newConfigStore(conf).readConfigLocked(ctx, "delta")
 	assert.NoError(t, err)
 	assert.Equal(t, "updated", cfg.Description)
 }
@@ -175,7 +175,7 @@ func TestAddMember(t *testing.T) {
 	conf, _ := newTestConfig()
 	ctx := context.Background()
 
-	_, err := conf.CreateTeam(ctx, "epsilon", "desc", "lead", "type1")
+	_, err := newConfigStore(conf).CreateTeam(ctx, "epsilon", "desc", "lead", "type1")
 	assert.NoError(t, err)
 
 	member := teamMember{
@@ -184,10 +184,10 @@ func TestAddMember(t *testing.T) {
 		AgentType: "coder",
 		JoinedAt:  time.Now(),
 	}
-	err = conf.AddMember(ctx, "epsilon", member)
+	err = newConfigStore(conf).AddMember(ctx, "epsilon", member)
 	assert.NoError(t, err)
 
-	cfg, err := conf.readConfigLocked(ctx, "epsilon")
+	cfg, err := newConfigStore(conf).readConfigLocked(ctx, "epsilon")
 	assert.NoError(t, err)
 	assert.Len(t, cfg.Members, 2)
 	assert.Equal(t, "worker1", cfg.Members[1].Name)
@@ -199,7 +199,7 @@ func TestAddMemberWithDeduplicatedName_Unique(t *testing.T) {
 	conf, _ := newTestConfig()
 	ctx := context.Background()
 
-	_, err := conf.CreateTeam(ctx, "zeta", "desc", "lead", "type1")
+	_, err := newConfigStore(conf).CreateTeam(ctx, "zeta", "desc", "lead", "type1")
 	assert.NoError(t, err)
 
 	member := teamMember{
@@ -207,7 +207,7 @@ func TestAddMemberWithDeduplicatedName_Unique(t *testing.T) {
 		AgentType: "coder",
 		JoinedAt:  time.Now(),
 	}
-	result, err := conf.AddMemberWithDeduplicatedName(ctx, "zeta", member)
+	result, err := newConfigStore(conf).AddMemberWithDeduplicatedName(ctx, "zeta", member)
 	assert.NoError(t, err)
 	assert.Equal(t, "unique-agent", result.Name)
 	assert.Equal(t, "unique-agent@zeta", result.AgentID)
@@ -217,7 +217,7 @@ func TestAddMemberWithDeduplicatedName_Duplicate(t *testing.T) {
 	conf, _ := newTestConfig()
 	ctx := context.Background()
 
-	_, err := conf.CreateTeam(ctx, "eta", "desc", "lead", "type1")
+	_, err := newConfigStore(conf).CreateTeam(ctx, "eta", "desc", "lead", "type1")
 	assert.NoError(t, err)
 
 	first := teamMember{
@@ -225,7 +225,7 @@ func TestAddMemberWithDeduplicatedName_Duplicate(t *testing.T) {
 		AgentType: "coder",
 		JoinedAt:  time.Now(),
 	}
-	_, err = conf.AddMemberWithDeduplicatedName(ctx, "eta", first)
+	_, err = newConfigStore(conf).AddMemberWithDeduplicatedName(ctx, "eta", first)
 	assert.NoError(t, err)
 
 	second := teamMember{
@@ -233,7 +233,7 @@ func TestAddMemberWithDeduplicatedName_Duplicate(t *testing.T) {
 		AgentType: "coder",
 		JoinedAt:  time.Now(),
 	}
-	result, err := conf.AddMemberWithDeduplicatedName(ctx, "eta", second)
+	result, err := newConfigStore(conf).AddMemberWithDeduplicatedName(ctx, "eta", second)
 	assert.NoError(t, err)
 	assert.Equal(t, "agent-2", result.Name)
 	assert.Equal(t, "agent-2@eta", result.AgentID)
@@ -243,7 +243,7 @@ func TestRemoveMember(t *testing.T) {
 	conf, _ := newTestConfig()
 	ctx := context.Background()
 
-	_, err := conf.CreateTeam(ctx, "iota", "desc", "lead", "type1")
+	_, err := newConfigStore(conf).CreateTeam(ctx, "iota", "desc", "lead", "type1")
 	assert.NoError(t, err)
 
 	member := teamMember{
@@ -252,17 +252,17 @@ func TestRemoveMember(t *testing.T) {
 		AgentType: "coder",
 		JoinedAt:  time.Now(),
 	}
-	err = conf.AddMember(ctx, "iota", member)
+	err = newConfigStore(conf).AddMember(ctx, "iota", member)
 	assert.NoError(t, err)
 
-	cfg, err := conf.readConfigLocked(ctx, "iota")
+	cfg, err := newConfigStore(conf).readConfigLocked(ctx, "iota")
 	assert.NoError(t, err)
 	assert.Len(t, cfg.Members, 2)
 
-	err = conf.RemoveMember(ctx, "iota", "removable")
+	err = newConfigStore(conf).RemoveMember(ctx, "iota", "removable")
 	assert.NoError(t, err)
 
-	cfg, err = conf.readConfigLocked(ctx, "iota")
+	cfg, err = newConfigStore(conf).readConfigLocked(ctx, "iota")
 	assert.NoError(t, err)
 	assert.Len(t, cfg.Members, 1)
 	for _, m := range cfg.Members {
@@ -274,10 +274,10 @@ func TestHasActiveTeammates_NoTeammates(t *testing.T) {
 	conf, _ := newTestConfig()
 	ctx := context.Background()
 
-	_, err := conf.CreateTeam(ctx, "kappa", "desc", LeaderAgentName, "type1")
+	_, err := newConfigStore(conf).CreateTeam(ctx, "kappa", "desc", LeaderAgentName, "type1")
 	assert.NoError(t, err)
 
-	has, err := conf.HasActiveTeammates(ctx, "kappa")
+	has, err := newConfigStore(conf).HasActiveTeammates(ctx, "kappa")
 	assert.NoError(t, err)
 	assert.False(t, has)
 }
@@ -286,7 +286,7 @@ func TestHasActiveTeammates_WithTeammate(t *testing.T) {
 	conf, _ := newTestConfig()
 	ctx := context.Background()
 
-	_, err := conf.CreateTeam(ctx, "lambda", "desc", LeaderAgentName, "type1")
+	_, err := newConfigStore(conf).CreateTeam(ctx, "lambda", "desc", LeaderAgentName, "type1")
 	assert.NoError(t, err)
 
 	member := teamMember{
@@ -295,10 +295,10 @@ func TestHasActiveTeammates_WithTeammate(t *testing.T) {
 		AgentType: "coder",
 		JoinedAt:  time.Now(),
 	}
-	err = conf.AddMember(ctx, "lambda", member)
+	err = newConfigStore(conf).AddMember(ctx, "lambda", member)
 	assert.NoError(t, err)
 
-	has, err := conf.HasActiveTeammates(ctx, "lambda")
+	has, err := newConfigStore(conf).HasActiveTeammates(ctx, "lambda")
 	assert.NoError(t, err)
 	assert.True(t, has)
 }
@@ -307,7 +307,7 @@ func TestGetActiveTeammateNames(t *testing.T) {
 	conf, _ := newTestConfig()
 	ctx := context.Background()
 
-	_, err := conf.CreateTeam(ctx, "mu", "desc", LeaderAgentName, "type1")
+	_, err := newConfigStore(conf).CreateTeam(ctx, "mu", "desc", LeaderAgentName, "type1")
 	assert.NoError(t, err)
 
 	member1 := teamMember{
@@ -322,12 +322,12 @@ func TestGetActiveTeammateNames(t *testing.T) {
 		AgentType: "coder",
 		JoinedAt:  time.Now(),
 	}
-	err = conf.AddMember(ctx, "mu", member1)
+	err = newConfigStore(conf).AddMember(ctx, "mu", member1)
 	assert.NoError(t, err)
-	err = conf.AddMember(ctx, "mu", member2)
+	err = newConfigStore(conf).AddMember(ctx, "mu", member2)
 	assert.NoError(t, err)
 
-	names, err := conf.GetActiveTeammateNames(ctx, "mu")
+	names, err := newConfigStore(conf).GetActiveTeammateNames(ctx, "mu")
 	assert.NoError(t, err)
 	assert.Len(t, names, 2)
 	assert.Contains(t, names, "dev1")
@@ -339,27 +339,27 @@ func TestGetActiveTeammateNames_ExcludesIdleTeammates(t *testing.T) {
 	conf, _ := newTestConfig()
 	ctx := context.Background()
 
-	_, err := conf.CreateTeam(ctx, "mu-idle", "desc", LeaderAgentName, "type1")
+	_, err := newConfigStore(conf).CreateTeam(ctx, "mu-idle", "desc", LeaderAgentName, "type1")
 	assert.NoError(t, err)
 
-	err = conf.AddMember(ctx, "mu-idle", teamMember{
+	err = newConfigStore(conf).AddMember(ctx, "mu-idle", teamMember{
 		Name:      "dev1",
 		AgentID:   makeAgentID("dev1", "mu-idle"),
 		AgentType: "coder",
 		JoinedAt:  time.Now(),
 	})
 	assert.NoError(t, err)
-	err = conf.AddMember(ctx, "mu-idle", teamMember{
+	err = newConfigStore(conf).AddMember(ctx, "mu-idle", teamMember{
 		Name:      "dev2",
 		AgentID:   makeAgentID("dev2", "mu-idle"),
 		AgentType: "coder",
 		JoinedAt:  time.Now(),
 	})
 	assert.NoError(t, err)
-	err = conf.SetMemberActive(ctx, "mu-idle", "dev2", false)
+	err = newConfigStore(conf).SetMemberActive(ctx, "mu-idle", "dev2", false)
 	assert.NoError(t, err)
 
-	names, err := conf.GetActiveTeammateNames(ctx, "mu-idle")
+	names, err := newConfigStore(conf).GetActiveTeammateNames(ctx, "mu-idle")
 	assert.NoError(t, err)
 	assert.Equal(t, []string{"dev1"}, names)
 }
@@ -368,7 +368,7 @@ func TestHasMember_Found(t *testing.T) {
 	conf, _ := newTestConfig()
 	ctx := context.Background()
 
-	_, err := conf.CreateTeam(ctx, "nu", "desc", "lead", "type1")
+	_, err := newConfigStore(conf).CreateTeam(ctx, "nu", "desc", "lead", "type1")
 	assert.NoError(t, err)
 
 	member := teamMember{
@@ -377,10 +377,10 @@ func TestHasMember_Found(t *testing.T) {
 		AgentType: "coder",
 		JoinedAt:  time.Now(),
 	}
-	err = conf.AddMember(ctx, "nu", member)
+	err = newConfigStore(conf).AddMember(ctx, "nu", member)
 	assert.NoError(t, err)
 
-	found, err := conf.HasMember(ctx, "nu", "target")
+	found, err := newConfigStore(conf).HasMember(ctx, "nu", "target")
 	assert.NoError(t, err)
 	assert.True(t, found)
 }
@@ -389,10 +389,10 @@ func TestHasMember_NotFound(t *testing.T) {
 	conf, _ := newTestConfig()
 	ctx := context.Background()
 
-	_, err := conf.CreateTeam(ctx, "xi", "desc", "lead", "type1")
+	_, err := newConfigStore(conf).CreateTeam(ctx, "xi", "desc", "lead", "type1")
 	assert.NoError(t, err)
 
-	found, err := conf.HasMember(ctx, "xi", "nonexistent")
+	found, err := newConfigStore(conf).HasMember(ctx, "xi", "nonexistent")
 	assert.NoError(t, err)
 	assert.False(t, found)
 }
@@ -401,10 +401,10 @@ func TestDeleteTeam(t *testing.T) {
 	conf, backend := newTestConfig()
 	ctx := context.Background()
 
-	_, err := conf.CreateTeam(ctx, "omicron", "desc", "lead", "type1")
+	_, err := newConfigStore(conf).CreateTeam(ctx, "omicron", "desc", "lead", "type1")
 	assert.NoError(t, err)
 
-	configPath := conf.configFilePath("omicron")
+	configPath := newConfigStore(conf).configFilePath("omicron")
 	_, ok := backend.files[configPath]
 	assert.True(t, ok)
 
@@ -417,7 +417,7 @@ func TestDeleteTeam(t *testing.T) {
 	backend.dirs[teamDir] = true
 	backend.dirs[tasksDir] = true
 
-	err = conf.DeleteTeam(ctx, "omicron")
+	err = newConfigStore(conf).DeleteTeam(ctx, "omicron")
 	assert.NoError(t, err)
 
 	_, ok = backend.files[configPath]
@@ -431,11 +431,11 @@ func TestReadConfig_InvalidJSON(t *testing.T) {
 	conf, backend := newTestConfig()
 	ctx := context.Background()
 
-	configPath := conf.configFilePath("badteam")
+	configPath := newConfigStore(conf).configFilePath("badteam")
 	backend.files[configPath] = `not valid json`
 
 	conf.state.cfgLock.RLock()
-	_, err := conf.readConfig(ctx, "badteam")
+	_, err := newConfigStore(conf).readConfig(ctx, "badteam")
 	conf.state.cfgLock.RUnlock()
 	assert.Error(t, err)
 }
@@ -445,7 +445,7 @@ func TestWriteConfig_BackendWriteError(t *testing.T) {
 
 	cfg := &teamConfig{Name: "test", Members: []teamMember{}}
 	conf.state.cfgLock.Lock()
-	err := conf.writeConfig(context.Background(), "test", cfg)
+	err := newConfigStore(conf).writeConfig(context.Background(), "test", cfg)
 	conf.state.cfgLock.Unlock()
 	assert.Error(t, err)
 }
@@ -453,7 +453,7 @@ func TestWriteConfig_BackendWriteError(t *testing.T) {
 func TestUpdateConfig_ReadConfigError(t *testing.T) {
 	conf := newTestConfigWithErrBackend(errors.New("read failed"))
 
-	err := conf.updateConfig(context.Background(), "nonexistent", func(cfg *teamConfig) error {
+	err := newConfigStore(conf).updateConfig(context.Background(), "nonexistent", func(cfg *teamConfig) error {
 		return nil
 	})
 	assert.Error(t, err)
@@ -462,28 +462,28 @@ func TestUpdateConfig_ReadConfigError(t *testing.T) {
 func TestCreateTeam_EnsureDirError(t *testing.T) {
 	conf := newTestConfigWithErrBackend(errors.New("dir error"))
 
-	_, err := conf.CreateTeam(context.Background(), "newteam", "desc", "lead", "type1")
+	_, err := newConfigStore(conf).CreateTeam(context.Background(), "newteam", "desc", "lead", "type1")
 	assert.Error(t, err)
 }
 
 func TestDeleteTeam_BackendError(t *testing.T) {
 	conf := newTestConfigWithErrBackend(errors.New("delete failed"))
 
-	err := conf.DeleteTeam(context.Background(), "someteam")
+	err := newConfigStore(conf).DeleteTeam(context.Background(), "someteam")
 	assert.Error(t, err)
 }
 
 func TestHasActiveTeammates_ReadConfigError(t *testing.T) {
 	conf := newTestConfigWithErrBackend(errors.New("read failed"))
 
-	_, err := conf.HasActiveTeammates(context.Background(), "someteam")
+	_, err := newConfigStore(conf).HasActiveTeammates(context.Background(), "someteam")
 	assert.Error(t, err)
 }
 
 func TestResolveTeamName_BackendReadError(t *testing.T) {
 	conf := newTestConfigWithErrBackend(errors.New("exists error"))
 
-	_, err := conf.resolveTeamName(context.Background(), "someteam")
+	_, err := newConfigStore(conf).resolveTeamName(context.Background(), "someteam")
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "exists error")
 }

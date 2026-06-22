@@ -172,7 +172,7 @@ func TestSendMessageTool_InvokableRun_DM_Success(t *testing.T) {
 
 	teamName := mw.getTeamName()
 
-	cm := conf
+	cm := newConfigStore(conf)
 	err = cm.AddMember(ctx, teamName, teamMember{Name: "worker", JoinedAt: time.Now()})
 	assert.NoError(t, err)
 
@@ -213,7 +213,7 @@ func TestSendMessageTool_InvokableRun_Broadcast(t *testing.T) {
 
 	teamName := mw.getTeamName()
 
-	cm := conf
+	cm := newConfigStore(conf)
 	err = cm.AddMember(ctx, teamName, teamMember{Name: "worker1", JoinedAt: time.Now()})
 	assert.NoError(t, err)
 	err = cm.AddMember(ctx, teamName, teamMember{Name: "worker2", JoinedAt: time.Now()})
@@ -305,7 +305,7 @@ func TestSendMessageTool_InvokableRun_ShutdownRequest_Success(t *testing.T) {
 
 	teamName := mw.getTeamName()
 
-	cm := conf
+	cm := newConfigStore(conf)
 	err = cm.AddMember(ctx, teamName, teamMember{Name: "worker", JoinedAt: time.Now()})
 	assert.NoError(t, err)
 
@@ -577,7 +577,7 @@ func TestSendMessageTool_InvokableRun_ShutdownResponse_ByLeader(t *testing.T) {
 
 	teamName := mw.getTeamName()
 
-	cm := conf
+	cm := newConfigStore(conf)
 	err = cm.AddMember(ctx, teamName, teamMember{Name: "worker", JoinedAt: time.Now()})
 	assert.NoError(t, err)
 
@@ -652,7 +652,7 @@ func TestSendMessageTool_InvokableRun_DM_VerifyInboxContent(t *testing.T) {
 
 	teamName := mw.getTeamName()
 
-	cm := conf
+	cm := newConfigStore(conf)
 	err = cm.AddMember(ctx, teamName, teamMember{Name: "worker", JoinedAt: time.Now()})
 	assert.NoError(t, err)
 
@@ -691,7 +691,7 @@ func TestSendMessageTool_InvokableRun_ShutdownRequest_VerifyResult(t *testing.T)
 
 	teamName := mw.getTeamName()
 
-	cm := conf
+	cm := newConfigStore(conf)
 	err = cm.AddMember(ctx, teamName, teamMember{Name: "worker", JoinedAt: time.Now()})
 	assert.NoError(t, err)
 
@@ -748,7 +748,7 @@ func TestSendMessageTool_ValidateRecipient_MemberExists(t *testing.T) {
 	assert.NoError(t, err)
 
 	teamName := mw.getTeamName()
-	cm := conf
+	cm := newConfigStore(conf)
 	err = cm.AddMember(ctx, teamName, teamMember{Name: "worker", JoinedAt: time.Now()})
 	assert.NoError(t, err)
 
@@ -769,7 +769,7 @@ func TestSendMessageTool_InvokableRun_Broadcast_ExcludesSender(t *testing.T) {
 
 	teamName := mw.getTeamName()
 
-	cm := conf
+	cm := newConfigStore(conf)
 	err = cm.AddMember(ctx, teamName, teamMember{Name: "worker", JoinedAt: time.Now()})
 	assert.NoError(t, err)
 
@@ -813,7 +813,7 @@ func TestSendMessageTool_InvokableRun_TeammateAsSender(t *testing.T) {
 
 	teamName := mw.getTeamName()
 
-	cm := conf
+	cm := newConfigStore(conf)
 	err = cm.AddMember(ctx, teamName, teamMember{Name: "worker", JoinedAt: time.Now()})
 	assert.NoError(t, err)
 

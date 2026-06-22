@@ -28,6 +28,20 @@ import (
 )
 
 // Backend extends plantask.Backend with additional methods needed by team operations.
+//
+// Concurrency and durability contract:
+//
+//   - All team state (config.json and per-agent inbox files) is persisted as
+//     whole-file overwrites via Write. The team package serializes access with
+//     in-process locks (a dedicated config RWMutex and per-inbox named locks),
+//     so a single process is safe.
+//   - These locks do NOT span processes. Sharing one BaseDir across multiple
+//     processes is therefore unsupported unless the Backend itself provides
+//     cross-process coordination.
+//   - For crash safety, an implementation's Write SHOULD replace the target file
+//     atomically (e.g. write to a temp file in the same directory, then rename).
+//     Without atomic replacement, a crash mid-write can leave a truncated
+//     config.json or inbox that the team can no longer parse.
 type Backend interface {
 	plantask.Backend
 

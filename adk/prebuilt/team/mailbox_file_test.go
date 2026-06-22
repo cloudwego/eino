@@ -341,7 +341,7 @@ func TestNewMailboxFromConfig(t *testing.T) {
 	ctx := context.Background()
 	teamName := "test-team"
 
-	_, err := conf.CreateTeam(ctx, teamName, "desc", LeaderAgentName, "general-purpose")
+	_, err := newConfigStore(conf).CreateTeam(ctx, teamName, "desc", LeaderAgentName, "general-purpose")
 	assert.NoError(t, err)
 
 	mb := newMailboxFromConfig(conf, teamName, "worker-1")

@@ -99,6 +99,7 @@ func NewRunner(ctx context.Context, conf *RunnerConfig) (*Runner, error) {
 	router := newSourceRouter(LeaderAgentName, conf.logger())
 	pumpMgr := newPumpManager(router, conf.logger())
 	pumpMgr.teamCfg = conf.TeamConfig
+	pumpMgr.store = newConfigStore(conf.TeamConfig)
 
 	// onReminder is bound to this runner's router — not stored on the shared
 	// Config — so parallel runners over the same *Config each get their own
@@ -178,7 +179,7 @@ func newTeammateRunner(conf *RunnerConfig, router *sourceRouter, pumpMgr *pumpMa
 
 	tmMailbox := newMailboxFromConfig(conf.TeamConfig, teamName, agentName)
 
-	mailboxSource := newMailboxMessageSource(tmMailbox, &MailboxSourceConfig{
+	mailboxSource := newMailboxMessageSource(tmMailbox, &mailboxSourceConfig{
 		OwnerName: agentName,
 		Role:      teamRoleTeammate,
 		Logger:    conf.logger(),
@@ -239,9 +240,25 @@ func buildTeamAgent(ctx context.Context, conf *RunnerConfig, teamMW *teamMiddlew
 	return agent, ptMW, nil
 }
 
+// resolveReminderInterval maps a Config.Interval value to the interval passed to
+// plantask.WithReminder. The zero value means "unset" and falls back to the
+// default (10); only an explicitly negative value disables reminders. This
+// prevents the common "Interval left unset" path from silently overwriting
+// plantask's own default with 0 and turning reminders off.
+func resolveReminderInterval(interval int) int {
+	if interval == 0 {
+		return defaultReminderInterval
+	}
+	return interval
+}
+
 // newTeamPlantaskMiddleware creates a plantask middleware configured for team mode.
 // It wires up the task directory resolver, agent name resolver, and task assignment notifier.
 func newTeamPlantaskMiddleware(ctx context.Context, teamCfg *Config, mw *teamMiddleware, onReminder func(ctx context.Context, agentName string, reminderText string)) (adk.ChatModelAgentMiddleware, error) {
+	reminderInterval := resolveReminderInterval(teamCfg.Interval)
+
+	store := newConfigStore(teamCfg)
+
 	return plantask.New(ctx, &plantask.Config{
 		Backend: teamCfg.Backend,
 		BaseDir: teamCfg.BaseDir,
@@ -260,7 +277,7 @@ func newTeamPlantaskMiddleware(ctx context.Context, teamCfg *Config, mw *teamMid
 			if teamName == "" {
 				return nil
 			}
-			exists, err := teamCfg.HasMember(ctx, teamName, owner)
+			exists, err := store.HasMember(ctx, teamName, owner)
 			if err != nil {
 				return fmt.Errorf("check owner %q membership: %w", owner, err)
 			}
@@ -275,7 +292,7 @@ func newTeamPlantaskMiddleware(ctx context.Context, teamCfg *Config, mw *teamMid
 		plantask.WithAgentNameResolver(func(_ context.Context) string {
 			return mw.agentName
 		}),
-		plantask.WithReminder(teamCfg.Interval, func(ctx context.Context, reminderText string) {
+		plantask.WithReminder(reminderInterval, func(ctx context.Context, reminderText string) {
 			if onReminder == nil {
 				return
 			}

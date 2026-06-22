@@ -127,7 +127,7 @@ func TestMakeShutdownResponseHandler(t *testing.T) {
 
 	teamName := mw.getTeamName()
 
-	cm := conf
+	cm := newConfigStore(conf)
 	err = cm.AddMember(ctx, teamName, teamMember{Name: "worker", JoinedAt: time.Now()})
 	assert.NoError(t, err)
 

@@ -103,7 +103,7 @@ func TestTeamDeleteTool_InvokableRun_NoRunningGoroutinesAllowed(t *testing.T) {
 	// Add a member in config but do NOT register it in the registry.
 	// This simulates a teammate that has already been shut down (goroutine exited)
 	// but its config entry was not yet cleaned up.
-	cm := conf
+	cm := newConfigStore(conf)
 	err = cm.AddMember(ctx, mw.getTeamName(), teamMember{Name: "worker", JoinedAt: time.Now()})
 	assert.NoError(t, err)
 

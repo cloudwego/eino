@@ -15,7 +15,7 @@
  */
 
 // message_source.go adapts the mailbox into a TurnInput producer.
-// MailboxMessageSource reads inbox messages, handles control-message filtering
+// mailboxMessageSource reads inbox messages, handles control-message filtering
 // (shutdown response, teammate terminated), and builds TurnInput items.
 
 package team
@@ -28,8 +28,8 @@ import (
 	"github.com/google/uuid"
 )
 
-// MailboxSourceConfig configures the MailboxMessageSource behavior.
-type MailboxSourceConfig struct {
+// mailboxSourceConfig configures the mailboxMessageSource behavior.
+type mailboxSourceConfig struct {
 	// OwnerName is the name of the agent that owns this mailbox.
 	// Used to set TargetAgent in TurnInput.
 	OwnerName string
@@ -53,18 +53,18 @@ type MailboxSourceConfig struct {
 	Logger Logger
 }
 
-// MailboxMessageSource reads messages from a FileMailbox and produces TurnInput items.
-type MailboxMessageSource struct {
+// mailboxMessageSource reads messages from a FileMailbox and produces TurnInput items.
+type mailboxMessageSource struct {
 	mailbox *mailbox
-	conf    *MailboxSourceConfig
+	conf    *mailboxSourceConfig
 
 	processedCount         int
 	lastIdleProcessedCount int
 }
 
-// newMailboxMessageSource creates a new MailboxMessageSource.
-func newMailboxMessageSource(mailbox *mailbox, conf *MailboxSourceConfig) *MailboxMessageSource {
-	return &MailboxMessageSource{
+// newMailboxMessageSource creates a new mailboxMessageSource.
+func newMailboxMessageSource(mailbox *mailbox, conf *mailboxSourceConfig) *mailboxMessageSource {
+	return &mailboxMessageSource{
 		mailbox: mailbox,
 		conf:    conf,
 	}
@@ -72,7 +72,7 @@ func newMailboxMessageSource(mailbox *mailbox, conf *MailboxSourceConfig) *Mailb
 
 // tryReceive is a non-blocking read from the mailbox.
 // Returns (item, true) if there are unread messages, or (empty, false) if none.
-func (s *MailboxMessageSource) tryReceive(ctx context.Context, notifyIdle bool) (TurnInput, bool, error) {
+func (s *mailboxMessageSource) tryReceive(ctx context.Context, notifyIdle bool) (TurnInput, bool, error) {
 	if s.mailbox == nil {
 		return TurnInput{}, false, nil
 	}
@@ -84,7 +84,7 @@ func (s *MailboxMessageSource) tryReceive(ctx context.Context, notifyIdle bool) 
 	if len(msgs) == 0 {
 		if notifyIdle && s.conf.Role == teamRoleTeammate && s.processedCount > s.lastIdleProcessedCount {
 			s.lastIdleProcessedCount = s.processedCount
-			if err := sendIdleNotification(ctx, s.mailbox, s.conf.OwnerName, "available"); err != nil && s.conf.Logger != nil {
+			if err := sendIdleNotification(ctx, s.mailbox, s.conf.OwnerName, idleStatusAvailable); err != nil && s.conf.Logger != nil {
 				s.conf.Logger.Printf("sendIdleNotification[%s]: %v", s.conf.OwnerName, err)
 			}
 		}
@@ -95,7 +95,7 @@ func (s *MailboxMessageSource) tryReceive(ctx context.Context, notifyIdle bool) 
 }
 
 // waitForItem blocks until a message is available in the mailbox, then returns it.
-func (s *MailboxMessageSource) waitForItem(ctx context.Context) (TurnInput, error) {
+func (s *mailboxMessageSource) waitForItem(ctx context.Context) (TurnInput, error) {
 	empty := TurnInput{}
 
 	if s.mailbox == nil {
@@ -136,22 +136,30 @@ func (s *MailboxMessageSource) waitForItem(ctx context.Context) (TurnInput, erro
 	}
 }
 
-func (s *MailboxMessageSource) consumeMessages(ctx context.Context, msgs []InboxMessage) (TurnInput, bool, error) {
+func (s *mailboxMessageSource) consumeMessages(ctx context.Context, msgs []InboxMessage) (TurnInput, bool, error) {
 	if len(msgs) == 0 {
 		return TurnInput{}, false, nil
 	}
 
 	original := msgs
-	var err error
-	msgs, err = s.handleLeaderControlMessages(ctx, msgs)
-	if err != nil {
-		return TurnInput{}, false, err
-	}
 
+	// Mark the snapshot read BEFORE running control-message side effects.
+	// handleLeaderControlMessages can trigger irreversible actions (e.g.
+	// OnShutdownResponse → removeTeammate, which unassigns tasks and removes the
+	// member from config). If MarkRead ran afterwards and failed, the same
+	// shutdown_response would be observed again on the next poll and the side
+	// effects would run a second time. Consuming the messages first makes a
+	// failed control-message handler the only retry surface; the underlying
+	// teardown is additionally guarded by idempotent firstStop checks.
 	if err := s.mailbox.MarkRead(ctx, original); err != nil {
 		return TurnInput{}, false, err
 	}
 	s.processedCount += len(original)
+
+	msgs, err := s.handleLeaderControlMessages(ctx, msgs)
+	if err != nil {
+		return TurnInput{}, false, err
+	}
 
 	if len(msgs) == 0 {
 		return TurnInput{}, false, nil
@@ -160,7 +168,7 @@ func (s *MailboxMessageSource) consumeMessages(ctx context.Context, msgs []Inbox
 	return s.buildTurnInput(msgs), true, nil
 }
 
-func (s *MailboxMessageSource) handleLeaderControlMessages(ctx context.Context, msgs []InboxMessage) ([]InboxMessage, error) {
+func (s *mailboxMessageSource) handleLeaderControlMessages(ctx context.Context, msgs []InboxMessage) ([]InboxMessage, error) {
 	if s.conf.Role != teamRoleLeader {
 		return msgs, nil
 	}
@@ -229,13 +237,13 @@ func buildTeammateTerminatedSystemMessage(notifyMsg string) (InboxMessage, error
 	}
 	return InboxMessage{
 		ID:        uuid.New().String(),
-		From:      "system",
+		From:      systemSender,
 		Text:      text,
 		Timestamp: utcNowMillis(),
 	}, nil
 }
 
-func (s *MailboxMessageSource) buildTurnInput(msgs []InboxMessage) TurnInput {
+func (s *mailboxMessageSource) buildTurnInput(msgs []InboxMessage) TurnInput {
 	return TurnInput{
 		TargetAgent: s.conf.OwnerName,
 		Messages:    inboxMessagesToStrings(msgs),

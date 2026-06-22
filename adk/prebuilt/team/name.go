@@ -66,8 +66,8 @@ func validateName(kind, name string) error {
 	if name == "." || name == ".." {
 		return fmt.Errorf("%s %q is reserved and cannot be used", kind, name)
 	}
-	if strings.Contains(name, "*") {
-		return fmt.Errorf("%s %q must not contain '*' (reserved for broadcast)", kind, name)
+	if strings.Contains(name, broadcastTarget) {
+		return fmt.Errorf("%s %q must not contain %q (reserved for broadcast)", kind, name, broadcastTarget)
 	}
 	for i, r := range name {
 		if i == 0 {

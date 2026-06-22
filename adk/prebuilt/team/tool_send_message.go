@@ -22,9 +22,9 @@ package team
 import (
 	"context"
 	"fmt"
-	"time"
 
 	"github.com/bytedance/sonic"
+	"github.com/google/uuid"
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/components/tool"
@@ -168,12 +168,12 @@ func (t *sendMessageTool) validateArgs(msgType messageType, args *sendMessageArg
 
 func (t *sendMessageTool) validateRecipient(ctx context.Context, teamName string, msgType messageType, to string) error {
 	// Broadcast or empty recipient: no single-recipient validation needed.
-	if to == "" || to == "*" {
+	if to == "" || to == broadcastTarget {
 		return nil
 	}
 
 	// All point-to-point message types require recipient membership validation.
-	// Broadcast is already handled above (to == "*").
+	// Broadcast is already handled above (to == broadcastTarget).
 	exists, err := t.mw.lifecycle.hasMember(ctx, teamName, to)
 	if err != nil {
 		return fmt.Errorf("check recipient %q: %w", to, err)
@@ -188,7 +188,7 @@ func (t *sendMessageTool) validateRecipient(ctx context.Context, teamName string
 func (t *sendMessageTool) resolveRecipient(msgType messageType, args *sendMessageArgs) (string, error) {
 	switch msgType {
 	case messageTypeBroadcast:
-		return "*", nil
+		return broadcastTarget, nil
 	case messageTypeShutdownResponse:
 		if args.Recipient == "" {
 			return LeaderAgentName, nil
@@ -233,9 +233,11 @@ func (t *sendMessageTool) buildOutboxMessage(msgType messageType, to string, app
 	return msg, nil
 }
 
-// shutdownRequestID generates a unique ID for a shutdown request.
+// shutdownRequestID generates a unique ID for a shutdown request. A UUID is used
+// (rather than a timestamp) so two shutdown requests to the same target can never
+// collide, even within the same nanosecond.
 func (t *sendMessageTool) shutdownRequestID(to string) string {
-	return fmt.Sprintf("shutdown-%d@%s", time.Now().UnixNano(), to)
+	return fmt.Sprintf("shutdown-%s@%s", uuid.New().String(), to)
 }
 
 // buildResult constructs the response map for the tool invocation.
@@ -248,7 +250,7 @@ func (t *sendMessageTool) buildResult(msgType messageType, to string, approved b
 		result["routing"] = t.buildRoutingResult(to, args)
 	case messageTypeBroadcast:
 		result["message"] = "Message broadcast to all teammates"
-		result["routing"] = t.buildRoutingResult("*", args)
+		result["routing"] = t.buildRoutingResult(broadcastTarget, args)
 	case messageTypeShutdownRequest:
 		result["message"] = fmt.Sprintf("Shutdown request sent to %s. Request ID: %s", to, msg.RequestID)
 		result["request_id"] = msg.RequestID
@@ -276,7 +278,7 @@ func buildApprovalResultMessage(msgType messageType, to string, approved bool) s
 }
 
 func (t *sendMessageTool) buildRoutingResult(target string, args *sendMessageArgs) map[string]any {
-	if target != "*" {
+	if target != broadcastTarget {
 		target = "@" + target
 	}
 

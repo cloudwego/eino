@@ -45,7 +45,7 @@ func TestNewMailboxMessageSource(t *testing.T) {
 		},
 	}
 
-	conf := &MailboxSourceConfig{
+	conf := &mailboxSourceConfig{
 		OwnerName: "agent1",
 		Role:      teamRoleTeammate,
 	}
@@ -59,7 +59,7 @@ func TestNewMailboxMessageSource(t *testing.T) {
 }
 
 func TestTryReceive_NilMailbox(t *testing.T) {
-	src := newMailboxMessageSource(nil, &MailboxSourceConfig{
+	src := newMailboxMessageSource(nil, &mailboxSourceConfig{
 		OwnerName: "agent1",
 		Role:      teamRoleTeammate,
 	})
@@ -90,7 +90,7 @@ func TestTryReceive_NoMessages(t *testing.T) {
 	inboxPath := filepath.Join("/tmp/test", "teams", "myteam", "inboxes", "agent1.json")
 	backend.files[inboxPath] = "[]"
 
-	src := newMailboxMessageSource(mb, &MailboxSourceConfig{
+	src := newMailboxMessageSource(mb, &mailboxSourceConfig{
 		OwnerName: "agent1",
 		Role:      teamRoleTeammate,
 	})
@@ -124,7 +124,7 @@ func TestTryReceive_WithMessages(t *testing.T) {
 	})
 	backend.files[inboxPath] = msgJSON
 
-	src := newMailboxMessageSource(mb, &MailboxSourceConfig{
+	src := newMailboxMessageSource(mb, &mailboxSourceConfig{
 		OwnerName: "agent1",
 		Role:      teamRoleTeammate,
 	})
@@ -158,7 +158,7 @@ func TestTryReceive_SendsIdleNotificationForTeammate(t *testing.T) {
 	leaderInboxPath := filepath.Join("/tmp/test", "teams", "myteam", "inboxes", "team-lead.json")
 	backend.files[leaderInboxPath] = "[]"
 
-	src := newMailboxMessageSource(mb, &MailboxSourceConfig{
+	src := newMailboxMessageSource(mb, &mailboxSourceConfig{
 		OwnerName: "agent1",
 		Role:      teamRoleTeammate,
 	})
@@ -213,7 +213,7 @@ func TestTryReceive_DoesNotSendIdleForLeader(t *testing.T) {
 		},
 	}
 
-	src := newMailboxMessageSource(mb, &MailboxSourceConfig{
+	src := newMailboxMessageSource(mb, &mailboxSourceConfig{
 		OwnerName: "team-lead",
 		Role:      teamRoleLeader,
 	})
@@ -265,7 +265,7 @@ func TestConsumeMessages_EmptyMsgs(t *testing.T) {
 		},
 	}
 
-	src := newMailboxMessageSource(mb, &MailboxSourceConfig{
+	src := newMailboxMessageSource(mb, &mailboxSourceConfig{
 		OwnerName: "agent1",
 		Role:      teamRoleTeammate,
 	})
@@ -303,7 +303,7 @@ func TestConsumeMessages_MarksMessagesAsRead(t *testing.T) {
 	allMsgsJSON, _ := sonic.MarshalString(msgs)
 	backend.files[inboxPath] = allMsgsJSON
 
-	src := newMailboxMessageSource(mb, &MailboxSourceConfig{
+	src := newMailboxMessageSource(mb, &mailboxSourceConfig{
 		OwnerName: "agent1",
 		Role:      teamRoleTeammate,
 	})
@@ -337,7 +337,7 @@ func TestHandleLeaderControlMessages_NonLeader(t *testing.T) {
 		},
 	}
 
-	src := newMailboxMessageSource(mb, &MailboxSourceConfig{
+	src := newMailboxMessageSource(mb, &mailboxSourceConfig{
 		OwnerName: "agent1",
 		Role:      teamRoleTeammate,
 	})
@@ -370,7 +370,7 @@ func TestHandleLeaderControlMessages_InterceptsShutdownResponse(t *testing.T) {
 	}
 
 	var calledWith string
-	src := newMailboxMessageSource(mb, &MailboxSourceConfig{
+	src := newMailboxMessageSource(mb, &mailboxSourceConfig{
 		OwnerName: "team-lead",
 		Role:      teamRoleLeader,
 		OnShutdownResponse: func(ctx context.Context, fromName string) (string, error) {
@@ -409,7 +409,7 @@ func TestHandleLeaderControlMessages_ShutdownResponseFalseNotIntercepted(t *test
 	}
 
 	called := false
-	src := newMailboxMessageSource(mb, &MailboxSourceConfig{
+	src := newMailboxMessageSource(mb, &mailboxSourceConfig{
 		OwnerName: "team-lead",
 		Role:      teamRoleLeader,
 		OnShutdownResponse: func(ctx context.Context, fromName string) (string, error) {
@@ -446,7 +446,7 @@ func TestHandleLeaderControlMessages_NonShutdownPassesThrough(t *testing.T) {
 	}
 
 	called := false
-	src := newMailboxMessageSource(mb, &MailboxSourceConfig{
+	src := newMailboxMessageSource(mb, &mailboxSourceConfig{
 		OwnerName: "team-lead",
 		Role:      teamRoleLeader,
 		OnShutdownResponse: func(ctx context.Context, fromName string) (string, error) {
@@ -482,7 +482,7 @@ func TestHandleLeaderControlMessages_IdleNotificationPassedThrough(t *testing.T)
 		},
 	}
 
-	src := newMailboxMessageSource(mb, &MailboxSourceConfig{
+	src := newMailboxMessageSource(mb, &mailboxSourceConfig{
 		OwnerName: "team-lead",
 		Role:      teamRoleLeader,
 	})
@@ -532,7 +532,7 @@ func TestInboxMessagesToStrings_EmptySlice(t *testing.T) {
 }
 
 func TestWaitForItem_NilMailbox(t *testing.T) {
-	src := newMailboxMessageSource(nil, &MailboxSourceConfig{
+	src := newMailboxMessageSource(nil, &mailboxSourceConfig{
 		OwnerName: "agent1",
 		Role:      teamRoleTeammate,
 	})
@@ -562,7 +562,7 @@ func TestWaitForItem_LeaderExitWhenNoActiveTeammates(t *testing.T) {
 	inboxPath := filepath.Join("/tmp/test", "teams", "myteam", "inboxes", "team-lead.json")
 	backend.files[inboxPath] = "[]"
 
-	src := newMailboxMessageSource(mb, &MailboxSourceConfig{
+	src := newMailboxMessageSource(mb, &mailboxSourceConfig{
 		OwnerName:           "team-lead",
 		Role:                teamRoleLeader,
 		ExitWhenNoTeammates: true,
@@ -599,7 +599,7 @@ func TestWaitForItem_LeaderHasActiveTeammatesError(t *testing.T) {
 	inboxPath := filepath.Join("/tmp/test", "teams", "myteam", "inboxes", "team-lead.json")
 	backend.files[inboxPath] = "[]"
 
-	src := newMailboxMessageSource(mb, &MailboxSourceConfig{
+	src := newMailboxMessageSource(mb, &mailboxSourceConfig{
 		OwnerName:           "team-lead",
 		Role:                teamRoleLeader,
 		ExitWhenNoTeammates: true,
@@ -643,7 +643,7 @@ func TestWaitForItem_LeaderWithActiveTeammatesReceivesMessages(t *testing.T) {
 		_ = backend.Write(context.Background(), &WriteRequest{FilePath: inboxPath, Content: msgJSON})
 	}()
 
-	src := newMailboxMessageSource(mb, &MailboxSourceConfig{
+	src := newMailboxMessageSource(mb, &mailboxSourceConfig{
 		OwnerName:           "team-lead",
 		Role:                teamRoleLeader,
 		ExitWhenNoTeammates: true,
@@ -687,7 +687,7 @@ func TestWaitForItem_TeammateReceivesMessages(t *testing.T) {
 		_ = backend.Write(context.Background(), &WriteRequest{FilePath: inboxPath, Content: msgJSON})
 	}()
 
-	src := newMailboxMessageSource(mb, &MailboxSourceConfig{
+	src := newMailboxMessageSource(mb, &mailboxSourceConfig{
 		OwnerName: "worker",
 		Role:      teamRoleTeammate,
 	})
@@ -718,7 +718,7 @@ func TestConsumeMessages_MarkReadError(t *testing.T) {
 		},
 	}
 
-	src := newMailboxMessageSource(mb, &MailboxSourceConfig{
+	src := newMailboxMessageSource(mb, &mailboxSourceConfig{
 		OwnerName: "agent1",
 		Role:      teamRoleTeammate,
 	})
@@ -738,4 +738,50 @@ func TestBuildTeammateTerminatedSystemMessage_Valid(t *testing.T) {
 	assert.Equal(t, "system", msg.From)
 	assert.Contains(t, msg.Text, "teammate_terminated")
 	assert.Contains(t, msg.Text, "worker has shut down.")
+}
+
+// TestConsumeMessages_MarksReadBeforeSideEffects guards the ordering fix: the
+// inbox snapshot must be marked read before control-message side effects (like
+// OnShutdownResponse) run, so a side effect can never be replayed if it fails
+// after the messages were already acted upon.
+func TestConsumeMessages_MarksReadBeforeSideEffects(t *testing.T) {
+	backend := newInMemoryBackend()
+	locks := newNamedLockManager()
+	mb := &mailbox{
+		conf: &mailboxConfig{
+			Backend:      backend,
+			BaseDir:      "/tmp/test",
+			TeamName:     "myteam",
+			OwnerName:    "team-lead",
+			PollInterval: 10 * time.Millisecond,
+		},
+		inboxLocks: locks,
+		listMembers: func(ctx context.Context) ([]string, error) {
+			return []string{"team-lead", "agent1"}, nil
+		},
+	}
+
+	approvalJSON, _ := marshalShutdownResponse("agent1", "req-1", true, "done")
+	msgs := []InboxMessage{
+		{ID: "m1", From: "agent1", Text: approvalJSON, Timestamp: utcNowMillis()},
+	}
+	inboxPath := filepath.Join("/tmp/test", "teams", "myteam", "inboxes", "team-lead.json")
+	allMsgsJSON, _ := sonic.MarshalString(msgs)
+	backend.files[inboxPath] = allMsgsJSON
+
+	var unreadAtCallback int
+	src := newMailboxMessageSource(mb, &mailboxSourceConfig{
+		OwnerName: "team-lead",
+		Role:      teamRoleLeader,
+		OnShutdownResponse: func(ctx context.Context, fromName string) (string, error) {
+			unread, _ := mb.ReadUnread(ctx)
+			unreadAtCallback = len(unread)
+			return fromName + " has shut down.", nil
+		},
+	})
+
+	_, ok, err := src.consumeMessages(context.Background(), msgs)
+	assert.NoError(t, err)
+	assert.True(t, ok)
+	assert.Equal(t, 0, unreadAtCallback, "inbox should be marked read before OnShutdownResponse runs")
 }
