@@ -84,10 +84,6 @@ const (
 	// defaultPollInterval is the fallback polling interval for mailbox reads.
 	defaultPollInterval = 500 * time.Millisecond
 
-	// defaultReminderInterval is the number of assistant turns between task
-	// reminders used when Config.Interval is left unset (the zero value).
-	defaultReminderInterval = 10
-
 	// broadcastTarget is the wildcard recipient that fans a message out to every
 	// other member of the team.
 	broadcastTarget = "*"

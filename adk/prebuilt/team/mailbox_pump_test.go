@@ -843,3 +843,140 @@ func TestRunPump_RejectedPushKeepsTeammateMessageUnread(t *testing.T) {
 	assert.Len(t, unread, 1)
 	assert.Equal(t, "m1", unread[0].ID)
 }
+
+// TestRunPump_AbnormalExitStopsTeammateLoop guards the zombie-teammate fix: when
+// a teammate pump exits abnormally while its ctx is still live (here a backend
+// read that returns invalid JSON, so tryReceive errors), StartPump must stop the
+// owning TurnLoop. Otherwise the loop owner blocks in runner.Wait forever with no
+// pump draining its inbox, and the deferred cleanupExitedTeammate never runs.
+func TestRunPump_AbnormalExitStopsTeammateLoop(t *testing.T) {
+	backend := newInMemoryBackend()
+	locks := newNamedLockManager()
+	logger := nopLogger{}
+	router := newSourceRouter(LeaderAgentName, logger)
+
+	loop := adk.NewTurnLoop(adk.TurnLoopConfig[TurnInput, adk.Message]{
+		GenInput: func(ctx context.Context, l *adk.TurnLoop[TurnInput, adk.Message], items []TurnInput) (*adk.GenInputResult[TurnInput, adk.Message], error) {
+			return &adk.GenInputResult[TurnInput, adk.Message]{Consumed: items}, nil
+		},
+		PrepareAgent: func(ctx context.Context, l *adk.TurnLoop[TurnInput, adk.Message], items []TurnInput) (adk.Agent, error) {
+			return nil, errors.New("not used")
+		},
+	})
+	router.RegisterLoop("worker", loop)
+
+	mb := &mailbox{
+		conf: &mailboxConfig{
+			Backend:      backend,
+			BaseDir:      "/tmp/test",
+			TeamName:     "myteam",
+			OwnerName:    "worker",
+			PollInterval: 5 * time.Millisecond,
+		},
+		inboxLocks: locks,
+		listMembers: func(ctx context.Context) ([]string, error) {
+			return []string{"team-lead", "worker"}, nil
+		},
+	}
+
+	// Invalid JSON makes tryReceive error, forcing an abnormal pump exit.
+	inboxPath := inboxFilePath("/tmp/test", "myteam", "worker")
+	_ = backend.Write(context.Background(), &WriteRequest{FilePath: inboxPath, Content: "INVALID_JSON"})
+
+	ms := newMailboxMessageSource(mb, &mailboxSourceConfig{
+		OwnerName: "worker",
+		Role:      teamRoleTeammate,
+	})
+
+	pm := newPumpManager(router, logger)
+	pm.SetMailbox("worker", ms)
+
+	// The loop owner blocks in Wait until the pump's abnormal exit stops the loop.
+	loop.Run(context.Background())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	pm.StartPump(ctx, "worker")
+
+	done := make(chan struct{})
+	go func() {
+		loop.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("teammate loop was not stopped after abnormal pump exit (zombie teammate)")
+	}
+}
+
+// TestRunPump_AbnormalExitDoesNotStopLeaderLoop verifies the leader exemption:
+// a leader pump error is logged but must NOT stop the host-owned leader loop,
+// which is driven by the host and torn down via cleanupLeaderMailbox.
+func TestRunPump_AbnormalExitDoesNotStopLeaderLoop(t *testing.T) {
+	backend := newInMemoryBackend()
+	locks := newNamedLockManager()
+	logger := nopLogger{}
+	router := newSourceRouter(LeaderAgentName, logger)
+
+	loop := adk.NewTurnLoop(adk.TurnLoopConfig[TurnInput, adk.Message]{
+		GenInput: func(ctx context.Context, l *adk.TurnLoop[TurnInput, adk.Message], items []TurnInput) (*adk.GenInputResult[TurnInput, adk.Message], error) {
+			return &adk.GenInputResult[TurnInput, adk.Message]{Consumed: items}, nil
+		},
+		PrepareAgent: func(ctx context.Context, l *adk.TurnLoop[TurnInput, adk.Message], items []TurnInput) (adk.Agent, error) {
+			return nil, errors.New("not used")
+		},
+	})
+	router.RegisterLoop(LeaderAgentName, loop)
+
+	mb := &mailbox{
+		conf: &mailboxConfig{
+			Backend:      backend,
+			BaseDir:      "/tmp/test",
+			TeamName:     "myteam",
+			OwnerName:    LeaderAgentName,
+			PollInterval: 5 * time.Millisecond,
+		},
+		inboxLocks: locks,
+		listMembers: func(ctx context.Context) ([]string, error) {
+			return []string{LeaderAgentName, "worker"}, nil
+		},
+	}
+
+	leaderInboxPath := inboxFilePath("/tmp/test", "myteam", LeaderAgentName)
+	_ = backend.Write(context.Background(), &WriteRequest{FilePath: leaderInboxPath, Content: "INVALID_JSON"})
+
+	ms := newMailboxMessageSource(mb, &mailboxSourceConfig{
+		OwnerName: LeaderAgentName,
+		Role:      teamRoleLeader,
+	})
+
+	pm := newPumpManager(router, logger)
+	pm.SetMailbox(LeaderAgentName, ms)
+
+	loop.Run(context.Background())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	pm.StartPump(ctx, LeaderAgentName)
+
+	// Give the pump time to hit the error and exit. The leader loop must remain
+	// running (the host owns its lifecycle), so Wait must NOT return on its own.
+	done := make(chan struct{})
+	go func() {
+		loop.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		t.Fatal("leader loop was stopped by an abnormal pump exit; it must be left to the host")
+	case <-time.After(200 * time.Millisecond):
+		// Expected: leader loop still running.
+	}
+
+	// Host-driven teardown still works.
+	loop.Stop()
+	<-done
+}

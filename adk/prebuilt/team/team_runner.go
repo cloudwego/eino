@@ -106,10 +106,15 @@ func NewRunner(ctx context.Context, conf *RunnerConfig) (*Runner, error) {
 	// Config — so parallel runners over the same *Config each get their own
 	// callback and never overwrite each other.
 	onReminder := func(_ context.Context, agentName string, reminderText string) {
-		router.Push(TurnInput{
+		// A dropped push (the target loop is being torn down) is not fatal, but
+		// log it so a lost reminder is observable — mirroring the same
+		// accepted-check convention used by notifyLeaderTeammateTerminated.
+		if accepted, _ := router.Push(TurnInput{
 			TargetAgent: agentName,
 			Messages:    []string{reminderText},
-		})
+		}); !accepted {
+			conf.logger().Printf("onReminder: loop for %q unavailable, dropped reminder", agentName)
+		}
 	}
 
 	leaderMW := newTeamLeadMiddleware(conf, router, pumpMgr)
@@ -252,13 +257,15 @@ func buildTeamAgent(ctx context.Context, conf *RunnerConfig, teamMW *teamMiddlew
 }
 
 // resolveReminderInterval maps a Config.Interval value to the interval passed to
-// plantask.WithReminder. The zero value means "unset" and falls back to the
-// default (10); only an explicitly negative value disables reminders. This
-// prevents the common "Interval left unset" path from silently overwriting
-// plantask's own default with 0 and turning reminders off.
+// plantask.WithReminder. The zero value means "unset" and falls back to
+// plantask's own default; only an explicitly negative value disables reminders.
+// Reusing plantask.DefaultReminderInterval (rather than a local copy) keeps the
+// team default in lockstep with plantask's, so the "Interval left unset" path
+// never silently overwrites plantask's default with a stale duplicate value or
+// with 0 (which would turn reminders off).
 func resolveReminderInterval(interval int) int {
 	if interval == 0 {
-		return defaultReminderInterval
+		return plantask.DefaultReminderInterval
 	}
 	return interval
 }
