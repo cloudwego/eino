@@ -265,3 +265,100 @@ func TestSendIdleNotification_VerifyPayload(t *testing.T) {
 	assert.Equal(t, agentName, payload.From)
 	assert.Equal(t, "idle", payload.IdleReason)
 }
+
+func TestRenderProtocolText_PlainContentPassthrough(t *testing.T) {
+	// Non-JSON plain text is returned unchanged.
+	assert.Equal(t, "just some text", renderProtocolText("just some text"))
+	// Valid JSON without a recognized type falls back to the original text.
+	assert.Equal(t, `{"foo":"bar"}`, renderProtocolText(`{"foo":"bar"}`))
+}
+
+func TestRenderProtocolText_IdleNotification(t *testing.T) {
+	text, err := json.Marshal(idleNotificationPayload{
+		protocolHeader: newProtocolHeader(messageTypeIdleNotification, "worker", ""),
+		IdleReason:     "available",
+	})
+	assert.NoError(t, err)
+
+	rendered := renderProtocolText(string(text))
+	assert.NotContains(t, rendered, "idle_notification")
+	assert.NotContains(t, rendered, "{")
+	assert.Contains(t, rendered, "idle")
+	assert.Contains(t, rendered, "available")
+}
+
+func TestRenderProtocolText_TaskAssignment(t *testing.T) {
+	text, err := json.Marshal(taskAssignmentPayload{
+		protocolHeader: newProtocolHeader(messageTypeTaskAssignment, "", ""),
+		TaskID:         "42",
+		Subject:        "Write the report",
+		Description:    "Cover Q3 metrics",
+		AssignedBy:     "lead",
+	})
+	assert.NoError(t, err)
+
+	rendered := renderProtocolText(string(text))
+	assert.NotContains(t, rendered, "task_assignment")
+	assert.NotContains(t, rendered, "{")
+	assert.Contains(t, rendered, "#42")
+	assert.Contains(t, rendered, "Write the report")
+	assert.Contains(t, rendered, "Cover Q3 metrics")
+	assert.Contains(t, rendered, "lead")
+}
+
+func TestRenderProtocolText_TeammateTerminated(t *testing.T) {
+	text, err := json.Marshal(teammateTerminatedPayload{
+		protocolHeader: newProtocolHeader(messageTypeTeammateTerminated, "", ""),
+		Message:        "worker has shut down.",
+	})
+	assert.NoError(t, err)
+
+	rendered := renderProtocolText(string(text))
+	assert.Equal(t, "worker has shut down.", rendered)
+}
+
+func TestRenderProtocolText_ShutdownRequest(t *testing.T) {
+	text, err := marshalShutdownRequest("lead", "req-1", "wrap it up")
+	assert.NoError(t, err)
+
+	rendered := renderProtocolText(text)
+	assert.NotContains(t, rendered, "shutdown_request")
+	assert.NotContains(t, rendered, "{")
+	assert.Contains(t, rendered, "shut down")
+	assert.Contains(t, rendered, "wrap it up")
+}
+
+func TestRenderProtocolText_ShutdownResponse(t *testing.T) {
+	approved, err := marshalShutdownResponse("worker", "req-1", true, "")
+	assert.NoError(t, err)
+	rendered := renderProtocolText(approved)
+	assert.NotContains(t, rendered, "shutdown_response")
+	assert.Contains(t, rendered, "approved")
+
+	rejected, err := marshalShutdownResponse("worker", "req-1", false, "still busy")
+	assert.NoError(t, err)
+	rendered = renderProtocolText(rejected)
+	assert.Contains(t, rendered, "rejected")
+	assert.Contains(t, rendered, "still busy")
+}
+
+func TestInboxMessagesToStrings_RendersControlPayload(t *testing.T) {
+	idleJSON, err := json.Marshal(idleNotificationPayload{
+		protocolHeader: newProtocolHeader(messageTypeIdleNotification, "worker", ""),
+		IdleReason:     "available",
+	})
+	assert.NoError(t, err)
+
+	rendered := inboxMessagesToStrings([]inboxMessage{
+		{From: "worker", Text: string(idleJSON)},
+		{From: "worker", Text: "plain hello"},
+	})
+	assert.Len(t, rendered, 2)
+	// Control payload is rendered to natural language inside the envelope; the
+	// raw JSON type string no longer leaks to the model.
+	assert.Contains(t, rendered[0], "<teammate-message")
+	assert.NotContains(t, rendered[0], "idle_notification")
+	assert.Contains(t, rendered[0], "idle")
+	// Plain content passes through untouched.
+	assert.Contains(t, rendered[1], "plain hello")
+}

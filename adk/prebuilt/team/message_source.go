@@ -280,7 +280,10 @@ func inboxMessagesToStrings(msgs []inboxMessage) []string {
 		if m.Text == "" {
 			continue
 		}
-		result = append(result, formatTeammateMessageEnvelope(m.From, m.Text, m.Summary))
+		// Control/system payloads are stored as JSON on the wire; render them to a
+		// short natural-language sentence before the model sees them. Plain DM and
+		// broadcast content is returned unchanged by renderProtocolText.
+		result = append(result, formatTeammateMessageEnvelope(m.From, renderProtocolText(m.Text), m.Summary))
 	}
 	return result
 }

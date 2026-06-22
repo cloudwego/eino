@@ -319,7 +319,7 @@ func (lm *lifecycleManager) notifyLeaderTeammateTerminated(ctx context.Context, 
 	}
 	item := TurnInput{
 		TargetAgent: LeaderAgentName,
-		Messages:    []string{formatTeammateMessageEnvelope(sysMsg.From, sysMsg.Text, sysMsg.Summary)},
+		Messages:    []string{formatTeammateMessageEnvelope(sysMsg.From, renderProtocolText(sysMsg.Text), sysMsg.Summary)},
 	}
 	// A dropped push (leader loop already unregistered during teardown) is not
 	// fatal, but log it so the lost termination notice is not invisible.

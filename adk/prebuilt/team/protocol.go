@@ -184,6 +184,94 @@ func sanitizeEnvelopeText(text string) string {
 	return strings.ReplaceAll(text, "</teammate-message>", "&lt;/teammate-message&gt;")
 }
 
+// renderProtocolText converts a wire-level message body into the text the model
+// actually sees. Plain DM/broadcast content is passed through unchanged; control
+// and system payloads (which are stored as JSON on the wire) are rendered to a
+// short natural-language sentence so the model reads "Worker is now idle" instead
+// of raw {"type":"idle_notification",...}. An unrecognized or non-JSON body falls
+// back to the original text, so this is safe for arbitrary user content.
+func renderProtocolText(text string) string {
+	var header protocolHeader
+	if err := sonic.UnmarshalString(text, &header); err != nil {
+		return text
+	}
+
+	switch messageType(header.Type) {
+	case messageTypeIdleNotification:
+		var p idleNotificationPayload
+		if err := sonic.UnmarshalString(text, &p); err != nil {
+			return text
+		}
+		if p.IdleReason != "" {
+			return fmt.Sprintf("is now idle (%s) and available for new work.", p.IdleReason)
+		}
+		return "is now idle and available for new work."
+
+	case messageTypeTaskAssignment:
+		var p taskAssignmentPayload
+		if err := sonic.UnmarshalString(text, &p); err != nil {
+			return text
+		}
+		var sb strings.Builder
+		sb.WriteString("You have been assigned task #")
+		sb.WriteString(p.TaskID)
+		if p.Subject != "" {
+			sb.WriteString(": ")
+			sb.WriteString(p.Subject)
+		}
+		if p.AssignedBy != "" {
+			sb.WriteString(" (assigned by ")
+			sb.WriteString(p.AssignedBy)
+			sb.WriteString(")")
+		}
+		sb.WriteString(".")
+		if p.Description != "" {
+			sb.WriteString("\n")
+			sb.WriteString(p.Description)
+		}
+		return sb.String()
+
+	case messageTypeTeammateTerminated:
+		var p teammateTerminatedPayload
+		if err := sonic.UnmarshalString(text, &p); err != nil {
+			return text
+		}
+		// Message is already a human-readable sentence built by
+		// buildTeammateTerminationMessage; surface it directly.
+		if p.Message != "" {
+			return p.Message
+		}
+		return text
+
+	case messageTypeShutdownRequest:
+		var p shutdownRequestPayload
+		if err := sonic.UnmarshalString(text, &p); err != nil {
+			return text
+		}
+		if p.Reason != "" {
+			return fmt.Sprintf("requests that you shut down. Reason: %s", p.Reason)
+		}
+		return "requests that you shut down."
+
+	case messageTypeShutdownResponse:
+		var p shutdownResponsePayload
+		if err := sonic.UnmarshalString(text, &p); err != nil {
+			return text
+		}
+		decision := "rejected"
+		if p.Approve {
+			decision = "approved"
+		}
+		if p.Reason != "" {
+			return fmt.Sprintf("%s the shutdown request. Reason: %s", decision, p.Reason)
+		}
+		return fmt.Sprintf("%s the shutdown request.", decision)
+
+	default:
+		return text
+	}
+}
+
 // ─── Idle notification ───────────────────────────────────────────────────────
 
 // idleNotificationPayload is the typed payload for idle notifications.

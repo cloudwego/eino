@@ -158,6 +158,16 @@ func (t *agentTool) runTeammate(ctx context.Context, args agentToolArgs) (string
 		return "", err
 	}
 
+	// Serialize the whole "read active team name → register member → spawn
+	// teammate" sequence against the other leader-only lifecycle tools
+	// (TeamCreate, TeamDelete). Tool calls in one assistant turn may run in
+	// parallel, so without this lock an Agent spawn could interleave with a
+	// TeamDelete that already saw an empty teammate registry and is tearing the
+	// team directories down — leaving a registered member and a running goroutine
+	// bound to a team that no longer exists on disk.
+	t.mw.teamOpLock.Lock()
+	defer t.mw.teamOpLock.Unlock()
+
 	// The active team is whatever TeamCreate established on this leader middleware.
 	// We deliberately do NOT fall back to args.TeamName when no team is active: a
 	// teammate spawn must attach to the team the leader is actually running (its

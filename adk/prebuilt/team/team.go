@@ -141,14 +141,22 @@ type teamMiddleware struct {
 	teamNameVal atomic.Value // stores string; set at creation for teammates; set by TeamCreate for leader
 
 	// teamOpLock serializes team-lifecycle transitions that span multiple,
-	// individually non-atomic steps. TeamCreate's "no active team → create dir →
-	// setup leader mailbox → setTeamName" sequence and the Agent tool's
-	// "read active team name → register/spawn teammate" sequence both read and
-	// then mutate active-team state. Tool calls within a single assistant turn
-	// may run in parallel (see compose tool_node parallelRunToolCall), so without
-	// this lock two concurrent TeamCreate calls could both observe an empty team
-	// name and each create a team, leaving an orphaned team directory and the
-	// leader pump bound to the losing team. Held only by the leader.
+	// individually non-atomic steps and that read and then mutate active-team
+	// state. All three leader-only tools take it:
+	//   - TeamCreate: "no active team → create dir → setup leader mailbox →
+	//     setTeamName"
+	//   - Agent (spawn): "read active team name → register member → spawn teammate"
+	//   - TeamDelete: "no running teammates → delete dirs → clear team name"
+	// Tool calls within a single assistant turn may run in parallel (see compose
+	// tool_node parallelRunToolCall), so without this lock two concurrent
+	// TeamCreate calls could both observe an empty team name and each create a
+	// team (leaving an orphaned directory and the leader pump bound to the losing
+	// team), and an Agent spawn could interleave with a TeamDelete that already
+	// observed an empty teammate registry — registering a member and starting a
+	// goroutine against a team whose directories are being torn down. None of
+	// these tools re-acquire the lock on their own paths, so there is no
+	// reentrancy, and each takes teamOpLock before cfgLock so the lock order is
+	// consistent. Held only by the leader.
 	teamOpLock sync.Mutex
 
 	lifecycle *lifecycleManager // teammate lifecycle: registry, config, routing, plantask
