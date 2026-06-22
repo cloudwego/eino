@@ -4908,18 +4908,74 @@ func TestRunnerSkipsLeadingSystemEventWhenCustomGenModelInputHasNoSystem(t *test
 	assert.Equal(t, schema.User, model.inputs[0][0].Role)
 }
 
-func TestSameSystemMessageIgnoresExtra(t *testing.T) {
+func TestAttack_LeadingSystemMessageExtraChangesArePersisted(t *testing.T) {
+	ctx := context.Background()
+	store := newSessionHelperStore()
+	sid := "leading-system-extra-update"
+
+	runTurn := func(trace string) {
+		model := &leadingSystemTestModel[*schema.Message]{response: schema.AssistantMessage("answer "+trace, nil)}
+		agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+			Name:        "system-extra-agent",
+			Description: "test",
+			Instruction: "ignored by custom input",
+			Model:       model,
+			GenModelInput: func(_ context.Context, _ string, input *AgentInput) ([]*schema.Message, error) {
+				system := schema.SystemMessage("same")
+				system.Extra = map[string]any{"trace": trace}
+				messages := make([]*schema.Message, 0, len(input.Messages)+1)
+				messages = append(messages, system)
+				messages = append(messages, input.Messages...)
+				return messages, nil
+			},
+		})
+		require.NoError(t, err)
+		runner := NewRunner(ctx, RunnerConfig{Agent: agent, SessionID: sid, SessionStore: store})
+		drainSessionEvents(t, runner.Run(ctx, []*schema.Message{schema.UserMessage(trace)}))
+	}
+
+	runTurn("a")
+	runTurn("b")
+
+	var update *MessageUpdatedEvent[*schema.Message]
+	for _, event := range loadMessageSessionEvents(t, ctx, store, sid) {
+		if event.MessageUpdated != nil && event.MessageUpdated.Message.Role == schema.System {
+			update = event.MessageUpdated
+		}
+	}
+	require.NotNil(t, update, "system Extra changes must be persisted as message_updated")
+	assert.Equal(t, "b", update.Message.Extra["trace"])
+
+	handle := mustOpenTestSession[*schema.Message](t, ctx, store, sid)
+	result, err := reconstructSessionState[*schema.Message](ctx, handle, sid, defaultLoadPageSize)
+	require.NoError(t, err)
+	require.NoError(t, handle.close(ctx))
+	require.NotEmpty(t, result.state.Messages)
+	assert.Equal(t, "b", result.state.Messages[0].Extra["trace"])
+}
+
+func TestSameSystemMessageComparesExtraExceptMessageID(t *testing.T) {
 	oldMsg := schema.SystemMessage("same")
 	oldMsg.Extra = map[string]any{"_eino_msg_id": "old", "trace": "a"}
 	newMsg := schema.SystemMessage("same")
-	newMsg.Extra = map[string]any{"_eino_msg_id": "new", "trace": "b"}
+	newMsg.Extra = map[string]any{"_eino_msg_id": "new", "trace": "a"}
+	setMessageIDFromTarget[*schema.Message](newMsg, GetMessageID(oldMsg))
 	assert.True(t, sameSystemMessage[*schema.Message](oldMsg, newMsg))
+	newMsg.Extra["trace"] = "b"
+	assert.False(t, sameSystemMessage[*schema.Message](oldMsg, newMsg))
 
 	oldAgentic := schema.SystemAgenticMessage("same")
 	oldAgentic.Extra = map[string]any{"_eino_msg_id": "old", "trace": "a"}
 	newAgentic := schema.SystemAgenticMessage("same")
-	newAgentic.Extra = map[string]any{"_eino_msg_id": "new", "trace": "b"}
+	newAgentic.Extra = map[string]any{"_eino_msg_id": "new", "trace": "a"}
+	setMessageIDFromTarget[*schema.AgenticMessage](newAgentic, GetMessageID(oldAgentic))
 	assert.True(t, sameSystemMessage[*schema.AgenticMessage](oldAgentic, newAgentic))
+	newAgentic.Extra["trace"] = "b"
+	assert.False(t, sameSystemMessage[*schema.AgenticMessage](oldAgentic, newAgentic))
+
+	setMessageIDFromTarget[*schema.Message](newMsg, "")
+	assert.Equal(t, "old", GetMessageID(newMsg))
+	setMessageIDFromTarget[*schema.Message](nil, "ignored")
 }
 
 func TestRunnerPersists_LeadingSystemMessageAgenticInsertAndUpdate(t *testing.T) {

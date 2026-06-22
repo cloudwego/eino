@@ -350,19 +350,10 @@ func sameSystemMessage[M MessageType](oldSys, newSys M) bool {
 	switch oldMsg := any(oldSys).(type) {
 	case *schema.Message:
 		newMsg, ok := any(newSys).(*schema.Message)
-		if !ok {
-			return false
-		}
-		return oldMsg.Role == newMsg.Role &&
-			oldMsg.Content == newMsg.Content &&
-			reflect.DeepEqual(oldMsg.MultiContent, newMsg.MultiContent) &&
-			reflect.DeepEqual(oldMsg.UserInputMultiContent, newMsg.UserInputMultiContent) &&
-			reflect.DeepEqual(oldMsg.AssistantGenMultiContent, newMsg.AssistantGenMultiContent) &&
-			oldMsg.Name == newMsg.Name
+		return ok && reflect.DeepEqual(oldMsg, newMsg)
 	case *schema.AgenticMessage:
 		newMsg, ok := any(newSys).(*schema.AgenticMessage)
-		return ok && oldMsg.Role == newMsg.Role &&
-			reflect.DeepEqual(oldMsg.ContentBlocks, newMsg.ContentBlocks)
+		return ok && reflect.DeepEqual(oldMsg, newMsg)
 	default:
 		return false
 	}
