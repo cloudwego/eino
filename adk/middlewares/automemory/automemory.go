@@ -49,9 +49,10 @@ type Config[M adk.MessageType] struct {
 	// Required. Store paths are resolved against this backend and bounded per store.
 	MemoryBackend Backend
 
-	// GenInstruction returns the auto memory policy block appended to the system prompt.
-	// Use it to customize memory read/write strength and criteria. The framework always
-	// appends the memory store manifest and memory indexes after this block.
+	// GenInstruction returns the runtime memory instruction appended to the main agent system prompt.
+	// Use it to customize how strongly the main agent should read from and write to memory during normal task execution.
+	// It does not control the post-run extraction agent; use Write.GenInstruction for extraction-specific save criteria.
+	// The framework always appends the memory store manifest after this block.
 	// Optional. Defaults to the built-in auto memory instruction.
 	GenInstruction func(ctx context.Context) (string, error)
 
@@ -105,7 +106,7 @@ type ReadConfig[M adk.MessageType] struct {
 	// Model is used for topic selection. Defaults to Config.Model.
 	Model model.BaseModel[M]
 
-	// Index controls whether and how MEMORY.md is loaded into system prompt.
+	// Index controls whether and how MEMORY.md is loaded as a memory index reminder.
 	// Optional. Defaults to enabled with MEMORY.md as the index file.
 	Index *IndexConfig
 
@@ -124,11 +125,11 @@ type IndexConfig struct {
 	// Optional. Defaults to MEMORY.md.
 	FileName string
 
-	// MaxLines caps index content injected into system prompt.
+	// MaxLines caps index content injected into the memory index reminder.
 	// Optional. Defaults to package default.
 	MaxLines int
 
-	// MaxBytes caps index content injected into system prompt.
+	// MaxBytes caps index content injected into the memory index reminder.
 	// Optional. Defaults to package default.
 	MaxBytes int
 }
@@ -168,7 +169,12 @@ type WriteConfig[M adk.MessageType] struct {
 	// MaxTurns caps the extractor's tool-call loop.
 	MaxTurns int
 
-	SkipIndex bool
+	// GenInstruction returns the save policy block used by the post-run memory extraction agent.
+	// Use it to customize which observations should or should not be persisted after a run.
+	// This replaces the extractor prompt's built-in "What to save" and "What NOT to save" sections; runtime memory behavior
+	// in the main agent system prompt is controlled by Config.GenInstruction.
+	// Optional. Defaults to the built-in extraction save criteria.
+	GenInstruction func(ctx context.Context) (string, error)
 
 	// HandleExtractionIterator, if set, is called with the extractionAgent's event
 	// iterator returned by Run(). The handler is responsible for draining the
@@ -435,7 +441,7 @@ func (m *middleware[M]) renderInstruction(ctx context.Context, baseInstruction s
 			return "", err
 		}
 		if strings.TrimSpace(custom) != "" {
-			memDesc = custom
+			memDesc = custom + "\n\n"
 		}
 	}
 
@@ -899,8 +905,12 @@ func (m *middleware[M]) runMemoryExtractionAgent(ctx context.Context, snapshot [
 		return err
 	}
 	newMessageCount := countModelVisibleMessagesSince(snapshot, cursor)
-	enableMemoryIndex := m.memoryIndexEnabled() && !m.cfg.Write.SkipIndex
-	userPrompt := buildExtractAutoOnlyPrompt(m.extractionMemoryStoresPrompt(), newMessageCount, manifest, enableMemoryIndex)
+	enableMemoryIndex := m.memoryIndexEnabled()
+	savePolicy, err := m.extractSavePolicyInstruction(ctx)
+	if err != nil {
+		return err
+	}
+	userPrompt := buildExtractAutoOnlyPrompt(m.extractionMemoryStoresPrompt(), newMessageCount, manifest, savePolicy, enableMemoryIndex)
 	msgs := append(append([]M{}, snapshot...), makeUserMsg[M](userPrompt))
 	extractionAgent, err := m.newExtractionAgent(ctx, toolInfos)
 	if err != nil {
@@ -928,6 +938,17 @@ func (m *middleware[M]) runMemoryExtractionAgent(ctx context.Context, snapshot [
 			return ev.Err
 		}
 	}
+}
+
+func (m *middleware[M]) extractSavePolicyInstruction(ctx context.Context) (string, error) {
+	if m.cfg == nil || m.cfg.Write == nil || m.cfg.Write.GenInstruction == nil {
+		return "", nil
+	}
+	custom, err := m.cfg.Write.GenInstruction(ctx)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(custom), nil
 }
 
 func (m *middleware[M]) extractionMemoryStoresPrompt() string {
