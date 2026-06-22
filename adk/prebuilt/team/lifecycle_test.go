@@ -22,6 +22,8 @@ import (
 	"fmt"
 	"path/filepath"
 	"reflect"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -541,4 +543,89 @@ func TestLifecycleManager_CleanupFailedTeammateSpawn_RemoveMemberError(t *testin
 	assert.NotPanics(t, func() {
 		lm.cleanupFailedTeammateSpawn(ctx, "nonexistent-team", "worker")
 	})
+}
+
+// orderRecordingBackend wraps an inMemoryBackend and records, in order, the
+// inbox-delete and member-removal (config write) operations during a teardown.
+// It lets tests assert the ordering invariant that closes the same-name teammate
+// cleanup/spawn race.
+type orderRecordingBackend struct {
+	*inMemoryBackend
+	mu          sync.Mutex
+	ops         []string
+	inboxSuffix string
+	configPath  string
+}
+
+func (b *orderRecordingBackend) Delete(ctx context.Context, req *DeleteRequest) error {
+	if b.inboxSuffix != "" && strings.HasSuffix(req.FilePath, b.inboxSuffix) {
+		b.mu.Lock()
+		b.ops = append(b.ops, "delete-inbox")
+		b.mu.Unlock()
+	}
+	return b.inMemoryBackend.Delete(ctx, req)
+}
+
+func (b *orderRecordingBackend) Write(ctx context.Context, req *WriteRequest) error {
+	// The only config.json write performed during teardownTeammate is
+	// RemoveMember, so any write to the team config path marks that step.
+	if req.FilePath == b.configPath {
+		b.mu.Lock()
+		b.ops = append(b.ops, "remove-member")
+		b.mu.Unlock()
+	}
+	return b.inMemoryBackend.Write(ctx, req)
+}
+
+// TestLifecycleManager_TeardownDeletesInboxBeforeRemoveMember verifies the
+// ordering invariant that closes the same-name teammate cleanup/spawn race: the
+// goroutine-exit cleanup path (which does NOT hold teamOpLock) must delete the
+// member's inbox file BEFORE freeing the name via RemoveMember. If RemoveMember
+// ran first, a concurrent Agent spawn could re-register the same name and create
+// a fresh inbox (with the new teammate's initial prompt) that this teardown's
+// delete would then clobber.
+func TestLifecycleManager_TeardownDeletesInboxBeforeRemoveMember(t *testing.T) {
+	teamName := "myteam"
+	memberName := "worker"
+
+	rec := &orderRecordingBackend{
+		inMemoryBackend: newInMemoryBackend(),
+		inboxSuffix:     filepath.Join("inboxes", memberName+".json"),
+	}
+	conf := &Config{Backend: rec, BaseDir: "/tmp/test"}
+	conf.ensureInit()
+	rec.configPath = newConfigStore(conf).configFilePath(teamName)
+
+	router := newSourceRouter(LeaderAgentName, nopLogger{})
+	pumpMgr := newPumpManager(router, nopLogger{})
+	runnerConf := &RunnerConfig{
+		TeamConfig:  conf,
+		AgentConfig: &adk.ChatModelAgentConfig{Name: "test", Description: "test"},
+	}
+	lm := newLifecycleManager(conf, runnerConf, true, router, pumpMgr)
+
+	ctx := context.Background()
+	cm := newConfigStore(conf)
+	_, err := cm.CreateTeam(ctx, teamName, "", LeaderAgentName, "")
+	assert.NoError(t, err)
+	_, err = cm.AddMemberWithDeduplicatedName(ctx, teamName, teamMember{Name: memberName, JoinedAt: time.Now()})
+	assert.NoError(t, err)
+	err = lm.initInbox(ctx, teamName, memberName)
+	assert.NoError(t, err)
+
+	// Reset recorded ops so only the teardown's operations are captured (team
+	// creation and member add also write config.json).
+	rec.mu.Lock()
+	rec.ops = nil
+	rec.mu.Unlock()
+
+	_, err = lm.teardownTeammate(ctx, teamName, memberName, teardownOptions{})
+	assert.NoError(t, err)
+
+	rec.mu.Lock()
+	ops := append([]string(nil), rec.ops...)
+	rec.mu.Unlock()
+
+	assert.Equal(t, []string{"delete-inbox", "remove-member"}, ops,
+		"teardown must delete the inbox before removing the member from config")
 }

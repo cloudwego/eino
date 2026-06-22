@@ -81,6 +81,9 @@ type Runner struct {
 // It creates the team leader middleware, prepends it to AgentConfig.Handlers,
 // constructs the ChatModelAgent, and wires up the TurnLoop.
 func NewRunner(ctx context.Context, conf *RunnerConfig) (*Runner, error) {
+	if conf == nil {
+		return nil, fmt.Errorf("RunnerConfig is required")
+	}
 	if conf.AgentConfig == nil {
 		return nil, fmt.Errorf("AgentConfig is required")
 	}

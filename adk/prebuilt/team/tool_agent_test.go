@@ -232,7 +232,6 @@ func TestAgentTool_RunForeground(t *testing.T) {
 		Description: "test leader",
 		Model:       &mockBaseChatModel{},
 	}
-
 	runnerConf := &RunnerConfig{
 		AgentConfig: agentConf,
 		TeamConfig:  conf,
@@ -247,6 +246,46 @@ func TestAgentTool_RunForeground(t *testing.T) {
 	result, err := agentT.InvokableRun(context.Background(), `{"prompt":"say hello","description":"greeting"}`)
 	assert.NoError(t, err)
 	assert.NotEmpty(t, result)
+}
+
+// TestAgentTool_NamedAgent_NoActiveTeam_RunsForeground verifies that a named
+// Agent call with run_in_background unset runs as a one-shot foreground sub-agent
+// when no team is active, rather than erroring or hanging. The team-active branch
+// of the dispatch decision is resolved under teamOpLock; when the team is empty
+// the lock is released and the call falls through to the foreground path.
+func TestAgentTool_NamedAgent_NoActiveTeam_RunsForeground(t *testing.T) {
+	backend := newInMemoryBackend()
+	conf := &Config{Backend: backend, BaseDir: "/tmp/test"}
+	conf.ensureInit()
+
+	agentConf := &adk.ChatModelAgentConfig{
+		Name:        "leader",
+		Description: "test leader",
+		Model:       &mockBaseChatModel{},
+	}
+	runnerConf := &RunnerConfig{
+		AgentConfig: agentConf,
+		TeamConfig:  conf,
+	}
+
+	router := newSourceRouter(LeaderAgentName, nopLogger{})
+	pumpMgr := newPumpManager(router, nopLogger{})
+	mw := newTeamLeadMiddleware(runnerConf, router, pumpMgr)
+	// No TeamCreate: getTeamName() is empty.
+	assert.Equal(t, "", mw.getTeamName())
+
+	agentT := newAgentTool(mw)
+
+	// A named agent without an active team must NOT be treated as a teammate
+	// (which would require a team and return errTeamNotFound); it runs foreground.
+	result, err := agentT.InvokableRun(context.Background(), `{"name":"worker","prompt":"say hello","description":"greeting"}`)
+	assert.NoError(t, err)
+	assert.NotEmpty(t, result)
+
+	// No member should have been registered anywhere, since the foreground path
+	// does not touch team config.
+	has, _ := newConfigStore(conf).HasMember(context.Background(), "anyteam", "worker")
+	assert.False(t, has)
 }
 
 func TestAgentTool_RunBackground_CleanupOnFailure(t *testing.T) {
