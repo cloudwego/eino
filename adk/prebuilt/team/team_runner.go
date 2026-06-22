@@ -98,8 +98,6 @@ func NewRunner(ctx context.Context, conf *RunnerConfig) (*Runner, error) {
 
 	router := newSourceRouter(LeaderAgentName, conf.logger())
 	pumpMgr := newPumpManager(router, conf.logger())
-	pumpMgr.teamCfg = conf.TeamConfig
-	pumpMgr.store = newConfigStore(conf.TeamConfig)
 
 	// onReminder is bound to this runner's router — not stored on the shared
 	// Config — so parallel runners over the same *Config each get their own
@@ -113,7 +111,6 @@ func NewRunner(ctx context.Context, conf *RunnerConfig) (*Runner, error) {
 
 	leaderMW := newTeamLeadMiddleware(conf, router, pumpMgr)
 	leaderMW.lifecycle.onReminder = onReminder
-	pumpMgr.teamNameFn = leaderMW.getTeamName
 
 	agent, ptMW, err := buildTeamAgent(ctx, conf, leaderMW, "", onReminder)
 	if err != nil {

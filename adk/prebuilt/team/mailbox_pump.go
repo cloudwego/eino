@@ -39,16 +39,22 @@ type pumpHandle struct {
 // Each pump reads from a mailboxMessageSource and pushes TurnInput items
 // into the corresponding agent's TurnLoop via the sourceRouter.
 type pumpManager struct {
-	router     *sourceRouter
-	logger     Logger
-	teamCfg    *Config
-	store      *configStore
-	teamNameFn func() string
+	router *sourceRouter
+	logger Logger
 
 	mu           sync.Mutex
 	mailboxes    map[string]*mailboxMessageSource
 	pumps        map[string]*pumpHandle
 	startingDone map[string]chan struct{} // closed when StartPump finishes installing the new pump
+	// active tracks each teammate's busy/idle status in memory, keyed by agent
+	// name. This is volatile runtime state that flips frequently as messages
+	// arrive and drain, so it is deliberately NOT persisted to config.json:
+	// persisting would rewrite the whole file under the single shared cfgLock on
+	// every flip, serializing the hot path against low-frequency member
+	// add/remove. No code path reads a persisted busy/idle flag — TeamDelete
+	// consults the teammate registry for liveness (see tool_team_delete.go) — so
+	// keeping it in process is both cheaper and correct.
+	active map[string]bool
 }
 
 func newPumpManager(router *sourceRouter, logger Logger) *pumpManager {
@@ -58,6 +64,7 @@ func newPumpManager(router *sourceRouter, logger Logger) *pumpManager {
 		mailboxes:    make(map[string]*mailboxMessageSource),
 		pumps:        make(map[string]*pumpHandle),
 		startingDone: make(map[string]chan struct{}),
+		active:       make(map[string]bool),
 	}
 }
 
@@ -83,6 +90,7 @@ func (pm *pumpManager) UnsetMailbox(agentName string) {
 	}
 	pm.mu.Lock()
 	delete(pm.mailboxes, agentName)
+	delete(pm.active, agentName)
 	h := pm.pumps[agentName]
 	delete(pm.pumps, agentName)
 	startingDone := pm.startingDone[agentName]
@@ -185,10 +193,10 @@ func (pm *pumpManager) runPump(ctx context.Context, agentName string,
 
 	isTeammate := ms.conf.Role == teamRoleTeammate
 
-	// active mirrors the isActive flag last written to config for this teammate.
-	// We only call setActive when the value actually flips, so steady-state
-	// busy/idle cycles do not rewrite config.json (and grab cfgLock) every tick.
-	// A nil pointer means "not yet written", forcing the first transition through.
+	// active mirrors the busy/idle status last recorded for this teammate. We only
+	// call setActive when the value actually flips, so steady-state busy/idle
+	// cycles do not touch the shared map every tick. A nil pointer means "not yet
+	// recorded", forcing the first transition through.
 	var active *bool
 	setActive := func(next bool) {
 		if !isTeammate {
@@ -197,7 +205,7 @@ func (pm *pumpManager) runPump(ctx context.Context, agentName string,
 		if active != nil && *active == next {
 			return
 		}
-		pm.setActive(ctx, agentName, next)
+		pm.setActive(agentName, next)
 		active = &next
 	}
 
@@ -258,16 +266,20 @@ func (pm *pumpManager) runPump(ctx context.Context, agentName string,
 	}
 }
 
-// setActive updates the member's isActive status in the team config.
-func (pm *pumpManager) setActive(ctx context.Context, agentName string, active bool) {
-	if pm.store == nil || pm.teamNameFn == nil {
-		return
-	}
-	teamName := pm.teamNameFn()
-	if teamName == "" {
-		return
-	}
-	if err := pm.store.SetMemberActive(ctx, teamName, agentName, active); err != nil {
-		pm.logger.Printf("mailbox pump[%s] setActive(%v): %v", agentName, active, err)
-	}
+// setActive records the teammate's busy/idle status in memory. The status is
+// intentionally process-local (see the pumpManager.active doc comment): it is
+// not persisted, so this never touches the backend or cfgLock on the hot path.
+func (pm *pumpManager) setActive(agentName string, active bool) {
+	pm.mu.Lock()
+	pm.active[agentName] = active
+	pm.mu.Unlock()
+}
+
+// isActive reports the last recorded busy/idle status for the given teammate and
+// whether any status has been recorded yet.
+func (pm *pumpManager) isActive(agentName string) (active bool, ok bool) {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	active, ok = pm.active[agentName]
+	return active, ok
 }

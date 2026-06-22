@@ -66,7 +66,13 @@ type teamMember struct {
 	AgentType string    `json:"agentType,omitempty"`
 	Prompt    string    `json:"prompt,omitempty"`
 	JoinedAt  time.Time `json:"joinedAt"`
-	IsActive  *bool     `json:"isActive,omitempty"`
+	// IsActive defaults to true when a member is created and is retained for
+	// schema/backward compatibility. It is NOT a live busy/idle indicator:
+	// volatile busy/idle status is tracked in process by pumpManager (see its
+	// active map) and intentionally never persisted, so this field is not updated
+	// on every message cycle. Liveness checks (e.g. TeamDelete) consult the
+	// teammate registry, not this flag.
+	IsActive *bool `json:"isActive,omitempty"`
 }
 
 // makeAgentID returns the agent ID in the format "name@team".
@@ -168,10 +174,20 @@ func (s *configStore) CreateTeam(ctx context.Context, teamName, description, lea
 
 // readConfig reads the team configuration without locking.
 // Caller must hold at least s.conf.state.cfgLock.RLock().
+//
+// Backend.Read may report a missing file either as a non-nil error or as a
+// (nil, nil) result (see the Backend.Read contract note in backend.go), so the
+// nil-content case is guarded explicitly — mirroring mailbox.readInbox — to
+// avoid a nil dereference on backends that take the latter approach. A missing
+// or empty config.json is surfaced as an error because, unlike an inbox, the
+// team config must exist for any team operation to make sense.
 func (s *configStore) readConfig(ctx context.Context, teamName string) (*teamConfig, error) {
 	content, err := s.conf.Backend.Read(ctx, &ReadRequest{FilePath: s.configFilePath(teamName)})
 	if err != nil {
 		return nil, err
+	}
+	if content == nil || content.Content == "" {
+		return nil, fmt.Errorf("read team config %q: missing or empty config.json", teamName)
 	}
 	var config teamConfig
 	if err := sonic.UnmarshalString(content.Content, &config); err != nil {
@@ -273,19 +289,6 @@ func (s *configStore) AddMemberWithDeduplicatedName(ctx context.Context, teamNam
 		return nil
 	})
 	return result, err
-}
-
-func (s *configStore) SetMemberActive(ctx context.Context, teamName, memberName string, active bool) error {
-	return s.updateConfig(ctx, teamName, func(cfg *teamConfig) error {
-		for i := range cfg.Members {
-			if cfg.Members[i].Name != memberName {
-				continue
-			}
-			cfg.Members[i].IsActive = boolPtr(active)
-			return nil
-		}
-		return nil
-	})
 }
 
 // RemoveMember removes a member from the team configuration.
