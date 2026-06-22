@@ -62,7 +62,7 @@ func (t *teamDeleteTool) InvokableRun(ctx context.Context, _ string, _ ...tool.O
 			}), nil
 		}
 
-		cm := t.mw.lifecycle.teamCfg
+		cm := t.mw.lifecycle.store
 		if err := cm.DeleteTeam(ctx, teamName); err != nil {
 			return "", fmt.Errorf("delete team %q: %w", teamName, err)
 		}

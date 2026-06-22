@@ -62,6 +62,7 @@ func newMailboxFromConfig(conf *Config, teamName, ownerName string) *mailbox {
 	pollInterval := defaultPollInterval
 
 	locks := conf.state.locks
+	store := newConfigStore(conf)
 
 	return &mailbox{
 		conf: &mailboxConfig{
@@ -74,7 +75,7 @@ func newMailboxFromConfig(conf *Config, teamName, ownerName string) *mailbox {
 		inboxLocks: locks,
 		listMembers: func(ctx context.Context) ([]string, error) {
 			var names []string
-			err := conf.readConfigWithReadLock(ctx, teamName, func(cfg *teamConfig) error {
+			err := store.readConfigWithReadLock(ctx, teamName, func(cfg *teamConfig) error {
 				for _, m := range cfg.Members {
 					names = append(names, m.Name)
 				}
@@ -153,7 +154,7 @@ func (m *mailbox) writeInbox(ctx context.Context, agentName string, msgs []Inbox
 
 // Send sends a message to the target agent's inbox.
 func (m *mailbox) Send(ctx context.Context, msg *outboxMessage) error {
-	if msg.To == "*" {
+	if msg.To == broadcastTarget {
 		return m.broadcast(ctx, msg)
 	}
 	return m.sendToOne(ctx, msg.To, msg)

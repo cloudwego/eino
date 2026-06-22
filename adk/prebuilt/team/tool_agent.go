@@ -78,7 +78,7 @@ func (t *agentTool) Info(_ context.Context) (*schema.ToolInfo, error) {
 			},
 			"run_in_background": {
 				Type: schema.Boolean,
-				Desc: "Set to true to run this agent in the background. You will be notified when it completes.",
+				Desc: "Set to true to run this agent in the background; you will be notified when it completes. Note: when a team is active and a name is provided, the agent is always run in the background (so it stays addressable via SendMessage) regardless of this flag.",
 			},
 		}),
 	}, nil
@@ -94,11 +94,26 @@ func (t *agentTool) InvokableRun(ctx context.Context, argumentsInJSON string, _ 
 		return "", fmt.Errorf("prompt and description are required")
 	}
 
-	if args.RunInBackground || (t.mw.getTeamName() != "" && args.Name != "") {
+	if t.shouldRunAsTeammate(args) {
 		return t.runTeammate(ctx, args)
 	}
 
 	return t.runForeground(ctx, args)
+}
+
+// shouldRunAsTeammate decides whether an Agent call is dispatched as a
+// background teammate (mailbox-based, long-lived) instead of a synchronous
+// foreground sub-agent. A teammate is used when either:
+//   - run_in_background is explicitly requested, or
+//   - a team is active AND the caller named the agent. In team mode a named
+//     agent is addressable via SendMessage, so it is always spawned in the
+//     background regardless of run_in_background. This implicit override is
+//     documented in the run_in_background tool schema.
+func (t *agentTool) shouldRunAsTeammate(args agentToolArgs) bool {
+	if args.RunInBackground {
+		return true
+	}
+	return t.mw.getTeamName() != "" && args.Name != ""
 }
 
 // runForeground runs the agent synchronously by reusing adk.NewAgentTool,
@@ -131,7 +146,7 @@ func (t *agentTool) runForeground(ctx context.Context, args agentToolArgs) (stri
 // active team context the call returns errTeamNotFound.
 func (t *agentTool) runTeammate(ctx context.Context, args agentToolArgs) (string, error) {
 	if args.Name == "" {
-		args.Name = "agent"
+		args.Name = defaultTeammateName
 	}
 	if err := validateMemberName(args.Name); err != nil {
 		return "", err
@@ -195,7 +210,7 @@ func (t *agentTool) runTeammate(ctx context.Context, args agentToolArgs) (string
 
 // registerTeammate registers the teammate in the team config with a deduplicated name.
 func (t *agentTool) registerTeammate(ctx context.Context, teamName string, args *agentToolArgs) (teamMember, error) {
-	cm := t.mw.lifecycle.teamCfg
+	cm := t.mw.lifecycle.store
 	member, err := cm.AddMemberWithDeduplicatedName(ctx, teamName, teamMember{
 		Name:      args.Name,
 		AgentType: args.SubagentType,

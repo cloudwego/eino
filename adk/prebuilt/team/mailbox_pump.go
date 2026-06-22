@@ -15,7 +15,7 @@
  */
 
 // mailbox_pump.go manages per-agent mailbox pump goroutines that read from
-// a MailboxMessageSource and push items into the corresponding TurnLoop.
+// a mailboxMessageSource and push items into the corresponding TurnLoop.
 // Separated from source_router.go to follow the Single Responsibility Principle.
 
 package team
@@ -36,16 +36,17 @@ type pumpHandle struct {
 }
 
 // pumpManager manages the lifecycle of per-agent mailbox pump goroutines.
-// Each pump reads from a MailboxMessageSource and pushes TurnInput items
+// Each pump reads from a mailboxMessageSource and pushes TurnInput items
 // into the corresponding agent's TurnLoop via the sourceRouter.
 type pumpManager struct {
 	router     *sourceRouter
 	logger     Logger
 	teamCfg    *Config
+	store      *configStore
 	teamNameFn func() string
 
 	mu           sync.Mutex
-	mailboxes    map[string]*MailboxMessageSource
+	mailboxes    map[string]*mailboxMessageSource
 	pumps        map[string]*pumpHandle
 	startingDone map[string]chan struct{} // closed when StartPump finishes installing the new pump
 }
@@ -54,14 +55,14 @@ func newPumpManager(router *sourceRouter, logger Logger) *pumpManager {
 	return &pumpManager{
 		router:       router,
 		logger:       logger,
-		mailboxes:    make(map[string]*MailboxMessageSource),
+		mailboxes:    make(map[string]*mailboxMessageSource),
 		pumps:        make(map[string]*pumpHandle),
 		startingDone: make(map[string]chan struct{}),
 	}
 }
 
-// SetMailbox registers a MailboxMessageSource for the given agent.
-func (pm *pumpManager) SetMailbox(agentName string, ms *MailboxMessageSource) {
+// SetMailbox registers a mailboxMessageSource for the given agent.
+func (pm *pumpManager) SetMailbox(agentName string, ms *mailboxMessageSource) {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 	pm.mailboxes[agentName] = ms
@@ -106,11 +107,16 @@ func (pm *pumpManager) StartPump(ctx context.Context, agentName string) {
 	ms := pm.mailboxes[agentName]
 	if ms == nil {
 		pm.mu.Unlock()
+		// A missing mailbox means SetMailbox was never called (or was already
+		// unset) for this agent. Surfacing it helps diagnose teammates whose
+		// initial prompt would otherwise sit unread in the inbox forever.
+		pm.logger.Printf("mailbox pump[%s] not started: no mailbox registered", agentName)
 		return
 	}
 	loop := pm.router.getLoop(agentName)
 	if loop == nil {
 		pm.mu.Unlock()
+		pm.logger.Printf("mailbox pump[%s] not started: no TurnLoop registered", agentName)
 		return
 	}
 
@@ -155,7 +161,7 @@ func (pm *pumpManager) StartPump(ctx context.Context, agentName string) {
 // non-blocking tryReceive and blocking waitForItem, pushing received messages
 // into the agent's TurnLoop. It exits when ctx is cancelled or the loop rejects a push.
 func (pm *pumpManager) runPump(ctx context.Context, agentName string,
-	ms *MailboxMessageSource, loop *adk.TurnLoop[TurnInput, adk.Message]) {
+	ms *mailboxMessageSource, loop *adk.TurnLoop[TurnInput, adk.Message]) {
 
 	// idleSent tracks whether an idle notification has already been sent since
 	// the last time messages were processed. This prevents flooding the leader
@@ -163,6 +169,22 @@ func (pm *pumpManager) runPump(ctx context.Context, agentName string,
 	idleSent := false
 
 	isTeammate := ms.conf.Role == teamRoleTeammate
+
+	// active mirrors the isActive flag last written to config for this teammate.
+	// We only call setActive when the value actually flips, so steady-state
+	// busy/idle cycles do not rewrite config.json (and grab cfgLock) every tick.
+	// A nil pointer means "not yet written", forcing the first transition through.
+	var active *bool
+	setActive := func(next bool) {
+		if !isTeammate {
+			return
+		}
+		if active != nil && *active == next {
+			return
+		}
+		pm.setActive(ctx, agentName, next)
+		active = &next
+	}
 
 	for {
 		select {
@@ -178,9 +200,7 @@ func (pm *pumpManager) runPump(ctx context.Context, agentName string,
 		}
 		if ok {
 			idleSent = false
-			if isTeammate {
-				pm.setActive(ctx, agentName, true)
-			}
+			setActive(true)
 			item.TargetAgent = agentName
 			if accepted, _ := loop.Push(item); !accepted {
 				return
@@ -188,8 +208,8 @@ func (pm *pumpManager) runPump(ctx context.Context, agentName string,
 			continue
 		}
 
-		if isTeammate && !idleSent {
-			pm.setActive(ctx, agentName, false)
+		if !idleSent {
+			setActive(false)
 		}
 		idleSent = true
 
@@ -202,9 +222,7 @@ func (pm *pumpManager) runPump(ctx context.Context, agentName string,
 			return
 		}
 		idleSent = false // reset after processing new messages
-		if isTeammate {
-			pm.setActive(ctx, agentName, true)
-		}
+		setActive(true)
 		item.TargetAgent = agentName
 		if accepted, _ := loop.Push(item); !accepted {
 			return
@@ -214,14 +232,14 @@ func (pm *pumpManager) runPump(ctx context.Context, agentName string,
 
 // setActive updates the member's isActive status in the team config.
 func (pm *pumpManager) setActive(ctx context.Context, agentName string, active bool) {
-	if pm.teamCfg == nil || pm.teamNameFn == nil {
+	if pm.store == nil || pm.teamNameFn == nil {
 		return
 	}
 	teamName := pm.teamNameFn()
 	if teamName == "" {
 		return
 	}
-	if err := pm.teamCfg.SetMemberActive(ctx, teamName, agentName, active); err != nil {
+	if err := pm.store.SetMemberActive(ctx, teamName, agentName, active); err != nil {
 		pm.logger.Printf("mailbox pump[%s] setActive(%v): %v", agentName, active, err)
 	}
 }

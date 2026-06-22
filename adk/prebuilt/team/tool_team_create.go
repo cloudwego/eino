@@ -81,7 +81,7 @@ func (t *teamCreateTool) InvokableRun(ctx context.Context, argumentsInJSON strin
 		return "", fmt.Errorf("team %q is already active, delete it before creating a new team", currentTeamName)
 	}
 
-	cm := t.mw.lifecycle.teamCfg
+	cm := t.mw.lifecycle.store
 	team, err := cm.CreateTeam(ctx, args.TeamName, args.Description, LeaderAgentName, args.AgentType)
 	if err != nil {
 		return "", fmt.Errorf("create team: %w", err)
@@ -107,7 +107,7 @@ func (t *teamCreateTool) InvokableRun(ctx context.Context, argumentsInJSON strin
 	}()
 
 	// Create the leader's inbox file, mailbox source, and start the pump atomically.
-	if err = t.mw.lifecycle.setupMailbox(ctx, teamName, LeaderAgentName, &MailboxSourceConfig{
+	if err = t.mw.lifecycle.setupMailbox(ctx, teamName, LeaderAgentName, &mailboxSourceConfig{
 		OwnerName:          LeaderAgentName,
 		Role:               teamRoleLeader,
 		OnShutdownResponse: t.makeShutdownResponseHandler(teamName),

@@ -57,7 +57,7 @@ func TestNewTaskAssignedNotifier_ValidTeamName_SendsMessage(t *testing.T) {
 	ctx := context.Background()
 	teamName := "myteam"
 
-	_, err := conf.CreateTeam(ctx, teamName, "desc", LeaderAgentName, "general-purpose")
+	_, err := newConfigStore(conf).CreateTeam(ctx, teamName, "desc", LeaderAgentName, "general-purpose")
 	assert.NoError(t, err)
 
 	teamNameFn := func() string { return teamName }
@@ -96,7 +96,7 @@ func TestNewTaskAssignedNotifier_EmptyAssignedBy_DefaultsToLeader(t *testing.T) 
 	ctx := context.Background()
 	teamName := "myteam"
 
-	_, err := conf.CreateTeam(ctx, teamName, "desc", LeaderAgentName, "general-purpose")
+	_, err := newConfigStore(conf).CreateTeam(ctx, teamName, "desc", LeaderAgentName, "general-purpose")
 	assert.NoError(t, err)
 
 	teamNameFn := func() string { return teamName }
@@ -131,7 +131,7 @@ func TestNewTaskAssignedNotifier_PayloadContainsCorrectFields(t *testing.T) {
 	ctx := context.Background()
 	teamName := "myteam"
 
-	_, err := conf.CreateTeam(ctx, teamName, "desc", LeaderAgentName, "general-purpose")
+	_, err := newConfigStore(conf).CreateTeam(ctx, teamName, "desc", LeaderAgentName, "general-purpose")
 	assert.NoError(t, err)
 
 	teamNameFn := func() string { return teamName }

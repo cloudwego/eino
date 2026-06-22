@@ -15,7 +15,14 @@
  */
 
 // team_config.go manages the persistent team config.json (member list, team
-// metadata) with read-write locking. All operations are methods on Config.
+// metadata) with read-write locking.
+//
+// All runtime operations live on the unexported configStore rather than on the
+// public Config: Config is purely declarative configuration (Backend, BaseDir,
+// Interval) supplied by the caller, while configStore holds the team-management
+// behavior used internally by the tool and lifecycle layers. This keeps the
+// public API surface small and prevents callers from reaching into team
+// bookkeeping that is meant to be driven by the Runner.
 
 package team
 
@@ -29,6 +36,19 @@ import (
 )
 
 const configFileName = "config.json"
+
+// configStore is the internal façade over a Config that performs all team
+// config.json read-modify-write operations. It is created once per Config via
+// newConfigStore and shared by the lifecycle and tool layers.
+type configStore struct {
+	conf *Config
+}
+
+// newConfigStore wraps a Config so the team runtime can perform config.json
+// operations without exposing them on the public Config type.
+func newConfigStore(conf *Config) *configStore {
+	return &configStore{conf: conf}
+}
 
 // teamConfig represents the team configuration stored in config.json.
 type teamConfig struct {
@@ -72,9 +92,9 @@ func isMemberActive(member teamMember) bool {
 // resolveTeamName returns a unique team name. If the given name is already
 // taken (e.g. leftover from a previous run), it appends a Unix-nano timestamp
 // to avoid collisions
-func (c *Config) resolveTeamName(ctx context.Context, teamName string) (string, error) {
-	path := c.configFilePath(teamName)
-	exists, err := c.Backend.Exists(ctx, path)
+func (s *configStore) resolveTeamName(ctx context.Context, teamName string) (string, error) {
+	path := s.configFilePath(teamName)
+	exists, err := s.conf.Backend.Exists(ctx, path)
 	if err != nil {
 		return "", fmt.Errorf("check team %q exists error: %w", teamName, err)
 	}
@@ -88,11 +108,11 @@ func (c *Config) resolveTeamName(ctx context.Context, teamName string) (string, 
 
 // CreateTeam creates the team directory structure and config.json.
 // If teamName is already taken, a timestamped suffix is appended automatically.
-func (c *Config) CreateTeam(ctx context.Context, teamName, description, leaderName, leaderType string) (*teamConfig, error) {
-	c.state.cfgLock.Lock()
-	defer c.state.cfgLock.Unlock()
+func (s *configStore) CreateTeam(ctx context.Context, teamName, description, leaderName, leaderType string) (*teamConfig, error) {
+	s.conf.state.cfgLock.Lock()
+	defer s.conf.state.cfgLock.Unlock()
 
-	resolved, err := c.resolveTeamName(ctx, teamName)
+	resolved, err := s.resolveTeamName(ctx, teamName)
 	if err != nil {
 		return nil, err
 	}
@@ -124,18 +144,18 @@ func (c *Config) CreateTeam(ctx context.Context, teamName, description, leaderNa
 	}
 
 	// create inboxes dir
-	if err := ensureDir(ctx, c.Backend, inboxDirPath(c.BaseDir, teamName)); err != nil {
+	if err := ensureDir(ctx, s.conf.Backend, inboxDirPath(s.conf.BaseDir, teamName)); err != nil {
 		return nil, fmt.Errorf("create inboxes dir: %w", err)
 	}
 
 	// create tasks dir
-	if err := ensureDir(ctx, c.Backend, tasksDirPath(c.BaseDir, teamName)); err != nil {
+	if err := ensureDir(ctx, s.conf.Backend, tasksDirPath(s.conf.BaseDir, teamName)); err != nil {
 		return nil, fmt.Errorf("create tasks dir: %w", err)
 	}
 
 	// write config.json
-	if err := c.Backend.Write(ctx, &WriteRequest{
-		FilePath: c.configFilePath(teamName),
+	if err := s.conf.Backend.Write(ctx, &WriteRequest{
+		FilePath: s.configFilePath(teamName),
 		Content:  data,
 	}); err != nil {
 		return nil, fmt.Errorf("write config.json: %w", err)
@@ -145,9 +165,9 @@ func (c *Config) CreateTeam(ctx context.Context, teamName, description, leaderNa
 }
 
 // readConfig reads the team configuration without locking.
-// Caller must hold at least c.state.cfgLock.RLock().
-func (c *Config) readConfig(ctx context.Context, teamName string) (*teamConfig, error) {
-	content, err := c.Backend.Read(ctx, &ReadRequest{FilePath: c.configFilePath(teamName)})
+// Caller must hold at least s.conf.state.cfgLock.RLock().
+func (s *configStore) readConfig(ctx context.Context, teamName string) (*teamConfig, error) {
+	content, err := s.conf.Backend.Read(ctx, &ReadRequest{FilePath: s.configFilePath(teamName)})
 	if err != nil {
 		return nil, err
 	}
@@ -159,44 +179,44 @@ func (c *Config) readConfig(ctx context.Context, teamName string) (*teamConfig, 
 }
 
 // writeConfig writes the team configuration without locking.
-// Caller must hold c.state.cfgLock.Lock().
-func (c *Config) writeConfig(ctx context.Context, teamName string, config *teamConfig) error {
+// Caller must hold s.conf.state.cfgLock.Lock().
+func (s *configStore) writeConfig(ctx context.Context, teamName string, config *teamConfig) error {
 	data, err := sonic.MarshalString(config)
 	if err != nil {
 		return err
 	}
-	return c.Backend.Write(ctx, &WriteRequest{
-		FilePath: c.configFilePath(teamName),
+	return s.conf.Backend.Write(ctx, &WriteRequest{
+		FilePath: s.configFilePath(teamName),
 		Content:  data,
 	})
 }
 
 // updateConfig performs an atomic read-modify-write on the team config under a write lock.
-func (c *Config) updateConfig(ctx context.Context, teamName string, fn func(cfg *teamConfig) error) error {
-	c.state.cfgLock.Lock()
-	defer c.state.cfgLock.Unlock()
-	config, err := c.readConfig(ctx, teamName)
+func (s *configStore) updateConfig(ctx context.Context, teamName string, fn func(cfg *teamConfig) error) error {
+	s.conf.state.cfgLock.Lock()
+	defer s.conf.state.cfgLock.Unlock()
+	config, err := s.readConfig(ctx, teamName)
 	if err != nil {
 		return err
 	}
 	if err := fn(config); err != nil {
 		return err
 	}
-	return c.writeConfig(ctx, teamName, config)
+	return s.writeConfig(ctx, teamName, config)
 }
 
 // readConfigLocked reads config under a read lock.
-func (c *Config) readConfigLocked(ctx context.Context, teamName string) (*teamConfig, error) {
-	c.state.cfgLock.RLock()
-	defer c.state.cfgLock.RUnlock()
-	return c.readConfig(ctx, teamName)
+func (s *configStore) readConfigLocked(ctx context.Context, teamName string) (*teamConfig, error) {
+	s.conf.state.cfgLock.RLock()
+	defer s.conf.state.cfgLock.RUnlock()
+	return s.readConfig(ctx, teamName)
 }
 
 // readConfigWithReadLock reads config under a read lock and passes it to fn for processing.
-func (c *Config) readConfigWithReadLock(ctx context.Context, teamName string, fn func(cfg *teamConfig) error) error {
-	c.state.cfgLock.RLock()
-	defer c.state.cfgLock.RUnlock()
-	config, err := c.readConfig(ctx, teamName)
+func (s *configStore) readConfigWithReadLock(ctx context.Context, teamName string, fn func(cfg *teamConfig) error) error {
+	s.conf.state.cfgLock.RLock()
+	defer s.conf.state.cfgLock.RUnlock()
+	config, err := s.readConfig(ctx, teamName)
 	if err != nil {
 		return err
 	}
@@ -204,8 +224,8 @@ func (c *Config) readConfigWithReadLock(ctx context.Context, teamName string, fn
 }
 
 // AddMember adds a new member to the team configuration.
-func (c *Config) AddMember(ctx context.Context, teamName string, member teamMember) error {
-	return c.updateConfig(ctx, teamName, func(cfg *teamConfig) error {
+func (s *configStore) AddMember(ctx context.Context, teamName string, member teamMember) error {
+	return s.updateConfig(ctx, teamName, func(cfg *teamConfig) error {
 		cfg.Members = append(cfg.Members, withDefaultMemberActivity(member))
 		return nil
 	})
@@ -213,9 +233,9 @@ func (c *Config) AddMember(ctx context.Context, teamName string, member teamMemb
 
 // AddMemberWithDeduplicatedName adds a member under a single write lock and
 // returns the final member with a unique name assigned.
-func (c *Config) AddMemberWithDeduplicatedName(ctx context.Context, teamName string, member teamMember) (teamMember, error) {
+func (s *configStore) AddMemberWithDeduplicatedName(ctx context.Context, teamName string, member teamMember) (teamMember, error) {
 	var result teamMember
-	err := c.updateConfig(ctx, teamName, func(cfg *teamConfig) error {
+	err := s.updateConfig(ctx, teamName, func(cfg *teamConfig) error {
 		existing := make(map[string]struct{}, len(cfg.Members))
 		for _, m := range cfg.Members {
 			existing[m.Name] = struct{}{}
@@ -244,8 +264,8 @@ func (c *Config) AddMemberWithDeduplicatedName(ctx context.Context, teamName str
 	return result, err
 }
 
-func (c *Config) SetMemberActive(ctx context.Context, teamName, memberName string, active bool) error {
-	return c.updateConfig(ctx, teamName, func(cfg *teamConfig) error {
+func (s *configStore) SetMemberActive(ctx context.Context, teamName, memberName string, active bool) error {
+	return s.updateConfig(ctx, teamName, func(cfg *teamConfig) error {
 		for i := range cfg.Members {
 			if cfg.Members[i].Name != memberName {
 				continue
@@ -258,8 +278,8 @@ func (c *Config) SetMemberActive(ctx context.Context, teamName, memberName strin
 }
 
 // RemoveMember removes a member from the team configuration.
-func (c *Config) RemoveMember(ctx context.Context, teamName, memberName string) error {
-	return c.updateConfig(ctx, teamName, func(cfg *teamConfig) error {
+func (s *configStore) RemoveMember(ctx context.Context, teamName, memberName string) error {
+	return s.updateConfig(ctx, teamName, func(cfg *teamConfig) error {
 		members := make([]teamMember, 0, len(cfg.Members))
 		for _, m := range cfg.Members {
 			if m.Name != memberName {
@@ -272,8 +292,8 @@ func (c *Config) RemoveMember(ctx context.Context, teamName, memberName string) 
 }
 
 // HasActiveTeammates checks if there are active teammates (excluding leader).
-func (c *Config) HasActiveTeammates(ctx context.Context, teamName string) (bool, error) {
-	cfg, err := c.readConfigLocked(ctx, teamName)
+func (s *configStore) HasActiveTeammates(ctx context.Context, teamName string) (bool, error) {
+	cfg, err := s.readConfigLocked(ctx, teamName)
 	if err != nil {
 		return false, err
 	}
@@ -286,9 +306,9 @@ func (c *Config) HasActiveTeammates(ctx context.Context, teamName string) (bool,
 }
 
 // GetActiveTeammateNames returns the names of active teammates (excluding leader).
-func (c *Config) GetActiveTeammateNames(ctx context.Context, teamName string) ([]string, error) {
+func (s *configStore) GetActiveTeammateNames(ctx context.Context, teamName string) ([]string, error) {
 	var names []string
-	err := c.readConfigWithReadLock(ctx, teamName, func(cfg *teamConfig) error {
+	err := s.readConfigWithReadLock(ctx, teamName, func(cfg *teamConfig) error {
 		for _, m := range cfg.Members {
 			if m.Name != LeaderAgentName && isMemberActive(m) {
 				names = append(names, m.Name)
@@ -300,9 +320,9 @@ func (c *Config) GetActiveTeammateNames(ctx context.Context, teamName string) ([
 }
 
 // HasMember checks whether the given member exists in the team configuration.
-func (c *Config) HasMember(ctx context.Context, teamName, memberName string) (bool, error) {
+func (s *configStore) HasMember(ctx context.Context, teamName, memberName string) (bool, error) {
 	var found bool
-	err := c.readConfigWithReadLock(ctx, teamName, func(cfg *teamConfig) error {
+	err := s.readConfigWithReadLock(ctx, teamName, func(cfg *teamConfig) error {
 		for _, m := range cfg.Members {
 			if m.Name == memberName {
 				found = true
@@ -315,17 +335,17 @@ func (c *Config) HasMember(ctx context.Context, teamName, memberName string) (bo
 }
 
 // DeleteTeam removes the team directory and tasks directory.
-func (c *Config) DeleteTeam(ctx context.Context, teamName string) error {
-	c.state.cfgLock.Lock()
-	defer c.state.cfgLock.Unlock()
+func (s *configStore) DeleteTeam(ctx context.Context, teamName string) error {
+	s.conf.state.cfgLock.Lock()
+	defer s.conf.state.cfgLock.Unlock()
 
-	teamDir := teamDirPath(c.BaseDir, teamName)
-	taskDir := tasksDirPath(c.BaseDir, teamName)
+	teamDir := teamDirPath(s.conf.BaseDir, teamName)
+	taskDir := tasksDirPath(s.conf.BaseDir, teamName)
 
-	if err := deleteDirIfExists(ctx, c.Backend, teamDir); err != nil {
+	if err := deleteDirIfExists(ctx, s.conf.Backend, teamDir); err != nil {
 		return fmt.Errorf("delete team dir: %w", err)
 	}
-	if err := deleteDirIfExists(ctx, c.Backend, taskDir); err != nil {
+	if err := deleteDirIfExists(ctx, s.conf.Backend, taskDir); err != nil {
 		return fmt.Errorf("delete task dir: %w", err)
 	}
 
@@ -334,11 +354,11 @@ func (c *Config) DeleteTeam(ctx context.Context, teamName string) error {
 
 // configFilePath returns the config.json path for the given team.
 // Path: {baseDir}/teams/{teamName}/config.json
-func (c *Config) configFilePath(teamName string) string {
-	return filepath.Join(teamDirPath(c.BaseDir, teamName), configFileName)
+func (s *configStore) configFilePath(teamName string) string {
+	return filepath.Join(teamDirPath(s.conf.BaseDir, teamName), configFileName)
 }
 
 // LeadAgentID returns the agent ID of the team leader.
-func (c *Config) LeadAgentID(teamName string) string {
+func (s *configStore) LeadAgentID(teamName string) string {
 	return makeAgentID(LeaderAgentName, teamName)
 }

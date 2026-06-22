@@ -356,3 +356,12 @@ func TestNewRunner_OnReminderCallback(t *testing.T) {
 	// onReminder is now stored per-runner on the lifecycle manager, not on the shared Config.
 	assert.NotNil(t, runner.leaderMW.lifecycle.onReminder)
 }
+
+func TestResolveReminderInterval(t *testing.T) {
+	// Zero (unset) must fall back to the default rather than disabling reminders.
+	assert.Equal(t, defaultReminderInterval, resolveReminderInterval(0))
+	// A positive value is honored as-is.
+	assert.Equal(t, 5, resolveReminderInterval(5))
+	// A negative value is preserved so reminders can be explicitly disabled.
+	assert.Equal(t, -1, resolveReminderInterval(-1))
+}

@@ -85,7 +85,7 @@ func TestSendInitialPrompt_StoresRawPromptForSingleEnvelopeFormatting(t *testing
 	tool := newAgentTool(mw)
 
 	teamName := "myteam"
-	_, err := mw.lifecycle.teamCfg.CreateTeam(context.Background(), teamName, "", LeaderAgentName, "")
+	_, err := newConfigStore(mw.lifecycle.teamCfg).CreateTeam(context.Background(), teamName, "", LeaderAgentName, "")
 	assert.NoError(t, err)
 
 	args := agentToolArgs{
@@ -146,7 +146,7 @@ func TestAgentTool_RunBackground_FullFlow(t *testing.T) {
 	assert.Contains(t, result, "worker")
 	assert.Contains(t, result, "myteam")
 
-	has, _ := conf.HasMember(context.Background(), "myteam", "worker")
+	has, _ := newConfigStore(conf).HasMember(context.Background(), "myteam", "worker")
 	assert.True(t, has)
 
 	runner.leaderMW.ShutdownAllTeammates(context.Background(), "myteam")
@@ -185,7 +185,7 @@ func TestAgentTool_RunBackground_InvalidMemberName(t *testing.T) {
 	// registered.
 	_, err = agentT.InvokableRun(context.Background(), `{"name":"../evil","prompt":"do something","description":"test"}`)
 	assert.Error(t, err)
-	has, _ := conf.HasMember(context.Background(), "myteam", "../evil")
+	has, _ := newConfigStore(conf).HasMember(context.Background(), "myteam", "../evil")
 	assert.False(t, has)
 
 	// The reserved leader name must be rejected for a teammate.
@@ -244,7 +244,7 @@ func TestAgentTool_RunBackground_CleanupOnFailure(t *testing.T) {
 	pumpMgr := newPumpManager(router, nopLogger{})
 	mw := newTeamLeadMiddleware(runnerConf, router, pumpMgr)
 
-	cm := conf
+	cm := newConfigStore(conf)
 	_, _ = cm.CreateTeam(context.Background(), "myteam", "", LeaderAgentName, "")
 	mw.setTeamName("myteam")
 

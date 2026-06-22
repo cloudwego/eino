@@ -235,7 +235,7 @@ func TestLifecycleManager_StopTeammateRuntime(t *testing.T) {
 	ctx := context.Background()
 	teamName := "myteam"
 
-	cm := conf
+	cm := newConfigStore(conf)
 	_, err := cm.CreateTeam(ctx, teamName, "", LeaderAgentName, "")
 	assert.NoError(t, err)
 
@@ -258,7 +258,7 @@ func TestLifecycleManager_CleanupFailedTeammateSpawn(t *testing.T) {
 	ctx := context.Background()
 	teamName := "myteam"
 
-	cm := conf
+	cm := newConfigStore(conf)
 	_, err := cm.CreateTeam(ctx, teamName, "", LeaderAgentName, "")
 	assert.NoError(t, err)
 
@@ -283,7 +283,7 @@ func TestLifecycleManager_RemoveTeammate(t *testing.T) {
 	ctx := context.Background()
 	teamName := "myteam"
 
-	cm := conf
+	cm := newConfigStore(conf)
 	_, _ = cm.CreateTeam(ctx, teamName, "", LeaderAgentName, "")
 	_ = cm.AddMember(ctx, teamName, teamMember{Name: "worker", JoinedAt: time.Now()})
 
@@ -365,7 +365,7 @@ func TestLifecycleManager_CleanupExitedTeammate(t *testing.T) {
 	ctx := context.Background()
 	teamName := "myteam"
 
-	cm := conf
+	cm := newConfigStore(conf)
 	_, _ = cm.CreateTeam(ctx, teamName, "", LeaderAgentName, "")
 	_ = cm.AddMember(ctx, teamName, teamMember{Name: "worker", JoinedAt: time.Now()})
 
@@ -393,7 +393,7 @@ func TestLifecycleManager_StartTeammateRunner(t *testing.T) {
 	ctx := context.Background()
 	teamName := "myteam"
 
-	cm := conf
+	cm := newConfigStore(conf)
 	_, _ = cm.CreateTeam(ctx, teamName, "", LeaderAgentName, "")
 	_ = cm.AddMember(ctx, teamName, teamMember{Name: "worker", JoinedAt: time.Now()})
 
@@ -427,7 +427,7 @@ func TestLifecycleManager_ShutdownAllTeammates(t *testing.T) {
 	mw, conf := newTestTeamMiddleware()
 	ctx := context.Background()
 
-	cm := conf
+	cm := newConfigStore(conf)
 	_, _ = cm.CreateTeam(ctx, "myteam", "", LeaderAgentName, "")
 	mw.setTeamName("myteam")
 
@@ -443,7 +443,7 @@ func TestLifecycleManager_CleanupExitedTeammate_UnassignErr(t *testing.T) {
 	ctx := context.Background()
 	teamName := "myteam"
 
-	cm := conf
+	cm := newConfigStore(conf)
 	_, _ = cm.CreateTeam(ctx, teamName, "", LeaderAgentName, "")
 	_ = cm.AddMember(ctx, teamName, teamMember{Name: "worker", JoinedAt: time.Now()})
 
@@ -482,7 +482,7 @@ func TestLifecycleManager_RemoveTeammate_UnassignError(t *testing.T) {
 	ctx := context.Background()
 	teamName := "myteam"
 
-	cm := conf
+	cm := newConfigStore(conf)
 	_, _ = cm.CreateTeam(ctx, teamName, "", LeaderAgentName, "")
 	_ = cm.AddMember(ctx, teamName, teamMember{Name: "worker", JoinedAt: time.Now()})
 
@@ -508,10 +508,10 @@ func TestLifecycleManager_SetupMailbox(t *testing.T) {
 	ctx := context.Background()
 	teamName := "myteam"
 
-	cm := conf
+	cm := newConfigStore(conf)
 	_, _ = cm.CreateTeam(ctx, teamName, "", LeaderAgentName, "")
 
-	err := lm.setupMailbox(ctx, teamName, "worker", &MailboxSourceConfig{
+	err := lm.setupMailbox(ctx, teamName, "worker", &mailboxSourceConfig{
 		OwnerName: "worker",
 		Role:      teamRoleTeammate,
 	})

@@ -51,6 +51,7 @@ type lifecycleManager struct {
 	router     *sourceRouter                                                    // multi-agent message routing
 	pumpMgr    *pumpManager                                                     // mailbox pump goroutine management
 	teamCfg    *Config                                                          // team configuration (Backend, BaseDir, etc.)
+	store      *configStore                                                     // config.json read-modify-write operations
 	runnerConf *RunnerConfig                                                    // full runner config, needed for teammate creation
 	isLeader   bool                                                             // whether this agent is the team leader
 	logger     Logger                                                           // logger instance
@@ -63,6 +64,7 @@ func newLifecycleManager(teamCfg *Config, runnerConf *RunnerConfig, isLeader boo
 		router:     router,
 		pumpMgr:    pumpMgr,
 		teamCfg:    teamCfg,
+		store:      newConfigStore(teamCfg),
 		runnerConf: runnerConf,
 		isLeader:   isLeader,
 		logger:     runnerConf.logger(),
@@ -111,7 +113,7 @@ func (lm *lifecycleManager) plantaskMW() plantask.Middleware {
 
 // hasMember checks whether the given member exists in the team configuration.
 func (lm *lifecycleManager) hasMember(ctx context.Context, teamName, memberName string) (bool, error) {
-	return lm.teamCfg.HasMember(ctx, teamName, memberName)
+	return lm.store.HasMember(ctx, teamName, memberName)
 }
 
 // mailbox creates a new mailbox instance for the given team and owner.
@@ -152,18 +154,74 @@ func (lm *lifecycleManager) startTeammateRunner(parentCtx context.Context,
 	})
 }
 
+// teardownOptions controls how teardownTeammate performs a teammate removal.
+type teardownOptions struct {
+	// stopRuntime cancels the teammate goroutine and unregisters its mailbox/loop
+	// before touching config. Spawn-failure cleanup leaves this false because the
+	// runner was never registered.
+	stopRuntime bool
+	// unassignTasks reassigns the member's owned tasks back to the pool. Spawn
+	// failure happens before any task could be owned, so it leaves this false.
+	unassignTasks bool
+}
+
+// teardownResult reports what teardownTeammate did so callers can decide on
+// follow-up actions (e.g. leader notification).
+type teardownResult struct {
+	firstStop  bool
+	unassigned []string
+}
+
+// teardownTeammate is the single, idempotent removal path shared by the
+// graceful (removeTeammate), goroutine-exit (cleanupExitedTeammate), and
+// spawn-failure (cleanupFailedTeammateSpawn) flows. It performs, in order:
+// stop runtime (optional) → unassign tasks (optional) → RemoveMember →
+// delete inbox file. Each step is best-effort: errors are returned joined so the
+// caller can log them, but later steps always run so a teammate can never linger
+// half-removed in config.
+func (lm *lifecycleManager) teardownTeammate(ctx context.Context, teamName, memberName string, opts teardownOptions) (teardownResult, error) {
+	var res teardownResult
+	var errs []error
+
+	if opts.stopRuntime {
+		res.firstStop = lm.stopTeammateRuntime(ctx, teamName, memberName)
+	} else {
+		// No runtime to stop, but still detach any messaging registrations so a
+		// failed spawn does not leave a dangling mailbox/loop behind.
+		lm.pumpMgr.UnsetMailbox(memberName)
+		lm.router.UnregisterLoop(memberName)
+	}
+
+	if opts.unassignTasks {
+		unassigned, unassignErr := lm.unassignMemberTasks(ctx, memberName)
+		if unassignErr != nil {
+			errs = append(errs, fmt.Errorf("unassign tasks for %q: %w", memberName, unassignErr))
+		}
+		res.unassigned = unassigned
+	}
+
+	if removeErr := lm.store.RemoveMember(ctx, teamName, memberName); removeErr != nil {
+		errs = append(errs, fmt.Errorf("remove member %q: %w", memberName, removeErr))
+	}
+
+	// Delete inbox file to prevent a same-name teammate from inheriting stale
+	// messages. The per-inbox lock is reference counted inside the mailbox
+	// operations (ForName/Release) and reclaimed automatically once no send/read
+	// holds it, so there is nothing to remove explicitly here.
+	if delErr := lm.teamCfg.Backend.Delete(ctx, &DeleteRequest{FilePath: lm.inboxPath(teamName, memberName)}); delErr != nil {
+		errs = append(errs, fmt.Errorf("delete inbox for %q: %w", memberName, delErr))
+	}
+
+	return res, joinErrors(errs...)
+}
+
 // cleanupFailedTeammateSpawn reverses a partially-completed teammate spawn:
 // removes the member from config, deletes the inbox file, and unregisters
 // the mailbox source and loop.
 func (lm *lifecycleManager) cleanupFailedTeammateSpawn(ctx context.Context, teamName, memberName string) {
-	if err := lm.teamCfg.RemoveMember(ctx, teamName, memberName); err != nil {
-		lm.logger.Printf("cleanupFailedTeammateSpawn: remove member %q: %v", memberName, err)
+	if _, err := lm.teardownTeammate(ctx, teamName, memberName, teardownOptions{}); err != nil {
+		lm.logger.Printf("cleanupFailedTeammateSpawn: %v", err)
 	}
-	if err := lm.teamCfg.Backend.Delete(ctx, &DeleteRequest{FilePath: lm.inboxPath(teamName, memberName)}); err != nil {
-		lm.logger.Printf("cleanupFailedTeammateSpawn: delete inbox for %q: %v", memberName, err)
-	}
-	lm.pumpMgr.UnsetMailbox(memberName)
-	lm.router.UnregisterLoop(memberName)
 }
 
 // stopTeammateRuntime cancels the teammate's context and unregisters
@@ -191,25 +249,13 @@ func (lm *lifecycleManager) stopTeammateRuntime(ctx context.Context, teamName, m
 // goroutine exits (gracefully or not). It stops the runtime, unassigns tasks,
 // removes the member from config, and optionally notifies the leader.
 func (lm *lifecycleManager) cleanupExitedTeammate(ctx context.Context, teamName, memberName string) {
-	// Same order as removeTeammate: stop runtime first (idempotent if already
-	// stopped), then unassign tasks, then remove from config.
-	firstStop := lm.stopTeammateRuntime(ctx, teamName, memberName)
-	unassigned, unassignErr := lm.unassignMemberTasks(ctx, memberName)
-	if unassignErr != nil {
-		lm.logger.Printf("cleanupExitedTeammate: unassign tasks for %q: %v", memberName, unassignErr)
+	res, err := lm.teardownTeammate(ctx, teamName, memberName, teardownOptions{
+		stopRuntime:   true,
+		unassignTasks: true,
+	})
+	if err != nil {
+		lm.logger.Printf("cleanupExitedTeammate: %v", err)
 	}
-	if err := lm.teamCfg.RemoveMember(ctx, teamName, memberName); err != nil {
-		lm.logger.Printf("cleanupExitedTeammate: remove member %q: %v", memberName, err)
-	}
-	// Delete inbox file to prevent a same-name teammate from inheriting stale messages.
-	if err := lm.teamCfg.Backend.Delete(ctx, &DeleteRequest{FilePath: lm.inboxPath(teamName, memberName)}); err != nil {
-		lm.logger.Printf("cleanupExitedTeammate: delete inbox for %q: %v", memberName, err)
-	}
-	// The per-inbox lock is reference counted inside the mailbox operations
-	// (ForName/Release), so it is reclaimed automatically once no send/read is in
-	// flight. No explicit removal is needed, which also avoids the previous hazard
-	// where a hard delete could hand a concurrent sender a second lock instance
-	// for the same name.
 
 	// Only send a terminated notification when this is the first cleanup for
 	// the teammate (i.e. a non-graceful exit such as crash or context cancel).
@@ -217,42 +263,19 @@ func (lm *lifecycleManager) cleanupExitedTeammate(ctx context.Context, teamName,
 	// path (removeTeammate → stopTeammateRuntime), firstStop is false and the
 	// notification has already been sent via OnShutdownResponse — skip to avoid
 	// duplicate notifications to the leader.
-	if firstStop {
-		lm.notifyLeaderTeammateTerminated(ctx, teamName, memberName, unassigned)
+	if res.firstStop {
+		lm.notifyLeaderTeammateTerminated(ctx, teamName, memberName, res.unassigned)
 	}
 }
 
 // removeTeammate performs a graceful removal: stops the runtime, unassigns
 // owned tasks, and removes the member from the team config.
 func (lm *lifecycleManager) removeTeammate(ctx context.Context, teamName, memberName string) (unassigned []string, firstStop bool, err error) {
-	// Stop the runtime first so a failed cleanup does not leave a live teammate
-	// that is no longer reachable through the team config.
-	firstStop = lm.stopTeammateRuntime(ctx, teamName, memberName)
-
-	unassigned, unassignErr := lm.unassignMemberTasks(ctx, memberName)
-
-	// Always attempt RemoveMember even if unassign failed, so the teammate
-	// doesn't linger in config as a "dead" member that others try to message.
-	if removeErr := lm.teamCfg.RemoveMember(ctx, teamName, memberName); removeErr != nil {
-		if unassignErr != nil {
-			return nil, firstStop, fmt.Errorf("unassign tasks for %q: %v; remove member: %w", memberName, unassignErr, removeErr)
-		}
-		return unassigned, firstStop, fmt.Errorf("remove member %q: %w", memberName, removeErr)
-	}
-
-	// Delete inbox file to prevent a same-name teammate from inheriting stale messages.
-	if err := lm.teamCfg.Backend.Delete(ctx, &DeleteRequest{FilePath: lm.inboxPath(teamName, memberName)}); err != nil {
-		lm.logger.Printf("removeTeammate: delete inbox for %q: %v", memberName, err)
-	}
-	// The per-inbox lock is reference counted inside the mailbox operations
-	// (ForName/Release) and reclaimed automatically once no send/read holds it,
-	// so there is nothing to remove explicitly here.
-
-	if unassignErr != nil {
-		return nil, firstStop, fmt.Errorf("unassign tasks for %q: %w", memberName, unassignErr)
-	}
-
-	return unassigned, firstStop, nil
+	res, teardownErr := lm.teardownTeammate(ctx, teamName, memberName, teardownOptions{
+		stopRuntime:   true,
+		unassignTasks: true,
+	})
+	return res.unassigned, res.firstStop, teardownErr
 }
 
 // unassignMemberTasks delegates to plantask Middleware which uses proper locking
@@ -297,10 +320,10 @@ func (lm *lifecycleManager) notifyLeaderTeammateTerminated(ctx context.Context, 
 	_, _ = lm.router.Push(item)
 }
 
-// setupMailbox initializes the inbox file, registers a MailboxMessageSource on the router,
+// setupMailbox initializes the inbox file, registers a mailboxMessageSource on the router,
 // and starts the mailbox pump goroutine. This ensures no gap between inbox creation and
 // pump startup where messages could be lost.
-func (lm *lifecycleManager) setupMailbox(ctx context.Context, teamName, agentName string, sourceCfg *MailboxSourceConfig) error {
+func (lm *lifecycleManager) setupMailbox(ctx context.Context, teamName, agentName string, sourceCfg *mailboxSourceConfig) error {
 	if err := lm.initInbox(ctx, teamName, agentName); err != nil {
 		return fmt.Errorf("create inbox file for %s: %w", agentName, err)
 	}

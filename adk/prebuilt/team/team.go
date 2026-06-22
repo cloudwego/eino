@@ -52,8 +52,8 @@ type Config struct {
 	initOnce sync.Once
 
 	// Interval is the interval in assistant turns between task reminders.
-	// Default is 10.
-	// Set to 0 to disable task reminders.
+	// The zero value (i.e. leaving this field unset) selects the default of 10.
+	// Set to a negative value to disable task reminders entirely.
 	Interval int
 }
 

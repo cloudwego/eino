@@ -19,6 +19,7 @@ package team
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -59,7 +60,7 @@ func TestPumpManager_SetMailbox(t *testing.T) {
 			return []string{"team-lead", "worker"}, nil
 		},
 	}
-	ms := newMailboxMessageSource(mb, &MailboxSourceConfig{
+	ms := newMailboxMessageSource(mb, &mailboxSourceConfig{
 		OwnerName: "worker",
 		Role:      teamRoleTeammate,
 	})
@@ -92,7 +93,7 @@ func TestPumpManager_UnsetMailbox(t *testing.T) {
 			return []string{"team-lead", "worker"}, nil
 		},
 	}
-	ms := newMailboxMessageSource(mb, &MailboxSourceConfig{
+	ms := newMailboxMessageSource(mb, &mailboxSourceConfig{
 		OwnerName: "worker",
 		Role:      teamRoleTeammate,
 	})
@@ -149,7 +150,7 @@ func TestPumpManager_StartPump_NoLoop(t *testing.T) {
 			return []string{"team-lead", "worker"}, nil
 		},
 	}
-	ms := newMailboxMessageSource(mb, &MailboxSourceConfig{
+	ms := newMailboxMessageSource(mb, &mailboxSourceConfig{
 		OwnerName: "worker",
 		Role:      teamRoleTeammate,
 	})
@@ -197,7 +198,7 @@ func TestPumpManager_StartPump_StartsAndUnsetStops(t *testing.T) {
 	inboxPath := inboxFilePath("/tmp/test", "myteam", "worker")
 	_ = backend.Write(context.Background(), &WriteRequest{FilePath: inboxPath, Content: "[]"})
 
-	ms := newMailboxMessageSource(mb, &MailboxSourceConfig{
+	ms := newMailboxMessageSource(mb, &mailboxSourceConfig{
 		OwnerName: "worker",
 		Role:      teamRoleTeammate,
 	})
@@ -260,7 +261,7 @@ func TestRunPump_TryReceiveProcessesPreExistingMessages(t *testing.T) {
 	_ = backend.Write(context.Background(), &WriteRequest{FilePath: inboxPath, Content: msgJSON})
 	_ = backend.Write(context.Background(), &WriteRequest{FilePath: leaderInboxPath, Content: "[]"})
 
-	ms := newMailboxMessageSource(mb, &MailboxSourceConfig{
+	ms := newMailboxMessageSource(mb, &mailboxSourceConfig{
 		OwnerName: "worker",
 		Role:      teamRoleTeammate,
 	})
@@ -315,7 +316,7 @@ func TestRunPump_WaitForItemProcessesDelayedMessages(t *testing.T) {
 	_ = backend.Write(context.Background(), &WriteRequest{FilePath: inboxPath, Content: "[]"})
 	_ = backend.Write(context.Background(), &WriteRequest{FilePath: leaderInboxPath, Content: "[]"})
 
-	ms := newMailboxMessageSource(mb, &MailboxSourceConfig{
+	ms := newMailboxMessageSource(mb, &mailboxSourceConfig{
 		OwnerName: "worker",
 		Role:      teamRoleTeammate,
 	})
@@ -377,7 +378,7 @@ func TestRunPump_ExitsWhenLoopStopped(t *testing.T) {
 	_ = backend.Write(context.Background(), &WriteRequest{FilePath: inboxPath, Content: msgJSON})
 	_ = backend.Write(context.Background(), &WriteRequest{FilePath: leaderInboxPath, Content: "[]"})
 
-	ms := newMailboxMessageSource(mb, &MailboxSourceConfig{
+	ms := newMailboxMessageSource(mb, &mailboxSourceConfig{
 		OwnerName: "worker",
 		Role:      teamRoleTeammate,
 	})
@@ -445,7 +446,7 @@ func TestRunPump_WaitForItemErrorLogsAndExits(t *testing.T) {
 	_ = backend.Write(context.Background(), &WriteRequest{FilePath: inboxPath, Content: "[]"})
 	_ = backend.Write(context.Background(), &WriteRequest{FilePath: leaderInboxPath, Content: "[]"})
 
-	ms := newMailboxMessageSource(mb, &MailboxSourceConfig{
+	ms := newMailboxMessageSource(mb, &mailboxSourceConfig{
 		OwnerName:           "worker",
 		Role:                teamRoleLeader,
 		ExitWhenNoTeammates: true,
@@ -505,7 +506,7 @@ func TestRunPump_TryReceiveErrorLogsAndExits(t *testing.T) {
 	inboxPath := inboxFilePath("/tmp/test", "myteam", "worker")
 	_ = backend.Write(context.Background(), &WriteRequest{FilePath: inboxPath, Content: "INVALID_JSON"})
 
-	ms := newMailboxMessageSource(mb, &MailboxSourceConfig{
+	ms := newMailboxMessageSource(mb, &mailboxSourceConfig{
 		OwnerName: "worker",
 		Role:      teamRoleTeammate,
 	})
@@ -560,7 +561,7 @@ func TestRunPump_ReplacesOldPump(t *testing.T) {
 	_ = backend.Write(context.Background(), &WriteRequest{FilePath: inboxPath, Content: "[]"})
 	_ = backend.Write(context.Background(), &WriteRequest{FilePath: leaderInboxPath, Content: "[]"})
 
-	ms := newMailboxMessageSource(mb, &MailboxSourceConfig{
+	ms := newMailboxMessageSource(mb, &mailboxSourceConfig{
 		OwnerName: "worker",
 		Role:      teamRoleTeammate,
 	})
@@ -590,4 +591,53 @@ func TestRunPump_ReplacesOldPump(t *testing.T) {
 	pm.mu.Unlock()
 	assert.NotNil(t, secondHandle)
 	assert.NotSame(t, firstHandle, secondHandle)
+}
+
+func TestPumpManager_StartPump_LogsWhenNoMailbox(t *testing.T) {
+	router := newSourceRouter(LeaderAgentName, nopLogger{})
+
+	var logged string
+	logger := &testLogger{onPrintf: func(format string, args ...any) {
+		logged += fmt.Sprintf(format, args...)
+	}}
+	pm := newPumpManager(router, logger)
+
+	pm.StartPump(context.Background(), "worker")
+
+	assert.Contains(t, logged, "no mailbox registered")
+}
+
+func TestPumpManager_StartPump_LogsWhenNoLoop(t *testing.T) {
+	router := newSourceRouter(LeaderAgentName, nopLogger{})
+
+	var logged string
+	logger := &testLogger{onPrintf: func(format string, args ...any) {
+		logged += fmt.Sprintf(format, args...)
+	}}
+	pm := newPumpManager(router, logger)
+
+	backend := newInMemoryBackend()
+	locks := newNamedLockManager()
+	mb := &mailbox{
+		conf: &mailboxConfig{
+			Backend:      backend,
+			BaseDir:      "/tmp/test",
+			TeamName:     "myteam",
+			OwnerName:    "worker",
+			PollInterval: 10 * time.Millisecond,
+		},
+		inboxLocks: locks,
+		listMembers: func(ctx context.Context) ([]string, error) {
+			return []string{"team-lead", "worker"}, nil
+		},
+	}
+	ms := newMailboxMessageSource(mb, &mailboxSourceConfig{
+		OwnerName: "worker",
+		Role:      teamRoleTeammate,
+	})
+	pm.SetMailbox("worker", ms)
+
+	pm.StartPump(context.Background(), "worker")
+
+	assert.Contains(t, logged, "no TurnLoop registered")
 }
