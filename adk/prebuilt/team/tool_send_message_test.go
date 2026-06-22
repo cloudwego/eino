@@ -884,3 +884,138 @@ func TestSendMessageTool_BuildResult_DefaultCase(t *testing.T) {
 	assert.Equal(t, true, result["success"])
 	assert.Equal(t, "Message sent to worker", result["message"])
 }
+
+// TestSendMessageTool_DeliveryWarning_ResidualMember verifies that a DM to a
+// member listed in config.json but with no running goroutine succeeds yet carries
+// a non-fatal delivery_warning so the model knows the message may sit unread.
+func TestSendMessageTool_DeliveryWarning_ResidualMember(t *testing.T) {
+	mw, conf := newTestTeamMiddleware()
+	ctx := context.Background()
+
+	createTool := newTeamCreateTool(mw)
+	_, err := createTool.InvokableRun(ctx, `{"team_name":"myteam"}`)
+	assert.NoError(t, err)
+
+	teamName := mw.getTeamName()
+
+	cm := newConfigStore(conf)
+	// Member exists in config but is never registered in the teammate registry,
+	// simulating a residual member left by an incomplete cleanup.
+	err = cm.AddMember(ctx, teamName, teamMember{Name: "worker", JoinedAt: time.Now()})
+	assert.NoError(t, err)
+
+	tool, err := newSendMessageTool(mw, LeaderAgentName)
+	assert.NoError(t, err)
+
+	result, err := tool.InvokableRun(ctx, `{"type":"message","recipient":"worker","content":"hello","summary":"greeting"}`)
+	assert.NoError(t, err)
+	assert.Contains(t, result, "success")
+	assert.Contains(t, result, "delivery_warning")
+	assert.Contains(t, result, "no running goroutine")
+}
+
+// TestSendMessageTool_DeliveryWarning_ShutdownRequestResidualMember verifies that
+// a shutdown_request to a residual member also surfaces the delivery_warning.
+func TestSendMessageTool_DeliveryWarning_ShutdownRequestResidualMember(t *testing.T) {
+	mw, conf := newTestTeamMiddleware()
+	ctx := context.Background()
+
+	createTool := newTeamCreateTool(mw)
+	_, err := createTool.InvokableRun(ctx, `{"team_name":"myteam"}`)
+	assert.NoError(t, err)
+
+	teamName := mw.getTeamName()
+
+	cm := newConfigStore(conf)
+	err = cm.AddMember(ctx, teamName, teamMember{Name: "worker", JoinedAt: time.Now()})
+	assert.NoError(t, err)
+
+	tool, err := newSendMessageTool(mw, LeaderAgentName)
+	assert.NoError(t, err)
+
+	result, err := tool.InvokableRun(ctx, `{"type":"shutdown_request","recipient":"worker"}`)
+	assert.NoError(t, err)
+	assert.Contains(t, result, "success")
+	assert.Contains(t, result, "delivery_warning")
+}
+
+// TestSendMessageTool_DeliveryWarning_AbsentForLiveTeammate verifies that no
+// delivery_warning is emitted when the recipient has a live runner registered.
+func TestSendMessageTool_DeliveryWarning_AbsentForLiveTeammate(t *testing.T) {
+	mw, conf := newTestTeamMiddleware()
+	ctx := context.Background()
+
+	createTool := newTeamCreateTool(mw)
+	_, err := createTool.InvokableRun(ctx, `{"team_name":"myteam"}`)
+	assert.NoError(t, err)
+
+	teamName := mw.getTeamName()
+
+	cm := newConfigStore(conf)
+	err = cm.AddMember(ctx, teamName, teamMember{Name: "worker", JoinedAt: time.Now()})
+	assert.NoError(t, err)
+	// Register a live runner for the recipient.
+	mw.lifecycle.registry.register("worker", &teammateHandle{})
+
+	tool, err := newSendMessageTool(mw, LeaderAgentName)
+	assert.NoError(t, err)
+
+	result, err := tool.InvokableRun(ctx, `{"type":"message","recipient":"worker","content":"hello","summary":"greeting"}`)
+	assert.NoError(t, err)
+	assert.Contains(t, result, "success")
+	assert.NotContains(t, result, "delivery_warning")
+}
+
+// TestSendMessageTool_DeliveryWarning_SkippedForTeammateSender verifies that a
+// teammate sender never emits a delivery_warning: it does not own the registry,
+// so it cannot judge liveness, and its messages to the leader are consumed by the
+// leader's own pump (not tracked in the teammate registry).
+func TestSendMessageTool_DeliveryWarning_SkippedForTeammateSender(t *testing.T) {
+	mw, conf := newTestTeamMiddleware()
+	mw.isLeader = false
+	ctx := context.Background()
+
+	createTool := newTeamCreateTool(mw)
+	_, err := createTool.InvokableRun(ctx, `{"team_name":"myteam"}`)
+	assert.NoError(t, err)
+
+	teamName := mw.getTeamName()
+
+	cm := newConfigStore(conf)
+	err = cm.AddMember(ctx, teamName, teamMember{Name: "worker", JoinedAt: time.Now()})
+	assert.NoError(t, err)
+
+	tool, err := newSendMessageTool(mw, "other-worker")
+	assert.NoError(t, err)
+
+	result, err := tool.InvokableRun(ctx, `{"type":"message","recipient":"worker","content":"hi","summary":"note"}`)
+	assert.NoError(t, err)
+	assert.Contains(t, result, "success")
+	assert.NotContains(t, result, "delivery_warning")
+}
+
+// TestSendMessageTool_DeliveryWarning_AbsentForLeaderRecipient verifies that a DM
+// addressed to the leader never warns: the leader's inbox is drained by its own
+// pump, which is not represented in the teammate registry.
+func TestSendMessageTool_DeliveryWarning_AbsentForLeaderRecipient(t *testing.T) {
+	mw, conf := newTestTeamMiddleware()
+	ctx := context.Background()
+
+	createTool := newTeamCreateTool(mw)
+	_, err := createTool.InvokableRun(ctx, `{"team_name":"myteam"}`)
+	assert.NoError(t, err)
+
+	teamName := mw.getTeamName()
+
+	cm := newConfigStore(conf)
+	err = cm.AddMember(ctx, teamName, teamMember{Name: LeaderAgentName, JoinedAt: time.Now()})
+	assert.NoError(t, err)
+
+	tool, err := newSendMessageTool(mw, "worker")
+	assert.NoError(t, err)
+
+	result, err := tool.InvokableRun(ctx, `{"type":"message","recipient":"team-lead","content":"update","summary":"progress"}`)
+	assert.NoError(t, err)
+	assert.Contains(t, result, "success")
+	assert.NotContains(t, result, "delivery_warning")
+}
