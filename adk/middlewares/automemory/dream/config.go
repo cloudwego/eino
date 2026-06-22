@@ -29,7 +29,6 @@ import (
 )
 
 const (
-	defaultSessionKey        = "__eino_automemory_dream_session_id__"
 	defaultMinInterval       = 24 * time.Hour
 	defaultMinTouchedSession = 5
 	defaultScanInterval      = 10 * time.Minute
@@ -58,9 +57,9 @@ type Config[M adk.MessageType] struct {
 	// Required.
 	Model model.BaseModel[M]
 
-	// SessionIDFunc resolves the current session ID.
-	// Optional. Default: a generated session-scoped ID.
-	SessionIDFunc automemory.SessionIDFunc[M]
+	// SessionID is the current logical session ID.
+	// Optional. When empty, dream runs without cross-turn session grouping.
+	SessionID string
 
 	// OnError handles non-fatal runtime errors.
 	// Optional. Default: nil.
@@ -121,9 +120,6 @@ func applyCoreDefaults[M adk.MessageType](cfg *Config[M]) error {
 	if cfg.MemoryDirectory == "" || cfg.MemoryBackend == nil || cfg.Model == nil {
 		return fmt.Errorf("auto dream config: invalid")
 	}
-	if cfg.SessionIDFunc == nil {
-		cfg.SessionIDFunc = defaultSessionIDFunc[M]
-	}
 	return nil
 }
 
@@ -163,15 +159,4 @@ func applyScheduleDefaults[M adk.MessageType](cfg *Config[M]) error {
 		cfg.Schedule.Store = NewLocalStore()
 	}
 	return nil
-}
-
-func defaultSessionIDFunc[M adk.MessageType](ctx context.Context, _ *adk.TypedChatModelAgentState[M]) (string, error) {
-	if v, ok := adk.GetSessionValue(ctx, defaultSessionKey); ok {
-		if s, ok := v.(string); ok && s != "" {
-			return s, nil
-		}
-	}
-	s := fmt.Sprintf("dream-%d", time.Now().UnixNano())
-	adk.AddSessionValue(ctx, defaultSessionKey, s)
-	return s, nil
 }

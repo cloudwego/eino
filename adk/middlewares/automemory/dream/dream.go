@@ -70,18 +70,14 @@ func Run[M adk.MessageType](ctx context.Context, cfg *Config[M], req *RunRequest
 	}
 	sessionID := strings.TrimSpace(req.SessionID)
 	if sessionID == "" {
-		sessionID, err = cfg.SessionIDFunc(ctx, nil)
-		if err != nil {
-			m.onErr(ctx, stageResolveSessionID, err)
-			return err
-		}
+		sessionID = strings.TrimSpace(cfg.SessionID)
 	}
 	return m.runDream(ctx, sessionID, nil)
 }
 
 type RunRequest struct {
 	// SessionID identifies the current session.
-	// Optional. When empty, `SessionIDFunc` is used.
+	// Optional. When empty, Config.SessionID is used.
 	SessionID string
 }
 
@@ -125,11 +121,7 @@ func (m *middleware[M]) AfterAgent(ctx context.Context, state *adk.TypedChatMode
 	if m == nil || m.cfg == nil || m.cfg.Schedule == nil {
 		return ctx, nil
 	}
-	sessionID, err := m.cfg.SessionIDFunc(ctx, state)
-	if err != nil {
-		m.onErr(ctx, stageResolveSessionID, err)
-		return ctx, nil
-	}
+	sessionID := strings.TrimSpace(m.cfg.SessionID)
 	now := m.now()
 	if err := m.cfg.Schedule.Store.RecordSessionTouch(ctx, m.resolvedMemoryDir, sessionID, now); err != nil {
 		m.onErr(ctx, stageRecordTouch, err)

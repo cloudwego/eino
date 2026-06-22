@@ -807,9 +807,13 @@ func (m *middleware[M]) AfterAgent(ctx context.Context, state *adk.TypedChatMode
 		return ctx, nil
 
 	case WriteModeAsync:
-		if sessionID == "" {
-			sessionID = getOrInitWriteSessionID(ctx)
-			coordKey = m.coordinatorKey(sessionID)
+		if coordKey == "" {
+			if err := m.runMemoryExtractionAgent(ctx, state.Messages, cursor, state.ToolInfos); err != nil {
+				m.onErr(ctx, OnErrorStageMemoryWriteSync, err)
+				return ctx, nil
+			}
+			state = markWriteCursor(state, len(state.Messages))
+			return ctx, nil
 		}
 		snap, err := buildPendingSnapshot(state.Messages, cursor, state.ToolInfos)
 		if err != nil {

@@ -105,7 +105,6 @@ func TestCommonOptionsAndFilteringContracts(t *testing.T) {
 		WithSkipTransferMessages(),
 		withSharedParentSession(),
 		WithCallbacks(nil),
-		WithRefreshToolInfos(),
 	)
 	require.NotNil(t, base)
 	assert.Equal(t, values, base.sessionValues)
@@ -114,7 +113,6 @@ func TestCommonOptionsAndFilteringContracts(t *testing.T) {
 	assert.True(t, base.enableInternalTimelineEvents)
 	assert.True(t, base.skipTransferMessages)
 	assert.True(t, base.sharedParentSession)
-	assert.True(t, base.refreshToolInfos)
 	assert.Len(t, base.handlers, 1)
 
 	custom := GetImplSpecificOptions(&struct{ Seen bool }{}, WrapImplSpecificOptFn(func(o *struct{ Seen bool }) {
@@ -125,7 +123,7 @@ func TestCommonOptionsAndFilteringContracts(t *testing.T) {
 	undesignatedCallback := WithCallbacks(nil)
 	currentCallback := WithCallbacks(nil).DesignateAgent("parent")
 	otherCallback := WithCallbacks(nil).DesignateAgent("child")
-	nonCallback := WithRefreshToolInfos()
+	nonCallback := WithSessionValues(map[string]any{"x": "y"})
 	filtered := filterCallbackHandlersForNestedAgents("parent", []AgentRunOption{
 		undesignatedCallback,
 		currentCallback,

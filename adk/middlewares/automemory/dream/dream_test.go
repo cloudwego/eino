@@ -18,7 +18,6 @@ package dream
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -181,7 +180,7 @@ func TestNew_DoesNotMutateConfig(t *testing.T) {
 
 	_, err := New(ctx, cfg)
 	require.NoError(t, err)
-	require.Nil(t, cfg.SessionIDFunc)
+	require.Empty(t, cfg.SessionID)
 	require.Zero(t, cfg.Schedule.MinInterval)
 	require.Zero(t, cfg.Schedule.MinTouchedSession)
 	require.Zero(t, cfg.Schedule.ScanInterval)
@@ -373,46 +372,19 @@ func TestIntegration_UserPerspective_AgentMiddlewareAutoDream(t *testing.T) {
 	require.Contains(t, string(index), "dream.md")
 }
 
-func TestIntegration_UserPerspective_RunReturnsCallbackErrors(t *testing.T) {
-	ctx := context.Background()
-	tmp := t.TempDir()
-	require.NoError(t, os.WriteFile(filepath.Join(tmp, "MEMORY.md"), []byte(""), 0o644))
-
-	expected := fmt.Errorf("resolve session failed")
-	var onErrStages []string
-	err := Run(ctx, &Config[*schema.Message]{
-		MemoryDirectory: tmp,
-		MemoryBackend:   automemory.NewLocalBackend(),
-		Model:           &dreamModel{},
-		SessionIDFunc: func(context.Context, *adk.TypedChatModelAgentState[*schema.Message]) (string, error) {
-			return "", expected
-		},
-		OnError: func(_ context.Context, stage string, err error) {
-			onErrStages = append(onErrStages, stage+":"+err.Error())
-		},
-	}, nil)
-	require.ErrorIs(t, err, expected)
-	require.Equal(t, []string{stageResolveSessionID + ":" + expected.Error()}, onErrStages)
-}
-
-func TestIntegration_UserPerspective_RunFallsBackToSessionIDFuncWithoutState(t *testing.T) {
+func TestIntegration_UserPerspective_RunFallsBackToConfigSessionIDWithoutRequest(t *testing.T) {
 	ctx := context.Background()
 	tmp := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(tmp, "MEMORY.md"), []byte(""), 0o644))
 
 	model := &dreamModel{}
-	var resolvedState *adk.TypedChatModelAgentState[*schema.Message]
 	err := Run(ctx, &Config[*schema.Message]{
 		MemoryDirectory: tmp,
 		MemoryBackend:   automemory.NewLocalBackend(),
 		Model:           model,
-		SessionIDFunc: func(_ context.Context, state *adk.TypedChatModelAgentState[*schema.Message]) (string, error) {
-			resolvedState = state
-			return "fallback-session", nil
-		},
+		SessionID:       "fallback-session",
 	}, nil)
 	require.NoError(t, err)
-	require.Nil(t, resolvedState)
 
 	raw, err := os.ReadFile(filepath.Join(tmp, "dream.md"))
 	require.NoError(t, err)

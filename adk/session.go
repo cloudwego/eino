@@ -59,7 +59,7 @@ var ErrEventIDOutOfRange = errors.New("adk: session event id out of range")
 var ErrRollbackTargetNotFound = errors.New("adk: rollback target turn not found")
 var ErrInvalidRollbackTarget = errors.New("adk: invalid rollback target")
 var ErrRollbackTargetInactive = errors.New("adk: rollback target is not active")
-var ErrSessionHeadChanged = errors.New("adk: session committed turn_end head changed")
+var ErrSessionHeadChanged = errors.New("adk: session committed idle head changed")
 var ErrSessionBusy = errors.New("adk: session already has an active handle")
 var ErrDuplicateEventID = errors.New("adk: duplicate session event_id")
 
@@ -129,10 +129,6 @@ type AppendSessionEventsRequest[M MessageType] struct {
 // SessionEvent is the JSON-serializable persistence format for session events.
 // Exactly one semantic content field is active per event. The MessagesReplaced field
 // uses pointer-to-slice semantics (nil = absent, non-nil = active replacement).
-//
-// TurnEndState is persisted as a SessionEvent with the TurnEnd field set. The Messages
-// field within TurnEnd is intentionally left nil — messages are reconstructed from the
-// event log on read.
 type SessionEvent[M MessageType] struct {
 	// SessionID identifies the session timeline this event belongs to. Runner-owned
 	// root events use the runner SessionID; nested AgentTool events use their
@@ -169,7 +165,7 @@ type SessionEvent[M MessageType] struct {
 	MessageUpdated   *MessageUpdatedEvent[M]  `json:"message_updated,omitempty"`
 	MessageInserted  *MessageInsertedEvent[M] `json:"message_inserted,omitempty"`
 	MessagesDeleted  *MessagesDeletedEvent    `json:"messages_deleted,omitempty"`
-	TurnEnd          *TurnEndState[M]         `json:"turn_end,omitempty"`
+	ModelContext     *ModelContextEvent       `json:"model_context,omitempty"`
 	Rollback         *SessionRollbackEvent    `json:"rollback,omitempty"`
 
 	Lifecycle *LifecycleEvent    `json:"lifecycle,omitempty"`
@@ -189,7 +185,7 @@ const (
 	SessionEventMessageUpdated   SessionEventKind = "message_updated"
 	SessionEventMessageInserted  SessionEventKind = "message_inserted"
 	SessionEventMessagesDeleted  SessionEventKind = "messages_deleted"
-	SessionEventTurnEnd          SessionEventKind = "turn_end"
+	SessionEventModelContext     SessionEventKind = "model_context"
 	SessionEventRollback         SessionEventKind = "rollback"
 
 	SessionEventSessionStatusRunning     SessionEventKind = "session.status_running"
@@ -209,23 +205,16 @@ const (
 )
 
 type LifecycleEvent struct {
-	Scope      LifecycleScope  `json:"scope,omitempty"`
 	State      SessionRunState `json:"state,omitempty"`
 	StopReason *StopReason     `json:"stop_reason,omitempty"`
 }
 
 type SessionRollbackEvent struct {
-	ToEventID             string `json:"to_event_id"`
-	ToTurnID              string `json:"to_turn_id,omitempty"`
-	PreviousHeadTurnEndID string `json:"previous_head_turn_end_id,omitempty"`
-	PreviousHeadTurnID    string `json:"previous_head_turn_id,omitempty"`
+	ToEventID                 string `json:"to_event_id"`
+	ToTurnID                  string `json:"to_turn_id,omitempty"`
+	PreviousHeadCommitEventID string `json:"previous_head_commit_event_id,omitempty"`
+	PreviousHeadTurnID        string `json:"previous_head_turn_id,omitempty"`
 }
-
-type LifecycleScope string
-
-const (
-	LifecycleScopeSession LifecycleScope = "session"
-)
 
 type SessionRunState string
 
@@ -237,6 +226,11 @@ const (
 
 type StopReason struct {
 	Type string `json:"type,omitempty"`
+}
+
+type ModelContextEvent struct {
+	ToolInfos         []*schema.ToolInfo `json:"tool_infos,omitempty"`
+	DeferredToolInfos []*schema.ToolInfo `json:"deferred_tool_infos,omitempty"`
 }
 
 type SessionErrorEvent struct {
@@ -476,12 +470,11 @@ type SessionConfig[M MessageType] struct {
 	SessionAcquireTimeout time.Duration
 }
 
-// TurnEndState is the agent-visible state materialized at a successful turn boundary.
-type TurnEndState[M MessageType] struct {
+type reconstructedSessionState[M MessageType] struct {
 	Messages          []M
 	ToolInfos         []*schema.ToolInfo
 	DeferredToolInfos []*schema.ToolInfo
-	SessionValues     map[string]any
+	sawModelContext   bool
 }
 
 type runnerSessionCheckpoint struct {
@@ -492,9 +485,6 @@ type runnerSessionCheckpoint struct {
 }
 
 func init() {
-	schema.RegisterName[*TurnEndState[*schema.Message]]("_eino_adk_turn_end_state")
-	schema.RegisterName[*TurnEndState[*schema.AgenticMessage]]("_eino_adk_agentic_turn_end_state")
-
 	// Register SessionEvent and helper types for HumanReadableSerializer.
 	schema.RegisterName[*SessionEvent[*schema.Message]]("_eino_adk_session_event")
 	schema.RegisterName[*SessionEvent[*schema.AgenticMessage]]("_eino_adk_agentic_session_event")
@@ -503,6 +493,7 @@ func init() {
 	schema.RegisterName[*MessageInsertedEvent[*schema.Message]]("_eino_adk_message_inserted_event")
 	schema.RegisterName[*MessageInsertedEvent[*schema.AgenticMessage]]("_eino_adk_agentic_message_inserted_event")
 	schema.RegisterName[*MessagesDeletedEvent]("_eino_adk_messages_deleted_event")
+	schema.RegisterName[*ModelContextEvent]("_eino_adk_model_context_event")
 	schema.RegisterName[*LifecycleEvent]("_eino_adk_lifecycle_event")
 	schema.RegisterName[*SessionErrorEvent]("_eino_adk_session_error_event")
 	schema.RegisterName[*RetryStatus]("_eino_adk_retry_status")
@@ -687,11 +678,6 @@ func normalizeAgentSessionEventWithAssigner[M MessageType](
 		event.Timestamp = ts
 		se.Timestamp = ts
 	}
-	if se.TurnEnd != nil {
-		turnEnd := *se.TurnEnd
-		turnEnd.Messages = nil
-		se.TurnEnd = &turnEnd
-	}
 	event.EventID = se.EventID
 	event.Timestamp = se.Timestamp
 	event.SessionEvent = &se
@@ -736,8 +722,11 @@ func ClassifySessionEvent[M MessageType](event *SessionEvent[M]) (SessionEventKi
 		}
 		add(SessionEventMessagesDeleted)
 	}
-	if event.TurnEnd != nil {
-		add(SessionEventTurnEnd)
+	if event.ModelContext != nil {
+		if err := validateModelContextEvent(event.ModelContext); err != nil {
+			return "", err
+		}
+		add(SessionEventModelContext)
 	}
 	if event.Rollback != nil {
 		if event.EventID == "" {
@@ -764,37 +753,11 @@ func ClassifySessionEvent[M MessageType](event *SessionEvent[M]) (SessionEventKi
 		add(SessionEventSessionError)
 	}
 	if event.Span != nil {
-		if (event.Span.Model != nil) == (event.Span.Tool != nil) {
-			return "", errors.New("span event must populate exactly one of Model or Tool")
+		kind, err := classifySpanSessionEvent(event.Span)
+		if err != nil {
+			return "", err
 		}
-		switch event.Span.Kind {
-		case SpanKindModel:
-			if event.Span.Model == nil {
-				return "", errors.New("model span requires Span.Model meta")
-			}
-			switch {
-			case !event.Span.StartedAt.IsZero() && event.Span.EndedAt.IsZero():
-				add(SessionEventSpanModelRequestStart)
-			case !event.Span.EndedAt.IsZero():
-				add(SessionEventSpanModelRequestEnd)
-			default:
-				return "", errors.New("model span must have start or end timestamp")
-			}
-		case SpanKindTool:
-			if event.Span.Tool == nil {
-				return "", errors.New("tool span requires Span.Tool meta")
-			}
-			switch {
-			case !event.Span.StartedAt.IsZero() && event.Span.EndedAt.IsZero():
-				add(SessionEventSpanToolCallStart)
-			case !event.Span.EndedAt.IsZero():
-				add(SessionEventSpanToolCallEnd)
-			default:
-				return "", errors.New("tool span must have start or end timestamp")
-			}
-		default:
-			return "", fmt.Errorf("unknown span kind %q", event.Span.Kind)
-		}
+		add(kind)
 	}
 	if event.UserObservation != nil {
 		if event.UserObservation.Interrupt == nil {
@@ -820,9 +783,46 @@ func ClassifySessionEvent[M MessageType](event *SessionEvent[M]) (SessionEventKi
 	return kinds[0], nil
 }
 
+func classifySpanSessionEvent(span *SpanEvent) (SessionEventKind, error) {
+	if (span.Model != nil) == (span.Tool != nil) {
+		return "", errors.New("span event must populate exactly one of Model or Tool")
+	}
+	switch span.Kind {
+	case SpanKindModel:
+		if span.Model == nil {
+			return "", errors.New("model span requires Span.Model meta")
+		}
+		switch {
+		case !span.StartedAt.IsZero() && span.EndedAt.IsZero():
+			return SessionEventSpanModelRequestStart, nil
+		case !span.EndedAt.IsZero():
+			return SessionEventSpanModelRequestEnd, nil
+		default:
+			return "", errors.New("model span must have start or end timestamp")
+		}
+	case SpanKindTool:
+		if span.Tool == nil {
+			return "", errors.New("tool span requires Span.Tool meta")
+		}
+		switch {
+		case !span.StartedAt.IsZero() && span.EndedAt.IsZero():
+			return SessionEventSpanToolCallStart, nil
+		case !span.EndedAt.IsZero():
+			return SessionEventSpanToolCallEnd, nil
+		default:
+			return "", errors.New("tool span must have start or end timestamp")
+		}
+	default:
+		return "", fmt.Errorf("unknown span kind %q", span.Kind)
+	}
+}
+
 // NormalizeSessionEventKind fills an empty Kind from the active payload and
 // rejects mismatches between Kind and payload shape.
 func NormalizeSessionEventKind[M MessageType](event *SessionEvent[M]) error {
+	if event != nil && event.Kind == "turn_end" {
+		return nil
+	}
 	kind, err := ClassifySessionEvent(event)
 	if err != nil {
 		return err
@@ -848,7 +848,7 @@ func ValidateEmittedSessionEventKind[M MessageType](event *SessionEvent[M]) erro
 
 func isSessionDurableBoundaryKind(kind SessionEventKind) bool {
 	switch kind {
-	case SessionEventMessage, SessionEventTurnEnd, SessionEventAgentInterrupt:
+	case SessionEventMessage, SessionEventSessionStatusIdle, SessionEventAgentInterrupt:
 		return true
 	default:
 		return false
@@ -1073,7 +1073,7 @@ func stripSessionEventFields[M MessageType](event *TypedAgentEvent[M]) *TypedAge
 }
 
 // applySessionEvent applies a single SessionEvent to the message array, mutating in place.
-// TurnEnd events are metadata-only and do not mutate messages.
+// Non-message events are ignored.
 func applySessionEvent[M MessageType](messages *[]M, event *SessionEvent[M]) error {
 	if !isContextSessionEvent(event) {
 		return nil
@@ -1087,15 +1087,6 @@ func isContextSessionEvent[M MessageType](event *SessionEvent[M]) bool {
 	}
 	return !isNilMessage(event.Message) || event.MessagesReplaced != nil ||
 		event.MessageUpdated != nil || event.MessageInserted != nil || event.MessagesDeleted != nil
-}
-
-func isTurnEndSessionEvent[M MessageType](event *SessionEvent[M]) bool {
-	return event != nil && event.TurnEnd != nil
-}
-
-func isTurnEndAgentEvent[M MessageType](event *TypedAgentEvent[M]) bool {
-	return event != nil && event.SessionEvent != nil &&
-		event.SessionEvent.Kind == SessionEventTurnEnd && event.SessionEvent.TurnEnd != nil
 }
 
 func applyContextSessionEvent[M MessageType](messages []M, event *SessionEvent[M]) ([]M, error) {
@@ -1150,19 +1141,6 @@ func applyContextSessionEventInPlace[M MessageType](event *SessionEvent[M], out 
 		}
 	}
 	return nil
-}
-
-func applyTurnEndSessionEvent[M MessageType](state *TurnEndState[M], event *SessionEvent[M]) *TurnEndState[M] {
-	if state == nil {
-		state = &TurnEndState[M]{}
-	}
-	if event == nil || event.TurnEnd == nil {
-		return state
-	}
-	state.ToolInfos = event.TurnEnd.ToolInfos
-	state.DeferredToolInfos = event.TurnEnd.DeferredToolInfos
-	state.SessionValues = event.TurnEnd.SessionValues
-	return state
 }
 
 // replaceMessageByID finds the message with the given ID and replaces it.
@@ -1225,21 +1203,49 @@ func validateMessageIDs(field string, ids []string) error {
 	return nil
 }
 
-type sessionReconstructResult[M MessageType] struct {
-	state          *TurnEndState[M]
-	inFlightTurnID string // TurnID from events after the last committed TurnEnd (the interrupted turn)
+func validateModelContextEvent(event *ModelContextEvent) error {
+	if event == nil {
+		return nil
+	}
+	if err := validateToolInfoNames("ModelContext.ToolInfos", event.ToolInfos); err != nil {
+		return err
+	}
+	return validateToolInfoNames("ModelContext.DeferredToolInfos", event.DeferredToolInfos)
 }
 
-// modelContextSessionEventKinds is the set of event kinds required to reconstruct
-// model-facing session state (messages + turn metadata). Timeline-only events
-// (lifecycle, span, error, interrupt) are excluded.
-var modelContextSessionEventKinds = []SessionEventKind{
+func validateToolInfoNames(field string, infos []*schema.ToolInfo) error {
+	seen := make(map[string]struct{}, len(infos))
+	for _, info := range infos {
+		if info == nil {
+			continue
+		}
+		if info.Name == "" {
+			return fmt.Errorf("%s must not contain empty tool name", field)
+		}
+		if _, ok := seen[info.Name]; ok {
+			return fmt.Errorf("%s contains duplicate tool name %q", field, info.Name)
+		}
+		seen[info.Name] = struct{}{}
+	}
+	return nil
+}
+
+type sessionReconstructResult[M MessageType] struct {
+	state *reconstructedSessionState[M]
+}
+
+// sessionReplayEventKinds is the set of event kinds required to project the active
+// session log and reconstruct model-facing state.
+var sessionReplayEventKinds = []SessionEventKind{
 	SessionEventMessage,
 	SessionEventMessagesReplaced,
 	SessionEventMessageUpdated,
 	SessionEventMessageInserted,
 	SessionEventMessagesDeleted,
-	SessionEventTurnEnd,
+	SessionEventModelContext,
+	SessionEventSessionStatusIdle,
+	SessionEventAgentInterrupt,
+	SessionEventCancel,
 	SessionEventRollback,
 }
 
@@ -1335,10 +1341,10 @@ func RollbackSession[M MessageType](
 		Timestamp: newEventTimestamp(),
 		Kind:      SessionEventRollback,
 		Rollback: &SessionRollbackEvent{
-			ToEventID:             target.EventID,
-			ToTurnID:              target.TurnID,
-			PreviousHeadTurnEndID: head.EventID,
-			PreviousHeadTurnID:    head.TurnID,
+			ToEventID:                 target.EventID,
+			ToTurnID:                  target.TurnID,
+			PreviousHeadCommitEventID: head.EventID,
+			PreviousHeadTurnID:        head.TurnID,
 		},
 	}
 	if err := assignSessionEventID(ctx, rb, cfg.EventIDGenerator); err != nil {
@@ -1360,12 +1366,9 @@ func RollbackSession[M MessageType](
 	return nil
 }
 
-// reconstructSessionState rebuilds session state from the append log.
-// Durable context events are replayed through the log tail, including messages
-// after the latest TurnEnd. The latest TurnEnd remains the metadata boundary for
-// tool infos, deferred tool infos, and session values. This preserves framework
-// context fidelity; provider-specific sanitization for dangling tool-call
-// structures remains a caller or middleware concern.
+// reconstructSessionState rebuilds session state by replaying the active log.
+// Committed idle lifecycle events are loaded for rollback projection but are not
+// applied as reconstructed state.
 func reconstructSessionState[M MessageType](
 	ctx context.Context,
 	handle sessionHandle[M],
@@ -1380,32 +1383,11 @@ func reconstructSessionState[M MessageType](
 		return nil, nil
 	}
 
-	committedEndIdx := latestCommittedTurnEnd(allEvents)
-	contextTailIdx := len(allEvents) - 1
-	inFlightStartIdx := committedEndIdx + 1
-	if committedEndIdx < 0 {
-		// Compatibility for historical/session-fixture logs written before
-		// TurnEnd became the explicit commit boundary.
-		inFlightStartIdx = 0
-		committedEndIdx = contextTailIdx
-	}
-
-	// After the last committed TurnEnd, any events belong to an interrupted
-	// turn. The first TurnID found identifies that turn — all events within a
-	// single turn share the same TurnID, so only the first match is needed.
-	var inFlightTurnID string
-	for i := inFlightStartIdx; i <= contextTailIdx; i++ {
-		if allEvents[i] != nil && allEvents[i].TurnID != "" {
-			inFlightTurnID = allEvents[i].TurnID
-			break
-		}
-	}
-
-	state, err := replayDurableContextEvents(allEvents, committedEndIdx, contextTailIdx)
+	state, err := replayDurableContextEvents(allEvents)
 	if err != nil {
 		return nil, err
 	}
-	return &sessionReconstructResult[M]{state: state, inFlightTurnID: inFlightTurnID}, nil
+	return &sessionReconstructResult[M]{state: state}, nil
 }
 
 func loadActiveSessionEventsReverse[M MessageType](
@@ -1425,7 +1407,7 @@ func loadActiveSessionEventsReverse[M MessageType](
 			After:     after,
 			Limit:     pageSize,
 			Reverse:   true,
-			Kinds:     modelContextSessionEventKinds,
+			Kinds:     sessionReplayEventKinds,
 		})
 		if err != nil {
 			return nil, err
@@ -1460,13 +1442,11 @@ func projectActiveEventsFromReverse[M MessageType](
 				return nil, ErrRollbackTargetInactive
 			}
 			target := active[pos]
-			if target.Kind != SessionEventTurnEnd {
+			if !isCommittedIdleEvent(target) {
 				return nil, ErrInvalidRollbackTarget
 			}
-			if rb.ToTurnID != "" {
-				if target.TurnEnd == nil || target.TurnID != rb.ToTurnID {
-					return nil, ErrInvalidRollbackTarget
-				}
+			if rb.ToTurnID != "" && target.TurnID != rb.ToTurnID {
+				return nil, ErrInvalidRollbackTarget
 			}
 			activeLen = pos + 1
 			continue
@@ -1512,7 +1492,7 @@ func findPhysicalRollbackTargetEvidence[M MessageType](
 			After:     after,
 			Limit:     pageSize,
 			Reverse:   false,
-			Kinds:     modelContextSessionEventKinds,
+			Kinds:     sessionReplayEventKinds,
 		})
 		if err != nil {
 			return rollbackTargetEvidenceNone, err
@@ -1527,7 +1507,7 @@ func findPhysicalRollbackTargetEvidence[M MessageType](
 			if event.TurnID != targetTurnID {
 				continue
 			}
-			if event.Kind == SessionEventTurnEnd && event.TurnEnd != nil {
+			if isCommittedIdleEvent(event) {
 				return rollbackTargetEvidenceCommitted, nil
 			}
 			evidence = rollbackTargetEvidenceUncommitted
@@ -1556,16 +1536,13 @@ func resolveRollbackTarget[M MessageType](
 ) (target *SessionEvent[M], head *SessionEvent[M], err error) {
 	var sawTargetTurnEvidence bool
 	for _, event := range activeEvents {
-		if event.Kind != SessionEventTurnEnd {
+		if !isCommittedIdleEvent(event) {
 			if !sawTargetTurnEvidence {
 				if event.TurnID == targetTurnID {
 					sawTargetTurnEvidence = true
 				}
 			}
 			continue
-		}
-		if event.Kind != SessionEventTurnEnd || event.TurnEnd == nil || event.TurnID == "" {
-			return nil, nil, ErrInvalidRollbackTarget
 		}
 		head = event
 		if event.TurnID == targetTurnID {
@@ -1582,24 +1559,14 @@ func resolveRollbackTarget[M MessageType](
 	return nil, nil, ErrRollbackTargetNotFound
 }
 
-func replayDurableContextEvents[M MessageType](events []*SessionEvent[M], metadataTurnEndPos int, contextTailPos int) (*TurnEndState[M], error) {
-	if len(events) == 0 || metadataTurnEndPos < 0 || contextTailPos < 0 {
+func replayDurableContextEvents[M MessageType](events []*SessionEvent[M]) (*reconstructedSessionState[M], error) {
+	if len(events) == 0 {
 		return nil, nil
 	}
-	if metadataTurnEndPos >= len(events) {
-		metadataTurnEndPos = len(events) - 1
-	}
-	if contextTailPos >= len(events) {
-		contextTailPos = len(events) - 1
-	}
-	if contextTailPos < metadataTurnEndPos {
-		contextTailPos = metadataTurnEndPos
-	}
-
 	var messages []M
 	startIdx := 0
 	boundaryIdx := -1
-	for i := 0; i <= contextTailPos; i++ {
+	for i := 0; i < len(events); i++ {
 		if events[i].MessagesReplaced != nil {
 			boundaryIdx = i
 		}
@@ -1610,28 +1577,36 @@ func replayDurableContextEvents[M MessageType](events []*SessionEvent[M], metada
 		startIdx = boundaryIdx + 1
 	}
 
-	for i := startIdx; i <= contextTailPos; i++ {
+	// Model-context reconstruction is intentionally scoped to events at or after
+	// the latest MessagesReplaced boundary, the same window used for messages.
+	// A model_context emitted before that boundary is not recovered: doing so
+	// would require scanning the full session log, which defeats the point of
+	// shortcutting reconstruction at MessagesReplaced. The only consequence is
+	// that the next turn's first model call re-emits a model_context snapshot
+	// (sawModelContext starts false) even when the tool set is unchanged — an
+	// extra audit event, not a correctness issue, since reconstructed ToolInfos
+	// feed only the change-detection baseline and never the model itself.
+	state := &reconstructedSessionState[M]{Messages: messages}
+	for i := startIdx; i < len(events); i++ {
 		if err := applySessionEvent(&messages, events[i]); err != nil {
 			return nil, fmt.Errorf("reconstruct: %w", err)
 		}
+		if events[i] != nil && events[i].ModelContext != nil {
+			state.ToolInfos = append([]*schema.ToolInfo{}, events[i].ModelContext.ToolInfos...)
+			state.DeferredToolInfos = append([]*schema.ToolInfo{}, events[i].ModelContext.DeferredToolInfos...)
+			state.sawModelContext = true
+		}
 	}
-
-	state := &TurnEndState[M]{Messages: messages}
-	state = applyTurnEndSessionEvent(state, events[metadataTurnEndPos])
+	state.Messages = messages
 	return state, nil
 }
 
-func latestCommittedTurnEnd[M MessageType](events []*SessionEvent[M]) int {
-	for i := len(events) - 1; i >= 0; i-- {
-		if events[i] != nil && events[i].Kind == SessionEventTurnEnd && events[i].TurnID != "" && events[i].TurnEnd != nil {
-			return i
-		}
-	}
-	// Fallback for legacy logs that lack Kind/TurnID on TurnEnd events.
-	for i := len(events) - 1; i >= 0; i-- {
-		if events[i] != nil && events[i].TurnEnd != nil {
-			return i
-		}
-	}
-	return -1
+func isCommittedIdleEvent[M MessageType](event *SessionEvent[M]) bool {
+	return event != nil &&
+		event.Kind == SessionEventSessionStatusIdle &&
+		event.Lifecycle != nil &&
+		event.Lifecycle.State == SessionRunStateIdle &&
+		event.Lifecycle.StopReason != nil &&
+		event.Lifecycle.StopReason.Type == "end_turn" &&
+		event.TurnID != ""
 }
