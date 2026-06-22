@@ -145,11 +145,20 @@ func (t *agentTool) shouldRunAsTeammate(args agentToolArgs) bool {
 // runForeground runs the agent synchronously by reusing adk.NewAgentTool,
 // which handles event iteration, streaming, and interrupt/resume internally.
 //
-// The foreground agent is a one-shot, isolated sub-agent: it is built directly
-// from agentConfig() and does NOT go through buildTeamAgent, so it has no team
-// or plantask middleware. It therefore cannot see the shared task list, is not
-// addressable via SendMessage, and cannot spawn teammates. Use a background
-// teammate (named, or run_in_background=true) when those capabilities are needed.
+// The foreground agent is a one-shot, isolated sub-agent. It is built directly
+// from a shallow copy of agentConfig() and does NOT go through buildTeamAgent,
+// so the team layer injects none of its own middleware: no team-aware plantask
+// middleware and no team middleware. It therefore cannot see the shared task
+// list, is not addressable via SendMessage, and cannot spawn teammates. Use a
+// background teammate (named, or run_in_background=true) when those
+// capabilities are needed.
+//
+// This withholds team-injected middleware, not the caller's own
+// AgentConfig.Handlers: any handlers the user attached to AgentConfig are
+// inherited as-is (the shallow copy shares the Handlers slice header). The team
+// layer never adds a plantask middleware on this path, but if the user supplied
+// one of their own it still runs. Foreground isolation is about withholding team
+// capabilities, not about scrubbing the user's handler chain.
 func (t *agentTool) runForeground(ctx context.Context, args agentToolArgs) (string, error) {
 	newConfig := *t.mw.lifecycle.agentConfig()
 	newConfig.Instruction = args.Prompt

@@ -240,9 +240,12 @@ func (s *mailboxMessageSource) handleLeaderControlMessages(ctx context.Context, 
 				return nil, err
 			}
 			systemMsgs = append(systemMsgs, systemMsg)
-		case messageTypeIdleNotification:
-			remaining = append(remaining, m)
 		default:
+			// Everything else — including idle notifications
+			// (messageTypeIdleNotification) — is forwarded verbatim into the
+			// leader's model context. Idle notifications carry no side effect to
+			// run here; they are rendered for the leader like any other
+			// passthrough message.
 			remaining = append(remaining, m)
 		}
 	}

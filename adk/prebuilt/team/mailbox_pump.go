@@ -174,17 +174,47 @@ func (pm *pumpManager) StartPump(ctx context.Context, agentName string) {
 	close(done) // signal any waiting UnsetMailbox that the new pump is installed
 
 	safeGoWithLogger(pm.logger, func() {
+		// abnormal stays true unless runPump returns a clean ctx-cancel exit. It
+		// is read in a defer so it also covers the panic-unwinding path: a panic
+		// propagates past runPump (leaving abnormal=true), runs this defer, then
+		// reaches safeGoWithLogger's recover for logging.
+		abnormal := true
 		defer close(pumpDone)
 		defer cancel()
-		pm.runPump(pumpCtx, agentName, ms, loop)
+		// A teammate pump that exits while its ctx is still live is a degraded
+		// state: the pump goroutine is decoupled from the TurnLoop owner
+		// goroutine (which blocks in runner.Wait), so without intervention the
+		// loop would keep running with nobody draining its inbox — a zombie
+		// teammate that can never be delivered to, never cleaned up, and blocks
+		// TeamDelete forever. In that case stop the loop so the owner's
+		// runner.Wait unblocks and the deferred cleanupExitedTeammate runs the
+		// normal crash-teardown path. A clean ctx-cancel exit (UnsetMailbox /
+		// shutdown) is the expected teardown path and must not trigger a Stop.
+		//
+		// Only teammate pumps self-heal this way: the leader loop is driven by the
+		// host and torn down via cleanupLeaderMailbox, so a leader pump error is
+		// logged inside runPump but must not stop the host-owned leader loop.
+		defer func() {
+			if abnormal && ms.conf.Role == teamRoleTeammate && pumpCtx.Err() == nil {
+				pm.logger.Printf("mailbox pump[%s] exited abnormally; stopping loop to trigger cleanup", agentName)
+				loop.Stop(adk.WithImmediate())
+			}
+		}()
+		abnormal = pm.runPump(pumpCtx, agentName, ms, loop)
 	})
 }
 
 // runPump is the main loop for a mailbox pump goroutine. It alternates between
 // non-blocking tryReceive and blocking waitForItem, pushing received messages
-// into the agent's TurnLoop. It exits when ctx is cancelled or the loop rejects a push.
+// into the agent's TurnLoop.
+//
+// It returns abnormal=true when it exits for any reason other than a clean
+// ctx-cancel (backend error from tryReceive/waitForItem/ack, or a loop that
+// rejected a push because it is tearing down). The caller uses this to decide
+// whether the owning TurnLoop must be stopped so a teammate cannot linger as a
+// zombie (see StartPump). A clean ctx-cancel exit returns abnormal=false.
 func (pm *pumpManager) runPump(ctx context.Context, agentName string,
-	ms *mailboxMessageSource, loop *adk.TurnLoop[TurnInput, adk.Message]) {
+	ms *mailboxMessageSource, loop *adk.TurnLoop[TurnInput, adk.Message]) (abnormal bool) {
 
 	// idleSent tracks whether an idle notification has already been sent since
 	// the last time messages were processed. This prevents flooding the leader
@@ -212,30 +242,20 @@ func (pm *pumpManager) runPump(ctx context.Context, agentName string,
 	for {
 		select {
 		case <-ctx.Done():
-			return
+			return false
 		default:
 		}
 
 		item, ack, ok, err := ms.tryReceive(ctx, !idleSent)
 		if err != nil {
 			pm.logger.Printf("mailbox pump[%s] error: %v", agentName, err)
-			return
+			return true
 		}
 		if ok {
 			idleSent = false
 			setActive(true)
-			item.TargetAgent = agentName
-			if accepted, _ := loop.Push(item); !accepted {
-				// The loop rejected the push (it is being torn down). Do NOT ack:
-				// leaving the messages unread keeps them recoverable instead of
-				// silently dropping them. The leader's ack is a no-op (its snapshot
-				// was already consumed for replay-safe side effects), so this only
-				// preserves ordinary teammate messages.
-				return
-			}
-			if ackErr := ack(ctx); ackErr != nil {
-				pm.logger.Printf("mailbox pump[%s] ack error: %v", agentName, ackErr)
-				return
+			if done, ok := pm.pushAndAck(ctx, agentName, loop, item, ack); done {
+				return !ok
 			}
 			continue
 		}
@@ -248,22 +268,44 @@ func (pm *pumpManager) runPump(ctx context.Context, agentName string,
 		item, ack, err = ms.waitForItem(ctx)
 		if err != nil {
 			if ctx.Err() != nil {
-				return
+				return false
 			}
 			pm.logger.Printf("mailbox pump[%s] wait error: %v", agentName, err)
-			return
+			return true
 		}
 		idleSent = false // reset after processing new messages
 		setActive(true)
-		item.TargetAgent = agentName
-		if accepted, _ := loop.Push(item); !accepted {
-			return
-		}
-		if ackErr := ack(ctx); ackErr != nil {
-			pm.logger.Printf("mailbox pump[%s] ack error: %v", agentName, ackErr)
-			return
+		if done, ok := pm.pushAndAck(ctx, agentName, loop, item, ack); done {
+			return !ok
 		}
 	}
+}
+
+// pushAndAck stamps the item for the agent, pushes it into the loop, and acks it.
+// It returns done=true when the pump must stop processing, with ok reporting
+// whether that stop was clean (ok=true means a normal continuation could not
+// happen but it is not an error to report). Specifically:
+//
+//   - push rejected (loop tearing down): done=true, ok=false. Do NOT ack —
+//     leaving the messages unread keeps them recoverable instead of silently
+//     dropping them. The leader's ack is a no-op (its snapshot was already
+//     consumed for replay-safe side effects), so this only preserves ordinary
+//     teammate messages. This is an abnormal exit: the loop is gone, so the
+//     pump cannot keep running against it.
+//   - ack failed (backend error): done=true, ok=false. Abnormal exit.
+//   - success: done=false (caller continues the loop).
+func (pm *pumpManager) pushAndAck(ctx context.Context, agentName string,
+	loop *adk.TurnLoop[TurnInput, adk.Message], item TurnInput, ack ackFunc) (done, ok bool) {
+
+	item.TargetAgent = agentName
+	if accepted, _ := loop.Push(item); !accepted {
+		return true, false
+	}
+	if ackErr := ack(ctx); ackErr != nil {
+		pm.logger.Printf("mailbox pump[%s] ack error: %v", agentName, ackErr)
+		return true, false
+	}
+	return false, true
 }
 
 // setActive records the teammate's busy/idle status in memory. The status is

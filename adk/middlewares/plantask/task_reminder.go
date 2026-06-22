@@ -34,8 +34,11 @@ var taskWriteToolNames = map[string]bool{
 	TaskUpdateToolName: true,
 }
 
-// defaultReminderInterval is the default number of assistant turns before a reminder is injected.
-const defaultReminderInterval = 10
+// DefaultReminderInterval is the default number of assistant turns before a
+// reminder is injected. It is exported so callers that build on plantask (e.g.
+// the team package) can resolve an unset interval to the same default instead
+// of hardcoding a duplicate value that could drift out of sync.
+const DefaultReminderInterval = 10
 
 // extraKeyTaskReminder is the marker in message.Extra to identify task reminder messages.
 const extraKeyTaskReminder = "_task_reminder"

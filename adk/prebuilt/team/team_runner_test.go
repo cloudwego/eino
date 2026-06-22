@@ -426,7 +426,7 @@ func TestNewRunner_OnReminderCallback(t *testing.T) {
 
 func TestResolveReminderInterval(t *testing.T) {
 	// Zero (unset) must fall back to the default rather than disabling reminders.
-	assert.Equal(t, defaultReminderInterval, resolveReminderInterval(0))
+	assert.Equal(t, plantask.DefaultReminderInterval, resolveReminderInterval(0))
 	// A positive value is honored as-is.
 	assert.Equal(t, 5, resolveReminderInterval(5))
 	// A negative value is preserved so reminders can be explicitly disabled.

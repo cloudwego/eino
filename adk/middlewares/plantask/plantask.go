@@ -270,7 +270,7 @@ func NewTyped[M adk.MessageType](_ context.Context, config *Config, opts ...Opti
 	m := &middleware{
 		backend:          config.Backend,
 		baseDir:          config.BaseDir,
-		reminderInterval: defaultReminderInterval,
+		reminderInterval: DefaultReminderInterval,
 	}
 
 	for _, opt := range opts {
