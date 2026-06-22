@@ -57,7 +57,7 @@ func TestFileStorePersistsAcrossInstances(t *testing.T) {
 	require.NoError(t, err)
 
 	first := testMessageEvent("persist-1", "first")
-	second := testTurnEndEvent("persist-2", "turn-1")
+	second := testCommittedIdleEvent("persist-2", "turn-1")
 	err = store.AppendEvents(ctx, &adk.AppendSessionEventsRequest[*schema.Message]{SessionID: "s", Events: []*adk.SessionEvent[*schema.Message]{first, second}})
 	require.NoError(t, err)
 
@@ -77,7 +77,7 @@ func TestFileStoreWritesHumanReadableEvlogLines(t *testing.T) {
 	require.NoError(t, err)
 
 	first := testMessageEvent("line-1", "first")
-	second := testTurnEndEvent("line-2", "turn-1")
+	second := testCommittedIdleEvent("line-2", "turn-1")
 	err = store.AppendEvents(ctx, &adk.AppendSessionEventsRequest[*schema.Message]{SessionID: "s", Events: []*adk.SessionEvent[*schema.Message]{first, second}})
 	require.NoError(t, err)
 
@@ -95,7 +95,7 @@ func TestFileStoreWritesHumanReadableEvlogLines(t *testing.T) {
 	parts1 := strings.SplitN(lines[1], "\t", 3)
 	require.Len(t, parts1, 3)
 	assert.Equal(t, "line-2", parts1[0])
-	assert.Equal(t, "turn_end", parts1[1])
+	assert.Equal(t, "session.status_idle", parts1[1])
 }
 
 func TestFileStoreRollbackPreservesPhysicalAuditLog(t *testing.T) {
@@ -107,9 +107,9 @@ func TestFileStoreRollbackPreservesPhysicalAuditLog(t *testing.T) {
 
 	err = store.AppendEvents(ctx, &adk.AppendSessionEventsRequest[*schema.Message]{SessionID: sessionID, Events: []*adk.SessionEvent[*schema.Message]{
 		withTurn(testMessageEvent("msg-1", "Q1"), "turn-1"),
-		testTurnEndEvent("end-1", "turn-1"),
+		testCommittedIdleEvent("end-1", "turn-1"),
 		withTurn(testMessageEvent("msg-2", "Q2"), "turn-2"),
-		testTurnEndEvent("end-2", "turn-2"),
+		testCommittedIdleEvent("end-2", "turn-2"),
 	}})
 	require.NoError(t, err)
 
@@ -204,7 +204,7 @@ func TestFileStoreValidationReplayAndReversePagination(t *testing.T) {
 	events := []*adk.SessionEvent[*schema.Message]{
 		testMessageEvent("e1", "one"),
 		testSpanEvent("e2"),
-		testTurnEndEvent("e3", "turn-1"),
+		testCommittedIdleEvent("e3", "turn-1"),
 	}
 	err = store.AppendEvents(ctx, &adk.AppendSessionEventsRequest[*schema.Message]{
 		SessionID: "s",
@@ -241,7 +241,7 @@ func TestFileStoreValidationReplayAndReversePagination(t *testing.T) {
 	forward, err := store.LoadEvents(ctx, &adk.LoadSessionEventsRequest{
 		SessionID: "s",
 		After:     "e1",
-		Kinds:     []adk.SessionEventKind{adk.SessionEventTurnEnd, adk.SessionEventMessage},
+		Kinds:     []adk.SessionEventKind{adk.SessionEventSessionStatusIdle, adk.SessionEventMessage},
 		Limit:     1,
 	})
 	require.NoError(t, err)
