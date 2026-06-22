@@ -198,6 +198,40 @@ func TestModelTimeoutStreamOpenCooperativeTimeout(t *testing.T) {
 	}
 }
 
+func TestAttack_StreamOpenTimeoutDoesNotRequireProviderCooperation(t *testing.T) {
+	release := make(chan struct{})
+	m := &fakeChatModel{
+		callbacksEnabled: true,
+		generate: func(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.Message, error) {
+			return schema.AssistantMessage("unused", nil), nil
+		},
+		stream: func(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+			<-release
+			return schema.StreamReaderFromArray([]*schema.Message{schema.AssistantMessage("late", nil)}), nil
+		},
+	}
+	defer close(release)
+
+	wrapped := newTypedTimeoutModelWrapper[*schema.Message](m, &Config{CallTimeout: 10 * time.Millisecond})
+	errCh := make(chan error, 1)
+	go func() {
+		stream, err := wrapped.Stream(context.Background(), []*schema.Message{schema.UserMessage("hi")})
+		if stream != nil {
+			stream.Close()
+		}
+		errCh <- err
+	}()
+
+	select {
+	case err := <-errCh:
+		timeoutErr, ok := AsModelTimeout(err)
+		require.True(t, ok)
+		require.Equal(t, PhaseCall, timeoutErr.Phase)
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("stream open did not return at CallTimeout when provider ignored context")
+	}
+}
+
 func TestModelTimeoutStreamIdleTimeoutAfterOutput(t *testing.T) {
 	m := &fakeChatModel{
 		callbacksEnabled: true,
@@ -251,6 +285,41 @@ func TestModelTimeoutStreamTotalTimeoutAfterOutput(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, PhaseTotal, timeoutErr.Phase)
 	require.Equal(t, 1, timeoutErr.ChunksReceived)
+}
+
+func TestAttack_StreamBodyTimeoutDoesNotRequireUpstreamRecvCooperation(t *testing.T) {
+	upstreamReader, upstreamWriter := schema.Pipe[*schema.Message](0)
+	m := &fakeChatModel{
+		callbacksEnabled: true,
+		generate: func(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.Message, error) {
+			return schema.AssistantMessage("unused", nil), nil
+		},
+		stream: func(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+			return upstreamReader, nil
+		},
+	}
+
+	wrapped := newTypedTimeoutModelWrapper[*schema.Message](m, &Config{FirstChunkTimeout: 10 * time.Millisecond})
+	stream, err := wrapped.Stream(context.Background(), []*schema.Message{schema.UserMessage("hi")})
+	require.NoError(t, err)
+	defer stream.Close()
+	defer upstreamWriter.Close()
+
+	errCh := make(chan error, 1)
+	go func() {
+		_, recvErr := stream.Recv()
+		errCh <- recvErr
+	}()
+
+	select {
+	case err := <-errCh:
+		timeoutErr, ok := AsModelTimeout(err)
+		require.True(t, ok)
+		require.Equal(t, PhaseFirstChunk, timeoutErr.Phase)
+		require.Equal(t, 0, timeoutErr.ChunksReceived)
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("stream body did not return at FirstChunkTimeout when upstream Recv stayed blocked")
+	}
 }
 
 func TestModelTimeoutGenerateTotalBeatsCallTimeout(t *testing.T) {

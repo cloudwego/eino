@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/cloudwego/eino/adk"
@@ -225,164 +226,140 @@ func (w *typedTimeoutModelWrapper[M]) Generate(ctx context.Context, input []M, o
 	}
 }
 
+type timeoutStreamOpenResult[M adk.MessageType] struct {
+	reader *schema.StreamReader[M]
+	err    error
+}
+
 func (w *typedTimeoutModelWrapper[M]) Stream(ctx context.Context, input []M, opts ...model.Option) (*schema.StreamReader[M], error) {
 	if !isConfigActive(w.config) {
 		return w.inner.Stream(ctx, input, opts...)
 	}
 
 	started := time.Now()
-	streamCtx, cancel := newStreamOpenCancelContext(ctx)
-	timeoutState := newModelStreamTimeoutState[M](w.config, started, cancel)
-	defer func() {
-		if timeoutState.reader == nil {
-			timeoutState.stop()
-			cancel()
+	bodyTimeoutActive := w.hasStreamBodyTimeout()
+	streamCtx := ctx
+	cancel := func() {}
+	if bodyTimeoutActive && w.config.TotalTimeout > 0 {
+		streamCtx, cancel = newStreamOpenTimeoutContext(ctx, w.config.TotalTimeout)
+	} else if bodyTimeoutActive || w.config.CallTimeout > 0 {
+		streamCtx, cancel = newStreamOpenCancelContext(ctx)
+	}
+
+	resultCh := make(chan timeoutStreamOpenResult[M], 1)
+	done := make(chan struct{})
+	accepted := make(chan struct{})
+	go func() {
+		reader, err := w.inner.Stream(streamCtx, input, opts...)
+		result := timeoutStreamOpenResult[M]{reader: reader, err: err}
+		select {
+		case <-done:
+			if reader != nil {
+				reader.Close()
+			}
+		case resultCh <- result:
+			select {
+			case <-accepted:
+			case <-done:
+				if reader != nil {
+					reader.Close()
+				}
+			}
 		}
 	}()
 
 	openTimeout, openPhase, hasOpenTimeout := minPositiveTimeout(w.config.CallTimeout, w.config.TotalTimeout)
 	var openTimer *time.Timer
+	var openTimeoutCh <-chan time.Time
 	if hasOpenTimeout {
-		openTimer = time.AfterFunc(openTimeout, func() {
-			timeoutState.timeout(openPhase, openTimeout)
-		})
+		openTimer = time.NewTimer(openTimeout)
+		openTimeoutCh = openTimer.C
+		defer openTimer.Stop()
 	}
 
-	reader, err := w.inner.Stream(streamCtx, input, opts...)
-	if openTimer != nil && !openTimer.Stop() {
-		if reader != nil {
-			reader.Close()
+	var result timeoutStreamOpenResult[M]
+	select {
+	case result = <-resultCh:
+		close(accepted)
+		if ctx.Err() == nil && hasOpenTimeout && result.err != nil &&
+			streamCtx.Err() != nil && time.Since(started) >= openTimeout {
+			cancel()
+			return nil, modelTimeoutError(openPhase, openTimeout, started, 0)
 		}
+		if result.err != nil {
+			cancel()
+			return nil, result.err
+		}
+	case <-ctx.Done():
+		close(done)
+		cancel()
+		return nil, ctx.Err()
+	case <-openTimeoutCh:
+		close(done)
+		cancel()
+		return nil, modelTimeoutError(openPhase, openTimeout, started, 0)
+	case <-streamCtx.Done():
+		close(done)
+		cancel()
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		if timeoutErr := timeoutState.err(); timeoutErr != nil {
-			return nil, timeoutErr
-		}
+		return nil, modelTimeoutError(PhaseTotal, w.config.TotalTimeout, started, 0)
 	}
-	if err != nil {
-		if ctx.Err() == nil {
-			if timeoutErr := timeoutState.err(); timeoutErr != nil {
-				return nil, timeoutErr
-			}
-		}
-		return nil, err
-	}
-	if reader == nil {
+
+	if result.reader == nil {
+		cancel()
 		return nil, errors.New("model Stream returned nil reader without error")
 	}
-	if !w.hasStreamBodyTimeout() {
-		timeoutState.reader = schema.StreamReaderWithConvert(reader, func(msg M) (M, error) {
-			return msg, nil
-		}, schema.WithOnEOF(func() (any, error) {
-			timeoutState.stop()
-			cancel()
-			return nil, io.EOF
-		}), schema.WithErrWrapper(func(streamErr error) error {
-			timeoutState.stop()
-			cancel()
-			return streamErr
-		}))
-		return timeoutState.reader, nil
+	if !bodyTimeoutActive {
+		return result.reader, nil
 	}
-	timeoutState.reader = w.wrapStreamBody(ctx, streamCtx, cancel, reader, started, timeoutState)
-	return timeoutState.reader, nil
+	return w.wrapStreamBody(ctx, streamCtx, cancel, result.reader, started), nil
 }
 
 func newStreamOpenCancelContext(ctx context.Context) (context.Context, context.CancelFunc) {
 	return context.WithCancel(ctx)
 }
 
+func newStreamOpenTimeoutContext(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(ctx, timeout)
+}
+
 func (w *typedTimeoutModelWrapper[M]) hasStreamBodyTimeout() bool {
 	return w.config.FirstChunkTimeout > 0 || w.config.StreamIdleTimeout > 0 || w.config.TotalTimeout > 0
 }
 
-type modelStreamTimeoutState[M adk.MessageType] struct {
-	config  *Config
-	started time.Time
-	cancel  context.CancelFunc
-	reader  *schema.StreamReader[M]
-
-	mu              sync.Mutex
-	inactivityTimer *time.Timer
-	totalTimer      *time.Timer
-	chunks          int
-	terminal        bool
-	errValue        *Error
+type timeoutStreamWriter[M adk.MessageType] struct {
+	writer *schema.StreamWriter[M]
+	done   chan struct{}
+	once   sync.Once
+	mu     sync.Mutex
+	closed bool
 }
 
-func newModelStreamTimeoutState[M adk.MessageType](config *Config, started time.Time, cancel context.CancelFunc) *modelStreamTimeoutState[M] {
-	return &modelStreamTimeoutState[M]{config: config, started: started, cancel: cancel}
+func newTimeoutStreamWriter[M adk.MessageType](writer *schema.StreamWriter[M]) *timeoutStreamWriter[M] {
+	return &timeoutStreamWriter[M]{
+		writer: writer,
+		done:   make(chan struct{}),
+	}
 }
 
-func (s *modelStreamTimeoutState[M]) timeout(phase Phase, timeout time.Duration) {
-	s.mu.Lock()
-	if !s.terminal && s.errValue == nil {
-		s.errValue = modelTimeoutError(phase, timeout, s.started, s.chunks)
+func (w *timeoutStreamWriter[M]) send(msg M, err error) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.closed {
+		return true
 	}
-	s.mu.Unlock()
-	s.cancel()
+	return w.writer.Send(msg, err)
 }
 
-func (s *modelStreamTimeoutState[M]) stop() {
-	s.mu.Lock()
-	if s.inactivityTimer != nil {
-		s.inactivityTimer.Stop()
-		s.inactivityTimer = nil
-	}
-	if s.totalTimer != nil {
-		s.totalTimer.Stop()
-		s.totalTimer = nil
-	}
-	s.terminal = true
-	s.mu.Unlock()
-}
-
-func (s *modelStreamTimeoutState[M]) err() *Error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.errValue
-}
-
-func (s *modelStreamTimeoutState[M]) afterChunk() {
-	s.mu.Lock()
-	if s.terminal || s.errValue != nil {
-		s.mu.Unlock()
-		return
-	}
-	s.chunks++
-	s.resetInactivityLocked(s.config.StreamIdleTimeout, PhaseStreamIdle)
-	s.mu.Unlock()
-}
-
-func (s *modelStreamTimeoutState[M]) startBodyTimers() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.terminal || s.errValue != nil {
-		return
-	}
-	if s.config.TotalTimeout > 0 {
-		remaining := time.Until(s.started.Add(s.config.TotalTimeout))
-		if remaining < 0 {
-			remaining = 0
-		}
-		s.totalTimer = time.AfterFunc(remaining, func() {
-			s.timeout(PhaseTotal, s.config.TotalTimeout)
-		})
-	}
-	s.resetInactivityLocked(s.config.FirstChunkTimeout, PhaseFirstChunk)
-}
-
-func (s *modelStreamTimeoutState[M]) resetInactivityLocked(timeout time.Duration, phase Phase) {
-	if s.inactivityTimer != nil {
-		s.inactivityTimer.Stop()
-		s.inactivityTimer = nil
-	}
-	if timeout <= 0 {
-		return
-	}
-	s.inactivityTimer = time.AfterFunc(timeout, func() {
-		s.timeout(phase, timeout)
+func (w *timeoutStreamWriter[M]) close() {
+	w.once.Do(func() {
+		w.mu.Lock()
+		w.closed = true
+		w.writer.Close()
+		w.mu.Unlock()
+		close(w.done)
 	})
 }
 
@@ -391,33 +368,131 @@ func (w *typedTimeoutModelWrapper[M]) wrapStreamBody(
 	streamCtx context.Context,
 	cancel context.CancelFunc,
 	upstream *schema.StreamReader[M],
-	_ time.Time,
-	timeoutState *modelStreamTimeoutState[M],
+	started time.Time,
 ) *schema.StreamReader[M] {
-	timeoutState.startBodyTimers()
-	return schema.StreamReaderWithConvert(upstream,
-		func(msg M) (M, error) {
-			timeoutState.afterChunk()
-			return msg, nil
-		},
-		schema.WithOnEOF(func() (any, error) {
-			timeoutState.stop()
+	reader, writer := schema.Pipe[M](1)
+	terminal := newTimeoutStreamWriter(writer)
+	var chunks int32
+	activity := make(chan struct{}, 1)
+	var finishOnce sync.Once
+
+	finish := func(err error) {
+		finishOnce.Do(func() {
+			if err != nil {
+				var zero M
+				terminal.send(zero, err)
+			}
+			terminal.close()
+			upstream.Close()
 			cancel()
-			return nil, io.EOF
-		}),
-		schema.WithErrWrapper(func(streamErr error) error {
-			timeoutState.stop()
-			cancel()
-			if ctx.Err() != nil {
-				return ctx.Err()
+		})
+	}
+
+	go func() {
+		for {
+			msg, err := upstream.Recv()
+			if err == io.EOF {
+				finish(nil)
+				return
 			}
-			if timeoutErr := timeoutState.err(); timeoutErr != nil {
-				return timeoutErr
+			if err != nil {
+				if ctx.Err() != nil {
+					finish(ctx.Err())
+					return
+				}
+				if streamCtx.Err() != nil && w.config.TotalTimeout > 0 {
+					finish(modelTimeoutError(PhaseTotal, w.config.TotalTimeout, started, int(atomic.LoadInt32(&chunks))))
+					return
+				}
+				finish(err)
+				return
 			}
-			if streamCtx.Err() != nil {
-				return streamCtx.Err()
+			if terminal.send(msg, nil) {
+				finish(nil)
+				return
 			}
-			return streamErr
-		}),
-	)
+			atomic.AddInt32(&chunks, 1)
+			select {
+			case activity <- struct{}{}:
+			default:
+			}
+		}
+	}()
+
+	go func() {
+		firstReceived := false
+		var inactivityTimer *time.Timer
+		var inactivityCh <-chan time.Time
+		resetInactivity := func(d time.Duration) {
+			if inactivityTimer != nil {
+				if !inactivityTimer.Stop() {
+					select {
+					case <-inactivityTimer.C:
+					default:
+					}
+				}
+			}
+			if d > 0 {
+				inactivityTimer = time.NewTimer(d)
+				inactivityCh = inactivityTimer.C
+			} else {
+				inactivityCh = nil
+			}
+		}
+		defer func() {
+			if inactivityTimer != nil {
+				inactivityTimer.Stop()
+			}
+		}()
+
+		resetInactivity(w.config.FirstChunkTimeout)
+		var totalTimer *time.Timer
+		var totalCh <-chan time.Time
+		if w.config.TotalTimeout > 0 {
+			remaining := time.Until(started.Add(w.config.TotalTimeout))
+			if remaining < 0 {
+				remaining = 0
+			}
+			totalTimer = time.NewTimer(remaining)
+			totalCh = totalTimer.C
+			defer totalTimer.Stop()
+		}
+
+		for {
+			select {
+			case <-terminal.done:
+				return
+			case <-activity:
+				if !firstReceived {
+					firstReceived = true
+				}
+				resetInactivity(w.config.StreamIdleTimeout)
+			case <-inactivityCh:
+				phase := PhaseFirstChunk
+				timeout := w.config.FirstChunkTimeout
+				if firstReceived {
+					phase = PhaseStreamIdle
+					timeout = w.config.StreamIdleTimeout
+				}
+				finish(modelTimeoutError(phase, timeout, started, int(atomic.LoadInt32(&chunks))))
+				return
+			case <-totalCh:
+				finish(modelTimeoutError(PhaseTotal, w.config.TotalTimeout, started, int(atomic.LoadInt32(&chunks))))
+				return
+			case <-streamCtx.Done():
+				if ctx.Err() != nil {
+					finish(ctx.Err())
+					return
+				}
+				if w.config.TotalTimeout > 0 {
+					finish(modelTimeoutError(PhaseTotal, w.config.TotalTimeout, started, int(atomic.LoadInt32(&chunks))))
+					return
+				}
+				finish(streamCtx.Err())
+				return
+			}
+		}
+	}()
+
+	return reader
 }
