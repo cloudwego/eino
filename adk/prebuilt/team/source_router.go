@@ -54,7 +54,13 @@ func (r *sourceRouter) RegisterLoop(agentName string, loop *adk.TurnLoop[TurnInp
 }
 
 // UnregisterLoop removes the TurnLoop registration for the given agent.
+// A nil sourceRouter is a no-op: teammate middleware is constructed without a
+// router (only the leader owns one), so routing operations through a teammate's
+// manager must be harmless rather than panic.
 func (r *sourceRouter) UnregisterLoop(agentName string) {
+	if r == nil {
+		return
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	delete(r.loops, agentName)

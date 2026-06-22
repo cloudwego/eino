@@ -37,19 +37,13 @@ type mailboxSourceConfig struct {
 	// Role determines exit conditions.
 	Role teamRole
 
-	// ExitWhenNoTeammates (Leader only): exit when no active teammates remain.
-	ExitWhenNoTeammates bool
-
-	// HasActiveTeammates (Leader only) checks if there are active teammates.
-	// Required when ExitWhenNoTeammates is true.
-	HasActiveTeammates func(ctx context.Context) (bool, error)
-
 	// OnShutdownResponse (Leader only) is called when a shutdown_response message is received.
 	// It should handle: removing the member from team config, unassigning tasks, cancelling the teammate.
 	// Returns the notification message text for the teammate_terminated system message.
 	OnShutdownResponse func(ctx context.Context, fromName string) (string, error)
 
-	// Logger for non-fatal warnings. If nil, errors are silently ignored.
+	// Logger for non-fatal warnings. If nil, a default logger is used so
+	// best-effort I/O failures are still surfaced rather than silently dropped.
 	Logger Logger
 }
 
@@ -70,6 +64,15 @@ func newMailboxMessageSource(mailbox *mailbox, conf *mailboxSourceConfig) *mailb
 	}
 }
 
+// logger returns the configured Logger, falling back to the standard log package
+// so non-fatal warnings are never silently discarded when Logger is unset.
+func (s *mailboxMessageSource) logger() Logger {
+	if s.conf.Logger != nil {
+		return s.conf.Logger
+	}
+	return defaultLogger{}
+}
+
 // tryReceive is a non-blocking read from the mailbox.
 // Returns (item, true) if there are unread messages, or (empty, false) if none.
 func (s *mailboxMessageSource) tryReceive(ctx context.Context, notifyIdle bool) (TurnInput, bool, error) {
@@ -84,8 +87,10 @@ func (s *mailboxMessageSource) tryReceive(ctx context.Context, notifyIdle bool) 
 	if len(msgs) == 0 {
 		if notifyIdle && s.conf.Role == teamRoleTeammate && s.processedCount > s.lastIdleProcessedCount {
 			s.lastIdleProcessedCount = s.processedCount
-			if err := sendIdleNotification(ctx, s.mailbox, s.conf.OwnerName, idleStatusAvailable); err != nil && s.conf.Logger != nil {
-				s.conf.Logger.Printf("sendIdleNotification[%s]: %v", s.conf.OwnerName, err)
+			if err := sendIdleNotification(ctx, s.mailbox, s.conf.OwnerName, idleStatusAvailable); err != nil {
+				// Best-effort: an idle notification is a hint to the leader, not a
+				// correctness requirement, so log and continue rather than fail the read.
+				s.logger().Printf("sendIdleNotification[%s]: %v", s.conf.OwnerName, err)
 			}
 		}
 		return TurnInput{}, false, nil
@@ -102,26 +107,8 @@ func (s *mailboxMessageSource) waitForItem(ctx context.Context) (TurnInput, erro
 		return empty, fmt.Errorf("mailbox is nil, cannot receive messages")
 	}
 
-	// Build an optional per-tick check so the leader can exit promptly when
-	// the last teammate shuts down, even if no new inbox messages arrive.
-	// The check runs inside the polling loop of waitForNewMessagesWithCheck,
-	// so it is evaluated on every 500ms tick — not only when a message appears.
-	var tickCheck func(ctx context.Context) error
-	if s.conf.Role == teamRoleLeader && s.conf.ExitWhenNoTeammates && s.conf.HasActiveTeammates != nil {
-		tickCheck = func(ctx context.Context) error {
-			active, err := s.conf.HasActiveTeammates(ctx)
-			if err != nil {
-				return err
-			}
-			if !active {
-				return fmt.Errorf("no active teammates")
-			}
-			return nil
-		}
-	}
-
 	for {
-		msgs, err := s.mailbox.waitForNewMessagesWithCheck(ctx, tickCheck)
+		msgs, err := s.mailbox.waitForNewMessages(ctx)
 		if err != nil {
 			return empty, err
 		}

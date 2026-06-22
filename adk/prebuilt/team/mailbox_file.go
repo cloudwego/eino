@@ -59,7 +59,10 @@ type mailbox struct {
 // newMailboxFromConfig creates a mailbox using the shared resources from Config.state.
 // This is the primary constructor used in team mode.
 func newMailboxFromConfig(conf *Config, teamName, ownerName string) *mailbox {
-	pollInterval := defaultPollInterval
+	pollInterval := conf.PollInterval
+	if pollInterval <= 0 {
+		pollInterval = defaultPollInterval
+	}
 
 	locks := conf.state.locks
 	store := newConfigStore(conf)
@@ -153,11 +156,26 @@ func (m *mailbox) writeInbox(ctx context.Context, agentName string, msgs []Inbox
 }
 
 // Send sends a message to the target agent's inbox.
+//
+// For broadcasts (To == broadcastTarget), use Broadcast instead when the caller
+// needs to know which members received the message: Send only reports an
+// aggregate error and discards the per-member delivery breakdown.
 func (m *mailbox) Send(ctx context.Context, msg *outboxMessage) error {
 	if msg.To == broadcastTarget {
-		return m.broadcast(ctx, msg)
+		_, err := m.broadcast(ctx, msg)
+		return err
 	}
 	return m.sendToOne(ctx, msg.To, msg)
+}
+
+// broadcastResult reports the per-member outcome of a broadcast. A broadcast is
+// best-effort and non-atomic: some members may receive the message while others
+// fail, so callers must surface both lists rather than treat it as all-or-nothing.
+type broadcastResult struct {
+	// Delivered lists the members whose inbox received the message.
+	Delivered []string
+	// Failed maps each member that could not be reached to its error message.
+	Failed map[string]string
 }
 
 func (m *mailbox) sendToOne(ctx context.Context, to string, msg *outboxMessage) error {
@@ -192,10 +210,18 @@ func (m *mailbox) sendToOne(ctx context.Context, to string, msg *outboxMessage) 
 	return m.writeInbox(ctx, to, msgs)
 }
 
-func (m *mailbox) broadcast(ctx context.Context, msg *outboxMessage) error {
+// broadcast delivers msg to every other team member. Delivery is best-effort and
+// non-atomic: each recipient is written independently, so a mid-broadcast failure
+// leaves earlier recipients with the message and later ones without. The returned
+// broadcastResult records exactly who received it and who did not so callers can
+// surface the breakdown (and retry if desired); the joined error is returned for
+// callers that only need a pass/fail signal.
+func (m *mailbox) broadcast(ctx context.Context, msg *outboxMessage) (broadcastResult, error) {
+	res := broadcastResult{}
+
 	names, err := m.listMembers(ctx)
 	if err != nil {
-		return fmt.Errorf("list members for broadcast: %w", err)
+		return res, fmt.Errorf("list members for broadcast: %w", err)
 	}
 
 	var errs []error
@@ -204,10 +230,16 @@ func (m *mailbox) broadcast(ctx context.Context, msg *outboxMessage) error {
 			continue
 		}
 		if err := m.sendToOne(ctx, name, msg); err != nil {
+			if res.Failed == nil {
+				res.Failed = make(map[string]string)
+			}
+			res.Failed[name] = err.Error()
 			errs = append(errs, fmt.Errorf("broadcast to %s: %w", name, err))
+			continue
 		}
+		res.Delivered = append(res.Delivered, name)
 	}
-	return joinErrors(errs...)
+	return res, joinErrors(errs...)
 }
 
 // ReadUnread returns all unread messages from this agent's inbox file.
@@ -286,15 +318,6 @@ func (m *mailbox) WaitForMessages(ctx context.Context) ([]InboxMessage, error) {
 // messages first. Use this when the caller has already verified no unread messages
 // exist, to avoid a redundant ReadUnread call.
 func (m *mailbox) waitForNewMessages(ctx context.Context) ([]InboxMessage, error) {
-	return m.waitForNewMessagesWithCheck(ctx, nil)
-}
-
-// waitForNewMessagesWithCheck is like waitForNewMessages but runs an optional
-// tickCheck callback on every poll cycle. If tickCheck returns a non-nil error
-// the wait is aborted and that error is returned. This allows callers (e.g. the
-// leader's ExitWhenNoTeammates logic) to break out of the blocking poll when an
-// external condition changes, without waiting for a new inbox message.
-func (m *mailbox) waitForNewMessagesWithCheck(ctx context.Context, tickCheck func(ctx context.Context) error) ([]InboxMessage, error) {
 	ticker := time.NewTicker(m.conf.PollInterval)
 	defer ticker.Stop()
 
@@ -304,12 +327,6 @@ func (m *mailbox) waitForNewMessagesWithCheck(ctx context.Context, tickCheck fun
 			return nil, ctx.Err()
 		case <-ticker.C:
 			// poll filesystem for new messages
-		}
-
-		if tickCheck != nil {
-			if err := tickCheck(ctx); err != nil {
-				return nil, err
-			}
 		}
 
 		if msgs, err := m.ReadUnread(ctx); err != nil {

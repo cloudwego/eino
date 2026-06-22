@@ -30,6 +30,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/components/tool"
@@ -46,15 +47,22 @@ type Config struct {
 	// Required.
 	BaseDir string
 
-	// state holds lazily-initialized internal fields. Separated from Config to
-	// make it clear which fields are part of the public API vs internal bookkeeping.
-	state    *configState
-	initOnce sync.Once
-
 	// Interval is the interval in assistant turns between task reminders.
 	// The zero value (i.e. leaving this field unset) selects the default of 10.
 	// Set to a negative value to disable task reminders entirely.
 	Interval int
+
+	// PollInterval is how often the mailbox poller checks an inbox for new
+	// messages. The zero value selects the default of 500ms. Lowering it reduces
+	// message-delivery latency at the cost of more frequent backend reads; raising
+	// it does the opposite.
+	PollInterval time.Duration
+
+	// state holds lazily-initialized internal fields. Separated from the public
+	// fields above to make it clear which fields are part of the public API vs
+	// internal bookkeeping.
+	state    *configState
+	initOnce sync.Once
 }
 
 func (c *Config) validate() error {
@@ -183,6 +191,6 @@ func (mw *teamMiddleware) BeforeAgent(ctx context.Context,
 // unassigning tasks, removing from config, and deleting shadow tasks. The wait
 // honors ctx so callers can bound teardown to an external deadline; it is also
 // capped at defaultShutdownTimeout internally.
-func (mw *teamMiddleware) ShutdownAllTeammates(ctx context.Context, teamName string) {
+func (mw *teamMiddleware) ShutdownAllTeammates(ctx context.Context) {
 	mw.lifecycle.shutdownAll(ctx, mw.logger())
 }

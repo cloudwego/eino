@@ -129,6 +129,15 @@ func (t *sendMessageTool) InvokableRun(ctx context.Context, argumentsInJSON stri
 
 	mailbox := t.mw.lifecycle.mailbox(teamName, t.senderName)
 
+	// Broadcast is best-effort and non-atomic: capture the per-member delivery
+	// breakdown so the result can tell the model who actually received the message
+	// rather than hiding partial failures behind a single aggregate error.
+	if msgType == messageTypeBroadcast {
+		bcast, bErr := mailbox.broadcast(ctx, msg)
+		result := marshalToolResult(t.buildBroadcastResult(&args, bcast, bErr))
+		return result, nil
+	}
+
 	if err := mailbox.Send(ctx, msg); err != nil {
 		return "", fmt.Errorf("send message: %w", err)
 	}
@@ -248,9 +257,6 @@ func (t *sendMessageTool) buildResult(msgType messageType, to string, approved b
 	case messageTypeDM:
 		result["message"] = fmt.Sprintf("Message sent to %s's inbox", to)
 		result["routing"] = t.buildRoutingResult(to, args)
-	case messageTypeBroadcast:
-		result["message"] = "Message broadcast to all teammates"
-		result["routing"] = t.buildRoutingResult(broadcastTarget, args)
 	case messageTypeShutdownRequest:
 		result["message"] = fmt.Sprintf("Shutdown request sent to %s. Request ID: %s", to, msg.RequestID)
 		result["request_id"] = msg.RequestID
@@ -261,6 +267,30 @@ func (t *sendMessageTool) buildResult(msgType messageType, to string, approved b
 		result["message"] = fmt.Sprintf("Message sent to %s", to)
 	}
 
+	return result
+}
+
+// buildBroadcastResult constructs the response map for a broadcast, exposing the
+// per-member delivery breakdown. A broadcast is best-effort: success is true only
+// when every teammate received the message; otherwise the failed recipients (and
+// their errors) are reported so the model can decide whether to retry.
+func (t *sendMessageTool) buildBroadcastResult(args *sendMessageArgs, bcast broadcastResult, bErr error) map[string]any {
+	result := map[string]any{
+		"success":   bErr == nil,
+		"delivered": bcast.Delivered,
+		"routing":   t.buildRoutingResult(broadcastTarget, args),
+	}
+
+	if bErr == nil {
+		result["message"] = fmt.Sprintf("Message broadcast to all teammates (%d delivered)", len(bcast.Delivered))
+		return result
+	}
+
+	result["failed"] = bcast.Failed
+	result["message"] = fmt.Sprintf(
+		"Broadcast partially delivered: %d delivered, %d failed. Failed recipients still need the message.",
+		len(bcast.Delivered), len(bcast.Failed),
+	)
 	return result
 }
 

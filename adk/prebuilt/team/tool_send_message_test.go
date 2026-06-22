@@ -18,6 +18,7 @@ package team
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -517,12 +518,31 @@ func TestSendMessageTool_BuildResult_Broadcast(t *testing.T) {
 	assert.NoError(t, err)
 
 	args := &sendMessageArgs{Content: "msg", Summary: "alert"}
-	msg := &outboxMessage{To: "*", Type: messageTypeBroadcast}
-	result := tool.buildResult(messageTypeBroadcast, "*", false, msg, args)
+	bcast := broadcastResult{Delivered: []string{"agent1", "agent2"}}
+	result := tool.buildBroadcastResult(args, bcast, nil)
 	assert.Equal(t, true, result["success"])
 	assert.Contains(t, result["message"], "broadcast")
+	assert.ElementsMatch(t, []string{"agent1", "agent2"}, result["delivered"])
 	routing := result["routing"].(map[string]any)
 	assert.Equal(t, "*", routing["target"])
+}
+
+func TestSendMessageTool_BuildBroadcastResult_PartialFailure(t *testing.T) {
+	mw, _ := newTestTeamMiddleware()
+	tool, err := newSendMessageTool(mw, LeaderAgentName)
+	assert.NoError(t, err)
+
+	args := &sendMessageArgs{Content: "msg", Summary: "alert"}
+	bcast := broadcastResult{
+		Delivered: []string{"agent1"},
+		Failed:    map[string]string{"agent2": "write failed"},
+	}
+	result := tool.buildBroadcastResult(args, bcast, errors.New("broadcast to agent2: write failed"))
+	assert.Equal(t, false, result["success"])
+	assert.Contains(t, result["message"], "partially delivered")
+	assert.Equal(t, []string{"agent1"}, result["delivered"])
+	failed := result["failed"].(map[string]string)
+	assert.Contains(t, failed, "agent2")
 }
 
 func TestSendMessageTool_BuildResult_ShutdownRequest(t *testing.T) {

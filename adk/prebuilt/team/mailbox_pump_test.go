@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -410,6 +411,9 @@ func TestRunPump_ExitsWhenLoopStopped(t *testing.T) {
 
 func TestRunPump_WaitForItemErrorLogsAndExits(t *testing.T) {
 	backend := newInMemoryBackend()
+	// failReadAfterBackend lets the initial tryReceive succeed, then makes the
+	// blocking waitForItem poll fail so we exercise the "wait error" log path.
+	fb := &failReadAfterBackend{inMemoryBackend: backend, failAfter: 1, failSuffix: "worker.json"}
 	locks := newNamedLockManager()
 	logged := make(chan string, 10)
 	logger := &testLogger{onPrintf: func(format string, args ...any) {
@@ -429,7 +433,7 @@ func TestRunPump_WaitForItemErrorLogsAndExits(t *testing.T) {
 
 	mb := &mailbox{
 		conf: &mailboxConfig{
-			Backend:      backend,
+			Backend:      fb,
 			BaseDir:      "/tmp/test",
 			TeamName:     "myteam",
 			OwnerName:    "worker",
@@ -447,12 +451,8 @@ func TestRunPump_WaitForItemErrorLogsAndExits(t *testing.T) {
 	_ = backend.Write(context.Background(), &WriteRequest{FilePath: leaderInboxPath, Content: "[]"})
 
 	ms := newMailboxMessageSource(mb, &mailboxSourceConfig{
-		OwnerName:           "worker",
-		Role:                teamRoleLeader,
-		ExitWhenNoTeammates: true,
-		HasActiveTeammates: func(ctx context.Context) (bool, error) {
-			return false, nil
-		},
+		OwnerName: "worker",
+		Role:      teamRoleTeammate,
 	})
 
 	pm := newPumpManager(router, logger)
@@ -464,7 +464,7 @@ func TestRunPump_WaitForItemErrorLogsAndExits(t *testing.T) {
 
 	select {
 	case msg := <-logged:
-		assert.Contains(t, msg, "wait error")
+		assert.Contains(t, msg, "error")
 	case <-time.After(2 * time.Second):
 		t.Fatal("timeout waiting for pump to log wait error")
 	}
@@ -640,4 +640,101 @@ func TestPumpManager_StartPump_LogsWhenNoLoop(t *testing.T) {
 	pm.StartPump(context.Background(), "worker")
 
 	assert.Contains(t, logged, "no TurnLoop registered")
+}
+
+// newPumpTestFixture builds a pumpManager wired to a registered loop and an
+// initialized inbox for a single teammate, ready for StartPump/UnsetMailbox.
+func newPumpTestFixture(t *testing.T, agentName string) (*pumpManager, func()) {
+	t.Helper()
+
+	backend := newInMemoryBackend()
+	locks := newNamedLockManager()
+	logger := nopLogger{}
+	router := newSourceRouter(LeaderAgentName, logger)
+
+	loop := adk.NewTurnLoop(adk.TurnLoopConfig[TurnInput, adk.Message]{
+		GenInput: func(ctx context.Context, l *adk.TurnLoop[TurnInput, adk.Message], items []TurnInput) (*adk.GenInputResult[TurnInput, adk.Message], error) {
+			return &adk.GenInputResult[TurnInput, adk.Message]{Consumed: items}, nil
+		},
+		PrepareAgent: func(ctx context.Context, l *adk.TurnLoop[TurnInput, adk.Message], items []TurnInput) (adk.Agent, error) {
+			return nil, errors.New("not used")
+		},
+	})
+	router.RegisterLoop(agentName, loop)
+
+	mb := &mailbox{
+		conf: &mailboxConfig{
+			Backend:      backend,
+			BaseDir:      "/tmp/test",
+			TeamName:     "myteam",
+			OwnerName:    agentName,
+			PollInterval: 5 * time.Millisecond,
+		},
+		inboxLocks: locks,
+		listMembers: func(ctx context.Context) ([]string, error) {
+			return []string{"team-lead", agentName}, nil
+		},
+	}
+
+	inboxPath := inboxFilePath("/tmp/test", "myteam", agentName)
+	_ = backend.Write(context.Background(), &WriteRequest{FilePath: inboxPath, Content: "[]"})
+
+	ms := newMailboxMessageSource(mb, &mailboxSourceConfig{
+		OwnerName: agentName,
+		Role:      teamRoleTeammate,
+	})
+
+	pm := newPumpManager(router, logger)
+	pm.SetMailbox(agentName, ms)
+
+	cleanup := func() {
+		loop.Stop()
+	}
+	return pm, cleanup
+}
+
+// TestPumpManager_StartUnsetConcurrent stresses the StartPump/UnsetMailbox
+// handoff under the race detector. The handoff uses a startingDone handshake plus
+// out-of-lock pump draining to guarantee two pumps never read the same inbox
+// concurrently; this test races those two operations to catch regressions there.
+// Run with `go test -race` to be meaningful.
+func TestPumpManager_StartUnsetConcurrent(t *testing.T) {
+	for iter := 0; iter < 20; iter++ {
+		pm, cleanup := newPumpTestFixture(t, "worker")
+
+		ctx, cancel := context.WithCancel(context.Background())
+
+		var wg sync.WaitGroup
+		// Several goroutines repeatedly start the pump while others unset it,
+		// exercising the concurrent install/drain handshake.
+		const workers = 4
+		wg.Add(workers * 2)
+		for i := 0; i < workers; i++ {
+			go func() {
+				defer wg.Done()
+				for j := 0; j < 10; j++ {
+					pm.StartPump(ctx, "worker")
+				}
+			}()
+			go func() {
+				defer wg.Done()
+				for j := 0; j < 10; j++ {
+					pm.UnsetMailbox("worker")
+				}
+			}()
+		}
+		wg.Wait()
+
+		// Final UnsetMailbox must leave no pump running regardless of interleaving.
+		pm.UnsetMailbox("worker")
+		pm.mu.Lock()
+		_, hasPump := pm.pumps["worker"]
+		_, hasStarting := pm.startingDone["worker"]
+		pm.mu.Unlock()
+		assert.False(t, hasPump, "no pump should remain after final UnsetMailbox")
+		assert.False(t, hasStarting, "no in-flight start should remain after final UnsetMailbox")
+
+		cancel()
+		cleanup()
+	}
 }

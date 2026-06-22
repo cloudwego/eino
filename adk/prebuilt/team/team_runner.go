@@ -169,7 +169,7 @@ func (r *Runner) WaitContext(ctx context.Context) *adk.TurnLoopExitState[TurnInp
 	if r.leaderMW != nil {
 		teamName := r.leaderMW.getTeamName()
 		if teamName != "" {
-			r.leaderMW.ShutdownAllTeammates(ctx, teamName)
+			r.leaderMW.ShutdownAllTeammates(ctx)
 		}
 		// Stop the leader's own mailbox pump to prevent goroutine leak.
 		// The pump is started by TeamCreate and is not covered by
