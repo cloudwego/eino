@@ -121,7 +121,7 @@ func TestTeammateRegistry_WaitWithTimeout_CompletesBeforeTimeout(t *testing.T) {
 	}()
 
 	start := time.Now()
-	reg.waitWithTimeout(nopLogger{}, 1*time.Second)
+	reg.waitWithTimeout(context.Background(), nopLogger{}, 1*time.Second)
 	elapsed := time.Since(start)
 
 	assert.True(t, elapsed < 1*time.Second)
@@ -132,10 +132,30 @@ func TestTeammateRegistry_WaitWithTimeout_TimesOut(t *testing.T) {
 	reg.addRunner()
 
 	start := time.Now()
-	reg.waitWithTimeout(nopLogger{}, 50*time.Millisecond)
+	reg.waitWithTimeout(context.Background(), nopLogger{}, 50*time.Millisecond)
 	elapsed := time.Since(start)
 
 	assert.True(t, elapsed >= 50*time.Millisecond)
+
+	reg.doneRunner()
+}
+
+func TestTeammateRegistry_WaitWithTimeout_ContextCancelled(t *testing.T) {
+	reg := newTeammateRegistry()
+	reg.addRunner()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		cancel()
+	}()
+
+	start := time.Now()
+	// Long timeout so the only way this returns promptly is via ctx cancellation.
+	reg.waitWithTimeout(ctx, nopLogger{}, 10*time.Second)
+	elapsed := time.Since(start)
+
+	assert.True(t, elapsed < 1*time.Second)
 
 	reg.doneRunner()
 }

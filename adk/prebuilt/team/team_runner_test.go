@@ -221,6 +221,46 @@ func TestRunner_PushRunWaitStop(t *testing.T) {
 	assert.NotNil(t, exitState)
 }
 
+func TestRunner_WaitContext(t *testing.T) {
+	backend := newInMemoryBackend()
+	conf := &Config{Backend: backend, BaseDir: "/tmp/test"}
+
+	agentConf := &adk.ChatModelAgentConfig{
+		Name:        "leader",
+		Description: "test leader",
+		Model:       &mockBaseChatModel{},
+	}
+
+	runnerConf := &RunnerConfig{
+		AgentConfig: agentConf,
+		TeamConfig:  conf,
+		GenInput: func(ctx context.Context, loop *adk.TurnLoop[TurnInput, adk.Message], items []TurnInput) (*adk.GenInputResult[TurnInput, adk.Message], error) {
+			go func() {
+				time.Sleep(10 * time.Millisecond)
+				loop.Stop()
+			}()
+			return &adk.GenInputResult[TurnInput, adk.Message]{Consumed: items}, nil
+		},
+		OnAgentEvents: noopOnAgentEvents,
+	}
+
+	runner, err := NewRunner(context.Background(), runnerConf)
+	assert.NoError(t, err)
+
+	accepted, _ := runner.Push(TurnInput{Messages: []string{"hello"}})
+	assert.True(t, accepted)
+
+	runner.Run(context.Background())
+
+	// An already-cancelled context must not prevent WaitContext from returning
+	// the exit state: the TurnLoop is always awaited and teammate teardown
+	// (none here) simply returns immediately.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	exitState := runner.WaitContext(ctx)
+	assert.NotNil(t, exitState)
+}
+
 func TestRunner_Stop(t *testing.T) {
 	backend := newInMemoryBackend()
 	conf := &Config{Backend: backend, BaseDir: "/tmp/test"}

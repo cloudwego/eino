@@ -101,3 +101,22 @@ func validateMemberName(name string) error {
 	}
 	return nil
 }
+
+// suffixedMemberName builds the deduplicated name "<base>-<i>" used when a
+// teammate name collides with an existing member. The "-<i>" suffix can push a
+// near-maxNameLength base past maxNameLength, so the base is truncated to leave
+// room for the suffix. Trailing body-only characters (".", "_", "-") are trimmed
+// from the truncated base so the suffix never produces sequences like "name.-2".
+// The base always retains its first (validated) start character, so the result
+// is never empty and still satisfies validateMemberName.
+func suffixedMemberName(base string, i int) string {
+	suffix := fmt.Sprintf("-%d", i)
+	budget := maxNameLength - len(suffix)
+	if budget < 1 {
+		budget = 1
+	}
+	if len(base) > budget {
+		base = strings.TrimRight(base[:budget], "._-")
+	}
+	return base + suffix
+}

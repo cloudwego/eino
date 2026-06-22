@@ -20,6 +20,7 @@
 package team
 
 import (
+	"context"
 	"sync"
 	"time"
 )
@@ -90,17 +91,26 @@ func (r *teammateRegistry) doneRunner() {
 	r.wg.Done()
 }
 
-// waitWithTimeout waits for all runners to exit, with a timeout.
-func (r *teammateRegistry) waitWithTimeout(logger Logger, timeout time.Duration) {
+// waitWithTimeout waits for all runners to exit. It returns when all runners
+// have exited, when the provided ctx is cancelled, or when the timeout elapses —
+// whichever happens first. ctx lets a caller bound shutdown to an external
+// deadline (e.g. a server's graceful-stop budget); timeout is the fallback cap
+// so a hung backend can never leak the waiting goroutine indefinitely.
+func (r *teammateRegistry) waitWithTimeout(ctx context.Context, logger Logger, timeout time.Duration) {
 	done := make(chan struct{})
 	go func() {
 		r.wg.Wait()
 		close(done)
 	}()
 
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
 	select {
 	case <-done:
-	case <-time.After(timeout):
+	case <-ctx.Done():
+		logger.Printf("teammateRegistry: context cancelled (%v) while waiting for teammates to exit", ctx.Err())
+	case <-timer.C:
 		logger.Printf("teammateRegistry: timed out after %v waiting for teammates to exit", timeout)
 	}
 }
