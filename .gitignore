@@ -64,6 +64,7 @@ CLAUDE.md
 
 # Internal dev setup (not for public repo)
 /scripts/dev_setup_internal.sh
+/adk/decode_session_event_test.go
 
 # External working trees
 /examples/
