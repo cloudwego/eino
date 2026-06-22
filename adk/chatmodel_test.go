@@ -118,13 +118,16 @@ func TestChatModelAgentRun(t *testing.T) {
 			events = append(events, event)
 		}
 
-		require.Len(t, events, 2)
-		require.NotNil(t, events[0].Output)
-		assert.Equal(t, "session answer", events[0].Output.MessageOutput.Message.Content)
+		require.Len(t, events, 3)
+		require.NotNil(t, events[0].SessionEvent)
+		assert.Equal(t, SessionEventMessageInserted, events[0].SessionEvent.Kind)
+		assert.Equal(t, schema.System, events[0].SessionEvent.MessageInserted.Message.Role)
+		require.NotNil(t, events[1].Output)
+		assert.Equal(t, "session answer", events[1].Output.MessageOutput.Message.Content)
 
-		require.NotNil(t, events[1].SessionEvent)
-		assert.Equal(t, SessionEventTurnEnd, events[1].SessionEvent.Kind)
-		turnEnd := events[1].SessionEvent.TurnEnd
+		require.NotNil(t, events[2].SessionEvent)
+		assert.Equal(t, SessionEventTurnEnd, events[2].SessionEvent.Kind)
+		turnEnd := events[2].SessionEvent.TurnEnd
 		require.NotNil(t, turnEnd)
 		assert.Nil(t, turnEnd.Messages)
 		assert.Equal(t, "session answer", turnEnd.SessionValues["answer"])
@@ -295,12 +298,14 @@ func TestChatModelAgentRun(t *testing.T) {
 			events = append(events, event)
 		}
 
-		require.Len(t, events, 4)
+		require.Len(t, events, 5)
 		assert.Equal(t, 2, generateCount)
-		require.NotNil(t, events[3].SessionEvent)
-		assert.Equal(t, SessionEventTurnEnd, events[3].SessionEvent.Kind)
+		require.NotNil(t, events[0].SessionEvent)
+		assert.Equal(t, SessionEventMessageInserted, events[0].SessionEvent.Kind)
+		require.NotNil(t, events[4].SessionEvent)
+		assert.Equal(t, SessionEventTurnEnd, events[4].SessionEvent.Kind)
 
-		turnEnd := events[3].SessionEvent.TurnEnd
+		turnEnd := events[4].SessionEvent.TurnEnd
 		require.NotNil(t, turnEnd)
 		assert.Nil(t, turnEnd.Messages)
 		require.Len(t, turnEnd.ToolInfos, 1)
