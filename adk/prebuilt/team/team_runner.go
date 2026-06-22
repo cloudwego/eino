@@ -300,6 +300,17 @@ func newTeamPlantaskMiddleware(ctx context.Context, teamCfg *Config, mw *teamMid
 		plantask.WithTaskBaseDirResolver(func(_ context.Context) string {
 			return tasksDirPath(teamCfg.BaseDir, mw.getTeamName())
 		}),
+		plantask.WithTaskGuard(func(_ context.Context) error {
+			// Until TeamCreate runs, getTeamName() is empty and the resolved task
+			// directory would collapse to {BaseDir}/tasks instead of the
+			// team-scoped {BaseDir}/tasks/{teamName}. Reject task operations in
+			// that window so tasks are never written outside a team and never
+			// orphaned from the team that is eventually created.
+			if mw.getTeamName() == "" {
+				return fmt.Errorf("no active team; create one with %s before managing tasks", teamCreateToolName)
+			}
+			return nil
+		}),
 		plantask.WithAgentNameResolver(func(_ context.Context) string {
 			return mw.agentName
 		}),

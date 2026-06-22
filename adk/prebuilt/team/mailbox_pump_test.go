@@ -738,3 +738,65 @@ func TestPumpManager_StartUnsetConcurrent(t *testing.T) {
 		cleanup()
 	}
 }
+
+// TestRunPump_RejectedPushKeepsTeammateMessageUnread guards the at-least-once
+// fix: when the TurnLoop rejects a push (because it has been stopped), an
+// ordinary teammate message must NOT be marked read, so it stays recoverable in
+// the inbox instead of being silently dropped.
+func TestRunPump_RejectedPushKeepsTeammateMessageUnread(t *testing.T) {
+	backend := newInMemoryBackend()
+	locks := newNamedLockManager()
+	logger := nopLogger{}
+	router := newSourceRouter(LeaderAgentName, logger)
+
+	loop := adk.NewTurnLoop(adk.TurnLoopConfig[TurnInput, adk.Message]{
+		GenInput: func(ctx context.Context, l *adk.TurnLoop[TurnInput, adk.Message], items []TurnInput) (*adk.GenInputResult[TurnInput, adk.Message], error) {
+			return &adk.GenInputResult[TurnInput, adk.Message]{Consumed: items}, nil
+		},
+		PrepareAgent: func(ctx context.Context, l *adk.TurnLoop[TurnInput, adk.Message], items []TurnInput) (adk.Agent, error) {
+			return nil, errors.New("not used")
+		},
+	})
+	router.RegisterLoop("worker", loop)
+
+	// Stop + Run + Wait so the loop commits its stop and closes the buffer; any
+	// subsequent Push is then deterministically rejected.
+	loop.Stop()
+	loop.Run(context.Background())
+	loop.Wait()
+
+	mb := &mailbox{
+		conf: &mailboxConfig{
+			Backend:      backend,
+			BaseDir:      "/tmp/test",
+			TeamName:     "myteam",
+			OwnerName:    "worker",
+			PollInterval: 5 * time.Millisecond,
+		},
+		inboxLocks: locks,
+		listMembers: func(ctx context.Context) ([]string, error) {
+			return []string{"team-lead", "worker"}, nil
+		},
+	}
+
+	inboxPath := inboxFilePath("/tmp/test", "myteam", "worker")
+	msgs := []inboxMessage{{ID: "m1", From: "team-lead", Text: "do work", Timestamp: utcNowMillis()}}
+	msgJSON, _ := sonic.MarshalString(msgs)
+	_ = backend.Write(context.Background(), &WriteRequest{FilePath: inboxPath, Content: msgJSON})
+
+	ms := newMailboxMessageSource(mb, &mailboxSourceConfig{
+		OwnerName: "worker",
+		Role:      teamRoleTeammate,
+	})
+
+	pm := newPumpManager(router, logger)
+
+	// runPump returns as soon as the push is rejected by the stopped loop.
+	pm.runPump(context.Background(), "worker", ms, loop)
+
+	// The message must still be unread: a rejected push does not ack/MarkRead.
+	unread, err := mb.ReadUnread(context.Background())
+	assert.NoError(t, err)
+	assert.Len(t, unread, 1)
+	assert.Equal(t, "m1", unread[0].ID)
+}

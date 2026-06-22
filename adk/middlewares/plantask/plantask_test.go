@@ -517,3 +517,75 @@ func TestNewWithAllOptions(t *testing.T) {
 	mw.onReminder(ctx, "test")
 	assert.True(t, reminderCalled)
 }
+
+func TestWithTaskGuard(t *testing.T) {
+	called := false
+	guard := func(ctx context.Context) error {
+		called = true
+		return nil
+	}
+	opt := WithTaskGuard(guard)
+	m := &middleware{}
+	opt(m)
+	assert.NotNil(t, m.taskGuard)
+	assert.NoError(t, m.checkGuard(context.Background()))
+	assert.True(t, called)
+
+	// checkGuard is a no-op when no guard is configured.
+	assert.NoError(t, (&middleware{}).checkGuard(context.Background()))
+}
+
+// TestTaskGuardBlocksAllTools verifies that when WithTaskGuard returns an error,
+// every task tool fails before touching storage, and that the tools succeed once
+// the guard permits the operation.
+func TestTaskGuardBlocksAllTools(t *testing.T) {
+	ctx := context.Background()
+	backend := newInMemoryBackend()
+	baseDir := "/tmp/tasks"
+
+	blocked := true
+	mw := testMiddleware(backend, baseDir)
+	mw.taskGuard = func(context.Context) error {
+		if blocked {
+			return errors.New("no active team")
+		}
+		return nil
+	}
+	turnLock := &sync.RWMutex{}
+
+	createTool := newTaskCreateTool(mw, turnLock)
+	getTool := newTaskGetTool(mw, turnLock)
+	updateTool := newTaskUpdateTool(mw, turnLock)
+	listTool := newTaskListTool(mw, turnLock)
+
+	// While blocked, every tool fails and nothing is written.
+	_, err := createTool.InvokableRun(ctx, `{"subject": "Task 1", "description": "First"}`)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "no active team")
+
+	_, err = updateTool.InvokableRun(ctx, `{"taskId": "1", "status": "completed"}`)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "no active team")
+
+	_, err = getTool.InvokableRun(ctx, `{"taskId": "1"}`)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "no active team")
+
+	_, err = listTool.InvokableRun(ctx, `{}`)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "no active team")
+
+	// No task file should have been created while blocked.
+	_, err = backend.Read(ctx, &ReadRequest{FilePath: filepath.Join(baseDir, "1.json")})
+	assert.Error(t, err)
+
+	// Once the guard permits, the tools work normally.
+	blocked = false
+	result, err := createTool.InvokableRun(ctx, `{"subject": "Task 1", "description": "First"}`)
+	assert.NoError(t, err)
+	assert.Contains(t, result, "Task #1")
+
+	result, err = listTool.InvokableRun(ctx, `{}`)
+	assert.NoError(t, err)
+	assert.Contains(t, result, "Task 1")
+}

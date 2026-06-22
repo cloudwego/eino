@@ -87,7 +87,10 @@ func withDefaultMemberActivity(member teamMember) teamMember {
 
 // resolveTeamName returns a unique team name. If the given name is already
 // taken (e.g. leftover from a previous run), it appends a Unix-nano timestamp
-// to avoid collisions
+// to avoid collisions. The caller-supplied name was already validated, but the
+// "-<nano>" suffix can push a near-maxNameLength base past the limit, so the
+// suffix is applied with the same length-safe truncation used for member-name
+// dedup and the result is re-validated before it becomes a directory component.
 func (s *configStore) resolveTeamName(ctx context.Context, teamName string) (string, error) {
 	path := s.configFilePath(teamName)
 	exists, err := s.conf.Backend.Exists(ctx, path)
@@ -97,8 +100,11 @@ func (s *configStore) resolveTeamName(ctx context.Context, teamName string) (str
 	if !exists {
 		return teamName, nil
 	}
-	// Name taken — generate a timestamped alternative.
-	resolved := fmt.Sprintf("%s-%d", teamName, time.Now().UnixNano())
+	// Name taken — generate a timestamped alternative within the length limit.
+	resolved := appendSuffixWithinLimit(teamName, fmt.Sprintf("-%d", time.Now().UnixNano()))
+	if err := validateTeamName(resolved); err != nil {
+		return "", fmt.Errorf("resolve unique team name: %w", err)
+	}
 	return resolved, nil
 }
 

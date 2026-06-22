@@ -124,6 +124,10 @@ func filterVisibleTasks(tasks []*task) []*task {
 }
 
 func (t *taskListTool) InvokableRun(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (string, error) {
+	if err := t.mw.checkGuard(ctx); err != nil {
+		return "", fmt.Errorf("%s %w", TaskListToolName, err)
+	}
+
 	lock := t.mw.getLock(t.turnLock)
 	lock.RLock()
 	defer lock.RUnlock()

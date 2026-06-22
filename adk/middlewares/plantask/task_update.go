@@ -119,6 +119,10 @@ func (t *taskUpdateTool) Info(ctx context.Context) (*schema.ToolInfo, error) {
 }
 
 func (t *taskUpdateTool) InvokableRun(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (string, error) {
+	if err := t.mw.checkGuard(ctx); err != nil {
+		return "", fmt.Errorf("%s %w", TaskUpdateToolName, err)
+	}
+
 	result, assignment, err := t.doUpdate(ctx, argumentsInJSON)
 	if err != nil {
 		return "", err

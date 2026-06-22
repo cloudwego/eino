@@ -73,16 +73,28 @@ func (s *mailboxMessageSource) logger() Logger {
 	return defaultLogger{}
 }
 
+// ackFunc commits the consumption of a delivered item by marking the underlying
+// inbox snapshot read. For the leader it is a no-op because consumeMessages
+// already marked the snapshot read before running control-message side effects
+// (see consumeMessages); for teammates it defers MarkRead until the pump has
+// successfully pushed the item into the TurnLoop, so a rejected push does not
+// drop the message from the inbox. ackFunc is always non-nil when ok is true.
+type ackFunc func(ctx context.Context) error
+
+func noopAck(context.Context) error { return nil }
+
 // tryReceive is a non-blocking read from the mailbox.
-// Returns (item, true) if there are unread messages, or (empty, false) if none.
-func (s *mailboxMessageSource) tryReceive(ctx context.Context, notifyIdle bool) (TurnInput, bool, error) {
+// Returns (item, ack, true) if there are unread messages, or (empty, nil, false)
+// if none. When ok is true the caller must invoke ack after the item has been
+// accepted so the messages are marked read (see ackFunc).
+func (s *mailboxMessageSource) tryReceive(ctx context.Context, notifyIdle bool) (TurnInput, ackFunc, bool, error) {
 	if s.mailbox == nil {
-		return TurnInput{}, false, nil
+		return TurnInput{}, nil, false, nil
 	}
 
 	msgs, err := s.mailbox.ReadUnread(ctx)
 	if err != nil {
-		return TurnInput{}, false, err
+		return TurnInput{}, nil, false, err
 	}
 	if len(msgs) == 0 {
 		if notifyIdle && s.conf.Role == teamRoleTeammate && s.processedCount > s.lastIdleProcessedCount {
@@ -93,66 +105,84 @@ func (s *mailboxMessageSource) tryReceive(ctx context.Context, notifyIdle bool) 
 				s.logger().Printf("sendIdleNotification[%s]: %v", s.conf.OwnerName, err)
 			}
 		}
-		return TurnInput{}, false, nil
+		return TurnInput{}, nil, false, nil
 	}
 
 	return s.consumeMessages(ctx, msgs)
 }
 
-// waitForItem blocks until a message is available in the mailbox, then returns it.
-func (s *mailboxMessageSource) waitForItem(ctx context.Context) (TurnInput, error) {
+// waitForItem blocks until a message is available in the mailbox, then returns it
+// along with an ack the caller must invoke once the item has been accepted.
+func (s *mailboxMessageSource) waitForItem(ctx context.Context) (TurnInput, ackFunc, error) {
 	empty := TurnInput{}
 
 	if s.mailbox == nil {
-		return empty, fmt.Errorf("mailbox is nil, cannot receive messages")
+		return empty, nil, fmt.Errorf("mailbox is nil, cannot receive messages")
 	}
 
 	for {
 		msgs, err := s.mailbox.waitForNewMessages(ctx)
 		if err != nil {
-			return empty, err
+			return empty, nil, err
 		}
 
-		item, ok, err := s.consumeMessages(ctx, msgs)
+		item, ack, ok, err := s.consumeMessages(ctx, msgs)
 		if err != nil {
-			return empty, err
+			return empty, nil, err
 		}
 		if ok {
-			return item, nil
+			return item, ack, nil
 		}
 	}
 }
 
-func (s *mailboxMessageSource) consumeMessages(ctx context.Context, msgs []inboxMessage) (TurnInput, bool, error) {
+func (s *mailboxMessageSource) consumeMessages(ctx context.Context, msgs []inboxMessage) (TurnInput, ackFunc, bool, error) {
 	if len(msgs) == 0 {
-		return TurnInput{}, false, nil
+		return TurnInput{}, nil, false, nil
 	}
 
 	original := msgs
 
-	// Mark the snapshot read BEFORE running control-message side effects.
-	// handleLeaderControlMessages can trigger irreversible actions (e.g.
+	// Leader path: mark the snapshot read BEFORE running control-message side
+	// effects. handleLeaderControlMessages can trigger irreversible actions (e.g.
 	// OnShutdownResponse → removeTeammate, which unassigns tasks and removes the
 	// member from config). If MarkRead ran afterwards and failed, the same
 	// shutdown_response would be observed again on the next poll and the side
 	// effects would run a second time. Consuming the messages first makes a
 	// failed control-message handler the only retry surface; the underlying
-	// teardown is additionally guarded by idempotent firstStop checks.
-	if err := s.mailbox.MarkRead(ctx, original); err != nil {
-		return TurnInput{}, false, err
-	}
-	s.processedCount += len(original)
+	// teardown is additionally guarded by idempotent firstStop checks. The
+	// returned ack is therefore a no-op for the leader.
+	//
+	// Teammate path: there are no control-message side effects (see
+	// handleLeaderControlMessages, which returns early for non-leaders), so the
+	// only consumer of a teammate message is the TurnLoop. Defer MarkRead into
+	// the ack so the pump only marks the snapshot read after the item is
+	// accepted; a rejected push (loop torn down) then leaves the message in the
+	// inbox instead of dropping it.
+	if s.conf.Role == teamRoleLeader {
+		if err := s.mailbox.MarkRead(ctx, original); err != nil {
+			return TurnInput{}, nil, false, err
+		}
+		s.processedCount += len(original)
 
-	msgs, err := s.handleLeaderControlMessages(ctx, msgs)
-	if err != nil {
-		return TurnInput{}, false, err
+		msgs, err := s.handleLeaderControlMessages(ctx, msgs)
+		if err != nil {
+			return TurnInput{}, nil, false, err
+		}
+		if len(msgs) == 0 {
+			return TurnInput{}, nil, false, nil
+		}
+		return s.buildTurnInput(msgs), noopAck, true, nil
 	}
 
-	if len(msgs) == 0 {
-		return TurnInput{}, false, nil
+	ack := func(ackCtx context.Context) error {
+		if err := s.mailbox.MarkRead(ackCtx, original); err != nil {
+			return err
+		}
+		s.processedCount += len(original)
+		return nil
 	}
-
-	return s.buildTurnInput(msgs), true, nil
+	return s.buildTurnInput(msgs), ack, true, nil
 }
 
 func (s *mailboxMessageSource) handleLeaderControlMessages(ctx context.Context, msgs []inboxMessage) ([]inboxMessage, error) {

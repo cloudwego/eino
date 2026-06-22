@@ -91,6 +91,20 @@ func WithOwnerValidator(validator func(ctx context.Context, owner string) error)
 	}
 }
 
+// WithTaskGuard registers a guard consulted at the start of every task tool
+// (TaskCreate / TaskUpdate / TaskGet / TaskList) before any storage access. When
+// it returns a non-nil error, the tool call fails with that error instead of
+// touching the task directory.
+//
+// The team integration uses this to reject task operations issued before a team
+// has been created: until TeamCreate runs, the resolved task directory is not yet
+// team-scoped, so tasks would otherwise be written to the wrong location.
+func WithTaskGuard(guard func(ctx context.Context) error) Option {
+	return func(m *middleware) {
+		m.taskGuard = guard
+	}
+}
+
 // WithReminder configures task reminder injection. The interval specifies how
 // many assistant turns without TaskCreate/TaskUpdate before a reminder is
 // injected. Set to negative to disable. Default is 10.
@@ -273,6 +287,10 @@ type middleware struct {
 	// non-empty owner on TaskUpdate must pass this check before being persisted.
 	ownerValidator func(ctx context.Context, owner string) error
 
+	// taskGuard (set via WithTaskGuard). When non-nil, every task tool consults
+	// it before any storage access and fails the call if it returns an error.
+	taskGuard func(ctx context.Context) error
+
 	// Context resolvers (set via WithTaskBaseDirResolver / WithAgentNameResolver, nil in single-agent mode)
 	taskBaseDirResolver func(ctx context.Context) string
 	agentNameResolver   func(ctx context.Context) string
@@ -287,6 +305,15 @@ func (m *middleware) resolveBaseDir(ctx context.Context) string {
 		}
 	}
 	return m.baseDir
+}
+
+// checkGuard consults the optional taskGuard before a task tool touches storage.
+// It returns nil when no guard is configured or the guard permits the operation.
+func (m *middleware) checkGuard(ctx context.Context) error {
+	if m.taskGuard == nil {
+		return nil
+	}
+	return m.taskGuard(ctx)
 }
 
 // usesSharedTaskMode returns true when task storage is resolved dynamically
