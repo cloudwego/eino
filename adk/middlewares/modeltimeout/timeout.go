@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-package adk
+package modeltimeout
 
 import (
 	"context"
@@ -25,37 +25,38 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
 )
 
-// ModelTimeoutPhase identifies which part of a model call exceeded its budget.
-type ModelTimeoutPhase string
+// Phase identifies which part of a model call exceeded its budget.
+type Phase string
 
 const (
-	// ModelTimeoutPhaseCall means Generate or Stream opening exceeded its budget.
-	ModelTimeoutPhaseCall ModelTimeoutPhase = "call"
-	// ModelTimeoutPhaseFirstChunk means no stream chunk arrived before the first-chunk budget.
-	ModelTimeoutPhaseFirstChunk ModelTimeoutPhase = "first_chunk"
-	// ModelTimeoutPhaseStreamIdle means the stream exceeded its inter-chunk idle budget.
-	ModelTimeoutPhaseStreamIdle ModelTimeoutPhase = "stream_idle"
-	// ModelTimeoutPhaseTotal means the whole Generate call or Stream lifecycle exceeded its budget.
-	ModelTimeoutPhaseTotal ModelTimeoutPhase = "total"
+	// PhaseCall means Generate or Stream opening exceeded its budget.
+	PhaseCall Phase = "call"
+	// PhaseFirstChunk means no stream chunk arrived before the first-chunk budget.
+	PhaseFirstChunk Phase = "first_chunk"
+	// PhaseStreamIdle means the stream exceeded its inter-chunk idle budget.
+	PhaseStreamIdle Phase = "stream_idle"
+	// PhaseTotal means the whole Generate call or Stream lifecycle exceeded its budget.
+	PhaseTotal Phase = "total"
 )
 
-// ErrModelTimeout is the sentinel matched by ModelTimeoutError.
+// ErrModelTimeout is the sentinel matched by Error.
 var ErrModelTimeout = errors.New("model timeout")
 
-// ModelTimeoutConfig configures opt-in timeout enforcement for ChatModel calls.
+// Config configures opt-in timeout enforcement for ChatModel calls.
 //
-// Timeout errors are surfaced as *ModelTimeoutError and can be handled by
+// Timeout errors are surfaced as *Error and can be handled by
 // ModelRetryConfig.ShouldRetry/IsRetryAble and ModelFailoverConfig.ShouldFailover.
 // If nil or all durations are <= 0, no timeout wrapper is installed.
 //
 // Timeouts are per model attempt because the timeout wrapper sits inside retry
 // and failover. Providers must respect context cancellation for Generate/Stream
 // opening and context cancellation or StreamReader.Close for stream-body cleanup.
-type ModelTimeoutConfig struct {
+type Config struct {
 	// CallTimeout bounds Generate and Stream until Stream returns a reader.
 	// For Generate this is effectively the non-streaming model call timeout.
 	// For Stream this is the request-open/header/reader-acquisition timeout.
@@ -74,15 +75,15 @@ type ModelTimeoutConfig struct {
 	TotalTimeout time.Duration
 }
 
-// ModelTimeoutError reports a model timeout without prescribing retry policy.
-type ModelTimeoutError struct {
-	Phase          ModelTimeoutPhase
+// Error reports a model timeout without prescribing retry policy.
+type Error struct {
+	Phase          Phase
 	Timeout        time.Duration
 	Elapsed        time.Duration
 	ChunksReceived int
 }
 
-func (e *ModelTimeoutError) Error() string {
+func (e *Error) Error() string {
 	if e == nil {
 		return ErrModelTimeout.Error()
 	}
@@ -90,13 +91,28 @@ func (e *ModelTimeoutError) Error() string {
 		e.Phase, e.Timeout, e.Elapsed, e.ChunksReceived)
 }
 
-func (e *ModelTimeoutError) Is(target error) bool {
+func (e *Error) Is(target error) bool {
 	return target == ErrModelTimeout
 }
 
-// AsModelTimeout extracts a ModelTimeoutError from err.
-func AsModelTimeout(err error) (*ModelTimeoutError, bool) {
-	var timeoutErr *ModelTimeoutError
+// IsModelTimeoutBeforeOutput reports whether the timeout happened before any
+// stream output reached downstream consumers.
+func (e *Error) IsModelTimeoutBeforeOutput() bool {
+	return e != nil && e.ChunksReceived == 0
+}
+
+// ModelTimeoutSpanMeta exposes timeout details to packages that should not
+// import this middleware package directly.
+func (e *Error) ModelTimeoutSpanMeta() (phase string, timeout time.Duration, elapsed time.Duration, chunksReceived int) {
+	if e == nil {
+		return "", 0, 0, 0
+	}
+	return string(e.Phase), e.Timeout, e.Elapsed, e.ChunksReceived
+}
+
+// AsModelTimeout extracts a Error from err.
+func AsModelTimeout(err error) (*Error, bool) {
+	var timeoutErr *Error
 	if errors.As(err, &timeoutErr) {
 		return timeoutErr, true
 	}
@@ -111,43 +127,56 @@ func IsModelTimeoutBeforeOutput(err error) bool {
 }
 
 func init() {
-	schema.RegisterName[*ModelTimeoutError]("_eino_adk_model_timeout_error")
+	schema.RegisterName[*Error]("_eino_adk_model_timeout_error")
 }
 
-type typedTimeoutModelWrapper[M MessageType] struct {
+type typedTimeoutModelWrapper[M adk.MessageType] struct {
 	inner  model.BaseModel[M]
-	config *ModelTimeoutConfig
+	config *Config
 }
 
-func newTypedTimeoutModelWrapper[M MessageType](inner model.BaseModel[M], config *ModelTimeoutConfig) model.BaseModel[M] {
+// NewTypedTimeoutModelWrapper wraps a model with timeout enforcement.
+//
+// Prefer configuring this through adk/middlewares/modeltimeout so timeout
+// behavior composes with other ChatModelAgent middlewares.
+func NewTypedTimeoutModelWrapper[M adk.MessageType](inner model.BaseModel[M], config *Config) model.BaseModel[M] {
 	return &typedTimeoutModelWrapper[M]{inner: inner, config: config}
 }
 
-func isModelTimeoutConfigActive(config *ModelTimeoutConfig) bool {
+func newTypedTimeoutModelWrapper[M adk.MessageType](inner model.BaseModel[M], config *Config) model.BaseModel[M] {
+	return NewTypedTimeoutModelWrapper(inner, config)
+}
+
+// IsConfigActive reports whether config enables any timeout.
+func IsConfigActive(config *Config) bool {
 	return config != nil && (config.CallTimeout > 0 ||
 		config.FirstChunkTimeout > 0 ||
 		config.StreamIdleTimeout > 0 ||
 		config.TotalTimeout > 0)
 }
 
-func minPositiveTimeout(callTimeout, totalTimeout time.Duration) (time.Duration, ModelTimeoutPhase, bool) {
+func isConfigActive(config *Config) bool {
+	return IsConfigActive(config)
+}
+
+func minPositiveTimeout(callTimeout, totalTimeout time.Duration) (time.Duration, Phase, bool) {
 	switch {
 	case callTimeout > 0 && totalTimeout > 0:
 		if totalTimeout <= callTimeout {
-			return totalTimeout, ModelTimeoutPhaseTotal, true
+			return totalTimeout, PhaseTotal, true
 		}
-		return callTimeout, ModelTimeoutPhaseCall, true
+		return callTimeout, PhaseCall, true
 	case callTimeout > 0:
-		return callTimeout, ModelTimeoutPhaseCall, true
+		return callTimeout, PhaseCall, true
 	case totalTimeout > 0:
-		return totalTimeout, ModelTimeoutPhaseTotal, true
+		return totalTimeout, PhaseTotal, true
 	default:
 		return 0, "", false
 	}
 }
 
-func modelTimeoutError(phase ModelTimeoutPhase, timeout time.Duration, started time.Time, chunks int) *ModelTimeoutError {
-	return &ModelTimeoutError{
+func modelTimeoutError(phase Phase, timeout time.Duration, started time.Time, chunks int) *Error {
+	return &Error{
 		Phase:          phase,
 		Timeout:        timeout,
 		Elapsed:        time.Since(started),
@@ -155,7 +184,7 @@ func modelTimeoutError(phase ModelTimeoutPhase, timeout time.Duration, started t
 	}
 }
 
-type timeoutGenerateResult[M MessageType] struct {
+type timeoutGenerateResult[M adk.MessageType] struct {
 	msg M
 	err error
 }
@@ -197,13 +226,13 @@ func (w *typedTimeoutModelWrapper[M]) Generate(ctx context.Context, input []M, o
 	}
 }
 
-type timeoutStreamOpenResult[M MessageType] struct {
+type timeoutStreamOpenResult[M adk.MessageType] struct {
 	reader *schema.StreamReader[M]
 	err    error
 }
 
 func (w *typedTimeoutModelWrapper[M]) Stream(ctx context.Context, input []M, opts ...model.Option) (*schema.StreamReader[M], error) {
-	if !isModelTimeoutConfigActive(w.config) {
+	if !isConfigActive(w.config) {
 		return w.inner.Stream(ctx, input, opts...)
 	}
 
@@ -275,7 +304,7 @@ func (w *typedTimeoutModelWrapper[M]) Stream(ctx context.Context, input []M, opt
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		return nil, modelTimeoutError(ModelTimeoutPhaseTotal, w.config.TotalTimeout, started, 0)
+		return nil, modelTimeoutError(PhaseTotal, w.config.TotalTimeout, started, 0)
 	}
 
 	if result.reader == nil {
@@ -288,10 +317,6 @@ func (w *typedTimeoutModelWrapper[M]) Stream(ctx context.Context, input []M, opt
 	return w.wrapStreamBody(ctx, streamCtx, cancel, result.reader, started), nil
 }
 
-func (w *typedTimeoutModelWrapper[M]) hasStreamBodyTimeout() bool {
-	return w.config.FirstChunkTimeout > 0 || w.config.StreamIdleTimeout > 0 || w.config.TotalTimeout > 0
-}
-
 func newStreamOpenCancelContext(ctx context.Context) (context.Context, context.CancelFunc) {
 	return context.WithCancel(ctx)
 }
@@ -300,7 +325,11 @@ func newStreamOpenTimeoutContext(ctx context.Context, timeout time.Duration) (co
 	return context.WithTimeout(ctx, timeout)
 }
 
-type timeoutStreamWriter[M MessageType] struct {
+func (w *typedTimeoutModelWrapper[M]) hasStreamBodyTimeout() bool {
+	return w.config.FirstChunkTimeout > 0 || w.config.StreamIdleTimeout > 0 || w.config.TotalTimeout > 0
+}
+
+type timeoutStreamWriter[M adk.MessageType] struct {
 	writer *schema.StreamWriter[M]
 	done   chan struct{}
 	once   sync.Once
@@ -308,7 +337,7 @@ type timeoutStreamWriter[M MessageType] struct {
 	closed bool
 }
 
-func newTimeoutStreamWriter[M MessageType](writer *schema.StreamWriter[M]) *timeoutStreamWriter[M] {
+func newTimeoutStreamWriter[M adk.MessageType](writer *schema.StreamWriter[M]) *timeoutStreamWriter[M] {
 	return &timeoutStreamWriter[M]{
 		writer: writer,
 		done:   make(chan struct{}),
@@ -367,6 +396,14 @@ func (w *typedTimeoutModelWrapper[M]) wrapStreamBody(
 				return
 			}
 			if err != nil {
+				if ctx.Err() != nil {
+					finish(ctx.Err())
+					return
+				}
+				if streamCtx.Err() != nil && w.config.TotalTimeout > 0 {
+					finish(modelTimeoutError(PhaseTotal, w.config.TotalTimeout, started, int(atomic.LoadInt32(&chunks))))
+					return
+				}
 				finish(err)
 				return
 			}
@@ -431,16 +468,16 @@ func (w *typedTimeoutModelWrapper[M]) wrapStreamBody(
 				}
 				resetInactivity(w.config.StreamIdleTimeout)
 			case <-inactivityCh:
-				phase := ModelTimeoutPhaseFirstChunk
+				phase := PhaseFirstChunk
 				timeout := w.config.FirstChunkTimeout
 				if firstReceived {
-					phase = ModelTimeoutPhaseStreamIdle
+					phase = PhaseStreamIdle
 					timeout = w.config.StreamIdleTimeout
 				}
 				finish(modelTimeoutError(phase, timeout, started, int(atomic.LoadInt32(&chunks))))
 				return
 			case <-totalCh:
-				finish(modelTimeoutError(ModelTimeoutPhaseTotal, w.config.TotalTimeout, started, int(atomic.LoadInt32(&chunks))))
+				finish(modelTimeoutError(PhaseTotal, w.config.TotalTimeout, started, int(atomic.LoadInt32(&chunks))))
 				return
 			case <-streamCtx.Done():
 				if ctx.Err() != nil {
@@ -448,7 +485,7 @@ func (w *typedTimeoutModelWrapper[M]) wrapStreamBody(
 					return
 				}
 				if w.config.TotalTimeout > 0 {
-					finish(modelTimeoutError(ModelTimeoutPhaseTotal, w.config.TotalTimeout, started, int(atomic.LoadInt32(&chunks))))
+					finish(modelTimeoutError(PhaseTotal, w.config.TotalTimeout, started, int(atomic.LoadInt32(&chunks))))
 					return
 				}
 				finish(streamCtx.Err())
