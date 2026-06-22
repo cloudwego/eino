@@ -148,9 +148,50 @@ func (t *sendMessageTool) InvokableRun(ctx context.Context, argumentsInJSON stri
 		}
 	}
 
-	result := marshalToolResult(t.buildResult(msgType, to, approved, msg, &args))
+	resultMap := t.buildResult(msgType, to, approved, msg, &args)
+	// Membership validation only proves the recipient is listed in config.json;
+	// it does not prove a runner is alive to consume the inbox. Surface a
+	// non-fatal warning when the leader targets a teammate that has no running
+	// goroutine (e.g. a residual member left by an incomplete cleanup) so the
+	// model learns the message may sit unread instead of seeing a bare success.
+	if warning := t.deliveryWarning(msgType, to); warning != "" {
+		resultMap["delivery_warning"] = warning
+	}
 
-	return result, nil
+	return marshalToolResult(resultMap), nil
+}
+
+// deliveryWarning returns a human-readable warning when a point-to-point message
+// is addressed to a recipient that is a config member but has no live runner to
+// consume it. It returns "" when no warning applies.
+//
+// The check is intentionally limited to the leader: only the leader process owns
+// the teammate registry, so only it can observe runtime liveness. A teammate's
+// registry is always empty, and messages it sends to the leader are consumed by
+// the leader's own pump (which is not tracked in the teammate registry), so a
+// teammate could never make a reliable liveness judgement and must not warn.
+// Broadcasts already report a per-member delivery breakdown and are skipped here.
+func (t *sendMessageTool) deliveryWarning(msgType messageType, to string) string {
+	if !t.mw.isLeader {
+		return ""
+	}
+	if to == "" || to == broadcastTarget || to == LeaderAgentName {
+		return ""
+	}
+	if msgType != messageTypeDM && msgType != messageTypeShutdownRequest {
+		return ""
+	}
+
+	for _, name := range t.mw.lifecycle.activeTeammateNames() {
+		if name == to {
+			return ""
+		}
+	}
+	return fmt.Sprintf(
+		"recipient %q is a registered member but has no running goroutine; "+
+			"the message was written to its inbox but will not be processed until "+
+			"the teammate is (re)started", to,
+	)
 }
 
 func (t *sendMessageTool) validateArgs(msgType messageType, args *sendMessageArgs) error {

@@ -19,6 +19,7 @@ package team
 import (
 	"context"
 	"fmt"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -97,7 +98,7 @@ func TestTeammateRegistry_AddRunnerDoneRunner(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		reg.wg.Wait()
+		reg.waitWithTimeout(context.Background(), nopLogger{}, 1*time.Second)
 		close(done)
 	}()
 
@@ -107,7 +108,7 @@ func TestTeammateRegistry_AddRunnerDoneRunner(t *testing.T) {
 	select {
 	case <-done:
 	case <-time.After(1 * time.Second):
-		t.Fatal("WaitGroup did not reach zero")
+		t.Fatal("runner counter did not reach zero")
 	}
 }
 
@@ -156,6 +157,35 @@ func TestTeammateRegistry_WaitWithTimeout_ContextCancelled(t *testing.T) {
 	elapsed := time.Since(start)
 
 	assert.True(t, elapsed < 1*time.Second)
+
+	reg.doneRunner()
+}
+
+// TestTeammateRegistry_WaitWithTimeout_NoGoroutineLeak verifies that a wait which
+// returns via timeout (while a runner is still "hung") does not leave a waiting
+// goroutine behind. The previous WaitGroup-based implementation spawned a
+// goroutine blocked on wg.Wait() that could only exit once the hung runner
+// finished; the counter-based implementation must leak nothing.
+func TestTeammateRegistry_WaitWithTimeout_NoGoroutineLeak(t *testing.T) {
+	reg := newTeammateRegistry()
+	reg.addRunner() // simulate a runner that never exits
+
+	// Let any startup goroutines settle before sampling the baseline.
+	time.Sleep(20 * time.Millisecond)
+	before := runtime.NumGoroutine()
+
+	for i := 0; i < 50; i++ {
+		reg.waitWithTimeout(context.Background(), nopLogger{}, 1*time.Millisecond)
+	}
+
+	// Give any (incorrectly) spawned goroutines a chance to appear before sampling.
+	time.Sleep(20 * time.Millisecond)
+	after := runtime.NumGoroutine()
+
+	// Allow a tiny slack for unrelated runtime goroutines, but 50 leaked waiters
+	// would blow well past this.
+	assert.LessOrEqual(t, after, before+2,
+		"waitWithTimeout leaked goroutines: before=%d after=%d", before, after)
 
 	reg.doneRunner()
 }
