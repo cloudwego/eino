@@ -54,6 +54,11 @@ type task struct {
 
 type taskOut struct {
 	Result string `json:"result"`
+	// NotificationWarning is set when a task mutation persisted successfully but a
+	// best-effort side effect (e.g. notifying the new owner) failed. It lets the
+	// model observe the inconsistency and decide whether to re-send the message,
+	// rather than seeing an unqualified success.
+	NotificationWarning string `json:"notification_warning,omitempty"`
 }
 
 const (
@@ -212,4 +217,11 @@ func writeTask(ctx context.Context, backend Backend, baseDir string, t *task) er
 // marshalTaskResponse marshals a taskOut result string into the standard tool response JSON.
 func marshalTaskResponse(result string) (string, error) {
 	return sonic.MarshalString(&taskOut{Result: result})
+}
+
+// marshalTaskResponseWithWarning marshals a taskOut carrying both the result and
+// a non-fatal notification warning, used when a task update persisted but the
+// follow-up assignment notification could not be delivered.
+func marshalTaskResponseWithWarning(result, warning string) (string, error) {
+	return sonic.MarshalString(&taskOut{Result: result, NotificationWarning: warning})
 }

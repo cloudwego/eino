@@ -311,6 +311,25 @@ func (s *configStore) HasMember(ctx context.Context, teamName, memberName string
 	return found, err
 }
 
+// NonLeaderMemberNames returns the names of members persisted in config.json
+// excluding the leader. TeamDelete consults this to detect members that still
+// exist in the persistent source of truth even when no goroutine is running for
+// them (e.g. a prior cleanup failed or the process restarted), so deletion does
+// not silently discard recoverable member state.
+func (s *configStore) NonLeaderMemberNames(ctx context.Context, teamName string) ([]string, error) {
+	var names []string
+	err := s.readConfigWithReadLock(ctx, teamName, func(cfg *teamConfig) error {
+		for _, m := range cfg.Members {
+			if m.Name == LeaderAgentName {
+				continue
+			}
+			names = append(names, m.Name)
+		}
+		return nil
+	})
+	return names, err
+}
+
 // DeleteTeam removes the team directory and tasks directory.
 func (s *configStore) DeleteTeam(ctx context.Context, teamName string) error {
 	s.conf.state.cfgLock.Lock()

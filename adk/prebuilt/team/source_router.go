@@ -27,8 +27,11 @@ import (
 // sourceRouter routes TurnInput items to the correct agent's TurnLoop by target name.
 //
 // It is push-based: callers push items via Push(), and the router forwards them
-// to the registered TurnLoop for the target agent. Items with an empty or unknown
-// TargetAgent are delivered to the default agent (leader).
+// to the registered TurnLoop for the target agent. Items with an empty
+// TargetAgent are delivered to the default agent (leader). Items with an
+// explicit but unknown TargetAgent are rejected rather than silently rerouted to
+// the leader, so a typo'd or stale target cannot quietly pollute the leader's
+// context with another agent's messages.
 type sourceRouter struct {
 	defaultAgent string
 	logger       Logger
@@ -74,7 +77,10 @@ func (r *sourceRouter) getLoop(agentName string) *adk.TurnLoop[TurnInput, adk.Me
 }
 
 // Push routes a TurnInput to the appropriate agent's TurnLoop.
-// Items with empty or unknown TargetAgent go to the default agent.
+// An empty TargetAgent is delivered to the default agent (leader). An explicit
+// but unknown TargetAgent is rejected (returns false) instead of being rerouted
+// to the leader, so a wrong or stale target surfaces to the caller rather than
+// silently entering the leader's context.
 func (r *sourceRouter) Push(item TurnInput, opts ...adk.PushOption[TurnInput, adk.Message]) (bool, <-chan struct{}) {
 	target := item.TargetAgent
 	if target == "" {
@@ -83,15 +89,15 @@ func (r *sourceRouter) Push(item TurnInput, opts ...adk.PushOption[TurnInput, ad
 
 	r.mu.RLock()
 	loop, ok := r.loops[target]
-	if !ok {
-		if target != r.defaultAgent {
-			r.logger.Printf("sourceRouter: unknown target agent %q, routing to default %q", target, r.defaultAgent)
-		}
-		loop = r.loops[r.defaultAgent]
-	}
 	r.mu.RUnlock()
 
-	if loop == nil {
+	if !ok {
+		// Empty targets already resolved to the default agent above; reaching here
+		// with ok=false for the default means no leader loop is registered yet.
+		// An explicit unknown target is a routing error, not a leader message.
+		if target != r.defaultAgent {
+			r.logger.Printf("sourceRouter: rejecting item for unknown target agent %q", target)
+		}
 		return false, nil
 	}
 

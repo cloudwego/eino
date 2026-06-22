@@ -24,6 +24,8 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/bytedance/sonic"
+
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/schema"
 )
@@ -36,15 +38,35 @@ func newTeamDeleteTool(mw *teamMiddleware) *teamDeleteTool {
 	return &teamDeleteTool{mw: mw}
 }
 
+type teamDeleteArgs struct {
+	// Force allows deletion even when config.json still lists non-leader members
+	// (e.g. a prior teardown failed or the process restarted before cleanup). It
+	// does not bypass the running-goroutine guard.
+	Force bool `json:"force,omitempty"`
+}
+
 func (t *teamDeleteTool) Info(_ context.Context) (*schema.ToolInfo, error) {
 	return &schema.ToolInfo{
-		Name:        teamDeleteToolName,
-		Desc:        selectToolDesc(teamDeleteToolDesc, teamDeleteToolDescChinese),
-		ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{}),
+		Name: teamDeleteToolName,
+		Desc: selectToolDesc(teamDeleteToolDesc, teamDeleteToolDescChinese),
+		ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
+			"force": {
+				Type:     schema.Boolean,
+				Desc:     "Delete the team even if config.json still lists members (e.g. after a failed cleanup). Does not bypass the running-teammate check.",
+				Required: false,
+			},
+		}),
 	}, nil
 }
 
-func (t *teamDeleteTool) InvokableRun(ctx context.Context, _ string, _ ...tool.Option) (string, error) {
+func (t *teamDeleteTool) InvokableRun(ctx context.Context, argumentsInJSON string, _ ...tool.Option) (string, error) {
+	args := teamDeleteArgs{}
+	if strings.TrimSpace(argumentsInJSON) != "" {
+		if err := sonic.UnmarshalString(argumentsInJSON, &args); err != nil {
+			return "", fmt.Errorf("%s parse arguments failed: %w", teamDeleteToolName, err)
+		}
+	}
+
 	teamName := t.mw.getTeamName()
 
 	if teamName != "" {
@@ -60,6 +82,25 @@ func (t *teamDeleteTool) InvokableRun(ctx context.Context, _ string, _ ...tool.O
 				"message":   fmt.Sprintf("Team %q still has active teammates [%s], shut them down first via SendMessage with shutdown_request", teamName, strings.Join(runningNames, ", ")),
 				"team_name": teamName,
 			}), nil
+		}
+
+		// No goroutine is running, but config.json — the persistent source of
+		// truth — may still list members if a previous teardown failed or the
+		// process restarted before cleanup completed. Deleting the team directory
+		// would silently discard that recoverable state, so refuse unless the
+		// caller explicitly forces it.
+		if !args.Force {
+			residual, err := t.mw.lifecycle.store.NonLeaderMemberNames(ctx, teamName)
+			if err != nil {
+				return "", fmt.Errorf("%s check residual members for %q: %w", teamDeleteToolName, teamName, err)
+			}
+			if len(residual) > 0 {
+				return marshalToolResult(map[string]any{
+					"success":   false,
+					"message":   fmt.Sprintf("Team %q still lists member(s) [%s] in config.json with no running goroutine (likely incomplete cleanup). Verify they are done, then retry with force=true to delete anyway.", teamName, strings.Join(residual, ", ")),
+					"team_name": teamName,
+				}), nil
+			}
 		}
 
 		cm := t.mw.lifecycle.store

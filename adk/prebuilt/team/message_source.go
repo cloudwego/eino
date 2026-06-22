@@ -191,6 +191,13 @@ func (s *mailboxMessageSource) handleLeaderControlMessages(ctx context.Context, 
 
 			notifyMsg, err := s.conf.OnShutdownResponse(ctx, fromName)
 			if err != nil {
+				// The inbox snapshot was already consumed (MarkRead ran before this
+				// handler so a successful side effect can never be replayed). A failure
+				// here means graceful cleanup did not complete and will NOT be retried
+				// from the mailbox, so surface it loudly instead of dropping it: log the
+				// error and forward the original control message to the leader so a human
+				// or the leader agent can react rather than losing the shutdown silently.
+				s.logger().Printf("OnShutdownResponse[from=%s] failed, cleanup not retried: %v", fromName, err)
 				remaining = append(remaining, m)
 				continue
 			}
