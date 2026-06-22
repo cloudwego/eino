@@ -966,9 +966,7 @@ func TestMiddleware_AfterAgent_AsyncExtractionKeepsLatestPendingSnapshot(t *test
 		firstRunStarted: startedCh,
 	}
 	coord := &CoordinationConfig[*schema.Message]{
-		SessionIDFunc: func(ctx context.Context, state *adk.ChatModelAgentState) (string, error) {
-			return "session-1", nil
-		},
+		SessionID:   "session-1",
 		Coordinator: NewLocalCoordinator(),
 		LockTTL:     time.Minute,
 	}
@@ -1175,9 +1173,7 @@ func TestMiddleware_BeforeAgent_DistributedCursorSyncIntoMessageExtra(t *testing
 	ctx := context.Background()
 	b := NewInMemoryBackend()
 	coord := &CoordinationConfig[*schema.Message]{
-		SessionIDFunc: func(ctx context.Context, state *adk.ChatModelAgentState) (string, error) {
-			return "sess-cursor", nil
-		},
+		SessionID:   "sess-cursor",
 		Coordinator: NewLocalCoordinator(),
 		LockTTL:     time.Minute,
 	}
@@ -1210,9 +1206,7 @@ func TestMiddleware_BeforeAgent_WriteCursorDoesNotBlockInstructionInjection(t *t
 	b.put("/mem/MEMORY.md", "remembered\n", now)
 
 	coord := &CoordinationConfig[*schema.Message]{
-		SessionIDFunc: func(ctx context.Context, state *adk.ChatModelAgentState) (string, error) {
-			return "sess-cursor", nil
-		},
+		SessionID:   "sess-cursor",
 		Coordinator: NewLocalCoordinator(),
 		LockTTL:     time.Minute,
 	}
@@ -1536,9 +1530,7 @@ func TestMiddleware_AfterAgent_AsyncSetsPendingSnapshotWhenLockHeld(t *testing.T
 
 	extModel := &extractionModel{}
 	coord := &CoordinationConfig[*schema.Message]{
-		SessionIDFunc: func(ctx context.Context, state *adk.ChatModelAgentState) (string, error) {
-			return "sess-pending", nil
-		},
+		SessionID:   "sess-pending",
 		Coordinator: NewLocalCoordinator(),
 		LockTTL:     time.Minute,
 	}

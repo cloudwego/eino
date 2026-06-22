@@ -329,12 +329,12 @@ func emitRetryingTimeline[M MessageType](ctx context.Context, err error, rejectR
 	sendSessionTimelineEvent(ctx, &SessionEvent[M]{
 		Timestamp: newEventTimestamp(),
 		Kind:      SessionEventSessionStatusRescheduled,
-		Lifecycle: &LifecycleEvent{Scope: LifecycleScopeSession, State: SessionRunStateRescheduled},
+		Lifecycle: &LifecycleEvent{State: SessionRunStateRescheduled},
 	})
 	sendSessionTimelineEvent(ctx, &SessionEvent[M]{
 		Timestamp: newEventTimestamp(),
 		Kind:      SessionEventSessionStatusRunning,
-		Lifecycle: &LifecycleEvent{Scope: LifecycleScopeSession, State: SessionRunStateRunning},
+		Lifecycle: &LifecycleEvent{State: SessionRunStateRunning},
 	})
 }
 

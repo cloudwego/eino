@@ -74,7 +74,7 @@ func TestInMemoryStoreKindFilterAndPagination(t *testing.T) {
 	events := []*adk.SessionEvent[*schema.Message]{
 		testMessageEvent("e1", "one"),
 		testSpanEvent("e2"),
-		testTurnEndEvent("e3", "turn-1"),
+		testCommittedIdleEvent("e3", "turn-1"),
 		testMessageEvent("e4", "four"),
 	}
 	err := store.AppendEvents(ctx, &adk.AppendSessionEventsRequest[*schema.Message]{SessionID: "s", Events: events})
@@ -83,7 +83,7 @@ func TestInMemoryStoreKindFilterAndPagination(t *testing.T) {
 	res, err := store.LoadEvents(ctx, &adk.LoadSessionEventsRequest{
 		SessionID: "s",
 		After:     "e2",
-		Kinds:     []adk.SessionEventKind{adk.SessionEventMessage, adk.SessionEventTurnEnd},
+		Kinds:     []adk.SessionEventKind{adk.SessionEventMessage, adk.SessionEventSessionStatusIdle},
 		Limit:     1,
 	})
 	require.NoError(t, err)
@@ -118,7 +118,7 @@ func TestInMemoryStoreValidationReplayAndReversePagination(t *testing.T) {
 	events := []*adk.SessionEvent[*schema.Message]{
 		testMessageEvent("e1", "one"),
 		testSpanEvent("e2"),
-		testTurnEndEvent("e3", "turn-1"),
+		testCommittedIdleEvent("e3", "turn-1"),
 	}
 	err := store.AppendEvents(ctx, &adk.AppendSessionEventsRequest[*schema.Message]{
 		SessionID: "s",
@@ -188,12 +188,15 @@ func testMessageEvent(id, content string) *adk.SessionEvent[*schema.Message] {
 	}
 }
 
-func testTurnEndEvent(id, turnID string) *adk.SessionEvent[*schema.Message] {
+func testCommittedIdleEvent(id, turnID string) *adk.SessionEvent[*schema.Message] {
 	return &adk.SessionEvent[*schema.Message]{
 		EventID: id,
-		Kind:    adk.SessionEventTurnEnd,
+		Kind:    adk.SessionEventSessionStatusIdle,
 		TurnID:  turnID,
-		TurnEnd: &adk.TurnEndState[*schema.Message]{},
+		Lifecycle: &adk.LifecycleEvent{
+			State:      adk.SessionRunStateIdle,
+			StopReason: &adk.StopReason{Type: "end_turn"},
+		},
 	}
 }
 

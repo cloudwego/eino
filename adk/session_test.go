@@ -147,6 +147,17 @@ func withTestEventID[M MessageType](se *SessionEvent[M]) *SessionEvent[M] {
 	return se
 }
 
+func withTestCommittedIdle[M MessageType](turnID string) *SessionEvent[M] {
+	return withTestEventID(&SessionEvent[M]{
+		Kind:   SessionEventSessionStatusIdle,
+		TurnID: turnID,
+		Lifecycle: &LifecycleEvent{
+			State:      SessionRunStateIdle,
+			StopReason: &StopReason{Type: "end_turn"},
+		},
+	})
+}
+
 func testSequentialEventIDGenerator(prefix string) SessionEventIDGenerator[*schema.Message] {
 	var n int64
 	return func(_ context.Context, _ *SessionEvent[*schema.Message]) (string, error) {
@@ -220,9 +231,12 @@ func appendCommittedTestTurn(t *testing.T, ctx context.Context, store testSessio
 		})
 	}
 	return appendTestSessionEvent(t, ctx, store, sid, &SessionEvent[*schema.Message]{
-		Kind:    SessionEventTurnEnd,
-		TurnID:  turnID,
-		TurnEnd: &TurnEndState[*schema.Message]{SessionValues: map[string]any{"turn": turnID}},
+		Kind:   SessionEventSessionStatusIdle,
+		TurnID: turnID,
+		Lifecycle: &LifecycleEvent{
+			State:      SessionRunStateIdle,
+			StopReason: &StopReason{Type: "end_turn"},
+		},
 	})
 }
 
@@ -230,7 +244,14 @@ type runnerSessionAgent struct {
 	name    string
 	inputs  [][]*schema.Message
 	values  []map[string]any
-	turnEnd *TurnEndState[*schema.Message]
+	turnEnd *testTurnState[*schema.Message]
+}
+
+type testTurnState[M MessageType] struct {
+	Messages          []M
+	ToolInfos         []*schema.ToolInfo
+	DeferredToolInfos []*schema.ToolInfo
+	SessionValues     map[string]any
 }
 
 func (a *runnerSessionAgent) Name(_ context.Context) string        { return a.name }
@@ -239,23 +260,12 @@ func (a *runnerSessionAgent) Run(ctx context.Context, input *AgentInput, _ ...Ag
 	iter, gen := NewAsyncIteratorPair[*AgentEvent]()
 	a.inputs = append(a.inputs, append([]*schema.Message{}, input.Messages...))
 	a.values = append(a.values, GetSessionValues(ctx))
-	turnEnd := a.turnEnd
-	if turnEnd == nil {
-		turnEnd = &TurnEndState[*schema.Message]{Messages: append([]*schema.Message{}, input.Messages...)}
-	}
 	go func() {
 		defer gen.Close()
 		gen.Send(&AgentEvent{
 			AgentName: a.name,
 			Output: &AgentOutput{
 				MessageOutput: &MessageVariant{Message: schema.AssistantMessage("ok", nil), Role: schema.Assistant},
-			},
-		})
-		gen.Send(&AgentEvent{
-			AgentName: a.name,
-			SessionEvent: &SessionEvent[*schema.Message]{
-				Kind:    SessionEventTurnEnd,
-				TurnEnd: turnEnd,
 			},
 		})
 	}()
@@ -286,15 +296,6 @@ func (a *streamingSessionAgent) Run(_ context.Context, _ *AgentInput, _ ...Agent
 		})
 		<-a.release
 		sw.Close()
-		gen.Send(&AgentEvent{
-			AgentName: a.Name(context.Background()),
-			SessionEvent: &SessionEvent[*schema.Message]{
-				Kind: SessionEventTurnEnd,
-				TurnEnd: &TurnEndState[*schema.Message]{
-					Messages: []*schema.Message{schema.AssistantMessage("partial", nil)},
-				},
-			},
-		})
 	}()
 	return iter
 }
@@ -612,7 +613,7 @@ func TestRunnerSessionModePrependsCommittedMessagesOnce(t *testing.T) {
 	sessionID := "runner-session"
 	firstAgent := &runnerSessionAgent{
 		name: "runner-session-agent",
-		turnEnd: &TurnEndState[*schema.Message]{
+		turnEnd: &testTurnState[*schema.Message]{
 			Messages:      []*schema.Message{schema.UserMessage("first"), schema.AssistantMessage("answer1", nil)},
 			SessionValues: map[string]any{"k": "restored"},
 		},
@@ -626,7 +627,7 @@ func TestRunnerSessionModePrependsCommittedMessagesOnce(t *testing.T) {
 
 	secondAgent := &runnerSessionAgent{
 		name: "runner-session-agent",
-		turnEnd: &TurnEndState[*schema.Message]{
+		turnEnd: &testTurnState[*schema.Message]{
 			Messages:      []*schema.Message{schema.UserMessage("first"), schema.AssistantMessage("answer1", nil), schema.UserMessage("second"), schema.AssistantMessage("answer2", nil)},
 			SessionValues: map[string]any{"k": "next"},
 		},
@@ -644,7 +645,7 @@ func TestRunnerSessionModePrependsCommittedMessagesOnce(t *testing.T) {
 	assert.Equal(t, "ok", secondAgent.inputs[0][1].Content)
 	assert.Equal(t, "second", secondAgent.inputs[0][2].Content)
 	require.Len(t, secondAgent.values, 1)
-	assert.Equal(t, "restored", secondAgent.values[0]["k"])
+	assert.Nil(t, secondAgent.values[0]["k"])
 	assert.Equal(t, "value", secondAgent.values[0]["override"])
 }
 
@@ -993,8 +994,7 @@ func TestRunnerSessionModeDeleteCheckpointFailureIsReported(t *testing.T) {
 	store.deleteErr = errors.New("delete failed")
 
 	res := &sessionTurnResult[*schema.Message]{
-		persister:  persister,
-		sawTurnEnd: true,
+		persister: persister,
 		sessionState: &runnerSessionRunState[*schema.Message]{
 			enabled:      true,
 			sessionID:    "delete-fail-session",
@@ -1007,12 +1007,10 @@ func TestRunnerSessionModeDeleteCheckpointFailureIsReported(t *testing.T) {
 	err := res.finalize(ctx)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to delete session checkpoint")
-	assert.True(t, res.sawTurnEnd, "turn must have been seen before stale checkpoint cleanup")
 }
 
-func TestTurnEndStateSessionValues_JSONLikeRoundTrip(t *testing.T) {
-	state := &TurnEndState[*schema.Message]{
-		Messages: []*schema.Message{schema.UserMessage("hello")},
+func TestModelContextEvent_JSONLikeRoundTrip(t *testing.T) {
+	modelCtx := &ModelContextEvent{
 		ToolInfos: []*schema.ToolInfo{
 			{
 				Name:        "lookup",
@@ -1020,23 +1018,16 @@ func TestTurnEndStateSessionValues_JSONLikeRoundTrip(t *testing.T) {
 				ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{"q": {Type: schema.String}}),
 			},
 		},
-		SessionValues: map[string]any{
-			"nested": map[string]any{"count": int64(9007199254740993)},
-			"list":   []any{"a", int64(7), true},
-		},
 	}
 
-	se := &SessionEvent[*schema.Message]{TurnEnd: state}
+	se := &SessionEvent[*schema.Message]{Kind: SessionEventModelContext, ModelContext: modelCtx}
 	data, err := encodeSessionEvent(withTestEventID(se))
 	require.NoError(t, err)
 	decoded, err := decodeSessionEvent[*schema.Message](data)
 	require.NoError(t, err)
-	require.NotNil(t, decoded.TurnEnd)
-	require.Len(t, decoded.TurnEnd.Messages, 1)
-	assert.Equal(t, "hello", decoded.TurnEnd.Messages[0].Content)
-	require.Len(t, decoded.TurnEnd.ToolInfos, 1)
-	assert.Equal(t, "lookup", decoded.TurnEnd.ToolInfos[0].Name)
-	assert.Equal(t, state.SessionValues, decoded.TurnEnd.SessionValues)
+	require.NotNil(t, decoded.ModelContext)
+	require.Len(t, decoded.ModelContext.ToolInfos, 1)
+	assert.Equal(t, "lookup", decoded.ModelContext.ToolInfos[0].Name)
 }
 
 func TestRunnerSessionStreamingDoesNotBlockLiveEvent(t *testing.T) {
@@ -1203,15 +1194,6 @@ func (a *runnerInterruptAgent) Resume(ctx context.Context, info *ResumeInfo, _ .
 				},
 			},
 		})
-		gen.Send(&AgentEvent{
-			AgentName: "InterruptAgent",
-			SessionEvent: &SessionEvent[*schema.Message]{
-				Kind: SessionEventTurnEnd,
-				TurnEnd: &TurnEndState[*schema.Message]{
-					Messages: []*schema.Message{schema.AssistantMessage("resumed ok", nil)},
-				},
-			},
-		})
 	}()
 	return iter
 }
@@ -1237,7 +1219,6 @@ func (a *runnerCheckpointSanitizeAgent) Run(ctx context.Context, _ *AgentInput, 
 				EventID: "checkpoint-session-only",
 				Kind:    SessionEventSessionStatusRunning,
 				Lifecycle: &LifecycleEvent{
-					Scope: LifecycleScopeSession,
 					State: SessionRunStateRunning,
 				},
 			},
@@ -1313,7 +1294,7 @@ func TestRunnerSessionModeFlushFailurePreventsCommit(t *testing.T) {
 
 	agent := &runnerSessionAgent{
 		name: "flush-fail-agent",
-		turnEnd: &TurnEndState[*schema.Message]{
+		turnEnd: &testTurnState[*schema.Message]{
 			Messages: []*schema.Message{schema.AssistantMessage("done", nil)},
 		},
 	}
@@ -1345,7 +1326,7 @@ func TestRunnerSessionSyncModeBlocksDeliveryUntilAppendCompletes(t *testing.T) {
 	store := newBlockingAppendStore()
 	agent := &runnerSessionAgent{
 		name: "sync-block-agent",
-		turnEnd: &TurnEndState[*schema.Message]{
+		turnEnd: &testTurnState[*schema.Message]{
 			Messages: []*schema.Message{schema.AssistantMessage("ok", nil)},
 		},
 	}
@@ -1413,7 +1394,7 @@ func TestRunnerSessionSyncModeAppendFailureSuppressesOutput(t *testing.T) {
 	store.appendErr = errors.New("sync append failed")
 	agent := &runnerSessionAgent{
 		name: "sync-fail-agent",
-		turnEnd: &TurnEndState[*schema.Message]{
+		turnEnd: &testTurnState[*schema.Message]{
 			Messages: []*schema.Message{schema.AssistantMessage("ok", nil)},
 		},
 	}
@@ -1562,7 +1543,6 @@ func TestRunnerSessionDurableBoundaryBatchShape(t *testing.T) {
 		{SessionEventSessionStatusRunning},
 		{SessionEventMessage},
 		{SessionEventMessage},
-		{SessionEventTurnEnd},
 		{SessionEventSessionStatusIdle},
 	}, store.appendBatches)
 }
@@ -1627,19 +1607,16 @@ func TestSessionPersister_DirectAppendNoRetryAndLatch(t *testing.T) {
 	})
 }
 
-// TestTurnEndState_GobRoundtripNilFields verifies gob roundtrip preserves nil semantics.
-func TestTurnEndState_GobRoundtripNilFields(t *testing.T) {
-	original := &TurnEndState[*schema.Message]{}
-	se := &SessionEvent[*schema.Message]{TurnEnd: original}
+// TestModelContextEvent_GobRoundtripNilFields verifies gob roundtrip preserves nil semantics.
+func TestModelContextEvent_GobRoundtripNilFields(t *testing.T) {
+	se := &SessionEvent[*schema.Message]{Kind: SessionEventModelContext, ModelContext: &ModelContextEvent{}}
 	encoded, err := encodeSessionEvent(withTestEventID(se))
 	require.NoError(t, err)
 	decoded, err := decodeSessionEvent[*schema.Message](encoded)
 	require.NoError(t, err)
-	require.NotNil(t, decoded.TurnEnd)
-	assert.Nil(t, decoded.TurnEnd.Messages)
-	assert.Nil(t, decoded.TurnEnd.ToolInfos)
-	assert.Nil(t, decoded.TurnEnd.DeferredToolInfos)
-	assert.Nil(t, decoded.TurnEnd.SessionValues)
+	require.NotNil(t, decoded.ModelContext)
+	assert.Nil(t, decoded.ModelContext.ToolInfos)
+	assert.Nil(t, decoded.ModelContext.DeferredToolInfos)
 }
 
 func TestNormalizeSessionConfig_Variations(t *testing.T) {
@@ -1964,8 +1941,8 @@ func TestStripSessionEventFields(t *testing.T) {
 	t.Run("SessionEvent-only event drops to nil", func(t *testing.T) {
 		ev := &AgentEvent{
 			SessionEvent: &SessionEvent[*schema.Message]{
-				Kind:    SessionEventTurnEnd,
-				TurnEnd: &TurnEndState[*schema.Message]{},
+				Kind:         SessionEventModelContext,
+				ModelContext: &ModelContextEvent{},
 			},
 		}
 		stripped := stripSessionEventFields(ev)
@@ -1990,9 +1967,9 @@ func TestStripSessionEventFields(t *testing.T) {
 			Timestamp: ts,
 			Err:       errors.New("visible"),
 			SessionEvent: &SessionEvent[*schema.Message]{
-				SessionID: "child-1",
-				Kind:      SessionEventTurnEnd,
-				TurnEnd:   &TurnEndState[*schema.Message]{},
+				SessionID:    "child-1",
+				Kind:         SessionEventModelContext,
+				ModelContext: &ModelContextEvent{},
 			},
 		}
 		stripped := stripSessionEventFields(ev)
@@ -2156,10 +2133,10 @@ func TestSessionRollbackEventRoundTrip(t *testing.T) {
 		EventID: uuid.NewString(),
 		Kind:    SessionEventRollback,
 		Rollback: &SessionRollbackEvent{
-			ToEventID:             "turn-end-1",
-			ToTurnID:              "turn-1",
-			PreviousHeadTurnEndID: "turn-end-2",
-			PreviousHeadTurnID:    "turn-2",
+			ToEventID:                 "turn-end-1",
+			ToTurnID:                  "turn-1",
+			PreviousHeadCommitEventID: "turn-end-2",
+			PreviousHeadTurnID:        "turn-2",
 		},
 	}
 	data, err := encodeSessionEvent(se)
@@ -2171,7 +2148,7 @@ func TestSessionRollbackEventRoundTrip(t *testing.T) {
 	assert.Equal(t, SessionEventRollback, decoded.Kind)
 	assert.Equal(t, "turn-end-1", decoded.Rollback.ToEventID)
 	assert.Equal(t, "turn-1", decoded.Rollback.ToTurnID)
-	assert.Equal(t, "turn-end-2", decoded.Rollback.PreviousHeadTurnEndID)
+	assert.Equal(t, "turn-end-2", decoded.Rollback.PreviousHeadCommitEventID)
 	assert.Equal(t, "turn-2", decoded.Rollback.PreviousHeadTurnID)
 }
 
@@ -2223,7 +2200,6 @@ func TestRollbackSessionReconstructionHidesDeadBranchAndKeepsNewSuffix(t *testin
 	assert.Equal(t, "A1", result.state.Messages[1].Content)
 	assert.Equal(t, "Q3", result.state.Messages[2].Content)
 	assert.Equal(t, "A3", result.state.Messages[3].Content)
-	assert.Equal(t, "turn-3", result.state.SessionValues["turn"])
 
 	rollbackEvents := filterStoredSessionEvents(t, store.events, func(se *SessionEvent[*schema.Message]) bool {
 		return se.Kind == SessionEventRollback
@@ -2232,7 +2208,7 @@ func TestRollbackSessionReconstructionHidesDeadBranchAndKeepsNewSuffix(t *testin
 	require.NotNil(t, rollbackEvents[0].Rollback)
 	assert.Equal(t, t1.EventID, rollbackEvents[0].Rollback.ToEventID)
 	assert.Equal(t, "turn-1", rollbackEvents[0].Rollback.ToTurnID)
-	assert.Equal(t, t2.EventID, rollbackEvents[0].Rollback.PreviousHeadTurnEndID)
+	assert.Equal(t, t2.EventID, rollbackEvents[0].Rollback.PreviousHeadCommitEventID)
 	assert.Equal(t, "turn-2", rollbackEvents[0].Rollback.PreviousHeadTurnID)
 	assert.NotContains(t, store.checkpoints, sessionRunnerCheckpointID(sid))
 }
@@ -2255,7 +2231,6 @@ func TestRollbackSessionMultipleRollbacksProjectActiveBranch(t *testing.T) {
 	require.Len(t, result.state.Messages, 2)
 	assert.Equal(t, "Q1", result.state.Messages[0].Content)
 	assert.Equal(t, "A1", result.state.Messages[1].Content)
-	assert.Equal(t, "turn-1", result.state.SessionValues["turn"])
 
 	rollbackEvents := filterStoredSessionEvents(t, store.events, func(se *SessionEvent[*schema.Message]) bool {
 		return se.Kind == SessionEventRollback
@@ -2270,7 +2245,7 @@ func TestRunnerQueryAfterRollbackUsesActiveProjection(t *testing.T) {
 
 	firstAgent := &runnerSessionAgent{
 		name: "runner-session-agent",
-		turnEnd: &TurnEndState[*schema.Message]{
+		turnEnd: &testTurnState[*schema.Message]{
 			Messages: []*schema.Message{schema.UserMessage("first"), schema.AssistantMessage("answer1", nil)},
 		},
 	}
@@ -2280,15 +2255,15 @@ func TestRunnerQueryAfterRollbackUsesActiveProjection(t *testing.T) {
 		SessionStore: store,
 	})
 	drainSessionEvents(t, firstRunner.Query(ctx, "first"))
-	firstTurnEndEvents := filterStoredSessionEvents(t, store.events, func(se *SessionEvent[*schema.Message]) bool {
-		return se.Kind == SessionEventTurnEnd
+	firstCommittedIdleEvents := filterStoredSessionEvents(t, store.events, func(se *SessionEvent[*schema.Message]) bool {
+		return isCommittedIdleEvent(se)
 	})
-	require.Len(t, firstTurnEndEvents, 1)
-	firstTurnID := firstTurnEndEvents[0].TurnID
+	require.Len(t, firstCommittedIdleEvents, 1)
+	firstTurnID := firstCommittedIdleEvents[0].TurnID
 
 	secondAgent := &runnerSessionAgent{
 		name: "runner-session-agent",
-		turnEnd: &TurnEndState[*schema.Message]{
+		turnEnd: &testTurnState[*schema.Message]{
 			Messages: []*schema.Message{schema.UserMessage("first"), schema.AssistantMessage("answer1", nil), schema.UserMessage("second"), schema.AssistantMessage("answer2", nil)},
 		},
 	}
@@ -2303,7 +2278,7 @@ func TestRunnerQueryAfterRollbackUsesActiveProjection(t *testing.T) {
 
 	thirdAgent := &runnerSessionAgent{
 		name: "runner-session-agent",
-		turnEnd: &TurnEndState[*schema.Message]{
+		turnEnd: &testTurnState[*schema.Message]{
 			Messages: []*schema.Message{schema.UserMessage("first"), schema.AssistantMessage("answer1", nil), schema.UserMessage("third"), schema.AssistantMessage("answer3", nil)},
 		},
 	}
@@ -2431,7 +2406,7 @@ func TestReconstructRollbackMalformedRecordsFailClosed(t *testing.T) {
 	require.ErrorIs(t, err, ErrRollbackTargetInactive)
 }
 
-// TestRunnerSessionReconstructsFromEventLog: Delete TurnEndState from store,
+// TestRunnerSessionReconstructsFromEventLog: Delete testTurnState from store,
 // next turn should reconstruct from events.
 func TestRunnerSessionReconstructsFromEventLog(t *testing.T) {
 	ctx := context.Background()
@@ -2440,7 +2415,7 @@ func TestRunnerSessionReconstructsFromEventLog(t *testing.T) {
 
 	firstAgent := &runnerSessionAgent{
 		name: "ra",
-		turnEnd: &TurnEndState[*schema.Message]{
+		turnEnd: &testTurnState[*schema.Message]{
 			Messages: []*schema.Message{schema.UserMessage("first"), schema.AssistantMessage("answer1", nil)},
 		},
 	}
@@ -2453,14 +2428,14 @@ func TestRunnerSessionReconstructsFromEventLog(t *testing.T) {
 
 	// Verify context-commit events were captured: caller input + assistant output + turn-end.
 	commitEvents := filterStoredSessionEvents(t, store.events, func(se *SessionEvent[*schema.Message]) bool {
-		return se.Kind == SessionEventMessage || se.Kind == SessionEventTurnEnd
+		return se.Kind == SessionEventMessage || isCommittedIdleEvent(se)
 	})
 	require.Len(t, commitEvents, 3, "input event + assistant event + turn-end event should be in event log")
 
 	// Capture the prepared session state before agent runs.
 	capturedAgent := &runnerSessionAgent{
 		name: "ra",
-		turnEnd: &TurnEndState[*schema.Message]{
+		turnEnd: &testTurnState[*schema.Message]{
 			Messages: []*schema.Message{},
 		},
 	}
@@ -2490,7 +2465,7 @@ func TestRunnerSessionInputEventsPersisted(t *testing.T) {
 
 	agent := &runnerSessionAgent{
 		name: "input-agent",
-		turnEnd: &TurnEndState[*schema.Message]{
+		turnEnd: &testTurnState[*schema.Message]{
 			Messages: []*schema.Message{schema.AssistantMessage("answer", nil)},
 		},
 	}
@@ -2501,10 +2476,10 @@ func TestRunnerSessionInputEventsPersisted(t *testing.T) {
 	})
 	drainSessionEvents(t, runner.Query(ctx, "user-question"))
 
-	// Single-turn run: 1 user input event + 1 assistant output event + 1 TurnEnd event,
+	// Single-turn run: 1 user input event + 1 assistant output event + 1 idle commit event,
 	// plus non-context lifecycle timeline records.
 	commitEvents := filterStoredSessionEvents(t, store.events, func(se *SessionEvent[*schema.Message]) bool {
-		return se.Kind == SessionEventMessage || se.Kind == SessionEventTurnEnd
+		return se.Kind == SessionEventMessage || isCommittedIdleEvent(se)
 	})
 	require.Len(t, commitEvents, 3)
 	// The first message event should be the user input.
@@ -2946,12 +2921,11 @@ func TestSessionPersister_FlushContextCancellation(t *testing.T) {
 	assert.Equal(t, 1, store.getAppendCalls())
 }
 
-// --- Attack tests for TurnID / inFlightTurnID recovery ---
+// --- Attack tests for TurnID recovery ---
 
-// TestAttack_InFlightTurnIDRecoveryOnResume verifies that reconstructSessionState
-// correctly identifies an in-flight (interrupted) turn's TurnID from events
-// after the last committed TurnEnd.
-func TestAttack_InFlightTurnIDRecoveryOnResume(t *testing.T) {
+// TestAttack_ReconstructionIncludesInterruptedTailOnResume verifies that
+// reconstructSessionState keeps interrupted-tail messages during replay.
+func TestAttack_ReconstructionIncludesInterruptedTailOnResume(t *testing.T) {
 	ctx := context.Background()
 	store := newSessionHelperStore()
 	sid := "inflight-recovery"
@@ -2959,14 +2933,14 @@ func TestAttack_InFlightTurnIDRecoveryOnResume(t *testing.T) {
 	committedMsg := schema.UserMessage("committed-msg")
 	EnsureMessageID(committedMsg)
 
-	// A committed turn: TurnStart (lifecycle running) + Message + TurnEnd, all with TurnID "turn-committed"
+	// A committed turn: TurnStart (lifecycle running) + Message + committed idle, all with TurnID "turn-committed"
 	events := []*SessionEvent[*schema.Message]{
-		{EventID: uuid.NewString(), Kind: SessionEventSessionStatusRunning, TurnID: "turn-committed", Lifecycle: &LifecycleEvent{Scope: LifecycleScopeSession, State: SessionRunStateRunning}},
+		{EventID: uuid.NewString(), Kind: SessionEventSessionStatusRunning, TurnID: "turn-committed", Lifecycle: &LifecycleEvent{State: SessionRunStateRunning}},
 		{EventID: uuid.NewString(), Kind: SessionEventMessage, TurnID: "turn-committed", Message: committedMsg},
-		{EventID: uuid.NewString(), Kind: SessionEventTurnEnd, TurnID: "turn-committed", TurnEnd: &TurnEndState[*schema.Message]{SessionValues: map[string]any{"k": "v"}}},
+		{EventID: uuid.NewString(), Kind: SessionEventSessionStatusIdle, TurnID: "turn-committed", Lifecycle: &LifecycleEvent{State: SessionRunStateIdle, StopReason: &StopReason{Type: "end_turn"}}},
 	}
 
-	// An interrupted turn: a Message event with TurnID "turn-interrupted" and NO TurnEnd
+	// An interrupted turn: a Message event with TurnID "turn-interrupted" and no committed idle.
 	interruptedMsg := schema.AssistantMessage("interrupted-msg", nil)
 	EnsureMessageID(interruptedMsg)
 	events = append(events, &SessionEvent[*schema.Message]{
@@ -2980,7 +2954,6 @@ func TestAttack_InFlightTurnIDRecoveryOnResume(t *testing.T) {
 	result, err := reconstructSessionState[*schema.Message](ctx, store, sid, defaultLoadPageSize)
 	require.NoError(t, err)
 	require.NotNil(t, result)
-	assert.Equal(t, "turn-interrupted", result.inFlightTurnID)
 	require.NotNil(t, result.state)
 	// State should have messages from committed turn (1) + interrupted turn (1).
 	require.Len(t, result.state.Messages, 2)
@@ -2988,7 +2961,7 @@ func TestAttack_InFlightTurnIDRecoveryOnResume(t *testing.T) {
 	assert.Equal(t, "interrupted-msg", result.state.Messages[1].Content)
 }
 
-func TestAttack_InFlightTurnIDRecoveryWithoutCommittedTurnEnd(t *testing.T) {
+func TestAttack_ReconstructionWithoutCommittedIdle(t *testing.T) {
 	ctx := context.Background()
 	store := newSessionHelperStore()
 	sid := "inflight-no-committed-turn"
@@ -3013,68 +2986,9 @@ func TestAttack_InFlightTurnIDRecoveryWithoutCommittedTurnEnd(t *testing.T) {
 	result, err := reconstructSessionState[*schema.Message](ctx, store, sid, defaultLoadPageSize)
 	require.NoError(t, err)
 	require.NotNil(t, result)
-	assert.Equal(t, "turn-interrupted", result.inFlightTurnID)
 	require.NotNil(t, result.state)
 	require.Len(t, result.state.Messages, 1)
 	assert.Equal(t, "first-turn", result.state.Messages[0].Content)
-}
-
-// TestAttack_InFlightTurnIDEmptyWhenNoPostTurnEndEvents verifies that when
-// the last event is a TurnEnd (complete turn), inFlightTurnID is empty.
-func TestAttack_InFlightTurnIDEmptyWhenNoPostTurnEndEvents(t *testing.T) {
-	ctx := context.Background()
-	store := newSessionHelperStore()
-	sid := "no-inflight"
-
-	msg := schema.UserMessage("hello")
-	EnsureMessageID(msg)
-
-	events := []*SessionEvent[*schema.Message]{
-		{EventID: uuid.NewString(), Kind: SessionEventMessage, TurnID: "turn-1", Message: msg},
-		{EventID: uuid.NewString(), Kind: SessionEventTurnEnd, TurnID: "turn-1", TurnEnd: &TurnEndState[*schema.Message]{SessionValues: map[string]any{"done": true}}},
-	}
-
-	for _, se := range events {
-		require.NoError(t, store.AppendEventsForSession(ctx, sid, []*SessionEvent[*schema.Message]{se}))
-	}
-
-	result, err := reconstructSessionState[*schema.Message](ctx, store, sid, defaultLoadPageSize)
-	require.NoError(t, err)
-	require.NotNil(t, result)
-	assert.Equal(t, "", result.inFlightTurnID)
-}
-
-// TestAttack_InFlightTurnIDMultipleTurnIDsInTail verifies that when multiple
-// post-TurnEnd events have different TurnIDs, only the first one is used.
-func TestAttack_InFlightTurnIDMultipleTurnIDsInTail(t *testing.T) {
-	ctx := context.Background()
-	store := newSessionHelperStore()
-	sid := "multi-turnid-tail"
-
-	committedMsg := schema.UserMessage("committed")
-	EnsureMessageID(committedMsg)
-
-	msgA := schema.UserMessage("msg-A")
-	EnsureMessageID(msgA)
-	msgB := schema.AssistantMessage("msg-B", nil)
-	EnsureMessageID(msgB)
-
-	events := []*SessionEvent[*schema.Message]{
-		{EventID: uuid.NewString(), Kind: SessionEventMessage, TurnID: "turn-committed", Message: committedMsg},
-		{EventID: uuid.NewString(), Kind: SessionEventTurnEnd, TurnID: "turn-committed", TurnEnd: &TurnEndState[*schema.Message]{}},
-		// Post-TurnEnd events with different TurnIDs
-		{EventID: uuid.NewString(), Kind: SessionEventMessage, TurnID: "turn-A", Message: msgA},
-		{EventID: uuid.NewString(), Kind: SessionEventMessage, TurnID: "turn-B", Message: msgB},
-	}
-
-	for _, se := range events {
-		require.NoError(t, store.AppendEventsForSession(ctx, sid, []*SessionEvent[*schema.Message]{se}))
-	}
-
-	result, err := reconstructSessionState[*schema.Message](ctx, store, sid, defaultLoadPageSize)
-	require.NoError(t, err)
-	require.NotNil(t, result)
-	assert.Equal(t, "turn-A", result.inFlightTurnID, "should take the first TurnID found after committed TurnEnd")
 }
 
 // TestAttack_OldRunIDFieldIgnoredOnDeserialization verifies that a JSON payload
@@ -3106,10 +3020,10 @@ func TestAttack_ResumePreservesTurnIDFromInterruptedRun(t *testing.T) {
 	store := newSessionHelperStore()
 	sessionID := "resume-turnid-preserve"
 
-	// First, run a normal turn that completes (provides a committed TurnEnd baseline).
+	// First, run a normal turn that completes (provides a committed idle baseline).
 	normalAgent := &runnerSessionAgent{
 		name: "normal-agent",
-		turnEnd: &TurnEndState[*schema.Message]{
+		turnEnd: &testTurnState[*schema.Message]{
 			Messages: []*schema.Message{schema.AssistantMessage("first answer", nil)},
 		},
 	}
@@ -3151,17 +3065,17 @@ func TestAttack_ResumePreservesTurnIDFromInterruptedRun(t *testing.T) {
 	require.GreaterOrEqual(t, len(turnIDSet), 2, "must have at least 2 distinct TurnIDs (committed + interrupted)")
 
 	// The interrupted TurnID is the one on reconstructable model-context events
-	// after the last TurnEnd. Timeline status events are not replay anchors.
-	var lastTurnEndIdx int
+	// after the last committed idle. Timeline status events are not replay anchors.
+	var lastCommittedIdleIdx int
 	for i, ep := range store.events {
 		se, err := decodeSessionEvent[*schema.Message](ep.Data)
 		require.NoError(t, err)
-		if se.Kind == SessionEventTurnEnd && se.TurnID != "" {
-			lastTurnEndIdx = i
+		if isCommittedIdleEvent(se) {
+			lastCommittedIdleIdx = i
 		}
 	}
 	var interruptedTurnID string
-	for i := lastTurnEndIdx + 1; i < len(store.events); i++ {
+	for i := lastCommittedIdleIdx + 1; i < len(store.events); i++ {
 		se, err := decodeSessionEvent[*schema.Message](store.events[i].Data)
 		require.NoError(t, err)
 		if se.Kind == SessionEventMessage && se.TurnID != "" {
@@ -3169,7 +3083,7 @@ func TestAttack_ResumePreservesTurnIDFromInterruptedRun(t *testing.T) {
 			break
 		}
 	}
-	require.NotEmpty(t, interruptedTurnID, "interrupted run must have events with a TurnID after the last TurnEnd")
+	require.NotEmpty(t, interruptedTurnID, "interrupted run must have events with a TurnID after the last committed idle")
 
 	// Record event count before resume.
 	eventsBeforeResume := len(store.events)
@@ -3206,10 +3120,10 @@ func TestAttack_FreshRunIgnoresInFlightTurnID(t *testing.T) {
 	store := newSessionHelperStore()
 	sessionID := "fresh-run-ignores-inflight"
 
-	// First, run a normal turn that completes (provides a committed TurnEnd baseline).
+	// First, run a normal turn that completes (provides a committed idle baseline).
 	normalAgent := &runnerSessionAgent{
 		name: "normal-agent",
-		turnEnd: &TurnEndState[*schema.Message]{
+		turnEnd: &testTurnState[*schema.Message]{
 			Messages: []*schema.Message{schema.AssistantMessage("baseline", nil)},
 		},
 	}
@@ -3238,17 +3152,17 @@ func TestAttack_FreshRunIgnoresInFlightTurnID(t *testing.T) {
 		}
 	}
 
-	// Identify the interrupted TurnID (events after the last committed TurnEnd).
-	var lastTurnEndIdx int
+	// Identify the interrupted TurnID (events after the last committed idle).
+	var lastCommittedIdleIdx int
 	for i, ep := range store.events {
 		se, err := decodeSessionEvent[*schema.Message](ep.Data)
 		require.NoError(t, err)
-		if se.Kind == SessionEventTurnEnd && se.TurnID != "" {
-			lastTurnEndIdx = i
+		if isCommittedIdleEvent(se) {
+			lastCommittedIdleIdx = i
 		}
 	}
 	var interruptedTurnID string
-	for i := lastTurnEndIdx + 1; i < len(store.events); i++ {
+	for i := lastCommittedIdleIdx + 1; i < len(store.events); i++ {
 		se, err := decodeSessionEvent[*schema.Message](store.events[i].Data)
 		require.NoError(t, err)
 		if se.TurnID != "" {
@@ -3262,7 +3176,7 @@ func TestAttack_FreshRunIgnoresInFlightTurnID(t *testing.T) {
 	eventsBeforeFresh := len(store.events)
 	freshAgent := &runnerSessionAgent{
 		name: "fresh-agent",
-		turnEnd: &TurnEndState[*schema.Message]{
+		turnEnd: &testTurnState[*schema.Message]{
 			Messages: []*schema.Message{schema.AssistantMessage("fresh answer", nil)},
 		},
 	}
@@ -3289,11 +3203,11 @@ func TestAttack_FreshRunIgnoresInFlightTurnID(t *testing.T) {
 	}
 }
 
-// sessionStreamingAgent emits a single streaming assistant output followed by a
-// SessionEventTurnEnd. Used to verify the runner's stream-copy/persist path.
+// sessionStreamingAgent emits a single streaming assistant output. Used to
+// verify the runner's stream-copy/persist path.
 type sessionStreamingAgent struct {
 	chunks   []*schema.Message
-	turnEnd  *TurnEndState[*schema.Message]
+	turnEnd  *testTurnState[*schema.Message]
 	role     schema.RoleType
 	tool     string
 	preEvent *SessionEvent[*schema.Message]
@@ -3315,20 +3229,13 @@ func (a *sessionStreamingAgent) Run(_ context.Context, _ *AgentInput, _ ...Agent
 		}
 		mv := &MessageVariant{IsStreaming: true, MessageStream: stream, Role: role, ToolName: a.tool}
 		gen.Send(&AgentEvent{AgentName: "session-stream-agent", Output: &AgentOutput{MessageOutput: mv}})
-		gen.Send(&AgentEvent{
-			AgentName: "session-stream-agent",
-			SessionEvent: &SessionEvent[*schema.Message]{
-				Kind:    SessionEventTurnEnd,
-				TurnEnd: a.turnEnd,
-			},
-		})
 	}()
 	return iter
 }
 
 type agenticSessionStreamingAgent struct {
 	chunks  []*schema.AgenticMessage
-	turnEnd *TurnEndState[*schema.AgenticMessage]
+	turnEnd *testTurnState[*schema.AgenticMessage]
 }
 
 func (a *agenticSessionStreamingAgent) Name(_ context.Context) string {
@@ -3357,13 +3264,6 @@ func (a *agenticSessionStreamingAgent) Run(
 				},
 			},
 		})
-		gen.Send(&TypedAgentEvent[*schema.AgenticMessage]{
-			AgentName: "agentic-session-stream-agent",
-			SessionEvent: &SessionEvent[*schema.AgenticMessage]{
-				Kind:    SessionEventTurnEnd,
-				TurnEnd: a.turnEnd,
-			},
-		})
 	}()
 	return iter
 }
@@ -3383,7 +3283,7 @@ func TestStreamPersistence_CopyAndConcat(t *testing.T) {
 	}
 	agent := &sessionStreamingAgent{
 		chunks: chunks,
-		turnEnd: &TurnEndState[*schema.Message]{
+		turnEnd: &testTurnState[*schema.Message]{
 			Messages: []*schema.Message{schema.UserMessage("q"), schema.AssistantMessage("hello world", nil)},
 		},
 	}
@@ -3437,7 +3337,7 @@ func TestStreamPersistence_StreamingLiveBeforeMaterializedBoundary(t *testing.T)
 			schema.AssistantMessage("hello ", nil),
 			schema.AssistantMessage("sync", nil),
 		},
-		turnEnd: &TurnEndState[*schema.Message]{
+		turnEnd: &testTurnState[*schema.Message]{
 			Messages: []*schema.Message{schema.UserMessage("q"), schema.AssistantMessage("hello sync", nil)},
 		},
 	}
@@ -3495,7 +3395,7 @@ func TestStreamPersistence_PendingAnnotationFlushesBeforeMaterializedBoundary(t 
 			schema.AssistantMessage("hello ", nil),
 			schema.AssistantMessage("stream", nil),
 		},
-		turnEnd: &TurnEndState[*schema.Message]{
+		turnEnd: &testTurnState[*schema.Message]{
 			Messages: []*schema.Message{schema.UserMessage("q"), schema.AssistantMessage("hello stream", nil)},
 		},
 	}
@@ -3513,7 +3413,6 @@ func TestStreamPersistence_PendingAnnotationFlushesBeforeMaterializedBoundary(t 
 		{SessionEventMessage},
 		{annotationKind},
 		{SessionEventMessage},
-		{SessionEventTurnEnd},
 		{SessionEventSessionStatusIdle},
 	}, store.appendBatches)
 }
@@ -3528,7 +3427,7 @@ func TestStreamPersistence_ToolResultStreamingLiveBeforeMaterializedBoundary(t *
 			schema.ToolMessage("tool ", "tc-1", schema.WithToolName("t1")),
 			schema.ToolMessage("result", "tc-1", schema.WithToolName("t1")),
 		},
-		turnEnd: &TurnEndState[*schema.Message]{
+		turnEnd: &testTurnState[*schema.Message]{
 			Messages: []*schema.Message{schema.ToolMessage("tool result", "tc-1", schema.WithToolName("t1"))},
 		},
 		role: schema.Tool,
@@ -3586,7 +3485,7 @@ func TestStreamPersistence_AgenticToolResultChunksConcat(t *testing.T) {
 			agenticToolResultMessage("call_1", "execute", "first\n"),
 			agenticToolResultMessage("call_1", "execute", "second\n"),
 		},
-		turnEnd: &TurnEndState[*schema.AgenticMessage]{
+		turnEnd: &testTurnState[*schema.AgenticMessage]{
 			Messages: []*schema.AgenticMessage{
 				schema.UserAgenticMessage("q"),
 				agenticToolResultMessage("call_1", "execute", "first\nsecond\n"),
@@ -3656,7 +3555,7 @@ func TestStreamPersistence_AgenticToolResultChunksWithStreamingMeta(t *testing.T
 
 	agent := &agenticSessionStreamingAgent{
 		chunks: []*schema.AgenticMessage{first, second},
-		turnEnd: &TurnEndState[*schema.AgenticMessage]{
+		turnEnd: &testTurnState[*schema.AgenticMessage]{
 			Messages: []*schema.AgenticMessage{
 				schema.UserAgenticMessage("q"),
 				agenticToolResultMessage("call_1", "execute", "first\nsecond\n"),
@@ -3750,7 +3649,7 @@ func TestStreamPersistence_GetMessageError_NotEnqueued(t *testing.T) {
 
 	agent := &streamingAgentRaw{
 		stream: streamReader,
-		turnEnd: &TurnEndState[*schema.Message]{
+		turnEnd: &testTurnState[*schema.Message]{
 			Messages: []*schema.Message{schema.AssistantMessage("ok", nil)},
 		},
 	}
@@ -3803,7 +3702,7 @@ func TestStreamPersistence_GetMessageErrorSurfacesAfterLiveStreaming(t *testing.
 
 	agent := &streamingAgentRaw{
 		stream: streamReader,
-		turnEnd: &TurnEndState[*schema.Message]{
+		turnEnd: &testTurnState[*schema.Message]{
 			Messages: []*schema.Message{schema.AssistantMessage("ok", nil)},
 		},
 	}
@@ -3847,7 +3746,7 @@ func TestStreamPersistence_GetMessageErrorSurfacesAfterLiveStreaming(t *testing.
 // one that emits errors).
 type streamingAgentRaw struct {
 	stream  *schema.StreamReader[*schema.Message]
-	turnEnd *TurnEndState[*schema.Message]
+	turnEnd *testTurnState[*schema.Message]
 }
 
 func (a *streamingAgentRaw) Name(_ context.Context) string        { return "streaming-raw" }
@@ -3858,13 +3757,6 @@ func (a *streamingAgentRaw) Run(_ context.Context, _ *AgentInput, _ ...AgentRunO
 		defer gen.Close()
 		mv := &MessageVariant{IsStreaming: true, MessageStream: a.stream, Role: schema.Assistant}
 		gen.Send(&AgentEvent{AgentName: "streaming-raw", Output: &AgentOutput{MessageOutput: mv}})
-		gen.Send(&AgentEvent{
-			AgentName: "streaming-raw",
-			SessionEvent: &SessionEvent[*schema.Message]{
-				Kind:    SessionEventTurnEnd,
-				TurnEnd: a.turnEnd,
-			},
-		})
 	}()
 	return iter
 }
@@ -3905,7 +3797,7 @@ func TestRunnerInputEvents_MixedRoles(t *testing.T) {
 
 	agent := &runnerSessionAgent{
 		name: "mr-agent",
-		turnEnd: &TurnEndState[*schema.Message]{
+		turnEnd: &testTurnState[*schema.Message]{
 			Messages: []*schema.Message{schema.AssistantMessage("ok", nil)},
 		},
 	}
@@ -3936,20 +3828,12 @@ func TestRunnerInputEvents_MixedRoles(t *testing.T) {
 	assert.Equal(t, "hello", second.Message.Content)
 }
 
-// TestTurnEndOnly_PersistedAsSessionEvent verifies that an event carrying only
-// SessionEventTurnEnd (no message output, no mutations) persists the TurnEnd as
-// a SessionEvent variant in the log.
-func TestTurnEndOnly_PersistedAsSessionEvent(t *testing.T) {
+func TestCustomAgentNormalCloseCommitsIdle(t *testing.T) {
 	ctx := context.Background()
 	store := newSessionHelperStore()
 	sid := "turn-end-only"
 
-	// Custom agent that emits ONLY a TurnEnd event (no output, no mutations).
-	agent := &turnEndOnlyAgent{
-		turnEnd: &TurnEndState[*schema.Message]{
-			Messages: []*schema.Message{schema.UserMessage("x")},
-		},
-	}
+	agent := &turnEndOnlyAgent{}
 
 	runner := NewRunner(ctx, RunnerConfig{
 		Agent:        agent,
@@ -3958,21 +3842,18 @@ func TestTurnEndOnly_PersistedAsSessionEvent(t *testing.T) {
 	})
 	drainSessionEvents(t, runner.Query(ctx, "input"))
 
-	// The log should contain: the input event + a TurnEnd event.
-	var sawTurnEnd bool
+	var sawCommit bool
 	for _, ep := range store.events {
 		se, err := decodeSessionEvent[*schema.Message](ep.Data)
 		require.NoError(t, err)
-		if se.TurnEnd != nil {
-			sawTurnEnd = true
+		if isCommittedIdleEvent(se) {
+			sawCommit = true
 		}
 	}
-	assert.True(t, sawTurnEnd, "TurnEnd must be persisted as a SessionEvent")
+	assert.True(t, sawCommit)
 }
 
-type turnEndOnlyAgent struct {
-	turnEnd *TurnEndState[*schema.Message]
-}
+type turnEndOnlyAgent struct{}
 
 func (a *turnEndOnlyAgent) Name(_ context.Context) string        { return "turn-end-only" }
 func (a *turnEndOnlyAgent) Description(_ context.Context) string { return "" }
@@ -3980,25 +3861,18 @@ func (a *turnEndOnlyAgent) Run(_ context.Context, _ *AgentInput, _ ...AgentRunOp
 	iter, gen := NewAsyncIteratorPair[*AgentEvent]()
 	go func() {
 		defer gen.Close()
-		gen.Send(&AgentEvent{
-			AgentName: "turn-end-only",
-			SessionEvent: &SessionEvent[*schema.Message]{
-				Kind:    SessionEventTurnEnd,
-				TurnEnd: a.turnEnd,
-			},
-		})
 	}()
 	return iter
 }
 
-// TestTailReplay_PartialTurnWithoutTurnEnd verifies that events appended after
-// the last TurnEnd event are replayed on reconstruction (partial/interrupted turn).
-func TestTailReplay_PartialTurnWithoutTurnEnd(t *testing.T) {
+// TestTailReplay_PartialTurnWithoutCommittedIdle verifies that events appended
+// after the last committed idle are replayed on reconstruction.
+func TestTailReplay_PartialTurnWithoutCommittedIdle(t *testing.T) {
 	ctx := context.Background()
 	store := newSessionHelperStore()
 	sid := "tail-replay"
 
-	// Phase 1: a normal completed turn (messages + TurnEnd event).
+	// Phase 1: a normal completed turn (messages + committed idle event).
 	a1 := schema.UserMessage("Q1")
 	EnsureMessageID(a1)
 	r1 := schema.AssistantMessage("A1", nil)
@@ -4007,14 +3881,11 @@ func TestTailReplay_PartialTurnWithoutTurnEnd(t *testing.T) {
 		se := withTestEventID(&SessionEvent[*schema.Message]{Message: m})
 		require.NoError(t, store.AppendEventsForSession(ctx, sid, []*SessionEvent[*schema.Message]{se}))
 	}
-	// Persist TurnEnd as a SessionEvent.
-	turnEndSE := withTestEventID(&SessionEvent[*schema.Message]{TurnEnd: &TurnEndState[*schema.Message]{
-		Messages: []*schema.Message{a1, r1},
-	}})
-	require.NoError(t, store.AppendEventsForSession(ctx, sid, []*SessionEvent[*schema.Message]{turnEndSE}))
+	committedIdleSE := withTestCommittedIdle[*schema.Message]("turn-1")
+	require.NoError(t, store.AppendEventsForSession(ctx, sid, []*SessionEvent[*schema.Message]{committedIdleSE}))
 
 	// Phase 2: simulate a partial second turn where events were appended but
-	// no TurnEnd was persisted (interrupted).
+	// no committed idle was persisted (interrupted).
 	a2 := schema.UserMessage("Q2")
 	EnsureMessageID(a2)
 	r2 := schema.AssistantMessage("A2", nil)
@@ -4024,8 +3895,7 @@ func TestTailReplay_PartialTurnWithoutTurnEnd(t *testing.T) {
 		require.NoError(t, store.AppendEventsForSession(ctx, sid, []*SessionEvent[*schema.Message]{se}))
 	}
 
-	// Boot: prepareRunnerSessionRun reconstructs durable context through the log
-	// tail. The latest TurnEnd remains the metadata boundary.
+	// Boot: prepareRunnerSessionRun reconstructs durable context through the log tail.
 	state, err := prepareRunnerSessionRun[*schema.Message](ctx, nil, nil, sid, store, nil)
 	require.NoError(t, err)
 	require.True(t, state.enabled)
@@ -4048,10 +3918,7 @@ func TestTailReplay_NoTailEvents(t *testing.T) {
 	se := withTestEventID(&SessionEvent[*schema.Message]{Message: q})
 	require.NoError(t, store.AppendEventsForSession(ctx, sid, []*SessionEvent[*schema.Message]{se}))
 
-	// Persist TurnEnd as a SessionEvent.
-	turnEndSE := withTestEventID(&SessionEvent[*schema.Message]{TurnEnd: &TurnEndState[*schema.Message]{
-		Messages: []*schema.Message{q},
-	}})
+	turnEndSE := withTestCommittedIdle[*schema.Message]("turn-1")
 	require.NoError(t, store.AppendEventsForSession(ctx, sid, []*SessionEvent[*schema.Message]{turnEndSE}))
 
 	state, err := prepareRunnerSessionRun[*schema.Message](ctx, nil, nil, sid, store, nil)
@@ -4213,7 +4080,7 @@ func (h *agenticTestSessionHandle) appendEvents(ctx context.Context, req *Append
 func (h *agenticTestSessionHandle) close(context.Context) error { return nil }
 
 // TestPartialInterrupted_ThenNewRun verifies that when a turn is interrupted
-// after some events have been appended (but before SaveTurnEnd commits), a new
+// after some events have been appended (but before the committed idle marker), a new
 // Run with NO CheckPointStore (i.e. session-only mode) recovers the in-flight
 // events via tail replay rather than treating the session as fresh.
 //
@@ -4233,13 +4100,10 @@ func TestPartialInterrupted_ThenNewRun(t *testing.T) {
 		se := withTestEventID(&SessionEvent[*schema.Message]{Message: m})
 		require.NoError(t, store.AppendEventsForSession(ctx, sid, []*SessionEvent[*schema.Message]{se}))
 	}
-	// Persist TurnEnd as a SessionEvent (marks end of completed turn).
-	turnEndSE := withTestEventID(&SessionEvent[*schema.Message]{TurnEnd: &TurnEndState[*schema.Message]{
-		Messages: []*schema.Message{q1, r1},
-	}})
-	require.NoError(t, store.AppendEventsForSession(ctx, sid, []*SessionEvent[*schema.Message]{turnEndSE}))
+	committedIdleSE := withTestCommittedIdle[*schema.Message]("turn-1")
+	require.NoError(t, store.AppendEventsForSession(ctx, sid, []*SessionEvent[*schema.Message]{committedIdleSE}))
 
-	// Phase 2: simulate an interrupted turn — events appended, no new SaveTurnEnd.
+	// Phase 2: simulate an interrupted turn with events appended but no committed idle.
 	q2 := schema.UserMessage("partial")
 	EnsureMessageID(q2)
 	for _, m := range []*schema.Message{q2} {
@@ -4250,7 +4114,7 @@ func TestPartialInterrupted_ThenNewRun(t *testing.T) {
 	// Phase 3: new Run (no CheckPointStore; Runner skips pending checkpoints on fresh Run).
 	captured := &runnerSessionAgent{
 		name: "ra",
-		turnEnd: &TurnEndState[*schema.Message]{
+		turnEnd: &testTurnState[*schema.Message]{
 			Messages: []*schema.Message{},
 		},
 	}
@@ -4304,24 +4168,24 @@ func TestSessionEvent_StreamCopyConcat_ByteIdentical(t *testing.T) {
 
 // TestExplicitCheckpointResume_WithSessionMode verifies that when a caller passes
 // an explicit checkpoint ID alongside a configured SessionID/SessionStore[*schema.Message], the
-// resume path still loads the latest TurnEndState (and runs tail replay).
+// resume path still loads reconstructed session state.
 func TestExplicitCheckpointResume_WithSessionMode(t *testing.T) {
 	ctx := context.Background()
 	store := newSessionHelperStore()
 	sid := "explicit-cp-session"
 
-	// Seed the session store with events and a TurnEnd.
-	prior := &TurnEndState[*schema.Message]{
+	// Seed the session store with events and a committed idle marker.
+	prior := &testTurnState[*schema.Message]{
 		Messages: []*schema.Message{schema.UserMessage("seed"), schema.AssistantMessage("seed-ans", nil)},
 	}
-	// Seed session events (messages + TurnEnd).
+	// Seed session events (messages + committed idle).
 	for _, m := range prior.Messages {
 		EnsureMessageID(m)
 		se := withTestEventID(&SessionEvent[*schema.Message]{Message: m})
 		require.NoError(t, store.AppendEventsForSession(ctx, sid, []*SessionEvent[*schema.Message]{se}))
 	}
-	turnEndSE := withTestEventID(&SessionEvent[*schema.Message]{TurnEnd: prior})
-	require.NoError(t, store.AppendEventsForSession(ctx, sid, []*SessionEvent[*schema.Message]{turnEndSE}))
+	committedIdleSE := withTestCommittedIdle[*schema.Message]("turn-1")
+	require.NoError(t, store.AppendEventsForSession(ctx, sid, []*SessionEvent[*schema.Message]{committedIdleSE}))
 
 	// Seed an arbitrary checkpoint ID with a runner-session-checkpoint wrapper
 	// so runnerLoadCheckPointForSession can decode it.
@@ -4357,10 +4221,7 @@ func TestResumePath_TailReplay(t *testing.T) {
 		se := withTestEventID(&SessionEvent[*schema.Message]{Message: m})
 		require.NoError(t, store.AppendEventsForSession(ctx, sid, []*SessionEvent[*schema.Message]{se}))
 	}
-	// Persist TurnEnd as a SessionEvent.
-	turnEndSE := withTestEventID(&SessionEvent[*schema.Message]{TurnEnd: &TurnEndState[*schema.Message]{
-		Messages: []*schema.Message{q1, r1},
-	}})
+	turnEndSE := withTestCommittedIdle[*schema.Message]("turn-1")
 	require.NoError(t, store.AppendEventsForSession(ctx, sid, []*SessionEvent[*schema.Message]{turnEndSE}))
 
 	// Append a tail event after the snapshot.
@@ -4388,12 +4249,12 @@ func TestResumePath_TailReplay(t *testing.T) {
 
 // Ensure the io package import is used (for compile when chunks are empty).
 
-// mutationAgent emits a sequence of caller-provided TypedAgentEvents and a
-// final SessionEventTurnEnd. Used to verify the runner persists each session-mutation
+// mutationAgent emits a sequence of caller-provided TypedAgentEvents. Used to
+// verify the runner persists each session-mutation
 // event variant (MessagesReplaced, MessageUpdated, MessageInserted) faithfully.
 type mutationAgent struct {
 	events  []*AgentEvent
-	turnEnd *TurnEndState[*schema.Message]
+	turnEnd *testTurnState[*schema.Message]
 }
 
 func (a *mutationAgent) Name(_ context.Context) string        { return "mutation-agent" }
@@ -4405,13 +4266,6 @@ func (a *mutationAgent) Run(_ context.Context, _ *AgentInput, _ ...AgentRunOptio
 		for _, ev := range a.events {
 			gen.Send(ev)
 		}
-		gen.Send(&AgentEvent{
-			AgentName: "mutation-agent",
-			SessionEvent: &SessionEvent[*schema.Message]{
-				Kind:    SessionEventTurnEnd,
-				TurnEnd: a.turnEnd,
-			},
-		})
 	}()
 	return iter
 }
@@ -4437,7 +4291,7 @@ func TestRunnerPersists_MessagesReplaced(t *testing.T) {
 				},
 			},
 		},
-		turnEnd: &TurnEndState[*schema.Message]{Messages: []*schema.Message{summary}},
+		turnEnd: &testTurnState[*schema.Message]{Messages: []*schema.Message{summary}},
 	}
 	runner := NewRunner(ctx, RunnerConfig{
 		Agent:        agent,
@@ -4519,7 +4373,7 @@ func TestRunnerPersists_MessageUpdated_BothMessages(t *testing.T) {
 				},
 			},
 		},
-		turnEnd: &TurnEndState[*schema.Message]{
+		turnEnd: &testTurnState[*schema.Message]{
 			Messages: []*schema.Message{updatedAssistant, updatedTool},
 		},
 	}
@@ -4609,7 +4463,7 @@ func TestRunnerPersists_MessageInserted_AnchorAndAppend(t *testing.T) {
 				},
 			},
 		},
-		turnEnd: &TurnEndState[*schema.Message]{Messages: finalMessages},
+		turnEnd: &testTurnState[*schema.Message]{Messages: finalMessages},
 	}
 
 	runner := NewRunner(ctx, RunnerConfig{
@@ -5065,7 +4919,7 @@ func TestRunnerPersists_MessagesDeleted_Reconstructs(t *testing.T) {
 				},
 			},
 		},
-		turnEnd: &TurnEndState[*schema.Message]{Messages: []*schema.Message{a, c}},
+		turnEnd: &testTurnState[*schema.Message]{Messages: []*schema.Message{a, c}},
 	}
 	runner := NewRunner(ctx, RunnerConfig{
 		Agent:        agent,
@@ -5109,12 +4963,7 @@ func TestReconstructSessionState_MessagesDeletedMissingTargetFails(t *testing.T)
 	})
 	require.NoError(t, store.AppendEventsForSession(ctx, sid, []*SessionEvent[*schema.Message]{deleteEvent}))
 
-	turnEndEvent := withTestEventID(&SessionEvent[*schema.Message]{
-		TurnID: "turn-1",
-		TurnEnd: &TurnEndState[*schema.Message]{
-			Messages: []*schema.Message{a},
-		},
-	})
+	turnEndEvent := withTestCommittedIdle[*schema.Message]("turn-1")
 	require.NoError(t, store.AppendEventsForSession(ctx, sid, []*SessionEvent[*schema.Message]{turnEndEvent}))
 
 	_, err := reconstructSessionState[*schema.Message](ctx, mustOpenTestSession[*schema.Message](t, ctx, store, sid), sid, defaultLoadPageSize)
@@ -5159,7 +5008,7 @@ func TestAgentTool_ChildSessionID_FiltersFromParentLog(t *testing.T) {
 				},
 			},
 		},
-		turnEnd: &TurnEndState[*schema.Message]{
+		turnEnd: &testTurnState[*schema.Message]{
 			Messages: []*schema.Message{parentMsg},
 		},
 	}

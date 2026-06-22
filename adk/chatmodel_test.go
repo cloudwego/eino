@@ -86,7 +86,7 @@ func TestChatModelAgentRun(t *testing.T) {
 		assert.False(t, ok)
 	})
 
-	t.Run("SessionEvents_NoTools_EmitsTurnEnd", func(t *testing.T) {
+	t.Run("SessionEvents_NoTools_EmitsModelContext", func(t *testing.T) {
 		ctx := context.Background()
 
 		ctrl := gomock.NewController(t)
@@ -122,15 +122,14 @@ func TestChatModelAgentRun(t *testing.T) {
 		require.NotNil(t, events[0].SessionEvent)
 		assert.Equal(t, SessionEventMessageInserted, events[0].SessionEvent.Kind)
 		assert.Equal(t, schema.System, events[0].SessionEvent.MessageInserted.Message.Role)
-		require.NotNil(t, events[1].Output)
-		assert.Equal(t, "session answer", events[1].Output.MessageOutput.Message.Content)
 
-		require.NotNil(t, events[2].SessionEvent)
-		assert.Equal(t, SessionEventTurnEnd, events[2].SessionEvent.Kind)
-		turnEnd := events[2].SessionEvent.TurnEnd
-		require.NotNil(t, turnEnd)
-		assert.Nil(t, turnEnd.Messages)
-		assert.Equal(t, "session answer", turnEnd.SessionValues["answer"])
+		require.NotNil(t, events[1].SessionEvent)
+		assert.Equal(t, SessionEventModelContext, events[1].SessionEvent.Kind)
+		require.NotNil(t, events[1].SessionEvent.ModelContext)
+		assert.Empty(t, events[1].SessionEvent.ModelContext.ToolInfos)
+
+		require.NotNil(t, events[2].Output)
+		assert.Equal(t, "session answer", events[2].Output.MessageOutput.Message.Content)
 	})
 
 	t.Run("BasicChatModelWithAgentMiddleware", func(t *testing.T) {
@@ -251,7 +250,7 @@ func TestChatModelAgentRun(t *testing.T) {
 		assert.Len(t, capturedMessages, 3)
 	})
 
-	t.Run("SessionEvents_ReAct_EmitsToolAwareTurnEnd", func(t *testing.T) {
+	t.Run("SessionEvents_ReAct_EmitsToolAwareModelContext", func(t *testing.T) {
 		ctx := context.Background()
 
 		ctrl := gomock.NewController(t)
@@ -302,15 +301,11 @@ func TestChatModelAgentRun(t *testing.T) {
 		assert.Equal(t, 2, generateCount)
 		require.NotNil(t, events[0].SessionEvent)
 		assert.Equal(t, SessionEventMessageInserted, events[0].SessionEvent.Kind)
-		require.NotNil(t, events[4].SessionEvent)
-		assert.Equal(t, SessionEventTurnEnd, events[4].SessionEvent.Kind)
-
-		turnEnd := events[4].SessionEvent.TurnEnd
-		require.NotNil(t, turnEnd)
-		assert.Nil(t, turnEnd.Messages)
-		require.Len(t, turnEnd.ToolInfos, 1)
-		assert.Equal(t, "test_tool", turnEnd.ToolInfos[0].Name)
-		assert.Equal(t, "final with tool", turnEnd.SessionValues["answer"])
+		require.NotNil(t, events[1].SessionEvent)
+		assert.Equal(t, SessionEventModelContext, events[1].SessionEvent.Kind)
+		require.NotNil(t, events[1].SessionEvent.ModelContext)
+		require.Len(t, events[1].SessionEvent.ModelContext.ToolInfos, 1)
+		assert.Equal(t, "test_tool", events[1].SessionEvent.ModelContext.ToolInfos[0].Name)
 	})
 
 	t.Run("AfterChatModel_ReAct_ModifyAffectsFlow", func(t *testing.T) {
