@@ -255,9 +255,14 @@ type TypedModelRetryConfig[M MessageType] struct {
 // ModelRetryConfig is the default retry config type using *schema.Message.
 type ModelRetryConfig = TypedModelRetryConfig[*schema.Message]
 
+type retryableBeforeOutputError interface {
+	IsModelTimeoutBeforeOutput() bool
+}
+
 func defaultIsRetryAble(_ context.Context, err error) bool {
-	if timeoutErr, ok := AsModelTimeout(err); ok {
-		return timeoutErr.ChunksReceived == 0
+	var timeoutErr retryableBeforeOutputError
+	if errors.As(err, &timeoutErr) {
+		return timeoutErr.IsModelTimeoutBeforeOutput()
 	}
 	return err != nil
 }

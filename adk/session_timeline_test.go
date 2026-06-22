@@ -104,7 +104,7 @@ func TestSessionTimeline_ClassifyAndSerializeVariants(t *testing.T) {
 		{
 			name: "interrupt",
 			se:   &SessionEvent[*schema.Message]{UserObservation: &UserObservationEvent{Interrupt: &UserInterruptEvent{Reason: "user"}}},
-			kind: SessionEventUserInterrupt,
+			kind: SessionEventCancel,
 		},
 		{
 			name: "agent interrupt",
@@ -1348,9 +1348,10 @@ func TestRunnerTimelineCancelStopReasonAndUserInterruptPersisted(t *testing.T) {
 	require.NoError(t, cancelHandle.Wait())
 
 	userInterrupts := filterStoredSessionEvents(t, store.events, func(se *SessionEvent[*schema.Message]) bool {
-		return se.Kind == SessionEventUserInterrupt
+		return se.Kind == SessionEventCancel
 	})
 	require.Len(t, userInterrupts, 1)
+	assert.Equal(t, SessionEventKind("cancel"), userInterrupts[0].Kind)
 	require.NotNil(t, userInterrupts[0].UserObservation)
 	require.NotNil(t, userInterrupts[0].UserObservation.Interrupt)
 	assert.Equal(t, "cancelled", userInterrupts[0].UserObservation.Interrupt.Reason)
@@ -1383,14 +1384,23 @@ func TestToolSpan_PersistedAroundToolCallAndLinksToMessages(t *testing.T) {
 		SessionID:    "tool-span-around",
 		SessionStore: store,
 	})
-	iter := runner.Query(ctx, "go")
+	iter := runner.Query(ctx, "go", WithTimelineEvents())
+	var liveToolEnd *SessionEvent[*schema.Message]
 	for {
 		event, ok := iter.Next()
 		if !ok {
 			break
 		}
 		require.NoError(t, event.Err)
+		if event.SessionEvent != nil && event.SessionEvent.Kind == SessionEventSpanToolCallEnd {
+			liveToolEnd = event.SessionEvent
+		}
 	}
+	require.NotNil(t, liveToolEnd, "expected live tool_call_end span emission")
+	require.NotNil(t, liveToolEnd.Span)
+	require.NotNil(t, liveToolEnd.Span.Tool)
+	assert.Equal(t, "tool_span_tool", liveToolEnd.Span.Tool.Name)
+	assert.Equal(t, "ok", liveToolEnd.Span.Status)
 
 	stored := filterStoredSessionEvents(t, store.events, func(_ *SessionEvent[*schema.Message]) bool { return true })
 	var (

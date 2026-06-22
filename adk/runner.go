@@ -1166,7 +1166,7 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 		if cancelled {
 			sendTimelineEvent(&SessionEvent[M]{
 				Timestamp:       newEventTimestamp(),
-				Kind:            SessionEventUserInterrupt,
+				Kind:            SessionEventCancel,
 				UserObservation: &UserObservationEvent{Interrupt: &UserInterruptEvent{Reason: "cancelled"}},
 			})
 		}
