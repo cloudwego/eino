@@ -94,8 +94,6 @@ func NewTyped[M adk.MessageType](ctx context.Context, config *TypedConfig[M]) (a
 		}
 	}
 
-	enableRunInBackground := config.TaskMgr != nil
-
 	toolName := config.ToolName
 	if toolName == "" {
 		toolName = agentToolName
@@ -107,18 +105,17 @@ func NewTyped[M adk.MessageType](ctx context.Context, config *TypedConfig[M]) (a
 	}
 
 	at := &typedAgentTool[M]{
-		name:                  toolName,
-		subAgents:             subAgentMap,
-		subAgentSlice:         config.SubAgents,
-		descGen:               descGen,
-		mgr:                   config.TaskMgr,
-		enableRunInBackground: enableRunInBackground,
+		name:          toolName,
+		subAgents:     subAgentMap,
+		subAgentSlice: config.SubAgents,
+		descGen:       descGen,
+		mgr:           config.TaskMgr,
 	}
 
 	var tools []tool.BaseTool
 	tools = append(tools, at)
 
-	if enableRunInBackground {
+	if config.TaskMgr != nil {
 		outputTool, err := newTaskOutputTool(config.TaskMgr)
 		if err != nil {
 			return nil, fmt.Errorf("subagent: failed to create task_output tool: %w", err)
@@ -139,7 +136,7 @@ func NewTyped[M adk.MessageType](ctx context.Context, config *TypedConfig[M]) (a
 			English: agentToolPrompt,
 			Chinese: agentToolPromptChinese,
 		})
-		if enableRunInBackground {
+		if config.TaskMgr != nil {
 			instruction += internal.SelectPrompt(internal.I18nPrompts{
 				English: agentToolBackgroundPrompt,
 				Chinese: agentToolBackgroundPromptChinese,

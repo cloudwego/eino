@@ -521,7 +521,7 @@ func (a *flowAgent) run(
 			// copy before adding to session because once added to session it's stream could be consumed by genAgentInput at any time
 			// interrupt action are not added to session, because ALL information contained in it
 			// is either presented to end-user, or made available to agents through other means
-			copied := copyTypedAgentEvent(event)
+			copied := CopyTypedAgentEvent(event)
 			setAutomaticClose(copied)
 			setAutomaticClose(event)
 			runCtx.Session.addEvent(copied)
@@ -532,7 +532,7 @@ func (a *flowAgent) run(
 		if exactRunPathMatch(runCtx.RunPath, event.RunPath) {
 			lastAction = event.Action
 		}
-		copied := copyTypedAgentEvent(event)
+		copied := CopyTypedAgentEvent(event)
 		setAutomaticClose(copied)
 		setAutomaticClose(event)
 		cbGen.Send(copied)
@@ -604,7 +604,7 @@ func wrapIterWithOnEnd(ctx context.Context, iter *AsyncIterator[*AgentEvent]) *A
 			if !ok {
 				break
 			}
-			copied := copyTypedAgentEvent(event)
+			copied := CopyTypedAgentEvent(event)
 			cbGen.Send(copied)
 			outGen.Send(event)
 		}
@@ -754,13 +754,13 @@ func (a *typedFlowAgent[M]) run(
 			event.RunPath = runCtx.RunPath
 		}
 		if (event.Action == nil || event.Action.Interrupted == nil) && exactRunPathMatch(runCtx.RunPath, event.RunPath) {
-			copied := copyTypedAgentEvent(event)
+			copied := CopyTypedAgentEvent(event)
 			typedSetAutomaticClose(copied)
 			typedSetAutomaticClose(event)
 			addTypedEvent(runCtx.Session, copied)
 		}
 
-		agenticCopied := copyTypedAgentEvent(event)
+		agenticCopied := CopyTypedAgentEvent(event)
 		typedSetAutomaticClose(agenticCopied)
 		typedSetAutomaticClose(event)
 		agenticCbGen.Send(any(agenticCopied).(*TypedAgentEvent[*schema.AgenticMessage]))
@@ -784,7 +784,7 @@ func wrapAgenticIterWithOnEnd(ctx context.Context, iter *AsyncIterator[*TypedAge
 			if !ok {
 				break
 			}
-			copied := copyTypedAgentEvent(event)
+			copied := CopyTypedAgentEvent(event)
 			cbGen.Send(copied)
 			outGen.Send(event)
 		}

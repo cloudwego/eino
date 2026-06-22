@@ -273,7 +273,7 @@ func (at *typedAgentTool[M]) InvokableRun(ctx context.Context, argumentsInJSON s
 				// can distinguish child timeline events and the parent's persistence
 				// loop can skip them.
 				stampAgentToolSessionEvent(event, childSessionID)
-				tmp := copyTypedAgentEvent(event)
+				tmp := CopyTypedAgentEvent(event)
 				gen.Send(event)
 				event = tmp
 			}

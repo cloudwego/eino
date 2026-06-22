@@ -1215,7 +1215,7 @@ func TestCoverage_CopyAgenticEvent(t *testing.T) {
 		},
 	}
 
-	copied := copyTypedAgentEvent(original)
+	copied := CopyTypedAgentEvent(original)
 	assert.Equal(t, original.AgentName, copied.AgentName)
 	assert.Equal(t, len(original.RunPath), len(copied.RunPath))
 	assert.Equal(t, original.Action, copied.Action)

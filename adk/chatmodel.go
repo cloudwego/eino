@@ -23,7 +23,6 @@ import (
 	"fmt"
 	"math"
 	"runtime/debug"
-	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -862,20 +861,7 @@ func init() {
 }
 
 func extractTextContent[M MessageType](msg M) string {
-	switch v := any(msg).(type) {
-	case *schema.Message:
-		return v.Content
-	case *schema.AgenticMessage:
-		var texts []string
-		for _, block := range v.ContentBlocks {
-			if block != nil && block.Type == schema.ContentBlockTypeAssistantGenText && block.AssistantGenText != nil {
-				texts = append(texts, block.AssistantGenText.Text)
-			}
-		}
-		return strings.Join(texts, "\n")
-	default:
-		return ""
-	}
+	return internal.ExtractTextContent(msg)
 }
 
 func setOutputToSession[M MessageType](ctx context.Context, msg M, msgStream *schema.StreamReader[M], outputKey string) error {

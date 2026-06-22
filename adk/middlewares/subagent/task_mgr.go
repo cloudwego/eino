@@ -587,7 +587,7 @@ func drainEvents[M adk.MessageType](iter *adk.AsyncIterator[*adk.TypedAgentEvent
 
 		// Forward event to subscriber.
 		if gen != nil {
-			tmp := copyAgentEvent(event)
+			tmp := adk.CopyTypedAgentEvent(event)
 			gen.Send(event)
 			event = tmp
 		}

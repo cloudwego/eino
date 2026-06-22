@@ -45,10 +45,12 @@ type typedAgentTool[M adk.MessageType] struct {
 	name      string
 	subAgents map[string]tool.InvokableTool // for non-TaskMgr foreground path
 	// subAgentSlice preserves the original order for description generation.
-	subAgentSlice         []adk.TypedAgent[M]
-	descGen               func(ctx context.Context, subAgents []adk.TypedAgent[M]) (string, error)
-	mgr                   *TypedTaskMgr[M] // nil = foreground only, no task tracking
-	enableRunInBackground bool
+	subAgentSlice []adk.TypedAgent[M]
+	descGen       func(ctx context.Context, subAgents []adk.TypedAgent[M]) (string, error)
+	// mgr is the single source of truth for background support: nil means
+	// foreground-only with no task tracking, non-nil enables run_in_background
+	// and task lifecycle management.
+	mgr *TypedTaskMgr[M]
 }
 
 // agentInput is the unified input struct for the agent tool.
@@ -83,7 +85,7 @@ func (t *typedAgentTool[M]) Info(ctx context.Context) (*schema.ToolInfo, error) 
 		},
 	}
 
-	if t.enableRunInBackground {
+	if t.mgr != nil {
 		params["run_in_background"] = &schema.ParameterInfo{
 			Type: schema.Boolean,
 			Desc: "Set to true to run this agent in the background. You will be notified when it completes.",
@@ -113,7 +115,7 @@ func (t *typedAgentTool[M]) InvokableRun(ctx context.Context, argumentsInJSON st
 	description := input.Description
 
 	// Handle run_in_background when not enabled: return a system-reminder.
-	if input.RunInBackground != nil && *input.RunInBackground && !t.enableRunInBackground {
+	if input.RunInBackground != nil && *input.RunInBackground && t.mgr == nil {
 		return internal.SelectPrompt(internal.I18nPrompts{
 			English: "<system-reminder>Background execution is not available. " +
 				"The run_in_background parameter is not supported in the current configuration. " +

@@ -224,7 +224,7 @@ func (e *agentEventWrapper) consumeStream() {
 	e.AgentEvent.Output.MessageOutput.MessageStream = schema.StreamReaderFromArray([]Message{e.concatenatedMessage})
 }
 
-// copyTypedAgentEvent copies a TypedAgentEvent.
+// CopyTypedAgentEvent copies a TypedAgentEvent.
 // If the MessageVariant is streaming, the MessageStream will be copied.
 // RunPath will be deep copied.
 // The result of Copy will be a new TypedAgentEvent that is:
@@ -234,7 +234,7 @@ func (e *agentEventWrapper) consumeStream() {
 // NOTE: even if the event is copied, it's still not recommended to modify
 // the Message itself or Chunks of the MessageStream, as they are not copied.
 // NOTE: if you have CustomizedOutput or CustomizedAction, they are NOT copied.
-func copyTypedAgentEvent[M MessageType](ae *TypedAgentEvent[M]) *TypedAgentEvent[M] {
+func CopyTypedAgentEvent[M MessageType](ae *TypedAgentEvent[M]) *TypedAgentEvent[M] {
 	rp := make([]RunStep, len(ae.RunPath))
 	copy(rp, ae.RunPath)
 
