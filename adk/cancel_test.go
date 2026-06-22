@@ -3798,3 +3798,101 @@ func TestBuildCancelFunc_CASFailStateDone(t *testing.T) {
 		t.Log("CAS race path not triggered (L743 remains a theoretical race edge)")
 	}
 }
+
+func TestAgentCancelFunc_MultiCall_EscalateToImmediate(t *testing.T) {
+	cc := newCancelContext()
+	var interruptCalls int32
+	cc.setGraphInterruptFunc(func(opts ...compose.GraphInterruptOption) {
+		atomic.AddInt32(&interruptCalls, 1)
+	})
+	cancelFn := cc.buildCancelFunc()
+
+	handle1, _ := cancelFn(WithAgentCancelMode(CancelAfterChatModel))
+	handle2, _ := cancelFn(WithAgentCancelMode(CancelImmediate))
+	assert.Equal(t, int32(1), atomic.LoadInt32(&interruptCalls))
+
+	cancelErr := cc.createCancelError()
+	assert.Equal(t, CancelImmediate, cancelErr.Info.Mode)
+	assert.True(t, cancelErr.Info.Escalated)
+	assert.False(t, cancelErr.Info.Timeout)
+
+	assert.True(t, cc.markCancelHandled())
+	assert.NoError(t, handle1.Wait())
+	assert.NoError(t, handle2.Wait())
+}
+
+func TestAgentCancelFunc_MultiCall_JoinSafePointModes(t *testing.T) {
+	cc := newCancelContext()
+	cancelFn := cc.buildCancelFunc()
+
+	handle1, _ := cancelFn(WithAgentCancelMode(CancelAfterChatModel))
+	handle2, _ := cancelFn(WithAgentCancelMode(CancelAfterToolCalls))
+
+	want := CancelAfterChatModel | CancelAfterToolCalls
+	assert.Equal(t, want, cc.getMode())
+
+	assert.True(t, cc.markCancelHandled())
+	assert.NoError(t, handle1.Wait())
+	assert.NoError(t, handle2.Wait())
+}
+
+func TestAgentCancelFunc_MultiCall_TimeoutDeadlineJoinUsesAbsoluteTime(t *testing.T) {
+	cc := newCancelContext()
+	cancelFn := cc.buildCancelFunc()
+
+	handle1, _ := cancelFn(
+		WithAgentCancelMode(CancelAfterChatModel),
+		WithAgentCancelTimeout(200*time.Millisecond),
+	)
+
+	firstDeadline := cc.getDeadlineUnixNano()
+	assert.NotZero(t, firstDeadline)
+
+	time.Sleep(50 * time.Millisecond)
+
+	handle2, _ := cancelFn(
+		WithAgentCancelMode(CancelAfterToolCalls),
+		WithAgentCancelTimeout(60*time.Millisecond),
+	)
+
+	secondDeadline := cc.getDeadlineUnixNano()
+	assert.NotZero(t, secondDeadline)
+	assert.Less(t, secondDeadline, firstDeadline)
+
+	assert.True(t, cc.markCancelHandled())
+	assert.NoError(t, handle1.Wait())
+	assert.NoError(t, handle2.Wait())
+}
+
+func TestAgentCancelFunc_MultiCall_TimeoutEscalationReturnsErrCancelTimeout(t *testing.T) {
+	cc := newCancelContext()
+	var interruptCalls int32
+	interruptCh := make(chan struct{}, 1)
+	cc.setGraphInterruptFunc(func(opts ...compose.GraphInterruptOption) {
+		atomic.AddInt32(&interruptCalls, 1)
+		select {
+		case interruptCh <- struct{}{}:
+		default:
+		}
+	})
+	cancelFn := cc.buildCancelFunc()
+	handle, _ := cancelFn(
+		WithAgentCancelMode(CancelAfterChatModel),
+		WithAgentCancelTimeout(30*time.Millisecond),
+	)
+
+	select {
+	case <-interruptCh:
+	case <-time.After(1 * time.Second):
+		t.Fatal("timeout escalation did not interrupt")
+	}
+	assert.Equal(t, int32(1), atomic.LoadInt32(&interruptCalls))
+
+	cancelErr := cc.createCancelError()
+	assert.Equal(t, CancelAfterChatModel, cancelErr.Info.Mode)
+	assert.True(t, cancelErr.Info.Escalated)
+	assert.True(t, cancelErr.Info.Timeout)
+
+	assert.True(t, cc.markCancelHandled())
+	assert.Equal(t, ErrCancelTimeout, handle.Wait())
+}

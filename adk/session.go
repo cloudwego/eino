@@ -202,7 +202,7 @@ const (
 	SessionEventSpanToolCallStart     SessionEventKind = "span.tool_call_start"
 	SessionEventSpanToolCallEnd       SessionEventKind = "span.tool_call_end"
 
-	SessionEventUserInterrupt  SessionEventKind = "user.interrupt"
+	SessionEventCancel         SessionEventKind = "cancel"
 	SessionEventAgentInterrupt SessionEventKind = "agent.interrupt"
 
 	SessionEventExtensionPrefix = "x."
@@ -800,7 +800,7 @@ func ClassifySessionEvent[M MessageType](event *SessionEvent[M]) (SessionEventKi
 		if event.UserObservation.Interrupt == nil {
 			return "", errors.New("user observation has no active payload")
 		}
-		add(SessionEventUserInterrupt)
+		add(SessionEventCancel)
 	}
 	if event.AgentInterrupt != nil {
 		add(SessionEventAgentInterrupt)
