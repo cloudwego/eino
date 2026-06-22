@@ -80,6 +80,32 @@ func TestAgentTool_RunBackground_NoActiveTeam(t *testing.T) {
 	assert.Contains(t, err.Error(), "active team")
 }
 
+// TestAgentTool_RunBackground_TeamNameDoesNotBypassNoActiveTeam verifies that
+// passing an explicit team_name does NOT let the Agent tool spawn a teammate
+// when the leader has no active team. A teammate must attach to the team the
+// leader is actually running; honoring an arbitrary team_name would start a
+// teammate against a team with no leader pump reading its messages.
+func TestAgentTool_RunBackground_TeamNameDoesNotBypassNoActiveTeam(t *testing.T) {
+	mw, conf := newTestTeamMiddleware()
+
+	// A previously-existing team on disk that the leader never activated.
+	_, err := newConfigStore(conf).CreateTeam(context.Background(), "stale-team", "", LeaderAgentName, "")
+	assert.NoError(t, err)
+
+	tool := newAgentTool(mw)
+
+	_, err = tool.InvokableRun(context.Background(),
+		`{"prompt":"do something","description":"test task","run_in_background":true,"team_name":"stale-team"}`)
+	assert.Error(t, err)
+	assert.ErrorIs(t, err, errTeamNotFound)
+	assert.Contains(t, err.Error(), "active team")
+
+	// The stale team must not have gained a member from this rejected spawn.
+	exists, err := newConfigStore(conf).HasMember(context.Background(), "stale-team", defaultTeammateName)
+	assert.NoError(t, err)
+	assert.False(t, exists, "rejected spawn must not register a member in the stale team")
+}
+
 func TestSendInitialPrompt_StoresRawPromptForSingleEnvelopeFormatting(t *testing.T) {
 	mw, _ := newTestTeamMiddleware()
 	tool := newAgentTool(mw)

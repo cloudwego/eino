@@ -201,7 +201,7 @@ func (m *middleware) injectTaskReminder(ctx context.Context, state *adk.ChatMode
 	})
 
 	// Try to append current task list
-	tasks, err := listTasks(ctx, m.backend, m.resolveBaseDir(ctx))
+	tasks, err := listTasks(ctx, m.backend, m.resolveBaseDir(ctx), m.logger)
 	if err == nil {
 		tasks = filterVisibleTasks(tasks)
 		reminderText += formatTaskList(tasks)

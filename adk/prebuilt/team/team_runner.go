@@ -317,6 +317,10 @@ func newTeamPlantaskMiddleware(ctx context.Context, teamCfg *Config, mw *teamMid
 			}
 			onReminder(ctx, mw.agentName, reminderText)
 		}),
+		// Route plantask's best-effort diagnostics through the runner's logger so
+		// they share the host's structured logging instead of bypassing it via the
+		// standard log package.
+		plantask.WithLogger(mw.logger()),
 	)
 }
 

@@ -155,7 +155,7 @@ func TestListTasksSkipsInvalidFiles(t *testing.T) {
 	task1JSON, _ := sonic.MarshalString(task1)
 	_ = backend.Write(ctx, &WriteRequest{FilePath: filepath.Join(baseDir, "1.json"), Content: task1JSON})
 
-	tasks, err := listTasks(ctx, backend, baseDir)
+	tasks, err := listTasks(ctx, backend, baseDir, nil)
 	assert.NoError(t, err)
 	assert.Len(t, tasks, 1)
 	assert.Equal(t, "1", tasks[0].ID)

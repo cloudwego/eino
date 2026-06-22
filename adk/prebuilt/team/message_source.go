@@ -165,14 +165,14 @@ func (s *mailboxMessageSource) consumeMessages(ctx context.Context, msgs []inbox
 		}
 		s.processedCount += len(original)
 
-		msgs, err := s.handleLeaderControlMessages(ctx, msgs)
+		remaining, err := s.handleLeaderControlMessages(ctx, msgs)
 		if err != nil {
 			return TurnInput{}, nil, false, err
 		}
-		if len(msgs) == 0 {
+		if len(remaining) == 0 {
 			return TurnInput{}, nil, false, nil
 		}
-		return s.buildTurnInput(msgs), noopAck, true, nil
+		return s.buildTurnInput(remaining), noopAck, true, nil
 	}
 
 	ack := func(ackCtx context.Context) error {

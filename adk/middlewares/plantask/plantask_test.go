@@ -19,7 +19,9 @@ package plantask
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -588,4 +590,68 @@ func TestTaskGuardBlocksAllTools(t *testing.T) {
 	result, err = listTool.InvokableRun(ctx, `{}`)
 	assert.NoError(t, err)
 	assert.Contains(t, result, "Task 1")
+}
+
+// captureLogger records formatted log lines for assertions.
+type captureLogger struct {
+	mu    sync.Mutex
+	lines []string
+}
+
+func (c *captureLogger) Printf(format string, args ...any) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.lines = append(c.lines, fmt.Sprintf(format, args...))
+}
+
+func (c *captureLogger) joined() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return strings.Join(c.lines, "\n")
+}
+
+// TestWithLogger verifies that the injected Logger is stored and that
+// effectiveLogger falls back to the std logger when none is injected.
+func TestWithLogger(t *testing.T) {
+	logger := &captureLogger{}
+	m := &middleware{}
+	WithLogger(logger)(m)
+	assert.Same(t, logger, m.logger)
+	assert.Same(t, logger, m.effectiveLogger())
+
+	_, ok := (&middleware{}).effectiveLogger().(stdLogger)
+	assert.True(t, ok)
+}
+
+// TestWithLogger_AssignmentNotificationFailureLogged verifies that a failing
+// assignment notification is routed through the injected Logger (instead of the
+// standard log package) and surfaced to the caller as a warning.
+func TestWithLogger_AssignmentNotificationFailureLogged(t *testing.T) {
+	ctx := context.Background()
+	backend := newInMemoryBackend()
+	baseDir := "/tmp/tasks"
+
+	logger := &captureLogger{}
+	mw := testMiddleware(backend, baseDir)
+	mw.logger = logger
+	// Shared-task mode so an explicit owner change produces an assignment.
+	mw.taskBaseDirResolver = func(context.Context) string { return baseDir }
+	mw.onTaskAssigned = func(context.Context, TaskAssignment) error {
+		return errors.New("mailbox unavailable")
+	}
+	turnLock := &sync.RWMutex{}
+
+	createTool := newTaskCreateTool(mw, turnLock)
+	updateTool := newTaskUpdateTool(mw, turnLock)
+
+	_, err := createTool.InvokableRun(ctx, `{"subject": "Task 1", "description": "First"}`)
+	assert.NoError(t, err)
+
+	result, err := updateTool.InvokableRun(ctx, `{"taskId": "1", "owner": "worker"}`)
+	assert.NoError(t, err)
+	// The notification failure is surfaced to the model as a warning.
+	assert.Contains(t, result, "notification could not be delivered")
+	// And it is routed through the injected logger.
+	assert.Contains(t, logger.joined(), "notify task assignment")
+	assert.Contains(t, logger.joined(), "mailbox unavailable")
 }

@@ -19,7 +19,6 @@ package plantask
 import (
 	"context"
 	"fmt"
-	"log"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -55,7 +54,14 @@ func (t *taskListTool) Info(ctx context.Context) (*schema.ToolInfo, error) {
 	}, nil
 }
 
-func listTasks(ctx context.Context, backend Backend, baseDir string) ([]*task, error) {
+// listTasks reads all valid task files under baseDir. logger receives a warning
+// for any task file that fails to parse (the file is skipped rather than failing
+// the whole listing); a nil logger falls back to the standard log package so the
+// warning is never silently discarded.
+func listTasks(ctx context.Context, backend Backend, baseDir string, logger Logger) ([]*task, error) {
+	if logger == nil {
+		logger = stdLogger{}
+	}
 	files, err := backend.LsInfo(ctx, &LsInfoRequest{
 		Path: baseDir,
 	})
@@ -85,7 +91,7 @@ func listTasks(ctx context.Context, backend Backend, baseDir string) ([]*task, e
 		taskData := &task{}
 		err = sonic.UnmarshalString(content.Content, taskData)
 		if err != nil {
-			log.Printf("[plantask] parse task file %s failed, skipping: %v", file.Path, err)
+			logger.Printf("[plantask] parse task file %s failed, skipping: %v", file.Path, err)
 			continue
 		}
 
@@ -132,7 +138,7 @@ func (t *taskListTool) InvokableRun(ctx context.Context, argumentsInJSON string,
 	lock.RLock()
 	defer lock.RUnlock()
 
-	tasks, err := listTasks(ctx, t.mw.backend, t.mw.resolveBaseDir(ctx))
+	tasks, err := listTasks(ctx, t.mw.backend, t.mw.resolveBaseDir(ctx), t.mw.logger)
 	if err != nil {
 		return "", fmt.Errorf("%s %w", TaskListToolName, err)
 	}

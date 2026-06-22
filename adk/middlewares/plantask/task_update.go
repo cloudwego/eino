@@ -19,7 +19,6 @@ package plantask
 import (
 	"context"
 	"fmt"
-	"log"
 	"strings"
 	"sync"
 
@@ -135,7 +134,7 @@ func (t *taskUpdateTool) InvokableRun(ctx context.Context, argumentsInJSON strin
 	// can re-send the message, instead of returning an unqualified success.
 	if assignment != nil && t.mw.onTaskAssigned != nil {
 		if notifyErr := t.mw.onTaskAssigned(ctx, *assignment); notifyErr != nil {
-			log.Printf("[plantask] notify task assignment (task %s -> %s) failed: %v",
+			t.mw.effectiveLogger().Printf("[plantask] notify task assignment (task %s -> %s) failed: %v",
 				assignment.TaskID, assignment.Owner, notifyErr)
 			warning := fmt.Sprintf("task #%s assigned to %q but the assignment notification could not be delivered (%v); the assignee may be unaware, consider re-sending the message",
 				assignment.TaskID, assignment.Owner, notifyErr)
@@ -204,7 +203,7 @@ func (t *taskUpdateTool) doUpdate(ctx context.Context, argumentsInJSON string) (
 	var allTasks []*task
 	if needsTaskList {
 		var listErr error
-		allTasks, listErr = listTasks(ctx, t.mw.backend, baseDir)
+		allTasks, listErr = listTasks(ctx, t.mw.backend, baseDir, t.mw.logger)
 		if listErr != nil {
 			return "", nil, fmt.Errorf("%s list tasks failed, err: %w", TaskUpdateToolName, listErr)
 		}
@@ -245,7 +244,7 @@ func (t *taskUpdateTool) doUpdate(ctx context.Context, argumentsInJSON string) (
 		hasDependencyUpdates := len(params.AddBlocks) > 0 || len(params.AddBlockedBy) > 0
 		if hasDependencyUpdates {
 			var reloadErr error
-			allTasks, reloadErr = listTasks(ctx, t.mw.backend, baseDir)
+			allTasks, reloadErr = listTasks(ctx, t.mw.backend, baseDir, t.mw.logger)
 			if reloadErr != nil {
 				return "", nil, fmt.Errorf("%s reload tasks after dependency update failed, err: %w", TaskUpdateToolName, reloadErr)
 			}
@@ -274,7 +273,7 @@ func (t *taskUpdateTool) doUpdate(ctx context.Context, argumentsInJSON string) (
 	// so a cleanup failure should not fail the main operation.
 	if params.Status == taskStatusCompleted {
 		if checkErr := t.deleteAllTasksIfCompleted(ctx, allTasks); checkErr != nil {
-			log.Printf("[plantask] auto-delete all completed tasks failed, err: %v", checkErr)
+			t.mw.effectiveLogger().Printf("[plantask] auto-delete all completed tasks failed, err: %v", checkErr)
 		}
 	}
 

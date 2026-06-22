@@ -19,6 +19,7 @@ package plantask
 import (
 	"context"
 	"fmt"
+	"log"
 	"sync"
 
 	"github.com/cloudwego/eino/adk"
@@ -33,6 +34,21 @@ type Config struct {
 	// BaseDir is the root directory where task files are stored.
 	BaseDir string
 }
+
+// Logger is the logging interface used by the plantask middleware for
+// best-effort, non-fatal diagnostics (e.g. an undeliverable assignment
+// notification or an unparsable task file). Implementations must be safe for
+// concurrent use. Inject one via WithLogger so these messages flow through the
+// host's structured logger instead of the standard log package.
+type Logger interface {
+	Printf(format string, args ...any)
+}
+
+// stdLogger is the default Logger, used when WithLogger is not supplied. It
+// preserves the previous behavior of writing to the standard log package.
+type stdLogger struct{}
+
+func (stdLogger) Printf(format string, args ...any) { log.Printf(format, args...) }
 
 // Option configures optional behavior on the plantask middleware.
 type Option func(*middleware)
@@ -120,6 +136,17 @@ func WithReminder(interval int, onReminder func(ctx context.Context, reminderTex
 	}
 }
 
+// WithLogger injects the Logger used for best-effort, non-fatal diagnostics.
+// When unset, plantask falls back to the standard log package. Embedding layers
+// such as the team middleware pass their own Logger here so plantask warnings
+// (undeliverable assignment notifications, unparsable task files, best-effort
+// cleanup failures) share the host's structured logging instead of bypassing it.
+func WithLogger(logger Logger) Option {
+	return func(m *middleware) {
+		m.logger = logger
+	}
+}
+
 // TaskAssignment contains information about a task ownership change emitted by
 // the shared-task/team workflow.
 type TaskAssignment struct {
@@ -181,7 +208,7 @@ func (m *middleware) UnassignOwnerTasks(ctx context.Context, owner string) ([]st
 	defer lock.Unlock()
 
 	baseDir := m.resolveBaseDir(ctx)
-	tasks, err := listTasks(ctx, m.backend, baseDir)
+	tasks, err := listTasks(ctx, m.backend, baseDir, m.logger)
 	if err != nil {
 		return nil, fmt.Errorf("list tasks for unassign: %w", err)
 	}
@@ -294,6 +321,19 @@ type middleware struct {
 	// Context resolvers (set via WithTaskBaseDirResolver / WithAgentNameResolver, nil in single-agent mode)
 	taskBaseDirResolver func(ctx context.Context) string
 	agentNameResolver   func(ctx context.Context) string
+
+	// logger (set via WithLogger) receives best-effort, non-fatal diagnostics.
+	// nil means "use the standard log package"; access it through logger().
+	logger Logger
+}
+
+// logger returns the configured Logger, falling back to the standard log package
+// so non-fatal diagnostics are never silently discarded when none was injected.
+func (m *middleware) effectiveLogger() Logger {
+	if m.logger != nil {
+		return m.logger
+	}
+	return stdLogger{}
 }
 
 // resolveBaseDir returns the task storage directory at call time.

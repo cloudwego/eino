@@ -149,7 +149,7 @@ func deleteTaskLocked(ctx context.Context, backend Backend, baseDir string, task
 	}
 
 	// Remove dangling references from other tasks.
-	tasks, err := listTasks(ctx, backend, baseDir)
+	tasks, err := listTasks(ctx, backend, baseDir, nil)
 	if err != nil {
 		return fmt.Errorf("DeleteTask list tasks failed, err: %w", err)
 	}

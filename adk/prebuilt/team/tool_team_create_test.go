@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -85,6 +86,40 @@ func TestTeamCreateTool_InvokableRun_TeamAlreadyActive(t *testing.T) {
 	_, err = tool.InvokableRun(context.Background(), `{"team_name":"another"}`)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "already active")
+}
+
+// TestTeamCreateTool_InvokableRun_ConcurrentSingleWinner verifies that when
+// multiple TeamCreate calls race (as can happen with parallel tool calls in a
+// single assistant turn), exactly one succeeds and the rest are rejected with
+// "already active". Without the teamOpLock serializing the
+// check→create→setTeamName sequence, more than one call could observe an empty
+// team name and each create a team.
+func TestTeamCreateTool_InvokableRun_ConcurrentSingleWinner(t *testing.T) {
+	mw, _ := newTestTeamMiddleware()
+	tool := newTeamCreateTool(mw)
+
+	const n = 8
+	var wg sync.WaitGroup
+	wg.Add(n)
+
+	var mu sync.Mutex
+	var successCount int
+
+	for i := 0; i < n; i++ {
+		go func(i int) {
+			defer wg.Done()
+			args := fmt.Sprintf(`{"team_name":"team-%d"}`, i)
+			if _, err := tool.InvokableRun(context.Background(), args); err == nil {
+				mu.Lock()
+				successCount++
+				mu.Unlock()
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	assert.Equal(t, 1, successCount, "exactly one concurrent TeamCreate should succeed")
+	assert.NotEqual(t, "", mw.getTeamName(), "the winning team must be the active team")
 }
 
 func TestTeamCreateTool_InvokableRun_InvalidJSON(t *testing.T) {
