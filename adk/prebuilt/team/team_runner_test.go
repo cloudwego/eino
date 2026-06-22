@@ -40,6 +40,24 @@ func (m *mockBaseChatModel) Stream(_ context.Context, _ []*schema.Message, _ ...
 	return schema.StreamReaderFromArray([]*schema.Message{msg}), nil
 }
 
+// blockingChatModel keeps a teammate's turn alive until the context is cancelled
+// (e.g. via ShutdownAllTeammates). A teammate backed by a model that returns
+// immediately can finish its turn and run cleanupExitedTeammate (which removes
+// the member from config) before the test observes the freshly-registered
+// member, making membership assertions racy under load. Blocking until shutdown
+// makes those assertions deterministic.
+type blockingChatModel struct{}
+
+func (m *blockingChatModel) Generate(ctx context.Context, _ []*schema.Message, _ ...model.Option) (*schema.Message, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func (m *blockingChatModel) Stream(ctx context.Context, _ []*schema.Message, _ ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
 func noopOnAgentEvents(context.Context, *adk.TurnContext[TurnInput, adk.Message], *adk.AsyncIterator[*adk.AgentEvent]) error {
 	return nil
 }

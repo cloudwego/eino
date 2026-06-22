@@ -146,7 +146,10 @@ func TestAgentTool_RunBackground_FullFlow(t *testing.T) {
 	agentConf := &adk.ChatModelAgentConfig{
 		Name:        "leader",
 		Description: "test leader",
-		Model:       &mockBaseChatModel{},
+		// Use a blocking model so the spawned teammate's turn does not complete
+		// (and trigger cleanupExitedTeammate → RemoveMember) before the membership
+		// assertion below runs. ShutdownAllTeammates cancels it at the end.
+		Model: &blockingChatModel{},
 	}
 
 	runnerConf := &RunnerConfig{
@@ -176,7 +179,6 @@ func TestAgentTool_RunBackground_FullFlow(t *testing.T) {
 	assert.True(t, has)
 
 	runner.leaderMW.ShutdownAllTeammates(context.Background())
-	time.Sleep(200 * time.Millisecond)
 }
 
 func TestAgentTool_RunBackground_InvalidMemberName(t *testing.T) {
