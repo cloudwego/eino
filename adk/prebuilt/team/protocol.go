@@ -191,6 +191,15 @@ func sanitizeEnvelopeText(text string) string {
 // of raw {"type":"idle_notification",...}. An unrecognized or non-JSON body falls
 // back to the original text, so this is safe for arbitrary user content.
 func renderProtocolText(text string) string {
+	// Fast path: every control/system payload is a JSON object marshalled from a
+	// struct, so it always begins with '{' (after optional leading whitespace).
+	// Plain DM/broadcast content is the common case and almost never does, so skip
+	// the header unmarshal for it. A body that does start with '{' but is not a
+	// known control type still falls back to the original text below.
+	if !looksLikeJSONObject(text) {
+		return text
+	}
+
 	var header protocolHeader
 	if err := sonic.UnmarshalString(text, &header); err != nil {
 		return text

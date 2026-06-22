@@ -84,6 +84,22 @@ func (t *agentTool) Info(_ context.Context) (*schema.ToolInfo, error) {
 	}, nil
 }
 
+// InvokableRun dispatches the Agent tool call to either a background teammate or
+// a one-shot foreground sub-agent. A teammate is used when either:
+//
+//   - run_in_background is explicitly requested, or
+//   - a team is active AND the caller named the agent. In team mode a named agent
+//     is addressable via SendMessage, so it is always spawned in the background
+//     regardless of run_in_background. This implicit override is documented in the
+//     run_in_background tool schema.
+//
+// The team-active half of the second predicate is resolved under teamOpLock so it
+// is serialized against TeamCreate/TeamDelete: tool calls in one assistant turn
+// may run in parallel (see compose tool_node parallelRunToolCall), so reading the
+// active team outside the lock could observe an empty team while a concurrent
+// TeamCreate is mid-flight and silently downgrade the call to a one-shot
+// foreground sub-agent (no team/plantask middleware, not addressable via
+// SendMessage).
 func (t *agentTool) InvokableRun(ctx context.Context, argumentsInJSON string, _ ...tool.Option) (string, error) {
 	var args agentToolArgs
 	if err := sonic.UnmarshalString(argumentsInJSON, &args); err != nil {
@@ -101,16 +117,11 @@ func (t *agentTool) InvokableRun(ctx context.Context, argumentsInJSON string, _ 
 	}
 
 	// A named agent becomes an addressable background teammate *when a team is
-	// active*. That team-state read is resolved under teamOpLock so it is
-	// serialized against TeamCreate/TeamDelete: tool calls in one assistant turn
-	// may run in parallel (see compose tool_node parallelRunToolCall), so reading
-	// the active team outside the lock could observe an empty team while a
-	// concurrent TeamCreate is mid-flight and silently downgrade the call to a
-	// one-shot foreground sub-agent (no team/plantask middleware, not addressable
-	// via SendMessage). When the team is active we run the teammate body while
-	// still holding the lock (mirroring runTeammate); otherwise we release the
-	// lock and fall through to the foreground path so a full synchronous sub-agent
-	// run never serializes against unrelated team-lifecycle operations.
+	// active* (see the dispatch policy on InvokableRun). When the team is active we
+	// run the teammate body while still holding the lock (mirroring runTeammate);
+	// otherwise we release the lock and fall through to the foreground path so a
+	// full synchronous sub-agent run never serializes against unrelated
+	// team-lifecycle operations.
 	if args.Name != "" {
 		t.mw.teamOpLock.Lock()
 		if t.mw.getTeamName() != "" {
@@ -121,25 +132,6 @@ func (t *agentTool) InvokableRun(ctx context.Context, argumentsInJSON string, _ 
 	}
 
 	return t.runForeground(ctx, args)
-}
-
-// shouldRunAsTeammate is retained for documentation of the dispatch policy and
-// is exercised by tests. The live dispatch decision in InvokableRun resolves the
-// team-active half of this predicate under teamOpLock to avoid a TOCTOU race with
-// TeamCreate/TeamDelete; this helper performs the same logic without the lock and
-// must not be used to gate execution on its own.
-//
-// A teammate is used when either:
-//   - run_in_background is explicitly requested, or
-//   - a team is active AND the caller named the agent. In team mode a named
-//     agent is addressable via SendMessage, so it is always spawned in the
-//     background regardless of run_in_background. This implicit override is
-//     documented in the run_in_background tool schema.
-func (t *agentTool) shouldRunAsTeammate(args agentToolArgs) bool {
-	if args.RunInBackground {
-		return true
-	}
-	return t.mw.getTeamName() != "" && args.Name != ""
 }
 
 // runForeground runs the agent synchronously by reusing adk.NewAgentTool,

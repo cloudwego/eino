@@ -271,6 +271,20 @@ func TestRenderProtocolText_PlainContentPassthrough(t *testing.T) {
 	assert.Equal(t, "just some text", renderProtocolText("just some text"))
 	// Valid JSON without a recognized type falls back to the original text.
 	assert.Equal(t, `{"foo":"bar"}`, renderProtocolText(`{"foo":"bar"}`))
+	// Plain text that merely contains a brace later does not trip the fast path.
+	assert.Equal(t, "use {braces} sparingly", renderProtocolText("use {braces} sparingly"))
+}
+
+func TestLooksLikeJSONObject(t *testing.T) {
+	assert.True(t, looksLikeJSONObject("{}"))
+	assert.True(t, looksLikeJSONObject(`{"type":"idle_notification"}`))
+	// Leading whitespace before the object is tolerated.
+	assert.True(t, looksLikeJSONObject("  \n\t{\"a\":1}"))
+	// Plain content, arrays, and empty strings are not JSON objects.
+	assert.False(t, looksLikeJSONObject(""))
+	assert.False(t, looksLikeJSONObject("   "))
+	assert.False(t, looksLikeJSONObject("hello {world}"))
+	assert.False(t, looksLikeJSONObject(`["a","b"]`))
 }
 
 func TestRenderProtocolText_IdleNotification(t *testing.T) {

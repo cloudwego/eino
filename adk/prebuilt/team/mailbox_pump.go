@@ -299,6 +299,13 @@ func (pm *pumpManager) pushAndAck(ctx context.Context, agentName string,
 
 	item.TargetAgent = agentName
 	if accepted, _ := loop.Push(item); !accepted {
+		// The loop rejected the push because it is tearing down. We deliberately
+		// do NOT ack so unread messages stay recoverable. Log so a teardown-time
+		// drop is observable for both leader and teammate pumps: the teammate
+		// self-heal log in StartPump only fires for teammates, and the leader path
+		// has already consumed its snapshot (MarkRead before this push), so without
+		// this line a leader losing messages during shutdown would be silent.
+		pm.logger.Printf("mailbox pump[%s] push rejected (loop tearing down); leaving messages unread", agentName)
 		return true, false
 	}
 	if ackErr := ack(ctx); ackErr != nil {

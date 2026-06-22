@@ -67,11 +67,13 @@ type teamMember struct {
 	Prompt    string    `json:"prompt,omitempty"`
 	JoinedAt  time.Time `json:"joinedAt"`
 	// IsActive defaults to true when a member is created and is retained for
-	// schema/backward compatibility. It is NOT a live busy/idle indicator:
-	// volatile busy/idle status is tracked in process by pumpManager (see its
-	// active map) and intentionally never persisted, so this field is not updated
-	// on every message cycle. Liveness checks (e.g. TeamDelete) consult the
-	// teammate registry, not this flag.
+	// schema/backward compatibility. It is NOT a live busy/idle indicator and
+	// currently has NO readers anywhere in the codebase — it is only written here
+	// at creation time. Volatile busy/idle status is tracked in process by
+	// pumpManager (see its active map) and intentionally never persisted, so this
+	// field is not updated on every message cycle. Liveness checks (e.g.
+	// TeamDelete) consult the teammate registry, not this flag. Do not gate any
+	// behavior on it without first making the runtime actually maintain it.
 	IsActive *bool `json:"isActive,omitempty"`
 }
 
@@ -131,6 +133,10 @@ func (s *configStore) CreateTeam(ctx context.Context, teamName, description, lea
 		leaderType = generalAgentName
 	}
 
+	// One timestamp for the whole creation action so the leader's JoinedAt and the
+	// team's CreatedAt are identical rather than a few nanoseconds apart.
+	now := time.Now()
+
 	config := &teamConfig{
 		Name:        teamName,
 		Description: description,
@@ -139,11 +145,11 @@ func (s *configStore) CreateTeam(ctx context.Context, teamName, description, lea
 			withDefaultMemberActivity(teamMember{
 				Name:      leaderName,
 				AgentID:   makeAgentID(leaderName, teamName),
-				JoinedAt:  time.Now(),
+				JoinedAt:  now,
 				AgentType: leaderType,
 			}),
 		},
-		CreatedAt: time.Now(),
+		CreatedAt: now,
 	}
 
 	data, err := sonic.MarshalString(config)
