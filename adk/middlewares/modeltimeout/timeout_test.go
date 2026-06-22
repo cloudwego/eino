@@ -14,11 +14,10 @@
  * limitations under the License.
  */
 
-package adk
+package modeltimeout
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"io"
 	"sync/atomic"
@@ -27,9 +26,79 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	. "github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
 )
+
+type fakeChatModel struct {
+	callbacksEnabled bool
+	generate         func(context.Context, []*schema.Message, ...model.Option) (*schema.Message, error)
+	stream           func(context.Context, []*schema.Message, ...model.Option) (*schema.StreamReader[*schema.Message], error)
+}
+
+func (m *fakeChatModel) Generate(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+	return m.generate(ctx, input, opts...)
+}
+
+func (m *fakeChatModel) Stream(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+	return m.stream(ctx, input, opts...)
+}
+
+func (m *fakeChatModel) BindTools([]*schema.ToolInfo) error {
+	return nil
+}
+
+func (m *fakeChatModel) IsCallbacksEnabled() bool {
+	return m.callbacksEnabled
+}
+
+type mockAgenticModel struct {
+	generateFn func(context.Context, []*schema.AgenticMessage, ...model.Option) (*schema.AgenticMessage, error)
+	streamFn   func(context.Context, []*schema.AgenticMessage, ...model.Option) (*schema.StreamReader[*schema.AgenticMessage], error)
+}
+
+func (m *mockAgenticModel) Generate(ctx context.Context, input []*schema.AgenticMessage, opts ...model.Option) (*schema.AgenticMessage, error) {
+	return m.generateFn(ctx, input, opts...)
+}
+
+func (m *mockAgenticModel) Stream(ctx context.Context, input []*schema.AgenticMessage, opts ...model.Option) (*schema.StreamReader[*schema.AgenticMessage], error) {
+	if m.streamFn != nil {
+		return m.streamFn(ctx, input, opts...)
+	}
+	msg, err := m.Generate(ctx, input, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return schema.StreamReaderFromArray([]*schema.AgenticMessage{msg}), nil
+}
+
+func instantBackoff(context.Context, int) time.Duration {
+	return 0
+}
+
+func drainTimeoutAgentEvents(iter *AsyncIterator[*AgentEvent]) []*AgentEvent {
+	var events []*AgentEvent
+	for {
+		event, ok := iter.Next()
+		if !ok {
+			return events
+		}
+		events = append(events, event)
+	}
+}
+
+func contextAwareMessageStream(ctx context.Context, chunks ...*schema.Message) *schema.StreamReader[*schema.Message] {
+	reader, writer := schema.Pipe[*schema.Message](len(chunks) + 1)
+	for _, chunk := range chunks {
+		writer.Send(chunk, nil)
+	}
+	go func() {
+		<-ctx.Done()
+		writer.Send(nil, ctx.Err())
+	}()
+	return reader
+}
 
 func TestModelTimeoutGenerateCallTimeout(t *testing.T) {
 	release := make(chan struct{})
@@ -45,7 +114,7 @@ func TestModelTimeoutGenerateCallTimeout(t *testing.T) {
 	}
 	defer close(release)
 
-	wrapped := newTypedTimeoutModelWrapper[*schema.Message](m, &ModelTimeoutConfig{CallTimeout: 10 * time.Millisecond})
+	wrapped := newTypedTimeoutModelWrapper[*schema.Message](m, &Config{CallTimeout: 10 * time.Millisecond})
 	started := time.Now()
 	_, err := wrapped.Generate(context.Background(), []*schema.Message{schema.UserMessage("hi")})
 	require.Error(t, err)
@@ -53,7 +122,7 @@ func TestModelTimeoutGenerateCallTimeout(t *testing.T) {
 
 	timeoutErr, ok := AsModelTimeout(err)
 	require.True(t, ok)
-	require.Equal(t, ModelTimeoutPhaseCall, timeoutErr.Phase)
+	require.Equal(t, PhaseCall, timeoutErr.Phase)
 	require.Equal(t, 0, timeoutErr.ChunksReceived)
 	require.True(t, errors.Is(err, ErrModelTimeout))
 	require.True(t, IsModelTimeoutBeforeOutput(err))
@@ -70,7 +139,7 @@ func TestModelTimeoutGenerateParentCancellation(t *testing.T) {
 			return schema.StreamReaderFromArray([]*schema.Message{schema.AssistantMessage("unused", nil)}), nil
 		},
 	}
-	wrapped := newTypedTimeoutModelWrapper[*schema.Message](m, &ModelTimeoutConfig{CallTimeout: time.Second})
+	wrapped := newTypedTimeoutModelWrapper[*schema.Message](m, &Config{CallTimeout: time.Second})
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
@@ -85,13 +154,12 @@ func TestModelTimeoutStreamFirstChunkTimeout(t *testing.T) {
 		generate: func(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.Message, error) {
 			return schema.AssistantMessage("unused", nil), nil
 		},
-		stream: func(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.StreamReader[*schema.Message], error) {
-			reader, _ := schema.Pipe[*schema.Message](1)
-			return reader, nil
+		stream: func(ctx context.Context, _ []*schema.Message, _ ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+			return contextAwareMessageStream(ctx), nil
 		},
 	}
 
-	wrapped := newTypedTimeoutModelWrapper[*schema.Message](m, &ModelTimeoutConfig{FirstChunkTimeout: 10 * time.Millisecond})
+	wrapped := newTypedTimeoutModelWrapper[*schema.Message](m, &Config{FirstChunkTimeout: 10 * time.Millisecond})
 	stream, err := wrapped.Stream(context.Background(), []*schema.Message{schema.UserMessage("hi")})
 	require.NoError(t, err)
 	defer stream.Close()
@@ -99,42 +167,9 @@ func TestModelTimeoutStreamFirstChunkTimeout(t *testing.T) {
 	_, err = stream.Recv()
 	timeoutErr, ok := AsModelTimeout(err)
 	require.True(t, ok)
-	require.Equal(t, ModelTimeoutPhaseFirstChunk, timeoutErr.Phase)
+	require.Equal(t, PhaseFirstChunk, timeoutErr.Phase)
 	require.Equal(t, 0, timeoutErr.ChunksReceived)
-	require.True(t, defaultIsRetryAble(context.Background(), err))
-}
-
-func TestModelTimeoutStreamOpenTimeoutClosesLateReader(t *testing.T) {
-	release := make(chan struct{})
-	lateReader, lateWriter := schema.Pipe[*schema.Message](0)
-	m := &fakeChatModel{
-		callbacksEnabled: true,
-		generate: func(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.Message, error) {
-			return schema.AssistantMessage("unused", nil), nil
-		},
-		stream: func(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.StreamReader[*schema.Message], error) {
-			<-release
-			return lateReader, nil
-		},
-	}
-
-	wrapped := newTypedTimeoutModelWrapper[*schema.Message](m, &ModelTimeoutConfig{CallTimeout: 10 * time.Millisecond})
-	_, err := wrapped.Stream(context.Background(), []*schema.Message{schema.UserMessage("hi")})
-	timeoutErr, ok := AsModelTimeout(err)
-	require.True(t, ok)
-	require.Equal(t, ModelTimeoutPhaseCall, timeoutErr.Phase)
-
-	close(release)
-	closed := make(chan bool, 1)
-	go func() {
-		closed <- lateWriter.Send(schema.AssistantMessage("late", nil), nil)
-	}()
-	select {
-	case got := <-closed:
-		require.True(t, got, "late stream reader should be closed by timeout wrapper")
-	case <-time.After(time.Second):
-		t.Fatal("late stream reader was not closed")
-	}
+	require.True(t, IsModelTimeoutBeforeOutput(err))
 }
 
 func TestModelTimeoutStreamOpenCooperativeTimeout(t *testing.T) {
@@ -151,11 +186,11 @@ func TestModelTimeoutStreamOpenCooperativeTimeout(t *testing.T) {
 		},
 	}
 
-	wrapped := newTypedTimeoutModelWrapper[*schema.Message](m, &ModelTimeoutConfig{CallTimeout: 10 * time.Millisecond})
+	wrapped := newTypedTimeoutModelWrapper[*schema.Message](m, &Config{CallTimeout: 10 * time.Millisecond})
 	_, err := wrapped.Stream(context.Background(), []*schema.Message{schema.UserMessage("hi")})
 	timeoutErr, ok := AsModelTimeout(err)
 	require.True(t, ok)
-	require.Equal(t, ModelTimeoutPhaseCall, timeoutErr.Phase)
+	require.Equal(t, PhaseCall, timeoutErr.Phase)
 	select {
 	case <-cooperated:
 	case <-time.After(time.Second):
@@ -169,14 +204,12 @@ func TestModelTimeoutStreamIdleTimeoutAfterOutput(t *testing.T) {
 		generate: func(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.Message, error) {
 			return schema.AssistantMessage("unused", nil), nil
 		},
-		stream: func(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.StreamReader[*schema.Message], error) {
-			reader, writer := schema.Pipe[*schema.Message](1)
-			writer.Send(schema.AssistantMessage("first", nil), nil)
-			return reader, nil
+		stream: func(ctx context.Context, _ []*schema.Message, _ ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+			return contextAwareMessageStream(ctx, schema.AssistantMessage("first", nil)), nil
 		},
 	}
 
-	wrapped := newTypedTimeoutModelWrapper[*schema.Message](m, &ModelTimeoutConfig{StreamIdleTimeout: 10 * time.Millisecond})
+	wrapped := newTypedTimeoutModelWrapper[*schema.Message](m, &Config{StreamIdleTimeout: 10 * time.Millisecond})
 	stream, err := wrapped.Stream(context.Background(), []*schema.Message{schema.UserMessage("hi")})
 	require.NoError(t, err)
 	defer stream.Close()
@@ -188,9 +221,8 @@ func TestModelTimeoutStreamIdleTimeoutAfterOutput(t *testing.T) {
 	_, err = stream.Recv()
 	timeoutErr, ok := AsModelTimeout(err)
 	require.True(t, ok)
-	require.Equal(t, ModelTimeoutPhaseStreamIdle, timeoutErr.Phase)
+	require.Equal(t, PhaseStreamIdle, timeoutErr.Phase)
 	require.Equal(t, 1, timeoutErr.ChunksReceived)
-	require.False(t, defaultIsRetryAble(context.Background(), err))
 	require.False(t, IsModelTimeoutBeforeOutput(err))
 }
 
@@ -200,14 +232,12 @@ func TestModelTimeoutStreamTotalTimeoutAfterOutput(t *testing.T) {
 		generate: func(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.Message, error) {
 			return schema.AssistantMessage("unused", nil), nil
 		},
-		stream: func(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.StreamReader[*schema.Message], error) {
-			reader, writer := schema.Pipe[*schema.Message](1)
-			writer.Send(schema.AssistantMessage("first", nil), nil)
-			return reader, nil
+		stream: func(ctx context.Context, _ []*schema.Message, _ ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+			return contextAwareMessageStream(ctx, schema.AssistantMessage("first", nil)), nil
 		},
 	}
 
-	wrapped := newTypedTimeoutModelWrapper[*schema.Message](m, &ModelTimeoutConfig{TotalTimeout: 20 * time.Millisecond})
+	wrapped := newTypedTimeoutModelWrapper[*schema.Message](m, &Config{TotalTimeout: 20 * time.Millisecond})
 	stream, err := wrapped.Stream(context.Background(), []*schema.Message{schema.UserMessage("hi")})
 	require.NoError(t, err)
 	defer stream.Close()
@@ -219,7 +249,7 @@ func TestModelTimeoutStreamTotalTimeoutAfterOutput(t *testing.T) {
 	_, err = stream.Recv()
 	timeoutErr, ok := AsModelTimeout(err)
 	require.True(t, ok)
-	require.Equal(t, ModelTimeoutPhaseTotal, timeoutErr.Phase)
+	require.Equal(t, PhaseTotal, timeoutErr.Phase)
 	require.Equal(t, 1, timeoutErr.ChunksReceived)
 }
 
@@ -235,14 +265,14 @@ func TestModelTimeoutGenerateTotalBeatsCallTimeout(t *testing.T) {
 		},
 	}
 
-	wrapped := newTypedTimeoutModelWrapper[*schema.Message](m, &ModelTimeoutConfig{
+	wrapped := newTypedTimeoutModelWrapper[*schema.Message](m, &Config{
 		CallTimeout:  time.Second,
 		TotalTimeout: 10 * time.Millisecond,
 	})
 	_, err := wrapped.Generate(context.Background(), []*schema.Message{schema.UserMessage("hi")})
 	timeoutErr, ok := AsModelTimeout(err)
 	require.True(t, ok)
-	require.Equal(t, ModelTimeoutPhaseTotal, timeoutErr.Phase)
+	require.Equal(t, PhaseTotal, timeoutErr.Phase)
 }
 
 func TestModelTimeoutStreamDownstreamCloseClosesUpstream(t *testing.T) {
@@ -257,7 +287,7 @@ func TestModelTimeoutStreamDownstreamCloseClosesUpstream(t *testing.T) {
 		},
 	}
 
-	wrapped := newTypedTimeoutModelWrapper[*schema.Message](m, &ModelTimeoutConfig{StreamIdleTimeout: time.Second})
+	wrapped := newTypedTimeoutModelWrapper[*schema.Message](m, &Config{StreamIdleTimeout: time.Second})
 	stream, err := wrapped.Stream(context.Background(), []*schema.Message{schema.UserMessage("hi")})
 	require.NoError(t, err)
 	stream.Close()
@@ -284,96 +314,6 @@ func TestModelTimeoutStreamDownstreamCloseClosesUpstream(t *testing.T) {
 	}
 }
 
-func TestModelTimeoutRetryDefaultRetriesOnlyBeforeOutput(t *testing.T) {
-	t.Run("first chunk timeout retries", func(t *testing.T) {
-		var calls int32
-		m := &fakeChatModel{
-			callbacksEnabled: true,
-			generate: func(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.Message, error) {
-				return schema.AssistantMessage("unused", nil), nil
-			},
-			stream: func(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.StreamReader[*schema.Message], error) {
-				if atomic.AddInt32(&calls, 1) == 1 {
-					reader, _ := schema.Pipe[*schema.Message](1)
-					return reader, nil
-				}
-				return schema.StreamReaderFromArray([]*schema.Message{schema.AssistantMessage("ok", nil)}), nil
-			},
-		}
-		timeout := newTypedTimeoutModelWrapper[*schema.Message](m, &ModelTimeoutConfig{FirstChunkTimeout: 10 * time.Millisecond})
-		retry := newTypedRetryModelWrapper[*schema.Message](timeout, &ModelRetryConfig{MaxRetries: 1, BackoffFunc: instantBackoff})
-
-		stream, err := retry.Stream(context.Background(), []*schema.Message{schema.UserMessage("hi")})
-		require.NoError(t, err)
-		defer stream.Close()
-		msg, err := stream.Recv()
-		require.NoError(t, err)
-		require.Equal(t, "ok", msg.Content)
-		_, err = stream.Recv()
-		require.ErrorIs(t, err, io.EOF)
-		require.Equal(t, int32(2), atomic.LoadInt32(&calls))
-	})
-
-	t.Run("idle timeout after output does not retry", func(t *testing.T) {
-		var calls int32
-		m := &fakeChatModel{
-			callbacksEnabled: true,
-			generate: func(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.Message, error) {
-				return schema.AssistantMessage("unused", nil), nil
-			},
-			stream: func(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.StreamReader[*schema.Message], error) {
-				atomic.AddInt32(&calls, 1)
-				reader, writer := schema.Pipe[*schema.Message](1)
-				writer.Send(schema.AssistantMessage("partial", nil), nil)
-				return reader, nil
-			},
-		}
-		timeout := newTypedTimeoutModelWrapper[*schema.Message](m, &ModelTimeoutConfig{StreamIdleTimeout: 10 * time.Millisecond})
-		retry := newTypedRetryModelWrapper[*schema.Message](timeout, &ModelRetryConfig{MaxRetries: 1, BackoffFunc: instantBackoff})
-
-		_, err := retry.Stream(context.Background(), []*schema.Message{schema.UserMessage("hi")})
-		timeoutErr, ok := AsModelTimeout(err)
-		require.True(t, ok)
-		require.Equal(t, 1, timeoutErr.ChunksReceived)
-		require.Equal(t, int32(1), atomic.LoadInt32(&calls))
-	})
-}
-
-func TestModelTimeoutCustomRetryCanReplayAfterPartialOutput(t *testing.T) {
-	var calls int32
-	m := &fakeChatModel{
-		callbacksEnabled: true,
-		generate: func(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.Message, error) {
-			return schema.AssistantMessage("unused", nil), nil
-		},
-		stream: func(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.StreamReader[*schema.Message], error) {
-			if atomic.AddInt32(&calls, 1) == 1 {
-				reader, writer := schema.Pipe[*schema.Message](1)
-				writer.Send(schema.AssistantMessage("partial", nil), nil)
-				return reader, nil
-			}
-			return schema.StreamReaderFromArray([]*schema.Message{schema.AssistantMessage("replayed", nil)}), nil
-		},
-	}
-	timeout := newTypedTimeoutModelWrapper[*schema.Message](m, &ModelTimeoutConfig{StreamIdleTimeout: 10 * time.Millisecond})
-	retry := newTypedRetryModelWrapper[*schema.Message](timeout, &ModelRetryConfig{
-		MaxRetries:  1,
-		BackoffFunc: instantBackoff,
-		ShouldRetry: func(_ context.Context, rc *RetryContext) *RetryDecision {
-			timeoutErr, ok := AsModelTimeout(rc.Err)
-			return &RetryDecision{Retry: ok && timeoutErr.ChunksReceived > 0}
-		},
-	})
-
-	stream, err := retry.Stream(context.Background(), []*schema.Message{schema.UserMessage("hi")})
-	require.NoError(t, err)
-	defer stream.Close()
-	msg, err := stream.Recv()
-	require.NoError(t, err)
-	require.Equal(t, "replayed", msg.Content)
-	require.Equal(t, int32(2), atomic.LoadInt32(&calls))
-}
-
 func TestModelTimeoutChatModelAgentRetryIntegration(t *testing.T) {
 	var calls int32
 	m := &fakeChatModel{
@@ -390,114 +330,19 @@ func TestModelTimeoutChatModelAgentRetryIntegration(t *testing.T) {
 		},
 	}
 	agent, err := NewChatModelAgent(context.Background(), &ChatModelAgentConfig{
-		Name:               "timeout-retry",
-		Description:        "timeout retry",
-		Model:              m,
-		ModelTimeoutConfig: &ModelTimeoutConfig{CallTimeout: 10 * time.Millisecond},
-		ModelRetryConfig:   &ModelRetryConfig{MaxRetries: 1, BackoffFunc: instantBackoff},
+		Name:             "timeout-retry",
+		Description:      "timeout retry",
+		Model:            m,
+		Handlers:         []ChatModelAgentMiddleware{New(&Config{CallTimeout: 10 * time.Millisecond})},
+		ModelRetryConfig: &ModelRetryConfig{MaxRetries: 1, BackoffFunc: instantBackoff},
 	})
 	require.NoError(t, err)
 
-	events := drainAgentEvents(t, agent.Run(context.Background(), &AgentInput{Messages: []Message{schema.UserMessage("hi")}}))
+	events := drainTimeoutAgentEvents(agent.Run(context.Background(), &AgentInput{Messages: []Message{schema.UserMessage("hi")}}))
 	require.Len(t, events, 1)
 	require.NoError(t, events[0].Err)
 	require.Equal(t, "success", events[0].Output.MessageOutput.Message.Content)
 	require.Equal(t, int32(2), atomic.LoadInt32(&calls))
-}
-
-func TestModelTimeoutFailoverCanInspectTimeout(t *testing.T) {
-	slow := &fakeChatModel{
-		callbacksEnabled: true,
-		generate: func(ctx context.Context, _ []*schema.Message, _ ...model.Option) (*schema.Message, error) {
-			<-ctx.Done()
-			return nil, ctx.Err()
-		},
-		stream: func(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.StreamReader[*schema.Message], error) {
-			return schema.StreamReaderFromArray([]*schema.Message{schema.AssistantMessage("unused", nil)}), nil
-		},
-	}
-	fast := &fakeChatModel{
-		callbacksEnabled: true,
-		generate: func(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.Message, error) {
-			return schema.AssistantMessage("failover", nil), nil
-		},
-		stream: func(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.StreamReader[*schema.Message], error) {
-			return schema.StreamReaderFromArray([]*schema.Message{schema.AssistantMessage("failover", nil)}), nil
-		},
-	}
-
-	var inspected bool
-	proxy := &typedFailoverProxyModel[*schema.Message]{}
-	timeout := newTypedTimeoutModelWrapper[*schema.Message](proxy, &ModelTimeoutConfig{CallTimeout: 10 * time.Millisecond})
-	failover := newFailoverModelWrapper[*schema.Message](timeout, &ModelFailoverConfig[*schema.Message]{
-		MaxRetries: 2,
-		ShouldFailover: func(_ context.Context, _ *schema.Message, err error) bool {
-			timeoutErr, ok := AsModelTimeout(err)
-			inspected = ok && timeoutErr.ChunksReceived == 0
-			return inspected
-		},
-		GetFailoverModel: func(_ context.Context, fc *FailoverContext[*schema.Message]) (model.BaseModel[*schema.Message], []*schema.Message, error) {
-			if fc.FailoverAttempt == 1 {
-				return slow, nil, nil
-			}
-			return fast, nil, nil
-		},
-	})
-
-	msg, err := failover.Generate(context.Background(), []*schema.Message{schema.UserMessage("hi")})
-	require.NoError(t, err)
-	require.True(t, inspected)
-	require.Equal(t, "failover", msg.Content)
-}
-
-func TestModelTimeoutFailoverCanInspectRetryExhaustedLastErr(t *testing.T) {
-	slow := &fakeChatModel{
-		callbacksEnabled: true,
-		generate: func(ctx context.Context, _ []*schema.Message, _ ...model.Option) (*schema.Message, error) {
-			<-ctx.Done()
-			return nil, ctx.Err()
-		},
-		stream: func(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.StreamReader[*schema.Message], error) {
-			return schema.StreamReaderFromArray([]*schema.Message{schema.AssistantMessage("unused", nil)}), nil
-		},
-	}
-	fast := &fakeChatModel{
-		callbacksEnabled: true,
-		generate: func(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.Message, error) {
-			return schema.AssistantMessage("after-exhausted", nil), nil
-		},
-		stream: func(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.StreamReader[*schema.Message], error) {
-			return schema.StreamReaderFromArray([]*schema.Message{schema.AssistantMessage("after-exhausted", nil)}), nil
-		},
-	}
-
-	var inspected bool
-	proxy := &typedFailoverProxyModel[*schema.Message]{}
-	timeout := newTypedTimeoutModelWrapper[*schema.Message](proxy, &ModelTimeoutConfig{CallTimeout: 10 * time.Millisecond})
-	retry := newTypedRetryModelWrapper[*schema.Message](timeout, &ModelRetryConfig{MaxRetries: 0, BackoffFunc: instantBackoff})
-	failover := newFailoverModelWrapper[*schema.Message](retry, &ModelFailoverConfig[*schema.Message]{
-		MaxRetries: 2,
-		ShouldFailover: func(_ context.Context, _ *schema.Message, err error) bool {
-			var exhausted *RetryExhaustedError
-			if !errors.As(err, &exhausted) {
-				return false
-			}
-			timeoutErr, ok := AsModelTimeout(exhausted.LastErr)
-			inspected = ok && timeoutErr.ChunksReceived == 0
-			return inspected
-		},
-		GetFailoverModel: func(_ context.Context, fc *FailoverContext[*schema.Message]) (model.BaseModel[*schema.Message], []*schema.Message, error) {
-			if fc.FailoverAttempt == 1 {
-				return slow, nil, nil
-			}
-			return fast, nil, nil
-		},
-	})
-
-	msg, err := failover.Generate(context.Background(), []*schema.Message{schema.UserMessage("hi")})
-	require.NoError(t, err)
-	require.True(t, inspected)
-	require.Equal(t, "after-exhausted", msg.Content)
 }
 
 func TestModelTimeoutAgenticMessageGenerate(t *testing.T) {
@@ -507,33 +352,12 @@ func TestModelTimeoutAgenticMessageGenerate(t *testing.T) {
 			return nil, ctx.Err()
 		},
 	}
-	wrapped := newTypedTimeoutModelWrapper[*schema.AgenticMessage](m, &ModelTimeoutConfig{CallTimeout: 10 * time.Millisecond})
+	wrapped := newTypedTimeoutModelWrapper[*schema.AgenticMessage](m, &Config{CallTimeout: 10 * time.Millisecond})
 
 	_, err := wrapped.Generate(context.Background(), []*schema.AgenticMessage{schema.UserAgenticMessage("hi")})
 	timeoutErr, ok := AsModelTimeout(err)
 	require.True(t, ok)
-	require.Equal(t, ModelTimeoutPhaseCall, timeoutErr.Phase)
-}
-
-func TestModelTimeoutSpanMeta(t *testing.T) {
-	timeoutErr := &ModelTimeoutError{
-		Phase:          ModelTimeoutPhaseTotal,
-		Timeout:        20 * time.Millisecond,
-		Elapsed:        25 * time.Millisecond,
-		ChunksReceived: 2,
-	}
-	event := newModelSpanEndEvent(context.Background(), modelSpanEndEventInput[*schema.Message]{
-		spanID:       "span",
-		startEventID: "start",
-		started:      time.Now().Add(-25 * time.Millisecond),
-		ended:        time.Now(),
-		err:          timeoutErr,
-	})
-	require.NotNil(t, event.Span.Model.Timeout)
-	require.Equal(t, string(ModelTimeoutPhaseTotal), event.Span.Model.Timeout.Phase)
-	require.Equal(t, int64(20), event.Span.Model.Timeout.TimeoutMS)
-	require.Equal(t, int64(25), event.Span.Model.Timeout.ElapsedMS)
-	require.Equal(t, 2, event.Span.Model.Timeout.ChunksReceived)
+	require.Equal(t, PhaseCall, timeoutErr.Phase)
 }
 
 func TestModelTimeoutTimelineEventContainsTimeoutMeta(t *testing.T) {
@@ -548,10 +372,10 @@ func TestModelTimeoutTimelineEventContainsTimeoutMeta(t *testing.T) {
 		},
 	}
 	agent, err := NewChatModelAgent(context.Background(), &ChatModelAgentConfig{
-		Name:               "timeout-timeline",
-		Description:        "timeout timeline",
-		Model:              m,
-		ModelTimeoutConfig: &ModelTimeoutConfig{CallTimeout: 10 * time.Millisecond},
+		Name:        "timeout-timeline",
+		Description: "timeout timeline",
+		Model:       m,
+		Handlers:    []ChatModelAgentMiddleware{New(&Config{CallTimeout: 10 * time.Millisecond})},
 	})
 	require.NoError(t, err)
 
@@ -570,18 +394,8 @@ func TestModelTimeoutTimelineEventContainsTimeoutMeta(t *testing.T) {
 	require.Equal(t, "error", endEvent.Span.Status)
 	require.Contains(t, endEvent.Span.Err, "model timeout")
 	require.NotNil(t, endEvent.Span.Model.Timeout)
-	require.Equal(t, string(ModelTimeoutPhaseCall), endEvent.Span.Model.Timeout.Phase)
+	require.Equal(t, string(PhaseCall), endEvent.Span.Model.Timeout.Phase)
 
-	encoded, err := json.Marshal(newModelSpanEndEvent(context.Background(), modelSpanEndEventInput[*schema.Message]{
-		spanID:       "span",
-		startEventID: "start",
-		started:      time.Now(),
-		ended:        time.Now(),
-		msg:          schema.AssistantMessage("ok", nil),
-		accepted:     true,
-	}).Span.Model)
-	require.NoError(t, err)
-	require.NotContains(t, string(encoded), "timeout")
 }
 
 func TestAttack_ModelTimeoutRetryExhaustionKeepsTimelineTimeoutMeta(t *testing.T) {
@@ -596,11 +410,11 @@ func TestAttack_ModelTimeoutRetryExhaustionKeepsTimelineTimeoutMeta(t *testing.T
 		},
 	}
 	agent, err := NewChatModelAgent(context.Background(), &ChatModelAgentConfig{
-		Name:               "timeout-retry-exhausted-timeline",
-		Description:        "timeout retry exhausted timeline",
-		Model:              m,
-		ModelTimeoutConfig: &ModelTimeoutConfig{CallTimeout: 10 * time.Millisecond},
-		ModelRetryConfig:   &ModelRetryConfig{MaxRetries: 0, BackoffFunc: instantBackoff},
+		Name:             "timeout-retry-exhausted-timeline",
+		Description:      "timeout retry exhausted timeline",
+		Model:            m,
+		Handlers:         []ChatModelAgentMiddleware{New(&Config{CallTimeout: 10 * time.Millisecond})},
+		ModelRetryConfig: &ModelRetryConfig{MaxRetries: 0, BackoffFunc: instantBackoff},
 	})
 	require.NoError(t, err)
 
@@ -618,15 +432,15 @@ func TestAttack_ModelTimeoutRetryExhaustionKeepsTimelineTimeoutMeta(t *testing.T
 	require.NotNil(t, endEvent)
 	require.Contains(t, endEvent.Span.Err, "model timeout")
 	require.NotNil(t, endEvent.Span.Model.Timeout)
-	require.Equal(t, string(ModelTimeoutPhaseCall), endEvent.Span.Model.Timeout.Phase)
+	require.Equal(t, string(PhaseCall), endEvent.Span.Model.Timeout.Phase)
 }
 
 func TestModelTimeoutHelperContracts(t *testing.T) {
-	var nilTimeout *ModelTimeoutError
+	var nilTimeout *Error
 	require.Equal(t, ErrModelTimeout.Error(), nilTimeout.Error())
 
-	timeoutErr := &ModelTimeoutError{
-		Phase:          ModelTimeoutPhaseStreamIdle,
+	timeoutErr := &Error{
+		Phase:          PhaseStreamIdle,
 		Timeout:        time.Second,
 		Elapsed:        time.Millisecond,
 		ChunksReceived: 2,
@@ -638,13 +452,13 @@ func TestModelTimeoutHelperContracts(t *testing.T) {
 	require.True(t, ok)
 	require.Same(t, timeoutErr, extracted)
 	require.False(t, IsModelTimeoutBeforeOutput(timeoutErr))
-	require.True(t, IsModelTimeoutBeforeOutput(&ModelTimeoutError{ChunksReceived: 0}))
+	require.True(t, IsModelTimeoutBeforeOutput(&Error{ChunksReceived: 0}))
 
 	_, ok = AsModelTimeout(io.EOF)
 	require.False(t, ok)
-	require.False(t, isModelTimeoutConfigActive(nil))
-	require.False(t, isModelTimeoutConfigActive(&ModelTimeoutConfig{}))
-	require.True(t, isModelTimeoutConfigActive(&ModelTimeoutConfig{StreamIdleTimeout: time.Second}))
+	require.False(t, isConfigActive(nil))
+	require.False(t, isConfigActive(&Config{}))
+	require.True(t, isConfigActive(&Config{StreamIdleTimeout: time.Second}))
 
 	timeout, phase, ok := minPositiveTimeout(0, 0)
 	require.False(t, ok)
@@ -663,7 +477,7 @@ func TestModelTimeoutInactiveConfigDelegates(t *testing.T) {
 		},
 	}
 
-	wrapped := newTypedTimeoutModelWrapper[*schema.Message](m, &ModelTimeoutConfig{})
+	wrapped := newTypedTimeoutModelWrapper[*schema.Message](m, &Config{})
 	msg, err := wrapped.Generate(context.Background(), []*schema.Message{schema.UserMessage("hi")})
 	require.NoError(t, err)
 	require.Equal(t, "generated", msg.Content)
@@ -690,7 +504,7 @@ func TestModelTimeoutStreamOpenErrorPaths(t *testing.T) {
 				return nil, nil
 			},
 		}
-		wrapped := newTypedTimeoutModelWrapper[*schema.Message](m, &ModelTimeoutConfig{FirstChunkTimeout: time.Second})
+		wrapped := newTypedTimeoutModelWrapper[*schema.Message](m, &Config{FirstChunkTimeout: time.Second})
 
 		stream, err := wrapped.Stream(context.Background(), []*schema.Message{schema.UserMessage("hi")})
 		require.Nil(t, stream)
@@ -709,7 +523,7 @@ func TestModelTimeoutStreamOpenErrorPaths(t *testing.T) {
 				return nil, providerErr
 			},
 		}
-		wrapped := newTypedTimeoutModelWrapper[*schema.Message](m, &ModelTimeoutConfig{CallTimeout: time.Second})
+		wrapped := newTypedTimeoutModelWrapper[*schema.Message](m, &Config{CallTimeout: time.Second})
 
 		stream, err := wrapped.Stream(context.Background(), []*schema.Message{schema.UserMessage("hi")})
 		require.Nil(t, stream)
@@ -729,7 +543,7 @@ func TestModelTimeoutStreamOpenErrorPaths(t *testing.T) {
 		}
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
-		wrapped := newTypedTimeoutModelWrapper[*schema.Message](m, &ModelTimeoutConfig{CallTimeout: time.Second})
+		wrapped := newTypedTimeoutModelWrapper[*schema.Message](m, &Config{CallTimeout: time.Second})
 
 		stream, err := wrapped.Stream(ctx, []*schema.Message{schema.UserMessage("hi")})
 		require.Nil(t, stream)
