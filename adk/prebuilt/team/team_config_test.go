@@ -239,6 +239,31 @@ func TestAddMemberWithDeduplicatedName_Duplicate(t *testing.T) {
 	assert.Equal(t, "agent-2@eta", result.AgentID)
 }
 
+func TestAddMemberWithDeduplicatedName_NearLimitStaysValid(t *testing.T) {
+	conf, _ := newTestConfig()
+	ctx := context.Background()
+
+	store := newConfigStore(conf)
+	_, err := store.CreateTeam(ctx, "theta", "desc", "lead", "type1")
+	assert.NoError(t, err)
+
+	// A base name at the maximum length collides, so dedup must append a suffix
+	// without producing a name that exceeds maxNameLength or otherwise fails the
+	// member-name rules.
+	base := strings.Repeat("a", maxNameLength)
+	first := teamMember{Name: base, JoinedAt: time.Now()}
+	r1, err := store.AddMemberWithDeduplicatedName(ctx, "theta", first)
+	assert.NoError(t, err)
+	assert.Equal(t, base, r1.Name)
+
+	second := teamMember{Name: base, JoinedAt: time.Now()}
+	r2, err := store.AddMemberWithDeduplicatedName(ctx, "theta", second)
+	assert.NoError(t, err)
+	assert.LessOrEqual(t, len(r2.Name), maxNameLength)
+	assert.NoError(t, validateMemberName(r2.Name))
+	assert.Equal(t, makeAgentID(r2.Name, "theta"), r2.AgentID)
+}
+
 func TestRemoveMember(t *testing.T) {
 	conf, _ := newTestConfig()
 	ctx := context.Background()

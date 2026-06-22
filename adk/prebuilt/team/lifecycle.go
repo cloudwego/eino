@@ -366,8 +366,11 @@ func (lm *lifecycleManager) activeTeammateNames() []string {
 	return lm.registry.activeNames()
 }
 
-// shutdownAll cancels all active teammates and waits for their goroutines to exit.
-func (lm *lifecycleManager) shutdownAll(logger Logger) {
+// shutdownAll cancels all active teammates and waits for their goroutines to
+// exit. The wait honors ctx (so a caller can bound teardown to an external
+// deadline) and is additionally capped at defaultShutdownTimeout so a hung
+// backend cannot block shutdown indefinitely.
+func (lm *lifecycleManager) shutdownAll(ctx context.Context, logger Logger) {
 	lm.registry.cancelAll()
-	lm.registry.waitWithTimeout(logger, defaultShutdownTimeout)
+	lm.registry.waitWithTimeout(ctx, logger, defaultShutdownTimeout)
 }

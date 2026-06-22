@@ -356,7 +356,7 @@ func TestLifecycleManager_ShutdownAll(t *testing.T) {
 	lm, _, _, _ := setupLifecycleTest()
 	ctx, cancel := context.WithCancel(context.Background())
 	lm.registry.register("worker", &teammateHandle{Cancel: cancel})
-	lm.shutdownAll(nopLogger{})
+	lm.shutdownAll(context.Background(), nopLogger{})
 	assert.Error(t, ctx.Err())
 }
 

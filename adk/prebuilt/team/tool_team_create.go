@@ -99,7 +99,14 @@ func (t *teamCreateTool) InvokableRun(ctx context.Context, argumentsInJSON strin
 			// This mirrors the pattern in cleanupExitedTeammate.
 			cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), defaultShutdownTimeout)
 			defer cleanupCancel()
-			_ = cm.DeleteTeam(cleanupCtx, teamName)
+			// Log rather than silently discard the rollback error: a failed
+			// DeleteTeam leaves the team dir / tasks dir / config.json behind, and
+			// the caller only sees the original setup error. Surfacing it keeps
+			// this path consistent with cleanupFailedTeammateSpawn and makes stray
+			// residue diagnosable.
+			if cleanupErr := cm.DeleteTeam(cleanupCtx, teamName); cleanupErr != nil {
+				t.mw.logger().Printf("TeamCreate rollback: delete team %q: %v", teamName, cleanupErr)
+			}
 			if t.mw.getTeamName() == teamName {
 				t.mw.setTeamName("")
 			}

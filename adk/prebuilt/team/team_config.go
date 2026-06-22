@@ -248,10 +248,19 @@ func (s *configStore) AddMemberWithDeduplicatedName(ctx context.Context, teamNam
 			if _, ok := existing[finalName]; !ok {
 				break
 			}
-			finalName = fmt.Sprintf("%s-%d", baseName, i)
+			finalName = suffixedMemberName(baseName, i)
 		}
 		if _, ok := existing[finalName]; ok {
 			return fmt.Errorf("name deduplication exceeded limit (%d) for base name %q", maxDedup, baseName)
+		}
+
+		// The base name was validated upstream, but appending a "-N" suffix can
+		// push the result past maxNameLength (and thus past the filesystem path
+		// limit suffixedMemberName guards against). Re-validate the final name so
+		// the same constraints enforced on caller-supplied names also hold for the
+		// auto-generated one before it becomes an AgentID and inbox path component.
+		if err := validateMemberName(finalName); err != nil {
+			return fmt.Errorf("deduplicated %w", err)
 		}
 
 		member.Name = finalName

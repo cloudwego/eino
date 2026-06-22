@@ -17,6 +17,7 @@
 package team
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -80,4 +81,32 @@ func TestValidateTeamName_Wildcard(t *testing.T) {
 	err := validateTeamName("team*")
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "broadcast")
+}
+
+func TestSuffixedMemberName_ShortBase(t *testing.T) {
+	// A short base name is suffixed verbatim and stays valid.
+	got := suffixedMemberName("worker", 2)
+	assert.Equal(t, "worker-2", got)
+	assert.NoError(t, validateMemberName(got))
+}
+
+func TestSuffixedMemberName_TruncatesNearLimit(t *testing.T) {
+	base := strings.Repeat("a", maxNameLength)
+	for i := 2; i <= 1000; i++ {
+		got := suffixedMemberName(base, i)
+		assert.LessOrEqual(t, len(got), maxNameLength,
+			"suffixed name %q exceeds maxNameLength", got)
+		assert.NoError(t, validateMemberName(got),
+			"suffixed name %q must remain valid", got)
+		assert.True(t, strings.HasSuffix(got, fmt.Sprintf("-%d", i)))
+	}
+}
+
+func TestSuffixedMemberName_TrimsTrailingBodyChars(t *testing.T) {
+	// Truncation that lands on a body-only char ('.', '_', '-') must trim it so
+	// the result never contains sequences like "name.-2".
+	base := strings.Repeat("a", maxNameLength-2) + ".."
+	got := suffixedMemberName(base, 5)
+	assert.NoError(t, validateMemberName(got))
+	assert.False(t, strings.Contains(got, ".-"))
 }

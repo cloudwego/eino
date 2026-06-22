@@ -18,6 +18,9 @@ package team
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -143,4 +146,62 @@ func TestMakeShutdownResponseHandler(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Contains(t, msg, "worker")
 	assert.Contains(t, msg, "shut down")
+}
+
+// rollbackBackend wraps inMemoryBackend to fail inbox writes (so setupMailbox
+// fails and rollback runs) and fail Delete (so the rollback cleanup itself
+// errors), letting tests assert the rollback error is surfaced rather than
+// silently dropped.
+type rollbackBackend struct {
+	*inMemoryBackend
+	deleteErr error
+}
+
+func (b *rollbackBackend) Write(ctx context.Context, req *WriteRequest) error {
+	if strings.Contains(req.FilePath, "inboxes") {
+		return errors.New("inbox write failed")
+	}
+	return b.inMemoryBackend.Write(ctx, req)
+}
+
+func (b *rollbackBackend) Delete(ctx context.Context, req *DeleteRequest) error {
+	if b.deleteErr != nil {
+		return b.deleteErr
+	}
+	return b.inMemoryBackend.Delete(ctx, req)
+}
+
+func TestTeamCreateTool_InvokableRun_RollbackLogsCleanupError(t *testing.T) {
+	backend := &rollbackBackend{
+		inMemoryBackend: newInMemoryBackend(),
+		deleteErr:       errors.New("delete boom"),
+	}
+	conf := &Config{Backend: backend, BaseDir: "/tmp/test"}
+	conf.ensureInit()
+
+	var logged string
+	logger := &testLogger{onPrintf: func(format string, args ...any) {
+		logged += fmt.Sprintf(format, args...)
+	}}
+
+	runnerConf := &RunnerConfig{
+		TeamConfig:  conf,
+		AgentConfig: &adk.ChatModelAgentConfig{Name: "test", Description: "test"},
+		Logger:      logger,
+	}
+	router := newSourceRouter(LeaderAgentName, logger)
+	pumpMgr := newPumpManager(router, logger)
+	mw := newTeamLeadMiddleware(runnerConf, router, pumpMgr)
+	tool := newTeamCreateTool(mw)
+
+	// setupMailbox fails (inbox write rejected), triggering rollback; the
+	// rollback DeleteTeam also fails, so the error must be logged.
+	_, err := tool.InvokableRun(context.Background(), `{"team_name":"myteam"}`)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "setup leader mailbox")
+
+	assert.Contains(t, logged, "TeamCreate rollback")
+	assert.Contains(t, logged, "delete boom")
+	// Team name must be cleared on failure.
+	assert.Equal(t, "", mw.getTeamName())
 }

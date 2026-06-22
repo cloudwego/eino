@@ -152,13 +152,24 @@ func (r *Runner) Run(ctx context.Context) {
 }
 
 // Wait blocks until the TurnLoop exits and all teammate shutdown/cleanup
-// has completed, then returns the exit state.
+// has completed, then returns the exit state. Teammate teardown is bounded by
+// an internal default timeout; use WaitContext to additionally bound it by an
+// external deadline.
 func (r *Runner) Wait() *adk.TurnLoopExitState[TurnInput, adk.Message] {
+	return r.WaitContext(context.Background())
+}
+
+// WaitContext is like Wait but lets the caller bound teammate shutdown/cleanup
+// with ctx. The TurnLoop itself is always awaited to completion; ctx only
+// governs how long the post-loop teammate teardown waits before giving up
+// (teardown is still capped internally by defaultShutdownTimeout). This lets a
+// host (e.g. a server's graceful-stop path) cap how long exit can take.
+func (r *Runner) WaitContext(ctx context.Context) *adk.TurnLoopExitState[TurnInput, adk.Message] {
 	state := r.loop.Wait()
 	if r.leaderMW != nil {
 		teamName := r.leaderMW.getTeamName()
 		if teamName != "" {
-			r.leaderMW.ShutdownAllTeammates(context.Background(), teamName)
+			r.leaderMW.ShutdownAllTeammates(ctx, teamName)
 		}
 		// Stop the leader's own mailbox pump to prevent goroutine leak.
 		// The pump is started by TeamCreate and is not covered by

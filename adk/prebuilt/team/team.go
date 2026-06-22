@@ -180,7 +180,9 @@ func (mw *teamMiddleware) BeforeAgent(ctx context.Context,
 
 // ShutdownAllTeammates cancels all active teammates and waits for their
 // goroutines to exit. Each goroutine's deferred cleanupExitedTeammate handles
-// unassigning tasks, removing from config, and deleting shadow tasks.
+// unassigning tasks, removing from config, and deleting shadow tasks. The wait
+// honors ctx so callers can bound teardown to an external deadline; it is also
+// capped at defaultShutdownTimeout internally.
 func (mw *teamMiddleware) ShutdownAllTeammates(ctx context.Context, teamName string) {
-	mw.lifecycle.shutdownAll(mw.logger())
+	mw.lifecycle.shutdownAll(ctx, mw.logger())
 }
