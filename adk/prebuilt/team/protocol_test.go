@@ -252,7 +252,7 @@ func TestSendIdleNotification_VerifyPayload(t *testing.T) {
 	content := backend.files[leaderInboxPath]
 	backend.mu.RUnlock()
 
-	var msgs []InboxMessage
+	var msgs []inboxMessage
 	assert.NoError(t, json.Unmarshal([]byte(content), &msgs))
 	assert.Len(t, msgs, 1)
 	assert.Equal(t, agentName, msgs[0].From)

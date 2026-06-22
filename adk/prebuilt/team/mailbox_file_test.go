@@ -133,7 +133,7 @@ func TestWriteInbox_WriteAndReadBack(t *testing.T) {
 	mb := newTestMailbox(backend, "/tmp/test", "myteam", "agent1", nil)
 	ctx := context.Background()
 
-	msgs := []InboxMessage{
+	msgs := []inboxMessage{
 		{From: "leader", To: "agent1", Text: "task1", Timestamp: "2025-01-01T00:00:00.000Z", Read: false},
 		{From: "agent2", To: "agent1", Text: "update", Timestamp: "2025-01-01T00:00:01.000Z", Read: true},
 	}
@@ -217,7 +217,7 @@ func TestReadUnread_ReturnsOnlyUnread(t *testing.T) {
 	mb := newTestMailbox(backend, "/tmp/test", "myteam", "agent1", nil)
 	ctx := context.Background()
 
-	msgs := []InboxMessage{
+	msgs := []inboxMessage{
 		{From: "leader", To: "agent1", Text: "read msg", Timestamp: "t1", Read: true},
 		{From: "leader", To: "agent1", Text: "unread msg1", Timestamp: "t2", Read: false},
 		{From: "agent2", To: "agent1", Text: "unread msg2", Timestamp: "t3", Read: false},
@@ -236,14 +236,14 @@ func TestMarkRead_RemovesSpecifiedMessages(t *testing.T) {
 	mb := newTestMailbox(backend, "/tmp/test", "myteam", "agent1", nil)
 	ctx := context.Background()
 
-	msgs := []InboxMessage{
+	msgs := []inboxMessage{
 		{ID: "id-1", From: "leader", To: "agent1", Text: "msg1", Summary: "s1", Timestamp: "t1", Read: false},
 		{ID: "id-2", From: "leader", To: "agent1", Text: "msg2", Summary: "s2", Timestamp: "t2", Read: false},
 		{ID: "id-3", From: "agent2", To: "agent1", Text: "msg3", Summary: "s3", Timestamp: "t3", Read: false},
 	}
 	assert.NoError(t, mb.writeInbox(ctx, "agent1", msgs))
 
-	err := mb.MarkRead(ctx, []InboxMessage{msgs[0], msgs[2]})
+	err := mb.MarkRead(ctx, []inboxMessage{msgs[0], msgs[2]})
 	assert.NoError(t, err)
 
 	remaining, err := mb.readInbox(ctx, "agent1")
@@ -257,12 +257,12 @@ func TestMarkRead_EmptySlice_NoOp(t *testing.T) {
 	mb := newTestMailbox(backend, "/tmp/test", "myteam", "agent1", nil)
 	ctx := context.Background()
 
-	msgs := []InboxMessage{
+	msgs := []inboxMessage{
 		{From: "leader", To: "agent1", Text: "msg1", Timestamp: "t1", Read: false},
 	}
 	assert.NoError(t, mb.writeInbox(ctx, "agent1", msgs))
 
-	err := mb.MarkRead(ctx, []InboxMessage{})
+	err := mb.MarkRead(ctx, []inboxMessage{})
 	assert.NoError(t, err)
 
 	remaining, err := mb.readInbox(ctx, "agent1")
@@ -276,7 +276,7 @@ func TestWaitForMessages_ExistingMessages_ReturnsImmediately(t *testing.T) {
 	mb := newTestMailbox(backend, "/tmp/test", "myteam", "agent1", nil)
 	ctx := context.Background()
 
-	msgs := []InboxMessage{
+	msgs := []inboxMessage{
 		{From: "leader", To: "agent1", Text: "existing", Timestamp: "t1", Read: false},
 	}
 	assert.NoError(t, mb.writeInbox(ctx, "agent1", msgs))
@@ -521,7 +521,7 @@ func TestWriteInbox_BackendWriteError(t *testing.T) {
 	eb := newErrBackend(errors.New("write failed"))
 	mb := newTestMailbox(eb, "/tmp/test", "myteam", "agent1", nil)
 
-	err := mb.writeInbox(context.Background(), "agent1", []InboxMessage{
+	err := mb.writeInbox(context.Background(), "agent1", []inboxMessage{
 		{From: "leader", Text: "hello", Timestamp: "t1"},
 	})
 	assert.Error(t, err)
@@ -539,7 +539,7 @@ func TestMarkRead_ReadInboxError(t *testing.T) {
 	eb := newErrBackend(errors.New("backend error"))
 	mb := newTestMailbox(eb, "/tmp/test", "myteam", "agent1", nil)
 
-	err := mb.MarkRead(context.Background(), []InboxMessage{
+	err := mb.MarkRead(context.Background(), []inboxMessage{
 		{From: "leader", Text: "msg1", Timestamp: "t1"},
 	})
 	assert.Error(t, err)
@@ -560,7 +560,7 @@ func TestWaitForMessages_ReadUnreadSucceedsFirstCall(t *testing.T) {
 	mb := newTestMailbox(backend, "/tmp/test", "myteam", "agent1", nil)
 	ctx := context.Background()
 
-	msgs := []InboxMessage{
+	msgs := []inboxMessage{
 		{From: "leader", Text: "urgent", Timestamp: "t1", Read: false},
 	}
 	assert.NoError(t, mb.writeInbox(ctx, "agent1", msgs))

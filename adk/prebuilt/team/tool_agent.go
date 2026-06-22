@@ -118,6 +118,12 @@ func (t *agentTool) shouldRunAsTeammate(args agentToolArgs) bool {
 
 // runForeground runs the agent synchronously by reusing adk.NewAgentTool,
 // which handles event iteration, streaming, and interrupt/resume internally.
+//
+// The foreground agent is a one-shot, isolated sub-agent: it is built directly
+// from agentConfig() and does NOT go through buildTeamAgent, so it has no team
+// or plantask middleware. It therefore cannot see the shared task list, is not
+// addressable via SendMessage, and cannot spawn teammates. Use a background
+// teammate (named, or run_in_background=true) when those capabilities are needed.
 func (t *agentTool) runForeground(ctx context.Context, args agentToolArgs) (string, error) {
 	newConfig := *t.mw.lifecycle.agentConfig()
 	newConfig.Instruction = args.Prompt

@@ -55,7 +55,7 @@ func TestErrTeamNotFound(t *testing.T) {
 }
 
 func TestInboxMessage_ZeroValue(t *testing.T) {
-	var msg InboxMessage
+	var msg inboxMessage
 	assert.Equal(t, "", msg.From)
 	assert.Equal(t, "", msg.To)
 	assert.Equal(t, "", msg.Text)
@@ -81,7 +81,7 @@ func TestTurnInput_WithValues(t *testing.T) {
 }
 
 func TestInboxMessage_WithValues(t *testing.T) {
-	msg := InboxMessage{
+	msg := inboxMessage{
 		From:      "leader",
 		To:        "worker",
 		Text:      "do task",

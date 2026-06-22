@@ -153,7 +153,6 @@ func (t *teamCreateTool) makeShutdownResponseHandler(teamName string) func(ctx c
 		// will not send a duplicate because firstStop will be false there.
 		if err != nil {
 			t.mw.logger().Printf("removeTeammate(%s) partial cleanup error: %v", fromName, err)
-			return buildTeammateTerminationMessage(fromName, unassigned), nil
 		}
 		return buildTeammateTerminationMessage(fromName, unassigned), nil
 	}

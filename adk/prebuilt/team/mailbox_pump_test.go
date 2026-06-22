@@ -257,7 +257,7 @@ func TestRunPump_TryReceiveProcessesPreExistingMessages(t *testing.T) {
 
 	inboxPath := inboxFilePath("/tmp/test", "myteam", "worker")
 	leaderInboxPath := filepath.Join("/tmp/test", "teams", "myteam", "inboxes", "team-lead.json")
-	msgs := []InboxMessage{{From: "leader", Text: "hello", Timestamp: utcNowMillis()}}
+	msgs := []inboxMessage{{From: "leader", Text: "hello", Timestamp: utcNowMillis()}}
 	msgJSON, _ := sonic.MarshalString(msgs)
 	_ = backend.Write(context.Background(), &WriteRequest{FilePath: inboxPath, Content: msgJSON})
 	_ = backend.Write(context.Background(), &WriteRequest{FilePath: leaderInboxPath, Content: "[]"})
@@ -329,7 +329,7 @@ func TestRunPump_WaitForItemProcessesDelayedMessages(t *testing.T) {
 	pm.StartPump(ctx, "worker")
 
 	time.Sleep(50 * time.Millisecond)
-	msgs := []InboxMessage{{From: "leader", Text: "delayed task", Timestamp: utcNowMillis()}}
+	msgs := []inboxMessage{{From: "leader", Text: "delayed task", Timestamp: utcNowMillis()}}
 	msgJSON, _ := sonic.MarshalString(msgs)
 	_ = backend.Write(context.Background(), &WriteRequest{FilePath: inboxPath, Content: msgJSON})
 
@@ -374,7 +374,7 @@ func TestRunPump_ExitsWhenLoopStopped(t *testing.T) {
 
 	inboxPath := inboxFilePath("/tmp/test", "myteam", "worker")
 	leaderInboxPath := filepath.Join("/tmp/test", "teams", "myteam", "inboxes", "team-lead.json")
-	msgs := []InboxMessage{{From: "leader", Text: "msg", Timestamp: utcNowMillis()}}
+	msgs := []inboxMessage{{From: "leader", Text: "msg", Timestamp: utcNowMillis()}}
 	msgJSON, _ := sonic.MarshalString(msgs)
 	_ = backend.Write(context.Background(), &WriteRequest{FilePath: inboxPath, Content: msgJSON})
 	_ = backend.Write(context.Background(), &WriteRequest{FilePath: leaderInboxPath, Content: "[]"})

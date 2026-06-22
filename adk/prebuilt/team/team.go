@@ -38,6 +38,11 @@ import (
 )
 
 // Config is the configuration for the team middleware.
+//
+// A Config must not be copied after it is first passed to NewRunner: it carries
+// a sync.Once and lazily-initialized shared state, and copying it by value would
+// duplicate that state and break the once-only initialization guarantee. Pass it
+// by pointer instead.
 type Config struct {
 	// Backend is the storage backend for team data. Required.
 	Backend Backend
@@ -188,9 +193,9 @@ func (mw *teamMiddleware) BeforeAgent(ctx context.Context,
 
 // ShutdownAllTeammates cancels all active teammates and waits for their
 // goroutines to exit. Each goroutine's deferred cleanupExitedTeammate handles
-// unassigning tasks, removing from config, and deleting shadow tasks. The wait
-// honors ctx so callers can bound teardown to an external deadline; it is also
-// capped at defaultShutdownTimeout internally.
+// unassigning tasks, removing the member from config, and deleting its inbox
+// file. The wait honors ctx so callers can bound teardown to an external
+// deadline; it is also capped at defaultShutdownTimeout internally.
 func (mw *teamMiddleware) ShutdownAllTeammates(ctx context.Context) {
 	mw.lifecycle.shutdownAll(ctx, mw.logger())
 }
