@@ -28,8 +28,6 @@ import (
 	"github.com/cloudwego/eino/adk"
 )
 
-type SessionIDFunc[M adk.MessageType] func(ctx context.Context, state *adk.TypedChatModelAgentState[M]) (string, error)
-
 // Coordinator abstracts distributed coordination for async memory extraction.
 // A Redis-backed implementation can map AcquireLock to SETNX + TTL, Set to SET,
 // Get to GET, and GetAndDelete to GETDEL.
@@ -56,9 +54,9 @@ type PendingSnapshot struct {
 }
 
 type CoordinationConfig[M adk.MessageType] struct {
-	// SessionIDFunc returns the logical session ID used to build the coordinator key.
-	// Optional. Defaults to an internal context-scoped session ID for write extraction.
-	SessionIDFunc SessionIDFunc[M]
+	// SessionID is the logical session ID used to build the coordinator key.
+	// Optional. When empty, cross-turn coordination is disabled.
+	SessionID string
 
 	// Coordinator stores cursor/pending state and coordinates async extraction locks.
 	// Optional. Defaults to NewLocalCoordinator().
