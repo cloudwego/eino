@@ -46,9 +46,8 @@ func typedTaskToolMiddleware[M adk.MessageType](
 	handlers []adk.TypedChatModelAgentMiddleware[M],
 	modelRetryConfig *adk.TypedModelRetryConfig[M],
 	modelFailoverConfig *adk.ModelFailoverConfig[M],
-	modelTimeoutConfig *adk.ModelTimeoutConfig,
 ) (adk.TypedChatModelAgentMiddleware[M], error) {
-	t, err := typedNewTaskTool(ctx, taskToolDescriptionGenerator, subAgents, withoutGeneralSubAgent, cm, instruction, toolsConfig, maxIteration, middlewares, handlers, modelRetryConfig, modelFailoverConfig, modelTimeoutConfig)
+	t, err := typedNewTaskTool(ctx, taskToolDescriptionGenerator, subAgents, withoutGeneralSubAgent, cm, instruction, toolsConfig, maxIteration, middlewares, handlers, modelRetryConfig, modelFailoverConfig)
 	if err != nil {
 		return nil, err
 	}
@@ -74,7 +73,6 @@ func typedNewTaskTool[M adk.MessageType](
 	handlers []adk.TypedChatModelAgentMiddleware[M],
 	modelRetryConfig *adk.TypedModelRetryConfig[M],
 	modelFailoverConfig *adk.ModelFailoverConfig[M],
-	modelTimeoutConfig *adk.ModelTimeoutConfig,
 ) (tool.InvokableTool, error) {
 	t := &typedTaskTool[M]{
 		subAgents:     map[string]tool.InvokableTool{},
@@ -103,7 +101,6 @@ func typedNewTaskTool[M adk.MessageType](
 			GenModelInput:       typedGenModelInput[M],
 			ModelRetryConfig:    modelRetryConfig,
 			ModelFailoverConfig: modelFailoverConfig,
-			ModelTimeoutConfig:  modelTimeoutConfig,
 		})
 		if err != nil {
 			return nil, err

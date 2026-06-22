@@ -107,11 +107,6 @@ type TypedConfig[M adk.MessageType] struct {
 	// When set, the agent will automatically fail over to alternative models on errors.
 	// This config is also propagated to the general sub-agent.
 	ModelFailoverConfig *adk.ModelFailoverConfig[M]
-	// ModelTimeoutConfig configures opt-in timeout enforcement for ChatModel calls.
-	// When set, the agent will enforce timeouts on model calls.
-	// This config is also propagated to the general sub-agent.
-	ModelTimeoutConfig *adk.ModelTimeoutConfig
-
 	// OutputKey stores the agent's response in the session.
 	// Optional. When set, stores output via AddSessionValue(ctx, outputKey, msg.Content).
 	OutputKey string
@@ -152,7 +147,6 @@ func NewTyped[M adk.MessageType](ctx context.Context, cfg *TypedConfig[M]) (adk.
 			append(handlers, cfg.Handlers...),
 			cfg.ModelRetryConfig,
 			cfg.ModelFailoverConfig,
-			cfg.ModelTimeoutConfig,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to new task tool: %w", err)
@@ -173,7 +167,6 @@ func NewTyped[M adk.MessageType](ctx context.Context, cfg *TypedConfig[M]) (adk.
 		GenModelInput:       typedGenModelInput[M],
 		ModelRetryConfig:    cfg.ModelRetryConfig,
 		ModelFailoverConfig: cfg.ModelFailoverConfig,
-		ModelTimeoutConfig:  cfg.ModelTimeoutConfig,
 		OutputKey:           cfg.OutputKey,
 	})
 }

@@ -74,11 +74,6 @@ type TypedModelContext[M MessageType] struct {
 	// attempts are skipped (not treated as fatal) by the flow event processor.
 	ModelFailoverConfig *ModelFailoverConfig[M]
 
-	// ModelTimeoutConfig contains the timeout configuration for the model.
-	// This is populated at request time from the agent's ModelTimeoutConfig.
-	// Handlers should treat this value as read-only.
-	ModelTimeoutConfig *ModelTimeoutConfig
-
 	cancelContext *cancelContext
 }
 
