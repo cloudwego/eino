@@ -779,18 +779,6 @@ func countModelVisibleMessages[M adk.MessageType](msgs []M) int {
 	return n
 }
 
-func getOrInitWriteSessionID(ctx context.Context) string {
-	const key = "__automemory_write_session_id__"
-	if v, ok := adk.GetSessionValue(ctx, key); ok {
-		if s, ok := v.(string); ok && s != "" {
-			return s
-		}
-	}
-	s := fmt.Sprintf("%d", time.Now().UnixNano())
-	adk.AddSessionValue(ctx, key, s)
-	return s
-}
-
 func buildPendingSnapshot[M adk.MessageType](messages []M, cursor int, toolInfos []*schema.ToolInfo) (*PendingSnapshot, error) {
 	raw, err := json.Marshal(messages)
 	if err != nil {
@@ -956,10 +944,10 @@ func (m *middleware[M]) topicSelectionTopK() int {
 }
 
 func (m *middleware[M]) resolveSessionID(ctx context.Context, state *adk.TypedChatModelAgentState[M]) (string, error) {
-	if m.coordination != nil && m.coordination.SessionIDFunc != nil {
-		return m.coordination.SessionIDFunc(ctx, state)
+	if m.coordination != nil {
+		return strings.TrimSpace(m.coordination.SessionID), nil
 	}
-	return getOrInitWriteSessionID(ctx), nil
+	return "", nil
 }
 
 func (m *middleware[M]) sendTopicMemoryEvent(ctx context.Context, msgs []M, memMsg M) {

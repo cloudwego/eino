@@ -953,13 +953,6 @@ func ensureSessionEventMessageIDs[M MessageType](event *SessionEvent[M]) {
 	if event.MessageInserted != nil && !isNilMessage(event.MessageInserted.Message) {
 		EnsureMessageID(event.MessageInserted.Message)
 	}
-	if event.TurnEnd != nil {
-		for _, msg := range event.TurnEnd.Messages {
-			if !isNilMessage(msg) {
-				EnsureMessageID(msg)
-			}
-		}
-	}
 }
 
 func typedPopToolGenAction[M MessageType](ctx context.Context, toolName string) *AgentAction {
@@ -1978,6 +1971,7 @@ func (w *typedStateModelWrapper[M]) Generate(ctx context.Context, _ []M, opts ..
 		st.DeferredToolInfos = state.DeferredToolInfos
 		return nil
 	})
+	syncModelContextSessionEvent(ctx, state)
 
 	// Derive model options from state. Append after caller opts so state takes precedence
 	// (model.GetCommonOptions applies left-to-right, last wins).
@@ -2105,6 +2099,7 @@ func (w *typedStateModelWrapper[M]) Stream(ctx context.Context, _ []M, opts ...m
 		st.DeferredToolInfos = state.DeferredToolInfos
 		return nil
 	})
+	syncModelContextSessionEvent(ctx, state)
 
 	// Derive model options from state. Append after caller opts so state takes precedence
 	// (model.GetCommonOptions applies left-to-right, last wins).
