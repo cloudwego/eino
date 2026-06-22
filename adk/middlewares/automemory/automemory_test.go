@@ -727,6 +727,50 @@ func TestMiddleware_AfterAgent_SyncExtractionWritesMemoryFiles(t *testing.T) {
 	require.Contains(t, extModel.promptSeen[0], "Path: /mem")
 }
 
+func TestMiddleware_AfterAgent_SyncExtraction_CustomWriteInstruction(t *testing.T) {
+	ctx := context.Background()
+	b := NewInMemoryBackend()
+	now := time.Now()
+	b.put("/mem/MEMORY.md", "", now)
+
+	extModel := &extractionModel{}
+	mw, err := New(ctx, &Config[*schema.Message]{
+		MemoryStores:  []MemoryStore{{Path: "/mem"}},
+		MemoryBackend: b,
+		Write: &WriteConfig[*schema.Message]{
+			Mode:  WriteModeSync,
+			Model: extModel,
+			GenInstruction: func(ctx context.Context) (string, error) {
+				return "## Custom save policy\n- Save only explicitly requested memories\n- Prefer updating user_preferences.md for user preference changes\n- Do not save temporary debugging notes", nil
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	state := &adk.ChatModelAgentState{
+		Messages: []adk.Message{
+			schema.UserMessage("remember beta"),
+			schema.AssistantMessage("ack", nil),
+		},
+	}
+	_, err = mw.AfterAgent(ctx, &adk.TypedChatModelAgentState[*schema.Message]{Messages: state.Messages})
+	require.NoError(t, err)
+
+	extModel.mu.Lock()
+	defer extModel.mu.Unlock()
+	require.NotEmpty(t, extModel.promptSeen)
+	prompt := extModel.promptSeen[0]
+	require.Contains(t, prompt, "## Custom save policy")
+	require.Contains(t, prompt, "- Save only explicitly requested memories")
+	require.Contains(t, prompt, "- Prefer updating user_preferences.md for user preference changes")
+	require.Contains(t, prompt, "- Do not save temporary debugging notes")
+	require.NotContains(t, prompt, "## What to save")
+	require.NotContains(t, prompt, "- Stable patterns and conventions confirmed across multiple interactions")
+	require.NotContains(t, prompt, "## What NOT to save")
+	require.NotContains(t, prompt, "- Session-specific temporary state or current task details")
+	require.Contains(t, prompt, "## How to save memories")
+}
+
 func TestMiddleware_AfterAgent_SyncExtractionWritesNonPrimaryMemoryStore(t *testing.T) {
 	ctx := context.Background()
 	b := &countingBackend{InMemoryBackend: NewInMemoryBackend()}
@@ -1277,39 +1321,6 @@ func TestMiddleware_TopicSelection_AsyncProtectsMemoryMessageFromMutation(t *tes
 	require.NoError(t, err)
 	require.Equal(t, expected, next.Messages[len(next.Messages)-1].Content)
 	require.NotNil(t, next.Messages[len(next.Messages)-1].Extra[memoryExtraKey])
-}
-
-func TestMiddleware_AfterAgent_SyncExtraction_SkipIndexPrompt(t *testing.T) {
-	ctx := context.Background()
-	b := NewInMemoryBackend()
-	now := time.Now()
-	b.put("/mem/MEMORY.md", "", now)
-
-	extModel := &extractionModel{}
-	mw, err := New(ctx, &Config[*schema.Message]{
-		MemoryStores:  []MemoryStore{{Path: "/mem"}},
-		MemoryBackend: b,
-		Write: &WriteConfig[*schema.Message]{
-			Mode:      WriteModeSync,
-			Model:     extModel,
-			SkipIndex: true,
-		},
-	})
-	require.NoError(t, err)
-
-	state := &adk.ChatModelAgentState{
-		Messages: []adk.Message{
-			schema.UserMessage("remember gamma"),
-			schema.AssistantMessage("ack", nil),
-		},
-	}
-	_, err = mw.AfterAgent(ctx, &adk.TypedChatModelAgentState[*schema.Message]{Messages: state.Messages})
-	require.NoError(t, err)
-
-	extModel.mu.Lock()
-	defer extModel.mu.Unlock()
-	require.NotEmpty(t, extModel.promptSeen)
-	require.NotContains(t, extModel.promptSeen[0], "Step 2")
 }
 
 func TestMiddleware_IndexDisabled_HidesMemoryIndexPrompt(t *testing.T) {
