@@ -349,10 +349,10 @@ func buildMemoryIndexBlockChinese(index memoryIndexPromptInfo) string {
 	return strings.Join(lines, "\n")
 }
 
-func buildExtractAutoOnlyPrompt(memoryStores string, newMessageCount int, existingMemories string, enableMemoryIndex bool) string {
+func buildExtractAutoOnlyPrompt(memoryStores string, newMessageCount int, existingMemories string, savePolicyInstruction string, enableMemoryIndex bool) string {
 	return internal.SelectPrompt(internal.I18nPrompts{
-		English: buildExtractAutoOnlyPromptEnglish(memoryStores, newMessageCount, existingMemories, enableMemoryIndex),
-		Chinese: buildExtractAutoOnlyPromptChinese(memoryStores, newMessageCount, existingMemories, enableMemoryIndex),
+		English: buildExtractAutoOnlyPromptEnglish(memoryStores, newMessageCount, existingMemories, savePolicyInstruction, enableMemoryIndex),
+		Chinese: buildExtractAutoOnlyPromptChinese(memoryStores, newMessageCount, existingMemories, savePolicyInstruction, enableMemoryIndex),
 	})
 }
 
@@ -667,13 +667,48 @@ func buildExtractHowToSaveChinese(enableMemoryIndex bool) []string {
 	}
 }
 
-func buildExtractAutoOnlyPromptEnglish(memoryStores string, newMessageCount int, existingMemories string, enableMemoryIndex bool) string {
+func buildExtractSavePolicyEnglish(custom string) []string {
+	if strings.TrimSpace(custom) != "" {
+		return strings.Split(strings.TrimSpace(custom), "\n")
+	}
+	return []string{
+		"## What to save",
+		"- Stable patterns and conventions confirmed across multiple interactions",
+		"- Important file paths, architectural decisions, and user preferences",
+		"- Recurring debugging insights and known gotchas",
+		"",
+		"## What NOT to save",
+		"- Session-specific temporary state or current task details",
+		"- Secrets, credentials, or personal data",
+		"- Speculative or unverified conclusions",
+	}
+}
+
+func buildExtractSavePolicyChinese(custom string) []string {
+	if strings.TrimSpace(custom) != "" {
+		return strings.Split(strings.TrimSpace(custom), "\n")
+	}
+	return []string{
+		"## 应该保存什么",
+		"- 已在多次交互中得到确认的稳定模式和约定",
+		"- 重要文件路径、架构决策和用户偏好",
+		"- 可复用的调试经验与已知坑点",
+		"",
+		"## 不应保存什么",
+		"- 仅属于当前会话的临时状态或当前任务细节",
+		"- 密钥、凭据或个人数据",
+		"- 猜测性或未经验证的结论",
+	}
+}
+
+func buildExtractAutoOnlyPromptEnglish(memoryStores string, newMessageCount int, existingMemories string, savePolicyInstruction string, enableMemoryIndex bool) string {
 	manifest := ""
 	if existingMemories != "" {
 		manifest = fmt.Sprintf("\n\n## Existing memory files\n\n%s\n\nCheck this list before writing — update an existing file rather than creating a duplicate.", existingMemories)
 	}
 
 	howToSave := buildExtractHowToSaveEnglish(enableMemoryIndex)
+	savePolicy := buildExtractSavePolicyEnglish(savePolicyInstruction)
 
 	parts := []string{
 		fmt.Sprintf("You are now acting as the memory extraction subagent. Analyze only the most recent ~%d messages above and use them to update persistent memory.", newMessageCount),
@@ -688,28 +723,21 @@ func buildExtractAutoOnlyPromptEnglish(memoryStores string, newMessageCount int,
 		"",
 		"If the user explicitly asks you to remember something, save it immediately. If they ask you to forget something, find and remove the relevant memory.",
 		"",
-		"## What to save",
-		"- Stable patterns and conventions confirmed across multiple interactions",
-		"- Important file paths, architectural decisions, and user preferences",
-		"- Recurring debugging insights and known gotchas",
-		"",
-		"## What NOT to save",
-		"- Session-specific temporary state or current task details",
-		"- Secrets, credentials, or personal data",
-		"- Speculative or unverified conclusions",
-		"",
 	}
+	parts = append(parts, savePolicy...)
+	parts = append(parts, "")
 	parts = append(parts, howToSave...)
 	return joinLines(parts)
 }
 
-func buildExtractAutoOnlyPromptChinese(memoryStores string, newMessageCount int, existingMemories string, enableMemoryIndex bool) string {
+func buildExtractAutoOnlyPromptChinese(memoryStores string, newMessageCount int, existingMemories string, savePolicyInstruction string, enableMemoryIndex bool) string {
 	manifest := ""
 	if existingMemories != "" {
 		manifest = fmt.Sprintf("\n\n## 现有记忆文件\n\n%s\n\n写入前请先检查这份列表，优先更新已有文件，而不是创建重复记忆。", existingMemories)
 	}
 
 	howToSave := buildExtractHowToSaveChinese(enableMemoryIndex)
+	savePolicy := buildExtractSavePolicyChinese(savePolicyInstruction)
 
 	parts := []string{
 		fmt.Sprintf("你现在扮演记忆提取子智能体。只分析上方最近约 %d 条消息，并用它们来更新持久化记忆。", newMessageCount),
@@ -724,17 +752,9 @@ func buildExtractAutoOnlyPromptChinese(memoryStores string, newMessageCount int,
 		"",
 		"如果用户明确要求你记住某件事，请立即保存；如果用户要求遗忘某件事，请找到对应记忆并删除。",
 		"",
-		"## 应该保存什么",
-		"- 已在多次交互中得到确认的稳定模式和约定",
-		"- 重要文件路径、架构决策和用户偏好",
-		"- 可复用的调试经验与已知坑点",
-		"",
-		"## 不应保存什么",
-		"- 仅属于当前会话的临时状态或当前任务细节",
-		"- 密钥、凭据或个人数据",
-		"- 猜测性或未经验证的结论",
-		"",
 	}
+	parts = append(parts, savePolicy...)
+	parts = append(parts, "")
 	parts = append(parts, howToSave...)
 	return joinLines(parts)
 }
