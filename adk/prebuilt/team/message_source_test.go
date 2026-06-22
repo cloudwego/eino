@@ -19,7 +19,6 @@ package team
 import (
 	"context"
 	"errors"
-	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -542,81 +541,7 @@ func TestWaitForItem_NilMailbox(t *testing.T) {
 	assert.Contains(t, err.Error(), "mailbox is nil")
 }
 
-func TestWaitForItem_LeaderExitWhenNoActiveTeammates(t *testing.T) {
-	backend := newInMemoryBackend()
-	locks := newNamedLockManager()
-	mb := &mailbox{
-		conf: &mailboxConfig{
-			Backend:      backend,
-			BaseDir:      "/tmp/test",
-			TeamName:     "myteam",
-			OwnerName:    "team-lead",
-			PollInterval: 10 * time.Millisecond,
-		},
-		inboxLocks: locks,
-		listMembers: func(ctx context.Context) ([]string, error) {
-			return []string{"team-lead"}, nil
-		},
-	}
-
-	inboxPath := filepath.Join("/tmp/test", "teams", "myteam", "inboxes", "team-lead.json")
-	backend.files[inboxPath] = "[]"
-
-	src := newMailboxMessageSource(mb, &mailboxSourceConfig{
-		OwnerName:           "team-lead",
-		Role:                teamRoleLeader,
-		ExitWhenNoTeammates: true,
-		HasActiveTeammates: func(ctx context.Context) (bool, error) {
-			return false, nil
-		},
-	})
-
-	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-	defer cancel()
-
-	_, err := src.waitForItem(ctx)
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "no active teammates")
-}
-
-func TestWaitForItem_LeaderHasActiveTeammatesError(t *testing.T) {
-	backend := newInMemoryBackend()
-	locks := newNamedLockManager()
-	mb := &mailbox{
-		conf: &mailboxConfig{
-			Backend:      backend,
-			BaseDir:      "/tmp/test",
-			TeamName:     "myteam",
-			OwnerName:    "team-lead",
-			PollInterval: 10 * time.Millisecond,
-		},
-		inboxLocks: locks,
-		listMembers: func(ctx context.Context) ([]string, error) {
-			return []string{"team-lead"}, nil
-		},
-	}
-
-	inboxPath := filepath.Join("/tmp/test", "teams", "myteam", "inboxes", "team-lead.json")
-	backend.files[inboxPath] = "[]"
-
-	src := newMailboxMessageSource(mb, &mailboxSourceConfig{
-		OwnerName:           "team-lead",
-		Role:                teamRoleLeader,
-		ExitWhenNoTeammates: true,
-		HasActiveTeammates: func(ctx context.Context) (bool, error) {
-			return false, fmt.Errorf("registry error")
-		},
-	})
-
-	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-	defer cancel()
-
-	_, err := src.waitForItem(ctx)
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "registry error")
-}
-
-func TestWaitForItem_LeaderWithActiveTeammatesReceivesMessages(t *testing.T) {
+func TestWaitForItem_LeaderReceivesMessages(t *testing.T) {
 	backend := newInMemoryBackend()
 	locks := newNamedLockManager()
 	mb := &mailbox{
@@ -644,12 +569,8 @@ func TestWaitForItem_LeaderWithActiveTeammatesReceivesMessages(t *testing.T) {
 	}()
 
 	src := newMailboxMessageSource(mb, &mailboxSourceConfig{
-		OwnerName:           "team-lead",
-		Role:                teamRoleLeader,
-		ExitWhenNoTeammates: true,
-		HasActiveTeammates: func(ctx context.Context) (bool, error) {
-			return true, nil
-		},
+		OwnerName: "team-lead",
+		Role:      teamRoleLeader,
 	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)

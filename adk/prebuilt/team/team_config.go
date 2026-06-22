@@ -85,10 +85,6 @@ func withDefaultMemberActivity(member teamMember) teamMember {
 	return member
 }
 
-func isMemberActive(member teamMember) bool {
-	return member.IsActive == nil || *member.IsActive
-}
-
 // resolveTeamName returns a unique team name. If the given name is already
 // taken (e.g. leftover from a previous run), it appends a Unix-nano timestamp
 // to avoid collisions
@@ -298,34 +294,6 @@ func (s *configStore) RemoveMember(ctx context.Context, teamName, memberName str
 		cfg.Members = members
 		return nil
 	})
-}
-
-// HasActiveTeammates checks if there are active teammates (excluding leader).
-func (s *configStore) HasActiveTeammates(ctx context.Context, teamName string) (bool, error) {
-	cfg, err := s.readConfigLocked(ctx, teamName)
-	if err != nil {
-		return false, err
-	}
-	for _, m := range cfg.Members {
-		if m.Name != LeaderAgentName && isMemberActive(m) {
-			return true, nil
-		}
-	}
-	return false, nil
-}
-
-// GetActiveTeammateNames returns the names of active teammates (excluding leader).
-func (s *configStore) GetActiveTeammateNames(ctx context.Context, teamName string) ([]string, error) {
-	var names []string
-	err := s.readConfigWithReadLock(ctx, teamName, func(cfg *teamConfig) error {
-		for _, m := range cfg.Members {
-			if m.Name != LeaderAgentName && isMemberActive(m) {
-				names = append(names, m.Name)
-			}
-		}
-		return nil
-	})
-	return names, err
 }
 
 // HasMember checks whether the given member exists in the team configuration.

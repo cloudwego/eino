@@ -38,10 +38,12 @@ import (
 //   - These locks do NOT span processes. Sharing one BaseDir across multiple
 //     processes is therefore unsupported unless the Backend itself provides
 //     cross-process coordination.
-//   - For crash safety, an implementation's Write SHOULD replace the target file
-//     atomically (e.g. write to a temp file in the same directory, then rename).
-//     Without atomic replacement, a crash mid-write can leave a truncated
-//     config.json or inbox that the team can no longer parse.
+//   - For crash safety, Write MUST replace the target file atomically (e.g. write
+//     to a temp file in the same directory, fsync, then rename over the target).
+//     A non-atomic Write that is interrupted mid-write can leave a truncated
+//     config.json or inbox that the team can no longer parse, which permanently
+//     breaks routing and broadcast for that team. Implementations that cannot
+//     guarantee atomic replacement are unsuitable for team storage.
 type Backend interface {
 	plantask.Backend
 

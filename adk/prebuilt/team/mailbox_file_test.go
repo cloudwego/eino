@@ -378,13 +378,59 @@ func TestBroadcast_ListMembersError(t *testing.T) {
 		},
 	}
 
-	err := mb.broadcast(context.Background(), &outboxMessage{
+	_, err := mb.broadcast(context.Background(), &outboxMessage{
 		To:   "*",
 		Type: messageTypeBroadcast,
 		Text: "hello all",
 	})
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "member list unavailable")
+}
+
+func TestBroadcast_ReportsDeliveredAndFailed(t *testing.T) {
+	backend := newInMemoryBackend()
+	members := []string{"team-lead", "agent1", "agent2"}
+	mb := newTestMailbox(backend, "/tmp/test", "myteam", "team-lead", members)
+	ctx := context.Background()
+
+	for _, name := range members {
+		inboxPath := filepath.Join("/tmp/test", "teams", "myteam", "inboxes", name+".json")
+		assert.NoError(t, initInboxFile(ctx, backend, inboxPath))
+	}
+
+	res, err := mb.broadcast(ctx, &outboxMessage{
+		To:      "*",
+		Type:    messageTypeBroadcast,
+		Text:    "hello all",
+		Summary: "greeting",
+	})
+	assert.NoError(t, err)
+	assert.ElementsMatch(t, []string{"agent1", "agent2"}, res.Delivered)
+	assert.Empty(t, res.Failed)
+}
+
+func TestBroadcast_PartialFailureReportsBreakdown(t *testing.T) {
+	backend := newInMemoryBackend()
+	members := []string{"team-lead", "agent1", "agent2"}
+	// failOnWrite makes writes to agent2's inbox fail so the broadcast is partial.
+	fb := &failingWriteBackend{inMemoryBackend: backend, failPathSuffix: "agent2.json"}
+	mb := newTestMailbox(fb, "/tmp/test", "myteam", "team-lead", members)
+	ctx := context.Background()
+
+	for _, name := range members {
+		inboxPath := filepath.Join("/tmp/test", "teams", "myteam", "inboxes", name+".json")
+		assert.NoError(t, initInboxFile(ctx, backend, inboxPath))
+	}
+
+	res, err := mb.broadcast(ctx, &outboxMessage{
+		To:      "*",
+		Type:    messageTypeBroadcast,
+		Text:    "hello all",
+		Summary: "greeting",
+	})
+	assert.Error(t, err)
+	assert.Equal(t, []string{"agent1"}, res.Delivered)
+	assert.Contains(t, res.Failed, "agent2")
 }
 
 func TestSendToOne_ConcurrentSendsNoLostMessages(t *testing.T) {

@@ -104,11 +104,12 @@ func (t *teamCreateTool) InvokableRun(ctx context.Context, argumentsInJSON strin
 			// the caller only sees the original setup error. Surfacing it keeps
 			// this path consistent with cleanupFailedTeammateSpawn and makes stray
 			// residue diagnosable.
+			//
+			// No setTeamName("") reset is needed here: the middleware team name is
+			// only set on the success path (after the final error-returning step),
+			// so on the rollback path it is still whatever it was before this call.
 			if cleanupErr := cm.DeleteTeam(cleanupCtx, teamName); cleanupErr != nil {
 				t.mw.logger().Printf("TeamCreate rollback: delete team %q: %v", teamName, cleanupErr)
-			}
-			if t.mw.getTeamName() == teamName {
-				t.mw.setTeamName("")
 			}
 		}
 	}()

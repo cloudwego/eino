@@ -295,100 +295,6 @@ func TestRemoveMember(t *testing.T) {
 	}
 }
 
-func TestHasActiveTeammates_NoTeammates(t *testing.T) {
-	conf, _ := newTestConfig()
-	ctx := context.Background()
-
-	_, err := newConfigStore(conf).CreateTeam(ctx, "kappa", "desc", LeaderAgentName, "type1")
-	assert.NoError(t, err)
-
-	has, err := newConfigStore(conf).HasActiveTeammates(ctx, "kappa")
-	assert.NoError(t, err)
-	assert.False(t, has)
-}
-
-func TestHasActiveTeammates_WithTeammate(t *testing.T) {
-	conf, _ := newTestConfig()
-	ctx := context.Background()
-
-	_, err := newConfigStore(conf).CreateTeam(ctx, "lambda", "desc", LeaderAgentName, "type1")
-	assert.NoError(t, err)
-
-	member := teamMember{
-		Name:      "worker",
-		AgentID:   makeAgentID("worker", "lambda"),
-		AgentType: "coder",
-		JoinedAt:  time.Now(),
-	}
-	err = newConfigStore(conf).AddMember(ctx, "lambda", member)
-	assert.NoError(t, err)
-
-	has, err := newConfigStore(conf).HasActiveTeammates(ctx, "lambda")
-	assert.NoError(t, err)
-	assert.True(t, has)
-}
-
-func TestGetActiveTeammateNames(t *testing.T) {
-	conf, _ := newTestConfig()
-	ctx := context.Background()
-
-	_, err := newConfigStore(conf).CreateTeam(ctx, "mu", "desc", LeaderAgentName, "type1")
-	assert.NoError(t, err)
-
-	member1 := teamMember{
-		Name:      "dev1",
-		AgentID:   makeAgentID("dev1", "mu"),
-		AgentType: "coder",
-		JoinedAt:  time.Now(),
-	}
-	member2 := teamMember{
-		Name:      "dev2",
-		AgentID:   makeAgentID("dev2", "mu"),
-		AgentType: "coder",
-		JoinedAt:  time.Now(),
-	}
-	err = newConfigStore(conf).AddMember(ctx, "mu", member1)
-	assert.NoError(t, err)
-	err = newConfigStore(conf).AddMember(ctx, "mu", member2)
-	assert.NoError(t, err)
-
-	names, err := newConfigStore(conf).GetActiveTeammateNames(ctx, "mu")
-	assert.NoError(t, err)
-	assert.Len(t, names, 2)
-	assert.Contains(t, names, "dev1")
-	assert.Contains(t, names, "dev2")
-	assert.NotContains(t, names, LeaderAgentName)
-}
-
-func TestGetActiveTeammateNames_ExcludesIdleTeammates(t *testing.T) {
-	conf, _ := newTestConfig()
-	ctx := context.Background()
-
-	_, err := newConfigStore(conf).CreateTeam(ctx, "mu-idle", "desc", LeaderAgentName, "type1")
-	assert.NoError(t, err)
-
-	err = newConfigStore(conf).AddMember(ctx, "mu-idle", teamMember{
-		Name:      "dev1",
-		AgentID:   makeAgentID("dev1", "mu-idle"),
-		AgentType: "coder",
-		JoinedAt:  time.Now(),
-	})
-	assert.NoError(t, err)
-	err = newConfigStore(conf).AddMember(ctx, "mu-idle", teamMember{
-		Name:      "dev2",
-		AgentID:   makeAgentID("dev2", "mu-idle"),
-		AgentType: "coder",
-		JoinedAt:  time.Now(),
-	})
-	assert.NoError(t, err)
-	err = newConfigStore(conf).SetMemberActive(ctx, "mu-idle", "dev2", false)
-	assert.NoError(t, err)
-
-	names, err := newConfigStore(conf).GetActiveTeammateNames(ctx, "mu-idle")
-	assert.NoError(t, err)
-	assert.Equal(t, []string{"dev1"}, names)
-}
-
 func TestHasMember_Found(t *testing.T) {
 	conf, _ := newTestConfig()
 	ctx := context.Background()
@@ -495,13 +401,6 @@ func TestDeleteTeam_BackendError(t *testing.T) {
 	conf := newTestConfigWithErrBackend(errors.New("delete failed"))
 
 	err := newConfigStore(conf).DeleteTeam(context.Background(), "someteam")
-	assert.Error(t, err)
-}
-
-func TestHasActiveTeammates_ReadConfigError(t *testing.T) {
-	conf := newTestConfigWithErrBackend(errors.New("read failed"))
-
-	_, err := newConfigStore(conf).HasActiveTeammates(context.Background(), "someteam")
 	assert.Error(t, err)
 }
 

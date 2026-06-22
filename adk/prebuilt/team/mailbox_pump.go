@@ -62,14 +62,25 @@ func newPumpManager(router *sourceRouter, logger Logger) *pumpManager {
 }
 
 // SetMailbox registers a mailboxMessageSource for the given agent.
+//
+// A nil pumpManager is a no-op: teammate middleware is constructed without a
+// pump manager (only the leader's lifecycleManager owns one), so calling pump
+// operations through a teammate's manager must be harmless rather than panic.
 func (pm *pumpManager) SetMailbox(agentName string, ms *mailboxMessageSource) {
+	if pm == nil {
+		return
+	}
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 	pm.mailboxes[agentName] = ms
 }
 
 // UnsetMailbox detaches the mailbox for the given agent and stops its pump.
+// A nil pumpManager is a no-op (see SetMailbox).
 func (pm *pumpManager) UnsetMailbox(agentName string) {
+	if pm == nil {
+		return
+	}
 	pm.mu.Lock()
 	delete(pm.mailboxes, agentName)
 	h := pm.pumps[agentName]
@@ -102,7 +113,11 @@ func (pm *pumpManager) UnsetMailbox(agentName string) {
 // and pushes items into the agent's TurnLoop.
 // If a previous pump exists for this agent, it is cancelled and fully drained
 // before the new pump starts, preventing duplicate message processing.
+// A nil pumpManager is a no-op (see SetMailbox).
 func (pm *pumpManager) StartPump(ctx context.Context, agentName string) {
+	if pm == nil {
+		return
+	}
 	pm.mu.Lock()
 	ms := pm.mailboxes[agentName]
 	if ms == nil {

@@ -311,6 +311,10 @@ func (lm *lifecycleManager) notifyLeaderTeammateTerminated(ctx context.Context, 
 	notifyMsg := buildTeammateTerminationMessage(memberName, unassigned)
 	sysMsg, err := buildTeammateTerminatedSystemMessage(notifyMsg)
 	if err != nil {
+		// A marshal failure here is a programming error (the payload is built from
+		// internal types), not a transient I/O fault, so always surface it rather
+		// than dropping the leader notification silently.
+		lm.logger.Printf("notifyLeaderTeammateTerminated: build system message for %q: %v", memberName, err)
 		return
 	}
 	item := TurnInput{
@@ -336,10 +340,9 @@ func (lm *lifecycleManager) setupMailbox(ctx context.Context, teamName, agentNam
 
 // startPump starts the mailbox pump goroutine for the given agent.
 // Wraps pumpMgr.StartPump so tool layer doesn't access pumpMgr directly.
+// pumpMgr may be nil for teammate managers; StartPump is nil-safe.
 func (lm *lifecycleManager) startPump(ctx context.Context, agentName string) {
-	if lm.pumpMgr != nil {
-		lm.pumpMgr.StartPump(ctx, agentName)
-	}
+	lm.pumpMgr.StartPump(ctx, agentName)
 }
 
 // createTeammateRunner creates a teammate's TurnLoop runner and registers it
@@ -353,10 +356,9 @@ func (lm *lifecycleManager) createTeammateRunner(agent *adk.ChatModelAgent, agen
 // prevent goroutine leaks. The leader's per-inbox lock is reference counted in
 // the mailbox operations (ForName/Release) and reclaimed automatically once no
 // send/read holds it, so no explicit lock removal is needed here.
+// pumpMgr may be nil for teammate managers; UnsetMailbox is nil-safe.
 func (lm *lifecycleManager) cleanupLeaderMailbox() {
-	if lm.pumpMgr != nil {
-		lm.pumpMgr.UnsetMailbox(LeaderAgentName)
-	}
+	lm.pumpMgr.UnsetMailbox(LeaderAgentName)
 }
 
 // activeTeammateNames returns the names of teammates whose goroutines are still

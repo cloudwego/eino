@@ -434,7 +434,7 @@ func TestLifecycleManager_ShutdownAllTeammates(t *testing.T) {
 	workerCtx, cancel := context.WithCancel(context.Background())
 	mw.lifecycle.registry.register("worker", &teammateHandle{Cancel: cancel})
 
-	mw.ShutdownAllTeammates(ctx, "myteam")
+	mw.ShutdownAllTeammates(ctx)
 	assert.Error(t, workerCtx.Err())
 }
 

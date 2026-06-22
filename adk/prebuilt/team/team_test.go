@@ -204,5 +204,5 @@ func TestTeamMiddleware_ShutdownAllTeammates(t *testing.T) {
 	_, cancel := context.WithCancel(context.Background())
 	mw.lifecycle.registry.register("worker", &teammateHandle{Cancel: cancel})
 
-	mw.ShutdownAllTeammates(ctx, "myteam")
+	mw.ShutdownAllTeammates(ctx)
 }

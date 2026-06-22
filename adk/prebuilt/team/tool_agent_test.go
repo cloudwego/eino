@@ -149,7 +149,7 @@ func TestAgentTool_RunBackground_FullFlow(t *testing.T) {
 	has, _ := newConfigStore(conf).HasMember(context.Background(), "myteam", "worker")
 	assert.True(t, has)
 
-	runner.leaderMW.ShutdownAllTeammates(context.Background(), "myteam")
+	runner.leaderMW.ShutdownAllTeammates(context.Background())
 	time.Sleep(200 * time.Millisecond)
 }
 

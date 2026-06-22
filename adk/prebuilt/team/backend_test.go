@@ -143,3 +143,43 @@ func (b *errBackend) Exists(_ context.Context, _ string) (bool, error) {
 func (b *errBackend) Mkdir(_ context.Context, _ string) error {
 	return b.err
 }
+
+// failingWriteBackend wraps an inMemoryBackend and fails Write for any path
+// whose file name ends with failPathSuffix. It is used to simulate a partial
+// broadcast where some recipients' inboxes cannot be written.
+type failingWriteBackend struct {
+	*inMemoryBackend
+	failPathSuffix string
+}
+
+func (b *failingWriteBackend) Write(ctx context.Context, req *WriteRequest) error {
+	if b.failPathSuffix != "" && strings.HasSuffix(req.FilePath, b.failPathSuffix) {
+		return errors.New("write failed for " + req.FilePath)
+	}
+	return b.inMemoryBackend.Write(ctx, req)
+}
+
+// failReadAfterBackend wraps an inMemoryBackend and starts failing Read for a
+// matching path after a given number of successful reads. It is used to inject a
+// read error into the blocking poll loop after the initial read has succeeded.
+type failReadAfterBackend struct {
+	*inMemoryBackend
+	failSuffix string
+	failAfter  int
+
+	mu        sync.Mutex
+	readCount int
+}
+
+func (b *failReadAfterBackend) Read(ctx context.Context, req *ReadRequest) (*fspkg.FileContent, error) {
+	if b.failSuffix != "" && strings.HasSuffix(req.FilePath, b.failSuffix) {
+		b.mu.Lock()
+		b.readCount++
+		fail := b.readCount > b.failAfter
+		b.mu.Unlock()
+		if fail {
+			return nil, errors.New("read failed for " + req.FilePath)
+		}
+	}
+	return b.inMemoryBackend.Read(ctx, req)
+}
