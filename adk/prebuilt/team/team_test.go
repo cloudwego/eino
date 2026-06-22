@@ -70,18 +70,23 @@ func TestRunnerConfig_Logger_ReturnsCustomLogger(t *testing.T) {
 	assert.True(t, ok)
 }
 
-func TestConfig_RemoveLock(t *testing.T) {
+func TestConfig_LockReleaseReclaims(t *testing.T) {
 	backend := newInMemoryBackend()
 	conf := &Config{Backend: backend, BaseDir: "/tmp/test"}
 	conf.ensureInit()
 
 	conf.state.locks.ForName("some-agent")
-	conf.removeLock("some-agent")
+	conf.state.locks.Release("some-agent")
+	assert.Empty(t, conf.state.locks.locks)
 }
 
-func TestConfig_RemoveLock_NilState(t *testing.T) {
-	conf := &Config{}
-	conf.removeLock("anything")
+func TestConfig_LockRelease_Unknown(t *testing.T) {
+	backend := newInMemoryBackend()
+	conf := &Config{Backend: backend, BaseDir: "/tmp/test"}
+	conf.ensureInit()
+
+	conf.state.locks.Release("anything")
+	assert.Empty(t, conf.state.locks.locks)
 }
 
 func TestTeamMiddleware_GetSetTeamName(t *testing.T) {

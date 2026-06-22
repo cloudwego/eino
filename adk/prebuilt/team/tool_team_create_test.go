@@ -93,6 +93,24 @@ func TestTeamCreateTool_InvokableRun_InvalidJSON(t *testing.T) {
 	assert.Contains(t, err.Error(), "parse TeamCreate args")
 }
 
+func TestTeamCreateTool_InvokableRun_InvalidName(t *testing.T) {
+	cases := []string{
+		`{"team_name":"../escape"}`,
+		`{"team_name":"a/b"}`,
+		`{"team_name":".."}`,
+		`{"team_name":"team*"}`,
+		`{"team_name":".hidden"}`,
+		`{"team_name":"has space"}`,
+	}
+	for _, args := range cases {
+		mw, _ := newTestTeamMiddleware()
+		tool := newTeamCreateTool(mw)
+		_, err := tool.InvokableRun(context.Background(), args)
+		assert.Error(t, err, "expected rejection for %s", args)
+		assert.Equal(t, "", mw.getTeamName(), "team must not be created for %s", args)
+	}
+}
+
 func TestNewTeamCreateTool_NonNil(t *testing.T) {
 	mw, _ := newTestTeamMiddleware()
 	tool := newTeamCreateTool(mw)

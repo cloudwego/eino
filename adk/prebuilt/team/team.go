@@ -94,14 +94,6 @@ func (c *Config) ensureInit() {
 	})
 }
 
-// removeLock releases the named lock for a resource (e.g. an inbox) to prevent
-// memory accumulation over many create/destroy cycles.
-func (c *Config) removeLock(name string) {
-	if c.state != nil && c.state.locks != nil {
-		c.state.locks.Remove(name)
-	}
-}
-
 func newTeamLeadMiddleware(conf *RunnerConfig, router *sourceRouter, pumpMgr *pumpManager) *teamMiddleware {
 	return newMiddleware(conf, true, LeaderAgentName, router, pumpMgr)
 }

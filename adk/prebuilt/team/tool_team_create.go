@@ -74,6 +74,9 @@ func (t *teamCreateTool) InvokableRun(ctx context.Context, argumentsInJSON strin
 	if args.TeamName == "" {
 		return "", fmt.Errorf("team_name is required")
 	}
+	if err := validateTeamName(args.TeamName); err != nil {
+		return "", err
+	}
 	if currentTeamName := t.mw.getTeamName(); currentTeamName != "" {
 		return "", fmt.Errorf("team %q is already active, delete it before creating a new team", currentTeamName)
 	}

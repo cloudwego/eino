@@ -171,11 +171,9 @@ func (lm *lifecycleManager) cleanupFailedTeammateSpawn(ctx context.Context, team
 // (i.e. the teammateHandle was still present in the registry), false if it was
 // already stopped by a prior call (idempotent).
 //
-// NOTE: this intentionally does NOT call removeLock. The per-inbox lock must
-// remain valid until the member is removed from config (RemoveMember) and the
-// inbox file is deleted, so that concurrent senders who already passed the
-// hasMember check still share the same lock. Callers are responsible for
-// calling removeLock after RemoveMember + inbox deletion.
+// NOTE: per-inbox locks are reference counted inside the mailbox operations
+// (ForName/Release), so there is no separate lock-removal step to coordinate
+// here. The lock is reclaimed automatically once no send/read holds a reference.
 func (lm *lifecycleManager) stopTeammateRuntime(ctx context.Context, teamName, memberName string) bool {
 	result, firstStop := lm.registry.remove(memberName)
 	if firstStop {
@@ -207,10 +205,11 @@ func (lm *lifecycleManager) cleanupExitedTeammate(ctx context.Context, teamName,
 	if err := lm.teamCfg.Backend.Delete(ctx, &DeleteRequest{FilePath: lm.inboxPath(teamName, memberName)}); err != nil {
 		lm.logger.Printf("cleanupExitedTeammate: delete inbox for %q: %v", memberName, err)
 	}
-	// Release the per-inbox lock only after the member is removed from config
-	// and the inbox file is deleted, so concurrent senders that already passed
-	// hasMember still share the same lock instance.
-	lm.teamCfg.removeLock(memberName)
+	// The per-inbox lock is reference counted inside the mailbox operations
+	// (ForName/Release), so it is reclaimed automatically once no send/read is in
+	// flight. No explicit removal is needed, which also avoids the previous hazard
+	// where a hard delete could hand a concurrent sender a second lock instance
+	// for the same name.
 
 	// Only send a terminated notification when this is the first cleanup for
 	// the teammate (i.e. a non-graceful exit such as crash or context cancel).
@@ -245,10 +244,9 @@ func (lm *lifecycleManager) removeTeammate(ctx context.Context, teamName, member
 	if err := lm.teamCfg.Backend.Delete(ctx, &DeleteRequest{FilePath: lm.inboxPath(teamName, memberName)}); err != nil {
 		lm.logger.Printf("removeTeammate: delete inbox for %q: %v", memberName, err)
 	}
-	// Release the per-inbox lock only after the member is removed from config
-	// and the inbox file is deleted, so concurrent senders that already passed
-	// hasMember still share the same lock instance.
-	lm.teamCfg.removeLock(memberName)
+	// The per-inbox lock is reference counted inside the mailbox operations
+	// (ForName/Release) and reclaimed automatically once no send/read holds it,
+	// so there is nothing to remove explicitly here.
 
 	if unassignErr != nil {
 		return nil, firstStop, fmt.Errorf("unassign tasks for %q: %w", memberName, unassignErr)
@@ -328,13 +326,14 @@ func (lm *lifecycleManager) createTeammateRunner(agent *adk.ChatModelAgent, agen
 	return newTeammateRunner(lm.runnerConf, lm.router, lm.pumpMgr, agent, agentName, teamName)
 }
 
-// cleanupLeaderMailbox stops the leader's mailbox pump and releases its per-inbox
-// lock. Called by TeamDelete to prevent goroutine leaks and memory accumulation.
+// cleanupLeaderMailbox stops the leader's mailbox pump. Called by TeamDelete to
+// prevent goroutine leaks. The leader's per-inbox lock is reference counted in
+// the mailbox operations (ForName/Release) and reclaimed automatically once no
+// send/read holds it, so no explicit lock removal is needed here.
 func (lm *lifecycleManager) cleanupLeaderMailbox() {
 	if lm.pumpMgr != nil {
 		lm.pumpMgr.UnsetMailbox(LeaderAgentName)
 	}
-	lm.teamCfg.removeLock(LeaderAgentName)
 }
 
 // activeTeammateNames returns the names of teammates whose goroutines are still
