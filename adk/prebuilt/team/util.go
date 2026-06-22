@@ -37,6 +37,24 @@ func selectToolDesc(english, chinese string) string {
 	})
 }
 
+// looksLikeJSONObject reports whether s, ignoring leading ASCII whitespace,
+// begins with '{'. All control/system payloads are JSON objects marshalled from
+// a struct, so this is a cheap pre-check that lets hot paths skip a full JSON
+// unmarshal for ordinary plain-text message bodies.
+func looksLikeJSONObject(s string) bool {
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case ' ', '\t', '\n', '\r':
+			continue
+		case '{':
+			return true
+		default:
+			return false
+		}
+	}
+	return false
+}
+
 // safeGoWithLogger runs f in a new goroutine, recovering from panics and logging to logger.
 func safeGoWithLogger(logger Logger, f func()) {
 	go func() {
