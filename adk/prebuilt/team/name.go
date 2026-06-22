@@ -110,7 +110,15 @@ func validateMemberName(name string) error {
 // The base always retains its first (validated) start character, so the result
 // is never empty and still satisfies validateMemberName.
 func suffixedMemberName(base string, i int) string {
-	suffix := fmt.Sprintf("-%d", i)
+	return appendSuffixWithinLimit(base, fmt.Sprintf("-%d", i))
+}
+
+// appendSuffixWithinLimit appends suffix to base while keeping the combined
+// length within maxNameLength. When base is too long it is truncated and its
+// trailing body-only characters (".", "_", "-") are trimmed so the suffix never
+// produces sequences like "name.-2". base must already start with a valid start
+// character, which is preserved, so the result is never empty.
+func appendSuffixWithinLimit(base, suffix string) string {
 	budget := maxNameLength - len(suffix)
 	if budget < 1 {
 		budget = 1

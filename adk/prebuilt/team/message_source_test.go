@@ -63,7 +63,7 @@ func TestTryReceive_NilMailbox(t *testing.T) {
 		Role:      teamRoleTeammate,
 	})
 
-	item, ok, err := src.tryReceive(context.Background(), false)
+	item, _, ok, err := src.tryReceive(context.Background(), false)
 	assert.NoError(t, err)
 	assert.False(t, ok)
 	assert.Equal(t, TurnInput{}, item)
@@ -94,7 +94,7 @@ func TestTryReceive_NoMessages(t *testing.T) {
 		Role:      teamRoleTeammate,
 	})
 
-	item, ok, err := src.tryReceive(context.Background(), false)
+	item, _, ok, err := src.tryReceive(context.Background(), false)
 	assert.NoError(t, err)
 	assert.False(t, ok)
 	assert.Equal(t, TurnInput{}, item)
@@ -128,7 +128,7 @@ func TestTryReceive_WithMessages(t *testing.T) {
 		Role:      teamRoleTeammate,
 	})
 
-	item, ok, err := src.tryReceive(context.Background(), false)
+	item, _, ok, err := src.tryReceive(context.Background(), false)
 	assert.NoError(t, err)
 	assert.True(t, ok)
 	assert.Equal(t, "agent1", item.TargetAgent)
@@ -171,15 +171,19 @@ func TestTryReceive_SendsIdleNotificationForTeammate(t *testing.T) {
 	})
 	backend.files[inboxPath] = msgJSON
 
-	_, _, err := src.consumeMessages(ctx, []inboxMessage{
+	_, ack, ok0, err := src.consumeMessages(ctx, []inboxMessage{
 		{From: "sender", Text: "work", Timestamp: ts},
 	})
 	assert.NoError(t, err)
+	assert.True(t, ok0)
+	// Teammate messages defer MarkRead/processedCount into ack until the pump
+	// confirms the push was accepted, so invoke ack to simulate that.
+	assert.NoError(t, ack(ctx))
 	assert.Greater(t, src.processedCount, src.lastIdleProcessedCount)
 
 	backend.files[inboxPath] = "[]"
 
-	_, ok, err := src.tryReceive(ctx, true)
+	_, _, ok, err := src.tryReceive(ctx, true)
 	assert.NoError(t, err)
 	assert.False(t, ok)
 
@@ -226,7 +230,7 @@ func TestTryReceive_DoesNotSendIdleForLeader(t *testing.T) {
 	})
 	backend.files[inboxPath] = msgJSON
 
-	_, _, err := src.consumeMessages(ctx, []inboxMessage{
+	_, _, _, err := src.consumeMessages(ctx, []inboxMessage{
 		{From: "agent1", Text: "update", Timestamp: ts},
 	})
 	assert.NoError(t, err)
@@ -237,7 +241,7 @@ func TestTryReceive_DoesNotSendIdleForLeader(t *testing.T) {
 	agent1InboxPath := filepath.Join("/tmp/test", "teams", "myteam", "inboxes", "agent1.json")
 	backend.files[agent1InboxPath] = "[]"
 
-	_, ok, err := src.tryReceive(ctx, true)
+	_, _, ok, err := src.tryReceive(ctx, true)
 	assert.NoError(t, err)
 	assert.False(t, ok)
 
@@ -269,7 +273,7 @@ func TestConsumeMessages_EmptyMsgs(t *testing.T) {
 		Role:      teamRoleTeammate,
 	})
 
-	item, ok, err := src.consumeMessages(context.Background(), []inboxMessage{})
+	item, _, ok, err := src.consumeMessages(context.Background(), []inboxMessage{})
 	assert.NoError(t, err)
 	assert.False(t, ok)
 	assert.Equal(t, TurnInput{}, item)
@@ -308,12 +312,19 @@ func TestConsumeMessages_MarksMessagesAsRead(t *testing.T) {
 	})
 
 	ctx := context.Background()
-	item, ok, err := src.consumeMessages(ctx, msgs)
+	item, ack, ok, err := src.consumeMessages(ctx, msgs)
 	assert.NoError(t, err)
 	assert.True(t, ok)
 	assert.Equal(t, "agent1", item.TargetAgent)
 
-	// Messages are marked read immediately by consumeMessages.
+	// Teammate messages are not marked read until the pump acks a successful
+	// push, so the snapshot is still unread immediately after consumeMessages.
+	beforeAck, err := mb.readInbox(ctx, "agent1")
+	assert.NoError(t, err)
+	assert.Len(t, beforeAck, len(msgs))
+
+	// After ack the inbox is compacted (messages marked read).
+	assert.NoError(t, ack(ctx))
 	remaining, err := mb.readInbox(ctx, "agent1")
 	assert.NoError(t, err)
 	assert.Empty(t, remaining)
@@ -577,7 +588,7 @@ func TestWaitForItem_NilMailbox(t *testing.T) {
 		Role:      teamRoleTeammate,
 	})
 
-	_, err := src.waitForItem(context.Background())
+	_, _, err := src.waitForItem(context.Background())
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "mailbox is nil")
 }
@@ -617,7 +628,7 @@ func TestWaitForItem_LeaderReceivesMessages(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	item, err := src.waitForItem(ctx)
+	item, _, err := src.waitForItem(ctx)
 	assert.NoError(t, err)
 	assert.NotEmpty(t, item.Messages)
 }
@@ -657,7 +668,7 @@ func TestWaitForItem_TeammateReceivesMessages(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	item, err := src.waitForItem(ctx)
+	item, _, err := src.waitForItem(ctx)
 	assert.NoError(t, err)
 	assert.NotEmpty(t, item.Messages)
 	assert.Equal(t, "worker", item.TargetAgent)
@@ -689,9 +700,12 @@ func TestConsumeMessages_MarkReadError(t *testing.T) {
 		{From: "sender", Text: "hello", Timestamp: utcNowMillis()},
 	}
 
-	// consumeMessages should surface the MarkRead error directly.
-	_, _, err := src.consumeMessages(context.Background(), msgs)
-	assert.Error(t, err)
+	// For a teammate, MarkRead is deferred into ack, so consumeMessages itself
+	// succeeds and the backend MarkRead error surfaces when the pump calls ack.
+	_, ack, ok, err := src.consumeMessages(context.Background(), msgs)
+	assert.NoError(t, err)
+	assert.True(t, ok)
+	assert.Error(t, ack(context.Background()))
 }
 
 func TestBuildTeammateTerminatedSystemMessage_Valid(t *testing.T) {
@@ -742,7 +756,7 @@ func TestConsumeMessages_MarksReadBeforeSideEffects(t *testing.T) {
 		},
 	})
 
-	_, ok, err := src.consumeMessages(context.Background(), msgs)
+	_, _, ok, err := src.consumeMessages(context.Background(), msgs)
 	assert.NoError(t, err)
 	assert.True(t, ok)
 	assert.Equal(t, 0, unreadAtCallback, "inbox should be marked read before OnShutdownResponse runs")

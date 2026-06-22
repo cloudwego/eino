@@ -62,6 +62,10 @@ type taskGetArgs struct {
 }
 
 func (t *taskGetTool) InvokableRun(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (string, error) {
+	if err := t.mw.checkGuard(ctx); err != nil {
+		return "", fmt.Errorf("%s %w", TaskGetToolName, err)
+	}
+
 	lock := t.mw.getLock(t.turnLock)
 	lock.RLock()
 	defer lock.RUnlock()

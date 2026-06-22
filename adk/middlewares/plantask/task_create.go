@@ -84,6 +84,10 @@ func (t *taskCreateTool) Info(ctx context.Context) (*schema.ToolInfo, error) {
 }
 
 func (t *taskCreateTool) InvokableRun(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (string, error) {
+	if err := t.mw.checkGuard(ctx); err != nil {
+		return "", fmt.Errorf("%s %w", TaskCreateToolName, err)
+	}
+
 	lock := t.mw.getLock(t.turnLock)
 	lock.Lock()
 	defer lock.Unlock()

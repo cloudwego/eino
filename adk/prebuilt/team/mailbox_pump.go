@@ -208,7 +208,7 @@ func (pm *pumpManager) runPump(ctx context.Context, agentName string,
 		default:
 		}
 
-		item, ok, err := ms.tryReceive(ctx, !idleSent)
+		item, ack, ok, err := ms.tryReceive(ctx, !idleSent)
 		if err != nil {
 			pm.logger.Printf("mailbox pump[%s] error: %v", agentName, err)
 			return
@@ -218,6 +218,15 @@ func (pm *pumpManager) runPump(ctx context.Context, agentName string,
 			setActive(true)
 			item.TargetAgent = agentName
 			if accepted, _ := loop.Push(item); !accepted {
+				// The loop rejected the push (it is being torn down). Do NOT ack:
+				// leaving the messages unread keeps them recoverable instead of
+				// silently dropping them. The leader's ack is a no-op (its snapshot
+				// was already consumed for replay-safe side effects), so this only
+				// preserves ordinary teammate messages.
+				return
+			}
+			if err := ack(ctx); err != nil {
+				pm.logger.Printf("mailbox pump[%s] ack error: %v", agentName, err)
 				return
 			}
 			continue
@@ -228,7 +237,7 @@ func (pm *pumpManager) runPump(ctx context.Context, agentName string,
 		}
 		idleSent = true
 
-		item, err = ms.waitForItem(ctx)
+		item, ack, err = ms.waitForItem(ctx)
 		if err != nil {
 			if ctx.Err() != nil {
 				return
@@ -240,6 +249,10 @@ func (pm *pumpManager) runPump(ctx context.Context, agentName string,
 		setActive(true)
 		item.TargetAgent = agentName
 		if accepted, _ := loop.Push(item); !accepted {
+			return
+		}
+		if err := ack(ctx); err != nil {
+			pm.logger.Printf("mailbox pump[%s] ack error: %v", agentName, err)
 			return
 		}
 	}

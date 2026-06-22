@@ -80,6 +80,23 @@ func TestResolveTeamName_Taken(t *testing.T) {
 	assert.True(t, strings.HasPrefix(name, "myteam-"))
 }
 
+// TestResolveTeamName_TakenNearLimitStaysValid guards the length fix: when a
+// near-maxNameLength team name collides, appending the timestamp suffix must not
+// push the resolved name past maxNameLength or otherwise fail validateTeamName.
+func TestResolveTeamName_TakenNearLimitStaysValid(t *testing.T) {
+	conf, backend := newTestConfig()
+	ctx := context.Background()
+
+	base := strings.Repeat("a", maxNameLength)
+	backend.files[newConfigStore(conf).configFilePath(base)] = `{}`
+
+	name, err := newConfigStore(conf).resolveTeamName(ctx, base)
+	assert.NoError(t, err)
+	assert.NotEqual(t, base, name)
+	assert.LessOrEqual(t, len(name), maxNameLength)
+	assert.NoError(t, validateTeamName(name))
+}
+
 func TestCreateTeam(t *testing.T) {
 	conf, backend := newTestConfig()
 	ctx := context.Background()
