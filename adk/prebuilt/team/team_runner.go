@@ -50,7 +50,10 @@ type RunnerConfig struct {
 
 	// OnAgentEvents is called to handle events emitted by the agent.
 	// The TurnContext provides per-turn info and control.
-	// Optional.
+	// Required: NewRunner returns an error if this is nil. The handler is
+	// responsible for draining the agent event stream; failing to consume events
+	// can block or stall the TurnLoop, so a no-op drain must be supplied if the
+	// caller does not need the events.
 	OnAgentEvents func(ctx context.Context, tc *adk.TurnContext[TurnInput, adk.Message], events *adk.AsyncIterator[*adk.AgentEvent]) error
 
 	// Logger is the logger used by the team middleware.
@@ -249,6 +252,23 @@ func newTeamPlantaskMiddleware(ctx context.Context, teamCfg *Config, mw *teamMid
 				return mw.getTeamName()
 			}),
 		),
+		plantask.WithOwnerValidator(func(ctx context.Context, owner string) error {
+			// Reject task assignments to identities that are not real members of
+			// the active team, so a TaskUpdate cannot create an orphaned task whose
+			// owner has no inbox / TurnLoop to consume the assignment notification.
+			teamName := mw.getTeamName()
+			if teamName == "" {
+				return nil
+			}
+			exists, err := teamCfg.HasMember(ctx, teamName, owner)
+			if err != nil {
+				return fmt.Errorf("check owner %q membership: %w", owner, err)
+			}
+			if !exists {
+				return fmt.Errorf("owner %q is not a member of team %q", owner, teamName)
+			}
+			return nil
+		}),
 		plantask.WithTaskBaseDirResolver(func(_ context.Context) string {
 			return tasksDirPath(teamCfg.BaseDir, mw.getTeamName())
 		}),

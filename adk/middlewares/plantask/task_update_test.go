@@ -18,6 +18,7 @@ package plantask
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -1097,6 +1098,145 @@ func TestTaskUpdateToolWithAssignedHook_DoesNotNotifyWhenOwnerUnchanged(t *testi
 	var updated task
 	_ = sonic.UnmarshalString(content.Content, &updated)
 	assert.Equal(t, "worker-agent", updated.Owner)
+}
+
+func TestTaskUpdateToolWithOwnerValidator_RejectsUnknownOwner(t *testing.T) {
+	ctx := context.Background()
+	backend := newInMemoryBackend()
+	baseDir := "/tmp/tasks"
+
+	var hookCalled bool
+
+	mw := &middleware{
+		backend: backend,
+		baseDir: baseDir,
+		taskBaseDirResolver: func(ctx context.Context) string {
+			return baseDir
+		},
+		ownerValidator: func(ctx context.Context, owner string) error {
+			if owner != "known-agent" {
+				return fmt.Errorf("owner %q is not a member", owner)
+			}
+			return nil
+		},
+		onTaskAssigned: func(ctx context.Context, assignment TaskAssignment) error {
+			hookCalled = true
+			return nil
+		},
+	}
+
+	taskData := &task{
+		ID:          "1",
+		Subject:     "Validated Task",
+		Description: "Task for owner validation",
+		Status:      taskStatusPending,
+		Blocks:      []string{},
+		BlockedBy:   []string{},
+	}
+	taskJSON, _ := sonic.MarshalString(taskData)
+	_ = backend.Write(ctx, &WriteRequest{FilePath: filepath.Join(baseDir, "1.json"), Content: taskJSON})
+
+	tool := newTaskUpdateTool(mw, &sync.RWMutex{})
+
+	_, err := tool.InvokableRun(ctx, `{"taskId": "1", "owner": "ghost-agent"}`)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "ghost-agent")
+	assert.False(t, hookCalled, "assignment hook must not fire on rejected owner")
+
+	// The task must not have been mutated/persisted with the invalid owner.
+	content, _ := backend.Read(ctx, &ReadRequest{FilePath: filepath.Join(baseDir, "1.json")})
+	var persisted task
+	_ = sonic.UnmarshalString(content.Content, &persisted)
+	assert.Empty(t, persisted.Owner, "rejected owner must not be persisted")
+}
+
+func TestTaskUpdateToolWithOwnerValidator_AllowsKnownOwner(t *testing.T) {
+	ctx := context.Background()
+	backend := newInMemoryBackend()
+	baseDir := "/tmp/tasks"
+
+	mw := &middleware{
+		backend: backend,
+		baseDir: baseDir,
+		taskBaseDirResolver: func(ctx context.Context) string {
+			return baseDir
+		},
+		ownerValidator: func(ctx context.Context, owner string) error {
+			if owner != "known-agent" {
+				return fmt.Errorf("owner %q is not a member", owner)
+			}
+			return nil
+		},
+	}
+
+	taskData := &task{
+		ID:          "1",
+		Subject:     "Validated Task",
+		Description: "Task for owner validation",
+		Status:      taskStatusPending,
+		Blocks:      []string{},
+		BlockedBy:   []string{},
+	}
+	taskJSON, _ := sonic.MarshalString(taskData)
+	_ = backend.Write(ctx, &WriteRequest{FilePath: filepath.Join(baseDir, "1.json"), Content: taskJSON})
+
+	tool := newTaskUpdateTool(mw, &sync.RWMutex{})
+
+	result, err := tool.InvokableRun(ctx, `{"taskId": "1", "owner": "known-agent"}`)
+	assert.NoError(t, err)
+	assert.Contains(t, result, "owner")
+
+	content, _ := backend.Read(ctx, &ReadRequest{FilePath: filepath.Join(baseDir, "1.json")})
+	var persisted task
+	_ = sonic.UnmarshalString(content.Content, &persisted)
+	assert.Equal(t, "known-agent", persisted.Owner)
+}
+
+func TestTaskUpdateToolWithOwnerValidator_SkipsImplicitSelfAssignment(t *testing.T) {
+	ctx := context.Background()
+	backend := newInMemoryBackend()
+	baseDir := "/tmp/tasks"
+
+	validatorCalled := false
+
+	mw := &middleware{
+		backend: backend,
+		baseDir: baseDir,
+		taskBaseDirResolver: func(ctx context.Context) string {
+			return baseDir
+		},
+		agentNameResolver: func(ctx context.Context) string {
+			return "self-agent"
+		},
+		ownerValidator: func(ctx context.Context, owner string) error {
+			validatorCalled = true
+			return fmt.Errorf("should not be consulted for implicit self-assignment")
+		},
+	}
+
+	taskData := &task{
+		ID:          "1",
+		Subject:     "Self Task",
+		Description: "Implicit self assignment",
+		Status:      taskStatusPending,
+		Blocks:      []string{},
+		BlockedBy:   []string{},
+	}
+	taskJSON, _ := sonic.MarshalString(taskData)
+	_ = backend.Write(ctx, &WriteRequest{FilePath: filepath.Join(baseDir, "1.json"), Content: taskJSON})
+
+	tool := newTaskUpdateTool(mw, &sync.RWMutex{})
+
+	// No explicit owner; marking in_progress triggers implicit self-assignment,
+	// which must not consult the validator.
+	_, err := tool.InvokableRun(ctx, `{"taskId": "1", "status": "in_progress"}`)
+	assert.NoError(t, err)
+	assert.False(t, validatorCalled)
+
+	content, _ := backend.Read(ctx, &ReadRequest{FilePath: filepath.Join(baseDir, "1.json")})
+	var persisted task
+	_ = sonic.UnmarshalString(content.Content, &persisted)
+	assert.Equal(t, "self-agent", persisted.Owner)
 }
 
 func TestTaskUpdateToolCompletedWithDependencyUpdates(t *testing.T) {

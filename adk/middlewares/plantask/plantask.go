@@ -76,6 +76,21 @@ func WithSharedTaskLock(lock *sync.RWMutex) Option {
 	}
 }
 
+// WithOwnerValidator registers a validator invoked when TaskUpdate sets a
+// non-empty task owner in shared-task mode (enabled by WithTaskBaseDirResolver).
+// It lets the embedding layer (e.g. team) reject assignments to identities that
+// are not real members before the change is persisted and before any assignment
+// notification is sent, preventing orphaned tasks owned by non-existent agents.
+//
+// The validator is only consulted for explicit owner changes; the implicit
+// self-assignment performed when marking a task in_progress is trusted because
+// it always uses the current agent's own name.
+func WithOwnerValidator(validator func(ctx context.Context, owner string) error) Option {
+	return func(m *middleware) {
+		m.ownerValidator = validator
+	}
+}
+
 // WithReminder configures task reminder injection. The interval specifies how
 // many assistant turns without TaskCreate/TaskUpdate before a reminder is
 // injected. Set to negative to disable. Default is 10.
@@ -253,6 +268,10 @@ type middleware struct {
 
 	// Task assignment notification (set via WithTaskAssignedHook)
 	onTaskAssigned func(ctx context.Context, assignment TaskAssignment) error
+
+	// Owner validation (set via WithOwnerValidator). When non-nil, an explicit
+	// non-empty owner on TaskUpdate must pass this check before being persisted.
+	ownerValidator func(ctx context.Context, owner string) error
 
 	// Context resolvers (set via WithTaskBaseDirResolver / WithAgentNameResolver, nil in single-agent mode)
 	taskBaseDirResolver func(ctx context.Context) string

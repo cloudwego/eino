@@ -207,7 +207,11 @@ func (t *taskUpdateTool) doUpdate(ctx context.Context, argumentsInJSON string) (
 		updatedFields = append(updatedFields, fields...)
 	}
 
-	updatedFields = t.updateOwnerAndMetadata(ctx, taskData, params, updatedFields)
+	fields, ownerErr := t.updateOwnerAndMetadata(ctx, taskData, params, updatedFields)
+	if ownerErr != nil {
+		return "", nil, ownerErr
+	}
+	updatedFields = fields
 
 	if params.Status == taskStatusCompleted {
 		// If dependency updates were applied above, allTasks is stale because
@@ -347,8 +351,18 @@ func (t *taskUpdateTool) updateDependencies(ctx context.Context, taskData *task,
 // updateOwnerAndMetadata applies owner and metadata changes.
 // In shared-task mode, it auto-sets owner to the current agent when marking a
 // task as in_progress without explicitly providing an owner.
-func (t *taskUpdateTool) updateOwnerAndMetadata(ctx context.Context, taskData *task, params *taskUpdateArgs, updatedFields []string) []string {
+//
+// When an explicit non-empty owner is supplied in shared-task mode and an owner
+// validator is configured, the validator is consulted first; a rejection aborts
+// the whole update so the task is never persisted with an unknown owner (which
+// would otherwise create an orphaned task and a notification no one consumes).
+func (t *taskUpdateTool) updateOwnerAndMetadata(ctx context.Context, taskData *task, params *taskUpdateArgs, updatedFields []string) ([]string, error) {
 	if params.Owner != "" {
+		if t.mw.usesSharedTaskMode() && t.mw.ownerValidator != nil {
+			if err := t.mw.ownerValidator(ctx, params.Owner); err != nil {
+				return nil, fmt.Errorf("%s validate owner %q failed, err: %w", TaskUpdateToolName, params.Owner, err)
+			}
+		}
 		if taskData.Owner != params.Owner {
 			taskData.Owner = params.Owner
 			updatedFields = append(updatedFields, "owner")
@@ -373,7 +387,7 @@ func (t *taskUpdateTool) updateOwnerAndMetadata(ctx context.Context, taskData *t
 		}
 		updatedFields = append(updatedFields, "metadata")
 	}
-	return updatedFields
+	return updatedFields, nil
 }
 
 // handleCompletion clears dependencies from the completed task using the pre-loaded task list,

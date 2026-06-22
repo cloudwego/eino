@@ -153,6 +153,47 @@ func TestAgentTool_RunBackground_FullFlow(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 }
 
+func TestAgentTool_RunBackground_InvalidMemberName(t *testing.T) {
+	backend := newInMemoryBackend()
+	conf := &Config{Backend: backend, BaseDir: "/tmp/test"}
+
+	agentConf := &adk.ChatModelAgentConfig{
+		Name:        "leader",
+		Description: "test leader",
+		Model:       &mockBaseChatModel{},
+	}
+
+	runnerConf := &RunnerConfig{
+		AgentConfig: agentConf,
+		TeamConfig:  conf,
+		GenInput: func(ctx context.Context, loop *adk.TurnLoop[TurnInput, adk.Message], items []TurnInput) (*adk.GenInputResult[TurnInput, adk.Message], error) {
+			return &adk.GenInputResult[TurnInput, adk.Message]{Consumed: items}, nil
+		},
+		OnAgentEvents: noopOnAgentEvents,
+	}
+
+	runner, err := NewRunner(context.Background(), runnerConf)
+	assert.NoError(t, err)
+
+	createTool := newTeamCreateTool(runner.leaderMW)
+	_, err = createTool.InvokableRun(context.Background(), `{"team_name":"myteam"}`)
+	assert.NoError(t, err)
+
+	agentT := newAgentTool(runner.leaderMW)
+
+	// Path traversal in the member name must be rejected before any member is
+	// registered.
+	_, err = agentT.InvokableRun(context.Background(), `{"name":"../evil","prompt":"do something","description":"test"}`)
+	assert.Error(t, err)
+	has, _ := conf.HasMember(context.Background(), "myteam", "../evil")
+	assert.False(t, has)
+
+	// The reserved leader name must be rejected for a teammate.
+	_, err = agentT.InvokableRun(context.Background(), `{"name":"team-lead","prompt":"do something","description":"test"}`)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "reserved for the team leader")
+}
+
 func TestAgentTool_RunForeground(t *testing.T) {
 	backend := newInMemoryBackend()
 	conf := &Config{Backend: backend, BaseDir: "/tmp/test"}

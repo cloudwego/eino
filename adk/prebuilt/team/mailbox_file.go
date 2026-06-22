@@ -173,7 +173,11 @@ func (m *mailbox) sendToOne(ctx context.Context, to string, msg *outboxMessage) 
 	}
 
 	// Use per-target lock so all senders writing to the same inbox are serialized.
+	// Release is paired with ForName so the manager can reclaim the lock once no
+	// sender/reader is using it, while guaranteeing all concurrent users of the
+	// same name share one lock instance.
 	lock := m.inboxLocks.ForName(to)
+	defer m.inboxLocks.Release(to)
 	lock.Lock()
 	defer lock.Unlock()
 
@@ -208,6 +212,7 @@ func (m *mailbox) broadcast(ctx context.Context, msg *outboxMessage) error {
 // ReadUnread returns all unread messages from this agent's inbox file.
 func (m *mailbox) ReadUnread(ctx context.Context) ([]InboxMessage, error) {
 	lock := m.inboxLocks.ForName(m.conf.OwnerName)
+	defer m.inboxLocks.Release(m.conf.OwnerName)
 	lock.RLock()
 	defer lock.RUnlock()
 
@@ -241,6 +246,7 @@ func (m *mailbox) MarkRead(ctx context.Context, msgs []InboxMessage) error {
 
 	// Use per-owner lock: MarkRead modifies the owner's own inbox file.
 	lock := m.inboxLocks.ForName(m.conf.OwnerName)
+	defer m.inboxLocks.Release(m.conf.OwnerName)
 	lock.Lock()
 	defer lock.Unlock()
 

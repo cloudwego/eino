@@ -133,6 +133,9 @@ func (t *agentTool) runTeammate(ctx context.Context, args agentToolArgs) (string
 	if args.Name == "" {
 		args.Name = "agent"
 	}
+	if err := validateMemberName(args.Name); err != nil {
+		return "", err
+	}
 
 	teamName := t.mw.getTeamName()
 	if args.TeamName != "" && teamName != args.TeamName {

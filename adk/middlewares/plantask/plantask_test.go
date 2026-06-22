@@ -231,6 +231,20 @@ func TestWithReminder(t *testing.T) {
 	assert.True(t, called)
 }
 
+func TestWithOwnerValidator(t *testing.T) {
+	called := false
+	validator := func(ctx context.Context, owner string) error {
+		called = true
+		return nil
+	}
+	opt := WithOwnerValidator(validator)
+	m := &middleware{}
+	opt(m)
+	assert.NotNil(t, m.ownerValidator)
+	_ = m.ownerValidator(context.Background(), "owner")
+	assert.True(t, called)
+}
+
 func TestWithReminderNilCallback(t *testing.T) {
 	opt := WithReminder(20, nil)
 	m := &middleware{}

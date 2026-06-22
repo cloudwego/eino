@@ -36,6 +36,8 @@ func TestForName_SameName_ReturnsSameLock(t *testing.T) {
 	lk1 := m.ForName("agent-a")
 	lk2 := m.ForName("agent-a")
 	assert.Same(t, lk1, lk2)
+	m.Release("agent-a")
+	m.Release("agent-a")
 }
 
 func TestForName_DifferentNames_ReturnsDifferentLocks(t *testing.T) {
@@ -43,14 +45,42 @@ func TestForName_DifferentNames_ReturnsDifferentLocks(t *testing.T) {
 	lk1 := m.ForName("agent-a")
 	lk2 := m.ForName("agent-b")
 	assert.NotSame(t, lk1, lk2)
+	m.Release("agent-a")
+	m.Release("agent-b")
 }
 
-func TestRemove_NextForNameReturnsNewLock(t *testing.T) {
+func TestRelease_DropsToZero_NextForNameReturnsNewLock(t *testing.T) {
 	m := newNamedLockManager()
 	lk1 := m.ForName("agent-a")
-	m.Remove("agent-a")
+	m.Release("agent-a") // refs back to 0, entry freed
+	assert.Empty(t, m.locks)
 	lk2 := m.ForName("agent-a")
 	assert.NotSame(t, lk1, lk2)
+	m.Release("agent-a")
+}
+
+// TestRelease_WhileReferenced_KeepsSameLock is the core invariant: while any
+// holder still references a name, a Release by another holder must NOT swap the
+// lock instance out from under it. This is what guarantees mailbox read-modify-
+// write stays mutually exclusive even across member removal + same-name reuse.
+func TestRelease_WhileReferenced_KeepsSameLock(t *testing.T) {
+	m := newNamedLockManager()
+	lk1 := m.ForName("agent-a") // refs = 1
+	lk2 := m.ForName("agent-a") // refs = 2, same instance
+	assert.Same(t, lk1, lk2)
+
+	m.Release("agent-a") // refs = 1, entry must survive
+	lk3 := m.ForName("agent-a")
+	assert.Same(t, lk1, lk3, "lock must not be reallocated while still referenced")
+
+	m.Release("agent-a")
+	m.Release("agent-a")
+}
+
+func TestRelease_Unknown_NoPanic(t *testing.T) {
+	m := newNamedLockManager()
+	m.Release("never-acquired") // must not panic or underflow
+	assert.Empty(t, m.locks)
 }
 
 func TestForName_ConcurrentAccess(t *testing.T) {
@@ -81,4 +111,12 @@ func TestForName_ConcurrentAccess(t *testing.T) {
 			assert.Same(t, expected, results[i][j])
 		}
 	}
+
+	// Release all references so the manager reclaims every entry.
+	for i := 0; i < goroutines; i++ {
+		for j := 0; j < names; j++ {
+			m.Release(fmt.Sprintf("name-%d", j))
+		}
+	}
+	assert.Empty(t, m.locks)
 }
