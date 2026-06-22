@@ -28,7 +28,6 @@ type options struct {
 	enableInternalTimelineEvents bool
 	handlers                     []callbacks.Handler
 	cancelCtx                    *cancelContext
-	refreshToolInfos             bool
 }
 
 // AgentRunOption is the call option for adk Agent.
@@ -104,19 +103,6 @@ func withSharedParentSession() AgentRunOption {
 func WithCallbacks(handlers ...callbacks.Handler) AgentRunOption {
 	return WrapImplSpecificOptFn(func(o *options) {
 		o.handlers = append(o.handlers, handlers...)
-	})
-}
-
-// WithRefreshToolInfos forces the agent to re-derive its tool list from the current
-// BaseTool set instead of using the persisted TurnEndState.ToolInfos from the previous turn.
-//
-// By default, when a SessionEventStore is configured, the Runner reuses the exact tool list
-// from the previous turn's end to preserve the model's prompt cache. Use this option when
-// you have added, removed, or updated tools between turns and need the model to see the
-// changes immediately (accepting a cache miss).
-func WithRefreshToolInfos() AgentRunOption {
-	return WrapImplSpecificOptFn(func(o *options) {
-		o.refreshToolInfos = true
 	})
 }
 

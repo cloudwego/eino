@@ -426,9 +426,12 @@ func messageEvent[M adk.MessageType](id string, msg M) *adk.SessionEvent[M] {
 func turnEndEvent[M adk.MessageType](id, turnID string) *adk.SessionEvent[M] {
 	return &adk.SessionEvent[M]{
 		EventID: id,
-		Kind:    adk.SessionEventTurnEnd,
+		Kind:    adk.SessionEventSessionStatusIdle,
 		TurnID:  turnID,
-		TurnEnd: &adk.TurnEndState[M]{},
+		Lifecycle: &adk.LifecycleEvent{
+			State:      adk.SessionRunStateIdle,
+			StopReason: &adk.StopReason{Type: "end_turn"},
+		},
 	}
 }
 

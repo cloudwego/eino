@@ -59,6 +59,8 @@ type typedChatModelAgentExecCtx[M MessageType] struct {
 	sessionEvents          bool
 	timelineEvents         bool
 	internalTimelineEvents bool
+	lastModelContext       *ModelContextEvent
+	sawModelContext        bool
 }
 
 func (e *typedChatModelAgentExecCtx[M]) send(ctx context.Context, event *TypedAgentEvent[M]) {
@@ -106,6 +108,38 @@ func (e *typedChatModelAgentExecCtx[M]) send(ctx context.Context, event *TypedAg
 		}
 	}
 	e.generator.trySend(event)
+}
+
+func copyModelContextEvent(event *ModelContextEvent) *ModelContextEvent {
+	if event == nil {
+		return nil
+	}
+	return &ModelContextEvent{
+		ToolInfos:         append([]*schema.ToolInfo{}, event.ToolInfos...),
+		DeferredToolInfos: append([]*schema.ToolInfo{}, event.DeferredToolInfos...),
+	}
+}
+
+func syncModelContextSessionEvent[M MessageType](ctx context.Context, state *TypedChatModelAgentState[M]) {
+	execCtx := getTypedChatModelAgentExecCtx[M](ctx)
+	if execCtx == nil || !execCtx.sessionEvents || state == nil {
+		return
+	}
+	current := &ModelContextEvent{
+		ToolInfos:         append([]*schema.ToolInfo{}, state.ToolInfos...),
+		DeferredToolInfos: append([]*schema.ToolInfo{}, state.DeferredToolInfos...),
+	}
+	changed := !execCtx.sawModelContext || !reflect.DeepEqual(execCtx.lastModelContext, current)
+	if changed {
+		execCtx.send(ctx, &TypedAgentEvent[M]{
+			SessionEvent: &SessionEvent[M]{
+				Kind:         SessionEventModelContext,
+				ModelContext: copyModelContextEvent(current),
+			},
+		})
+	}
+	execCtx.lastModelContext = copyModelContextEvent(current)
+	execCtx.sawModelContext = true
 }
 
 type chatModelAgentExecCtx = typedChatModelAgentExecCtx[*schema.Message]
@@ -167,16 +201,18 @@ type chatModelAgentRunOptions struct {
 
 	historyModifier func(context.Context, []Message) []Message
 
-	afterToolCallsHook func(ctx context.Context) error
-
-	previousTurnToolInfos         []*schema.ToolInfo
-	previousTurnDeferredToolInfos []*schema.ToolInfo
+	afterToolCallsHook     func(ctx context.Context) error
+	initialModelContext    *ModelContextEvent
+	sawInitialModelContext bool
 }
 
-func withPreviousTurnToolInfos(toolInfos, deferredToolInfos []*schema.ToolInfo) AgentRunOption {
+func withInitialModelContext(event *ModelContextEvent, saw bool) AgentRunOption {
 	return WrapImplSpecificOptFn(func(t *chatModelAgentRunOptions) {
-		t.previousTurnToolInfos = toolInfos
-		t.previousTurnDeferredToolInfos = deferredToolInfos
+		if !saw {
+			return
+		}
+		t.initialModelContext = copyModelContextEvent(event)
+		t.sawInitialModelContext = true
 	})
 }
 
@@ -691,8 +727,6 @@ type typedRunParams[M MessageType] struct {
 	internalTimelineEvents bool
 
 	afterToolCallsHook func(ctx context.Context) error
-
-	toolInfosPreSeeded bool
 }
 
 type typedRunFunc[M MessageType] func(ctx context.Context, p *typedRunParams[M])
@@ -1102,43 +1136,6 @@ func (a *TypedChatModelAgent[M]) applyAfterAgent(ctx context.Context) (context.C
 	return ctx, nil
 }
 
-func (a *TypedChatModelAgent[M]) snapshotTurnEndState(ctx context.Context) *TurnEndState[M] {
-	var state *TurnEndState[M]
-	_ = compose.ProcessState(ctx, func(_ context.Context, st *typedState[M]) error {
-		state = &TurnEndState[M]{
-			Messages:          append([]M{}, st.Messages...),
-			ToolInfos:         append([]*schema.ToolInfo{}, st.ToolInfos...),
-			DeferredToolInfos: append([]*schema.ToolInfo{}, st.DeferredToolInfos...),
-			SessionValues:     GetSessionValues(ctx),
-		}
-		return nil
-	})
-	return state
-}
-
-func (a *TypedChatModelAgent[M]) emitTurnEndState(ctx context.Context, state *TurnEndState[M]) {
-	execCtx := getTypedChatModelAgentExecCtx[M](ctx)
-	if execCtx == nil {
-		return
-	}
-	if state == nil {
-		state = &TurnEndState[M]{SessionValues: GetSessionValues(ctx)}
-	} else {
-		state.SessionValues = GetSessionValues(ctx)
-	}
-	execCtx.send(ctx, &TypedAgentEvent[M]{
-		AgentName: a.name,
-		SessionEvent: &SessionEvent[M]{
-			Kind: SessionEventTurnEnd,
-			TurnEnd: &TurnEndState[M]{
-				ToolInfos:         state.ToolInfos,
-				DeferredToolInfos: state.DeferredToolInfos,
-				SessionValues:     state.SessionValues,
-			},
-		},
-	})
-}
-
 func (a *TypedChatModelAgent[M]) prepareExecContext(ctx context.Context) (*execContext, error) {
 	instruction := a.instruction
 	toolsNodeConf := a.toolsConfig.ToolsNodeConfig
@@ -1315,14 +1312,12 @@ func (a *TypedChatModelAgent[M]) buildNoToolsRunFunc(_ context.Context) (typedRu
 
 		appendModelToChain(chain, wrappedModel)
 
-		var turnEndState *TurnEndState[M]
 		chain.AppendLambda(compose.InvokableLambda(func(ctx context.Context, msg M) (M, error) {
 			if len(a.handlers) > 0 {
 				if _, err := a.applyAfterAgent(ctx); err != nil {
 					return msg, err
 				}
 			}
-			turnEndState = a.snapshotTurnEndState(ctx)
 			return msg, nil
 		}))
 
@@ -1371,9 +1366,6 @@ func (a *TypedChatModelAgent[M]) buildNoToolsRunFunc(_ context.Context) (typedRu
 				}
 			} else if msgStream != nil {
 				msgStream.Close()
-			}
-			if p.sessionEvents {
-				a.emitTurnEndState(ctx, turnEndState)
 			}
 			return
 		}
@@ -1429,7 +1421,6 @@ func (a *TypedChatModelAgent[M]) buildMessageReActRunFunc(_ context.Context, bc 
 		}
 		ctx = withCancelContext(ctx, cancelCtx)
 
-		var turnEndState *TurnEndState[*schema.Message]
 		msgAgent := any(a).(*TypedChatModelAgent[*schema.Message])
 		msgConf.afterAgentFunc = func(ctx context.Context, msg *schema.Message) (*schema.Message, error) {
 			if len(a.handlers) > 0 {
@@ -1438,7 +1429,6 @@ func (a *TypedChatModelAgent[M]) buildMessageReActRunFunc(_ context.Context, bc 
 					return msg, err
 				}
 			}
-			turnEndState = msgAgent.snapshotTurnEndState(ctx)
 			return msg, nil
 		}
 
@@ -1451,9 +1441,6 @@ func (a *TypedChatModelAgent[M]) buildMessageReActRunFunc(_ context.Context, bc 
 		chain := compose.NewChain[reactRunInput, Message]().
 			AppendLambda(
 				compose.InvokableLambda(func(ctx context.Context, in reactRunInput) (*reactInput, error) {
-					if mp.toolInfosPreSeeded {
-						_ = SetRunLocalValue(ctx, ToolInfosPreSeededKey, true)
-					}
 					messages, genErr := genModelInputFn(ctx, in.instruction, in.input)
 					if genErr != nil {
 						return nil, genErr
@@ -1532,9 +1519,6 @@ func (a *TypedChatModelAgent[M]) buildMessageReActRunFunc(_ context.Context, bc 
 				msgStream.Close()
 			}
 
-			if p.sessionEvents {
-				any(a).(*TypedChatModelAgent[*schema.Message]).emitTurnEndState(ctx, turnEndState)
-			}
 			return
 		}
 
@@ -1575,7 +1559,6 @@ func (a *TypedChatModelAgent[M]) buildAgenticReActRunFunc(_ context.Context, bc 
 		}
 		ctx = withCancelContext(ctx, cancelCtx)
 
-		var turnEndState *TurnEndState[*schema.AgenticMessage]
 		agenticAgent := any(a).(*TypedChatModelAgent[*schema.AgenticMessage])
 		agenticConf.afterAgentFunc = func(ctx context.Context, msg *schema.AgenticMessage) (*schema.AgenticMessage, error) {
 			if len(a.handlers) > 0 {
@@ -1584,7 +1567,6 @@ func (a *TypedChatModelAgent[M]) buildAgenticReActRunFunc(_ context.Context, bc 
 					return msg, err
 				}
 			}
-			turnEndState = agenticAgent.snapshotTurnEndState(ctx)
 			return msg, nil
 		}
 
@@ -1597,9 +1579,6 @@ func (a *TypedChatModelAgent[M]) buildAgenticReActRunFunc(_ context.Context, bc 
 		chain := compose.NewChain[agenticReactRunInput, *schema.AgenticMessage]().
 			AppendLambda(
 				compose.InvokableLambda(func(ctx context.Context, in agenticReactRunInput) (*agenticReactInput, error) {
-					if ap.toolInfosPreSeeded {
-						_ = SetRunLocalValue(ctx, ToolInfosPreSeededKey, true)
-					}
 					messages, genErr := genModelInputFn(ctx, in.instruction, in.input)
 					if genErr != nil {
 						return nil, genErr
@@ -1675,9 +1654,6 @@ func (a *TypedChatModelAgent[M]) buildAgenticReActRunFunc(_ context.Context, bc 
 				msgStream.Close()
 			}
 
-			if p.sessionEvents {
-				any(a).(*TypedChatModelAgent[*schema.AgenticMessage]).emitTurnEndState(ctx, turnEndState)
-			}
 			return
 		}
 
@@ -1793,25 +1769,12 @@ func (a *TypedChatModelAgent[M]) Run(ctx context.Context, input *TypedAgentInput
 	co := getComposeOptions(opts)
 	co = append(co, compose.WithCheckPointID(bridgeCheckpointID))
 	runOps := GetImplSpecificOptions[chatModelAgentRunOptions](nil, opts...)
+	if execCtx := getTypedChatModelAgentExecCtx[M](ctx); execCtx != nil {
+		execCtx.lastModelContext = copyModelContextEvent(runOps.initialModelContext)
+		execCtx.sawModelContext = runOps.sawInitialModelContext
+	}
 
-	var toolInfosPreSeeded bool
-	if len(runOps.previousTurnToolInfos) > 0 {
-		// Use the exact tool list persisted at the previous turn's end for prompt cache preservation.
-		co = append(co, compose.WithChatModelOption(model.WithTools(runOps.previousTurnToolInfos)))
-		if len(runOps.previousTurnDeferredToolInfos) > 0 {
-			co = append(co, compose.WithChatModelOption(model.WithDeferredTools(runOps.previousTurnDeferredToolInfos)))
-		}
-		toolInfosPreSeeded = true
-		// Still apply tool execution configuration from bc.
-		if bc != nil {
-			if bc.toolSearchTool != nil {
-				co = append(co, compose.WithChatModelOption(model.WithToolSearchTool(bc.toolSearchTool)))
-			}
-			if bc.toolUpdated {
-				co = append(co, compose.WithToolsNodeOption(compose.WithToolList(bc.toolsNodeConf.Tools...)))
-			}
-		}
-	} else if bc != nil {
+	if bc != nil {
 		if len(bc.toolInfos) > 0 {
 			co = append(co, compose.WithChatModelOption(model.WithTools(bc.toolInfos)))
 		}
@@ -1860,7 +1823,6 @@ func (a *TypedChatModelAgent[M]) Run(ctx context.Context, input *TypedAgentInput
 			timelineEvents:         o.enableTimelineEvents,
 			internalTimelineEvents: o.enableInternalTimelineEvents,
 			afterToolCallsHook:     runOps.afterToolCallsHook,
-			toolInfosPreSeeded:     toolInfosPreSeeded,
 		})
 	}()
 
@@ -1900,6 +1862,10 @@ func (a *TypedChatModelAgent[M]) Resume(ctx context.Context, info *ResumeInfo, o
 	co := getComposeOptions(opts)
 	co = append(co, compose.WithCheckPointID(bridgeCheckpointID))
 	resumeRunOps := GetImplSpecificOptions[chatModelAgentRunOptions](nil, opts...)
+	if execCtx := getTypedChatModelAgentExecCtx[M](ctx); execCtx != nil {
+		execCtx.lastModelContext = copyModelContextEvent(resumeRunOps.initialModelContext)
+		execCtx.sawModelContext = resumeRunOps.sawInitialModelContext
+	}
 
 	if bc != nil {
 		if len(bc.toolInfos) > 0 {

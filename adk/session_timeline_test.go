@@ -66,7 +66,7 @@ func TestSessionTimeline_ClassifyAndSerializeVariants(t *testing.T) {
 	}{
 		{
 			name: "lifecycle",
-			se:   &SessionEvent[*schema.Message]{Lifecycle: &LifecycleEvent{Scope: LifecycleScopeSession, State: SessionRunStateRunning}},
+			se:   &SessionEvent[*schema.Message]{Lifecycle: &LifecycleEvent{State: SessionRunStateRunning}},
 			kind: SessionEventSessionStatusRunning,
 		},
 		{
@@ -223,7 +223,7 @@ func TestSessionTimeline_ReconstructionIgnoresNonContextVariants(t *testing.T) {
 	msg := schema.UserMessage("hello")
 	EnsureMessageID(msg)
 	events := []*SessionEvent[*schema.Message]{
-		{EventID: uuid.NewString(), Kind: SessionEventSessionStatusRunning, Lifecycle: &LifecycleEvent{Scope: LifecycleScopeSession, State: SessionRunStateRunning}},
+		{EventID: uuid.NewString(), Kind: SessionEventSessionStatusRunning, Lifecycle: &LifecycleEvent{State: SessionRunStateRunning}},
 		{EventID: uuid.NewString(), Kind: SessionEventMessage, Message: msg},
 		{EventID: uuid.NewString(), Kind: SessionEventSpanModelRequestStart, Span: &SpanEvent{SpanID: uuid.NewString(), Kind: SpanKindModel, StartedAt: time.Now().UTC(), Model: &ModelSpanMeta{}}},
 		{EventID: uuid.NewString(), Kind: SessionEventKind("x.outcome.started"), Extension: &SessionExtensionEvent{Data: &sessionTimelineExtensionPayload{Attempt: 1}}},
@@ -236,7 +236,7 @@ func TestSessionTimeline_ReconstructionIgnoresNonContextVariants(t *testing.T) {
 			},
 		}},
 		{EventID: uuid.NewString(), Kind: SessionEventSessionError, Error: &SessionErrorEvent{Type: "transient", RetryStatus: &RetryStatus{Type: "retrying"}}},
-		{EventID: uuid.NewString(), Kind: SessionEventTurnEnd, TurnEnd: &TurnEndState[*schema.Message]{SessionValues: map[string]any{"k": "v"}}},
+		{EventID: uuid.NewString(), Kind: SessionEventModelContext, ModelContext: &ModelContextEvent{}},
 	}
 	for _, se := range events {
 		require.NoError(t, store.AppendEventsForSession(ctx, sid, []*SessionEvent[*schema.Message]{se}))
@@ -248,7 +248,7 @@ func TestSessionTimeline_ReconstructionIgnoresNonContextVariants(t *testing.T) {
 	require.NotNil(t, result.state)
 	require.Len(t, result.state.Messages, 1)
 	assert.Equal(t, "hello", result.state.Messages[0].Content)
-	assert.Equal(t, map[string]any{"k": "v"}, result.state.SessionValues)
+	assert.True(t, result.state.sawModelContext)
 }
 
 func TestSessionTimeline_AgentInterruptRoundTripPreservesContexts(t *testing.T) {
@@ -359,13 +359,13 @@ func TestRunner_PersistsAgentInterruptSessionEvent(t *testing.T) {
 	assert.Equal(t, liveInterruptContexts[0].Info, ctx0.Info)
 	requireStoredIdleStopReason(t, store.events, "interrupted")
 
-	turnEnds := filterStoredSessionEvents(t, store.events, func(se *SessionEvent[*schema.Message]) bool {
-		return se.Kind == SessionEventTurnEnd
+	committedIdleEvents := filterStoredSessionEvents(t, store.events, func(se *SessionEvent[*schema.Message]) bool {
+		return isCommittedIdleEvent(se)
 	})
-	assert.Empty(t, turnEnds, "business interrupt should remain an in-flight turn without TurnEnd")
+	assert.Empty(t, committedIdleEvents, "business interrupt should not commit")
 }
 
-func TestSessionTimeline_ReconstructionIncludesPartialContextAfterLatestTurnEnd(t *testing.T) {
+func TestSessionTimeline_ReconstructionIncludesPartialContextAfterLatestCommittedIdle(t *testing.T) {
 	ctx := context.Background()
 	store := newSessionHelperStore()
 	sid := "timeline-partial"
@@ -381,8 +381,8 @@ func TestSessionTimeline_ReconstructionIncludesPartialContextAfterLatestTurnEnd(
 	events := []*SessionEvent[*schema.Message]{
 		{EventID: uuid.NewString(), Kind: SessionEventMessage, Message: committedUser},
 		{EventID: uuid.NewString(), Kind: SessionEventMessage, Message: committedAssistant},
-		{EventID: uuid.NewString(), Kind: SessionEventTurnEnd, TurnID: "turn-1", TurnEnd: &TurnEndState[*schema.Message]{SessionValues: map[string]any{"turn": "committed"}}},
-		{EventID: uuid.NewString(), Kind: SessionEventSessionStatusRunning, Lifecycle: &LifecycleEvent{Scope: LifecycleScopeSession, State: SessionRunStateRunning}},
+		{EventID: uuid.NewString(), Kind: SessionEventSessionStatusIdle, TurnID: "turn-1", Lifecycle: &LifecycleEvent{State: SessionRunStateIdle, StopReason: &StopReason{Type: "end_turn"}}},
+		{EventID: uuid.NewString(), Kind: SessionEventSessionStatusRunning, Lifecycle: &LifecycleEvent{State: SessionRunStateRunning}},
 		{EventID: uuid.NewString(), Kind: SessionEventMessage, Message: partialUser},
 		{EventID: uuid.NewString(), Kind: SessionEventMessage, Message: partialAssistant},
 		{EventID: uuid.NewString(), Kind: SessionEventSessionError, Error: &SessionErrorEvent{Type: SessionErrorTypeModelRetry, RetryStatus: &RetryStatus{Type: "retrying"}}},
@@ -400,7 +400,6 @@ func TestSessionTimeline_ReconstructionIncludesPartialContextAfterLatestTurnEnd(
 	assert.Equal(t, "committed assistant", result.state.Messages[1].Content)
 	assert.Equal(t, "partial user", result.state.Messages[2].Content)
 	assert.Equal(t, "partial assistant", result.state.Messages[3].Content)
-	assert.Equal(t, map[string]any{"turn": "committed"}, result.state.SessionValues)
 }
 
 func TestSessionTimeline_ReconstructionPartialContextMissingAnchorFails(t *testing.T) {
@@ -415,7 +414,7 @@ func TestSessionTimeline_ReconstructionPartialContextMissingAnchorFails(t *testi
 
 	events := []*SessionEvent[*schema.Message]{
 		{EventID: uuid.NewString(), Kind: SessionEventMessage, Message: committedUser},
-		{EventID: uuid.NewString(), Kind: SessionEventTurnEnd, TurnID: "turn-1", TurnEnd: &TurnEndState[*schema.Message]{}},
+		{EventID: uuid.NewString(), Kind: SessionEventSessionStatusIdle, TurnID: "turn-1", Lifecycle: &LifecycleEvent{State: SessionRunStateIdle, StopReason: &StopReason{Type: "end_turn"}}},
 		{EventID: uuid.NewString(), Kind: SessionEventMessageInserted, MessageInserted: &MessageInsertedEvent[*schema.Message]{
 			Message:         inserted,
 			BeforeMessageID: "missing-anchor",
@@ -430,7 +429,7 @@ func TestSessionTimeline_ReconstructionPartialContextMissingAnchorFails(t *testi
 	assert.Contains(t, err.Error(), "missing-anchor")
 }
 
-func TestSessionTimeline_LatestCommittedTurnEndPrefersTurnIDBoundary(t *testing.T) {
+func TestSessionTimeline_CommittedIdleIsReplayBoundaryOnly(t *testing.T) {
 	committedUser := schema.UserMessage("committed user")
 	partialUser := schema.UserMessage("partial user")
 	for _, msg := range []*schema.Message{committedUser, partialUser} {
@@ -439,26 +438,22 @@ func TestSessionTimeline_LatestCommittedTurnEndPrefersTurnIDBoundary(t *testing.
 
 	events := []*SessionEvent[*schema.Message]{
 		{EventID: uuid.NewString(), Kind: SessionEventMessage, Message: committedUser},
-		{EventID: uuid.NewString(), Kind: SessionEventTurnEnd, TurnID: "turn-1", TurnEnd: &TurnEndState[*schema.Message]{SessionValues: map[string]any{"turn": "committed"}}},
+		{EventID: uuid.NewString(), Kind: SessionEventSessionStatusIdle, TurnID: "turn-1", Lifecycle: &LifecycleEvent{State: SessionRunStateIdle, StopReason: &StopReason{Type: "end_turn"}}},
 		{EventID: uuid.NewString(), Kind: SessionEventMessage, Message: partialUser},
-		{EventID: uuid.NewString(), Kind: SessionEventTurnEnd, TurnEnd: &TurnEndState[*schema.Message]{SessionValues: map[string]any{"turn": "legacy-tail"}}},
+		{EventID: uuid.NewString(), Kind: "turn_end"},
 	}
 
-	idx := latestCommittedTurnEnd(events)
-	require.Equal(t, 1, idx)
-
-	state, err := replayDurableContextEvents(events, idx, idx)
+	state, err := replayDurableContextEvents(events)
 	require.NoError(t, err)
-	require.Len(t, state.Messages, 1)
+	require.Len(t, state.Messages, 2)
 	assert.Equal(t, "committed user", state.Messages[0].Content)
-	assert.Equal(t, map[string]any{"turn": "committed"}, state.SessionValues)
+	assert.Equal(t, "partial user", state.Messages[1].Content)
 }
 
 func TestWithTimelineEvents_LiveExposure(t *testing.T) {
 	ctx := context.Background()
 	agent := &runnerSessionAgent{
-		name:    "timeline-agent",
-		turnEnd: &TurnEndState[*schema.Message]{Messages: []*schema.Message{schema.AssistantMessage("ok", nil)}},
+		name: "timeline-agent",
 	}
 
 	t.Run("stripped by default", func(t *testing.T) {
@@ -767,7 +762,6 @@ func TestSessionTimeline_EmittedKindMustBeExplicit(t *testing.T) {
 		EventID:   uuid.NewString(),
 		Timestamp: newEventTimestamp(),
 		Lifecycle: &LifecycleEvent{
-			Scope: LifecycleScopeSession,
 			State: SessionRunStateRunning,
 		},
 	})
@@ -1030,25 +1024,13 @@ func TestSessionTimeline_NormalizeAgentSessionEventMaterializesEnvelope(t *testi
 		assert.Equal(t, ts, out.Timestamp)
 	})
 
-	t.Run("turn end messages stripped without mutating producer event", func(t *testing.T) {
-		msg := schema.AssistantMessage("kept only by producer", nil)
-		original := &SessionEvent[*schema.Message]{
-			Kind: SessionEventTurnEnd,
-			TurnEnd: &TurnEndState[*schema.Message]{
-				Messages:      []*schema.Message{msg},
-				SessionValues: map[string]any{"answer": "ok"},
-			},
-		}
+	t.Run("model context event normalizes without mutation", func(t *testing.T) {
+		original := &SessionEvent[*schema.Message]{Kind: SessionEventModelContext, ModelContext: &ModelContextEvent{}}
 		event := &AgentEvent{SessionEvent: original}
 		se, err := normalizeAgentSessionEvent(event)
 		require.NoError(t, err)
-		require.NotNil(t, se.TurnEnd)
-		assert.Nil(t, se.TurnEnd.Messages)
-		require.NotNil(t, event.SessionEvent.TurnEnd)
-		assert.Nil(t, event.SessionEvent.TurnEnd.Messages)
-		require.NotNil(t, original.TurnEnd)
-		require.Len(t, original.TurnEnd.Messages, 1)
-		assert.Equal(t, "ok", se.TurnEnd.SessionValues["answer"])
+		require.NotNil(t, se.ModelContext)
+		require.NotNil(t, event.SessionEvent.ModelContext)
 	})
 }
 
@@ -1199,9 +1181,9 @@ func TestRunnerTimelineRetryExhaustedStopReason(t *testing.T) {
 	requireStoredIdleStopReason(t, store.events, "retries_exhausted")
 
 	turnEnds := filterStoredSessionEvents(t, store.events, func(se *SessionEvent[*schema.Message]) bool {
-		return se.Kind == SessionEventTurnEnd
+		return isCommittedIdleEvent(se)
 	})
-	assert.Empty(t, turnEnds, "retry exhaustion should not commit a TurnEnd")
+	assert.Empty(t, turnEnds, "retry exhaustion should not commit")
 }
 
 func TestRunnerTimelineFailedStopReason(t *testing.T) {
@@ -1227,7 +1209,7 @@ func TestRunnerTimelineFailedStopReason(t *testing.T) {
 	require.NotEmpty(t, gotErrs)
 	assert.EqualError(t, gotErrs[0], "boom")
 	for _, err := range gotErrs {
-		assert.NotContains(t, err.Error(), "missing SessionEventTurnEnd")
+		assert.NotContains(t, err.Error(), "missing committed idle")
 	}
 
 	sessionErrors := filterStoredSessionEvents(t, store.events, func(se *SessionEvent[*schema.Message]) bool {
@@ -1239,13 +1221,13 @@ func TestRunnerTimelineFailedStopReason(t *testing.T) {
 	assert.Equal(t, "boom", sessionErrors[len(sessionErrors)-1].Error.Message)
 	requireStoredIdleStopReason(t, store.events, "failed")
 
-	turnEnds := filterStoredSessionEvents(t, store.events, func(se *SessionEvent[*schema.Message]) bool {
-		return se.Kind == SessionEventTurnEnd
+	committedIdleEvents := filterStoredSessionEvents(t, store.events, func(se *SessionEvent[*schema.Message]) bool {
+		return isCommittedIdleEvent(se)
 	})
-	assert.Empty(t, turnEnds, "failed turn should not commit a TurnEnd")
+	assert.Empty(t, committedIdleEvents, "failed turn should not commit")
 }
 
-func TestRunnerTimelineModelCallFatalDoesNotRequireTurnEnd(t *testing.T) {
+func TestRunnerTimelineModelCallFatalDoesNotRequireCommitMarker(t *testing.T) {
 	ctx := context.Background()
 	modelErr := errors.New("model exploded")
 	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
@@ -1278,7 +1260,7 @@ func TestRunnerTimelineModelCallFatalDoesNotRequireTurnEnd(t *testing.T) {
 	require.NotEmpty(t, gotErrs)
 	assert.ErrorIs(t, gotErrs[0], modelErr)
 	for _, err := range gotErrs {
-		assert.NotContains(t, err.Error(), "missing SessionEventTurnEnd")
+		assert.NotContains(t, err.Error(), "missing committed idle")
 	}
 
 	sessionErrors := filterStoredSessionEvents(t, store.events, func(se *SessionEvent[*schema.Message]) bool {
@@ -1291,9 +1273,9 @@ func TestRunnerTimelineModelCallFatalDoesNotRequireTurnEnd(t *testing.T) {
 	requireStoredIdleStopReason(t, store.events, "failed")
 
 	turnEnds := filterStoredSessionEvents(t, store.events, func(se *SessionEvent[*schema.Message]) bool {
-		return se.Kind == SessionEventTurnEnd
+		return isCommittedIdleEvent(se)
 	})
-	assert.Empty(t, turnEnds, "fatal model call should abort without committing a TurnEnd")
+	assert.Empty(t, turnEnds, "fatal model call should not commit")
 }
 
 func TestRunnerTimelineCancelStopReasonAndUserInterruptPersisted(t *testing.T) {
@@ -1358,9 +1340,9 @@ func TestRunnerTimelineCancelStopReasonAndUserInterruptPersisted(t *testing.T) {
 	requireStoredIdleStopReason(t, store.events, "cancelled")
 
 	turnEnds := filterStoredSessionEvents(t, store.events, func(se *SessionEvent[*schema.Message]) bool {
-		return se.Kind == SessionEventTurnEnd
+		return isCommittedIdleEvent(se)
 	})
-	assert.Empty(t, turnEnds, "cancelled turn should not commit a TurnEnd")
+	assert.Empty(t, turnEnds, "cancelled turn should not commit")
 }
 
 func TestToolSpan_PersistedAroundToolCallAndLinksToMessages(t *testing.T) {
@@ -1559,7 +1541,7 @@ func TestSessionTimeline_ReconstructionUsesKindFilter(t *testing.T) {
 		{EventID: uuid.NewString(), Kind: SessionEventMessage, Message: msg1},
 		{EventID: uuid.NewString(), Kind: SessionEventMessage, Message: msg2},
 		{EventID: uuid.NewString(), Kind: SessionEventSpanModelRequestStart, Span: &SpanEvent{SpanID: uuid.NewString(), Kind: SpanKindModel, StartedAt: time.Now().UTC(), Model: &ModelSpanMeta{}}},
-		{EventID: uuid.NewString(), Kind: SessionEventTurnEnd, TurnEnd: &TurnEndState[*schema.Message]{SessionValues: map[string]any{"done": true}}},
+		{EventID: uuid.NewString(), Kind: SessionEventModelContext, ModelContext: &ModelContextEvent{}},
 	}
 	for _, se := range events {
 		require.NoError(t, inner.AppendEventsForSession(ctx, sid, []*SessionEvent[*schema.Message]{se}))
@@ -1568,10 +1550,10 @@ func TestSessionTimeline_ReconstructionUsesKindFilter(t *testing.T) {
 	result, err := reconstructSessionState[*schema.Message](ctx, wrapper, sid, defaultLoadPageSize)
 	require.NoError(t, err)
 
-	// All recorded Kinds slices should equal modelContextSessionEventKinds.
+	// All recorded Kinds slices should equal sessionReplayEventKinds.
 	require.NotEmpty(t, wrapper.recordedKinds)
 	for _, kinds := range wrapper.recordedKinds {
-		assert.Equal(t, modelContextSessionEventKinds, kinds)
+		assert.Equal(t, sessionReplayEventKinds, kinds)
 	}
 
 	// Verify reconstruction result.
@@ -1580,7 +1562,7 @@ func TestSessionTimeline_ReconstructionUsesKindFilter(t *testing.T) {
 	require.Len(t, result.state.Messages, 2)
 	assert.Equal(t, "hello", result.state.Messages[0].Content)
 	assert.Equal(t, "world", result.state.Messages[1].Content)
-	assert.Equal(t, map[string]any{"done": true}, result.state.SessionValues)
+	assert.True(t, result.state.sawModelContext)
 }
 
 func TestToolSpan_StreamableToolEmitsEndAfterEOF(t *testing.T) {
