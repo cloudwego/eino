@@ -233,8 +233,8 @@ func (pm *pumpManager) runPump(ctx context.Context, agentName string,
 				// preserves ordinary teammate messages.
 				return
 			}
-			if err := ack(ctx); err != nil {
-				pm.logger.Printf("mailbox pump[%s] ack error: %v", agentName, err)
+			if ackErr := ack(ctx); ackErr != nil {
+				pm.logger.Printf("mailbox pump[%s] ack error: %v", agentName, ackErr)
 				return
 			}
 			continue
@@ -259,8 +259,8 @@ func (pm *pumpManager) runPump(ctx context.Context, agentName string,
 		if accepted, _ := loop.Push(item); !accepted {
 			return
 		}
-		if err := ack(ctx); err != nil {
-			pm.logger.Printf("mailbox pump[%s] ack error: %v", agentName, err)
+		if ackErr := ack(ctx); ackErr != nil {
+			pm.logger.Printf("mailbox pump[%s] ack error: %v", agentName, ackErr)
 			return
 		}
 	}

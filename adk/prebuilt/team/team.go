@@ -140,6 +140,17 @@ type teamMiddleware struct {
 
 	teamNameVal atomic.Value // stores string; set at creation for teammates; set by TeamCreate for leader
 
+	// teamOpLock serializes team-lifecycle transitions that span multiple,
+	// individually non-atomic steps. TeamCreate's "no active team → create dir →
+	// setup leader mailbox → setTeamName" sequence and the Agent tool's
+	// "read active team name → register/spawn teammate" sequence both read and
+	// then mutate active-team state. Tool calls within a single assistant turn
+	// may run in parallel (see compose tool_node parallelRunToolCall), so without
+	// this lock two concurrent TeamCreate calls could both observe an empty team
+	// name and each create a team, leaving an orphaned team directory and the
+	// leader pump bound to the losing team. Held only by the leader.
+	teamOpLock sync.Mutex
+
 	lifecycle *lifecycleManager // teammate lifecycle: registry, config, routing, plantask
 }
 

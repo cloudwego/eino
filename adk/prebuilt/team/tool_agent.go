@@ -158,15 +158,20 @@ func (t *agentTool) runTeammate(ctx context.Context, args agentToolArgs) (string
 		return "", err
 	}
 
+	// The active team is whatever TeamCreate established on this leader middleware.
+	// We deliberately do NOT fall back to args.TeamName when no team is active: a
+	// teammate spawn must attach to the team the leader is actually running (its
+	// inbox pump, router, and plantask state are all bound to that team). Honoring
+	// an arbitrary args.TeamName here would register a member and start a teammate
+	// against a team the leader never activated — its messages to the leader would
+	// land in an inbox no pump is reading. A non-matching team_name is logged and
+	// ignored; an empty active team is a hard error.
 	teamName := t.mw.getTeamName()
 	if args.TeamName != "" && teamName != args.TeamName {
-		t.mw.logger().Printf("[AgentTool] team_name %q is not active, using current team %q\n", args.TeamName, teamName)
+		t.mw.logger().Printf("[AgentTool] team_name %q is not the active team %q; using the active team\n", args.TeamName, teamName)
 	}
 	if teamName == "" {
-		teamName = args.TeamName
-	}
-	if teamName == "" {
-		return "", fmt.Errorf("run_in_background requires an active team: %w", errTeamNotFound)
+		return "", fmt.Errorf("run_in_background requires an active team (create one with TeamCreate first): %w", errTeamNotFound)
 	}
 
 	member, err := t.registerTeammate(ctx, teamName, &args)

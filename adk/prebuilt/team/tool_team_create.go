@@ -77,6 +77,15 @@ func (t *teamCreateTool) InvokableRun(ctx context.Context, argumentsInJSON strin
 	if err := validateTeamName(args.TeamName); err != nil {
 		return "", err
 	}
+
+	// Serialize the whole "check current team → create → setup leader mailbox →
+	// setTeamName" sequence. Tool calls in one assistant turn may run in parallel,
+	// so without this lock two concurrent TeamCreate calls could both pass the
+	// emptiness check below and each create a team, leaving an orphaned directory
+	// and the leader pump bound to the losing team.
+	t.mw.teamOpLock.Lock()
+	defer t.mw.teamOpLock.Unlock()
+
 	if currentTeamName := t.mw.getTeamName(); currentTeamName != "" {
 		return "", fmt.Errorf("team %q is already active, delete it before creating a new team", currentTeamName)
 	}
