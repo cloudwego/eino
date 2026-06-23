@@ -185,87 +185,74 @@ const teammateInstructionChinese = `# 代理队友通信
 - 不要在工具调用前使用冒号。例如，像 "Let me read the file:" 这种后面紧跟工具调用的写法是不合适的，应改成以句号结尾的 "Let me read the file."
 `
 
-// ─── TeamCreate tool ─────────────────────────────────────────────────────────
+// ─── Leader instruction ───────────────────────────────────────────────────────
+//
+// Appended to the team leader's system prompt by NewRunner. The team and its
+// shared task list already exist (created with the Runner), so this instruction
+// covers only how to coordinate work, not how to create or delete a team.
 
-const teamCreateToolName = "TeamCreate"
-const teamCreateToolDesc = `Create a new team to coordinate multiple agents working on a project. Teams have a 1:1 correspondence with task lists (Team = TaskList).
+const leaderInstruction = `# Agent Team Coordination
 
-This creates:
-- A team config file with member list
-- A shared task list directory for all teammates
-- Inbox directories for message passing
-
-## When to Use
-
-Use this tool proactively whenever:
-- The user explicitly asks to use a team, swarm, or group of agents
-- The user mentions wanting agents to work together, coordinate, or collaborate
-- A task is complex enough that it would benefit from parallel work by multiple agents (e.g., building a full-stack feature with frontend and backend work, refactoring a codebase while keeping tests passing, implementing a multi-step project with research, planning, and coding phases)
-
-When in doubt about whether a task warrants a team, prefer spawning a team.
+You are the lead of an agent team. A shared team and task list already exist for
+this session; you coordinate the work and synthesize the results.
 
 ## Team Workflow
 
-1. **Create a team** with TeamCreate - this creates both the team and its task list
-2. **Create tasks** using the Task tools (TaskCreate, TaskList, etc.) - they automatically use the team's task list
-3. **Spawn teammates** using the Agent tool with name parameters to create teammates that join the team
-4. **Assign tasks** using TaskUpdate with owner to give tasks to idle teammates
-5. **Teammates work on assigned tasks** and mark them completed via TaskUpdate
-6. **Teammates go idle between turns** - after each turn, teammates automatically go idle and send a notification. IMPORTANT: Be patient with idle teammates! Don't comment on their idleness until it actually impacts your work.
-7. **Shutdown your team** - when the task is completed, gracefully shut down your teammates via SendMessage with shutdown_request.
+1. **Create tasks** using the Task tools (TaskCreate, TaskList, etc.) - they
+   automatically use the team's shared task list.
+2. **Spawn teammates** using the Agent tool with a name parameter to create
+   teammates that join the team and can be addressed via SendMessage.
+3. **Assign tasks** using TaskUpdate with the owner parameter to give tasks to
+   teammates, or let teammates claim unassigned, unblocked tasks themselves.
+4. **Teammates work on assigned tasks** and mark them completed via TaskUpdate.
+5. **Teammates go idle between turns** - after each turn, a teammate automatically
+   goes idle and notifies you. Be patient with idle teammates; do not comment on
+   their idleness until it actually impacts your work.
+6. **Shut down teammates** - when the work is complete, gracefully shut down each
+   teammate via SendMessage with shutdown_request. The team's directories are
+   cleaned up automatically when the session ends, so there is no separate delete
+   step.
 
 ## Task Ownership
 
-Tasks are assigned using TaskUpdate with the owner parameter. Any agent can set or change task ownership via TaskUpdate.
+Tasks are assigned using TaskUpdate with the owner parameter. Any agent can set or
+change task ownership via TaskUpdate.
 
 ## Automatic Message Delivery
 
-**IMPORTANT**: Messages from teammates are automatically delivered to you. You do NOT need to manually check your inbox.
+**IMPORTANT**: Messages from teammates are automatically delivered to you. You do
+NOT need to manually check your inbox.
 
 ## Teammate Idle State
 
-Teammates go idle after every turn—this is completely normal and expected. A teammate going idle immediately after sending you a message does NOT mean they are done or unavailable. Idle simply means they are waiting for input.
+Teammates go idle after every turn—this is completely normal and expected. A
+teammate going idle immediately after sending you a message does NOT mean they are
+done or unavailable. Idle simply means they are waiting for input.
 
 ## Task List Coordination
 
-Teams share a task list that all teammates can access.
+Teams share a task list that all teammates can access. Encourage teammates to:
+1. Check TaskList periodically, especially after completing each task, to find work.
+2. Claim unassigned, unblocked tasks with TaskUpdate (set owner to your name).
+   Prefer tasks in ID order (lowest ID first).
+3. Create new tasks with TaskCreate when identifying additional work.
+4. Mark tasks completed with TaskUpdate when done, then check TaskList for more.
 
-Teammates should:
-1. Check TaskList periodically, especially after completing each task, to find available work
-2. Claim unassigned, unblocked tasks with TaskUpdate (set owner to your name). Prefer tasks in ID order (lowest ID first)
-3. Create new tasks with TaskCreate when identifying additional work
-4. Mark tasks as completed with TaskUpdate when done, then check TaskList for next work
-5. Coordinate with other teammates by reading the task list status
+**IMPORTANT**: Your team cannot hear you unless you use the SendMessage tool.
+Always send a message to a teammate when you are responding to them.`
 
-**IMPORTANT notes for communication with your team**:
-- Your team cannot hear you if you do not use the SendMessage tool. Always send a message to your teammates if you are responding to them.
-- Use TaskUpdate to mark tasks completed.`
+const leaderInstructionChinese = `# 代理团队协调
 
-const teamCreateToolDescChinese = `创建一个新的团队来协调多个代理在项目中协作。团队与任务列表一一对应（Team = TaskList）。
-
-这将创建：
-- 包含成员列表的团队配置文件
-- 供所有队友使用的共享任务列表目录
-- 用于消息传递的收件箱目录
-
-## 何时使用
-
-在以下情况下主动使用此工具：
-- 用户明确要求使用团队、集群或一组代理
-- 用户提到希望代理一起工作、协调或协作
-- 任务足够复杂，可以从多个代理的并行工作中受益（例如，构建包含前端和后端工作的全栈功能、在保持测试通过的同时重构代码库、实施包含研究、规划和编码阶段的多步骤项目）
-
-如果不确定任务是否需要团队，倾向于创建团队。
+你是一个代理团队的负责人。本次会话已自动创建好团队及共享任务列表，你负责协调工作并汇总结果。
 
 ## 团队工作流程
 
-1. **创建团队** - 使用 TeamCreate 创建团队及其任务列表
-2. **创建任务** - 使用任务工具（TaskCreate、TaskList 等），它们会自动使用团队的任务列表
-3. **生成队友** - 使用 Agent 工具并指定 name 参数来创建加入团队的队友
-4. **分配任务** - 使用 TaskUpdate 的 owner 参数将任务分配给空闲的队友
-5. **队友处理分配的任务** - 并通过 TaskUpdate 将其标记为已完成
-6. **队友在轮次之间进入空闲状态** - 每轮结束后，队友会自动进入空闲状态并发送通知。重要：对空闲的队友要有耐心！除非影响到你的工作，否则不要评论他们的空闲状态。
-7. **关闭团队** - 任务完成后，通过 SendMessage 发送 shutdown_request 来优雅地关闭队友。
+1. **创建任务** - 使用任务工具（TaskCreate、TaskList 等），它们会自动使用团队的共享任务列表。
+2. **生成队友** - 使用 Agent 工具并指定 name 参数来创建加入团队的队友，之后可通过 SendMessage 寻址。
+3. **分配任务** - 使用 TaskUpdate 的 owner 参数将任务分配给队友，或让队友自行认领未分配、未阻塞的任务。
+4. **队友处理分配的任务** - 并通过 TaskUpdate 将其标记为已完成。
+5. **队友在轮次之间进入空闲状态** - 每轮结束后，队友会自动进入空闲状态并通知你。请对空闲的队友保持耐心；除非影响到你的工作，否则不要评论他们的空闲状态。
+6. **关闭队友** - 工作完成后，通过 SendMessage 发送 shutdown_request 优雅地关闭每个队友。会话结束时团队目录会被自动清理，无需单独的删除步骤。
 
 ## 任务所有权
 
@@ -281,44 +268,10 @@ const teamCreateToolDescChinese = `创建一个新的团队来协调多个代理
 
 ## 任务列表协调
 
-团队共享一个所有队友都可以访问的任务列表。
+团队共享一个所有队友都可以访问的任务列表。鼓励队友：
+1. 定期检查 TaskList，特别是在完成每个任务后，以查找可用的工作。
+2. 使用 TaskUpdate 认领未分配、未阻塞的任务（将 owner 设置为你的名字）。优先按 ID 顺序处理任务（最小 ID 优先）。
+3. 发现额外工作时使用 TaskCreate 创建新任务。
+4. 完成后使用 TaskUpdate 将任务标记为已完成，然后检查 TaskList 获取下一个工作。
 
-队友应该：
-1. 定期检查 TaskList，特别是在完成每个任务后，以查找可用的工作
-2. 使用 TaskUpdate 认领未分配、未阻塞的任务（将 owner 设置为你的名字）。优先按 ID 顺序处理任务（最小 ID 优先）
-3. 发现额外工作时使用 TaskCreate 创建新任务
-4. 完成后使用 TaskUpdate 将任务标记为已完成，然后检查 TaskList 获取下一个工作
-5. 通过读取任务列表状态与其他队友协调
-
-**团队沟通的重要说明**：
-- 如果不使用 SendMessage 工具，你的团队听不到你。回复队友时务必发送消息。
-- 使用 TaskUpdate 标记任务已完成。`
-
-// ─── TeamDelete tool ─────────────────────────────────────────────────────────
-
-const teamDeleteToolName = "TeamDelete"
-const teamDeleteToolDesc = `Remove team and task directories when the swarm work is complete.
-
-This operation:
-- Removes the team directory and config
-- Removes the task directory
-- Clears team context from the current session
-
-**IMPORTANT**: TeamDelete will fail if the team still has active members (running goroutines). Gracefully terminate teammates first, then call TeamDelete after all teammates have shut down.
-
-TeamDelete also refuses if config.json still lists members with no running goroutine (usually an incomplete cleanup). Verify those members are truly done, then retry with ` + "`force: true`" + ` to delete anyway. ` + "`force`" + ` does not bypass the running-teammate check.
-
-Use this when all teammates have finished their work and you want to clean up the team resources. The team name is automatically determined from the current session's team context.`
-
-const teamDeleteToolDescChinese = `当团队工作完成后，删除团队和任务目录。
-
-此操作：
-- 删除团队目录和配置
-- 删除任务目录
-- 清除当前会话中的团队上下文
-
-**重要**：如果团队仍有活跃成员（运行中的协程），TeamDelete 将失败。请先优雅地终止队友，然后在所有队友关闭后调用 TeamDelete。
-
-如果 config.json 仍列有成员但没有运行中的协程（通常是清理未完成），TeamDelete 也会拒绝执行。请先确认这些成员确实已完成，然后使用 ` + "`force: true`" + ` 重试以强制删除。` + "`force`" + ` 不会绕过运行中队友的检查。
-
-当所有队友完成工作且你想清理团队资源时使用此工具。团队名称从当前会话的团队上下文自动确定。`
+**重要**：如果不使用 SendMessage 工具，你的团队听不到你。回复队友时务必发送消息。`
