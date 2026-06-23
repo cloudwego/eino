@@ -177,6 +177,49 @@ func TestSend_DM(t *testing.T) {
 	assert.NotEmpty(t, msgs[0].Timestamp)
 }
 
+func TestSend_DMToMissingInboxDoesNotResurrect(t *testing.T) {
+	backend := newInMemoryBackend()
+	mb := newTestMailbox(backend, "/tmp/test", "myteam", "leader", []string{"leader", "agent1"})
+	ctx := context.Background()
+
+	// agent1 has no inbox: it was torn down (DeleteInbox) but the leader's send
+	// still resolves the recipient because RemoveMember has not run yet. A DM must
+	// NOT recreate the inbox — it returns errInboxNotFound instead.
+	inboxPath := filepath.Join("/tmp/test", "teams", "myteam", "inboxes", "agent1.json")
+
+	err := mb.Send(ctx, &outboxMessage{
+		To:      "agent1",
+		Type:    messageTypeDM,
+		Text:    "do this task",
+		Summary: "task assignment",
+	})
+	assert.Error(t, err)
+	assert.ErrorIs(t, err, errInboxNotFound)
+
+	exists, existsErr := backend.Exists(ctx, inboxPath)
+	assert.NoError(t, existsErr)
+	assert.False(t, exists, "point-to-point Send must not resurrect a removed inbox")
+}
+
+func TestSend_ShutdownRequestToMissingInboxDoesNotResurrect(t *testing.T) {
+	backend := newInMemoryBackend()
+	mb := newTestMailbox(backend, "/tmp/test", "myteam", "leader", []string{"leader", "agent1"})
+	ctx := context.Background()
+
+	inboxPath := filepath.Join("/tmp/test", "teams", "myteam", "inboxes", "agent1.json")
+
+	err := mb.Send(ctx, &outboxMessage{
+		To:   "agent1",
+		Type: messageTypeShutdownRequest,
+		Text: "please shut down",
+	})
+	assert.ErrorIs(t, err, errInboxNotFound)
+
+	exists, existsErr := backend.Exists(ctx, inboxPath)
+	assert.NoError(t, existsErr)
+	assert.False(t, exists, "shutdown_request Send must not resurrect a removed inbox")
+}
+
 func TestSend_Broadcast(t *testing.T) {
 	backend := newInMemoryBackend()
 	members := []string{"team-lead", "agent1", "agent2"}
@@ -318,7 +361,7 @@ func TestWaitForNewMessages_PollsAndFindsNewMessages(t *testing.T) {
 
 	go func() {
 		time.Sleep(30 * time.Millisecond)
-		_ = senderMb.sendToOne(context.Background(), "agent1", &outboxMessage{
+		_, _ = senderMb.sendToOneIfExists(context.Background(), "agent1", &outboxMessage{
 			To:      "agent1",
 			Type:    messageTypeDM,
 			Text:    "delayed message",
@@ -495,13 +538,14 @@ func TestSendToOne_ConcurrentSendsNoLostMessages(t *testing.T) {
 					return members, nil
 				},
 			}
-			err := mb.sendToOne(context.Background(), "agent1", &outboxMessage{
+			delivered, err := mb.sendToOneIfExists(context.Background(), "agent1", &outboxMessage{
 				To:      "agent1",
 				Type:    messageTypeDM,
 				Text:    fmt.Sprintf("msg from sender-%d", idx),
 				Summary: "concurrent test",
 			})
 			assert.NoError(t, err)
+			assert.True(t, delivered)
 		}(i)
 	}
 

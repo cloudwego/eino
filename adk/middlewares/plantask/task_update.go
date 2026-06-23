@@ -19,8 +19,6 @@ package plantask
 import (
 	"context"
 	"fmt"
-	"sort"
-	"strconv"
 	"strings"
 	"sync"
 
@@ -444,30 +442,11 @@ func (t *taskUpdateTool) handleCompletion(taskData *task, allTasks []*task, dirt
 // validation happens in memory before this is called, so a failure here is the
 // only persistence error a TaskUpdate can surface. On a mid-batch failure it
 // reports which tasks were persisted and which were not, so a retry of the same
-// (idempotent) update can reconcile any one-sided edge left behind.
+// (idempotent) update can reconcile any one-sided edge left behind. The actual
+// batching is shared with the delete path via persistTaskGraph.
 func (t *taskUpdateTool) persistGraph(ctx context.Context, baseDir string, dirty map[string]*task) error {
-	// Write in deterministic ID order so partial-failure reporting is stable.
-	ids := make([]string, 0, len(dirty))
-	for id := range dirty {
-		ids = append(ids, id)
-	}
-	sort.Slice(ids, func(i, j int) bool {
-		ni, errI := strconv.ParseInt(ids[i], 10, 64)
-		nj, errJ := strconv.ParseInt(ids[j], 10, 64)
-		if errI == nil && errJ == nil {
-			return ni < nj
-		}
-		return ids[i] < ids[j]
-	})
-
-	var persisted []string
-	for _, id := range ids {
-		if err := writeTask(ctx, t.mw.backend, baseDir, dirty[id]); err != nil {
-			remaining := ids[len(persisted):]
-			return fmt.Errorf("%s persist task graph failed at Task #%s (persisted %v, not persisted %v); retry the same update to reconcile, err: %w",
-				TaskUpdateToolName, id, persisted, remaining, err)
-		}
-		persisted = append(persisted, id)
+	if err := persistTaskGraph(ctx, t.mw.backend, baseDir, dirty); err != nil {
+		return fmt.Errorf("%s %w", TaskUpdateToolName, err)
 	}
 	return nil
 }

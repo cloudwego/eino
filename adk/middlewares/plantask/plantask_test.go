@@ -314,6 +314,42 @@ func TestMiddlewareDeleteTaskMissingTaskIsNoOp(t *testing.T) {
 	assert.NoError(t, err)
 }
 
+// TestMiddlewareInterfaceExposesProgrammaticAPI guards against the interface
+// drifting from the doc that recommends Middleware.CreateTask/DeleteTask: a caller
+// holding only the exported Middleware interface must be able to reach both.
+func TestMiddlewareInterfaceExposesProgrammaticAPI(t *testing.T) {
+	ctx := context.Background()
+	backend := newInMemoryBackend()
+	baseDir := "/tmp/tasks"
+
+	var mw Middleware = testMiddleware(backend, baseDir)
+
+	taskID, err := mw.CreateTask(ctx, &TaskInput{Subject: "via interface", Description: "Desc"})
+	assert.NoError(t, err)
+	assert.Equal(t, "1", taskID)
+
+	err = mw.DeleteTask(ctx, taskID)
+	assert.NoError(t, err)
+}
+
+// TestMiddlewareCreateDeleteHonorGuard ensures the programmatic API does not
+// bypass the task guard that gates the tool path in team mode.
+func TestMiddlewareCreateDeleteHonorGuard(t *testing.T) {
+	ctx := context.Background()
+	backend := newInMemoryBackend()
+	baseDir := "/tmp/tasks"
+
+	guardErr := errors.New("guard denied")
+	mw := testMiddleware(backend, baseDir)
+	WithTaskGuard(func(context.Context) error { return guardErr })(mw)
+
+	_, err := mw.CreateTask(ctx, &TaskInput{Subject: "blocked", Description: "Desc"})
+	assert.ErrorIs(t, err, guardErr)
+
+	err = mw.DeleteTask(ctx, "1")
+	assert.ErrorIs(t, err, guardErr)
+}
+
 func TestUnassignOwnerTasksSuccess(t *testing.T) {
 	ctx := context.Background()
 	backend := newInMemoryBackend()

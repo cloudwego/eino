@@ -157,11 +157,24 @@ type TaskAssignment struct {
 	AssignedBy  string // who set the owner (from context)
 }
 
-// Middleware is a marker interface for identifying plantask middleware instances.
-// Used by team.NewRunner to detect if a plantask middleware is already present
-// in user-provided handlers to avoid duplicate injection.
+// Middleware is the programmatic interface for driving plantask state outside of
+// model tool calls. team.NewRunner uses it as a marker (via isPlanTaskMiddleware)
+// to detect an already-present plantask middleware and avoid duplicate injection;
+// it also exposes the concurrency-safe task operations that the package-level
+// CreateTask/DeleteTask functions document as the preferred entry points.
 type Middleware interface {
 	isPlanTaskMiddleware()
+
+	// CreateTask creates a task with proper locking and returns its ID. Prefer
+	// this over the package-level CreateTask when a Middleware is available: it
+	// shares the middleware's task lock (and the team lock in team mode) and honors
+	// the configured task guard, so it is safe to call concurrently with tool calls.
+	CreateTask(ctx context.Context, input *TaskInput) (string, error)
+
+	// DeleteTask deletes a task with proper locking. Prefer this over the
+	// package-level DeleteTask when a Middleware is available, for the same locking
+	// and guard guarantees as CreateTask.
+	DeleteTask(ctx context.Context, taskID string) error
 
 	// UnassignOwnerTasks finds all tasks owned by the given owner, clears their
 	// owner, reverts in_progress tasks to pending, and returns the unassigned task IDs.
@@ -182,8 +195,14 @@ func (m *middleware) rwLock() *sync.RWMutex {
 }
 
 // CreateTask creates a task with proper locking. It resolves the baseDir from
-// the context (team mode) or falls back to the configured baseDir.
+// the context (team mode) or falls back to the configured baseDir. The configured
+// task guard is consulted first so a programmatic create cannot bypass the team
+// directory constraint that the TaskCreate tool enforces.
 func (m *middleware) CreateTask(ctx context.Context, input *TaskInput) (string, error) {
+	if err := m.checkGuard(ctx); err != nil {
+		return "", err
+	}
+
 	lock := m.rwLock()
 	lock.Lock()
 	defer lock.Unlock()
@@ -191,8 +210,14 @@ func (m *middleware) CreateTask(ctx context.Context, input *TaskInput) (string, 
 	return createTaskLocked(ctx, m.backend, m.resolveBaseDir(ctx), input)
 }
 
-// DeleteTask deletes a task with proper locking.
+// DeleteTask deletes a task with proper locking. The configured task guard is
+// consulted first so a programmatic delete cannot bypass the team directory
+// constraint that the TaskUpdate/Delete tools enforce.
 func (m *middleware) DeleteTask(ctx context.Context, taskID string) error {
+	if err := m.checkGuard(ctx); err != nil {
+		return err
+	}
+
 	lock := m.rwLock()
 	lock.Lock()
 	defer lock.Unlock()
