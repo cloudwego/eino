@@ -7788,6 +7788,102 @@ func TestTurnLoop_ManagedRestore_WaitsForExplicitResume(t *testing.T) {
 	assert.Equal(t, int32(1), atomic.LoadInt32(&genResumeRan))
 }
 
+func TestTurnLoop_ManagedRestore_DeletesConsumedCheckpointAfterSuccessfulResume(t *testing.T) {
+	ctx := context.Background()
+	cpID := "managed-restore-delete-after-resume"
+	store := &deletableCheckpointStore{
+		turnLoopCheckpointStore: turnLoopCheckpointStore{m: make(map[string][]byte)},
+	}
+
+	interruptObserved := make(chan struct{})
+	var interruptOnce sync.Once
+	firstAgent := &turnLoopManagedResumeAgent{interruptInfo: "approval_needed"}
+	loop1 := newAndRunTurnLoop(ctx, TurnLoopConfig[string, *schema.Message]{
+		InterruptMode: TurnLoopInterruptWaitsForExplicitResume,
+		Store:         store,
+		CheckpointID:  cpID,
+		GenInput:      genInputConsumeAllWithMsg,
+		PrepareAgent:  prepareAgent(firstAgent),
+		OnAgentEvents: func(_ context.Context, _ *TurnContext[string, *schema.Message], events *AsyncIterator[*AgentEvent]) error {
+			for {
+				event, ok := events.Next()
+				if !ok {
+					break
+				}
+				if event.Action != nil && event.Action.Interrupted != nil {
+					interruptOnce.Do(func() { close(interruptObserved) })
+				}
+			}
+			return nil
+		},
+	})
+	loop1.Push("trigger-interrupt")
+	waitOrFail(t, interruptObserved, "interrupt was not observed")
+	loop1.Stop()
+	exit1 := loop1.Wait()
+	require.NoError(t, exit1.ExitReason)
+	require.True(t, exit1.CheckpointAttempted)
+	require.NoError(t, exit1.CheckpointErr)
+
+	store.mu.Lock()
+	_, exists := store.m[cpID]
+	store.deleteCalled = false
+	store.deletedKey = ""
+	store.mu.Unlock()
+	require.True(t, exists, "setup checkpoint should exist")
+
+	resumeObserved := make(chan struct{})
+	resumedRunDone := make(chan struct{})
+	var resumeOnce, resumedRunOnce sync.Once
+	secondAgent := &turnLoopManagedResumeAgent{
+		onResume: func(*ResumeInfo) {
+			resumeOnce.Do(func() { close(resumeObserved) })
+		},
+	}
+	loop2 := NewTurnLoop(TurnLoopConfig[string, *schema.Message]{
+		InterruptMode: TurnLoopInterruptWaitsForExplicitResume,
+		Store:         store,
+		CheckpointID:  cpID,
+		GenInput:      genInputConsumeAllWithMsg,
+		GenResume: func(_ context.Context, _ *TurnLoop[string, *schema.Message], interruptedItems, _, resumeItems []string) (*GenResumeResult[string, *schema.Message], error) {
+			return &GenResumeResult[string, *schema.Message]{
+				Decision: TurnLoopResumeDecisionResume,
+				Consumed: append(append([]string{}, interruptedItems...), resumeItems...),
+			}, nil
+		},
+		PrepareAgent: prepareAgent(secondAgent),
+		OnAgentEvents: func(_ context.Context, _ *TurnContext[string, *schema.Message], events *AsyncIterator[*AgentEvent]) error {
+			for {
+				if _, ok := events.Next(); !ok {
+					break
+				}
+			}
+			resumedRunOnce.Do(func() { close(resumedRunDone) })
+			return nil
+		},
+	})
+	loop2.Run(ctx)
+	require.Eventually(t, func() bool {
+		loop2.resumeMu.Lock()
+		defer loop2.resumeMu.Unlock()
+		return loop2.checkpointLoaded
+	}, time.Second, 5*time.Millisecond)
+	require.Eventually(t, func() bool { return loop2.Resume("approve") == nil }, time.Second, 5*time.Millisecond)
+	waitOrFail(t, resumeObserved, "agent resume was not observed")
+	waitOrFail(t, resumedRunDone, "resumed run did not finish")
+
+	require.Eventually(t, func() bool {
+		store.mu.Lock()
+		defer store.mu.Unlock()
+		_, exists := store.m[cpID]
+		return store.deleteCalled && store.deletedKey == cpID && !exists
+	}, time.Second, 5*time.Millisecond, "consumed checkpoint should be deleted while loop stays alive")
+
+	loop2.Stop()
+	exit2 := loop2.Wait()
+	require.NoError(t, exit2.ExitReason)
+}
+
 // Test #9
 func TestTurnLoop_ManagedRestore_PreRunResumeSubmitsImmediately(t *testing.T) {
 	ctx := context.Background()

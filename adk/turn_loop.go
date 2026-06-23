@@ -1096,6 +1096,18 @@ func (l *TurnLoop[T, M]) deleteTurnLoopCheckpoint(ctx context.Context, checkPoin
 	return nil
 }
 
+func (l *TurnLoop[T, M]) deleteLoadedCheckpointAfterSuccessfulResume(ctx context.Context, runErr error, isResume bool, hasInterrupt bool) error {
+	if runErr != nil || !isResume || hasInterrupt || l.loadCheckpointID == "" {
+		return runErr
+	}
+	checkpointID := l.loadCheckpointID
+	if err := l.deleteTurnLoopCheckpoint(ctx, checkpointID); err != nil {
+		return fmt.Errorf("failed to delete consumed checkpoint[%s] after resume: %w", checkpointID, err)
+	}
+	l.loadCheckpointID = ""
+	return nil
+}
+
 func (l *TurnLoop[T, M]) tryLoadCheckpoint(ctx context.Context) error {
 	// Adopt any Resume() items submitted before the checkpoint finished loading.
 	// Registered as a defer so it runs on ALL exit paths, including the early
@@ -2146,6 +2158,7 @@ func (l *TurnLoop[T, M]) run(ctx context.Context) {
 		l.buffer.PushFront(plan.remaining)
 
 		runErr := l.runAgentAndHandleEvents(plan.turnCtx, agent, plan.spec)
+		runErr = l.deleteLoadedCheckpointAfterSuccessfulResume(ctx, runErr, plan.spec.isResume, l.interruptContexts != nil)
 
 		if runErr != nil {
 			// Set interruptedItems when a cancel or interrupt was captured from the
