@@ -345,7 +345,16 @@ func (s *configStore) NonLeaderMemberNames(ctx context.Context, teamName string)
 	return names, err
 }
 
-// DeleteTeam removes the team directory and tasks directory.
+// DeleteTeam removes the team's tasks directory and then its team directory.
+//
+// Order matters for crash recovery: the team directory holds config.json, the
+// persistent source of truth TeamDelete consults (via NonLeaderMemberNames) to
+// decide whether deletion is safe. By deleting the tasks directory first and the
+// team directory (config.json) last, any mid-sequence failure leaves config.json
+// intact, so a retry still passes the residual-member check instead of failing
+// the recovery path with a "missing config.json" error. Both steps use
+// deleteDirIfExists, which is idempotent (a no-op when the directory is already
+// gone), so retrying a partially-completed delete safely reconciles the rest.
 func (s *configStore) DeleteTeam(ctx context.Context, teamName string) error {
 	s.conf.state.cfgLock.Lock()
 	defer s.conf.state.cfgLock.Unlock()
@@ -353,11 +362,16 @@ func (s *configStore) DeleteTeam(ctx context.Context, teamName string) error {
 	teamDir := teamDirPath(s.conf.BaseDir, teamName)
 	taskDir := tasksDirPath(s.conf.BaseDir, teamName)
 
-	if err := deleteDirIfExists(ctx, s.conf.Backend, teamDir); err != nil {
-		return fmt.Errorf("delete team dir: %w", err)
-	}
 	if err := deleteDirIfExists(ctx, s.conf.Backend, taskDir); err != nil {
-		return fmt.Errorf("delete task dir: %w", err)
+		// config.json (in teamDir) is untouched, so a retry of TeamDelete still
+		// sees a complete team and can clean up; surface that this is recoverable.
+		return fmt.Errorf("delete task dir (team config left intact, retry to reconcile): %w", err)
+	}
+	if err := deleteDirIfExists(ctx, s.conf.Backend, teamDir); err != nil {
+		// The tasks dir is already gone but config.json remains, so a retry's
+		// residual-member check still works and deleteDirIfExists(taskDir) is a
+		// no-op; only teamDir removal needs to be retried.
+		return fmt.Errorf("delete team dir (tasks already removed, retry to reconcile): %w", err)
 	}
 
 	return nil

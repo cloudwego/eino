@@ -19,6 +19,8 @@ package plantask
 import (
 	"context"
 	"fmt"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -198,7 +200,12 @@ func (t *taskUpdateTool) doUpdate(ctx context.Context, argumentsInJSON string) (
 	}
 
 	// Load the full task list once upfront when any operation needs it
-	// (dependency updates, completion cleanup, or all-completed check).
+	// (dependency updates, completion cleanup, or all-completed check). Every
+	// graph mutation below runs against this single in-memory snapshot and is
+	// flushed together at the end (see persistGraph), so a validation or
+	// cycle-detection failure never persists a partial change, and a successful
+	// update never leaves a one-sided dependency edge from interleaved per-file
+	// writes.
 	needsTaskList := len(params.AddBlocks) > 0 || len(params.AddBlockedBy) > 0 || params.Status == taskStatusCompleted
 	var allTasks []*task
 	if needsTaskList {
@@ -208,8 +215,9 @@ func (t *taskUpdateTool) doUpdate(ctx context.Context, argumentsInJSON string) (
 			return "", nil, fmt.Errorf("%s list tasks failed, err: %w", TaskUpdateToolName, listErr)
 		}
 		// Replace the allTasks entry for the current task with taskData so that
-		// in-memory modifications (e.g., status set to "completed") are visible
-		// to downstream consumers like deleteAllTasksIfCompleted.
+		// in-memory modifications (status, dependency edges, cleared edges) are
+		// visible to downstream consumers (cycle detection, completion cleanup,
+		// deleteAllTasksIfCompleted) and to the batched write-back below.
 		for i, tk := range allTasks {
 			if tk.ID == params.TaskID {
 				allTasks[i] = taskData
@@ -218,12 +226,18 @@ func (t *taskUpdateTool) doUpdate(ctx context.Context, argumentsInJSON string) (
 		}
 	}
 
+	// dirty collects every task object mutated by this update so they can be
+	// flushed in one batch. taskData is always dirty (it is the task being
+	// updated); dependency and completion handling add the counterpart tasks
+	// they touch. Keyed by ID so a task touched by both phases is written once.
+	dirty := map[string]*task{params.TaskID: taskData}
+
 	var updatedFields []string
 
 	updatedFields = t.updateBasicFields(taskData, params, updatedFields)
 
 	if len(params.AddBlocks) > 0 || len(params.AddBlockedBy) > 0 {
-		fields, depErr := t.updateDependencies(ctx, taskData, params, allTasks)
+		fields, depErr := t.updateDependencies(taskData, params, allTasks, dirty)
 		if depErr != nil {
 			return "", nil, depErr
 		}
@@ -237,39 +251,27 @@ func (t *taskUpdateTool) doUpdate(ctx context.Context, argumentsInJSON string) (
 	updatedFields = fields
 
 	if params.Status == taskStatusCompleted {
-		// If dependency updates were applied above, allTasks is stale because
-		// addDependencyToTask wrote modified tasks directly to the backend.
-		// Reload to prevent clearCompletedTaskDependencies from overwriting
-		// those changes with the stale in-memory snapshot.
-		hasDependencyUpdates := len(params.AddBlocks) > 0 || len(params.AddBlockedBy) > 0
-		if hasDependencyUpdates {
-			var reloadErr error
-			allTasks, reloadErr = listTasks(ctx, t.mw.backend, baseDir, t.mw.logger)
-			if reloadErr != nil {
-				return "", nil, fmt.Errorf("%s reload tasks after dependency update failed, err: %w", TaskUpdateToolName, reloadErr)
-			}
-			for i, tk := range allTasks {
-				if tk.ID == params.TaskID {
-					allTasks[i] = taskData
-					break
-				}
-			}
-		}
-		fields, compErr := t.handleCompletion(ctx, taskData, params.TaskID, allTasks)
-		if compErr != nil {
-			return "", nil, compErr
-		}
-		updatedFields = append(updatedFields, fields...)
+		// Completion clears this task's edges and removes references to it from
+		// its counterparts, all in memory against the same allTasks snapshot the
+		// dependency phase mutated; touched counterparts are added to dirty so
+		// they are flushed together with taskData below.
+		updatedFields = append(updatedFields, t.handleCompletion(taskData, allTasks, dirty)...)
 	}
 
-	if err := writeTask(ctx, t.mw.backend, baseDir, taskData); err != nil {
-		return "", nil, fmt.Errorf("%s %w", TaskUpdateToolName, err)
+	// Flush all mutated tasks in a single batch. Nothing above writes to the
+	// backend, so a validation or cycle-detection failure aborts before any
+	// persisted change. On a mid-batch backend failure persistGraph returns an
+	// error naming the tasks it did and did not persist; because every mutation
+	// is idempotent (appendUnique / reference removal), retrying the same
+	// TaskUpdate reconciles any one-sided edge.
+	if err := t.persistGraph(ctx, baseDir, dirty); err != nil {
+		return "", nil, err
 	}
 
 	// Check if all tasks are completed. Reuse the in-memory allTasks slice:
 	// handleCompletion may have modified task objects (cleared dependencies),
 	// but status fields remain accurate for the all-completed check.
-	// Cleanup is best-effort: the task update has already been persisted above,
+	// Cleanup is best-effort: the task graph has already been persisted above,
 	// so a cleanup failure should not fail the main operation.
 	if params.Status == taskStatusCompleted {
 		if checkErr := t.deleteAllTasksIfCompleted(ctx, allTasks); checkErr != nil {
@@ -314,9 +316,11 @@ func (t *taskUpdateTool) updateBasicFields(taskData *task, params *taskUpdateArg
 	return updatedFields
 }
 
-// updateDependencies validates and applies blocks/blockedBy changes with cycle detection.
-// It uses the pre-loaded task list and builds a map for efficient cycle checks.
-func (t *taskUpdateTool) updateDependencies(ctx context.Context, taskData *task, params *taskUpdateArgs, tasks []*task) ([]string, error) {
+// updateDependencies validates and applies blocks/blockedBy changes with cycle
+// detection. It mutates only in-memory task objects (the pre-loaded snapshot)
+// and records every counterpart it touches in dirty so doUpdate can flush the
+// whole graph in a single batch; it performs no backend writes itself.
+func (t *taskUpdateTool) updateDependencies(taskData *task, params *taskUpdateArgs, tasks []*task, dirty map[string]*task) ([]string, error) {
 	taskMap := make(map[string]*task, len(tasks))
 	for _, tk := range tasks {
 		taskMap[tk.ID] = tk
@@ -340,9 +344,10 @@ func (t *taskUpdateTool) updateDependencies(ctx context.Context, taskData *task,
 			}
 		}
 		for _, blockedTaskID := range params.AddBlocks {
-			if addErr := t.addDependencyToTask(ctx, blockedTaskID, params.TaskID, "blockedBy"); addErr != nil {
-				return nil, fmt.Errorf("%s update Task #%s blocks failed, err: %w", TaskUpdateToolName, params.TaskID, addErr)
-			}
+			// taskData blocks blockedTaskID, so blockedTaskID is blockedBy taskData.
+			target := taskMap[blockedTaskID]
+			target.BlockedBy = appendUnique(target.BlockedBy, params.TaskID)
+			dirty[target.ID] = target
 		}
 		taskData.Blocks = appendUnique(taskData.Blocks, params.AddBlocks...)
 		updatedFields = append(updatedFields, "blocks")
@@ -360,9 +365,10 @@ func (t *taskUpdateTool) updateDependencies(ctx context.Context, taskData *task,
 			}
 		}
 		for _, blockingTaskID := range params.AddBlockedBy {
-			if addErr := t.addDependencyToTask(ctx, blockingTaskID, params.TaskID, "blocks"); addErr != nil {
-				return nil, fmt.Errorf("%s update Task #%s blockedBy failed, err: %w", TaskUpdateToolName, params.TaskID, addErr)
-			}
+			// taskData is blockedBy blockingTaskID, so blockingTaskID blocks taskData.
+			target := taskMap[blockingTaskID]
+			target.Blocks = appendUnique(target.Blocks, params.TaskID)
+			dirty[target.ID] = target
 		}
 		taskData.BlockedBy = appendUnique(taskData.BlockedBy, params.AddBlockedBy...)
 		updatedFields = append(updatedFields, "blockedBy")
@@ -413,45 +419,54 @@ func (t *taskUpdateTool) updateOwnerAndMetadata(ctx context.Context, taskData *t
 	return updatedFields, nil
 }
 
-// handleCompletion clears dependencies from the completed task using the pre-loaded task list,
-// and returns additional updated fields.
-func (t *taskUpdateTool) handleCompletion(ctx context.Context, taskData *task, taskID string, allTasks []*task) ([]string, error) {
-	dependenciesCleared, clearErr := t.clearCompletedTaskDependencies(ctx, taskData, allTasks)
-	if clearErr != nil {
-		return nil, fmt.Errorf("%s clear dependencies for completed Task #%s failed, err: %w", TaskUpdateToolName, taskID, clearErr)
-	}
-	if dependenciesCleared {
-		return []string{"blocks", "blockedBy"}, nil
-	}
-	return nil, nil
-}
-
-// addDependencyToTask reads a task, appends depID to the specified dependency field, and writes it back.
-// field must be "blocks" or "blockedBy".
-func (t *taskUpdateTool) addDependencyToTask(ctx context.Context, targetTaskID, depID, field string) error {
-	baseDir := t.mw.resolveBaseDir(ctx)
-	targetTask, err := readTask(ctx, t.mw.backend, baseDir, targetTaskID)
-	if err != nil {
-		return fmt.Errorf("updating %s: %w", field, err)
-	}
-	if targetTask == nil {
-		return fmt.Errorf("updating %s: task #%s not found", field, targetTaskID)
-	}
-
-	switch field {
-	case "blockedBy":
-		targetTask.BlockedBy = appendUnique(targetTask.BlockedBy, depID)
-	case "blocks":
-		targetTask.Blocks = appendUnique(targetTask.Blocks, depID)
-	}
-
-	if err := writeTask(ctx, t.mw.backend, baseDir, targetTask); err != nil {
-		return fmt.Errorf("updating %s: %w", field, err)
+// handleCompletion clears dependencies from the completed task and removes
+// references to it from its counterparts, all in memory against the pre-loaded
+// snapshot. Touched counterparts are recorded in dirty for the batched flush.
+func (t *taskUpdateTool) handleCompletion(taskData *task, allTasks []*task, dirty map[string]*task) []string {
+	if t.clearCompletedTaskDependencies(taskData, allTasks, dirty) {
+		return []string{"blocks", "blockedBy"}
 	}
 	return nil
 }
 
-func (t *taskUpdateTool) clearCompletedTaskDependencies(ctx context.Context, completedTask *task, tasks []*task) (bool, error) {
+// persistGraph writes every task in dirty back to the backend in one batch. It
+// is the single write surface for a task-graph update: all mutation and
+// validation happens in memory before this is called, so a failure here is the
+// only persistence error a TaskUpdate can surface. On a mid-batch failure it
+// reports which tasks were persisted and which were not, so a retry of the same
+// (idempotent) update can reconcile any one-sided edge left behind.
+func (t *taskUpdateTool) persistGraph(ctx context.Context, baseDir string, dirty map[string]*task) error {
+	// Write in deterministic ID order so partial-failure reporting is stable.
+	ids := make([]string, 0, len(dirty))
+	for id := range dirty {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool {
+		ni, errI := strconv.ParseInt(ids[i], 10, 64)
+		nj, errJ := strconv.ParseInt(ids[j], 10, 64)
+		if errI == nil && errJ == nil {
+			return ni < nj
+		}
+		return ids[i] < ids[j]
+	})
+
+	var persisted []string
+	for _, id := range ids {
+		if err := writeTask(ctx, t.mw.backend, baseDir, dirty[id]); err != nil {
+			remaining := ids[len(persisted):]
+			return fmt.Errorf("%s persist task graph failed at Task #%s (persisted %v, not persisted %v); retry the same update to reconcile, err: %w",
+				TaskUpdateToolName, id, persisted, remaining, err)
+		}
+		persisted = append(persisted, id)
+	}
+	return nil
+}
+
+// clearCompletedTaskDependencies removes references to completedTask from every
+// other task's blocks/blockedBy in memory, recording each modified task in
+// dirty, then clears completedTask's own edges. It reports whether completedTask
+// had any edges to clear. No backend writes happen here; persistGraph flushes.
+func (t *taskUpdateTool) clearCompletedTaskDependencies(completedTask *task, tasks []*task, dirty map[string]*task) bool {
 	for _, otherTask := range tasks {
 		if otherTask.ID == completedTask.ID {
 			continue
@@ -482,17 +497,14 @@ func (t *taskUpdateTool) clearCompletedTaskDependencies(ctx context.Context, com
 
 		otherTask.Blocks = newBlocks
 		otherTask.BlockedBy = newBlockedBy
-
-		if err := writeTask(ctx, t.mw.backend, t.mw.resolveBaseDir(ctx), otherTask); err != nil {
-			return false, fmt.Errorf("clear dependencies: %w", err)
-		}
+		dirty[otherTask.ID] = otherTask
 	}
 
 	dependenciesCleared := len(completedTask.Blocks) > 0 || len(completedTask.BlockedBy) > 0
 	completedTask.Blocks = nil
 	completedTask.BlockedBy = nil
 
-	return dependenciesCleared, nil
+	return dependenciesCleared
 }
 
 // deleteAllTasksIfCompleted deletes all tasks if every task is completed.
