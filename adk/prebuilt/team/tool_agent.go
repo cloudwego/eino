@@ -37,7 +37,6 @@ type agentToolArgs struct {
 	Prompt          string `json:"prompt"`
 	Description     string `json:"description,omitempty"`
 	SubagentType    string `json:"subagent_type,omitempty"`
-	TeamName        string `json:"team_name,omitempty"`
 	RunInBackground bool   `json:"run_in_background,omitempty"`
 }
 
@@ -72,10 +71,6 @@ func (t *agentTool) Info(_ context.Context) (*schema.ToolInfo, error) {
 				Type: schema.String,
 				Desc: "The type of specialized agent to use for this task",
 			},
-			"team_name": {
-				Type: schema.String,
-				Desc: "Optional. Must match the currently active team. A non-matching value is ignored and the active team is used; if there is no active team the call fails.",
-			},
 			"run_in_background": {
 				Type: schema.Boolean,
 				Desc: "Set to true to run this agent in the background; you will be notified when it completes. Note: when a team is active and a name is provided, the agent is always run in the background (so it stays addressable via SendMessage) regardless of this flag.",
@@ -94,12 +89,10 @@ func (t *agentTool) Info(_ context.Context) (*schema.ToolInfo, error) {
 //     run_in_background tool schema.
 //
 // The team-active half of the second predicate is resolved under teamOpLock so it
-// is serialized against TeamCreate/TeamDelete: tool calls in one assistant turn
+// is serialized against a concurrent Agent spawn: tool calls in one assistant turn
 // may run in parallel (see compose tool_node parallelRunToolCall), so reading the
-// active team outside the lock could observe an empty team while a concurrent
-// TeamCreate is mid-flight and silently downgrade the call to a one-shot
-// foreground sub-agent (no team/plantask middleware, not addressable via
-// SendMessage).
+// active team outside the lock could race with another spawn. (The team itself is
+// created by NewRunner before any tool runs and removed only at Runner shutdown.)
 func (t *agentTool) InvokableRun(ctx context.Context, argumentsInJSON string, _ ...tool.Option) (string, error) {
 	var args agentToolArgs
 	if err := sonic.UnmarshalString(argumentsInJSON, &args); err != nil {
@@ -175,8 +168,8 @@ func (t *agentTool) runForeground(ctx context.Context, args agentToolArgs) (stri
 }
 
 // runTeammate spawns the agent as a background teammate with mailbox-based communication.
-// It requires team mode (a team must have been created via TeamCreate first); without an
-// active team context the call returns errTeamNotFound.
+// It requires an active team (always present in normal operation since NewRunner
+// creates one); without it the call returns errTeamNotFound.
 //
 // This entry point acquires teamOpLock itself. It is used by the explicit
 // run_in_background path, where InvokableRun has not already taken the lock. The
@@ -185,12 +178,9 @@ func (t *agentTool) runForeground(ctx context.Context, args agentToolArgs) (stri
 // non-reentrant teamOpLock.
 func (t *agentTool) runTeammate(ctx context.Context, args agentToolArgs) (string, error) {
 	// Serialize the whole "read active team name → register member → spawn
-	// teammate" sequence against the other leader-only lifecycle tools
-	// (TeamCreate, TeamDelete). Tool calls in one assistant turn may run in
-	// parallel, so without this lock an Agent spawn could interleave with a
-	// TeamDelete that already saw an empty teammate registry and is tearing the
-	// team directories down — leaving a registered member and a running goroutine
-	// bound to a team that no longer exists on disk.
+	// teammate" sequence against a concurrent Agent spawn. Tool calls in one
+	// assistant turn may run in parallel, so without this lock two spawns reusing
+	// the same member name could race on registration.
 	t.mw.teamOpLock.Lock()
 	defer t.mw.teamOpLock.Unlock()
 	return t.runTeammateLocked(ctx, args)
@@ -206,20 +196,12 @@ func (t *agentTool) runTeammateLocked(ctx context.Context, args agentToolArgs) (
 		return "", err
 	}
 
-	// The active team is whatever TeamCreate established on this leader middleware.
-	// We deliberately do NOT fall back to args.TeamName when no team is active: a
-	// teammate spawn must attach to the team the leader is actually running (its
-	// inbox pump, router, and plantask state are all bound to that team). Honoring
-	// an arbitrary args.TeamName here would register a member and start a teammate
-	// against a team the leader never activated — its messages to the leader would
-	// land in an inbox no pump is reading. A non-matching team_name is logged and
-	// ignored; an empty active team is a hard error.
+	// The active team is the one NewRunner created for this leader. It is always
+	// present in normal operation; an empty name here would mean the leader
+	// middleware was constructed outside NewRunner, which is a programming error.
 	teamName := t.mw.getTeamName()
-	if args.TeamName != "" && teamName != args.TeamName {
-		t.mw.logger().Printf("[AgentTool] team_name %q is not the active team %q; using the active team\n", args.TeamName, teamName)
-	}
 	if teamName == "" {
-		return "", fmt.Errorf("run_in_background requires an active team (create one with TeamCreate first): %w", errTeamNotFound)
+		return "", fmt.Errorf("spawning a teammate requires an active team: %w", errTeamNotFound)
 	}
 
 	member, err := t.registerTeammate(ctx, teamName, &args)
@@ -313,8 +295,8 @@ func (t *agentTool) buildTeammateAgent(ctx context.Context, teamName string, arg
 // per-turn GenInputResult.RunCtx with its own deadline/cancel — and binding a
 // background teammate to it would cancel the teammate the moment the spawning
 // turn ends, breaking the "background teammate survives across turns" contract.
-// The teammate is instead torn down explicitly (TeamDelete / shutdown_request /
-// Runner shutdown) via the Cancel func registered below.
+// The teammate is instead torn down explicitly (shutdown_request / Runner
+// shutdown) via the Cancel func registered below.
 func (t *agentTool) spawnTeammateRunner(ctx context.Context, teamName, name string, tmAgent *adk.ChatModelAgent) error {
 	rootCtx := t.mw.lifecycle.teammateRootContext(ctx)
 	appCtx, cancel := context.WithCancel(rootCtx)

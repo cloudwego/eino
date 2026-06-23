@@ -81,32 +81,6 @@ func TestAgentTool_RunBackground_NoActiveTeam(t *testing.T) {
 	assert.Contains(t, err.Error(), "active team")
 }
 
-// TestAgentTool_RunBackground_TeamNameDoesNotBypassNoActiveTeam verifies that
-// passing an explicit team_name does NOT let the Agent tool spawn a teammate
-// when the leader has no active team. A teammate must attach to the team the
-// leader is actually running; honoring an arbitrary team_name would start a
-// teammate against a team with no leader pump reading its messages.
-func TestAgentTool_RunBackground_TeamNameDoesNotBypassNoActiveTeam(t *testing.T) {
-	mw, conf := newTestTeamMiddleware()
-
-	// A previously-existing team on disk that the leader never activated.
-	_, err := newConfigStore(conf).CreateTeam(context.Background(), "stale-team", "", LeaderAgentName, "")
-	assert.NoError(t, err)
-
-	tool := newAgentTool(mw)
-
-	_, err = tool.InvokableRun(context.Background(),
-		`{"prompt":"do something","description":"test task","run_in_background":true,"team_name":"stale-team"}`)
-	assert.Error(t, err)
-	assert.ErrorIs(t, err, errTeamNotFound)
-	assert.Contains(t, err.Error(), "active team")
-
-	// The stale team must not have gained a member from this rejected spawn.
-	exists, err := newConfigStore(conf).HasMember(context.Background(), "stale-team", defaultTeammateName)
-	assert.NoError(t, err)
-	assert.False(t, exists, "rejected spawn must not register a member in the stale team")
-}
-
 func TestSendInitialPrompt_StoresRawPromptForSingleEnvelopeFormatting(t *testing.T) {
 	mw, _ := newTestTeamMiddleware()
 	tool := newAgentTool(mw)
@@ -142,7 +116,7 @@ func TestSendInitialPrompt_StoresRawPromptForSingleEnvelopeFormatting(t *testing
 
 func TestAgentTool_RunBackground_FullFlow(t *testing.T) {
 	backend := newInMemoryBackend()
-	conf := &Config{Backend: backend, BaseDir: "/tmp/test"}
+	conf := &Config{Backend: backend, BaseDir: "/tmp/test", Name: "myteam"}
 
 	agentConf := &adk.ChatModelAgentConfig{
 		Name:        "leader",
@@ -162,11 +136,8 @@ func TestAgentTool_RunBackground_FullFlow(t *testing.T) {
 		OnAgentEvents: noopOnAgentEvents,
 	}
 
+	// The team "myteam" is created automatically by NewRunner (TeamConfig.Name).
 	runner, err := NewRunner(context.Background(), runnerConf)
-	assert.NoError(t, err)
-
-	createTool := newTeamCreateTool(runner.leaderMW)
-	_, err = createTool.InvokableRun(context.Background(), `{"team_name":"myteam"}`)
 	assert.NoError(t, err)
 
 	agentT := newAgentTool(runner.leaderMW)
@@ -190,7 +161,7 @@ func TestAgentTool_RunBackground_FullFlow(t *testing.T) {
 // as the spawning turn ends, breaking the cross-turn survival contract.
 func TestAgentTool_TeammateSurvivesToolCtxCancel(t *testing.T) {
 	backend := newInMemoryBackend()
-	conf := &Config{Backend: backend, BaseDir: "/tmp/test"}
+	conf := &Config{Backend: backend, BaseDir: "/tmp/test", Name: "myteam"}
 
 	agentConf := &adk.ChatModelAgentConfig{
 		Name:        "leader",
@@ -222,16 +193,13 @@ func TestAgentTool_TeammateSurvivesToolCtxCancel(t *testing.T) {
 	}
 
 	// Start the runner with a long-lived root context so teammates derive from it.
+	// The team "myteam" is created automatically by NewRunner (TeamConfig.Name).
 	rootCtx, rootCancel := context.WithCancel(context.Background())
 	defer rootCancel()
 
 	runner, err := NewRunner(rootCtx, runnerConf)
 	assert.NoError(t, err)
 	runner.Run(rootCtx)
-
-	createTool := newTeamCreateTool(runner.leaderMW)
-	_, err = createTool.InvokableRun(context.Background(), `{"team_name":"myteam"}`)
-	assert.NoError(t, err)
 
 	// Spawn the teammate using a per-turn context that we cancel right after.
 	turnCtx, turnCancel := context.WithCancel(context.Background())
@@ -262,7 +230,7 @@ func TestAgentTool_TeammateSurvivesToolCtxCancel(t *testing.T) {
 
 func TestAgentTool_RunBackground_InvalidMemberName(t *testing.T) {
 	backend := newInMemoryBackend()
-	conf := &Config{Backend: backend, BaseDir: "/tmp/test"}
+	conf := &Config{Backend: backend, BaseDir: "/tmp/test", Name: "myteam"}
 
 	agentConf := &adk.ChatModelAgentConfig{
 		Name:        "leader",
@@ -279,11 +247,8 @@ func TestAgentTool_RunBackground_InvalidMemberName(t *testing.T) {
 		OnAgentEvents: noopOnAgentEvents,
 	}
 
+	// The team "myteam" is created automatically by NewRunner (TeamConfig.Name).
 	runner, err := NewRunner(context.Background(), runnerConf)
-	assert.NoError(t, err)
-
-	createTool := newTeamCreateTool(runner.leaderMW)
-	_, err = createTool.InvokableRun(context.Background(), `{"team_name":"myteam"}`)
 	assert.NoError(t, err)
 
 	agentT := newAgentTool(runner.leaderMW)

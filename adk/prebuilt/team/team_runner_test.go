@@ -214,6 +214,146 @@ func TestNewRunner_FullSuccess(t *testing.T) {
 	assert.NotNil(t, runner.leaderMW)
 }
 
+// TestNewRunner_AutoCreatesNamedTeam verifies NewRunner creates the team named in
+// TeamConfig.Name up front: config.json exists with the leader as a member, and
+// the middleware reports it as the active team.
+func TestNewRunner_AutoCreatesNamedTeam(t *testing.T) {
+	backend := newInMemoryBackend()
+	conf := &Config{Backend: backend, BaseDir: "/tmp/test", Name: "myteam"}
+
+	runnerConf := &RunnerConfig{
+		AgentConfig: &adk.ChatModelAgentConfig{Name: "leader", Description: "test", Model: &mockBaseChatModel{}},
+		TeamConfig:  conf,
+		GenInput: func(_ context.Context, _ *adk.TurnLoop[TurnInput, adk.Message], items []TurnInput) (*adk.GenInputResult[TurnInput, adk.Message], error) {
+			return &adk.GenInputResult[TurnInput, adk.Message]{Consumed: items}, nil
+		},
+		OnAgentEvents: noopOnAgentEvents,
+	}
+
+	runner, err := NewRunner(context.Background(), runnerConf)
+	assert.NoError(t, err)
+	assert.Equal(t, "myteam", runner.leaderMW.getTeamName())
+
+	has, err := newConfigStore(conf).HasMember(context.Background(), "myteam", LeaderAgentName)
+	assert.NoError(t, err)
+	assert.True(t, has, "leader must be a member of the auto-created team")
+}
+
+// TestNewRunner_GeneratesTeamNameWhenUnset verifies that leaving TeamConfig.Name
+// empty makes NewRunner generate a non-empty team name and create that team.
+func TestNewRunner_GeneratesTeamNameWhenUnset(t *testing.T) {
+	backend := newInMemoryBackend()
+	conf := &Config{Backend: backend, BaseDir: "/tmp/test"}
+
+	runnerConf := &RunnerConfig{
+		AgentConfig: &adk.ChatModelAgentConfig{Name: "leader", Description: "test", Model: &mockBaseChatModel{}},
+		TeamConfig:  conf,
+		GenInput: func(_ context.Context, _ *adk.TurnLoop[TurnInput, adk.Message], items []TurnInput) (*adk.GenInputResult[TurnInput, adk.Message], error) {
+			return &adk.GenInputResult[TurnInput, adk.Message]{Consumed: items}, nil
+		},
+		OnAgentEvents: noopOnAgentEvents,
+	}
+
+	runner, err := NewRunner(context.Background(), runnerConf)
+	assert.NoError(t, err)
+
+	name := runner.leaderMW.getTeamName()
+	assert.NotEmpty(t, name)
+	assert.NoError(t, validateTeamName(name))
+
+	has, err := newConfigStore(conf).HasMember(context.Background(), name, LeaderAgentName)
+	assert.NoError(t, err)
+	assert.True(t, has)
+}
+
+// TestRunner_WaitDeletesTeamByDefault verifies the team's on-disk data is removed
+// after the loop exits when RetainDataOnExit is left false.
+func TestRunner_WaitDeletesTeamByDefault(t *testing.T) {
+	backend := newInMemoryBackend()
+	conf := &Config{Backend: backend, BaseDir: "/tmp/test", Name: "myteam"}
+
+	runnerConf := &RunnerConfig{
+		AgentConfig: &adk.ChatModelAgentConfig{Name: "leader", Description: "test", Model: &mockBaseChatModel{}},
+		TeamConfig:  conf,
+		GenInput: func(_ context.Context, loop *adk.TurnLoop[TurnInput, adk.Message], items []TurnInput) (*adk.GenInputResult[TurnInput, adk.Message], error) {
+			loop.Stop()
+			return &adk.GenInputResult[TurnInput, adk.Message]{Consumed: items}, nil
+		},
+		OnAgentEvents: noopOnAgentEvents,
+	}
+
+	runner, err := NewRunner(context.Background(), runnerConf)
+	assert.NoError(t, err)
+
+	// CreateTeam does not Mkdir the team dir itself (only its inbox/task subdirs),
+	// so register it explicitly to mirror a real filesystem where config.json's
+	// parent dir exists and is removable.
+	assert.NoError(t, backend.Mkdir(context.Background(), teamDirPath(conf.BaseDir, "myteam")))
+
+	cfgPath := newConfigStore(conf).configFilePath("myteam")
+	exists, err := backend.Exists(context.Background(), cfgPath)
+	assert.NoError(t, err)
+	assert.True(t, exists, "config.json should exist after NewRunner")
+
+	// Push an item so GenInput runs and stops the loop; without an item the loop
+	// idles and Wait would block forever.
+	runner.Push(TurnInput{Messages: []string{"hello"}})
+	runner.Run(context.Background())
+	runner.Wait()
+
+	exists, err = backend.Exists(context.Background(), cfgPath)
+	assert.NoError(t, err)
+	assert.False(t, exists, "team data must be deleted after Wait when RetainDataOnExit is false")
+}
+
+// TestRunner_WaitRetainsTeamWhenConfigured verifies RetainDataOnExit keeps the
+// team's on-disk data after the loop exits.
+func TestRunner_WaitRetainsTeamWhenConfigured(t *testing.T) {
+	backend := newInMemoryBackend()
+	conf := &Config{Backend: backend, BaseDir: "/tmp/test", Name: "myteam", RetainDataOnExit: true}
+
+	runnerConf := &RunnerConfig{
+		AgentConfig: &adk.ChatModelAgentConfig{Name: "leader", Description: "test", Model: &mockBaseChatModel{}},
+		TeamConfig:  conf,
+		GenInput: func(_ context.Context, loop *adk.TurnLoop[TurnInput, adk.Message], items []TurnInput) (*adk.GenInputResult[TurnInput, adk.Message], error) {
+			loop.Stop()
+			return &adk.GenInputResult[TurnInput, adk.Message]{Consumed: items}, nil
+		},
+		OnAgentEvents: noopOnAgentEvents,
+	}
+
+	runner, err := NewRunner(context.Background(), runnerConf)
+	assert.NoError(t, err)
+
+	runner.Push(TurnInput{Messages: []string{"hello"}})
+	runner.Run(context.Background())
+	runner.Wait()
+
+	cfgPath := newConfigStore(conf).configFilePath("myteam")
+	exists, err := backend.Exists(context.Background(), cfgPath)
+	assert.NoError(t, err)
+	assert.True(t, exists, "team data must be retained after Wait when RetainDataOnExit is true")
+}
+
+// TestNewRunner_InvalidTeamName verifies an invalid TeamConfig.Name is rejected
+// before any team directory is created.
+func TestNewRunner_InvalidTeamName(t *testing.T) {
+	conf := &Config{Backend: newInMemoryBackend(), BaseDir: "/tmp/test", Name: "../evil"}
+
+	runnerConf := &RunnerConfig{
+		AgentConfig: &adk.ChatModelAgentConfig{Name: "leader", Description: "test", Model: &mockBaseChatModel{}},
+		TeamConfig:  conf,
+		GenInput: func(_ context.Context, _ *adk.TurnLoop[TurnInput, adk.Message], items []TurnInput) (*adk.GenInputResult[TurnInput, adk.Message], error) {
+			return &adk.GenInputResult[TurnInput, adk.Message]{Consumed: items}, nil
+		},
+		OnAgentEvents: noopOnAgentEvents,
+	}
+
+	_, err := NewRunner(context.Background(), runnerConf)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "team name")
+}
+
 func TestRunner_PushRunWaitStop(t *testing.T) {
 	backend := newInMemoryBackend()
 	conf := &Config{Backend: backend, BaseDir: "/tmp/test"}

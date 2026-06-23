@@ -23,24 +23,23 @@
 // Architecture:
 //
 //	Leader (team-lead)
-//	  ├── TeamCreate tool  → creates team + config.json
 //	  ├── TaskCreate tool  → creates review tasks
 //	  ├── Agent tool       → spawns teammates (run_in_background)
-//	  ├── SendMessage tool → shutdown_request to teammates
-//	  └── TeamDelete tool  → cleanup
+//	  └── SendMessage tool → shutdown_request to teammates
 //
 //	Teammate (security-reviewer / perf-reviewer / test-reviewer)
 //	  ├── TaskUpdate tool  → claim and complete tasks
 //	  └── SendMessage tool → send report to leader / shutdown_approved
 //
 // Flow:
-//  1. Leader creates a team
+//  1. The team is created automatically when the Runner is constructed.
 //  2. Leader creates 3 review tasks
 //  3. Leader spawns 3 teammates via Agent tool (run_in_background=true)
 //  4. Each teammate: TaskUpdate(in_progress) → TaskUpdate(completed) → SendMessage(report)
 //  5. Leader receives reports, sends shutdown_request to each teammate
 //  6. Each teammate responds with shutdown_approved
-//  7. Leader receives teammate_terminated notifications, then TeamDelete
+//  7. Leader receives teammate_terminated notifications; the team is cleaned up
+//     automatically when the Runner exits.
 package main
 
 import (
@@ -84,8 +83,8 @@ func (h *agentHistory) snapshot(agent string) []*schema.Message {
 
 func main() {
 	ctx := context.Background()
-	// backend := newInMemoryBackend()
-	baseDir := "/data00/home/fanlv/eino/adk/middlewares/team/specs/demo/base_dir"
+
+	baseDir := "./base_dir"
 	os.RemoveAll(baseDir)
 	if _, err := os.Stat(baseDir); err != nil {
 		os.MkdirAll(baseDir, 0755)
@@ -98,7 +97,7 @@ func main() {
 	问题一： 天空为什么是蓝色的？
 	问题二： 海水为什么是咸的？
 	问题三： 人或者的意义是什么？
-	创建一个3人知识专家团队，分别来回答这个三个问题，回答精简一点，一句话就行了。
+	请生成 3 个知识专家队友，分别来回答这三个问题，回答精简一点，一句话就行了。
 	teamlead 不要自己回答问题，要等三个知识专家都回答了，再汇总答案给我。
 	`
 

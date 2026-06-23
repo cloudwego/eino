@@ -199,8 +199,8 @@ func (pm *pumpManager) StartPump(ctx context.Context, agentName string) {
 		// state: the pump goroutine is decoupled from the TurnLoop owner
 		// goroutine (which blocks in runner.Wait), so without intervention the
 		// loop would keep running with nobody draining its inbox — a zombie
-		// teammate that can never be delivered to, never cleaned up, and blocks
-		// TeamDelete forever. In that case stop the loop so the owner's
+		// teammate that can never be delivered to or cleaned up. In that case
+		// stop the loop so the owner's
 		// runner.Wait unblocks and the deferred cleanupExitedTeammate runs the
 		// normal crash-teardown path. A clean ctx-cancel exit (UnsetMailbox /
 		// shutdown) is the expected teardown path and must not trigger a Stop.

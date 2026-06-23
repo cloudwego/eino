@@ -152,7 +152,9 @@ func TestTeamMiddleware_BeforeAgent_Leader(t *testing.T) {
 	ctx, result, err := mw.BeforeAgent(ctx, runCtx)
 	assert.NoError(t, err)
 	assert.NotNil(t, result)
-	assert.Len(t, result.Tools, 4)
+	// Leader injects Agent + SendMessage (TeamCreate/TeamDelete were removed when
+	// team lifecycle became automatic).
+	assert.Len(t, result.Tools, 2)
 }
 
 func TestTeamMiddleware_BeforeAgent_Teammate(t *testing.T) {
