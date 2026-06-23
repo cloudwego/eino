@@ -269,8 +269,7 @@ func (t *agentTool) runTeammateLocked(ctx context.Context, args agentToolArgs) (
 
 // registerTeammate registers the teammate in the team config with a deduplicated name.
 func (t *agentTool) registerTeammate(ctx context.Context, teamName string, args *agentToolArgs) (teamMember, error) {
-	cm := t.mw.lifecycle.store
-	member, err := cm.AddMemberWithDeduplicatedName(ctx, teamName, teamMember{
+	member, err := t.mw.lifecycle.addTeammateMember(ctx, teamName, teamMember{
 		Name:      args.Name,
 		AgentType: args.SubagentType,
 		Prompt:    args.Prompt,
@@ -307,8 +306,18 @@ func (t *agentTool) buildTeammateAgent(ctx context.Context, teamName string, arg
 }
 
 // spawnTeammateRunner creates the teammate's TurnLoop runner and starts it in a goroutine.
+//
+// The teammate's runtime context is derived from the team runtime root context
+// (captured when the Runner started), NOT from the tool call's ctx. The tool
+// ctx can be a short-lived per-turn context — e.g. when the host returns a
+// per-turn GenInputResult.RunCtx with its own deadline/cancel — and binding a
+// background teammate to it would cancel the teammate the moment the spawning
+// turn ends, breaking the "background teammate survives across turns" contract.
+// The teammate is instead torn down explicitly (TeamDelete / shutdown_request /
+// Runner shutdown) via the Cancel func registered below.
 func (t *agentTool) spawnTeammateRunner(ctx context.Context, teamName, name string, tmAgent *adk.ChatModelAgent) error {
-	appCtx, cancel := context.WithCancel(ctx)
+	rootCtx := t.mw.lifecycle.teammateRootContext(ctx)
+	appCtx, cancel := context.WithCancel(rootCtx)
 	runner, err := t.mw.lifecycle.createTeammateRunner(tmAgent, name, teamName)
 	if err != nil {
 		cancel()

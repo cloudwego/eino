@@ -26,6 +26,7 @@ import (
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/adk/middlewares/plantask"
+	"github.com/cloudwego/eino/schema"
 )
 
 func TestNewAgentTool_NonNil(t *testing.T) {
@@ -178,6 +179,84 @@ func TestAgentTool_RunBackground_FullFlow(t *testing.T) {
 	has, _ := newConfigStore(conf).HasMember(context.Background(), "myteam", "worker")
 	assert.True(t, has)
 
+	runner.leaderMW.ShutdownAllTeammates(context.Background())
+}
+
+// TestAgentTool_TeammateSurvivesToolCtxCancel verifies that a background
+// teammate is bound to the team runtime root context (captured by Runner.Run),
+// not to the per-turn tool call context. Cancelling the ctx that was passed to
+// the Agent tool must NOT cancel the teammate: a host that supplies a per-turn
+// RunCtx with its own deadline would otherwise kill background teammates as soon
+// as the spawning turn ends, breaking the cross-turn survival contract.
+func TestAgentTool_TeammateSurvivesToolCtxCancel(t *testing.T) {
+	backend := newInMemoryBackend()
+	conf := &Config{Backend: backend, BaseDir: "/tmp/test"}
+
+	agentConf := &adk.ChatModelAgentConfig{
+		Name:        "leader",
+		Description: "test leader",
+		// Block so the teammate's turn does not complete on its own; its liveness
+		// is then governed purely by context cancellation.
+		Model: &blockingChatModel{},
+	}
+
+	runnerConf := &RunnerConfig{
+		AgentConfig: agentConf,
+		TeamConfig:  conf,
+		GenInput: func(ctx context.Context, loop *adk.TurnLoop[TurnInput, adk.Message], items []TurnInput) (*adk.GenInputResult[TurnInput, adk.Message], error) {
+			// Build a real Input so the teammate's turn actually runs (and blocks in
+			// blockingChatModel) instead of failing with "agent input is nil" and
+			// self-cleaning — which would defeat the survival assertion below.
+			var msgs []adk.Message
+			for _, it := range items {
+				for _, m := range it.Messages {
+					msgs = append(msgs, schema.UserMessage(m))
+				}
+			}
+			return &adk.GenInputResult[TurnInput, adk.Message]{
+				Consumed: items,
+				Input:    &adk.AgentInput{Messages: msgs},
+			}, nil
+		},
+		OnAgentEvents: noopOnAgentEvents,
+	}
+
+	// Start the runner with a long-lived root context so teammates derive from it.
+	rootCtx, rootCancel := context.WithCancel(context.Background())
+	defer rootCancel()
+
+	runner, err := NewRunner(rootCtx, runnerConf)
+	assert.NoError(t, err)
+	runner.Run(rootCtx)
+
+	createTool := newTeamCreateTool(runner.leaderMW)
+	_, err = createTool.InvokableRun(context.Background(), `{"team_name":"myteam"}`)
+	assert.NoError(t, err)
+
+	// Spawn the teammate using a per-turn context that we cancel right after.
+	turnCtx, turnCancel := context.WithCancel(context.Background())
+	agentT := newAgentTool(runner.leaderMW)
+	_, err = agentT.InvokableRun(turnCtx, `{"name":"worker","prompt":"do something","description":"test task"}`)
+	assert.NoError(t, err)
+
+	// End the spawning turn. With the fix the teammate is bound to rootCtx, so it
+	// must stay alive (and registered) despite this cancellation.
+	turnCancel()
+
+	// The teammate must remain registered (alive) for a sustained window after the
+	// spawning turn ctx is cancelled. The callback returns true (the "bad"
+	// condition for assert.Never) only when "worker" is missing, so the assertion
+	// fails the moment the teammate is erroneously torn down.
+	assert.Never(t, func() bool {
+		for _, n := range runner.leaderMW.lifecycle.activeTeammateNames() {
+			if n == "worker" {
+				return false
+			}
+		}
+		return true
+	}, 300*time.Millisecond, 30*time.Millisecond, "teammate must survive cancellation of the spawning turn ctx")
+
+	runner.Stop()
 	runner.leaderMW.ShutdownAllTeammates(context.Background())
 }
 

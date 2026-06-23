@@ -81,6 +81,15 @@ const (
 	// defaultShutdownTimeout is the maximum time to wait for teammates to exit.
 	defaultShutdownTimeout = 30 * time.Second
 
+	// defaultPumpDrainTimeout bounds how long a pump-lifecycle operation
+	// (UnsetMailbox / StartPump) waits for an old pump goroutine to fully exit
+	// after its context is cancelled. A well-behaved pump observes ctx cancel and
+	// returns promptly; this cap ensures a backend that ignores cancellation in
+	// Read/Write/Exists cannot wedge the cleanup/replacement path forever. On
+	// timeout the operation logs and proceeds, accepting a brief window where the
+	// orphaned pump may still run rather than blocking shutdown indefinitely.
+	defaultPumpDrainTimeout = 30 * time.Second
+
 	// defaultPollInterval is the fallback polling interval for mailbox reads.
 	defaultPollInterval = 500 * time.Millisecond
 

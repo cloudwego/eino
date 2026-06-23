@@ -30,6 +30,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/adk/middlewares/plantask"
@@ -56,6 +57,20 @@ type lifecycleManager struct {
 	isLeader   bool                                                             // whether this agent is the team leader
 	logger     Logger                                                           // logger instance
 	onReminder func(ctx context.Context, agentName string, reminderText string) // per-runner reminder callback
+
+	// rootCtxMu guards rootCtx. rootCtx is the long-lived team runtime context,
+	// captured once when the Runner starts (Runner.Run → setRootContext). Teammate
+	// runner goroutines are derived from this context — NOT from the per-turn tool
+	// call context — so a background teammate outlives the single assistant turn
+	// that spawned it. The tool call's own ctx can be a short-lived per-turn ctx
+	// (e.g. when the host supplies GenInputResult.RunCtx with a per-turn deadline);
+	// binding teammates to it would cancel them as soon as that turn ends, which
+	// contradicts the "background teammate survives across turns" contract.
+	// Teammate lifetime is instead governed by explicit teardown (TeamDelete /
+	// shutdown_request / Runner shutdown), which cancels each teammate's derived
+	// context via its registered Cancel func.
+	rootCtxMu sync.RWMutex
+	rootCtx   context.Context
 }
 
 func newLifecycleManager(teamCfg *Config, runnerConf *RunnerConfig, isLeader bool, router *sourceRouter, pumpMgr *pumpManager) *lifecycleManager {
@@ -81,6 +96,32 @@ func (lm *lifecycleManager) SetPlantaskMW(ptMW plantask.Middleware) {
 // agentConfig returns the agent configuration from the runner config.
 func (lm *lifecycleManager) agentConfig() *adk.ChatModelAgentConfig {
 	return lm.runnerConf.AgentConfig
+}
+
+// setRootContext records the long-lived team runtime context. It is called once
+// when the Runner starts (Runner.Run). Teammate runner goroutines are derived
+// from this context rather than from the per-turn tool call context, so a
+// background teammate is not cancelled when the assistant turn that spawned it
+// ends. See the rootCtx field doc for the full rationale.
+func (lm *lifecycleManager) setRootContext(ctx context.Context) {
+	lm.rootCtxMu.Lock()
+	lm.rootCtx = ctx
+	lm.rootCtxMu.Unlock()
+}
+
+// teammateRootContext returns the context teammate runners should be derived
+// from. It prefers the team runtime root context captured by setRootContext;
+// before the Runner has started (root not yet set, e.g. in unit tests that spawn
+// directly) it falls back to the supplied tool ctx so behaviour degrades to the
+// previous per-call binding rather than panicking on a nil context.
+func (lm *lifecycleManager) teammateRootContext(toolCtx context.Context) context.Context {
+	lm.rootCtxMu.RLock()
+	root := lm.rootCtx
+	lm.rootCtxMu.RUnlock()
+	if root != nil {
+		return root
+	}
+	return toolCtx
 }
 
 // buildTeammateAgent creates a teammate's ChatModelAgent with team and plantask middleware.
@@ -114,6 +155,44 @@ func (lm *lifecycleManager) plantaskMW() plantask.Middleware {
 // hasMember checks whether the given member exists in the team configuration.
 func (lm *lifecycleManager) hasMember(ctx context.Context, teamName, memberName string) (bool, error) {
 	return lm.store.HasMember(ctx, teamName, memberName)
+}
+
+// createTeam creates a new team (directory layout + config.json) and returns the
+// resolved team config. Exposed so the TeamCreate tool does not reach into the
+// config store directly (infrastructure access is centralized in lifecycle; see
+// the package doc comment in types.go).
+func (lm *lifecycleManager) createTeam(ctx context.Context, teamName, description, leaderName, leaderType string) (*teamConfig, error) {
+	return lm.store.CreateTeam(ctx, teamName, description, leaderName, leaderType)
+}
+
+// deleteTeam removes the persisted team (config.json, inbox, and task
+// directories) for the given team name.
+func (lm *lifecycleManager) deleteTeam(ctx context.Context, teamName string) error {
+	return lm.store.DeleteTeam(ctx, teamName)
+}
+
+// nonLeaderMemberNames returns the names of all non-leader members still listed
+// in config.json. TeamDelete uses it to detect residual members left by an
+// incomplete cleanup or a process restart.
+func (lm *lifecycleManager) nonLeaderMemberNames(ctx context.Context, teamName string) ([]string, error) {
+	return lm.store.NonLeaderMemberNames(ctx, teamName)
+}
+
+// addTeammateMember registers a teammate in config.json with a deduplicated name
+// and returns the stored member (whose Name may differ from the requested one if
+// a collision was resolved).
+func (lm *lifecycleManager) addTeammateMember(ctx context.Context, teamName string, member teamMember) (teamMember, error) {
+	return lm.store.AddMemberWithDeduplicatedName(ctx, teamName, member)
+}
+
+// configFilePath returns the on-disk path of the team's config.json.
+func (lm *lifecycleManager) configFilePath(teamName string) string {
+	return lm.store.configFilePath(teamName)
+}
+
+// leadAgentID returns the leader's agent ID for the given team.
+func (lm *lifecycleManager) leadAgentID(teamName string) string {
+	return lm.store.LeadAgentID(teamName)
 }
 
 // mailbox creates a new mailbox instance for the given team and owner.
@@ -214,10 +293,14 @@ func (lm *lifecycleManager) teardownTeammate(ctx context.Context, teamName, memb
 	// Delete inbox file before RemoveMember so a same-name teammate cannot be
 	// registered and have its fresh inbox clobbered by this delete (see the
 	// ordering note above). Deleting it also prevents a future same-name teammate
-	// from inheriting stale messages. The per-inbox lock is reference counted
-	// inside the mailbox operations (ForName/Release) and reclaimed automatically
-	// once no send/read holds it, so there is nothing to remove explicitly here.
-	if delErr := lm.teamCfg.Backend.Delete(ctx, &DeleteRequest{FilePath: lm.inboxPath(teamName, memberName)}); delErr != nil {
+	// from inheriting stale messages. The delete goes through mailbox.DeleteInbox
+	// so it holds the same per-inbox write lock as sendToOne/MarkRead: this
+	// serializes the removal against concurrent senders (a member can still pass
+	// membership validation until RemoveMember below), so a send cannot interleave
+	// with the delete to resurrect the inbox or lose its write. The per-inbox lock
+	// is reference counted (ForName/Release) and reclaimed automatically once no
+	// holder remains, so there is nothing to remove explicitly here.
+	if delErr := lm.mailbox(teamName, LeaderAgentName).DeleteInbox(ctx, memberName); delErr != nil {
 		errs = append(errs, fmt.Errorf("delete inbox for %q: %w", memberName, delErr))
 	}
 
@@ -276,8 +359,13 @@ func (lm *lifecycleManager) cleanupExitedTeammate(ctx context.Context, teamName,
 	// path (removeTeammate → stopTeammateRuntime), firstStop is false and the
 	// notification has already been sent via OnShutdownResponse — skip to avoid
 	// duplicate notifications to the leader.
+	//
+	// Pass the teardown error through so a partial cleanup failure is reported to
+	// the leader, not just logged: this is the only notification the leader gets
+	// for a crashed teammate, so swallowing the error here would hide residual
+	// state (config member, inbox, or task) with no other signal.
 	if res.firstStop {
-		lm.notifyLeaderTeammateTerminated(ctx, teamName, memberName, res.unassigned)
+		lm.notifyLeaderTeammateTerminated(ctx, teamName, memberName, res.unassigned, err)
 	}
 }
 
@@ -302,11 +390,24 @@ func (lm *lifecycleManager) unassignMemberTasks(ctx context.Context, memberName 
 }
 
 // buildTeammateTerminationMessage builds a human-readable termination notice
-// including any tasks that were unassigned.
-func buildTeammateTerminationMessage(name string, unassigned []string) string {
+// including any tasks that were unassigned and, when cleanupErr is non-nil, a
+// warning that teardown only partially succeeded.
+//
+// Surfacing cleanupErr in the leader-facing message (not just the log) is
+// deliberate: teammate teardown is best-effort and never retried from the
+// mailbox, so a swallowed inbox-delete / RemoveMember / unassign failure would
+// otherwise leave residual config members, undeleted inboxes, or stuck tasks
+// that the leader has no way to learn about. The warning tells the leader the
+// teammate is gone but the team state may need a TeamDelete(force=true) or a
+// manual retry to fully reconcile.
+func buildTeammateTerminationMessage(name string, unassigned []string, cleanupErr error) string {
 	msg := fmt.Sprintf("%s has shut down.", name)
 	if len(unassigned) > 0 {
 		msg += fmt.Sprintf(" %d task(s) were unassigned: #%s.", len(unassigned), strings.Join(unassigned, ", #"))
+	}
+	if cleanupErr != nil {
+		msg += fmt.Sprintf(" WARNING: cleanup only partially completed (%v); the team may retain residual"+
+			" config member(s), undeleted inbox(es), or unreassigned task(s). Verify with TeamDelete (force=true if needed).", cleanupErr)
 	}
 	return msg
 }
@@ -315,13 +416,13 @@ func buildTeammateTerminationMessage(name string, unassigned []string) string {
 // leader's inbox so it learns about non-graceful teammate exits (crash,
 // context cancel, etc.). Failures are best-effort because cleanup must not
 // fail, but they are logged so a dropped notification is observable.
-func (lm *lifecycleManager) notifyLeaderTeammateTerminated(ctx context.Context, teamName, memberName string, unassigned []string) {
+func (lm *lifecycleManager) notifyLeaderTeammateTerminated(ctx context.Context, teamName, memberName string, unassigned []string, cleanupErr error) {
 	if !lm.isLeader {
 		// Only the leader process owns the router and mailbox infra;
 		// teammate processes must not try to push into it.
 		return
 	}
-	notifyMsg := buildTeammateTerminationMessage(memberName, unassigned)
+	notifyMsg := buildTeammateTerminationMessage(memberName, unassigned, cleanupErr)
 	sysMsg, err := buildTeammateTerminatedSystemMessage(notifyMsg)
 	if err != nil {
 		// A marshal failure here is a programming error (the payload is built from
