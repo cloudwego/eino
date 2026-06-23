@@ -28,10 +28,11 @@ import (
 // OnAgentEvents), construct the Runner, then Push → Run → Wait.
 //
 // The leader agent is a plain adk.ChatModelAgent; NewRunner automatically injects
-// the team middleware (TeamCreate / Agent / SendMessage / TeamDelete tools) and a
-// team-aware plantask middleware (the shared task list) into it. The model here is
-// a stub so the example is deterministic and needs no API key; in a real program
-// supply a live model.Model (e.g. an OpenAI/Ark chat model) instead.
+// the team middleware (Agent / SendMessage tools) and a team-aware plantask
+// middleware (the shared task list) into it, and creates the team itself (removed
+// at Runner exit). The model here is a stub so the example is deterministic and
+// needs no API key; in a real program supply a live model.Model (e.g. an
+// OpenAI/Ark chat model) instead.
 //
 // Backend is an interface (see the Backend doc for the durability contract). This
 // example uses an in-memory implementation for brevity; production code should use

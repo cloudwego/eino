@@ -30,14 +30,6 @@ func TestSendMessageToolName(t *testing.T) {
 	assert.Equal(t, "SendMessage", sendMessageToolName)
 }
 
-func TestTeamCreateToolName(t *testing.T) {
-	assert.Equal(t, "TeamCreate", teamCreateToolName)
-}
-
-func TestTeamDeleteToolName(t *testing.T) {
-	assert.Equal(t, "TeamDelete", teamDeleteToolName)
-}
-
 func TestAgentToolDesc_NonEmpty(t *testing.T) {
 	assert.NotEmpty(t, agentToolDesc)
 }
@@ -54,18 +46,10 @@ func TestSendMessageToolDescChinese_NonEmpty(t *testing.T) {
 	assert.NotEmpty(t, sendMessageToolDescChinese)
 }
 
-func TestTeamCreateToolDesc_NonEmpty(t *testing.T) {
-	assert.NotEmpty(t, teamCreateToolDesc)
+func TestLeaderInstruction_NonEmpty(t *testing.T) {
+	assert.NotEmpty(t, leaderInstruction)
 }
 
-func TestTeamCreateToolDescChinese_NonEmpty(t *testing.T) {
-	assert.NotEmpty(t, teamCreateToolDescChinese)
-}
-
-func TestTeamDeleteToolDesc_NonEmpty(t *testing.T) {
-	assert.NotEmpty(t, teamDeleteToolDesc)
-}
-
-func TestTeamDeleteToolDescChinese_NonEmpty(t *testing.T) {
-	assert.NotEmpty(t, teamDeleteToolDescChinese)
+func TestLeaderInstructionChinese_NonEmpty(t *testing.T) {
+	assert.NotEmpty(t, leaderInstructionChinese)
 }

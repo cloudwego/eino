@@ -24,6 +24,8 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/google/uuid"
+
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/adk/middlewares/plantask"
 )
@@ -71,15 +73,28 @@ func (c *RunnerConfig) logger() Logger {
 
 // Runner wraps the TurnLoop lifecycle with multi-agent routing
 // and per-agent conversation history management.
+//
+// The team is created when NewRunner returns and removed when Wait/WaitContext
+// returns (unless TeamConfig.RetainDataOnExit is set), so the agent never has to
+// create or delete a team itself.
 type Runner struct {
 	loop     *adk.TurnLoop[TurnInput, adk.Message]
 	leaderMW *teamMiddleware
 	router   *sourceRouter
+
+	teamName         string
+	retainDataOnExit bool
 }
 
 // NewRunner creates a new Runner with multi-agent routing support.
 // It creates the team leader middleware, prepends it to AgentConfig.Handlers,
 // constructs the ChatModelAgent, and wires up the TurnLoop.
+//
+// NewRunner also creates the team itself: it writes the team directory layout
+// and config.json, then registers the leader's inbox so teammates can message it
+// the moment they are spawned. The team name comes from TeamConfig.Name, or is
+// generated when that is empty. On any failure after the team directory is
+// created, NewRunner rolls it back so a failed construction leaves no residue.
 func NewRunner(ctx context.Context, conf *RunnerConfig) (*Runner, error) {
 	if conf == nil {
 		return nil, fmt.Errorf("RunnerConfig is required")
@@ -120,8 +135,30 @@ func NewRunner(ctx context.Context, conf *RunnerConfig) (*Runner, error) {
 	leaderMW := newTeamLeadMiddleware(conf, router, pumpMgr)
 	leaderMW.lifecycle.onReminder = onReminder
 
-	agent, ptMW, err := buildTeamAgent(ctx, conf, leaderMW, "", onReminder)
+	// Create the team up front: directory layout, config.json with the leader as
+	// the first member, and the leader's registered inbox. This replaces the old
+	// TeamCreate tool — the agent no longer creates a team itself.
+	teamName, err := setupTeam(ctx, conf, leaderMW)
 	if err != nil {
+		return nil, err
+	}
+	leaderMW.setTeamName(teamName)
+
+	rollback := func() {
+		// The tool call's ctx may already be cancelled on the error path; use a
+		// fresh bounded context so cleanup still runs. Mirrors cleanupExitedTeammate.
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), defaultShutdownTimeout)
+		defer cancel()
+		leaderMW.lifecycle.cleanupLeaderMailbox()
+		if delErr := leaderMW.lifecycle.deleteTeam(cleanupCtx, teamName); delErr != nil {
+			conf.logger().Printf("NewRunner rollback: delete team %q: %v", teamName, delErr)
+		}
+	}
+
+	extraInstruction := selectToolDesc(leaderInstruction, leaderInstructionChinese)
+	agent, ptMW, err := buildTeamAgent(ctx, conf, leaderMW, extraInstruction, onReminder)
+	if err != nil {
+		rollback()
 		return nil, fmt.Errorf("create leader agent: %w", err)
 	}
 	leaderMW.lifecycle.SetPlantaskMW(ptMW)
@@ -137,10 +174,57 @@ func NewRunner(ctx context.Context, conf *RunnerConfig) (*Runner, error) {
 	router.RegisterLoop(LeaderAgentName, loop)
 
 	return &Runner{
-		loop:     loop,
-		leaderMW: leaderMW,
-		router:   router,
+		loop:             loop,
+		leaderMW:         leaderMW,
+		router:           router,
+		teamName:         teamName,
+		retainDataOnExit: conf.TeamConfig.RetainDataOnExit,
 	}, nil
+}
+
+// setupTeam resolves the team name (generating one when unset), creates the team
+// directory layout and config.json, and registers the leader's inbox (without
+// starting its pump — that happens in Run, bound to the long-lived team runtime
+// context). It returns the resolved team name. On a mailbox-registration failure
+// it rolls back the just-created team directory so no residue is left behind.
+func setupTeam(ctx context.Context, conf *RunnerConfig, leaderMW *teamMiddleware) (string, error) {
+	name := conf.TeamConfig.Name
+	if name == "" {
+		name = generateTeamName()
+	}
+	if err := validateTeamName(name); err != nil {
+		return "", fmt.Errorf("invalid team name: %w", err)
+	}
+
+	team, err := leaderMW.lifecycle.createTeam(ctx, name, "", LeaderAgentName, conf.AgentConfig.Name)
+	if err != nil {
+		return "", fmt.Errorf("create team: %w", err)
+	}
+	// createTeam may append a suffix on collision; use the resolved name.
+	resolved := team.Name
+
+	if err := leaderMW.lifecycle.registerMailbox(ctx, resolved, LeaderAgentName, &mailboxSourceConfig{
+		OwnerName:          LeaderAgentName,
+		Role:               teamRoleLeader,
+		OnShutdownResponse: leaderMW.lifecycle.makeLeaderShutdownResponseHandler(resolved),
+		Logger:             conf.logger(),
+	}); err != nil {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), defaultShutdownTimeout)
+		defer cancel()
+		if delErr := leaderMW.lifecycle.deleteTeam(cleanupCtx, resolved); delErr != nil {
+			conf.logger().Printf("setupTeam rollback: delete team %q: %v", resolved, delErr)
+		}
+		return "", fmt.Errorf("register leader mailbox: %w", err)
+	}
+
+	return resolved, nil
+}
+
+// generateTeamName returns a unique default team name for a Runner whose
+// TeamConfig.Name was left empty. Backed by a UUID so concurrent Runners over the
+// same BaseDir never collide.
+func generateTeamName() string {
+	return "team-" + uuid.New().String()
 }
 
 // Push pushes a TurnInput into the Runner's TurnLoop buffer.
@@ -156,11 +240,19 @@ func (r *Runner) Push(item TurnInput, opts ...adk.PushOption[TurnInput, adk.Mess
 // The ctx passed here is captured as the team runtime root context: background
 // teammates spawned by the Agent tool derive their runtime context from it
 // rather than from the per-turn tool call context, so a teammate survives across
-// assistant turns and is only torn down by explicit shutdown/TeamDelete or when
-// this ctx is cancelled.
+// assistant turns and is only torn down by explicit shutdown or when this ctx is
+// cancelled. The leader's mailbox pump is also started here (bound to this ctx),
+// so leader-directed messages flow as soon as the loop runs.
 func (r *Runner) Run(ctx context.Context) {
 	if r.leaderMW != nil {
 		r.leaderMW.lifecycle.setRootContext(ctx)
+		// Start the leader's mailbox pump now that the long-lived team runtime
+		// context is available. The inbox and mailbox source were already
+		// registered by NewRunner (registerMailbox), so this only attaches the
+		// pump goroutine. Binding it to ctx (not the construction ctx) ties the
+		// pump's lifetime to the run, and the TurnLoop is already registered so
+		// StartPump finds it.
+		r.leaderMW.lifecycle.startPump(ctx, LeaderAgentName)
 	}
 	r.loop.Run(ctx)
 }
@@ -178,17 +270,30 @@ func (r *Runner) Wait() *adk.TurnLoopExitState[TurnInput, adk.Message] {
 // governs how long the post-loop teammate teardown waits before giving up
 // (teardown is still capped internally by defaultShutdownTimeout). This lets a
 // host (e.g. a server's graceful-stop path) cap how long exit can take.
+//
+// After teammates are torn down and the leader pump is stopped, the team's
+// on-disk data is removed unless TeamConfig.RetainDataOnExit was set. This
+// replaces the old TeamDelete tool — cleanup is now tied to the Runner's life.
 func (r *Runner) WaitContext(ctx context.Context) *adk.TurnLoopExitState[TurnInput, adk.Message] {
 	state := r.loop.Wait()
 	if r.leaderMW != nil {
-		teamName := r.leaderMW.getTeamName()
-		if teamName != "" {
+		if r.teamName != "" {
 			r.leaderMW.ShutdownAllTeammates(ctx)
 		}
-		// Stop the leader's own mailbox pump to prevent goroutine leak.
-		// The pump is started by TeamCreate and is not covered by
-		// ShutdownAllTeammates (which only handles teammate pumps).
+		// Stop the leader's own mailbox pump to prevent a goroutine leak. It is
+		// not covered by ShutdownAllTeammates (which only handles teammate pumps).
 		r.leaderMW.lifecycle.cleanupLeaderMailbox()
+
+		// Remove the team's on-disk data unless the caller asked to retain it.
+		// Use a fresh bounded context so cleanup runs even if ctx is already
+		// cancelled (mirrors the teammate teardown cleanup contexts).
+		if !r.retainDataOnExit && r.teamName != "" {
+			cleanupCtx, cancel := context.WithTimeout(context.Background(), defaultShutdownTimeout)
+			defer cancel()
+			if err := r.leaderMW.lifecycle.deleteTeam(cleanupCtx, r.teamName); err != nil {
+				r.leaderMW.logger().Printf("WaitContext: delete team %q: %v", r.teamName, err)
+			}
+		}
 	}
 	return state
 }
@@ -317,13 +422,14 @@ func newTeamPlantaskMiddleware(ctx context.Context, teamCfg *Config, mw *teamMid
 			return tasksDirPath(teamCfg.BaseDir, mw.getTeamName())
 		}),
 		plantask.WithTaskGuard(func(_ context.Context) error {
-			// Until TeamCreate runs, getTeamName() is empty and the resolved task
+			// The team is created before the Runner returns, so getTeamName() is
+			// normally non-empty by the time any task tool runs. This guard is a
+			// defensive backstop: if the name is somehow empty, the resolved task
 			// directory would collapse to {BaseDir}/tasks instead of the
-			// team-scoped {BaseDir}/tasks/{teamName}. Reject task operations in
-			// that window so tasks are never written outside a team and never
-			// orphaned from the team that is eventually created.
+			// team-scoped {BaseDir}/tasks/{teamName}, orphaning tasks. Reject task
+			// operations in that window so tasks are never written outside a team.
 			if mw.getTeamName() == "" {
-				return fmt.Errorf("no active team; create one with %s before managing tasks", teamCreateToolName)
+				return fmt.Errorf("no active team; task operations are unavailable")
 			}
 			return nil
 		}),

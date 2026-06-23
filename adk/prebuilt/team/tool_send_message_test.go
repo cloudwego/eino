@@ -71,8 +71,7 @@ func TestSendMessageTool_InvokableRun_InvalidJSON(t *testing.T) {
 	mw, _ := newTestTeamMiddleware()
 	ctx := context.Background()
 
-	createTool := newTeamCreateTool(mw)
-	_, err := createTool.InvokableRun(ctx, `{"team_name":"myteam"}`)
+	err := setupTestTeam(ctx, mw, "myteam")
 	assert.NoError(t, err)
 
 	tool, err := newSendMessageTool(mw, LeaderAgentName)
@@ -87,8 +86,7 @@ func TestSendMessageTool_InvokableRun_EmptyType(t *testing.T) {
 	mw, _ := newTestTeamMiddleware()
 	ctx := context.Background()
 
-	createTool := newTeamCreateTool(mw)
-	_, err := createTool.InvokableRun(ctx, `{"team_name":"myteam"}`)
+	err := setupTestTeam(ctx, mw, "myteam")
 	assert.NoError(t, err)
 
 	tool, err := newSendMessageTool(mw, LeaderAgentName)
@@ -103,8 +101,7 @@ func TestSendMessageTool_InvokableRun_InvalidType(t *testing.T) {
 	mw, _ := newTestTeamMiddleware()
 	ctx := context.Background()
 
-	createTool := newTeamCreateTool(mw)
-	_, err := createTool.InvokableRun(ctx, `{"team_name":"myteam"}`)
+	err := setupTestTeam(ctx, mw, "myteam")
 	assert.NoError(t, err)
 
 	tool, err := newSendMessageTool(mw, LeaderAgentName)
@@ -119,8 +116,7 @@ func TestSendMessageTool_InvokableRun_DM_MissingRecipient(t *testing.T) {
 	mw, _ := newTestTeamMiddleware()
 	ctx := context.Background()
 
-	createTool := newTeamCreateTool(mw)
-	_, err := createTool.InvokableRun(ctx, `{"team_name":"myteam"}`)
+	err := setupTestTeam(ctx, mw, "myteam")
 	assert.NoError(t, err)
 
 	tool, err := newSendMessageTool(mw, LeaderAgentName)
@@ -135,8 +131,7 @@ func TestSendMessageTool_InvokableRun_DM_MissingContent(t *testing.T) {
 	mw, _ := newTestTeamMiddleware()
 	ctx := context.Background()
 
-	createTool := newTeamCreateTool(mw)
-	_, err := createTool.InvokableRun(ctx, `{"team_name":"myteam"}`)
+	err := setupTestTeam(ctx, mw, "myteam")
 	assert.NoError(t, err)
 
 	tool, err := newSendMessageTool(mw, LeaderAgentName)
@@ -151,8 +146,7 @@ func TestSendMessageTool_InvokableRun_DM_MissingSummary(t *testing.T) {
 	mw, _ := newTestTeamMiddleware()
 	ctx := context.Background()
 
-	createTool := newTeamCreateTool(mw)
-	_, err := createTool.InvokableRun(ctx, `{"team_name":"myteam"}`)
+	err := setupTestTeam(ctx, mw, "myteam")
 	assert.NoError(t, err)
 
 	tool, err := newSendMessageTool(mw, LeaderAgentName)
@@ -167,8 +161,7 @@ func TestSendMessageTool_InvokableRun_DM_Success(t *testing.T) {
 	mw, conf := newTestTeamMiddleware()
 	ctx := context.Background()
 
-	createTool := newTeamCreateTool(mw)
-	_, err := createTool.InvokableRun(ctx, `{"team_name":"myteam"}`)
+	err := setupTestTeam(ctx, mw, "myteam")
 	assert.NoError(t, err)
 
 	teamName := mw.getTeamName()
@@ -208,8 +201,7 @@ func TestSendMessageTool_InvokableRun_Broadcast(t *testing.T) {
 	mw, conf := newTestTeamMiddleware()
 	ctx := context.Background()
 
-	createTool := newTeamCreateTool(mw)
-	_, err := createTool.InvokableRun(ctx, `{"team_name":"myteam"}`)
+	err := setupTestTeam(ctx, mw, "myteam")
 	assert.NoError(t, err)
 
 	teamName := mw.getTeamName()
@@ -264,8 +256,7 @@ func TestSendMessageTool_InvokableRun_ShutdownRequest_MissingRecipient(t *testin
 	mw, _ := newTestTeamMiddleware()
 	ctx := context.Background()
 
-	createTool := newTeamCreateTool(mw)
-	_, err := createTool.InvokableRun(ctx, `{"team_name":"myteam"}`)
+	err := setupTestTeam(ctx, mw, "myteam")
 	assert.NoError(t, err)
 
 	tool, err := newSendMessageTool(mw, LeaderAgentName)
@@ -280,8 +271,7 @@ func TestSendMessageTool_InvokableRun_ShutdownResponse_MissingFields(t *testing.
 	mw, _ := newTestTeamMiddleware()
 	ctx := context.Background()
 
-	createTool := newTeamCreateTool(mw)
-	_, err := createTool.InvokableRun(ctx, `{"team_name":"myteam"}`)
+	err := setupTestTeam(ctx, mw, "myteam")
 	assert.NoError(t, err)
 
 	tool, err := newSendMessageTool(mw, LeaderAgentName)
@@ -300,8 +290,7 @@ func TestSendMessageTool_InvokableRun_ShutdownRequest_Success(t *testing.T) {
 	mw, conf := newTestTeamMiddleware()
 	ctx := context.Background()
 
-	createTool := newTeamCreateTool(mw)
-	_, err := createTool.InvokableRun(ctx, `{"team_name":"myteam"}`)
+	err := setupTestTeam(ctx, mw, "myteam")
 	assert.NoError(t, err)
 
 	teamName := mw.getTeamName()
@@ -328,8 +317,7 @@ func TestSendMessageTool_ValidateRecipient_NonMember(t *testing.T) {
 	mw, _ := newTestTeamMiddleware()
 	ctx := context.Background()
 
-	createTool := newTeamCreateTool(mw)
-	_, err := createTool.InvokableRun(ctx, `{"team_name":"myteam"}`)
+	err := setupTestTeam(ctx, mw, "myteam")
 	assert.NoError(t, err)
 
 	tool, err := newSendMessageTool(mw, LeaderAgentName)
@@ -344,8 +332,7 @@ func TestSendMessageTool_ValidateRecipient_Broadcast(t *testing.T) {
 	mw, _ := newTestTeamMiddleware()
 	ctx := context.Background()
 
-	createTool := newTeamCreateTool(mw)
-	_, err := createTool.InvokableRun(ctx, `{"team_name":"myteam"}`)
+	err := setupTestTeam(ctx, mw, "myteam")
 	assert.NoError(t, err)
 
 	tool, err := newSendMessageTool(mw, LeaderAgentName)
@@ -575,8 +562,7 @@ func TestSendMessageTool_InvokableRun_DM_NonMemberRecipient(t *testing.T) {
 	mw, _ := newTestTeamMiddleware()
 	ctx := context.Background()
 
-	createTool := newTeamCreateTool(mw)
-	_, err := createTool.InvokableRun(ctx, `{"team_name":"myteam"}`)
+	err := setupTestTeam(ctx, mw, "myteam")
 	assert.NoError(t, err)
 
 	tool, err := newSendMessageTool(mw, LeaderAgentName)
@@ -591,8 +577,7 @@ func TestSendMessageTool_InvokableRun_ShutdownResponse_ByLeader(t *testing.T) {
 	mw, conf := newTestTeamMiddleware()
 	ctx := context.Background()
 
-	createTool := newTeamCreateTool(mw)
-	_, err := createTool.InvokableRun(ctx, `{"team_name":"myteam"}`)
+	err := setupTestTeam(ctx, mw, "myteam")
 	assert.NoError(t, err)
 
 	teamName := mw.getTeamName()
@@ -618,8 +603,7 @@ func TestSendMessageTool_InvokableRun_Broadcast_NoContent(t *testing.T) {
 	mw, _ := newTestTeamMiddleware()
 	ctx := context.Background()
 
-	createTool := newTeamCreateTool(mw)
-	_, err := createTool.InvokableRun(ctx, `{"team_name":"myteam"}`)
+	err := setupTestTeam(ctx, mw, "myteam")
 	assert.NoError(t, err)
 
 	tool, err := newSendMessageTool(mw, LeaderAgentName)
@@ -634,8 +618,7 @@ func TestSendMessageTool_InvokableRun_Broadcast_NoSummary(t *testing.T) {
 	mw, _ := newTestTeamMiddleware()
 	ctx := context.Background()
 
-	createTool := newTeamCreateTool(mw)
-	_, err := createTool.InvokableRun(ctx, `{"team_name":"myteam"}`)
+	err := setupTestTeam(ctx, mw, "myteam")
 	assert.NoError(t, err)
 
 	tool, err := newSendMessageTool(mw, LeaderAgentName)
@@ -650,8 +633,7 @@ func TestSendMessageTool_InvokableRun_ShutdownRequest_NonMember(t *testing.T) {
 	mw, _ := newTestTeamMiddleware()
 	ctx := context.Background()
 
-	createTool := newTeamCreateTool(mw)
-	_, err := createTool.InvokableRun(ctx, `{"team_name":"myteam"}`)
+	err := setupTestTeam(ctx, mw, "myteam")
 	assert.NoError(t, err)
 
 	tool, err := newSendMessageTool(mw, LeaderAgentName)
@@ -666,8 +648,7 @@ func TestSendMessageTool_InvokableRun_DM_VerifyInboxContent(t *testing.T) {
 	mw, conf := newTestTeamMiddleware()
 	ctx := context.Background()
 
-	createTool := newTeamCreateTool(mw)
-	_, err := createTool.InvokableRun(ctx, `{"team_name":"myteam"}`)
+	err := setupTestTeam(ctx, mw, "myteam")
 	assert.NoError(t, err)
 
 	teamName := mw.getTeamName()
@@ -705,8 +686,7 @@ func TestSendMessageTool_InvokableRun_ShutdownRequest_VerifyResult(t *testing.T)
 	mw, conf := newTestTeamMiddleware()
 	ctx := context.Background()
 
-	createTool := newTeamCreateTool(mw)
-	_, err := createTool.InvokableRun(ctx, `{"team_name":"myteam"}`)
+	err := setupTestTeam(ctx, mw, "myteam")
 	assert.NoError(t, err)
 
 	teamName := mw.getTeamName()
@@ -748,8 +728,7 @@ func TestSendMessageTool_ValidateRecipient_EmptyTo(t *testing.T) {
 	mw, _ := newTestTeamMiddleware()
 	ctx := context.Background()
 
-	createTool := newTeamCreateTool(mw)
-	_, err := createTool.InvokableRun(ctx, `{"team_name":"myteam"}`)
+	err := setupTestTeam(ctx, mw, "myteam")
 	assert.NoError(t, err)
 
 	tool, err := newSendMessageTool(mw, LeaderAgentName)
@@ -763,8 +742,7 @@ func TestSendMessageTool_ValidateRecipient_MemberExists(t *testing.T) {
 	mw, conf := newTestTeamMiddleware()
 	ctx := context.Background()
 
-	createTool := newTeamCreateTool(mw)
-	_, err := createTool.InvokableRun(ctx, `{"team_name":"myteam"}`)
+	err := setupTestTeam(ctx, mw, "myteam")
 	assert.NoError(t, err)
 
 	teamName := mw.getTeamName()
@@ -783,8 +761,7 @@ func TestSendMessageTool_InvokableRun_Broadcast_ExcludesSender(t *testing.T) {
 	mw, conf := newTestTeamMiddleware()
 	ctx := context.Background()
 
-	createTool := newTeamCreateTool(mw)
-	_, err := createTool.InvokableRun(ctx, `{"team_name":"myteam"}`)
+	err := setupTestTeam(ctx, mw, "myteam")
 	assert.NoError(t, err)
 
 	teamName := mw.getTeamName()
@@ -827,8 +804,7 @@ func TestSendMessageTool_InvokableRun_TeammateAsSender(t *testing.T) {
 	mw, conf := newTestTeamMiddleware()
 	ctx := context.Background()
 
-	createTool := newTeamCreateTool(mw)
-	_, err := createTool.InvokableRun(ctx, `{"team_name":"myteam"}`)
+	err := setupTestTeam(ctx, mw, "myteam")
 	assert.NoError(t, err)
 
 	teamName := mw.getTeamName()
@@ -892,8 +868,7 @@ func TestSendMessageTool_DeliveryWarning_ResidualMember(t *testing.T) {
 	mw, conf := newTestTeamMiddleware()
 	ctx := context.Background()
 
-	createTool := newTeamCreateTool(mw)
-	_, err := createTool.InvokableRun(ctx, `{"team_name":"myteam"}`)
+	err := setupTestTeam(ctx, mw, "myteam")
 	assert.NoError(t, err)
 
 	teamName := mw.getTeamName()
@@ -926,8 +901,7 @@ func TestSendMessageTool_DMToTornDownInboxDoesNotResurrect(t *testing.T) {
 	mw, conf := newTestTeamMiddleware()
 	ctx := context.Background()
 
-	createTool := newTeamCreateTool(mw)
-	_, err := createTool.InvokableRun(ctx, `{"team_name":"myteam"}`)
+	err := setupTestTeam(ctx, mw, "myteam")
 	assert.NoError(t, err)
 
 	teamName := mw.getTeamName()
@@ -953,8 +927,7 @@ func TestSendMessageTool_DeliveryWarning_ShutdownRequestResidualMember(t *testin
 	mw, conf := newTestTeamMiddleware()
 	ctx := context.Background()
 
-	createTool := newTeamCreateTool(mw)
-	_, err := createTool.InvokableRun(ctx, `{"team_name":"myteam"}`)
+	err := setupTestTeam(ctx, mw, "myteam")
 	assert.NoError(t, err)
 
 	teamName := mw.getTeamName()
@@ -979,8 +952,7 @@ func TestSendMessageTool_DeliveryWarning_AbsentForLiveTeammate(t *testing.T) {
 	mw, conf := newTestTeamMiddleware()
 	ctx := context.Background()
 
-	createTool := newTeamCreateTool(mw)
-	_, err := createTool.InvokableRun(ctx, `{"team_name":"myteam"}`)
+	err := setupTestTeam(ctx, mw, "myteam")
 	assert.NoError(t, err)
 
 	teamName := mw.getTeamName()
@@ -1010,8 +982,7 @@ func TestSendMessageTool_DeliveryWarning_SkippedForTeammateSender(t *testing.T) 
 	mw.isLeader = false
 	ctx := context.Background()
 
-	createTool := newTeamCreateTool(mw)
-	_, err := createTool.InvokableRun(ctx, `{"team_name":"myteam"}`)
+	err := setupTestTeam(ctx, mw, "myteam")
 	assert.NoError(t, err)
 
 	teamName := mw.getTeamName()
@@ -1037,8 +1008,7 @@ func TestSendMessageTool_DeliveryWarning_AbsentForLeaderRecipient(t *testing.T) 
 	mw, conf := newTestTeamMiddleware()
 	ctx := context.Background()
 
-	createTool := newTeamCreateTool(mw)
-	_, err := createTool.InvokableRun(ctx, `{"team_name":"myteam"}`)
+	err := setupTestTeam(ctx, mw, "myteam")
 	assert.NoError(t, err)
 
 	teamName := mw.getTeamName()
@@ -1065,8 +1035,7 @@ func TestSendMessageTool_SerializedAgainstTeamOpWriteLock(t *testing.T) {
 	mw, conf := newTestTeamMiddleware()
 	ctx := context.Background()
 
-	createTool := newTeamCreateTool(mw)
-	_, err := createTool.InvokableRun(ctx, `{"team_name":"myteam"}`)
+	err := setupTestTeam(ctx, mw, "myteam")
 	assert.NoError(t, err)
 
 	teamName := mw.getTeamName()
@@ -1115,8 +1084,7 @@ func TestSendMessageTool_ConcurrentSendsNotMutuallyBlocked(t *testing.T) {
 	mw, conf := newTestTeamMiddleware()
 	ctx := context.Background()
 
-	createTool := newTeamCreateTool(mw)
-	_, err := createTool.InvokableRun(ctx, `{"team_name":"myteam"}`)
+	err := setupTestTeam(ctx, mw, "myteam")
 	assert.NoError(t, err)
 
 	teamName := mw.getTeamName()

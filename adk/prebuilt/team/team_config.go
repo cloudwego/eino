@@ -306,7 +306,7 @@ func (s *configStore) HasMember(ctx context.Context, teamName, memberName string
 }
 
 // NonLeaderMemberNames returns the names of members persisted in config.json
-// excluding the leader. TeamDelete consults this to detect members that still
+// excluding the leader. Team teardown consults this to detect members that still
 // exist in the persistent source of truth even when no goroutine is running for
 // them (e.g. a prior cleanup failed or the process restarted), so deletion does
 // not silently discard recoverable member state.
@@ -327,7 +327,7 @@ func (s *configStore) NonLeaderMemberNames(ctx context.Context, teamName string)
 // DeleteTeam removes the team's tasks directory and then its team directory.
 //
 // Order matters for crash recovery: the team directory holds config.json, the
-// persistent source of truth TeamDelete consults (via NonLeaderMemberNames) to
+// persistent source of truth team teardown consults (via NonLeaderMemberNames) to
 // decide whether deletion is safe. By deleting the tasks directory first and the
 // team directory (config.json) last, any mid-sequence failure leaves config.json
 // intact, so a retry still passes the residual-member check instead of failing
@@ -342,7 +342,7 @@ func (s *configStore) DeleteTeam(ctx context.Context, teamName string) error {
 	taskDir := tasksDirPath(s.conf.BaseDir, teamName)
 
 	if err := deleteDirIfExists(ctx, s.conf.Backend, taskDir); err != nil {
-		// config.json (in teamDir) is untouched, so a retry of TeamDelete still
+		// config.json (in teamDir) is untouched, so a retry of team teardown still
 		// sees a complete team and can clean up; surface that this is recoverable.
 		return fmt.Errorf("delete task dir (team config left intact, retry to reconcile): %w", err)
 	}
