@@ -874,6 +874,44 @@ func TestTaskUpdateToolNoDeleteWhenNotAllCompleted(t *testing.T) {
 	assert.Equal(t, taskStatusCompleted, updatedTask1.Status)
 }
 
+// TestTaskUpdateToolNoAutoDeleteInSharedTaskMode verifies that completing the
+// last outstanding task in shared-task mode (team integration) does NOT wipe the
+// team-wide task graph, even when every task is completed. The auto-clear is a
+// single-agent "scratch pad" convenience and would otherwise non-deterministically
+// destroy completed-task visibility for the whole team.
+func TestTaskUpdateToolNoAutoDeleteInSharedTaskMode(t *testing.T) {
+	ctx := context.Background()
+	backend := newInMemoryBackend()
+	baseDir := "/tmp/tasks"
+
+	teamMW := &middleware{
+		backend:             backend,
+		baseDir:             baseDir,
+		taskBaseDirResolver: func(ctx context.Context) string { return baseDir },
+		agentNameResolver:   func(ctx context.Context) string { return "agent-a" },
+	}
+
+	task1 := &task{ID: "1", Subject: "Task 1", Status: taskStatusCompleted, Blocks: []string{}, BlockedBy: []string{}}
+	task1JSON, _ := sonic.MarshalString(task1)
+	_ = backend.Write(ctx, &WriteRequest{FilePath: filepath.Join(baseDir, "1.json"), Content: task1JSON})
+
+	task2 := &task{ID: "2", Subject: "Task 2", Status: taskStatusInProgress, Blocks: []string{}, BlockedBy: []string{}}
+	task2JSON, _ := sonic.MarshalString(task2)
+	_ = backend.Write(ctx, &WriteRequest{FilePath: filepath.Join(baseDir, "2.json"), Content: task2JSON})
+
+	tool := newTaskUpdateTool(teamMW, &sync.RWMutex{})
+
+	// Completing task 2 makes every task completed; in single-agent mode this
+	// would trigger deleteAllTasksIfCompleted, but shared-task mode must not.
+	_, err := tool.InvokableRun(ctx, `{"taskId": "2", "status": "completed"}`)
+	assert.NoError(t, err)
+
+	_, err = backend.Read(ctx, &ReadRequest{FilePath: filepath.Join(baseDir, "1.json")})
+	assert.NoError(t, err, "completed task 1 must survive in shared-task mode")
+	_, err = backend.Read(ctx, &ReadRequest{FilePath: filepath.Join(baseDir, "2.json")})
+	assert.NoError(t, err, "completed task 2 must survive in shared-task mode")
+}
+
 func TestTaskUpdateToolInvalidJSON(t *testing.T) {
 	ctx := context.Background()
 	backend := newInMemoryBackend()

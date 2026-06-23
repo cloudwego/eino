@@ -335,6 +335,13 @@ func (t *sendMessageTool) buildBroadcastResult(args *sendMessageArgs, bcast broa
 		"routing":   t.buildRoutingResult(broadcastTarget, args),
 	}
 
+	// Members removed mid-broadcast are reported as skipped (not failures) so the
+	// model can see why a recipient it expected is absent from the delivered list
+	// without treating a benign concurrent removal as an error to retry.
+	if len(bcast.Skipped) > 0 {
+		result["skipped"] = bcast.Skipped
+	}
+
 	if bErr == nil {
 		// A nil error with no recipients means the team has no other members, not
 		// that the message reached the whole team. Use a distinct message so the

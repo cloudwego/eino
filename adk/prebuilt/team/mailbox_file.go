@@ -191,20 +191,16 @@ type broadcastResult struct {
 	Delivered []string
 	// Failed maps each member that could not be reached to its error message.
 	Failed map[string]string
+	// Skipped lists members that were dropped without an error because their
+	// inbox no longer existed at delivery time — i.e. the member was removed
+	// (RemoveMember + DeleteInbox) between the membership snapshot and this write.
+	// They are reported separately from Failed so a benign concurrent removal is
+	// not surfaced as a delivery error.
+	Skipped []string
 }
 
 func (m *mailbox) sendToOne(ctx context.Context, to string, msg *outboxMessage) error {
-	now := utcNowMillis()
-
-	inboxMsg := inboxMessage{
-		ID:        uuid.New().String(),
-		From:      m.conf.OwnerName,
-		To:        to,
-		Text:      msg.Text,
-		Summary:   msg.Summary,
-		Timestamp: now,
-		Read:      false,
-	}
+	inboxMsg := m.newInboxMessage(to, msg)
 
 	// Use per-target lock so all senders writing to the same inbox are serialized.
 	// Release is paired with ForName so the manager can reclaim the lock once no
@@ -225,12 +221,71 @@ func (m *mailbox) sendToOne(ctx context.Context, to string, msg *outboxMessage) 
 	return m.writeInbox(ctx, to, msgs)
 }
 
+// newInboxMessage builds an inboxMessage envelope addressed to `to` from an
+// outboxMessage. Shared by sendToOne and the broadcast fan-out.
+func (m *mailbox) newInboxMessage(to string, msg *outboxMessage) inboxMessage {
+	return inboxMessage{
+		ID:        uuid.New().String(),
+		From:      m.conf.OwnerName,
+		To:        to,
+		Text:      msg.Text,
+		Summary:   msg.Summary,
+		Timestamp: utcNowMillis(),
+		Read:      false,
+	}
+}
+
+// sendToOneIfExists appends a message to an existing inbox only. It reports
+// delivered=false (without an error) when the target inbox no longer exists,
+// which broadcast treats as a member removed mid-fan-out rather than a failure.
+//
+// The existence check runs under the same per-inbox lock that DeleteInbox holds,
+// so it is race-free: either this sees the inbox before DeleteInbox removes it
+// (and writes), or it observes the inbox already gone (and skips). Without the
+// existence guard, writeInbox would unconditionally recreate the file, leaking an
+// orphaned inbox for a member that was just torn down.
+func (m *mailbox) sendToOneIfExists(ctx context.Context, to string, msg *outboxMessage) (delivered bool, err error) {
+	inboxMsg := m.newInboxMessage(to, msg)
+
+	lock := m.inboxLocks.ForName(to)
+	defer m.inboxLocks.Release(to)
+	lock.Lock()
+	defer lock.Unlock()
+
+	exists, err := m.conf.Backend.Exists(ctx, m.inboxFilePathForOwner(to))
+	if err != nil {
+		return false, fmt.Errorf("check inbox exists: %w", err)
+	}
+	if !exists {
+		return false, nil
+	}
+
+	msgs, err := m.readInbox(ctx, to)
+	if err != nil {
+		return false, fmt.Errorf("read inbox: %w", err)
+	}
+
+	msgs = append(msgs, inboxMsg)
+
+	if err := m.writeInbox(ctx, to, msgs); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // broadcast delivers msg to every other team member. Delivery is best-effort and
 // non-atomic: each recipient is written independently, so a mid-broadcast failure
 // leaves earlier recipients with the message and later ones without. The returned
-// broadcastResult records exactly who received it and who did not so callers can
-// surface the breakdown (and retry if desired); the joined error is returned for
-// callers that only need a pass/fail signal.
+// broadcastResult records exactly who received it, who failed, and who was skipped
+// (removed mid-broadcast) so callers can surface the breakdown (and retry if
+// desired); the joined error is returned for callers that only need a pass/fail
+// signal.
+//
+// The membership list is a snapshot taken before the per-recipient writes, so a
+// member can be removed (RemoveMember + DeleteInbox) after the snapshot but before
+// its write. sendToOneIfExists guards against that by only appending to an inbox
+// that still exists, checked under the per-inbox lock; a vanished inbox is recorded
+// in Skipped rather than resurrected as an orphaned file.
 //
 // Cost: broadcast performs one full read-modify-write of each recipient's inbox
 // file, i.e. O(N) backend round-trips and O(N × inbox size) IO for N members.
@@ -250,12 +305,19 @@ func (m *mailbox) broadcast(ctx context.Context, msg *outboxMessage) (broadcastR
 		if name == m.conf.OwnerName {
 			continue
 		}
-		if err := m.sendToOne(ctx, name, msg); err != nil {
+		delivered, err := m.sendToOneIfExists(ctx, name, msg)
+		if err != nil {
 			if res.Failed == nil {
 				res.Failed = make(map[string]string)
 			}
 			res.Failed[name] = err.Error()
 			errs = append(errs, fmt.Errorf("broadcast to %s: %w", name, err))
+			continue
+		}
+		if !delivered {
+			// Inbox no longer exists: the member was removed between the snapshot and
+			// this write. Skip silently (not a delivery failure).
+			res.Skipped = append(res.Skipped, name)
 			continue
 		}
 		res.Delivered = append(res.Delivered, name)

@@ -409,6 +409,40 @@ func TestBroadcast_ReportsDeliveredAndFailed(t *testing.T) {
 	assert.Empty(t, res.Failed)
 }
 
+// TestBroadcast_SkipsRemovedMemberWithoutResurrectingInbox guards the broadcast
+// TOCTOU fix: a member present in the membership snapshot but whose inbox no
+// longer exists (removed mid-broadcast) must be reported as Skipped — not
+// Delivered and not Failed — and broadcast must NOT recreate an orphan inbox file
+// for it.
+func TestBroadcast_SkipsRemovedMemberWithoutResurrectingInbox(t *testing.T) {
+	backend := newInMemoryBackend()
+	members := []string{"team-lead", "agent1", "agent2"}
+	mb := newTestMailbox(backend, "/tmp/test", "myteam", "team-lead", members)
+	ctx := context.Background()
+
+	// Only agent1 has an inbox; agent2 is in the snapshot but its inbox was
+	// already deleted (simulating a concurrent RemoveMember + DeleteInbox).
+	agent1Path := filepath.Join("/tmp/test", "teams", "myteam", "inboxes", "agent1.json")
+	assert.NoError(t, initInboxFile(ctx, backend, agent1Path))
+	agent2Path := filepath.Join("/tmp/test", "teams", "myteam", "inboxes", "agent2.json")
+
+	res, err := mb.broadcast(ctx, &outboxMessage{
+		To:      "*",
+		Type:    messageTypeBroadcast,
+		Text:    "hello all",
+		Summary: "greeting",
+	})
+	assert.NoError(t, err)
+	assert.Equal(t, []string{"agent1"}, res.Delivered)
+	assert.Equal(t, []string{"agent2"}, res.Skipped)
+	assert.Empty(t, res.Failed)
+
+	// The removed member's inbox must not have been recreated.
+	exists, err := backend.Exists(ctx, agent2Path)
+	assert.NoError(t, err)
+	assert.False(t, exists, "broadcast must not resurrect a removed member's inbox")
+}
+
 func TestBroadcast_PartialFailureReportsBreakdown(t *testing.T) {
 	backend := newInMemoryBackend()
 	members := []string{"team-lead", "agent1", "agent2"}
