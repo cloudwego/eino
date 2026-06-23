@@ -152,7 +152,16 @@ func (r *Runner) Push(item TurnInput, opts ...adk.PushOption[TurnInput, adk.Mess
 
 // Run starts the TurnLoop. It is non-blocking: the loop runs in the background.
 // Use Wait to block until the loop exits.
+//
+// The ctx passed here is captured as the team runtime root context: background
+// teammates spawned by the Agent tool derive their runtime context from it
+// rather than from the per-turn tool call context, so a teammate survives across
+// assistant turns and is only torn down by explicit shutdown/TeamDelete or when
+// this ctx is cancelled.
 func (r *Runner) Run(ctx context.Context) {
+	if r.leaderMW != nil {
+		r.leaderMW.lifecycle.setRootContext(ctx)
+	}
 	r.loop.Run(ctx)
 }
 

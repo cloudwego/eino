@@ -89,6 +89,19 @@ func (t *sendMessageTool) Info(_ context.Context) (*schema.ToolInfo, error) {
 }
 
 func (t *sendMessageTool) InvokableRun(ctx context.Context, argumentsInJSON string, _ ...tool.Option) (string, error) {
+	// Hold the team-op read lock for the whole "read active team → validate
+	// recipient → write inbox" sequence. This is a shared lock, so concurrent
+	// SendMessage calls still run in parallel, but it excludes the exclusive
+	// writers (TeamCreate/Agent/TeamDelete). Without it, TeamDelete could delete
+	// the team directory and clear the team name in the window between this call
+	// reading the active team (and passing membership validation) and actually
+	// writing the inbox, producing a backend-dependent outcome (a failed write or
+	// a recreated just-deleted path). The lock is held only on the leader's
+	// middleware instance for any real exclusion; on a teammate's middleware it is
+	// an uncontended RLock and thus effectively free.
+	t.mw.teamOpLock.RLock()
+	defer t.mw.teamOpLock.RUnlock()
+
 	teamName := t.mw.getTeamName()
 	if teamName == "" {
 		return "", errTeamNotFound

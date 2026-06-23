@@ -103,6 +103,21 @@ func initInboxFile(ctx context.Context, backend Backend, inboxPath string) error
 	})
 }
 
+// DeleteInbox removes the given agent's inbox file, holding the same per-inbox
+// write lock that sendToOne/MarkRead use. Taking the lock serializes the delete
+// against concurrent senders so a send cannot interleave with the removal and
+// either resurrect the file (recreating an inbox for a member being torn down)
+// or have its write silently discarded. The lock reference is paired with
+// Release so the manager can reclaim it once no sender/reader holds it.
+func (m *mailbox) DeleteInbox(ctx context.Context, agentName string) error {
+	lock := m.inboxLocks.ForName(agentName)
+	defer m.inboxLocks.Release(agentName)
+	lock.Lock()
+	defer lock.Unlock()
+
+	return m.conf.Backend.Delete(ctx, &DeleteRequest{FilePath: m.inboxFilePathForOwner(agentName)})
+}
+
 // inboxFilePathForOwner returns the path to an agent's inbox file.
 func (m *mailbox) inboxFilePathForOwner(agentName string) string {
 	return inboxFilePath(m.conf.BaseDir, m.conf.TeamName, agentName)

@@ -90,8 +90,7 @@ func (t *teamCreateTool) InvokableRun(ctx context.Context, argumentsInJSON strin
 		return "", fmt.Errorf("team %q is already active, delete it before creating a new team", currentTeamName)
 	}
 
-	cm := t.mw.lifecycle.store
-	team, err := cm.CreateTeam(ctx, args.TeamName, args.Description, LeaderAgentName, args.AgentType)
+	team, err := t.mw.lifecycle.createTeam(ctx, args.TeamName, args.Description, LeaderAgentName, args.AgentType)
 	if err != nil {
 		return "", fmt.Errorf("create team: %w", err)
 	}
@@ -117,7 +116,7 @@ func (t *teamCreateTool) InvokableRun(ctx context.Context, argumentsInJSON strin
 			// No setTeamName("") reset is needed here: the middleware team name is
 			// only set on the success path (after the final error-returning step),
 			// so on the rollback path it is still whatever it was before this call.
-			if cleanupErr := cm.DeleteTeam(cleanupCtx, teamName); cleanupErr != nil {
+			if cleanupErr := t.mw.lifecycle.deleteTeam(cleanupCtx, teamName); cleanupErr != nil {
 				t.mw.logger().Printf("TeamCreate rollback: delete team %q: %v", teamName, cleanupErr)
 			}
 		}
@@ -139,8 +138,8 @@ func (t *teamCreateTool) InvokableRun(ctx context.Context, argumentsInJSON strin
 
 	result := marshalToolResult(map[string]any{
 		"team_name":      team.Name,
-		"team_file_path": cm.configFilePath(team.Name),
-		"lead_agent_id":  cm.LeadAgentID(team.Name),
+		"team_file_path": t.mw.lifecycle.configFilePath(team.Name),
+		"lead_agent_id":  t.mw.lifecycle.leadAgentID(team.Name),
 	})
 	return result, nil
 }
@@ -160,9 +159,14 @@ func (t *teamCreateTool) makeShutdownResponseHandler(teamName string) func(ctx c
 		// generate a notification so the leader learns about the exit, even if
 		// cleanup (unassign/remove) partially failed — cleanupExitedTeammate
 		// will not send a duplicate because firstStop will be false there.
+		//
+		// A partial cleanup error is folded into the notification message (not
+		// just logged) so the leader sees the teammate is gone AND that team
+		// state may be residual; otherwise an approved shutdown that failed to
+		// remove the member or delete the inbox would report a bare success.
 		if err != nil {
 			t.mw.logger().Printf("removeTeammate(%s) partial cleanup error: %v", fromName, err)
 		}
-		return buildTeammateTerminationMessage(fromName, unassigned), nil
+		return buildTeammateTerminationMessage(fromName, unassigned, err), nil
 	}
 }

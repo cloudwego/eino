@@ -142,11 +142,24 @@ type teamMiddleware struct {
 
 	// teamOpLock serializes team-lifecycle transitions that span multiple,
 	// individually non-atomic steps and that read and then mutate active-team
-	// state. All three leader-only tools take it:
+	// state. It is an RWMutex used as a read/write lease on the active team:
+	//
+	// Write lock (exclusive) — leader-only lifecycle tools that create or destroy
+	// the active team / its members:
 	//   - TeamCreate: "no active team → create dir → setup leader mailbox →
 	//     setTeamName"
 	//   - Agent (spawn): "read active team name → register member → spawn teammate"
 	//   - TeamDelete: "no running teammates → delete dirs → clear team name"
+	//
+	// Read lock (shared) — SendMessage: it reads the active team and writes to an
+	// existing inbox but does not change team membership, so concurrent sends may
+	// proceed in parallel with one another while still being excluded from a
+	// concurrent TeamDelete. Without this, a SendMessage could read the active
+	// team and pass member validation, then have TeamDelete delete the team
+	// directory and clear the team name before the send writes the inbox —
+	// producing backend-dependent behavior (a failed write, or a recreated
+	// just-deleted path).
+	//
 	// Tool calls within a single assistant turn may run in parallel (see compose
 	// tool_node parallelRunToolCall), so without this lock two concurrent
 	// TeamCreate calls could both observe an empty team name and each create a
@@ -157,7 +170,7 @@ type teamMiddleware struct {
 	// these tools re-acquire the lock on their own paths, so there is no
 	// reentrancy, and each takes teamOpLock before cfgLock so the lock order is
 	// consistent. Held only by the leader.
-	teamOpLock sync.Mutex
+	teamOpLock sync.RWMutex
 
 	lifecycle *lifecycleManager // teammate lifecycle: registry, config, routing, plantask
 }

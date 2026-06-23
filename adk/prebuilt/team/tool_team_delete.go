@@ -98,7 +98,7 @@ func (t *teamDeleteTool) InvokableRun(ctx context.Context, argumentsInJSON strin
 		// would silently discard that recoverable state, so refuse unless the
 		// caller explicitly forces it.
 		if !args.Force {
-			residual, err := t.mw.lifecycle.store.NonLeaderMemberNames(ctx, teamName)
+			residual, err := t.mw.lifecycle.nonLeaderMemberNames(ctx, teamName)
 			if err != nil {
 				return "", fmt.Errorf("%s check residual members for %q: %w", teamDeleteToolName, teamName, err)
 			}
@@ -111,8 +111,7 @@ func (t *teamDeleteTool) InvokableRun(ctx context.Context, argumentsInJSON strin
 			}
 		}
 
-		cm := t.mw.lifecycle.store
-		if err := cm.DeleteTeam(ctx, teamName); err != nil {
+		if err := t.mw.lifecycle.deleteTeam(ctx, teamName); err != nil {
 			return "", fmt.Errorf("delete team %q: %w", teamName, err)
 		}
 	}

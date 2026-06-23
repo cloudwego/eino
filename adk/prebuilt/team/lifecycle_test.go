@@ -51,27 +51,42 @@ func setupLifecycleTest() (*lifecycleManager, *Config, *sourceRouter, *pumpManag
 }
 
 func TestBuildTeammateTerminationMessage_NoUnassigned(t *testing.T) {
-	msg := buildTeammateTerminationMessage("worker", nil)
+	msg := buildTeammateTerminationMessage("worker", nil, nil)
 	assert.Equal(t, "worker has shut down.", msg)
 }
 
 func TestBuildTeammateTerminationMessage_EmptyUnassigned(t *testing.T) {
-	msg := buildTeammateTerminationMessage("worker", []string{})
+	msg := buildTeammateTerminationMessage("worker", []string{}, nil)
 	assert.Equal(t, "worker has shut down.", msg)
 }
 
 func TestBuildTeammateTerminationMessage_WithUnassigned(t *testing.T) {
-	msg := buildTeammateTerminationMessage("worker", []string{"1", "2"})
+	msg := buildTeammateTerminationMessage("worker", []string{"1", "2"}, nil)
 	assert.Contains(t, msg, "worker has shut down.")
 	assert.Contains(t, msg, "2 task(s) were unassigned")
 	assert.Contains(t, msg, "#1, #2")
 }
 
 func TestBuildTeammateTerminationMessage_SingleUnassigned(t *testing.T) {
-	msg := buildTeammateTerminationMessage("agent-x", []string{"5"})
+	msg := buildTeammateTerminationMessage("agent-x", []string{"5"}, nil)
 	assert.Contains(t, msg, "agent-x has shut down.")
 	assert.Contains(t, msg, "1 task(s) were unassigned")
 	assert.Contains(t, msg, "#5")
+}
+
+func TestBuildTeammateTerminationMessage_WithCleanupError(t *testing.T) {
+	msg := buildTeammateTerminationMessage("worker", nil, fmt.Errorf("delete inbox: boom"))
+	assert.Contains(t, msg, "worker has shut down.")
+	assert.Contains(t, msg, "WARNING: cleanup only partially completed")
+	assert.Contains(t, msg, "delete inbox: boom")
+}
+
+func TestBuildTeammateTerminationMessage_WithUnassignedAndCleanupError(t *testing.T) {
+	msg := buildTeammateTerminationMessage("worker", []string{"7"}, fmt.Errorf("remove member: nope"))
+	assert.Contains(t, msg, "1 task(s) were unassigned")
+	assert.Contains(t, msg, "#7")
+	assert.Contains(t, msg, "WARNING: cleanup only partially completed")
+	assert.Contains(t, msg, "remove member: nope")
 }
 
 func TestNewLifecycleManager(t *testing.T) {
@@ -318,7 +333,7 @@ func TestLifecycleManager_NotifyLeaderTerminated_NotLeader(t *testing.T) {
 	}
 	lm := newLifecycleManager(conf, runnerConf, false, nil, nil)
 	assert.NotPanics(t, func() {
-		lm.notifyLeaderTeammateTerminated(context.Background(), "team", "worker", nil)
+		lm.notifyLeaderTeammateTerminated(context.Background(), "team", "worker", nil, nil)
 	})
 }
 
@@ -336,7 +351,7 @@ func TestLifecycleManager_NotifyLeaderTerminated_IsLeader(t *testing.T) {
 	router.RegisterLoop(LeaderAgentName, loop)
 
 	assert.NotPanics(t, func() {
-		lm.notifyLeaderTeammateTerminated(context.Background(), "myteam", "worker", []string{"1", "2"})
+		lm.notifyLeaderTeammateTerminated(context.Background(), "myteam", "worker", []string{"1", "2"}, nil)
 	})
 }
 
@@ -628,4 +643,53 @@ func TestLifecycleManager_TeardownDeletesInboxBeforeRemoveMember(t *testing.T) {
 
 	assert.Equal(t, []string{"delete-inbox", "remove-member"}, ops,
 		"teardown must delete the inbox before removing the member from config")
+}
+
+// TestLifecycleManager_TeardownInboxDeleteRacesWithSends exercises the per-inbox
+// lock now held by teardown's inbox delete (mailbox.DeleteInbox) against a flood
+// of concurrent senders writing to the same inbox. With the lock in place the
+// delete and every send are serialized on the same per-inbox mutex, so the run
+// must be free of data races (go test -race) and the teardown must still remove
+// the member. Without the lock the raw Backend.Delete could interleave with a
+// send's read-modify-write.
+func TestLifecycleManager_TeardownInboxDeleteRacesWithSends(t *testing.T) {
+	lm, conf, _, _ := setupLifecycleTest()
+	ctx := context.Background()
+	teamName := "myteam"
+	memberName := "worker"
+
+	cm := newConfigStore(conf)
+	_, err := cm.CreateTeam(ctx, teamName, "", LeaderAgentName, "")
+	assert.NoError(t, err)
+	_, err = cm.AddMemberWithDeduplicatedName(ctx, teamName, teamMember{Name: memberName, JoinedAt: time.Now()})
+	assert.NoError(t, err)
+	err = lm.initInbox(ctx, teamName, memberName)
+	assert.NoError(t, err)
+
+	leaderMb := lm.mailbox(teamName, LeaderAgentName)
+
+	var wg sync.WaitGroup
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			// Best-effort: a send may legitimately fail once the inbox is gone.
+			_ = leaderMb.Send(ctx, &outboxMessage{
+				To:      memberName,
+				Type:    messageTypeDM,
+				Text:    "concurrent",
+				Summary: "race",
+			})
+		}()
+	}
+
+	// Tear the teammate down concurrently with the senders.
+	_, err = lm.teardownTeammate(ctx, teamName, memberName, teardownOptions{})
+	assert.NoError(t, err)
+
+	wg.Wait()
+
+	// The member must be gone from config regardless of send interleaving.
+	has, _ := cm.HasMember(ctx, teamName, memberName)
+	assert.False(t, has)
 }

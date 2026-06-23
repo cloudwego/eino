@@ -23,6 +23,7 @@ package team
 import (
 	"context"
 	"sync"
+	"time"
 
 	"github.com/cloudwego/eino/adk"
 )
@@ -82,6 +83,27 @@ func (pm *pumpManager) SetMailbox(agentName string, ms *mailboxMessageSource) {
 	pm.mailboxes[agentName] = ms
 }
 
+// waitPumpDone waits for a cancelled pump goroutine to fully exit, bounded by
+// defaultPumpDrainTimeout. It returns true if the pump exited cleanly and false
+// if the wait timed out. A timeout means the pump (or the backend I/O it is
+// blocked on) ignored context cancellation; the caller logs and proceeds rather
+// than blocking the cleanup/replacement path forever. The orphaned goroutine
+// will still exit on its own once the backend call returns, but it can no longer
+// wedge UnsetMailbox/StartPump.
+//
+// agentName is only used for the diagnostic log line.
+func (pm *pumpManager) waitPumpDone(agentName string, done <-chan struct{}) bool {
+	timer := time.NewTimer(defaultPumpDrainTimeout)
+	defer timer.Stop()
+	select {
+	case <-done:
+		return true
+	case <-timer.C:
+		pm.logger.Printf("mailbox pump[%s] did not exit within %s after cancel; proceeding without waiting", agentName, defaultPumpDrainTimeout)
+		return false
+	}
+}
+
 // UnsetMailbox detaches the mailbox for the given agent and stops its pump.
 // A nil pumpManager is a no-op (see SetMailbox).
 func (pm *pumpManager) UnsetMailbox(agentName string) {
@@ -98,7 +120,7 @@ func (pm *pumpManager) UnsetMailbox(agentName string) {
 
 	if h != nil {
 		h.cancel()
-		<-h.done
+		pm.waitPumpDone(agentName, h.done)
 	}
 
 	// If StartPump is in progress (lock released while draining the old pump),
@@ -112,7 +134,7 @@ func (pm *pumpManager) UnsetMailbox(agentName string) {
 		pm.mu.Unlock()
 		if h != nil {
 			h.cancel()
-			<-h.done
+			pm.waitPumpDone(agentName, h.done)
 		}
 	}
 }
@@ -158,10 +180,13 @@ func (pm *pumpManager) StartPump(ctx context.Context, agentName string) {
 
 	// Wait for the old pump to fully exit before starting a new one.
 	// This eliminates the window where two pumps concurrently ReadUnread
-	// the same messages and both push duplicates into the TurnLoop.
+	// the same messages and both push duplicates into the TurnLoop. The wait is
+	// bounded (waitPumpDone): a backend that ignores cancellation must not block
+	// pump replacement forever. On timeout we proceed; the worst case is a brief
+	// overlap until the orphaned pump's in-flight backend call returns.
 	if old != nil {
 		old.cancel()
-		<-old.done
+		pm.waitPumpDone(agentName, old.done)
 	}
 
 	pumpCtx, cancel := context.WithCancel(ctx)

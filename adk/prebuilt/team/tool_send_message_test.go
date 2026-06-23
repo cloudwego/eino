@@ -1019,3 +1019,95 @@ func TestSendMessageTool_DeliveryWarning_AbsentForLeaderRecipient(t *testing.T) 
 	assert.Contains(t, result, "success")
 	assert.NotContains(t, result, "delivery_warning")
 }
+
+// TestSendMessageTool_SerializedAgainstTeamOpWriteLock verifies that SendMessage
+// takes the team-op read lock for the whole "read active team → validate → send"
+// sequence, so it cannot interleave with an exclusive lifecycle operation such as
+// TeamDelete. While the write lock is held, SendMessage must block instead of
+// reading a soon-to-be-deleted team and writing into a directory being torn down.
+func TestSendMessageTool_SerializedAgainstTeamOpWriteLock(t *testing.T) {
+	mw, conf := newTestTeamMiddleware()
+	ctx := context.Background()
+
+	createTool := newTeamCreateTool(mw)
+	_, err := createTool.InvokableRun(ctx, `{"team_name":"myteam"}`)
+	assert.NoError(t, err)
+
+	teamName := mw.getTeamName()
+	cm := newConfigStore(conf)
+	err = cm.AddMember(ctx, teamName, teamMember{Name: "worker", JoinedAt: time.Now()})
+	assert.NoError(t, err)
+	inboxPath := inboxFilePath(conf.BaseDir, teamName, "worker")
+	err = conf.Backend.Write(ctx, &WriteRequest{FilePath: inboxPath, Content: "[]"})
+	assert.NoError(t, err)
+
+	tool, err := newSendMessageTool(mw, LeaderAgentName)
+	assert.NoError(t, err)
+
+	// Simulate an in-flight exclusive lifecycle op (e.g. TeamDelete) by holding
+	// the write lock.
+	mw.teamOpLock.Lock()
+
+	done := make(chan struct{})
+	go func() {
+		_, _ = tool.InvokableRun(ctx, `{"type":"message","recipient":"worker","content":"hello","summary":"greeting"}`)
+		close(done)
+	}()
+
+	// SendMessage must not complete while the exclusive lock is held.
+	select {
+	case <-done:
+		mw.teamOpLock.Unlock()
+		t.Fatal("SendMessage ran while teamOpLock write lock was held; it does not take the read lock")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	// Release the lock; SendMessage should now proceed and finish.
+	mw.teamOpLock.Unlock()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("SendMessage did not finish after teamOpLock was released")
+	}
+}
+
+// TestSendMessageTool_ConcurrentSendsNotMutuallyBlocked verifies the read lock is
+// shared: two SendMessage calls may proceed concurrently. We hold a read lock in
+// the test (mirroring an in-flight SendMessage) and assert a second SendMessage
+// still completes, proving sends are not serialized against one another.
+func TestSendMessageTool_ConcurrentSendsNotMutuallyBlocked(t *testing.T) {
+	mw, conf := newTestTeamMiddleware()
+	ctx := context.Background()
+
+	createTool := newTeamCreateTool(mw)
+	_, err := createTool.InvokableRun(ctx, `{"team_name":"myteam"}`)
+	assert.NoError(t, err)
+
+	teamName := mw.getTeamName()
+	cm := newConfigStore(conf)
+	err = cm.AddMember(ctx, teamName, teamMember{Name: "worker", JoinedAt: time.Now()})
+	assert.NoError(t, err)
+	inboxPath := inboxFilePath(conf.BaseDir, teamName, "worker")
+	err = conf.Backend.Write(ctx, &WriteRequest{FilePath: inboxPath, Content: "[]"})
+	assert.NoError(t, err)
+
+	tool, err := newSendMessageTool(mw, LeaderAgentName)
+	assert.NoError(t, err)
+
+	// Hold a read lock to mimic another in-flight SendMessage.
+	mw.teamOpLock.RLock()
+	defer mw.teamOpLock.RUnlock()
+
+	done := make(chan struct{})
+	go func() {
+		_, sendErr := tool.InvokableRun(ctx, `{"type":"message","recipient":"worker","content":"hi","summary":"greeting"}`)
+		assert.NoError(t, sendErr)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("a second SendMessage blocked while a read lock was held; sends must run concurrently")
+	}
+}
