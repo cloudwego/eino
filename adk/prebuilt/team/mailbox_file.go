@@ -157,8 +157,8 @@ func (m *mailbox) writeInbox(ctx context.Context, agentName string, msgs []inbox
 
 // Send sends a message to the target agent's inbox.
 //
-// For broadcasts (To == broadcastTarget), use Broadcast instead when the caller
-// needs to know which members received the message: Send only reports an
+// For broadcasts (To == broadcastTarget), call broadcast directly when the
+// caller needs to know which members received the message: Send only reports an
 // aggregate error and discards the per-member delivery breakdown.
 func (m *mailbox) Send(ctx context.Context, msg *outboxMessage) error {
 	if msg.To == broadcastTarget {

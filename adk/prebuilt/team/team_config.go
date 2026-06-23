@@ -66,31 +66,11 @@ type teamMember struct {
 	AgentType string    `json:"agentType,omitempty"`
 	Prompt    string    `json:"prompt,omitempty"`
 	JoinedAt  time.Time `json:"joinedAt"`
-	// IsActive defaults to true when a member is created and is retained for
-	// schema/backward compatibility. It is NOT a live busy/idle indicator and
-	// currently has NO readers anywhere in the codebase — it is only written here
-	// at creation time. Volatile busy/idle status is tracked in process by
-	// pumpManager (see its active map) and intentionally never persisted, so this
-	// field is not updated on every message cycle. Liveness checks (e.g.
-	// TeamDelete) consult the teammate registry, not this flag. Do not gate any
-	// behavior on it without first making the runtime actually maintain it.
-	IsActive *bool `json:"isActive,omitempty"`
 }
 
 // makeAgentID returns the agent ID in the format "name@team".
 func makeAgentID(name, teamName string) string {
 	return name + "@" + teamName
-}
-
-func boolPtr(v bool) *bool {
-	return &v
-}
-
-func withDefaultMemberActivity(member teamMember) teamMember {
-	if member.IsActive == nil {
-		member.IsActive = boolPtr(true)
-	}
-	return member
 }
 
 // resolveTeamName returns a unique team name. If the given name is already
@@ -142,12 +122,12 @@ func (s *configStore) CreateTeam(ctx context.Context, teamName, description, lea
 		Description: description,
 		LeadAgentID: makeAgentID(leaderName, teamName),
 		Members: []teamMember{
-			withDefaultMemberActivity(teamMember{
+			{
 				Name:      leaderName,
 				AgentID:   makeAgentID(leaderName, teamName),
 				JoinedAt:  now,
 				AgentType: leaderType,
-			}),
+			},
 		},
 		CreatedAt: now,
 	}
@@ -250,7 +230,7 @@ func (s *configStore) readConfigWithReadLock(ctx context.Context, teamName strin
 // AddMember adds a new member to the team configuration.
 func (s *configStore) AddMember(ctx context.Context, teamName string, member teamMember) error {
 	return s.updateConfig(ctx, teamName, func(cfg *teamConfig) error {
-		cfg.Members = append(cfg.Members, withDefaultMemberActivity(member))
+		cfg.Members = append(cfg.Members, member)
 		return nil
 	})
 }
@@ -289,7 +269,6 @@ func (s *configStore) AddMemberWithDeduplicatedName(ctx context.Context, teamNam
 
 		member.Name = finalName
 		member.AgentID = makeAgentID(finalName, teamName)
-		member = withDefaultMemberActivity(member)
 		cfg.Members = append(cfg.Members, member)
 		result = member
 		return nil
