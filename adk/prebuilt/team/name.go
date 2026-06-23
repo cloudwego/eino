@@ -16,8 +16,8 @@
 
 // name.go provides a single source of truth for validating team and member
 // names before they are used to build filesystem paths (team dir, inbox file,
-// task dir) or routed through the mailbox. Names flow in from LLM tool calls
-// (TeamCreate.team_name, Agent.name) and TaskUpdate.owner, so they must be
+// task dir) or routed through the mailbox. Names flow in from TeamConfig.Name,
+// LLM tool calls (Agent.name), and TaskUpdate.owner, so they must be
 // constrained to avoid path traversal, reserved-name collisions, and the
 // broadcast wildcard before any Join/Write happens.
 
@@ -83,7 +83,7 @@ func validateName(kind, name string) error {
 	return nil
 }
 
-// validateTeamName validates a team name supplied via the TeamCreate tool.
+// validateTeamName validates a team name (from TeamConfig.Name or generated).
 func validateTeamName(name string) error {
 	return validateName("team name", name)
 }

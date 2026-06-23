@@ -8,7 +8,7 @@ communicate through file-backed mailboxes and collaborate on a shared task list.
 
 `NewRunner` builds a leader `adk.ChatModelAgent` and automatically injects:
 
-- **Team tools** — `TeamCreate`, `Agent` (spawn a teammate), `SendMessage`
+- **Team tools** — `Agent` (spawn a teammate), `SendMessage`
   (DM / broadcast / shutdown request+response), and `TeamDelete`.
 - **A team-aware plantask middleware** — a shared task list (`TaskCreate`,
   `TaskList`, `TaskGet`, `TaskUpdate`) stored under a per-team directory so the
@@ -17,8 +17,8 @@ communicate through file-backed mailboxes and collaborate on a shared task list.
   completed (tasks are removed explicitly via `status: "deleted"`).
 
 Teammates are spawned in the background, stay addressable by name via
-`SendMessage` across assistant turns, and are torn down explicitly (TeamDelete /
-shutdown_request / Runner shutdown).
+`SendMessage` across assistant turns, and are torn down explicitly (shutdown_request /
+Runner shutdown).
 
 ## Minimal usage
 

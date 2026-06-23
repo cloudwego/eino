@@ -1,8 +1,8 @@
 module example.com/demo
 
-go 1.24.1
+go 1.23
 
-replace github.com/cloudwego/eino => /data00/home/fanlv/eino
+replace github.com/cloudwego/eino => ../../../../
 
 require (
 	github.com/bytedance/sonic v1.15.0

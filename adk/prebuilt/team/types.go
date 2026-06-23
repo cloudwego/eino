@@ -28,9 +28,9 @@
 //	│    Entry point: creates TurnLoop, leader middleware, agent.  │
 //	├─────────────────────────────────────────────────────────────┤
 //	│  teamMiddleware (team.go)                                   │
-//	│    Injects tool instances (Agent, SendMessage, TeamCreate,  │
-//	│    TeamDelete) into each agent run via BeforeAgent.          │
-//	│    Has no config/infra fields — delegates to lifecycle.      │
+//	│    Injects tool instances (Agent, SendMessage) into each     │
+//	│    agent run via BeforeAgent. Has no config/infra fields —    │
+//	│    delegates to lifecycle.                                    │
 //	├─────────────────────────────────────────────────────────────┤
 //	│  lifecycleManager (lifecycle.go)  ← central facade          │
 //	│    Teammate spawn/cleanup/termination. Owns registry,       │
@@ -108,8 +108,10 @@ const (
 
 // ─── Errors ──────────────────────────────────────────────────────────────────
 
-// errTeamNotFound is returned when no active team exists.
-var errTeamNotFound = errors.New("no active team, create a team first with TeamCreate")
+// errTeamNotFound is returned when no active team exists. In normal operation a
+// team always exists (NewRunner creates it), so this signals a leader middleware
+// constructed outside NewRunner — a programming error.
+var errTeamNotFound = errors.New("no active team")
 
 // errInboxNotFound is returned when a point-to-point send targets an inbox that
 // no longer exists. Point-to-point delivery never recreates a missing inbox (see

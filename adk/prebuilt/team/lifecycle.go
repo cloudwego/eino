@@ -66,9 +66,9 @@ type lifecycleManager struct {
 	// (e.g. when the host supplies GenInputResult.RunCtx with a per-turn deadline);
 	// binding teammates to it would cancel them as soon as that turn ends, which
 	// contradicts the "background teammate survives across turns" contract.
-	// Teammate lifetime is instead governed by explicit teardown (TeamDelete /
-	// shutdown_request / Runner shutdown), which cancels each teammate's derived
-	// context via its registered Cancel func.
+	// Teammate lifetime is instead governed by explicit teardown (shutdown_request
+	// / Runner shutdown), which cancels each teammate's derived context via its
+	// registered Cancel func.
 	rootCtxMu sync.RWMutex
 	rootCtx   context.Context
 }
@@ -158,9 +158,9 @@ func (lm *lifecycleManager) hasMember(ctx context.Context, teamName, memberName 
 }
 
 // createTeam creates a new team (directory layout + config.json) and returns the
-// resolved team config. Exposed so the TeamCreate tool does not reach into the
-// config store directly (infrastructure access is centralized in lifecycle; see
-// the package doc comment in types.go).
+// resolved team config. Exposed so the Runner does not reach into the config
+// store directly (infrastructure access is centralized in lifecycle; see the
+// package doc comment in types.go).
 func (lm *lifecycleManager) createTeam(ctx context.Context, teamName, description, leaderName, leaderType string) (*teamConfig, error) {
 	return lm.store.CreateTeam(ctx, teamName, description, leaderName, leaderType)
 }
@@ -172,8 +172,7 @@ func (lm *lifecycleManager) deleteTeam(ctx context.Context, teamName string) err
 }
 
 // nonLeaderMemberNames returns the names of all non-leader members still listed
-// in config.json. TeamDelete uses it to detect residual members left by an
-// incomplete cleanup or a process restart.
+// in config.json.
 func (lm *lifecycleManager) nonLeaderMemberNames(ctx context.Context, teamName string) ([]string, error) {
 	return lm.store.NonLeaderMemberNames(ctx, teamName)
 }
@@ -400,8 +399,8 @@ func (lm *lifecycleManager) unassignMemberTasks(ctx context.Context, memberName 
 // mailbox, so a swallowed inbox-delete / RemoveMember / unassign failure would
 // otherwise leave residual config members, undeleted inboxes, or stuck tasks
 // that the leader has no way to learn about. The warning tells the leader the
-// teammate is gone but the team state may need a TeamDelete(force=true) or a
-// manual retry to fully reconcile.
+// teammate is gone but the team state may retain residue until the Runner exits
+// and cleans up the team directory.
 func buildTeammateTerminationMessage(name string, unassigned []string, cleanupErr error) string {
 	msg := fmt.Sprintf("%s has shut down.", name)
 	if len(unassigned) > 0 {
@@ -409,7 +408,7 @@ func buildTeammateTerminationMessage(name string, unassigned []string, cleanupEr
 	}
 	if cleanupErr != nil {
 		msg += fmt.Sprintf(" WARNING: cleanup only partially completed (%v); the team may retain residual"+
-			" config member(s), undeleted inbox(es), or unreassigned task(s). Verify with TeamDelete (force=true if needed).", cleanupErr)
+			" config member(s), undeleted inbox(es), or unreassigned task(s) until the team is torn down.", cleanupErr)
 	}
 	return msg
 }
@@ -448,14 +447,53 @@ func (lm *lifecycleManager) notifyLeaderTeammateTerminated(ctx context.Context, 
 // and starts the mailbox pump goroutine. This ensures no gap between inbox creation and
 // pump startup where messages could be lost.
 func (lm *lifecycleManager) setupMailbox(ctx context.Context, teamName, agentName string, sourceCfg *mailboxSourceConfig) error {
+	if err := lm.registerMailbox(ctx, teamName, agentName, sourceCfg); err != nil {
+		return err
+	}
+	lm.startPump(ctx, agentName)
+	return nil
+}
+
+// registerMailbox initializes the inbox file and registers a
+// mailboxMessageSource for the agent WITHOUT starting its pump. The leader's
+// mailbox is registered this way at Runner construction so the inbox exists
+// before any teammate can send to it, while the pump is deferred to Run so it
+// binds to the long-lived team runtime context rather than the construction
+// context. Teammate setup uses setupMailbox (register + start) because a
+// teammate's pump shares the teammate goroutine's context from the start.
+func (lm *lifecycleManager) registerMailbox(ctx context.Context, teamName, agentName string, sourceCfg *mailboxSourceConfig) error {
 	if err := lm.initInbox(ctx, teamName, agentName); err != nil {
 		return fmt.Errorf("create inbox file for %s: %w", agentName, err)
 	}
 	mb := lm.mailbox(teamName, agentName)
 	ms := newMailboxMessageSource(mb, sourceCfg)
 	lm.pumpMgr.SetMailbox(agentName, ms)
-	lm.startPump(ctx, agentName)
 	return nil
+}
+
+// makeLeaderShutdownResponseHandler returns the OnShutdownResponse callback for
+// the leader's mailbox: it removes the member from team config, unassigns their
+// tasks, and cancels the teammate goroutine, returning the human-readable
+// termination notice for the leader (or "" when a duplicate notification should
+// be suppressed). It is wired into the leader mailbox source by the Runner.
+func (lm *lifecycleManager) makeLeaderShutdownResponseHandler(teamName string) func(ctx context.Context, fromName string) (string, error) {
+	return func(ctx context.Context, fromName string) (string, error) {
+		unassigned, firstStop, err := lm.removeTeammate(ctx, teamName, fromName)
+		// When firstStop is false, the teammate's goroutine already exited and
+		// cleanupExitedTeammate sent a termination notification via the router.
+		// Return "" so handleLeaderControlMessages skips the duplicate notification.
+		if !firstStop {
+			return "", nil
+		}
+		// firstStop=true means we are the first to stop this teammate. Always
+		// generate a notification so the leader learns about the exit, even if
+		// cleanup (unassign/remove) partially failed — cleanupExitedTeammate
+		// will not send a duplicate because firstStop will be false there.
+		if err != nil {
+			lm.logger.Printf("removeTeammate(%s) partial cleanup error: %v", fromName, err)
+		}
+		return buildTeammateTerminationMessage(fromName, unassigned, err), nil
+	}
 }
 
 // startPump starts the mailbox pump goroutine for the given agent.
@@ -472,8 +510,8 @@ func (lm *lifecycleManager) createTeammateRunner(agent *adk.ChatModelAgent, agen
 	return newTeammateRunner(lm.runnerConf, lm.router, lm.pumpMgr, agent, agentName, teamName)
 }
 
-// cleanupLeaderMailbox stops the leader's mailbox pump. Called by TeamDelete to
-// prevent goroutine leaks. The leader's per-inbox lock is reference counted in
+// cleanupLeaderMailbox stops the leader's mailbox pump. Called during Runner
+// shutdown to prevent goroutine leaks. The leader's per-inbox lock is reference counted in
 // the mailbox operations (ForName/Release) and reclaimed automatically once no
 // send/read holds it, so no explicit lock removal is needed here.
 // pumpMgr may be nil for teammate managers; UnsetMailbox is nil-safe.

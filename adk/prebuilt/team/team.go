@@ -52,6 +52,20 @@ type Config struct {
 	// Required.
 	BaseDir string
 
+	// Name is the team name. Optional: when left empty NewRunner generates a
+	// unique name ("team-<random>"). The team is created automatically when the
+	// Runner is constructed and torn down when it exits, so there is no tool for
+	// the agent to name or create a team itself. A non-empty Name that collides
+	// with an existing on-disk team gets a timestamp suffix appended.
+	Name string
+
+	// RetainDataOnExit keeps the team's on-disk data (config.json, inboxes, and
+	// the shared task directory) after the Runner exits. The default (false)
+	// removes everything when Wait/WaitContext returns, mirroring an ephemeral
+	// session. Set it to true when a host wants to inspect or resume the team's
+	// task list after the run.
+	RetainDataOnExit bool
+
 	// Interval is the interval in assistant turns between task reminders.
 	// The zero value (i.e. leaving this field unset) selects the default of 10.
 	// Set to a negative value to disable task reminders entirely.
@@ -129,47 +143,37 @@ func newMiddleware(conf *RunnerConfig, isLeader bool, agentName string, router *
 	}
 }
 
-// teamMiddleware is the core middleware that injects team tools (TeamCreate,
-// TeamDelete, Agent, SendMessage) into each agent run via BeforeAgent.
-// Lifecycle management (teammate spawn/cleanup/termination) is delegated
-// to the embedded lifecycleManager.
+// teamMiddleware is the core middleware that injects team tools (Agent,
+// SendMessage) into each agent run via BeforeAgent. Lifecycle management
+// (teammate spawn/cleanup/termination) is delegated to the embedded
+// lifecycleManager. The team itself is created when the Runner is constructed
+// and removed when it exits, so there is no create/delete tool.
 type teamMiddleware struct {
 	*adk.BaseChatModelAgentMiddleware
 	isLeader  bool
 	agentName string
 
-	teamNameVal atomic.Value // stores string; set at creation for teammates; set by TeamCreate for leader
+	teamNameVal atomic.Value // stores string; set at construction for both leader (by NewRunner) and teammates
 
 	// teamOpLock serializes team-lifecycle transitions that span multiple,
 	// individually non-atomic steps and that read and then mutate active-team
 	// state. It is an RWMutex used as a read/write lease on the active team:
 	//
-	// Write lock (exclusive) — leader-only lifecycle tools that create or destroy
-	// the active team / its members:
-	//   - TeamCreate: "no active team → create dir → setup leader mailbox →
-	//     setTeamName"
-	//   - Agent (spawn): "read active team name → register member → spawn teammate"
-	//   - TeamDelete: "no running teammates → delete dirs → clear team name"
+	// Write lock (exclusive) — leader-only Agent (spawn): "read active team name →
+	// register member → spawn teammate". The team is created up front by NewRunner
+	// and deleted by Runner shutdown, so spawn is the only in-flight writer of
+	// active-team membership.
 	//
 	// Read lock (shared) — SendMessage: it reads the active team and writes to an
 	// existing inbox but does not change team membership, so concurrent sends may
 	// proceed in parallel with one another while still being excluded from a
-	// concurrent TeamDelete. Without this, a SendMessage could read the active
-	// team and pass member validation, then have TeamDelete delete the team
-	// directory and clear the team name before the send writes the inbox —
-	// producing backend-dependent behavior (a failed write, or a recreated
-	// just-deleted path).
+	// concurrent spawn.
 	//
 	// Tool calls within a single assistant turn may run in parallel (see compose
-	// tool_node parallelRunToolCall), so without this lock two concurrent
-	// TeamCreate calls could both observe an empty team name and each create a
-	// team (leaving an orphaned directory and the leader pump bound to the losing
-	// team), and an Agent spawn could interleave with a TeamDelete that already
-	// observed an empty teammate registry — registering a member and starting a
-	// goroutine against a team whose directories are being torn down. None of
-	// these tools re-acquire the lock on their own paths, so there is no
-	// reentrancy, and each takes teamOpLock before cfgLock so the lock order is
-	// consistent. Held only by the leader.
+	// tool_node parallelRunToolCall), so without this lock two concurrent Agent
+	// spawns reusing the same member name could race on registration. Each takes
+	// teamOpLock before cfgLock so the lock order is consistent. Held only by the
+	// leader.
 	teamOpLock sync.RWMutex
 
 	lifecycle *lifecycleManager // teammate lifecycle: registry, config, routing, plantask
@@ -206,8 +210,6 @@ func (mw *teamMiddleware) BeforeAgent(ctx context.Context,
 
 	if mw.isLeader {
 		tools = append(tools,
-			newTeamCreateTool(mw),
-			newTeamDeleteTool(mw),
 			newAgentTool(mw),
 		)
 	}
