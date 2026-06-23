@@ -74,7 +74,7 @@ func (t *agentTool) Info(_ context.Context) (*schema.ToolInfo, error) {
 			},
 			"team_name": {
 				Type: schema.String,
-				Desc: "Team name for spawning. Uses current team context if omitted.",
+				Desc: "Optional. Must match the currently active team. A non-matching value is ignored and the active team is used; if there is no active team the call fails.",
 			},
 			"run_in_background": {
 				Type: schema.Boolean,

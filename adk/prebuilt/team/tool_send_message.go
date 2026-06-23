@@ -323,6 +323,13 @@ func (t *sendMessageTool) buildBroadcastResult(args *sendMessageArgs, bcast broa
 	}
 
 	if bErr == nil {
+		// A nil error with no recipients means the team has no other members, not
+		// that the message reached the whole team. Use a distinct message so the
+		// model does not read "0 delivered" as a successful fan-out.
+		if len(bcast.Delivered) == 0 {
+			result["message"] = "No other teammates to receive the broadcast"
+			return result
+		}
 		result["message"] = fmt.Sprintf("Message broadcast to all teammates (%d delivered)", len(bcast.Delivered))
 		return result
 	}

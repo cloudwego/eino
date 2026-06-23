@@ -80,10 +80,9 @@ func (t *teamDeleteTool) InvokableRun(ctx context.Context, argumentsInJSON strin
 
 	if teamName != "" {
 		// Check the teammate registry for goroutines that are still running.
-		// This is more accurate than the config-level IsActive flag, which
-		// only tracks idle/busy status — an idle teammate (IsActive=false)
-		// still has a live goroutine that would be disrupted by deleting the
-		// team directories.
+		// Liveness is determined solely by the in-process registry: a running
+		// teammate has a live goroutine that would be disrupted by deleting the
+		// team directories. Busy/idle status is never persisted to config.json.
 		runningNames := t.mw.lifecycle.activeTeammateNames()
 		if len(runningNames) > 0 {
 			return marshalToolResult(map[string]any{

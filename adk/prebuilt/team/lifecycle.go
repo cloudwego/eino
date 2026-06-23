@@ -379,8 +379,8 @@ func (lm *lifecycleManager) cleanupLeaderMailbox() {
 }
 
 // activeTeammateNames returns the names of teammates whose goroutines are still
-// running (registered in the registry). This reflects actual runtime state, not
-// the config-level IsActive flag which only tracks idle/busy status.
+// running (registered in the registry). This reflects actual runtime state;
+// busy/idle status is tracked in process and never persisted to config.json.
 func (lm *lifecycleManager) activeTeammateNames() []string {
 	return lm.registry.activeNames()
 }
