@@ -273,7 +273,17 @@ func (t *taskUpdateTool) doUpdate(ctx context.Context, argumentsInJSON string) (
 	// but status fields remain accurate for the all-completed check.
 	// Cleanup is best-effort: the task graph has already been persisted above,
 	// so a cleanup failure should not fail the main operation.
-	if params.Status == taskStatusCompleted {
+	//
+	// Only the single-agent ("scratch pad") mode auto-clears the whole task list
+	// once everything is completed. In shared-task mode the task directory is
+	// shared by the entire team (see WithTaskBaseDirResolver in the team runner),
+	// so one teammate completing its last task while the team's tasks all happen
+	// to be completed must NOT wipe the team-wide task graph: that would be
+	// non-deterministic (it depends on which member finishes last) and would
+	// strip the leader's visibility into completed work during the gap before it
+	// queues the next batch. Shared-mode tasks are removed explicitly via the
+	// "deleted" status instead.
+	if params.Status == taskStatusCompleted && !t.mw.usesSharedTaskMode() {
 		if checkErr := t.deleteAllTasksIfCompleted(ctx, allTasks); checkErr != nil {
 			t.mw.effectiveLogger().Printf("[plantask] auto-delete all completed tasks failed, err: %v", checkErr)
 		}

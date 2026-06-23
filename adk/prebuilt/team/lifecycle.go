@@ -452,7 +452,7 @@ func (lm *lifecycleManager) setupMailbox(ctx context.Context, teamName, agentNam
 	mb := lm.mailbox(teamName, agentName)
 	ms := newMailboxMessageSource(mb, sourceCfg)
 	lm.pumpMgr.SetMailbox(agentName, ms)
-	lm.pumpMgr.StartPump(ctx, agentName)
+	lm.startPump(ctx, agentName)
 	return nil
 }
 
