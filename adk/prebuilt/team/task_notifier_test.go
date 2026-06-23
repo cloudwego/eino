@@ -60,6 +60,11 @@ func TestNewTaskAssignedNotifier_ValidTeamName_SendsMessage(t *testing.T) {
 	_, err := newConfigStore(conf).CreateTeam(ctx, teamName, "desc", LeaderAgentName, "general-purpose")
 	assert.NoError(t, err)
 
+	// A real assignee is a spawned member, and the spawn path creates its inbox
+	// before the teammate runs. Mirror that here: the notifier delivers to an
+	// existing inbox and never resurrects a missing one.
+	assert.NoError(t, initInboxFile(ctx, backend, inboxFilePath("/tmp/test", teamName, "worker")))
+
 	teamNameFn := func() string { return teamName }
 	notifier := newTaskAssignedNotifier(conf, teamNameFn)
 
@@ -99,6 +104,8 @@ func TestNewTaskAssignedNotifier_EmptyAssignedBy_DefaultsToLeader(t *testing.T) 
 	_, err := newConfigStore(conf).CreateTeam(ctx, teamName, "desc", LeaderAgentName, "general-purpose")
 	assert.NoError(t, err)
 
+	assert.NoError(t, initInboxFile(ctx, backend, inboxFilePath("/tmp/test", teamName, "worker")))
+
 	teamNameFn := func() string { return teamName }
 	notifier := newTaskAssignedNotifier(conf, teamNameFn)
 
@@ -133,6 +140,8 @@ func TestNewTaskAssignedNotifier_PayloadContainsCorrectFields(t *testing.T) {
 
 	_, err := newConfigStore(conf).CreateTeam(ctx, teamName, "desc", LeaderAgentName, "general-purpose")
 	assert.NoError(t, err)
+
+	assert.NoError(t, initInboxFile(ctx, backend, inboxFilePath("/tmp/test", teamName, "dev1")))
 
 	teamNameFn := func() string { return teamName }
 	notifier := newTaskAssignedNotifier(conf, teamNameFn)

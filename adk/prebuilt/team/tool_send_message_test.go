@@ -899,10 +899,13 @@ func TestSendMessageTool_DeliveryWarning_ResidualMember(t *testing.T) {
 	teamName := mw.getTeamName()
 
 	cm := newConfigStore(conf)
-	// Member exists in config but is never registered in the teammate registry,
-	// simulating a residual member left by an incomplete cleanup.
+	// Member exists in config with its inbox still on disk, but is never registered
+	// in the teammate registry — a residual member left by a crashed/cancelled
+	// runner whose inbox the cleanup has not yet removed. The DM is delivered to the
+	// existing inbox and carries a warning because no live runner will consume it.
 	err = cm.AddMember(ctx, teamName, teamMember{Name: "worker", JoinedAt: time.Now()})
 	assert.NoError(t, err)
+	assert.NoError(t, mw.lifecycle.initInbox(ctx, teamName, "worker"))
 
 	tool, err := newSendMessageTool(mw, LeaderAgentName)
 	assert.NoError(t, err)
@@ -914,8 +917,38 @@ func TestSendMessageTool_DeliveryWarning_ResidualMember(t *testing.T) {
 	assert.Contains(t, result, "no running goroutine")
 }
 
-// TestSendMessageTool_DeliveryWarning_ShutdownRequestResidualMember verifies that
-// a shutdown_request to a residual member also surfaces the delivery_warning.
+// TestSendMessageTool_DMToTornDownInboxDoesNotResurrect verifies the Issue-1 fix
+// at the tool boundary: a DM to a member that is still listed in config but whose
+// inbox was already deleted (the teardown window between DeleteInbox and
+// RemoveMember) must fail with errInboxNotFound and must NOT recreate the inbox
+// file. Resurrecting it would leak an orphan inbox for a member being removed.
+func TestSendMessageTool_DMToTornDownInboxDoesNotResurrect(t *testing.T) {
+	mw, conf := newTestTeamMiddleware()
+	ctx := context.Background()
+
+	createTool := newTeamCreateTool(mw)
+	_, err := createTool.InvokableRun(ctx, `{"team_name":"myteam"}`)
+	assert.NoError(t, err)
+
+	teamName := mw.getTeamName()
+
+	cm := newConfigStore(conf)
+	// Member is still in config (membership validation will pass) but its inbox
+	// has already been torn down — exactly the half-removed teardown state.
+	err = cm.AddMember(ctx, teamName, teamMember{Name: "worker", JoinedAt: time.Now()})
+	assert.NoError(t, err)
+
+	tool, err := newSendMessageTool(mw, LeaderAgentName)
+	assert.NoError(t, err)
+
+	_, err = tool.InvokableRun(ctx, `{"type":"message","recipient":"worker","content":"hello","summary":"greeting"}`)
+	assert.ErrorIs(t, err, errInboxNotFound)
+
+	inboxPath := inboxFilePath("/tmp/test", teamName, "worker")
+	exists, existsErr := conf.Backend.Exists(ctx, inboxPath)
+	assert.NoError(t, existsErr)
+	assert.False(t, exists, "DM must not resurrect a torn-down member's inbox")
+}
 func TestSendMessageTool_DeliveryWarning_ShutdownRequestResidualMember(t *testing.T) {
 	mw, conf := newTestTeamMiddleware()
 	ctx := context.Background()
@@ -929,6 +962,7 @@ func TestSendMessageTool_DeliveryWarning_ShutdownRequestResidualMember(t *testin
 	cm := newConfigStore(conf)
 	err = cm.AddMember(ctx, teamName, teamMember{Name: "worker", JoinedAt: time.Now()})
 	assert.NoError(t, err)
+	assert.NoError(t, mw.lifecycle.initInbox(ctx, teamName, "worker"))
 
 	tool, err := newSendMessageTool(mw, LeaderAgentName)
 	assert.NoError(t, err)
@@ -954,6 +988,7 @@ func TestSendMessageTool_DeliveryWarning_AbsentForLiveTeammate(t *testing.T) {
 	cm := newConfigStore(conf)
 	err = cm.AddMember(ctx, teamName, teamMember{Name: "worker", JoinedAt: time.Now()})
 	assert.NoError(t, err)
+	assert.NoError(t, mw.lifecycle.initInbox(ctx, teamName, "worker"))
 	// Register a live runner for the recipient.
 	mw.lifecycle.registry.register("worker", &teammateHandle{})
 
@@ -984,6 +1019,7 @@ func TestSendMessageTool_DeliveryWarning_SkippedForTeammateSender(t *testing.T) 
 	cm := newConfigStore(conf)
 	err = cm.AddMember(ctx, teamName, teamMember{Name: "worker", JoinedAt: time.Now()})
 	assert.NoError(t, err)
+	assert.NoError(t, mw.lifecycle.initInbox(ctx, teamName, "worker"))
 
 	tool, err := newSendMessageTool(mw, "other-worker")
 	assert.NoError(t, err)

@@ -87,6 +87,13 @@ func listTasks(ctx context.Context, backend Backend, baseDir string, logger Logg
 		if err != nil {
 			return nil, fmt.Errorf("read task file %s failed: %w", file.Path, err)
 		}
+		// The Backend contract permits Read to return (nil, nil) for a path that
+		// no longer exists (e.g. a task file deleted between LsInfo and this read,
+		// or a backend that signals absence without an error). Skip such entries
+		// instead of dereferencing a nil FileContent and panicking.
+		if content == nil || content.Content == "" {
+			continue
+		}
 
 		taskData := &task{}
 		err = sonic.UnmarshalString(content.Content, taskData)

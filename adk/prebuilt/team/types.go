@@ -111,6 +111,13 @@ const (
 // errTeamNotFound is returned when no active team exists.
 var errTeamNotFound = errors.New("no active team, create a team first with TeamCreate")
 
+// errInboxNotFound is returned when a point-to-point send targets an inbox that
+// no longer exists. Point-to-point delivery never recreates a missing inbox (see
+// mailbox.Send): a vanished inbox means the recipient was torn down between
+// membership validation and the write, and resurrecting it would leak an orphan
+// file for a member that is gone.
+var errInboxNotFound = errors.New("recipient inbox no longer exists (member may have been removed)")
+
 // Logger is the logging interface used by the team middleware.
 // Implementations must be safe for concurrent use.
 type Logger interface {

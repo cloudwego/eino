@@ -191,6 +191,13 @@ func readTask(ctx context.Context, backend Backend, baseDir, taskID string) (*ta
 		}
 		return nil, fmt.Errorf("read task #%s failed: %w", taskID, err)
 	}
+	// The Backend contract permits Read on a missing path to return (nil, nil)
+	// instead of an error (the team Backend documents this explicitly), so treat
+	// a nil/empty FileContent as "task not found" rather than dereferencing it
+	// and panicking.
+	if content == nil || content.Content == "" {
+		return nil, nil
+	}
 
 	t := &task{}
 	if err := sonic.UnmarshalString(content.Content, t); err != nil {

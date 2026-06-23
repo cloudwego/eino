@@ -294,12 +294,14 @@ func (lm *lifecycleManager) teardownTeammate(ctx context.Context, teamName, memb
 	// registered and have its fresh inbox clobbered by this delete (see the
 	// ordering note above). Deleting it also prevents a future same-name teammate
 	// from inheriting stale messages. The delete goes through mailbox.DeleteInbox
-	// so it holds the same per-inbox write lock as sendToOne/MarkRead: this
-	// serializes the removal against concurrent senders (a member can still pass
-	// membership validation until RemoveMember below), so a send cannot interleave
-	// with the delete to resurrect the inbox or lose its write. The per-inbox lock
-	// is reference counted (ForName/Release) and reclaimed automatically once no
-	// holder remains, so there is nothing to remove explicitly here.
+	// so it holds the same per-inbox write lock as the senders/MarkRead: a member
+	// can still pass membership validation until RemoveMember below, but every
+	// point-to-point send goes through sendToOneIfExists, which only appends to an
+	// inbox that still exists (checked under that lock). So a send racing this
+	// teardown either lands before the delete or is reported as not-delivered —
+	// it can never resurrect the inbox. The per-inbox lock is reference counted
+	// (ForName/Release) and reclaimed automatically once no holder remains, so
+	// there is nothing to remove explicitly here.
 	if delErr := lm.mailbox(teamName, LeaderAgentName).DeleteInbox(ctx, memberName); delErr != nil {
 		errs = append(errs, fmt.Errorf("delete inbox for %q: %w", memberName, delErr))
 	}

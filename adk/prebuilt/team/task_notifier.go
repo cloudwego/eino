@@ -38,6 +38,15 @@ type taskAssignmentPayload struct {
 
 // newTaskAssignedNotifier returns an OnTaskAssigned callback that sends
 // task_assignment messages to the assignee's mailbox.
+//
+// Delivery uses mailbox.Send, which never recreates a missing inbox: a real
+// assignee is validated as a team member (see WithOwnerValidator) and members
+// are only ever registered by the spawn path, which creates the inbox before the
+// teammate runs. So in normal flow the inbox exists. If it does not — the member
+// was torn down between assignment and this send — Send returns errInboxNotFound
+// rather than resurrecting an orphan inbox; plantask surfaces that as a non-fatal
+// "assignment could not be delivered, consider re-sending" warning on the
+// TaskUpdate result instead of silently leaking a file the assignee can't read.
 func newTaskAssignedNotifier(conf *Config, teamNameFn func() string) func(ctx context.Context, a plantask.TaskAssignment) error {
 	return func(ctx context.Context, a plantask.TaskAssignment) error {
 		teamName := teamNameFn()

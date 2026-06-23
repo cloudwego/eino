@@ -104,11 +104,16 @@ func initInboxFile(ctx context.Context, backend Backend, inboxPath string) error
 }
 
 // DeleteInbox removes the given agent's inbox file, holding the same per-inbox
-// write lock that sendToOne/MarkRead use. Taking the lock serializes the delete
-// against concurrent senders so a send cannot interleave with the removal and
-// either resurrect the file (recreating an inbox for a member being torn down)
-// or have its write silently discarded. The lock reference is paired with
-// Release so the manager can reclaim it once no sender/reader holds it.
+// write lock that the senders (sendToOneIfExists) and MarkRead use. The lock
+// alone only serializes individual operations — it cannot order a delete ahead
+// of a later send, so taking it does NOT by itself stop a send from running
+// after the delete and recreating the file. What prevents resurrection is that
+// every point-to-point send goes through sendToOneIfExists, which checks inbox
+// existence under this same lock and skips (rather than recreates) when the
+// inbox is gone: a send either observes the inbox before the delete and writes,
+// or sees it already removed and reports not-delivered. The lock reference is
+// paired with Release so the manager can reclaim it once no sender/reader holds
+// it.
 func (m *mailbox) DeleteInbox(ctx context.Context, agentName string) error {
 	lock := m.inboxLocks.ForName(agentName)
 	defer m.inboxLocks.Release(agentName)
@@ -172,6 +177,15 @@ func (m *mailbox) writeInbox(ctx context.Context, agentName string, msgs []inbox
 
 // Send sends a message to the target agent's inbox.
 //
+// Point-to-point delivery never creates a missing inbox: if the target inbox no
+// longer exists (the recipient was torn down between membership validation and
+// this write), Send returns errInboxNotFound rather than recreating the file.
+// Resurrecting it would leak an orphaned inbox for a member that is gone — the
+// teardown path (lifecycle.teardownTeammate) deletes the inbox before removing
+// the member from config, so a send can still pass membership validation while
+// the inbox is being removed. Only the explicit spawn path (sendInitialPrompt)
+// creates an inbox, and it does so via initInbox before calling Send.
+//
 // For broadcasts (To == broadcastTarget), call broadcast directly when the
 // caller needs to know which members received the message: Send only reports an
 // aggregate error and discards the per-member delivery breakdown.
@@ -180,7 +194,14 @@ func (m *mailbox) Send(ctx context.Context, msg *outboxMessage) error {
 		_, err := m.broadcast(ctx, msg)
 		return err
 	}
-	return m.sendToOne(ctx, msg.To, msg)
+	delivered, err := m.sendToOneIfExists(ctx, msg.To, msg)
+	if err != nil {
+		return err
+	}
+	if !delivered {
+		return fmt.Errorf("send to %q: %w", msg.To, errInboxNotFound)
+	}
+	return nil
 }
 
 // broadcastResult reports the per-member outcome of a broadcast. A broadcast is
@@ -199,30 +220,9 @@ type broadcastResult struct {
 	Skipped []string
 }
 
-func (m *mailbox) sendToOne(ctx context.Context, to string, msg *outboxMessage) error {
-	inboxMsg := m.newInboxMessage(to, msg)
-
-	// Use per-target lock so all senders writing to the same inbox are serialized.
-	// Release is paired with ForName so the manager can reclaim the lock once no
-	// sender/reader is using it, while guaranteeing all concurrent users of the
-	// same name share one lock instance.
-	lock := m.inboxLocks.ForName(to)
-	defer m.inboxLocks.Release(to)
-	lock.Lock()
-	defer lock.Unlock()
-
-	msgs, err := m.readInbox(ctx, to)
-	if err != nil {
-		return fmt.Errorf("read inbox: %w", err)
-	}
-
-	msgs = append(msgs, inboxMsg)
-
-	return m.writeInbox(ctx, to, msgs)
-}
-
 // newInboxMessage builds an inboxMessage envelope addressed to `to` from an
-// outboxMessage. Shared by sendToOne and the broadcast fan-out.
+// outboxMessage. Shared by the point-to-point send (sendToOneIfExists) and the
+// broadcast fan-out.
 func (m *mailbox) newInboxMessage(to string, msg *outboxMessage) inboxMessage {
 	return inboxMessage{
 		ID:        uuid.New().String(),
@@ -236,8 +236,12 @@ func (m *mailbox) newInboxMessage(to string, msg *outboxMessage) inboxMessage {
 }
 
 // sendToOneIfExists appends a message to an existing inbox only. It reports
-// delivered=false (without an error) when the target inbox no longer exists,
-// which broadcast treats as a member removed mid-fan-out rather than a failure.
+// delivered=false (without an error) when the target inbox no longer exists.
+// This is the sole point-to-point delivery primitive: both Send (DMs, shutdown
+// requests/responses, task-assignment and idle notifications) and the broadcast
+// fan-out go through it, so no point-to-point path can ever recreate a missing
+// inbox. Send turns delivered=false into errInboxNotFound; broadcast treats it
+// as a member removed mid-fan-out (Skipped) rather than a failure.
 //
 // The existence check runs under the same per-inbox lock that DeleteInbox holds,
 // so it is race-free: either this sees the inbox before DeleteInbox removes it
