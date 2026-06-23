@@ -1,5 +1,5 @@
 /*
- * Copyright 2025 CloudWeGo Authors
+ * Copyright 2026 CloudWeGo Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -183,11 +183,17 @@ func typedGenModelInput[M adk.MessageType](_ context.Context, instruction string
 	switch any(zero).(type) {
 	case *schema.Message:
 		msgs := make([]*schema.Message, 0, len(input.Messages)+1)
+		inputMessages := input.Messages
 		if instruction != "" {
+			if len(inputMessages) > 0 {
+				if msg, ok := any(inputMessages[0]).(*schema.Message); ok && msg.Role == schema.System {
+					inputMessages = inputMessages[1:]
+				}
+			}
 			msgs = append(msgs, schema.SystemMessage(instruction))
 		}
 		// Type assertion is safe here because M = *schema.Message.
-		for _, m := range input.Messages {
+		for _, m := range inputMessages {
 			msgs = append(msgs, any(m).(*schema.Message))
 		}
 		result := make([]M, len(msgs))
@@ -197,10 +203,16 @@ func typedGenModelInput[M adk.MessageType](_ context.Context, instruction string
 		return result, nil
 	case *schema.AgenticMessage:
 		msgs := make([]*schema.AgenticMessage, 0, len(input.Messages)+1)
+		inputMessages := input.Messages
 		if instruction != "" {
+			if len(inputMessages) > 0 {
+				if msg, ok := any(inputMessages[0]).(*schema.AgenticMessage); ok && msg.Role == schema.AgenticRoleTypeSystem {
+					inputMessages = inputMessages[1:]
+				}
+			}
 			msgs = append(msgs, schema.SystemAgenticMessage(instruction))
 		}
-		for _, m := range input.Messages {
+		for _, m := range inputMessages {
 			msgs = append(msgs, any(m).(*schema.AgenticMessage))
 		}
 		result := make([]M, len(msgs))

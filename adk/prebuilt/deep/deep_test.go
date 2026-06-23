@@ -1,5 +1,5 @@
 /*
- * Copyright 2025 CloudWeGo Authors
+ * Copyright 2026 CloudWeGo Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -30,6 +31,7 @@ import (
 	"github.com/cloudwego/eino/adk/filesystem"
 	filesystem2 "github.com/cloudwego/eino/adk/middlewares/filesystem"
 	"github.com/cloudwego/eino/adk/prebuilt/planexecute"
+	adksession "github.com/cloudwego/eino/adk/session"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
@@ -91,6 +93,56 @@ func readAgenticText(msg *schema.AgenticMessage) string {
 	return ""
 }
 
+func readAgenticInputText(msg *schema.AgenticMessage) string {
+	if msg == nil {
+		return ""
+	}
+	for _, block := range msg.ContentBlocks {
+		if block == nil {
+			continue
+		}
+		if block.UserInputText != nil {
+			return block.UserInputText.Text
+		}
+	}
+	return ""
+}
+
+type recordingDeepModel struct {
+	mu       sync.Mutex
+	inputs   [][]*schema.Message
+	response *schema.Message
+}
+
+func (m *recordingDeepModel) Generate(_ context.Context, input []*schema.Message, _ ...model.Option) (*schema.Message, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	copied := append([]*schema.Message{}, input...)
+	m.inputs = append(m.inputs, copied)
+	if m.response != nil {
+		return m.response, nil
+	}
+	return schema.AssistantMessage("ok", nil), nil
+}
+
+func (m *recordingDeepModel) Stream(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+	msg, err := m.Generate(ctx, input, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return schema.StreamReaderFromArray([]*schema.Message{msg}), nil
+}
+
+func (m *recordingDeepModel) snapshotInputs() [][]*schema.Message {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([][]*schema.Message, len(m.inputs))
+	for i, input := range m.inputs {
+		out[i] = append([]*schema.Message{}, input...)
+	}
+	return out
+}
+
 type mockSearchTool struct{}
 
 func (m *mockSearchTool) Info(context.Context) (*schema.ToolInfo, error) {
@@ -129,6 +181,56 @@ func TestGenModelInput(t *testing.T) {
 		assert.Equal(t, "hello", msgs[1].Content)
 	})
 
+	t.Run("WithInstructionStripsLeadingSystemMessage", func(t *testing.T) {
+		input := &adk.AgentInput{
+			Messages: []*schema.Message{
+				schema.SystemMessage("old"),
+				schema.UserMessage("hello"),
+			},
+		}
+
+		msgs, err := typedGenModelInput(ctx, "new", input)
+		assert.NoError(t, err)
+		assert.Len(t, msgs, 2)
+		assert.Equal(t, schema.System, msgs[0].Role)
+		assert.Equal(t, "new", msgs[0].Content)
+		assert.Equal(t, schema.User, msgs[1].Role)
+		assert.Equal(t, "hello", msgs[1].Content)
+
+		systemCount := 0
+		for _, msg := range msgs {
+			if msg.Role == schema.System {
+				systemCount++
+			}
+		}
+		assert.Equal(t, 1, systemCount)
+	})
+
+	t.Run("WithInstructionStripsLeadingAgenticSystemMessage", func(t *testing.T) {
+		input := &adk.TypedAgentInput[*schema.AgenticMessage]{
+			Messages: []*schema.AgenticMessage{
+				schema.SystemAgenticMessage("old"),
+				schema.UserAgenticMessage("hello"),
+			},
+		}
+
+		msgs, err := typedGenModelInput(ctx, "new", input)
+		assert.NoError(t, err)
+		assert.Len(t, msgs, 2)
+		assert.Equal(t, schema.AgenticRoleTypeSystem, msgs[0].Role)
+		assert.Equal(t, "new", readAgenticInputText(msgs[0]))
+		assert.Equal(t, schema.AgenticRoleTypeUser, msgs[1].Role)
+		assert.Equal(t, "hello", readAgenticInputText(msgs[1]))
+
+		systemCount := 0
+		for _, msg := range msgs {
+			if msg.Role == schema.AgenticRoleTypeSystem {
+				systemCount++
+			}
+		}
+		assert.Equal(t, 1, systemCount)
+	})
+
 	t.Run("WithoutInstruction", func(t *testing.T) {
 		input := &adk.AgentInput{
 			Messages: []*schema.Message{
@@ -142,6 +244,83 @@ func TestGenModelInput(t *testing.T) {
 		assert.Equal(t, schema.User, msgs[0].Role)
 		assert.Equal(t, "hello", msgs[0].Content)
 	})
+
+	t.Run("WithoutInstructionPreservesLeadingSystemMessage", func(t *testing.T) {
+		input := &adk.AgentInput{
+			Messages: []*schema.Message{
+				schema.SystemMessage("old"),
+				schema.UserMessage("hello"),
+			},
+		}
+
+		msgs, err := typedGenModelInput(ctx, "", input)
+		assert.NoError(t, err)
+		assert.Len(t, msgs, 2)
+		assert.Equal(t, schema.System, msgs[0].Role)
+		assert.Equal(t, "old", msgs[0].Content)
+		assert.Equal(t, schema.User, msgs[1].Role)
+		assert.Equal(t, "hello", msgs[1].Content)
+	})
+}
+
+func TestDeepAgentTurn2DeduplicatesPersistedLeadingSystemMessage(t *testing.T) {
+	ctx := context.Background()
+	store := adksession.NewInMemoryStore[*schema.Message](nil)
+	model := &recordingDeepModel{}
+	agent, err := New(ctx, &Config{
+		Name:                   "deep",
+		Description:            "deep agent",
+		ChatModel:              model,
+		Instruction:            "you are deep agent",
+		MaxIteration:           2,
+		WithoutWriteTodos:      true,
+		WithoutGeneralSubAgent: true,
+	})
+	assert.NoError(t, err)
+	if err != nil {
+		return
+	}
+
+	runner := adk.NewRunner(ctx, adk.RunnerConfig{
+		Agent:        agent,
+		SessionID:    "deep-leading-system-dedup",
+		SessionStore: store,
+	})
+	for _, input := range [][]adk.Message{
+		{schema.UserMessage("turn one")},
+		{schema.UserMessage("turn two")},
+	} {
+		iter := runner.Run(ctx, input)
+		for {
+			if _, ok := iter.Next(); !ok {
+				break
+			}
+		}
+	}
+
+	inputs := model.snapshotInputs()
+	assert.Len(t, inputs, 2)
+	if len(inputs) < 2 {
+		return
+	}
+	secondTurnInput := inputs[1]
+	assert.NotEmpty(t, secondTurnInput)
+	if len(secondTurnInput) == 0 {
+		return
+	}
+	assert.Equal(t, schema.System, secondTurnInput[0].Role)
+	assert.Equal(t, "you are deep agent", secondTurnInput[0].Content)
+
+	systemCount := 0
+	for _, msg := range secondTurnInput {
+		if msg.Role == schema.System {
+			systemCount++
+		}
+	}
+	assert.Equal(t, 1, systemCount)
+	if len(secondTurnInput) > 1 {
+		assert.NotEqual(t, schema.System, secondTurnInput[1].Role, "reconstructed system message must not remain after fresh system message")
+	}
 }
 
 func TestWriteTodos(t *testing.T) {
