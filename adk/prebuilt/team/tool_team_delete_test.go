@@ -19,6 +19,8 @@ package team
 import (
 	"context"
 	"errors"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -34,6 +36,22 @@ type deleteErrBackend struct {
 
 func (b *deleteErrBackend) Delete(_ context.Context, _ *DeleteRequest) error {
 	return b.err
+}
+
+// pathDeleteErrBackend fails Delete only for paths under a configured prefix,
+// letting tests simulate a backend where one of TeamDelete's two directory
+// deletions fails while the other succeeds.
+type pathDeleteErrBackend struct {
+	*inMemoryBackend
+	failPrefix string
+	err        error
+}
+
+func (b *pathDeleteErrBackend) Delete(ctx context.Context, req *DeleteRequest) error {
+	if b.failPrefix != "" && strings.HasPrefix(req.FilePath, b.failPrefix) {
+		return b.err
+	}
+	return b.inMemoryBackend.Delete(ctx, req)
 }
 
 func TestTeamDeleteTool_Info(t *testing.T) {
@@ -167,6 +185,104 @@ func TestTeamDeleteTool_InvokableRun_DeleteFailureReturnsError(t *testing.T) {
 	assert.Contains(t, err.Error(), "delete failed")
 	// Team name should NOT be cleared when deletion fails.
 	assert.Equal(t, "myteam", mw.getTeamName())
+}
+
+// TestConfigStore_DeleteTeam_TasksFirstKeepsConfigRecoverable verifies the
+// crash-recovery ordering of DeleteTeam: when removing the team directory (which
+// holds config.json) fails, the tasks directory has already been removed but
+// config.json is preserved, so a retry's residual-member check still works
+// instead of failing with "missing config.json".
+func TestConfigStore_DeleteTeam_TasksFirstKeepsConfigRecoverable(t *testing.T) {
+	ctx := context.Background()
+	mem := newInMemoryBackend()
+	baseDir := "/tmp/test"
+
+	conf := &Config{Backend: mem, BaseDir: baseDir}
+	conf.ensureInit()
+	store := newConfigStore(conf)
+
+	_, err := store.CreateTeam(ctx, "myteam", "", LeaderAgentName, "")
+	assert.NoError(t, err)
+	// Seed a task so the tasks directory is non-empty.
+	taskDir := tasksDirPath(baseDir, "myteam")
+	assert.NoError(t, mem.Write(ctx, &WriteRequest{FilePath: filepath.Join(taskDir, "1.json"), Content: "{}"}))
+
+	// CreateTeam does not Mkdir the team dir itself (only its inbox/task subdirs),
+	// so register it explicitly to mirror a real filesystem where it exists.
+	teamDir := teamDirPath(baseDir, "myteam")
+	assert.NoError(t, mem.Mkdir(ctx, teamDir))
+
+	// Fail deletion of the team directory (config.json lives here). The tasks
+	// directory deletion runs first and succeeds.
+	backend := &pathDeleteErrBackend{
+		inMemoryBackend: mem,
+		failPrefix:      teamDir,
+		err:             errors.New("team dir delete failed"),
+	}
+	conf.Backend = backend
+	failStore := newConfigStore(conf)
+
+	err = failStore.DeleteTeam(ctx, "myteam")
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "retry to reconcile")
+
+	// config.json must survive so recovery can still read the member list.
+	exists, existsErr := mem.Exists(ctx, failStore.configFilePath("myteam"))
+	assert.NoError(t, existsErr)
+	assert.True(t, exists, "config.json must be preserved when team-dir deletion fails")
+
+	// The residual-member check (recovery path) must still work, not hit a
+	// missing-config error.
+	names, namesErr := failStore.NonLeaderMemberNames(ctx, "myteam")
+	assert.NoError(t, namesErr)
+	assert.Empty(t, names)
+
+	// Clear the fault and retry: deleteDirIfExists is idempotent, so the
+	// already-removed tasks dir is a no-op and the team dir is now removed.
+	conf.Backend = mem
+	okStore := newConfigStore(conf)
+	assert.NoError(t, okStore.DeleteTeam(ctx, "myteam"))
+	exists, _ = mem.Exists(ctx, okStore.configFilePath("myteam"))
+	assert.False(t, exists, "config.json must be gone after successful retry")
+}
+
+// TestConfigStore_DeleteTeam_TaskDirFailureKeepsConfig verifies that a failure
+// deleting the tasks directory (the first step) leaves config.json fully intact,
+// so the whole team remains and a retry can complete cleanly.
+func TestConfigStore_DeleteTeam_TaskDirFailureKeepsConfig(t *testing.T) {
+	ctx := context.Background()
+	mem := newInMemoryBackend()
+	baseDir := "/tmp/test"
+
+	conf := &Config{Backend: mem, BaseDir: baseDir}
+	conf.ensureInit()
+	store := newConfigStore(conf)
+
+	_, err := store.CreateTeam(ctx, "myteam", "", LeaderAgentName, "")
+	assert.NoError(t, err)
+	taskDir := tasksDirPath(baseDir, "myteam")
+	assert.NoError(t, mem.Write(ctx, &WriteRequest{FilePath: filepath.Join(taskDir, "1.json"), Content: "{}"}))
+
+	backend := &pathDeleteErrBackend{
+		inMemoryBackend: mem,
+		failPrefix:      taskDir,
+		err:             errors.New("task dir delete failed"),
+	}
+	conf.Backend = backend
+	failStore := newConfigStore(conf)
+
+	err = failStore.DeleteTeam(ctx, "myteam")
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "team config left intact")
+
+	// Both config.json and the team directory must survive untouched.
+	exists, _ := mem.Exists(ctx, failStore.configFilePath("myteam"))
+	assert.True(t, exists, "config.json must be intact when task-dir deletion fails first")
+
+	// Retry cleanly once the fault is cleared.
+	conf.Backend = mem
+	okStore := newConfigStore(conf)
+	assert.NoError(t, okStore.DeleteTeam(ctx, "myteam"))
 }
 
 // TestTeamDeleteTool_AcquiresTeamOpLock verifies that TeamDelete takes the

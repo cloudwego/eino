@@ -1387,3 +1387,139 @@ func TestDeleteTaskInvalidID(t *testing.T) {
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "DeleteTask invalid task ID")
 }
+
+// writeFailBackend wraps an inMemoryBackend and fails Write for a configured set
+// of file paths, letting tests simulate a backend that errors part-way through a
+// multi-task graph write.
+type writeFailBackend struct {
+	*inMemoryBackend
+	failPaths map[string]struct{}
+}
+
+func (b *writeFailBackend) Write(ctx context.Context, req *WriteRequest) error {
+	if _, fail := b.failPaths[req.FilePath]; fail {
+		return fmt.Errorf("simulated write failure for %s", req.FilePath)
+	}
+	return b.inMemoryBackend.Write(ctx, req)
+}
+
+// TestTaskUpdateToolDependencyWriteFailsBeforePartialEdge verifies that when the
+// batched graph flush fails on the first task it writes, nothing is persisted —
+// so a failed dependency update never leaves a one-sided edge. persistGraph
+// writes in ascending ID order, so failing the current task (#1, written first)
+// aborts before the counterpart (#2) is touched.
+func TestTaskUpdateToolDependencyWriteFailsBeforePartialEdge(t *testing.T) {
+	ctx := context.Background()
+	mem := newInMemoryBackend()
+	baseDir := "/tmp/tasks"
+
+	task1 := &task{ID: "1", Subject: "Task 1", Status: taskStatusPending, Blocks: []string{}, BlockedBy: []string{}}
+	task1JSON, _ := sonic.MarshalString(task1)
+	_ = mem.Write(ctx, &WriteRequest{FilePath: filepath.Join(baseDir, "1.json"), Content: task1JSON})
+
+	task2 := &task{ID: "2", Subject: "Task 2", Status: taskStatusPending, Blocks: []string{}, BlockedBy: []string{}}
+	task2JSON, _ := sonic.MarshalString(task2)
+	_ = mem.Write(ctx, &WriteRequest{FilePath: filepath.Join(baseDir, "2.json"), Content: task2JSON})
+
+	backend := &writeFailBackend{
+		inMemoryBackend: mem,
+		failPaths:       map[string]struct{}{filepath.Join(baseDir, "1.json"): {}},
+	}
+
+	tool := newTaskUpdateTool(testMiddleware(backend, baseDir), &sync.RWMutex{})
+
+	_, err := tool.InvokableRun(ctx, `{"taskId": "1", "addBlocks": ["2"]}`)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "persist task graph failed")
+
+	// Neither side should carry an edge: the flush aborted on #1 before touching #2.
+	content1, _ := mem.Read(ctx, &ReadRequest{FilePath: filepath.Join(baseDir, "1.json")})
+	var persisted1 task
+	_ = sonic.UnmarshalString(content1.Content, &persisted1)
+	assert.Empty(t, persisted1.Blocks)
+
+	content2, _ := mem.Read(ctx, &ReadRequest{FilePath: filepath.Join(baseDir, "2.json")})
+	var persisted2 task
+	_ = sonic.UnmarshalString(content2.Content, &persisted2)
+	assert.Empty(t, persisted2.BlockedBy)
+}
+
+// TestTaskUpdateToolDependencyValidationFailsPersistsNothing verifies that a
+// validation failure (here a non-existent target) aborts before any backend
+// write, because all mutation now happens in memory ahead of the batched flush.
+func TestTaskUpdateToolDependencyValidationFailsPersistsNothing(t *testing.T) {
+	ctx := context.Background()
+	backend := newInMemoryBackend()
+	baseDir := "/tmp/tasks"
+
+	task1 := &task{ID: "1", Subject: "Task 1", Status: taskStatusPending, Blocks: []string{}, BlockedBy: []string{}}
+	task1JSON, _ := sonic.MarshalString(task1)
+	_ = backend.Write(ctx, &WriteRequest{FilePath: filepath.Join(baseDir, "1.json"), Content: task1JSON})
+
+	task2 := &task{ID: "2", Subject: "Task 2", Status: taskStatusPending, Blocks: []string{}, BlockedBy: []string{}}
+	task2JSON, _ := sonic.MarshalString(task2)
+	_ = backend.Write(ctx, &WriteRequest{FilePath: filepath.Join(baseDir, "2.json"), Content: task2JSON})
+
+	tool := newTaskUpdateTool(testMiddleware(backend, baseDir), &sync.RWMutex{})
+
+	// #2 exists, #999 does not: the whole update must be rejected with no partial
+	// edge written for the valid target.
+	_, err := tool.InvokableRun(ctx, `{"taskId": "1", "addBlocks": ["2", "999"]}`)
+	assert.Error(t, err)
+
+	content1, _ := backend.Read(ctx, &ReadRequest{FilePath: filepath.Join(baseDir, "1.json")})
+	var persisted1 task
+	_ = sonic.UnmarshalString(content1.Content, &persisted1)
+	assert.Empty(t, persisted1.Blocks)
+
+	content2, _ := backend.Read(ctx, &ReadRequest{FilePath: filepath.Join(baseDir, "2.json")})
+	var persisted2 task
+	_ = sonic.UnmarshalString(content2.Content, &persisted2)
+	assert.Empty(t, persisted2.BlockedBy)
+}
+
+// TestTaskUpdateToolDependencyRetryAfterWriteFailure verifies that even when a
+// flush fails partway (leaving at most a recoverable one-sided edge), re-running
+// the same idempotent TaskUpdate reconciles the graph to a fully consistent
+// bidirectional edge. Here the counterpart (#2) write is failed first — which can
+// leave #1.blocks written but #2.blockedBy missing — then the fault is cleared
+// and the retry repairs it.
+func TestTaskUpdateToolDependencyRetryAfterWriteFailure(t *testing.T) {
+	ctx := context.Background()
+	mem := newInMemoryBackend()
+	baseDir := "/tmp/tasks"
+
+	task1 := &task{ID: "1", Subject: "Task 1", Status: taskStatusPending, Blocks: []string{}, BlockedBy: []string{}}
+	task1JSON, _ := sonic.MarshalString(task1)
+	_ = mem.Write(ctx, &WriteRequest{FilePath: filepath.Join(baseDir, "1.json"), Content: task1JSON})
+
+	task2 := &task{ID: "2", Subject: "Task 2", Status: taskStatusPending, Blocks: []string{}, BlockedBy: []string{}}
+	task2JSON, _ := sonic.MarshalString(task2)
+	_ = mem.Write(ctx, &WriteRequest{FilePath: filepath.Join(baseDir, "2.json"), Content: task2JSON})
+
+	backend := &writeFailBackend{
+		inMemoryBackend: mem,
+		failPaths:       map[string]struct{}{filepath.Join(baseDir, "2.json"): {}},
+	}
+	tool := newTaskUpdateTool(testMiddleware(backend, baseDir), &sync.RWMutex{})
+
+	_, err := tool.InvokableRun(ctx, `{"taskId": "1", "addBlocks": ["2"]}`)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "persist task graph failed")
+
+	// Clear the fault and retry the identical update; idempotent mutations repair
+	// any one-sided edge left behind.
+	backend.failPaths = map[string]struct{}{}
+	_, err = tool.InvokableRun(ctx, `{"taskId": "1", "addBlocks": ["2"]}`)
+	assert.NoError(t, err)
+
+	content1, _ := mem.Read(ctx, &ReadRequest{FilePath: filepath.Join(baseDir, "1.json")})
+	var persisted1 task
+	_ = sonic.UnmarshalString(content1.Content, &persisted1)
+	assert.Equal(t, []string{"2"}, persisted1.Blocks)
+
+	content2, _ := mem.Read(ctx, &ReadRequest{FilePath: filepath.Join(baseDir, "2.json")})
+	var persisted2 task
+	_ = sonic.UnmarshalString(content2.Content, &persisted2)
+	assert.Equal(t, []string{"1"}, persisted2.BlockedBy)
+}
