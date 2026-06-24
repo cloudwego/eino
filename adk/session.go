@@ -160,13 +160,14 @@ type SessionEvent[M MessageType] struct {
 	// and the resumed suffix) as one unit.
 	TurnID string `json:"turn_id,omitempty"`
 
-	Message          M                        `json:"message,omitempty"`
-	MessagesReplaced *[]M                     `json:"messages_replaced,omitempty"`
-	MessageUpdated   *MessageUpdatedEvent[M]  `json:"message_updated,omitempty"`
-	MessageInserted  *MessageInsertedEvent[M] `json:"message_inserted,omitempty"`
-	MessagesDeleted  *MessagesDeletedEvent    `json:"messages_deleted,omitempty"`
-	ModelContext     *ModelContextEvent       `json:"model_context,omitempty"`
-	Rollback         *SessionRollbackEvent    `json:"rollback,omitempty"`
+	Message                 M                                `json:"message,omitempty"`
+	MessageStreamIncomplete *MessageStreamIncompleteEvent[M] `json:"message_stream_incomplete,omitempty"`
+	MessagesReplaced        *[]M                             `json:"messages_replaced,omitempty"`
+	MessageUpdated          *MessageUpdatedEvent[M]          `json:"message_updated,omitempty"`
+	MessageInserted         *MessageInsertedEvent[M]         `json:"message_inserted,omitempty"`
+	MessagesDeleted         *MessagesDeletedEvent            `json:"messages_deleted,omitempty"`
+	ModelContext            *ModelContextEvent               `json:"model_context,omitempty"`
+	Rollback                *SessionRollbackEvent            `json:"rollback,omitempty"`
 
 	Lifecycle *LifecycleEvent    `json:"lifecycle,omitempty"`
 	Error     *SessionErrorEvent `json:"error,omitempty"`
@@ -180,13 +181,14 @@ type SessionEvent[M MessageType] struct {
 type SessionEventKind string
 
 const (
-	SessionEventMessage          SessionEventKind = "message"
-	SessionEventMessagesReplaced SessionEventKind = "messages_replaced"
-	SessionEventMessageUpdated   SessionEventKind = "message_updated"
-	SessionEventMessageInserted  SessionEventKind = "message_inserted"
-	SessionEventMessagesDeleted  SessionEventKind = "messages_deleted"
-	SessionEventModelContext     SessionEventKind = "model_context"
-	SessionEventRollback         SessionEventKind = "rollback"
+	SessionEventMessage                 SessionEventKind = "message"
+	SessionEventMessageStreamIncomplete SessionEventKind = "message_stream_incomplete"
+	SessionEventMessagesReplaced        SessionEventKind = "messages_replaced"
+	SessionEventMessageUpdated          SessionEventKind = "message_updated"
+	SessionEventMessageInserted         SessionEventKind = "message_inserted"
+	SessionEventMessagesDeleted         SessionEventKind = "messages_deleted"
+	SessionEventModelContext            SessionEventKind = "model_context"
+	SessionEventRollback                SessionEventKind = "rollback"
 
 	SessionEventSessionStatusRunning     SessionEventKind = "session.status_running"
 	SessionEventSessionStatusIdle        SessionEventKind = "session.status_idle"
@@ -396,6 +398,13 @@ type SessionExtensionEvent struct {
 	Data any `json:"data,omitempty"`
 }
 
+// MessageStreamIncompleteEvent records the materialized prefix of a stream that
+// failed before EOF. It is durable replay data and does not enter model context.
+type MessageStreamIncompleteEvent[M MessageType] struct {
+	Message M      `json:"message"`
+	Error   string `json:"error,omitempty"`
+}
+
 // MessageUpdatedEvent represents a single message replacement within the messages array.
 type MessageUpdatedEvent[M MessageType] struct {
 	// MessageID identifies the target message via its eino-internal message ID
@@ -488,6 +497,8 @@ func init() {
 	// Register SessionEvent and helper types for HumanReadableSerializer.
 	schema.RegisterName[*SessionEvent[*schema.Message]]("_eino_adk_session_event")
 	schema.RegisterName[*SessionEvent[*schema.AgenticMessage]]("_eino_adk_agentic_session_event")
+	schema.RegisterName[*MessageStreamIncompleteEvent[*schema.Message]]("_eino_adk_message_stream_incomplete_event")
+	schema.RegisterName[*MessageStreamIncompleteEvent[*schema.AgenticMessage]]("_eino_adk_agentic_message_stream_incomplete_event")
 	schema.RegisterName[*MessageUpdatedEvent[*schema.Message]]("_eino_adk_message_updated_event")
 	schema.RegisterName[*MessageUpdatedEvent[*schema.AgenticMessage]]("_eino_adk_agentic_message_updated_event")
 	schema.RegisterName[*MessageInsertedEvent[*schema.Message]]("_eino_adk_message_inserted_event")
@@ -706,6 +717,12 @@ func ClassifySessionEvent[M MessageType](event *SessionEvent[M]) (SessionEventKi
 	}
 	if !isNilMessage(event.Message) {
 		add(SessionEventMessage)
+	}
+	if event.MessageStreamIncomplete != nil {
+		if isNilMessage(event.MessageStreamIncomplete.Message) {
+			return "", errors.New("message stream incomplete event must set non-nil Message")
+		}
+		add(SessionEventMessageStreamIncomplete)
 	}
 	if event.MessagesReplaced != nil {
 		add(SessionEventMessagesReplaced)

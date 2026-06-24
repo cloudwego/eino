@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/gob"
+	"errors"
 	"fmt"
 	"io"
 	"time"
@@ -540,6 +541,58 @@ func concatMessageStream[M MessageType](stream *schema.StreamReader[M]) (M, erro
 			return zero, err
 		}
 		return any(result).(M), nil
+	default:
+		panic("unreachable: unknown MessageType")
+	}
+}
+
+func materializeMessageStreamPrefix[M MessageType](stream *schema.StreamReader[M]) (msg M, hasChunks bool, streamErr error, err error) {
+	var zero M
+	switch s := any(stream).(type) {
+	case *schema.StreamReader[*schema.Message]:
+		defer s.Close()
+		var msgs []*schema.Message
+		for {
+			frame, recvErr := s.Recv()
+			if errors.Is(recvErr, io.EOF) {
+				break
+			}
+			if recvErr != nil {
+				streamErr = recvErr
+				break
+			}
+			msgs = append(msgs, frame)
+		}
+		if len(msgs) == 0 {
+			return zero, false, streamErr, nil
+		}
+		result, concatErr := schema.ConcatMessages(msgs)
+		if concatErr != nil {
+			return zero, true, streamErr, concatErr
+		}
+		return any(result).(M), true, streamErr, nil
+	case *schema.StreamReader[*schema.AgenticMessage]:
+		defer s.Close()
+		var msgs []*schema.AgenticMessage
+		for {
+			frame, recvErr := s.Recv()
+			if errors.Is(recvErr, io.EOF) {
+				break
+			}
+			if recvErr != nil {
+				streamErr = recvErr
+				break
+			}
+			msgs = append(msgs, frame)
+		}
+		if len(msgs) == 0 {
+			return zero, false, streamErr, nil
+		}
+		result, concatErr := schema.ConcatAgenticMessages(msgs)
+		if concatErr != nil {
+			return zero, true, streamErr, concatErr
+		}
+		return any(result).(M), true, streamErr, nil
 	default:
 		panic("unreachable: unknown MessageType")
 	}
