@@ -176,14 +176,18 @@ type SessionEventVariant[M MessageType] struct {
 	MessageStreamRef *MessageStreamRef
 }
 
+// IsEvent returns true if the variant carries a materialized SessionEvent.
 func (v *SessionEventVariant[M]) IsEvent() bool {
 	return v != nil && v.Event != nil
 }
 
+// IsMessageStream returns true if the variant carries a streaming message reference.
 func (v *SessionEventVariant[M]) IsMessageStream() bool {
 	return v != nil && v.MessageStreamRef != nil
 }
 
+// GetEvent returns the materialized SessionEvent, or nil if the variant
+// carries a MessageStreamRef or is nil.
 func (v *SessionEventVariant[M]) GetEvent() *SessionEvent[M] {
 	if v == nil {
 		return nil
@@ -191,6 +195,8 @@ func (v *SessionEventVariant[M]) GetEvent() *SessionEvent[M] {
 	return v.Event
 }
 
+// GetMessageStreamRef returns the streaming message reference, or nil if the
+// variant carries a materialized SessionEvent or is nil.
 func (v *SessionEventVariant[M]) GetMessageStreamRef() *MessageStreamRef {
 	if v == nil {
 		return nil
@@ -198,6 +204,10 @@ func (v *SessionEventVariant[M]) GetMessageStreamRef() *MessageStreamRef {
 	return v.MessageStreamRef
 }
 
+// MessageStreamRef carries the durable identity metadata for a streaming
+// message whose content remains in Output.MessageOutput.MessageStream. It is
+// carried by SessionEventVariant for live events and materialized into a full
+// SessionEvent when the stream prefix is persisted.
 type MessageStreamRef struct {
 	EventID   string
 	Timestamp time.Time
@@ -380,6 +390,7 @@ type ToolSpanMeta struct {
 	ToolResultMessageEventID string `json:"tool_result_message_event_id,omitempty"`
 }
 
+// CancelEvent records a user-initiated cancellation in the durable session timeline.
 type CancelEvent struct {
 	Reason string `json:"reason,omitempty"`
 }
@@ -641,20 +652,11 @@ func toSessionEventChecked[M MessageType](event *TypedAgentEvent[M]) (*SessionEv
 		}
 		return &se, nil
 	}
-	se := &SessionEvent[M]{Timestamp: newEventTimestamp()}
-	switch {
-	case event.Output != nil && event.Output.MessageOutput != nil:
-		if !isNilMessage(event.Output.MessageOutput.Message) {
-			se.Kind = SessionEventMessage
-			se.Message = event.Output.MessageOutput.Message
-		} else {
-			return nil, nil
-		}
-	default:
-		return nil, nil
+	if event.Output != nil && event.Output.MessageOutput != nil &&
+		!isNilMessage(event.Output.MessageOutput.Message) {
+		return nil, errors.New("persistable AgentEvent has no SessionEventVariant.Event")
 	}
-	return nil, errors.New("persistable AgentEvent has no SessionEventVariant.Event")
-	return se, NormalizeSessionEventKind(se)
+	return nil, nil
 }
 
 func normalizeAgentSessionEvent[M MessageType](event *TypedAgentEvent[M]) (SessionEvent[M], error) {
