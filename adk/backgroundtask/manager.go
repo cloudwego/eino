@@ -248,7 +248,6 @@ type Manager struct {
 type taskRecord struct {
 	task   Task
 	cancel context.CancelFunc // cancels the run's context
-	done   bool               // true once task reaches a terminal state
 	// doneCh is closed exactly once, by finalize, when the task reaches a terminal
 	// state. Wait selects on it so waiting for one task neither holds m.mu nor is
 	// woken by unrelated tasks finishing.
@@ -362,15 +361,12 @@ func (m *Manager) Wait(ctx context.Context, id string) (*Task, bool) {
 		return nil, false
 	}
 	doneCh := rec.doneCh
-	done := rec.done
 	m.mu.Unlock()
 
-	if !done {
-		select {
-		case <-doneCh:
-		case <-ctx.Done():
-			return m.taskSnapshot(id), false
-		}
+	select {
+	case <-doneCh:
+	case <-ctx.Done():
+		return m.taskSnapshot(id), false
 	}
 	return m.taskSnapshot(id), true
 }
@@ -399,7 +395,7 @@ func (m *Manager) Cancel(id string) error {
 		return fmt.Errorf("no background task has id %q, so there is nothing to stop. "+
 			"If you are unsure of the id, there is nothing left to cancel", id)
 	}
-	if rec.done {
+	if taskDone(rec.doneCh) {
 		return fmt.Errorf("background task %q has already finished (status: %s) and cannot be stopped. "+
 			"Use the task_output tool with this id to read its result instead", id, rec.task.Status)
 	}
@@ -447,7 +443,7 @@ func (m *Manager) Close(ctx context.Context) error {
 	m.closed = true
 
 	for _, rec := range m.tasks {
-		if !rec.done {
+		if !taskDone(rec.doneCh) {
 			m.cancelTask(rec)
 		}
 	}
@@ -608,7 +604,7 @@ func (m *Manager) timeoutTask(id string, budgetMs int) {
 	defer m.mu.Unlock()
 
 	rec, ok := m.tasks[id]
-	if !ok || rec.done {
+	if !ok || taskDone(rec.doneCh) {
 		return
 	}
 	if rec.cancel != nil {
@@ -647,7 +643,7 @@ func (m *Manager) cancelIfRunning(id string) {
 	defer m.mu.Unlock()
 
 	rec, ok := m.tasks[id]
-	if !ok || rec.done {
+	if !ok || taskDone(rec.doneCh) {
 		return
 	}
 	m.cancelTask(rec)
@@ -665,7 +661,7 @@ func (m *Manager) detach(id string) bool {
 	defer m.mu.Unlock()
 
 	rec, ok := m.tasks[id]
-	if !ok || rec.done {
+	if !ok || taskDone(rec.doneCh) {
 		return false
 	}
 	rec.task.RunInBackground = true
@@ -680,11 +676,10 @@ func (m *Manager) detach(id string) bool {
 // Must be called with m.mu held.
 func (m *Manager) finalize(id string, apply func(rec *taskRecord)) bool {
 	rec, ok := m.tasks[id]
-	if !ok || rec.done {
+	if !ok || taskDone(rec.doneCh) {
 		return false
 	}
 
-	rec.done = true
 	now := time.Now()
 	rec.task.DoneAt = &now
 	apply(rec)
@@ -728,11 +723,20 @@ func cloneTask(t *Task) *Task {
 
 func (m *Manager) hasRunningLocked() bool {
 	for _, rec := range m.tasks {
-		if !rec.done {
+		if !taskDone(rec.doneCh) {
 			return true
 		}
 	}
 	return false
+}
+
+func taskDone(doneCh <-chan struct{}) bool {
+	select {
+	case <-doneCh:
+		return true
+	default:
+		return false
+	}
 }
 
 // WorkFunc performs a single managed execution. It is supplied by the caller
