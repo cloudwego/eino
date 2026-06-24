@@ -57,6 +57,7 @@ type lifecycleManager struct {
 	isLeader   bool                                                             // whether this agent is the team leader
 	logger     Logger                                                           // logger instance
 	onReminder func(ctx context.Context, agentName string, reminderText string) // per-runner reminder callback
+	subagents  *subagentRegistry                                                // reusable teammate roles; nil/empty means subagent_type is a plain label
 
 	// rootCtxMu guards rootCtx. rootCtx is the long-lived team runtime context,
 	// captured once when the Runner starts (Runner.Run → setRootContext). Teammate
@@ -127,8 +128,33 @@ func (lm *lifecycleManager) teammateRootContext(toolCtx context.Context) context
 // buildTeammateAgent creates a teammate's ChatModelAgent with team and plantask middleware.
 // The teammate's specific task prompt is delivered via the mailbox (sendInitialPrompt),
 // not via the agent instruction — so no prompt parameter is needed here.
-func (lm *lifecycleManager) buildTeammateAgent(ctx context.Context, agentName, teamName string) (*adk.ChatModelAgent, error) {
+//
+// subagentType selects a reusable role from the registry: when it names a
+// declared TeammateRole, that role's Model / Tools / Instruction are overlaid onto
+// the leader's base config before the team/plantask middleware is wired in. An
+// empty type, or any type when no roles are configured, falls back to the base
+// config unchanged (the caller validates unknown-but-configured types before
+// reaching here). The role's Instruction is layered before the teammate-name line
+// and shared teammate instruction so the final order is base → role → name+howto.
+func (lm *lifecycleManager) buildTeammateAgent(ctx context.Context, agentName, teamName, subagentType string) (*adk.ChatModelAgent, error) {
 	tmMW := newTeamTeammateMiddleware(lm.runnerConf, agentName, teamName)
+
+	baseConfig := lm.runnerConf.AgentConfig
+	if def, ok, _ := lm.subagents.resolve(subagentType); ok {
+		baseConfig = overlaySubagentConfig(baseConfig, def)
+	}
+
+	// Give the teammate its own agent identity. Without this every teammate would
+	// inherit the leader's Name ("team-lead") and Description, so all spawned
+	// agents would report the leader's name in their events and present the
+	// leader's identity to the model — corrupting event attribution and making the
+	// teammate behave as if it were the leader. Copy before mutating so the shared
+	// leader AgentConfig (used verbatim on the no-role path) is never modified;
+	// overlaySubagentConfig already returns a copy, but the no-role path does not.
+	cfg := *baseConfig
+	cfg.Name = agentName
+	cfg.Description = ""
+	baseConfig = &cfg
 
 	extraInstruction := fmt.Sprintf(
 		"Your agent name is: %s\n\n%s",
@@ -136,7 +162,7 @@ func (lm *lifecycleManager) buildTeammateAgent(ctx context.Context, agentName, t
 		selectToolDesc(teammateInstruction, teammateInstructionChinese),
 	)
 
-	tmAgent, ptMW, err := buildTeamAgent(ctx, lm.runnerConf, tmMW, extraInstruction, lm.onReminder)
+	tmAgent, ptMW, err := buildTeamAgent(ctx, lm.runnerConf, tmMW, baseConfig, extraInstruction, lm.onReminder)
 	if err != nil {
 		return nil, fmt.Errorf("create teammate agent: %w", err)
 	}
@@ -145,6 +171,25 @@ func (lm *lifecycleManager) buildTeammateAgent(ctx context.Context, agentName, t
 	tmMW.lifecycle.SetPlantaskMW(ptMW)
 
 	return tmAgent, nil
+}
+
+// validateSubagentType rejects a subagent_type that names no declared role when
+// roles are configured. An empty type, or any type when no roles are configured,
+// is accepted (it falls back to the base config). The Agent tool calls this
+// before registering a member so an unknown type surfaces as a tool error the
+// model can retry, rather than silently spawning a misconfigured teammate.
+func (lm *lifecycleManager) validateSubagentType(subagentType string) error {
+	_, _, err := lm.subagents.resolve(subagentType)
+	return err
+}
+
+// subagentTypeNames returns the declared role names (empty when none), used by
+// the Agent tool to enumerate valid subagent_type values in its schema.
+func (lm *lifecycleManager) subagentTypeNames() []string {
+	if lm.subagents.empty() {
+		return nil
+	}
+	return lm.subagents.order
 }
 
 // plantaskMW returns the plantask middleware for task operations.
