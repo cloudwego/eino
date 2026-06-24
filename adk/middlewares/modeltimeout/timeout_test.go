@@ -455,8 +455,8 @@ func TestModelTimeoutTimelineEventContainsTimeoutMeta(t *testing.T) {
 		if !ok {
 			break
 		}
-		if event.SessionEvent != nil && event.SessionEvent.Kind == SessionEventSpanModelRequestEnd {
-			endEvent = event.SessionEvent
+		if event.SessionEventVariant.GetEvent() != nil && event.SessionEventVariant.GetEvent().Kind == SessionEventSpanModelRequestEnd {
+			endEvent = event.SessionEventVariant.GetEvent()
 		}
 	}
 	require.NotNil(t, endEvent)
@@ -494,8 +494,8 @@ func TestAttack_ModelTimeoutRetryExhaustionKeepsTimelineTimeoutMeta(t *testing.T
 		if !ok {
 			break
 		}
-		if event.SessionEvent != nil && event.SessionEvent.Kind == SessionEventSpanModelRequestEnd {
-			endEvent = event.SessionEvent
+		if event.SessionEventVariant.GetEvent() != nil && event.SessionEventVariant.GetEvent().Kind == SessionEventSpanModelRequestEnd {
+			endEvent = event.SessionEventVariant.GetEvent()
 		}
 	}
 	require.NotNil(t, endEvent)

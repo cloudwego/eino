@@ -947,11 +947,32 @@ func TestStampAgentToolSessionEvent(t *testing.T) {
 
 	stampAgentToolSessionEvent(event, "agent_tool:child")
 
-	require.NotNil(t, event.SessionEvent)
-	assert.Equal(t, "agent_tool:child", event.SessionEvent.SessionID)
-	assert.Equal(t, event.EventID, event.SessionEvent.EventID)
-	assert.Equal(t, event.Timestamp, event.SessionEvent.Timestamp)
-	assert.Equal(t, SessionEventMessage, event.SessionEvent.Kind)
+	require.NotNil(t, event.SessionEventVariant.GetEvent())
+	assert.Equal(t, "agent_tool:child", event.SessionEventVariant.SessionID)
+	assert.Empty(t, event.SessionEventVariant.GetEvent().EventID)
+	assert.False(t, event.SessionEventVariant.GetEvent().Timestamp.IsZero())
+	assert.Equal(t, SessionEventMessage, event.SessionEventVariant.GetEvent().Kind)
+}
+
+func TestStampAgentToolSessionEvent_Streaming(t *testing.T) {
+	event := &AgentEvent{
+		Output: &AgentOutput{
+			MessageOutput: &MessageVariant{
+				IsStreaming:   true,
+				MessageStream: schema.StreamReaderFromArray([]Message{schema.AssistantMessage("child", nil)}),
+				Role:          schema.Assistant,
+			},
+		},
+	}
+
+	stampAgentToolSessionEvent(event, "agent_tool:child")
+
+	ref := event.SessionEventVariant.GetMessageStreamRef()
+	require.NotNil(t, ref)
+	assert.Equal(t, "agent_tool:child", event.SessionEventVariant.SessionID)
+	assert.Empty(t, ref.EventID)
+	assert.False(t, ref.Timestamp.IsZero())
+	assert.Equal(t, SessionEventMessage, ref.Kind)
 }
 
 func TestSequentialWorkflow_WithChatModelAgentTool_NestedRunPathAndSessions(t *testing.T) {

@@ -757,10 +757,10 @@ func TestPermissionDecisionAppearsInToolUseTimeline(t *testing.T) {
 			break
 		}
 		require.NoError(t, event.Err)
-		if event.SessionEvent == nil || event.SessionEvent.Span == nil || event.SessionEvent.Span.Tool == nil {
+		if event.SessionEventVariant.GetEvent() == nil || event.SessionEventVariant.GetEvent().Span == nil || event.SessionEventVariant.GetEvent().Span.Tool == nil {
 			continue
 		}
-		if event.SessionEvent.Kind == adk.SessionEventSpanToolCallEnd && event.SessionEvent.Span.Status == "ok" {
+		if event.SessionEventVariant.GetEvent().Kind == adk.SessionEventSpanToolCallEnd && event.SessionEventVariant.GetEvent().Span.Status == "ok" {
 			sawToolCallEndOK = true
 		}
 	}
@@ -879,12 +879,12 @@ func TestPermissionDecisionEventResumeLiveAndPersisted(t *testing.T) {
 					break
 				}
 				require.NoError(t, event.Err)
-				if event.SessionEvent == nil || event.SessionEvent.Kind != adk.SessionEventAgentInterrupt {
+				if event.SessionEventVariant.GetEvent() == nil || event.SessionEventVariant.GetEvent().Kind != adk.SessionEventInterrupt {
 					continue
 				}
-				require.NotNil(t, event.SessionEvent.AgentInterrupt)
-				require.Len(t, event.SessionEvent.AgentInterrupt.Contexts, 1)
-				interruptID = event.SessionEvent.AgentInterrupt.Contexts[0].InterruptID
+				require.NotNil(t, event.SessionEventVariant.GetEvent().Interrupt)
+				require.Len(t, event.SessionEventVariant.GetEvent().Interrupt.Contexts, 1)
+				interruptID = event.SessionEventVariant.GetEvent().Interrupt.Contexts[0].InterruptID
 			}
 			require.NotEmpty(t, interruptID)
 
@@ -900,8 +900,8 @@ func TestPermissionDecisionEventResumeLiveAndPersisted(t *testing.T) {
 					break
 				}
 				require.NoError(t, event.Err)
-				if event.SessionEvent != nil && event.SessionEvent.Kind == SessionEventPermissionDecision {
-					liveDecision = event.SessionEvent
+				if event.SessionEventVariant.GetEvent() != nil && event.SessionEventVariant.GetEvent().Kind == SessionEventPermissionDecision {
+					liveDecision = event.SessionEventVariant.GetEvent()
 				}
 			}
 			requireDecisionEvent(t, liveDecision, tt.wantAction, tt.wantDecisionText, tt.wantUpdatedInput, tt.wantHasUpdated)
@@ -992,10 +992,10 @@ func TestAttack_InvalidRespondDoesNotPersistDecisionEvent(t *testing.T) {
 			break
 		}
 		require.NoError(t, event.Err)
-		if event.SessionEvent != nil && event.SessionEvent.Kind == adk.SessionEventAgentInterrupt {
-			require.NotNil(t, event.SessionEvent.AgentInterrupt)
-			require.Len(t, event.SessionEvent.AgentInterrupt.Contexts, 1)
-			interruptID = event.SessionEvent.AgentInterrupt.Contexts[0].InterruptID
+		if event.SessionEventVariant.GetEvent() != nil && event.SessionEventVariant.GetEvent().Kind == adk.SessionEventInterrupt {
+			require.NotNil(t, event.SessionEventVariant.GetEvent().Interrupt)
+			require.Len(t, event.SessionEventVariant.GetEvent().Interrupt.Contexts, 1)
+			interruptID = event.SessionEventVariant.GetEvent().Interrupt.Contexts[0].InterruptID
 		}
 	}
 	require.NotEmpty(t, interruptID)
@@ -1015,8 +1015,8 @@ func TestAttack_InvalidRespondDoesNotPersistDecisionEvent(t *testing.T) {
 			resumeErr = event.Err
 			continue
 		}
-		if event.SessionEvent != nil {
-			assert.NotEqual(t, SessionEventPermissionDecision, event.SessionEvent.Kind)
+		if event.SessionEventVariant.GetEvent() != nil {
+			assert.NotEqual(t, SessionEventPermissionDecision, event.SessionEventVariant.GetEvent().Kind)
 		}
 	}
 	require.Error(t, resumeErr)
@@ -1091,17 +1091,17 @@ func TestToolSpan_PermissionDenyEmitsBothSpansOnSameRun(t *testing.T) {
 			break
 		}
 		require.NoError(t, event.Err)
-		if event.SessionEvent == nil || event.SessionEvent.Span == nil || event.SessionEvent.Span.Tool == nil {
+		if event.SessionEventVariant.GetEvent() == nil || event.SessionEventVariant.GetEvent().Span == nil || event.SessionEventVariant.GetEvent().Span.Tool == nil {
 			continue
 		}
-		switch event.SessionEvent.Kind {
+		switch event.SessionEventVariant.GetEvent().Kind {
 		case adk.SessionEventSpanToolCallStart:
 			startCount++
-			startSpanID = event.SessionEvent.Span.SpanID
-			startEventID = event.SessionEvent.EventID
+			startSpanID = event.SessionEventVariant.GetEvent().Span.SpanID
+			startEventID = event.SessionEventVariant.GetEvent().EventID
 		case adk.SessionEventSpanToolCallEnd:
 			endCount++
-			endSpan = event.SessionEvent
+			endSpan = event.SessionEventVariant.GetEvent()
 		}
 	}
 
@@ -1186,17 +1186,17 @@ func TestPermissionGate_PersistedAgentInterruptOmitsPrivateInfo(t *testing.T) {
 
 			var interrupt *adk.SessionEvent[*schema.Message]
 			for _, event := range store.events {
-				if event.Kind != adk.SessionEventAgentInterrupt {
+				if event.Kind != adk.SessionEventInterrupt {
 					continue
 				}
 				interrupt = event
 				break
 			}
 			require.NotNil(t, interrupt)
-			require.NotNil(t, interrupt.AgentInterrupt)
-			require.Len(t, interrupt.AgentInterrupt.Contexts, 1)
+			require.NotNil(t, interrupt.Interrupt)
+			require.Len(t, interrupt.Interrupt.Contexts, 1)
 
-			ctx0 := interrupt.AgentInterrupt.Contexts[0]
+			ctx0 := interrupt.Interrupt.Contexts[0]
 			assert.Equal(t, "permission_call", ctx0.ToolUseID)
 
 			infoJSON, err := json.Marshal(ctx0.Info)
@@ -1245,14 +1245,12 @@ type permissionSessionStore struct {
 	events []*adk.SessionEvent[*schema.Message]
 }
 
-func (s *permissionSessionStore) AppendEvents(_ context.Context, req *adk.AppendSessionEventsRequest[*schema.Message]) error {
-	if req != nil {
-		s.events = append(s.events, req.Events...)
-	}
+func (s *permissionSessionStore) AppendEvents(_ context.Context, _ string, events []*adk.SessionEvent[*schema.Message]) error {
+	s.events = append(s.events, events...)
 	return nil
 }
 
-func (s *permissionSessionStore) LoadEvents(_ context.Context, req *adk.LoadSessionEventsRequest) (*adk.LoadSessionEventsResult[*schema.Message], error) {
+func (s *permissionSessionStore) LoadEvents(_ context.Context, _ string, req *adk.LoadSessionEventsRequest) (*adk.LoadSessionEventsResult[*schema.Message], error) {
 	if req == nil {
 		req = &adk.LoadSessionEventsRequest{}
 	}

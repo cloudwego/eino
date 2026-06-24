@@ -2558,14 +2558,14 @@ func drainAndCollectSpans(t *testing.T, iter *AsyncIterator[*AgentEvent]) (start
 		if ev.Action != nil && ev.Action.Interrupted != nil {
 			interrupted = true
 		}
-		if ev.SessionEvent == nil || ev.SessionEvent.Span == nil {
+		if ev.SessionEventVariant.GetEvent() == nil || ev.SessionEventVariant.GetEvent().Span == nil {
 			continue
 		}
-		switch ev.SessionEvent.Kind {
+		switch ev.SessionEventVariant.GetEvent().Kind {
 		case SessionEventSpanToolCallStart:
-			starts = append(starts, ev.SessionEvent)
+			starts = append(starts, ev.SessionEventVariant.GetEvent())
 		case SessionEventSpanToolCallEnd:
-			ends = append(ends, ev.SessionEvent)
+			ends = append(ends, ev.SessionEventVariant.GetEvent())
 		}
 	}
 	return
@@ -2636,12 +2636,12 @@ func runInterruptResumeAndCollectSpans(t *testing.T, agent *TypedChatModelAgent[
 		if ev.Action != nil && ev.Action.Interrupted != nil {
 			interruptEvt = ev
 		}
-		if ev.SessionEvent != nil && ev.SessionEvent.Span != nil {
-			switch ev.SessionEvent.Kind {
+		if ev.SessionEventVariant.GetEvent() != nil && ev.SessionEventVariant.GetEvent().Span != nil {
+			switch ev.SessionEventVariant.GetEvent().Kind {
 			case SessionEventSpanToolCallStart:
-				starts1 = append(starts1, ev.SessionEvent)
+				starts1 = append(starts1, ev.SessionEventVariant.GetEvent())
 			case SessionEventSpanToolCallEnd:
-				ends1 = append(ends1, ev.SessionEvent)
+				ends1 = append(ends1, ev.SessionEventVariant.GetEvent())
 			}
 		}
 	}
@@ -2739,12 +2739,12 @@ func TestToolSpan_StreamableInterruptDefersEnd(t *testing.T) {
 		if ev.Action != nil && ev.Action.Interrupted != nil {
 			interruptEvt = ev
 		}
-		if ev.SessionEvent != nil && ev.SessionEvent.Span != nil {
-			switch ev.SessionEvent.Kind {
+		if ev.SessionEventVariant.GetEvent() != nil && ev.SessionEventVariant.GetEvent().Span != nil {
+			switch ev.SessionEventVariant.GetEvent().Kind {
 			case SessionEventSpanToolCallStart:
-				starts1 = append(starts1, ev.SessionEvent)
+				starts1 = append(starts1, ev.SessionEventVariant.GetEvent())
 			case SessionEventSpanToolCallEnd:
-				ends1 = append(ends1, ev.SessionEvent)
+				ends1 = append(ends1, ev.SessionEventVariant.GetEvent())
 			}
 		}
 	}
@@ -2850,12 +2850,12 @@ func TestToolSpan_PermissionRejectEmitsEndSpan(t *testing.T) {
 		if ev.Action != nil && ev.Action.Interrupted != nil {
 			interruptEvt = ev
 		}
-		if ev.SessionEvent != nil && ev.SessionEvent.Span != nil {
-			switch ev.SessionEvent.Kind {
+		if ev.SessionEventVariant.GetEvent() != nil && ev.SessionEventVariant.GetEvent().Span != nil {
+			switch ev.SessionEventVariant.GetEvent().Kind {
 			case SessionEventSpanToolCallStart:
-				starts1 = append(starts1, ev.SessionEvent)
+				starts1 = append(starts1, ev.SessionEventVariant.GetEvent())
 			case SessionEventSpanToolCallEnd:
-				ends1 = append(ends1, ev.SessionEvent)
+				ends1 = append(ends1, ev.SessionEventVariant.GetEvent())
 			}
 		}
 	}
@@ -2966,12 +2966,12 @@ func TestToolSpan_ParallelInterruptResumesEmitMatchingEnds(t *testing.T) {
 		if ev.Action != nil && ev.Action.Interrupted != nil {
 			interruptEvt = ev
 		}
-		if ev.SessionEvent != nil && ev.SessionEvent.Span != nil {
-			switch ev.SessionEvent.Kind {
+		if ev.SessionEventVariant.GetEvent() != nil && ev.SessionEventVariant.GetEvent().Span != nil {
+			switch ev.SessionEventVariant.GetEvent().Kind {
 			case SessionEventSpanToolCallStart:
-				starts1 = append(starts1, ev.SessionEvent)
+				starts1 = append(starts1, ev.SessionEventVariant.GetEvent())
 			case SessionEventSpanToolCallEnd:
-				ends1 = append(ends1, ev.SessionEvent)
+				ends1 = append(ends1, ev.SessionEventVariant.GetEvent())
 			}
 		}
 	}
