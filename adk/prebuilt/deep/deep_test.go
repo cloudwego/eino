@@ -28,6 +28,7 @@ import (
 	"go.uber.org/mock/gomock"
 
 	"github.com/cloudwego/eino/adk"
+	"github.com/cloudwego/eino/adk/backgroundtask"
 	"github.com/cloudwego/eino/adk/filesystem"
 	filesystem2 "github.com/cloudwego/eino/adk/middlewares/filesystem"
 	"github.com/cloudwego/eino/adk/prebuilt/planexecute"
@@ -324,7 +325,7 @@ func TestDeepAgentTurn2DeduplicatesPersistedLeadingSystemMessage(t *testing.T) {
 }
 
 func TestWriteTodos(t *testing.T) {
-	m, err := buildTypedBuiltinAgentMiddlewares(context.Background(), &Config{WithoutWriteTodos: false})
+	m, err := buildTypedBuiltinAgentMiddlewares(context.Background(), &Config{WithoutWriteTodos: false}, nil)
 	assert.NoError(t, err)
 
 	wt := m[0].(*typedAppendPromptTool[*schema.Message]).t.(tool.InvokableTool)
@@ -367,7 +368,7 @@ func TestDeepAgentFilesystemExecuteDefaults(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			handlers, err := buildTypedBuiltinAgentMiddlewares(ctx, tt.cfg)
+			handlers, err := buildTypedBuiltinAgentMiddlewares(ctx, tt.cfg, nil)
 			assert.NoError(t, err)
 			assert.Len(t, handlers, 1)
 
@@ -407,6 +408,69 @@ func TestDeepAgentFilesystemExecuteDefaults(t *testing.T) {
 	}
 }
 
+func TestDeepAgentManagerWiring(t *testing.T) {
+	ctx := context.Background()
+
+	// With a Manager, the top-level built-in handlers route execute through it, so
+	// the execute tool gains a run_in_background field.
+	mgr := backgroundtask.New(ctx, &backgroundtask.Config{})
+	defer func() { _ = mgr.Close(ctx) }()
+
+	handlers, err := buildTypedBuiltinAgentMiddlewares(ctx, &Config{
+		WithoutWriteTodos: true,
+		Shell:             &deepMockShell{},
+	}, mgr)
+	assert.NoError(t, err)
+	assert.Len(t, handlers, 1)
+
+	_, runCtx, err := handlers[0].BeforeAgent(ctx, &adk.ChatModelAgentContext[*schema.Message]{})
+	assert.NoError(t, err)
+	assert.NotNil(t, runCtx)
+	assert.Len(t, runCtx.Tools, 1)
+
+	info, err := runCtx.Tools[0].Info(ctx)
+	assert.NoError(t, err)
+	js, err := info.ParamsOneOf.ToJSONSchema()
+	assert.NoError(t, err)
+	_, ok := js.Properties.Get("run_in_background")
+	assert.True(t, ok, "managed execute must expose run_in_background")
+
+	// Without a Manager, the same handlers produce a command-only execute tool.
+	plain, err := buildTypedBuiltinAgentMiddlewares(ctx, &Config{
+		WithoutWriteTodos: true,
+		Shell:             &deepMockShell{},
+	}, nil)
+	assert.NoError(t, err)
+	_, plainCtx, err := plain[0].BeforeAgent(ctx, &adk.ChatModelAgentContext[*schema.Message]{})
+	assert.NoError(t, err)
+	plainInfo, err := plainCtx.Tools[0].Info(ctx)
+	assert.NoError(t, err)
+	plainJS, err := plainInfo.ParamsOneOf.ToJSONSchema()
+	assert.NoError(t, err)
+	_, ok = plainJS.Properties.Get("run_in_background")
+	assert.False(t, ok, "unmanaged execute must not expose run_in_background")
+}
+
+// NewTyped with a Manager injects the task_output/task_stop control tools and a
+// background-capable subagent tool exactly once at the top level.
+func TestDeepAgentNewTypedWithManager(t *testing.T) {
+	ctx := context.Background()
+	mgr := backgroundtask.New(ctx, &backgroundtask.Config{})
+	defer func() { _ = mgr.Close(ctx) }()
+
+	cm := mockModel.NewMockToolCallingChatModel(gomock.NewController(t))
+
+	agent, err := New(ctx, &Config{
+		Name:        "deep",
+		Description: "deep agent",
+		ChatModel:   cm,
+		Shell:       &deepMockShell{},
+		Manager:     mgr,
+	})
+	assert.NoError(t, err)
+	assert.NotNil(t, agent)
+}
+
 func TestDeepAgentManualFilesystemMiddlewarePath(t *testing.T) {
 	ctx := context.Background()
 	ctrl := gomock.NewController(t)
@@ -416,10 +480,8 @@ func TestDeepAgentManualFilesystemMiddlewarePath(t *testing.T) {
 	cm.EXPECT().WithTools(gomock.Any()).Return(cm, nil).AnyTimes()
 
 	fsMW, err := filesystem2.New(ctx, &filesystem2.MiddlewareConfig{
-		Shell: &deepMockShell{},
-		ExecuteToolConfig: &filesystem2.ExecuteToolConfig{
-			InputMode: filesystem2.ExecuteToolInputModeRich,
-		},
+		Shell:             &deepMockShell{},
+		ExecuteToolConfig: &filesystem2.ExecuteToolConfig{},
 	})
 	assert.NoError(t, err)
 
@@ -431,9 +493,7 @@ func TestDeepAgentManualFilesystemMiddlewarePath(t *testing.T) {
 	assert.Equal(t, filesystem2.ToolNameExecute, info.Name)
 	js, err := info.ParamsOneOf.ToJSONSchema()
 	assert.NoError(t, err)
-	_, ok := js.Properties.Get("mode")
-	assert.True(t, ok)
-	_, ok = js.Properties.Get("wait_ms")
+	_, ok := js.Properties.Get("command")
 	assert.True(t, ok)
 
 	agent, err := New(ctx, &Config{

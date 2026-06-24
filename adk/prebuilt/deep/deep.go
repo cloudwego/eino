@@ -24,9 +24,12 @@ import (
 	"github.com/bytedance/sonic"
 
 	"github.com/cloudwego/eino/adk"
+	"github.com/cloudwego/eino/adk/backgroundtask"
 	"github.com/cloudwego/eino/adk/filesystem"
 	"github.com/cloudwego/eino/adk/internal"
+	backgroundtaskmw "github.com/cloudwego/eino/adk/middlewares/backgroundtask"
 	filesystem2 "github.com/cloudwego/eino/adk/middlewares/filesystem"
+	"github.com/cloudwego/eino/adk/middlewares/subagent"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool/utils"
 	"github.com/cloudwego/eino/schema"
@@ -82,6 +85,15 @@ type TypedConfig[M adk.MessageType] struct {
 	// Optional. Mutually exclusive with Shell.
 	StreamingShell filesystem.StreamingShell
 
+	// Manager is an optional shared background-task Manager for the top-level agent.
+	// When set, the top-level agent can spawn sub-agents and run shell commands as
+	// managed background tasks under one task-ID space, and the task_output/task_stop
+	// control tools are injected once. The Manager is intentionally NOT propagated to
+	// the general or user sub-agents: their shell runs stay foreground/buffered and
+	// they cannot launch background work, so background orchestration is a top-level
+	// concern only.
+	Manager *backgroundtask.Manager
+
 	// WithoutWriteTodos disables the built-in write_todos tool when set to true.
 	WithoutWriteTodos bool
 	// WithoutGeneralSubAgent disables the general-purpose subagent when set to true.
@@ -119,7 +131,9 @@ type Config = TypedConfig[*schema.Message]
 // This function initializes built-in tools, creates a task tool for subagent orchestration,
 // and returns a fully configured TypedChatModelAgent ready for execution.
 func NewTyped[M adk.MessageType](ctx context.Context, cfg *TypedConfig[M]) (adk.TypedResumableAgent[M], error) {
-	handlers, err := buildTypedBuiltinAgentMiddlewares(ctx, cfg)
+	// Sub-agents never get the Manager: their shell runs stay foreground/buffered
+	// and they cannot launch background work (see Config.Manager).
+	subAgentHandlers, err := buildTypedBuiltinAgentMiddlewares(ctx, cfg, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -132,26 +146,40 @@ func NewTyped[M adk.MessageType](ctx context.Context, cfg *TypedConfig[M]) (adk.
 		})
 	}
 
-	if !cfg.WithoutGeneralSubAgent || len(cfg.SubAgents) > 0 {
-		tt, err := typedTaskToolMiddleware(
-			ctx,
-			cfg.TaskToolDescriptionGenerator,
-			cfg.SubAgents,
+	// The top-level agent's built-in handlers do get the Manager, so its own shell
+	// runs are background-capable and tracked under the shared task-ID space.
+	handlers, err := buildTypedBuiltinAgentMiddlewares(ctx, cfg, cfg.Manager)
+	if err != nil {
+		return nil, err
+	}
 
-			cfg.WithoutGeneralSubAgent,
-			cfg.ChatModel,
-			instruction,
-			cfg.ToolsConfig,
-			cfg.MaxIteration,
-			cfg.Middlewares,
-			append(handlers, cfg.Handlers...),
-			cfg.ModelRetryConfig,
-			cfg.ModelFailoverConfig,
-		)
+	if !cfg.WithoutGeneralSubAgent || len(cfg.SubAgents) > 0 {
+		allSubAgents, err := buildSubAgentsList(ctx, cfg, instruction, subAgentHandlers)
 		if err != nil {
-			return nil, fmt.Errorf("failed to new task tool: %w", err)
+			return nil, err
 		}
-		handlers = append(handlers, tt)
+		if len(allSubAgents) > 0 {
+			subagentMW, err := subagent.NewTyped[M](ctx, &subagent.TypedConfig[M]{
+				SubAgents:                allSubAgents,
+				ToolName:                 taskToolName,
+				ToolDescriptionGenerator: cfg.TaskToolDescriptionGenerator,
+				Manager:                  cfg.Manager,
+			})
+			if err != nil {
+				return nil, fmt.Errorf("failed to create subagent middleware: %w", err)
+			}
+			handlers = append(handlers, subagentMW)
+		}
+	}
+
+	// When a Manager is shared with the domain middlewares above, wire its control
+	// tools (task_output/task_stop) exactly once at the top level.
+	if cfg.Manager != nil {
+		controlMW, err := backgroundtaskmw.NewTyped[M](ctx, &backgroundtaskmw.TypedConfig[M]{Manager: cfg.Manager})
+		if err != nil {
+			return nil, fmt.Errorf("failed to create background-task control middleware: %w", err)
+		}
+		handlers = append(handlers, controlMW)
 	}
 
 	return adk.NewTypedChatModelAgent(ctx, &adk.TypedChatModelAgentConfig[M]{
@@ -224,7 +252,38 @@ func typedGenModelInput[M adk.MessageType](_ context.Context, instruction string
 	panic("unreachable")
 }
 
-func buildTypedBuiltinAgentMiddlewares[M adk.MessageType](ctx context.Context, cfg *TypedConfig[M]) ([]adk.TypedChatModelAgentMiddleware[M], error) {
+func buildSubAgentsList[M adk.MessageType](ctx context.Context, cfg *TypedConfig[M], instruction string, handlers []adk.TypedChatModelAgentMiddleware[M]) ([]adk.TypedAgent[M], error) {
+	var allSubAgents []adk.TypedAgent[M]
+
+	if !cfg.WithoutGeneralSubAgent {
+		agentDesc := internal.SelectPrompt(internal.I18nPrompts{
+			English: generalAgentDescription,
+			Chinese: generalAgentDescriptionChinese,
+		})
+		generalAgent, err := adk.NewTypedChatModelAgent(ctx, &adk.TypedChatModelAgentConfig[M]{
+			Name:                generalAgentName,
+			Description:         agentDesc,
+			Instruction:         instruction,
+			Model:               cfg.ChatModel,
+			ToolsConfig:         cfg.ToolsConfig,
+			MaxIterations:       cfg.MaxIteration,
+			Middlewares:         cfg.Middlewares,
+			Handlers:            append(handlers, cfg.Handlers...),
+			GenModelInput:       typedGenModelInput[M],
+			ModelRetryConfig:    cfg.ModelRetryConfig,
+			ModelFailoverConfig: cfg.ModelFailoverConfig,
+		})
+		if err != nil {
+			return nil, err
+		}
+		allSubAgents = append(allSubAgents, generalAgent)
+	}
+
+	allSubAgents = append(allSubAgents, cfg.SubAgents...)
+	return allSubAgents, nil
+}
+
+func buildTypedBuiltinAgentMiddlewares[M adk.MessageType](ctx context.Context, cfg *TypedConfig[M], manager *backgroundtask.Manager) ([]adk.TypedChatModelAgentMiddleware[M], error) {
 	var ms []adk.TypedChatModelAgentMiddleware[M]
 	if !cfg.WithoutWriteTodos {
 		t, err := typedNewWriteTodos[M]()
@@ -239,6 +298,7 @@ func buildTypedBuiltinAgentMiddlewares[M adk.MessageType](ctx context.Context, c
 			Backend:        cfg.Backend,
 			Shell:          cfg.Shell,
 			StreamingShell: cfg.StreamingShell,
+			Manager:        manager,
 		})
 		if err != nil {
 			return nil, err

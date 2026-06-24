@@ -1,0 +1,238 @@
+/*
+ * Copyright 2026 CloudWeGo Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package filesystem
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"strings"
+
+	"github.com/cloudwego/eino/adk/backgroundtask"
+	"github.com/cloudwego/eino/adk/filesystem"
+	"github.com/cloudwego/eino/components/tool"
+	"github.com/cloudwego/eino/components/tool/utils"
+	"github.com/cloudwego/eino/compose"
+	"github.com/cloudwego/eino/schema"
+)
+
+// ExecuteTaskType is the backgroundtask Task.Type tag for shell-command tasks
+// launched by the execute tool. A shared Manager's ShouldAutoBackground hook can
+// match on it to apply shell-specific policy (e.g. IsAutoBackgroundAllowed).
+//
+// A filesystem.Backend satisfies backgroundtask.OutputStore directly, so a
+// background Manager can persist task output through the same backend used for the
+// file tools: backgroundtask.Config{OutputStore: backend, OutputDir: ...}.
+const ExecuteTaskType = "bash"
+
+// disallowedAutoBackgroundCommands lists commands that must not be moved to the
+// background when they hit their foreground deadline. Entries are matched exactly
+// against the first shell segment after trimming surrounding whitespace.
+var disallowedAutoBackgroundCommands = []string{"sleep"}
+
+// IsAutoBackgroundAllowed reports whether a shell command may be moved to the
+// background when it exceeds its foreground budget. It is a ready reference
+// implementation for a backgroundtask Manager's ShouldAutoBackground hook. The
+// first shell segment (up to the first shell operator) is compared exactly against
+// a small denylist; by default only a bare "sleep" is disallowed.
+//
+// Typical wiring (Task.Description carries the command for shell runs):
+//
+//	mgr := backgroundtask.New(ctx, &backgroundtask.Config{
+//	    ShouldAutoBackground: func(_ context.Context, t *backgroundtask.Task) bool {
+//	        return filesystem.IsAutoBackgroundAllowed(t.Description)
+//	    },
+//	})
+func IsAutoBackgroundAllowed(command string) bool {
+	first := strings.TrimSpace(firstShellSegment(command))
+	if first == "" {
+		return true
+	}
+	for _, c := range disallowedAutoBackgroundCommands {
+		if first == c {
+			return false
+		}
+	}
+	return true
+}
+
+// firstShellSegment returns the command text up to the first top-level shell
+// operator. It is a deliberately simple, non-quote-aware split — sufficient for
+// the bare-"sleep" blocklist used by IsAutoBackgroundAllowed.
+func firstShellSegment(command string) string {
+	idx := len(command)
+	for _, op := range []string{"&&", "||", ";", "|", "&"} {
+		if i := strings.Index(command, op); i >= 0 && i < idx {
+			idx = i
+		}
+	}
+	return command[:idx]
+}
+
+// bashWork adapts a blocking shell execution into a backgroundtask.WorkFunc.
+// The request carries only the command; the Manager is the sole owner of
+// foreground/background/auto-background switching, so no background hint is
+// pushed down to the backend.
+func bashWork(sb filesystem.Shell, req *filesystem.ExecuteRequest) backgroundtask.WorkFunc {
+	return func(ctx context.Context) (string, error) {
+		result, err := sb.Execute(ctx, req)
+		if err != nil {
+			return "", err
+		}
+		return convExecuteResponse(result), nil
+	}
+}
+
+// bashStreamWork adapts a streaming shell execution into a backgroundtask.StreamWorkFunc.
+// It returns a stream of formatted output chunks; the Manager forwards them to the
+// caller in real time (for the foreground phase) and accumulates them into the
+// task's final result. The terminal note (exit code / no-output) is emitted as a
+// final chunk so it is part of both the live stream and the persisted result.
+func bashStreamWork(sb filesystem.StreamingShell, req *filesystem.ExecuteRequest) backgroundtask.StreamWorkFunc {
+	return func(ctx context.Context) (*schema.StreamReader[string], error) {
+		stream, err := sb.ExecuteStreaming(ctx, req)
+		if err != nil {
+			return nil, err
+		}
+
+		sr, sw := schema.Pipe[string](bashStreamBufferCap)
+		go func() {
+			defer stream.Close()
+			defer sw.Close()
+
+			var exitCode *int
+			var hasContent bool
+			for {
+				chunk, recvErr := stream.Recv()
+				if recvErr == io.EOF {
+					break
+				}
+				if recvErr != nil {
+					sw.Send("", recvErr)
+					return
+				}
+				if chunk == nil {
+					continue
+				}
+				if chunk.ExitCode != nil {
+					exitCode = chunk.ExitCode
+				}
+				if text := formatExecChunk(chunk.Output, chunk.Truncated); text != "" {
+					hasContent = true
+					if sw.Send(text, nil) {
+						return // caller stopped consuming
+					}
+				}
+			}
+			if note := execTerminalNote(exitCode, hasContent); note != "" {
+				sw.Send(note, nil)
+			}
+		}()
+		return sr, nil
+	}
+}
+
+// bashStreamBufferCap is the buffer size of the pipe bashStreamWork produces.
+const bashStreamBufferCap = 16
+
+// newManagedExecuteTool builds an execute tool whose runs are tracked by a shared
+// background-task Manager. The model controls background execution via the
+// run_in_background field; auto-background switching is handled transparently by
+// the Manager. On a background launch the tool returns the task ID so the agent
+// can later query it via task_output.
+//
+// With a StreamingShell backend the tool is itself a StreamableTool: the
+// foreground phase streams output to the caller in real time, and a run that moves
+// to the background caps the stream with a notice (the rest is drained into the
+// task result). With a plain Shell backend the tool is buffered.
+//
+// Exactly one of sb / streaming must be non-nil.
+func newManagedExecuteTool(
+	mgr *backgroundtask.Manager,
+	sb filesystem.Shell,
+	streaming filesystem.StreamingShell,
+	name string,
+	desc string,
+) (tool.BaseTool, error) {
+	toolName := selectToolName(name, ToolNameExecute)
+	d, err := selectToolDesc(desc, ManagedExecuteToolDesc, ManagedExecuteToolDescChinese)
+	if err != nil {
+		return nil, err
+	}
+
+	if streaming != nil {
+		return newManagedStreamingExecuteTool(mgr, streaming, toolName, d)
+	}
+	return newManagedBufferedExecuteTool(mgr, sb, toolName, d)
+}
+
+// managedRunInput builds the RunInput shared by the buffered and streaming managed
+// execute tools.
+func managedRunInput(ctx context.Context, input executeManagedArgs) *backgroundtask.RunInput {
+	runInput := &backgroundtask.RunInput{
+		Description:     input.Command,
+		Type:            ExecuteTaskType,
+		ToolUseID:       compose.GetToolCallID(ctx),
+		RunInBackground: input.RunInBackground,
+	}
+	// A positive timeout overrides the Manager's default foreground budget for
+	// this command. When the deadline expires, the Manager's policy decides
+	// whether to move the task to the background or stop it.
+	if input.TimeoutMS > 0 {
+		runInput.ForegroundTimeoutMs = &input.TimeoutMS
+	}
+	return runInput
+}
+
+func newManagedBufferedExecuteTool(mgr *backgroundtask.Manager, sb filesystem.Shell, toolName, desc string) (tool.BaseTool, error) {
+	return utils.InferTool(toolName, desc, func(ctx context.Context, input executeManagedArgs) (string, error) {
+		req := &filesystem.ExecuteRequest{Command: input.Command}
+		result, err := mgr.Run(ctx, managedRunInput(ctx, input), bashWork(sb, req))
+		if err != nil {
+			return "", err
+		}
+
+		switch result.Status {
+		case backgroundtask.StatusCompleted:
+			return result.Result, nil
+		case backgroundtask.StatusRunning:
+			msg := fmt.Sprintf("Command running in background with ID: %s. You will be notified when it completes.", result.TaskID)
+			if result.OutputFile != "" {
+				msg += fmt.Sprintf(" Output is being written to: %s.", result.OutputFile)
+			}
+			msg += " Use task_output with this ID to check status or retrieve the result."
+			return msg, nil
+		case backgroundtask.StatusFailed:
+			return "", fmt.Errorf("execute task %q failed: %s", result.TaskID, result.Error)
+		case backgroundtask.StatusCanceled:
+			return "", fmt.Errorf("execute task %q was canceled", result.TaskID)
+		default:
+			return result.Result, nil
+		}
+	})
+}
+
+func newManagedStreamingExecuteTool(mgr *backgroundtask.Manager, streaming filesystem.StreamingShell, toolName, desc string) (tool.BaseTool, error) {
+	return utils.InferStreamTool(toolName, desc, func(ctx context.Context, input executeManagedArgs) (*schema.StreamReader[string], error) {
+		req := &filesystem.ExecuteRequest{Command: input.Command}
+		// RunStream owns the returned stream: it forwards work chunks to this caller
+		// in real time, and on auto-background caps the stream with a notice while
+		// draining the rest into the task result. A background launch (or timeout)
+		// is therefore surfaced inline as a final chunk, not as an error.
+		return mgr.RunStream(ctx, managedRunInput(ctx, input), bashStreamWork(streaming, req))
+	})
+}
