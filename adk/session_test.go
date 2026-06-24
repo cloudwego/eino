@@ -1083,7 +1083,7 @@ func TestRunnerSessionStreamingDoesNotBlockLiveEvent(t *testing.T) {
 	drainSessionEvents(t, iter)
 }
 
-func TestRunnerSessionDropsErroredStreamingMessageBeforeCheckpoint(t *testing.T) {
+func TestRunnerSessionPersistsIncompleteStreamingMessageBeforeCheckpoint(t *testing.T) {
 	ctx := context.Background()
 
 	tests := []struct {
@@ -1137,7 +1137,7 @@ func TestRunnerSessionDropsErroredStreamingMessageBeforeCheckpoint(t *testing.T)
 			require.True(t, sawInterrupt)
 			_, exists, err := store.Get(ctx, checkpointID)
 			require.NoError(t, err)
-			require.True(t, exists, "checkpoint should still be saved after dropping errored message stream")
+			require.True(t, exists, "checkpoint should still be saved after incomplete message stream")
 
 			persistedPartialMessages := filterStoredSessionEvents(t, store.events, func(se *SessionEvent[*schema.Message]) bool {
 				return se.Kind == SessionEventMessage &&
@@ -1146,6 +1146,13 @@ func TestRunnerSessionDropsErroredStreamingMessageBeforeCheckpoint(t *testing.T)
 					se.Message.Content == "partial"
 			})
 			assert.Empty(t, persistedPartialMessages)
+			incompleteMessages := filterStoredSessionEvents(t, store.events, func(se *SessionEvent[*schema.Message]) bool {
+				return se.Kind == SessionEventMessageStreamIncomplete
+			})
+			require.Len(t, incompleteMessages, 1)
+			require.NotNil(t, incompleteMessages[0].MessageStreamIncomplete)
+			assert.Equal(t, "partial", incompleteMessages[0].MessageStreamIncomplete.Message.Content)
+			assert.Contains(t, incompleteMessages[0].MessageStreamIncomplete.Error, tt.streamErr.Error())
 		})
 	}
 }
@@ -3206,11 +3213,12 @@ func TestAttack_FreshRunIgnoresInFlightTurnID(t *testing.T) {
 // sessionStreamingAgent emits a single streaming assistant output. Used to
 // verify the runner's stream-copy/persist path.
 type sessionStreamingAgent struct {
-	chunks   []*schema.Message
-	turnEnd  *testTurnState[*schema.Message]
-	role     schema.RoleType
-	tool     string
-	preEvent *SessionEvent[*schema.Message]
+	chunks    []*schema.Message
+	streamErr error
+	turnEnd   *testTurnState[*schema.Message]
+	role      schema.RoleType
+	tool      string
+	preEvent  *SessionEvent[*schema.Message]
 }
 
 func (a *sessionStreamingAgent) Name(_ context.Context) string        { return "session-stream-agent" }
@@ -3222,7 +3230,7 @@ func (a *sessionStreamingAgent) Run(_ context.Context, _ *AgentInput, _ ...Agent
 		if a.preEvent != nil {
 			gen.Send(&AgentEvent{AgentName: "session-stream-agent", SessionEvent: a.preEvent})
 		}
-		stream := schema.StreamReaderFromArray(a.chunks)
+		stream := testStreamReaderWithTerminalError(a.chunks, a.streamErr)
 		role := a.role
 		if role == "" {
 			role = schema.Assistant
@@ -3234,8 +3242,9 @@ func (a *sessionStreamingAgent) Run(_ context.Context, _ *AgentInput, _ ...Agent
 }
 
 type agenticSessionStreamingAgent struct {
-	chunks  []*schema.AgenticMessage
-	turnEnd *testTurnState[*schema.AgenticMessage]
+	chunks    []*schema.AgenticMessage
+	streamErr error
+	turnEnd   *testTurnState[*schema.AgenticMessage]
 }
 
 func (a *agenticSessionStreamingAgent) Name(_ context.Context) string {
@@ -3259,13 +3268,29 @@ func (a *agenticSessionStreamingAgent) Run(
 			Output: &TypedAgentOutput[*schema.AgenticMessage]{
 				MessageOutput: &TypedMessageVariant[*schema.AgenticMessage]{
 					IsStreaming:   true,
-					MessageStream: schema.StreamReaderFromArray(a.chunks),
+					MessageStream: testStreamReaderWithTerminalError(a.chunks, a.streamErr),
 					AgenticRole:   schema.AgenticRoleTypeUser,
 				},
 			},
 		})
 	}()
 	return iter
+}
+
+func testStreamReaderWithTerminalError[T any](chunks []T, streamErr error) *schema.StreamReader[T] {
+	if streamErr == nil {
+		return schema.StreamReaderFromArray(chunks)
+	}
+	reader, writer := schema.Pipe[T](len(chunks) + 1)
+	go func() {
+		defer writer.Close()
+		for _, chunk := range chunks {
+			writer.Send(chunk, nil)
+		}
+		var zero T
+		writer.Send(zero, streamErr)
+	}()
+	return reader
 }
 
 // TestStreamPersistence_CopyAndConcat verifies that streaming assistant outputs
@@ -3325,6 +3350,214 @@ func TestStreamPersistence_CopyAndConcat(t *testing.T) {
 	require.Len(t, assistantMessages, 1, "streaming assistant output must be persisted exactly once")
 	assert.Equal(t, "hello world", assistantMessages[0].Content,
 		"persisted stream message must be the fully concatenated content")
+}
+
+func TestStreamPersistence_IncompleteStreamPrefixPersisted(t *testing.T) {
+	ctx := context.Background()
+	store := newSessionHelperStore()
+	streamErr := errors.New("model stream failed")
+	agent := &sessionStreamingAgent{
+		chunks: []*schema.Message{
+			schema.AssistantMessage("hello ", nil),
+			schema.AssistantMessage("partial", nil),
+		},
+		streamErr: streamErr,
+	}
+	runner := NewRunner(ctx, RunnerConfig{
+		Agent:           agent,
+		EnableStreaming: true,
+		SessionID:       "incomplete-stream-session",
+		SessionStore:    store,
+	})
+
+	drainErroredStreamEvents(t, runner.Query(ctx, "q"), streamErr)
+
+	events := decodeStoredSessionEvents(t, store.events)
+	var incomplete []*SessionEvent[*schema.Message]
+	var normalFailedMessages []*SessionEvent[*schema.Message]
+	for _, se := range events {
+		if se.Kind == SessionEventMessageStreamIncomplete {
+			incomplete = append(incomplete, se)
+		}
+		if se.Kind == SessionEventMessage && se.Message != nil &&
+			se.Message.Role == schema.Assistant && se.Message.Content == "hello partial" {
+			normalFailedMessages = append(normalFailedMessages, se)
+		}
+	}
+	require.Len(t, incomplete, 1)
+	require.NotNil(t, incomplete[0].MessageStreamIncomplete)
+	require.NotNil(t, incomplete[0].MessageStreamIncomplete.Message)
+	assert.Equal(t, "hello partial", incomplete[0].MessageStreamIncomplete.Message.Content)
+	assert.Contains(t, incomplete[0].MessageStreamIncomplete.Error, streamErr.Error())
+	assert.Empty(t, normalFailedMessages, "failed stream prefix must not be persisted as a normal context message")
+}
+
+func TestAttack_IncompleteStreamPrefixCarriesDurableMetadata(t *testing.T) {
+	ctx := context.Background()
+	store := newSessionHelperStore()
+	sid := "attack-incomplete-metadata"
+	streamErr := errors.New("stream transport failed")
+	agent := &sessionStreamingAgent{
+		chunks: []*schema.Message{
+			schema.AssistantMessage("prefix", nil),
+		},
+		streamErr: streamErr,
+	}
+	runner := NewRunner(ctx, RunnerConfig{
+		Agent:           agent,
+		EnableStreaming: true,
+		SessionID:       sid,
+		SessionStore:    store,
+	})
+
+	drainErroredStreamEvents(t, runner.Query(ctx, "q"), streamErr)
+
+	events := decodeStoredSessionEvents(t, store.events)
+	var incomplete *SessionEvent[*schema.Message]
+	var idle *SessionEvent[*schema.Message]
+	for _, se := range events {
+		switch se.Kind {
+		case SessionEventMessageStreamIncomplete:
+			incomplete = se
+		case SessionEventSessionStatusIdle:
+			idle = se
+		}
+	}
+
+	require.NotNil(t, incomplete)
+	require.NotNil(t, idle)
+	assert.Equal(t, sid, incomplete.SessionID)
+	assert.NotEmpty(t, incomplete.EventID)
+	assert.NotEmpty(t, incomplete.TurnID)
+	assert.Equal(t, incomplete.TurnID, idle.TurnID)
+	assert.True(t, incomplete.Timestamp.Before(idle.Timestamp) || incomplete.Timestamp.Equal(idle.Timestamp))
+	assert.Equal(t, "prefix", incomplete.MessageStreamIncomplete.Message.Content)
+	assert.Contains(t, incomplete.MessageStreamIncomplete.Error, streamErr.Error())
+}
+
+func TestAttack_IncompleteStreamPersistsAllTerminalErrors(t *testing.T) {
+	ctx := context.Background()
+	tests := []struct {
+		name      string
+		streamErr error
+	}{
+		{name: "canceled", streamErr: ErrStreamCanceled},
+		{name: "will retry", streamErr: &WillRetryError{ErrStr: "retry", RetryAttempt: 1}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := newSessionHelperStore()
+			runner := NewRunner(ctx, RunnerConfig{
+				Agent: &sessionStreamingAgent{
+					chunks:    []*schema.Message{schema.AssistantMessage("transient", nil)},
+					streamErr: tt.streamErr,
+				},
+				EnableStreaming: true,
+				SessionID:       "attack-nondurable-" + tt.name,
+				SessionStore:    store,
+			})
+
+			drainErroredStreamEvents(t, runner.Query(ctx, "q"), tt.streamErr)
+
+			incomplete := filterStoredSessionEvents(t, store.events, func(se *SessionEvent[*schema.Message]) bool {
+				return se.Kind == SessionEventMessageStreamIncomplete
+			})
+			require.Len(t, incomplete, 1)
+			require.NotNil(t, incomplete[0].MessageStreamIncomplete)
+			assert.Equal(t, "transient", incomplete[0].MessageStreamIncomplete.Message.Content)
+			assert.Contains(t, incomplete[0].MessageStreamIncomplete.Error, tt.streamErr.Error())
+		})
+	}
+}
+
+func drainErroredStreamEvents(t *testing.T, iter *AsyncIterator[*AgentEvent], streamErr error) {
+	t.Helper()
+	var sawStreamErr bool
+	for {
+		ev, ok := iter.Next()
+		if !ok {
+			break
+		}
+		require.NoError(t, ev.Err)
+		if ev.Output == nil || ev.Output.MessageOutput == nil ||
+			!ev.Output.MessageOutput.IsStreaming || ev.Output.MessageOutput.MessageStream == nil {
+			continue
+		}
+		for {
+			_, err := ev.Output.MessageOutput.MessageStream.Recv()
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			if err != nil {
+				assert.ErrorContains(t, err, streamErr.Error())
+				sawStreamErr = true
+				break
+			}
+		}
+	}
+	require.True(t, sawStreamErr, "live stream must surface the terminal stream error")
+}
+
+func TestStreamPersistence_IncompleteStreamExcludedFromReconstruction(t *testing.T) {
+	ctx := context.Background()
+	store := newSessionHelperStore()
+	sid := "incomplete-reconstruct-session"
+	turnID := "turn-incomplete"
+	appendTestSessionEvent(t, ctx, store, sid, &SessionEvent[*schema.Message]{
+		Kind:    SessionEventMessage,
+		TurnID:  turnID,
+		Message: schema.UserMessage("q"),
+	})
+	appendTestSessionEvent(t, ctx, store, sid, &SessionEvent[*schema.Message]{
+		Kind:   SessionEventMessageStreamIncomplete,
+		TurnID: turnID,
+		MessageStreamIncomplete: &MessageStreamIncompleteEvent[*schema.Message]{
+			Message: schema.AssistantMessage("partial", nil),
+			Error:   "model stream failed",
+		},
+	})
+	appendTestSessionEvent(t, ctx, store, sid, &SessionEvent[*schema.Message]{
+		Kind:   SessionEventSessionStatusIdle,
+		TurnID: turnID,
+		Lifecycle: &LifecycleEvent{
+			State:      SessionRunStateIdle,
+			StopReason: &StopReason{Type: "end_turn"},
+		},
+	})
+
+	result, err := reconstructSessionState[*schema.Message](ctx, mustOpenTestSession[*schema.Message](t, ctx, store, sid), sid, defaultLoadPageSize)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.NotNil(t, result.state)
+	require.Len(t, result.state.Messages, 1)
+	assert.Equal(t, "q", result.state.Messages[0].Content)
+}
+
+func TestMessageStreamIncompleteEvent_RoundTripAndValidation(t *testing.T) {
+	event := withTestEventID(&SessionEvent[*schema.Message]{
+		Kind: SessionEventMessageStreamIncomplete,
+		MessageStreamIncomplete: &MessageStreamIncompleteEvent[*schema.Message]{
+			Message: schema.AssistantMessage("partial", nil),
+			Error:   "model stream failed",
+		},
+	})
+	encoded, err := encodeSessionEvent(event)
+	require.NoError(t, err)
+	decoded, err := decodeSessionEvent[*schema.Message](encoded)
+	require.NoError(t, err)
+	require.NotNil(t, decoded.MessageStreamIncomplete)
+	assert.Equal(t, SessionEventMessageStreamIncomplete, decoded.Kind)
+	assert.Equal(t, "partial", decoded.MessageStreamIncomplete.Message.Content)
+	assert.Equal(t, "model stream failed", decoded.MessageStreamIncomplete.Error)
+	assert.False(t, isContextSessionEvent(decoded))
+
+	_, err = encodeSessionEvent(withTestEventID(&SessionEvent[*schema.Message]{
+		Kind:                    SessionEventMessageStreamIncomplete,
+		MessageStreamIncomplete: &MessageStreamIncompleteEvent[*schema.Message]{Error: "missing message"},
+	}))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "message stream incomplete event")
 }
 
 func TestStreamPersistence_StreamingLiveBeforeMaterializedBoundary(t *testing.T) {
@@ -3610,6 +3843,81 @@ func TestStreamPersistence_AgenticToolResultChunksWithStreamingMeta(t *testing.T
 	assert.Equal(t, "execute", block.FunctionToolResult.Name)
 	require.Len(t, block.FunctionToolResult.Content, 1)
 	assert.Equal(t, "first\nsecond\n", block.FunctionToolResult.Content[0].Text.Text)
+}
+
+func TestStreamPersistence_AgenticIncompleteStreamPrefixPersisted(t *testing.T) {
+	ctx := context.Background()
+	store := newAgenticSessionHelperStore()
+	sid := "agentic-incomplete-stream-session"
+	streamErr := errors.New("agentic model stream failed")
+	chunk := agenticToolResultMessage("call_1", "execute", "partial\n")
+	agent := &agenticSessionStreamingAgent{
+		chunks:    []*schema.AgenticMessage{chunk},
+		streamErr: streamErr,
+	}
+	runner := NewTypedRunner(TypedRunnerConfig[*schema.AgenticMessage]{
+		Agent:           agent,
+		EnableStreaming: true,
+		SessionID:       sid,
+		SessionStore:    store,
+	})
+
+	iter := runner.Run(ctx, []*schema.AgenticMessage{schema.UserAgenticMessage("q")})
+	var sawStreamErr bool
+	for {
+		ev, ok := iter.Next()
+		if !ok {
+			break
+		}
+		require.NoError(t, ev.Err)
+		if ev.Output != nil && ev.Output.MessageOutput != nil &&
+			ev.Output.MessageOutput.IsStreaming && ev.Output.MessageOutput.MessageStream != nil {
+			for {
+				_, err := ev.Output.MessageOutput.MessageStream.Recv()
+				if errors.Is(err, io.EOF) {
+					break
+				}
+				if err != nil {
+					assert.ErrorContains(t, err, streamErr.Error())
+					sawStreamErr = true
+					break
+				}
+			}
+		}
+	}
+	require.True(t, sawStreamErr)
+
+	res, err := store.LoadEventsForSession(ctx, sid, nil)
+	require.NoError(t, err)
+	var incomplete []*SessionEvent[*schema.AgenticMessage]
+	var normalToolMessages []*SessionEvent[*schema.AgenticMessage]
+	for _, se := range res.Events {
+		if se.Kind == SessionEventMessageStreamIncomplete {
+			incomplete = append(incomplete, se)
+		}
+		if se.Kind == SessionEventMessage && se.Message != nil &&
+			len(se.Message.ContentBlocks) == 1 &&
+			se.Message.ContentBlocks[0].Type == schema.ContentBlockTypeFunctionToolResult {
+			normalToolMessages = append(normalToolMessages, se)
+		}
+	}
+	require.Len(t, incomplete, 1)
+	require.NotNil(t, incomplete[0].MessageStreamIncomplete)
+	prefix := incomplete[0].MessageStreamIncomplete.Message
+	require.NotNil(t, prefix)
+	require.Len(t, prefix.ContentBlocks, 1)
+	require.NotNil(t, prefix.ContentBlocks[0].FunctionToolResult)
+	require.Len(t, prefix.ContentBlocks[0].FunctionToolResult.Content, 1)
+	assert.Equal(t, "partial\n", prefix.ContentBlocks[0].FunctionToolResult.Content[0].Text.Text)
+	assert.Contains(t, incomplete[0].MessageStreamIncomplete.Error, streamErr.Error())
+	assert.Empty(t, normalToolMessages)
+
+	reconstructed, err := reconstructSessionState[*schema.AgenticMessage](ctx, mustOpenTestSession[*schema.AgenticMessage](t, ctx, store, sid), sid, defaultLoadPageSize)
+	require.NoError(t, err)
+	require.NotNil(t, reconstructed)
+	require.NotNil(t, reconstructed.state)
+	require.Len(t, reconstructed.state.Messages, 1)
+	assert.Equal(t, schema.AgenticRoleTypeUser, reconstructed.state.Messages[0].Role)
 }
 
 func agenticToolResultMessage(callID, name, text string) *schema.AgenticMessage {
