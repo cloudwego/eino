@@ -1083,7 +1083,7 @@ func TestRunnerSessionStreamingDoesNotBlockLiveEvent(t *testing.T) {
 	drainSessionEvents(t, iter)
 }
 
-func TestRunnerSessionDropsErroredStreamingMessageBeforeCheckpoint(t *testing.T) {
+func TestRunnerSessionPersistsIncompleteStreamingMessageBeforeCheckpoint(t *testing.T) {
 	ctx := context.Background()
 
 	tests := []struct {
@@ -1137,7 +1137,7 @@ func TestRunnerSessionDropsErroredStreamingMessageBeforeCheckpoint(t *testing.T)
 			require.True(t, sawInterrupt)
 			_, exists, err := store.Get(ctx, checkpointID)
 			require.NoError(t, err)
-			require.True(t, exists, "checkpoint should still be saved after dropping errored message stream")
+			require.True(t, exists, "checkpoint should still be saved after incomplete message stream")
 
 			persistedPartialMessages := filterStoredSessionEvents(t, store.events, func(se *SessionEvent[*schema.Message]) bool {
 				return se.Kind == SessionEventMessage &&
@@ -1149,7 +1149,10 @@ func TestRunnerSessionDropsErroredStreamingMessageBeforeCheckpoint(t *testing.T)
 			incompleteMessages := filterStoredSessionEvents(t, store.events, func(se *SessionEvent[*schema.Message]) bool {
 				return se.Kind == SessionEventMessageStreamIncomplete
 			})
-			assert.Empty(t, incompleteMessages)
+			require.Len(t, incompleteMessages, 1)
+			require.NotNil(t, incompleteMessages[0].MessageStreamIncomplete)
+			assert.Equal(t, "partial", incompleteMessages[0].MessageStreamIncomplete.Message.Content)
+			assert.Contains(t, incompleteMessages[0].MessageStreamIncomplete.Error, tt.streamErr.Error())
 		})
 	}
 }
@@ -3367,30 +3370,7 @@ func TestStreamPersistence_IncompleteStreamPrefixPersisted(t *testing.T) {
 		SessionStore:    store,
 	})
 
-	iter := runner.Query(ctx, "q")
-	var sawStreamErr bool
-	for {
-		ev, ok := iter.Next()
-		if !ok {
-			break
-		}
-		require.NoError(t, ev.Err)
-		if ev.Output != nil && ev.Output.MessageOutput != nil &&
-			ev.Output.MessageOutput.IsStreaming && ev.Output.MessageOutput.MessageStream != nil {
-			for {
-				_, err := ev.Output.MessageOutput.MessageStream.Recv()
-				if errors.Is(err, io.EOF) {
-					break
-				}
-				if err != nil {
-					assert.ErrorContains(t, err, streamErr.Error())
-					sawStreamErr = true
-					break
-				}
-			}
-		}
-	}
-	require.True(t, sawStreamErr, "live stream must surface the terminal stream error")
+	drainErroredStreamEvents(t, runner.Query(ctx, "q"), streamErr)
 
 	events := decodeStoredSessionEvents(t, store.events)
 	var incomplete []*SessionEvent[*schema.Message]
@@ -3410,6 +3390,113 @@ func TestStreamPersistence_IncompleteStreamPrefixPersisted(t *testing.T) {
 	assert.Equal(t, "hello partial", incomplete[0].MessageStreamIncomplete.Message.Content)
 	assert.Contains(t, incomplete[0].MessageStreamIncomplete.Error, streamErr.Error())
 	assert.Empty(t, normalFailedMessages, "failed stream prefix must not be persisted as a normal context message")
+}
+
+func TestAttack_IncompleteStreamPrefixCarriesDurableMetadata(t *testing.T) {
+	ctx := context.Background()
+	store := newSessionHelperStore()
+	sid := "attack-incomplete-metadata"
+	streamErr := errors.New("stream transport failed")
+	agent := &sessionStreamingAgent{
+		chunks: []*schema.Message{
+			schema.AssistantMessage("prefix", nil),
+		},
+		streamErr: streamErr,
+	}
+	runner := NewRunner(ctx, RunnerConfig{
+		Agent:           agent,
+		EnableStreaming: true,
+		SessionID:       sid,
+		SessionStore:    store,
+	})
+
+	drainErroredStreamEvents(t, runner.Query(ctx, "q"), streamErr)
+
+	events := decodeStoredSessionEvents(t, store.events)
+	var incomplete *SessionEvent[*schema.Message]
+	var idle *SessionEvent[*schema.Message]
+	for _, se := range events {
+		switch se.Kind {
+		case SessionEventMessageStreamIncomplete:
+			incomplete = se
+		case SessionEventSessionStatusIdle:
+			idle = se
+		}
+	}
+
+	require.NotNil(t, incomplete)
+	require.NotNil(t, idle)
+	assert.Equal(t, sid, incomplete.SessionID)
+	assert.NotEmpty(t, incomplete.EventID)
+	assert.NotEmpty(t, incomplete.TurnID)
+	assert.Equal(t, incomplete.TurnID, idle.TurnID)
+	assert.True(t, incomplete.Timestamp.Before(idle.Timestamp) || incomplete.Timestamp.Equal(idle.Timestamp))
+	assert.Equal(t, "prefix", incomplete.MessageStreamIncomplete.Message.Content)
+	assert.Contains(t, incomplete.MessageStreamIncomplete.Error, streamErr.Error())
+}
+
+func TestAttack_IncompleteStreamPersistsAllTerminalErrors(t *testing.T) {
+	ctx := context.Background()
+	tests := []struct {
+		name      string
+		streamErr error
+	}{
+		{name: "canceled", streamErr: ErrStreamCanceled},
+		{name: "will retry", streamErr: &WillRetryError{ErrStr: "retry", RetryAttempt: 1}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := newSessionHelperStore()
+			runner := NewRunner(ctx, RunnerConfig{
+				Agent: &sessionStreamingAgent{
+					chunks:    []*schema.Message{schema.AssistantMessage("transient", nil)},
+					streamErr: tt.streamErr,
+				},
+				EnableStreaming: true,
+				SessionID:       "attack-nondurable-" + tt.name,
+				SessionStore:    store,
+			})
+
+			drainErroredStreamEvents(t, runner.Query(ctx, "q"), tt.streamErr)
+
+			incomplete := filterStoredSessionEvents(t, store.events, func(se *SessionEvent[*schema.Message]) bool {
+				return se.Kind == SessionEventMessageStreamIncomplete
+			})
+			require.Len(t, incomplete, 1)
+			require.NotNil(t, incomplete[0].MessageStreamIncomplete)
+			assert.Equal(t, "transient", incomplete[0].MessageStreamIncomplete.Message.Content)
+			assert.Contains(t, incomplete[0].MessageStreamIncomplete.Error, tt.streamErr.Error())
+		})
+	}
+}
+
+func drainErroredStreamEvents(t *testing.T, iter *AsyncIterator[*AgentEvent], streamErr error) {
+	t.Helper()
+	var sawStreamErr bool
+	for {
+		ev, ok := iter.Next()
+		if !ok {
+			break
+		}
+		require.NoError(t, ev.Err)
+		if ev.Output == nil || ev.Output.MessageOutput == nil ||
+			!ev.Output.MessageOutput.IsStreaming || ev.Output.MessageOutput.MessageStream == nil {
+			continue
+		}
+		for {
+			_, err := ev.Output.MessageOutput.MessageStream.Recv()
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			if err != nil {
+				assert.ErrorContains(t, err, streamErr.Error())
+				sawStreamErr = true
+				break
+			}
+		}
+	}
+	require.True(t, sawStreamErr, "live stream must surface the terminal stream error")
 }
 
 func TestStreamPersistence_IncompleteStreamExcludedFromReconstruction(t *testing.T) {
