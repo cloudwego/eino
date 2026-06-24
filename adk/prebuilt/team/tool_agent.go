@@ -49,13 +49,29 @@ func newAgentTool(mw *teamMiddleware) *agentTool {
 }
 
 func (t *agentTool) Info(_ context.Context) (*schema.ToolInfo, error) {
+	subagentParam := &schema.ParameterInfo{
+		Type: schema.String,
+		Desc: "The type of specialized agent to use for this task",
+	}
+	// Constrain subagent_type to the declared role names and require it, so the
+	// model must pick a valid role. The registry is always non-empty in production
+	// (NewRunner injects a default general-purpose role when the host declares
+	// none), so this branch is the normal case; the fallback only applies to a
+	// lifecycleManager built directly in a unit test.
+	if names := t.mw.lifecycle.subagentTypeNames(); len(names) > 0 {
+		subagentParam.Enum = names
+		subagentParam.Required = true
+		subagentParam.Desc = "The type of specialized agent to use for this task. Required; must be exactly one of: " +
+			strings.Join(names, ", ") + "."
+	}
+
 	return &schema.ToolInfo{
 		Name: agentToolName,
 		Desc: selectToolDesc(agentToolDesc, agentToolDescChinese),
 		ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
 			"name": {
 				Type: schema.String,
-				Desc: "Name for the spawned agent. Makes it addressable via SendMessage({to: name}) while running.",
+				Desc: "Name for the spawned agent. Makes it addressable via SendMessage({to: name}) while running. Must start with an ASCII letter or digit and contain only letters, digits, '.', '_', '-' (no spaces or CJK characters); \"team-lead\" is reserved.",
 			},
 			"prompt": {
 				Type:     schema.String,
@@ -67,10 +83,7 @@ func (t *agentTool) Info(_ context.Context) (*schema.ToolInfo, error) {
 				Desc:     "A short (3-5 word) description of the task",
 				Required: true,
 			},
-			"subagent_type": {
-				Type: schema.String,
-				Desc: "The type of specialized agent to use for this task",
-			},
+			"subagent_type": subagentParam,
 			"run_in_background": {
 				Type: schema.Boolean,
 				Desc: "Set to true to run this agent in the background; you will be notified when it completes. Note: when a team is active and a name is provided, the agent is always run in the background (so it stays addressable via SendMessage) regardless of this flag.",
@@ -101,6 +114,18 @@ func (t *agentTool) InvokableRun(ctx context.Context, argumentsInJSON string, _ 
 
 	if args.Prompt == "" || args.Description == "" {
 		return "", fmt.Errorf("prompt and description are required")
+	}
+
+	// Reject an unknown subagent_type before any dispatch (decision D2), so it is
+	// enforced uniformly across every path — background teammate, named teammate,
+	// and the one-shot foreground sub-agent alike. Validating here rather than only
+	// inside runTeammateLocked closes the hole where a foreground spawn (no name,
+	// no run_in_background) silently ignored an invalid type. The model gets a tool
+	// error it can retry with a valid type. An empty type, or any type when no
+	// roles are configured, is accepted. The registry is immutable after NewRunner,
+	// so this read needs no lock.
+	if err := t.mw.lifecycle.validateSubagentType(args.SubagentType); err != nil {
+		return "", err
 	}
 
 	// An explicit run_in_background request is always a teammate spawn (it
@@ -284,7 +309,7 @@ func (t *agentTool) sendInitialPrompt(ctx context.Context, teamName string, args
 
 // buildTeammateAgent constructs the agent with team and plantask middleware wired up.
 func (t *agentTool) buildTeammateAgent(ctx context.Context, teamName string, args agentToolArgs) (*adk.ChatModelAgent, error) {
-	return t.mw.lifecycle.buildTeammateAgent(ctx, args.Name, teamName)
+	return t.mw.lifecycle.buildTeammateAgent(ctx, args.Name, teamName, args.SubagentType)
 }
 
 // spawnTeammateRunner creates the teammate's TurnLoop runner and starts it in a goroutine.

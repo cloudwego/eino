@@ -482,7 +482,7 @@ func TestBuildTeamAgent(t *testing.T) {
 	pumpMgr := newPumpManager(router, nopLogger{})
 	mw := newTeamLeadMiddleware(runnerConf, router, pumpMgr)
 
-	agent, ptMW, err := buildTeamAgent(context.Background(), runnerConf, mw, "extra instruction", nil)
+	agent, ptMW, err := buildTeamAgent(context.Background(), runnerConf, mw, runnerConf.AgentConfig, "extra instruction", nil)
 	assert.NoError(t, err)
 	assert.NotNil(t, agent)
 	assert.NotNil(t, ptMW)

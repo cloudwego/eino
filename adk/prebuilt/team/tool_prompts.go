@@ -201,7 +201,11 @@ this session; you coordinate the work and synthesize the results.
 1. **Create tasks** using the Task tools (TaskCreate, TaskList, etc.) - they
    automatically use the team's shared task list.
 2. **Spawn teammates** using the Agent tool with a name parameter to create
-   teammates that join the team and can be addressed via SendMessage.
+   teammates that join the team and can be addressed via SendMessage. The name
+   MUST start with an ASCII letter or digit and may then contain only letters,
+   digits, '.', '_', and '-' (no spaces, no other punctuation, and no CJK
+   characters). Use ASCII identifiers like "geo-expert" or "researcher2", not
+   names like "_expert". The name "team-lead" is reserved and cannot be used.
 3. **Assign tasks** using TaskUpdate with the owner parameter to give tasks to
    teammates, or let teammates claim unassigned, unblocked tasks themselves.
 4. **Teammates work on assigned tasks** and mark them completed via TaskUpdate.
@@ -248,7 +252,7 @@ const leaderInstructionChinese = `# 代理团队协调
 ## 团队工作流程
 
 1. **创建任务** - 使用任务工具（TaskCreate、TaskList 等），它们会自动使用团队的共享任务列表。
-2. **生成队友** - 使用 Agent 工具并指定 name 参数来创建加入团队的队友，之后可通过 SendMessage 寻址。
+2. **生成队友** - 使用 Agent 工具并指定 name 参数来创建加入团队的队友，之后可通过 SendMessage 寻址。name 必须以 ASCII 字母或数字开头，其余字符只能是字母、数字、'.'、'_'、'-'（不能包含空格、其他标点或中文字符）。请使用 "geo-expert"、"researcher2" 这样的 ASCII 标识符，不要用 "物理专家" 这类名字。"team-lead" 为保留名，不可使用。
 3. **分配任务** - 使用 TaskUpdate 的 owner 参数将任务分配给队友，或让队友自行认领未分配、未阻塞的任务。
 4. **队友处理分配的任务** - 并通过 TaskUpdate 将其标记为已完成。
 5. **队友在轮次之间进入空闲状态** - 每轮结束后，队友会自动进入空闲状态并通知你。请对空闲的队友保持耐心；除非影响到你的工作，否则不要评论他们的空闲状态。

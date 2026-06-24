@@ -141,7 +141,7 @@ func TestAgentTool_RunBackground_FullFlow(t *testing.T) {
 	assert.NoError(t, err)
 
 	agentT := newAgentTool(runner.leaderMW)
-	result, err := agentT.InvokableRun(context.Background(), `{"name":"worker","prompt":"do something useful","description":"test task"}`)
+	result, err := agentT.InvokableRun(context.Background(), `{"name":"worker","prompt":"do something useful","description":"test task","subagent_type":"general-purpose"}`)
 	assert.NoError(t, err)
 	assert.Contains(t, result, "Spawned successfully")
 	assert.Contains(t, result, "worker")
@@ -204,7 +204,7 @@ func TestAgentTool_TeammateSurvivesToolCtxCancel(t *testing.T) {
 	// Spawn the teammate using a per-turn context that we cancel right after.
 	turnCtx, turnCancel := context.WithCancel(context.Background())
 	agentT := newAgentTool(runner.leaderMW)
-	_, err = agentT.InvokableRun(turnCtx, `{"name":"worker","prompt":"do something","description":"test task"}`)
+	_, err = agentT.InvokableRun(turnCtx, `{"name":"worker","prompt":"do something","description":"test task","subagent_type":"general-purpose"}`)
 	assert.NoError(t, err)
 
 	// End the spawning turn. With the fix the teammate is bound to rootCtx, so it
@@ -255,13 +255,13 @@ func TestAgentTool_RunBackground_InvalidMemberName(t *testing.T) {
 
 	// Path traversal in the member name must be rejected before any member is
 	// registered.
-	_, err = agentT.InvokableRun(context.Background(), `{"name":"../evil","prompt":"do something","description":"test"}`)
+	_, err = agentT.InvokableRun(context.Background(), `{"name":"../evil","prompt":"do something","description":"test","subagent_type":"general-purpose"}`)
 	assert.Error(t, err)
 	has, _ := newConfigStore(conf).HasMember(context.Background(), "myteam", "../evil")
 	assert.False(t, has)
 
 	// The reserved leader name must be rejected for a teammate.
-	_, err = agentT.InvokableRun(context.Background(), `{"name":"team-lead","prompt":"do something","description":"test"}`)
+	_, err = agentT.InvokableRun(context.Background(), `{"name":"team-lead","prompt":"do something","description":"test","subagent_type":"general-purpose"}`)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "reserved for the team leader")
 }
