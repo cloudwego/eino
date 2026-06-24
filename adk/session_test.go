@@ -4808,6 +4808,154 @@ func TestAttack_LeadingSystemMessageExtraChangesArePersisted(t *testing.T) {
 	assert.Equal(t, "b", result.state.Messages[0].Extra["trace"])
 }
 
+func TestAttack_LeadingSystemMessageMutationInGenModelInputStillPersistsUpdate(t *testing.T) {
+	ctx := context.Background()
+	store := newSessionHelperStore()
+	sid := "leading-system-content-mutation"
+	seedModel := &leadingSystemTestModel[*schema.Message]{response: schema.AssistantMessage("seed answer", nil)}
+	seedAgent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "system-content-seed-agent",
+		Description: "test",
+		Instruction: "system v1",
+		Model:       seedModel,
+	})
+	require.NoError(t, err)
+	drainSessionEvents(t, NewRunner(ctx, RunnerConfig{Agent: seedAgent, SessionID: sid, SessionStore: store}).
+		Run(ctx, []*schema.Message{schema.UserMessage("seed")}))
+
+	updateModel := &leadingSystemTestModel[*schema.Message]{response: schema.AssistantMessage("updated answer", nil)}
+	updateAgent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "system-content-update-agent",
+		Description: "test",
+		Model:       updateModel,
+		GenModelInput: func(_ context.Context, _ string, input *AgentInput) ([]*schema.Message, error) {
+			require.NotEmpty(t, input.Messages)
+			input.Messages[0].Content = "mutated old system"
+			return append([]*schema.Message{schema.SystemMessage("system v2")}, input.Messages[1:]...), nil
+		},
+	})
+	require.NoError(t, err)
+	drainSessionEvents(t, NewRunner(ctx, RunnerConfig{Agent: updateAgent, SessionID: sid, SessionStore: store}).
+		Run(ctx, []*schema.Message{schema.UserMessage("update")}))
+
+	var update *MessageUpdatedEvent[*schema.Message]
+	for _, event := range loadMessageSessionEvents(t, ctx, store, sid) {
+		if event.MessageUpdated != nil && event.MessageUpdated.Message.Role == schema.System {
+			update = event.MessageUpdated
+		}
+	}
+	require.NotNil(t, update)
+	assert.Equal(t, "system v2", update.Message.Content)
+
+	handle := mustOpenTestSession[*schema.Message](t, ctx, store, sid)
+	result, err := reconstructSessionState[*schema.Message](ctx, handle, sid, defaultLoadPageSize)
+	require.NoError(t, err)
+	require.NoError(t, handle.close(ctx))
+	require.NotEmpty(t, result.state.Messages)
+	assert.Equal(t, "system v2", result.state.Messages[0].Content)
+}
+
+func TestAttack_LeadingSystemMessageExtraMutationInGenModelInputStillPersistsUpdate(t *testing.T) {
+	ctx := context.Background()
+	store := newSessionHelperStore()
+	sid := "leading-system-extra-mutation"
+
+	runTurn := func(trace string, mutateOld bool) {
+		model := &leadingSystemTestModel[*schema.Message]{response: schema.AssistantMessage("answer "+trace, nil)}
+		agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+			Name:        "system-extra-mutation-agent",
+			Description: "test",
+			Model:       model,
+			GenModelInput: func(_ context.Context, _ string, input *AgentInput) ([]*schema.Message, error) {
+				tail := input.Messages
+				if mutateOld {
+					require.NotEmpty(t, input.Messages)
+					require.NotNil(t, input.Messages[0].Extra)
+					input.Messages[0].Extra["trace"] = trace
+					tail = input.Messages[1:]
+				}
+				system := schema.SystemMessage("same")
+				system.Extra = map[string]any{"trace": trace}
+				return append([]*schema.Message{system}, tail...), nil
+			},
+		})
+		require.NoError(t, err)
+		drainSessionEvents(t, NewRunner(ctx, RunnerConfig{Agent: agent, SessionID: sid, SessionStore: store}).
+			Run(ctx, []*schema.Message{schema.UserMessage(trace)}))
+	}
+
+	runTurn("old", false)
+	runTurn("new", true)
+
+	var update *MessageUpdatedEvent[*schema.Message]
+	for _, event := range loadMessageSessionEvents(t, ctx, store, sid) {
+		if event.MessageUpdated != nil && event.MessageUpdated.Message.Role == schema.System {
+			update = event.MessageUpdated
+		}
+	}
+	require.NotNil(t, update, "system Extra mutation must not hide the generated update")
+	assert.Equal(t, "new", update.Message.Extra["trace"])
+
+	handle := mustOpenTestSession[*schema.Message](t, ctx, store, sid)
+	result, err := reconstructSessionState[*schema.Message](ctx, handle, sid, defaultLoadPageSize)
+	require.NoError(t, err)
+	require.NoError(t, handle.close(ctx))
+	require.NotEmpty(t, result.state.Messages)
+	assert.Equal(t, "new", result.state.Messages[0].Extra["trace"])
+}
+
+func TestAttack_LeadingSystemSnapshotAssignsIDToSource(t *testing.T) {
+	ctx := context.Background()
+	sourceSystem := schema.SystemMessage("system v1")
+	input := &AgentInput{Messages: []*schema.Message{sourceSystem, schema.UserMessage("hello")}}
+	model := &leadingSystemTestModel[*schema.Message]{response: schema.AssistantMessage("answer", nil)}
+	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "system-source-id-agent",
+		Description: "test",
+		Model:       model,
+		GenModelInput: func(_ context.Context, _ string, input *AgentInput) ([]*schema.Message, error) {
+			return append([]*schema.Message{schema.SystemMessage("system v2")}, input.Messages[1:]...), nil
+		},
+	})
+	require.NoError(t, err)
+
+	var update *MessageUpdatedEvent[*schema.Message]
+	for iter := agent.Run(ctx, input, withEnableSessionEvents()); ; {
+		event, ok := iter.Next()
+		if !ok {
+			break
+		}
+		require.NoError(t, event.Err)
+		if event.SessionEvent != nil && event.SessionEvent.MessageUpdated != nil {
+			update = event.SessionEvent.MessageUpdated
+		}
+	}
+
+	sourceID := GetMessageID(sourceSystem)
+	require.NotEmpty(t, sourceID)
+	require.NotNil(t, update)
+	assert.Equal(t, sourceID, update.MessageID)
+}
+
+func TestAttack_LeadingSystemSnapshotDoesNotAssignIDWhenSessionEventsDisabled(t *testing.T) {
+	ctx := context.Background()
+	sourceSystem := schema.SystemMessage("system v1")
+	input := &AgentInput{Messages: []*schema.Message{sourceSystem, schema.UserMessage("hello")}}
+	model := &leadingSystemTestModel[*schema.Message]{response: schema.AssistantMessage("answer", nil)}
+	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "system-disabled-source-id-agent",
+		Description: "test",
+		Model:       model,
+		GenModelInput: func(_ context.Context, _ string, input *AgentInput) ([]*schema.Message, error) {
+			return append([]*schema.Message{schema.SystemMessage("system v2")}, input.Messages[1:]...), nil
+		},
+	})
+	require.NoError(t, err)
+
+	drainSessionEvents(t, agent.Run(ctx, input))
+	assert.Empty(t, GetMessageID(sourceSystem))
+}
+
 func TestSameSystemMessageComparesExtraExceptMessageID(t *testing.T) {
 	oldMsg := schema.SystemMessage("same")
 	oldMsg.Extra = map[string]any{"_eino_msg_id": "old", "trace": "a"}
