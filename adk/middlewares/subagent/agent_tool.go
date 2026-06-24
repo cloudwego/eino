@@ -96,7 +96,7 @@ func newManagedAgentTool(mgr *backgroundtask.Manager, subAgents map[string]tool.
 			case backgroundtask.StatusCompleted:
 				return result.Result, nil
 			case backgroundtask.StatusRunning:
-				msg := fmt.Sprintf("Agent running in background with ID: %s. You will be notified when it completes.", result.TaskID)
+				msg := fmt.Sprintf("Agent running in background with ID: %s. You will be notified when it completes.", result.ID)
 				if result.OutputFile != "" {
 					msg += fmt.Sprintf(" Output is being written to: %s.", result.OutputFile)
 				}
@@ -104,10 +104,10 @@ func newManagedAgentTool(mgr *backgroundtask.Manager, subAgents map[string]tool.
 				return msg, nil
 			case backgroundtask.StatusFailed:
 				return "", fmt.Errorf("subagent %q task %q (%s) failed: %s",
-					in.SubagentType, result.TaskID, in.Description, result.Error)
+					in.SubagentType, result.ID, in.Description, result.Error)
 			case backgroundtask.StatusCanceled:
 				return "", fmt.Errorf("subagent %q task %q (%s) was canceled",
-					in.SubagentType, result.TaskID, in.Description)
+					in.SubagentType, result.ID, in.Description)
 			default:
 				return result.Result, nil
 			}

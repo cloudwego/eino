@@ -82,11 +82,11 @@ func TestRunStream_ForegroundStreamsAndCompletes(t *testing.T) {
 	got := drainStringStream(t, sr)
 	assert.Equal(t, "abc", got)
 
-	require.NoError(t, m.WaitAllDone(context.Background()))
 	tasks := m.List()
 	require.Len(t, tasks, 1)
-	assert.Equal(t, StatusCompleted, tasks[0].Status)
-	assert.Equal(t, "abc", tasks[0].Result)
+	task := waitTask(t, m, tasks[0].ID)
+	assert.Equal(t, StatusCompleted, task.Status)
+	assert.Equal(t, "abc", task.Result)
 }
 
 // TestRunStream_AutoBackground: a run that outlives its budget is moved to the
@@ -108,13 +108,13 @@ func TestRunStream_AutoBackground(t *testing.T) {
 	assert.Contains(t, got, "moved to the background")
 	assert.Contains(t, got, "(bash)")
 
-	require.NoError(t, m.WaitAllDone(context.Background()))
 	tasks := m.List()
 	require.Len(t, tasks, 1)
-	assert.Equal(t, StatusCompleted, tasks[0].Status)
-	assert.True(t, tasks[0].RunInBackground)
+	task := waitTask(t, m, tasks[0].ID)
+	assert.Equal(t, StatusCompleted, task.Status)
+	assert.True(t, task.RunInBackground)
 	// All four chunks land in the final result even though only some were streamed.
-	assert.Equal(t, "1234", tasks[0].Result)
+	assert.Equal(t, "1234", task.Result)
 }
 
 // TestRunStream_ExplicitBackground: no execution chunks reach the caller, only the
@@ -129,14 +129,15 @@ func TestRunStream_ExplicitBackground(t *testing.T) {
 	require.NoError(t, err)
 
 	got := drainStringStream(t, sr)
-	assert.Contains(t, got, "moved to the background")
+	assert.Contains(t, got, "is running in the background")
+	assert.NotContains(t, got, "moved to the background")
 	assert.NotContains(t, got, "chunk-")
 
-	require.NoError(t, m.WaitAllDone(context.Background()))
 	tasks := m.List()
 	require.Len(t, tasks, 1)
-	assert.Equal(t, StatusCompleted, tasks[0].Status)
-	assert.Equal(t, "chunk-1chunk-2", tasks[0].Result)
+	task := waitTask(t, m, tasks[0].ID)
+	assert.Equal(t, StatusCompleted, task.Status)
+	assert.Equal(t, "chunk-1chunk-2", task.Result)
 }
 
 // TestRunStream_WorkError: an error from the stream finalizes the task as failed
@@ -174,8 +175,8 @@ func TestRunStream_WorkError(t *testing.T) {
 	require.Error(t, sawErr)
 	assert.Contains(t, sawErr.Error(), "boom")
 
-	require.NoError(t, m.WaitAllDone(context.Background()))
 	tasks := m.List()
 	require.Len(t, tasks, 1)
-	assert.Equal(t, StatusFailed, tasks[0].Status)
+	task := waitTask(t, m, tasks[0].ID)
+	assert.Equal(t, StatusFailed, task.Status)
 }

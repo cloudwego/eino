@@ -45,6 +45,13 @@ func anyRunning(m *backgroundtask.Manager) bool {
 	return false
 }
 
+func waitAllTasks(t *testing.T, m *backgroundtask.Manager) {
+	t.Helper()
+	require.Eventually(t, func() bool {
+		return !anyRunning(m)
+	}, time.Second, 10*time.Millisecond)
+}
+
 type mockAgent struct {
 	name string
 	desc string
@@ -272,8 +279,7 @@ func TestAgentTool_Background(t *testing.T) {
 	assert.True(t, anyRunning(mgr))
 
 	// Wait for the background task to complete, then inspect final state.
-	err = mgr.WaitAllDone(context.Background())
-	require.NoError(t, err)
+	waitAllTasks(t, mgr)
 
 	tasks := mgr.List()
 	require.Len(t, tasks, 1)
@@ -402,8 +408,7 @@ func TestAgentTool_AutoBackground(t *testing.T) {
 	assert.True(t, anyRunning(mgr))
 
 	// Wait for completion.
-	err = mgr.WaitAllDone(context.Background())
-	require.NoError(t, err)
+	waitAllTasks(t, mgr)
 
 	tasks := mgr.List()
 	require.Len(t, tasks, 1)

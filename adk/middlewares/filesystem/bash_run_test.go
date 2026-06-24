@@ -34,6 +34,18 @@ import (
 
 func intPtr(v int) *int { return &v }
 
+func waitAllTasks(t *testing.T, mgr *backgroundtask.Manager) {
+	t.Helper()
+	require.Eventually(t, func() bool {
+		for _, task := range mgr.List() {
+			if task.Status == backgroundtask.StatusRunning {
+				return false
+			}
+		}
+		return true
+	}, time.Second, 10*time.Millisecond)
+}
+
 // A filesystem.Backend is a direct backgroundtask.OutputStore (no adapter): the
 // Manager persists task output through it, and the file is readable back.
 func TestBackendAsOutputStore_PersistsTaskOutput(t *testing.T) {
@@ -149,7 +161,7 @@ func TestManagedExecuteTool_Background(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, result, "running in background")
 
-	require.NoError(t, mgr.WaitAllDone(context.Background()))
+	waitAllTasks(t, mgr)
 	tasks := mgr.List()
 	require.Len(t, tasks, 1)
 	assert.True(t, tasks[0].RunInBackground)
@@ -185,7 +197,7 @@ func TestManagedExecuteTool_TimeoutMovesToBackground(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, result, "running in background")
 
-	require.NoError(t, mgr.WaitAllDone(context.Background()))
+	waitAllTasks(t, mgr)
 	tasks := mgr.List()
 	require.Len(t, tasks, 1)
 	assert.Equal(t, backgroundtask.StatusCompleted, tasks[0].Status)
@@ -212,7 +224,7 @@ func TestManagedExecuteTool_TimeoutKills(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "timed out")
 
-	require.NoError(t, mgr.WaitAllDone(context.Background()))
+	waitAllTasks(t, mgr)
 	tasks := mgr.List()
 	require.Len(t, tasks, 1)
 	assert.Equal(t, backgroundtask.StatusFailed, tasks[0].Status)
@@ -241,7 +253,7 @@ func TestManagedExecuteTool_StreamingForeground(t *testing.T) {
 	assert.Contains(t, got, "chunk1")
 	assert.Contains(t, got, "chunk3")
 
-	require.NoError(t, mgr.WaitAllDone(context.Background()))
+	waitAllTasks(t, mgr)
 	tasks := mgr.List()
 	require.Len(t, tasks, 1)
 	assert.Equal(t, backgroundtask.StatusCompleted, tasks[0].Status)
@@ -271,10 +283,11 @@ func TestManagedExecuteTool_StreamingExplicitBackground(t *testing.T) {
 	sr, err := st.StreamableRun(context.Background(), `{"command":"echo hi","run_in_background":true}`)
 	require.NoError(t, err)
 	got := drainToolStream(t, sr)
-	assert.Contains(t, got, "moved to the background")
+	assert.Contains(t, got, "is running in the background")
+	assert.NotContains(t, got, "moved to the background")
 	assert.NotContains(t, got, "chunk1")
 
-	require.NoError(t, mgr.WaitAllDone(context.Background()))
+	waitAllTasks(t, mgr)
 	tasks := mgr.List()
 	require.Len(t, tasks, 1)
 	assert.True(t, tasks[0].RunInBackground)

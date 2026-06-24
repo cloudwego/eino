@@ -27,6 +27,7 @@ package backgroundtask
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/cloudwego/eino/adk"
@@ -42,6 +43,21 @@ const (
 	taskStopToolName   = "task_stop"
 )
 
+// ToolConfig configures one of the injected control tools (task_output, task_stop).
+type ToolConfig struct {
+	// Name overrides the tool name used in registration.
+	// Optional; the default name ("task_output" / "task_stop") is used when empty.
+	Name string
+
+	// Desc overrides the tool description used in registration.
+	// Optional; the built-in description (with i18n) is used when nil.
+	Desc *string
+
+	// Disable removes this tool from the injected set.
+	// Optional; false by default. Use it to expose only one of the control tools.
+	Disable bool
+}
+
 // Config configures the background-task control middleware for the standard
 // *schema.Message message type. It is the default specialization of TypedConfig.
 type Config = TypedConfig[*schema.Message]
@@ -55,6 +71,11 @@ type TypedConfig[M adk.MessageType] struct {
 	// It is typically the same Manager the domain middlewares (subagent, filesystem)
 	// were given, so a single task-ID space spans agent and shell runs.
 	Manager *bgtask.Manager
+
+	// TaskOutputToolConfig configures the task_output tool. Optional.
+	TaskOutputToolConfig *ToolConfig
+	// TaskStopToolConfig configures the task_stop tool. Optional.
+	TaskStopToolConfig *ToolConfig
 }
 
 // New creates a middleware that injects the task_output and task_stop tools, bound
@@ -70,14 +91,22 @@ func NewTyped[M adk.MessageType](_ context.Context, config *TypedConfig[M]) (adk
 		return nil, fmt.Errorf("backgroundtask: Manager is required")
 	}
 	mgr := config.Manager
+	queried := newQueryTracker()
 
-	outputTool, err := newTaskOutputTool(mgr)
-	if err != nil {
-		return nil, fmt.Errorf("backgroundtask: failed to create task_output tool: %w", err)
+	var tools []tool.BaseTool
+	if !disabled(config.TaskOutputToolConfig) {
+		outputTool, err := newTaskOutputTool(mgr, queried, config.TaskOutputToolConfig)
+		if err != nil {
+			return nil, fmt.Errorf("backgroundtask: failed to create task_output tool: %w", err)
+		}
+		tools = append(tools, outputTool)
 	}
-	stopTool, err := newTaskStopTool(mgr)
-	if err != nil {
-		return nil, fmt.Errorf("backgroundtask: failed to create task_stop tool: %w", err)
+	if !disabled(config.TaskStopToolConfig) {
+		stopTool, err := newTaskStopTool(mgr, config.TaskStopToolConfig)
+		if err != nil {
+			return nil, fmt.Errorf("backgroundtask: failed to create task_stop tool: %w", err)
+		}
+		tools = append(tools, stopTool)
 	}
 
 	instruction := internal.SelectPrompt(internal.I18nPrompts{
@@ -86,9 +115,31 @@ func NewTyped[M adk.MessageType](_ context.Context, config *TypedConfig[M]) (adk
 	})
 
 	return &typedMiddleware[M]{
-		tools:       []tool.BaseTool{outputTool, stopTool},
+		tools:       tools,
 		instruction: instruction,
 	}, nil
+}
+
+// disabled reports whether a tool config opts out of registering its tool.
+func disabled(c *ToolConfig) bool {
+	return c != nil && c.Disable
+}
+
+// selectToolName returns the configured name override, or the default when unset.
+func selectToolName(c *ToolConfig, defaultName string) string {
+	if c != nil && c.Name != "" {
+		return c.Name
+	}
+	return defaultName
+}
+
+// selectToolDesc returns the configured description override, or the built-in
+// i18n description when unset.
+func selectToolDesc(c *ToolConfig, english, chinese string) string {
+	if c != nil && c.Desc != nil {
+		return *c.Desc
+	}
+	return internal.SelectPrompt(internal.I18nPrompts{English: english, Chinese: chinese})
 }
 
 type typedMiddleware[M adk.MessageType] struct {
@@ -117,17 +168,32 @@ type taskOutputInput struct {
 	Timeout int   `json:"timeout,omitempty" jsonschema_description:"Maximum time to wait in milliseconds when blocking. Defaults to 30000; capped at 600000."`
 }
 
+// queryTracker is owned by the task_output middleware, not by Manager. It keeps
+// consumption bookkeeping out of the lifecycle registry.
+type queryTracker struct {
+	mu      sync.Mutex
+	queried map[string]struct{}
+}
+
+func newQueryTracker() *queryTracker {
+	return &queryTracker{queried: make(map[string]struct{})}
+}
+
+func (q *queryTracker) mark(id string) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.queried[id] = struct{}{}
+}
+
 const (
 	defaultTaskOutputTimeoutMs = 30000
 	maxTaskOutputTimeoutMs     = 600000
 )
 
-func newTaskOutputTool(mgr *bgtask.Manager) (tool.InvokableTool, error) {
-	desc := internal.SelectPrompt(internal.I18nPrompts{
-		English: taskOutputToolDescription,
-		Chinese: taskOutputToolDescriptionChinese,
-	})
-	return utils.InferTool(taskOutputToolName, desc, func(ctx context.Context, input taskOutputInput) (string, error) {
+func newTaskOutputTool(mgr *bgtask.Manager, queried *queryTracker, cfg *ToolConfig) (tool.InvokableTool, error) {
+	name := selectToolName(cfg, taskOutputToolName)
+	desc := selectToolDesc(cfg, taskOutputToolDescription, taskOutputToolDescriptionChinese)
+	return utils.InferTool(name, desc, func(ctx context.Context, input taskOutputInput) (string, error) {
 		task, ok := resolveTask(ctx, mgr, input)
 		if !ok {
 			return fmt.Sprintf("Task %q not found", input.TaskID), nil
@@ -135,10 +201,9 @@ func newTaskOutputTool(mgr *bgtask.Manager) (tool.InvokableTool, error) {
 
 		// Only mark the result as consumed once the task has actually finished.
 		// A still-running task has no final result yet, so polling its status
-		// must not flip ResultQueried — otherwise a never-read result would look
-		// consumed.
+		// must not mark a never-read result as consumed.
 		if task.Status != bgtask.StatusRunning {
-			mgr.MarkQueried(input.TaskID)
+			queried.mark(input.TaskID)
 		}
 
 		return formatTask(task), nil
@@ -147,6 +212,7 @@ func newTaskOutputTool(mgr *bgtask.Manager) (tool.InvokableTool, error) {
 
 // resolveTask fetches the task, optionally blocking until it finishes. Blocking is
 // the default; it is bounded by input.Timeout (clamped to [0, max], default 30s).
+// The returned bool reports whether the task exists (not whether it finished).
 func resolveTask(ctx context.Context, mgr *bgtask.Manager, input taskOutputInput) (*bgtask.Task, bool) {
 	if input.Block != nil && !*input.Block {
 		return mgr.Get(input.TaskID)
@@ -162,19 +228,20 @@ func resolveTask(ctx context.Context, mgr *bgtask.Manager, input taskOutputInput
 
 	waitCtx, cancel := context.WithTimeout(ctx, time.Duration(timeoutMs)*time.Millisecond)
 	defer cancel()
-	return mgr.WaitForTask(waitCtx, input.TaskID)
+	// Wait's bool reports whether the task reached a terminal state; for the tool we
+	// only care whether the task exists, so translate via the returned snapshot.
+	task, _ := mgr.Wait(waitCtx, input.TaskID)
+	return task, task != nil
 }
 
 type taskStopInput struct {
 	TaskID string `json:"task_id" jsonschema:"required" jsonschema_description:"The ID of the background task to stop"`
 }
 
-func newTaskStopTool(mgr *bgtask.Manager) (tool.InvokableTool, error) {
-	desc := internal.SelectPrompt(internal.I18nPrompts{
-		English: taskStopToolDescription,
-		Chinese: taskStopToolDescriptionChinese,
-	})
-	return utils.InferTool(taskStopToolName, desc, func(ctx context.Context, input taskStopInput) (string, error) {
+func newTaskStopTool(mgr *bgtask.Manager, cfg *ToolConfig) (tool.InvokableTool, error) {
+	name := selectToolName(cfg, taskStopToolName)
+	desc := selectToolDesc(cfg, taskStopToolDescription, taskStopToolDescriptionChinese)
+	return utils.InferTool(name, desc, func(ctx context.Context, input taskStopInput) (string, error) {
 		if err := mgr.Cancel(input.TaskID); err != nil {
 			return fmt.Sprintf("Failed to stop task %q: %s", input.TaskID, err.Error()), nil
 		}

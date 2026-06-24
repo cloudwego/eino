@@ -37,7 +37,7 @@ func closeWithTimeout(m *bgtask.Manager) {
 	_ = m.Close(ctx)
 }
 
-func runWork(m *bgtask.Manager, description string, background bool, work bgtask.WorkFunc) (*bgtask.RunResult, error) {
+func runWork(m *bgtask.Manager, description string, background bool, work bgtask.WorkFunc) (*bgtask.Task, error) {
 	return m.Run(context.Background(), &bgtask.RunInput{
 		Description:     description,
 		RunInBackground: background,
@@ -99,6 +99,43 @@ func TestMiddleware_InjectsControlTools(t *testing.T) {
 	findTool(t, tools, taskStopToolName)
 }
 
+func TestMiddleware_ToolConfig_NameOverrideAndDisable(t *testing.T) {
+	mgr := bgtask.New(context.Background(), &bgtask.Config{})
+	defer closeWithTimeout(mgr)
+
+	customDesc := "custom output desc"
+	mw, err := New(context.Background(), &Config{
+		Manager:              mgr,
+		TaskOutputToolConfig: &ToolConfig{Name: "get_output", Desc: &customDesc},
+		TaskStopToolConfig:   &ToolConfig{Disable: true},
+	})
+	require.NoError(t, err)
+	_, runCtx, err := mw.BeforeAgent(context.Background(), &adk.ChatModelAgentContext[*schema.Message]{})
+	require.NoError(t, err)
+
+	// task_stop disabled → only the renamed task_output remains.
+	require.Len(t, runCtx.Tools, 1)
+	info, err := runCtx.Tools[0].Info(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, "get_output", info.Name)
+	assert.Equal(t, customDesc, info.Desc)
+}
+
+func TestMiddleware_ToolConfig_DisableBoth(t *testing.T) {
+	mgr := bgtask.New(context.Background(), &bgtask.Config{})
+	defer closeWithTimeout(mgr)
+
+	mw, err := New(context.Background(), &Config{
+		Manager:              mgr,
+		TaskOutputToolConfig: &ToolConfig{Disable: true},
+		TaskStopToolConfig:   &ToolConfig{Disable: true},
+	})
+	require.NoError(t, err)
+	_, runCtx, err := mw.BeforeAgent(context.Background(), &adk.ChatModelAgentContext[*schema.Message]{})
+	require.NoError(t, err)
+	assert.Empty(t, runCtx.Tools)
+}
+
 func TestMiddleware_InjectsInstruction(t *testing.T) {
 	mgr := bgtask.New(context.Background(), &bgtask.Config{})
 	defer closeWithTimeout(mgr)
@@ -120,16 +157,11 @@ func TestTaskOutputTool(t *testing.T) {
 	require.Equal(t, bgtask.StatusCompleted, result.Status)
 
 	tl := findTool(t, injectedTools(t, mgr), taskOutputToolName)
-	output, err := tl.InvokableRun(context.Background(), fmt.Sprintf(`{"task_id":"%s"}`, result.TaskID))
+	output, err := tl.InvokableRun(context.Background(), fmt.Sprintf(`{"task_id":"%s"}`, result.ID))
 	require.NoError(t, err)
 	assert.Contains(t, output, "test task")
 	assert.Contains(t, output, "task result")
 	assert.Contains(t, output, "completed")
-
-	// Verify task_output marks the result as queried.
-	task, ok := mgr.Get(result.TaskID)
-	require.True(t, ok)
-	assert.True(t, task.ResultQueried)
 }
 
 func TestTaskOutputTool_NotFound(t *testing.T) {
@@ -142,9 +174,7 @@ func TestTaskOutputTool_NotFound(t *testing.T) {
 	assert.Contains(t, result, "not found")
 }
 
-// Polling a still-running task must not mark its result consumed — the final
-// result has not been produced yet.
-func TestTaskOutputTool_RunningNotMarkedQueried(t *testing.T) {
+func TestTaskOutputTool_NonBlockingRunningThenTerminal(t *testing.T) {
 	mgr := bgtask.New(context.Background(), &bgtask.Config{})
 	defer closeWithTimeout(mgr)
 
@@ -152,23 +182,19 @@ func TestTaskOutputTool_RunningNotMarkedQueried(t *testing.T) {
 	require.NoError(t, err)
 
 	tl := findTool(t, injectedTools(t, mgr), taskOutputToolName)
-	out, err := tl.InvokableRun(context.Background(), fmt.Sprintf(`{"task_id":"%s","block":false}`, runResult.TaskID))
+	out, err := tl.InvokableRun(context.Background(), fmt.Sprintf(`{"task_id":"%s","block":false}`, runResult.ID))
 	require.NoError(t, err)
 	assert.Contains(t, out, "running")
 
-	// Still running → result not yet consumed.
-	task, ok := mgr.Get(runResult.TaskID)
-	require.True(t, ok)
-	assert.False(t, task.ResultQueried)
+	require.NoError(t, mgr.Cancel(runResult.ID))
+	waitCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	task, done := mgr.Wait(waitCtx, runResult.ID)
+	require.True(t, done)
+	require.NotNil(t, task)
 
-	// Once finished, querying does mark it consumed.
-	require.NoError(t, mgr.Cancel(runResult.TaskID))
-	require.NoError(t, mgr.WaitAllDone(context.Background()))
-	_, err = tl.InvokableRun(context.Background(), fmt.Sprintf(`{"task_id":"%s","block":false}`, runResult.TaskID))
+	_, err = tl.InvokableRun(context.Background(), fmt.Sprintf(`{"task_id":"%s","block":false}`, runResult.ID))
 	require.NoError(t, err)
-	task, ok = mgr.Get(runResult.TaskID)
-	require.True(t, ok)
-	assert.True(t, task.ResultQueried)
 }
 
 func TestTaskStopTool(t *testing.T) {
@@ -179,11 +205,11 @@ func TestTaskStopTool(t *testing.T) {
 	require.NoError(t, err)
 
 	tl := findTool(t, injectedTools(t, mgr), taskStopToolName)
-	result, err := tl.InvokableRun(context.Background(), fmt.Sprintf(`{"task_id":"%s"}`, runResult.TaskID))
+	result, err := tl.InvokableRun(context.Background(), fmt.Sprintf(`{"task_id":"%s"}`, runResult.ID))
 	require.NoError(t, err)
 	assert.Contains(t, result, "Successfully stopped")
 
-	task, ok := mgr.Get(runResult.TaskID)
+	task, ok := mgr.Get(runResult.ID)
 	require.True(t, ok)
 	assert.Equal(t, bgtask.StatusCanceled, task.Status)
 }
@@ -197,7 +223,7 @@ func TestTaskStopTool_AlreadyDone(t *testing.T) {
 	require.Equal(t, bgtask.StatusCompleted, runResult.Status)
 
 	tl := findTool(t, injectedTools(t, mgr), taskStopToolName)
-	result, err := tl.InvokableRun(context.Background(), fmt.Sprintf(`{"task_id":"%s"}`, runResult.TaskID))
+	result, err := tl.InvokableRun(context.Background(), fmt.Sprintf(`{"task_id":"%s"}`, runResult.ID))
 	require.NoError(t, err)
 	assert.Contains(t, result, "Failed to stop")
 }

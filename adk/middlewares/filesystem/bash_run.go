@@ -210,16 +210,16 @@ func newManagedBufferedExecuteTool(mgr *backgroundtask.Manager, sb filesystem.Sh
 		case backgroundtask.StatusCompleted:
 			return result.Result, nil
 		case backgroundtask.StatusRunning:
-			msg := fmt.Sprintf("Command running in background with ID: %s. You will be notified when it completes.", result.TaskID)
+			msg := fmt.Sprintf("Command running in background with ID: %s. You will be notified when it completes.", result.ID)
 			if result.OutputFile != "" {
 				msg += fmt.Sprintf(" Output is being written to: %s.", result.OutputFile)
 			}
 			msg += " Use task_output with this ID to check status or retrieve the result."
 			return msg, nil
 		case backgroundtask.StatusFailed:
-			return "", fmt.Errorf("execute task %q failed: %s", result.TaskID, result.Error)
+			return "", fmt.Errorf("execute task %q failed: %s", result.ID, result.Error)
 		case backgroundtask.StatusCanceled:
-			return "", fmt.Errorf("execute task %q was canceled", result.TaskID)
+			return "", fmt.Errorf("execute task %q was canceled", result.ID)
 		default:
 			return result.Result, nil
 		}

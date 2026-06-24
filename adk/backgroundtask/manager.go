@@ -20,7 +20,7 @@
 //
 // The central type is Manager: a non-generic, in-memory registry that tracks
 // foreground/background/auto-background runs and exposes them via Get/List/
-// Cancel/WaitAllDone. Manager is deliberately non-generic so a single instance
+// Cancel/Wait/Close. Manager is deliberately non-generic so a single instance
 // can be shared across heterogeneous domains (e.g. agent runs and shell runs)
 // under one unified task-ID space.
 //
@@ -45,7 +45,6 @@ import (
 	"time"
 
 	"github.com/cloudwego/eino/adk/filesystem"
-	"github.com/cloudwego/eino/internal"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -93,50 +92,14 @@ type Task struct {
 	// RunInBackground indicates whether this task is running (or ran) in the
 	// background — either launched with RunInBackground, or moved to the background
 	// after exhausting its foreground budget. It distinguishes background tasks
-	// from foreground ones when inspecting task state, and gates terminal
-	// notifications (see Subscribe).
+	// from foreground ones when inspecting task state.
 	RunInBackground bool
-	// ResultQueried indicates whether the orchestrating agent has queried this
-	// task's result (typically via the task_output tool). This helps developers
-	// know which background task results have already been consumed.
-	ResultQueried bool
 	// CreatedAt is the time the task was registered.
 	CreatedAt time.Time
 	// DoneAt is the time the task reached a terminal state. Nil if still running.
 	DoneAt *time.Time
 	// Metadata holds arbitrary extensible fields for future use.
 	Metadata map[string]any
-}
-
-// RunResult is the return value of Run.
-// It reports the outcome of a run so the caller does not need to track the task itself.
-type RunResult struct {
-	// TaskID is the unique identifier assigned to this execution.
-	TaskID string
-	// Status indicates the outcome: StatusCompleted, StatusFailed, or StatusRunning (for background tasks).
-	Status Status
-	// Result is the run output when Status is StatusCompleted.
-	Result string
-	// OutputFile is the path the run's output is (or will be) persisted to, when an
-	// output store is configured. It is reserved at launch, so it is populated even
-	// for a StatusRunning result — letting the caller hand the agent a path to read
-	// once the task completes. Empty when no output store is configured.
-	OutputFile string
-	// Error is the error message when Status is StatusFailed.
-	Error string
-}
-
-// Notification reports a background task's transition to a terminal state
-// (completed or failed; an explicitly canceled task does not notify). It carries a
-// snapshot of the task at that moment — not a live event stream: streaming a run's
-// domain events is intentionally out of scope (see the package doc).
-//
-// Notifications are delivered only for tasks that ran in the background (launched
-// with RunInBackground, or auto-backgrounded after their foreground budget).
-// Foreground runs return their result to the caller inline and never notify.
-type Notification struct {
-	// Task is the task's state at the terminal transition.
-	Task *Task
 }
 
 // RunInput is the execution-agnostic input for Run.
@@ -235,17 +198,16 @@ type Manager struct {
 	shouldAutoBackground func(ctx context.Context, task *Task) bool
 	outputStore          OutputStore
 	outputDir            string
-
-	// Subscription state, initialized lazily by Subscribe.
-	subscribeOnce sync.Once
-	notifyCh      chan *Notification
-	notifyBuf     *internal.UnboundedChan[*Notification]
 }
 
 type taskRecord struct {
 	task   Task
 	cancel context.CancelFunc // cancels the run's context
 	done   bool               // true once task reaches a terminal state
+	// doneCh is closed exactly once, by finalize, when the task reaches a terminal
+	// state. Wait selects on it so waiting for one task neither holds m.mu nor is
+	// woken by unrelated tasks finishing.
+	doneCh chan struct{}
 }
 
 // New creates a new Manager.
@@ -292,48 +254,39 @@ func (m *Manager) Get(id string) (*Task, bool) {
 	return cloneTask(&rec.task), true
 }
 
-// WaitForTask blocks until the task with the given id reaches a terminal state, or
-// until ctx is canceled, and returns its current state. It returns (nil, false) if
-// no such task exists. If ctx is canceled before the task finishes, it returns the
-// task's latest (still-running) snapshot with ok=true — callers should inspect
-// Task.DoneAt / Task.Status to tell whether the wait actually completed.
-func (m *Manager) WaitForTask(ctx context.Context, id string) (*Task, bool) {
-	done := make(chan struct{})
-	defer close(done)
-	go func() {
-		select {
-		case <-ctx.Done():
-			m.cond.Broadcast()
-		case <-done:
-		}
-	}()
-
+// Wait blocks until the task with the given id reaches a terminal state, or until
+// ctx is canceled, and returns the task's current snapshot together with whether it
+// actually reached a terminal state. Callers bound the wait with ctx (e.g.
+// context.WithTimeout).
+//
+// Return values:
+//   - (nil, false): no task with this id exists.
+//   - (task, true): the task reached a terminal state (task.Status is terminal).
+//   - (task, false): ctx was canceled/timed out first; task is the latest
+//     (still-running) snapshot.
+//
+// The wait is per-task: it selects on the task's own done channel rather than the
+// shared condition, so it neither holds m.mu while waiting nor is woken when other
+// tasks finish.
+func (m *Manager) Wait(ctx context.Context, id string) (*Task, bool) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	rec, ok := m.tasks[id]
 	if !ok {
+		m.mu.Unlock()
 		return nil, false
 	}
-	for !rec.done {
-		if ctx.Err() != nil {
-			break
+	doneCh := rec.doneCh
+	done := rec.done
+	m.mu.Unlock()
+
+	if !done {
+		select {
+		case <-doneCh:
+		case <-ctx.Done():
+			return m.taskSnapshot(id), false
 		}
-		m.cond.Wait()
 	}
-	return cloneTask(&rec.task), true
-}
-
-// MarkQueried marks a task's result as having been queried by the orchestrating
-// agent (typically via the task_output tool). This helps developers know which
-// background task results have already been consumed.
-func (m *Manager) MarkQueried(id string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if rec, ok := m.tasks[id]; ok {
-		rec.task.ResultQueried = true
-	}
+	return m.taskSnapshot(id), true
 }
 
 // List returns a snapshot of all tasks (both running and completed).
@@ -369,40 +322,10 @@ func (m *Manager) Cancel(id string) error {
 	return nil
 }
 
-// Subscribe returns a channel that receives a Notification each time a background
-// task reaches a terminal state. It is the hook a host uses to surface completions
-// to the agent (e.g. by injecting a task-notification message).
-//
-// Only background tasks notify — foreground runs return their result to the caller
-// inline. The subscription is forward-only: notifications generated before
-// Subscribe was first called are not replayed (use Get/List to inspect prior
-// tasks). Multiple calls return the same channel (a single shared stream of
-// notifications). The channel is closed by Close.
-func (m *Manager) Subscribe() <-chan *Notification {
-	m.subscribeOnce.Do(func() {
-		m.notifyBuf = internal.NewUnboundedChan[*Notification]()
-		m.notifyCh = make(chan *Notification)
-		go m.relayNotifications()
-	})
-	return m.notifyCh
-}
-
-// relayNotifications pumps notifications from the unbounded buffer to the public
-// channel, so sending under the Manager lock never blocks on a slow consumer.
-func (m *Manager) relayNotifications() {
-	defer close(m.notifyCh)
-	for {
-		n, ok := m.notifyBuf.Receive()
-		if !ok {
-			return
-		}
-		m.notifyCh <- n
-	}
-}
-
-// WaitAllDone blocks until all registered tasks have reached a terminal state,
-// or until the provided context is canceled.
-func (m *Manager) WaitAllDone(ctx context.Context) error {
+// waitIdle blocks until no registered task is still running, or until the
+// provided context is canceled. It backs graceful Close; single-task waits use
+// Wait.
+func (m *Manager) waitIdle(ctx context.Context) error {
 	done := make(chan struct{})
 	defer close(done)
 	go func() {
@@ -430,7 +353,7 @@ func (m *Manager) WaitAllDone(ctx context.Context) error {
 // then cancels any remaining running tasks.
 // After Close returns, Run will return an error.
 func (m *Manager) Close(ctx context.Context) error {
-	_ = m.WaitAllDone(ctx)
+	_ = m.waitIdle(ctx)
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -441,10 +364,6 @@ func (m *Manager) Close(ctx context.Context) error {
 		if !rec.done {
 			m.cancelTask(rec)
 		}
-	}
-
-	if m.notifyBuf != nil {
-		m.notifyBuf.Close()
 	}
 
 	return nil
@@ -475,6 +394,7 @@ func (m *Manager) createTask(input *RunInput) (string, error) {
 			OutputFile:      m.outputPath(id),
 			Metadata:        cloneMetadata(input.Metadata),
 		},
+		doneCh: make(chan struct{}),
 	}
 
 	return id, nil
@@ -643,24 +563,10 @@ func (m *Manager) finalize(id string, apply func(rec *taskRecord)) bool {
 	rec.task.DoneAt = &now
 	apply(rec)
 
-	// Notify only for background tasks, and not for an explicit cancel: a
-	// foreground run's result is returned to the caller inline, and a cancel was
-	// requested by the caller (e.g. task_stop) who already knows — both would be
-	// redundant notifications.
-	if rec.task.RunInBackground && rec.task.Status != StatusCanceled {
-		m.sendNotificationLocked(&Notification{Task: cloneTask(&rec.task)})
-	}
-
+	// Signal per-task waiters (Wait) and the all-done waiters (Close).
+	close(rec.doneCh)
 	m.cond.Broadcast()
 	return true
-}
-
-// sendNotificationLocked enqueues a notification to the subscriber, if any.
-// Uses the unbounded buffer so it never blocks under m.mu. Must be called with m.mu held.
-func (m *Manager) sendNotificationLocked(n *Notification) {
-	if m.notifyBuf != nil {
-		m.notifyBuf.TrySend(n)
-	}
 }
 
 // cloneTask returns a copy of t safe to hand to callers. The Metadata map is
@@ -722,9 +628,8 @@ func (c detachedCtx) Value(key any) any { return c.parent.Value(key) }
 //     StatusRunning. Otherwise the run is canceled and reported as timed out
 //     (StatusFailed).
 //
-// All runs are tracked in Manager state and visible via Get/List, and background
-// runs notify subscribers on completion (see Subscribe).
-func (m *Manager) Run(ctx context.Context, input *RunInput, work WorkFunc) (*RunResult, error) {
+// All runs are tracked in Manager state and visible via Get/List.
+func (m *Manager) Run(ctx context.Context, input *RunInput, work WorkFunc) (*Task, error) {
 	id, err := m.createTask(input)
 	if err != nil {
 		return nil, err
@@ -741,7 +646,7 @@ func (m *Manager) Run(ctx context.Context, input *RunInput, work WorkFunc) (*Run
 
 	// run executes the work and finalizes the task. The terminal outcome lives on
 	// the task record (set by completeTask/failTask), which Run reads back via
-	// toRunResultByID — so run signals completion rather than returning a value.
+	// taskSnapshot — so run signals completion rather than returning a value.
 	run := func() {
 		defer cancel()
 		r, runErr := work(runCtx)
@@ -756,10 +661,10 @@ func (m *Manager) Run(ctx context.Context, input *RunInput, work WorkFunc) (*Run
 	}
 
 	// Explicit background: run in goroutine, return immediately. createTask already
-	// marked the task RunInBackground, so its terminal transition will notify.
+	// marked the task RunInBackground.
 	if input.RunInBackground {
 		go run()
-		return m.runningResult(id), nil
+		return m.taskSnapshot(id), nil
 	}
 
 	// Foreground: run in a goroutine and wait. The wait honors caller cancellation
@@ -784,34 +689,34 @@ func (m *Manager) Run(ctx context.Context, input *RunInput, work WorkFunc) (*Run
 			// run() has already finalized the task before signaling, so the recorded
 			// state is authoritative — including a StatusCanceled set by a concurrent
 			// Cancel, which must win over the work's own ctx-canceled error.
-			return m.toRunResultByID(id), nil
+			return m.taskSnapshot(id), nil
 		case <-ctx.Done():
 			// Caller abandoned the foreground wait before the deadline (e.g. the
 			// turn was canceled) and before any auto-background: stop the work.
 			m.cancelIfRunning(id)
-			return m.toRunResultByID(id), nil
+			return m.taskSnapshot(id), nil
 		case <-timer.C:
 			task, ok := m.Get(id)
 			if !ok || task.DoneAt != nil {
 				// Work finished right at the deadline — report its actual outcome.
-				return m.toRunResultByID(id), nil
+				return m.taskSnapshot(id), nil
 			}
 			if m.allowAutoBackground(ctx, task) && m.detach(id) {
-				return m.runningResult(id), nil
+				return m.taskSnapshot(id), nil
 			}
 			// Hook declined (or work finished during the hook): stop if still running.
 			m.timeoutTask(id, budgetMs)
-			return m.toRunResultByID(id), nil
+			return m.taskSnapshot(id), nil
 		}
 	}
 
 	// Foreground without a deadline: block until completion or caller cancellation.
 	select {
 	case <-done:
-		return m.toRunResultByID(id), nil
+		return m.taskSnapshot(id), nil
 	case <-ctx.Done():
 		m.cancelIfRunning(id)
-		return m.toRunResultByID(id), nil
+		return m.taskSnapshot(id), nil
 	}
 }
 
@@ -830,14 +735,13 @@ type StreamWorkFunc func(ctx context.Context) (*schema.StreamReader[string], err
 // RunStream executes streaming work as a managed task, returning a stream of
 // output chunks to consume in real time.
 //
-// It mirrors Run's lifecycle (tracking, foreground budget, auto-background,
-// notifications) but preserves streaming for the foreground phase:
+// It mirrors Run's lifecycle (tracking, foreground budget, auto-background) but
+// preserves streaming for the foreground phase:
 //   - Foreground completion: every chunk is forwarded live, then the stream closes.
 //   - Auto-background at the deadline: chunks forwarded so far are kept; the
 //     Manager appends a single notice chunk (task id + output file) and closes the
 //     caller's stream, while the work keeps running in the background — its
-//     remaining output is drained into the task's Result/OutputFile and a terminal
-//     notification fires on completion (see Subscribe).
+//     remaining output is drained into the task's Result/OutputFile.
 //   - Explicit background (input.RunInBackground): the work runs detached from the
 //     start, so no execution chunks reach the caller; the stream carries only the
 //     background notice and then closes.
@@ -919,7 +823,7 @@ func (m *Manager) forwardStream(r *streamRun) {
 	// Explicit background: do not forward execution chunks. Emit the notice
 	// immediately, close the caller stream, and drain the rest into the result.
 	if r.input.RunInBackground {
-		r.sw.Send(m.backgroundNotice(r.id), nil)
+		r.sw.Send(m.backgroundStartNotice(r.id), nil)
 		r.sw.Close()
 		m.drainStream(r.runCtx, r.id, chunks, &buf)
 		return
@@ -959,7 +863,7 @@ func (m *Manager) forwardStream(r *streamRun) {
 			if m.allowAutoBackground(r.callerCtx, task) && m.detach(r.id) {
 				// Moved to the background: cap the caller's stream with a notice and
 				// keep draining the rest into the task result.
-				r.sw.Send(m.backgroundNotice(r.id), nil)
+				r.sw.Send(m.backgroundMoveNotice(r.id), nil)
 				r.sw.Close()
 				m.drainStream(r.runCtx, r.id, chunks, &buf)
 				return
@@ -1025,16 +929,26 @@ func (m *Manager) drainStream(runCtx context.Context, id string, chunks <-chan s
 	}
 }
 
-// backgroundNotice builds the generic chunk appended when a task moves to the
-// background. It uses only Manager-level facts (type, id, output file), so it
-// stays domain-agnostic.
-func (m *Manager) backgroundNotice(id string) string {
+// backgroundStartNotice builds the generic chunk emitted for an explicit
+// RunInBackground launch. It uses only Manager-level facts (type, id, output
+// file), so it stays domain-agnostic.
+func (m *Manager) backgroundStartNotice(id string) string {
+	return m.backgroundNotice(id, "is running in the background")
+}
+
+// backgroundMoveNotice builds the generic chunk appended when a foreground run
+// is moved to the background by the auto-background policy.
+func (m *Manager) backgroundMoveNotice(id string) string {
+	return m.backgroundNotice(id, "moved to the background")
+}
+
+func (m *Manager) backgroundNotice(id string, state string) string {
 	task, ok := m.Get(id)
 	kind := ""
 	if ok && task.Type != "" {
 		kind = " (" + task.Type + ")"
 	}
-	msg := fmt.Sprintf("\n[task %s%s moved to the background; you will be notified when it completes", id, kind)
+	msg := fmt.Sprintf("\n[task %s%s %s; you will be notified when it completes", id, kind, state)
 	if ok && task.OutputFile != "" {
 		msg += fmt.Sprintf(". Output: %s", task.OutputFile)
 	}
@@ -1044,20 +958,13 @@ func (m *Manager) backgroundNotice(id string) string {
 // streamBufferCap is the buffer size of the caller-facing stream pipe.
 const streamBufferCap = 16
 
-// runningResult builds the RunResult handed back when a task is left running in
-// the background. The output-file path is deterministic and reserved at launch
-// (see Task.OutputFile), so the caller can surface it to the agent immediately.
-func (m *Manager) runningResult(id string) *RunResult {
-	return &RunResult{TaskID: id, Status: StatusRunning, OutputFile: m.outputPath(id)}
-}
-
-// toRunResultByID builds a RunResult from a task's current (terminal) state. The
-// task record is the single source of truth, so a concurrent cancel or timeout is
-// reflected faithfully.
-func (m *Manager) toRunResultByID(id string) *RunResult {
-	task, ok := m.Get(id)
-	if !ok {
-		return &RunResult{TaskID: id, Status: StatusFailed}
+// taskSnapshot returns the current state of a task as a cloned *Task. The task
+// record is the single source of truth, so a concurrent cancel or timeout is
+// reflected faithfully. It falls back to a minimal failed snapshot if the task is
+// somehow absent (should not happen for a just-created task).
+func (m *Manager) taskSnapshot(id string) *Task {
+	if task, ok := m.Get(id); ok {
+		return task
 	}
-	return &RunResult{TaskID: id, Status: task.Status, Result: task.Result, Error: task.Error, OutputFile: task.OutputFile}
+	return &Task{ID: id, Status: StatusFailed}
 }
