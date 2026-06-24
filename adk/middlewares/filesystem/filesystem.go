@@ -664,15 +664,15 @@ func formatLineNumbers(content string, startLine, columnOffset, columnLimit int)
 	var b strings.Builder
 	for i, line := range lines {
 		lineNo := startLine + i
-		line, note := sliceLineByColumns(line, lineNo, columnOffset, columnLimit)
+		slicedLine, note := sliceLineByColumns(line, lineNo, columnOffset, columnLimit)
 		if i < len(lines)-1 {
-			fmt.Fprintf(&b, "%6d\t%s", lineNo, line)
+			fmt.Fprintf(&b, "%6d\t%s", lineNo, slicedLine)
 			if note != "" {
 				fmt.Fprintf(&b, "\n[%s]", note)
 			}
 			b.WriteByte('\n')
 		} else {
-			fmt.Fprintf(&b, "%6d\t%s", lineNo, line)
+			fmt.Fprintf(&b, "%6d\t%s", lineNo, slicedLine)
 			if note != "" {
 				fmt.Fprintf(&b, "\n[%s]", note)
 			}

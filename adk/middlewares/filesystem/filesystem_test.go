@@ -265,6 +265,63 @@ func TestReadFileTool_LongSingleLineColumnPagination(t *testing.T) {
 	assert.Equal(t, fmt.Sprintf("     1\t%s\n[Line 1 starts at column 2501 of 3000.]", strings.Repeat("b", 500)), result)
 }
 
+func TestReadFileTool_ColumnPaginationEdgeCases(t *testing.T) {
+	backend := filesystem.NewInMemoryBackend()
+	assert.NoError(t, backend.Write(context.Background(), &filesystem.WriteRequest{
+		FilePath: "/file.txt",
+		Content:  "aaaaaaaaaa",
+	}))
+
+	readTool, err := newReadFileTool(backend, "", "")
+	assert.NoError(t, err)
+
+	r, err := invokeTool(t, readTool, `{"file_path":"/file.txt", "offset":1, "limit":1, "column_limit":-1}`)
+	assert.NoError(t, err)
+	assert.Contains(t, r, "aaaaaaaaaa")
+	assert.NotContains(t, r, "truncated")
+	assert.NotContains(t, r, "starts at column")
+
+	r, err = invokeTool(t, readTool, `{"file_path":"/file.txt", "offset":1, "limit":1, "column_offset":50, "column_limit":10}`)
+	assert.NoError(t, err)
+	assert.Contains(t, r, "column_offset=50 is beyond the end")
+
+	r, err = invokeTool(t, readTool, `{"file_path":"/file.txt", "offset":1, "limit":1, "column_offset":5, "column_limit":100}`)
+	assert.NoError(t, err)
+	assert.Contains(t, r, fmt.Sprintf("     1\t%s", "aaaaaa"))
+	assert.NotContains(t, r, "truncated")
+	assert.Contains(t, r, "Line 1 starts at column 5 of 10")
+}
+
+func TestReadFileTool_ColumnPaginationOnEmptyLine(t *testing.T) {
+	backend := filesystem.NewInMemoryBackend()
+	assert.NoError(t, backend.Write(context.Background(), &filesystem.WriteRequest{
+		FilePath: "/mixed.txt",
+		Content:  "\nhello",
+	}))
+
+	readTool, err := newReadFileTool(backend, "", "")
+	assert.NoError(t, err)
+
+	r, err := invokeTool(t, readTool, `{"file_path":"/mixed.txt", "offset":1, "limit":1, "column_offset":3, "column_limit":10}`)
+	assert.NoError(t, err)
+	assert.Contains(t, r, "Line 1 has no content at column_offset=3")
+}
+
+func TestReadFileTool_ColumnOffsetBoundary(t *testing.T) {
+	backend := filesystem.NewInMemoryBackend()
+	assert.NoError(t, backend.Write(context.Background(), &filesystem.WriteRequest{
+		FilePath: "/b.txt",
+		Content:  "abcdef",
+	}))
+
+	readTool, err := newReadFileTool(backend, "", "")
+	assert.NoError(t, err)
+
+	r, err := invokeTool(t, readTool, `{"file_path":"/b.txt", "offset":1, "limit":1, "column_offset":7, "column_limit":5}`)
+	assert.NoError(t, err)
+	assert.Contains(t, r, "column_offset=7 is beyond the end")
+}
+
 func TestWriteFileTool(t *testing.T) {
 	backend := setupTestBackend()
 	writeTool, err := newWriteFileTool(backend, "", "")
