@@ -58,6 +58,22 @@ type RunnerConfig struct {
 	// caller does not need the events.
 	OnAgentEvents func(ctx context.Context, tc *adk.TurnContext[TurnInput, adk.Message], events *adk.AsyncIterator[*adk.AgentEvent]) error
 
+	// TeammateRoles declares reusable teammate roles the leader can spawn by passing
+	// their Name as the Agent tool's subagent_type. Optional.
+	//
+	// The available roles (name + description + tool summary) are rendered into the
+	// leader's instruction so it knows which subagent_type values exist and when to
+	// use each, and spawning a teammate with a role overlays that role's Model /
+	// Tools / Instruction onto AgentConfig. subagent_type is required and must match
+	// a declared role; an empty or unmatched value is rejected by the Agent tool and
+	// surfaced back to the model to retry.
+	//
+	// When this list is empty, the framework injects a single default
+	// "general-purpose" role (inheriting the leader's model and tools) so there is
+	// always exactly one valid subagent_type. Supplying roles replaces that default
+	// with the given set, which is then treated as the exhaustive allowlist.
+	TeammateRoles []TeammateRole
+
 	// Logger is the logger used by the team middleware.
 	// If nil, the standard log package is used.
 	Logger Logger
@@ -114,6 +130,11 @@ func NewRunner(ctx context.Context, conf *RunnerConfig) (*Runner, error) {
 
 	conf.TeamConfig.ensureInit()
 
+	registry, err := newSubagentRegistry(conf.TeammateRoles)
+	if err != nil {
+		return nil, fmt.Errorf("invalid TeammateRoles: %w", err)
+	}
+
 	router := newSourceRouter(LeaderAgentName, conf.logger())
 	pumpMgr := newPumpManager(router, conf.logger())
 
@@ -134,6 +155,7 @@ func NewRunner(ctx context.Context, conf *RunnerConfig) (*Runner, error) {
 
 	leaderMW := newTeamLeadMiddleware(conf, router, pumpMgr)
 	leaderMW.lifecycle.onReminder = onReminder
+	leaderMW.lifecycle.subagents = registry
 
 	// Create the team up front: directory layout, config.json with the leader as
 	// the first member, and the leader's registered inbox. This replaces the old
@@ -156,7 +178,12 @@ func NewRunner(ctx context.Context, conf *RunnerConfig) (*Runner, error) {
 	}
 
 	extraInstruction := selectToolDesc(leaderInstruction, leaderInstructionChinese)
-	agent, ptMW, err := buildTeamAgent(ctx, conf, leaderMW, extraInstruction, onReminder)
+	// Append the available subagent types so the leader knows which subagent_type
+	// values exist and when to use each (no-op when no roles are configured).
+	if types := renderAvailableSubagentTypes(registry); types != "" {
+		extraInstruction += "\n\n" + types
+	}
+	agent, ptMW, err := buildTeamAgent(ctx, conf, leaderMW, conf.AgentConfig, extraInstruction, onReminder)
 	if err != nil {
 		rollback()
 		return nil, fmt.Errorf("create leader agent: %w", err)
@@ -337,10 +364,16 @@ func newTeammateRunner(conf *RunnerConfig, router *sourceRouter, pumpMgr *pumpMa
 // user-provided plantask middleware), applies extraInstruction if non-empty, and
 // returns the agent along with the typed plantask.Middleware for task operations.
 //
+// baseConfig is the ChatModelAgentConfig to build from: NewRunner passes
+// conf.AgentConfig for the leader, while agentTool.buildTeammateAgent passes a
+// per-teammate config (the leader's config, optionally overlaid with a
+// TeammateRole's Model / Tools / Instruction). baseConfig is copied by value
+// before mutation so the caller's config is never modified.
+//
 // This is the single factory used by both NewRunner (leader) and
 // agentTool.buildTeammateAgent (teammate) to avoid duplicating the
 // middleware-wiring logic.
-func buildTeamAgent(ctx context.Context, conf *RunnerConfig, teamMW *teamMiddleware, extraInstruction string, onReminder func(ctx context.Context, agentName string, reminderText string)) (*adk.ChatModelAgent, plantask.Middleware, error) {
+func buildTeamAgent(ctx context.Context, conf *RunnerConfig, teamMW *teamMiddleware, baseConfig *adk.ChatModelAgentConfig, extraInstruction string, onReminder func(ctx context.Context, agentName string, reminderText string)) (*adk.ChatModelAgent, plantask.Middleware, error) {
 	defaultHandlers := []adk.ChatModelAgentMiddleware{teamMW}
 
 	ptMWRaw, err := newTeamPlantaskMiddleware(ctx, conf.TeamConfig, teamMW, onReminder)
@@ -354,9 +387,9 @@ func buildTeamAgent(ctx context.Context, conf *RunnerConfig, teamMW *teamMiddlew
 		return nil, nil, fmt.Errorf("plantask middleware does not implement plantask.Middleware")
 	}
 
-	handlers := append(defaultHandlers, stripPlantaskMiddleware(conf.AgentConfig.Handlers)...)
+	handlers := append(defaultHandlers, stripPlantaskMiddleware(baseConfig.Handlers)...)
 
-	newConfig := *conf.AgentConfig
+	newConfig := *baseConfig
 	newConfig.Handlers = handlers
 	if extraInstruction != "" {
 		newConfig.Instruction = fmt.Sprintf("%s\n%s", newConfig.Instruction, extraInstruction)

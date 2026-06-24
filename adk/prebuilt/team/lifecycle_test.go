@@ -186,7 +186,7 @@ func TestLifecycleManager_BuildTeammateAgent_AppendsLocalizedInstruction(t *test
 	pumpMgr := newPumpManager(router, nopLogger{})
 	lm := newLifecycleManager(conf, runnerConf, true, router, pumpMgr)
 
-	agent, err := lm.buildTeammateAgent(context.Background(), "worker", "myteam")
+	agent, err := lm.buildTeammateAgent(context.Background(), "worker", "myteam", "")
 	assert.NoError(t, err)
 	assert.NotNil(t, agent)
 
@@ -197,6 +197,11 @@ func TestLifecycleManager_BuildTeammateAgent_AppendsLocalizedInstruction(t *test
 	)
 	instruction := reflect.ValueOf(agent).Elem().FieldByName("instruction").String()
 	assert.Equal(t, "base instruction\n"+expectedExtraInstruction, instruction)
+
+	// The teammate must carry its own agent name, not inherit the leader's
+	// ("leader"). Inheriting it corrupts event attribution and makes the teammate
+	// present the leader's identity to the model.
+	assert.Equal(t, "worker", agent.Name(context.Background()))
 }
 
 func TestLifecycleManager_ConfigStore(t *testing.T) {

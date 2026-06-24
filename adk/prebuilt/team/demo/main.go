@@ -47,9 +47,11 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/cloudwego/eino/adk"
@@ -98,7 +100,7 @@ func main() {
 	问题二： 海水为什么是咸的？
 	问题三： 人或者的意义是什么？
 	请生成 3 个知识专家队友，分别来回答这三个问题，回答精简一点，一句话就行了。
-	teamlead 不要自己回答问题，要等三个知识专家都回答了，再汇总答案给我。
+	teamleader 不要自己回答问题，要等三个知识专家都回答了，再汇总答案给我。
 	`
 
 	// modelImpl := newScriptedModel(scenario)
@@ -116,7 +118,6 @@ func main() {
 			Instruction:   "You are a helpful assistant.",
 			Model:         modelImpl,
 			MaxIterations: 1000,
-
 			Handlers: []adk.ChatModelAgentMiddleware{
 				NewToolWrapMiddleware(),
 			},
@@ -125,6 +126,18 @@ func main() {
 			Backend:  backend,
 			BaseDir:  baseDir,
 			Interval: 10,
+		},
+		TeammateRoles: []team.TeammateRole{
+			{
+				Name:        "geo-expert",
+				Description: "A experienced geography expert.",
+				Instruction: "You are a experienced geography expert.",
+			},
+			{
+				Name:        "philosopher",
+				Description: "A philosopher.",
+				Instruction: "You are a experienced philosopher.",
+			},
 		},
 		GenInput: func(_ context.Context, _ *adk.TurnLoop[team.TurnInput, adk.Message], items []team.TurnInput) (*adk.GenInputResult[team.TurnInput, adk.Message], error) {
 			target := ""
@@ -192,23 +205,31 @@ func main() {
 		Messages:    []string{leaderPrompt},
 	})
 
+	// go func() {
+	// 	time.Sleep(90 * time.Second)
+	// 	runner.Push(team.TurnInput{
+	// 		TargetAgent: team.LeaderAgentName,
+	// 		Messages:    []string{"现在几点？请回答我。"},
+	// 	})
+	// 	// time.Sleep(30 * time.Second)
+	// 	// runner.Push(team.TurnInput{
+	// 	// 	TargetAgent: team.LeaderAgentName,
+	// 	// 	Messages:    []string{leaderPrompt},
+	// 	// })
+	// 	// time.Sleep(90 * time.Second)
+	// 	// printflag = true
+	// 	// runner.Push(team.TurnInput{
+	// 	// 	TargetAgent: team.LeaderAgentName,
+	// 	// 	Messages:    []string{"1+1=？"},
+	// 	// })
+	// }()
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
 	go func() {
-		time.Sleep(90 * time.Second)
-		runner.Push(team.TurnInput{
-			TargetAgent: team.LeaderAgentName,
-			Messages:    []string{"现在几点？请回答我。"},
-		})
-		// time.Sleep(30 * time.Second)
-		// runner.Push(team.TurnInput{
-		// 	TargetAgent: team.LeaderAgentName,
-		// 	Messages:    []string{leaderPrompt},
-		// })
-		// time.Sleep(90 * time.Second)
-		// printflag = true
-		// runner.Push(team.TurnInput{
-		// 	TargetAgent: team.LeaderAgentName,
-		// 	Messages:    []string{"1+1=？"},
-		// })
+		<-sigCh
+		log.Println("shutting down...")
+		runner.Stop()
 	}()
 
 	fmt.Println("=== Agent Teams Demo ===")
@@ -222,6 +243,7 @@ func main() {
 
 	fmt.Println()
 	fmt.Println("=== Demo Complete ===")
+
 }
 
 // ---------------------------------------------------------------------------
