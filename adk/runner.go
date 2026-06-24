@@ -1046,12 +1046,27 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 					}
 					liveDelivered = true
 
-					persistCopy := &TypedMessageVariant[M]{IsStreaming: true, MessageStream: copies[0]}
-					persistedMsg, err := persistCopy.GetMessage()
+					persistedMsg, hasChunks, streamErr, err := materializeMessageStreamPrefix(copies[0])
 					if err != nil {
-						// A message-stream error means this message should not enter
-						// model context. Drop only this SessionEvent; the turn and any
-						// deferred checkpoint can still commit.
+						// Prefix projection is best-effort replay data. A concat failure
+						// should not fail the turn after the source stream already failed.
+						continue
+					}
+					if streamErr != nil {
+						if hasChunks {
+							_ = persistSessionEvent(&SessionEvent[M]{
+								EventID:   event.EventID,
+								Timestamp: event.Timestamp,
+								Kind:      SessionEventMessageStreamIncomplete,
+								MessageStreamIncomplete: &MessageStreamIncompleteEvent[M]{
+									Message: persistedMsg,
+									Error:   streamErr.Error(),
+								},
+							})
+						}
+						continue
+					}
+					if !hasChunks {
 						continue
 					}
 

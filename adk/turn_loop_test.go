@@ -977,7 +977,7 @@ func TestTurnLoop_GetAgentError_RecoverConsumed(t *testing.T) {
 func TestTurnLoop_GenInputError_RecoverItems(t *testing.T) {
 	genErr := errors.New("gen input error")
 
-	loop := newAndRunTurnLoop(context.Background(), TurnLoopConfig[string, *schema.Message]{
+	loop := NewTurnLoop(TurnLoopConfig[string, *schema.Message]{
 		GenInput: func(ctx context.Context, _ *TurnLoop[string, *schema.Message], items []string) (*GenInputResult[string, *schema.Message], error) {
 			return nil, genErr
 		},
@@ -986,6 +986,7 @@ func TestTurnLoop_GenInputError_RecoverItems(t *testing.T) {
 
 	loop.Push("msg1")
 	loop.Push("msg2")
+	loop.Run(context.Background())
 
 	result := loop.Wait()
 	assert.ErrorIs(t, result.ExitReason, genErr)
