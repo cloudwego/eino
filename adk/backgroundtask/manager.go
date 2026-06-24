@@ -45,6 +45,7 @@ import (
 	"time"
 
 	"github.com/cloudwego/eino/adk/filesystem"
+	"github.com/cloudwego/eino/internal"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -73,8 +74,8 @@ type Task struct {
 	// Description. Empty if the launcher did not set it.
 	Type string
 	// ToolUseID is the id of the tool call that launched this task, when known.
-	// It lets a host correlate a terminal notification back to the originating
-	// tool call. Empty if the launcher did not set it.
+	// It lets a host correlate a task event back to the originating tool call.
+	// Empty if the launcher did not set it.
 	ToolUseID string
 	// Description is a human-readable summary of what the task does.
 	Description string
@@ -100,6 +101,30 @@ type Task struct {
 	DoneAt *time.Time
 	// Metadata holds arbitrary extensible fields for future use.
 	Metadata map[string]any
+}
+
+// TaskEventType describes the lifecycle transition that caused a task event.
+type TaskEventType string
+
+const (
+	// TaskEventCreated indicates a task was registered in StatusRunning.
+	TaskEventCreated TaskEventType = "created"
+	// TaskEventBackgrounded indicates a foreground task moved to the background.
+	TaskEventBackgrounded TaskEventType = "backgrounded"
+	// TaskEventCompleted indicates a task finished successfully.
+	TaskEventCompleted TaskEventType = "completed"
+	// TaskEventFailed indicates a task finished with an error.
+	TaskEventFailed TaskEventType = "failed"
+	// TaskEventCanceled indicates a task was canceled by Cancel / Close.
+	TaskEventCanceled TaskEventType = "canceled"
+)
+
+// TaskEvent is a lifecycle event published by Manager.Subscribe.
+type TaskEvent struct {
+	// Type is the transition that caused this event.
+	Type TaskEventType
+	// Task is the task snapshot immediately after the transition.
+	Task *Task
 }
 
 // RunInput is the execution-agnostic input for Run.
@@ -133,6 +158,13 @@ type RunInput struct {
 // defaultForegroundTimeoutMs is the default foreground budget (120 seconds).
 const defaultForegroundTimeoutMs = 120_000
 
+// IDGenerator returns the complete ID for a new task.
+//
+// The generator sees the run input before the task is registered and may return a
+// business-side identifier. Manager does not add the task-type prefix when IDGen
+// is configured; callers that want one should include it in the returned ID.
+type IDGenerator func(ctx context.Context, input *RunInput) (string, error)
+
 // Config configures a Manager.
 type Config struct {
 	// ForegroundTimeoutMs sets the foreground budget: the time a foreground run is
@@ -157,6 +189,14 @@ type Config struct {
 	// When nil (the default), it is treated as always returning false: a run that
 	// hits its deadline is canceled and reported as timed out, never auto-backgrounded.
 	ShouldAutoBackground func(ctx context.Context, task *Task) bool
+
+	// IDGen, when set, decides the full ID of every task created by this Manager.
+	// If nil, Manager uses its default task-type-prefixed base62 ID.
+	//
+	// IDGen may be called concurrently by concurrent Run / RunStream calls. It
+	// must return a non-empty ID. The returned ID must be unique among this
+	// Manager's registered tasks; a duplicate fails task creation.
+	IDGen IDGenerator
 
 	// OutputStore, when set together with OutputDir, persists each completed task's
 	// result to a file at OutputDir/<taskID>.output and records the path in
@@ -196,8 +236,13 @@ type Manager struct {
 	closed               bool
 	foregroundTimeoutMs  int
 	shouldAutoBackground func(ctx context.Context, task *Task) bool
+	idGen                IDGenerator
 	outputStore          OutputStore
 	outputDir            string
+
+	subscribeOnce sync.Once
+	eventCh       chan *TaskEvent
+	eventBuf      *internal.UnboundedChan[*TaskEvent]
 }
 
 type taskRecord struct {
@@ -226,10 +271,51 @@ func New(_ context.Context, conf *Config) *Manager {
 	}
 	if conf != nil {
 		m.shouldAutoBackground = conf.ShouldAutoBackground
+		m.idGen = conf.IDGen
 		m.outputStore = conf.OutputStore
 		m.outputDir = conf.OutputDir
 	}
 	return m
+}
+
+// Subscribe returns a channel that receives TaskEvent values whenever the Manager
+// changes a task's lifecycle state.
+//
+// The stream is forward-only: events generated before the first Subscribe call
+// are not replayed (use Get/List to inspect current state). Multiple calls return
+// the same shared stream, and Close closes it after buffered events are drained.
+// The returned Task values are snapshots; mutating them does not mutate the
+// Manager's registry.
+func (m *Manager) Subscribe() <-chan *TaskEvent {
+	m.subscribeOnce.Do(func() {
+		buf := internal.NewUnboundedChan[*TaskEvent]()
+		ch := make(chan *TaskEvent)
+
+		m.mu.Lock()
+		m.eventBuf = buf
+		m.eventCh = ch
+		closed := m.closed
+		m.mu.Unlock()
+
+		go m.relayEvents(buf, ch)
+		if closed {
+			buf.Close()
+		}
+	})
+	return m.eventCh
+}
+
+// relayEvents pumps events from the unbounded buffer to the public channel,
+// so publishing under the Manager lock never blocks on a slow subscriber.
+func (m *Manager) relayEvents(buf *internal.UnboundedChan[*TaskEvent], ch chan<- *TaskEvent) {
+	defer close(ch)
+	for {
+		event, ok := buf.Receive()
+		if !ok {
+			return
+		}
+		ch <- event
+	}
 }
 
 // allowAutoBackground reports whether a run that has hit its foreground deadline
@@ -365,22 +451,56 @@ func (m *Manager) Close(ctx context.Context) error {
 			m.cancelTask(rec)
 		}
 	}
+	if m.eventBuf != nil {
+		m.eventBuf.Close()
+	}
 
 	return nil
 }
 
 // createTask registers a new task in StatusRunning state.
 // The cancel function is not set here — call storeCancelFunc after creation.
-func (m *Manager) createTask(input *RunInput) (string, error) {
+func (m *Manager) createTask(ctx context.Context, input *RunInput) (string, error) {
+	if input == nil {
+		return "", fmt.Errorf("backgroundtask: RunInput is required")
+	}
+
+	if m.idGen != nil {
+		id, err := m.idGen(ctx, input)
+		if err != nil {
+			return "", fmt.Errorf("backgroundtask: task id generator: %w", err)
+		}
+		return m.registerTask(input, id)
+	}
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	if m.closed {
-		return "", fmt.Errorf("the background task manager has shut down and is no longer accepting new tasks. " +
-			"Do not retry this; finish using any results you already have")
+		return "", m.closedError()
 	}
 
 	id := taskIDPrefix(input.Type) + "_" + base62(m.nextRawID())
+	return m.registerTaskLocked(input, id)
+}
+
+func (m *Manager) registerTask(input *RunInput, id string) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.closed {
+		return "", m.closedError()
+	}
+	return m.registerTaskLocked(input, id)
+}
+
+func (m *Manager) registerTaskLocked(input *RunInput, id string) (string, error) {
+	if id == "" {
+		return "", fmt.Errorf("backgroundtask: task id generator returned empty id")
+	}
+	if _, ok := m.tasks[id]; ok {
+		return "", fmt.Errorf("backgroundtask: task id %q already exists", id)
+	}
 
 	m.tasks[id] = &taskRecord{
 		task: Task{
@@ -396,8 +516,14 @@ func (m *Manager) createTask(input *RunInput) (string, error) {
 		},
 		doneCh: make(chan struct{}),
 	}
+	m.sendEventLocked(m.tasks[id], TaskEventCreated)
 
 	return id, nil
+}
+
+func (m *Manager) closedError() error {
+	return fmt.Errorf("the background task manager has shut down and is no longer accepting new tasks. " +
+		"Do not retry this; finish using any results you already have")
 }
 
 // cloneMetadata shallow-copies caller-supplied metadata so later mutations to the
@@ -527,10 +653,9 @@ func (m *Manager) cancelIfRunning(id string) {
 	m.cancelTask(rec)
 }
 
-// detach marks a still-running task as a background task, so its terminal
-// transition will notify subscribers. It is called when Run hands the task back to
-// the caller as StatusRunning (an explicit background launch, or an
-// auto-background at the foreground deadline).
+// detach marks a still-running task as a background task and publishes an event.
+// It is called when Run hands the task back to the caller as StatusRunning (an
+// explicit background launch, or an auto-background at the foreground deadline).
 //
 // Returns false if the task already reached a terminal state — i.e. the work
 // finished concurrently with the deadline — in which case the caller should report
@@ -544,12 +669,13 @@ func (m *Manager) detach(id string) bool {
 		return false
 	}
 	rec.task.RunInBackground = true
+	m.sendEventLocked(rec, TaskEventBackgrounded)
 	return true
 }
 
 // finalize applies a terminal state transition to a task.
-// It sets done=true, records DoneAt, notifies subscribers (for background tasks),
-// and broadcasts the condition.
+// It sets done=true, records DoneAt, publishes an event, and broadcasts the
+// condition.
 // Returns false if the task was not found or already in a terminal state (idempotent).
 // Must be called with m.mu held.
 func (m *Manager) finalize(id string, apply func(rec *taskRecord)) bool {
@@ -565,8 +691,30 @@ func (m *Manager) finalize(id string, apply func(rec *taskRecord)) bool {
 
 	// Signal per-task waiters (Wait) and the all-done waiters (Close).
 	close(rec.doneCh)
+	m.sendEventLocked(rec, eventTypeForStatus(rec.task.Status))
 	m.cond.Broadcast()
 	return true
+}
+
+// sendEventLocked publishes a task event to subscribers, if Subscribe has
+// been called. Must be called with m.mu held.
+func (m *Manager) sendEventLocked(rec *taskRecord, typ TaskEventType) {
+	if typ != "" && m.eventBuf != nil {
+		m.eventBuf.TrySend(&TaskEvent{Type: typ, Task: cloneTask(&rec.task)})
+	}
+}
+
+func eventTypeForStatus(status Status) TaskEventType {
+	switch status {
+	case StatusCompleted:
+		return TaskEventCompleted
+	case StatusFailed:
+		return TaskEventFailed
+	case StatusCanceled:
+		return TaskEventCanceled
+	default:
+		return ""
+	}
 }
 
 // cloneTask returns a copy of t safe to hand to callers. The Metadata map is
@@ -630,7 +778,7 @@ func (c detachedCtx) Value(key any) any { return c.parent.Value(key) }
 //
 // All runs are tracked in Manager state and visible via Get/List.
 func (m *Manager) Run(ctx context.Context, input *RunInput, work WorkFunc) (*Task, error) {
-	id, err := m.createTask(input)
+	id, err := m.createTask(ctx, input)
 	if err != nil {
 		return nil, err
 	}
@@ -654,7 +802,7 @@ func (m *Manager) Run(ctx context.Context, input *RunInput, work WorkFunc) (*Tas
 			m.failTask(id, runErr)
 		} else {
 			// Persist the result before finalizing (outside the lock), so the
-			// output file is in place by the time subscribers see the completion.
+			// output file is in place by the time subscribers see the terminal event.
 			m.persistOutput(runCtx, id, r)
 			m.completeTask(id, r)
 		}
@@ -749,7 +897,7 @@ type StreamWorkFunc func(ctx context.Context) (*schema.StreamReader[string], err
 // The returned reader is always non-nil on a nil error. The Manager is the sole
 // writer of that stream, so there is never a write race with the work.
 func (m *Manager) RunStream(ctx context.Context, input *RunInput, work StreamWorkFunc) (*schema.StreamReader[string], error) {
-	id, err := m.createTask(input)
+	id, err := m.createTask(ctx, input)
 	if err != nil {
 		return nil, err
 	}

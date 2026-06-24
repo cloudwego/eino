@@ -90,6 +90,22 @@ func waitTask(t *testing.T, m *Manager, id string) *Task {
 	return task
 }
 
+func waitTaskEvent(t *testing.T, ch <-chan *TaskEvent, match func(*TaskEvent) bool) *TaskEvent {
+	t.Helper()
+	timeout := time.After(time.Second)
+	for {
+		select {
+		case event, ok := <-ch:
+			require.True(t, ok, "subscription closed before the expected update")
+			if match(event) {
+				return event
+			}
+		case <-timeout:
+			t.Fatal("timed out waiting for the expected task update")
+		}
+	}
+}
+
 // --- Run (foreground) Tests ---
 
 func TestManager_RunForeground(t *testing.T) {
@@ -214,6 +230,97 @@ func TestManager_RunBackground_PreservesCallerCtxValues(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("work did not run")
 	}
+}
+
+// --- Subscribe Tests ---
+
+func TestManager_Subscribe_ForegroundLifecycle(t *testing.T) {
+	m := New(context.Background(), &Config{})
+	defer closeWithTimeout(m)
+
+	ch := m.Subscribe()
+	result, err := run(m, "fg task", false, workReturning("done", nil))
+	require.NoError(t, err)
+
+	created := waitTaskEvent(t, ch, func(event *TaskEvent) bool {
+		return event.Type == TaskEventCreated && event.Task.ID == result.ID
+	})
+	assert.False(t, created.Task.RunInBackground)
+	assert.Equal(t, StatusRunning, created.Task.Status)
+
+	completed := waitTaskEvent(t, ch, func(event *TaskEvent) bool {
+		return event.Type == TaskEventCompleted && event.Task.ID == result.ID
+	})
+	assert.Equal(t, StatusCompleted, completed.Task.Status)
+	assert.Equal(t, "done", completed.Task.Result)
+}
+
+func TestManager_Subscribe_BackgroundLifecycle(t *testing.T) {
+	m := New(context.Background(), &Config{})
+	defer closeWithTimeout(m)
+
+	ch := m.Subscribe()
+	result, err := run(m, "bg task", true, workSleeping(20*time.Millisecond, "bg result"))
+	require.NoError(t, err)
+
+	created := waitTaskEvent(t, ch, func(event *TaskEvent) bool {
+		return event.Type == TaskEventCreated && event.Task.ID == result.ID
+	})
+	assert.True(t, created.Task.RunInBackground)
+	assert.Equal(t, StatusRunning, created.Task.Status)
+
+	done := waitTaskEvent(t, ch, func(event *TaskEvent) bool {
+		return event.Type == TaskEventCompleted && event.Task.ID == result.ID
+	})
+	assert.Equal(t, StatusCompleted, done.Task.Status)
+	assert.Equal(t, "bg result", done.Task.Result)
+	assert.NotNil(t, done.Task.DoneAt)
+}
+
+func TestManager_Subscribe_AutoBackgroundChange(t *testing.T) {
+	m := New(context.Background(), &Config{ForegroundTimeoutMs: intPtr(20), ShouldAutoBackground: allowBackground})
+	defer closeWithTimeout(m)
+
+	ch := m.Subscribe()
+	result, err := run(m, "slow", false, workSleeping(80*time.Millisecond, "late"))
+	require.NoError(t, err)
+	assert.Equal(t, StatusRunning, result.Status)
+
+	bg := waitTaskEvent(t, ch, func(event *TaskEvent) bool {
+		return event.Type == TaskEventBackgrounded && event.Task.ID == result.ID
+	})
+	assert.Equal(t, StatusRunning, bg.Task.Status)
+	assert.True(t, bg.Task.RunInBackground)
+	assert.Equal(t, "slow", bg.Task.Description)
+
+	done := waitTaskEvent(t, ch, func(event *TaskEvent) bool {
+		return event.Type == TaskEventCompleted && event.Task.ID == result.ID
+	})
+	assert.Equal(t, "late", done.Task.Result)
+}
+
+func TestManager_Subscribe_CancelChange(t *testing.T) {
+	m := New(context.Background(), &Config{})
+	defer closeWithTimeout(m)
+
+	ch := m.Subscribe()
+	result, err := run(m, "bg", true, workBlocking())
+	require.NoError(t, err)
+	require.NoError(t, m.Cancel(result.ID))
+
+	done := waitTaskEvent(t, ch, func(event *TaskEvent) bool {
+		return event.Type == TaskEventCanceled && event.Task.ID == result.ID
+	})
+	assert.Equal(t, canceledError, done.Task.Error)
+}
+
+func TestManager_Subscribe_ClosesOnClose(t *testing.T) {
+	m := New(context.Background(), &Config{})
+	ch := m.Subscribe()
+
+	require.NoError(t, m.Close(context.Background()))
+	_, ok := <-ch
+	assert.False(t, ok)
 }
 
 // --- Type / ToolUseID ---
