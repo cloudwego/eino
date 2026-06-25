@@ -456,35 +456,33 @@ func stampAgentToolSessionEvent[M MessageType](event *TypedAgentEvent[M], childS
 	if event == nil || childSessionID == "" {
 		return
 	}
-	if event.EventID == "" {
-		event.EventID = uuid.NewString()
-	}
-	if event.Timestamp.IsZero() {
-		event.Timestamp = newEventTimestamp()
-	}
-	if event.SessionEvent == nil {
-		event.SessionEvent = &SessionEvent[M]{
-			SessionID: childSessionID,
-			EventID:   event.EventID,
-			Timestamp: event.Timestamp,
+	if event.SessionEventVariant == nil && event.Output != nil && event.Output.MessageOutput != nil {
+		ts := newEventTimestamp()
+		if event.Output.MessageOutput.IsStreaming {
+			event.SessionEventVariant = &SessionEventVariant[M]{
+				MessageStreamRef: &MessageStreamRef{
+					Timestamp: ts,
+					Kind:      SessionEventMessage,
+				},
+			}
+		} else if !isNilMessage(event.Output.MessageOutput.Message) {
+			event.SessionEventVariant = &SessionEventVariant[M]{
+				Event: &SessionEvent[M]{
+					Timestamp: ts,
+					Kind:      SessionEventMessage,
+					Message:   event.Output.MessageOutput.Message,
+				},
+			}
 		}
-		if event.Output != nil && event.Output.MessageOutput != nil {
-			event.SessionEvent.Kind = SessionEventMessage
-		}
-		return
 	}
-	event.SessionEvent.SessionID = childSessionID
-	if event.SessionEvent.EventID == "" {
-		event.SessionEvent.EventID = event.EventID
-	}
-	if event.SessionEvent.Timestamp.IsZero() {
-		event.SessionEvent.Timestamp = event.Timestamp
+	if event.SessionEventVariant != nil {
+		event.SessionEventVariant.SessionID = childSessionID
 	}
 }
 
 // newTypedInvokableAgentToolRunner creates a runner for the inner agent without
 // SessionEventStore. The child's events are forwarded to the parent's live stream
-// (tagged with childSessionID on SessionEvent) and filtered out of the parent's persistence.
+// (tagged with childSessionID on SessionEventVariant) and filtered out of the parent's persistence.
 // The child's durability relies solely on the bridge checkpoint stored inside
 // agentToolInterruptState — there is no independent child session log.
 // This may change in the future if AgentTool needs cross-turn context
