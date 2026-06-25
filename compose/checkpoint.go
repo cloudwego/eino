@@ -19,6 +19,7 @@ package compose
 import (
 	"context"
 	"fmt"
+	"reflect"
 
 	"github.com/cloudwego/eino/internal/core"
 	"github.com/cloudwego/eino/internal/serialization"
@@ -204,12 +205,41 @@ func (c *checkPointer) get(ctx context.Context, id string) (*checkpoint, bool, e
 }
 
 func (c *checkPointer) set(ctx context.Context, id string, cp *checkpoint) error {
+	normalizeCheckpointTypedNilInputs(cp)
+
 	data, err := c.serializer.Marshal(cp)
 	if err != nil {
 		return err
 	}
 
 	return c.store.Set(ctx, id, data)
+}
+
+func normalizeCheckpointTypedNilInputs(cp *checkpoint) {
+	if cp == nil {
+		return
+	}
+	for key, input := range cp.Inputs {
+		if isTypedNil(input) {
+			cp.Inputs[key] = nil
+		}
+	}
+	for _, sub := range cp.SubGraphs {
+		normalizeCheckpointTypedNilInputs(sub)
+	}
+}
+
+func isTypedNil(v any) bool {
+	if v == nil {
+		return false
+	}
+	rv := reflect.ValueOf(v)
+	switch rv.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Ptr, reflect.Slice:
+		return rv.IsNil()
+	default:
+		return false
+	}
 }
 
 // MigrateCheckpointState is an advanced compatibility utility for checkpoint upgrades.

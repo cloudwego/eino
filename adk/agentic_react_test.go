@@ -210,6 +210,15 @@ func lastAgenticEvent(events []*agenticAgentEvent) *agenticAgentEvent {
 	return events[len(events)-1]
 }
 
+func firstAgenticEventError(events []*agenticAgentEvent) error {
+	for _, ev := range events {
+		if ev.Err != nil {
+			return ev.Err
+		}
+	}
+	return nil
+}
+
 func findInterruptEvent(events []*agenticAgentEvent) *agenticAgentEvent {
 	for _, ev := range events {
 		if ev.Action != nil && ev.Action.Interrupted != nil {
@@ -578,6 +587,7 @@ func TestAgenticReact_DoubleInterruptResume(t *testing.T) {
 	runner := newAgenticRunnerWithStore(t, ctx, mdl, []tool.BaseTool{&agenticInterruptTool{name: "approval_tool"}}, store)
 
 	events1 := drainAgenticEvents(runner.Query(ctx, "approve twice", WithCheckPointID("dbl-cp")))
+	require.NoError(t, firstAgenticEventError(events1))
 	int1Event := findInterruptEvent(events1)
 	require.NotNil(t, int1Event, "expected first interrupt")
 	int1ID := int1Event.Action.Interrupted.InterruptContexts[0].ID
@@ -588,6 +598,7 @@ func TestAgenticReact_DoubleInterruptResume(t *testing.T) {
 	require.NoError(t, err)
 
 	events2 := drainAgenticEvents(iter2)
+	require.NoError(t, firstAgenticEventError(events2))
 	int2Event := findInterruptEvent(events2)
 	require.NotNil(t, int2Event, "expected second interrupt")
 	int2ID := int2Event.Action.Interrupted.InterruptContexts[0].ID
@@ -598,6 +609,7 @@ func TestAgenticReact_DoubleInterruptResume(t *testing.T) {
 	require.NoError(t, err)
 
 	events3 := drainAgenticEvents(iter3)
+	require.NoError(t, firstAgenticEventError(events3))
 	last := lastAgenticEvent(events3)
 
 	require.NotNil(t, last)
@@ -605,6 +617,53 @@ func TestAgenticReact_DoubleInterruptResume(t *testing.T) {
 	require.NotNil(t, last.Output)
 	require.NotNil(t, last.Output.MessageOutput)
 	assert.Contains(t, agenticTextContent(last.Output.MessageOutput.Message), "all approved")
+}
+
+func TestAgenticReact_ResumeThenCancelAfterChatModelCheckpoint(t *testing.T) {
+	ctx := context.Background()
+
+	var modelCallCount int32
+	mdl := &mockAgenticModel{
+		generateFn: func(ctx context.Context, input []*schema.AgenticMessage, opts ...model.Option) (*schema.AgenticMessage, error) {
+			count := atomic.AddInt32(&modelCallCount, 1)
+			switch count {
+			case 1:
+				return agenticToolCallMsg("approval_tool", "c1", `"first"`), nil
+			case 2:
+				return agenticToolCallMsg("approval_tool", "c2", `"second"`), nil
+			default:
+				return nil, fmt.Errorf("unexpected call #%d", count)
+			}
+		},
+	}
+
+	store := &agenticReactTestStore{m: map[string][]byte{}}
+	runner := newAgenticRunnerWithStore(t, ctx, mdl, []tool.BaseTool{&agenticInterruptTool{name: "approval_tool"}}, store)
+
+	events1 := drainAgenticEvents(runner.Query(ctx, "approve then cancel", WithCheckPointID("resume-cancel-cp")))
+	require.NoError(t, firstAgenticEventError(events1))
+	int1Event := findInterruptEvent(events1)
+	require.NotNil(t, int1Event, "expected tool interrupt")
+	int1ID := int1Event.Action.Interrupted.InterruptContexts[0].ID
+
+	cancelOpt, cancelFn := WithCancel()
+	handle, contributed := cancelFn(WithAgentCancelMode(CancelAfterChatModel))
+	require.True(t, contributed)
+
+	iter2, err := runner.ResumeWithParams(ctx, "resume-cancel-cp", &ResumeParams{
+		Targets: map[string]any{int1ID: "approved"},
+	}, cancelOpt)
+	require.NoError(t, err)
+
+	events2 := drainAgenticEvents(iter2)
+	require.NoError(t, handle.Wait())
+	for _, event := range events2 {
+		if event.Err == nil {
+			continue
+		}
+		var cancelErr *CancelError
+		require.ErrorAs(t, event.Err, &cancelErr)
+	}
 }
 
 func TestAgenticReact_ChatModelAgent_NoTools(t *testing.T) {

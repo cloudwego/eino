@@ -17,7 +17,9 @@
 package compose
 
 import (
+	"bytes"
 	"context"
+	"encoding/gob"
 	"errors"
 	"io"
 	"sync"
@@ -54,12 +56,65 @@ func newInMemoryStore() *inMemoryStore {
 	}
 }
 
+type checkpointTypedNilInput struct {
+	Value string
+}
+
+type checkpointGobSerializer struct{}
+
+func (g *checkpointGobSerializer) Marshal(v any) ([]byte, error) {
+	buf := new(bytes.Buffer)
+	err := gob.NewEncoder(buf).Encode(v)
+	if err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+func (g *checkpointGobSerializer) Unmarshal(data []byte, v any) error {
+	return gob.NewDecoder(bytes.NewBuffer(data)).Decode(v)
+}
+
+func TestCheckpointGobSerializerNormalizesTypedNilInput(t *testing.T) {
+	store := newInMemoryStore()
+	cpr := newCheckPointer(nil, nil, store, &checkpointGobSerializer{})
+	cp := &checkpoint{
+		Channels:       map[string]channel{},
+		Inputs:         map[string]any{"node": (*checkpointTypedNilInput)(nil)},
+		SkipPreHandler: map[string]bool{},
+	}
+
+	err := cpr.set(context.Background(), "cp", cp)
+	assert.NoError(t, err)
+	if err != nil {
+		return
+	}
+
+	got, existed, err := cpr.get(context.Background(), "cp")
+	assert.NoError(t, err)
+	assert.True(t, existed)
+	assert.Contains(t, got.Inputs, "node")
+	assert.Nil(t, got.Inputs["node"])
+}
+
+func TestRunnableInvokeAcceptsNilForPointerInput(t *testing.T) {
+	lambda := InvokableLambda(func(ctx context.Context, input *checkpointTypedNilInput) (string, error) {
+		assert.Nil(t, input)
+		return "ok", nil
+	})
+
+	out, err := lambda.executor.i(context.Background(), nil)
+	assert.NoError(t, err)
+	assert.Equal(t, "ok", out)
+}
+
 type testStruct struct {
 	A string
 }
 
 func init() {
 	schema.Register[testStruct]()
+	schema.RegisterName[*checkpointTypedNilInput]("compose_checkpoint_typed_nil_input")
 }
 
 func TestSimpleCheckPoint(t *testing.T) {

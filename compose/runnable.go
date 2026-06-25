@@ -69,6 +69,15 @@ func runnableLambda[I, O, TOption any](i Invoke[I, O, TOption], s Stream[I, O, T
 	return rp.toComposableRunnable()
 }
 
+func isNilAssignableType(t reflect.Type) bool {
+	switch t.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Ptr, reflect.Slice:
+		return true
+	default:
+		return false
+	}
+}
+
 type runnablePacker[I, O, TOption any] struct {
 	i Invoke[I, O, TOption]
 	s Stream[I, O, TOption]
@@ -112,9 +121,9 @@ func (rp *runnablePacker[I, O, TOption]) toComposableRunnable() *composableRunna
 		in, ok := input.(I)
 		if !ok {
 			// When a nil is passed as an 'any' type, its original type information is lost,
-			// becoming an untyped nil. This would cause type assertions to fail.
-			// So if the input is nil and the target type I is an interface, we need to explicitly create a nil of type I.
-			if input == nil && reflect.TypeOf((*I)(nil)).Elem().Kind() == reflect.Interface {
+			// becoming an untyped nil. This would cause type assertions to fail for nil-able
+			// input types, so recreate the zero value of I when nil is valid for I.
+			if input == nil && isNilAssignableType(reflect.TypeOf((*I)(nil)).Elem()) {
 				var i I
 				in = i
 			} else {
