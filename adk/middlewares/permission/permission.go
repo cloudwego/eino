@@ -361,9 +361,11 @@ func emitDecisionEvent[M adk.MessageType](ctx context.Context, tCtx *adk.ToolCon
 		HasUpdatedInput: decision.HasUpdatedInput,
 	}
 	return adk.TypedSendEvent[M](ctx, &adk.TypedAgentEvent[M]{
-		SessionEvent: &adk.SessionEvent[M]{
-			Kind:      SessionEventPermissionDecision,
-			Extension: &adk.SessionExtensionEvent{Data: payload},
+		SessionEventVariant: &adk.SessionEventVariant[M]{
+			Event: &adk.SessionEvent[M]{
+				Kind:      SessionEventPermissionDecision,
+				Extension: &adk.SessionExtensionEvent{Data: payload},
+			},
 		},
 	})
 }
