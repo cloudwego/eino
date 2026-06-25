@@ -70,41 +70,19 @@ func (e *typedChatModelAgentExecCtx[M]) send(ctx context.Context, event *TypedAg
 	if e.cancelCtx != nil && e.cancelCtx.isImmediateCancelled() {
 		return
 	}
-	// Allocate EventID at the first emission boundary so live (user-land) and
-	// persisted (SessionEventStore) copies of the same logical event share identity.
-	// User-supplied non-empty IDs (e.g. replay scenarios) are preserved.
-	//
-	// SessionEvent[M] drafts route ID allocation through the runner-installed
-	// SessionEventIDGenerator[M] via normalizeAgentSessionEventWithAssigner so
-	// producer-owned identity applies. Live-only TypedAgentEvent (no
-	// SessionEvent payload) calls the generator with a nil draft as the
-	// documented exception (see runner.go:944): no draft exists for the
-	// transport-level event, so the generator falls through to UUID by
-	// default while still respecting any application override.
 	if event == nil {
 		return
 	}
 	ensureTypedAgentEventMessageIDs(event)
-	if event.EventID == "" || event.SessionEvent != nil {
+	if event.SessionEventVariant != nil && event.SessionEventVariant.Event != nil {
 		gen := sessionEventIDGeneratorFromContext[M](ctx)
 		if gen == nil {
 			gen = DefaultSessionEventIDGenerator[M]
 		}
-		if event.SessionEvent != nil {
-			if _, err := normalizeAgentSessionEventWithAssigner(event, func(se *SessionEvent[M]) (string, error) {
-				return gen(ctx, se)
-			}); err != nil {
-				event.Err = err
-			}
-		} else if event.EventID == "" {
-			id, err := gen(ctx, nil)
-			if err != nil {
-				event.Err = err
-			} else if id == "" {
-				event.Err = ErrSessionEventIDGeneratorEmpty
-			} else {
-				event.EventID = id
-			}
+		if _, err := normalizeAgentSessionEventWithAssigner(event, func(se *SessionEvent[M]) (string, error) {
+			return gen(ctx, se)
+		}); err != nil {
+			event.Err = err
 		}
 	}
 	e.generator.trySend(event)
@@ -132,9 +110,11 @@ func syncModelContextSessionEvent[M MessageType](ctx context.Context, state *Typ
 	changed := !execCtx.sawModelContext || !reflect.DeepEqual(execCtx.lastModelContext, current)
 	if changed {
 		execCtx.send(ctx, &TypedAgentEvent[M]{
-			SessionEvent: &SessionEvent[M]{
-				Kind:         SessionEventModelContext,
-				ModelContext: copyModelContextEvent(current),
+			SessionEventVariant: &SessionEventVariant[M]{
+				Event: &SessionEvent[M]{
+					Kind:         SessionEventModelContext,
+					ModelContext: copyModelContextEvent(current),
+				},
 			},
 		})
 	}
@@ -379,45 +359,6 @@ func leadingSystemMessage[M MessageType](messages []M) (M, bool) {
 	return zero, false
 }
 
-type leadingSystemSyncInput[M MessageType] struct {
-	previous     []M
-	generated    []M
-	oldSystem    M
-	hasOldSystem bool
-}
-
-func snapshotLeadingSystemForSync[M MessageType](messages []M) (M, bool) {
-	oldSys, ok := leadingSystemMessage(messages)
-	if !ok {
-		var zero M
-		return zero, false
-	}
-	EnsureMessageID(oldSys)
-	snapshot := copyMessage(oldSys)
-	cloneMessageExtra(snapshot)
-	return snapshot, true
-}
-
-func cloneMessageExtra[M MessageType](msg M) {
-	switch v := any(msg).(type) {
-	case *schema.Message:
-		v.Extra = cloneExtraMap(v.Extra)
-	case *schema.AgenticMessage:
-		v.Extra = cloneExtraMap(v.Extra)
-	}
-}
-
-func cloneExtraMap(extra map[string]any) map[string]any {
-	if extra == nil {
-		return nil
-	}
-	cloned := make(map[string]any, len(extra))
-	for k, v := range extra {
-		cloned[k] = v
-	}
-	return cloned
-}
-
 func sameSystemMessage[M MessageType](oldSys, newSys M) bool {
 	if isNilMessage(oldSys) || isNilMessage(newSys) {
 		return isNilMessage(oldSys) && isNilMessage(newSys)
@@ -434,6 +375,31 @@ func sameSystemMessage[M MessageType](oldSys, newSys M) bool {
 	}
 }
 
+func deepCopyMessage[M MessageType](msg M) M {
+	switch v := any(msg).(type) {
+	case *schema.Message:
+		cp := *v
+		if v.Extra != nil {
+			cp.Extra = make(map[string]any, len(v.Extra))
+			for k, val := range v.Extra {
+				cp.Extra[k] = val
+			}
+		}
+		return any(&cp).(M)
+	case *schema.AgenticMessage:
+		cp := *v
+		if v.Extra != nil {
+			cp.Extra = make(map[string]any, len(v.Extra))
+			for k, val := range v.Extra {
+				cp.Extra[k] = val
+			}
+		}
+		return any(&cp).(M)
+	default:
+		return msg
+	}
+}
+
 func setMessageIDFromTarget[M MessageType](msg M, targetID string) {
 	if targetID == "" || isNilMessage(msg) {
 		return
@@ -443,54 +409,64 @@ func setMessageIDFromTarget[M MessageType](msg M, targetID string) {
 
 func syncLeadingSystemMessageSessionEvent[M MessageType](
 	ctx context.Context,
-	input leadingSystemSyncInput[M],
+	previous []M,
+	oldSys M,
+	hasOldSys bool,
+	generated []M,
 ) error {
 	execCtx := getTypedChatModelAgentExecCtx[M](ctx)
 	if execCtx == nil || !execCtx.sessionEvents {
 		return nil
 	}
 
-	newSys, ok := leadingSystemMessage(input.generated)
+	newSys, ok := leadingSystemMessage(generated)
 	if !ok {
 		return nil
 	}
 
 	var event *TypedAgentEvent[M]
-	if input.hasOldSystem {
-		oldID := GetMessageID(input.oldSystem)
+	if hasOldSys {
+		EnsureMessageID(oldSys)
+		oldID := GetMessageID(oldSys)
 		setMessageIDFromTarget(newSys, oldID)
-		if sameSystemMessage(input.oldSystem, newSys) {
+		if sameSystemMessage(oldSys, newSys) {
 			return nil
 		}
 		event = &TypedAgentEvent[M]{
-			SessionEvent: &SessionEvent[M]{
-				Kind: SessionEventMessageUpdated,
-				MessageUpdated: &MessageUpdatedEvent[M]{
-					MessageID: oldID,
-					Message:   newSys,
+			SessionEventVariant: &SessionEventVariant[M]{
+				Event: &SessionEvent[M]{
+					Kind: SessionEventMessageUpdated,
+					MessageUpdated: &MessageUpdatedEvent[M]{
+						MessageID: oldID,
+						Message:   newSys,
+					},
 				},
 			},
 		}
-	} else if len(input.previous) == 0 {
+	} else if len(previous) == 0 {
 		EnsureMessageID(newSys)
 		event = &TypedAgentEvent[M]{
-			SessionEvent: &SessionEvent[M]{
-				Kind:    SessionEventMessage,
-				Message: newSys,
+			SessionEventVariant: &SessionEventVariant[M]{
+				Event: &SessionEvent[M]{
+					Kind:    SessionEventMessage,
+					Message: newSys,
+				},
 			},
 		}
 	} else {
-		if isNilMessage(input.previous[0]) {
+		if isNilMessage(previous[0]) {
 			return errors.New("sync leading system message: previous first message is nil")
 		}
-		EnsureMessageID(input.previous[0])
+		EnsureMessageID(previous[0])
 		EnsureMessageID(newSys)
 		event = &TypedAgentEvent[M]{
-			SessionEvent: &SessionEvent[M]{
-				Kind: SessionEventMessageInserted,
-				MessageInserted: &MessageInsertedEvent[M]{
-					Message:         newSys,
-					BeforeMessageID: GetMessageID(input.previous[0]),
+			SessionEventVariant: &SessionEventVariant[M]{
+				Event: &SessionEvent[M]{
+					Kind: SessionEventMessageInserted,
+					MessageInserted: &MessageInsertedEvent[M]{
+						Message:         newSys,
+						BeforeMessageID: GetMessageID(previous[0]),
+					},
 				},
 			},
 		}
@@ -1328,24 +1304,16 @@ func (a *TypedChatModelAgent[M]) buildNoToolsRunFunc(_ context.Context) (typedRu
 			}))
 
 		chain.AppendLambda(compose.InvokableLambda(func(ctx context.Context, in typedNoToolsInput[M]) ([]M, error) {
-			var syncInput leadingSystemSyncInput[M]
-			if p.sessionEvents {
-				oldSys, hasOldSys := snapshotLeadingSystemForSync(in.input.Messages)
-				syncInput = leadingSystemSyncInput[M]{
-					previous:     in.input.Messages,
-					oldSystem:    oldSys,
-					hasOldSystem: hasOldSys,
-				}
+			oldSys, hasOldSys := leadingSystemMessage(in.input.Messages)
+			if hasOldSys {
+				oldSys = deepCopyMessage(oldSys)
 			}
 			messages, err := a.genModelInput(ctx, in.instruction, in.input)
 			if err != nil {
 				return nil, err
 			}
-			if p.sessionEvents {
-				syncInput.generated = messages
-				if err := syncLeadingSystemMessageSessionEvent(ctx, syncInput); err != nil {
-					return nil, err
-				}
+			if err := syncLeadingSystemMessageSessionEvent(ctx, in.input.Messages, oldSys, hasOldSys, messages); err != nil {
+				return nil, err
 			}
 			if p.sessionEvents {
 				ensureGeneratedMessageIDs(messages)
@@ -1490,24 +1458,16 @@ func (a *TypedChatModelAgent[M]) buildMessageReActRunFunc(_ context.Context, bc 
 		chain := compose.NewChain[reactRunInput, Message]().
 			AppendLambda(
 				compose.InvokableLambda(func(ctx context.Context, in reactRunInput) (*reactInput, error) {
-					var syncInput leadingSystemSyncInput[*schema.Message]
-					if mp.sessionEvents {
-						oldSys, hasOldSys := snapshotLeadingSystemForSync(in.input.Messages)
-						syncInput = leadingSystemSyncInput[*schema.Message]{
-							previous:     in.input.Messages,
-							oldSystem:    oldSys,
-							hasOldSystem: hasOldSys,
-						}
+					oldSys, hasOldSys := leadingSystemMessage(in.input.Messages)
+					if hasOldSys {
+						oldSys = deepCopyMessage(oldSys)
 					}
 					messages, genErr := genModelInputFn(ctx, in.instruction, in.input)
 					if genErr != nil {
 						return nil, genErr
 					}
-					if mp.sessionEvents {
-						syncInput.generated = messages
-						if genErr = syncLeadingSystemMessageSessionEvent(ctx, syncInput); genErr != nil {
-							return nil, genErr
-						}
+					if genErr = syncLeadingSystemMessageSessionEvent(ctx, in.input.Messages, oldSys, hasOldSys, messages); genErr != nil {
+						return nil, genErr
 					}
 					if mp.sessionEvents {
 						ensureGeneratedMessageIDs(messages)
@@ -1640,24 +1600,16 @@ func (a *TypedChatModelAgent[M]) buildAgenticReActRunFunc(_ context.Context, bc 
 		chain := compose.NewChain[agenticReactRunInput, *schema.AgenticMessage]().
 			AppendLambda(
 				compose.InvokableLambda(func(ctx context.Context, in agenticReactRunInput) (*agenticReactInput, error) {
-					var syncInput leadingSystemSyncInput[*schema.AgenticMessage]
-					if ap.sessionEvents {
-						oldSys, hasOldSys := snapshotLeadingSystemForSync(in.input.Messages)
-						syncInput = leadingSystemSyncInput[*schema.AgenticMessage]{
-							previous:     in.input.Messages,
-							oldSystem:    oldSys,
-							hasOldSystem: hasOldSys,
-						}
+					oldSys, hasOldSys := leadingSystemMessage(in.input.Messages)
+					if hasOldSys {
+						oldSys = deepCopyMessage(oldSys)
 					}
 					messages, genErr := genModelInputFn(ctx, in.instruction, in.input)
 					if genErr != nil {
 						return nil, genErr
 					}
-					if ap.sessionEvents {
-						syncInput.generated = messages
-						if genErr = syncLeadingSystemMessageSessionEvent(ctx, syncInput); genErr != nil {
-							return nil, genErr
-						}
+					if genErr = syncLeadingSystemMessageSessionEvent(ctx, in.input.Messages, oldSys, hasOldSys, messages); genErr != nil {
+						return nil, genErr
 					}
 					if ap.sessionEvents {
 						ensureGeneratedMessageIDs(messages)

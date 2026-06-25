@@ -86,12 +86,10 @@ func (h *localSessionHandle[M]) loadEvents(ctx context.Context, req *LoadSession
 	if req == nil {
 		req = &LoadSessionEventsRequest{}
 	}
-	clone := *req
-	clone.SessionID = h.sessionID
-	return h.store.LoadEvents(ctx, &clone)
+	return h.store.LoadEvents(ctx, h.sessionID, req)
 }
 
-func (h *localSessionHandle[M]) appendEvents(ctx context.Context, req *AppendSessionEventsRequest[M]) error {
+func (h *localSessionHandle[M]) appendEvents(ctx context.Context, events []*SessionEvent[M]) error {
 	h.mu.Lock()
 	if h.closed {
 		h.mu.Unlock()
@@ -99,12 +97,7 @@ func (h *localSessionHandle[M]) appendEvents(ctx context.Context, req *AppendSes
 	}
 	h.mu.Unlock()
 
-	if req == nil {
-		req = &AppendSessionEventsRequest[M]{}
-	}
-	clone := *req
-	clone.SessionID = h.sessionID
-	if err := h.store.AppendEvents(ctx, &clone); err != nil {
+	if err := h.store.AppendEvents(ctx, h.sessionID, events); err != nil {
 		return err
 	}
 	return nil

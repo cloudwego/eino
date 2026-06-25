@@ -137,9 +137,9 @@ type countingSessionStore struct {
 	loadCalls int32
 }
 
-func (s *countingSessionStore) LoadEvents(ctx context.Context, req *adk.LoadSessionEventsRequest) (*adk.LoadSessionEventsResult[*schema.Message], error) {
+func (s *countingSessionStore) LoadEvents(ctx context.Context, sessionID string, req *adk.LoadSessionEventsRequest) (*adk.LoadSessionEventsResult[*schema.Message], error) {
 	atomic.AddInt32(&s.loadCalls, 1)
-	return s.SessionEventStore.LoadEvents(ctx, req)
+	return s.SessionEventStore.LoadEvents(ctx, sessionID, req)
 }
 
 type nilStateStore struct {
@@ -195,14 +195,11 @@ func TestMiddleware_AfterAgent_RunInlineWithSessionStore(t *testing.T) {
 	store := NewLocalStore()
 	model := &dreamModel{}
 	eventStore := &countingSessionStore{SessionEventStore: adksession.NewInMemoryStore[*schema.Message](nil)}
-	err := eventStore.AppendEvents(ctx, &adk.AppendSessionEventsRequest[*schema.Message]{
-		SessionID: "session-a",
-		Events: []*adk.SessionEvent[*schema.Message]{{
-			EventID: "e1",
-			Kind:    adk.SessionEventMessage,
-			Message: schema.AssistantMessage("build failure: missing dependency", nil),
-		}},
-	})
+	err := eventStore.AppendEvents(ctx, "session-a", []*adk.SessionEvent[*schema.Message]{{
+		EventID: "e1",
+		Kind:    adk.SessionEventMessage,
+		Message: schema.AssistantMessage("build failure: missing dependency", nil),
+	}})
 	require.NoError(t, err)
 	mw, err := New(ctx, &Config[*schema.Message]{
 		MemoryDirectory: tmp,

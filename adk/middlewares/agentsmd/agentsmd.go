@@ -124,11 +124,13 @@ func (m *typedMiddleware[M]) BeforeModelRewriteState(ctx context.Context, state 
 		beforeID = adk.GetMessageID(anchorMsg)
 	}
 	_ = adk.TypedSendEvent(ctx, &adk.TypedAgentEvent[M]{
-		SessionEvent: &adk.SessionEvent[M]{
-			Kind: adk.SessionEventMessageInserted,
-			MessageInserted: &adk.MessageInsertedEvent[M]{
-				Message:         insertedMsg,
-				BeforeMessageID: beforeID,
+		SessionEventVariant: &adk.SessionEventVariant[M]{
+			Event: &adk.SessionEvent[M]{
+				Kind: adk.SessionEventMessageInserted,
+				MessageInserted: &adk.MessageInsertedEvent[M]{
+					Message:         insertedMsg,
+					BeforeMessageID: beforeID,
+				},
 			},
 		},
 	})

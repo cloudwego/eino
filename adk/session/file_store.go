@@ -107,14 +107,9 @@ func errorsNewEmptySessionID() error {
 // AppendEvents appends events to the session's event log.
 //
 // Each SessionEvent.EventID MUST be non-empty. Duplicate event IDs are rejected.
-func (s *FileStore[M]) AppendEvents(_ context.Context, req *adk.AppendSessionEventsRequest[M]) error {
+func (s *FileStore[M]) AppendEvents(_ context.Context, sessionID string, events []*adk.SessionEvent[M]) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if req == nil {
-		req = &adk.AppendSessionEventsRequest[M]{}
-	}
-	sessionID := req.SessionID
-	events := req.Events
 
 	path, err := s.sessionPath(sessionID)
 	if err != nil {
@@ -186,13 +181,12 @@ func (s *FileStore[M]) AppendEvents(_ context.Context, req *adk.AppendSessionEve
 }
 
 // LoadEvents loads events with pagination and direction support.
-func (s *FileStore[M]) LoadEvents(_ context.Context, opts *adk.LoadSessionEventsRequest) (*adk.LoadSessionEventsResult[M], error) {
+func (s *FileStore[M]) LoadEvents(_ context.Context, sessionID string, opts *adk.LoadSessionEventsRequest) (*adk.LoadSessionEventsResult[M], error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if opts == nil {
 		opts = &adk.LoadSessionEventsRequest{}
 	}
-	sessionID := opts.SessionID
 	path, err := s.sessionPath(sessionID)
 	if err != nil {
 		return nil, err

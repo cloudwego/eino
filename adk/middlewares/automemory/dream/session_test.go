@@ -34,14 +34,11 @@ func TestNewSessionHistoryGrepTool(t *testing.T) {
 	sessionID := "session-1"
 
 	appendEvent := func(eventID string, msg *schema.Message) {
-		err := store.AppendEvents(ctx, &adk.AppendSessionEventsRequest[*schema.Message]{
-			SessionID: sessionID,
-			Events: []*adk.SessionEvent[*schema.Message]{{
-				EventID: eventID,
-				Kind:    adk.SessionEventMessage,
-				Message: msg,
-			}},
-		})
+		err := store.AppendEvents(ctx, sessionID, []*adk.SessionEvent[*schema.Message]{{
+			EventID: eventID,
+			Kind:    adk.SessionEventMessage,
+			Message: msg,
+		}})
 		require.NoError(t, err)
 	}
 
@@ -65,14 +62,11 @@ func TestNewSessionHistoryGrepTool_SearchesRunScopedSessions(t *testing.T) {
 	store := adksession.NewInMemoryStore[*schema.Message](nil)
 
 	appendEvent := func(sessionID, eventID string, msg *schema.Message) {
-		err := store.AppendEvents(ctx, &adk.AppendSessionEventsRequest[*schema.Message]{
-			SessionID: sessionID,
-			Events: []*adk.SessionEvent[*schema.Message]{{
-				EventID: eventID,
-				Kind:    adk.SessionEventMessage,
-				Message: msg,
-			}},
-		})
+		err := store.AppendEvents(ctx, sessionID, []*adk.SessionEvent[*schema.Message]{{
+			EventID: eventID,
+			Kind:    adk.SessionEventMessage,
+			Message: msg,
+		}})
 		require.NoError(t, err)
 	}
 

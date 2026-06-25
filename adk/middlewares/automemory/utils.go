@@ -955,13 +955,17 @@ func (m *middleware[M]) sendTopicMemoryEvent(ctx context.Context, msgs []M, memM
 	if len(msgs) > 0 && !isNilMessage(msgs[len(msgs)-1]) {
 		beforeID = adk.GetMessageID(msgs[len(msgs)-1])
 	}
-	if sendEventErr := adk.TypedSendEvent(ctx, &adk.TypedAgentEvent[M]{SessionEvent: &adk.SessionEvent[M]{
-		Kind: adk.SessionEventMessageInserted,
-		MessageInserted: &adk.MessageInsertedEvent[M]{
-			Message:         memMsg,
-			BeforeMessageID: beforeID,
+	if sendEventErr := adk.TypedSendEvent(ctx, &adk.TypedAgentEvent[M]{
+		SessionEventVariant: &adk.SessionEventVariant[M]{
+			Event: &adk.SessionEvent[M]{
+				Kind: adk.SessionEventMessageInserted,
+				MessageInserted: &adk.MessageInsertedEvent[M]{
+					Message:         memMsg,
+					BeforeMessageID: beforeID,
+				},
+			},
 		},
-	}}); sendEventErr != nil {
+	}); sendEventErr != nil {
 		m.onErr(ctx, OnErrorStageSendSessionEvent, sendEventErr)
 	}
 }
