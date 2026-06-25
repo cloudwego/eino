@@ -87,7 +87,7 @@ func RunSerializerConformanceTests[M adk.MessageType](
 			t.Fatalf("custom serializer Marshal was not called")
 		}
 
-		res, err := store.LoadEvents(ctx, &adk.LoadSessionEventsRequest{SessionID: "s"})
+		res, err := store.LoadEvents(ctx, "s", &adk.LoadSessionEventsRequest{})
 		requireNoError(t, err)
 		if serializer.unmarshalCount == 0 {
 			t.Fatalf("custom serializer Unmarshal was not called")
@@ -106,7 +106,7 @@ func testAppendAndForwardLoad[M adk.MessageType](t *testing.T, factory func(test
 	appendEvents(t, ctx, store, "s", first, second)
 	appendEvents(t, ctx, store, "s", third)
 
-	res, err := store.LoadEvents(ctx, &adk.LoadSessionEventsRequest{SessionID: "s"})
+	res, err := store.LoadEvents(ctx, "s", &adk.LoadSessionEventsRequest{})
 	requireNoError(t, err)
 	if res == nil {
 		t.Fatalf("LoadEvents returned nil result")
@@ -123,9 +123,8 @@ func testExtensionKindFilter[M adk.MessageType](t *testing.T, factory func(testi
 	third := extensionEvent[M]("custom-2", "x.conformance.custom")
 	appendEvents(t, ctx, store, "s", first, second, third)
 
-	res, err := store.LoadEvents(ctx, &adk.LoadSessionEventsRequest{
-		SessionID: "s",
-		Kinds:     []adk.SessionEventKind{adk.SessionEventKind("x.conformance.custom")},
+	res, err := store.LoadEvents(ctx, "s", &adk.LoadSessionEventsRequest{
+		Kinds: []adk.SessionEventKind{adk.SessionEventKind("x.conformance.custom")},
 	})
 	requireNoError(t, err)
 	if res == nil {
@@ -147,11 +146,10 @@ func testReversePagination[M adk.MessageType](t *testing.T, factory func(testing
 	var collected []string
 	var after string
 	for {
-		res, err := store.LoadEvents(ctx, &adk.LoadSessionEventsRequest{
-			SessionID: "s",
-			Reverse:   true,
-			Limit:     2,
-			After:     after,
+		res, err := store.LoadEvents(ctx, "s", &adk.LoadSessionEventsRequest{
+			Reverse: true,
+			Limit:   2,
+			After:   after,
 		})
 		requireNoError(t, err)
 		if res == nil || len(res.Events) == 0 {
@@ -187,9 +185,9 @@ func testForwardPagination[M adk.MessageType](t *testing.T, factory func(testing
 	}
 
 	var collected []*adk.SessionEvent[M]
-	req := &adk.LoadSessionEventsRequest{SessionID: "s", Limit: 10}
+	req := &adk.LoadSessionEventsRequest{Limit: 10}
 	for {
-		res, err := store.LoadEvents(ctx, req)
+		res, err := store.LoadEvents(ctx, "s", req)
 		requireNoError(t, err)
 		if res == nil || len(res.Events) == 0 {
 			break
@@ -198,7 +196,7 @@ func testForwardPagination[M adk.MessageType](t *testing.T, factory func(testing
 		if res.Next == "" {
 			break
 		}
-		req = &adk.LoadSessionEventsRequest{SessionID: "s", Limit: 10, After: res.Next}
+		req = &adk.LoadSessionEventsRequest{Limit: 10, After: res.Next}
 	}
 	if len(collected) != 80 {
 		t.Fatalf("expected 80 events, got %d", len(collected))
@@ -220,11 +218,11 @@ func testSessionIsolation[M adk.MessageType](t *testing.T, factory func(testing.
 	appendEvents(t, ctx, store, "alpha", alpha)
 	appendEvents(t, ctx, store, "beta", beta)
 
-	alphaRes, err := store.LoadEvents(ctx, &adk.LoadSessionEventsRequest{SessionID: "alpha"})
+	alphaRes, err := store.LoadEvents(ctx, "alpha", &adk.LoadSessionEventsRequest{})
 	requireNoError(t, err)
 	requireEventsEqual(t, []*adk.SessionEvent[M]{alpha}, alphaRes.Events)
 
-	betaRes, err := store.LoadEvents(ctx, &adk.LoadSessionEventsRequest{SessionID: "beta"})
+	betaRes, err := store.LoadEvents(ctx, "beta", &adk.LoadSessionEventsRequest{})
 	requireNoError(t, err)
 	requireEventsEqual(t, []*adk.SessionEvent[M]{beta}, betaRes.Events)
 }
@@ -233,7 +231,7 @@ func testEmptySession[M adk.MessageType](t *testing.T, factory func(testing.TB) 
 	store := newStore(t, factory)
 	ctx := context.Background()
 
-	res, err := store.LoadEvents(ctx, &adk.LoadSessionEventsRequest{SessionID: "nonexistent"})
+	res, err := store.LoadEvents(ctx, "nonexistent", &adk.LoadSessionEventsRequest{})
 	requireNoError(t, err)
 	if res != nil && len(res.Events) != 0 {
 		t.Fatalf("expected empty result for nonexistent session, got %d events", len(res.Events))
@@ -247,12 +245,12 @@ func testRejectDuplicateEventID[M adk.MessageType](t *testing.T, factory func(te
 	first := messageEvent("dup-1", makeMessage("first"))
 	dup := messageEvent("dup-1", makeMessage("second"))
 	appendEvents(t, ctx, store, "s", first)
-	err := store.AppendEvents(ctx, &adk.AppendSessionEventsRequest[M]{SessionID: "s", Events: []*adk.SessionEvent[M]{dup}})
+	err := store.AppendEvents(ctx, "s", []*adk.SessionEvent[M]{dup})
 	if !errors.Is(err, adk.ErrDuplicateEventID) {
 		t.Fatalf("expected ErrDuplicateEventID, got %v", err)
 	}
 
-	res, err := store.LoadEvents(ctx, &adk.LoadSessionEventsRequest{SessionID: "s"})
+	res, err := store.LoadEvents(ctx, "s", &adk.LoadSessionEventsRequest{})
 	requireNoError(t, err)
 	requireEventsEqual(t, []*adk.SessionEvent[M]{first}, res.Events)
 }
@@ -263,12 +261,12 @@ func testRejectDuplicateEventIDWithinBatch[M adk.MessageType](t *testing.T, fact
 
 	first := messageEvent("dup-batch-1", makeMessage("first"))
 	dup := messageEvent("dup-batch-1", makeMessage("second"))
-	err := store.AppendEvents(ctx, &adk.AppendSessionEventsRequest[M]{SessionID: "s", Events: []*adk.SessionEvent[M]{first, dup}})
+	err := store.AppendEvents(ctx, "s", []*adk.SessionEvent[M]{first, dup})
 	if !errors.Is(err, adk.ErrDuplicateEventID) {
 		t.Fatalf("expected ErrDuplicateEventID, got %v", err)
 	}
 
-	res, err := store.LoadEvents(ctx, &adk.LoadSessionEventsRequest{SessionID: "s"})
+	res, err := store.LoadEvents(ctx, "s", &adk.LoadSessionEventsRequest{})
 	requireNoError(t, err)
 	requireEventsEqual(t, nil, res.Events)
 }
@@ -277,10 +275,7 @@ func testRejectEmptyEventID[M adk.MessageType](t *testing.T, factory func(testin
 	store := newStore(t, factory)
 	ctx := context.Background()
 
-	err := store.AppendEvents(ctx, &adk.AppendSessionEventsRequest[M]{
-		SessionID: "s",
-		Events:    []*adk.SessionEvent[M]{{Kind: adk.SessionEventMessage, Message: makeMessage("empty")}},
-	})
+	err := store.AppendEvents(ctx, "s", []*adk.SessionEvent[M]{{Kind: adk.SessionEventMessage, Message: makeMessage("empty")}})
 	if !errors.Is(err, adk.ErrInvalidEventID) {
 		t.Fatalf("expected ErrInvalidEventID, got %v", err)
 	}
@@ -296,7 +291,7 @@ func testAfterForward[M adk.MessageType](t *testing.T, factory func(testing.TB) 
 		appendEvents(t, ctx, store, "s", events[i])
 	}
 
-	res, err := store.LoadEvents(ctx, &adk.LoadSessionEventsRequest{SessionID: "s", After: "fwd-2"})
+	res, err := store.LoadEvents(ctx, "s", &adk.LoadSessionEventsRequest{After: "fwd-2"})
 	requireNoError(t, err)
 	requireEventsEqual(t, []*adk.SessionEvent[M]{events[3], events[4]}, res.Events)
 }
@@ -311,7 +306,7 @@ func testAfterReverse[M adk.MessageType](t *testing.T, factory func(testing.TB) 
 		appendEvents(t, ctx, store, "s", events[i])
 	}
 
-	res, err := store.LoadEvents(ctx, &adk.LoadSessionEventsRequest{SessionID: "s", Reverse: true, After: "rev-2"})
+	res, err := store.LoadEvents(ctx, "s", &adk.LoadSessionEventsRequest{Reverse: true, After: "rev-2"})
 	requireNoError(t, err)
 	requireEventsEqual(t, []*adk.SessionEvent[M]{events[1], events[0]}, res.Events)
 }
@@ -322,11 +317,11 @@ func testUnknownAfter[M adk.MessageType](t *testing.T, factory func(testing.TB) 
 
 	appendEvents(t, ctx, store, "s", messageEvent("only-1", makeMessage("only")))
 
-	_, err := store.LoadEvents(ctx, &adk.LoadSessionEventsRequest{SessionID: "s", After: "ghost"})
+	_, err := store.LoadEvents(ctx, "s", &adk.LoadSessionEventsRequest{After: "ghost"})
 	if !errors.Is(err, adk.ErrEventIDOutOfRange) {
 		t.Fatalf("forward unknown After expected ErrEventIDOutOfRange, got %v", err)
 	}
-	_, err = store.LoadEvents(ctx, &adk.LoadSessionEventsRequest{SessionID: "s", After: "ghost", Reverse: true})
+	_, err = store.LoadEvents(ctx, "s", &adk.LoadSessionEventsRequest{After: "ghost", Reverse: true})
 	if !errors.Is(err, adk.ErrEventIDOutOfRange) {
 		t.Fatalf("reverse unknown After expected ErrEventIDOutOfRange, got %v", err)
 	}
@@ -341,13 +336,13 @@ func testEmptyPageBoundary[M adk.MessageType](t *testing.T, factory func(testing
 		appendEvents(t, ctx, store, "s", messageEvent(id, makeMessage(id)))
 	}
 
-	res, err := store.LoadEvents(ctx, &adk.LoadSessionEventsRequest{SessionID: "s", After: "e2"})
+	res, err := store.LoadEvents(ctx, "s", &adk.LoadSessionEventsRequest{After: "e2"})
 	requireNoError(t, err)
 	if res == nil || len(res.Events) != 0 || res.Next != "" {
 		t.Fatalf("forward empty page expected, got events=%d next=%q", len(res.Events), res.Next)
 	}
 
-	res, err = store.LoadEvents(ctx, &adk.LoadSessionEventsRequest{SessionID: "s", Reverse: true, After: "e0"})
+	res, err = store.LoadEvents(ctx, "s", &adk.LoadSessionEventsRequest{Reverse: true, After: "e0"})
 	requireNoError(t, err)
 	if res == nil || len(res.Events) != 0 || res.Next != "" {
 		t.Fatalf("reverse empty page expected, got events=%d next=%q", len(res.Events), res.Next)
@@ -361,7 +356,7 @@ func testEventBodyRoundTrip[M adk.MessageType](t *testing.T, factory func(testin
 	event := messageEvent("body-test-1", makeMessage("body"))
 	appendEvents(t, ctx, store, "s", event)
 
-	res, err := store.LoadEvents(ctx, &adk.LoadSessionEventsRequest{SessionID: "s"})
+	res, err := store.LoadEvents(ctx, "s", &adk.LoadSessionEventsRequest{})
 	requireNoError(t, err)
 	if res == nil || len(res.Events) != 1 {
 		t.Fatalf("expected 1 event, got %d", len(res.Events))
@@ -380,7 +375,7 @@ func newStore[M adk.MessageType](t testing.TB, factory func(testing.TB) adk.Sess
 
 func appendEvents[M adk.MessageType](t testing.TB, ctx context.Context, store adk.SessionEventStore[M], sessionID string, events ...*adk.SessionEvent[M]) {
 	t.Helper()
-	err := store.AppendEvents(ctx, &adk.AppendSessionEventsRequest[M]{SessionID: sessionID, Events: events})
+	err := store.AppendEvents(ctx, sessionID, events)
 	requireNoError(t, err)
 }
 

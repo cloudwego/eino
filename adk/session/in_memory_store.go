@@ -64,14 +64,9 @@ func NewInMemoryStore[M adk.MessageType](cfg *InMemoryStoreConfig) *InMemoryStor
 }
 
 // AppendEvents appends events to the session's event log.
-func (s *InMemoryStore[M]) AppendEvents(_ context.Context, req *adk.AppendSessionEventsRequest[M]) error {
+func (s *InMemoryStore[M]) AppendEvents(_ context.Context, sessionID string, events []*adk.SessionEvent[M]) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if req == nil {
-		req = &adk.AppendSessionEventsRequest[M]{}
-	}
-	sessionID := req.SessionID
-	events := req.Events
 	idx, ok := s.eventIDIdx[sessionID]
 	if !ok {
 		idx = make(map[string]int)
@@ -113,15 +108,13 @@ func (s *InMemoryStore[M]) AppendEvents(_ context.Context, req *adk.AppendSessio
 }
 
 // LoadEvents loads events with pagination and direction support.
-func (s *InMemoryStore[M]) LoadEvents(_ context.Context, opts *adk.LoadSessionEventsRequest) (*adk.LoadSessionEventsResult[M], error) {
+func (s *InMemoryStore[M]) LoadEvents(_ context.Context, sessionID string, opts *adk.LoadSessionEventsRequest) (*adk.LoadSessionEventsResult[M], error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	if opts == nil {
 		opts = &adk.LoadSessionEventsRequest{}
 	}
-	sessionID := opts.SessionID
-
 	if opts.Reverse {
 		return s.loadReverse(sessionID, opts)
 	}

@@ -253,7 +253,6 @@ func gobDecodeAgenticMessageVariant(mv *TypedMessageVariant[*schema.AgenticMessa
 func typedEventFromMessage[M MessageType](msg M, msgStream *schema.StreamReader[M],
 	role schema.RoleType, toolName string) *TypedAgentEvent[M] {
 	return &TypedAgentEvent[M]{
-		Timestamp: newEventTimestamp(),
 		Output: &TypedAgentOutput[M]{
 			MessageOutput: &TypedMessageVariant[M]{
 				IsStreaming:   msgStream != nil,
@@ -304,7 +303,6 @@ func EventFromMessage(msg Message, msgStream *schema.StreamReader[Message],
 // In streaming mode, the role is available on the event before consuming the stream.
 func EventFromAgenticMessage(msg AgenticMessage, msgStream AgenticMessageStream, agenticRole schema.AgenticRoleType) *TypedAgentEvent[AgenticMessage] {
 	return &TypedAgentEvent[AgenticMessage]{
-		Timestamp: newEventTimestamp(),
 		Output: &TypedAgentOutput[AgenticMessage]{
 			MessageOutput: &TypedMessageVariant[AgenticMessage]{
 				IsStreaming:   msgStream != nil,
@@ -425,19 +423,6 @@ type runStepSerialization struct {
 // TypedAgentEvent represents a single event emitted during agent execution.
 // CheckpointSchema: persisted via serialization.RunCtx (gob).
 type TypedAgentEvent[M MessageType] struct {
-	// EventID is the run-unique identity of this event, allocated once at the
-	// first emission boundary by execCtx.send. Live (user-land) and persisted
-	// (SessionEventStore) copies of the same logical event share this ID, allowing
-	// SSE adapters to use it as `id:` and resume from the session event log.
-	// Format: UUIDv4 string when allocated by the runtime. Leave empty to let
-	// the runtime allocate; an explicitly set non-empty value is preserved.
-	EventID string
-
-	// Timestamp is the wall-clock time when this event occurred at the ADK-visible
-	// emission boundary. The runtime fills it when unset; built-in wrappers set it
-	// at their semantic source boundary before sending the event.
-	Timestamp time.Time
-
 	AgentName string
 
 	// RunPath represents the execution path from root agent to the current event source.
@@ -454,12 +439,11 @@ type TypedAgentEvent[M MessageType] struct {
 
 	Err error
 
-	// SessionEvent is the first-class live timeline envelope. All session-semantic
-	// payloads, including lifecycle, error, span, observation, message mutation,
-	// and turn-end records, must be carried here. For durable managed-session
-	// events, EventID and SessionEvent.EventID must be identical after runtime
-	// materialization.
-	SessionEvent *SessionEvent[M]
+	// SessionEventVariant is the first-class live session envelope. Event carries
+	// a materialized durable SessionEvent. MessageStreamRef carries only the
+	// reserved durable metadata for a streaming message whose content remains in
+	// Output.MessageOutput.MessageStream.
+	SessionEventVariant *SessionEventVariant[M]
 }
 
 // AgentEvent is the default event type using *schema.Message.

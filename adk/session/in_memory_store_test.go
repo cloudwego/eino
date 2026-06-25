@@ -77,14 +77,13 @@ func TestInMemoryStoreKindFilterAndPagination(t *testing.T) {
 		testCommittedIdleEvent("e3", "turn-1"),
 		testMessageEvent("e4", "four"),
 	}
-	err := store.AppendEvents(ctx, &adk.AppendSessionEventsRequest[*schema.Message]{SessionID: "s", Events: events})
+	err := store.AppendEvents(ctx, "s", events)
 	require.NoError(t, err)
 
-	res, err := store.LoadEvents(ctx, &adk.LoadSessionEventsRequest{
-		SessionID: "s",
-		After:     "e2",
-		Kinds:     []adk.SessionEventKind{adk.SessionEventMessage, adk.SessionEventSessionStatusIdle},
-		Limit:     1,
+	res, err := store.LoadEvents(ctx, "s", &adk.LoadSessionEventsRequest{
+		After: "e2",
+		Kinds: []adk.SessionEventKind{adk.SessionEventMessage, adk.SessionEventSessionStatusIdle},
+		Limit: 1,
 	})
 	require.NoError(t, err)
 	require.Len(t, res.Events, 1)
@@ -95,16 +94,16 @@ func TestInMemoryStoreKindFilterAndPagination(t *testing.T) {
 func TestInMemoryStoreLoadReturnsIndependentEvents(t *testing.T) {
 	ctx := context.Background()
 	store := session.NewInMemoryStore[*schema.Message](nil)
-	err := store.AppendEvents(ctx, &adk.AppendSessionEventsRequest[*schema.Message]{SessionID: "s", Events: []*adk.SessionEvent[*schema.Message]{
+	err := store.AppendEvents(ctx, "s", []*adk.SessionEvent[*schema.Message]{
 		testMessageEvent("e1", "one"),
-	}})
+	})
 	require.NoError(t, err)
 
-	first, err := store.LoadEvents(ctx, &adk.LoadSessionEventsRequest{SessionID: "s"})
+	first, err := store.LoadEvents(ctx, "s", &adk.LoadSessionEventsRequest{})
 	require.NoError(t, err)
 	first.Events[0].EventID = "mutated"
 
-	second, err := store.LoadEvents(ctx, &adk.LoadSessionEventsRequest{SessionID: "s"})
+	second, err := store.LoadEvents(ctx, "s", &adk.LoadSessionEventsRequest{})
 	require.NoError(t, err)
 	assert.Equal(t, "e1", second.Events[0].EventID)
 }
@@ -113,66 +112,47 @@ func TestInMemoryStoreValidationReplayAndReversePagination(t *testing.T) {
 	ctx := context.Background()
 	store := session.NewInMemoryStore[*schema.Message](nil)
 
-	require.NoError(t, store.AppendEvents(ctx, nil))
+	require.NoError(t, store.AppendEvents(ctx, "", nil))
 
 	events := []*adk.SessionEvent[*schema.Message]{
 		testMessageEvent("e1", "one"),
 		testSpanEvent("e2"),
 		testCommittedIdleEvent("e3", "turn-1"),
 	}
-	err := store.AppendEvents(ctx, &adk.AppendSessionEventsRequest[*schema.Message]{
-		SessionID: "s",
-		Events:    events,
-	})
+	err := store.AppendEvents(ctx, "s", events)
 	require.NoError(t, err)
 
-	err = store.AppendEvents(ctx, &adk.AppendSessionEventsRequest[*schema.Message]{
-		SessionID: "s",
-		Events:    []*adk.SessionEvent[*schema.Message]{testMessageEvent("e4", "four")},
-	})
+	err = store.AppendEvents(ctx, "s", []*adk.SessionEvent[*schema.Message]{testMessageEvent("e4", "four")})
 	require.NoError(t, err)
 
-	err = store.AppendEvents(ctx, &adk.AppendSessionEventsRequest[*schema.Message]{
-		SessionID: "s2",
-		Events:    []*adk.SessionEvent[*schema.Message]{nil},
-	})
+	err = store.AppendEvents(ctx, "s2", []*adk.SessionEvent[*schema.Message]{nil})
 	require.ErrorIs(t, err, adk.ErrInvalidEventID)
 
-	err = store.AppendEvents(ctx, &adk.AppendSessionEventsRequest[*schema.Message]{
-		SessionID: "s2",
-		Events: []*adk.SessionEvent[*schema.Message]{
-			testMessageEvent("dup", "one"),
-			testMessageEvent("dup", "two"),
-		},
+	err = store.AppendEvents(ctx, "s2", []*adk.SessionEvent[*schema.Message]{
+		testMessageEvent("dup", "one"),
+		testMessageEvent("dup", "two"),
 	})
 	require.ErrorIs(t, err, adk.ErrDuplicateEventID)
 
-	err = store.AppendEvents(ctx, &adk.AppendSessionEventsRequest[*schema.Message]{
-		SessionID: "s",
-		Events:    []*adk.SessionEvent[*schema.Message]{testMessageEvent("e1", "duplicate existing")},
-	})
+	err = store.AppendEvents(ctx, "s", []*adk.SessionEvent[*schema.Message]{testMessageEvent("e1", "duplicate existing")})
 	require.ErrorIs(t, err, adk.ErrDuplicateEventID)
 
-	err = store.AppendEvents(ctx, &adk.AppendSessionEventsRequest[*schema.Message]{
-		SessionID: "s2",
-		Events:    []*adk.SessionEvent[*schema.Message]{{EventID: "invalid-kind"}},
-	})
+	err = store.AppendEvents(ctx, "s2", []*adk.SessionEvent[*schema.Message]{{EventID: "invalid-kind"}})
 	require.Error(t, err)
 
-	reverseEmpty, err := store.LoadEvents(ctx, &adk.LoadSessionEventsRequest{SessionID: "empty", Reverse: true})
+	reverseEmpty, err := store.LoadEvents(ctx, "empty", &adk.LoadSessionEventsRequest{Reverse: true})
 	require.NoError(t, err)
 	assert.Empty(t, reverseEmpty.Events)
 
-	_, err = store.LoadEvents(ctx, &adk.LoadSessionEventsRequest{SessionID: "s", After: "missing"})
+	_, err = store.LoadEvents(ctx, "s", &adk.LoadSessionEventsRequest{After: "missing"})
 	require.ErrorIs(t, err, adk.ErrEventIDOutOfRange)
-	_, err = store.LoadEvents(ctx, &adk.LoadSessionEventsRequest{SessionID: "s", Reverse: true, After: "missing"})
+	_, err = store.LoadEvents(ctx, "s", &adk.LoadSessionEventsRequest{Reverse: true, After: "missing"})
 	require.ErrorIs(t, err, adk.ErrEventIDOutOfRange)
 
-	reverse, err := store.LoadEvents(ctx, &adk.LoadSessionEventsRequest{
-		SessionID: "s",
-		Reverse:   true,
-		After:     "e4",
-		Limit:     1,
+	reverse, err := store.LoadEvents(ctx, "s", &adk.LoadSessionEventsRequest{
+		Reverse: true,
+		After:   "e4",
+		Limit:   1,
 	})
 	require.NoError(t, err)
 	require.Len(t, reverse.Events, 1)

@@ -308,15 +308,15 @@ func sendSessionTimelineEvent[M MessageType](ctx context.Context, se *SessionEve
 	}
 	if se.EventID == "" {
 		if err := assignSessionEventIDFromContext(ctx, se); err != nil {
-			execCtx.send(ctx, &TypedAgentEvent[M]{Timestamp: newEventTimestamp(), Err: err})
+			execCtx.send(ctx, &TypedAgentEvent[M]{Err: err})
 			return
 		}
 	}
 	if err := ValidateEmittedSessionEventKind(se); err != nil {
-		execCtx.send(ctx, &TypedAgentEvent[M]{Timestamp: newEventTimestamp(), Err: err})
+		execCtx.send(ctx, &TypedAgentEvent[M]{Err: err})
 		return
 	}
-	execCtx.send(ctx, &TypedAgentEvent[M]{EventID: se.EventID, Timestamp: se.Timestamp, SessionEvent: se})
+	execCtx.send(ctx, &TypedAgentEvent[M]{SessionEventVariant: &SessionEventVariant[M]{Event: se}})
 }
 
 func newModelSpanStartEvent[M MessageType](ctx context.Context, spanID string, started time.Time, opts ...model.Option) *SessionEvent[M] {
@@ -580,7 +580,7 @@ func (m *typedEventSenderModel[M]) Generate(ctx context.Context, input []M, opts
 	// its ID allocation through the runner's SessionEventIDGenerator[M] so
 	// producer-owned identity applies. The same ID is used for the live
 	// TypedAgentEvent below; the materialized SessionEvent later inherits it.
-	assistantDraft := &SessionEvent[M]{Kind: SessionEventMessage, Message: copyMessage(result)}
+	assistantDraft := &SessionEvent[M]{Timestamp: timestamp, Kind: SessionEventMessage, Message: copyMessage(result)}
 	if err := assignSessionEventIDFromContext(ctx, assistantDraft); err != nil {
 		var zero M
 		return zero, err
@@ -600,8 +600,7 @@ func (m *typedEventSenderModel[M]) Generate(ctx context.Context, input []M, opts
 	})
 
 	event := typedModelOutputEvent(copyMessage(result), nil)
-	event.EventID = assistantMsgEventID
-	event.Timestamp = timestamp
+	event.SessionEventVariant = &SessionEventVariant[M]{Event: assistantDraft}
 	execCtx.send(ctx, event)
 
 	return result, nil
@@ -648,7 +647,7 @@ func (m *typedEventSenderModel[M]) Stream(ctx context.Context, input []M, opts .
 	// owned ID. Generators that need to recognize the assistant draft can
 	// match on Kind==SessionEventMessage with a zero Message.
 	var draftZero M
-	assistantDraft := &SessionEvent[M]{Kind: SessionEventMessage, Message: draftZero}
+	assistantDraft := &SessionEvent[M]{Timestamp: timestamp, Kind: SessionEventMessage, Message: draftZero}
 	if err := assignSessionEventIDFromContext(ctx, assistantDraft); err != nil {
 		result.Close()
 		return nil, err
@@ -669,8 +668,13 @@ func (m *typedEventSenderModel[M]) Stream(ctx context.Context, input []M, opts .
 
 	var zero M
 	event := typedModelOutputEvent[M](zero, eventStream)
-	event.EventID = assistantMsgEventID
-	event.Timestamp = timestamp
+	event.SessionEventVariant = &SessionEventVariant[M]{
+		MessageStreamRef: &MessageStreamRef{
+			EventID:   assistantMsgEventID,
+			Timestamp: timestamp,
+			Kind:      SessionEventMessage,
+		},
+	}
 	execCtx.send(ctx, event)
 
 	spanStream := streams[2]
@@ -927,7 +931,9 @@ func ensureTypedAgentEventMessageIDs[M MessageType](event *TypedAgentEvent[M]) {
 	if event.Output != nil && event.Output.MessageOutput != nil && !isNilMessage(event.Output.MessageOutput.Message) {
 		EnsureMessageID(event.Output.MessageOutput.Message)
 	}
-	ensureSessionEventMessageIDs(event.SessionEvent)
+	if event.SessionEventVariant != nil {
+		ensureSessionEventMessageIDs(event.SessionEventVariant.Event)
+	}
 }
 
 func ensureSessionEventMessageIDs[M MessageType](event *SessionEvent[M]) {
@@ -1321,17 +1327,16 @@ func (w *typedEventSenderToolWrapper[M]) WrapInvokableToolCall(_ context.Context
 		// on allocation failure, skip both the tool result event and the
 		// matching tool span end so no orphaned ToolResultMessageEventID
 		// reference is left in the timeline.
-		toolResultDraft := &SessionEvent[M]{Kind: SessionEventMessage, Message: event.Output.MessageOutput.Message}
+		toolResultDraft := &SessionEvent[M]{Timestamp: timestamp, Kind: SessionEventMessage, Message: event.Output.MessageOutput.Message}
 		if idErr := assignSessionEventIDFromContext(ctx, toolResultDraft); idErr != nil {
 			if execCtx := getTypedChatModelAgentExecCtx[M](ctx); execCtx != nil && execCtx.generator != nil {
-				execCtx.send(ctx, &TypedAgentEvent[M]{Timestamp: newEventTimestamp(), Err: idErr})
+				execCtx.send(ctx, &TypedAgentEvent[M]{Err: idErr})
 			}
 			clearToolSpanInFlight[M](ctx, tCtx.CallID)
 			return "", idErr
 		}
 		resultEventID := toolResultDraft.EventID
-		event.EventID = resultEventID
-		event.Timestamp = timestamp
+		event.SessionEventVariant = &SessionEventVariant[M]{Event: toolResultDraft}
 		if prePopAction != nil {
 			event.Action = prePopAction
 		}
@@ -1396,10 +1401,10 @@ func (w *typedEventSenderToolWrapper[M]) WrapStreamableToolCall(_ context.Contex
 		// skip the tool result event AND the tool span end so no orphaned
 		// ToolResultMessageEventID reference is left behind.
 		var toolResultDraftMsg M
-		toolResultDraft := &SessionEvent[M]{Kind: SessionEventMessage, Message: toolResultDraftMsg}
+		toolResultDraft := &SessionEvent[M]{Timestamp: timestamp, Kind: SessionEventMessage, Message: toolResultDraftMsg}
 		if idErr := assignSessionEventIDFromContext(ctx, toolResultDraft); idErr != nil {
 			if execCtx := getTypedChatModelAgentExecCtx[M](ctx); execCtx != nil && execCtx.generator != nil {
-				execCtx.send(ctx, &TypedAgentEvent[M]{Timestamp: newEventTimestamp(), Err: idErr})
+				execCtx.send(ctx, &TypedAgentEvent[M]{Err: idErr})
 			}
 			streams[0].Close()
 			streams[1].Close()
@@ -1454,8 +1459,13 @@ func (w *typedEventSenderToolWrapper[M]) WrapStreamableToolCall(_ context.Contex
 		}
 
 		event := typedToolStreamEvent[M](callID, toolName, toolMsgID, streams[0])
-		event.EventID = resultEventID
-		event.Timestamp = timestamp
+		event.SessionEventVariant = &SessionEventVariant[M]{
+			MessageStreamRef: &MessageStreamRef{
+				EventID:   resultEventID,
+				Timestamp: timestamp,
+				Kind:      SessionEventMessage,
+			},
+		}
 		event.Action = prePopAction
 
 		execCtx := getTypedChatModelAgentExecCtx[M](ctx)
@@ -1528,17 +1538,16 @@ func (w *typedEventSenderToolWrapper[M]) WrapEnhancedInvokableToolCall(_ context
 		// draft. Fail-closed: on allocation failure, skip both the tool
 		// result event and the matching tool span end so no orphaned
 		// ToolResultMessageEventID reference is left behind.
-		toolResultDraft := &SessionEvent[M]{Kind: SessionEventMessage, Message: event.Output.MessageOutput.Message}
+		toolResultDraft := &SessionEvent[M]{Timestamp: timestamp, Kind: SessionEventMessage, Message: event.Output.MessageOutput.Message}
 		if idErr := assignSessionEventIDFromContext(ctx, toolResultDraft); idErr != nil {
 			if execCtx := getTypedChatModelAgentExecCtx[M](ctx); execCtx != nil && execCtx.generator != nil {
-				execCtx.send(ctx, &TypedAgentEvent[M]{Timestamp: newEventTimestamp(), Err: idErr})
+				execCtx.send(ctx, &TypedAgentEvent[M]{Err: idErr})
 			}
 			clearToolSpanInFlight[M](ctx, tCtx.CallID)
 			return nil, idErr
 		}
 		resultEventID := toolResultDraft.EventID
-		event.EventID = resultEventID
-		event.Timestamp = timestamp
+		event.SessionEventVariant = &SessionEventVariant[M]{Event: toolResultDraft}
 		if prePopAction != nil {
 			event.Action = prePopAction
 		}
@@ -1603,10 +1612,10 @@ func (w *typedEventSenderToolWrapper[M]) WrapEnhancedStreamableToolCall(_ contex
 		// skip the tool result event AND the tool span end so no orphaned
 		// ToolResultMessageEventID reference is left behind.
 		var toolResultDraftMsg M
-		toolResultDraft := &SessionEvent[M]{Kind: SessionEventMessage, Message: toolResultDraftMsg}
+		toolResultDraft := &SessionEvent[M]{Timestamp: timestamp, Kind: SessionEventMessage, Message: toolResultDraftMsg}
 		if idErr := assignSessionEventIDFromContext(ctx, toolResultDraft); idErr != nil {
 			if execCtx := getTypedChatModelAgentExecCtx[M](ctx); execCtx != nil && execCtx.generator != nil {
-				execCtx.send(ctx, &TypedAgentEvent[M]{Timestamp: newEventTimestamp(), Err: idErr})
+				execCtx.send(ctx, &TypedAgentEvent[M]{Err: idErr})
 			}
 			streams[0].Close()
 			streams[1].Close()
@@ -1661,8 +1670,13 @@ func (w *typedEventSenderToolWrapper[M]) WrapEnhancedStreamableToolCall(_ contex
 		}
 
 		event := typedToolEnhancedStreamEvent[M](callID, toolName, toolMsgID, streams[0])
-		event.EventID = resultEventID
-		event.Timestamp = timestamp
+		event.SessionEventVariant = &SessionEventVariant[M]{
+			MessageStreamRef: &MessageStreamRef{
+				EventID:   resultEventID,
+				Timestamp: timestamp,
+				Kind:      SessionEventMessage,
+			},
+		}
 		event.Action = prePopAction
 
 		execCtx := getTypedChatModelAgentExecCtx[M](ctx)
