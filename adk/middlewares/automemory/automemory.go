@@ -41,18 +41,18 @@ func init() {
 }
 
 type Config[M adk.MessageType] struct {
-	// MemoryStores defines the persistent memory stores exposed to automemory.
-	// Required. At least one store must be configured.
-	MemoryStores []MemoryStore
+	// MemoryDirectory is the persistent memory root directory exposed to automemory.
+	// Required. Relative paths are resolved against the process working directory.
+	MemoryDirectory string
 
-	// MemoryBackend is the storage backend used by all MemoryStores.
-	// Required. Store paths are resolved against this backend and bounded per store.
+	// MemoryBackend is the storage backend used by MemoryDirectory.
+	// Required. File operations are bounded to MemoryDirectory.
 	MemoryBackend Backend
 
 	// GenInstruction returns the runtime memory instruction appended to the main agent system prompt.
 	// Use it to customize how strongly the main agent should read from and write to memory during normal task execution.
 	// It does not control the post-run extraction agent; use Write.GenInstruction for extraction-specific save criteria.
-	// The framework always appends the memory store manifest after this block.
+	// The framework always appends the memory directory manifest after this block.
 	// Optional. Defaults to the built-in auto memory instruction.
 	GenInstruction func(ctx context.Context) (string, error)
 
@@ -79,20 +79,6 @@ type Config[M adk.MessageType] struct {
 	OnError func(ctx context.Context, stage ErrorStage, err error)
 }
 
-type MemoryStore struct {
-	// Path is the root path of this memory store.
-	// Required. Relative paths are resolved against the process working directory.
-	Path string
-
-	// Name is the display name and relative path prefix used to disambiguate this store.
-	// Optional. Defaults to the base name of Path.
-	Name string
-
-	// Description describes the purpose of this memory store in the system prompt manifest.
-	// Optional. Defaults to empty.
-	Description string
-}
-
 type ReadMode string
 
 const (
@@ -117,11 +103,7 @@ type ReadConfig[M adk.MessageType] struct {
 }
 
 type IndexConfig struct {
-	// EnableMemoryIndex controls whether MEMORY.md is used as a memory index.
-	// Optional. Defaults to true when nil.
-	EnableMemoryIndex *bool
-
-	// FileName is the index file name under each memory store.
+	// FileName is the index file name under MemoryDirectory.
 	// Optional. Defaults to MEMORY.md.
 	FileName string
 
@@ -135,20 +117,38 @@ type IndexConfig struct {
 }
 
 type TopicSelectionConfig struct {
-	// CandidateGlob is matched against the RELATIVE path under each memory store.
+	// Enable controls whether topic memory selection is enabled.
+	// When false, automemory will not query, rank, read, or inject topic memories.
+	// Optional. Defaults to true when nil.
+	Enable *bool
+
+	// CandidateGlob is matched against the RELATIVE path under MemoryDirectory.
 	// Example: "**/*.md"
-	CandidateGlob  string
+	// Optional. Defaults to CandidateGlobPattern.
+	CandidateGlob string
+
+	// CandidateLimit caps the number of candidate topic files considered for selection.
+	// Optional. Defaults to 200.
 	CandidateLimit int
+
 	// CandidatePreviewLines are read from each candidate to parse YAML frontmatter.
+	// Optional. Defaults to 30.
 	CandidatePreviewLines int
 
+	// TopK caps the number of topic memory files selected for injection.
+	// Optional. Defaults to 5.
 	TopK int
 
 	// MaxLines caps single topic memory file read lines.
+	// Optional. Defaults to 200.
 	MaxLines int
+
 	// MaxBytes caps single topic memory file read bytes.
+	// Optional. Defaults to 4k.
 	MaxBytes int
-	// MaxTotalBytes caps the total rendered topic memory reminder across all stores.
+
+	// MaxTotalBytes caps the total rendered topic memory reminder.
+	// Optional. Defaults to 16k.
 	MaxTotalBytes int
 }
 
@@ -191,7 +191,8 @@ type middleware[M adk.MessageType] struct {
 
 	cfg *Config[M]
 
-	memoryStores []runtimeMemoryStore
+	resolvedMemoryDirectory string
+	boundedMemoryBackend    *ainternal.FSBackend
 
 	topicSelectionModel model.BaseModel[M]
 	extractionHandler   adk.TypedChatModelAgentMiddleware[M]
@@ -220,13 +221,6 @@ type memoryExtra struct {
 	Cursor int
 }
 
-type runtimeMemoryStore struct {
-	MemoryStore
-
-	Path    string
-	Backend *ainternal.FSBackend
-}
-
 // New creates an automemory middleware from the provided configuration.
 func New[M adk.MessageType](ctx context.Context, config *Config[M]) (adk.TypedChatModelAgentMiddleware[M], error) {
 	if config == nil {
@@ -234,11 +228,19 @@ func New[M adk.MessageType](ctx context.Context, config *Config[M]) (adk.TypedCh
 	}
 
 	cfg := cloneConfig(config)
-	if cfg.MemoryBackend == nil {
+	if cfg.MemoryDirectory == "" || cfg.MemoryBackend == nil {
 		return nil, fmt.Errorf("auto memory config: invalid")
 	}
 
-	stores, err := buildRuntimeMemoryStores(cfg)
+	resolvedMemoryDir, err := ainternal.ResolveMemoryDir(cfg.MemoryDirectory)
+	if err != nil {
+		return nil, fmt.Errorf("auto memory config: resolve memory directory: %w", err)
+	}
+	boundedMemoryBackend, err := ainternal.NewFSBackend(cfg.MemoryBackend, ainternal.FSBackendConfig{
+		BaseDir:           resolvedMemoryDir,
+		NotFoundAsContent: true,
+		ErrorPrefix:       "memory backend",
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -250,12 +252,13 @@ func New[M adk.MessageType](ctx context.Context, config *Config[M]) (adk.TypedCh
 	m := &middleware[M]{
 		TypedBaseChatModelAgentMiddleware: adk.TypedBaseChatModelAgentMiddleware[M]{},
 		cfg:                               cfg,
-		memoryStores:                      stores,
+		resolvedMemoryDirectory:           resolvedMemoryDir,
+		boundedMemoryBackend:              boundedMemoryBackend,
 		coordination:                      cfg.Coordination,
 	}
 
 	m.topicSelectionTool = topicSelectionToolInfo()
-	if cfg.Read.TopicSelection != nil && cfg.Read.Model != nil {
+	if topicSelectionConfigEnabled(cfg.Read.TopicSelection) && cfg.Read.Model != nil {
 		m.topicSelectionModel = &modelWithTools[M]{
 			base:  cfg.Read.Model,
 			tools: []*schema.ToolInfo{m.topicSelectionTool},
@@ -264,7 +267,7 @@ func New[M adk.MessageType](ctx context.Context, config *Config[M]) (adk.TypedCh
 
 	if cfg.Write.Mode != WriteModeDisabled && cfg.Write.Model != nil {
 		fileSystemMiddleware, err := fsmw.NewTyped[M](ctx, &fsmw.MiddlewareConfig{
-			Backend:        newMultiStoreBackend(stores),
+			Backend:        boundedMemoryBackend,
 			LsToolConfig:   &fsmw.ToolConfig{Disable: true},
 			GrepToolConfig: &fsmw.ToolConfig{Disable: true},
 		})
@@ -301,7 +304,7 @@ func (m *middleware[M]) BeforeAgent(ctx context.Context, runCtx *adk.ChatModelAg
 		}
 	}
 
-	// 1) System prompt: inject stable auto memory instruction and store manifest (best-effort).
+	// 1) System prompt: inject stable auto memory instruction and directory manifest (best-effort).
 	instruction, err := m.renderInstruction(ctx, nRunCtx.Instruction)
 	if err != nil {
 		m.onErr(ctx, OnErrorStageRenderInstruction, err)
@@ -328,7 +331,7 @@ func (m *middleware[M]) BeforeAgent(ctx context.Context, runCtx *adk.ChatModelAg
 
 	// 3) Topic memories: sync mode selects from the original user query.
 	if !hasTopicMemoryInjected(nRunCtx.AgentInput.Messages) &&
-		m.cfg.Read.Mode == ReadModeSync && m.cfg.Read.TopicSelection != nil && m.topicSelectionModel != nil {
+		m.cfg.Read.Mode == ReadModeSync && m.topicSelectionEnabled() {
 		memMsg, err := m.selectAndBuildTopicMemoryMessage(ctx, nRunCtx.AgentInput)
 		if err != nil {
 			m.onErr(ctx, OnErrorStageTopicSelectionSync, err)
@@ -345,7 +348,7 @@ func (m *middleware[M]) BeforeAgent(ctx context.Context, runCtx *adk.ChatModelAg
 
 	// 4) Topic memories: async mode starts selection here (cannot use RunLocalValue in BeforeAgent).
 	if !hasTopicMemoryInjected(nRunCtx.AgentInput.Messages) &&
-		m.cfg.Read.Mode == ReadModeAsync && m.cfg.Read.TopicSelection != nil && m.topicSelectionModel != nil {
+		m.cfg.Read.Mode == ReadModeAsync && m.topicSelectionEnabled() {
 		if existing, _ := ctx.Value(ctxKeySelectionFuture{}).(*selectionFuture); existing == nil {
 			fut := &selectionFuture{done: make(chan struct{})}
 			ctx = context.WithValue(ctx, ctxKeySelectionFuture{}, fut)
@@ -386,6 +389,9 @@ func (m *middleware[M]) BeforeModelRewriteState(ctx context.Context, state *adk.
 		}
 	}
 	if m.cfg.Read.Mode != ReadModeAsync {
+		return ctx, state, nil
+	}
+	if !m.topicSelectionEnabled() {
 		return ctx, state, nil
 	}
 	fut, _ := ctx.Value(ctxKeySelectionFuture{}).(*selectionFuture)
@@ -433,8 +439,7 @@ type topicSelectionResp struct {
 }
 
 func (m *middleware[M]) renderInstruction(ctx context.Context, baseInstruction string) (string, error) {
-	enableIndex := m.memoryIndexEnabled()
-	memDesc := getDefaultMemoryInstruction(enableIndex)
+	memDesc := getDefaultMemoryInstruction()
 	if m.cfg.GenInstruction != nil {
 		custom, err := m.cfg.GenInstruction(ctx)
 		if err != nil {
@@ -445,55 +450,30 @@ func (m *middleware[M]) renderInstruction(ctx context.Context, baseInstruction s
 		}
 	}
 
-	stores := make([]memoryStorePromptInfo, 0, len(m.memoryStores))
-	for _, store := range m.memoryStores {
-		stores = append(stores, memoryStorePromptInfo{
-			Name:        store.displayName(),
-			Mount:       store.Path,
-			Description: strings.TrimSpace(store.Description),
-		})
-	}
-
-	return buildSystemMemoryInstruction(baseInstruction, memDesc, stores)
+	return buildSystemMemoryInstruction(baseInstruction, memDesc, m.resolvedMemoryDirectory)
 }
 
 func (m *middleware[M]) buildMemoryIndexMessage(ctx context.Context) (M, error) {
-	if !m.memoryIndexEnabled() {
-		return nil, nil
-	}
-	stores := make([]memoryStorePromptInfo, 0, len(m.memoryStores))
-	hasIndex := false
-	for _, store := range m.memoryStores {
-		indexPath := filepath.Join(store.Path, m.cfg.Read.Index.FileName)
-		indexContent := ""
-		totalLines := 0
+	indexPath := filepath.Join(m.resolvedMemoryDirectory, m.cfg.Read.Index.FileName)
+	indexContent := ""
+	totalLines := 0
 
-		fc, err := store.Backend.Read(ctx, &ReadRequest{FilePath: indexPath})
-		if err == nil && fc != nil && !isFileNotFoundContent(fc.Content) {
-			indexContent = fc.Content
-			totalLines = strings.Count(indexContent, "\n") + 1
-		}
-		truncatedMemoryIndex, _, truncated := linesOrSizeTrunc(indexContent, m.cfg.Read.Index.MaxLines, m.cfg.Read.Index.MaxBytes)
-		stores = append(stores, memoryStorePromptInfo{
-			Name:        store.displayName(),
-			Mount:       store.Path,
-			Description: strings.TrimSpace(store.Description),
-			Index: &memoryIndexPromptInfo{
-				FileName:       m.cfg.Read.Index.FileName,
-				Path:           indexPath,
-				Content:        truncatedMemoryIndex,
-				Empty:          strings.TrimSpace(indexContent) == "",
-				Truncated:      truncated,
-				Lines:          totalLines,
-				IncludeContent: true,
-			},
-		})
-		hasIndex = true
+	fc, err := m.boundedMemoryBackend.Read(ctx, &ReadRequest{FilePath: indexPath})
+	if err == nil && fc != nil && !isFileNotFoundContent(fc.Content) {
+		indexContent = fc.Content
+		totalLines = strings.Count(indexContent, "\n") + 1
 	}
-	if !hasIndex {
-		return nil, nil
+	truncatedMemoryIndex, _, truncated := linesOrSizeTrunc(indexContent, m.cfg.Read.Index.MaxLines, m.cfg.Read.Index.MaxBytes)
+	index := memoryIndexPromptInfo{
+		FileName:       m.cfg.Read.Index.FileName,
+		Path:           indexPath,
+		Content:        truncatedMemoryIndex,
+		Empty:          strings.TrimSpace(indexContent) == "",
+		Truncated:      truncated,
+		Lines:          totalLines,
+		IncludeContent: true,
 	}
-	return newMemoryIndexMessage[M](buildMemoryIndexReminder(stores)), nil
+	return newMemoryIndexMessage[M](buildMemoryIndexReminder(index)), nil
 }
 
 type topicFrontmatter struct {
@@ -503,21 +483,17 @@ type topicFrontmatter struct {
 }
 
 type topicCandidateBundle struct {
-	StoreName string
-	StorePath string
-	Backend   Backend
-	Key       string
-	AbsPath   string
-	RelPath   string
-	Info      FileInfo
+	Key     string
+	AbsPath string
+	RelPath string
+	Info    FileInfo
 }
 
 type topicMemoryPromptInfo struct {
-	StoreName string
-	StorePath string
-	Path      string
-	Saved     string
-	Content   string
+	MemoryDirectory string
+	Path            string
+	Saved           string
+	Content         string
 }
 
 func (m *middleware[M]) selectAndBuildTopicMemoryMessage(ctx context.Context, agentIn *adk.TypedAgentInput[M]) (M, error) {
@@ -569,36 +545,31 @@ func (m *middleware[M]) listTopicCandidates(ctx context.Context) (map[string]top
 }
 
 func (m *middleware[M]) topicSelectionCandidates(ctx context.Context) ([]topicCandidateBundle, error) {
+	files, err := m.boundedMemoryBackend.GlobInfo(ctx, &GlobInfoRequest{
+		Pattern: m.cfg.Read.TopicSelection.CandidateGlob,
+		Path:    m.resolvedMemoryDirectory,
+	})
+	if err != nil {
+		return nil, err
+	}
+
 	var candidates []topicCandidateBundle
-	for _, store := range m.memoryStores {
-		files, err := store.Backend.GlobInfo(ctx, &GlobInfoRequest{
-			Pattern: m.cfg.Read.TopicSelection.CandidateGlob,
-			Path:    store.Path,
+	indexAbs := filepath.Join(m.resolvedMemoryDirectory, m.cfg.Read.Index.FileName)
+	for _, fi := range files {
+		if filepath.Clean(fi.Path) == filepath.Clean(indexAbs) {
+			continue
+		}
+		rel, relErr := filepath.Rel(m.resolvedMemoryDirectory, fi.Path)
+		if relErr != nil {
+			rel = filepath.Base(fi.Path)
+		}
+		rel = filepath.ToSlash(rel)
+		candidates = append(candidates, topicCandidateBundle{
+			Key:     rel,
+			AbsPath: fi.Path,
+			RelPath: rel,
+			Info:    fi,
 		})
-		if err != nil {
-			return nil, err
-		}
-		indexAbs := filepath.Join(store.Path, m.cfg.Read.Index.FileName)
-		for _, fi := range files {
-			if filepath.Clean(fi.Path) == filepath.Clean(indexAbs) {
-				continue
-			}
-			rel, relErr := filepath.Rel(store.Path, fi.Path)
-			if relErr != nil {
-				rel = filepath.Base(fi.Path)
-			}
-			rel = filepath.ToSlash(rel)
-			key := filepath.ToSlash(filepath.Join(store.displayName(), rel))
-			candidates = append(candidates, topicCandidateBundle{
-				StoreName: store.displayName(),
-				StorePath: store.Path,
-				Backend:   store.Backend,
-				Key:       key,
-				AbsPath:   fi.Path,
-				RelPath:   rel,
-				Info:      fi,
-			})
-		}
 	}
 	if len(candidates) == 0 {
 		return nil, nil
@@ -614,7 +585,7 @@ func (m *middleware[M]) topicSelectionCandidates(ctx context.Context) ([]topicCa
 }
 
 func (m *middleware[M]) buildTopicCandidateBundle(ctx context.Context, bundle topicCandidateBundle) (topicCandidateBundle, string, bool) {
-	preview, err := bundle.Backend.Read(ctx, &ReadRequest{
+	preview, err := m.boundedMemoryBackend.Read(ctx, &ReadRequest{
 		FilePath: bundle.AbsPath,
 		Limit:    m.cfg.Read.TopicSelection.CandidatePreviewLines,
 	})
@@ -623,7 +594,7 @@ func (m *middleware[M]) buildTopicCandidateBundle(ctx context.Context, bundle to
 	}
 
 	desc := describeTopicCandidate(preview.Content)
-	manifestLine := fmt.Sprintf("- %s (store: %s, saved %s): %s", bundle.Key, bundle.StoreName, bundle.Info.ModifiedAt, desc)
+	manifestLine := fmt.Sprintf("- %s (saved %s): %s", bundle.Key, bundle.Info.ModifiedAt, desc)
 	return bundle, manifestLine, true
 }
 
@@ -699,7 +670,7 @@ func (m *middleware[M]) renderTopicMemories(
 		if !ok {
 			continue
 		}
-		topicBytes := len(topic.Content) + len(topic.StoreName) + len(topic.StorePath) + len(topic.Path)
+		topicBytes := len(topic.Content) + len(topic.MemoryDirectory) + len(topic.Path)
 		if maxTotalBytes > 0 && totalBytes+topicBytes > maxTotalBytes {
 			if len(rendered) == 0 {
 				if len(topic.Content) > maxTotalBytes {
@@ -716,7 +687,7 @@ func (m *middleware[M]) renderTopicMemories(
 }
 
 func (m *middleware[M]) renderTopicMemory(ctx context.Context, bundle topicCandidateBundle) (topicMemoryPromptInfo, bool) {
-	full, err := bundle.Backend.Read(ctx, &ReadRequest{FilePath: bundle.AbsPath})
+	full, err := m.boundedMemoryBackend.Read(ctx, &ReadRequest{FilePath: bundle.AbsPath})
 	if err != nil || full == nil || isFileNotFoundContent(full.Content) {
 		return topicMemoryPromptInfo{}, false
 	}
@@ -733,11 +704,10 @@ func (m *middleware[M]) renderTopicMemory(ctx context.Context, bundle topicCandi
 	}
 
 	return topicMemoryPromptInfo{
-		StoreName: bundle.StoreName,
-		StorePath: bundle.StorePath,
-		Path:      bundle.RelPath,
-		Saved:     bundle.Info.ModifiedAt,
-		Content:   content,
+		MemoryDirectory: m.resolvedMemoryDirectory,
+		Path:            bundle.RelPath,
+		Saved:           bundle.Info.ModifiedAt,
+		Content:         content,
 	}, true
 }
 
@@ -771,7 +741,7 @@ func (m *middleware[M]) AfterAgent(ctx context.Context, state *adk.TypedChatMode
 	}
 
 	// Skip background extraction if the main agent already wrote memory files in this range.
-	if hasMemoryWritesSince(state.Messages, cursor, m.memoryStores) {
+	if hasMemoryWritesSince(state.Messages, cursor, m.resolvedMemoryDirectory) {
 		end := len(state.Messages)
 		if coordKey != "" {
 			_ = setCoordinatorCursor(ctx, m.coordination.Coordinator, coordKey, end)
@@ -909,12 +879,11 @@ func (m *middleware[M]) runMemoryExtractionAgent(ctx context.Context, snapshot [
 		return err
 	}
 	newMessageCount := countModelVisibleMessagesSince(snapshot, cursor)
-	enableMemoryIndex := m.memoryIndexEnabled()
 	savePolicy, err := m.extractSavePolicyInstruction(ctx)
 	if err != nil {
 		return err
 	}
-	userPrompt := buildExtractAutoOnlyPrompt(m.extractionMemoryStoresPrompt(), newMessageCount, manifest, savePolicy, enableMemoryIndex)
+	userPrompt := buildExtractAutoOnlyPrompt(m.extractionMemoryDirectoryPrompt(), newMessageCount, manifest, savePolicy)
 	msgs := append(append([]M{}, snapshot...), makeUserMsg[M](userPrompt))
 	extractionAgent, err := m.newExtractionAgent(ctx, toolInfos)
 	if err != nil {
@@ -955,73 +924,48 @@ func (m *middleware[M]) extractSavePolicyInstruction(ctx context.Context) (strin
 	return strings.TrimSpace(custom), nil
 }
 
-func (m *middleware[M]) extractionMemoryStoresPrompt() string {
-	stores := make([]memoryStorePromptInfo, 0, len(m.memoryStores))
-	for _, store := range m.memoryStores {
-		info := memoryStorePromptInfo{
-			Name:        store.displayName(),
-			Mount:       store.Path,
-			Description: strings.TrimSpace(store.Description),
-		}
-		if m.memoryIndexEnabled() {
-			info.Index = &memoryIndexPromptInfo{
-				FileName: m.cfg.Read.Index.FileName,
-				Path:     filepath.Join(store.Path, m.cfg.Read.Index.FileName),
-			}
-		}
-		stores = append(stores, info)
+func (m *middleware[M]) extractionMemoryDirectoryPrompt() string {
+	index := &memoryIndexPromptInfo{
+		FileName: m.cfg.Read.Index.FileName,
+		Path:     filepath.Join(m.resolvedMemoryDirectory, m.cfg.Read.Index.FileName),
 	}
-	return buildMemoryStoresManifest(stores)
+	return buildMemoryDirectoryManifest(m.resolvedMemoryDirectory, index)
 }
 
 func (m *middleware[M]) buildMemoryManifest(ctx context.Context) (string, error) {
-	var stores []memoryManifestStorePromptInfo
-	for _, store := range m.memoryStores {
-		files, err := store.Backend.GlobInfo(ctx, &GlobInfoRequest{
-			Pattern: CandidateGlobPattern,
-			Path:    store.Path,
-		})
-		if err != nil {
-			return "", err
-		}
-		storeInfo := memoryManifestStorePromptInfo{
-			Name:  store.displayName(),
-			Mount: store.Path,
-		}
-		indexAbs := filepath.Join(store.Path, m.cfg.Read.Index.FileName)
-		if len(files) == 0 {
-			stores = append(stores, storeInfo)
-			continue
-		}
-		for _, fi := range files {
-			rel, relErr := filepath.Rel(store.Path, fi.Path)
-			if relErr != nil {
-				rel = filepath.Base(fi.Path)
-			}
-			rel = filepath.ToSlash(rel)
-			if filepath.Clean(fi.Path) == filepath.Clean(indexAbs) {
-				if !m.memoryIndexEnabled() {
-					continue
-				}
-				rel = m.cfg.Read.Index.FileName
-			}
-			desc := ""
-			preview, rerr := store.Backend.Read(ctx, &ReadRequest{FilePath: fi.Path, Limit: defaultCandidatePreviewLine})
-			if rerr == nil && preview != nil && !isFileNotFoundContent(preview.Content) {
-				if fm, ok := parseFrontmatter(preview.Content); ok {
-					desc = strings.TrimSpace(fm.Description)
-				}
-			}
-			storeInfo.Files = append(storeInfo.Files, memoryManifestFilePromptInfo{
-				MemoryPath:  filepath.ToSlash(filepath.Join(store.displayName(), rel)),
-				AbsPath:     fi.Path,
-				Saved:       fi.ModifiedAt,
-				Description: desc,
-			})
-		}
-		stores = append(stores, storeInfo)
+	files, err := m.boundedMemoryBackend.GlobInfo(ctx, &GlobInfoRequest{
+		Pattern: CandidateGlobPattern,
+		Path:    m.resolvedMemoryDirectory,
+	})
+	if err != nil {
+		return "", err
 	}
-	return buildExtractionMemoryManifest(stores), nil
+	manifest := memoryManifestPromptInfo{Directory: m.resolvedMemoryDirectory}
+	indexAbs := filepath.Join(m.resolvedMemoryDirectory, m.cfg.Read.Index.FileName)
+	for _, fi := range files {
+		rel, relErr := filepath.Rel(m.resolvedMemoryDirectory, fi.Path)
+		if relErr != nil {
+			rel = filepath.Base(fi.Path)
+		}
+		rel = filepath.ToSlash(rel)
+		if filepath.Clean(fi.Path) == filepath.Clean(indexAbs) {
+			rel = m.cfg.Read.Index.FileName
+		}
+		desc := ""
+		preview, rerr := m.boundedMemoryBackend.Read(ctx, &ReadRequest{FilePath: fi.Path, Limit: defaultCandidatePreviewLine})
+		if rerr == nil && preview != nil && !isFileNotFoundContent(preview.Content) {
+			if fm, ok := parseFrontmatter(preview.Content); ok {
+				desc = strings.TrimSpace(fm.Description)
+			}
+		}
+		manifest.Files = append(manifest.Files, memoryManifestFilePromptInfo{
+			MemoryPath:  rel,
+			AbsPath:     fi.Path,
+			Saved:       fi.ModifiedAt,
+			Description: desc,
+		})
+	}
+	return buildExtractionMemoryManifest(manifest), nil
 }
 
 type toolInfoOverrideMiddleware[M adk.MessageType] struct {
