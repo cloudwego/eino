@@ -554,9 +554,10 @@ func init() {
 	schema.RegisterName[*ModelTimeoutMeta]("_eino_adk_model_timeout_meta")
 	schema.RegisterName[*ModelUsage]("_eino_adk_model_usage")
 	schema.RegisterName[*ToolSpanMeta]("_eino_adk_tool_span_meta")
-	schema.RegisterName[*SessionEventVariant[*schema.Message]]("_eino_adk_session_event_variant")
-	schema.RegisterName[*SessionEventVariant[*schema.AgenticMessage]]("_eino_adk_agentic_session_event_variant")
-	schema.RegisterName[*MessageStreamRef]("_eino_adk_message_stream_ref")
+	// Note: SessionEventVariant and MessageStreamRef are not registered here
+	// because they never reach a serializer: checkpoint sanitizers strip
+	// SessionEventVariant before gob encoding, and the store serializer only
+	// encodes *SessionEvent[M] (the materialized form, not the variant).
 	schema.RegisterName[*CancelEvent]("_eino_adk_cancel_event")
 	schema.RegisterName[*InterruptEvent]("_eino_adk_interrupt_event")
 	schema.RegisterName[*InterruptContext]("_eino_adk_interrupt_context")
