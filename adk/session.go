@@ -169,6 +169,11 @@ type SessionEvent[M MessageType] struct {
 // SessionEventVariant is the live AgentEvent envelope for session-related
 // metadata. SessionID is live ownership metadata only; it is intentionally not
 // part of durable SessionEvent payloads.
+//
+// Invariant: exactly one of Event or MessageStreamRef must be set.
+// Event carries a fully materialized SessionEvent; MessageStreamRef carries
+// only the reserved durable identity for a streaming message whose content
+// remains in Output.MessageOutput.MessageStream.
 type SessionEventVariant[M MessageType] struct {
 	SessionID string
 
@@ -176,38 +181,11 @@ type SessionEventVariant[M MessageType] struct {
 	MessageStreamRef *MessageStreamRef
 }
 
-// IsEvent returns true if the variant carries a materialized SessionEvent.
-func (v *SessionEventVariant[M]) IsEvent() bool {
-	return v != nil && v.Event != nil
-}
-
-// IsMessageStream returns true if the variant carries a streaming message reference.
-func (v *SessionEventVariant[M]) IsMessageStream() bool {
-	return v != nil && v.MessageStreamRef != nil
-}
-
-// GetEvent returns the materialized SessionEvent, or nil if the variant
-// carries a MessageStreamRef or is nil.
-func (v *SessionEventVariant[M]) GetEvent() *SessionEvent[M] {
-	if v == nil {
-		return nil
-	}
-	return v.Event
-}
-
-// GetMessageStreamRef returns the streaming message reference, or nil if the
-// variant carries a materialized SessionEvent or is nil.
-func (v *SessionEventVariant[M]) GetMessageStreamRef() *MessageStreamRef {
-	if v == nil {
-		return nil
-	}
-	return v.MessageStreamRef
-}
-
 // MessageStreamRef carries the durable identity metadata for a streaming
 // message whose content remains in Output.MessageOutput.MessageStream. It is
-// carried by SessionEventVariant for live events and materialized into a full
-// SessionEvent when the stream prefix is persisted.
+// carried by SessionEventVariant for live events. The runner later reuses this
+// identity when it drains its persistence copy of the stream and writes the
+// resulting message as a SessionEvent.
 type MessageStreamRef struct {
 	EventID   string
 	Timestamp time.Time
@@ -837,6 +815,10 @@ func classifySpanSessionEvent(span *SpanEvent) (SessionEventKind, error) {
 // NormalizeSessionEventKind fills an empty Kind from the active payload and
 // rejects mismatches between Kind and payload shape.
 func NormalizeSessionEventKind[M MessageType](event *SessionEvent[M]) error {
+	// Legacy compatibility: "turn_end" is the pre-refactor lifecycle event kind.
+	// Sessions persisted before the SessionRunState refactor may carry this kind
+	// on replay. Bypassing classification avoids failing on legacy data that has
+	// no active payload field matching any current kind.
 	if event != nil && event.Kind == "turn_end" {
 		return nil
 	}

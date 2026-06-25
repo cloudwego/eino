@@ -326,11 +326,6 @@ func emitRetryingTimeline[M MessageType](ctx context.Context, err error, rejectR
 			RetryStatus: &RetryStatus{Type: "retrying"},
 		},
 	})
-	sendSessionTimelineEvent(ctx, &SessionEvent[M]{
-		Timestamp: newEventTimestamp(),
-		Kind:      SessionEventSessionStatusRunning,
-		Lifecycle: &LifecycleEvent{State: SessionRunStateRunning},
-	})
 }
 
 func emitRetryExhaustedTimeline[M MessageType](ctx context.Context, err error) {

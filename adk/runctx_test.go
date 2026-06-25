@@ -695,15 +695,15 @@ func TestSanitizeRunContextForSessionCheckpointStripsSessionEvents(t *testing.T)
 	require.NotSame(t, rc, sanitized)
 	require.NotSame(t, session, sanitized.Session)
 	require.Len(t, sanitized.Session.Events, 2)
-	assert.Nil(t, sanitized.Session.Events[0].SessionEventVariant.GetEvent())
+	assert.Nil(t, sanitized.Session.Events[0].SessionEventVariant)
 	assert.Same(t, output, sanitized.Session.Events[0].Output)
 	assert.NotNil(t, sanitized.Session.Events[1].Action.Interrupted)
-	assert.Nil(t, sanitized.Session.Events[1].SessionEventVariant.GetEvent())
+	assert.Nil(t, sanitized.Session.Events[1].SessionEventVariant)
 	assert.Equal(t, map[string]any{"k": "v"}, sanitized.Session.Values)
 
-	assert.NotNil(t, kept.SessionEventVariant.GetEvent(), "sanitizer must not mutate the original output event")
-	assert.NotNil(t, dropped.SessionEventVariant.GetEvent(), "sanitizer must not mutate the original timeline event")
-	assert.NotNil(t, interrupt.SessionEventVariant.GetEvent(), "sanitizer must not mutate the original interrupt event")
+	assert.NotNil(t, kept.SessionEventVariant.Event, "sanitizer must not mutate the original output event")
+	assert.NotNil(t, dropped.SessionEventVariant.Event, "sanitizer must not mutate the original timeline event")
+	assert.NotNil(t, interrupt.SessionEventVariant.Event, "sanitizer must not mutate the original interrupt event")
 }
 
 func TestSanitizeRunContextForSessionCheckpointTypedEvents(t *testing.T) {
@@ -748,10 +748,10 @@ func TestSanitizeRunContextForSessionCheckpointTypedEvents(t *testing.T) {
 	store, ok := sanitized.Session.TypedEvents.(*[]*typedAgentEventWrapper[*schema.AgenticMessage])
 	require.True(t, ok)
 	require.Len(t, *store, 1)
-	assert.Nil(t, (*store)[0].event.SessionEventVariant.GetEvent())
+	assert.Nil(t, (*store)[0].event.SessionEventVariant)
 	assert.Same(t, output, (*store)[0].event.Output)
-	assert.NotNil(t, events[0].event.SessionEventVariant.GetEvent(), "sanitizer must not mutate the original typed event")
-	assert.NotNil(t, events[1].event.SessionEventVariant.GetEvent(), "sanitizer must not mutate the original typed timeline event")
+	assert.NotNil(t, events[0].event.SessionEventVariant.Event, "sanitizer must not mutate the original typed event")
+	assert.NotNil(t, events[1].event.SessionEventVariant.Event, "sanitizer must not mutate the original typed timeline event")
 }
 
 func TestSanitizeRunContextForSessionCheckpointReducesEncodedPayload(t *testing.T) {
@@ -794,7 +794,7 @@ func TestSanitizeRunContextForSessionCheckpointReducesEncodedPayload(t *testing.
 	_, decoded, _, err := runnerLoadCheckPointBytes(context.Background(), sanitized)
 	require.NoError(t, err)
 	require.Len(t, decoded.Session.Events, 1)
-	assert.Nil(t, decoded.Session.Events[0].SessionEventVariant.GetEvent())
+	assert.Nil(t, decoded.Session.Events[0].SessionEventVariant)
 	assert.NotNil(t, decoded.Session.Events[0].Output)
 }
 
@@ -841,8 +841,8 @@ func TestSanitizeRunContextForSessionCheckpointPreservesLaneChain(t *testing.T) 
 	require.NotNil(t, sanitized.Session.LaneEvents.Parent)
 	require.Len(t, sanitized.Session.LaneEvents.Events, 1)
 	require.Len(t, sanitized.Session.LaneEvents.Parent.Events, 1)
-	assert.Nil(t, sanitized.Session.LaneEvents.Events[0].SessionEventVariant.GetEvent())
-	assert.Nil(t, sanitized.Session.LaneEvents.Parent.Events[0].SessionEventVariant.GetEvent())
-	assert.NotNil(t, childTimelineOnly.SessionEventVariant.GetEvent(), "sanitizer must not mutate original child lane")
-	assert.NotNil(t, parentTimelineOnly.SessionEventVariant.GetEvent(), "sanitizer must not mutate original parent lane")
+	assert.Nil(t, sanitized.Session.LaneEvents.Events[0].SessionEventVariant)
+	assert.Nil(t, sanitized.Session.LaneEvents.Parent.Events[0].SessionEventVariant)
+	assert.NotNil(t, childTimelineOnly.SessionEventVariant.Event, "sanitizer must not mutate original child lane")
+	assert.NotNil(t, parentTimelineOnly.SessionEventVariant.Event, "sanitizer must not mutate original parent lane")
 }

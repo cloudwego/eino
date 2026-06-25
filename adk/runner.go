@@ -1071,13 +1071,6 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 						continue
 					}
 
-					persistMV := *event.Output.MessageOutput
-					persistMV.Message = persistedMsg
-					persistMV.MessageStream = nil
-					persistMV.IsStreaming = false
-					persistOutput := *event.Output
-					persistOutput.MessageOutput = &persistMV
-					_ = persistOutput
 					_ = persistSessionEvent(&SessionEvent[M]{
 						EventID:   ref.EventID,
 						Timestamp: ref.Timestamp,

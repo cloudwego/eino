@@ -375,6 +375,31 @@ func sameSystemMessage[M MessageType](oldSys, newSys M) bool {
 	}
 }
 
+func deepCopyMessage[M MessageType](msg M) M {
+	switch v := any(msg).(type) {
+	case *schema.Message:
+		cp := *v
+		if v.Extra != nil {
+			cp.Extra = make(map[string]any, len(v.Extra))
+			for k, val := range v.Extra {
+				cp.Extra[k] = val
+			}
+		}
+		return any(&cp).(M)
+	case *schema.AgenticMessage:
+		cp := *v
+		if v.Extra != nil {
+			cp.Extra = make(map[string]any, len(v.Extra))
+			for k, val := range v.Extra {
+				cp.Extra[k] = val
+			}
+		}
+		return any(&cp).(M)
+	default:
+		return msg
+	}
+}
+
 func setMessageIDFromTarget[M MessageType](msg M, targetID string) {
 	if targetID == "" || isNilMessage(msg) {
 		return
@@ -385,6 +410,8 @@ func setMessageIDFromTarget[M MessageType](msg M, targetID string) {
 func syncLeadingSystemMessageSessionEvent[M MessageType](
 	ctx context.Context,
 	previous []M,
+	oldSys M,
+	hasOldSys bool,
 	generated []M,
 ) error {
 	execCtx := getTypedChatModelAgentExecCtx[M](ctx)
@@ -398,7 +425,7 @@ func syncLeadingSystemMessageSessionEvent[M MessageType](
 	}
 
 	var event *TypedAgentEvent[M]
-	if oldSys, hasOldSys := leadingSystemMessage(previous); hasOldSys {
+	if hasOldSys {
 		EnsureMessageID(oldSys)
 		oldID := GetMessageID(oldSys)
 		setMessageIDFromTarget(newSys, oldID)
@@ -1251,11 +1278,15 @@ func (a *TypedChatModelAgent[M]) buildNoToolsRunFunc(_ context.Context) (typedRu
 			}))
 
 		chain.AppendLambda(compose.InvokableLambda(func(ctx context.Context, in typedNoToolsInput[M]) ([]M, error) {
+			oldSys, hasOldSys := leadingSystemMessage(in.input.Messages)
+			if hasOldSys {
+				oldSys = deepCopyMessage(oldSys)
+			}
 			messages, err := a.genModelInput(ctx, in.instruction, in.input)
 			if err != nil {
 				return nil, err
 			}
-			if err := syncLeadingSystemMessageSessionEvent(ctx, in.input.Messages, messages); err != nil {
+			if err := syncLeadingSystemMessageSessionEvent(ctx, in.input.Messages, oldSys, hasOldSys, messages); err != nil {
 				return nil, err
 			}
 			if p.sessionEvents {
@@ -1409,11 +1440,15 @@ func (a *TypedChatModelAgent[M]) buildMessageReActRunFunc(_ context.Context, bc 
 		chain := compose.NewChain[reactRunInput, Message]().
 			AppendLambda(
 				compose.InvokableLambda(func(ctx context.Context, in reactRunInput) (*reactInput, error) {
+					oldSys, hasOldSys := leadingSystemMessage(in.input.Messages)
+					if hasOldSys {
+						oldSys = deepCopyMessage(oldSys)
+					}
 					messages, genErr := genModelInputFn(ctx, in.instruction, in.input)
 					if genErr != nil {
 						return nil, genErr
 					}
-					if genErr = syncLeadingSystemMessageSessionEvent(ctx, in.input.Messages, messages); genErr != nil {
+					if genErr = syncLeadingSystemMessageSessionEvent(ctx, in.input.Messages, oldSys, hasOldSys, messages); genErr != nil {
 						return nil, genErr
 					}
 					if mp.sessionEvents {
@@ -1555,11 +1590,15 @@ func (a *TypedChatModelAgent[M]) buildAgenticReActRunFunc(_ context.Context, bc 
 		chain := compose.NewChain[agenticReactRunInput, *schema.AgenticMessage]().
 			AppendLambda(
 				compose.InvokableLambda(func(ctx context.Context, in agenticReactRunInput) (*agenticReactInput, error) {
+					oldSys, hasOldSys := leadingSystemMessage(in.input.Messages)
+					if hasOldSys {
+						oldSys = deepCopyMessage(oldSys)
+					}
 					messages, genErr := genModelInputFn(ctx, in.instruction, in.input)
 					if genErr != nil {
 						return nil, genErr
 					}
-					if genErr = syncLeadingSystemMessageSessionEvent(ctx, in.input.Messages, messages); genErr != nil {
+					if genErr = syncLeadingSystemMessageSessionEvent(ctx, in.input.Messages, oldSys, hasOldSys, messages); genErr != nil {
 						return nil, genErr
 					}
 					if ap.sessionEvents {

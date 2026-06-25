@@ -466,7 +466,7 @@ func TestWithTimelineEvents_LiveExposure(t *testing.T) {
 				break
 			}
 			require.NoError(t, event.Err)
-			assert.Nil(t, event.SessionEventVariant.GetEvent())
+			assert.Nil(t, event.SessionEventVariant)
 		}
 		lifecycle := filterStoredSessionEvents(t, store.events, func(se *SessionEvent[*schema.Message]) bool {
 			return se.Kind == SessionEventSessionStatusRunning || se.Kind == SessionEventSessionStatusIdle
@@ -487,10 +487,10 @@ func TestWithTimelineEvents_LiveExposure(t *testing.T) {
 				break
 			}
 			require.NoError(t, event.Err)
-			if event.SessionEventVariant.GetEvent() != nil {
-				kinds = append(kinds, event.SessionEventVariant.GetEvent().Kind)
-				if event.SessionEventVariant.GetEvent().Kind == SessionEventMessage && event.SessionEventVariant.GetEvent().Message != nil &&
-					event.SessionEventVariant.GetEvent().Message.Role == schema.User && event.SessionEventVariant.GetEvent().Message.Content == "hello" {
+			if event.SessionEventVariant != nil && event.SessionEventVariant.Event != nil {
+				kinds = append(kinds, event.SessionEventVariant.Event.Kind)
+				if event.SessionEventVariant.Event.Kind == SessionEventMessage && event.SessionEventVariant.Event.Message != nil &&
+					event.SessionEventVariant.Event.Message.Role == schema.User && event.SessionEventVariant.Event.Message.Content == "hello" {
 					liveUserInput = true
 				}
 			}
@@ -566,8 +566,8 @@ func TestRunner_ExtensionEventSentWithTypedSendEventIsLiveAndPersisted(t *testin
 				break
 			}
 			require.NoError(t, event.Err)
-			if event.SessionEventVariant.GetEvent() != nil && event.SessionEventVariant.GetEvent().Kind == extensionKind {
-				liveExtension = event.SessionEventVariant.GetEvent()
+			if event.SessionEventVariant != nil && event.SessionEventVariant.Event != nil && event.SessionEventVariant.Event.Kind == extensionKind {
+				liveExtension = event.SessionEventVariant.Event
 			}
 		}
 
@@ -621,7 +621,7 @@ func TestRunner_ExtensionEventSentWithTypedSendEventIsLiveAndPersisted(t *testin
 				break
 			}
 			require.NoError(t, event.Err)
-			assert.Nil(t, event.SessionEventVariant.GetEvent())
+			assert.Nil(t, event.SessionEventVariant)
 		}
 
 		stored := filterStoredSessionEvents(t, store.events, func(se *SessionEvent[*schema.Message]) bool {
@@ -660,7 +660,7 @@ func TestSessionTimeline_SpanMetaMustBeOneOf(t *testing.T) {
 	assert.Contains(t, err.Error(), "exactly one of Model or Tool")
 }
 
-func TestRetryTimelineEmitsRescheduleSequence(t *testing.T) {
+func TestRetryTimelineEmitsRetryingError(t *testing.T) {
 	iter, gen := NewAsyncIteratorPair[*AgentEvent]()
 	ctx := withTypedChatModelAgentExecCtx(context.Background(), &chatModelAgentExecCtx{
 		generator:              gen,
@@ -677,13 +677,12 @@ func TestRetryTimelineEmitsRescheduleSequence(t *testing.T) {
 			break
 		}
 		require.NoError(t, event.Err)
-		require.NotNil(t, event.SessionEventVariant.GetEvent())
-		kinds = append(kinds, event.SessionEventVariant.GetEvent().Kind)
+		require.NotNil(t, event.SessionEventVariant.Event)
+		kinds = append(kinds, event.SessionEventVariant.Event.Kind)
 	}
 
 	require.Equal(t, []SessionEventKind{
 		SessionEventSessionError,
-		SessionEventSessionStatusRunning,
 	}, kinds)
 }
 
@@ -738,8 +737,8 @@ func TestModelSpanEndCarriesAssistantUsage(t *testing.T) {
 			break
 		}
 		require.NoError(t, event.Err)
-		if event.SessionEventVariant.GetEvent() != nil && event.SessionEventVariant.GetEvent().Kind == SessionEventSpanModelRequestEnd {
-			spanEnd = event.SessionEventVariant.GetEvent()
+		if event.SessionEventVariant != nil && event.SessionEventVariant.Event != nil && event.SessionEventVariant.Event.Kind == SessionEventSpanModelRequestEnd {
+			spanEnd = event.SessionEventVariant.Event
 		}
 	}
 	require.NotNil(t, spanEnd)
@@ -799,9 +798,9 @@ func TestSessionTimeline_TypedAgentEventGobRoundTripPreservesSessionEvent(t *tes
 
 	var decoded AgentEvent
 	require.NoError(t, gob.NewDecoder(&buf).Decode(&decoded))
-	require.NotNil(t, decoded.SessionEventVariant.GetEvent())
-	assert.Equal(t, original.SessionEventVariant.GetEvent().EventID, decoded.SessionEventVariant.GetEvent().EventID)
-	assert.Equal(t, SessionEventSpanToolCallStart, decoded.SessionEventVariant.GetEvent().Kind)
+	require.NotNil(t, decoded.SessionEventVariant.Event)
+	assert.Equal(t, original.SessionEventVariant.Event.EventID, decoded.SessionEventVariant.Event.EventID)
+	assert.Equal(t, SessionEventSpanToolCallStart, decoded.SessionEventVariant.Event.Kind)
 }
 
 func TestModelSpanMetaFromContextPopulatesFailoverAndModelFields(t *testing.T) {
@@ -875,9 +874,9 @@ func TestRetryTimelineUsesRejectReasonMessage(t *testing.T) {
 		if !ok {
 			break
 		}
-		if event.SessionEventVariant.GetEvent() != nil && event.SessionEventVariant.GetEvent().Kind == SessionEventSessionError {
-			require.NotNil(t, event.SessionEventVariant.GetEvent().Error)
-			assert.Equal(t, "policy rejected", event.SessionEventVariant.GetEvent().Error.Message)
+		if event.SessionEventVariant != nil && event.SessionEventVariant.Event != nil && event.SessionEventVariant.Event.Kind == SessionEventSessionError {
+			require.NotNil(t, event.SessionEventVariant.Event.Error)
+			assert.Equal(t, "policy rejected", event.SessionEventVariant.Event.Error.Message)
 			found = true
 		}
 	}
@@ -921,15 +920,15 @@ func TestFailoverTimelineLinksAttemptsAndEmitsSessionErrors(t *testing.T) {
 			break
 		}
 		require.NoError(t, event.Err)
-		if event.SessionEventVariant.GetEvent() == nil {
+		if event.SessionEventVariant == nil || event.SessionEventVariant.Event == nil {
 			continue
 		}
-		switch event.SessionEventVariant.GetEvent().Kind {
+		switch event.SessionEventVariant.Event.Kind {
 		case SessionEventSpanModelRequestStart:
-			starts = append(starts, event.SessionEventVariant.GetEvent())
+			starts = append(starts, event.SessionEventVariant.Event)
 		case SessionEventSessionError:
-			if event.SessionEventVariant.GetEvent().Error != nil && event.SessionEventVariant.GetEvent().Error.Type == SessionErrorTypeModelFailover {
-				failoverErrors = append(failoverErrors, event.SessionEventVariant.GetEvent())
+			if event.SessionEventVariant.Event.Error != nil && event.SessionEventVariant.Event.Error.Type == SessionErrorTypeModelFailover {
+				failoverErrors = append(failoverErrors, event.SessionEventVariant.Event)
 			}
 		}
 	}
@@ -989,9 +988,9 @@ func TestSessionTimeline_NormalizeAgentSessionEventMaterializesEnvelope(t *testi
 		se, err := normalizeAgentSessionEvent(event)
 		require.NoError(t, err)
 		require.NotEmpty(t, se.EventID)
-		assert.Equal(t, se.EventID, event.SessionEventVariant.GetEvent().EventID)
+		assert.Equal(t, se.EventID, event.SessionEventVariant.Event.EventID)
 		require.False(t, se.Timestamp.IsZero())
-		assert.Equal(t, se.Timestamp, event.SessionEventVariant.GetEvent().Timestamp)
+		assert.Equal(t, se.Timestamp, event.SessionEventVariant.Event.Timestamp)
 		assert.Empty(t, original.EventID)
 	})
 
@@ -1001,7 +1000,7 @@ func TestSessionTimeline_NormalizeAgentSessionEventMaterializesEnvelope(t *testi
 		se, err := normalizeAgentSessionEvent(event)
 		require.NoError(t, err)
 		require.NotNil(t, se.ModelContext)
-		require.NotNil(t, event.SessionEventVariant.GetEvent().ModelContext)
+		require.NotNil(t, event.SessionEventVariant.Event.ModelContext)
 	})
 }
 
@@ -1041,8 +1040,8 @@ func TestRetryOnlyModelSpansHaveNoParentSpanID(t *testing.T) {
 			break
 		}
 		require.NoError(t, event.Err)
-		if event.SessionEventVariant.GetEvent() != nil && event.SessionEventVariant.GetEvent().Kind == SessionEventSpanModelRequestStart {
-			starts = append(starts, event.SessionEventVariant.GetEvent())
+		if event.SessionEventVariant != nil && event.SessionEventVariant.Event != nil && event.SessionEventVariant.Event.Kind == SessionEventSpanModelRequestStart {
+			starts = append(starts, event.SessionEventVariant.Event)
 		}
 	}
 	require.NotEmpty(t, starts)
@@ -1093,16 +1092,16 @@ func TestRetryAndFailoverTimelineKeepsDistinctErrorTypes(t *testing.T) {
 			break
 		}
 		require.NoError(t, event.Err)
-		if event.SessionEventVariant.GetEvent() == nil || event.SessionEventVariant.GetEvent().Kind != SessionEventSessionError || event.SessionEventVariant.GetEvent().Error == nil {
+		if event.SessionEventVariant == nil || event.SessionEventVariant.Event == nil || event.SessionEventVariant.Event.Kind != SessionEventSessionError || event.SessionEventVariant.Event.Error == nil {
 			continue
 		}
-		switch event.SessionEventVariant.GetEvent().Error.Type {
+		switch event.SessionEventVariant.Event.Error.Type {
 		case SessionErrorTypeModelRetry:
-			if event.SessionEventVariant.GetEvent().Error.RetryStatus != nil && event.SessionEventVariant.GetEvent().Error.RetryStatus.Type == "exhausted" {
+			if event.SessionEventVariant.Event.Error.RetryStatus != nil && event.SessionEventVariant.Event.Error.RetryStatus.Type == "exhausted" {
 				retryExhausted = true
 			}
 		case SessionErrorTypeModelFailover:
-			if event.SessionEventVariant.GetEvent().Error.RetryStatus != nil && event.SessionEventVariant.GetEvent().Error.RetryStatus.Type == "retrying" {
+			if event.SessionEventVariant.Event.Error.RetryStatus != nil && event.SessionEventVariant.Event.Error.RetryStatus.Type == "retrying" {
 				failoverRetrying = true
 			}
 		}
@@ -1344,8 +1343,8 @@ func TestToolSpan_PersistedAroundToolCallAndLinksToMessages(t *testing.T) {
 			break
 		}
 		require.NoError(t, event.Err)
-		if event.SessionEventVariant.GetEvent() != nil && event.SessionEventVariant.GetEvent().Kind == SessionEventSpanToolCallEnd {
-			liveToolEnd = event.SessionEventVariant.GetEvent()
+		if event.SessionEventVariant != nil && event.SessionEventVariant.Event != nil && event.SessionEventVariant.Event.Kind == SessionEventSpanToolCallEnd {
+			liveToolEnd = event.SessionEventVariant.Event
 		}
 	}
 	require.NotNil(t, liveToolEnd, "expected live tool_call_end span emission")

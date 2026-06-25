@@ -119,14 +119,14 @@ func TestChatModelAgentRun(t *testing.T) {
 		}
 
 		require.Len(t, events, 3)
-		require.NotNil(t, events[0].SessionEventVariant.GetEvent())
-		assert.Equal(t, SessionEventMessageInserted, events[0].SessionEventVariant.GetEvent().Kind)
-		assert.Equal(t, schema.System, events[0].SessionEventVariant.GetEvent().MessageInserted.Message.Role)
+		require.NotNil(t, events[0].SessionEventVariant.Event)
+		assert.Equal(t, SessionEventMessageInserted, events[0].SessionEventVariant.Event.Kind)
+		assert.Equal(t, schema.System, events[0].SessionEventVariant.Event.MessageInserted.Message.Role)
 
-		require.NotNil(t, events[1].SessionEventVariant.GetEvent())
-		assert.Equal(t, SessionEventModelContext, events[1].SessionEventVariant.GetEvent().Kind)
-		require.NotNil(t, events[1].SessionEventVariant.GetEvent().ModelContext)
-		assert.Empty(t, events[1].SessionEventVariant.GetEvent().ModelContext.ToolInfos)
+		require.NotNil(t, events[1].SessionEventVariant.Event)
+		assert.Equal(t, SessionEventModelContext, events[1].SessionEventVariant.Event.Kind)
+		require.NotNil(t, events[1].SessionEventVariant.Event.ModelContext)
+		assert.Empty(t, events[1].SessionEventVariant.Event.ModelContext.ToolInfos)
 
 		require.NotNil(t, events[2].Output)
 		assert.Equal(t, "session answer", events[2].Output.MessageOutput.Message.Content)
@@ -299,13 +299,13 @@ func TestChatModelAgentRun(t *testing.T) {
 
 		require.Len(t, events, 5)
 		assert.Equal(t, 2, generateCount)
-		require.NotNil(t, events[0].SessionEventVariant.GetEvent())
-		assert.Equal(t, SessionEventMessageInserted, events[0].SessionEventVariant.GetEvent().Kind)
-		require.NotNil(t, events[1].SessionEventVariant.GetEvent())
-		assert.Equal(t, SessionEventModelContext, events[1].SessionEventVariant.GetEvent().Kind)
-		require.NotNil(t, events[1].SessionEventVariant.GetEvent().ModelContext)
-		require.Len(t, events[1].SessionEventVariant.GetEvent().ModelContext.ToolInfos, 1)
-		assert.Equal(t, "test_tool", events[1].SessionEventVariant.GetEvent().ModelContext.ToolInfos[0].Name)
+		require.NotNil(t, events[0].SessionEventVariant.Event)
+		assert.Equal(t, SessionEventMessageInserted, events[0].SessionEventVariant.Event.Kind)
+		require.NotNil(t, events[1].SessionEventVariant.Event)
+		assert.Equal(t, SessionEventModelContext, events[1].SessionEventVariant.Event.Kind)
+		require.NotNil(t, events[1].SessionEventVariant.Event.ModelContext)
+		require.Len(t, events[1].SessionEventVariant.Event.ModelContext.ToolInfos, 1)
+		assert.Equal(t, "test_tool", events[1].SessionEventVariant.Event.ModelContext.ToolInfos[0].Name)
 	})
 
 	t.Run("AfterChatModel_ReAct_ModifyAffectsFlow", func(t *testing.T) {

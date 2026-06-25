@@ -947,11 +947,11 @@ func TestStampAgentToolSessionEvent(t *testing.T) {
 
 	stampAgentToolSessionEvent(event, "agent_tool:child")
 
-	require.NotNil(t, event.SessionEventVariant.GetEvent())
+	require.NotNil(t, event.SessionEventVariant.Event)
 	assert.Equal(t, "agent_tool:child", event.SessionEventVariant.SessionID)
-	assert.Empty(t, event.SessionEventVariant.GetEvent().EventID)
-	assert.False(t, event.SessionEventVariant.GetEvent().Timestamp.IsZero())
-	assert.Equal(t, SessionEventMessage, event.SessionEventVariant.GetEvent().Kind)
+	assert.Empty(t, event.SessionEventVariant.Event.EventID)
+	assert.False(t, event.SessionEventVariant.Event.Timestamp.IsZero())
+	assert.Equal(t, SessionEventMessage, event.SessionEventVariant.Event.Kind)
 }
 
 func TestStampAgentToolSessionEvent_Streaming(t *testing.T) {
@@ -967,7 +967,7 @@ func TestStampAgentToolSessionEvent_Streaming(t *testing.T) {
 
 	stampAgentToolSessionEvent(event, "agent_tool:child")
 
-	ref := event.SessionEventVariant.GetMessageStreamRef()
+	ref := event.SessionEventVariant.MessageStreamRef
 	require.NotNil(t, ref)
 	assert.Equal(t, "agent_tool:child", event.SessionEventVariant.SessionID)
 	assert.Empty(t, ref.EventID)

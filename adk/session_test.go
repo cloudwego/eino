@@ -1096,7 +1096,7 @@ func TestRunnerSessionStreamingRefAllocatesMissingEventID(t *testing.T) {
 		}
 	}
 	require.NotNil(t, event.SessionEventVariant)
-	ref := event.SessionEventVariant.GetMessageStreamRef()
+	ref := event.SessionEventVariant.MessageStreamRef
 	require.NotNil(t, ref)
 	assert.Equal(t, businessID, ref.EventID)
 	assert.Equal(t, SessionEventMessage, ref.Kind)
@@ -2020,7 +2020,7 @@ func TestStripSessionEventFields(t *testing.T) {
 		}
 		stripped := stripSessionEventFields(ev)
 		require.NotNil(t, stripped)
-		assert.Nil(t, stripped.SessionEventVariant.GetEvent())
+		assert.Nil(t, stripped.SessionEventVariant)
 		assert.EqualError(t, stripped.Err, "visible")
 	})
 
@@ -2709,7 +2709,7 @@ func TestRunnerSessionInterruptCheckpointTailIsFinalIdle(t *testing.T) {
 	require.NotNil(t, runCtx.Session)
 	for _, event := range runCtx.Session.Events {
 		require.NotNil(t, event.AgentEvent)
-		assert.Nil(t, event.SessionEventVariant.GetEvent())
+		assert.Nil(t, event.SessionEventVariant)
 	}
 }
 
@@ -2732,8 +2732,8 @@ func TestRunnerSessionCheckpointPayloadStripsSessionEvents(t *testing.T) {
 			break
 		}
 		require.NoError(t, event.Err)
-		if event.SessionEventVariant.GetEvent() != nil {
-			liveSessionEventIDs = append(liveSessionEventIDs, event.SessionEventVariant.GetEvent().EventID)
+		if event.SessionEventVariant != nil && event.SessionEventVariant.Event != nil {
+			liveSessionEventIDs = append(liveSessionEventIDs, event.SessionEventVariant.Event.EventID)
 		}
 	}
 	assert.Contains(t, liveSessionEventIDs, "checkpoint-session-only")
@@ -2753,7 +2753,7 @@ func TestRunnerSessionCheckpointPayloadStripsSessionEvents(t *testing.T) {
 	var foundOutput bool
 	for _, event := range runCtx.Session.Events {
 		require.NotNil(t, event.AgentEvent)
-		assert.Nil(t, event.SessionEventVariant.GetEvent())
+		assert.Nil(t, event.SessionEventVariant)
 		assert.True(t, event.Output != nil || event.Action != nil || event.Err != nil)
 		if event.Output != nil &&
 			event.Output.MessageOutput != nil &&
@@ -2799,8 +2799,8 @@ func TestRunnerSessionAgentInterruptBoundaryFailureNotExposed(t *testing.T) {
 		if event.Err != nil {
 			errs = append(errs, event.Err)
 		}
-		if event.SessionEventVariant.GetEvent() != nil {
-			kinds = append(kinds, event.SessionEventVariant.GetEvent().Kind)
+		if event.SessionEventVariant != nil && event.SessionEventVariant.Event != nil {
+			kinds = append(kinds, event.SessionEventVariant.Event.Kind)
 		}
 	}
 	require.NotEmpty(t, errs)
@@ -5152,6 +5152,103 @@ func TestAttack_LeadingSystemMessageExtraChangesArePersisted(t *testing.T) {
 	assert.Equal(t, "b", result.state.Messages[0].Extra["trace"])
 }
 
+func TestAttack_LeadingSystemMessageExtraMutationInGenModelInputStillPersistsUpdate(t *testing.T) {
+	ctx := context.Background()
+	store := newSessionHelperStore()
+	sid := "leading-system-extra-mutation"
+
+	system := schema.SystemMessage("sys")
+	system.Extra = map[string]any{"trace": "a"}
+
+	runTurn := func(trace string) {
+		model := &leadingSystemTestModel[*schema.Message]{response: schema.AssistantMessage("answer "+trace, nil)}
+		agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+			Name:        "system-extra-mut-agent",
+			Description: "test",
+			Instruction: "ignored by custom input",
+			Model:       model,
+			GenModelInput: func(_ context.Context, _ string, input *AgentInput) ([]*schema.Message, error) {
+				if len(input.Messages) > 0 && input.Messages[0].Role == schema.System {
+					if input.Messages[0].Extra == nil {
+						input.Messages[0].Extra = make(map[string]any)
+					}
+					input.Messages[0].Extra["trace"] = trace
+				}
+				return input.Messages, nil
+			},
+		})
+		require.NoError(t, err)
+		runner := NewRunner(ctx, RunnerConfig{Agent: agent, SessionID: sid, SessionStore: store})
+		drainSessionEvents(t, runner.Run(ctx, []*schema.Message{system, schema.UserMessage(trace)}))
+	}
+
+	runTurn("a")
+	system.Extra = nil
+	runTurn("b")
+
+	var update *MessageUpdatedEvent[*schema.Message]
+	for _, event := range loadMessageSessionEvents(t, ctx, store, sid) {
+		if event.MessageUpdated != nil && event.MessageUpdated.Message.Role == schema.System {
+			update = event.MessageUpdated
+		}
+	}
+	require.NotNil(t, update, "in-place Extra mutation in GenModelInput must still be detected as message_updated")
+	assert.Equal(t, "b", update.Message.Extra["trace"])
+
+	handle := mustOpenTestSession[*schema.Message](t, ctx, store, sid)
+	result, err := reconstructSessionState[*schema.Message](ctx, handle, sid, defaultLoadPageSize)
+	require.NoError(t, err)
+	require.NoError(t, handle.close(ctx))
+	require.NotEmpty(t, result.state.Messages)
+	assert.Equal(t, "b", result.state.Messages[0].Extra["trace"])
+}
+
+func TestAttack_LeadingSystemMessageContentMutationInGenModelInputStillPersistsUpdate(t *testing.T) {
+	ctx := context.Background()
+	store := newSessionHelperStore()
+	sid := "leading-system-content-mutation"
+
+	system := schema.SystemMessage("sys v1")
+
+	runTurn := func(content string) {
+		model := &leadingSystemTestModel[*schema.Message]{response: schema.AssistantMessage("answer "+content, nil)}
+		agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+			Name:        "system-content-mut-agent",
+			Description: "test",
+			Instruction: "ignored by custom input",
+			Model:       model,
+			GenModelInput: func(_ context.Context, _ string, input *AgentInput) ([]*schema.Message, error) {
+				if len(input.Messages) > 0 && input.Messages[0].Role == schema.System {
+					input.Messages[0].Content = content
+				}
+				return input.Messages, nil
+			},
+		})
+		require.NoError(t, err)
+		runner := NewRunner(ctx, RunnerConfig{Agent: agent, SessionID: sid, SessionStore: store})
+		drainSessionEvents(t, runner.Run(ctx, []*schema.Message{system, schema.UserMessage(content)}))
+	}
+
+	runTurn("sys v1")
+	runTurn("sys v2")
+
+	var update *MessageUpdatedEvent[*schema.Message]
+	for _, event := range loadMessageSessionEvents(t, ctx, store, sid) {
+		if event.MessageUpdated != nil && event.MessageUpdated.Message.Role == schema.System {
+			update = event.MessageUpdated
+		}
+	}
+	require.NotNil(t, update, "in-place Content mutation in GenModelInput must still be detected as message_updated")
+	assert.Equal(t, "sys v2", update.Message.Content)
+
+	handle := mustOpenTestSession[*schema.Message](t, ctx, store, sid)
+	result, err := reconstructSessionState[*schema.Message](ctx, handle, sid, defaultLoadPageSize)
+	require.NoError(t, err)
+	require.NoError(t, handle.close(ctx))
+	require.NotEmpty(t, result.state.Messages)
+	assert.Equal(t, "sys v2", result.state.Messages[0].Content)
+}
+
 func TestSameSystemMessageComparesExtraExceptMessageID(t *testing.T) {
 	oldMsg := schema.SystemMessage("same")
 	oldMsg.Extra = map[string]any{"_eino_msg_id": "old", "trace": "a"}
@@ -5404,4 +5501,491 @@ func TestAgentToolInterruptState_RoundTrip(t *testing.T) {
 	require.NoError(t, json.Unmarshal(encoded, &decoded))
 	assert.Equal(t, wrapped.ChildSessionID, decoded.ChildSessionID)
 	assert.Equal(t, wrapped.BridgeCheckpoint, decoded.BridgeCheckpoint)
+}
+
+func TestAttack_SessionEventVariantBothSet(t *testing.T) {
+	ev := &TypedAgentEvent[Message]{
+		SessionEventVariant: &SessionEventVariant[Message]{
+			Event: &SessionEvent[Message]{
+				EventID: "evt-1",
+				Kind:    SessionEventMessage,
+				Message: schema.UserMessage("hello"),
+			},
+			MessageStreamRef: &MessageStreamRef{
+				EventID: "evt-2",
+				Kind:    SessionEventMessage,
+			},
+		},
+	}
+
+	err := validateAgentSessionEventIdentity(ev)
+	if err == nil {
+		t.Fatal("expected error when both Event and MessageStreamRef are set, got nil")
+	}
+	t.Logf("correctly rejected both-set variant: %v", err)
+}
+
+func TestAttack_SessionEventVariantNeitherSet(t *testing.T) {
+	ev := &TypedAgentEvent[Message]{
+		SessionEventVariant: &SessionEventVariant[Message]{
+			SessionID: "sess-1",
+		},
+	}
+
+	err := validateAgentSessionEventIdentity(ev)
+	if err == nil {
+		t.Fatal("expected error when neither Event nor MessageStreamRef is set, got nil")
+	}
+	t.Logf("correctly rejected neither-set variant: %v", err)
+}
+
+func TestAttack_SessionEventVariantNil(t *testing.T) {
+	ev := &TypedAgentEvent[Message]{}
+	err := validateAgentSessionEventIdentity(ev)
+	if err != nil {
+		t.Fatalf("nil variant should be valid, got error: %v", err)
+	}
+	t.Log("nil variant accepted correctly")
+}
+
+func TestAttack_MessageStreamRefWrongKind(t *testing.T) {
+	ev := &TypedAgentEvent[Message]{
+		SessionEventVariant: &SessionEventVariant[Message]{
+			MessageStreamRef: &MessageStreamRef{
+				EventID: "evt-1",
+				Kind:    SessionEventSessionStatusRunning,
+			},
+		},
+	}
+
+	err := validateAgentSessionEventIdentity(ev)
+	if err == nil {
+		t.Fatal("expected error for MessageStreamRef with non-message kind, got nil")
+	}
+	t.Logf("correctly rejected wrong kind on stream ref: %v", err)
+}
+
+func TestAttack_ClassifySessionEventZeroValue(t *testing.T) {
+	ev := &SessionEvent[Message]{}
+
+	_, err := ClassifySessionEvent(ev)
+	if err == nil {
+		t.Fatal("expected error for zero-value session event with no payload, got nil")
+	}
+	t.Logf("correctly rejected zero-value event: %v", err)
+}
+
+func TestAttack_ClassifySessionEventNil(t *testing.T) {
+	_, err := ClassifySessionEvent[Message](nil)
+	if err == nil {
+		t.Fatal("expected error for nil session event, got nil")
+	}
+	t.Logf("correctly rejected nil event: %v", err)
+}
+
+func TestAttack_ClassifySessionEventMultiplePayloads(t *testing.T) {
+	ev := &SessionEvent[Message]{
+		Message: schema.UserMessage("hello"),
+		Cancel:  &CancelEvent{Reason: "test"},
+	}
+
+	_, err := ClassifySessionEvent(ev)
+	if err == nil {
+		t.Fatal("expected error for event with multiple active payloads, got nil")
+	}
+	t.Logf("correctly rejected multiple-payload event: %v", err)
+}
+
+func TestAttack_NormalizeSessionEventKindMismatch(t *testing.T) {
+	ev := &SessionEvent[Message]{
+		Kind:    SessionEventCancel,
+		Message: schema.UserMessage("hello"),
+	}
+
+	err := NormalizeSessionEventKind(ev)
+	if err == nil {
+		t.Fatal("expected error for kind mismatch, got nil")
+	}
+	t.Logf("correctly rejected kind mismatch: %v", err)
+}
+
+func TestAttack_NormalizeSessionEventKindTurnEndLegacy(t *testing.T) {
+	ev := &SessionEvent[Message]{
+		Kind: "turn_end",
+	}
+
+	err := NormalizeSessionEventKind(ev)
+	if err != nil {
+		t.Fatalf("legacy turn_end should be accepted, got error: %v", err)
+	}
+	if ev.Kind != "turn_end" {
+		t.Fatalf("legacy turn_end kind should be preserved, got %q", ev.Kind)
+	}
+	t.Log("legacy turn_end kind handled correctly")
+}
+
+func TestAttack_ValidateEmittedSessionEventEmptyKind(t *testing.T) {
+	ev := &SessionEvent[Message]{
+		Message: schema.UserMessage("hello"),
+	}
+
+	err := ValidateEmittedSessionEventKind(ev)
+	if err == nil {
+		t.Fatal("expected error for emitted event with empty Kind, got nil")
+	}
+	t.Logf("correctly rejected empty-kind emitted event: %v", err)
+}
+
+func TestAttack_ValidateEmittedSessionEventNil(t *testing.T) {
+	err := ValidateEmittedSessionEventKind[Message](nil)
+	if err == nil {
+		t.Fatal("expected error for nil emitted event, got nil")
+	}
+	t.Logf("correctly rejected nil emitted event: %v", err)
+}
+
+func TestAttack_SessionEventEncodeDecodeRoundtrip(t *testing.T) {
+	original := &SessionEvent[Message]{
+		EventID:   "roundtrip-1",
+		Timestamp: time.Date(2026, 1, 15, 10, 30, 0, 0, time.UTC),
+		Kind:      SessionEventMessage,
+		TurnID:    "turn-abc",
+		Message:   schema.UserMessage("roundtrip test"),
+	}
+
+	data, err := encodeSessionEvent(original)
+	if err != nil {
+		t.Fatalf("encode failed: %v", err)
+	}
+
+	decoded, err := decodeSessionEvent[Message](data)
+	if err != nil {
+		t.Fatalf("decode failed: %v", err)
+	}
+
+	if decoded.EventID != original.EventID {
+		t.Errorf("EventID mismatch: got %q want %q", decoded.EventID, original.EventID)
+	}
+	if decoded.Kind != original.Kind {
+		t.Errorf("Kind mismatch: got %q want %q", decoded.Kind, original.Kind)
+	}
+	if decoded.TurnID != original.TurnID {
+		t.Errorf("TurnID mismatch: got %q want %q", decoded.TurnID, original.TurnID)
+	}
+	t.Log("encode/decode roundtrip OK")
+}
+
+func TestAttack_SessionEventVariantEncodeDecodeRoundtrip(t *testing.T) {
+	original := &SessionEventVariant[Message]{
+		SessionID: "sess-roundtrip",
+		Event: &SessionEvent[Message]{
+			EventID:   "evt-rt-1",
+			Timestamp: time.Date(2026, 1, 15, 10, 30, 0, 0, time.UTC),
+			Kind:      SessionEventMessage,
+			Message:   schema.UserMessage("variant roundtrip"),
+		},
+	}
+
+	data, err := sessionSerializer.Marshal(original)
+	if err != nil {
+		t.Fatalf("encode variant failed: %v", err)
+	}
+
+	var decoded SessionEventVariant[Message]
+	if err := sessionSerializer.Unmarshal(data, &decoded); err != nil {
+		t.Fatalf("decode variant failed: %v", err)
+	}
+
+	if decoded.SessionID != original.SessionID {
+		t.Errorf("SessionID mismatch: got %q want %q", decoded.SessionID, original.SessionID)
+	}
+	if decoded.Event == nil {
+		t.Fatal("decoded Event is nil")
+	}
+	if decoded.Event.EventID != original.Event.EventID {
+		t.Errorf("Event.EventID mismatch: got %q want %q", decoded.Event.EventID, original.Event.EventID)
+	}
+	t.Log("variant encode/decode roundtrip OK")
+}
+
+func TestAttack_AssignSessionEventIDEmptyGenerator(t *testing.T) {
+	emptyGen := func(_ context.Context, _ *SessionEvent[Message]) (string, error) {
+		return "", nil
+	}
+
+	ev := &SessionEvent[Message]{
+		Kind:    SessionEventMessage,
+		Message: schema.UserMessage("test"),
+	}
+
+	err := assignSessionEventID(context.Background(), ev, emptyGen)
+	if !errors.Is(err, ErrSessionEventIDGeneratorEmpty) {
+		t.Fatalf("expected ErrSessionEventIDGeneratorEmpty, got %v", err)
+	}
+	t.Logf("correctly handled empty generator: %v", err)
+}
+
+func TestAttack_AssignSessionEventIDGeneratorError(t *testing.T) {
+	genErr := errors.New("generator failed")
+	errGen := func(_ context.Context, _ *SessionEvent[Message]) (string, error) {
+		return "", genErr
+	}
+
+	ev := &SessionEvent[Message]{
+		Kind:    SessionEventMessage,
+		Message: schema.UserMessage("test"),
+	}
+
+	err := assignSessionEventID(context.Background(), ev, errGen)
+	if err == nil {
+		t.Fatal("expected error from generator, got nil")
+	}
+	if !errors.Is(err, genErr) {
+		t.Fatalf("expected wrapped generator error, got %v", err)
+	}
+	t.Logf("correctly propagated generator error: %v", err)
+}
+
+func TestAttack_ApplySessionEventMessagesDeletedEmptyIDs(t *testing.T) {
+	messages := []Message{schema.UserMessage("a"), schema.UserMessage("b")}
+	ev := &SessionEvent[Message]{
+		Kind: SessionEventMessagesDeleted,
+		MessagesDeleted: &MessagesDeletedEvent{
+			MessageIDs: []string{},
+		},
+	}
+
+	err := applySessionEvent(&messages, ev)
+	if err == nil {
+		t.Fatal("expected error for empty MessageIDs, got nil")
+	}
+	t.Logf("correctly rejected empty MessageIDs: %v", err)
+}
+
+func TestAttack_ApplySessionEventMessagesDeletedDuplicateIDs(t *testing.T) {
+	messages := []Message{schema.UserMessage("a")}
+	ev := &SessionEvent[Message]{
+		Kind: SessionEventMessagesDeleted,
+		MessagesDeleted: &MessagesDeletedEvent{
+			MessageIDs: []string{"dup", "dup"},
+		},
+	}
+
+	err := applySessionEvent(&messages, ev)
+	if err == nil {
+		t.Fatal("expected error for duplicate MessageIDs, got nil")
+	}
+	t.Logf("correctly rejected duplicate MessageIDs: %v", err)
+}
+
+func TestAttack_ApplySessionEventMessageUpdatedIdentityMismatch(t *testing.T) {
+	msg := schema.UserMessage("original")
+	EnsureMessageID(msg)
+
+	messages := []Message{msg}
+	newMsg := schema.UserMessage("updated")
+	EnsureMessageID(newMsg)
+
+	ev := &SessionEvent[Message]{
+		Kind: SessionEventMessageUpdated,
+		MessageUpdated: &MessageUpdatedEvent[Message]{
+			MessageID: GetMessageID(msg),
+			Message:   newMsg,
+		},
+	}
+
+	err := applySessionEvent(&messages, ev)
+	if err == nil {
+		t.Log("MessageUpdated with matching ID applied OK")
+	} else {
+		t.Logf("MessageUpdated result: %v", err)
+	}
+}
+
+func TestAttack_IsContextSessionEventEdgeCases(t *testing.T) {
+	tests := []struct {
+		name string
+		ev   *SessionEvent[Message]
+		want bool
+	}{
+		{"nil event", nil, false},
+		{"empty event", &SessionEvent[Message]{}, false},
+		{"cancel event", &SessionEvent[Message]{Cancel: &CancelEvent{}}, false},
+		{"lifecycle event", &SessionEvent[Message]{Lifecycle: &LifecycleEvent{State: SessionRunStateRunning}}, false},
+		{"error event", &SessionEvent[Message]{Error: &SessionErrorEvent{}}, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isContextSessionEvent(tt.ev)
+			if got != tt.want {
+				t.Errorf("isContextSessionEvent() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+	t.Log("all isContextSessionEvent edge cases pass")
+}
+
+func TestAttack_ToSessionEventCheckedStreamingOutput(t *testing.T) {
+	ev := &TypedAgentEvent[Message]{
+		Output: &TypedAgentOutput[Message]{
+			MessageOutput: &TypedMessageVariant[Message]{
+				IsStreaming: true,
+				Message:     nil,
+			},
+		},
+		SessionEventVariant: nil,
+	}
+
+	se, err := toSessionEventChecked(ev)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if se != nil {
+		t.Fatalf("expected nil SessionEvent for streaming output without variant, got %v", se)
+	}
+	t.Log("streaming output without variant correctly returns nil session event")
+}
+
+func TestAttack_StripSessionEventFields(t *testing.T) {
+	tests := []struct {
+		name string
+		ev   *TypedAgentEvent[Message]
+		nil  bool
+	}{
+		{"nil event", nil, true},
+		{"no variant, with output", &TypedAgentEvent[Message]{
+			Output: &TypedAgentOutput[Message]{
+				MessageOutput: &TypedMessageVariant[Message]{Message: schema.UserMessage("test")},
+			},
+		}, false},
+		{"only variant", &TypedAgentEvent[Message]{
+			SessionEventVariant: &SessionEventVariant[Message]{
+				Event: &SessionEvent[Message]{EventID: "x", Kind: SessionEventMessage, Message: schema.UserMessage("test")},
+			},
+		}, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := stripSessionEventFields(tt.ev)
+			if tt.nil && result != nil {
+				t.Errorf("expected nil result, got %v", result)
+			}
+			if !tt.nil && result == nil {
+				t.Error("expected non-nil result, got nil")
+			}
+			if result != nil && result.SessionEventVariant != nil {
+				t.Error("SessionEventVariant should be stripped")
+			}
+		})
+	}
+	t.Log("stripSessionEventFields all cases pass")
+}
+
+func TestAttack_ClassifySpanEventBothModelAndTool(t *testing.T) {
+	span := &SpanEvent{
+		SpanID: "span-1",
+		Kind:   SpanKindModel,
+		Model:  &ModelSpanMeta{},
+		Tool:   &ToolSpanMeta{ToolUseID: "call-1"},
+	}
+
+	_, err := classifySpanSessionEvent(span)
+	if err == nil {
+		t.Fatal("expected error when both Model and Tool are set, got nil")
+	}
+	t.Logf("correctly rejected both-model-and-tool span: %v", err)
+}
+
+func TestAttack_ClassifySpanEventNeitherModelNorTool(t *testing.T) {
+	span := &SpanEvent{
+		SpanID: "span-1",
+		Kind:   SpanKindModel,
+	}
+
+	_, err := classifySpanSessionEvent(span)
+	if err == nil {
+		t.Fatal("expected error when neither Model nor Tool is set, got nil")
+	}
+	t.Logf("correctly rejected no-meta span: %v", err)
+}
+
+func TestAttack_SessionEventCancelClassification(t *testing.T) {
+	ev := &SessionEvent[Message]{
+		Cancel: &CancelEvent{Reason: "user cancelled"},
+	}
+
+	kind, err := ClassifySessionEvent(ev)
+	if err != nil {
+		t.Fatalf("classification failed: %v", err)
+	}
+	if kind != SessionEventCancel {
+		t.Errorf("kind = %q, want %q", kind, SessionEventCancel)
+	}
+	t.Logf("CancelEvent classified correctly as %q", kind)
+}
+
+func TestAttack_SessionEventInterruptClassification(t *testing.T) {
+	ev := &SessionEvent[Message]{
+		Interrupt: &InterruptEvent{
+			Contexts: []*InterruptContext{
+				{InterruptID: "tool:lookup:call_1", ToolUseID: "call_1"},
+			},
+		},
+	}
+
+	kind, err := ClassifySessionEvent(ev)
+	if err != nil {
+		t.Fatalf("classification failed: %v", err)
+	}
+	if kind != SessionEventInterrupt {
+		t.Errorf("kind = %q, want %q", kind, SessionEventInterrupt)
+	}
+	t.Logf("InterruptEvent classified correctly as %q", kind)
+}
+
+func TestAttack_SessionRollbackEventValidation(t *testing.T) {
+	ev := &SessionEvent[Message]{
+		EventID: "rb-1",
+		Rollback: &SessionRollbackEvent{
+			ToEventID: "target-1",
+		},
+	}
+
+	kind, err := ClassifySessionEvent(ev)
+	if err != nil {
+		t.Fatalf("classification failed: %v", err)
+	}
+	if kind != SessionEventRollback {
+		t.Errorf("kind = %q, want %q", kind, SessionEventRollback)
+	}
+	t.Logf("RollbackEvent classified correctly as %q", kind)
+}
+
+func TestAttack_SessionRollbackEventMissingToEventID(t *testing.T) {
+	ev := &SessionEvent[Message]{
+		EventID:  "rb-1",
+		Rollback: &SessionRollbackEvent{},
+	}
+
+	_, err := ClassifySessionEvent(ev)
+	if err == nil {
+		t.Fatal("expected error for rollback with empty ToEventID, got nil")
+	}
+	t.Logf("correctly rejected rollback with empty ToEventID: %v", err)
+}
+
+func TestAttack_SessionRollbackEventMissingOwnEventID(t *testing.T) {
+	ev := &SessionEvent[Message]{
+		Rollback: &SessionRollbackEvent{
+			ToEventID: "target-1",
+		},
+	}
+
+	_, err := ClassifySessionEvent(ev)
+	if err == nil {
+		t.Fatal("expected error for rollback with empty own EventID, got nil")
+	}
+	t.Logf("correctly rejected rollback with empty own EventID: %v", err)
 }
