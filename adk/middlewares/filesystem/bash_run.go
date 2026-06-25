@@ -109,45 +109,37 @@ func bashStreamWork(sb filesystem.StreamingShell, req *filesystem.ExecuteRequest
 			return nil, err
 		}
 
-		sr, sw := schema.Pipe[string](bashStreamBufferCap)
-		go func() {
-			defer stream.Close()
-			defer sw.Close()
-
-			var exitCode *int
-			var hasContent bool
-			for {
-				chunk, recvErr := stream.Recv()
-				if recvErr == io.EOF {
-					break
-				}
-				if recvErr != nil {
-					sw.Send("", recvErr)
-					return
-				}
+		// exitCode/hasContent accumulate across chunks: convert writes them per
+		// chunk, the OnEOF hook reads them to build the terminal note. The convert
+		// model has no per-stream state of its own, so they live in this closure.
+		// Safe without synchronization because StreamReaderWithConvert is pull-driven
+		// and single-consumer — convert and OnEOF run serially on the same Recv stack.
+		var exitCode *int
+		var hasContent bool
+		return schema.StreamReaderWithConvert(stream,
+			func(chunk *filesystem.ExecuteResponse) (string, error) {
 				if chunk == nil {
-					continue
+					return "", schema.ErrNoValue
 				}
 				if chunk.ExitCode != nil {
 					exitCode = chunk.ExitCode
 				}
-				if text := formatExecChunk(chunk.Output, chunk.Truncated); text != "" {
-					hasContent = true
-					if sw.Send(text, nil) {
-						return // caller stopped consuming
-					}
+				text := formatExecChunk(chunk.Output, chunk.Truncated)
+				if text == "" {
+					return "", schema.ErrNoValue
 				}
-			}
-			if note := execTerminalNote(exitCode, hasContent); note != "" {
-				sw.Send(note, nil)
-			}
-		}()
-		return sr, nil
+				hasContent = true
+				return text, nil
+			},
+			schema.WithOnEOF(func() (any, error) {
+				if note := execTerminalNote(exitCode, hasContent); note != "" {
+					return note, nil
+				}
+				return nil, io.EOF
+			}),
+		), nil
 	}
 }
-
-// bashStreamBufferCap is the buffer size of the pipe bashStreamWork produces.
-const bashStreamBufferCap = 16
 
 // newManagedExecuteTool builds an execute tool whose runs are tracked by a shared
 // background-task Manager. The model controls background execution via the

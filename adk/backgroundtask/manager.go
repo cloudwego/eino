@@ -40,12 +40,14 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/cloudwego/eino/adk/filesystem"
 	"github.com/cloudwego/eino/internal"
+	"github.com/cloudwego/eino/internal/safe"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -801,6 +803,12 @@ func (m *Manager) Run(ctx context.Context, input *RunInput, work WorkFunc) (*Tas
 	// taskSnapshot — so run signals completion rather than returning a value.
 	run := func() {
 		defer cancel()
+		defer func() {
+			if p := recover(); p != nil {
+				// A panicking WorkFunc must fail its own task, not crash the process.
+				m.failTask(id, safe.NewPanicErr(p, debug.Stack()))
+			}
+		}()
 		r, runErr := work(runCtx)
 		if runErr != nil {
 			m.failTask(id, runErr)
@@ -951,6 +959,18 @@ type streamRun struct {
 // that writes to it, so injecting the background notice never races the work.
 func (m *Manager) forwardStream(r *streamRun) {
 	defer r.cancel()
+	// A panic constructing the work stream (r.work below) lands here, before sw is
+	// closed: fail the task and surface it on the caller stream. Panics while reading
+	// chunks are recovered closer to their source — pumpStream for the foreground
+	// loop, drainReader for the background drain — so this never double-closes sw.
+	defer func() {
+		if p := recover(); p != nil {
+			err := safe.NewPanicErr(p, debug.Stack())
+			m.failTask(r.id, err)
+			r.sw.Send("", err)
+			r.sw.Close()
+		}
+	}()
 
 	ws, err := r.work(r.runCtx)
 	if err != nil {
@@ -961,24 +981,26 @@ func (m *Manager) forwardStream(r *streamRun) {
 	}
 	defer ws.Close()
 
-	chunks := pumpStream(r.runCtx, ws)
-
 	var buf strings.Builder
+
+	// Explicit background: no foreground phase to stream and no deadline to race
+	// (RunStream forces budgetMs=0), so skip the pumpStream goroutine entirely.
+	// Emit the notice, close the caller stream, and drain the reader directly into
+	// the result.
+	if r.input.RunInBackground {
+		r.sw.Send(m.backgroundStartNotice(r.id), nil)
+		r.sw.Close()
+		m.drainReader(r.runCtx, r.id, ws, &buf)
+		return
+	}
+
+	chunks := pumpStream(r.runCtx, ws)
 
 	var timerC <-chan time.Time
 	if r.budgetMs > 0 {
 		timer := time.NewTimer(time.Duration(r.budgetMs) * time.Millisecond)
 		defer timer.Stop()
 		timerC = timer.C
-	}
-
-	// Explicit background: do not forward execution chunks. Emit the notice
-	// immediately, close the caller stream, and drain the rest into the result.
-	if r.input.RunInBackground {
-		r.sw.Send(m.backgroundStartNotice(r.id), nil)
-		r.sw.Close()
-		m.drainStream(r.runCtx, r.id, chunks, &buf)
-		return
 	}
 
 	for {
@@ -1040,6 +1062,17 @@ type streamChunk struct {
 func pumpStream(ctx context.Context, ws *schema.StreamReader[string]) <-chan streamChunk {
 	chunks := make(chan streamChunk)
 	go func() {
+		// ws.Recv runs the work's stream (including any convert step) in this
+		// goroutine, so a panic there must not crash the process. Turn it into a
+		// terminal chunk error; the forward loop fails the task on it like any other.
+		defer func() {
+			if p := recover(); p != nil {
+				select {
+				case chunks <- streamChunk{err: safe.NewPanicErr(p, debug.Stack())}:
+				case <-ctx.Done():
+				}
+			}
+		}()
 		for {
 			text, err := ws.Recv()
 			c := streamChunk{text: text, err: err}
@@ -1054,6 +1087,42 @@ func pumpStream(ctx context.Context, ws *schema.StreamReader[string]) <-chan str
 		}
 	}()
 	return chunks
+}
+
+// drainReader consumes a backgrounded run's reader directly into buf and finalizes
+// the task on completion. Used by the explicit-background path, which has no
+// foreground select loop and therefore no pumpStream channel — reading ws inline
+// saves a goroutine. Called after the caller's stream has been closed, so it never
+// writes to sw.
+//
+// Unlike drainStream it has no runCtx.Done() case: it exits only when ws.Recv
+// returns EOF or an error. On Cancel/Close the run's ctx is canceled, which the
+// work must honor by ending its stream — that is what unblocks Recv here. A no-op
+// completeTask/failTask then loses the race against the cancelTask that already
+// finalized the task (both are idempotent). This mirrors the original drainStream,
+// whose pump goroutine likewise stayed blocked on Recv until the work honored ctx.
+func (m *Manager) drainReader(runCtx context.Context, id string, ws *schema.StreamReader[string], buf *strings.Builder) {
+	// ws.Recv runs the work's stream in this goroutine; a panic must fail the task,
+	// not crash the process. The caller stream is already closed before draining, so
+	// recovery only finalizes — it never touches sw.
+	defer func() {
+		if p := recover(); p != nil {
+			m.failTask(id, safe.NewPanicErr(p, debug.Stack()))
+		}
+	}()
+	for {
+		text, err := ws.Recv()
+		if err == io.EOF {
+			m.persistOutput(runCtx, id, buf.String())
+			m.completeTask(id, buf.String())
+			return
+		}
+		if err != nil {
+			m.failTask(id, err)
+			return
+		}
+		buf.WriteString(text)
+	}
 }
 
 // drainStream consumes a backgrounded run's remaining chunks into buf and
