@@ -220,6 +220,37 @@ const (
 	SessionEventExtensionPrefix = "x."
 )
 
+var knownSessionEventKinds = map[SessionEventKind]struct{}{
+	SessionEventMessage:                 {},
+	SessionEventMessageStreamIncomplete: {},
+	SessionEventMessagesReplaced:        {},
+	SessionEventMessageUpdated:          {},
+	SessionEventMessageInserted:         {},
+	SessionEventMessagesDeleted:         {},
+	SessionEventModelContext:            {},
+	SessionEventRollback:                {},
+	SessionEventSessionStatusRunning:    {},
+	SessionEventSessionStatusIdle:       {},
+	SessionEventSessionError:            {},
+	SessionEventSpanModelRequestStart:   {},
+	SessionEventSpanModelRequestEnd:     {},
+	SessionEventSpanToolCallStart:       {},
+	SessionEventSpanToolCallEnd:         {},
+	SessionEventCancel:                  {},
+	SessionEventInterrupt:               {},
+}
+
+func isKnownSessionEventKind(kind SessionEventKind) bool {
+	if kind == "" {
+		return false
+	}
+	if strings.HasPrefix(string(kind), SessionEventExtensionPrefix) {
+		return true
+	}
+	_, ok := knownSessionEventKinds[kind]
+	return ok
+}
+
 type LifecycleEvent struct {
 	State      SessionRunState `json:"state,omitempty"`
 	StopReason *StopReason     `json:"stop_reason,omitempty"`
@@ -778,6 +809,56 @@ func ClassifySessionEvent[M MessageType](event *SessionEvent[M]) (SessionEventKi
 	return kinds[0], nil
 }
 
+func countActiveSessionEventPayloads[M MessageType](event *SessionEvent[M]) int {
+	if event == nil {
+		return 0
+	}
+	count := 0
+	if !isNilMessage(event.Message) {
+		count++
+	}
+	if event.MessageStreamIncomplete != nil {
+		count++
+	}
+	if event.MessagesReplaced != nil {
+		count++
+	}
+	if event.MessageUpdated != nil {
+		count++
+	}
+	if event.MessageInserted != nil {
+		count++
+	}
+	if event.MessagesDeleted != nil {
+		count++
+	}
+	if event.ModelContext != nil {
+		count++
+	}
+	if event.Rollback != nil {
+		count++
+	}
+	if event.Lifecycle != nil {
+		count++
+	}
+	if event.Error != nil {
+		count++
+	}
+	if event.Span != nil {
+		count++
+	}
+	if event.Cancel != nil {
+		count++
+	}
+	if event.Interrupt != nil {
+		count++
+	}
+	if event.Extension != nil {
+		count++
+	}
+	return count
+}
+
 func classifySpanSessionEvent(span *SpanEvent) (SessionEventKind, error) {
 	if (span.Model != nil) == (span.Tool != nil) {
 		return "", errors.New("span event must populate exactly one of Model or Tool")
@@ -814,12 +895,14 @@ func classifySpanSessionEvent(span *SpanEvent) (SessionEventKind, error) {
 
 // NormalizeSessionEventKind fills an empty Kind from the active payload and
 // rejects mismatches between Kind and payload shape.
+//
+// Unknown kinds (kinds not in the known set and not prefixed with "x.") with
+// no recognized payload are tolerated as a forward/backward compatibility
+// mechanism: legacy data (e.g. pre-refactor "turn_end") and events written by
+// newer code with kinds we don't yet understand are accepted as-is rather than
+// failing replay.
 func NormalizeSessionEventKind[M MessageType](event *SessionEvent[M]) error {
-	// Legacy compatibility: "turn_end" is the pre-refactor lifecycle event kind.
-	// Sessions persisted before the SessionRunState refactor may carry this kind
-	// on replay. Bypassing classification avoids failing on legacy data that has
-	// no active payload field matching any current kind.
-	if event != nil && event.Kind == "turn_end" {
+	if event != nil && event.Kind != "" && !isKnownSessionEventKind(event.Kind) && countActiveSessionEventPayloads(event) == 0 {
 		return nil
 	}
 	kind, err := ClassifySessionEvent(event)

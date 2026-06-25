@@ -5609,19 +5609,48 @@ func TestAttack_NormalizeSessionEventKindMismatch(t *testing.T) {
 	t.Logf("correctly rejected kind mismatch: %v", err)
 }
 
-func TestAttack_NormalizeSessionEventKindTurnEndLegacy(t *testing.T) {
-	ev := &SessionEvent[Message]{
-		Kind: "turn_end",
+func TestAttack_NormalizeSessionEventKindUnknownKindTolerated(t *testing.T) {
+	unknownKinds := []SessionEventKind{
+		"turn_end",
+		"session_started",
+		"custom_thing",
+		"future.new_kind",
 	}
+	for _, k := range unknownKinds {
+		ev := &SessionEvent[Message]{
+			Kind: k,
+		}
+		err := NormalizeSessionEventKind(ev)
+		if err != nil {
+			t.Fatalf("unknown kind %q should be tolerated, got error: %v", k, err)
+		}
+		if ev.Kind != k {
+			t.Fatalf("unknown kind %q should be preserved, got %q", k, ev.Kind)
+		}
+	}
+}
 
+func TestAttack_NormalizeSessionEventKindKnownKindMissingPayloadStillErrors(t *testing.T) {
+	ev := &SessionEvent[Message]{
+		Kind: SessionEventMessage,
+	}
 	err := NormalizeSessionEventKind(ev)
-	if err != nil {
-		t.Fatalf("legacy turn_end should be accepted, got error: %v", err)
+	if err == nil {
+		t.Fatal("expected error for known kind with missing payload, got nil")
 	}
-	if ev.Kind != "turn_end" {
-		t.Fatalf("legacy turn_end kind should be preserved, got %q", ev.Kind)
+	t.Logf("correctly rejected known kind with missing payload: %v", err)
+}
+
+func TestAttack_NormalizeSessionEventKindUnknownKindWithPayloadStillErrors(t *testing.T) {
+	ev := &SessionEvent[Message]{
+		Kind:    "future.new_kind",
+		Message: schema.UserMessage("hello"),
 	}
-	t.Log("legacy turn_end kind handled correctly")
+	err := NormalizeSessionEventKind(ev)
+	if err == nil {
+		t.Fatal("expected error for unknown kind with recognized payload, got nil")
+	}
+	t.Logf("correctly rejected unknown kind with recognized payload: %v", err)
 }
 
 func TestAttack_ValidateEmittedSessionEventEmptyKind(t *testing.T) {
