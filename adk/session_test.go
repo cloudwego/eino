@@ -5704,37 +5704,41 @@ func TestAttack_SessionEventEncodeDecodeRoundtrip(t *testing.T) {
 	t.Log("encode/decode roundtrip OK")
 }
 
-func TestAttack_SessionEventVariantEncodeDecodeRoundtrip(t *testing.T) {
-	original := &SessionEventVariant[Message]{
-		SessionID: "sess-roundtrip",
-		Event: &SessionEvent[Message]{
-			EventID:   "evt-rt-1",
-			Timestamp: time.Date(2026, 1, 15, 10, 30, 0, 0, time.UTC),
-			Kind:      SessionEventMessage,
-			Message:   schema.UserMessage("variant roundtrip"),
+func TestAttack_SessionEventVariantPayloadEncodeDecodeRoundtrip(t *testing.T) {
+	original := &TypedAgentEvent[Message]{
+		SessionEventVariant: &SessionEventVariant[Message]{
+			SessionID: "sess-roundtrip",
+			Event: &SessionEvent[Message]{
+				EventID:   "evt-rt-1",
+				Timestamp: time.Date(2026, 1, 15, 10, 30, 0, 0, time.UTC),
+				Kind:      SessionEventMessage,
+				Message:   schema.UserMessage("variant roundtrip"),
+			},
 		},
 	}
 
-	data, err := sessionSerializer.Marshal(original)
+	persistable, err := toSessionEventChecked(original)
 	if err != nil {
-		t.Fatalf("encode variant failed: %v", err)
+		t.Fatalf("convert variant payload failed: %v", err)
+	}
+	if persistable == original.SessionEventVariant.Event {
+		t.Fatal("persistable event must be copied out of live SessionEventVariant")
 	}
 
-	var decoded SessionEventVariant[Message]
-	if err := sessionSerializer.Unmarshal(data, &decoded); err != nil {
-		t.Fatalf("decode variant failed: %v", err)
+	data, err := encodeSessionEvent(persistable)
+	if err != nil {
+		t.Fatalf("encode variant payload failed: %v", err)
 	}
 
-	if decoded.SessionID != original.SessionID {
-		t.Errorf("SessionID mismatch: got %q want %q", decoded.SessionID, original.SessionID)
+	decoded, err := decodeSessionEvent[Message](data)
+	if err != nil {
+		t.Fatalf("decode variant payload failed: %v", err)
 	}
-	if decoded.Event == nil {
-		t.Fatal("decoded Event is nil")
+
+	if decoded.EventID != original.SessionEventVariant.Event.EventID {
+		t.Errorf("EventID mismatch: got %q want %q", decoded.EventID, original.SessionEventVariant.Event.EventID)
 	}
-	if decoded.Event.EventID != original.Event.EventID {
-		t.Errorf("Event.EventID mismatch: got %q want %q", decoded.Event.EventID, original.Event.EventID)
-	}
-	t.Log("variant encode/decode roundtrip OK")
+	t.Log("variant payload encode/decode roundtrip OK")
 }
 
 func TestAttack_AssignSessionEventIDEmptyGenerator(t *testing.T) {
