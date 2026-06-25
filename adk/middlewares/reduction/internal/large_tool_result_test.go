@@ -555,6 +555,35 @@ func TestToolResultOffloading_BackendWriteError(t *testing.T) {
 	}
 }
 
+func TestToolResultOffloading_SkipReadFileTool(t *testing.T) {
+	ctx := context.Background()
+	backend := newMockBackend()
+
+	config := &toolResultOffloadingConfig{
+		Backend:          backend,
+		ReadFileToolName: "read_file",
+		TokenLimit:       10,
+	}
+
+	middleware := newToolResultOffloading(ctx, config)
+	largeResult := strings.Repeat("x", 100)
+	mockEndpoint := func(ctx context.Context, input *compose.ToolInput) (*compose.ToolOutput, error) {
+		return &compose.ToolOutput{Result: largeResult}, nil
+	}
+
+	wrappedEndpoint := middleware.Invokable(mockEndpoint)
+	output, err := wrappedEndpoint(ctx, &compose.ToolInput{Name: "read_file", CallID: "read_file_call"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if output.Result != largeResult {
+		t.Fatalf("expected read_file result to pass through unchanged")
+	}
+	if len(backend.files) != 0 {
+		t.Fatalf("expected no files to be written, got %d", len(backend.files))
+	}
+}
+
 // failingBackend is a mock backend that can be configured to fail
 type failingBackend struct {
 	writeErr error

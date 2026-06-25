@@ -48,6 +48,9 @@ const (
 
 	noFilesFound   = "No files found"
 	noMatchesFound = "No matches found"
+
+	defaultReadFileLineLimit   = 2000
+	defaultReadFileColumnLimit = 2000
 )
 
 // ToolConfig configures a filesystem tool
@@ -208,10 +211,15 @@ func NewMiddleware(ctx context.Context, config *Config) (adk.AgentMiddleware, er
 	}
 
 	if !config.WithoutLargeToolResultOffloading {
+		readFileToolName := ToolNameReadFile
+		if config.ReadFileToolConfig != nil && config.ReadFileToolConfig.Name != "" {
+			readFileToolName = config.ReadFileToolConfig.Name
+		}
 		m.WrapToolCall = newToolResultOffloading(ctx, &toolResultOffloadingConfig{
 			Backend:       config.Backend,
 			TokenLimit:    config.LargeToolResultOffloadingTokenLimit,
 			PathGenerator: config.LargeToolResultOffloadingPathGen,
+			ExcludeTools:  []string{readFileToolName},
 		})
 	}
 
@@ -592,6 +600,12 @@ type readFileArgs struct {
 
 	// Limit is the number of lines to read.
 	Limit int `json:"limit" jsonschema:"description=The number of lines to read. Only provide if the file is too large to read at once."`
+
+	// ColumnOffset is the 1-based character column to start reading from within each returned line.
+	ColumnOffset int `json:"column_offset,omitempty" jsonschema:"description=The 1-based character column to start reading from within each returned line. Use with column_limit for very long single-line files. Values less than 1 are treated as 1."`
+
+	// ColumnLimit is the maximum number of characters to read from each returned line.
+	ColumnLimit int `json:"column_limit,omitempty" jsonschema:"description=The maximum number of characters to read from each returned line. Defaults to 2000 to keep very long single-line files readable. Set to -1 to disable column limiting."`
 }
 
 // multiModalReadFileArgs extends readFileArgs with PDF-specific parameters for MultiModalReadFileTool.
@@ -609,12 +623,7 @@ func newReadFileTool(fs filesystem.Backend, name string, desc string) (tool.Base
 		return nil, err
 	}
 	return utils.InferTool(toolName, d, func(ctx context.Context, input readFileArgs) (string, error) {
-		if input.Offset <= 0 {
-			input.Offset = 1
-		}
-		if input.Limit <= 0 {
-			input.Limit = 2000
-		}
+		normalizeReadFileArgs(&input)
 
 		fileCt, err := fs.Read(ctx, &filesystem.ReadRequest{
 			FilePath: input.FilePath,
@@ -628,24 +637,92 @@ func newReadFileTool(fs filesystem.Backend, name string, desc string) (tool.Base
 			return fmt.Sprintf("No content found at path: %s", input.FilePath), nil
 		}
 
-		return formatLineNumbers(fileCt.Content, input.Offset), nil
+		return formatLineNumbers(fileCt.Content, input.Offset, input.ColumnOffset, input.ColumnLimit), nil
 	})
+}
+
+func normalizeReadFileArgs(input *readFileArgs) {
+	if input.Offset <= 0 {
+		input.Offset = 1
+	}
+	if input.Limit <= 0 {
+		input.Limit = defaultReadFileLineLimit
+	}
+	if input.ColumnOffset <= 0 {
+		input.ColumnOffset = 1
+	}
+	if input.ColumnLimit == 0 {
+		input.ColumnLimit = defaultReadFileColumnLimit
+	}
 }
 
 // formatLineNumbers prefixes each line of content with a 1-based line number
 // starting at startLine (e.g. "     1\tfoo"). startLine corresponds to the
 // line number of the first line in content (usually ReadRequest.Offset).
-func formatLineNumbers(content string, startLine int) string {
+func formatLineNumbers(content string, startLine, columnOffset, columnLimit int) string {
 	lines := strings.Split(content, "\n")
 	var b strings.Builder
 	for i, line := range lines {
+		lineNo := startLine + i
+		slicedLine, note := sliceLineByColumns(line, lineNo, columnOffset, columnLimit)
 		if i < len(lines)-1 {
-			fmt.Fprintf(&b, "%6d\t%s\n", startLine+i, line)
+			fmt.Fprintf(&b, "%6d\t%s", lineNo, slicedLine)
+			if note != "" {
+				fmt.Fprintf(&b, "\n[%s]", note)
+			}
+			b.WriteByte('\n')
 		} else {
-			fmt.Fprintf(&b, "%6d\t%s", startLine+i, line)
+			fmt.Fprintf(&b, "%6d\t%s", lineNo, slicedLine)
+			if note != "" {
+				fmt.Fprintf(&b, "\n[%s]", note)
+			}
 		}
 	}
 	return b.String()
+}
+
+func sliceLineByColumns(line string, lineNo, columnOffset, columnLimit int) (string, string) {
+	if columnOffset <= 0 {
+		columnOffset = 1
+	}
+	if columnLimit == 0 {
+		columnLimit = defaultReadFileColumnLimit
+	}
+	if columnOffset == 1 && columnLimit < 0 {
+		return line, ""
+	}
+
+	runes := []rune(line)
+	totalColumns := len(runes)
+	if totalColumns == 0 {
+		if columnOffset == 1 {
+			return "", ""
+		}
+		return "", fmt.Sprintf("Line %d has no content at column_offset=%d.", lineNo, columnOffset)
+	}
+
+	start := columnOffset - 1
+	if start >= totalColumns {
+		return "", fmt.Sprintf("Line %d has %d columns; column_offset=%d is beyond the end.", lineNo, totalColumns, columnOffset)
+	}
+
+	end := totalColumns
+	if columnLimit > 0 && start+columnLimit < end {
+		end = start + columnLimit
+	}
+
+	segment := string(runes[start:end])
+	if start == 0 && end == totalColumns {
+		return segment, ""
+	}
+	if end < totalColumns {
+		nextLimit := columnLimit
+		if nextLimit < 0 {
+			nextLimit = defaultReadFileColumnLimit
+		}
+		return segment, fmt.Sprintf("Line %d truncated: showing columns %d-%d of %d. Use column_offset=%d and column_limit=%d to continue.", lineNo, start+1, end, totalColumns, end+1, nextLimit)
+	}
+	return segment, fmt.Sprintf("Line %d starts at column %d of %d.", lineNo, start+1, totalColumns)
 }
 
 const maxPagesPerRequest = 20
@@ -697,12 +774,7 @@ func newMultiModalReadFileTool(fs filesystem.Backend, name string, desc string) 
 	}
 
 	return utils.InferEnhancedTool(toolName, d, func(ctx context.Context, input multiModalReadFileArgs) (*schema.ToolResult, error) {
-		if input.Offset <= 0 {
-			input.Offset = 1
-		}
-		if input.Limit <= 0 {
-			input.Limit = 2000
-		}
+		normalizeReadFileArgs(&input.readFileArgs)
 
 		if input.Pages != "" {
 			if err := validatePages(input.Pages); err != nil {
@@ -779,7 +851,7 @@ func newMultiModalReadFileTool(fs filesystem.Backend, name string, desc string) 
 		}
 
 		return &schema.ToolResult{
-			Parts: []schema.ToolOutputPart{{Type: schema.ToolPartTypeText, Text: formatLineNumbers(fileCt.Content, input.Offset)}},
+			Parts: []schema.ToolOutputPart{{Type: schema.ToolPartTypeText, Text: formatLineNumbers(fileCt.Content, input.Offset, input.ColumnOffset, input.ColumnLimit)}},
 		}, nil
 	})
 }

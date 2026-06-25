@@ -37,6 +37,7 @@ type toolResultOffloadingConfig struct {
 	Backend       filesystem.Backend
 	TokenLimit    int
 	PathGenerator func(ctx context.Context, input *compose.ToolInput) (string, error)
+	ExcludeTools  []string
 }
 
 func newToolResultOffloading(ctx context.Context, config *toolResultOffloadingConfig) compose.ToolMiddleware {
@@ -44,6 +45,10 @@ func newToolResultOffloading(ctx context.Context, config *toolResultOffloadingCo
 		backend:       config.Backend,
 		tokenLimit:    config.TokenLimit,
 		pathGenerator: config.PathGenerator,
+		excludeTools:  make(map[string]struct{}, len(config.ExcludeTools)),
+	}
+	for _, toolName := range config.ExcludeTools {
+		offloading.excludeTools[toolName] = struct{}{}
 	}
 
 	if offloading.tokenLimit == 0 {
@@ -66,6 +71,7 @@ type toolResultOffloading struct {
 	backend       filesystem.Backend
 	tokenLimit    int
 	pathGenerator func(ctx context.Context, input *compose.ToolInput) (string, error)
+	excludeTools  map[string]struct{}
 }
 
 func (t *toolResultOffloading) invoke(endpoint compose.InvokableToolEndpoint) compose.InvokableToolEndpoint {
@@ -101,6 +107,11 @@ func (t *toolResultOffloading) stream(endpoint compose.StreamableToolEndpoint) c
 }
 
 func (t *toolResultOffloading) handleResult(ctx context.Context, result string, input *compose.ToolInput) (string, error) {
+	if input != nil {
+		if _, excluded := t.excludeTools[input.Name]; excluded {
+			return result, nil
+		}
+	}
 	if len(result) > t.tokenLimit*4 {
 		path, err := t.pathGenerator(ctx, input)
 		if err != nil {

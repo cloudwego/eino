@@ -265,6 +265,35 @@ func Test_reduceByTokens(t *testing.T) {
 	}
 }
 
+func TestNewToolResultMiddleware_ExcludesReadFileFromClear(t *testing.T) {
+	ctx := context.Background()
+	backend := newMockBackend()
+
+	mw, err := NewToolResultMiddleware(ctx, &ToolResultConfig{
+		Backend:                backend,
+		ClearingTokenThreshold: 1,
+		KeepRecentTokens:       -1,
+		OffloadingTokenLimit:   1000,
+	})
+	assert.NoError(t, err)
+	assert.NotNil(t, mw.BeforeChatModel)
+
+	readFileResult := strings.Repeat("x", 100)
+	state := &adk.ChatModelAgentState{
+		Messages: []adk.Message{
+			schema.UserMessage("read offloaded content"),
+			schema.ToolMessage(readFileResult, "read_call", schema.WithToolName("read_file")),
+			schema.ToolMessage(strings.Repeat("y", 100), "other_call", schema.WithToolName("other_tool")),
+			schema.UserMessage("tail"),
+		},
+	}
+
+	err = mw.BeforeChatModel(ctx, state)
+	assert.NoError(t, err)
+	assert.Equal(t, readFileResult, state.Messages[1].Content)
+	assert.Equal(t, "[Old tool result content cleared]", state.Messages[2].Content)
+}
+
 func Test_newClearToolResult(t *testing.T) {
 	ctx := context.Background()
 
