@@ -16,7 +16,11 @@
 
 package embedding
 
-import "context"
+import (
+	"context"
+
+	"github.com/cloudwego/eino/schema"
+)
 
 // Embedder converts a batch of strings into dense vector representations.
 //
@@ -36,4 +40,13 @@ import "context"
 //go:generate  mockgen -destination ../../internal/mock/components/embedding/Embedding_mock.go --package embedding -source interface.go
 type Embedder interface {
 	EmbedStrings(ctx context.Context, texts []string, opts ...Option) ([][]float64, error) // invoke
+}
+
+// MultiModalInput represents a single multimodal sample to be embedded.
+type MultiModalInput []schema.MessageInputPart
+
+// MultiModalEmbedder embeds multimodal inputs (text,image) into vector representations.
+type MultiModalEmbedder interface {
+	Embedder
+	EmbedMultiModal(ctx context.Context, inputs []MultiModalInput, opts ...Option) ([][]float64, error)
 }
