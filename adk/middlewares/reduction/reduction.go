@@ -1255,7 +1255,9 @@ func (t *typedToolReductionMiddleware[M]) applyClearRewriteGeneric(ctx context.C
 }
 
 func sendClearRewriteSessionEvent[M adk.MessageType](ctx context.Context, event *adk.SessionEvent[M]) error {
-	err := adk.TypedSendEvent(ctx, &adk.TypedAgentEvent[M]{SessionEvent: event})
+	err := adk.TypedSendEvent(ctx, &adk.TypedAgentEvent[M]{
+		SessionEventVariant: &adk.SessionEventVariant[M]{Event: event},
+	})
 	if err != nil && strings.Contains(err.Error(), "must be called within a ChatModelAgent Run() or Resume() execution context") {
 		return nil
 	}

@@ -564,7 +564,9 @@ func deletedAgenticMessageIDs(messages []*schema.AgenticMessage, rewrites []agen
 
 func sendNormalizationEvents[M adk.MessageType](ctx context.Context, events []*adk.SessionEvent[M]) error {
 	for _, event := range events {
-		err := adk.TypedSendEvent(ctx, &adk.TypedAgentEvent[M]{SessionEvent: event})
+		err := adk.TypedSendEvent(ctx, &adk.TypedAgentEvent[M]{
+			SessionEventVariant: &adk.SessionEventVariant[M]{Event: event},
+		})
 		if isOutOfRunContextError(err) {
 			continue
 		}

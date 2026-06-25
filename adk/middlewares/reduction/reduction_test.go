@@ -3850,7 +3850,7 @@ func drainReductionEvents(t *testing.T, iter *adk.AsyncIterator[*adk.AgentEvent]
 
 func loadReductionSessionEvents(t *testing.T, ctx context.Context, store adk.SessionEventStore[*schema.Message], sessionID string) []*adk.SessionEvent[*schema.Message] {
 	t.Helper()
-	res, err := store.LoadEvents(ctx, &adk.LoadSessionEventsRequest{SessionID: sessionID})
+	res, err := store.LoadEvents(ctx, sessionID, &adk.LoadSessionEventsRequest{})
 	assert.NoError(t, err)
 	return res.Events
 }
