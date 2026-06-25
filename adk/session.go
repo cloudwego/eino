@@ -78,8 +78,8 @@ const (
 // session event log. Runner coordinates process-local single-writer access for
 // a session before calling AppendEvents.
 type SessionEventStore[M MessageType] interface {
-	LoadEvents(ctx context.Context, req *LoadSessionEventsRequest) (*LoadSessionEventsResult[M], error)
-	AppendEvents(ctx context.Context, req *AppendSessionEventsRequest[M]) error
+	LoadEvents(ctx context.Context, sessionID string, req *LoadSessionEventsRequest) (*LoadSessionEventsResult[M], error)
+	AppendEvents(ctx context.Context, sessionID string, events []*SessionEvent[M]) error
 }
 
 type openSessionRequest struct {
@@ -92,14 +92,12 @@ type openSessionResult[M MessageType] struct {
 
 type sessionHandle[M MessageType] interface {
 	loadEvents(ctx context.Context, req *LoadSessionEventsRequest) (*LoadSessionEventsResult[M], error)
-	appendEvents(ctx context.Context, req *AppendSessionEventsRequest[M]) error
+	appendEvents(ctx context.Context, events []*SessionEvent[M]) error
 	close(ctx context.Context) error
 }
 
 // LoadSessionEventsRequest configures typed event loading pagination and direction.
 type LoadSessionEventsRequest struct {
-	// SessionID identifies the session log to load.
-	SessionID string
 	// After is the last-seen event_id used as an exclusive append-position cursor.
 	After string
 	// Limit is the maximum number of events to return. 0 means no limit.
@@ -118,23 +116,13 @@ type LoadSessionEventsResult[M MessageType] struct {
 	Next string
 }
 
-type AppendSessionEventsRequest[M MessageType] struct {
-	// SessionID identifies the session log to append to.
-	SessionID string
-	// Events are appended as one batch. Each EventID must be non-empty and
-	// unique within the session.
-	Events []*SessionEvent[M]
-}
-
 // SessionEvent is the JSON-serializable persistence format for session events.
+// SessionEvent is session-local; stores receive the owning session id as a
+// first-class argument. The pair (session_id, event_id) globally identifies a
+// persisted event.
 // Exactly one semantic content field is active per event. The MessagesReplaced field
 // uses pointer-to-slice semantics (nil = absent, non-nil = active replacement).
 type SessionEvent[M MessageType] struct {
-	// SessionID identifies the session timeline this event belongs to. Runner-owned
-	// root events use the runner SessionID; nested AgentTool events use their
-	// synthetic child SessionID so live consumers can distinguish event ownership.
-	SessionID string `json:"session_id,omitempty"`
-
 	// EventID is the canonical, session-unique identity of this event.
 	// Assigned exactly once by the Runner at event materialization
 	// (in makeInputSessionEvent / toSessionEvent). Persister-level retries
@@ -173,9 +161,36 @@ type SessionEvent[M MessageType] struct {
 	Error     *SessionErrorEvent `json:"error,omitempty"`
 	Span      *SpanEvent         `json:"span,omitempty"`
 
-	UserObservation *UserObservationEvent  `json:"user_observation,omitempty"`
-	AgentInterrupt  *AgentInterruptEvent   `json:"agent_interrupt,omitempty"`
-	Extension       *SessionExtensionEvent `json:"extension,omitempty"`
+	Cancel    *CancelEvent           `json:"cancel,omitempty"`
+	Interrupt *InterruptEvent        `json:"interrupt,omitempty"`
+	Extension *SessionExtensionEvent `json:"extension,omitempty"`
+}
+
+// SessionEventVariant is the live AgentEvent envelope for session-related
+// metadata. SessionID is live ownership metadata only; it is intentionally not
+// part of durable SessionEvent payloads.
+//
+// Invariant: exactly one of Event or MessageStreamRef must be set.
+// Event carries a fully materialized SessionEvent; MessageStreamRef carries
+// only the reserved durable identity for a streaming message whose content
+// remains in Output.MessageOutput.MessageStream.
+type SessionEventVariant[M MessageType] struct {
+	SessionID string
+
+	Event            *SessionEvent[M]
+	MessageStreamRef *MessageStreamRef
+}
+
+// MessageStreamRef carries the durable identity metadata for a streaming
+// message whose content remains in Output.MessageOutput.MessageStream. It is
+// carried by SessionEventVariant for live events. The runner later reuses this
+// identity when it drains its persistence copy of the stream and writes the
+// resulting message as a SessionEvent.
+type MessageStreamRef struct {
+	EventID   string
+	Timestamp time.Time
+	Kind      SessionEventKind
+	TurnID    string
 }
 
 type SessionEventKind string
@@ -190,21 +205,51 @@ const (
 	SessionEventModelContext            SessionEventKind = "model_context"
 	SessionEventRollback                SessionEventKind = "rollback"
 
-	SessionEventSessionStatusRunning     SessionEventKind = "session.status_running"
-	SessionEventSessionStatusIdle        SessionEventKind = "session.status_idle"
-	SessionEventSessionStatusRescheduled SessionEventKind = "session.status_rescheduled"
-	SessionEventSessionError             SessionEventKind = "session.error"
+	SessionEventSessionStatusRunning SessionEventKind = "session.status_running"
+	SessionEventSessionStatusIdle    SessionEventKind = "session.status_idle"
+	SessionEventSessionError         SessionEventKind = "session.error"
 
 	SessionEventSpanModelRequestStart SessionEventKind = "span.model_request_start"
 	SessionEventSpanModelRequestEnd   SessionEventKind = "span.model_request_end"
 	SessionEventSpanToolCallStart     SessionEventKind = "span.tool_call_start"
 	SessionEventSpanToolCallEnd       SessionEventKind = "span.tool_call_end"
 
-	SessionEventCancel         SessionEventKind = "cancel"
-	SessionEventAgentInterrupt SessionEventKind = "agent.interrupt"
+	SessionEventCancel    SessionEventKind = "cancel"
+	SessionEventInterrupt SessionEventKind = "interrupt"
 
 	SessionEventExtensionPrefix = "x."
 )
+
+var knownSessionEventKinds = map[SessionEventKind]struct{}{
+	SessionEventMessage:                 {},
+	SessionEventMessageStreamIncomplete: {},
+	SessionEventMessagesReplaced:        {},
+	SessionEventMessageUpdated:          {},
+	SessionEventMessageInserted:         {},
+	SessionEventMessagesDeleted:         {},
+	SessionEventModelContext:            {},
+	SessionEventRollback:                {},
+	SessionEventSessionStatusRunning:    {},
+	SessionEventSessionStatusIdle:       {},
+	SessionEventSessionError:            {},
+	SessionEventSpanModelRequestStart:   {},
+	SessionEventSpanModelRequestEnd:     {},
+	SessionEventSpanToolCallStart:       {},
+	SessionEventSpanToolCallEnd:         {},
+	SessionEventCancel:                  {},
+	SessionEventInterrupt:               {},
+}
+
+func isKnownSessionEventKind(kind SessionEventKind) bool {
+	if kind == "" {
+		return false
+	}
+	if strings.HasPrefix(string(kind), SessionEventExtensionPrefix) {
+		return true
+	}
+	_, ok := knownSessionEventKinds[kind]
+	return ok
+}
 
 type LifecycleEvent struct {
 	State      SessionRunState `json:"state,omitempty"`
@@ -221,9 +266,8 @@ type SessionRollbackEvent struct {
 type SessionRunState string
 
 const (
-	SessionRunStateRunning     SessionRunState = "running"
-	SessionRunStateIdle        SessionRunState = "idle"
-	SessionRunStateRescheduled SessionRunState = "rescheduled"
+	SessionRunStateRunning SessionRunState = "running"
+	SessionRunStateIdle    SessionRunState = "idle"
 )
 
 type StopReason struct {
@@ -355,23 +399,20 @@ type ToolSpanMeta struct {
 	ToolResultMessageEventID string `json:"tool_result_message_event_id,omitempty"`
 }
 
-type UserObservationEvent struct {
-	Interrupt *UserInterruptEvent `json:"interrupt,omitempty"`
-}
-
-type UserInterruptEvent struct {
+// CancelEvent records a user-initiated cancellation in the durable session timeline.
+type CancelEvent struct {
 	Reason string `json:"reason,omitempty"`
 }
 
-// AgentInterruptEvent records a business interrupt in the durable session timeline.
-type AgentInterruptEvent struct {
+// InterruptEvent records a business interrupt in the durable session timeline.
+type InterruptEvent struct {
 	// Contexts is the set of interrupt contexts that caused the agent to pause.
 	// Each element represents a single root-cause interrupt point.
-	Contexts []*AgentInterruptContext `json:"contexts,omitempty"`
+	Contexts []*InterruptContext `json:"contexts,omitempty"`
 }
 
-// AgentInterruptContext describes a single interrupt point within a batch.
-type AgentInterruptContext struct {
+// InterruptContext describes a single interrupt point within a batch.
+type InterruptContext struct {
 	// InterruptID is the fully-qualified address of the interrupt point
 	// (e.g. "agent:A;tool:lookup:call_1"). Use this as the key in ResumeParams.Targets.
 	InterruptID string `json:"interrupt_id,omitempty"`
@@ -432,8 +473,8 @@ type MessagesDeletedEvent struct {
 
 // SessionEventIDGenerator returns the EventID for a draft SessionEvent[M].
 //
-// Generators see the fully-populated draft (Kind, Message, Span, Extension,
-// SessionID, TurnID, ...) and may return a business-side identifier such as
+// Generators see the fully-populated session-local draft (Kind, Message, Span,
+// Extension, TurnID, ...) and may return a business-side identifier such as
 // the matching application order/job/result ID. When a generator does not
 // recognize a draft event, it should fall through to
 // DefaultSessionEventIDGenerator[M] rather than allocating a UUID directly,
@@ -513,10 +554,13 @@ func init() {
 	schema.RegisterName[*ModelTimeoutMeta]("_eino_adk_model_timeout_meta")
 	schema.RegisterName[*ModelUsage]("_eino_adk_model_usage")
 	schema.RegisterName[*ToolSpanMeta]("_eino_adk_tool_span_meta")
-	schema.RegisterName[*UserObservationEvent]("_eino_adk_user_observation_event")
-	schema.RegisterName[*UserInterruptEvent]("_eino_adk_user_interrupt_event")
-	schema.RegisterName[*AgentInterruptEvent]("_eino_adk_agent_interrupt_event")
-	schema.RegisterName[*AgentInterruptContext]("_eino_adk_agent_interrupt_context")
+	// Note: SessionEventVariant and MessageStreamRef are not registered here
+	// because they never reach a serializer: checkpoint sanitizers strip
+	// SessionEventVariant before gob encoding, and the store serializer only
+	// encodes *SessionEvent[M] (the materialized form, not the variant).
+	schema.RegisterName[*CancelEvent]("_eino_adk_cancel_event")
+	schema.RegisterName[*InterruptEvent]("_eino_adk_interrupt_event")
+	schema.RegisterName[*InterruptContext]("_eino_adk_interrupt_context")
 	schema.RegisterName[*SessionExtensionEvent]("_eino_adk_session_extension_event")
 	schema.RegisterName[*SessionRollbackEvent]("_eino_adk_session_rollback_event")
 }
@@ -598,8 +642,7 @@ func makeInputSessionEvent[M MessageType](msg M) *SessionEvent[M] {
 }
 
 // toSessionEvent converts an internal TypedAgentEvent into the persistence format.
-// Returns nil if the event has no persistable content. Reuses event.EventID
-// allocated upstream by execCtx.send so live and persisted views share identity.
+// Returns nil if the event has no persistable content.
 func toSessionEvent[M MessageType](event *TypedAgentEvent[M]) *SessionEvent[M] {
 	se, _ := toSessionEventChecked(event)
 	return se
@@ -609,7 +652,7 @@ func toSessionEventChecked[M MessageType](event *TypedAgentEvent[M]) (*SessionEv
 	if event == nil {
 		return nil, nil
 	}
-	if event.SessionEvent != nil {
+	if event.SessionEventVariant != nil && event.SessionEventVariant.Event != nil {
 		se, err := normalizeAgentSessionEvent(event)
 		if err != nil {
 			return nil, err
@@ -619,24 +662,11 @@ func toSessionEventChecked[M MessageType](event *TypedAgentEvent[M]) (*SessionEv
 		}
 		return &se, nil
 	}
-	se := &SessionEvent[M]{Timestamp: event.Timestamp}
-	switch {
-	case event.Output != nil && event.Output.MessageOutput != nil:
-		if !isNilMessage(event.Output.MessageOutput.Message) {
-			se.Kind = SessionEventMessage
-			se.Message = event.Output.MessageOutput.Message
-		} else {
-			return nil, nil
-		}
-	default:
-		return nil, nil
+	if event.Output != nil && event.Output.MessageOutput != nil &&
+		!isNilMessage(event.Output.MessageOutput.Message) {
+		return nil, errors.New("persistable AgentEvent has no SessionEventVariant.Event")
 	}
-	if event.EventID != "" {
-		se.EventID = event.EventID
-	} else {
-		return nil, errors.New("persistable AgentEvent has empty EventID")
-	}
-	return se, NormalizeSessionEventKind(se)
+	return nil, nil
 }
 
 func normalizeAgentSessionEvent[M MessageType](event *TypedAgentEvent[M]) (SessionEvent[M], error) {
@@ -653,22 +683,14 @@ func normalizeAgentSessionEventWithAssigner[M MessageType](
 	event *TypedAgentEvent[M],
 	assign func(*SessionEvent[M]) (string, error),
 ) (SessionEvent[M], error) {
-	if event == nil || event.SessionEvent == nil {
+	if event == nil || event.SessionEventVariant == nil || event.SessionEventVariant.Event == nil {
 		return SessionEvent[M]{}, errors.New("missing session event")
 	}
 	if assign == nil {
 		assign = func(*SessionEvent[M]) (string, error) { return uuid.NewString(), nil }
 	}
-	se := *event.SessionEvent
-	if event.EventID != "" && se.EventID != "" && event.EventID != se.EventID {
-		return SessionEvent[M]{}, fmt.Errorf("session event identity mismatch: agent event %q session event %q", event.EventID, se.EventID)
-	}
-	switch {
-	case event.EventID != "":
-		se.EventID = event.EventID
-	case se.EventID != "":
-		event.EventID = se.EventID
-	default:
+	se := *event.SessionEventVariant.Event
+	if se.EventID == "" {
 		id, err := assign(&se)
 		if err != nil {
 			return SessionEvent[M]{}, err
@@ -676,31 +698,24 @@ func normalizeAgentSessionEventWithAssigner[M MessageType](
 		if id == "" {
 			return SessionEvent[M]{}, ErrSessionEventIDGeneratorEmpty
 		}
-		event.EventID = id
 		se.EventID = id
 	}
-	switch {
-	case !event.Timestamp.IsZero() && se.Timestamp.IsZero():
-		se.Timestamp = event.Timestamp
-	case event.Timestamp.IsZero() && !se.Timestamp.IsZero():
-		event.Timestamp = se.Timestamp
-	case event.Timestamp.IsZero() && se.Timestamp.IsZero():
-		ts := newEventTimestamp()
-		event.Timestamp = ts
-		se.Timestamp = ts
+	if se.Timestamp.IsZero() {
+		se.Timestamp = newEventTimestamp()
 	}
-	event.EventID = se.EventID
-	event.Timestamp = se.Timestamp
-	event.SessionEvent = &se
+	event.SessionEventVariant.Event = &se
 	return se, nil
 }
 
 func validateAgentSessionEventIdentity[M MessageType](event *TypedAgentEvent[M]) error {
-	if event == nil || event.SessionEvent == nil {
+	if event == nil || event.SessionEventVariant == nil {
 		return nil
 	}
-	if event.EventID == "" || event.SessionEvent.EventID == "" || event.EventID != event.SessionEvent.EventID {
-		return fmt.Errorf("session event identity mismatch: agent event %q session event %q", event.EventID, event.SessionEvent.EventID)
+	if (event.SessionEventVariant.Event == nil) == (event.SessionEventVariant.MessageStreamRef == nil) {
+		return errors.New("session event variant must set exactly one payload")
+	}
+	if ref := event.SessionEventVariant.MessageStreamRef; ref != nil && ref.Kind != SessionEventMessage {
+		return fmt.Errorf("message stream ref kind must be %q, got %q", SessionEventMessage, ref.Kind)
 	}
 	return nil
 }
@@ -760,8 +775,6 @@ func ClassifySessionEvent[M MessageType](event *SessionEvent[M]) (SessionEventKi
 			add(SessionEventSessionStatusRunning)
 		case SessionRunStateIdle:
 			add(SessionEventSessionStatusIdle)
-		case SessionRunStateRescheduled:
-			add(SessionEventSessionStatusRescheduled)
 		default:
 			return "", fmt.Errorf("unknown lifecycle state %q", event.Lifecycle.State)
 		}
@@ -776,14 +789,11 @@ func ClassifySessionEvent[M MessageType](event *SessionEvent[M]) (SessionEventKi
 		}
 		add(kind)
 	}
-	if event.UserObservation != nil {
-		if event.UserObservation.Interrupt == nil {
-			return "", errors.New("user observation has no active payload")
-		}
+	if event.Cancel != nil {
 		add(SessionEventCancel)
 	}
-	if event.AgentInterrupt != nil {
-		add(SessionEventAgentInterrupt)
+	if event.Interrupt != nil {
+		add(SessionEventInterrupt)
 	}
 	if event.Extension != nil {
 		if event.Kind == "" {
@@ -798,6 +808,56 @@ func ClassifySessionEvent[M MessageType](event *SessionEvent[M]) (SessionEventKi
 		return "", fmt.Errorf("session event must have exactly one active payload, got %d", len(kinds))
 	}
 	return kinds[0], nil
+}
+
+func countActiveSessionEventPayloads[M MessageType](event *SessionEvent[M]) int {
+	if event == nil {
+		return 0
+	}
+	count := 0
+	if !isNilMessage(event.Message) {
+		count++
+	}
+	if event.MessageStreamIncomplete != nil {
+		count++
+	}
+	if event.MessagesReplaced != nil {
+		count++
+	}
+	if event.MessageUpdated != nil {
+		count++
+	}
+	if event.MessageInserted != nil {
+		count++
+	}
+	if event.MessagesDeleted != nil {
+		count++
+	}
+	if event.ModelContext != nil {
+		count++
+	}
+	if event.Rollback != nil {
+		count++
+	}
+	if event.Lifecycle != nil {
+		count++
+	}
+	if event.Error != nil {
+		count++
+	}
+	if event.Span != nil {
+		count++
+	}
+	if event.Cancel != nil {
+		count++
+	}
+	if event.Interrupt != nil {
+		count++
+	}
+	if event.Extension != nil {
+		count++
+	}
+	return count
 }
 
 func classifySpanSessionEvent(span *SpanEvent) (SessionEventKind, error) {
@@ -836,8 +896,14 @@ func classifySpanSessionEvent(span *SpanEvent) (SessionEventKind, error) {
 
 // NormalizeSessionEventKind fills an empty Kind from the active payload and
 // rejects mismatches between Kind and payload shape.
+//
+// Unknown kinds (kinds not in the known set and not prefixed with "x.") with
+// no recognized payload are tolerated as a forward/backward compatibility
+// mechanism: legacy data (e.g. pre-refactor "turn_end") and events written by
+// newer code with kinds we don't yet understand are accepted as-is rather than
+// failing replay.
 func NormalizeSessionEventKind[M MessageType](event *SessionEvent[M]) error {
-	if event != nil && event.Kind == "turn_end" {
+	if event != nil && event.Kind != "" && !isKnownSessionEventKind(event.Kind) && countActiveSessionEventPayloads(event) == 0 {
 		return nil
 	}
 	kind, err := ClassifySessionEvent(event)
@@ -865,7 +931,7 @@ func ValidateEmittedSessionEventKind[M MessageType](event *SessionEvent[M]) erro
 
 func isSessionDurableBoundaryKind(kind SessionEventKind) bool {
 	switch kind {
-	case SessionEventMessage, SessionEventSessionStatusIdle, SessionEventAgentInterrupt:
+	case SessionEventMessage, SessionEventSessionStatusIdle, SessionEventInterrupt:
 		return true
 	default:
 		return false
@@ -897,7 +963,7 @@ func normalizeSessionConfig[M MessageType](cfg *SessionConfig[M]) SessionConfig[
 // persisting the event.
 //
 // Callers MUST construct the draft with EventID == "" and populate every
-// other relevant field (SessionID, TurnID, Kind, payload, timestamp) so the
+// other relevant session-local field (TurnID, Kind, payload, timestamp) so the
 // generator sees a complete draft. A nil event is a no-op.
 //
 // On generator-side contract violations, the helper returns:
@@ -1046,10 +1112,7 @@ func (p *sessionEventPersister[M]) closeAndWait() error {
 }
 
 func (p *sessionEventPersister[M]) appendEvents(events []*SessionEvent[M]) error {
-	err := p.handle.appendEvents(p.ctx, &AppendSessionEventsRequest[M]{
-		SessionID: p.sessionID,
-		Events:    events,
-	})
+	err := p.handle.appendEvents(p.ctx, events)
 	if err != nil {
 		p.setErr(err)
 		return err
@@ -1078,11 +1141,11 @@ func stripSessionEventFields[M MessageType](event *TypedAgentEvent[M]) *TypedAge
 	if event == nil {
 		return nil
 	}
-	if event.SessionEvent == nil {
+	if event.SessionEventVariant == nil {
 		return event
 	}
 	stripped := *event
-	stripped.SessionEvent = nil
+	stripped.SessionEventVariant = nil
 	if stripped.Output == nil && stripped.Action == nil && stripped.Err == nil {
 		return nil
 	}
@@ -1261,7 +1324,7 @@ var sessionReplayEventKinds = []SessionEventKind{
 	SessionEventMessagesDeleted,
 	SessionEventModelContext,
 	SessionEventSessionStatusIdle,
-	SessionEventAgentInterrupt,
+	SessionEventInterrupt,
 	SessionEventCancel,
 	SessionEventRollback,
 }
@@ -1367,10 +1430,7 @@ func RollbackSession[M MessageType](
 	if err := assignSessionEventID(ctx, rb, cfg.EventIDGenerator); err != nil {
 		return err
 	}
-	if err := openResult.handle.appendEvents(ctx, &AppendSessionEventsRequest[M]{
-		SessionID: sessionID,
-		Events:    []*SessionEvent[M]{rb},
-	}); err != nil {
+	if err := openResult.handle.appendEvents(ctx, []*SessionEvent[M]{rb}); err != nil {
 		return err
 	}
 	if cfg.CheckPointStore != nil {
@@ -1420,11 +1480,10 @@ func loadActiveSessionEventsReverse[M MessageType](
 	var after string
 	for {
 		result, err := handle.loadEvents(ctx, &LoadSessionEventsRequest{
-			SessionID: sessionID,
-			After:     after,
-			Limit:     pageSize,
-			Reverse:   true,
-			Kinds:     sessionReplayEventKinds,
+			After:   after,
+			Limit:   pageSize,
+			Reverse: true,
+			Kinds:   sessionReplayEventKinds,
 		})
 		if err != nil {
 			return nil, err
@@ -1505,11 +1564,10 @@ func findPhysicalRollbackTargetEvidence[M MessageType](
 	var evidence rollbackTargetEvidence
 	for {
 		result, err := handle.loadEvents(ctx, &LoadSessionEventsRequest{
-			SessionID: sessionID,
-			After:     after,
-			Limit:     pageSize,
-			Reverse:   false,
-			Kinds:     sessionReplayEventKinds,
+			After:   after,
+			Limit:   pageSize,
+			Reverse: false,
+			Kinds:   sessionReplayEventKinds,
 		})
 		if err != nil {
 			return rollbackTargetEvidenceNone, err

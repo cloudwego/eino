@@ -30,13 +30,16 @@ import (
 )
 
 type serviceContractStore struct {
-	loadReqs   []*LoadSessionEventsRequest
-	appendReqs []*AppendSessionEventsRequest[*schema.Message]
-	loadErr    error
-	appendErr  error
+	loadSessionIDs   []string
+	loadReqs         []*LoadSessionEventsRequest
+	appendSessionIDs []string
+	appendEvents     [][]*SessionEvent[*schema.Message]
+	loadErr          error
+	appendErr        error
 }
 
-func (s *serviceContractStore) LoadEvents(_ context.Context, req *LoadSessionEventsRequest) (*LoadSessionEventsResult[*schema.Message], error) {
+func (s *serviceContractStore) LoadEvents(_ context.Context, sessionID string, req *LoadSessionEventsRequest) (*LoadSessionEventsResult[*schema.Message], error) {
+	s.loadSessionIDs = append(s.loadSessionIDs, sessionID)
 	s.loadReqs = append(s.loadReqs, req)
 	if s.loadErr != nil {
 		return nil, s.loadErr
@@ -44,8 +47,9 @@ func (s *serviceContractStore) LoadEvents(_ context.Context, req *LoadSessionEve
 	return &LoadSessionEventsResult[*schema.Message]{}, nil
 }
 
-func (s *serviceContractStore) AppendEvents(_ context.Context, req *AppendSessionEventsRequest[*schema.Message]) error {
-	s.appendReqs = append(s.appendReqs, req)
+func (s *serviceContractStore) AppendEvents(_ context.Context, sessionID string, events []*SessionEvent[*schema.Message]) error {
+	s.appendSessionIDs = append(s.appendSessionIDs, sessionID)
+	s.appendEvents = append(s.appendEvents, events)
 	if s.appendErr != nil {
 		return s.appendErr
 	}
@@ -175,20 +179,18 @@ func TestLocalSessionStoreHandleContracts(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, res)
 	require.Len(t, store.loadReqs, 1)
-	assert.Equal(t, "sid", store.loadReqs[0].SessionID)
+	assert.Equal(t, "sid", store.loadSessionIDs[0])
 
 	event := validTestPayload()
-	err = opened.handle.appendEvents(ctx, &AppendSessionEventsRequest[*schema.Message]{
-		Events: []*SessionEvent[*schema.Message]{event},
-	})
+	err = opened.handle.appendEvents(ctx, []*SessionEvent[*schema.Message]{event})
 	require.NoError(t, err)
-	require.Len(t, store.appendReqs, 1)
-	assert.Equal(t, "sid", store.appendReqs[0].SessionID)
+	require.Len(t, store.appendEvents, 1)
+	assert.Equal(t, "sid", store.appendSessionIDs[0])
 
 	err = opened.handle.appendEvents(ctx, nil)
 	require.NoError(t, err)
-	require.Len(t, store.appendReqs, 2)
-	assert.Equal(t, "sid", store.appendReqs[1].SessionID)
+	require.Len(t, store.appendEvents, 2)
+	assert.Equal(t, "sid", store.appendSessionIDs[1])
 
 	require.NoError(t, opened.handle.close(ctx))
 	require.NoError(t, opened.handle.close(ctx))
@@ -210,9 +212,7 @@ func TestLocalSessionStoreHandleContracts(t *testing.T) {
 	store.appendErr = errors.New("append failed")
 	opened, err = openLocalSession[*schema.Message](ctx, store, &openSessionRequest{sessionID: "sid-append-err"})
 	require.NoError(t, err)
-	err = opened.handle.appendEvents(ctx, &AppendSessionEventsRequest[*schema.Message]{
-		Events: []*SessionEvent[*schema.Message]{validTestPayload()},
-	})
+	err = opened.handle.appendEvents(ctx, []*SessionEvent[*schema.Message]{validTestPayload()})
 	require.ErrorContains(t, err, "append failed")
 	require.NoError(t, opened.handle.close(ctx))
 }

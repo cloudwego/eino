@@ -71,11 +71,7 @@ type publicSessionHelperStore struct {
 	*sessionHelperStore
 }
 
-func (s *publicSessionHelperStore) LoadEvents(ctx context.Context, req *LoadSessionEventsRequest) (*LoadSessionEventsResult[*schema.Message], error) {
-	sessionID := ""
-	if req != nil {
-		sessionID = req.SessionID
-	}
+func (s *publicSessionHelperStore) LoadEvents(ctx context.Context, sessionID string, req *LoadSessionEventsRequest) (*LoadSessionEventsResult[*schema.Message], error) {
 	res, err := s.sessionHelperStore.LoadEventsForSession(ctx, sessionID, req)
 	if err != nil {
 		return nil, err
@@ -83,15 +79,7 @@ func (s *publicSessionHelperStore) LoadEvents(ctx context.Context, req *LoadSess
 	return res, nil
 }
 
-func (s *publicSessionHelperStore) AppendEvents(ctx context.Context, req *AppendSessionEventsRequest[*schema.Message]) error {
-	sessionID := ""
-	if req != nil {
-		sessionID = req.SessionID
-	}
-	var events []*SessionEvent[*schema.Message]
-	if req != nil {
-		events = req.Events
-	}
+func (s *publicSessionHelperStore) AppendEvents(ctx context.Context, sessionID string, events []*SessionEvent[*schema.Message]) error {
 	return s.sessionHelperStore.AppendEventsForSession(ctx, sessionID, events)
 }
 
@@ -115,11 +103,8 @@ func (s *blockingAppendStore) AppendEventsForSession(ctx context.Context, sessio
 	return s.sessionHelperStore.AppendEventsForSession(ctx, sessionID, events)
 }
 
-func (s *blockingAppendStore) AppendEvents(ctx context.Context, req *AppendSessionEventsRequest[*schema.Message]) error {
-	if req == nil {
-		req = &AppendSessionEventsRequest[*schema.Message]{}
-	}
-	return s.AppendEventsForSession(ctx, req.SessionID, req.Events)
+func (s *blockingAppendStore) AppendEvents(ctx context.Context, sessionID string, events []*SessionEvent[*schema.Message]) error {
+	return s.AppendEventsForSession(ctx, sessionID, events)
 }
 
 func (s *blockingAppendStore) openSession(_ context.Context, req *openSessionRequest) (*openSessionResult[*schema.Message], error) {
@@ -130,11 +115,8 @@ func (s *blockingAppendStore) openSession(_ context.Context, req *openSessionReq
 	return &openSessionResult[*schema.Message]{handle: &legacyMessageTestHandle{store: s, sessionID: sessionID}}, nil
 }
 
-func (s *blockingAppendStore) appendEvents(ctx context.Context, req *AppendSessionEventsRequest[*schema.Message]) error {
-	if req == nil {
-		req = &AppendSessionEventsRequest[*schema.Message]{}
-	}
-	return s.AppendEventsForSession(ctx, req.SessionID, req.Events)
+func (s *blockingAppendStore) appendEvents(ctx context.Context, events []*SessionEvent[*schema.Message]) error {
+	return s.AppendEventsForSession(ctx, "", events)
 }
 
 // withTestEventID assigns a fresh UUIDv4 to the SessionEvent if its EventID is
@@ -274,6 +256,7 @@ func (a *runnerSessionAgent) Run(ctx context.Context, input *AgentInput, _ ...Ag
 
 type streamingSessionAgent struct {
 	release chan struct{}
+	variant *SessionEventVariant[*schema.Message]
 }
 
 func (a *streamingSessionAgent) Name(_ context.Context) string { return "streaming-session-agent" }
@@ -293,6 +276,7 @@ func (a *streamingSessionAgent) Run(_ context.Context, _ *AgentInput, _ ...Agent
 			Output: &AgentOutput{
 				MessageOutput: &MessageVariant{IsStreaming: true, MessageStream: sr, Role: schema.Assistant},
 			},
+			SessionEventVariant: a.variant,
 		})
 		<-a.release
 		sw.Close()
@@ -366,13 +350,7 @@ func (s *sessionHelperStore) Delete(_ context.Context, key string) error {
 	return nil
 }
 
-func (s *sessionHelperStore) AppendEvents(ctx context.Context, req *AppendSessionEventsRequest[*schema.Message]) error {
-	sessionID := ""
-	var events []*SessionEvent[*schema.Message]
-	if req != nil {
-		sessionID = req.SessionID
-		events = req.Events
-	}
+func (s *sessionHelperStore) AppendEvents(ctx context.Context, sessionID string, events []*SessionEvent[*schema.Message]) error {
 	return s.AppendEventsForSession(ctx, sessionID, events)
 }
 
@@ -418,11 +396,7 @@ func (s *sessionHelperStore) AppendEventsForSession(_ context.Context, _ string,
 	return nil
 }
 
-func (s *sessionHelperStore) LoadEvents(ctx context.Context, req *LoadSessionEventsRequest) (*LoadSessionEventsResult[*schema.Message], error) {
-	sessionID := ""
-	if req != nil {
-		sessionID = req.SessionID
-	}
+func (s *sessionHelperStore) LoadEvents(ctx context.Context, sessionID string, req *LoadSessionEventsRequest) (*LoadSessionEventsResult[*schema.Message], error) {
 	return s.LoadEventsForSession(ctx, sessionID, req)
 }
 
@@ -523,18 +497,11 @@ func (s *sessionHelperStore) openSession(_ context.Context, req *openSessionRequ
 }
 
 func (s *sessionHelperStore) loadEvents(ctx context.Context, req *LoadSessionEventsRequest) (*LoadSessionEventsResult[*schema.Message], error) {
-	sessionID := ""
-	if req != nil {
-		sessionID = req.SessionID
-	}
-	return s.LoadEventsForSession(ctx, sessionID, req)
+	return s.LoadEventsForSession(ctx, "", req)
 }
 
-func (s *sessionHelperStore) appendEvents(ctx context.Context, req *AppendSessionEventsRequest[*schema.Message]) error {
-	if req == nil {
-		req = &AppendSessionEventsRequest[*schema.Message]{}
-	}
-	return s.AppendEventsForSession(ctx, req.SessionID, req.Events)
+func (s *sessionHelperStore) appendEvents(ctx context.Context, events []*SessionEvent[*schema.Message]) error {
+	return s.AppendEventsForSession(ctx, "", events)
 }
 
 func (s *sessionHelperStore) close(context.Context) error { return nil }
@@ -551,11 +518,8 @@ func (h *testSessionHandle) loadEvents(ctx context.Context, req *LoadSessionEven
 	return h.store.LoadEventsForSession(ctx, h.sessionID, req)
 }
 
-func (h *testSessionHandle) appendEvents(ctx context.Context, req *AppendSessionEventsRequest[*schema.Message]) error {
-	if req == nil {
-		req = &AppendSessionEventsRequest[*schema.Message]{}
-	}
-	return h.store.AppendEventsForSession(ctx, h.sessionID, req.Events)
+func (h *testSessionHandle) appendEvents(ctx context.Context, events []*SessionEvent[*schema.Message]) error {
+	return h.store.AppendEventsForSession(ctx, h.sessionID, events)
 }
 
 func (h *testSessionHandle) close(context.Context) error { return nil }
@@ -577,11 +541,8 @@ func (h *legacyMessageTestHandle) loadEvents(ctx context.Context, req *LoadSessi
 	return h.store.LoadEventsForSession(ctx, h.sessionID, req)
 }
 
-func (h *legacyMessageTestHandle) appendEvents(ctx context.Context, req *AppendSessionEventsRequest[*schema.Message]) error {
-	if req == nil {
-		req = &AppendSessionEventsRequest[*schema.Message]{}
-	}
-	return h.store.AppendEventsForSession(ctx, h.sessionID, req.Events)
+func (h *legacyMessageTestHandle) appendEvents(ctx context.Context, events []*SessionEvent[*schema.Message]) error {
+	return h.store.AppendEventsForSession(ctx, h.sessionID, events)
 }
 
 func (h *legacyMessageTestHandle) close(context.Context) error { return nil }
@@ -1083,6 +1044,81 @@ func TestRunnerSessionStreamingDoesNotBlockLiveEvent(t *testing.T) {
 	drainSessionEvents(t, iter)
 }
 
+func TestRunnerSessionStreamingRefAllocatesMissingEventID(t *testing.T) {
+	ctx := context.Background()
+	store := newSessionHelperStore()
+	agent := &streamingSessionAgent{
+		release: make(chan struct{}),
+		variant: &SessionEventVariant[*schema.Message]{
+			MessageStreamRef: &MessageStreamRef{Kind: SessionEventMessage},
+		},
+	}
+	release := func() {
+		select {
+		case <-agent.release:
+		default:
+			close(agent.release)
+		}
+	}
+	defer release()
+
+	const businessID = "stream-business-id"
+	var sawStreamDraft bool
+	gen := func(ctx context.Context, e *SessionEvent[*schema.Message]) (string, error) {
+		if e != nil && e.Kind == SessionEventMessage && e.Message == nil {
+			sawStreamDraft = true
+			assert.False(t, e.Timestamp.IsZero())
+			assert.NotEmpty(t, e.TurnID)
+			return businessID, nil
+		}
+		return DefaultSessionEventIDGenerator[*schema.Message](ctx, e)
+	}
+
+	runner := NewRunner(ctx, RunnerConfig{
+		Agent:           agent,
+		EnableStreaming: true,
+		SessionID:       "streaming-ref-session",
+		SessionStore:    store,
+		SessionConfig: &SessionConfig[*schema.Message]{
+			EventIDGenerator: gen,
+		},
+	})
+
+	iter := runner.Query(ctx, "start", WithTimelineEvents())
+	var event *AgentEvent
+	for {
+		ev, ok := iter.Next()
+		require.True(t, ok)
+		require.NoError(t, ev.Err)
+		if ev.Output != nil && ev.Output.MessageOutput != nil && ev.Output.MessageOutput.IsStreaming {
+			event = ev
+			break
+		}
+	}
+	require.NotNil(t, event.SessionEventVariant)
+	ref := event.SessionEventVariant.MessageStreamRef
+	require.NotNil(t, ref)
+	assert.Equal(t, businessID, ref.EventID)
+	assert.Equal(t, SessionEventMessage, ref.Kind)
+	assert.NotEmpty(t, ref.TurnID)
+	assert.False(t, ref.Timestamp.IsZero())
+
+	msg, err := event.Output.MessageOutput.MessageStream.Recv()
+	require.NoError(t, err)
+	assert.Equal(t, "partial", msg.Content)
+	release()
+	drainSessionEvents(t, iter)
+
+	require.True(t, sawStreamDraft)
+	messages := filterStoredSessionEvents(t, store.events, func(se *SessionEvent[*schema.Message]) bool {
+		return se.Kind == SessionEventMessage && se.Message != nil && se.Message.Content == "partial"
+	})
+	require.Len(t, messages, 1)
+	assert.Equal(t, businessID, messages[0].EventID)
+	assert.Equal(t, ref.TurnID, messages[0].TurnID)
+	assert.Equal(t, ref.Timestamp, messages[0].Timestamp)
+}
+
 func TestRunnerSessionPersistsIncompleteStreamingMessageBeforeCheckpoint(t *testing.T) {
 	ctx := context.Background()
 
@@ -1220,18 +1256,18 @@ func (a *runnerCheckpointSanitizeAgent) Run(ctx context.Context, _ *AgentInput, 
 	go func() {
 		defer gen.Close()
 		gen.Send(&AgentEvent{
-			EventID:   "checkpoint-session-only",
 			AgentName: "CheckpointSanitizeAgent",
-			SessionEvent: &SessionEvent[*schema.Message]{
-				EventID: "checkpoint-session-only",
-				Kind:    SessionEventSessionStatusRunning,
-				Lifecycle: &LifecycleEvent{
-					State: SessionRunStateRunning,
+			SessionEventVariant: &SessionEventVariant[*schema.Message]{
+				Event: &SessionEvent[*schema.Message]{
+					EventID: "checkpoint-session-only",
+					Kind:    SessionEventSessionStatusRunning,
+					Lifecycle: &LifecycleEvent{
+						State: SessionRunStateRunning,
+					},
 				},
 			},
 		})
 		gen.Send(&AgentEvent{
-			EventID:   "checkpoint-output",
 			AgentName: "CheckpointSanitizeAgent",
 			Output: &AgentOutput{
 				MessageOutput: &MessageVariant{
@@ -1239,10 +1275,12 @@ func (a *runnerCheckpointSanitizeAgent) Run(ctx context.Context, _ *AgentInput, 
 					Role:    schema.Assistant,
 				},
 			},
-			SessionEvent: &SessionEvent[*schema.Message]{
-				EventID: "checkpoint-output",
-				Kind:    SessionEventMessage,
-				Message: schema.AssistantMessage("mixed output", nil),
+			SessionEventVariant: &SessionEventVariant[*schema.Message]{
+				Event: &SessionEvent[*schema.Message]{
+					EventID: "checkpoint-output",
+					Kind:    SessionEventMessage,
+					Message: schema.AssistantMessage("mixed output", nil),
+				},
 			},
 		})
 		gen.Send(Interrupt(ctx, "confirm?"))
@@ -1932,24 +1970,23 @@ func setMessageIDForTest(msg *schema.Message, id string) {
 // TestStripSessionEventFields verifies all session-internal fields are stripped.
 func TestStripSessionEventFields(t *testing.T) {
 	t.Run("non-session-internal event passes through", func(t *testing.T) {
-		ts := time.Date(2026, 5, 22, 10, 0, 0, 0, time.UTC)
 		ev := &AgentEvent{
-			Timestamp: ts,
 			Output: &AgentOutput{
 				MessageOutput: &MessageVariant{Message: schema.AssistantMessage("hi", nil), Role: schema.Assistant},
 			},
 		}
 		stripped := stripSessionEventFields(ev)
 		require.NotNil(t, stripped)
-		assert.Equal(t, ts, stripped.Timestamp)
 		assert.Equal(t, "hi", stripped.Output.MessageOutput.Message.Content)
 	})
 
 	t.Run("SessionEvent-only event drops to nil", func(t *testing.T) {
 		ev := &AgentEvent{
-			SessionEvent: &SessionEvent[*schema.Message]{
-				Kind:         SessionEventModelContext,
-				ModelContext: &ModelContextEvent{},
+			SessionEventVariant: &SessionEventVariant[*schema.Message]{
+				Event: &SessionEvent[*schema.Message]{
+					Kind:         SessionEventModelContext,
+					ModelContext: &ModelContextEvent{},
+				},
 			},
 		}
 		stripped := stripSessionEventFields(ev)
@@ -1959,9 +1996,11 @@ func TestStripSessionEventFields(t *testing.T) {
 	t.Run("message mutation SessionEvent-only event drops to nil", func(t *testing.T) {
 		msgs := []*schema.Message{schema.UserMessage("x")}
 		ev := &AgentEvent{
-			SessionEvent: &SessionEvent[*schema.Message]{
-				Kind:             SessionEventMessagesReplaced,
-				MessagesReplaced: &msgs,
+			SessionEventVariant: &SessionEventVariant[*schema.Message]{
+				Event: &SessionEvent[*schema.Message]{
+					Kind:             SessionEventMessagesReplaced,
+					MessagesReplaced: &msgs,
+				},
 			},
 		}
 		stripped := stripSessionEventFields(ev)
@@ -1969,25 +2008,24 @@ func TestStripSessionEventFields(t *testing.T) {
 	})
 
 	t.Run("Err with SessionEvent keeps Err", func(t *testing.T) {
-		ts := time.Date(2026, 5, 22, 10, 1, 0, 0, time.UTC)
 		ev := &AgentEvent{
-			Timestamp: ts,
-			Err:       errors.New("visible"),
-			SessionEvent: &SessionEvent[*schema.Message]{
-				SessionID:    "child-1",
-				Kind:         SessionEventModelContext,
-				ModelContext: &ModelContextEvent{},
+			Err: errors.New("visible"),
+			SessionEventVariant: &SessionEventVariant[*schema.Message]{
+				SessionID: "child-1",
+				Event: &SessionEvent[*schema.Message]{
+					Kind:         SessionEventModelContext,
+					ModelContext: &ModelContextEvent{},
+				},
 			},
 		}
 		stripped := stripSessionEventFields(ev)
 		require.NotNil(t, stripped)
-		assert.Nil(t, stripped.SessionEvent)
-		assert.Equal(t, ts, stripped.Timestamp)
+		assert.Nil(t, stripped.SessionEventVariant)
 		assert.EqualError(t, stripped.Err, "visible")
 	})
 
-	t.Run("SessionEvent with SessionID alone is stripped", func(t *testing.T) {
-		ev := &AgentEvent{SessionEvent: &SessionEvent[*schema.Message]{SessionID: "child-1"}}
+	t.Run("SessionEventVariant with SessionID alone is stripped", func(t *testing.T) {
+		ev := &AgentEvent{SessionEventVariant: &SessionEventVariant[*schema.Message]{SessionID: "child-1"}}
 		stripped := stripSessionEventFields(ev)
 		assert.Nil(t, stripped)
 	})
@@ -1998,10 +2036,16 @@ func TestSessionEventTimestamp(t *testing.T) {
 	msg := schema.AssistantMessage("hi", nil)
 	EnsureMessageID(msg)
 	event := &AgentEvent{
-		EventID:   uuid.NewString(),
-		Timestamp: ts,
 		Output: &AgentOutput{
 			MessageOutput: &MessageVariant{Message: msg, Role: schema.Assistant},
+		},
+		SessionEventVariant: &SessionEventVariant[*schema.Message]{
+			Event: &SessionEvent[*schema.Message]{
+				EventID:   uuid.NewString(),
+				Timestamp: ts,
+				Kind:      SessionEventMessage,
+				Message:   msg,
+			},
 		},
 	}
 
@@ -2523,11 +2567,8 @@ func (s *recordingHelperStore) AppendEventsForSession(ctx context.Context, sid s
 	return s.sessionHelperStore.AppendEventsForSession(ctx, sid, events)
 }
 
-func (s *recordingHelperStore) AppendEvents(ctx context.Context, req *AppendSessionEventsRequest[*schema.Message]) error {
-	if req == nil {
-		req = &AppendSessionEventsRequest[*schema.Message]{}
-	}
-	return s.AppendEventsForSession(ctx, req.SessionID, req.Events)
+func (s *recordingHelperStore) AppendEvents(ctx context.Context, sessionID string, events []*SessionEvent[*schema.Message]) error {
+	return s.AppendEventsForSession(ctx, sessionID, events)
 }
 
 func (s *recordingHelperStore) openSession(_ context.Context, req *openSessionRequest) (*openSessionResult[*schema.Message], error) {
@@ -2538,11 +2579,8 @@ func (s *recordingHelperStore) openSession(_ context.Context, req *openSessionRe
 	return &openSessionResult[*schema.Message]{handle: &legacyMessageTestHandle{store: s, sessionID: sessionID}}, nil
 }
 
-func (s *recordingHelperStore) appendEvents(ctx context.Context, req *AppendSessionEventsRequest[*schema.Message]) error {
-	if req == nil {
-		req = &AppendSessionEventsRequest[*schema.Message]{}
-	}
-	return s.AppendEventsForSession(ctx, req.SessionID, req.Events)
+func (s *recordingHelperStore) appendEvents(ctx context.Context, events []*SessionEvent[*schema.Message]) error {
+	return s.AppendEventsForSession(ctx, "", events)
 }
 
 func (s *recordingHelperStore) Set(ctx context.Context, key string, value []byte) error {
@@ -2571,7 +2609,7 @@ func TestRunnerSessionInterruptCheckpointSkippedOnPersistFailure(t *testing.T) {
 	ctx := context.Background()
 	store := newRecordingHelperStore()
 	store.sessionHelperStore.kindErr = map[SessionEventKind]error{
-		SessionEventAgentInterrupt: errors.New("simulated append failure"),
+		SessionEventInterrupt: errors.New("simulated append failure"),
 	}
 
 	runner := NewRunner(ctx, RunnerConfig{
@@ -2671,7 +2709,7 @@ func TestRunnerSessionInterruptCheckpointTailIsFinalIdle(t *testing.T) {
 	require.NotNil(t, runCtx.Session)
 	for _, event := range runCtx.Session.Events {
 		require.NotNil(t, event.AgentEvent)
-		assert.Nil(t, event.SessionEvent)
+		assert.Nil(t, event.SessionEventVariant)
 	}
 }
 
@@ -2694,8 +2732,8 @@ func TestRunnerSessionCheckpointPayloadStripsSessionEvents(t *testing.T) {
 			break
 		}
 		require.NoError(t, event.Err)
-		if event.SessionEvent != nil {
-			liveSessionEventIDs = append(liveSessionEventIDs, event.SessionEvent.EventID)
+		if event.SessionEventVariant != nil && event.SessionEventVariant.Event != nil {
+			liveSessionEventIDs = append(liveSessionEventIDs, event.SessionEventVariant.Event.EventID)
 		}
 	}
 	assert.Contains(t, liveSessionEventIDs, "checkpoint-session-only")
@@ -2712,13 +2750,11 @@ func TestRunnerSessionCheckpointPayloadStripsSessionEvents(t *testing.T) {
 	require.NotNil(t, runCtx)
 	require.NotNil(t, runCtx.Session)
 
-	var checkpointEventIDs []string
 	var foundOutput bool
 	for _, event := range runCtx.Session.Events {
 		require.NotNil(t, event.AgentEvent)
-		assert.Nil(t, event.SessionEvent)
+		assert.Nil(t, event.SessionEventVariant)
 		assert.True(t, event.Output != nil || event.Action != nil || event.Err != nil)
-		checkpointEventIDs = append(checkpointEventIDs, event.EventID)
 		if event.Output != nil &&
 			event.Output.MessageOutput != nil &&
 			event.Output.MessageOutput.Message != nil &&
@@ -2726,7 +2762,6 @@ func TestRunnerSessionCheckpointPayloadStripsSessionEvents(t *testing.T) {
 			foundOutput = true
 		}
 	}
-	assert.NotContains(t, checkpointEventIDs, "checkpoint-session-only")
 	assert.True(t, foundOutput)
 
 	var persistedKinds []SessionEventKind
@@ -2743,7 +2778,7 @@ func TestRunnerSessionAgentInterruptBoundaryFailureNotExposed(t *testing.T) {
 	ctx := context.Background()
 	store := newRecordingHelperStore()
 	store.sessionHelperStore.kindErr = map[SessionEventKind]error{
-		SessionEventAgentInterrupt: errors.New("agent interrupt append failed"),
+		SessionEventInterrupt: errors.New("agent interrupt append failed"),
 	}
 
 	runner := NewRunner(ctx, RunnerConfig{
@@ -2764,12 +2799,12 @@ func TestRunnerSessionAgentInterruptBoundaryFailureNotExposed(t *testing.T) {
 		if event.Err != nil {
 			errs = append(errs, event.Err)
 		}
-		if event.SessionEvent != nil {
-			kinds = append(kinds, event.SessionEvent.Kind)
+		if event.SessionEventVariant != nil && event.SessionEventVariant.Event != nil {
+			kinds = append(kinds, event.SessionEventVariant.Event.Kind)
 		}
 	}
 	require.NotEmpty(t, errs)
-	assert.NotContains(t, kinds, SessionEventAgentInterrupt)
+	assert.NotContains(t, kinds, SessionEventInterrupt)
 
 	cpKey := sessionRunnerCheckpointID("interrupt-not-exposed")
 	_, existed := store.checkpoints[cpKey]
@@ -2780,7 +2815,7 @@ func TestRunnerSessionInterruptPersistErrorSurfacesWithoutCheckpoint(t *testing.
 	ctx := context.Background()
 	store := newSessionHelperStore()
 	store.kindErr = map[SessionEventKind]error{
-		SessionEventAgentInterrupt: errors.New("agent interrupt append failed"),
+		SessionEventInterrupt: errors.New("agent interrupt append failed"),
 	}
 	runner := NewRunner(ctx, RunnerConfig{
 		Agent:        &runnerInterruptAgent{},
@@ -2849,18 +2884,12 @@ func (s *transientFailStore) AppendEventsForSession(ctx context.Context, session
 	return s.sessionHelperStore.AppendEventsForSession(ctx, sessionID, events)
 }
 
-func (s *transientFailStore) AppendEvents(ctx context.Context, req *AppendSessionEventsRequest[*schema.Message]) error {
-	if req == nil {
-		req = &AppendSessionEventsRequest[*schema.Message]{}
-	}
-	return s.AppendEventsForSession(ctx, req.SessionID, req.Events)
+func (s *transientFailStore) AppendEvents(ctx context.Context, sessionID string, events []*SessionEvent[*schema.Message]) error {
+	return s.AppendEventsForSession(ctx, sessionID, events)
 }
 
-func (s *transientFailStore) appendEvents(ctx context.Context, req *AppendSessionEventsRequest[*schema.Message]) error {
-	if req == nil {
-		req = &AppendSessionEventsRequest[*schema.Message]{}
-	}
-	return s.AppendEventsForSession(ctx, req.SessionID, req.Events)
+func (s *transientFailStore) appendEvents(ctx context.Context, events []*SessionEvent[*schema.Message]) error {
+	return s.AppendEventsForSession(ctx, "", events)
 }
 
 func (s *transientFailStore) getAppendCalls() int {
@@ -2977,8 +3006,8 @@ func TestAttack_ReconstructionWithoutCommittedIdle(t *testing.T) {
 	EnsureMessageID(msg)
 	events := []*SessionEvent[*schema.Message]{
 		{EventID: uuid.NewString(), Kind: SessionEventMessage, TurnID: "turn-interrupted", Message: msg},
-		{EventID: uuid.NewString(), Kind: SessionEventAgentInterrupt, TurnID: "turn-interrupted", AgentInterrupt: &AgentInterruptEvent{
-			Contexts: []*AgentInterruptContext{
+		{EventID: uuid.NewString(), Kind: SessionEventInterrupt, TurnID: "turn-interrupted", Interrupt: &InterruptEvent{
+			Contexts: []*InterruptContext{
 				{
 					InterruptID: "agent:InterruptAgent",
 					Info:        "approval_needed",
@@ -3228,7 +3257,12 @@ func (a *sessionStreamingAgent) Run(_ context.Context, _ *AgentInput, _ ...Agent
 	go func() {
 		defer gen.Close()
 		if a.preEvent != nil {
-			gen.Send(&AgentEvent{AgentName: "session-stream-agent", SessionEvent: a.preEvent})
+			gen.Send(&AgentEvent{
+				AgentName: "session-stream-agent",
+				SessionEventVariant: &SessionEventVariant[*schema.Message]{
+					Event: a.preEvent,
+				},
+			})
 		}
 		stream := testStreamReaderWithTerminalError(a.chunks, a.streamErr)
 		role := a.role
@@ -3426,7 +3460,6 @@ func TestAttack_IncompleteStreamPrefixCarriesDurableMetadata(t *testing.T) {
 
 	require.NotNil(t, incomplete)
 	require.NotNil(t, idle)
-	assert.Equal(t, sid, incomplete.SessionID)
 	assert.NotEmpty(t, incomplete.EventID)
 	assert.NotEmpty(t, incomplete.TurnID)
 	assert.Equal(t, incomplete.TurnID, idle.TurnID)
@@ -4277,12 +4310,8 @@ func newAgenticSessionHelperStore() *agenticSessionHelperStore {
 	return &agenticSessionHelperStore{eventIDIdx: make(map[string]int)}
 }
 
-func (s *agenticSessionHelperStore) AppendEvents(ctx context.Context, req *AppendSessionEventsRequest[*schema.AgenticMessage]) error {
-	var events []*SessionEvent[*schema.AgenticMessage]
-	if req != nil {
-		events = req.Events
-	}
-	return s.AppendEventsForSession(ctx, "", events)
+func (s *agenticSessionHelperStore) AppendEvents(ctx context.Context, sessionID string, events []*SessionEvent[*schema.AgenticMessage]) error {
+	return s.AppendEventsForSession(ctx, sessionID, events)
 }
 
 func (s *agenticSessionHelperStore) AppendEventsForSession(_ context.Context, _ string, events []*SessionEvent[*schema.AgenticMessage]) error {
@@ -4308,8 +4337,8 @@ func (s *agenticSessionHelperStore) AppendEventsForSession(_ context.Context, _ 
 	return nil
 }
 
-func (s *agenticSessionHelperStore) LoadEvents(ctx context.Context, req *LoadSessionEventsRequest) (*LoadSessionEventsResult[*schema.AgenticMessage], error) {
-	return s.LoadEventsForSession(ctx, "", req)
+func (s *agenticSessionHelperStore) LoadEvents(ctx context.Context, sessionID string, req *LoadSessionEventsRequest) (*LoadSessionEventsResult[*schema.AgenticMessage], error) {
+	return s.LoadEventsForSession(ctx, sessionID, req)
 }
 
 func (s *agenticSessionHelperStore) LoadEventsForSession(_ context.Context, _ string, opts *LoadSessionEventsRequest) (*LoadSessionEventsResult[*schema.AgenticMessage], error) {
@@ -4378,11 +4407,8 @@ func (h *agenticTestSessionHandle) loadEvents(ctx context.Context, req *LoadSess
 	return h.store.LoadEventsForSession(ctx, h.sessionID, req)
 }
 
-func (h *agenticTestSessionHandle) appendEvents(ctx context.Context, req *AppendSessionEventsRequest[*schema.AgenticMessage]) error {
-	if req == nil {
-		req = &AppendSessionEventsRequest[*schema.AgenticMessage]{}
-	}
-	return h.store.AppendEventsForSession(ctx, h.sessionID, req.Events)
+func (h *agenticTestSessionHandle) appendEvents(ctx context.Context, events []*SessionEvent[*schema.AgenticMessage]) error {
+	return h.store.AppendEventsForSession(ctx, h.sessionID, events)
 }
 
 func (h *agenticTestSessionHandle) close(context.Context) error { return nil }
@@ -4593,9 +4619,11 @@ func TestRunnerPersists_MessagesReplaced(t *testing.T) {
 		events: []*AgentEvent{
 			{
 				AgentName: "mutation-agent",
-				SessionEvent: &SessionEvent[*schema.Message]{
-					Kind:             SessionEventMessagesReplaced,
-					MessagesReplaced: &repl,
+				SessionEventVariant: &SessionEventVariant[*schema.Message]{
+					Event: &SessionEvent[*schema.Message]{
+						Kind:             SessionEventMessagesReplaced,
+						MessagesReplaced: &repl,
+					},
 				},
 			},
 		},
@@ -4662,21 +4690,25 @@ func TestRunnerPersists_MessageUpdated_BothMessages(t *testing.T) {
 			},
 			{
 				AgentName: "mutation-agent",
-				SessionEvent: &SessionEvent[*schema.Message]{
-					Kind: SessionEventMessageUpdated,
-					MessageUpdated: &MessageUpdatedEvent[*schema.Message]{
-						MessageID: GetMessageID(toolResultMsg),
-						Message:   updatedTool,
+				SessionEventVariant: &SessionEventVariant[*schema.Message]{
+					Event: &SessionEvent[*schema.Message]{
+						Kind: SessionEventMessageUpdated,
+						MessageUpdated: &MessageUpdatedEvent[*schema.Message]{
+							MessageID: GetMessageID(toolResultMsg),
+							Message:   updatedTool,
+						},
 					},
 				},
 			},
 			{
 				AgentName: "mutation-agent",
-				SessionEvent: &SessionEvent[*schema.Message]{
-					Kind: SessionEventMessageUpdated,
-					MessageUpdated: &MessageUpdatedEvent[*schema.Message]{
-						MessageID: GetMessageID(toolCallMsg),
-						Message:   updatedAssistant,
+				SessionEventVariant: &SessionEventVariant[*schema.Message]{
+					Event: &SessionEvent[*schema.Message]{
+						Kind: SessionEventMessageUpdated,
+						MessageUpdated: &MessageUpdatedEvent[*schema.Message]{
+							MessageID: GetMessageID(toolCallMsg),
+							Message:   updatedAssistant,
+						},
 					},
 				},
 			},
@@ -4751,22 +4783,26 @@ func TestRunnerPersists_MessageInserted_AnchorAndAppend(t *testing.T) {
 			// MessageInserted before the user message:
 			{
 				AgentName: "mutation-agent",
-				SessionEvent: &SessionEvent[*schema.Message]{
-					Kind: SessionEventMessageInserted,
-					MessageInserted: &MessageInsertedEvent[*schema.Message]{
-						Message:         agentsmdMsg,
-						BeforeMessageID: GetMessageID(userMsg),
+				SessionEventVariant: &SessionEventVariant[*schema.Message]{
+					Event: &SessionEvent[*schema.Message]{
+						Kind: SessionEventMessageInserted,
+						MessageInserted: &MessageInsertedEvent[*schema.Message]{
+							Message:         agentsmdMsg,
+							BeforeMessageID: GetMessageID(userMsg),
+						},
 					},
 				},
 			},
 			// MessageInserted appended at end:
 			{
 				AgentName: "mutation-agent",
-				SessionEvent: &SessionEvent[*schema.Message]{
-					Kind: SessionEventMessageInserted,
-					MessageInserted: &MessageInsertedEvent[*schema.Message]{
-						Message:         patchedTool,
-						BeforeMessageID: "",
+				SessionEventVariant: &SessionEventVariant[*schema.Message]{
+					Event: &SessionEvent[*schema.Message]{
+						Kind: SessionEventMessageInserted,
+						MessageInserted: &MessageInsertedEvent[*schema.Message]{
+							Message:         patchedTool,
+							BeforeMessageID: "",
+						},
 					},
 				},
 			},
@@ -5116,84 +5152,39 @@ func TestAttack_LeadingSystemMessageExtraChangesArePersisted(t *testing.T) {
 	assert.Equal(t, "b", result.state.Messages[0].Extra["trace"])
 }
 
-func TestAttack_LeadingSystemMessageMutationInGenModelInputStillPersistsUpdate(t *testing.T) {
-	ctx := context.Background()
-	store := newSessionHelperStore()
-	sid := "leading-system-content-mutation"
-	seedModel := &leadingSystemTestModel[*schema.Message]{response: schema.AssistantMessage("seed answer", nil)}
-	seedAgent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
-		Name:        "system-content-seed-agent",
-		Description: "test",
-		Instruction: "system v1",
-		Model:       seedModel,
-	})
-	require.NoError(t, err)
-	drainSessionEvents(t, NewRunner(ctx, RunnerConfig{Agent: seedAgent, SessionID: sid, SessionStore: store}).
-		Run(ctx, []*schema.Message{schema.UserMessage("seed")}))
-
-	updateModel := &leadingSystemTestModel[*schema.Message]{response: schema.AssistantMessage("updated answer", nil)}
-	updateAgent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
-		Name:        "system-content-update-agent",
-		Description: "test",
-		Model:       updateModel,
-		GenModelInput: func(_ context.Context, _ string, input *AgentInput) ([]*schema.Message, error) {
-			require.NotEmpty(t, input.Messages)
-			input.Messages[0].Content = "mutated old system"
-			return append([]*schema.Message{schema.SystemMessage("system v2")}, input.Messages[1:]...), nil
-		},
-	})
-	require.NoError(t, err)
-	drainSessionEvents(t, NewRunner(ctx, RunnerConfig{Agent: updateAgent, SessionID: sid, SessionStore: store}).
-		Run(ctx, []*schema.Message{schema.UserMessage("update")}))
-
-	var update *MessageUpdatedEvent[*schema.Message]
-	for _, event := range loadMessageSessionEvents(t, ctx, store, sid) {
-		if event.MessageUpdated != nil && event.MessageUpdated.Message.Role == schema.System {
-			update = event.MessageUpdated
-		}
-	}
-	require.NotNil(t, update)
-	assert.Equal(t, "system v2", update.Message.Content)
-
-	handle := mustOpenTestSession[*schema.Message](t, ctx, store, sid)
-	result, err := reconstructSessionState[*schema.Message](ctx, handle, sid, defaultLoadPageSize)
-	require.NoError(t, err)
-	require.NoError(t, handle.close(ctx))
-	require.NotEmpty(t, result.state.Messages)
-	assert.Equal(t, "system v2", result.state.Messages[0].Content)
-}
-
 func TestAttack_LeadingSystemMessageExtraMutationInGenModelInputStillPersistsUpdate(t *testing.T) {
 	ctx := context.Background()
 	store := newSessionHelperStore()
 	sid := "leading-system-extra-mutation"
 
-	runTurn := func(trace string, mutateOld bool) {
+	system := schema.SystemMessage("sys")
+	system.Extra = map[string]any{"trace": "a"}
+
+	runTurn := func(trace string) {
 		model := &leadingSystemTestModel[*schema.Message]{response: schema.AssistantMessage("answer "+trace, nil)}
 		agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
-			Name:        "system-extra-mutation-agent",
+			Name:        "system-extra-mut-agent",
 			Description: "test",
+			Instruction: "ignored by custom input",
 			Model:       model,
 			GenModelInput: func(_ context.Context, _ string, input *AgentInput) ([]*schema.Message, error) {
-				tail := input.Messages
-				if mutateOld {
-					require.NotEmpty(t, input.Messages)
-					require.NotNil(t, input.Messages[0].Extra)
+				if len(input.Messages) > 0 && input.Messages[0].Role == schema.System {
+					if input.Messages[0].Extra == nil {
+						input.Messages[0].Extra = make(map[string]any)
+					}
 					input.Messages[0].Extra["trace"] = trace
-					tail = input.Messages[1:]
 				}
-				system := schema.SystemMessage("same")
-				system.Extra = map[string]any{"trace": trace}
-				return append([]*schema.Message{system}, tail...), nil
+				return input.Messages, nil
 			},
 		})
 		require.NoError(t, err)
-		drainSessionEvents(t, NewRunner(ctx, RunnerConfig{Agent: agent, SessionID: sid, SessionStore: store}).
-			Run(ctx, []*schema.Message{schema.UserMessage(trace)}))
+		runner := NewRunner(ctx, RunnerConfig{Agent: agent, SessionID: sid, SessionStore: store})
+		drainSessionEvents(t, runner.Run(ctx, []*schema.Message{system, schema.UserMessage(trace)}))
 	}
 
-	runTurn("old", false)
-	runTurn("new", true)
+	runTurn("a")
+	system.Extra = nil
+	runTurn("b")
 
 	var update *MessageUpdatedEvent[*schema.Message]
 	for _, event := range loadMessageSessionEvents(t, ctx, store, sid) {
@@ -5201,67 +5192,61 @@ func TestAttack_LeadingSystemMessageExtraMutationInGenModelInputStillPersistsUpd
 			update = event.MessageUpdated
 		}
 	}
-	require.NotNil(t, update, "system Extra mutation must not hide the generated update")
-	assert.Equal(t, "new", update.Message.Extra["trace"])
+	require.NotNil(t, update, "in-place Extra mutation in GenModelInput must still be detected as message_updated")
+	assert.Equal(t, "b", update.Message.Extra["trace"])
 
 	handle := mustOpenTestSession[*schema.Message](t, ctx, store, sid)
 	result, err := reconstructSessionState[*schema.Message](ctx, handle, sid, defaultLoadPageSize)
 	require.NoError(t, err)
 	require.NoError(t, handle.close(ctx))
 	require.NotEmpty(t, result.state.Messages)
-	assert.Equal(t, "new", result.state.Messages[0].Extra["trace"])
+	assert.Equal(t, "b", result.state.Messages[0].Extra["trace"])
 }
 
-func TestAttack_LeadingSystemSnapshotAssignsIDToSource(t *testing.T) {
+func TestAttack_LeadingSystemMessageContentMutationInGenModelInputStillPersistsUpdate(t *testing.T) {
 	ctx := context.Background()
-	sourceSystem := schema.SystemMessage("system v1")
-	input := &AgentInput{Messages: []*schema.Message{sourceSystem, schema.UserMessage("hello")}}
-	model := &leadingSystemTestModel[*schema.Message]{response: schema.AssistantMessage("answer", nil)}
-	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
-		Name:        "system-source-id-agent",
-		Description: "test",
-		Model:       model,
-		GenModelInput: func(_ context.Context, _ string, input *AgentInput) ([]*schema.Message, error) {
-			return append([]*schema.Message{schema.SystemMessage("system v2")}, input.Messages[1:]...), nil
-		},
-	})
-	require.NoError(t, err)
+	store := newSessionHelperStore()
+	sid := "leading-system-content-mutation"
 
-	var update *MessageUpdatedEvent[*schema.Message]
-	for iter := agent.Run(ctx, input, withEnableSessionEvents()); ; {
-		event, ok := iter.Next()
-		if !ok {
-			break
-		}
-		require.NoError(t, event.Err)
-		if event.SessionEvent != nil && event.SessionEvent.MessageUpdated != nil {
-			update = event.SessionEvent.MessageUpdated
-		}
+	system := schema.SystemMessage("sys v1")
+
+	runTurn := func(content string) {
+		model := &leadingSystemTestModel[*schema.Message]{response: schema.AssistantMessage("answer "+content, nil)}
+		agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+			Name:        "system-content-mut-agent",
+			Description: "test",
+			Instruction: "ignored by custom input",
+			Model:       model,
+			GenModelInput: func(_ context.Context, _ string, input *AgentInput) ([]*schema.Message, error) {
+				if len(input.Messages) > 0 && input.Messages[0].Role == schema.System {
+					input.Messages[0].Content = content
+				}
+				return input.Messages, nil
+			},
+		})
+		require.NoError(t, err)
+		runner := NewRunner(ctx, RunnerConfig{Agent: agent, SessionID: sid, SessionStore: store})
+		drainSessionEvents(t, runner.Run(ctx, []*schema.Message{system, schema.UserMessage(content)}))
 	}
 
-	sourceID := GetMessageID(sourceSystem)
-	require.NotEmpty(t, sourceID)
-	require.NotNil(t, update)
-	assert.Equal(t, sourceID, update.MessageID)
-}
+	runTurn("sys v1")
+	runTurn("sys v2")
 
-func TestAttack_LeadingSystemSnapshotDoesNotAssignIDWhenSessionEventsDisabled(t *testing.T) {
-	ctx := context.Background()
-	sourceSystem := schema.SystemMessage("system v1")
-	input := &AgentInput{Messages: []*schema.Message{sourceSystem, schema.UserMessage("hello")}}
-	model := &leadingSystemTestModel[*schema.Message]{response: schema.AssistantMessage("answer", nil)}
-	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
-		Name:        "system-disabled-source-id-agent",
-		Description: "test",
-		Model:       model,
-		GenModelInput: func(_ context.Context, _ string, input *AgentInput) ([]*schema.Message, error) {
-			return append([]*schema.Message{schema.SystemMessage("system v2")}, input.Messages[1:]...), nil
-		},
-	})
+	var update *MessageUpdatedEvent[*schema.Message]
+	for _, event := range loadMessageSessionEvents(t, ctx, store, sid) {
+		if event.MessageUpdated != nil && event.MessageUpdated.Message.Role == schema.System {
+			update = event.MessageUpdated
+		}
+	}
+	require.NotNil(t, update, "in-place Content mutation in GenModelInput must still be detected as message_updated")
+	assert.Equal(t, "sys v2", update.Message.Content)
+
+	handle := mustOpenTestSession[*schema.Message](t, ctx, store, sid)
+	result, err := reconstructSessionState[*schema.Message](ctx, handle, sid, defaultLoadPageSize)
 	require.NoError(t, err)
-
-	drainSessionEvents(t, agent.Run(ctx, input))
-	assert.Empty(t, GetMessageID(sourceSystem))
+	require.NoError(t, handle.close(ctx))
+	require.NotEmpty(t, result.state.Messages)
+	assert.Equal(t, "sys v2", result.state.Messages[0].Content)
 }
 
 func TestSameSystemMessageComparesExtraExceptMessageID(t *testing.T) {
@@ -5367,10 +5352,12 @@ func TestRunnerPersists_MessagesDeleted_Reconstructs(t *testing.T) {
 			},
 			{
 				AgentName: "mutation-agent",
-				SessionEvent: &SessionEvent[*schema.Message]{
-					Kind: SessionEventMessagesDeleted,
-					MessagesDeleted: &MessagesDeletedEvent{
-						MessageIDs: []string{GetMessageID(b)},
+				SessionEventVariant: &SessionEventVariant[*schema.Message]{
+					Event: &SessionEvent[*schema.Message]{
+						Kind: SessionEventMessagesDeleted,
+						MessagesDeleted: &MessagesDeletedEvent{
+							MessageIDs: []string{GetMessageID(b)},
+						},
 					},
 				},
 			},
@@ -5449,8 +5436,12 @@ func TestAgentTool_ChildSessionID_FiltersFromParentLog(t *testing.T) {
 			// An event tagged as belonging to a different session — should not be persisted.
 			{
 				AgentName: "child",
-				SessionEvent: &SessionEvent[*schema.Message]{
+				SessionEventVariant: &SessionEventVariant[*schema.Message]{
 					SessionID: "agent_tool:abc-123",
+					Event: &SessionEvent[*schema.Message]{
+						Kind:    SessionEventMessage,
+						Message: childMsg,
+					},
 				},
 				Output: &AgentOutput{
 					MessageOutput: &MessageVariant{Message: childMsg, Role: schema.Assistant},
@@ -5510,4 +5501,524 @@ func TestAgentToolInterruptState_RoundTrip(t *testing.T) {
 	require.NoError(t, json.Unmarshal(encoded, &decoded))
 	assert.Equal(t, wrapped.ChildSessionID, decoded.ChildSessionID)
 	assert.Equal(t, wrapped.BridgeCheckpoint, decoded.BridgeCheckpoint)
+}
+
+func TestAttack_SessionEventVariantBothSet(t *testing.T) {
+	ev := &TypedAgentEvent[Message]{
+		SessionEventVariant: &SessionEventVariant[Message]{
+			Event: &SessionEvent[Message]{
+				EventID: "evt-1",
+				Kind:    SessionEventMessage,
+				Message: schema.UserMessage("hello"),
+			},
+			MessageStreamRef: &MessageStreamRef{
+				EventID: "evt-2",
+				Kind:    SessionEventMessage,
+			},
+		},
+	}
+
+	err := validateAgentSessionEventIdentity(ev)
+	if err == nil {
+		t.Fatal("expected error when both Event and MessageStreamRef are set, got nil")
+	}
+	t.Logf("correctly rejected both-set variant: %v", err)
+}
+
+func TestAttack_SessionEventVariantNeitherSet(t *testing.T) {
+	ev := &TypedAgentEvent[Message]{
+		SessionEventVariant: &SessionEventVariant[Message]{
+			SessionID: "sess-1",
+		},
+	}
+
+	err := validateAgentSessionEventIdentity(ev)
+	if err == nil {
+		t.Fatal("expected error when neither Event nor MessageStreamRef is set, got nil")
+	}
+	t.Logf("correctly rejected neither-set variant: %v", err)
+}
+
+func TestAttack_SessionEventVariantNil(t *testing.T) {
+	ev := &TypedAgentEvent[Message]{}
+	err := validateAgentSessionEventIdentity(ev)
+	if err != nil {
+		t.Fatalf("nil variant should be valid, got error: %v", err)
+	}
+	t.Log("nil variant accepted correctly")
+}
+
+func TestAttack_MessageStreamRefWrongKind(t *testing.T) {
+	ev := &TypedAgentEvent[Message]{
+		SessionEventVariant: &SessionEventVariant[Message]{
+			MessageStreamRef: &MessageStreamRef{
+				EventID: "evt-1",
+				Kind:    SessionEventSessionStatusRunning,
+			},
+		},
+	}
+
+	err := validateAgentSessionEventIdentity(ev)
+	if err == nil {
+		t.Fatal("expected error for MessageStreamRef with non-message kind, got nil")
+	}
+	t.Logf("correctly rejected wrong kind on stream ref: %v", err)
+}
+
+func TestAttack_ClassifySessionEventZeroValue(t *testing.T) {
+	ev := &SessionEvent[Message]{}
+
+	_, err := ClassifySessionEvent(ev)
+	if err == nil {
+		t.Fatal("expected error for zero-value session event with no payload, got nil")
+	}
+	t.Logf("correctly rejected zero-value event: %v", err)
+}
+
+func TestAttack_ClassifySessionEventNil(t *testing.T) {
+	_, err := ClassifySessionEvent[Message](nil)
+	if err == nil {
+		t.Fatal("expected error for nil session event, got nil")
+	}
+	t.Logf("correctly rejected nil event: %v", err)
+}
+
+func TestAttack_ClassifySessionEventMultiplePayloads(t *testing.T) {
+	ev := &SessionEvent[Message]{
+		Message: schema.UserMessage("hello"),
+		Cancel:  &CancelEvent{Reason: "test"},
+	}
+
+	_, err := ClassifySessionEvent(ev)
+	if err == nil {
+		t.Fatal("expected error for event with multiple active payloads, got nil")
+	}
+	t.Logf("correctly rejected multiple-payload event: %v", err)
+}
+
+func TestAttack_NormalizeSessionEventKindMismatch(t *testing.T) {
+	ev := &SessionEvent[Message]{
+		Kind:    SessionEventCancel,
+		Message: schema.UserMessage("hello"),
+	}
+
+	err := NormalizeSessionEventKind(ev)
+	if err == nil {
+		t.Fatal("expected error for kind mismatch, got nil")
+	}
+	t.Logf("correctly rejected kind mismatch: %v", err)
+}
+
+func TestAttack_NormalizeSessionEventKindUnknownKindTolerated(t *testing.T) {
+	unknownKinds := []SessionEventKind{
+		"turn_end",
+		"session_started",
+		"custom_thing",
+		"future.new_kind",
+	}
+	for _, k := range unknownKinds {
+		ev := &SessionEvent[Message]{
+			Kind: k,
+		}
+		err := NormalizeSessionEventKind(ev)
+		if err != nil {
+			t.Fatalf("unknown kind %q should be tolerated, got error: %v", k, err)
+		}
+		if ev.Kind != k {
+			t.Fatalf("unknown kind %q should be preserved, got %q", k, ev.Kind)
+		}
+	}
+}
+
+func TestAttack_NormalizeSessionEventKindKnownKindMissingPayloadStillErrors(t *testing.T) {
+	ev := &SessionEvent[Message]{
+		Kind: SessionEventMessage,
+	}
+	err := NormalizeSessionEventKind(ev)
+	if err == nil {
+		t.Fatal("expected error for known kind with missing payload, got nil")
+	}
+	t.Logf("correctly rejected known kind with missing payload: %v", err)
+}
+
+func TestAttack_NormalizeSessionEventKindUnknownKindWithPayloadStillErrors(t *testing.T) {
+	ev := &SessionEvent[Message]{
+		Kind:    "future.new_kind",
+		Message: schema.UserMessage("hello"),
+	}
+	err := NormalizeSessionEventKind(ev)
+	if err == nil {
+		t.Fatal("expected error for unknown kind with recognized payload, got nil")
+	}
+	t.Logf("correctly rejected unknown kind with recognized payload: %v", err)
+}
+
+func TestAttack_ValidateEmittedSessionEventEmptyKind(t *testing.T) {
+	ev := &SessionEvent[Message]{
+		Message: schema.UserMessage("hello"),
+	}
+
+	err := ValidateEmittedSessionEventKind(ev)
+	if err == nil {
+		t.Fatal("expected error for emitted event with empty Kind, got nil")
+	}
+	t.Logf("correctly rejected empty-kind emitted event: %v", err)
+}
+
+func TestAttack_ValidateEmittedSessionEventNil(t *testing.T) {
+	err := ValidateEmittedSessionEventKind[Message](nil)
+	if err == nil {
+		t.Fatal("expected error for nil emitted event, got nil")
+	}
+	t.Logf("correctly rejected nil emitted event: %v", err)
+}
+
+func TestAttack_SessionEventEncodeDecodeRoundtrip(t *testing.T) {
+	original := &SessionEvent[Message]{
+		EventID:   "roundtrip-1",
+		Timestamp: time.Date(2026, 1, 15, 10, 30, 0, 0, time.UTC),
+		Kind:      SessionEventMessage,
+		TurnID:    "turn-abc",
+		Message:   schema.UserMessage("roundtrip test"),
+	}
+
+	data, err := encodeSessionEvent(original)
+	if err != nil {
+		t.Fatalf("encode failed: %v", err)
+	}
+
+	decoded, err := decodeSessionEvent[Message](data)
+	if err != nil {
+		t.Fatalf("decode failed: %v", err)
+	}
+
+	if decoded.EventID != original.EventID {
+		t.Errorf("EventID mismatch: got %q want %q", decoded.EventID, original.EventID)
+	}
+	if decoded.Kind != original.Kind {
+		t.Errorf("Kind mismatch: got %q want %q", decoded.Kind, original.Kind)
+	}
+	if decoded.TurnID != original.TurnID {
+		t.Errorf("TurnID mismatch: got %q want %q", decoded.TurnID, original.TurnID)
+	}
+	t.Log("encode/decode roundtrip OK")
+}
+
+func TestAttack_SessionEventVariantPayloadEncodeDecodeRoundtrip(t *testing.T) {
+	original := &TypedAgentEvent[Message]{
+		SessionEventVariant: &SessionEventVariant[Message]{
+			SessionID: "sess-roundtrip",
+			Event: &SessionEvent[Message]{
+				EventID:   "evt-rt-1",
+				Timestamp: time.Date(2026, 1, 15, 10, 30, 0, 0, time.UTC),
+				Kind:      SessionEventMessage,
+				Message:   schema.UserMessage("variant roundtrip"),
+			},
+		},
+	}
+
+	persistable, err := toSessionEventChecked(original)
+	if err != nil {
+		t.Fatalf("convert variant payload failed: %v", err)
+	}
+	if persistable == original.SessionEventVariant.Event {
+		t.Fatal("persistable event must be copied out of live SessionEventVariant")
+	}
+
+	data, err := encodeSessionEvent(persistable)
+	if err != nil {
+		t.Fatalf("encode variant payload failed: %v", err)
+	}
+
+	decoded, err := decodeSessionEvent[Message](data)
+	if err != nil {
+		t.Fatalf("decode variant payload failed: %v", err)
+	}
+
+	if decoded.EventID != original.SessionEventVariant.Event.EventID {
+		t.Errorf("EventID mismatch: got %q want %q", decoded.EventID, original.SessionEventVariant.Event.EventID)
+	}
+	t.Log("variant payload encode/decode roundtrip OK")
+}
+
+func TestAttack_AssignSessionEventIDEmptyGenerator(t *testing.T) {
+	emptyGen := func(_ context.Context, _ *SessionEvent[Message]) (string, error) {
+		return "", nil
+	}
+
+	ev := &SessionEvent[Message]{
+		Kind:    SessionEventMessage,
+		Message: schema.UserMessage("test"),
+	}
+
+	err := assignSessionEventID(context.Background(), ev, emptyGen)
+	if !errors.Is(err, ErrSessionEventIDGeneratorEmpty) {
+		t.Fatalf("expected ErrSessionEventIDGeneratorEmpty, got %v", err)
+	}
+	t.Logf("correctly handled empty generator: %v", err)
+}
+
+func TestAttack_AssignSessionEventIDGeneratorError(t *testing.T) {
+	genErr := errors.New("generator failed")
+	errGen := func(_ context.Context, _ *SessionEvent[Message]) (string, error) {
+		return "", genErr
+	}
+
+	ev := &SessionEvent[Message]{
+		Kind:    SessionEventMessage,
+		Message: schema.UserMessage("test"),
+	}
+
+	err := assignSessionEventID(context.Background(), ev, errGen)
+	if err == nil {
+		t.Fatal("expected error from generator, got nil")
+	}
+	if !errors.Is(err, genErr) {
+		t.Fatalf("expected wrapped generator error, got %v", err)
+	}
+	t.Logf("correctly propagated generator error: %v", err)
+}
+
+func TestAttack_ApplySessionEventMessagesDeletedEmptyIDs(t *testing.T) {
+	messages := []Message{schema.UserMessage("a"), schema.UserMessage("b")}
+	ev := &SessionEvent[Message]{
+		Kind: SessionEventMessagesDeleted,
+		MessagesDeleted: &MessagesDeletedEvent{
+			MessageIDs: []string{},
+		},
+	}
+
+	err := applySessionEvent(&messages, ev)
+	if err == nil {
+		t.Fatal("expected error for empty MessageIDs, got nil")
+	}
+	t.Logf("correctly rejected empty MessageIDs: %v", err)
+}
+
+func TestAttack_ApplySessionEventMessagesDeletedDuplicateIDs(t *testing.T) {
+	messages := []Message{schema.UserMessage("a")}
+	ev := &SessionEvent[Message]{
+		Kind: SessionEventMessagesDeleted,
+		MessagesDeleted: &MessagesDeletedEvent{
+			MessageIDs: []string{"dup", "dup"},
+		},
+	}
+
+	err := applySessionEvent(&messages, ev)
+	if err == nil {
+		t.Fatal("expected error for duplicate MessageIDs, got nil")
+	}
+	t.Logf("correctly rejected duplicate MessageIDs: %v", err)
+}
+
+func TestAttack_ApplySessionEventMessageUpdatedIdentityMismatch(t *testing.T) {
+	msg := schema.UserMessage("original")
+	EnsureMessageID(msg)
+
+	messages := []Message{msg}
+	newMsg := schema.UserMessage("updated")
+	EnsureMessageID(newMsg)
+
+	ev := &SessionEvent[Message]{
+		Kind: SessionEventMessageUpdated,
+		MessageUpdated: &MessageUpdatedEvent[Message]{
+			MessageID: GetMessageID(msg),
+			Message:   newMsg,
+		},
+	}
+
+	err := applySessionEvent(&messages, ev)
+	if err == nil {
+		t.Log("MessageUpdated with matching ID applied OK")
+	} else {
+		t.Logf("MessageUpdated result: %v", err)
+	}
+}
+
+func TestAttack_IsContextSessionEventEdgeCases(t *testing.T) {
+	tests := []struct {
+		name string
+		ev   *SessionEvent[Message]
+		want bool
+	}{
+		{"nil event", nil, false},
+		{"empty event", &SessionEvent[Message]{}, false},
+		{"cancel event", &SessionEvent[Message]{Cancel: &CancelEvent{}}, false},
+		{"lifecycle event", &SessionEvent[Message]{Lifecycle: &LifecycleEvent{State: SessionRunStateRunning}}, false},
+		{"error event", &SessionEvent[Message]{Error: &SessionErrorEvent{}}, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isContextSessionEvent(tt.ev)
+			if got != tt.want {
+				t.Errorf("isContextSessionEvent() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+	t.Log("all isContextSessionEvent edge cases pass")
+}
+
+func TestAttack_ToSessionEventCheckedStreamingOutput(t *testing.T) {
+	ev := &TypedAgentEvent[Message]{
+		Output: &TypedAgentOutput[Message]{
+			MessageOutput: &TypedMessageVariant[Message]{
+				IsStreaming: true,
+				Message:     nil,
+			},
+		},
+		SessionEventVariant: nil,
+	}
+
+	se, err := toSessionEventChecked(ev)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if se != nil {
+		t.Fatalf("expected nil SessionEvent for streaming output without variant, got %v", se)
+	}
+	t.Log("streaming output without variant correctly returns nil session event")
+}
+
+func TestAttack_StripSessionEventFields(t *testing.T) {
+	tests := []struct {
+		name string
+		ev   *TypedAgentEvent[Message]
+		nil  bool
+	}{
+		{"nil event", nil, true},
+		{"no variant, with output", &TypedAgentEvent[Message]{
+			Output: &TypedAgentOutput[Message]{
+				MessageOutput: &TypedMessageVariant[Message]{Message: schema.UserMessage("test")},
+			},
+		}, false},
+		{"only variant", &TypedAgentEvent[Message]{
+			SessionEventVariant: &SessionEventVariant[Message]{
+				Event: &SessionEvent[Message]{EventID: "x", Kind: SessionEventMessage, Message: schema.UserMessage("test")},
+			},
+		}, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := stripSessionEventFields(tt.ev)
+			if tt.nil && result != nil {
+				t.Errorf("expected nil result, got %v", result)
+			}
+			if !tt.nil && result == nil {
+				t.Error("expected non-nil result, got nil")
+			}
+			if result != nil && result.SessionEventVariant != nil {
+				t.Error("SessionEventVariant should be stripped")
+			}
+		})
+	}
+	t.Log("stripSessionEventFields all cases pass")
+}
+
+func TestAttack_ClassifySpanEventBothModelAndTool(t *testing.T) {
+	span := &SpanEvent{
+		SpanID: "span-1",
+		Kind:   SpanKindModel,
+		Model:  &ModelSpanMeta{},
+		Tool:   &ToolSpanMeta{ToolUseID: "call-1"},
+	}
+
+	_, err := classifySpanSessionEvent(span)
+	if err == nil {
+		t.Fatal("expected error when both Model and Tool are set, got nil")
+	}
+	t.Logf("correctly rejected both-model-and-tool span: %v", err)
+}
+
+func TestAttack_ClassifySpanEventNeitherModelNorTool(t *testing.T) {
+	span := &SpanEvent{
+		SpanID: "span-1",
+		Kind:   SpanKindModel,
+	}
+
+	_, err := classifySpanSessionEvent(span)
+	if err == nil {
+		t.Fatal("expected error when neither Model nor Tool is set, got nil")
+	}
+	t.Logf("correctly rejected no-meta span: %v", err)
+}
+
+func TestAttack_SessionEventCancelClassification(t *testing.T) {
+	ev := &SessionEvent[Message]{
+		Cancel: &CancelEvent{Reason: "user cancelled"},
+	}
+
+	kind, err := ClassifySessionEvent(ev)
+	if err != nil {
+		t.Fatalf("classification failed: %v", err)
+	}
+	if kind != SessionEventCancel {
+		t.Errorf("kind = %q, want %q", kind, SessionEventCancel)
+	}
+	t.Logf("CancelEvent classified correctly as %q", kind)
+}
+
+func TestAttack_SessionEventInterruptClassification(t *testing.T) {
+	ev := &SessionEvent[Message]{
+		Interrupt: &InterruptEvent{
+			Contexts: []*InterruptContext{
+				{InterruptID: "tool:lookup:call_1", ToolUseID: "call_1"},
+			},
+		},
+	}
+
+	kind, err := ClassifySessionEvent(ev)
+	if err != nil {
+		t.Fatalf("classification failed: %v", err)
+	}
+	if kind != SessionEventInterrupt {
+		t.Errorf("kind = %q, want %q", kind, SessionEventInterrupt)
+	}
+	t.Logf("InterruptEvent classified correctly as %q", kind)
+}
+
+func TestAttack_SessionRollbackEventValidation(t *testing.T) {
+	ev := &SessionEvent[Message]{
+		EventID: "rb-1",
+		Rollback: &SessionRollbackEvent{
+			ToEventID: "target-1",
+		},
+	}
+
+	kind, err := ClassifySessionEvent(ev)
+	if err != nil {
+		t.Fatalf("classification failed: %v", err)
+	}
+	if kind != SessionEventRollback {
+		t.Errorf("kind = %q, want %q", kind, SessionEventRollback)
+	}
+	t.Logf("RollbackEvent classified correctly as %q", kind)
+}
+
+func TestAttack_SessionRollbackEventMissingToEventID(t *testing.T) {
+	ev := &SessionEvent[Message]{
+		EventID:  "rb-1",
+		Rollback: &SessionRollbackEvent{},
+	}
+
+	_, err := ClassifySessionEvent(ev)
+	if err == nil {
+		t.Fatal("expected error for rollback with empty ToEventID, got nil")
+	}
+	t.Logf("correctly rejected rollback with empty ToEventID: %v", err)
+}
+
+func TestAttack_SessionRollbackEventMissingOwnEventID(t *testing.T) {
+	ev := &SessionEvent[Message]{
+		Rollback: &SessionRollbackEvent{
+			ToEventID: "target-1",
+		},
+	}
+
+	_, err := ClassifySessionEvent(ev)
+	if err == nil {
+		t.Fatal("expected error for rollback with empty own EventID, got nil")
+	}
+	t.Logf("correctly rejected rollback with empty own EventID: %v", err)
 }

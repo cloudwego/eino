@@ -242,9 +242,6 @@ func GetSessionValue(ctx context.Context, key string) (any, bool) {
 
 func (rs *runSession) addEvent(event *AgentEvent) {
 	now := time.Now()
-	if event.Timestamp.IsZero() {
-		event.Timestamp = now.UTC()
-	}
 	wrapper := &agentEventWrapper{AgentEvent: event, TS: now.UnixNano()}
 	// If LaneEvents is not nil, we are in a parallel lane.
 	// Append to the lane's local event slice (lock-free).
@@ -303,9 +300,6 @@ func addTypedEvent[M MessageType](session *runSession, event *TypedAgentEvent[M]
 		return
 	}
 	now := time.Now()
-	if event.Timestamp.IsZero() {
-		event.Timestamp = now.UTC()
-	}
 	session.mtx.Lock()
 	defer session.mtx.Unlock()
 	wrapper := &typedAgentEventWrapper[M]{event: event, TS: now.UnixNano()}
@@ -467,7 +461,7 @@ func sanitizeAgentEventWrapperForSessionCheckpoint(w *agentEventWrapper) *agentE
 
 	event := *w.AgentEvent
 	event.RunPath = append([]RunStep(nil), w.AgentEvent.RunPath...)
-	event.SessionEvent = nil
+	event.SessionEventVariant = nil
 	if event.Output == nil && event.Action == nil && event.Err == nil {
 		return nil
 	}
@@ -489,7 +483,7 @@ func sanitizeTypedAgentEventWrapperForSessionCheckpoint[M MessageType](
 
 	event := *w.event
 	event.RunPath = append([]RunStep(nil), w.event.RunPath...)
-	event.SessionEvent = nil
+	event.SessionEventVariant = nil
 	if event.Output == nil && event.Action == nil && event.Err == nil {
 		return nil
 	}

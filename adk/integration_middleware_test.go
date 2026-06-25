@@ -109,7 +109,7 @@ func TestAgentsMDIntegration_PersistsMessageInserted(t *testing.T) {
 	}
 
 	// Read the persisted event log.
-	res, err := store.LoadEvents(ctx, &adk.LoadSessionEventsRequest{SessionID: "agentsmd-test"})
+	res, err := store.LoadEvents(ctx, "agentsmd-test", &adk.LoadSessionEventsRequest{})
 	require.NoError(t, err)
 
 	var sawInsertedAgentsmd bool
@@ -175,7 +175,7 @@ func TestAgentsMDIntegration_NextTurnSkipsReinsertion(t *testing.T) {
 
 	// Count agentsmd MessageInserted events after turn 1.
 	countAgentsmdInserts := func() int {
-		res, err := store.LoadEvents(ctx, &adk.LoadSessionEventsRequest{SessionID: sid})
+		res, err := store.LoadEvents(ctx, sid, &adk.LoadSessionEventsRequest{})
 		require.NoError(t, err)
 		count := 0
 		for _, se := range res.Events {
@@ -273,7 +273,7 @@ func TestToolSearchIntegration_PersistsMessageInserted(t *testing.T) {
 		require.NoError(t, ev.Err)
 	}
 
-	res, err := store.LoadEvents(ctx, &adk.LoadSessionEventsRequest{SessionID: sid})
+	res, err := store.LoadEvents(ctx, sid, &adk.LoadSessionEventsRequest{})
 	require.NoError(t, err)
 
 	var sawInsertedReminder bool
@@ -327,10 +327,7 @@ func TestPatchToolCallsIntegration_PersistsMessageInserted(t *testing.T) {
 
 	for _, m := range []*schema.Message{user, dangling} {
 		se := &adk.SessionEvent[*schema.Message]{EventID: uuid.NewString(), Kind: adk.SessionEventMessage, Message: m}
-		err := store.AppendEvents(ctx, &adk.AppendSessionEventsRequest[*schema.Message]{
-			SessionID: sid,
-			Events:    []*adk.SessionEvent[*schema.Message]{se},
-		})
+		err := store.AppendEvents(ctx, sid, []*adk.SessionEvent[*schema.Message]{se})
 		require.NoError(t, err)
 	}
 
@@ -365,7 +362,7 @@ func TestPatchToolCallsIntegration_PersistsMessageInserted(t *testing.T) {
 
 	// Read events back; among the events appended on this turn there should be
 	// a MessageInserted carrying a Tool-role synthetic message.
-	res, err := store.LoadEvents(ctx, &adk.LoadSessionEventsRequest{SessionID: sid})
+	res, err := store.LoadEvents(ctx, sid, &adk.LoadSessionEventsRequest{})
 	require.NoError(t, err)
 	var sawInsertedToolResult bool
 	for _, se := range res.Events {
@@ -430,10 +427,7 @@ func TestReductionIntegration_PersistsBothMessageUpdated(t *testing.T) {
 	}
 	for _, m := range []*schema.Message{user, assistantA, toolResultA, assistantB, toolResultB} {
 		se := &adk.SessionEvent[*schema.Message]{EventID: uuid.NewString(), Kind: adk.SessionEventMessage, Message: m}
-		err := store.AppendEvents(ctx, &adk.AppendSessionEventsRequest[*schema.Message]{
-			SessionID: sid,
-			Events:    []*adk.SessionEvent[*schema.Message]{se},
-		})
+		err := store.AppendEvents(ctx, sid, []*adk.SessionEvent[*schema.Message]{se})
 		require.NoError(t, err)
 	}
 
@@ -488,7 +482,7 @@ func TestReductionIntegration_PersistsBothMessageUpdated(t *testing.T) {
 		require.NoError(t, ev.Err)
 	}
 
-	res, err := store.LoadEvents(ctx, &adk.LoadSessionEventsRequest{SessionID: sid})
+	res, err := store.LoadEvents(ctx, sid, &adk.LoadSessionEventsRequest{})
 	require.NoError(t, err)
 
 	var sawAssistantUpdated, sawToolUpdated bool

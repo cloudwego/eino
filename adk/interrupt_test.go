@@ -781,10 +781,6 @@ func TestWorkflowInterrupt(t *testing.T) {
 		}
 
 		assert.Equal(t, 2, len(events))
-		for i := range messageEvents {
-			assert.False(t, events[i].Timestamp.IsZero())
-			messageEvents[i].Timestamp = events[i].Timestamp
-		}
 		assert.Equal(t, messageEvents, events)
 	})
 
@@ -1130,10 +1126,6 @@ func TestWorkflowInterrupt(t *testing.T) {
 			},
 		}
 		assert.Equal(t, 2, len(events))
-		for i := range loopFinalMessageEvents {
-			assert.False(t, events[i].Timestamp.IsZero())
-			loopFinalMessageEvents[i].Timestamp = events[i].Timestamp
-		}
 		assert.Equal(t, loopFinalMessageEvents, events)
 	})
 
@@ -1202,7 +1194,6 @@ func TestWorkflowInterrupt(t *testing.T) {
 					event.Output != nil && event.Output.MessageOutput != nil &&
 					event.Output.MessageOutput.Message != nil &&
 					event.Output.MessageOutput.Message.Content == want.Output.MessageOutput.Message.Content {
-					assert.False(t, event.Timestamp.IsZero())
 					return
 				}
 			}
