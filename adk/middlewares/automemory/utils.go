@@ -28,67 +28,10 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/cloudwego/eino/adk"
-	ainternal "github.com/cloudwego/eino/adk/middlewares/automemory/internal"
 	adkfs "github.com/cloudwego/eino/adk/middlewares/filesystem"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
 )
-
-func buildRuntimeMemoryStores[M adk.MessageType](cfg *Config[M]) ([]runtimeMemoryStore, error) {
-	stores := append([]MemoryStore{}, cfg.MemoryStores...)
-	if len(stores) == 0 {
-		return nil, fmt.Errorf("auto memory config: no memory stores")
-	}
-
-	out := make([]runtimeMemoryStore, 0, len(stores))
-	seenName := make(map[string]struct{}, len(stores))
-	seenPath := make(map[string]struct{}, len(stores))
-	for i, store := range stores {
-		if strings.TrimSpace(store.Path) == "" {
-			return nil, fmt.Errorf("auto memory config: memory store %d has empty path", i)
-		}
-		resolvedPath, err := ainternal.ResolveMemoryDir(store.Path)
-		if err != nil {
-			return nil, fmt.Errorf("auto memory config: resolve memory store %d: %w", i, err)
-		}
-		if _, ok := seenPath[resolvedPath]; ok {
-			return nil, fmt.Errorf("auto memory config: duplicate memory store path: %s", resolvedPath)
-		}
-		seenPath[resolvedPath] = struct{}{}
-
-		name := strings.TrimSpace(store.Name)
-		if name == "" {
-			name = filepath.Base(resolvedPath)
-			if name == "." || name == string(filepath.Separator) || name == "" {
-				name = fmt.Sprintf("memory_%d", i+1)
-			}
-			store.Name = name
-		}
-		if strings.ContainsAny(name, `/\`) {
-			return nil, fmt.Errorf("auto memory config: memory store name must not contain path separators: %s", name)
-		}
-		if _, ok := seenName[name]; ok {
-			return nil, fmt.Errorf("auto memory config: duplicate memory store name: %s", name)
-		}
-		seenName[name] = struct{}{}
-
-		bounded, err := ainternal.NewFSBackend(cfg.MemoryBackend, ainternal.FSBackendConfig{
-			BaseDir:           resolvedPath,
-			NotFoundAsContent: true,
-			ErrorPrefix:       "memory backend",
-		})
-		if err != nil {
-			return nil, err
-		}
-		store.Path = resolvedPath
-		out = append(out, runtimeMemoryStore{
-			MemoryStore: store,
-			Path:        resolvedPath,
-			Backend:     bounded,
-		})
-	}
-	return out, nil
-}
 
 func applyReadDefaults[M adk.MessageType](cfg *Config[M]) {
 	if cfg.Read.Mode == "" {
@@ -96,9 +39,6 @@ func applyReadDefaults[M adk.MessageType](cfg *Config[M]) {
 	}
 	if cfg.Read.Index == nil {
 		cfg.Read.Index = &IndexConfig{}
-	}
-	if cfg.Read.Index.EnableMemoryIndex == nil {
-		cfg.Read.Index.EnableMemoryIndex = boolPtr(true)
 	}
 	if cfg.Read.Index.FileName == "" {
 		cfg.Read.Index.FileName = memoryIndexFileName
@@ -114,6 +54,9 @@ func applyReadDefaults[M adk.MessageType](cfg *Config[M]) {
 	}
 	if cfg.Read.TopicSelection == nil {
 		cfg.Read.TopicSelection = &TopicSelectionConfig{}
+	}
+	if cfg.Read.TopicSelection.Enable == nil {
+		cfg.Read.TopicSelection.Enable = boolPtr(true)
 	}
 	if cfg.Read.TopicSelection.TopK <= 0 {
 		cfg.Read.TopicSelection.TopK = defaultTopicTopK
@@ -811,7 +754,7 @@ func decodePendingSnapshot[M adk.MessageType](snapshot *PendingSnapshot) ([]M, i
 	return msgs, snapshot.Cursor, toolInfos, nil
 }
 
-func hasMemoryWritesSince[M adk.MessageType](msgs []M, cursor int, stores []runtimeMemoryStore) bool {
+func hasMemoryWritesSince[M adk.MessageType](msgs []M, cursor int, memoryDirectory string) bool {
 	if cursor < 0 {
 		cursor = 0
 	}
@@ -823,35 +766,12 @@ func hasMemoryWritesSince[M adk.MessageType](msgs []M, cursor int, stores []runt
 			if tc.Function.Name != adkfs.ToolNameWriteFile && tc.Function.Name != adkfs.ToolNameEditFile {
 				continue
 			}
-			if fp, ok := extractFilePath(tc.Function.Arguments); ok && isPathWithinMemoryStores(stores, fp) {
+			if fp, ok := extractFilePath(tc.Function.Arguments); ok && isPathWithinMemoryDir(memoryDirectory, fp) {
 				return true
 			}
 		}
 	}
 	return false
-}
-
-func isPathWithinMemoryStores(stores []runtimeMemoryStore, filePath string) bool {
-	if filePath == "" {
-		return false
-	}
-	if filepath.IsAbs(filePath) {
-		for _, store := range stores {
-			if isPathWithinMemoryDir(store.Path, filePath) {
-				return true
-			}
-		}
-		return false
-	}
-
-	clean := filepath.ToSlash(filepath.Clean(filePath))
-	for _, store := range stores {
-		name := filepath.ToSlash(store.displayName())
-		if clean == name || strings.HasPrefix(clean, name+"/") {
-			return true
-		}
-	}
-	return len(stores) == 1 && isPathWithinMemoryDir(stores[0].Path, filePath)
 }
 
 func countModelVisibleMessagesSince[M adk.MessageType](msgs []M, cursor int) int {
@@ -877,36 +797,20 @@ func parseRFC3339NanoBestEffort(s string) time.Time {
 	return time.Time{}
 }
 
-func (s runtimeMemoryStore) displayName() string {
-	if strings.TrimSpace(s.Name) != "" {
-		return strings.TrimSpace(s.Name)
-	}
-	return s.Path
-}
-
 func (m *middleware[M]) coordinatorKey(sessionID string) string {
-	if sessionID == "" || m == nil || len(m.memoryStores) == 0 {
+	if sessionID == "" || m == nil || m.resolvedMemoryDirectory == "" {
 		return ""
 	}
-	paths := m.memoryStorePaths()
-	sort.Strings(paths)
-	return strings.Join(paths, "\n") + "::" + sessionID
+	return m.resolvedMemoryDirectory + "::" + sessionID
 }
 
-func (m *middleware[M]) memoryStorePaths() []string {
-	if m == nil || len(m.memoryStores) == 0 {
-		return nil
-	}
-	paths := make([]string, 0, len(m.memoryStores))
-	for _, store := range m.memoryStores {
-		paths = append(paths, store.Path)
-	}
-	return paths
+func (m *middleware[M]) topicSelectionEnabled() bool {
+	return m != nil && m.cfg != nil && m.cfg.Read != nil &&
+		topicSelectionConfigEnabled(m.cfg.Read.TopicSelection) && m.topicSelectionModel != nil
 }
 
-func (m *middleware[M]) memoryIndexEnabled() bool {
-	return m != nil && m.cfg != nil && m.cfg.Read != nil && m.cfg.Read.Index != nil &&
-		m.cfg.Read.Index.EnableMemoryIndex != nil && *m.cfg.Read.Index.EnableMemoryIndex
+func topicSelectionConfigEnabled(cfg *TopicSelectionConfig) bool {
+	return cfg != nil && cfg.Enable != nil && *cfg.Enable
 }
 
 func (m *middleware[M]) onErr(ctx context.Context, stage ErrorStage, err error) {
@@ -922,7 +826,7 @@ func (m *middleware[M]) lastUserMessage(agentIn *adk.TypedAgentInput[M]) (M, boo
 	if agentIn == nil || len(agentIn.Messages) == 0 {
 		return nil, false
 	}
-	if m.cfg.Read.TopicSelection == nil || m.topicSelectionModel == nil {
+	if !m.topicSelectionEnabled() {
 		return nil, false
 	}
 	for i := len(agentIn.Messages) - 1; i >= 0; i-- {
