@@ -20,7 +20,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"strings"
 
 	"github.com/cloudwego/eino/adk/backgroundtask"
 	"github.com/cloudwego/eino/adk/filesystem"
@@ -32,55 +31,30 @@ import (
 
 // ExecuteTaskType is the backgroundtask Task.Type tag for shell-command tasks
 // launched by the execute tool. A shared Manager's ShouldAutoBackground hook can
-// match on it to apply shell-specific policy (e.g. IsAutoBackgroundAllowed).
+// match on it to apply shell-specific policy, recovering the command via
+// CommandFromTask.
 //
 // A filesystem.Backend satisfies backgroundtask.OutputStore directly, so a
 // background Manager can persist task output through the same backend used for the
 // file tools: backgroundtask.Config{OutputStore: backend, OutputDir: ...}.
 const ExecuteTaskType = "bash"
 
-// disallowedAutoBackgroundCommands lists commands that must not be moved to the
-// background when they hit their foreground deadline. Entries are matched exactly
-// against the first shell segment after trimming surrounding whitespace.
-var disallowedAutoBackgroundCommands = []string{"sleep"}
+// MetadataKeyCommand is the RunInput.Metadata / Task.Metadata key under which the
+// execute tool records the shell command for a task. A ShouldAutoBackground hook
+// reads it (via CommandFromTask) to apply command-specific policy without parsing
+// the human-readable Description. The value is a string.
+const MetadataKeyCommand = "command"
 
-// IsAutoBackgroundAllowed reports whether a shell command may be moved to the
-// background when it exceeds its foreground budget. It is a ready reference
-// implementation for a backgroundtask Manager's ShouldAutoBackground hook. The
-// first shell segment (up to the first shell operator) is compared exactly against
-// a small denylist; by default only a bare "sleep" is disallowed.
-//
-// Typical wiring (Task.Description carries the command for shell runs):
-//
-//	mgr := backgroundtask.New(ctx, &backgroundtask.Config{
-//	    ShouldAutoBackground: func(_ context.Context, t *backgroundtask.Task) bool {
-//	        return filesystem.IsAutoBackgroundAllowed(t.Description)
-//	    },
-//	})
-func IsAutoBackgroundAllowed(command string) bool {
-	first := strings.TrimSpace(firstShellSegment(command))
-	if first == "" {
-		return true
+// CommandFromTask returns the shell command recorded in a shell task's metadata
+// under MetadataKeyCommand. The execute tool always records it for shell tasks, so
+// a hook receiving a task of ExecuteTaskType can rely on a non-empty result; it
+// returns "" only when given a nil or non-shell task.
+func CommandFromTask(t *backgroundtask.Task) string {
+	if t == nil {
+		return ""
 	}
-	for _, c := range disallowedAutoBackgroundCommands {
-		if first == c {
-			return false
-		}
-	}
-	return true
-}
-
-// firstShellSegment returns the command text up to the first top-level shell
-// operator. It is a deliberately simple, non-quote-aware split — sufficient for
-// the bare-"sleep" blocklist used by IsAutoBackgroundAllowed.
-func firstShellSegment(command string) string {
-	idx := len(command)
-	for _, op := range []string{"&&", "||", ";", "|", "&"} {
-		if i := strings.Index(command, op); i >= 0 && i < idx {
-			idx = i
-		}
-	}
-	return command[:idx]
+	cmd, _ := t.Metadata[MetadataKeyCommand].(string)
+	return cmd
 }
 
 // bashWork adapts a blocking shell execution into a backgroundtask.WorkFunc.
@@ -180,6 +154,7 @@ func managedRunInput(ctx context.Context, input executeManagedArgs) *backgroundt
 		Type:            ExecuteTaskType,
 		ToolUseID:       compose.GetToolCallID(ctx),
 		RunInBackground: input.RunInBackground,
+		Metadata:        map[string]any{MetadataKeyCommand: input.Command},
 	}
 	// A positive timeout overrides the Manager's default foreground budget for
 	// this command. When the deadline expires, the Manager's policy decides
@@ -202,11 +177,14 @@ func newManagedBufferedExecuteTool(mgr *backgroundtask.Manager, sb filesystem.Sh
 		case backgroundtask.StatusCompleted:
 			return result.Result, nil
 		case backgroundtask.StatusRunning:
-			msg := fmt.Sprintf("Command running in background with ID: %s. You will be notified when it completes.", result.ID)
+			msg := fmt.Sprintf("Command running in background with ID: %s.", result.ID)
 			if result.OutputFile != "" {
 				msg += fmt.Sprintf(" Output is being written to: %s.", result.OutputFile)
 			}
-			msg += " Use task_output with this ID to check status or retrieve the result."
+			msg += " You will be notified when it completes."
+			if result.OutputFile != "" {
+				msg += " To check interim output, use Read on that file path."
+			}
 			return msg, nil
 		case backgroundtask.StatusFailed:
 			return "", fmt.Errorf("execute task %q failed: %s", result.ID, result.Error)

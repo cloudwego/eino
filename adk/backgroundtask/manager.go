@@ -181,8 +181,14 @@ type Config struct {
 	// ShouldAutoBackground decides, at a foreground run's deadline, whether it may be
 	// moved to the background (kept running) instead of being canceled. Applications
 	// can use it to permit long-lived workloads such as servers and watchers while
-	// timing out commands whose results are no longer useful. For shell commands,
-	// filesystem.IsAutoBackgroundAllowed provides a ready reference implementation.
+	// timing out commands whose results are no longer useful. The hook receives the
+	// task, so a host can branch on Task.Type and recover domain parameters from
+	// Task.Metadata (e.g. the shell command via filesystem.CommandFromTask).
+	//
+	// Deciding whether a workload is genuinely long-lived is inherently host- and
+	// command-specific, so this package ships no built-in policy: the framework
+	// cannot reliably infer "never exits" from a command string, and a wrong guess
+	// either kills a useful run or keeps a doomed one. Hosts encode their own rules.
 	//
 	// It is consulted ONLY for the auto path — a foreground run that hits its
 	// deadline. An explicit RunInBackground run always backgrounds immediately,
@@ -211,6 +217,37 @@ type Config struct {
 	// OutputDir is the directory under which task output files are written. Only
 	// used when OutputStore is set.
 	OutputDir string
+
+	// BackgroundNotice customizes the chunk emitted on a RunStream caller's stream
+	// when a task starts in the background or is auto-moved there. The Manager owns
+	// only lifecycle facts (id, type, output file); how a host tells the model to
+	// retrieve the result is host-specific — one host exposes a task_output tool,
+	// another points at the output file — so that wording does not belong in this
+	// type-erased layer.
+	//
+	// When nil, defaultBackgroundNotice is used: it announces the background launch
+	// and, when an output file is reserved, directs the reader to Read that path for
+	// interim output.
+	//
+	// The ctx passed to the hook is the run's context (detached from the caller's
+	// cancellation, carrying its values); use it only for value lookup, not to gate
+	// the notice on cancellation.
+	BackgroundNotice func(ctx context.Context, info NoticeInfo) string
+}
+
+// NoticeInfo carries the lifecycle facts a BackgroundNotice hook may use to build
+// the chunk shown when a run goes to the background.
+type NoticeInfo struct {
+	// Task is a snapshot of the task at the moment the notice is emitted, carrying
+	// ID, Type, and OutputFile. Nil only if the task vanished mid-emit (not expected).
+	Task *Task
+	// AutoBackgrounded is false when the run was launched directly in the background
+	// (RunInBackground), and true when a foreground run was auto-moved to the
+	// background at its deadline because the ShouldAutoBackground hook permitted it
+	// (a deadline the hook declines becomes a timeout failure, which never reaches
+	// this notice). The true case is the same transition reported to subscribers as
+	// TaskEventBackgrounded.
+	AutoBackgrounded bool
 }
 
 // OutputStore persists task output to a durable location. A filesystem.Backend
@@ -241,6 +278,7 @@ type Manager struct {
 	idGen                IDGenerator
 	outputStore          OutputStore
 	outputDir            string
+	backgroundNoticeFn   func(ctx context.Context, info NoticeInfo) string
 
 	subscribeOnce sync.Once
 	eventCh       chan *TaskEvent
@@ -275,6 +313,7 @@ func New(_ context.Context, conf *Config) *Manager {
 		m.idGen = conf.IDGen
 		m.outputStore = conf.OutputStore
 		m.outputDir = conf.OutputDir
+		m.backgroundNoticeFn = conf.BackgroundNotice
 	}
 	return m
 }
@@ -988,7 +1027,7 @@ func (m *Manager) forwardStream(r *streamRun) {
 	// Emit the notice, close the caller stream, and drain the reader directly into
 	// the result.
 	if r.input.RunInBackground {
-		r.sw.Send(m.backgroundStartNotice(r.id), nil)
+		r.sw.Send(m.backgroundStartNotice(r.runCtx, r.id), nil)
 		r.sw.Close()
 		m.drainReader(r.runCtx, r.id, ws, &buf)
 		return
@@ -1037,7 +1076,7 @@ func (m *Manager) forwardStream(r *streamRun) {
 			if m.allowAutoBackground(r.callerCtx, task) && m.detach(r.id) {
 				// Moved to the background: cap the caller's stream with a notice and
 				// keep draining the rest into the task result.
-				r.sw.Send(m.backgroundMoveNotice(r.id), nil)
+				r.sw.Send(m.backgroundMoveNotice(r.runCtx, r.id), nil)
 				r.sw.Close()
 				m.drainStream(r.runCtx, r.id, chunks, &buf)
 				return
@@ -1150,30 +1189,70 @@ func (m *Manager) drainStream(runCtx context.Context, id string, chunks <-chan s
 	}
 }
 
-// backgroundStartNotice builds the generic chunk emitted for an explicit
-// RunInBackground launch. It uses only Manager-level facts (type, id, output
-// file), so it stays domain-agnostic.
-func (m *Manager) backgroundStartNotice(id string) string {
-	return m.backgroundNotice(id, "is running in the background")
+// backgroundStartNotice builds the chunk emitted for an explicit RunInBackground
+// launch.
+func (m *Manager) backgroundStartNotice(ctx context.Context, id string) string {
+	return m.notice(ctx, id, false)
 }
 
-// backgroundMoveNotice builds the generic chunk appended when a foreground run
-// is moved to the background by the auto-background policy.
-func (m *Manager) backgroundMoveNotice(id string) string {
-	return m.backgroundNotice(id, "moved to the background")
+// backgroundMoveNotice builds the chunk appended when a foreground run is moved to
+// the background by the auto-background policy.
+func (m *Manager) backgroundMoveNotice(ctx context.Context, id string) string {
+	return m.notice(ctx, id, true)
 }
 
-func (m *Manager) backgroundNotice(id string, state string) string {
-	task, ok := m.Get(id)
-	kind := ""
-	if ok && task.Type != "" {
-		kind = " (" + task.Type + ")"
+// notice produces the background-launch chunk: the configured BackgroundNotice
+// hook when set, otherwise defaultBackgroundNotice. It snapshots the task so the
+// hook sees the same lifecycle facts (id, type, output file) the default would.
+func (m *Manager) notice(ctx context.Context, id string, autoBackgrounded bool) string {
+	task, _ := m.Get(id)
+	info := NoticeInfo{Task: task, AutoBackgrounded: autoBackgrounded}
+	if m.backgroundNoticeFn != nil {
+		return m.backgroundNoticeFn(ctx, info)
 	}
-	msg := fmt.Sprintf("\n[task %s%s %s; you will be notified when it completes", id, kind, state)
-	if ok && task.OutputFile != "" {
-		msg += fmt.Sprintf(". Output: %s", task.OutputFile)
+	return defaultBackgroundNotice(info)
+}
+
+// noticeTemplate is the default background-notice text. Placeholders are filled by
+// defaultBackgroundNotice; {kind} and {output} expand to empty when absent, so the
+// same template serves the with- and without-output-file cases.
+const noticeTemplate = "\n[task {id}{kind} {state}; you will be notified when it completes.{output}]"
+
+// noticeOutputTemplate is the {output} fragment, present only when the task has a
+// reserved output file.
+const noticeOutputTemplate = " Output is being written to: {file}." +
+	" To check interim output, use Read on that file path."
+
+// defaultBackgroundNotice is the built-in BackgroundNotice. It announces the
+// background launch and, when an output file is reserved, directs the reader to
+// Read that path for interim output. It deliberately names no control tool, since
+// the retrieval mechanism is host-specific (see Config.BackgroundNotice).
+func defaultBackgroundNotice(info NoticeInfo) string {
+	id, kind, outputFile := "", "", ""
+	if info.Task != nil {
+		id = info.Task.ID
+		if info.Task.Type != "" {
+			kind = " (" + info.Task.Type + ")"
+		}
+		outputFile = info.Task.OutputFile
 	}
-	return msg + ". Use task_output to retrieve the result.]"
+
+	state := "is running in the background"
+	if info.AutoBackgrounded {
+		state = "moved to the background"
+	}
+
+	output := ""
+	if outputFile != "" {
+		output = strings.NewReplacer("{file}", outputFile).Replace(noticeOutputTemplate)
+	}
+
+	return strings.NewReplacer(
+		"{id}", id,
+		"{kind}", kind,
+		"{state}", state,
+		"{output}", output,
+	).Replace(noticeTemplate)
 }
 
 // streamBufferCap is the buffer size of the caller-facing stream pipe.

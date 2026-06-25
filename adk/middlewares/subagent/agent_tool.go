@@ -38,7 +38,26 @@ const (
 	// launched by the agent tool, letting a shared Manager distinguish them from
 	// shell tasks.
 	TaskTypeSubagent = "subagent"
+
+	// MetadataKeySubagentType is the RunInput.Metadata / Task.Metadata key under
+	// which the agent tool records the sub-agent type for a task. A
+	// ShouldAutoBackground hook reads it (via SubagentTypeFromTask) to apply
+	// agent-type-specific policy without parsing the human-readable Description. The
+	// value is a string.
+	MetadataKeySubagentType = "subagent_type"
 )
+
+// SubagentTypeFromTask returns the sub-agent type recorded in a sub-agent task's
+// metadata under MetadataKeySubagentType, or "" if absent (e.g. the task is not a
+// sub-agent run). It is the intended way for a ShouldAutoBackground hook to recover
+// the agent type.
+func SubagentTypeFromTask(t *backgroundtask.Task) string {
+	if t == nil {
+		return ""
+	}
+	st, _ := t.Metadata[MetadataKeySubagentType].(string)
+	return st
+}
 
 // agentInput is the agent tool's input when no Manager is configured: spawn a
 // sub-agent synchronously in the foreground.
@@ -85,6 +104,7 @@ func newManagedAgentTool(mgr *backgroundtask.Manager, subAgents map[string]tool.
 				Type:            TaskTypeSubagent,
 				ToolUseID:       compose.GetToolCallID(ctx),
 				RunInBackground: in.RunInBackground,
+				Metadata:        map[string]any{MetadataKeySubagentType: in.SubagentType},
 			}, func(workCtx context.Context) (string, error) {
 				return a.InvokableRun(workCtx, params, opts...)
 			})
@@ -96,11 +116,14 @@ func newManagedAgentTool(mgr *backgroundtask.Manager, subAgents map[string]tool.
 			case backgroundtask.StatusCompleted:
 				return result.Result, nil
 			case backgroundtask.StatusRunning:
-				msg := fmt.Sprintf("Agent running in background with ID: %s. You will be notified when it completes.", result.ID)
+				msg := fmt.Sprintf("Agent running in background with ID: %s.", result.ID)
 				if result.OutputFile != "" {
 					msg += fmt.Sprintf(" Output is being written to: %s.", result.OutputFile)
 				}
-				msg += " Use task_output with this ID to check status or retrieve the result."
+				msg += " You will be notified when it completes."
+				if result.OutputFile != "" {
+					msg += " To check interim output, use Read on that file path."
+				}
 				return msg, nil
 			case backgroundtask.StatusFailed:
 				return "", fmt.Errorf("subagent %q task %q (%s) failed: %s",

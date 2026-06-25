@@ -79,24 +79,6 @@ func TestBackendAsOutputStore_PersistsTaskOutput(t *testing.T) {
 	assert.Equal(t, "the output", got.Content)
 }
 
-func TestIsAutoBackgroundAllowed(t *testing.T) {
-	cases := []struct {
-		command string
-		want    bool
-	}{
-		{"sleep", false},              // bare sleep is blocked
-		{"sleep 5", true},             // sleep with args allowed (matched exactly)
-		{"  sleep  ", false},          // surrounding space trimmed
-		{"npm run build", true},       // normal command
-		{"echo hi && sleep 5", true},  // sleep not in first segment
-		{"sleep && echo done", false}, // bare sleep as first segment
-		{"", true},                    // empty → allowed
-	}
-	for _, c := range cases {
-		assert.Equalf(t, c.want, IsAutoBackgroundAllowed(c.command), "command=%q", c.command)
-	}
-}
-
 // slowShell is a Shell whose Execute blocks for delay (honoring ctx cancellation)
 // before returning out.
 type slowShell struct {
