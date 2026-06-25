@@ -2799,12 +2799,12 @@ func TestTurnLoop_ManagedInterrupt_DecisionResumeUsesCapturedCheckpointIDAndPara
 	}
 
 	interruptEvents := filterStoredSessionEvents(t, sessionStore.events, func(se *SessionEvent[*schema.Message]) bool {
-		return se.Kind == SessionEventAgentInterrupt
+		return se.Kind == SessionEventInterrupt
 	})
 	require.Len(t, interruptEvents, 1)
-	require.NotNil(t, interruptEvents[0].AgentInterrupt)
-	require.NotEmpty(t, interruptEvents[0].AgentInterrupt.Contexts)
-	assert.Equal(t, interruptTargetID, interruptEvents[0].AgentInterrupt.Contexts[0].InterruptID)
+	require.NotNil(t, interruptEvents[0].Interrupt)
+	require.NotEmpty(t, interruptEvents[0].Interrupt.Contexts)
+	assert.Equal(t, interruptTargetID, interruptEvents[0].Interrupt.Contexts[0].InterruptID)
 
 	turnEndEvents := filterStoredSessionEvents(t, sessionStore.events, func(se *SessionEvent[*schema.Message]) bool {
 		return isCommittedIdleEvent(se)
@@ -3941,13 +3941,7 @@ type mockSessionStore struct {
 	events map[string][]storedSessionEvent
 }
 
-func (m *mockSessionStore) AppendEvents(ctx context.Context, req *AppendSessionEventsRequest[*schema.Message]) error {
-	sessionID := ""
-	var events []*SessionEvent[*schema.Message]
-	if req != nil {
-		sessionID = req.SessionID
-		events = req.Events
-	}
+func (m *mockSessionStore) AppendEvents(ctx context.Context, sessionID string, events []*SessionEvent[*schema.Message]) error {
 	return m.AppendEventsForSession(ctx, sessionID, events)
 }
 
@@ -3977,11 +3971,7 @@ func (m *mockSessionStore) AppendEventsForSession(_ context.Context, sessionID s
 	return nil
 }
 
-func (m *mockSessionStore) LoadEvents(ctx context.Context, req *LoadSessionEventsRequest) (*LoadSessionEventsResult[*schema.Message], error) {
-	sessionID := ""
-	if req != nil {
-		sessionID = req.SessionID
-	}
+func (m *mockSessionStore) LoadEvents(ctx context.Context, sessionID string, req *LoadSessionEventsRequest) (*LoadSessionEventsResult[*schema.Message], error) {
 	return m.LoadEventsForSession(ctx, sessionID, req)
 }
 
@@ -4078,11 +4068,8 @@ func (h *mockSessionHandle) loadEvents(ctx context.Context, req *LoadSessionEven
 	return h.store.LoadEventsForSession(ctx, h.sessionID, req)
 }
 
-func (h *mockSessionHandle) appendEvents(ctx context.Context, req *AppendSessionEventsRequest[*schema.Message]) error {
-	if req == nil {
-		req = &AppendSessionEventsRequest[*schema.Message]{}
-	}
-	return h.store.AppendEventsForSession(ctx, h.sessionID, req.Events)
+func (h *mockSessionHandle) appendEvents(ctx context.Context, events []*SessionEvent[*schema.Message]) error {
+	return h.store.AppendEventsForSession(ctx, h.sessionID, events)
 }
 
 func (h *mockSessionHandle) close(context.Context) error { return nil }
