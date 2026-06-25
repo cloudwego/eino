@@ -8204,13 +8204,15 @@ func TestAttack_PreLoadResumeLosesToAcceptedCheckpointResume(t *testing.T) {
 	require.NoError(t, store.Set(ctx, cpID, data))
 
 	gotResume := make(chan []string, 1)
+	gotUnhandled := make(chan []string, 1)
 	loop := NewTurnLoop(TurnLoopConfig[string, *schema.Message]{
 		InterruptMode: TurnLoopInterruptWaitsForExplicitResume,
 		Store:         store,
 		CheckpointID:  cpID,
 		GenInput:      genInputConsumeAllWithMsg,
-		GenResume: func(_ context.Context, _ *TurnLoop[string, *schema.Message], interrupted, _, resumeItems []string) (*GenResumeResult[string, *schema.Message], error) {
+		GenResume: func(_ context.Context, _ *TurnLoop[string, *schema.Message], interrupted, unhandled, resumeItems []string) (*GenResumeResult[string, *schema.Message], error) {
 			gotResume <- append([]string{}, resumeItems...)
+			gotUnhandled <- append([]string{}, unhandled...)
 			return &GenResumeResult[string, *schema.Message]{
 				Decision: TurnLoopResumeDecisionStartNewTurn,
 				Input:    &AgentInput{Messages: []Message{schema.UserMessage("resumed")}},
@@ -8242,7 +8244,14 @@ func TestAttack_PreLoadResumeLosesToAcceptedCheckpointResume(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("GenResume not invoked")
 	}
-	t.Logf("pre-load Resume return value (informational): %v", preErr)
+	select {
+	case unhandled := <-gotUnhandled:
+		assert.Contains(t, unhandled, "preload-should-lose",
+			"pre-load Resume must be preserved as unhandled input when checkpoint resume intent wins")
+	case <-time.After(2 * time.Second):
+		t.Fatal("GenResume unhandled items not captured")
+	}
+	require.NoError(t, preErr)
 }
 
 // TestAttack_TimeoutWithNilInterruptContexts ensures a timeout still produces an

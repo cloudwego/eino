@@ -1145,10 +1145,15 @@ func (l *TurnLoop[T, M]) tryLoadCheckpoint(ctx context.Context) error {
 			// No checkpoint to resume into; treat preLoad as Push items so they
 			// don't silently disappear.
 			l.buffer.PushFront(preLoad)
+		case pr != nil && pr.resumeSubmitted && len(preLoad) > 0:
+			// The restored checkpoint already carries accepted resume intent.
+			// Preserve the pre-load Resume items as normal unhandled input rather
+			// than silently dropping them or overriding the checkpoint intent.
+			pr.unhandled = append(pr.unhandled, preLoad...)
 		}
 		// If pr != nil && pr.resumeSubmitted (checkpoint carried accepted resume
-		// items), those win: the cases above skip, preLoad is left unused, and a
-		// later post-load Resume() would return ErrTurnLoopResumeInProgress.
+		// items), those win as resume intent; preLoad is retained as unhandled
+		// input so Resume before Run remains non-lossy.
 
 		l.checkpointLoaded = true
 	}()
