@@ -575,12 +575,36 @@ func newLsTool(fs filesystem.Backend, name string, desc string) (tool.BaseTool, 
 		if len(infos) == 0 {
 			return noFilesFound, nil
 		}
-		paths := make([]string, 0, len(infos))
+		lines := make([]string, 0, len(infos))
 		for _, fi := range infos {
-			paths = append(paths, fi.Path)
+			if fi.IsDir {
+				// Append a trailing slash so the model can tell directories
+				// from files and does not explore a directory as if it were a file.
+				lines = append(lines, fi.Path+"/")
+				continue
+			}
+			// Include the file size so the model can avoid reading very large
+			// (e.g. binary) files that would pollute the context window.
+			lines = append(lines, fmt.Sprintf("%s (%s)", fi.Path, formatFileSize(fi.Size)))
 		}
-		return strings.Join(paths, "\n"), nil
+		return strings.Join(lines, "\n"), nil
 	})
+}
+
+// formatFileSize renders a byte count in a compact, human-readable form
+// (e.g. "29 B", "1.2 KB", "3.4 MB"). The ls tool uses it so the model can
+// gauge a file's size before deciding whether to read it.
+func formatFileSize(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	div, exp := int64(unit), 0
+	for x := n / unit; x >= unit; x /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(n)/float64(div), "KMGTPE"[exp])
 }
 
 type readFileArgs struct {
