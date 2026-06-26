@@ -93,9 +93,36 @@ func copyModelContextEvent(event *ModelContextEvent) *ModelContextEvent {
 		return nil
 	}
 	return &ModelContextEvent{
-		ToolInfos:         append([]*schema.ToolInfo{}, event.ToolInfos...),
-		DeferredToolInfos: append([]*schema.ToolInfo{}, event.DeferredToolInfos...),
+		ToolInfos:         cloneToolInfos(event.ToolInfos),
+		DeferredToolInfos: cloneToolInfos(event.DeferredToolInfos),
 	}
+}
+
+func cloneToolInfos(infos []*schema.ToolInfo) []*schema.ToolInfo {
+	if infos == nil {
+		return nil
+	}
+	return append([]*schema.ToolInfo{}, infos...)
+}
+
+func modelContextEventEqual(a, b *ModelContextEvent) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return toolInfosEqual(a.ToolInfos, b.ToolInfos) &&
+		toolInfosEqual(a.DeferredToolInfos, b.DeferredToolInfos)
+}
+
+func toolInfosEqual(a, b []*schema.ToolInfo) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if !reflect.DeepEqual(a[i], b[i]) {
+			return false
+		}
+	}
+	return true
 }
 
 func syncModelContextSessionEvent[M MessageType](ctx context.Context, state *TypedChatModelAgentState[M]) {
@@ -104,10 +131,10 @@ func syncModelContextSessionEvent[M MessageType](ctx context.Context, state *Typ
 		return
 	}
 	current := &ModelContextEvent{
-		ToolInfos:         append([]*schema.ToolInfo{}, state.ToolInfos...),
-		DeferredToolInfos: append([]*schema.ToolInfo{}, state.DeferredToolInfos...),
+		ToolInfos:         cloneToolInfos(state.ToolInfos),
+		DeferredToolInfos: cloneToolInfos(state.DeferredToolInfos),
 	}
-	changed := !execCtx.sawModelContext || !reflect.DeepEqual(execCtx.lastModelContext, current)
+	changed := !execCtx.sawModelContext || !modelContextEventEqual(execCtx.lastModelContext, current)
 	if changed {
 		execCtx.send(ctx, &TypedAgentEvent[M]{
 			SessionEventVariant: &SessionEventVariant[M]{
