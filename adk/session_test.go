@@ -610,6 +610,37 @@ func TestRunnerSessionModePrependsCommittedMessagesOnce(t *testing.T) {
 	assert.Equal(t, "value", secondAgent.values[0]["override"])
 }
 
+func TestRunnerSessionModeSkipsDuplicateEmptyModelContext(t *testing.T) {
+	ctx := context.Background()
+	store := newSessionHelperStore()
+	sessionID := "runner-model-context-session"
+	model := &leadingSystemTestModel[*schema.Message]{response: schema.AssistantMessage("ok", nil)}
+	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "runner-model-context-agent",
+		Description: "runner model context agent",
+		Instruction: "You are a helpful assistant.",
+		Model:       model,
+	})
+	require.NoError(t, err)
+
+	runner := NewRunner(ctx, RunnerConfig{
+		Agent:        agent,
+		SessionID:    sessionID,
+		SessionStore: store,
+	})
+	drainSessionEvents(t, runner.Query(ctx, "first"))
+	drainSessionEvents(t, runner.Query(ctx, "second"))
+
+	result, err := store.LoadEventsForSession(ctx, sessionID, &LoadSessionEventsRequest{
+		Kinds: []SessionEventKind{SessionEventModelContext},
+	})
+	require.NoError(t, err)
+	require.Len(t, result.Events, 1)
+	require.NotNil(t, result.Events[0].ModelContext)
+	assert.Empty(t, result.Events[0].ModelContext.ToolInfos)
+	assert.Empty(t, result.Events[0].ModelContext.DeferredToolInfos)
+}
+
 func TestAttack_SessionEventIDGeneratorCoversRunnerEvents(t *testing.T) {
 	ctx := context.Background()
 	store := newSessionHelperStore()
