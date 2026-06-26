@@ -641,7 +641,7 @@ func (t *typedToolReductionMiddleware[M]) beforeModelRewriteStateGeneric(ctx con
 		return ctx, state, err
 	}
 
-	if estimatedTokens <= t.config.MaxTokensForClear {
+	if estimatedTokens < t.config.MaxTokensForClear {
 		return ctx, state, nil
 	}
 
