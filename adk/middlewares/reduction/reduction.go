@@ -97,15 +97,22 @@ type TypedConfig[M adk.MessageType] struct {
 
 	// TokenCounter is used to count the number of tokens in the conversation messages.
 	// It is used to determine when to trigger clearing based on token usage, and token usage after clearing.
-	// Required.
+	// Optional. If not provided, a default token counter will be used, which estimates tokens by counting 1 token per 4 characters.
 	TokenCounter func(ctx context.Context, msg []M, tools []*schema.ToolInfo) (int64, error)
 
 	// MaxTokensForClear is the maximum number of tokens allowed in the conversation before clearing is attempted.
 	// Required. Default is 160000.
 	MaxTokensForClear int64
 
-	// ClearRetentionSuffixLimit is the number of most recent messages to retain without clearing.
-	// This ensures the model has some immediate context.
+	// ClearRetentionSuffixLimit is the number of most recent tool-call rounds to retain without clearing.
+	// A round consists of one assistant message (which may contain multiple tool calls) and its corresponding tool-result messages.
+	// This ensures the model has immediate context to process pending tool results.
+	//
+	// Example with ClearRetentionSuffixLimit = 2, the retained suffix looks like:
+	//   Round 2: assistant [call_A, call_B] → result_A, result_B
+	//   Round 1: assistant [call_C] → result_C
+	// (Round 1 is the most recent, closest to the end of the message list.)
+	//
 	// Optional. Default is 1.
 	ClearRetentionSuffixLimit int
 
@@ -681,16 +688,14 @@ func (t *typedToolReductionMiddleware[M]) beforeModelRewriteStateGeneric(ctx con
 		toolCallMsg := editTarget[toolCallMsgIndex]
 		toolCalls := getToolCallsGeneric(toolCallMsg)
 		if isAssistantMsg(toolCallMsg) && len(toolCalls) > 0 {
-			toolMsgIndex := toolCallMsgIndex
 			for _, tc := range toolCalls {
-				toolMsgIndex++
-				if toolMsgIndex >= end {
-					break
+				// Find the corresponding tool-result message by callID
+				resultMsgIndex, found := findToolResultByCallID(editTarget, toolCallMsgIndex+1, toolCallMsgIndex+1+len(toolCalls), tc.CallID)
+				if !found {
+					continue // No corresponding tool result found, skip
 				}
-				resultMsg := editTarget[toolMsgIndex]
-				if !isToolResultMsg(resultMsg) { // unexpected
-					break
-				}
+				resultMsg := editTarget[resultMsgIndex]
+
 				if _, found := t.excludeClearTools[tc.Name]; found {
 					continue
 				}
@@ -847,6 +852,51 @@ func (t *typedToolReductionMiddleware[M]) applyClearRewriteGeneric(ctx context.C
 	}
 
 	return editTarget, end, nil
+}
+
+func agenticResultCallID(block *schema.ContentBlock) (string, bool) {
+	if block == nil {
+		return "", false
+	}
+	if block.Type == schema.ContentBlockTypeFunctionToolResult && block.FunctionToolResult != nil {
+		return block.FunctionToolResult.CallID, true
+	}
+	if block.Type == schema.ContentBlockTypeToolSearchResult && block.ToolSearchFunctionToolResult != nil {
+		return block.ToolSearchFunctionToolResult.CallID, true
+	}
+	return "", false
+}
+
+func findToolResultByCallID[M adk.MessageType](messages []M, startIndex, endIndex int, callID string) (int, bool) {
+	for i := startIndex; i < endIndex; i++ {
+		msg := messages[i]
+		if isToolResultMsg(msg) {
+			if getToolResultCallID(msg) == callID {
+				return i, true
+			}
+		} else {
+			return -1, false
+		}
+	}
+	return -1, false
+}
+
+func getToolResultCallID[M adk.MessageType](msg M) string {
+	switch m := any(msg).(type) {
+	case *schema.Message:
+		if m.Role == schema.Tool {
+			return m.ToolCallID
+		}
+	case *schema.AgenticMessage:
+		if m.Role == schema.AgenticRoleTypeUser {
+			for _, block := range m.ContentBlocks {
+				if callID, ok := agenticResultCallID(block); ok {
+					return callID
+				}
+			}
+		}
+	}
+	return ""
 }
 
 type offloadStashItem struct {
