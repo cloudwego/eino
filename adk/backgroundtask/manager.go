@@ -27,7 +27,8 @@
 // What a run actually does is supplied per-call as a WorkFunc passed to Run, which
 // keeps the engine agnostic to what it runs (agents, shell, ...); adapters that
 // produce WorkFunc values live in the consuming packages (subagent, filesystem).
-// Completed task output can optionally be persisted through OutputStore.
+// A task may carry an output-file path (RunInput.OutputFile) that the launcher
+// writes to; the Manager only records and surfaces the path, never the file.
 //
 // Manager tracks lifecycle only. Streaming a specific run's events in real time
 // is intentionally out of scope here: the launcher (a domain adapter) already
@@ -39,13 +40,11 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"path/filepath"
 	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/cloudwego/eino/adk/filesystem"
 	"github.com/cloudwego/eino/internal"
 	"github.com/cloudwego/eino/internal/safe"
 	"github.com/cloudwego/eino/schema"
@@ -85,10 +84,12 @@ type Task struct {
 	Status Status
 	// Result contains the task output, set when Status is StatusCompleted.
 	Result string
-	// OutputFile is the path the task's result was persisted to, when an output
-	// store is configured (see Config.OutputStore). Empty otherwise. The file
-	// outlives the in-memory record, so it remains readable after the Manager is
-	// rebuilt.
+	// OutputFile is the path the task's output is written to, when the launcher
+	// supplied one via RunInput.OutputFile. Empty otherwise. The Manager only
+	// records and surfaces this path (in notices and Get/List); it never writes
+	// the file — the launcher's work owns writing, so it may contain interim
+	// output while the task is still running. The file outlives the in-memory
+	// record, so it remains readable after the Manager is rebuilt.
 	OutputFile string
 	// Error contains the error message, set when Status is StatusFailed.
 	Error string
@@ -148,6 +149,12 @@ type RunInput struct {
 	// label background tasks — e.g. an originating tool-call ID, session, or trace.
 	// The Manager does not interpret it. It is shallow-copied into the task on creation.
 	Metadata map[string]any
+	// OutputFile is the optional path the launcher will write this task's output
+	// to. When non-empty it is recorded on Task.OutputFile and surfaced in the
+	// background notice; the Manager itself never writes the file. The launcher
+	// (a domain adapter) owns writing, so the file may carry interim output while
+	// the task runs. Empty means the task has no output file.
+	OutputFile string
 	// ForegroundTimeoutMs optionally overrides the Manager's foreground budget for
 	// this run only. When nil, the Manager's configured default applies. When non-nil,
 	// it bounds how long the run may occupy the foreground before its deadline fires
@@ -206,18 +213,6 @@ type Config struct {
 	// Manager's registered tasks; a duplicate fails task creation.
 	IDGen IDGenerator
 
-	// OutputStore, when set together with OutputDir, persists each completed task's
-	// result to a file at OutputDir/<taskID>.output and records the path in
-	// Task.OutputFile. The file outlives the in-memory record, so a task's output
-	// remains readable (by path) even after the Manager is rebuilt. Writes are
-	// best-effort: a write failure does not fail the task. A filesystem.Backend
-	// satisfies this interface directly.
-	OutputStore OutputStore
-
-	// OutputDir is the directory under which task output files are written. Only
-	// used when OutputStore is set.
-	OutputDir string
-
 	// BackgroundNotice customizes the chunk emitted on a RunStream caller's stream
 	// when a task starts in the background or is auto-moved there. The Manager owns
 	// only lifecycle facts (id, type, output file); how a host tells the model to
@@ -250,14 +245,6 @@ type NoticeInfo struct {
 	AutoBackgrounded bool
 }
 
-// OutputStore persists task output to a durable location. A filesystem.Backend
-// satisfies this interface directly; any other durable store can implement the
-// single Write method.
-type OutputStore interface {
-	// Write creates or overwrites the file at req.FilePath with req.Content.
-	Write(ctx context.Context, req *filesystem.WriteRequest) error
-}
-
 // Manager is a non-generic, in-memory registry that owns the lifecycle of
 // managed executions: creation, foreground/background/auto-background
 // switching, cancellation and terminal-state tracking.
@@ -276,8 +263,6 @@ type Manager struct {
 	foregroundTimeoutMs  int
 	shouldAutoBackground func(ctx context.Context, task *Task) bool
 	idGen                IDGenerator
-	outputStore          OutputStore
-	outputDir            string
 	backgroundNoticeFn   func(ctx context.Context, info NoticeInfo) string
 
 	subscribeOnce sync.Once
@@ -311,8 +296,6 @@ func New(_ context.Context, conf *Config) *Manager {
 	if conf != nil {
 		m.shouldAutoBackground = conf.ShouldAutoBackground
 		m.idGen = conf.IDGen
-		m.outputStore = conf.OutputStore
-		m.outputDir = conf.OutputDir
 		m.backgroundNoticeFn = conf.BackgroundNotice
 	}
 	return m
@@ -548,7 +531,7 @@ func (m *Manager) registerTaskLocked(input *RunInput, id string) (string, error)
 			Status:          StatusRunning,
 			RunInBackground: input.RunInBackground,
 			CreatedAt:       time.Now(),
-			OutputFile:      m.outputPath(id),
+			OutputFile:      input.OutputFile,
 			Metadata:        cloneMetadata(input.Metadata),
 		},
 		doneCh: make(chan struct{}),
@@ -597,28 +580,6 @@ func (m *Manager) completeTask(id string, result string) {
 		rec.task.Status = StatusCompleted
 		rec.task.Result = result
 	})
-}
-
-// outputPath returns the deterministic output-file path for a task, or "" when no
-// output store is configured. The path is reserved at task creation so it can be
-// surfaced before the file is actually written.
-func (m *Manager) outputPath(id string) string {
-	if m.outputStore == nil || m.outputDir == "" {
-		return ""
-	}
-	return filepath.Join(m.outputDir, id+".output")
-}
-
-// persistOutput writes a completed task's result to its reserved output path via
-// the configured OutputStore. Best-effort: with no store configured, or on a write
-// error, it is a no-op and the task completes normally with its in-memory Result
-// intact. Called outside m.mu (it may do I/O).
-func (m *Manager) persistOutput(ctx context.Context, id, content string) {
-	path := m.outputPath(id)
-	if path == "" {
-		return
-	}
-	_ = m.outputStore.Write(ctx, &filesystem.WriteRequest{FilePath: path, Content: content})
 }
 
 // failTask transitions a task to StatusFailed with the given error.
@@ -852,9 +813,6 @@ func (m *Manager) Run(ctx context.Context, input *RunInput, work WorkFunc) (*Tas
 		if runErr != nil {
 			m.failTask(id, runErr)
 		} else {
-			// Persist the result before finalizing (outside the lock), so the
-			// output file is in place by the time subscribers see the terminal event.
-			m.persistOutput(runCtx, id, r)
 			m.completeTask(id, r)
 		}
 	}
@@ -1029,7 +987,7 @@ func (m *Manager) forwardStream(r *streamRun) {
 	if r.input.RunInBackground {
 		r.sw.Send(m.backgroundStartNotice(r.runCtx, r.id), nil)
 		r.sw.Close()
-		m.drainReader(r.runCtx, r.id, ws, &buf)
+		m.drainReader(r.id, ws, &buf)
 		return
 	}
 
@@ -1046,7 +1004,6 @@ func (m *Manager) forwardStream(r *streamRun) {
 		select {
 		case c := <-chunks:
 			if c.err == io.EOF {
-				m.persistOutput(r.runCtx, r.id, buf.String())
 				m.completeTask(r.id, buf.String())
 				r.sw.Close()
 				return
@@ -1140,7 +1097,7 @@ func pumpStream(ctx context.Context, ws *schema.StreamReader[string]) <-chan str
 // completeTask/failTask then loses the race against the cancelTask that already
 // finalized the task (both are idempotent). This mirrors the original drainStream,
 // whose pump goroutine likewise stayed blocked on Recv until the work honored ctx.
-func (m *Manager) drainReader(runCtx context.Context, id string, ws *schema.StreamReader[string], buf *strings.Builder) {
+func (m *Manager) drainReader(id string, ws *schema.StreamReader[string], buf *strings.Builder) {
 	// ws.Recv runs the work's stream in this goroutine; a panic must fail the task,
 	// not crash the process. The caller stream is already closed before draining, so
 	// recovery only finalizes — it never touches sw.
@@ -1152,7 +1109,6 @@ func (m *Manager) drainReader(runCtx context.Context, id string, ws *schema.Stre
 	for {
 		text, err := ws.Recv()
 		if err == io.EOF {
-			m.persistOutput(runCtx, id, buf.String())
 			m.completeTask(id, buf.String())
 			return
 		}
@@ -1172,7 +1128,6 @@ func (m *Manager) drainStream(runCtx context.Context, id string, chunks <-chan s
 		select {
 		case c := <-chunks:
 			if c.err == io.EOF {
-				m.persistOutput(runCtx, id, buf.String())
 				m.completeTask(id, buf.String())
 				return
 			}

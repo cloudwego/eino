@@ -83,6 +83,32 @@ type ExecuteToolConfig struct {
 	ToolConfig
 }
 
+// BackgroundConfig enables background-task execution for the execute tool.
+//
+// When set, the execute tool gains a run_in_background field and routes runs
+// through the shared Manager, so background and auto-background runs are tracked
+// and visible to the task_output/task_stop control tools. With a StreamingShell
+// backend the foreground phase still streams in real time; once a run moves to the
+// background its stream is capped with a notice and the rest is collected into the
+// task result.
+type BackgroundConfig struct {
+	// Manager is the shared background-task Manager. Required (a nil Manager is the
+	// same as no BackgroundConfig). It may be shared with other middlewares (e.g.
+	// subagent) for a unified task-ID space; wire the backgroundtask control
+	// middleware once, bound to the same Manager.
+	Manager *backgroundtask.Manager
+
+	// OutputStore and OutputDir, when both set, give every managed run an output
+	// file at OutputDir/<id>.output: streaming runs append their chunks to it as
+	// they arrive (interim output), buffered runs append their result on completion.
+	// The path is recorded on Task.OutputFile and surfaced in the background notice.
+	// OutputStore is a filesystem.Appender (filesystem.InMemoryBackend implements
+	// it); supply your own to direct output elsewhere. When either is unset, runs
+	// have no output file.
+	OutputStore filesystem.Appender
+	OutputDir   string
+}
+
 // Config is the configuration for the filesystem middleware
 type Config struct {
 	// Backend provides filesystem operations used by tools and offloading.
@@ -101,17 +127,10 @@ type Config struct {
 	// Mutually exclusive with Shell.
 	StreamingShell filesystem.StreamingShell
 
-	// Manager is an optional shared background-task Manager.
-	// When set, execute can run commands as managed background tasks and expose
-	// their state through the task_output/task_stop control tools. The Manager may
-	// be shared with other middlewares (e.g. subagent) for a unified task-ID space.
-	// Wire the backgroundtask control middleware once, bound to the same Manager.
-	//
-	// With a StreamingShell backend, a managed execute tool still streams its
-	// foreground output in real time; once a run moves to the background its stream
-	// is capped with a notice and the remaining output is collected into the task
-	// result. An explicit run_in_background launch has no foreground phase to stream.
-	Manager *backgroundtask.Manager
+	// Background configures background-task execution for the execute tool. When
+	// nil, execute runs only foreground (blocking) and is not tracked. See
+	// BackgroundConfig.
+	Background *BackgroundConfig
 
 	// LsToolConfig configures the ls tool
 	// optional
@@ -205,7 +224,7 @@ func NewMiddleware(ctx context.Context, config *Config) (adk.AgentMiddleware, er
 		Backend:                 config.Backend,
 		Shell:                   config.Shell,
 		StreamingShell:          config.StreamingShell,
-		Manager:                 config.Manager,
+		Background:              config.Background,
 		LsToolConfig:            config.LsToolConfig,
 		ReadFileToolConfig:      config.ReadFileToolConfig,
 		WriteFileToolConfig:     config.WriteFileToolConfig,
@@ -263,17 +282,10 @@ type MiddlewareConfig struct {
 	// Mutually exclusive with Shell.
 	StreamingShell filesystem.StreamingShell
 
-	// Manager is an optional shared background-task Manager.
-	// When set, execute can run commands as managed background tasks and expose
-	// their state through the task_output/task_stop control tools. The Manager may
-	// be shared with other middlewares (e.g. subagent) for a unified task-ID space.
-	// Wire the backgroundtask control middleware once, bound to the same Manager.
-	//
-	// With a StreamingShell backend, a managed execute tool still streams its
-	// foreground output in real time; once a run moves to the background its stream
-	// is capped with a notice and the remaining output is collected into the task
-	// result. An explicit run_in_background launch has no foreground phase to stream.
-	Manager *backgroundtask.Manager
+	// Background configures background-task execution for the execute tool. When
+	// nil, execute runs only foreground (blocking) and is not tracked. See
+	// BackgroundConfig.
+	Background *BackgroundConfig
 
 	// LsToolConfig configures the ls tool
 	// optional
@@ -579,11 +591,15 @@ func createExecuteTool(middlewareConfig *MiddlewareConfig) (tool.BaseTool, error
 		// background/auto-background runs are tracked and visible to the
 		// task_output/task_stop control tools. Without a Manager the tool is
 		// command-only with no background support.
-		if middlewareConfig.Manager != nil {
+		if middlewareConfig.Background != nil && middlewareConfig.Background.Manager != nil {
 			return newManagedExecuteTool(
-				middlewareConfig.Manager,
+				middlewareConfig.Background.Manager,
 				middlewareConfig.Shell,
 				middlewareConfig.StreamingShell,
+				outputSink{
+					appender:  middlewareConfig.Background.OutputStore,
+					outputDir: middlewareConfig.Background.OutputDir,
+				},
 				executeConfig.Name,
 				desc,
 			)

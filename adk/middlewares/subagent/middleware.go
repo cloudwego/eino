@@ -22,6 +22,7 @@ import (
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/adk/backgroundtask"
+	"github.com/cloudwego/eino/adk/filesystem"
 	"github.com/cloudwego/eino/adk/internal"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/schema"
@@ -51,17 +52,35 @@ type TypedConfig[M adk.MessageType] struct {
 	// Defined as *string because an empty string may be an intentional user value.
 	SystemPrompt *string
 
-	// Manager is an optional shared background-task Manager.
-	// When nil, only foreground (blocking) agent execution is available, and agent runs
-	// are NOT tracked. When set, ALL agent runs (foreground and background) are managed
-	// by the Manager, making them visible via Get/List, and the Agent tool
-	// gains a run_in_background parameter.
-	//
-	// The Manager may be shared with other middlewares (e.g. filesystem) so that a
-	// single task-ID space spans agent and shell runs. The task_output/task_stop
-	// control tools are NOT injected here; wire the backgroundtask control middleware
-	// (adk/middlewares/backgroundtask) once, bound to the same Manager.
+	// Background configures background-task execution for sub-agent runs. When nil,
+	// only foreground (blocking) agent execution is available and runs are NOT
+	// tracked. See BackgroundConfig.
+	Background *BackgroundConfig
+}
+
+// BackgroundConfig enables background-task execution for the agent tool.
+//
+// When set, ALL agent runs (foreground and background) are managed by the Manager,
+// making them visible via Get/List, and the Agent tool gains a run_in_background
+// parameter.
+type BackgroundConfig struct {
+	// Manager is the shared background-task Manager. Required (a nil Manager is the
+	// same as no BackgroundConfig). It may be shared with other middlewares (e.g.
+	// filesystem) so a single task-ID space spans agent and shell runs. The
+	// task_output/task_stop control tools are NOT injected here; wire the
+	// backgroundtask control middleware (adk/middlewares/backgroundtask) once, bound
+	// to the same Manager.
 	Manager *backgroundtask.Manager
+
+	// OutputStore and OutputDir, when both set, give every managed sub-agent run an
+	// output file at OutputDir/<id>.output. The managed agent tool appends the
+	// sub-agent's final result there on completion and records the path on
+	// Task.OutputFile, so a backgrounded run's result is retrievable by path (and
+	// large results need not be inlined). The Manager itself never writes.
+	// OutputStore is a filesystem.Appender (filesystem.InMemoryBackend implements
+	// it); output files require one. When either is unset, runs have no output file.
+	OutputStore filesystem.Appender
+	OutputDir   string
 }
 
 // New creates a ChatModelAgentMiddleware that injects sub-agent tools into the agent context.
@@ -113,8 +132,8 @@ func NewTyped[M adk.MessageType](ctx context.Context, config *TypedConfig[M]) (a
 	// With a Manager, the tool exposes run_in_background and routes through the
 	// Manager; without one it is a plain foreground spawn.
 	var at tool.BaseTool
-	if config.Manager != nil {
-		at, err = newManagedAgentTool(config.Manager, subAgentToolMap, toolName, desc)
+	if config.Background != nil && config.Background.Manager != nil {
+		at, err = newManagedAgentTool(config.Background.Manager, subAgentToolMap, config.Background.OutputStore, config.Background.OutputDir, toolName, desc)
 	} else {
 		at, err = newAgentTool(subAgentToolMap, toolName, desc)
 	}
@@ -133,7 +152,7 @@ func NewTyped[M adk.MessageType](ctx context.Context, config *TypedConfig[M]) (a
 			English: agentToolPrompt,
 			Chinese: agentToolPromptChinese,
 		})
-		if config.Manager != nil {
+		if config.Background != nil && config.Background.Manager != nil {
 			instruction += internal.SelectPrompt(internal.I18nPrompts{
 				English: agentToolBackgroundPrompt,
 				Chinese: agentToolBackgroundPromptChinese,

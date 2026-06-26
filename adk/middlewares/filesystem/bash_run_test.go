@@ -34,6 +34,21 @@ import (
 
 func intPtr(v int) *int { return &v }
 
+// findExecuteTool returns the execute tool from a tool set (which, when a Backend
+// is configured, also contains the file tools).
+func findExecuteTool(t *testing.T, tools []tool.BaseTool) tool.BaseTool {
+	t.Helper()
+	for _, to := range tools {
+		info, err := to.Info(context.Background())
+		require.NoError(t, err)
+		if info.Name == ToolNameExecute {
+			return to
+		}
+	}
+	t.Fatalf("execute tool %q not found in tool set", ToolNameExecute)
+	return nil
+}
+
 func waitAllTasks(t *testing.T, mgr *backgroundtask.Manager) {
 	t.Helper()
 	require.Eventually(t, func() bool {
@@ -46,14 +61,11 @@ func waitAllTasks(t *testing.T, mgr *backgroundtask.Manager) {
 	}, time.Second, 10*time.Millisecond)
 }
 
-// A filesystem.Backend is a direct backgroundtask.OutputStore (no adapter): the
-// Manager persists task output through it, and the file is readable back.
-func TestBackendAsOutputStore_PersistsTaskOutput(t *testing.T) {
+// With a Backend and OutputDir configured, the managed execute tool writes each
+// task's output to a file under that directory, and the file is readable back.
+func TestManagedExecuteTool_WritesOutputFile(t *testing.T) {
 	backend := setupTestBackend()
-	mgr := backgroundtask.New(context.Background(), &backgroundtask.Config{
-		OutputStore: backend, // drop-in: Backend satisfies OutputStore
-		OutputDir:   "/tasks",
-	})
+	mgr := backgroundtask.New(context.Background(), &backgroundtask.Config{})
 	defer func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 		defer cancel()
@@ -61,12 +73,17 @@ func TestBackendAsOutputStore_PersistsTaskOutput(t *testing.T) {
 	}()
 
 	tools, err := getFilesystemTools(context.Background(), &MiddlewareConfig{
+		Backend: backend,
 		Shell:   &mockShellBackend{resp: &filesystem.ExecuteResponse{Output: "the output"}},
-		Manager: mgr,
+		Background: &BackgroundConfig{
+			Manager:     mgr,
+			OutputStore: backend,
+			OutputDir:   "/tasks",
+		},
 	})
 	require.NoError(t, err)
 
-	_, err = invokeTool(t, tools[0], `{"command":"echo hi"}`)
+	_, err = invokeTool(t, findExecuteTool(t, tools), `{"command":"echo hi"}`)
 	require.NoError(t, err)
 
 	tasks := mgr.List()
@@ -104,8 +121,8 @@ func TestManagedExecuteTool_Foreground(t *testing.T) {
 	}()
 
 	tools, err := getFilesystemTools(context.Background(), &MiddlewareConfig{
-		Shell:   &mockShellBackend{resp: &filesystem.ExecuteResponse{Output: "ok"}},
-		Manager: mgr,
+		Shell: &mockShellBackend{resp: &filesystem.ExecuteResponse{Output: "ok"}},
+		Background: &BackgroundConfig{Manager: mgr},
 	})
 	require.NoError(t, err)
 	require.Len(t, tools, 1)
@@ -123,23 +140,26 @@ func TestManagedExecuteTool_Foreground(t *testing.T) {
 }
 
 func TestManagedExecuteTool_Background(t *testing.T) {
-	mgr := backgroundtask.New(context.Background(), &backgroundtask.Config{
-		OutputStore: setupTestBackend(), // so a background launch reports an output path
-		OutputDir:   "/tasks",
-	})
+	mgr := backgroundtask.New(context.Background(), &backgroundtask.Config{})
 	defer func() {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
 		_ = mgr.Close(ctx)
 	}()
 
+	backend := setupTestBackend() // so a background launch reports an output path
 	tools, err := getFilesystemTools(context.Background(), &MiddlewareConfig{
+		Backend: backend,
 		Shell:   &mockShellBackend{resp: &filesystem.ExecuteResponse{Output: "done"}},
-		Manager: mgr,
+		Background: &BackgroundConfig{
+			Manager:     mgr,
+			OutputStore: backend,
+			OutputDir:   "/tasks",
+		},
 	})
 	require.NoError(t, err)
 
-	result, err := invokeTool(t, tools[0], `{"command":"sleep 1","run_in_background":true}`)
+	result, err := invokeTool(t, findExecuteTool(t, tools), `{"command":"sleep 1","run_in_background":true}`)
 	require.NoError(t, err)
 	assert.Contains(t, result, "running in background")
 
@@ -169,8 +189,8 @@ func TestManagedExecuteTool_TimeoutMovesToBackground(t *testing.T) {
 	}()
 
 	tools, err := getFilesystemTools(context.Background(), &MiddlewareConfig{
-		Shell:   &slowShell{delay: 200 * time.Millisecond, out: "slow done"},
-		Manager: mgr,
+		Shell: &slowShell{delay: 200 * time.Millisecond, out: "slow done"},
+		Background: &BackgroundConfig{Manager: mgr},
 	})
 	require.NoError(t, err)
 
@@ -197,8 +217,8 @@ func TestManagedExecuteTool_TimeoutKills(t *testing.T) {
 	}()
 
 	tools, err := getFilesystemTools(context.Background(), &MiddlewareConfig{
-		Shell:   &slowShell{delay: time.Second, out: "never"},
-		Manager: mgr,
+		Shell: &slowShell{delay: time.Second, out: "never"},
+		Background: &BackgroundConfig{Manager: mgr},
 	})
 	require.NoError(t, err)
 
@@ -223,7 +243,7 @@ func TestManagedExecuteTool_StreamingForeground(t *testing.T) {
 		_ = mgr.Close(ctx)
 	}()
 
-	executeTool, err := newManagedExecuteTool(mgr, nil, &mockStreamingShellMultiChunk{}, "", "")
+	executeTool, err := newManagedExecuteTool(mgr, nil, &mockStreamingShellMultiChunk{}, outputSink{}, "", "")
 	require.NoError(t, err)
 
 	st, ok := executeTool.(tool.StreamableTool)
@@ -248,17 +268,15 @@ func TestManagedExecuteTool_StreamingForeground(t *testing.T) {
 // An explicit background launch on a streaming managed tool emits only the
 // background notice on the caller's stream; the output lands in the task result.
 func TestManagedExecuteTool_StreamingExplicitBackground(t *testing.T) {
-	mgr := backgroundtask.New(context.Background(), &backgroundtask.Config{
-		OutputStore: setupTestBackend(),
-		OutputDir:   "/tasks",
-	})
+	backend := setupTestBackend()
+	mgr := backgroundtask.New(context.Background(), &backgroundtask.Config{})
 	defer func() {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
 		_ = mgr.Close(ctx)
 	}()
 
-	executeTool, err := newManagedExecuteTool(mgr, nil, &mockStreamingShellMultiChunk{}, "", "")
+	executeTool, err := newManagedExecuteTool(mgr, nil, &mockStreamingShellMultiChunk{}, outputSink{appender: backend, outputDir: "/tasks"}, "", "")
 	require.NoError(t, err)
 	st := executeTool.(tool.StreamableTool)
 
@@ -275,6 +293,85 @@ func TestManagedExecuteTool_StreamingExplicitBackground(t *testing.T) {
 	assert.True(t, tasks[0].RunInBackground)
 	assert.Equal(t, backgroundtask.StatusCompleted, tasks[0].Status)
 	assert.Contains(t, tasks[0].Result, "chunk1")
+	// The streamed output was teed to the output file as it drained in the background.
+	require.NotEmpty(t, tasks[0].OutputFile)
+	got2, err := backend.Read(context.Background(), &filesystem.ReadRequest{FilePath: tasks[0].OutputFile})
+	require.NoError(t, err)
+	assert.Contains(t, got2.Content, "chunk1")
+}
+
+// gatedStreamingShell emits "first\n", waits for release, then "second\n" and EOF.
+// It lets a test observe interim output: the output file holds a growing prefix
+// while the run is mid-stream.
+type gatedStreamingShell struct {
+	release chan struct{}
+}
+
+func (g *gatedStreamingShell) ExecuteStreaming(ctx context.Context, _ *filesystem.ExecuteRequest) (*schema.StreamReader[*filesystem.ExecuteResponse], error) {
+	sr, sw := schema.Pipe[*filesystem.ExecuteResponse](2)
+	go func() {
+		defer sw.Close()
+		sw.Send(&filesystem.ExecuteResponse{Output: "first\n"}, nil)
+		<-g.release
+		sw.Send(&filesystem.ExecuteResponse{Output: "second\n", ExitCode: ptrOf(0)}, nil)
+	}()
+	return sr, nil
+}
+
+// The streaming execute tool tees chunks to the output file as they arrive, so a
+// reader sees interim output (a growing prefix) before the run completes.
+func TestManagedExecuteTool_StreamingInterimOutput(t *testing.T) {
+	backend := setupTestBackend()
+	mgr := backgroundtask.New(context.Background(), &backgroundtask.Config{})
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_ = mgr.Close(ctx)
+	}()
+
+	gate := &gatedStreamingShell{release: make(chan struct{})}
+	executeTool, err := newManagedExecuteTool(mgr, nil, gate, outputSink{appender: backend, outputDir: "/tasks"}, "", "")
+	require.NoError(t, err)
+	st := executeTool.(tool.StreamableTool)
+
+	sr, err := st.StreamableRun(context.Background(), `{"command":"run"}`)
+	require.NoError(t, err)
+
+	// Read the first chunk off the caller stream — by then it has also been teed to
+	// the output file.
+	first, err := sr.Recv()
+	require.NoError(t, err)
+	assert.Contains(t, first, "first")
+
+	tasks := mgr.List()
+	require.Len(t, tasks, 1)
+	path := tasks[0].OutputFile
+	require.NotEmpty(t, path)
+
+	// Interim: the file holds the first chunk but not yet the second.
+	require.Eventually(t, func() bool {
+		got, readErr := backend.Read(context.Background(), &filesystem.ReadRequest{FilePath: path})
+		return readErr == nil && strings.Contains(got.Content, "first")
+	}, time.Second, 5*time.Millisecond)
+	interim, err := backend.Read(context.Background(), &filesystem.ReadRequest{FilePath: path})
+	require.NoError(t, err)
+	assert.NotContains(t, interim.Content, "second", "second chunk must not be present before release")
+
+	// Release the rest and drain.
+	close(gate.release)
+	for {
+		if _, err := sr.Recv(); err == io.EOF {
+			break
+		} else {
+			require.NoError(t, err)
+		}
+	}
+
+	waitAllTasks(t, mgr)
+	final, err := backend.Read(context.Background(), &filesystem.ReadRequest{FilePath: path})
+	require.NoError(t, err)
+	assert.Contains(t, final.Content, "first")
+	assert.Contains(t, final.Content, "second")
 }
 
 // drainToolStream reads a tool's string stream to EOF and returns the joined text.
@@ -300,7 +397,7 @@ func TestManagedExecuteTool_Schema(t *testing.T) {
 		_ = mgr.Close(ctx)
 	}()
 
-	executeTool, err := newManagedExecuteTool(mgr, &mockShellBackend{resp: &filesystem.ExecuteResponse{Output: "ok"}}, nil, "", "")
+	executeTool, err := newManagedExecuteTool(mgr, &mockShellBackend{resp: &filesystem.ExecuteResponse{Output: "ok"}}, nil, outputSink{}, "", "")
 	require.NoError(t, err)
 
 	info, err := executeTool.Info(context.Background())

@@ -419,7 +419,7 @@ func TestDeepAgentManagerWiring(t *testing.T) {
 	handlers, err := buildTypedBuiltinAgentMiddlewares(ctx, &Config{
 		WithoutWriteTodos: true,
 		Shell:             &deepMockShell{},
-	}, mgr)
+	}, &BackgroundConfig{Manager: mgr})
 	assert.NoError(t, err)
 	assert.Len(t, handlers, 1)
 
@@ -465,7 +465,7 @@ func TestDeepAgentNewTypedWithManager(t *testing.T) {
 		Description: "deep agent",
 		ChatModel:   cm,
 		Shell:       &deepMockShell{},
-		Manager:     mgr,
+		Background:  &BackgroundConfig{Manager: mgr},
 	})
 	assert.NoError(t, err)
 	assert.NotNil(t, agent)

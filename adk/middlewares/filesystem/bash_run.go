@@ -20,6 +20,9 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"path/filepath"
+
+	"github.com/google/uuid"
 
 	"github.com/cloudwego/eino/adk/backgroundtask"
 	"github.com/cloudwego/eino/adk/filesystem"
@@ -34,9 +37,11 @@ import (
 // match on it to apply shell-specific policy, recovering the command via
 // CommandFromTask.
 //
-// A filesystem.Backend satisfies backgroundtask.OutputStore directly, so a
-// background Manager can persist task output through the same backend used for the
-// file tools: backgroundtask.Config{OutputStore: backend, OutputDir: ...}.
+// When the filesystem middleware is configured with both a Backend and an
+// OutputDir, the managed execute tool writes each task's output to a file under
+// that directory and records the path on Task.OutputFile (streaming runs tee
+// chunks as interim output; buffered runs write the result on completion). The
+// Manager itself never writes — the execute tool owns it.
 const ExecuteTaskType = "bash"
 
 // MetadataKeyCommand is the RunInput.Metadata / Task.Metadata key under which the
@@ -57,17 +62,77 @@ func CommandFromTask(t *backgroundtask.Task) string {
 	return cmd
 }
 
+// outputSink bundles the output-file configuration for a managed execute tool: an
+// Appender to write through and the directory to reserve paths under. Both must be
+// set to enable output files; a zero outputSink disables them.
+type outputSink struct {
+	appender  filesystem.Appender
+	outputDir string
+}
+
+// bashOutputWriter appends a managed execute task's output to a file via a
+// filesystem.Appender. It is built per invocation: when both an Appender and an
+// outputDir are configured it reserves outputDir/<uuid>.output and appends there;
+// otherwise it is disabled and every method is a no-op, so the task has no output
+// file. There is no rewrite fallback — output files require an Appender.
+//
+// The execute tool — not the Manager — owns writing, so streaming runs tee interim
+// output as chunks arrive. It is single-consumer: appendChunk is called serially on
+// the StreamReaderWithConvert Recv stack, so no synchronization is needed.
+type bashOutputWriter struct {
+	appender filesystem.Appender // nil => disabled
+	path     string
+}
+
+// reserveBashOutput builds a writer that appends under the sink, or a disabled
+// writer when output files are not configured (no appender / no dir). It creates
+// the file empty up front so the advertised path exists before any output. The
+// file is named after the launching tool-call id (so it matches Task.ToolUseID),
+// falling back to a uuid when no tool-call id is in context.
+func reserveBashOutput(ctx context.Context, sink outputSink) *bashOutputWriter {
+	if sink.appender == nil || sink.outputDir == "" {
+		return &bashOutputWriter{}
+	}
+	w := &bashOutputWriter{
+		appender: sink.appender,
+		path:     filepath.Join(sink.outputDir, outputFileName(ctx)+".output"),
+	}
+	w.append(ctx, "")
+	return w
+}
+
+func (w *bashOutputWriter) append(ctx context.Context, content string) {
+	if w.appender == nil {
+		return
+	}
+	_ = w.appender.Append(ctx, &filesystem.AppendRequest{FilePath: w.path, Content: content})
+}
+
+// outputFileName returns the base name (without extension) for a task's output
+// file: the launching tool-call id when present (so the file matches
+// Task.ToolUseID), or a uuid fallback when no tool-call id is in context — the
+// fallback keeps names unique so concurrent untagged tasks don't collide.
+func outputFileName(ctx context.Context) string {
+	if id := compose.GetToolCallID(ctx); id != "" {
+		return id
+	}
+	return uuid.NewString()
+}
+
 // bashWork adapts a blocking shell execution into a backgroundtask.WorkFunc.
 // The request carries only the command; the Manager is the sole owner of
 // foreground/background/auto-background switching, so no background hint is
-// pushed down to the backend.
-func bashWork(sb filesystem.Shell, req *filesystem.ExecuteRequest) backgroundtask.WorkFunc {
+// pushed down to the backend. On success it appends the result to the output file
+// (when one is configured) before returning, so the file matches Task.Result.
+func bashWork(sb filesystem.Shell, req *filesystem.ExecuteRequest, w *bashOutputWriter) backgroundtask.WorkFunc {
 	return func(ctx context.Context) (string, error) {
 		result, err := sb.Execute(ctx, req)
 		if err != nil {
 			return "", err
 		}
-		return convExecuteResponse(result), nil
+		out := convExecuteResponse(result)
+		w.append(ctx, out)
+		return out, nil
 	}
 }
 
@@ -76,7 +141,12 @@ func bashWork(sb filesystem.Shell, req *filesystem.ExecuteRequest) backgroundtas
 // caller in real time (for the foreground phase) and accumulates them into the
 // task's final result. The terminal note (exit code / no-output) is emitted as a
 // final chunk so it is part of both the live stream and the persisted result.
-func bashStreamWork(sb filesystem.StreamingShell, req *filesystem.ExecuteRequest) backgroundtask.StreamWorkFunc {
+//
+// Each emitted chunk (and the terminal note) is also teed to the output file via w,
+// so the file carries interim output while the task runs. Teeing happens inside the
+// convert/OnEOF callbacks, which run on the Recv stack for both the foreground loop
+// and the background drain — so the Manager never has to write.
+func bashStreamWork(sb filesystem.StreamingShell, req *filesystem.ExecuteRequest, w *bashOutputWriter) backgroundtask.StreamWorkFunc {
 	return func(ctx context.Context) (*schema.StreamReader[string], error) {
 		stream, err := sb.ExecuteStreaming(ctx, req)
 		if err != nil {
@@ -103,10 +173,12 @@ func bashStreamWork(sb filesystem.StreamingShell, req *filesystem.ExecuteRequest
 					return "", schema.ErrNoValue
 				}
 				hasContent = true
+				w.append(ctx, text)
 				return text, nil
 			},
 			schema.WithOnEOF(func() (any, error) {
 				if note := execTerminalNote(exitCode, hasContent); note != "" {
+					w.append(ctx, note)
 					return note, nil
 				}
 				return nil, io.EOF
@@ -126,11 +198,17 @@ func bashStreamWork(sb filesystem.StreamingShell, req *filesystem.ExecuteRequest
 // to the background caps the stream with a notice (the rest is drained into the
 // task result). With a plain Shell backend the tool is buffered.
 //
-// Exactly one of sb / streaming must be non-nil.
+// Exactly one of sb / streaming must be non-nil. appender and outputDir, when both
+// set, enable per-task output files (the tool appends output to
+// outputDir/<id>.output); otherwise runs have no output file.
+// Exactly one of sb / streaming must be non-nil. sink, when fully configured
+// (appender + dir), enables per-task output files (the tool appends output to
+// outputDir/<id>.output); otherwise runs have no output file.
 func newManagedExecuteTool(
 	mgr *backgroundtask.Manager,
 	sb filesystem.Shell,
 	streaming filesystem.StreamingShell,
+	sink outputSink,
 	name string,
 	desc string,
 ) (tool.BaseTool, error) {
@@ -141,20 +219,22 @@ func newManagedExecuteTool(
 	}
 
 	if streaming != nil {
-		return newManagedStreamingExecuteTool(mgr, streaming, toolName, d)
+		return newManagedStreamingExecuteTool(mgr, streaming, sink, toolName, d)
 	}
-	return newManagedBufferedExecuteTool(mgr, sb, toolName, d)
+	return newManagedBufferedExecuteTool(mgr, sb, sink, toolName, d)
 }
 
 // managedRunInput builds the RunInput shared by the buffered and streaming managed
-// execute tools.
-func managedRunInput(ctx context.Context, input executeManagedArgs) *backgroundtask.RunInput {
+// execute tools. w supplies the reserved output-file path (empty when output files
+// are not configured), which the work funcs write to.
+func managedRunInput(ctx context.Context, input executeManagedArgs, w *bashOutputWriter) *backgroundtask.RunInput {
 	runInput := &backgroundtask.RunInput{
 		Description:     input.Command,
 		Type:            ExecuteTaskType,
 		ToolUseID:       compose.GetToolCallID(ctx),
 		RunInBackground: input.RunInBackground,
 		Metadata:        map[string]any{MetadataKeyCommand: input.Command},
+		OutputFile:      w.path,
 	}
 	// A positive timeout overrides the Manager's default foreground budget for
 	// this command. When the deadline expires, the Manager's policy decides
@@ -165,10 +245,11 @@ func managedRunInput(ctx context.Context, input executeManagedArgs) *backgroundt
 	return runInput
 }
 
-func newManagedBufferedExecuteTool(mgr *backgroundtask.Manager, sb filesystem.Shell, toolName, desc string) (tool.BaseTool, error) {
+func newManagedBufferedExecuteTool(mgr *backgroundtask.Manager, sb filesystem.Shell, sink outputSink, toolName, desc string) (tool.BaseTool, error) {
 	return utils.InferTool(toolName, desc, func(ctx context.Context, input executeManagedArgs) (string, error) {
 		req := &filesystem.ExecuteRequest{Command: input.Command}
-		result, err := mgr.Run(ctx, managedRunInput(ctx, input), bashWork(sb, req))
+		w := reserveBashOutput(ctx, sink)
+		result, err := mgr.Run(ctx, managedRunInput(ctx, input, w), bashWork(sb, req, w))
 		if err != nil {
 			return "", err
 		}
@@ -196,13 +277,14 @@ func newManagedBufferedExecuteTool(mgr *backgroundtask.Manager, sb filesystem.Sh
 	})
 }
 
-func newManagedStreamingExecuteTool(mgr *backgroundtask.Manager, streaming filesystem.StreamingShell, toolName, desc string) (tool.BaseTool, error) {
+func newManagedStreamingExecuteTool(mgr *backgroundtask.Manager, streaming filesystem.StreamingShell, sink outputSink, toolName, desc string) (tool.BaseTool, error) {
 	return utils.InferStreamTool(toolName, desc, func(ctx context.Context, input executeManagedArgs) (*schema.StreamReader[string], error) {
 		req := &filesystem.ExecuteRequest{Command: input.Command}
+		w := reserveBashOutput(ctx, sink)
 		// RunStream owns the returned stream: it forwards work chunks to this caller
 		// in real time, and on auto-background caps the stream with a notice while
 		// draining the rest into the task result. A background launch (or timeout)
 		// is therefore surfaced inline as a final chunk, not as an error.
-		return mgr.RunStream(ctx, managedRunInput(ctx, input), bashStreamWork(streaming, req))
+		return mgr.RunStream(ctx, managedRunInput(ctx, input, w), bashStreamWork(streaming, req, w))
 	})
 }

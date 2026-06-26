@@ -158,6 +158,14 @@ type WriteRequest struct {
 	Content string
 }
 
+// AppendRequest contains parameters for appending content to a file.
+type AppendRequest struct {
+	// FilePath is the path of the file to append to.
+	FilePath string
+	// Content is the data to append at the end of the file.
+	Content string
+}
+
 // EditRequest contains parameters for editing file content.
 type EditRequest struct {
 	// FilePath is the path of the file to edit.
@@ -234,6 +242,15 @@ type MultiFileContent struct {
 //     or use the built-in reduction middleware with configurable policies.
 type MultiModalReader interface {
 	MultiModalRead(ctx context.Context, req *MultiModalReadRequest) (*MultiFileContent, error)
+}
+
+// Appender appends content to the end of a file without rewriting the whole file,
+// enabling efficient incremental writes — e.g. streaming a long-running background
+// task's output to its output file as chunks arrive.
+type Appender interface {
+	// Append adds req.Content to the end of the file at req.FilePath, creating the
+	// file if it does not exist.
+	Append(ctx context.Context, req *AppendRequest) error
 }
 
 // Backend is a pluggable, unified file backend protocol interface.

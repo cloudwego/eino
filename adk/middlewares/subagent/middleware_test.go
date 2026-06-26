@@ -26,6 +26,7 @@ import (
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/adk/backgroundtask"
+	"github.com/cloudwego/eino/adk/filesystem"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/schema"
 )
@@ -155,7 +156,7 @@ func TestBeforeAgent_WithManager_InjectsAgentToolOnly(t *testing.T) {
 		SubAgents: []adk.Agent{
 			&mockAgent{name: "worker", desc: "does work"},
 		},
-		Manager: mgr,
+		Background: &BackgroundConfig{Manager: mgr},
 	})
 	require.NoError(t, err)
 
@@ -264,7 +265,7 @@ func TestAgentTool_Background(t *testing.T) {
 
 	mw, err := New(ctx, &Config{
 		SubAgents: []adk.Agent{slowAgent},
-		Manager:   mgr,
+		Background: &BackgroundConfig{Manager: mgr},
 	})
 	require.NoError(t, err)
 
@@ -341,7 +342,7 @@ func TestAgentTool_ForegroundWithTaskMgr(t *testing.T) {
 
 	mw, err := New(ctx, &Config{
 		SubAgents: []adk.Agent{agent},
-		Manager:   mgr,
+		Background: &BackgroundConfig{Manager: mgr},
 	})
 	require.NoError(t, err)
 
@@ -362,6 +363,46 @@ func TestAgentTool_ForegroundWithTaskMgr(t *testing.T) {
 	require.Len(t, tasks, 1)
 	assert.Equal(t, backgroundtask.StatusCompleted, tasks[0].Status)
 	assert.Equal(t, "fast agent", tasks[0].Result)
+}
+
+// With OutputStore and OutputDir configured, a completed managed agent run writes
+// its final result to the task's output file.
+func TestAgentTool_WritesOutputFile(t *testing.T) {
+	ctx := context.Background()
+	backend := filesystem.NewInMemoryBackend()
+	mgr := backgroundtask.New(context.Background(), &backgroundtask.Config{})
+	defer func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_ = mgr.Close(closeCtx)
+	}()
+
+	mw, err := New(ctx, &Config{
+		SubAgents: []adk.Agent{&mockAgent{name: "fast", desc: "fast agent"}},
+		Background: &BackgroundConfig{
+			Manager:     mgr,
+			OutputStore: backend,
+			OutputDir:   "/tasks",
+		},
+	})
+	require.NoError(t, err)
+
+	runCtx := &adk.ChatModelAgentContext[*schema.Message]{}
+	_, newRunCtx, err := mw.BeforeAgent(ctx, runCtx)
+	require.NoError(t, err)
+	at := newRunCtx.Tools[0].(tool.InvokableTool)
+
+	_, err = at.InvokableRun(ctx, `{"subagent_type":"fast","prompt":"task detail","description":"task"}`)
+	require.NoError(t, err)
+
+	tasks := mgr.List()
+	require.Len(t, tasks, 1)
+	path := tasks[0].OutputFile
+	require.NotEmpty(t, path)
+
+	got, err := backend.Read(ctx, &filesystem.ReadRequest{FilePath: path})
+	require.NoError(t, err)
+	assert.Equal(t, "fast agent", got.Content)
 }
 
 // --- Auto-background ---
@@ -389,7 +430,7 @@ func TestAgentTool_AutoBackground(t *testing.T) {
 
 	mw, err := New(ctx, &Config{
 		SubAgents: []adk.Agent{slowAgent},
-		Manager:   mgr,
+		Background: &BackgroundConfig{Manager: mgr},
 	})
 	require.NoError(t, err)
 
@@ -429,7 +470,7 @@ func TestAgentTool_AutoBackground_FastAgent(t *testing.T) {
 
 	mw, err := New(ctx, &Config{
 		SubAgents: []adk.Agent{fastAgent},
-		Manager:   mgr,
+		Background: &BackgroundConfig{Manager: mgr},
 	})
 	require.NoError(t, err)
 

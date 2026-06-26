@@ -253,11 +253,14 @@ func formatTask(task *bgtask.Task) string {
 	result := fmt.Sprintf("Task ID: %s\nDescription: %s\nStatus: %s",
 		task.ID, task.Description, task.Status)
 
-	if task.Result != "" {
-		result += fmt.Sprintf("\nResult: %s", task.Result)
-	}
+	// When the task has an output file, the file is authoritative — point at it and
+	// do not inline Result. The file carries the same (or interim) output and may be
+	// large, so Read'ing it selectively avoids inlining the whole blob. Without an
+	// output file, Result is the only copy, so inline it.
 	if task.OutputFile != "" {
-		result += fmt.Sprintf("\nOutput file: %s", task.OutputFile)
+		result += fmt.Sprintf("\nOutput file: %s (use Read on this path for the output)", task.OutputFile)
+	} else if task.Result != "" {
+		result += fmt.Sprintf("\nResult: %s", task.Result)
 	}
 	if task.Error != "" {
 		result += fmt.Sprintf("\nError: %s", task.Error)

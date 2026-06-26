@@ -26,8 +26,6 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	"github.com/cloudwego/eino/adk/filesystem"
 )
 
 // closeWithTimeout closes the Manager with a short timeout to avoid blocking on uncompleted tasks.
@@ -342,39 +340,28 @@ func TestManager_TypeAndToolUseIDStored(t *testing.T) {
 	assert.Equal(t, "call_42", task.ToolUseID)
 }
 
-// --- Output persistence ---
+// --- Output file ---
 
-type memOutputStore struct {
-	mu    sync.Mutex
-	files map[string]string
-}
-
-func (s *memOutputStore) Write(_ context.Context, req *filesystem.WriteRequest) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.files == nil {
-		s.files = map[string]string{}
-	}
-	s.files[req.FilePath] = req.Content
-	return nil
-}
-
-func TestManager_OutputPersisted(t *testing.T) {
-	store := &memOutputStore{}
-	m := New(context.Background(), &Config{OutputStore: store, OutputDir: "/tasks"})
+// The Manager records RunInput.OutputFile on the task and surfaces it, but never
+// writes the file itself (the launcher owns writing).
+func TestManager_OutputFile_RecordedNotWritten(t *testing.T) {
+	m := New(context.Background(), &Config{})
 	defer closeWithTimeout(m)
 
-	result, err := run(m, "task", false, workReturning("the output", nil))
+	result, err := m.Run(context.Background(), &RunInput{
+		Description: "task",
+		OutputFile:  "/tasks/custom.output",
+	}, workReturning("the output", nil))
 	require.NoError(t, err)
 
 	task, ok := m.Get(result.ID)
 	require.True(t, ok)
-	wantPath := "/tasks/" + result.ID + ".output"
-	assert.Equal(t, wantPath, task.OutputFile)
-	assert.Equal(t, "the output", store.files[wantPath])
+	assert.Equal(t, "/tasks/custom.output", task.OutputFile)
+	// Result is still tracked in memory; the Manager does not touch the file.
+	assert.Equal(t, "the output", task.Result)
 }
 
-func TestManager_NoOutputStore_NoOutputFile(t *testing.T) {
+func TestManager_NoOutputFile(t *testing.T) {
 	m := New(context.Background(), &Config{})
 	defer closeWithTimeout(m)
 

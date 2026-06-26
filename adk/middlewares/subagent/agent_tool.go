@@ -19,13 +19,16 @@ package subagent
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	"github.com/bytedance/sonic"
+	"github.com/google/uuid"
 	"github.com/slongfield/pyfmt"
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/adk/backgroundtask"
+	"github.com/cloudwego/eino/adk/filesystem"
 	"github.com/cloudwego/eino/adk/internal"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/components/tool/utils"
@@ -91,7 +94,13 @@ func newAgentTool(subAgents map[string]tool.InvokableTool, name, desc string) (t
 // newManagedAgentTool builds the Manager-backed agent tool. It wraps the same
 // agent-as-tool invocation in a managed task, so foreground behavior is identical
 // and only lifecycle/background switching is layered on top.
-func newManagedAgentTool(mgr *backgroundtask.Manager, subAgents map[string]tool.InvokableTool, name, desc string) (tool.BaseTool, error) {
+//
+// When store and outputDir are both set, each run is given an output file at
+// outputDir/<uuid>.output: the file is created empty up front so its advertised
+// path exists immediately, and the sub-agent's final result is appended there on
+// completion. The Manager never writes — the tool owns it. store is a
+// filesystem.Appender; output files require one (no rewrite fallback).
+func newManagedAgentTool(mgr *backgroundtask.Manager, subAgents map[string]tool.InvokableTool, store filesystem.Appender, outputDir, name, desc string) (tool.BaseTool, error) {
 	return utils.InferOptionableTool(name, desc,
 		func(ctx context.Context, in agentManagedInput, opts ...tool.Option) (string, error) {
 			a, params, err := resolveSubAgent(subAgents, in.SubagentType, in.Prompt, in.Description)
@@ -99,14 +108,24 @@ func newManagedAgentTool(mgr *backgroundtask.Manager, subAgents map[string]tool.
 				return "", err
 			}
 
+			outputFile := reserveAgentOutputFile(ctx, store, outputDir)
+
 			result, err := mgr.Run(ctx, &backgroundtask.RunInput{
 				Description:     in.Description,
 				Type:            TaskTypeSubagent,
 				ToolUseID:       compose.GetToolCallID(ctx),
 				RunInBackground: in.RunInBackground,
 				Metadata:        map[string]any{MetadataKeySubagentType: in.SubagentType},
+				OutputFile:      outputFile,
 			}, func(workCtx context.Context) (string, error) {
-				return a.InvokableRun(workCtx, params, opts...)
+				out, runErr := a.InvokableRun(workCtx, params, opts...)
+				if runErr != nil {
+					return "", runErr
+				}
+				if outputFile != "" {
+					_ = store.Append(workCtx, &filesystem.AppendRequest{FilePath: outputFile, Content: out})
+				}
+				return out, nil
 			})
 			if err != nil {
 				return "", err
@@ -135,6 +154,24 @@ func newManagedAgentTool(mgr *backgroundtask.Manager, subAgents map[string]tool.
 				return result.Result, nil
 			}
 		})
+}
+
+// reserveAgentOutputFile reserves an output-file path under outputDir and creates
+// it empty (via Append) so the path exists before the run completes. The file is
+// named after the launching tool-call id (so it matches Task.ToolUseID), falling
+// back to a uuid when no tool-call id is in context. Returns "" when output files
+// are not configured (no store / no dir).
+func reserveAgentOutputFile(ctx context.Context, store filesystem.Appender, outputDir string) string {
+	if store == nil || outputDir == "" {
+		return ""
+	}
+	name := compose.GetToolCallID(ctx)
+	if name == "" {
+		name = uuid.NewString()
+	}
+	path := filepath.Join(outputDir, name+".output")
+	_ = store.Append(ctx, &filesystem.AppendRequest{FilePath: path, Content: ""})
+	return path
 }
 
 // resolveSubAgent looks up the agent-as-tool adapter for subagentType and builds
