@@ -1667,8 +1667,8 @@ func replayDurableContextEvents[M MessageType](events []*SessionEvent[M]) (*reco
 			return nil, fmt.Errorf("reconstruct: %w", err)
 		}
 		if events[i] != nil && events[i].ModelContext != nil {
-			state.ToolInfos = append([]*schema.ToolInfo{}, events[i].ModelContext.ToolInfos...)
-			state.DeferredToolInfos = append([]*schema.ToolInfo{}, events[i].ModelContext.DeferredToolInfos...)
+			state.ToolInfos = cloneToolInfos(events[i].ModelContext.ToolInfos)
+			state.DeferredToolInfos = cloneToolInfos(events[i].ModelContext.DeferredToolInfos)
 			state.sawModelContext = true
 		}
 	}
