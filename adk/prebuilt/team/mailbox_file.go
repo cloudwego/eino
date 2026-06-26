@@ -1,0 +1,425 @@
+/*
+ * Copyright 2026 CloudWeGo Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+// mailbox_file.go implements the file-system-backed mailbox: per-agent inbox
+// files stored as JSON arrays. Provides read, write, send, broadcast, and
+// polling operations with per-target locking to prevent lost updates.
+// Message types (outboxMessage, inboxMessage) are defined in protocol.go and types.go.
+
+package team
+
+import (
+	"context"
+	"fmt"
+	"time"
+
+	"github.com/bytedance/sonic"
+	"github.com/google/uuid"
+)
+
+// mailboxConfig is the configuration for mailbox.
+type mailboxConfig struct {
+	// Backend is the storage backend for reading and writing mailbox files.
+	Backend Backend
+	// BaseDir is the root directory where mailbox files are stored.
+	BaseDir string
+	// TeamName is the name of the team this mailbox belongs to.
+	TeamName string
+	// OwnerName is the name of the agent that owns this mailbox.
+	OwnerName string
+	// PollInterval is the fallback polling interval, default 500ms.
+	PollInterval time.Duration
+}
+
+// memberLister returns the list of team member names for broadcast.
+type memberLister func(ctx context.Context) ([]string, error)
+
+// mailbox implements file-system-backed per-agent inbox operations.
+// Each agent's inbox is a single JSON array file: inboxes/{agentName}.json
+// Messages are marked as read by setting the "read" field to true.
+type mailbox struct {
+	conf        *mailboxConfig
+	inboxLocks  *namedLockManager
+	listMembers memberLister // for broadcast: returns all member names
+}
+
+// newMailboxFromConfig creates a mailbox using the shared resources from Config.state.
+// This is the primary constructor used in team mode.
+func newMailboxFromConfig(conf *Config, teamName, ownerName string) *mailbox {
+	pollInterval := conf.PollInterval
+	if pollInterval <= 0 {
+		pollInterval = defaultPollInterval
+	}
+
+	locks := conf.state.locks
+	store := newConfigStore(conf)
+
+	return &mailbox{
+		conf: &mailboxConfig{
+			Backend:      conf.Backend,
+			BaseDir:      conf.BaseDir,
+			TeamName:     teamName,
+			OwnerName:    ownerName,
+			PollInterval: pollInterval,
+		},
+		inboxLocks: locks,
+		listMembers: func(ctx context.Context) ([]string, error) {
+			var names []string
+			err := store.readConfigWithReadLock(ctx, teamName, func(cfg *teamConfig) error {
+				for _, m := range cfg.Members {
+					names = append(names, m.Name)
+				}
+				return nil
+			})
+			return names, err
+		},
+	}
+}
+
+func initInboxFile(ctx context.Context, backend Backend, inboxPath string) error {
+	exists, err := backend.Exists(ctx, inboxPath)
+	if err != nil {
+		return fmt.Errorf("check inbox exists: %w", err)
+	}
+	if exists {
+		return nil
+	}
+	return backend.Write(ctx, &WriteRequest{
+		FilePath: inboxPath,
+		Content:  "[]",
+	})
+}
+
+// DeleteInbox removes the given agent's inbox file, holding the same per-inbox
+// write lock that the senders (sendToOneIfExists) and MarkRead use. The lock
+// alone only serializes individual operations — it cannot order a delete ahead
+// of a later send, so taking it does NOT by itself stop a send from running
+// after the delete and recreating the file. What prevents resurrection is that
+// every point-to-point send goes through sendToOneIfExists, which checks inbox
+// existence under this same lock and skips (rather than recreates) when the
+// inbox is gone: a send either observes the inbox before the delete and writes,
+// or sees it already removed and reports not-delivered. The lock reference is
+// paired with Release so the manager can reclaim it once no sender/reader holds
+// it.
+func (m *mailbox) DeleteInbox(ctx context.Context, agentName string) error {
+	lock := m.inboxLocks.ForName(agentName)
+	defer m.inboxLocks.Release(agentName)
+	lock.Lock()
+	defer lock.Unlock()
+
+	return m.conf.Backend.Delete(ctx, &DeleteRequest{FilePath: m.inboxFilePathForOwner(agentName)})
+}
+
+// inboxFilePathForOwner returns the path to an agent's inbox file.
+func (m *mailbox) inboxFilePathForOwner(agentName string) string {
+	return inboxFilePath(m.conf.BaseDir, m.conf.TeamName, agentName)
+}
+
+// readInbox reads all messages from the given agent's inbox file.
+// Returns nil slice if the file doesn't exist or is empty.
+// NOTE: caller must hold the per-inbox lock when atomicity with writeInbox is required.
+func (m *mailbox) readInbox(ctx context.Context, agentName string) ([]inboxMessage, error) {
+	inboxPath := m.inboxFilePathForOwner(agentName)
+
+	exists, err := m.conf.Backend.Exists(ctx, inboxPath)
+	if err != nil {
+		return nil, fmt.Errorf("check inbox exists: %w", err)
+	}
+	if !exists {
+		return nil, nil
+	}
+
+	content, err := m.conf.Backend.Read(ctx, &ReadRequest{FilePath: inboxPath})
+	if err != nil {
+		return nil, fmt.Errorf("read inbox file: %w", err)
+	}
+	if content == nil || content.Content == "" {
+		return nil, nil
+	}
+
+	var msgs []inboxMessage
+	if err := sonic.UnmarshalString(content.Content, &msgs); err != nil {
+		return nil, fmt.Errorf("unmarshal inbox: %w", err)
+	}
+	return msgs, nil
+}
+
+// writeInbox writes the messages to the given agent's inbox file.
+// NOTE: caller must hold the per-inbox lock when atomicity with readInbox is required.
+func (m *mailbox) writeInbox(ctx context.Context, agentName string, msgs []inboxMessage) error {
+	data, err := sonic.MarshalString(msgs)
+	if err != nil {
+		return fmt.Errorf("marshal inbox: %w", err)
+	}
+
+	inboxPath := m.inboxFilePathForOwner(agentName)
+	if err := m.conf.Backend.Write(ctx, &WriteRequest{
+		FilePath: inboxPath,
+		Content:  data,
+	}); err != nil {
+		return fmt.Errorf("write inbox: %w", err)
+	}
+	return nil
+}
+
+// Send sends a message to the target agent's inbox.
+//
+// Point-to-point delivery never creates a missing inbox: if the target inbox no
+// longer exists (the recipient was torn down between membership validation and
+// this write), Send returns errInboxNotFound rather than recreating the file.
+// Resurrecting it would leak an orphaned inbox for a member that is gone — the
+// teardown path (lifecycle.teardownTeammate) deletes the inbox before removing
+// the member from config, so a send can still pass membership validation while
+// the inbox is being removed. Only the explicit spawn path (sendInitialPrompt)
+// creates an inbox, and it does so via initInbox before calling Send.
+//
+// For broadcasts (To == broadcastTarget), call broadcast directly when the
+// caller needs to know which members received the message: Send only reports an
+// aggregate error and discards the per-member delivery breakdown.
+func (m *mailbox) Send(ctx context.Context, msg *outboxMessage) error {
+	if msg.To == broadcastTarget {
+		_, err := m.broadcast(ctx, msg)
+		return err
+	}
+	delivered, err := m.sendToOneIfExists(ctx, msg.To, msg)
+	if err != nil {
+		return err
+	}
+	if !delivered {
+		return fmt.Errorf("send to %q: %w", msg.To, errInboxNotFound)
+	}
+	return nil
+}
+
+// broadcastResult reports the per-member outcome of a broadcast. A broadcast is
+// best-effort and non-atomic: some members may receive the message while others
+// fail, so callers must surface both lists rather than treat it as all-or-nothing.
+type broadcastResult struct {
+	// Delivered lists the members whose inbox received the message.
+	Delivered []string
+	// Failed maps each member that could not be reached to its error message.
+	Failed map[string]string
+	// Skipped lists members that were dropped without an error because their
+	// inbox no longer existed at delivery time — i.e. the member was removed
+	// (RemoveMember + DeleteInbox) between the membership snapshot and this write.
+	// They are reported separately from Failed so a benign concurrent removal is
+	// not surfaced as a delivery error.
+	Skipped []string
+}
+
+// newInboxMessage builds an inboxMessage envelope addressed to `to` from an
+// outboxMessage. Shared by the point-to-point send (sendToOneIfExists) and the
+// broadcast fan-out.
+func (m *mailbox) newInboxMessage(to string, msg *outboxMessage) inboxMessage {
+	return inboxMessage{
+		ID:        uuid.New().String(),
+		From:      m.conf.OwnerName,
+		To:        to,
+		Text:      msg.Text,
+		Summary:   msg.Summary,
+		Timestamp: utcNowMillis(),
+		Read:      false,
+	}
+}
+
+// sendToOneIfExists appends a message to an existing inbox only. It reports
+// delivered=false (without an error) when the target inbox no longer exists.
+// This is the sole point-to-point delivery primitive: both Send (DMs, shutdown
+// requests/responses, task-assignment and idle notifications) and the broadcast
+// fan-out go through it, so no point-to-point path can ever recreate a missing
+// inbox. Send turns delivered=false into errInboxNotFound; broadcast treats it
+// as a member removed mid-fan-out (Skipped) rather than a failure.
+//
+// The existence check runs under the same per-inbox lock that DeleteInbox holds,
+// so it is race-free: either this sees the inbox before DeleteInbox removes it
+// (and writes), or it observes the inbox already gone (and skips). Without the
+// existence guard, writeInbox would unconditionally recreate the file, leaking an
+// orphaned inbox for a member that was just torn down.
+func (m *mailbox) sendToOneIfExists(ctx context.Context, to string, msg *outboxMessage) (delivered bool, err error) {
+	inboxMsg := m.newInboxMessage(to, msg)
+
+	lock := m.inboxLocks.ForName(to)
+	defer m.inboxLocks.Release(to)
+	lock.Lock()
+	defer lock.Unlock()
+
+	exists, err := m.conf.Backend.Exists(ctx, m.inboxFilePathForOwner(to))
+	if err != nil {
+		return false, fmt.Errorf("check inbox exists: %w", err)
+	}
+	if !exists {
+		return false, nil
+	}
+
+	msgs, err := m.readInbox(ctx, to)
+	if err != nil {
+		return false, fmt.Errorf("read inbox: %w", err)
+	}
+
+	msgs = append(msgs, inboxMsg)
+
+	if err := m.writeInbox(ctx, to, msgs); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// broadcast delivers msg to every other team member. Delivery is best-effort and
+// non-atomic: each recipient is written independently, so a mid-broadcast failure
+// leaves earlier recipients with the message and later ones without. The returned
+// broadcastResult records exactly who received it, who failed, and who was skipped
+// (removed mid-broadcast) so callers can surface the breakdown (and retry if
+// desired); the joined error is returned for callers that only need a pass/fail
+// signal.
+//
+// The membership list is a snapshot taken before the per-recipient writes, so a
+// member can be removed (RemoveMember + DeleteInbox) after the snapshot but before
+// its write. sendToOneIfExists guards against that by only appending to an inbox
+// that still exists, checked under the per-inbox lock; a vanished inbox is recorded
+// in Skipped rather than resurrected as an orphaned file.
+//
+// Cost: broadcast performs one full read-modify-write of each recipient's inbox
+// file, i.e. O(N) backend round-trips and O(N × inbox size) IO for N members.
+// It is deliberately expensive and the tool prompt (see tool_prompts.go) steers
+// the model toward targeted "message" sends; treat broadcast as a coarse,
+// infrequent fan-out rather than a hot path.
+func (m *mailbox) broadcast(ctx context.Context, msg *outboxMessage) (broadcastResult, error) {
+	res := broadcastResult{}
+
+	names, err := m.listMembers(ctx)
+	if err != nil {
+		return res, fmt.Errorf("list members for broadcast: %w", err)
+	}
+
+	var errs []error
+	for _, name := range names {
+		if name == m.conf.OwnerName {
+			continue
+		}
+		delivered, err := m.sendToOneIfExists(ctx, name, msg)
+		if err != nil {
+			if res.Failed == nil {
+				res.Failed = make(map[string]string)
+			}
+			res.Failed[name] = err.Error()
+			errs = append(errs, fmt.Errorf("broadcast to %s: %w", name, err))
+			continue
+		}
+		if !delivered {
+			// Inbox no longer exists: the member was removed between the snapshot and
+			// this write. Skip silently (not a delivery failure).
+			res.Skipped = append(res.Skipped, name)
+			continue
+		}
+		res.Delivered = append(res.Delivered, name)
+	}
+	return res, joinErrors(errs...)
+}
+
+// ReadUnread returns all unread messages from this agent's inbox file.
+func (m *mailbox) ReadUnread(ctx context.Context) ([]inboxMessage, error) {
+	lock := m.inboxLocks.ForName(m.conf.OwnerName)
+	defer m.inboxLocks.Release(m.conf.OwnerName)
+	lock.RLock()
+	defer lock.RUnlock()
+
+	all, err := m.readInbox(ctx, m.conf.OwnerName)
+	if err != nil {
+		return nil, fmt.Errorf("read inbox: %w", err)
+	}
+
+	var unread []inboxMessage
+	for _, msg := range all {
+		if !msg.Read {
+			unread = append(unread, msg)
+		}
+	}
+	return unread, nil
+}
+
+// MarkRead removes the given messages from the inbox file, compacting it to
+// only retain unread messages. This prevents the inbox file from growing
+// unboundedly over time.
+// Messages are matched by ID.
+func (m *mailbox) MarkRead(ctx context.Context, msgs []inboxMessage) error {
+	if len(msgs) == 0 {
+		return nil
+	}
+
+	toRemove := make(map[string]bool, len(msgs))
+	for _, msg := range msgs {
+		toRemove[msg.ID] = true
+	}
+
+	// Use per-owner lock: MarkRead modifies the owner's own inbox file.
+	lock := m.inboxLocks.ForName(m.conf.OwnerName)
+	defer m.inboxLocks.Release(m.conf.OwnerName)
+	lock.Lock()
+	defer lock.Unlock()
+
+	all, err := m.readInbox(ctx, m.conf.OwnerName)
+	if err != nil {
+		return fmt.Errorf("read inbox: %w", err)
+	}
+
+	remaining := make([]inboxMessage, 0, len(all))
+	for _, msg := range all {
+		if !toRemove[msg.ID] {
+			remaining = append(remaining, msg)
+		}
+	}
+
+	if len(remaining) == len(all) {
+		return nil
+	}
+
+	return m.writeInbox(ctx, m.conf.OwnerName, remaining)
+}
+
+// WaitForMessages blocks until new messages arrive or context is cancelled.
+func (m *mailbox) WaitForMessages(ctx context.Context) ([]inboxMessage, error) {
+	// check existing messages first
+	if msgs, err := m.ReadUnread(ctx); err != nil {
+		return nil, err
+	} else if len(msgs) > 0 {
+		return msgs, nil
+	}
+
+	return m.waitForNewMessages(ctx)
+}
+
+// waitForNewMessages blocks until new messages arrive, without checking existing
+// messages first. Use this when the caller has already verified no unread messages
+// exist, to avoid a redundant ReadUnread call.
+func (m *mailbox) waitForNewMessages(ctx context.Context) ([]inboxMessage, error) {
+	ticker := time.NewTicker(m.conf.PollInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-ticker.C:
+			// poll filesystem for new messages
+		}
+
+		if msgs, err := m.ReadUnread(ctx); err != nil {
+			return nil, err
+		} else if len(msgs) > 0 {
+			return msgs, nil
+		}
+	}
+}
