@@ -196,7 +196,22 @@ func newSubagentTestRunner(t *testing.T, name string, subagents []TeammateRole) 
 		TeamConfig:    conf,
 		TeammateRoles: subagents,
 		GenInput: func(_ context.Context, _ *adk.TurnLoop[TurnInput, adk.Message], items []TurnInput) (*adk.GenInputResult[TurnInput, adk.Message], error) {
-			return &adk.GenInputResult[TurnInput, adk.Message]{Consumed: items}, nil
+			// Supply a real Input so a spawned teammate's turn reaches (and blocks
+			// in) blockingChatModel instead of failing immediately with "agent input
+			// is nil". A teammate whose turn fails right away runs cleanupExitedTeammate
+			// (which RemoveMember-s it) concurrently with the test's membership
+			// assertion, making "is the freshly-spawned member registered?" racy.
+			// Blocking the turn keeps the member stable until ShutdownAllTeammates.
+			var msgs []adk.Message
+			for _, it := range items {
+				for _, m := range it.Messages {
+					msgs = append(msgs, schema.UserMessage(m))
+				}
+			}
+			return &adk.GenInputResult[TurnInput, adk.Message]{
+				Consumed: items,
+				Input:    &adk.AgentInput{Messages: msgs},
+			}, nil
 		},
 		OnAgentEvents: noopOnAgentEvents,
 	}
