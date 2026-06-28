@@ -93,15 +93,18 @@ func NewTyped[M adk.MessageType](_ context.Context, config *TypedConfig[M]) (adk
 	mgr := config.Manager
 	queried := newQueryTracker()
 
+	outputEnabled := !disabled(config.TaskOutputToolConfig)
+	stopEnabled := !disabled(config.TaskStopToolConfig)
+
 	var tools []tool.BaseTool
-	if !disabled(config.TaskOutputToolConfig) {
+	if outputEnabled {
 		outputTool, err := newTaskOutputTool(mgr, queried, config.TaskOutputToolConfig)
 		if err != nil {
 			return nil, fmt.Errorf("backgroundtask: failed to create task_output tool: %w", err)
 		}
 		tools = append(tools, outputTool)
 	}
-	if !disabled(config.TaskStopToolConfig) {
+	if stopEnabled {
 		stopTool, err := newTaskStopTool(mgr, config.TaskStopToolConfig)
 		if err != nil {
 			return nil, fmt.Errorf("backgroundtask: failed to create task_stop tool: %w", err)
@@ -109,10 +112,7 @@ func NewTyped[M adk.MessageType](_ context.Context, config *TypedConfig[M]) (adk
 		tools = append(tools, stopTool)
 	}
 
-	instruction := internal.SelectPrompt(internal.I18nPrompts{
-		English: backgroundTaskPrompt,
-		Chinese: backgroundTaskPromptChinese,
-	})
+	instruction := buildInstruction(config.TaskOutputToolConfig, outputEnabled, config.TaskStopToolConfig, stopEnabled)
 
 	return &typedMiddleware[M]{
 		tools:       tools,
@@ -123,6 +123,40 @@ func NewTyped[M adk.MessageType](_ context.Context, config *TypedConfig[M]) (adk
 // disabled reports whether a tool config opts out of registering its tool.
 func disabled(c *ToolConfig) bool {
 	return c != nil && c.Disable
+}
+
+// buildInstruction assembles the background-task instruction so the per-tool
+// sentences name the tools as actually registered and omit any disabled tool.
+// It returns "" when no control tool is enabled, so a fully-disabled middleware
+// injects nothing.
+func buildInstruction(outputCfg *ToolConfig, outputEnabled bool, stopCfg *ToolConfig, stopEnabled bool) string {
+	if !outputEnabled && !stopEnabled {
+		return ""
+	}
+
+	instruction := internal.SelectPrompt(internal.I18nPrompts{
+		English: backgroundTaskPromptHeader,
+		Chinese: backgroundTaskPromptHeaderChinese,
+	})
+	if outputEnabled {
+		line := internal.SelectPrompt(internal.I18nPrompts{
+			English: backgroundTaskOutputLine,
+			Chinese: backgroundTaskOutputLineChinese,
+		})
+		instruction += fmt.Sprintf(line, selectToolName(outputCfg, taskOutputToolName))
+	}
+	if stopEnabled {
+		line := internal.SelectPrompt(internal.I18nPrompts{
+			English: backgroundTaskStopLine,
+			Chinese: backgroundTaskStopLineChinese,
+		})
+		instruction += fmt.Sprintf(line, selectToolName(stopCfg, taskStopToolName))
+	}
+	instruction += internal.SelectPrompt(internal.I18nPrompts{
+		English: backgroundTaskPromptFooter,
+		Chinese: backgroundTaskPromptFooterChinese,
+	})
+	return instruction
 }
 
 // selectToolName returns the configured name override, or the default when unset.
@@ -155,7 +189,9 @@ func (m *typedMiddleware[M]) BeforeAgent(ctx context.Context, runCtx *adk.ChatMo
 	}
 
 	nRunCtx := *runCtx
-	nRunCtx.Instruction += "\n" + m.instruction
+	if m.instruction != "" {
+		nRunCtx.Instruction += "\n" + m.instruction
+	}
 	nRunCtx.Tools = append(nRunCtx.Tools, m.tools...)
 	return ctx, &nRunCtx, nil
 }
@@ -253,14 +289,23 @@ func formatTask(task *bgtask.Task) string {
 	result := fmt.Sprintf("Task ID: %s\nDescription: %s\nStatus: %s",
 		task.ID, task.Description, task.Status)
 
-	// When the task has an output file, the file is authoritative — point at it and
-	// do not inline Result. The file carries the same (or interim) output and may be
-	// large, so Read'ing it selectively avoids inlining the whole blob. Without an
-	// output file, Result is the only copy, so inline it.
-	if task.OutputFile != "" {
+	// When the task has a reliable output file, the file is authoritative — point at
+	// it and do not inline Result. The file carries the same (or interim) output and
+	// may be large, so Read'ing it selectively avoids inlining the whole blob. When a
+	// write to the file failed (OutputFileErr set), the file is partial, so Result —
+	// which the Manager accumulates in full independent of file writes — is the only
+	// trustworthy copy: inline it and flag the file as incomplete. Without an output
+	// file, Result is likewise the only copy, so inline it.
+	if task.OutputFile != "" && task.OutputFileErr == "" {
 		result += fmt.Sprintf("\nOutput file: %s (use Read on this path for the output)", task.OutputFile)
-	} else if task.Result != "" {
-		result += fmt.Sprintf("\nResult: %s", task.Result)
+	} else {
+		if task.Result != "" {
+			result += fmt.Sprintf("\nResult: %s", task.Result)
+		}
+		if task.OutputFile != "" {
+			result += fmt.Sprintf("\nOutput file: %s (incomplete — a write failed: %s; use the Result above)",
+				task.OutputFile, task.OutputFileErr)
+		}
 	}
 	if task.Error != "" {
 		result += fmt.Sprintf("\nError: %s", task.Error)

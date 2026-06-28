@@ -91,6 +91,15 @@ type Task struct {
 	// output while the task is still running. The file outlives the in-memory
 	// record, so it remains readable after the Manager is rebuilt.
 	OutputFile string
+	// OutputFileErr is set by the launcher (via MarkOutputFileUnreliable) when a
+	// write to OutputFile fails, so the file is known to be incomplete. It is
+	// empty while the file is trustworthy. Consumers that would otherwise treat
+	// OutputFile as the authoritative output must, when this is non-empty, fall
+	// back to the in-memory Result (which the Manager always accumulates in full,
+	// independent of file writes) and treat the file as partial. The Manager does
+	// not interpret the value beyond emptiness; it carries the first failure's
+	// message for diagnostics.
+	OutputFileErr string
 	// Error contains the error message, set when Status is StatusFailed.
 	Error string
 	// RunInBackground indicates whether this task is running (or ran) in the
@@ -567,6 +576,31 @@ func (m *Manager) storeCancelFunc(id string, cancel context.CancelFunc) {
 
 	if rec, ok := m.tasks[id]; ok {
 		rec.cancel = cancel
+	}
+}
+
+// MarkOutputFileUnreliable records that a write to the given output-file path
+// failed, so the file is known to be incomplete. The launcher that owns writing
+// calls it (keyed by the output-file path it holds, since the task id may not be
+// in scope at write time) when an append to the file errors.
+//
+// It sets Task.OutputFileErr on the task whose OutputFile matches outputFile, so
+// consumers fall back to the in-memory Result instead of trusting the partial
+// file. The first failure wins: a later call does not overwrite an existing
+// message, since once the file has a gap it is unreliable regardless of what
+// later writes do. A nil/empty path, an unknown path, or an already-marked task
+// is a no-op, so callers may invoke it unconditionally on write error.
+func (m *Manager) MarkOutputFileUnreliable(outputFile, errMsg string) {
+	if outputFile == "" {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	for _, rec := range m.tasks {
+		if rec.task.OutputFile == outputFile && rec.task.OutputFileErr == "" {
+			rec.task.OutputFileErr = errMsg
+		}
 	}
 }
 

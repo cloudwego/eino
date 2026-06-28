@@ -18,6 +18,7 @@ package filesystem
 
 import (
 	"context"
+	"errors"
 	"io"
 	"strings"
 	"testing"
@@ -121,7 +122,7 @@ func TestManagedExecuteTool_Foreground(t *testing.T) {
 	}()
 
 	tools, err := getFilesystemTools(context.Background(), &MiddlewareConfig{
-		Shell: &mockShellBackend{resp: &filesystem.ExecuteResponse{Output: "ok"}},
+		Shell:      &mockShellBackend{resp: &filesystem.ExecuteResponse{Output: "ok"}},
 		Background: &BackgroundConfig{Manager: mgr},
 	})
 	require.NoError(t, err)
@@ -189,7 +190,7 @@ func TestManagedExecuteTool_TimeoutMovesToBackground(t *testing.T) {
 	}()
 
 	tools, err := getFilesystemTools(context.Background(), &MiddlewareConfig{
-		Shell: &slowShell{delay: 200 * time.Millisecond, out: "slow done"},
+		Shell:      &slowShell{delay: 200 * time.Millisecond, out: "slow done"},
 		Background: &BackgroundConfig{Manager: mgr},
 	})
 	require.NoError(t, err)
@@ -217,7 +218,7 @@ func TestManagedExecuteTool_TimeoutKills(t *testing.T) {
 	}()
 
 	tools, err := getFilesystemTools(context.Background(), &MiddlewareConfig{
-		Shell: &slowShell{delay: time.Second, out: "never"},
+		Shell:      &slowShell{delay: time.Second, out: "never"},
 		Background: &BackgroundConfig{Manager: mgr},
 	})
 	require.NoError(t, err)
@@ -424,4 +425,77 @@ func TestExecuteTool_NoManager_NotTracked(t *testing.T) {
 	result, err := invokeTool(t, tools[0], `{"command":"echo hi"}`)
 	require.NoError(t, err)
 	assert.Equal(t, "ok", result)
+}
+
+// failingAppender wraps a Backend but fails Append after failAfter successful
+// appends (failAfter=0 fails the very first append, i.e. the reservation write).
+// Reads delegate to the backend so the partial file is still observable.
+type failingAppender struct {
+	backend   *filesystem.InMemoryBackend
+	failAfter int
+	calls     int
+}
+
+func (f *failingAppender) Append(ctx context.Context, req *filesystem.AppendRequest) error {
+	if f.calls >= f.failAfter {
+		f.calls++
+		return errors.New("append failed")
+	}
+	f.calls++
+	return f.backend.Append(ctx, req)
+}
+
+// When the up-front reservation write fails, the task advertises no output file,
+// so consumers fall back to the in-memory Result.
+func TestManagedExecuteTool_ReservationFailure_NoOutputFile(t *testing.T) {
+	backend := setupTestBackend()
+	mgr := backgroundtask.New(context.Background(), &backgroundtask.Config{})
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_ = mgr.Close(ctx)
+	}()
+
+	appender := &failingAppender{backend: backend, failAfter: 0}
+	executeTool, err := newManagedExecuteTool(mgr, &mockShellBackend{resp: &filesystem.ExecuteResponse{Output: "the output"}}, nil,
+		outputSink{appender: appender, outputDir: "/tasks"}, "", "")
+	require.NoError(t, err)
+
+	result, err := invokeTool(t, executeTool, `{"command":"echo hi"}`)
+	require.NoError(t, err)
+	assert.Equal(t, "the output", result)
+
+	tasks := mgr.List()
+	require.Len(t, tasks, 1)
+	assert.Empty(t, tasks[0].OutputFile, "reservation failure must leave OutputFile unset")
+	assert.Empty(t, tasks[0].OutputFileErr)
+	assert.Equal(t, "the output", tasks[0].Result)
+}
+
+// When a write to the output file fails after reservation, the file is marked
+// unreliable (OutputFileErr set) while the in-memory Result stays complete.
+func TestManagedExecuteTool_WriteFailure_MarksUnreliable(t *testing.T) {
+	backend := setupTestBackend()
+	mgr := backgroundtask.New(context.Background(), &backgroundtask.Config{})
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_ = mgr.Close(ctx)
+	}()
+
+	// failAfter=1: the reservation write succeeds, the result write fails.
+	appender := &failingAppender{backend: backend, failAfter: 1}
+	executeTool, err := newManagedExecuteTool(mgr, &mockShellBackend{resp: &filesystem.ExecuteResponse{Output: "the output"}}, nil,
+		outputSink{appender: appender, outputDir: "/tasks"}, "", "")
+	require.NoError(t, err)
+
+	result, err := invokeTool(t, executeTool, `{"command":"echo hi"}`)
+	require.NoError(t, err)
+	assert.Equal(t, "the output", result)
+
+	tasks := mgr.List()
+	require.Len(t, tasks, 1)
+	assert.NotEmpty(t, tasks[0].OutputFile, "the path was reserved, so it is still recorded")
+	assert.NotEmpty(t, tasks[0].OutputFileErr, "the failed write must mark the file unreliable")
+	assert.Equal(t, "the output", tasks[0].Result, "Result stays complete regardless of file writes")
 }

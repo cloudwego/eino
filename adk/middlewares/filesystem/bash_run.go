@@ -77,35 +77,51 @@ type outputSink struct {
 // file. There is no rewrite fallback — output files require an Appender.
 //
 // The execute tool — not the Manager — owns writing, so streaming runs tee interim
-// output as chunks arrive. It is single-consumer: appendChunk is called serially on
+// output as chunks arrive. It is single-consumer: append is called serially on
 // the StreamReaderWithConvert Recv stack, so no synchronization is needed.
+//
+// On the first append failure the file is left with a gap, so the writer records
+// the failure via mgr.MarkOutputFileUnreliable (letting task_output fall back to
+// the complete in-memory Result) and stops attempting further writes.
 type bashOutputWriter struct {
+	mgr      *backgroundtask.Manager
 	appender filesystem.Appender // nil => disabled
 	path     string
+	failed   bool // set after the first append error: the file is now partial
 }
 
 // reserveBashOutput builds a writer that appends under the sink, or a disabled
 // writer when output files are not configured (no appender / no dir). It creates
-// the file empty up front so the advertised path exists before any output. The
-// file is named after the launching tool-call id (so it matches Task.ToolUseID),
-// falling back to a uuid when no tool-call id is in context.
-func reserveBashOutput(ctx context.Context, sink outputSink) *bashOutputWriter {
+// the file empty up front so the advertised path exists before any output; if even
+// that reservation write fails, it returns a disabled writer so the task advertises
+// no output file and consumers fall back to the in-memory Result. The file is
+// named after the launching tool-call id (so it matches Task.ToolUseID), falling
+// back to a uuid when no tool-call id is in context.
+func reserveBashOutput(ctx context.Context, mgr *backgroundtask.Manager, sink outputSink) *bashOutputWriter {
 	if sink.appender == nil || sink.outputDir == "" {
 		return &bashOutputWriter{}
 	}
-	w := &bashOutputWriter{
-		appender: sink.appender,
-		path:     filepath.Join(sink.outputDir, outputFileName(ctx)+".output"),
+	path := filepath.Join(sink.outputDir, outputFileName(ctx)+".output")
+	if err := sink.appender.Append(ctx, &filesystem.AppendRequest{FilePath: path, Content: ""}); err != nil {
+		return &bashOutputWriter{}
 	}
-	w.append(ctx, "")
-	return w
+	return &bashOutputWriter{
+		mgr:      mgr,
+		appender: sink.appender,
+		path:     path,
+	}
 }
 
 func (w *bashOutputWriter) append(ctx context.Context, content string) {
-	if w.appender == nil {
+	if w.appender == nil || w.failed {
 		return
 	}
-	_ = w.appender.Append(ctx, &filesystem.AppendRequest{FilePath: w.path, Content: content})
+	if err := w.appender.Append(ctx, &filesystem.AppendRequest{FilePath: w.path, Content: content}); err != nil {
+		// The file now has a gap: stop writing and mark it unreliable so task_output
+		// surfaces the complete in-memory Result instead of trusting the partial file.
+		w.failed = true
+		w.mgr.MarkOutputFileUnreliable(w.path, err.Error())
+	}
 }
 
 // outputFileName returns the base name (without extension) for a task's output
@@ -248,7 +264,7 @@ func managedRunInput(ctx context.Context, input executeManagedArgs, w *bashOutpu
 func newManagedBufferedExecuteTool(mgr *backgroundtask.Manager, sb filesystem.Shell, sink outputSink, toolName, desc string) (tool.BaseTool, error) {
 	return utils.InferTool(toolName, desc, func(ctx context.Context, input executeManagedArgs) (string, error) {
 		req := &filesystem.ExecuteRequest{Command: input.Command}
-		w := reserveBashOutput(ctx, sink)
+		w := reserveBashOutput(ctx, mgr, sink)
 		result, err := mgr.Run(ctx, managedRunInput(ctx, input, w), bashWork(sb, req, w))
 		if err != nil {
 			return "", err
@@ -280,7 +296,7 @@ func newManagedBufferedExecuteTool(mgr *backgroundtask.Manager, sb filesystem.Sh
 func newManagedStreamingExecuteTool(mgr *backgroundtask.Manager, streaming filesystem.StreamingShell, sink outputSink, toolName, desc string) (tool.BaseTool, error) {
 	return utils.InferStreamTool(toolName, desc, func(ctx context.Context, input executeManagedArgs) (*schema.StreamReader[string], error) {
 		req := &filesystem.ExecuteRequest{Command: input.Command}
-		w := reserveBashOutput(ctx, sink)
+		w := reserveBashOutput(ctx, mgr, sink)
 		// RunStream owns the returned stream: it forwards work chunks to this caller
 		// in real time, and on auto-background caps the stream with a notice while
 		// draining the rest into the task result. A background launch (or timeout)

@@ -146,6 +146,61 @@ func TestMiddleware_InjectsInstruction(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, runCtx.Instruction, "base")
 	assert.Contains(t, runCtx.Instruction, "task_output")
+	assert.Contains(t, runCtx.Instruction, "task_stop")
+}
+
+// TestMiddleware_InstructionUsesRenamedTool verifies the instruction names the
+// tool as registered: a renamed task_output is referenced by its new name, and
+// the default name no longer appears.
+func TestMiddleware_InstructionUsesRenamedTool(t *testing.T) {
+	mgr := bgtask.New(context.Background(), &bgtask.Config{})
+	defer closeWithTimeout(mgr)
+
+	mw, err := New(context.Background(), &Config{
+		Manager:              mgr,
+		TaskOutputToolConfig: &ToolConfig{Name: "get_task_result"},
+	})
+	require.NoError(t, err)
+	_, runCtx, err := mw.BeforeAgent(context.Background(), &adk.ChatModelAgentContext[*schema.Message]{})
+	require.NoError(t, err)
+	assert.Contains(t, runCtx.Instruction, "get_task_result")
+	assert.NotContains(t, runCtx.Instruction, "task_output")
+	assert.Contains(t, runCtx.Instruction, "task_stop")
+}
+
+// TestMiddleware_InstructionOmitsDisabledTool verifies a disabled tool's sentence
+// is dropped so the model is never told to call a tool that was not registered.
+func TestMiddleware_InstructionOmitsDisabledTool(t *testing.T) {
+	mgr := bgtask.New(context.Background(), &bgtask.Config{})
+	defer closeWithTimeout(mgr)
+
+	mw, err := New(context.Background(), &Config{
+		Manager:            mgr,
+		TaskStopToolConfig: &ToolConfig{Disable: true},
+	})
+	require.NoError(t, err)
+	_, runCtx, err := mw.BeforeAgent(context.Background(), &adk.ChatModelAgentContext[*schema.Message]{})
+	require.NoError(t, err)
+	assert.Contains(t, runCtx.Instruction, "task_output")
+	assert.NotContains(t, runCtx.Instruction, "task_stop")
+}
+
+// TestMiddleware_InstructionEmptyWhenAllDisabled verifies a fully-disabled
+// middleware injects neither tools nor a background-task instruction.
+func TestMiddleware_InstructionEmptyWhenAllDisabled(t *testing.T) {
+	mgr := bgtask.New(context.Background(), &bgtask.Config{})
+	defer closeWithTimeout(mgr)
+
+	mw, err := New(context.Background(), &Config{
+		Manager:              mgr,
+		TaskOutputToolConfig: &ToolConfig{Disable: true},
+		TaskStopToolConfig:   &ToolConfig{Disable: true},
+	})
+	require.NoError(t, err)
+	_, runCtx, err := mw.BeforeAgent(context.Background(), &adk.ChatModelAgentContext[*schema.Message]{Instruction: "base"})
+	require.NoError(t, err)
+	assert.Equal(t, "base", runCtx.Instruction)
+	assert.Empty(t, runCtx.Tools)
 }
 
 func TestTaskOutputTool(t *testing.T) {
@@ -226,4 +281,43 @@ func TestTaskStopTool_AlreadyDone(t *testing.T) {
 	result, err := tl.InvokableRun(context.Background(), fmt.Sprintf(`{"task_id":"%s"}`, runResult.ID))
 	require.NoError(t, err)
 	assert.Contains(t, result, "Failed to stop")
+}
+
+// A reliable output file is authoritative: formatTask points at it and does not
+// inline Result.
+func TestFormatTask_ReliableOutputFile(t *testing.T) {
+	out := formatTask(&bgtask.Task{
+		ID:         "bash_1",
+		Status:     bgtask.StatusCompleted,
+		Result:     "the full result",
+		OutputFile: "/tasks/bash_1.output",
+	})
+	assert.Contains(t, out, "/tasks/bash_1.output")
+	assert.NotContains(t, out, "the full result", "a reliable file replaces inlining Result")
+}
+
+// When the output file is marked unreliable, formatTask falls back to the complete
+// in-memory Result and flags the file as incomplete rather than pointing at it as
+// the sole authority.
+func TestFormatTask_UnreliableOutputFile_FallsBackToResult(t *testing.T) {
+	out := formatTask(&bgtask.Task{
+		ID:            "bash_1",
+		Status:        bgtask.StatusCompleted,
+		Result:        "the full result",
+		OutputFile:    "/tasks/bash_1.output",
+		OutputFileErr: "append failed",
+	})
+	assert.Contains(t, out, "the full result", "Result must be surfaced when the file is unreliable")
+	assert.Contains(t, out, "incomplete", "the file must be flagged as partial")
+	assert.Contains(t, out, "/tasks/bash_1.output")
+}
+
+// With no output file, Result is the only copy and is inlined.
+func TestFormatTask_NoOutputFile(t *testing.T) {
+	out := formatTask(&bgtask.Task{
+		ID:     "bash_1",
+		Status: bgtask.StatusCompleted,
+		Result: "the full result",
+	})
+	assert.Contains(t, out, "the full result")
 }

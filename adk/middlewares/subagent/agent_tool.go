@@ -123,7 +123,12 @@ func newManagedAgentTool(mgr *backgroundtask.Manager, subAgents map[string]tool.
 					return "", runErr
 				}
 				if outputFile != "" {
-					_ = store.Append(workCtx, &filesystem.AppendRequest{FilePath: outputFile, Content: out})
+					if appendErr := store.Append(workCtx, &filesystem.AppendRequest{FilePath: outputFile, Content: out}); appendErr != nil {
+						// The result never reached the file: mark it unreliable so
+						// task_output surfaces the complete in-memory Result instead of
+						// trusting the empty/partial file.
+						mgr.MarkOutputFileUnreliable(outputFile, appendErr.Error())
+					}
 				}
 				return out, nil
 			})
@@ -160,7 +165,9 @@ func newManagedAgentTool(mgr *backgroundtask.Manager, subAgents map[string]tool.
 // it empty (via Append) so the path exists before the run completes. The file is
 // named after the launching tool-call id (so it matches Task.ToolUseID), falling
 // back to a uuid when no tool-call id is in context. Returns "" when output files
-// are not configured (no store / no dir).
+// are not configured (no store / no dir) or when the up-front reservation write
+// fails — in the latter case the task advertises no output file, so consumers
+// fall back to the in-memory Result.
 func reserveAgentOutputFile(ctx context.Context, store filesystem.Appender, outputDir string) string {
 	if store == nil || outputDir == "" {
 		return ""
@@ -170,7 +177,9 @@ func reserveAgentOutputFile(ctx context.Context, store filesystem.Appender, outp
 		name = uuid.NewString()
 	}
 	path := filepath.Join(outputDir, name+".output")
-	_ = store.Append(ctx, &filesystem.AppendRequest{FilePath: path, Content: ""})
+	if err := store.Append(ctx, &filesystem.AppendRequest{FilePath: path, Content: ""}); err != nil {
+		return ""
+	}
 	return path
 }
 
