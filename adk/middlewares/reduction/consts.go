@@ -32,6 +32,7 @@ Preview (first {preview_size}):
 Preview (last {preview_size}):
 {preview_last}
 
+Use {read_tool_name} to view
 </persisted-output>`
 	truncFmtZh = `<persisted-output>
 输出结果过大 ({original_size}). 完整输出保存到: {file_path}
@@ -41,6 +42,7 @@ Preview (last {preview_size}):
 预览 (后 {preview_size}):
 {preview_last}
 
+使用 {read_tool_name} 进行查看
 </persisted-output>`
 )
 
@@ -81,11 +83,11 @@ func getStreamTruncFmt() string {
 	})
 }
 
-func formatStreamOffloadSavedNotify(filePath string) string {
+func formatStreamOffloadSavedNotify(filePath, readFileToolName string) string {
 	return fmt.Sprintf(internal.SelectPrompt(internal.I18nPrompts{
-		English: "Full output saved to: %s.",
-		Chinese: "完整输出保存到: %s。",
-	}), filePath)
+		English: "Full output saved to: %s. Use %s to view.",
+		Chinese: "完整输出保存到: %s。使用 %s 进行查看。",
+	}), filePath, readFileToolName)
 }
 
 func formatStreamOffloadFailedNotify(err error) string {
