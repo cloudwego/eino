@@ -59,23 +59,21 @@ func getFailoverHasMoreAttempts(ctx context.Context) bool {
 type typedFailoverProxyModel[M MessageType] struct {
 }
 
-func (m *typedFailoverProxyModel[M]) prepareTarget(ctx context.Context) (model.BaseModel[M], string, error) {
+func (m *typedFailoverProxyModel[M]) prepareTarget(ctx context.Context) (model.BaseModel[M], error) {
 	target, ok := typedGetFailoverCurrentModel[M](ctx)
 	if !ok {
-		return nil, "", errors.New("failover current model not found in context")
+		return nil, errors.New("failover current model not found in context")
 	}
-
-	targetType, _ := components.GetType(target)
 
 	if !components.IsCallbacksEnabled(target) {
 		target = typedCallbackInjectionModelWrapper[M]{}.wrapModel(target)
 	}
 
-	return target, targetType, nil
+	return target, nil
 }
 
 func (m *typedFailoverProxyModel[M]) Generate(ctx context.Context, input []M, opts ...model.Option) (M, error) {
-	target, _, err := m.prepareTarget(ctx)
+	target, err := m.prepareTarget(ctx)
 	if err != nil {
 		var zero M
 		return zero, err
@@ -85,7 +83,7 @@ func (m *typedFailoverProxyModel[M]) Generate(ctx context.Context, input []M, op
 }
 
 func (m *typedFailoverProxyModel[M]) Stream(ctx context.Context, input []M, opts ...model.Option) (*schema.StreamReader[M], error) {
-	target, _, err := m.prepareTarget(ctx)
+	target, err := m.prepareTarget(ctx)
 	if err != nil {
 		return nil, err
 	}
