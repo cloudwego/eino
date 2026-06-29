@@ -50,14 +50,14 @@ func anyRunning(m *Manager) bool {
 
 // workReturning builds a WorkFunc that returns the given result/error immediately.
 func workReturning(result string, err error) WorkFunc {
-	return func(ctx context.Context) (string, error) {
+	return func(ctx context.Context, _ TaskInfo) (string, error) {
 		return result, err
 	}
 }
 
 // workSleeping builds a WorkFunc that sleeps then returns result.
 func workSleeping(d time.Duration, result string) WorkFunc {
-	return func(ctx context.Context) (string, error) {
+	return func(ctx context.Context, _ TaskInfo) (string, error) {
 		time.Sleep(d)
 		return result, nil
 	}
@@ -65,7 +65,7 @@ func workSleeping(d time.Duration, result string) WorkFunc {
 
 // workBlocking builds a WorkFunc that blocks until its context is canceled.
 func workBlocking() WorkFunc {
-	return func(ctx context.Context) (string, error) {
+	return func(ctx context.Context, _ TaskInfo) (string, error) {
 		<-ctx.Done()
 		return "", ctx.Err()
 	}
@@ -159,7 +159,7 @@ func TestManager_RunBackground_SurvivesCallerCtxCancel(t *testing.T) {
 	started := make(chan struct{})
 	release := make(chan struct{})
 	result, err := m.Run(callerCtx, &RunInput{Description: "bg", RunInBackground: true},
-		func(ctx context.Context) (string, error) {
+		func(ctx context.Context, _ TaskInfo) (string, error) {
 			close(started)
 			select {
 			case <-release:
@@ -214,7 +214,7 @@ func TestManager_RunBackground_PreservesCallerCtxValues(t *testing.T) {
 
 	got := make(chan interface{}, 1)
 	result, err := m.Run(callerCtx, &RunInput{Description: "bg", RunInBackground: true},
-		func(ctx context.Context) (string, error) {
+		func(ctx context.Context, _ TaskInfo) (string, error) {
 			got <- ctx.Value(key)
 			return "ok", nil
 		})
@@ -583,7 +583,7 @@ func TestManager_Cancel_ForegroundReportsCanceled(t *testing.T) {
 	}()
 
 	result, err := m.Run(context.Background(), &RunInput{Description: "fg cancelable"},
-		func(ctx context.Context) (string, error) {
+		func(ctx context.Context, _ TaskInfo) (string, error) {
 			// Surface the task id to the canceller, then block until canceled.
 			for _, t := range m.List() {
 				started <- t.ID
@@ -772,7 +772,7 @@ func TestManager_ContextCancelStopsWork(t *testing.T) {
 	defer closeWithTimeout(m)
 
 	started := make(chan struct{})
-	work := func(ctx context.Context) (string, error) {
+	work := func(ctx context.Context, _ TaskInfo) (string, error) {
 		close(started)
 		<-ctx.Done()
 		return "", errSentinel

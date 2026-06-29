@@ -93,12 +93,14 @@ type Task struct {
 	OutputFile string
 	// OutputFileErr is set by the launcher (via MarkOutputFileUnreliable) when a
 	// write to OutputFile fails, so the file is known to be incomplete. It is
-	// empty while the file is trustworthy. Consumers that would otherwise treat
-	// OutputFile as the authoritative output must, when this is non-empty, fall
-	// back to the in-memory Result (which the Manager always accumulates in full,
-	// independent of file writes) and treat the file as partial. The Manager does
-	// not interpret the value beyond emptiness; it carries the first failure's
-	// message for diagnostics.
+	// empty while the file is trustworthy. When non-empty, neither OutputFile nor
+	// Result can be treated as the authoritative complete output: the file has a
+	// gap, and Result is only whatever the worker returned (which may be empty
+	// while the task is still running, and — depending on the worker — may be a
+	// partial projection of the file rather than its full content). Consumers
+	// should report the file's failed state honestly rather than present either
+	// side as complete. The Manager does not interpret the value beyond emptiness;
+	// it carries the first failure's message for diagnostics.
 	OutputFileErr string
 	// Error contains the error message, set when Status is StatusFailed.
 	Error string
@@ -579,28 +581,26 @@ func (m *Manager) storeCancelFunc(id string, cancel context.CancelFunc) {
 	}
 }
 
-// MarkOutputFileUnreliable records that a write to the given output-file path
-// failed, so the file is known to be incomplete. The launcher that owns writing
-// calls it (keyed by the output-file path it holds, since the task id may not be
-// in scope at write time) when an append to the file errors.
+// MarkOutputFileUnreliable records that a write to the task's output file failed,
+// so the file is known to be incomplete. The launcher that owns writing calls it
+// (with the task id it receives via WorkFunc's TaskInfo) when an append to the
+// file errors.
 //
-// It sets Task.OutputFileErr on the task whose OutputFile matches outputFile, so
-// consumers fall back to the in-memory Result instead of trusting the partial
-// file. The first failure wins: a later call does not overwrite an existing
-// message, since once the file has a gap it is unreliable regardless of what
-// later writes do. A nil/empty path, an unknown path, or an already-marked task
-// is a no-op, so callers may invoke it unconditionally on write error.
-func (m *Manager) MarkOutputFileUnreliable(outputFile, errMsg string) {
-	if outputFile == "" {
+// It sets Task.OutputFileErr on the task with the given id, so consumers stop
+// trusting the partial file. The first failure wins: a later call does not
+// overwrite an existing message, since once the file has a gap it is unreliable
+// regardless of what later writes do. An empty id, an unknown id, or an
+// already-marked task is a no-op, so callers may invoke it unconditionally on
+// write error.
+func (m *Manager) MarkOutputFileUnreliable(taskID, errMsg string) {
+	if taskID == "" {
 		return
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	for _, rec := range m.tasks {
-		if rec.task.OutputFile == outputFile && rec.task.OutputFileErr == "" {
-			rec.task.OutputFileErr = errMsg
-		}
+	if rec, ok := m.tasks[taskID]; ok && rec.task.OutputFileErr == "" {
+		rec.task.OutputFileErr = errMsg
 	}
 }
 
@@ -775,9 +775,29 @@ func taskDone(doneCh <-chan struct{}) bool {
 	}
 }
 
+// TaskInfo is a read-only snapshot of the facts the Manager establishes about a
+// task at creation, handed to the WorkFunc when it starts. It is not the live
+// Task record: it carries only identity fixed at creation, never the mutable
+// lifecycle fields (Result/Status/Error/OutputFileErr) the Manager fills later,
+// so work never races on them. The work already holds everything the launcher
+// passed in (Type, OutputFile, Metadata, ...); TaskInfo supplies what only the
+// Manager knows. New fields may be added over time — adding a field is backward
+// compatible, so the WorkFunc signature stays stable.
+type TaskInfo struct {
+	// ID is the Manager-generated task id. It is the one fact the work cannot
+	// otherwise obtain: the id is assigned inside createTask, after the work
+	// closure is already built. The launcher passes it to MarkOutputFileUnreliable
+	// to report an output-file write failure against this task.
+	ID string
+}
+
 // WorkFunc performs a single managed execution. It is supplied by the caller
 // (e.g. a subagent or filesystem adapter); the Manager itself never knows what
 // the work is.
+//
+// task carries the Manager-assigned facts about this run (see TaskInfo) — most
+// importantly its id, which the work needs to report an output-file write failure
+// via Manager.MarkOutputFileUnreliable.
 //
 // ctx carries the values of the Run call's context but is detached from its
 // cancellation, so a backgrounded task outlives the turn that launched it. It is
@@ -787,7 +807,7 @@ func taskDone(doneCh <-chan struct{}) bool {
 //
 // The returned result becomes Task.Result; a non-nil err becomes Task.Error and
 // transitions the task to StatusFailed.
-type WorkFunc func(ctx context.Context) (result string, err error)
+type WorkFunc func(ctx context.Context, task TaskInfo) (result string, err error)
 
 // detachedCtx carries its parent's values but is never canceled by the parent.
 // It mirrors context.WithoutCancel (Go 1.21+); this package targets Go 1.18.
@@ -843,7 +863,7 @@ func (m *Manager) Run(ctx context.Context, input *RunInput, work WorkFunc) (*Tas
 				m.failTask(id, safe.NewPanicErr(p, debug.Stack()))
 			}
 		}()
-		r, runErr := work(runCtx)
+		r, runErr := work(runCtx, TaskInfo{ID: id})
 		if runErr != nil {
 			m.failTask(id, runErr)
 		} else {
@@ -918,10 +938,13 @@ func (m *Manager) Run(ctx context.Context, input *RunInput, work WorkFunc) (*Tas
 // the task's final Result (and OutputFile). Chunk semantics (formatting, exit
 // codes) are entirely the caller's concern; the Manager only concatenates.
 //
+// task behaves exactly as for WorkFunc (see TaskInfo): it carries the task id the
+// work uses to report an output-file write failure.
+//
 // ctx behaves exactly as for WorkFunc (see WorkFunc): detached from the caller's
 // cancellation, stopped by Cancel/deadline/Close. Work should honor it and close
 // the returned reader when ctx is done.
-type StreamWorkFunc func(ctx context.Context) (*schema.StreamReader[string], error)
+type StreamWorkFunc func(ctx context.Context, task TaskInfo) (*schema.StreamReader[string], error)
 
 // RunStream executes streaming work as a managed task, returning a stream of
 // output chunks to consume in real time.
@@ -1003,7 +1026,7 @@ func (m *Manager) forwardStream(r *streamRun) {
 		}
 	}()
 
-	ws, err := r.work(r.runCtx)
+	ws, err := r.work(r.runCtx, TaskInfo{ID: r.id})
 	if err != nil {
 		m.failTask(r.id, err)
 		r.sw.Send("", err)

@@ -292,10 +292,12 @@ func formatTask(task *bgtask.Task) string {
 	// When the task has a reliable output file, the file is authoritative — point at
 	// it and do not inline Result. The file carries the same (or interim) output and
 	// may be large, so Read'ing it selectively avoids inlining the whole blob. When a
-	// write to the file failed (OutputFileErr set), the file is partial, so Result —
-	// which the Manager accumulates in full independent of file writes — is the only
-	// trustworthy copy: inline it and flag the file as incomplete. Without an output
-	// file, Result is likewise the only copy, so inline it.
+	// write to the file failed (OutputFileErr set), neither side is the complete
+	// output: the file has a gap, and Result is only what the worker returned (which
+	// may be empty while the task runs, or a partial projection of the file). Report
+	// the failure honestly and surface Result as best-effort current data rather than
+	// presenting either as authoritative. Without an output file, Result is the only
+	// copy, so inline it.
 	if task.OutputFile != "" && task.OutputFileErr == "" {
 		result += fmt.Sprintf("\nOutput file: %s (use Read on this path for the output)", task.OutputFile)
 	} else {
@@ -303,7 +305,7 @@ func formatTask(task *bgtask.Task) string {
 			result += fmt.Sprintf("\nResult: %s", task.Result)
 		}
 		if task.OutputFile != "" {
-			result += fmt.Sprintf("\nOutput file: %s (incomplete — a write failed: %s; use the Result above)",
+			result += fmt.Sprintf("\nOutput file: %s (incomplete — a write failed: %s; full output is unavailable. The Result above, if any, is the best-effort output captured so far and may be empty or partial)",
 				task.OutputFile, task.OutputFileErr)
 		}
 	}

@@ -48,7 +48,7 @@ func drainStringStream(t *testing.T, sr *schema.StreamReader[string]) string {
 // streamWorkChunks returns a StreamWorkFunc that emits the given chunks, optionally
 // pausing before each so a deadline can fire mid-stream.
 func streamWorkChunks(pause time.Duration, chunks ...string) StreamWorkFunc {
-	return func(ctx context.Context) (*schema.StreamReader[string], error) {
+	return func(ctx context.Context, _ TaskInfo) (*schema.StreamReader[string], error) {
 		sr, sw := schema.Pipe[string](len(chunks))
 		go func() {
 			defer sw.Close()
@@ -147,7 +147,7 @@ func TestRunStream_WorkError(t *testing.T) {
 	defer closeWithTimeout(m)
 
 	wantErr := errors.New("boom")
-	work := func(ctx context.Context) (*schema.StreamReader[string], error) {
+	work := func(ctx context.Context, _ TaskInfo) (*schema.StreamReader[string], error) {
 		sr, sw := schema.Pipe[string](2)
 		go func() {
 			defer sw.Close()

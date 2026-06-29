@@ -117,17 +117,17 @@ func newManagedAgentTool(mgr *backgroundtask.Manager, subAgents map[string]tool.
 				RunInBackground: in.RunInBackground,
 				Metadata:        map[string]any{MetadataKeySubagentType: in.SubagentType},
 				OutputFile:      outputFile,
-			}, func(workCtx context.Context) (string, error) {
+			}, func(workCtx context.Context, task backgroundtask.TaskInfo) (string, error) {
 				out, runErr := a.InvokableRun(workCtx, params, opts...)
 				if runErr != nil {
 					return "", runErr
 				}
 				if outputFile != "" {
 					if appendErr := store.Append(workCtx, &filesystem.AppendRequest{FilePath: outputFile, Content: out}); appendErr != nil {
-						// The result never reached the file: mark it unreliable so
-						// task_output surfaces the complete in-memory Result instead of
-						// trusting the empty/partial file.
-						mgr.MarkOutputFileUnreliable(outputFile, appendErr.Error())
+						// The result never reached the file: mark it unreliable (by task id)
+						// so task_output reports the file's failed state instead of trusting
+						// the empty/partial file.
+						mgr.MarkOutputFileUnreliable(task.ID, appendErr.Error())
 					}
 				}
 				return out, nil

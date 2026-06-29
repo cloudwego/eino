@@ -81,13 +81,15 @@ type outputSink struct {
 // the StreamReaderWithConvert Recv stack, so no synchronization is needed.
 //
 // On the first append failure the file is left with a gap, so the writer records
-// the failure via mgr.MarkOutputFileUnreliable (letting task_output fall back to
-// the complete in-memory Result) and stops attempting further writes.
+// the failure via mgr.MarkOutputFileUnreliable (keyed by taskID, which the work
+// func receives from the Manager and sets on the writer before its first append)
+// and stops attempting further writes.
 type bashOutputWriter struct {
 	mgr      *backgroundtask.Manager
 	appender filesystem.Appender // nil => disabled
 	path     string
-	failed   bool // set after the first append error: the file is now partial
+	taskID   string // set by the work func once the Manager assigns it
+	failed   bool   // set after the first append error: the file is now partial
 }
 
 // reserveBashOutput builds a writer that appends under the sink, or a disabled
@@ -117,10 +119,10 @@ func (w *bashOutputWriter) append(ctx context.Context, content string) {
 		return
 	}
 	if err := w.appender.Append(ctx, &filesystem.AppendRequest{FilePath: w.path, Content: content}); err != nil {
-		// The file now has a gap: stop writing and mark it unreliable so task_output
-		// surfaces the complete in-memory Result instead of trusting the partial file.
+		// The file now has a gap: stop writing and mark it unreliable (by task id) so
+		// task_output reports the file's failed state instead of trusting the partial file.
 		w.failed = true
-		w.mgr.MarkOutputFileUnreliable(w.path, err.Error())
+		w.mgr.MarkOutputFileUnreliable(w.taskID, err.Error())
 	}
 }
 
@@ -141,7 +143,8 @@ func outputFileName(ctx context.Context) string {
 // pushed down to the backend. On success it appends the result to the output file
 // (when one is configured) before returning, so the file matches Task.Result.
 func bashWork(sb filesystem.Shell, req *filesystem.ExecuteRequest, w *bashOutputWriter) backgroundtask.WorkFunc {
-	return func(ctx context.Context) (string, error) {
+	return func(ctx context.Context, task backgroundtask.TaskInfo) (string, error) {
+		w.taskID = task.ID
 		result, err := sb.Execute(ctx, req)
 		if err != nil {
 			return "", err
@@ -163,7 +166,8 @@ func bashWork(sb filesystem.Shell, req *filesystem.ExecuteRequest, w *bashOutput
 // convert/OnEOF callbacks, which run on the Recv stack for both the foreground loop
 // and the background drain — so the Manager never has to write.
 func bashStreamWork(sb filesystem.StreamingShell, req *filesystem.ExecuteRequest, w *bashOutputWriter) backgroundtask.StreamWorkFunc {
-	return func(ctx context.Context) (*schema.StreamReader[string], error) {
+	return func(ctx context.Context, task backgroundtask.TaskInfo) (*schema.StreamReader[string], error) {
+		w.taskID = task.ID
 		stream, err := sb.ExecuteStreaming(ctx, req)
 		if err != nil {
 			return nil, err

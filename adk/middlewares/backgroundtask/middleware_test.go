@@ -45,13 +45,13 @@ func runWork(m *bgtask.Manager, description string, background bool, work bgtask
 }
 
 func completedWork(result string) bgtask.WorkFunc {
-	return func(ctx context.Context) (string, error) {
+	return func(ctx context.Context, _ bgtask.TaskInfo) (string, error) {
 		return result, nil
 	}
 }
 
 func blockingWork() bgtask.WorkFunc {
-	return func(ctx context.Context) (string, error) {
+	return func(ctx context.Context, _ bgtask.TaskInfo) (string, error) {
 		<-ctx.Done()
 		return "", ctx.Err()
 	}
