@@ -577,10 +577,10 @@ func TestExecuteTool(t *testing.T) {
 	}
 }
 
-func TestExecuteToolInputModes(t *testing.T) {
+func TestExecuteToolSchema_NoManager(t *testing.T) {
 	ctx := context.Background()
 
-	t.Run("default schema remains legacy command only", func(t *testing.T) {
+	t.Run("schema is command only", func(t *testing.T) {
 		executeTool, err := newExecuteTool(&mockShellBackend{resp: &filesystem.ExecuteResponse{Output: "ok"}}, "", "")
 		assert.NoError(t, err)
 
@@ -592,109 +592,19 @@ func TestExecuteToolInputModes(t *testing.T) {
 		assert.Equal(t, 1, js.Properties.Len())
 		_, ok := js.Properties.Get("command")
 		assert.True(t, ok)
-		_, ok = js.Properties.Get("mode")
-		assert.False(t, ok)
-		_, ok = js.Properties.Get("wait_ms")
+		_, ok = js.Properties.Get("run_in_background")
 		assert.False(t, ok)
 	})
 
-	t.Run("legacy non-streaming forwards only command", func(t *testing.T) {
+	t.Run("forwards only the command to the backend", func(t *testing.T) {
 		shell := &mockShellBackend{resp: &filesystem.ExecuteResponse{Output: "ok"}}
-		executeTool, err := newExecuteTool(shell, "", "", ExecuteToolInputModeLegacy)
+		executeTool, err := newExecuteTool(shell, "", "")
 		assert.NoError(t, err)
 
 		result, err := invokeTool(t, executeTool, `{"command": "echo ok"}`)
 		assert.NoError(t, err)
 		assert.Equal(t, "ok", result)
 		assert.Equal(t, "echo ok", shell.req.Command)
-		assert.Empty(t, shell.req.Mode)
-		assert.Zero(t, shell.req.WaitMS)
-		assert.False(t, shell.req.RunInBackendGround)
-	})
-
-	t.Run("rich non-streaming forwards mode and wait_ms", func(t *testing.T) {
-		shell := &mockShellBackend{resp: &filesystem.ExecuteResponse{Output: "ok"}}
-		executeTool, err := newExecuteTool(shell, "", "", ExecuteToolInputModeRich)
-		assert.NoError(t, err)
-
-		result, err := invokeTool(t, executeTool, `{"command": "npm test", "mode": "foreground", "wait_ms": 1200}`)
-		assert.NoError(t, err)
-		assert.Equal(t, "ok", result)
-		assert.Equal(t, "npm test", shell.req.Command)
-		assert.Equal(t, filesystem.ExecuteModeForeground, shell.req.Mode)
-		assert.Equal(t, int64(1200), shell.req.WaitMS)
-		assert.False(t, shell.req.RunInBackendGround)
-	})
-
-	t.Run("rich background sets compatibility flag", func(t *testing.T) {
-		shell := &mockShellBackend{resp: &filesystem.ExecuteResponse{Output: "ok"}}
-		executeTool, err := newExecuteTool(shell, "", "", ExecuteToolInputModeRich)
-		assert.NoError(t, err)
-
-		_, err = invokeTool(t, executeTool, `{"command": "npm run dev", "mode": "background"}`)
-		assert.NoError(t, err)
-		assert.Equal(t, filesystem.ExecuteModeBackground, shell.req.Mode)
-		assert.True(t, shell.req.RunInBackendGround)
-	})
-
-	t.Run("rich auto forwards auto mode", func(t *testing.T) {
-		shell := &mockShellBackend{resp: &filesystem.ExecuteResponse{Output: "ok"}}
-		executeTool, err := newExecuteTool(shell, "", "", ExecuteToolInputModeRich)
-		assert.NoError(t, err)
-
-		_, err = invokeTool(t, executeTool, `{"command": "long command", "mode": "auto"}`)
-		assert.NoError(t, err)
-		assert.Equal(t, filesystem.ExecuteModeAuto, shell.req.Mode)
-		assert.False(t, shell.req.RunInBackendGround)
-	})
-
-	t.Run("rich empty mode preserves backend default", func(t *testing.T) {
-		shell := &mockShellBackend{resp: &filesystem.ExecuteResponse{Output: "ok"}}
-		executeTool, err := newExecuteTool(shell, "", "", ExecuteToolInputModeRich)
-		assert.NoError(t, err)
-
-		_, err = invokeTool(t, executeTool, `{"command": "echo ok"}`)
-		assert.NoError(t, err)
-		assert.Empty(t, shell.req.Mode)
-		assert.False(t, shell.req.RunInBackendGround)
-	})
-
-	t.Run("rich unknown mode is rejected before backend execution", func(t *testing.T) {
-		shell := &mockShellBackend{resp: &filesystem.ExecuteResponse{Output: "ok"}}
-		executeTool, err := newExecuteTool(shell, "", "", ExecuteToolInputModeRich)
-		assert.NoError(t, err)
-
-		_, err = invokeTool(t, executeTool, `{"command": "echo ok", "mode": "detached"}`)
-		assert.Error(t, err)
-		assert.Nil(t, shell.req)
-	})
-
-	t.Run("rich negative wait_ms is rejected before backend execution", func(t *testing.T) {
-		shell := &mockShellBackend{resp: &filesystem.ExecuteResponse{Output: "ok"}}
-		executeTool, err := newExecuteTool(shell, "", "", ExecuteToolInputModeRich)
-		assert.NoError(t, err)
-
-		_, err = invokeTool(t, executeTool, `{"command": "echo ok", "wait_ms": -1}`)
-		assert.Error(t, err)
-		assert.Nil(t, shell.req)
-	})
-
-	t.Run("rich schema exposes optional mode and wait_ms", func(t *testing.T) {
-		executeTool, err := newExecuteTool(&mockShellBackend{resp: &filesystem.ExecuteResponse{Output: "ok"}}, "", "", ExecuteToolInputModeRich)
-		assert.NoError(t, err)
-
-		info, err := executeTool.Info(ctx)
-		assert.NoError(t, err)
-		js, err := info.ParamsOneOf.ToJSONSchema()
-		assert.NoError(t, err)
-		assert.NotNil(t, js)
-		assert.Equal(t, 3, js.Properties.Len())
-		_, ok := js.Properties.Get("command")
-		assert.True(t, ok)
-		_, ok = js.Properties.Get("mode")
-		assert.True(t, ok)
-		_, ok = js.Properties.Get("wait_ms")
-		assert.True(t, ok)
 	})
 }
 
@@ -783,17 +693,6 @@ func TestExecuteToolConfig(t *testing.T) {
 	ctx := context.Background()
 	backend := setupTestBackend()
 
-	t.Run("unknown input mode rejected", func(t *testing.T) {
-		_, err := New(ctx, &MiddlewareConfig{
-			Shell: &mockShellBackend{resp: &filesystem.ExecuteResponse{Output: "ok"}},
-			ExecuteToolConfig: &ExecuteToolConfig{
-				InputMode: ExecuteToolInputMode("unknown"),
-			},
-		})
-		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "unknown execute tool input mode")
-	})
-
 	t.Run("disable skips execute registration", func(t *testing.T) {
 		tools, err := getFilesystemTools(ctx, &MiddlewareConfig{
 			Backend: backend,
@@ -849,7 +748,6 @@ func TestExecuteToolConfig(t *testing.T) {
 			Shell: &mockShellBackend{resp: &filesystem.ExecuteResponse{Output: "ok"}},
 			ExecuteToolConfig: &ExecuteToolConfig{
 				ToolConfig: ToolConfig{Name: "run"},
-				InputMode:  ExecuteToolInputModeRich,
 			},
 		})
 		assert.NoError(t, err)
@@ -859,7 +757,7 @@ func TestExecuteToolConfig(t *testing.T) {
 		assert.Equal(t, "run", info.Name)
 		js, err := info.ParamsOneOf.ToJSONSchema()
 		assert.NoError(t, err)
-		_, ok := js.Properties.Get("wait_ms")
+		_, ok := js.Properties.Get("command")
 		assert.True(t, ok)
 	})
 }
@@ -2194,9 +2092,9 @@ func TestNewStreamingExecuteTool(t *testing.T) {
 		assert.Equal(t, "custom desc", info.Desc)
 	})
 
-	t.Run("legacy streaming forwards only command", func(t *testing.T) {
+	t.Run("streaming forwards only command", func(t *testing.T) {
 		streamingShell := &mockStreamingShell{}
-		executeTool, err := newStreamingExecuteTool(streamingShell, "", "", ExecuteToolInputModeLegacy)
+		executeTool, err := newStreamingExecuteTool(streamingShell, "", "")
 		assert.NoError(t, err)
 
 		st := executeTool.(tool.StreamableTool)
@@ -2211,99 +2109,6 @@ func TestNewStreamingExecuteTool(t *testing.T) {
 			assert.NoError(t, recvErr)
 		}
 		assert.Equal(t, "echo hello", streamingShell.req.Command)
-		assert.Empty(t, streamingShell.req.Mode)
-		assert.Zero(t, streamingShell.req.WaitMS)
-		assert.False(t, streamingShell.req.RunInBackendGround)
-	})
-
-	t.Run("rich streaming forwards mode and wait_ms", func(t *testing.T) {
-		tests := []struct {
-			name                string
-			input               string
-			wantCommand         string
-			wantMode            filesystem.ExecuteMode
-			wantWaitMS          int64
-			wantBackendGround   bool
-			wantBackendExecuted bool
-			wantErr             bool
-		}{
-			{
-				name:                "background",
-				input:               `{"command": "npm run dev", "mode": "background", "wait_ms": 1500}`,
-				wantCommand:         "npm run dev",
-				wantMode:            filesystem.ExecuteModeBackground,
-				wantWaitMS:          1500,
-				wantBackendGround:   true,
-				wantBackendExecuted: true,
-			},
-			{
-				name:                "foreground",
-				input:               `{"command": "go test ./...", "mode": "foreground", "wait_ms": 500}`,
-				wantCommand:         "go test ./...",
-				wantMode:            filesystem.ExecuteModeForeground,
-				wantWaitMS:          500,
-				wantBackendExecuted: true,
-			},
-			{
-				name:                "auto",
-				input:               `{"command": "long command", "mode": "auto"}`,
-				wantCommand:         "long command",
-				wantMode:            filesystem.ExecuteModeAuto,
-				wantBackendExecuted: true,
-			},
-			{
-				name:                "empty mode",
-				input:               `{"command": "echo ok"}`,
-				wantCommand:         "echo ok",
-				wantBackendExecuted: true,
-			},
-			{
-				name:    "negative wait_ms",
-				input:   `{"command": "echo ok", "wait_ms": -1}`,
-				wantErr: true,
-			},
-		}
-
-		for _, tt := range tests {
-			t.Run(tt.name, func(t *testing.T) {
-				streamingShell := &mockStreamingShell{}
-				executeTool, err := newStreamingExecuteTool(streamingShell, "", "", ExecuteToolInputModeRich)
-				assert.NoError(t, err)
-
-				st := executeTool.(tool.StreamableTool)
-				sr, err := st.StreamableRun(context.Background(), tt.input)
-				if tt.wantErr {
-					assert.Error(t, err)
-					assert.Nil(t, streamingShell.req)
-					return
-				}
-				assert.NoError(t, err)
-				defer sr.Close()
-				for {
-					_, recvErr := sr.Recv()
-					if recvErr == io.EOF {
-						break
-					}
-					assert.NoError(t, recvErr)
-				}
-				assert.True(t, tt.wantBackendExecuted)
-				assert.Equal(t, tt.wantCommand, streamingShell.req.Command)
-				assert.Equal(t, tt.wantMode, streamingShell.req.Mode)
-				assert.Equal(t, tt.wantWaitMS, streamingShell.req.WaitMS)
-				assert.Equal(t, tt.wantBackendGround, streamingShell.req.RunInBackendGround)
-			})
-		}
-	})
-
-	t.Run("rich streaming rejects invalid input before backend execution", func(t *testing.T) {
-		streamingShell := &mockStreamingShell{}
-		executeTool, err := newStreamingExecuteTool(streamingShell, "", "", ExecuteToolInputModeRich)
-		assert.NoError(t, err)
-
-		st := executeTool.(tool.StreamableTool)
-		_, err = st.StreamableRun(context.Background(), `{"command": "echo hello", "mode": "invalid"}`)
-		assert.Error(t, err)
-		assert.Nil(t, streamingShell.req)
 	})
 }
 
@@ -2532,18 +2337,6 @@ func TestConfig_Validate(t *testing.T) {
 		}
 		err := c.Validate()
 		assert.NoError(t, err)
-	})
-
-	t.Run("unknown execute input mode returns error", func(t *testing.T) {
-		c := &Config{
-			Shell: &mockShellBackend{},
-			ExecuteToolConfig: &ExecuteToolConfig{
-				InputMode: ExecuteToolInputMode("invalid"),
-			},
-		}
-		err := c.Validate()
-		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "unknown execute tool input mode")
 	})
 }
 

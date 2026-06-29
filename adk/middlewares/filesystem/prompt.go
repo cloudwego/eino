@@ -268,7 +268,7 @@ Bad examples (avoid these):
 - execute(command="grep -r 'pattern' .")  # 改用 grep 工具
 `
 
-	RichExecuteToolDesc = `
+	ManagedExecuteToolDesc = `
 Executes a given command in the sandbox environment with proper handling and security measures.
 
 Before executing the command, please follow these steps:
@@ -289,12 +289,8 @@ Before executing the command, please follow these steps:
 
 Usage notes:
 - The command parameter is required
-- The optional mode parameter can be "foreground", "background", or "auto"
-- Use mode "foreground" for commands expected to finish and not continue in the background
-- Use mode "background" for servers, watchers, and long-running commands
-- Use mode "auto" to let the backend decide whether to yield/background when supported
-- The optional wait_ms parameter is a hint for foreground wait or startup preview time and may be clamped or ignored by the backend
-- If the backend returns shell-visible handles, continue using ordinary execute calls with the returned commands
+- Set run_in_background=true for servers, watchers, and other long-running commands you do not need to wait for. You will be notified when it completes; use the task_output tool to check its status or retrieve its result, and the task_stop tool to cancel it.
+- The optional timeout parameter (in milliseconds) sets the maximum time to wait for the command. Omit to use the default.
 - Commands run in an isolated sandbox environment
 - Returns combined stdout/stderr output with exit code
 - If the output is very large, it may be truncated
@@ -306,9 +302,8 @@ Usage notes:
 
 Examples:
 Good examples:
-- execute(command="pytest /foo/bar/tests", mode="foreground")
-- execute(command="python /path/to/script.py", mode="foreground", wait_ms=1000)
-- execute(command="npm run dev", mode="background", wait_ms=1000)
+- execute(command="pytest /foo/bar/tests")
+- execute(command="npm run dev", run_in_background=true)
 
 Bad examples (avoid these):
 - execute(command="cd /foo/bar && pytest tests")  # Use absolute path instead
@@ -317,7 +312,7 @@ Bad examples (avoid these):
 - execute(command="grep -r 'pattern' .")  # Use grep tool instead
 `
 
-	RichExecuteToolDescChinese = `
+	ManagedExecuteToolDescChinese = `
 在沙箱环境中执行给定命令，具有适当的处理和安全措施。
 
 执行命令前，请按照以下步骤操作：
@@ -338,12 +333,8 @@ Bad examples (avoid these):
 
 使用说明：
 - command 参数是必需的
-- 可选的 mode 参数可以是 "foreground"、"background" 或 "auto"
-- mode "foreground" 用于预期会完成且不应在后台继续运行的命令
-- mode "background" 用于服务器、监听器和长时间运行的命令
-- mode "auto" 让后端在支持时决定是否让出或转入后台
-- 可选的 wait_ms 参数是前台等待或启动预览时间提示，后端可能会限制或忽略它
-- 如果后端返回 shell 可见的句柄，请继续用普通 execute 调用执行返回的命令
+- 对于服务器、监听器等你无需等待的长时间运行命令，设置 run_in_background=true。命令完成时你会收到通知；使用 task_output 工具查询其状态或获取结果，使用 task_stop 工具取消它。
+- 可选的 timeout 参数（毫秒）设置等待命令的最长时间。不传则使用默认值。
 - 命令在隔离的沙箱环境中运行
 - 返回合并的 stdout/stderr 输出和退出代码
 - 如果输出非常大，可能会被截断
@@ -355,9 +346,8 @@ Bad examples (avoid these):
 
 示例：
 好的示例：
-- execute(command="pytest /foo/bar/tests", mode="foreground")
-- execute(command="python /path/to/script.py", mode="foreground", wait_ms=1000)
-- execute(command="npm run dev", mode="background", wait_ms=1000)
+- execute(command="pytest /foo/bar/tests")
+- execute(command="npm run dev", run_in_background=true)
 
 不好的示例（避免这些）：
 - execute(command="cd /foo/bar && pytest tests")  # 改用绝对路径

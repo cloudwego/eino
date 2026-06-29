@@ -640,6 +640,26 @@ func (b *InMemoryBackend) Write(ctx context.Context, req *WriteRequest) error {
 	return nil
 }
 
+// Append adds content to the end of a file, creating it if it does not exist.
+// It implements the optional Appender interface, letting OutputWriter stream
+// task output incrementally without rewriting the whole file each time.
+func (b *InMemoryBackend) Append(ctx context.Context, req *AppendRequest) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	filePath := normalizePath(req.FilePath)
+	if entry, ok := b.files[filePath]; ok {
+		entry.content += req.Content
+		entry.modifiedAt = time.Now()
+		return nil
+	}
+	b.files[filePath] = &fileEntry{
+		content:    req.Content,
+		modifiedAt: time.Now(),
+	}
+	return nil
+}
+
 // Edit replaces string occurrences in a file.
 func (b *InMemoryBackend) Edit(ctx context.Context, req *EditRequest) error {
 	b.mu.Lock()
