@@ -44,17 +44,17 @@ const (
 
 	// MetadataKeySubagentType is the RunInput.Metadata / Task.Metadata key under
 	// which the agent tool records the sub-agent type for a task. A
-	// ShouldAutoBackground hook reads it (via SubagentTypeFromTask) to apply
+	// ShouldAutoBackground hook reads it (via TypeFromTask) to apply
 	// agent-type-specific policy without parsing the human-readable Description. The
 	// value is a string.
 	MetadataKeySubagentType = "subagent_type"
 )
 
-// SubagentTypeFromTask returns the sub-agent type recorded in a sub-agent task's
+// TypeFromTask returns the sub-agent type recorded in a sub-agent task's
 // metadata under MetadataKeySubagentType, or "" if absent (e.g. the task is not a
 // sub-agent run). It is the intended way for a ShouldAutoBackground hook to recover
 // the agent type.
-func SubagentTypeFromTask(t *backgroundtask.Task) string {
+func TypeFromTask(t *backgroundtask.Task) string {
 	if t == nil {
 		return ""
 	}
