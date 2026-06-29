@@ -29,6 +29,7 @@ import (
 	"strings"
 
 	"github.com/cloudwego/eino/adk"
+	"github.com/cloudwego/eino/adk/backgroundtask"
 	"github.com/cloudwego/eino/adk/filesystem"
 	"github.com/cloudwego/eino/adk/internal"
 	"github.com/cloudwego/eino/components/tool"
@@ -72,21 +73,40 @@ type ToolConfig struct {
 	Disable bool
 }
 
-// ExecuteToolInputMode controls the JSON input schema for the execute tool.
-type ExecuteToolInputMode string
-
-const (
-	ExecuteToolInputModeLegacy ExecuteToolInputMode = "legacy"
-	ExecuteToolInputModeRich   ExecuteToolInputMode = "rich"
-)
-
 // ExecuteToolConfig configures the execute tool.
+//
+// The execute tool's input schema is determined by whether a background-task
+// Manager is configured on the middleware: without a Manager the tool accepts
+// only a command; with a Manager it additionally accepts a run_in_background
+// flag and routes runs through the Manager for lifecycle tracking.
 type ExecuteToolConfig struct {
 	ToolConfig
+}
 
-	// InputMode controls whether execute accepts only command or richer execution hints.
-	// Empty means legacy mode.
-	InputMode ExecuteToolInputMode
+// BackgroundConfig enables background-task execution for the execute tool.
+//
+// When set, the execute tool gains a run_in_background field and routes runs
+// through the shared Manager, so background and auto-background runs are tracked
+// and visible to the task_output/task_stop control tools. With a StreamingShell
+// backend the foreground phase still streams in real time; once a run moves to the
+// background its stream is capped with a notice and the rest is collected into the
+// task result.
+type BackgroundConfig struct {
+	// Manager is the shared background-task Manager. Required (a nil Manager is the
+	// same as no BackgroundConfig). It may be shared with other middlewares (e.g.
+	// subagent) for a unified task-ID space; wire the backgroundtask control
+	// middleware once, bound to the same Manager.
+	Manager *backgroundtask.Manager
+
+	// OutputStore and OutputDir, when both set, give every managed run an output
+	// file at OutputDir/<id>.output: streaming runs append their chunks to it as
+	// they arrive (interim output), buffered runs append their result on completion.
+	// The path is recorded on Task.OutputFile and surfaced in the background notice.
+	// OutputStore is a filesystem.Appender (filesystem.InMemoryBackend implements
+	// it); supply your own to direct output elsewhere. When either is unset, runs
+	// have no output file.
+	OutputStore filesystem.Appender
+	OutputDir   string
 }
 
 // Config is the configuration for the filesystem middleware
@@ -106,6 +126,11 @@ type Config struct {
 	// At least one of Backend, Shell, or StreamingShell must be set.
 	// Mutually exclusive with Shell.
 	StreamingShell filesystem.StreamingShell
+
+	// Background configures background-task execution for the execute tool. When
+	// nil, execute runs only foreground (blocking) and is not tracked. See
+	// BackgroundConfig.
+	Background *BackgroundConfig
 
 	// LsToolConfig configures the ls tool
 	// optional
@@ -181,9 +206,6 @@ func (c *Config) Validate() error {
 	if c.StreamingShell != nil && c.Shell != nil {
 		return errors.New("shell and streaming shell should not be both set")
 	}
-	if err := validateExecuteToolInputMode(c.ExecuteToolConfig); err != nil {
-		return err
-	}
 	return nil
 }
 
@@ -202,6 +224,7 @@ func NewMiddleware(ctx context.Context, config *Config) (adk.AgentMiddleware, er
 		Backend:                 config.Backend,
 		Shell:                   config.Shell,
 		StreamingShell:          config.StreamingShell,
+		Background:              config.Background,
 		LsToolConfig:            config.LsToolConfig,
 		ReadFileToolConfig:      config.ReadFileToolConfig,
 		WriteFileToolConfig:     config.WriteFileToolConfig,
@@ -258,6 +281,11 @@ type MiddlewareConfig struct {
 	// At least one of Backend, Shell, or StreamingShell must be set.
 	// Mutually exclusive with Shell.
 	StreamingShell filesystem.StreamingShell
+
+	// Background configures background-task execution for the execute tool. When
+	// nil, execute runs only foreground (blocking) and is not tracked. See
+	// BackgroundConfig.
+	Background *BackgroundConfig
 
 	// LsToolConfig configures the ls tool
 	// optional
@@ -340,9 +368,6 @@ func (c *MiddlewareConfig) Validate() error {
 	}
 	if c.StreamingShell != nil && c.Shell != nil {
 		return errors.New("shell and streaming shell should not be both set")
-	}
-	if err := validateExecuteToolInputMode(c.ExecuteToolConfig); err != nil {
-		return err
 	}
 	return nil
 }
@@ -447,9 +472,8 @@ func (m *typedFilesystemMiddleware[M]) BeforeAgent(ctx context.Context, runCtx *
 	return ctx, &nRunCtx, nil
 }
 
-// toolSpec defines a specification for creating a filesystem tool.
-// It unifies the tool creation process by encapsulating the tool configuration,
-// legacy descriptor, and the creation function.
+// toolSpec describes how to construct one filesystem tool, including its
+// configuration, legacy descriptor, and constructor.
 type toolSpec struct {
 	config     *ToolConfig
 	legacyDesc *string
@@ -457,10 +481,6 @@ type toolSpec struct {
 }
 
 func getFilesystemTools(_ context.Context, middlewareConfig *MiddlewareConfig) ([]tool.BaseTool, error) {
-	if err := validateExecuteToolInputMode(middlewareConfig.ExecuteToolConfig); err != nil {
-		return nil, err
-	}
-
 	var tools []tool.BaseTool
 
 	toolSpecs := []toolSpec{
@@ -552,25 +572,6 @@ func getFilesystemTools(_ context.Context, middlewareConfig *MiddlewareConfig) (
 	return tools, nil
 }
 
-func validateExecuteToolInputMode(config *ExecuteToolConfig) error {
-	if config == nil {
-		return nil
-	}
-	switch config.InputMode {
-	case "", ExecuteToolInputModeLegacy, ExecuteToolInputModeRich:
-		return nil
-	default:
-		return fmt.Errorf("unknown execute tool input mode: %s", config.InputMode)
-	}
-}
-
-func normalizeExecuteToolInputMode(config *ExecuteToolConfig) ExecuteToolInputMode {
-	if config == nil || config.InputMode == "" {
-		return ExecuteToolInputModeLegacy
-	}
-	return config.InputMode
-}
-
 func createExecuteTool(middlewareConfig *MiddlewareConfig) (tool.BaseTool, error) {
 	executeConfig := middlewareConfig.ExecuteToolConfig
 	if executeConfig == nil {
@@ -584,17 +585,35 @@ func createExecuteTool(middlewareConfig *MiddlewareConfig) (tool.BaseTool, error
 		if executeConfig.Desc != nil {
 			desc = *executeConfig.Desc
 		}
-		inputMode := normalizeExecuteToolInputMode(executeConfig)
-		if middlewareConfig.StreamingShell != nil {
-			return newStreamingExecuteTool(middlewareConfig.StreamingShell, executeConfig.Name, desc, inputMode)
+
+		// When a shared Manager is configured, the execute tool exposes a
+		// run_in_background field and routes runs through the Manager, so
+		// background/auto-background runs are tracked and visible to the
+		// task_output/task_stop control tools. Without a Manager the tool is
+		// command-only with no background support.
+		if middlewareConfig.Background != nil && middlewareConfig.Background.Manager != nil {
+			return newManagedExecuteTool(
+				middlewareConfig.Background.Manager,
+				middlewareConfig.Shell,
+				middlewareConfig.StreamingShell,
+				outputSink{
+					appender:  middlewareConfig.Background.OutputStore,
+					outputDir: middlewareConfig.Background.OutputDir,
+				},
+				executeConfig.Name,
+				desc,
+			)
 		}
-		return newExecuteTool(middlewareConfig.Shell, executeConfig.Name, desc, inputMode)
+
+		if middlewareConfig.StreamingShell != nil {
+			return newStreamingExecuteTool(middlewareConfig.StreamingShell, executeConfig.Name, desc)
+		}
+		return newExecuteTool(middlewareConfig.Shell, executeConfig.Name, desc)
 	})
 }
 
-// createToolFromSpec creates a tool instance based on the provided toolSpec.
-// It handles configuration merging (ToolConfig + legacy Desc), checks if the tool
-// is disabled, and prioritizes CustomTool over the default implementation.
+// createToolFromSpec creates a tool from spec, applying configuration merging,
+// disable handling, and CustomTool precedence.
 func createToolFromSpec(middlewareConfig *MiddlewareConfig, spec toolSpec) (tool.BaseTool, error) {
 	mergedConfig := middlewareConfig.mergeToolConfigWithDesc(spec.config, spec.legacyDesc)
 
@@ -1057,108 +1076,46 @@ func newGrepTool(fs filesystem.Backend, name string, desc string) (tool.BaseTool
 	})
 }
 
-type executeArgsLegacy struct {
-	Command string `json:"command"`
+type executeArgs struct {
+	Command string `json:"command" jsonschema:"required" jsonschema_description:"The command to execute"`
 }
 
-type executeArgsRich struct {
-	Command string `json:"command"`
-	Mode    string `json:"mode,omitempty" jsonschema:"enum=auto,enum=foreground,enum=background"`
-	WaitMS  int64  `json:"wait_ms,omitempty"`
+// executeManagedArgs is the execute tool input used when a background-task
+// Manager is configured: the model may additionally request background execution.
+type executeManagedArgs struct {
+	executeArgs
+	RunInBackground bool `json:"run_in_background,omitempty" jsonschema_description:"Set to true to run the command in the background. You will be notified when it completes; use task_output to query it and task_stop to cancel it."`
+	// TimeoutMS is the foreground budget in milliseconds. When omitted, the configured
+	// default applies. Ignored when run_in_background is true. What happens at the
+	// deadline (move to background vs. stop) is decided by the Manager's
+	// ShouldAutoBackground policy and is intentionally not surfaced to the model.
+	TimeoutMS int `json:"timeout,omitempty" jsonschema_description:"Optional timeout in milliseconds. The maximum time to wait for the command. Omit to use the default."`
 }
 
-func newExecuteRequestFromRich(input executeArgsRich) (*filesystem.ExecuteRequest, error) {
-	if input.WaitMS < 0 {
-		return nil, errors.New("wait_ms should not be negative")
-	}
-
-	req := &filesystem.ExecuteRequest{
-		Command: input.Command,
-		Mode:    filesystem.ExecuteMode(input.Mode),
-		WaitMS:  input.WaitMS,
-	}
-	switch req.Mode {
-	case "":
-		return req, nil
-	case filesystem.ExecuteModeAuto, filesystem.ExecuteModeForeground:
-		return req, nil
-	case filesystem.ExecuteModeBackground:
-		req.RunInBackendGround = true
-		return req, nil
-	default:
-		return nil, fmt.Errorf("unknown execute mode: %s", input.Mode)
-	}
-}
-
-func newExecuteTool(sb filesystem.Shell, name string, desc string, inputModes ...ExecuteToolInputMode) (tool.BaseTool, error) {
+func newExecuteTool(sb filesystem.Shell, name string, desc string) (tool.BaseTool, error) {
 	toolName := selectToolName(name, ToolNameExecute)
-	inputMode := ExecuteToolInputModeLegacy
-	if len(inputModes) > 0 && inputModes[0] != "" {
-		inputMode = inputModes[0]
-	}
-	defaultDesc, defaultDescChinese := executeToolDescs(inputMode)
-	d, err := selectToolDesc(desc, defaultDesc, defaultDescChinese)
+	d, err := selectToolDesc(desc, ExecuteToolDesc, ExecuteToolDescChinese)
 	if err != nil {
 		return nil, err
 	}
-
-	switch inputMode {
-	case ExecuteToolInputModeLegacy:
-		return utils.InferTool(toolName, d, func(ctx context.Context, input executeArgsLegacy) (string, error) {
-			result, err := sb.Execute(ctx, &filesystem.ExecuteRequest{Command: input.Command})
-			if err != nil {
-				return "", err
-			}
-
-			return convExecuteResponse(result), nil
-		})
-	case ExecuteToolInputModeRich:
-		return utils.InferTool(toolName, d, func(ctx context.Context, input executeArgsRich) (string, error) {
-			req, err := newExecuteRequestFromRich(input)
-			if err != nil {
-				return "", err
-			}
-			result, err := sb.Execute(ctx, req)
-			if err != nil {
-				return "", err
-			}
-
-			return convExecuteResponse(result), nil
-		})
-	default:
-		return nil, fmt.Errorf("unknown execute tool input mode: %s", inputMode)
-	}
+	return utils.InferTool(toolName, d, func(ctx context.Context, input executeArgs) (string, error) {
+		result, err := sb.Execute(ctx, &filesystem.ExecuteRequest{Command: input.Command})
+		if err != nil {
+			return "", err
+		}
+		return convExecuteResponse(result), nil
+	})
 }
 
-func executeToolDescs(inputMode ExecuteToolInputMode) (string, string) {
-	if inputMode == ExecuteToolInputModeRich {
-		return RichExecuteToolDesc, RichExecuteToolDescChinese
-	}
-	return ExecuteToolDesc, ExecuteToolDescChinese
-}
-
-func newStreamingExecuteTool(sb filesystem.StreamingShell, name string, desc string, inputModes ...ExecuteToolInputMode) (tool.BaseTool, error) {
+func newStreamingExecuteTool(sb filesystem.StreamingShell, name string, desc string) (tool.BaseTool, error) {
 	toolName := selectToolName(name, ToolNameExecute)
-	inputMode := ExecuteToolInputModeLegacy
-	if len(inputModes) > 0 && inputModes[0] != "" {
-		inputMode = inputModes[0]
-	}
-	defaultDesc, defaultDescChinese := executeToolDescs(inputMode)
-	d, err := selectToolDesc(desc, defaultDesc, defaultDescChinese)
+	d, err := selectToolDesc(desc, ExecuteToolDesc, ExecuteToolDescChinese)
 	if err != nil {
 		return nil, err
 	}
-
-	switch inputMode {
-	case ExecuteToolInputModeLegacy:
-		return newStreamingExecuteToolWithRun(sb, toolName, d, func(input executeArgsLegacy) (*filesystem.ExecuteRequest, error) {
-			return &filesystem.ExecuteRequest{Command: input.Command}, nil
-		})
-	case ExecuteToolInputModeRich:
-		return newStreamingExecuteToolWithRun(sb, toolName, d, newExecuteRequestFromRich)
-	default:
-		return nil, fmt.Errorf("unknown execute tool input mode: %s", inputMode)
-	}
+	return newStreamingExecuteToolWithRun(sb, toolName, d, func(input executeArgs) (*filesystem.ExecuteRequest, error) {
+		return &filesystem.ExecuteRequest{Command: input.Command}, nil
+	})
 }
 
 func newStreamingExecuteToolWithRun[T any](
@@ -1206,28 +1163,53 @@ func newStreamingExecuteToolWithRun[T any](
 					exitCode = chunk.ExitCode
 				}
 
-				parts := make([]string, 0, 2)
-				if chunk.Output != "" {
-					parts = append(parts, chunk.Output)
-				}
-				if chunk.Truncated {
-					parts = append(parts, "[Output was truncated due to size limits]")
-				}
-				if len(parts) > 0 {
-					sw.Send(strings.Join(parts, "\n"), nil)
+				if text := formatExecChunk(chunk.Output, chunk.Truncated); text != "" {
+					sw.Send(text, nil)
 					hasSentContent = true
 				}
 			}
 
-			if exitCode != nil && *exitCode != 0 {
-				sw.Send(fmt.Sprintf("\n[Command failed with exit code %d]", *exitCode), nil)
-			} else if !hasSentContent {
-				sw.Send("[Command executed successfully with no output]", nil)
+			if note := execTerminalNote(exitCode, hasSentContent); note != "" {
+				sw.Send(note, nil)
 			}
 		}()
 
 		return sr, nil
 	})
+}
+
+// Markers appended to execute-tool output. Shared by the buffered (convExecuteResponse),
+// streaming (newStreamingExecuteToolWithRun), and managed (bashStreamWork) paths.
+const (
+	outputTruncatedNote = "[Output was truncated due to size limits]"
+	commandFailedFmt    = "[Command failed with exit code %d]"
+	noCommandOutputNote = "[Command executed successfully with no output]"
+)
+
+// formatExecChunk renders one streamed ExecuteResponse chunk to the text to emit,
+// or "" when the chunk carries nothing.
+func formatExecChunk(output string, truncated bool) string {
+	parts := make([]string, 0, 2)
+	if output != "" {
+		parts = append(parts, output)
+	}
+	if truncated {
+		parts = append(parts, outputTruncatedNote)
+	}
+	return strings.Join(parts, "\n")
+}
+
+// execTerminalNote returns the trailing text for a finished command: a failure note
+// for a non-zero exit code, the no-output message when nothing was emitted, or ""
+// otherwise.
+func execTerminalNote(exitCode *int, hasContent bool) string {
+	if exitCode != nil && *exitCode != 0 {
+		return "\n" + fmt.Sprintf(commandFailedFmt, *exitCode)
+	}
+	if !hasContent {
+		return noCommandOutputNote
+	}
+	return ""
 }
 
 func convExecuteResponse(response *filesystem.ExecuteResponse) string {
@@ -1236,15 +1218,15 @@ func convExecuteResponse(response *filesystem.ExecuteResponse) string {
 	}
 	parts := []string{response.Output}
 	if response.ExitCode != nil && *response.ExitCode != 0 {
-		parts = append(parts, fmt.Sprintf("[Command failed with exit code %d]", *response.ExitCode))
+		parts = append(parts, fmt.Sprintf(commandFailedFmt, *response.ExitCode))
 	}
 	if response.Truncated {
-		parts = append(parts, "[Output was truncated due to size limits]")
+		parts = append(parts, outputTruncatedNote)
 	}
 
 	result := strings.Join(parts, "\n")
 	if result == "" && (response.ExitCode == nil || *response.ExitCode == 0) {
-		return "[Command executed successfully with no output]"
+		return noCommandOutputNote
 	}
 	return result
 }
