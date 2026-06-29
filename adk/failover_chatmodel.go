@@ -23,7 +23,6 @@ import (
 	"io"
 	"log"
 
-	"github.com/cloudwego/eino/callbacks"
 	"github.com/cloudwego/eino/components"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/compose"
@@ -76,63 +75,22 @@ func (m *typedFailoverProxyModel[M]) prepareTarget(ctx context.Context) (model.B
 }
 
 func (m *typedFailoverProxyModel[M]) Generate(ctx context.Context, input []M, opts ...model.Option) (M, error) {
-	target, targetType, err := m.prepareTarget(ctx)
+	target, _, err := m.prepareTarget(ctx)
 	if err != nil {
 		var zero M
 		return zero, err
 	}
 
-	// Override compose-level RunInfo with FailoverChatModel identity for the outer span.
-	ctx = callbacks.ReuseHandlers(ctx, &callbacks.RunInfo{
-		Type:      "FailoverChatModel",
-		Component: components.ComponentOfChatModel,
-	})
-	ctx = callbacks.OnStart(ctx, input)
-
-	// Create child RunInfo for the target model.
-	nCtx := callbacks.ReuseHandlers(ctx, &callbacks.RunInfo{
-		Type:      targetType,
-		Component: components.ComponentOfChatModel,
-	})
-
-	result, err := target.Generate(nCtx, input, opts...)
-	if err != nil {
-		callbacks.OnError(ctx, err)
-		return result, err
-	}
-
-	callbacks.OnEnd(ctx, result)
-
-	return result, nil
+	return target.Generate(ctx, input, opts...)
 }
 
 func (m *typedFailoverProxyModel[M]) Stream(ctx context.Context, input []M, opts ...model.Option) (*schema.StreamReader[M], error) {
-	target, targetType, err := m.prepareTarget(ctx)
+	target, _, err := m.prepareTarget(ctx)
 	if err != nil {
 		return nil, err
 	}
 
-	// Override compose-level RunInfo with FailoverChatModel identity for the outer span.
-	ctx = callbacks.ReuseHandlers(ctx, &callbacks.RunInfo{
-		Type:      "FailoverChatModel",
-		Component: components.ComponentOfChatModel,
-	})
-	ctx = callbacks.OnStart(ctx, input)
-
-	// Create child RunInfo for the target model.
-	nCtx := callbacks.ReuseHandlers(ctx, &callbacks.RunInfo{
-		Type:      targetType,
-		Component: components.ComponentOfChatModel,
-	})
-
-	result, err := target.Stream(nCtx, input, opts...)
-	if err != nil {
-		callbacks.OnError(ctx, err)
-		return nil, err
-	}
-
-	_, wrappedStream := callbacks.OnEndWithStreamOutput(ctx, result)
-	return wrappedStream, nil
+	return target.Stream(ctx, input, opts...)
 }
 
 func (m *typedFailoverProxyModel[M]) IsCallbacksEnabled() bool {
