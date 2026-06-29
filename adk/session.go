@@ -56,7 +56,7 @@ var ErrSessionEventIDGeneratorEmpty = errors.New("adk: session event id generato
 // the session log. Callers can detect this and fall back to a full reload.
 var ErrEventIDOutOfRange = errors.New("adk: session event id out of range")
 
-var ErrRollbackTargetNotFound = errors.New("adk: rollback target turn not found")
+var ErrRollbackTargetNotFound = errors.New("adk: rollback target event not found")
 var ErrInvalidRollbackTarget = errors.New("adk: invalid rollback target")
 var ErrRollbackTargetInactive = errors.New("adk: rollback target is not active")
 var ErrSessionHeadChanged = errors.New("adk: session committed idle head changed")
@@ -142,12 +142,6 @@ type SessionEvent[M MessageType] struct {
 
 	Kind SessionEventKind `json:"kind,omitempty"`
 
-	// TurnID groups all events belonging to a single logical turn. A fresh Run
-	// assigns a new UUID; a Resume preserves the original TurnID so downstream
-	// consumers can correlate the entire turn (including the interrupted prefix
-	// and the resumed suffix) as one unit.
-	TurnID string `json:"turn_id,omitempty"`
-
 	Message                 M                                `json:"message,omitempty"`
 	MessageStreamIncomplete *MessageStreamIncompleteEvent[M] `json:"message_stream_incomplete,omitempty"`
 	MessagesReplaced        *[]M                             `json:"messages_replaced,omitempty"`
@@ -190,7 +184,6 @@ type MessageStreamRef struct {
 	EventID   string
 	Timestamp time.Time
 	Kind      SessionEventKind
-	TurnID    string
 }
 
 type SessionEventKind string
@@ -258,9 +251,7 @@ type LifecycleEvent struct {
 
 type SessionRollbackEvent struct {
 	ToEventID                 string `json:"to_event_id"`
-	ToTurnID                  string `json:"to_turn_id,omitempty"`
 	PreviousHeadCommitEventID string `json:"previous_head_commit_event_id,omitempty"`
-	PreviousHeadTurnID        string `json:"previous_head_turn_id,omitempty"`
 }
 
 type SessionRunState string
@@ -474,8 +465,8 @@ type MessagesDeletedEvent struct {
 // SessionEventIDGenerator returns the EventID for a draft SessionEvent[M].
 //
 // Generators see the fully-populated session-local draft (Kind, Message, Span,
-// Extension, TurnID, ...) and may return a business-side identifier such as
-// the matching application order/job/result ID. When a generator does not
+// Extension, payload, timestamp, ...) and may return a business-side identifier
+// such as the matching application order/job/result ID. When a generator does not
 // recognize a draft event, it should fall through to
 // DefaultSessionEventIDGenerator[M] rather than allocating a UUID directly,
 // so that the default behavior stays consistent with the framework default.
@@ -529,7 +520,6 @@ type reconstructedSessionState[M MessageType] struct {
 
 type runnerSessionCheckpoint struct {
 	SessionID    string
-	TurnID       string
 	CheckPointID string
 	Payload      []byte
 }
@@ -963,7 +953,7 @@ func normalizeSessionConfig[M MessageType](cfg *SessionConfig[M]) SessionConfig[
 // persisting the event.
 //
 // Callers MUST construct the draft with EventID == "" and populate every
-// other relevant session-local field (TurnID, Kind, payload, timestamp) so the
+// other relevant session-local field (Kind, payload, timestamp) so the
 // generator sees a complete draft. A nil event is a no-op.
 //
 // On generator-side contract violations, the helper returns:
@@ -1330,9 +1320,9 @@ var sessionReplayEventKinds = []SessionEventKind{
 }
 
 type RollbackSessionOptions[M MessageType] struct {
-	CheckPointStore    CheckPointStore
-	ExpectedHeadTurnID string
-	EventIDGenerator   SessionEventIDGenerator[M]
+	CheckPointStore     CheckPointStore
+	ExpectedHeadEventID string
+	EventIDGenerator    SessionEventIDGenerator[M]
 }
 
 type RollbackSessionOption[M MessageType] func(*RollbackSessionOptions[M])
@@ -1344,16 +1334,17 @@ func WithRollbackSessionCheckPointStore[M MessageType](store CheckPointStore) Ro
 	}
 }
 
-// WithRollbackSessionExpectedHeadTurnID requires the current active head turn to match turnID before rollback.
-func WithRollbackSessionExpectedHeadTurnID[M MessageType](turnID string) RollbackSessionOption[M] {
+// WithRollbackSessionExpectedHeadEventID requires the current active committed
+// idle event to match eventID before rollback.
+func WithRollbackSessionExpectedHeadEventID[M MessageType](eventID string) RollbackSessionOption[M] {
 	return func(opts *RollbackSessionOptions[M]) {
-		opts.ExpectedHeadTurnID = turnID
+		opts.ExpectedHeadEventID = eventID
 	}
 }
 
 // WithRollbackEventIDGenerator overrides the EventID generator for the rollback
-// event. The generator sees the fully-populated rollback draft (kind, turn IDs,
-// SessionRollbackEvent payload) before assignment. If nil or not set,
+// event. The generator sees the fully-populated rollback draft (kind,
+// SessionRollbackEvent payload, timestamp) before assignment. If nil or not set,
 // DefaultSessionEventIDGenerator[M] (UUID v4) is used.
 func WithRollbackEventIDGenerator[M MessageType](gen SessionEventIDGenerator[M]) RollbackSessionOption[M] {
 	return func(opts *RollbackSessionOptions[M]) {
@@ -1361,12 +1352,13 @@ func WithRollbackEventIDGenerator[M MessageType](gen SessionEventIDGenerator[M])
 	}
 }
 
-// RollbackSession appends a rollback marker that makes targetTurnID the latest active committed turn.
+// RollbackSession appends a rollback marker that makes the committed idle event
+// with targetEventID the latest active committed boundary.
 func RollbackSession[M MessageType](
 	ctx context.Context,
 	store SessionEventStore[M],
 	sessionID string,
-	targetTurnID string,
+	targetEventID string,
 	opts ...RollbackSessionOption[M],
 ) error {
 	if store == nil {
@@ -1375,7 +1367,7 @@ func RollbackSession[M MessageType](
 	if sessionID == "" {
 		return errors.New("adk: rollback sessionID is empty")
 	}
-	if targetTurnID == "" {
+	if targetEventID == "" {
 		return ErrRollbackTargetNotFound
 	}
 	var cfg RollbackSessionOptions[M]
@@ -1397,10 +1389,10 @@ func RollbackSession[M MessageType](
 	if err != nil {
 		return err
 	}
-	target, head, err := resolveRollbackTarget[M](activeEvents, targetTurnID)
+	target, head, err := resolveRollbackTarget[M](activeEvents, targetEventID)
 	if err != nil {
 		if errors.Is(err, ErrRollbackTargetNotFound) {
-			evidence, evidenceErr := findPhysicalRollbackTargetEvidence[M](ctx, openResult.handle, sessionID, targetTurnID, defaultLoadPageSize)
+			evidence, evidenceErr := findPhysicalRollbackTargetEvidence[M](ctx, openResult.handle, sessionID, targetEventID, defaultLoadPageSize)
 			if evidenceErr != nil {
 				return evidenceErr
 			}
@@ -1413,7 +1405,7 @@ func RollbackSession[M MessageType](
 		}
 		return err
 	}
-	if cfg.ExpectedHeadTurnID != "" && (head == nil || head.TurnID != cfg.ExpectedHeadTurnID) {
+	if cfg.ExpectedHeadEventID != "" && (head == nil || head.EventID != cfg.ExpectedHeadEventID) {
 		return ErrSessionHeadChanged
 	}
 
@@ -1422,9 +1414,7 @@ func RollbackSession[M MessageType](
 		Kind:      SessionEventRollback,
 		Rollback: &SessionRollbackEvent{
 			ToEventID:                 target.EventID,
-			ToTurnID:                  target.TurnID,
 			PreviousHeadCommitEventID: head.EventID,
-			PreviousHeadTurnID:        head.TurnID,
 		},
 	}
 	if err := assignSessionEventID(ctx, rb, cfg.EventIDGenerator); err != nil {
@@ -1521,9 +1511,6 @@ func projectActiveEventsFromReverse[M MessageType](
 			if !isCommittedIdleEvent(target) {
 				return nil, ErrInvalidRollbackTarget
 			}
-			if rb.ToTurnID != "" && target.TurnID != rb.ToTurnID {
-				return nil, ErrInvalidRollbackTarget
-			}
 			activeLen = pos + 1
 			continue
 		}
@@ -1554,7 +1541,7 @@ func findPhysicalRollbackTargetEvidence[M MessageType](
 	ctx context.Context,
 	handle sessionHandle[M],
 	sessionID string,
-	targetTurnID string,
+	targetEventID string,
 	pageSize int,
 ) (rollbackTargetEvidence, error) {
 	if pageSize <= 0 {
@@ -1579,7 +1566,7 @@ func findPhysicalRollbackTargetEvidence[M MessageType](
 			if event.Kind == SessionEventRollback {
 				continue
 			}
-			if event.TurnID != targetTurnID {
+			if event.EventID != targetEventID {
 				continue
 			}
 			if isCommittedIdleEvent(event) {
@@ -1607,28 +1594,25 @@ func decodeRollbackSessionEvent[M MessageType](event *SessionEvent[M]) (*Session
 
 func resolveRollbackTarget[M MessageType](
 	activeEvents []*SessionEvent[M],
-	targetTurnID string,
+	targetEventID string,
 ) (target *SessionEvent[M], head *SessionEvent[M], err error) {
-	var sawTargetTurnEvidence bool
+	var sawTargetEvent bool
 	for _, event := range activeEvents {
+		if event != nil && event.EventID == targetEventID {
+			sawTargetEvent = true
+		}
 		if !isCommittedIdleEvent(event) {
-			if !sawTargetTurnEvidence {
-				if event.TurnID == targetTurnID {
-					sawTargetTurnEvidence = true
-				}
-			}
 			continue
 		}
 		head = event
-		if event.TurnID == targetTurnID {
+		if event.EventID == targetEventID {
 			target = event
-			sawTargetTurnEvidence = true
 		}
 	}
 	if target != nil {
 		return target, head, nil
 	}
-	if sawTargetTurnEvidence {
+	if sawTargetEvent {
 		return nil, nil, ErrInvalidRollbackTarget
 	}
 	return nil, nil, ErrRollbackTargetNotFound
@@ -1682,6 +1666,5 @@ func isCommittedIdleEvent[M MessageType](event *SessionEvent[M]) bool {
 		event.Lifecycle != nil &&
 		event.Lifecycle.State == SessionRunStateIdle &&
 		event.Lifecycle.StopReason != nil &&
-		event.Lifecycle.StopReason.Type == "end_turn" &&
-		event.TurnID != ""
+		event.Lifecycle.StopReason.Type == "end_turn"
 }

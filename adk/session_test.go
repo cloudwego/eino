@@ -129,10 +129,10 @@ func withTestEventID[M MessageType](se *SessionEvent[M]) *SessionEvent[M] {
 	return se
 }
 
-func withTestCommittedIdle[M MessageType](turnID string) *SessionEvent[M] {
+func withTestCommittedIdle[M MessageType](eventID string) *SessionEvent[M] {
 	return withTestEventID(&SessionEvent[M]{
-		Kind:   SessionEventSessionStatusIdle,
-		TurnID: turnID,
+		EventID: eventID,
+		Kind:    SessionEventSessionStatusIdle,
 		Lifecycle: &LifecycleEvent{
 			State:      SessionRunStateIdle,
 			StopReason: &StopReason{Type: "end_turn"},
@@ -199,7 +199,7 @@ func testMessageWithID(content string, role schema.RoleType) *schema.Message {
 	return msg
 }
 
-func appendCommittedTestTurn(t *testing.T, ctx context.Context, store testSessionAppendStore, sid string, turnID string, contents ...string) *SessionEvent[*schema.Message] {
+func appendCommittedTestTurn(t *testing.T, ctx context.Context, store testSessionAppendStore, sid string, boundaryEventID string, contents ...string) *SessionEvent[*schema.Message] {
 	t.Helper()
 	for i, content := range contents {
 		role := schema.User
@@ -208,13 +208,12 @@ func appendCommittedTestTurn(t *testing.T, ctx context.Context, store testSessio
 		}
 		appendTestSessionEvent(t, ctx, store, sid, &SessionEvent[*schema.Message]{
 			Kind:    SessionEventMessage,
-			TurnID:  turnID,
 			Message: testMessageWithID(content, role),
 		})
 	}
 	return appendTestSessionEvent(t, ctx, store, sid, &SessionEvent[*schema.Message]{
-		Kind:   SessionEventSessionStatusIdle,
-		TurnID: turnID,
+		EventID: boundaryEventID,
+		Kind:    SessionEventSessionStatusIdle,
 		Lifecycle: &LifecycleEvent{
 			State:      SessionRunStateIdle,
 			StopReason: &StopReason{Type: "end_turn"},
@@ -1099,7 +1098,6 @@ func TestRunnerSessionStreamingRefAllocatesMissingEventID(t *testing.T) {
 		if e != nil && e.Kind == SessionEventMessage && e.Message == nil {
 			sawStreamDraft = true
 			assert.False(t, e.Timestamp.IsZero())
-			assert.NotEmpty(t, e.TurnID)
 			return businessID, nil
 		}
 		return DefaultSessionEventIDGenerator[*schema.Message](ctx, e)
@@ -1131,7 +1129,6 @@ func TestRunnerSessionStreamingRefAllocatesMissingEventID(t *testing.T) {
 	require.NotNil(t, ref)
 	assert.Equal(t, businessID, ref.EventID)
 	assert.Equal(t, SessionEventMessage, ref.Kind)
-	assert.NotEmpty(t, ref.TurnID)
 	assert.False(t, ref.Timestamp.IsZero())
 
 	msg, err := event.Output.MessageOutput.MessageStream.Recv()
@@ -1146,7 +1143,6 @@ func TestRunnerSessionStreamingRefAllocatesMissingEventID(t *testing.T) {
 	})
 	require.Len(t, messages, 1)
 	assert.Equal(t, businessID, messages[0].EventID)
-	assert.Equal(t, ref.TurnID, messages[0].TurnID)
 	assert.Equal(t, ref.Timestamp, messages[0].Timestamp)
 }
 
@@ -2216,9 +2212,7 @@ func TestSessionRollbackEventRoundTrip(t *testing.T) {
 		Kind:    SessionEventRollback,
 		Rollback: &SessionRollbackEvent{
 			ToEventID:                 "turn-end-1",
-			ToTurnID:                  "turn-1",
 			PreviousHeadCommitEventID: "turn-end-2",
-			PreviousHeadTurnID:        "turn-2",
 		},
 	}
 	data, err := encodeSessionEvent(se)
@@ -2229,9 +2223,7 @@ func TestSessionRollbackEventRoundTrip(t *testing.T) {
 	require.NotNil(t, decoded.Rollback)
 	assert.Equal(t, SessionEventRollback, decoded.Kind)
 	assert.Equal(t, "turn-end-1", decoded.Rollback.ToEventID)
-	assert.Equal(t, "turn-1", decoded.Rollback.ToTurnID)
 	assert.Equal(t, "turn-end-2", decoded.Rollback.PreviousHeadCommitEventID)
-	assert.Equal(t, "turn-2", decoded.Rollback.PreviousHeadTurnID)
 }
 
 func TestAttack_RollbackSessionUsesConfiguredEventIDGenerator(t *testing.T) {
@@ -2269,7 +2261,7 @@ func TestRollbackSessionReconstructionHidesDeadBranchAndKeepsNewSuffix(t *testin
 		sid,
 		"turn-1",
 		WithRollbackSessionCheckPointStore[*schema.Message](store),
-		WithRollbackSessionExpectedHeadTurnID[*schema.Message]("turn-2"),
+		WithRollbackSessionExpectedHeadEventID[*schema.Message]("turn-2"),
 	))
 	appendCommittedTestTurn(t, ctx, store, sid, "turn-3", "Q3", "A3")
 
@@ -2289,9 +2281,7 @@ func TestRollbackSessionReconstructionHidesDeadBranchAndKeepsNewSuffix(t *testin
 	require.Len(t, rollbackEvents, 1)
 	require.NotNil(t, rollbackEvents[0].Rollback)
 	assert.Equal(t, t1.EventID, rollbackEvents[0].Rollback.ToEventID)
-	assert.Equal(t, "turn-1", rollbackEvents[0].Rollback.ToTurnID)
 	assert.Equal(t, t2.EventID, rollbackEvents[0].Rollback.PreviousHeadCommitEventID)
-	assert.Equal(t, "turn-2", rollbackEvents[0].Rollback.PreviousHeadTurnID)
 	assert.NotContains(t, store.checkpoints, sessionRunnerCheckpointID(sid))
 }
 
@@ -2341,7 +2331,7 @@ func TestRunnerQueryAfterRollbackUsesActiveProjection(t *testing.T) {
 		return isCommittedIdleEvent(se)
 	})
 	require.Len(t, firstCommittedIdleEvents, 1)
-	firstTurnID := firstCommittedIdleEvents[0].TurnID
+	firstBoundaryEventID := firstCommittedIdleEvents[0].EventID
 
 	secondAgent := &runnerSessionAgent{
 		name: "runner-session-agent",
@@ -2356,7 +2346,7 @@ func TestRunnerQueryAfterRollbackUsesActiveProjection(t *testing.T) {
 	})
 	drainSessionEvents(t, secondRunner.Query(ctx, "second"))
 
-	require.NoError(t, RollbackSession[*schema.Message](ctx, store, sid, firstTurnID))
+	require.NoError(t, RollbackSession[*schema.Message](ctx, store, sid, firstBoundaryEventID))
 
 	thirdAgent := &runnerSessionAgent{
 		name: "runner-session-agent",
@@ -2386,12 +2376,12 @@ func TestRollbackSessionTargetResolutionErrors(t *testing.T) {
 	appendCommittedTestTurn(t, ctx, store, sid, "turn-1", "Q1", "A1")
 	appendCommittedTestTurn(t, ctx, store, sid, "turn-2", "Q2", "A2")
 	appendTestSessionEvent(t, ctx, store, sid, &SessionEvent[*schema.Message]{
+		EventID: "pending-event",
 		Kind:    SessionEventMessage,
-		TurnID:  "turn-pending",
 		Message: testMessageWithID("pending", schema.User),
 	})
 
-	err := RollbackSession[*schema.Message](ctx, store, sid, "turn-pending")
+	err := RollbackSession[*schema.Message](ctx, store, sid, "pending-event")
 	require.ErrorIs(t, err, ErrInvalidRollbackTarget)
 
 	err = RollbackSession[*schema.Message](ctx, store, sid, "missing")
@@ -2402,7 +2392,7 @@ func TestRollbackSessionTargetResolutionErrors(t *testing.T) {
 		store,
 		sid,
 		"turn-1",
-		WithRollbackSessionExpectedHeadTurnID[*schema.Message]("stale-head"),
+		WithRollbackSessionExpectedHeadEventID[*schema.Message]("stale-head"),
 	)
 	require.ErrorIs(t, err, ErrSessionHeadChanged)
 	rollbackEvents := filterStoredSessionEvents(t, store.events, func(se *SessionEvent[*schema.Message]) bool {
@@ -2415,14 +2405,14 @@ func TestRollbackSessionTargetResolutionErrors(t *testing.T) {
 		store,
 		sid,
 		"turn-1",
-		WithRollbackSessionExpectedHeadTurnID[*schema.Message]("turn-2"),
+		WithRollbackSessionExpectedHeadEventID[*schema.Message]("turn-2"),
 	))
 	err = RollbackSession[*schema.Message](
 		ctx,
 		store,
 		sid,
 		"turn-2",
-		WithRollbackSessionExpectedHeadTurnID[*schema.Message]("turn-2"),
+		WithRollbackSessionExpectedHeadEventID[*schema.Message]("turn-2"),
 	)
 	require.ErrorIs(t, err, ErrRollbackTargetInactive)
 }
@@ -2434,7 +2424,6 @@ func TestReconstructRollbackMalformedRecordsFailClosed(t *testing.T) {
 
 	msg := appendTestSessionEvent(t, ctx, store, sid, &SessionEvent[*schema.Message]{
 		Kind:    SessionEventMessage,
-		TurnID:  "turn-1",
 		Message: testMessageWithID("Q1", schema.User),
 	})
 	appendCommittedTestTurn(t, ctx, store, sid, "turn-1", "A1")
@@ -2443,7 +2432,6 @@ func TestReconstructRollbackMalformedRecordsFailClosed(t *testing.T) {
 		Kind: SessionEventRollback,
 		Rollback: &SessionRollbackEvent{
 			ToEventID: msg.EventID,
-			ToTurnID:  "turn-1",
 		},
 	})
 	_, err := reconstructSessionState[*schema.Message](ctx, store, sid, defaultLoadPageSize)
@@ -2456,7 +2444,6 @@ func TestReconstructRollbackMalformedRecordsFailClosed(t *testing.T) {
 		Kind:    SessionEventRollback,
 		Rollback: &SessionRollbackEvent{
 			ToEventID: "missing-turn-end-event",
-			ToTurnID:  "turn-1",
 		},
 	}
 	data, encodeErr := encodeSessionEvent(payloadEvent)
@@ -2481,7 +2468,6 @@ func TestReconstructRollbackMalformedRecordsFailClosed(t *testing.T) {
 		Kind: SessionEventRollback,
 		Rollback: &SessionRollbackEvent{
 			ToEventID: staleTarget.EventID,
-			ToTurnID:  "turn-2",
 		},
 	})
 	_, err = reconstructSessionState[*schema.Message](ctx, store, sid, defaultLoadPageSize)
@@ -2988,7 +2974,7 @@ func TestSessionPersister_FlushContextCancellation(t *testing.T) {
 	assert.Equal(t, 1, store.getAppendCalls())
 }
 
-// --- Attack tests for TurnID recovery ---
+// --- Attack tests for reconstruction across committed and in-flight events ---
 
 // TestAttack_ReconstructionIncludesInterruptedTailOnResume verifies that
 // reconstructSessionState keeps interrupted-tail messages during replay.
@@ -3000,18 +2986,18 @@ func TestAttack_ReconstructionIncludesInterruptedTailOnResume(t *testing.T) {
 	committedMsg := schema.UserMessage("committed-msg")
 	EnsureMessageID(committedMsg)
 
-	// A committed turn: TurnStart (lifecycle running) + Message + committed idle, all with TurnID "turn-committed"
+	// A committed turn: TurnStart (lifecycle running) + Message + committed idle.
 	events := []*SessionEvent[*schema.Message]{
-		{EventID: uuid.NewString(), Kind: SessionEventSessionStatusRunning, TurnID: "turn-committed", Lifecycle: &LifecycleEvent{State: SessionRunStateRunning}},
-		{EventID: uuid.NewString(), Kind: SessionEventMessage, TurnID: "turn-committed", Message: committedMsg},
-		{EventID: uuid.NewString(), Kind: SessionEventSessionStatusIdle, TurnID: "turn-committed", Lifecycle: &LifecycleEvent{State: SessionRunStateIdle, StopReason: &StopReason{Type: "end_turn"}}},
+		{EventID: uuid.NewString(), Kind: SessionEventSessionStatusRunning, Lifecycle: &LifecycleEvent{State: SessionRunStateRunning}},
+		{EventID: uuid.NewString(), Kind: SessionEventMessage, Message: committedMsg},
+		{EventID: uuid.NewString(), Kind: SessionEventSessionStatusIdle, Lifecycle: &LifecycleEvent{State: SessionRunStateIdle, StopReason: &StopReason{Type: "end_turn"}}},
 	}
 
-	// An interrupted turn: a Message event with TurnID "turn-interrupted" and no committed idle.
+	// An interrupted run: a Message event with no committed idle.
 	interruptedMsg := schema.AssistantMessage("interrupted-msg", nil)
 	EnsureMessageID(interruptedMsg)
 	events = append(events, &SessionEvent[*schema.Message]{
-		EventID: uuid.NewString(), Kind: SessionEventMessage, TurnID: "turn-interrupted", Message: interruptedMsg,
+		EventID: uuid.NewString(), Kind: SessionEventMessage, Message: interruptedMsg,
 	})
 
 	for _, se := range events {
@@ -3036,8 +3022,8 @@ func TestAttack_ReconstructionWithoutCommittedIdle(t *testing.T) {
 	msg := schema.UserMessage("first-turn")
 	EnsureMessageID(msg)
 	events := []*SessionEvent[*schema.Message]{
-		{EventID: uuid.NewString(), Kind: SessionEventMessage, TurnID: "turn-interrupted", Message: msg},
-		{EventID: uuid.NewString(), Kind: SessionEventInterrupt, TurnID: "turn-interrupted", Interrupt: &InterruptEvent{
+		{EventID: uuid.NewString(), Kind: SessionEventMessage, Message: msg},
+		{EventID: uuid.NewString(), Kind: SessionEventInterrupt, Interrupt: &InterruptEvent{
 			Contexts: []*InterruptContext{
 				{
 					InterruptID: "agent:InterruptAgent",
@@ -3059,14 +3045,11 @@ func TestAttack_ReconstructionWithoutCommittedIdle(t *testing.T) {
 }
 
 // TestAttack_OldRunIDFieldIgnoredOnDeserialization verifies that a JSON payload
-// containing a legacy "run_id" field is deserialized without error, and the
-// field is silently ignored (no RunID field on the struct).
+// containing a legacy "run_id" field is deserialized without error.
 func TestAttack_OldRunIDFieldIgnoredOnDeserialization(t *testing.T) {
-	// Manually craft JSON with a legacy "run_id" field alongside valid fields.
 	rawJSON := []byte(`{
 		"event_id": "evt-legacy",
 		"run_id": "old-run",
-		"turn_id": "turn-1",
 		"kind": "message",
 		"message": {"role": "user", "content": "hello from legacy"}
 	}`)
@@ -3074,18 +3057,15 @@ func TestAttack_OldRunIDFieldIgnoredOnDeserialization(t *testing.T) {
 	event, err := decodeSessionEventWithSerializer[*schema.Message](rawJSON, nil)
 	require.NoError(t, err, "deserialization must not fail on unknown run_id field")
 	require.NotNil(t, event)
-	assert.Equal(t, "turn-1", event.TurnID)
 	assert.Equal(t, "evt-legacy", event.EventID)
 	require.NotNil(t, event.Message)
 	assert.Equal(t, "hello from legacy", event.Message.Content)
 }
 
-// TestAttack_ResumePreservesTurnIDFromInterruptedRun verifies that Resume
-// carries the same TurnID as the interrupted run's events.
-func TestAttack_ResumePreservesTurnIDFromInterruptedRun(t *testing.T) {
+func TestAttack_ResumeAfterInterruptedRunWritesSessionEvents(t *testing.T) {
 	ctx := context.Background()
 	store := newSessionHelperStore()
-	sessionID := "resume-turnid-preserve"
+	sessionID := "resume-after-interrupt"
 
 	// First, run a normal turn that completes (provides a committed idle baseline).
 	normalAgent := &runnerSessionAgent{
@@ -3119,43 +3099,8 @@ func TestAttack_ResumePreservesTurnIDFromInterruptedRun(t *testing.T) {
 		}
 	}
 
-	// Find the TurnID used by the interrupted run. It must differ from the first run's TurnID.
-	// Collect all unique TurnIDs from the store.
-	turnIDSet := make(map[string]bool)
-	for _, ep := range store.events {
-		se, err := decodeSessionEvent[*schema.Message](ep.Data)
-		require.NoError(t, err)
-		if se.TurnID != "" {
-			turnIDSet[se.TurnID] = true
-		}
-	}
-	require.GreaterOrEqual(t, len(turnIDSet), 2, "must have at least 2 distinct TurnIDs (committed + interrupted)")
-
-	// The interrupted TurnID is the one on reconstructable model-context events
-	// after the last committed idle. Timeline status events are not replay anchors.
-	var lastCommittedIdleIdx int
-	for i, ep := range store.events {
-		se, err := decodeSessionEvent[*schema.Message](ep.Data)
-		require.NoError(t, err)
-		if isCommittedIdleEvent(se) {
-			lastCommittedIdleIdx = i
-		}
-	}
-	var interruptedTurnID string
-	for i := lastCommittedIdleIdx + 1; i < len(store.events); i++ {
-		se, err := decodeSessionEvent[*schema.Message](store.events[i].Data)
-		require.NoError(t, err)
-		if se.Kind == SessionEventMessage && se.TurnID != "" {
-			interruptedTurnID = se.TurnID
-			break
-		}
-	}
-	require.NotEmpty(t, interruptedTurnID, "interrupted run must have events with a TurnID after the last committed idle")
-
-	// Record event count before resume.
 	eventsBeforeResume := len(store.events)
 
-	// Resume the runner.
 	resumeIter, err := runner.Resume(ctx, "")
 	require.NoError(t, err)
 	for {
@@ -3165,24 +3110,15 @@ func TestAttack_ResumePreservesTurnIDFromInterruptedRun(t *testing.T) {
 		}
 	}
 
-	// Check that resume events (added after the interrupted run) carry the same TurnID.
-	var resumeTurnIDs []string
-	for i := eventsBeforeResume; i < len(store.events); i++ {
-		se, err := decodeSessionEvent[*schema.Message](store.events[i].Data)
-		require.NoError(t, err)
-		if se.TurnID != "" {
-			resumeTurnIDs = append(resumeTurnIDs, se.TurnID)
-		}
-	}
-	require.NotEmpty(t, resumeTurnIDs, "resume must produce events with TurnIDs")
-	for _, tid := range resumeTurnIDs {
-		assert.Equal(t, interruptedTurnID, tid, "resume events must carry the same TurnID as the interrupted run")
-	}
+	require.Greater(t, len(store.events), eventsBeforeResume)
+	resumeEvents := filterStoredSessionEvents(t, store.events[eventsBeforeResume:], func(se *SessionEvent[*schema.Message]) bool {
+		return se.Kind == SessionEventKind(SessionEventExtensionPrefix+"resume.request_started") ||
+			se.Kind == SessionEventSessionStatusIdle
+	})
+	require.NotEmpty(t, resumeEvents)
 }
 
-// TestAttack_FreshRunIgnoresInFlightTurnID verifies that a fresh Run on a
-// session with an interrupted turn does NOT reuse the interrupted TurnID.
-func TestAttack_FreshRunIgnoresInFlightTurnID(t *testing.T) {
+func TestAttack_FreshRunIgnoresInterruptedSuffixMetadata(t *testing.T) {
 	ctx := context.Background()
 	store := newSessionHelperStore()
 	sessionID := "fresh-run-ignores-inflight"
@@ -3219,26 +3155,6 @@ func TestAttack_FreshRunIgnoresInFlightTurnID(t *testing.T) {
 		}
 	}
 
-	// Identify the interrupted TurnID (events after the last committed idle).
-	var lastCommittedIdleIdx int
-	for i, ep := range store.events {
-		se, err := decodeSessionEvent[*schema.Message](ep.Data)
-		require.NoError(t, err)
-		if isCommittedIdleEvent(se) {
-			lastCommittedIdleIdx = i
-		}
-	}
-	var interruptedTurnID string
-	for i := lastCommittedIdleIdx + 1; i < len(store.events); i++ {
-		se, err := decodeSessionEvent[*schema.Message](store.events[i].Data)
-		require.NoError(t, err)
-		if se.TurnID != "" {
-			interruptedTurnID = se.TurnID
-			break
-		}
-	}
-	require.NotEmpty(t, interruptedTurnID)
-
 	// Instead of resuming, create a NEW runner on the same session and run a new query (fresh Run).
 	eventsBeforeFresh := len(store.events)
 	freshAgent := &runnerSessionAgent{
@@ -3255,19 +3171,13 @@ func TestAttack_FreshRunIgnoresInFlightTurnID(t *testing.T) {
 	})
 	drainSessionEvents(t, freshRunner.Query(ctx, "new question"))
 
-	// Collect TurnIDs from the fresh run's events.
-	var freshTurnIDs []string
-	for i := eventsBeforeFresh; i < len(store.events); i++ {
-		se, err := decodeSessionEvent[*schema.Message](store.events[i].Data)
-		require.NoError(t, err)
-		if se.TurnID != "" {
-			freshTurnIDs = append(freshTurnIDs, se.TurnID)
-		}
-	}
-	require.NotEmpty(t, freshTurnIDs, "fresh run must have events with TurnIDs")
-	for _, tid := range freshTurnIDs {
-		assert.NotEqual(t, interruptedTurnID, tid, "fresh run must NOT reuse the interrupted TurnID")
-	}
+	require.Greater(t, len(store.events), eventsBeforeFresh)
+	require.Len(t, freshAgent.inputs, 1)
+	require.Len(t, freshAgent.inputs[0], 4)
+	assert.Equal(t, "baseline", freshAgent.inputs[0][0].Content)
+	assert.Equal(t, "ok", freshAgent.inputs[0][1].Content)
+	assert.Equal(t, "trigger interrupt", freshAgent.inputs[0][2].Content)
+	assert.Equal(t, "new question", freshAgent.inputs[0][3].Content)
 }
 
 // sessionStreamingAgent emits a single streaming assistant output. Used to
@@ -3492,8 +3402,6 @@ func TestAttack_IncompleteStreamPrefixCarriesDurableMetadata(t *testing.T) {
 	require.NotNil(t, incomplete)
 	require.NotNil(t, idle)
 	assert.NotEmpty(t, incomplete.EventID)
-	assert.NotEmpty(t, incomplete.TurnID)
-	assert.Equal(t, incomplete.TurnID, idle.TurnID)
 	assert.True(t, incomplete.Timestamp.Before(idle.Timestamp) || incomplete.Timestamp.Equal(idle.Timestamp))
 	assert.Equal(t, "prefix", incomplete.MessageStreamIncomplete.Message.Content)
 	assert.Contains(t, incomplete.MessageStreamIncomplete.Error, streamErr.Error())
@@ -3567,23 +3475,19 @@ func TestStreamPersistence_IncompleteStreamExcludedFromReconstruction(t *testing
 	ctx := context.Background()
 	store := newSessionHelperStore()
 	sid := "incomplete-reconstruct-session"
-	turnID := "turn-incomplete"
 	appendTestSessionEvent(t, ctx, store, sid, &SessionEvent[*schema.Message]{
 		Kind:    SessionEventMessage,
-		TurnID:  turnID,
 		Message: schema.UserMessage("q"),
 	})
 	appendTestSessionEvent(t, ctx, store, sid, &SessionEvent[*schema.Message]{
-		Kind:   SessionEventMessageStreamIncomplete,
-		TurnID: turnID,
+		Kind: SessionEventMessageStreamIncomplete,
 		MessageStreamIncomplete: &MessageStreamIncompleteEvent[*schema.Message]{
 			Message: schema.AssistantMessage("partial", nil),
 			Error:   "model stream failed",
 		},
 	})
 	appendTestSessionEvent(t, ctx, store, sid, &SessionEvent[*schema.Message]{
-		Kind:   SessionEventSessionStatusIdle,
-		TurnID: turnID,
+		Kind: SessionEventSessionStatusIdle,
 		Lifecycle: &LifecycleEvent{
 			State:      SessionRunStateIdle,
 			StopReason: &StopReason{Type: "end_turn"},
@@ -5437,8 +5341,8 @@ func TestReconstructSessionState_MessagesDeletedMissingTargetFails(t *testing.T)
 	})
 	require.NoError(t, store.AppendEventsForSession(ctx, sid, []*SessionEvent[*schema.Message]{deleteEvent}))
 
-	turnEndEvent := withTestCommittedIdle[*schema.Message]("turn-1")
-	require.NoError(t, store.AppendEventsForSession(ctx, sid, []*SessionEvent[*schema.Message]{turnEndEvent}))
+	committedIdleEvent := withTestCommittedIdle[*schema.Message]("turn-1")
+	require.NoError(t, store.AppendEventsForSession(ctx, sid, []*SessionEvent[*schema.Message]{committedIdleEvent}))
 
 	_, err := reconstructSessionState[*schema.Message](ctx, mustOpenTestSession[*schema.Message](t, ctx, store, sid), sid, defaultLoadPageSize)
 	require.Error(t, err)
@@ -5709,7 +5613,6 @@ func TestAttack_SessionEventEncodeDecodeRoundtrip(t *testing.T) {
 		EventID:   "roundtrip-1",
 		Timestamp: time.Date(2026, 1, 15, 10, 30, 0, 0, time.UTC),
 		Kind:      SessionEventMessage,
-		TurnID:    "turn-abc",
 		Message:   schema.UserMessage("roundtrip test"),
 	}
 
@@ -5728,9 +5631,6 @@ func TestAttack_SessionEventEncodeDecodeRoundtrip(t *testing.T) {
 	}
 	if decoded.Kind != original.Kind {
 		t.Errorf("Kind mismatch: got %q want %q", decoded.Kind, original.Kind)
-	}
-	if decoded.TurnID != original.TurnID {
-		t.Errorf("TurnID mismatch: got %q want %q", decoded.TurnID, original.TurnID)
 	}
 	t.Log("encode/decode roundtrip OK")
 }

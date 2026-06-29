@@ -2806,11 +2806,11 @@ func TestTurnLoop_ManagedInterrupt_DecisionResumeUsesCapturedCheckpointIDAndPara
 	require.NotEmpty(t, interruptEvents[0].Interrupt.Contexts)
 	assert.Equal(t, interruptTargetID, interruptEvents[0].Interrupt.Contexts[0].InterruptID)
 
-	turnEndEvents := filterStoredSessionEvents(t, sessionStore.events, func(se *SessionEvent[*schema.Message]) bool {
+	committedIdleEvents := filterStoredSessionEvents(t, sessionStore.events, func(se *SessionEvent[*schema.Message]) bool {
 		return isCommittedIdleEvent(se)
 	})
-	require.Len(t, turnEndEvents, 1)
-	assert.Equal(t, interruptEvents[0].TurnID, turnEndEvents[0].TurnID)
+	require.Len(t, committedIdleEvents, 1)
+	assert.NotEmpty(t, committedIdleEvents[0].EventID)
 }
 
 func TestTurnLoop_RestoredPendingResumeDistinguishesLegacyAndAcceptedResumeItems(t *testing.T) {
