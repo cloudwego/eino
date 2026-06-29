@@ -24,9 +24,12 @@ import (
 	"github.com/bytedance/sonic"
 
 	"github.com/cloudwego/eino/adk"
+	"github.com/cloudwego/eino/adk/backgroundtask"
 	"github.com/cloudwego/eino/adk/filesystem"
 	"github.com/cloudwego/eino/adk/internal"
+	backgroundtaskmw "github.com/cloudwego/eino/adk/middlewares/backgroundtask"
 	filesystem2 "github.com/cloudwego/eino/adk/middlewares/filesystem"
+	"github.com/cloudwego/eino/adk/middlewares/subagent"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool/utils"
 	"github.com/cloudwego/eino/schema"
@@ -35,6 +38,25 @@ import (
 func init() {
 	schema.RegisterName[TODO]("_eino_adk_prebuilt_deep_todo")
 	schema.RegisterName[[]TODO]("_eino_adk_prebuilt_deep_todo_slice")
+}
+
+// BackgroundConfig enables background-task execution for a DeepAgent's top-level
+// agent. When set, shell commands and sub-agent runs can execute as managed
+// background tasks under one task-ID space, and the task_output/task_stop control
+// tools are injected once.
+type BackgroundConfig struct {
+	// Manager is the shared background-task Manager. Required (a nil Manager is the
+	// same as no BackgroundConfig).
+	Manager *backgroundtask.Manager
+
+	// OutputDir, when set together with Config.Backend, gives every managed
+	// background task (shell command or sub-agent run) an output file under this
+	// directory. Shell runs tee their output there as it streams (interim output);
+	// sub-agent runs write their final result there. The path is recorded on
+	// Task.OutputFile and surfaced when the task is launched in the background, so a
+	// backgrounded task's output is retrievable by path. When empty, tasks have no
+	// output file.
+	OutputDir string
 }
 
 // TypedConfig defines the configuration for creating a DeepAgent parameterized by message type.
@@ -82,6 +104,15 @@ type TypedConfig[M adk.MessageType] struct {
 	// Optional. Mutually exclusive with Shell.
 	StreamingShell filesystem.StreamingShell
 
+	// Background configures background-task execution for the top-level agent: it
+	// can spawn sub-agents and run shell commands as managed background tasks under
+	// one task-ID space, and the task_output/task_stop control tools are injected
+	// once. Background is intentionally NOT propagated to the general or user
+	// sub-agents: their shell runs stay foreground/buffered and they cannot launch
+	// background work, so background orchestration is a top-level concern only. When
+	// nil, the top-level agent has no background-task support. See BackgroundConfig.
+	Background *BackgroundConfig
+
 	// WithoutWriteTodos disables the built-in write_todos tool when set to true.
 	WithoutWriteTodos bool
 	// WithoutGeneralSubAgent disables the general-purpose subagent when set to true.
@@ -119,7 +150,9 @@ type Config = TypedConfig[*schema.Message]
 // This function initializes built-in tools, creates a task tool for subagent orchestration,
 // and returns a fully configured TypedChatModelAgent ready for execution.
 func NewTyped[M adk.MessageType](ctx context.Context, cfg *TypedConfig[M]) (adk.TypedResumableAgent[M], error) {
-	handlers, err := buildTypedBuiltinAgentMiddlewares(ctx, cfg)
+	// Sub-agents never get the Manager: their shell runs stay foreground/buffered
+	// and they cannot launch background work (see Config.Manager).
+	subAgentHandlers, err := buildTypedBuiltinAgentMiddlewares(ctx, cfg, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -132,26 +165,47 @@ func NewTyped[M adk.MessageType](ctx context.Context, cfg *TypedConfig[M]) (adk.
 		})
 	}
 
-	if !cfg.WithoutGeneralSubAgent || len(cfg.SubAgents) > 0 {
-		tt, err := typedTaskToolMiddleware(
-			ctx,
-			cfg.TaskToolDescriptionGenerator,
-			cfg.SubAgents,
+	// The top-level agent's built-in handlers do get background support, so its own
+	// shell runs are background-capable and tracked under the shared task-ID space.
+	handlers, err := buildTypedBuiltinAgentMiddlewares(ctx, cfg, cfg.Background)
+	if err != nil {
+		return nil, err
+	}
 
-			cfg.WithoutGeneralSubAgent,
-			cfg.ChatModel,
-			instruction,
-			cfg.ToolsConfig,
-			cfg.MaxIteration,
-			cfg.Middlewares,
-			append(handlers, cfg.Handlers...),
-			cfg.ModelRetryConfig,
-			cfg.ModelFailoverConfig,
-		)
+	if !cfg.WithoutGeneralSubAgent || len(cfg.SubAgents) > 0 {
+		allSubAgents, err := buildSubAgentsList(ctx, cfg, instruction, subAgentHandlers)
 		if err != nil {
-			return nil, fmt.Errorf("failed to new task tool: %w", err)
+			return nil, err
 		}
-		handlers = append(handlers, tt)
+		if len(allSubAgents) > 0 {
+			subCfg := &subagent.TypedConfig[M]{
+				SubAgents:                allSubAgents,
+				ToolName:                 taskToolName,
+				ToolDescriptionGenerator: cfg.TaskToolDescriptionGenerator,
+			}
+			if cfg.Background != nil && cfg.Background.Manager != nil {
+				subCfg.Background = &subagent.BackgroundConfig{
+					Manager:     cfg.Background.Manager,
+					OutputStore: backendAppender(cfg.Backend),
+					OutputDir:   cfg.Background.OutputDir,
+				}
+			}
+			subagentMW, err := subagent.NewTyped[M](ctx, subCfg)
+			if err != nil {
+				return nil, fmt.Errorf("failed to create subagent middleware: %w", err)
+			}
+			handlers = append(handlers, subagentMW)
+		}
+	}
+
+	// When background support is configured, wire its control tools
+	// (task_output/task_stop) exactly once at the top level.
+	if cfg.Background != nil && cfg.Background.Manager != nil {
+		controlMW, err := backgroundtaskmw.NewTyped[M](ctx, &backgroundtaskmw.TypedConfig[M]{Manager: cfg.Background.Manager})
+		if err != nil {
+			return nil, fmt.Errorf("failed to create background-task control middleware: %w", err)
+		}
+		handlers = append(handlers, controlMW)
 	}
 
 	return adk.NewTypedChatModelAgent(ctx, &adk.TypedChatModelAgentConfig[M]{
@@ -224,7 +278,38 @@ func typedGenModelInput[M adk.MessageType](_ context.Context, instruction string
 	panic("unreachable")
 }
 
-func buildTypedBuiltinAgentMiddlewares[M adk.MessageType](ctx context.Context, cfg *TypedConfig[M]) ([]adk.TypedChatModelAgentMiddleware[M], error) {
+func buildSubAgentsList[M adk.MessageType](ctx context.Context, cfg *TypedConfig[M], instruction string, handlers []adk.TypedChatModelAgentMiddleware[M]) ([]adk.TypedAgent[M], error) {
+	var allSubAgents []adk.TypedAgent[M]
+
+	if !cfg.WithoutGeneralSubAgent {
+		agentDesc := internal.SelectPrompt(internal.I18nPrompts{
+			English: generalAgentDescription,
+			Chinese: generalAgentDescriptionChinese,
+		})
+		generalAgent, err := adk.NewTypedChatModelAgent(ctx, &adk.TypedChatModelAgentConfig[M]{
+			Name:                generalAgentName,
+			Description:         agentDesc,
+			Instruction:         instruction,
+			Model:               cfg.ChatModel,
+			ToolsConfig:         cfg.ToolsConfig,
+			MaxIterations:       cfg.MaxIteration,
+			Middlewares:         cfg.Middlewares,
+			Handlers:            append(handlers, cfg.Handlers...),
+			GenModelInput:       typedGenModelInput[M],
+			ModelRetryConfig:    cfg.ModelRetryConfig,
+			ModelFailoverConfig: cfg.ModelFailoverConfig,
+		})
+		if err != nil {
+			return nil, err
+		}
+		allSubAgents = append(allSubAgents, generalAgent)
+	}
+
+	allSubAgents = append(allSubAgents, cfg.SubAgents...)
+	return allSubAgents, nil
+}
+
+func buildTypedBuiltinAgentMiddlewares[M adk.MessageType](ctx context.Context, cfg *TypedConfig[M], background *BackgroundConfig) ([]adk.TypedChatModelAgentMiddleware[M], error) {
 	var ms []adk.TypedChatModelAgentMiddleware[M]
 	if !cfg.WithoutWriteTodos {
 		t, err := typedNewWriteTodos[M]()
@@ -235,11 +320,19 @@ func buildTypedBuiltinAgentMiddlewares[M adk.MessageType](ctx context.Context, c
 	}
 
 	if cfg.Backend != nil || cfg.Shell != nil || cfg.StreamingShell != nil {
-		fm, err := filesystem2.NewTyped[M](ctx, &filesystem2.MiddlewareConfig{
+		mwCfg := &filesystem2.MiddlewareConfig{
 			Backend:        cfg.Backend,
 			Shell:          cfg.Shell,
 			StreamingShell: cfg.StreamingShell,
-		})
+		}
+		if background != nil && background.Manager != nil {
+			mwCfg.Background = &filesystem2.BackgroundConfig{
+				Manager:     background.Manager,
+				OutputStore: backendAppender(cfg.Backend),
+				OutputDir:   background.OutputDir,
+			}
+		}
+		fm, err := filesystem2.NewTyped[M](ctx, mwCfg)
 		if err != nil {
 			return nil, err
 		}
@@ -247,6 +340,14 @@ func buildTypedBuiltinAgentMiddlewares[M adk.MessageType](ctx context.Context, c
 	}
 
 	return ms, nil
+}
+
+// backendAppender returns b as a filesystem.Appender when it supports incremental
+// append, or nil otherwise — in which case background tasks run without output
+// files. The default InMemoryBackend implements Appender.
+func backendAppender(b filesystem.Backend) filesystem.Appender {
+	ap, _ := b.(filesystem.Appender)
+	return ap
 }
 
 type TODO struct {
