@@ -158,6 +158,14 @@ type WriteRequest struct {
 	Content string
 }
 
+// AppendRequest contains parameters for appending content to a file.
+type AppendRequest struct {
+	// FilePath is the path of the file to append to.
+	FilePath string
+	// Content is the data to append at the end of the file.
+	Content string
+}
+
 // EditRequest contains parameters for editing file content.
 type EditRequest struct {
 	// FilePath is the path of the file to edit.
@@ -236,6 +244,15 @@ type MultiModalReader interface {
 	MultiModalRead(ctx context.Context, req *MultiModalReadRequest) (*MultiFileContent, error)
 }
 
+// Appender appends content to the end of a file without rewriting the whole file,
+// enabling efficient incremental writes — e.g. streaming a long-running background
+// task's output to its output file as chunks arrive.
+type Appender interface {
+	// Append adds req.Content to the end of the file at req.FilePath, creating the
+	// file if it does not exist.
+	Append(ctx context.Context, req *AppendRequest) error
+}
+
 // Backend is a pluggable, unified file backend protocol interface.
 //
 // All methods use struct-based parameters to allow future extensibility
@@ -282,29 +299,13 @@ type Backend interface {
 	Edit(ctx context.Context, req *EditRequest) error
 }
 
-// ExecuteMode is an optional shell execution hint.
-type ExecuteMode string
-
-const (
-	ExecuteModeAuto       ExecuteMode = "auto"
-	ExecuteModeForeground ExecuteMode = "foreground"
-	ExecuteModeBackground ExecuteMode = "background"
-)
-
 // ExecuteRequest contains parameters for executing a command.
+//
+// Foreground/background switching and timeouts are the caller's concern (e.g. the
+// backgroundtask Manager): a backend simply runs the command and must honor ctx
+// cancellation, which is how a timed-out or canceled run is stopped.
 type ExecuteRequest struct {
 	Command string // The command to execute
-
-	// RunInBackendGround is kept for source compatibility.
-	// If Mode is empty and this field is true, backends may treat the request as background execution.
-	RunInBackendGround bool
-
-	// Mode is an optional execution hint. Empty means legacy behavior.
-	Mode ExecuteMode
-
-	// WaitMS is an optional caller-requested foreground wait or startup preview budget.
-	// Backends may ignore or clamp this value.
-	WaitMS int64
 }
 
 // ExecuteResponse contains the response result of command execution.
@@ -314,10 +315,16 @@ type ExecuteResponse struct {
 	Truncated bool   // Whether the output was truncated
 }
 
+// Shell executes shell commands. Execute must honor ctx cancellation by stopping
+// the underlying command (e.g. via exec.CommandContext): a timed-out or canceled
+// run is stopped solely by canceling ctx, so an implementation that ignores it
+// will leak the process and its goroutine after the run is reported stopped.
 type Shell interface {
 	Execute(ctx context.Context, input *ExecuteRequest) (result *ExecuteResponse, err error)
 }
 
+// StreamingShell is the streaming counterpart of Shell. ExecuteStreaming must honor
+// ctx cancellation by stopping the underlying command, as described on Shell.
 type StreamingShell interface {
 	ExecuteStreaming(ctx context.Context, input *ExecuteRequest) (result *schema.StreamReader[*ExecuteResponse], err error)
 }
