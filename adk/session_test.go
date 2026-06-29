@@ -4912,7 +4912,7 @@ func TestRunnerRecalculatesSystemMessageOnSecondRun(t *testing.T) {
 	sid := "recalc-system-second-run"
 
 	runTurn := func(instruction, user string) *leadingSystemTestModel[*schema.Message] {
-		model := &leadingSystemTestModel[*schema.Message]{response: schema.AssistantMessage("answer " + user, nil)}
+		model := &leadingSystemTestModel[*schema.Message]{response: schema.AssistantMessage("answer "+user, nil)}
 		agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
 			Name:        "recalc-system-agent",
 			Description: "test",
