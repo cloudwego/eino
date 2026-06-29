@@ -263,7 +263,7 @@ func extractSkillInfos[M adk.MessageType](messages []M, skillTool string) ([]*sk
 				}
 				skills = append(skills, &skillInfo{
 					Name:    arg.Skill,
-					Content: m.Content,
+					Content: messageUserTextContent(m),
 				})
 			}
 

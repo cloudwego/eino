@@ -1027,22 +1027,26 @@ func isUserRole[M adk.MessageType](msg M) bool {
 	panic("unreachable")
 }
 
+func messageUserTextContent(m *schema.Message) string {
+	if m == nil {
+		return ""
+	}
+	var parts []string
+	for _, part := range m.UserInputMultiContent {
+		if part.Type == schema.ChatMessagePartTypeText && part.Text != "" {
+			parts = append(parts, part.Text)
+		}
+	}
+	if len(parts) > 0 {
+		return strings.Join(parts, "\n")
+	}
+	return m.Content
+}
+
 func getUserMsgTextContent[M adk.MessageType](msg M) string {
 	switch m := any(msg).(type) {
 	case *schema.Message:
-		if m == nil {
-			return ""
-		}
-		var parts []string
-		for _, part := range m.UserInputMultiContent {
-			if part.Type == schema.ChatMessagePartTypeText && part.Text != "" {
-				parts = append(parts, part.Text)
-			}
-		}
-		if len(parts) > 0 {
-			return strings.Join(parts, "\n")
-		}
-		return m.Content
+		return messageUserTextContent(m)
 
 	case *schema.AgenticMessage:
 		if m == nil {
