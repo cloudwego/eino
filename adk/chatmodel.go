@@ -362,148 +362,76 @@ func newDefaultGenModelInput[M MessageType]() TypedGenModelInput[M] {
 	}
 }
 
+const extraKeyRuntimeGeneratedSystemMessage = "_eino_adk_runtime_generated_system_message"
+
 func ensureGeneratedMessageIDs[M MessageType](messages []M) {
 	for _, msg := range messages {
 		EnsureMessageID(msg)
 	}
 }
 
-func leadingSystemMessage[M MessageType](messages []M) (M, bool) {
-	var zero M
-	if len(messages) == 0 || isNilMessage(messages[0]) {
-		return zero, false
-	}
-	switch msg := any(messages[0]).(type) {
+func isSystemRoleMessage[M MessageType](msg M) bool {
+	switch m := any(msg).(type) {
 	case *schema.Message:
-		if msg.Role == schema.System {
-			return messages[0], true
-		}
+		return m.Role == schema.System
 	case *schema.AgenticMessage:
-		if msg.Role == schema.AgenticRoleTypeSystem {
-			return messages[0], true
-		}
+		return m.Role == schema.AgenticRoleTypeSystem
 	}
-	return zero, false
+	return false
 }
 
-func sameSystemMessage[M MessageType](oldSys, newSys M) bool {
-	if isNilMessage(oldSys) || isNilMessage(newSys) {
-		return isNilMessage(oldSys) && isNilMessage(newSys)
-	}
-	switch oldMsg := any(oldSys).(type) {
+func getMessageExtra[M MessageType](msg M) map[string]any {
+	switch m := any(msg).(type) {
 	case *schema.Message:
-		newMsg, ok := any(newSys).(*schema.Message)
-		return ok && reflect.DeepEqual(oldMsg, newMsg)
+		return m.Extra
 	case *schema.AgenticMessage:
-		newMsg, ok := any(newSys).(*schema.AgenticMessage)
-		return ok && reflect.DeepEqual(oldMsg, newMsg)
-	default:
-		return false
-	}
-}
-
-func deepCopyMessage[M MessageType](msg M) M {
-	switch v := any(msg).(type) {
-	case *schema.Message:
-		cp := *v
-		if v.Extra != nil {
-			cp.Extra = make(map[string]any, len(v.Extra))
-			for k, val := range v.Extra {
-				cp.Extra[k] = val
-			}
-		}
-		return any(&cp).(M)
-	case *schema.AgenticMessage:
-		cp := *v
-		if v.Extra != nil {
-			cp.Extra = make(map[string]any, len(v.Extra))
-			for k, val := range v.Extra {
-				cp.Extra[k] = val
-			}
-		}
-		return any(&cp).(M)
-	default:
-		return msg
-	}
-}
-
-func setMessageIDFromTarget[M MessageType](msg M, targetID string) {
-	if targetID == "" || isNilMessage(msg) {
-		return
-	}
-	typedSetMessageID(msg, targetID)
-}
-
-func syncLeadingSystemMessageSessionEvent[M MessageType](
-	ctx context.Context,
-	previous []M,
-	oldSys M,
-	hasOldSys bool,
-	generated []M,
-) error {
-	execCtx := getTypedChatModelAgentExecCtx[M](ctx)
-	if execCtx == nil || !execCtx.sessionEvents {
-		return nil
-	}
-
-	newSys, ok := leadingSystemMessage(generated)
-	if !ok {
-		return nil
-	}
-
-	var event *TypedAgentEvent[M]
-	if hasOldSys {
-		EnsureMessageID(oldSys)
-		oldID := GetMessageID(oldSys)
-		setMessageIDFromTarget(newSys, oldID)
-		if sameSystemMessage(oldSys, newSys) {
-			return nil
-		}
-		event = &TypedAgentEvent[M]{
-			SessionEventVariant: &SessionEventVariant[M]{
-				Event: &SessionEvent[M]{
-					Kind: SessionEventMessageUpdated,
-					MessageUpdated: &MessageUpdatedEvent[M]{
-						MessageID: oldID,
-						Message:   newSys,
-					},
-				},
-			},
-		}
-	} else if len(previous) == 0 {
-		EnsureMessageID(newSys)
-		event = &TypedAgentEvent[M]{
-			SessionEventVariant: &SessionEventVariant[M]{
-				Event: &SessionEvent[M]{
-					Kind:    SessionEventMessage,
-					Message: newSys,
-				},
-			},
-		}
-	} else {
-		if isNilMessage(previous[0]) {
-			return errors.New("sync leading system message: previous first message is nil")
-		}
-		EnsureMessageID(previous[0])
-		EnsureMessageID(newSys)
-		event = &TypedAgentEvent[M]{
-			SessionEventVariant: &SessionEventVariant[M]{
-				Event: &SessionEvent[M]{
-					Kind: SessionEventMessageInserted,
-					MessageInserted: &MessageInsertedEvent[M]{
-						Message:         newSys,
-						BeforeMessageID: GetMessageID(previous[0]),
-					},
-				},
-			},
-		}
-	}
-
-	execCtx.send(ctx, event)
-	if event.Err != nil {
-		return event.Err
+		return m.Extra
 	}
 	return nil
+}
+
+func setMessageExtraField[M MessageType](msg M, key string, value any) {
+	switch m := any(msg).(type) {
+	case *schema.Message:
+		if m.Extra == nil {
+			m.Extra = map[string]any{}
+		}
+		m.Extra[key] = value
+	case *schema.AgenticMessage:
+		if m.Extra == nil {
+			m.Extra = map[string]any{}
+		}
+		m.Extra[key] = value
+	}
+}
+
+func markRuntimeGeneratedLeadingSystem[M MessageType](inputMsgs, generatedMsgs []M) {
+	inputIDs := make(map[string]struct{})
+	for _, msg := range inputMsgs {
+		if isNilMessage(msg) {
+			continue
+		}
+		id := GetMessageID(msg)
+		if id != "" {
+			inputIDs[id] = struct{}{}
+		}
+	}
+	for i := 0; i < len(generatedMsgs); i++ {
+		msg := generatedMsgs[i]
+		if isNilMessage(msg) || !isSystemRoleMessage(msg) {
+			break
+		}
+		id := GetMessageID(msg)
+		if id == "" {
+			setMessageExtraField(msg, extraKeyRuntimeGeneratedSystemMessage, true)
+			continue
+		}
+		if _, ok := inputIDs[id]; !ok {
+			setMessageExtraField(msg, extraKeyRuntimeGeneratedSystemMessage, true)
+		} else {
+			break
+		}
+	}
 }
 
 // TypedChatModelAgentState represents the state of a chat model agent during conversation.
@@ -1305,19 +1233,13 @@ func (a *TypedChatModelAgent[M]) buildNoToolsRunFunc(_ context.Context) (typedRu
 			}))
 
 		chain.AppendLambda(compose.InvokableLambda(func(ctx context.Context, in typedNoToolsInput[M]) ([]M, error) {
-			oldSys, hasOldSys := leadingSystemMessage(in.input.Messages)
-			if hasOldSys {
-				oldSys = deepCopyMessage(oldSys)
-			}
 			messages, err := a.genModelInput(ctx, in.instruction, in.input)
 			if err != nil {
 				return nil, err
 			}
-			if err := syncLeadingSystemMessageSessionEvent(ctx, in.input.Messages, oldSys, hasOldSys, messages); err != nil {
-				return nil, err
-			}
 			if p.sessionEvents {
 				ensureGeneratedMessageIDs(messages)
+				markRuntimeGeneratedLeadingSystem(in.input.Messages, messages)
 			}
 			if err := compose.ProcessState(ctx, func(_ context.Context, st *typedState[M]) error {
 				st.Messages = append(st.Messages, messages...)
@@ -1467,19 +1389,13 @@ func (a *TypedChatModelAgent[M]) buildMessageReActRunFunc(_ context.Context, bc 
 		chain := compose.NewChain[reactRunInput, Message]().
 			AppendLambda(
 				compose.InvokableLambda(func(ctx context.Context, in reactRunInput) (*reactInput, error) {
-					oldSys, hasOldSys := leadingSystemMessage(in.input.Messages)
-					if hasOldSys {
-						oldSys = deepCopyMessage(oldSys)
-					}
 					messages, genErr := genModelInputFn(ctx, in.instruction, in.input)
 					if genErr != nil {
 						return nil, genErr
 					}
-					if genErr = syncLeadingSystemMessageSessionEvent(ctx, in.input.Messages, oldSys, hasOldSys, messages); genErr != nil {
-						return nil, genErr
-					}
 					if mp.sessionEvents {
 						ensureGeneratedMessageIDs(messages)
+						markRuntimeGeneratedLeadingSystem(in.input.Messages, messages)
 					}
 					return &reactInput{
 						Messages: messages,
@@ -1617,19 +1533,13 @@ func (a *TypedChatModelAgent[M]) buildAgenticReActRunFunc(_ context.Context, bc 
 		chain := compose.NewChain[agenticReactRunInput, *schema.AgenticMessage]().
 			AppendLambda(
 				compose.InvokableLambda(func(ctx context.Context, in agenticReactRunInput) (*agenticReactInput, error) {
-					oldSys, hasOldSys := leadingSystemMessage(in.input.Messages)
-					if hasOldSys {
-						oldSys = deepCopyMessage(oldSys)
-					}
 					messages, genErr := genModelInputFn(ctx, in.instruction, in.input)
 					if genErr != nil {
 						return nil, genErr
 					}
-					if genErr = syncLeadingSystemMessageSessionEvent(ctx, in.input.Messages, oldSys, hasOldSys, messages); genErr != nil {
-						return nil, genErr
-					}
 					if ap.sessionEvents {
 						ensureGeneratedMessageIDs(messages)
+						markRuntimeGeneratedLeadingSystem(in.input.Messages, messages)
 					}
 					return &agenticReactInput{
 						Messages: messages,
