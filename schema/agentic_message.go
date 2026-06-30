@@ -2227,12 +2227,19 @@ func (a *AgenticResponseMeta) String() string {
 	return sb.String()
 }
 
-// truncateString truncates a string to maxLen characters, adding "..." if truncated
+// truncateString truncates a string to maxLen runes (not bytes), adding "..."
+// if truncated. Counting and slicing by rune keeps multi-byte UTF-8 characters
+// intact instead of cutting one in half, matching truncateTextByChars and
+// truncateSkillContent elsewhere in the repo.
 func truncateString(s string, maxLen int) string {
-	if len(s) <= maxLen {
+	if maxLen < 0 {
+		maxLen = 0
+	}
+	runes := []rune(s)
+	if len(runes) <= maxLen {
 		return s
 	}
-	return s[:maxLen] + "..."
+	return string(runes[:maxLen]) + "..."
 }
 
 // formatMediaString formats URL, Base64Data, MIMEType and Detail for media content
