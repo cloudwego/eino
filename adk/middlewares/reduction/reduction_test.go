@@ -353,7 +353,7 @@ func TestReductionMiddlewareClear(t *testing.T) {
 						Function: schema.FunctionCall{Name: "get_weather", Arguments: `{"location": "London, UK", "unit": "c"}`},
 					},
 				}),
-				schema.ToolMessage("Sunny", "call_123456789"),
+				schema.ToolMessage("Sunny", "call_987654321"),
 				schema.AssistantMessage("", []schema.ToolCall{
 					{
 						ID:       "call_123456789",
@@ -460,7 +460,7 @@ func TestReductionMiddlewareClear(t *testing.T) {
 						Function: schema.FunctionCall{Name: "get_weather", Arguments: `{"location": "London, UK", "unit": "c"}`},
 					},
 				}),
-				schema.ToolMessage("Sunny", "call_123456789"),
+				schema.ToolMessage("Sunny", "call_987654321"),
 				schema.AssistantMessage("", []schema.ToolCall{
 					{
 						ID:       "call_123456789",
@@ -489,6 +489,74 @@ func TestReductionMiddlewareClear(t *testing.T) {
 			},
 		}, s.Messages[4].ToolCalls)
 		assert.Equal(t, "[Old tool result content cleared]", s.Messages[3].Content)
+	})
+
+	t.Run("test clear with reordered tool results", func(t *testing.T) {
+		backend := filesystem.NewInMemoryBackend()
+		config := &Config{
+			SkipTruncation:            true,
+			TokenCounter:              defaultTokenCounter,
+			MaxTokensForClear:         20,
+			ClearRetentionSuffixLimit: 0,
+			ToolConfig: map[string]*ToolReductionConfig{
+				"get_weather": {
+					Backend:      backend,
+					SkipClear:    false,
+					ClearHandler: defaultClearHandler(testClearOffloadPath("/tmp"), true, "read_file"),
+				},
+			},
+		}
+
+		mw, err := New(ctx, config)
+		assert.NoError(t, err)
+		_, s, err := mw.BeforeModelRewriteState(ctx, &adk.ChatModelAgentState{
+			Messages: []adk.Message{
+				schema.SystemMessage("you are a helpful assistant"),
+				schema.UserMessage("get weather for two cities"),
+				// Assistant message with two tool calls
+				schema.AssistantMessage("", []schema.ToolCall{
+					{
+						ID:       "two_call_one",
+						Type:     "function",
+						Function: schema.FunctionCall{Name: "get_weather", Arguments: `{"location": "London"}`},
+					},
+					{
+						ID:       "two_call_two",
+						Type:     "function",
+						Function: schema.FunctionCall{Name: "get_weather", Arguments: `{"location": "Paris"}`},
+					},
+				}),
+				// Intentionally put tool result two BEFORE tool result one
+				schema.ToolMessage("Cloudy in Paris", "two_call_two"),
+				schema.ToolMessage("Sunny in London", "two_call_one"),
+				schema.AssistantMessage("", []schema.ToolCall{{ID: "dummy", Type: "function", Function: schema.FunctionCall{Name: "dummy_tool"}}}),
+			},
+		}, &adk.ModelContext{
+			Tools: toolsInfo,
+		})
+		assert.NoError(t, err)
+
+		// Verify tool call arguments are preserved (not offloaded since offload is true)
+		assert.Equal(t, `{"location": "London"}`, s.Messages[2].ToolCalls[0].Function.Arguments)
+		assert.Equal(t, `{"location": "Paris"}`, s.Messages[2].ToolCalls[1].Function.Arguments)
+
+		// Verify tool result two is correctly matched and offloaded (it's at index 3)
+		assert.Equal(t, "<persisted-output>Tool result saved to: /tmp/clear/two_call_two\nUse read_file to view</persisted-output>", s.Messages[3].Content)
+		fileContent2, err := backend.Read(ctx, &filesystem.ReadRequest{
+			FilePath: "/tmp/clear/two_call_two",
+		})
+		assert.NoError(t, err)
+		fileContentStr2 := strings.TrimPrefix(strings.TrimSpace(fileContent2.Content), "1\t")
+		assert.Equal(t, "Cloudy in Paris", fileContentStr2)
+
+		// Verify tool result one is correctly matched and offloaded (it's at index 4)
+		assert.Equal(t, "<persisted-output>Tool result saved to: /tmp/clear/two_call_one\nUse read_file to view</persisted-output>", s.Messages[4].Content)
+		fileContent1, err := backend.Read(ctx, &filesystem.ReadRequest{
+			FilePath: "/tmp/clear/two_call_one",
+		})
+		assert.NoError(t, err)
+		fileContentStr1 := strings.TrimPrefix(strings.TrimSpace(fileContent1.Content), "1\t")
+		assert.Equal(t, "Sunny in London", fileContentStr1)
 	})
 
 	t.Run("test clear", func(t *testing.T) {
@@ -547,7 +615,7 @@ func TestReductionMiddlewareClear(t *testing.T) {
 						Function: schema.FunctionCall{Name: "get_weather", Arguments: `{"location": "London, UK", "unit": "c"}`},
 					},
 				}),
-				schema.ToolMessage("Sunny", "call_123456789"),
+				schema.ToolMessage("Sunny", "call_987654321"),
 				schema.AssistantMessage("", []schema.ToolCall{
 					{
 						ID:       "call_123456789",
@@ -621,7 +689,7 @@ func TestReductionMiddlewareClear(t *testing.T) {
 					Function: schema.FunctionCall{Name: "get_weather", Arguments: `{"location": "London, UK", "unit": "c"}`},
 				},
 			}),
-			schema.ToolMessage("Sunny", "call_123456789"),
+			schema.ToolMessage("Sunny", "call_987654321"),
 			schema.AssistantMessage("", []schema.ToolCall{
 				{
 					ID:       "call_123456789",
@@ -872,7 +940,7 @@ func TestReductionMiddlewareClear(t *testing.T) {
 					Function: schema.FunctionCall{Name: "get_weather", Arguments: `{"location": "London, UK", "unit": "c"}`},
 				},
 			}),
-			schema.ToolMessage("Sunny Sunny Sunny Sunny Sunny Sunny Sunny Sunny Sunny Sunny Sunny Sunny Sunny", "call_123456789"),
+			schema.ToolMessage("Sunny Sunny Sunny Sunny Sunny Sunny Sunny Sunny Sunny Sunny Sunny Sunny Sunny", "call_987654321"),
 			schema.AssistantMessage("", []schema.ToolCall{
 				{
 					ID:       "call_123456789",
