@@ -172,7 +172,6 @@ func testCommittedIdleEvent(id, turnID string) *adk.SessionEvent[*schema.Message
 	return &adk.SessionEvent[*schema.Message]{
 		EventID: id,
 		Kind:    adk.SessionEventSessionStatusIdle,
-		TurnID:  turnID,
 		Lifecycle: &adk.LifecycleEvent{
 			State:      adk.SessionRunStateIdle,
 			StopReason: &adk.StopReason{Type: "end_turn"},

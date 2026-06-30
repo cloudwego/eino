@@ -910,7 +910,6 @@ func TestPermissionDecisionEventResumeLiveAndPersisted(t *testing.T) {
 			require.Len(t, decisions, 1)
 			requireDecisionEvent(t, decisions[0], tt.wantAction, tt.wantDecisionText, tt.wantUpdatedInput, tt.wantHasUpdated)
 			assert.Equal(t, liveDecision.EventID, decisions[0].EventID)
-			assert.Equal(t, liveDecision.TurnID, decisions[0].TurnID)
 
 			decisionJSON, err := json.Marshal(decisions[0].Extension.Data)
 			require.NoError(t, err)
@@ -1328,7 +1327,6 @@ func requireDecisionEvent(
 	t.Helper()
 	require.NotNil(t, event)
 	require.NotEmpty(t, event.EventID)
-	require.NotEmpty(t, event.TurnID)
 	require.NotNil(t, event.Extension)
 	payload, ok := event.Extension.Data.(*DecisionEvent)
 	require.True(t, ok)

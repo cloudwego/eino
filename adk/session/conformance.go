@@ -101,7 +101,7 @@ func testAppendAndForwardLoad[M adk.MessageType](t *testing.T, factory func(test
 	ctx := context.Background()
 
 	first := messageEvent("e1", makeMessage("first"))
-	second := turnEndEvent[M]("e2", "turn-1")
+	second := committedIdleEvent[M]("e2")
 	third := messageEvent("e3", makeMessage("third"))
 	appendEvents(t, ctx, store, "s", first, second)
 	appendEvents(t, ctx, store, "s", third)
@@ -119,7 +119,7 @@ func testExtensionKindFilter[M adk.MessageType](t *testing.T, factory func(testi
 	ctx := context.Background()
 
 	first := extensionEvent[M]("custom-1", "x.conformance.custom")
-	second := turnEndEvent[M]("turn-1", "turn-1")
+	second := committedIdleEvent[M]("turn-1")
 	third := extensionEvent[M]("custom-2", "x.conformance.custom")
 	appendEvents(t, ctx, store, "s", first, second, third)
 
@@ -214,7 +214,7 @@ func testSessionIsolation[M adk.MessageType](t *testing.T, factory func(testing.
 	ctx := context.Background()
 
 	alpha := messageEvent("alpha-1", makeMessage("alpha"))
-	beta := turnEndEvent[M]("beta-1", "beta-turn")
+	beta := committedIdleEvent[M]("beta-1")
 	appendEvents(t, ctx, store, "alpha", alpha)
 	appendEvents(t, ctx, store, "beta", beta)
 
@@ -418,11 +418,10 @@ func messageEvent[M adk.MessageType](id string, msg M) *adk.SessionEvent[M] {
 	return &adk.SessionEvent[M]{EventID: id, Kind: adk.SessionEventMessage, Message: msg}
 }
 
-func turnEndEvent[M adk.MessageType](id, turnID string) *adk.SessionEvent[M] {
+func committedIdleEvent[M adk.MessageType](id string) *adk.SessionEvent[M] {
 	return &adk.SessionEvent[M]{
 		EventID: id,
 		Kind:    adk.SessionEventSessionStatusIdle,
-		TurnID:  turnID,
 		Lifecycle: &adk.LifecycleEvent{
 			State:      adk.SessionRunStateIdle,
 			StopReason: &adk.StopReason{Type: "end_turn"},

@@ -381,7 +381,7 @@ func TestSessionTimeline_ReconstructionIncludesPartialContextAfterLatestCommitte
 	events := []*SessionEvent[*schema.Message]{
 		{EventID: uuid.NewString(), Kind: SessionEventMessage, Message: committedUser},
 		{EventID: uuid.NewString(), Kind: SessionEventMessage, Message: committedAssistant},
-		{EventID: uuid.NewString(), Kind: SessionEventSessionStatusIdle, TurnID: "turn-1", Lifecycle: &LifecycleEvent{State: SessionRunStateIdle, StopReason: &StopReason{Type: "end_turn"}}},
+		{EventID: uuid.NewString(), Kind: SessionEventSessionStatusIdle, Lifecycle: &LifecycleEvent{State: SessionRunStateIdle, StopReason: &StopReason{Type: "end_turn"}}},
 		{EventID: uuid.NewString(), Kind: SessionEventSessionStatusRunning, Lifecycle: &LifecycleEvent{State: SessionRunStateRunning}},
 		{EventID: uuid.NewString(), Kind: SessionEventMessage, Message: partialUser},
 		{EventID: uuid.NewString(), Kind: SessionEventMessage, Message: partialAssistant},
@@ -414,7 +414,7 @@ func TestSessionTimeline_ReconstructionPartialContextMissingAnchorFails(t *testi
 
 	events := []*SessionEvent[*schema.Message]{
 		{EventID: uuid.NewString(), Kind: SessionEventMessage, Message: committedUser},
-		{EventID: uuid.NewString(), Kind: SessionEventSessionStatusIdle, TurnID: "turn-1", Lifecycle: &LifecycleEvent{State: SessionRunStateIdle, StopReason: &StopReason{Type: "end_turn"}}},
+		{EventID: uuid.NewString(), Kind: SessionEventSessionStatusIdle, Lifecycle: &LifecycleEvent{State: SessionRunStateIdle, StopReason: &StopReason{Type: "end_turn"}}},
 		{EventID: uuid.NewString(), Kind: SessionEventMessageInserted, MessageInserted: &MessageInsertedEvent[*schema.Message]{
 			Message:         inserted,
 			BeforeMessageID: "missing-anchor",
@@ -438,7 +438,7 @@ func TestSessionTimeline_CommittedIdleIsReplayBoundaryOnly(t *testing.T) {
 
 	events := []*SessionEvent[*schema.Message]{
 		{EventID: uuid.NewString(), Kind: SessionEventMessage, Message: committedUser},
-		{EventID: uuid.NewString(), Kind: SessionEventSessionStatusIdle, TurnID: "turn-1", Lifecycle: &LifecycleEvent{State: SessionRunStateIdle, StopReason: &StopReason{Type: "end_turn"}}},
+		{EventID: uuid.NewString(), Kind: SessionEventSessionStatusIdle, Lifecycle: &LifecycleEvent{State: SessionRunStateIdle, StopReason: &StopReason{Type: "end_turn"}}},
 		{EventID: uuid.NewString(), Kind: SessionEventMessage, Message: partialUser},
 		{EventID: uuid.NewString(), Kind: "turn_end"},
 	}
@@ -573,7 +573,6 @@ func TestRunner_ExtensionEventSentWithTypedSendEventIsLiveAndPersisted(t *testin
 
 		require.NotNil(t, liveExtension)
 		require.NotEmpty(t, liveExtension.EventID)
-		require.NotEmpty(t, liveExtension.TurnID)
 		require.NotNil(t, liveExtension.Extension)
 		livePayload, ok := liveExtension.Extension.Data.(*sessionTimelineExtensionPayload)
 		require.True(t, ok)
@@ -585,7 +584,6 @@ func TestRunner_ExtensionEventSentWithTypedSendEventIsLiveAndPersisted(t *testin
 		})
 		require.Len(t, stored, 1)
 		assert.Equal(t, liveExtension.EventID, stored[0].EventID)
-		assert.Equal(t, liveExtension.TurnID, stored[0].TurnID)
 		require.NotNil(t, stored[0].Extension)
 		storedPayload, ok := stored[0].Extension.Data.(*sessionTimelineExtensionPayload)
 		require.True(t, ok)

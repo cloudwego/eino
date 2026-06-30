@@ -168,6 +168,90 @@ func TestMiddlewareBeforeModelRewriteState(t *testing.T) {
 		assert.Equal(t, schema.User, newState.Messages[1].Role)
 	})
 
+	t.Run("marked runtime system messages stripped from MessagesReplaced event payload", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		cm := mockModel.NewMockBaseChatModel(ctrl)
+		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			DoAndReturn(func(ctx context.Context, msgs []*schema.Message, opts ...interface{}) (*schema.Message, error) {
+				assert.Equal(t, schema.System, msgs[0].Role)
+				return &schema.Message{
+					Role:    schema.Assistant,
+					Content: "Summary content",
+				}, nil
+			}).Times(1)
+
+		mw := &TypedMiddleware[*schema.Message]{
+			cfg: &Config{
+				Model:   cm,
+				Trigger: &TriggerCondition{ContextTokens: 10},
+			},
+			TypedBaseChatModelAgentMiddleware: &adk.TypedBaseChatModelAgentMiddleware[*schema.Message]{},
+		}
+
+		runtimeSys := schema.SystemMessage("runtime generated system")
+		setMsgExtra(runtimeSys, extraKeyRuntimeGeneratedSystemMessage, true)
+
+		state := &adk.ChatModelAgentState{
+			Messages: []adk.Message{
+				runtimeSys,
+				schema.UserMessage(strings.Repeat("a", 100)),
+				schema.AssistantMessage(strings.Repeat("b", 100), nil),
+			},
+		}
+
+		_, newState, err := mw.BeforeModelRewriteState(ctx, state, mtx)
+		assert.NoError(t, err)
+		assert.Len(t, newState.Messages, 2)
+		assert.Equal(t, schema.System, newState.Messages[0].Role)
+		assert.Equal(t, "runtime generated system", newState.Messages[0].Content)
+
+		eventPayload := stripRuntimeGeneratedLeadingSystemMessages(newState.Messages)
+		assert.Len(t, eventPayload, 1)
+		assert.Equal(t, schema.User, eventPayload[0].Role)
+	})
+
+	t.Run("unmarked caller system messages preserved in both runtime and event payload", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		cm := mockModel.NewMockBaseChatModel(ctrl)
+		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			DoAndReturn(func(ctx context.Context, msgs []*schema.Message, opts ...interface{}) (*schema.Message, error) {
+				assert.Equal(t, schema.System, msgs[0].Role)
+				return &schema.Message{
+					Role:    schema.Assistant,
+					Content: "Summary content",
+				}, nil
+			}).Times(1)
+
+		mw := &TypedMiddleware[*schema.Message]{
+			cfg: &Config{
+				Model:   cm,
+				Trigger: &TriggerCondition{ContextTokens: 10},
+			},
+			TypedBaseChatModelAgentMiddleware: &adk.TypedBaseChatModelAgentMiddleware[*schema.Message]{},
+		}
+
+		callerSys := schema.SystemMessage("caller supplied system")
+
+		state := &adk.ChatModelAgentState{
+			Messages: []adk.Message{
+				callerSys,
+				schema.UserMessage(strings.Repeat("a", 100)),
+				schema.AssistantMessage(strings.Repeat("b", 100), nil),
+			},
+		}
+
+		_, newState, err := mw.BeforeModelRewriteState(ctx, state, mtx)
+		assert.NoError(t, err)
+		assert.Len(t, newState.Messages, 2)
+		assert.Equal(t, schema.System, newState.Messages[0].Role)
+		assert.Equal(t, "caller supplied system", newState.Messages[0].Content)
+
+		eventPayload := stripRuntimeGeneratedLeadingSystemMessages(newState.Messages)
+		assert.Len(t, eventPayload, 2)
+		assert.Equal(t, schema.System, eventPayload[0].Role)
+		assert.Equal(t, "caller supplied system", eventPayload[0].Content)
+	})
+
 	t.Run("preserves multiple system messages", func(t *testing.T) {
 		ctrl := gomock.NewController(t)
 		cm := mockModel.NewMockBaseChatModel(ctrl)
@@ -2242,5 +2326,164 @@ func TestGetAssistantTextContent(t *testing.T) {
 		}
 		got := getAssistantTextContent(msg)
 		assert.Equal(t, "", got)
+	})
+}
+
+func TestStripRuntimeGeneratedLeadingSystemMessages(t *testing.T) {
+	t.Run("no system messages", func(t *testing.T) {
+		msgs := []*schema.Message{
+			schema.UserMessage("hello"),
+			schema.AssistantMessage("hi", nil),
+		}
+		result := stripRuntimeGeneratedLeadingSystemMessages(msgs)
+		assert.Len(t, result, 2)
+		assert.Equal(t, "hello", result[0].Content)
+	})
+
+	t.Run("unmarked system message preserved", func(t *testing.T) {
+		sys := schema.SystemMessage("durable system")
+		msgs := []*schema.Message{
+			sys,
+			schema.UserMessage("hello"),
+		}
+		result := stripRuntimeGeneratedLeadingSystemMessages(msgs)
+		assert.Len(t, result, 2)
+		assert.Equal(t, schema.System, result[0].Role)
+		assert.Equal(t, "durable system", result[0].Content)
+	})
+
+	t.Run("single marked system message stripped", func(t *testing.T) {
+		sys := schema.SystemMessage("runtime system")
+		setMsgExtra(sys, extraKeyRuntimeGeneratedSystemMessage, true)
+		msgs := []*schema.Message{
+			sys,
+			schema.UserMessage("hello"),
+		}
+		result := stripRuntimeGeneratedLeadingSystemMessages(msgs)
+		assert.Len(t, result, 1)
+		assert.Equal(t, schema.User, result[0].Role)
+		assert.Equal(t, "hello", result[0].Content)
+	})
+
+	t.Run("multiple marked system messages stripped", func(t *testing.T) {
+		sys1 := schema.SystemMessage("runtime 1")
+		setMsgExtra(sys1, extraKeyRuntimeGeneratedSystemMessage, true)
+		sys2 := schema.SystemMessage("runtime 2")
+		setMsgExtra(sys2, extraKeyRuntimeGeneratedSystemMessage, true)
+		msgs := []*schema.Message{
+			sys1,
+			sys2,
+			schema.UserMessage("hello"),
+		}
+		result := stripRuntimeGeneratedLeadingSystemMessages(msgs)
+		assert.Len(t, result, 1)
+		assert.Equal(t, schema.User, result[0].Role)
+	})
+
+	t.Run("mixed marked and unmarked - only prefix stripped", func(t *testing.T) {
+		marked := schema.SystemMessage("runtime")
+		setMsgExtra(marked, extraKeyRuntimeGeneratedSystemMessage, true)
+		unmarked := schema.SystemMessage("durable")
+		msgs := []*schema.Message{
+			marked,
+			unmarked,
+			schema.UserMessage("hello"),
+		}
+		result := stripRuntimeGeneratedLeadingSystemMessages(msgs)
+		assert.Len(t, result, 2)
+		assert.Equal(t, schema.System, result[0].Role)
+		assert.Equal(t, "durable", result[0].Content)
+	})
+
+	t.Run("non-leading system message preserved", func(t *testing.T) {
+		sys := schema.SystemMessage("mid-system")
+		setMsgExtra(sys, extraKeyRuntimeGeneratedSystemMessage, true)
+		msgs := []*schema.Message{
+			schema.UserMessage("first"),
+			sys,
+			schema.AssistantMessage("resp", nil),
+		}
+		result := stripRuntimeGeneratedLeadingSystemMessages(msgs)
+		assert.Len(t, result, 3)
+		assert.Equal(t, schema.User, result[0].Role)
+		assert.Equal(t, schema.System, result[1].Role)
+	})
+
+	t.Run("only marked system messages - empty result", func(t *testing.T) {
+		sys1 := schema.SystemMessage("runtime 1")
+		setMsgExtra(sys1, extraKeyRuntimeGeneratedSystemMessage, true)
+		sys2 := schema.SystemMessage("runtime 2")
+		setMsgExtra(sys2, extraKeyRuntimeGeneratedSystemMessage, true)
+		msgs := []*schema.Message{sys1, sys2}
+		result := stripRuntimeGeneratedLeadingSystemMessages(msgs)
+		assert.Len(t, result, 0)
+	})
+
+	t.Run("agentic messages - marked stripped", func(t *testing.T) {
+		sys := schema.SystemAgenticMessage("runtime system")
+		setMsgExtra(sys, extraKeyRuntimeGeneratedSystemMessage, true)
+		msgs := []*schema.AgenticMessage{
+			sys,
+			schema.UserAgenticMessage("hello"),
+		}
+		result := stripRuntimeGeneratedLeadingSystemMessages(msgs)
+		assert.Len(t, result, 1)
+		assert.Equal(t, schema.AgenticRoleTypeUser, result[0].Role)
+	})
+
+	t.Run("agentic messages - unmarked preserved", func(t *testing.T) {
+		sys := schema.SystemAgenticMessage("durable system")
+		msgs := []*schema.AgenticMessage{
+			sys,
+			schema.UserAgenticMessage("hello"),
+		}
+		result := stripRuntimeGeneratedLeadingSystemMessages(msgs)
+		assert.Len(t, result, 2)
+		assert.Equal(t, schema.AgenticRoleTypeSystem, result[0].Role)
+	})
+
+	t.Run("returns a new slice, not the original slice", func(t *testing.T) {
+		sys := schema.SystemMessage("runtime")
+		setMsgExtra(sys, extraKeyRuntimeGeneratedSystemMessage, true)
+		user := schema.UserMessage("hello")
+		assistant := schema.AssistantMessage("resp", nil)
+		msgs := []*schema.Message{sys, user, assistant}
+		result := stripRuntimeGeneratedLeadingSystemMessages(msgs)
+		assert.Len(t, result, 2)
+		originalLen := len(result)
+		result = append(result, schema.UserMessage("extra"))
+		assert.Len(t, msgs, 3, "appending to result must not affect original slice")
+		assert.Len(t, result, originalLen+1)
+	})
+}
+
+func TestIsMarkedRuntimeGeneratedSystemMessage(t *testing.T) {
+	t.Run("marked system message", func(t *testing.T) {
+		msg := schema.SystemMessage("test")
+		setMsgExtra(msg, extraKeyRuntimeGeneratedSystemMessage, true)
+		assert.True(t, isMarkedRuntimeGeneratedSystemMessage(msg))
+	})
+
+	t.Run("unmarked system message", func(t *testing.T) {
+		msg := schema.SystemMessage("test")
+		assert.False(t, isMarkedRuntimeGeneratedSystemMessage(msg))
+	})
+
+	t.Run("non-system message with marker", func(t *testing.T) {
+		msg := schema.UserMessage("test")
+		setMsgExtra(msg, extraKeyRuntimeGeneratedSystemMessage, true)
+		assert.False(t, isMarkedRuntimeGeneratedSystemMessage(msg))
+	})
+
+	t.Run("nil extra", func(t *testing.T) {
+		msg := schema.SystemMessage("test")
+		msg.Extra = nil
+		assert.False(t, isMarkedRuntimeGeneratedSystemMessage(msg))
+	})
+
+	t.Run("marker with wrong type", func(t *testing.T) {
+		msg := schema.SystemMessage("test")
+		setMsgExtra(msg, extraKeyRuntimeGeneratedSystemMessage, "yes")
+		assert.False(t, isMarkedRuntimeGeneratedSystemMessage(msg))
 	})
 }
