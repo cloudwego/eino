@@ -358,7 +358,11 @@ func (m *TypedMiddleware[M]) BeforeModelRewriteState(ctx context.Context, state 
 	// message state at the summarization boundary. Independent of EmitInternalEvents.
 	// Error is ignored: when not in an execution context (e.g. unit tests), the
 	// event simply has no consumer.
-	msgs := afterState.Messages
+	//
+	// The emitted durable payload strips runtime-generated leading system messages
+	// because they are recalculated on each run via applyBeforeAgent -> GenModelInput
+	// and should not be reconstructed from session history.
+	msgs := stripRuntimeGeneratedLeadingSystemMessages(afterState.Messages)
 	_ = adk.TypedSendEvent(ctx, &adk.TypedAgentEvent[M]{
 		SessionEventVariant: &adk.SessionEventVariant[M]{
 			Event: &adk.SessionEvent[M]{
@@ -975,6 +979,8 @@ func (c *TriggerCondition) check() error {
 // Generic helper functions
 // ============================================================================
 
+const extraKeyRuntimeGeneratedSystemMessage = "_eino_adk_runtime_generated_system_message"
+
 func isSystemRole[M adk.MessageType](msg M) bool {
 	switch m := any(msg).(type) {
 	case *schema.Message:
@@ -983,6 +989,32 @@ func isSystemRole[M adk.MessageType](msg M) bool {
 		return m.Role == schema.AgenticRoleTypeSystem
 	}
 	panic("unreachable")
+}
+
+func isMarkedRuntimeGeneratedSystemMessage[M adk.MessageType](msg M) bool {
+	if !isSystemRole(msg) {
+		return false
+	}
+	extra := getMsgExtra(msg)
+	if extra == nil {
+		return false
+	}
+	v, ok := extra[extraKeyRuntimeGeneratedSystemMessage]
+	if !ok {
+		return false
+	}
+	b, ok := v.(bool)
+	return ok && b
+}
+
+func stripRuntimeGeneratedLeadingSystemMessages[M adk.MessageType](msgs []M) []M {
+	i := 0
+	for i < len(msgs) && isMarkedRuntimeGeneratedSystemMessage(msgs[i]) {
+		i++
+	}
+	out := make([]M, 0, len(msgs)-i)
+	out = append(out, msgs[i:]...)
+	return out
 }
 
 func isUserRole[M adk.MessageType](msg M) bool {
