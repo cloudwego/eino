@@ -180,9 +180,29 @@ func formatTeammateMessageEnvelope(teammateID, text, summary string) string {
 	return sb.String()
 }
 
+// sanitizeEnvelopeText neutralizes any markup in untrusted teammate text so it
+// cannot break out of the <teammate-message> wrapper and inject its own context
+// tags (e.g. a forged <system-reminder>). It escapes the two characters that can
+// start markup — '<' (any tag, including closing-tag whitespace/case variants
+// like "</teammate-message >") and '&' (character entities) — and nothing else,
+// so newlines, tabs, and '>' survive verbatim and the body stays readable.
+//
+// Escaping only '<' and '&' is deliberately narrower than xml.EscapeText, which
+// also turns '\n' into "&#xA;" and '\t' into "&#x9;" and would mangle every line
+// break in multi-line teammate output. Defeating the start of any tag or entity
+// is sufficient: with '<' escaped, no closing-tag variant can form.
 func sanitizeEnvelopeText(text string) string {
-	return strings.ReplaceAll(text, "</teammate-message>", "&lt;/teammate-message&gt;")
+	// Replace '&' first so the '&' introduced by escaping '<' is not re-escaped.
+	return envelopeTextEscaper.Replace(text)
 }
+
+// envelopeTextEscaper escapes '&' before '<' as a single pass (NewReplacer scans
+// left to right and never reprocesses inserted text, so ordering of the pairs
+// only documents intent — both are matched against the original input).
+var envelopeTextEscaper = strings.NewReplacer(
+	"&", "&amp;",
+	"<", "&lt;",
+)
 
 // renderProtocolText converts a wire-level message body into the text the model
 // actually sees. Plain DM/broadcast content is passed through unchanged; control
