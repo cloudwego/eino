@@ -41,6 +41,15 @@ Preview (last {preview_size}):
 )
 
 const (
+	streamTruncFmt = `<persisted-output>
+Output truncated after {preview_size} bytes were streamed. Full output saved to: {file_path}
+</persisted-output>`
+	streamTruncFmtZh = `<persisted-output>
+输出结果在流式传输 {preview_size} 字节后被截断。完整输出保存到: {file_path}
+</persisted-output>`
+)
+
+const (
 	clearWithOffloadingFmt = `<persisted-output>Tool result saved to: {file_path}
 Use {read_tool_name} to view</persisted-output>`
 	clearWithOffloadingFmtZh = `<persisted-output>工具结果已保存至: {file_path}
@@ -58,6 +67,13 @@ func getTruncFmt() string {
 	return internal.SelectPrompt(internal.I18nPrompts{
 		English: truncFmt,
 		Chinese: truncFmtZh,
+	})
+}
+
+func getStreamTruncFmt() string {
+	return internal.SelectPrompt(internal.I18nPrompts{
+		English: streamTruncFmt,
+		Chinese: streamTruncFmtZh,
 	})
 }
 
