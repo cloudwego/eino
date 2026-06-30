@@ -650,6 +650,9 @@ func toSessionEventChecked[M MessageType](event *TypedAgentEvent[M]) (*SessionEv
 		if err := ValidateEmittedSessionEventKind(&se); err != nil {
 			return nil, err
 		}
+		if se.Kind == SessionEventModelContext {
+			return nil, nil
+		}
 		return &se, nil
 	}
 	if event.Output != nil && event.Output.MessageOutput != nil &&

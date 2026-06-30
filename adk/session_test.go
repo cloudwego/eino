@@ -636,10 +636,7 @@ func TestRunnerSessionModeSkipsDuplicateEmptyModelContext(t *testing.T) {
 		Kinds: []SessionEventKind{SessionEventModelContext},
 	})
 	require.NoError(t, err)
-	require.Len(t, result.Events, 1)
-	require.NotNil(t, result.Events[0].ModelContext)
-	assert.Empty(t, result.Events[0].ModelContext.ToolInfos)
-	assert.Empty(t, result.Events[0].ModelContext.DeferredToolInfos)
+	require.Len(t, result.Events, 0)
 }
 
 func TestRunnerSessionModeSkipsDuplicateToolModelContext(t *testing.T) {
@@ -672,10 +669,7 @@ func TestRunnerSessionModeSkipsDuplicateToolModelContext(t *testing.T) {
 		Kinds: []SessionEventKind{SessionEventModelContext},
 	})
 	require.NoError(t, err)
-	require.Len(t, result.Events, 1)
-	require.NotNil(t, result.Events[0].ModelContext)
-	require.Len(t, result.Events[0].ModelContext.ToolInfos, 1)
-	assert.Equal(t, "extra_tool", result.Events[0].ModelContext.ToolInfos[0].Name)
+	require.Len(t, result.Events, 0)
 }
 
 func TestAttack_SessionEventIDGeneratorCoversRunnerEvents(t *testing.T) {
