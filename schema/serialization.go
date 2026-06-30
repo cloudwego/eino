@@ -56,9 +56,6 @@ func init() {
 	RegisterName[MessagePartCommon]("_eino_message_part_common")
 	RegisterName[ImageURLDetail]("_eino_image_url_detail")
 	RegisterName[PromptTokenDetails]("_eino_prompt_token_details")
-
-	RegisterName[map[string]any]("_eino_map_string_any")
-	RegisterName[[]any]("_eino_slice_any")
 }
 
 // RegisterName registers a type with a specific name for serialization. This is

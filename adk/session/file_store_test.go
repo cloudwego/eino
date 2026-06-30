@@ -106,14 +106,14 @@ func TestFileStoreRollbackPreservesPhysicalAuditLog(t *testing.T) {
 	sessionID := "rollback-audit"
 
 	err = store.AppendEvents(ctx, sessionID, []*adk.SessionEvent[*schema.Message]{
-		withTurn(testMessageEvent("msg-1", "Q1"), "turn-1"),
+		testMessageEvent("msg-1", "Q1"),
 		testCommittedIdleEvent("end-1", "turn-1"),
-		withTurn(testMessageEvent("msg-2", "Q2"), "turn-2"),
+		testMessageEvent("msg-2", "Q2"),
 		testCommittedIdleEvent("end-2", "turn-2"),
 	})
 	require.NoError(t, err)
 
-	require.NoError(t, adk.RollbackSession[*schema.Message](ctx, store, sessionID, "turn-1"))
+	require.NoError(t, adk.RollbackSession[*schema.Message](ctx, store, sessionID, "end-1"))
 
 	res, err := store.LoadEvents(ctx, sessionID, &adk.LoadSessionEventsRequest{})
 	require.NoError(t, err)
@@ -278,11 +278,6 @@ func TestFileStoreRejectsCorruptedRecordsOnIndexRebuild(t *testing.T) {
 			require.Error(t, err)
 		})
 	}
-}
-
-func withTurn(event *adk.SessionEvent[*schema.Message], turnID string) *adk.SessionEvent[*schema.Message] {
-	event.TurnID = turnID
-	return event
 }
 
 type newlineSerializer struct{}
