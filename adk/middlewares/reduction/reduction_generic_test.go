@@ -296,6 +296,49 @@ func testHelperFunctions[M adk.MessageType](t *testing.T) {
 		copiedTCs := getToolCallsGeneric(copied[0])
 		assert.Equal(t, `{"modified":"true"}`, copiedTCs[0].Arguments)
 	})
+
+	t.Run("getToolResultCallID", func(t *testing.T) {
+		// Tool result message with matching callID
+		tr := makeToolResultMsgG[M]("result content", "call_123", "my_tool")
+		assert.Equal(t, "call_123", getToolResultCallID(tr))
+
+		// Non-tool-result message should return empty string
+		user := makeUserMsgG[M]("hello")
+		assert.Equal(t, "", getToolResultCallID(user))
+	})
+
+	t.Run("findToolResultByCallID", func(t *testing.T) {
+		messages := []M{
+			makeAssistantMsgWithToolCallsG[M]([]testToolCall{
+				{ID: "call_1", Name: "tool1", Arguments: `{}`},
+			}),
+			makeToolResultMsgG[M]("result 1", "call_1", "tool1"),
+			makeToolResultMsgG[M]("result 2", "call_2", "tool2"),
+		}
+
+		// Find existing tool result
+		idx, found := findToolResultByCallID(messages, 1, 3, "call_2")
+		assert.True(t, found)
+		assert.Equal(t, 2, idx)
+
+		// Find non-existent tool result
+		idx, found = findToolResultByCallID(messages, 1, 3, "call_999")
+		assert.False(t, found)
+		assert.Equal(t, -1, idx)
+
+		// Stop searching when encountering a non-tool-result message
+		messages2 := []M{
+			makeAssistantMsgWithToolCallsG[M]([]testToolCall{
+				{ID: "call_3", Name: "tool3", Arguments: `{}`},
+			}),
+			makeToolResultMsgG[M]("result 3", "call_3", "tool3"),
+			makeUserMsgG[M]("not a tool result"),
+			makeToolResultMsgG[M]("result 4", "call_4", "tool4"),
+		}
+		idx, found = findToolResultByCallID(messages2, 1, 4, "call_4")
+		assert.False(t, found)
+		assert.Equal(t, -1, idx)
+	})
 }
 
 // ---------------------------------------------------------------------------
