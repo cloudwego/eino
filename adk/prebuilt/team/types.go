@@ -1,0 +1,158 @@
+/*
+ * Copyright 2026 CloudWeGo Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+// Package team provides Agent Teams middleware for coordinating multiple agents
+// via mailbox-based message passing and shared task lists.
+//
+// # Architecture
+//
+// The package is organised into the following layers. Tool implementations
+// access infrastructure exclusively through the lifecycleManager facade,
+// never through direct field access to router/pumpMgr/configStore.
+//
+//	┌─────────────────────────────────────────────────────────────┐
+//	│  Runner (team_runner.go)                                    │
+//	│    Entry point: creates TurnLoop, leader middleware, agent.  │
+//	├─────────────────────────────────────────────────────────────┤
+//	│  teamMiddleware (team.go)                                   │
+//	│    Injects tool instances (Agent, SendMessage) into each     │
+//	│    agent run via BeforeAgent. Has no config/infra fields —    │
+//	│    delegates to lifecycle.                                    │
+//	├─────────────────────────────────────────────────────────────┤
+//	│  lifecycleManager (lifecycle.go)  ← central facade          │
+//	│    Teammate spawn/cleanup/termination. Owns registry,       │
+//	│    config store, router, pump manager, plantask, and        │
+//	│    RunnerConfig. Exposes semantic methods to tool layer.     │
+//	├─────────────────────────────────────────────────────────────┤
+//	│  Messaging layer                                            │
+//	│    sourceRouter    - routes TurnInput to agent TurnLoops     │
+//	│    pumpManager     - per-agent mailbox→TurnLoop goroutines   │
+//	│    MailboxMsgSrc   - control-message filtering & TurnInput   │
+//	│    mailbox         - file-backed inbox read/write/poll       │
+//	│                      (uses memberLister callback, not        │
+//	│                       Config directly)                      │
+//	├─────────────────────────────────────────────────────────────┤
+//	│  Protocol (protocol.go)                                     │
+//	│    Message types, serialisation, XML envelope formatting.    │
+//	├─────────────────────────────────────────────────────────────┤
+//	│  Storage (backend.go, team_config.go)                       │
+//	│    Backend interface, path layout, config.json CRUD.         │
+//	└─────────────────────────────────────────────────────────────┘
+//
+// # Message flow
+//
+// SendMessage tool → mailbox.Send → target inbox file → pumpManager reads →
+// sourceRouter.Push → target TurnLoop → agent processes messages.
+package team
+
+import (
+	"errors"
+	"log"
+	"time"
+)
+
+// ─── Constants ───────────────────────────────────────────────────────────────
+
+const (
+	// LeaderAgentName is the fixed agent name for the team leader.
+	LeaderAgentName = "team-lead"
+
+	// generalAgentName is the default agent type when none is specified.
+	generalAgentName = "general-purpose"
+
+	// defaultTeammateName is the fallback teammate name used when the Agent tool
+	// spawns a background teammate without an explicit name. Deduplication may
+	// turn this into "agent-2", "agent-3", etc. for concurrent unnamed spawns.
+	defaultTeammateName = "agent"
+
+	// defaultShutdownTimeout is the maximum time to wait for teammates to exit.
+	defaultShutdownTimeout = 30 * time.Second
+
+	// defaultPumpDrainTimeout bounds how long a pump-lifecycle operation
+	// (UnsetMailbox / StartPump) waits for an old pump goroutine to fully exit
+	// after its context is cancelled. A well-behaved pump observes ctx cancel and
+	// returns promptly; this cap ensures a backend that ignores cancellation in
+	// Read/Write/Exists cannot wedge the cleanup/replacement path forever. On
+	// timeout the operation logs and proceeds, accepting a brief window where the
+	// orphaned pump may still run rather than blocking shutdown indefinitely.
+	defaultPumpDrainTimeout = 30 * time.Second
+
+	// defaultPollInterval is the fallback polling interval for mailbox reads.
+	defaultPollInterval = 500 * time.Millisecond
+
+	// broadcastTarget is the wildcard recipient that fans a message out to every
+	// other member of the team.
+	broadcastTarget = "*"
+
+	// systemSender is the From value used for messages the framework injects on
+	// behalf of the team rather than a real agent (e.g. teammate_terminated).
+	systemSender = "system"
+
+	// idleStatusAvailable is the idle-notification status a teammate reports when
+	// it has drained its inbox and is ready for more work.
+	idleStatusAvailable = "available"
+)
+
+// ─── Errors ──────────────────────────────────────────────────────────────────
+
+// errTeamNotFound is returned when no active team exists. In normal operation a
+// team always exists (NewRunner creates it), so this signals a leader middleware
+// constructed outside NewRunner — a programming error.
+var errTeamNotFound = errors.New("no active team")
+
+// errInboxNotFound is returned when a point-to-point send targets an inbox that
+// no longer exists. Point-to-point delivery never recreates a missing inbox (see
+// mailbox.Send): a vanished inbox means the recipient was torn down between
+// membership validation and the write, and resurrecting it would leak an orphan
+// file for a member that is gone.
+var errInboxNotFound = errors.New("recipient inbox no longer exists (member may have been removed)")
+
+// Logger is the logging interface used by the team middleware.
+// Implementations must be safe for concurrent use.
+type Logger interface {
+	Printf(format string, args ...any)
+}
+
+// defaultLogger wraps the standard log package.
+type defaultLogger struct{}
+
+func (defaultLogger) Printf(format string, args ...any) { log.Printf(format, args...) }
+
+// nopLogger discards all log output.
+type nopLogger struct{}
+
+func (nopLogger) Printf(string, ...any) {}
+
+// inboxMessage is the internal wire format for a mailbox message. Each message
+// is stored as an element in a JSON array file per agent.
+type inboxMessage struct {
+	ID        string `json:"id"`
+	From      string `json:"from"`
+	To        string `json:"to,omitempty"`
+	Text      string `json:"text"`
+	Summary   string `json:"summary,omitempty"`
+	Timestamp string `json:"timestamp"`
+	Read      bool   `json:"read"`
+}
+
+// TurnInput carries routing information along with messages for multi-agent dispatch.
+type TurnInput struct {
+	// TargetAgent is the name of the agent that should handle this input.
+	// Empty string means the team leader (main agent).
+	TargetAgent string
+	// Messages contains the actual messages for this turn.
+	Messages []string
+}
