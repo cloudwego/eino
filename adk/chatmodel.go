@@ -19,6 +19,7 @@ package adk
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -118,11 +119,23 @@ func toolInfosEqual(a, b []*schema.ToolInfo) bool {
 		return false
 	}
 	for i := range a {
-		if !reflect.DeepEqual(a[i], b[i]) {
+		if !toolInfoEqual(a[i], b[i]) {
 			return false
 		}
 	}
 	return true
+}
+
+func toolInfoEqual(a, b *schema.ToolInfo) bool {
+	if reflect.DeepEqual(a, b) {
+		return true
+	}
+	aBytes, aErr := json.Marshal(a)
+	bBytes, bErr := json.Marshal(b)
+	if aErr != nil || bErr != nil {
+		return false
+	}
+	return bytes.Equal(aBytes, bBytes)
 }
 
 func syncModelContextSessionEvent[M MessageType](ctx context.Context, state *TypedChatModelAgentState[M]) {

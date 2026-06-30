@@ -33,6 +33,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cloudwego/eino/components/model"
+	"github.com/cloudwego/eino/components/tool"
+	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -638,6 +640,42 @@ func TestRunnerSessionModeSkipsDuplicateEmptyModelContext(t *testing.T) {
 	require.NotNil(t, result.Events[0].ModelContext)
 	assert.Empty(t, result.Events[0].ModelContext.ToolInfos)
 	assert.Empty(t, result.Events[0].ModelContext.DeferredToolInfos)
+}
+
+func TestRunnerSessionModeSkipsDuplicateToolModelContext(t *testing.T) {
+	ctx := context.Background()
+	store := newSessionHelperStore()
+	sessionID := "runner-tool-model-context-session"
+	model := &sessionToolCallingModel{response: schema.AssistantMessage("ok", nil)}
+	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "runner-tool-model-context-agent",
+		Description: "runner tool model context agent",
+		Instruction: "You are a helpful assistant.",
+		Model:       model,
+		ToolsConfig: ToolsConfig{
+			ToolsNodeConfig: compose.ToolsNodeConfig{
+				Tools: []tool.BaseTool{modelContextExtraTool{}},
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	runner := NewRunner(ctx, RunnerConfig{
+		Agent:        agent,
+		SessionID:    sessionID,
+		SessionStore: store,
+	})
+	drainSessionEvents(t, runner.Query(ctx, "first"))
+	drainSessionEvents(t, runner.Query(ctx, "second"))
+
+	result, err := store.LoadEventsForSession(ctx, sessionID, &LoadSessionEventsRequest{
+		Kinds: []SessionEventKind{SessionEventModelContext},
+	})
+	require.NoError(t, err)
+	require.Len(t, result.Events, 1)
+	require.NotNil(t, result.Events[0].ModelContext)
+	require.Len(t, result.Events[0].ModelContext.ToolInfos, 1)
+	assert.Equal(t, "extra_tool", result.Events[0].ModelContext.ToolInfos[0].Name)
 }
 
 func TestAttack_SessionEventIDGeneratorCoversRunnerEvents(t *testing.T) {
@@ -4808,6 +4846,48 @@ func (m *leadingSystemTestModel[M]) Stream(ctx context.Context, input []M, opts 
 		return nil, err
 	}
 	return schema.StreamReaderFromArray([]M{msg}), nil
+}
+
+type sessionToolCallingModel struct {
+	response *schema.Message
+	inputs   [][]*schema.Message
+}
+
+func (m *sessionToolCallingModel) Generate(_ context.Context, input []*schema.Message, _ ...model.Option) (*schema.Message, error) {
+	m.inputs = append(m.inputs, append([]*schema.Message{}, input...))
+	return m.response, nil
+}
+
+func (m *sessionToolCallingModel) Stream(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+	msg, err := m.Generate(ctx, input, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return schema.StreamReaderFromArray([]*schema.Message{msg}), nil
+}
+
+func (m *sessionToolCallingModel) WithTools(_ []*schema.ToolInfo) (model.ToolCallingChatModel, error) {
+	return m, nil
+}
+
+type modelContextExtraTool struct{}
+
+func (modelContextExtraTool) Info(context.Context) (*schema.ToolInfo, error) {
+	return &schema.ToolInfo{
+		Name:  "extra_tool",
+		Desc:  "tool with json-normalized extra metadata",
+		Extra: map[string]any{"version": 1},
+		ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
+			"query": {
+				Type: schema.String,
+				Desc: "query",
+			},
+		}),
+	}, nil
+}
+
+func (modelContextExtraTool) InvokableRun(context.Context, string, ...tool.Option) (string, error) {
+	return "ok", nil
 }
 
 func drainAgenticSessionEvents(t *testing.T, iter *AsyncIterator[*TypedAgentEvent[*schema.AgenticMessage]]) {
