@@ -1241,6 +1241,7 @@ func TestChatModelAgentToolInterrupt(t *testing.T) {
 			assert.Equal(t, Address{
 				{Type: AddressSegmentAgent, ID: "name"},
 				{Type: AddressSegmentTool, ID: "myAgent", SubID: "1"},
+				{Type: AddressSegmentTool, ID: agentToolInterruptAddressID("myAgent")},
 				{Type: AddressSegmentAgent, ID: "myAgent"},
 			}, ctx.Address)
 			assert.Equal(t, "interrupt again", ctx.Info)
@@ -1757,6 +1758,7 @@ func TestNestedChatModelAgentWithAgentTool(t *testing.T) {
 	expectedAddress := Address{
 		{Type: AddressSegmentAgent, ID: "OuterAgent"},
 		{Type: AddressSegmentTool, ID: "InnerAgent", SubID: "1"},
+		{Type: AddressSegmentTool, ID: agentToolInterruptAddressID("InnerAgent")},
 		{Type: AddressSegmentAgent, ID: "InnerAgent"},
 		{Type: AddressSegmentTool, ID: "innerTool", SubID: "1"},
 	}

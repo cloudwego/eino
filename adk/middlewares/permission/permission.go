@@ -177,6 +177,11 @@ func (m *Middleware[M]) permissionGate(
 	wasInterrupted, hasState, savedState := tool.GetInterruptState[*AskState](ctx)
 	isTarget, hasData, response := tool.GetResumeContext[*ResumeResponse](ctx)
 
+	// A descendant interrupt is being resumed; this wrapper is only a conduit.
+	if !wasInterrupted && isTarget && !hasData {
+		return &gateResult{allowed: true, argument: argument}, nil
+	}
+
 	if wasInterrupted && !hasState {
 		return &gateResult{allowed: true, argument: argument}, nil
 	}

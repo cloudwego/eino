@@ -19,6 +19,7 @@ package adk
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -30,6 +31,8 @@ import (
 	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
 )
+
+const agentToolInterruptAddressPrefix = "agent_tool_"
 
 var (
 	defaultAgentToolParam = schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
@@ -132,6 +135,13 @@ type agentToolRequest struct {
 	Request string `json:"request"`
 }
 
+func agentToolInterruptAddressID(agentName string) string {
+	if agentName == "" {
+		return "agent_tool"
+	}
+	return agentToolInterruptAddressPrefix + base64.RawURLEncoding.EncodeToString([]byte(agentName))
+}
+
 func (at *typedAgentTool[M]) Info(ctx context.Context) (*schema.ToolInfo, error) {
 	name := at.agent.Name(ctx)
 	if name == "" {
@@ -163,6 +173,9 @@ type agentToolInterruptState struct {
 }
 
 func (at *typedAgentTool[M]) InvokableRun(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (string, error) {
+	agentName := at.agent.Name(ctx)
+	ctx = AppendAddressSegment(ctx, AddressSegmentTool, agentToolInterruptAddressID(agentName))
+
 	if cancelCtx := getCancelContext(ctx); cancelCtx != nil {
 		cancelCtx.markAgentToolDescendant()
 	}
@@ -183,7 +196,7 @@ func (at *typedAgentTool[M]) InvokableRun(ctx context.Context, argumentsInJSON s
 		// (which may be reused across turns) and with user-assigned session IDs.
 		childSessionID = "agent_tool:" + uuid.NewString()
 	} else if !hasState {
-		return "", fmt.Errorf("agent tool '%s' interrupt has happened, but cannot find interrupt state", at.agent.Name(ctx))
+		return "", fmt.Errorf("agent tool '%s' interrupt has happened, but cannot find interrupt state", agentName)
 	} else {
 		// Resume — try the JSON envelope (introduced when SessionID-based event
 		// filtering landed). If the envelope does not parse or carries no bridge
@@ -210,7 +223,7 @@ func (at *typedAgentTool[M]) InvokableRun(ctx context.Context, argumentsInJSON s
 			if _, ok := any(zero).(*schema.Message); !ok {
 				return "", fmt.Errorf("fullChatHistoryAsInput is only supported for *schema.Message agents")
 			}
-			msgInput, histErr := getReactChatHistory(ctx, at.agent.Name(ctx))
+			msgInput, histErr := getReactChatHistory(ctx, agentName)
 			if histErr != nil {
 				return "", histErr
 			}
@@ -229,11 +242,11 @@ func (at *typedAgentTool[M]) InvokableRun(ctx context.Context, argumentsInJSON s
 
 		runner := newTypedInvokableAgentToolRunner(at.agent, ms, enableStreaming)
 		iter = runner.Run(ctx, input,
-			append(extractAndDeriveAgentToolCancelCtx(ctx, at.agent.Name(ctx), opts), WithCheckPointID(bridgeCheckpointID), withSharedParentSession())...)
+			append(extractAndDeriveAgentToolCancelCtx(ctx, agentName, opts), WithCheckPointID(bridgeCheckpointID), withSharedParentSession())...)
 	} else {
 		ms = newResumeBridgeStore(bridgeCheckpointID, bridgeCheckpoint)
 
-		agentOpts := extractAndDeriveAgentToolCancelCtx(ctx, at.agent.Name(ctx), opts)
+		agentOpts := extractAndDeriveAgentToolCancelCtx(ctx, agentName, opts)
 		agentOpts = append(agentOpts, withSharedParentSession())
 
 		runner := newTypedInvokableAgentToolRunner(at.agent, ms, enableStreaming)

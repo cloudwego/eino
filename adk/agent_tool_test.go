@@ -18,6 +18,7 @@ package adk
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -30,6 +31,7 @@ import (
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
+	"github.com/cloudwego/eino/internal/core"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -296,6 +298,41 @@ func TestAgentTool_InvokableRun(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestAgentTool_UsesInnerAddressWhenOuterToolWasInterrupted(t *testing.T) {
+	ctx := context.Background()
+
+	mockAgent := newMockAgentForTool("TestAgent", "Test agent description", []*AgentEvent{
+		{
+			AgentName: "TestAgent",
+			Output: &AgentOutput{
+				MessageOutput: &MessageVariant{
+					IsStreaming: false,
+					Message:     schema.AssistantMessage("Test response", nil),
+					Role:        schema.Assistant,
+				},
+			},
+		},
+	})
+	agentTool := NewAgentTool(ctx, mockAgent).(tool.InvokableTool)
+
+	outerCtx := AppendAddressSegment(ctx, AddressSegmentAgent, "OuterAgent")
+	outerCtx = AppendAddressSegment(outerCtx, AddressSegmentTool, "agent")
+	err := tool.StatefulInterrupt(outerCtx, "permission ask", "permission-state")
+	require.Error(t, err)
+	var permissionSignal *core.InterruptSignal
+	require.True(t, errors.As(err, &permissionSignal))
+
+	id2Addr, id2State := core.SignalToPersistenceMaps(permissionSignal)
+	resumeCtx := core.PopulateInterruptState(context.Background(), id2Addr, id2State)
+	resumeCtx = core.BatchResumeWithData(resumeCtx, map[string]any{permissionSignal.ID: "approved"})
+	resumeCtx = AppendAddressSegment(resumeCtx, AddressSegmentAgent, "OuterAgent")
+	resumeCtx = AppendAddressSegment(resumeCtx, AddressSegmentTool, "agent")
+
+	output, err := agentTool.InvokableRun(resumeCtx, `{"request":"Test request"}`)
+	require.NoError(t, err)
+	assert.Equal(t, "Test response", output)
 }
 
 func TestGetReactHistory(t *testing.T) {

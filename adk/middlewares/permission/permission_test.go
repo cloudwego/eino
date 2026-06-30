@@ -219,6 +219,51 @@ func TestWrapInvokableToolCall_PassesThroughBusinessInterruptResume(t *testing.T
 	assert.Equal(t, 2, endpointCalls)
 }
 
+func TestWrapInvokableToolCall_PassesThroughDescendantInterruptResume(t *testing.T) {
+	checkerCalls := 0
+	m := NewTyped[*schema.Message](func(ctx context.Context, tCtx *adk.ToolContext, args *schema.ToolArgument) (*GateCheckResult, error) {
+		checkerCalls++
+		return &GateCheckResult{Decision: GateAsk, Message: "approve tool?"}, nil
+	})
+
+	endpointCalls := 0
+	endpoint := adk.InvokableToolCallEndpoint(func(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (string, error) {
+		endpointCalls++
+		childCtx := adk.AppendAddressSegment(ctx, adk.AddressSegmentTool, "agent_tool_inner")
+		wasInterrupted, hasState, state := tool.GetInterruptState[string](childCtx)
+		isTarget, hasData, data := tool.GetResumeContext[string](childCtx)
+		if wasInterrupted && hasState {
+			assert.Equal(t, "descendant-state", state)
+			require.True(t, isTarget)
+			require.True(t, hasData)
+			assert.Equal(t, "descendant-resume", data)
+			assert.Equal(t, `{"path":"/tmp/approved"}`, argumentsInJSON)
+			return "descendant resumed", nil
+		}
+		return "", tool.StatefulInterrupt(childCtx, "descendant interrupt", "descendant-state")
+	})
+
+	tCtx := &adk.ToolContext{Name: "NestedTool", CallID: "call_nested_descendant"}
+	wrapped, err := m.WrapInvokableToolCall(context.Background(), endpoint, tCtx)
+	require.NoError(t, err)
+
+	_, err = wrapped(withAddress(context.Background()), `{"path":"/tmp/approved"}`)
+	require.Error(t, err)
+	var permissionSignal *core.InterruptSignal
+	require.True(t, errors.As(err, &permissionSignal))
+
+	_, err = wrapped(resumeContext(permissionSignal, &ResumeResponse{Action: ResumeActionApprove}), `{"path":"/tmp/ignored"}`)
+	require.Error(t, err)
+	var descendantSignal *core.InterruptSignal
+	require.True(t, errors.As(err, &descendantSignal))
+
+	result, err := wrapped(genericResumeContext(descendantSignal, "descendant-resume"), `{"path":"/tmp/approved"}`)
+	require.NoError(t, err)
+	assert.Equal(t, "descendant resumed", result)
+	assert.Equal(t, 1, checkerCalls)
+	assert.Equal(t, 2, endpointCalls)
+}
+
 func TestAttack_BusinessInterruptNonTargetReplayPassesThrough(t *testing.T) {
 	m := NewTyped[*schema.Message](func(ctx context.Context, tCtx *adk.ToolContext, args *schema.ToolArgument) (*GateCheckResult, error) {
 		return &GateCheckResult{Decision: GateAllow}, nil
