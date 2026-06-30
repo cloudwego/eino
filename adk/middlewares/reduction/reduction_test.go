@@ -71,14 +71,14 @@ func TestReductionMiddlewareTrunc(t *testing.T) {
 				"mock_invokable_tool": {
 					Backend:        backend,
 					SkipTruncation: false,
-					TruncHandler:   defaultTruncHandler(testTruncOffloadPath("/tmp"), 70),
+					TruncHandler:   defaultTruncHandler(testTruncOffloadPath("/tmp"), 70, "read_file"),
 				},
 			},
 		}
 
 		mw, err := New(ctx, config)
 		assert.NoError(t, err)
-		exp := "<persisted-output>\nOutput too large (199). Full output saved to: /tmp/trunc/12345\nPreview (first 35):\nhello worldhello worldhello worldhe\n\nPreview (last 35):\nldhello worldhello worldhello world\n\n</persisted-output>"
+		exp := "<persisted-output>\nOutput too large (199). Full output saved to: /tmp/trunc/12345\nPreview (first 35):\nhello worldhello worldhello worldhe\n\nPreview (last 35):\nldhello worldhello worldhello world\n\nUse read_file to view\n</persisted-output>"
 
 		edp, err := mw.WrapInvokableToolCall(ctx, it.InvokableRun, tCtx)
 		assert.NoError(t, err)
@@ -90,6 +90,28 @@ func TestReductionMiddlewareTrunc(t *testing.T) {
 		expOrigContent := `hello worldhello worldhello worldhello worldhello worldhello worldhello worldhello worldhello worldhello world
 hello worldhello worldhello worldhello worldhello worldhello worldhello worldhello world`
 		assert.Equal(t, expOrigContent, content.Content)
+	})
+
+	t.Run("test default truncation notice includes configured read tool name", func(t *testing.T) {
+		tCtx := &adk.ToolContext{
+			Name:   "mock_invokable_tool",
+			CallID: "12345",
+		}
+		backend := filesystem.NewInMemoryBackend()
+		config := &Config{
+			Backend:           backend,
+			MaxLengthForTrunc: 70,
+			ReadFileToolName:  "cat_file",
+		}
+
+		mw, err := New(ctx, config)
+		assert.NoError(t, err)
+
+		edp, err := mw.WrapInvokableToolCall(ctx, it.InvokableRun, tCtx)
+		assert.NoError(t, err)
+		resp, err := edp(ctx, `{"value":"asd"}`)
+		assert.NoError(t, err)
+		assert.Contains(t, resp, "Use cat_file to view")
 	})
 
 	t.Run("test streamable line and max length trunc", func(t *testing.T) {
@@ -104,13 +126,13 @@ hello worldhello worldhello worldhello worldhello worldhello worldhello worldhel
 				"mock_streamable_tool": {
 					Backend:        backend,
 					SkipTruncation: false,
-					TruncHandler:   defaultTruncHandler(testTruncOffloadPath("/tmp"), 70),
+					TruncHandler:   defaultTruncHandler(testTruncOffloadPath("/tmp"), 70, "read_file"),
 				},
 			},
 		}
 		mw, err := New(ctx, config)
 		assert.NoError(t, err)
-		exp := "<persisted-output>\nOutput too large (199). Full output saved to: /tmp/trunc/54321\nPreview (first 35):\nhello worldhello worldhello worldhe\n\nPreview (last 35):\nldhello worldhello worldhello world\n\n</persisted-output>"
+		exp := "<persisted-output>\nOutput too large (199). Full output saved to: /tmp/trunc/54321\nPreview (first 35):\nhello worldhello worldhello worldhe\n\nPreview (last 35):\nldhello worldhello worldhello world\n\nUse read_file to view\n</persisted-output>"
 
 		edp, err := mw.WrapStreamableToolCall(ctx, st.StreamableRun, tCtx)
 		assert.NoError(t, err)
@@ -140,7 +162,7 @@ hello worldhello worldhello worldhello worldhello worldhello worldhello worldhel
 				"mock_streamable_tool": {
 					Backend:        backend,
 					SkipTruncation: false,
-					TruncHandler:   defaultTruncHandler(testTruncOffloadPath("/tmp"), 70),
+					TruncHandler:   defaultTruncHandler(testTruncOffloadPath("/tmp"), 70, "read_file"),
 				},
 			},
 		}
@@ -1020,7 +1042,7 @@ func TestDefaultTruncHandlerWithStreamToolResult(t *testing.T) {
 			StreamToolResult: sr,
 		}
 
-		fn := defaultTruncHandler(testTruncOffloadPath("/tmp"), 100)
+		fn := defaultTruncHandler(testTruncOffloadPath("/tmp"), 100, "read_file")
 		result, err := fn(ctx, detail)
 		assert.NoError(t, err)
 		assert.False(t, result.NeedTrunc)
@@ -1042,7 +1064,7 @@ func TestDefaultTruncHandlerWithStreamToolResult(t *testing.T) {
 			StreamToolResult: sr,
 		}
 
-		fn := defaultTruncHandler(testTruncOffloadPath("/tmp"), 100)
+		fn := defaultTruncHandler(testTruncOffloadPath("/tmp"), 100, "read_file")
 		result, err := fn(ctx, detail)
 		assert.NoError(t, err)
 		assert.True(t, result.NeedTrunc)
@@ -1062,7 +1084,7 @@ func TestDefaultTruncHandlerWithStreamToolResult(t *testing.T) {
 
 		fn := defaultTruncHandler(func(context.Context, *ToolDetail) (string, error) {
 			return "", fmt.Errorf("gen path error")
-		}, 10)
+		}, 10, "read_file")
 		_, err := fn(ctx, detail)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "gen path error")

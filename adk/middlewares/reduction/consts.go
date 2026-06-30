@@ -28,6 +28,7 @@ Preview (first {preview_size}):
 Preview (last {preview_size}):
 {preview_last}
 
+Use {read_tool_name} to view
 </persisted-output>`
 	truncFmtZh = `<persisted-output>
 输出结果过大 ({original_size}). 完整输出保存到: {file_path}
@@ -37,6 +38,7 @@ Preview (last {preview_size}):
 预览 (后 {preview_size}):
 {preview_last}
 
+使用 {read_tool_name} 进行查看
 </persisted-output>`
 )
 
