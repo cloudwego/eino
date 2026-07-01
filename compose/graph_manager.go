@@ -325,6 +325,7 @@ func (t *taskManager) submit(tasks []*task) error {
 			i--
 			t.num++
 			t.done.Send(currentTask)
+			continue
 		}
 
 		t.runningTasks[currentTask.nodeKey] = currentTask
