@@ -168,6 +168,14 @@ func (at *typedAgentTool[M]) InvokableRun(ctx context.Context, argumentsInJSON s
 	}
 
 	gen, enableStreaming := getEmitGeneratorAndEnableStreaming[M](opts)
+	// A background-capable invocation (WithAgentToolParentForwardUntil) bounds parent
+	// forwarding by a "backgrounded" signal and uses a non-panicking send: once the
+	// run detaches it outlives the parent turn, whose generator is then closed. A
+	// plain foreground invocation sets neither, so it forwards with a panicking Send
+	// — a send on an unexpectedly-closed generator is a bug there and must surface.
+	toolOpts := tool.GetImplSpecificOptions[agentToolOptions](nil, opts...)
+	gatedForward := toolOpts.gatedForward
+	forwardParentUntil := toolOpts.forwardParentUntil
 	var ms *bridgeStore
 	var iter *AsyncIterator[*TypedAgentEvent[M]]
 	var err error
@@ -274,7 +282,16 @@ func (at *typedAgentTool[M]) InvokableRun(ctx context.Context, argumentsInJSON s
 				// loop can skip them.
 				stampAgentToolSessionEvent(event, childSessionID)
 				tmp := copyTypedAgentEvent(event)
-				gen.Send(event)
+				if gatedForward {
+					// Background-capable: forward only until the run is backgrounded,
+					// then drop (the run outlives the parent turn). trySend, not Send:
+					// after detach the parent generator may be closed.
+					if !backgrounded(forwardParentUntil) {
+						gen.trySend(event)
+					}
+				} else {
+					gen.Send(event)
+				}
 				event = tmp
 			}
 		}
@@ -329,6 +346,14 @@ type agentToolOptions struct {
 	agentName       string
 	opts            []AgentRunOption
 	enableStreaming bool
+
+	// gatedForward is set by WithAgentToolParentForwardUntil to mark this as a
+	// background-capable invocation: parent forwarding is bounded by
+	// forwardParentUntil and uses a non-panicking send (see the option's doc).
+	gatedForward bool
+	// forwardParentUntil, when gatedForward is set, stops parent forwarding once
+	// closed (the run has been backgrounded). Nil means "never backgrounded".
+	forwardParentUntil <-chan struct{}
 }
 
 // typedAgentToolEventOptions carries the parent runner's event generator for a
@@ -353,6 +378,46 @@ func withTypedAgentToolEventGenerator[M MessageType](gen *AsyncGenerator[*TypedA
 	return tool.WrapImplSpecificOptFn(func(o *typedAgentToolEventOptions[M]) {
 		o.generator = gen
 	})
+}
+
+// WithAgentToolParentForwardUntil marks an AgentTool invocation as
+// background-capable and bounds how long the inner agent's events are forwarded to
+// the parent's event stream: forwarding continues until done is closed, then
+// stops.
+//
+// It is meant for a middleware that runs an AgentTool as a managed
+// (backgroundable) task: pass the task's "backgrounded" signal as done. A run that
+// is backgrounded outlives the parent turn, which closes its event generator on
+// turn end; forwarding to the parent after that point is both wrong (the events
+// belong to a stream the user has stopped watching) and unsafe (a send on the
+// closed generator would race). Gating on done stops forwarding at the moment the
+// run detaches.
+//
+// Presence of this option also selects the non-panicking send used on this
+// background-capable path (a plain foreground AgentTool, which never sets it,
+// forwards with a panicking send so a send on an unexpectedly-closed generator
+// surfaces as the bug it is). A nil done is treated as "never backgrounded":
+// forwarding runs for the whole invocation.
+func WithAgentToolParentForwardUntil(done <-chan struct{}) tool.Option {
+	return tool.WrapImplSpecificOptFn(func(o *agentToolOptions) {
+		o.forwardParentUntil = done
+		o.gatedForward = true
+	})
+}
+
+// backgrounded reports whether the done signal has fired (the run has been moved
+// to the background). A nil done never fires — the run stays foreground for its
+// whole lifetime.
+func backgrounded(done <-chan struct{}) bool {
+	if done == nil {
+		return false
+	}
+	select {
+	case <-done:
+		return true
+	default:
+		return false
+	}
 }
 
 func getOptionsByAgentName(agentName string, opts []tool.Option) []AgentRunOption {
