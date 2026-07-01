@@ -1339,7 +1339,7 @@ func TestChatModelAgentNamedToolMiddlewareResumeBeforeAgentTool(t *testing.T) {
 	assert.Equal(t, Address{
 		{Type: AddressSegmentAgent, ID: "OuterApprovalAgent"},
 		{Type: AddressSegmentTool, ID: "InnerCleanAgent", SubID: "call_agent_tool"},
-		{Type: AddressSegmentMiddleware, ID: "test_approval", SubID: "call_agent_tool"},
+		{Type: AddressSegmentMiddleware, ID: "test_approval"},
 	}, interruptCtx.Address)
 
 	iter, err = runner.ResumeWithParams(ctx, "approval-agent-tool", &ResumeParams{

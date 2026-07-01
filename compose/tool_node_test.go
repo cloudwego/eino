@@ -941,7 +941,7 @@ func TestNamedToolMiddlewareUsesOwnAddress(t *testing.T) {
 	assert.Error(t, err)
 	var signal *core.InterruptSignal
 	assert.True(t, errors.As(err, &signal))
-	assert.Equal(t, "tool:tool3:call_1;middleware:permission:call_1", signal.Address.String())
+	assert.Equal(t, "tool:tool3:call_1;middleware:permission", signal.Address.String())
 }
 
 func TestNamedToolMiddlewareResumeDoesNotLeakToInnerTool(t *testing.T) {
@@ -1044,10 +1044,10 @@ func TestNamedToolMiddlewaresAreSiblings(t *testing.T) {
 	_, err := endpoint(ctx, &ToolInput{Name: "tool3", CallID: "call_1"})
 	assert.NoError(t, err)
 	assert.Equal(t, []string{
-		"outer-before=tool:tool3:call_1;middleware:outer:call_1",
-		"inner-before=tool:tool3:call_1;middleware:inner:call_1",
-		"inner-after=tool:tool3:call_1;middleware:inner:call_1",
-		"outer-after=tool:tool3:call_1;middleware:outer:call_1",
+		"outer-before=tool:tool3:call_1;middleware:outer",
+		"inner-before=tool:tool3:call_1;middleware:inner",
+		"inner-after=tool:tool3:call_1;middleware:inner",
+		"outer-after=tool:tool3:call_1;middleware:outer",
 	}, addresses)
 }
 
@@ -1090,7 +1090,7 @@ func TestMixedNamedAndUnnamedToolMiddlewares(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, []string{
 		"unnamed-before=tool:tool3:call_1",
-		"named=tool:tool3:call_1;middleware:permission:call_1",
+		"named=tool:tool3:call_1;middleware:permission",
 		"tool=tool:tool3:call_1",
 		"unnamed-after=tool:tool3:call_1",
 	}, addresses)
@@ -1129,7 +1129,7 @@ func TestNamedStreamableToolMiddlewareUsesOwnAddress(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, "ok", chunk)
 	assert.Equal(t, []string{
-		"middleware=tool:stream_tool:call_1;middleware:permission:call_1",
+		"middleware=tool:stream_tool:call_1;middleware:permission",
 		"tool=tool:stream_tool:call_1",
 	}, addresses)
 }
@@ -1167,7 +1167,7 @@ func TestNamedEnhancedInvokableToolMiddlewareUsesOwnAddress(t *testing.T) {
 	}
 	assert.Equal(t, "ok", out.Result.Parts[0].Text)
 	assert.Equal(t, []string{
-		"middleware=tool:enhanced_tool:call_1;middleware:permission:call_1",
+		"middleware=tool:enhanced_tool:call_1;middleware:permission",
 		"tool=tool:enhanced_tool:call_1",
 	}, addresses)
 }
@@ -1207,7 +1207,7 @@ func TestNamedEnhancedStreamableToolMiddlewareUsesOwnAddress(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, "ok", chunk.Parts[0].Text)
 	assert.Equal(t, []string{
-		"middleware=tool:enhanced_stream_tool:call_1;middleware:permission:call_1",
+		"middleware=tool:enhanced_stream_tool:call_1;middleware:permission",
 		"tool=tool:enhanced_stream_tool:call_1",
 	}, addresses)
 }

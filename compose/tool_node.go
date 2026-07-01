@@ -727,7 +727,7 @@ func wrapInvokableToolMiddleware(spec invokableToolMiddlewareSpec, next Invokabl
 		return spec.fn(next)
 	}
 	return func(ctx context.Context, input *ToolInput) (*ToolOutput, error) {
-		mwCtx := core.AppendAddressSegment(ctx, AddressSegmentMiddleware, spec.name, input.CallID)
+		mwCtx := core.AppendAddressSegment(ctx, AddressSegmentMiddleware, spec.name, "")
 		inner := func(ctx context.Context, input *ToolInput) (*ToolOutput, error) {
 			return next(core.PopAddressSegment(ctx), input)
 		}
@@ -740,7 +740,7 @@ func wrapStreamableToolMiddleware(spec streamableToolMiddlewareSpec, next Stream
 		return spec.fn(next)
 	}
 	return func(ctx context.Context, input *ToolInput) (*StreamToolOutput, error) {
-		mwCtx := core.AppendAddressSegment(ctx, AddressSegmentMiddleware, spec.name, input.CallID)
+		mwCtx := core.AppendAddressSegment(ctx, AddressSegmentMiddleware, spec.name, "")
 		inner := func(ctx context.Context, input *ToolInput) (*StreamToolOutput, error) {
 			return next(core.PopAddressSegment(ctx), input)
 		}
@@ -753,7 +753,7 @@ func wrapEnhancedInvokableToolMiddleware(spec enhancedInvokableToolMiddlewareSpe
 		return spec.fn(next)
 	}
 	return func(ctx context.Context, input *ToolInput) (*EnhancedInvokableToolOutput, error) {
-		mwCtx := core.AppendAddressSegment(ctx, AddressSegmentMiddleware, spec.name, input.CallID)
+		mwCtx := core.AppendAddressSegment(ctx, AddressSegmentMiddleware, spec.name, "")
 		inner := func(ctx context.Context, input *ToolInput) (*EnhancedInvokableToolOutput, error) {
 			return next(core.PopAddressSegment(ctx), input)
 		}
@@ -766,7 +766,7 @@ func wrapEnhancedStreamableToolMiddleware(spec enhancedStreamableToolMiddlewareS
 		return spec.fn(next)
 	}
 	return func(ctx context.Context, input *ToolInput) (*EnhancedStreamableToolOutput, error) {
-		mwCtx := core.AppendAddressSegment(ctx, AddressSegmentMiddleware, spec.name, input.CallID)
+		mwCtx := core.AppendAddressSegment(ctx, AddressSegmentMiddleware, spec.name, "")
 		inner := func(ctx context.Context, input *ToolInput) (*EnhancedStreamableToolOutput, error) {
 			return next(core.PopAddressSegment(ctx), input)
 		}
