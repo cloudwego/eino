@@ -31,6 +31,7 @@ import (
 	"github.com/cloudwego/eino/callbacks"
 	"github.com/cloudwego/eino/components"
 	"github.com/cloudwego/eino/components/tool"
+	"github.com/cloudwego/eino/internal/core"
 	"github.com/cloudwego/eino/internal/safe"
 	"github.com/cloudwego/eino/schema"
 )
@@ -82,10 +83,10 @@ type ToolsNode struct {
 	unknownToolHandler                func(ctx context.Context, name, input string) (string, error)
 	executeSequentially               bool
 	toolArgumentsHandler              func(ctx context.Context, name, input string) (string, error)
-	toolCallMiddlewares               []InvokableToolMiddleware
-	streamToolCallMiddlewares         []StreamableToolMiddleware
-	enhancedToolCallMiddlewares       []EnhancedInvokableToolMiddleware
-	enhancedStreamToolCallMiddlewares []EnhancedStreamableToolMiddleware
+	toolCallMiddlewares               []invokableToolMiddlewareSpec
+	streamToolCallMiddlewares         []streamableToolMiddlewareSpec
+	enhancedToolCallMiddlewares       []enhancedInvokableToolMiddlewareSpec
+	enhancedStreamToolCallMiddlewares []enhancedStreamableToolMiddlewareSpec
 	toolAliasConfigs                  map[string]ToolAliasConfig
 }
 
@@ -151,6 +152,11 @@ type EnhancedStreamableToolMiddleware func(EnhancedStreamableToolEndpoint) Enhan
 
 // ToolMiddleware groups middleware hooks for invokable and streamable tool calls.
 type ToolMiddleware struct {
+	// Name is an optional stable identity for interrupt-capable middleware.
+	// Named middleware gets its own execution address frame under the tool call.
+	// Names must be unique within the tool middleware stack for a given tool call.
+	Name string
+
 	// Invokable contains middleware function for non-streaming tool calls.
 	// Note: This middleware only applies to tools that implement the InvokableTool interface.
 	Invokable InvokableToolMiddleware
@@ -166,6 +172,26 @@ type ToolMiddleware struct {
 	// EnhancedStreamable contains middleware function for streaming enhanced tool calls.
 	// Note: This middleware only applies to tools that implement the EnhancedStreamableTool interface.
 	EnhancedStreamable EnhancedStreamableToolMiddleware
+}
+
+type invokableToolMiddlewareSpec struct {
+	name string
+	fn   InvokableToolMiddleware
+}
+
+type streamableToolMiddlewareSpec struct {
+	name string
+	fn   StreamableToolMiddleware
+}
+
+type enhancedInvokableToolMiddlewareSpec struct {
+	name string
+	fn   EnhancedInvokableToolMiddleware
+}
+
+type enhancedStreamableToolMiddlewareSpec struct {
+	name string
+	fn   EnhancedStreamableToolMiddleware
 }
 
 // ToolAliasConfig configures name and argument aliases for a single tool.
@@ -236,23 +262,23 @@ type ToolsNodeConfig struct {
 //	}
 //	toolsNode, err := NewToolNode(ctx, conf)
 func NewToolNode(ctx context.Context, conf *ToolsNodeConfig) (*ToolsNode, error) {
-	var middlewares []InvokableToolMiddleware
-	var streamMiddlewares []StreamableToolMiddleware
-	var enhancedInvokableMiddlewares []EnhancedInvokableToolMiddleware
-	var enhancedStreamableMiddlewares []EnhancedStreamableToolMiddleware
+	var middlewares []invokableToolMiddlewareSpec
+	var streamMiddlewares []streamableToolMiddlewareSpec
+	var enhancedInvokableMiddlewares []enhancedInvokableToolMiddlewareSpec
+	var enhancedStreamableMiddlewares []enhancedStreamableToolMiddlewareSpec
 
 	for _, m := range conf.ToolCallMiddlewares {
 		if m.Invokable != nil {
-			middlewares = append(middlewares, m.Invokable)
+			middlewares = append(middlewares, invokableToolMiddlewareSpec{name: m.Name, fn: m.Invokable})
 		}
 		if m.Streamable != nil {
-			streamMiddlewares = append(streamMiddlewares, m.Streamable)
+			streamMiddlewares = append(streamMiddlewares, streamableToolMiddlewareSpec{name: m.Name, fn: m.Streamable})
 		}
 		if m.EnhancedInvokable != nil {
-			enhancedInvokableMiddlewares = append(enhancedInvokableMiddlewares, m.EnhancedInvokable)
+			enhancedInvokableMiddlewares = append(enhancedInvokableMiddlewares, enhancedInvokableToolMiddlewareSpec{name: m.Name, fn: m.EnhancedInvokable})
 		}
 		if m.EnhancedStreamable != nil {
-			enhancedStreamableMiddlewares = append(enhancedStreamableMiddlewares, m.EnhancedStreamable)
+			enhancedStreamableMiddlewares = append(enhancedStreamableMiddlewares, enhancedStreamableToolMiddlewareSpec{name: m.Name, fn: m.EnhancedStreamable})
 		}
 	}
 
@@ -371,10 +397,10 @@ func remapArgs(args string, aliasMap map[string]string) (string, error) {
 type convToolsParams struct {
 	tools       []tool.BaseTool
 	middlewares struct {
-		invokable          []InvokableToolMiddleware
-		streamable         []StreamableToolMiddleware
-		enhancedInvokable  []EnhancedInvokableToolMiddleware
-		enhancedStreamable []EnhancedStreamableToolMiddleware
+		invokable          []invokableToolMiddlewareSpec
+		streamable         []streamableToolMiddlewareSpec
+		enhancedInvokable  []enhancedInvokableToolMiddlewareSpec
+		enhancedStreamable []enhancedStreamableToolMiddlewareSpec
 	}
 	aliasConfigs map[string]ToolAliasConfig
 }
@@ -573,10 +599,10 @@ func convTools(ctx context.Context, params convToolsParams) (*toolsTuple, error)
 	return ret, nil
 }
 
-func wrapToolCall(it tool.InvokableTool, middlewares []InvokableToolMiddleware, needCallback bool) InvokableToolEndpoint {
+func wrapToolCall(it tool.InvokableTool, middlewares []invokableToolMiddlewareSpec, needCallback bool) InvokableToolEndpoint {
 	middleware := func(next InvokableToolEndpoint) InvokableToolEndpoint {
 		for i := len(middlewares) - 1; i >= 0; i-- {
-			next = middlewares[i](next)
+			next = wrapInvokableToolMiddleware(middlewares[i], next)
 		}
 		return next
 	}
@@ -592,10 +618,10 @@ func wrapToolCall(it tool.InvokableTool, middlewares []InvokableToolMiddleware, 
 	})
 }
 
-func wrapStreamToolCall(st tool.StreamableTool, middlewares []StreamableToolMiddleware, needCallback bool) StreamableToolEndpoint {
+func wrapStreamToolCall(st tool.StreamableTool, middlewares []streamableToolMiddlewareSpec, needCallback bool) StreamableToolEndpoint {
 	middleware := func(next StreamableToolEndpoint) StreamableToolEndpoint {
 		for i := len(middlewares) - 1; i >= 0; i-- {
-			next = middlewares[i](next)
+			next = wrapStreamableToolMiddleware(middlewares[i], next)
 		}
 		return next
 	}
@@ -611,10 +637,10 @@ func wrapStreamToolCall(st tool.StreamableTool, middlewares []StreamableToolMidd
 	})
 }
 
-func wrapEnhancedInvokableToolCall(eiTool tool.EnhancedInvokableTool, middlewares []EnhancedInvokableToolMiddleware, needCallback bool) EnhancedInvokableToolEndpoint {
+func wrapEnhancedInvokableToolCall(eiTool tool.EnhancedInvokableTool, middlewares []enhancedInvokableToolMiddlewareSpec, needCallback bool) EnhancedInvokableToolEndpoint {
 	middleware := func(next EnhancedInvokableToolEndpoint) EnhancedInvokableToolEndpoint {
 		for i := len(middlewares) - 1; i >= 0; i-- {
-			next = middlewares[i](next)
+			next = wrapEnhancedInvokableToolMiddleware(middlewares[i], next)
 		}
 		return next
 	}
@@ -630,10 +656,10 @@ func wrapEnhancedInvokableToolCall(eiTool tool.EnhancedInvokableTool, middleware
 	})
 }
 
-func wrapEnhancedStreamableToolCall(est tool.EnhancedStreamableTool, middlewares []EnhancedStreamableToolMiddleware, needCallback bool) EnhancedStreamableToolEndpoint {
+func wrapEnhancedStreamableToolCall(est tool.EnhancedStreamableTool, middlewares []enhancedStreamableToolMiddlewareSpec, needCallback bool) EnhancedStreamableToolEndpoint {
 	middleware := func(next EnhancedStreamableToolEndpoint) EnhancedStreamableToolEndpoint {
 		for i := len(middlewares) - 1; i >= 0; i-- {
-			next = middlewares[i](next)
+			next = wrapEnhancedStreamableToolMiddleware(middlewares[i], next)
 		}
 		return next
 	}
@@ -647,6 +673,58 @@ func wrapEnhancedStreamableToolCall(est tool.EnhancedStreamableTool, middlewares
 		}
 		return &EnhancedStreamableToolOutput{Result: result}, nil
 	})
+}
+
+func wrapInvokableToolMiddleware(spec invokableToolMiddlewareSpec, next InvokableToolEndpoint) InvokableToolEndpoint {
+	if spec.name == "" {
+		return spec.fn(next)
+	}
+	return func(ctx context.Context, input *ToolInput) (*ToolOutput, error) {
+		mwCtx := core.AppendAddressSegment(ctx, AddressSegmentMiddleware, spec.name, input.CallID)
+		inner := func(ctx context.Context, input *ToolInput) (*ToolOutput, error) {
+			return next(core.PopAddressSegment(ctx), input)
+		}
+		return spec.fn(inner)(mwCtx, input)
+	}
+}
+
+func wrapStreamableToolMiddleware(spec streamableToolMiddlewareSpec, next StreamableToolEndpoint) StreamableToolEndpoint {
+	if spec.name == "" {
+		return spec.fn(next)
+	}
+	return func(ctx context.Context, input *ToolInput) (*StreamToolOutput, error) {
+		mwCtx := core.AppendAddressSegment(ctx, AddressSegmentMiddleware, spec.name, input.CallID)
+		inner := func(ctx context.Context, input *ToolInput) (*StreamToolOutput, error) {
+			return next(core.PopAddressSegment(ctx), input)
+		}
+		return spec.fn(inner)(mwCtx, input)
+	}
+}
+
+func wrapEnhancedInvokableToolMiddleware(spec enhancedInvokableToolMiddlewareSpec, next EnhancedInvokableToolEndpoint) EnhancedInvokableToolEndpoint {
+	if spec.name == "" {
+		return spec.fn(next)
+	}
+	return func(ctx context.Context, input *ToolInput) (*EnhancedInvokableToolOutput, error) {
+		mwCtx := core.AppendAddressSegment(ctx, AddressSegmentMiddleware, spec.name, input.CallID)
+		inner := func(ctx context.Context, input *ToolInput) (*EnhancedInvokableToolOutput, error) {
+			return next(core.PopAddressSegment(ctx), input)
+		}
+		return spec.fn(inner)(mwCtx, input)
+	}
+}
+
+func wrapEnhancedStreamableToolMiddleware(spec enhancedStreamableToolMiddlewareSpec, next EnhancedStreamableToolEndpoint) EnhancedStreamableToolEndpoint {
+	if spec.name == "" {
+		return spec.fn(next)
+	}
+	return func(ctx context.Context, input *ToolInput) (*EnhancedStreamableToolOutput, error) {
+		mwCtx := core.AppendAddressSegment(ctx, AddressSegmentMiddleware, spec.name, input.CallID)
+		inner := func(ctx context.Context, input *ToolInput) (*EnhancedStreamableToolOutput, error) {
+			return next(core.PopAddressSegment(ctx), input)
+		}
+		return spec.fn(inner)(mwCtx, input)
+	}
 }
 
 type invokableToolWithCallback struct {

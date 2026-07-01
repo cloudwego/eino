@@ -42,6 +42,15 @@ type testEnhancedToolWrapperHandler struct {
 	wrapEnhancedStreamableFn func(context.Context, EnhancedStreamableToolCallEndpoint, *ToolContext) EnhancedStreamableToolCallEndpoint
 }
 
+type namedToolWrapperHandler struct {
+	*BaseChatModelAgentMiddleware
+	name string
+}
+
+func (h *namedToolWrapperHandler) ToolMiddlewareName() string {
+	return h.name
+}
+
 func (h *testEnhancedToolWrapperHandler) WrapEnhancedInvokableToolCall(ctx context.Context, endpoint EnhancedInvokableToolCallEndpoint, tCtx *ToolContext) (EnhancedInvokableToolCallEndpoint, error) {
 	if h.wrapEnhancedInvokableFn != nil {
 		return h.wrapEnhancedInvokableFn(ctx, endpoint, tCtx), nil
@@ -87,6 +96,17 @@ func newTestEnhancedStreamableToolCallWrapper(beforeFn, afterFn func()) func(con
 }
 
 func TestHandlersToToolMiddlewaresEnhanced(t *testing.T) {
+	t.Run("PreservesExplicitMiddlewareName", func(t *testing.T) {
+		middlewares := handlersToToolMiddlewares([]ChatModelAgentMiddleware{
+			&namedToolWrapperHandler{
+				BaseChatModelAgentMiddleware: &BaseChatModelAgentMiddleware{},
+				name:                         "permission",
+			},
+		})
+		require.Len(t, middlewares, 1)
+		assert.Equal(t, "permission", middlewares[0].Name)
+	})
+
 	t.Run("OnlyEnhancedInvokableHandler", func(t *testing.T) {
 		var called bool
 		handlers := []ChatModelAgentMiddleware{

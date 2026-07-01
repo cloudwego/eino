@@ -152,6 +152,11 @@ func New(checker Checker) *Middleware[*schema.Message] {
 	return NewTyped[*schema.Message](checker)
 }
 
+// ToolMiddlewareName returns the stable execution address frame for permission middleware.
+func (m *Middleware[M]) ToolMiddlewareName() string {
+	return "permission"
+}
+
 type gateResult struct {
 	allowed    bool
 	denyResult string
@@ -178,6 +183,10 @@ func (m *Middleware[M]) permissionGate(
 	isTarget, hasData, response := tool.GetResumeContext[*ResumeResponse](ctx)
 
 	if wasInterrupted && !hasState {
+		// Compatibility path for direct Wrap*ToolCall usage and old checkpoints
+		// where permission and the wrapped business tool shared one address.
+		// In the normal ChatModelAgent path, permission is named and owns a
+		// middleware address, so business tool state should not be visible here.
 		return &gateResult{allowed: true, argument: argument}, nil
 	}
 

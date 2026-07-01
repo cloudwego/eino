@@ -18,6 +18,7 @@ package compose
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"strconv"
@@ -30,6 +31,7 @@ import (
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/internal"
+	"github.com/cloudwego/eino/internal/core"
 	"github.com/cloudwego/eino/internal/generic"
 	"github.com/cloudwego/eino/schema"
 )
@@ -900,6 +902,178 @@ func TestToolMiddleware(t *testing.T) {
 	assert.Equal(t, "middleware2", messages[1].Content)
 }
 
+func TestNamedToolMiddlewareUsesOwnAddress(t *testing.T) {
+	ctx := appendToolAddressSegment(context.Background(), "tool3", "call_1")
+	endpoint := wrapToolCall(&myTool3{t: t}, []invokableToolMiddlewareSpec{
+		{
+			name: "permission",
+			fn: func(next InvokableToolEndpoint) InvokableToolEndpoint {
+				return func(ctx context.Context, input *ToolInput) (*ToolOutput, error) {
+					return nil, StatefulInterrupt(ctx, "ask", "permission-state")
+				}
+			},
+		},
+	}, false)
+
+	_, err := endpoint(ctx, &ToolInput{Name: "tool3", CallID: "call_1"})
+	assert.Error(t, err)
+	var signal *core.InterruptSignal
+	assert.True(t, errors.As(err, &signal))
+	assert.Equal(t, "tool:tool3:call_1;middleware:permission:call_1", signal.Address.String())
+}
+
+func TestNamedToolMiddlewareResumeDoesNotLeakToInnerTool(t *testing.T) {
+	ctx := appendToolAddressSegment(context.Background(), "tool3", "call_1")
+	interruptingEndpoint := wrapToolCall(&myTool3{t: t}, []invokableToolMiddlewareSpec{
+		{
+			name: "permission",
+			fn: func(next InvokableToolEndpoint) InvokableToolEndpoint {
+				return func(ctx context.Context, input *ToolInput) (*ToolOutput, error) {
+					return nil, StatefulInterrupt(ctx, "ask", "permission-state")
+				}
+			},
+		},
+	}, false)
+
+	_, err := interruptingEndpoint(ctx, &ToolInput{Name: "tool3", CallID: "call_1"})
+	assert.Error(t, err)
+	var signal *core.InterruptSignal
+	assert.True(t, errors.As(err, &signal))
+
+	var (
+		innerWasInterrupted bool
+		innerHasState       bool
+		innerAddress        string
+	)
+	resumingTool := &addressStateTool{
+		name: "tool3",
+		run: func(ctx context.Context, argumentsInJSON string) (string, error) {
+			innerWasInterrupted, innerHasState, _ = tool.GetInterruptState[string](ctx)
+			innerAddress = GetCurrentAddress(ctx).String()
+			return "ok", nil
+		},
+	}
+	resumingEndpoint := wrapToolCall(resumingTool, []invokableToolMiddlewareSpec{
+		{
+			name: "permission",
+			fn: func(next InvokableToolEndpoint) InvokableToolEndpoint {
+				return func(ctx context.Context, input *ToolInput) (*ToolOutput, error) {
+					wasInterrupted, hasState, state := tool.GetInterruptState[string](ctx)
+					assert.True(t, wasInterrupted)
+					assert.True(t, hasState)
+					assert.Equal(t, "permission-state", state)
+
+					isTarget, hasData, data := tool.GetResumeContext[string](ctx)
+					assert.True(t, isTarget)
+					assert.True(t, hasData)
+					assert.Equal(t, "approve", data)
+
+					return next(ctx, input)
+				}
+			},
+		},
+	}, false)
+
+	id2Addr, id2State := core.SignalToPersistenceMaps(signal)
+	resumeCtx := core.PopulateInterruptState(context.Background(), id2Addr, id2State)
+	resumeCtx = core.BatchResumeWithData(resumeCtx, map[string]any{signal.ID: "approve"})
+	resumeCtx = appendToolAddressSegment(resumeCtx, "tool3", "call_1")
+
+	out, err := resumingEndpoint(resumeCtx, &ToolInput{Name: "tool3", CallID: "call_1"})
+	assert.NoError(t, err)
+	assert.Equal(t, "ok", out.Result)
+	assert.False(t, innerWasInterrupted)
+	assert.False(t, innerHasState)
+	assert.Equal(t, "tool:tool3:call_1", innerAddress)
+}
+
+func TestNamedToolMiddlewaresAreSiblings(t *testing.T) {
+	var addresses []string
+	record := func(label string, ctx context.Context) {
+		addresses = append(addresses, label+"="+GetCurrentAddress(ctx).String())
+	}
+
+	endpoint := wrapToolCall(&myTool3{t: t}, []invokableToolMiddlewareSpec{
+		{
+			name: "outer",
+			fn: func(next InvokableToolEndpoint) InvokableToolEndpoint {
+				return func(ctx context.Context, input *ToolInput) (*ToolOutput, error) {
+					record("outer-before", ctx)
+					out, err := next(ctx, input)
+					record("outer-after", ctx)
+					return out, err
+				}
+			},
+		},
+		{
+			name: "inner",
+			fn: func(next InvokableToolEndpoint) InvokableToolEndpoint {
+				return func(ctx context.Context, input *ToolInput) (*ToolOutput, error) {
+					record("inner-before", ctx)
+					out, err := next(ctx, input)
+					record("inner-after", ctx)
+					return out, err
+				}
+			},
+		},
+	}, false)
+
+	ctx := appendToolAddressSegment(context.Background(), "tool3", "call_1")
+	_, err := endpoint(ctx, &ToolInput{Name: "tool3", CallID: "call_1"})
+	assert.NoError(t, err)
+	assert.Equal(t, []string{
+		"outer-before=tool:tool3:call_1;middleware:outer:call_1",
+		"inner-before=tool:tool3:call_1;middleware:inner:call_1",
+		"inner-after=tool:tool3:call_1;middleware:inner:call_1",
+		"outer-after=tool:tool3:call_1;middleware:outer:call_1",
+	}, addresses)
+}
+
+func TestMixedNamedAndUnnamedToolMiddlewares(t *testing.T) {
+	var addresses []string
+	record := func(label string, ctx context.Context) {
+		addresses = append(addresses, label+"="+GetCurrentAddress(ctx).String())
+	}
+
+	endpoint := wrapToolCall(&addressStateTool{
+		name: "tool3",
+		run: func(ctx context.Context, argumentsInJSON string) (string, error) {
+			record("tool", ctx)
+			return "ok", nil
+		},
+	}, []invokableToolMiddlewareSpec{
+		{
+			fn: func(next InvokableToolEndpoint) InvokableToolEndpoint {
+				return func(ctx context.Context, input *ToolInput) (*ToolOutput, error) {
+					record("unnamed-before", ctx)
+					out, err := next(ctx, input)
+					record("unnamed-after", ctx)
+					return out, err
+				}
+			},
+		},
+		{
+			name: "permission",
+			fn: func(next InvokableToolEndpoint) InvokableToolEndpoint {
+				return func(ctx context.Context, input *ToolInput) (*ToolOutput, error) {
+					record("named", ctx)
+					return next(ctx, input)
+				}
+			},
+		},
+	}, false)
+
+	ctx := appendToolAddressSegment(context.Background(), "tool3", "call_1")
+	_, err := endpoint(ctx, &ToolInput{Name: "tool3", CallID: "call_1"})
+	assert.NoError(t, err)
+	assert.Equal(t, []string{
+		"unnamed-before=tool:tool3:call_1",
+		"named=tool:tool3:call_1;middleware:permission:call_1",
+		"tool=tool:tool3:call_1",
+		"unnamed-after=tool:tool3:call_1",
+	}, addresses)
+}
+
 type myTool1 struct {
 	times uint
 }
@@ -945,6 +1119,19 @@ func (m *myTool3) InvokableRun(ctx context.Context, argumentsInJSON string, opts
 	assert.Equal(m.t, 0, m.times)
 	m.times++
 	return "tool3 input: " + argumentsInJSON, nil
+}
+
+type addressStateTool struct {
+	name string
+	run  func(ctx context.Context, argumentsInJSON string) (string, error)
+}
+
+func (m *addressStateTool) Info(ctx context.Context) (*schema.ToolInfo, error) {
+	return &schema.ToolInfo{Name: m.name}, nil
+}
+
+func (m *addressStateTool) InvokableRun(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (string, error) {
+	return m.run(ctx, argumentsInJSON)
 }
 
 type myTool4 struct {

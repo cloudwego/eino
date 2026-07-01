@@ -46,6 +46,8 @@ func TestNewTypedSupportsBothMessageTypes(t *testing.T) {
 
 	var _ adk.ChatModelAgentMiddleware = New(checker)
 	var _ adk.TypedChatModelAgentMiddleware[*schema.AgenticMessage] = NewTyped[*schema.AgenticMessage](checker)
+	var _ adk.ToolMiddlewareNamer = New(checker)
+	assert.Equal(t, "permission", New(checker).ToolMiddlewareName())
 }
 
 func TestWrapInvokableToolCall_AllowWithUpdatedInput(t *testing.T) {

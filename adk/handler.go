@@ -260,6 +260,12 @@ type TypedChatModelAgentMiddleware[M MessageType] interface {
 // See TypedChatModelAgentMiddleware for full documentation.
 type ChatModelAgentMiddleware = TypedChatModelAgentMiddleware[*schema.Message]
 
+// ToolMiddlewareNamer optionally gives a ChatModelAgent middleware's tool-call
+// wrapper a stable execution address frame.
+type ToolMiddlewareNamer interface {
+	ToolMiddlewareName() string
+}
+
 type TypedBaseChatModelAgentMiddleware[M MessageType] struct{}
 
 // BaseChatModelAgentMiddleware provides default no-op implementations for ChatModelAgentMiddleware.
