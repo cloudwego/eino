@@ -126,7 +126,7 @@ func newManagedAgentTool(mgr *backgroundtask.Manager, subAgents map[string]tool.
 				// run_in_background it is already closed here, for an auto-backgrounded
 				// run it closes at the deadline. Foreground runs never fire it and
 				// forward for their whole lifetime.
-				runOpts := append(opts, adk.WithAgentToolParentForwardUntil(task.Backgrounded))
+				runOpts := append(opts, adk.WithAgentToolEventForwardUntil(task.Backgrounded))
 				out, runErr := a.InvokableRun(workCtx, params, runOpts...)
 				if runErr != nil {
 					return "", runErr
