@@ -902,6 +902,28 @@ func TestToolMiddleware(t *testing.T) {
 	assert.Equal(t, "middleware2", messages[1].Content)
 }
 
+func TestAttack_DuplicateNamedToolMiddlewareRejected(t *testing.T) {
+	_, err := NewToolNode(context.Background(), &ToolsNodeConfig{
+		Tools: []tool.BaseTool{&myTool3{t: t}},
+		ToolCallMiddlewares: []ToolMiddleware{
+			{
+				Name: "permission",
+				Invokable: func(next InvokableToolEndpoint) InvokableToolEndpoint {
+					return next
+				},
+			},
+			{
+				Name: "permission",
+				Invokable: func(next InvokableToolEndpoint) InvokableToolEndpoint {
+					return next
+				},
+			},
+		},
+	})
+
+	assert.EqualError(t, err, `duplicate invokable tool middleware name "permission"`)
+}
+
 func TestNamedToolMiddlewareUsesOwnAddress(t *testing.T) {
 	ctx := appendToolAddressSegment(context.Background(), "tool3", "call_1")
 	endpoint := wrapToolCall(&myTool3{t: t}, []invokableToolMiddlewareSpec{
@@ -1074,6 +1096,122 @@ func TestMixedNamedAndUnnamedToolMiddlewares(t *testing.T) {
 	}, addresses)
 }
 
+func TestNamedStreamableToolMiddlewareUsesOwnAddress(t *testing.T) {
+	var addresses []string
+	record := func(label string, ctx context.Context) {
+		addresses = append(addresses, label+"="+GetCurrentAddress(ctx).String())
+	}
+
+	endpoint := wrapStreamToolCall(&addressStreamTool{
+		name: "stream_tool",
+		run: func(ctx context.Context, argumentsInJSON string) (*schema.StreamReader[string], error) {
+			record("tool", ctx)
+			return schema.StreamReaderFromArray([]string{"ok"}), nil
+		},
+	}, []streamableToolMiddlewareSpec{
+		{
+			name: "permission",
+			fn: func(next StreamableToolEndpoint) StreamableToolEndpoint {
+				return func(ctx context.Context, input *ToolInput) (*StreamToolOutput, error) {
+					record("middleware", ctx)
+					return next(ctx, input)
+				}
+			},
+		},
+	}, false)
+
+	ctx := appendToolAddressSegment(context.Background(), "stream_tool", "call_1")
+	out, err := endpoint(ctx, &ToolInput{Name: "stream_tool", CallID: "call_1", Arguments: "{}"})
+	if !assert.NoError(t, err) {
+		return
+	}
+	chunk, err := out.Result.Recv()
+	assert.NoError(t, err)
+	assert.Equal(t, "ok", chunk)
+	assert.Equal(t, []string{
+		"middleware=tool:stream_tool:call_1;middleware:permission:call_1",
+		"tool=tool:stream_tool:call_1",
+	}, addresses)
+}
+
+func TestNamedEnhancedInvokableToolMiddlewareUsesOwnAddress(t *testing.T) {
+	var addresses []string
+	record := func(label string, ctx context.Context) {
+		addresses = append(addresses, label+"="+GetCurrentAddress(ctx).String())
+	}
+
+	endpoint := wrapEnhancedInvokableToolCall(&enhancedInvokableTool{
+		info: &schema.ToolInfo{Name: "enhanced_tool"},
+		fn: func(ctx context.Context, input *schema.ToolArgument) (*schema.ToolResult, error) {
+			record("tool", ctx)
+			return &schema.ToolResult{Parts: []schema.ToolOutputPart{
+				{Type: schema.ToolPartTypeText, Text: "ok"},
+			}}, nil
+		},
+	}, []enhancedInvokableToolMiddlewareSpec{
+		{
+			name: "permission",
+			fn: func(next EnhancedInvokableToolEndpoint) EnhancedInvokableToolEndpoint {
+				return func(ctx context.Context, input *ToolInput) (*EnhancedInvokableToolOutput, error) {
+					record("middleware", ctx)
+					return next(ctx, input)
+				}
+			},
+		},
+	}, false)
+
+	ctx := appendToolAddressSegment(context.Background(), "enhanced_tool", "call_1")
+	out, err := endpoint(ctx, &ToolInput{Name: "enhanced_tool", CallID: "call_1", Arguments: "input"})
+	if !assert.NoError(t, err) {
+		return
+	}
+	assert.Equal(t, "ok", out.Result.Parts[0].Text)
+	assert.Equal(t, []string{
+		"middleware=tool:enhanced_tool:call_1;middleware:permission:call_1",
+		"tool=tool:enhanced_tool:call_1",
+	}, addresses)
+}
+
+func TestNamedEnhancedStreamableToolMiddlewareUsesOwnAddress(t *testing.T) {
+	var addresses []string
+	record := func(label string, ctx context.Context) {
+		addresses = append(addresses, label+"="+GetCurrentAddress(ctx).String())
+	}
+
+	endpoint := wrapEnhancedStreamableToolCall(&enhancedStreamableTool{
+		info: &schema.ToolInfo{Name: "enhanced_stream_tool"},
+		fn: func(ctx context.Context, input *schema.ToolArgument) (*schema.StreamReader[*schema.ToolResult], error) {
+			record("tool", ctx)
+			return schema.StreamReaderFromArray([]*schema.ToolResult{
+				{Parts: []schema.ToolOutputPart{{Type: schema.ToolPartTypeText, Text: "ok"}}},
+			}), nil
+		},
+	}, []enhancedStreamableToolMiddlewareSpec{
+		{
+			name: "permission",
+			fn: func(next EnhancedStreamableToolEndpoint) EnhancedStreamableToolEndpoint {
+				return func(ctx context.Context, input *ToolInput) (*EnhancedStreamableToolOutput, error) {
+					record("middleware", ctx)
+					return next(ctx, input)
+				}
+			},
+		},
+	}, false)
+
+	ctx := appendToolAddressSegment(context.Background(), "enhanced_stream_tool", "call_1")
+	out, err := endpoint(ctx, &ToolInput{Name: "enhanced_stream_tool", CallID: "call_1", Arguments: "input"})
+	if !assert.NoError(t, err) {
+		return
+	}
+	chunk, err := out.Result.Recv()
+	assert.NoError(t, err)
+	assert.Equal(t, "ok", chunk.Parts[0].Text)
+	assert.Equal(t, []string{
+		"middleware=tool:enhanced_stream_tool:call_1;middleware:permission:call_1",
+		"tool=tool:enhanced_stream_tool:call_1",
+	}, addresses)
+}
+
 type myTool1 struct {
 	times uint
 }
@@ -1131,6 +1269,19 @@ func (m *addressStateTool) Info(ctx context.Context) (*schema.ToolInfo, error) {
 }
 
 func (m *addressStateTool) InvokableRun(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (string, error) {
+	return m.run(ctx, argumentsInJSON)
+}
+
+type addressStreamTool struct {
+	name string
+	run  func(ctx context.Context, argumentsInJSON string) (*schema.StreamReader[string], error)
+}
+
+func (m *addressStreamTool) Info(ctx context.Context) (*schema.ToolInfo, error) {
+	return &schema.ToolInfo{Name: m.name}, nil
+}
+
+func (m *addressStreamTool) StreamableRun(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (*schema.StreamReader[string], error) {
 	return m.run(ctx, argumentsInJSON)
 }
 

@@ -179,9 +179,17 @@ type invokableToolMiddlewareSpec struct {
 	fn   InvokableToolMiddleware
 }
 
+func (s invokableToolMiddlewareSpec) middlewareName() string {
+	return s.name
+}
+
 type streamableToolMiddlewareSpec struct {
 	name string
 	fn   StreamableToolMiddleware
+}
+
+func (s streamableToolMiddlewareSpec) middlewareName() string {
+	return s.name
 }
 
 type enhancedInvokableToolMiddlewareSpec struct {
@@ -189,9 +197,17 @@ type enhancedInvokableToolMiddlewareSpec struct {
 	fn   EnhancedInvokableToolMiddleware
 }
 
+func (s enhancedInvokableToolMiddlewareSpec) middlewareName() string {
+	return s.name
+}
+
 type enhancedStreamableToolMiddlewareSpec struct {
 	name string
 	fn   EnhancedStreamableToolMiddleware
+}
+
+func (s enhancedStreamableToolMiddlewareSpec) middlewareName() string {
+	return s.name
 }
 
 // ToolAliasConfig configures name and argument aliases for a single tool.
@@ -281,6 +297,18 @@ func NewToolNode(ctx context.Context, conf *ToolsNodeConfig) (*ToolsNode, error)
 			enhancedStreamableMiddlewares = append(enhancedStreamableMiddlewares, enhancedStreamableToolMiddlewareSpec{name: m.Name, fn: m.EnhancedStreamable})
 		}
 	}
+	if err := validateUniqueMiddlewareNames("invokable", middlewares); err != nil {
+		return nil, err
+	}
+	if err := validateUniqueMiddlewareNames("streamable", streamMiddlewares); err != nil {
+		return nil, err
+	}
+	if err := validateUniqueMiddlewareNames("enhanced invokable", enhancedInvokableMiddlewares); err != nil {
+		return nil, err
+	}
+	if err := validateUniqueMiddlewareNames("enhanced streamable", enhancedStreamableMiddlewares); err != nil {
+		return nil, err
+	}
 
 	params := convToolsParams{
 		tools:        conf.Tools,
@@ -307,6 +335,25 @@ func NewToolNode(ctx context.Context, conf *ToolsNodeConfig) (*ToolsNode, error)
 		enhancedStreamToolCallMiddlewares: enhancedStreamableMiddlewares,
 		toolAliasConfigs:                  conf.ToolAliases,
 	}, nil
+}
+
+type toolMiddlewareSpec interface {
+	middlewareName() string
+}
+
+func validateUniqueMiddlewareNames[T toolMiddlewareSpec](kind string, middlewares []T) error {
+	names := make(map[string]struct{}, len(middlewares))
+	for _, m := range middlewares {
+		name := m.middlewareName()
+		if name == "" {
+			continue
+		}
+		if _, ok := names[name]; ok {
+			return fmt.Errorf("duplicate %s tool middleware name %q", kind, name)
+		}
+		names[name] = struct{}{}
+	}
+	return nil
 }
 
 // ToolsInterruptAndRerunExtra carries interrupt metadata for ToolsNode reruns.
