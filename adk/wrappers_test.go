@@ -47,7 +47,7 @@ type namedToolWrapperHandler struct {
 	name string
 }
 
-func (h *namedToolWrapperHandler) ToolMiddlewareName() string {
+func (h *namedToolWrapperHandler) ToolCallWrapperName() string {
 	return h.name
 }
 

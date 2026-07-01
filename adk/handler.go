@@ -260,15 +260,14 @@ type TypedChatModelAgentMiddleware[M MessageType] interface {
 // See TypedChatModelAgentMiddleware for full documentation.
 type ChatModelAgentMiddleware = TypedChatModelAgentMiddleware[*schema.Message]
 
-// ToolMiddlewareNamer is an optional interface a ChatModelAgent middleware may
+// ToolCallWrapperNamer is an optional interface a ChatModelAgent middleware may
 // implement to give its tool-call wrapper a stable, named execution address
 // frame of the form "...;tool:<tool>:<callID>;middleware:<name>".
 //
 // When to implement it:
 //   - Implement this ONLY if the middleware's tool-call wrapper can interrupt
 //     (e.g. it calls tool.StatefulInterrupt) and must persist and resume its own
-//     interrupt state independently of the wrapped tool. The permission
-//     middleware is the canonical example.
+//     interrupt state independently of the wrapped tool.
 //   - Do NOT implement it for middleware that merely observes, transforms, or
 //     forwards tool calls without interrupting. Unnamed middleware shares the
 //     tool's address frame, which is the correct, cheaper default: without a
@@ -281,8 +280,8 @@ type ChatModelAgentMiddleware = TypedChatModelAgentMiddleware[*schema.Message]
 // endpoint kind (see validateUniqueMiddlewareNames); returning "" is treated as
 // unnamed. Because the name becomes part of the persisted interrupt address, it
 // must remain stable across restarts for checkpoints to resume correctly.
-type ToolMiddlewareNamer interface {
-	ToolMiddlewareName() string
+type ToolCallWrapperNamer interface {
+	ToolCallWrapperName() string
 }
 
 type TypedBaseChatModelAgentMiddleware[M MessageType] struct{}
