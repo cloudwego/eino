@@ -430,6 +430,26 @@ func TestGetNextResumptionPoints(t *testing.T) {
 		assert.True(t, points["agent1"])
 		assert.True(t, points["agent2"])
 	})
+
+	t.Run("DeeperMiddlewareAddressReturnsImmediateTool", func(t *testing.T) {
+		ctx := context.Background()
+		ctx = context.WithValue(ctx, addrCtxKey{}, &addrCtx{
+			addr: Address{{Type: AddressSegmentAgent, ID: "agent1"}},
+		})
+		ctx = context.WithValue(ctx, globalResumeInfoKey{}, &globalResumeInfo{
+			id2Addr: map[string]Address{
+				"middleware": {
+					{Type: AddressSegmentAgent, ID: "agent1"},
+					{Type: AddressSegmentTool, ID: "tool1", SubID: "call1"},
+					{Type: AddressSegmentType("middleware"), ID: "permission", SubID: "call1"},
+				},
+			},
+		})
+
+		points, err := GetNextResumptionPoints(ctx)
+		assert.NoError(t, err)
+		assert.Equal(t, map[string]bool{"tool1": true}, points)
+	})
 }
 
 func TestBatchResumeWithData(t *testing.T) {
@@ -867,6 +887,15 @@ func TestAppendAddressSegment(t *testing.T) {
 		assert.Equal(t, AddressSegmentTool, addr[0].Type)
 		assert.Equal(t, "tool1", addr[0].ID)
 		assert.Equal(t, "call123", addr[0].SubID)
+	})
+
+	t.Run("PopRestoresParentAddress", func(t *testing.T) {
+		ctx := context.Background()
+		ctx = AppendAddressSegment(ctx, AddressSegmentAgent, "agent1", "")
+		ctx = AppendAddressSegment(ctx, AddressSegmentTool, "tool1", "call1")
+
+		popped := PopAddressSegment(ctx)
+		assert.Equal(t, Address{{Type: AddressSegmentAgent, ID: "agent1"}}, GetCurrentAddress(popped))
 	})
 }
 
