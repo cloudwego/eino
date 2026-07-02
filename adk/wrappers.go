@@ -120,6 +120,9 @@ func handlersToToolMiddlewares[M MessageType](handlers []TypedChatModelAgentMidd
 	for _, handler := range handlers {
 
 		m := compose.ToolMiddleware{}
+		if namer, ok := handler.(ChatModelAgentMiddlewareNamer); ok {
+			m.Name = namer.ChatModelAgentMiddlewareName()
+		}
 
 		h := handler
 		m.Invokable = func(next compose.InvokableToolEndpoint) compose.InvokableToolEndpoint {

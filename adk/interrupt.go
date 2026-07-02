@@ -171,11 +171,16 @@ type AddressSegment = core.AddressSegment
 type AddressSegmentType = core.AddressSegmentType
 
 const (
-	AddressSegmentAgent AddressSegmentType = "agent"
-	AddressSegmentTool  AddressSegmentType = "tool"
+	AddressSegmentAgent      AddressSegmentType = "agent"
+	AddressSegmentTool       AddressSegmentType = "tool"
+	AddressSegmentMiddleware AddressSegmentType = "middleware"
 )
 
-var allowedAddressSegmentTypes = []AddressSegmentType{AddressSegmentAgent, AddressSegmentTool}
+var allowedAddressSegmentTypes = []AddressSegmentType{
+	AddressSegmentAgent,
+	AddressSegmentTool,
+	AddressSegmentMiddleware,
+}
 
 // AppendAddressSegment adds an address segment for the current execution context.
 func AppendAddressSegment(ctx context.Context, segType AddressSegmentType, segID string) context.Context {
