@@ -113,6 +113,23 @@ func (s *slowShell) Execute(ctx context.Context, _ *filesystem.ExecuteRequest) (
 	}
 }
 
+// gatedShell is a Shell whose Execute blocks until release is closed (honoring ctx
+// cancellation), then returns out. It lets a test hold a background task in the
+// running state deterministically, without relying on wall-clock timing.
+type gatedShell struct {
+	release chan struct{}
+	out     string
+}
+
+func (s *gatedShell) Execute(ctx context.Context, _ *filesystem.ExecuteRequest) (*filesystem.ExecuteResponse, error) {
+	select {
+	case <-s.release:
+		return &filesystem.ExecuteResponse{Output: s.out}, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
 func TestManagedExecuteTool_Foreground(t *testing.T) {
 	mgr := backgroundtask.New(context.Background(), &backgroundtask.Config{})
 	defer func() {
@@ -149,9 +166,13 @@ func TestManagedExecuteTool_Background(t *testing.T) {
 	}()
 
 	backend := setupTestBackend() // so a background launch reports an output path
+	// A gated shell keeps the background task in the running state until we release
+	// it, so the launch reliably returns the "running in background" notice rather
+	// than racing the task to completion.
+	shell := &gatedShell{release: make(chan struct{}), out: "done"}
 	tools, err := getFilesystemTools(context.Background(), &MiddlewareConfig{
 		Backend: backend,
-		Shell:   &mockShellBackend{resp: &filesystem.ExecuteResponse{Output: "done"}},
+		Shell:   shell,
 		Background: &BackgroundConfig{
 			Manager:     mgr,
 			OutputStore: backend,
@@ -164,6 +185,8 @@ func TestManagedExecuteTool_Background(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, result, "running in background")
 
+	// Let the held task finish, then confirm it reaches completion.
+	close(shell.release)
 	waitAllTasks(t, mgr)
 	tasks := mgr.List()
 	require.Len(t, tasks, 1)
