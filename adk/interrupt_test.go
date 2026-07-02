@@ -1277,6 +1277,139 @@ func TestChatModelAgentToolInterrupt(t *testing.T) {
 	assert.False(t, ok)
 }
 
+func TestChatModelAgentNamedToolMiddlewareResumeBeforeAgentTool(t *testing.T) {
+	ctx := context.Background()
+	approval := &testAgentToolApprovalMiddleware{
+		BaseChatModelAgentMiddleware: &BaseChatModelAgentMiddleware{},
+		t:                            t,
+	}
+
+	innerAgent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "InnerCleanAgent",
+		Description: "Inner agent that should run cleanly after outer approval",
+		Model: &myModel{
+			messages: []*schema.Message{
+				schema.AssistantMessage("inner clean result", nil),
+			},
+		},
+	})
+	assert.NoError(t, err)
+
+	outerAgent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "OuterApprovalAgent",
+		Description: "Outer agent with approval middleware around an agent tool",
+		Model: &myModel{
+			messages: []*schema.Message{
+				schema.AssistantMessage("", []schema.ToolCall{
+					{
+						ID: "call_agent_tool",
+						Function: schema.FunctionCall{
+							Name:      "InnerCleanAgent",
+							Arguments: `{"request":"run inner"}`,
+						},
+					},
+				}),
+				schema.AssistantMessage("outer completed", nil),
+			},
+		},
+		ToolsConfig: ToolsConfig{
+			ToolsNodeConfig: compose.ToolsNodeConfig{
+				Tools: []tool.BaseTool{NewAgentTool(ctx, innerAgent)},
+			},
+		},
+		Handlers: []ChatModelAgentMiddleware{approval},
+	})
+	assert.NoError(t, err)
+
+	runner := NewRunner(ctx, RunnerConfig{
+		Agent:           outerAgent,
+		CheckPointStore: newMyStore(),
+	})
+
+	iter := runner.Query(ctx, "start", WithCheckPointID("approval-agent-tool"))
+	_, interruptEvent := consumeUntilInterrupt(iter)
+	if interruptEvent == nil {
+		t.Fatal("expected approval middleware interrupt")
+	}
+	assert.Equal(t, 1, len(interruptEvent.Action.Interrupted.InterruptContexts))
+
+	interruptCtx := interruptEvent.Action.Interrupted.InterruptContexts[0]
+	assert.True(t, interruptCtx.IsRootCause)
+	assert.Equal(t, "approval required", interruptCtx.Info)
+	assert.Equal(t, Address{
+		{Type: AddressSegmentAgent, ID: "OuterApprovalAgent"},
+		{Type: AddressSegmentTool, ID: "InnerCleanAgent", SubID: "call_agent_tool"},
+		{Type: AddressSegmentMiddleware, ID: "test_approval"},
+	}, interruptCtx.Address)
+
+	iter, err = runner.ResumeWithParams(ctx, "approval-agent-tool", &ResumeParams{
+		Targets: map[string]any{
+			interruptCtx.ID: "allow",
+		},
+	})
+	assert.NoError(t, err)
+
+	finalEvents, reinterrupt := consumeUntilInterrupt(iter)
+	assert.Nil(t, reinterrupt)
+	assert.Equal(t, 1, approval.approvedCalls)
+
+	var foundInnerResult, foundOuterResult bool
+	for _, event := range finalEvents {
+		if event.Err != nil {
+			t.Fatalf("unexpected event error after approval resume: %v", event.Err)
+		}
+		if event.Output == nil || event.Output.MessageOutput == nil || event.Output.MessageOutput.Message == nil {
+			continue
+		}
+		switch event.Output.MessageOutput.Message.Content {
+		case "inner clean result":
+			foundInnerResult = true
+		case "outer completed":
+			foundOuterResult = true
+		}
+	}
+	assert.True(t, foundInnerResult, "inner agent should run after approval")
+	assert.True(t, foundOuterResult, "outer agent should complete after agent tool result")
+}
+
+type testAgentToolApprovalMiddleware struct {
+	*BaseChatModelAgentMiddleware
+	t             *testing.T
+	approvedCalls int
+}
+
+func (m *testAgentToolApprovalMiddleware) ChatModelAgentMiddlewareName() string {
+	return "test_approval"
+}
+
+func (m *testAgentToolApprovalMiddleware) WrapInvokableToolCall(
+	_ context.Context,
+	endpoint InvokableToolCallEndpoint,
+	tCtx *ToolContext,
+) (InvokableToolCallEndpoint, error) {
+	return func(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (string, error) {
+		assert.Equal(m.t, "InnerCleanAgent", tCtx.Name)
+		assert.Equal(m.t, "call_agent_tool", tCtx.CallID)
+
+		wasInterrupted, hasState, state := tool.GetInterruptState[string](ctx)
+		isTarget, hasData, data := tool.GetResumeContext[string](ctx)
+		if wasInterrupted {
+			assert.True(m.t, hasState)
+			assert.Equal(m.t, "approval-state", state)
+		}
+		if isTarget {
+			assert.True(m.t, hasData)
+			assert.Equal(m.t, "allow", data)
+			m.approvedCalls++
+			return endpoint(ctx, argumentsInJSON, opts...)
+		}
+		if wasInterrupted {
+			return "", tool.StatefulInterrupt(ctx, "approval required", state)
+		}
+		return "", tool.StatefulInterrupt(ctx, "approval required", "approval-state")
+	}, nil
+}
+
 func newMyStore() *myStore {
 	return &myStore{
 		m: map[string][]byte{},
