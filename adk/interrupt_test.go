@@ -1378,7 +1378,7 @@ type testAgentToolApprovalMiddleware struct {
 	approvedCalls int
 }
 
-func (m *testAgentToolApprovalMiddleware) ToolCallWrapperName() string {
+func (m *testAgentToolApprovalMiddleware) ChatModelAgentMiddlewareName() string {
 	return "test_approval"
 }
 

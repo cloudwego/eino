@@ -47,7 +47,7 @@ type namedToolWrapperHandler struct {
 	name string
 }
 
-func (h *namedToolWrapperHandler) ToolCallWrapperName() string {
+func (h *namedToolWrapperHandler) ChatModelAgentMiddlewareName() string {
 	return h.name
 }
 
