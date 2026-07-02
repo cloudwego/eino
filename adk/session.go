@@ -331,7 +331,7 @@ type ModelSpanMeta struct {
 	Accepted                 bool              `json:"accepted"`
 }
 
-// ModelTimeoutMeta records timeout details for a model span that ended with a ModelTimeoutError.
+// ModelTimeoutMeta records timeout details for a model span that ended with a timeout-aware error.
 type ModelTimeoutMeta struct {
 	// Phase identifies which part of the model call exceeded its timeout budget.
 	Phase string `json:"phase,omitempty"`
@@ -357,10 +357,9 @@ type ModelUsage struct {
 // identity envelope that joins those two messages together with timing
 // and status.
 //
-// Tool spans for permission-gated calls may straddle multiple Run/Resume
-// invocations: the start span fires on the run where the call begins
-// (typically before the user is asked), and the end span fires on the run
-// where the call completes (after the user has approved/rejected/responded).
+// Tool spans for interrupted tool calls may straddle multiple Run/Resume
+// invocations: the start span fires on the run where the call begins, and the
+// end span fires on the run where the call completes after resume.
 // Both spans share the same SpanID. Consumers correlating a start span to
 // its eventual end span should follow SessionEvent.Span.SpanID (or use
 // ToolUseID for cross-event correlation across resume boundaries).
@@ -410,8 +409,7 @@ type InterruptContext struct {
 	// Info is the business-defined payload describing the interrupt, provided by
 	// the component that triggered it (e.g. a middleware or a custom tool).
 	// ADK treats it as opaque; consumers type-assert it to the concrete type the
-	// triggering component documents (e.g. *permission.AskInfo) to determine how
-	// to handle the interrupt.
+	// triggering component documents to determine how to handle the interrupt.
 	Info any `json:"info,omitempty"`
 	// ToolUseID is set when the interrupt source is a specific tool call. It is
 	// structural metadata derived from the interrupt address, identifying which

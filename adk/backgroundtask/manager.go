@@ -874,8 +874,9 @@ func (m *Manager) Run(ctx context.Context, input *RunInput, work WorkFunc) (*Tas
 	// Explicit background: run in goroutine, return immediately. createTask already
 	// marked the task RunInBackground.
 	if input.RunInBackground {
+		task := m.taskSnapshot(id)
 		go run()
-		return m.taskSnapshot(id), nil
+		return task, nil
 	}
 
 	// Foreground: run in a goroutine and wait. The wait honors caller cancellation
