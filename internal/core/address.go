@@ -80,6 +80,7 @@ type addrCtxKey struct{}
 
 type addrCtx struct {
 	addr           Address
+	parent         *addrCtx
 	interruptState *InterruptState
 	isResumeTarget bool
 	resumeData     any
@@ -107,6 +108,13 @@ func GetCurrentAddress(ctx context.Context) Address {
 	return nil
 }
 
+func getAddrCtx(ctx context.Context) *addrCtx {
+	if p, ok := ctx.Value(addrCtxKey{}).(*addrCtx); ok {
+		return p
+	}
+	return nil
+}
+
 // AppendAddressSegment creates a new execution context for a sub-component (e.g., a graph node or a tool call).
 //
 // It extends the current context's address with a new segment and populates the new context with the
@@ -118,7 +126,11 @@ func GetCurrentAddress(ctx context.Context) Address {
 func AppendAddressSegment(ctx context.Context, segType AddressSegmentType, segID string,
 	subID string) context.Context {
 	// get current address
-	currentAddress := GetCurrentAddress(ctx)
+	parent := getAddrCtx(ctx)
+	var currentAddress Address
+	if parent != nil {
+		currentAddress = parent.addr
+	}
 	if len(currentAddress) == 0 {
 		currentAddress = []AddressSegment{
 			{
@@ -139,7 +151,8 @@ func AppendAddressSegment(ctx context.Context, segType AddressSegmentType, segID
 	}
 
 	runCtx := &addrCtx{
-		addr: currentAddress,
+		addr:   currentAddress,
+		parent: parent,
 	}
 
 	rInfo, hasRInfo := getResumeInfo(ctx)
@@ -184,6 +197,15 @@ func AppendAddressSegment(ctx context.Context, segType AddressSegmentType, segID
 	}
 
 	return context.WithValue(ctx, addrCtxKey{}, runCtx)
+}
+
+// PopAddressSegment restores the previous execution address context, if one exists.
+func PopAddressSegment(ctx context.Context) context.Context {
+	current := getAddrCtx(ctx)
+	if current == nil || current.parent == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, addrCtxKey{}, current.parent)
 }
 
 // GetNextResumptionPoints finds the immediate child resumption points for a given parent address.
