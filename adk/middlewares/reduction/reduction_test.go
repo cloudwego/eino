@@ -103,6 +103,32 @@ func toolResultStreamWithError(chunks []*schema.ToolResult, err error) *schema.S
 	return sr
 }
 
+func sendStreamChunk[T any](t *testing.T, sw *schema.StreamWriter[T], chunk T) bool {
+	t.Helper()
+
+	done := make(chan bool, 1)
+	go func() {
+		done <- sw.Send(chunk, nil)
+	}()
+
+	select {
+	case closed := <-done:
+		return closed
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out sending stream chunk")
+		return true
+	}
+}
+
+type writeFailBackend struct {
+	filesystem.Backend
+	err error
+}
+
+func (b *writeFailBackend) Write(context.Context, *filesystem.WriteRequest) error {
+	return b.err
+}
+
 func TestReductionMiddlewareTrunc(t *testing.T) {
 	ctx := context.Background()
 	it := mockInvokableTool()
@@ -478,7 +504,7 @@ hello worldhello worldhello worldhello worldhello worldhello worldhello worldhel
 
 		t.Run("truncates incrementally and writes full output", func(t *testing.T) {
 			cfg := &ToolReductionConfig{Backend: backend}
-			resp := mw.wrapDefaultStreamableTruncation(ctx, cfg, tCtx, `{}`, stringStream(strings.Repeat("x", 20)))
+			resp := mw.wrapDefaultStreamableTruncation(ctx, cfg, tCtx, `{}`, stringStream(strings.Repeat("x", 20), "tail"))
 			defer resp.Close()
 
 			got, err := resp.Recv()
@@ -494,7 +520,76 @@ hello worldhello worldhello worldhello worldhello worldhello worldhello worldhel
 
 			content, err := backend.Read(ctx, &filesystem.ReadRequest{FilePath: "/tmp/trunc/stream_branches"})
 			assert.NoError(t, err)
-			assert.Equal(t, strings.Repeat("x", 20), content.Content)
+			assert.Equal(t, strings.Repeat("x", 20)+"tail", content.Content)
+		})
+
+		t.Run("write error is forwarded after source EOF", func(t *testing.T) {
+			wantErr := errors.New("stream write error")
+			cfg := &ToolReductionConfig{
+				Backend: &writeFailBackend{
+					Backend: filesystem.NewInMemoryBackend(),
+					err:     wantErr,
+				},
+			}
+			resp := mw.wrapDefaultStreamableTruncation(ctx, cfg, tCtx, `{}`, stringStream(strings.Repeat("x", 20)))
+			defer resp.Close()
+
+			got, err := resp.Recv()
+			assert.NoError(t, err)
+			assert.Equal(t, strings.Repeat("x", 10), got)
+			notice, err := resp.Recv()
+			assert.NoError(t, err)
+			assert.Contains(t, notice, "Output truncated after 10 bytes were streamed")
+			_, err = resp.Recv()
+			assert.Equal(t, wantErr, err)
+		})
+
+		t.Run("stops when consumer closes before short chunk", func(t *testing.T) {
+			cfg := &ToolReductionConfig{}
+			input, inputW := schema.Pipe[string](0)
+			resp := mw.wrapDefaultStreamableTruncation(ctx, cfg, tCtx, `{}`, input)
+
+			resp.Close()
+			closed := sendStreamChunk(t, inputW, "short")
+			inputW.Close()
+
+			assert.False(t, closed)
+		})
+
+		t.Run("stops when consumer closes before prefix", func(t *testing.T) {
+			cfg := &ToolReductionConfig{Backend: backend}
+			input, inputW := schema.Pipe[string](0)
+			resp := mw.wrapDefaultStreamableTruncation(ctx, cfg, tCtx, `{}`, input)
+
+			closed := sendStreamChunk(t, inputW, "abc")
+			assert.False(t, closed)
+			got, err := resp.Recv()
+			assert.NoError(t, err)
+			assert.Equal(t, "abc", got)
+
+			resp.Close()
+			closed = sendStreamChunk(t, inputW, strings.Repeat("x", 20))
+			inputW.Close()
+
+			assert.False(t, closed)
+		})
+
+		t.Run("stops when consumer closes before notice", func(t *testing.T) {
+			cfg := &ToolReductionConfig{Backend: backend}
+			input, inputW := schema.Pipe[string](0)
+			resp := mw.wrapDefaultStreamableTruncation(ctx, cfg, tCtx, `{}`, input)
+
+			closed := sendStreamChunk(t, inputW, strings.Repeat("x", 10))
+			assert.False(t, closed)
+			got, err := resp.Recv()
+			assert.NoError(t, err)
+			assert.Equal(t, strings.Repeat("x", 10), got)
+
+			resp.Close()
+			closed = sendStreamChunk(t, inputW, "overflow")
+			inputW.Close()
+
+			assert.False(t, closed)
 		})
 	})
 
@@ -566,6 +661,33 @@ hello worldhello worldhello worldhello worldhello worldhello worldhello worldhel
 			assert.Contains(t, err.Error(), "conflicting")
 		})
 
+		t.Run("concat error before notice is forwarded", func(t *testing.T) {
+			audioA := "YXVkaW8x"
+			audioB := "YXVkaW8y"
+			cfg := &ToolReductionConfig{Backend: backend}
+			resp := mw.wrapDefaultEnhancedStreamableTruncation(ctx, cfg, tCtx, toolArg, toolResultStream(
+				&schema.ToolResult{Parts: []schema.ToolOutputPart{
+					{Type: schema.ToolPartTypeText, Text: "ok"},
+					{Type: schema.ToolPartTypeAudio, Audio: &schema.ToolOutputAudio{MessagePartCommon: schema.MessagePartCommon{Base64Data: &audioA}}},
+				}},
+				&schema.ToolResult{Parts: []schema.ToolOutputPart{
+					{Type: schema.ToolPartTypeText, Text: strings.Repeat("x", 20)},
+					{Type: schema.ToolPartTypeAudio, Audio: &schema.ToolOutputAudio{MessagePartCommon: schema.MessagePartCommon{Base64Data: &audioB}}},
+				}},
+			))
+			defer resp.Close()
+
+			got, err := resp.Recv()
+			assert.NoError(t, err)
+			assert.Equal(t, "ok", got.Parts[0].Text)
+			prefix, err := resp.Recv()
+			assert.NoError(t, err)
+			assert.Equal(t, strings.Repeat("x", 8), prefix.Parts[0].Text)
+			_, err = resp.Recv()
+			assert.Error(t, err)
+			assert.Contains(t, err.Error(), "conflicting")
+		})
+
 		t.Run("path generation error is forwarded", func(t *testing.T) {
 			wantErr := errors.New("enhanced path generation error")
 			mwWithPathErr := &typedToolReductionMiddleware[*schema.Message]{
@@ -601,7 +723,10 @@ hello worldhello worldhello worldhello worldhello worldhello worldhello worldhel
 
 		t.Run("truncates incrementally and writes full output", func(t *testing.T) {
 			cfg := &ToolReductionConfig{Backend: backend}
-			resp := mw.wrapDefaultEnhancedStreamableTruncation(ctx, cfg, tCtx, toolArg, toolResultStream(longResult))
+			resp := mw.wrapDefaultEnhancedStreamableTruncation(ctx, cfg, tCtx, toolArg, toolResultStream(
+				longResult,
+				&schema.ToolResult{Parts: []schema.ToolOutputPart{{Type: schema.ToolPartTypeText, Text: "tail"}}},
+			))
 			defer resp.Close()
 
 			got, err := resp.Recv()
@@ -617,7 +742,76 @@ hello worldhello worldhello worldhello worldhello worldhello worldhello worldhel
 
 			content, err := backend.Read(ctx, &filesystem.ReadRequest{FilePath: "/tmp/trunc/enhanced_stream_branches"})
 			assert.NoError(t, err)
-			assert.Equal(t, strings.Repeat("x", 20), content.Content)
+			assert.Equal(t, strings.Repeat("x", 20)+"tail", content.Content)
+		})
+
+		t.Run("write error is forwarded after source EOF", func(t *testing.T) {
+			wantErr := errors.New("enhanced write error")
+			cfg := &ToolReductionConfig{
+				Backend: &writeFailBackend{
+					Backend: filesystem.NewInMemoryBackend(),
+					err:     wantErr,
+				},
+			}
+			resp := mw.wrapDefaultEnhancedStreamableTruncation(ctx, cfg, tCtx, toolArg, toolResultStream(longResult))
+			defer resp.Close()
+
+			got, err := resp.Recv()
+			assert.NoError(t, err)
+			assert.Equal(t, strings.Repeat("x", 10), got.Parts[0].Text)
+			notice, err := resp.Recv()
+			assert.NoError(t, err)
+			assert.Contains(t, notice.Parts[0].Text, "Output truncated after 10 bytes were streamed")
+			_, err = resp.Recv()
+			assert.Equal(t, wantErr, err)
+		})
+
+		t.Run("stops when consumer closes before short chunk", func(t *testing.T) {
+			cfg := &ToolReductionConfig{}
+			input, inputW := schema.Pipe[*schema.ToolResult](0)
+			resp := mw.wrapDefaultEnhancedStreamableTruncation(ctx, cfg, tCtx, toolArg, input)
+
+			resp.Close()
+			closed := sendStreamChunk(t, inputW, &schema.ToolResult{Parts: []schema.ToolOutputPart{{Type: schema.ToolPartTypeText, Text: "short"}}})
+			inputW.Close()
+
+			assert.False(t, closed)
+		})
+
+		t.Run("stops when consumer closes before prefix", func(t *testing.T) {
+			cfg := &ToolReductionConfig{Backend: backend}
+			input, inputW := schema.Pipe[*schema.ToolResult](0)
+			resp := mw.wrapDefaultEnhancedStreamableTruncation(ctx, cfg, tCtx, toolArg, input)
+
+			closed := sendStreamChunk(t, inputW, &schema.ToolResult{Parts: []schema.ToolOutputPart{{Type: schema.ToolPartTypeText, Text: "abc"}}})
+			assert.False(t, closed)
+			got, err := resp.Recv()
+			assert.NoError(t, err)
+			assert.Equal(t, "abc", got.Parts[0].Text)
+
+			resp.Close()
+			closed = sendStreamChunk(t, inputW, longResult)
+			inputW.Close()
+
+			assert.False(t, closed)
+		})
+
+		t.Run("stops when consumer closes before notice", func(t *testing.T) {
+			cfg := &ToolReductionConfig{Backend: backend}
+			input, inputW := schema.Pipe[*schema.ToolResult](0)
+			resp := mw.wrapDefaultEnhancedStreamableTruncation(ctx, cfg, tCtx, toolArg, input)
+
+			closed := sendStreamChunk(t, inputW, &schema.ToolResult{Parts: []schema.ToolOutputPart{{Type: schema.ToolPartTypeText, Text: strings.Repeat("x", 10)}}})
+			assert.False(t, closed)
+			got, err := resp.Recv()
+			assert.NoError(t, err)
+			assert.Equal(t, strings.Repeat("x", 10), got.Parts[0].Text)
+
+			resp.Close()
+			closed = sendStreamChunk(t, inputW, &schema.ToolResult{Parts: []schema.ToolOutputPart{{Type: schema.ToolPartTypeText, Text: "overflow"}}})
+			inputW.Close()
+
+			assert.False(t, closed)
 		})
 	})
 
