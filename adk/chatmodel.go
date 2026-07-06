@@ -1471,7 +1471,7 @@ func (a *TypedChatModelAgent[M]) buildMessageReActRunFunc(_ context.Context, bc 
 		var runOpts []compose.Option
 		runOpts = append(runOpts, mp.composeOpts...)
 		if a.toolsConfig.EmitInternalEvents {
-			runOpts = append(runOpts, compose.WithToolsNodeOption(compose.WithToolOption(withAgentToolEventGenerator(mp.generator))))
+			runOpts = append(runOpts, compose.WithToolsNodeOption(compose.WithToolOption(withTypedAgentToolEventForwardTarget(mp.generator))))
 		}
 		if mp.input.EnableStreaming {
 			runOpts = append(runOpts, compose.WithToolsNodeOption(compose.WithToolOption(withAgentToolEnableStreaming(true))))
@@ -1604,7 +1604,7 @@ func (a *TypedChatModelAgent[M]) buildAgenticReActRunFunc(_ context.Context, bc 
 		var runOpts []compose.Option
 		runOpts = append(runOpts, ap.composeOpts...)
 		if a.toolsConfig.EmitInternalEvents {
-			runOpts = append(runOpts, compose.WithToolsNodeOption(compose.WithToolOption(withTypedAgentToolEventGenerator[*schema.AgenticMessage](ap.generator))))
+			runOpts = append(runOpts, compose.WithToolsNodeOption(compose.WithToolOption(withTypedAgentToolEventForwardTarget[*schema.AgenticMessage](ap.generator))))
 		}
 		if ap.input.EnableStreaming {
 			runOpts = append(runOpts, compose.WithToolsNodeOption(compose.WithToolOption(withAgentToolEnableStreaming(true))))

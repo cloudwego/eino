@@ -789,3 +789,80 @@ func TestManager_ContextCancelStopsWork(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, StatusCanceled, task.Status)
 }
+
+// --- TaskInfo.Backgrounded signal Tests ---
+
+// isClosed reports whether a done channel has fired without blocking.
+func isClosed(ch <-chan struct{}) bool {
+	select {
+	case <-ch:
+		return true
+	default:
+		return false
+	}
+}
+
+// An explicit RunInBackground launch is background from the start, so the work
+// must observe Backgrounded already closed on entry.
+func TestManager_Backgrounded_ExplicitClosedBeforeWork(t *testing.T) {
+	m := New(context.Background(), &Config{})
+	defer closeWithTimeout(m)
+
+	seen := make(chan bool, 1)
+	release := make(chan struct{})
+	result, err := m.Run(context.Background(), &RunInput{Description: "bg", RunInBackground: true},
+		func(_ context.Context, task TaskInfo) (string, error) {
+			seen <- isClosed(task.Backgrounded)
+			<-release
+			return "ok", nil
+		})
+	require.NoError(t, err)
+	assert.Equal(t, StatusRunning, result.Status)
+
+	assert.True(t, <-seen, "explicit background work should see Backgrounded already closed")
+	close(release)
+	waitTask(t, m, result.ID)
+}
+
+// A run that completes in the foreground is never backgrounded: its Backgrounded
+// signal stays open for the whole run.
+func TestManager_Backgrounded_ForegroundStaysOpen(t *testing.T) {
+	m := New(context.Background(), &Config{})
+	defer closeWithTimeout(m)
+
+	var duringRun bool
+	result, err := run(m, "fg", false, func(_ context.Context, task TaskInfo) (string, error) {
+		duringRun = isClosed(task.Backgrounded)
+		return "ok", nil
+	})
+	require.NoError(t, err)
+	assert.Equal(t, StatusCompleted, result.Status)
+	assert.False(t, duringRun, "foreground work must not see Backgrounded closed")
+}
+
+// A foreground run that is auto-moved to the background at its deadline must have
+// its Backgrounded signal close at the transition, so still-running work learns it
+// detached.
+func TestManager_Backgrounded_AutoBackgroundCloses(t *testing.T) {
+	m := New(context.Background(), &Config{ForegroundTimeoutMs: intPtr(50), ShouldAutoBackground: allowBackground})
+	defer closeWithTimeout(m)
+
+	closedCh := make(chan struct{})
+	result, err := m.Run(context.Background(), &RunInput{Description: "slow"},
+		func(_ context.Context, task TaskInfo) (string, error) {
+			// Block until the deadline detaches the run, then confirm the signal fired.
+			<-task.Backgrounded
+			close(closedCh)
+			return "slow result", nil
+		})
+	require.NoError(t, err)
+	assert.Equal(t, StatusRunning, result.Status)
+
+	select {
+	case <-closedCh:
+	case <-time.After(time.Second):
+		t.Fatal("Backgrounded did not close at the auto-background transition")
+	}
+	waitTask(t, m, result.ID)
+}
+
