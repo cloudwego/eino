@@ -61,6 +61,23 @@ type TypedConfig[M adk.MessageType] struct {
 	// Optional.
 	ModelOptions []model.Option
 
+	// ReusePromptCaching indicates whether the summarization call should
+	// reuse the main conversation's cached prompt instead of rebuilding a
+	// fresh input. For example, the input becomes
+	// [sysMsg, userMsg1, assistantMsg1, ..., userInstruction] rather than
+	// [innerSysInstruction, userMsg1, assistantMsg1, ..., userInstruction].
+	// The current state's ToolInfos and DeferredToolInfos are also passed
+	// via model.WithTools/model.WithDeferredTools so the tool envelope
+	// matches the main conversation's, preserving the cache.
+	//
+	// Because the model still sees the original messages and tools, there is
+	// a small chance that it chooses to call a tool instead of producing a
+	// summary directly. It is therefore recommended to also configure Retry
+	// or Failover to handle this case.
+	//
+	// Optional. Defaults to false.
+	ReusePromptCaching bool
+
 	// TokenCounter calculates the token count for given messages and tools.
 	//
 	// Parameters:
@@ -293,7 +310,7 @@ func (m *TypedMiddleware[M]) Summarize(ctx context.Context, state *adk.TypedChat
 		}
 	}
 
-	rawSummary, modelInput, err := m.summarize(ctx, beforeState.Messages)
+	rawSummary, modelInput, err := m.summarize(ctx, beforeState)
 	if err != nil {
 		return nil, err
 	}
@@ -499,18 +516,20 @@ func estimateTokenBytes(tokens int) int {
 	return tokens * 4
 }
 
-func (m *TypedMiddleware[M]) summarize(ctx context.Context, originalMsgs []M) (M, []M, error) {
+func (m *TypedMiddleware[M]) summarize(ctx context.Context, state adk.TypedChatModelAgentState[M]) (M, []M, error) {
 	var zero M
-	_, contextMsgs := splitSystemAndContextMsgs(originalMsgs)
+	_, contextMsgs := splitSystemAndContextMsgs(state.Messages)
 
-	modelInput, err := m.buildSummarizationModelInput(ctx, originalMsgs, contextMsgs)
+	modelInput, err := m.buildSummarizationModelInput(ctx, state.Messages, contextMsgs)
 	if err != nil {
 		return zero, nil, err
 	}
 
-	rawSummary, err := m.generateWithRetry(ctx, m.cfg.Model, modelInput, m.cfg.ModelOptions, m.cfg.Retry)
+	opts := m.summarizeModelOptions(state.ToolInfos, state.DeferredToolInfos)
+
+	rawSummary, err := m.generateWithRetry(ctx, m.cfg.Model, modelInput, opts, m.cfg.Retry)
 	if typedShouldFailover(ctx, m.cfg.Failover, rawSummary, err) {
-		rawSummary, modelInput, err = m.runFailover(ctx, originalMsgs, modelInput, rawSummary, err)
+		rawSummary, modelInput, err = m.runFailover(ctx, state.Messages, modelInput, opts, rawSummary, err)
 		if err != nil {
 			return zero, nil, err
 		}
@@ -519,6 +538,17 @@ func (m *TypedMiddleware[M]) summarize(ctx context.Context, originalMsgs []M) (M
 	}
 
 	return rawSummary, modelInput, nil
+}
+
+func (m *TypedMiddleware[M]) summarizeModelOptions(toolInfos, deferredToolInfos []*schema.ToolInfo) []model.Option {
+	if !m.cfg.ReusePromptCaching {
+		return m.cfg.ModelOptions
+	}
+	opts := make([]model.Option, len(m.cfg.ModelOptions), len(m.cfg.ModelOptions)+2)
+	copy(opts, m.cfg.ModelOptions)
+	opts = append(opts, model.WithTools(toolInfos))
+	opts = append(opts, model.WithDeferredTools(deferredToolInfos))
+	return opts
 }
 
 func splitSystemAndContextMsgs[M adk.MessageType](msgs []M) ([]M, []M) {
@@ -534,8 +564,8 @@ func splitSystemAndContextMsgs[M adk.MessageType](msgs []M) ([]M, []M) {
 	return systemMsgs, contextMsgs
 }
 
-func (m *TypedMiddleware[M]) runFailover(ctx context.Context, originalMsgs, defaultInput []M, lastResp M,
-	lastErr error) (M, []M, error) {
+func (m *TypedMiddleware[M]) runFailover(ctx context.Context, originalMsgs, defaultInput []M, opts []model.Option,
+	lastResp M, lastErr error) (M, []M, error) {
 
 	var zero M
 	const defaultMaxRetries = 3
@@ -577,7 +607,7 @@ func (m *TypedMiddleware[M]) runFailover(ctx context.Context, originalMsgs, defa
 			}
 		} else {
 			modelInput = nextInput
-			lastResp, lastErr = m.generateAndEmit(ctx, failoverModel, modelInput, m.cfg.ModelOptions, attempt, GenerateSummaryPhaseFailover)
+			lastResp, lastErr = m.generateAndEmit(ctx, failoverModel, modelInput, opts, attempt, GenerateSummaryPhaseFailover)
 		}
 
 		if !typedShouldFailover(ctx, m.cfg.Failover, lastResp, lastErr) {
@@ -629,6 +659,13 @@ func (m *TypedMiddleware[M]) buildSummarizationModelInput(ctx context.Context, o
 		if err != nil {
 			return nil, fmt.Errorf("failed to generate model input: %w", err)
 		}
+		return input, nil
+	}
+
+	if m.cfg.ReusePromptCaching {
+		input := make([]M, 0, len(originMsgs)+1)
+		input = append(input, originMsgs...)
+		input = append(input, userInstruction)
 		return input, nil
 	}
 
