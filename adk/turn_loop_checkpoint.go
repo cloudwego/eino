@@ -222,6 +222,7 @@ func interruptedItemsForExit[T any](items []T, pending *turnLoopPendingResume[T]
 func (l *TurnLoop[T, M]) cleanup(ctx context.Context, exec *turnExecution[T, M]) {
 	atomic.StoreInt32(&l.stopped, 1)
 
+	l.buffer.Close()
 	unhandled := l.buffer.TakeAll()
 	l.resumeMu.Lock()
 	pending := l.pendingResume
@@ -306,6 +307,5 @@ func (l *TurnLoop[T, M]) cleanup(ctx context.Context, exec *turnExecution[T, M])
 
 	l.stopCtrl.closeForLoopExit()
 	l.preemptCtrl.closeForLoopExit()
-	l.buffer.Close()
 	close(l.done)
 }

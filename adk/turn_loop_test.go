@@ -86,6 +86,33 @@ func (s *turnLoopCheckpointStore) Get(_ context.Context, key string) ([]byte, bo
 	return v, ok, nil
 }
 
+type blockingTurnLoopCheckpointStore struct {
+	turnLoopCheckpointStore
+	setStarted chan struct{}
+	releaseSet chan struct{}
+	setOnce    sync.Once
+}
+
+func newBlockingTurnLoopCheckpointStore() *blockingTurnLoopCheckpointStore {
+	return &blockingTurnLoopCheckpointStore{
+		turnLoopCheckpointStore: turnLoopCheckpointStore{m: make(map[string][]byte)},
+		setStarted:              make(chan struct{}),
+		releaseSet:              make(chan struct{}),
+	}
+}
+
+func (s *blockingTurnLoopCheckpointStore) Set(ctx context.Context, key string, value []byte) error {
+	s.setOnce.Do(func() {
+		close(s.setStarted)
+	})
+	select {
+	case <-s.releaseSet:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	return s.turnLoopCheckpointStore.Set(ctx, key, value)
+}
+
 type turnLoopCancellableMockAgent struct {
 	name     string
 	runFunc  func(ctx context.Context, input *AgentInput) (*AgentOutput, error)
@@ -4712,6 +4739,76 @@ func TestTurnLoop_PushAfterStop_BufferedAsLateItems(t *testing.T) {
 
 	late := result.TakeLateItems()
 	assert.Equal(t, []string{"late1", "late2", "late3"}, late)
+}
+
+func TestTurnLoop_CleanupDoesNotLoseConcurrentPushes(t *testing.T) {
+	const (
+		attempts = 10
+		pushes   = 500
+	)
+
+	for attempt := 0; attempt < attempts; attempt++ {
+		store := newBlockingTurnLoopCheckpointStore()
+		loop := NewTurnLoop(TurnLoopConfig[string, *schema.Message]{
+			Store:        store,
+			CheckpointID: "cp",
+			GenInput:     genInputConsumeAll,
+			PrepareAgent: prepareTestAgent,
+		})
+		require.True(t, loop.stopCtrl.requestStop(&stopConfig{}).commit)
+
+		type pushResult struct {
+			item string
+			ok   bool
+		}
+		start := make(chan struct{})
+		results := make(chan pushResult, pushes)
+		for i := 0; i < pushes; i++ {
+			item := fmt.Sprintf("attempt-%d-push-%d", attempt, i)
+			go func() {
+				<-start
+				ok, _ := loop.Push(item)
+				results <- pushResult{item: item, ok: ok}
+			}()
+		}
+
+		cleanupDone := make(chan struct{})
+		close(start)
+		go func() {
+			loop.cleanup(context.Background(), &turnExecution[string, *schema.Message]{
+				checkpointBytes: []byte("checkpoint"),
+				checkpointID:    "runner",
+			})
+			close(cleanupDone)
+		}()
+
+		waitOrFail(t, store.setStarted, "cleanup did not start checkpoint save")
+
+		gotResults := make([]pushResult, 0, pushes)
+		for i := 0; i < pushes; i++ {
+			gotResults = append(gotResults, <-results)
+		}
+		close(store.releaseSet)
+		waitOrFail(t, cleanupDone, "cleanup did not finish")
+
+		unhandled := make(map[string]bool, len(loop.result.UnhandledItems))
+		for _, item := range loop.result.UnhandledItems {
+			unhandled[item] = true
+		}
+		lateItems := loop.result.TakeLateItems()
+		late := make(map[string]bool, len(lateItems))
+		for _, item := range lateItems {
+			late[item] = true
+		}
+
+		for _, result := range gotResults {
+			if result.ok {
+				assert.True(t, unhandled[result.item], "accepted push %q was not recovered as unhandled", result.item)
+				continue
+			}
+			assert.True(t, late[result.item], "rejected push %q was not recovered as late", result.item)
+		}
+	}
 }
 
 func TestTurnLoop_TakeLateItems_Idempotent(t *testing.T) {
