@@ -288,6 +288,13 @@ type taskRecord struct {
 	// state. Wait selects on it so waiting for one task neither holds m.mu nor is
 	// woken by unrelated tasks finishing.
 	doneCh chan struct{}
+	// backgrounded is closed exactly once (guarded by bgClosed) when the task moves
+	// to background execution: before the work starts for an explicit
+	// RunInBackground launch, or at the auto-background transition (detach). It stays
+	// open for a run that completes in the foreground. Handed to the work via
+	// TaskInfo.Backgrounded so foreground-only side effects can stop when it fires.
+	backgrounded chan struct{}
+	bgClosed     bool
 }
 
 // New creates a new Manager.
@@ -545,11 +552,43 @@ func (m *Manager) registerTaskLocked(input *RunInput, id string) (string, error)
 			OutputFile:      input.OutputFile,
 			Metadata:        cloneMetadata(input.Metadata),
 		},
-		doneCh: make(chan struct{}),
+		doneCh:       make(chan struct{}),
+		backgrounded: make(chan struct{}),
 	}
 	m.sendEventLocked(m.tasks[id], TaskEventCreated)
 
 	return id, nil
+}
+
+// markBackgroundedLocked closes a task's backgrounded signal, idempotently. Must be
+// called with m.mu held.
+func (m *Manager) markBackgroundedLocked(rec *taskRecord) {
+	if !rec.bgClosed {
+		rec.bgClosed = true
+		close(rec.backgrounded)
+	}
+}
+
+// backgroundedCh returns the task's backgrounded signal channel. Returns a nil
+// channel if the task is absent (should not happen for a just-created task); a nil
+// channel never fires, which is the correct "stayed foreground" reading.
+func (m *Manager) backgroundedCh(id string) <-chan struct{} {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if rec, ok := m.tasks[id]; ok {
+		return rec.backgrounded
+	}
+	return nil
+}
+
+// markBackgrounded closes a task's backgrounded signal, idempotently. Used for an
+// explicit RunInBackground launch, where the run is background from the start.
+func (m *Manager) markBackgrounded(id string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if rec, ok := m.tasks[id]; ok {
+		m.markBackgroundedLocked(rec)
+	}
 }
 
 func (m *Manager) closedError() error {
@@ -701,6 +740,7 @@ func (m *Manager) detach(id string) bool {
 		return false
 	}
 	rec.task.RunInBackground = true
+	m.markBackgroundedLocked(rec)
 	m.sendEventLocked(rec, TaskEventBackgrounded)
 	return true
 }
@@ -789,6 +829,14 @@ type TaskInfo struct {
 	// closure is already built. The launcher passes it to MarkOutputFileUnreliable
 	// to report an output-file write failure against this task.
 	ID string
+	// Backgrounded is closed when this task moves to background execution: before
+	// the work starts for an explicit RunInBackground launch, or at the
+	// auto-background transition (foreground deadline reached and permitted). It
+	// stays open for a run that completes in the foreground. Work uses it to stop
+	// side effects that are only valid while the run is foreground — most notably
+	// forwarding events to the launching turn's live stream, which the turn closes
+	// once it ends. It is never nil.
+	Backgrounded <-chan struct{}
 }
 
 // WorkFunc performs a single managed execution. It is supplied by the caller
@@ -852,6 +900,8 @@ func (m *Manager) Run(ctx context.Context, input *RunInput, work WorkFunc) (*Tas
 	runCtx, cancel := context.WithCancel(detachedCtx{parent: ctx})
 	m.storeCancelFunc(id, cancel)
 
+	bgCh := m.backgroundedCh(id)
+
 	// run executes the work and finalizes the task. The terminal outcome lives on
 	// the task record (set by completeTask/failTask), which Run reads back via
 	// taskSnapshot — so run signals completion rather than returning a value.
@@ -863,7 +913,7 @@ func (m *Manager) Run(ctx context.Context, input *RunInput, work WorkFunc) (*Tas
 				m.failTask(id, safe.NewPanicErr(p, debug.Stack()))
 			}
 		}()
-		r, runErr := work(runCtx, TaskInfo{ID: id})
+		r, runErr := work(runCtx, TaskInfo{ID: id, Backgrounded: bgCh})
 		if runErr != nil {
 			m.failTask(id, runErr)
 		} else {
@@ -872,8 +922,10 @@ func (m *Manager) Run(ctx context.Context, input *RunInput, work WorkFunc) (*Tas
 	}
 
 	// Explicit background: run in goroutine, return immediately. createTask already
-	// marked the task RunInBackground.
+	// marked the task RunInBackground; signal backgrounded before the work starts so
+	// the work never treats itself as foreground.
 	if input.RunInBackground {
+		m.markBackgrounded(id)
 		task := m.taskSnapshot(id)
 		go run()
 		return task, nil
@@ -1027,7 +1079,13 @@ func (m *Manager) forwardStream(r *streamRun) {
 		}
 	}()
 
-	ws, err := r.work(r.runCtx, TaskInfo{ID: r.id})
+	// Explicit background: the run is background from the start, so signal it before
+	// the work starts (RunStream forces budgetMs=0 for this case).
+	if r.input.RunInBackground {
+		m.markBackgrounded(r.id)
+	}
+
+	ws, err := r.work(r.runCtx, TaskInfo{ID: r.id, Backgrounded: m.backgroundedCh(r.id)})
 	if err != nil {
 		m.failTask(r.id, err)
 		r.sw.Send("", err)

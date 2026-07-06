@@ -30,6 +30,7 @@ import (
 	"github.com/cloudwego/eino/adk/backgroundtask"
 	"github.com/cloudwego/eino/adk/filesystem"
 	"github.com/cloudwego/eino/adk/internal"
+	"github.com/cloudwego/eino/adk/internal/agenttool"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/components/tool/utils"
 	"github.com/cloudwego/eino/compose"
@@ -118,7 +119,16 @@ func newManagedAgentTool(mgr *backgroundtask.Manager, subAgents map[string]tool.
 				Metadata:        map[string]any{MetadataKeySubagentType: in.SubagentType},
 				OutputFile:      outputFile,
 			}, func(workCtx context.Context, task backgroundtask.TaskInfo) (string, error) {
-				out, runErr := a.InvokableRun(workCtx, params, opts...)
+				// Bound the inner agent's forwarding to the launching turn's event
+				// stream by the task's backgrounded signal: a backgrounded run outlives
+				// the turn (which closes its event generator on turn end), so forwarding
+				// to it past that point is wrong and unsafe. The AgentTool stops
+				// forwarding when task.Backgrounded fires — for an explicit
+				// run_in_background it is already closed here, for an auto-backgrounded
+				// run it closes at the deadline. Foreground runs never fire it and
+				// forward for their whole lifetime.
+				runOpts := append(opts, agenttool.WithForwardGate(task.Backgrounded))
+				out, runErr := a.InvokableRun(workCtx, params, runOpts...)
 				if runErr != nil {
 					return "", runErr
 				}
