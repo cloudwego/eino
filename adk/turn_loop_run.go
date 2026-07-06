@@ -145,6 +145,110 @@ type turnExecution[T any, M MessageType] struct {
 	interruptedItems  []T
 }
 
+type turnLoopNextItems[T any] struct {
+	isResume bool
+	pr       *turnLoopPendingResume[T]
+	items    []T
+	pushBack []T
+}
+
+func (l *TurnLoop[T, M]) collectNextTurnItems(ctx context.Context) (*turnLoopNextItems[T], bool) {
+	next := &turnLoopNextItems[T]{}
+	if l.pendingResume != nil {
+		next.isResume = true
+		var ok bool
+		next.pr, ok = l.takePendingResume(ctx)
+		if !ok {
+			return nil, false
+		}
+
+		l.preemptCtrl.waitForPushes()
+		buffered := l.buffer.TakeAll()
+		if !next.pr.resumeSubmitted {
+			next.pr.resumeItems = append(next.pr.resumeItems, buffered...)
+		} else {
+			next.pr.unhandled = append(next.pr.unhandled, buffered...)
+		}
+
+		next.pushBack = make([]T, 0, len(next.pr.interrupted)+len(next.pr.unhandled)+len(next.pr.resumeItems))
+		next.pushBack = append(next.pushBack, next.pr.interrupted...)
+		next.pushBack = append(next.pushBack, next.pr.unhandled...)
+		next.pushBack = append(next.pushBack, next.pr.resumeItems...)
+		return next, true
+	}
+
+	first, ok := l.receiveNextTurnItem(ctx)
+	if !ok {
+		return nil, false
+	}
+
+	if err := ctx.Err(); err != nil {
+		l.buffer.PushFront([]T{first})
+		l.runErr = err
+		return nil, false
+	}
+
+	if l.stopCtrl.isCommitted() {
+		l.buffer.PushFront([]T{first})
+		return nil, false
+	}
+
+	l.preemptCtrl.waitForPushes()
+	rest := l.buffer.TakeAll()
+	next.items = append([]T{first}, rest...)
+	next.pushBack = next.items
+	return next, true
+}
+
+func (l *TurnLoop[T, M]) receiveNextTurnItem(ctx context.Context) (T, bool) {
+	if idleFor := l.stopCtrl.idleDuration(); idleFor > 0 {
+		return l.receiveNextTurnItemUntilIdle(ctx, idleFor)
+	}
+	first, ok := l.buffer.Receive()
+	// Woken up by Stop(UntilIdleFor); re-enter loop to start the idle timer.
+	if !ok && l.stopCtrl.idleDuration() > 0 {
+		var zero T
+		return zero, false
+	}
+	if !ok {
+		if err := ctx.Err(); err != nil {
+			l.runErr = err
+		}
+	}
+	return first, ok
+}
+
+func (l *TurnLoop[T, M]) receiveNextTurnItemUntilIdle(ctx context.Context, idleFor time.Duration) (T, bool) {
+	l.buffer.ClearWakeup()
+	idleTimer := time.NewTimer(idleFor)
+	cancelIdle := make(chan struct{})
+	// When the idle timer fires, commitStop closes the buffer via buffer.Close(),
+	// which broadcasts to unblock the pending Receive() call below.
+	go func() {
+		select {
+		case <-idleTimer.C:
+			l.commitStop()
+		case <-cancelIdle:
+		}
+	}()
+
+	first, ok := l.buffer.Receive()
+
+	idleTimer.Stop()
+	close(cancelIdle)
+
+	if !ok {
+		if err := ctx.Err(); err != nil {
+			l.runErr = err
+		}
+		if !l.buffer.IsClosed() {
+			var zero T
+			return zero, false
+		}
+	}
+	return first, ok
+}
+
 func (l *TurnLoop[T, M]) abortPlanningTurn() {
 	l.preemptCtrl.abortPlanningTurn().ack()
 }
@@ -291,58 +395,6 @@ func (l *TurnLoop[T, M]) run(ctx context.Context) {
 			exec.interruptedItems = append([]T{}, plan.spec.consumed...)
 			l.runErr = &InterruptError{InterruptContexts: exec.interruptContexts}
 			return
-		}
-	}
-}
-
-// watchPreempt runs for the lifetime of a single active turn. It consumes
-// pending preempt requests exactly once and submits cancel for that turn.
-func (l *TurnLoop[T, M]) watchPreempt(done <-chan struct{}, agentCancelFunc AgentCancelFunc, preemptDone chan struct{}) {
-	preemptDoneClosed := false
-	for {
-		select {
-		case <-done:
-			return
-		case <-l.preemptCtrl.notify:
-			req, ok := l.preemptCtrl.receivePreempt()
-			if !ok {
-				continue
-			}
-			// CancelHandle is intentionally not awaited here: agentCancelFunc commits the cancel signal synchronously,
-			// while waiting would block until the turn finishes and can deadlock this watcher against the done signal.
-			_, contributed := agentCancelFunc(req.cancelOptions(time.Now())...)
-			if contributed && !preemptDoneClosed {
-				close(preemptDone)
-				preemptDoneClosed = true
-			}
-			req.ack()
-		}
-	}
-}
-
-// watchStop runs for the lifetime of a single active turn. It consumes pending
-// Stop cancel requests exactly once and submits them to that turn.
-func (l *TurnLoop[T, M]) watchStop(done <-chan struct{}, agentCancelFunc AgentCancelFunc, stoppedDone chan struct{}) {
-	stoppedClosed := false
-
-	submit := func(req *stopCancelRequest) {
-		_, contributed := agentCancelFunc(req.cancelOptions(time.Now())...)
-		if contributed && !stoppedClosed {
-			close(stoppedDone)
-			stoppedClosed = true
-		}
-	}
-
-	for {
-		if req, ok := l.stopCtrl.receiveCancel(); ok {
-			submit(req)
-			continue
-		}
-
-		select {
-		case <-done:
-			return
-		case <-l.stopCtrl.notify:
 		}
 	}
 }

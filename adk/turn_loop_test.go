@@ -5256,6 +5256,13 @@ func TestWithPreemptTimeout_ZeroSafePoint_Panics(t *testing.T) {
 		func() { WithPreemptTimeout[string, *schema.Message](SafePoint(0), time.Second) })
 }
 
+func TestWithPreemptTimeout_NonPositiveTimeout_Panics(t *testing.T) {
+	assert.PanicsWithValue(t, "adk: WithPreemptTimeout: timeout must be positive",
+		func() { WithPreemptTimeout[string, *schema.Message](AnySafePoint, 0) })
+	assert.PanicsWithValue(t, "adk: WithPreemptTimeout: timeout must be positive",
+		func() { WithPreemptTimeout[string, *schema.Message](AnySafePoint, -1*time.Second) })
+}
+
 func TestSafePoint_ToCancelMode(t *testing.T) {
 	assert.Equal(t, CancelAfterToolCalls, AfterToolCalls.toCancelMode())
 	assert.Equal(t, CancelAfterChatModel, AfterChatModel.toCancelMode())
@@ -5917,6 +5924,52 @@ func TestTurnLoop_UntilIdleFor_ConcurrentPushDuringIdleTimer(t *testing.T) {
 
 	finalCount := atomic.LoadInt32(&turnCount)
 	assert.Equal(t, int32(6), finalCount, "all 6 pushes should have been processed")
+}
+
+func TestAttack_UntilIdleForPushNearDeadlineDoesNotDropAcceptedItem(t *testing.T) {
+	turnDone := make(chan string, 2)
+	waitForTurn := func(expected string) {
+		t.Helper()
+		select {
+		case item := <-turnDone:
+			assert.Equal(t, expected, item)
+		case <-time.After(2 * time.Second):
+			t.Fatalf("turn for %q did not complete", expected)
+		}
+	}
+
+	loop := newAndRunTurnLoop(context.Background(), TurnLoopConfig[string, *schema.Message]{
+		GenInput: genInputConsumeAllWithMsg,
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string, *schema.Message], consumed []string) (Agent, error) {
+			item := consumed[0]
+			return &turnLoopMockAgent{
+				name: "test",
+				runFunc: func(ctx context.Context, input *AgentInput) (*AgentOutput, error) {
+					turnDone <- item
+					return &AgentOutput{}, nil
+				},
+			}, nil
+		},
+	})
+
+	ok, _ := loop.Push("initial")
+	require.True(t, ok)
+	waitForTurn("initial")
+
+	loop.Stop(UntilIdleFor(80 * time.Millisecond))
+	time.Sleep(60 * time.Millisecond)
+	ok, _ = loop.Push("near-deadline")
+	if !ok {
+		t.Log("push raced after idle stop commit; item is expected to be reported as late")
+		exit := loop.Wait()
+		assert.Equal(t, []string{"near-deadline"}, exit.TakeLateItems())
+		return
+	}
+
+	waitForTurn("near-deadline")
+	exit := loop.Wait()
+	assert.NoError(t, exit.ExitReason)
+	assert.Empty(t, exit.TakeLateItems())
 }
 
 func TestTurnLoop_UntilIdleFor_MultipleStopCallsFirstWins(t *testing.T) {

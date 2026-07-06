@@ -408,3 +408,14 @@ func (l *TurnLoop[T, M]) start(ctx context.Context) {
 func (l *TurnLoop[T, M]) Run(ctx context.Context) {
 	l.start(ctx)
 }
+
+// Wait blocks until the loop exits and returns the result.
+// This method is safe to call from multiple goroutines.
+// All callers will receive the same result.
+//
+// Wait blocks until Run is called AND the loop exits. If Run is
+// never called, Wait blocks forever.
+func (l *TurnLoop[T, M]) Wait() *TurnLoopExitState[T, M] {
+	<-l.done
+	return l.result
+}

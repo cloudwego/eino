@@ -172,7 +172,7 @@ type turnLoopPendingResume[T any] struct {
 // (via WithPreemptTimeout), not as a direct user choice. This is why SafePoint
 // has no "immediate" value and why WithPreempt requires a non-zero SafePoint
 // (panics otherwise).
-func (l *TurnLoop[T, M]) takePendingResume(ctx context.Context) (*turnLoopPendingResume[T], bool) {
+func (l *TurnLoop[T, M]) takePendingResume(_ context.Context) (*turnLoopPendingResume[T], bool) {
 	l.resumeMu.Lock()
 	pr := l.pendingResume
 	if pr == nil {
@@ -255,7 +255,7 @@ func (l *TurnLoop[T, M]) cleanup(ctx context.Context, exec *turnExecution[T, M])
 		((l.stopCtrl.isCommitted() && exitCausedByStop) || businessInterrupt || (pending != nil && hasPendingRunnerState)) &&
 		!isIdle && !l.stopCtrl.skipCheckpointEnabled()
 
-	var checkpointed bool
+	var checkpointAttempted bool
 	var checkpointErr error
 
 	if shouldSaveCheckpoint {
@@ -277,7 +277,7 @@ func (l *TurnLoop[T, M]) cleanup(ctx context.Context, exec *turnExecution[T, M])
 			ResumeItems:        resumeItems,
 			CanceledItems:      interruptedItems,
 		}
-		checkpointed = true
+		checkpointAttempted = true
 		checkpointErr = l.saveTurnLoopCheckpoint(ctx, checkpointID, cp)
 	} else if l.loadCheckpointID != "" {
 		_ = l.deleteTurnLoopCheckpoint(ctx, l.loadCheckpointID)
@@ -291,7 +291,7 @@ func (l *TurnLoop[T, M]) cleanup(ctx context.Context, exec *turnExecution[T, M])
 		UnhandledItems:      unhandled,
 		InterruptedItems:    interruptedItemsForExit(interruptedItems, pending),
 		StopCause:           l.stopCtrl.cause(),
-		CheckpointAttempted: checkpointed,
+		CheckpointAttempted: checkpointAttempted,
 		CheckpointErr:       checkpointErr,
 		TakeLateItems: func() []T {
 			takeLateOnce.Do(func() {
