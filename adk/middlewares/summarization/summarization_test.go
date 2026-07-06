@@ -613,6 +613,188 @@ func TestMiddlewareBeforeModelRewriteState(t *testing.T) {
 		assert.NoError(t, err)
 	})
 
+	t.Run("ReusePromptCaching appends user instruction to original messages without rebuilding", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		cm := mockModel.NewMockBaseChatModel(ctrl)
+
+		sysMsg := schema.SystemMessage("caller supplied system")
+		userMsg := schema.UserMessage(strings.Repeat("a", 100))
+		assistantMsg := schema.AssistantMessage(strings.Repeat("b", 100), nil)
+
+		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			DoAndReturn(func(ctx context.Context, msgs []*schema.Message, opts ...interface{}) (*schema.Message, error) {
+				require.Len(t, msgs, 4)
+				assert.Same(t, sysMsg, msgs[0])
+				assert.Same(t, userMsg, msgs[1])
+				assert.Same(t, assistantMsg, msgs[2])
+				assert.Equal(t, schema.User, msgs[3].Role)
+				return &schema.Message{
+					Role:    schema.Assistant,
+					Content: "Summary content",
+				}, nil
+			}).Times(1)
+
+		mw := &TypedMiddleware[*schema.Message]{
+			cfg: &Config{
+				Model:              cm,
+				Trigger:            &TriggerCondition{ContextTokens: 10},
+				ReusePromptCaching: true,
+			},
+			TypedBaseChatModelAgentMiddleware: &adk.TypedBaseChatModelAgentMiddleware[*schema.Message]{},
+		}
+
+		state := &adk.ChatModelAgentState{
+			Messages: []adk.Message{sysMsg, userMsg, assistantMsg},
+		}
+
+		_, newState, err := mw.BeforeModelRewriteState(ctx, state, mtx)
+		assert.NoError(t, err)
+		assert.Len(t, newState.Messages, 2)
+		assert.Equal(t, schema.System, newState.Messages[0].Role)
+		assert.Equal(t, "caller supplied system", newState.Messages[0].Content)
+		assert.Equal(t, schema.User, newState.Messages[1].Role)
+	})
+
+	t.Run("ReusePromptCaching injects state tool infos as model.WithTools", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		cm := mockModel.NewMockBaseChatModel(ctrl)
+
+		stateTools := []*schema.ToolInfo{
+			{Name: "state_tool_a"},
+			{Name: "state_tool_b"},
+		}
+
+		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			DoAndReturn(func(ctx context.Context, msgs []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+				common := model.GetCommonOptions(&model.Options{}, opts...)
+				require.Len(t, common.Tools, 2)
+				assert.Equal(t, "state_tool_a", common.Tools[0].Name)
+				assert.Equal(t, "state_tool_b", common.Tools[1].Name)
+				return &schema.Message{
+					Role:    schema.Assistant,
+					Content: "Summary content",
+				}, nil
+			}).Times(1)
+
+		mw := &TypedMiddleware[*schema.Message]{
+			cfg: &Config{
+				Model:              cm,
+				Trigger:            &TriggerCondition{ContextTokens: 10},
+				ReusePromptCaching: true,
+			},
+			TypedBaseChatModelAgentMiddleware: &adk.TypedBaseChatModelAgentMiddleware[*schema.Message]{},
+		}
+
+		state := &adk.ChatModelAgentState{
+			Messages: []adk.Message{
+				schema.UserMessage(strings.Repeat("a", 100)),
+				schema.AssistantMessage(strings.Repeat("b", 100), nil),
+			},
+			ToolInfos: stateTools,
+		}
+
+		_, _, err := mw.BeforeModelRewriteState(ctx, state, mtx)
+		assert.NoError(t, err)
+	})
+
+	t.Run("ReusePromptCaching injects state deferred tool infos as model.WithDeferredTools", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		cm := mockModel.NewMockBaseChatModel(ctrl)
+
+		stateTools := []*schema.ToolInfo{
+			{Name: "state_tool_a"},
+		}
+		deferredTools := []*schema.ToolInfo{
+			{Name: "deferred_tool_a"},
+			{Name: "deferred_tool_b"},
+		}
+
+		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			DoAndReturn(func(ctx context.Context, msgs []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+				common := model.GetCommonOptions(&model.Options{}, opts...)
+				require.Len(t, common.Tools, 1)
+				assert.Equal(t, "state_tool_a", common.Tools[0].Name)
+				require.Len(t, common.DeferredTools, 2)
+				assert.Equal(t, "deferred_tool_a", common.DeferredTools[0].Name)
+				assert.Equal(t, "deferred_tool_b", common.DeferredTools[1].Name)
+				return &schema.Message{
+					Role:    schema.Assistant,
+					Content: "Summary content",
+				}, nil
+			}).Times(1)
+
+		mw := &TypedMiddleware[*schema.Message]{
+			cfg: &Config{
+				Model:              cm,
+				Trigger:            &TriggerCondition{ContextTokens: 10},
+				ReusePromptCaching: true,
+			},
+			TypedBaseChatModelAgentMiddleware: &adk.TypedBaseChatModelAgentMiddleware[*schema.Message]{},
+		}
+
+		state := &adk.ChatModelAgentState{
+			Messages: []adk.Message{
+				schema.UserMessage(strings.Repeat("a", 100)),
+				schema.AssistantMessage(strings.Repeat("b", 100), nil),
+			},
+			ToolInfos:         stateTools,
+			DeferredToolInfos: deferredTools,
+		}
+
+		_, _, err := mw.BeforeModelRewriteState(ctx, state, mtx)
+		assert.NoError(t, err)
+	})
+
+	t.Run("ReusePromptCaching with failover injects state tool infos into failover model call", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		primary := mockModel.NewMockBaseChatModel(ctrl)
+		failover := mockModel.NewMockBaseChatModel(ctrl)
+
+		stateTools := []*schema.ToolInfo{
+			{Name: "state_tool_a"},
+		}
+
+		primary.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			Return(&schema.Message{
+				Role:    schema.Assistant,
+				Content: "partial output",
+			}, fmt.Errorf("primary error")).Times(1)
+		failover.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			DoAndReturn(func(ctx context.Context, msgs []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+				common := model.GetCommonOptions(&model.Options{}, opts...)
+				require.Len(t, common.Tools, 1)
+				assert.Equal(t, "state_tool_a", common.Tools[0].Name)
+				return &schema.Message{
+					Role:    schema.Assistant,
+					Content: "Summary from failover",
+				}, nil
+			}).Times(1)
+
+		mw := &TypedMiddleware[*schema.Message]{
+			cfg: &Config{
+				Model:              primary,
+				Trigger:            &TriggerCondition{ContextTokens: 10},
+				ReusePromptCaching: true,
+				Failover: &FailoverConfig{
+					GetFailoverModel: func(ctx context.Context, failoverCtx *FailoverContext) (model.BaseChatModel, []*schema.Message, error) {
+						return failover, []*schema.Message{schema.UserMessage("failover input")}, nil
+					},
+				},
+			},
+			TypedBaseChatModelAgentMiddleware: &adk.TypedBaseChatModelAgentMiddleware[*schema.Message]{},
+		}
+
+		state := &adk.ChatModelAgentState{
+			Messages: []adk.Message{
+				schema.UserMessage(strings.Repeat("a", 100)),
+			},
+			ToolInfos: stateTools,
+		}
+
+		_, _, err := mw.BeforeModelRewriteState(ctx, state, mtx)
+		assert.NoError(t, err)
+	})
+
 }
 
 func TestMiddlewareShouldSummarize(t *testing.T) {
