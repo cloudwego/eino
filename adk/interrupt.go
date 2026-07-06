@@ -340,7 +340,7 @@ func encodeRunnerCheckPointWithRunCtx(
 	return buf.Bytes(), nil
 }
 
-const bridgeCheckpointID = "adk_react_mock_key"
+const bridgeCheckpointID = "adk_bridge_checkpoint"
 
 func newBridgeStore() *bridgeStore {
 	return &bridgeStore{data: make(map[string][]byte)}
