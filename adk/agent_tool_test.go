@@ -27,6 +27,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/cloudwego/eino/adk/internal/agenttool"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
@@ -1278,7 +1279,7 @@ func TestCrossTypeAgentToolGracefulError(t *testing.T) {
 	}
 }
 
-// --- Event-forward gate (WithAgentToolEventForwardUntil) ---
+// --- Event-forward gate ---
 
 // collectForwarded drains a parent generator's iterator and returns the content of
 // every non-streaming message event forwarded to it. Runs in a goroutine; the
@@ -1300,7 +1301,7 @@ func collectForwarded(iter *AsyncIterator[*AgentEvent], out *[]string, done chan
 // With the gate open (done never fires), a background-capable invocation forwards
 // the inner agent's events to the parent generator — same as a plain foreground
 // agent-as-tool call.
-func TestAgentToolEventForwardUntil_OpenGateForwards(t *testing.T) {
+func TestAgentToolEventForwardGate_OpenGateForwards(t *testing.T) {
 	ctx := context.Background()
 	sub := &emitEventsAgent{events: []*AgentEvent{
 		EventFromMessage(schema.AssistantMessage("child output", nil), nil, schema.Assistant, ""),
@@ -1314,8 +1315,8 @@ func TestAgentToolEventForwardUntil_OpenGateForwards(t *testing.T) {
 
 	// nil done => never backgrounded => gate stays open the whole run.
 	_, err := at.InvokableRun(ctx, `{"request":"q"}`,
-		withAgentToolEventForwardTarget(gen),
-		WithAgentToolEventForwardUntil(nil))
+		withTypedAgentToolEventForwardTarget(gen),
+		agenttool.WithForwardGate(nil))
 	require.NoError(t, err)
 
 	gen.Close()
@@ -1325,7 +1326,7 @@ func TestAgentToolEventForwardUntil_OpenGateForwards(t *testing.T) {
 
 // With the gate already closed (the run is backgrounded before it starts), a
 // background-capable invocation forwards nothing to the parent generator.
-func TestAgentToolEventForwardUntil_ClosedGateDropsForwarding(t *testing.T) {
+func TestAgentToolEventForwardGate_ClosedGateDropsForwarding(t *testing.T) {
 	ctx := context.Background()
 	sub := &emitEventsAgent{events: []*AgentEvent{
 		EventFromMessage(schema.AssistantMessage("child output", nil), nil, schema.Assistant, ""),
@@ -1341,8 +1342,8 @@ func TestAgentToolEventForwardUntil_ClosedGateDropsForwarding(t *testing.T) {
 	close(backgrounded) // already backgrounded
 
 	_, err := at.InvokableRun(ctx, `{"request":"q"}`,
-		withAgentToolEventForwardTarget(gen),
-		WithAgentToolEventForwardUntil(backgrounded))
+		withTypedAgentToolEventForwardTarget(gen),
+		agenttool.WithForwardGate(backgrounded))
 	require.NoError(t, err)
 
 	gen.Close()
@@ -1352,7 +1353,7 @@ func TestAgentToolEventForwardUntil_ClosedGateDropsForwarding(t *testing.T) {
 
 // On the gated (background-capable) path, forwarding to an already-closed parent
 // generator must not panic — a backgrounded run outlives the turn that closes it.
-func TestAgentToolEventForwardUntil_ClosedParentGeneratorNoPanic(t *testing.T) {
+func TestAgentToolEventForwardGate_ClosedParentGeneratorNoPanic(t *testing.T) {
 	ctx := context.Background()
 	sub := &emitEventsAgent{events: []*AgentEvent{
 		EventFromMessage(schema.AssistantMessage("child output", nil), nil, schema.Assistant, ""),
@@ -1366,8 +1367,8 @@ func TestAgentToolEventForwardUntil_ClosedParentGeneratorNoPanic(t *testing.T) {
 
 	require.NotPanics(t, func() {
 		_, err := at.InvokableRun(ctx, `{"request":"q"}`,
-			withAgentToolEventForwardTarget(gen),
-			WithAgentToolEventForwardUntil(nil))
+			withTypedAgentToolEventForwardTarget(gen),
+			agenttool.WithForwardGate(nil))
 		require.NoError(t, err)
 	})
 }

@@ -30,6 +30,7 @@ import (
 	"github.com/cloudwego/eino/adk/backgroundtask"
 	"github.com/cloudwego/eino/adk/filesystem"
 	"github.com/cloudwego/eino/adk/internal"
+	"github.com/cloudwego/eino/adk/internal/agenttool"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/components/tool/utils"
 	"github.com/cloudwego/eino/compose"
@@ -126,7 +127,7 @@ func newManagedAgentTool(mgr *backgroundtask.Manager, subAgents map[string]tool.
 				// run_in_background it is already closed here, for an auto-backgrounded
 				// run it closes at the deadline. Foreground runs never fire it and
 				// forward for their whole lifetime.
-				runOpts := append(opts, adk.WithAgentToolEventForwardUntil(task.Backgrounded))
+				runOpts := append(opts, agenttool.WithForwardGate(task.Backgrounded))
 				out, runErr := a.InvokableRun(workCtx, params, runOpts...)
 				if runErr != nil {
 					return "", runErr
