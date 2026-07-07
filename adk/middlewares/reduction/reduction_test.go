@@ -262,52 +262,45 @@ hello worldhello worldhello worldhello worldhello worldhello worldhello worldhel
 		assert.Equal(t, "first chunk", first)
 
 		close(releaseOverflow)
-		var remaining strings.Builder
 		noticeCh := make(chan string, 1)
 		noticeErrCh := make(chan error, 1)
 		go func() {
-			for {
-				chunk, recvErr := resp.Recv()
-				if recvErr != nil {
-					noticeErrCh <- recvErr
-					return
-				}
-				remaining.WriteString(chunk)
-				if strings.Contains(remaining.String(), "persisted-output") {
-					noticeCh <- remaining.String()
-					return
-				}
+			chunk, recvErr := resp.Recv()
+			if recvErr != nil {
+				noticeErrCh <- recvErr
+				return
 			}
+			noticeCh <- chunk
 		}()
 
 		select {
 		case got := <-noticeCh:
-			assert.Contains(t, got, "Output truncated after")
-			assert.NotContains(t, got, "Preview (first")
-			assert.NotContains(t, got, "Preview (last")
+			close(releaseEOF)
+			assert.Failf(t, "streamable truncation notice returned before source EOF", "got %q", got)
+			return
 		case recvErr := <-noticeErrCh:
 			close(releaseEOF)
 			assert.NoError(t, recvErr)
 			return
-		case <-time.After(2 * time.Second):
-			close(releaseEOF)
-			assert.Fail(t, "streamable truncation notice blocked until source EOF")
-			return
+		case <-time.After(100 * time.Millisecond):
 		}
 
 		close(releaseEOF)
-		for {
-			chunk, recvErr := resp.Recv()
-			if recvErr != nil {
-				if recvErr == io.EOF {
-					break
-				}
-				assert.NoError(t, recvErr)
-				return
-			}
-			remaining.WriteString(chunk)
+		var remaining string
+		select {
+		case remaining = <-noticeCh:
+		case recvErr := <-noticeErrCh:
+			assert.NoError(t, recvErr)
+			return
+		case <-time.After(2 * time.Second):
+			assert.Fail(t, "streamable truncation notice blocked after source EOF")
+			return
 		}
-		assert.Contains(t, remaining.String(), "persisted-output")
+		assert.Contains(t, remaining, "Output truncated after")
+		assert.NotContains(t, remaining, "Preview (first")
+		assert.NotContains(t, remaining, "Preview (last")
+		_, err = resp.Recv()
+		assert.Equal(t, io.EOF, err)
 
 		content, err := backend.Read(ctx, &filesystem.ReadRequest{FilePath: "/tmp/trunc/stream_nonblocking"})
 		assert.NoError(t, err)
@@ -374,64 +367,50 @@ hello worldhello worldhello worldhello worldhello worldhello worldhello worldhel
 		assert.Equal(t, "first chunk", first.Parts[0].Text)
 
 		close(releaseOverflow)
-		var remaining strings.Builder
 		noticeCh := make(chan string, 1)
 		noticeErrCh := make(chan error, 1)
 		go func() {
-			for {
-				chunk, recvErr := resp.Recv()
-				if recvErr != nil {
-					noticeErrCh <- recvErr
-					return
-				}
-				for _, part := range chunk.Parts {
-					if part.Type == schema.ToolPartTypeText {
-						remaining.WriteString(part.Text)
-					}
-				}
-				if strings.Contains(remaining.String(), "persisted-output") {
-					noticeCh <- remaining.String()
-					return
-				}
+			chunk, recvErr := resp.Recv()
+			if recvErr != nil {
+				noticeErrCh <- recvErr
+				return
 			}
+			noticeCh <- stringifyToolOutputParts(chunk.Parts)
 		}()
 
 		select {
 		case got := <-noticeCh:
-			assert.Contains(t, got, "Output truncated after")
-			assert.NotContains(t, got, "Preview (first")
-			assert.NotContains(t, got, "Preview (last")
+			close(releaseEOF)
+			assert.Failf(t, "enhanced streamable truncation notice returned before source EOF", "got %q", got)
+			return
 		case recvErr := <-noticeErrCh:
 			close(releaseEOF)
 			assert.NoError(t, recvErr)
 			return
-		case <-time.After(2 * time.Second):
-			close(releaseEOF)
-			assert.Fail(t, "enhanced streamable truncation notice blocked until source EOF")
-			return
+		case <-time.After(100 * time.Millisecond):
 		}
 
 		close(releaseEOF)
-		for {
-			chunk, recvErr := resp.Recv()
-			if recvErr != nil {
-				if recvErr == io.EOF {
-					break
-				}
-				assert.NoError(t, recvErr)
-				return
-			}
-			for _, part := range chunk.Parts {
-				if part.Type == schema.ToolPartTypeText {
-					remaining.WriteString(part.Text)
-				}
-			}
+		var remaining string
+		select {
+		case remaining = <-noticeCh:
+		case recvErr := <-noticeErrCh:
+			assert.NoError(t, recvErr)
+			return
+		case <-time.After(2 * time.Second):
+			assert.Fail(t, "enhanced streamable truncation notice blocked after source EOF")
+			return
 		}
-		assert.Contains(t, remaining.String(), "persisted-output")
+		assert.Contains(t, remaining, "Output truncated after")
+		assert.NotContains(t, remaining, "Preview (first")
+		assert.NotContains(t, remaining, "Preview (last")
+		_, err = resp.Recv()
+		assert.Equal(t, io.EOF, err)
 
 		content, err := backend.Read(ctx, &filesystem.ReadRequest{FilePath: "/tmp/trunc/enhanced_stream_nonblocking"})
 		assert.NoError(t, err)
-		assert.Equal(t, "first chunk"+strings.Repeat("x", 80), content.Content)
+		assert.Contains(t, content.Content, `"text": "first chunk"`)
+		assert.Contains(t, content.Content, fmt.Sprintf(`"text": "%s"`, strings.Repeat("x", 80)))
 	})
 
 	t.Run("test default streamable truncation terminal cases", func(t *testing.T) {
@@ -469,7 +448,7 @@ hello worldhello worldhello worldhello worldhello worldhello worldhello worldhel
 			assert.Equal(t, wantErr, err)
 		})
 
-		t.Run("path generation error is forwarded", func(t *testing.T) {
+		t.Run("path generation error is rendered in truncation notice", func(t *testing.T) {
 			wantErr := errors.New("path generation error")
 			mwWithPathErr := &typedToolReductionMiddleware[*schema.Message]{
 				config: &TypedConfig[*schema.Message]{
@@ -485,36 +464,39 @@ hello worldhello worldhello worldhello worldhello worldhello worldhello worldhel
 
 			got, err := resp.Recv()
 			assert.NoError(t, err)
-			assert.Equal(t, strings.Repeat("x", 10), got)
+			assert.Contains(t, got, strings.Repeat("x", 10))
+			assert.Contains(t, got, "Output truncated after 10 bytes were streamed")
+			assert.Contains(t, got, "Failed to save full output: path generation error.")
 			_, err = resp.Recv()
-			assert.Equal(t, wantErr, err)
+			assert.Equal(t, io.EOF, err)
 		})
 
-		t.Run("missing backend error is forwarded", func(t *testing.T) {
+		t.Run("missing backend error is rendered in truncation notice", func(t *testing.T) {
 			cfg := &ToolReductionConfig{}
 			resp := mw.wrapDefaultStreamableTruncation(ctx, cfg, tCtx, `{}`, stringStream(strings.Repeat("x", 20)))
 			defer resp.Close()
 
 			got, err := resp.Recv()
 			assert.NoError(t, err)
-			assert.Equal(t, strings.Repeat("x", 10), got)
+			assert.Contains(t, got, strings.Repeat("x", 10))
+			assert.Contains(t, got, "Output truncated after 10 bytes were streamed")
+			assert.Contains(t, got, "Failed to save full output: truncation: no backend for offload.")
 			_, err = resp.Recv()
-			assert.EqualError(t, err, "truncation: no backend for offload")
+			assert.Equal(t, io.EOF, err)
 		})
 
-		t.Run("truncates incrementally and writes full output", func(t *testing.T) {
+		t.Run("truncates on source EOF and writes full output", func(t *testing.T) {
 			cfg := &ToolReductionConfig{Backend: backend}
 			resp := mw.wrapDefaultStreamableTruncation(ctx, cfg, tCtx, `{}`, stringStream(strings.Repeat("x", 20), "tail"))
 			defer resp.Close()
 
 			got, err := resp.Recv()
 			assert.NoError(t, err)
-			assert.Equal(t, strings.Repeat("x", 10), got)
-			notice, err := resp.Recv()
-			assert.NoError(t, err)
-			assert.Contains(t, notice, "Output truncated after 10 bytes were streamed")
-			assert.NotContains(t, notice, "Preview (first")
-			assert.NotContains(t, notice, "Preview (last")
+			assert.Contains(t, got, strings.Repeat("x", 10))
+			assert.Contains(t, got, "Output truncated after 10 bytes were streamed")
+			assert.Contains(t, got, "Full output saved to: /tmp/trunc/stream_branches.")
+			assert.NotContains(t, got, "Preview (first")
+			assert.NotContains(t, got, "Preview (last")
 			_, err = resp.Recv()
 			assert.Equal(t, io.EOF, err)
 
@@ -523,7 +505,7 @@ hello worldhello worldhello worldhello worldhello worldhello worldhello worldhel
 			assert.Equal(t, strings.Repeat("x", 20)+"tail", content.Content)
 		})
 
-		t.Run("write error is forwarded after source EOF", func(t *testing.T) {
+		t.Run("write error is rendered in truncation notice after source EOF", func(t *testing.T) {
 			wantErr := errors.New("stream write error")
 			cfg := &ToolReductionConfig{
 				Backend: &writeFailBackend{
@@ -536,60 +518,31 @@ hello worldhello worldhello worldhello worldhello worldhello worldhello worldhel
 
 			got, err := resp.Recv()
 			assert.NoError(t, err)
-			assert.Equal(t, strings.Repeat("x", 10), got)
-			notice, err := resp.Recv()
-			assert.NoError(t, err)
-			assert.Contains(t, notice, "Output truncated after 10 bytes were streamed")
+			assert.Contains(t, got, strings.Repeat("x", 10))
+			assert.Contains(t, got, "Output truncated after 10 bytes were streamed")
+			assert.Contains(t, got, "Failed to save full output: stream write error.")
 			_, err = resp.Recv()
-			assert.Equal(t, wantErr, err)
+			assert.Equal(t, io.EOF, err)
 		})
 
-		t.Run("stops when consumer closes before short chunk", func(t *testing.T) {
-			cfg := &ToolReductionConfig{}
-			input, inputW := schema.Pipe[string](0)
-			resp := mw.wrapDefaultStreamableTruncation(ctx, cfg, tCtx, `{}`, input)
-
-			resp.Close()
-			closed := sendStreamChunk(t, inputW, "short")
-			inputW.Close()
-
-			assert.False(t, closed)
-		})
-
-		t.Run("stops when consumer closes before prefix", func(t *testing.T) {
+		t.Run("source error after truncation replays swallowed chunks before error", func(t *testing.T) {
+			wantErr := errors.New("stream source error after truncation")
 			cfg := &ToolReductionConfig{Backend: backend}
-			input, inputW := schema.Pipe[string](0)
-			resp := mw.wrapDefaultStreamableTruncation(ctx, cfg, tCtx, `{}`, input)
+			resp := mw.wrapDefaultStreamableTruncation(ctx, cfg, tCtx, `{}`, stringStreamWithError(
+				[]string{"abc", "defghijklmnop", "tail"},
+				wantErr,
+			))
+			defer resp.Close()
 
-			closed := sendStreamChunk(t, inputW, "abc")
-			assert.False(t, closed)
 			got, err := resp.Recv()
 			assert.NoError(t, err)
 			assert.Equal(t, "abc", got)
 
-			resp.Close()
-			closed = sendStreamChunk(t, inputW, strings.Repeat("x", 20))
-			inputW.Close()
-
-			assert.False(t, closed)
-		})
-
-		t.Run("stops when consumer closes before notice", func(t *testing.T) {
-			cfg := &ToolReductionConfig{Backend: backend}
-			input, inputW := schema.Pipe[string](0)
-			resp := mw.wrapDefaultStreamableTruncation(ctx, cfg, tCtx, `{}`, input)
-
-			closed := sendStreamChunk(t, inputW, strings.Repeat("x", 10))
-			assert.False(t, closed)
-			got, err := resp.Recv()
+			replayed, err := resp.Recv()
 			assert.NoError(t, err)
-			assert.Equal(t, strings.Repeat("x", 10), got)
-
-			resp.Close()
-			closed = sendStreamChunk(t, inputW, "overflow")
-			inputW.Close()
-
-			assert.False(t, closed)
+			assert.Equal(t, "defghijklmnoptail", replayed)
+			_, err = resp.Recv()
+			assert.Equal(t, wantErr, err)
 		})
 	})
 
@@ -635,7 +588,7 @@ hello worldhello worldhello worldhello worldhello worldhello worldhello worldhel
 			assert.Equal(t, wantErr, err)
 		})
 
-		t.Run("concat error is forwarded", func(t *testing.T) {
+		t.Run("conflicting media parts do not prevent truncation notice", func(t *testing.T) {
 			audioA := "YXVkaW8x"
 			audioB := "YXVkaW8y"
 			cfg := &ToolReductionConfig{Backend: backend}
@@ -653,15 +606,12 @@ hello worldhello worldhello worldhello worldhello worldhello worldhello worldhel
 			got, err := resp.Recv()
 			assert.NoError(t, err)
 			assert.Equal(t, strings.Repeat("x", 10), got.Parts[0].Text)
-			notice, err := resp.Recv()
-			assert.NoError(t, err)
-			assert.Contains(t, notice.Parts[0].Text, "Output truncated after 10 bytes were streamed")
+			assert.Contains(t, stringifyToolOutputParts(got.Parts), "Output truncated after 10 bytes were streamed")
 			_, err = resp.Recv()
-			assert.Error(t, err)
-			assert.Contains(t, err.Error(), "conflicting")
+			assert.Equal(t, io.EOF, err)
 		})
 
-		t.Run("concat error before notice is forwarded", func(t *testing.T) {
+		t.Run("conflicting media parts after forwarded chunk do not prevent truncation notice", func(t *testing.T) {
 			audioA := "YXVkaW8x"
 			audioB := "YXVkaW8y"
 			cfg := &ToolReductionConfig{Backend: backend}
@@ -680,15 +630,15 @@ hello worldhello worldhello worldhello worldhello worldhello worldhello worldhel
 			got, err := resp.Recv()
 			assert.NoError(t, err)
 			assert.Equal(t, "ok", got.Parts[0].Text)
-			prefix, err := resp.Recv()
+			notice, err := resp.Recv()
 			assert.NoError(t, err)
-			assert.Equal(t, strings.Repeat("x", 8), prefix.Parts[0].Text)
+			assert.Equal(t, strings.Repeat("x", 8), notice.Parts[0].Text)
+			assert.Contains(t, stringifyToolOutputParts(notice.Parts), "Output truncated after 10 bytes were streamed")
 			_, err = resp.Recv()
-			assert.Error(t, err)
-			assert.Contains(t, err.Error(), "conflicting")
+			assert.Equal(t, io.EOF, err)
 		})
 
-		t.Run("path generation error is forwarded", func(t *testing.T) {
+		t.Run("path generation error is rendered in truncation notice", func(t *testing.T) {
 			wantErr := errors.New("enhanced path generation error")
 			mwWithPathErr := &typedToolReductionMiddleware[*schema.Message]{
 				config: &TypedConfig[*schema.Message]{
@@ -705,11 +655,13 @@ hello worldhello worldhello worldhello worldhello worldhello worldhello worldhel
 			got, err := resp.Recv()
 			assert.NoError(t, err)
 			assert.Equal(t, strings.Repeat("x", 10), got.Parts[0].Text)
+			assert.Contains(t, stringifyToolOutputParts(got.Parts), "Output truncated after 10 bytes were streamed")
+			assert.Contains(t, stringifyToolOutputParts(got.Parts), "Failed to save full output: enhanced path generation error.")
 			_, err = resp.Recv()
-			assert.Equal(t, wantErr, err)
+			assert.Equal(t, io.EOF, err)
 		})
 
-		t.Run("missing backend error is forwarded", func(t *testing.T) {
+		t.Run("missing backend error is rendered in truncation notice", func(t *testing.T) {
 			cfg := &ToolReductionConfig{}
 			resp := mw.wrapDefaultEnhancedStreamableTruncation(ctx, cfg, tCtx, toolArg, toolResultStream(longResult))
 			defer resp.Close()
@@ -717,11 +669,13 @@ hello worldhello worldhello worldhello worldhello worldhello worldhello worldhel
 			got, err := resp.Recv()
 			assert.NoError(t, err)
 			assert.Equal(t, strings.Repeat("x", 10), got.Parts[0].Text)
+			assert.Contains(t, stringifyToolOutputParts(got.Parts), "Output truncated after 10 bytes were streamed")
+			assert.Contains(t, stringifyToolOutputParts(got.Parts), "Failed to save full output: truncation: no backend for offload.")
 			_, err = resp.Recv()
-			assert.EqualError(t, err, "truncation: no backend for offload")
+			assert.Equal(t, io.EOF, err)
 		})
 
-		t.Run("truncates incrementally and writes full output", func(t *testing.T) {
+		t.Run("truncates on source EOF and writes full output", func(t *testing.T) {
 			cfg := &ToolReductionConfig{Backend: backend}
 			resp := mw.wrapDefaultEnhancedStreamableTruncation(ctx, cfg, tCtx, toolArg, toolResultStream(
 				longResult,
@@ -732,20 +686,21 @@ hello worldhello worldhello worldhello worldhello worldhello worldhello worldhel
 			got, err := resp.Recv()
 			assert.NoError(t, err)
 			assert.Equal(t, strings.Repeat("x", 10), got.Parts[0].Text)
-			notice, err := resp.Recv()
-			assert.NoError(t, err)
-			assert.Contains(t, notice.Parts[0].Text, "Output truncated after 10 bytes were streamed")
-			assert.NotContains(t, notice.Parts[0].Text, "Preview (first")
-			assert.NotContains(t, notice.Parts[0].Text, "Preview (last")
+			gotText := stringifyToolOutputParts(got.Parts)
+			assert.Contains(t, gotText, "Output truncated after 10 bytes were streamed")
+			assert.Contains(t, gotText, "Full output saved to: /tmp/trunc/enhanced_stream_branches.")
+			assert.NotContains(t, gotText, "Preview (first")
+			assert.NotContains(t, gotText, "Preview (last")
 			_, err = resp.Recv()
 			assert.Equal(t, io.EOF, err)
 
 			content, err := backend.Read(ctx, &filesystem.ReadRequest{FilePath: "/tmp/trunc/enhanced_stream_branches"})
 			assert.NoError(t, err)
-			assert.Equal(t, strings.Repeat("x", 20)+"tail", content.Content)
+			assert.Contains(t, content.Content, fmt.Sprintf(`"text": "%s"`, strings.Repeat("x", 20)))
+			assert.Contains(t, content.Content, `"text": "tail"`)
 		})
 
-		t.Run("write error is forwarded after source EOF", func(t *testing.T) {
+		t.Run("write error is rendered in truncation notice after source EOF", func(t *testing.T) {
 			wantErr := errors.New("enhanced write error")
 			cfg := &ToolReductionConfig{
 				Backend: &writeFailBackend{
@@ -759,59 +714,35 @@ hello worldhello worldhello worldhello worldhello worldhello worldhello worldhel
 			got, err := resp.Recv()
 			assert.NoError(t, err)
 			assert.Equal(t, strings.Repeat("x", 10), got.Parts[0].Text)
-			notice, err := resp.Recv()
-			assert.NoError(t, err)
-			assert.Contains(t, notice.Parts[0].Text, "Output truncated after 10 bytes were streamed")
+			assert.Contains(t, stringifyToolOutputParts(got.Parts), "Output truncated after 10 bytes were streamed")
+			assert.Contains(t, stringifyToolOutputParts(got.Parts), "Failed to save full output: enhanced write error.")
 			_, err = resp.Recv()
-			assert.Equal(t, wantErr, err)
+			assert.Equal(t, io.EOF, err)
 		})
 
-		t.Run("stops when consumer closes before short chunk", func(t *testing.T) {
-			cfg := &ToolReductionConfig{}
-			input, inputW := schema.Pipe[*schema.ToolResult](0)
-			resp := mw.wrapDefaultEnhancedStreamableTruncation(ctx, cfg, tCtx, toolArg, input)
-
-			resp.Close()
-			closed := sendStreamChunk(t, inputW, &schema.ToolResult{Parts: []schema.ToolOutputPart{{Type: schema.ToolPartTypeText, Text: "short"}}})
-			inputW.Close()
-
-			assert.False(t, closed)
-		})
-
-		t.Run("stops when consumer closes before prefix", func(t *testing.T) {
+		t.Run("source error after truncation replays swallowed chunks before error", func(t *testing.T) {
+			wantErr := errors.New("enhanced source stream error after truncation")
 			cfg := &ToolReductionConfig{Backend: backend}
-			input, inputW := schema.Pipe[*schema.ToolResult](0)
-			resp := mw.wrapDefaultEnhancedStreamableTruncation(ctx, cfg, tCtx, toolArg, input)
+			resp := mw.wrapDefaultEnhancedStreamableTruncation(ctx, cfg, tCtx, toolArg, toolResultStreamWithError(
+				[]*schema.ToolResult{
+					{Parts: []schema.ToolOutputPart{{Type: schema.ToolPartTypeText, Text: "abc"}}},
+					{Parts: []schema.ToolOutputPart{{Type: schema.ToolPartTypeText, Text: "defghijklmnop"}}},
+					{Parts: []schema.ToolOutputPart{{Type: schema.ToolPartTypeText, Text: "tail"}}},
+				},
+				wantErr,
+			))
+			defer resp.Close()
 
-			closed := sendStreamChunk(t, inputW, &schema.ToolResult{Parts: []schema.ToolOutputPart{{Type: schema.ToolPartTypeText, Text: "abc"}}})
-			assert.False(t, closed)
 			got, err := resp.Recv()
 			assert.NoError(t, err)
 			assert.Equal(t, "abc", got.Parts[0].Text)
 
-			resp.Close()
-			closed = sendStreamChunk(t, inputW, longResult)
-			inputW.Close()
-
-			assert.False(t, closed)
-		})
-
-		t.Run("stops when consumer closes before notice", func(t *testing.T) {
-			cfg := &ToolReductionConfig{Backend: backend}
-			input, inputW := schema.Pipe[*schema.ToolResult](0)
-			resp := mw.wrapDefaultEnhancedStreamableTruncation(ctx, cfg, tCtx, toolArg, input)
-
-			closed := sendStreamChunk(t, inputW, &schema.ToolResult{Parts: []schema.ToolOutputPart{{Type: schema.ToolPartTypeText, Text: strings.Repeat("x", 10)}}})
-			assert.False(t, closed)
-			got, err := resp.Recv()
+			replayed, err := resp.Recv()
 			assert.NoError(t, err)
-			assert.Equal(t, strings.Repeat("x", 10), got.Parts[0].Text)
-
-			resp.Close()
-			closed = sendStreamChunk(t, inputW, &schema.ToolResult{Parts: []schema.ToolOutputPart{{Type: schema.ToolPartTypeText, Text: "overflow"}}})
-			inputW.Close()
-
-			assert.False(t, closed)
+			assert.Equal(t, "defghijklmnop", replayed.Parts[0].Text)
+			assert.Equal(t, "tail", replayed.Parts[1].Text)
+			_, err = resp.Recv()
+			assert.Equal(t, wantErr, err)
 		})
 	})
 
