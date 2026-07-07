@@ -17,7 +17,11 @@
 // Package reduction provides middlewares to trim context and clear tool results.
 package reduction
 
-import "github.com/cloudwego/eino/adk/internal"
+import (
+	"fmt"
+
+	"github.com/cloudwego/eino/adk/internal"
+)
 
 const (
 	truncFmt = `<persisted-output>
@@ -41,6 +45,15 @@ Preview (last {preview_size}):
 )
 
 const (
+	streamTruncFmt = `<persisted-output>
+Output truncated after {preview_size} bytes were streamed. {offload_notify} {error_msg_notify}
+</persisted-output>`
+	streamTruncFmtZh = `<persisted-output>
+输出结果在流式传输 {preview_size} 字节后被截断。{offload_notify} {error_msg_notify}
+</persisted-output>`
+)
+
+const (
 	clearWithOffloadingFmt = `<persisted-output>Tool result saved to: {file_path}
 Use {read_tool_name} to view</persisted-output>`
 	clearWithOffloadingFmtZh = `<persisted-output>工具结果已保存至: {file_path}
@@ -59,6 +72,30 @@ func getTruncFmt() string {
 		English: truncFmt,
 		Chinese: truncFmtZh,
 	})
+}
+
+func getStreamTruncFmt() string {
+	return internal.SelectPrompt(internal.I18nPrompts{
+		English: streamTruncFmt,
+		Chinese: streamTruncFmtZh,
+	})
+}
+
+func formatStreamOffloadSavedNotify(filePath string) string {
+	return fmt.Sprintf(internal.SelectPrompt(internal.I18nPrompts{
+		English: "Full output saved to: %s.",
+		Chinese: "完整输出保存到: %s。",
+	}), filePath)
+}
+
+func formatStreamOffloadFailedNotify(err error) string {
+	if err == nil {
+		return ""
+	}
+	return fmt.Sprintf(internal.SelectPrompt(internal.I18nPrompts{
+		English: "Failed to save full output: %v.",
+		Chinese: "完整输出保存失败: %v。",
+	}), err)
 }
 
 func getClearWithOffloadingFmt() string {

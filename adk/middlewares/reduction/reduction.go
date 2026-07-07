@@ -484,6 +484,9 @@ func (t *typedToolReductionMiddleware[M]) WrapStreamableToolCall(_ context.Conte
 		if err != nil {
 			return nil, err
 		}
+		if cfg == t.defaultConfig {
+			return t.wrapDefaultStreamableTruncation(ctx, cfg, tCtx, argumentsInJSON, output), nil
+		}
 
 		readers := output.Copy(2)
 		output = readers[0]
@@ -528,6 +531,144 @@ func (t *typedToolReductionMiddleware[M]) WrapStreamableToolCall(_ context.Conte
 		})
 		return sr, nil
 	}, nil
+}
+
+func (t *typedToolReductionMiddleware[M]) wrapDefaultStreamableTruncation(
+	ctx context.Context,
+	cfg *ToolReductionConfig,
+	tCtx *adk.ToolContext,
+	argumentsInJSON string,
+	output *schema.StreamReader[string],
+) *schema.StreamReader[string] {
+	var (
+		fullOutput             strings.Builder
+		curSize                int
+		reachedLimit           bool
+		truncTextPrefix        string
+		truncTriggeredFullText string
+		sourceErr              error
+	)
+
+	// Chunk mapping:
+	//
+	// Normal EOF:
+	//   input : C1 -------- C2(crosses limit) -------- C3 -------- EOF
+	//   output: C1 -------- [swallow C2,C3] ---------- prefix(C2)+notice
+	//
+	// Source error after truncation:
+	//   input : C1 -------- C2(crosses limit) -------- C3 -------- ERR
+	//   output: C1 -------- [swallow C2,C3] ---------- replay(C2+C3 tail) -- ERR
+	//
+	// Before truncation, chunks are forwarded unchanged. Once the limit is reached,
+	// the wrapper keeps reading and accumulating full output but suppresses chunks.
+	// On clean EOF, it offloads full output and emits one final truncation notice.
+	// On source error, it replays the original content swallowed since the truncation
+	// point, then surfaces the original source error via the outer convert layer.
+	convertHandler := func(chunk string) (string, error) {
+		if chunk == "" {
+			return "", schema.ErrNoValue
+		}
+		fullOutput.WriteString(chunk)
+		if reachedLimit {
+			return "", schema.ErrNoValue
+		}
+
+		chunkSize := len(chunk)
+		if curSize+chunkSize < t.config.MaxLengthForTrunc {
+			curSize += chunkSize
+			return chunk, nil
+		}
+
+		reachedLimit = true
+		truncTriggeredFullText = fullOutput.String()
+
+		leftSize := t.config.MaxLengthForTrunc - curSize
+		if leftSize > 0 {
+			truncTextPrefix = clampPrefixToUTF8Boundary(chunk, leftSize)
+		}
+		return "", schema.ErrNoValue
+	}
+
+	errHandler := func(err error) error {
+		if reachedLimit {
+			sourceErr = err
+			return nil
+		}
+		return err
+	}
+
+	eofHandler := func() (any, error) {
+		if sourceErr != nil {
+			if fullOutput.Len() > curSize {
+				return fullOutput.String()[curSize:], nil
+			}
+			return nil, io.EOF
+		}
+		if !reachedLimit {
+			return nil, io.EOF
+		}
+		detail := &ToolDetail{
+			ToolContext: tCtx,
+			ToolArgument: &schema.ToolArgument{
+				Text: argumentsInJSON,
+			},
+			ToolResult: &schema.ToolResult{
+				Parts: []schema.ToolOutputPart{
+					{Type: schema.ToolPartTypeText, Text: truncTriggeredFullText},
+				},
+			},
+		}
+
+		var (
+			offloadNotify string
+			errorNotify   string
+		)
+		filePath, err := t.config.GenTruncOffloadFilePath(ctx, detail)
+		if err != nil {
+			errorNotify = formatStreamOffloadFailedNotify(err)
+		} else if cfg.Backend == nil {
+			errorNotify = formatStreamOffloadFailedNotify(fmt.Errorf("truncation: no backend for offload"))
+		} else if err = cfg.Backend.Write(ctx, &filesystem.WriteRequest{
+			FilePath: filePath,
+			Content:  fullOutput.String(),
+		}); err != nil {
+			errorNotify = formatStreamOffloadFailedNotify(err)
+		} else {
+			offloadNotify = formatStreamOffloadSavedNotify(filePath)
+		}
+
+		notice, err := formatStreamTruncNotice(t.config.MaxLengthForTrunc, offloadNotify, errorNotify)
+		if err != nil {
+			return nil, err
+		}
+		return truncTextPrefix + notice, nil
+	}
+
+	truncatedStream := schema.StreamReaderWithConvert(
+		output,
+		convertHandler,
+		schema.WithErrWrapper(errHandler),
+		schema.WithOnEOF(eofHandler),
+	)
+
+	// StreamReaderWithConvert's WithOnEOF can inject only one value or one error.
+	// The source-error fallback needs two Recv results:
+	//   1. replay swallowed original output,
+	//   2. surface the original source error.
+	// The inner reader emits the replay value, and this outer reader emits the
+	// original error when the inner reader reaches EOF after replay.
+	return schema.StreamReaderWithConvert(
+		truncatedStream,
+		func(chunk string) (string, error) {
+			return chunk, nil
+		},
+		schema.WithOnEOF(func() (any, error) {
+			if sourceErr != nil {
+				return nil, sourceErr
+			}
+			return nil, io.EOF
+		}),
+	)
 }
 
 func (t *typedToolReductionMiddleware[M]) WrapEnhancedInvokableToolCall(_ context.Context, endpoint adk.EnhancedInvokableToolCallEndpoint, tCtx *adk.ToolContext) (adk.EnhancedInvokableToolCallEndpoint, error) {
@@ -585,6 +726,9 @@ func (t *typedToolReductionMiddleware[M]) WrapEnhancedStreamableToolCall(_ conte
 		if err != nil {
 			return nil, err
 		}
+		if cfg == t.defaultConfig {
+			return t.wrapDefaultEnhancedStreamableTruncation(ctx, cfg, tCtx, toolArgument, output), nil
+		}
 
 		readers := output.Copy(2)
 		output = readers[0]
@@ -619,6 +763,215 @@ func (t *typedToolReductionMiddleware[M]) WrapEnhancedStreamableToolCall(_ conte
 
 		return truncResult.StreamToolResult, nil
 	}, nil
+}
+
+func (t *typedToolReductionMiddleware[M]) wrapDefaultEnhancedStreamableTruncation(
+	ctx context.Context,
+	cfg *ToolReductionConfig,
+	tCtx *adk.ToolContext,
+	toolArgument *schema.ToolArgument,
+	output *schema.StreamReader[*schema.ToolResult],
+) *schema.StreamReader[*schema.ToolResult] {
+	var (
+		chunks                   []*schema.ToolResult
+		replayChunks             []*schema.ToolResult
+		fullLength               int
+		reachedLimit             bool
+		truncTextPrefix          *schema.ToolResult
+		truncTriggeredToolResult *schema.ToolResult
+		sourceErr                error
+	)
+
+	// Chunk mapping:
+	//
+	// Normal EOF:
+	//   input : C1 -------- C2(crosses limit) -------- C3 -------- EOF
+	//   output: C1 -------- [swallow C2,C3] ---------- prefix(C2)+notice
+	//
+	// Source error after truncation:
+	//   input : C1 -------- C2(crosses limit) -------- C3 -------- ERR
+	//   output: C1 -------- [swallow C2,C3] ---------- replay(C2+C3) -- ERR
+	//
+	// Replay uses one merged ToolResult because WithOnEOF can inject only one
+	// value. As in the string stream wrapper, the outer convert layer surfaces
+	// the original source error on the following Recv.
+	convertHandler := func(chunk *schema.ToolResult) (*schema.ToolResult, error) {
+		chunks = append(chunks, chunk)
+		chunkLength := toolResultTextLength(chunk)
+		if reachedLimit {
+			fullLength += chunkLength
+			replayChunks = append(replayChunks, chunk)
+			return nil, schema.ErrNoValue
+		}
+		if fullLength+chunkLength < t.config.MaxLengthForTrunc {
+			fullLength += chunkLength
+			return chunk, nil
+		}
+
+		reachedLimit = true
+		replayChunks = append(replayChunks, chunk)
+		truncTextPrefix = toolResultTextPrefix(chunk, t.config.MaxLengthForTrunc-fullLength)
+		fullLength += chunkLength
+		truncTriggeredToolResult = &schema.ToolResult{Parts: flattenToolResultParts(chunks)}
+		return nil, schema.ErrNoValue
+	}
+
+	errHandler := func(err error) error {
+		if reachedLimit {
+			sourceErr = err
+			return nil
+		}
+		return err
+	}
+
+	eofHandler := func() (any, error) {
+		if sourceErr != nil {
+			replay := &schema.ToolResult{Parts: flattenToolResultParts(replayChunks)}
+			if len(replay.Parts) > 0 {
+				return replay, nil
+			}
+			return nil, io.EOF
+		}
+		if !reachedLimit {
+			return nil, io.EOF
+		}
+
+		fullToolResult := &schema.ToolResult{Parts: flattenToolResultParts(chunks)}
+		detail := &ToolDetail{
+			ToolContext:  tCtx,
+			ToolArgument: toolArgument,
+			ToolResult:   truncTriggeredToolResult,
+		}
+
+		var (
+			offloadNotify string
+			errorNotify   string
+		)
+		filePath, err := t.config.GenTruncOffloadFilePath(ctx, detail)
+		if err != nil {
+			errorNotify = formatStreamOffloadFailedNotify(err)
+		} else if cfg.Backend == nil {
+			errorNotify = formatStreamOffloadFailedNotify(fmt.Errorf("truncation: no backend for offload"))
+		} else if err = cfg.Backend.Write(ctx, &filesystem.WriteRequest{
+			FilePath: filePath,
+			Content:  stringifyToolOutputParts(fullToolResult.Parts),
+		}); err != nil {
+			errorNotify = formatStreamOffloadFailedNotify(err)
+		} else {
+			offloadNotify = formatStreamOffloadSavedNotify(filePath)
+		}
+
+		notice, err := formatStreamTruncNotice(t.config.MaxLengthForTrunc, offloadNotify, errorNotify)
+		if err != nil {
+			return nil, err
+		}
+
+		parts := make([]schema.ToolOutputPart, 0, 1)
+		if truncTextPrefix != nil {
+			parts = append(parts, truncTextPrefix.Parts...)
+		}
+		parts = append(parts, schema.ToolOutputPart{Type: schema.ToolPartTypeText, Text: notice})
+		return &schema.ToolResult{Parts: parts}, nil
+	}
+
+	truncatedStream := schema.StreamReaderWithConvert(
+		output,
+		convertHandler,
+		schema.WithErrWrapper(errHandler),
+		schema.WithOnEOF(eofHandler),
+	)
+
+	return schema.StreamReaderWithConvert(
+		truncatedStream,
+		func(chunk *schema.ToolResult) (*schema.ToolResult, error) {
+			return chunk, nil
+		},
+		schema.WithOnEOF(func() (any, error) {
+			if sourceErr != nil {
+				return nil, sourceErr
+			}
+			return nil, io.EOF
+		}),
+	)
+}
+
+func formatStreamTruncNotice(previewSize int, offloadNotify, errorMsgNotify string) (string, error) {
+	return pyfmt.Fmt(getStreamTruncFmt(), map[string]any{
+		"preview_size":     previewSize,
+		"offload_notify":   offloadNotify,
+		"error_msg_notify": errorMsgNotify,
+	})
+}
+
+func toolResultTextPrefix(result *schema.ToolResult, maxLength int) *schema.ToolResult {
+	if result == nil || maxLength <= 0 {
+		return nil
+	}
+	var (
+		length int
+		parts  []schema.ToolOutputPart
+	)
+	for _, part := range result.Parts {
+		if part.Type != schema.ToolPartTypeText {
+			parts = append(parts, part)
+			continue
+		}
+		remaining := maxLength - length
+		if remaining <= 0 {
+			break
+		}
+		if len(part.Text) <= remaining {
+			parts = append(parts, part)
+			length += len(part.Text)
+			continue
+		}
+		part.Text = clampPrefixToUTF8Boundary(part.Text, remaining)
+		if part.Text != "" {
+			parts = append(parts, part)
+		}
+		break
+	}
+	if len(parts) == 0 {
+		return nil
+	}
+	return &schema.ToolResult{Parts: parts}
+}
+
+func toolResultTextLength(result *schema.ToolResult) int {
+	if result == nil {
+		return 0
+	}
+	var length int
+	for _, part := range result.Parts {
+		if part.Type == schema.ToolPartTypeText {
+			length += len(part.Text)
+		}
+	}
+	return length
+}
+
+func flattenToolResultParts(chunks []*schema.ToolResult) []schema.ToolOutputPart {
+	var parts []schema.ToolOutputPart
+	for _, chunk := range chunks {
+		if chunk == nil || len(chunk.Parts) == 0 {
+			continue
+		}
+		parts = append(parts, chunk.Parts...)
+	}
+	return parts
+}
+
+func writeTruncOffload(ctx context.Context, cfg *ToolReductionConfig, truncResult *TruncResult) error {
+	if !truncResult.NeedOffload {
+		return nil
+	}
+	if cfg.Backend == nil {
+		return fmt.Errorf("truncation: no backend for offload")
+	}
+	return cfg.Backend.Write(ctx, &filesystem.WriteRequest{
+		FilePath: truncResult.OffloadFilePath,
+		Content:  truncResult.OffloadContent,
+	})
 }
 
 func (t *typedToolReductionMiddleware[M]) BeforeModelRewriteState(ctx context.Context, state *adk.TypedChatModelAgentState[M], mc *adk.TypedModelContext[M]) (
@@ -1324,8 +1677,9 @@ func defaultTokenCounter(_ context.Context, msgs []*schema.Message, tools []*sch
 	return tokens, nil
 }
 
-// defaultTruncHandler applies the same truncation strategy to both non-streaming
-// and streaming tool outputs.
+// defaultTruncHandler applies the shared buffered truncation strategy. The
+// built-in default streaming wrappers bypass it so they can truncate
+// incrementally with a streaming-specific notice.
 //
 // Processing steps:
 //  1. Read and join tool output into a complete result:
@@ -1345,7 +1699,8 @@ func defaultTokenCounter(_ context.Context, msgs []*schema.Message, tools []*sch
 //   - When truncation is applied to a streaming tool result, output is re-emitted as a
 //     buffered single-result stream (not original chunk-by-chunk streaming semantics).
 //
-// If a tool requires strict incremental streaming behavior, provide a custom TruncHandler for that tool.
+// Tool-specific configurations that install this handler for streaming outputs
+// keep the buffered behavior below.
 func defaultTruncHandler(
 	genOffloadFilePathFn func(ctx context.Context, toolDetail *ToolDetail) (filePath string, err error),
 	truncMaxLength int,
