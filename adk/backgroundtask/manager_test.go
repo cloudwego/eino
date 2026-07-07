@@ -848,15 +848,18 @@ func TestManager_Backgrounded_AutoBackgroundCloses(t *testing.T) {
 	defer closeWithTimeout(m)
 
 	closedCh := make(chan struct{})
+	release := make(chan struct{})
 	result, err := m.Run(context.Background(), &RunInput{Description: "slow"},
 		func(_ context.Context, task TaskInfo) (string, error) {
 			// Block until the deadline detaches the run, then confirm the signal fired.
 			<-task.Backgrounded
 			close(closedCh)
+			<-release
 			return "slow result", nil
 		})
 	require.NoError(t, err)
 	assert.Equal(t, StatusRunning, result.Status)
+	close(release)
 
 	select {
 	case <-closedCh:
@@ -865,4 +868,3 @@ func TestManager_Backgrounded_AutoBackgroundCloses(t *testing.T) {
 	}
 	waitTask(t, m, result.ID)
 }
-
