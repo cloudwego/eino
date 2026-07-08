@@ -330,7 +330,7 @@ func NewTyped[M adk.MessageType](_ context.Context, config *TypedConfig[M]) (adk
 		SkipClear:      config.SkipClear,
 	}
 	if !defaultReductionConfig.SkipTruncation {
-		defaultReductionConfig.TruncHandler = defaultTruncHandler(config.GenTruncOffloadFilePath, config.MaxLengthForTrunc)
+		defaultReductionConfig.TruncHandler = defaultTruncHandler(config.GenTruncOffloadFilePath, config.MaxLengthForTrunc, config.ReadFileToolName)
 	}
 	if !defaultReductionConfig.SkipClear {
 		defaultReductionConfig.ClearHandler = defaultClearHandler(config.GenClearOffloadFilePath, config.Backend != nil, config.ReadFileToolName)
@@ -634,7 +634,7 @@ func (t *typedToolReductionMiddleware[M]) wrapDefaultStreamableTruncation(
 		}); err != nil {
 			errorNotify = formatStreamOffloadFailedNotify(err)
 		} else {
-			offloadNotify = formatStreamOffloadSavedNotify(filePath)
+			offloadNotify = formatStreamOffloadSavedNotify(filePath, t.config.ReadFileToolName)
 		}
 
 		notice, err := formatStreamTruncNotice(t.config.MaxLengthForTrunc, offloadNotify, errorNotify)
@@ -858,7 +858,7 @@ func (t *typedToolReductionMiddleware[M]) wrapDefaultEnhancedStreamableTruncatio
 		}); err != nil {
 			errorNotify = formatStreamOffloadFailedNotify(err)
 		} else {
-			offloadNotify = formatStreamOffloadSavedNotify(filePath)
+			offloadNotify = formatStreamOffloadSavedNotify(filePath, t.config.ReadFileToolName)
 		}
 
 		notice, err := formatStreamTruncNotice(t.config.MaxLengthForTrunc, offloadNotify, errorNotify)
@@ -1704,6 +1704,7 @@ func defaultTokenCounter(_ context.Context, msgs []*schema.Message, tools []*sch
 func defaultTruncHandler(
 	genOffloadFilePathFn func(ctx context.Context, toolDetail *ToolDetail) (filePath string, err error),
 	truncMaxLength int,
+	readFileToolName string,
 ) func(ctx context.Context, detail *ToolDetail) (truncResult *TruncResult, err error) {
 
 	return func(ctx context.Context, detail *ToolDetail) (offloadInfo *TruncResult, err error) {
@@ -1745,11 +1746,12 @@ func defaultTruncHandler(
 				continue
 			}
 			truncNotify, fmtErr := pyfmt.Fmt(getTruncFmt(), map[string]any{
-				"original_size": len(part.Text),
-				"file_path":     filePath,
-				"preview_size":  previewSize,
-				"preview_first": clampPrefixToUTF8Boundary(text, previewSize),
-				"preview_last":  clampSuffixToUTF8Boundary(text, previewSize),
+				"original_size":  len(part.Text),
+				"file_path":      filePath,
+				"preview_size":   previewSize,
+				"preview_first":  clampPrefixToUTF8Boundary(text, previewSize),
+				"preview_last":   clampSuffixToUTF8Boundary(text, previewSize),
+				"read_tool_name": readFileToolName,
 			})
 			if fmtErr != nil {
 				return nil, fmtErr
