@@ -1,0 +1,23 @@
+adk/internal/agenttool/options.go
+  s_6ca64c16161ef3::t_11c85d188c507d 29-30,54
+adk/internal/agenttool/options_test.go
+  s_6ca64c16161ef3::t_387c2c43d94a3b 26-30,46
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.5",
+  "base_commit_sha": "0421ada8b8a601962e425ec2fcd55986fc8d7205",
+  "prompts": {},
+  "sessions": {
+    "s_6ca64c16161ef3": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5a54-336a-7170-8908-d8e0eed12a0f",
+        "model": "unknown"
+      },
+      "human_author": "lipandeng <lipandeng@bytedance.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
