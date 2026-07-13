@@ -1,0 +1,33 @@
+adk/agent_tool.go
+  s_6ca64c16161ef3::t_3f4a2e5395161b 80-81,171,265,277-282,346-353,385,387,394
+adk/agent_tool_test.go
+  s_6ca64c16161ef3::t_eb8f92a401eee5 1282,1301,1314,1322,1335-1339,1347-1349,1361,1365-1392
+adk/chatmodel.go
+  s_6ca64c16161ef3::t_0119728ce32963 1464,1605
+adk/internal/agenttool/options_test.go
+  s_6ca64c16161ef3::t_235e9ec7f85dfd 1-50
+adk/middlewares/subagent/agent_tool.go
+  s_6ca64c16161ef3::t_fff74bbf18504f 21,39,104-108,126-151,187-296
+adk/middlewares/subagent/middleware.go
+  s_6ca64c16161ef3::t_200b612edfaf72 76-80,138
+adk/prebuilt/deep/deep.go
+  s_6ca64c16161ef3::t_b5e63051e5385c 55
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.5",
+  "base_commit_sha": "27bd2d15639f45b46e044f1a781aa74c21e4d149",
+  "prompts": {},
+  "sessions": {
+    "s_6ca64c16161ef3": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5a54-336a-7170-8908-d8e0eed12a0f",
+        "model": "unknown"
+      },
+      "human_author": "lipandeng <lipandeng@bytedance.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
