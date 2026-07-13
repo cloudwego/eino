@@ -1,0 +1,23 @@
+adk/internal/agenttool/options.go
+  s_6ca64c16161ef3::t_6b1d65edaa206e 50
+adk/middlewares/subagent/agent_tool.go
+  s_6ca64c16161ef3::t_a27d86c8d88e9f 24,103-107,116,225-230,236-238,241-248,251-254,256,271-289,291-296,298-302,304-309,311-323,327-332,340
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.5",
+  "base_commit_sha": "c6db5c1d69e6f3a90762dabd0bc5bd1cefc43b8e",
+  "prompts": {},
+  "sessions": {
+    "s_6ca64c16161ef3": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5a54-336a-7170-8908-d8e0eed12a0f",
+        "model": "unknown"
+      },
+      "human_author": "lipandeng <lipandeng@bytedance.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
