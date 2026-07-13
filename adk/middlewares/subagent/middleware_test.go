@@ -521,26 +521,32 @@ func TestAgentTool_WritesInterimEventsWithoutParentReceiver(t *testing.T) {
 	assert.Equal(t, "firstsecond", records[0].Message["content"])
 }
 
-func TestSanitizedMessageValue_RemovesExtraFields(t *testing.T) {
+func TestSanitizedMessageValue_RemovesOnlyRootExtra(t *testing.T) {
 	t.Run("message", func(t *testing.T) {
-		value := sanitizedMessageValue(&schema.Message{
+		original := &schema.Message{
 			Role:    schema.Assistant,
 			Content: "answer",
 			Extra:   map[string]any{"not_json": func() {}},
 			UserInputMultiContent: []schema.MessageInputPart{{
 				Type:  schema.ChatMessagePartTypeText,
 				Text:  "nested",
-				Extra: map[string]any{"not_json": func() {}},
+				Extra: map[string]any{"provider": "kept"},
 			}},
-		})
+		}
+		value := sanitizedMessageValue(original).(adk.Message)
+		assert.NotSame(t, original, value)
+		assert.Nil(t, value.Extra)
+		assert.Equal(t, map[string]any{"provider": "kept"}, value.UserInputMultiContent[0].Extra)
+		assert.NotNil(t, original.Extra)
+
 		data, err := sonic.Marshal(value)
 		require.NoError(t, err)
-		assert.NotContains(t, string(data), `"extra"`)
+		assert.Contains(t, string(data), `"extra":{"provider":"kept"}`)
 		assert.Contains(t, string(data), `"answer"`)
 	})
 
 	t.Run("agentic message", func(t *testing.T) {
-		value := sanitizedMessageValue(&schema.AgenticMessage{
+		original := &schema.AgenticMessage{
 			Role:  schema.AgenticRoleTypeAssistant,
 			Extra: map[string]any{"not_json": func() {}},
 			ResponseMeta: &schema.AgenticResponseMeta{
@@ -553,12 +559,18 @@ func TestSanitizedMessageValue_RemovesExtraFields(t *testing.T) {
 			ContentBlocks: []*schema.ContentBlock{{
 				Type:             schema.ContentBlockTypeAssistantGenText,
 				AssistantGenText: &schema.AssistantGenText{Text: "answer"},
-				Extra:            map[string]any{"not_json": func() {}},
+				Extra:            map[string]any{"provider": "kept"},
 			}},
-		})
+		}
+		value := sanitizedMessageValue(original).(adk.AgenticMessage)
+		assert.NotSame(t, original, value)
+		assert.Nil(t, value.Extra)
+		assert.Equal(t, map[string]any{"provider": "kept"}, value.ContentBlocks[0].Extra)
+		assert.NotNil(t, original.Extra)
+
 		data, err := sonic.Marshal(value)
 		require.NoError(t, err)
-		assert.NotContains(t, string(data), `"extra"`)
+		assert.Contains(t, string(data), `"extra":{"provider":"kept"}`)
 		assert.Contains(t, string(data), `"openai_extension":{"id":"response-id"}`)
 		assert.Contains(t, string(data), `"extension":{"provider":"kept"}`)
 		assert.Contains(t, string(data), `"token_usage"`)

@@ -21,7 +21,6 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
-	"reflect"
 	"strings"
 
 	"github.com/bytedance/sonic"
@@ -36,7 +35,6 @@ import (
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/components/tool/utils"
 	"github.com/cloudwego/eino/compose"
-	"github.com/cloudwego/eino/schema"
 )
 
 const (
@@ -268,60 +266,27 @@ func (r *agentEventFileReceiver[M]) fail(err error) {
 	}
 }
 
-var schemaPackagePath = reflect.TypeOf(schema.Message{}).PkgPath()
-
 // sanitizedMessageValue makes a non-mutating copy of a schema message and
-// removes every formal Extra field before JSON serialization. Interface-valued
-// extension fields are deliberately kept opaque, so custom and provider
-// extensions remain part of the output.
+// removes its root Extra field before JSON serialization. Nested Extra fields,
+// custom extensions, and provider extensions remain part of the output.
 func sanitizedMessageValue[M adk.MessageType](msg M) any {
-	return cloneSchemaValueWithoutExtra(reflect.ValueOf(msg)).Interface()
-}
-
-func cloneSchemaValueWithoutExtra(value reflect.Value) reflect.Value {
-	if !value.IsValid() {
-		return value
+	switch m := any(msg).(type) {
+	case adk.Message:
+		if m == nil {
+			return nil
+		}
+		cloned := *m
+		cloned.Extra = nil
+		return &cloned
+	case adk.AgenticMessage:
+		if m == nil {
+			return nil
+		}
+		cloned := *m
+		cloned.Extra = nil
+		return &cloned
 	}
-
-	switch value.Kind() {
-	case reflect.Pointer:
-		if value.IsNil() || value.Type().Elem().Kind() != reflect.Struct || value.Type().Elem().PkgPath() != schemaPackagePath {
-			return value
-		}
-		cloned := reflect.New(value.Type().Elem())
-		cloned.Elem().Set(cloneSchemaValueWithoutExtra(value.Elem()))
-		return cloned
-	case reflect.Struct:
-		if value.Type().PkgPath() != schemaPackagePath {
-			return value
-		}
-		cloned := reflect.New(value.Type()).Elem()
-		for i := 0; i < value.NumField(); i++ {
-			field := value.Type().Field(i)
-			if !field.IsExported() || field.Name == "Extra" {
-				continue
-			}
-			cloned.Field(i).Set(cloneSchemaValueWithoutExtra(value.Field(i)))
-		}
-		return cloned
-	case reflect.Slice:
-		if value.IsNil() {
-			return value
-		}
-		cloned := reflect.MakeSlice(value.Type(), value.Len(), value.Len())
-		for i := 0; i < value.Len(); i++ {
-			cloned.Index(i).Set(cloneSchemaValueWithoutExtra(value.Index(i)))
-		}
-		return cloned
-	case reflect.Array:
-		cloned := reflect.New(value.Type()).Elem()
-		for i := 0; i < value.Len(); i++ {
-			cloned.Index(i).Set(cloneSchemaValueWithoutExtra(value.Index(i)))
-		}
-		return cloned
-	default:
-		return value
-	}
+	return msg
 }
 
 // agentOutputFilePath allocates an output-file path under outputDir without
