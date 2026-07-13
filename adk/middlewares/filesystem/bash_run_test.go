@@ -428,18 +428,18 @@ func TestExecuteTool_NoManager_NotTracked(t *testing.T) {
 	assert.Equal(t, "ok", result)
 }
 
-// failingStreamAppender wraps a Backend but fails to open an append stream after
+// failingAppendOpener wraps a Backend but fails to open an append stream after
 // failAfter successful opens (failAfter=0 fails the very first open, i.e. the
 // reservation). Reads delegate to the backend so any partial file is still
 // observable. In the buffered path the reservation and the result are each one
 // OpenAppend, so failAfter selects which logical append fails.
-type failingStreamAppender struct {
+type failingAppendOpener struct {
 	backend   *filesystem.InMemoryBackend
 	failAfter int
 	opens     int
 }
 
-func (f *failingStreamAppender) OpenAppend(ctx context.Context, req *filesystem.OpenAppendRequest) (filesystem.AppendStream, error) {
+func (f *failingAppendOpener) OpenAppend(ctx context.Context, req *filesystem.OpenAppendRequest) (io.WriteCloser, error) {
 	if f.opens >= f.failAfter {
 		f.opens++
 		return nil, errors.New("append failed")
@@ -459,9 +459,9 @@ func TestManagedExecuteTool_ReservationFailure_NoOutputFile(t *testing.T) {
 		_ = mgr.Close(ctx)
 	}()
 
-	appender := &failingStreamAppender{backend: backend, failAfter: 0}
+	opener := &failingAppendOpener{backend: backend, failAfter: 0}
 	executeTool, err := newManagedExecuteTool(mgr, &mockShellBackend{resp: &filesystem.ExecuteResponse{Output: "the output"}}, nil,
-		outputSink{store: appender, outputDir: "/tasks"}, "", "")
+		outputSink{store: opener, outputDir: "/tasks"}, "", "")
 	require.NoError(t, err)
 
 	result, err := invokeTool(t, executeTool, `{"command":"echo hi"}`)
@@ -487,9 +487,9 @@ func TestManagedExecuteTool_WriteFailure_MarksUnreliable(t *testing.T) {
 	}()
 
 	// failAfter=1: the reservation open succeeds, the result open fails.
-	appender := &failingStreamAppender{backend: backend, failAfter: 1}
+	opener := &failingAppendOpener{backend: backend, failAfter: 1}
 	executeTool, err := newManagedExecuteTool(mgr, &mockShellBackend{resp: &filesystem.ExecuteResponse{Output: "the output"}}, nil,
-		outputSink{store: appender, outputDir: "/tasks"}, "", "")
+		outputSink{store: opener, outputDir: "/tasks"}, "", "")
 	require.NoError(t, err)
 
 	result, err := invokeTool(t, executeTool, `{"command":"echo hi"}`)
@@ -503,32 +503,32 @@ func TestManagedExecuteTool_WriteFailure_MarksUnreliable(t *testing.T) {
 	assert.Equal(t, "the output", tasks[0].Result, "Result stays complete regardless of file writes")
 }
 
-// countingStreamAppender wraps a Backend and counts every OpenAppend and every
+// countingAppendOpener wraps a Backend and counts every OpenAppend and every
 // handle Close, so a test can assert that no opened append session was leaked
 // (opens == closes).
-type countingStreamAppender struct {
+type countingAppendOpener struct {
 	backend *filesystem.InMemoryBackend
 	opens   int32
 	closes  int32
 }
 
-func (c *countingStreamAppender) OpenAppend(ctx context.Context, req *filesystem.OpenAppendRequest) (filesystem.AppendStream, error) {
+func (c *countingAppendOpener) OpenAppend(ctx context.Context, req *filesystem.OpenAppendRequest) (io.WriteCloser, error) {
 	inner, err := c.backend.OpenAppend(ctx, req)
 	if err != nil {
 		return nil, err
 	}
 	atomic.AddInt32(&c.opens, 1)
-	return &countingAppendStream{AppendStream: inner, parent: c}, nil
+	return &countingAppendWriter{WriteCloser: inner, parent: c}, nil
 }
 
-type countingAppendStream struct {
-	filesystem.AppendStream
-	parent *countingStreamAppender
+type countingAppendWriter struct {
+	io.WriteCloser
+	parent *countingAppendOpener
 }
 
-func (s *countingAppendStream) Close() error {
+func (s *countingAppendWriter) Close() error {
 	atomic.AddInt32(&s.parent.closes, 1)
-	return s.AppendStream.Close()
+	return s.WriteCloser.Close()
 }
 
 // erroringStreamingShell emits one chunk then a non-EOF error (no clean EOF), so the
@@ -550,7 +550,7 @@ func (e *erroringStreamingShell) ExecuteStreaming(ctx context.Context, _ *filesy
 // backend does not leak the handle. Asserted by opens == closes.
 func TestManagedExecuteTool_StreamingSourceError_ClosesStream(t *testing.T) {
 	backend := setupTestBackend()
-	counter := &countingStreamAppender{backend: backend}
+	counter := &countingAppendOpener{backend: backend}
 	mgr := backgroundtask.New(context.Background(), &backgroundtask.Config{})
 	defer func() {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)

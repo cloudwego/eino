@@ -101,8 +101,8 @@ func newAgentTool(subAgents map[string]tool.InvokableTool, name, desc string) (t
 // outputDir/<uuid>.output: the file is created empty up front so its advertised
 // path exists immediately, and the sub-agent's final result is appended there on
 // completion. The Manager never writes — the tool owns it. store is a
-// filesystem.StreamAppender; output files require one (no rewrite fallback).
-func newManagedAgentTool(mgr *backgroundtask.Manager, subAgents map[string]tool.InvokableTool, store filesystem.StreamAppender, outputDir, name, desc string) (tool.BaseTool, error) {
+// filesystem.AppendOpener; output files require one (no rewrite fallback).
+func newManagedAgentTool(mgr *backgroundtask.Manager, subAgents map[string]tool.InvokableTool, store filesystem.AppendOpener, outputDir, name, desc string) (tool.BaseTool, error) {
 	return utils.InferOptionableTool(name, desc,
 		func(ctx context.Context, in agentManagedInput, opts ...tool.Option) (string, error) {
 			a, params, err := resolveSubAgent(subAgents, in.SubagentType, in.Prompt, in.Description)
@@ -179,7 +179,7 @@ func newManagedAgentTool(mgr *backgroundtask.Manager, subAgents map[string]tool.
 // Returns "" when output files are not configured (no store / no dir) or when the
 // up-front reservation fails — in the latter case the task advertises no output
 // file, so consumers fall back to the in-memory Result.
-func reserveAgentOutputFile(ctx context.Context, store filesystem.StreamAppender, outputDir string) string {
+func reserveAgentOutputFile(ctx context.Context, store filesystem.AppendOpener, outputDir string) string {
 	if store == nil || outputDir == "" {
 		return ""
 	}
@@ -197,7 +197,7 @@ func reserveAgentOutputFile(ctx context.Context, store filesystem.StreamAppender
 // appendOnce opens an append stream to path, writes content (skipped when empty,
 // which just creates/reserves the file via create-on-open), and closes it, returning
 // the first write or close error. It always closes the handle.
-func appendOnce(ctx context.Context, store filesystem.StreamAppender, path, content string) error {
+func appendOnce(ctx context.Context, store filesystem.AppendOpener, path, content string) error {
 	w, err := store.OpenAppend(ctx, &filesystem.OpenAppendRequest{FilePath: path})
 	if err != nil {
 		return err

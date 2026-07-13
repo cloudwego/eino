@@ -63,19 +63,19 @@ func CommandFromTask(t *backgroundtask.Task) string {
 }
 
 // outputSink bundles the output-file configuration for a managed execute tool: a
-// StreamAppender to open append streams through and the directory to reserve paths
+// AppendOpener to open append streams through and the directory to reserve paths
 // under. Both must be set to enable output files; a zero outputSink disables them.
 type outputSink struct {
-	store     filesystem.StreamAppender
+	store     filesystem.AppendOpener
 	outputDir string
 }
 
 // bashOutputWriter tees a managed execute task's output to a file via a
-// filesystem.StreamAppender. It is built per invocation: when both a StreamAppender
+// filesystem.AppendOpener. It is built per invocation: when both an AppendOpener
 // and an outputDir are configured it reserves outputDir/<uuid>.output (created empty
 // up front) and opens an append stream when the work starts; otherwise it is
 // disabled and every method is a no-op, so the task has no output file. There is no
-// rewrite fallback — output files require a StreamAppender.
+// rewrite fallback — output files require an AppendOpener.
 //
 // The execute tool — not the Manager — owns writing, so streaming runs tee interim
 // output as chunks arrive. It is single-consumer: append is called serially on
@@ -87,11 +87,11 @@ type outputSink struct {
 // and stops attempting further writes.
 type bashOutputWriter struct {
 	mgr    *backgroundtask.Manager
-	store  filesystem.StreamAppender // nil => disabled
+	store  filesystem.AppendOpener // nil => disabled
 	path   string
-	stream filesystem.AppendStream // opened lazily by the streaming work; nil => not open
-	taskID string                  // set by the work func once the Manager assigns it
-	failed bool                    // set after the first append error: the file is now partial
+	stream io.WriteCloser // opened lazily by the streaming work; nil => not open
+	taskID string         // set by the work func once the Manager assigns it
+	failed bool           // set after the first append error: the file is now partial
 }
 
 // reserveBashOutput builds a writer that tees under the sink, or a disabled writer
@@ -228,7 +228,7 @@ func bashWork(sb filesystem.Shell, req *filesystem.ExecuteRequest, w *bashOutput
 // two terminal outcomes the convert reader observes — so the handle is flushed and
 // released on both. On the rarer caller-abandon / timeout paths the source ends
 // without either hook firing; the session is then released by the work context's
-// cancellation (the file is already incomplete in that case), which the AppendStream
+// cancellation (the file is already incomplete in that case), which the AppendOpener
 // contract requires a resource-holding backend to honor.
 func bashStreamWork(sb filesystem.StreamingShell, req *filesystem.ExecuteRequest, w *bashOutputWriter) backgroundtask.StreamWorkFunc {
 	return func(ctx context.Context, task backgroundtask.TaskInfo) (*schema.StreamReader[string], error) {

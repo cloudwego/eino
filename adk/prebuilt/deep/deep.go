@@ -186,7 +186,7 @@ func NewTyped[M adk.MessageType](ctx context.Context, cfg *TypedConfig[M]) (adk.
 			if cfg.Background != nil && cfg.Background.Manager != nil {
 				subCfg.Background = &subagent.BackgroundConfig{
 					Manager:     cfg.Background.Manager,
-					OutputStore: backendStreamAppender(cfg.Backend),
+					OutputStore: backendAppendOpener(cfg.Backend),
 					OutputDir:   cfg.Background.OutputDir,
 				}
 			}
@@ -328,7 +328,7 @@ func buildTypedBuiltinAgentMiddlewares[M adk.MessageType](ctx context.Context, c
 		if background != nil && background.Manager != nil {
 			mwCfg.Background = &filesystem2.BackgroundConfig{
 				Manager:     background.Manager,
-				OutputStore: backendStreamAppender(cfg.Backend),
+				OutputStore: backendAppendOpener(cfg.Backend),
 				OutputDir:   background.OutputDir,
 			}
 		}
@@ -342,12 +342,12 @@ func buildTypedBuiltinAgentMiddlewares[M adk.MessageType](ctx context.Context, c
 	return ms, nil
 }
 
-// backendStreamAppender returns b as a filesystem.StreamAppender when it supports
+// backendAppendOpener returns b as a filesystem.AppendOpener when it supports
 // incremental append, or nil otherwise — in which case background tasks run without
-// output files. The default InMemoryBackend implements StreamAppender.
-func backendStreamAppender(b filesystem.Backend) filesystem.StreamAppender {
-	sa, _ := b.(filesystem.StreamAppender)
-	return sa
+// output files. The default InMemoryBackend implements AppendOpener.
+func backendAppendOpener(b filesystem.Backend) filesystem.AppendOpener {
+	ao, _ := b.(filesystem.AppendOpener)
+	return ao
 }
 
 type TODO struct {

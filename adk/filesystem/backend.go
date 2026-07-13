@@ -243,8 +243,16 @@ type MultiModalReader interface {
 	MultiModalRead(ctx context.Context, req *MultiModalReadRequest) (*MultiFileContent, error)
 }
 
-// AppendStream is a write-only, tail-appending session to a single file, obtained
-// from StreamAppender.OpenAppend. Its contract is exactly io.WriteCloser:
+// AppendOpener opens a write-only, tail-appending session to a file, letting
+// callers stream content to the end of the file incrementally without rewriting
+// the whole file — e.g. teeing a long-running background task's output to its
+// output file as chunks arrive.
+//
+// It is an optional Backend extension (like MultiModalReader): a Backend that can
+// keep a file handle or RPC stream open implements it directly, so per-chunk backend
+// latency can be amortized over the session.
+//
+// The io.WriteCloser returned by OpenAppend has the following contract:
 //
 //   - Write appends bytes to the end of the file. It MAY buffer: a nil error does
 //     NOT guarantee the bytes are durable or yet visible to a concurrent Read. If a
@@ -274,22 +282,10 @@ type MultiModalReader interface {
 // append without a []byte copy (use io.WriteString, which detects it). They MAY
 // implement interface{ Flush() error } to expose a mid-stream durability/visibility
 // checkpoint without ending the session.
-type AppendStream interface {
-	io.WriteCloser
-}
-
-// StreamAppender opens an append stream to a file, letting callers stream content
-// to the end of the file incrementally without rewriting the whole file — e.g.
-// teeing a long-running background task's output to its output file as chunks
-// arrive.
-//
-// It is an optional Backend extension (like MultiModalReader): a Backend that can
-// keep a file handle or RPC stream open implements it directly, so per-chunk backend
-// latency is paid once at open rather than on every write.
-type StreamAppender interface {
+type AppendOpener interface {
 	// OpenAppend opens an append stream to req.FilePath, creating the file if it
-	// does not exist. See AppendStream for the returned handle's contract.
-	OpenAppend(ctx context.Context, req *OpenAppendRequest) (AppendStream, error)
+	// does not exist.
+	OpenAppend(ctx context.Context, req *OpenAppendRequest) (io.WriteCloser, error)
 }
 
 // Backend is a pluggable, unified file backend protocol interface.

@@ -642,12 +642,12 @@ func (b *InMemoryBackend) Write(ctx context.Context, req *WriteRequest) error {
 }
 
 // OpenAppend opens an append stream to the file at req.FilePath, creating it if it
-// does not exist. It implements the optional StreamAppender interface, letting
+// does not exist. It implements the optional AppendOpener interface, letting
 // callers stream task output incrementally without rewriting the whole file.
 //
 // In-memory writes have no latency, so the returned handle writes through under the
 // backend lock on every Write (immediately visible to Read); Close is a no-op.
-func (b *InMemoryBackend) OpenAppend(ctx context.Context, req *OpenAppendRequest) (AppendStream, error) {
+func (b *InMemoryBackend) OpenAppend(ctx context.Context, req *OpenAppendRequest) (io.WriteCloser, error) {
 	filePath := normalizePath(req.FilePath)
 
 	// Create-on-open: an open + close with no writes yields an empty file.
@@ -657,27 +657,27 @@ func (b *InMemoryBackend) OpenAppend(ctx context.Context, req *OpenAppendRequest
 	}
 	b.mu.Unlock()
 
-	return &inMemoryAppendStream{b: b, path: filePath}, nil
+	return &inMemoryAppendWriter{b: b, path: filePath}, nil
 }
 
-// inMemoryAppendStream is the append handle returned by InMemoryBackend.OpenAppend.
+// inMemoryAppendWriter is the append handle returned by InMemoryBackend.OpenAppend.
 // It is single-consumer; each write appends to the file entry under the backend lock.
-type inMemoryAppendStream struct {
+type inMemoryAppendWriter struct {
 	b    *InMemoryBackend
 	path string
 }
 
-func (s *inMemoryAppendStream) Write(p []byte) (int, error) {
+func (s *inMemoryAppendWriter) Write(p []byte) (int, error) {
 	return s.WriteString(string(p))
 }
 
 // WriteString appends str without a []byte round-trip; io.WriteString detects it.
-func (s *inMemoryAppendStream) WriteString(str string) (int, error) {
+func (s *inMemoryAppendWriter) WriteString(str string) (int, error) {
 	s.append(str)
 	return len(str), nil
 }
 
-func (s *inMemoryAppendStream) append(content string) {
+func (s *inMemoryAppendWriter) append(content string) {
 	if content == "" {
 		return
 	}
@@ -694,11 +694,11 @@ func (s *inMemoryAppendStream) append(content string) {
 
 // Close finalizes the session. In-memory writes are already applied, so there is
 // nothing to flush.
-func (s *inMemoryAppendStream) Close() error { return nil }
+func (s *inMemoryAppendWriter) Close() error { return nil }
 
 var (
-	_ AppendStream    = (*inMemoryAppendStream)(nil)
-	_ io.StringWriter = (*inMemoryAppendStream)(nil)
+	_ io.WriteCloser  = (*inMemoryAppendWriter)(nil)
+	_ io.StringWriter = (*inMemoryAppendWriter)(nil)
 )
 
 // Edit replaces string occurrences in a file.

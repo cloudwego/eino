@@ -77,10 +77,10 @@ type BackgroundConfig struct {
 	// sub-agent's final result there on completion and records the path on
 	// Task.OutputFile, so a backgrounded run's result is retrievable by path (and
 	// large results need not be inlined). The Manager itself never writes.
-	// OutputStore is a filesystem.StreamAppender (filesystem.InMemoryBackend
+	// OutputStore is a filesystem.AppendOpener (filesystem.InMemoryBackend
 	// implements it); output files require one. When either is unset, runs have no
 	// output file.
-	OutputStore filesystem.StreamAppender
+	OutputStore filesystem.AppendOpener
 	OutputDir   string
 }
 

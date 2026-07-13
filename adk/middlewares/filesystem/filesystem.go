@@ -102,10 +102,10 @@ type BackgroundConfig struct {
 	// file at OutputDir/<id>.output: streaming runs append their chunks to it as
 	// they arrive (interim output), buffered runs append their result on completion.
 	// The path is recorded on Task.OutputFile and surfaced in the background notice.
-	// OutputStore is a filesystem.StreamAppender (filesystem.InMemoryBackend
+	// OutputStore is a filesystem.AppendOpener (filesystem.InMemoryBackend
 	// implements it); supply your own to direct output elsewhere. When either is
 	// unset, runs have no output file.
-	OutputStore filesystem.StreamAppender
+	OutputStore filesystem.AppendOpener
 	OutputDir   string
 }
 

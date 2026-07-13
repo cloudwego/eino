@@ -2515,6 +2515,6 @@ func TestInMemoryBackend_OpenAppend(t *testing.T) {
 		}
 	})
 
-	// InMemoryBackend must satisfy the optional StreamAppender extension.
-	var _ StreamAppender = NewInMemoryBackend()
+	// InMemoryBackend must satisfy the optional AppendOpener extension.
+	var _ AppendOpener = NewInMemoryBackend()
 }
