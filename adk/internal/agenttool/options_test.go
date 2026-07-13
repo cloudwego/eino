@@ -23,6 +23,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestResolveEventReceivers_NoTransforms(t *testing.T) {
+	receivers := ResolveEventReceivers[int]()
+	assert.Len(t, receivers, 0)
+}
+
 func TestResolveEventReceivers_TransformsInOptionOrder(t *testing.T) {
 	var calls []string
 	receivers := ResolveEventReceivers[int](
@@ -38,7 +43,7 @@ func TestResolveEventReceivers_TransformsInOptionOrder(t *testing.T) {
 				calls = append(calls, "before")
 				previous(event)
 			}
-			return append(current, nil, func(int) { calls = append(calls, "second") })
+			return append(current, func(int) { calls = append(calls, "second") })
 		}),
 	)
 

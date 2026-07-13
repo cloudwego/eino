@@ -26,8 +26,8 @@ import "github.com/cloudwego/eino/components/tool"
 type EventReceiver[E any] func(event E)
 
 // EventReceiverTransform derives the receiver list for an AgentTool invocation
-// from the receivers configured so far. Transforms run in tool-option order and
-// receive a non-nil, possibly empty slice.
+// from the receivers configured so far. Transforms run in tool-option order.
+// The receiver list may be empty, but must not contain nil elements.
 type EventReceiverTransform[E any] func(current []EventReceiver[E]) []EventReceiver[E]
 
 type eventReceiverOptions[E any] struct {
@@ -50,19 +50,6 @@ func ResolveEventReceivers[E any](opts ...tool.Option) []EventReceiver[E] {
 	receivers := make([]EventReceiver[E], 0)
 	for _, transform := range o.transforms {
 		receivers = transform(receivers)
-		if receivers == nil {
-			receivers = make([]EventReceiver[E], 0)
-		}
 	}
-
-	// A nil receiver is not a valid endpoint. Ignore one defensively so a bad
-	// internal transform cannot turn event dispatch into a nil-function panic.
-	n := 0
-	for _, receiver := range receivers {
-		if receiver != nil {
-			receivers[n] = receiver
-			n++
-		}
-	}
-	return receivers[:n]
+	return receivers
 }
