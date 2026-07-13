@@ -52,10 +52,11 @@ type BackgroundConfig struct {
 	// OutputDir, when set together with Config.Backend, gives every managed
 	// background task (shell command or sub-agent run) an output file under this
 	// directory. Shell runs tee their output there as it streams (interim output);
-	// sub-agent runs stream their AgentEvent output there. The path is recorded on
+	// sub-agent runs append materialized AgentEvents as JSONL. The path is recorded on
 	// Task.OutputFile and surfaced when the task is launched in the background, so a
-	// backgrounded task's output is retrievable by path. When empty, tasks have no
-	// output file.
+	// backgrounded task's output is retrievable by path. Sub-agent output files are
+	// created lazily, so the path may briefly be visible before the file exists. When
+	// empty, tasks have no output file.
 	OutputDir string
 }
 

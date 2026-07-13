@@ -18,10 +18,10 @@ package subagent
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"path/filepath"
+	"reflect"
 	"strings"
 
 	"github.com/bytedance/sonic"
@@ -100,11 +100,11 @@ func newAgentTool(subAgents map[string]tool.InvokableTool, name, desc string) (t
 // and only lifecycle/background switching is layered on top.
 //
 // When store and outputDir are both set, each run is given an output file at
-// outputDir/<uuid>.output: the file is created empty up front so its advertised
-// path exists immediately, then one append writer remains open while the
-// sub-agent runs and receives its AgentEvents in real time. The Manager never
-// writes — the tool owns the writer. store is a filesystem.AppendOpener; output
-// files require one (no rewrite fallback).
+// outputDir/<uuid>.output. The path is allocated before the run, then the work
+// callback lazily creates it and keeps one append writer open while the sub-agent
+// runs, writing one JSONL record for each materialized AgentEvent. The Manager
+// never writes — the tool owns the writer. store is a filesystem.AppendOpener;
+// output files require one (no rewrite fallback).
 func newManagedAgentTool[M adk.MessageType](mgr *backgroundtask.Manager, subAgents map[string]tool.InvokableTool, store filesystem.AppendOpener, outputDir, name, desc string) (tool.BaseTool, error) {
 	return utils.InferOptionableTool(name, desc,
 		func(ctx context.Context, in agentManagedInput, opts ...tool.Option) (string, error) {
@@ -113,7 +113,7 @@ func newManagedAgentTool[M adk.MessageType](mgr *backgroundtask.Manager, subAgen
 				return "", err
 			}
 
-			outputFile := reserveAgentOutputFile(ctx, store, outputDir)
+			outputFile := agentOutputFilePath(ctx, store, outputDir)
 
 			result, err := mgr.Run(ctx, &backgroundtask.RunInput{
 				Description:     in.Description,
@@ -222,45 +222,40 @@ type agentEventFileReceiver[M adk.MessageType] struct {
 	failed  bool
 }
 
+type agentEventRecord struct {
+	Type      string `json:"type"`
+	AgentName string `json:"agent_name,omitempty"`
+	Message   any    `json:"message"`
+}
+
 func (r *agentEventFileReceiver[M]) receive(event *adk.TypedAgentEvent[M]) {
 	if r.failed || event == nil || event.Output == nil || event.Output.MessageOutput == nil {
 		return
 	}
 
-	output := event.Output.MessageOutput
-	if !output.IsStreaming {
-		r.writeMessage(output.Message)
+	msg, err := event.Output.MessageOutput.GetMessage()
+	if err != nil {
+		r.fail(fmt.Errorf("materialize agent output message: %w", err))
 		return
 	}
-	if output.MessageStream == nil {
+	message := sanitizedMessageValue(msg)
+	data, err := sonic.Marshal(&agentEventRecord{
+		Type:      "message",
+		AgentName: event.AgentName,
+		Message:   message,
+	})
+	if err != nil {
+		r.fail(fmt.Errorf("marshal agent output event: %w", err))
 		return
 	}
-	defer output.MessageStream.Close()
-	for {
-		chunk, err := output.MessageStream.Recv()
-		if errors.Is(err, io.EOF) {
-			return
-		}
-		if err != nil {
-			r.fail(fmt.Errorf("receive agent output stream: %w", err))
-			return
-		}
-		if !r.writeMessage(chunk) {
-			return
-		}
+	data = append(data, '\n')
+	n, err := r.writer.Write(data)
+	if err == nil && n != len(data) {
+		err = io.ErrShortWrite
 	}
-}
-
-func (r *agentEventFileReceiver[M]) writeMessage(msg M) bool {
-	content := agentEventText(msg)
-	if content == "" {
-		return true
-	}
-	if _, err := io.WriteString(r.writer, content); err != nil {
+	if err != nil {
 		r.fail(fmt.Errorf("write agent output: %w", err))
-		return false
 	}
-	return true
 }
 
 func (r *agentEventFileReceiver[M]) fail(err error) {
@@ -273,35 +268,68 @@ func (r *agentEventFileReceiver[M]) fail(err error) {
 	}
 }
 
-func agentEventText[M adk.MessageType](msg M) string {
-	switch v := any(msg).(type) {
-	case *schema.Message:
-		if v != nil {
-			return v.Content
-		}
-	case *schema.AgenticMessage:
-		if v == nil {
-			return ""
-		}
-		var texts []string
-		for _, block := range v.ContentBlocks {
-			if block != nil && block.Type == schema.ContentBlockTypeAssistantGenText && block.AssistantGenText != nil {
-				texts = append(texts, block.AssistantGenText.Text)
-			}
-		}
-		return strings.Join(texts, "\n")
-	}
-	return ""
+var schemaPackagePath = reflect.TypeOf(schema.Message{}).PkgPath()
+
+// sanitizedMessageValue makes a non-mutating copy of a schema message and
+// removes every formal Extra field before JSON serialization. Interface-valued
+// extension fields are deliberately kept opaque, so custom and provider
+// extensions remain part of the output.
+func sanitizedMessageValue[M adk.MessageType](msg M) any {
+	return cloneSchemaValueWithoutExtra(reflect.ValueOf(msg)).Interface()
 }
 
-// reserveAgentOutputFile reserves an output-file path under outputDir and creates
-// it empty (open+close, which creates the file on open) so the path exists before
-// the run completes. The file is named after the launching tool-call id (so it
-// matches Task.ToolUseID), falling back to a uuid when no tool-call id is in context.
-// Returns "" when output files are not configured (no store / no dir) or when the
-// up-front reservation fails — in the latter case the task advertises no output
-// file, so consumers fall back to the in-memory Result.
-func reserveAgentOutputFile(ctx context.Context, store filesystem.AppendOpener, outputDir string) string {
+func cloneSchemaValueWithoutExtra(value reflect.Value) reflect.Value {
+	if !value.IsValid() {
+		return value
+	}
+
+	switch value.Kind() {
+	case reflect.Pointer:
+		if value.IsNil() || value.Type().Elem().Kind() != reflect.Struct || value.Type().Elem().PkgPath() != schemaPackagePath {
+			return value
+		}
+		cloned := reflect.New(value.Type().Elem())
+		cloned.Elem().Set(cloneSchemaValueWithoutExtra(value.Elem()))
+		return cloned
+	case reflect.Struct:
+		if value.Type().PkgPath() != schemaPackagePath {
+			return value
+		}
+		cloned := reflect.New(value.Type()).Elem()
+		for i := 0; i < value.NumField(); i++ {
+			field := value.Type().Field(i)
+			if !field.IsExported() || field.Name == "Extra" {
+				continue
+			}
+			cloned.Field(i).Set(cloneSchemaValueWithoutExtra(value.Field(i)))
+		}
+		return cloned
+	case reflect.Slice:
+		if value.IsNil() {
+			return value
+		}
+		cloned := reflect.MakeSlice(value.Type(), value.Len(), value.Len())
+		for i := 0; i < value.Len(); i++ {
+			cloned.Index(i).Set(cloneSchemaValueWithoutExtra(value.Index(i)))
+		}
+		return cloned
+	case reflect.Array:
+		cloned := reflect.New(value.Type()).Elem()
+		for i := 0; i < value.Len(); i++ {
+			cloned.Index(i).Set(cloneSchemaValueWithoutExtra(value.Index(i)))
+		}
+		return cloned
+	default:
+		return value
+	}
+}
+
+// agentOutputFilePath allocates an output-file path under outputDir without
+// opening it. The work callback creates the file lazily through its single
+// append session. The file is named after the launching tool-call id (so it
+// matches Task.ToolUseID), falling back to a uuid when no tool-call id is in
+// context. Returns "" when output files are not configured.
+func agentOutputFilePath(ctx context.Context, store filesystem.AppendOpener, outputDir string) string {
 	if store == nil || outputDir == "" {
 		return ""
 	}
@@ -309,28 +337,7 @@ func reserveAgentOutputFile(ctx context.Context, store filesystem.AppendOpener, 
 	if name == "" {
 		name = uuid.NewString()
 	}
-	path := filepath.Join(outputDir, name+".output")
-	if err := appendOnce(ctx, store, path, ""); err != nil {
-		return ""
-	}
-	return path
-}
-
-// appendOnce opens an append stream to path, writes content (skipped when empty,
-// which just creates/reserves the file via create-on-open), and closes it, returning
-// the first write or close error. It always closes the handle.
-func appendOnce(ctx context.Context, store filesystem.AppendOpener, path, content string) error {
-	w, err := store.OpenAppend(ctx, &filesystem.OpenAppendRequest{FilePath: path})
-	if err != nil {
-		return err
-	}
-	if content != "" {
-		if _, werr := io.WriteString(w, content); werr != nil {
-			_ = w.Close()
-			return werr
-		}
-	}
-	return w.Close()
+	return filepath.Join(outputDir, name+".output")
 }
 
 // resolveSubAgent looks up the agent-as-tool adapter for subagentType and builds

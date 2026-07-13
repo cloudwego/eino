@@ -18,9 +18,13 @@ package subagent
 
 import (
 	"context"
+	"io"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/bytedance/sonic"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -30,6 +34,7 @@ import (
 	"github.com/cloudwego/eino/adk/internal/agenttool"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/schema"
+	"github.com/cloudwego/eino/schema/openai"
 )
 
 // --- Mock Agent ---
@@ -83,7 +88,8 @@ func (m *mockAgent) Run(ctx context.Context, input *adk.AgentInput, options ...a
 }
 
 type stagedAgent struct {
-	release <-chan struct{}
+	release   <-chan struct{}
+	firstSent chan<- struct{}
 }
 
 func (s *stagedAgent) Name(context.Context) string        { return "staged" }
@@ -97,11 +103,42 @@ func (s *stagedAgent) Run(context.Context, *adk.AgentInput, ...adk.AgentRunOptio
 	}()
 	go func() {
 		writer.Send(schema.AssistantMessage("first", nil), nil)
+		close(s.firstSent)
 		<-s.release
 		writer.Send(schema.AssistantMessage("second", nil), nil)
 		writer.Close()
 	}()
 	return iter
+}
+
+type outputEventRecord struct {
+	Type      string         `json:"type"`
+	AgentName string         `json:"agent_name"`
+	Message   map[string]any `json:"message"`
+}
+
+type countingAppendStore struct {
+	backend *filesystem.InMemoryBackend
+	opens   atomic.Int32
+}
+
+func (s *countingAppendStore) OpenAppend(ctx context.Context, req *filesystem.OpenAppendRequest) (io.WriteCloser, error) {
+	s.opens.Add(1)
+	return s.backend.OpenAppend(ctx, req)
+}
+
+func decodeOutputEventRecords(t *testing.T, content string) []outputEventRecord {
+	t.Helper()
+	content = strings.TrimSpace(content)
+	if content == "" {
+		return nil
+	}
+	lines := strings.Split(content, "\n")
+	records := make([]outputEventRecord, len(lines))
+	for i, line := range lines {
+		require.NoError(t, sonic.UnmarshalString(line, &records[i]))
+	}
+	return records
 }
 
 // --- Config Validation Tests ---
@@ -393,6 +430,7 @@ func TestAgentTool_ForegroundWithTaskMgr(t *testing.T) {
 func TestAgentTool_WritesOutputFile(t *testing.T) {
 	ctx := context.Background()
 	backend := filesystem.NewInMemoryBackend()
+	store := &countingAppendStore{backend: backend}
 	mgr := backgroundtask.New(context.Background(), &backgroundtask.Config{})
 	defer func() {
 		closeCtx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -404,7 +442,7 @@ func TestAgentTool_WritesOutputFile(t *testing.T) {
 		SubAgents: []adk.Agent{&mockAgent{name: "fast", desc: "fast agent"}},
 		Background: &BackgroundConfig{
 			Manager:     mgr,
-			OutputStore: backend,
+			OutputStore: store,
 			OutputDir:   "/tasks",
 		},
 	})
@@ -425,7 +463,12 @@ func TestAgentTool_WritesOutputFile(t *testing.T) {
 
 	got, err := backend.Read(ctx, &filesystem.ReadRequest{FilePath: path})
 	require.NoError(t, err)
-	assert.Equal(t, "fast agent", got.Content)
+	assert.EqualValues(t, 1, store.opens.Load(), "one append session should create and write the output file")
+	records := decodeOutputEventRecords(t, got.Content)
+	require.Len(t, records, 1)
+	assert.Equal(t, "message", records[0].Type)
+	assert.Equal(t, "fast agent", records[0].Message["content"])
+	assert.Equal(t, string(schema.User), records[0].Message["role"])
 }
 
 func TestAgentTool_WritesInterimEventsWithoutParentReceiver(t *testing.T) {
@@ -439,8 +482,9 @@ func TestAgentTool_WritesInterimEventsWithoutParentReceiver(t *testing.T) {
 	}()
 
 	release := make(chan struct{})
+	firstSent := make(chan struct{})
 	mw, err := New(ctx, &Config{
-		SubAgents: []adk.Agent{&stagedAgent{release: release}},
+		SubAgents: []adk.Agent{&stagedAgent{release: release, firstSent: firstSent}},
 		Background: &BackgroundConfig{
 			Manager:     mgr,
 			OutputStore: backend,
@@ -462,17 +506,64 @@ func TestAgentTool_WritesInterimEventsWithoutParentReceiver(t *testing.T) {
 	require.Len(t, tasks, 1)
 	path := tasks[0].OutputFile
 	require.NotEmpty(t, path)
-	require.Eventually(t, func() bool {
-		got, readErr := backend.Read(ctx, &filesystem.ReadRequest{FilePath: path})
-		return readErr == nil && got.Content == "first"
-	}, time.Second, 10*time.Millisecond)
-	assert.True(t, anyRunning(mgr), "the first AgentEvent should be visible before task completion")
+	<-firstSent
+	got, err := backend.Read(ctx, &filesystem.ReadRequest{FilePath: path})
+	require.NoError(t, err)
+	assert.Empty(t, got.Content, "a streaming AgentEvent is written after GetMessage materializes it")
+	assert.True(t, anyRunning(mgr))
 
 	close(release)
 	waitAllTasks(t, mgr)
-	got, err := backend.Read(ctx, &filesystem.ReadRequest{FilePath: path})
+	got, err = backend.Read(ctx, &filesystem.ReadRequest{FilePath: path})
 	require.NoError(t, err)
-	assert.Equal(t, "firstsecond", got.Content)
+	records := decodeOutputEventRecords(t, got.Content)
+	require.Len(t, records, 1)
+	assert.Equal(t, "firstsecond", records[0].Message["content"])
+}
+
+func TestSanitizedMessageValue_RemovesExtraFields(t *testing.T) {
+	t.Run("message", func(t *testing.T) {
+		value := sanitizedMessageValue(&schema.Message{
+			Role:    schema.Assistant,
+			Content: "answer",
+			Extra:   map[string]any{"not_json": func() {}},
+			UserInputMultiContent: []schema.MessageInputPart{{
+				Type:  schema.ChatMessagePartTypeText,
+				Text:  "nested",
+				Extra: map[string]any{"not_json": func() {}},
+			}},
+		})
+		data, err := sonic.Marshal(value)
+		require.NoError(t, err)
+		assert.NotContains(t, string(data), `"extra"`)
+		assert.Contains(t, string(data), `"answer"`)
+	})
+
+	t.Run("agentic message", func(t *testing.T) {
+		value := sanitizedMessageValue(&schema.AgenticMessage{
+			Role:  schema.AgenticRoleTypeAssistant,
+			Extra: map[string]any{"not_json": func() {}},
+			ResponseMeta: &schema.AgenticResponseMeta{
+				TokenUsage: &schema.TokenUsage{TotalTokens: 1},
+				OpenAIExtension: &openai.ResponseMetaExtension{
+					ID: "response-id",
+				},
+				Extension: map[string]any{"provider": "kept"},
+			},
+			ContentBlocks: []*schema.ContentBlock{{
+				Type:             schema.ContentBlockTypeAssistantGenText,
+				AssistantGenText: &schema.AssistantGenText{Text: "answer"},
+				Extra:            map[string]any{"not_json": func() {}},
+			}},
+		})
+		data, err := sonic.Marshal(value)
+		require.NoError(t, err)
+		assert.NotContains(t, string(data), `"extra"`)
+		assert.Contains(t, string(data), `"openai_extension":{"id":"response-id"}`)
+		assert.Contains(t, string(data), `"extension":{"provider":"kept"}`)
+		assert.Contains(t, string(data), `"token_usage"`)
+		assert.Contains(t, string(data), `"answer"`)
+	})
 }
 
 func TestManagedEventReceiverTransform_GatesOnlyParentReceivers(t *testing.T) {

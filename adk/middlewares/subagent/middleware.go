@@ -73,11 +73,13 @@ type BackgroundConfig struct {
 	Manager *backgroundtask.Manager
 
 	// OutputStore and OutputDir, when both set, give every managed sub-agent run an
-	// output file at OutputDir/<id>.output. The managed agent tool streams textual
-	// output from the sub-agent's AgentEvents there as they arrive and records the
-	// path on Task.OutputFile, so a backgrounded run's interim and final output is
-	// retrievable by path (and large results need not be inlined). The Manager
-	// itself never writes.
+	// output file at OutputDir/<id>.output. The managed agent tool appends one JSONL
+	// record for each materialized AgentEvent and records the path on Task.OutputFile,
+	// so a backgrounded run's interim and final output is retrievable by path (and
+	// large results need not be inlined). The path is allocated before the run and
+	// the file is created lazily by the work callback's single append session, so a
+	// newly returned background task may briefly advertise the path before it exists.
+	// The Manager itself never writes.
 	// OutputStore is a filesystem.AppendOpener (filesystem.InMemoryBackend
 	// implements it); output files require one. When either is unset, runs have no
 	// output file.

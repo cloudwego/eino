@@ -47,7 +47,7 @@ func WithEventReceiverTransform[E any](transform EventReceiverTransform[E]) tool
 // ResolveEventReceivers applies the configured transforms in option order.
 func ResolveEventReceivers[E any](opts ...tool.Option) []EventReceiver[E] {
 	o := tool.GetImplSpecificOptions[eventReceiverOptions[E]](nil, opts...)
-	receivers := make([]EventReceiver[E], 0)
+	receivers := make([]EventReceiver[E], 0, len(o.transforms))
 	for _, transform := range o.transforms {
 		receivers = transform(receivers)
 	}
