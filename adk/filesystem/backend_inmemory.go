@@ -19,6 +19,7 @@ package filesystem
 import (
 	"context"
 	"fmt"
+	"io"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -640,25 +641,65 @@ func (b *InMemoryBackend) Write(ctx context.Context, req *WriteRequest) error {
 	return nil
 }
 
-// Append adds content to the end of a file, creating it if it does not exist.
-// It implements the optional Appender interface, letting OutputWriter stream
-// task output incrementally without rewriting the whole file each time.
-func (b *InMemoryBackend) Append(ctx context.Context, req *AppendRequest) error {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-
+// OpenAppend opens an append stream to the file at req.FilePath, creating it if it
+// does not exist. It implements the optional StreamAppender interface, letting
+// callers stream task output incrementally without rewriting the whole file.
+//
+// In-memory writes have no latency, so the returned handle writes through under the
+// backend lock on every Write (immediately visible to Read); Close is a no-op.
+func (b *InMemoryBackend) OpenAppend(ctx context.Context, req *OpenAppendRequest) (AppendStream, error) {
 	filePath := normalizePath(req.FilePath)
-	if entry, ok := b.files[filePath]; ok {
-		entry.content += req.Content
-		entry.modifiedAt = time.Now()
-		return nil
+
+	// Create-on-open: an open + close with no writes yields an empty file.
+	b.mu.Lock()
+	if _, ok := b.files[filePath]; !ok {
+		b.files[filePath] = &fileEntry{content: "", modifiedAt: time.Now()}
 	}
-	b.files[filePath] = &fileEntry{
-		content:    req.Content,
-		modifiedAt: time.Now(),
-	}
-	return nil
+	b.mu.Unlock()
+
+	return &inMemoryAppendStream{b: b, path: filePath}, nil
 }
+
+// inMemoryAppendStream is the append handle returned by InMemoryBackend.OpenAppend.
+// It is single-consumer; each write appends to the file entry under the backend lock.
+type inMemoryAppendStream struct {
+	b    *InMemoryBackend
+	path string
+}
+
+func (s *inMemoryAppendStream) Write(p []byte) (int, error) {
+	return s.WriteString(string(p))
+}
+
+// WriteString appends str without a []byte round-trip; io.WriteString detects it.
+func (s *inMemoryAppendStream) WriteString(str string) (int, error) {
+	s.append(str)
+	return len(str), nil
+}
+
+func (s *inMemoryAppendStream) append(content string) {
+	if content == "" {
+		return
+	}
+	s.b.mu.Lock()
+	defer s.b.mu.Unlock()
+
+	if entry, ok := s.b.files[s.path]; ok {
+		entry.content += content
+		entry.modifiedAt = time.Now()
+		return
+	}
+	s.b.files[s.path] = &fileEntry{content: content, modifiedAt: time.Now()}
+}
+
+// Close finalizes the session. In-memory writes are already applied, so there is
+// nothing to flush.
+func (s *inMemoryAppendStream) Close() error { return nil }
+
+var (
+	_ AppendStream    = (*inMemoryAppendStream)(nil)
+	_ io.StringWriter = (*inMemoryAppendStream)(nil)
+)
 
 // Edit replaces string occurrences in a file.
 func (b *InMemoryBackend) Edit(ctx context.Context, req *EditRequest) error {

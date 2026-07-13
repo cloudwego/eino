@@ -19,6 +19,7 @@ package filesystem
 
 import (
 	"context"
+	"io"
 
 	"github.com/cloudwego/eino/schema"
 )
@@ -158,12 +159,10 @@ type WriteRequest struct {
 	Content string
 }
 
-// AppendRequest contains parameters for appending content to a file.
-type AppendRequest struct {
-	// FilePath is the path of the file to append to.
+// OpenAppendRequest contains parameters for opening an append stream.
+type OpenAppendRequest struct {
+	// FilePath is the path of the file to append to; it is created if absent.
 	FilePath string
-	// Content is the data to append at the end of the file.
-	Content string
 }
 
 // EditRequest contains parameters for editing file content.
@@ -244,13 +243,53 @@ type MultiModalReader interface {
 	MultiModalRead(ctx context.Context, req *MultiModalReadRequest) (*MultiFileContent, error)
 }
 
-// Appender appends content to the end of a file without rewriting the whole file,
-// enabling efficient incremental writes — e.g. streaming a long-running background
-// task's output to its output file as chunks arrive.
-type Appender interface {
-	// Append adds req.Content to the end of the file at req.FilePath, creating the
-	// file if it does not exist.
-	Append(ctx context.Context, req *AppendRequest) error
+// AppendStream is a write-only, tail-appending session to a single file, obtained
+// from StreamAppender.OpenAppend. Its contract is exactly io.WriteCloser:
+//
+//   - Write appends bytes to the end of the file. It MAY buffer: a nil error does
+//     NOT guarantee the bytes are durable or yet visible to a concurrent Read. If a
+//     prior buffered write already failed, the stream is permanently broken and
+//     Write returns that sticky error; callers should stop writing.
+//   - Close flushes any buffered content, finalizes the session, and returns the
+//     first error observed over the stream's lifetime (nil if all writes landed).
+//     Closing a session in which nothing was written yields an empty file (the file
+//     is created on open).
+//
+// A handle is single-consumer: it is not safe for concurrent use.
+//
+// Two obligations fall on a backend that holds OS or network resources (an fd, an
+// RPC stream), because callers may abandon a session without a clean Close:
+//
+//   - The ctx passed to OpenAppend bounds the whole session. Callers guarantee Close
+//     on normal completion and on a stream error, but NOT on every abandonment
+//     (a canceled or timed-out run may just drop the handle). So the implementation
+//     MUST release its resources when that ctx is canceled — not only in Close, or
+//     it leaks a handle on those paths. Canceling the ctx aborts pending writes.
+//   - When Write buffers, the implementation SHOULD flush on its own cadence (time or
+//     size based) so a concurrent Read of a still-running task sees recent interim
+//     output; the caller does not drive flushing, since a per-write flush would
+//     reintroduce the per-write latency this abstraction exists to amortize.
+//
+// Implementations SHOULD additionally implement io.StringWriter so text callers can
+// append without a []byte copy (use io.WriteString, which detects it). They MAY
+// implement interface{ Flush() error } to expose a mid-stream durability/visibility
+// checkpoint without ending the session.
+type AppendStream interface {
+	io.WriteCloser
+}
+
+// StreamAppender opens an append stream to a file, letting callers stream content
+// to the end of the file incrementally without rewriting the whole file — e.g.
+// teeing a long-running background task's output to its output file as chunks
+// arrive.
+//
+// It is an optional Backend extension (like MultiModalReader): a Backend that can
+// keep a file handle or RPC stream open implements it directly, so per-chunk backend
+// latency is paid once at open rather than on every write.
+type StreamAppender interface {
+	// OpenAppend opens an append stream to req.FilePath, creating the file if it
+	// does not exist. See AppendStream for the returned handle's contract.
+	OpenAppend(ctx context.Context, req *OpenAppendRequest) (AppendStream, error)
 }
 
 // Backend is a pluggable, unified file backend protocol interface.

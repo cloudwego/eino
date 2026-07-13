@@ -19,6 +19,7 @@ package subagent
 import (
 	"context"
 	"fmt"
+	"io"
 	"path/filepath"
 	"strings"
 
@@ -100,8 +101,8 @@ func newAgentTool(subAgents map[string]tool.InvokableTool, name, desc string) (t
 // outputDir/<uuid>.output: the file is created empty up front so its advertised
 // path exists immediately, and the sub-agent's final result is appended there on
 // completion. The Manager never writes — the tool owns it. store is a
-// filesystem.Appender; output files require one (no rewrite fallback).
-func newManagedAgentTool(mgr *backgroundtask.Manager, subAgents map[string]tool.InvokableTool, store filesystem.Appender, outputDir, name, desc string) (tool.BaseTool, error) {
+// filesystem.StreamAppender; output files require one (no rewrite fallback).
+func newManagedAgentTool(mgr *backgroundtask.Manager, subAgents map[string]tool.InvokableTool, store filesystem.StreamAppender, outputDir, name, desc string) (tool.BaseTool, error) {
 	return utils.InferOptionableTool(name, desc,
 		func(ctx context.Context, in agentManagedInput, opts ...tool.Option) (string, error) {
 			a, params, err := resolveSubAgent(subAgents, in.SubagentType, in.Prompt, in.Description)
@@ -133,7 +134,7 @@ func newManagedAgentTool(mgr *backgroundtask.Manager, subAgents map[string]tool.
 					return "", runErr
 				}
 				if outputFile != "" {
-					if appendErr := store.Append(workCtx, &filesystem.AppendRequest{FilePath: outputFile, Content: out}); appendErr != nil {
+					if appendErr := appendOnce(workCtx, store, outputFile, out); appendErr != nil {
 						// The result never reached the file: mark it unreliable (by task id)
 						// so task_output reports the file's failed state instead of trusting
 						// the empty/partial file.
@@ -172,13 +173,13 @@ func newManagedAgentTool(mgr *backgroundtask.Manager, subAgents map[string]tool.
 }
 
 // reserveAgentOutputFile reserves an output-file path under outputDir and creates
-// it empty (via Append) so the path exists before the run completes. The file is
-// named after the launching tool-call id (so it matches Task.ToolUseID), falling
-// back to a uuid when no tool-call id is in context. Returns "" when output files
-// are not configured (no store / no dir) or when the up-front reservation write
-// fails — in the latter case the task advertises no output file, so consumers
-// fall back to the in-memory Result.
-func reserveAgentOutputFile(ctx context.Context, store filesystem.Appender, outputDir string) string {
+// it empty (open+close, which creates the file on open) so the path exists before
+// the run completes. The file is named after the launching tool-call id (so it
+// matches Task.ToolUseID), falling back to a uuid when no tool-call id is in context.
+// Returns "" when output files are not configured (no store / no dir) or when the
+// up-front reservation fails — in the latter case the task advertises no output
+// file, so consumers fall back to the in-memory Result.
+func reserveAgentOutputFile(ctx context.Context, store filesystem.StreamAppender, outputDir string) string {
 	if store == nil || outputDir == "" {
 		return ""
 	}
@@ -187,10 +188,27 @@ func reserveAgentOutputFile(ctx context.Context, store filesystem.Appender, outp
 		name = uuid.NewString()
 	}
 	path := filepath.Join(outputDir, name+".output")
-	if err := store.Append(ctx, &filesystem.AppendRequest{FilePath: path, Content: ""}); err != nil {
+	if err := appendOnce(ctx, store, path, ""); err != nil {
 		return ""
 	}
 	return path
+}
+
+// appendOnce opens an append stream to path, writes content (skipped when empty,
+// which just creates/reserves the file via create-on-open), and closes it, returning
+// the first write or close error. It always closes the handle.
+func appendOnce(ctx context.Context, store filesystem.StreamAppender, path, content string) error {
+	w, err := store.OpenAppend(ctx, &filesystem.OpenAppendRequest{FilePath: path})
+	if err != nil {
+		return err
+	}
+	if content != "" {
+		if _, werr := io.WriteString(w, content); werr != nil {
+			_ = w.Close()
+			return werr
+		}
+	}
+	return w.Close()
 }
 
 // resolveSubAgent looks up the agent-as-tool adapter for subagentType and builds
