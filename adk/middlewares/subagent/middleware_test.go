@@ -27,6 +27,7 @@ import (
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/adk/backgroundtask"
 	"github.com/cloudwego/eino/adk/filesystem"
+	"github.com/cloudwego/eino/adk/internal/agenttool"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/schema"
 )
@@ -78,6 +79,28 @@ func (m *mockAgent) Run(ctx context.Context, input *adk.AgentInput, options ...a
 
 	gen.Send(adk.EventFromMessage(schema.UserMessage(result), nil, schema.User, ""))
 	gen.Close()
+	return iter
+}
+
+type stagedAgent struct {
+	release <-chan struct{}
+}
+
+func (s *stagedAgent) Name(context.Context) string        { return "staged" }
+func (s *stagedAgent) Description(context.Context) string { return "staged agent" }
+func (s *stagedAgent) Run(context.Context, *adk.AgentInput, ...adk.AgentRunOption) *adk.AsyncIterator[*adk.AgentEvent] {
+	iter, gen := adk.NewAsyncIteratorPair[*adk.AgentEvent]()
+	stream, writer := schema.Pipe[*schema.Message](0)
+	go func() {
+		gen.Send(adk.EventFromMessage(nil, stream, schema.Assistant, ""))
+		gen.Close()
+	}()
+	go func() {
+		writer.Send(schema.AssistantMessage("first", nil), nil)
+		<-s.release
+		writer.Send(schema.AssistantMessage("second", nil), nil)
+		writer.Close()
+	}()
 	return iter
 }
 
@@ -264,7 +287,7 @@ func TestAgentTool_Background(t *testing.T) {
 	}
 
 	mw, err := New(ctx, &Config{
-		SubAgents: []adk.Agent{slowAgent},
+		SubAgents:  []adk.Agent{slowAgent},
 		Background: &BackgroundConfig{Manager: mgr},
 	})
 	require.NoError(t, err)
@@ -341,7 +364,7 @@ func TestAgentTool_ForegroundWithTaskMgr(t *testing.T) {
 	agent := &mockAgent{name: "fast", desc: "fast agent"}
 
 	mw, err := New(ctx, &Config{
-		SubAgents: []adk.Agent{agent},
+		SubAgents:  []adk.Agent{agent},
 		Background: &BackgroundConfig{Manager: mgr},
 	})
 	require.NoError(t, err)
@@ -366,7 +389,7 @@ func TestAgentTool_ForegroundWithTaskMgr(t *testing.T) {
 }
 
 // With OutputStore and OutputDir configured, a completed managed agent run writes
-// its final result to the task's output file.
+// its AgentEvent output to the task's output file.
 func TestAgentTool_WritesOutputFile(t *testing.T) {
 	ctx := context.Background()
 	backend := filesystem.NewInMemoryBackend()
@@ -405,6 +428,73 @@ func TestAgentTool_WritesOutputFile(t *testing.T) {
 	assert.Equal(t, "fast agent", got.Content)
 }
 
+func TestAgentTool_WritesInterimEventsWithoutParentReceiver(t *testing.T) {
+	ctx := context.Background()
+	backend := filesystem.NewInMemoryBackend()
+	mgr := backgroundtask.New(context.Background(), &backgroundtask.Config{})
+	defer func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_ = mgr.Close(closeCtx)
+	}()
+
+	release := make(chan struct{})
+	mw, err := New(ctx, &Config{
+		SubAgents: []adk.Agent{&stagedAgent{release: release}},
+		Background: &BackgroundConfig{
+			Manager:     mgr,
+			OutputStore: backend,
+			OutputDir:   "/tasks",
+		},
+	})
+	require.NoError(t, err)
+
+	runCtx := &adk.ChatModelAgentContext[*schema.Message]{}
+	_, newRunCtx, err := mw.BeforeAgent(ctx, runCtx)
+	require.NoError(t, err)
+	at := newRunCtx.Tools[0].(tool.InvokableTool)
+
+	result, err := at.InvokableRun(ctx, `{"subagent_type":"staged","prompt":"task detail","description":"task","run_in_background":true}`)
+	require.NoError(t, err)
+	assert.Contains(t, result, "running in background")
+
+	tasks := mgr.List()
+	require.Len(t, tasks, 1)
+	path := tasks[0].OutputFile
+	require.NotEmpty(t, path)
+	require.Eventually(t, func() bool {
+		got, readErr := backend.Read(ctx, &filesystem.ReadRequest{FilePath: path})
+		return readErr == nil && got.Content == "first"
+	}, time.Second, 10*time.Millisecond)
+	assert.True(t, anyRunning(mgr), "the first AgentEvent should be visible before task completion")
+
+	close(release)
+	waitAllTasks(t, mgr)
+	got, err := backend.Read(ctx, &filesystem.ReadRequest{FilePath: path})
+	require.NoError(t, err)
+	assert.Equal(t, "firstsecond", got.Content)
+}
+
+func TestManagedEventReceiverTransform_GatesOnlyParentReceivers(t *testing.T) {
+	backgrounded := make(chan struct{})
+	close(backgrounded)
+
+	var parentEvents, taskEvents int
+	transform := managedEventReceiverTransform(backgrounded, agenttool.EventReceiver[int](func(int) {
+		taskEvents++
+	}))
+	receivers := transform([]agenttool.EventReceiver[int]{func(int) {
+		parentEvents++
+	}})
+
+	require.Len(t, receivers, 2)
+	for _, receiver := range receivers {
+		receiver(1)
+	}
+	assert.Zero(t, parentEvents)
+	assert.Equal(t, 1, taskEvents)
+}
+
 // --- Auto-background ---
 
 func TestAgentTool_AutoBackground(t *testing.T) {
@@ -429,7 +519,7 @@ func TestAgentTool_AutoBackground(t *testing.T) {
 	}
 
 	mw, err := New(ctx, &Config{
-		SubAgents: []adk.Agent{slowAgent},
+		SubAgents:  []adk.Agent{slowAgent},
 		Background: &BackgroundConfig{Manager: mgr},
 	})
 	require.NoError(t, err)
@@ -469,7 +559,7 @@ func TestAgentTool_AutoBackground_FastAgent(t *testing.T) {
 	fastAgent := &mockAgent{name: "fast", desc: "fast agent"}
 
 	mw, err := New(ctx, &Config{
-		SubAgents: []adk.Agent{fastAgent},
+		SubAgents:  []adk.Agent{fastAgent},
 		Background: &BackgroundConfig{Manager: mgr},
 	})
 	require.NoError(t, err)

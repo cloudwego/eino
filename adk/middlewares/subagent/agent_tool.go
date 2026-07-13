@@ -18,6 +18,7 @@ package subagent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"path/filepath"
@@ -35,6 +36,7 @@ import (
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/components/tool/utils"
 	"github.com/cloudwego/eino/compose"
+	"github.com/cloudwego/eino/schema"
 )
 
 const (
@@ -99,10 +101,11 @@ func newAgentTool(subAgents map[string]tool.InvokableTool, name, desc string) (t
 //
 // When store and outputDir are both set, each run is given an output file at
 // outputDir/<uuid>.output: the file is created empty up front so its advertised
-// path exists immediately, and the sub-agent's final result is appended there on
-// completion. The Manager never writes — the tool owns it. store is a
-// filesystem.AppendOpener; output files require one (no rewrite fallback).
-func newManagedAgentTool(mgr *backgroundtask.Manager, subAgents map[string]tool.InvokableTool, store filesystem.AppendOpener, outputDir, name, desc string) (tool.BaseTool, error) {
+// path exists immediately, then one append writer remains open while the
+// sub-agent runs and receives its AgentEvents in real time. The Manager never
+// writes — the tool owns the writer. store is a filesystem.AppendOpener; output
+// files require one (no rewrite fallback).
+func newManagedAgentTool[M adk.MessageType](mgr *backgroundtask.Manager, subAgents map[string]tool.InvokableTool, store filesystem.AppendOpener, outputDir, name, desc string) (tool.BaseTool, error) {
 	return utils.InferOptionableTool(name, desc,
 		func(ctx context.Context, in agentManagedInput, opts ...tool.Option) (string, error) {
 			a, params, err := resolveSubAgent(subAgents, in.SubagentType, in.Prompt, in.Description)
@@ -120,26 +123,35 @@ func newManagedAgentTool(mgr *backgroundtask.Manager, subAgents map[string]tool.
 				Metadata:        map[string]any{MetadataKeySubagentType: in.SubagentType},
 				OutputFile:      outputFile,
 			}, func(workCtx context.Context, task backgroundtask.TaskInfo) (string, error) {
-				// Bound the inner agent's forwarding to the launching turn's event
-				// stream by the task's backgrounded signal: a backgrounded run outlives
-				// the turn (which closes its event generator on turn end), so forwarding
-				// to it past that point is wrong and unsafe. The AgentTool stops
-				// forwarding when task.Backgrounded fires — for an explicit
-				// run_in_background it is already closed here, for an auto-backgrounded
-				// run it closes at the deadline. Foreground runs never fire it and
-				// forward for their whole lifetime.
-				runOpts := append(opts, agenttool.WithForwardGate(task.Backgrounded))
+				var outputReceiver agenttool.EventReceiver[*adk.TypedAgentEvent[M]]
+				if outputFile != "" {
+					writer, openErr := store.OpenAppend(workCtx, &filesystem.OpenAppendRequest{FilePath: outputFile})
+					if openErr != nil {
+						mgr.MarkOutputFileUnreliable(task.ID, openErr.Error())
+					} else {
+						fileReceiver := &agentEventFileReceiver[M]{
+							writer: writer,
+							onError: func(err error) {
+								mgr.MarkOutputFileUnreliable(task.ID, err.Error())
+							},
+						}
+						outputReceiver = fileReceiver.receive
+						defer func() {
+							if closeErr := writer.Close(); closeErr != nil {
+								fileReceiver.fail(fmt.Errorf("close agent output file: %w", closeErr))
+							}
+						}()
+					}
+				}
+
+				// Existing receivers came from the launching parent agent. Gate only
+				// those receivers when the task is backgrounded, then append the task's
+				// output-file receiver after the gate so it continues receiving events.
+				runOpts := append(opts, agenttool.WithEventReceiverTransform(
+					managedEventReceiverTransform(task.Backgrounded, outputReceiver)))
 				out, runErr := a.InvokableRun(workCtx, params, runOpts...)
 				if runErr != nil {
 					return "", runErr
-				}
-				if outputFile != "" {
-					if appendErr := appendOnce(workCtx, store, outputFile, out); appendErr != nil {
-						// The result never reached the file: mark it unreliable (by task id)
-						// so task_output reports the file's failed state instead of trusting
-						// the empty/partial file.
-						mgr.MarkOutputFileUnreliable(task.ID, appendErr.Error())
-					}
 				}
 				return out, nil
 			})
@@ -170,6 +182,116 @@ func newManagedAgentTool(mgr *backgroundtask.Manager, subAgents map[string]tool.
 				return result.Result, nil
 			}
 		})
+}
+
+// managedEventReceiverTransform gates the parent receivers configured before
+// it and then appends the task receiver. An empty current slice is valid: that
+// is the EmitInternalEvents=false path, where only task output is needed.
+func managedEventReceiverTransform[E any](backgrounded <-chan struct{}, taskReceiver agenttool.EventReceiver[E]) agenttool.EventReceiverTransform[E] {
+	return func(current []agenttool.EventReceiver[E]) []agenttool.EventReceiver[E] {
+		for i := range current {
+			receiver := current[i]
+			current[i] = func(event E) {
+				if !signalClosed(backgrounded) {
+					receiver(event)
+				}
+			}
+		}
+		if taskReceiver != nil {
+			current = append(current, taskReceiver)
+		}
+		return current
+	}
+}
+
+func signalClosed(done <-chan struct{}) bool {
+	if done == nil {
+		return false
+	}
+	select {
+	case <-done:
+		return true
+	default:
+		return false
+	}
+}
+
+type agentEventFileReceiver[M adk.MessageType] struct {
+	writer  io.Writer
+	onError func(error)
+	failed  bool
+}
+
+func (r *agentEventFileReceiver[M]) receive(event *adk.TypedAgentEvent[M]) {
+	if r.failed || event == nil || event.Output == nil || event.Output.MessageOutput == nil {
+		return
+	}
+
+	output := event.Output.MessageOutput
+	if !output.IsStreaming {
+		r.writeMessage(output.Message)
+		return
+	}
+	if output.MessageStream == nil {
+		return
+	}
+	defer output.MessageStream.Close()
+	for {
+		chunk, err := output.MessageStream.Recv()
+		if errors.Is(err, io.EOF) {
+			return
+		}
+		if err != nil {
+			r.fail(fmt.Errorf("receive agent output stream: %w", err))
+			return
+		}
+		if !r.writeMessage(chunk) {
+			return
+		}
+	}
+}
+
+func (r *agentEventFileReceiver[M]) writeMessage(msg M) bool {
+	content := agentEventText(msg)
+	if content == "" {
+		return true
+	}
+	if _, err := io.WriteString(r.writer, content); err != nil {
+		r.fail(fmt.Errorf("write agent output: %w", err))
+		return false
+	}
+	return true
+}
+
+func (r *agentEventFileReceiver[M]) fail(err error) {
+	if err == nil || r.failed {
+		return
+	}
+	r.failed = true
+	if r.onError != nil {
+		r.onError(err)
+	}
+}
+
+func agentEventText[M adk.MessageType](msg M) string {
+	switch v := any(msg).(type) {
+	case *schema.Message:
+		if v != nil {
+			return v.Content
+		}
+	case *schema.AgenticMessage:
+		if v == nil {
+			return ""
+		}
+		var texts []string
+		for _, block := range v.ContentBlocks {
+			if block != nil && block.Type == schema.ContentBlockTypeAssistantGenText && block.AssistantGenText != nil {
+				texts = append(texts, block.AssistantGenText.Text)
+			}
+		}
+		return strings.Join(texts, "\n")
+	}
+	return ""
 }
 
 // reserveAgentOutputFile reserves an output-file path under outputDir and creates

@@ -1279,7 +1279,7 @@ func TestCrossTypeAgentToolGracefulError(t *testing.T) {
 	}
 }
 
-// --- Event-forward gate ---
+// --- Event receivers ---
 
 // collectForwarded drains a parent generator's iterator and returns the content of
 // every non-streaming message event forwarded to it. Runs in a goroutine; the
@@ -1298,10 +1298,7 @@ func collectForwarded(iter *AsyncIterator[*AgentEvent], out *[]string, done chan
 	}
 }
 
-// With the gate open (done never fires), a background-capable invocation forwards
-// the inner agent's events to the parent generator — same as a plain foreground
-// agent-as-tool call.
-func TestAgentToolEventForwardGate_OpenGateForwards(t *testing.T) {
+func TestAgentToolEventReceiver_ParentReceives(t *testing.T) {
 	ctx := context.Background()
 	sub := &emitEventsAgent{events: []*AgentEvent{
 		EventFromMessage(schema.AssistantMessage("child output", nil), nil, schema.Assistant, ""),
@@ -1313,10 +1310,8 @@ func TestAgentToolEventForwardGate_OpenGateForwards(t *testing.T) {
 	done := make(chan struct{})
 	go collectForwarded(iter, &got, done)
 
-	// nil done => never backgrounded => gate stays open the whole run.
 	_, err := at.InvokableRun(ctx, `{"request":"q"}`,
-		withTypedAgentToolEventForwardTarget(gen),
-		agenttool.WithForwardGate(nil))
+		withParentEventReceiver(gen))
 	require.NoError(t, err)
 
 	gen.Close()
@@ -1324,9 +1319,7 @@ func TestAgentToolEventForwardGate_OpenGateForwards(t *testing.T) {
 	assert.Contains(t, got, "child output")
 }
 
-// With the gate already closed (the run is backgrounded before it starts), a
-// background-capable invocation forwards nothing to the parent generator.
-func TestAgentToolEventForwardGate_ClosedGateDropsForwarding(t *testing.T) {
+func TestAgentToolEventReceiver_LaterTransformCanSuppressParent(t *testing.T) {
 	ctx := context.Background()
 	sub := &emitEventsAgent{events: []*AgentEvent{
 		EventFromMessage(schema.AssistantMessage("child output", nil), nil, schema.Assistant, ""),
@@ -1338,12 +1331,12 @@ func TestAgentToolEventForwardGate_ClosedGateDropsForwarding(t *testing.T) {
 	done := make(chan struct{})
 	go collectForwarded(iter, &got, done)
 
-	backgrounded := make(chan struct{})
-	close(backgrounded) // already backgrounded
-
 	_, err := at.InvokableRun(ctx, `{"request":"q"}`,
-		withTypedAgentToolEventForwardTarget(gen),
-		agenttool.WithForwardGate(backgrounded))
+		withParentEventReceiver(gen),
+		agenttool.WithEventReceiverTransform(func(current []agenttool.EventReceiver[*AgentEvent]) []agenttool.EventReceiver[*AgentEvent] {
+			require.Len(t, current, 1)
+			return current[:0]
+		}))
 	require.NoError(t, err)
 
 	gen.Close()
@@ -1351,24 +1344,49 @@ func TestAgentToolEventForwardGate_ClosedGateDropsForwarding(t *testing.T) {
 	assert.Empty(t, got)
 }
 
-// On the gated (background-capable) path, forwarding to an already-closed parent
-// generator must not panic — a backgrounded run outlives the turn that closes it.
-func TestAgentToolEventForwardGate_ClosedParentGeneratorNoPanic(t *testing.T) {
+// EventReceiver delivery is best-effort: a parent generator that has already
+// stopped drops the event instead of panicking.
+func TestAgentToolEventReceiver_ClosedParentGeneratorNoPanic(t *testing.T) {
 	ctx := context.Background()
 	sub := &emitEventsAgent{events: []*AgentEvent{
 		EventFromMessage(schema.AssistantMessage("child output", nil), nil, schema.Assistant, ""),
 	}}
 	at := NewAgentTool(ctx, sub).(tool.InvokableTool)
 
-	// A parent generator that is already closed, with the gate still open: the
-	// gated path uses a non-panicking send, so this must not panic.
 	_, gen := NewAsyncIteratorPair[*AgentEvent]()
 	gen.Close()
 
 	require.NotPanics(t, func() {
 		_, err := at.InvokableRun(ctx, `{"request":"q"}`,
-			withTypedAgentToolEventForwardTarget(gen),
-			agenttool.WithForwardGate(nil))
+			withParentEventReceiver(gen))
 		require.NoError(t, err)
 	})
+}
+
+func TestAgentToolEventReceiver_StreamingFanoutCopiesPerReceiver(t *testing.T) {
+	ctx := context.Background()
+	stream := schema.StreamReaderFromArray([]*schema.Message{
+		schema.AssistantMessage("first ", nil),
+		schema.AssistantMessage("second", nil),
+	})
+	sub := &emitEventsAgent{events: []*AgentEvent{
+		EventFromMessage(nil, stream, schema.Assistant, ""),
+	}}
+	at := NewAgentTool(ctx, sub).(tool.InvokableTool)
+
+	var got []string
+	addReceiver := func(current []agenttool.EventReceiver[*AgentEvent]) []agenttool.EventReceiver[*AgentEvent] {
+		return append(current, func(event *AgentEvent) {
+			msg, err := event.Output.MessageOutput.GetMessage()
+			require.NoError(t, err)
+			got = append(got, msg.Content)
+		})
+	}
+
+	result, err := at.InvokableRun(ctx, `{"request":"q"}`,
+		agenttool.WithEventReceiverTransform(addReceiver),
+		agenttool.WithEventReceiverTransform(addReceiver))
+	require.NoError(t, err)
+	assert.Equal(t, "first second", result)
+	assert.Equal(t, []string{"first second", "first second"}, got)
 }

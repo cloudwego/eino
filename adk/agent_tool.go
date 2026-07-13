@@ -77,8 +77,8 @@ func withAgentToolEnableStreaming(enabled bool) tool.Option {
 //
 // Event Streaming:
 // When EmitInternalEvents is enabled in ToolsConfig, the agent tool will emit AgentEvent
-// from the inner agent to the parent agent's AsyncGenerator, allowing real-time streaming
-// of the inner agent's output to the end-user via Runner.
+// from the inner agent to a receiver backed by the parent agent's AsyncGenerator, allowing
+// real-time streaming of the inner agent's output to the end-user via Runner.
 //
 // Note that these forwarded events are NOT recorded in the parent agent's runSession.
 // They are only emitted to the end-user and have no effect on the parent agent's state
@@ -168,13 +168,7 @@ func (at *typedAgentTool[M]) InvokableRun(ctx context.Context, argumentsInJSON s
 		cancelCtx.markAgentToolDescendant()
 	}
 
-	gen, enableStreaming := getEmitGeneratorAndEnableStreaming[M](opts)
-	// A background-capable invocation bounds event forwarding to the caller by a
-	// "backgrounded" signal and uses a non-panicking send: once the run detaches it
-	// outlives the parent turn, whose generator is then closed. A plain foreground
-	// invocation sets neither, so it forwards with a panicking Send — a send on an
-	// unexpectedly-closed generator is a bug there and must surface.
-	forwardGate := tool.GetImplSpecificOptions[agenttool.ForwardGate](nil, opts...)
+	receivers, enableStreaming := getEventReceiversAndEnableStreaming[M](opts)
 	var ms *bridgeStore
 	var iter *AsyncIterator[*TypedAgentEvent[M]]
 	var err error
@@ -268,7 +262,7 @@ func (at *typedAgentTool[M]) InvokableRun(ctx context.Context, argumentsInJSON s
 			return "", event.Err
 		}
 
-		if gen != nil {
+		if len(receivers) > 0 {
 			if event.Action == nil || event.Action.Interrupted == nil {
 				if parentRunCtx := getRunCtx(ctx); parentRunCtx != nil && len(parentRunCtx.RunPath) > 0 {
 					rp := make([]RunStep, 0, len(parentRunCtx.RunPath)+len(event.RunPath))
@@ -280,18 +274,13 @@ func (at *typedAgentTool[M]) InvokableRun(ctx context.Context, argumentsInJSON s
 				// can distinguish child timeline events and the parent's persistence
 				// loop can skip them.
 				stampAgentToolSessionEvent(event, childSessionID)
-				tmp := copyTypedAgentEvent(event)
-				if forwardGate.Enabled {
-					// Background-capable: forward only until the run is backgrounded,
-					// then drop (the run outlives the parent turn). trySend, not Send:
-					// after detach the parent generator may be closed.
-					if !backgrounded(forwardGate.Until) {
-						gen.trySend(event)
-					}
-				} else {
-					gen.Send(event)
+				// Each receiver gets an independent copy. In particular, streaming
+				// MessageStreams are read-once, so sharing one event across the parent
+				// generator, an output-file receiver, and AgentTool's own final-result
+				// extraction would race or consume another recipient's stream.
+				for _, receiver := range receivers {
+					receiver(copyTypedAgentEvent(event))
 				}
-				event = tmp
 			}
 		}
 
@@ -347,13 +336,6 @@ type agentToolOptions struct {
 	enableStreaming bool
 }
 
-// typedAgentToolEventOptions carries the event-forward target (the caller's event
-// generator) for a specific message type. This keeps forwarded internal events
-// type-compatible with the caller's event stream.
-type typedAgentToolEventOptions[M MessageType] struct {
-	generator *AsyncGenerator[*TypedAgentEvent[M]]
-}
-
 func withAgentToolOptions(agentName string, opts []AgentRunOption) tool.Option {
 	return tool.WrapImplSpecificOptFn(func(opt *agentToolOptions) {
 		opt.agentName = agentName
@@ -361,25 +343,15 @@ func withAgentToolOptions(agentName string, opts []AgentRunOption) tool.Option {
 	})
 }
 
-func withTypedAgentToolEventForwardTarget[M MessageType](gen *AsyncGenerator[*TypedAgentEvent[M]]) tool.Option {
-	return tool.WrapImplSpecificOptFn(func(o *typedAgentToolEventOptions[M]) {
-		o.generator = gen
+func withParentEventReceiver[M MessageType](gen *AsyncGenerator[*TypedAgentEvent[M]]) tool.Option {
+	return agenttool.WithEventReceiverTransform(func(current []agenttool.EventReceiver[*TypedAgentEvent[M]]) []agenttool.EventReceiver[*TypedAgentEvent[M]] {
+		return append(current, func(event *TypedAgentEvent[M]) {
+			// A parent turn may close its generator while a background-capable
+			// AgentTool invocation is still finishing. EventReceiver is best-effort,
+			// so a stopped downstream consumer drops the event rather than panicking.
+			gen.trySend(event)
+		})
 	})
-}
-
-// backgrounded reports whether the done signal has fired (the run has been moved
-// to the background). A nil done never fires — the run stays foreground for its
-// whole lifetime.
-func backgrounded(done <-chan struct{}) bool {
-	if done == nil {
-		return false
-	}
-	select {
-	case <-done:
-		return true
-	default:
-		return false
-	}
 }
 
 func getOptionsByAgentName(agentName string, opts []tool.Option) []AgentRunOption {
@@ -410,24 +382,16 @@ func extractAndDeriveAgentToolCancelCtx(ctx context.Context, agentName string, o
 	return agentOpts
 }
 
-func getEmitGeneratorAndEnableStreaming[M MessageType](opts []tool.Option) (*AsyncGenerator[*TypedAgentEvent[M]], bool) {
+func getEventReceiversAndEnableStreaming[M MessageType](opts []tool.Option) ([]agenttool.EventReceiver[*TypedAgentEvent[M]], bool) {
 	o := tool.GetImplSpecificOptions[agentToolOptions](nil, opts...)
-	eventOptions := tool.GetImplSpecificOptions[typedAgentToolEventOptions[M]](nil, opts...)
-	if o == nil && eventOptions == nil {
-		return nil, false
-	}
-
-	var gen *AsyncGenerator[*TypedAgentEvent[M]]
-	if eventOptions != nil {
-		gen = eventOptions.generator
-	}
+	receivers := agenttool.ResolveEventReceivers[*TypedAgentEvent[M]](opts...)
 
 	var enableStreaming bool
 	if o != nil {
 		enableStreaming = o.enableStreaming
 	}
 
-	return gen, enableStreaming
+	return receivers, enableStreaming
 }
 
 func getReactChatHistory(ctx context.Context, destAgentName string) ([]Message, error) {

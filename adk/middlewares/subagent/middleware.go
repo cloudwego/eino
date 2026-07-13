@@ -73,10 +73,11 @@ type BackgroundConfig struct {
 	Manager *backgroundtask.Manager
 
 	// OutputStore and OutputDir, when both set, give every managed sub-agent run an
-	// output file at OutputDir/<id>.output. The managed agent tool appends the
-	// sub-agent's final result there on completion and records the path on
-	// Task.OutputFile, so a backgrounded run's result is retrievable by path (and
-	// large results need not be inlined). The Manager itself never writes.
+	// output file at OutputDir/<id>.output. The managed agent tool streams textual
+	// output from the sub-agent's AgentEvents there as they arrive and records the
+	// path on Task.OutputFile, so a backgrounded run's interim and final output is
+	// retrievable by path (and large results need not be inlined). The Manager
+	// itself never writes.
 	// OutputStore is a filesystem.AppendOpener (filesystem.InMemoryBackend
 	// implements it); output files require one. When either is unset, runs have no
 	// output file.
@@ -134,7 +135,7 @@ func NewTyped[M adk.MessageType](ctx context.Context, config *TypedConfig[M]) (a
 	// Manager; without one it is a plain foreground spawn.
 	var at tool.BaseTool
 	if config.Background != nil && config.Background.Manager != nil {
-		at, err = newManagedAgentTool(config.Background.Manager, subAgentToolMap, config.Background.OutputStore, config.Background.OutputDir, toolName, desc)
+		at, err = newManagedAgentTool[M](config.Background.Manager, subAgentToolMap, config.Background.OutputStore, config.Background.OutputDir, toolName, desc)
 	} else {
 		at, err = newAgentTool(subAgentToolMap, toolName, desc)
 	}
