@@ -106,7 +106,7 @@ type Task struct {
 	Error string
 	// RunInBackground indicates whether this task is running (or ran) in the
 	// background — either launched with RunInBackground, or moved to the background
-	// after exhausting its foreground budget. It distinguishes background tasks
+	// after reaching its foreground timeout. It distinguishes background tasks
 	// from foreground ones when inspecting task state.
 	RunInBackground bool
 	// CreatedAt is the time the task was registered.
@@ -182,7 +182,7 @@ type RunInput struct {
 	// (a domain adapter) owns writing, so the file may carry interim output while
 	// the task runs. Empty means the task has no output file.
 	OutputFile string
-	// ForegroundTimeoutMs optionally overrides the Manager's foreground budget for
+	// ForegroundTimeoutMs optionally overrides the Manager's foreground timeout for
 	// this run only. When nil, the Manager's configured default applies. When non-nil,
 	// it bounds how long the run may occupy the foreground before its deadline fires
 	// (see Config.ShouldAutoBackground for what happens at the deadline). A value <= 0
@@ -191,7 +191,7 @@ type RunInput struct {
 	ForegroundTimeoutMs *int
 }
 
-// defaultForegroundTimeoutMs is the default foreground budget (120 seconds).
+// defaultForegroundTimeoutMs is the default foreground timeout (120 seconds).
 const defaultForegroundTimeoutMs = 120_000
 
 // IDGenerator returns the complete ID for a new task.
@@ -203,7 +203,7 @@ type IDGenerator func(ctx context.Context, input *RunInput) (string, error)
 
 // Config configures a Manager.
 type Config struct {
-	// ForegroundTimeoutMs sets the foreground budget: the time a foreground run is
+	// ForegroundTimeoutMs sets the foreground timeout: the time a foreground run is
 	// allowed to occupy the foreground before its deadline fires.
 	// When > 0, a foreground run that hasn't completed within this many
 	// milliseconds reaches its deadline (see ShouldAutoBackground for what happens then).
@@ -314,9 +314,9 @@ type taskRecord struct {
 }
 
 // New creates a new Manager.
-// By default, the foreground budget is 120 seconds; set Config.ForegroundTimeoutMs
+// By default, the foreground timeout is 120 seconds; set Config.ForegroundTimeoutMs
 // to 0 to remove the deadline (foreground runs block until completion). What
-// happens when the budget is reached is governed by Config.ShouldAutoBackground
+// happens when the timeout is reached is governed by Config.ShouldAutoBackground
 // (default: cancel the run and report it timed out).
 func New(_ context.Context, conf *Config) *Manager {
 	m := &Manager{
@@ -690,7 +690,7 @@ func (m *Manager) failTask(id string, err error) {
 // foreground run hits its deadline and the ShouldAutoBackground hook declined to
 // background it. No-op if the task is already terminal (idempotent), so the
 // timed-out reason wins the race against the work goroutine's own ctx-canceled error.
-func (m *Manager) timeoutTask(id string, budgetMs int) {
+func (m *Manager) timeoutTask(id string, foregroundTimeoutMs int) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -703,7 +703,7 @@ func (m *Manager) timeoutTask(id string, budgetMs int) {
 	}
 	m.finalize(id, func(rec *taskRecord) {
 		rec.task.Status = StatusFailed
-		rec.task.Error = fmt.Sprintf("timed out after %dms", budgetMs)
+		rec.task.Error = fmt.Sprintf("timed out after %dms", foregroundTimeoutMs)
 	})
 }
 
@@ -891,12 +891,12 @@ func (c detachedCtx) Value(key any) any { return c.parent.Value(key) }
 // Run executes work as a managed task on m.
 //
 // The execution mode depends on input.RunInBackground and the effective foreground
-// budget (input.ForegroundTimeoutMs if set, else the Manager's configured default):
-//   - Foreground (RunInBackground=false, budget<=0): blocks until completion
+// timeout (input.ForegroundTimeoutMs if set, else the Manager's configured default):
+//   - Foreground (RunInBackground=false, timeout<=0): blocks until completion
 //   - Background (RunInBackground=true): returns an initial StatusRunning snapshot
 //     without waiting for work. The task may complete immediately afterward; use
 //     Get or task events to observe its current state.
-//   - Deadline (budget>0): runs in foreground up to the budget, then — if still
+//   - Deadline (timeout>0): runs in foreground up to the timeout, then — if still
 //     running — consults the Manager's ShouldAutoBackground hook. If it permits,
 //     the run is moved to the background (kept running) and Run returns
 //     StatusRunning. Otherwise the run is canceled and reported as timed out
@@ -951,20 +951,20 @@ func (m *Manager) Run(ctx context.Context, input *RunInput, work WorkFunc) (*Tas
 
 	// Foreground: run in a goroutine and wait. The wait honors caller cancellation
 	// (the detached work ctx does not, so it is canceled explicitly here) and, when a
-	// budget is set, the foreground deadline.
+	// timeout is set, the foreground deadline.
 	done := make(chan struct{}, 1)
 	go func() { run(); done <- struct{}{} }()
 
-	budgetMs := m.foregroundTimeoutMs
+	foregroundTimeoutMs := m.foregroundTimeoutMs
 	if input.ForegroundTimeoutMs != nil {
-		budgetMs = *input.ForegroundTimeoutMs
+		foregroundTimeoutMs = *input.ForegroundTimeoutMs
 	}
 
-	if budgetMs > 0 {
-		// Foreground with a deadline: wait up to the effective budget (per-run
+	if foregroundTimeoutMs > 0 {
+		// Foreground with a deadline: wait up to the effective timeout (per-run
 		// override takes precedence over the Manager default). On the deadline,
 		// either move to the background (if the hook permits) or cancel as timed out.
-		timer := time.NewTimer(time.Duration(budgetMs) * time.Millisecond)
+		timer := time.NewTimer(time.Duration(foregroundTimeoutMs) * time.Millisecond)
 		defer timer.Stop()
 		select {
 		case <-done:
@@ -987,7 +987,7 @@ func (m *Manager) Run(ctx context.Context, input *RunInput, work WorkFunc) (*Tas
 				return m.taskSnapshot(id), nil
 			}
 			// Hook declined (or work finished during the hook): stop if still running.
-			m.timeoutTask(id, budgetMs)
+			m.timeoutTask(id, foregroundTimeoutMs)
 			return m.taskSnapshot(id), nil
 		}
 	}
@@ -1020,7 +1020,7 @@ type StreamWorkFunc func(ctx context.Context, task TaskInfo) (*schema.StreamRead
 // RunStream executes streaming work as a managed task, returning a stream of
 // output chunks to consume in real time.
 //
-// It mirrors Run's lifecycle (tracking, foreground budget, auto-background) but
+// It mirrors Run's lifecycle (tracking, foreground timeout, auto-background) but
 // preserves streaming for the foreground phase:
 //   - Foreground completion: every chunk is forwarded live, then the stream closes.
 //   - Auto-background at the deadline: chunks forwarded so far are kept; the
@@ -1048,25 +1048,25 @@ func (m *Manager) RunStream(ctx context.Context, input *RunInput, work StreamWor
 
 	sr, sw := schema.Pipe[string](streamBufferCap)
 
-	budgetMs := m.foregroundTimeoutMs
+	foregroundTimeoutMs := m.foregroundTimeoutMs
 	if input.ForegroundTimeoutMs != nil {
-		budgetMs = *input.ForegroundTimeoutMs
+		foregroundTimeoutMs = *input.ForegroundTimeoutMs
 	}
 	// An explicit background launch has no foreground phase to stream, so its
-	// budget is irrelevant: forward nothing, just emit the notice.
+	// foreground timeout is irrelevant: forward nothing, just emit the notice.
 	if input.RunInBackground {
-		budgetMs = 0
+		foregroundTimeoutMs = 0
 	}
 
 	go m.forwardStream(&streamRun{
-		callerCtx: ctx,
-		runCtx:    runCtx,
-		cancel:    cancel,
-		id:        id,
-		input:     input,
-		work:      work,
-		sw:        sw,
-		budgetMs:  budgetMs,
+		callerCtx:           ctx,
+		runCtx:              runCtx,
+		cancel:              cancel,
+		id:                  id,
+		input:               input,
+		work:                work,
+		sw:                  sw,
+		foregroundTimeoutMs: foregroundTimeoutMs,
 	})
 	return sr, nil
 }
@@ -1074,14 +1074,14 @@ func (m *Manager) RunStream(ctx context.Context, input *RunInput, work StreamWor
 // streamRun bundles the per-run state for forwardStream (kept as one value to stay
 // within the argument limit and to make the goroutine launch self-documenting).
 type streamRun struct {
-	callerCtx context.Context
-	runCtx    context.Context
-	cancel    context.CancelFunc
-	id        string
-	input     *RunInput
-	work      StreamWorkFunc
-	sw        *schema.StreamWriter[string]
-	budgetMs  int
+	callerCtx           context.Context
+	runCtx              context.Context
+	cancel              context.CancelFunc
+	id                  string
+	input               *RunInput
+	work                StreamWorkFunc
+	sw                  *schema.StreamWriter[string]
+	foregroundTimeoutMs int
 }
 
 // forwardStream owns the caller-facing stream writer sw: it is the only goroutine
@@ -1103,7 +1103,7 @@ func (m *Manager) forwardStream(r *streamRun) {
 	}()
 
 	// Explicit background: the run is background from the start, so signal it before
-	// the work starts (RunStream forces budgetMs=0 for this case).
+	// the work starts (RunStream forces foregroundTimeoutMs=0 for this case).
 	if r.input.RunInBackground {
 		m.markBackgrounded(r.id)
 	}
@@ -1155,12 +1155,12 @@ func (m *Manager) forwardPumpedStream(r *streamRun, ws *schema.StreamReader[stri
 	chunks := pumpStream(r.runCtx, ws)
 
 	var timerC <-chan time.Time
-	timerMs := r.budgetMs
+	phaseTimeoutMs := r.foregroundTimeoutMs
 	if mode == pumpedStreamBackgroundPreview {
-		timerMs = r.input.BackgroundStartupPreviewMs
+		phaseTimeoutMs = r.input.BackgroundStartupPreviewMs
 	}
-	if timerMs > 0 {
-		timer := time.NewTimer(time.Duration(timerMs) * time.Millisecond)
+	if phaseTimeoutMs > 0 {
+		timer := time.NewTimer(time.Duration(phaseTimeoutMs) * time.Millisecond)
 		defer timer.Stop()
 		timerC = timer.C
 	}
@@ -1223,7 +1223,7 @@ func (m *Manager) forwardPumpedStream(r *streamRun, ws *schema.StreamReader[stri
 				m.drainStream(r.runCtx, r.id, chunks, buf)
 				return
 			}
-			m.timeoutTask(r.id, r.budgetMs)
+			m.timeoutTask(r.id, r.foregroundTimeoutMs)
 			r.sw.Close()
 			return
 		}
