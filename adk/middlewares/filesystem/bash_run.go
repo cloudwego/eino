@@ -304,15 +304,12 @@ func bashStreamWork(sb filesystem.StreamingShell, req *filesystem.ExecuteRequest
 // With a StreamingShell backend the tool is itself a StreamableTool: the
 // foreground phase streams output to the caller in real time. An explicit
 // background launch first exposes a bounded startup preview, then caps the stream
-// with a notice; a run moved to the background after its foreground budget caps
+// with a notice; a run moved to the background after its foreground timeout caps
 // the stream immediately. In both cases the rest is drained into the task result.
 // With a plain Shell backend the tool is buffered and has no startup preview.
 //
-// Exactly one of sb / streaming must be non-nil. appender and outputDir, when both
-// set, enable per-task output files (the tool appends output to
-// outputDir/<id>.output); otherwise runs have no output file.
 // Exactly one of sb / streaming must be non-nil. sink, when fully configured
-// (appender + dir), enables per-task output files (the tool appends output to
+// (AppendOpener + dir), enables per-task output files (the tool appends output to
 // outputDir/<id>.output); otherwise runs have no output file.
 func newManagedExecuteTool(
 	mgr *backgroundtask.Manager,
@@ -346,7 +343,7 @@ func managedRunInput(ctx context.Context, input executeManagedArgs, w *bashOutpu
 		Metadata:        map[string]any{MetadataKeyCommand: input.Command},
 		OutputFile:      w.path,
 	}
-	// A positive timeout overrides the Manager's default foreground budget for
+	// A positive timeout overrides the Manager's default foreground timeout for
 	// this command. When the deadline expires, the Manager's policy decides
 	// whether to move the task to the background or stop it.
 	if input.TimeoutMS > 0 {

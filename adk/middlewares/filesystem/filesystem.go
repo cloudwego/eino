@@ -1086,7 +1086,7 @@ type executeArgs struct {
 type executeManagedArgs struct {
 	executeArgs
 	RunInBackground bool `json:"run_in_background,omitempty" jsonschema_description:"Set to true to run the command in the background. You will be notified when it completes; use task_output to query it and task_stop to cancel it."`
-	// TimeoutMS is the foreground budget in milliseconds. When omitted, the configured
+	// TimeoutMS is the foreground timeout in milliseconds. When omitted, the configured
 	// default applies. Ignored when run_in_background is true. What happens at the
 	// deadline (move to background vs. stop) is decided by the Manager's
 	// ShouldAutoBackground policy and is intentionally not surfaced to the model.

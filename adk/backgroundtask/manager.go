@@ -1055,11 +1055,11 @@ type StreamWorkFunc func(ctx context.Context, task TaskInfo) (*schema.StreamRead
 //     into the task's Result/OutputFile.
 //
 // The foreground and preview windows are both measured from when the work returns
-// its stream reader (see StreamWorkFunc), not from this call: RunStream invokes the
-// work synchronously and starts the timers only afterward. Blocking initialization
-// performed before the reader is returned is therefore not counted against either
-// window — streaming work must return its reader promptly for the windows to reflect
-// output time rather than startup time.
+// its stream reader (see StreamWorkFunc), not from this call: RunStream's forwarding
+// goroutine starts the timers only after work returns its reader. Blocking
+// initialization performed before the reader is returned is therefore not counted
+// against either window — streaming work must return its reader promptly for the
+// windows to reflect output time rather than startup time.
 //
 // The returned reader is always non-nil on a nil error. The Manager is the sole
 // writer of that stream, so there is never a write race with the work.
