@@ -396,6 +396,54 @@ func TestMiddleware_TopicSelection_AsyncInjectsInBeforeModel(t *testing.T) {
 	}, 2*time.Second, 10*time.Millisecond)
 }
 
+func TestMiddleware_BeforeModelRewriteState_PreservesToolInfos(t *testing.T) {
+	ctx := context.Background()
+	b := NewInMemoryBackend()
+	now := time.Now()
+
+	b.put("/mem/MEMORY.md", "- [debugging.md](debugging.md) - notes\n", now)
+	b.put("/mem/debugging.md", "---\nname: Debugging\ndescription: build and test commands\ntype: project\n---\n\n# Debugging\npnpm test\n", now)
+
+	mw, err := New(ctx, &Config[*schema.Message]{
+		MemoryDirectory: "/mem",
+		MemoryBackend:   b,
+		Model:           &fixedModel{out: `{"selected_memories":["debugging.md"]}`},
+		Read:            &ReadConfig[*schema.Message]{Mode: ReadModeAsync},
+	})
+	require.NoError(t, err)
+
+	runCtx := &adk.ChatModelAgentContext[*schema.Message]{
+		Instruction: "base",
+		AgentInput:  &adk.AgentInput{Messages: []adk.Message{schema.UserMessage("How to run tests?")}},
+	}
+	ctx2, _, err := mw.BeforeAgent(ctx, runCtx)
+	require.NoError(t, err)
+
+	toolInfos := []*schema.ToolInfo{
+		{Name: "tool_a"},
+		{Name: "tool_b"},
+	}
+	deferredToolInfos := []*schema.ToolInfo{
+		{Name: "deferred_tool_c"},
+	}
+	st := &adk.ChatModelAgentState{
+		Messages:          []adk.Message{schema.UserMessage("How to run tests?")},
+		ToolInfos:         toolInfos,
+		DeferredToolInfos: deferredToolInfos,
+	}
+
+	require.Eventually(t, func() bool {
+		_, next, err := mw.BeforeModelRewriteState(ctx2, st, nil)
+		require.NoError(t, err)
+		st = next
+		last := st.Messages[len(st.Messages)-1]
+		return len(st.Messages) == 2 && last.Extra != nil && last.Extra["__eino_automemory__"] != nil
+	}, 2*time.Second, 10*time.Millisecond)
+
+	require.Equal(t, toolInfos, st.ToolInfos)
+	require.Equal(t, deferredToolInfos, st.DeferredToolInfos)
+}
+
 type panicModel struct{}
 
 func (m *panicModel) Generate(ctx context.Context, input []*schema.Message, _ ...model.Option) (*schema.Message, error) {
