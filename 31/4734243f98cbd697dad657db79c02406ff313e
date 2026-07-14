@@ -1,0 +1,37 @@
+adk/filesystem/backend.go
+  s_df7c557d07e0b5::t_080bca3908fc25 22,162-164,246-292
+adk/filesystem/backend_inmemory.go
+  s_df7c557d07e0b5::t_bed8f827e5ec6f 22,644-653,655-658,660-682,684-690,692,695-703
+adk/filesystem/backend_inmemory_test.go
+  s_df7c557d07e0b5::t_6426ac646f3ac4 22,2443-2520
+adk/middlewares/filesystem/bash_run.go
+  s_df7c557d07e0b5::t_afca83f5b739cd 65-67,69,73-78,89-94,97-106,108,112-116,120-157,161-168,171,174-184,211,223-232,240-242,248-249,265,269-275,280-287
+adk/middlewares/filesystem/bash_run_test.go
+  s_df7c557d07e0b5::t_005f29b5cc5b22 24,281,335,431-436,439,442-445,447-448,462,464,489-490,492,505-584
+adk/middlewares/filesystem/filesystem.go
+  s_df7c557d07e0b5::t_5b277945eed28f 105-108,600
+adk/middlewares/subagent/agent_tool.go
+  s_df7c557d07e0b5::t_0a76d8d38642e0 22,104-105,137,176-182,191,197-213
+adk/middlewares/subagent/middleware.go
+  s_df7c557d07e0b5::t_d408665f9b87c1 80-83
+adk/prebuilt/deep/deep.go
+  s_df7c557d07e0b5::t_c4c97dd9085170 189,331,345-350
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.5",
+  "base_commit_sha": "314734243f98cbd697dad657db79c02406ff313e",
+  "prompts": {},
+  "sessions": {
+    "s_df7c557d07e0b5": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "02bc1ca1-4185-4bac-ad9c-cbc6b2fff38c",
+        "model": "unknown"
+      },
+      "human_author": "lipandeng <lipandeng@bytedance.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}

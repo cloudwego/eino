@@ -1,0 +1,37 @@
+adk/filesystem/backend.go
+  s_6ca64c16161ef3::t_d7f50b5aaaaa6a 246-255,285,287-288
+adk/filesystem/backend_inmemory.go
+  s_6ca64c16161ef3::t_56d80049602a74 645,650,660,663,665,670,675,680,697,700-701
+adk/filesystem/backend_inmemory_test.go
+  s_6ca64c16161ef3::t_652731a013b1eb 2518-2519
+adk/middlewares/filesystem/bash_run.go
+  s_6ca64c16161ef3::t_5b7670924f7493 66,69,74,78,90,92-94,231
+adk/middlewares/filesystem/bash_run_test.go
+  s_6ca64c16161ef3::t_f19c5cbeee84c0 431,436,442,462,464,490,492,506,509,515,521,524-526,529,531,553
+adk/middlewares/filesystem/filesystem.go
+  s_6ca64c16161ef3::t_5f6be094d97b6b 105,108
+adk/middlewares/subagent/agent_tool.go
+  s_6ca64c16161ef3::t_88a455cffb96cc 104-105,182,200
+adk/middlewares/subagent/middleware.go
+  s_6ca64c16161ef3::t_35c0e6ce789c5f 80,83
+adk/prebuilt/deep/deep.go
+  s_6ca64c16161ef3::t_fb44d9785d0e48 189,331,345,347-350
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.5",
+  "base_commit_sha": "4adc7c101536d0871bf40ee22d8ea0d0eb4e4b5c",
+  "prompts": {},
+  "sessions": {
+    "s_6ca64c16161ef3": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5a54-336a-7170-8908-d8e0eed12a0f",
+        "model": "unknown"
+      },
+      "human_author": "lipandeng <lipandeng@bytedance.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}

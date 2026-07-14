@@ -1,0 +1,27 @@
+adk/backgroundtask/run_stream_test.go
+  s_6ca64c16161ef3::t_94799ba91949f8 141-184
+adk/middlewares/filesystem/bash_run.go
+  s_6ca64c16161ef3::t_1efd003f8f09a7 47-52,305-309,394-395,397-400
+adk/middlewares/filesystem/bash_run_test.go
+  s_6ca64c16161ef3::t_d36cc817d04351 270-272,289-291
+adk/middlewares/filesystem/filesystem.go
+  s_6ca64c16161ef3::t_5ea139c0035ec9 91-94
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.5",
+  "base_commit_sha": "690127dcfcb8715af930c305dfce4105e3c7fe4d",
+  "prompts": {},
+  "sessions": {
+    "s_6ca64c16161ef3": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5a54-336a-7170-8908-d8e0eed12a0f",
+        "model": "unknown"
+      },
+      "human_author": "lipandeng <lipandeng@bytedance.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}

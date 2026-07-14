@@ -1,0 +1,21 @@
+adk/backgroundtask/manager.go
+  s_6ca64c16161ef3::t_5d68d0a8c000aa 109,185,194,206,317,319,693,706,894-895,899,954,958,960,963-964,967,990,1023,1051,1053,1056,1058,1062-1069,1077-1084,1106,1158,1160,1162-1163,1226
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.5",
+  "base_commit_sha": "6f798142a267e4ca364b2b1b0ead1e04236d55fd",
+  "prompts": {},
+  "sessions": {
+    "s_6ca64c16161ef3": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5a54-336a-7170-8908-d8e0eed12a0f",
+        "model": "unknown"
+      },
+      "human_author": "lipandeng <lipandeng@bytedance.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
