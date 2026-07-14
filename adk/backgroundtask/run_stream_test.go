@@ -140,6 +140,50 @@ func TestRunStream_ExplicitBackground(t *testing.T) {
 	assert.Equal(t, "chunk-1chunk-2", task.Result)
 }
 
+// TestRunStream_ExplicitBackgroundStartupPreview forwards launch-time chunks for
+// the configured preview window, then emits the normal background notice and
+// drains later output into the task result without forwarding it to the caller.
+func TestRunStream_ExplicitBackgroundStartupPreview(t *testing.T) {
+	m := New(context.Background(), &Config{})
+	defer closeWithTimeout(m)
+
+	release := make(chan struct{})
+	work := func(ctx context.Context, _ TaskInfo) (*schema.StreamReader[string], error) {
+		sr, sw := schema.Pipe[string](2)
+		sw.Send("authenticate at https://example.com/oauth\n", nil)
+		go func() {
+			defer sw.Close()
+			select {
+			case <-release:
+				sw.Send("authenticated\n", nil)
+			case <-ctx.Done():
+			}
+		}()
+		return sr, nil
+	}
+
+	sr, err := m.RunStream(context.Background(), &RunInput{
+		Description:                "oauth",
+		Type:                       "bash",
+		RunInBackground:            true,
+		BackgroundStartupPreviewMs: 500,
+	}, work)
+	require.NoError(t, err)
+
+	got := drainStringStream(t, sr)
+	assert.Contains(t, got, "https://example.com/oauth")
+	assert.Contains(t, got, "is running in the background")
+	assert.NotContains(t, got, "authenticated")
+
+	close(release)
+	tasks := m.List()
+	require.Len(t, tasks, 1)
+	task := waitTask(t, m, tasks[0].ID)
+	assert.True(t, task.RunInBackground)
+	assert.Equal(t, StatusCompleted, task.Status)
+	assert.Equal(t, "authenticate at https://example.com/oauth\nauthenticated\n", task.Result)
+}
+
 // TestRunStream_WorkError: an error from the stream finalizes the task as failed
 // and surfaces on the caller's stream.
 func TestRunStream_WorkError(t *testing.T) {

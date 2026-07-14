@@ -267,8 +267,9 @@ func TestManagedExecuteTool_StreamingForeground(t *testing.T) {
 	assert.Contains(t, tasks[0].Result, "chunk3")
 }
 
-// An explicit background launch on a streaming managed tool emits only the
-// background notice on the caller's stream; the output lands in the task result.
+// An explicit background launch on a streaming managed tool exposes startup
+// output. This quick command completes inside the preview window, so its complete
+// output reaches the caller without a stale background notice.
 func TestManagedExecuteTool_StreamingExplicitBackground(t *testing.T) {
 	backend := setupTestBackend()
 	mgr := backgroundtask.New(context.Background(), &backgroundtask.Config{})
@@ -285,9 +286,9 @@ func TestManagedExecuteTool_StreamingExplicitBackground(t *testing.T) {
 	sr, err := st.StreamableRun(context.Background(), `{"command":"echo hi","run_in_background":true}`)
 	require.NoError(t, err)
 	got := drainToolStream(t, sr)
-	assert.Contains(t, got, "is running in the background")
-	assert.NotContains(t, got, "moved to the background")
-	assert.NotContains(t, got, "chunk1")
+	assert.Contains(t, got, "chunk1")
+	assert.Contains(t, got, "chunk3")
+	assert.NotContains(t, got, "is running in the background")
 
 	waitAllTasks(t, mgr)
 	tasks := mgr.List()

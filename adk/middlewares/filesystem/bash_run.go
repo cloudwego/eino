@@ -44,6 +44,12 @@ import (
 // Manager itself never writes — the execute tool owns it.
 const ExecuteTaskType = "bash"
 
+// defaultBashStartupPreviewMs is the caller-visible startup window for an
+// explicitly backgrounded StreamingShell run. The task is backgrounded from the
+// start; only its initial output remains attached briefly so launch-time prompts
+// such as OAuth URLs are not hidden in the background output file.
+const defaultBashStartupPreviewMs = 1_000
+
 // MetadataKeyCommand is the RunInput.Metadata / Task.Metadata key under which the
 // execute tool records the shell command for a task. A ShouldAutoBackground hook
 // reads it (via CommandFromTask) to apply command-specific policy without parsing
@@ -296,9 +302,11 @@ func bashStreamWork(sb filesystem.StreamingShell, req *filesystem.ExecuteRequest
 // can later query it via task_output.
 //
 // With a StreamingShell backend the tool is itself a StreamableTool: the
-// foreground phase streams output to the caller in real time, and a run that moves
-// to the background caps the stream with a notice (the rest is drained into the
-// task result). With a plain Shell backend the tool is buffered.
+// foreground phase streams output to the caller in real time. An explicit
+// background launch first exposes a bounded startup preview, then caps the stream
+// with a notice; a run moved to the background after its foreground budget caps
+// the stream immediately. In both cases the rest is drained into the task result.
+// With a plain Shell backend the tool is buffered and has no startup preview.
 //
 // Exactly one of sb / streaming must be non-nil. appender and outputDir, when both
 // set, enable per-task output files (the tool appends output to
@@ -383,10 +391,12 @@ func newManagedStreamingExecuteTool(mgr *backgroundtask.Manager, streaming files
 	return utils.InferStreamTool(toolName, desc, func(ctx context.Context, input executeManagedArgs) (*schema.StreamReader[string], error) {
 		req := &filesystem.ExecuteRequest{Command: input.Command}
 		w := reserveBashOutput(ctx, mgr, sink)
+		runInput := managedRunInput(ctx, input, w)
+		runInput.BackgroundStartupPreviewMs = defaultBashStartupPreviewMs
 		// RunStream owns the returned stream: it forwards work chunks to this caller
-		// in real time, and on auto-background caps the stream with a notice while
-		// draining the rest into the task result. A background launch (or timeout)
-		// is therefore surfaced inline as a final chunk, not as an error.
-		return mgr.RunStream(ctx, managedRunInput(ctx, input, w), bashStreamWork(streaming, req, w))
+		// in real time. An explicit background launch exposes only its bounded startup
+		// preview before the notice; auto-background caps the stream at the transition.
+		// In either case the remaining output is drained into the task result.
+		return mgr.RunStream(ctx, runInput, bashStreamWork(streaming, req, w))
 	})
 }

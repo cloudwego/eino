@@ -88,9 +88,10 @@ type ExecuteToolConfig struct {
 // When set, the execute tool gains a run_in_background field and routes runs
 // through the shared Manager, so background and auto-background runs are tracked
 // and visible to the task_output/task_stop control tools. With a StreamingShell
-// backend the foreground phase still streams in real time; once a run moves to the
-// background its stream is capped with a notice and the rest is collected into the
-// task result.
+// backend the foreground phase still streams in real time. An explicit background
+// launch briefly previews startup output before its stream is capped with a notice;
+// an auto-background transition caps it immediately. The remaining output is
+// collected into the task result.
 type BackgroundConfig struct {
 	// Manager is the shared background-task Manager. Required (a nil Manager is the
 	// same as no BackgroundConfig). It may be shared with other middlewares (e.g.

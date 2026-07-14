@@ -153,8 +153,19 @@ type RunInput struct {
 	// ToolUseID is the optional id of the tool call launching this task, stored in
 	// Task.ToolUseID. See Task.ToolUseID.
 	ToolUseID string
-	// RunInBackground controls execution mode: true returns immediately with StatusRunning.
+	// RunInBackground controls execution mode. Run returns immediately with
+	// StatusRunning; RunStream returns a caller stream that normally contains the
+	// background notice, optionally preceded by a bounded startup preview.
 	RunInBackground bool
+	// BackgroundStartupPreviewMs keeps an explicit-background RunStream caller's
+	// stream open for up to this many milliseconds and forwards work chunks emitted
+	// during that startup window. When the window expires, RunStream appends the
+	// normal background notice, closes the caller stream, and drains the remaining
+	// work output in the background. This lets launch-time information such as an
+	// OAuth URL remain visible without changing the task's background lifecycle.
+	// A value <= 0 disables the preview. Ignored by Run and by foreground RunStream
+	// executions (including their later auto-background transition).
+	BackgroundStartupPreviewMs int
 	// Metadata is optional caller-supplied data attached to the task's Task.Metadata.
 	// It is for observers (Get/List, the task_output tool, the host) to correlate or
 	// label background tasks — e.g. an originating tool-call ID, session, or trace.
@@ -1010,8 +1021,10 @@ type StreamWorkFunc func(ctx context.Context, task TaskInfo) (*schema.StreamRead
 //     caller's stream, while the work keeps running in the background — its
 //     remaining output is drained into the task's Result/OutputFile.
 //   - Explicit background (input.RunInBackground): the work runs detached from the
-//     start, so no execution chunks reach the caller; the stream carries only the
-//     background notice and then closes.
+//     start. By default no execution chunks reach the caller; when
+//     input.BackgroundStartupPreviewMs is positive, chunks emitted during that
+//     bounded startup window are forwarded before the background notice. The
+//     remaining output is drained into the task's Result/OutputFile.
 //
 // The returned reader is always non-nil on a nil error. The Manager is the sole
 // writer of that stream, so there is never a write race with the work.
@@ -1096,11 +1109,15 @@ func (m *Manager) forwardStream(r *streamRun) {
 
 	var buf strings.Builder
 
-	// Explicit background: no foreground phase to stream and no deadline to race
-	// (RunStream forces budgetMs=0), so skip the pumpStream goroutine entirely.
-	// Emit the notice, close the caller stream, and drain the reader directly into
-	// the result.
+	// Explicit background: the lifecycle is already detached, but a caller may opt
+	// into a bounded startup preview so launch-time output (for example an OAuth
+	// URL) remains visible. After the preview, or immediately when it is disabled,
+	// cap the caller stream with a notice and drain the rest into the result.
 	if r.input.RunInBackground {
+		if r.input.BackgroundStartupPreviewMs > 0 {
+			m.previewBackgroundStartup(r, ws, &buf)
+			return
+		}
 		r.sw.Send(m.backgroundStartNotice(r.runCtx, r.id), nil)
 		r.sw.Close()
 		m.drainReader(r.id, ws, &buf)
@@ -1156,6 +1173,53 @@ func (m *Manager) forwardStream(r *streamRun) {
 			}
 			m.timeoutTask(r.id, r.budgetMs)
 			r.sw.Close()
+			return
+		}
+	}
+}
+
+// previewBackgroundStartup forwards the initial chunks of an explicitly
+// backgrounded stream for a bounded time. The task is backgrounded before this
+// function starts; the preview affects only caller visibility, not lifecycle.
+// Once the window expires it emits the normal background notice, closes the
+// caller stream, and continues draining the same pumped stream in the background.
+func (m *Manager) previewBackgroundStartup(r *streamRun, ws *schema.StreamReader[string], buf *strings.Builder) {
+	chunks := pumpStream(r.runCtx, ws)
+	timer := time.NewTimer(time.Duration(r.input.BackgroundStartupPreviewMs) * time.Millisecond)
+	defer timer.Stop()
+
+	for {
+		select {
+		case c := <-chunks:
+			if c.err == io.EOF {
+				m.completeTask(r.id, buf.String())
+				r.sw.Close()
+				return
+			}
+			if c.err != nil {
+				m.failTask(r.id, c.err)
+				r.sw.Send("", c.err)
+				r.sw.Close()
+				return
+			}
+			buf.WriteString(c.text)
+			if r.sw.Send(c.text, nil) {
+				// The caller stopped reading the preview. The task was explicitly
+				// backgrounded, so keep it running and drain the remaining output.
+				r.sw.Close()
+				m.drainStream(r.runCtx, r.id, chunks, buf)
+				return
+			}
+		case <-r.callerCtx.Done():
+			// Caller cancellation does not stop an explicitly backgrounded task.
+			// Stop previewing and keep draining under the detached run context.
+			r.sw.Close()
+			m.drainStream(r.runCtx, r.id, chunks, buf)
+			return
+		case <-timer.C:
+			r.sw.Send(m.backgroundStartNotice(r.runCtx, r.id), nil)
+			r.sw.Close()
+			m.drainStream(r.runCtx, r.id, chunks, buf)
 			return
 		}
 	}
