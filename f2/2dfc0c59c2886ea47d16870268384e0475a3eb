@@ -1,0 +1,23 @@
+adk/filesystem/backend_inmemory.go
+  s_6ca64c16161ef3::t_a0c62d30036b33 33-35,39-44,86,116,163,240,296,549-552,561,633,648,665,680-690,695-696,698,702-710,712,714-716,744,766
+adk/filesystem/backend_inmemory_test.go
+  s_6ca64c16161ef3::t_d820c1f0384355 2521-2555
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.5",
+  "base_commit_sha": "f22dfc0c59c2886ea47d16870268384e0475a3eb",
+  "prompts": {},
+  "sessions": {
+    "s_6ca64c16161ef3": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5a54-336a-7170-8908-d8e0eed12a0f",
+        "model": "unknown"
+      },
+      "human_author": "lipandeng <lipandeng@bytedance.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
