@@ -170,6 +170,11 @@ type RunInput struct {
 	// stream closes without a background notice; the task is already terminal then.
 	// A value <= 0 disables the preview. Ignored by Run and by foreground RunStream
 	// executions (including their later auto-background transition).
+	//
+	// The window is measured from when the StreamWorkFunc returns its reader (see
+	// StreamWorkFunc), so it bounds the preview of streamed output, not the work's
+	// initialization; streaming work must return its reader promptly for the window
+	// to be meaningful.
 	BackgroundStartupPreviewMs int
 	// Metadata is optional caller-supplied data attached to the task's Task.Metadata.
 	// It is for observers (Get/List, the task_output tool, the host) to correlate or
@@ -188,6 +193,10 @@ type RunInput struct {
 	// (see Config.ShouldAutoBackground for what happens at the deadline). A value <= 0
 	// removes the deadline for this run (blocks until completion). Ignored when
 	// RunInBackground is true.
+	//
+	// For Run the deadline is measured from when the work starts; for RunStream it is
+	// measured from when the work returns its stream reader (see StreamWorkFunc), so
+	// streaming work must return its reader promptly for the two to coincide.
 	ForegroundTimeoutMs *int
 }
 
@@ -1015,6 +1024,16 @@ func (m *Manager) Run(ctx context.Context, input *RunInput, work WorkFunc) (*Tas
 // ctx behaves exactly as for WorkFunc (see WorkFunc): detached from the caller's
 // cancellation, stopped by Cancel/deadline/Close. Work should honor it and close
 // the returned reader when ctx is done.
+//
+// Return the reader promptly. The Manager's foreground timeout and
+// RunInput.BackgroundStartupPreviewMs windows are measured from when this function
+// returns its reader, not from the RunStream call — RunStream calls it synchronously
+// and only starts those timers afterward. So blocking initialization (spawning a
+// process, waiting for a subprocess to be ready, dialing) must be done in the
+// producer goroutine that writes to the reader and surfaced as its first chunks, not
+// before returning. Work that blocks before returning makes the caller wait for
+// init-time plus the window rather than the window alone, and that extra wait is not
+// bounded by either timeout.
 type StreamWorkFunc func(ctx context.Context, task TaskInfo) (*schema.StreamReader[string], error)
 
 // RunStream executes streaming work as a managed task, returning a stream of
@@ -1034,6 +1053,13 @@ type StreamWorkFunc func(ctx context.Context, task TaskInfo) (*schema.StreamRead
 //     all chunks are forwarded and the stream closes with no background notice.
 //     Otherwise the notice ends the preview and the remaining output is drained
 //     into the task's Result/OutputFile.
+//
+// The foreground and preview windows are both measured from when the work returns
+// its stream reader (see StreamWorkFunc), not from this call: RunStream invokes the
+// work synchronously and starts the timers only afterward. Blocking initialization
+// performed before the reader is returned is therefore not counted against either
+// window — streaming work must return its reader promptly for the windows to reflect
+// output time rather than startup time.
 //
 // The returned reader is always non-nil on a nil error. The Manager is the sole
 // writer of that stream, so there is never a write race with the work.
