@@ -24,6 +24,8 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+
+	"github.com/cloudwego/eino/schema"
 )
 
 func assertNotClosedWithin(t *testing.T, ch <-chan struct{}, d time.Duration) {
@@ -39,6 +41,18 @@ func setupParentChild(t *testing.T) (parent, child *cancelContext, cleanup func(
 	parent = newCancelContext()
 	ctx, cancel := context.WithCancel(context.Background())
 	child = parent.deriveAgentToolCancelContext(ctx)
+	cleanup = func() {
+		child.markDone()
+		cancel()
+	}
+	t.Cleanup(cleanup)
+	return parent, child, cleanup
+}
+
+func setupAbortOnlyChild(t *testing.T) (parent, child *cancelContext, cleanup func()) {
+	parent = newCancelContext()
+	ctx, cancel := context.WithCancel(context.Background())
+	child = deriveAbortOnlyCancelContext(ctx, parent)
 	cleanup = func() {
 		child.markDone()
 		cancel()
@@ -239,6 +253,144 @@ func TestDeriveAgentToolCancelContext(t *testing.T) {
 			}
 			assert.True(t, child.isImmediateCancelled())
 		})
+	})
+}
+
+func TestDeriveAbortOnlyCancelContext(t *testing.T) {
+	t.Run("SafePointDoesNotPropagate", func(t *testing.T) {
+		parent, child, _ := setupAbortOnlyChild(t)
+
+		parent.setRecursive(true)
+		parent.triggerCancel(CancelAfterChatModel)
+
+		assertNotClosedWithin(t, child.cancelChan, 50*time.Millisecond)
+		assertNotClosedWithin(t, child.immediateChan, 50*time.Millisecond)
+	})
+
+	t.Run("RecursiveImmediatePropagates", func(t *testing.T) {
+		parent, child, _ := setupAbortOnlyChild(t)
+
+		parent.setRecursive(true)
+		parent.triggerImmediateCancel()
+
+		select {
+		case <-child.immediateChan:
+		case <-time.After(time.Second):
+			t.Fatal("abort-only child did not receive immediate cancel")
+		}
+		assert.True(t, child.isImmediateCancelled())
+	})
+
+	t.Run("LateRecursiveImmediateEscalationPropagates", func(t *testing.T) {
+		parent, child, _ := setupAbortOnlyChild(t)
+
+		parent.triggerImmediateCancel()
+		assertNotClosedWithin(t, child.immediateChan, 50*time.Millisecond)
+
+		parent.setRecursive(true)
+
+		select {
+		case <-child.immediateChan:
+		case <-time.After(time.Second):
+			t.Fatal("abort-only child did not receive late recursive immediate cancel")
+		}
+	})
+
+	t.Run("ChildCompletionPreventsLaterPropagation", func(t *testing.T) {
+		parent, child, _ := setupAbortOnlyChild(t)
+
+		parent.triggerImmediateCancel()
+		time.Sleep(50 * time.Millisecond)
+		child.markDone()
+		parent.setRecursive(true)
+
+		assertNotClosedWithin(t, child.immediateChan, 50*time.Millisecond)
+	})
+
+	t.Run("ParentImmediateThenContextDoneExits", func(t *testing.T) {
+		parent := newCancelContext()
+		ctx, cancel := context.WithCancel(context.Background())
+		child := deriveAbortOnlyCancelContext(ctx, parent)
+		t.Cleanup(func() {
+			child.markDone()
+			cancel()
+		})
+
+		parent.triggerImmediateCancel()
+		assertNotClosedWithin(t, child.immediateChan, 50*time.Millisecond)
+
+		cancel()
+		assertNotClosedWithin(t, child.immediateChan, 50*time.Millisecond)
+	})
+
+	t.Run("AgentToolDescendantStopsAtAbortOnlyBoundary", func(t *testing.T) {
+		root := newCancelContext()
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		abortOnly := deriveAbortOnlyCancelContext(ctx, root)
+		agentToolChild := abortOnly.deriveAgentToolCancelContext(ctx)
+		t.Cleanup(func() {
+			agentToolChild.markDone()
+			abortOnly.markDone()
+		})
+
+		agentToolChild.markAgentToolDescendant()
+
+		assert.True(t, agentToolChild.hasAgentToolDescendant())
+		assert.True(t, abortOnly.hasAgentToolDescendant())
+		assert.False(t, root.hasAgentToolDescendant())
+	})
+}
+
+func TestWithAbortOnlyCancelContext(t *testing.T) {
+	cc := newCancelContext()
+	cc.abortOnly = true
+
+	ctx, cancel := withAbortOnlyCancelContext(context.Background(), cc)
+	defer cancel()
+
+	cc.markDone()
+
+	select {
+	case <-ctx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("abort-only context was not canceled when cancel context completed")
+	}
+}
+
+func TestCheckPreExecCancel(t *testing.T) {
+	t.Run("AbortOnlyImmediateTerminatesWithoutEvent", func(t *testing.T) {
+		cc := newCancelContext()
+		cc.abortOnly = true
+		cc.triggerImmediateCancel()
+
+		iter, gen := NewAsyncIteratorPair[*TypedAgentEvent[*schema.Message]]()
+
+		assert.True(t, checkPreExecCancel(cc, gen))
+		select {
+		case <-cc.doneChan:
+		case <-time.After(time.Second):
+			t.Fatal("abort-only pre-exec cancel did not mark context done")
+		}
+
+		gen.Close()
+		_, ok := iter.Next()
+		assert.False(t, ok)
+	})
+
+	t.Run("AlreadyHandledCancelTerminatesWithoutDuplicateEvent", func(t *testing.T) {
+		cc := newCancelContext()
+		cc.triggerImmediateCancel()
+		assert.True(t, cc.markCancelHandled())
+
+		iter, gen := NewAsyncIteratorPair[*TypedAgentEvent[*schema.Message]]()
+
+		assert.True(t, checkPreExecCancel(cc, gen))
+
+		gen.Close()
+		_, ok := iter.Next()
+		assert.False(t, ok)
 	})
 }
 

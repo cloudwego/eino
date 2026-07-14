@@ -45,10 +45,12 @@ type CancelMode int
 const (
 	// CancelImmediate cancels the agent as soon as the signal is received,
 	// without waiting for a ChatModel or ToolCalls safe-point.
-	// By default, only the root agent is interrupted; descendant agents inside
-	// AgentTools are torn down via context cancellation as a side effect.
+	// By default, only the root agent is interrupted.
 	// Use WithRecursive to propagate explicit immediate-cancel signals to
-	// descendants for clean teardown with grace period.
+	// checkpoint-aware AgentTool boundaries and direct synchronous middleware
+	// agents. AgentTool descendants may contribute nested checkpoints; direct
+	// middleware agents only receive cooperative teardown through Go context
+	// cancellation, stream termination, and local graph interruption.
 	CancelImmediate CancelMode = 0
 	// CancelAfterChatModel cancels after the root agent's next chat model call
 	// completes. By default, only the root agent checks this safe-point;
@@ -120,16 +122,26 @@ func WithAgentCancelTimeout(timeout time.Duration) AgentCancelOption {
 }
 
 // WithRecursive opts into recursive cancel propagation. By default, cancel
-// modes only affect the root agent; descendant agents inside AgentTools are
-// not notified. WithRecursive makes the cancel propagate to all descendants:
-//   - CancelAfterChatModel / CancelAfterToolCalls: descendants check their own safe-points.
-//   - CancelImmediate: descendants receive explicit immediate-cancel signals for
+// modes only affect the root agent. WithRecursive makes the cancel propagate
+// through checkpoint-aware AgentTool boundaries:
+//   - CancelAfterChatModel / CancelAfterToolCalls: AgentTool descendants check their own safe-points.
+//   - CancelImmediate: AgentTool descendants receive explicit immediate-cancel signals for
 //     clean teardown; the root uses a grace period to collect child interrupts.
 //
-// With recursive cancellation, each descendant agent also triggers cancellation
-// and cascades its interrupt information upward. The root agent ultimately
-// produces a complete checkpoint that includes descendant checkpoints, enabling
-// resumption from the exact point where each descendant was interrupted.
+// Direct synchronous ChatModelAgent calls made from middleware do not establish
+// the checkpoint bridge required for targeted resumption. WithRecursive still
+// propagates CancelImmediate to them as abort-only teardown, but their local
+// interrupts are not attached to the root checkpoint.
+//
+// Immediate termination is cooperative: user code that ignores context
+// cancellation, stream termination, and graph interruption cannot be forcibly
+// killed by the framework.
+//
+// With recursive cancellation, each AgentTool descendant also triggers
+// cancellation and cascades its interrupt information upward. The root agent
+// ultimately produces a complete checkpoint that includes descendant
+// checkpoints, enabling resumption from the exact point where each descendant
+// was interrupted.
 //
 // Once any cancel call includes WithRecursive, the flag stays set for the
 // entire cancel lifecycle (monotonic escalation).
@@ -316,8 +328,9 @@ type cancelContext struct {
 	recursive     int32         // atomic; 1 if cancel should propagate into AgentTool internal agents
 	recursiveChan chan struct{} // closed when recursive transitions from 0 to 1
 
-	root   bool           // true for the original cancelContext created by WithCancel(); false for AgentTool internal agents
-	parent *cancelContext // non-nil for AgentTool internal agents; used to propagate AgentTool boundary markers upward
+	root      bool           // true for the original cancelContext created by WithCancel(); false for derived scopes
+	abortOnly bool           // true for direct middleware children that receive teardown but do not contribute checkpoints
+	parent    *cancelContext // non-nil for AgentTool internal agents; used to propagate AgentTool boundary markers upward
 
 	agentToolDescendant int32 // atomic; 1 once an AgentTool runs under this cancel context
 
@@ -420,6 +433,52 @@ func (cc *cancelContext) deriveAgentToolCancelContext(ctx context.Context) *canc
 	return child
 }
 
+func deriveAbortOnlyCancelContext(ctx context.Context, parent *cancelContext) *cancelContext {
+	if parent == nil {
+		return nil
+	}
+	child := newCancelContext()
+	child.root = false
+	child.abortOnly = true
+
+	go func() {
+		select {
+		case <-parent.immediateChan:
+			if parent.isRecursive() {
+				child.setRecursive(true)
+				child.triggerImmediateCancel()
+				return
+			}
+			select {
+			case <-parent.recursiveChan:
+				child.setRecursive(true)
+				child.triggerImmediateCancel()
+			case <-child.doneChan:
+			case <-ctx.Done():
+			}
+		case <-child.doneChan:
+		case <-ctx.Done():
+		}
+	}()
+
+	return child
+}
+
+func withAbortOnlyCancelContext(ctx context.Context, cc *cancelContext) (context.Context, context.CancelFunc) {
+	ctx = withCancelContext(ctx, cc)
+	ctx, cancel := context.WithCancel(ctx)
+	go func() {
+		select {
+		case <-cc.immediateChan:
+			cancel()
+		case <-cc.doneChan:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	return ctx, cancel
+}
+
 func (cc *cancelContext) triggerCancel(mode CancelMode) {
 	cc.setMode(mode)
 	if atomic.CompareAndSwapInt32(&cc.state, stateRunning, stateCancelling) {
@@ -508,7 +567,7 @@ func (cc *cancelContext) sendImmediateInterrupt() bool {
 	fns := make([]func(...compose.GraphInterruptOption), len(cc.graphInterruptFuncs))
 	copy(fns, cc.graphInterruptFuncs)
 
-	if cc.isRecursive() && cc.hasAgentToolDescendant() {
+	if !cc.abortOnly && cc.isRecursive() && cc.hasAgentToolDescendant() {
 		select {
 		case <-cc.doneChan:
 			cc.mu.Unlock()
@@ -569,6 +628,9 @@ func (cc *cancelContext) hasAgentToolDescendant() bool {
 func (cc *cancelContext) markAgentToolDescendant() {
 	for cur := cc; cur != nil; cur = cur.parent {
 		atomic.StoreInt32(&cur.agentToolDescendant, 1)
+		if cur.abortOnly {
+			break
+		}
 	}
 }
 
@@ -608,6 +670,34 @@ func (cc *cancelContext) createAndMarkCancelHandled() (*CancelError, bool) {
 	cancelErr := cc.createCancelError()
 	ok := cc.markCancelHandled()
 	return cancelErr, ok
+}
+
+func isAbortOnlyCancelled(cc *cancelContext) bool {
+	return cc != nil && cc.abortOnly && cc.isImmediateCancelled()
+}
+
+func checkPreExecCancel[M MessageType](cc *cancelContext, gen *AsyncGenerator[*TypedAgentEvent[M]]) (terminated bool) {
+	if cc == nil {
+		return false
+	}
+	if cc.abortOnly {
+		if cc.isImmediateCancelled() {
+			cc.markDone()
+			return true
+		}
+		return false
+	}
+	if cc.shouldCancel() {
+		if cc.getMode() == CancelImmediate || atomic.LoadInt32(&cc.escalated) == 1 {
+			cancelErr, ok := cc.createAndMarkCancelHandled()
+			if !ok {
+				return true
+			}
+			gen.Send(&TypedAgentEvent[M]{Err: cancelErr})
+			return true
+		}
+	}
+	return false
 }
 
 // buildCancelFunc builds the AgentCancelFunc for external use.
