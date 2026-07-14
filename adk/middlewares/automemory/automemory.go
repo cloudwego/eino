@@ -622,7 +622,7 @@ func (m *middleware[M]) selectTopicCandidates(
 	}
 
 	toolInfo := topicSelectionToolInfo()
-	resp, err := m.topicSelectionModel.Generate(
+	respStream, err := m.topicSelectionModel.Stream(
 		ctx,
 		[]M{
 			makeSystemMsg[M](getTopicSelectionSystemPrompt()),
@@ -630,6 +630,11 @@ func (m *middleware[M]) selectTopicCandidates(
 		},
 		makeToolChoiceForced[M](toolInfo.Name),
 	)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, err := concatMessageStream(respStream)
 	if err != nil {
 		return nil, err
 	}
