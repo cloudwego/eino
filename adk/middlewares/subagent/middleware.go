@@ -55,15 +55,19 @@ type TypedConfig[M adk.MessageType] struct {
 	// Background configures background-task execution for sub-agent runs. When nil,
 	// only foreground (blocking) agent execution is available and runs are NOT
 	// tracked. See BackgroundConfig.
-	Background *BackgroundConfig[M]
+	Background *TypedBackgroundConfig[M]
 }
 
-// BackgroundConfig enables background-task execution for the agent tool.
+// BackgroundConfig enables background-task execution for the standard
+// *schema.Message agent tool.
+type BackgroundConfig = TypedBackgroundConfig[*schema.Message]
+
+// TypedBackgroundConfig enables background-task execution for the agent tool.
 //
 // When set, ALL agent runs (foreground and background) are managed by the Manager,
 // making them visible via Get/List, and the Agent tool gains a run_in_background
 // parameter.
-type BackgroundConfig[M adk.MessageType] struct {
+type TypedBackgroundConfig[M adk.MessageType] struct {
 	// Manager is the shared background-task Manager. Required (a nil Manager is the
 	// same as no BackgroundConfig). It may be shared with other middlewares (e.g.
 	// filesystem) so a single task-ID space spans agent and shell runs. The
@@ -79,13 +83,15 @@ type BackgroundConfig[M adk.MessageType] struct {
 	// lazily by the work callback, so a newly returned background task may briefly
 	// advertise the path before it exists. The Manager itself never writes.
 	//
-	// The file is JSON Lines: one record per line, appended as each AgentEvent
-	// materializes, so a backgrounded run's interim output is visible before it
-	// completes. EventFormat encodes each event into its line (see AgentEventFormat);
-	// when nil the default encoder is used, which writes {"type","agent_name",
-	// "message"} with the event's message (root Extra stripped) and a "type" naming
-	// the event kind. A custom EventFormat may reshape or skip events — e.g. skipping
-	// everything but the final assistant answer to get a final-result-only file.
+	// The output file is line-oriented: one line per materialized AgentEvent,
+	// appended as events arrive so a backgrounded run's interim output is visible
+	// before it completes. EventFormat encodes each event into its line (see
+	// AgentEventFormat) and therefore defines the file's actual format. When
+	// EventFormat is nil, the default encoder writes one JSON object per line (JSONL):
+	// {agent_name, message}, with the event's message (root Extra stripped) carrying
+	// its own role and any tool calls/results — no separate type field. A custom
+	// EventFormat may emit any per-line text and may skip events — e.g. skipping every
+	// event but the final assistant answer to get a final-result-only file.
 	//
 	// OutputStore is a filesystem.AppendOpener (filesystem.InMemoryBackend
 	// implements it); output files require one. When either is unset, runs have no

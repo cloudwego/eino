@@ -190,7 +190,7 @@ func NewTyped[M adk.MessageType](ctx context.Context, cfg *TypedConfig[M]) (adk.
 				ToolDescriptionGenerator: cfg.TaskToolDescriptionGenerator,
 			}
 			if cfg.Background != nil && cfg.Background.Manager != nil {
-				subCfg.Background = &subagent.BackgroundConfig[M]{
+				subCfg.Background = &subagent.TypedBackgroundConfig[M]{
 					Manager:     cfg.Background.Manager,
 					OutputStore: backendAppendOpener(cfg.Backend),
 					OutputDir:   cfg.Background.OutputDir,

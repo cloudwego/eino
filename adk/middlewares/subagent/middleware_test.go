@@ -215,7 +215,7 @@ func TestBeforeAgent_WithManager_InjectsAgentToolOnly(t *testing.T) {
 		SubAgents: []adk.Agent{
 			&mockAgent{name: "worker", desc: "does work"},
 		},
-		Background: &BackgroundConfig[*schema.Message]{Manager: mgr},
+		Background: &BackgroundConfig{Manager: mgr},
 	})
 	require.NoError(t, err)
 
@@ -324,7 +324,7 @@ func TestAgentTool_Background(t *testing.T) {
 
 	mw, err := New(ctx, &Config{
 		SubAgents:  []adk.Agent{slowAgent},
-		Background: &BackgroundConfig[*schema.Message]{Manager: mgr},
+		Background: &BackgroundConfig{Manager: mgr},
 	})
 	require.NoError(t, err)
 
@@ -401,7 +401,7 @@ func TestAgentTool_ForegroundWithTaskMgr(t *testing.T) {
 
 	mw, err := New(ctx, &Config{
 		SubAgents:  []adk.Agent{agent},
-		Background: &BackgroundConfig[*schema.Message]{Manager: mgr},
+		Background: &BackgroundConfig{Manager: mgr},
 	})
 	require.NoError(t, err)
 
@@ -439,7 +439,7 @@ func TestAgentTool_WritesOutputFile(t *testing.T) {
 
 	mw, err := New(ctx, &Config{
 		SubAgents: []adk.Agent{&mockAgent{name: "fast", desc: "fast agent"}},
-		Background: &BackgroundConfig[*schema.Message]{
+		Background: &BackgroundConfig{
 			Manager:     mgr,
 			OutputStore: store,
 			OutputDir:   "/tasks",
@@ -494,7 +494,7 @@ func TestAgentTool_CustomEventFormat(t *testing.T) {
 
 	mw, err := New(ctx, &Config{
 		SubAgents: []adk.Agent{&mockAgent{name: "fast", desc: "fast agent"}},
-		Background: &BackgroundConfig[*schema.Message]{
+		Background: &BackgroundConfig{
 			Manager:     mgr,
 			OutputStore: backend,
 			OutputDir:   "/tasks",
@@ -536,7 +536,7 @@ func TestAgentTool_EventFormatSkipsAll(t *testing.T) {
 
 	mw, err := New(ctx, &Config{
 		SubAgents: []adk.Agent{&mockAgent{name: "fast", desc: "fast agent"}},
-		Background: &BackgroundConfig[*schema.Message]{
+		Background: &BackgroundConfig{
 			Manager:     mgr,
 			OutputStore: backend,
 			OutputDir:   "/tasks",
@@ -576,7 +576,7 @@ func TestAgentTool_DefaultFormatAdvertisesHint(t *testing.T) {
 
 	mw, err := New(ctx, &Config{
 		SubAgents: []adk.Agent{&mockAgent{name: "fast", desc: "fast agent"}},
-		Background: &BackgroundConfig[*schema.Message]{
+		Background: &BackgroundConfig{
 			Manager:     mgr,
 			OutputStore: backend,
 			OutputDir:   "/tasks",
@@ -608,7 +608,7 @@ func TestAgentTool_WritesInterimEventsWithoutParentReceiver(t *testing.T) {
 	firstSent := make(chan struct{})
 	mw, err := New(ctx, &Config{
 		SubAgents: []adk.Agent{&stagedAgent{release: release, firstSent: firstSent}},
-		Background: &BackgroundConfig[*schema.Message]{
+		Background: &BackgroundConfig{
 			Manager:     mgr,
 			OutputStore: backend,
 			OutputDir:   "/tasks",
@@ -746,7 +746,7 @@ func TestAgentTool_AutoBackground(t *testing.T) {
 
 	mw, err := New(ctx, &Config{
 		SubAgents:  []adk.Agent{slowAgent},
-		Background: &BackgroundConfig[*schema.Message]{Manager: mgr},
+		Background: &BackgroundConfig{Manager: mgr},
 	})
 	require.NoError(t, err)
 
@@ -786,7 +786,7 @@ func TestAgentTool_AutoBackground_FastAgent(t *testing.T) {
 
 	mw, err := New(ctx, &Config{
 		SubAgents:  []adk.Agent{fastAgent},
-		Background: &BackgroundConfig[*schema.Message]{Manager: mgr},
+		Background: &BackgroundConfig{Manager: mgr},
 	})
 	require.NoError(t, err)
 
