@@ -270,8 +270,15 @@ func (r *agentEventFileReceiver[M]) receive(event *adk.TypedAgentEvent[M]) {
 	// Write the line and its newline in one call: a single write halves per-write
 	// backend overhead (lock/RPC) and keeps the line and its terminator atomic at the
 	// write boundary; the extra newline concat is cheap. io.WriteString uses the
-	// backend's StringWriter fast path when available, avoiding a []byte copy.
-	if _, err := io.WriteString(r.writer, line+"\n"); err != nil {
+	// backend's StringWriter fast path when available, avoiding a []byte copy. Treat a
+	// short write as an error even when the writer reports nil, so a truncated line
+	// marks the file unreliable rather than being trusted as authoritative.
+	data := line + "\n"
+	n, err := io.WriteString(r.writer, data)
+	if err == nil && n != len(data) {
+		err = io.ErrShortWrite
+	}
+	if err != nil {
 		r.fail(fmt.Errorf("write agent output: %w", err))
 	}
 }
