@@ -1,0 +1,21 @@
+adk/backgroundtask/manager.go
+  s_1f87e36eab1b35::t_8951cffaf711f8 173-177,196-199,1027-1036,1057-1063
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.5",
+  "base_commit_sha": "f105e64f1fbd884735f05e8921b84eab293c687f",
+  "prompts": {},
+  "sessions": {
+    "s_1f87e36eab1b35": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "0652c0c3-7051-4232-ac6b-113ea0baad42",
+        "model": "unknown"
+      },
+      "human_author": "lipandeng <lipandeng@bytedance.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
