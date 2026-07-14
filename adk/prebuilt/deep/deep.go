@@ -44,6 +44,11 @@ func init() {
 // agent. When set, shell commands and sub-agent runs can execute as managed
 // background tasks under one task-ID space, and the task_output/task_stop control
 // tools are injected once.
+//
+// It holds only configuration shared by both task kinds (shell and sub-agent). Knobs
+// that apply to only one kind — e.g. a custom sub-agent event encoder
+// (subagent.AgentEventFormat) — are intentionally not exposed here; compose the
+// subagent middleware directly when you need them.
 type BackgroundConfig struct {
 	// Manager is the shared background-task Manager. Required (a nil Manager is the
 	// same as no BackgroundConfig).
@@ -52,11 +57,11 @@ type BackgroundConfig struct {
 	// OutputDir, when set together with Config.Backend, gives every managed
 	// background task (shell command or sub-agent run) an output file under this
 	// directory. Shell runs tee their output there as it streams (interim output);
-	// sub-agent runs append materialized AgentEvents as JSONL. The path is recorded on
-	// Task.OutputFile and surfaced when the task is launched in the background, so a
-	// backgrounded task's output is retrievable by path. Sub-agent output files are
-	// created lazily, so the path may briefly be visible before the file exists. When
-	// empty, tasks have no output file.
+	// sub-agent runs write one JSON line per materialized event (the default encoder).
+	// The path is recorded on Task.OutputFile and surfaced when the task is launched
+	// in the background, so a backgrounded task's output is retrievable by path.
+	// Sub-agent output files are created lazily, so the path may briefly be visible
+	// before the file exists. When empty, tasks have no output file.
 	OutputDir string
 }
 
@@ -185,10 +190,11 @@ func NewTyped[M adk.MessageType](ctx context.Context, cfg *TypedConfig[M]) (adk.
 				ToolDescriptionGenerator: cfg.TaskToolDescriptionGenerator,
 			}
 			if cfg.Background != nil && cfg.Background.Manager != nil {
-				subCfg.Background = &subagent.BackgroundConfig{
+				subCfg.Background = &subagent.BackgroundConfig[M]{
 					Manager:     cfg.Background.Manager,
 					OutputStore: backendAppendOpener(cfg.Backend),
 					OutputDir:   cfg.Background.OutputDir,
+					// EventFormat left nil => subagent's default encoder.
 				}
 			}
 			subagentMW, err := subagent.NewTyped[M](ctx, subCfg)

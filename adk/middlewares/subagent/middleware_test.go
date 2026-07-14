@@ -112,7 +112,6 @@ func (s *stagedAgent) Run(context.Context, *adk.AgentInput, ...adk.AgentRunOptio
 }
 
 type outputEventRecord struct {
-	Type      string         `json:"type"`
 	AgentName string         `json:"agent_name"`
 	Message   map[string]any `json:"message"`
 }
@@ -216,7 +215,7 @@ func TestBeforeAgent_WithManager_InjectsAgentToolOnly(t *testing.T) {
 		SubAgents: []adk.Agent{
 			&mockAgent{name: "worker", desc: "does work"},
 		},
-		Background: &BackgroundConfig{Manager: mgr},
+		Background: &BackgroundConfig[*schema.Message]{Manager: mgr},
 	})
 	require.NoError(t, err)
 
@@ -325,7 +324,7 @@ func TestAgentTool_Background(t *testing.T) {
 
 	mw, err := New(ctx, &Config{
 		SubAgents:  []adk.Agent{slowAgent},
-		Background: &BackgroundConfig{Manager: mgr},
+		Background: &BackgroundConfig[*schema.Message]{Manager: mgr},
 	})
 	require.NoError(t, err)
 
@@ -402,7 +401,7 @@ func TestAgentTool_ForegroundWithTaskMgr(t *testing.T) {
 
 	mw, err := New(ctx, &Config{
 		SubAgents:  []adk.Agent{agent},
-		Background: &BackgroundConfig{Manager: mgr},
+		Background: &BackgroundConfig[*schema.Message]{Manager: mgr},
 	})
 	require.NoError(t, err)
 
@@ -426,7 +425,7 @@ func TestAgentTool_ForegroundWithTaskMgr(t *testing.T) {
 }
 
 // With OutputStore and OutputDir configured, a completed managed agent run writes
-// its AgentEvent output to the task's output file.
+// its events to the output file via the default encoder (one JSON record per line).
 func TestAgentTool_WritesOutputFile(t *testing.T) {
 	ctx := context.Background()
 	backend := filesystem.NewInMemoryBackend()
@@ -440,10 +439,11 @@ func TestAgentTool_WritesOutputFile(t *testing.T) {
 
 	mw, err := New(ctx, &Config{
 		SubAgents: []adk.Agent{&mockAgent{name: "fast", desc: "fast agent"}},
-		Background: &BackgroundConfig{
+		Background: &BackgroundConfig[*schema.Message]{
 			Manager:     mgr,
 			OutputStore: store,
 			OutputDir:   "/tasks",
+			// EventFormat omitted => default encoder (JSONL).
 		},
 	})
 	require.NoError(t, err)
@@ -466,9 +466,132 @@ func TestAgentTool_WritesOutputFile(t *testing.T) {
 	assert.EqualValues(t, 1, atomic.LoadInt32(&store.opens), "one append session should create and write the output file")
 	records := decodeOutputEventRecords(t, got.Content)
 	require.Len(t, records, 1)
-	assert.Equal(t, "message", records[0].Type)
+	assert.Equal(t, "fast", records[0].AgentName)
 	assert.Equal(t, "fast agent", records[0].Message["content"])
+	// The event kind is read from the message's own role, not a separate type field.
 	assert.Equal(t, string(schema.User), records[0].Message["role"])
+}
+
+// A custom EventFormat controls each line's bytes; the default format hint is not
+// advertised because the caller owns its own format.
+func TestAgentTool_CustomEventFormat(t *testing.T) {
+	ctx := context.Background()
+	backend := filesystem.NewInMemoryBackend()
+	mgr := backgroundtask.New(context.Background(), &backgroundtask.Config{})
+	defer func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_ = mgr.Close(closeCtx)
+	}()
+
+	format := func(_ context.Context, ev *adk.TypedAgentEvent[*schema.Message]) (string, error) {
+		msg, err := ev.Output.MessageOutput.GetMessage()
+		if err != nil {
+			return "", err
+		}
+		return "LINE:" + msg.Content, nil
+	}
+
+	mw, err := New(ctx, &Config{
+		SubAgents: []adk.Agent{&mockAgent{name: "fast", desc: "fast agent"}},
+		Background: &BackgroundConfig[*schema.Message]{
+			Manager:     mgr,
+			OutputStore: backend,
+			OutputDir:   "/tasks",
+			EventFormat: format,
+		},
+	})
+	require.NoError(t, err)
+
+	runCtx := &adk.ChatModelAgentContext[*schema.Message]{}
+	_, newRunCtx, err := mw.BeforeAgent(ctx, runCtx)
+	require.NoError(t, err)
+	at := newRunCtx.Tools[0].(tool.InvokableTool)
+
+	_, err = at.InvokableRun(ctx, `{"subagent_type":"fast","prompt":"task detail","description":"task"}`)
+	require.NoError(t, err)
+
+	tasks := mgr.List()
+	require.Len(t, tasks, 1)
+	got, err := backend.Read(ctx, &filesystem.ReadRequest{FilePath: tasks[0].OutputFile})
+	require.NoError(t, err)
+	assert.Equal(t, "LINE:fast agent\n", got.Content)
+}
+
+// An EventFormat that returns the skip signal for every event yields an empty file
+// (the FinalText-style pattern: skip all but the events you want to keep).
+func TestAgentTool_EventFormatSkipsAll(t *testing.T) {
+	ctx := context.Background()
+	backend := filesystem.NewInMemoryBackend()
+	mgr := backgroundtask.New(context.Background(), &backgroundtask.Config{})
+	defer func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_ = mgr.Close(closeCtx)
+	}()
+
+	skipAll := func(context.Context, *adk.TypedAgentEvent[*schema.Message]) (string, error) {
+		return "", nil
+	}
+
+	mw, err := New(ctx, &Config{
+		SubAgents: []adk.Agent{&mockAgent{name: "fast", desc: "fast agent"}},
+		Background: &BackgroundConfig[*schema.Message]{
+			Manager:     mgr,
+			OutputStore: backend,
+			OutputDir:   "/tasks",
+			EventFormat: skipAll,
+		},
+	})
+	require.NoError(t, err)
+
+	runCtx := &adk.ChatModelAgentContext[*schema.Message]{}
+	_, newRunCtx, err := mw.BeforeAgent(ctx, runCtx)
+	require.NoError(t, err)
+	at := newRunCtx.Tools[0].(tool.InvokableTool)
+
+	out, err := at.InvokableRun(ctx, `{"subagent_type":"fast","prompt":"task detail","description":"task"}`)
+	require.NoError(t, err)
+	assert.Equal(t, "fast agent", out, "skipping lines does not affect the returned result")
+
+	tasks := mgr.List()
+	require.Len(t, tasks, 1)
+	got, err := backend.Read(ctx, &filesystem.ReadRequest{FilePath: tasks[0].OutputFile})
+	require.NoError(t, err)
+	assert.Empty(t, got.Content, "every event skipped => empty file")
+}
+
+// The default encoder's format is surfaced to the launcher in the background-run
+// message (a closed loop inside the subagent middleware), so the model knows to read
+// the file as JSONL. A custom encoder gets no such description.
+func TestAgentTool_DefaultFormatAdvertisesHint(t *testing.T) {
+	ctx := context.Background()
+	backend := filesystem.NewInMemoryBackend()
+	mgr := backgroundtask.New(context.Background(), &backgroundtask.Config{})
+	defer func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_ = mgr.Close(closeCtx)
+	}()
+
+	mw, err := New(ctx, &Config{
+		SubAgents: []adk.Agent{&mockAgent{name: "fast", desc: "fast agent"}},
+		Background: &BackgroundConfig[*schema.Message]{
+			Manager:     mgr,
+			OutputStore: backend,
+			OutputDir:   "/tasks",
+		},
+	})
+	require.NoError(t, err)
+
+	runCtx := &adk.ChatModelAgentContext[*schema.Message]{}
+	_, newRunCtx, err := mw.BeforeAgent(ctx, runCtx)
+	require.NoError(t, err)
+	at := newRunCtx.Tools[0].(tool.InvokableTool)
+
+	msg, err := at.InvokableRun(ctx, `{"subagent_type":"fast","prompt":"task detail","description":"task","run_in_background":true}`)
+	require.NoError(t, err)
+	assert.Contains(t, msg, "JSONL", "the background-run message describes the default JSONL format")
 }
 
 func TestAgentTool_WritesInterimEventsWithoutParentReceiver(t *testing.T) {
@@ -485,7 +608,7 @@ func TestAgentTool_WritesInterimEventsWithoutParentReceiver(t *testing.T) {
 	firstSent := make(chan struct{})
 	mw, err := New(ctx, &Config{
 		SubAgents: []adk.Agent{&stagedAgent{release: release, firstSent: firstSent}},
-		Background: &BackgroundConfig{
+		Background: &BackgroundConfig[*schema.Message]{
 			Manager:     mgr,
 			OutputStore: backend,
 			OutputDir:   "/tasks",
@@ -623,7 +746,7 @@ func TestAgentTool_AutoBackground(t *testing.T) {
 
 	mw, err := New(ctx, &Config{
 		SubAgents:  []adk.Agent{slowAgent},
-		Background: &BackgroundConfig{Manager: mgr},
+		Background: &BackgroundConfig[*schema.Message]{Manager: mgr},
 	})
 	require.NoError(t, err)
 
@@ -663,7 +786,7 @@ func TestAgentTool_AutoBackground_FastAgent(t *testing.T) {
 
 	mw, err := New(ctx, &Config{
 		SubAgents:  []adk.Agent{fastAgent},
-		Background: &BackgroundConfig{Manager: mgr},
+		Background: &BackgroundConfig[*schema.Message]{Manager: mgr},
 	})
 	require.NoError(t, err)
 
