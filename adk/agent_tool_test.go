@@ -1319,6 +1319,26 @@ func TestAgentToolEventReceiver_ParentReceives(t *testing.T) {
 	assert.Contains(t, got, "child output")
 }
 
+func TestAgentToolEventReceiver_PreservesChildSessionEnvelope(t *testing.T) {
+	ctx := context.Background()
+	sub := &emitEventsAgent{events: []*AgentEvent{
+		EventFromMessage(schema.AssistantMessage("child output", nil), nil, schema.Assistant, ""),
+	}}
+	at := NewAgentTool(ctx, sub).(tool.InvokableTool)
+
+	var got *AgentEvent
+	_, err := at.InvokableRun(ctx, `{"request":"q"}`,
+		agenttool.WithEventReceiverTransform(func(current []agenttool.EventReceiver[*AgentEvent]) []agenttool.EventReceiver[*AgentEvent] {
+			return append(current, func(event *AgentEvent) { got = event })
+		}))
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	require.NotNil(t, got.SessionEventVariant)
+	assert.Contains(t, got.SessionEventVariant.SessionID, "agent_tool:")
+	require.NotNil(t, got.SessionEventVariant.Event)
+	assert.Equal(t, SessionEventMessage, got.SessionEventVariant.Event.Kind)
+}
+
 func TestAgentToolEventReceiver_LaterTransformCanSuppressParent(t *testing.T) {
 	ctx := context.Background()
 	sub := &emitEventsAgent{events: []*AgentEvent{
