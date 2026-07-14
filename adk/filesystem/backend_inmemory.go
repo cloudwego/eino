@@ -672,11 +672,15 @@ func (b *InMemoryBackend) OpenAppend(ctx context.Context, req *OpenAppendRequest
 // inMemoryAppendWriter is the append handle returned by InMemoryBackend.OpenAppend.
 // It is single-consumer; each write appends to the file entry under the backend lock.
 type inMemoryAppendWriter struct {
-	b    *InMemoryBackend
-	path string
+	b      *InMemoryBackend
+	path   string
+	closed bool // set by Close; further writes are rejected. Single-consumer: no lock needed.
 }
 
 func (s *inMemoryAppendWriter) Write(p []byte) (int, error) {
+	if s.closed {
+		return 0, io.ErrClosedPipe
+	}
 	if len(p) == 0 {
 		return 0, nil
 	}
@@ -692,6 +696,9 @@ func (s *inMemoryAppendWriter) Write(p []byte) (int, error) {
 
 // WriteString appends str without a []byte round-trip; io.WriteString detects it.
 func (s *inMemoryAppendWriter) WriteString(str string) (int, error) {
+	if s.closed {
+		return 0, io.ErrClosedPipe
+	}
 	if str == "" {
 		return 0, nil
 	}
@@ -716,9 +723,13 @@ func (s *inMemoryAppendWriter) entryLocked() *fileEntry {
 	return entry
 }
 
-// Close finalizes the session. In-memory writes are already applied, so there is
-// nothing to flush.
-func (s *inMemoryAppendWriter) Close() error { return nil }
+// Close finalizes the session: it is idempotent and rejects any later Write /
+// WriteString with io.ErrClosedPipe. In-memory writes are already applied, so there
+// is nothing to flush.
+func (s *inMemoryAppendWriter) Close() error {
+	s.closed = true
+	return nil
+}
 
 var (
 	_ io.WriteCloser  = (*inMemoryAppendWriter)(nil)

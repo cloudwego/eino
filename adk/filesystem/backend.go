@@ -261,7 +261,8 @@ type MultiModalReader interface {
 //   - Close flushes any buffered content, finalizes the session, and returns the
 //     first error observed over the stream's lifetime (nil if all writes landed).
 //     Closing a session in which nothing was written yields an empty file (the file
-//     is created on open).
+//     is created on open). Close is idempotent, and a Write after Close is rejected
+//     (it returns an error, e.g. io.ErrClosedPipe, and does not modify the file).
 //
 // A handle is single-consumer: it is not safe for concurrent use.
 //

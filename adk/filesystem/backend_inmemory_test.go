@@ -2515,6 +2515,38 @@ func TestInMemoryBackend_OpenAppend(t *testing.T) {
 		}
 	})
 
+	t.Run("write after close is rejected and does not mutate the file", func(t *testing.T) {
+		b := NewInMemoryBackend()
+		w, err := b.OpenAppend(ctx, &OpenAppendRequest{FilePath: "/closed.output"})
+		if err != nil {
+			t.Fatalf("OpenAppend failed: %v", err)
+		}
+		if _, err := io.WriteString(w, "kept\n"); err != nil {
+			t.Fatalf("write failed: %v", err)
+		}
+		if err := w.Close(); err != nil {
+			t.Fatalf("Close failed: %v", err)
+		}
+		// Close is idempotent.
+		if err := w.Close(); err != nil {
+			t.Fatalf("second Close failed: %v", err)
+		}
+		// Both write paths reject after Close with io.ErrClosedPipe.
+		if _, err := w.Write([]byte("dropped\n")); err != io.ErrClosedPipe {
+			t.Fatalf("Write after Close: got %v, want io.ErrClosedPipe", err)
+		}
+		if _, err := io.WriteString(w, "dropped\n"); err != io.ErrClosedPipe {
+			t.Fatalf("WriteString after Close: got %v, want io.ErrClosedPipe", err)
+		}
+		got, err := b.Read(ctx, &ReadRequest{FilePath: "/closed.output"})
+		if err != nil {
+			t.Fatalf("Read failed: %v", err)
+		}
+		if got.Content != "kept\n" {
+			t.Fatalf("file mutated after Close: got %q, want %q", got.Content, "kept\n")
+		}
+	})
+
 	// InMemoryBackend must satisfy the optional AppendOpener extension.
 	var _ AppendOpener = NewInMemoryBackend()
 }
