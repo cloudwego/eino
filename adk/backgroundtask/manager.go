@@ -153,16 +153,21 @@ type RunInput struct {
 	// ToolUseID is the optional id of the tool call launching this task, stored in
 	// Task.ToolUseID. See Task.ToolUseID.
 	ToolUseID string
-	// RunInBackground controls execution mode. Run returns immediately with
-	// StatusRunning; RunStream returns a caller stream that normally contains the
-	// background notice, optionally preceded by a bounded startup preview.
+	// RunInBackground starts the task in the background. Run returns an initial
+	// StatusRunning snapshot without waiting for the work. RunStream returns its
+	// caller-facing stream without waiting; consuming that stream normally yields
+	// the background notice, optionally preceded by a bounded startup preview. If
+	// the work reaches a terminal state during the preview, the stream instead
+	// ends after forwarding all work chunks, without a background notice.
 	RunInBackground bool
 	// BackgroundStartupPreviewMs keeps an explicit-background RunStream caller's
 	// stream open for up to this many milliseconds and forwards work chunks emitted
 	// during that startup window. When the window expires, RunStream appends the
 	// normal background notice, closes the caller stream, and drains the remaining
 	// work output in the background. This lets launch-time information such as an
-	// OAuth URL remain visible without changing the task's background lifecycle.
+	// OAuth URL remain visible without changing the task's background lifecycle. If
+	// the work finishes during the window, all chunks are forwarded and the caller
+	// stream closes without a background notice; the task is already terminal then.
 	// A value <= 0 disables the preview. Ignored by Run and by foreground RunStream
 	// executions (including their later auto-background transition).
 	BackgroundStartupPreviewMs int
@@ -888,7 +893,9 @@ func (c detachedCtx) Value(key any) any { return c.parent.Value(key) }
 // The execution mode depends on input.RunInBackground and the effective foreground
 // budget (input.ForegroundTimeoutMs if set, else the Manager's configured default):
 //   - Foreground (RunInBackground=false, budget<=0): blocks until completion
-//   - Background (RunInBackground=true): returns immediately with StatusRunning
+//   - Background (RunInBackground=true): returns an initial StatusRunning snapshot
+//     without waiting for work. The task may complete immediately afterward; use
+//     Get or task events to observe its current state.
 //   - Deadline (budget>0): runs in foreground up to the budget, then — if still
 //     running — consults the Manager's ShouldAutoBackground hook. If it permits,
 //     the run is moved to the background (kept running) and Run returns
@@ -1023,8 +1030,10 @@ type StreamWorkFunc func(ctx context.Context, task TaskInfo) (*schema.StreamRead
 //   - Explicit background (input.RunInBackground): the work runs detached from the
 //     start. By default no execution chunks reach the caller; when
 //     input.BackgroundStartupPreviewMs is positive, chunks emitted during that
-//     bounded startup window are forwarded before the background notice. The
-//     remaining output is drained into the task's Result/OutputFile.
+//     bounded startup window are forwarded. If work finishes during the preview,
+//     all chunks are forwarded and the stream closes with no background notice.
+//     Otherwise the notice ends the preview and the remaining output is drained
+//     into the task's Result/OutputFile.
 //
 // The returned reader is always non-nil on a nil error. The Manager is the sole
 // writer of that stream, so there is never a write race with the work.

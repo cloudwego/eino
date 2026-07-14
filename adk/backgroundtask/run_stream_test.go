@@ -184,6 +184,31 @@ func TestRunStream_ExplicitBackgroundStartupPreview(t *testing.T) {
 	assert.Equal(t, "authenticate at https://example.com/oauth\nauthenticated\n", task.Result)
 }
 
+// TestRunStream_ExplicitBackgroundStartupPreviewCompleted forwards all output and
+// omits the background notice when work finishes inside the preview window.
+func TestRunStream_ExplicitBackgroundStartupPreviewCompleted(t *testing.T) {
+	m := New(context.Background(), &Config{})
+	defer closeWithTimeout(m)
+
+	sr, err := m.RunStream(context.Background(), &RunInput{
+		Description:                "quick",
+		Type:                       "bash",
+		RunInBackground:            true,
+		BackgroundStartupPreviewMs: 500,
+	}, streamWorkChunks(0, "done"))
+	require.NoError(t, err)
+
+	got := drainStringStream(t, sr)
+	assert.Equal(t, "done", got)
+	assert.NotContains(t, got, "is running in the background")
+
+	tasks := m.List()
+	require.Len(t, tasks, 1)
+	assert.True(t, tasks[0].RunInBackground)
+	assert.Equal(t, StatusCompleted, tasks[0].Status)
+	assert.Equal(t, "done", tasks[0].Result)
+}
+
 // TestRunStream_WorkError: an error from the stream finalizes the task as failed
 // and surfaces on the caller's stream.
 func TestRunStream_WorkError(t *testing.T) {
