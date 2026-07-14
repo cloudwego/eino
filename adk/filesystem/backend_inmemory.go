@@ -30,8 +30,16 @@ import (
 )
 
 type fileEntry struct {
-	content    string
+	// content must not be copied after the first write. Overwrites replace the
+	// entire *fileEntry instead of resetting or copying the builder.
+	content    strings.Builder
 	modifiedAt time.Time
+}
+
+func newFileEntry(content string, modifiedAt time.Time) *fileEntry {
+	entry := &fileEntry{modifiedAt: modifiedAt}
+	entry.content.WriteString(content)
+	return entry
 }
 
 // InMemoryBackend is an in-memory implementation of the Backend interface.
@@ -75,7 +83,7 @@ func (b *InMemoryBackend) LsInfo(ctx context.Context, req *LsInfoRequest) ([]Fil
 					result = append(result, FileInfo{
 						Path:       filepath.Base(normalizedFilePath),
 						IsDir:      false,
-						Size:       int64(len(entry.content)),
+						Size:       int64(entry.content.Len()),
 						ModifiedAt: entry.modifiedAt.Format(time.RFC3339Nano),
 					})
 					seen[normalizedFilePath] = true
@@ -105,7 +113,7 @@ func (b *InMemoryBackend) LsInfo(ctx context.Context, req *LsInfoRequest) ([]Fil
 						result = append(result, FileInfo{
 							Path:       parts[0],
 							IsDir:      false,
-							Size:       int64(len(entry.content)),
+							Size:       int64(entry.content.Len()),
 							ModifiedAt: entry.modifiedAt.Format(time.RFC3339Nano),
 						})
 					}
@@ -152,7 +160,7 @@ func (b *InMemoryBackend) Read(ctx context.Context, req *ReadRequest) (*FileCont
 	}
 	limit := req.Limit
 
-	content := entry.content
+	content := entry.content.String()
 
 	// Fast path: no offset and no limit — return as-is
 	if offset == 0 && limit <= 0 {
@@ -229,7 +237,7 @@ func (b *InMemoryBackend) GrepRaw(ctx context.Context, req *GrepRequest) ([]Grep
 	if len(filteredFiles) == 1 {
 		collector := newGrepCollector()
 		entry := b.files[filteredFiles[0]]
-		collector.processFile(filteredFiles[0], entry.content, re, req)
+		collector.processFile(filteredFiles[0], entry.content.String(), re, req)
 		return collector.buildResults(b, req)
 	}
 
@@ -285,7 +293,7 @@ func (b *InMemoryBackend) grepFilesInParallel(filteredFiles []string, re *regexp
 		entry := b.files[filePath]
 		tasks <- fileTask{
 			path:    filePath,
-			content: entry.content,
+			content: entry.content.String(),
 		}
 	}
 	close(tasks)
@@ -538,6 +546,10 @@ func (b *InMemoryBackend) applyContext(matches []GrepMatch, req *GrepRequest) []
 		// Get file content once per file
 		b.mu.RLock()
 		entry, exists := b.files[filePath]
+		var content string
+		if exists {
+			content = entry.content.String()
+		}
 		b.mu.RUnlock()
 
 		if !exists {
@@ -546,7 +558,7 @@ func (b *InMemoryBackend) applyContext(matches []GrepMatch, req *GrepRequest) []
 			continue
 		}
 
-		lines := strings.Split(entry.content, "\n")
+		lines := strings.Split(content, "\n")
 		processedLines := make(map[int]bool)
 
 		// Process all matches for this file
@@ -618,7 +630,7 @@ func (b *InMemoryBackend) GlobInfo(ctx context.Context, req *GlobInfoRequest) ([
 			result = append(result, FileInfo{
 				Path:       resultPath,
 				IsDir:      false,
-				Size:       int64(len(entry.content)),
+				Size:       int64(entry.content.Len()),
 				ModifiedAt: entry.modifiedAt.Format(time.RFC3339Nano),
 			})
 		}
@@ -633,10 +645,7 @@ func (b *InMemoryBackend) Write(ctx context.Context, req *WriteRequest) error {
 	defer b.mu.Unlock()
 
 	filePath := normalizePath(req.FilePath)
-	b.files[filePath] = &fileEntry{
-		content:    req.Content,
-		modifiedAt: time.Now(),
-	}
+	b.files[filePath] = newFileEntry(req.Content, time.Now())
 
 	return nil
 }
@@ -653,7 +662,7 @@ func (b *InMemoryBackend) OpenAppend(ctx context.Context, req *OpenAppendRequest
 	// Create-on-open: an open + close with no writes yields an empty file.
 	b.mu.Lock()
 	if _, ok := b.files[filePath]; !ok {
-		b.files[filePath] = &fileEntry{content: "", modifiedAt: time.Now()}
+		b.files[filePath] = newFileEntry("", time.Now())
 	}
 	b.mu.Unlock()
 
@@ -668,28 +677,43 @@ type inMemoryAppendWriter struct {
 }
 
 func (s *inMemoryAppendWriter) Write(p []byte) (int, error) {
-	return s.WriteString(string(p))
+	if len(p) == 0 {
+		return 0, nil
+	}
+
+	s.b.mu.Lock()
+	defer s.b.mu.Unlock()
+
+	entry := s.entryLocked()
+	n, _ := entry.content.Write(p)
+	entry.modifiedAt = time.Now()
+	return n, nil
 }
 
 // WriteString appends str without a []byte round-trip; io.WriteString detects it.
 func (s *inMemoryAppendWriter) WriteString(str string) (int, error) {
-	s.append(str)
-	return len(str), nil
-}
-
-func (s *inMemoryAppendWriter) append(content string) {
-	if content == "" {
-		return
+	if str == "" {
+		return 0, nil
 	}
+
 	s.b.mu.Lock()
 	defer s.b.mu.Unlock()
 
+	entry := s.entryLocked()
+	n, _ := entry.content.WriteString(str)
+	entry.modifiedAt = time.Now()
+	return n, nil
+}
+
+// entryLocked returns the current file entry, recreating it if another caller
+// removed it after OpenAppend. The backend write lock must be held by the caller.
+func (s *inMemoryAppendWriter) entryLocked() *fileEntry {
 	if entry, ok := s.b.files[s.path]; ok {
-		entry.content += content
-		entry.modifiedAt = time.Now()
-		return
+		return entry
 	}
-	s.b.files[s.path] = &fileEntry{content: content, modifiedAt: time.Now()}
+	entry := newFileEntry("", time.Now())
+	s.b.files[s.path] = entry
+	return entry
 }
 
 // Close finalizes the session. In-memory writes are already applied, so there is
@@ -717,7 +741,7 @@ func (b *InMemoryBackend) Edit(ctx context.Context, req *EditRequest) error {
 		return fmt.Errorf("oldString must be non-empty")
 	}
 
-	content := entry.content
+	content := entry.content.String()
 	if !strings.Contains(content, req.OldString) {
 		return fmt.Errorf("oldString not found in file: %s", filePath)
 	}
@@ -739,10 +763,7 @@ func (b *InMemoryBackend) Edit(ctx context.Context, req *EditRequest) error {
 		newContent = strings.Replace(content, req.OldString, req.NewString, 1)
 	}
 
-	b.files[filePath] = &fileEntry{
-		content:    newContent,
-		modifiedAt: time.Now(),
-	}
+	b.files[filePath] = newFileEntry(newContent, time.Now())
 
 	return nil
 }

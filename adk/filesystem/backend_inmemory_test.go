@@ -2518,3 +2518,38 @@ func TestInMemoryBackend_OpenAppend(t *testing.T) {
 	// InMemoryBackend must satisfy the optional AppendOpener extension.
 	var _ AppendOpener = NewInMemoryBackend()
 }
+
+func BenchmarkInMemoryBackend_OpenAppend(b *testing.B) {
+	const (
+		chunkSize  = 1024
+		chunkCount = 1024
+	)
+	ctx := context.Background()
+	chunk := strings.Repeat("x", chunkSize)
+
+	b.ReportAllocs()
+	b.SetBytes(chunkSize * chunkCount)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		backend := NewInMemoryBackend()
+		writer, err := backend.OpenAppend(ctx, &OpenAppendRequest{FilePath: "/out"})
+		if err != nil {
+			b.Fatal(err)
+		}
+		for j := 0; j < chunkCount; j++ {
+			if _, err = io.WriteString(writer, chunk); err != nil {
+				b.Fatal(err)
+			}
+		}
+		if err = writer.Close(); err != nil {
+			b.Fatal(err)
+		}
+		content, err := backend.Read(ctx, &ReadRequest{FilePath: "/out"})
+		if err != nil {
+			b.Fatal(err)
+		}
+		if got, want := len(content.Content), chunkSize*chunkCount; got != want {
+			b.Fatalf("unexpected content length: got %d, want %d", got, want)
+		}
+	}
+}
