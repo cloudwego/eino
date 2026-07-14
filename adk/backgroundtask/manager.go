@@ -1091,7 +1091,8 @@ func (m *Manager) forwardStream(r *streamRun) {
 	// A panic constructing the work stream (r.work below) lands here, before sw is
 	// closed: fail the task and surface it on the caller stream. Panics while reading
 	// chunks are recovered closer to their source — pumpStream for the foreground
-	// loop, drainReader for the background drain — so this never double-closes sw.
+	// and preview loops, drainReader for the direct background drain — so this never
+	// double-closes sw.
 	defer func() {
 		if p := recover(); p != nil {
 			err := safe.NewPanicErr(p, debug.Stack())
@@ -1123,21 +1124,43 @@ func (m *Manager) forwardStream(r *streamRun) {
 	// URL) remains visible. After the preview, or immediately when it is disabled,
 	// cap the caller stream with a notice and drain the rest into the result.
 	if r.input.RunInBackground {
-		if r.input.BackgroundStartupPreviewMs > 0 {
-			m.previewBackgroundStartup(r, ws, &buf)
+		if r.input.BackgroundStartupPreviewMs <= 0 {
+			r.sw.Send(m.backgroundStartNotice(r.runCtx, r.id), nil)
+			r.sw.Close()
+			m.drainReader(r.id, ws, &buf)
 			return
 		}
-		r.sw.Send(m.backgroundStartNotice(r.runCtx, r.id), nil)
-		r.sw.Close()
-		m.drainReader(r.id, ws, &buf)
+		m.forwardPumpedStream(r, ws, &buf, pumpedStreamBackgroundPreview)
 		return
 	}
 
+	m.forwardPumpedStream(r, ws, &buf, pumpedStreamForeground)
+}
+
+// pumpedStreamMode describes the caller-visible phase handled by
+// forwardPumpedStream. Both modes need pumpStream so they can select on blocking
+// work output together with a timer and caller cancellation. Explicit background
+// runs without a preview bypass this path and use drainReader directly.
+type pumpedStreamMode uint8
+
+const (
+	pumpedStreamForeground pumpedStreamMode = iota
+	pumpedStreamBackgroundPreview
+)
+
+// forwardPumpedStream forwards chunks during a foreground or explicit-background
+// preview phase. The chunk, completion, and error paths are shared; only caller
+// abandonment and timer expiry have mode-specific lifecycle semantics.
+func (m *Manager) forwardPumpedStream(r *streamRun, ws *schema.StreamReader[string], buf *strings.Builder, mode pumpedStreamMode) {
 	chunks := pumpStream(r.runCtx, ws)
 
 	var timerC <-chan time.Time
-	if r.budgetMs > 0 {
-		timer := time.NewTimer(time.Duration(r.budgetMs) * time.Millisecond)
+	timerMs := r.budgetMs
+	if mode == pumpedStreamBackgroundPreview {
+		timerMs = r.input.BackgroundStartupPreviewMs
+	}
+	if timerMs > 0 {
+		timer := time.NewTimer(time.Duration(timerMs) * time.Millisecond)
 		defer timer.Stop()
 		timerC = timer.C
 	}
@@ -1158,16 +1181,36 @@ func (m *Manager) forwardStream(r *streamRun) {
 			}
 			buf.WriteString(c.text)
 			if r.sw.Send(c.text, nil) {
-				// Caller closed the stream early (abandoned the read): stop the work.
+				if mode == pumpedStreamBackgroundPreview {
+					// The caller stopped reading the preview. The task was explicitly
+					// backgrounded, so keep it running and drain the remaining output.
+					r.sw.Close()
+					m.drainStream(r.runCtx, r.id, chunks, buf)
+					return
+				}
+				// Caller closed a foreground stream early: stop the work.
 				m.cancelIfRunning(r.id)
 				return
 			}
 		case <-r.callerCtx.Done():
+			if mode == pumpedStreamBackgroundPreview {
+				// Caller cancellation does not stop an explicitly backgrounded task.
+				// Stop previewing and keep draining under the detached run context.
+				r.sw.Close()
+				m.drainStream(r.runCtx, r.id, chunks, buf)
+				return
+			}
 			// Caller abandoned the foreground wait before the deadline: stop work.
 			m.cancelIfRunning(r.id)
 			r.sw.Close()
 			return
 		case <-timerC:
+			if mode == pumpedStreamBackgroundPreview {
+				r.sw.Send(m.backgroundStartNotice(r.runCtx, r.id), nil)
+				r.sw.Close()
+				m.drainStream(r.runCtx, r.id, chunks, buf)
+				return
+			}
 			task, ok := m.Get(r.id)
 			if !ok || task.DoneAt != nil {
 				continue // finished right at the deadline; let the chunks case end it
@@ -1177,58 +1220,11 @@ func (m *Manager) forwardStream(r *streamRun) {
 				// keep draining the rest into the task result.
 				r.sw.Send(m.backgroundMoveNotice(r.runCtx, r.id), nil)
 				r.sw.Close()
-				m.drainStream(r.runCtx, r.id, chunks, &buf)
+				m.drainStream(r.runCtx, r.id, chunks, buf)
 				return
 			}
 			m.timeoutTask(r.id, r.budgetMs)
 			r.sw.Close()
-			return
-		}
-	}
-}
-
-// previewBackgroundStartup forwards the initial chunks of an explicitly
-// backgrounded stream for a bounded time. The task is backgrounded before this
-// function starts; the preview affects only caller visibility, not lifecycle.
-// Once the window expires it emits the normal background notice, closes the
-// caller stream, and continues draining the same pumped stream in the background.
-func (m *Manager) previewBackgroundStartup(r *streamRun, ws *schema.StreamReader[string], buf *strings.Builder) {
-	chunks := pumpStream(r.runCtx, ws)
-	timer := time.NewTimer(time.Duration(r.input.BackgroundStartupPreviewMs) * time.Millisecond)
-	defer timer.Stop()
-
-	for {
-		select {
-		case c := <-chunks:
-			if c.err == io.EOF {
-				m.completeTask(r.id, buf.String())
-				r.sw.Close()
-				return
-			}
-			if c.err != nil {
-				m.failTask(r.id, c.err)
-				r.sw.Send("", c.err)
-				r.sw.Close()
-				return
-			}
-			buf.WriteString(c.text)
-			if r.sw.Send(c.text, nil) {
-				// The caller stopped reading the preview. The task was explicitly
-				// backgrounded, so keep it running and drain the remaining output.
-				r.sw.Close()
-				m.drainStream(r.runCtx, r.id, chunks, buf)
-				return
-			}
-		case <-r.callerCtx.Done():
-			// Caller cancellation does not stop an explicitly backgrounded task.
-			// Stop previewing and keep draining under the detached run context.
-			r.sw.Close()
-			m.drainStream(r.runCtx, r.id, chunks, buf)
-			return
-		case <-timer.C:
-			r.sw.Send(m.backgroundStartNotice(r.runCtx, r.id), nil)
-			r.sw.Close()
-			m.drainStream(r.runCtx, r.id, chunks, buf)
 			return
 		}
 	}
