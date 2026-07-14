@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -310,6 +311,43 @@ func isAssistantRole[M adk.MessageType](msg M) bool {
 		return m != nil && m.Role == schema.Assistant
 	case *schema.AgenticMessage:
 		return m != nil && m.Role == schema.AgenticRoleTypeAssistant
+	default:
+		panic("unreachable")
+	}
+}
+
+func concatMessageStream[M adk.MessageType](r *schema.StreamReader[M]) (M, error) {
+	var chunks []M
+	for {
+		chunk, err := r.Recv()
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			var zero M
+			return zero, err
+		}
+		chunks = append(chunks, chunk)
+	}
+
+	var zero M
+	if len(chunks) == 0 {
+		return zero, nil
+	}
+
+	switch any(zero).(type) {
+	case *schema.Message:
+		msg, err := schema.ConcatMessages(any(chunks).([]*schema.Message))
+		if err != nil {
+			return zero, err
+		}
+		return any(msg).(M), nil
+	case *schema.AgenticMessage:
+		msg, err := schema.ConcatAgenticMessages(any(chunks).([]*schema.AgenticMessage))
+		if err != nil {
+			return zero, err
+		}
+		return any(msg).(M), nil
 	default:
 		panic("unreachable")
 	}
