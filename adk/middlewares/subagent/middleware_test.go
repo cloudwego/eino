@@ -119,11 +119,11 @@ type outputEventRecord struct {
 
 type countingAppendStore struct {
 	backend *filesystem.InMemoryBackend
-	opens   atomic.Int32
+	opens   int32
 }
 
 func (s *countingAppendStore) OpenAppend(ctx context.Context, req *filesystem.OpenAppendRequest) (io.WriteCloser, error) {
-	s.opens.Add(1)
+	atomic.AddInt32(&s.opens, 1)
 	return s.backend.OpenAppend(ctx, req)
 }
 
@@ -463,7 +463,7 @@ func TestAgentTool_WritesOutputFile(t *testing.T) {
 
 	got, err := backend.Read(ctx, &filesystem.ReadRequest{FilePath: path})
 	require.NoError(t, err)
-	assert.EqualValues(t, 1, store.opens.Load(), "one append session should create and write the output file")
+	assert.EqualValues(t, 1, atomic.LoadInt32(&store.opens), "one append session should create and write the output file")
 	records := decodeOutputEventRecords(t, got.Content)
 	require.Len(t, records, 1)
 	assert.Equal(t, "message", records[0].Type)
