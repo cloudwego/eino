@@ -431,7 +431,10 @@ func (m *middleware[M]) BeforeModelRewriteState(ctx context.Context, state *adk.
 	fut.applied = true
 	fut.mu.Unlock()
 
-	return ctx, &adk.TypedChatModelAgentState[M]{Messages: msgs}, nil
+	nState := *state
+	nState.Messages = msgs
+
+	return ctx, &nState, nil
 }
 
 type topicSelectionResp struct {
