@@ -231,8 +231,10 @@ func (e *agentEventWrapper) consumeStream() {
 // - safe to set fields of TypedAgentEvent
 // - safe to extend RunPath
 // - safe to receive from MessageStream
+// - safe to set fields on SessionEventVariant and its Event / MessageStreamRef
 // NOTE: even if the event is copied, it's still not recommended to modify
-// the Message itself or Chunks of the MessageStream, as they are not copied.
+// the Message itself, nested SessionEvent payloads, or Chunks of the
+// MessageStream, as they are not copied.
 // NOTE: if you have CustomizedOutput or CustomizedAction, they are NOT copied.
 func copyTypedAgentEvent[M MessageType](ae *TypedAgentEvent[M]) *TypedAgentEvent[M] {
 	rp := make([]RunStep, len(ae.RunPath))
@@ -243,6 +245,18 @@ func copyTypedAgentEvent[M MessageType](ae *TypedAgentEvent[M]) *TypedAgentEvent
 		RunPath:   rp,
 		Action:    ae.Action,
 		Err:       ae.Err,
+	}
+	if variant := ae.SessionEventVariant; variant != nil {
+		copiedVariant := *variant
+		if variant.Event != nil {
+			copiedEvent := *variant.Event
+			copiedVariant.Event = &copiedEvent
+		}
+		if variant.MessageStreamRef != nil {
+			copiedRef := *variant.MessageStreamRef
+			copiedVariant.MessageStreamRef = &copiedRef
+		}
+		copied.SessionEventVariant = &copiedVariant
 	}
 
 	if ae.Output == nil {
