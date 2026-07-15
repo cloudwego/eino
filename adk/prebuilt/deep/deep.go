@@ -44,6 +44,11 @@ func init() {
 // agent. When set, shell commands and sub-agent runs can execute as managed
 // background tasks under one task-ID space, and the task_output/task_stop control
 // tools are injected once.
+//
+// It holds only configuration shared by both task kinds (shell and sub-agent). Knobs
+// that apply to only one kind — e.g. a custom sub-agent event encoder
+// (subagent.AgentEventFormat) — are intentionally not exposed here; compose the
+// subagent middleware directly when you need them.
 type BackgroundConfig struct {
 	// Manager is the shared background-task Manager. Required (a nil Manager is the
 	// same as no BackgroundConfig).
@@ -52,10 +57,11 @@ type BackgroundConfig struct {
 	// OutputDir, when set together with Config.Backend, gives every managed
 	// background task (shell command or sub-agent run) an output file under this
 	// directory. Shell runs tee their output there as it streams (interim output);
-	// sub-agent runs write their final result there. The path is recorded on
-	// Task.OutputFile and surfaced when the task is launched in the background, so a
-	// backgrounded task's output is retrievable by path. When empty, tasks have no
-	// output file.
+	// sub-agent runs write one JSON line per materialized event (the default encoder).
+	// The path is recorded on Task.OutputFile and surfaced when the task is launched
+	// in the background, so a backgrounded task's output is retrievable by path.
+	// Sub-agent output files are created lazily, so the path may briefly be visible
+	// before the file exists. When empty, tasks have no output file.
 	OutputDir string
 }
 
@@ -184,10 +190,11 @@ func NewTyped[M adk.MessageType](ctx context.Context, cfg *TypedConfig[M]) (adk.
 				ToolDescriptionGenerator: cfg.TaskToolDescriptionGenerator,
 			}
 			if cfg.Background != nil && cfg.Background.Manager != nil {
-				subCfg.Background = &subagent.BackgroundConfig{
+				subCfg.Background = &subagent.TypedBackgroundConfig[M]{
 					Manager:     cfg.Background.Manager,
-					OutputStore: backendAppender(cfg.Backend),
+					OutputStore: backendAppendOpener(cfg.Backend),
 					OutputDir:   cfg.Background.OutputDir,
+					// EventFormat left nil => subagent's default encoder.
 				}
 			}
 			subagentMW, err := subagent.NewTyped[M](ctx, subCfg)
@@ -328,7 +335,7 @@ func buildTypedBuiltinAgentMiddlewares[M adk.MessageType](ctx context.Context, c
 		if background != nil && background.Manager != nil {
 			mwCfg.Background = &filesystem2.BackgroundConfig{
 				Manager:     background.Manager,
-				OutputStore: backendAppender(cfg.Backend),
+				OutputStore: backendAppendOpener(cfg.Backend),
 				OutputDir:   background.OutputDir,
 			}
 		}
@@ -342,12 +349,12 @@ func buildTypedBuiltinAgentMiddlewares[M adk.MessageType](ctx context.Context, c
 	return ms, nil
 }
 
-// backendAppender returns b as a filesystem.Appender when it supports incremental
-// append, or nil otherwise — in which case background tasks run without output
-// files. The default InMemoryBackend implements Appender.
-func backendAppender(b filesystem.Backend) filesystem.Appender {
-	ap, _ := b.(filesystem.Appender)
-	return ap
+// backendAppendOpener returns b as a filesystem.AppendOpener when it supports
+// incremental append, or nil otherwise — in which case background tasks run without
+// output files. The default InMemoryBackend implements AppendOpener.
+func backendAppendOpener(b filesystem.Backend) filesystem.AppendOpener {
+	ao, _ := b.(filesystem.AppendOpener)
+	return ao
 }
 
 type TODO struct {
