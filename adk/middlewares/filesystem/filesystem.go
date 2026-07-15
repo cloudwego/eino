@@ -88,9 +88,10 @@ type ExecuteToolConfig struct {
 // When set, the execute tool gains a run_in_background field and routes runs
 // through the shared Manager, so background and auto-background runs are tracked
 // and visible to the task_output/task_stop control tools. With a StreamingShell
-// backend the foreground phase still streams in real time; once a run moves to the
-// background its stream is capped with a notice and the rest is collected into the
-// task result.
+// backend the foreground phase still streams in real time. An explicit background
+// launch briefly previews startup output before its stream is capped with a notice;
+// an auto-background transition caps it immediately. The remaining output is
+// collected into the task result.
 type BackgroundConfig struct {
 	// Manager is the shared background-task Manager. Required (a nil Manager is the
 	// same as no BackgroundConfig). It may be shared with other middlewares (e.g.
@@ -102,10 +103,10 @@ type BackgroundConfig struct {
 	// file at OutputDir/<id>.output: streaming runs append their chunks to it as
 	// they arrive (interim output), buffered runs append their result on completion.
 	// The path is recorded on Task.OutputFile and surfaced in the background notice.
-	// OutputStore is a filesystem.Appender (filesystem.InMemoryBackend implements
-	// it); supply your own to direct output elsewhere. When either is unset, runs
-	// have no output file.
-	OutputStore filesystem.Appender
+	// OutputStore is a filesystem.AppendOpener (filesystem.InMemoryBackend
+	// implements it); supply your own to direct output elsewhere. When either is
+	// unset, runs have no output file.
+	OutputStore filesystem.AppendOpener
 	OutputDir   string
 }
 
@@ -597,7 +598,7 @@ func createExecuteTool(middlewareConfig *MiddlewareConfig) (tool.BaseTool, error
 				middlewareConfig.Shell,
 				middlewareConfig.StreamingShell,
 				outputSink{
-					appender:  middlewareConfig.Background.OutputStore,
+					store:     middlewareConfig.Background.OutputStore,
 					outputDir: middlewareConfig.Background.OutputDir,
 				},
 				executeConfig.Name,
@@ -1085,7 +1086,7 @@ type executeArgs struct {
 type executeManagedArgs struct {
 	executeArgs
 	RunInBackground bool `json:"run_in_background,omitempty" jsonschema_description:"Set to true to run the command in the background. You will be notified when it completes; use task_output to query it and task_stop to cancel it."`
-	// TimeoutMS is the foreground budget in milliseconds. When omitted, the configured
+	// TimeoutMS is the foreground timeout in milliseconds. When omitted, the configured
 	// default applies. Ignored when run_in_background is true. What happens at the
 	// deadline (move to background vs. stop) is decided by the Manager's
 	// ShouldAutoBackground policy and is intentionally not surfaced to the model.
