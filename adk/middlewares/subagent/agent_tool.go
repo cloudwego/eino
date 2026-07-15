@@ -19,6 +19,7 @@ package subagent
 import (
 	"context"
 	"fmt"
+	"io"
 	"path/filepath"
 	"strings"
 
@@ -96,12 +97,29 @@ func newAgentTool(subAgents map[string]tool.InvokableTool, name, desc string) (t
 // agent-as-tool invocation in a managed task, so foreground behavior is identical
 // and only lifecycle/background switching is layered on top.
 //
-// When store and outputDir are both set, each run is given an output file at
-// outputDir/<uuid>.output: the file is created empty up front so its advertised
-// path exists immediately, and the sub-agent's final result is appended there on
-// completion. The Manager never writes — the tool owns it. store is a
-// filesystem.Appender; output files require one (no rewrite fallback).
-func newManagedAgentTool(mgr *backgroundtask.Manager, subAgents map[string]tool.InvokableTool, store filesystem.Appender, outputDir, name, desc string) (tool.BaseTool, error) {
+// agentOutput bundles the output-file configuration for a managed agent tool: the
+// AppendOpener to write through, the directory to reserve paths under, and the
+// per-event encoder. A zero store or outputDir disables output files. A nil format
+// selects the built-in default encoder (see defaultAgentEventFormat).
+type agentOutput[M adk.MessageType] struct {
+	store     filesystem.AppendOpener
+	outputDir string
+	format    AgentEventFormat[M]
+}
+
+// When sink.store and sink.outputDir are both set, each run is given an output file
+// at outputDir/<uuid>.output, and the work callback lazily creates it and keeps one
+// append writer open while the sub-agent runs, writing one line per materialized
+// AgentEvent through sink.format (or the default encoder when it is nil). The path is
+// allocated before the run. The Manager never writes — the tool owns the writer.
+// sink.store is a filesystem.AppendOpener; output files require one (no rewrite
+// fallback).
+func newManagedAgentTool[M adk.MessageType](mgr *backgroundtask.Manager, subAgents map[string]tool.InvokableTool, sink agentOutput[M], name, desc string) (tool.BaseTool, error) {
+	format := sink.format
+	var formatHint string // set only for the default encoder, whose format we can describe
+	if format == nil {
+		format, formatHint = defaultAgentEventFormat[M], outputFileFormatHint
+	}
 	return utils.InferOptionableTool(name, desc,
 		func(ctx context.Context, in agentManagedInput, opts ...tool.Option) (string, error) {
 			a, params, err := resolveSubAgent(subAgents, in.SubagentType, in.Prompt, in.Description)
@@ -109,7 +127,7 @@ func newManagedAgentTool(mgr *backgroundtask.Manager, subAgents map[string]tool.
 				return "", err
 			}
 
-			outputFile := reserveAgentOutputFile(ctx, store, outputDir)
+			outputFile := agentOutputFilePath(ctx, sink.store, sink.outputDir)
 
 			result, err := mgr.Run(ctx, &backgroundtask.RunInput{
 				Description:     in.Description,
@@ -119,26 +137,38 @@ func newManagedAgentTool(mgr *backgroundtask.Manager, subAgents map[string]tool.
 				Metadata:        map[string]any{MetadataKeySubagentType: in.SubagentType},
 				OutputFile:      outputFile,
 			}, func(workCtx context.Context, task backgroundtask.TaskInfo) (string, error) {
-				// Bound the inner agent's forwarding to the launching turn's event
-				// stream by the task's backgrounded signal: a backgrounded run outlives
-				// the turn (which closes its event generator on turn end), so forwarding
-				// to it past that point is wrong and unsafe. The AgentTool stops
-				// forwarding when task.Backgrounded fires — for an explicit
-				// run_in_background it is already closed here, for an auto-backgrounded
-				// run it closes at the deadline. Foreground runs never fire it and
-				// forward for their whole lifetime.
-				runOpts := append(opts, agenttool.WithForwardGate(task.Backgrounded))
+				var outputReceiver agenttool.EventReceiver[*adk.TypedAgentEvent[M]]
+				if outputFile != "" {
+					writer, openErr := sink.store.OpenAppend(workCtx, &filesystem.OpenAppendRequest{FilePath: outputFile})
+					if openErr != nil {
+						mgr.MarkOutputFileUnreliable(task.ID, openErr.Error())
+					} else {
+						fileReceiver := &agentEventFileReceiver[M]{
+							ctx:    workCtx,
+							writer: writer,
+							format: format,
+							onError: func(err error) {
+								mgr.MarkOutputFileUnreliable(task.ID, err.Error())
+							},
+						}
+						outputReceiver = fileReceiver.receive
+						defer func() {
+							if closeErr := writer.Close(); closeErr != nil {
+								fileReceiver.fail(fmt.Errorf("close agent output file: %w", closeErr))
+							}
+						}()
+					}
+				}
+
+				// Existing receivers came from the launching parent agent. Gate only
+				// those receivers when the task is backgrounded, then append the task's
+				// output-file receiver (nil when output files are off) after the gate so
+				// it continues receiving events.
+				runOpts := append(opts, agenttool.WithEventReceiverTransform(
+					managedEventReceiverTransform(task.Backgrounded, outputReceiver)))
 				out, runErr := a.InvokableRun(workCtx, params, runOpts...)
 				if runErr != nil {
 					return "", runErr
-				}
-				if outputFile != "" {
-					if appendErr := store.Append(workCtx, &filesystem.AppendRequest{FilePath: outputFile, Content: out}); appendErr != nil {
-						// The result never reached the file: mark it unreliable (by task id)
-						// so task_output reports the file's failed state instead of trusting
-						// the empty/partial file.
-						mgr.MarkOutputFileUnreliable(task.ID, appendErr.Error())
-					}
 				}
 				return out, nil
 			})
@@ -156,7 +186,11 @@ func newManagedAgentTool(mgr *backgroundtask.Manager, subAgents map[string]tool.
 				}
 				msg += " You will be notified when it completes."
 				if result.OutputFile != "" {
-					msg += " To check interim output, use Read on that file path."
+					if formatHint != "" {
+						msg += fmt.Sprintf(" To check interim output, use Read on that file path (%s).", formatHint)
+					} else {
+						msg += " To check interim output, use Read on that file path."
+					}
 				}
 				return msg, nil
 			case backgroundtask.StatusFailed:
@@ -171,14 +205,146 @@ func newManagedAgentTool(mgr *backgroundtask.Manager, subAgents map[string]tool.
 		})
 }
 
-// reserveAgentOutputFile reserves an output-file path under outputDir and creates
-// it empty (via Append) so the path exists before the run completes. The file is
-// named after the launching tool-call id (so it matches Task.ToolUseID), falling
-// back to a uuid when no tool-call id is in context. Returns "" when output files
-// are not configured (no store / no dir) or when the up-front reservation write
-// fails — in the latter case the task advertises no output file, so consumers
-// fall back to the in-memory Result.
-func reserveAgentOutputFile(ctx context.Context, store filesystem.Appender, outputDir string) string {
+// managedEventReceiverTransform gates the parent receivers configured before
+// it and then appends the task receiver. An empty current slice is valid: that
+// is the EmitInternalEvents=false path, where only task output is needed.
+func managedEventReceiverTransform[E any](backgrounded <-chan struct{}, taskReceiver agenttool.EventReceiver[E]) agenttool.EventReceiverTransform[E] {
+	return func(current []agenttool.EventReceiver[E]) []agenttool.EventReceiver[E] {
+		for i := range current {
+			receiver := current[i]
+			current[i] = func(event E) {
+				if !signalClosed(backgrounded) {
+					receiver(event)
+				}
+			}
+		}
+		if taskReceiver != nil {
+			current = append(current, taskReceiver)
+		}
+		return current
+	}
+}
+
+func signalClosed(done <-chan struct{}) bool {
+	if done == nil {
+		return false
+	}
+	select {
+	case <-done:
+		return true
+	default:
+		return false
+	}
+}
+
+type agentEventFileReceiver[M adk.MessageType] struct {
+	ctx     context.Context
+	writer  io.Writer
+	format  AgentEventFormat[M]
+	onError func(error)
+	failed  bool
+}
+
+type agentEventRecord struct {
+	AgentName string `json:"agent_name,omitempty"`
+	Message   any    `json:"message"`
+}
+
+// receive encodes one event through the configured format and appends it as a line.
+// An empty line skips the event — nothing is written; a non-nil error marks the file
+// unreliable and stops further writes.
+func (r *agentEventFileReceiver[M]) receive(event *adk.TypedAgentEvent[M]) {
+	if r.failed {
+		return
+	}
+
+	line, err := r.format(r.ctx, event)
+	if err != nil {
+		r.fail(fmt.Errorf("encode agent output event: %w", err))
+		return
+	}
+	if line == "" {
+		return // skip: no line to write for this event
+	}
+
+	// Write the line and its newline in one call: a single write halves per-write
+	// backend overhead (lock/RPC) and keeps the line and its terminator atomic at the
+	// write boundary; the extra newline concat is cheap. io.WriteString uses the
+	// backend's StringWriter fast path when available, avoiding a []byte copy. Treat a
+	// short write as an error even when the writer reports nil, so a truncated line
+	// marks the file unreliable rather than being trusted as authoritative.
+	data := line + "\n"
+	n, err := io.WriteString(r.writer, data)
+	if err == nil && n != len(data) {
+		err = io.ErrShortWrite
+	}
+	if err != nil {
+		r.fail(fmt.Errorf("write agent output: %w", err))
+	}
+}
+
+// defaultAgentEventFormat is the built-in AgentEventFormat: it emits one JSON object
+// per message-bearing event — {agent_name, message} with the event's message (root
+// Extra stripped) — and skips (returns "") events that carry no materialized message.
+// The event kind is read from the message's own role and tool calls, so no separate
+// type field is added. It does not use ctx.
+func defaultAgentEventFormat[M adk.MessageType](_ context.Context, event *adk.TypedAgentEvent[M]) (string, error) {
+	if event == nil || event.Output == nil || event.Output.MessageOutput == nil {
+		return "", nil // skip: nothing to record
+	}
+	msg, err := event.Output.MessageOutput.GetMessage()
+	if err != nil {
+		return "", fmt.Errorf("materialize agent output message: %w", err)
+	}
+	data, err := sonic.Marshal(&agentEventRecord{
+		AgentName: event.AgentName,
+		Message:   sanitizedMessageValue(msg),
+	})
+	if err != nil {
+		return "", fmt.Errorf("marshal agent output event: %w", err)
+	}
+	return string(data), nil
+}
+
+func (r *agentEventFileReceiver[M]) fail(err error) {
+	if err == nil || r.failed {
+		return
+	}
+	r.failed = true
+	if r.onError != nil {
+		r.onError(err)
+	}
+}
+
+// sanitizedMessageValue makes a non-mutating copy of a schema message and
+// removes its root Extra field before JSON serialization. Nested Extra fields,
+// custom extensions, and provider extensions remain part of the output.
+func sanitizedMessageValue[M adk.MessageType](msg M) any {
+	switch m := any(msg).(type) {
+	case adk.Message:
+		if m == nil {
+			return nil
+		}
+		cloned := *m
+		cloned.Extra = nil
+		return &cloned
+	case adk.AgenticMessage:
+		if m == nil {
+			return nil
+		}
+		cloned := *m
+		cloned.Extra = nil
+		return &cloned
+	}
+	return msg
+}
+
+// agentOutputFilePath allocates an output-file path under outputDir without
+// opening it. The work callback creates the file lazily through its single
+// append session. The file is named after the launching tool-call id (so it
+// matches Task.ToolUseID), falling back to a uuid when no tool-call id is in
+// context. Returns "" when output files are not configured.
+func agentOutputFilePath(ctx context.Context, store filesystem.AppendOpener, outputDir string) string {
 	if store == nil || outputDir == "" {
 		return ""
 	}
@@ -186,11 +352,7 @@ func reserveAgentOutputFile(ctx context.Context, store filesystem.Appender, outp
 	if name == "" {
 		name = uuid.NewString()
 	}
-	path := filepath.Join(outputDir, name+".output")
-	if err := store.Append(ctx, &filesystem.AppendRequest{FilePath: path, Content: ""}); err != nil {
-		return ""
-	}
-	return path
+	return filepath.Join(outputDir, name+".output")
 }
 
 // resolveSubAgent looks up the agent-as-tool adapter for subagentType and builds

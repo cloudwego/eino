@@ -20,21 +20,36 @@ package agenttool
 
 import "github.com/cloudwego/eino/components/tool"
 
-// ForwardGate controls the internal AgentTool event-forwarding gate.
-type ForwardGate struct {
-	// Enabled marks the AgentTool invocation as background-capable: forwarding to
-	// the caller is bounded by Until and uses a non-panicking send.
-	Enabled bool
-	// Until stops forwarding to the caller once closed. Nil means "never
-	// backgrounded".
-	Until <-chan struct{}
+// EventReceiver is a caller-provided function that receives an event emitted by
+// the AgentTool's inner agent. Receivers must be best-effort and safe to call
+// after their downstream consumer has stopped.
+type EventReceiver[E any] func(event E)
+
+// EventReceiverTransform derives the receiver list for an AgentTool invocation
+// from the receivers configured so far. Transforms run in tool-option order.
+// The receiver list may be empty, but must not contain nil elements.
+type EventReceiverTransform[E any] func(current []EventReceiver[E]) []EventReceiver[E]
+
+type eventReceiverOptions[E any] struct {
+	transforms []EventReceiverTransform[E]
 }
 
-// WithForwardGate marks an AgentTool invocation as background-capable and
-// forwards inner-agent events to the caller until done is closed.
-func WithForwardGate(done <-chan struct{}) tool.Option {
-	return tool.WrapImplSpecificOptFn(func(o *ForwardGate) {
-		o.Enabled = true
-		o.Until = done
+// WithEventReceiverTransform adds an internal receiver-list transform to an
+// AgentTool invocation.
+func WithEventReceiverTransform[E any](transform EventReceiverTransform[E]) tool.Option {
+	return tool.WrapImplSpecificOptFn(func(o *eventReceiverOptions[E]) {
+		if transform != nil {
+			o.transforms = append(o.transforms, transform)
+		}
 	})
+}
+
+// ResolveEventReceivers applies the configured transforms in option order.
+func ResolveEventReceivers[E any](opts ...tool.Option) []EventReceiver[E] {
+	o := tool.GetImplSpecificOptions[eventReceiverOptions[E]](nil, opts...)
+	receivers := make([]EventReceiver[E], 0, len(o.transforms))
+	for _, transform := range o.transforms {
+		receivers = transform(receivers)
+	}
+	return receivers
 }

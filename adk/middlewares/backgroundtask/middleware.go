@@ -313,7 +313,11 @@ func formatTask(task *bgtask.Task) string {
 		result += fmt.Sprintf("\nError: %s", task.Error)
 	}
 	if task.DoneAt != nil {
-		result += fmt.Sprintf("\nCompleted at: %s", task.DoneAt.Format("2006-01-02 15:04:05"))
+		// Report elapsed time rather than an absolute timestamp: a wall-clock time
+		// carries no zone here and is ambiguous, while the duration is zone-independent
+		// and more useful. Duration.String() picks a readable unit (ms/s/m); Round trims
+		// sub-millisecond noise.
+		result += fmt.Sprintf("\nElapsed: %s", task.DoneAt.Sub(task.CreatedAt).Round(time.Millisecond))
 	}
 
 	return result
