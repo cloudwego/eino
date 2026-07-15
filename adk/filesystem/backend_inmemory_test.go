@@ -19,6 +19,7 @@ package filesystem
 import (
 	"context"
 	"fmt"
+	"io"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -2438,4 +2439,149 @@ func TestInMemoryBackend_Read_NoLimit(t *testing.T) {
 				totalLines, strings.Count(content.Content, "\n")+1)
 		}
 	})
+}
+
+func TestInMemoryBackend_OpenAppend(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("create on open, empty when closed with no writes", func(t *testing.T) {
+		b := NewInMemoryBackend()
+		w, err := b.OpenAppend(ctx, &OpenAppendRequest{FilePath: "/reserved.output"})
+		if err != nil {
+			t.Fatalf("OpenAppend failed: %v", err)
+		}
+		if err := w.Close(); err != nil {
+			t.Fatalf("Close failed: %v", err)
+		}
+		got, err := b.Read(ctx, &ReadRequest{FilePath: "/reserved.output"})
+		if err != nil {
+			t.Fatalf("Read failed (file should exist after open): %v", err)
+		}
+		if got.Content != "" {
+			t.Fatalf("expected empty file, got %q", got.Content)
+		}
+	})
+
+	t.Run("multiple writes append in order", func(t *testing.T) {
+		b := NewInMemoryBackend()
+		w, err := b.OpenAppend(ctx, &OpenAppendRequest{FilePath: "/out.txt"})
+		if err != nil {
+			t.Fatalf("OpenAppend failed: %v", err)
+		}
+		// Write via io.WriteString to exercise the io.StringWriter fast path.
+		if _, err := io.WriteString(w, "alpha\n"); err != nil {
+			t.Fatalf("write failed: %v", err)
+		}
+		// Write via the []byte path as well.
+		if _, err := w.Write([]byte("beta\n")); err != nil {
+			t.Fatalf("write failed: %v", err)
+		}
+		if _, err := io.WriteString(w, "gamma"); err != nil {
+			t.Fatalf("write failed: %v", err)
+		}
+		if err := w.Close(); err != nil {
+			t.Fatalf("Close failed: %v", err)
+		}
+		got, err := b.Read(ctx, &ReadRequest{FilePath: "/out.txt"})
+		if err != nil {
+			t.Fatalf("Read failed: %v", err)
+		}
+		if want := "alpha\nbeta\ngamma"; got.Content != want {
+			t.Fatalf("expected %q, got %q", want, got.Content)
+		}
+	})
+
+	t.Run("append to existing file continues from the end", func(t *testing.T) {
+		b := NewInMemoryBackend()
+		if err := b.Write(ctx, &WriteRequest{FilePath: "/log", Content: "start\n"}); err != nil {
+			t.Fatalf("Write failed: %v", err)
+		}
+		w, err := b.OpenAppend(ctx, &OpenAppendRequest{FilePath: "/log"})
+		if err != nil {
+			t.Fatalf("OpenAppend failed: %v", err)
+		}
+		if _, err := io.WriteString(w, "more\n"); err != nil {
+			t.Fatalf("write failed: %v", err)
+		}
+		if err := w.Close(); err != nil {
+			t.Fatalf("Close failed: %v", err)
+		}
+		got, err := b.Read(ctx, &ReadRequest{FilePath: "/log"})
+		if err != nil {
+			t.Fatalf("Read failed: %v", err)
+		}
+		if want := "start\nmore\n"; got.Content != want {
+			t.Fatalf("expected %q, got %q", want, got.Content)
+		}
+	})
+
+	t.Run("write after close is rejected and does not mutate the file", func(t *testing.T) {
+		b := NewInMemoryBackend()
+		w, err := b.OpenAppend(ctx, &OpenAppendRequest{FilePath: "/closed.output"})
+		if err != nil {
+			t.Fatalf("OpenAppend failed: %v", err)
+		}
+		if _, err := io.WriteString(w, "kept\n"); err != nil {
+			t.Fatalf("write failed: %v", err)
+		}
+		if err := w.Close(); err != nil {
+			t.Fatalf("Close failed: %v", err)
+		}
+		// Close is idempotent.
+		if err := w.Close(); err != nil {
+			t.Fatalf("second Close failed: %v", err)
+		}
+		// Both write paths reject after Close with io.ErrClosedPipe.
+		if _, err := w.Write([]byte("dropped\n")); err != io.ErrClosedPipe {
+			t.Fatalf("Write after Close: got %v, want io.ErrClosedPipe", err)
+		}
+		if _, err := io.WriteString(w, "dropped\n"); err != io.ErrClosedPipe {
+			t.Fatalf("WriteString after Close: got %v, want io.ErrClosedPipe", err)
+		}
+		got, err := b.Read(ctx, &ReadRequest{FilePath: "/closed.output"})
+		if err != nil {
+			t.Fatalf("Read failed: %v", err)
+		}
+		if got.Content != "kept\n" {
+			t.Fatalf("file mutated after Close: got %q, want %q", got.Content, "kept\n")
+		}
+	})
+
+	// InMemoryBackend must satisfy the optional AppendOpener extension.
+	var _ AppendOpener = NewInMemoryBackend()
+}
+
+func BenchmarkInMemoryBackend_OpenAppend(b *testing.B) {
+	const (
+		chunkSize  = 1024
+		chunkCount = 1024
+	)
+	ctx := context.Background()
+	chunk := strings.Repeat("x", chunkSize)
+
+	b.ReportAllocs()
+	b.SetBytes(chunkSize * chunkCount)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		backend := NewInMemoryBackend()
+		writer, err := backend.OpenAppend(ctx, &OpenAppendRequest{FilePath: "/out"})
+		if err != nil {
+			b.Fatal(err)
+		}
+		for j := 0; j < chunkCount; j++ {
+			if _, err = io.WriteString(writer, chunk); err != nil {
+				b.Fatal(err)
+			}
+		}
+		if err = writer.Close(); err != nil {
+			b.Fatal(err)
+		}
+		content, err := backend.Read(ctx, &ReadRequest{FilePath: "/out"})
+		if err != nil {
+			b.Fatal(err)
+		}
+		if got, want := len(content.Content), chunkSize*chunkCount; got != want {
+			b.Fatalf("unexpected content length: got %d, want %d", got, want)
+		}
+	}
 }

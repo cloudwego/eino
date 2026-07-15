@@ -289,7 +289,7 @@ Before executing the command, please follow these steps:
 
 Usage notes:
 - The command parameter is required
-- Set run_in_background=true for servers, watchers, and other long-running commands you do not need to wait for. You will be notified when it completes; use the task_output tool to check its status or retrieve its result, and the task_stop tool to cancel it.
+- Set run_in_background=true for servers, watchers, and other long-running commands you do not need to wait for. Streaming commands briefly expose startup output (such as an OAuth URL) before the caller stream closes. You will be notified when the command completes; use the task_output tool to check its status or retrieve its result, and the task_stop tool to cancel it.
 - The optional timeout parameter (in milliseconds) sets the maximum time to wait for the command. Omit to use the default.
 - Commands run in an isolated sandbox environment
 - Returns combined stdout/stderr output with exit code
@@ -333,7 +333,7 @@ Bad examples (avoid these):
 
 使用说明：
 - command 参数是必需的
-- 对于服务器、监听器等你无需等待的长时间运行命令，设置 run_in_background=true。命令完成时你会收到通知；使用 task_output 工具查询其状态或获取结果，使用 task_stop 工具取消它。
+- 对于服务器、监听器等你无需等待的长时间运行命令，设置 run_in_background=true。流式命令会在调用方输出流关闭前短暂展示启动输出（例如 OAuth 链接）。命令完成时你会收到通知；使用 task_output 工具查询其状态或获取结果，使用 task_stop 工具取消它。
 - 可选的 timeout 参数（毫秒）设置等待命令的最长时间。不传则使用默认值。
 - 命令在隔离的沙箱环境中运行
 - 返回合并的 stdout/stderr 输出和退出代码

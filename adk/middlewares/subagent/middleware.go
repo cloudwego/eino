@@ -55,15 +55,19 @@ type TypedConfig[M adk.MessageType] struct {
 	// Background configures background-task execution for sub-agent runs. When nil,
 	// only foreground (blocking) agent execution is available and runs are NOT
 	// tracked. See BackgroundConfig.
-	Background *BackgroundConfig
+	Background *TypedBackgroundConfig[M]
 }
 
-// BackgroundConfig enables background-task execution for the agent tool.
+// BackgroundConfig enables background-task execution for the standard
+// *schema.Message agent tool.
+type BackgroundConfig = TypedBackgroundConfig[*schema.Message]
+
+// TypedBackgroundConfig enables background-task execution for the agent tool.
 //
 // When set, ALL agent runs (foreground and background) are managed by the Manager,
 // making them visible via Get/List, and the Agent tool gains a run_in_background
 // parameter.
-type BackgroundConfig struct {
+type TypedBackgroundConfig[M adk.MessageType] struct {
 	// Manager is the shared background-task Manager. Required (a nil Manager is the
 	// same as no BackgroundConfig). It may be shared with other middlewares (e.g.
 	// filesystem) so a single task-ID space spans agent and shell runs. The
@@ -73,15 +77,48 @@ type BackgroundConfig struct {
 	Manager *backgroundtask.Manager
 
 	// OutputStore and OutputDir, when both set, give every managed sub-agent run an
-	// output file at OutputDir/<id>.output. The managed agent tool appends the
-	// sub-agent's final result there on completion and records the path on
-	// Task.OutputFile, so a backgrounded run's result is retrievable by path (and
-	// large results need not be inlined). The Manager itself never writes.
-	// OutputStore is a filesystem.Appender (filesystem.InMemoryBackend implements
-	// it); output files require one. When either is unset, runs have no output file.
-	OutputStore filesystem.Appender
+	// output file at OutputDir/<id>.output and record the path on Task.OutputFile, so
+	// a backgrounded run's output is retrievable by path (and large results need not
+	// be inlined). The path is allocated before the run and the file is created
+	// lazily by the work callback, so a newly returned background task may briefly
+	// advertise the path before it exists. The Manager itself never writes.
+	//
+	// The output file is line-oriented: one line per materialized AgentEvent,
+	// appended as events arrive so a backgrounded run's interim output is visible
+	// before it completes. EventFormat encodes each event into its line (see
+	// AgentEventFormat) and therefore defines the file's actual format. When
+	// EventFormat is nil, the default encoder writes one JSON object per line (JSONL):
+	// {agent_name, message}, with the event's message (root Extra stripped) carrying
+	// its own role and any tool calls/results — no separate type field. A custom
+	// EventFormat may emit any per-line text and may skip events — e.g. skipping every
+	// event but the final assistant answer to get a final-result-only file.
+	//
+	// OutputStore is a filesystem.AppendOpener (filesystem.InMemoryBackend
+	// implements it); output files require one. When either is unset, runs have no
+	// output file.
+	OutputStore filesystem.AppendOpener
 	OutputDir   string
+	EventFormat AgentEventFormat[M]
 }
+
+// AgentEventFormat encodes one materialized AgentEvent into the text of a single
+// output-file line (the framework appends the newline). It runs once per event, on
+// the run's Recv stack (serially, single-consumer), so it needs no synchronization.
+// ctx is the run's (detached) context; honor it for cancellation and read request
+// values from it as needed.
+//
+// Returns:
+//   - (line, nil) with line != "": the line is written, followed by a newline.
+//   - ("", nil): skip — the event contributes no line. Skipping every event but the
+//     final answer yields a final-result-only file.
+//   - (_, err): the write is abandoned and the output file is marked unreliable, so
+//     task_output reports the file's failed state instead of trusting a partial file.
+type AgentEventFormat[M adk.MessageType] func(ctx context.Context, event *adk.TypedAgentEvent[M]) (string, error)
+
+// outputFileFormatHint is the human-readable description of the default encoder's
+// output, surfaced to the launcher in the managed agent tool's background-run message
+// so the reader knows to interpret the file as JSONL.
+const outputFileFormatHint = `JSONL — one JSON object per line, each a materialized event {agent_name, message}; the message carries its own role and any tool calls/results.`
 
 // New creates a ChatModelAgentMiddleware that injects sub-agent tools into the agent context.
 //
@@ -133,7 +170,11 @@ func NewTyped[M adk.MessageType](ctx context.Context, config *TypedConfig[M]) (a
 	// Manager; without one it is a plain foreground spawn.
 	var at tool.BaseTool
 	if config.Background != nil && config.Background.Manager != nil {
-		at, err = newManagedAgentTool(config.Background.Manager, subAgentToolMap, config.Background.OutputStore, config.Background.OutputDir, toolName, desc)
+		at, err = newManagedAgentTool[M](config.Background.Manager, subAgentToolMap, agentOutput[M]{
+			store:     config.Background.OutputStore,
+			outputDir: config.Background.OutputDir,
+			format:    config.Background.EventFormat,
+		}, toolName, desc)
 	} else {
 		at, err = newAgentTool(subAgentToolMap, toolName, desc)
 	}
