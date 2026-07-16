@@ -981,16 +981,19 @@ func TestTurnLoop_GetAgentError_RecoverConsumed(t *testing.T) {
 func TestTurnLoop_GenInputError_RecoverItems(t *testing.T) {
 	genErr := errors.New("gen input error")
 
-	loop := newAndRunTurnLoop(context.Background(), TurnLoopConfig[string, *schema.Message]{
+	loop := NewTurnLoop(TurnLoopConfig[string, *schema.Message]{
 		GenInput: func(ctx context.Context, _ *TurnLoop[string, *schema.Message], items []string) (*GenInputResult[string, *schema.Message], error) {
 			return nil, genErr
 		},
 		PrepareAgent: prepareTestAgent,
 	})
 
-	loop.Push("msg1")
-	loop.Push("msg2")
+	ok, _ := loop.Push("msg1")
+	require.True(t, ok)
+	ok, _ = loop.Push("msg2")
+	require.True(t, ok)
 
+	loop.Run(context.Background())
 	result := loop.Wait()
 	assert.ErrorIs(t, result.ExitReason, genErr)
 	assert.Len(t, result.UnhandledItems, 2, "should recover all items when GenInput fails")
