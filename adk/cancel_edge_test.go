@@ -1562,6 +1562,74 @@ func TestWithCancel_RecursiveImmediate_MiddlewareChildAbortOnly(t *testing.T) {
 	assert.Equal(t, int32(1), atomic.LoadInt32(&resumeChildCalls), "middleware child should be invoked as a fresh Run on root resume")
 }
 
+func TestWithCancel_RecursiveImmediate_BeforeAgentChildAbortOnly(t *testing.T) {
+	ctx := context.Background()
+
+	childModel := newContextAwareBlockingChatModel(schema.AssistantMessage("child done", nil))
+	childAgent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "BeforeAgentMiddlewareChild",
+		Description: "direct BeforeAgent child",
+		Instruction: "child",
+		Model:       childModel,
+	})
+	require.NoError(t, err)
+
+	outerAgent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "OuterBeforeAgentMiddlewareAgent",
+		Description: "outer",
+		Instruction: "outer",
+		Model:       &plainResponseModel{text: "outer done"},
+		Handlers: []ChatModelAgentMiddleware{
+			&testBeforeAgentHandler{fn: func(ctx context.Context, runCtx *ChatModelAgentContext) (context.Context, *ChatModelAgentContext, error) {
+				iter := childAgent.Run(ctx, &AgentInput{Messages: []Message{schema.UserMessage("child work")}})
+				for {
+					event, ok := iter.Next()
+					if !ok {
+						return ctx, runCtx, nil
+					}
+					if event.Err != nil {
+						return ctx, runCtx, event.Err
+					}
+				}
+			}},
+		},
+	})
+	require.NoError(t, err)
+
+	cancelOpt, cancelFn := WithCancel()
+	iterCh := make(chan *AsyncIterator[*AgentEvent], 1)
+	go func() {
+		iterCh <- NewRunner(ctx, RunnerConfig{Agent: outerAgent}).Run(ctx, []Message{schema.UserMessage("go")}, cancelOpt)
+	}()
+
+	select {
+	case <-childModel.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("BeforeAgent middleware child model did not start")
+	}
+
+	handle, _ := cancelFn(WithRecursive())
+
+	select {
+	case <-childModel.cancelObserved:
+	case <-time.After(time.Second):
+		t.Fatal("BeforeAgent middleware child did not observe recursive immediate context cancellation")
+	}
+
+	require.NoError(t, handle.Wait())
+	var iter *AsyncIterator[*AgentEvent]
+	select {
+	case iter = <-iterCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("outer Run did not return after BeforeAgent child cancellation")
+	}
+	_, cancelErrors := drainCancelErrors(iter)
+	require.Len(t, cancelErrors, 1, "outer stream should emit exactly one root CancelError")
+	for _, intCtx := range cancelErrors[0].InterruptContexts {
+		assert.NotContains(t, fmt.Sprint(intCtx.Address), "BeforeAgentMiddlewareChild")
+	}
+}
+
 func TestWithCancel_RecursiveImmediate_MultiLevelMiddlewareChildrenAbortOnly(t *testing.T) {
 	ctx := context.Background()
 

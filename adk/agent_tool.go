@@ -155,7 +155,7 @@ func (at *typedAgentTool[M]) InvokableRun(ctx context.Context, argumentsInJSON s
 	if cancelCtx := getCancelContext(ctx); cancelCtx != nil {
 		cancelCtx.markAgentToolDescendant()
 	}
-	ctx = context.WithValue(ctx, chatModelAgentExecutionKey{}, false)
+	ctx = clearChatModelAgentExecCtx(ctx)
 
 	gen, enableStreaming := getEmitGeneratorAndEnableStreaming[M](opts)
 	var ms *bridgeStore
