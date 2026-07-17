@@ -441,7 +441,7 @@ func TestSplitCamelCase(t *testing.T) {
 func TestEnsureReminder(t *testing.T) {
 	m := &typedMiddleware[*schema.Message]{sr: "<reminder>"}
 
-	t.Run("normal: system then user", func(t *testing.T) {
+	t.Run("after latest user message", func(t *testing.T) {
 		input := []*schema.Message{
 			{Role: schema.System, Content: "sys"},
 			{Role: schema.User, Content: "hi"},
@@ -450,10 +450,23 @@ func TestEnsureReminder(t *testing.T) {
 		require.Len(t, got, 3)
 		assert.Equal(t, schema.System, got[0].Role)
 		assert.Equal(t, schema.User, got[1].Role)
-		assert.Equal(t, "<reminder>", got[1].Content)
-		assert.Equal(t, true, got[1].Extra[toolSearchReminderExtraKey])
-		assert.Equal(t, schema.User, got[2].Role)
-		assert.Equal(t, "hi", got[2].Content)
+		assert.Equal(t, schema.System, got[2].Role)
+		assert.Equal(t, "<reminder>", got[2].Content)
+		assert.Equal(t, true, got[2].Extra[toolSearchReminderExtraKey])
+	})
+
+	t.Run("after latest assistant message", func(t *testing.T) {
+		input := []*schema.Message{
+			{Role: schema.System, Content: "sys"},
+			{Role: schema.User, Content: "hi"},
+			{Role: schema.Assistant, Content: "hello"},
+		}
+		got, _, _, _ := m.ensureReminder(input)
+		require.Len(t, got, 4)
+		assert.Equal(t, schema.User, got[1].Role)
+		assert.Equal(t, schema.Assistant, got[2].Role)
+		assert.Equal(t, schema.System, got[3].Role)
+		assert.Equal(t, "<reminder>", got[3].Content)
 	})
 
 	t.Run("all system messages", func(t *testing.T) {
@@ -465,12 +478,14 @@ func TestEnsureReminder(t *testing.T) {
 		require.Len(t, got, 3)
 		assert.Equal(t, schema.System, got[0].Role)
 		assert.Equal(t, schema.System, got[1].Role)
+		assert.Equal(t, schema.System, got[2].Role)
 		assert.Equal(t, "<reminder>", got[2].Content)
 	})
 
 	t.Run("empty input", func(t *testing.T) {
 		got, _, _, _ := m.ensureReminder(nil)
 		require.Len(t, got, 1)
+		assert.Equal(t, schema.System, got[0].Role)
 		assert.Equal(t, "<reminder>", got[0].Content)
 	})
 
@@ -481,14 +496,15 @@ func TestEnsureReminder(t *testing.T) {
 		}
 		got, _, _, _ := m.ensureReminder(input)
 		require.Len(t, got, 3)
-		assert.Equal(t, "<reminder>", got[0].Content)
-		assert.Equal(t, "hi", got[1].Content)
-		assert.Equal(t, "hello", got[2].Content)
+		assert.Equal(t, "hi", got[0].Content)
+		assert.Equal(t, "hello", got[1].Content)
+		assert.Equal(t, schema.System, got[2].Role)
+		assert.Equal(t, "<reminder>", got[2].Content)
 	})
 
 	t.Run("idempotent: does not insert twice", func(t *testing.T) {
 		input := []*schema.Message{
-			{Role: schema.User, Content: "<reminder>", Extra: map[string]any{toolSearchReminderExtraKey: true}},
+			{Role: schema.System, Content: "<reminder>", Extra: map[string]any{toolSearchReminderExtraKey: true}},
 			{Role: schema.User, Content: "hi"},
 		}
 		got, _, _, _ := m.ensureReminder(input)
@@ -615,7 +631,7 @@ func TestBeforeModelRewriteState_Mode1_ForwardSelection(t *testing.T) {
 	state := &adk.ChatModelAgentState{
 		Messages: []*schema.Message{
 			{Role: schema.System, Content: "sys"},
-			{Role: schema.User, Content: "hello", Extra: map[string]any{toolSearchReminderExtraKey: true}},
+			{Role: schema.System, Content: "hello", Extra: map[string]any{toolSearchReminderExtraKey: true}},
 			schema.AssistantMessage("", []schema.ToolCall{
 				{ID: "tc1", Function: schema.FunctionCall{Name: toolSearchToolName, Arguments: `{"query":"select:dynamic_tool_a"}`}},
 			}),
@@ -773,7 +789,7 @@ func TestBeforeModelRewriteState_Mode1_MultipleToolSearchResultsAcrossTurns(t *t
 	state := &adk.ChatModelAgentState{
 		Messages: []*schema.Message{
 			{Role: schema.System, Content: "sys"},
-			{Role: schema.User, Content: "reminder", Extra: map[string]any{toolSearchReminderExtraKey: true}},
+			{Role: schema.System, Content: "reminder", Extra: map[string]any{toolSearchReminderExtraKey: true}},
 			schema.AssistantMessage("", []schema.ToolCall{
 				{ID: "tc1", Function: schema.FunctionCall{Name: toolSearchToolName, Arguments: `{"query":"select:dynamic_tool_a"}`}},
 			}),
@@ -816,7 +832,7 @@ func TestBeforeModelRewriteState_Mode1_MalformedJSONInToolSearchResult(t *testin
 	state := &adk.ChatModelAgentState{
 		Messages: []*schema.Message{
 			{Role: schema.System, Content: "sys"},
-			{Role: schema.User, Content: "reminder", Extra: map[string]any{toolSearchReminderExtraKey: true}},
+			{Role: schema.System, Content: "reminder", Extra: map[string]any{toolSearchReminderExtraKey: true}},
 			schema.AssistantMessage("", []schema.ToolCall{
 				{ID: "tc1", Function: schema.FunctionCall{Name: toolSearchToolName, Arguments: `{"query":"select:dynamic_tool_a"}`}},
 			}),
@@ -854,7 +870,7 @@ func TestBeforeModelRewriteState_Mode1_NonExistentToolInForwardSelection(t *test
 
 	state := &adk.ChatModelAgentState{
 		Messages: []*schema.Message{
-			{Role: schema.User, Content: "reminder", Extra: map[string]any{toolSearchReminderExtraKey: true}},
+			{Role: schema.System, Content: "reminder", Extra: map[string]any{toolSearchReminderExtraKey: true}},
 			schema.AssistantMessage("", []schema.ToolCall{
 				{ID: "tc1", Function: schema.FunctionCall{Name: toolSearchToolName, Arguments: `{"query":"select:nonexistent_tool,dynamic_tool_a"}`}},
 			}),
@@ -919,7 +935,7 @@ func TestBeforeModelRewriteState_Mode1_DoubleInitWithoutComposeContext(t *testin
 
 	state := &adk.ChatModelAgentState{
 		Messages: []*schema.Message{
-			{Role: schema.User, Content: "reminder", Extra: map[string]any{toolSearchReminderExtraKey: true}},
+			{Role: schema.System, Content: "reminder", Extra: map[string]any{toolSearchReminderExtraKey: true}},
 			schema.AssistantMessage("", []schema.ToolCall{
 				{ID: "tc1", Function: schema.FunctionCall{Name: toolSearchToolName, Arguments: `{"query":"select:dynamic_tool_a"}`}},
 			}),
@@ -975,7 +991,7 @@ func TestBeforeModelRewriteState_ToolInfosSliceMutation(t *testing.T) {
 
 	state := &adk.ChatModelAgentState{
 		Messages: []*schema.Message{
-			{Role: schema.User, Content: "reminder", Extra: map[string]any{toolSearchReminderExtraKey: true}},
+			{Role: schema.System, Content: "reminder", Extra: map[string]any{toolSearchReminderExtraKey: true}},
 			schema.AssistantMessage("", []schema.ToolCall{
 				{ID: "tc1", Function: schema.FunctionCall{Name: toolSearchToolName, Arguments: `{"query":"select:dynamic_tool_a"}`}},
 			}),

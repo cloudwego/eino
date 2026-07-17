@@ -167,42 +167,45 @@ func (m *typedMiddleware[M]) markInitialized(ctx context.Context) {
 	_ = adk.SetRunLocalValue(ctx, toolSearchInitializedKey, true)
 }
 
-func (m *typedMiddleware[M]) ensureReminder(msgs []M) (result []M, insertedMsg M, anchorMsg M, didInsert bool) {
+func (m *typedMiddleware[M]) ensureReminder(msgs []M) (result []M, insertedMsg M, beforeMessageID string, didInsert bool) {
 	for _, msg := range msgs {
 		if hasToolSearchReminderExtra(msg) {
-			return msgs, insertedMsg, anchorMsg, false
+			return msgs, insertedMsg, beforeMessageID, false
 		}
 	}
 
 	insertedMsg = makeReminderMsg[M](m.sr)
 	adk.EnsureMessageID(insertedMsg)
-	result = make([]M, 0, len(msgs)+1)
-	inserted := false
-	for _, msg := range msgs {
-		if !inserted && !isSystemRoleTS(msg) {
-			inserted = true
-			result = append(result, insertedMsg)
-			anchorMsg = msg
+
+	insertAt := len(msgs)
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if isReminderAnchorTS(msgs[i]) {
+			insertAt = i + 1
+			break
 		}
-		result = append(result, msg)
 	}
-	if !inserted {
-		result = append(result, insertedMsg)
+
+	result = make([]M, 0, len(msgs)+1)
+	result = append(result, msgs[:insertAt]...)
+	result = append(result, insertedMsg)
+	result = append(result, msgs[insertAt:]...)
+	if insertAt < len(msgs) {
+		beforeMessageID = adk.GetMessageID(msgs[insertAt])
 	}
-	return result, insertedMsg, anchorMsg, true
+	return result, insertedMsg, beforeMessageID, true
 }
 
-func isNilTSMessage[M adk.MessageType](msg M) bool {
-	var zero M
-	return any(msg) == any(zero)
-}
-
-func isSystemRoleTS[M adk.MessageType](msg M) bool {
+func isReminderAnchorTS[M adk.MessageType](msg M) bool {
 	switch m := any(msg).(type) {
 	case *schema.Message:
-		return m.Role == schema.System
+		return (m.Role == schema.User) || (m.Role == schema.Assistant && len(m.ToolCalls) == 0)
 	case *schema.AgenticMessage:
-		return m.Role == schema.AgenticRoleTypeSystem
+		switch m.Role {
+		case schema.AgenticRoleTypeUser:
+			return !internal.HasToolResult(m.ContentBlocks)
+		case schema.AgenticRoleTypeAssistant:
+			return !internal.HasToolCall(m.ContentBlocks)
+		}
 	}
 	return false
 }
@@ -211,11 +214,11 @@ func makeReminderMsg[M adk.MessageType](content string) M {
 	var zero M
 	switch any(zero).(type) {
 	case *schema.Message:
-		msg := schema.UserMessage(content)
+		msg := schema.SystemMessage(content)
 		msg.Extra = map[string]any{toolSearchReminderExtraKey: true}
 		return any(msg).(M)
 	case *schema.AgenticMessage:
-		msg := schema.UserAgenticMessage(content)
+		msg := schema.SystemAgenticMessage(content)
 		msg.Extra = map[string]any{toolSearchReminderExtraKey: true}
 		return any(msg).(M)
 	}
@@ -283,21 +286,17 @@ func toolNameSet(tools []*schema.ToolInfo) map[string]bool {
 }
 
 func (m *typedMiddleware[M]) BeforeModelRewriteState(ctx context.Context, state *adk.TypedChatModelAgentState[M], _ *adk.TypedModelContext[M]) (context.Context, *adk.TypedChatModelAgentState[M], error) {
-	newMsgs, insertedMsg, anchorMsg, didInsert := m.ensureReminder(state.Messages)
+	newMsgs, insertedMsg, beforeMessageID, didInsert := m.ensureReminder(state.Messages)
 	state.Messages = newMsgs
 
 	if didInsert {
-		var beforeID string
-		if !isNilTSMessage(anchorMsg) {
-			beforeID = adk.GetMessageID(anchorMsg)
-		}
 		_ = adk.TypedSendEvent(ctx, &adk.TypedAgentEvent[M]{
 			SessionEventVariant: &adk.SessionEventVariant[M]{
 				Event: &adk.SessionEvent[M]{
 					Kind: adk.SessionEventMessageInserted,
 					MessageInserted: &adk.MessageInsertedEvent[M]{
 						Message:         insertedMsg,
-						BeforeMessageID: beforeID,
+						BeforeMessageID: beforeMessageID,
 					},
 				},
 			},
