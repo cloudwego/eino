@@ -1,0 +1,23 @@
+schema/openai/extension.go
+  s_d09b76c7f2963c::t_6a824b9775a6d2 246-250,252-253
+schema/agentic_message_concat_test.go
+  s_d09b76c7f2963c::t_aa72adfc4aedf1 241,244
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "e9c3dffddd49204208399eec06c3a07c7926cb5a",
+  "prompts": {},
+  "sessions": {
+    "s_d09b76c7f2963c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "2f606958-a5bc-4db7-93c7-f576ba0ffaab",
+        "model": "unknown"
+      },
+      "human_author": "lipandeng <lipandeng@bytedance.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
