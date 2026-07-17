@@ -238,10 +238,10 @@ func TestConcatFunctionToolResults_Optimized(t *testing.T) {
 	t.Run("adjacent text chunks merged, non-text preserved", func(t *testing.T) {
 		results := []*FunctionToolResult{
 			{CallID: "c1", Name: "tool1", Content: []*FunctionToolResultContentBlock{
-				{Type: FunctionToolResultContentBlockTypeText, Text: &UserInputText{Text: "hel"}},
+				{Type: FunctionToolResultContentBlockTypeText, Text: &UserInputText{Text: "he"}},
 			}},
 			{CallID: "c1", Name: "tool1", Content: []*FunctionToolResultContentBlock{
-				{Type: FunctionToolResultContentBlockTypeText, Text: &UserInputText{Text: "lo "}},
+				{Type: FunctionToolResultContentBlockTypeText, Text: &UserInputText{Text: "llo "}},
 			}},
 			{CallID: "c1", Name: "tool1", Content: []*FunctionToolResultContentBlock{
 				{Type: FunctionToolResultContentBlockTypeText, Text: &UserInputText{Text: "world"}},

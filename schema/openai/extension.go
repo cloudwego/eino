@@ -205,7 +205,6 @@ func ConcatReasoningExtensions(chunks []*ReasoningExtension) (*ReasoningExtensio
 	var (
 		indices      []int
 		indexToParts = map[int][]string{}
-		indexToLen   = map[int]int{}
 		hasIndexed   bool
 		hasUnindexed bool
 	)
@@ -233,7 +232,6 @@ func ConcatReasoningExtensions(chunks []*ReasoningExtension) (*ReasoningExtensio
 				indices = append(indices, idx)
 			}
 			indexToParts[idx] = append(indexToParts[idx], c.Text)
-			indexToLen[idx] += len(c.Text)
 		}
 	}
 
@@ -245,9 +243,14 @@ func ConcatReasoningExtensions(chunks []*ReasoningExtension) (*ReasoningExtensio
 		sort.Ints(indices)
 		ret.Content = make([]*ReasoningContent, 0, len(indices))
 		for _, idx := range indices {
+			parts := indexToParts[idx]
+			total := 0
+			for _, p := range parts {
+				total += len(p)
+			}
 			var sb strings.Builder
-			sb.Grow(indexToLen[idx])
-			for _, p := range indexToParts[idx] {
+			sb.Grow(total)
+			for _, p := range parts {
 				sb.WriteString(p)
 			}
 			ret.Content = append(ret.Content, &ReasoningContent{Text: sb.String()})
