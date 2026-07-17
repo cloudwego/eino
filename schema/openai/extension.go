@@ -19,6 +19,7 @@ package openai
 import (
 	"fmt"
 	"sort"
+	"strings"
 )
 
 type ResponseMetaExtension struct {
@@ -168,15 +169,26 @@ func ConcatAssistantGenTextExtensions(chunks []*AssistantGenTextExtension) (*Ass
 		ret.Annotations = append(ret.Annotations, &an)
 	}
 
+	// Assemble the refusal reason from all chunks with a single pre-sized allocation,
+	// building a fresh OutputRefusal so the input chunks are never mutated.
+	var (
+		refusalParts []string
+		refusalLen   int
+	)
 	for _, ext := range chunks {
 		if ext.Refusal == nil {
 			continue
 		}
-		if ret.Refusal == nil {
-			ret.Refusal = ext.Refusal
-		} else {
-			ret.Refusal.Reason += ext.Refusal.Reason
+		refusalParts = append(refusalParts, ext.Refusal.Reason)
+		refusalLen += len(ext.Refusal.Reason)
+	}
+	if len(refusalParts) > 0 {
+		var sb strings.Builder
+		sb.Grow(refusalLen)
+		for _, p := range refusalParts {
+			sb.WriteString(p)
 		}
+		ret.Refusal = &OutputRefusal{Reason: sb.String()}
 	}
 
 	return ret, nil
@@ -191,10 +203,11 @@ func ConcatReasoningExtensions(chunks []*ReasoningExtension) (*ReasoningExtensio
 	ret := &ReasoningExtension{}
 
 	var (
-		indices        []int
-		indexToContent = map[int]*ReasoningContent{}
-		hasIndexed     bool
-		hasUnindexed   bool
+		indices      []int
+		indexToParts = map[int][]string{}
+		indexToLen   = map[int]int{}
+		hasIndexed   bool
+		hasUnindexed bool
 	)
 
 	for _, ext := range chunks {
@@ -214,12 +227,13 @@ func ConcatReasoningExtensions(chunks []*ReasoningExtension) (*ReasoningExtensio
 
 			hasIndexed = true
 			idx := *c.Index
-			if existing, ok := indexToContent[idx]; ok {
-				existing.Text += c.Text
-			} else {
-				indexToContent[idx] = &ReasoningContent{Text: c.Text}
+			// Accumulate fragments per index; the string is built once below so a
+			// long stream sharing one index stays O(total bytes) instead of O(n^2).
+			if _, ok := indexToParts[idx]; !ok {
 				indices = append(indices, idx)
 			}
+			indexToParts[idx] = append(indexToParts[idx], c.Text)
+			indexToLen[idx] += len(c.Text)
 		}
 	}
 
@@ -231,7 +245,12 @@ func ConcatReasoningExtensions(chunks []*ReasoningExtension) (*ReasoningExtensio
 		sort.Ints(indices)
 		ret.Content = make([]*ReasoningContent, 0, len(indices))
 		for _, idx := range indices {
-			ret.Content = append(ret.Content, indexToContent[idx])
+			var sb strings.Builder
+			sb.Grow(indexToLen[idx])
+			for _, p := range indexToParts[idx] {
+				sb.WriteString(p)
+			}
+			ret.Content = append(ret.Content, &ReasoningContent{Text: sb.String()})
 		}
 	}
 
