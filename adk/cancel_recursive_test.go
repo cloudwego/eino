@@ -257,6 +257,10 @@ func TestDeriveCheckpointAwareCancelContext(t *testing.T) {
 }
 
 func TestDeriveAbortOnlyCancelContext(t *testing.T) {
+	t.Run("NilParentReturnsNil", func(t *testing.T) {
+		assert.Nil(t, deriveAbortOnlyCancelContext(context.Background(), nil))
+	})
+
 	t.Run("SafePointDoesNotPropagate", func(t *testing.T) {
 		parent, child, _ := setupAbortOnlyChild(t)
 
@@ -622,4 +626,22 @@ func TestDeriveCheckpointAwareSubAgentCancelContext(t *testing.T) {
 			t.Fatal("root checkpoint-aware ancestor was marked through an abort-only barrier")
 		}
 	})
+}
+
+func TestResolveRunCancelContext_CheckpointAwareInheritedScope(t *testing.T) {
+	parent := newCancelContext()
+	baseCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	child := parent.deriveCheckpointAwareCancelContext(baseCtx)
+	t.Cleanup(child.markDone)
+	ctx := withCancelContext(baseCtx, child)
+
+	got, owned := resolveRunCancelContext(ctx, &options{})
+	if got != child {
+		t.Fatal("checkpoint-aware inherited scope was not reused")
+	}
+	if owned {
+		t.Fatal("checkpoint-aware inherited scope should not be owned by the child run")
+	}
 }
