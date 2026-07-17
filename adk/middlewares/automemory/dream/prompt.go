@@ -51,6 +51,8 @@ You are performing a dream: a reflective pass over persistent memory files. Synt
 
 Memory directory: %s
 
+This directory is a working copy of the memory. Edit it freely: your result is promoted to the live memory location only after this run completes successfully. Operate only within this directory.
+
 ## Phase 1 - Orient
 - Use ls/glob to inspect the memory directory
 - Read MEMORY.md first to understand the current index
@@ -96,6 +98,8 @@ func buildConsolidationPromptChinese(memoryRoot string, touchedSessions []string
 你正在执行一次 dream：对持久化记忆文件做反思式整理。请把最近学到的内容沉淀成稳定、清晰且结构化的长期记忆，帮助未来会话快速建立上下文。
 
 记忆目录：%s
+
+该目录是记忆的工作副本，可放心修改：只有在本次运行成功完成后，整理结果才会被提升（promote）到真正的记忆位置。请只在该目录内操作。
 
 ## 阶段 1 - 建立整体认识
 - 使用 ls/glob 查看记忆目录
