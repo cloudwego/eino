@@ -1,0 +1,27 @@
+schema/agentic_message.go
+  s_87dd5799a8d2b2::t_40e03ea95a29f7 1315-1341,1349-1352,1444-1446,1527-1529,1561-1563,1595-1597,1629-1631,1663-1668,1686-1689,1691,1768-1773,1775-1798,1802-1803,1806-1808,1811-1813,1815-1817,1821-1824,1826-1828,1831-1838,1840-1843,1845,1977-1979,2093-2095
+schema/agentic_message_concat_test.go
+  s_87dd5799a8d2b2::t_3fbd00a1edeeb0 1-397
+schema/openai/extension.go
+  s_87dd5799a8d2b2::t_e32e8adb5d8c5d 22,172-177,182-189,191,206-210,230-232,235-236,248-253
+schema/openai/extension_concat_test.go
+  s_87dd5799a8d2b2::t_c78436fbdfc4f2 1-121
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "91cf243d23549d0d7e427a032816e1171c251a96",
+  "prompts": {},
+  "sessions": {
+    "s_87dd5799a8d2b2": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "fa35776e-9657-4dc1-8f9e-fe7fbb7c2f6a",
+        "model": "unknown"
+      },
+      "human_author": "lipandeng <lipandeng@bytedance.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
