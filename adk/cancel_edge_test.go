@@ -234,6 +234,57 @@ func drainCancelErrors(iter *AsyncIterator[*AgentEvent]) ([]*AgentEvent, []*Canc
 	return events, cancelErrors
 }
 
+func runChildAgentToEnd(ctx context.Context, child Agent, msg string) error {
+	iter := child.Run(ctx, &AgentInput{Messages: []Message{schema.UserMessage(msg)}})
+	for {
+		event, ok := iter.Next()
+		if !ok {
+			return nil
+		}
+		if event.Err != nil {
+			return event.Err
+		}
+	}
+}
+
+func newTransferSupervisorWithSubAgent(t *testing.T, ctx context.Context, mdl model.BaseChatModel, subAgent Agent) Agent {
+	t.Helper()
+
+	supervisorAgent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "supervisor",
+		Description: "supervisor agent",
+		Instruction: "you are a supervisor",
+		Model:       mdl,
+	})
+	require.NoError(t, err)
+
+	agentWithSubAgents, err := SetSubAgents(ctx, supervisorAgent, []Agent{subAgent})
+	require.NoError(t, err)
+	return agentWithSubAgents
+}
+
+func assertCancelErrorExcludesAddresses(t *testing.T, cancelErr *CancelError, names ...string) {
+	t.Helper()
+
+	for _, intCtx := range cancelErr.InterruptContexts {
+		addr := fmt.Sprint(intCtx.Address)
+		for _, name := range names {
+			assert.NotContains(t, addr, name)
+		}
+	}
+}
+
+func assertCancelErrorIncludesAddress(t *testing.T, cancelErr *CancelError, name string) {
+	t.Helper()
+
+	for _, intCtx := range cancelErr.InterruptContexts {
+		if strings.Contains(fmt.Sprint(intCtx.Address), name) {
+			return
+		}
+	}
+	t.Fatalf("cancel interrupt contexts do not include %q", name)
+}
+
 // --- tests ---
 
 // TestWithCancel_BeforeExecutionStarts verifies that a cancel issued before
@@ -394,17 +445,7 @@ func TestWithCancel_RecursiveDoesNotTargetAgentEmbeddedInMiddleware(t *testing.T
 				state *ChatModelAgentState,
 				_ *ModelContext,
 			) (context.Context, *ChatModelAgentState, error) {
-				iter := innerAgent.Run(ctx, &AgentInput{Messages: []Message{schema.UserMessage("run")}})
-				for {
-					event, ok := iter.Next()
-					if !ok {
-						break
-					}
-					if event.Err != nil {
-						return ctx, state, event.Err
-					}
-				}
-				return ctx, state, nil
+				return ctx, state, runChildAgentToEnd(ctx, innerAgent, "run")
 			}},
 		},
 	})
@@ -1393,21 +1434,10 @@ func TestWithCancel_RecursiveImmediate_TransferChildCheckpoint(t *testing.T) {
 		},
 	}
 
-	supervisorAgent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
-		Name:        "supervisor",
-		Description: "supervisor agent (equivalent to DeepAgent)",
-		Instruction: "you are a supervisor",
-		Model:       supervisorModel,
-	})
-	require.NoError(t, err)
-
-	agentWithSubAgents, err := SetSubAgents(ctx, supervisorAgent, []Agent{subAgent})
-	require.NoError(t, err)
-
 	store := newCancelTestStore()
 	checkpointID := "recursive-immediate-transfer-child-checkpoint"
 	runner := NewRunner(ctx, RunnerConfig{
-		Agent:           agentWithSubAgents,
+		Agent:           newTransferSupervisorWithSubAgent(t, ctx, supervisorModel, subAgent),
 		EnableStreaming: false,
 		CheckPointStore: store,
 	})
@@ -1436,14 +1466,7 @@ func TestWithCancel_RecursiveImmediate_TransferChildCheckpoint(t *testing.T) {
 	require.Len(t, cancelErrors, 1, "transfer child should emit a checkpoint CancelError")
 	assert.Equal(t, CancelImmediate, cancelErrors[0].Info.Mode)
 
-	var hasSubAgentCheckpoint bool
-	for _, intCtx := range cancelErrors[0].InterruptContexts {
-		if strings.Contains(fmt.Sprint(intCtx.Address), "sub_agent") {
-			hasSubAgentCheckpoint = true
-			break
-		}
-	}
-	assert.True(t, hasSubAgentCheckpoint, "transfer target should participate in checkpoint interrupt contexts")
+	assertCancelErrorIncludesAddress(t, cancelErrors[0], "sub_agent")
 
 	resumeSubAgentCalls := int32(0)
 	resumeSubAgent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
@@ -1459,18 +1482,8 @@ func TestWithCancel_RecursiveImmediate_TransferChildCheckpoint(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	resumeSupervisor, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
-		Name:        "supervisor",
-		Description: "supervisor agent (equivalent to DeepAgent)",
-		Instruction: "you are a supervisor",
-		Model:       supervisorModel,
-	})
-	require.NoError(t, err)
-
-	resumeAgentWithSubAgents, err := SetSubAgents(ctx, resumeSupervisor, []Agent{resumeSubAgent})
-	require.NoError(t, err)
 	resumeRunner := NewRunner(ctx, RunnerConfig{
-		Agent:           resumeAgentWithSubAgents,
+		Agent:           newTransferSupervisorWithSubAgent(t, ctx, supervisorModel, resumeSubAgent),
 		EnableStreaming: false,
 		CheckPointStore: store,
 	})
@@ -1525,21 +1538,10 @@ func TestWithCancel_RecursiveSafePoint_TransferChildCheckpoint(t *testing.T) {
 			}},
 		},
 	}
-	supervisorAgent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
-		Name:        "supervisor",
-		Description: "supervisor agent",
-		Instruction: "you are a supervisor",
-		Model:       supervisorModel,
-	})
-	require.NoError(t, err)
-
-	agentWithSubAgents, err := SetSubAgents(ctx, supervisorAgent, []Agent{subAgent})
-	require.NoError(t, err)
-
 	store := newCancelTestStore()
 	checkpointID := "recursive-safe-point-transfer-child-checkpoint"
 	runner := NewRunner(ctx, RunnerConfig{
-		Agent:           agentWithSubAgents,
+		Agent:           newTransferSupervisorWithSubAgent(t, ctx, supervisorModel, subAgent),
 		EnableStreaming: false,
 		CheckPointStore: store,
 	})
@@ -1567,14 +1569,7 @@ func TestWithCancel_RecursiveSafePoint_TransferChildCheckpoint(t *testing.T) {
 	require.Len(t, cancelErrors, 1, "transfer child should emit a safe-point checkpoint CancelError")
 	assert.Equal(t, CancelAfterChatModel, cancelErrors[0].Info.Mode)
 
-	var hasSubAgentCheckpoint bool
-	for _, intCtx := range cancelErrors[0].InterruptContexts {
-		if strings.Contains(fmt.Sprint(intCtx.Address), "sub_agent") {
-			hasSubAgentCheckpoint = true
-			break
-		}
-	}
-	assert.True(t, hasSubAgentCheckpoint, "transfer target should participate in safe-point checkpoint interrupt contexts")
+	assertCancelErrorIncludesAddress(t, cancelErrors[0], "sub_agent")
 
 	resumeSubAgentCalls := int32(0)
 	resumeSubAgent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
@@ -1594,17 +1589,8 @@ func TestWithCancel_RecursiveSafePoint_TransferChildCheckpoint(t *testing.T) {
 		},
 	})
 	require.NoError(t, err)
-	resumeSupervisor, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
-		Name:        "supervisor",
-		Description: "supervisor agent",
-		Instruction: "you are a supervisor",
-		Model:       supervisorModel,
-	})
-	require.NoError(t, err)
-	resumeAgentWithSubAgents, err := SetSubAgents(ctx, resumeSupervisor, []Agent{resumeSubAgent})
-	require.NoError(t, err)
 	resumeRunner := NewRunner(ctx, RunnerConfig{
-		Agent:           resumeAgentWithSubAgents,
+		Agent:           newTransferSupervisorWithSubAgent(t, ctx, supervisorModel, resumeSubAgent),
 		EnableStreaming: false,
 		CheckPointStore: store,
 	})
@@ -1635,16 +1621,7 @@ func TestWithCancel_RecursiveImmediate_MiddlewareChildAbortOnly(t *testing.T) {
 		Model:       &plainResponseModel{text: "outer done"},
 		Middlewares: []AgentMiddleware{{
 			BeforeChatModel: func(ctx context.Context, _ *ChatModelAgentState) error {
-				iter := childAgent.Run(ctx, &AgentInput{Messages: []Message{schema.UserMessage("child work")}})
-				for {
-					event, ok := iter.Next()
-					if !ok {
-						return nil
-					}
-					if event.Err != nil {
-						return event.Err
-					}
-				}
+				return runChildAgentToEnd(ctx, childAgent, "child work")
 			},
 		}},
 	})
@@ -1674,9 +1651,7 @@ func TestWithCancel_RecursiveImmediate_MiddlewareChildAbortOnly(t *testing.T) {
 	require.NoError(t, handle.Wait())
 	_, cancelErrors := drainCancelErrors(iter)
 	require.Len(t, cancelErrors, 1, "outer stream should emit exactly one root CancelError")
-	for _, intCtx := range cancelErrors[0].InterruptContexts {
-		assert.NotContains(t, fmt.Sprint(intCtx.Address), "MiddlewareChild")
-	}
+	assertCancelErrorExcludesAddresses(t, cancelErrors[0], "MiddlewareChild")
 
 	resumeChildCalls := int32(0)
 	resumeChildModel := &countingChatModel{
@@ -1700,16 +1675,7 @@ func TestWithCancel_RecursiveImmediate_MiddlewareChildAbortOnly(t *testing.T) {
 		Model:       &plainResponseModel{text: "outer done after resume"},
 		Middlewares: []AgentMiddleware{{
 			BeforeChatModel: func(ctx context.Context, _ *ChatModelAgentState) error {
-				iter := resumeChildAgent.Run(ctx, &AgentInput{Messages: []Message{schema.UserMessage("child work")}})
-				for {
-					event, ok := iter.Next()
-					if !ok {
-						return nil
-					}
-					if event.Err != nil {
-						return event.Err
-					}
-				}
+				return runChildAgentToEnd(ctx, resumeChildAgent, "child work")
 			},
 		}},
 	})
@@ -1806,10 +1772,7 @@ func TestWithCancel_RecursiveImmediate_MiddlewareChildAgentToolCheckpointResumeB
 		"the root may handle its own immediate interrupt, but not a checkpoint hidden behind a direct middleware Run")
 	_, cancelErrors := drainCancelErrors(iter)
 	require.Len(t, cancelErrors, 1, "root stream should expose only the root immediate cancel")
-	for _, intCtx := range cancelErrors[0].InterruptContexts {
-		assert.NotContains(t, fmt.Sprint(intCtx.Address), "MiddlewareLeafAgent",
-			"root cancel must not expose the nested AgentTool checkpoint from behind the direct middleware Run")
-	}
+	assertCancelErrorExcludesAddresses(t, cancelErrors[0], "MiddlewareLeafAgent")
 	assert.Equal(t, int32(0), atomic.LoadInt32(&childInterruptSeen),
 		"the abort-only middleware child must swallow the nested AgentTool interrupt action instead of surfacing it as a resumable boundary")
 
@@ -1854,16 +1817,7 @@ func TestWithCancel_RecursiveImmediate_MiddlewareChildAgentToolCheckpointResumeB
 		Model:       &plainResponseModel{text: "outer done after resume"},
 		Middlewares: []AgentMiddleware{{
 			BeforeChatModel: func(ctx context.Context, _ *ChatModelAgentState) error {
-				iter := resumeChildAgent.Run(ctx, &AgentInput{Messages: []Message{schema.UserMessage("child work")}})
-				for {
-					event, ok := iter.Next()
-					if !ok {
-						return nil
-					}
-					if event.Err != nil {
-						return event.Err
-					}
-				}
+				return runChildAgentToEnd(ctx, resumeChildAgent, "child work")
 			},
 		}},
 	})
@@ -1942,9 +1896,7 @@ func TestWithCancel_RecursiveImmediate_BeforeAgentChildAbortOnly(t *testing.T) {
 	}
 	_, cancelErrors := drainCancelErrors(iter)
 	require.Len(t, cancelErrors, 1, "outer stream should emit exactly one root CancelError")
-	for _, intCtx := range cancelErrors[0].InterruptContexts {
-		assert.NotContains(t, fmt.Sprint(intCtx.Address), "BeforeAgentMiddlewareChild")
-	}
+	assertCancelErrorExcludesAddresses(t, cancelErrors[0], "BeforeAgentMiddlewareChild")
 }
 
 func TestWithCancel_RecursiveImmediate_MultiLevelMiddlewareChildrenAbortOnly(t *testing.T) {
@@ -1974,16 +1926,7 @@ func TestWithCancel_RecursiveImmediate_MultiLevelMiddlewareChildrenAbortOnly(t *
 					default:
 					}
 				}()
-				iter := agentC.Run(ctx, &AgentInput{Messages: []Message{schema.UserMessage("c work")}})
-				for {
-					event, ok := iter.Next()
-					if !ok {
-						return nil
-					}
-					if event.Err != nil {
-						return event.Err
-					}
-				}
+				return runChildAgentToEnd(ctx, agentC, "c work")
 			},
 		}},
 	})
@@ -1996,16 +1939,7 @@ func TestWithCancel_RecursiveImmediate_MultiLevelMiddlewareChildrenAbortOnly(t *
 		Model:       &plainResponseModel{text: "outer done"},
 		Middlewares: []AgentMiddleware{{
 			BeforeChatModel: func(ctx context.Context, _ *ChatModelAgentState) error {
-				iter := agentB.Run(ctx, &AgentInput{Messages: []Message{schema.UserMessage("b work")}})
-				for {
-					event, ok := iter.Next()
-					if !ok {
-						return nil
-					}
-					if event.Err != nil {
-						return event.Err
-					}
-				}
+				return runChildAgentToEnd(ctx, agentB, "b work")
 			},
 		}},
 	})
@@ -2036,11 +1970,7 @@ func TestWithCancel_RecursiveImmediate_MultiLevelMiddlewareChildrenAbortOnly(t *
 	require.NoError(t, handle.Wait())
 	_, cancelErrors := drainCancelErrors(iter)
 	require.Len(t, cancelErrors, 1, "outer stream should emit exactly one root CancelError")
-	for _, intCtx := range cancelErrors[0].InterruptContexts {
-		addr := fmt.Sprint(intCtx.Address)
-		assert.NotContains(t, addr, "MiddlewareChildB")
-		assert.NotContains(t, addr, "MiddlewareChildC")
-	}
+	assertCancelErrorExcludesAddresses(t, cancelErrors[0], "MiddlewareChildB", "MiddlewareChildC")
 }
 
 func TestWithCancel_NonRecursiveImmediate_DoesNotAbortMiddlewareChild(t *testing.T) {
@@ -2068,16 +1998,7 @@ func TestWithCancel_NonRecursiveImmediate_DoesNotAbortMiddlewareChild(t *testing
 		Model:       &plainResponseModel{text: "outer done"},
 		Middlewares: []AgentMiddleware{{
 			BeforeChatModel: func(ctx context.Context, _ *ChatModelAgentState) error {
-				iter := childAgent.Run(ctx, &AgentInput{Messages: []Message{schema.UserMessage("child work")}})
-				for {
-					event, ok := iter.Next()
-					if !ok {
-						return nil
-					}
-					if event.Err != nil {
-						return event.Err
-					}
-				}
+				return runChildAgentToEnd(ctx, childAgent, "child work")
 			},
 		}},
 	})

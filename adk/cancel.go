@@ -434,6 +434,11 @@ func (cc *cancelContext) deriveCheckpointAwareCancelContext(ctx context.Context)
 	return child
 }
 
+// deriveAbortOnlyCancelContext creates a child cancelContext for direct
+// non-boundary nested runs, such as a ChatModelAgent called from user
+// middleware. The child only receives recursive immediate teardown from the
+// parent; safe-point modes do not propagate because this scope is a resume
+// barrier and cannot contribute checkpoint state to the parent.
 func deriveAbortOnlyCancelContext(ctx context.Context, parent *cancelContext) *cancelContext {
 	if parent == nil {
 		return nil
@@ -466,6 +471,10 @@ func deriveAbortOnlyCancelContext(ctx context.Context, parent *cancelContext) *c
 	return child
 }
 
+// withAbortOnlyCancelContext bridges an abort-only cancelContext into the Go
+// context seen by user/model/tool code. When the cancelContext receives
+// immediate teardown or finishes, ctx.Done() is closed so ordinary cooperative
+// cancellation checks can stop promptly.
 func withAbortOnlyCancelContext(ctx context.Context, cc *cancelContext) (context.Context, context.CancelFunc) {
 	ctx = withCancelContext(ctx, cc)
 	ctx, cancel := context.WithCancel(ctx)
@@ -707,6 +716,11 @@ func isAbortOnlyCancelled(cc *cancelContext) bool {
 	return cc != nil && cc.abortOnly && cc.isImmediateCancelled()
 }
 
+// checkPreExecCancel handles cancellation that is already visible before a
+// ChatModelAgent enters its compose graph. This closes the window before graph
+// interrupt functions are registered: checkpoint-aware scopes emit a CancelError
+// for immediate cancellation, while abort-only scopes silently terminate because
+// they are teardown-only resume barriers.
 func checkPreExecCancel[M MessageType](cc *cancelContext, gen *AsyncGenerator[*TypedAgentEvent[M]]) (terminated bool) {
 	if cc == nil {
 		return false
