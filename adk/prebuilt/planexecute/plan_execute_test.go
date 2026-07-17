@@ -1008,8 +1008,9 @@ func (m *slowChatModel) WithTools(tools []*schema.ToolInfo) (model.ToolCallingCh
 	return m, nil
 }
 
-// TestWithCancel_PlanExecute_DuringExecution verifies that cancel works
-// during the executor (ChatModelAgent) phase of the PlanExecute agent.
+// TestWithCancel_PlanExecute_DuringExecution verifies that recursive immediate
+// cancel aborts the executor (ChatModelAgent) phase promptly while the outer
+// workflow handles the cancellation.
 func TestWithCancel_PlanExecute_DuringExecution(t *testing.T) {
 	ctx := context.Background()
 
@@ -1078,10 +1079,10 @@ func TestWithCancel_PlanExecute_DuringExecution(t *testing.T) {
 
 	time.Sleep(50 * time.Millisecond)
 
-	// Cancel should NOT return ErrExecutionEnded
-	handle, _ := cancelFn()
+	start := time.Now()
+	handle, _ := cancelFn(adk.WithRecursive())
 	err = handle.Wait()
-	assert.NoError(t, err, "Cancel during executor should succeed")
+	assert.NoError(t, err, "PlanExecute workflow should handle recursive cancel")
 
 	hasCancelError := false
 	for {
@@ -1094,12 +1095,15 @@ func TestWithCancel_PlanExecute_DuringExecution(t *testing.T) {
 			hasCancelError = true
 		}
 	}
+	elapsed := time.Since(start)
 
-	assert.True(t, hasCancelError, "Should have CancelError event")
+	assert.True(t, hasCancelError, "Should have CancelError event from PlanExecute workflow")
+	assert.True(t, elapsed < 3*time.Second, "Should complete quickly after recursive cancel, elapsed: %v", elapsed)
 }
 
-// TestWithCancel_PlanExecute_BetweenTransitions verifies that cancel works
-// when fired between agent transitions (e.g., after planner, before executor starts).
+// TestWithCancel_PlanExecute_BetweenTransitions verifies that recursive immediate
+// cancel aborts a direct executor child after the planner phase promptly while
+// the outer workflow handles the cancellation.
 func TestWithCancel_PlanExecute_BetweenTransitions(t *testing.T) {
 	ctx := context.Background()
 
@@ -1179,9 +1183,9 @@ func TestWithCancel_PlanExecute_BetweenTransitions(t *testing.T) {
 	}
 
 	start := time.Now()
-	handle, _ := cancelFn()
+	handle, _ := cancelFn(adk.WithRecursive())
 	err = handle.Wait()
-	assert.NoError(t, err, "Cancel between transitions should succeed")
+	assert.NoError(t, err, "PlanExecute workflow should handle recursive cancel")
 
 	hasCancelError := false
 	for {
@@ -1196,6 +1200,90 @@ func TestWithCancel_PlanExecute_BetweenTransitions(t *testing.T) {
 	}
 	elapsed := time.Since(start)
 
-	assert.True(t, hasCancelError, "Should have CancelError event")
-	assert.True(t, elapsed < 3*time.Second, "Should complete quickly after cancel, elapsed: %v", elapsed)
+	assert.True(t, hasCancelError, "Should have CancelError event from PlanExecute workflow")
+	assert.True(t, elapsed < 3*time.Second, "Should complete quickly after recursive cancel, elapsed: %v", elapsed)
+}
+
+func TestWithCancel_PlanExecute_DuringExecution_CancelAfterChatModel(t *testing.T) {
+	ctx := context.Background()
+
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockPlanner := mockAdk.NewMockAgent(ctrl)
+	mockPlanner.EXPECT().Name(gomock.Any()).Return("planner").AnyTimes()
+	mockPlanner.EXPECT().Description(gomock.Any()).Return("a planner agent").AnyTimes()
+
+	plan := &defaultPlan{Steps: []string{"Step 1"}}
+	userInput := []adk.Message{schema.UserMessage("test task")}
+
+	mockPlanner.EXPECT().Run(gomock.Any(), gomock.Any(), gomock.Any()).DoAndReturn(
+		func(ctx context.Context, input *adk.AgentInput, opts ...adk.AgentRunOption) *adk.AsyncIterator[*adk.AgentEvent] {
+			iterator, generator := adk.NewAsyncIteratorPair[*adk.AgentEvent]()
+			adk.AddSessionValue(ctx, PlanSessionKey, plan)
+			adk.AddSessionValue(ctx, UserInputSessionKey, userInput)
+			planJSON, _ := sonic.MarshalString(plan)
+			generator.Send(adk.EventFromMessage(schema.AssistantMessage(planJSON, nil), nil, schema.Assistant, ""))
+			generator.Close()
+			return iterator
+		},
+	).Times(1)
+
+	executorStarted := make(chan struct{})
+	executor, err := NewExecutor(ctx, &ExecutorConfig{
+		Model: &slowChatModel{
+			delay:       100 * time.Millisecond,
+			response:    schema.AssistantMessage("step result", nil),
+			startedChan: executorStarted,
+		},
+		MaxIterations: 5,
+	})
+	assert.NoError(t, err)
+
+	mockReplanner := mockAdk.NewMockAgent(ctrl)
+	mockReplanner.EXPECT().Name(gomock.Any()).Return("replanner").AnyTimes()
+	mockReplanner.EXPECT().Description(gomock.Any()).Return("a replanner agent").AnyTimes()
+
+	agent, err := New(ctx, &Config{
+		Planner:       mockPlanner,
+		Executor:      executor,
+		Replanner:     mockReplanner,
+		MaxIterations: 5,
+	})
+	assert.NoError(t, err)
+
+	store := newCheckpointStore()
+	runner := adk.NewRunner(ctx, adk.RunnerConfig{
+		Agent:           agent,
+		CheckPointStore: store,
+	})
+
+	cancelOpt, cancelFn := adk.WithCancel()
+	iter := runner.Run(ctx, userInput, cancelOpt, adk.WithCheckPointID("planexecute-safe-point-cancel"))
+
+	select {
+	case <-executorStarted:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Executor model did not start")
+	}
+
+	handle, _ := cancelFn(adk.WithAgentCancelMode(adk.CancelAfterChatModel), adk.WithRecursive())
+	err = handle.Wait()
+	assert.NoError(t, err, "PlanExecute workflow should handle recursive safe-point cancel")
+
+	var cancelErr *adk.CancelError
+	for {
+		event, ok := iter.Next()
+		if !ok {
+			break
+		}
+		if event.Err != nil {
+			errors.As(event.Err, &cancelErr)
+		}
+	}
+
+	if assert.NotNil(t, cancelErr, "Should have CancelError event from PlanExecute workflow safe-point") {
+		assert.Equal(t, adk.CancelAfterChatModel, cancelErr.Info.Mode)
+		assert.NotEmpty(t, cancelErr.InterruptContexts)
+	}
 }

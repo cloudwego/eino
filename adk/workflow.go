@@ -208,6 +208,8 @@ func (a *workflowAgent) runSequential(ctx context.Context,
 		}
 
 		var subIterator *AsyncIterator[*AgentEvent]
+		childCancelCtx := deriveCheckpointAwareSubAgentCancelContext(seqCtx, opts)
+		childOpts := appendCancelContextOption(opts, childCancelCtx)
 		if seqState != nil {
 			wfInfo, _ := info.Data.(*WorkflowInterruptInfo)
 			if wfInfo != nil && wfInfo.SequentialInterruptInfo != nil {
@@ -215,13 +217,13 @@ func (a *workflowAgent) runSequential(ctx context.Context,
 				subIterator = subAgent.Resume(seqCtx, &ResumeInfo{
 					EnableStreaming: info.EnableStreaming,
 					InterruptInfo:   wfInfo.SequentialInterruptInfo,
-				}, opts...)
+				}, childOpts...)
 			} else {
-				subIterator = subAgent.Run(seqCtx, nil, opts...)
+				subIterator = subAgent.Run(seqCtx, nil, childOpts...)
 			}
 			seqState = nil
 		} else {
-			subIterator = subAgent.Run(seqCtx, nil, opts...)
+			subIterator = subAgent.Run(seqCtx, nil, childOpts...)
 		}
 
 		seqCtx = updateRunPathOnly(seqCtx, subAgent.Name(seqCtx))
@@ -360,6 +362,8 @@ func (a *workflowAgent) runLoop(ctx context.Context, generator *AsyncGenerator[*
 			}
 
 			var subIterator *AsyncIterator[*AgentEvent]
+			childCancelCtx := deriveCheckpointAwareSubAgentCancelContext(loopCtx, opts)
+			childOpts := appendCancelContextOption(opts, childCancelCtx)
 			if loopState != nil {
 				wfInfo, _ := resumeInfo.Data.(*WorkflowInterruptInfo)
 				if wfInfo != nil && wfInfo.SequentialInterruptInfo != nil {
@@ -367,13 +371,13 @@ func (a *workflowAgent) runLoop(ctx context.Context, generator *AsyncGenerator[*
 					subIterator = subAgent.Resume(loopCtx, &ResumeInfo{
 						EnableStreaming: resumeInfo.EnableStreaming,
 						InterruptInfo:   wfInfo.SequentialInterruptInfo,
-					}, opts...)
+					}, childOpts...)
 				} else {
-					subIterator = subAgent.Run(loopCtx, nil, opts...)
+					subIterator = subAgent.Run(loopCtx, nil, childOpts...)
 				}
 				loopState = nil // Only resume the first time.
 			} else {
-				subIterator = subAgent.Run(loopCtx, nil, opts...)
+				subIterator = subAgent.Run(loopCtx, nil, childOpts...)
 			}
 
 			loopCtx = updateRunPathOnly(loopCtx, subAgent.Name(loopCtx))
@@ -533,13 +537,17 @@ func (a *workflowAgent) runParallel(ctx context.Context, generator *AsyncGenerat
 				if wfInfo, ok := resumeInfo.Data.(*WorkflowInterruptInfo); ok && wfInfo != nil {
 					childResumeInfo.InterruptInfo = wfInfo.ParallelInterruptInfo[idx]
 				}
-				iterator = agent.Resume(childContexts[idx], childResumeInfo, opts...)
+				childCancelCtx := deriveCheckpointAwareSubAgentCancelContext(childContexts[idx], opts)
+				childOpts := appendCancelContextOption(opts, childCancelCtx)
+				iterator = agent.Resume(childContexts[idx], childResumeInfo, childOpts...)
 			} else if parState != nil {
 				// We are resuming, but this child is not in the next points map.
 				// This means it finished successfully, so we don't run it.
 				return
 			} else {
-				iterator = agent.Run(childContexts[idx], nil, opts...)
+				childCancelCtx := deriveCheckpointAwareSubAgentCancelContext(childContexts[idx], opts)
+				childOpts := appendCancelContextOption(opts, childCancelCtx)
+				iterator = agent.Run(childContexts[idx], nil, childOpts...)
 			}
 
 			for {

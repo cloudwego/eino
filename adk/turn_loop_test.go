@@ -4843,9 +4843,9 @@ func TestNewTurnLoop_NilPrepareAgent_Panics(t *testing.T) {
 	})
 }
 
-func TestDeriveAgentToolCancelContext_NilParent_ReturnsNil(t *testing.T) {
+func TestDeriveCheckpointAwareCancelContext_NilParent_ReturnsNil(t *testing.T) {
 	var cc *cancelContext
-	assert.Nil(t, cc.deriveAgentToolCancelContext(context.Background()))
+	assert.Nil(t, cc.deriveCheckpointAwareCancelContext(context.Background()))
 }
 
 func TestUntilIdleFor(t *testing.T) {
@@ -5774,7 +5774,7 @@ func TestAttack_SkipCheckpoint_Sticky(t *testing.T) {
 //
 // IMPORTANT: child.markDone() is NOT called by the probe. The test MUST
 // call it (e.g. via t.Cleanup) after verifying propagation to avoid a
-// race between markDone closing child.doneChan and the deriveAgentToolCancelContext
+// race between markDone closing child.doneChan and the deriveCheckpointAwareCancelContext
 // goroutines propagating the cancel signal.
 type turnLoopNestedProbeAgent struct {
 	parentCCCh chan *cancelContext
@@ -5788,7 +5788,7 @@ func (a *turnLoopNestedProbeAgent) Run(ctx context.Context, _ *AgentInput, opts 
 	o := getCommonOptions(nil, opts...)
 	cc := o.cancelCtx
 
-	child := cc.deriveAgentToolCancelContext(ctx)
+	child := cc.deriveCheckpointAwareCancelContext(ctx)
 	a.parentCCCh <- cc
 	a.childCCCh <- child
 

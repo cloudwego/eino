@@ -40,7 +40,7 @@ func assertNotClosedWithin(t *testing.T, ch <-chan struct{}, d time.Duration) {
 func setupParentChild(t *testing.T) (parent, child *cancelContext, cleanup func()) {
 	parent = newCancelContext()
 	ctx, cancel := context.WithCancel(context.Background())
-	child = parent.deriveAgentToolCancelContext(ctx)
+	child = parent.deriveCheckpointAwareCancelContext(ctx)
 	cleanup = func() {
 		child.markDone()
 		cancel()
@@ -61,7 +61,7 @@ func setupAbortOnlyChild(t *testing.T) (parent, child *cancelContext, cleanup fu
 	return parent, child, cleanup
 }
 
-func TestDeriveAgentToolCancelContext(t *testing.T) {
+func TestDeriveCheckpointAwareCancelContext(t *testing.T) {
 	t.Run("Shallow", func(t *testing.T) {
 		t.Run("DoesNotPropagateSafePoint", func(t *testing.T) {
 			parent, child, _ := setupParentChild(t)
@@ -83,8 +83,8 @@ func TestDeriveAgentToolCancelContext(t *testing.T) {
 			a := newCancelContext()
 			ctx, cancel := context.WithCancel(context.Background())
 
-			b := a.deriveAgentToolCancelContext(ctx)
-			c := b.deriveAgentToolCancelContext(ctx)
+			b := a.deriveCheckpointAwareCancelContext(ctx)
+			c := b.deriveCheckpointAwareCancelContext(ctx)
 			t.Cleanup(func() {
 				c.markDone()
 				b.markDone()
@@ -105,7 +105,7 @@ func TestDeriveAgentToolCancelContext(t *testing.T) {
 			parent := newCancelContext()
 			ctx, cancel := context.WithCancel(context.Background())
 
-			child := parent.deriveAgentToolCancelContext(ctx)
+			child := parent.deriveCheckpointAwareCancelContext(ctx)
 
 			parent.triggerCancel(CancelAfterChatModel)
 			time.Sleep(100 * time.Millisecond)
@@ -155,8 +155,8 @@ func TestDeriveAgentToolCancelContext(t *testing.T) {
 			a := newCancelContext()
 			ctx, cancel := context.WithCancel(context.Background())
 
-			b := a.deriveAgentToolCancelContext(ctx)
-			c := b.deriveAgentToolCancelContext(ctx)
+			b := a.deriveCheckpointAwareCancelContext(ctx)
+			c := b.deriveCheckpointAwareCancelContext(ctx)
 			t.Cleanup(func() {
 				c.markDone()
 				b.markDone()
@@ -204,7 +204,7 @@ func TestDeriveAgentToolCancelContext(t *testing.T) {
 			parent.setRecursive(true)
 			parent.triggerCancel(CancelAfterChatModel)
 
-			child := parent.deriveAgentToolCancelContext(ctx)
+			child := parent.deriveCheckpointAwareCancelContext(ctx)
 			t.Cleanup(func() {
 				child.markDone()
 				cancel()
@@ -323,23 +323,23 @@ func TestDeriveAbortOnlyCancelContext(t *testing.T) {
 		assertNotClosedWithin(t, child.immediateChan, 50*time.Millisecond)
 	})
 
-	t.Run("AgentToolDescendantStopsAtAbortOnlyBoundary", func(t *testing.T) {
+	t.Run("CheckpointAwareDescendantStopsAtAbortOnlyBoundary", func(t *testing.T) {
 		root := newCancelContext()
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
 		abortOnly := deriveAbortOnlyCancelContext(ctx, root)
-		agentToolChild := abortOnly.deriveAgentToolCancelContext(ctx)
+		checkpointAwareScope := abortOnly.deriveCheckpointAwareCancelContext(ctx)
 		t.Cleanup(func() {
-			agentToolChild.markDone()
+			checkpointAwareScope.markDone()
 			abortOnly.markDone()
 		})
 
-		agentToolChild.markAgentToolDescendant()
+		checkpointAwareScope.markCheckpointAwareDescendant()
 
-		assert.True(t, agentToolChild.hasAgentToolDescendant())
-		assert.True(t, abortOnly.hasAgentToolDescendant())
-		assert.False(t, root.hasAgentToolDescendant())
+		assert.True(t, checkpointAwareScope.hasCheckpointAwareDescendant())
+		assert.False(t, abortOnly.hasCheckpointAwareDescendant())
+		assert.False(t, root.hasCheckpointAwareDescendant())
 	})
 }
 
@@ -394,13 +394,13 @@ func TestCheckPreExecCancel(t *testing.T) {
 	})
 }
 
-func TestDeriveAgentToolCancelContext_Race(t *testing.T) {
+func TestDeriveCheckpointAwareCancelContext_Race(t *testing.T) {
 	t.Run("SetRecursiveConcurrentWithCancelChan", func(t *testing.T) {
 		for i := 0; i < 100; i++ {
 			parent := newCancelContext()
 			ctx, cancel := context.WithCancel(context.Background())
 
-			child := parent.deriveAgentToolCancelContext(ctx)
+			child := parent.deriveCheckpointAwareCancelContext(ctx)
 
 			var wg sync.WaitGroup
 			wg.Add(2)
@@ -434,7 +434,7 @@ func TestDeriveAgentToolCancelContext_Race(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
-		child := parent.deriveAgentToolCancelContext(ctx)
+		child := parent.deriveCheckpointAwareCancelContext(ctx)
 
 		parent.triggerCancel(CancelAfterChatModel)
 		time.Sleep(50 * time.Millisecond)
@@ -452,8 +452,8 @@ func TestDeriveAgentToolCancelContext_Race(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
-		child1 := parent.deriveAgentToolCancelContext(ctx)
-		child2 := parent.deriveAgentToolCancelContext(ctx)
+		child1 := parent.deriveCheckpointAwareCancelContext(ctx)
+		child2 := parent.deriveCheckpointAwareCancelContext(ctx)
 
 		parent.triggerCancel(CancelAfterChatModel)
 		time.Sleep(50 * time.Millisecond)
@@ -482,7 +482,7 @@ func TestDeriveAgentToolCancelContext_Race(t *testing.T) {
 			parent := newCancelContext()
 			ctx, cancel := context.WithCancel(context.Background())
 
-			child := parent.deriveAgentToolCancelContext(ctx)
+			child := parent.deriveCheckpointAwareCancelContext(ctx)
 
 			parent.triggerCancel(CancelAfterChatModel)
 
@@ -535,5 +535,91 @@ func TestDeriveAgentToolCancelContext_Race(t *testing.T) {
 		}
 
 		assert.True(t, parent.isRecursive())
+	})
+}
+
+func TestAppendCancelContextOption_CopiesInputSlice(t *testing.T) {
+	parent := newCancelContext()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	child := parent.deriveCheckpointAwareCancelContext(ctx)
+	t.Cleanup(child.markDone)
+
+	raw := make([]AgentRunOption, 1, 2)
+	raw[0] = WrapImplSpecificOptFn(func(o *options) {
+		o.skipTransferMessages = true
+	})
+	opts := raw[:1]
+
+	childOpts := appendCancelContextOption(opts, child)
+
+	requireLen := func(name string, got, want int) {
+		t.Helper()
+		if got != want {
+			t.Fatalf("%s length = %d, want %d", name, got, want)
+		}
+	}
+	requireLen("opts", len(opts), 1)
+	requireLen("childOpts", len(childOpts), 2)
+
+	originalCommon := getCommonOptions(nil, raw[:2]...)
+	if originalCommon.cancelCtx != nil {
+		t.Fatal("appendCancelContextOption reused the caller's backing array")
+	}
+
+	childCommon := getCommonOptions(nil, childOpts...)
+	if childCommon.cancelCtx != child {
+		t.Fatal("sub-agent opts did not receive the requested cancel context")
+	}
+}
+
+func TestDeriveCheckpointAwareSubAgentCancelContext(t *testing.T) {
+	t.Run("CheckpointAwareParent", func(t *testing.T) {
+		parent := newCancelContext()
+		baseCtx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		ctx := withCancelContext(baseCtx, parent)
+
+		child := deriveCheckpointAwareSubAgentCancelContext(ctx, nil)
+		if child != nil {
+			t.Cleanup(child.markDone)
+		}
+
+		if child == nil {
+			t.Fatal("sub-agent cancel context was not derived")
+		}
+		if child == parent {
+			t.Fatal("sub-agent cancel context reused the parent cancel context")
+		}
+		if child.parent != parent || child.abortOnly {
+			t.Fatal("sub-agent cancel context is not checkpoint-aware")
+		}
+		if !parent.hasCheckpointAwareDescendant() {
+			t.Fatal("parent was not marked as having a checkpoint-aware descendant")
+		}
+	})
+
+	t.Run("AbortOnlyParentIsResumeBarrier", func(t *testing.T) {
+		root := newCancelContext()
+		baseCtx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		abortOnly := deriveAbortOnlyCancelContext(baseCtx, root)
+		t.Cleanup(abortOnly.markDone)
+		ctx := withCancelContext(baseCtx, abortOnly)
+
+		child := deriveCheckpointAwareSubAgentCancelContext(ctx, nil)
+		if child != nil {
+			t.Cleanup(child.markDone)
+		}
+
+		if child != nil {
+			t.Fatal("sub-agent cancel context crossed an abort-only resume barrier")
+		}
+		if abortOnly.hasCheckpointAwareDescendant() {
+			t.Fatal("abort-only scope was marked as having a checkpoint-aware descendant")
+		}
+		if root.hasCheckpointAwareDescendant() {
+			t.Fatal("root checkpoint-aware ancestor was marked through an abort-only barrier")
+		}
 	})
 }

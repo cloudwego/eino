@@ -83,14 +83,6 @@ func getTypedChatModelAgentExecCtx[M MessageType](ctx context.Context) *typedCha
 	return nil
 }
 
-// AgentTool is a checkpoint boundary: its internal agents must not be classified
-// as direct middleware children of the ChatModelAgent that called the tool.
-func clearChatModelAgentExecCtx(ctx context.Context) context.Context {
-	ctx = context.WithValue(ctx, typedChatModelAgentExecCtxKey[*schema.Message]{}, nil)
-	ctx = context.WithValue(ctx, typedChatModelAgentExecCtxKey[*schema.AgenticMessage]{}, nil)
-	return ctx
-}
-
 type chatModelAgentRunOptions struct {
 	chatModelOptions []model.Option
 	toolOptions      []tool.Option
@@ -480,24 +472,8 @@ type typedRunParams[M MessageType] struct {
 
 type typedRunFunc[M MessageType] func(ctx context.Context, p *typedRunParams[M])
 
-func hasChatModelAgentExecCtx(ctx context.Context) bool {
-	return getTypedChatModelAgentExecCtx[*schema.Message](ctx) != nil ||
-		getTypedChatModelAgentExecCtx[*schema.AgenticMessage](ctx) != nil
-}
-
-// The current Address is read before this ChatModelAgent installs its own
-// compose graph, so the nearest ADK segment describes the caller-side boundary.
-func isUnderADKToolBoundary(ctx context.Context) bool {
-	addr := compose.GetCurrentAddress(ctx)
-	for i := len(addr) - 1; i >= 0; i-- {
-		switch addr[i].Type {
-		case AddressSegmentTool:
-			return true
-		case AddressSegmentAgent:
-			return false
-		}
-	}
-	return false
+func isCheckpointAwareCancelScope(cc *cancelContext) bool {
+	return cc != nil && cc.parent != nil && !cc.abortOnly
 }
 
 func resolveRunCancelContext(ctx context.Context, o *options) (*cancelContext, bool) {
@@ -505,10 +481,17 @@ func resolveRunCancelContext(ctx context.Context, o *options) (*cancelContext, b
 	if o.cancelCtx != nil {
 		return o.cancelCtx, o.cancelCtx != inherited
 	}
-	if hasChatModelAgentExecCtx(ctx) && !isUnderADKToolBoundary(ctx) {
-		return deriveAbortOnlyCancelContext(ctx, inherited), inherited != nil
+	if inherited != nil {
+		// ADK-managed child boundaries pass explicit checkpoint-aware scopes.
+		// Such scopes may reach ChatModelAgent through transparent wrappers.
+		if isCheckpointAwareCancelScope(inherited) {
+			return inherited, false
+		}
+		// Other inherited scopes are direct non-boundary nesting: only immediate
+		// recursive abort should propagate, without safe-point checkpointing.
+		return deriveAbortOnlyCancelContext(ctx, inherited), true
 	}
-	return inherited, false
+	return nil, false
 }
 
 // NewChatModelAgent creates a new ChatModelAgent with the given config.
