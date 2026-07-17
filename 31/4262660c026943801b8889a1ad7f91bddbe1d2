@@ -1,0 +1,23 @@
+adk/agent_tool_test.go
+  s_527c5b1ee6f74a::t_8ff1df58de35bc 1322-1341
+adk/utils.go
+  s_527c5b1ee6f74a::t_634ac56cdddca2 234,236-237,249-260
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.5",
+  "base_commit_sha": "314262660c026943801b8889a1ad7f91bddbe1d2",
+  "prompts": {},
+  "sessions": {
+    "s_527c5b1ee6f74a": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f607e-5365-7cf1-90fe-c79f56262d72",
+        "model": "unknown"
+      },
+      "human_author": "lipandeng <lipandeng@bytedance.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}

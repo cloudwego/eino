@@ -1,0 +1,25 @@
+adk/backgroundtask/manager.go
+  s_527c5b1ee6f74a::t_f0e860a70f25fc 1058-1062
+adk/middlewares/filesystem/bash_run.go
+  s_527c5b1ee6f74a::t_340f7b8b0d0341 307,312,346
+adk/middlewares/filesystem/filesystem.go
+  s_527c5b1ee6f74a::t_00da54460f370c 1089
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.5",
+  "base_commit_sha": "655e6cd8639478bd0e9f2a55a4fbba46af3de1ae",
+  "prompts": {},
+  "sessions": {
+    "s_527c5b1ee6f74a": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f607e-5365-7cf1-90fe-c79f56262d72",
+        "model": "unknown"
+      },
+      "human_author": "lipandeng <lipandeng@bytedance.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}

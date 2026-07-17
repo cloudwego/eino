@@ -1,0 +1,29 @@
+adk/middlewares/backgroundtask/middleware.go
+  s_1f87e36eab1b35::t_2ad687b685bab4 316-320
+adk/middlewares/subagent/agent_tool.go
+  s_1f87e36eab1b35::t_7fef5e0c4aa81d 100-122,130,142,147,149,165-166,189-193,241,243,253-255,257,261,263,266-291,294,297,299
+adk/middlewares/subagent/middleware.go
+  s_1f87e36eab1b35::t_7a31459a8af44f 58,66,76-89,95,98-116,167-171
+adk/middlewares/subagent/middleware_test.go
+  s_1f87e36eab1b35::t_708432feb077ea 218,327,404,428,442,446,469,471,475-596,611,749,789
+adk/prebuilt/deep/deep.go
+  s_1f87e36eab1b35::t_26d3ce3cb6dabf 47-51,60-64,193,197
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.5",
+  "base_commit_sha": "1eb21bed26b301d031018bd14ddbb5178ea060bb",
+  "prompts": {},
+  "sessions": {
+    "s_1f87e36eab1b35": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "0652c0c3-7051-4232-ac6b-113ea0baad42",
+        "model": "unknown"
+      },
+      "human_author": "lipandeng <lipandeng@bytedance.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}

@@ -1,0 +1,33 @@
+adk/middlewares/subagent/middleware.go
+  s_1f87e36eab1b35::t_67ca72eddbc3a7 58,61-65,70,86-94
+adk/middlewares/subagent/middleware_test.go
+  s_527c5b1ee6f74a::t_f0d44ea8f652b3 218,327,404,442,497,539,579,611,749,789
+adk/prebuilt/deep/deep.go
+  s_527c5b1ee6f74a::t_bde900717a116f 193
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.5",
+  "base_commit_sha": "bc9a137f63acb9629dfdb8406456bb6d4a4f6fe1",
+  "prompts": {},
+  "sessions": {
+    "s_1f87e36eab1b35": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "0652c0c3-7051-4232-ac6b-113ea0baad42",
+        "model": "unknown"
+      },
+      "human_author": "lipandeng <lipandeng@bytedance.com>"
+    },
+    "s_527c5b1ee6f74a": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f607e-5365-7cf1-90fe-c79f56262d72",
+        "model": "unknown"
+      },
+      "human_author": "lipandeng <lipandeng@bytedance.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
