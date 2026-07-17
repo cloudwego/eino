@@ -1,0 +1,763 @@
+/*
+ * Copyright 2026 CloudWeGo Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package team
+
+import (
+	"context"
+	"errors"
+	"path/filepath"
+	"testing"
+	"time"
+
+	"github.com/bytedance/sonic"
+	"github.com/stretchr/testify/assert"
+)
+
+func TestNewMailboxMessageSource(t *testing.T) {
+	backend := newInMemoryBackend()
+	locks := newNamedLockManager()
+	mb := &mailbox{
+		conf: &mailboxConfig{
+			Backend:      backend,
+			BaseDir:      "/tmp/test",
+			TeamName:     "myteam",
+			OwnerName:    "agent1",
+			PollInterval: 10 * time.Millisecond,
+		},
+		inboxLocks: locks,
+		listMembers: func(ctx context.Context) ([]string, error) {
+			return []string{"team-lead", "agent1"}, nil
+		},
+	}
+
+	conf := &mailboxSourceConfig{
+		OwnerName: "agent1",
+		Role:      teamRoleTeammate,
+	}
+	src := newMailboxMessageSource(mb, conf)
+
+	assert.NotNil(t, src)
+	assert.Same(t, mb, src.mailbox)
+	assert.Same(t, conf, src.conf)
+	assert.Equal(t, 0, src.processedCount)
+	assert.Equal(t, 0, src.lastIdleProcessedCount)
+}
+
+func TestTryReceive_NilMailbox(t *testing.T) {
+	src := newMailboxMessageSource(nil, &mailboxSourceConfig{
+		OwnerName: "agent1",
+		Role:      teamRoleTeammate,
+	})
+
+	item, _, ok, err := src.tryReceive(context.Background(), false)
+	assert.NoError(t, err)
+	assert.False(t, ok)
+	assert.Equal(t, TurnInput{}, item)
+}
+
+func TestTryReceive_NoMessages(t *testing.T) {
+	backend := newInMemoryBackend()
+	locks := newNamedLockManager()
+	mb := &mailbox{
+		conf: &mailboxConfig{
+			Backend:      backend,
+			BaseDir:      "/tmp/test",
+			TeamName:     "myteam",
+			OwnerName:    "agent1",
+			PollInterval: 10 * time.Millisecond,
+		},
+		inboxLocks: locks,
+		listMembers: func(ctx context.Context) ([]string, error) {
+			return []string{"team-lead", "agent1"}, nil
+		},
+	}
+
+	inboxPath := filepath.Join("/tmp/test", "teams", "myteam", "inboxes", "agent1.json")
+	backend.files[inboxPath] = "[]"
+
+	src := newMailboxMessageSource(mb, &mailboxSourceConfig{
+		OwnerName: "agent1",
+		Role:      teamRoleTeammate,
+	})
+
+	item, _, ok, err := src.tryReceive(context.Background(), false)
+	assert.NoError(t, err)
+	assert.False(t, ok)
+	assert.Equal(t, TurnInput{}, item)
+}
+
+func TestTryReceive_WithMessages(t *testing.T) {
+	backend := newInMemoryBackend()
+	locks := newNamedLockManager()
+	mb := &mailbox{
+		conf: &mailboxConfig{
+			Backend:      backend,
+			BaseDir:      "/tmp/test",
+			TeamName:     "myteam",
+			OwnerName:    "agent1",
+			PollInterval: 10 * time.Millisecond,
+		},
+		inboxLocks: locks,
+		listMembers: func(ctx context.Context) ([]string, error) {
+			return []string{"team-lead", "agent1"}, nil
+		},
+	}
+
+	inboxPath := filepath.Join("/tmp/test", "teams", "myteam", "inboxes", "agent1.json")
+	msgJSON, _ := sonic.MarshalString([]inboxMessage{
+		{From: "sender", Text: "hello", Timestamp: utcNowMillis()},
+	})
+	backend.files[inboxPath] = msgJSON
+
+	src := newMailboxMessageSource(mb, &mailboxSourceConfig{
+		OwnerName: "agent1",
+		Role:      teamRoleTeammate,
+	})
+
+	item, _, ok, err := src.tryReceive(context.Background(), false)
+	assert.NoError(t, err)
+	assert.True(t, ok)
+	assert.Equal(t, "agent1", item.TargetAgent)
+	assert.Len(t, item.Messages, 1)
+	assert.Contains(t, item.Messages[0], "hello")
+	assert.Contains(t, item.Messages[0], "sender")
+}
+
+func TestTryReceive_SendsIdleNotificationForTeammate(t *testing.T) {
+	backend := newInMemoryBackend()
+	locks := newNamedLockManager()
+	mb := &mailbox{
+		conf: &mailboxConfig{
+			Backend:      backend,
+			BaseDir:      "/tmp/test",
+			TeamName:     "myteam",
+			OwnerName:    "agent1",
+			PollInterval: 10 * time.Millisecond,
+		},
+		inboxLocks: locks,
+		listMembers: func(ctx context.Context) ([]string, error) {
+			return []string{"team-lead", "agent1"}, nil
+		},
+	}
+
+	leaderInboxPath := filepath.Join("/tmp/test", "teams", "myteam", "inboxes", "team-lead.json")
+	backend.files[leaderInboxPath] = "[]"
+
+	src := newMailboxMessageSource(mb, &mailboxSourceConfig{
+		OwnerName: "agent1",
+		Role:      teamRoleTeammate,
+	})
+
+	ctx := context.Background()
+
+	inboxPath := filepath.Join("/tmp/test", "teams", "myteam", "inboxes", "agent1.json")
+	ts := utcNowMillis()
+	msgJSON, _ := sonic.MarshalString([]inboxMessage{
+		{From: "sender", Text: "work", Timestamp: ts},
+	})
+	backend.files[inboxPath] = msgJSON
+
+	_, ack, ok0, err := src.consumeMessages(ctx, []inboxMessage{
+		{From: "sender", Text: "work", Timestamp: ts},
+	})
+	assert.NoError(t, err)
+	assert.True(t, ok0)
+	// Teammate messages defer MarkRead/processedCount into ack until the pump
+	// confirms the push was accepted, so invoke ack to simulate that.
+	assert.NoError(t, ack(ctx))
+	assert.Greater(t, src.processedCount, src.lastIdleProcessedCount)
+
+	backend.files[inboxPath] = "[]"
+
+	_, _, ok, err := src.tryReceive(ctx, true)
+	assert.NoError(t, err)
+	assert.False(t, ok)
+
+	backend.mu.RLock()
+	leaderInbox := backend.files[leaderInboxPath]
+	backend.mu.RUnlock()
+
+	var leaderMsgs []inboxMessage
+	err = sonic.UnmarshalString(leaderInbox, &leaderMsgs)
+	assert.NoError(t, err)
+	assert.Len(t, leaderMsgs, 1)
+	assert.Equal(t, "agent1", leaderMsgs[0].From)
+	assert.Contains(t, leaderMsgs[0].Text, string(messageTypeIdleNotification))
+}
+
+func TestTryReceive_DoesNotSendIdleForLeader(t *testing.T) {
+	backend := newInMemoryBackend()
+	locks := newNamedLockManager()
+	mb := &mailbox{
+		conf: &mailboxConfig{
+			Backend:      backend,
+			BaseDir:      "/tmp/test",
+			TeamName:     "myteam",
+			OwnerName:    "team-lead",
+			PollInterval: 10 * time.Millisecond,
+		},
+		inboxLocks: locks,
+		listMembers: func(ctx context.Context) ([]string, error) {
+			return []string{"team-lead", "agent1"}, nil
+		},
+	}
+
+	src := newMailboxMessageSource(mb, &mailboxSourceConfig{
+		OwnerName: "team-lead",
+		Role:      teamRoleLeader,
+	})
+
+	ctx := context.Background()
+
+	inboxPath := filepath.Join("/tmp/test", "teams", "myteam", "inboxes", "team-lead.json")
+	ts := utcNowMillis()
+	msgJSON, _ := sonic.MarshalString([]inboxMessage{
+		{From: "agent1", Text: "update", Timestamp: ts},
+	})
+	backend.files[inboxPath] = msgJSON
+
+	_, _, _, err := src.consumeMessages(ctx, []inboxMessage{
+		{From: "agent1", Text: "update", Timestamp: ts},
+	})
+	assert.NoError(t, err)
+	assert.Greater(t, src.processedCount, src.lastIdleProcessedCount)
+
+	backend.files[inboxPath] = "[]"
+
+	agent1InboxPath := filepath.Join("/tmp/test", "teams", "myteam", "inboxes", "agent1.json")
+	backend.files[agent1InboxPath] = "[]"
+
+	_, _, ok, err := src.tryReceive(ctx, true)
+	assert.NoError(t, err)
+	assert.False(t, ok)
+
+	backend.mu.RLock()
+	agent1Inbox := backend.files[agent1InboxPath]
+	backend.mu.RUnlock()
+	assert.Equal(t, "[]", agent1Inbox)
+}
+
+func TestConsumeMessages_EmptyMsgs(t *testing.T) {
+	backend := newInMemoryBackend()
+	locks := newNamedLockManager()
+	mb := &mailbox{
+		conf: &mailboxConfig{
+			Backend:      backend,
+			BaseDir:      "/tmp/test",
+			TeamName:     "myteam",
+			OwnerName:    "agent1",
+			PollInterval: 10 * time.Millisecond,
+		},
+		inboxLocks: locks,
+		listMembers: func(ctx context.Context) ([]string, error) {
+			return []string{"team-lead", "agent1"}, nil
+		},
+	}
+
+	src := newMailboxMessageSource(mb, &mailboxSourceConfig{
+		OwnerName: "agent1",
+		Role:      teamRoleTeammate,
+	})
+
+	item, _, ok, err := src.consumeMessages(context.Background(), []inboxMessage{})
+	assert.NoError(t, err)
+	assert.False(t, ok)
+	assert.Equal(t, TurnInput{}, item)
+}
+
+func TestConsumeMessages_MarksMessagesAsRead(t *testing.T) {
+	backend := newInMemoryBackend()
+	locks := newNamedLockManager()
+	mb := &mailbox{
+		conf: &mailboxConfig{
+			Backend:      backend,
+			BaseDir:      "/tmp/test",
+			TeamName:     "myteam",
+			OwnerName:    "agent1",
+			PollInterval: 10 * time.Millisecond,
+		},
+		inboxLocks: locks,
+		listMembers: func(ctx context.Context) ([]string, error) {
+			return []string{"team-lead", "agent1"}, nil
+		},
+	}
+
+	ts := utcNowMillis()
+	msgs := []inboxMessage{
+		{From: "sender", Text: "msg1", Timestamp: ts},
+		{From: "sender2", Text: "msg2", Timestamp: ts},
+	}
+
+	inboxPath := filepath.Join("/tmp/test", "teams", "myteam", "inboxes", "agent1.json")
+	allMsgsJSON, _ := sonic.MarshalString(msgs)
+	backend.files[inboxPath] = allMsgsJSON
+
+	src := newMailboxMessageSource(mb, &mailboxSourceConfig{
+		OwnerName: "agent1",
+		Role:      teamRoleTeammate,
+	})
+
+	ctx := context.Background()
+	item, ack, ok, err := src.consumeMessages(ctx, msgs)
+	assert.NoError(t, err)
+	assert.True(t, ok)
+	assert.Equal(t, "agent1", item.TargetAgent)
+
+	// Teammate messages are not marked read until the pump acks a successful
+	// push, so the snapshot is still unread immediately after consumeMessages.
+	beforeAck, err := mb.readInbox(ctx, "agent1")
+	assert.NoError(t, err)
+	assert.Len(t, beforeAck, len(msgs))
+
+	// After ack the inbox is compacted (messages marked read).
+	assert.NoError(t, ack(ctx))
+	remaining, err := mb.readInbox(ctx, "agent1")
+	assert.NoError(t, err)
+	assert.Empty(t, remaining)
+}
+
+func TestHandleLeaderControlMessages_NonLeader(t *testing.T) {
+	backend := newInMemoryBackend()
+	locks := newNamedLockManager()
+	mb := &mailbox{
+		conf: &mailboxConfig{
+			Backend:      backend,
+			BaseDir:      "/tmp/test",
+			TeamName:     "myteam",
+			OwnerName:    "agent1",
+			PollInterval: 10 * time.Millisecond,
+		},
+		inboxLocks: locks,
+		listMembers: func(ctx context.Context) ([]string, error) {
+			return []string{"team-lead", "agent1"}, nil
+		},
+	}
+
+	src := newMailboxMessageSource(mb, &mailboxSourceConfig{
+		OwnerName: "agent1",
+		Role:      teamRoleTeammate,
+	})
+
+	approvalJSON, _ := marshalShutdownResponse("agent1", "req-1", true, "done")
+	msgs := []inboxMessage{
+		{From: "agent1", Text: approvalJSON, Timestamp: utcNowMillis()},
+	}
+
+	result, err := src.handleLeaderControlMessages(context.Background(), msgs)
+	assert.NoError(t, err)
+	assert.Equal(t, msgs, result)
+}
+
+func TestHandleLeaderControlMessages_InterceptsShutdownResponse(t *testing.T) {
+	backend := newInMemoryBackend()
+	locks := newNamedLockManager()
+	mb := &mailbox{
+		conf: &mailboxConfig{
+			Backend:      backend,
+			BaseDir:      "/tmp/test",
+			TeamName:     "myteam",
+			OwnerName:    "team-lead",
+			PollInterval: 10 * time.Millisecond,
+		},
+		inboxLocks: locks,
+		listMembers: func(ctx context.Context) ([]string, error) {
+			return []string{"team-lead", "agent1"}, nil
+		},
+	}
+
+	var calledWith string
+	src := newMailboxMessageSource(mb, &mailboxSourceConfig{
+		OwnerName: "team-lead",
+		Role:      teamRoleLeader,
+		OnShutdownResponse: func(ctx context.Context, fromName string) (string, error) {
+			calledWith = fromName
+			return fromName + " has shut down.", nil
+		},
+	})
+
+	approvalJSON, _ := marshalShutdownResponse("agent1", "req-1", true, "done")
+	msg := inboxMessage{From: "agent1", Text: approvalJSON, Timestamp: utcNowMillis()}
+
+	result, err := src.handleLeaderControlMessages(context.Background(), []inboxMessage{msg})
+	assert.NoError(t, err)
+	assert.Equal(t, "agent1", calledWith)
+	assert.Len(t, result, 1)
+	assert.Equal(t, "system", result[0].From)
+	assert.Contains(t, result[0].Text, string(messageTypeTeammateTerminated))
+	assert.Contains(t, result[0].Text, "agent1 has shut down.")
+}
+
+func TestHandleLeaderControlMessages_ShutdownResponseFalseNotIntercepted(t *testing.T) {
+	backend := newInMemoryBackend()
+	locks := newNamedLockManager()
+	mb := &mailbox{
+		conf: &mailboxConfig{
+			Backend:      backend,
+			BaseDir:      "/tmp/test",
+			TeamName:     "myteam",
+			OwnerName:    "team-lead",
+			PollInterval: 10 * time.Millisecond,
+		},
+		inboxLocks: locks,
+		listMembers: func(ctx context.Context) ([]string, error) {
+			return []string{"team-lead", "agent1"}, nil
+		},
+	}
+
+	called := false
+	src := newMailboxMessageSource(mb, &mailboxSourceConfig{
+		OwnerName: "team-lead",
+		Role:      teamRoleLeader,
+		OnShutdownResponse: func(ctx context.Context, fromName string) (string, error) {
+			called = true
+			return "", nil
+		},
+	})
+
+	approvalJSON, _ := marshalShutdownResponse("agent1", "req-1", false, "not done yet")
+	msg := inboxMessage{From: "agent1", Text: approvalJSON, Timestamp: utcNowMillis()}
+
+	result, err := src.handleLeaderControlMessages(context.Background(), []inboxMessage{msg})
+	assert.NoError(t, err)
+	assert.False(t, called)
+	assert.Len(t, result, 1)
+	assert.Equal(t, "agent1", result[0].From)
+}
+
+// TestHandleLeaderControlMessages_ShutdownResponseHandlerError verifies that when
+// OnShutdownResponse fails (graceful cleanup did not complete and is not retried
+// from the mailbox, since the snapshot was already marked read), the original
+// control message is forwarded to the leader instead of being silently dropped,
+// so the exit surfaces rather than disappearing.
+func TestHandleLeaderControlMessages_ShutdownResponseHandlerError(t *testing.T) {
+	backend := newInMemoryBackend()
+	locks := newNamedLockManager()
+	mb := &mailbox{
+		conf: &mailboxConfig{
+			Backend:      backend,
+			BaseDir:      "/tmp/test",
+			TeamName:     "myteam",
+			OwnerName:    "team-lead",
+			PollInterval: 10 * time.Millisecond,
+		},
+		inboxLocks: locks,
+		listMembers: func(ctx context.Context) ([]string, error) {
+			return []string{"team-lead", "agent1"}, nil
+		},
+	}
+
+	src := newMailboxMessageSource(mb, &mailboxSourceConfig{
+		OwnerName: "team-lead",
+		Role:      teamRoleLeader,
+		OnShutdownResponse: func(ctx context.Context, fromName string) (string, error) {
+			return "", errors.New("cleanup failed")
+		},
+	})
+
+	approvalJSON, _ := marshalShutdownResponse("agent1", "req-1", true, "done")
+	msg := inboxMessage{From: "agent1", Text: approvalJSON, Timestamp: utcNowMillis()}
+
+	result, err := src.handleLeaderControlMessages(context.Background(), []inboxMessage{msg})
+	assert.NoError(t, err)
+	// The original control message must be forwarded to the leader, not dropped.
+	assert.Len(t, result, 1)
+	assert.Equal(t, "agent1", result[0].From)
+	assert.Equal(t, approvalJSON, result[0].Text)
+}
+
+func TestHandleLeaderControlMessages_NonShutdownPassesThrough(t *testing.T) {
+	backend := newInMemoryBackend()
+	locks := newNamedLockManager()
+	mb := &mailbox{
+		conf: &mailboxConfig{
+			Backend:      backend,
+			BaseDir:      "/tmp/test",
+			TeamName:     "myteam",
+			OwnerName:    "team-lead",
+			PollInterval: 10 * time.Millisecond,
+		},
+		inboxLocks: locks,
+		listMembers: func(ctx context.Context) ([]string, error) {
+			return []string{"team-lead", "agent1"}, nil
+		},
+	}
+
+	called := false
+	src := newMailboxMessageSource(mb, &mailboxSourceConfig{
+		OwnerName: "team-lead",
+		Role:      teamRoleLeader,
+		OnShutdownResponse: func(ctx context.Context, fromName string) (string, error) {
+			called = true
+			return "", nil
+		},
+	})
+
+	msgs := []inboxMessage{
+		{From: "agent1", Text: "just a regular message", Timestamp: utcNowMillis()},
+	}
+
+	result, err := src.handleLeaderControlMessages(context.Background(), msgs)
+	assert.NoError(t, err)
+	assert.False(t, called)
+	assert.Equal(t, msgs, result)
+}
+
+func TestHandleLeaderControlMessages_IdleNotificationPassedThrough(t *testing.T) {
+	backend := newInMemoryBackend()
+	locks := newNamedLockManager()
+	mb := &mailbox{
+		conf: &mailboxConfig{
+			Backend:      backend,
+			BaseDir:      "/tmp/test",
+			TeamName:     "myteam",
+			OwnerName:    "team-lead",
+			PollInterval: 10 * time.Millisecond,
+		},
+		inboxLocks: locks,
+		listMembers: func(ctx context.Context) ([]string, error) {
+			return []string{"team-lead", "agent1"}, nil
+		},
+	}
+
+	src := newMailboxMessageSource(mb, &mailboxSourceConfig{
+		OwnerName: "team-lead",
+		Role:      teamRoleLeader,
+	})
+
+	idleJSON, _ := sonic.MarshalString(idleNotificationPayload{
+		protocolHeader: newProtocolHeader(messageTypeIdleNotification, "agent1", ""),
+		IdleReason:     "available",
+	})
+	msg := inboxMessage{From: "agent1", Text: idleJSON, Timestamp: utcNowMillis()}
+
+	result, err := src.handleLeaderControlMessages(context.Background(), []inboxMessage{msg})
+	assert.NoError(t, err)
+	assert.Equal(t, []inboxMessage{msg}, result)
+}
+
+func TestBuildTeammateTerminatedSystemMessage(t *testing.T) {
+	msg, err := buildTeammateTerminatedSystemMessage("agent1 has completed work")
+	assert.NoError(t, err)
+	assert.Equal(t, "system", msg.From)
+	assert.NotEmpty(t, msg.Timestamp)
+
+	var payload teammateTerminatedPayload
+	err = sonic.UnmarshalString(msg.Text, &payload)
+	assert.NoError(t, err)
+	assert.Equal(t, string(messageTypeTeammateTerminated), payload.Type)
+	assert.Equal(t, "agent1 has completed work", payload.Message)
+}
+
+func TestInboxMessagesToStrings_WithMessages(t *testing.T) {
+	msgs := []inboxMessage{
+		{From: "agent1", Text: "hello", Summary: "greeting"},
+		{From: "agent2", Text: "", Summary: "empty"},
+		{From: "agent3", Text: "world", Summary: ""},
+	}
+
+	result := inboxMessagesToStrings(msgs)
+	assert.Len(t, result, 2)
+	assert.Contains(t, result[0], "agent1")
+	assert.Contains(t, result[0], "hello")
+	assert.Contains(t, result[1], "agent3")
+	assert.Contains(t, result[1], "world")
+}
+
+func TestInboxMessagesToStrings_EmptySlice(t *testing.T) {
+	result := inboxMessagesToStrings([]inboxMessage{})
+	assert.Empty(t, result)
+}
+
+func TestWaitForItem_NilMailbox(t *testing.T) {
+	src := newMailboxMessageSource(nil, &mailboxSourceConfig{
+		OwnerName: "agent1",
+		Role:      teamRoleTeammate,
+	})
+
+	_, _, err := src.waitForItem(context.Background())
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "mailbox is nil")
+}
+
+func TestWaitForItem_LeaderReceivesMessages(t *testing.T) {
+	backend := newInMemoryBackend()
+	locks := newNamedLockManager()
+	mb := &mailbox{
+		conf: &mailboxConfig{
+			Backend:      backend,
+			BaseDir:      "/tmp/test",
+			TeamName:     "myteam",
+			OwnerName:    "team-lead",
+			PollInterval: 10 * time.Millisecond,
+		},
+		inboxLocks: locks,
+		listMembers: func(ctx context.Context) ([]string, error) {
+			return []string{"team-lead", "worker"}, nil
+		},
+	}
+
+	inboxPath := filepath.Join("/tmp/test", "teams", "myteam", "inboxes", "team-lead.json")
+	_ = backend.Write(context.Background(), &WriteRequest{FilePath: inboxPath, Content: "[]"})
+
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		msgs := []inboxMessage{{From: "worker", Text: "update", Timestamp: utcNowMillis()}}
+		msgJSON, _ := sonic.MarshalString(msgs)
+		_ = backend.Write(context.Background(), &WriteRequest{FilePath: inboxPath, Content: msgJSON})
+	}()
+
+	src := newMailboxMessageSource(mb, &mailboxSourceConfig{
+		OwnerName: "team-lead",
+		Role:      teamRoleLeader,
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	item, _, err := src.waitForItem(ctx)
+	assert.NoError(t, err)
+	assert.NotEmpty(t, item.Messages)
+}
+
+func TestWaitForItem_TeammateReceivesMessages(t *testing.T) {
+	backend := newInMemoryBackend()
+	locks := newNamedLockManager()
+	mb := &mailbox{
+		conf: &mailboxConfig{
+			Backend:      backend,
+			BaseDir:      "/tmp/test",
+			TeamName:     "myteam",
+			OwnerName:    "worker",
+			PollInterval: 10 * time.Millisecond,
+		},
+		inboxLocks: locks,
+		listMembers: func(ctx context.Context) ([]string, error) {
+			return []string{"team-lead", "worker"}, nil
+		},
+	}
+
+	inboxPath := filepath.Join("/tmp/test", "teams", "myteam", "inboxes", "worker.json")
+	_ = backend.Write(context.Background(), &WriteRequest{FilePath: inboxPath, Content: "[]"})
+
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		msgs := []inboxMessage{{From: "leader", Text: "do this", Timestamp: utcNowMillis()}}
+		msgJSON, _ := sonic.MarshalString(msgs)
+		_ = backend.Write(context.Background(), &WriteRequest{FilePath: inboxPath, Content: msgJSON})
+	}()
+
+	src := newMailboxMessageSource(mb, &mailboxSourceConfig{
+		OwnerName: "worker",
+		Role:      teamRoleTeammate,
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	item, _, err := src.waitForItem(ctx)
+	assert.NoError(t, err)
+	assert.NotEmpty(t, item.Messages)
+	assert.Equal(t, "worker", item.TargetAgent)
+}
+
+func TestConsumeMessages_MarkReadError(t *testing.T) {
+	eb := newErrBackend(errors.New("backend error"))
+	locks := newNamedLockManager()
+	mb := &mailbox{
+		conf: &mailboxConfig{
+			Backend:      eb,
+			BaseDir:      "/tmp/test",
+			TeamName:     "myteam",
+			OwnerName:    "agent1",
+			PollInterval: 10 * time.Millisecond,
+		},
+		inboxLocks: locks,
+		listMembers: func(ctx context.Context) ([]string, error) {
+			return []string{"team-lead", "agent1"}, nil
+		},
+	}
+
+	src := newMailboxMessageSource(mb, &mailboxSourceConfig{
+		OwnerName: "agent1",
+		Role:      teamRoleTeammate,
+	})
+
+	msgs := []inboxMessage{
+		{From: "sender", Text: "hello", Timestamp: utcNowMillis()},
+	}
+
+	// For a teammate, MarkRead is deferred into ack, so consumeMessages itself
+	// succeeds and the backend MarkRead error surfaces when the pump calls ack.
+	_, ack, ok, err := src.consumeMessages(context.Background(), msgs)
+	assert.NoError(t, err)
+	assert.True(t, ok)
+	assert.Error(t, ack(context.Background()))
+}
+
+func TestBuildTeammateTerminatedSystemMessage_Valid(t *testing.T) {
+	msg, err := buildTeammateTerminatedSystemMessage("worker has shut down.")
+	assert.NoError(t, err)
+	assert.Equal(t, "system", msg.From)
+	assert.Contains(t, msg.Text, "teammate_terminated")
+	assert.Contains(t, msg.Text, "worker has shut down.")
+}
+
+// TestConsumeMessages_MarksReadBeforeSideEffects guards the ordering fix: the
+// inbox snapshot must be marked read before control-message side effects (like
+// OnShutdownResponse) run, so a side effect can never be replayed if it fails
+// after the messages were already acted upon.
+func TestConsumeMessages_MarksReadBeforeSideEffects(t *testing.T) {
+	backend := newInMemoryBackend()
+	locks := newNamedLockManager()
+	mb := &mailbox{
+		conf: &mailboxConfig{
+			Backend:      backend,
+			BaseDir:      "/tmp/test",
+			TeamName:     "myteam",
+			OwnerName:    "team-lead",
+			PollInterval: 10 * time.Millisecond,
+		},
+		inboxLocks: locks,
+		listMembers: func(ctx context.Context) ([]string, error) {
+			return []string{"team-lead", "agent1"}, nil
+		},
+	}
+
+	approvalJSON, _ := marshalShutdownResponse("agent1", "req-1", true, "done")
+	msgs := []inboxMessage{
+		{ID: "m1", From: "agent1", Text: approvalJSON, Timestamp: utcNowMillis()},
+	}
+	inboxPath := filepath.Join("/tmp/test", "teams", "myteam", "inboxes", "team-lead.json")
+	allMsgsJSON, _ := sonic.MarshalString(msgs)
+	backend.files[inboxPath] = allMsgsJSON
+
+	var unreadAtCallback int
+	src := newMailboxMessageSource(mb, &mailboxSourceConfig{
+		OwnerName: "team-lead",
+		Role:      teamRoleLeader,
+		OnShutdownResponse: func(ctx context.Context, fromName string) (string, error) {
+			unread, _ := mb.ReadUnread(ctx)
+			unreadAtCallback = len(unread)
+			return fromName + " has shut down.", nil
+		},
+	})
+
+	_, _, ok, err := src.consumeMessages(context.Background(), msgs)
+	assert.NoError(t, err)
+	assert.True(t, ok)
+	assert.Equal(t, 0, unreadAtCallback, "inbox should be marked read before OnShutdownResponse runs")
+}

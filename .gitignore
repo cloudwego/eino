@@ -68,3 +68,6 @@ CLAUDE.md
 # External working trees
 /examples/
 /ext/
+
+*.local.md
+**/settings.local.json

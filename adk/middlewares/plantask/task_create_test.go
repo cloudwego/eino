@@ -30,9 +30,8 @@ func TestTaskCreateTool(t *testing.T) {
 	ctx := context.Background()
 	backend := newInMemoryBackend()
 	baseDir := "/tmp/tasks"
-	lock := &sync.Mutex{}
 
-	tool := newTaskCreateTool(backend, baseDir, lock)
+	tool := newTaskCreateTool(testMiddleware(backend, baseDir), &sync.RWMutex{})
 
 	info, err := tool.Info(ctx)
 	assert.NoError(t, err)
@@ -72,9 +71,8 @@ func TestTaskCreateToolWithMetadata(t *testing.T) {
 	ctx := context.Background()
 	backend := newInMemoryBackend()
 	baseDir := "/tmp/tasks"
-	lock := &sync.Mutex{}
 
-	tool := newTaskCreateTool(backend, baseDir, lock)
+	tool := newTaskCreateTool(testMiddleware(backend, baseDir), &sync.RWMutex{})
 
 	result, err := tool.InvokableRun(ctx, `{"subject": "Task with metadata", "description": "Has metadata", "metadata": {"key1": "value1", "key2": "value2"}}`)
 	assert.NoError(t, err)
@@ -88,4 +86,107 @@ func TestTaskCreateToolWithMetadata(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, "value1", taskData.Metadata["key1"])
 	assert.Equal(t, "value2", taskData.Metadata["key2"])
+}
+
+func TestTaskCreateToolInvalidJSON(t *testing.T) {
+	ctx := context.Background()
+	backend := newInMemoryBackend()
+	baseDir := "/tmp/tasks"
+
+	tool := newTaskCreateTool(testMiddleware(backend, baseDir), &sync.RWMutex{})
+
+	_, err := tool.InvokableRun(ctx, `{invalid`)
+	assert.Error(t, err)
+}
+
+func TestTaskCreateToolHighwatermarkRecovery(t *testing.T) {
+	ctx := context.Background()
+	backend := newInMemoryBackend()
+	baseDir := "/tmp/tasks"
+
+	tool := newTaskCreateTool(testMiddleware(backend, baseDir), &sync.RWMutex{})
+
+	_, err := tool.InvokableRun(ctx, `{"subject": "Task 1", "description": "First"}`)
+	assert.NoError(t, err)
+	_, err = tool.InvokableRun(ctx, `{"subject": "Task 2", "description": "Second"}`)
+	assert.NoError(t, err)
+
+	_ = backend.Delete(ctx, &DeleteRequest{FilePath: filepath.Join(baseDir, highWatermarkFileName)})
+
+	result, err := tool.InvokableRun(ctx, `{"subject": "Task 3", "description": "Third"}`)
+	assert.NoError(t, err)
+	assert.Contains(t, result, "Task #3 created successfully")
+}
+
+func TestCreateTaskPublicAPI(t *testing.T) {
+	ctx := context.Background()
+	backend := newInMemoryBackend()
+	baseDir := "/tmp/tasks"
+
+	taskID, err := CreateTask(ctx, backend, baseDir, &TaskInput{
+		Subject:     "Public API Task",
+		Description: "Created via public API",
+		ActiveForm:  "Working",
+	})
+	assert.NoError(t, err)
+	assert.Equal(t, "1", taskID)
+
+	content, err := backend.Read(ctx, &ReadRequest{FilePath: filepath.Join(baseDir, "1.json")})
+	assert.NoError(t, err)
+
+	var taskData task
+	err = sonic.UnmarshalString(content.Content, &taskData)
+	assert.NoError(t, err)
+	assert.Equal(t, "1", taskData.ID)
+	assert.Equal(t, "Public API Task", taskData.Subject)
+	assert.Equal(t, "Created via public API", taskData.Description)
+	assert.Equal(t, taskStatusPending, taskData.Status)
+	assert.Equal(t, "Working", taskData.ActiveForm)
+}
+
+func TestCreateTaskPublicAPINilInput(t *testing.T) {
+	ctx := context.Background()
+	backend := newInMemoryBackend()
+	baseDir := "/tmp/tasks"
+
+	_, err := CreateTask(ctx, backend, baseDir, nil)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "CreateTask input is nil")
+}
+
+func TestCreateTaskInvalidStatus(t *testing.T) {
+	ctx := context.Background()
+	backend := newInMemoryBackend()
+	baseDir := "/tmp/tasks"
+
+	_, err := CreateTask(ctx, backend, baseDir, &TaskInput{
+		Subject:     "Bad Status Task",
+		Description: "Has invalid status",
+		Status:      "unknown_status",
+	})
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid task status")
+}
+
+func TestTaskCreateToolWithHighwatermarkEdgeCases(t *testing.T) {
+	ctx := context.Background()
+	backend := newInMemoryBackend()
+	baseDir := "/tmp/tasks"
+
+	_ = backend.Write(ctx, &WriteRequest{FilePath: filepath.Join(baseDir, highWatermarkFileName), Content: ""})
+
+	tool := newTaskCreateTool(testMiddleware(backend, baseDir), &sync.RWMutex{})
+
+	result, err := tool.InvokableRun(ctx, `{"subject": "Task Empty HW", "description": "Empty highwatermark"}`)
+	assert.NoError(t, err)
+	assert.Contains(t, result, "Task #1 created successfully")
+
+	backend2 := newInMemoryBackend()
+	_ = backend2.Write(ctx, &WriteRequest{FilePath: filepath.Join(baseDir, highWatermarkFileName), Content: "notanumber"})
+
+	tool2 := newTaskCreateTool(testMiddleware(backend2, baseDir), &sync.RWMutex{})
+
+	result, err = tool2.InvokableRun(ctx, `{"subject": "Task Bad HW", "description": "Non-numeric highwatermark"}`)
+	assert.NoError(t, err)
+	assert.Contains(t, result, "Task #1 created successfully")
 }
