@@ -232,8 +232,9 @@ func TestMiddleware_IndexInjection_CustomInstructionErrorReportsRenderStage(t *t
 		GenInstruction: func(ctx context.Context) (string, error) {
 			return "", fmt.Errorf("custom instruction failed")
 		},
-		OnError: func(ctx context.Context, stage ErrorStage, err error) {
+		OnError: func(ctx context.Context, stage ErrorStage, err error) error {
 			stages = append(stages, stage)
+			return nil
 		},
 	})
 	require.NoError(t, err)
@@ -247,6 +248,98 @@ func TestMiddleware_IndexInjection_CustomInstructionErrorReportsRenderStage(t *t
 	require.NoError(t, err)
 	require.Equal(t, "base", out.Instruction)
 	require.Equal(t, []ErrorStage{OnErrorStageRenderInstruction}, stages)
+}
+
+func TestMiddleware_BeforeAgent_RenderInstructionError_BlocksByDefault(t *testing.T) {
+	ctx := context.Background()
+	b := NewInMemoryBackend()
+
+	mw, err := New(ctx, &Config[*schema.Message]{
+		MemoryDirectory: "/mem",
+		MemoryBackend:   b,
+		GenInstruction: func(ctx context.Context) (string, error) {
+			return "", fmt.Errorf("instruction render failed")
+		},
+	})
+	require.NoError(t, err)
+
+	runCtx := &adk.ChatModelAgentContext[*schema.Message]{
+		Instruction: "base",
+		AgentInput:  &adk.AgentInput{Messages: []adk.Message{schema.UserMessage("hi")}},
+	}
+
+	_, _, err = mw.BeforeAgent(ctx, runCtx)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "instruction render failed")
+}
+
+func TestMiddleware_BeforeAgent_RenderInstructionError_SkipsMemoryInjection(t *testing.T) {
+	ctx := context.Background()
+	b := NewInMemoryBackend()
+	now := time.Now()
+
+	b.put("/mem/MEMORY.md", "- [notes.md](notes.md) - notes\n", now)
+	b.put("/mem/notes.md", "some notes", now)
+
+	mw, err := New(ctx, &Config[*schema.Message]{
+		MemoryDirectory: "/mem",
+		MemoryBackend:   b,
+		Model:           &contentModel{out: `{"selected_memories":["notes.md"]}`},
+		GenInstruction: func(ctx context.Context) (string, error) {
+			return "", fmt.Errorf("broken")
+		},
+		OnError: func(_ context.Context, _ ErrorStage, _ error) error {
+			return nil
+		},
+		Read: &ReadConfig[*schema.Message]{Mode: ReadModeSync},
+	})
+	require.NoError(t, err)
+
+	runCtx := &adk.ChatModelAgentContext[*schema.Message]{
+		Instruction: "base",
+		AgentInput:  &adk.AgentInput{Messages: []adk.Message{schema.UserMessage("hi")}},
+	}
+
+	_, out, err := mw.BeforeAgent(ctx, runCtx)
+	require.NoError(t, err)
+	require.Equal(t, "base", out.Instruction)
+	// No memory messages should be injected when instruction rendering fails
+	require.Equal(t, 1, len(out.AgentInput.Messages), "should not inject any memory messages")
+}
+
+func TestMiddleware_BeforeAgent_OnErrorCanBlock(t *testing.T) {
+	ctx := context.Background()
+	b := NewInMemoryBackend()
+	now := time.Now()
+
+	b.put("/mem/MEMORY.md", "- [notes.md](notes.md) - notes\n", now)
+	b.put("/mem/notes.md", "---\nname: Notes\ndescription: misc notes\ntype: project\n---\n\nsome notes", now)
+
+	// Model that returns non-parseable content to trigger topic selection error
+	mdl := &contentModel{out: "I cannot select"}
+
+	mw, err := New(ctx, &Config[*schema.Message]{
+		MemoryDirectory: "/mem",
+		MemoryBackend:   b,
+		Model:           mdl,
+		Read:            &ReadConfig[*schema.Message]{Mode: ReadModeSync},
+		OnError: func(_ context.Context, stage ErrorStage, err error) error {
+			if stage == OnErrorStageTopicSelectionSync {
+				return fmt.Errorf("blocked: %w", err)
+			}
+			return nil
+		},
+	})
+	require.NoError(t, err)
+
+	runCtx := &adk.ChatModelAgentContext[*schema.Message]{
+		Instruction: "base",
+		AgentInput:  &adk.AgentInput{Messages: []adk.Message{schema.UserMessage("hi")}},
+	}
+
+	_, _, err = mw.BeforeAgent(ctx, runCtx)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "blocked:")
 }
 
 func TestNew_DoesNotMutateConfig(t *testing.T) {
@@ -766,8 +859,9 @@ func TestMiddleware_AfterAgent_SyncExtractionWritesMemoryFiles(t *testing.T) {
 			Mode:  WriteModeSync,
 			Model: extModel,
 		},
-		OnError: func(ctx context.Context, stage ErrorStage, err error) {
+		OnError: func(ctx context.Context, stage ErrorStage, err error) error {
 			onErrStages = append(onErrStages, stage)
+			return nil
 		},
 	})
 	require.NoError(t, err)
@@ -876,8 +970,9 @@ func TestMiddleware_AfterAgent_SyncExtractionWritesMemoryDirectory(t *testing.T)
 			Mode:  WriteModeSync,
 			Model: extModel,
 		},
-		OnError: func(ctx context.Context, stage ErrorStage, err error) {
+		OnError: func(ctx context.Context, stage ErrorStage, err error) error {
 			onErrStages = append(onErrStages, stage)
+			return nil
 		},
 	})
 	require.NoError(t, err)
@@ -1577,4 +1672,204 @@ func TestMiddleware_AfterAgent_AsyncSetsPendingSnapshotWhenLockHeld(t *testing.T
 	topic, err := b.Read(ctx, &ReadRequest{FilePath: "/mem/topic.md"})
 	require.NoError(t, err)
 	require.Equal(t, "remember pending", topic.Content)
+}
+
+// contentModel always returns the given content as a text response.
+type contentModel struct {
+	out string
+}
+
+func (m *contentModel) Generate(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.Message, error) {
+	return &schema.Message{Role: schema.Assistant, Content: m.out}, nil
+}
+
+func (m *contentModel) Stream(_ context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+	msg, err := m.Generate(context.Background(), input, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return schema.StreamReaderFromArray([]*schema.Message{msg}), nil
+}
+
+// noResponseFormatModel rejects calls with ResponseFormat set.
+type noResponseFormatModel struct{}
+
+func (m *noResponseFormatModel) Generate(_ context.Context, _ []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+	common := model.GetCommonOptions(nil, opts...)
+	if common.ResponseFormat != nil {
+		return nil, fmt.Errorf("response_format not supported")
+	}
+	return &schema.Message{Role: schema.Assistant, Content: "no structured output"}, nil
+}
+
+func (m *noResponseFormatModel) Stream(_ context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+	msg, err := m.Generate(context.Background(), input, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return schema.StreamReaderFromArray([]*schema.Message{msg}), nil
+}
+
+func TestMiddleware_TopicSelection_FallbackToJSONContent(t *testing.T) {
+	ctx := context.Background()
+	b := NewInMemoryBackend()
+	now := time.Now()
+
+	b.put("/mem/MEMORY.md", "- [debugging.md](debugging.md) - notes\n", now)
+	b.put("/mem/debugging.md", "---\nname: Debugging\ndescription: build and test commands\ntype: project\n---\n\n# Debugging\npnpm test\n", now)
+
+	mdl := &contentModel{out: `{"selected_memories":["debugging.md"]}`}
+
+	mw, err := New(ctx, &Config[*schema.Message]{
+		MemoryDirectory: "/mem",
+		MemoryBackend:   b,
+		Model:           mdl,
+		Read:            &ReadConfig[*schema.Message]{Mode: ReadModeSync},
+	})
+	require.NoError(t, err)
+
+	runCtx := &adk.ChatModelAgentContext[*schema.Message]{
+		Instruction: "base",
+		AgentInput:  &adk.AgentInput{Messages: []adk.Message{schema.UserMessage("How to run tests?")}},
+	}
+	_, out, err := mw.BeforeAgent(ctx, runCtx)
+	require.NoError(t, err)
+
+	topicCount := countTopicMemoryMessages(out.AgentInput.Messages)
+	require.Equal(t, 1, topicCount, "should inject topic memory via fallback")
+}
+
+func TestMiddleware_TopicSelection_FixedOutputMode(t *testing.T) {
+	ctx := context.Background()
+	b := NewInMemoryBackend()
+	now := time.Now()
+
+	b.put("/mem/MEMORY.md", "- [debugging.md](debugging.md) - notes\n", now)
+	b.put("/mem/debugging.md", "---\nname: Debugging\ndescription: build and test commands\ntype: project\n---\n\n# Debugging\npnpm test\n", now)
+
+	mdl := &contentModel{out: `{"selected_memories":["debugging.md"]}`}
+
+	mw, err := New(ctx, &Config[*schema.Message]{
+		MemoryDirectory: "/mem",
+		MemoryBackend:   b,
+		Model:           mdl,
+		Read: &ReadConfig[*schema.Message]{
+			Mode: ReadModeSync,
+			TopicSelection: &TopicSelectionConfig{
+				OutputMode: TopicSelectionOutputModeJSONObject,
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	runCtx := &adk.ChatModelAgentContext[*schema.Message]{
+		Instruction: "base",
+		AgentInput:  &adk.AgentInput{Messages: []adk.Message{schema.UserMessage("How to run tests?")}},
+	}
+	_, out, err := mw.BeforeAgent(ctx, runCtx)
+	require.NoError(t, err)
+
+	topicCount := countTopicMemoryMessages(out.AgentInput.Messages)
+	require.Equal(t, 1, topicCount, "should inject topic memory with fixed json_object mode")
+}
+
+func TestMiddleware_TopicSelection_FixedOutputModeFails(t *testing.T) {
+	ctx := context.Background()
+	b := NewInMemoryBackend()
+	now := time.Now()
+
+	b.put("/mem/MEMORY.md", "- [debugging.md](debugging.md) - notes\n", now)
+	b.put("/mem/debugging.md", "---\nname: Debugging\ndescription: build and test commands\ntype: project\n---\n\n# Debugging\npnpm test\n", now)
+
+	mdl := &noResponseFormatModel{}
+
+	var capturedErr error
+	mw, err := New(ctx, &Config[*schema.Message]{
+		MemoryDirectory: "/mem",
+		MemoryBackend:   b,
+		Model:           mdl,
+		Read: &ReadConfig[*schema.Message]{
+			Mode: ReadModeSync,
+			TopicSelection: &TopicSelectionConfig{
+				OutputMode: TopicSelectionOutputModeJSONSchema,
+			},
+		},
+		OnError: func(_ context.Context, _ ErrorStage, err error) error {
+			capturedErr = err
+			return nil
+		},
+	})
+	require.NoError(t, err)
+
+	runCtx := &adk.ChatModelAgentContext[*schema.Message]{
+		Instruction: "base",
+		AgentInput:  &adk.AgentInput{Messages: []adk.Message{schema.UserMessage("How to run tests?")}},
+	}
+	_, out, err := mw.BeforeAgent(ctx, runCtx)
+	require.NoError(t, err)
+
+	topicCount := countTopicMemoryMessages(out.AgentInput.Messages)
+	require.Equal(t, 0, topicCount, "should not inject topic memory when fixed output mode fails")
+	require.NotNil(t, capturedErr, "OnError should be called when output mode fails")
+}
+
+
+func TestMiddleware_TopicSelection_FallbackJSONSchemaToJSONObject(t *testing.T) {
+	ctx := context.Background()
+	b := NewInMemoryBackend()
+	now := time.Now()
+
+	b.put("/mem/MEMORY.md", "- [debugging.md](debugging.md) - notes\n", now)
+	b.put("/mem/debugging.md", "---\nname: Debugging\ndescription: build and test commands\ntype: project\n---\n\n# Debugging\npnpm test\n", now)
+
+	// Model returns non-JSON for plain call, rejects json_schema, returns JSON for json_object.
+	// Step 1 (plain) fails → step 2 json_schema fails → step 2 json_object succeeds.
+	mdl := &selectiveResponseModel{
+		plainOut:      "Let me think...",
+		jsonObjectOut: `{"selected_memories":["debugging.md"]}`,
+	}
+	mw, err := New(ctx, &Config[*schema.Message]{
+		MemoryDirectory: "/mem",
+		MemoryBackend:   b,
+		Model:           mdl,
+		Read:            &ReadConfig[*schema.Message]{Mode: ReadModeSync},
+	})
+	require.NoError(t, err)
+
+	runCtx := &adk.ChatModelAgentContext[*schema.Message]{
+		Instruction: "base",
+		AgentInput:  &adk.AgentInput{Messages: []adk.Message{schema.UserMessage("How to run tests?")}},
+	}
+	_, out, err := mw.BeforeAgent(ctx, runCtx)
+	require.NoError(t, err)
+
+	topicCount := countTopicMemoryMessages(out.AgentInput.Messages)
+	require.Equal(t, 1, topicCount, "should inject topic memory via json_object fallback")
+}
+
+// selectiveResponseModel rejects json_schema, returns non-parseable for plain, returns JSON for json_object.
+type selectiveResponseModel struct {
+	plainOut      string
+	jsonObjectOut string
+}
+
+func (m *selectiveResponseModel) Generate(_ context.Context, _ []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+	common := model.GetCommonOptions(nil, opts...)
+	if common.ResponseFormat != nil {
+		switch common.ResponseFormat.Type {
+		case schema.ResponseFormatTypeJSONSchema:
+			return nil, fmt.Errorf("json_schema not supported")
+		case schema.ResponseFormatTypeJSONObject:
+			return &schema.Message{Role: schema.Assistant, Content: m.jsonObjectOut}, nil
+		}
+	}
+	return &schema.Message{Role: schema.Assistant, Content: m.plainOut}, nil
+}
+
+func (m *selectiveResponseModel) Stream(_ context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+	msg, err := m.Generate(context.Background(), input, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return schema.StreamReaderFromArray([]*schema.Message{msg}), nil
 }

@@ -73,10 +73,14 @@ type Config[M adk.MessageType] struct {
 	// Optional. Defaults to a local in-process coordinator.
 	Coordination *CoordinationConfig[M]
 
-	// OnError is called when automemory encounters an error. Errors are best-effort by default:
-	// the middleware will skip memory injection and allow the agent to continue.
-	// Optional.
-	OnError func(ctx context.Context, stage ErrorStage, err error)
+	// OnError is called when automemory encounters an error at a specific stage.
+	// Return a non-nil error to block the middleware and propagate the error to the caller.
+	// Return nil to skip the error and continue with best-effort degradation.
+	// Note: for stages that fire in background goroutines, the return value is ignored
+	// (see ErrorStage documentation for the full list).
+	// Optional. Defaults to defaultOnError, which blocks on render_instruction and
+	// snapshot_marshal, and logs all other errors without blocking.
+	OnError func(ctx context.Context, stage ErrorStage, err error) error
 }
 
 type ReadMode string
@@ -150,7 +154,24 @@ type TopicSelectionConfig struct {
 	// MaxTotalBytes caps the total rendered topic memory reminder.
 	// Optional. Defaults to 16k.
 	MaxTotalBytes int
+
+	// OutputMode constrains the response format used for topic selection.
+	// Supported values: "json_schema", "json_object".
+	// When set, the fallback step uses only this response format (no further fallback).
+	// When empty (default), the middleware first tries a plain call (tools configured,
+	// no response_format), then falls back to json_schema and json_object in order.
+	OutputMode TopicSelectionOutputMode
 }
+
+// TopicSelectionOutputMode specifies the response format used for topic selection fallback.
+type TopicSelectionOutputMode string
+
+const (
+	// TopicSelectionOutputModeJSONSchema uses response_format=json_schema for structured output.
+	TopicSelectionOutputModeJSONSchema TopicSelectionOutputMode = "json_schema"
+	// TopicSelectionOutputModeJSONObject uses response_format=json_object for structured output.
+	TopicSelectionOutputModeJSONObject TopicSelectionOutputMode = "json_object"
+)
 
 type WriteMode string
 
@@ -289,28 +310,30 @@ func (m *middleware[M]) BeforeAgent(ctx context.Context, runCtx *adk.ChatModelAg
 	// Sync distributed write cursor back into message extras so later runs on other
 	// machines still carry a transcript-local marker.
 	if nRunCtx.AgentInput != nil && len(nRunCtx.AgentInput.Messages) > 0 && m.coordination != nil && m.coordination.Coordinator != nil {
-		if sessionID, err := m.resolveSessionID(ctx, &adk.TypedChatModelAgentState[M]{Messages: nRunCtx.AgentInput.Messages}); err == nil && sessionID != "" {
-			localCursor := getWriteCursorFromMessages(nRunCtx.AgentInput.Messages)
-			coordKey := m.coordinatorKey(sessionID)
-			if remoteCursor, ok, err := getCoordinatorCursor(ctx, m.coordination.Coordinator, coordKey); err == nil && ok && remoteCursor > localCursor {
-				st := markWriteCursor(&adk.TypedChatModelAgentState[M]{Messages: nRunCtx.AgentInput.Messages}, remoteCursor)
-				if st != nil {
-					nRunCtx.AgentInput = &adk.TypedAgentInput[M]{
-						Messages:        st.Messages,
-						EnableStreaming: nRunCtx.AgentInput.EnableStreaming,
-					}
+		sessionID := m.coordination.SessionID
+		localCursor := getWriteCursorFromMessages(nRunCtx.AgentInput.Messages)
+		coordKey := m.coordinatorKey(sessionID)
+		if remoteCursor, ok, err := getCoordinatorCursor(ctx, m.coordination.Coordinator, coordKey); err == nil && ok && remoteCursor > localCursor {
+			st := markWriteCursor(&adk.TypedChatModelAgentState[M]{Messages: nRunCtx.AgentInput.Messages}, remoteCursor)
+			if st != nil {
+				nRunCtx.AgentInput = &adk.TypedAgentInput[M]{
+					Messages:        st.Messages,
+					EnableStreaming: nRunCtx.AgentInput.EnableStreaming,
 				}
 			}
 		}
 	}
 
-	// 1) System prompt: inject stable auto memory instruction and directory manifest (best-effort).
+	// 1) System prompt: inject stable auto memory instruction and directory manifest.
+	// If this fails, skip all subsequent memory injection to avoid partial context.
 	instruction, err := m.renderInstruction(ctx, nRunCtx.Instruction)
 	if err != nil {
-		m.onErr(ctx, OnErrorStageRenderInstruction, err)
-	} else {
-		nRunCtx.Instruction = instruction
+		if blockErr := m.onErr(ctx, OnErrorStageRenderInstruction, err); blockErr != nil {
+			return ctx, runCtx, blockErr
+		}
+		return ctx, &nRunCtx, nil
 	}
+	nRunCtx.Instruction = instruction
 
 	if nRunCtx.AgentInput == nil || len(nRunCtx.AgentInput.Messages) == 0 {
 		return ctx, &nRunCtx, nil
@@ -322,9 +345,10 @@ func (m *middleware[M]) BeforeAgent(ctx context.Context, runCtx *adk.ChatModelAg
 	if !hasMemoryIndexInjected(nRunCtx.AgentInput.Messages) {
 		indexMsg, err := m.buildMemoryIndexMessage(ctx)
 		if err != nil {
-			m.onErr(ctx, OnErrorStageRenderInstruction, err)
+			if blockErr := m.onErr(ctx, OnErrorStageReadMemoryIndex, err); blockErr != nil {
+				return ctx, runCtx, blockErr
+			}
 		} else if !isNilMessage(indexMsg) {
-			m.sendTopicMemoryEvent(ctx, nRunCtx.AgentInput.Messages, indexMsg)
 			reminders = append(reminders, indexMsg)
 		}
 	}
@@ -334,14 +358,18 @@ func (m *middleware[M]) BeforeAgent(ctx context.Context, runCtx *adk.ChatModelAg
 		m.cfg.Read.Mode == ReadModeSync && m.topicSelectionEnabled() {
 		memMsg, err := m.selectAndBuildTopicMemoryMessage(ctx, nRunCtx.AgentInput)
 		if err != nil {
-			m.onErr(ctx, OnErrorStageTopicSelectionSync, err)
+			if blockErr := m.onErr(ctx, OnErrorStageTopicSelectionSync, err); blockErr != nil {
+				return ctx, runCtx, blockErr
+			}
 		} else if !isNilMessage(memMsg) {
-			m.sendTopicMemoryEvent(ctx, nRunCtx.AgentInput.Messages, memMsg)
 			reminders = append(reminders, memMsg)
 		}
 	}
 
 	if len(reminders) > 0 {
+		for _, r := range reminders {
+			m.sendTopicMemoryEvent(ctx, nRunCtx.AgentInput.Messages, r)
+		}
 		msgs := insertMessagesBeforeLastUserQuery(nRunCtx.AgentInput.Messages, reminders)
 		nRunCtx.AgentInput = &adk.TypedAgentInput[M]{Messages: msgs, EnableStreaming: nRunCtx.AgentInput.EnableStreaming}
 	}
@@ -414,7 +442,9 @@ func (m *middleware[M]) BeforeModelRewriteState(ctx context.Context, state *adk.
 	err := fut.err
 	fut.mu.Unlock()
 	if err != nil {
-		m.onErr(ctx, OnErrorStageTopicSelectionAsync, err)
+		if blockErr := m.onErr(ctx, OnErrorStageTopicSelectionAsync, err); blockErr != nil {
+			return ctx, state, blockErr
+		}
 	}
 
 	var msgs []M
@@ -621,14 +651,44 @@ func (m *middleware[M]) selectTopicCandidates(
 		return nil, err
 	}
 
-	toolInfo := topicSelectionToolInfo()
+	valid := make(map[string]struct{}, len(relToBundle))
+	for k := range relToBundle {
+		valid[k] = struct{}{}
+	}
+
+	mode := m.cfg.Read.TopicSelection.OutputMode
+	if mode != "" {
+		// Fixed mode: skip plain call, directly use the configured response_format.
+		return m.selectTopicWithResponseFormat(ctx, mode, userMsg, valid, topK)
+	}
+
+	// Step 1: plain call (tools configured, no forced choice, no response_format).
+	selected, plainErr := m.selectTopicPlain(ctx, userMsg, valid, topK)
+	if plainErr == nil {
+		return selected, nil
+	}
+
+	// Step 2: auto fallback with response_format — try json_schema, then json_object.
+	selected, err = m.selectTopicWithResponseFormat(ctx, TopicSelectionOutputModeJSONSchema, userMsg, valid, topK)
+	if err == nil {
+		return selected, nil
+	}
+	return m.selectTopicWithResponseFormat(ctx, TopicSelectionOutputModeJSONObject, userMsg, valid, topK)
+}
+
+// selectTopicPlain calls the model with tools configured but no forced choice and no response_format.
+func (m *middleware[M]) selectTopicPlain(
+	ctx context.Context,
+	userMsg string,
+	valid map[string]struct{},
+	topK int,
+) ([]string, error) {
 	respStream, err := m.topicSelectionModel.Stream(
 		ctx,
 		[]M{
-			makeSystemMsg[M](getTopicSelectionSystemPrompt()),
+			makeSystemMsg[M](getTopicSelectionSystemPrompt() + "\n\n" + getTopicSelectionJSONOutputHint()),
 			makeUserMsg[M](userMsg),
 		},
-		makeToolChoiceForced[M](toolInfo.Name),
 	)
 	if err != nil {
 		return nil, err
@@ -639,11 +699,67 @@ func (m *middleware[M]) selectTopicCandidates(
 		return nil, err
 	}
 
-	valid := make(map[string]struct{}, len(relToBundle))
-	for k := range relToBundle {
-		valid[k] = struct{}{}
+	return m.parseTopicSelectionResponse(resp, valid, topK)
+}
+
+// selectTopicWithResponseFormat calls the model with tools and the given response_format.
+func (m *middleware[M]) selectTopicWithResponseFormat(
+	ctx context.Context,
+	mode TopicSelectionOutputMode,
+	userMsg string,
+	valid map[string]struct{},
+	topK int,
+) ([]string, error) {
+	var rfOpt model.Option
+	switch mode {
+	case TopicSelectionOutputModeJSONSchema:
+		rfOpt = model.WithResponseFormat(&schema.ResponseFormat{
+			Type: schema.ResponseFormatTypeJSONSchema,
+			JSONSchema: &schema.ResponseFormatJSONSchema{
+				Schema: topicSelectionJSONSchema(),
+			},
+		})
+	case TopicSelectionOutputModeJSONObject:
+		rfOpt = model.WithResponseFormat(&schema.ResponseFormat{
+			Type: schema.ResponseFormatTypeJSONObject,
+		})
+	default:
+		return nil, fmt.Errorf("unsupported topic selection output mode: %q", mode)
 	}
-	selected, err := parseTopicSelectionFromToolCall(resp, valid)
+
+	respStream, err := m.topicSelectionModel.Stream(
+		ctx,
+		[]M{
+			makeSystemMsg[M](getTopicSelectionSystemPrompt() + "\n\n" + getTopicSelectionJSONOutputHint()),
+			makeUserMsg[M](userMsg),
+		},
+		rfOpt,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, err := concatMessageStream(respStream)
+	if err != nil {
+		return nil, err
+	}
+
+	return m.parseTopicSelectionResponse(resp, valid, topK)
+}
+
+// parseTopicSelectionResponse tries to extract selected memories from a model response,
+// checking tool_call first, then falling back to content JSON parsing.
+func (m *middleware[M]) parseTopicSelectionResponse(resp M, valid map[string]struct{}, topK int) ([]string, error) {
+	// Try tool call first.
+	if selected, err := parseTopicSelectionFromToolCall(resp, valid); err == nil {
+		if len(selected) > topK {
+			return selected[:topK], nil
+		}
+		return selected, nil
+	}
+
+	// Fall back to content JSON parsing.
+	selected, err := parseTopicSelectionFromContent[M](resp, valid)
 	if err != nil {
 		return nil, err
 	}
@@ -730,11 +846,7 @@ func (m *middleware[M]) AfterAgent(ctx context.Context, state *adk.TypedChatMode
 		return ctx, nil
 	}
 
-	sessionID, err := m.resolveSessionID(ctx, state)
-	if err != nil {
-		m.onErr(ctx, OnErrorStageResolveSessionID, err)
-		return ctx, nil
-	}
+	sessionID := m.coordination.SessionID
 	coordKey := m.coordinatorKey(sessionID)
 
 	cursor := getWriteCursorFromMessages(state.Messages)
@@ -775,7 +887,9 @@ func (m *middleware[M]) AfterAgent(ctx context.Context, state *adk.TypedChatMode
 	case WriteModeSync:
 		end := len(state.Messages)
 		if err := m.runMemoryExtractionAgent(ctx, state.Messages, cursor, state.ToolInfos); err != nil {
-			m.onErr(ctx, OnErrorStageMemoryWriteSync, err)
+			if blockErr := m.onErr(ctx, OnErrorStageMemoryWriteSync, err); blockErr != nil {
+				return ctx, blockErr
+			}
 			return ctx, nil
 		}
 		if coordKey != "" {
@@ -787,7 +901,9 @@ func (m *middleware[M]) AfterAgent(ctx context.Context, state *adk.TypedChatMode
 	case WriteModeAsync:
 		if coordKey == "" {
 			if err := m.runMemoryExtractionAgent(ctx, state.Messages, cursor, state.ToolInfos); err != nil {
-				m.onErr(ctx, OnErrorStageMemoryWriteSync, err)
+				if blockErr := m.onErr(ctx, OnErrorStageMemoryWriteSync, err); blockErr != nil {
+					return ctx, blockErr
+				}
 				return ctx, nil
 			}
 			state = markWriteCursor(state, len(state.Messages))
@@ -795,17 +911,21 @@ func (m *middleware[M]) AfterAgent(ctx context.Context, state *adk.TypedChatMode
 		}
 		snap, err := buildPendingSnapshot(state.Messages, cursor, state.ToolInfos)
 		if err != nil {
-			m.onErr(ctx, OnErrorStageSnapshotMarshal, err)
+			if blockErr := m.onErr(ctx, OnErrorStageSnapshotMarshal, err); blockErr != nil {
+				return ctx, blockErr
+			}
 			return ctx, nil
 		}
 		unlock, ok, err := m.coordination.Coordinator.AcquireLock(ctx, coordKey, m.coordination.LockTTL)
 		if err != nil {
-			m.onErr(ctx, OnErrorStageAcquireExtractionLock, err)
+			if blockErr := m.onErr(ctx, OnErrorStageAcquireExtractionLock, err); blockErr != nil {
+				return ctx, blockErr
+			}
 			return ctx, nil
 		}
 		if !ok {
 			if err := setCoordinatorPendingSnapshot(ctx, m.coordination.Coordinator, coordKey, snap, m.coordination.LockTTL); err != nil {
-				m.onErr(ctx, OnErrorStageStashPendingSnapshot, err)
+				m.onErr(ctx, OnErrorStageStashPendingSnapshot, err) // nolint: errcheck
 			}
 			return ctx, nil
 		}
@@ -823,7 +943,7 @@ func (m *middleware[M]) runExtractionDrain(ctx context.Context, coordKey string,
 			return
 		}
 		if err := unlock(ctx); err != nil {
-			m.onErr(ctx, OnErrorStageReleaseExtractionLock, err)
+			m.onErr(ctx, OnErrorStageReleaseExtractionLock, err) //nolint:errcheck
 		}
 	}()
 
@@ -831,16 +951,16 @@ func (m *middleware[M]) runExtractionDrain(ctx context.Context, coordKey string,
 	for current != nil {
 		msgs, cursor, toolInfos, err := decodePendingSnapshot[M](current)
 		if err != nil {
-			m.onErr(ctx, OnErrorStageDecodePendingSnapshot, err)
+			m.onErr(ctx, OnErrorStageDecodePendingSnapshot, err) //nolint:errcheck
 		} else if err := m.runMemoryExtractionAgent(ctx, msgs, cursor, toolInfos); err != nil {
-			m.onErr(ctx, OnErrorStageMemoryWriteAsync, err)
+			m.onErr(ctx, OnErrorStageMemoryWriteAsync, err) //nolint:errcheck
 		} else {
 			_ = setCoordinatorCursor(ctx, m.coordination.Coordinator, coordKey, len(msgs))
 		}
 
 		next, loadErr := popCoordinatorPendingSnapshot(ctx, m.coordination.Coordinator, coordKey)
 		if loadErr != nil {
-			m.onErr(ctx, OnErrorStageLoadPendingSnapshot, loadErr)
+			m.onErr(ctx, OnErrorStageLoadPendingSnapshot, loadErr) //nolint:errcheck
 			return
 		}
 		current = next

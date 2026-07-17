@@ -41,13 +41,34 @@ const (
 // ErrorStage error stage during auto memory processing
 type ErrorStage string
 
-// OnError stage constants. These values are stable identifiers used to report
-// best-effort failures through Config.OnError.
+// OnError stage constants identify where an error occurred in the automemory lifecycle.
+//
+// The OnError callback's return value controls whether the middleware blocks (non-nil)
+// or continues with degraded behavior (nil). However, for stages that fire in background
+// goroutines or non-propagatable contexts, the return value is ignored — the error is
+// reported for observability only.
+//
+// Stages where return value is honored (can block):
+//   - OnErrorStageRenderInstruction (BeforeAgent)
+//   - OnErrorStageReadMemoryIndex (BeforeAgent)
+//   - OnErrorStageTopicSelectionSync (BeforeAgent)
+//   - OnErrorStageTopicSelectionAsync (BeforeModelRewriteState)
+//   - OnErrorStageMemoryWriteSync (AfterAgent)
+//   - OnErrorStageSnapshotMarshal (AfterAgent)
+//   - OnErrorStageAcquireExtractionLock (AfterAgent)
+//
+// Stages where return value is ignored (background/async, notification only):
+//   - OnErrorStageStashPendingSnapshot
+//   - OnErrorStageReleaseExtractionLock
+//   - OnErrorStageDecodePendingSnapshot
+//   - OnErrorStageMemoryWriteAsync
+//   - OnErrorStageLoadPendingSnapshot
+//   - OnErrorStageSendSessionEvent
 const (
 	OnErrorStageTopicSelectionSync    ErrorStage = "topic_selection_sync"
 	OnErrorStageTopicSelectionAsync   ErrorStage = "topic_selection_async"
 	OnErrorStageRenderInstruction     ErrorStage = "render_instruction"
-	OnErrorStageResolveSessionID      ErrorStage = "resolve_session_id"
+	OnErrorStageReadMemoryIndex       ErrorStage = "read_memory_index"
 	OnErrorStageMemoryWriteSync       ErrorStage = "memory_write_sync"
 	OnErrorStageSnapshotMarshal       ErrorStage = "snapshot_marshal"
 	OnErrorStageAcquireExtractionLock ErrorStage = "acquire_extraction_lock"
