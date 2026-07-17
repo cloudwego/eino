@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -72,6 +73,51 @@ func (m *blockingChatModel) Stream(ctx context.Context, _ []*schema.Message, _ .
 }
 
 func (m *blockingChatModel) BindTools(_ []*schema.ToolInfo) error { return nil }
+
+type contextAwareBlockingChatModel struct {
+	release        chan struct{}
+	response       *schema.Message
+	started        chan struct{}
+	cancelObserved chan struct{}
+	callCount      int32
+}
+
+func newContextAwareBlockingChatModel(response *schema.Message) *contextAwareBlockingChatModel {
+	return &contextAwareBlockingChatModel{
+		release:        make(chan struct{}),
+		response:       response,
+		started:        make(chan struct{}, 4),
+		cancelObserved: make(chan struct{}, 4),
+	}
+}
+
+func (m *contextAwareBlockingChatModel) Generate(ctx context.Context, _ []*schema.Message, _ ...model.Option) (*schema.Message, error) {
+	atomic.AddInt32(&m.callCount, 1)
+	select {
+	case m.started <- struct{}{}:
+	default:
+	}
+	select {
+	case <-ctx.Done():
+		select {
+		case m.cancelObserved <- struct{}{}:
+		default:
+		}
+		return nil, ctx.Err()
+	case <-m.release:
+		return m.response, nil
+	}
+}
+
+func (m *contextAwareBlockingChatModel) Stream(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+	msg, err := m.Generate(ctx, input, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return schema.StreamReaderFromArray([]*schema.Message{msg}), nil
+}
+
+func (m *contextAwareBlockingChatModel) BindTools(_ []*schema.ToolInfo) error { return nil }
 
 // errorChatModel returns an error from Generate/Stream.
 type errorChatModel struct {
@@ -171,6 +217,74 @@ func drainEvents(iter *AsyncIterator[*AgentEvent]) ([]*AgentEvent, bool) {
 	return events, hasCancelError
 }
 
+func drainCancelErrors(iter *AsyncIterator[*AgentEvent]) ([]*AgentEvent, []*CancelError) {
+	var events []*AgentEvent
+	var cancelErrors []*CancelError
+	for {
+		e, ok := iter.Next()
+		if !ok {
+			break
+		}
+		events = append(events, e)
+		var ce *CancelError
+		if e.Err != nil && errors.As(e.Err, &ce) {
+			cancelErrors = append(cancelErrors, ce)
+		}
+	}
+	return events, cancelErrors
+}
+
+func runChildAgentToEnd(ctx context.Context, child Agent, msg string) error {
+	iter := child.Run(ctx, &AgentInput{Messages: []Message{schema.UserMessage(msg)}})
+	for {
+		event, ok := iter.Next()
+		if !ok {
+			return nil
+		}
+		if event.Err != nil {
+			return event.Err
+		}
+	}
+}
+
+func newTransferSupervisorWithSubAgent(t *testing.T, ctx context.Context, mdl model.BaseChatModel, subAgent Agent) Agent {
+	t.Helper()
+
+	supervisorAgent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "supervisor",
+		Description: "supervisor agent",
+		Instruction: "you are a supervisor",
+		Model:       mdl,
+	})
+	require.NoError(t, err)
+
+	agentWithSubAgents, err := SetSubAgents(ctx, supervisorAgent, []Agent{subAgent})
+	require.NoError(t, err)
+	return agentWithSubAgents
+}
+
+func assertCancelErrorExcludesAddresses(t *testing.T, cancelErr *CancelError, names ...string) {
+	t.Helper()
+
+	for _, intCtx := range cancelErr.InterruptContexts {
+		addr := fmt.Sprint(intCtx.Address)
+		for _, name := range names {
+			assert.NotContains(t, addr, name)
+		}
+	}
+}
+
+func assertCancelErrorIncludesAddress(t *testing.T, cancelErr *CancelError, name string) {
+	t.Helper()
+
+	for _, intCtx := range cancelErr.InterruptContexts {
+		if strings.Contains(fmt.Sprint(intCtx.Address), name) {
+			return
+		}
+	}
+	t.Fatalf("cancel interrupt contexts do not include %q", name)
+}
+
 // --- tests ---
 
 // TestWithCancel_BeforeExecutionStarts verifies that a cancel issued before
@@ -258,10 +372,10 @@ func TestWithCancel_AfterCompletion(t *testing.T) {
 	assert.ErrorIs(t, cancelErr, ErrExecutionEnded)
 }
 
-// TestWithCancel_DerivedAgentToolCancelContextMarkedDoneAfterRun verifies that
-// an explicitly derived AgentTool child cancel context is owned by the child run,
+// TestWithCancel_DerivedCheckpointContextMarkedDoneAfterRun verifies that
+// an explicitly derived checkpoint-aware cancel context is owned by the sub-agent run,
 // even when the Go context also carries the parent cancel context.
-func TestWithCancel_DerivedAgentToolCancelContextMarkedDoneAfterRun(t *testing.T) {
+func TestWithCancel_DerivedCheckpointCancelContextMarkedDoneAfterRun(t *testing.T) {
 	ctx := context.Background()
 
 	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
@@ -273,7 +387,7 @@ func TestWithCancel_DerivedAgentToolCancelContextMarkedDoneAfterRun(t *testing.T
 
 	parent := newCancelContext()
 	parentCtx := withCancelContext(ctx, parent)
-	child := parent.deriveAgentToolCancelContext(parentCtx)
+	child := parent.deriveCheckpointAwareCancelContext(parentCtx)
 
 	childOpt := WrapImplSpecificOptFn(func(o *options) {
 		o.cancelCtx = child
@@ -289,8 +403,87 @@ func TestWithCancel_DerivedAgentToolCancelContextMarkedDoneAfterRun(t *testing.T
 	select {
 	case <-child.doneChan:
 	case <-time.After(time.Second):
-		t.Fatal("derived AgentTool cancel context was not marked done after child run completion")
+		t.Fatal("derived checkpoint cancel context was not marked done after child run completion")
 	}
+}
+
+func TestWithCancel_RecursiveDoesNotTargetAgentEmbeddedInMiddleware(t *testing.T) {
+	ctx := context.Background()
+
+	innerModel := newBlockingChatModel(toolCallMsg(toolCall("inner-call", "inner-tool", `{"input":"x"}`)))
+	innerToolCalled := make(chan struct{}, 1)
+	innerTool := &callbackTool{
+		name: "inner-tool",
+		onCall: func() {
+			innerToolCalled <- struct{}{}
+		},
+	}
+	innerAgent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "InnerMiddlewareAgent",
+		Description: "agent invoked as middleware implementation detail",
+		Model:       innerModel,
+		ToolsConfig: ToolsConfig{
+			ToolsNodeConfig: compose.ToolsNodeConfig{Tools: []tool.BaseTool{innerTool}},
+			ReturnDirectly:  map[string]bool{"inner-tool": true},
+		},
+	})
+	require.NoError(t, err)
+
+	outerTool := newBlockingTool("outer-tool")
+	outerAgent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "OuterAgent",
+		Description: "outer agent",
+		Model: &simpleChatModel{
+			response: toolCallMsg(toolCall("outer-call", "outer-tool", `{"input":"x"}`)),
+		},
+		ToolsConfig: ToolsConfig{
+			ToolsNodeConfig: compose.ToolsNodeConfig{Tools: []tool.BaseTool{outerTool}},
+		},
+		Handlers: []ChatModelAgentMiddleware{
+			&testAfterModelRewriteStateHandler{fn: func(
+				ctx context.Context,
+				state *ChatModelAgentState,
+				_ *ModelContext,
+			) (context.Context, *ChatModelAgentState, error) {
+				return ctx, state, runChildAgentToEnd(ctx, innerAgent, "run")
+			}},
+		},
+	})
+	require.NoError(t, err)
+
+	cancelOpt, cancelFn := WithCancel()
+	iter := outerAgent.Run(ctx, &AgentInput{Messages: []Message{schema.UserMessage("run")}}, cancelOpt)
+
+	select {
+	case <-innerModel.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("middleware's embedded agent did not start")
+	}
+
+	cancelDone := make(chan error, 1)
+	go func() {
+		handle, _ := cancelFn(WithAgentCancelMode(CancelAfterChatModel), WithRecursive())
+		cancelDone <- handle.Wait()
+	}()
+
+	close(innerModel.unblockCh)
+
+	select {
+	case <-innerToolCalled:
+	case <-time.After(5 * time.Second):
+		t.Fatal("recursive cancel incorrectly targeted the middleware's embedded agent")
+	}
+
+	select {
+	case err := <-cancelDone:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("outer cancel did not complete")
+	}
+
+	_, hasCancelError := drainEvents(iter)
+	assert.True(t, hasCancelError, "outer agent should cancel at its own safe-point")
+	assert.Equal(t, int32(0), atomic.LoadInt32(&outerTool.callCount), "outer tool must not run after cancellation")
 }
 
 // TestWithCancel_AfterBusinessInterrupt verifies cancelFn returns ErrExecutionEnded
@@ -1139,16 +1332,11 @@ func TestWithCancel_Resume_CancelAfterChatModel_MessagePreserved(t *testing.T) {
 
 }
 
-// TestHandleRunFuncError_AlreadyHandled_NoDuplicate verifies that when
-// markCancelHandled() was already claimed by a sub-agent's handleRunFuncError,
-// the sequential workflow's checkCancel does not emit a second CancelError.
-//
-// Setup: sequential[cma1, cma2] with CancelAfterToolCalls. cma1 has tools,
-// cancel fires while tool is running. After tool completes, the safe-point
-// fires in cma1's handleRunFuncError (claiming markCancelHandled). The
-// sequential workflow's checkCancel at the transition point should find
-// markCancelHandled returns false and skip — producing exactly 1 CancelError.
-func TestHandleRunFuncError_AlreadyHandled_NoDuplicate(t *testing.T) {
+// TestWithCancel_SafePoint_DirectWorkflowChildAbortOnly verifies that a
+// ChatModelAgent invoked as a direct workflow child does not participate in
+// safe-point checkpointing. Safe-point cancel remains local to checkpoint-aware
+// scopes; direct children only receive recursive immediate abort.
+func TestWithCancel_SafePoint_DirectWorkflowChildAbortOnly(t *testing.T) {
 	ctx := context.Background()
 
 	bt := newBlockingTool("bt")
@@ -1192,8 +1380,9 @@ func TestHandleRunFuncError_AlreadyHandled_NoDuplicate(t *testing.T) {
 		t.Fatal("Tool did not start")
 	}
 
-	// Cancel while tool is still running (in goroutine because cancelFn blocks
-	// until execution finishes), then unblock tool so safe-point fires
+	// Cancel while the direct child tool is still running. This should not
+	// produce a sub-agent checkpoint: direct non-boundary nested runs ignore safe-point
+	// cancel and continue until they finish normally.
 	go func() {
 		handle, _ := cancelFn(WithAgentCancelMode(CancelAfterToolCalls))
 		_ = handle.Wait()
@@ -1215,24 +1404,20 @@ func TestHandleRunFuncError_AlreadyHandled_NoDuplicate(t *testing.T) {
 		}
 	}
 
-	assert.Equal(t, 1, cancelCount, "Should have exactly one CancelError, no duplicate from handleRunFuncError + checkCancel")
+	assert.Equal(t, 0, cancelCount, "direct workflow child should not emit a safe-point CancelError")
 }
 
-func TestWithCancel_CancelAfterChatModel_NestedAgentTool(t *testing.T) {
+func TestWithCancel_RecursiveImmediate_TransferChildCheckpoint(t *testing.T) {
 	ctx := context.Background()
 
-	subAgentModel := newBlockingChatModel(toolCallMsg(toolCall("c1", "sub_tool", `{"input":"x"}`)))
+	subAgentModel := newContextAwareBlockingChatModel(schema.AssistantMessage("sub-agent done", nil))
 	subAgentModelStarted := subAgentModel.started
-	subTool := newBlockingTool("sub_tool")
 
 	subAgent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
 		Name:        "sub_agent",
 		Description: "test sub agent",
 		Instruction: "you are a sub agent",
 		Model:       subAgentModel,
-		ToolsConfig: ToolsConfig{
-			ToolsNodeConfig: compose.ToolsNodeConfig{Tools: []tool.BaseTool{subTool}},
-		},
 	})
 	require.NoError(t, err)
 
@@ -1249,24 +1434,16 @@ func TestWithCancel_CancelAfterChatModel_NestedAgentTool(t *testing.T) {
 		},
 	}
 
-	supervisorAgent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
-		Name:        "supervisor",
-		Description: "supervisor agent (equivalent to DeepAgent)",
-		Instruction: "you are a supervisor",
-		Model:       supervisorModel,
-	})
-	require.NoError(t, err)
-
-	agentWithSubAgents, err := SetSubAgents(ctx, supervisorAgent, []Agent{subAgent})
-	require.NoError(t, err)
-
+	store := newCancelTestStore()
+	checkpointID := "recursive-immediate-transfer-child-checkpoint"
 	runner := NewRunner(ctx, RunnerConfig{
-		Agent:           agentWithSubAgents,
+		Agent:           newTransferSupervisorWithSubAgent(t, ctx, supervisorModel, subAgent),
 		EnableStreaming: false,
+		CheckPointStore: store,
 	})
 
 	cancelOpt, cancelFn := WithCancel()
-	iter := runner.Run(ctx, []Message{schema.UserMessage("test")}, cancelOpt)
+	iter := runner.Run(ctx, []Message{schema.UserMessage("test")}, cancelOpt, WithCheckPointID(checkpointID))
 
 	select {
 	case <-subAgentModelStarted:
@@ -1278,29 +1455,573 @@ func TestWithCancel_CancelAfterChatModel_NestedAgentTool(t *testing.T) {
 
 	cancelDone := make(chan error, 1)
 	go func() {
-		handle, _ := cancelFn(WithAgentCancelMode(CancelAfterChatModel), WithRecursive())
+		handle, _ := cancelFn(WithRecursive())
 		cancelDone <- handle.Wait()
 	}()
 
-	time.Sleep(100 * time.Millisecond)
-	close(subAgentModel.unblockCh)
-
 	cancelErr := <-cancelDone
-	assert.NoError(t, cancelErr)
+	require.NoError(t, cancelErr)
 
-	hasCancelError := false
-	for {
-		event, ok := iter.Next()
-		if !ok {
-			break
-		}
-		var ce *CancelError
-		if event.Err != nil && errors.As(event.Err, &ce) {
-			hasCancelError = true
-		}
+	_, cancelErrors := drainCancelErrors(iter)
+	require.Len(t, cancelErrors, 1, "transfer child should emit a checkpoint CancelError")
+	assert.Equal(t, CancelImmediate, cancelErrors[0].Info.Mode)
+
+	assertCancelErrorIncludesAddress(t, cancelErrors[0], "sub_agent")
+
+	resumeSubAgentCalls := int32(0)
+	resumeSubAgent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "sub_agent",
+		Description: "test sub agent",
+		Instruction: "you are a sub agent",
+		Model: &countingChatModel{
+			callCount: &resumeSubAgentCalls,
+			responses: []*schema.Message{
+				schema.AssistantMessage("sub-agent resumed", nil),
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	resumeRunner := NewRunner(ctx, RunnerConfig{
+		Agent:           newTransferSupervisorWithSubAgent(t, ctx, supervisorModel, resumeSubAgent),
+		EnableStreaming: false,
+		CheckPointStore: store,
+	})
+	resumeIter, err := resumeRunner.Resume(ctx, checkpointID)
+	require.NoError(t, err)
+	resumeEvents, resumeCancelErrors := drainCancelErrors(resumeIter)
+	require.Empty(t, resumeCancelErrors)
+	require.NotEmpty(t, resumeEvents)
+	assert.Equal(t, int32(1), atomic.LoadInt32(&resumeSubAgentCalls), "transfer target should resume from its own checkpoint")
+}
+
+func TestWithCancel_RecursiveSafePoint_TransferChildCheckpoint(t *testing.T) {
+	ctx := context.Background()
+
+	subTool := &slowTool{
+		name:   "sub_tool",
+		delay:  10 * time.Millisecond,
+		result: "sub tool result",
+	}
+	subAgentModel := newContextAwareBlockingChatModel(&schema.Message{
+		Role: schema.Assistant,
+		ToolCalls: []schema.ToolCall{{
+			ID: "sub_call_1", Type: "function",
+			Function: schema.FunctionCall{
+				Name:      "sub_tool",
+				Arguments: `{"input":"x"}`,
+			},
+		}},
+	})
+	subAgent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "sub_agent",
+		Description: "test sub agent",
+		Instruction: "you are a sub agent",
+		Model:       subAgentModel,
+		ToolsConfig: ToolsConfig{
+			ToolsNodeConfig: compose.ToolsNodeConfig{
+				Tools: []tool.BaseTool{subTool},
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	supervisorModel := &simpleChatModel{
+		response: &schema.Message{
+			Role: schema.Assistant,
+			ToolCalls: []schema.ToolCall{{
+				ID: "call_1", Type: "function",
+				Function: schema.FunctionCall{
+					Name:      TransferToAgentToolName,
+					Arguments: `{"agent_name": "sub_agent"}`,
+				},
+			}},
+		},
+	}
+	store := newCancelTestStore()
+	checkpointID := "recursive-safe-point-transfer-child-checkpoint"
+	runner := NewRunner(ctx, RunnerConfig{
+		Agent:           newTransferSupervisorWithSubAgent(t, ctx, supervisorModel, subAgent),
+		EnableStreaming: false,
+		CheckPointStore: store,
+	})
+
+	cancelOpt, cancelFn := WithCancel()
+	iter := runner.Run(ctx, []Message{schema.UserMessage("test")}, cancelOpt, WithCheckPointID(checkpointID))
+
+	select {
+	case <-subAgentModel.started:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Sub-agent model did not start")
 	}
 
-	assert.True(t, hasCancelError, "CancelError expected from nested agent tool with tools")
+	handle, contributed := cancelFn(WithAgentCancelMode(CancelAfterChatModel), WithRecursive())
+	require.True(t, contributed)
+	cancelDone := make(chan error, 1)
+	go func() {
+		cancelDone <- handle.Wait()
+	}()
+	time.Sleep(50 * time.Millisecond)
+	close(subAgentModel.release)
+
+	_, cancelErrors := drainCancelErrors(iter)
+	require.NoError(t, <-cancelDone)
+	require.Len(t, cancelErrors, 1, "transfer child should emit a safe-point checkpoint CancelError")
+	assert.Equal(t, CancelAfterChatModel, cancelErrors[0].Info.Mode)
+
+	assertCancelErrorIncludesAddress(t, cancelErrors[0], "sub_agent")
+
+	resumeSubAgentCalls := int32(0)
+	resumeSubAgent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "sub_agent",
+		Description: "test sub agent",
+		Instruction: "you are a sub agent",
+		Model: &countingChatModel{
+			callCount: &resumeSubAgentCalls,
+			responses: []*schema.Message{
+				schema.AssistantMessage("sub-agent resumed", nil),
+			},
+		},
+		ToolsConfig: ToolsConfig{
+			ToolsNodeConfig: compose.ToolsNodeConfig{
+				Tools: []tool.BaseTool{subTool},
+			},
+		},
+	})
+	require.NoError(t, err)
+	resumeRunner := NewRunner(ctx, RunnerConfig{
+		Agent:           newTransferSupervisorWithSubAgent(t, ctx, supervisorModel, resumeSubAgent),
+		EnableStreaming: false,
+		CheckPointStore: store,
+	})
+	resumeIter, err := resumeRunner.Resume(ctx, checkpointID)
+	require.NoError(t, err)
+	resumeEvents, resumeCancelErrors := drainCancelErrors(resumeIter)
+	require.Empty(t, resumeCancelErrors)
+	require.NotEmpty(t, resumeEvents)
+	assert.Equal(t, int32(1), atomic.LoadInt32(&resumeSubAgentCalls), "transfer target should resume from its safe-point checkpoint")
+}
+
+func TestWithCancel_RecursiveImmediate_MiddlewareChildAbortOnly(t *testing.T) {
+	ctx := context.Background()
+
+	childModel := newContextAwareBlockingChatModel(schema.AssistantMessage("child done", nil))
+	childAgent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "MiddlewareChild",
+		Description: "direct middleware child",
+		Instruction: "child",
+		Model:       childModel,
+	})
+	require.NoError(t, err)
+
+	outerAgent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "OuterMiddlewareAgent",
+		Description: "outer",
+		Instruction: "outer",
+		Model:       &plainResponseModel{text: "outer done"},
+		Middlewares: []AgentMiddleware{{
+			BeforeChatModel: func(ctx context.Context, _ *ChatModelAgentState) error {
+				return runChildAgentToEnd(ctx, childAgent, "child work")
+			},
+		}},
+	})
+	require.NoError(t, err)
+
+	store := newCancelTestStore()
+	checkpointID := "recursive-immediate-middleware-child-abort-only"
+	runner := NewRunner(ctx, RunnerConfig{Agent: outerAgent, CheckPointStore: store})
+
+	cancelOpt, cancelFn := WithCancel()
+	iter := runner.Run(ctx, []Message{schema.UserMessage("go")}, cancelOpt, WithCheckPointID(checkpointID))
+
+	select {
+	case <-childModel.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("middleware child model did not start")
+	}
+
+	handle, _ := cancelFn(WithRecursive())
+
+	select {
+	case <-childModel.cancelObserved:
+	case <-time.After(time.Second):
+		t.Fatal("middleware child did not observe recursive immediate context cancellation")
+	}
+
+	require.NoError(t, handle.Wait())
+	_, cancelErrors := drainCancelErrors(iter)
+	require.Len(t, cancelErrors, 1, "outer stream should emit exactly one root CancelError")
+	assertCancelErrorExcludesAddresses(t, cancelErrors[0], "MiddlewareChild")
+
+	resumeChildCalls := int32(0)
+	resumeChildModel := &countingChatModel{
+		callCount: &resumeChildCalls,
+		responses: []*schema.Message{
+			schema.AssistantMessage("fresh child run after resume", nil),
+		},
+	}
+	resumeChildAgent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "MiddlewareChild",
+		Description: "direct middleware child",
+		Instruction: "child",
+		Model:       resumeChildModel,
+	})
+	require.NoError(t, err)
+
+	resumeOuterAgent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "OuterMiddlewareAgent",
+		Description: "outer",
+		Instruction: "outer",
+		Model:       &plainResponseModel{text: "outer done after resume"},
+		Middlewares: []AgentMiddleware{{
+			BeforeChatModel: func(ctx context.Context, _ *ChatModelAgentState) error {
+				return runChildAgentToEnd(ctx, resumeChildAgent, "child work")
+			},
+		}},
+	})
+	require.NoError(t, err)
+
+	resumeRunner := NewRunner(ctx, RunnerConfig{Agent: resumeOuterAgent, CheckPointStore: store})
+	resumeIter, err := resumeRunner.Resume(ctx, checkpointID)
+	require.NoError(t, err)
+	resumeEvents, resumeCancelErrors := drainCancelErrors(resumeIter)
+	require.Empty(t, resumeCancelErrors)
+	require.NotEmpty(t, resumeEvents)
+	assert.Equal(t, int32(1), atomic.LoadInt32(&resumeChildCalls), "middleware child should be invoked as a fresh Run on root resume")
+}
+
+func TestWithCancel_RecursiveImmediate_MiddlewareChildAgentToolCheckpointResumeBarrier(t *testing.T) {
+	ctx := context.Background()
+
+	leafModel := newBlockingChatModel(schema.AssistantMessage("leaf done", nil))
+	t.Cleanup(func() {
+		close(leafModel.unblockCh)
+	})
+	leafAgent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "MiddlewareLeafAgent",
+		Description: "leaf agent wrapped as a tool under a direct middleware child",
+		Instruction: "leaf",
+		Model:       leafModel,
+	})
+	require.NoError(t, err)
+
+	childModelCallCount := int32(0)
+	childModel := &countingChatModel{
+		callCount: &childModelCallCount,
+		responses: []*schema.Message{
+			toolCallMsg(toolCall("child-leaf", "MiddlewareLeafAgent", `{"request":"leaf work"}`)),
+			schema.AssistantMessage("child done", nil),
+		},
+	}
+	childAgent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "MiddlewareChildWithAgentTool",
+		Description: "direct middleware child with an agent tool",
+		Instruction: "child",
+		Model:       childModel,
+		ToolsConfig: ToolsConfig{
+			ToolsNodeConfig: compose.ToolsNodeConfig{
+				Tools: []tool.BaseTool{NewAgentTool(ctx, leafAgent)},
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	childInterruptSeen := int32(0)
+	resumeChildCalls := int32(0)
+	resumeLeafCalls := int32(0)
+	outerAgent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "OuterMiddlewareAgent",
+		Description: "outer",
+		Instruction: "outer",
+		Model:       &plainResponseModel{text: "outer done"},
+		Middlewares: []AgentMiddleware{{
+			BeforeChatModel: func(ctx context.Context, _ *ChatModelAgentState) error {
+				iter := childAgent.Run(ctx, &AgentInput{Messages: []Message{schema.UserMessage("child work")}})
+				for {
+					event, ok := iter.Next()
+					if !ok {
+						return nil
+					}
+					if event.Action != nil && event.Action.Interrupted != nil {
+						atomic.StoreInt32(&childInterruptSeen, 1)
+					}
+					if event.Err != nil {
+						return event.Err
+					}
+				}
+			},
+		}},
+	})
+	require.NoError(t, err)
+
+	store := newCancelTestStore()
+	checkpointID := "recursive-immediate-middleware-agent-tool-resume-barrier"
+	runner := NewRunner(ctx, RunnerConfig{Agent: outerAgent, CheckPointStore: store})
+
+	cancelOpt, cancelFn := WithCancel()
+	iter := runner.Run(ctx, []Message{schema.UserMessage("go")}, cancelOpt, WithCheckPointID(checkpointID))
+
+	select {
+	case <-leafModel.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("leaf agent model did not start")
+	}
+
+	handle, _ := cancelFn(WithRecursive())
+	assert.NoError(t, handle.Wait(),
+		"the root may handle its own immediate interrupt, but not a checkpoint hidden behind a direct middleware Run")
+	_, cancelErrors := drainCancelErrors(iter)
+	require.Len(t, cancelErrors, 1, "root stream should expose only the root immediate cancel")
+	assertCancelErrorExcludesAddresses(t, cancelErrors[0], "MiddlewareLeafAgent")
+	assert.Equal(t, int32(0), atomic.LoadInt32(&childInterruptSeen),
+		"the abort-only middleware child must swallow the nested AgentTool interrupt action instead of surfacing it as a resumable boundary")
+
+	resumeLeafModel := &countingChatModel{
+		callCount: &resumeLeafCalls,
+		responses: []*schema.Message{
+			schema.AssistantMessage("leaf done after resume", nil),
+		},
+	}
+	resumeLeafAgent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "MiddlewareLeafAgent",
+		Description: "leaf agent wrapped as a tool under a direct middleware child",
+		Instruction: "leaf",
+		Model:       resumeLeafModel,
+	})
+	require.NoError(t, err)
+
+	resumeChildModel := &countingChatModel{
+		callCount: &resumeChildCalls,
+		responses: []*schema.Message{
+			toolCallMsg(toolCall("child-leaf", "MiddlewareLeafAgent", `{"request":"leaf work"}`)),
+			schema.AssistantMessage("child done after resume", nil),
+		},
+	}
+	resumeChildAgent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "MiddlewareChildWithAgentTool",
+		Description: "direct middleware child with an agent tool",
+		Instruction: "child",
+		Model:       resumeChildModel,
+		ToolsConfig: ToolsConfig{
+			ToolsNodeConfig: compose.ToolsNodeConfig{
+				Tools: []tool.BaseTool{NewAgentTool(ctx, resumeLeafAgent)},
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	resumeOuterAgent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "OuterMiddlewareAgent",
+		Description: "outer",
+		Instruction: "outer",
+		Model:       &plainResponseModel{text: "outer done after resume"},
+		Middlewares: []AgentMiddleware{{
+			BeforeChatModel: func(ctx context.Context, _ *ChatModelAgentState) error {
+				return runChildAgentToEnd(ctx, resumeChildAgent, "child work")
+			},
+		}},
+	})
+	require.NoError(t, err)
+
+	resumeRunner := NewRunner(ctx, RunnerConfig{Agent: resumeOuterAgent, CheckPointStore: store})
+	resumeIter, err := resumeRunner.Resume(ctx, checkpointID)
+	require.NoError(t, err)
+	resumeEvents, resumeCancelErrors := drainCancelErrors(resumeIter)
+	require.Empty(t, resumeCancelErrors)
+	require.NotEmpty(t, resumeEvents)
+	assert.GreaterOrEqual(t, atomic.LoadInt32(&resumeChildCalls), int32(1), "middleware child should be invoked as a fresh Run on root resume")
+	assert.Equal(t, int32(1), atomic.LoadInt32(&resumeLeafCalls), "nested AgentTool should run fresh, not resume from the hidden checkpoint")
+}
+
+func TestWithCancel_RecursiveImmediate_BeforeAgentChildAbortOnly(t *testing.T) {
+	ctx := context.Background()
+
+	childModel := newContextAwareBlockingChatModel(schema.AssistantMessage("child done", nil))
+	childAgent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "BeforeAgentMiddlewareChild",
+		Description: "direct BeforeAgent child",
+		Instruction: "child",
+		Model:       childModel,
+	})
+	require.NoError(t, err)
+
+	outerAgent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "OuterBeforeAgentMiddlewareAgent",
+		Description: "outer",
+		Instruction: "outer",
+		Model:       &plainResponseModel{text: "outer done"},
+		Handlers: []ChatModelAgentMiddleware{
+			&testBeforeAgentHandler{fn: func(ctx context.Context, runCtx *ChatModelAgentContext) (context.Context, *ChatModelAgentContext, error) {
+				iter := childAgent.Run(ctx, &AgentInput{Messages: []Message{schema.UserMessage("child work")}})
+				for {
+					event, ok := iter.Next()
+					if !ok {
+						return ctx, runCtx, nil
+					}
+					if event.Err != nil {
+						return ctx, runCtx, event.Err
+					}
+				}
+			}},
+		},
+	})
+	require.NoError(t, err)
+
+	cancelOpt, cancelFn := WithCancel()
+	iterCh := make(chan *AsyncIterator[*AgentEvent], 1)
+	go func() {
+		iterCh <- NewRunner(ctx, RunnerConfig{Agent: outerAgent}).Run(ctx, []Message{schema.UserMessage("go")}, cancelOpt)
+	}()
+
+	select {
+	case <-childModel.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("BeforeAgent middleware child model did not start")
+	}
+
+	handle, _ := cancelFn(WithRecursive())
+
+	select {
+	case <-childModel.cancelObserved:
+	case <-time.After(time.Second):
+		t.Fatal("BeforeAgent middleware child did not observe recursive immediate context cancellation")
+	}
+
+	require.NoError(t, handle.Wait())
+	var iter *AsyncIterator[*AgentEvent]
+	select {
+	case iter = <-iterCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("outer Run did not return after BeforeAgent child cancellation")
+	}
+	_, cancelErrors := drainCancelErrors(iter)
+	require.Len(t, cancelErrors, 1, "outer stream should emit exactly one root CancelError")
+	assertCancelErrorExcludesAddresses(t, cancelErrors[0], "BeforeAgentMiddlewareChild")
+}
+
+func TestWithCancel_RecursiveImmediate_MultiLevelMiddlewareChildrenAbortOnly(t *testing.T) {
+	ctx := context.Background()
+
+	cModel := newContextAwareBlockingChatModel(schema.AssistantMessage("c done", nil))
+	agentC, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "MiddlewareChildC",
+		Description: "direct middleware child C",
+		Instruction: "child C",
+		Model:       cModel,
+	})
+	require.NoError(t, err)
+
+	bCancelObserved := make(chan struct{}, 1)
+	agentB, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "MiddlewareChildB",
+		Description: "direct middleware child B",
+		Instruction: "child B",
+		Model:       &plainResponseModel{text: "b done"},
+		Middlewares: []AgentMiddleware{{
+			BeforeChatModel: func(ctx context.Context, _ *ChatModelAgentState) error {
+				go func() {
+					<-ctx.Done()
+					select {
+					case bCancelObserved <- struct{}{}:
+					default:
+					}
+				}()
+				return runChildAgentToEnd(ctx, agentC, "c work")
+			},
+		}},
+	})
+	require.NoError(t, err)
+
+	outerAgent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "OuterMultiLevelMiddlewareAgent",
+		Description: "outer",
+		Instruction: "outer",
+		Model:       &plainResponseModel{text: "outer done"},
+		Middlewares: []AgentMiddleware{{
+			BeforeChatModel: func(ctx context.Context, _ *ChatModelAgentState) error {
+				return runChildAgentToEnd(ctx, agentB, "b work")
+			},
+		}},
+	})
+	require.NoError(t, err)
+
+	cancelOpt, cancelFn := WithCancel()
+	iter := NewRunner(ctx, RunnerConfig{Agent: outerAgent}).Run(ctx, []Message{schema.UserMessage("go")}, cancelOpt)
+
+	select {
+	case <-cModel.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("middleware child C model did not start")
+	}
+
+	handle, _ := cancelFn(WithRecursive())
+
+	select {
+	case <-bCancelObserved:
+	case <-time.After(time.Second):
+		t.Fatal("middleware child B did not observe recursive immediate context cancellation")
+	}
+	select {
+	case <-cModel.cancelObserved:
+	case <-time.After(time.Second):
+		t.Fatal("middleware child C did not observe recursive immediate context cancellation")
+	}
+
+	require.NoError(t, handle.Wait())
+	_, cancelErrors := drainCancelErrors(iter)
+	require.Len(t, cancelErrors, 1, "outer stream should emit exactly one root CancelError")
+	assertCancelErrorExcludesAddresses(t, cancelErrors[0], "MiddlewareChildB", "MiddlewareChildC")
+}
+
+func TestWithCancel_NonRecursiveImmediate_DoesNotAbortMiddlewareChild(t *testing.T) {
+	ctx := context.Background()
+
+	childModel := newContextAwareBlockingChatModel(schema.AssistantMessage("child done", nil))
+	released := false
+	t.Cleanup(func() {
+		if !released {
+			close(childModel.release)
+		}
+	})
+	childAgent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "MiddlewareChild",
+		Description: "direct middleware child",
+		Instruction: "child",
+		Model:       childModel,
+	})
+	require.NoError(t, err)
+
+	outerAgent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "OuterMiddlewareAgent",
+		Description: "outer",
+		Instruction: "outer",
+		Model:       &plainResponseModel{text: "outer done"},
+		Middlewares: []AgentMiddleware{{
+			BeforeChatModel: func(ctx context.Context, _ *ChatModelAgentState) error {
+				return runChildAgentToEnd(ctx, childAgent, "child work")
+			},
+		}},
+	})
+	require.NoError(t, err)
+
+	cancelOpt, cancelFn := WithCancel()
+	iter := NewRunner(ctx, RunnerConfig{Agent: outerAgent}).Run(ctx, []Message{schema.UserMessage("go")}, cancelOpt)
+
+	select {
+	case <-childModel.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("middleware child model did not start")
+	}
+
+	handle, _ := cancelFn()
+	assertNotClosedWithin(t, childModel.cancelObserved, 100*time.Millisecond)
+
+	close(childModel.release)
+	released = true
+
+	require.NoError(t, handle.Wait())
+	_, cancelErrors := drainCancelErrors(iter)
+	require.Len(t, cancelErrors, 1)
 }
 
 // slowStreamingTool implements StreamableTool (but NOT InvokableTool), streaming

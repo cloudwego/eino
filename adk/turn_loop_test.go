@@ -981,16 +981,19 @@ func TestTurnLoop_GetAgentError_RecoverConsumed(t *testing.T) {
 func TestTurnLoop_GenInputError_RecoverItems(t *testing.T) {
 	genErr := errors.New("gen input error")
 
-	loop := newAndRunTurnLoop(context.Background(), TurnLoopConfig[string, *schema.Message]{
+	loop := NewTurnLoop(TurnLoopConfig[string, *schema.Message]{
 		GenInput: func(ctx context.Context, _ *TurnLoop[string, *schema.Message], items []string) (*GenInputResult[string, *schema.Message], error) {
 			return nil, genErr
 		},
 		PrepareAgent: prepareTestAgent,
 	})
 
-	loop.Push("msg1")
-	loop.Push("msg2")
+	ok, _ := loop.Push("msg1")
+	require.True(t, ok)
+	ok, _ = loop.Push("msg2")
+	require.True(t, ok)
 
+	loop.Run(context.Background())
 	result := loop.Wait()
 	assert.ErrorIs(t, result.ExitReason, genErr)
 	assert.Len(t, result.UnhandledItems, 2, "should recover all items when GenInput fails")
@@ -4840,9 +4843,9 @@ func TestNewTurnLoop_NilPrepareAgent_Panics(t *testing.T) {
 	})
 }
 
-func TestDeriveAgentToolCancelContext_NilParent_ReturnsNil(t *testing.T) {
+func TestDeriveCheckpointAwareCancelContext_NilParent_ReturnsNil(t *testing.T) {
 	var cc *cancelContext
-	assert.Nil(t, cc.deriveAgentToolCancelContext(context.Background()))
+	assert.Nil(t, cc.deriveCheckpointAwareCancelContext(context.Background()))
 }
 
 func TestUntilIdleFor(t *testing.T) {
@@ -5771,7 +5774,7 @@ func TestAttack_SkipCheckpoint_Sticky(t *testing.T) {
 //
 // IMPORTANT: child.markDone() is NOT called by the probe. The test MUST
 // call it (e.g. via t.Cleanup) after verifying propagation to avoid a
-// race between markDone closing child.doneChan and the deriveAgentToolCancelContext
+// race between markDone closing child.doneChan and the deriveCheckpointAwareCancelContext
 // goroutines propagating the cancel signal.
 type turnLoopNestedProbeAgent struct {
 	parentCCCh chan *cancelContext
@@ -5785,7 +5788,7 @@ func (a *turnLoopNestedProbeAgent) Run(ctx context.Context, _ *AgentInput, opts 
 	o := getCommonOptions(nil, opts...)
 	cc := o.cancelCtx
 
-	child := cc.deriveAgentToolCancelContext(ctx)
+	child := cc.deriveCheckpointAwareCancelContext(ctx)
 	a.parentCCCh <- cc
 	a.childCCCh <- child
 

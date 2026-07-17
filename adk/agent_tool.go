@@ -153,7 +153,7 @@ func (at *typedAgentTool[M]) Info(ctx context.Context) (*schema.ToolInfo, error)
 
 func (at *typedAgentTool[M]) InvokableRun(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (string, error) {
 	if cancelCtx := getCancelContext(ctx); cancelCtx != nil {
-		cancelCtx.markAgentToolDescendant()
+		cancelCtx.markCheckpointAwareDescendant()
 	}
 
 	gen, enableStreaming := getEmitGeneratorAndEnableStreaming[M](opts)
@@ -324,19 +324,8 @@ func getOptionsByAgentName(agentName string, opts []tool.Option) []AgentRunOptio
 
 func extractAndDeriveAgentToolCancelCtx(ctx context.Context, agentName string, opts []tool.Option) []AgentRunOption {
 	agentOpts := getOptionsByAgentName(agentName, opts)
-	baseOpts := getCommonOptions(nil, agentOpts...)
-	parentCtx := baseOpts.cancelCtx
-	if parentCtx == nil {
-		parentCtx = getCancelContext(ctx)
-	}
-	if parentCtx != nil {
-		parentCtx.markAgentToolDescendant()
-		childCtx := parentCtx.deriveAgentToolCancelContext(ctx)
-		agentOpts = append(agentOpts, WrapImplSpecificOptFn(func(o *options) {
-			o.cancelCtx = childCtx
-		}))
-	}
-	return agentOpts
+	childCancelCtx := deriveCheckpointAwareSubAgentCancelContext(ctx, agentOpts)
+	return appendCancelContextOption(agentOpts, childCancelCtx)
 }
 
 func getEmitGeneratorAndEnableStreaming[M MessageType](opts []tool.Option) (*AsyncGenerator[*TypedAgentEvent[M]], bool) {

@@ -461,7 +461,10 @@ func (a *flowAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...AgentR
 	}
 
 	ctxForSubAgents = withCancelContext(ctxForSubAgents, cancelCtx)
-	innerIter := subAgent.Resume(ctxForSubAgents, info, filterCancelOption(opts)...)
+	filteredOpts := filterCancelOption(opts)
+	childCancelCtx := deriveCheckpointAwareSubAgentCancelContext(ctxForSubAgents, filteredOpts)
+	childOpts := appendCancelContextOption(filteredOpts, childCancelCtx)
+	innerIter := subAgent.Resume(ctxForSubAgents, info, childOpts...)
 	return wrapIterWithCancelCtx(wrapIterWithOnEnd(ctx, innerIter), cancelCtx)
 }
 
@@ -563,7 +566,9 @@ func (a *flowAgent) run(
 			return
 		}
 
-		subAIter := agentToRun.Run(ctxForSubAgents, nil /*subagents get input from runCtx*/, opts...)
+		childCancelCtx := deriveCheckpointAwareSubAgentCancelContext(ctxForSubAgents, opts)
+		childOpts := appendCancelContextOption(opts, childCancelCtx)
+		subAIter := agentToRun.Run(ctxForSubAgents, nil /*subagents get input from runCtx*/, childOpts...)
 		for {
 			subEvent, ok_ := subAIter.Next()
 			if !ok_ {

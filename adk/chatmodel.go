@@ -472,12 +472,26 @@ type typedRunParams[M MessageType] struct {
 
 type typedRunFunc[M MessageType] func(ctx context.Context, p *typedRunParams[M])
 
+func isCheckpointAwareCancelScope(cc *cancelContext) bool {
+	return cc != nil && cc.parent != nil && !cc.abortOnly
+}
+
 func resolveRunCancelContext(ctx context.Context, o *options) (*cancelContext, bool) {
 	inherited := getCancelContext(ctx)
 	if o.cancelCtx != nil {
 		return o.cancelCtx, o.cancelCtx != inherited
 	}
-	return inherited, false
+	if inherited != nil {
+		// ADK-managed child boundaries pass explicit checkpoint-aware scopes.
+		// Such scopes may reach ChatModelAgent through transparent wrappers.
+		if isCheckpointAwareCancelScope(inherited) {
+			return inherited, false
+		}
+		// Other inherited scopes are direct non-boundary nesting: only immediate
+		// recursive abort should propagate, without safe-point checkpointing.
+		return deriveAbortOnlyCancelContext(ctx, inherited), true
+	}
+	return nil, false
 }
 
 // NewChatModelAgent creates a new ChatModelAgent with the given config.
@@ -918,6 +932,13 @@ func (a *TypedChatModelAgent[M]) handleRunFuncError(
 	store *bridgeStore,
 	generator *AsyncGenerator[*TypedAgentEvent[M]],
 ) {
+	if isAbortOnlyCancelled(cancelCtx) {
+		if cancelCtxOwned {
+			cancelCtx.markDone()
+		}
+		return
+	}
+
 	info, ok := compose.ExtractInterruptInfo(err)
 	if ok {
 		if cancelCtx != nil {
@@ -1038,16 +1059,8 @@ func (a *TypedChatModelAgent[M]) buildNoToolsRunFunc(_ context.Context) (typedRu
 			failoverLastSuccessModel: a.model,
 		})
 
-		// Pre-execution cancel check
-		if cancelCtx != nil && cancelCtx.shouldCancel() {
-			if cancelCtx.getMode() == CancelImmediate || atomic.LoadInt32(&cancelCtx.escalated) == 1 {
-				cancelErr, ok := cancelCtx.createAndMarkCancelHandled()
-				if !ok {
-					return
-				}
-				p.generator.Send(&TypedAgentEvent[M]{Err: cancelErr})
-				return
-			}
+		if checkPreExecCancel(cancelCtx, p.generator) {
+			return
 		}
 
 		in := typedNoToolsInput[M]{input: p.input, instruction: p.instruction}
@@ -1177,16 +1190,8 @@ func (a *TypedChatModelAgent[M]) buildMessageReActRunFunc(_ context.Context, bc 
 			afterToolCallsHook:       mp.afterToolCallsHook,
 		})
 
-		// Pre-execution cancel check
-		if cancelCtx != nil && cancelCtx.shouldCancel() {
-			if cancelCtx.getMode() == CancelImmediate || atomic.LoadInt32(&cancelCtx.escalated) == 1 {
-				cancelErr, ok := cancelCtx.createAndMarkCancelHandled()
-				if !ok {
-					return
-				}
-				mp.generator.Send(&AgentEvent{Err: cancelErr})
-				return
-			}
+		if checkPreExecCancel(cancelCtx, mp.generator) {
+			return
 		}
 
 		in := reactRunInput{
@@ -1315,16 +1320,8 @@ func (a *TypedChatModelAgent[M]) buildAgenticReActRunFunc(_ context.Context, bc 
 			afterToolCallsHook:       ap.afterToolCallsHook,
 		})
 
-		// Pre-execution cancel check
-		if cancelCtx != nil && cancelCtx.shouldCancel() {
-			if cancelCtx.getMode() == CancelImmediate || atomic.LoadInt32(&cancelCtx.escalated) == 1 {
-				cancelErr, ok := cancelCtx.createAndMarkCancelHandled()
-				if !ok {
-					return
-				}
-				ap.generator.Send(&TypedAgentEvent[*schema.AgenticMessage]{Err: cancelErr})
-				return
-			}
+		if checkPreExecCancel(cancelCtx, ap.generator) {
+			return
 		}
 
 		in := agenticReactRunInput{input: ap.input, instruction: ap.instruction}
@@ -1446,10 +1443,22 @@ func (a *TypedChatModelAgent[M]) Run(ctx context.Context, input *TypedAgentInput
 
 	o := getCommonOptions(nil, opts...)
 	cancelCtx, cancelCtxOwned := resolveRunCancelContext(ctx, o)
+	var abortOnlyCancel context.CancelFunc
+	if cancelCtxOwned && cancelCtx != nil && cancelCtx.abortOnly {
+		ctx, abortOnlyCancel = withAbortOnlyCancelContext(ctx, cancelCtx)
+	}
+	ctx = withTypedChatModelAgentExecCtx(ctx, &typedChatModelAgentExecCtx[M]{
+		generator:                generator,
+		cancelCtx:                cancelCtx,
+		failoverLastSuccessModel: a.model,
+	})
 
 	ctx, run, bc, err := a.getRunFunc(ctx)
 	if err != nil {
 		go func() {
+			if abortOnlyCancel != nil {
+				defer abortOnlyCancel()
+			}
 			if cancelCtxOwned && cancelCtx != nil {
 				defer cancelCtx.markDone()
 			}
@@ -1476,6 +1485,9 @@ func (a *TypedChatModelAgent[M]) Run(ctx context.Context, input *TypedAgentInput
 	}
 
 	go func() {
+		if abortOnlyCancel != nil {
+			defer abortOnlyCancel()
+		}
 		defer func() {
 			panicErr := recover()
 			if panicErr != nil {
@@ -1520,10 +1532,22 @@ func (a *TypedChatModelAgent[M]) Resume(ctx context.Context, info *ResumeInfo, o
 
 	o := getCommonOptions(nil, opts...)
 	cancelCtx, cancelCtxOwned := resolveRunCancelContext(ctx, o)
+	var abortOnlyCancel context.CancelFunc
+	if cancelCtxOwned && cancelCtx != nil && cancelCtx.abortOnly {
+		ctx, abortOnlyCancel = withAbortOnlyCancelContext(ctx, cancelCtx)
+	}
+	ctx = withTypedChatModelAgentExecCtx(ctx, &typedChatModelAgentExecCtx[M]{
+		generator:                generator,
+		cancelCtx:                cancelCtx,
+		failoverLastSuccessModel: a.model,
+	})
 
 	ctx, run, bc, err := a.getRunFunc(ctx)
 	if err != nil {
 		go func() {
+			if abortOnlyCancel != nil {
+				defer abortOnlyCancel()
+			}
 			if cancelCtxOwned && cancelCtx != nil {
 				defer cancelCtx.markDone()
 			}
@@ -1600,6 +1624,9 @@ func (a *TypedChatModelAgent[M]) Resume(ctx context.Context, info *ResumeInfo, o
 	}
 
 	go func() {
+		if abortOnlyCancel != nil {
+			defer abortOnlyCancel()
+		}
 		defer func() {
 			panicErr := recover()
 			if panicErr != nil {

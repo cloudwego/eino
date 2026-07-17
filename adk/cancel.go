@@ -45,14 +45,17 @@ type CancelMode int
 const (
 	// CancelImmediate cancels the agent as soon as the signal is received,
 	// without waiting for a ChatModel or ToolCalls safe-point.
-	// By default, only the root agent is interrupted; descendant agents inside
-	// AgentTools are torn down via context cancellation as a side effect.
+	// By default, only the root agent is interrupted.
 	// Use WithRecursive to propagate explicit immediate-cancel signals to
-	// descendants for clean teardown with grace period.
+	// checkpoint-aware ADK-managed sub-agent boundaries and direct synchronous middleware
+	// agents. Checkpoint descendants may contribute nested checkpoints; direct
+	// middleware agents only receive cooperative teardown through Go context
+	// cancellation, stream termination, and local graph interruption.
 	CancelImmediate CancelMode = 0
 	// CancelAfterChatModel cancels after the root agent's next chat model call
 	// completes. By default, only the root agent checks this safe-point;
-	// nested sub-agents inside AgentTools are unaware of the cancel.
+	// nested sub-agents inside explicit checkpoint-aware boundaries are unaware
+	// of the cancel.
 	// Use WithRecursive to propagate the cancel to all descendants — whichever
 	// ChatModel finishes first triggers the cancel.
 	CancelAfterChatModel CancelMode = 1 << iota
@@ -120,16 +123,26 @@ func WithAgentCancelTimeout(timeout time.Duration) AgentCancelOption {
 }
 
 // WithRecursive opts into recursive cancel propagation. By default, cancel
-// modes only affect the root agent; descendant agents inside AgentTools are
-// not notified. WithRecursive makes the cancel propagate to all descendants:
-//   - CancelAfterChatModel / CancelAfterToolCalls: descendants check their own safe-points.
-//   - CancelImmediate: descendants receive explicit immediate-cancel signals for
+// modes only affect the root agent. WithRecursive makes the cancel propagate
+// through checkpoint-aware ADK-managed sub-agent boundaries:
+//   - CancelAfterChatModel / CancelAfterToolCalls: checkpoint descendants check their own safe-points.
+//   - CancelImmediate: checkpoint descendants receive explicit immediate-cancel signals for
 //     clean teardown; the root uses a grace period to collect child interrupts.
 //
-// With recursive cancellation, each descendant agent also triggers cancellation
-// and cascades its interrupt information upward. The root agent ultimately
-// produces a complete checkpoint that includes descendant checkpoints, enabling
-// resumption from the exact point where each descendant was interrupted.
+// Direct synchronous ChatModelAgent calls made from middleware do not establish
+// the checkpoint bridge required for targeted resumption. WithRecursive still
+// propagates CancelImmediate to them as abort-only teardown, but their local
+// interrupts are not attached to the root checkpoint.
+//
+// Immediate termination is cooperative: user code that ignores context
+// cancellation, stream termination, and graph interruption cannot be forcibly
+// killed by the framework.
+//
+// With recursive cancellation, each checkpoint descendant also triggers
+// cancellation and cascades its interrupt information upward. The root agent
+// ultimately produces a complete checkpoint that includes descendant
+// checkpoints, enabling resumption from the exact point where each descendant
+// was interrupted.
 //
 // Once any cancel call includes WithRecursive, the flag stays set for the
 // entire cancel lifecycle (monotonic escalation).
@@ -272,9 +285,9 @@ const (
 	interruptImmediate int32 = 1
 )
 
-// defaultCancelImmediateGracePeriod is the bounded time a recursive
-// AgentTool cancel waits before forcing the current level's graph interrupt.
-// This gives deeper AgentTool/internal-agent interrupts a chance to bubble up
+// defaultCancelImmediateGracePeriod is the bounded time a recursive cancel
+// waits before forcing the current level's graph interrupt. This gives deeper
+// checkpoint-aware sub-agent boundary interrupts a chance to bubble up
 // as CompositeInterrupts. If this proves insufficient for deeply nested
 // structures or too slow for latency-sensitive use cases, consider making it
 // configurable via an AgentCancelOption.
@@ -313,13 +326,14 @@ type cancelContext struct {
 	startedMode      int32 // atomic, mode when state transitioned to cancelling
 	deadlineUnixNano int64 // atomic, 0 means no deadline
 
-	recursive     int32         // atomic; 1 if cancel should propagate into AgentTool internal agents
+	recursive     int32         // atomic; 1 if cancel should propagate into checkpoint-aware sub-agent scopes
 	recursiveChan chan struct{} // closed when recursive transitions from 0 to 1
 
-	root   bool           // true for the original cancelContext created by WithCancel(); false for AgentTool internal agents
-	parent *cancelContext // non-nil for AgentTool internal agents; used to propagate AgentTool boundary markers upward
+	root      bool           // true for the original cancelContext created by WithCancel(); false for derived scopes
+	abortOnly bool           // true for direct middleware children that receive teardown but do not contribute checkpoints
+	parent    *cancelContext // non-nil for derived scopes; used to propagate checkpoint boundary markers upward
 
-	agentToolDescendant int32 // atomic; 1 once an AgentTool runs under this cancel context
+	checkpointAwareDescendant int32 // atomic; 1 once a checkpoint-aware sub-agent boundary runs under this cancel context
 
 	cancelMu      sync.Mutex
 	timeoutOnce   sync.Once
@@ -356,12 +370,12 @@ func (cc *cancelContext) setRecursive(v bool) {
 	}
 }
 
-// deriveAgentToolCancelContext creates the cancelContext used by an AgentTool's
-// internal agent. It receives recursive cancel propagation from the parent
-// AgentTool call. The caller MUST ensure the child's markDone() is eventually
+// deriveCheckpointAwareCancelContext creates a checkpoint-aware sub-agent cancelContext
+// for an explicit ADK-managed sub-agent execution boundary. It receives recursive
+// cancel propagation from the parent scope. The caller MUST ensure the child's markDone() is eventually
 // called (e.g., via wrapIterWithCancelCtx's defer) or that ctx is canceled;
 // otherwise the two propagation goroutines will leak.
-func (cc *cancelContext) deriveAgentToolCancelContext(ctx context.Context) *cancelContext {
+func (cc *cancelContext) deriveCheckpointAwareCancelContext(ctx context.Context) *cancelContext {
 	if cc == nil {
 		return nil
 	}
@@ -418,6 +432,62 @@ func (cc *cancelContext) deriveAgentToolCancelContext(ctx context.Context) *canc
 	}()
 
 	return child
+}
+
+// deriveAbortOnlyCancelContext creates a child cancelContext for direct
+// non-boundary nested runs, such as a ChatModelAgent called from user
+// middleware. The child only receives recursive immediate teardown from the
+// parent; safe-point modes do not propagate because this scope is a resume
+// barrier and cannot contribute checkpoint state to the parent.
+func deriveAbortOnlyCancelContext(ctx context.Context, parent *cancelContext) *cancelContext {
+	if parent == nil {
+		return nil
+	}
+	child := newCancelContext()
+	child.root = false
+	child.abortOnly = true
+	child.parent = parent
+
+	go func() {
+		select {
+		case <-parent.immediateChan:
+			if parent.isRecursive() {
+				child.setRecursive(true)
+				child.triggerImmediateCancel()
+				return
+			}
+			select {
+			case <-parent.recursiveChan:
+				child.setRecursive(true)
+				child.triggerImmediateCancel()
+			case <-child.doneChan:
+			case <-ctx.Done():
+			}
+		case <-child.doneChan:
+		case <-ctx.Done():
+		}
+	}()
+
+	return child
+}
+
+// withAbortOnlyCancelContext bridges an abort-only cancelContext into the Go
+// context seen by user/model/tool code. When the cancelContext receives
+// immediate teardown or finishes, ctx.Done() is closed so ordinary cooperative
+// cancellation checks can stop promptly.
+func withAbortOnlyCancelContext(ctx context.Context, cc *cancelContext) (context.Context, context.CancelFunc) {
+	ctx = withCancelContext(ctx, cc)
+	ctx, cancel := context.WithCancel(ctx)
+	go func() {
+		select {
+		case <-cc.immediateChan:
+			cancel()
+		case <-cc.doneChan:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	return ctx, cancel
 }
 
 func (cc *cancelContext) triggerCancel(mode CancelMode) {
@@ -508,7 +578,7 @@ func (cc *cancelContext) sendImmediateInterrupt() bool {
 	fns := make([]func(...compose.GraphInterruptOption), len(cc.graphInterruptFuncs))
 	copy(fns, cc.graphInterruptFuncs)
 
-	if cc.isRecursive() && cc.hasAgentToolDescendant() {
+	if !cc.abortOnly && cc.isRecursive() && cc.hasCheckpointAwareDescendant() {
 		select {
 		case <-cc.doneChan:
 			cc.mu.Unlock()
@@ -562,14 +632,46 @@ func (cc *cancelContext) markDone() {
 	}
 }
 
-func (cc *cancelContext) hasAgentToolDescendant() bool {
-	return cc != nil && atomic.LoadInt32(&cc.agentToolDescendant) == 1
+func (cc *cancelContext) hasCheckpointAwareDescendant() bool {
+	return cc != nil && atomic.LoadInt32(&cc.checkpointAwareDescendant) == 1
 }
 
-func (cc *cancelContext) markAgentToolDescendant() {
+func (cc *cancelContext) markCheckpointAwareDescendant() {
 	for cur := cc; cur != nil; cur = cur.parent {
-		atomic.StoreInt32(&cur.agentToolDescendant, 1)
+		if cur.abortOnly {
+			break
+		}
+		atomic.StoreInt32(&cur.checkpointAwareDescendant, 1)
 	}
+}
+
+// deriveCheckpointAwareSubAgentCancelContext derives a checkpoint-aware cancelContext
+// for an ADK-managed sub-agent boundary that should participate in recursive
+// checkpoint cancellation.
+func deriveCheckpointAwareSubAgentCancelContext(ctx context.Context, opts []AgentRunOption) *cancelContext {
+	parentCtx := getCommonOptions(nil, opts...).cancelCtx
+	if parentCtx == nil {
+		parentCtx = getCancelContext(ctx)
+	}
+	if parentCtx == nil || parentCtx.abortOnly {
+		return nil
+	}
+
+	parentCtx.markCheckpointAwareDescendant()
+	return parentCtx.deriveCheckpointAwareCancelContext(ctx)
+}
+
+// appendCancelContextOption copies opts before appending the internal cancel
+// option so parallel sub-agent derivation cannot share the caller's slice
+// backing array.
+func appendCancelContextOption(opts []AgentRunOption, cancelCtx *cancelContext) []AgentRunOption {
+	childOpts := append([]AgentRunOption(nil), opts...)
+	if cancelCtx == nil {
+		return childOpts
+	}
+	return append(childOpts, WrapImplSpecificOptFn(func(o *options) {
+		o.cancelCtx = cancelCtx
+	}))
 }
 
 // markCancelHandled signals that the cancel path in the runFunc has created
@@ -608,6 +710,39 @@ func (cc *cancelContext) createAndMarkCancelHandled() (*CancelError, bool) {
 	cancelErr := cc.createCancelError()
 	ok := cc.markCancelHandled()
 	return cancelErr, ok
+}
+
+func isAbortOnlyCancelled(cc *cancelContext) bool {
+	return cc != nil && cc.abortOnly && cc.isImmediateCancelled()
+}
+
+// checkPreExecCancel handles cancellation that is already visible before a
+// ChatModelAgent enters its compose graph. This closes the window before graph
+// interrupt functions are registered: checkpoint-aware scopes emit a CancelError
+// for immediate cancellation, while abort-only scopes silently terminate because
+// they are teardown-only resume barriers.
+func checkPreExecCancel[M MessageType](cc *cancelContext, gen *AsyncGenerator[*TypedAgentEvent[M]]) (terminated bool) {
+	if cc == nil {
+		return false
+	}
+	if cc.abortOnly {
+		if cc.isImmediateCancelled() {
+			cc.markDone()
+			return true
+		}
+		return false
+	}
+	if cc.shouldCancel() {
+		if cc.getMode() == CancelImmediate || atomic.LoadInt32(&cc.escalated) == 1 {
+			cancelErr, ok := cc.createAndMarkCancelHandled()
+			if !ok {
+				return true
+			}
+			gen.Send(&TypedAgentEvent[M]{Err: cancelErr})
+			return true
+		}
+	}
+	return false
 }
 
 // buildCancelFunc builds the AgentCancelFunc for external use.
@@ -785,7 +920,7 @@ func (cc *cancelContext) buildCancelFunc() AgentCancelFunc {
 // It calls markDone when the inner iterator is fully drained, ensuring the
 // cancelContext's doneChan is closed and propagation goroutines can exit.
 //
-// For root cancelContexts (created by WithCancel, not deriveAgentToolCancelContext), it also
+// For root cancelContexts (created by WithCancel, not deriveCheckpointAwareCancelContext), it also
 // converts interrupt ACTION events to CancelError when cancel is active.
 // This is the single point of interrupt-to-CancelError conversion in the
 // system — Runner.handleIter only enriches the resulting CancelError with
