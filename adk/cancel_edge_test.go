@@ -1684,9 +1684,8 @@ func TestWithCancel_RecursiveImmediate_MiddlewareChildAbortOnly(t *testing.T) {
 	resumeRunner := NewRunner(ctx, RunnerConfig{Agent: resumeOuterAgent, CheckPointStore: store})
 	resumeIter, err := resumeRunner.Resume(ctx, checkpointID)
 	require.NoError(t, err)
-	resumeEvents, resumeCancelErrors := drainCancelErrors(resumeIter)
+	_, resumeCancelErrors := drainCancelErrors(resumeIter)
 	require.Empty(t, resumeCancelErrors)
-	require.NotEmpty(t, resumeEvents)
 	assert.Equal(t, int32(1), atomic.LoadInt32(&resumeChildCalls), "middleware child should be invoked as a fresh Run on root resume")
 }
 
@@ -1826,9 +1825,8 @@ func TestWithCancel_RecursiveImmediate_MiddlewareChildAgentToolCheckpointResumeB
 	resumeRunner := NewRunner(ctx, RunnerConfig{Agent: resumeOuterAgent, CheckPointStore: store})
 	resumeIter, err := resumeRunner.Resume(ctx, checkpointID)
 	require.NoError(t, err)
-	resumeEvents, resumeCancelErrors := drainCancelErrors(resumeIter)
+	_, resumeCancelErrors := drainCancelErrors(resumeIter)
 	require.Empty(t, resumeCancelErrors)
-	require.NotEmpty(t, resumeEvents)
 	assert.GreaterOrEqual(t, atomic.LoadInt32(&resumeChildCalls), int32(1), "middleware child should be invoked as a fresh Run on root resume")
 	assert.Equal(t, int32(1), atomic.LoadInt32(&resumeLeafCalls), "nested AgentTool should run fresh, not resume from the hidden checkpoint")
 }

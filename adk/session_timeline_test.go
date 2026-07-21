@@ -552,10 +552,20 @@ func TestRunner_ExtensionEventSentWithTypedSendEventIsLiveAndPersisted(t *testin
 
 	t.Run("visible when timeline requested", func(t *testing.T) {
 		store := newSessionHelperStore()
+		var extensionDraftTurnID string
+		gen := func(ctx context.Context, e *SessionEvent[*schema.Message]) (string, error) {
+			if e.Kind == extensionKind {
+				extensionDraftTurnID = e.TurnID
+			}
+			return DefaultSessionEventIDGenerator[*schema.Message](ctx, e)
+		}
 		runner := NewRunner(ctx, RunnerConfig{
 			Agent:        agent,
 			SessionID:    "extension-event-session-visible",
 			SessionStore: store,
+			SessionConfig: &SessionConfig[*schema.Message]{
+				EventIDGenerator: gen,
+			},
 		})
 
 		var liveExtension *SessionEvent[*schema.Message]
@@ -573,6 +583,8 @@ func TestRunner_ExtensionEventSentWithTypedSendEventIsLiveAndPersisted(t *testin
 
 		require.NotNil(t, liveExtension)
 		require.NotEmpty(t, liveExtension.EventID)
+		require.NotEmpty(t, liveExtension.TurnID)
+		assert.Equal(t, liveExtension.TurnID, extensionDraftTurnID)
 		require.NotNil(t, liveExtension.Extension)
 		livePayload, ok := liveExtension.Extension.Data.(*sessionTimelineExtensionPayload)
 		require.True(t, ok)
@@ -584,6 +596,7 @@ func TestRunner_ExtensionEventSentWithTypedSendEventIsLiveAndPersisted(t *testin
 		})
 		require.Len(t, stored, 1)
 		assert.Equal(t, liveExtension.EventID, stored[0].EventID)
+		assert.Equal(t, liveExtension.TurnID, stored[0].TurnID)
 		require.NotNil(t, stored[0].Extension)
 		storedPayload, ok := stored[0].Extension.Data.(*sessionTimelineExtensionPayload)
 		require.True(t, ok)
