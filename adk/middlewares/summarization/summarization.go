@@ -384,7 +384,7 @@ func (m *TypedMiddleware[M]) BeforeModelRewriteState(ctx context.Context, state 
 		SessionEventVariant: &adk.SessionEventVariant[M]{
 			Event: &adk.SessionEvent[M]{
 				Kind:             adk.SessionEventMessagesReplaced,
-				Extra:            map[string]any{"_eino_source": "summarization", "_eino_reason": "context_summarized"},
+				Extra:            map[string]any{"_eino_reason": "context_summarized"},
 				MessagesReplaced: &msgs,
 			},
 		},

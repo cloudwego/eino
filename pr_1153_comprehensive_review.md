@@ -224,7 +224,81 @@ Full `go test ./...` remains blocked by pre-existing baseline failures listed in
 
 ## Remaining Items
 
-- `go test ./...` is still red due baseline failures unrelated to PR 1153:
+- At the original PR 1153 review point, `go test ./...` was red due baseline failures unrelated to PR 1153:
   - `github.com/cloudwego/eino/adk` recursive cancel/resume and interrupt resume tests.
   - `github.com/cloudwego/eino/adk/prebuilt/deep` final-result emission test.
+- A later follow-up run after rebasing onto current `alpha/10` passed; see the follow-up verification section below.
 - No temporary `review/pr-*` branches were created, so post-review cleanup had no branches to delete.
+
+## Follow-Up Review: Reason-Only Summarization Metadata
+
+### Overview
+
+- Request: keep only `_eino_reason` for summarization-created `messages_replaced` events.
+- Total iterations: Stage 1: 1, Stage 2: 1, Stage 3: 1
+- Files modified by this follow-up: 2 tracked files
+- Delta: +4 / -4
+
+### Stage 1: Design Review
+
+| Dimension | Rating | Notes |
+|-----------|--------|-------|
+| Concept Coherence | 5/5 | `_eino_reason=context_summarized` captures the business distinction; `Kind=messages_replaced` already captures the operation. |
+| API Usability and Intuitiveness | 5/5 | Providers can branch on one framework key instead of two partially redundant keys. |
+| Minimum API Surface | 5/5 | No new public symbols or extra first-party key. |
+| Backward Compatibility | 4/5 | Only affects new first-party metadata on an unreleased PR branch; provider-added business keys still work. |
+| Module Separation and Layering | 5/5 | Change remains local to summarization event construction and its test. |
+| Cohesion vs. Tension | 5/5 | Reason metadata is still ignored by replay/reconstruction and used only as envelope metadata. |
+| Elegance vs. Complexity | 5/5 | Removes duplicative first-party metadata. |
+| Naming | 5/5 | `_eino_reason` is the more precise key for the motivating query. |
+| Readability | 5/5 | The event seed is smaller and easier to inspect. |
+| Duplication | 5/5 | Removes duplicate source/reason encoding. |
+| Public API Documentation | 5/5 | No public API doc change required; local plan text was updated. |
+| Internal Comments | 5/5 | Existing comments remain accurate. |
+
+Finding resolved:
+
+| # | Dimension | Finding | Fix Applied | Files |
+|---|-----------|---------|-------------|-------|
+| 1 | Minimum metadata / Cohesion | `_eino_source=summarization` duplicated information already implied by `_eino_reason=context_summarized` for the only first-party seed. | Removed `_eino_source`; providers now branch on `_eino_reason`. | `adk/middlewares/summarization/summarization.go`, `adk/middlewares/summarization/summarization_test.go` |
+
+Validation and counter-argument:
+
+- Validation: the source key was only used by the summarization extra test and did not carry independent behavior.
+- Counter-argument: keeping `_eino_source` would allow producer-level filtering if summarization emits many event types later.
+- Verdict: Fix now. Add a producer key later only when a concrete multi-producer query requires it.
+
+### Stage 2: Attack Review
+
+| # | Severity | Issue | Test Name | Status |
+|---|----------|-------|-----------|--------|
+| 1 | OK | Summarization `messages_replaced` must persist `_eino_reason`, must not seed `_eino_source`, and must still allow provider-added business metadata. | `TestAttack_SummarizationMessagesReplacedUsesReasonOnly` | Passing |
+
+Attack verification:
+
+- `go test ./adk/middlewares/summarization -run 'TestAttack_SummarizationMessagesReplacedUsesReasonOnly' -v -count=1`: pass.
+
+### Stage 3: Test Audit
+
+| Priority | Issue | Count | Estimated LOC Impact |
+|----------|-------|-------|----------------------|
+| None | The changed test has exact assertions for absence, exact reason value, and provider-added metadata. | 0 | 0 |
+
+Coverage:
+
+- `go test ./adk/middlewares/summarization -coverprofile=pr1153_summarization_reason_cover.out -count=1 && go tool cover -func=pr1153_summarization_reason_cover.out`: pass, 87.5% statement coverage.
+- `BeforeModelRewriteState`: 92.3%.
+
+### Verification
+
+- `go test ./...`: pass.
+- `go test ./adk/middlewares/summarization -count=1`: pass.
+- `go test ./adk ./adk/session -run 'Test.*SessionEvent.*Extra|Test.*EventExtraProvider|TestAttack_SummarizationMessagesReplacedUsesReasonOnly' -count=1`: pass.
+- `go build ./...`: pass.
+
+### Cumulative Follow-Up File Change List
+
+| File | Stage(s) | Summary of Changes |
+|------|----------|--------------------|
+| `adk/middlewares/summarization/summarization.go` | 1 | Seed only `_eino_reason=context_summarized` on durable summarization replacement events. |
+| `adk/middlewares/summarization/summarization_test.go` | 2, 3 | Renamed the metadata test as an attack test and asserted `_eino_source` is absent while provider extension still works. |

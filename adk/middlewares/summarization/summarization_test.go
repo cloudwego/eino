@@ -80,7 +80,7 @@ func TestNew(t *testing.T) {
 	})
 }
 
-func TestSummarizationMessagesReplacedEventExtra(t *testing.T) {
+func TestAttack_SummarizationMessagesReplacedUsesReasonOnly(t *testing.T) {
 	ctx := context.Background()
 	mw, err := New(ctx, &Config{
 		Model:   &fixedSummaryTestModel{content: "summary"},
@@ -104,7 +104,7 @@ func TestSummarizationMessagesReplacedEventExtra(t *testing.T) {
 		SessionStore: store,
 		SessionConfig: &adk.SessionConfig[*schema.Message]{
 			EventExtraProvider: func(_ context.Context, event *adk.SessionEvent[*schema.Message]) (map[string]any, error) {
-				if event.Kind == adk.SessionEventMessagesReplaced && event.Extra["_eino_source"] == "summarization" {
+				if event.Kind == adk.SessionEventMessagesReplaced && event.Extra["_eino_reason"] == "context_summarized" {
 					return map[string]any{"reason": "business_summary"}, nil
 				}
 				return nil, nil
@@ -130,7 +130,7 @@ func TestSummarizationMessagesReplacedEventExtra(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, res.Events, 1)
 	extra := res.Events[0].Extra
-	assert.Equal(t, "summarization", extra["_eino_source"])
+	assert.NotContains(t, extra, "_eino_source")
 	assert.Equal(t, "context_summarized", extra["_eino_reason"])
 	assert.Equal(t, "business_summary", extra["reason"])
 }
