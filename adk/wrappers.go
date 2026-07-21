@@ -306,7 +306,7 @@ func sendSessionTimelineEvent[M MessageType](ctx context.Context, se *SessionEve
 	if !execCtx.timelineEvents && !execCtx.internalTimelineEvents {
 		return
 	}
-	stampSessionEventTurnID(se, sessionEventTurnIDFromContext[M](ctx))
+	stampSessionEventTurnID(se, sessionEventContextFromContext[M](ctx).turnID)
 	if se.Timestamp.IsZero() {
 		se.Timestamp = newEventTimestamp()
 	}

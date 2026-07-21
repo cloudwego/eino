@@ -587,8 +587,7 @@ func typedRunnerRunImpl[M MessageType](a TypedAgent[M], enableStreaming bool, st
 	}
 
 	if sessionState.enabled {
-		ctx = contextWithSessionEventIDGenerator[M](ctx, sessionState.sessionConfig.EventIDGenerator)
-		ctx = contextWithSessionEventTurnID[M](ctx, sessionState.turnID)
+		ctx = contextWithSessionEventContext[M](ctx, sessionState.sessionConfig.EventIDGenerator, sessionState.turnID)
 	}
 
 	var zero M
@@ -700,8 +699,7 @@ func typedRunnerResumeInternalImpl[M MessageType](a TypedAgent[M], store CheckPo
 	AddSessionValues(ctx, o.sessionValues)
 
 	if sessionState.enabled {
-		ctx = contextWithSessionEventIDGenerator[M](ctx, sessionState.sessionConfig.EventIDGenerator)
-		ctx = contextWithSessionEventTurnID[M](ctx, sessionState.turnID)
+		ctx = contextWithSessionEventContext[M](ctx, sessionState.sessionConfig.EventIDGenerator, sessionState.turnID)
 	}
 
 	if len(resumeData) > 0 {
