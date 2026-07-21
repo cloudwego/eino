@@ -130,7 +130,7 @@ func (s *FileStore[M]) AppendEvents(_ context.Context, sessionID string, events 
 		if normalizeErr := adk.NormalizeSessionEventKind(e); normalizeErr != nil {
 			return normalizeErr
 		}
-		if validateErr := adk.ValidateSessionEventExtra(e); validateErr != nil {
+		if validateErr := adk.ValidateSessionEventMetadata(e); validateErr != nil {
 			return validateErr
 		}
 		data, marshalErr := s.serializer.Marshal(e)

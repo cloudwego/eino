@@ -103,8 +103,8 @@ func TestAttack_SummarizationMessagesReplacedUsesReasonOnly(t *testing.T) {
 		SessionID:    "summary-extra-session",
 		SessionStore: store,
 		SessionConfig: &adk.SessionConfig[*schema.Message]{
-			EventExtraProvider: func(_ context.Context, event *adk.SessionEvent[*schema.Message]) (map[string]any, error) {
-				if event.Kind == adk.SessionEventMessagesReplaced && event.Extra["_eino_reason"] == "context_summarized" {
+			EventMetadataProvider: func(_ context.Context, event *adk.SessionEvent[*schema.Message]) (map[string]any, error) {
+				if event.Kind == adk.SessionEventMessagesReplaced && event.Metadata["_eino_reason"] == "context_summarized" {
 					return map[string]any{"reason": "business_summary"}, nil
 				}
 				return nil, nil
@@ -129,7 +129,7 @@ func TestAttack_SummarizationMessagesReplacedUsesReasonOnly(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Len(t, res.Events, 1)
-	extra := res.Events[0].Extra
+	extra := res.Events[0].Metadata
 	assert.NotContains(t, extra, "_eino_source")
 	assert.Equal(t, "context_summarized", extra["_eino_reason"])
 	assert.Equal(t, "business_summary", extra["reason"])

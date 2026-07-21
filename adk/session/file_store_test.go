@@ -98,14 +98,14 @@ func TestFileStoreWritesHumanReadableEvlogLines(t *testing.T) {
 	assert.Equal(t, "session.status_idle", parts1[1])
 }
 
-func TestFileStoreSessionEventExtraRoundTripKeepsThreeColumnFormat(t *testing.T) {
+func TestFileStoreSessionEventMetadataRoundTripKeepsThreeColumnFormat(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
 	store, err := session.NewFileStore[*schema.Message](dir, nil)
 	require.NoError(t, err)
 
 	event := testMessageEvent("extra-1", "one")
-	event.Extra = map[string]any{
+	event.Metadata = map[string]any{
 		"reason": "audit",
 		"nested": map[string]any{"items": []any{"a", "b"}},
 	}
@@ -116,8 +116,8 @@ func TestFileStoreSessionEventExtraRoundTripKeepsThreeColumnFormat(t *testing.T)
 	res, err := reopened.LoadEvents(ctx, "s", &adk.LoadSessionEventsRequest{})
 	require.NoError(t, err)
 	require.Len(t, res.Events, 1)
-	assert.Equal(t, "audit", res.Events[0].Extra["reason"])
-	assert.Equal(t, "a", res.Events[0].Extra["nested"].(map[string]any)["items"].([]any)[0])
+	assert.Equal(t, "audit", res.Events[0].Metadata["reason"])
+	assert.Equal(t, "a", res.Events[0].Metadata["nested"].(map[string]any)["items"].([]any)[0])
 
 	data, err := os.ReadFile(filepath.Join(dir, url.PathEscape("s")+".evlog"))
 	require.NoError(t, err)

@@ -6111,7 +6111,7 @@ func TestAttack_SessionRollbackEventMissingOwnEventID(t *testing.T) {
 	t.Logf("correctly rejected rollback with empty own EventID: %v", err)
 }
 
-func TestSessionEventExtraValidation(t *testing.T) {
+func TestSessionEventMetadataValidation(t *testing.T) {
 	type boolAlias bool
 	type intAlias int
 	type floatAlias float64
@@ -6122,7 +6122,7 @@ func TestSessionEventExtraValidation(t *testing.T) {
 	valid := &SessionEvent[*schema.Message]{
 		Kind:    SessionEventMessage,
 		Message: schema.UserMessage("hello"),
-		Extra: map[string]any{
+		Metadata: map[string]any{
 			"nil":    nil,
 			"bool":   true,
 			"string": "ok",
@@ -6134,10 +6134,10 @@ func TestSessionEventExtraValidation(t *testing.T) {
 		},
 	}
 	require.NoError(t, ValidateEmittedSessionEventKind(valid))
-	err := ValidateSessionEventExtra[*schema.Message](nil)
+	err := ValidateSessionEventMetadata[*schema.Message](nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "nil session event")
-	assert.Equal(t, 1, countActiveSessionEventPayloads(valid), "Extra must not count as a semantic payload")
+	assert.Equal(t, 1, countActiveSessionEventPayloads(valid), "Metadata must not count as a semantic payload")
 
 	_, err = snapshotSessionEvent(valid)
 	require.NoError(t, err)
@@ -6166,56 +6166,56 @@ func TestSessionEventExtraValidation(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			err := ValidateSessionEventExtra(&SessionEvent[*schema.Message]{Extra: tc.extra})
+			err := ValidateSessionEventMetadata(&SessionEvent[*schema.Message]{Metadata: tc.extra})
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), "bad")
 		})
 	}
 }
 
-func TestSessionEventExtraProviderMergeAndMutationGuard(t *testing.T) {
+func TestSessionEventMetadataProviderMergeAndMutationGuard(t *testing.T) {
 	ctx := context.Background()
-	var generatorSawExtra bool
+	var generatorSawMetadata bool
 	baseNested := map[string]any{"inner": "base"}
 	baseSlice := []any{"seed", map[string]any{"leaf": "base"}}
 	providerNested := map[string]any{"inner": "provider"}
 	providerSlice := []any{"provider", map[string]any{"leaf": "provider"}}
 	event := &SessionEvent[*schema.Message]{
-		Kind:    SessionEventMessage,
-		Extra:   map[string]any{"reason": "seed", "_eino_source": "framework", "base_nested": baseNested, "base_slice": baseSlice},
-		Message: schema.UserMessage("hello"),
+		Kind:     SessionEventMessage,
+		Metadata: map[string]any{"reason": "seed", "_eino_source": "framework", "base_nested": baseNested, "base_slice": baseSlice},
+		Message:  schema.UserMessage("hello"),
 	}
 	err := prepareSessionEventEnvelope(ctx, event,
 		func(_ context.Context, draft *SessionEvent[*schema.Message]) (string, error) {
-			generatorSawExtra = draft.Extra["reason"] == "provider" &&
-				draft.Extra["_eino_source"] == "framework" &&
-				draft.Extra["view_only"] == nil &&
+			generatorSawMetadata = draft.Metadata["reason"] == "provider" &&
+				draft.Metadata["_eino_source"] == "framework" &&
+				draft.Metadata["view_only"] == nil &&
 				!draft.Timestamp.IsZero()
 			return "event-1", nil
 		},
 		func(_ context.Context, view *SessionEvent[*schema.Message]) (map[string]any, error) {
 			require.Empty(t, view.EventID)
 			require.False(t, view.Timestamp.IsZero())
-			view.Extra["view_only"] = true
+			view.Metadata["view_only"] = true
 			return map[string]any{"reason": "provider", "tenant_id": "t1", "provider_nested": providerNested, "provider_slice": providerSlice}, nil
 		},
 		sessionEventEnvelopeOptions{},
 	)
 	require.NoError(t, err)
-	assert.True(t, generatorSawExtra)
+	assert.True(t, generatorSawMetadata)
 	assert.Equal(t, "event-1", event.EventID)
-	assert.Equal(t, "provider", event.Extra["reason"])
-	assert.Equal(t, "framework", event.Extra["_eino_source"])
-	assert.Equal(t, "t1", event.Extra["tenant_id"])
-	assert.NotContains(t, event.Extra, "view_only")
+	assert.Equal(t, "provider", event.Metadata["reason"])
+	assert.Equal(t, "framework", event.Metadata["_eino_source"])
+	assert.Equal(t, "t1", event.Metadata["tenant_id"])
+	assert.NotContains(t, event.Metadata, "view_only")
 	baseNested["inner"] = "mutated"
 	baseSlice[1].(map[string]any)["leaf"] = "mutated"
 	providerNested["inner"] = "mutated"
 	providerSlice[1].(map[string]any)["leaf"] = "mutated"
-	assert.Equal(t, "base", event.Extra["base_nested"].(map[string]any)["inner"])
-	assert.Equal(t, "base", event.Extra["base_slice"].([]any)[1].(map[string]any)["leaf"])
-	assert.Equal(t, "provider", event.Extra["provider_nested"].(map[string]any)["inner"])
-	assert.Equal(t, "provider", event.Extra["provider_slice"].([]any)[1].(map[string]any)["leaf"])
+	assert.Equal(t, "base", event.Metadata["base_nested"].(map[string]any)["inner"])
+	assert.Equal(t, "base", event.Metadata["base_slice"].([]any)[1].(map[string]any)["leaf"])
+	assert.Equal(t, "provider", event.Metadata["provider_nested"].(map[string]any)["inner"])
+	assert.Equal(t, "provider", event.Metadata["provider_slice"].([]any)[1].(map[string]any)["leaf"])
 
 	t.Run("rejects framework provider keys", func(t *testing.T) {
 		ev := &SessionEvent[*schema.Message]{Kind: SessionEventMessage, Message: schema.UserMessage("hello")}
@@ -6253,21 +6253,21 @@ func TestSessionEventExtraProviderMergeAndMutationGuard(t *testing.T) {
 		assert.Empty(t, ev.EventID)
 	})
 
-	t.Run("rejects invalid existing extra before provider", func(t *testing.T) {
+	t.Run("rejects invalid existing metadata before provider", func(t *testing.T) {
 		ev := &SessionEvent[*schema.Message]{
-			Kind:    SessionEventMessage,
-			Extra:   map[string]any{"bad": []string{"x"}},
-			Message: schema.UserMessage("hello"),
+			Kind:     SessionEventMessage,
+			Metadata: map[string]any{"bad": []string{"x"}},
+			Message:  schema.UserMessage("hello"),
 		}
 		err := prepareSessionEventEnvelope(ctx, ev, nil, func(context.Context, *SessionEvent[*schema.Message]) (map[string]any, error) {
-			t.Fatal("provider must not run when existing Extra is invalid")
+			t.Fatal("provider must not run when existing Metadata is invalid")
 			return nil, nil
 		}, sessionEventEnvelopeOptions{})
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "bad")
 	})
 
-	t.Run("rejects invalid provider extra value", func(t *testing.T) {
+	t.Run("rejects invalid provider metadata value", func(t *testing.T) {
 		ev := &SessionEvent[*schema.Message]{Kind: SessionEventMessage, Message: schema.UserMessage("hello")}
 		err := prepareSessionEventEnvelope(ctx, ev, nil, func(context.Context, *SessionEvent[*schema.Message]) (map[string]any, error) {
 			return map[string]any{"bad": math.NaN()}, nil
@@ -6289,7 +6289,7 @@ func TestSessionEventExtraProviderMergeAndMutationGuard(t *testing.T) {
 
 	t.Run("nil event is no-op", func(t *testing.T) {
 		require.NoError(t, prepareSessionEventEnvelope[*schema.Message](ctx, nil, nil, nil, sessionEventEnvelopeOptions{}))
-		require.NoError(t, applySessionEventExtraProvider[*schema.Message](ctx, nil, nil))
+		require.NoError(t, applySessionEventMetadataProvider[*schema.Message](ctx, nil, nil))
 	})
 }
 
@@ -6320,11 +6320,11 @@ func TestSessionEventContextMergesGeneratorProviderAndTurnID(t *testing.T) {
 	stampSessionEventTurnID(event, sc.turnID)
 	require.NoError(t, prepareSessionEventEnvelope(context.Background(), event, sc.generator, sc.provider, sessionEventEnvelopeOptions{}))
 	assert.Equal(t, "turn-2", event.TurnID)
-	assert.Equal(t, "test", event.Extra["reason"])
+	assert.Equal(t, "test", event.Metadata["reason"])
 	assert.Equal(t, "event-1", event.EventID)
 }
 
-func TestRunnerSessionEventExtraProviderDecoratesPreparationEvents(t *testing.T) {
+func TestRunnerSessionEventMetadataProviderDecoratesPreparationEvents(t *testing.T) {
 	ctx := context.Background()
 	store := newSessionHelperStore()
 	var providerCalls int64
@@ -6334,12 +6334,12 @@ func TestRunnerSessionEventExtraProviderDecoratesPreparationEvents(t *testing.T)
 		SessionID:    "provider-session",
 		SessionStore: store,
 		SessionConfig: &SessionConfig[*schema.Message]{
-			EventExtraProvider: func(_ context.Context, event *SessionEvent[*schema.Message]) (map[string]any, error) {
+			EventMetadataProvider: func(_ context.Context, event *SessionEvent[*schema.Message]) (map[string]any, error) {
 				atomic.AddInt64(&providerCalls, 1)
 				return map[string]any{"provider_kind": string(event.Kind)}, nil
 			},
 			EventIDGenerator: func(_ context.Context, event *SessionEvent[*schema.Message]) (string, error) {
-				if event.Extra["provider_kind"] == string(event.Kind) {
+				if event.Metadata["provider_kind"] == string(event.Kind) {
 					atomic.AddInt64(&generatorSawProvider, 1)
 				}
 				return DefaultSessionEventIDGenerator[*schema.Message](context.Background(), event)
@@ -6359,7 +6359,7 @@ func TestRunnerSessionEventExtraProviderDecoratesPreparationEvents(t *testing.T)
 	events := decodeStoredSessionEvents(t, store.events)
 	var sawRunning, sawInput bool
 	for _, event := range events {
-		if event.Extra["provider_kind"] != string(event.Kind) {
+		if event.Metadata["provider_kind"] != string(event.Kind) {
 			continue
 		}
 		switch event.Kind {
@@ -6377,161 +6377,173 @@ func TestRunnerSessionEventExtraProviderDecoratesPreparationEvents(t *testing.T)
 	assert.GreaterOrEqual(t, atomic.LoadInt64(&generatorSawProvider), int64(3))
 }
 
-func TestRunnerSessionEventExtraProviderErrorFailsBeforeAppend(t *testing.T) {
+func TestRunnerSessionEventMetadataProviderRunnerBranches(t *testing.T) {
 	ctx := context.Background()
-	store := newSessionHelperStore()
-	providerErr := errors.New("provider failed")
-	runner := NewRunner(ctx, RunnerConfig{
-		Agent:        &runnerSessionAgent{name: "provider-error-agent"},
-		SessionID:    "provider-error-session",
-		SessionStore: store,
-		SessionConfig: &SessionConfig[*schema.Message]{
-			EventExtraProvider: func(context.Context, *SessionEvent[*schema.Message]) (map[string]any, error) {
-				return nil, providerErr
-			},
+	drain := func(iter *AsyncIterator[*AgentEvent]) []*AgentEvent {
+		var events []*AgentEvent
+		for {
+			event, ok := iter.Next()
+			if !ok {
+				return events
+			}
+			events = append(events, event)
+		}
+	}
+	errorCases := []struct {
+		name              string
+		err               error
+		errOnInput        bool
+		wantRunningStored bool
+	}{
+		{
+			name: "provider error fails before running append",
+			err:  errors.New("provider failed"),
 		},
-	})
-
-	iter := runner.Query(ctx, "hello")
-	event, ok := iter.Next()
-	require.True(t, ok)
-	require.ErrorIs(t, event.Err, providerErr)
-	_, ok = iter.Next()
-	assert.False(t, ok)
-	assert.Empty(t, store.events, "provider error on running event must fail before persistence")
-}
-
-func TestRunnerSessionEventExtraProviderErrorOnInputFailsBeforeInputAppend(t *testing.T) {
-	ctx := context.Background()
-	store := newSessionHelperStore()
-	providerErr := errors.New("input provider failed")
-	runner := NewRunner(ctx, RunnerConfig{
-		Agent:        &runnerSessionAgent{name: "provider-input-error-agent"},
-		SessionID:    "provider-input-error-session",
-		SessionStore: store,
-		SessionConfig: &SessionConfig[*schema.Message]{
-			EventExtraProvider: func(_ context.Context, event *SessionEvent[*schema.Message]) (map[string]any, error) {
-				if event.Kind == SessionEventMessage && event.Message != nil && event.Message.Role == schema.User {
-					return nil, providerErr
-				}
-				return map[string]any{"provider_kind": string(event.Kind)}, nil
-			},
+		{
+			name:              "provider error fails before input append",
+			err:               errors.New("input provider failed"),
+			errOnInput:        true,
+			wantRunningStored: true,
 		},
-	})
-
-	iter := runner.Query(ctx, "hello")
-	event, ok := iter.Next()
-	require.True(t, ok)
-	require.ErrorIs(t, event.Err, providerErr)
-	_, ok = iter.Next()
-	assert.False(t, ok)
-
-	events := decodeStoredSessionEvents(t, store.events)
-	require.Len(t, events, 1)
-	assert.Equal(t, SessionEventSessionStatusRunning, events[0].Kind)
-}
-
-func TestRunnerSessionEventExtraProviderRejectsPreassignedInvalidExtra(t *testing.T) {
-	ctx := context.Background()
-	store := newSessionHelperStore()
-	runner := NewRunner(ctx, RunnerConfig{
-		Agent: &runnerSingleEventAgent{
-			name: "preassigned-invalid-extra-agent",
-			event: &AgentEvent{
-				SessionEventVariant: &SessionEventVariant[*schema.Message]{
-					Event: &SessionEvent[*schema.Message]{
-						EventID: "preassigned-event",
-						Kind:    SessionEventMessage,
-						Extra:   map[string]any{"bad": []string{"x"}},
-						Message: schema.AssistantMessage("bad extra", nil),
+	}
+	for _, tc := range errorCases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := newSessionHelperStore()
+			runner := NewRunner(ctx, RunnerConfig{
+				Agent:        &runnerSessionAgent{name: tc.name},
+				SessionID:    tc.name,
+				SessionStore: store,
+				SessionConfig: &SessionConfig[*schema.Message]{
+					EventMetadataProvider: func(_ context.Context, event *SessionEvent[*schema.Message]) (map[string]any, error) {
+						if !tc.errOnInput {
+							return nil, tc.err
+						}
+						if event.Kind == SessionEventMessage && event.Message != nil && event.Message.Role == schema.User {
+							return nil, tc.err
+						}
+						return map[string]any{"provider_kind": string(event.Kind)}, nil
 					},
 				},
+			})
+
+			events := drain(runner.Query(ctx, "hello"))
+			require.Len(t, events, 1)
+			require.ErrorIs(t, events[0].Err, tc.err)
+			if tc.wantRunningStored {
+				events := decodeStoredSessionEvents(t, store.events)
+				require.Len(t, events, 1)
+				assert.Equal(t, SessionEventSessionStatusRunning, events[0].Kind)
+			} else {
+				assert.Empty(t, store.events, "provider error on running event must fail before persistence")
+			}
+		})
+	}
+
+	tests := []struct {
+		name string
+		run  func(t *testing.T)
+	}{
+		{
+			name: "preassigned invalid metadata is rejected",
+			run: func(t *testing.T) {
+				store := newSessionHelperStore()
+				runner := NewRunner(ctx, RunnerConfig{
+					Agent: &runnerSingleEventAgent{
+						name: "preassigned-invalid-metadata-agent",
+						event: &AgentEvent{
+							SessionEventVariant: &SessionEventVariant[*schema.Message]{
+								Event: &SessionEvent[*schema.Message]{
+									EventID:  "preassigned-event",
+									Kind:     SessionEventMessage,
+									Metadata: map[string]any{"bad": []string{"x"}},
+									Message:  schema.AssistantMessage("bad metadata", nil),
+								},
+							},
+						},
+					},
+					SessionID:    "preassigned-invalid-metadata-session",
+					SessionStore: store,
+				})
+
+				liveEvents := drain(runner.Query(ctx, "hello", WithTimelineEvents()))
+				var sawInvalid bool
+				for _, event := range liveEvents {
+					if event.SessionEventVariant != nil && event.SessionEventVariant.Event != nil &&
+						event.SessionEventVariant.Event.EventID == "preassigned-event" {
+						require.Error(t, event.Err)
+						assert.Contains(t, event.Err.Error(), "bad")
+						sawInvalid = true
+					}
+				}
+				assert.True(t, sawInvalid)
+
+				events := decodeStoredSessionEvents(t, store.events)
+				var persistedInvalid bool
+				for _, event := range events {
+					if event.EventID == "preassigned-event" {
+						persistedInvalid = true
+					}
+				}
+				assert.False(t, persistedInvalid)
 			},
 		},
-		SessionID:    "preassigned-invalid-extra-session",
-		SessionStore: store,
-	})
+		{
+			name: "output fallback event is decorated before id generation",
+			run: func(t *testing.T) {
+				store := newSessionHelperStore()
+				var generatorSawMetadata bool
+				runner := NewRunner(ctx, RunnerConfig{
+					Agent: &runnerSingleEventAgent{
+						name: "output-fallback-metadata-agent",
+						event: &AgentEvent{
+							Output: &AgentOutput{
+								MessageOutput: &MessageVariant{Message: schema.AssistantMessage("fallback", nil), Role: schema.Assistant},
+							},
+						},
+					},
+					SessionID:    "output-fallback-metadata-session",
+					SessionStore: store,
+					SessionConfig: &SessionConfig[*schema.Message]{
+						EventMetadataProvider: func(_ context.Context, event *SessionEvent[*schema.Message]) (map[string]any, error) {
+							if event.Kind == SessionEventMessage && event.Message != nil && event.Message.Role == schema.Assistant {
+								return map[string]any{"fallback_output": event.Message.Content}, nil
+							}
+							return nil, nil
+						},
+						EventIDGenerator: func(_ context.Context, event *SessionEvent[*schema.Message]) (string, error) {
+							if event.Kind == SessionEventMessage && event.Message != nil &&
+								event.Message.Role == schema.Assistant && event.Metadata["fallback_output"] == "fallback" {
+								generatorSawMetadata = true
+							}
+							return DefaultSessionEventIDGenerator[*schema.Message](context.Background(), event)
+						},
+					},
+				})
 
-	iter := runner.Query(ctx, "hello", WithTimelineEvents())
-	var sawInvalid bool
-	for {
-		event, ok := iter.Next()
-		if !ok {
-			break
-		}
-		if event.SessionEventVariant != nil && event.SessionEventVariant.Event != nil &&
-			event.SessionEventVariant.Event.EventID == "preassigned-event" {
-			require.Error(t, event.Err)
-			assert.Contains(t, event.Err.Error(), "bad")
-			sawInvalid = true
-		}
-	}
-	assert.True(t, sawInvalid)
+				for _, event := range drain(runner.Query(ctx, "hello", WithTimelineEvents())) {
+					require.NoError(t, event.Err)
+				}
+				assert.True(t, generatorSawMetadata)
 
-	events := decodeStoredSessionEvents(t, store.events)
-	var persistedInvalid bool
-	for _, event := range events {
-		if event.EventID == "preassigned-event" {
-			persistedInvalid = true
-		}
+				events := decodeStoredSessionEvents(t, store.events)
+				var assistant *SessionEvent[*schema.Message]
+				for _, event := range events {
+					if event.Kind == SessionEventMessage && event.Message != nil && event.Message.Role == schema.Assistant {
+						assistant = event
+					}
+				}
+				require.NotNil(t, assistant)
+				assert.Equal(t, "fallback", assistant.Metadata["fallback_output"])
+			},
+		},
 	}
-	assert.False(t, persistedInvalid)
+
+	for _, tt := range tests {
+		t.Run(tt.name, tt.run)
+	}
 }
 
-func TestRunnerSessionEventExtraProviderDecoratesOutputFallbackEvent(t *testing.T) {
-	ctx := context.Background()
-	store := newSessionHelperStore()
-	var generatorSawExtra bool
-	runner := NewRunner(ctx, RunnerConfig{
-		Agent: &runnerSingleEventAgent{
-			name: "output-fallback-extra-agent",
-			event: &AgentEvent{
-				Output: &AgentOutput{
-					MessageOutput: &MessageVariant{Message: schema.AssistantMessage("fallback", nil), Role: schema.Assistant},
-				},
-			},
-		},
-		SessionID:    "output-fallback-extra-session",
-		SessionStore: store,
-		SessionConfig: &SessionConfig[*schema.Message]{
-			EventExtraProvider: func(_ context.Context, event *SessionEvent[*schema.Message]) (map[string]any, error) {
-				if event.Kind == SessionEventMessage && event.Message != nil && event.Message.Role == schema.Assistant {
-					return map[string]any{"fallback_output": event.Message.Content}, nil
-				}
-				return nil, nil
-			},
-			EventIDGenerator: func(_ context.Context, event *SessionEvent[*schema.Message]) (string, error) {
-				if event.Kind == SessionEventMessage && event.Message != nil &&
-					event.Message.Role == schema.Assistant && event.Extra["fallback_output"] == "fallback" {
-					generatorSawExtra = true
-				}
-				return DefaultSessionEventIDGenerator[*schema.Message](context.Background(), event)
-			},
-		},
-	})
-
-	iter := runner.Query(ctx, "hello", WithTimelineEvents())
-	for {
-		event, ok := iter.Next()
-		if !ok {
-			break
-		}
-		require.NoError(t, event.Err)
-	}
-	assert.True(t, generatorSawExtra)
-
-	events := decodeStoredSessionEvents(t, store.events)
-	var assistant *SessionEvent[*schema.Message]
-	for _, event := range events {
-		if event.Kind == SessionEventMessage && event.Message != nil && event.Message.Role == schema.Assistant {
-			assistant = event
-		}
-	}
-	require.NotNil(t, assistant)
-	assert.Equal(t, "fallback", assistant.Extra["fallback_output"])
-}
-
-func TestRunnerSessionEventExtraProviderDecoratesResumeRequest(t *testing.T) {
+func TestRunnerSessionEventMetadataProviderDecoratesResumeRequest(t *testing.T) {
 	ctx := context.Background()
 	store := newSessionHelperStore()
 	sid := "provider-resume-session"
@@ -6544,11 +6556,11 @@ func TestRunnerSessionEventExtraProviderDecoratesResumeRequest(t *testing.T) {
 	require.NoError(t, store.Set(ctx, sessionRunnerCheckpointID(sid), cpBytes))
 
 	state, _, err := prepareRunnerSessionResume[*schema.Message](ctx, store, sid, store, &SessionConfig[*schema.Message]{
-		EventExtraProvider: func(_ context.Context, event *SessionEvent[*schema.Message]) (map[string]any, error) {
+		EventMetadataProvider: func(_ context.Context, event *SessionEvent[*schema.Message]) (map[string]any, error) {
 			return map[string]any{"provider_kind": string(event.Kind)}, nil
 		},
 		EventIDGenerator: func(_ context.Context, event *SessionEvent[*schema.Message]) (string, error) {
-			if event.Extra["provider_kind"] != string(event.Kind) {
+			if event.Metadata["provider_kind"] != string(event.Kind) {
 				return "", errors.New("generator did not see provider metadata")
 			}
 			return DefaultSessionEventIDGenerator[*schema.Message](context.Background(), event)
@@ -6565,13 +6577,13 @@ func TestRunnerSessionEventExtraProviderDecoratesResumeRequest(t *testing.T) {
 	for _, event := range events {
 		if event.Kind == resumeKind {
 			sawResume = true
-			assert.Equal(t, string(resumeKind), event.Extra["provider_kind"])
+			assert.Equal(t, string(resumeKind), event.Metadata["provider_kind"])
 		}
 	}
 	assert.True(t, sawResume, "provider must decorate pre-injection resume request event")
 }
 
-func TestRunnerSessionEventExtraProviderDecoratesStreamingFinalMessage(t *testing.T) {
+func TestRunnerSessionEventMetadataProviderDecoratesStreamingFinalMessage(t *testing.T) {
 	ctx := context.Background()
 	t.Run("complete stream", func(t *testing.T) {
 		store := newSessionHelperStore()
@@ -6587,7 +6599,7 @@ func TestRunnerSessionEventExtraProviderDecoratesStreamingFinalMessage(t *testin
 			SessionID:       "provider-stream-session",
 			SessionStore:    store,
 			SessionConfig: &SessionConfig[*schema.Message]{
-				EventExtraProvider: func(_ context.Context, event *SessionEvent[*schema.Message]) (map[string]any, error) {
+				EventMetadataProvider: func(_ context.Context, event *SessionEvent[*schema.Message]) (map[string]any, error) {
 					if event.Kind == SessionEventMessage && event.Message != nil && event.Message.Role == schema.Assistant {
 						return map[string]any{"stream_content": event.Message.Content}, nil
 					}
@@ -6625,7 +6637,7 @@ func TestRunnerSessionEventExtraProviderDecoratesStreamingFinalMessage(t *testin
 		}
 		require.NotNil(t, persisted)
 		assert.Equal(t, reservedID, persisted.EventID, "stream final persistence must preserve reserved event id")
-		assert.Equal(t, "hello world", persisted.Extra["stream_content"])
+		assert.Equal(t, "hello world", persisted.Metadata["stream_content"])
 	})
 
 	t.Run("incomplete stream", func(t *testing.T) {
@@ -6640,7 +6652,7 @@ func TestRunnerSessionEventExtraProviderDecoratesStreamingFinalMessage(t *testin
 			SessionID:       "provider-incomplete-stream-session",
 			SessionStore:    store,
 			SessionConfig: &SessionConfig[*schema.Message]{
-				EventExtraProvider: func(_ context.Context, event *SessionEvent[*schema.Message]) (map[string]any, error) {
+				EventMetadataProvider: func(_ context.Context, event *SessionEvent[*schema.Message]) (map[string]any, error) {
 					if event.Kind == SessionEventMessageStreamIncomplete {
 						return map[string]any{"stream_incomplete": true}, nil
 					}
@@ -6670,13 +6682,13 @@ func TestRunnerSessionEventExtraProviderDecoratesStreamingFinalMessage(t *testin
 			}
 		}
 		require.NotNil(t, incomplete)
-		streamIncomplete, ok := incomplete.Extra["stream_incomplete"].(bool)
+		streamIncomplete, ok := incomplete.Metadata["stream_incomplete"].(bool)
 		require.True(t, ok)
 		assert.True(t, streamIncomplete)
 	})
 }
 
-func TestAttack_StreamModelReservationGeneratorSeesProviderExtra(t *testing.T) {
+func TestAttack_StreamModelReservationGeneratorSeesProviderMetadata(t *testing.T) {
 	ctx := context.Background()
 	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
 		Name:        "stream-provider-reservation-agent",
@@ -6695,7 +6707,7 @@ func TestAttack_StreamModelReservationGeneratorSeesProviderExtra(t *testing.T) {
 		SessionID:       "stream-provider-reservation-session",
 		SessionStore:    store,
 		SessionConfig: &SessionConfig[*schema.Message]{
-			EventExtraProvider: func(_ context.Context, event *SessionEvent[*schema.Message]) (map[string]any, error) {
+			EventMetadataProvider: func(_ context.Context, event *SessionEvent[*schema.Message]) (map[string]any, error) {
 				if event.Kind == SessionEventMessage && isNilMessage(event.Message) {
 					return map[string]any{"reservation": "model_stream"}, nil
 				}
@@ -6703,7 +6715,7 @@ func TestAttack_StreamModelReservationGeneratorSeesProviderExtra(t *testing.T) {
 			},
 			EventIDGenerator: func(_ context.Context, event *SessionEvent[*schema.Message]) (string, error) {
 				if event.Kind == SessionEventMessage && isNilMessage(event.Message) &&
-					event.Extra["reservation"] == "model_stream" {
+					event.Metadata["reservation"] == "model_stream" {
 					atomic.AddInt64(&generatorSawReservation, 1)
 				}
 				return DefaultSessionEventIDGenerator[*schema.Message](context.Background(), event)
@@ -6728,7 +6740,7 @@ func TestAttack_StreamModelReservationGeneratorSeesProviderExtra(t *testing.T) {
 	assert.Equal(t, int64(1), atomic.LoadInt64(&generatorSawReservation))
 }
 
-func TestAttack_StreamToolReservationGeneratorSeesProviderExtra(t *testing.T) {
+func TestAttack_StreamToolReservationGeneratorSeesProviderMetadata(t *testing.T) {
 	ctx := context.Background()
 	streamTool := &streamableTestTool{name: "provider_stream_tool", result: "stream chunk"}
 	mockModel := &mockToolCallingModel{toolCallName: "provider_stream_tool"}
@@ -6749,7 +6761,7 @@ func TestAttack_StreamToolReservationGeneratorSeesProviderExtra(t *testing.T) {
 		SessionID:    "stream-tool-provider-reservation-session",
 		SessionStore: store,
 		SessionConfig: &SessionConfig[*schema.Message]{
-			EventExtraProvider: func(_ context.Context, event *SessionEvent[*schema.Message]) (map[string]any, error) {
+			EventMetadataProvider: func(_ context.Context, event *SessionEvent[*schema.Message]) (map[string]any, error) {
 				if event.Kind == SessionEventMessage && isNilMessage(event.Message) {
 					return map[string]any{"reservation": "tool_stream"}, nil
 				}
@@ -6757,7 +6769,7 @@ func TestAttack_StreamToolReservationGeneratorSeesProviderExtra(t *testing.T) {
 			},
 			EventIDGenerator: func(_ context.Context, event *SessionEvent[*schema.Message]) (string, error) {
 				if event.Kind == SessionEventMessage && isNilMessage(event.Message) &&
-					event.Extra["reservation"] == "tool_stream" {
+					event.Metadata["reservation"] == "tool_stream" {
 					atomic.AddInt64(&generatorSawReservation, 1)
 				}
 				return DefaultSessionEventIDGenerator[*schema.Message](context.Background(), event)
@@ -6782,7 +6794,7 @@ func TestAttack_StreamToolReservationGeneratorSeesProviderExtra(t *testing.T) {
 	assert.Equal(t, int64(1), atomic.LoadInt64(&generatorSawReservation))
 }
 
-func TestAttack_EnhancedStreamToolReservationGeneratorSeesProviderExtra(t *testing.T) {
+func TestAttack_EnhancedStreamToolReservationGeneratorSeesProviderMetadata(t *testing.T) {
 	ctx := context.Background()
 	streamTool := &enhancedStreamableTestTool{name: "provider_enhanced_stream_tool", result: "stream chunk"}
 	mockModel := &mockToolCallingModel{toolCallName: "provider_enhanced_stream_tool"}
@@ -6804,7 +6816,7 @@ func TestAttack_EnhancedStreamToolReservationGeneratorSeesProviderExtra(t *testi
 		SessionID:       "enhanced-stream-tool-provider-reservation-session",
 		SessionStore:    store,
 		SessionConfig: &SessionConfig[*schema.Message]{
-			EventExtraProvider: func(_ context.Context, event *SessionEvent[*schema.Message]) (map[string]any, error) {
+			EventMetadataProvider: func(_ context.Context, event *SessionEvent[*schema.Message]) (map[string]any, error) {
 				if event.Kind == SessionEventMessage && isNilMessage(event.Message) {
 					return map[string]any{"reservation": "enhanced_tool_stream"}, nil
 				}
@@ -6812,7 +6824,7 @@ func TestAttack_EnhancedStreamToolReservationGeneratorSeesProviderExtra(t *testi
 			},
 			EventIDGenerator: func(_ context.Context, event *SessionEvent[*schema.Message]) (string, error) {
 				if event.Kind == SessionEventMessage && isNilMessage(event.Message) &&
-					event.Extra["reservation"] == "enhanced_tool_stream" {
+					event.Metadata["reservation"] == "enhanced_tool_stream" {
 					atomic.AddInt64(&generatorSawReservation, 1)
 				}
 				return DefaultSessionEventIDGenerator[*schema.Message](context.Background(), event)
@@ -6837,7 +6849,7 @@ func TestAttack_EnhancedStreamToolReservationGeneratorSeesProviderExtra(t *testi
 	assert.GreaterOrEqual(t, atomic.LoadInt64(&generatorSawReservation), int64(1))
 }
 
-func TestSessionEventExtraIgnoredByReconstruction(t *testing.T) {
+func TestSessionEventMetadataIgnoredByReconstruction(t *testing.T) {
 	ctx := context.Background()
 	storeWithExtra := newSessionHelperStore()
 	storeWithoutExtra := newSessionHelperStore()
@@ -6847,9 +6859,9 @@ func TestSessionEventExtraIgnoredByReconstruction(t *testing.T) {
 	setMessageIDForTest(withoutExtraMsg, GetMessageID(withExtraMsg))
 
 	appendTestSessionEvent(t, ctx, storeWithExtra, "s", &SessionEvent[*schema.Message]{
-		Kind:    SessionEventMessage,
-		Extra:   map[string]any{"reason": "audit", "nested": map[string]any{"k": "v"}},
-		Message: withExtraMsg,
+		Kind:     SessionEventMessage,
+		Metadata: map[string]any{"reason": "audit", "nested": map[string]any{"k": "v"}},
+		Message:  withExtraMsg,
 	})
 	appendTestSessionEvent(t, ctx, storeWithoutExtra, "s", &SessionEvent[*schema.Message]{
 		Kind:    SessionEventMessage,

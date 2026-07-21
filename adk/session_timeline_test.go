@@ -643,7 +643,7 @@ func TestRunner_ExtensionEventSentWithTypedSendEventIsLiveAndPersisted(t *testin
 	})
 }
 
-func TestRunner_EventExtraProviderRunsOnceForTypedSendEvent(t *testing.T) {
+func TestRunner_EventMetadataProviderRunsOnceForTypedSendEvent(t *testing.T) {
 	ctx := context.Background()
 	extensionKind := SessionEventKind("x.provider.once")
 	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
@@ -674,7 +674,7 @@ func TestRunner_EventExtraProviderRunsOnceForTypedSendEvent(t *testing.T) {
 		SessionID:    "provider-once-session",
 		SessionStore: store,
 		SessionConfig: &SessionConfig[*schema.Message]{
-			EventExtraProvider: func(_ context.Context, event *SessionEvent[*schema.Message]) (map[string]any, error) {
+			EventMetadataProvider: func(_ context.Context, event *SessionEvent[*schema.Message]) (map[string]any, error) {
 				if event.Kind == extensionKind {
 					return map[string]any{"provider_call": atomic.AddInt64(&extensionProviderCalls, 1)}, nil
 				}
@@ -698,7 +698,7 @@ func TestRunner_EventExtraProviderRunsOnceForTypedSendEvent(t *testing.T) {
 	}
 
 	require.NotNil(t, liveExtension)
-	assert.Equal(t, int64(1), liveExtension.Extra["provider_call"])
+	assert.Equal(t, int64(1), liveExtension.Metadata["provider_call"])
 	assert.Equal(t, int64(1), atomic.LoadInt64(&extensionProviderCalls))
 
 	persisted := filterStoredSessionEvents(t, store.events, func(se *SessionEvent[*schema.Message]) bool {
@@ -706,7 +706,7 @@ func TestRunner_EventExtraProviderRunsOnceForTypedSendEvent(t *testing.T) {
 	})
 	require.Len(t, persisted, 1)
 	assert.Equal(t, liveExtension.EventID, persisted[0].EventID)
-	assert.Equal(t, int64(1), persisted[0].Extra["provider_call"])
+	assert.Equal(t, int64(1), persisted[0].Metadata["provider_call"])
 }
 
 func TestTypedSendEventOutsideExecutionIsNoop(t *testing.T) {

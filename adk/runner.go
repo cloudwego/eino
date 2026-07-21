@@ -291,7 +291,7 @@ func prepareRunnerSessionRun[M MessageType]( //nolint:revive // argument-limit
 		Kind:      SessionEventSessionStatusRunning,
 		Lifecycle: &LifecycleEvent{State: SessionRunStateRunning},
 	}
-	err = prepareSessionEventEnvelope(ctx, runningEvent, state.sessionConfig.EventIDGenerator, state.sessionConfig.EventExtraProvider, sessionEventEnvelopeOptions{})
+	err = prepareSessionEventEnvelope(ctx, runningEvent, state.sessionConfig.EventIDGenerator, state.sessionConfig.EventMetadataProvider, sessionEventEnvelopeOptions{})
 	if err != nil {
 		_ = state.sessionHandle.close(ctx)
 		return nil, err
@@ -403,7 +403,7 @@ func prepareRunnerSessionResume[M MessageType]( //nolint:revive // argument-limi
 		state.turnID = cp.TurnID
 		resumeEvent.TurnID = state.turnID
 	}
-	if err := prepareSessionEventEnvelope(ctx, resumeEvent, state.sessionConfig.EventIDGenerator, state.sessionConfig.EventExtraProvider, sessionEventEnvelopeOptions{}); err != nil {
+	if err := prepareSessionEventEnvelope(ctx, resumeEvent, state.sessionConfig.EventIDGenerator, state.sessionConfig.EventMetadataProvider, sessionEventEnvelopeOptions{}); err != nil {
 		_ = state.sessionHandle.close(ctx)
 		return nil, "", err
 	}
@@ -445,7 +445,7 @@ func appendRunnerSessionInputEvents[M MessageType](
 	for _, msg := range messages {
 		se := makeInputSessionEvent[M](msg)
 		stampSessionEventTurnID(se, state.turnID)
-		if err := prepareSessionEventEnvelope(ctx, se, state.sessionConfig.EventIDGenerator, state.sessionConfig.EventExtraProvider, sessionEventEnvelopeOptions{}); err != nil {
+		if err := prepareSessionEventEnvelope(ctx, se, state.sessionConfig.EventIDGenerator, state.sessionConfig.EventMetadataProvider, sessionEventEnvelopeOptions{}); err != nil {
 			return err
 		}
 		if err := state.sessionHandle.appendEvents(ctx, []*SessionEvent[M]{se}); err != nil {
@@ -584,7 +584,7 @@ func typedRunnerRunImpl[M MessageType](a TypedAgent[M], enableStreaming bool, st
 	}
 
 	if sessionState.enabled {
-		ctx = contextWithSessionEventContext[M](ctx, sessionState.sessionConfig.EventIDGenerator, sessionState.sessionConfig.EventExtraProvider, sessionState.turnID)
+		ctx = contextWithSessionEventContext[M](ctx, sessionState.sessionConfig.EventIDGenerator, sessionState.sessionConfig.EventMetadataProvider, sessionState.turnID)
 	}
 
 	var zero M
@@ -696,7 +696,7 @@ func typedRunnerResumeInternalImpl[M MessageType](a TypedAgent[M], store CheckPo
 	AddSessionValues(ctx, o.sessionValues)
 
 	if sessionState.enabled {
-		ctx = contextWithSessionEventContext[M](ctx, sessionState.sessionConfig.EventIDGenerator, sessionState.sessionConfig.EventExtraProvider, sessionState.turnID)
+		ctx = contextWithSessionEventContext[M](ctx, sessionState.sessionConfig.EventIDGenerator, sessionState.sessionConfig.EventMetadataProvider, sessionState.turnID)
 	}
 
 	if len(resumeData) > 0 {
@@ -862,7 +862,7 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 					Kind:      SessionEventMessage,
 				}
 				stampOwnTurnID(draft)
-				if err := prepareSessionEventEnvelope(ctx, draft, sessionState.sessionConfig.EventIDGenerator, sessionState.sessionConfig.EventExtraProvider, sessionEventEnvelopeOptions{AllowPayloadlessDraft: true}); err != nil {
+				if err := prepareSessionEventEnvelope(ctx, draft, sessionState.sessionConfig.EventIDGenerator, sessionState.sessionConfig.EventMetadataProvider, sessionEventEnvelopeOptions{AllowPayloadlessDraft: true}); err != nil {
 					setPersistErr(err)
 					return nil, err
 				}
@@ -877,7 +877,7 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 			Kind:      SessionEventMessage,
 		}
 		stampOwnTurnID(draft)
-		if err := prepareSessionEventEnvelope(ctx, draft, sessionState.sessionConfig.EventIDGenerator, sessionState.sessionConfig.EventExtraProvider, sessionEventEnvelopeOptions{AllowPayloadlessDraft: true}); err != nil {
+		if err := prepareSessionEventEnvelope(ctx, draft, sessionState.sessionConfig.EventIDGenerator, sessionState.sessionConfig.EventMetadataProvider, sessionEventEnvelopeOptions{AllowPayloadlessDraft: true}); err != nil {
 			setPersistErr(err)
 			return nil, err
 		}
@@ -901,7 +901,7 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 			Message:   event.Output.MessageOutput.Message,
 		}
 		stampOwnTurnID(draft)
-		if err := prepareSessionEventEnvelope(ctx, draft, sessionState.sessionConfig.EventIDGenerator, sessionState.sessionConfig.EventExtraProvider, sessionEventEnvelopeOptions{}); err != nil {
+		if err := prepareSessionEventEnvelope(ctx, draft, sessionState.sessionConfig.EventIDGenerator, sessionState.sessionConfig.EventMetadataProvider, sessionEventEnvelopeOptions{}); err != nil {
 			return nil, err
 		}
 		event.SessionEventVariant = &SessionEventVariant[M]{SessionID: sessionState.sessionID, Event: draft}
@@ -940,13 +940,13 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 		if !foreignEvent && event.SessionEventVariant != nil && event.SessionEventVariant.Event != nil {
 			if event.SessionEventVariant.Event.EventID == "" {
 				gen := DefaultSessionEventIDGenerator[M]
-				var provider SessionEventExtraProvider[M]
+				var provider SessionEventMetadataProvider[M]
 				if sessionState != nil && sessionState.enabled {
 					gen = sessionState.sessionConfig.EventIDGenerator
 					if gen == nil {
 						gen = DefaultSessionEventIDGenerator[M]
 					}
-					provider = sessionState.sessionConfig.EventExtraProvider
+					provider = sessionState.sessionConfig.EventMetadataProvider
 				}
 				se := *event.SessionEventVariant.Event
 				stampOwnTurnID(&se)
@@ -1074,7 +1074,7 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 									Error:   streamErr.Error(),
 								},
 							}
-							if err := prepareSessionEventEnvelope(ctx, draft, sessionState.sessionConfig.EventIDGenerator, sessionState.sessionConfig.EventExtraProvider, sessionEventEnvelopeOptions{PreserveEventID: true}); err != nil {
+							if err := prepareSessionEventEnvelope(ctx, draft, sessionState.sessionConfig.EventIDGenerator, sessionState.sessionConfig.EventMetadataProvider, sessionEventEnvelopeOptions{PreserveEventID: true}); err != nil {
 								setPersistErr(err)
 								continue
 							}
@@ -1093,7 +1093,7 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 						Kind:      SessionEventMessage,
 						Message:   persistedMsg,
 					}
-					if err := prepareSessionEventEnvelope(ctx, draft, sessionState.sessionConfig.EventIDGenerator, sessionState.sessionConfig.EventExtraProvider, sessionEventEnvelopeOptions{PreserveEventID: true}); err != nil {
+					if err := prepareSessionEventEnvelope(ctx, draft, sessionState.sessionConfig.EventIDGenerator, sessionState.sessionConfig.EventMetadataProvider, sessionEventEnvelopeOptions{PreserveEventID: true}); err != nil {
 						setPersistErr(err)
 						continue
 					}
