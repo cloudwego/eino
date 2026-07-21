@@ -354,6 +354,7 @@ func testEventBodyRoundTrip[M adk.MessageType](t *testing.T, factory func(testin
 	ctx := context.Background()
 
 	event := messageEvent("body-test-1", makeMessage("body"))
+	event.TurnID = "turn-body-test-1"
 	appendEvents(t, ctx, store, "s", event)
 
 	res, err := store.LoadEvents(ctx, "s", &adk.LoadSessionEventsRequest{})
