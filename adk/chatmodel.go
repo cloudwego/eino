@@ -476,6 +476,11 @@ func isCheckpointAwareCancelScope(cc *cancelContext) bool {
 	return cc != nil && cc.parent != nil && !cc.abortOnly
 }
 
+func hasActiveChatModelAgentExecCtx(ctx context.Context) bool {
+	return getTypedChatModelAgentExecCtx[*schema.Message](ctx) != nil ||
+		getTypedChatModelAgentExecCtx[*schema.AgenticMessage](ctx) != nil
+}
+
 func resolveRunCancelContext(ctx context.Context, o *options) (*cancelContext, bool) {
 	inherited := getCancelContext(ctx)
 	if o.cancelCtx != nil {
@@ -484,7 +489,7 @@ func resolveRunCancelContext(ctx context.Context, o *options) (*cancelContext, b
 	if inherited != nil {
 		// ADK-managed child boundaries pass explicit checkpoint-aware scopes.
 		// Such scopes may reach ChatModelAgent through transparent wrappers.
-		if isCheckpointAwareCancelScope(inherited) {
+		if isCheckpointAwareCancelScope(inherited) && !hasActiveChatModelAgentExecCtx(ctx) {
 			return inherited, false
 		}
 		// Other inherited scopes are direct non-boundary nesting: only immediate
