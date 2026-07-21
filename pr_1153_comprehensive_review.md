@@ -306,3 +306,32 @@ Coverage:
 |------|----------|--------------------|
 | `adk/middlewares/summarization/summarization.go` | 1 | Seed only `_eino_reason=context_summarized` on durable summarization replacement events. |
 | `adk/middlewares/summarization/summarization_test.go` | 2, 3 | Renamed the metadata test as an attack test and asserted `_eino_source` is absent while provider extension still works. |
+
+## Follow-Up Review: Patch Coverage Hardening
+
+### Overview
+
+- Request: improve sub-par patch coverage for `adk/session.go` and `adk/runner.go`.
+- Total iterations: Stage 1: 1, Stage 2: 1, Stage 3: 1
+- Files modified by this follow-up: 2 tracked files
+
+### Changes
+
+| # | Category | Change | Files |
+|---|----------|--------|-------|
+| 1 | Coverage Gap | Added validation branches for named primitive aliases, nil map/slice values, non-nil pointers, complex values, arrays, invalid existing `Extra`, invalid provider output, payloadless draft missing kind, preserve-ID missing ID, and nil-event no-ops. | `adk/session_test.go` |
+| 2 | Coverage Gap | Added runner tests for provider failure on input events, invalid preassigned session events, and output fallback event decoration before ID generation. | `adk/session_test.go` |
+| 3 | Bug Fix | Preassigned live `SessionEventVariant.Event` values now run `ValidateEmittedSessionEventKind`; invalid `Extra` is surfaced on the live event and not only during persistence. | `adk/runner.go` |
+
+### Coverage After Follow-Up
+
+- `go test -coverprofile=coverage.out ./adk`: pass, `./adk` coverage 88.8%.
+- `validateSessionEventExtraValue`: 84.3%.
+- `applySessionEventExtraProvider`: 95.5%.
+- `prepareSessionEventEnvelope`: 94.7%.
+- `typedRunnerHandleIterImpl`: 84.4%.
+
+### Verification
+
+- `go test ./adk -run 'Test(SessionEventExtraValidation|SessionEventExtraProviderMergeAndMutationGuard|SessionEventContextMergesGeneratorProviderAndTurnID|RunnerSessionEventExtraProvider(ErrorOnInputFailsBeforeInputAppend|RejectsPreassignedInvalidExtra|DecoratesOutputFallbackEvent|ErrorFailsBeforeAppend|DecoratesPreparationEvents|DecoratesResumeRequest|DecoratesStreamingFinalMessage)|Attack_Stream(Model|Tool|EnhancedStreamTool)ReservationGeneratorSeesProviderExtra)' -count=1`: pass.
+- `go test -coverprofile=coverage.out ./adk`: pass.

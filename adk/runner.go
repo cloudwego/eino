@@ -955,6 +955,9 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 					event.Err = err
 				}
 				event.SessionEventVariant.Event = &se
+			} else if err := ValidateEmittedSessionEventKind(event.SessionEventVariant.Event); err != nil {
+				setPersistErr(err)
+				event.Err = err
 			}
 		}
 		if !foreignEvent && event.SessionEventVariant != nil && event.SessionEventVariant.MessageStreamRef != nil {
