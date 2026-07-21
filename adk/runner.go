@@ -776,13 +776,13 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 			}
 		}
 	}
-	stampParentSessionEvent := func(se *SessionEvent[M]) {
+	stampOwnTurnID := func(se *SessionEvent[M]) {
 		if sessionState == nil || !sessionState.enabled {
 			return
 		}
 		stampSessionEventTurnID(se, sessionState.turnID)
 	}
-	stampParentStreamRef := func(ref *MessageStreamRef) {
+	stampOwnStreamRefTurnID := func(ref *MessageStreamRef) {
 		if ref == nil || sessionState == nil || !sessionState.enabled || sessionState.turnID == "" {
 			return
 		}
@@ -817,7 +817,7 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 		if persister == nil || se == nil {
 			return nil
 		}
-		stampParentSessionEvent(se)
+		stampOwnTurnID(se)
 		if err := ValidateEmittedSessionEventKind(se); err != nil {
 			setPersistErr(err)
 			return err
@@ -831,7 +831,7 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 		if se == nil {
 			return false
 		}
-		stampParentSessionEvent(se)
+		stampOwnTurnID(se)
 		if se.EventID == "" {
 			if err := assignSessionEventIDFromContext(ctx, se); err != nil {
 				setPersistErr(err)
@@ -856,14 +856,14 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 			if ref.Timestamp.IsZero() {
 				ref.Timestamp = newEventTimestamp()
 			}
-			stampParentStreamRef(ref)
+			stampOwnStreamRefTurnID(ref)
 			ref.Kind = SessionEventMessage
 			if ref.EventID == "" {
 				draft := &SessionEvent[M]{
 					Timestamp: ref.Timestamp,
 					Kind:      SessionEventMessage,
 				}
-				stampParentSessionEvent(draft)
+				stampOwnTurnID(draft)
 				if err := assignSessionEventID(ctx, draft, sessionState.sessionConfig.EventIDGenerator); err != nil {
 					setPersistErr(err)
 					return nil, err
@@ -878,7 +878,7 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 			Timestamp: newEventTimestamp(),
 			Kind:      SessionEventMessage,
 		}
-		stampParentSessionEvent(draft)
+		stampOwnTurnID(draft)
 		if err := assignSessionEventID(ctx, draft, sessionState.sessionConfig.EventIDGenerator); err != nil {
 			setPersistErr(err)
 			return nil, err
@@ -902,7 +902,7 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 			Kind:      SessionEventMessage,
 			Message:   event.Output.MessageOutput.Message,
 		}
-		stampParentSessionEvent(draft)
+		stampOwnTurnID(draft)
 		if idErr := assignSessionEventID(ctx, draft, sessionState.sessionConfig.EventIDGenerator); idErr != nil {
 			return nil, idErr
 		}
@@ -940,7 +940,7 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 			event.SessionEventVariant.SessionID != "" &&
 			event.SessionEventVariant.SessionID != sessionState.sessionID
 		if !fromOtherSession && event.SessionEventVariant != nil && event.SessionEventVariant.Event != nil {
-			stampParentSessionEvent(event.SessionEventVariant.Event)
+			stampOwnTurnID(event.SessionEventVariant.Event)
 			gen := DefaultSessionEventIDGenerator[M]
 			if sessionState != nil && sessionState.enabled {
 				gen = sessionState.sessionConfig.EventIDGenerator
@@ -956,7 +956,7 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 			}
 		}
 		if !fromOtherSession && event.SessionEventVariant != nil && event.SessionEventVariant.MessageStreamRef != nil {
-			stampParentStreamRef(event.SessionEventVariant.MessageStreamRef)
+			stampOwnStreamRefTurnID(event.SessionEventVariant.MessageStreamRef)
 		}
 		if err := validateAgentSessionEventIdentity(event); err != nil {
 			setPersistErr(err)
