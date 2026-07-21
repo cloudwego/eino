@@ -1449,51 +1449,6 @@ func ensureMessageIDsOnCopiedMessages[M adk.MessageType](msgs []M) []M {
 	return msgs
 }
 
-func agenticResultCallID(block *schema.ContentBlock) (string, bool) {
-	if block == nil {
-		return "", false
-	}
-	if block.Type == schema.ContentBlockTypeFunctionToolResult && block.FunctionToolResult != nil {
-		return block.FunctionToolResult.CallID, true
-	}
-	if block.Type == schema.ContentBlockTypeToolSearchResult && block.ToolSearchFunctionToolResult != nil {
-		return block.ToolSearchFunctionToolResult.CallID, true
-	}
-	return "", false
-}
-
-func findToolResultByCallID[M adk.MessageType](messages []M, startIndex, endIndex int, callID string) (int, bool) {
-	for i := startIndex; i < endIndex; i++ {
-		msg := messages[i]
-		if isToolResultMsg(msg) {
-			if getToolResultCallID(msg) == callID {
-				return i, true
-			}
-		} else {
-			return -1, false
-		}
-	}
-	return -1, false
-}
-
-func getToolResultCallID[M adk.MessageType](msg M) string {
-	switch m := any(msg).(type) {
-	case *schema.Message:
-		if m.Role == schema.Tool {
-			return m.ToolCallID
-		}
-	case *schema.AgenticMessage:
-		if m.Role == schema.AgenticRoleTypeUser {
-			for _, block := range m.ContentBlocks {
-				if callID, ok := agenticResultCallID(block); ok {
-					return callID
-				}
-			}
-		}
-	}
-	return ""
-}
-
 type offloadStashItem struct {
 	config      *ToolReductionConfig
 	offloadInfo *ClearResult
