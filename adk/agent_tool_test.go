@@ -1339,6 +1339,64 @@ func TestAgentToolEventReceiver_PreservesChildSessionEnvelope(t *testing.T) {
 	assert.Equal(t, SessionEventMessage, got.SessionEventVariant.Event.Kind)
 }
 
+func TestAttack_AgentToolForeignSessionEventsDoNotInheritParentTurnID(t *testing.T) {
+	tests := []struct {
+		name            string
+		enableStreaming bool
+		wantRef         bool
+	}{
+		{name: "materialized event"},
+		{name: "stream ref", enableStreaming: true, wantRef: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			inner, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+				Name:        "turn-id-child-" + strings.ReplaceAll(tt.name, " ", "-"),
+				Description: "child",
+				Model:       &emitOnceModel{},
+			})
+			require.NoError(t, err)
+			at := NewAgentTool(ctx, inner).(tool.InvokableTool)
+
+			ctx = contextWithSessionEventContext[*schema.Message](ctx, nil, "parent-turn-id")
+			var got *AgentEvent
+			opts := []tool.Option{
+				withAgentToolOptions(inner.Name(ctx), []AgentRunOption{withEnableSessionEvents()}),
+				agenttool.WithEventReceiverTransform(func(current []agenttool.EventReceiver[*AgentEvent]) []agenttool.EventReceiver[*AgentEvent] {
+					return append(current, func(event *AgentEvent) {
+						if event.SessionEventVariant == nil {
+							return
+						}
+						if !tt.wantRef && event.SessionEventVariant.Event != nil {
+							got = event
+						}
+						if tt.wantRef && event.SessionEventVariant.MessageStreamRef != nil {
+							got = event
+						}
+					})
+				}),
+			}
+			if tt.enableStreaming {
+				opts = append([]tool.Option{withAgentToolEnableStreaming(true)}, opts...)
+			}
+			_, err = at.InvokableRun(ctx, `{"request":"q"}`, opts...)
+			require.NoError(t, err)
+			require.NotNil(t, got)
+			require.NotNil(t, got.SessionEventVariant)
+			require.Contains(t, got.SessionEventVariant.SessionID, "agent_tool:")
+			if tt.wantRef {
+				require.NotNil(t, got.SessionEventVariant.MessageStreamRef)
+				assert.Empty(t, got.SessionEventVariant.MessageStreamRef.TurnID)
+				return
+			}
+			require.NotNil(t, got.SessionEventVariant.Event)
+			assert.Empty(t, got.SessionEventVariant.Event.TurnID)
+		})
+	}
+}
+
 func TestAgentToolEventReceiver_LaterTransformCanSuppressParent(t *testing.T) {
 	ctx := context.Background()
 	sub := &emitEventsAgent{events: []*AgentEvent{
