@@ -63,7 +63,7 @@ func (t *taskCreateTool) Info(ctx context.Context) (*schema.ToolInfo, error) {
 			},
 			"description": {
 				Type:     schema.String,
-				Desc:     "A detailed description of what needs to be done",
+				Desc:     "What needs to be done",
 				Required: true,
 			},
 			"activeForm": {
@@ -209,57 +209,47 @@ NOTE that you should not use this tool if there is only one trivial task to do. 
 ## Task Fields
 
 - **subject**: A brief, actionable title in imperative form (e.g., "Fix authentication bug in login flow")
-- **description**: Detailed description of what needs to be done, including context and acceptance criteria
-- **activeForm**: Present continuous form shown in spinner when task is in_progress (e.g., "Fixing authentication bug"). This is displayed to the user while you work on the task.
+- **description**: What needs to be done
+- **activeForm** (optional): Present continuous form shown in the spinner when the task is in_progress (e.g., "Fixing authentication bug"). If omitted, the spinner shows the subject instead.
 
-**IMPORTANT**: Always provide activeForm when creating tasks. The subject should be imperative ("Run tests") while activeForm should be present continuous ("Running tests"). All tasks are created with status "pending".
+All tasks are created with status ` + "`" + `pending` + "`" + `.
 
 ## Tips
 
 - Create tasks with clear, specific subjects that describe the outcome
-- Include enough detail in the description for another agent to understand and complete the task
 - After creating tasks, use TaskUpdate to set up dependencies (blocks/blockedBy) if needed
 - Check TaskList first to avoid creating duplicate tasks
 `
 
-const taskCreateToolDescChinese = `使用此工具为当前编码会话创建结构化的任务列表。这有助于跟踪进度、组织复杂任务，并向用户展示工作的完整性。
-它还帮助用户了解任务的进度和请求的整体进展。
+const taskCreateToolDescChinese = `使用此工具为当前编码会话创建结构化的任务列表。这有助于你跟踪进度、组织复杂任务，并向用户展示工作的完整性。
+它也帮助用户理解任务进展以及其请求的整体进度。
 
-## 何时使用此工具
+## 何时使用本工具
+在以下场景主动使用：
+- 复杂的多步骤任务 —— 当任务需要 3 个或更多不同步骤或操作时
+- 非平凡的复杂任务 —— 需要仔细规划或多次操作的任务
+- 计划模式 —— 使用计划模式时，创建任务列表来跟踪工作
+- 用户明确要求待办列表 —— 当用户直接要求你使用待办列表时
+- 用户提供多个任务 —— 当用户给出一组待办事项（编号或逗号分隔）时
+- 收到新指令后 —— 立即将用户需求记录为任务
+- 开始处理某个任务时 —— 在动手之前先标记为 in_progress
+- 完成某个任务后 —— 标记为 completed，并补充实现过程中发现的后续任务
 
-在以下场景中主动使用此工具：
-
-- 复杂的多步骤任务 - 当任务需要 3 个或更多不同的步骤或操作时
-- 非简单的复杂任务 - 需要仔细规划或多个操作的任务
-- 计划模式 - 使用计划模式时，创建任务列表来跟踪工作
-- 用户明确要求待办列表 - 当用户直接要求使用待办列表时
-- 用户提供多个任务 - 当用户提供待办事项列表时（编号或逗号分隔）
-- 收到新指令后 - 立即将用户需求记录为任务
-- 开始处理任务时 - 在开始工作之前将其标记为 in_progress
-- 完成任务后 - 将其标记为已完成，并添加实施过程中发现的任何后续任务
-
-## 何时不使用此工具
-
-在以下情况下跳过使用此工具：
-- 只有一个简单直接的任务
-- 任务很简单，跟踪它没有组织上的好处
-- 任务可以在少于 3 个简单步骤内完成
-- 任务纯粹是对话性或信息性的
-
-注意：如果只有一个简单任务要做，不应该使用此工具。在这种情况下，直接完成任务更好。
+## 何时不要使用本工具
+在以下情况跳过：
+- 只有单个、直接了当的任务
+- 任务很琐碎，跟踪它没有组织上的收益
+- 任务可在少于 3 个琐碎步骤内完成
+- 任务纯属对话或信息性质
+注意：如果只有一个琐碎任务要做，就不要用本工具。这种情况下直接做更好。
 
 ## 任务字段
-
-- **subject**：简短的、可操作的标题，使用祈使句形式（例如，"修复登录流程中的认证错误"）
-- **description**：需要完成的工作的详细描述，包括上下文和验收标准
-- **activeForm**：任务处于 in_progress 状态时在加载动画中显示的现在进行时形式（例如，"正在修复认证错误"）。这会在你处理任务时显示给用户。
-
-**重要**：创建任务时始终提供 activeForm。subject 应该是祈使句（"运行测试"），而 activeForm 应该是现在进行时（"正在运行测试"）。所有任务创建时状态为 "pending"。
+- **subject**：一个简短、可执行的祈使句标题（例如 "Fix authentication bug in login flow"）
+- **description**：需要做什么
+- **activeForm**（可选）：任务处于 in_progress 时在 spinner 中显示的现在进行时形式（例如 "Fixing authentication bug"）。省略时 spinner 显示 subject。
+所有任务创建时状态均为 ` + "`" + `pending` + "`" + `。
 
 ## 提示
-
-- 创建具有清晰、具体主题的任务，描述预期结果
-- 在描述中包含足够的细节，以便其他代理能够理解并完成任务
-- 创建任务后，如果需要，使用 TaskUpdate 设置依赖关系（blocks/blockedBy）
-- 先检查 TaskList 以避免创建重复任务
-`
+- 创建任务时用清晰、具体、描述结果的 subject
+- 创建任务后，如有需要用 TaskUpdate 设置依赖（blocks/blockedBy）
+- 先用 TaskList 检查，避免创建重复任务`

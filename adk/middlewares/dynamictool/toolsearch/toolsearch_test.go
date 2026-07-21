@@ -369,15 +369,15 @@ func TestMiddlewareFlow(t *testing.T) {
 	assert.NotContains(t, toolsPerCall[2], "dynamic_tool_b")
 
 	// Verify reminder is present in messages (checked via tool list — the wrapper inserts it).
-	// The model received messages, and the reminder contains "<available-deferred-tools>".
 	// We indirectly verify this by checking that the middleware ran without error and the
 	// 3-turn flow completed successfully, which requires the tool_search tool to work.
 
-	// Additional: verify that the reminder contains the dynamic tool names.
+	// Additional: verify that the reminder lists the dynamic tool names and carries the
+	// tool_search usage preamble.
 	mwImpl := mw.(*typedMiddleware[*schema.Message])
 	assert.True(t, strings.Contains(mwImpl.sr, "dynamic_tool_a"))
 	assert.True(t, strings.Contains(mwImpl.sr, "dynamic_tool_b"))
-	assert.True(t, strings.Contains(mwImpl.sr, "<available-deferred-tools>"))
+	assert.True(t, strings.Contains(mwImpl.sr, "tool_search"))
 }
 
 // ---------------------------------------------------------------------------

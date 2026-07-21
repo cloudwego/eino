@@ -47,6 +47,16 @@ type Config struct {
 	// invalidate the model's KV-cache (as the tool list changes between calls), and effectiveness
 	// depends on the model's ability to work with a dynamically changing tool set.
 	UseModelToolSearch bool
+
+	// DisableMidConversationSystemMessage controls the role of the mid-conversation
+	// tool-search reminder injected by BeforeModelRewriteState. When false (the
+	// default) the reminder is a system message, matching the historical behavior.
+	// Set it to true for models that reject mid-conversation system messages: the
+	// reminder is then wrapped as a user message placed immediately before the latest
+	// turn's user-input message. The setting is read every turn, so it may be changed
+	// mid-session (e.g. after a model swap); the prior reminder is re-aligned to the
+	// current role in place.
+	DisableMidConversationSystemMessage bool
 }
 
 // NewTyped constructs and returns the generic tool search middleware.
@@ -94,6 +104,7 @@ func NewTyped[M adk.MessageType](ctx context.Context, config *Config) (adk.Typed
 		mapOfDynamicTools:  mapOfDynamicTools,
 		dynamicToolInfos:   dynamicToolInfos,
 		useModelToolSearch: config.UseModelToolSearch,
+		reminderAsUser:     config.DisableMidConversationSystemMessage,
 		sr:                 buf.String(),
 	}, nil
 }
@@ -131,6 +142,7 @@ type typedMiddleware[M adk.MessageType] struct {
 	mapOfDynamicTools  map[string]*schema.ToolInfo
 	dynamicToolInfos   []*schema.ToolInfo
 	useModelToolSearch bool
+	reminderAsUser     bool
 	sr                 string
 }
 
@@ -174,16 +186,10 @@ func (m *typedMiddleware[M]) ensureReminder(msgs []M) (result []M, insertedMsg M
 		}
 	}
 
-	insertedMsg = makeReminderMsg[M](m.sr)
+	insertedMsg = makeReminderMsg[M](m.sr, m.reminderAsUser)
 	adk.EnsureMessageID(insertedMsg)
 
-	insertAt := len(msgs)
-	for i := len(msgs) - 1; i >= 0; i-- {
-		if isReminderAnchorTS(msgs[i]) {
-			insertAt = i + 1
-			break
-		}
-	}
+	insertAt := reminderInsertIndexTS(msgs, m.reminderAsUser)
 
 	result = make([]M, 0, len(msgs)+1)
 	result = append(result, msgs[:insertAt]...)
@@ -193,6 +199,57 @@ func (m *typedMiddleware[M]) ensureReminder(msgs []M) (result []M, insertedMsg M
 		beforeMessageID = adk.GetMessageID(msgs[insertAt])
 	}
 	return result, insertedMsg, beforeMessageID, true
+}
+
+// migrateReminderRole re-aligns the role of a previously inserted tool-search
+// reminder to the current setting, so a mid-session switch of the reminder role
+// (e.g. after a model swap) also updates the reminder accumulated in an earlier
+// turn. It rewrites only in the returned slice: a mismatched reminder is replaced
+// with a fresh message carrying the same content and message ID but the target
+// role, leaving the original (persisted) object untouched. The change is in-memory
+// only — recomputed each turn, never emitted as a session event. Returns the input
+// slice unchanged when nothing needs migrating.
+func (m *typedMiddleware[M]) migrateReminderRole(msgs []M) []M {
+	var result []M
+	for i, msg := range msgs {
+		if !hasToolSearchReminderExtra(msg) || reminderIsUserTS(msg) == m.reminderAsUser {
+			continue
+		}
+		if result == nil {
+			result = make([]M, len(msgs))
+			copy(result, msgs)
+		}
+		replacement := makeReminderMsg[M](reminderContentTS(msg), m.reminderAsUser)
+		setReminderMessageIDTS(replacement, adk.GetMessageID(msg))
+		result[i] = replacement
+	}
+	if result == nil {
+		return msgs
+	}
+	return result
+}
+
+// reminderInsertIndexTS returns the index at which a fresh reminder should be
+// inserted: after the latest turn boundary in system mode (asUser=false), or
+// immediately before the latest turn's user-input message in user mode (asUser=true).
+func reminderInsertIndexTS[M adk.MessageType](msgs []M, asUser bool) int {
+	if asUser {
+		for i := len(msgs) - 1; i >= 0; i-- {
+			if isUserInputAnchorTS(msgs[i]) {
+				return i
+			}
+		}
+		return len(msgs)
+	}
+
+	insertAt := len(msgs)
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if isReminderAnchorTS(msgs[i]) {
+			insertAt = i + 1
+			break
+		}
+	}
+	return insertAt
 }
 
 func isReminderAnchorTS[M adk.MessageType](msg M) bool {
@@ -210,15 +267,79 @@ func isReminderAnchorTS[M adk.MessageType](msg M) bool {
 	return false
 }
 
-func makeReminderMsg[M adk.MessageType](content string) M {
+// isUserInputAnchorTS reports whether msg is a user-input message (a user turn, not a
+// tool result carried on a user-role message). It is the user-mode counterpart to
+// isReminderAnchorTS: it marks the boundary a user-role reminder is inserted before.
+func isUserInputAnchorTS[M adk.MessageType](msg M) bool {
+	switch v := any(msg).(type) {
+	case *schema.Message:
+		return v.Role == schema.User
+	case *schema.AgenticMessage:
+		return v.Role == schema.AgenticRoleTypeUser && !internal.HasToolResult(v.ContentBlocks)
+	}
+	return false
+}
+
+// reminderIsUserTS reports whether a reminder message currently carries the user
+// role. A reminder is always either a system or a user message, so anything that is
+// not a system message is treated as user role.
+func reminderIsUserTS[M adk.MessageType](msg M) bool {
+	switch v := any(msg).(type) {
+	case *schema.Message:
+		return v.Role != schema.System
+	case *schema.AgenticMessage:
+		return v.Role != schema.AgenticRoleTypeSystem
+	}
+	return true
+}
+
+// reminderContentTS returns the text carried by a reminder created via
+// makeReminderMsg, role-agnostically.
+func reminderContentTS[M adk.MessageType](msg M) string {
+	switch v := any(msg).(type) {
+	case *schema.Message:
+		return v.Content
+	case *schema.AgenticMessage:
+		if len(v.ContentBlocks) == 1 {
+			if b := v.ContentBlocks[0]; b != nil && b.UserInputText != nil {
+				return b.UserInputText.Text
+			}
+		}
+	}
+	return ""
+}
+
+// setReminderMessageIDTS stamps id onto msg's Extra, preserving its other keys.
+func setReminderMessageIDTS[M adk.MessageType](msg M, id string) {
+	switch v := any(msg).(type) {
+	case *schema.Message:
+		v.Extra = internal.SetMessageID(v.Extra, id)
+	case *schema.AgenticMessage:
+		v.Extra = internal.SetMessageID(v.Extra, id)
+	}
+}
+
+// makeReminderMsg builds the tool-search reminder carrying content. It is a user
+// message when asUser is true, otherwise a system message (the default).
+func makeReminderMsg[M adk.MessageType](content string, asUser bool) M {
 	var zero M
 	switch any(zero).(type) {
 	case *schema.Message:
-		msg := schema.SystemMessage(content)
+		var msg *schema.Message
+		if asUser {
+			msg = schema.UserMessage(content)
+		} else {
+			msg = schema.SystemMessage(content)
+		}
 		msg.Extra = map[string]any{toolSearchReminderExtraKey: true}
 		return any(msg).(M)
 	case *schema.AgenticMessage:
-		msg := schema.SystemAgenticMessage(content)
+		var msg *schema.AgenticMessage
+		if asUser {
+			msg = schema.UserAgenticMessage(content)
+		} else {
+			msg = schema.SystemAgenticMessage(content)
+		}
 		msg.Extra = map[string]any{toolSearchReminderExtraKey: true}
 		return any(msg).(M)
 	}
@@ -286,6 +407,10 @@ func toolNameSet(tools []*schema.ToolInfo) map[string]bool {
 }
 
 func (m *typedMiddleware[M]) BeforeModelRewriteState(ctx context.Context, state *adk.TypedChatModelAgentState[M], _ *adk.TypedModelContext[M]) (context.Context, *adk.TypedChatModelAgentState[M], error) {
+	// Re-align the role of any reminder inserted in an earlier turn to the current
+	// setting (in-memory only; not emitted as a session event).
+	state.Messages = m.migrateReminderRole(state.Messages)
+
 	newMsgs, insertedMsg, beforeMessageID, didInsert := m.ensureReminder(state.Messages)
 	state.Messages = newMsgs
 
