@@ -76,6 +76,7 @@ func (e *typedChatModelAgentExecCtx[M]) send(ctx context.Context, event *TypedAg
 	}
 	ensureTypedAgentEventMessageIDs(event)
 	if event.SessionEventVariant != nil && event.SessionEventVariant.Event != nil {
+		stampSessionEventTurnID(event.SessionEventVariant.Event, sessionEventTurnIDFromContext[M](ctx))
 		gen := sessionEventIDGeneratorFromContext[M](ctx)
 		if gen == nil {
 			gen = DefaultSessionEventIDGenerator[M]

@@ -306,6 +306,7 @@ func sendSessionTimelineEvent[M MessageType](ctx context.Context, se *SessionEve
 	if !execCtx.timelineEvents && !execCtx.internalTimelineEvents {
 		return
 	}
+	stampSessionEventTurnID(se, sessionEventTurnIDFromContext[M](ctx))
 	if se.Timestamp.IsZero() {
 		se.Timestamp = newEventTimestamp()
 	}
@@ -674,6 +675,7 @@ func (m *typedEventSenderModel[M]) Stream(ctx context.Context, input []M, opts .
 	event.SessionEventVariant = &SessionEventVariant[M]{
 		MessageStreamRef: &MessageStreamRef{
 			EventID:   assistantMsgEventID,
+			TurnID:    assistantDraft.TurnID,
 			Timestamp: timestamp,
 			Kind:      SessionEventMessage,
 		},
@@ -1465,6 +1467,7 @@ func (w *typedEventSenderToolWrapper[M]) WrapStreamableToolCall(_ context.Contex
 		event.SessionEventVariant = &SessionEventVariant[M]{
 			MessageStreamRef: &MessageStreamRef{
 				EventID:   resultEventID,
+				TurnID:    toolResultDraft.TurnID,
 				Timestamp: timestamp,
 				Kind:      SessionEventMessage,
 			},
@@ -1676,6 +1679,7 @@ func (w *typedEventSenderToolWrapper[M]) WrapEnhancedStreamableToolCall(_ contex
 		event.SessionEventVariant = &SessionEventVariant[M]{
 			MessageStreamRef: &MessageStreamRef{
 				EventID:   resultEventID,
+				TurnID:    toolResultDraft.TurnID,
 				Timestamp: timestamp,
 				Kind:      SessionEventMessage,
 			},

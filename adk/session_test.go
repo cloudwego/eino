@@ -696,6 +696,75 @@ func TestAttack_SessionEventIDGeneratorCoversRunnerEvents(t *testing.T) {
 	}
 }
 
+func TestRunnerSessionTurnIDFreshRuns(t *testing.T) {
+	ctx := context.Background()
+	store := newSessionHelperStore()
+	sessionID := "turn-id-fresh"
+	runner := NewRunner(ctx, RunnerConfig{
+		Agent:        &runnerSessionAgent{name: "turn-id-agent"},
+		SessionID:    sessionID,
+		SessionStore: store,
+	})
+
+	drainSessionEvents(t, runner.Query(ctx, "first"))
+	first := decodeStoredSessionEvents(t, store.events)
+	require.NotEmpty(t, first)
+	require.Equal(t, SessionEventSessionStatusRunning, first[0].Kind)
+	firstTurnID := first[0].EventID
+	require.NotEmpty(t, firstTurnID)
+	for _, event := range first {
+		assert.Equal(t, firstTurnID, event.TurnID, "kind=%s event_id=%s", event.Kind, event.EventID)
+	}
+
+	beforeSecond := len(store.events)
+	drainSessionEvents(t, runner.Query(ctx, "second"))
+	second := decodeStoredSessionEvents(t, store.events[beforeSecond:])
+	require.NotEmpty(t, second)
+	require.Equal(t, SessionEventSessionStatusRunning, second[0].Kind)
+	secondTurnID := second[0].EventID
+	require.NotEmpty(t, secondTurnID)
+	assert.NotEqual(t, firstTurnID, secondTurnID)
+	for _, event := range second {
+		assert.Equal(t, secondTurnID, event.TurnID, "kind=%s event_id=%s", event.Kind, event.EventID)
+	}
+}
+
+func TestRunnerSessionTurnIDCustomGeneratorObservesDraft(t *testing.T) {
+	ctx := context.Background()
+	store := newSessionHelperStore()
+	const openingID = "business-opening-turn"
+	var observedAfterOpening []string
+	var sawOpening bool
+	gen := func(ctx context.Context, e *SessionEvent[*schema.Message]) (string, error) {
+		if e.Kind == SessionEventSessionStatusRunning {
+			sawOpening = true
+			assert.Empty(t, e.TurnID)
+			return openingID, nil
+		}
+		observedAfterOpening = append(observedAfterOpening, e.TurnID)
+		return DefaultSessionEventIDGenerator[*schema.Message](ctx, e)
+	}
+	runner := NewRunner(ctx, RunnerConfig{
+		Agent:        &runnerSessionAgent{name: "turn-id-generator-agent"},
+		SessionID:    "turn-id-generator",
+		SessionStore: store,
+		SessionConfig: &SessionConfig[*schema.Message]{
+			EventIDGenerator: gen,
+		},
+	})
+
+	drainSessionEvents(t, runner.Query(ctx, "hello"))
+
+	require.True(t, sawOpening)
+	require.NotEmpty(t, observedAfterOpening)
+	for _, turnID := range observedAfterOpening {
+		assert.Equal(t, openingID, turnID)
+	}
+	for _, event := range decodeStoredSessionEvents(t, store.events) {
+		assert.Equal(t, openingID, event.TurnID)
+	}
+}
+
 func TestAttack_RunnerHandlesSessionEventWithoutSessionStore(t *testing.T) {
 	ctx := context.Background()
 	runner := NewRunner(ctx, RunnerConfig{
@@ -959,6 +1028,36 @@ func TestRunnerSessionModeRejectsPendingCheckpoint(t *testing.T) {
 	assert.Equal(t, "new input", agent.inputs[0][0].Content)
 }
 
+func TestRunnerSessionCheckpointTurnIDRoundTrip(t *testing.T) {
+	data, err := encodeRunnerSessionCheckpoint(&runnerSessionCheckpoint{
+		SessionID:    "s",
+		CheckPointID: "cp",
+		TurnID:       "turn-1",
+		Payload:      []byte("opaque"),
+	})
+	require.NoError(t, err)
+
+	decoded, err := decodeRunnerSessionCheckpoint(data)
+	require.NoError(t, err)
+	assert.Equal(t, "turn-1", decoded.TurnID)
+
+	type oldRunnerSessionCheckpoint struct {
+		SessionID    string
+		CheckPointID string
+		Payload      []byte
+	}
+	legacyPayload, err := encodeGob(&oldRunnerSessionCheckpoint{
+		SessionID:    "s",
+		CheckPointID: "cp",
+		Payload:      []byte("legacy"),
+	})
+	require.NoError(t, err)
+	legacy, err := decodeRunnerSessionCheckpoint(legacyPayload)
+	require.NoError(t, err)
+	assert.Empty(t, legacy.TurnID)
+	assert.Equal(t, []byte("legacy"), legacy.Payload)
+}
+
 func TestAttack_RunClosesSessionHandleWhenCheckpointDecodeFails(t *testing.T) {
 	ctx := context.Background()
 	store := &publicSessionHelperStore{sessionHelperStore: newSessionHelperStore()}
@@ -1160,6 +1259,7 @@ func TestRunnerSessionStreamingRefAllocatesMissingEventID(t *testing.T) {
 	ref := event.SessionEventVariant.MessageStreamRef
 	require.NotNil(t, ref)
 	assert.Equal(t, businessID, ref.EventID)
+	assert.NotEmpty(t, ref.TurnID)
 	assert.Equal(t, SessionEventMessage, ref.Kind)
 	assert.False(t, ref.Timestamp.IsZero())
 
@@ -1175,6 +1275,7 @@ func TestRunnerSessionStreamingRefAllocatesMissingEventID(t *testing.T) {
 	})
 	require.Len(t, messages, 1)
 	assert.Equal(t, businessID, messages[0].EventID)
+	assert.Equal(t, ref.TurnID, messages[0].TurnID)
 	assert.Equal(t, ref.Timestamp, messages[0].Timestamp)
 }
 
@@ -1769,6 +1870,7 @@ func TestSessionEvent_HumanReadableSerializerDirectRoundTrip(t *testing.T) {
 	serializer := &schema.HumanReadableSerializer{}
 	se := &SessionEvent[*schema.Message]{
 		EventID: "serializer-direct",
+		TurnID:  "serializer-turn",
 		Kind:    SessionEventSessionStatusIdle,
 		Lifecycle: &LifecycleEvent{
 			State: SessionRunStateIdle,
@@ -1782,7 +1884,22 @@ func TestSessionEvent_HumanReadableSerializerDirectRoundTrip(t *testing.T) {
 	require.NoError(t, serializer.Unmarshal(data, &decoded))
 	require.NoError(t, NormalizeSessionEventKind(&decoded))
 	assert.Equal(t, se.EventID, decoded.EventID)
+	assert.Equal(t, se.TurnID, decoded.TurnID)
 	assert.Equal(t, se.Kind, decoded.Kind)
+}
+
+func TestSessionEvent_OldPayloadWithoutTurnIDDecodesEmpty(t *testing.T) {
+	rawJSON := []byte(`{
+		"event_id": "evt-no-turn",
+		"kind": "message",
+		"message": {"role": "user", "content": "legacy"}
+	}`)
+
+	event, err := decodeSessionEventWithSerializer[*schema.Message](rawJSON, nil)
+	require.NoError(t, err)
+	require.NotNil(t, event)
+	assert.Equal(t, "evt-no-turn", event.EventID)
+	assert.Empty(t, event.TurnID)
 }
 
 // --- New tests covering the design doc ---
@@ -1791,11 +1908,12 @@ func TestSessionEvent_HumanReadableRoundTrip(t *testing.T) {
 	t.Run("Message", func(t *testing.T) {
 		msg := schema.UserMessage("hello")
 		EnsureMessageID(msg)
-		se := &SessionEvent[*schema.Message]{Message: msg}
+		se := &SessionEvent[*schema.Message]{TurnID: "turn-message", Message: msg}
 		data, err := encodeSessionEvent(se)
 		require.NoError(t, err)
 		decoded, err := decodeSessionEvent[*schema.Message](data)
 		require.NoError(t, err)
+		assert.Equal(t, "turn-message", decoded.TurnID)
 		require.NotNil(t, decoded.Message)
 		assert.Equal(t, "hello", decoded.Message.Content)
 		assert.Equal(t, GetMessageID(msg), GetMessageID(decoded.Message))
@@ -3131,6 +3249,22 @@ func TestAttack_ResumeAfterInterruptedRunWritesSessionEvents(t *testing.T) {
 		}
 	}
 
+	interruptedEvents := decodeStoredSessionEvents(t, store.events)
+	require.NotEmpty(t, interruptedEvents)
+	var interruptedTurnID string
+	for i := len(interruptedEvents) - 1; i >= 0; i-- {
+		if interruptedEvents[i].Kind == SessionEventSessionStatusRunning {
+			interruptedTurnID = interruptedEvents[i].TurnID
+			assert.Equal(t, interruptedEvents[i].EventID, interruptedTurnID)
+			break
+		}
+	}
+	require.NotEmpty(t, interruptedTurnID)
+	cp, existed, err := loadRunnerSessionCheckpoint(ctx, store, sessionRunnerCheckpointID(sessionID))
+	require.NoError(t, err)
+	require.True(t, existed)
+	require.Equal(t, interruptedTurnID, cp.TurnID)
+
 	eventsBeforeResume := len(store.events)
 
 	resumeIter, err := runner.Resume(ctx, "")
@@ -3148,6 +3282,9 @@ func TestAttack_ResumeAfterInterruptedRunWritesSessionEvents(t *testing.T) {
 			se.Kind == SessionEventSessionStatusIdle
 	})
 	require.NotEmpty(t, resumeEvents)
+	for _, event := range resumeEvents {
+		assert.Equal(t, interruptedTurnID, event.TurnID, "kind=%s", event.Kind)
+	}
 }
 
 func TestAttack_FreshRunIgnoresInterruptedSuffixMetadata(t *testing.T) {
@@ -4507,6 +4644,29 @@ func TestExplicitCheckpointResume_WithSessionMode(t *testing.T) {
 		"caller-supplied checkpoint ID must be preserved")
 }
 
+func TestPrepareRunnerSessionResume_LegacyCheckpointUsesResumeEventTurnID(t *testing.T) {
+	ctx := context.Background()
+	store := newSessionHelperStore()
+	sid := "legacy-turn-id-resume"
+	cpID := "legacy-turn-id-cp"
+	cpBytes, err := encodeRunnerSessionCheckpoint(&runnerSessionCheckpoint{
+		Payload: []byte("opaque"),
+	})
+	require.NoError(t, err)
+	require.NoError(t, store.Set(ctx, cpID, cpBytes))
+
+	state, effective, err := prepareRunnerSessionResume[*schema.Message](ctx, store, sid, store, nil, cpID)
+	require.NoError(t, err)
+	require.True(t, state.enabled)
+	require.Equal(t, cpID, effective)
+	require.Len(t, state.initialTimeline, 1)
+	resumeEvent := state.initialTimeline[0]
+	require.Equal(t, SessionEventKind(SessionEventExtensionPrefix+"resume.request_started"), resumeEvent.Kind)
+	require.NotEmpty(t, resumeEvent.EventID)
+	assert.Equal(t, resumeEvent.EventID, state.turnID)
+	assert.Equal(t, resumeEvent.EventID, resumeEvent.TurnID)
+}
+
 // TestResumePath_TailReplay verifies that the resume path also performs tail
 // replay (uses the same fast path as the run path).
 func TestResumePath_TailReplay(t *testing.T) {
@@ -5335,6 +5495,58 @@ func TestAgentTool_ChildSessionID_FiltersFromParentLog(t *testing.T) {
 	}
 	assert.False(t, sawChild, "events tagged with a different SessionEvent.SessionID must NOT enter the parent session log")
 	assert.True(t, sawParent, "parent's own events must be persisted")
+}
+
+func TestRunnerSessionTurnIDOverwritesProducerEventsAndSkipsChildSession(t *testing.T) {
+	ctx := context.Background()
+	store := newSessionHelperStore()
+	sid := "turn-id-producer"
+	extensionKind := SessionEventKind(SessionEventExtensionPrefix + "producer")
+	agent := &mutationAgent{
+		events: []*AgentEvent{
+			{
+				SessionEventVariant: &SessionEventVariant[*schema.Message]{
+					Event: &SessionEvent[*schema.Message]{
+						TurnID:    "producer-selected-turn",
+						Kind:      extensionKind,
+						Extension: &SessionExtensionEvent{},
+					},
+				},
+			},
+			{
+				SessionEventVariant: &SessionEventVariant[*schema.Message]{
+					SessionID: "agent_tool:child",
+					Event: &SessionEvent[*schema.Message]{
+						TurnID:    "child-turn",
+						Kind:      extensionKind,
+						Extension: &SessionExtensionEvent{},
+					},
+				},
+			},
+		},
+	}
+	runner := NewRunner(ctx, RunnerConfig{
+		Agent:        agent,
+		SessionID:    sid,
+		SessionStore: store,
+	})
+
+	drainSessionEvents(t, runner.Query(ctx, "go", WithTimelineEvents()))
+
+	events := decodeStoredSessionEvents(t, store.events)
+	require.NotEmpty(t, events)
+	parentTurnID := events[0].TurnID
+	require.NotEmpty(t, parentTurnID)
+	var sawExtension bool
+	for _, event := range events {
+		assert.Equal(t, parentTurnID, event.TurnID, "kind=%s", event.Kind)
+		if event.Kind == extensionKind {
+			sawExtension = true
+			assert.NotEqual(t, "producer-selected-turn", event.TurnID)
+		}
+		assert.NotEqual(t, "child-turn", event.TurnID)
+	}
+	assert.True(t, sawExtension)
 }
 
 // TestAgentToolInterruptState_RoundTrip verifies the wrapper struct round-trips

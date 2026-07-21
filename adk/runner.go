@@ -176,6 +176,7 @@ type runnerSessionRunState[M MessageType] struct {
 	sessionStore    SessionEventStore[M]
 	sessionHandle   sessionHandle[M]
 	checkPointStore CheckPointStore
+	turnID          string
 	initialTimeline []*SessionEvent[M]
 	// inputMessages are the caller-provided messages for this turn (before history prepend).
 	// Captured so the Runner can persist them as session events at turn start.
@@ -295,6 +296,8 @@ func prepareRunnerSessionRun[M MessageType]( //nolint:revive // argument-limit
 		_ = state.sessionHandle.close(ctx)
 		return nil, err
 	}
+	state.turnID = runningEvent.EventID
+	runningEvent.TurnID = state.turnID
 	err = appendRunnerSessionControlEvent(ctx, state, runningEvent)
 	if err != nil {
 		_ = state.sessionHandle.close(ctx)
@@ -379,7 +382,7 @@ func prepareRunnerSessionResume[M MessageType]( //nolint:revive // argument-limi
 	// passing an explicit checkpoint ID has asserted the checkpoint should exist
 	// and any error will surface from the subsequent load. For implicit resume,
 	// the absence of a pending checkpoint is fatal and reported here.
-	_, existed, err := loadRunnerSessionCheckpoint(ctx, checkPointStore, effectiveCheckPointID)
+	cp, existed, err := loadRunnerSessionCheckpoint(ctx, checkPointStore, effectiveCheckPointID)
 	if err != nil {
 		_ = state.sessionHandle.close(ctx)
 		return nil, "", err
@@ -396,9 +399,17 @@ func prepareRunnerSessionResume[M MessageType]( //nolint:revive // argument-limi
 		Kind:      SessionEventKind(SessionEventExtensionPrefix + "resume.request_started"),
 		Extension: &SessionExtensionEvent{},
 	}
+	if cp != nil && cp.TurnID != "" {
+		state.turnID = cp.TurnID
+		resumeEvent.TurnID = state.turnID
+	}
 	if err := assignSessionEventID(ctx, resumeEvent, state.sessionConfig.EventIDGenerator); err != nil {
 		_ = state.sessionHandle.close(ctx)
 		return nil, "", err
+	}
+	if state.turnID == "" {
+		state.turnID = resumeEvent.EventID
+		resumeEvent.TurnID = state.turnID
 	}
 	if err := appendRunnerSessionControlEvent(ctx, state, resumeEvent); err != nil {
 		_ = state.sessionHandle.close(ctx)
@@ -433,6 +444,7 @@ func appendRunnerSessionInputEvents[M MessageType](
 	}
 	for _, msg := range messages {
 		se := makeInputSessionEvent[M](msg)
+		stampSessionEventTurnID(se, state.turnID)
 		if err := assignSessionEventID(ctx, se, state.sessionConfig.EventIDGenerator); err != nil {
 			return err
 		}
@@ -529,6 +541,7 @@ func saveRunnerCheckpoint[M MessageType]( //nolint:revive // argument-limit
 	data, err := encodeRunnerSessionCheckpoint(&runnerSessionCheckpoint{
 		SessionID:    sessionState.sessionID,
 		CheckPointID: checkPointID,
+		TurnID:       sessionState.turnID,
 		Payload:      payload,
 	})
 	if err != nil {
@@ -575,6 +588,7 @@ func typedRunnerRunImpl[M MessageType](a TypedAgent[M], enableStreaming bool, st
 
 	if sessionState.enabled {
 		ctx = contextWithSessionEventIDGenerator[M](ctx, sessionState.sessionConfig.EventIDGenerator)
+		ctx = contextWithSessionEventTurnID[M](ctx, sessionState.turnID)
 	}
 
 	var zero M
@@ -687,6 +701,7 @@ func typedRunnerResumeInternalImpl[M MessageType](a TypedAgent[M], store CheckPo
 
 	if sessionState.enabled {
 		ctx = contextWithSessionEventIDGenerator[M](ctx, sessionState.sessionConfig.EventIDGenerator)
+		ctx = contextWithSessionEventTurnID[M](ctx, sessionState.turnID)
 	}
 
 	if len(resumeData) > 0 {
@@ -763,6 +778,18 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 			}
 		}
 	}
+	stampParentSessionEvent := func(se *SessionEvent[M]) {
+		if sessionState == nil || !sessionState.enabled {
+			return
+		}
+		stampSessionEventTurnID(se, sessionState.turnID)
+	}
+	stampParentStreamRef := func(ref *MessageStreamRef) {
+		if ref == nil || sessionState == nil || !sessionState.enabled || sessionState.turnID == "" {
+			return
+		}
+		ref.TurnID = sessionState.turnID
+	}
 	setPersistErr := func(err error) {
 		if err != nil && persistErr == nil {
 			persistErr = err
@@ -792,6 +819,7 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 		if persister == nil || se == nil {
 			return nil
 		}
+		stampParentSessionEvent(se)
 		if err := ValidateEmittedSessionEventKind(se); err != nil {
 			setPersistErr(err)
 			return err
@@ -805,6 +833,7 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 		if se == nil {
 			return false
 		}
+		stampParentSessionEvent(se)
 		if se.EventID == "" {
 			if err := assignSessionEventIDFromContext(ctx, se); err != nil {
 				setPersistErr(err)
@@ -829,17 +858,20 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 			if ref.Timestamp.IsZero() {
 				ref.Timestamp = newEventTimestamp()
 			}
+			stampParentStreamRef(ref)
 			ref.Kind = SessionEventMessage
 			if ref.EventID == "" {
 				draft := &SessionEvent[M]{
 					Timestamp: ref.Timestamp,
 					Kind:      SessionEventMessage,
 				}
+				stampParentSessionEvent(draft)
 				if err := assignSessionEventID(ctx, draft, sessionState.sessionConfig.EventIDGenerator); err != nil {
 					setPersistErr(err)
 					return nil, err
 				}
 				ref.EventID = draft.EventID
+				ref.TurnID = draft.TurnID
 				ref.Timestamp = draft.Timestamp
 			}
 			return ref, nil
@@ -848,12 +880,14 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 			Timestamp: newEventTimestamp(),
 			Kind:      SessionEventMessage,
 		}
+		stampParentSessionEvent(draft)
 		if err := assignSessionEventID(ctx, draft, sessionState.sessionConfig.EventIDGenerator); err != nil {
 			setPersistErr(err)
 			return nil, err
 		}
 		return &MessageStreamRef{
 			EventID:   draft.EventID,
+			TurnID:    draft.TurnID,
 			Timestamp: draft.Timestamp,
 			Kind:      SessionEventMessage,
 		}, nil
@@ -870,6 +904,7 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 			Kind:      SessionEventMessage,
 			Message:   event.Output.MessageOutput.Message,
 		}
+		stampParentSessionEvent(draft)
 		if idErr := assignSessionEventID(ctx, draft, sessionState.sessionConfig.EventIDGenerator); idErr != nil {
 			return nil, idErr
 		}
@@ -907,6 +942,7 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 			event.SessionEventVariant.SessionID != "" &&
 			event.SessionEventVariant.SessionID != sessionState.sessionID
 		if !fromOtherSession && event.SessionEventVariant != nil && event.SessionEventVariant.Event != nil {
+			stampParentSessionEvent(event.SessionEventVariant.Event)
 			gen := DefaultSessionEventIDGenerator[M]
 			if sessionState != nil && sessionState.enabled {
 				gen = sessionState.sessionConfig.EventIDGenerator
@@ -1024,6 +1060,7 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 						if hasChunks {
 							_ = persistSessionEvent(&SessionEvent[M]{
 								EventID:   ref.EventID,
+								TurnID:    ref.TurnID,
 								Timestamp: ref.Timestamp,
 								Kind:      SessionEventMessageStreamIncomplete,
 								MessageStreamIncomplete: &MessageStreamIncompleteEvent[M]{
@@ -1040,6 +1077,7 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 
 					_ = persistSessionEvent(&SessionEvent[M]{
 						EventID:   ref.EventID,
+						TurnID:    ref.TurnID,
 						Timestamp: ref.Timestamp,
 						Kind:      SessionEventMessage,
 						Message:   persistedMsg,
