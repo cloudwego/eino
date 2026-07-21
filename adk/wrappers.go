@@ -646,7 +646,9 @@ func (m *typedEventSenderModel[M]) Stream(ctx context.Context, input []M, opts .
 	// match on Kind==SessionEventMessage with a zero Message.
 	var draftZero M
 	assistantDraft := &SessionEvent[M]{Timestamp: timestamp, Kind: SessionEventMessage, Message: draftZero}
-	if err := assignSessionEventIDFromContext(ctx, assistantDraft); err != nil {
+	sc := sessionEventContextFromContext[M](ctx)
+	stampSessionEventTurnID(assistantDraft, sc.turnID)
+	if err := prepareSessionEventEnvelope(ctx, assistantDraft, sc.generator, sc.provider, sessionEventEnvelopeOptions{AllowPayloadlessDraft: true}); err != nil {
 		result.Close()
 		return nil, err
 	}
@@ -1403,7 +1405,9 @@ func (w *typedEventSenderToolWrapper[M]) WrapStreamableToolCall(_ context.Contex
 		// ToolResultMessageEventID reference is left behind.
 		var toolResultDraftMsg M
 		toolResultDraft := &SessionEvent[M]{Timestamp: timestamp, Kind: SessionEventMessage, Message: toolResultDraftMsg}
-		if idErr := assignSessionEventIDFromContext(ctx, toolResultDraft); idErr != nil {
+		sc := sessionEventContextFromContext[M](ctx)
+		stampSessionEventTurnID(toolResultDraft, sc.turnID)
+		if idErr := prepareSessionEventEnvelope(ctx, toolResultDraft, sc.generator, sc.provider, sessionEventEnvelopeOptions{AllowPayloadlessDraft: true}); idErr != nil {
 			if execCtx := getTypedChatModelAgentExecCtx[M](ctx); execCtx != nil && execCtx.generator != nil {
 				execCtx.send(ctx, &TypedAgentEvent[M]{Err: idErr})
 			}
@@ -1617,7 +1621,9 @@ func (w *typedEventSenderToolWrapper[M]) WrapEnhancedStreamableToolCall(_ contex
 		// ToolResultMessageEventID reference is left behind.
 		var toolResultDraftMsg M
 		toolResultDraft := &SessionEvent[M]{Timestamp: timestamp, Kind: SessionEventMessage, Message: toolResultDraftMsg}
-		if idErr := assignSessionEventIDFromContext(ctx, toolResultDraft); idErr != nil {
+		sc := sessionEventContextFromContext[M](ctx)
+		stampSessionEventTurnID(toolResultDraft, sc.turnID)
+		if idErr := prepareSessionEventEnvelope(ctx, toolResultDraft, sc.generator, sc.provider, sessionEventEnvelopeOptions{AllowPayloadlessDraft: true}); idErr != nil {
 			if execCtx := getTypedChatModelAgentExecCtx[M](ctx); execCtx != nil && execCtx.generator != nil {
 				execCtx.send(ctx, &TypedAgentEvent[M]{Err: idErr})
 			}

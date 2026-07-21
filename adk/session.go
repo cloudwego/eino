@@ -1181,7 +1181,8 @@ func applySessionEventExtraProvider[M MessageType](
 }
 
 type sessionEventEnvelopeOptions struct {
-	PreserveEventID bool
+	PreserveEventID       bool
+	AllowPayloadlessDraft bool
 }
 
 func prepareSessionEventEnvelope[M MessageType](
@@ -1194,8 +1195,14 @@ func prepareSessionEventEnvelope[M MessageType](
 	if event == nil {
 		return nil
 	}
-	if err := NormalizeSessionEventKind(event); err != nil {
-		return err
+	if opts.AllowPayloadlessDraft {
+		if event.Kind == "" {
+			return errors.New("session event draft must set non-empty Kind")
+		}
+	} else {
+		if err := NormalizeSessionEventKind(event); err != nil {
+			return err
+		}
 	}
 	if event.Timestamp.IsZero() {
 		event.Timestamp = newEventTimestamp()
@@ -1210,6 +1217,9 @@ func prepareSessionEventEnvelope[M MessageType](
 		if err := assignSessionEventID(ctx, event, gen); err != nil {
 			return err
 		}
+	}
+	if opts.AllowPayloadlessDraft {
+		return ValidateSessionEventExtra(event)
 	}
 	return ValidateEmittedSessionEventKind(event)
 }

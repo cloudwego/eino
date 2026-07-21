@@ -6417,8 +6417,171 @@ func TestRunnerSessionEventExtraProviderDecoratesStreamingFinalMessage(t *testin
 			}
 		}
 		require.NotNil(t, incomplete)
-		assert.Equal(t, true, incomplete.Extra["stream_incomplete"])
+		streamIncomplete, ok := incomplete.Extra["stream_incomplete"].(bool)
+		require.True(t, ok)
+		assert.True(t, streamIncomplete)
 	})
+}
+
+func TestAttack_StreamModelReservationGeneratorSeesProviderExtra(t *testing.T) {
+	ctx := context.Background()
+	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "stream-provider-reservation-agent",
+		Instruction: "test",
+		Model: &leadingSystemTestModel[*schema.Message]{
+			response: schema.AssistantMessage("streamed", nil),
+		},
+	})
+	require.NoError(t, err)
+
+	store := newSessionHelperStore()
+	var generatorSawReservation int64
+	runner := NewRunner(ctx, RunnerConfig{
+		Agent:           agent,
+		EnableStreaming: true,
+		SessionID:       "stream-provider-reservation-session",
+		SessionStore:    store,
+		SessionConfig: &SessionConfig[*schema.Message]{
+			EventExtraProvider: func(_ context.Context, event *SessionEvent[*schema.Message]) (map[string]any, error) {
+				if event.Kind == SessionEventMessage && isNilMessage(event.Message) {
+					return map[string]any{"reservation": "model_stream"}, nil
+				}
+				return nil, nil
+			},
+			EventIDGenerator: func(_ context.Context, event *SessionEvent[*schema.Message]) (string, error) {
+				if event.Kind == SessionEventMessage && isNilMessage(event.Message) &&
+					event.Extra["reservation"] == "model_stream" {
+					atomic.AddInt64(&generatorSawReservation, 1)
+				}
+				return DefaultSessionEventIDGenerator[*schema.Message](context.Background(), event)
+			},
+		},
+	})
+
+	iter := runner.Query(ctx, "q")
+	for {
+		event, ok := iter.Next()
+		if !ok {
+			break
+		}
+		require.NoError(t, event.Err)
+		if event.Output != nil && event.Output.MessageOutput != nil &&
+			event.Output.MessageOutput.IsStreaming && event.Output.MessageOutput.MessageStream != nil {
+			_, err := schema.ConcatMessageStream(event.Output.MessageOutput.MessageStream)
+			require.NoError(t, err)
+		}
+	}
+
+	assert.Equal(t, int64(1), atomic.LoadInt64(&generatorSawReservation))
+}
+
+func TestAttack_StreamToolReservationGeneratorSeesProviderExtra(t *testing.T) {
+	ctx := context.Background()
+	streamTool := &streamableTestTool{name: "provider_stream_tool", result: "stream chunk"}
+	mockModel := &mockToolCallingModel{toolCallName: "provider_stream_tool"}
+	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "stream-tool-provider-reservation-agent",
+		Instruction: "test",
+		Model:       mockModel,
+		ToolsConfig: ToolsConfig{
+			ToolsNodeConfig: compose.ToolsNodeConfig{Tools: []tool.BaseTool{streamTool}},
+		},
+	})
+	require.NoError(t, err)
+
+	store := newSessionHelperStore()
+	var generatorSawReservation int64
+	runner := NewRunner(ctx, RunnerConfig{
+		Agent:        agent,
+		SessionID:    "stream-tool-provider-reservation-session",
+		SessionStore: store,
+		SessionConfig: &SessionConfig[*schema.Message]{
+			EventExtraProvider: func(_ context.Context, event *SessionEvent[*schema.Message]) (map[string]any, error) {
+				if event.Kind == SessionEventMessage && isNilMessage(event.Message) {
+					return map[string]any{"reservation": "tool_stream"}, nil
+				}
+				return nil, nil
+			},
+			EventIDGenerator: func(_ context.Context, event *SessionEvent[*schema.Message]) (string, error) {
+				if event.Kind == SessionEventMessage && isNilMessage(event.Message) &&
+					event.Extra["reservation"] == "tool_stream" {
+					atomic.AddInt64(&generatorSawReservation, 1)
+				}
+				return DefaultSessionEventIDGenerator[*schema.Message](context.Background(), event)
+			},
+		},
+	})
+
+	iter := runner.Query(ctx, "q")
+	for {
+		event, ok := iter.Next()
+		if !ok {
+			break
+		}
+		require.NoError(t, event.Err)
+		if event.Output != nil && event.Output.MessageOutput != nil &&
+			event.Output.MessageOutput.IsStreaming && event.Output.MessageOutput.MessageStream != nil {
+			_, err := schema.ConcatMessageStream(event.Output.MessageOutput.MessageStream)
+			require.NoError(t, err)
+		}
+	}
+
+	assert.Equal(t, int64(1), atomic.LoadInt64(&generatorSawReservation))
+}
+
+func TestAttack_EnhancedStreamToolReservationGeneratorSeesProviderExtra(t *testing.T) {
+	ctx := context.Background()
+	streamTool := &enhancedStreamableTestTool{name: "provider_enhanced_stream_tool", result: "stream chunk"}
+	mockModel := &mockToolCallingModel{toolCallName: "provider_enhanced_stream_tool"}
+	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "enhanced-stream-tool-provider-reservation-agent",
+		Instruction: "test",
+		Model:       mockModel,
+		ToolsConfig: ToolsConfig{
+			ToolsNodeConfig: compose.ToolsNodeConfig{Tools: []tool.BaseTool{streamTool}},
+		},
+	})
+	require.NoError(t, err)
+
+	store := newSessionHelperStore()
+	var generatorSawReservation int64
+	runner := NewRunner(ctx, RunnerConfig{
+		Agent:           agent,
+		EnableStreaming: true,
+		SessionID:       "enhanced-stream-tool-provider-reservation-session",
+		SessionStore:    store,
+		SessionConfig: &SessionConfig[*schema.Message]{
+			EventExtraProvider: func(_ context.Context, event *SessionEvent[*schema.Message]) (map[string]any, error) {
+				if event.Kind == SessionEventMessage && isNilMessage(event.Message) {
+					return map[string]any{"reservation": "enhanced_tool_stream"}, nil
+				}
+				return nil, nil
+			},
+			EventIDGenerator: func(_ context.Context, event *SessionEvent[*schema.Message]) (string, error) {
+				if event.Kind == SessionEventMessage && isNilMessage(event.Message) &&
+					event.Extra["reservation"] == "enhanced_tool_stream" {
+					atomic.AddInt64(&generatorSawReservation, 1)
+				}
+				return DefaultSessionEventIDGenerator[*schema.Message](context.Background(), event)
+			},
+		},
+	})
+
+	iter := runner.Query(ctx, "q")
+	for {
+		event, ok := iter.Next()
+		if !ok {
+			break
+		}
+		require.NoError(t, event.Err)
+		if event.Output != nil && event.Output.MessageOutput != nil &&
+			event.Output.MessageOutput.IsStreaming && event.Output.MessageOutput.MessageStream != nil {
+			_, err := schema.ConcatMessageStream(event.Output.MessageOutput.MessageStream)
+			require.NoError(t, err)
+		}
+	}
+
+	assert.GreaterOrEqual(t, atomic.LoadInt64(&generatorSawReservation), int64(1))
 }
 
 func TestSessionEventExtraIgnoredByReconstruction(t *testing.T) {

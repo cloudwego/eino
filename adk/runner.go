@@ -862,7 +862,7 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 					Kind:      SessionEventMessage,
 				}
 				stampOwnTurnID(draft)
-				if err := assignSessionEventID(ctx, draft, sessionState.sessionConfig.EventIDGenerator); err != nil {
+				if err := prepareSessionEventEnvelope(ctx, draft, sessionState.sessionConfig.EventIDGenerator, sessionState.sessionConfig.EventExtraProvider, sessionEventEnvelopeOptions{AllowPayloadlessDraft: true}); err != nil {
 					setPersistErr(err)
 					return nil, err
 				}
@@ -877,7 +877,7 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 			Kind:      SessionEventMessage,
 		}
 		stampOwnTurnID(draft)
-		if err := assignSessionEventID(ctx, draft, sessionState.sessionConfig.EventIDGenerator); err != nil {
+		if err := prepareSessionEventEnvelope(ctx, draft, sessionState.sessionConfig.EventIDGenerator, sessionState.sessionConfig.EventExtraProvider, sessionEventEnvelopeOptions{AllowPayloadlessDraft: true}); err != nil {
 			setPersistErr(err)
 			return nil, err
 		}
