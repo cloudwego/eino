@@ -645,3 +645,27 @@ func TestResolveRunCancelContext_CheckpointAwareInheritedScope(t *testing.T) {
 		t.Fatal("checkpoint-aware inherited scope should not be owned by the child run")
 	}
 }
+
+func TestAttack_DirectNestedAgentUnderCheckpointAwareParentGetsAbortOnlyScope(t *testing.T) {
+	parent := newCancelContext()
+	baseCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	checkpointAware := parent.deriveCheckpointAwareCancelContext(baseCtx)
+	t.Cleanup(checkpointAware.markDone)
+	ctx := withCancelContext(baseCtx, checkpointAware)
+	ctx = withTypedChatModelAgentExecCtx(ctx, &chatModelAgentExecCtx{
+		cancelCtx: checkpointAware,
+	})
+
+	got, owned := resolveRunCancelContext(ctx, &options{})
+	if got == checkpointAware {
+		t.Fatal("direct nested agent reused the checkpoint-aware parent scope")
+	}
+	if got == nil || !got.abortOnly || got.parent != checkpointAware {
+		t.Fatalf("direct nested agent should derive an abort-only child scope, got %#v", got)
+	}
+	if !owned {
+		t.Fatal("direct nested agent should own the derived abort-only scope")
+	}
+}
