@@ -935,11 +935,11 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 		if !ok {
 			break
 		}
-		fromOtherSession := event.SessionEventVariant != nil &&
+		foreignEvent := event.SessionEventVariant != nil &&
 			sessionState != nil && sessionState.enabled &&
 			event.SessionEventVariant.SessionID != "" &&
 			event.SessionEventVariant.SessionID != sessionState.sessionID
-		if !fromOtherSession && event.SessionEventVariant != nil && event.SessionEventVariant.Event != nil {
+		if !foreignEvent && event.SessionEventVariant != nil && event.SessionEventVariant.Event != nil {
 			stampOwnTurnID(event.SessionEventVariant.Event)
 			gen := DefaultSessionEventIDGenerator[M]
 			if sessionState != nil && sessionState.enabled {
@@ -955,7 +955,7 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 				event.Err = err
 			}
 		}
-		if !fromOtherSession && event.SessionEventVariant != nil && event.SessionEventVariant.MessageStreamRef != nil {
+		if !foreignEvent && event.SessionEventVariant != nil && event.SessionEventVariant.MessageStreamRef != nil {
 			stampOwnStreamRefTurnID(event.SessionEventVariant.MessageStreamRef)
 		}
 		if err := validateAgentSessionEventIdentity(event); err != nil {
@@ -1021,9 +1021,9 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 
 		liveDelivered := false
 		if persister != nil {
-			// Skip persistence (but not live delivery) for events owned by a
-			// different session (inner agent events forwarded via AgentTool).
-			if !fromOtherSession {
+			// Skip persistence (but not live delivery) for events tagged with a
+			// foreign SessionID (inner agent events forwarded via AgentTool).
+			if !foreignEvent {
 				if event.Output != nil && event.Output.MessageOutput != nil &&
 					event.Output.MessageOutput.IsStreaming && event.Output.MessageOutput.MessageStream != nil {
 					ref, err := reserveMessageStreamRef(event)
