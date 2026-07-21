@@ -130,20 +130,23 @@ Re-audit:
 Verification:
 
 - `go test ./adk -run 'TestAttack_(StreamModel|StreamTool|EnhancedStreamTool)ReservationGeneratorSeesProviderExtra' -count=1 -v`: pass.
-- `go test ./adk -run 'Test(SessionEventExtra|RunnerSessionEventExtraProvider|Runner_EventExtraProviderRunsOnceForTypedSendEvent|Attack_(StreamModel|StreamTool|EnhancedStreamTool)ReservationGeneratorSeesProviderExtra|StreamPersistence|RunnerSessionStreamingRefAllocatesMissingEventID)' -coverprofile=pr1153_adk_cover.out -count=1`: pass, targeted ADK coverage 29.2%.
+- `go test ./adk -run 'TestSessionEventExtraValidation|TestSessionEventExtraProviderMergeAndMutationGuard|TestSessionEventContextMergesGeneratorProviderAndTurnID|TestRunnerSessionEventExtraProvider|TestAttack_Stream(Model|Tool|EnhancedStreamTool)ReservationGeneratorSeesProviderExtra' -coverprofile=adk_pr1153_cover.out -count=1`: pass, targeted ADK coverage 26.1%.
 - `go test ./adk/session ./adk/middlewares/summarization -count=1`: pass.
 
 Targeted coverage highlights:
 
 | Function | Coverage |
 |----------|----------|
-| `ValidateSessionEventExtra` | 66.7% |
+| `ValidateSessionEventExtra` | 100.0% |
 | `normalizeSessionEventExtra` | 100.0% |
 | `validateSessionEventExtraValue` | 74.5% |
 | `cloneSessionEventExtra` | 100.0% |
+| `cloneSessionEventExtraValue` | 100.0% |
 | `cloneSessionEventProviderView` | 80.0% |
 | `mergeSessionEventExtra` | 100.0% |
-| `applySessionEventExtraProvider` | 81.8% |
+| `applySessionEventExtraProvider` | 77.3% |
+| `prepareSessionEventEnvelope` | 73.7% |
+| `contextWithSessionEventContext` | 90.0% |
 | `WrapStreamableToolCall` | 72.4% |
 | `WrapEnhancedStreamableToolCall` | 72.4% |
 
@@ -205,12 +208,13 @@ Full `go test ./...` remains blocked by pre-existing baseline failures listed in
 |---|----------|--------|------------|
 | 1 | Assertion Quality | Replaced boolean equality on `any` map value with typed boolean assertion. | +2 |
 | 2 | Coverage Gap | Added enhanced streamable tool attack coverage. | +55 |
+| 3 | Coverage Gap | Removed unused context helper wrappers and added nested `Extra` clone plus context merge coverage. | +21 / -28 |
 
 ### Coverage Final
 
-- Targeted ADK coverage profile: 29.2% statement coverage for selected PR-relevant tests.
-- Changed helper coverage is above 70% for core validation/provider paths except `cloneSessionEventExtraValue` at 28.6%, which only has two small recursive branches and is indirectly covered through map cloning tests.
-- Full package coverage could not be produced from `go test ./...` due unrelated baseline failures.
+- Targeted ADK coverage profile: 26.1% statement coverage for selected PR-relevant tests.
+- Changed helper coverage is above 70% for validation/provider/context paths; recursive `Extra` cloning is directly covered.
+- PR-relevant package coverage: `./adk` 88.6%, `./adk/session` 88.5%, `./adk/middlewares/summarization` 87.5%.
 
 ## Cumulative File Change List
 
@@ -219,7 +223,7 @@ Full `go test ./...` remains blocked by pre-existing baseline failures listed in
 | `adk/session.go` | 1, 2 | Added `AllowPayloadlessDraft` envelope option to support streaming ID reservation without weakening normal emitted-event validation. |
 | `adk/wrappers.go` | 1, 2 | Routed model stream, streamable tool, and enhanced streamable tool reservation drafts through provider-aware envelope preparation. |
 | `adk/runner.go` | 1, 2 | Routed runner fallback stream-ref reservation drafts through provider-aware envelope preparation. |
-| `adk/session_test.go` | 2, 3 | Added three streaming reservation attack tests and tightened one boolean assertion. |
+| `adk/session_test.go` | 2, 3 | Added streaming reservation attack tests, tightened assertions, and covered nested `Extra` clone plus context merge branches. |
 | `pr_1153_comprehensive_review.md` | 4 | Tracking document and final summary. |
 
 ## Remaining Items

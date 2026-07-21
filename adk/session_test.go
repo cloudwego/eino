@@ -6102,9 +6102,12 @@ func TestSessionEventExtraValidation(t *testing.T) {
 		},
 	}
 	require.NoError(t, ValidateEmittedSessionEventKind(valid))
+	err := ValidateSessionEventExtra[*schema.Message](nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "nil session event")
 	assert.Equal(t, 1, countActiveSessionEventPayloads(valid), "Extra must not count as a semantic payload")
 
-	_, err := snapshotSessionEvent(valid)
+	_, err = snapshotSessionEvent(valid)
 	require.NoError(t, err)
 
 	cases := []struct {
@@ -6135,9 +6138,13 @@ func TestSessionEventExtraValidation(t *testing.T) {
 func TestSessionEventExtraProviderMergeAndMutationGuard(t *testing.T) {
 	ctx := context.Background()
 	var generatorSawExtra bool
+	baseNested := map[string]any{"inner": "base"}
+	baseSlice := []any{"seed", map[string]any{"leaf": "base"}}
+	providerNested := map[string]any{"inner": "provider"}
+	providerSlice := []any{"provider", map[string]any{"leaf": "provider"}}
 	event := &SessionEvent[*schema.Message]{
 		Kind:    SessionEventMessage,
-		Extra:   map[string]any{"reason": "seed", "_eino_source": "framework"},
+		Extra:   map[string]any{"reason": "seed", "_eino_source": "framework", "base_nested": baseNested, "base_slice": baseSlice},
 		Message: schema.UserMessage("hello"),
 	}
 	err := prepareSessionEventEnvelope(ctx, event,
@@ -6152,7 +6159,7 @@ func TestSessionEventExtraProviderMergeAndMutationGuard(t *testing.T) {
 			require.Empty(t, view.EventID)
 			require.False(t, view.Timestamp.IsZero())
 			view.Extra["view_only"] = true
-			return map[string]any{"reason": "provider", "tenant_id": "t1"}, nil
+			return map[string]any{"reason": "provider", "tenant_id": "t1", "provider_nested": providerNested, "provider_slice": providerSlice}, nil
 		},
 		sessionEventEnvelopeOptions{},
 	)
@@ -6163,6 +6170,14 @@ func TestSessionEventExtraProviderMergeAndMutationGuard(t *testing.T) {
 	assert.Equal(t, "framework", event.Extra["_eino_source"])
 	assert.Equal(t, "t1", event.Extra["tenant_id"])
 	assert.NotContains(t, event.Extra, "view_only")
+	baseNested["inner"] = "mutated"
+	baseSlice[1].(map[string]any)["leaf"] = "mutated"
+	providerNested["inner"] = "mutated"
+	providerSlice[1].(map[string]any)["leaf"] = "mutated"
+	assert.Equal(t, "base", event.Extra["base_nested"].(map[string]any)["inner"])
+	assert.Equal(t, "base", event.Extra["base_slice"].([]any)[1].(map[string]any)["leaf"])
+	assert.Equal(t, "provider", event.Extra["provider_nested"].(map[string]any)["inner"])
+	assert.Equal(t, "provider", event.Extra["provider_slice"].([]any)[1].(map[string]any)["leaf"])
 
 	t.Run("rejects framework provider keys", func(t *testing.T) {
 		ev := &SessionEvent[*schema.Message]{Kind: SessionEventMessage, Message: schema.UserMessage("hello")}
@@ -6199,6 +6214,37 @@ func TestSessionEventExtraProviderMergeAndMutationGuard(t *testing.T) {
 		require.ErrorIs(t, err, providerErr)
 		assert.Empty(t, ev.EventID)
 	})
+}
+
+func TestSessionEventContextMergesGeneratorProviderAndTurnID(t *testing.T) {
+	ctx := context.Background()
+	generator := func(context.Context, *SessionEvent[*schema.Message]) (string, error) {
+		return "event-1", nil
+	}
+	provider := func(context.Context, *SessionEvent[*schema.Message]) (map[string]any, error) {
+		return map[string]any{"reason": "test"}, nil
+	}
+
+	assert.Equal(t, ctx, contextWithSessionEventContext[*schema.Message](ctx, nil, nil, ""))
+
+	ctx = contextWithSessionEventContext(ctx, generator, provider, "turn-1")
+	sc := sessionEventContextFromContext[*schema.Message](ctx)
+	require.NotNil(t, sc.generator)
+	require.NotNil(t, sc.provider)
+	assert.Equal(t, "turn-1", sc.turnID)
+
+	ctx = contextWithSessionEventContext[*schema.Message](ctx, nil, nil, "turn-2")
+	sc = sessionEventContextFromContext[*schema.Message](ctx)
+	require.NotNil(t, sc.generator)
+	require.NotNil(t, sc.provider)
+	assert.Equal(t, "turn-2", sc.turnID)
+
+	event := &SessionEvent[*schema.Message]{Kind: SessionEventMessage, Message: schema.UserMessage("hello")}
+	stampSessionEventTurnID(event, sc.turnID)
+	require.NoError(t, prepareSessionEventEnvelope(context.Background(), event, sc.generator, sc.provider, sessionEventEnvelopeOptions{}))
+	assert.Equal(t, "turn-2", event.TurnID)
+	assert.Equal(t, "test", event.Extra["reason"])
+	assert.Equal(t, "event-1", event.EventID)
 }
 
 func TestRunnerSessionEventExtraProviderDecoratesPreparationEvents(t *testing.T) {

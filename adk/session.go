@@ -653,8 +653,7 @@ func normalizeSerializer(serializer schema.Serializer) schema.Serializer {
 // makeInputSessionEvent wraps an input message as a SessionEvent draft.
 //
 // The returned draft has an empty EventID; the caller must assign one via
-// assignSessionEventIDFromContext (or assignSessionEventID) before sending or
-// persisting the event.
+// assignSessionEventID before sending or persisting the event.
 func makeInputSessionEvent[M MessageType](msg M) *SessionEvent[M] {
 	return &SessionEvent[M]{Timestamp: newEventTimestamp(), Kind: SessionEventMessage, Message: msg}
 }
@@ -1228,8 +1227,7 @@ func prepareSessionEventEnvelope[M MessageType](
 // gen, falling back to DefaultSessionEventIDGenerator[M] when gen is nil. It
 // is the single authoritative entry point for SessionEvent[M] ID allocation
 // in ADK; runner / wrappers paths must route every draft through this helper
-// (or its context wrapper assignSessionEventIDFromContext) before sending or
-// persisting the event.
+// before sending or persisting the event.
 //
 // Callers MUST construct the draft with EventID == "" and populate every
 // other relevant session-local field (Kind, payload, timestamp) so the
@@ -1306,30 +1304,6 @@ func stampSessionEventTurnID[M MessageType](event *SessionEvent[M], turnID strin
 		return
 	}
 	event.TurnID = turnID
-}
-
-func contextWithSessionEventExtraProvider[M MessageType](ctx context.Context, provider SessionEventExtraProvider[M]) context.Context {
-	if provider == nil {
-		return ctx
-	}
-	return contextWithSessionEventContext[M](ctx, nil, provider, "")
-}
-
-func sessionEventExtraProviderFromContext[M MessageType](ctx context.Context) SessionEventExtraProvider[M] {
-	return sessionEventContextFromContext[M](ctx).provider
-}
-
-// assignSessionEventIDFromContext assigns the EventID of a draft
-// SessionEvent[M] using the SessionEventIDGenerator[M] stored in ctx (falling
-// back to DefaultSessionEventIDGenerator[M] when none is set). Wrappers and
-// runner closures call this helper after populating the rest of the draft.
-func assignSessionEventIDFromContext[M MessageType](ctx context.Context, event *SessionEvent[M]) error {
-	if event == nil {
-		return nil
-	}
-	sc := sessionEventContextFromContext[M](ctx)
-	stampSessionEventTurnID(event, sc.turnID)
-	return assignSessionEventID(ctx, event, sc.generator)
 }
 
 type sessionEventPersister[M MessageType] struct {
