@@ -957,6 +957,9 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 				event.Err = err
 			}
 		}
+		if !fromOtherSession && event.SessionEventVariant != nil && event.SessionEventVariant.MessageStreamRef != nil {
+			stampParentStreamRef(event.SessionEventVariant.MessageStreamRef)
+		}
 		if err := validateAgentSessionEventIdentity(event); err != nil {
 			setPersistErr(err)
 			event.Err = err

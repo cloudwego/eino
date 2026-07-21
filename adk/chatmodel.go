@@ -87,6 +87,12 @@ func (e *typedChatModelAgentExecCtx[M]) send(ctx context.Context, event *TypedAg
 			event.Err = err
 		}
 	}
+	if event.SessionEventVariant != nil && event.SessionEventVariant.MessageStreamRef != nil {
+		turnID := sessionEventTurnIDFromContext[M](ctx)
+		if turnID != "" {
+			event.SessionEventVariant.MessageStreamRef.TurnID = turnID
+		}
+	}
 	e.generator.trySend(event)
 }
 
