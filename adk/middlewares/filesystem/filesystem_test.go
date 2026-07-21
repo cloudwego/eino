@@ -589,6 +589,7 @@ func TestExecuteToolSchema_NoManager(t *testing.T) {
 		js, err := info.ParamsOneOf.ToJSONSchema()
 		assert.NoError(t, err)
 		assert.NotNil(t, js)
+		// command only; no run_in_background without a Manager.
 		assert.Equal(t, 1, js.Properties.Len())
 		_, ok := js.Properties.Get("command")
 		assert.True(t, ok)
@@ -2740,7 +2741,7 @@ func TestMultiModalReadFileTool_CustomDescNoSuffix(t *testing.T) {
 	assert.NoError(t, err)
 	defaultInfo, err := defaultTool.Info(context.Background())
 	assert.NoError(t, err)
-	assert.Contains(t, defaultInfo.Desc, "multimodal", "default desc should include multimodal suffix")
+	assert.Contains(t, defaultInfo.Desc, "Reads images", "default desc should include the multimodal read section")
 }
 
 // TestMultiModalReadFileTool_EmptyPartDataError verifies that a FileContentPart

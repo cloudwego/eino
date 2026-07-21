@@ -349,6 +349,25 @@ func (m *TypedMiddleware[M]) Summarize(ctx context.Context, state *adk.TypedChat
 	return finalMsgs, nil
 }
 
+func (m *TypedMiddleware[M]) BeforeAgent(ctx context.Context, runCtx *adk.ChatModelAgentContext[M]) (context.Context, *adk.ChatModelAgentContext[M], error) {
+	if runCtx == nil {
+		return ctx, runCtx, nil
+	}
+	// Append the context-management note to the agent system prompt so the model knows
+	// long conversations are summarized automatically ({{summarization prompt}}).
+	note := getContextManagementInstruction()
+	if strings.TrimSpace(note) != "" && !strings.Contains(runCtx.Instruction, note) {
+		nRunCtx := *runCtx
+		if strings.TrimSpace(nRunCtx.Instruction) == "" {
+			nRunCtx.Instruction = note
+		} else {
+			nRunCtx.Instruction = nRunCtx.Instruction + "\n\n" + note
+		}
+		return ctx, &nRunCtx, nil
+	}
+	return ctx, runCtx, nil
+}
+
 func (m *TypedMiddleware[M]) BeforeModelRewriteState(ctx context.Context, state *adk.TypedChatModelAgentState[M],
 	_ *adk.TypedModelContext[M]) (context.Context, *adk.TypedChatModelAgentState[M], error) {
 

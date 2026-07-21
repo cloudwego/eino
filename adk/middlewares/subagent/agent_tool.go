@@ -21,11 +21,9 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
-	"strings"
 
 	"github.com/bytedance/sonic"
 	"github.com/google/uuid"
-	"github.com/slongfield/pyfmt"
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/adk/backgroundtask"
@@ -373,19 +371,12 @@ func resolveSubAgent(subAgents map[string]tool.InvokableTool, subagentType, prom
 	return a, params, nil
 }
 
-// defaultAgentToolDescription generates the agent tool description with sub-agent list.
+// defaultAgentToolDescription returns the agent tool description. The available
+// agent types are no longer embedded here (they are injected as a mid-conversation
+// system message); the {back_ground_prompt} placeholder is filled by the middleware.
 func defaultAgentToolDescription[M adk.MessageType](ctx context.Context, subAgents []adk.TypedAgent[M]) (string, error) {
-	subAgentsDescBuilder := strings.Builder{}
-	for _, a := range subAgents {
-		name := a.Name(ctx)
-		desc := a.Description(ctx)
-		_, _ = fmt.Fprintf(&subAgentsDescBuilder, "- %s: %s\n", name, desc)
-	}
-	toolDesc := internal.SelectPrompt(internal.I18nPrompts{
+	return internal.SelectPrompt(internal.I18nPrompts{
 		English: agentToolDescription,
 		Chinese: agentToolDescriptionChinese,
-	})
-	return pyfmt.Fmt(toolDesc, map[string]any{
-		"other_agents": subAgentsDescBuilder.String(),
-	})
+	}), nil
 }
