@@ -77,16 +77,20 @@ func (e *typedChatModelAgentExecCtx[M]) send(ctx context.Context, event *TypedAg
 	ensureTypedAgentEventMessageIDs(event)
 	sc := sessionEventContextFromContext[M](ctx)
 	if event.SessionEventVariant != nil && event.SessionEventVariant.Event != nil {
-		stampSessionEventTurnID(event.SessionEventVariant.Event, sc.turnID)
-		gen := sc.generator
-		if gen == nil {
-			gen = DefaultSessionEventIDGenerator[M]
-		}
-		if _, err := normalizeAgentSessionEventWithAssigner(event, func(se *SessionEvent[M]) (string, error) {
-			return gen(ctx, se)
-		}); err != nil {
+		se := *event.SessionEventVariant.Event
+		stampSessionEventTurnID(&se, sc.turnID)
+		if se.EventID == "" {
+			gen := sc.generator
+			if gen == nil {
+				gen = DefaultSessionEventIDGenerator[M]
+			}
+			if err := prepareSessionEventEnvelope(ctx, &se, gen, sc.provider, sessionEventEnvelopeOptions{}); err != nil {
+				event.Err = err
+			}
+		} else if err := ValidateEmittedSessionEventKind(&se); err != nil {
 			event.Err = err
 		}
+		event.SessionEventVariant.Event = &se
 	}
 	if event.SessionEventVariant != nil && event.SessionEventVariant.MessageStreamRef != nil {
 		if sc.turnID != "" {

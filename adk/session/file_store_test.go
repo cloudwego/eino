@@ -98,6 +98,38 @@ func TestFileStoreWritesHumanReadableEvlogLines(t *testing.T) {
 	assert.Equal(t, "session.status_idle", parts1[1])
 }
 
+func TestFileStoreSessionEventExtraRoundTripKeepsThreeColumnFormat(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	store, err := session.NewFileStore[*schema.Message](dir, nil)
+	require.NoError(t, err)
+
+	event := testMessageEvent("extra-1", "one")
+	event.Extra = map[string]any{
+		"reason": "audit",
+		"nested": map[string]any{"items": []any{"a", "b"}},
+	}
+	require.NoError(t, store.AppendEvents(ctx, "s", []*adk.SessionEvent[*schema.Message]{event}))
+
+	reopened, err := session.NewFileStore[*schema.Message](dir, nil)
+	require.NoError(t, err)
+	res, err := reopened.LoadEvents(ctx, "s", &adk.LoadSessionEventsRequest{})
+	require.NoError(t, err)
+	require.Len(t, res.Events, 1)
+	assert.Equal(t, "audit", res.Events[0].Extra["reason"])
+	assert.Equal(t, "a", res.Events[0].Extra["nested"].(map[string]any)["items"].([]any)[0])
+
+	data, err := os.ReadFile(filepath.Join(dir, url.PathEscape("s")+".evlog"))
+	require.NoError(t, err)
+	lines := strings.Split(strings.TrimSuffix(string(data), "\n"), "\n")
+	require.Len(t, lines, 1)
+	parts := strings.SplitN(lines[0], "\t", 4)
+	require.Len(t, parts, 3)
+	assert.Equal(t, "extra-1", parts[0])
+	assert.Equal(t, "message", parts[1])
+	assert.Contains(t, parts[2], "extra")
+}
+
 func TestFileStoreRollbackPreservesPhysicalAuditLog(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()

@@ -88,6 +88,9 @@ func (s *InMemoryStore[M]) AppendEvents(_ context.Context, sessionID string, eve
 		if err := adk.NormalizeSessionEventKind(e); err != nil {
 			return err
 		}
+		if err := adk.ValidateSessionEventExtra(e); err != nil {
+			return err
+		}
 		data, err := s.serializer.Marshal(e)
 		if err != nil {
 			return err

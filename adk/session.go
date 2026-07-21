@@ -22,6 +22,8 @@ import (
 	"encoding/gob"
 	"errors"
 	"fmt"
+	"math"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -149,6 +151,10 @@ type SessionEvent[M MessageType] struct {
 	Timestamp time.Time `json:"timestamp,omitempty"`
 
 	Kind SessionEventKind `json:"kind,omitempty"`
+
+	// Extra carries application-owned event-envelope metadata. It is ignored by
+	// replay/reconstruction and does not count as a semantic payload.
+	Extra map[string]any `json:"extra,omitempty"`
 
 	Message                 M                                `json:"message,omitempty"`
 	MessageStreamIncomplete *MessageStreamIncompleteEvent[M] `json:"message_stream_incomplete,omitempty"`
@@ -483,6 +489,12 @@ type MessagesDeletedEvent struct {
 // event is appended to the store.
 type SessionEventIDGenerator[M MessageType] func(ctx context.Context, event *SessionEvent[M]) (string, error)
 
+// SessionEventExtraProvider returns application-owned event-envelope metadata
+// for a normalized SessionEvent draft. The event argument is a provider-view
+// copy: top-level envelope fields and SessionEvent.Extra are isolated from the
+// original event, while semantic payloads must be treated as read-only.
+type SessionEventExtraProvider[M MessageType] func(ctx context.Context, event *SessionEvent[M]) (map[string]any, error)
+
 // DefaultSessionEventIDGenerator returns a UUID-based EventID for any draft.
 // It is exported so that application-side SessionEventIDGenerator[M]
 // implementations can fall through to default behavior when they do not
@@ -510,6 +522,11 @@ type SessionConfig[M MessageType] struct {
 	// the generator is always invoked. Returning an empty string fails the
 	// turn closed (ErrSessionEventIDGeneratorEmpty).
 	EventIDGenerator SessionEventIDGenerator[M]
+	// EventExtraProvider decorates every runner / wrapper produced session
+	// event with additional validated event-envelope metadata. Provider output
+	// is merged before EventIDGenerator runs, so custom generators can inspect
+	// the final Extra map. Returned keys prefixed with "_eino_" are rejected.
+	EventExtraProvider SessionEventExtraProvider[M]
 	// SessionAcquireTimeout bounds how long Runner may wait to acquire any session
 	// handle before failing the current Run/Resume/Rollback attempt.
 	//
@@ -599,6 +616,9 @@ func decodeSessionEvent[M MessageType](data []byte) (*SessionEvent[M], error) {
 
 func encodeSessionEventWithSerializer[M MessageType](event *SessionEvent[M], serializer schema.Serializer) ([]byte, error) {
 	if err := NormalizeSessionEventKind(event); err != nil {
+		return nil, err
+	}
+	if err := ValidateSessionEventExtra(event); err != nil {
 		return nil, err
 	}
 	return normalizeSerializer(serializer).Marshal(event)
@@ -927,7 +947,19 @@ func ValidateEmittedSessionEventKind[M MessageType](event *SessionEvent[M]) erro
 	if event.Kind == "" {
 		return errors.New("emitted session event must set non-empty Kind")
 	}
-	return NormalizeSessionEventKind(event)
+	if err := NormalizeSessionEventKind(event); err != nil {
+		return err
+	}
+	return ValidateSessionEventExtra(event)
+}
+
+// ValidateSessionEventExtra validates the portable event-envelope metadata
+// shape. It intentionally validates only Extra, not store-specific encoding.
+func ValidateSessionEventExtra[M MessageType](event *SessionEvent[M]) error {
+	if event == nil {
+		return errors.New("nil session event")
+	}
+	return normalizeSessionEventExtra(event.Extra)
 }
 
 func isSessionDurableBoundaryKind(kind SessionEventKind) bool {
@@ -950,10 +982,236 @@ func normalizeSessionConfig[M MessageType](cfg *SessionConfig[M]) SessionConfig[
 	if cfg.EventIDGenerator != nil {
 		normalized.EventIDGenerator = cfg.EventIDGenerator
 	}
+	if cfg.EventExtraProvider != nil {
+		normalized.EventExtraProvider = cfg.EventExtraProvider
+	}
 	if cfg.SessionAcquireTimeout > 0 {
 		normalized.SessionAcquireTimeout = cfg.SessionAcquireTimeout
 	}
 	return normalized
+}
+
+const sessionEventExtraFrameworkPrefix = "_eino_"
+
+func normalizeSessionEventExtra(extra map[string]any) error {
+	for k, v := range extra {
+		if err := validateSessionEventExtraValue(k, v); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+var (
+	sessionEventExtraMapType   = reflect.TypeOf(map[string]any{})
+	sessionEventExtraSliceType = reflect.TypeOf([]any{})
+)
+
+func validateSessionEventExtraValue(path string, value any) error {
+	if value == nil {
+		return nil
+	}
+	t := reflect.TypeOf(value)
+	if t == nil {
+		return nil
+	}
+	v := reflect.ValueOf(value)
+	switch t.Kind() {
+	case reflect.Bool, reflect.String:
+		if t.PkgPath() != "" {
+			return fmt.Errorf("session event Extra[%s] has unsupported named primitive type %s", path, t)
+		}
+		return nil
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		if t.PkgPath() != "" {
+			return fmt.Errorf("session event Extra[%s] has unsupported named primitive type %s", path, t)
+		}
+		return nil
+	case reflect.Float32, reflect.Float64:
+		if t.PkgPath() != "" {
+			return fmt.Errorf("session event Extra[%s] has unsupported named primitive type %s", path, t)
+		}
+		f := v.Convert(reflect.TypeOf(float64(0))).Float()
+		if math.IsNaN(f) || math.IsInf(f, 0) {
+			return fmt.Errorf("session event Extra[%s] has non-finite float %v", path, f)
+		}
+		return nil
+	case reflect.Map:
+		if t != sessionEventExtraMapType {
+			if t.Key().Kind() != reflect.String {
+				return fmt.Errorf("session event Extra[%s] has unsupported map key type %s", path, t.Key())
+			}
+			return fmt.Errorf("session event Extra[%s] has unsupported map type %s", path, t)
+		}
+		if v.IsNil() {
+			return nil
+		}
+		iter := v.MapRange()
+		for iter.Next() {
+			key := iter.Key().String()
+			childPath := path + "." + key
+			if path == "" {
+				childPath = key
+			}
+			if err := validateSessionEventExtraValue(childPath, iter.Value().Interface()); err != nil {
+				return err
+			}
+		}
+		return nil
+	case reflect.Slice:
+		if t != sessionEventExtraSliceType {
+			return fmt.Errorf("session event Extra[%s] has unsupported slice type %s", path, t)
+		}
+		if v.IsNil() {
+			return nil
+		}
+		for i := 0; i < v.Len(); i++ {
+			if err := validateSessionEventExtraValue(fmt.Sprintf("%s[%d]", path, i), v.Index(i).Interface()); err != nil {
+				return err
+			}
+		}
+		return nil
+	case reflect.Ptr, reflect.UnsafePointer:
+		if v.IsNil() {
+			return fmt.Errorf("session event Extra[%s] has unsupported typed nil %s", path, t)
+		}
+		return fmt.Errorf("session event Extra[%s] has unsupported pointer type %s", path, t)
+	case reflect.Uintptr:
+		return fmt.Errorf("session event Extra[%s] has unsupported pointer-like type %s", path, t)
+	case reflect.Interface:
+		if v.IsNil() {
+			return nil
+		}
+		return validateSessionEventExtraValue(path, v.Elem().Interface())
+	case reflect.Func, reflect.Chan, reflect.Complex64, reflect.Complex128, reflect.Struct, reflect.Array:
+		return fmt.Errorf("session event Extra[%s] has unsupported type %s", path, t)
+	default:
+		return fmt.Errorf("session event Extra[%s] has unsupported type %s", path, t)
+	}
+}
+
+func cloneSessionEventExtra(extra map[string]any) map[string]any {
+	if extra == nil {
+		return nil
+	}
+	out := make(map[string]any, len(extra))
+	for k, v := range extra {
+		out[k] = cloneSessionEventExtraValue(v)
+	}
+	return out
+}
+
+func cloneSessionEventExtraValue(value any) any {
+	switch v := value.(type) {
+	case map[string]any:
+		return cloneSessionEventExtra(v)
+	case []any:
+		out := make([]any, len(v))
+		for i := range v {
+			out[i] = cloneSessionEventExtraValue(v[i])
+		}
+		return out
+	default:
+		return v
+	}
+}
+
+func cloneSessionEventProviderView[M MessageType](event *SessionEvent[M]) *SessionEvent[M] {
+	if event == nil {
+		return nil
+	}
+	view := *event
+	view.Extra = cloneSessionEventExtra(event.Extra)
+	return &view
+}
+
+func mergeSessionEventExtra(base, added map[string]any) (map[string]any, error) {
+	if len(base) == 0 && len(added) == 0 {
+		return nil, nil
+	}
+	out := cloneSessionEventExtra(base)
+	if out == nil {
+		out = make(map[string]any, len(added))
+	}
+	for k, v := range added {
+		if strings.HasPrefix(k, sessionEventExtraFrameworkPrefix) {
+			return nil, fmt.Errorf("session event extra provider cannot return framework-owned key %q", k)
+		}
+		out[k] = cloneSessionEventExtraValue(v)
+	}
+	return out, nil
+}
+
+func applySessionEventExtraProvider[M MessageType](
+	ctx context.Context,
+	event *SessionEvent[M],
+	provider SessionEventExtraProvider[M],
+) error {
+	if event == nil {
+		return nil
+	}
+	if err := normalizeSessionEventExtra(event.Extra); err != nil {
+		return err
+	}
+	if provider == nil {
+		return nil
+	}
+	view := cloneSessionEventProviderView(event)
+	kind, eventID, timestamp := view.Kind, view.EventID, view.Timestamp
+	added, err := provider(ctx, view)
+	if err != nil {
+		return fmt.Errorf("adk: session event extra provider: %w", err)
+	}
+	if view.Kind != kind || view.EventID != eventID || !view.Timestamp.Equal(timestamp) {
+		return errors.New("adk: session event extra provider mutated protected event envelope fields")
+	}
+	if validateErr := normalizeSessionEventExtra(added); validateErr != nil {
+		return validateErr
+	}
+	merged, err := mergeSessionEventExtra(event.Extra, added)
+	if err != nil {
+		return err
+	}
+	if validateErr := normalizeSessionEventExtra(merged); validateErr != nil {
+		return validateErr
+	}
+	event.Extra = merged
+	return nil
+}
+
+type sessionEventEnvelopeOptions struct {
+	PreserveEventID bool
+}
+
+func prepareSessionEventEnvelope[M MessageType](
+	ctx context.Context,
+	event *SessionEvent[M],
+	gen SessionEventIDGenerator[M],
+	provider SessionEventExtraProvider[M],
+	opts sessionEventEnvelopeOptions,
+) error {
+	if event == nil {
+		return nil
+	}
+	if err := NormalizeSessionEventKind(event); err != nil {
+		return err
+	}
+	if event.Timestamp.IsZero() {
+		event.Timestamp = newEventTimestamp()
+	}
+	if err := applySessionEventExtraProvider(ctx, event, provider); err != nil {
+		return err
+	}
+	if opts.PreserveEventID && event.EventID == "" {
+		return ErrInvalidEventID
+	}
+	if event.EventID == "" && !opts.PreserveEventID {
+		if err := assignSessionEventID(ctx, event, gen); err != nil {
+			return err
+		}
+	}
+	return ValidateEmittedSessionEventKind(event)
 }
 
 // assignSessionEventID assigns the EventID of a draft SessionEvent[M] using
@@ -999,22 +1257,27 @@ type sessionEventContextKey[M MessageType] struct{}
 
 type sessionEventContext[M MessageType] struct {
 	generator SessionEventIDGenerator[M]
+	provider  SessionEventExtraProvider[M]
 	turnID    string
 }
 
-func contextWithSessionEventContext[M MessageType](ctx context.Context, gen SessionEventIDGenerator[M], turnID string) context.Context {
-	if gen == nil && turnID == "" {
+func contextWithSessionEventContext[M MessageType](ctx context.Context, gen SessionEventIDGenerator[M], provider SessionEventExtraProvider[M], turnID string) context.Context {
+	if gen == nil && provider == nil && turnID == "" {
 		return ctx
 	}
 	existing := sessionEventContextFromContext[M](ctx)
 	if gen == nil {
 		gen = existing.generator
 	}
+	if provider == nil {
+		provider = existing.provider
+	}
 	if turnID == "" {
 		turnID = existing.turnID
 	}
 	return context.WithValue(ctx, sessionEventContextKey[M]{}, &sessionEventContext[M]{
 		generator: gen,
+		provider:  provider,
 		turnID:    turnID,
 	})
 }
@@ -1033,6 +1296,17 @@ func stampSessionEventTurnID[M MessageType](event *SessionEvent[M], turnID strin
 		return
 	}
 	event.TurnID = turnID
+}
+
+func contextWithSessionEventExtraProvider[M MessageType](ctx context.Context, provider SessionEventExtraProvider[M]) context.Context {
+	if provider == nil {
+		return ctx
+	}
+	return contextWithSessionEventContext[M](ctx, nil, provider, "")
+}
+
+func sessionEventExtraProviderFromContext[M MessageType](ctx context.Context) SessionEventExtraProvider[M] {
+	return sessionEventContextFromContext[M](ctx).provider
 }
 
 // assignSessionEventIDFromContext assigns the EventID of a draft
@@ -1074,6 +1348,10 @@ func (p *sessionEventPersister[M]) enqueueAsync(event *SessionEvent[M]) error {
 	if event == nil || event.EventID == "" {
 		return p.getErr()
 	}
+	if err := ValidateSessionEventExtra(event); err != nil {
+		p.setErr(err)
+		return err
+	}
 	snapshot, err := snapshotSessionEvent(event)
 	if err != nil {
 		p.setErr(err)
@@ -1091,6 +1369,10 @@ func (p *sessionEventPersister[M]) enqueueAsync(event *SessionEvent[M]) error {
 func (p *sessionEventPersister[M]) commitBoundary(event *SessionEvent[M]) error {
 	if event == nil || event.EventID == "" {
 		return p.getErr()
+	}
+	if err := ValidateSessionEventExtra(event); err != nil {
+		p.setErr(err)
+		return err
 	}
 	snapshot, err := snapshotSessionEvent(event)
 	if err != nil {
