@@ -230,8 +230,10 @@ func TestBeforeAgent_WithManager_InjectsAgentToolOnly(t *testing.T) {
 	// the backgroundtask control middleware.
 	assert.Len(t, newRunCtx.Tools, 1)
 
-	// Instruction should include the background-support prompt.
-	assert.Contains(t, newRunCtx.Instruction, "background")
+	// The background-support prompt now lives in the agent tool description, not the instruction.
+	toolInfo, err := newRunCtx.Tools[0].Info(ctx)
+	require.NoError(t, err)
+	assert.Contains(t, toolInfo.Desc, "background")
 }
 
 func TestBeforeAgent_CustomSystemPrompt(t *testing.T) {
@@ -363,8 +365,14 @@ func TestAgentTool_Info(t *testing.T) {
 	info, err := newRunCtx.Tools[0].Info(ctx)
 	require.NoError(t, err)
 	assert.Equal(t, agentToolName, info.Name)
-	assert.Contains(t, info.Desc, "helper")
-	assert.Contains(t, info.Desc, "helps with tasks")
+	// Agent types are no longer embedded in the description; they are injected as a
+	// mid-conversation system message by BeforeModelRewriteState.
+	assert.NotContains(t, info.Desc, "helps with tasks")
+	sm := mw.(*typedSubagentMiddleware[*schema.Message])
+	section, ok := sm.buildAgentTypesSection(ctx)
+	require.True(t, ok)
+	assert.Contains(t, section, "helper")
+	assert.Contains(t, section, "helps with tasks")
 }
 
 func TestAgentTool_CustomName(t *testing.T) {
@@ -801,4 +809,106 @@ func TestAgentTool_AutoBackground_FastAgent(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "fast agent", result)
 	assert.False(t, anyRunning(mgr))
+}
+
+func TestSubagent_BeforeModelRewriteState_UpsertsReminderByExtra(t *testing.T) {
+	ctx := context.Background()
+	m := &typedSubagentMiddleware[*schema.Message]{
+		subAgents: []adk.TypedAgent[*schema.Message]{&mockAgent{name: "worker", desc: "does work"}},
+	}
+
+	state := &adk.TypedChatModelAgentState[*schema.Message]{Messages: []*schema.Message{schema.UserMessage("hi")}}
+
+	_, ns, err := m.BeforeModelRewriteState(ctx, state, nil)
+	require.NoError(t, err)
+	require.Len(t, ns.Messages, 2)
+	reminder := ns.Messages[1]
+	assert.Equal(t, schema.System, reminder.Role)
+	assert.True(t, reminder.Extra[agentTypesReminderExtraKey].(bool))
+	assert.NotContains(t, reminder.Content, "<!--")
+	assert.Contains(t, reminder.Content, "worker")
+	assert.Contains(t, reminder.Content, "does work")
+
+	_, ns, err = m.BeforeModelRewriteState(ctx, ns, nil)
+	require.NoError(t, err)
+	require.Len(t, ns.Messages, 2)
+	assert.Equal(t, reminder.Content, ns.Messages[1].Content)
+}
+
+// TestSubagent_BeforeModelRewriteState_PreservesOtherMessages verifies that the
+// subagent middleware never mutates or removes existing messages — including a
+// leading system message and reminders owned by other middlewares — and simply
+// appends its own reminder at the end.
+func TestSubagent_BeforeModelRewriteState_PreservesOtherMessages(t *testing.T) {
+	ctx := context.Background()
+	m := &typedSubagentMiddleware[*schema.Message]{
+		subAgents: []adk.TypedAgent[*schema.Message]{&mockAgent{name: "worker", desc: "does work"}},
+	}
+
+	// A leading instruction system message plus another middleware's reminder,
+	// guarded by its own dedicated Extra key.
+	const otherKey = "__eino_other_middleware_section__"
+	instruction := schema.SystemMessage("base instruction")
+	otherReminder := schema.SystemMessage("other middleware section")
+	otherReminder.Extra = map[string]any{otherKey: true}
+	state := &adk.TypedChatModelAgentState[*schema.Message]{
+		Messages: []*schema.Message{instruction, schema.UserMessage("hi"), otherReminder},
+	}
+
+	_, ns, err := m.BeforeModelRewriteState(ctx, state, nil)
+	require.NoError(t, err)
+	// The three existing messages are preserved verbatim; the subagent reminder is
+	// appended at the end.
+	require.Len(t, ns.Messages, 4)
+	assert.Equal(t, "base instruction", ns.Messages[0].Content)
+	assert.Equal(t, "other middleware section", ns.Messages[2].Content)
+	assert.True(t, ns.Messages[2].Extra[otherKey].(bool))
+	_, mutated := ns.Messages[2].Extra[agentTypesReminderExtraKey]
+	assert.False(t, mutated, "the other middleware's reminder must not be tagged with the subagent key")
+
+	reminder := ns.Messages[3]
+	assert.Equal(t, schema.System, reminder.Role)
+	assert.True(t, reminder.Extra[agentTypesReminderExtraKey].(bool))
+	assert.Contains(t, reminder.Content, "worker")
+	assert.Contains(t, reminder.Content, "does work")
+
+	// Re-invocation is idempotent: the subagent does not append its reminder twice.
+	_, ns2, err := m.BeforeModelRewriteState(ctx, ns, nil)
+	require.NoError(t, err)
+	require.Len(t, ns2.Messages, 4)
+	assert.Equal(t, reminder.Content, ns2.Messages[3].Content)
+}
+
+// TestSubagent_BeforeModelRewriteState_AppendsWhenAgentsChange verifies that
+// when the sub-agent list changes between invocations, a fresh reminder is
+// appended at the end while the stale reminder is left untouched (preserving the
+// model's KV cache prefix). The latest reminder supersedes it.
+func TestSubagent_BeforeModelRewriteState_AppendsWhenAgentsChange(t *testing.T) {
+	ctx := context.Background()
+	m := &typedSubagentMiddleware[*schema.Message]{
+		subAgents: []adk.TypedAgent[*schema.Message]{&mockAgent{name: "worker", desc: "does work"}},
+	}
+
+	state := &adk.TypedChatModelAgentState[*schema.Message]{Messages: []*schema.Message{schema.UserMessage("hi")}}
+
+	_, ns, err := m.BeforeModelRewriteState(ctx, state, nil)
+	require.NoError(t, err)
+	require.Len(t, ns.Messages, 2)
+	first := ns.Messages[1]
+	assert.Contains(t, first.Content, "worker")
+	assert.NotContains(t, first.Content, "helper")
+
+	// Simulate the sub-agent set changing between turns.
+	m.subAgents = append(m.subAgents, &mockAgent{name: "helper", desc: "assists"})
+
+	_, ns, err = m.BeforeModelRewriteState(ctx, ns, nil)
+	require.NoError(t, err)
+	require.Len(t, ns.Messages, 3)
+	assert.Equal(t, first.Content, ns.Messages[1].Content, "stale reminder must be left untouched to preserve prefix cache")
+	latest := ns.Messages[2]
+	assert.Equal(t, schema.System, latest.Role)
+	assert.True(t, latest.Extra[agentTypesReminderExtraKey].(bool))
+	assert.Contains(t, latest.Content, "worker")
+	assert.Contains(t, latest.Content, "helper")
+	assert.Contains(t, latest.Content, "assists")
 }

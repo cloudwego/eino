@@ -99,50 +99,37 @@ Terse command-style prompts produce shallow, generic work.
 
 	agentToolDescription = `Launch a new agent to handle complex, multi-step tasks. Each agent type has specific capabilities and tools available to it.
 
-When using the agent tool, specify a subagent_type parameter to select which agent type to use.
+Available agent types are listed in <system-reminder> messages in the conversation.
 
-Available agent types and the tools they have access to:
-{other_agents}
+When using the Agent tool, specify a subagent_type parameter to select which agent type to use.
 
 ## When to use
 
 Reach for this when the task matches an available agent type, when you have independent work to run in parallel, or when answering would mean reading across several files — delegate it and you keep the conclusion, not the file dumps. For a single-fact lookup where you already know the file, symbol, or value, search directly. Once you've delegated a search, don't also run it yourself — wait for the result.
 
-- The agent's final message is returned to you as the tool result; it is not shown to the user — relay what matters.
-- Each agent call starts fresh, so give a complete, self-contained task description.
-`
+- The agent's final message is returned to you as the tool result; it is not shown to the user — relay what matters.{back_ground_prompt}`
 
-	agentToolDescriptionChinese = `启动新智能体来处理复杂的多步骤任务。每种智能体类型都有特定的能力和可用的工具。
+	agentToolDescriptionChinese = `启动一个新的智能体来处理复杂的多步骤任务。每种智能体类型都有其特定的能力和可用工具。
 
-使用 agent 工具时，指定 subagent_type 参数来选择要使用的智能体类型。
+可用的智能体类型会列在对话中的 <system-reminder> 消息里。
 
-可用的智能体类型及其可访问的工具：
-{other_agents}
+使用 Agent 工具时，指定 subagent_type 参数来选择要使用的智能体类型。
 
 ## 何时使用
 
-当任务匹配某个可用的智能体类型、当你有可以并行处理的独立工作、或者当回答问题需要跨多个文件阅读时——把它委托出去，你只需保留结论，而无需处理大量文件内容。对于你已经知道文件、符号或具体值的单点查找，直接自己搜索即可。一旦你把某个搜索委托出去，就不要自己再重复执行——等待它的结果。
+当任务匹配某个可用的智能体类型、当你有可并行的独立工作、或当回答需要跨多个文件阅读时——把它委托出去，你只保留结论，而不必处理大量文件内容。对于你已知文件、符号或具体值的单点查找，直接自己搜索。一旦把某个搜索委托出去，就不要自己再重复执行——等待其结果。
 
-- 智能体的最终消息会作为工具结果返回给你；它不会展示给用户——请转述其中重要的内容。
-- 每次智能体调用都是全新开始，因此请提供完整、自包含的任务描述。
-`
+- 智能体的最终消息会作为工具结果返回给你；它不会展示给用户——请转述其中重要的内容。`
 
 	agentToolBackgroundPrompt = `
-## Running agents in the background
-- Set run_in_background=true to run an agent in the background. It keeps running after the tool
-  call returns, and you will be notified when it completes. Do not block waiting on it — continue
-  with other work, and use the task_output tool to check its status or retrieve its result by
-  task_id when you need it.
-- Use foreground (the default) when you need the agent's result before you can proceed; use
-  background when you have genuinely independent work to do in parallel.
-- Use the task_stop tool to cancel a background agent by task_id.
-`
+
+Subagents run in the background by default; you'll be notified when one completes. Pass ` + "`" + `run_in_background: false` + "`" + ` for a synchronous run when you need the result before continuing.`
 
 	agentToolBackgroundPromptChinese = `
-## 在后台运行智能体
-- 设置 run_in_background=true 可在后台运行智能体。它在工具调用返回后会继续运行，完成时你将收到通知。
-  不要为等待它而阻塞——请继续处理其他工作，并在需要时使用 task_output 工具通过 task_id 查询其状态或获取结果。
-- 当你需要智能体的结果才能继续时使用前台（默认）；当你有真正独立的工作可以并行完成时使用后台。
-- 使用 task_stop 工具通过 task_id 取消后台智能体。
-`
+
+子智能体默认在后台运行；完成时你会收到通知。当你需要先拿到结果才能继续时，传 ` + "`" + `run_in_background: false` + "`" + ` 以同步运行。`
+
+	availableAgentTypesPreamble = `Available agent types for the Agent tool:`
+
+	availableAgentTypesPreambleChinese = `Agent 工具可用的智能体类型：`
 )

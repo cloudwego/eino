@@ -407,7 +407,7 @@ func TestManagedExecuteTool_Schema(t *testing.T) {
 	require.NoError(t, err)
 	js, err := info.ParamsOneOf.ToJSONSchema()
 	require.NoError(t, err)
-	assert.Equal(t, 3, js.Properties.Len())
+	assert.Equal(t, 4, js.Properties.Len())
 	_, ok := js.Properties.Get("command")
 	assert.True(t, ok)
 	_, ok = js.Properties.Get("run_in_background")

@@ -17,12 +17,10 @@
 package skill
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
-	"text/template"
 
 	"github.com/slongfield/pyfmt"
 
@@ -278,6 +276,129 @@ func (h *typedSkillHandler[M]) BeforeAgent(ctx context.Context, runCtx *adk.Chat
 	return ctx, runCtx, nil
 }
 
+const skillsReminderExtraKey = "__eino_skill_available_skills__"
+
+// buildSkillsSection renders the available-skills section.
+// Returns ok=false when there are no skills.
+func (h *typedSkillHandler[M]) buildSkillsSection(ctx context.Context) (string, bool) {
+	skills, err := h.tool.b.List(ctx)
+	if err != nil || len(skills) == 0 {
+		return "", false
+	}
+	preamble := internal.SelectPrompt(internal.I18nPrompts{
+		English: availableSkillsPreamble,
+		Chinese: availableSkillsPreambleChinese,
+	})
+	var sb strings.Builder
+	sb.WriteString(preamble)
+	for _, sk := range skills {
+		sb.WriteString(fmt.Sprintf("\n- %s: %s", sk.Name, sk.Description))
+	}
+	return sb.String(), true
+}
+
+// BeforeModelRewriteState publishes the available-skills list as a system
+// reminder. Skills can be installed between turns, so the list is rebuilt every
+// invocation and a fresh reminder is appended whenever it changes (see
+// upsertSystemReminder).
+func (h *typedSkillHandler[M]) BeforeModelRewriteState(ctx context.Context, state *adk.TypedChatModelAgentState[M], _ *adk.TypedModelContext[M]) (context.Context, *adk.TypedChatModelAgentState[M], error) {
+	if state == nil {
+		return ctx, state, nil
+	}
+	section, ok := h.buildSkillsSection(ctx)
+	if !ok {
+		return ctx, state, nil
+	}
+	nState := *state
+	nState.Messages = upsertSystemReminder(state.Messages, skillsReminderExtraKey, section)
+	return ctx, &nState, nil
+}
+
+// upsertSystemReminder appends a fresh system reminder carrying section when it
+// differs from the most recent reminder this middleware previously emitted.
+// Reminders are identified by extraKey (each middleware owns its own key).
+//
+// Following the mid-conversation system message pattern, existing reminders are
+// never mutated or removed: rewriting history would invalidate the model's KV
+// cache for every message after the edit. Appending at the end keeps the prefix
+// intact while ensuring the latest reminder reflects the current state — later
+// reminders supersede earlier ones. When the content is unchanged nothing is
+// added, so repeated invocations within a turn are idempotent.
+func upsertSystemReminder[M adk.MessageType](messages []M, extraKey string, section string) []M {
+	// Reverse scan: the reminder closest to the end reflects the last state this
+	// middleware published.
+	for i := len(messages) - 1; i >= 0; i-- {
+		msg := messages[i]
+		if !isSystemMessage(msg) || !hasExtraKey(msg, extraKey) {
+			continue
+		}
+		if systemMessageContent(msg) == section {
+			// Unchanged since the last reminder: idempotent no-op.
+			return messages
+		}
+		// Content changed (e.g. a skill was installed): stop scanning and append a
+		// new reminder below rather than editing the stale one in place.
+		break
+	}
+	result := make([]M, len(messages), len(messages)+1)
+	copy(result, messages)
+	return append(result, newSystemReminder[M](extraKey, section))
+}
+
+func isSystemMessage[M adk.MessageType](msg M) bool {
+	switch v := any(msg).(type) {
+	case *schema.Message:
+		return v.Role == schema.System
+	case *schema.AgenticMessage:
+		return v.Role == schema.AgenticRoleTypeSystem
+	}
+	return false
+}
+
+func hasExtraKey[M adk.MessageType](msg M, extraKey string) bool {
+	switch v := any(msg).(type) {
+	case *schema.Message:
+		_, ok := v.Extra[extraKey]
+		return ok
+	case *schema.AgenticMessage:
+		_, ok := v.Extra[extraKey]
+		return ok
+	}
+	return false
+}
+
+// systemMessageContent returns the text carried by a reminder created via
+// newSystemReminder, used to detect whether the section changed since the last
+// reminder. It mirrors newSystemReminder's single-text-block layout.
+func systemMessageContent[M adk.MessageType](msg M) string {
+	switch v := any(msg).(type) {
+	case *schema.Message:
+		return v.Content
+	case *schema.AgenticMessage:
+		if len(v.ContentBlocks) == 1 {
+			if b := v.ContentBlocks[0]; b != nil && b.UserInputText != nil {
+				return b.UserInputText.Text
+			}
+		}
+	}
+	return ""
+}
+
+func newSystemReminder[M adk.MessageType](extraKey string, content string) M {
+	var zero M
+	switch any(zero).(type) {
+	case *schema.Message:
+		msg := schema.SystemMessage(content)
+		msg.Extra = map[string]any{extraKey: true}
+		return any(msg).(M)
+	case *schema.AgenticMessage:
+		msg := schema.SystemAgenticMessage(content)
+		msg.Extra = map[string]any{extraKey: true}
+		return any(msg).(M)
+	}
+	panic("unreachable")
+}
+
 func (h *typedSkillHandler[M]) WrapModel(ctx context.Context, m model.BaseModel[M], _ *adk.TypedModelContext[M]) (model.BaseModel[M], error) {
 	if h.tool.modelHub == nil {
 		return m, nil
@@ -374,10 +495,6 @@ type typedSkillTool[M adk.MessageType] struct {
 	formatForkResult  func(ctx context.Context, in TypedSubAgentOutput[M]) (string, error)
 }
 
-type descriptionTemplateHelper struct {
-	Matters []FrontMatter
-}
-
 func (s *typedSkillTool[M]) Info(ctx context.Context) (*schema.ToolInfo, error) {
 	skills, err := s.b.List(ctx)
 	if err != nil {
@@ -388,16 +505,12 @@ func (s *typedSkillTool[M]) Info(ctx context.Context) (*schema.ToolInfo, error) 
 	if s.customToolDesc != nil {
 		fullDesc = s.customToolDesc(ctx, skills)
 	} else {
-		desc, renderErr := renderToolDescription(skills)
-		if renderErr != nil {
-			return nil, fmt.Errorf("failed to render skill tool description: %w", renderErr)
-		}
-
-		descBase := internal.SelectPrompt(internal.I18nPrompts{
+		// The available-skills list is no longer embedded in the tool description; it is
+		// injected as a mid-conversation system message in BeforeModelRewriteState.
+		fullDesc = internal.SelectPrompt(internal.I18nPrompts{
 			English: toolDescriptionBase,
 			Chinese: toolDescriptionBaseChinese,
 		})
-		fullDesc = descBase + desc
 	}
 
 	oneOf, err := s.buildParamsOneOf(ctx)
@@ -446,14 +559,22 @@ func (s *typedSkillTool[M]) setActiveModel(ctx context.Context, modelName string
 
 func defaultToolParams() map[string]*schema.ParameterInfo {
 	skillParamDesc := internal.SelectPrompt(internal.I18nPrompts{
-		English: "The skill name (no arguments). E.g., \"pdf\" or \"xlsx\"",
-		Chinese: "Skill 名称（无需其他参数）。例如：\"pdf\" 或 \"xlsx\"",
+		English: "The skill name. E.g., \"pdf\" or \"xlsx\"",
+		Chinese: "Skill 名称。例如：\"pdf\" 或 \"xlsx\"",
 	})
 	return map[string]*schema.ParameterInfo{
 		"skill": {
 			Type:     schema.String,
 			Desc:     skillParamDesc,
 			Required: true,
+		},
+		"args": {
+			Type: schema.String,
+			Desc: internal.SelectPrompt(internal.I18nPrompts{
+				English: "Optional arguments for the skill",
+				Chinese: "传给该 skill 的可选参数",
+			}),
+			Required: false,
 		},
 	}
 }
@@ -693,19 +814,4 @@ func (s *typedSkillTool[M]) getMessagesFromState(ctx context.Context) ([]M, erro
 		return nil, fmt.Errorf("fork mode is not supported for AgenticMessage; use agent mode instead")
 	}
 	return messages, nil
-}
-
-func renderToolDescription(matters []FrontMatter) (string, error) {
-	tpl, err := template.New("skills").Parse(toolDescriptionTemplate)
-	if err != nil {
-		return "", err
-	}
-
-	var buf bytes.Buffer
-	err = tpl.Execute(&buf, descriptionTemplateHelper{Matters: matters})
-	if err != nil {
-		return "", err
-	}
-
-	return buf.String(), nil
 }

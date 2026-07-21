@@ -19,6 +19,9 @@ package subagent
 import (
 	"context"
 	"fmt"
+	"strings"
+
+	"github.com/slongfield/pyfmt"
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/adk/backgroundtask"
@@ -166,10 +169,26 @@ func NewTyped[M adk.MessageType](ctx context.Context, config *TypedConfig[M]) (a
 		return nil, err
 	}
 
+	backgroundEnabled := config.Background != nil && config.Background.Manager != nil
+
+	// The background-run note now lives in the tool description (not the system prompt),
+	// filled into the {back_ground_prompt} placeholder only when background is enabled.
+	bgPrompt := ""
+	if backgroundEnabled {
+		bgPrompt = internal.SelectPrompt(internal.I18nPrompts{
+			English: agentToolBackgroundPrompt,
+			Chinese: agentToolBackgroundPromptChinese,
+		})
+	}
+	desc, err = pyfmt.Fmt(desc, map[string]any{"back_ground_prompt": bgPrompt})
+	if err != nil {
+		return nil, err
+	}
+
 	// With a Manager, the tool exposes run_in_background and routes through the
 	// Manager; without one it is a plain foreground spawn.
 	var at tool.BaseTool
-	if config.Background != nil && config.Background.Manager != nil {
+	if backgroundEnabled {
 		at, err = newManagedAgentTool[M](config.Background.Manager, subAgentToolMap, agentOutput[M]{
 			store:     config.Background.OutputStore,
 			outputDir: config.Background.OutputDir,
@@ -184,7 +203,8 @@ func NewTyped[M adk.MessageType](ctx context.Context, config *TypedConfig[M]) (a
 
 	tools := []tool.BaseTool{at}
 
-	// Build system prompt.
+	// Build system prompt. The background-run note is no longer appended here; it now
+	// lives in the tool description via the {back_ground_prompt} placeholder.
 	var instruction string
 	if config.SystemPrompt != nil {
 		instruction = *config.SystemPrompt
@@ -193,17 +213,12 @@ func NewTyped[M adk.MessageType](ctx context.Context, config *TypedConfig[M]) (a
 			English: agentToolPrompt,
 			Chinese: agentToolPromptChinese,
 		})
-		if config.Background != nil && config.Background.Manager != nil {
-			instruction += internal.SelectPrompt(internal.I18nPrompts{
-				English: agentToolBackgroundPrompt,
-				Chinese: agentToolBackgroundPromptChinese,
-			})
-		}
 	}
 
 	return &typedSubagentMiddleware[M]{
 		tools:       tools,
 		instruction: instruction,
+		subAgents:   config.SubAgents,
 	}, nil
 }
 
@@ -211,6 +226,7 @@ type typedSubagentMiddleware[M adk.MessageType] struct {
 	adk.TypedBaseChatModelAgentMiddleware[M]
 	tools       []tool.BaseTool
 	instruction string
+	subAgents   []adk.TypedAgent[M]
 }
 
 // BeforeAgent injects sub-agent tools and instructions into the agent context.
@@ -223,6 +239,128 @@ func (m *typedSubagentMiddleware[M]) BeforeAgent(ctx context.Context, runCtx *ad
 	nRunCtx.Instruction += "\n" + m.instruction
 	nRunCtx.Tools = append(nRunCtx.Tools, m.tools...)
 	return ctx, &nRunCtx, nil
+}
+
+const agentTypesReminderExtraKey = "__eino_subagent_available_agent_types__"
+
+// buildAgentTypesSection renders the available-agent-types section. Returns ok=false
+// when there are no sub-agents.
+func (m *typedSubagentMiddleware[M]) buildAgentTypesSection(ctx context.Context) (string, bool) {
+	if len(m.subAgents) == 0 {
+		return "", false
+	}
+	preamble := internal.SelectPrompt(internal.I18nPrompts{
+		English: availableAgentTypesPreamble,
+		Chinese: availableAgentTypesPreambleChinese,
+	})
+	var sb strings.Builder
+	sb.WriteString(preamble)
+	for _, a := range m.subAgents {
+		sb.WriteString(fmt.Sprintf("\n- %s: %s", a.Name(ctx), a.Description(ctx)))
+	}
+	return sb.String(), true
+}
+
+// BeforeModelRewriteState publishes the available agent types as a system
+// reminder. Sub-agents can change between turns, so the list is rebuilt every
+// invocation and a fresh reminder is appended whenever it changes (see
+// upsertSystemReminder).
+func (m *typedSubagentMiddleware[M]) BeforeModelRewriteState(ctx context.Context, state *adk.TypedChatModelAgentState[M], _ *adk.TypedModelContext[M]) (context.Context, *adk.TypedChatModelAgentState[M], error) {
+	if state == nil {
+		return ctx, state, nil
+	}
+	section, ok := m.buildAgentTypesSection(ctx)
+	if !ok {
+		return ctx, state, nil
+	}
+	nState := *state
+	nState.Messages = upsertSystemReminder(state.Messages, agentTypesReminderExtraKey, section)
+	return ctx, &nState, nil
+}
+
+// upsertSystemReminder appends a fresh system reminder carrying section when it
+// differs from the most recent reminder this middleware previously emitted.
+// Reminders are identified by extraKey (each middleware owns its own key).
+//
+// Following the mid-conversation system message pattern, existing reminders are
+// never mutated or removed: rewriting history would invalidate the model's KV
+// cache for every message after the edit. Appending at the end keeps the prefix
+// intact while ensuring the latest reminder reflects the current state — later
+// reminders supersede earlier ones. When the content is unchanged nothing is
+// added, so repeated invocations within a turn are idempotent.
+func upsertSystemReminder[M adk.MessageType](messages []M, extraKey string, section string) []M {
+	// Reverse scan: the reminder closest to the end reflects the last state this
+	// middleware published.
+	for i := len(messages) - 1; i >= 0; i-- {
+		msg := messages[i]
+		if !isSystemMessage(msg) || !hasExtraKey(msg, extraKey) {
+			continue
+		}
+		if systemMessageContent(msg) == section {
+			// Unchanged since the last reminder: idempotent no-op.
+			return messages
+		}
+		// Content changed (e.g. a sub-agent was added): stop scanning and append a
+		// new reminder below rather than editing the stale one in place.
+		break
+	}
+	result := make([]M, len(messages), len(messages)+1)
+	copy(result, messages)
+	return append(result, newSystemReminder[M](extraKey, section))
+}
+
+func isSystemMessage[M adk.MessageType](msg M) bool {
+	switch v := any(msg).(type) {
+	case *schema.Message:
+		return v.Role == schema.System
+	case *schema.AgenticMessage:
+		return v.Role == schema.AgenticRoleTypeSystem
+	}
+	return false
+}
+
+func hasExtraKey[M adk.MessageType](msg M, extraKey string) bool {
+	switch v := any(msg).(type) {
+	case *schema.Message:
+		_, ok := v.Extra[extraKey]
+		return ok
+	case *schema.AgenticMessage:
+		_, ok := v.Extra[extraKey]
+		return ok
+	}
+	return false
+}
+
+// systemMessageContent returns the text carried by a reminder created via
+// newSystemReminder, used to detect whether the section changed since the last
+// reminder. It mirrors newSystemReminder's single-text-block layout.
+func systemMessageContent[M adk.MessageType](msg M) string {
+	switch v := any(msg).(type) {
+	case *schema.Message:
+		return v.Content
+	case *schema.AgenticMessage:
+		if len(v.ContentBlocks) == 1 {
+			if b := v.ContentBlocks[0]; b != nil && b.UserInputText != nil {
+				return b.UserInputText.Text
+			}
+		}
+	}
+	return ""
+}
+
+func newSystemReminder[M adk.MessageType](extraKey string, content string) M {
+	var zero M
+	switch any(zero).(type) {
+	case *schema.Message:
+		msg := schema.SystemMessage(content)
+		msg.Extra = map[string]any{extraKey: true}
+		return any(msg).(M)
+	case *schema.AgenticMessage:
+		msg := schema.SystemAgenticMessage(content)
+		msg.Extra = map[string]any{extraKey: true}
+		return any(msg).(M)
+	}
+	panic("unreachable")
 }
 
 func validate[M adk.MessageType](ctx context.Context, c *TypedConfig[M]) error {

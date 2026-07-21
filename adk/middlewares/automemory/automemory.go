@@ -442,18 +442,27 @@ type topicSelectionResp struct {
 }
 
 func (m *middleware[M]) renderInstruction(ctx context.Context, baseInstruction string) (string, error) {
-	memDesc := getDefaultMemoryInstruction()
+	// Custom instruction: append the "## Memory directory" manifest so the memory path
+	// is still surfaced (a custom instruction is not expected to embed the path itself).
 	if m.cfg.GenInstruction != nil {
 		custom, err := m.cfg.GenInstruction(ctx)
 		if err != nil {
 			return "", err
 		}
 		if strings.TrimSpace(custom) != "" {
-			memDesc = custom + "\n\n"
+			return buildSystemMemoryInstruction(baseInstruction, custom+"\n\n", m.resolvedMemoryDirectory)
 		}
 	}
 
-	return buildSystemMemoryInstruction(baseInstruction, memDesc, m.resolvedMemoryDirectory)
+	// Default instruction embeds the memory directory inline via the {memory_directory}
+	// pyfmt placeholder, so no separate directory manifest is appended.
+	memDesc, err := pyfmt.Fmt(getDefaultMemoryInstruction(), map[string]any{
+		"memory_directory": m.resolvedMemoryDirectory,
+	})
+	if err != nil {
+		return "", err
+	}
+	return baseInstruction + "\n" + memDesc, nil
 }
 
 func (m *middleware[M]) buildMemoryIndexMessage(ctx context.Context) (M, error) {

@@ -57,302 +57,105 @@ Usage:
 - 这对于探索文件系统和找到要读取或编辑的正确文件非常有用
 - 在使用 read_file 或 edit_file 工具之前，你几乎总是应该先使用此工具`
 
-	ReadFileToolDesc = `Reads a file from the filesystem. You can access any file directly by using this tool.
-Assume this tool is able to read all files on the machine. If the User provides a path to a file assume that path is valid. It is okay to read a file that does not exist; an error will be returned.
+	ReadFileToolDesc = `Reads a file from the local filesystem.
 
-Usage:
-- The file_path parameter must be an absolute path, not a relative path
-- By default, it reads up to 2000 lines starting from the beginning of the file
-- **IMPORTANT for large files and codebase exploration**: Use pagination with offset and limit parameters to avoid context overflow
-	- First scan: read_file(path, limit=100) to see file structure
-	- Read more sections: read_file(path, offset=100, limit=200) for next 200 lines
-	- Only omit limit (read full file) when necessary for editing
-- Specify offset and limit: read_file(path, offset=0, limit=100) reads first 100 lines
-- Results are returned using cat -n format, with line numbers starting at 1
-- You have the capability to call multiple tools in a single response. It is always better to speculatively read multiple files as a batch that are potentially useful.
-- If you read a file that exists but has empty contents you will receive a system reminder warning in place of file contents.
-- You should ALWAYS make sure a file has been read before editing it.`
+- ` + "`" + `file_path` + "`" + ` must be an absolute path.
+- Reads up to 2000 lines by default.
+- When you already know which part of the file you need, only read that part. This can be important for larger files.
+- Results are returned using cat -n format, with line numbers starting at 1{EnhancedReadFileDesc}
+- Reading a directory, a missing file, or an empty file returns an error or system reminder rather than content.
+- Do NOT re-read a file you just edited to verify — edit_file/write_file would have errored if the change failed, and the harness tracks file state for you.`
 
-	ReadFileToolDescChinese = `从文件系统读取文件。你可以使用此工具直接访问任何文件。
-假设此工具能够读取机器上的所有文件。如果用户提供了文件路径，假设该路径是有效的。读取不存在的文件是可以的；将返回错误。
+	ReadFileToolDescChinese = `从本地文件系统读取文件。
 
-使用方法：
-- file_path 参数必须是绝对路径，不能是相对路径
-- 默认情况下，从文件开头读取最多 2000 行
-- **大文件和代码库探索的重要提示**：使用 offset 和 limit 参数进行分页，以避免上下文溢出
-	- 首次扫描：read_file(path, limit=100) 查看文件结构
-	- 读取更多部分：read_file(path, offset=100, limit=200) 读取接下来的 200 行
-	- 仅在编辑必要时才省略 limit（读取完整文件）
-- 指定 offset 和 limit：read_file(path, offset=0, limit=100) 读取前 100 行
-- 结果以 cat -n 格式返回，行号从 1 开始
-- 你可以在单个响应中调用多个工具。最好同时推测性地批量读取多个可能有用的文件
-- 如果你读取的文件存在但内容为空，你将收到系统提醒警告而不是文件内容
-- 在编辑文件之前，你应该始终确保已读取该文件`
+- ` + "`" + `file_path` + "`" + ` 必须是绝对路径。
+- 默认最多读取 2000 行。
+- 当你已经知道需要文件的哪一部分时，只读取那一部分。这对较大的文件尤其重要。
+- 结果以 cat -n 格式返回，行号从 1 开始。{EnhancedReadFileDesc}
+- 读取目录、不存在的文件或空文件时，返回错误或系统提醒而非内容。
+- 不要为了验证而重新读取你刚编辑过的文件 —— 若改动失败 edit_file/write_file 早已报错，且 harness 会为你跟踪文件状态。`
 
-	// EnhancedReadFileDescSuffix is appended to ReadFileToolDesc when using MultiModalReadFileTool.
-	EnhancedReadFileDescSuffix = `
-- This tool supports reading image files (e.g., PNG, JPG, etc.). When reading an image file, the contents are presented visually, as the underlying model is a multimodal LLM.
-- This tool can read PDF files (.pdf). For large PDFs (more than 10 pages), you MUST provide the pages parameter to read specific page ranges (e.g., pages: "1-5"). Reading a large PDF without the pages parameter will fail. Maximum 20 pages per request.`
+	EnhancedReadFileDesc = `
+- Reads images (PNG, JPG, …) and presents them visually. Reads PDFs via the ` + "`" + `pages` + "`" + ` parameter (e.g. "1-5", max 20 pages/request; required for PDFs over 10 pages). Reads Jupyter notebooks (.ipynb) as cells with outputs.`
 
-	EnhancedReadFileDescSuffixChinese = `
-- 此工具支持读取图片文件（如 PNG、JPG 等）。读取图片文件时，内容将以视觉方式呈现，因为底层模型是多模态 LLM。
-- 此工具可以读取 PDF 文件（.pdf）。对于大型 PDF（超过 10 页），你必须提供 pages 参数来指定页面范围（例如 pages: "1-5"）。不提供 pages 参数读取大型 PDF 将会失败。每次请求最多 20 页。`
+	EnhancedReadFileDescChinese = `
+- 可读取图片（PNG、JPG 等）并以视觉方式呈现。可通过 ` + "`" + `pages` + "`" + ` 参数读取 PDF（如 "1-5"，每次最多 20 页；超过 10 页的 PDF 必须提供该参数）。可将 Jupyter notebook（.ipynb）按单元格及其输出读取。`
 
-	EditFileToolDesc = `Performs exact string replacements in files.
+	EditFileToolDesc = `Performs exact string replacement in a file.
 
-Usage:
-- You must use your 'read_file' tool at least once in the conversation before editing. This tool will error if you attempt an edit without reading the file.
-- When editing text from Read tool output, ensure you preserve the exact indentation (tabs/spaces) as it appears AFTER the line number prefix. The line number prefix format is: spaces + line number + tab. Everything after that tab is the actual file content to match. Never include any part of the line number prefix in the old_string or new_string.
-- ALWAYS prefer editing existing files. NEVER write new files unless explicitly required.
-- Only use emojis if the user explicitly requests it. Avoid adding emojis to files unless asked.
-- The edit will FAIL if 'old_string' is not unique in the file. Either provide a larger string with more surrounding context to make it unique or use 'replace_all' to change every instance of 'old_string'.
-- Use 'replace_all' for replacing and renaming strings across the file. This parameter is useful if you want to rename a variable for instance.`
+- You must Read the file in this conversation before editing, or the call will fail.
+- ` + "`" + `old_string` + "`" + ` must match the file exactly, including indentation, and be unique — the edit fails otherwise. Strip the Read line prefix (line number + tab) before matching.
+- ` + "`" + `replace_all: true` + "`" + ` replaces every occurrence instead.`
 
 	EditFileToolDescChinese = `在文件中执行精确的字符串替换。
 
-使用方法：
-- 在编辑之前，你必须在对话中至少使用一次 'read_file' 工具。如果你在未读取文件的情况下尝试编辑，此工具将报错
-- 当从 Read 工具输出编辑文本时，请确保保留行号前缀之后的确切缩进（制表符/空格）。行号前缀格式为：空格 + 行号 + 制表符。制表符之后的所有内容都是要匹配的实际文件内容。永远不要在 old_string 或 new_string 中包含行号前缀的任何部分
-- 始终优先编辑现有文件。除非明确要求，否则不要创建新文件
-- 仅在用户明确要求时使用表情符号。除非被要求，否则避免在文件中添加表情符号
-- 如果 'old_string' 在文件中不唯一，编辑将失败。要么提供包含更多上下文的更长字符串使其唯一，要么使用 'replace_all' 更改 'old_string' 的每个实例
-- 使用 'replace_all' 在整个文件中替换和重命名字符串。例如，如果你想重命名变量，此参数很有用`
+- 编辑前你必须在本次对话中 Read 过该文件，否则调用会失败。
+- ` + "`" + `old_string` + "`" + ` 必须与文件完全一致（包括缩进）且唯一，否则编辑失败。匹配前请去掉 Read 输出的行前缀（行号 + 制表符）。
+- ` + "`" + `replace_all: true` + "`" + ` 则替换所有出现处。`
 
-	WriteFileToolDesc = `Writes a file to the local filesystem.
+	WriteFileToolDesc = `Writes a file to the local filesystem, overwriting if one exists.
 
-Usage:
-- This tool will overwrite the existing file if there is one at the provided path.
-- If this is an existing file, you MUST use the Read tool first to read the file's contents. This tool will fail if you did not read the file first.
-- ALWAYS prefer editing existing files in the codebase. NEVER write new files unless explicitly required.
-- NEVER proactively create documentation files (*.md) or README files. Only create documentation files if explicitly requested by the User.
-- Only use emojis if the user explicitly requests it. Avoid writing emojis to files unless asked.`
+When to use: creating a new file, or fully replacing one you've already Read. Overwriting an existing file you haven't Read will fail. For partial changes, use Edit instead.`
 
-	WriteFileToolDescChinese = `将文件写入本地文件系统。
+	WriteFileToolDescChinese = `将文件写入本地文件系统，若已存在则覆盖。
 
-使用方法：
-- 如果提供的路径已存在文件，此工具将覆盖现有文件
-- 如果这是一个现有文件，你必须先使用 Read 工具读取文件内容。如果你没有先读取文件，此工具将失败
-- 始终优先编辑代码库中的现有文件。除非明确要求，否则不要创建新文件
-- 不要主动创建文档文件（*.md）或 README 文件。仅在用户明确要求时才创建文档文件
-- 仅在用户明确要求时使用表情符号。除非被要求，否则避免在文件中写入表情符号`
+何时使用：创建新文件，或完全替换一个你已 Read 过的文件。覆盖你尚未 Read 过的已有文件会失败。局部改动请改用 Edit。`
 
-	GlobToolDesc = `Fast file pattern matching tool that works with any codebase size
+	GlobToolDesc = `- Fast file pattern matching tool that works with any codebase size
 - Supports glob patterns like "**/*.js" or "src/**/*.ts"
 - Returns matching file paths sorted by modification time
 - Use this tool when you need to find files by name patterns
-- You can call multiple tools in a single response. It is always better to speculatively perform multiple searches in parallel if they are potentially useful.
+- When you are doing an open ended search that may require multiple rounds of globbing and grepping, use the Agent tool instead`
 
-Examples:
-- '**/*.py' - Find all Python files
-- '*.txt' - Find all text files in root
-- '/subdir/**/*.md' - Find all markdown files under /subdir`
-
-	GlobToolDescChinese = `适用于任何代码库大小的快速文件模式匹配工具
-- 支持 glob 模式，如 "**/*.js" 或 "src/**/*.ts"
+	GlobToolDescChinese = `- 适用于任何代码库规模的快速文件模式匹配工具
+- 支持形如 "**/*.js" 或 "src/**/*.ts" 的 glob 模式
 - 返回按修改时间排序的匹配文件路径
 - 当你需要按名称模式查找文件时使用此工具
-- 你可以在单个响应中调用多个工具。最好同时并行执行多个可能有用的搜索
+- 当你进行可能需要多轮 glob 与 grep 的开放式搜索时，改用 Agent 工具`
 
-示例：
-- '**/*.py' - 查找所有 Python 文件
-- '*.txt' - 查找根目录中的所有文本文件
-- '/subdir/**/*.md' - 查找 /subdir 下的所有 markdown 文件`
-
-	GrepToolDesc = `
-A powerful search tool built on ripgrep
+	GrepToolDesc = `A powerful search tool built on ripgrep
 
   Usage:
-  - ALWAYS use Grep for search tasks. NEVER invoke 'grep' or 'rg' as a Bash command. The Grep tool has been optimized for correct permissions and access.
+  - ALWAYS use Grep for search tasks. NEVER invoke ` + "`" + `grep` + "`" + ` or ` + "`" + `rg` + "`" + ` as a Bash command. The Grep tool has been optimized for correct permissions and access.
   - Supports full regex syntax (e.g., "log.*Error", "function\s+\w+")
   - Filter files with glob parameter (e.g., "*.js", "**/*.tsx") or type parameter (e.g., "js", "py", "rust")
   - Output modes: "content" shows matching lines, "files_with_matches" shows only file paths (default), "count" shows match counts
-  - Use Task tool for open-ended searches requiring multiple rounds
-  - Pattern syntax: Uses ripgrep (not grep) - literal braces need escaping (use 'interface\{\}' to find 'interface{}' in Go code)
-  - Multiline matching: By default patterns match within single lines only. For cross-line patterns like 'struct \{[\s\S]*?field', use 'multiline: true'`
+  - Use Agent tool for open-ended searches requiring multiple rounds
+  - Pattern syntax: Uses ripgrep (not grep) - literal braces need escaping (use ` + "`" + `interface\{\}` + "`" + ` to find ` + "`" + `interface{}` + "`" + ` in Go code)
+  - Multiline matching: By default patterns match within single lines only. For cross-line patterns like ` + "`" + `struct \{[\s\S]*?field` + "`" + `, use ` + "`" + `multiline: true` + "`"
 
-	GrepToolDescChinese = `
-基于 ripgrep 的强大搜索工具
+	GrepToolDescChinese = `基于 ripgrep 的强大搜索工具
 
   使用方法：
-  - 始终使用 Grep 进行搜索任务。不要将 'grep' 或 'rg' 作为 Bash 命令调用。Grep 工具已针对正确的权限和访问进行了优化
-  - 支持完整的正则表达式语法（例如，"log.*Error"，"function\s+\w+"）
-  - 使用 glob 参数（例如，"*.js"，"**/*.tsx"）或 type 参数（例如，"js"，"py"，"rust"）过滤文件
+  - 搜索任务始终使用 Grep。不要将 ` + "`" + `grep` + "`" + ` 或 ` + "`" + `rg` + "`" + ` 作为 Bash 命令调用。Grep 工具已针对正确的权限与访问做了优化。
+  - 支持完整正则语法（如 "log.*Error"、"function\s+\w+"）
+  - 用 glob 参数（如 "*.js"、"**/*.tsx"）或 type 参数（如 "js"、"py"、"rust"）过滤文件
   - 输出模式："content" 显示匹配行，"files_with_matches" 仅显示文件路径（默认），"count" 显示匹配计数
-  - 对于需要多轮的开放式搜索，使用 Task 工具
-  - 模式语法：使用 ripgrep（不是 grep）- 字面大括号需要转义（使用 'interface\{\}' 在 Go 代码中查找 'interface{}'）
-  - 多行匹配：默认情况下，模式仅在单行内匹配。对于跨行模式如 'struct \{[\s\S]*?field'，使用 'multiline: true'`
+  - 需要多轮的开放式搜索请使用 Agent 工具
+  - 模式语法：使用 ripgrep（非 grep）——字面大括号需转义（用 ` + "`" + `interface\{\}` + "`" + ` 匹配 Go 代码中的 ` + "`" + `interface{}` + "`" + `）
+  - 多行匹配：默认模式仅在单行内匹配。对于跨行模式如 ` + "`" + `struct \{[\s\S]*?field` + "`" + `，使用 ` + "`" + `multiline: true` + "`"
 
-	ExecuteToolDesc = `
-Executes a given command in the sandbox environment with proper handling and security measures.
+	ExecuteToolDesc = `Executes a bash command and returns its output.
 
-Before executing the command, please follow these steps:
+- Working directory persists between calls, but prefer absolute paths — ` + "`" + `cd` + "`" + ` in a compound command can trigger a permission prompt. Shell state (env vars, functions) does not persist; the shell is initialized from the user's profile.
+- IMPORTANT: Avoid using this tool to run ` + "`" + `cat` + "`" + `, ` + "`" + `head` + "`" + `, ` + "`" + `tail` + "`" + `, ` + "`" + `sed` + "`" + `, ` + "`" + `awk` + "`" + `, or ` + "`" + `echo` + "`" + ` commands, unless explicitly instructed or after you have verified that a dedicated tool cannot accomplish your task. Instead, use the appropriate dedicated tool as this will provide a much better experience for the user.`
 
-1. Directory Verification:
-- If the command will create new directories or files, first use the ls tool to verify the parent directory exists and is the correct location
-- For example, before running "mkdir foo/bar", first use ls to check that "foo" exists and is the intended parent directory
+	ExecuteToolDescChinese = `执行一条 bash 命令并返回其输出。
 
-2. Command Execution:
-- Always quote file paths that contain spaces with double quotes (e.g., cd "path with spaces/file.txt")
-- Examples of proper quoting:
-- cd "/Users/name/My Documents" (correct)
-- cd /Users/name/My Documents (incorrect - will fail)
-- python "/path/with spaces/script.py" (correct)
-- python /path/with spaces/script.py (incorrect - will fail)
-- After ensuring proper quoting, execute the command
-- Capture the output of the command
+- 工作目录在多次调用间保持，但优先使用绝对路径 —— 复合命令中的 ` + "`" + `cd` + "`" + ` 可能触发权限确认。Shell 状态（环境变量、函数）不会保留；shell 以用户的 profile 初始化。
+- 重要：除非明确要求，或你已确认没有专用工具能完成任务，否则避免用本工具运行 ` + "`" + `cat` + "`" + `、` + "`" + `head` + "`" + `、` + "`" + `tail` + "`" + `、` + "`" + `sed` + "`" + `、` + "`" + `awk` + "`" + `、` + "`" + `echo` + "`" + ` 命令。请改用相应的专用工具，这会带来更好的体验。`
 
-Usage notes:
-- The command parameter is required
-- Commands run in an isolated sandbox environment
-- Returns combined stdout/stderr output with exit code
-- If the output is very large, it may be truncated
-- VERY IMPORTANT: You MUST avoid using search commands like find and grep. Instead use the grep, glob tools to search. You MUST avoid read tools like cat, head, tail, and use read_file to read files.
-- When issuing multiple commands, use the ';' or '&&' operator to separate them. DO NOT use newlines (newlines are ok in quoted strings)
-- Use '&&' when commands depend on each other (e.g., "mkdir dir && cd dir")
-- Use ';' only when you need to run commands sequentially but don't care if earlier commands fail
-- Try to maintain your current working directory throughout the session by using absolute paths and avoiding usage of cd
+	ManagedExecuteToolDesc = `Executes a bash command and returns its output.
 
-Examples:
-Good examples:
-- execute(command="pytest /foo/bar/tests")
-- execute(command="python /path/to/script.py")
-- execute(command="npm install && npm test")
+- Working directory persists between calls, but prefer absolute paths — ` + "`" + `cd` + "`" + ` in a compound command can trigger a permission prompt. Shell state (env vars, functions) does not persist; the shell is initialized from the user's profile.
+- IMPORTANT: Avoid using this tool to run ` + "`" + `cat` + "`" + `, ` + "`" + `head` + "`" + `, ` + "`" + `tail` + "`" + `, ` + "`" + `sed` + "`" + `, ` + "`" + `awk` + "`" + `, or ` + "`" + `echo` + "`" + ` commands, unless explicitly instructed or after you have verified that a dedicated tool cannot accomplish your task. Instead, use the appropriate dedicated tool as this will provide a much better experience for the user.
+- ` + "`" + `timeout` + "`" + ` is in milliseconds: default 120000, max 600000.
+- ` + "`" + `run_in_background` + "`" + ` runs the command detached: it keeps running across turns and re-invokes you when it exits. No ` + "`" + `&` + "`" + ` needed. Foreground ` + "`" + `sleep` + "`" + ` is blocked; use Monitor with an until-loop to wait on a condition.`
 
-Bad examples (avoid these):
-- execute(command="cd /foo/bar && pytest tests")  # Use absolute path instead
-- execute(command="cat file.txt")  # Use read_file tool instead
-- execute(command="find . -name '*.py'")  # Use glob tool instead
-- execute(command="grep -r 'pattern' .")  # Use grep tool instead
-`
+	ManagedExecuteToolDescChinese = `执行一条 bash 命令并返回其输出。
 
-	ExecuteToolDescChinese = `
-在沙箱环境中执行给定命令，具有适当的处理和安全措施。
-
-执行命令前，请按照以下步骤操作：
-
-1. 目录验证：
-- 如果命令将创建新目录或文件，首先使用 ls 工具验证父目录是否存在且是正确的位置
-- 例如，在运行 "mkdir foo/bar" 之前，首先使用 ls 检查 "foo" 是否存在且是预期的父目录
-
-2. 命令执行：
-- 始终用双引号引用包含空格的文件路径（例如，cd "path with spaces/file.txt"）
-- 正确引用的示例：
-- cd "/Users/name/My Documents"（正确）
-- cd /Users/name/My Documents（错误 - 将失败）
-- python "/path/with spaces/script.py"（正确）
-- python /path/with spaces/script.py（错误 - 将失败）
-- 确保正确引用后，执行命令
-- 捕获命令的输出
-
-使用说明：
-- command 参数是必需的
-- 命令在隔离的沙箱环境中运行
-- 返回合并的 stdout/stderr 输出和退出代码
-- 如果输出非常大，可能会被截断
-- 非常重要：你必须避免使用 find 和 grep 等搜索命令。请改用 grep、glob 工具进行搜索。你必须避免使用 cat、head、tail 等读取工具，请使用 read_file 读取文件
-- 发出多个命令时，使用 ';' 或 '&&' 运算符分隔它们。不要使用换行符（引号字符串中的换行符是可以的）
-- 当命令相互依赖时使用 '&&'（例如，"mkdir dir && cd dir"）
-- 仅当你需要按顺序运行命令但不关心早期命令是否失败时使用 ';'
-- 尝试通过使用绝对路径并避免使用 cd 来在整个会话中保持当前工作目录
-
-示例：
-好的示例：
-- execute(command="pytest /foo/bar/tests")
-- execute(command="python /path/to/script.py")
-- execute(command="npm install && npm test")
-
-不好的示例（避免这些）：
-- execute(command="cd /foo/bar && pytest tests")  # 改用绝对路径
-- execute(command="cat file.txt")  # 改用 read_file 工具
-- execute(command="find . -name '*.py'")  # 改用 glob 工具
-- execute(command="grep -r 'pattern' .")  # 改用 grep 工具
-`
-
-	ManagedExecuteToolDesc = `
-Executes a given command in the sandbox environment with proper handling and security measures.
-
-Before executing the command, please follow these steps:
-
-1. Directory Verification:
-- If the command will create new directories or files, first use the ls tool to verify the parent directory exists and is the correct location
-- For example, before running "mkdir foo/bar", first use ls to check that "foo" exists and is the intended parent directory
-
-2. Command Execution:
-- Always quote file paths that contain spaces with double quotes (e.g., cd "path with spaces/file.txt")
-- Examples of proper quoting:
-- cd "/Users/name/My Documents" (correct)
-- cd /Users/name/My Documents (incorrect - will fail)
-- python "/path/with spaces/script.py" (correct)
-- python /path/with spaces/script.py (incorrect - will fail)
-- After ensuring proper quoting, execute the command
-- Capture the output of the command
-
-Usage notes:
-- The command parameter is required
-- Set run_in_background=true for servers, watchers, and other long-running commands you do not need to wait for. Streaming commands briefly expose startup output (such as an OAuth URL) before the caller stream closes. You will be notified when the command completes; use the task_output tool to check its status or retrieve its result, and the task_stop tool to cancel it.
-- The optional timeout parameter (in milliseconds) sets the maximum time to wait for the command. Omit to use the default.
-- Commands run in an isolated sandbox environment
-- Returns combined stdout/stderr output with exit code
-- If the output is very large, it may be truncated
-- VERY IMPORTANT: You MUST avoid using search commands like find and grep. Instead use the grep, glob tools to search. You MUST avoid read tools like cat, head, tail, and use read_file to read files.
-- When issuing multiple commands, use the ';' or '&&' operator to separate them. DO NOT use newlines (newlines are ok in quoted strings)
-- Use '&&' when commands depend on each other (e.g., "mkdir dir && cd dir")
-- Use ';' only when you need to run commands sequentially but don't care if earlier commands fail
-- Try to maintain your current working directory throughout the session by using absolute paths and avoiding usage of cd
-
-Examples:
-Good examples:
-- execute(command="pytest /foo/bar/tests")
-- execute(command="npm run dev", run_in_background=true)
-
-Bad examples (avoid these):
-- execute(command="cd /foo/bar && pytest tests")  # Use absolute path instead
-- execute(command="cat file.txt")  # Use read_file tool instead
-- execute(command="find . -name '*.py'")  # Use glob tool instead
-- execute(command="grep -r 'pattern' .")  # Use grep tool instead
-`
-
-	ManagedExecuteToolDescChinese = `
-在沙箱环境中执行给定命令，具有适当的处理和安全措施。
-
-执行命令前，请按照以下步骤操作：
-
-1. 目录验证：
-- 如果命令将创建新目录或文件，首先使用 ls 工具验证父目录是否存在且是正确的位置
-- 例如，在运行 "mkdir foo/bar" 之前，首先使用 ls 检查 "foo" 是否存在且是预期的父目录
-
-2. 命令执行：
-- 始终用双引号引用包含空格的文件路径（例如，cd "path with spaces/file.txt"）
-- 正确引用的示例：
-- cd "/Users/name/My Documents"（正确）
-- cd /Users/name/My Documents（错误 - 将失败）
-- python "/path/with spaces/script.py"（正确）
-- python /path/with spaces/script.py（错误 - 将失败）
-- 确保正确引用后，执行命令
-- 捕获命令的输出
-
-使用说明：
-- command 参数是必需的
-- 对于服务器、监听器等你无需等待的长时间运行命令，设置 run_in_background=true。流式命令会在调用方输出流关闭前短暂展示启动输出（例如 OAuth 链接）。命令完成时你会收到通知；使用 task_output 工具查询其状态或获取结果，使用 task_stop 工具取消它。
-- 可选的 timeout 参数（毫秒）设置等待命令的最长时间。不传则使用默认值。
-- 命令在隔离的沙箱环境中运行
-- 返回合并的 stdout/stderr 输出和退出代码
-- 如果输出非常大，可能会被截断
-- 非常重要：你必须避免使用 find 和 grep 等搜索命令。请改用 grep、glob 工具进行搜索。你必须避免使用 cat、head、tail 等读取工具，请使用 read_file 读取文件
-- 发出多个命令时，使用 ';' 或 '&&' 运算符分隔它们。不要使用换行符（引号字符串中的换行符是可以的）
-- 当命令相互依赖时使用 '&&'（例如，"mkdir dir && cd dir"）
-- 仅当你需要按顺序运行命令但不关心早期命令是否失败时使用 ';'
-- 尝试通过使用绝对路径并避免使用 cd 来在整个会话中保持当前工作目录
-
-示例：
-好的示例：
-- execute(command="pytest /foo/bar/tests")
-- execute(command="npm run dev", run_in_background=true)
-
-不好的示例（避免这些）：
-- execute(command="cd /foo/bar && pytest tests")  # 改用绝对路径
-- execute(command="cat file.txt")  # 改用 read_file 工具
-- execute(command="find . -name '*.py'")  # 改用 glob 工具
-- execute(command="grep -r 'pattern' .")  # 改用 grep 工具
-`
+- 工作目录在多次调用间保持，但优先使用绝对路径 —— 复合命令中的 ` + "`" + `cd` + "`" + ` 可能触发权限确认。Shell 状态（环境变量、函数）不会保留；shell 以用户的 profile 初始化。
+- 重要：除非明确要求，或你已确认没有专用工具能完成任务，否则避免用本工具运行 ` + "`" + `cat` + "`" + `、` + "`" + `head` + "`" + `、` + "`" + `tail` + "`" + `、` + "`" + `sed` + "`" + `、` + "`" + `awk` + "`" + `、` + "`" + `echo` + "`" + ` 命令。请改用相应的专用工具，这会带来更好的体验。
+- ` + "`" + `timeout` + "`" + ` 单位为毫秒：默认 120000，最大 600000。
+- ` + "`" + `run_in_background` + "`" + ` 以分离方式运行命令：它跨轮次持续运行，退出时会重新唤起你。无需 ` + "`" + `&` + "`" + `。前台 ` + "`" + `sleep` + "`" + ` 被禁止；用 Monitor 配合 until 循环来等待某个条件。`
 )
