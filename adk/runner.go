@@ -399,7 +399,7 @@ func prepareRunnerSessionResume[M MessageType]( //nolint:revive // argument-limi
 		Kind:      SessionEventKind(SessionEventExtensionPrefix + "resume.request_started"),
 		Extension: &SessionExtensionEvent{},
 	}
-	if cp != nil && cp.TurnID != "" {
+	if cp.TurnID != "" {
 		state.turnID = cp.TurnID
 		resumeEvent.TurnID = state.turnID
 	}
@@ -409,7 +409,7 @@ func prepareRunnerSessionResume[M MessageType]( //nolint:revive // argument-limi
 	}
 	if state.turnID == "" {
 		state.turnID = resumeEvent.EventID
-		resumeEvent.TurnID = state.turnID
+		resumeEvent.TurnID = resumeEvent.EventID
 	}
 	if err := appendRunnerSessionControlEvent(ctx, state, resumeEvent); err != nil {
 		_ = state.sessionHandle.close(ctx)
