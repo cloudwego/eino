@@ -136,6 +136,14 @@ type SessionEvent[M MessageType] struct {
 	// the session message array.
 	EventID string `json:"event_id"`
 
+	// TurnID is runner-owned, session-local correlation metadata. For a fresh
+	// runner-managed Run or Query, it equals the opening
+	// session.status_running EventID. Every event produced by that logical turn
+	// carries the same value, and Resume preserves the value from the runner
+	// checkpoint. Empty TurnID is valid for legacy records and events created
+	// outside a runner-managed turn.
+	TurnID string `json:"turn_id,omitempty"`
+
 	// Timestamp is inherited from the source AgentEvent and represents the event
 	// occurrence time, not the SessionEventStore persistence time.
 	Timestamp time.Time `json:"timestamp,omitempty"`
@@ -182,6 +190,7 @@ type SessionEventVariant[M MessageType] struct {
 // resulting message as a SessionEvent.
 type MessageStreamRef struct {
 	EventID   string
+	TurnID    string
 	Timestamp time.Time
 	Kind      SessionEventKind
 }
@@ -519,6 +528,7 @@ type reconstructedSessionState[M MessageType] struct {
 type runnerSessionCheckpoint struct {
 	SessionID    string
 	CheckPointID string
+	TurnID       string
 	Payload      []byte
 }
 
@@ -985,31 +995,44 @@ func assignSessionEventID[M MessageType](
 	return nil
 }
 
-type sessionEventIDGeneratorKey[M MessageType] struct{}
+type sessionEventContextKey[M MessageType] struct{}
 
-// contextWithSessionEventIDGenerator stores the typed SessionEventIDGenerator[M]
-// in ctx so that deeply-nested wrappers (model / tool / middleware) can route
-// SessionEvent[M] draft ID allocation through the runner's configured
-// generator without explicit parameter threading.
-//
-// This is an internal plumbing escape hatch; the only payload allowed in ctx
-// under this key is the generator function itself. Storing business IDs,
-// per-event state, or anything else under this key is forbidden — see the
-// "scoped exception" note in the design plan.
-func contextWithSessionEventIDGenerator[M MessageType](ctx context.Context, gen SessionEventIDGenerator[M]) context.Context {
-	if gen == nil {
-		return ctx
-	}
-	return context.WithValue(ctx, sessionEventIDGeneratorKey[M]{}, gen)
+type sessionEventContext[M MessageType] struct {
+	generator SessionEventIDGenerator[M]
+	turnID    string
 }
 
-func sessionEventIDGeneratorFromContext[M MessageType](ctx context.Context) SessionEventIDGenerator[M] {
-	if v := ctx.Value(sessionEventIDGeneratorKey[M]{}); v != nil {
-		if gen, ok := v.(SessionEventIDGenerator[M]); ok {
-			return gen
+func contextWithSessionEventContext[M MessageType](ctx context.Context, gen SessionEventIDGenerator[M], turnID string) context.Context {
+	if gen == nil && turnID == "" {
+		return ctx
+	}
+	existing := sessionEventContextFromContext[M](ctx)
+	if gen == nil {
+		gen = existing.generator
+	}
+	if turnID == "" {
+		turnID = existing.turnID
+	}
+	return context.WithValue(ctx, sessionEventContextKey[M]{}, &sessionEventContext[M]{
+		generator: gen,
+		turnID:    turnID,
+	})
+}
+
+func sessionEventContextFromContext[M MessageType](ctx context.Context) sessionEventContext[M] {
+	if v := ctx.Value(sessionEventContextKey[M]{}); v != nil {
+		if sc, ok := v.(*sessionEventContext[M]); ok && sc != nil {
+			return *sc
 		}
 	}
-	return nil
+	return sessionEventContext[M]{}
+}
+
+func stampSessionEventTurnID[M MessageType](event *SessionEvent[M], turnID string) {
+	if event == nil || turnID == "" {
+		return
+	}
+	event.TurnID = turnID
 }
 
 // assignSessionEventIDFromContext assigns the EventID of a draft
@@ -1020,7 +1043,9 @@ func assignSessionEventIDFromContext[M MessageType](ctx context.Context, event *
 	if event == nil {
 		return nil
 	}
-	return assignSessionEventID(ctx, event, sessionEventIDGeneratorFromContext[M](ctx))
+	sc := sessionEventContextFromContext[M](ctx)
+	stampSessionEventTurnID(event, sc.turnID)
+	return assignSessionEventID(ctx, event, sc.generator)
 }
 
 type sessionEventPersister[M MessageType] struct {
