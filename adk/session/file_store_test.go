@@ -98,14 +98,14 @@ func TestFileStoreWritesHumanReadableEvlogLines(t *testing.T) {
 	assert.Equal(t, "session.status_idle", parts1[1])
 }
 
-func TestFileStoreSessionEventMetadataRoundTripKeepsThreeColumnFormat(t *testing.T) {
+func TestFileStoreSessionEventExtraRoundTripKeepsThreeColumnFormat(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
 	store, err := session.NewFileStore[*schema.Message](dir, nil)
 	require.NoError(t, err)
 
 	event := testMessageEvent("extra-1", "one")
-	event.Metadata = map[string]any{
+	event.Extra = map[string]any{
 		"reason": "audit",
 		"nested": map[string]any{"items": []any{"a", "b"}},
 	}
@@ -116,8 +116,8 @@ func TestFileStoreSessionEventMetadataRoundTripKeepsThreeColumnFormat(t *testing
 	res, err := reopened.LoadEvents(ctx, "s", &adk.LoadSessionEventsRequest{})
 	require.NoError(t, err)
 	require.Len(t, res.Events, 1)
-	assert.Equal(t, "audit", res.Events[0].Metadata["reason"])
-	assert.Equal(t, "a", res.Events[0].Metadata["nested"].(map[string]any)["items"].([]any)[0])
+	assert.Equal(t, "audit", res.Events[0].Extra["reason"])
+	assert.Equal(t, "a", res.Events[0].Extra["nested"].(map[string]any)["items"].([]any)[0])
 
 	data, err := os.ReadFile(filepath.Join(dir, url.PathEscape("s")+".evlog"))
 	require.NoError(t, err)
@@ -286,7 +286,7 @@ func TestFileStoreRejectsCorruptedRecordsOnIndexRebuild(t *testing.T) {
 		"empty event id":      "\tmessage\t{}\n",
 		"missing kind tab":    "e1\tmessage-only\n",
 		"duplicate event id":  "e1\tmessage\t{}\ne1\tmessage\t{}\n",
-		"metadata mismatches": "e1\tturn_end\t{\"event_id\":\"e1\",\"kind\":\"message\",\"message\":{\"role\":\"user\",\"content\":\"x\"}}\n",
+		"extra mismatches":    "e1\tturn_end\t{\"event_id\":\"e1\",\"kind\":\"message\",\"message\":{\"role\":\"user\",\"content\":\"x\"}}\n",
 		"invalid event body":  "e1\tmessage\tnot-json\n",
 		"invalid event shape": "e1\tmessage\t{\"event_id\":\"e1\",\"kind\":\"message\"}\n",
 		"empty session id":    "",

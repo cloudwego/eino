@@ -108,11 +108,11 @@ func TestInMemoryStoreLoadReturnsIndependentEvents(t *testing.T) {
 	assert.Equal(t, "e1", second.Events[0].EventID)
 }
 
-func TestInMemoryStoreSessionEventMetadataRoundTripAndIsolation(t *testing.T) {
+func TestInMemoryStoreSessionEventExtraRoundTripAndIsolation(t *testing.T) {
 	ctx := context.Background()
 	store := session.NewInMemoryStore[*schema.Message](nil)
 	original := testMessageEvent("extra-1", "one")
-	original.Metadata = map[string]any{
+	original.Extra = map[string]any{
 		"reason": "seed",
 		"nested": map[string]any{
 			"items": []any{"a", "b"},
@@ -120,21 +120,21 @@ func TestInMemoryStoreSessionEventMetadataRoundTripAndIsolation(t *testing.T) {
 	}
 	require.NoError(t, store.AppendEvents(ctx, "s", []*adk.SessionEvent[*schema.Message]{original}))
 
-	original.Metadata["reason"] = "mutated"
-	original.Metadata["nested"].(map[string]any)["items"].([]any)[0] = "mutated"
+	original.Extra["reason"] = "mutated"
+	original.Extra["nested"].(map[string]any)["items"].([]any)[0] = "mutated"
 
 	first, err := store.LoadEvents(ctx, "s", &adk.LoadSessionEventsRequest{})
 	require.NoError(t, err)
 	require.Len(t, first.Events, 1)
-	assert.Equal(t, "seed", first.Events[0].Metadata["reason"])
-	nested := first.Events[0].Metadata["nested"].(map[string]any)
+	assert.Equal(t, "seed", first.Events[0].Extra["reason"])
+	nested := first.Events[0].Extra["nested"].(map[string]any)
 	items := nested["items"].([]any)
 	assert.Equal(t, "a", items[0])
 
 	items[0] = "loaded-mutated"
 	second, err := store.LoadEvents(ctx, "s", &adk.LoadSessionEventsRequest{})
 	require.NoError(t, err)
-	assert.Equal(t, "a", second.Events[0].Metadata["nested"].(map[string]any)["items"].([]any)[0])
+	assert.Equal(t, "a", second.Events[0].Extra["nested"].(map[string]any)["items"].([]any)[0])
 }
 
 func TestInMemoryStoreValidationReplayAndReversePagination(t *testing.T) {
