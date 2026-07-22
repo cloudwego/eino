@@ -554,8 +554,10 @@ type CompletionTokensDetails struct {
 
 // PromptTokenDetails provides a breakdown of prompt token usage.
 type PromptTokenDetails struct {
-	// Cached tokens present in the prompt.
+	// CachedTokens is the number of prompt tokens read from a provider cache.
 	CachedTokens int `json:"cached_tokens"`
+	// CacheCreationTokens is the number of prompt tokens written to a provider cache.
+	CacheCreationTokens int `json:"cache_creation_tokens"`
 }
 
 var _ MessagesTemplate = &Message{}
@@ -1751,6 +1753,9 @@ func ConcatMessages(msgs []*Message) (*Message, error) {
 
 				if msg.ResponseMeta.Usage.PromptTokenDetails.CachedTokens > ret.ResponseMeta.Usage.PromptTokenDetails.CachedTokens {
 					ret.ResponseMeta.Usage.PromptTokenDetails.CachedTokens = msg.ResponseMeta.Usage.PromptTokenDetails.CachedTokens
+				}
+				if msg.ResponseMeta.Usage.PromptTokenDetails.CacheCreationTokens > ret.ResponseMeta.Usage.PromptTokenDetails.CacheCreationTokens {
+					ret.ResponseMeta.Usage.PromptTokenDetails.CacheCreationTokens = msg.ResponseMeta.Usage.PromptTokenDetails.CacheCreationTokens
 				}
 
 				if msg.ResponseMeta.Usage.CompletionTokensDetails.ReasoningTokens > ret.ResponseMeta.Usage.CompletionTokensDetails.ReasoningTokens {
