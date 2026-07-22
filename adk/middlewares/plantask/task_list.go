@@ -74,17 +74,21 @@ func listTasks(ctx context.Context, backend Backend, baseDir string) ([]*task, e
 			continue
 		}
 
+		filePath := file.Path
+		if !filepath.IsAbs(filePath) {
+			filePath = filepath.Join(baseDir, filePath)
+		}
 		content, err := backend.Read(ctx, &ReadRequest{
-			FilePath: file.Path,
+			FilePath: filePath,
 		})
 		if err != nil {
-			return nil, fmt.Errorf("%s read task file %s failed, err: %w", TaskListToolName, file.Path, err)
+			return nil, fmt.Errorf("%s read task file %s failed, err: %w", TaskListToolName, filePath, err)
 		}
 
 		taskData := &task{}
 		err = sonic.UnmarshalString(content.Content, taskData)
 		if err != nil {
-			return nil, fmt.Errorf("%s parse task file %s failed, err: %w", TaskListToolName, file.Path, err)
+			return nil, fmt.Errorf("%s parse task file %s failed, err: %w", TaskListToolName, filePath, err)
 		}
 
 		tasks = append(tasks, taskData)
