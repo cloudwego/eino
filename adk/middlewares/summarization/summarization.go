@@ -340,7 +340,7 @@ func (m *TypedMiddleware[M]) BeforeModelRewriteState(ctx context.Context, state 
 		Tools:    state.ToolInfos,
 	})
 	if err != nil {
-		return nil, nil, err
+		return ctx, nil, err
 	}
 	if !triggered {
 		return ctx, state, nil
@@ -348,7 +348,7 @@ func (m *TypedMiddleware[M]) BeforeModelRewriteState(ctx context.Context, state 
 
 	finalMsgs, err := m.Summarize(ctx, state)
 	if err != nil {
-		return nil, nil, err
+		return ctx, nil, err
 	}
 
 	afterState := *state
