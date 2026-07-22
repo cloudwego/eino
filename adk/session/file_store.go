@@ -439,7 +439,7 @@ func (s *FileStore[M]) decodeFileEvent(src fileEvent) (*adk.SessionEvent[M], err
 		return nil, err
 	}
 	if event.EventID != src.eventID || event.Kind != src.kind {
-		return nil, fmt.Errorf("adk/session: file event metadata mismatch for event_id %q", src.eventID)
+		return nil, fmt.Errorf("adk/session: file event header mismatch for event_id %q", src.eventID)
 	}
 	return &event, nil
 }

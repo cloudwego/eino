@@ -306,17 +306,9 @@ func sendSessionTimelineEvent[M MessageType](ctx context.Context, se *SessionEve
 	if !execCtx.timelineEvents && !execCtx.internalTimelineEvents {
 		return
 	}
-	stampSessionEventTurnID(se, sessionEventContextFromContext[M](ctx).turnID)
-	if se.Timestamp.IsZero() {
-		se.Timestamp = newEventTimestamp()
-	}
-	if se.EventID == "" {
-		if err := assignSessionEventIDFromContext(ctx, se); err != nil {
-			execCtx.send(ctx, &TypedAgentEvent[M]{Err: err})
-			return
-		}
-	}
-	if err := ValidateEmittedSessionEventKind(se); err != nil {
+	sc := sessionEventContextFromContext[M](ctx)
+	stampSessionEventTurnID(se, sc.turnID)
+	if err := prepareSessionEventEnvelope(ctx, se, sc.generator, sc.provider, sessionEventEnvelopeOptions{}); err != nil {
 		execCtx.send(ctx, &TypedAgentEvent[M]{Err: err})
 		return
 	}
@@ -585,7 +577,9 @@ func (m *typedEventSenderModel[M]) Generate(ctx context.Context, input []M, opts
 	// producer-owned identity applies. The same ID is used for the live
 	// TypedAgentEvent below; the materialized SessionEvent later inherits it.
 	assistantDraft := &SessionEvent[M]{Timestamp: timestamp, Kind: SessionEventMessage, Message: copyMessage(result)}
-	if err := assignSessionEventIDFromContext(ctx, assistantDraft); err != nil {
+	sc := sessionEventContextFromContext[M](ctx)
+	stampSessionEventTurnID(assistantDraft, sc.turnID)
+	if err := prepareSessionEventEnvelope(ctx, assistantDraft, sc.generator, sc.provider, sessionEventEnvelopeOptions{}); err != nil {
 		var zero M
 		return zero, err
 	}
@@ -652,7 +646,9 @@ func (m *typedEventSenderModel[M]) Stream(ctx context.Context, input []M, opts .
 	// match on Kind==SessionEventMessage with a zero Message.
 	var draftZero M
 	assistantDraft := &SessionEvent[M]{Timestamp: timestamp, Kind: SessionEventMessage, Message: draftZero}
-	if err := assignSessionEventIDFromContext(ctx, assistantDraft); err != nil {
+	sc := sessionEventContextFromContext[M](ctx)
+	stampSessionEventTurnID(assistantDraft, sc.turnID)
+	if err := prepareSessionEventEnvelope(ctx, assistantDraft, sc.generator, sc.provider, sessionEventEnvelopeOptions{AllowPayloadlessDraft: true}); err != nil {
 		result.Close()
 		return nil, err
 	}
@@ -1333,7 +1329,9 @@ func (w *typedEventSenderToolWrapper[M]) WrapInvokableToolCall(_ context.Context
 		// matching tool span end so no orphaned ToolResultMessageEventID
 		// reference is left in the timeline.
 		toolResultDraft := &SessionEvent[M]{Timestamp: timestamp, Kind: SessionEventMessage, Message: event.Output.MessageOutput.Message}
-		if idErr := assignSessionEventIDFromContext(ctx, toolResultDraft); idErr != nil {
+		sc := sessionEventContextFromContext[M](ctx)
+		stampSessionEventTurnID(toolResultDraft, sc.turnID)
+		if idErr := prepareSessionEventEnvelope(ctx, toolResultDraft, sc.generator, sc.provider, sessionEventEnvelopeOptions{}); idErr != nil {
 			if execCtx := getTypedChatModelAgentExecCtx[M](ctx); execCtx != nil && execCtx.generator != nil {
 				execCtx.send(ctx, &TypedAgentEvent[M]{Err: idErr})
 			}
@@ -1407,7 +1405,9 @@ func (w *typedEventSenderToolWrapper[M]) WrapStreamableToolCall(_ context.Contex
 		// ToolResultMessageEventID reference is left behind.
 		var toolResultDraftMsg M
 		toolResultDraft := &SessionEvent[M]{Timestamp: timestamp, Kind: SessionEventMessage, Message: toolResultDraftMsg}
-		if idErr := assignSessionEventIDFromContext(ctx, toolResultDraft); idErr != nil {
+		sc := sessionEventContextFromContext[M](ctx)
+		stampSessionEventTurnID(toolResultDraft, sc.turnID)
+		if idErr := prepareSessionEventEnvelope(ctx, toolResultDraft, sc.generator, sc.provider, sessionEventEnvelopeOptions{AllowPayloadlessDraft: true}); idErr != nil {
 			if execCtx := getTypedChatModelAgentExecCtx[M](ctx); execCtx != nil && execCtx.generator != nil {
 				execCtx.send(ctx, &TypedAgentEvent[M]{Err: idErr})
 			}
@@ -1545,7 +1545,9 @@ func (w *typedEventSenderToolWrapper[M]) WrapEnhancedInvokableToolCall(_ context
 		// result event and the matching tool span end so no orphaned
 		// ToolResultMessageEventID reference is left behind.
 		toolResultDraft := &SessionEvent[M]{Timestamp: timestamp, Kind: SessionEventMessage, Message: event.Output.MessageOutput.Message}
-		if idErr := assignSessionEventIDFromContext(ctx, toolResultDraft); idErr != nil {
+		sc := sessionEventContextFromContext[M](ctx)
+		stampSessionEventTurnID(toolResultDraft, sc.turnID)
+		if idErr := prepareSessionEventEnvelope(ctx, toolResultDraft, sc.generator, sc.provider, sessionEventEnvelopeOptions{}); idErr != nil {
 			if execCtx := getTypedChatModelAgentExecCtx[M](ctx); execCtx != nil && execCtx.generator != nil {
 				execCtx.send(ctx, &TypedAgentEvent[M]{Err: idErr})
 			}
@@ -1619,7 +1621,9 @@ func (w *typedEventSenderToolWrapper[M]) WrapEnhancedStreamableToolCall(_ contex
 		// ToolResultMessageEventID reference is left behind.
 		var toolResultDraftMsg M
 		toolResultDraft := &SessionEvent[M]{Timestamp: timestamp, Kind: SessionEventMessage, Message: toolResultDraftMsg}
-		if idErr := assignSessionEventIDFromContext(ctx, toolResultDraft); idErr != nil {
+		sc := sessionEventContextFromContext[M](ctx)
+		stampSessionEventTurnID(toolResultDraft, sc.turnID)
+		if idErr := prepareSessionEventEnvelope(ctx, toolResultDraft, sc.generator, sc.provider, sessionEventEnvelopeOptions{AllowPayloadlessDraft: true}); idErr != nil {
 			if execCtx := getTypedChatModelAgentExecCtx[M](ctx); execCtx != nil && execCtx.generator != nil {
 				execCtx.send(ctx, &TypedAgentEvent[M]{Err: idErr})
 			}

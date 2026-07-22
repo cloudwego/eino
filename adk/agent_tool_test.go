@@ -1360,7 +1360,7 @@ func TestAttack_AgentToolForeignSessionEventsDoNotInheritParentTurnID(t *testing
 			require.NoError(t, err)
 			at := NewAgentTool(ctx, inner).(tool.InvokableTool)
 
-			ctx = contextWithSessionEventContext[*schema.Message](ctx, nil, "parent-turn-id")
+			ctx = contextWithSessionEventContext[*schema.Message](ctx, nil, nil, "parent-turn-id")
 			var got *AgentEvent
 			opts := []tool.Option{
 				withAgentToolOptions(inner.Name(ctx), []AgentRunOption{withEnableSessionEvents()}),
