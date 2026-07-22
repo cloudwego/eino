@@ -493,7 +493,33 @@ func receiveWithListening(recv func() (*task, bool), cancel chan *time.Duration)
 
 	select {
 	case p := <-resultCh:
-		return p.ta, p.closed, false, false, nil
+		// A task can complete at essentially the same instant an immediate
+		// cancel is issued (e.g. a stream-cancel monitor reacting to the same
+		// signal that produced this task's error). Re-check cancel
+		// non-blockingly so a cancel signal that is already pending gets
+		// priority over the task result instead of being silently dropped.
+		// This narrows, but cannot fully eliminate, the window where an
+		// unrelated task finishes a few nanoseconds before a concurrent
+		// cancel call — that residual race is inherent to unsynchronized
+		// concurrent channel signals.
+		select {
+		case timeout, ok := <-cancel:
+			if !ok {
+				return nil, false, true, true, nil
+			}
+			if timeout == nil {
+				// Unlimited grace period: the task's real result is authoritative.
+				return p.ta, p.closed, false, true, nil
+			}
+			if *timeout <= 0 {
+				now := time.Now()
+				return nil, false, true, true, &now
+			}
+			dt := time.Now().Add(*timeout)
+			return p.ta, p.closed, false, true, &dt
+		default:
+			return p.ta, p.closed, false, false, nil
+		}
 	case timeout, ok := <-cancel:
 		if !ok {
 			// The cancel channel has been closed — this means a previous call to
@@ -506,6 +532,19 @@ func receiveWithListening(recv func() (*task, bool), cancel chan *time.Duration)
 		canceled = true
 		if timeout == nil {
 			break
+		}
+		if *timeout <= 0 {
+			// Zero/negative timeout means "interrupt now, no grace period"
+			// (CancelImmediate or a timed-out safe-point escalation). Do NOT
+			// race resultCh against a time.After(0) timer here: the timer
+			// goes through the runtime's timer heap and is not instantaneous,
+			// while the task's own completion may itself be a side effect of
+			// this same cancellation (e.g. a stream-cancel monitor injecting
+			// an error into the task's input stream). Letting that race would
+			// non-deterministically treat the cancellation as a normal task
+			// completion and skip the interrupt/checkpoint path entirely.
+			now := time.Now()
+			return nil, false, true, true, &now
 		}
 		timeoutCh = time.After(*timeout)
 		dt := time.Now().Add(*timeout)

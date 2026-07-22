@@ -565,6 +565,18 @@ func (cc *cancelContext) isImmediateCancelled() bool {
 // Also closes immediateChan (used by cancelMonitoredModel to abort an in-progress stream).
 // Returns false if an interrupt was already sent or if no graphInterruptFuncs have been
 // registered yet (the deferred fire in setGraphInterruptFunc will handle that case).
+//
+// Ordering matters here. Closing immediateChan wakes wrapStreamWithCancelMonitoring,
+// which injects ErrStreamCanceled into this level's own model stream — that can fail
+// the stream's node almost immediately. If immediateChan closed before the compose
+// graph interrupt signal was sent, the task manager could observe the node's plain
+// error before it had any cancel signal to recognize, and report a normal node
+// failure instead of a cancellation (see issue #1148). So for the direct path, fire
+// this level's own graph interrupt(s) first, and only then close immediateChan.
+//
+// The recursive-with-descendant path is different on purpose: immediateChan must
+// close early there so descendants (which select on it) can start tearing down
+// during the grace period, before this level's own interrupt is forced.
 func (cc *cancelContext) sendImmediateInterrupt() bool {
 	cc.mu.Lock()
 
@@ -573,30 +585,37 @@ func (cc *cancelContext) sendImmediateInterrupt() bool {
 		return false
 	}
 
-	close(cc.immediateChan)
-
 	fns := make([]func(...compose.GraphInterruptOption), len(cc.graphInterruptFuncs))
 	copy(fns, cc.graphInterruptFuncs)
 
 	if !cc.abortOnly && cc.isRecursive() && cc.hasCheckpointAwareDescendant() {
+		close(cc.immediateChan)
+
 		select {
 		case <-cc.doneChan:
 			cc.mu.Unlock()
 			return true
 		case <-time.After(defaultCancelImmediateGracePeriod):
 		}
-	}
 
-	if len(fns) == 0 {
+		if len(fns) == 0 {
+			cc.mu.Unlock()
+			return false
+		}
+
+		for _, fn := range fns {
+			fn(compose.WithGraphInterruptTimeout(0))
+		}
 		cc.mu.Unlock()
-		return false
+		return true
 	}
 
 	for _, fn := range fns {
 		fn(compose.WithGraphInterruptTimeout(0))
 	}
+	close(cc.immediateChan)
 	cc.mu.Unlock()
-	return true
+	return len(fns) > 0
 }
 
 // setGraphInterruptFunc appends a graph interrupt function to the list.
