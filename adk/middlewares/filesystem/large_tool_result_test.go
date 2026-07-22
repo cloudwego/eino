@@ -24,6 +24,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+
 	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
 )
@@ -576,6 +578,31 @@ func TestToolResultOffloading_BackendWriteError(t *testing.T) {
 	if !strings.Contains(err.Error(), "write failed") {
 		t.Errorf("expected 'write failed' error, got %v", err)
 	}
+}
+
+func TestToolResultOffloading_ExcludeTools(t *testing.T) {
+	ctx := context.Background()
+	backend := newMockBackend()
+
+	middleware := newToolResultOffloading(ctx, &toolResultOffloadingConfig{
+		Backend:      backend,
+		TokenLimit:   10,
+		ExcludeTools: []string{ToolNameReadFile},
+	})
+
+	largeResult := strings.Repeat("x", 100)
+	mockEndpoint := func(ctx context.Context, input *compose.ToolInput) (*compose.ToolOutput, error) {
+		return &compose.ToolOutput{Result: largeResult}, nil
+	}
+
+	wrappedEndpoint := middleware.Invokable(mockEndpoint)
+	output, err := wrappedEndpoint(ctx, &compose.ToolInput{
+		Name:   ToolNameReadFile,
+		CallID: "read_file_call",
+	})
+	assert.NoError(t, err)
+	assert.Equal(t, largeResult, output.Result)
+	assert.Empty(t, backend.files)
 }
 
 // failingBackend is a mock backend that can be configured to fail

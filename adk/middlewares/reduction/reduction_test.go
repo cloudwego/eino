@@ -986,6 +986,34 @@ hello worldhello worldhello worldhello worldhello worldhello worldhello worldhel
 		_, err = backend.Read(ctx, &filesystem.ReadRequest{FilePath: "/custom/trunc/custom_123"})
 		assert.NoError(t, err)
 	})
+
+	t.Run("read_file tool is not truncated by default", func(t *testing.T) {
+		tCtx := &adk.ToolContext{
+			Name:   "read_file",
+			CallID: "read_file_call",
+		}
+		backend := filesystem.NewInMemoryBackend()
+		config := &Config{
+			Backend:           backend,
+			MaxLengthForTrunc: 10,
+		}
+
+		mw, err := New(ctx, config)
+		assert.NoError(t, err)
+
+		largeReadFileResult := strings.Repeat("x", 100)
+		endpoint := func(_ context.Context, _ string, _ ...tool.Option) (string, error) {
+			return largeReadFileResult, nil
+		}
+		wrapped, err := mw.WrapInvokableToolCall(ctx, endpoint, tCtx)
+		assert.NoError(t, err)
+
+		resp, err := wrapped(ctx, `{}`)
+		assert.NoError(t, err)
+		assert.Equal(t, largeReadFileResult, resp)
+		_, err = backend.Read(ctx, &filesystem.ReadRequest{FilePath: "/tmp/trunc/read_file_call"})
+		assert.Error(t, err)
+	})
 }
 
 func TestReductionMiddlewareClear(t *testing.T) {
@@ -1433,6 +1461,38 @@ func TestReductionMiddlewareClear(t *testing.T) {
 		assert.NotNil(t, msgs[4].Extra[msgClearedFlag])
 		assert.Equal(t, "<persisted-output>Tool result saved to: /tmp/clear/call_987654321\nUse read_file to view</persisted-output>", s.Messages[3].Content)
 		assert.Equal(t, "<persisted-output>Tool result saved to: /tmp/clear/call_123456789\nUse read_file to view</persisted-output>", s.Messages[5].Content)
+	})
+
+	t.Run("read_file tool is not cleared by default", func(t *testing.T) {
+		backend := filesystem.NewInMemoryBackend()
+		config := &Config{
+			Backend:                   backend,
+			SkipTruncation:            true,
+			TokenCounter:              func(context.Context, []adk.Message, []*schema.ToolInfo) (int64, error) { return 100, nil },
+			MaxTokensForClear:         20,
+			ClearRetentionSuffixLimit: 0,
+		}
+
+		mw, err := New(ctx, config)
+		assert.NoError(t, err)
+
+		longReadFileResult := strings.Repeat("x", 100)
+		msgs := []adk.Message{
+			schema.UserMessage("read persisted output"),
+			schema.AssistantMessage("", []schema.ToolCall{
+				{ID: "read_call", Type: "function", Function: schema.FunctionCall{Name: "read_file", Arguments: `{"file_path":"/tmp/trunc/original"}`}},
+			}),
+			schema.ToolMessage(longReadFileResult, "read_call", schema.WithToolName("read_file")),
+			schema.AssistantMessage("", []schema.ToolCall{
+				{ID: "next_call", Type: "function", Function: schema.FunctionCall{Name: "next_tool", Arguments: `{}`}},
+			}),
+		}
+
+		_, state, err := mw.BeforeModelRewriteState(ctx, &adk.ChatModelAgentState{Messages: msgs}, &adk.ModelContext{})
+		assert.NoError(t, err)
+		assert.Equal(t, longReadFileResult, state.Messages[2].Content)
+		_, err = backend.Read(ctx, &filesystem.ReadRequest{FilePath: "/tmp/clear/read_call"})
+		assert.Error(t, err)
 	})
 
 	t.Run("test ClearExcludeTools", func(t *testing.T) {

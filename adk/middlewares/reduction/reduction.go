@@ -21,7 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"path/filepath"
+	pathpkg "path"
 	"strings"
 	"unicode/utf8"
 
@@ -92,6 +92,7 @@ type TypedConfig[M adk.MessageType] struct {
 	MaxLengthForTrunc int
 
 	// TruncExcludeTools is list of tool names whose tool results should never be truncated.
+	// ReadFileToolName is always excluded by default so retrieved offloaded content is not re-truncated.
 	// Optional. Default is nil.
 	TruncExcludeTools []string
 
@@ -123,6 +124,7 @@ type TypedConfig[M adk.MessageType] struct {
 	ClearAtLeastTokens int64
 
 	// ClearExcludeTools is list of tool names whose tool uses and results should never be cleared.
+	// ReadFileToolName is always excluded by default so retrieved offloaded content is not re-cleared.
 	// Optional. Default is nil.
 	ClearExcludeTools []string
 
@@ -272,7 +274,7 @@ func (t *TypedConfig[M]) copyAndFillDefaults() (*TypedConfig[M], error) {
 			if tcID == "" {
 				tcID = uuid.NewString()
 			}
-			return filepath.Join(cfg.RootDir, "trunc", tcID), nil
+			return pathpkg.Join(cfg.RootDir, "trunc", tcID), nil
 		}
 	}
 	if cfg.GenClearOffloadFilePath == nil {
@@ -281,7 +283,7 @@ func (t *TypedConfig[M]) copyAndFillDefaults() (*TypedConfig[M], error) {
 			if tcID == "" {
 				tcID = uuid.NewString()
 			}
-			return filepath.Join(cfg.RootDir, "clear", tcID), nil
+			return pathpkg.Join(cfg.RootDir, "clear", tcID), nil
 		}
 	}
 	if cfg.MaxLengthForTrunc == 0 {
@@ -335,14 +337,17 @@ func NewTyped[M adk.MessageType](_ context.Context, config *TypedConfig[M]) (adk
 	if !defaultReductionConfig.SkipClear {
 		defaultReductionConfig.ClearHandler = defaultClearHandler(config.GenClearOffloadFilePath, config.Backend != nil, config.ReadFileToolName)
 	}
-	excludeTruncTools := make(map[string]struct{}, len(config.TruncExcludeTools))
+	excludeTruncTools := make(map[string]struct{}, len(config.TruncExcludeTools)+1)
 	for _, toolName := range config.TruncExcludeTools {
 		excludeTruncTools[toolName] = struct{}{}
 	}
-	excludeClearTools := make(map[string]struct{}, len(config.ClearExcludeTools))
+	excludeTruncTools[config.ReadFileToolName] = struct{}{}
+
+	excludeClearTools := make(map[string]struct{}, len(config.ClearExcludeTools)+1)
 	for _, toolName := range config.ClearExcludeTools {
 		excludeClearTools[toolName] = struct{}{}
 	}
+	excludeClearTools[config.ReadFileToolName] = struct{}{}
 
 	return &typedToolReductionMiddleware[M]{
 		config:            config,
@@ -1300,7 +1305,7 @@ func isUserMsg[M adk.MessageType](msg M) bool {
 			return false
 		}
 		// A user-role agentic message that contains any FunctionToolResult block
-		// is a tool result message, not a normal user message — even if it also
+		// is a tool result message, not a normal user message, even if it also
 		// carries UserInput blocks. This ensures the clear flow's tool-call grouping
 		// remains correctly aligned.
 		for _, block := range m.ContentBlocks {

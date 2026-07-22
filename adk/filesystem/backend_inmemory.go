@@ -19,7 +19,7 @@ package filesystem
 import (
 	"context"
 	"fmt"
-	"path/filepath"
+	pathpkg "path"
 	"regexp"
 	"strings"
 	"sync"
@@ -72,7 +72,7 @@ func (b *InMemoryBackend) LsInfo(ctx context.Context, req *LsInfoRequest) ([]Fil
 				// The path itself is a file
 				if !seen[normalizedFilePath] {
 					result = append(result, FileInfo{
-						Path:       filepath.Base(normalizedFilePath),
+						Path:       pathpkg.Base(normalizedFilePath),
 						IsDir:      false,
 						Size:       int64(len(entry.content)),
 						ModifiedAt: entry.modifiedAt.Format(time.RFC3339Nano),
@@ -378,7 +378,7 @@ func (b *InMemoryBackend) filterByGlob(files []string, searchPath string, globPa
 				matchPath = strings.TrimPrefix(filePath, searchPath+"/")
 			}
 		} else {
-			matchPath = filepath.Base(filePath)
+			matchPath = pathpkg.Base(filePath)
 		}
 
 		matched, err := doublestar.Match(globPattern, matchPath)
@@ -397,7 +397,7 @@ func (b *InMemoryBackend) filterByFileType(files []string, fileType string) []st
 	var result []string
 
 	for _, filePath := range files {
-		ext := strings.TrimPrefix(filepath.Ext(filePath), ".")
+		ext := strings.TrimPrefix(pathpkg.Ext(filePath), ".")
 		if matchFileType(ext, fileType) {
 			result = append(result, filePath)
 		}
@@ -691,13 +691,14 @@ func normalizePath(path string) string {
 	if path == "" {
 		return "/"
 	}
+	path = strings.ReplaceAll(path, "\\", "/")
 
 	// Ensure path starts with "/"
 	if !strings.HasPrefix(path, "/") {
 		path = "/" + path
 	}
 
-	return filepath.Clean(path)
+	return pathpkg.Clean(path)
 }
 
 type grepCollector struct {
