@@ -88,3 +88,130 @@ func TestConcatMessageStream_WithToolCalls(t *testing.T) {
 	require.Len(t, msg.ToolCalls, 1)
 	assert.Equal(t, "search", msg.ToolCalls[0].Function.Name)
 }
+
+func TestParseTopicSelectionFromContent_PureJSON(t *testing.T) {
+	valid := map[string]struct{}{
+		"debugging.md": {},
+		"patterns.md":  {},
+		"notes.md":     {},
+	}
+	msg := &schema.Message{
+		Role:    schema.Assistant,
+		Content: `{"selected_memories": ["debugging.md", "patterns.md"]}`,
+	}
+
+	selected, err := parseTopicSelectionFromContent[*schema.Message](msg, valid)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"debugging.md", "patterns.md"}, selected)
+}
+
+func TestParseTopicSelectionFromContent_MarkdownCodeBlock(t *testing.T) {
+	valid := map[string]struct{}{
+		"debugging.md": {},
+		"patterns.md":  {},
+	}
+	msg := &schema.Message{
+		Role: schema.Assistant,
+		Content: "Here is my selection:\n```json\n{\"selected_memories\": [\"debugging.md\"]}\n```\n",
+	}
+
+	selected, err := parseTopicSelectionFromContent[*schema.Message](msg, valid)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"debugging.md"}, selected)
+}
+
+func TestParseTopicSelectionFromContent_FiltersInvalidPaths(t *testing.T) {
+	valid := map[string]struct{}{
+		"debugging.md": {},
+	}
+	msg := &schema.Message{
+		Role:    schema.Assistant,
+		Content: `{"selected_memories": ["debugging.md", "nonexistent.md"]}`,
+	}
+
+	selected, err := parseTopicSelectionFromContent[*schema.Message](msg, valid)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"debugging.md"}, selected)
+}
+
+func TestParseTopicSelectionFromContent_EmptyContent(t *testing.T) {
+	valid := map[string]struct{}{"a.md": {}}
+	msg := &schema.Message{Role: schema.Assistant, Content: ""}
+
+	_, err := parseTopicSelectionFromContent[*schema.Message](msg, valid)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "empty response content")
+}
+
+func TestParseTopicSelectionFromContent_NoJSON(t *testing.T) {
+	valid := map[string]struct{}{"a.md": {}}
+	msg := &schema.Message{Role: schema.Assistant, Content: "I don't know what to pick."}
+
+	_, err := parseTopicSelectionFromContent[*schema.Message](msg, valid)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no JSON found")
+}
+
+func TestParseTopicSelectionFromContent_EmptySelection(t *testing.T) {
+	valid := map[string]struct{}{"a.md": {}}
+	msg := &schema.Message{
+		Role:    schema.Assistant,
+		Content: `{"selected_memories": []}`,
+	}
+
+	selected, err := parseTopicSelectionFromContent[*schema.Message](msg, valid)
+	require.NoError(t, err)
+	assert.Empty(t, selected)
+}
+
+func TestExtractJSON(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			name:  "pure json",
+			input: `{"selected_memories": ["a.md"]}`,
+			want:  `{"selected_memories": ["a.md"]}`,
+		},
+		{
+			name:  "json with prefix text",
+			input: "Here are the results:\n{\"selected_memories\": [\"b.md\"]}",
+			want:  `{"selected_memories": ["b.md"]}`,
+		},
+		{
+			name:  "markdown json block",
+			input: "```json\n{\"selected_memories\": [\"c.md\"]}\n```",
+			want:  `{"selected_memories": ["c.md"]}`,
+		},
+		{
+			name:  "markdown generic block with json",
+			input: "```\n{\"selected_memories\": [\"d.md\"]}\n```",
+			want:  `{"selected_memories": ["d.md"]}`,
+		},
+		{
+			name:  "no json",
+			input: "I cannot select any memories.",
+			want:  "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := extractJSON(tt.input)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestTopicSelectionJSONSchema(t *testing.T) {
+	s := topicSelectionJSONSchema()
+	require.NotNil(t, s)
+	assert.Equal(t, "object", s.Type)
+	props := s.Properties
+	require.NotNil(t, props)
+	val, ok := props.Get("selected_memories")
+	require.True(t, ok)
+	assert.Equal(t, "array", val.Type)
+}

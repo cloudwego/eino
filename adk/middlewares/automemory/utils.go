@@ -21,16 +21,17 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"path/filepath"
 	"sort"
 	"strings"
 	"time"
 
+	"github.com/eino-contrib/jsonschema"
 	"gopkg.in/yaml.v3"
 
 	"github.com/cloudwego/eino/adk"
 	adkfs "github.com/cloudwego/eino/adk/middlewares/filesystem"
-	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -247,6 +248,16 @@ func topicSelectionToolInfo() *schema.ToolInfo {
 	}
 }
 
+func topicSelectionJSONSchema() *jsonschema.Schema {
+	r := &jsonschema.Reflector{
+		Anonymous:      true,
+		DoNotReference: true,
+	}
+	s := r.Reflect(&topicSelectionResp{})
+	s.Version = ""
+	return s
+}
+
 func parseTopicSelectionFromToolCall[M adk.MessageType](msg M, valid map[string]struct{}) ([]string, error) {
 	toolCalls := messageToolCalls(msg)
 	if len(toolCalls) == 0 {
@@ -388,6 +399,87 @@ func userMessageTextContent[M adk.MessageType](msg M) string {
 	}
 }
 
+func assistantTextContent[M adk.MessageType](msg M) string {
+	switch m := any(msg).(type) {
+	case *schema.Message:
+		if m == nil {
+			return ""
+		}
+		return m.Content
+	case *schema.AgenticMessage:
+		if m == nil {
+			return ""
+		}
+		parts := make([]string, 0, len(m.ContentBlocks))
+		for _, block := range m.ContentBlocks {
+			if block != nil && block.AssistantGenText != nil {
+				parts = append(parts, block.AssistantGenText.Text)
+			}
+		}
+		return strings.Join(parts, "\n")
+	default:
+		panic("unreachable")
+	}
+}
+
+func parseTopicSelectionFromContent[M adk.MessageType](msg M, valid map[string]struct{}) ([]string, error) {
+	content := assistantTextContent[M](msg)
+	if content == "" {
+		return nil, fmt.Errorf("empty response content")
+	}
+
+	jsonStr := extractJSON(content)
+	if jsonStr == "" {
+		return nil, fmt.Errorf("no JSON found in response content")
+	}
+
+	var parsed topicSelectionResp
+	if err := json.Unmarshal([]byte(jsonStr), &parsed); err != nil {
+		return nil, fmt.Errorf("failed to parse JSON from content: %w", err)
+	}
+
+	out := normalizeSelected(parsed.SelectedMemories)
+	filtered := make([]string, 0, len(out))
+	for _, p := range out {
+		if _, ok := valid[p]; ok {
+			filtered = append(filtered, p)
+		}
+	}
+	return filtered, nil
+}
+
+func extractJSON(s string) string {
+	s = strings.TrimSpace(s)
+
+	if start := strings.Index(s, "```json"); start != -1 {
+		body := s[start+7:]
+		if end := strings.Index(body, "```"); end != -1 {
+			return strings.TrimSpace(body[:end])
+		}
+	}
+	if start := strings.Index(s, "```"); start != -1 {
+		body := s[start+3:]
+		if nl := strings.IndexByte(body, '\n'); nl != -1 {
+			body = body[nl+1:]
+		}
+		if end := strings.Index(body, "```"); end != -1 {
+			candidate := strings.TrimSpace(body[:end])
+			if len(candidate) > 0 && candidate[0] == '{' {
+				return candidate
+			}
+		}
+	}
+
+	if idx := strings.IndexByte(s, '{'); idx != -1 {
+		candidate := s[idx:]
+		if last := strings.LastIndexByte(candidate, '}'); last != -1 {
+			return candidate[:last+1]
+		}
+	}
+
+	return ""
+}
+
 func getMsgExtra[M adk.MessageType](msg M) map[string]any {
 	switch m := any(msg).(type) {
 	case *schema.Message:
@@ -442,23 +534,6 @@ func makeSystemMsg[M adk.MessageType](text string) M {
 		return any(schema.SystemMessage(text)).(M)
 	case *schema.AgenticMessage:
 		return any(schema.SystemAgenticMessage(text)).(M)
-	default:
-		panic("unreachable")
-	}
-}
-
-func makeToolChoiceForced[M adk.MessageType](name string) model.Option {
-	var zero M
-	switch any(zero).(type) {
-	case *schema.Message:
-		return model.WithToolChoice(schema.ToolChoiceForced, name)
-	case *schema.AgenticMessage:
-		return model.WithAgenticToolChoice(&schema.AgenticToolChoice{
-			Type: schema.ToolChoiceForced,
-			Forced: &schema.AgenticForcedToolChoice{
-				Tools: []*schema.AllowedTool{{FunctionName: name}},
-			},
-		})
 	default:
 		panic("unreachable")
 	}
@@ -851,13 +926,29 @@ func topicSelectionConfigEnabled(cfg *TopicSelectionConfig) bool {
 	return cfg != nil && cfg.Enable != nil && *cfg.Enable
 }
 
-func (m *middleware[M]) onErr(ctx context.Context, stage ErrorStage, err error) {
+// defaultOnError is the default error handler used when Config.OnError is nil.
+// It blocks on instruction rendering failures and snapshot marshal errors (which indicate bugs),
+// logs all other errors via log.Printf, and returns nil to allow degraded execution.
+func defaultOnError(_ context.Context, stage ErrorStage, err error) error {
+	switch stage {
+	case OnErrorStageRenderInstruction, OnErrorStageSnapshotMarshal:
+		log.Printf("[automemory] fatal error at stage %q: %v", stage, err)
+		return err
+	default:
+		log.Printf("[automemory] non-fatal error at stage %q: %v", stage, err)
+		return nil
+	}
+}
+
+func (m *middleware[M]) onErr(ctx context.Context, stage ErrorStage, err error) error {
 	if err == nil {
-		return
+		return nil
 	}
-	if m.cfg != nil && m.cfg.OnError != nil {
-		m.cfg.OnError(ctx, stage, err)
+	handler := m.cfg.OnError
+	if handler == nil {
+		handler = defaultOnError
 	}
+	return handler(ctx, stage, err)
 }
 
 func (m *middleware[M]) lastUserMessage(agentIn *adk.TypedAgentInput[M]) (M, bool) {
@@ -885,13 +976,6 @@ func (m *middleware[M]) topicSelectionTopK() int {
 	return topK
 }
 
-func (m *middleware[M]) resolveSessionID(ctx context.Context, state *adk.TypedChatModelAgentState[M]) (string, error) {
-	if m.coordination != nil {
-		return strings.TrimSpace(m.coordination.SessionID), nil
-	}
-	return "", nil
-}
-
 func (m *middleware[M]) sendTopicMemoryEvent(ctx context.Context, msgs []M, memMsg M) {
 	var beforeID string
 	if len(msgs) > 0 && !isNilMessage(msgs[len(msgs)-1]) {
@@ -908,6 +992,6 @@ func (m *middleware[M]) sendTopicMemoryEvent(ctx context.Context, msgs []M, memM
 			},
 		},
 	}); sendEventErr != nil {
-		m.onErr(ctx, OnErrorStageSendSessionEvent, sendEventErr)
+		_ = m.onErr(ctx, OnErrorStageSendSessionEvent, sendEventErr) //nolint:errcheck
 	}
 }

@@ -146,6 +146,18 @@ Recently used tools:
 
 	defaultTopicMemoryTruncNotifyChinese = `
 > 该记忆文件已被截断（{reason}）。请使用 Read 工具查看完整文件：{abs_path}`
+
+	defaultTopicSelectionJSONOutputHint = `You must respond with a JSON object in the following format (no additional text, no markdown code block):
+{"selected_memories": ["path/to/memory1.md", "path/to/memory2.md"]}
+
+Example — if the available memories include "debugging.md" and "patterns.md", and only "debugging.md" is relevant:
+{"selected_memories": ["debugging.md"]}`
+
+	defaultTopicSelectionJSONOutputHintChinese = `你必须以如下 JSON 格式回复（不要附加任何额外文本，不要使用 markdown 代码块）：
+{"selected_memories": ["path/to/memory1.md", "path/to/memory2.md"]}
+
+示例 — 假设可用记忆包含 "debugging.md" 和 "patterns.md"，且仅 "debugging.md" 相关：
+{"selected_memories": ["debugging.md"]}`
 )
 
 type memoryIndexPromptInfo struct {
@@ -453,6 +465,13 @@ func getTopicSelectionUserPrompt() string {
 	return internal.SelectPrompt(internal.I18nPrompts{
 		English: defaultTopicSelectionUserPrompt,
 		Chinese: defaultTopicSelectionUserPromptChinese,
+	})
+}
+
+func getTopicSelectionJSONOutputHint() string {
+	return internal.SelectPrompt(internal.I18nPrompts{
+		English: defaultTopicSelectionJSONOutputHint,
+		Chinese: defaultTopicSelectionJSONOutputHintChinese,
 	})
 }
 
