@@ -150,11 +150,12 @@ type SessionEvent[M MessageType] struct {
 
 	Kind SessionEventKind `json:"kind,omitempty"`
 
-	// Extra carries application-owned event-envelope data. ADK ignores it for
-	// replay, reconstruction, rollback, and kind classification. Values are
-	// serialized by the configured SessionEventStore serializer; custom concrete
-	// types stored behind any must be registered when durable round-trip behavior
-	// is required.
+	// Extra carries event-envelope data. Application keys share the map with
+	// framework-owned keys prefixed by "_eino_"; EventExtraProvider output cannot
+	// create framework-owned keys. ADK ignores Extra for replay, reconstruction,
+	// rollback, and kind classification. Values are serialized by the configured
+	// SessionEventStore serializer; custom concrete types stored behind any must
+	// be registered when durable round-trip behavior is required.
 	Extra map[string]any `json:"extra,omitempty"`
 
 	Message                 M                                `json:"message,omitempty"`

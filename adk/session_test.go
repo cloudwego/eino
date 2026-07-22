@@ -5068,7 +5068,7 @@ type modelContextExtraTool struct{}
 func (modelContextExtraTool) Info(context.Context) (*schema.ToolInfo, error) {
 	return &schema.ToolInfo{
 		Name:  "extra_tool",
-		Desc:  "tool with json-normalized extra extra",
+		Desc:  "tool with json-normalized extra",
 		Extra: map[string]any{"version": 1},
 		ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
 			"query": {
