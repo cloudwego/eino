@@ -1310,9 +1310,25 @@ func concatToolCalls(chunks []ToolCall) ([]ToolCall, error) {
 				if toolID == "" {
 					toolID = chunk.ID
 				} else if toolID != chunk.ID {
-					return nil, fmt.Errorf("cannot concat ToolCalls with different tool id: '%s' '%s'", toolID, chunk.ID)
-				}
+					// A different name on the new chunk means this is an independent
+					// complete tool call reusing the same index (some models emit all
+					// tool calls with index=0). Finalize the current call and reset.
+					if chunk.Function.Name != "" && chunk.Function.Name != toolName {
+						toolCall.ID = toolID
+						toolCall.Type = toolType
+						toolCall.Function.Name = toolName
+						toolCall.Function.Arguments = args.String()
+						merged = append(merged, toolCall)
 
+						toolCall = chunk
+						toolID = chunk.ID
+						toolType = ""
+						toolName = ""
+						args.Reset()
+					} else {
+						return nil, fmt.Errorf("cannot concat ToolCalls with different tool id: '%s' '%s'", toolID, chunk.ID)
+					}
+				}
 			}
 
 			if chunk.Type != "" {
