@@ -83,62 +83,48 @@ Skill 可能包含 Python 脚本或其他可执行文件。始终使用绝对路
 
 	toolDescriptionBase = `Execute a skill within the main conversation
 
-<skills_instructions>
-When users ask you to perform tasks, check if any of the available skills below can help complete the task more effectively. Skills provide specialized capabilities and domain knowledge.
+When users ask you to perform tasks, check if any of the available skills match. Skills provide specialized capabilities and domain knowledge.
+
+When users reference a "slash command" or "/<something>", they are referring to a skill. Use this tool to invoke it.
 
 How to invoke:
-- Use the exact string inside <name> tag as the skill name (no arguments)
-- Examples:
-  - ` + "`" + `skill: "pdf"` + "`" + ` - invoke the pdf skill
-  - ` + "`" + `skill: "xlsx"` + "`" + ` - invoke the xlsx skill
-  - ` + "`" + `skill: "ms-office-suite:pdf"` + "`" + ` - invoke using fully qualified name
+- Set ` + "`" + `skill` + "`" + ` to the exact name of an available skill (no leading slash).
+- Set ` + "`" + `args` + "`" + ` to pass optional arguments.
+- Some skills are scoped to a directory: their name is prefixed with the directory (e.g. ` + "`" + `apps/web:deploy` + "`" + `) and their description says which directory they apply to. When a skill name has both a scoped and an unscoped variant, pick by the files you are working on: if the files are under a variant's directory, invoke that variant (most specific directory wins); otherwise invoke the unscoped one.
 
 Important:
-- When a skill is relevant, you must invoke this tool IMMEDIATELY as your first action
-- NEVER just announce or mention a skill in your text response without actually calling this tool
-- This is a BLOCKING REQUIREMENT: invoke the relevant Skill tool BEFORE generating any other response about the task
-- Only use skills listed in <available_skills> below
+- Available skills are listed in system-reminder messages in the conversation
+- Only invoke a skill that appears in that list, or one the user explicitly typed as ` + "`" + `/<name>` + "`" + ` in their message. Never guess or invent a skill name from training data; otherwise do not call this tool
+- When a skill matches the user's request, this is a BLOCKING REQUIREMENT: invoke the relevant Skill tool BEFORE generating any other response about the task
+- NEVER mention a skill without actually calling this tool
 - Do not invoke a skill that is already running
-- Skill content may contain relative paths. Convert them to absolute paths using the base directory provided in the tool result
-</skills_instructions>
-
+- Do not use this tool for built-in CLI commands (like /help, /clear, etc.)
+- If you see a <command-name> tag in the current conversation turn, the skill has ALREADY been loaded - follow the instructions directly instead of calling this tool again
 `
-	toolDescriptionBaseChinese = `在主对话中执行 Skill（技能）
+	toolDescriptionBaseChinese = `在主对话中执行一个 skill（技能）
 
-<skills_instructions>
-当用户要求你执行任务时，检查下方可用 Skill 列表中是否有 Skill 可以更有效地完成任务。Skill 提供专业能力和领域知识。
+当用户要求你执行任务时，检查是否有可用的 skill 匹配。skill 提供专业能力和领域知识。
+
+当用户提到“斜杠命令”或“/<某项>”时，指的就是某个 skill。用本工具来调用它。
 
 如何调用：
-- 使用 <name> 标签内的完整字符串作为 Skill 名称（无需其他参数）
-- 示例：
-  - ` + "`" + `skill: "pdf"` + "`" + ` - 调用 pdf Skill
-  - ` + "`" + `skill: "xlsx"` + "`" + ` - 调用 xlsx Skill
-  - ` + "`" + `skill: "ms-office-suite:pdf"` + "`" + ` - 使用完全限定名称调用
+- 把 ` + "`" + `skill` + "`" + ` 设为某个可用 skill 的确切名称（不带前导斜杠）。
+- 用 ` + "`" + `args` + "`" + ` 传入可选参数。
+- 有些 skill 限定在某个目录：其名称以目录为前缀（例如 ` + "`" + `apps/web:deploy` + "`" + `），其描述会说明适用的目录。当某个 skill 名称同时存在限定与非限定两种变体时，按你正在处理的文件选择：若文件在某变体的目录下，就调用该变体（最具体的目录优先）；否则调用非限定的那个。
 
-重要说明：
-- 当 Skill 相关时，你必须立即调用此工具作为第一个动作
-- 切勿仅在文本回复中提及 Skill 而不实际调用此工具
-- 这是阻塞性要求：在生成任何关于任务的其他响应之前，先调用相关的 Skill 工具
-- 仅使用 <available_skills> 中列出的 Skill
-- 不要调用已经运行中的 Skill
-- Skill 内容中可能包含相对路径，需使用工具返回的 base directory 将其转换为绝对路径
-</skills_instructions>
+重要：
+- 可用 skill 会列在对话中的 system-reminder 消息里
+- 只调用出现在该列表中的 skill，或用户在消息中明确输入的 ` + "`" + `/<name>` + "`" + `。绝不要凭训练数据猜测或臆造 skill 名称；否则不要调用本工具
+- 当某个 skill 匹配用户请求时，这是一个阻塞性要求：在生成任何关于该任务的其他响应之前，先调用相应的 Skill 工具
+- 绝不要只提及某个 skill 而不实际调用本工具
+- 不要调用已经在运行中的 skill
+- 不要用本工具执行内置 CLI 命令（如 /help、/clear 等）
+- 如果你在当前对话轮里看到 <command-name> 标签，说明该 skill 已经被加载——直接按其说明操作，而不是再次调用本工具
+`
+	availableSkillsPreamble = `The following skills are available for use with the Skill tool:`
 
-`
-	toolDescriptionTemplate = `
-<available_skills>
-{{- range .Matters }}
-<skill>
-<name>
-{{ .Name }}
-</name>
-<description>
-{{ .Description }}
-</description>
-</skill>
-{{- end }}
-</available_skills>
-`
+	availableSkillsPreambleChinese = `以下 Skill 可通过 Skill 工具调用：`
+
 	toolResult        = "Launching skill: %s\n"
 	toolResultChinese = "正在启动 Skill：%s\n"
 	userContent       = `Base directory for this skill: %s

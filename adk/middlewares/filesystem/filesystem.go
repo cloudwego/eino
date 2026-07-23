@@ -28,6 +28,8 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/slongfield/pyfmt"
+
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/adk/backgroundtask"
 	"github.com/cloudwego/eino/adk/filesystem"
@@ -321,7 +323,8 @@ type MiddlewareConfig struct {
 	//
 	// If you provide a custom MultiModalReader, you may need to override
 	// ReadFileToolConfig.Desc to accurately describe your implementation's capabilities.
-	// The default description is composed of ReadFileToolDesc + EnhancedReadFileDescSuffix.
+	// The default description is ReadFileToolDesc with its {EnhancedReadFileDesc}
+	// placeholder resolved to EnhancedReadFileDesc.
 	//
 	// Note: When enabled, the read_file tool becomes an EnhancedInvokableTool.
 	// If you use ChatModelAgentMiddleware, you must implement ChatModelAgentMiddleware.WrapEnhancedInvokableToolCall
@@ -685,7 +688,16 @@ type multiModalReadFileArgs struct {
 
 func newReadFileTool(fs filesystem.Backend, name string, desc string) (tool.BaseTool, error) {
 	toolName := selectToolName(name, ToolNameReadFile)
-	d, err := selectToolDesc(desc, ReadFileToolDesc, ReadFileToolDescChinese)
+	// The standard (non-multimodal) read tool resolves {EnhancedReadFileDesc} to empty.
+	enDefault, err := pyfmt.Fmt(ReadFileToolDesc, map[string]any{"EnhancedReadFileDesc": ""})
+	if err != nil {
+		return nil, err
+	}
+	zhDefault, err := pyfmt.Fmt(ReadFileToolDescChinese, map[string]any{"EnhancedReadFileDesc": ""})
+	if err != nil {
+		return nil, err
+	}
+	d, err := selectToolDesc(desc, enDefault, zhDefault)
 	if err != nil {
 		return nil, err
 	}
@@ -763,18 +775,18 @@ func newMultiModalReadFileTool(fs filesystem.Backend, name string, desc string) 
 			"Either implement the MultiModalReader interface on your backend, or set UseMultiModalRead to false", fs)
 	}
 	toolName := selectToolName(name, ToolNameReadFile)
-	d, err := selectToolDesc(desc, ReadFileToolDesc, ReadFileToolDescChinese)
+	// The multimodal read tool resolves {EnhancedReadFileDesc} to the multimodal suffix.
+	enDefault, err := pyfmt.Fmt(ReadFileToolDesc, map[string]any{"EnhancedReadFileDesc": EnhancedReadFileDesc})
 	if err != nil {
 		return nil, err
 	}
-	// Only append the multimodal suffix when falling back to the built-in desc.
-	// A custom desc is expected to describe its own capabilities, so appending
-	// would produce duplicated or contradictory descriptions.
-	if desc == "" {
-		d += internal.SelectPrompt(internal.I18nPrompts{
-			English: EnhancedReadFileDescSuffix,
-			Chinese: EnhancedReadFileDescSuffixChinese,
-		})
+	zhDefault, err := pyfmt.Fmt(ReadFileToolDescChinese, map[string]any{"EnhancedReadFileDesc": EnhancedReadFileDescChinese})
+	if err != nil {
+		return nil, err
+	}
+	d, err := selectToolDesc(desc, enDefault, zhDefault)
+	if err != nil {
+		return nil, err
 	}
 
 	return utils.InferEnhancedTool(toolName, d, func(ctx context.Context, input multiModalReadFileArgs) (*schema.ToolResult, error) {
