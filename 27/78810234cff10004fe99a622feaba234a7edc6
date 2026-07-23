@@ -1,0 +1,18 @@
+adk/middlewares/skill/skill_agentic_test.go
+  h_6e46e521ea7821 121,128
+adk/middlewares/skill/reminder_role_test.go
+  h_6e46e521ea7821 1-115,145-148,151-155,158-160
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "2778810234cff10004fe99a622feaba234a7edc6",
+  "prompts": {},
+  "humans": {
+    "h_6e46e521ea7821": {
+      "author": "zhangjianxiong.zjx <zhangjianxiong.zjx@bytedance.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
