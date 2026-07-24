@@ -586,6 +586,11 @@ func TestWorkflowInterrupt(t *testing.T) {
 		}
 
 		assert.Equal(t, 2, len(events))
+		assert.NotEmpty(t, events[0].InvocationID)
+		assert.NotEmpty(t, events[1].InvocationID)
+		assert.NotEqual(t, events[0].InvocationID, events[1].InvocationID)
+		messageEvents[0].InvocationID = events[0].InvocationID
+		messageEvents[1].InvocationID = events[1].InvocationID
 		assert.Equal(t, messageEvents, events)
 	})
 
@@ -931,6 +936,11 @@ func TestWorkflowInterrupt(t *testing.T) {
 			},
 		}
 		assert.Equal(t, 2, len(events))
+		assert.NotEmpty(t, events[0].InvocationID)
+		assert.NotEmpty(t, events[1].InvocationID)
+		assert.NotEqual(t, events[0].InvocationID, events[1].InvocationID)
+		loopFinalMessageEvents[0].InvocationID = events[0].InvocationID
+		loopFinalMessageEvents[1].InvocationID = events[1].InvocationID
 		assert.Equal(t, loopFinalMessageEvents, events)
 	})
 
@@ -991,8 +1001,23 @@ func TestWorkflowInterrupt(t *testing.T) {
 			},
 		}
 
-		assert.Contains(t, events, parallelMessageEvents[0])
-		assert.Contains(t, events, parallelMessageEvents[1])
+		eventByAgentName := make(map[string]*AgentEvent, len(events))
+		for _, event := range events {
+			assert.NotEmpty(t, event.InvocationID)
+			eventByAgentName[event.AgentName] = event
+		}
+		sa3Event, sa3OK := eventByAgentName["sa3"]
+		sa4Event, sa4OK := eventByAgentName["sa4"]
+		if assert.True(t, sa3OK) && assert.True(t, sa4OK) {
+			assert.NotEqual(t, sa3Event.InvocationID, sa4Event.InvocationID)
+		}
+		for _, expected := range parallelMessageEvents {
+			actual := eventByAgentName[expected.AgentName]
+			if assert.NotNil(t, actual) {
+				expected.InvocationID = actual.InvocationID
+				assert.Equal(t, expected, actual)
+			}
+		}
 
 		assert.NotNil(t, interruptEvent)
 		assert.Equal(t, "parallel agent", interruptEvent.AgentName)
