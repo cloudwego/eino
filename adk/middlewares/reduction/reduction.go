@@ -135,6 +135,26 @@ type TypedConfig[M adk.MessageType] struct {
 	// Optional. Default is nil, which means no rewrite.
 	ClearMessageRewriter func(ctx context.Context, toolCallMsg M, toolResponseMsgs []M) (messagesAfterRewrite []M, err error)
 
+	// ClearPreCommit is called after all clear modifications (ClearMessageRewriter + ClearHandlers)
+	// have been applied to the message copies, but before the framework applies the result.
+	//
+	// The input's ModifiedMessages contains only the messages within the clear range (i.e. those
+	// that were subject to clearing), not the full message list. Messages outside the clear range
+	// (system/user prefix and the retention suffix) are excluded.
+	// Mutations to ModifiedMessages are reflected in subsequent processing
+	// (TokenCounter threshold check when ClearAtLeastTokens > 0, ClearPostProcess, and the final committed state).
+	//
+	// Use cases:
+	//   - Invalidate per-message cached token counts so TokenCounter reflects updated content.
+	//   - Perform pre-commit validation or transformations on the modified messages.
+	//   - Collect metrics about what was modified before the commit/rollback decision.
+	//
+	// Returning a non-nil error aborts the entire clear operation; original state is preserved.
+	//
+	// Not called when clear is skipped (e.g. estimatedTokens < MaxTokensForClear, or SkipClear is true).
+	// Optional. Default is nil, which means no processing.
+	ClearPreCommit func(ctx context.Context, input *ClearPreCommitInput[M]) error
+
 	// ClearPostProcess is clear post process handler.
 	// Optional.
 	ClearPostProcess func(ctx context.Context, state *adk.TypedChatModelAgentState[M]) context.Context
@@ -235,6 +255,15 @@ type ClearResult struct {
 	OffloadContent string
 }
 
+// ClearPreCommitInput is the input for ClearPreCommit.
+type ClearPreCommitInput[M adk.MessageType] struct {
+	// ModifiedMessages contains the messages within the clear range after all modifications
+	// (ClearMessageRewriter + ClearHandlers) have been applied.
+	// This does NOT include messages outside the clear range that are unaffected.
+	// Mutations to these messages are reflected in subsequent processing.
+	ModifiedMessages []M
+}
+
 func (t *TypedConfig[M]) copyAndFillDefaults() (*TypedConfig[M], error) {
 	cfg := &TypedConfig[M]{
 		Backend:                   t.Backend,
@@ -252,6 +281,7 @@ func (t *TypedConfig[M]) copyAndFillDefaults() (*TypedConfig[M], error) {
 		ClearAtLeastTokens:        t.ClearAtLeastTokens,
 		ClearExcludeTools:         t.ClearExcludeTools,
 		ClearMessageRewriter:      t.ClearMessageRewriter,
+		ClearPreCommit:            t.ClearPreCommit,
 		ClearPostProcess:          t.ClearPostProcess,
 	}
 	if cfg.TokenCounter == nil {
@@ -1084,20 +1114,10 @@ func (t *typedToolReductionMiddleware[M]) beforeModelRewriteStateGeneric(ctx con
 					if cfg.Backend == nil {
 						return ctx, state, fmt.Errorf("clear: no backend for offload")
 					}
-					if clearAtLeastTokens > 0 { // delay clear offloading
-						offloadStash = append(offloadStash, &offloadStashItem{
-							config:      cfg,
-							offloadInfo: offloadInfo,
-						})
-					} else { // instant clear offloading
-						writeErr := cfg.Backend.Write(ctx, &filesystem.WriteRequest{
-							FilePath: offloadInfo.OffloadFilePath,
-							Content:  offloadInfo.OffloadContent,
-						})
-						if writeErr != nil {
-							return ctx, state, writeErr
-						}
-					}
+					offloadStash = append(offloadStash, &offloadStashItem{
+						config:      cfg,
+						offloadInfo: offloadInfo,
+					})
 				}
 
 				setToolCallArguments(toolCallMsg, tc.BlockIndex, offloadInfo.ToolArgument.Text)
@@ -1110,6 +1130,13 @@ func (t *typedToolReductionMiddleware[M]) beforeModelRewriteStateGeneric(ctx con
 		toolCallMsgIndex++
 	}
 
+	// ClearPreCommit: let consumer process modified messages before commit decision
+	if t.config.ClearPreCommit != nil {
+		if err = t.config.ClearPreCommit(ctx, &ClearPreCommitInput[M]{ModifiedMessages: editTarget[start:end]}); err != nil {
+			return ctx, state, err
+		}
+	}
+
 	if clearAtLeastTokens > 0 {
 		estimatedTokensAfterClear, err := t.config.TokenCounter(ctx, editTarget, state.ToolInfos)
 		if err != nil {
@@ -1120,14 +1147,16 @@ func (t *typedToolReductionMiddleware[M]) beforeModelRewriteStateGeneric(ctx con
 			// clear not applied, post process won't apply as well.
 			return ctx, state, nil
 		}
-		for _, item := range offloadStash {
-			writeErr := item.config.Backend.Write(ctx, &filesystem.WriteRequest{
-				FilePath: item.offloadInfo.OffloadFilePath,
-				Content:  item.offloadInfo.OffloadContent,
-			})
-			if writeErr != nil {
-				return ctx, state, writeErr
-			}
+	}
+
+	// commit offloads
+	for _, item := range offloadStash {
+		writeErr := item.config.Backend.Write(ctx, &filesystem.WriteRequest{
+			FilePath: item.offloadInfo.OffloadFilePath,
+			Content:  item.offloadInfo.OffloadContent,
+		})
+		if writeErr != nil {
+			return ctx, state, writeErr
 		}
 	}
 
@@ -1149,11 +1178,7 @@ func (t *typedToolReductionMiddleware[M]) applyClearRewriteGeneric(ctx context.C
 
 	editTarget = append(editTarget, state.Messages[:start]...)
 
-	if clearAtLeastTokens > 0 {
-		needProcessPart = copyMessagesGeneric(state.Messages[start:end])
-	} else {
-		needProcessPart = state.Messages[start:end]
-	}
+	needProcessPart = copyMessagesGeneric(state.Messages[start:end])
 
 	if t.config.ClearMessageRewriter != nil {
 		var (
