@@ -1387,7 +1387,7 @@ func TestReductionMiddlewareClear(t *testing.T) {
 				Function: schema.FunctionCall{Name: "get_weather", Arguments: `{"location": "London, UK", "unit": "c"}`},
 			},
 		}, s.Messages[2].ToolCalls)
-		assert.NotNil(t, msgs[2].Extra[msgClearedFlag])
+		assert.NotNil(t, s.Messages[2].Extra[msgClearedFlag])
 		assert.Equal(t, []schema.ToolCall{
 			{
 				ID:       "call_123456789",
@@ -1422,7 +1422,7 @@ func TestReductionMiddlewareClear(t *testing.T) {
 				Function: schema.FunctionCall{Name: "get_weather", Arguments: `{"location": "London, UK", "unit": "c"}`},
 			},
 		}, s.Messages[2].ToolCalls)
-		assert.NotNil(t, msgs[2].Extra[msgClearedFlag])
+		assert.NotNil(t, s.Messages[2].Extra[msgClearedFlag])
 		assert.Equal(t, []schema.ToolCall{
 			{
 				ID:       "call_123456789",
@@ -1430,7 +1430,7 @@ func TestReductionMiddlewareClear(t *testing.T) {
 				Function: schema.FunctionCall{Name: "get_weather", Arguments: `{"location": "London, UK", "unit": "c"}`},
 			},
 		}, s.Messages[4].ToolCalls)
-		assert.NotNil(t, msgs[4].Extra[msgClearedFlag])
+		assert.NotNil(t, s.Messages[4].Extra[msgClearedFlag])
 		assert.Equal(t, "<persisted-output>Tool result saved to: /tmp/clear/call_987654321\nUse read_file to view</persisted-output>", s.Messages[3].Content)
 		assert.Equal(t, "<persisted-output>Tool result saved to: /tmp/clear/call_123456789\nUse read_file to view</persisted-output>", s.Messages[5].Content)
 	})
@@ -1649,6 +1649,196 @@ func TestReductionMiddlewareClear(t *testing.T) {
 			FilePath: "/tmp/clear/call_987654321",
 		})
 		assert.NoError(t, err)
+	})
+
+	t.Run("ClearPreCommit - invalidates cache before threshold check", func(t *testing.T) {
+		backend := filesystem.NewInMemoryBackend()
+		const cacheKey = "_cached_tokens"
+		config := &Config{
+			SkipTruncation: true,
+			TokenCounter: func(_ context.Context, msgs []adk.Message, _ []*schema.ToolInfo) (int64, error) {
+				var size int64
+				for _, msg := range msgs {
+					if v, ok := msg.Extra[cacheKey]; ok {
+						size += v.(int64)
+					} else {
+						size += int64(len(msg.Content))
+					}
+				}
+				return size, nil
+			},
+			MaxTokensForClear:         50,
+			ClearRetentionSuffixLimit: 1,
+			ClearAtLeastTokens:        30,
+			ClearPreCommit: func(_ context.Context, input *ClearPreCommitInput[adk.Message]) error {
+				for i := range input.ModifiedMessages {
+					delete(input.ModifiedMessages[i].Extra, cacheKey)
+				}
+				return nil
+			},
+			ToolConfig: map[string]*ToolReductionConfig{
+				"get_weather": {
+					Backend:      backend,
+					SkipClear:    false,
+					ClearHandler: defaultClearHandler(testClearOffloadPath("/tmp"), true, "read_file"),
+				},
+			},
+		}
+
+		mw, err := New(ctx, config)
+		assert.NoError(t, err)
+
+		msgs := []adk.Message{
+			schema.SystemMessage("sys"),
+			schema.UserMessage("hello"),
+			schema.AssistantMessage("", []schema.ToolCall{
+				{ID: "call_1", Type: "function", Function: schema.FunctionCall{Name: "get_weather", Arguments: `{}`}},
+			}),
+			func() adk.Message {
+				m := schema.ToolMessage("long content that should be cleared away", "call_1")
+				m.Extra = map[string]any{cacheKey: int64(999)}
+				return m
+			}(),
+			schema.AssistantMessage("", []schema.ToolCall{
+				{ID: "call_2", Type: "function", Function: schema.FunctionCall{Name: "get_weather", Arguments: `{}`}},
+			}),
+			schema.ToolMessage("recent", "call_2"),
+		}
+
+		_, s, err := mw.BeforeModelRewriteState(ctx, &adk.ChatModelAgentState{Messages: msgs}, &adk.ModelContext{Tools: toolsInfo})
+		assert.NoError(t, err)
+		assert.Contains(t, s.Messages[3].Content, "persisted-output")
+	})
+
+	t.Run("ClearPreCommit - without hook, cached tokens prevent clear", func(t *testing.T) {
+		const cacheKey = "_cached_tokens"
+		config := &Config{
+			SkipTruncation: true,
+			TokenCounter: func(_ context.Context, msgs []adk.Message, _ []*schema.ToolInfo) (int64, error) {
+				var size int64
+				for _, msg := range msgs {
+					if v, ok := msg.Extra[cacheKey]; ok {
+						size += v.(int64)
+					} else {
+						size += int64(len(msg.Content))
+					}
+				}
+				return size, nil
+			},
+			MaxTokensForClear:         50,
+			ClearRetentionSuffixLimit: 1,
+			ClearAtLeastTokens:        30,
+			ToolConfig: map[string]*ToolReductionConfig{
+				"get_weather": {
+					SkipClear:    false,
+					ClearHandler: defaultClearHandler(testClearOffloadPath("/tmp"), false, ""),
+				},
+			},
+		}
+
+		mw, err := New(ctx, config)
+		assert.NoError(t, err)
+
+		msgs := []adk.Message{
+			schema.SystemMessage("sys"),
+			schema.UserMessage("hello"),
+			schema.AssistantMessage("", []schema.ToolCall{
+				{ID: "call_1", Type: "function", Function: schema.FunctionCall{Name: "get_weather", Arguments: `{}`}},
+			}),
+			func() adk.Message {
+				m := schema.ToolMessage("long content that should be cleared away", "call_1")
+				m.Extra = map[string]any{cacheKey: int64(999)}
+				return m
+			}(),
+			schema.AssistantMessage("", []schema.ToolCall{
+				{ID: "call_2", Type: "function", Function: schema.FunctionCall{Name: "get_weather", Arguments: `{}`}},
+			}),
+			schema.ToolMessage("recent", "call_2"),
+		}
+
+		_, s, err := mw.BeforeModelRewriteState(ctx, &adk.ChatModelAgentState{Messages: msgs}, &adk.ModelContext{Tools: toolsInfo})
+		assert.NoError(t, err)
+		assert.Equal(t, "long content that should be cleared away", s.Messages[3].Content)
+	})
+
+	t.Run("ClearPreCommit - error aborts clear", func(t *testing.T) {
+		config := &Config{
+			SkipTruncation:            true,
+			TokenCounter:              func(context.Context, []adk.Message, []*schema.ToolInfo) (int64, error) { return 100, nil },
+			MaxTokensForClear:         20,
+			ClearRetentionSuffixLimit: 1,
+			ClearPreCommit: func(_ context.Context, _ *ClearPreCommitInput[adk.Message]) error {
+				return errors.New("pre-commit failed")
+			},
+			ToolConfig: map[string]*ToolReductionConfig{
+				"get_weather": {
+					SkipClear:    false,
+					ClearHandler: defaultClearHandler(testClearOffloadPath("/tmp"), false, ""),
+				},
+			},
+		}
+
+		mw, err := New(ctx, config)
+		assert.NoError(t, err)
+
+		msgs := []adk.Message{
+			schema.SystemMessage("sys"),
+			schema.UserMessage("hello"),
+			schema.AssistantMessage("", []schema.ToolCall{
+				{ID: "call_1", Type: "function", Function: schema.FunctionCall{Name: "get_weather", Arguments: `{}`}},
+			}),
+			schema.ToolMessage("Sunny", "call_1"),
+			schema.AssistantMessage("", []schema.ToolCall{
+				{ID: "call_2", Type: "function", Function: schema.FunctionCall{Name: "get_weather", Arguments: `{}`}},
+			}),
+			schema.ToolMessage("recent", "call_2"),
+		}
+
+		_, _, err = mw.BeforeModelRewriteState(ctx, &adk.ChatModelAgentState{Messages: msgs}, &adk.ModelContext{Tools: toolsInfo})
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "pre-commit failed")
+	})
+
+	t.Run("ClearPreCommit - called even when ClearAtLeastTokens is 0", func(t *testing.T) {
+		var preCommitCalled bool
+		config := &Config{
+			SkipTruncation:            true,
+			TokenCounter:              func(context.Context, []adk.Message, []*schema.ToolInfo) (int64, error) { return 100, nil },
+			MaxTokensForClear:         20,
+			ClearRetentionSuffixLimit: 1,
+			ClearAtLeastTokens:        0,
+			ClearPreCommit: func(_ context.Context, input *ClearPreCommitInput[adk.Message]) error {
+				preCommitCalled = true
+				assert.NotEmpty(t, input.ModifiedMessages)
+				return nil
+			},
+			ToolConfig: map[string]*ToolReductionConfig{
+				"get_weather": {
+					SkipClear:    false,
+					ClearHandler: defaultClearHandler(testClearOffloadPath("/tmp"), false, ""),
+				},
+			},
+		}
+
+		mw, err := New(ctx, config)
+		assert.NoError(t, err)
+
+		msgs := []adk.Message{
+			schema.SystemMessage("sys"),
+			schema.UserMessage("hello"),
+			schema.AssistantMessage("", []schema.ToolCall{
+				{ID: "call_1", Type: "function", Function: schema.FunctionCall{Name: "get_weather", Arguments: `{}`}},
+			}),
+			schema.ToolMessage("Sunny", "call_1"),
+			schema.AssistantMessage("", []schema.ToolCall{
+				{ID: "call_2", Type: "function", Function: schema.FunctionCall{Name: "get_weather", Arguments: `{}`}},
+			}),
+			schema.ToolMessage("recent", "call_2"),
+		}
+
+		_, _, err = mw.BeforeModelRewriteState(ctx, &adk.ChatModelAgentState{Messages: msgs}, &adk.ModelContext{Tools: toolsInfo})
+		assert.NoError(t, err)
+		assert.True(t, preCommitCalled)
 	})
 }
 
