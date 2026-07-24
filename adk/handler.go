@@ -326,6 +326,32 @@ func processTypedState(ctx context.Context, fn func(extra map[string]any) map[st
 	})
 }
 
+// TypedGetMessages returns the current ChatModelAgent message list.
+//
+// It can be called from middleware and tool hooks while a ChatModelAgent is
+// running or resuming, including hooks that do not receive
+// TypedChatModelAgentState directly. The returned slice is a snapshot: callers
+// may append to or replace its entries without changing agent state. The
+// messages themselves are not deep-copied and must be treated as read-only.
+func TypedGetMessages[M MessageType](ctx context.Context) ([]M, error) {
+	var messages []M
+	err := compose.ProcessState(ctx, func(_ context.Context, st *typedState[M]) error {
+		messages = append([]M(nil), st.Messages...)
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("TypedGetMessages failed: must be called within a ChatModelAgent Run() or Resume() execution context: %w", err)
+	}
+	return messages, nil
+}
+
+// GetMessages returns the current ChatModelAgent message list.
+//
+// It is the *schema.Message specialization of TypedGetMessages.
+func GetMessages(ctx context.Context) ([]Message, error) {
+	return TypedGetMessages[*schema.Message](ctx)
+}
+
 // SetRunLocalValue sets a key-value pair that persists for the duration of the current agent Run() invocation.
 // The value is scoped to this specific execution and is not shared across different Run() calls or agent instances.
 //
