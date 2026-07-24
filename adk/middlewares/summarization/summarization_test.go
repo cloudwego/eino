@@ -575,6 +575,23 @@ func TestMiddlewareShouldSummarize(t *testing.T) {
 		assert.False(t, triggered)
 	})
 
+	t.Run("message-only trigger does not enable zero token threshold", func(t *testing.T) {
+		mw := &TypedMiddleware[*schema.Message]{
+			cfg: &Config{
+				Trigger: &TriggerCondition{ContextMessages: 3},
+			},
+		}
+
+		triggered, err := mw.shouldSummarize(ctx, &TokenCounterInput{
+			Messages: []adk.Message{
+				schema.UserMessage("msg1"),
+				schema.UserMessage("msg2"),
+			},
+		})
+		assert.NoError(t, err)
+		assert.False(t, triggered)
+	})
+
 	t.Run("returns true when over threshold", func(t *testing.T) {
 		mw := &TypedMiddleware[*schema.Message]{
 			cfg: &Config{
@@ -1022,6 +1039,27 @@ func TestMiddlewareBuildSummarizationModelInput(t *testing.T) {
 		assert.True(t, found, "should contain context message")
 	})
 
+	t.Run("windows default input to context token threshold", func(t *testing.T) {
+		mw := &TypedMiddleware[*schema.Message]{
+			cfg: &Config{
+				Trigger: &TriggerCondition{},
+			},
+		}
+		systemInstruction, userInstruction := mw.getModelInstructions()
+		mw.cfg.Trigger.ContextTokens = estimateTypedMessageTokens(systemInstruction) +
+			estimateTypedMessageTokens(userInstruction) + 3
+
+		oldMessage := schema.UserMessage(strings.Repeat("old", 20))
+		recentMessage := schema.UserMessage("recent")
+		contextMsgs := []adk.Message{oldMessage, recentMessage}
+
+		input, err := mw.buildSummarizationModelInput(ctx, contextMsgs, contextMsgs)
+		require.NoError(t, err)
+		require.Len(t, input, 3)
+		assert.Same(t, recentMessage, input[1])
+		assert.NotContains(t, input, oldMessage)
+	})
+
 	t.Run("uses GenModelInput", func(t *testing.T) {
 		expectedInput := []adk.Message{
 			schema.UserMessage("custom input"),
@@ -1072,6 +1110,18 @@ func TestMiddlewareBuildSummarizationModelInput(t *testing.T) {
 		assert.Equal(t, schema.User, lastMsg.Role)
 		assert.Contains(t, lastMsg.Content, "custom instruction")
 	})
+}
+
+func TestWindowMessagesByTokenLimit(t *testing.T) {
+	oldMessage := schema.UserMessage(strings.Repeat("o", 80))
+	recentMessage := schema.UserMessage("recent")
+	messages := []adk.Message{oldMessage, recentMessage}
+
+	window := windowMessagesByTokenLimit(messages, estimateTypedMessageTokens(recentMessage))
+	require.Len(t, window, 1)
+	assert.Same(t, recentMessage, window[0])
+
+	assert.Nil(t, windowMessagesByTokenLimit(messages, 0))
 }
 
 func TestMiddlewareSummarize(t *testing.T) {

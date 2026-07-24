@@ -75,6 +75,11 @@ type TypedConfig[M adk.MessageType] struct {
 
 	// Trigger specifies the conditions that activate summarization.
 	// Optional. Defaults to triggering when total tokens exceed 160k.
+	//
+	// ContextTokens also bounds the default summarization model input. When
+	// history exceeds that limit, the default input builder keeps the newest
+	// contiguous messages that fit and evicts older messages. A custom
+	// GenModelInput retains full control and is not windowed.
 	Trigger *TriggerCondition
 
 	// EmitInternalEvents indicates whether internal events should be emitted during summarization,
@@ -372,7 +377,7 @@ func (m *TypedMiddleware[M]) shouldSummarize(ctx context.Context, input *TypedTo
 
 func (m *TypedMiddleware[M]) getTriggerContextTokens() int {
 	const defaultTriggerContextTokens = 160000
-	if m.cfg.Trigger != nil {
+	if m.cfg.Trigger != nil && m.cfg.Trigger.ContextTokens > 0 {
 		return m.cfg.Trigger.ContextTokens
 	}
 	return defaultTriggerContextTokens
@@ -433,12 +438,7 @@ func defaultTypedTokenCounter[M adk.MessageType](_ context.Context, input *Typed
 
 	var incrementTokens int
 	for _, msg := range input.Messages[incrementStart:] {
-		switch m := any(msg).(type) {
-		case *schema.Message:
-			incrementTokens += estimateMessageTokens(m)
-		case *schema.AgenticMessage:
-			incrementTokens += estimateAgenticMessageTokens(m)
-		}
+		incrementTokens += estimateTypedMessageTokens(msg)
 	}
 
 	for _, tl := range input.Tools {
@@ -479,6 +479,17 @@ func estimateTokenCount(charLen int) int {
 
 func estimateTokenBytes(tokens int) int {
 	return tokens * 4
+}
+
+func estimateTypedMessageTokens[M adk.MessageType](msg M) int {
+	switch m := any(msg).(type) {
+	case *schema.Message:
+		return estimateMessageTokens(m)
+	case *schema.AgenticMessage:
+		return estimateAgenticMessageTokens(m)
+	default:
+		return 0
+	}
 }
 
 func (m *TypedMiddleware[M]) summarize(ctx context.Context, originalMsgs []M) (M, []M, error) {
@@ -614,12 +625,38 @@ func (m *TypedMiddleware[M]) buildSummarizationModelInput(ctx context.Context, o
 		return input, nil
 	}
 
+	contextMsgs = windowMessagesByTokenLimit(contextMsgs, m.getTriggerContextTokens()-
+		estimateTypedMessageTokens(sysInstruction)-estimateTypedMessageTokens(userInstruction))
+
 	input := make([]M, 0, len(contextMsgs)+2)
 	input = append(input, sysInstruction)
 	input = append(input, contextMsgs...)
 	input = append(input, userInstruction)
 
 	return input, nil
+}
+
+// windowMessagesByTokenLimit returns the newest contiguous message window that
+// fits within tokenLimit. Keeping a suffix preserves the latest user intent and
+// tool-call/result ordering while preventing an already-over-limit history from
+// being sent unchanged to the summarization model.
+func windowMessagesByTokenLimit[M adk.MessageType](messages []M, tokenLimit int) []M {
+	if tokenLimit <= 0 || len(messages) == 0 {
+		return nil
+	}
+
+	total := 0
+	start := len(messages)
+	for i := len(messages) - 1; i >= 0; i-- {
+		tokens := estimateTypedMessageTokens(messages[i])
+		if total+tokens > tokenLimit {
+			break
+		}
+		total += tokens
+		start = i
+	}
+
+	return messages[start:]
 }
 
 func (m *TypedMiddleware[M]) getModelInstructions() (M, M) {
