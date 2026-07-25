@@ -1,5 +1,7 @@
 # Eino
 
+[![MCP Toplist](https://mcptoplist.com/badge/mcp.so%2Feino%2Fcloudwego.svg)](https://mcptoplist.com/server/mcp.so%2Feino%2Fcloudwego)
+
 ![coverage](https://raw.githubusercontent.com/cloudwego/eino/badges/.badges/main/coverage.svg)
 [![Release](https://img.shields.io/github/v/release/cloudwego/eino)](https://github.com/cloudwego/eino/releases)
 [![WebSite](https://img.shields.io/website?up_message=cloudwego&url=https%3A%2F%2Fwww.cloudwego.io%2F)](https://www.cloudwego.io/)
