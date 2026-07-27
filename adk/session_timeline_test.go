@@ -21,6 +21,7 @@ import (
 	"context"
 	"encoding/gob"
 	"errors"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -642,6 +643,72 @@ func TestRunner_ExtensionEventSentWithTypedSendEventIsLiveAndPersisted(t *testin
 	})
 }
 
+func TestRunner_EventExtraProviderRunsOnceForTypedSendEvent(t *testing.T) {
+	ctx := context.Background()
+	extensionKind := SessionEventKind("x.provider.once")
+	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "provider-once-agent",
+		Instruction: "test",
+		Model:       &extensionEventModel{},
+		Middlewares: []AgentMiddleware{
+			{
+				AfterChatModel: func(ctx context.Context, _ *ChatModelAgentState) error {
+					return SendEvent(ctx, &AgentEvent{
+						SessionEventVariant: &SessionEventVariant[*schema.Message]{
+							Event: &SessionEvent[*schema.Message]{
+								Kind:      extensionKind,
+								Extension: &SessionExtensionEvent{},
+							},
+						},
+					})
+				},
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	store := newSessionHelperStore()
+	var extensionProviderCalls int64
+	runner := NewRunner(ctx, RunnerConfig{
+		Agent:        agent,
+		SessionID:    "provider-once-session",
+		SessionStore: store,
+		SessionConfig: &SessionConfig[*schema.Message]{
+			EventExtraProvider: func(_ context.Context, event *SessionEvent[*schema.Message]) (map[string]any, error) {
+				if event.Kind == extensionKind {
+					return map[string]any{"provider_call": atomic.AddInt64(&extensionProviderCalls, 1)}, nil
+				}
+				return map[string]any{"provider_kind": string(event.Kind)}, nil
+			},
+		},
+	})
+
+	var liveExtension *SessionEvent[*schema.Message]
+	iter := runner.Query(ctx, "hello", WithTimelineEvents())
+	for {
+		event, ok := iter.Next()
+		if !ok {
+			break
+		}
+		require.NoError(t, event.Err)
+		if event.SessionEventVariant != nil && event.SessionEventVariant.Event != nil &&
+			event.SessionEventVariant.Event.Kind == extensionKind {
+			liveExtension = event.SessionEventVariant.Event
+		}
+	}
+
+	require.NotNil(t, liveExtension)
+	assert.Equal(t, int64(1), liveExtension.Extra["provider_call"])
+	assert.Equal(t, int64(1), atomic.LoadInt64(&extensionProviderCalls))
+
+	persisted := filterStoredSessionEvents(t, store.events, func(se *SessionEvent[*schema.Message]) bool {
+		return se.Kind == extensionKind
+	})
+	require.Len(t, persisted, 1)
+	assert.Equal(t, liveExtension.EventID, persisted[0].EventID)
+	assert.Equal(t, int64(1), persisted[0].Extra["provider_call"])
+}
+
 func TestTypedSendEventOutsideExecutionIsNoop(t *testing.T) {
 	err := SendEvent(context.Background(), &AgentEvent{
 		SessionEventVariant: &SessionEventVariant[*schema.Message]{
@@ -762,7 +829,7 @@ func TestModelSpanEndCarriesAssistantUsage(t *testing.T) {
 	assert.True(t, spanEnd.Span.Model.Accepted)
 }
 
-func TestSessionTimeline_EmittedKindMustBeExplicit(t *testing.T) {
+func TestSessionTimeline_EmittedKindIsDerivedBeforeSend(t *testing.T) {
 	iter, gen := NewAsyncIteratorPair[*AgentEvent]()
 	ctx := withTypedChatModelAgentExecCtx(context.Background(), &chatModelAgentExecCtx{
 		generator:              gen,
@@ -780,8 +847,10 @@ func TestSessionTimeline_EmittedKindMustBeExplicit(t *testing.T) {
 
 	event, ok := iter.Next()
 	require.True(t, ok)
-	require.Error(t, event.Err)
-	assert.Contains(t, event.Err.Error(), "non-empty Kind")
+	require.NoError(t, event.Err)
+	require.NotNil(t, event.SessionEventVariant)
+	require.NotNil(t, event.SessionEventVariant.Event)
+	assert.Equal(t, SessionEventSessionStatusRunning, event.SessionEventVariant.Event.Kind)
 }
 
 func TestSessionTimeline_TypedAgentEventGobRoundTripPreservesSessionEvent(t *testing.T) {
