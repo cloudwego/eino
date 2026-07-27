@@ -472,18 +472,18 @@ type topicSelectionResp struct {
 }
 
 func (m *middleware[M]) renderInstruction(ctx context.Context, baseInstruction string) (string, error) {
-	memDesc := getDefaultMemoryInstruction()
 	if m.cfg.GenInstruction != nil {
 		custom, err := m.cfg.GenInstruction(ctx)
 		if err != nil {
 			return "", err
 		}
 		if strings.TrimSpace(custom) != "" {
-			memDesc = custom + "\n\n"
+			custom = custom + "\n\n"
 		}
+		return baseInstruction + "\n" + custom, nil
 	}
-
-	return buildSystemMemoryInstruction(baseInstruction, memDesc, m.resolvedMemoryDirectory)
+	
+	return buildSystemMemoryInstruction(baseInstruction, getDefaultMemoryInstruction(), m.resolvedMemoryDirectory)
 }
 
 func (m *middleware[M]) buildMemoryIndexMessage(ctx context.Context) (M, error) {
