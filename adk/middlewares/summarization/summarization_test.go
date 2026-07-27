@@ -29,6 +29,7 @@ import (
 	"go.uber.org/mock/gomock"
 
 	"github.com/cloudwego/eino/adk"
+	"github.com/cloudwego/eino/adk/session"
 	"github.com/cloudwego/eino/components/model"
 	mockModel "github.com/cloudwego/eino/internal/mock/components/model"
 	"github.com/cloudwego/eino/schema"
@@ -36,6 +37,18 @@ import (
 
 func intPtr(v int) *int {
 	return &v
+}
+
+type fixedSummaryTestModel struct {
+	content string
+}
+
+func (m *fixedSummaryTestModel) Generate(context.Context, []*schema.Message, ...model.Option) (*schema.Message, error) {
+	return schema.AssistantMessage(m.content, nil), nil
+}
+
+func (m *fixedSummaryTestModel) Stream(context.Context, []*schema.Message, ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+	return schema.StreamReaderFromArray([]*schema.Message{schema.AssistantMessage(m.content, nil)}), nil
 }
 
 func TestNew(t *testing.T) {
@@ -65,6 +78,61 @@ func TestNew(t *testing.T) {
 		assert.Error(t, err)
 		assert.Nil(t, mw)
 	})
+}
+
+func TestAttack_SummarizationMessagesReplacedUsesReasonOnly(t *testing.T) {
+	ctx := context.Background()
+	mw, err := New(ctx, &Config{
+		Model:   &fixedSummaryTestModel{content: "summary"},
+		Trigger: &TriggerCondition{ContextMessages: 1},
+	})
+	require.NoError(t, err)
+
+	agent, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
+		Name:        "summary-extra-agent",
+		Description: "summary extra test",
+		Instruction: "test",
+		Model:       &fixedSummaryTestModel{content: "ok"},
+		Handlers:    []adk.ChatModelAgentMiddleware{mw},
+	})
+	require.NoError(t, err)
+
+	store := session.NewInMemoryStore[*schema.Message](nil)
+	runner := adk.NewRunner(ctx, adk.RunnerConfig{
+		Agent:        agent,
+		SessionID:    "summary-extra-session",
+		SessionStore: store,
+		SessionConfig: &adk.SessionConfig[*schema.Message]{
+			EventExtraProvider: func(_ context.Context, event *adk.SessionEvent[*schema.Message]) (map[string]any, error) {
+				if event.Kind == adk.SessionEventMessagesReplaced && event.Extra["_eino_reason"] == "context_summarized" {
+					return map[string]any{"reason": "business_summary"}, nil
+				}
+				return nil, nil
+			},
+		},
+	})
+
+	iter := runner.Run(ctx, []*schema.Message{
+		schema.UserMessage("first"),
+		schema.UserMessage("second"),
+	})
+	for {
+		event, ok := iter.Next()
+		if !ok {
+			break
+		}
+		require.NoError(t, event.Err)
+	}
+
+	res, err := store.LoadEvents(ctx, "summary-extra-session", &adk.LoadSessionEventsRequest{
+		Kinds: []adk.SessionEventKind{adk.SessionEventMessagesReplaced},
+	})
+	require.NoError(t, err)
+	require.Len(t, res.Events, 1)
+	extra := res.Events[0].Extra
+	assert.NotContains(t, extra, "_eino_source")
+	assert.Equal(t, "context_summarized", extra["_eino_reason"])
+	assert.Equal(t, "business_summary", extra["reason"])
 }
 
 func TestMiddlewareBeforeModelRewriteState(t *testing.T) {
