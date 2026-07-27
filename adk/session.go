@@ -150,6 +150,14 @@ type SessionEvent[M MessageType] struct {
 
 	Kind SessionEventKind `json:"kind,omitempty"`
 
+	// Extra carries event-envelope data. Application keys share the map with
+	// framework-owned keys prefixed by "_eino_"; EventExtraProvider output cannot
+	// create framework-owned keys. ADK ignores Extra for replay, reconstruction,
+	// rollback, and kind classification. Values are serialized by the configured
+	// SessionEventStore serializer; custom concrete types stored behind any must
+	// be registered when durable round-trip behavior is required.
+	Extra map[string]any `json:"extra,omitempty"`
+
 	Message                 M                                `json:"message,omitempty"`
 	MessageStreamIncomplete *MessageStreamIncompleteEvent[M] `json:"message_stream_incomplete,omitempty"`
 	MessagesReplaced        *[]M                             `json:"messages_replaced,omitempty"`
@@ -456,7 +464,7 @@ type MessageUpdatedEvent[M MessageType] struct {
 
 // MessageInsertedEvent represents a message inserted by a middleware.
 type MessageInsertedEvent[M MessageType] struct {
-	// Message is the inserted message (carries its own idempotency markers in Extra/metadata).
+	// Message is the inserted message (carries its own idempotency markers in Extra).
 	Message M `json:"message"`
 	// BeforeMessageID identifies the message BEFORE which this message was inserted,
 	// using the eino message ID. Empty string means "append at end".
@@ -482,6 +490,12 @@ type MessagesDeletedEvent struct {
 // (ErrSessionEventIDGeneratorEmpty); the runner fails closed before the
 // event is appended to the store.
 type SessionEventIDGenerator[M MessageType] func(ctx context.Context, event *SessionEvent[M]) (string, error)
+
+// SessionEventExtraProvider returns application-owned event-envelope data for a
+// normalized SessionEvent draft. The returned map is the provider's only
+// supported output channel; providers should treat the event argument as
+// read-only.
+type SessionEventExtraProvider[M MessageType] func(ctx context.Context, event *SessionEvent[M]) (map[string]any, error)
 
 // DefaultSessionEventIDGenerator returns a UUID-based EventID for any draft.
 // It is exported so that application-side SessionEventIDGenerator[M]
@@ -510,6 +524,11 @@ type SessionConfig[M MessageType] struct {
 	// the generator is always invoked. Returning an empty string fails the
 	// turn closed (ErrSessionEventIDGeneratorEmpty).
 	EventIDGenerator SessionEventIDGenerator[M]
+	// EventExtraProvider decorates every runner / wrapper produced session event
+	// with additional event-envelope Extra. Provider output is merged before
+	// EventIDGenerator runs, so custom generators can inspect the final Extra map.
+	// Returned keys prefixed with "_eino_" are rejected.
+	EventExtraProvider SessionEventExtraProvider[M]
 	// SessionAcquireTimeout bounds how long Runner may wait to acquire any session
 	// handle before failing the current Run/Resume/Rollback attempt.
 	//
@@ -633,8 +652,7 @@ func normalizeSerializer(serializer schema.Serializer) schema.Serializer {
 // makeInputSessionEvent wraps an input message as a SessionEvent draft.
 //
 // The returned draft has an empty EventID; the caller must assign one via
-// assignSessionEventIDFromContext (or assignSessionEventID) before sending or
-// persisting the event.
+// assignSessionEventID before sending or persisting the event.
 func makeInputSessionEvent[M MessageType](msg M) *SessionEvent[M] {
 	return &SessionEvent[M]{Timestamp: newEventTimestamp(), Kind: SessionEventMessage, Message: msg}
 }
@@ -927,7 +945,10 @@ func ValidateEmittedSessionEventKind[M MessageType](event *SessionEvent[M]) erro
 	if event.Kind == "" {
 		return errors.New("emitted session event must set non-empty Kind")
 	}
-	return NormalizeSessionEventKind(event)
+	if err := NormalizeSessionEventKind(event); err != nil {
+		return err
+	}
+	return nil
 }
 
 func isSessionDurableBoundaryKind(kind SessionEventKind) bool {
@@ -950,18 +971,106 @@ func normalizeSessionConfig[M MessageType](cfg *SessionConfig[M]) SessionConfig[
 	if cfg.EventIDGenerator != nil {
 		normalized.EventIDGenerator = cfg.EventIDGenerator
 	}
+	if cfg.EventExtraProvider != nil {
+		normalized.EventExtraProvider = cfg.EventExtraProvider
+	}
 	if cfg.SessionAcquireTimeout > 0 {
 		normalized.SessionAcquireTimeout = cfg.SessionAcquireTimeout
 	}
 	return normalized
 }
 
+const sessionEventExtraFrameworkPrefix = "_eino_"
+
+func mergeSessionEventExtra(base, added map[string]any) (map[string]any, error) {
+	if len(base) == 0 && len(added) == 0 {
+		return nil, nil
+	}
+	out := make(map[string]any, len(base)+len(added))
+	for k, v := range base {
+		out[k] = v
+	}
+	for k, v := range added {
+		if strings.HasPrefix(k, sessionEventExtraFrameworkPrefix) {
+			return nil, fmt.Errorf("session event extra provider cannot return framework-owned key %q", k)
+		}
+		out[k] = v
+	}
+	return out, nil
+}
+
+func applySessionEventExtraProvider[M MessageType](
+	ctx context.Context,
+	event *SessionEvent[M],
+	provider SessionEventExtraProvider[M],
+) error {
+	if event == nil {
+		return nil
+	}
+	if provider == nil {
+		return nil
+	}
+	added, err := provider(ctx, event)
+	if err != nil {
+		return fmt.Errorf("adk: session event extra provider: %w", err)
+	}
+	merged, err := mergeSessionEventExtra(event.Extra, added)
+	if err != nil {
+		return err
+	}
+	event.Extra = merged
+	return nil
+}
+
+type sessionEventEnvelopeOptions struct {
+	PreserveEventID       bool
+	AllowPayloadlessDraft bool
+}
+
+func prepareSessionEventEnvelope[M MessageType](
+	ctx context.Context,
+	event *SessionEvent[M],
+	gen SessionEventIDGenerator[M],
+	provider SessionEventExtraProvider[M],
+	opts sessionEventEnvelopeOptions,
+) error {
+	if event == nil {
+		return nil
+	}
+	if opts.AllowPayloadlessDraft {
+		if event.Kind == "" {
+			return errors.New("session event draft must set non-empty Kind")
+		}
+	} else {
+		if err := NormalizeSessionEventKind(event); err != nil {
+			return err
+		}
+	}
+	if event.Timestamp.IsZero() {
+		event.Timestamp = newEventTimestamp()
+	}
+	if err := applySessionEventExtraProvider(ctx, event, provider); err != nil {
+		return err
+	}
+	if opts.PreserveEventID && event.EventID == "" {
+		return ErrInvalidEventID
+	}
+	if event.EventID == "" && !opts.PreserveEventID {
+		if err := assignSessionEventID(ctx, event, gen); err != nil {
+			return err
+		}
+	}
+	if opts.AllowPayloadlessDraft {
+		return nil
+	}
+	return ValidateEmittedSessionEventKind(event)
+}
+
 // assignSessionEventID assigns the EventID of a draft SessionEvent[M] using
 // gen, falling back to DefaultSessionEventIDGenerator[M] when gen is nil. It
 // is the single authoritative entry point for SessionEvent[M] ID allocation
 // in ADK; runner / wrappers paths must route every draft through this helper
-// (or its context wrapper assignSessionEventIDFromContext) before sending or
-// persisting the event.
+// before sending or persisting the event.
 //
 // Callers MUST construct the draft with EventID == "" and populate every
 // other relevant session-local field (Kind, payload, timestamp) so the
@@ -999,22 +1108,27 @@ type sessionEventContextKey[M MessageType] struct{}
 
 type sessionEventContext[M MessageType] struct {
 	generator SessionEventIDGenerator[M]
+	provider  SessionEventExtraProvider[M]
 	turnID    string
 }
 
-func contextWithSessionEventContext[M MessageType](ctx context.Context, gen SessionEventIDGenerator[M], turnID string) context.Context {
-	if gen == nil && turnID == "" {
+func contextWithSessionEventContext[M MessageType](ctx context.Context, gen SessionEventIDGenerator[M], provider SessionEventExtraProvider[M], turnID string) context.Context {
+	if gen == nil && provider == nil && turnID == "" {
 		return ctx
 	}
 	existing := sessionEventContextFromContext[M](ctx)
 	if gen == nil {
 		gen = existing.generator
 	}
+	if provider == nil {
+		provider = existing.provider
+	}
 	if turnID == "" {
 		turnID = existing.turnID
 	}
 	return context.WithValue(ctx, sessionEventContextKey[M]{}, &sessionEventContext[M]{
 		generator: gen,
+		provider:  provider,
 		turnID:    turnID,
 	})
 }
@@ -1033,19 +1147,6 @@ func stampSessionEventTurnID[M MessageType](event *SessionEvent[M], turnID strin
 		return
 	}
 	event.TurnID = turnID
-}
-
-// assignSessionEventIDFromContext assigns the EventID of a draft
-// SessionEvent[M] using the SessionEventIDGenerator[M] stored in ctx (falling
-// back to DefaultSessionEventIDGenerator[M] when none is set). Wrappers and
-// runner closures call this helper after populating the rest of the draft.
-func assignSessionEventIDFromContext[M MessageType](ctx context.Context, event *SessionEvent[M]) error {
-	if event == nil {
-		return nil
-	}
-	sc := sessionEventContextFromContext[M](ctx)
-	stampSessionEventTurnID(event, sc.turnID)
-	return assignSessionEventID(ctx, event, sc.generator)
 }
 
 type sessionEventPersister[M MessageType] struct {
