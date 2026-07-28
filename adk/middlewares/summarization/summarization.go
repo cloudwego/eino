@@ -356,7 +356,7 @@ func (m *TypedMiddleware[M]) BeforeAgent(ctx context.Context, runCtx *adk.ChatMo
 	// Append the context-management note to the agent system prompt so the model knows
 	// long conversations are summarized automatically ({{summarization prompt}}).
 	note := getContextManagementInstruction()
-	if strings.TrimSpace(note) != "" && !strings.Contains(runCtx.Instruction, note) {
+	if strings.TrimSpace(note) != "" {
 		nRunCtx := *runCtx
 		if strings.TrimSpace(nRunCtx.Instruction) == "" {
 			nRunCtx.Instruction = note

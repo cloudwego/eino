@@ -56,11 +56,12 @@ func TestSkill_BeforeModelRewriteState_AgenticMessage(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, ns2.Messages, 2)
 
-	// Skill list changes: a fresh reminder is appended (content-changed path).
+	// Skill list changes: insert-once means no new reminder is appended once one
+	// already exists — the state is left unchanged.
 	backend.m = append(backend.m, Skill{FrontMatter: FrontMatter{Name: "beta", Description: "second"}})
 	_, ns3, err := h.BeforeModelRewriteState(ctx, ns2, nil)
 	require.NoError(t, err)
-	require.Len(t, ns3.Messages, 3)
+	require.Len(t, ns3.Messages, 2)
 
 	// No skills: buildSkillsSection returns ok=false and the state is untouched.
 	empty, err := NewTyped[*schema.AgenticMessage](ctx, &TypedConfig[*schema.AgenticMessage]{Backend: &inMemoryBackend{}})
@@ -125,12 +126,8 @@ func TestSkill_ReminderHelpers_AgenticMessage(t *testing.T) {
 	// isSystemMessage / hasExtraKey.
 	assert.True(t, isSystemMessage(system))
 	assert.False(t, isSystemMessage(user))
-	reminder := newReminder[*schema.AgenticMessage]("k", "content", false)
+	reminder := newReminder[*schema.AgenticMessage]("k", "content")
 	assert.True(t, hasExtraKey(reminder, "k"))
 	assert.False(t, hasExtraKey(user, "k"))
-
-	// reminderContent: single-block reminder returns its text; a multi-role
-	// message with no single UserInputText block returns "".
-	assert.Equal(t, "content", reminderContent(reminder))
-	assert.Equal(t, "", reminderContent(assistant))
+	assert.True(t, isSystemMessage(reminder))
 }

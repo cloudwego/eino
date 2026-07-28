@@ -373,7 +373,7 @@ func resolveSubAgent(subAgents map[string]tool.InvokableTool, subagentType, prom
 
 // defaultAgentToolDescription returns the agent tool description. The available
 // agent types are no longer embedded here (they are injected as a mid-conversation
-// system message); the {back_ground_prompt} placeholder is filled by the middleware.
+// system message); the {background_prompt} placeholder is filled by the middleware.
 func defaultAgentToolDescription[M adk.MessageType](ctx context.Context, subAgents []adk.TypedAgent[M]) (string, error) {
 	return internal.SelectPrompt(internal.I18nPrompts{
 		English: agentToolDescription,

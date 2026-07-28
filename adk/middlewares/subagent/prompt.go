@@ -107,7 +107,7 @@ When using the Agent tool, specify a subagent_type parameter to select which age
 
 Reach for this when the task matches an available agent type, when you have independent work to run in parallel, or when answering would mean reading across several files — delegate it and you keep the conclusion, not the file dumps. For a single-fact lookup where you already know the file, symbol, or value, search directly. Once you've delegated a search, don't also run it yourself — wait for the result.
 
-- The agent's final message is returned to you as the tool result; it is not shown to the user — relay what matters.{back_ground_prompt}`
+- The agent's final message is returned to you as the tool result; it is not shown to the user — relay what matters.{background_prompt}`
 
 	agentToolDescriptionChinese = `启动一个新的智能体来处理复杂的多步骤任务。每种智能体类型都有其特定的能力和可用工具。
 
@@ -123,11 +123,11 @@ Reach for this when the task matches an available agent type, when you have inde
 
 	agentToolBackgroundPrompt = `
 
-Subagents run in the background by default; you'll be notified when one completes. Pass ` + "`" + `run_in_background: false` + "`" + ` for a synchronous run when you need the result before continuing.`
+Subagents run in the foreground by default; the tool call returns only once the sub-agent completes. Pass ` + "`" + `run_in_background: true` + "`" + ` to run it in the background instead — you'll be notified when it completes.`
 
 	agentToolBackgroundPromptChinese = `
 
-子智能体默认在后台运行；完成时你会收到通知。当你需要先拿到结果才能继续时，传 ` + "`" + `run_in_background: false` + "`" + ` 以同步运行。`
+子智能体默认在前台运行；工具调用会等到子智能体完成后才返回。若要改为后台运行，传 ` + "`" + `run_in_background: true` + "`" + `——完成时你会收到通知。`
 
 	availableAgentTypesPreamble = `Available agent types for the Agent tool:`
 

@@ -182,16 +182,6 @@ type TypedConfig[M adk.MessageType] struct {
 	// in a default formatted string.
 	// optional
 	FormatForkResult func(ctx context.Context, in TypedSubAgentOutput[M]) (string, error)
-
-	// DisableMidConversationSystemMessage controls the role of the mid-conversation
-	// available-skills reminder injected by BeforeModelRewriteState. When false (the
-	// default) the reminder is a system message, matching the historical behavior.
-	// Set it to true for models that reject mid-conversation system messages: the
-	// reminder is then wrapped as a user message placed immediately before the latest
-	// turn's user-input message. The setting is read every turn, so it may be changed
-	// mid-session (e.g. after a model swap); prior reminders are re-aligned to the
-	// current role in place.
-	DisableMidConversationSystemMessage bool
 }
 
 // Config is a backward-compatible alias for TypedConfig instantiated with *schema.Message.
@@ -229,8 +219,7 @@ func NewTyped[M adk.MessageType](ctx context.Context, config *TypedConfig[M]) (a
 	}
 
 	return &typedSkillHandler[M]{
-		instruction:    instruction,
-		reminderAsUser: config.DisableMidConversationSystemMessage,
+		instruction: instruction,
 		tool: &typedSkillTool[M]{
 			b:                 config.Backend,
 			toolName:          name,
@@ -277,9 +266,8 @@ func NewMiddleware(ctx context.Context, config *Config) (adk.ChatModelAgentMiddl
 
 type typedSkillHandler[M adk.MessageType] struct {
 	*adk.TypedBaseChatModelAgentMiddleware[M]
-	instruction    string
-	reminderAsUser bool
-	tool           *typedSkillTool[M]
+	instruction string
+	tool        *typedSkillTool[M]
 }
 
 func (h *typedSkillHandler[M]) BeforeAgent(ctx context.Context, runCtx *adk.ChatModelAgentContext[M]) (context.Context, *adk.ChatModelAgentContext[M], error) {
@@ -304,9 +292,9 @@ func buildSkillsSectionFromEntries(skills []FrontMatter) string {
 }
 
 // BeforeModelRewriteState publishes the available-skills list as a system
-// reminder. Skills can be installed between turns, so the list is rebuilt every
-// invocation and a fresh reminder is appended whenever it changes (see
-// appendReminderIfChanged).
+// reminder. The reminder is inserted once: when the history already contains a
+// reminder from this middleware (identified by skillsReminderExtraKey) nothing is
+// added and the skill List is skipped, otherwise a single reminder is appended.
 //
 // When a reminder is appended, it is also emitted as a durable MessageInserted
 // session event so it is reconstructed in place on the next turn instead of
@@ -317,21 +305,22 @@ func (h *typedSkillHandler[M]) BeforeModelRewriteState(ctx context.Context, stat
 	if state == nil {
 		return ctx, state, nil
 	}
+	nState := *state
+
+	// Insert-once: if a reminder from this middleware already exists in history,
+	// nothing is added and the (potentially expensive) skill List is skipped.
+	for _, msg := range nState.Messages {
+		if hasExtraKey(msg, skillsReminderExtraKey) {
+			return ctx, &nState, nil
+		}
+	}
+
 	skills, err := h.tool.b.List(ctx)
 	if err != nil || len(skills) == 0 {
-		return ctx, state, nil
+		return ctx, &nState, nil
 	}
 	section := buildSkillsSectionFromEntries(skills)
-	entries := make([]reminderEntry, 0, len(skills))
-	for _, sk := range skills {
-		entries = append(entries, reminderEntry{Name: sk.Name, Description: sk.Description})
-	}
-	nState := *state
-	// Re-align the role of prior reminders to the current setting, in case the
-	// reminder role was switched mid-session (e.g. after a model swap). This is
-	// applied only in-memory and recomputed every turn — it is not persisted.
-	msgs := migrateReminderRole(state.Messages, skillsReminderExtraKey, h.reminderAsUser)
-	newMsgs, insertedMsg, beforeMessageID, didInsert := appendReminderIfChanged(msgs, skillsReminderExtraKey, section, entries, buildSkillsSectionFromReminderEntries, h.reminderAsUser)
+	newMsgs, insertedMsg, beforeMessageID, didInsert := appendReminderIfChanged(nState.Messages, skillsReminderExtraKey, section)
 	nState.Messages = newMsgs
 
 	if didInsert {
@@ -351,101 +340,35 @@ func (h *typedSkillHandler[M]) BeforeModelRewriteState(ctx context.Context, stat
 	return ctx, &nState, nil
 }
 
-// migrateReminderRole re-aligns the role of this middleware's previously inserted
-// reminders (identified by extraKey) to the current setting, so a mid-session switch
-// of the reminder role also updates reminders accumulated in earlier turns. When
-// asUser is true reminders are aligned to user role, otherwise to system role.
+// appendReminderIfChanged inserts a single reminder from this middleware when the
+// history does not already contain one (identified by extraKey). It returns the
+// resulting messages plus, when a reminder was inserted, the inserted message, the
+// ID of the message it was inserted before (empty when it lands at the tail), and
+// didInsert=true — so the caller can persist the reminder as a MessageInserted
+// session event that reconstructs at the same spot.
 //
-// It rewrites only in the returned slice: each mismatched reminder is replaced with
-// a fresh message carrying the same content and message ID but the target role,
-// leaving the original (persisted) message objects untouched. The change is applied
-// in-memory only — it is recomputed from the reconstructed messages every turn and
-// never emitted as a session event. Returns the input slice unchanged when nothing
-// needs migrating.
-func migrateReminderRole[M adk.MessageType](messages []M, extraKey string, asUser bool) []M {
-	var result []M
-	for i, msg := range messages {
-		if !hasExtraKey(msg, extraKey) || reminderIsUser(msg) == asUser {
-			continue
-		}
-		if result == nil {
-			result = make([]M, len(messages))
-			copy(result, messages)
-		}
-		replacement := newReminder[M](extraKey, reminderContent(msg), asUser)
-		setReminderMessageID(replacement, adk.GetMessageID(msg))
-		result[i] = replacement
-	}
-	if result == nil {
-		return messages
-	}
-	return result
-}
-
-type reminderEntry struct {
-	Name        string
-	Description string
-}
-
-func buildSkillsSectionFromReminderEntries(entries []reminderEntry) string {
-	skills := make([]FrontMatter, 0, len(entries))
-	for _, entry := range entries {
-		skills = append(skills, FrontMatter{Name: entry.Name, Description: entry.Description})
-	}
-	return buildSkillsSectionFromEntries(skills)
-}
-
-// appendReminderIfChanged inserts a fresh reminder carrying changed entries when
-// they differ from entries present in prior reminders from this middleware.
-// Reminders are identified by extraKey (each middleware owns its own key) regardless
-// of role. It returns the resulting messages plus, when a reminder was inserted, the
-// inserted message, the ID of the message it was inserted before (empty when it
-// lands at the tail), and didInsert=true — so the caller can persist the reminder as
-// a MessageInserted session event that reconstructs at the same spot.
+// The available-skills list is announced once and never updated: a reminder is
+// added only when none exists yet, so repeated invocations (within or across turns)
+// are idempotent. Existing reminders are never mutated or removed — rewriting
+// history would invalidate the model's KV cache for every message after the edit.
 //
-// Placement depends on role. In system mode (asUser=false) the reminder is placed
-// at a clean turn boundary — right after the latest user message or final assistant
-// answer (see isReminderAnchor) — rather than at the absolute tail, so it never lands
-// in the middle of pending tool-call/tool-result scaffolding; a stale reminder already
-// sitting there is superseded by placing the fresh one after it. In user mode
-// (asUser=true) the reminder is a user message placed immediately before the latest
-// turn's user-input message.
-//
-// Following the mid-conversation reminder pattern, existing reminders are never
-// mutated or removed here: rewriting history would invalidate the model's KV cache
-// for every message after the edit. Inserting keeps the prefix intact while ensuring
-// the latest reminder reflects the current state — later reminders add or refresh
-// only changed entries. When every current entry already appears in prior reminders
-// with the same name and description, nothing is added, so repeated invocations
-// within a turn are idempotent.
-func appendReminderIfChanged[M adk.MessageType](messages []M, extraKey string, section string, entries []reminderEntry, buildSection func([]reminderEntry) string, asUser bool) (result []M, insertedMsg M, beforeMessageID string, didInsert bool) {
-	latestByName := make(map[string]string, len(entries))
+// The reminder is a system message placed at a clean turn boundary — right after
+// the latest user message or final assistant answer (see reminderInsertIndex) —
+// rather than at the absolute tail, so it never lands in the middle of pending
+// tool-call/tool-result scaffolding. Models that reject mid-conversation system
+// messages should convert non-leading system messages to user role in their own
+// Generate/Stream (see schema.ConvertNonLeadingSystemMessagesToUser) at model-call
+// time without touching persisted history.
+func appendReminderIfChanged[M adk.MessageType](messages []M, extraKey string, section string) (result []M, insertedMsg M, beforeMessageID string, didInsert bool) {
 	for _, msg := range messages {
-		if !hasExtraKey(msg, extraKey) {
-			continue
-		}
-		for _, entry := range parseReminderEntries(reminderContent(msg)) {
-			latestByName[entry.Name] = entry.Description
+		if hasExtraKey(msg, extraKey) {
+			return messages, insertedMsg, "", false
 		}
 	}
 
-	changedEntries := make([]reminderEntry, 0, len(entries))
-	for _, entry := range entries {
-		if desc, ok := latestByName[entry.Name]; ok && desc == entry.Description {
-			continue
-		}
-		changedEntries = append(changedEntries, entry)
-	}
-	if len(changedEntries) == 0 {
-		return messages, insertedMsg, "", false
-	}
-	if len(changedEntries) < len(entries) {
-		section = buildSection(changedEntries)
-	}
+	insertAt := reminderInsertIndex(messages)
 
-	insertAt := reminderInsertIndex(messages, asUser)
-
-	insertedMsg = newReminder[M](extraKey, section, asUser)
+	insertedMsg = newReminder[M](extraKey, section)
 	adk.EnsureMessageID(insertedMsg)
 
 	result = make([]M, 0, len(messages)+1)
@@ -453,58 +376,25 @@ func appendReminderIfChanged[M adk.MessageType](messages []M, extraKey string, s
 	result = append(result, insertedMsg)
 	result = append(result, messages[insertAt:]...)
 
-	// Pin the reconstruction position to the message the reminder now precedes. A
-	// tail insert leaves this empty, which reconstructs as an append. The anchored
-	// message is always one the framework persists (user/assistant/tool/other
-	// reminder), never the regenerated leading system instruction.
+	// Record the ID of the message the reminder was inserted before, so the next
+	// turn can rebuild the reminder at the same spot (re-inserting it before that
+	// same message). A tail insert has no following message, so beforeMessageID
+	// stays empty and reconstruction treats it as a plain append. The message it
+	// precedes is always one the framework persists across turns
+	// (user/assistant/tool/another reminder), never the leading system instruction,
+	// which is regenerated each turn and has no stable ID to anchor to.
 	if insertAt < len(messages) {
 		beforeMessageID = adk.GetMessageID(messages[insertAt])
 	}
 	return result, insertedMsg, beforeMessageID, true
 }
 
-func parseReminderEntries(content string) []reminderEntry {
-	lines := strings.Split(content, "\n")
-	entries := make([]reminderEntry, 0, len(lines))
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if !strings.HasPrefix(line, "- ") {
-			continue
-		}
-		body := strings.TrimSpace(strings.TrimPrefix(line, "- "))
-		name, desc, ok := strings.Cut(body, ":")
-		if !ok {
-			continue
-		}
-		name = strings.TrimSpace(name)
-		if name == "" {
-			continue
-		}
-		entries = append(entries, reminderEntry{Name: name, Description: strings.TrimSpace(desc)})
-	}
-	return entries
-}
-
-// reminderInsertIndex returns the index at which a fresh reminder should be inserted.
-//
-//   - System mode (asUser=false): right after the latest turn boundary (user message
-//     or final assistant answer), then past any settled system messages already
-//     sitting there — sibling or stale reminders — so the fresh reminder lands after
-//     them without disturbing their positions, yet never after pending
-//     tool-call/tool-result scaffolding.
-//   - User mode (asUser=true): immediately before the latest turn's user-input
-//     message, so the user-role reminder reads as context preceding the user's ask.
-//     Falls back to the tail when there is no user-input message.
-func reminderInsertIndex[M adk.MessageType](messages []M, asUser bool) int {
-	if asUser {
-		for i := len(messages) - 1; i >= 0; i-- {
-			if isUserInputAnchor(messages[i]) {
-				return i
-			}
-		}
-		return len(messages)
-	}
-
+// reminderInsertIndex returns the index at which a fresh reminder should be
+// inserted: right after the latest turn boundary (user message or final assistant
+// answer), then past any settled system messages already sitting there — sibling or
+// stale reminders — so the fresh reminder lands after them without disturbing their
+// positions, yet never after pending tool-call/tool-result scaffolding.
+func reminderInsertIndex[M adk.MessageType](messages []M) int {
 	insertAt := len(messages)
 	for i := len(messages) - 1; i >= 0; i-- {
 		if isReminderAnchor(messages[i]) {
@@ -546,26 +436,6 @@ func isSystemMessage[M adk.MessageType](msg M) bool {
 	return false
 }
 
-// isUserInputAnchor reports whether msg is a user-input message (a user turn, not a
-// tool result carried on a user-role message). It is the user-mode counterpart to
-// isReminderAnchor: it marks the boundary a user-role reminder is inserted before.
-func isUserInputAnchor[M adk.MessageType](msg M) bool {
-	switch v := any(msg).(type) {
-	case *schema.Message:
-		return v.Role == schema.User
-	case *schema.AgenticMessage:
-		return v.Role == schema.AgenticRoleTypeUser && !internal.HasToolResult(v.ContentBlocks)
-	}
-	return false
-}
-
-// reminderIsUser reports whether a reminder message currently carries the user
-// role. A reminder is always either a system or a user message, so anything that is
-// not a system message is treated as user role.
-func reminderIsUser[M adk.MessageType](msg M) bool {
-	return !isSystemMessage(msg)
-}
-
 func hasExtraKey[M adk.MessageType](msg M, extraKey string) bool {
 	switch v := any(msg).(type) {
 	case *schema.Message:
@@ -578,58 +448,21 @@ func hasExtraKey[M adk.MessageType](msg M, extraKey string) bool {
 	return false
 }
 
-// reminderContent returns the text carried by a reminder created via
-// newReminder, used to detect whether the section changed since the last reminder.
-// It mirrors newReminder's single-text-block layout and is role-agnostic.
-func reminderContent[M adk.MessageType](msg M) string {
-	switch v := any(msg).(type) {
-	case *schema.Message:
-		return v.Content
-	case *schema.AgenticMessage:
-		if len(v.ContentBlocks) == 1 {
-			if b := v.ContentBlocks[0]; b != nil && b.UserInputText != nil {
-				return b.UserInputText.Text
-			}
-		}
-	}
-	return ""
-}
-
-// newReminder builds a reminder message carrying content and the given extraKey. It
-// is a user message when asUser is true, otherwise a system message (the default).
-func newReminder[M adk.MessageType](extraKey string, content string, asUser bool) M {
+// newReminder builds a system reminder message carrying content and the given
+// extraKey.
+func newReminder[M adk.MessageType](extraKey string, content string) M {
 	var zero M
 	switch any(zero).(type) {
 	case *schema.Message:
-		var msg *schema.Message
-		if asUser {
-			msg = schema.UserMessage(content)
-		} else {
-			msg = schema.SystemMessage(content)
-		}
+		msg := schema.SystemMessage(content)
 		msg.Extra = map[string]any{extraKey: true}
 		return any(msg).(M)
 	case *schema.AgenticMessage:
-		var msg *schema.AgenticMessage
-		if asUser {
-			msg = schema.UserAgenticMessage(content)
-		} else {
-			msg = schema.SystemAgenticMessage(content)
-		}
+		msg := schema.SystemAgenticMessage(content)
 		msg.Extra = map[string]any{extraKey: true}
 		return any(msg).(M)
 	}
 	panic("unreachable")
-}
-
-// setReminderMessageID stamps id onto msg's Extra, preserving its other keys.
-func setReminderMessageID[M adk.MessageType](msg M, id string) {
-	switch v := any(msg).(type) {
-	case *schema.Message:
-		v.Extra = internal.SetMessageID(v.Extra, id)
-	case *schema.AgenticMessage:
-		v.Extra = internal.SetMessageID(v.Extra, id)
-	}
 }
 
 func (h *typedSkillHandler[M]) WrapModel(ctx context.Context, m model.BaseModel[M], _ *adk.TypedModelContext[M]) (model.BaseModel[M], error) {
@@ -760,6 +593,7 @@ func (s *typedSkillTool[M]) Info(ctx context.Context) (*schema.ToolInfo, error) 
 
 type inputArguments struct {
 	Skill string `json:"skill"`
+	Args  string `json:"args"`
 }
 
 func (s *typedSkillTool[M]) InvokableRun(ctx context.Context, argumentsInJSON string, _ ...tool.Option) (string, error) {
@@ -839,7 +673,9 @@ func (s *typedSkillTool[M]) buildParamsOneOf(ctx context.Context) (*schema.Param
 
 func (s *typedSkillTool[M]) buildSkillResult(ctx context.Context, skill Skill, rawArguments string) (string, error) {
 	if s.buildContent == nil {
-		return s.defaultSkillContent(skill), nil
+		args := &inputArguments{}
+		_ = json.Unmarshal([]byte(rawArguments), args)
+		return s.defaultSkillContent(skill, args.Args), nil
 	}
 	content, err := s.buildContent(ctx, skill, rawArguments)
 	if err != nil {
@@ -848,7 +684,7 @@ func (s *typedSkillTool[M]) buildSkillResult(ctx context.Context, skill Skill, r
 	return content, nil
 }
 
-func (s *typedSkillTool[M]) defaultSkillContent(skill Skill) string {
+func (s *typedSkillTool[M]) defaultSkillContent(skill Skill, args string) string {
 	resultFmt := internal.SelectPrompt(internal.I18nPrompts{
 		English: toolResult,
 		Chinese: toolResultChinese,
@@ -858,7 +694,14 @@ func (s *typedSkillTool[M]) defaultSkillContent(skill Skill) string {
 		Chinese: userContentChinese,
 	})
 
-	return fmt.Sprintf(resultFmt, skill.Name) + fmt.Sprintf(contentFmt, skill.BaseDirectory, skill.Content)
+	content := fmt.Sprintf(resultFmt, skill.Name) + fmt.Sprintf(contentFmt, skill.BaseDirectory, skill.Content)
+	if args != "" {
+		content += fmt.Sprintf(internal.SelectPrompt(internal.I18nPrompts{
+			English: argumentsSuffix,
+			Chinese: argumentsSuffixChinese,
+		}), args)
+	}
+	return content
 }
 
 func (s *typedSkillTool[M]) runAgentMode(ctx context.Context, skill Skill, forkHistory bool, rawArguments string) (string, error) {

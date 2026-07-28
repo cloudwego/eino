@@ -53,10 +53,4 @@ func TestBeforeAgent_AppendsContextManagementNote(t *testing.T) {
 	require.NotNil(t, rc2)
 	assert.Contains(t, rc2.Instruction, "base instruction")
 	assert.Contains(t, rc2.Instruction, note)
-
-	// Idempotent: an instruction that already contains the note is returned unchanged.
-	_, rc3, err := mw.BeforeAgent(ctx, rc2)
-	require.NoError(t, err)
-	assert.Equal(t, rc2.Instruction, rc3.Instruction)
-	assert.Equal(t, strings.Count(rc2.Instruction, note), strings.Count(rc3.Instruction, note))
 }

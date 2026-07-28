@@ -60,7 +60,7 @@ func drainSkillEvents(t *testing.T, iter *adk.AsyncIterator[*adk.AgentEvent]) {
 	}
 }
 
-func TestSkill_ReminderUpdatesWhenSkillAddedBetweenTurns(t *testing.T) {
+func TestSkill_ReminderInsertedOnceAcrossTurns(t *testing.T) {
 	ctx := context.Background()
 	backend := &inMemoryBackend{m: []Skill{
 		{FrontMatter: FrontMatter{Name: "alpha", Description: "first skill"}},
@@ -93,7 +93,8 @@ func TestSkill_ReminderUpdatesWhenSkillAddedBetweenTurns(t *testing.T) {
 	// Between turns: install a new skill.
 	backend.m = append(backend.m, Skill{FrontMatter: FrontMatter{Name: "beta", Description: "second skill"}})
 
-	// Turn 2: "beta" should now appear in a reminder.
+	// Turn 2: the reminder is inserted only once, so the turn-1 reminder is
+	// preserved as-is and the newly added "beta" is NOT surfaced.
 	model2 := &reproRecordingModel{}
 	runner2 := adk.NewRunner(ctx, adk.RunnerConfig{Agent: newAgent(model2), SessionID: sessionID, SessionStore: store})
 	drainSkillEvents(t, runner2.Query(ctx, "again"))
@@ -101,11 +102,20 @@ func TestSkill_ReminderUpdatesWhenSkillAddedBetweenTurns(t *testing.T) {
 	turn2 := model2.inputs[len(model2.inputs)-1]
 
 	// Confirm turn 2 actually replayed the session history (not a fresh start),
-	// so the refresh is exercised against a reconstructed message list.
+	// so insert-once is exercised against a reconstructed message list.
 	assert.True(t, containsUserText(turn2, "hi"), "turn 2 must include turn 1 history via session reconstruction")
 
-	assert.True(t, sectionMentions(turn2, "beta"),
-		"turn 2 model input must contain a reminder that lists the newly added skill beta")
+	// Exactly one reminder, carried over from turn 1, still listing alpha only.
+	reminders := 0
+	for _, m := range turn2 {
+		if _, ok := m.Extra[skillsReminderExtraKey]; ok {
+			reminders++
+		}
+	}
+	assert.Equal(t, 1, reminders, "reminder is inserted once and reused across turns")
+	assert.True(t, sectionMentions(turn2, "alpha"), "turn 2 keeps the original reminder listing alpha")
+	assert.False(t, sectionMentions(turn2, "beta"),
+		"insert-once: a skill added between turns must not be surfaced in a new reminder")
 }
 
 func containsUserText(msgs []*schema.Message, text string) bool {

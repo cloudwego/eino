@@ -91,10 +91,8 @@ func TestSubagent_ReminderHelpers_AgenticMessage(t *testing.T) {
 	assert.True(t, isSystemMessage[*schema.AgenticMessage](system))
 	assert.False(t, isSystemMessage[*schema.AgenticMessage](user))
 
-	reminder := newReminder[*schema.AgenticMessage]("k", "content", false)
+	reminder := newReminder[*schema.AgenticMessage]("k", "content")
 	assert.True(t, hasExtraKey[*schema.AgenticMessage](reminder, "k"))
 	assert.False(t, hasExtraKey[*schema.AgenticMessage](user, "k"))
-
-	assert.Equal(t, "content", reminderContent[*schema.AgenticMessage](reminder))
-	assert.Equal(t, "", reminderContent[*schema.AgenticMessage](assistant))
+	assert.True(t, isSystemMessage[*schema.AgenticMessage](reminder))
 }

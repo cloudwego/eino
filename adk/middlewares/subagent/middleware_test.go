@@ -882,41 +882,6 @@ func TestSubagent_BeforeModelRewriteState_PreservesOtherMessages(t *testing.T) {
 	assert.Equal(t, reminder.Content, ns2.Messages[3].Content)
 }
 
-// TestSubagent_BeforeModelRewriteState_AppendsWhenAgentsChange verifies that
-// when the sub-agent list changes between invocations, a fresh reminder is
-// appended at the end while the stale reminder is left untouched (preserving the
-// model's KV cache prefix). The latest reminder supersedes it.
-func TestSubagent_BeforeModelRewriteState_AppendsWhenAgentsChange(t *testing.T) {
-	ctx := context.Background()
-	m := &typedSubagentMiddleware[*schema.Message]{
-		subAgents: []adk.TypedAgent[*schema.Message]{&mockAgent{name: "worker", desc: "does work"}},
-	}
-
-	state := &adk.TypedChatModelAgentState[*schema.Message]{Messages: []*schema.Message{schema.UserMessage("hi")}}
-
-	_, ns, err := m.BeforeModelRewriteState(ctx, state, nil)
-	require.NoError(t, err)
-	require.Len(t, ns.Messages, 2)
-	first := ns.Messages[1]
-	assert.Contains(t, first.Content, "worker")
-	assert.NotContains(t, first.Content, "helper")
-
-	// Simulate the sub-agent set changing between turns.
-	m.subAgents = append(m.subAgents, &mockAgent{name: "helper", desc: "assists"})
-
-	_, ns, err = m.BeforeModelRewriteState(ctx, ns, nil)
-	require.NoError(t, err)
-	require.Len(t, ns.Messages, 3)
-	assert.Equal(t, first.Content, ns.Messages[1].Content, "stale reminder must be left untouched to preserve prefix cache")
-	latest := ns.Messages[2]
-	assert.Equal(t, schema.System, latest.Role)
-	assert.True(t, latest.Extra[agentTypesReminderExtraKey].(bool))
-	assert.Contains(t, latest.Content, availableAgentTypesPreamble)
-	assert.NotContains(t, latest.Content, "worker")
-	assert.Contains(t, latest.Content, "helper")
-	assert.Contains(t, latest.Content, "assists")
-}
-
 // TestSubagent_BeforeModelRewriteState_InsertsAtTurnBoundary verifies that when
 // the conversation ends with pending tool-call scaffolding (an assistant
 // tool-call message followed by its tool result), the reminder is inserted right

@@ -1354,11 +1354,10 @@ func TestSkill_BeforeModelRewriteState_UpsertsReminderByExtra(t *testing.T) {
 	assert.Equal(t, reminder.Content, ns.Messages[1].Content)
 }
 
-// TestSkill_BeforeModelRewriteState_AppendsWhenSkillsChange verifies that when a
-// skill is installed between invocations, the skill list changes and a fresh
-// reminder is appended at the end (the stale reminder is left untouched so the
-// model's KV cache prefix is preserved). The latest reminder supersedes it.
-func TestSkill_BeforeModelRewriteState_AppendsWhenSkillsChange(t *testing.T) {
+// TestSkill_BeforeModelRewriteState_InsertOnce verifies that the reminder is
+// inserted only once: once a reminder from this middleware exists in history, a
+// later invocation adds nothing, even if the skill list changed between turns.
+func TestSkill_BeforeModelRewriteState_InsertOnce(t *testing.T) {
 	ctx := context.Background()
 	backend := &inMemoryBackend{m: []Skill{
 		{FrontMatter: FrontMatter{Name: "alpha", Description: "desc-alpha"}},
@@ -1381,17 +1380,10 @@ func TestSkill_BeforeModelRewriteState_AppendsWhenSkillsChange(t *testing.T) {
 
 	_, ns, err = h.BeforeModelRewriteState(ctx, ns, nil)
 	require.NoError(t, err)
-	// The stale reminder stays in place; a fresh one carrying only the changed
-	// skill entry is appended at the end.
-	require.Len(t, ns.Messages, 3)
-	assert.Equal(t, first.Content, ns.Messages[1].Content, "stale reminder must be left untouched to preserve prefix cache")
-	latest := ns.Messages[2]
-	assert.Equal(t, schema.System, latest.Role)
-	assert.True(t, latest.Extra[skillsReminderExtraKey].(bool))
-	assert.Contains(t, latest.Content, availableSkillsPreamble)
-	assert.NotContains(t, latest.Content, "alpha")
-	assert.Contains(t, latest.Content, "beta")
-	assert.Contains(t, latest.Content, "desc-beta")
+	// Insert-once: the existing reminder is left untouched and no new one is added.
+	require.Len(t, ns.Messages, 2)
+	assert.Equal(t, first.Content, ns.Messages[1].Content, "existing reminder must be left untouched")
+	assert.NotContains(t, ns.Messages[1].Content, "beta")
 }
 
 // TestSkill_BeforeModelRewriteState_PreservesOtherMessages verifies that the

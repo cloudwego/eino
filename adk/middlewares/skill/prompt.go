@@ -85,8 +85,6 @@ Skill 可能包含 Python 脚本或其他可执行文件。始终使用绝对路
 
 When users ask you to perform tasks, check if any of the available skills match. Skills provide specialized capabilities and domain knowledge.
 
-When users reference a "slash command" or "/<something>", they are referring to a skill. Use this tool to invoke it.
-
 How to invoke:
 - Set ` + "`" + `skill` + "`" + ` to the exact name of an available skill (no leading slash).
 - Set ` + "`" + `args` + "`" + ` to pass optional arguments.
@@ -94,18 +92,14 @@ How to invoke:
 
 Important:
 - Available skills are listed in system-reminder messages in the conversation
-- Only invoke a skill that appears in that list, or one the user explicitly typed as ` + "`" + `/<name>` + "`" + ` in their message. Never guess or invent a skill name from training data; otherwise do not call this tool
+- Only invoke a skill that appears in that list. Never guess or invent a skill name from training data; otherwise do not call this tool
 - When a skill matches the user's request, this is a BLOCKING REQUIREMENT: invoke the relevant Skill tool BEFORE generating any other response about the task
 - NEVER mention a skill without actually calling this tool
 - Do not invoke a skill that is already running
-- Do not use this tool for built-in CLI commands (like /help, /clear, etc.)
-- If you see a <command-name> tag in the current conversation turn, the skill has ALREADY been loaded - follow the instructions directly instead of calling this tool again
 `
 	toolDescriptionBaseChinese = `在主对话中执行一个 skill（技能）
 
 当用户要求你执行任务时，检查是否有可用的 skill 匹配。skill 提供专业能力和领域知识。
-
-当用户提到“斜杠命令”或“/<某项>”时，指的就是某个 skill。用本工具来调用它。
 
 如何调用：
 - 把 ` + "`" + `skill` + "`" + ` 设为某个可用 skill 的确切名称（不带前导斜杠）。
@@ -114,12 +108,10 @@ Important:
 
 重要：
 - 可用 skill 会列在对话中的 system-reminder 消息里
-- 只调用出现在该列表中的 skill，或用户在消息中明确输入的 ` + "`" + `/<name>` + "`" + `。绝不要凭训练数据猜测或臆造 skill 名称；否则不要调用本工具
+- 只调用出现在该列表中的 skill。绝不要凭训练数据猜测或臆造 skill 名称；否则不要调用本工具
 - 当某个 skill 匹配用户请求时，这是一个阻塞性要求：在生成任何关于该任务的其他响应之前，先调用相应的 Skill 工具
 - 绝不要只提及某个 skill 而不实际调用本工具
 - 不要调用已经在运行中的 skill
-- 不要用本工具执行内置 CLI 命令（如 /help、/clear 等）
-- 如果你在当前对话轮里看到 <command-name> 标签，说明该 skill 已经被加载——直接按其说明操作，而不是再次调用本工具
 `
 	availableSkillsPreamble = `The following skills are available for use with the Skill tool:`
 
@@ -133,7 +125,9 @@ Important:
 	userContentChinese = `此 Skill 的目录：%s
 
 %s`
-	toolName = "skill"
+	argumentsSuffix        = "\n\n\nARGUMENTS: %s"
+	argumentsSuffixChinese = "\n\n参数：%s"
+	toolName               = "skill"
 
 	subAgentResultFormat        = "Skill \"%s\" completed (sub-agent execution).\n\nResult:\n%s"
 	subAgentResultFormatChinese = "Skill \"%s\" 已完成（子 Agent 执行）。\n\n结果：\n%s"
