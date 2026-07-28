@@ -25,6 +25,7 @@ import (
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/adk/backgroundtask"
+	durablesubagent "github.com/cloudwego/eino/adk/backgroundtask/subagent"
 	"github.com/cloudwego/eino/adk/filesystem"
 	"github.com/cloudwego/eino/adk/internal"
 	backgroundtaskmw "github.com/cloudwego/eino/adk/middlewares/backgroundtask"
@@ -45,25 +46,24 @@ func init() {
 // background tasks under one task-ID space, and the task_output/task_stop control
 // tools are injected once.
 //
-// It holds only configuration shared by both task kinds (shell and sub-agent). Knobs
-// that apply to only one kind — e.g. a custom sub-agent event encoder
-// (subagent.AgentEventFormat) — are intentionally not exposed here; compose the
-// subagent middleware directly when you need them.
-type BackgroundConfig struct {
+// It holds the shared Manager plus durable sub-agent identity and session
+// dependencies. Shell-specific output configuration remains OutputDir.
+type TypedBackgroundConfig[M adk.MessageType] struct {
 	// Manager is the shared background-task Manager. Required (a nil Manager is the
 	// same as no BackgroundConfig).
-	Manager *backgroundtask.Manager
+	Manager         *backgroundtask.Manager
+	AgentRefs       map[string]durablesubagent.AgentRef
+	SessionID       func(context.Context) (string, error)
+	SessionStore    adk.SessionEventStore[M]
+	CheckPointStore adk.CheckPointStore
+	Authorize       backgroundtaskmw.AuthorizeFunc
 
-	// OutputDir, when set together with Config.Backend, gives every managed
-	// background task (shell command or sub-agent run) an output file under this
-	// directory. Shell runs tee their output there as it streams (interim output);
-	// sub-agent runs write one JSON line per materialized event (the default encoder).
-	// The path is recorded on Task.OutputFile and surfaced when the task is launched
-	// in the background, so a backgrounded task's output is retrievable by path.
-	// Sub-agent output files are created lazily, so the path may briefly be visible
-	// before the file exists. When empty, tasks have no output file.
+	// OutputDir, when set together with Config.Backend, lets process-local shell
+	// tasks tee output to files and report their path/reliability as typed updates.
 	OutputDir string
 }
+
+type BackgroundConfig = TypedBackgroundConfig[*schema.Message]
 
 // TypedConfig defines the configuration for creating a DeepAgent parameterized by message type.
 // An Agentic DeepAgent (M = *schema.AgenticMessage) only supports Agentic sub-agents,
@@ -117,7 +117,7 @@ type TypedConfig[M adk.MessageType] struct {
 	// sub-agents: their shell runs stay foreground/buffered and they cannot launch
 	// background work, so background orchestration is a top-level concern only. When
 	// nil, the top-level agent has no background-task support. See BackgroundConfig.
-	Background *BackgroundConfig
+	Background *TypedBackgroundConfig[M]
 
 	// WithoutWriteTodos disables the built-in write_todos tool when set to true.
 	WithoutWriteTodos bool
@@ -191,10 +191,9 @@ func NewTyped[M adk.MessageType](ctx context.Context, cfg *TypedConfig[M]) (adk.
 			}
 			if cfg.Background != nil && cfg.Background.Manager != nil {
 				subCfg.Background = &subagent.TypedBackgroundConfig[M]{
-					Manager:     cfg.Background.Manager,
-					OutputStore: backendAppendOpener(cfg.Backend),
-					OutputDir:   cfg.Background.OutputDir,
-					// EventFormat left nil => subagent's default encoder.
+					Manager: cfg.Background.Manager, AgentRefs: cfg.Background.AgentRefs,
+					SessionID: cfg.Background.SessionID, SessionStore: cfg.Background.SessionStore,
+					CheckPointStore: cfg.Background.CheckPointStore,
 				}
 			}
 			subagentMW, err := subagent.NewTyped[M](ctx, subCfg)
@@ -208,7 +207,9 @@ func NewTyped[M adk.MessageType](ctx context.Context, cfg *TypedConfig[M]) (adk.
 	// When background support is configured, wire its control tools
 	// (task_output/task_stop) exactly once at the top level.
 	if cfg.Background != nil && cfg.Background.Manager != nil {
-		controlMW, err := backgroundtaskmw.NewTyped[M](ctx, &backgroundtaskmw.TypedConfig[M]{Manager: cfg.Background.Manager})
+		controlMW, err := backgroundtaskmw.NewTyped[M](ctx, &backgroundtaskmw.TypedConfig[M]{
+			Manager: cfg.Background.Manager, Authorize: cfg.Background.Authorize,
+		})
 		if err != nil {
 			return nil, fmt.Errorf("failed to create background-task control middleware: %w", err)
 		}
@@ -316,7 +317,7 @@ func buildSubAgentsList[M adk.MessageType](ctx context.Context, cfg *TypedConfig
 	return allSubAgents, nil
 }
 
-func buildTypedBuiltinAgentMiddlewares[M adk.MessageType](ctx context.Context, cfg *TypedConfig[M], background *BackgroundConfig) ([]adk.TypedChatModelAgentMiddleware[M], error) {
+func buildTypedBuiltinAgentMiddlewares[M adk.MessageType](ctx context.Context, cfg *TypedConfig[M], background *TypedBackgroundConfig[M]) ([]adk.TypedChatModelAgentMiddleware[M], error) {
 	var ms []adk.TypedChatModelAgentMiddleware[M]
 	if !cfg.WithoutWriteTodos {
 		t, err := typedNewWriteTodos[M]()

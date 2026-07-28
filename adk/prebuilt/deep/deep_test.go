@@ -29,6 +29,7 @@ import (
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/adk/backgroundtask"
+	durablesubagent "github.com/cloudwego/eino/adk/backgroundtask/subagent"
 	"github.com/cloudwego/eino/adk/filesystem"
 	filesystem2 "github.com/cloudwego/eino/adk/middlewares/filesystem"
 	"github.com/cloudwego/eino/adk/prebuilt/planexecute"
@@ -459,13 +460,24 @@ func TestDeepAgentNewTypedWithManager(t *testing.T) {
 	defer func() { _ = mgr.Close(ctx) }()
 
 	cm := mockModel.NewMockToolCallingChatModel(gomock.NewController(t))
+	store := adksession.NewInMemoryStore[*schema.Message](nil)
 
 	agent, err := New(ctx, &Config{
 		Name:        "deep",
 		Description: "deep agent",
 		ChatModel:   cm,
 		Shell:       &deepMockShell{},
-		Background:  &BackgroundConfig{Manager: mgr},
+		Background: &BackgroundConfig{
+			Manager: mgr,
+			AgentRefs: map[string]durablesubagent.AgentRef{
+				generalAgentName: {
+					Namespace: "test", Name: generalAgentName, Version: "v1",
+					MessageType: "schema.Message", DefinitionDigest: "general-definition",
+				},
+			},
+			SessionID:    func(context.Context) (string, error) { return "parent-session", nil },
+			SessionStore: store, CheckPointStore: store,
+		},
 	})
 	assert.NoError(t, err)
 	assert.NotNil(t, agent)

@@ -18,6 +18,7 @@ package filesystem
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"strings"
@@ -63,6 +64,27 @@ func waitAllTasks(t *testing.T, mgr *backgroundtask.Manager) {
 	}, time.Second, 10*time.Millisecond)
 }
 
+func filesystemOutput(t *testing.T, mgr *backgroundtask.Manager, task *backgroundtask.Task) (string, bool) {
+	t.Helper()
+	updates, err := mgr.ListTaskUpdates(context.Background(), &backgroundtask.ListTaskUpdatesRequest{
+		TaskID: task.Spec.ID, Limit: 1000,
+	})
+	require.NoError(t, err)
+	var state struct {
+		Path     string `json:"path"`
+		Reliable bool   `json:"reliable"`
+	}
+	found := false
+	for _, update := range updates.Updates {
+		if update.Kind != "eino.dev/filesystem_output" || update.Payload == nil {
+			continue
+		}
+		require.NoError(t, json.Unmarshal(update.Payload.Value.Payload, &state))
+		found = true
+	}
+	return state.Path, found && state.Reliable
+}
+
 // With a Backend and OutputDir configured, the managed execute tool writes each
 // task's output to a file under that directory, and the file is readable back.
 func TestManagedExecuteTool_WritesOutputFile(t *testing.T) {
@@ -90,8 +112,9 @@ func TestManagedExecuteTool_WritesOutputFile(t *testing.T) {
 
 	tasks := mgr.List()
 	require.Len(t, tasks, 1)
-	path := tasks[0].OutputFile
+	path, reliable := filesystemOutput(t, mgr, tasks[0])
 	require.NotEmpty(t, path)
+	assert.True(t, reliable)
 
 	got, err := backend.Read(context.Background(), &filesystem.ReadRequest{FilePath: path})
 	require.NoError(t, err)
@@ -137,8 +160,8 @@ func TestManagedExecuteTool_Foreground(t *testing.T) {
 	tasks := mgr.List()
 	require.Len(t, tasks, 1)
 	assert.Equal(t, backgroundtask.StatusCompleted, tasks[0].Status)
-	assert.Equal(t, "echo hi", tasks[0].Description)
-	assert.Equal(t, ExecuteTaskType, tasks[0].Type)
+	assert.Equal(t, "echo hi", tasks[0].Spec.Description)
+	assert.Equal(t, ExecuteTaskType, tasks[0].Spec.Type)
 }
 
 func TestManagedExecuteTool_Background(t *testing.T) {
@@ -163,18 +186,18 @@ func TestManagedExecuteTool_Background(t *testing.T) {
 
 	result, err := invokeTool(t, findExecuteTool(t, tools), `{"command":"sleep 1","run_in_background":true}`)
 	require.NoError(t, err)
-	assert.Contains(t, result, "running in background")
+	assert.Contains(t, result, "is running")
 
 	waitAllTasks(t, mgr)
 	tasks := mgr.List()
 	require.Len(t, tasks, 1)
-	assert.True(t, tasks[0].RunInBackground)
 	assert.Equal(t, backgroundtask.StatusCompleted, tasks[0].Status)
 
 	// The background-launch message reports the (reserved) output-file path so the
 	// agent can read it once the task completes.
-	assert.Contains(t, result, tasks[0].OutputFile)
-	assert.NotEmpty(t, tasks[0].OutputFile)
+	path, reliable := filesystemOutput(t, mgr, tasks[0])
+	assert.Contains(t, result, path)
+	assert.True(t, reliable)
 }
 
 // A foreground command that outlives its timeout is moved to the background
@@ -199,13 +222,13 @@ func TestManagedExecuteTool_TimeoutMovesToBackground(t *testing.T) {
 	// timeout=50ms < 200ms command → moved to background.
 	result, err := invokeTool(t, tools[0], `{"command":"sleep","timeout":50}`)
 	require.NoError(t, err)
-	assert.Contains(t, result, "running in background")
+	assert.Contains(t, result, "is running")
 
 	waitAllTasks(t, mgr)
 	tasks := mgr.List()
 	require.Len(t, tasks, 1)
 	assert.Equal(t, backgroundtask.StatusCompleted, tasks[0].Status)
-	assert.Equal(t, "slow done", tasks[0].Result)
+	assert.Equal(t, "slow done", string(string(tasks[0].ResultRef.Value.Payload)))
 }
 
 // Without a ShouldAutoBackground hook, a command that outlives its timeout is
@@ -225,13 +248,12 @@ func TestManagedExecuteTool_TimeoutKills(t *testing.T) {
 	require.NoError(t, err)
 
 	_, err = invokeTool(t, tools[0], `{"command":"sleep","timeout":50}`)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "timed out")
+	require.NoError(t, err)
 
 	waitAllTasks(t, mgr)
 	tasks := mgr.List()
 	require.Len(t, tasks, 1)
-	assert.Equal(t, backgroundtask.StatusFailed, tasks[0].Status)
+	assert.Equal(t, backgroundtask.StatusCanceled, tasks[0].Status)
 }
 
 // With a Manager, the execute tool schema gains run_in_background and timeout fields.
@@ -261,10 +283,10 @@ func TestManagedExecuteTool_StreamingForeground(t *testing.T) {
 	tasks := mgr.List()
 	require.Len(t, tasks, 1)
 	assert.Equal(t, backgroundtask.StatusCompleted, tasks[0].Status)
-	assert.Equal(t, ExecuteTaskType, tasks[0].Type)
+	assert.Equal(t, ExecuteTaskType, tasks[0].Spec.Type)
 	// The streamed chunks are also the persisted result.
-	assert.Contains(t, tasks[0].Result, "chunk1")
-	assert.Contains(t, tasks[0].Result, "chunk3")
+	assert.Contains(t, string(tasks[0].ResultRef.Value.Payload), "chunk1")
+	assert.Contains(t, string(tasks[0].ResultRef.Value.Payload), "chunk3")
 }
 
 // An explicit background launch on a streaming managed tool exposes startup
@@ -293,12 +315,12 @@ func TestManagedExecuteTool_StreamingExplicitBackground(t *testing.T) {
 	waitAllTasks(t, mgr)
 	tasks := mgr.List()
 	require.Len(t, tasks, 1)
-	assert.True(t, tasks[0].RunInBackground)
 	assert.Equal(t, backgroundtask.StatusCompleted, tasks[0].Status)
-	assert.Contains(t, tasks[0].Result, "chunk1")
+	assert.Contains(t, string(tasks[0].ResultRef.Value.Payload), "chunk1")
 	// The streamed output was teed to the output file as it drained in the background.
-	require.NotEmpty(t, tasks[0].OutputFile)
-	got2, err := backend.Read(context.Background(), &filesystem.ReadRequest{FilePath: tasks[0].OutputFile})
+	path, reliable := filesystemOutput(t, mgr, tasks[0])
+	require.True(t, reliable)
+	got2, err := backend.Read(context.Background(), &filesystem.ReadRequest{FilePath: path})
 	require.NoError(t, err)
 	assert.Contains(t, got2.Content, "chunk1")
 }
@@ -348,8 +370,9 @@ func TestManagedExecuteTool_StreamingInterimOutput(t *testing.T) {
 
 	tasks := mgr.List()
 	require.Len(t, tasks, 1)
-	path := tasks[0].OutputFile
+	path, reliable := filesystemOutput(t, mgr, tasks[0])
 	require.NotEmpty(t, path)
+	assert.True(t, reliable)
 
 	// Interim: the file holds the first chunk but not yet the second.
 	require.Eventually(t, func() bool {
@@ -471,9 +494,10 @@ func TestManagedExecuteTool_ReservationFailure_NoOutputFile(t *testing.T) {
 
 	tasks := mgr.List()
 	require.Len(t, tasks, 1)
-	assert.Empty(t, tasks[0].OutputFile, "reservation failure must leave OutputFile unset")
-	assert.Empty(t, tasks[0].OutputFileErr)
-	assert.Equal(t, "the output", tasks[0].Result)
+	path, reliable := filesystemOutput(t, mgr, tasks[0])
+	assert.Empty(t, path)
+	assert.False(t, reliable)
+	assert.Equal(t, "the output", string(string(tasks[0].ResultRef.Value.Payload)))
 }
 
 // When a write to the output file fails after reservation, the file is marked
@@ -499,9 +523,10 @@ func TestManagedExecuteTool_WriteFailure_MarksUnreliable(t *testing.T) {
 
 	tasks := mgr.List()
 	require.Len(t, tasks, 1)
-	assert.NotEmpty(t, tasks[0].OutputFile, "the path was reserved, so it is still recorded")
-	assert.NotEmpty(t, tasks[0].OutputFileErr, "the failed write must mark the file unreliable")
-	assert.Equal(t, "the output", tasks[0].Result, "Result stays complete regardless of file writes")
+	path, reliable := filesystemOutput(t, mgr, tasks[0])
+	assert.NotEmpty(t, path)
+	assert.False(t, reliable)
+	assert.Equal(t, "the output", string(string(tasks[0].ResultRef.Value.Payload)))
 }
 
 // countingAppendOpener wraps a Backend and counts every OpenAppend and every

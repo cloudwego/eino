@@ -18,7 +18,10 @@ package backgroundtask
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -212,11 +215,14 @@ func TestTaskOutputTool(t *testing.T) {
 	require.Equal(t, bgtask.StatusCompleted, result.Status)
 
 	tl := findTool(t, injectedTools(t, mgr), taskOutputToolName)
-	output, err := tl.InvokableRun(context.Background(), fmt.Sprintf(`{"task_id":"%s"}`, result.ID))
+	output, err := tl.InvokableRun(context.Background(), fmt.Sprintf(`{"task_id":"%s"}`, result.Spec.ID))
 	require.NoError(t, err)
+	var response taskOutputResponse
+	require.NoError(t, json.Unmarshal([]byte(output), &response))
 	assert.Contains(t, output, "test task")
-	assert.Contains(t, output, "task result")
 	assert.Contains(t, output, "completed")
+	require.NotNil(t, response.Result)
+	assert.Equal(t, "task result", string(response.Result.Value.Payload))
 }
 
 func TestTaskOutputTool_NotFound(t *testing.T) {
@@ -237,18 +243,18 @@ func TestTaskOutputTool_NonBlockingRunningThenTerminal(t *testing.T) {
 	require.NoError(t, err)
 
 	tl := findTool(t, injectedTools(t, mgr), taskOutputToolName)
-	out, err := tl.InvokableRun(context.Background(), fmt.Sprintf(`{"task_id":"%s","block":false}`, runResult.ID))
+	out, err := tl.InvokableRun(context.Background(), fmt.Sprintf(`{"task_id":"%s","block":false}`, runResult.Spec.ID))
 	require.NoError(t, err)
 	assert.Contains(t, out, "running")
 
-	require.NoError(t, mgr.Cancel(runResult.ID))
+	require.NoError(t, mgr.Cancel(runResult.Spec.ID))
 	waitCtx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	task, done := mgr.Wait(waitCtx, runResult.ID)
+	task, done := mgr.Wait(waitCtx, runResult.Spec.ID)
 	require.True(t, done)
 	require.NotNil(t, task)
 
-	_, err = tl.InvokableRun(context.Background(), fmt.Sprintf(`{"task_id":"%s","block":false}`, runResult.ID))
+	_, err = tl.InvokableRun(context.Background(), fmt.Sprintf(`{"task_id":"%s","block":false}`, runResult.Spec.ID))
 	require.NoError(t, err)
 }
 
@@ -260,12 +266,12 @@ func TestTaskStopTool(t *testing.T) {
 	require.NoError(t, err)
 
 	tl := findTool(t, injectedTools(t, mgr), taskStopToolName)
-	result, err := tl.InvokableRun(context.Background(), fmt.Sprintf(`{"task_id":"%s"}`, runResult.ID))
+	result, err := tl.InvokableRun(context.Background(), fmt.Sprintf(`{"task_id":"%s"}`, runResult.Spec.ID))
 	require.NoError(t, err)
-	assert.Contains(t, result, "Successfully stopped")
+	assert.Contains(t, result, "Stop requested")
 
-	task, ok := mgr.Get(runResult.ID)
-	require.True(t, ok)
+	task, done := mgr.Wait(context.Background(), runResult.Spec.ID)
+	require.True(t, done)
 	assert.Equal(t, bgtask.StatusCanceled, task.Status)
 }
 
@@ -278,46 +284,59 @@ func TestTaskStopTool_AlreadyDone(t *testing.T) {
 	require.Equal(t, bgtask.StatusCompleted, runResult.Status)
 
 	tl := findTool(t, injectedTools(t, mgr), taskStopToolName)
-	result, err := tl.InvokableRun(context.Background(), fmt.Sprintf(`{"task_id":"%s"}`, runResult.ID))
+	result, err := tl.InvokableRun(context.Background(), fmt.Sprintf(`{"task_id":"%s"}`, runResult.Spec.ID))
 	require.NoError(t, err)
 	assert.Contains(t, result, "Failed to stop")
 }
 
-// A reliable output file is authoritative: formatTask points at it and does not
-// inline Result.
-func TestFormatTask_ReliableOutputFile(t *testing.T) {
-	out := formatTask(&bgtask.Task{
-		ID:         "bash_1",
-		Status:     bgtask.StatusCompleted,
-		Result:     "the full result",
-		OutputFile: "/tasks/bash_1.output",
-	})
-	assert.Contains(t, out, "/tasks/bash_1.output")
-	assert.NotContains(t, out, "the full result", "a reliable file replaces inlining Result")
-}
+func TestControlAuthorizationRunsBeforeManagerAccess(t *testing.T) {
+	mgr := bgtask.New(context.Background(), &bgtask.Config{})
+	defer closeWithTimeout(mgr)
+	task, err := runWork(mgr, "secret task", true, blockingWork())
+	require.NoError(t, err)
 
-// When the output file is marked unreliable, formatTask falls back to the complete
-// in-memory Result and flags the file as incomplete rather than pointing at it as
-// the sole authority.
-func TestFormatTask_UnreliableOutputFile_FallsBackToResult(t *testing.T) {
-	out := formatTask(&bgtask.Task{
-		ID:            "bash_1",
-		Status:        bgtask.StatusCompleted,
-		Result:        "the full result",
-		OutputFile:    "/tasks/bash_1.output",
-		OutputFileErr: "append failed",
-	})
-	assert.Contains(t, out, "the full result", "Result must be surfaced when the file is unreliable")
-	assert.Contains(t, out, "incomplete", "the file must be flagged as partial")
-	assert.Contains(t, out, "/tasks/bash_1.output")
-}
+	var mu sync.Mutex
+	var calls []string
+	authorize := func(_ context.Context, operation ControlOperation, taskID string) error {
+		mu.Lock()
+		calls = append(calls, string(operation)+":"+taskID)
+		mu.Unlock()
+		return errors.New("denied")
+	}
+	mw, err := New(context.Background(), &Config{Manager: mgr, Authorize: authorize})
+	require.NoError(t, err)
+	_, runCtx, err := mw.BeforeAgent(
+		context.Background(),
+		&adk.ChatModelAgentContext[*schema.Message]{},
+	)
+	require.NoError(t, err)
+	output := findTool(t, runCtx.Tools, taskOutputToolName)
+	stop := findTool(t, runCtx.Tools, taskStopToolName)
 
-// With no output file, Result is the only copy and is inlined.
-func TestFormatTask_NoOutputFile(t *testing.T) {
-	out := formatTask(&bgtask.Task{
-		ID:     "bash_1",
-		Status: bgtask.StatusCompleted,
-		Result: "the full result",
-	})
-	assert.Contains(t, out, "the full result")
+	var responses []string
+	for _, taskID := range []string{task.Spec.ID, "missing"} {
+		response, invokeErr := output.InvokableRun(
+			context.Background(),
+			fmt.Sprintf(`{"task_id":%q,"block":false}`, taskID),
+		)
+		require.NoError(t, invokeErr)
+		responses = append(responses, response)
+		response, invokeErr = stop.InvokableRun(
+			context.Background(),
+			fmt.Sprintf(`{"task_id":%q}`, taskID),
+		)
+		require.NoError(t, invokeErr)
+		responses = append(responses, response)
+	}
+	assert.Equal(t, []string{
+		"Task access denied", "Task access denied",
+		"Task access denied", "Task access denied",
+	}, responses)
+	assert.Equal(t, []string{
+		"read:" + task.Spec.ID, "stop:" + task.Spec.ID,
+		"read:missing", "stop:missing",
+	}, calls)
+	current, ok := mgr.Get(task.Spec.ID)
+	require.True(t, ok)
+	assert.Equal(t, bgtask.StatusRunning, current.Status)
 }

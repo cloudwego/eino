@@ -104,7 +104,7 @@ type BackgroundConfig struct {
 	// OutputStore and OutputDir, when both set, give every managed run an output
 	// file at OutputDir/<id>.output: streaming runs append their chunks to it as
 	// they arrive (interim output), buffered runs append their result on completion.
-	// The path is recorded on Task.OutputFile and surfaced in the background notice.
+	// Path and reliability are reported through namespaced durable task updates.
 	// OutputStore is a filesystem.AppendOpener (filesystem.InMemoryBackend
 	// implements it); supply your own to direct output elsewhere. When either is
 	// unset, runs have no output file.
@@ -1097,7 +1097,7 @@ type executeArgs struct {
 // Manager is configured: the model may additionally request background execution.
 type executeManagedArgs struct {
 	executeArgs
-	RunInBackground bool `json:"run_in_background,omitempty" jsonschema_description:"Set to true to run the command in the background. You will be notified when it completes; use task_output to query it and task_stop to cancel it."`
+	RunInBackground bool `json:"run_in_background,omitempty" jsonschema_description:"Set to true to run the command in the background. Use task_output to query it and task_stop to cancel it."`
 	// TimeoutMS is the foreground timeout in milliseconds. When omitted, the configured
 	// default applies. Ignored when run_in_background is true. What happens at the
 	// deadline (move to background vs. stop) is decided by the Manager's
