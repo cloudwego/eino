@@ -57,6 +57,9 @@ type TypedBackgroundConfig[M adk.MessageType] struct {
 	SessionStore    adk.SessionEventStore[M]
 	CheckPointStore adk.CheckPointStore
 	Authorize       backgroundtaskmw.AuthorizeFunc
+	// ManagerScopeIsolated asserts that this DeepAgent and its Manager task-ID
+	// space are already restricted to one authorized caller scope.
+	ManagerScopeIsolated bool
 
 	// OutputDir, when set together with Config.Backend, lets process-local shell
 	// tasks tee output to files and report their path/reliability as typed updates.
@@ -209,6 +212,7 @@ func NewTyped[M adk.MessageType](ctx context.Context, cfg *TypedConfig[M]) (adk.
 	if cfg.Background != nil && cfg.Background.Manager != nil {
 		controlMW, err := backgroundtaskmw.NewTyped[M](ctx, &backgroundtaskmw.TypedConfig[M]{
 			Manager: cfg.Background.Manager, Authorize: cfg.Background.Authorize,
+			ManagerScopeIsolated: cfg.Background.ManagerScopeIsolated,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("failed to create background-task control middleware: %w", err)

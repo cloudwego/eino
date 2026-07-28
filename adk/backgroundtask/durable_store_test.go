@@ -47,8 +47,8 @@ func validInline(payload string) ArtifactValue {
 
 func validSpec(id string) Spec {
 	return Spec{
-		ID: id, ExecutorKey: "test", SpecVersion: "v1",
-		Payload: []byte(`{"work":"test"}`), PayloadEncoding: "application/json",
+		ID: id, ExecutorKey: "test", PayloadVersion: "v1",
+		Payload:   []byte(`{"work":"test"}`),
 		SessionID: "session-1",
 		Notify:    &NotificationTarget{Kind: "session_inbox", TargetID: "session-1", Metadata: map[string]string{"test/route": "one"}},
 		Recovery: RecoveryPolicy{
@@ -169,7 +169,7 @@ func TestMemoryStoreListClaimableAcceptsRegistryWildcardCapability_DefectProbing
 	require.NoError(t, err)
 
 	result, err := store.ListClaimable(context.Background(), &ListClaimableRequest{
-		Capabilities: []ExecutorCapability{{ExecutorKey: "test", SpecVersion: "*"}},
+		Capabilities: []ExecutorCapability{{ExecutorKey: "test", PayloadVersion: "*"}},
 	})
 	require.NoError(t, err)
 	require.Len(t, result.Tasks, 1, "[defect-probing] registry wildcard must advertise compatible task versions")
@@ -224,4 +224,133 @@ func TestMemoryStoreRejectsStaleGenerationAfterRecovery_BitsUT(t *testing.T) {
 	})
 	assert.True(t, errors.Is(err, ErrVersionConflict) || errors.Is(err, ErrLeaseLost))
 	assert.Greater(t, second.Lease.Generation, firstLease.Generation)
+}
+
+func TestMemoryStoreUpdateSequenceAndCopiesSurviveRecovery_BitsUT(t *testing.T) {
+	clock := &testClock{now: time.Unix(250, 0)}
+	store := NewMemoryStore(&MemoryStoreConfig{
+		Clock: clock.Now, MinLeaseDuration: time.Second, MaxLeaseDuration: time.Minute,
+	})
+	task, lease := createAndClaim(t, store, "update-recovery", 5*time.Second)
+	current := 1.0
+	payloadBytes := []byte("first")
+	first, err := store.AppendUpdate(context.Background(), &AppendTaskUpdateRequest{
+		Lease: lease, Kind: UpdateProgress,
+		Progress: &Progress{Current: &current, Total: float64Pointer(2), Unit: "steps"},
+		Payload: &UpdatePayload{
+			Type: "text/plain",
+			Value: ArtifactValue{
+				Payload: payloadBytes, Encoding: "utf-8",
+				Digest: digestFor(payloadBytes), Size: int64(len(payloadBytes)),
+			},
+		},
+	})
+	require.NoError(t, err)
+	current = 99
+	payloadBytes[0] = 'X'
+	*first.Update.Progress.Current = 88
+	first.Update.Payload.Value.Payload[0] = 'Y'
+
+	clock.Advance(6 * time.Second)
+	pending, err := store.Get(context.Background(), task.Spec.ID)
+	require.NoError(t, err)
+	secondClaim, err := store.Claim(context.Background(), &ClaimTaskRequest{
+		TaskID: task.Spec.ID, ExpectedVersion: pending.TransitionVersion,
+		WorkerID: "worker-2", LeaseDuration: 5 * time.Second,
+	})
+	require.NoError(t, err)
+	second, err := store.AppendUpdate(context.Background(), &AppendTaskUpdateRequest{
+		Lease: secondClaim.Lease, Kind: UpdateMessage,
+		Payload: &UpdatePayload{Type: "text/plain", Value: validInline("second")},
+	})
+	require.NoError(t, err)
+
+	all, err := store.ListUpdates(context.Background(), &ListTaskUpdatesRequest{
+		TaskID: task.Spec.ID, Limit: 100,
+	})
+	require.NoError(t, err)
+	for i := 1; i < len(all.Updates); i++ {
+		assert.Equal(t, all.Updates[i-1].Sequence+1, all.Updates[i].Sequence)
+	}
+	var firstStored *Update
+	for _, update := range all.Updates {
+		if update.Sequence == first.Update.Sequence {
+			firstStored = update
+		}
+	}
+	require.NotNil(t, firstStored)
+	assert.Equal(t, 1.0, *firstStored.Progress.Current)
+	assert.Equal(t, "first", string(firstStored.Payload.Value.Payload))
+	assert.Equal(t, int64(1), firstStored.Attempt)
+	assert.Equal(t, int64(2), second.Update.Attempt)
+	assert.Greater(t, second.Update.Sequence, first.Update.Sequence)
+}
+
+func TestMemoryStoreWaitUpdatesClosesListWaitRace_BitsUT(t *testing.T) {
+	store := NewMemoryStore(nil)
+	task, lease := createAndClaim(t, store, "wait-update-race", time.Minute)
+	before, err := store.ListUpdates(context.Background(), &ListTaskUpdatesRequest{
+		TaskID: task.Spec.ID, AfterSequence: task.LatestUpdateSequence, Limit: 10,
+	})
+	require.NoError(t, err)
+	assert.Empty(t, before.Updates)
+
+	appended, err := store.AppendUpdate(context.Background(), &AppendTaskUpdateRequest{
+		Lease: lease, Kind: UpdateMessage,
+		Payload: &UpdatePayload{Type: "text/plain", Value: validInline("raced")},
+	})
+	require.NoError(t, err)
+	waited, err := store.WaitUpdates(context.Background(), &WaitTaskUpdatesRequest{
+		TaskID: task.Spec.ID, AfterSequence: task.LatestUpdateSequence, Limit: 10,
+	})
+	require.NoError(t, err)
+	require.Len(t, waited.Updates, 1)
+	assert.Equal(t, appended.Update.Sequence, waited.Updates[0].Sequence)
+	assert.Equal(t, appended.Update.Sequence, waited.NextSequence)
+}
+
+func TestMemoryStoreVerifiesExternalCheckpointAndUpdateArtifacts_BitsUT(t *testing.T) {
+	verified := make(map[string]int)
+	verifier := artifactVerifierFunc(func(_ context.Context, key, _ string, _ int64) error {
+		verified[key]++
+		return nil
+	})
+	store := NewMemoryStore(&MemoryStoreConfig{
+		ArtifactVerifiers: map[string]ArtifactVerifier{"artifacts": verifier},
+	})
+	_, lease := createAndClaim(t, store, "external-values", time.Minute)
+	checkpointValue := ArtifactValue{
+		Ref:    &ArtifactRef{StoreKey: "artifacts", Key: "checkpoint"},
+		Digest: digestFor([]byte("checkpoint")), Size: int64(len("checkpoint")),
+	}
+	checkpointed, err := store.Commit(context.Background(), &CommitTaskRequest{
+		Lease: lease,
+		Mutation: TaskMutation{
+			ToStatus: StatusRunning,
+			Checkpoint: &CheckpointRef{
+				ExecutorKey: "test", Format: "test/checkpoint", Version: "v1",
+				Sequence: 1, State: checkpointValue,
+			},
+		},
+	})
+	require.NoError(t, err)
+	lease.ExpectedVersion = checkpointed.Task.TransitionVersion
+	updateValue := ArtifactValue{
+		Ref:    &ArtifactRef{StoreKey: "artifacts", Key: "update"},
+		Digest: digestFor([]byte("update")), Size: int64(len("update")),
+	}
+	appended, err := store.AppendUpdate(context.Background(), &AppendTaskUpdateRequest{
+		Lease: lease, Kind: UpdateMessage,
+		Payload: &UpdatePayload{Type: "text/plain", Value: updateValue},
+	})
+	require.NoError(t, err)
+	checkpointValue.Ref.Key = "mutated"
+	updateValue.Ref.Key = "mutated"
+
+	stored, err := store.Get(context.Background(), "external-values")
+	require.NoError(t, err)
+	assert.Equal(t, "checkpoint", stored.Checkpoint.State.Ref.Key)
+	assert.Equal(t, "update", appended.Update.Payload.Value.Ref.Key)
+	assert.Equal(t, 1, verified["checkpoint"])
+	assert.Equal(t, 1, verified["update"])
 }

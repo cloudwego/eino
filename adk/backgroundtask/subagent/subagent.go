@@ -32,8 +32,8 @@ import (
 )
 
 const (
-	ExecutorKey = "eino.dev/subagent"
-	SpecVersion = "v1"
+	ExecutorKey    = "eino.dev/subagent"
+	PayloadVersion = "v1"
 )
 
 type ResumeMode string
@@ -140,8 +140,8 @@ type Executor[M adk.MessageType] struct {
 func (e *Executor[M]) Key() string { return ExecutorKey }
 func (e *Executor[M]) Capabilities() []backgroundtask.ExecutorCapability {
 	return []backgroundtask.ExecutorCapability{{
-		ExecutorKey: ExecutorKey,
-		SpecVersion: SpecVersion,
+		ExecutorKey:    ExecutorKey,
+		PayloadVersion: PayloadVersion,
 	}}
 }
 
@@ -158,8 +158,8 @@ func (e *Executor[M]) Validate(spec backgroundtask.Spec) error {
 }
 
 func validateSpecPayload(spec backgroundtask.Spec) (*TaskPayload, error) {
-	if spec.SpecVersion != SpecVersion || spec.PayloadEncoding != "application/json" {
-		return nil, errors.New("backgroundtask/subagent: unsupported spec version or payload encoding")
+	if spec.PayloadVersion != PayloadVersion {
+		return nil, errors.New("backgroundtask/subagent: unsupported payload version")
 	}
 	payload, err := decodePayload(spec)
 	if err != nil {
@@ -428,9 +428,9 @@ func (e *Executor[M]) controlOutcome(
 	case backgroundtask.ControlDrain:
 		if _, exists, err := e.CheckPointStore.Get(context.Background(), payload.CheckpointID); err != nil || !exists {
 			if err == nil {
-				err = errors.New("backgroundtask/subagent: drain checkpoint is missing")
+				err = errors.New("runner checkpoint is missing")
 			}
-			outcome := failed(err)
+			outcome := failed(fmt.Errorf("%w: %v", backgroundtask.ErrCheckpointUnavailable, err))
 			return &outcome
 		}
 		stateBytes, err := json.Marshal(checkpointState{
@@ -577,7 +577,6 @@ type SubmitRequest struct {
 	Description      string
 	SessionID        string
 	ToolUseID        string
-	TraceID          string
 	ResumeMode       ResumeMode
 	AllowEmptyResume bool
 }
@@ -603,11 +602,11 @@ func Submit(ctx context.Context, manager *backgroundtask.Manager, req *SubmitReq
 		return nil, err
 	}
 	return manager.Submit(ctx, backgroundtask.Spec{
-		ID: id, ExecutorKey: ExecutorKey, SpecVersion: SpecVersion,
-		Payload: data, PayloadEncoding: "application/json",
-		Type: "subagent", Description: req.Description, SessionID: req.SessionID,
-		ToolUseID: req.ToolUseID, TraceID: req.TraceID,
-		Notify: &backgroundtask.NotificationTarget{Kind: "session_inbox", TargetID: req.SessionID},
+		ID: id, ExecutorKey: ExecutorKey, PayloadVersion: PayloadVersion,
+		Payload: data,
+		Type:    "subagent", Description: req.Description, SessionID: req.SessionID,
+		ToolUseID: req.ToolUseID,
+		Notify:    &backgroundtask.NotificationTarget{Kind: "session_inbox", TargetID: req.SessionID},
 		Recovery: backgroundtask.RecoveryPolicy{
 			OnLeaseExpired:      backgroundtask.RecoveryResumeCheckpoint,
 			OnMissingCheckpoint: backgroundtask.RecoveryFail, MaxAttempts: 3,

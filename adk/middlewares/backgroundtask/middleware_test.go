@@ -60,6 +60,29 @@ func blockingWork() bgtask.WorkFunc {
 	}
 }
 
+type staleFirstGetStore struct {
+	bgtask.Store
+	mu    sync.Mutex
+	first bool
+}
+
+func (s *staleFirstGetStore) Get(ctx context.Context, taskID string) (*bgtask.Task, error) {
+	task, err := s.Store.Get(ctx, taskID)
+	if err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.first {
+		s.first = false
+		stale := *task
+		stale.Status = bgtask.StatusRunning
+		stale.ResultRef = nil
+		return &stale, nil
+	}
+	return task, nil
+}
+
 // findTool returns the named tool from a tool list.
 func findTool(t *testing.T, tools []tool.BaseTool, name string) tool.InvokableTool {
 	t.Helper()
@@ -78,7 +101,7 @@ func findTool(t *testing.T, tools []tool.BaseTool, name string) tool.InvokableTo
 
 func injectedTools(t *testing.T, m *bgtask.Manager) []tool.BaseTool {
 	t.Helper()
-	mw, err := New(context.Background(), &Config{Manager: m})
+	mw, err := New(context.Background(), &Config{Manager: m, ManagerScopeIsolated: true})
 	require.NoError(t, err)
 	_, runCtx, err := mw.BeforeAgent(context.Background(), &adk.ChatModelAgentContext[*schema.Message]{})
 	require.NoError(t, err)
@@ -88,6 +111,20 @@ func injectedTools(t *testing.T, m *bgtask.Manager) []tool.BaseTool {
 func TestNew_NilManager(t *testing.T) {
 	_, err := New(context.Background(), nil)
 	assert.Error(t, err)
+}
+
+func TestNew_RequiresAuthorizationBoundary(t *testing.T) {
+	mgr := bgtask.New(context.Background(), nil)
+	defer closeWithTimeout(mgr)
+
+	_, err := New(context.Background(), &Config{Manager: mgr})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "Authorize or isolated Manager scope")
+
+	_, err = New(context.Background(), &Config{
+		Manager: mgr, ManagerScopeIsolated: true,
+	})
+	require.NoError(t, err)
 }
 
 func TestMiddleware_InjectsControlTools(t *testing.T) {
@@ -108,7 +145,7 @@ func TestMiddleware_ToolConfig_NameOverrideAndDisable(t *testing.T) {
 
 	customDesc := "custom output desc"
 	mw, err := New(context.Background(), &Config{
-		Manager:              mgr,
+		Manager: mgr, ManagerScopeIsolated: true,
 		TaskOutputToolConfig: &ToolConfig{Name: "get_output", Desc: &customDesc},
 		TaskStopToolConfig:   &ToolConfig{Disable: true},
 	})
@@ -129,7 +166,7 @@ func TestMiddleware_ToolConfig_DisableBoth(t *testing.T) {
 	defer closeWithTimeout(mgr)
 
 	mw, err := New(context.Background(), &Config{
-		Manager:              mgr,
+		Manager: mgr, ManagerScopeIsolated: true,
 		TaskOutputToolConfig: &ToolConfig{Disable: true},
 		TaskStopToolConfig:   &ToolConfig{Disable: true},
 	})
@@ -143,7 +180,7 @@ func TestMiddleware_InjectsInstruction(t *testing.T) {
 	mgr := bgtask.New(context.Background(), &bgtask.Config{})
 	defer closeWithTimeout(mgr)
 
-	mw, err := New(context.Background(), &Config{Manager: mgr})
+	mw, err := New(context.Background(), &Config{Manager: mgr, ManagerScopeIsolated: true})
 	require.NoError(t, err)
 	_, runCtx, err := mw.BeforeAgent(context.Background(), &adk.ChatModelAgentContext[*schema.Message]{Instruction: "base"})
 	require.NoError(t, err)
@@ -160,7 +197,7 @@ func TestMiddleware_InstructionUsesRenamedTool(t *testing.T) {
 	defer closeWithTimeout(mgr)
 
 	mw, err := New(context.Background(), &Config{
-		Manager:              mgr,
+		Manager: mgr, ManagerScopeIsolated: true,
 		TaskOutputToolConfig: &ToolConfig{Name: "get_task_result"},
 	})
 	require.NoError(t, err)
@@ -178,7 +215,7 @@ func TestMiddleware_InstructionOmitsDisabledTool(t *testing.T) {
 	defer closeWithTimeout(mgr)
 
 	mw, err := New(context.Background(), &Config{
-		Manager:            mgr,
+		Manager: mgr, ManagerScopeIsolated: true,
 		TaskStopToolConfig: &ToolConfig{Disable: true},
 	})
 	require.NoError(t, err)
@@ -195,7 +232,7 @@ func TestMiddleware_InstructionEmptyWhenAllDisabled(t *testing.T) {
 	defer closeWithTimeout(mgr)
 
 	mw, err := New(context.Background(), &Config{
-		Manager:              mgr,
+		Manager: mgr, ManagerScopeIsolated: true,
 		TaskOutputToolConfig: &ToolConfig{Disable: true},
 		TaskStopToolConfig:   &ToolConfig{Disable: true},
 	})
@@ -258,6 +295,30 @@ func TestTaskOutputTool_NonBlockingRunningThenTerminal(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestTaskOutputRefreshesSnapshotAfterListingUpdates(t *testing.T) {
+	store := bgtask.NewMemoryStore(nil)
+	submitter := bgtask.New(context.Background(), &bgtask.Config{Store: store})
+	task, err := runWork(submitter, "racing task", false, completedWork("done"))
+	require.NoError(t, err)
+	require.NoError(t, submitter.Close(context.Background()))
+
+	racingStore := &staleFirstGetStore{Store: store, first: true}
+	reader := bgtask.New(context.Background(), &bgtask.Config{Store: racingStore})
+	defer closeWithTimeout(reader)
+	outputTool := findTool(t, injectedTools(t, reader), taskOutputToolName)
+	output, err := outputTool.InvokableRun(context.Background(), fmt.Sprintf(
+		`{"task_id":%q,"block":false}`, task.Spec.ID,
+	))
+	require.NoError(t, err)
+
+	var response taskOutputResponse
+	require.NoError(t, json.Unmarshal([]byte(output), &response))
+	require.NotNil(t, response.Task)
+	assert.Equal(t, bgtask.StatusCompleted, response.Task.Status)
+	require.NotNil(t, response.Result)
+	assert.Equal(t, "done", string(response.Result.Value.Payload))
+}
+
 func TestTaskStopTool(t *testing.T) {
 	mgr := bgtask.New(context.Background(), &bgtask.Config{})
 	defer closeWithTimeout(mgr)
@@ -303,7 +364,7 @@ func TestControlAuthorizationRunsBeforeManagerAccess(t *testing.T) {
 		mu.Unlock()
 		return errors.New("denied")
 	}
-	mw, err := New(context.Background(), &Config{Manager: mgr, Authorize: authorize})
+	mw, err := New(context.Background(), &Config{Manager: mgr, ManagerScopeIsolated: true, Authorize: authorize})
 	require.NoError(t, err)
 	_, runCtx, err := mw.BeforeAgent(
 		context.Background(),

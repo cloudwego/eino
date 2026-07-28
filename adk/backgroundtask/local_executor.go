@@ -29,8 +29,8 @@ import (
 )
 
 const (
-	processLocalExecutorKey = "eino.dev/process-local"
-	processLocalSpecVersion = "v1"
+	processLocalExecutorKey    = "eino.dev/process-local"
+	processLocalPayloadVersion = "v1"
 )
 
 type processLocalRuntimeKey struct{}
@@ -76,8 +76,8 @@ func newProcessLocalExecutor() *processLocalExecutor {
 func (e *processLocalExecutor) Key() string { return processLocalExecutorKey }
 func (e *processLocalExecutor) Capabilities() []ExecutorCapability {
 	return []ExecutorCapability{{
-		ExecutorKey: processLocalExecutorKey,
-		SpecVersion: processLocalSpecVersion,
+		ExecutorKey:    processLocalExecutorKey,
+		PayloadVersion: processLocalPayloadVersion,
 	}}
 }
 
@@ -105,8 +105,8 @@ func (e *processLocalExecutor) remove(token string) {
 }
 
 func (e *processLocalExecutor) resolve(spec Spec) (*localWork, error) {
-	if spec.ExecutorKey != processLocalExecutorKey || spec.SpecVersion != processLocalSpecVersion ||
-		spec.PayloadEncoding != "text/plain" || len(spec.Payload) == 0 {
+	if spec.ExecutorKey != processLocalExecutorKey || spec.PayloadVersion != processLocalPayloadVersion ||
+		len(spec.Payload) == 0 {
 		return nil, errors.New("backgroundtask: invalid process-local task spec")
 	}
 	e.mu.Lock()
@@ -189,9 +189,9 @@ func inlineArtifact(payload []byte, encoding string) ArtifactValue {
 
 func processLocalSpec(id string, input *RunInput) Spec {
 	return Spec{
-		ID: id, ExecutorKey: processLocalExecutorKey, SpecVersion: processLocalSpecVersion,
-		Payload: []byte(id), PayloadEncoding: "text/plain",
-		Type: input.Type, Description: input.Description, ToolUseID: input.ToolUseID,
+		ID: id, ExecutorKey: processLocalExecutorKey, PayloadVersion: processLocalPayloadVersion,
+		Payload: []byte(id),
+		Type:    input.Type, Description: input.Description, ToolUseID: input.ToolUseID,
 		Recovery: RecoveryPolicy{
 			OnLeaseExpired: RecoveryFail, OnMissingCheckpoint: RecoveryFail, MaxAttempts: 1,
 		},

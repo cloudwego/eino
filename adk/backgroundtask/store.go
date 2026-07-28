@@ -35,6 +35,10 @@ var (
 	ErrIllegalTransition = errors.New("backgroundtask: illegal state transition")
 	ErrInvalidArtifact   = errors.New("backgroundtask: invalid artifact")
 	ErrAlreadyTerminal   = errors.New("backgroundtask: task is already terminal")
+	// ErrCheckpointUnavailable reports that a planned drain reached no safe,
+	// compatible checkpoint. Manager stops renewing and lets persisted recovery
+	// policy resolve the expired attempt instead of claiming suspension.
+	ErrCheckpointUnavailable = errors.New("backgroundtask: checkpoint unavailable")
 )
 
 type Store interface {
@@ -69,11 +73,8 @@ func terminalStatus(s Status) bool {
 }
 
 func validateSpec(s Spec) error {
-	if s.ID == "" || s.ExecutorKey == "" || s.SpecVersion == "" {
-		return fmt.Errorf("backgroundtask: id, executor key, and spec version are required")
-	}
-	if s.PayloadEncoding == "" {
-		return fmt.Errorf("backgroundtask: payload encoding is required")
+	if s.ID == "" || s.ExecutorKey == "" || s.PayloadVersion == "" {
+		return fmt.Errorf("backgroundtask: id, executor key, and payload version are required")
 	}
 	if s.Recovery.MaxAttempts <= 0 {
 		return fmt.Errorf("backgroundtask: recovery max attempts must be positive")

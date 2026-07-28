@@ -183,7 +183,7 @@ func (s *MemoryStore) ListClaimable(_ context.Context, req *ListClaimableRequest
 	}
 	caps := make(map[string]struct{}, len(req.Capabilities))
 	for _, c := range req.Capabilities {
-		caps[c.ExecutorKey+"\x00"+c.SpecVersion] = struct{}{}
+		caps[c.ExecutorKey+"\x00"+c.PayloadVersion] = struct{}{}
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -207,7 +207,7 @@ func (s *MemoryStore) ListClaimable(_ context.Context, req *ListClaimableRequest
 		if t.Status != StatusPending {
 			continue
 		}
-		_, exact := caps[t.Spec.ExecutorKey+"\x00"+t.Spec.SpecVersion]
+		_, exact := caps[t.Spec.ExecutorKey+"\x00"+t.Spec.PayloadVersion]
 		_, wildcard := caps[t.Spec.ExecutorKey+"\x00*"]
 		if !exact && !wildcard {
 			continue

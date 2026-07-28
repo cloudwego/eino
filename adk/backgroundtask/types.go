@@ -45,11 +45,10 @@ type NotificationTarget struct {
 
 // Spec is immutable serialized task intent.
 type Spec struct {
-	ID              string
-	ExecutorKey     string
-	SpecVersion     string
-	Payload         []byte
-	PayloadEncoding string
+	ID             string
+	ExecutorKey    string
+	PayloadVersion string
+	Payload        []byte
 
 	Type        string
 	Description string
@@ -60,7 +59,6 @@ type Spec struct {
 	Result   ResultPolicy
 
 	ToolUseID string
-	TraceID   string
 	Deadline  *time.Time
 	CreatedAt time.Time
 }
@@ -154,8 +152,8 @@ type NotificationOutboxRecord struct {
 }
 
 type ExecutorCapability struct {
-	ExecutorKey string
-	SpecVersion string
+	ExecutorKey    string
+	PayloadVersion string
 }
 
 type LeaseToken struct {

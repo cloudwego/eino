@@ -75,6 +75,10 @@ type TypedConfig[M adk.MessageType] struct {
 	// Authorize runs before a control can reveal task existence or mutate state.
 	// Hosts derive principals and tenancy from ctx; core task records remain neutral.
 	Authorize AuthorizeFunc
+	// ManagerScopeIsolated explicitly asserts that the injected tools and Manager
+	// task-ID space are restricted to one already-authorized caller scope. Set this
+	// only when no per-call Authorize hook is necessary.
+	ManagerScopeIsolated bool
 
 	// TaskOutputToolConfig configures the task_output tool. Optional.
 	TaskOutputToolConfig *ToolConfig
@@ -102,6 +106,9 @@ func New(ctx context.Context, config *Config) (adk.ChatModelAgentMiddleware, err
 func NewTyped[M adk.MessageType](_ context.Context, config *TypedConfig[M]) (adk.TypedChatModelAgentMiddleware[M], error) {
 	if config == nil || config.Manager == nil {
 		return nil, fmt.Errorf("backgroundtask: Manager is required")
+	}
+	if config.Authorize == nil && !config.ManagerScopeIsolated {
+		return nil, fmt.Errorf("backgroundtask: Authorize or isolated Manager scope is required")
 	}
 	mgr := config.Manager
 
@@ -257,6 +264,12 @@ func resolveDurableTask(ctx context.Context, mgr *bgtask.Manager, task *bgtask.T
 	updates, err := mgr.ListTaskUpdates(ctx, &bgtask.ListTaskUpdatesRequest{
 		TaskID: input.TaskID, AfterSequence: input.AfterSequence, Limit: limit,
 	})
+	if err != nil {
+		return "", err
+	}
+	// Refresh after listing so the snapshot cannot be older than updates returned
+	// by the same response.
+	task, err = mgr.GetTask(ctx, input.TaskID)
 	if err != nil {
 		return "", err
 	}

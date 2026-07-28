@@ -124,7 +124,7 @@ func (r *ExecutorRegistry) Register(executor Executor) error {
 			return errors.New("backgroundtask: executor capabilities are empty")
 		}
 		for _, capability := range capabilities {
-			if capability.ExecutorKey != executor.Key() || capability.SpecVersion == "" {
+			if capability.ExecutorKey != executor.Key() || capability.PayloadVersion == "" {
 				return errors.New("backgroundtask: executor capability does not match executor identity")
 			}
 		}
@@ -156,11 +156,11 @@ func (r *ExecutorRegistry) Capabilities() []ExecutorCapability {
 		}
 		// Custom executors without explicit capability metadata remain subject to
 		// Validate before claim.
-		result = append(result, ExecutorCapability{ExecutorKey: key, SpecVersion: "*"})
+		result = append(result, ExecutorCapability{ExecutorKey: key, PayloadVersion: "*"})
 	}
 	sort.Slice(result, func(i, j int) bool {
 		if result[i].ExecutorKey == result[j].ExecutorKey {
-			return result[i].SpecVersion < result[j].SpecVersion
+			return result[i].PayloadVersion < result[j].PayloadVersion
 		}
 		return result[i].ExecutorKey < result[j].ExecutorKey
 	})
@@ -555,6 +555,13 @@ func (m *Manager) Execute(ctx context.Context, taskID string) error {
 	close(heartbeatStop)
 	<-heartbeatDone
 
+	if outcome.Kind == OutcomeFailed &&
+		errors.Is(outcome.Err, ErrCheckpointUnavailable) &&
+		claim.Task.Spec.Recovery.OnLeaseExpired != RecoveryFail {
+		// The attempt is no longer renewed. Store expiry applies MaxAttempts,
+		// checkpoint availability, and OnMissingCheckpoint atomically.
+		return outcome.Err
+	}
 	mutation := mutationForOutcome(outcome)
 	_, err = runtime.commit(detachedCtx{parent: ctx}, mutation)
 	return err
