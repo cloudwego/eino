@@ -21,6 +21,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -29,11 +30,22 @@ import (
 )
 
 type testClock struct {
+	mu  sync.Mutex
 	now time.Time
 }
 
-func (c *testClock) Now() time.Time          { return c.now }
-func (c *testClock) Advance(d time.Duration) { c.now = c.now.Add(d) }
+func (c *testClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now
+}
+
+func (c *testClock) Advance(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.now = c.now.Add(d)
+}
+
 func digestFor(payload []byte) string {
 	sum := sha256.Sum256(payload)
 	return "sha256:" + hex.EncodeToString(sum[:])
