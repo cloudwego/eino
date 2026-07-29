@@ -489,3 +489,239 @@ func TestPatchToolCalls_AgenticMessage_NilBlockInUserMessage(t *testing.T) {
 	}
 	assert.True(t, foundResult, "patched message should contain tool result for call_1")
 }
+
+func TestPatchedToolResultGenerator_ErrorPropagation(t *testing.T) {
+	ctx := context.Background()
+	wantErr := fmt.Errorf("boom")
+
+	t.Run("Message", func(t *testing.T) {
+		mw, err := New(ctx, &Config{
+			PatchedToolResultGenerator: func(context.Context, string, string, *schema.ToolArgument) (*schema.ToolResult, error) {
+				return nil, wantErr
+			},
+		})
+		require.NoError(t, err)
+		state := &adk.ChatModelAgentState{
+			Messages: []adk.Message{
+				schema.AssistantMessage("", []schema.ToolCall{
+					{ID: "call_1", Function: schema.FunctionCall{Name: "tool_a", Arguments: "{}"}},
+				}),
+			},
+		}
+		_, _, err = mw.BeforeModelRewriteState(ctx, state, nil)
+		require.ErrorIs(t, err, wantErr)
+	})
+
+	t.Run("AgenticMessage", func(t *testing.T) {
+		mw, err := NewTyped[*schema.AgenticMessage](ctx, &Config{
+			PatchedToolResultGenerator: func(context.Context, string, string, *schema.ToolArgument) (*schema.ToolResult, error) {
+				return nil, wantErr
+			},
+		})
+		require.NoError(t, err)
+		state := &adk.TypedChatModelAgentState[*schema.AgenticMessage]{
+			Messages: []*schema.AgenticMessage{
+				makeAssistantMsgWithToolCalls[*schema.AgenticMessage]("", []testToolCall{
+					{ID: "call_1", Name: "tool_a", Arguments: `{"a":1}`},
+				}),
+			},
+		}
+		_, _, err = mw.BeforeModelRewriteState(ctx, state, nil)
+		require.ErrorIs(t, err, wantErr)
+	})
+}
+
+func TestPatchedContentGenerator_ErrorPropagation(t *testing.T) {
+	ctx := context.Background()
+	wantErr := fmt.Errorf("legacy boom")
+
+	t.Run("Message", func(t *testing.T) {
+		mw, err := New(ctx, &Config{
+			PatchedContentGenerator: func(context.Context, string, string) (string, error) {
+				return "", wantErr
+			},
+		})
+		require.NoError(t, err)
+		state := &adk.ChatModelAgentState{
+			Messages: []adk.Message{
+				schema.AssistantMessage("", []schema.ToolCall{
+					{ID: "call_1", Function: schema.FunctionCall{Name: "tool_a"}},
+				}),
+			},
+		}
+		_, _, err = mw.BeforeModelRewriteState(ctx, state, nil)
+		require.ErrorIs(t, err, wantErr)
+	})
+
+	t.Run("AgenticMessage", func(t *testing.T) {
+		mw, err := NewTyped[*schema.AgenticMessage](ctx, &Config{
+			PatchedContentGenerator: func(context.Context, string, string) (string, error) {
+				return "", wantErr
+			},
+		})
+		require.NoError(t, err)
+		state := &adk.TypedChatModelAgentState[*schema.AgenticMessage]{
+			Messages: []*schema.AgenticMessage{
+				makeAssistantMsgWithToolCalls[*schema.AgenticMessage]("", []testToolCall{
+					{ID: "call_1", Name: "tool_a", Arguments: "{}"},
+				}),
+			},
+		}
+		_, _, err = mw.BeforeModelRewriteState(ctx, state, nil)
+		require.ErrorIs(t, err, wantErr)
+	})
+}
+
+func TestToolResultToMessage_NilAndEmpty(t *testing.T) {
+	msg, err := toolResultToMessage("tool_a", "call_1", nil)
+	require.NoError(t, err)
+	assert.Equal(t, "call_1", msg.ToolCallID)
+	assert.Equal(t, "tool_a", msg.ToolName)
+	assert.Empty(t, msg.Content)
+	assert.Empty(t, msg.UserInputMultiContent)
+
+	msg, err = toolResultToMessage("tool_a", "call_1", &schema.ToolResult{})
+	require.NoError(t, err)
+	assert.Empty(t, msg.Content)
+	assert.Empty(t, msg.UserInputMultiContent)
+}
+
+func TestToolResultToMessage_MultimodalDoesNotSetContent(t *testing.T) {
+	url := "https://example.com/a.png"
+	result := &schema.ToolResult{
+		Parts: []schema.ToolOutputPart{
+			{Type: schema.ToolPartTypeText, Text: "caption"},
+			{
+				Type: schema.ToolPartTypeImage,
+				Image: &schema.ToolOutputImage{
+					MessagePartCommon: schema.MessagePartCommon{URL: &url, MIMEType: "image/png"},
+				},
+			},
+		},
+	}
+	msg, err := toolResultToMessage("vision", "call_1", result)
+	require.NoError(t, err)
+	assert.Empty(t, msg.Content, "multi-part results should not set Content")
+	require.Len(t, msg.UserInputMultiContent, 2)
+}
+
+func TestToolResultToAgenticMessage_ToolSearchAndEmpty(t *testing.T) {
+	search := &schema.ToolSearchResult{Tools: []*schema.ToolInfo{{Name: "dyn"}}}
+	msg := toolResultToAgenticMessage("tool_search", "call_1", &schema.ToolResult{
+		Parts: []schema.ToolOutputPart{{
+			Type:             schema.ToolPartTypeToolSearchResult,
+			ToolSearchResult: search,
+		}},
+	})
+	require.Len(t, msg.ContentBlocks, 1)
+	assert.Equal(t, schema.ContentBlockTypeToolSearchResult, msg.ContentBlocks[0].Type)
+	require.NotNil(t, msg.ContentBlocks[0].ToolSearchFunctionToolResult)
+	assert.Equal(t, search, msg.ContentBlocks[0].ToolSearchFunctionToolResult.Result)
+
+	empty := toolResultToAgenticMessage("tool_a", "call_2", nil)
+	require.Len(t, empty.ContentBlocks, 1)
+	require.NotNil(t, empty.ContentBlocks[0].FunctionToolResult)
+	require.Len(t, empty.ContentBlocks[0].FunctionToolResult.Content, 1)
+	assert.Equal(t, "", empty.ContentBlocks[0].FunctionToolResult.Content[0].Text.Text)
+}
+
+func TestToolResultToFunctionBlocks_AllModalities(t *testing.T) {
+	url := "https://example.com/x"
+	b64 := "YmFzZTY0"
+	result := &schema.ToolResult{
+		Parts: []schema.ToolOutputPart{
+			{Type: schema.ToolPartTypeText, Text: "hello", Extra: map[string]any{"k": "v"}},
+			{
+				Type: schema.ToolPartTypeImage,
+				Image: &schema.ToolOutputImage{
+					MessagePartCommon: schema.MessagePartCommon{URL: &url, Base64Data: &b64, MIMEType: "image/png"},
+				},
+			},
+			{Type: schema.ToolPartTypeImage}, // nil Image skipped
+			{
+				Type: schema.ToolPartTypeAudio,
+				Audio: &schema.ToolOutputAudio{
+					MessagePartCommon: schema.MessagePartCommon{URL: &url, MIMEType: "audio/mpeg"},
+				},
+			},
+			{Type: schema.ToolPartTypeAudio},
+			{
+				Type: schema.ToolPartTypeVideo,
+				Video: &schema.ToolOutputVideo{
+					MessagePartCommon: schema.MessagePartCommon{URL: &url, MIMEType: "video/mp4"},
+				},
+			},
+			{Type: schema.ToolPartTypeVideo},
+			{
+				Type: schema.ToolPartTypeFile,
+				File: &schema.ToolOutputFile{
+					MessagePartCommon: schema.MessagePartCommon{URL: nil, Base64Data: &b64, MIMEType: "application/pdf"},
+				},
+			},
+			{Type: schema.ToolPartTypeFile},
+			{Type: schema.ToolPartTypeToolSearchResult}, // ignored by function-block conversion
+		},
+	}
+
+	blocks := toolResultToFunctionBlocks(result)
+	require.Len(t, blocks, 5)
+	assert.Equal(t, schema.FunctionToolResultContentBlockTypeText, blocks[0].Type)
+	assert.Equal(t, "hello", blocks[0].Text.Text)
+	assert.Equal(t, schema.FunctionToolResultContentBlockTypeImage, blocks[1].Type)
+	assert.Equal(t, url, blocks[1].Image.URL)
+	assert.Equal(t, b64, blocks[1].Image.Base64Data)
+	assert.Equal(t, schema.FunctionToolResultContentBlockTypeAudio, blocks[2].Type)
+	assert.Equal(t, schema.FunctionToolResultContentBlockTypeVideo, blocks[3].Type)
+	assert.Equal(t, schema.FunctionToolResultContentBlockTypeFile, blocks[4].Type)
+	assert.Equal(t, "", blocks[4].File.URL)
+	assert.Equal(t, b64, blocks[4].File.Base64Data)
+
+	assert.Nil(t, toolResultToFunctionBlocks(nil))
+	assert.Nil(t, toolResultToFunctionBlocks(&schema.ToolResult{}))
+}
+
+func TestPatchedToolResultGenerator_AgenticMultimodal(t *testing.T) {
+	ctx := context.Background()
+	url := "https://example.com/img.png"
+	mw, err := NewTyped[*schema.AgenticMessage](ctx, &Config{
+		PatchedToolResultGenerator: func(ctx context.Context, toolName, toolCallID string, toolArgument *schema.ToolArgument) (*schema.ToolResult, error) {
+			require.Equal(t, `{"q":1}`, toolArgument.Text)
+			return &schema.ToolResult{
+				Parts: []schema.ToolOutputPart{
+					{Type: schema.ToolPartTypeText, Text: "see image"},
+					{
+						Type: schema.ToolPartTypeImage,
+						Image: &schema.ToolOutputImage{
+							MessagePartCommon: schema.MessagePartCommon{URL: &url},
+						},
+					},
+				},
+			}, nil
+		},
+	})
+	require.NoError(t, err)
+
+	state := &adk.TypedChatModelAgentState[*schema.AgenticMessage]{
+		Messages: []*schema.AgenticMessage{
+			makeAssistantMsgWithToolCalls[*schema.AgenticMessage]("", []testToolCall{
+				{ID: "call_1", Name: "vision", Arguments: `{"q":1}`},
+			}),
+		},
+	}
+	_, newState, err := mw.BeforeModelRewriteState(ctx, state, nil)
+	require.NoError(t, err)
+	require.Len(t, newState.Messages, 2)
+	patched := newState.Messages[1]
+	require.Len(t, patched.ContentBlocks, 1)
+	fr := patched.ContentBlocks[0].FunctionToolResult
+	require.NotNil(t, fr)
+	require.Len(t, fr.Content, 2)
+	assert.Equal(t, "see image", fr.Content[0].Text.Text)
+	assert.Equal(t, url, fr.Content[1].Image.URL)
+}
+
+func TestDerefString(t *testing.T) {
+	assert.Equal(t, "", derefString(nil))
+	s := "x"
+	assert.Equal(t, "x", derefString(&s))
+}
