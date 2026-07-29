@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+// Package subagent provides a durable backgroundtask executor for ADK sub-agent runs.
 package subagent
 
 import (
@@ -304,26 +305,7 @@ func (e *Executor[M]) Execute(
 		case <-ctx.Done():
 		}
 	}()
-	var iter *adk.AsyncIterator[*adk.TypedAgentEvent[M]]
-	if len(task.Checkpoint) > 0 {
-		if payload.ResumeMode == ResumeNextTurn {
-			iter, err = e.runNextTurn(ctx, runner, task, payload, cancelOption)
-		} else if len(task.PendingResume) == 0 {
-			iter, err = runner.Resume(ctx, payload.CheckpointID, cancelOption)
-		} else {
-			var targets map[string]any
-			if unmarshalErr := json.Unmarshal(task.PendingResume, &targets); unmarshalErr != nil {
-				return nil, unmarshalErr
-			}
-			iter, err = runner.ResumeWithParams(
-				ctx, payload.CheckpointID, &adk.ResumeParams{Targets: targets}, cancelOption,
-			)
-		}
-	} else {
-		iter = runner.Query(
-			ctx, string(payload.Prompt), adk.WithCheckPointID(payload.CheckpointID), cancelOption,
-		)
-	}
+	iter, err := e.beginRun(ctx, runner, task, payload, cancelOption)
 	if err != nil {
 		return nil, err
 	}
@@ -339,26 +321,7 @@ func (e *Executor[M]) Execute(
 			interrupted = event.Action.Interrupted
 		}
 		if event.Err != nil && interrupted == nil {
-			control := pollControl(controlKinds)
-			var cancelError *adk.CancelError
-			if control == "" && (errors.Is(event.Err, context.Canceled) || errors.As(event.Err, &cancelError)) {
-				select {
-				case control = <-controlKinds:
-				case <-ctx.Done():
-				case <-time.After(100 * time.Millisecond):
-				}
-			}
-			if control != "" {
-				for {
-					if _, open := iter.Next(); !open {
-						break
-					}
-				}
-			}
-			if result, controlErr, controlled := e.controlResult(task, payload, control); controlled {
-				return result, controlErr
-			}
-			return nil, event.Err
+			return e.handleEventError(ctx, iter, task, payload, controlKinds, event.Err)
 		}
 		if event.Output == nil || event.Output.MessageOutput == nil {
 			continue
@@ -374,34 +337,7 @@ func (e *Executor[M]) Execute(
 		final = data
 	}
 	if interrupted != nil {
-		if _, exists, getErr := e.CheckPointStore.Get(ctx, payload.CheckpointID); getErr != nil || !exists {
-			if getErr == nil {
-				getErr = errors.New("backgroundtask/subagent: runner checkpoint is missing")
-			}
-			return nil, getErr
-		}
-		request, _ := json.Marshal(interrupted)
-		state := checkpointState{
-			CheckpointID: payload.CheckpointID, Mode: payload.ResumeMode,
-			AllowEmpty: payload.AllowEmptyResume, Sequence: nextCheckpointSequence(task.Checkpoint),
-		}
-		for _, interruptContext := range interrupted.InterruptContexts {
-			if interruptContext.ID != "" {
-				state.TargetIDs = append(state.TargetIDs, interruptContext.ID)
-			}
-		}
-		stateBytes, stateErr := json.Marshal(state)
-		if stateErr != nil || len(state.TargetIDs) == 0 {
-			if stateErr == nil {
-				stateErr = errors.New("backgroundtask/subagent: interrupt has no resumable targets")
-			}
-			return nil, stateErr
-		}
-		_ = request
-		return &backgroundtask.ExecutionResult{
-			Status:     backgroundtask.StatusWaitingInput,
-			Checkpoint: stateBytes,
-		}, nil
+		return e.interruptResult(ctx, task, payload, interrupted)
 	}
 	if final == nil {
 		if result, controlErr, controlled := e.controlResult(task, payload, pollControl(controlKinds)); controlled {
@@ -414,6 +350,105 @@ func (e *Executor[M]) Execute(
 	return &backgroundtask.ExecutionResult{
 		Status: backgroundtask.StatusCompleted,
 		Data:   final,
+	}, nil
+}
+
+func (e *Executor[M]) beginRun(
+	ctx context.Context,
+	runner *adk.TypedRunner[M],
+	task *backgroundtask.Task,
+	payload *TaskPayload,
+	options ...adk.AgentRunOption,
+) (*adk.AsyncIterator[*adk.TypedAgentEvent[M]], error) {
+	if len(task.Checkpoint) == 0 {
+		queryOptions := append([]adk.AgentRunOption{adk.WithCheckPointID(payload.CheckpointID)}, options...)
+		return runner.Query(
+			ctx, string(payload.Prompt), queryOptions...,
+		), nil
+	}
+	if payload.ResumeMode == ResumeNextTurn {
+		return e.runNextTurn(ctx, runner, task, payload, options...)
+	}
+	if len(task.PendingResume) == 0 {
+		return runner.Resume(ctx, payload.CheckpointID, options...)
+	}
+	var targets map[string]any
+	if err := json.Unmarshal(task.PendingResume, &targets); err != nil {
+		return nil, err
+	}
+	return runner.ResumeWithParams(
+		ctx, payload.CheckpointID, &adk.ResumeParams{Targets: targets}, options...,
+	)
+}
+
+func (e *Executor[M]) handleEventError(
+	ctx context.Context,
+	iter *adk.AsyncIterator[*adk.TypedAgentEvent[M]],
+	task *backgroundtask.Task,
+	payload *TaskPayload,
+	controlKinds <-chan backgroundtask.ControlKind,
+	err error,
+) (*backgroundtask.ExecutionResult, error) {
+	control := pollControl(controlKinds)
+	var cancelError *adk.CancelError
+	if control == "" && (errors.Is(err, context.Canceled) || errors.As(err, &cancelError)) {
+		control = waitForControl(ctx, controlKinds)
+	}
+	if control != "" {
+		for {
+			if _, open := iter.Next(); !open {
+				break
+			}
+		}
+	}
+	if result, controlErr, controlled := e.controlResult(task, payload, control); controlled {
+		return result, controlErr
+	}
+	return nil, err
+}
+
+func waitForControl(ctx context.Context, controls <-chan backgroundtask.ControlKind) backgroundtask.ControlKind {
+	select {
+	case control := <-controls:
+		return control
+	case <-ctx.Done():
+		return ""
+	case <-time.After(100 * time.Millisecond):
+		return ""
+	}
+}
+
+func (e *Executor[M]) interruptResult(
+	ctx context.Context,
+	task *backgroundtask.Task,
+	payload *TaskPayload,
+	interrupted *adk.InterruptInfo,
+) (*backgroundtask.ExecutionResult, error) {
+	if _, exists, err := e.CheckPointStore.Get(ctx, payload.CheckpointID); err != nil || !exists {
+		if err == nil {
+			err = errors.New("backgroundtask/subagent: runner checkpoint is missing")
+		}
+		return nil, err
+	}
+	state := checkpointState{
+		CheckpointID: payload.CheckpointID, Mode: payload.ResumeMode,
+		AllowEmpty: payload.AllowEmptyResume, Sequence: nextCheckpointSequence(task.Checkpoint),
+	}
+	for _, interruptContext := range interrupted.InterruptContexts {
+		if interruptContext.ID != "" {
+			state.TargetIDs = append(state.TargetIDs, interruptContext.ID)
+		}
+	}
+	stateBytes, err := json.Marshal(state)
+	if err != nil || len(state.TargetIDs) == 0 {
+		if err == nil {
+			err = errors.New("backgroundtask/subagent: interrupt has no resumable targets")
+		}
+		return nil, err
+	}
+	return &backgroundtask.ExecutionResult{
+		Status:     backgroundtask.StatusWaitingInput,
+		Checkpoint: stateBytes,
 	}, nil
 }
 

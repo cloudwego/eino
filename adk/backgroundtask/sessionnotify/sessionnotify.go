@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+// Package sessionnotify routes background task notifications into session inboxes.
 package sessionnotify
 
 import (
