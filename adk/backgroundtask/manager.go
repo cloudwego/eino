@@ -23,7 +23,7 @@
 // instance can serve heterogeneous executor domains under one task-ID space.
 //
 // Durable executors reconstruct work from Spec. WorkFunc and StreamWorkFunc are
-// retained only for explicitly process-local RecoveryFail tasks.
+// retained only for explicitly process-local tasks.
 //
 // The Store, outbox, and session-activation SPIs are provisional. Promotion
 // requires conformance against external multi-process providers.
@@ -44,7 +44,7 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
-// Status represents the lifecycle status of a task.
+// Status represents the durable lifecycle status of a task.
 type Status string
 
 const (
@@ -56,7 +56,7 @@ const (
 	StatusWaitingInput Status = "waiting_input"
 	// StatusSuspended indicates execution is checkpointed for a planned pause.
 	StatusSuspended Status = "suspended"
-	// StatusCanceling indicates durable stop intent is awaiting worker acknowledgement.
+	// StatusCanceling indicates durable stop intent is awaiting active-attempt acknowledgement.
 	StatusCanceling Status = "canceling"
 	// StatusCompleted indicates the task finished successfully.
 	StatusCompleted Status = "completed"
@@ -67,42 +67,51 @@ const (
 	StatusCanceled Status = "canceled"
 )
 
+// State aliases are kept for source compatibility while Status is the canonical
+// lifecycle name.
+type State = Status
+
+const (
+	StatePending      = StatusPending
+	StateRunning      = StatusRunning
+	StateWaitingInput = StatusWaitingInput
+	StateSuspended    = StatusSuspended
+	StateCanceling    = StatusCanceling
+	StateCompleted    = StatusCompleted
+	StateFailed       = StatusFailed
+	StateCanceled     = StatusCanceled
+)
+
 // Task represents a single managed execution record.
 type Task struct {
 	// Spec is the immutable serialized intent for this task.
 	Spec Spec
+	// Status is the current lifecycle status.
+	Status Status
+	// Checkpoint is the latest durable executor checkpoint.
+	Checkpoint []byte
+	// CheckpointVersion fences pending resume input to the checkpoint validated.
+	CheckpointVersion int64
+	// Result is the terminal execution outcome. It is nil until terminal.
+	Result *Result
+	// PendingResume is a one-shot resume command for the next active attempt.
+	PendingResume *PendingResume
 	// TransitionVersion is the CAS version of this durable record.
 	TransitionVersion int64
 	// Attempt counts successful claims.
 	Attempt int64
-	// LeaseOwner identifies the current worker.
+	// LeaseOwner identifies the current lease owner.
 	LeaseOwner string
-	// LeaseGeneration fences writes from prior workers.
+	// LeaseGeneration fences writes from prior active attempts.
 	LeaseGeneration int64
 	// LeaseExpiresAt is written using the Store's clock.
 	LeaseExpiresAt time.Time
-	// Checkpoint is the latest durable executor checkpoint.
-	Checkpoint *CheckpointRef
-	// ResultRef is the authoritative terminal result descriptor.
-	ResultRef *ResultRef
-	// LatestUpdateSequence is the exclusive cursor for subsequent update reads.
-	LatestUpdateSequence int64
-	// LatestProgress is a cheap projection of the latest progress update.
-	LatestProgress *Progress
-	// ResumeData and ResumeEncoding are atomically attached by Resume.
-	ResumeData     []byte
-	ResumeEncoding string
 	// CancelRequestedAt records durable explicit stop intent.
 	CancelRequestedAt *time.Time
 	// CancelTransitionVersion fences the adjacent cancel reconciliation.
 	CancelTransitionVersion int64
-	// TerminalReason is a bounded machine-readable terminal explanation.
-	TerminalReason string
 	// UpdatedAt is the Store mutation time.
 	UpdatedAt time.Time
-
-	// Status is the current lifecycle status.
-	Status Status
 	// DoneAt is the time the task reached a terminal state. Nil if still running.
 	DoneAt *time.Time
 }
@@ -135,16 +144,12 @@ type TaskEvent struct {
 // Domain-specific parameters (which agent, which command, the prompt) are
 // captured by the WorkFunc closure, not here.
 type RunInput struct {
-	// Description is a short human-readable title for the task, stored in Task.Description.
+	// Description is a short human-readable title for the task, stored in Spec.Description.
 	Description string
-	// Type is an optional tag for the task (e.g. "bash", "subagent"), stored in
-	// Task.Type. See Task.Type.
+	// Type is an optional process-local host hint. It is not persisted in Spec.
 	Type string
-	// ToolUseID is the optional id of the tool call launching this task, stored in
-	// Task.ToolUseID. See Task.ToolUseID.
-	ToolUseID string
 	// RunInBackground starts the task in the background. Run returns an initial
-	// StatusRunning snapshot without waiting for the work. RunStream returns its
+	// StateRunning snapshot without waiting for the work. RunStream returns its
 	// caller-facing stream without waiting; consuming that stream normally yields
 	// the background notice, optionally preceded by a bounded startup preview. If
 	// the work reaches a terminal state during the preview, the stream instead
@@ -196,11 +201,11 @@ type Config struct {
 	Store Store
 	// Executors resolves serialized task intent to local implementations.
 	Executors *ExecutorRegistry
-	// WorkerID identifies this Manager instance when it claims tasks. It must be
+	// ManagerInstanceID identifies this Manager instance when it claims tasks. It must be
 	// unique among concurrently active Manager instances sharing a Store. When
 	// empty, New generates a process-local identity.
-	WorkerID string
-	// LeaseDuration is the worker lease requested by Execute.
+	ManagerInstanceID string
+	// LeaseDuration is the active-attempt lease requested by Execute.
 	LeaseDuration time.Duration
 	// ForegroundTimeoutMs sets the foreground timeout: the time a foreground run is
 	// allowed to occupy the foreground before its deadline fires.
@@ -214,8 +219,8 @@ type Config struct {
 	// ShouldAutoBackground decides, at a foreground run's deadline, whether it may be
 	// moved to the background (kept running) instead of being canceled. Applications
 	// can use it to permit long-lived workloads such as servers and watchers. The
-	// hook receives the canonical task, so a host can branch on Task.Spec.Type and
-	// decode typed intent from Task.Spec.
+	// hook receives the canonical task, so a host can branch on ExecutorKey and
+	// decode typed intent from Task.Spec.Payload.
 	//
 	// Deciding whether a workload is genuinely long-lived is inherently host- and
 	// command-specific, so this package ships no built-in policy: the framework
@@ -278,15 +283,15 @@ type NoticeInfo struct {
 // passing a WorkFunc that performs the actual execution. A single Manager can
 // therefore be shared across multiple domains under one task-ID space.
 type Manager struct {
-	store         Store
-	executors     *ExecutorRegistry
-	workerID      string
-	leaseDuration time.Duration
-	workersMu     sync.Mutex
-	workers       map[string]*workerExecution
-	submittedMu   sync.RWMutex
-	submitted     map[string]struct{}
-	local         *processLocalExecutor
+	store          Store
+	executors      *ExecutorRegistry
+	leaseOwnerID   string
+	leaseDuration  time.Duration
+	attemptsMu     sync.Mutex
+	activeAttempts map[string]*activeAttempt
+	submittedMu    sync.RWMutex
+	submitted      map[string]struct{}
+	local          *processLocalExecutor
 
 	mu                   sync.Mutex
 	seq                  int64
@@ -310,9 +315,9 @@ type Manager struct {
 func New(_ context.Context, conf *Config) *Manager {
 	m := &Manager{
 		foregroundTimeoutMs: defaultForegroundTimeoutMs,
-		workerID:            newManagerWorkerID(),
+		leaseOwnerID:        newManagerInstanceID(),
 		leaseDuration:       30 * time.Second,
-		workers:             make(map[string]*workerExecution),
+		activeAttempts:      make(map[string]*activeAttempt),
 		submitted:           make(map[string]struct{}),
 	}
 	m.store = NewMemoryStore(nil)
@@ -328,8 +333,8 @@ func New(_ context.Context, conf *Config) *Manager {
 		if conf.Executors != nil {
 			m.executors = conf.Executors
 		}
-		if conf.WorkerID != "" {
-			m.workerID = conf.WorkerID
+		if conf.ManagerInstanceID != "" {
+			m.leaseOwnerID = conf.ManagerInstanceID
 		}
 		if conf.LeaseDuration > 0 {
 			m.leaseDuration = conf.LeaseDuration
@@ -409,7 +414,7 @@ func (m *Manager) Get(id string) (*Task, bool) {
 //
 // Return values:
 //   - (nil, false): no task with this id exists.
-//   - (task, true): the task reached a terminal state (task.Status is terminal).
+//   - (task, true): the task reached a terminal state.
 //   - (task, false): ctx was canceled/timed out first; task is the latest
 //     (still-running) snapshot.
 //
@@ -450,7 +455,7 @@ func (m *Manager) List() []*Task {
 }
 
 // Cancel stops a running task. The run's context is canceled and the task
-// transitions to StatusCanceled.
+// transitions to StateCanceled.
 // Returns an error if the task does not exist or is not running.
 func (m *Manager) Cancel(id string) error {
 	if _, err := m.store.Get(context.Background(), id); err != nil {
@@ -473,28 +478,28 @@ func (m *Manager) Close(ctx context.Context) error {
 	defer ticker.Stop()
 	var closeErr error
 	for {
-		m.workersMu.Lock()
-		active := len(m.workers)
-		for _, worker := range m.workers {
-			if worker == nil {
+		m.attemptsMu.Lock()
+		active := len(m.activeAttempts)
+		for _, attempt := range m.activeAttempts {
+			if attempt == nil {
 				continue
 			}
-			worker.runtime.requestControl(ControlDrain)
+			attempt.runtime.requestControl(ControlDrain)
 		}
-		m.workersMu.Unlock()
+		m.attemptsMu.Unlock()
 		if active == 0 {
 			break
 		}
 		select {
 		case <-ticker.C:
 		case <-ctx.Done():
-			m.workersMu.Lock()
-			for _, worker := range m.workers {
-				if worker != nil {
-					worker.cancel()
+			m.attemptsMu.Lock()
+			for _, attempt := range m.activeAttempts {
+				if attempt != nil {
+					attempt.cancel()
 				}
 			}
-			m.workersMu.Unlock()
+			m.attemptsMu.Unlock()
 			closeErr = ctx.Err()
 			goto closed
 		}
@@ -517,13 +522,13 @@ func (m *Manager) closedError() error {
 
 const canceledError = "task was canceled"
 
-func eventTypeForStatus(status Status) TaskEventType {
-	switch status {
-	case StatusCompleted:
+func eventTypeForState(state State) TaskEventType {
+	switch state {
+	case StateCompleted:
 		return TaskEventCompleted
-	case StatusFailed:
+	case StateFailed:
 		return TaskEventFailed
-	case StatusCanceled:
+	case StateCanceled:
 		return TaskEventCanceled
 	default:
 		return ""
@@ -533,10 +538,9 @@ func eventTypeForStatus(status Status) TaskEventType {
 func cloneTask(t *Task) *Task {
 	clone := *t
 	clone.Spec = cloneSpec(t.Spec)
-	clone.Checkpoint = cloneCheckpoint(t.Checkpoint)
-	clone.ResultRef = cloneResult(t.ResultRef)
-	clone.LatestProgress = cloneProgress(t.LatestProgress)
-	clone.ResumeData = append([]byte(nil), t.ResumeData...)
+	clone.Checkpoint = cloneBytes(t.Checkpoint)
+	clone.Result = cloneResult(t.Result)
+	clone.PendingResume = clonePendingResume(t.PendingResume)
 	clone.CancelRequestedAt = cloneTime(t.CancelRequestedAt)
 	clone.DoneAt = cloneTime(t.DoneAt)
 	return &clone
@@ -572,7 +576,7 @@ type TaskInfo struct {
 // abandoned foreground wait stops it, or when the Manager is closed. Work should
 // honor it.
 //
-// The returned result becomes the canonical ResultRef payload; a non-nil error
+// The returned result becomes the canonical completed Result.Data; a non-nil error
 // transitions the task to failed.
 type WorkFunc func(ctx context.Context, task TaskInfo) (result string, err error)
 
@@ -596,14 +600,14 @@ func (c detachedCtx) Value(key any) any { return c.parent.Value(key) }
 // The execution mode depends on input.RunInBackground and the effective foreground
 // timeout (input.ForegroundTimeoutMs if set, else the Manager's configured default):
 //   - Foreground (RunInBackground=false, timeout<=0): blocks until completion
-//   - Background (RunInBackground=true): returns an initial StatusRunning snapshot
+//   - Background (RunInBackground=true): returns an initial StateRunning snapshot
 //     without waiting for work. The task may complete immediately afterward; use
 //     Get or task events to observe its current state.
 //   - Deadline (timeout>0): runs in foreground up to the timeout, then — if still
 //     running — consults the Manager's ShouldAutoBackground hook. If it permits,
 //     the run is moved to the background (kept running) and Run returns
-//     StatusRunning. Otherwise the run is canceled and reported as timed out
-//     (StatusFailed).
+//     StateRunning. Otherwise the run is canceled and reported as timed out
+//     (StateFailed).
 //
 // All runs are tracked in Manager state and visible via Get/List.
 func (m *Manager) Run(ctx context.Context, input *RunInput, work WorkFunc) (*Task, error) {
@@ -620,7 +624,7 @@ func (m *Manager) Run(ctx context.Context, input *RunInput, work WorkFunc) (*Tas
 		defer m.local.remove(id)
 		executeErr := m.Execute(detachedCtx{parent: ctx}, id)
 		if current, getErr := m.store.Get(context.Background(), id); getErr == nil {
-			m.sendTaskEvent(current, eventTypeForStatus(current.Status))
+			m.sendTaskEvent(current, eventTypeForState(current.Status))
 		}
 		done <- executeErr
 	}()
@@ -698,7 +702,7 @@ func (m *Manager) sendTaskEvent(task *Task, eventType TaskEventType) {
 // StreamWorkFunc performs a single managed streaming execution. It is the
 // streaming counterpart of WorkFunc: instead of returning the whole result at
 // once, it returns output chunks. Manager projects those chunks live and
-// concatenates them into the canonical ResultRef.
+// concatenates them into the canonical completed Result.Data.
 //
 // task behaves exactly as for WorkFunc (see TaskInfo): it carries the task id the
 // work uses to report an output-file write failure.
@@ -727,14 +731,14 @@ type StreamWorkFunc func(ctx context.Context, task TaskInfo) (*schema.StreamRead
 //   - Auto-background at the deadline: chunks forwarded so far are kept; the
 //     Manager appends a single notice chunk (task id) and closes the
 //     caller's stream, while the work keeps running in the background — its
-//     remaining output is drained into the task's ResultRef.
+//     remaining output is drained into the task's Result.Data.
 //   - Explicit background (input.RunInBackground): the work runs detached from the
 //     start. By default no execution chunks reach the caller; when
 //     input.BackgroundStartupPreviewMs is positive, chunks emitted during that
 //     bounded startup window are forwarded. If work finishes during the preview,
 //     all chunks are forwarded and the stream closes with no background notice.
 //     Otherwise the notice ends the preview and the remaining output is drained
-//     into the task's ResultRef.
+//     into the task's Result.Data.
 //
 // The foreground and preview windows are both measured from when the work returns
 // its stream reader (see StreamWorkFunc), not from this call: RunStream's forwarding
@@ -807,14 +811,6 @@ func (m *Manager) runStreamProjection(
 					chunks <- streamChunk{err: recvErr}
 					closeChunks()
 					return "", recvErr
-				}
-				if reportErr := ReportUpdate(
-					workCtx, "eino.dev/process-local-stream", "text/plain",
-					[]byte(chunk), "text/plain",
-				); reportErr != nil {
-					chunks <- streamChunk{err: reportErr}
-					closeChunks()
-					return "", reportErr
 				}
 				output.WriteString(chunk)
 				chunks <- streamChunk{text: chunk}
@@ -941,9 +937,6 @@ func defaultBackgroundNotice(info NoticeInfo) string {
 	id, kind := "", ""
 	if info.Task != nil {
 		id = info.Task.Spec.ID
-		if info.Task.Spec.Type != "" {
-			kind = " (" + info.Task.Spec.Type + ")"
-		}
 	}
 
 	state := "is running in the background"

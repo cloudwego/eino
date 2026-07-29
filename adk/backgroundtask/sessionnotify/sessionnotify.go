@@ -137,29 +137,44 @@ func cloneItem(item *backgroundtask.SessionInboxItem) *backgroundtask.SessionInb
 
 func cloneNotification(notification backgroundtask.TaskNotification) backgroundtask.TaskNotification {
 	cloned := notification
-	if notification.Progress != nil {
-		progress := *notification.Progress
-		if progress.Current != nil {
-			value := *progress.Current
-			progress.Current = &value
-		}
-		if progress.Total != nil {
-			value := *progress.Total
-			progress.Total = &value
-		}
-		cloned.Progress = &progress
+	cloned.Task = cloneTaskSnapshot(notification.Task)
+	return cloned
+}
+
+func cloneTaskSnapshot(task *backgroundtask.Task) *backgroundtask.Task {
+	if task == nil {
+		return nil
 	}
-	if notification.Result != nil {
-		result := *notification.Result
-		if notification.Result.Value.Payload != nil {
-			result.Value.Payload = make([]byte, len(notification.Result.Value.Payload))
-			copy(result.Value.Payload, notification.Result.Value.Payload)
+	cloned := *task
+	cloned.Spec.Payload = append([]byte(nil), task.Spec.Payload...)
+	if task.Spec.Notify != nil {
+		target := *task.Spec.Notify
+		target.Metadata = make(map[string]string, len(task.Spec.Notify.Metadata))
+		for key, value := range task.Spec.Notify.Metadata {
+			target.Metadata[key] = value
 		}
-		if notification.Result.Value.Ref != nil {
-			ref := *notification.Result.Value.Ref
-			result.Value.Ref = &ref
-		}
+		cloned.Spec.Notify = &target
+	}
+	if task.Result != nil {
+		result := *task.Result
+		result.Data = append([]byte(nil), task.Result.Data...)
 		cloned.Result = &result
 	}
-	return cloned
+	cloned.Checkpoint = append([]byte(nil), task.Checkpoint...)
+	if task.PendingResume != nil {
+		pending := *task.PendingResume
+		pending.Data = append([]byte(nil), task.PendingResume.Data...)
+		cloned.PendingResume = &pending
+	}
+	cloned.CancelRequestedAt = cloneTime(task.CancelRequestedAt)
+	cloned.DoneAt = cloneTime(task.DoneAt)
+	return &cloned
+}
+
+func cloneTime(value *time.Time) *time.Time {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	return &cloned
 }

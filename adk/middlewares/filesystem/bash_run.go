@@ -33,14 +33,8 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
-// ExecuteTaskType is the backgroundtask Spec.Type tag for shell-command tasks
-// launched by the execute tool. A shared Manager's ShouldAutoBackground hook can
-// match on it to apply shell-specific policy, recovering the command via
-// CommandFromTask.
-//
-// When the filesystem middleware is configured with both a Backend and an
-// OutputDir, the managed execute tool writes each task's output to a file under
-// that directory and reports path/reliability as typed task updates.
+// ExecuteTaskType identifies shell-command tasks in host-side policy. The core
+// backgroundtask Spec does not persist display/filter labels.
 const ExecuteTaskType = "bash"
 
 // defaultBashStartupPreviewMs is the caller-visible startup window for an
@@ -51,7 +45,7 @@ const defaultBashStartupPreviewMs = 1_000
 
 // CommandFromTask returns the process-local shell task description.
 func CommandFromTask(t *backgroundtask.Task) string {
-	if t == nil || t.Spec.Type != ExecuteTaskType {
+	if t == nil || t.Spec.ExecutorKey == "" {
 		return ""
 	}
 	return t.Spec.Description
@@ -91,8 +85,8 @@ type bashOutputWriter struct {
 // empty up front (open+close, which creates the file on open) so the advertised path
 // exists before any output; if even that reservation fails, it returns a disabled
 // writer so the task advertises no output file and consumers fall back to the
-// in-memory Result. The file is named after the launching tool-call id (so it matches
-// Task.ToolUseID), falling back to a uuid when no tool-call id is in context.
+// in-memory Result. The file is named after the launching tool-call id, falling
+// back to a uuid when no tool-call id is in context.
 //
 // The streaming append session is not opened here: it is opened by the work func
 // (see open) under the work's context, so it survives the run being backgrounded.
@@ -126,18 +120,12 @@ func (w *bashOutputWriter) report(reliable bool, failure string) error {
 	if w.path == "" || w.ctx == nil {
 		return nil
 	}
-	payload, err := json.Marshal(struct {
+	_, err := json.Marshal(struct {
 		Path     string `json:"path"`
 		Reliable bool   `json:"reliable"`
 		Error    string `json:"error,omitempty"`
 	}{Path: w.path, Reliable: reliable, Error: failure})
-	if err != nil {
-		return err
-	}
-	return backgroundtask.ReportUpdate(
-		w.ctx, "eino.dev/filesystem_output", "eino.dev/filesystem_output",
-		payload, "application/json",
-	)
+	return err
 }
 
 // open opens the streaming append session for a streaming run. ctx is the work's
@@ -206,9 +194,9 @@ func (w *bashOutputWriter) appendResult(ctx context.Context, content string) err
 }
 
 // outputFileName returns the base name (without extension) for a task's output
-// file: the launching tool-call id when present (so the file matches
-// Task.ToolUseID), or a uuid fallback when no tool-call id is in context — the
-// fallback keeps names unique so concurrent untagged tasks don't collide.
+// file: the launching tool-call id when present, or a uuid fallback when no
+// tool-call id is in context. The fallback keeps names unique so concurrent
+// untagged tasks don't collide.
 func outputFileName(ctx context.Context) string {
 	if id := compose.GetToolCallID(ctx); id != "" {
 		return id
@@ -220,7 +208,7 @@ func outputFileName(ctx context.Context) string {
 // The request carries only the command; the Manager is the sole owner of
 // foreground/background/auto-background switching, so no background hint is
 // pushed down to the backend. On success it appends the result to the output file
-// (when one is configured) before returning, so it matches ResultRef.
+// (when one is configured) before returning, so it matches Result.Data.
 func bashWork(sb filesystem.Shell, req *filesystem.ExecuteRequest, w *bashOutputWriter) backgroundtask.WorkFunc {
 	return func(ctx context.Context, _ backgroundtask.TaskInfo) (string, error) {
 		result, err := sb.Execute(ctx, req)
@@ -359,11 +347,10 @@ func newManagedExecuteTool(
 // managedRunInput builds the RunInput shared by the buffered and streaming managed
 // execute tools. w supplies the reserved output-file path (empty when output files
 // are not configured), which the work funcs write to.
-func managedRunInput(ctx context.Context, input executeManagedArgs) *backgroundtask.RunInput {
+func managedRunInput(input executeManagedArgs) *backgroundtask.RunInput {
 	runInput := &backgroundtask.RunInput{
 		Description:     input.Command,
 		Type:            ExecuteTaskType,
-		ToolUseID:       compose.GetToolCallID(ctx),
 		RunInBackground: input.RunInBackground,
 	}
 	// A positive timeout overrides the Manager's default foreground timeout for
@@ -379,17 +366,17 @@ func newManagedBufferedExecuteTool(mgr *backgroundtask.Manager, sb filesystem.Sh
 	return utils.InferTool(toolName, desc, func(ctx context.Context, input executeManagedArgs) (string, error) {
 		req := &filesystem.ExecuteRequest{Command: input.Command}
 		w := reserveBashOutput(ctx, sink)
-		result, err := mgr.Run(ctx, managedRunInput(ctx, input), bashWork(sb, req, w))
+		result, err := mgr.Run(ctx, managedRunInput(input), bashWork(sb, req, w))
 		if err != nil {
 			return "", err
 		}
 
 		switch result.Status {
 		case backgroundtask.StatusCompleted:
-			if result.ResultRef == nil || result.ResultRef.Value.Payload == nil {
-				return "", fmt.Errorf("execute task %q completed without an inline result", result.Spec.ID)
+			if result.Result == nil || result.Result.Data == nil {
+				return "", fmt.Errorf("execute task %q completed without a result", result.Spec.ID)
 			}
-			return string(result.ResultRef.Value.Payload), nil
+			return string(result.Result.Data), nil
 		case backgroundtask.StatusPending, backgroundtask.StatusRunning,
 			backgroundtask.StatusWaitingInput, backgroundtask.StatusSuspended, backgroundtask.StatusCanceling:
 			msg := fmt.Sprintf("Command task %s is %s.", result.Spec.ID, result.Status)
@@ -402,7 +389,7 @@ func newManagedBufferedExecuteTool(mgr *backgroundtask.Manager, sb filesystem.Sh
 			}
 			return msg, nil
 		case backgroundtask.StatusFailed:
-			return "", fmt.Errorf("execute task %q failed: %s", result.Spec.ID, result.TerminalReason)
+			return "", fmt.Errorf("execute task %q failed: %s", result.Spec.ID, result.Result.Error)
 		case backgroundtask.StatusCanceled:
 			return "", fmt.Errorf("execute task %q was canceled", result.Spec.ID)
 		default:
@@ -415,7 +402,7 @@ func newManagedStreamingExecuteTool(mgr *backgroundtask.Manager, streaming files
 	return utils.InferStreamTool(toolName, desc, func(ctx context.Context, input executeManagedArgs) (*schema.StreamReader[string], error) {
 		req := &filesystem.ExecuteRequest{Command: input.Command}
 		w := reserveBashOutput(ctx, sink)
-		runInput := managedRunInput(ctx, input)
+		runInput := managedRunInput(input)
 		runInput.BackgroundStartupPreviewMs = defaultBashStartupPreviewMs
 		// RunStream owns the returned stream: it forwards work chunks to this caller
 		// in real time. An explicit background launch exposes only its bounded startup

@@ -81,11 +81,11 @@ func terminalTask(t *testing.T, mgr *backgroundtask.Manager) *backgroundtask.Tas
 	require.NoError(t, err)
 	for i := len(result.Deliveries) - 1; i >= 0; i-- {
 		record := result.Deliveries[i].Record
-		if record.Status == backgroundtask.StatusCompleted ||
-			record.Status == backgroundtask.StatusFailed ||
-			record.Status == backgroundtask.StatusCanceled {
-			task, getErr := mgr.GetTask(context.Background(), record.TaskID)
-			require.NoError(t, getErr)
+		task, getErr := mgr.GetTask(context.Background(), record.TaskID)
+		require.NoError(t, getErr)
+		if task.Status == backgroundtask.StateCompleted ||
+			task.Status == backgroundtask.StateFailed ||
+			task.Status == backgroundtask.StateCanceled {
 			return task
 		}
 	}
@@ -165,13 +165,9 @@ func TestDurableAgentToolForeground(t *testing.T) {
 	assert.Contains(t, result, "durable result")
 	task := terminalTask(t, mgr)
 	require.NotNil(t, task)
-	assert.Equal(t, backgroundtask.StatusCompleted, task.Status)
-	require.NotNil(t, task.ResultRef)
-	updates, err := mgr.ListTaskUpdates(ctx, &backgroundtask.ListTaskUpdatesRequest{
-		TaskID: task.Spec.ID, Limit: 100,
-	})
-	require.NoError(t, err)
-	assert.GreaterOrEqual(t, len(updates.Updates), 4)
+	assert.Equal(t, backgroundtask.StateCompleted, task.Status)
+	require.NotNil(t, task.Result)
+	assert.Contains(t, string(task.Result.Data), "durable result")
 }
 
 func TestDurableAgentToolBackgroundSurvivesCaller(t *testing.T) {
@@ -193,7 +189,7 @@ func TestDurableAgentToolBackgroundSurvivesCaller(t *testing.T) {
 	assert.True(t, strings.Contains(result, "ID:"))
 	require.Eventually(t, func() bool {
 		task := terminalTask(t, mgr)
-		return task != nil && task.Status == backgroundtask.StatusCompleted
+		return task != nil && task.Status == backgroundtask.StateCompleted
 	}, time.Second, 10*time.Millisecond)
 }
 

@@ -18,8 +18,6 @@ package backgroundtask
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"runtime/debug"
@@ -29,26 +27,10 @@ import (
 )
 
 const (
-	processLocalExecutorKey    = "eino.dev/process-local"
-	processLocalPayloadVersion = "v1"
+	processLocalExecutorKey = "eino.dev/process-local"
 )
 
 type processLocalRuntimeKey struct{}
-
-// ReportUpdate appends a namespaced durable update when ctx belongs to a
-// process-local Manager execution.
-func ReportUpdate(ctx context.Context, kind, payloadType string, payload []byte, encoding string) error {
-	runtime, ok := ctx.Value(processLocalRuntimeKey{}).(Runtime)
-	if !ok {
-		return errors.New("backgroundtask: context is not a process-local execution")
-	}
-	var value *UpdatePayload
-	if payload != nil {
-		artifact := inlineArtifact(payload, encoding)
-		value = &UpdatePayload{Type: payloadType, Value: artifact}
-	}
-	return runtime.ReportUpdate(ctx, &ReportUpdateRequest{Kind: UpdateKind(kind), Payload: value})
-}
 
 type localWork struct {
 	work         WorkFunc
@@ -75,10 +57,7 @@ func newProcessLocalExecutor() *processLocalExecutor {
 
 func (e *processLocalExecutor) Key() string { return processLocalExecutorKey }
 func (e *processLocalExecutor) Capabilities() []ExecutorCapability {
-	return []ExecutorCapability{{
-		ExecutorKey:    processLocalExecutorKey,
-		PayloadVersion: processLocalPayloadVersion,
-	}}
+	return []ExecutorCapability{{ExecutorKey: processLocalExecutorKey}}
 }
 
 func (e *processLocalExecutor) register(token string, work WorkFunc) (*localWork, error) {
@@ -105,8 +84,7 @@ func (e *processLocalExecutor) remove(token string) {
 }
 
 func (e *processLocalExecutor) resolve(spec Spec) (*localWork, error) {
-	if spec.ExecutorKey != processLocalExecutorKey || spec.PayloadVersion != processLocalPayloadVersion ||
-		len(spec.Payload) == 0 {
+	if spec.ExecutorKey != processLocalExecutorKey || len(spec.Payload) == 0 {
 		return nil, errors.New("backgroundtask: invalid process-local task spec")
 	}
 	e.mu.Lock()
@@ -123,20 +101,27 @@ func (e *processLocalExecutor) Validate(spec Spec) error {
 	return err
 }
 
-func (e *processLocalExecutor) ValidateResume(context.Context, *ValidateResumeRequest) (*ValidateResumeResult, error) {
+func (e *processLocalExecutor) ValidateCheckpoint(context.Context, Spec, []byte) error {
+	return errors.New("backgroundtask: process-local tasks do not support checkpoints")
+}
+
+func (e *processLocalExecutor) ValidateResume(context.Context, Spec, []byte, []byte) ([]byte, error) {
 	return nil, errors.New("backgroundtask: process-local tasks cannot resume")
 }
 
-func (e *processLocalExecutor) Execute(ctx context.Context, req ExecutionRequest, runtime Runtime) Outcome {
-	entry, err := e.resolve(req.Task)
+func (e *processLocalExecutor) Execute(ctx context.Context, task *Task, runtime Runtime) (*ExecutionResult, error) {
+	if task.Attempt > 1 && len(task.Checkpoint) == 0 {
+		return nil, errors.New("backgroundtask: process-local task cannot restart without a checkpoint")
+	}
+	entry, err := e.resolve(task.Spec)
 	if err != nil {
-		return Outcome{Kind: OutcomeFailed, Err: err}
+		return nil, err
 	}
 	entry.markStarted()
 	select {
 	case <-entry.proceed:
 	case <-ctx.Done():
-		return Outcome{Kind: OutcomeFailed, Err: ctx.Err()}
+		return nil, ctx.Err()
 	}
 	workCtx, cancel := context.WithCancel(context.WithValue(ctx, processLocalRuntimeKey{}, runtime))
 	defer cancel()
@@ -154,48 +139,36 @@ func (e *processLocalExecutor) Execute(ctx context.Context, req ExecutionRequest
 			resultCh <- result
 		}()
 		result.value, result.err = entry.work(
-			workCtx, TaskInfo{ID: req.Task.ID, Backgrounded: entry.backgrounded},
+			workCtx, TaskInfo{ID: task.Spec.ID, Backgrounded: entry.backgrounded},
 		)
 	}()
 
 	select {
 	case result := <-resultCh:
 		if result.err != nil {
-			return Outcome{Kind: OutcomeFailed, Err: result.err}
+			return nil, result.err
 		}
-		value := inlineArtifact([]byte(result.value), "text/plain")
-		return Outcome{
-			Kind: OutcomeCompleted, Result: &ResultRef{Format: req.Task.Result.ResultFormat, Value: value},
-		}
+		return &ExecutionResult{
+			Status: StatusCompleted,
+			Result: &Result{Data: []byte(result.value)},
+		}, nil
 	case control := <-runtime.Controls():
 		cancel()
 		<-resultCh
 		if control.Kind == ControlStop {
-			return Outcome{Kind: OutcomeCanceled, TerminalReason: canceledError}
+			return &ExecutionResult{
+				Status: StatusCanceled,
+				Result: &Result{Error: canceledError},
+			}, nil
 		}
-		return Outcome{
-			Kind: OutcomeFailed, TerminalReason: "process_local_task_cannot_be_recovered_after_drain",
-		}
-	}
-}
-
-func inlineArtifact(payload []byte, encoding string) ArtifactValue {
-	sum := sha256.Sum256(payload)
-	return ArtifactValue{
-		Payload: cloneBytes(payload), Encoding: encoding,
-		Digest: "sha256:" + hex.EncodeToString(sum[:]), Size: int64(len(payload)),
+		return nil, ErrCheckpointUnavailable
 	}
 }
 
 func processLocalSpec(id string, input *RunInput) Spec {
 	return Spec{
-		ID: id, ExecutorKey: processLocalExecutorKey, PayloadVersion: processLocalPayloadVersion,
-		Payload: []byte(id),
-		Type:    input.Type, Description: input.Description, ToolUseID: input.ToolUseID,
-		Recovery: RecoveryPolicy{
-			OnLeaseExpired: RecoveryFail, OnMissingCheckpoint: RecoveryFail, MaxAttempts: 1,
-		},
-		Result: ResultPolicy{ResultFormat: "text/plain"},
+		ID: id, ExecutorKey: processLocalExecutorKey, Payload: []byte(id),
+		Description: input.Description,
 	}
 }
 

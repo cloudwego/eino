@@ -22,11 +22,11 @@ import (
 	"time"
 )
 
-var managerWorkerSequence atomic.Uint64
+var managerInstanceSequence atomic.Uint64
 
-func newManagerWorkerID() string {
+func newManagerInstanceID() string {
 	return "manager-" + base62(time.Now().UnixNano()) + "-" +
-		base62(int64(managerWorkerSequence.Add(1)))
+		base62(int64(managerInstanceSequence.Add(1)))
 }
 
 // Task-id layout: a positive int64 (63 usable bits) packed as

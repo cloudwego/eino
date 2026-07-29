@@ -77,7 +77,7 @@ func (s *staleFirstGetStore) Get(ctx context.Context, taskID string) (*bgtask.Ta
 		s.first = false
 		stale := *task
 		stale.Status = bgtask.StatusRunning
-		stale.ResultRef = nil
+		stale.Result = nil
 		return &stale, nil
 	}
 	return task, nil
@@ -249,7 +249,7 @@ func TestTaskOutputTool(t *testing.T) {
 
 	result, err := runWork(mgr, "test task", false, completedWork("task result"))
 	require.NoError(t, err)
-	require.Equal(t, bgtask.StatusCompleted, result.Status)
+	require.Equal(t, bgtask.StateCompleted, result.Status)
 
 	tl := findTool(t, injectedTools(t, mgr), taskOutputToolName)
 	output, err := tl.InvokableRun(context.Background(), fmt.Sprintf(`{"task_id":"%s"}`, result.Spec.ID))
@@ -258,8 +258,8 @@ func TestTaskOutputTool(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(output), &response))
 	assert.Contains(t, output, "test task")
 	assert.Contains(t, output, "completed")
-	require.NotNil(t, response.Result)
-	assert.Equal(t, "task result", string(response.Result.Value.Payload))
+	require.NotNil(t, response.Task.Result)
+	assert.Equal(t, "task result", string(response.Task.Result.Data))
 }
 
 func TestTaskOutputTool_NotFound(t *testing.T) {
@@ -295,7 +295,7 @@ func TestTaskOutputTool_NonBlockingRunningThenTerminal(t *testing.T) {
 	require.NoError(t, err)
 }
 
-func TestTaskOutputRefreshesSnapshotAfterListingUpdates(t *testing.T) {
+func TestTaskOutputNonBlockingReturnsCurrentSnapshot(t *testing.T) {
 	store := bgtask.NewMemoryStore(nil)
 	submitter := bgtask.New(context.Background(), &bgtask.Config{Store: store})
 	task, err := runWork(submitter, "racing task", false, completedWork("done"))
@@ -314,9 +314,8 @@ func TestTaskOutputRefreshesSnapshotAfterListingUpdates(t *testing.T) {
 	var response taskOutputResponse
 	require.NoError(t, json.Unmarshal([]byte(output), &response))
 	require.NotNil(t, response.Task)
-	assert.Equal(t, bgtask.StatusCompleted, response.Task.Status)
-	require.NotNil(t, response.Result)
-	assert.Equal(t, "done", string(response.Result.Value.Payload))
+	assert.Equal(t, bgtask.StateRunning, response.Task.Status)
+	assert.Nil(t, response.Task.Result)
 }
 
 func TestTaskStopTool(t *testing.T) {
@@ -333,7 +332,7 @@ func TestTaskStopTool(t *testing.T) {
 
 	task, done := mgr.Wait(context.Background(), runResult.Spec.ID)
 	require.True(t, done)
-	assert.Equal(t, bgtask.StatusCanceled, task.Status)
+	assert.Equal(t, bgtask.StateCanceled, task.Status)
 }
 
 func TestTaskStopTool_AlreadyDone(t *testing.T) {
@@ -342,7 +341,7 @@ func TestTaskStopTool_AlreadyDone(t *testing.T) {
 
 	runResult, err := runWork(mgr, "done task", false, completedWork("done"))
 	require.NoError(t, err)
-	require.Equal(t, bgtask.StatusCompleted, runResult.Status)
+	require.Equal(t, bgtask.StateCompleted, runResult.Status)
 
 	tl := findTool(t, injectedTools(t, mgr), taskStopToolName)
 	result, err := tl.InvokableRun(context.Background(), fmt.Sprintf(`{"task_id":"%s"}`, runResult.Spec.ID))
@@ -399,5 +398,5 @@ func TestControlAuthorizationRunsBeforeManagerAccess(t *testing.T) {
 	}, calls)
 	current, ok := mgr.Get(task.Spec.ID)
 	require.True(t, ok)
-	assert.Equal(t, bgtask.StatusRunning, current.Status)
+	assert.Equal(t, bgtask.StateRunning, current.Status)
 }

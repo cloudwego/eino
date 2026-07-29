@@ -29,7 +29,6 @@ import (
 	"github.com/cloudwego/eino/adk/internal"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/components/tool/utils"
-	"github.com/cloudwego/eino/compose"
 )
 
 const (
@@ -113,7 +112,7 @@ func newDurableAgentTool[M adk.MessageType](
 		}
 		task, err := durablesubagent.Submit(callCtx, config.Manager, &durablesubagent.SubmitRequest{
 			Agent: ref, Prompt: prompt, Description: in.Description,
-			SessionID: sessionID, ToolUseID: compose.GetToolCallID(callCtx),
+			SessionID: sessionID,
 		})
 		if err != nil {
 			return "", err
@@ -139,10 +138,10 @@ func newDurableAgentTool[M adk.MessageType](
 func formatDurableTaskResult(agentType string, task *backgroundtask.Task) (string, error) {
 	switch task.Status {
 	case backgroundtask.StatusCompleted:
-		if task.ResultRef == nil || task.ResultRef.Value.Payload == nil {
-			return "", errors.New("subagent: completed task has no inline result")
+		if task.Result == nil || task.Result.Data == nil {
+			return "", errors.New("subagent: completed task has no result")
 		}
-		return string(task.ResultRef.Value.Payload), nil
+		return string(task.Result.Data), nil
 	case backgroundtask.StatusWaitingInput:
 		return fmt.Sprintf("Agent task %s requires input. Use task_output to inspect the request.", task.Spec.ID), nil
 	case backgroundtask.StatusSuspended, backgroundtask.StatusPending, backgroundtask.StatusRunning, backgroundtask.StatusCanceling:
@@ -150,7 +149,7 @@ func formatDurableTaskResult(agentType string, task *backgroundtask.Task) (strin
 	case backgroundtask.StatusCanceled:
 		return "", fmt.Errorf("subagent %q task %q was canceled", agentType, task.Spec.ID)
 	case backgroundtask.StatusFailed:
-		return "", fmt.Errorf("subagent %q task %q failed: %s", agentType, task.Spec.ID, task.TerminalReason)
+		return "", fmt.Errorf("subagent %q task %q failed: %s", agentType, task.Spec.ID, task.Result.Error)
 	default:
 		return "", fmt.Errorf("subagent %q task %q has unknown status %q", agentType, task.Spec.ID, task.Status)
 	}

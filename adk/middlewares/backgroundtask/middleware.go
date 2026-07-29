@@ -219,10 +219,8 @@ type taskOutputInput struct {
 	TaskID string `json:"task_id" jsonschema:"required" jsonschema_description:"The task ID to get output from"`
 	// Block defaults to true (wait for the task to finish). A *bool distinguishes
 	// "omitted" (wait) from an explicit false (return the current status now).
-	Block         *bool `json:"block,omitempty" jsonschema_description:"Whether to wait for the task to complete. Defaults to true; set false to return the current status immediately."`
-	Timeout       int   `json:"timeout,omitempty" jsonschema_description:"Maximum time to wait in milliseconds when blocking. Defaults to 30000; capped at 600000."`
-	AfterSequence int64 `json:"after_sequence,omitempty" jsonschema_description:"Exclusive update cursor. Defaults to zero."`
-	Limit         int   `json:"limit,omitempty" jsonschema_description:"Maximum updates to return. Defaults to 100."`
+	Block   *bool `json:"block,omitempty" jsonschema_description:"Whether to wait for the task to complete. Defaults to true; set false to return the current status immediately."`
+	Timeout int   `json:"timeout,omitempty" jsonschema_description:"Maximum time to wait in milliseconds when blocking. Defaults to 30000; capped at 600000."`
 }
 
 const (
@@ -250,31 +248,12 @@ func newTaskOutputTool(mgr *bgtask.Manager, authorize AuthorizeFunc, cfg *ToolCo
 }
 
 type taskOutputResponse struct {
-	Task         *bgtask.Task      `json:"task"`
-	Updates      []*bgtask.Update  `json:"updates"`
-	NextSequence int64             `json:"next_sequence"`
-	Result       *bgtask.ResultRef `json:"result,omitempty"`
+	Task *bgtask.Task `json:"task"`
 }
 
 func resolveDurableTask(ctx context.Context, mgr *bgtask.Manager, task *bgtask.Task, input taskOutputInput) (string, error) {
-	limit := input.Limit
-	if limit <= 0 || limit > 1000 {
-		limit = 100
-	}
-	updates, err := mgr.ListTaskUpdates(ctx, &bgtask.ListTaskUpdatesRequest{
-		TaskID: input.TaskID, AfterSequence: input.AfterSequence, Limit: limit,
-	})
-	if err != nil {
-		return "", err
-	}
-	// Refresh after listing so the snapshot cannot be older than updates returned
-	// by the same response.
-	task, err = mgr.GetTask(ctx, input.TaskID)
-	if err != nil {
-		return "", err
-	}
 	block := input.Block == nil || *input.Block
-	if block && len(updates.Updates) == 0 && !isTerminal(task.Status) {
+	if block && !isTerminal(task.Status) {
 		timeout := input.Timeout
 		if timeout <= 0 {
 			timeout = defaultTaskOutputTimeoutMs
@@ -284,18 +263,20 @@ func resolveDurableTask(ctx context.Context, mgr *bgtask.Manager, task *bgtask.T
 		}
 		waitCtx, cancel := context.WithTimeout(ctx, time.Duration(timeout)*time.Millisecond)
 		defer cancel()
-		updates, err = mgr.WaitTaskUpdates(waitCtx, &bgtask.WaitTaskUpdatesRequest{
-			TaskID: input.TaskID, AfterSequence: input.AfterSequence, Limit: limit,
-		})
-		if err != nil && !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
-			return "", err
+		for !isTerminal(task.Status) {
+			next, waitErr := mgr.WaitTask(waitCtx, &bgtask.WaitTaskRequest{
+				TaskID: input.TaskID, AfterVersion: task.TransitionVersion,
+			})
+			if waitErr != nil {
+				if errors.Is(waitErr, context.DeadlineExceeded) || errors.Is(waitErr, context.Canceled) {
+					break
+				}
+				return "", waitErr
+			}
+			task = next
 		}
-		task, _ = mgr.GetTask(ctx, input.TaskID)
 	}
-	response := taskOutputResponse{Task: task, Updates: updates.Updates, NextSequence: updates.NextSequence}
-	if task != nil && task.Status == bgtask.StatusCompleted {
-		response.Result = task.ResultRef
-	}
+	response := taskOutputResponse{Task: task}
 	data, err := json.Marshal(response)
 	return string(data), err
 }

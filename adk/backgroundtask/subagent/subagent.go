@@ -18,13 +18,12 @@ package subagent
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/adk/backgroundtask"
@@ -33,7 +32,7 @@ import (
 
 const (
 	ExecutorKey    = "eino.dev/subagent"
-	PayloadVersion = "v1"
+	payloadVersion = 1
 )
 
 type ResumeMode string
@@ -52,6 +51,7 @@ type AgentRef struct {
 }
 
 type TaskPayload struct {
+	Version          int        `json:"version"`
 	Agent            AgentRef   `json:"agent"`
 	Prompt           []byte     `json:"prompt"`
 	PromptEncoding   string     `json:"prompt_encoding"`
@@ -66,6 +66,7 @@ type checkpointState struct {
 	TargetIDs    []string   `json:"target_ids"`
 	AllowEmpty   bool       `json:"allow_empty"`
 	Mode         ResumeMode `json:"mode"`
+	Sequence     int64      `json:"sequence"`
 }
 
 type AgentRegistry[M adk.MessageType] struct {
@@ -139,10 +140,7 @@ type Executor[M adk.MessageType] struct {
 
 func (e *Executor[M]) Key() string { return ExecutorKey }
 func (e *Executor[M]) Capabilities() []backgroundtask.ExecutorCapability {
-	return []backgroundtask.ExecutorCapability{{
-		ExecutorKey:    ExecutorKey,
-		PayloadVersion: PayloadVersion,
-	}}
+	return []backgroundtask.ExecutorCapability{{ExecutorKey: ExecutorKey}}
 }
 
 func (e *Executor[M]) Validate(spec backgroundtask.Spec) error {
@@ -158,12 +156,12 @@ func (e *Executor[M]) Validate(spec backgroundtask.Spec) error {
 }
 
 func validateSpecPayload(spec backgroundtask.Spec) (*TaskPayload, error) {
-	if spec.PayloadVersion != PayloadVersion {
-		return nil, errors.New("backgroundtask/subagent: unsupported payload version")
-	}
 	payload, err := decodePayload(spec)
 	if err != nil {
 		return nil, err
+	}
+	if payload.Version != payloadVersion {
+		return nil, errors.New("backgroundtask/subagent: unsupported payload version")
 	}
 	if payload.ChildSessionID == "" || payload.CheckpointID == "" ||
 		payload.ChildSessionID != spec.ID+"/session" || payload.CheckpointID != spec.ID+"/checkpoint" {
@@ -178,63 +176,60 @@ func validateSpecPayload(spec backgroundtask.Spec) (*TaskPayload, error) {
 	return payload, nil
 }
 
-func (e *Executor[M]) ValidateCheckpoint(spec backgroundtask.Spec, checkpoint *backgroundtask.CheckpointRef) error {
+func (e *Executor[M]) ValidateCheckpoint(
+	_ context.Context,
+	spec backgroundtask.Spec,
+	checkpoint []byte,
+) error {
 	payload, err := validateSpecPayload(spec)
 	if err != nil {
 		return err
 	}
-	if checkpoint == nil ||
-		checkpoint.ExecutorKey != ExecutorKey ||
-		checkpoint.Format != "eino.runner" ||
-		checkpoint.Version != "v1" ||
-		checkpoint.State.Payload == nil ||
-		checkpoint.State.Ref != nil {
+	if len(checkpoint) == 0 {
 		return errors.New("backgroundtask/subagent: compatible checkpoint is required")
 	}
 	var state checkpointState
-	if err = json.Unmarshal(checkpoint.State.Payload, &state); err != nil ||
+	if err = json.Unmarshal(checkpoint, &state); err != nil ||
 		state.CheckpointID == "" ||
 		state.CheckpointID != payload.CheckpointID ||
 		state.Mode != payload.ResumeMode ||
-		state.AllowEmpty != payload.AllowEmptyResume {
+		state.AllowEmpty != payload.AllowEmptyResume ||
+		state.Sequence <= 0 {
 		return errors.New("backgroundtask/subagent: checkpoint state does not match task")
 	}
 	return nil
 }
 
-func (e *Executor[M]) ValidateResume(_ context.Context, req *backgroundtask.ValidateResumeRequest) (*backgroundtask.ValidateResumeResult, error) {
-	if req == nil {
-		return nil, errors.New("backgroundtask/subagent: compatible checkpoint is required")
-	}
-	if err := e.Validate(req.Task); err != nil {
+func (e *Executor[M]) ValidateResume(
+	ctx context.Context,
+	spec backgroundtask.Spec,
+	checkpoint []byte,
+	resumeData []byte,
+) ([]byte, error) {
+	if err := e.Validate(spec); err != nil {
 		return nil, err
 	}
-	if err := e.ValidateCheckpoint(req.Task, req.Checkpoint); err != nil {
+	if err := e.ValidateCheckpoint(ctx, spec, checkpoint); err != nil {
 		return nil, err
 	}
 	var state checkpointState
-	if err := json.Unmarshal(req.Checkpoint.State.Payload, &state); err != nil {
+	if err := json.Unmarshal(checkpoint, &state); err != nil {
 		return nil, err
 	}
-	if len(req.ResumeData) == 0 {
+	if len(resumeData) == 0 {
 		if !state.AllowEmpty {
 			return nil, errors.New("backgroundtask/subagent: this checkpoint requires targeted resume data")
 		}
-		return &backgroundtask.ValidateResumeResult{}, nil
+		return nil, nil
 	}
 	if state.Mode == ResumeNextTurn {
-		if req.ResumeEncoding != "utf-8" {
+		if !utf8.Valid(resumeData) {
 			return nil, errors.New("backgroundtask/subagent: next-turn input must be utf-8")
 		}
-		return &backgroundtask.ValidateResumeResult{
-			NormalizedData: append([]byte(nil), req.ResumeData...), NormalizedEncoding: "utf-8",
-		}, nil
-	}
-	if req.ResumeEncoding != "application/json" {
-		return nil, errors.New("backgroundtask/subagent: native resume data must be application/json")
+		return append([]byte(nil), resumeData...), nil
 	}
 	var targets map[string]any
-	if err := json.Unmarshal(req.ResumeData, &targets); err != nil || len(targets) == 0 {
+	if err := json.Unmarshal(resumeData, &targets); err != nil || len(targets) == 0 {
 		return nil, errors.New("backgroundtask/subagent: resume targets are invalid")
 	}
 	allowed := make(map[string]struct{}, len(state.TargetIDs))
@@ -250,17 +245,24 @@ func (e *Executor[M]) ValidateResume(_ context.Context, req *backgroundtask.Vali
 	if err != nil {
 		return nil, err
 	}
-	return &backgroundtask.ValidateResumeResult{NormalizedData: normalized, NormalizedEncoding: "application/json"}, nil
+	return normalized, nil
 }
 
-func (e *Executor[M]) Execute(ctx context.Context, req backgroundtask.ExecutionRequest, runtime backgroundtask.Runtime) backgroundtask.Outcome {
-	payload, err := decodePayload(req.Task)
+func (e *Executor[M]) Execute(
+	ctx context.Context,
+	task *backgroundtask.Task,
+	runtime backgroundtask.Runtime,
+) (*backgroundtask.ExecutionResult, error) {
+	if task.Attempt > 1 && len(task.Checkpoint) == 0 {
+		return nil, errors.New("backgroundtask/subagent: task cannot restart without a checkpoint")
+	}
+	payload, err := decodePayload(task.Spec)
 	if err != nil {
-		return failed(err)
+		return nil, err
 	}
 	agent, err := e.Agents.Resolve(payload.Agent)
 	if err != nil {
-		return failed(err)
+		return nil, err
 	}
 	runner := adk.NewTypedRunner(adk.TypedRunnerConfig[M]{
 		Agent: agent, CheckPointStore: e.CheckPointStore,
@@ -289,15 +291,15 @@ func (e *Executor[M]) Execute(ctx context.Context, req backgroundtask.ExecutionR
 		}
 	}()
 	var iter *adk.AsyncIterator[*adk.TypedAgentEvent[M]]
-	if req.Checkpoint != nil {
+	if len(task.Checkpoint) > 0 {
 		if payload.ResumeMode == ResumeNextTurn {
-			iter, err = e.runNextTurn(ctx, runner, req, payload, cancelOption)
-		} else if len(req.ResumeData) == 0 {
+			iter, err = e.runNextTurn(ctx, runner, task, payload, cancelOption)
+		} else if task.PendingResume == nil || len(task.PendingResume.Data) == 0 {
 			iter, err = runner.Resume(ctx, payload.CheckpointID, cancelOption)
 		} else {
 			var targets map[string]any
-			if unmarshalErr := json.Unmarshal(req.ResumeData, &targets); unmarshalErr != nil {
-				return failed(unmarshalErr)
+			if unmarshalErr := json.Unmarshal(task.PendingResume.Data, &targets); unmarshalErr != nil {
+				return nil, unmarshalErr
 			}
 			iter, err = runner.ResumeWithParams(
 				ctx, payload.CheckpointID, &adk.ResumeParams{Targets: targets}, cancelOption,
@@ -309,7 +311,7 @@ func (e *Executor[M]) Execute(ctx context.Context, req backgroundtask.ExecutionR
 		)
 	}
 	if err != nil {
-		return failed(err)
+		return nil, err
 	}
 
 	var final []byte
@@ -339,41 +341,35 @@ func (e *Executor[M]) Execute(ctx context.Context, req backgroundtask.ExecutionR
 					}
 				}
 			}
-			if controlled := e.controlOutcome(req, payload, control); controlled != nil {
-				return *controlled
+			if result, controlErr, controlled := e.controlResult(task, payload, control); controlled {
+				return result, controlErr
 			}
-			return failed(event.Err)
+			return nil, event.Err
 		}
 		if event.Output == nil || event.Output.MessageOutput == nil {
 			continue
 		}
 		message, messageErr := event.Output.MessageOutput.GetMessage()
 		if messageErr != nil {
-			return failed(messageErr)
+			return nil, messageErr
 		}
 		data, marshalErr := json.Marshal(message)
 		if marshalErr != nil {
-			return failed(marshalErr)
+			return nil, marshalErr
 		}
 		final = data
-		if reportErr := runtime.ReportUpdate(ctx, &backgroundtask.ReportUpdateRequest{
-			Kind:    backgroundtask.UpdateMessage,
-			Payload: &backgroundtask.UpdatePayload{Type: "eino.dev/subagent/message", Value: inline(data, "application/json")},
-		}); reportErr != nil {
-			return failed(reportErr)
-		}
 	}
 	if interrupted != nil {
 		if _, exists, getErr := e.CheckPointStore.Get(ctx, payload.CheckpointID); getErr != nil || !exists {
 			if getErr == nil {
 				getErr = errors.New("backgroundtask/subagent: runner checkpoint is missing")
 			}
-			return failed(getErr)
+			return nil, getErr
 		}
 		request, _ := json.Marshal(interrupted)
 		state := checkpointState{
 			CheckpointID: payload.CheckpointID, Mode: payload.ResumeMode,
-			AllowEmpty: payload.AllowEmptyResume,
+			AllowEmpty: payload.AllowEmptyResume, Sequence: nextCheckpointSequence(task.Checkpoint),
 		}
 		for _, interruptContext := range interrupted.InterruptContexts {
 			if interruptContext.ID != "" {
@@ -385,73 +381,59 @@ func (e *Executor[M]) Execute(ctx context.Context, req backgroundtask.ExecutionR
 			if stateErr == nil {
 				stateErr = errors.New("backgroundtask/subagent: interrupt has no resumable targets")
 			}
-			return failed(stateErr)
+			return nil, stateErr
 		}
-		return backgroundtask.Outcome{
-			Kind: backgroundtask.OutcomeWaitingInput,
-			Checkpoint: &backgroundtask.CheckpointRef{
-				ExecutorKey: ExecutorKey, Format: "eino.runner", Version: "v1", Sequence: checkpointSequence(req.Checkpoint),
-				State: inline(stateBytes, "application/json"), CreatedAt: time.Now(),
-			},
-			InputRequest: &backgroundtask.UpdatePayload{
-				Type: "eino.dev/subagent/input-required", Value: inline(request, "application/json"),
-			},
-		}
+		_ = request
+		return &backgroundtask.ExecutionResult{
+			Status:     backgroundtask.StatusWaitingInput,
+			Checkpoint: stateBytes,
+		}, nil
 	}
 	if final == nil {
-		if controlled := e.controlOutcome(req, payload, pollControl(controlKinds)); controlled != nil {
-			return *controlled
+		if result, controlErr, controlled := e.controlResult(task, payload, pollControl(controlKinds)); controlled {
+			return result, controlErr
 		}
 	}
 	if final == nil {
 		final = []byte("null")
 	}
-	return backgroundtask.Outcome{
-		Kind: backgroundtask.OutcomeCompleted,
-		Result: &backgroundtask.ResultRef{
-			Format: req.Task.Result.ResultFormat, Value: inline(final, "application/json"), CreatedAt: time.Now(),
-		},
-	}
+	return &backgroundtask.ExecutionResult{
+		Status: backgroundtask.StatusCompleted,
+		Result: &backgroundtask.Result{Data: final},
+	}, nil
 }
 
-func (e *Executor[M]) controlOutcome(
-	req backgroundtask.ExecutionRequest,
+func (e *Executor[M]) controlResult(
+	task *backgroundtask.Task,
 	payload *TaskPayload,
 	control backgroundtask.ControlKind,
-) *backgroundtask.Outcome {
+) (*backgroundtask.ExecutionResult, error, bool) {
 	switch control {
 	case backgroundtask.ControlStop:
-		outcome := backgroundtask.Outcome{
-			Kind: backgroundtask.OutcomeCanceled, TerminalReason: "canceled",
-		}
-		return &outcome
+		return &backgroundtask.ExecutionResult{
+			Status: backgroundtask.StatusCanceled,
+			Result: &backgroundtask.Result{Error: "canceled"},
+		}, nil, true
 	case backgroundtask.ControlDrain:
 		if _, exists, err := e.CheckPointStore.Get(context.Background(), payload.CheckpointID); err != nil || !exists {
 			if err == nil {
 				err = errors.New("runner checkpoint is missing")
 			}
-			outcome := failed(fmt.Errorf("%w: %v", backgroundtask.ErrCheckpointUnavailable, err))
-			return &outcome
+			return nil, fmt.Errorf("%w: %v", backgroundtask.ErrCheckpointUnavailable, err), true
 		}
 		stateBytes, err := json.Marshal(checkpointState{
 			CheckpointID: payload.CheckpointID, Mode: payload.ResumeMode,
-			AllowEmpty: payload.AllowEmptyResume,
+			AllowEmpty: payload.AllowEmptyResume, Sequence: nextCheckpointSequence(task.Checkpoint),
 		})
 		if err != nil {
-			outcome := failed(err)
-			return &outcome
+			return nil, err, true
 		}
-		outcome := backgroundtask.Outcome{
-			Kind: backgroundtask.OutcomeSuspended,
-			Checkpoint: &backgroundtask.CheckpointRef{
-				ExecutorKey: ExecutorKey, Format: "eino.runner", Version: "v1",
-				Sequence: checkpointSequence(req.Checkpoint),
-				State:    inline(stateBytes, "application/json"), CreatedAt: time.Now(),
-			},
-		}
-		return &outcome
+		return &backgroundtask.ExecutionResult{
+			Status:     backgroundtask.StatusSuspended,
+			Checkpoint: stateBytes,
+		}, nil, true
 	}
-	return nil
+	return nil, nil, false
 }
 
 func pollControl(controls <-chan backgroundtask.ControlKind) backgroundtask.ControlKind {
@@ -468,18 +450,26 @@ const resumeMarkerKey = "eino.dev/backgroundtask_resume"
 func (e *Executor[M]) runNextTurn(
 	ctx context.Context,
 	runner *adk.TypedRunner[M],
-	req backgroundtask.ExecutionRequest,
+	task *backgroundtask.Task,
 	payload *TaskPayload,
 	options ...adk.AgentRunOption,
 ) (*adk.AsyncIterator[*adk.TypedAgentEvent[M]], error) {
-	marker := fmt.Sprintf("%s:%d", req.Task.ID, req.Checkpoint.Sequence)
+	var state checkpointState
+	if err := json.Unmarshal(task.Checkpoint, &state); err != nil {
+		return nil, err
+	}
+	marker := fmt.Sprintf("%s:%d", task.Spec.ID, state.Sequence)
 	seen, err := e.hasResumeMarker(ctx, payload.ChildSessionID, marker)
 	if err != nil {
 		return nil, err
 	}
 	var messages []M
 	if !seen {
-		message, messageErr := resumeMessage[M](string(req.ResumeData), marker)
+		var data []byte
+		if task.PendingResume != nil {
+			data = task.PendingResume.Data
+		}
+		message, messageErr := resumeMessage[M](string(data), marker)
 		if messageErr != nil {
 			return nil, messageErr
 		}
@@ -550,25 +540,12 @@ func decodePayload(spec backgroundtask.Spec) (*TaskPayload, error) {
 	return &payload, nil
 }
 
-func checkpointSequence(previous *backgroundtask.CheckpointRef) int64 {
-	if previous == nil {
+func nextCheckpointSequence(previous []byte) int64 {
+	var state checkpointState
+	if len(previous) == 0 || json.Unmarshal(previous, &state) != nil || state.Sequence < 1 {
 		return 1
 	}
-	return previous.Sequence + 1
-}
-
-func inline(payload []byte, encoding string) backgroundtask.ArtifactValue {
-	sum := sha256.Sum256(payload)
-	cloned := make([]byte, len(payload))
-	copy(cloned, payload)
-	return backgroundtask.ArtifactValue{
-		Payload: cloned, Encoding: encoding,
-		Digest: "sha256:" + hex.EncodeToString(sum[:]), Size: int64(len(payload)),
-	}
-}
-
-func failed(err error) backgroundtask.Outcome {
-	return backgroundtask.Outcome{Kind: backgroundtask.OutcomeFailed, Err: err}
+	return state.Sequence + 1
 }
 
 type SubmitRequest struct {
@@ -576,7 +553,6 @@ type SubmitRequest struct {
 	Prompt           string
 	Description      string
 	SessionID        string
-	ToolUseID        string
 	ResumeMode       ResumeMode
 	AllowEmptyResume bool
 }
@@ -590,7 +566,8 @@ func Submit(ctx context.Context, manager *backgroundtask.Manager, req *SubmitReq
 		return nil, err
 	}
 	payload := TaskPayload{
-		Agent: req.Agent, Prompt: []byte(req.Prompt), PromptEncoding: "utf-8",
+		Version: payloadVersion,
+		Agent:   req.Agent, Prompt: []byte(req.Prompt), PromptEncoding: "utf-8",
 		ChildSessionID: id + "/session", CheckpointID: id + "/checkpoint",
 		ResumeMode: req.ResumeMode, AllowEmptyResume: req.AllowEmptyResume,
 	}
@@ -602,15 +579,8 @@ func Submit(ctx context.Context, manager *backgroundtask.Manager, req *SubmitReq
 		return nil, err
 	}
 	return manager.Submit(ctx, backgroundtask.Spec{
-		ID: id, ExecutorKey: ExecutorKey, PayloadVersion: PayloadVersion,
-		Payload: data,
-		Type:    "subagent", Description: req.Description, SessionID: req.SessionID,
-		ToolUseID: req.ToolUseID,
-		Notify:    &backgroundtask.NotificationTarget{Kind: "session_inbox", TargetID: req.SessionID},
-		Recovery: backgroundtask.RecoveryPolicy{
-			OnLeaseExpired:      backgroundtask.RecoveryResumeCheckpoint,
-			OnMissingCheckpoint: backgroundtask.RecoveryFail, MaxAttempts: 3,
-		},
-		Result: backgroundtask.ResultPolicy{ResultFormat: "eino.dev/subagent/result"},
+		ID: id, ExecutorKey: ExecutorKey, Payload: data,
+		Description: req.Description, SessionID: req.SessionID,
+		Notify: &backgroundtask.NotificationTarget{Kind: "session_inbox", TargetID: req.SessionID},
 	})
 }

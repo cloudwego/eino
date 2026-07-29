@@ -56,23 +56,15 @@ func TestDispatcherRedeliversUntilSinkAccepts_BitsUT(t *testing.T) {
 	})
 	task, lease := createAndClaim(t, store, "dispatch", 10*time.Second)
 	committed, err := store.Commit(context.Background(), &CommitTaskRequest{
-		Lease: lease, Mutation: mutationForStatus(StatusCompleted),
+		Lease: lease, Status: StatusCompleted, Result: &Result{Data: []byte("result")},
 	})
 	require.NoError(t, err)
-
-	// Ack the claim update so the test isolates the terminal record.
-	initial, err := store.Receive(context.Background(), &ReceiveNotificationsRequest{
-		ConsumerID: "setup", Limit: 1, VisibilityTime: time.Second,
-	})
-	require.NoError(t, err)
-	require.Len(t, initial.Deliveries, 1)
-	require.NoError(t, store.Ack(context.Background(), initial.Deliveries[0].Receipt))
 
 	sink := &routedRecordingSink{fail: true}
 	registry := NewSinkRegistry()
 	require.NoError(t, registry.Register("session_inbox", sink))
 	dispatcher := &Dispatcher{
-		Outbox: store, Sinks: registry, ConsumerID: "dispatcher",
+		Outbox: store, Store: store, Sinks: registry, ConsumerID: "dispatcher",
 		BatchSize: 10, Visibility: time.Second,
 	}
 	accepted, err := dispatcher.DispatchOnce(context.Background())
@@ -81,6 +73,8 @@ func TestDispatcherRedeliversUntilSinkAccepts_BitsUT(t *testing.T) {
 	require.Len(t, sink.notifications, 1)
 	assert.Equal(t, committed.Notification.NotificationID, sink.notifications[0].NotificationID)
 	assert.Equal(t, task.Spec.SessionID, sink.targets[0].TargetID)
+	require.NotNil(t, sink.notifications[0].Task)
+	assert.Equal(t, StateCompleted, sink.notifications[0].Task.Status)
 
 	clock.Advance(time.Second)
 	sink.fail = false
@@ -101,15 +95,15 @@ func TestMemoryStoreTerminalCommitCreatesOneTerminalOutbox_BitsUT(t *testing.T) 
 	store := NewMemoryStore(nil)
 	_, lease := createAndClaim(t, store, "one-terminal", time.Minute)
 	terminal, err := store.Commit(context.Background(), &CommitTaskRequest{
-		Lease: lease, Mutation: mutationForStatus(StatusCompleted),
+		Lease: lease, Status: StatusCompleted, Result: &Result{Data: []byte("result")},
 	})
 	require.NoError(t, err)
 	require.NotNil(t, terminal.Notification)
 	assert.Equal(t, NotificationCompleted, terminal.Notification.EventKind)
-	assert.Equal(t, terminal.Task.LatestUpdateSequence, terminal.Notification.UpdateSequence)
+	assert.Equal(t, terminal.Task.TransitionVersion, terminal.Notification.TransitionVersion)
 
 	_, err = store.Commit(context.Background(), &CommitTaskRequest{
-		Lease: lease, Mutation: mutationForStatus(StatusCompleted),
+		Lease: lease, Status: StatusCompleted, Result: &Result{Data: []byte("result")},
 	})
 	require.Error(t, err)
 
@@ -134,12 +128,11 @@ func TestRouteLessTaskNeverCreatesOutbox_BitsUT(t *testing.T) {
 	require.NoError(t, err)
 	claim, err := store.Claim(context.Background(), &ClaimTaskRequest{
 		TaskID: spec.ID, ExpectedVersion: created.TransitionVersion,
-		WorkerID: "worker", LeaseDuration: time.Minute,
+		LeaseOwnerID: "worker", LeaseDuration: time.Minute,
 	})
 	require.NoError(t, err)
-	_, err = store.AppendUpdate(context.Background(), &AppendTaskUpdateRequest{
-		Lease: claim.Lease, Kind: UpdateMessage,
-		Payload: &UpdatePayload{Type: "text/plain", Value: validInline("message")},
+	_, err = store.Commit(context.Background(), &CommitTaskRequest{
+		Lease: claim.Lease, Status: StatusCompleted, Result: &Result{Data: []byte("done")},
 	})
 	require.NoError(t, err)
 

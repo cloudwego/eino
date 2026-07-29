@@ -37,11 +37,11 @@ func closeWithTimeout(m *Manager) {
 
 func intPtr(v int) *int { return &v }
 
-// anyRunning reports whether the manager still has a task in StatusRunning,
+// anyRunning reports whether the manager still has a task in StateRunning,
 // derived from the public List() snapshot.
 func anyRunning(m *Manager) bool {
 	for _, t := range m.List() {
-		if t.Status == StatusRunning {
+		if t.Status == StateRunning {
 			return true
 		}
 	}
@@ -112,8 +112,8 @@ func TestManager_RunForeground(t *testing.T) {
 
 	result, err := run(m, "test task", false, workReturning("hello", nil))
 	require.NoError(t, err)
-	assert.Equal(t, StatusCompleted, result.Status)
-	assert.Equal(t, "hello", string(result.ResultRef.Value.Payload))
+	assert.Equal(t, StateCompleted, result.Status)
+	assert.Equal(t, "hello", string(result.Result.Data))
 	assert.NotEmpty(t, result.Spec.ID)
 }
 
@@ -123,8 +123,8 @@ func TestManager_RunForegroundError(t *testing.T) {
 
 	result, err := run(m, "failing task", false, workReturning("", fmt.Errorf("something failed")))
 	require.NoError(t, err) // Run itself doesn't error
-	assert.Equal(t, StatusFailed, result.Status)
-	assert.Equal(t, "something failed", result.TerminalReason)
+	assert.Equal(t, StateFailed, result.Status)
+	assert.Equal(t, "something failed", result.Result.Error)
 }
 
 // --- Run (background) Tests ---
@@ -135,13 +135,13 @@ func TestManager_RunBackground(t *testing.T) {
 
 	result, err := run(m, "bg task", true, workSleeping(50*time.Millisecond, "bg result"))
 	require.NoError(t, err)
-	assert.Equal(t, StatusRunning, result.Status)
+	assert.Equal(t, StateRunning, result.Status)
 	assert.NotEmpty(t, result.Spec.ID)
 	assert.True(t, anyRunning(m))
 
 	task := waitTask(t, m, result.Spec.ID)
-	assert.Equal(t, StatusCompleted, task.Status)
-	assert.Equal(t, "bg result", string(task.ResultRef.Value.Payload))
+	assert.Equal(t, StateCompleted, task.Status)
+	assert.Equal(t, "bg result", string(task.Result.Data))
 }
 
 // --- Work context lifetime Tests ---
@@ -169,7 +169,7 @@ func TestManager_RunBackground_SurvivesCallerCtxCancel(t *testing.T) {
 			}
 		})
 	require.NoError(t, err)
-	require.Equal(t, StatusRunning, result.Status)
+	require.Equal(t, StateRunning, result.Status)
 	<-started
 
 	// Cancel the caller (per-turn) context; the background task must keep running.
@@ -177,13 +177,13 @@ func TestManager_RunBackground_SurvivesCallerCtxCancel(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 	task, ok := m.Get(result.Spec.ID)
 	require.True(t, ok)
-	assert.Equal(t, StatusRunning, task.Status, "background task should survive caller ctx cancellation")
+	assert.Equal(t, StateRunning, task.Status, "background task should survive caller ctx cancellation")
 
 	// It finishes only when the work itself completes.
 	close(release)
 	task = waitTask(t, m, result.Spec.ID)
-	assert.Equal(t, StatusCompleted, task.Status)
-	assert.Equal(t, "done", string(task.ResultRef.Value.Payload))
+	assert.Equal(t, StateCompleted, task.Status)
+	assert.Equal(t, "done", string(task.Result.Data))
 }
 
 // A foreground task with no deadline must still be stopped when the caller
@@ -200,8 +200,8 @@ func TestManager_RunForeground_CallerCtxCancelStops(t *testing.T) {
 
 	result, err := m.Run(callerCtx, &RunInput{Description: "fg blocking"}, workBlocking())
 	require.NoError(t, err)
-	assert.Equal(t, StatusCanceling, result.Status)
-	assert.Equal(t, StatusCanceled, waitTask(t, m, result.Spec.ID).Status)
+	assert.Equal(t, StateCanceling, result.Status)
+	assert.Equal(t, StateCanceled, waitTask(t, m, result.Spec.ID).Status)
 }
 
 // The work context preserves the caller context's values (framework/session
@@ -220,7 +220,7 @@ func TestManager_RunBackground_PreservesCallerCtxValues(t *testing.T) {
 			return "ok", nil
 		})
 	require.NoError(t, err)
-	require.Equal(t, StatusRunning, result.Status)
+	require.Equal(t, StateRunning, result.Status)
 	waitTask(t, m, result.Spec.ID)
 
 	select {
@@ -244,13 +244,13 @@ func TestManager_Subscribe_ForegroundLifecycle(t *testing.T) {
 	created := waitTaskEvent(t, ch, func(event *TaskEvent) bool {
 		return event.Type == TaskEventCreated && event.Task.Spec.ID == result.Spec.ID
 	})
-	assert.Equal(t, StatusRunning, created.Task.Status)
+	assert.Equal(t, StateRunning, created.Task.Status)
 
 	completed := waitTaskEvent(t, ch, func(event *TaskEvent) bool {
 		return event.Type == TaskEventCompleted && event.Task.Spec.ID == result.Spec.ID
 	})
-	assert.Equal(t, StatusCompleted, completed.Task.Status)
-	assert.Equal(t, "done", string(completed.Task.ResultRef.Value.Payload))
+	assert.Equal(t, StateCompleted, completed.Task.Status)
+	assert.Equal(t, "done", string(completed.Task.Result.Data))
 }
 
 func TestManager_Subscribe_BackgroundLifecycle(t *testing.T) {
@@ -264,13 +264,13 @@ func TestManager_Subscribe_BackgroundLifecycle(t *testing.T) {
 	created := waitTaskEvent(t, ch, func(event *TaskEvent) bool {
 		return event.Type == TaskEventCreated && event.Task.Spec.ID == result.Spec.ID
 	})
-	assert.Equal(t, StatusRunning, created.Task.Status)
+	assert.Equal(t, StateRunning, created.Task.Status)
 
 	done := waitTaskEvent(t, ch, func(event *TaskEvent) bool {
 		return event.Type == TaskEventCompleted && event.Task.Spec.ID == result.Spec.ID
 	})
-	assert.Equal(t, StatusCompleted, done.Task.Status)
-	assert.Equal(t, "bg result", string(done.Task.ResultRef.Value.Payload))
+	assert.Equal(t, StateCompleted, done.Task.Status)
+	assert.Equal(t, "bg result", string(done.Task.Result.Data))
 	assert.NotNil(t, done.Task.DoneAt)
 }
 
@@ -281,18 +281,18 @@ func TestManager_Subscribe_AutoBackgroundChange(t *testing.T) {
 	ch := m.Subscribe()
 	result, err := run(m, "slow", false, workSleeping(80*time.Millisecond, "late"))
 	require.NoError(t, err)
-	assert.Equal(t, StatusRunning, result.Status)
+	assert.Equal(t, StateRunning, result.Status)
 
 	bg := waitTaskEvent(t, ch, func(event *TaskEvent) bool {
 		return event.Type == TaskEventBackgrounded && event.Task.Spec.ID == result.Spec.ID
 	})
-	assert.Equal(t, StatusRunning, bg.Task.Status)
+	assert.Equal(t, StateRunning, bg.Task.Status)
 	assert.Equal(t, "slow", bg.Task.Spec.Description)
 
 	done := waitTaskEvent(t, ch, func(event *TaskEvent) bool {
 		return event.Type == TaskEventCompleted && event.Task.Spec.ID == result.Spec.ID
 	})
-	assert.Equal(t, "late", string(done.Task.ResultRef.Value.Payload))
+	assert.Equal(t, "late", string(done.Task.Result.Data))
 }
 
 func TestManager_Subscribe_CancelChange(t *testing.T) {
@@ -307,7 +307,7 @@ func TestManager_Subscribe_CancelChange(t *testing.T) {
 	done := waitTaskEvent(t, ch, func(event *TaskEvent) bool {
 		return event.Type == TaskEventCanceled && event.Task.Spec.ID == result.Spec.ID
 	})
-	assert.Equal(t, canceledError, done.Task.TerminalReason)
+	assert.Equal(t, canceledError, done.Task.Result.Error)
 }
 
 func TestManager_Subscribe_ClosesOnClose(t *testing.T) {
@@ -319,23 +319,21 @@ func TestManager_Subscribe_ClosesOnClose(t *testing.T) {
 	assert.False(t, ok)
 }
 
-// --- Type / ToolUseID ---
+// --- Process-local hints ---
 
-func TestManager_TypeAndToolUseIDStored(t *testing.T) {
+func TestManager_TypeIsNotCoreSpecField(t *testing.T) {
 	m := New(context.Background(), &Config{})
 	defer closeWithTimeout(m)
 
 	result, err := m.Run(context.Background(), &RunInput{
 		Description: "task",
 		Type:        "bash",
-		ToolUseID:   "call_42",
 	}, workReturning("done", nil))
 	require.NoError(t, err)
 
 	task, ok := m.Get(result.Spec.ID)
 	require.True(t, ok)
-	assert.Equal(t, "bash", task.Spec.Type)
-	assert.Equal(t, "call_42", task.Spec.ToolUseID)
+	assert.Equal(t, "task", task.Spec.Description)
 }
 
 // --- Auto-background Tests ---
@@ -349,12 +347,12 @@ func TestManager_AutoBackground_Slow(t *testing.T) {
 
 	result, err := run(m, "slow task", false, workSleeping(200*time.Millisecond, "slow result"))
 	require.NoError(t, err)
-	assert.Equal(t, StatusRunning, result.Status)
+	assert.Equal(t, StateRunning, result.Status)
 	assert.True(t, anyRunning(m))
 
 	task := waitTask(t, m, result.Spec.ID)
-	assert.Equal(t, StatusCompleted, task.Status)
-	assert.Equal(t, "slow result", string(task.ResultRef.Value.Payload))
+	assert.Equal(t, StateCompleted, task.Status)
+	assert.Equal(t, "slow result", string(task.Result.Data))
 }
 
 // A per-run ForegroundTimeoutMs overrides the Manager default: here the Manager has
@@ -370,12 +368,12 @@ func TestManager_PerRunAutoBackgroundOverride(t *testing.T) {
 		ForegroundTimeoutMs: &override,
 	}, workSleeping(300*time.Millisecond, "slow result"))
 	require.NoError(t, err)
-	assert.Equal(t, StatusRunning, result.Status) // moved to background at 50ms
+	assert.Equal(t, StateRunning, result.Status) // moved to background at 50ms
 	assert.True(t, anyRunning(m))
 
 	task := waitTask(t, m, result.Spec.ID)
-	assert.Equal(t, StatusCompleted, task.Status)
-	assert.Equal(t, "slow result", string(task.ResultRef.Value.Payload))
+	assert.Equal(t, StateCompleted, task.Status)
+	assert.Equal(t, "slow result", string(task.Result.Data))
 }
 
 // With no ShouldAutoBackground hook (the default), a run that hits its deadline is
@@ -386,10 +384,10 @@ func TestManager_DeadlineKillsWhenNotBackgroundable(t *testing.T) {
 
 	result, err := run(m, "slow task", false, workBlocking())
 	require.NoError(t, err)
-	assert.Equal(t, StatusCanceling, result.Status)
+	assert.Equal(t, StateCanceling, result.Status)
 
 	task := waitTask(t, m, result.Spec.ID)
-	assert.Equal(t, StatusCanceled, task.Status)
+	assert.Equal(t, StateCanceled, task.Status)
 	assert.False(t, anyRunning(m)) // work was canceled
 }
 
@@ -406,12 +404,12 @@ func TestManager_ShouldAutoBackgroundPerTask(t *testing.T) {
 
 	bg, err := run(m, "server", false, workSleeping(150*time.Millisecond, "up"))
 	require.NoError(t, err)
-	assert.Equal(t, StatusRunning, bg.Status) // backgrounded
+	assert.Equal(t, StateRunning, bg.Status) // backgrounded
 
 	killed, err := run(m, "oneshot", false, workBlocking())
 	require.NoError(t, err)
-	assert.Equal(t, StatusCanceling, killed.Status)
-	assert.Equal(t, StatusCanceled, waitTask(t, m, killed.Spec.ID).Status)
+	assert.Equal(t, StateCanceling, killed.Status)
+	assert.Equal(t, StateCanceled, waitTask(t, m, killed.Spec.ID).Status)
 
 	waitTask(t, m, bg.Spec.ID)
 }
@@ -428,8 +426,8 @@ func TestManager_PerRunAutoBackgroundDisable(t *testing.T) {
 		ForegroundTimeoutMs: &off,
 	}, workSleeping(60*time.Millisecond, "done"))
 	require.NoError(t, err)
-	assert.Equal(t, StatusCompleted, result.Status) // blocked despite the 20ms default
-	assert.Equal(t, "done", string(result.ResultRef.Value.Payload))
+	assert.Equal(t, StateCompleted, result.Status) // blocked despite the 20ms default
+	assert.Equal(t, "done", string(result.Result.Data))
 }
 
 func TestManager_AutoBackground_Fast(t *testing.T) {
@@ -438,8 +436,8 @@ func TestManager_AutoBackground_Fast(t *testing.T) {
 
 	result, err := run(m, "fast task", false, workReturning("fast result", nil))
 	require.NoError(t, err)
-	assert.Equal(t, StatusCompleted, result.Status)
-	assert.Equal(t, "fast result", string(result.ResultRef.Value.Payload))
+	assert.Equal(t, StateCompleted, result.Status)
+	assert.Equal(t, "fast result", string(result.Result.Data))
 	assert.False(t, anyRunning(m))
 }
 
@@ -465,8 +463,8 @@ func TestManager_Get(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, result.Spec.ID, task.Spec.ID)
 	assert.Equal(t, "test task", task.Spec.Description)
-	assert.Equal(t, StatusCompleted, task.Status)
-	assert.Equal(t, "done", string(task.ResultRef.Value.Payload))
+	assert.Equal(t, StateCompleted, task.Status)
+	assert.Equal(t, "done", string(task.Result.Data))
 	assert.NotNil(t, task.DoneAt)
 }
 
@@ -484,8 +482,8 @@ func TestManager_List(t *testing.T) {
 	for _, task := range tasks {
 		byID[task.Spec.ID] = task
 	}
-	assert.Equal(t, StatusCompleted, byID[r1.Spec.ID].Status)
-	assert.Equal(t, StatusCompleted, byID[r2.Spec.ID].Status)
+	assert.Equal(t, StateCompleted, byID[r1.Spec.ID].Status)
+	assert.Equal(t, StateCompleted, byID[r2.Spec.ID].Status)
 }
 
 // --- Cancel Tests ---
@@ -496,20 +494,20 @@ func TestManager_Cancel(t *testing.T) {
 
 	result, err := run(m, "cancellable", true, workBlocking())
 	require.NoError(t, err)
-	assert.Equal(t, StatusRunning, result.Status)
+	assert.Equal(t, StateRunning, result.Status)
 
 	err = m.Cancel(result.Spec.ID)
 	require.NoError(t, err)
 
 	task := waitTask(t, m, result.Spec.ID)
-	assert.Equal(t, StatusCanceled, task.Status)
+	assert.Equal(t, StateCanceled, task.Status)
 	assert.NotNil(t, task.DoneAt)
 	// A canceled task carries a reason rather than an empty terminal state.
-	assert.Equal(t, canceledError, task.TerminalReason)
+	assert.Equal(t, canceledError, task.Result.Error)
 }
 
-// A foreground run stopped by Cancel reports StatusCanceled (with the cancel
-// reason) back to the caller, not StatusFailed from the work's ctx-canceled error.
+// A foreground run stopped by Cancel reports StateCanceled (with the cancel
+// reason) back to the caller, not StateFailed from the work's ctx-canceled error.
 func TestManager_Cancel_ForegroundReportsCanceled(t *testing.T) {
 	m := New(context.Background(), &Config{ForegroundTimeoutMs: intPtr(0)})
 	defer closeWithTimeout(m)
@@ -530,8 +528,8 @@ func TestManager_Cancel_ForegroundReportsCanceled(t *testing.T) {
 			return "", ctx.Err()
 		})
 	require.NoError(t, err)
-	assert.Equal(t, StatusCanceled, result.Status)
-	assert.Equal(t, canceledError, result.TerminalReason)
+	assert.Equal(t, StateCanceled, result.Status)
+	assert.Equal(t, canceledError, result.Result.Error)
 }
 
 func TestManager_CancelNotFound(t *testing.T) {
@@ -579,8 +577,8 @@ func TestManager_WaitCompleted(t *testing.T) {
 	require.NoError(t, err)
 
 	task := waitTask(t, m, result.Spec.ID)
-	assert.Equal(t, StatusCompleted, task.Status)
-	assert.Equal(t, "r1", string(task.ResultRef.Value.Payload))
+	assert.Equal(t, StateCompleted, task.Status)
+	assert.Equal(t, "r1", string(task.Result.Data))
 }
 
 func TestManager_WaitTimeout(t *testing.T) {
@@ -596,7 +594,7 @@ func TestManager_WaitTimeout(t *testing.T) {
 	task, done := m.Wait(ctx, result.Spec.ID)
 	require.NotNil(t, task)
 	assert.False(t, done)
-	assert.Equal(t, StatusRunning, task.Status)
+	assert.Equal(t, StateRunning, task.Status)
 }
 
 func TestManager_WaitNotFound(t *testing.T) {
@@ -649,7 +647,7 @@ func TestManager_ConcurrentRuns(t *testing.T) {
 			defer wg.Done()
 			result, err := run(m, fmt.Sprintf("task-%d", i), false, workReturning(fmt.Sprintf("result-%d", i), nil))
 			require.NoError(t, err)
-			assert.Equal(t, StatusCompleted, result.Status)
+			assert.Equal(t, StateCompleted, result.Status)
 		}(i)
 	}
 
@@ -692,7 +690,7 @@ func TestManager_RunInBackground_Background(t *testing.T) {
 
 	result, err := run(m, "bg task", true, workSleeping(50*time.Millisecond, "bg done"))
 	require.NoError(t, err)
-	assert.Equal(t, StatusRunning, result.Status)
+	assert.Equal(t, StateRunning, result.Status)
 
 	_, ok := m.Get(result.Spec.ID)
 	require.True(t, ok)
@@ -722,7 +720,7 @@ func TestManager_ContextCancelStopsWork(t *testing.T) {
 
 	task, ok := m.Get(result.Spec.ID)
 	require.True(t, ok)
-	assert.Equal(t, StatusCanceled, task.Status)
+	assert.Equal(t, StateCanceled, task.Status)
 }
 
 // --- TaskInfo.Backgrounded signal Tests ---
@@ -752,7 +750,7 @@ func TestManager_Backgrounded_ExplicitClosedBeforeWork(t *testing.T) {
 			return "ok", nil
 		})
 	require.NoError(t, err)
-	assert.Equal(t, StatusRunning, result.Status)
+	assert.Equal(t, StateRunning, result.Status)
 
 	assert.True(t, <-seen, "explicit background work should see Backgrounded already closed")
 	close(release)
@@ -771,7 +769,7 @@ func TestManager_Backgrounded_ForegroundStaysOpen(t *testing.T) {
 		return "ok", nil
 	})
 	require.NoError(t, err)
-	assert.Equal(t, StatusCompleted, result.Status)
+	assert.Equal(t, StateCompleted, result.Status)
 	assert.False(t, duringRun, "foreground work must not see Backgrounded closed")
 }
 
@@ -793,7 +791,7 @@ func TestManager_Backgrounded_AutoBackgroundCloses(t *testing.T) {
 			return "slow result", nil
 		})
 	require.NoError(t, err)
-	assert.Equal(t, StatusRunning, result.Status)
+	assert.Equal(t, StateRunning, result.Status)
 	close(release)
 
 	select {

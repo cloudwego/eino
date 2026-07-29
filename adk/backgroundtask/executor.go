@@ -21,38 +21,11 @@ import (
 	"errors"
 	"fmt"
 	"runtime/debug"
-	"sort"
 	"sync"
 	"time"
 
 	"github.com/cloudwego/eino/internal/safe"
 )
-
-type ExecutionRequest struct {
-	Task           Spec
-	Attempt        int64
-	Checkpoint     *CheckpointRef
-	ResumeData     []byte
-	ResumeEncoding string
-}
-
-type ValidateResumeRequest struct {
-	Task           Spec
-	Checkpoint     *CheckpointRef
-	ResumeData     []byte
-	ResumeEncoding string
-}
-
-type ValidateResumeResult struct {
-	NormalizedData     []byte
-	NormalizedEncoding string
-}
-
-type ReportUpdateRequest struct {
-	Kind     UpdateKind
-	Progress *Progress
-	Payload  *UpdatePayload
-}
 
 type ControlKind string
 
@@ -65,40 +38,23 @@ type ControlRequest struct {
 	Kind ControlKind
 }
 
-type OutcomeKind string
-
-const (
-	OutcomeCompleted    OutcomeKind = "completed"
-	OutcomeWaitingInput OutcomeKind = "waiting_input"
-	OutcomeSuspended    OutcomeKind = "suspended"
-	OutcomeCanceled     OutcomeKind = "canceled"
-	OutcomeFailed       OutcomeKind = "failed"
-)
-
-type Outcome struct {
-	Kind           OutcomeKind
-	Result         *ResultRef
-	Checkpoint     *CheckpointRef
-	InputRequest   *UpdatePayload
-	TerminalReason string
-	Err            error
+type Runtime interface {
+	ReportCheckpoint(context.Context, []byte) error
+	Controls() <-chan ControlRequest
 }
 
-type Runtime interface {
-	ReportUpdate(context.Context, *ReportUpdateRequest) error
-	ReportCheckpoint(context.Context, CheckpointRef) error
-	Controls() <-chan ControlRequest
+type ExecutionResult struct {
+	Status     Status
+	Checkpoint []byte
+	Result     *Result
 }
 
 type Executor interface {
 	Key() string
 	Validate(Spec) error
-	ValidateResume(context.Context, *ValidateResumeRequest) (*ValidateResumeResult, error)
-	Execute(context.Context, ExecutionRequest, Runtime) Outcome
-}
-
-type checkpointValidator interface {
-	ValidateCheckpoint(Spec, *CheckpointRef) error
+	ValidateCheckpoint(context.Context, Spec, []byte) error
+	ValidateResume(context.Context, Spec, []byte, []byte) ([]byte, error)
+	Execute(context.Context, *Task, Runtime) (*ExecutionResult, error)
 }
 
 type executorCapabilityProvider interface {
@@ -124,7 +80,7 @@ func (r *ExecutorRegistry) Register(executor Executor) error {
 			return errors.New("backgroundtask: executor capabilities are empty")
 		}
 		for _, capability := range capabilities {
-			if capability.ExecutorKey != executor.Key() || capability.PayloadVersion == "" {
+			if capability.ExecutorKey != executor.Key() {
 				return errors.New("backgroundtask: executor capability does not match executor identity")
 			}
 		}
@@ -154,20 +110,12 @@ func (r *ExecutorRegistry) Capabilities() []ExecutorCapability {
 			result = append(result, provider.Capabilities()...)
 			continue
 		}
-		// Custom executors without explicit capability metadata remain subject to
-		// Validate before claim.
-		result = append(result, ExecutorCapability{ExecutorKey: key, PayloadVersion: "*"})
+		result = append(result, ExecutorCapability{ExecutorKey: key})
 	}
-	sort.Slice(result, func(i, j int) bool {
-		if result[i].ExecutorKey == result[j].ExecutorKey {
-			return result[i].PayloadVersion < result[j].PayloadVersion
-		}
-		return result[i].ExecutorKey < result[j].ExecutorKey
-	})
 	return result
 }
 
-type workerExecution struct {
+type activeAttempt struct {
 	cancel  context.CancelFunc
 	runtime *taskRuntime
 }
@@ -205,35 +153,16 @@ func (r *taskRuntime) requestControl(kind ControlKind) {
 	}
 }
 
-func (r *taskRuntime) ReportUpdate(ctx context.Context, req *ReportUpdateRequest) error {
-	if req == nil {
-		return errors.New("backgroundtask: update request is required")
-	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.poison != nil {
-		return r.poison
-	}
-	result, err := r.store.AppendUpdate(ctx, &AppendTaskUpdateRequest{
-		Lease: r.lease, Kind: req.Kind, Progress: req.Progress, Payload: req.Payload,
-	})
-	if err != nil {
-		r.poison = err
-		return err
-	}
-	r.lease.ExpectedVersion = result.Task.TransitionVersion
-	return nil
-}
-
-func (r *taskRuntime) ReportCheckpoint(ctx context.Context, checkpoint CheckpointRef) error {
+func (r *taskRuntime) ReportCheckpoint(ctx context.Context, checkpoint []byte) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.poison != nil {
 		return r.poison
 	}
 	result, err := r.store.Commit(ctx, &CommitTaskRequest{
-		Lease:    r.lease,
-		Mutation: TaskMutation{ToStatus: StatusRunning, Checkpoint: &checkpoint},
+		Lease:      r.lease,
+		Status:     StatusRunning,
+		Checkpoint: cloneBytes(checkpoint),
 	})
 	if err != nil {
 		r.poison = err
@@ -274,7 +203,7 @@ func (r *taskRuntime) reconcileCancellationLocked(ctx context.Context) error {
 		return err
 	}
 	if task.Status != StatusCanceling || task.CancelRequestedAt == nil ||
-		task.LeaseOwner != r.lease.WorkerID || task.LeaseGeneration != r.lease.Generation ||
+		task.LeaseOwner != r.lease.LeaseOwnerID || task.LeaseGeneration != r.lease.Generation ||
 		task.CancelTransitionVersion != task.TransitionVersion ||
 		task.CancelTransitionVersion != r.lease.ExpectedVersion+1 {
 		r.poison = ErrLeaseLost
@@ -286,19 +215,25 @@ func (r *taskRuntime) reconcileCancellationLocked(ctx context.Context) error {
 	return nil
 }
 
-func (r *taskRuntime) commit(ctx context.Context, mutation TaskMutation) (*Task, error) {
+func (r *taskRuntime) commit(ctx context.Context, result *ExecutionResult) (*Task, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.poison != nil {
 		return nil, r.poison
 	}
-	result, err := r.store.Commit(ctx, &CommitTaskRequest{Lease: r.lease, Mutation: mutation})
+	if result == nil {
+		return nil, errors.New("backgroundtask: executor returned nil result")
+	}
+	commit, err := r.store.Commit(ctx, &CommitTaskRequest{
+		Lease: r.lease, Status: result.Status,
+		Checkpoint: cloneBytes(result.Checkpoint), Result: cloneResult(result.Result),
+	})
 	if err != nil {
 		r.poison = err
 		return nil, err
 	}
-	r.lease.ExpectedVersion = result.Task.TransitionVersion
-	return result.Task, nil
+	r.lease.ExpectedVersion = commit.Task.TransitionVersion
+	return commit.Task, nil
 }
 
 func (m *Manager) Store() Store { return m.store }
@@ -359,10 +294,6 @@ func (m *Manager) GetTask(ctx context.Context, taskID string) (*Task, error) {
 	return m.store.Get(ctx, taskID)
 }
 
-func (m *Manager) ListTaskUpdates(ctx context.Context, req *ListTaskUpdatesRequest) (*ListTaskUpdatesResult, error) {
-	return m.store.ListUpdates(ctx, req)
-}
-
 // ListClaimable is the read-only scheduler boundary. A scheduler may select and
 // dispatch a task ID from this result; only Execute performs claim and invocation.
 func (m *Manager) ListClaimable(ctx context.Context, req *ListClaimableRequest) (*ListClaimableResult, error) {
@@ -373,17 +304,13 @@ func (m *Manager) WaitTask(ctx context.Context, req *WaitTaskRequest) (*Task, er
 	return m.store.Wait(ctx, req)
 }
 
-func (m *Manager) WaitTaskUpdates(ctx context.Context, req *WaitTaskUpdatesRequest) (*ListTaskUpdatesResult, error) {
-	return m.store.WaitUpdates(ctx, req)
-}
-
 func (m *Manager) RequestCancel(ctx context.Context, taskID string) (*Task, error) {
-	m.workersMu.Lock()
-	worker := m.workers[taskID]
-	m.workersMu.Unlock()
-	if worker != nil {
-		worker.runtime.mu.Lock()
-		defer worker.runtime.mu.Unlock()
+	m.attemptsMu.Lock()
+	attempt := m.activeAttempts[taskID]
+	m.attemptsMu.Unlock()
+	if attempt != nil {
+		attempt.runtime.mu.Lock()
+		defer attempt.runtime.mu.Unlock()
 	}
 
 	var result *RequestCancelResult
@@ -409,8 +336,8 @@ func (m *Manager) RequestCancel(ctx context.Context, taskID string) (*Task, erro
 	if err != nil {
 		return nil, err
 	}
-	if result.Task.Status == StatusCanceling && worker != nil && !worker.runtime.canceling {
-		if err = worker.runtime.reconcileCancellationLocked(ctx); err != nil {
+	if result.Task.Status == StatusCanceling && attempt != nil && !attempt.runtime.canceling {
+		if err = attempt.runtime.reconcileCancellationLocked(ctx); err != nil {
 			return result.Task, err
 		}
 	}
@@ -428,23 +355,21 @@ func (m *Manager) ResumeTask(ctx context.Context, req *ResumeTaskRequest) (*Task
 	if task.TransitionVersion != req.ExpectedVersion {
 		return nil, ErrVersionConflict
 	}
+	if task.Status != StatusWaitingInput {
+		return nil, ErrIllegalTransition
+	}
 	executor, ok := m.executors.Resolve(task.Spec.ExecutorKey)
 	if !ok {
 		return nil, fmt.Errorf("backgroundtask: executor %q is unavailable", task.Spec.ExecutorKey)
 	}
-	normalized, err := executor.ValidateResume(ctx, &ValidateResumeRequest{
-		Task: task.Spec, Checkpoint: task.Checkpoint,
-		ResumeData: req.ResumeData, ResumeEncoding: req.ResumeEncoding,
-	})
+	normalized, err := executor.ValidateResume(
+		ctx, cloneSpec(task.Spec), cloneBytes(task.Checkpoint), cloneBytes(req.Data),
+	)
 	if err != nil {
 		return nil, err
 	}
-	if normalized == nil {
-		return nil, errors.New("backgroundtask: executor returned nil resume validation result")
-	}
 	return m.store.Resume(ctx, &ResumeTaskRequest{
-		TaskID: req.TaskID, ExpectedVersion: req.ExpectedVersion,
-		ResumeData: normalized.NormalizedData, ResumeEncoding: normalized.NormalizedEncoding,
+		TaskID: req.TaskID, ExpectedVersion: req.ExpectedVersion, Data: normalized,
 	})
 }
 
@@ -457,19 +382,19 @@ func (m *Manager) Execute(ctx context.Context, taskID string) error {
 		m.mu.Unlock()
 		return m.closedError()
 	}
-	m.workersMu.Lock()
-	if _, exists := m.workers[taskID]; exists {
-		m.workersMu.Unlock()
+	m.attemptsMu.Lock()
+	if _, exists := m.activeAttempts[taskID]; exists {
+		m.attemptsMu.Unlock()
 		m.mu.Unlock()
 		return errors.New("backgroundtask: task is already executing in this manager")
 	}
-	m.workers[taskID] = nil
-	m.workersMu.Unlock()
+	m.activeAttempts[taskID] = nil
+	m.attemptsMu.Unlock()
 	m.mu.Unlock()
 	defer func() {
-		m.workersMu.Lock()
-		delete(m.workers, taskID)
-		m.workersMu.Unlock()
+		m.attemptsMu.Lock()
+		delete(m.activeAttempts, taskID)
+		m.attemptsMu.Unlock()
 	}()
 
 	task, err := m.store.Get(ctx, taskID)
@@ -480,108 +405,103 @@ func (m *Manager) Execute(ctx context.Context, taskID string) error {
 	if !ok {
 		return fmt.Errorf("backgroundtask: executor %q is unavailable", task.Spec.ExecutorKey)
 	}
-	if err = executor.Validate(task.Spec); err != nil {
-		return err
-	}
-	leaseDuration := m.leaseDuration
 	claim, err := m.store.Claim(ctx, &ClaimTaskRequest{
 		TaskID: taskID, ExpectedVersion: task.TransitionVersion,
-		WorkerID: m.workerID, LeaseDuration: leaseDuration,
+		LeaseOwnerID: m.leaseOwnerID, LeaseDuration: m.leaseDuration,
 	})
 	if err != nil {
 		return err
 	}
 	runtime := newTaskRuntime(m.store, claim.Lease)
 	runCtx, cancel := context.WithCancel(ctx)
-	m.workersMu.Lock()
-	m.workers[taskID] = &workerExecution{cancel: cancel, runtime: runtime}
-	m.workersMu.Unlock()
+	m.attemptsMu.Lock()
+	m.activeAttempts[taskID] = &activeAttempt{cancel: cancel, runtime: runtime}
+	m.attemptsMu.Unlock()
 	defer cancel()
 
 	heartbeatDone := make(chan struct{})
 	heartbeatStop := make(chan struct{})
-	go func() {
-		defer close(heartbeatDone)
-		interval := leaseDuration / 3
-		if interval <= 0 {
-			interval = time.Nanosecond
-		}
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ticker.C:
-				if renewErr := runtime.renew(runCtx, leaseDuration); renewErr != nil {
-					if errors.Is(renewErr, errLeaseRenewalStopped) {
-						return
-					}
-					cancel()
-					return
-				}
-			case <-runCtx.Done():
-				return
-			case <-heartbeatStop:
-				return
-			}
-		}
-	}()
+	go m.renewLease(runCtx, cancel, runtime, heartbeatStop, heartbeatDone)
 
-	outcome := func() (out Outcome) {
-		defer func() {
-			if p := recover(); p != nil {
-				out = Outcome{Kind: OutcomeFailed, Err: safe.NewPanicErr(p, debug.Stack())}
-			}
-		}()
-		checkpoint := claim.Task.Checkpoint
-		resumeData := cloneBytes(claim.Task.ResumeData)
-		resumeEncoding := claim.Task.ResumeEncoding
-		if validator, ok := executor.(checkpointValidator); ok && checkpoint != nil {
-			if checkpointErr := validator.ValidateCheckpoint(claim.Task.Spec, checkpoint); checkpointErr != nil {
-				if claim.Task.Spec.Recovery.OnMissingCheckpoint != RecoveryRestartFromSpec {
-					return Outcome{Kind: OutcomeFailed, Err: checkpointErr}
-				}
-				checkpoint = nil
-				resumeData = nil
-				resumeEncoding = ""
-			}
-		}
-		return executor.Execute(runCtx, ExecutionRequest{
-			Task: claim.Task.Spec, Attempt: claim.Task.Attempt,
-			Checkpoint:     checkpoint,
-			ResumeData:     resumeData,
-			ResumeEncoding: resumeEncoding,
-		}, runtime)
-	}()
+	result, executeErr := m.executeClaim(runCtx, executor, claim.Task, runtime)
 	close(heartbeatStop)
 	<-heartbeatDone
 
-	if outcome.Kind == OutcomeFailed &&
-		errors.Is(outcome.Err, ErrCheckpointUnavailable) &&
-		claim.Task.Spec.Recovery.OnLeaseExpired != RecoveryFail {
-		// The attempt is no longer renewed. Store expiry applies MaxAttempts,
-		// checkpoint availability, and OnMissingCheckpoint atomically.
-		return outcome.Err
+	if errors.Is(executeErr, ErrCheckpointUnavailable) {
+		return executeErr
 	}
-	mutation := mutationForOutcome(outcome)
-	_, err = runtime.commit(detachedCtx{parent: ctx}, mutation)
+	if executeErr != nil {
+		result = &ExecutionResult{Status: StatusFailed, Result: &Result{Error: boundedError(executeErr)}}
+	} else if result == nil {
+		result = &ExecutionResult{Status: StatusFailed, Result: &Result{Error: "executor returned nil result"}}
+	}
+	_, err = runtime.commit(detachedCtx{parent: ctx}, result)
 	return err
 }
 
-func mutationForOutcome(out Outcome) TaskMutation {
-	reason := out.TerminalReason
-	if reason == "" && out.Err != nil {
-		reason = out.Err.Error()
+func (m *Manager) renewLease(
+	ctx context.Context,
+	cancel context.CancelFunc,
+	runtime *taskRuntime,
+	stop <-chan struct{},
+	done chan<- struct{},
+) {
+	defer close(done)
+	interval := m.leaseDuration / 3
+	if interval <= 0 {
+		interval = time.Nanosecond
 	}
-	switch out.Kind {
-	case OutcomeCompleted:
-		return TaskMutation{ToStatus: StatusCompleted, Result: out.Result}
-	case OutcomeWaitingInput:
-		return TaskMutation{ToStatus: StatusWaitingInput, Checkpoint: out.Checkpoint, InputRequest: out.InputRequest}
-	case OutcomeSuspended:
-		return TaskMutation{ToStatus: StatusSuspended, Checkpoint: out.Checkpoint}
-	case OutcomeCanceled:
-		return TaskMutation{ToStatus: StatusCanceled, TerminalReason: reason}
-	default:
-		return TaskMutation{ToStatus: StatusFailed, TerminalReason: reason}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			if err := runtime.renew(ctx, m.leaseDuration); err != nil {
+				if !errors.Is(err, errLeaseRenewalStopped) {
+					cancel()
+				}
+				return
+			}
+		case <-ctx.Done():
+			return
+		case <-stop:
+			return
+		}
 	}
+}
+
+func (m *Manager) executeClaim(
+	ctx context.Context,
+	executor Executor,
+	claimed *Task,
+	runtime Runtime,
+) (result *ExecutionResult, err error) {
+	defer func() {
+		if p := recover(); p != nil {
+			result = nil
+			err = safe.NewPanicErr(p, debug.Stack())
+		}
+	}()
+	executionTask := cloneTask(claimed)
+	if len(executionTask.Checkpoint) > 0 {
+		if checkpointErr := executor.ValidateCheckpoint(
+			ctx, cloneSpec(executionTask.Spec), cloneBytes(executionTask.Checkpoint),
+		); checkpointErr != nil {
+			executionTask.Checkpoint = nil
+			executionTask.PendingResume = nil
+		}
+	}
+	return executor.Execute(ctx, executionTask, runtime)
+}
+
+func boundedError(err error) string {
+	if err == nil {
+		return ""
+	}
+	const max = 4096
+	message := err.Error()
+	if len(message) <= max {
+		return message
+	}
+	return message[:max]
 }

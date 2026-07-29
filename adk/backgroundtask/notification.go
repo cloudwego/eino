@@ -27,12 +27,8 @@ type TaskNotification struct {
 	NotificationID    string
 	TaskID            string
 	TransitionVersion int64
-	UpdateSequence    int64
 	EventKind         NotificationEventKind
-	Status            Status
-	Progress          *Progress
-	Result            *ResultRef
-	Reason            string
+	Task              *Task
 }
 
 type NotificationSink interface {
@@ -129,6 +125,7 @@ type SessionActivationResult struct {
 
 type Dispatcher struct {
 	Outbox     NotificationOutbox
+	Store      Store
 	Sinks      NotificationSinkRegistry
 	ConsumerID string
 	BatchSize  int
@@ -136,8 +133,8 @@ type Dispatcher struct {
 }
 
 func (d *Dispatcher) DispatchOnce(ctx context.Context) (int, error) {
-	if d.Outbox == nil || d.Sinks == nil || d.ConsumerID == "" {
-		return 0, errors.New("backgroundtask: dispatcher outbox, sinks, and consumer id are required")
+	if d.Outbox == nil || d.Store == nil || d.Sinks == nil || d.ConsumerID == "" {
+		return 0, errors.New("backgroundtask: dispatcher outbox, store, sinks, and consumer id are required")
 	}
 	visibility := d.Visibility
 	if visibility <= 0 {
@@ -156,11 +153,14 @@ func (d *Dispatcher) DispatchOnce(ctx context.Context) (int, error) {
 			return accepted, errors.New("backgroundtask: notification sink is unavailable")
 		}
 		record := delivery.Record
+		task, loadErr := d.Store.Get(ctx, record.TaskID)
+		if loadErr != nil {
+			return accepted, loadErr
+		}
 		notification := TaskNotification{
 			NotificationID: record.NotificationID, TaskID: record.TaskID,
-			TransitionVersion: record.TransitionVersion, UpdateSequence: record.UpdateSequence,
-			EventKind: record.EventKind, Status: record.Status, Progress: cloneProgress(record.Progress),
-			Result: cloneResult(record.Result), Reason: record.Reason,
+			TransitionVersion: record.TransitionVersion,
+			EventKind:         record.EventKind, Task: task,
 		}
 		if routed, routedOK := sink.(RoutedNotificationSink); routedOK {
 			err = routed.AcceptTarget(ctx, record.Target, notification)

@@ -63,7 +63,6 @@ func TestAllocateTaskIDGeneratorReceivesNoDomainInput(t *testing.T) {
 	manager := New(context.Background(), &Config{
 		IDGen: func(ctx context.Context, input *RunInput) (string, error) {
 			assert.Empty(t, input.Type)
-			assert.Empty(t, input.ToolUseID)
 			assert.Equal(t, "trace-1", ctx.Value(taskIDContextKey{}))
 			return wantID, nil
 		},

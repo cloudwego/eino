@@ -85,8 +85,8 @@ func TestRunStream_ForegroundStreamsAndCompletes(t *testing.T) {
 	tasks := m.List()
 	require.Len(t, tasks, 1)
 	task := waitTask(t, m, tasks[0].Spec.ID)
-	assert.Equal(t, StatusCompleted, task.Status)
-	assert.Equal(t, "abc", string(task.ResultRef.Value.Payload))
+	assert.Equal(t, StateCompleted, task.Status)
+	assert.Equal(t, "abc", string(task.Result.Data))
 }
 
 // TestRunStream_AutoBackground: a run that outlives its budget is moved to the
@@ -106,14 +106,13 @@ func TestRunStream_AutoBackground(t *testing.T) {
 
 	got := drainStringStream(t, sr)
 	assert.Contains(t, got, "moved to the background")
-	assert.Contains(t, got, "(bash)")
 
 	tasks := m.List()
 	require.Len(t, tasks, 1)
 	task := waitTask(t, m, tasks[0].Spec.ID)
-	assert.Equal(t, StatusCompleted, task.Status)
+	assert.Equal(t, StateCompleted, task.Status)
 	// All four chunks land in the final result even though only some were streamed.
-	assert.Equal(t, "1234", string(task.ResultRef.Value.Payload))
+	assert.Equal(t, "1234", string(task.Result.Data))
 }
 
 // TestRunStream_ExplicitBackground: no execution chunks reach the caller, only the
@@ -135,8 +134,8 @@ func TestRunStream_ExplicitBackground(t *testing.T) {
 	tasks := m.List()
 	require.Len(t, tasks, 1)
 	task := waitTask(t, m, tasks[0].Spec.ID)
-	assert.Equal(t, StatusCompleted, task.Status)
-	assert.Equal(t, "chunk-1chunk-2", string(task.ResultRef.Value.Payload))
+	assert.Equal(t, StateCompleted, task.Status)
+	assert.Equal(t, "chunk-1chunk-2", string(task.Result.Data))
 }
 
 // TestRunStream_ExplicitBackgroundStartupPreview forwards launch-time chunks for
@@ -178,8 +177,8 @@ func TestRunStream_ExplicitBackgroundStartupPreview(t *testing.T) {
 	tasks := m.List()
 	require.Len(t, tasks, 1)
 	task := waitTask(t, m, tasks[0].Spec.ID)
-	assert.Equal(t, StatusCompleted, task.Status)
-	assert.Equal(t, "authenticate at https://example.com/oauth\nauthenticated\n", string(task.ResultRef.Value.Payload))
+	assert.Equal(t, StateCompleted, task.Status)
+	assert.Equal(t, "authenticate at https://example.com/oauth\nauthenticated\n", string(task.Result.Data))
 }
 
 // TestRunStream_ExplicitBackgroundStartupPreviewCompleted forwards all output and
@@ -202,8 +201,8 @@ func TestRunStream_ExplicitBackgroundStartupPreviewCompleted(t *testing.T) {
 
 	tasks := m.List()
 	require.Len(t, tasks, 1)
-	assert.Equal(t, StatusCompleted, tasks[0].Status)
-	assert.Equal(t, "done", string(tasks[0].ResultRef.Value.Payload))
+	assert.Equal(t, StateCompleted, tasks[0].Status)
+	assert.Equal(t, "done", string(tasks[0].Result.Data))
 }
 
 // TestRunStream_WorkError: an error from the stream finalizes the task as failed
@@ -244,7 +243,7 @@ func TestRunStream_WorkError(t *testing.T) {
 	tasks := m.List()
 	require.Len(t, tasks, 1)
 	task := waitTask(t, m, tasks[0].Spec.ID)
-	assert.Equal(t, StatusFailed, task.Status)
+	assert.Equal(t, StateFailed, task.Status)
 }
 
 func TestRunStream_ConstructionErrorClosesProjection(t *testing.T) {
@@ -268,7 +267,7 @@ func TestRunStream_ConstructionErrorClosesProjection(t *testing.T) {
 	tasks := m.List()
 	require.Len(t, tasks, 1)
 	task := waitTask(t, m, tasks[0].Spec.ID)
-	assert.Equal(t, StatusFailed, task.Status)
+	assert.Equal(t, StateFailed, task.Status)
 }
 
 func TestRunStream_NilReaderFails(t *testing.T) {
