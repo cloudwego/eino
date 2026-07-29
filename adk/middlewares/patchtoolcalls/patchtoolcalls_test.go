@@ -222,6 +222,63 @@ func testPatchToolCallsGeneric[M adk.MessageType](t *testing.T) {
 			wantContent:    "123 tool_b call_2",
 		},
 		{
+			name: "custom tool result generator",
+			config: &Config{
+				PatchedToolResultGenerator: func(ctx context.Context, toolName, toolCallID string, toolArgument *schema.ToolArgument) (*schema.ToolResult, error) {
+					argText := ""
+					if toolArgument != nil {
+						argText = toolArgument.Text
+					}
+					return &schema.ToolResult{
+						Parts: []schema.ToolOutputPart{{
+							Type: schema.ToolPartTypeText,
+							Text: fmt.Sprintf("result %s %s %s", toolName, toolCallID, argText),
+						}},
+					}, nil
+				},
+			},
+			messages: []M{
+				makeUserMsg[M]("hello"),
+				makeAssistantMsgWithToolCalls[M]("", []testToolCall{
+					{ID: "call_1", Name: "tool_a", Arguments: "{}"},
+					{ID: "call_2", Name: "tool_b", Arguments: `{"x":1}`},
+				}),
+				makeToolResultMsg[M]("result_a", "call_1", "tool_a"),
+			},
+			wantLen:        4,
+			checkPatchedAt: 2,
+			wantCallID:     "call_2",
+			wantToolName:   "tool_b",
+			wantContent:    `result tool_b call_2 {"x":1}`,
+		},
+		{
+			name: "tool result generator takes precedence over content generator",
+			config: &Config{
+				PatchedContentGenerator: func(ctx context.Context, toolName, toolCallID string) (string, error) {
+					return "legacy", nil
+				},
+				PatchedToolResultGenerator: func(ctx context.Context, toolName, toolCallID string, toolArgument *schema.ToolArgument) (*schema.ToolResult, error) {
+					return &schema.ToolResult{
+						Parts: []schema.ToolOutputPart{{
+							Type: schema.ToolPartTypeText,
+							Text: "enhanced",
+						}},
+					}, nil
+				},
+			},
+			messages: []M{
+				makeUserMsg[M]("hello"),
+				makeAssistantMsgWithToolCalls[M]("", []testToolCall{
+					{ID: "call_1", Name: "tool_a", Arguments: "{}"},
+				}),
+			},
+			wantLen:        3,
+			checkPatchedAt: 2,
+			wantCallID:     "call_1",
+			wantToolName:   "tool_a",
+			wantContent:    "enhanced",
+		},
+		{
 			name:   "two consecutive assistant messages with tool calls",
 			config: nil,
 			messages: []M{
@@ -280,6 +337,46 @@ func testPatchToolCallsGeneric[M adk.MessageType](t *testing.T) {
 func TestPatchToolCallsGeneric(t *testing.T) {
 	t.Run("Message", testPatchToolCallsGeneric[*schema.Message])
 	t.Run("AgenticMessage", testPatchToolCallsGeneric[*schema.AgenticMessage])
+}
+
+func TestPatchedToolResultGenerator_SetsContentAndMultiContent(t *testing.T) {
+	ctx := context.Background()
+	mw, err := New(ctx, &Config{
+		PatchedToolResultGenerator: func(ctx context.Context, toolName, toolCallID string, toolArgument *schema.ToolArgument) (*schema.ToolResult, error) {
+			require.Equal(t, "tool_a", toolName)
+			require.Equal(t, "call_1", toolCallID)
+			require.NotNil(t, toolArgument)
+			require.Equal(t, `{"q":"hi"}`, toolArgument.Text)
+			return &schema.ToolResult{
+				Parts: []schema.ToolOutputPart{{
+					Type: schema.ToolPartTypeText,
+					Text: "patched text",
+				}},
+			}, nil
+		},
+	})
+	require.NoError(t, err)
+
+	state := &adk.ChatModelAgentState{
+		Messages: []adk.Message{
+			schema.UserMessage("hello"),
+			schema.AssistantMessage("", []schema.ToolCall{
+				{ID: "call_1", Function: schema.FunctionCall{Name: "tool_a", Arguments: `{"q":"hi"}`}},
+			}),
+		},
+	}
+	_, newState, err := mw.BeforeModelRewriteState(ctx, state, nil)
+	require.NoError(t, err)
+	require.Len(t, newState.Messages, 3)
+
+	patched := newState.Messages[2]
+	assert.Equal(t, schema.Tool, patched.Role)
+	assert.Equal(t, "call_1", patched.ToolCallID)
+	assert.Equal(t, "tool_a", patched.ToolName)
+	assert.Equal(t, "patched text", patched.Content)
+	require.Len(t, patched.UserInputMultiContent, 1)
+	assert.Equal(t, schema.ChatMessagePartTypeText, patched.UserInputMultiContent[0].Type)
+	assert.Equal(t, "patched text", patched.UserInputMultiContent[0].Text)
 }
 
 func TestPatchToolCallsAgenticToolSearchResult(t *testing.T) {
