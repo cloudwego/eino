@@ -818,14 +818,15 @@ func (m *Manager) runStreamProjection(
 			task = current
 			deferNotice := input.RunInBackground && preview != nil
 			if task != nil && callerOpen && !deferNotice {
-				forward = false
 				if input.RunInBackground {
+					forward = false
 					writer.Send(m.backgroundStartNotice(detachedCtx{parent: ctx}, task.Spec.ID), nil)
 					writer.Close()
 					callerOpen = false
 					continue
 				}
 				if !terminalStatus(task.Status) {
+					forward = false
 					writer.Send(m.backgroundMoveNotice(detachedCtx{parent: ctx}, task.Spec.ID), nil)
 					writer.Close()
 					callerOpen = false

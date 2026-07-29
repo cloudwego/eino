@@ -201,8 +201,9 @@ func TestRunStream_ExplicitBackgroundStartupPreviewCompleted(t *testing.T) {
 
 	tasks := m.List()
 	require.Len(t, tasks, 1)
-	assert.Equal(t, StateCompleted, tasks[0].Status)
-	assert.Equal(t, "done", string(tasks[0].ResultData))
+	task := waitTask(t, m, tasks[0].Spec.ID)
+	assert.Equal(t, StateCompleted, task.Status)
+	assert.Equal(t, "done", string(task.ResultData))
 }
 
 // TestRunStream_WorkError: an error from the stream finalizes the task as failed
