@@ -339,7 +339,7 @@ func TestPatchToolCallsGeneric(t *testing.T) {
 	t.Run("AgenticMessage", testPatchToolCallsGeneric[*schema.AgenticMessage])
 }
 
-func TestPatchedToolResultGenerator_SetsContentAndMultiContent(t *testing.T) {
+func TestPatchedToolResultGenerator_SetsContentOnlyForPlainText(t *testing.T) {
 	ctx := context.Background()
 	mw, err := New(ctx, &Config{
 		PatchedToolResultGenerator: func(ctx context.Context, toolName, toolCallID string, toolArgument *schema.ToolArgument) (*schema.ToolResult, error) {
@@ -374,9 +374,8 @@ func TestPatchedToolResultGenerator_SetsContentAndMultiContent(t *testing.T) {
 	assert.Equal(t, "call_1", patched.ToolCallID)
 	assert.Equal(t, "tool_a", patched.ToolName)
 	assert.Equal(t, "patched text", patched.Content)
-	require.Len(t, patched.UserInputMultiContent, 1)
-	assert.Equal(t, schema.ChatMessagePartTypeText, patched.UserInputMultiContent[0].Type)
-	assert.Equal(t, "patched text", patched.UserInputMultiContent[0].Text)
+	assert.Empty(t, patched.UserInputMultiContent,
+		"plain-text tool results must not set UserInputMultiContent (OpenAI Content/MultiContent exclusivity)")
 }
 
 func TestPatchToolCallsAgenticToolSearchResult(t *testing.T) {
@@ -583,6 +582,18 @@ func TestToolResultToMessage_NilAndEmpty(t *testing.T) {
 	msg, err = toolResultToMessage("tool_a", "call_1", &schema.ToolResult{})
 	require.NoError(t, err)
 	assert.Empty(t, msg.Content)
+	assert.Empty(t, msg.UserInputMultiContent)
+}
+
+func TestToolResultToMessage_PlainTextSetsContentOnly(t *testing.T) {
+	msg, err := toolResultToMessage("tool_a", "call_1", &schema.ToolResult{
+		Parts: []schema.ToolOutputPart{{
+			Type: schema.ToolPartTypeText,
+			Text: "hello",
+		}},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "hello", msg.Content)
 	assert.Empty(t, msg.UserInputMultiContent)
 }
 

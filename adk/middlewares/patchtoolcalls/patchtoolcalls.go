@@ -315,11 +315,18 @@ func createPatchedAgenticToolMessage(ctx context.Context, gens patchedGenerators
 }
 
 // toolResultToMessage converts a ToolResult into a tool-role Message.
-// Multimodal parts are placed in UserInputMultiContent. When the result is a
-// single text part, Content is also set for callers that still read Content.
+//
+// Pure-text results (single text part) only set Content. Setting both Content
+// and UserInputMultiContent would break OpenAI-compatible serializers that
+// reject ChatCompletionMessage with Content and MultiContent simultaneously.
+// Multimodal / non-text parts go exclusively into UserInputMultiContent.
 func toolResultToMessage(toolName, callID string, result *schema.ToolResult) (*schema.Message, error) {
 	msg := schema.ToolMessage("", callID, schema.WithToolName(toolName))
 	if result == nil || len(result.Parts) == 0 {
+		return msg, nil
+	}
+	if text, ok := singleTextToolResult(result); ok {
+		msg.Content = text
 		return msg, nil
 	}
 	parts, err := result.ToMessageInputParts()
@@ -327,9 +334,6 @@ func toolResultToMessage(toolName, callID string, result *schema.ToolResult) (*s
 		return nil, err
 	}
 	msg.UserInputMultiContent = parts
-	if text, ok := singleTextToolResult(result); ok {
-		msg.Content = text
-	}
 	return msg, nil
 }
 
