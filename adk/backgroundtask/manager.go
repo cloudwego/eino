@@ -817,15 +817,19 @@ func (m *Manager) runStreamProjection(
 		case current := <-taskResult:
 			task = current
 			deferNotice := input.RunInBackground && preview != nil
-			if task != nil && !terminalStatus(task.Status) && callerOpen && !deferNotice {
+			if task != nil && callerOpen && !deferNotice {
 				forward = false
-				notice := m.backgroundStartNotice(detachedCtx{parent: ctx}, task.Spec.ID)
-				if !input.RunInBackground {
-					notice = m.backgroundMoveNotice(detachedCtx{parent: ctx}, task.Spec.ID)
+				if input.RunInBackground {
+					writer.Send(m.backgroundStartNotice(detachedCtx{parent: ctx}, task.Spec.ID), nil)
+					writer.Close()
+					callerOpen = false
+					continue
 				}
-				writer.Send(notice, nil)
-				writer.Close()
-				callerOpen = false
+				if !terminalStatus(task.Status) {
+					writer.Send(m.backgroundMoveNotice(detachedCtx{parent: ctx}, task.Spec.ID), nil)
+					writer.Close()
+					callerOpen = false
+				}
 			}
 		case chunk, ok := <-chunks:
 			if !ok {
