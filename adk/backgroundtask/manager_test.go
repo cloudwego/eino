@@ -220,8 +220,9 @@ func TestManager_RunBackground_PreservesCallerCtxValues(t *testing.T) {
 			return "ok", nil
 		})
 	require.NoError(t, err)
-	require.Equal(t, StateRunning, result.Status)
-	waitTask(t, m, result.Spec.ID)
+	require.NotNil(t, result)
+	task := waitTask(t, m, result.Spec.ID)
+	assert.Equal(t, StateCompleted, task.Status)
 
 	select {
 	case v := <-got:
