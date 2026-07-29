@@ -41,8 +41,8 @@ func init() {
 	schema.RegisterName[[]TODO]("_eino_adk_prebuilt_deep_todo_slice")
 }
 
-// BackgroundConfig enables background-task execution for a DeepAgent's top-level
-// agent. When set, shell commands and sub-agent runs can execute as managed
+// TypedBackgroundConfig enables background-task execution for a DeepAgent's
+// top-level agent. When set, shell commands and sub-agent runs can execute as managed
 // background tasks under one task-ID space, and the task_output/task_stop control
 // tools are injected once.
 //
@@ -199,7 +199,7 @@ func NewTyped[M adk.MessageType](ctx context.Context, cfg *TypedConfig[M]) (adk.
 					CheckPointStore: cfg.Background.CheckPointStore,
 				}
 			}
-			subagentMW, err := subagent.NewTyped[M](ctx, subCfg)
+			subagentMW, err := subagent.NewTyped(ctx, subCfg)
 			if err != nil {
 				return nil, fmt.Errorf("failed to create subagent middleware: %w", err)
 			}
@@ -210,7 +210,7 @@ func NewTyped[M adk.MessageType](ctx context.Context, cfg *TypedConfig[M]) (adk.
 	// When background support is configured, wire its control tools
 	// (task_output/task_stop) exactly once at the top level.
 	if cfg.Background != nil && cfg.Background.Manager != nil {
-		controlMW, err := backgroundtaskmw.NewTyped[M](ctx, &backgroundtaskmw.TypedConfig[M]{
+		controlMW, err := backgroundtaskmw.NewTyped(ctx, &backgroundtaskmw.TypedConfig[M]{
 			Manager: cfg.Background.Manager, Authorize: cfg.Background.Authorize,
 			ManagerScopeIsolated: cfg.Background.ManagerScopeIsolated,
 		})
