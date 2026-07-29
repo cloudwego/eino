@@ -77,7 +77,8 @@ func (s *staleFirstGetStore) Get(ctx context.Context, taskID string) (*bgtask.Ta
 		s.first = false
 		stale := *task
 		stale.Status = bgtask.StatusRunning
-		stale.Result = nil
+		stale.ResultData = nil
+		stale.ResultError = ""
 		return &stale, nil
 	}
 	return task, nil
@@ -258,8 +259,7 @@ func TestTaskOutputTool(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(output), &response))
 	assert.Contains(t, output, "test task")
 	assert.Contains(t, output, "completed")
-	require.NotNil(t, response.Task.Result)
-	assert.Equal(t, "task result", string(response.Task.Result.Data))
+	assert.Equal(t, "task result", string(response.Task.ResultData))
 }
 
 func TestTaskOutputTool_NotFound(t *testing.T) {
@@ -315,7 +315,8 @@ func TestTaskOutputNonBlockingReturnsCurrentSnapshot(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(output), &response))
 	require.NotNil(t, response.Task)
 	assert.Equal(t, bgtask.StateRunning, response.Task.Status)
-	assert.Nil(t, response.Task.Result)
+	assert.Empty(t, response.Task.ResultData)
+	assert.Empty(t, response.Task.ResultError)
 }
 
 func TestTaskStopTool(t *testing.T) {

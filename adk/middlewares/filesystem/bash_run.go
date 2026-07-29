@@ -85,7 +85,7 @@ type bashOutputWriter struct {
 // empty up front (open+close, which creates the file on open) so the advertised path
 // exists before any output; if even that reservation fails, it returns a disabled
 // writer so the task advertises no output file and consumers fall back to the
-// in-memory Result. The file is named after the launching tool-call id, falling
+// in-memory ResultData. The file is named after the launching tool-call id, falling
 // back to a uuid when no tool-call id is in context.
 //
 // The streaming append session is not opened here: it is opened by the work func
@@ -208,7 +208,7 @@ func outputFileName(ctx context.Context) string {
 // The request carries only the command; the Manager is the sole owner of
 // foreground/background/auto-background switching, so no background hint is
 // pushed down to the backend. On success it appends the result to the output file
-// (when one is configured) before returning, so it matches Result.Data.
+// (when one is configured) before returning, so it matches ResultData.
 func bashWork(sb filesystem.Shell, req *filesystem.ExecuteRequest, w *bashOutputWriter) backgroundtask.WorkFunc {
 	return func(ctx context.Context, _ backgroundtask.TaskInfo) (string, error) {
 		result, err := sb.Execute(ctx, req)
@@ -373,10 +373,10 @@ func newManagedBufferedExecuteTool(mgr *backgroundtask.Manager, sb filesystem.Sh
 
 		switch result.Status {
 		case backgroundtask.StatusCompleted:
-			if result.Result == nil || result.Result.Data == nil {
+			if result.ResultData == nil {
 				return "", fmt.Errorf("execute task %q completed without a result", result.Spec.ID)
 			}
-			return string(result.Result.Data), nil
+			return string(result.ResultData), nil
 		case backgroundtask.StatusPending, backgroundtask.StatusRunning,
 			backgroundtask.StatusWaitingInput, backgroundtask.StatusSuspended, backgroundtask.StatusCanceling:
 			msg := fmt.Sprintf("Command task %s is %s.", result.Spec.ID, result.Status)
@@ -389,7 +389,7 @@ func newManagedBufferedExecuteTool(mgr *backgroundtask.Manager, sb filesystem.Sh
 			}
 			return msg, nil
 		case backgroundtask.StatusFailed:
-			return "", fmt.Errorf("execute task %q failed: %s", result.Spec.ID, result.Result.Error)
+			return "", fmt.Errorf("execute task %q failed: %s", result.Spec.ID, result.ResultError)
 		case backgroundtask.StatusCanceled:
 			return "", fmt.Errorf("execute task %q was canceled", result.Spec.ID)
 		default:

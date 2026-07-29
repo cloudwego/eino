@@ -25,32 +25,45 @@ import (
 )
 
 var (
-	ErrNotFound          = errors.New("backgroundtask: task not found")
-	ErrAlreadyExists     = errors.New("backgroundtask: task already exists")
-	ErrVersionConflict   = errors.New("backgroundtask: transition version conflict")
-	ErrLeaseLost         = errors.New("backgroundtask: lease lost")
+	// ErrNotFound reports that a task or notification record does not exist.
+	ErrNotFound = errors.New("backgroundtask: task not found")
+	// ErrAlreadyExists reports that a task or registry entry already exists.
+	ErrAlreadyExists = errors.New("backgroundtask: task already exists")
+	// ErrVersionConflict reports that ExpectedVersion no longer matches the stored record.
+	ErrVersionConflict = errors.New("backgroundtask: task version conflict")
+	// ErrLeaseLost reports that an active attempt is no longer authorized.
+	ErrLeaseLost = errors.New("backgroundtask: lease lost")
+	// ErrIllegalTransition reports that a requested lifecycle transition is invalid.
 	ErrIllegalTransition = errors.New("backgroundtask: illegal state transition")
-	ErrInvalidResult     = errors.New("backgroundtask: invalid result")
-	ErrAlreadyTerminal   = errors.New("backgroundtask: task is already terminal")
+	// ErrInvalidResult reports an invalid terminal result or lifecycle output.
+	ErrInvalidResult = errors.New("backgroundtask: invalid result")
+	// ErrAlreadyTerminal reports that a task has already reached a terminal status.
+	ErrAlreadyTerminal = errors.New("backgroundtask: task is already terminal")
 	// ErrCheckpointUnavailable reports that a planned drain reached no safe,
 	// compatible checkpoint. Manager stops renewing the current lease so expiry
 	// can redispatch from the last durable checkpoint.
 	ErrCheckpointUnavailable = errors.New("backgroundtask: checkpoint unavailable")
 )
 
+// Store persists task snapshots and authorizes semantic lifecycle transitions.
 type Store interface {
 	Create(context.Context, *CreateTaskRequest) (*Task, error)
 	Get(context.Context, string) (*Task, error)
-	ListClaimable(context.Context, *ListClaimableRequest) (*ListClaimableResult, error)
-	Claim(context.Context, *ClaimTaskRequest) (*ClaimTaskResult, error)
-	Renew(context.Context, *RenewLeaseRequest) (*Task, error)
-	Commit(context.Context, *CommitTaskRequest) (*CommitTaskResult, error)
-	RequestCancel(context.Context, *RequestCancelRequest) (*RequestCancelResult, error)
+	ListPending(context.Context, *ListPendingRequest) (*ListPendingResult, error)
+	Start(context.Context, *StartTaskRequest) (*Task, error)
+	Heartbeat(context.Context, *HeartbeatRequest) (*Task, error)
+	Complete(context.Context, *CompleteTaskRequest) (*Task, error)
+	Fail(context.Context, *FailTaskRequest) (*Task, error)
+	WaitInput(context.Context, *WaitInputTaskRequest) (*Task, error)
+	Suspend(context.Context, *SuspendTaskRequest) (*Task, error)
+	Cancel(context.Context, *CancelTaskRequest) (*Task, error)
+	RequestCancel(context.Context, *RequestCancelRequest) (*Task, error)
 	Resume(context.Context, *ResumeTaskRequest) (*Task, error)
 	ReleaseSuspension(context.Context, *ReleaseSuspensionRequest) (*Task, error)
 	Wait(context.Context, *WaitTaskRequest) (*Task, error)
 }
 
+// NotificationOutbox leases lifecycle notifications for dispatch.
 type NotificationOutbox interface {
 	Receive(context.Context, *ReceiveNotificationsRequest) (*ReceiveNotificationsResult, error)
 	Ack(context.Context, NotificationReceipt) error
@@ -83,36 +96,30 @@ func validateSpec(spec Spec) error {
 	return nil
 }
 
-func validateTaskSnapshot(status Status, result *Result) error {
+func validateTaskSnapshot(status Status, data []byte, resultError string) error {
 	switch status {
 	case StatusPending, StatusRunning, StatusWaitingInput, StatusSuspended, StatusCanceling:
-		if result != nil {
+		if len(data) != 0 || resultError != "" {
 			return fmt.Errorf("%w: non-terminal task cannot have a result", ErrInvalidResult)
 		}
 	case StatusCompleted, StatusFailed, StatusCanceled:
-		if result == nil {
-			return fmt.Errorf("%w: terminal task requires a result", ErrInvalidResult)
-		}
 	default:
 		return fmt.Errorf("%w: unsupported status %q", ErrInvalidResult, status)
 	}
-	if result == nil {
-		return nil
-	}
-	if len(result.Error) > 4096 {
+	if len(resultError) > 4096 {
 		return errors.New("backgroundtask: result error exceeds configured bounds")
 	}
 	switch status {
 	case StatusCompleted:
-		if result.Error != "" {
+		if resultError != "" {
 			return fmt.Errorf("%w: completed result cannot carry an error", ErrInvalidResult)
 		}
 	case StatusFailed:
-		if result.Error == "" {
+		if resultError == "" {
 			return fmt.Errorf("%w: failed result requires an error", ErrInvalidResult)
 		}
 	case StatusCanceled:
-		if len(result.Data) != 0 {
+		if len(data) != 0 {
 			return fmt.Errorf("%w: canceled result cannot carry data", ErrInvalidResult)
 		}
 	}
@@ -150,25 +157,7 @@ func cloneSpec(v Spec) Spec {
 	return c
 }
 
-func cloneResult(v *Result) *Result {
-	if v == nil {
-		return nil
-	}
-	c := *v
-	c.Data = cloneBytes(v.Data)
-	return &c
-}
-
-func clonePendingResume(v *PendingResume) *PendingResume {
-	if v == nil {
-		return nil
-	}
-	c := *v
-	c.Data = cloneBytes(v.Data)
-	return &c
-}
-
-func cloneNotification(v *NotificationOutboxRecord) *NotificationOutboxRecord {
+func cloneNotification(v *Notification) *Notification {
 	if v == nil {
 		return nil
 	}
@@ -177,5 +166,6 @@ func cloneNotification(v *NotificationOutboxRecord) *NotificationOutboxRecord {
 	for k, value := range v.Target.Metadata {
 		c.Target.Metadata[k] = value
 	}
+	c.Task = cloneTask(v.Task)
 	return &c
 }

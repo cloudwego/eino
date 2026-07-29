@@ -86,19 +86,23 @@ type TypedConfig[M adk.MessageType] struct {
 	TaskStopToolConfig *ToolConfig
 }
 
+// ControlOperation is the task-control operation requested by an injected tool.
 type ControlOperation string
 
 const (
+	// ControlRead authorizes reading task output.
 	ControlRead ControlOperation = "read"
+	// ControlStop authorizes requesting task cancellation.
 	ControlStop ControlOperation = "stop"
 )
 
+// AuthorizeFunc decides whether a caller may perform a task-control operation.
 type AuthorizeFunc func(ctx context.Context, operation ControlOperation, taskID string) error
 
 // New creates a middleware that injects the task_output and task_stop tools, bound
 // to the Manager in config, for the standard *schema.Message message type.
 func New(ctx context.Context, config *Config) (adk.ChatModelAgentMiddleware, error) {
-	return NewTyped[*schema.Message](ctx, config)
+	return NewTyped(ctx, config)
 }
 
 // NewTyped creates a background-task control middleware parameterized by message type.
@@ -265,7 +269,7 @@ func resolveDurableTask(ctx context.Context, mgr *bgtask.Manager, task *bgtask.T
 		defer cancel()
 		for !isTerminal(task.Status) {
 			next, waitErr := mgr.WaitTask(waitCtx, &bgtask.WaitTaskRequest{
-				TaskID: input.TaskID, AfterVersion: task.TransitionVersion,
+				TaskID: input.TaskID, AfterVersion: task.Version,
 			})
 			if waitErr != nil {
 				if errors.Is(waitErr, context.DeadlineExceeded) || errors.Is(waitErr, context.Canceled) {

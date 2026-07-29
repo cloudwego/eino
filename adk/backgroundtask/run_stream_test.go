@@ -70,7 +70,7 @@ func streamWorkChunks(pause time.Duration, chunks ...string) StreamWorkFunc {
 }
 
 // TestRunStream_ForegroundStreamsAndCompletes: every chunk is forwarded live and
-// the accumulated text becomes the task's final Result.
+// the accumulated text becomes the task's final ResultData.
 func TestRunStream_ForegroundStreamsAndCompletes(t *testing.T) {
 	m := New(context.Background(), &Config{ForegroundTimeoutMs: intPtr(0)})
 	defer closeWithTimeout(m)
@@ -86,12 +86,12 @@ func TestRunStream_ForegroundStreamsAndCompletes(t *testing.T) {
 	require.Len(t, tasks, 1)
 	task := waitTask(t, m, tasks[0].Spec.ID)
 	assert.Equal(t, StateCompleted, task.Status)
-	assert.Equal(t, "abc", string(task.Result.Data))
+	assert.Equal(t, "abc", string(task.ResultData))
 }
 
 // TestRunStream_AutoBackground: a run that outlives its budget is moved to the
 // background; the caller's stream is capped with a notice and the remaining chunks
-// are drained into the task Result.
+// are drained into the task ResultData.
 func TestRunStream_AutoBackground(t *testing.T) {
 	m := New(context.Background(), &Config{
 		ForegroundTimeoutMs:  intPtr(40),
@@ -112,11 +112,11 @@ func TestRunStream_AutoBackground(t *testing.T) {
 	task := waitTask(t, m, tasks[0].Spec.ID)
 	assert.Equal(t, StateCompleted, task.Status)
 	// All four chunks land in the final result even though only some were streamed.
-	assert.Equal(t, "1234", string(task.Result.Data))
+	assert.Equal(t, "1234", string(task.ResultData))
 }
 
 // TestRunStream_ExplicitBackground: no execution chunks reach the caller, only the
-// notice; the work runs detached and its output becomes the task Result.
+// notice; the work runs detached and its output becomes the task ResultData.
 func TestRunStream_ExplicitBackground(t *testing.T) {
 	m := New(context.Background(), &Config{})
 	defer closeWithTimeout(m)
@@ -135,7 +135,7 @@ func TestRunStream_ExplicitBackground(t *testing.T) {
 	require.Len(t, tasks, 1)
 	task := waitTask(t, m, tasks[0].Spec.ID)
 	assert.Equal(t, StateCompleted, task.Status)
-	assert.Equal(t, "chunk-1chunk-2", string(task.Result.Data))
+	assert.Equal(t, "chunk-1chunk-2", string(task.ResultData))
 }
 
 // TestRunStream_ExplicitBackgroundStartupPreview forwards launch-time chunks for
@@ -178,7 +178,7 @@ func TestRunStream_ExplicitBackgroundStartupPreview(t *testing.T) {
 	require.Len(t, tasks, 1)
 	task := waitTask(t, m, tasks[0].Spec.ID)
 	assert.Equal(t, StateCompleted, task.Status)
-	assert.Equal(t, "authenticate at https://example.com/oauth\nauthenticated\n", string(task.Result.Data))
+	assert.Equal(t, "authenticate at https://example.com/oauth\nauthenticated\n", string(task.ResultData))
 }
 
 // TestRunStream_ExplicitBackgroundStartupPreviewCompleted forwards all output and
@@ -202,7 +202,7 @@ func TestRunStream_ExplicitBackgroundStartupPreviewCompleted(t *testing.T) {
 	tasks := m.List()
 	require.Len(t, tasks, 1)
 	assert.Equal(t, StateCompleted, tasks[0].Status)
-	assert.Equal(t, "done", string(tasks[0].Result.Data))
+	assert.Equal(t, "done", string(tasks[0].ResultData))
 }
 
 // TestRunStream_WorkError: an error from the stream finalizes the task as failed

@@ -53,16 +53,15 @@ func validSpec(id string) Spec {
 	}
 }
 
-func createAndClaim(t *testing.T, store *MemoryStore, id string, lease time.Duration) (*Task, LeaseToken) {
+func createAndStart(t *testing.T, store *MemoryStore, id string) *Task {
 	t.Helper()
 	created, err := store.Create(context.Background(), &CreateTaskRequest{Spec: validSpec(id)})
 	require.NoError(t, err)
-	claim, err := store.Claim(context.Background(), &ClaimTaskRequest{
-		TaskID: id, ExpectedVersion: created.TransitionVersion,
-		LeaseOwnerID: "worker", LeaseDuration: lease,
+	started, err := store.Start(context.Background(), &StartTaskRequest{
+		TaskID: id, ExpectedVersion: created.Version,
 	})
 	require.NoError(t, err)
-	return claim.Task, claim.Lease
+	return started
 }
 
 func TestMemoryStoreCreatePersistsPendingSnapshot_BitsUT(t *testing.T) {
@@ -72,7 +71,8 @@ func TestMemoryStoreCreatePersistsPendingSnapshot_BitsUT(t *testing.T) {
 	created, err := store.Create(context.Background(), &CreateTaskRequest{Spec: spec})
 	require.NoError(t, err)
 	assert.Equal(t, StatusPending, created.Status)
-	assert.Nil(t, created.Result)
+	assert.Empty(t, created.ResultData)
+	assert.Empty(t, created.ResultError)
 	assert.Nil(t, created.PendingResume)
 
 	spec.Payload[0] = 'X'
@@ -85,22 +85,20 @@ func TestMemoryStoreCreatePersistsPendingSnapshot_BitsUT(t *testing.T) {
 
 func TestMemoryStoreCheckpointedPauseHasNoTerminalResult_BitsUT(t *testing.T) {
 	store := NewMemoryStore(nil)
-	_, lease := createAndClaim(t, store, "waiting", time.Minute)
+	started := createAndStart(t, store, "waiting")
 
-	committed, err := store.Commit(context.Background(), &CommitTaskRequest{
-		Lease: lease, Status: StatusWaitingInput, Checkpoint: []byte("checkpoint"),
+	waiting, err := store.WaitInput(context.Background(), &WaitInputTaskRequest{
+		TaskID: "waiting", ExpectedVersion: started.Version, Checkpoint: []byte("checkpoint"),
 	})
 	require.NoError(t, err)
-	assert.Equal(t, StatusWaitingInput, committed.Task.Status)
-	assert.Equal(t, "checkpoint", string(committed.Task.Checkpoint))
-	assert.Equal(t, int64(1), committed.Task.CheckpointVersion)
-	assert.Nil(t, committed.Task.Result)
-	require.NotNil(t, committed.Notification)
-	assert.Equal(t, NotificationWaitingInput, committed.Notification.EventKind)
+	assert.Equal(t, StatusWaitingInput, waiting.Status)
+	assert.Equal(t, "checkpoint", string(waiting.Checkpoint))
+	assert.Empty(t, waiting.ResultData)
+	assert.Empty(t, waiting.ResultError)
 
-	_, lease = createAndClaim(t, store, "missing-checkpoint", time.Minute)
-	_, err = store.Commit(context.Background(), &CommitTaskRequest{
-		Lease: lease, Status: StatusWaitingInput,
+	started = createAndStart(t, store, "missing-checkpoint")
+	_, err = store.WaitInput(context.Background(), &WaitInputTaskRequest{
+		TaskID: "missing-checkpoint", ExpectedVersion: started.Version,
 	})
 	require.Error(t, err)
 	stillRunning, getErr := store.Get(context.Background(), "missing-checkpoint")
@@ -110,116 +108,98 @@ func TestMemoryStoreCheckpointedPauseHasNoTerminalResult_BitsUT(t *testing.T) {
 
 func TestMemoryStoreTerminalResultInvariant_BitsUT(t *testing.T) {
 	store := NewMemoryStore(nil)
-	_, lease := createAndClaim(t, store, "terminal", time.Minute)
+	started := createAndStart(t, store, "terminal")
 
-	_, err := store.Commit(context.Background(), &CommitTaskRequest{
-		Lease: lease, Status: StatusCompleted,
-	})
-	assert.ErrorIs(t, err, ErrInvalidResult)
-
-	completed, err := store.Commit(context.Background(), &CommitTaskRequest{
-		Lease: lease, Status: StatusCompleted, Result: &Result{Data: []byte("final")},
+	completed, err := store.Complete(context.Background(), &CompleteTaskRequest{
+		TaskID: "terminal", ExpectedVersion: started.Version, Data: []byte("final"),
 	})
 	require.NoError(t, err)
-	assert.Equal(t, StatusCompleted, completed.Task.Status)
-	assert.Equal(t, "final", string(completed.Task.Result.Data))
-	require.NotNil(t, completed.Task.DoneAt)
+	assert.Equal(t, StatusCompleted, completed.Status)
+	assert.Equal(t, "final", string(completed.ResultData))
+	require.NotNil(t, completed.DoneAt)
 }
 
 func TestMemoryStoreExpiredLeaseRedispatchesWithCheckpoint_BitsUT(t *testing.T) {
 	clock := &testClock{now: time.Unix(100, 0)}
 	store := NewMemoryStore(&MemoryStoreConfig{
-		Clock: clock.Now, MinLeaseDuration: time.Second, MaxLeaseDuration: time.Minute,
+		Clock: clock.Now, ActiveAttemptTimeout: 5 * time.Second,
 	})
-	_, lease := createAndClaim(t, store, "recovery", 5*time.Second)
-	_, err := store.Commit(context.Background(), &CommitTaskRequest{
-		Lease: lease, Status: StatusRunning, Checkpoint: []byte("checkpoint"),
-	})
-	require.NoError(t, err)
+	started := createAndStart(t, store, "recovery")
+	store.mu.Lock()
+	store.tasks["recovery"].Checkpoint = []byte("checkpoint")
+	store.mu.Unlock()
+	require.Equal(t, StatusRunning, started.Status)
 
 	clock.Advance(6 * time.Second)
 	recovered, err := store.Get(context.Background(), "recovery")
 	require.NoError(t, err)
 	assert.Equal(t, StatusPending, recovered.Status)
 	assert.Equal(t, "checkpoint", string(recovered.Checkpoint))
-	assert.Empty(t, recovered.LeaseOwner)
 
-	reclaimed, err := store.Claim(context.Background(), &ClaimTaskRequest{
-		TaskID: "recovery", ExpectedVersion: recovered.TransitionVersion,
-		LeaseOwnerID: "worker-2", LeaseDuration: 5 * time.Second,
+	reclaimed, err := store.Start(context.Background(), &StartTaskRequest{
+		TaskID: "recovery", ExpectedVersion: recovered.Version,
 	})
 	require.NoError(t, err)
-	assert.Equal(t, int64(2), reclaimed.Task.Attempt)
-	assert.Equal(t, StatusRunning, reclaimed.Task.Status)
-	assert.Equal(t, "checkpoint", string(reclaimed.Task.Checkpoint))
+	assert.Equal(t, int64(2), reclaimed.Attempt)
+	assert.Equal(t, StatusRunning, reclaimed.Status)
+	assert.Equal(t, "checkpoint", string(reclaimed.Checkpoint))
 }
 
-func TestMemoryStoreResumePersistsStandalonePendingResume_BitsUT(t *testing.T) {
+func TestMemoryStoreResumePersistsPendingResumeBytes_BitsUT(t *testing.T) {
 	store := NewMemoryStore(nil)
-	_, lease := createAndClaim(t, store, "resume", time.Minute)
-	waiting, err := store.Commit(context.Background(), &CommitTaskRequest{
-		Lease: lease, Status: StatusWaitingInput, Checkpoint: []byte("checkpoint"),
+	started := createAndStart(t, store, "resume")
+	waiting, err := store.WaitInput(context.Background(), &WaitInputTaskRequest{
+		TaskID: "resume", ExpectedVersion: started.Version, Checkpoint: []byte("checkpoint"),
 	})
 	require.NoError(t, err)
 
 	resumed, err := store.Resume(context.Background(), &ResumeTaskRequest{
-		TaskID: "resume", ExpectedVersion: waiting.Task.TransitionVersion,
+		TaskID: "resume", ExpectedVersion: waiting.Version,
 		Data: []byte("answer"),
 	})
 	require.NoError(t, err)
 	assert.Equal(t, StatusPending, resumed.Status)
 	assert.Equal(t, "checkpoint", string(resumed.Checkpoint))
 	require.NotNil(t, resumed.PendingResume)
-	assert.Equal(t, resumed.CheckpointVersion, resumed.PendingResume.CheckpointVersion)
-	assert.Equal(t, "answer", string(resumed.PendingResume.Data))
+	assert.Equal(t, "answer", string(resumed.PendingResume))
 }
 
-func TestMemoryStoreClaimDropsStalePendingResume_BitsUT(t *testing.T) {
+func TestMemoryStoreResumeRejectsStaleTaskVersion_BitsUT(t *testing.T) {
 	store := NewMemoryStore(nil)
-	_, lease := createAndClaim(t, store, "stale-resume", time.Minute)
-	waiting, err := store.Commit(context.Background(), &CommitTaskRequest{
-		Lease: lease, Status: StatusWaitingInput, Checkpoint: []byte("checkpoint-1"),
-	})
-	require.NoError(t, err)
-	resumed, err := store.Resume(context.Background(), &ResumeTaskRequest{
-		TaskID: "stale-resume", ExpectedVersion: waiting.Task.TransitionVersion,
-		Data: []byte("answer"),
+	started := createAndStart(t, store, "stale-resume")
+	waiting, err := store.WaitInput(context.Background(), &WaitInputTaskRequest{
+		TaskID: "stale-resume", ExpectedVersion: started.Version, Checkpoint: []byte("checkpoint-1"),
 	})
 	require.NoError(t, err)
 
 	store.mu.Lock()
 	store.tasks["stale-resume"].Checkpoint = []byte("checkpoint-2")
-	store.tasks["stale-resume"].CheckpointVersion++
+	store.advanceLocked(store.tasks["stale-resume"])
 	store.mu.Unlock()
 
-	claimed, err := store.Claim(context.Background(), &ClaimTaskRequest{
-		TaskID: "stale-resume", ExpectedVersion: resumed.TransitionVersion,
-		LeaseOwnerID: "worker-2", LeaseDuration: time.Minute,
+	_, err = store.Resume(context.Background(), &ResumeTaskRequest{
+		TaskID: "stale-resume", ExpectedVersion: waiting.Version,
+		Data: []byte("answer"),
 	})
-	require.NoError(t, err)
-	assert.Nil(t, claimed.Task.PendingResume)
-	assert.Equal(t, "checkpoint-2", string(claimed.Task.Checkpoint))
+	assert.ErrorIs(t, err, ErrVersionConflict)
 }
 
 func TestMemoryStoreCancelingReconcilesToCanceled_BitsUT(t *testing.T) {
 	store := NewMemoryStore(nil)
-	task, _ := createAndClaim(t, store, "cancel", time.Minute)
+	task := createAndStart(t, store, "cancel")
 
 	canceling, err := store.RequestCancel(context.Background(), &RequestCancelRequest{
-		TaskID: task.Spec.ID, ExpectedVersion: task.TransitionVersion,
+		TaskID: task.Spec.ID, ExpectedVersion: task.Version,
 	})
 	require.NoError(t, err)
-	assert.Equal(t, StatusCanceling, canceling.Task.Status)
-	assert.Nil(t, canceling.Task.Result)
+	assert.Equal(t, StatusCanceling, canceling.Status)
+	assert.Empty(t, canceling.ResultData)
+	assert.Empty(t, canceling.ResultError)
 
-	canceled, err := store.Commit(context.Background(), &CommitTaskRequest{
-		Lease: LeaseToken{
-			TaskID: "cancel", ExpectedVersion: canceling.Task.TransitionVersion,
-			LeaseOwnerID: "worker", Generation: task.LeaseGeneration,
-		},
-		Status: StatusCanceled, Result: &Result{Error: "canceled"},
+	canceled, err := store.Cancel(context.Background(), &CancelTaskRequest{
+		TaskID: "cancel", ExpectedVersion: canceling.Version,
 	})
 	require.NoError(t, err)
-	assert.Equal(t, StatusCanceled, canceled.Task.Status)
-	assert.Equal(t, "canceled", canceled.Task.Result.Error)
+	assert.Equal(t, StatusCanceled, canceled.Status)
+	assert.Equal(t, "task was canceled", canceled.ResultError)
 }

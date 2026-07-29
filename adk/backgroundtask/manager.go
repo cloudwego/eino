@@ -90,26 +90,20 @@ type Task struct {
 	Status Status
 	// Checkpoint is the latest durable executor checkpoint.
 	Checkpoint []byte
-	// CheckpointVersion fences pending resume input to the checkpoint validated.
-	CheckpointVersion int64
-	// Result is the terminal execution outcome. It is nil until terminal.
-	Result *Result
+	// ResultData is the terminal successful output. It is meaningful only when
+	// Status is StatusCompleted.
+	ResultData []byte
+	// ResultError is the terminal failure or cancellation reason. It is meaningful
+	// only when Status is StatusFailed or StatusCanceled.
+	ResultError string
 	// PendingResume is a one-shot resume command for the next active attempt.
-	PendingResume *PendingResume
-	// TransitionVersion is the CAS version of this durable record.
-	TransitionVersion int64
+	PendingResume []byte
+	// Version is the CAS version of this durable record.
+	Version int64
 	// Attempt counts successful claims.
 	Attempt int64
-	// LeaseOwner identifies the current lease owner.
-	LeaseOwner string
-	// LeaseGeneration fences writes from prior active attempts.
-	LeaseGeneration int64
-	// LeaseExpiresAt is written using the Store's clock.
-	LeaseExpiresAt time.Time
 	// CancelRequestedAt records durable explicit stop intent.
 	CancelRequestedAt *time.Time
-	// CancelTransitionVersion fences the adjacent cancel reconciliation.
-	CancelTransitionVersion int64
 	// UpdatedAt is the Store mutation time.
 	UpdatedAt time.Time
 	// DoneAt is the time the task reached a terminal state. Nil if still running.
@@ -201,12 +195,6 @@ type Config struct {
 	Store Store
 	// Executors resolves serialized task intent to local implementations.
 	Executors *ExecutorRegistry
-	// ManagerInstanceID identifies this Manager instance when it claims tasks. It must be
-	// unique among concurrently active Manager instances sharing a Store. When
-	// empty, New generates a process-local identity.
-	ManagerInstanceID string
-	// LeaseDuration is the active-attempt lease requested by Execute.
-	LeaseDuration time.Duration
 	// ForegroundTimeoutMs sets the foreground timeout: the time a foreground run is
 	// allowed to occupy the foreground before its deadline fires.
 	// When > 0, a foreground run that hasn't completed within this many
@@ -285,8 +273,7 @@ type NoticeInfo struct {
 type Manager struct {
 	store          Store
 	executors      *ExecutorRegistry
-	leaseOwnerID   string
-	leaseDuration  time.Duration
+	heartbeatEvery time.Duration
 	attemptsMu     sync.Mutex
 	activeAttempts map[string]*activeAttempt
 	submittedMu    sync.RWMutex
@@ -315,8 +302,7 @@ type Manager struct {
 func New(_ context.Context, conf *Config) *Manager {
 	m := &Manager{
 		foregroundTimeoutMs: defaultForegroundTimeoutMs,
-		leaseOwnerID:        newManagerInstanceID(),
-		leaseDuration:       30 * time.Second,
+		heartbeatEvery:      10 * time.Second,
 		activeAttempts:      make(map[string]*activeAttempt),
 		submitted:           make(map[string]struct{}),
 	}
@@ -332,12 +318,6 @@ func New(_ context.Context, conf *Config) *Manager {
 		}
 		if conf.Executors != nil {
 			m.executors = conf.Executors
-		}
-		if conf.ManagerInstanceID != "" {
-			m.leaseOwnerID = conf.ManagerInstanceID
-		}
-		if conf.LeaseDuration > 0 {
-			m.leaseDuration = conf.LeaseDuration
 		}
 		m.shouldAutoBackground = conf.ShouldAutoBackground
 		m.idGen = conf.IDGen
@@ -425,7 +405,7 @@ func (m *Manager) Wait(ctx context.Context, id string) (*Task, bool) {
 	if task, err := m.store.Get(ctx, id); err == nil {
 		for !terminalStatus(task.Status) {
 			task, err = m.store.Wait(ctx, &WaitTaskRequest{
-				TaskID: id, AfterVersion: task.TransitionVersion,
+				TaskID: id, AfterVersion: task.Version,
 			})
 			if err != nil {
 				current, getErr := m.store.Get(context.Background(), id)
@@ -536,11 +516,14 @@ func eventTypeForState(state State) TaskEventType {
 }
 
 func cloneTask(t *Task) *Task {
+	if t == nil {
+		return nil
+	}
 	clone := *t
 	clone.Spec = cloneSpec(t.Spec)
 	clone.Checkpoint = cloneBytes(t.Checkpoint)
-	clone.Result = cloneResult(t.Result)
-	clone.PendingResume = clonePendingResume(t.PendingResume)
+	clone.ResultData = cloneBytes(t.ResultData)
+	clone.PendingResume = cloneBytes(t.PendingResume)
 	clone.CancelRequestedAt = cloneTime(t.CancelRequestedAt)
 	clone.DoneAt = cloneTime(t.DoneAt)
 	return &clone
@@ -576,7 +559,7 @@ type TaskInfo struct {
 // abandoned foreground wait stops it, or when the Manager is closed. Work should
 // honor it.
 //
-// The returned result becomes the canonical completed Result.Data; a non-nil error
+// The returned result becomes the canonical completed ResultData; a non-nil error
 // transitions the task to failed.
 type WorkFunc func(ctx context.Context, task TaskInfo) (result string, err error)
 
@@ -702,7 +685,7 @@ func (m *Manager) sendTaskEvent(task *Task, eventType TaskEventType) {
 // StreamWorkFunc performs a single managed streaming execution. It is the
 // streaming counterpart of WorkFunc: instead of returning the whole result at
 // once, it returns output chunks. Manager projects those chunks live and
-// concatenates them into the canonical completed Result.Data.
+// concatenates them into the canonical completed ResultData.
 //
 // task behaves exactly as for WorkFunc (see TaskInfo): it carries the task id the
 // work uses to report an output-file write failure.
@@ -731,14 +714,14 @@ type StreamWorkFunc func(ctx context.Context, task TaskInfo) (*schema.StreamRead
 //   - Auto-background at the deadline: chunks forwarded so far are kept; the
 //     Manager appends a single notice chunk (task id) and closes the
 //     caller's stream, while the work keeps running in the background — its
-//     remaining output is drained into the task's Result.Data.
+//     remaining output is drained into the task's ResultData.
 //   - Explicit background (input.RunInBackground): the work runs detached from the
 //     start. By default no execution chunks reach the caller; when
 //     input.BackgroundStartupPreviewMs is positive, chunks emitted during that
 //     bounded startup window are forwarded. If work finishes during the preview,
 //     all chunks are forwarded and the stream closes with no background notice.
 //     Otherwise the notice ends the preview and the remaining output is drained
-//     into the task's Result.Data.
+//     into the task's ResultData.
 //
 // The foreground and preview windows are both measured from when the work returns
 // its stream reader (see StreamWorkFunc), not from this call: RunStream's forwarding

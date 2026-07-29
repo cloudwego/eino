@@ -18,16 +18,8 @@ package backgroundtask
 
 import (
 	"math/rand"
-	"sync/atomic"
 	"time"
 )
-
-var managerInstanceSequence atomic.Uint64
-
-func newManagerInstanceID() string {
-	return "manager-" + base62(time.Now().UnixNano()) + "-" +
-		base62(int64(managerInstanceSequence.Add(1)))
-}
 
 // Task-id layout: a positive int64 (63 usable bits) packed as
 //

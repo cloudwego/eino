@@ -138,10 +138,10 @@ func newDurableAgentTool[M adk.MessageType](
 func formatDurableTaskResult(agentType string, task *backgroundtask.Task) (string, error) {
 	switch task.Status {
 	case backgroundtask.StatusCompleted:
-		if task.Result == nil || task.Result.Data == nil {
+		if task.ResultData == nil {
 			return "", errors.New("subagent: completed task has no result")
 		}
-		return string(task.Result.Data), nil
+		return string(task.ResultData), nil
 	case backgroundtask.StatusWaitingInput:
 		return fmt.Sprintf("Agent task %s requires input. Use task_output to inspect the request.", task.Spec.ID), nil
 	case backgroundtask.StatusSuspended, backgroundtask.StatusPending, backgroundtask.StatusRunning, backgroundtask.StatusCanceling:
@@ -149,7 +149,7 @@ func formatDurableTaskResult(agentType string, task *backgroundtask.Task) (strin
 	case backgroundtask.StatusCanceled:
 		return "", fmt.Errorf("subagent %q task %q was canceled", agentType, task.Spec.ID)
 	case backgroundtask.StatusFailed:
-		return "", fmt.Errorf("subagent %q task %q failed: %s", agentType, task.Spec.ID, task.Result.Error)
+		return "", fmt.Errorf("subagent %q task %q failed: %s", agentType, task.Spec.ID, task.ResultError)
 	default:
 		return "", fmt.Errorf("subagent %q task %q has unknown status %q", agentType, task.Spec.ID, task.Status)
 	}

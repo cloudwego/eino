@@ -18,6 +18,7 @@ package backgroundtask
 
 import "time"
 
+// NotificationTarget describes where lifecycle notifications should be routed.
 type NotificationTarget struct {
 	Kind     string
 	TargetID string
@@ -36,136 +37,141 @@ type Spec struct {
 	CreatedAt   time.Time
 }
 
-// Result is the terminal execution outcome. Pending and running tasks do not
-// have a Result.
-type Result struct {
-	Data  []byte
-	Error string
-}
-
-// PendingResume is a one-shot resume command fenced to the checkpoint it was
-// validated against.
-type PendingResume struct {
-	CheckpointVersion int64
-	Data              []byte
-}
-
-type NotificationEventKind string
+// NotificationKind identifies the lifecycle transition that created a notification.
+type NotificationKind string
 
 const (
-	NotificationWaitingInput NotificationEventKind = "waiting_input"
-	NotificationCompleted    NotificationEventKind = "completed"
-	NotificationFailed       NotificationEventKind = "failed"
-	NotificationCanceled     NotificationEventKind = "canceled"
+	// NotificationWaitingInput reports that a task is paused waiting for resume input.
+	NotificationWaitingInput NotificationKind = "waiting_input"
+	// NotificationCompleted reports that a task completed successfully.
+	NotificationCompleted NotificationKind = "completed"
+	// NotificationFailed reports that a task failed.
+	NotificationFailed NotificationKind = "failed"
+	// NotificationCanceled reports that a task was canceled.
+	NotificationCanceled NotificationKind = "canceled"
 )
 
-// NotificationOutboxRecord is only a durable wake-up and routing pointer.
+// Notification is only a durable wake-up and routing pointer.
 // Authoritative task data is loaded by the consumer.
-type NotificationOutboxRecord struct {
-	NotificationID    string
-	TaskID            string
-	TransitionVersion int64
-	EventKind         NotificationEventKind
-	Target            NotificationTarget
-	CreatedAt         time.Time
+type Notification struct {
+	ID        string
+	TaskID    string
+	Version   int64
+	Kind      NotificationKind
+	Target    NotificationTarget
+	CreatedAt time.Time
+
+	// Task is nil for pointer-only outbox storage and populated for delivered
+	// notifications passed to sinks or stored in session inboxes.
+	Task *Task
 }
 
-type ExecutorCapability struct {
-	ExecutorKey string
-}
-
-type LeaseToken struct {
-	TaskID          string
-	ExpectedVersion int64
-	LeaseOwnerID    string
-	Generation      int64
-}
-
+// CreateTaskRequest creates a task from immutable serialized intent.
 type CreateTaskRequest struct {
 	Spec Spec
 }
 
-type ListClaimableRequest struct {
-	Capabilities []ExecutorCapability
+// ListPendingRequest lists pending task candidates for the given executor keys.
+type ListPendingRequest struct {
+	ExecutorKeys []string
 	Cursor       string
 	Limit        int
 }
 
-type ListClaimableResult struct {
+// ListPendingResult contains pending task candidates and an optional cursor.
+type ListPendingResult struct {
 	Tasks      []*Task
 	NextCursor string
 }
 
-type ClaimTaskRequest struct {
+// StartTaskRequest asks the Store to authorize a new active attempt.
+type StartTaskRequest struct {
 	TaskID          string
 	ExpectedVersion int64
-	LeaseOwnerID    string
-	LeaseDuration   time.Duration
 }
 
-type ClaimTaskResult struct {
-	Task  *Task
-	Lease LeaseToken
+// HeartbeatRequest reports liveness for an active attempt.
+type HeartbeatRequest struct {
+	TaskID          string
+	ExpectedVersion int64
 }
 
-type RenewLeaseRequest struct {
-	Lease         LeaseToken
-	LeaseDuration time.Duration
+// CompleteTaskRequest records successful task completion.
+type CompleteTaskRequest struct {
+	TaskID          string
+	ExpectedVersion int64
+	Data            []byte
 }
 
-// CommitTaskRequest atomically persists an executor-originated lifecycle
-// transition under the current lease fence.
-type CommitTaskRequest struct {
-	Lease      LeaseToken
-	Status     Status
-	Checkpoint []byte
-	Result     *Result
+// FailTaskRequest records failed task completion.
+type FailTaskRequest struct {
+	TaskID          string
+	ExpectedVersion int64
+	Error           string
 }
 
-type CommitTaskResult struct {
-	Task         *Task
-	Notification *NotificationOutboxRecord
+// WaitInputTaskRequest checkpoints a task that is waiting for external input.
+type WaitInputTaskRequest struct {
+	TaskID          string
+	ExpectedVersion int64
+	Checkpoint      []byte
 }
 
+// SuspendTaskRequest checkpoints a task for a planned suspension.
+type SuspendTaskRequest struct {
+	TaskID          string
+	ExpectedVersion int64
+	Checkpoint      []byte
+}
+
+// CancelTaskRequest records active-attempt acknowledgement of cancellation.
+type CancelTaskRequest struct {
+	TaskID          string
+	ExpectedVersion int64
+}
+
+// RequestCancelRequest records durable cancellation intent.
 type RequestCancelRequest struct {
 	TaskID          string
 	ExpectedVersion int64
 }
 
-type RequestCancelResult struct {
-	Task         *Task
-	Notification *NotificationOutboxRecord
-}
-
+// ResumeTaskRequest stores a one-shot resume command for a waiting task.
 type ResumeTaskRequest struct {
 	TaskID          string
 	ExpectedVersion int64
 	Data            []byte
 }
 
+// ReleaseSuspensionRequest returns a suspended task to pending.
 type ReleaseSuspensionRequest struct {
 	TaskID          string
 	ExpectedVersion int64
 }
 
+// WaitTaskRequest waits until a task advances beyond a known version.
 type WaitTaskRequest struct {
 	TaskID       string
 	AfterVersion int64
 }
 
+// NotificationReceipt identifies a received outbox notification for acknowledgement.
 type NotificationReceipt []byte
 
+// ReceiveNotificationsRequest leases visible notifications from an outbox.
 type ReceiveNotificationsRequest struct {
 	ConsumerID     string
 	Limit          int
 	VisibilityTime time.Duration
 }
 
+// NotificationDelivery contains a notification and its acknowledgement receipt.
 type NotificationDelivery struct {
-	Record  NotificationOutboxRecord
+	Record  Notification
 	Receipt NotificationReceipt
 }
 
+// ReceiveNotificationsResult contains leased notification deliveries.
 type ReceiveNotificationsResult struct {
 	Deliveries []NotificationDelivery
 }

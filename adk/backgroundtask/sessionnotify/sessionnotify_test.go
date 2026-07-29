@@ -64,13 +64,13 @@ func TestSinkAcceptTargetEnqueuesBeforeActivation_BitsUT(t *testing.T) {
 
 	err := sink.AcceptTarget(context.Background(), backgroundtask.NotificationTarget{
 		Kind: "session_inbox", TargetID: "session-1",
-	}, backgroundtask.TaskNotification{
-		NotificationID: "notification-1", TaskID: "task-1",
-		EventKind: backgroundtask.NotificationCompleted,
+	}, backgroundtask.Notification{
+		ID: "notification-1", TaskID: "task-1",
+		Kind: backgroundtask.NotificationCompleted,
 		Task: &backgroundtask.Task{
-			Spec:   backgroundtask.Spec{ID: "task-1"},
-			Status: backgroundtask.StatusCompleted,
-			Result: &backgroundtask.Result{},
+			Spec:       backgroundtask.Spec{ID: "task-1"},
+			Status:     backgroundtask.StatusCompleted,
+			ResultData: []byte("done"),
 		},
 	})
 	require.NoError(t, err)
@@ -87,7 +87,7 @@ func TestSinkAcceptTargetActivationFailureRetainsInboxItem_BitsUT(t *testing.T) 
 
 	err := sink.AcceptTarget(context.Background(), backgroundtask.NotificationTarget{
 		Kind: "session_inbox", TargetID: "session-1",
-	}, backgroundtask.TaskNotification{NotificationID: "notification-1"})
+	}, backgroundtask.Notification{ID: "notification-1"})
 	assert.ErrorIs(t, err, wantErr)
 
 	pending, listErr := inbox.ListPending(context.Background(), &backgroundtask.ListSessionNotificationsRequest{
@@ -95,7 +95,7 @@ func TestSinkAcceptTargetActivationFailureRetainsInboxItem_BitsUT(t *testing.T) 
 	})
 	require.NoError(t, listErr)
 	require.Len(t, pending, 1)
-	assert.Equal(t, "notification-1", pending[0].Notification.NotificationID)
+	assert.Equal(t, "notification-1", pending[0].Notification.ID)
 }
 
 func TestTerminalTaskNotificationWakesParentSession_BitsUT(t *testing.T) {
@@ -107,14 +107,12 @@ func TestTerminalTaskNotificationWakesParentSession_BitsUT(t *testing.T) {
 	}
 	created, err := store.Create(context.Background(), &backgroundtask.CreateTaskRequest{Spec: spec})
 	require.NoError(t, err)
-	claimed, err := store.Claim(context.Background(), &backgroundtask.ClaimTaskRequest{
-		TaskID: spec.ID, ExpectedVersion: created.TransitionVersion,
-		LeaseOwnerID: "worker", LeaseDuration: time.Minute,
+	started, err := store.Start(context.Background(), &backgroundtask.StartTaskRequest{
+		TaskID: spec.ID, ExpectedVersion: created.Version,
 	})
 	require.NoError(t, err)
-	_, err = store.Commit(context.Background(), &backgroundtask.CommitTaskRequest{
-		Lease: claimed.Lease, Status: backgroundtask.StatusCompleted,
-		Result: &backgroundtask.Result{Data: []byte("done")},
+	_, err = store.Complete(context.Background(), &backgroundtask.CompleteTaskRequest{
+		TaskID: spec.ID, ExpectedVersion: started.Version, Data: []byte("done"),
 	})
 	require.NoError(t, err)
 
@@ -140,21 +138,21 @@ func TestTerminalTaskNotificationWakesParentSession_BitsUT(t *testing.T) {
 	require.Len(t, pending, 1)
 	var completion *backgroundtask.SessionInboxItem
 	for _, item := range pending {
-		if item.Notification.EventKind == backgroundtask.NotificationCompleted {
+		if item.Notification.Kind == backgroundtask.NotificationCompleted {
 			completion = item
 		}
 	}
 	require.NotNil(t, completion)
 	require.NotNil(t, completion.Notification.Task)
-	assert.Equal(t, "done", string(completion.Notification.Task.Result.Data))
+	assert.Equal(t, "done", string(completion.Notification.Task.ResultData))
 }
 
 func TestMemoryInboxDeduplicatesAcrossAckAndRedelivery_BitsUT(t *testing.T) {
 	inbox := NewMemoryInbox()
 	request := &backgroundtask.EnqueueSessionNotificationRequest{
 		SessionID: "session-1",
-		Notification: backgroundtask.TaskNotification{
-			NotificationID: "notification-1", TaskID: "task-1",
+		Notification: backgroundtask.Notification{
+			ID: "notification-1", TaskID: "task-1",
 		},
 	}
 	first, err := inbox.Enqueue(context.Background(), request)
@@ -181,8 +179,8 @@ func TestMemoryInboxAckUsesVersionCAS_BitsUT(t *testing.T) {
 	inbox := NewMemoryInbox()
 	item, err := inbox.Enqueue(context.Background(), &backgroundtask.EnqueueSessionNotificationRequest{
 		SessionID: "session-1",
-		Notification: backgroundtask.TaskNotification{
-			NotificationID: "notification-1",
+		Notification: backgroundtask.Notification{
+			ID: "notification-1",
 		},
 	})
 	require.NoError(t, err)
@@ -204,8 +202,8 @@ func TestMemoryInboxDeepCopiesNotification_DefectProbing_BitsUT(t *testing.T) {
 	payload := []byte("result")
 	checkpoint := []byte("checkpoint")
 	pendingResume := []byte("resume")
-	notification := backgroundtask.TaskNotification{
-		NotificationID: "notification-1",
+	notification := backgroundtask.Notification{
+		ID: "notification-1",
 		Task: &backgroundtask.Task{
 			Spec: backgroundtask.Spec{
 				ID: "task-1",
@@ -214,12 +212,10 @@ func TestMemoryInboxDeepCopiesNotification_DefectProbing_BitsUT(t *testing.T) {
 					Metadata: map[string]string{"test/key": "original"},
 				},
 			},
-			Status:     backgroundtask.StatusCompleted,
-			Result:     &backgroundtask.Result{Data: payload},
-			Checkpoint: checkpoint,
-			PendingResume: &backgroundtask.PendingResume{
-				CheckpointVersion: 7, Data: pendingResume,
-			},
+			Status:        backgroundtask.StatusCompleted,
+			ResultData:    payload,
+			Checkpoint:    checkpoint,
+			PendingResume: pendingResume,
 		},
 	}
 	_, err := inbox.Enqueue(context.Background(), &backgroundtask.EnqueueSessionNotificationRequest{
@@ -235,22 +231,22 @@ func TestMemoryInboxDeepCopiesNotification_DefectProbing_BitsUT(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Len(t, pending, 1)
-	assert.Equal(t, "result", string(pending[0].Notification.Task.Result.Data))
+	assert.Equal(t, "result", string(pending[0].Notification.Task.ResultData))
 	assert.Equal(t, "checkpoint", string(pending[0].Notification.Task.Checkpoint))
-	assert.Equal(t, "resume", string(pending[0].Notification.Task.PendingResume.Data))
+	assert.Equal(t, "resume", string(pending[0].Notification.Task.PendingResume))
 
-	pending[0].Notification.Task.Result.Data[0] = 'Y'
+	pending[0].Notification.Task.ResultData[0] = 'Y'
 	pending[0].Notification.Task.Spec.Notify.Metadata["test/key"] = "mutated"
 	pending[0].Notification.Task.Checkpoint[0] = 'Y'
-	pending[0].Notification.Task.PendingResume.Data[0] = 'Y'
+	pending[0].Notification.Task.PendingResume[0] = 'Y'
 	again, err := inbox.ListPending(context.Background(), &backgroundtask.ListSessionNotificationsRequest{
 		SessionID: "session-1",
 	})
 	require.NoError(t, err)
-	assert.Equal(t, "result", string(again[0].Notification.Task.Result.Data))
+	assert.Equal(t, "result", string(again[0].Notification.Task.ResultData))
 	assert.Equal(t, "original", again[0].Notification.Task.Spec.Notify.Metadata["test/key"])
 	assert.Equal(t, "checkpoint", string(again[0].Notification.Task.Checkpoint))
-	assert.Equal(t, "resume", string(again[0].Notification.Task.PendingResume.Data))
+	assert.Equal(t, "resume", string(again[0].Notification.Task.PendingResume))
 }
 
 func TestTurnLoopActivatorQueuesWakeAndStartsLoop_BitsUT(t *testing.T) {

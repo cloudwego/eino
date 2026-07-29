@@ -217,7 +217,7 @@ func TestManagedExecuteTool_TimeoutMovesToBackground(t *testing.T) {
 	tasks := mgr.List()
 	require.Len(t, tasks, 1)
 	assert.Equal(t, backgroundtask.StateCompleted, tasks[0].Status)
-	assert.Equal(t, "slow done", string(string(tasks[0].Result.Data)))
+	assert.Equal(t, "slow done", string(tasks[0].ResultData))
 }
 
 // Without a ShouldAutoBackground hook, a command that outlives its timeout is
@@ -273,8 +273,8 @@ func TestManagedExecuteTool_StreamingForeground(t *testing.T) {
 	require.Len(t, tasks, 1)
 	assert.Equal(t, backgroundtask.StateCompleted, tasks[0].Status)
 	// The streamed chunks are also the persisted result.
-	assert.Contains(t, string(tasks[0].Result.Data), "chunk1")
-	assert.Contains(t, string(tasks[0].Result.Data), "chunk3")
+	assert.Contains(t, string(tasks[0].ResultData), "chunk1")
+	assert.Contains(t, string(tasks[0].ResultData), "chunk3")
 }
 
 // An explicit background launch on a streaming managed tool exposes startup
@@ -304,7 +304,7 @@ func TestManagedExecuteTool_StreamingExplicitBackground(t *testing.T) {
 	tasks := mgr.List()
 	require.Len(t, tasks, 1)
 	assert.Equal(t, backgroundtask.StateCompleted, tasks[0].Status)
-	assert.Contains(t, string(tasks[0].Result.Data), "chunk1")
+	assert.Contains(t, string(tasks[0].ResultData), "chunk1")
 	// The streamed output was teed to the output file as it drained in the background.
 	path, found := filesystemOutput(t, backend)
 	require.True(t, found)
@@ -461,7 +461,7 @@ func (f *failingAppendOpener) OpenAppend(ctx context.Context, req *filesystem.Op
 }
 
 // When the up-front reservation write fails, the task advertises no output file,
-// so consumers fall back to the in-memory Result.
+// so consumers fall back to the in-memory ResultData.
 func TestManagedExecuteTool_ReservationFailure_NoOutputFile(t *testing.T) {
 	backend := setupTestBackend()
 	mgr := backgroundtask.New(context.Background(), &backgroundtask.Config{})
@@ -485,11 +485,11 @@ func TestManagedExecuteTool_ReservationFailure_NoOutputFile(t *testing.T) {
 	path, found := filesystemOutput(t, backend)
 	assert.Empty(t, path)
 	assert.False(t, found)
-	assert.Equal(t, "the output", string(string(tasks[0].Result.Data)))
+	assert.Equal(t, "the output", string(tasks[0].ResultData))
 }
 
 // When a write to the output file fails after reservation, the file is marked
-// unreliable (OutputFileErr set) while the in-memory Result stays complete.
+// unreliable (OutputFileErr set) while the in-memory ResultData stays complete.
 func TestManagedExecuteTool_WriteFailure_MarksUnreliable(t *testing.T) {
 	backend := setupTestBackend()
 	mgr := backgroundtask.New(context.Background(), &backgroundtask.Config{})
@@ -514,7 +514,7 @@ func TestManagedExecuteTool_WriteFailure_MarksUnreliable(t *testing.T) {
 	path, found := filesystemOutput(t, backend)
 	assert.NotEmpty(t, path)
 	assert.True(t, found)
-	assert.Equal(t, "the output", string(string(tasks[0].Result.Data)))
+	assert.Equal(t, "the output", string(tasks[0].ResultData))
 }
 
 // countingAppendOpener wraps a Backend and counts every OpenAppend and every

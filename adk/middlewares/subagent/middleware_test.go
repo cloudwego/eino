@@ -166,8 +166,7 @@ func TestDurableAgentToolForeground(t *testing.T) {
 	task := terminalTask(t, mgr)
 	require.NotNil(t, task)
 	assert.Equal(t, backgroundtask.StateCompleted, task.Status)
-	require.NotNil(t, task.Result)
-	assert.Contains(t, string(task.Result.Data), "durable result")
+	assert.Contains(t, string(task.ResultData), "durable result")
 }
 
 func TestDurableAgentToolBackgroundSurvivesCaller(t *testing.T) {

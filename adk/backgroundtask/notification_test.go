@@ -29,17 +29,17 @@ import (
 type routedRecordingSink struct {
 	fail          bool
 	targets       []NotificationTarget
-	notifications []TaskNotification
+	notifications []Notification
 }
 
-func (s *routedRecordingSink) Accept(context.Context, TaskNotification) error {
+func (s *routedRecordingSink) Accept(context.Context, Notification) error {
 	return errors.New("unexpected non-routed delivery")
 }
 
 func (s *routedRecordingSink) AcceptTarget(
 	_ context.Context,
 	target NotificationTarget,
-	notification TaskNotification,
+	notification Notification,
 ) error {
 	s.targets = append(s.targets, target)
 	s.notifications = append(s.notifications, notification)
@@ -52,11 +52,11 @@ func (s *routedRecordingSink) AcceptTarget(
 func TestDispatcherRedeliversUntilSinkAccepts_BitsUT(t *testing.T) {
 	clock := &testClock{now: time.Unix(400, 0)}
 	store := NewMemoryStore(&MemoryStoreConfig{
-		Clock: clock.Now, MinLeaseDuration: time.Second, MaxLeaseDuration: time.Minute,
+		Clock: clock.Now, ActiveAttemptTimeout: time.Minute,
 	})
-	task, lease := createAndClaim(t, store, "dispatch", 10*time.Second)
-	committed, err := store.Commit(context.Background(), &CommitTaskRequest{
-		Lease: lease, Status: StatusCompleted, Result: &Result{Data: []byte("result")},
+	task := createAndStart(t, store, "dispatch")
+	completed, err := store.Complete(context.Background(), &CompleteTaskRequest{
+		TaskID: "dispatch", ExpectedVersion: task.Version, Data: []byte("result"),
 	})
 	require.NoError(t, err)
 
@@ -71,7 +71,7 @@ func TestDispatcherRedeliversUntilSinkAccepts_BitsUT(t *testing.T) {
 	require.Error(t, err)
 	assert.Zero(t, accepted)
 	require.Len(t, sink.notifications, 1)
-	assert.Equal(t, committed.Notification.NotificationID, sink.notifications[0].NotificationID)
+	assert.Equal(t, completed.Spec.ID, sink.notifications[0].TaskID)
 	assert.Equal(t, task.Spec.SessionID, sink.targets[0].TargetID)
 	require.NotNil(t, sink.notifications[0].Task)
 	assert.Equal(t, StateCompleted, sink.notifications[0].Task.Status)
@@ -82,7 +82,7 @@ func TestDispatcherRedeliversUntilSinkAccepts_BitsUT(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 1, accepted)
 	require.Len(t, sink.notifications, 2)
-	assert.Equal(t, sink.notifications[0].NotificationID, sink.notifications[1].NotificationID)
+	assert.Equal(t, sink.notifications[0].ID, sink.notifications[1].ID)
 
 	empty, err := store.Receive(context.Background(), &ReceiveNotificationsRequest{
 		ConsumerID: "verify", Limit: 10, VisibilityTime: time.Second,
@@ -93,17 +93,14 @@ func TestDispatcherRedeliversUntilSinkAccepts_BitsUT(t *testing.T) {
 
 func TestMemoryStoreTerminalCommitCreatesOneTerminalOutbox_BitsUT(t *testing.T) {
 	store := NewMemoryStore(nil)
-	_, lease := createAndClaim(t, store, "one-terminal", time.Minute)
-	terminal, err := store.Commit(context.Background(), &CommitTaskRequest{
-		Lease: lease, Status: StatusCompleted, Result: &Result{Data: []byte("result")},
+	started := createAndStart(t, store, "one-terminal")
+	terminal, err := store.Complete(context.Background(), &CompleteTaskRequest{
+		TaskID: "one-terminal", ExpectedVersion: started.Version, Data: []byte("result"),
 	})
 	require.NoError(t, err)
-	require.NotNil(t, terminal.Notification)
-	assert.Equal(t, NotificationCompleted, terminal.Notification.EventKind)
-	assert.Equal(t, terminal.Task.TransitionVersion, terminal.Notification.TransitionVersion)
 
-	_, err = store.Commit(context.Background(), &CommitTaskRequest{
-		Lease: lease, Status: StatusCompleted, Result: &Result{Data: []byte("result")},
+	_, err = store.Complete(context.Background(), &CompleteTaskRequest{
+		TaskID: "one-terminal", ExpectedVersion: started.Version, Data: []byte("result"),
 	})
 	require.Error(t, err)
 
@@ -113,7 +110,8 @@ func TestMemoryStoreTerminalCommitCreatesOneTerminalOutbox_BitsUT(t *testing.T) 
 	require.NoError(t, err)
 	terminalCount := 0
 	for _, delivery := range deliveries.Deliveries {
-		if delivery.Record.EventKind == NotificationCompleted {
+		if delivery.Record.Kind == NotificationCompleted {
+			assert.Equal(t, terminal.Version, delivery.Record.Version)
 			terminalCount++
 		}
 	}
@@ -126,13 +124,12 @@ func TestRouteLessTaskNeverCreatesOutbox_BitsUT(t *testing.T) {
 	spec.Notify = nil
 	created, err := store.Create(context.Background(), &CreateTaskRequest{Spec: spec})
 	require.NoError(t, err)
-	claim, err := store.Claim(context.Background(), &ClaimTaskRequest{
-		TaskID: spec.ID, ExpectedVersion: created.TransitionVersion,
-		LeaseOwnerID: "worker", LeaseDuration: time.Minute,
+	started, err := store.Start(context.Background(), &StartTaskRequest{
+		TaskID: spec.ID, ExpectedVersion: created.Version,
 	})
 	require.NoError(t, err)
-	_, err = store.Commit(context.Background(), &CommitTaskRequest{
-		Lease: claim.Lease, Status: StatusCompleted, Result: &Result{Data: []byte("done")},
+	_, err = store.Complete(context.Background(), &CompleteTaskRequest{
+		TaskID: spec.ID, ExpectedVersion: started.Version, Data: []byte("done"),
 	})
 	require.NoError(t, err)
 

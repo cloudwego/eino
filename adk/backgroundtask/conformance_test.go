@@ -34,7 +34,7 @@ type scriptedExecutor struct {
 	validateErr      error
 	checkpointErr    error
 	normalizedResume []byte
-	execute          func(context.Context, *Task, Runtime) (*ExecutionResult, error)
+	execute          func(context.Context, *Task, <-chan ControlRequest) (*ExecutionResult, error)
 
 	mu                  sync.Mutex
 	validated           []Spec
@@ -78,14 +78,14 @@ func (e *scriptedExecutor) ValidateResume(
 	return cloneBytes(e.normalizedResume), nil
 }
 
-func (e *scriptedExecutor) Execute(ctx context.Context, task *Task, runtime Runtime) (*ExecutionResult, error) {
+func (e *scriptedExecutor) Execute(ctx context.Context, task *Task, controls <-chan ControlRequest) (*ExecutionResult, error) {
 	e.mu.Lock()
 	e.executed = append(e.executed, cloneTask(task))
 	e.mu.Unlock()
 	if e.execute != nil {
-		return e.execute(ctx, task, runtime)
+		return e.execute(ctx, task, controls)
 	}
-	return &ExecutionResult{Status: StatusCompleted, Result: &Result{Data: []byte("result")}}, nil
+	return &ExecutionResult{Status: StatusCompleted, Data: []byte("result")}, nil
 }
 
 func managerWithExecutor(t *testing.T, store Store, executor Executor, lease time.Duration) *Manager {
@@ -93,7 +93,7 @@ func managerWithExecutor(t *testing.T, store Store, executor Executor, lease tim
 	registry := NewExecutorRegistry()
 	require.NoError(t, registry.Register(executor))
 	return New(context.Background(), &Config{
-		Store: store, Executors: registry, ManagerInstanceID: "manager", LeaseDuration: lease,
+		Store: store, Executors: registry,
 	})
 }
 
@@ -106,18 +106,18 @@ func TestSimplifiedPublicModelHasNoOverlappingStateFields_BitsUT(t *testing.T) {
 		"PayloadVersion", "Recovery", "Result", "PayloadEncoding", "TraceID", "SpecVersion",
 		"Type", "ToolUseID", "Deadline")
 	assertFieldsPresent(t, reflect.TypeOf(Task{}),
-		"Spec", "Status", "Checkpoint", "Result", "PendingResume")
+		"Spec", "Status", "Checkpoint", "ResultData", "ResultError", "PendingResume", "Version")
+	field, exists := reflect.TypeOf(Task{}).FieldByName("PendingResume")
+	require.True(t, exists)
+	assert.Equal(t, reflect.TypeOf([]byte(nil)), field.Type)
 	assertFieldsAbsent(t, reflect.TypeOf(Task{}),
-		"ID", "ResultRef", "TerminalReason", deprecatedResumeField, "ResumeEncoding",
-		deprecatedTaskCursorField, "LatestProgress")
-	assertFieldsAbsent(t, reflect.TypeOf(NotificationOutboxRecord{}),
+		"ID", "Result", "ResultRef", "TerminalReason", deprecatedResumeField, "ResumeEncoding",
+		deprecatedTaskCursorField, "LatestProgress", "TransitionVersion", "CheckpointVersion",
+		"CancelTransitionVersion", "LeaseOwner", "LeaseGeneration", "LeaseExpiresAt")
+	assertFieldsAbsent(t, reflect.TypeOf(Notification{}),
 		"Status", "Progress", "Checkpoint", "Result", "Reason", "SessionID",
-		deprecatedNotificationCursorField)
-
-	resultType := reflect.TypeOf(Result{})
-	assertFieldsPresent(t, resultType, "Data", "Error")
-	assertFieldsAbsent(t, resultType, "State", "Status")
-	assert.Equal(t, 2, resultType.NumField())
+		deprecatedNotificationCursorField, "TransitionVersion", "NotificationID", "EventKind")
+	assertFieldsPresent(t, reflect.TypeOf(Notification{}), "ID", "Version", "Kind", "Task")
 }
 
 func assertFieldsAbsent(t *testing.T, typ reflect.Type, names ...string) {
@@ -179,8 +179,8 @@ func TestManagerExecutePersistsReturnedResultDirectly_BitsUT(t *testing.T) {
 	completed, err := store.Get(context.Background(), task.Spec.ID)
 	require.NoError(t, err)
 	assert.Equal(t, StateCompleted, completed.Status)
-	assert.Equal(t, "result", string(completed.Result.Data))
-	assert.Empty(t, completed.Result.Error)
+	assert.Equal(t, "result", string(completed.ResultData))
+	assert.Empty(t, completed.ResultError)
 	require.Len(t, executor.executed, 1)
 	assert.Equal(t, int64(1), executor.executed[0].Attempt)
 }
@@ -188,7 +188,7 @@ func TestManagerExecutePersistsReturnedResultDirectly_BitsUT(t *testing.T) {
 func TestManagerReducesOrdinaryErrorsToBoundedDurableStrings_BitsUT(t *testing.T) {
 	message := strings.Repeat("x", 5000)
 	executor := &scriptedExecutor{
-		execute: func(context.Context, *Task, Runtime) (*ExecutionResult, error) {
+		execute: func(context.Context, *Task, <-chan ControlRequest) (*ExecutionResult, error) {
 			return nil, errors.New(message)
 		},
 	}
@@ -201,8 +201,8 @@ func TestManagerReducesOrdinaryErrorsToBoundedDurableStrings_BitsUT(t *testing.T
 	failed, err := store.Get(context.Background(), task.Spec.ID)
 	require.NoError(t, err)
 	assert.Equal(t, StateFailed, failed.Status)
-	assert.Len(t, failed.Result.Error, 4096)
-	assert.Nil(t, failed.Result.Data)
+	assert.Len(t, failed.ResultError, 4096)
+	assert.Nil(t, failed.ResultData)
 }
 
 func TestManagerValidatesCheckpointAndFallsBackToSpec_BitsUT(t *testing.T) {
@@ -233,13 +233,13 @@ func recoveredTaskStore(t *testing.T, id string, checkpoint []byte) (*MemoryStor
 	t.Helper()
 	clock := &testClock{now: time.Unix(100, 0)}
 	store := NewMemoryStore(&MemoryStoreConfig{
-		Clock: clock.Now, MinLeaseDuration: time.Second, MaxLeaseDuration: time.Minute,
+		Clock: clock.Now, ActiveAttemptTimeout: 5 * time.Second,
 	})
-	_, lease := createAndClaim(t, store, id, 5*time.Second)
-	_, err := store.Commit(context.Background(), &CommitTaskRequest{
-		Lease: lease, Status: StatusRunning, Checkpoint: checkpoint,
-	})
-	require.NoError(t, err)
+	started := createAndStart(t, store, id)
+	store.mu.Lock()
+	store.tasks[id].Checkpoint = checkpoint
+	store.mu.Unlock()
+	require.Equal(t, StateRunning, started.Status)
 	clock.Advance(6 * time.Second)
 	pending, err := store.Get(context.Background(), id)
 	require.NoError(t, err)
@@ -250,11 +250,11 @@ func recoveredTaskStore(t *testing.T, id string, checkpoint []byte) (*MemoryStor
 func TestNonRestartableExecutorRejectsExactMissingCheckpointDiscriminator_BitsUT(t *testing.T) {
 	executor := &scriptedExecutor{
 		checkpointErr: errors.New("corrupt"),
-		execute: func(_ context.Context, task *Task, _ Runtime) (*ExecutionResult, error) {
+		execute: func(_ context.Context, task *Task, _ <-chan ControlRequest) (*ExecutionResult, error) {
 			if task.Attempt > 1 && len(task.Checkpoint) == 0 {
 				return nil, errors.New("unsafe restart rejected")
 			}
-			return &ExecutionResult{Status: StatusCompleted, Result: &Result{Data: []byte("ok")}}, nil
+			return &ExecutionResult{Status: StatusCompleted, Data: []byte("ok")}, nil
 		},
 	}
 	store, _ := recoveredTaskStore(t, "non-restartable", []byte("corrupt"))
@@ -264,7 +264,7 @@ func TestNonRestartableExecutorRejectsExactMissingCheckpointDiscriminator_BitsUT
 	failed, err := store.Get(context.Background(), "non-restartable")
 	require.NoError(t, err)
 	assert.Equal(t, StateFailed, failed.Status)
-	assert.Equal(t, "unsafe restart rejected", failed.Result.Error)
+	assert.Equal(t, "unsafe restart rejected", failed.ResultError)
 }
 
 func TestManagerResumeValidatesAndStoresNormalizedOpaqueInput_BitsUT(t *testing.T) {
@@ -273,31 +273,30 @@ func TestManagerResumeValidatesAndStoresNormalizedOpaqueInput_BitsUT(t *testing.
 	manager := managerWithExecutor(t, store, executor, time.Minute)
 	submitted, err := manager.Submit(context.Background(), validSpec("resume-manager"))
 	require.NoError(t, err)
-	claim, err := store.Claim(context.Background(), &ClaimTaskRequest{
-		TaskID: submitted.Spec.ID, ExpectedVersion: submitted.TransitionVersion,
-		LeaseOwnerID: "worker", LeaseDuration: time.Minute,
+	started, err := store.Start(context.Background(), &StartTaskRequest{
+		TaskID: submitted.Spec.ID, ExpectedVersion: submitted.Version,
 	})
 	require.NoError(t, err)
-	waiting, err := store.Commit(context.Background(), &CommitTaskRequest{
-		Lease: claim.Lease, Status: StatusWaitingInput, Checkpoint: []byte("checkpoint"),
+	waiting, err := store.WaitInput(context.Background(), &WaitInputTaskRequest{
+		TaskID: submitted.Spec.ID, ExpectedVersion: started.Version, Checkpoint: []byte("checkpoint"),
 	})
 	require.NoError(t, err)
 
 	resumed, err := manager.ResumeTask(context.Background(), &ResumeTaskRequest{
-		TaskID: submitted.Spec.ID, ExpectedVersion: waiting.Task.TransitionVersion,
+		TaskID: submitted.Spec.ID, ExpectedVersion: waiting.Version,
 		Data: []byte("raw"),
 	})
 	require.NoError(t, err)
 	assert.Equal(t, "checkpoint", string(executor.resumeCheckpoint))
 	assert.Equal(t, "raw", string(executor.resumeInput))
 	require.NotNil(t, resumed.PendingResume)
-	assert.Equal(t, "normalized", string(resumed.PendingResume.Data))
+	assert.Equal(t, "normalized", string(resumed.PendingResume))
 	assert.Equal(t, StatePending, resumed.Status)
 }
 
 func TestManagerWaitingInputPersistsCheckpointWithoutTerminalResult_BitsUT(t *testing.T) {
 	executor := &scriptedExecutor{
-		execute: func(context.Context, *Task, Runtime) (*ExecutionResult, error) {
+		execute: func(context.Context, *Task, <-chan ControlRequest) (*ExecutionResult, error) {
 			return &ExecutionResult{Status: StatusWaitingInput, Checkpoint: []byte("checkpoint")}, nil
 		},
 	}
@@ -311,12 +310,13 @@ func TestManagerWaitingInputPersistsCheckpointWithoutTerminalResult_BitsUT(t *te
 	require.NoError(t, err)
 	assert.Equal(t, StateWaitingInput, waiting.Status)
 	assert.Equal(t, "checkpoint", string(waiting.Checkpoint))
-	assert.Nil(t, waiting.Result)
+	assert.Empty(t, waiting.ResultData)
+	assert.Empty(t, waiting.ResultError)
 }
 
 func TestManagerErrorDoesNotCreatePendingResume_BitsUT(t *testing.T) {
 	executor := &scriptedExecutor{
-		execute: func(_ context.Context, _ *Task, _ Runtime) (*ExecutionResult, error) {
+		execute: func(_ context.Context, _ *Task, _ <-chan ControlRequest) (*ExecutionResult, error) {
 			return nil, errors.New("execution failed")
 		},
 	}
@@ -329,17 +329,17 @@ func TestManagerErrorDoesNotCreatePendingResume_BitsUT(t *testing.T) {
 	failed, err := store.Get(context.Background(), task.Spec.ID)
 	require.NoError(t, err)
 	assert.Equal(t, StateFailed, failed.Status)
-	assert.Equal(t, "execution failed", failed.Result.Error)
+	assert.Equal(t, "execution failed", failed.ResultError)
 	assert.Nil(t, failed.PendingResume)
 }
 
 func TestCheckpointUnavailableStopsRenewalWithoutPersistingFailure_BitsUT(t *testing.T) {
 	clock := &testClock{now: time.Unix(500, 0)}
 	store := NewMemoryStore(&MemoryStoreConfig{
-		Clock: clock.Now, MinLeaseDuration: time.Second, MaxLeaseDuration: time.Minute,
+		Clock: clock.Now, ActiveAttemptTimeout: 5 * time.Second,
 	})
 	executor := &scriptedExecutor{
-		execute: func(context.Context, *Task, Runtime) (*ExecutionResult, error) {
+		execute: func(context.Context, *Task, <-chan ControlRequest) (*ExecutionResult, error) {
 			return nil, ErrCheckpointUnavailable
 		},
 	}
@@ -352,25 +352,13 @@ func TestCheckpointUnavailableStopsRenewalWithoutPersistingFailure_BitsUT(t *tes
 	running, getErr := store.Get(context.Background(), task.Spec.ID)
 	require.NoError(t, getErr)
 	assert.Equal(t, StateRunning, running.Status)
-	assert.Nil(t, running.Result)
+	assert.Empty(t, running.ResultData)
+	assert.Empty(t, running.ResultError)
 
 	clock.Advance(6 * time.Second)
 	pending, getErr := store.Get(context.Background(), task.Spec.ID)
 	require.NoError(t, getErr)
 	assert.Equal(t, StatePending, pending.Status)
-	assert.Nil(t, pending.Result)
-}
-
-func TestTaskRuntimeReportCheckpointStoresOpaqueBytes_BitsUT(t *testing.T) {
-	store := NewMemoryStore(nil)
-	_, lease := createAndClaim(t, store, "runtime-checkpoint", time.Minute)
-	runtime := newTaskRuntime(store, lease)
-	data := []byte("checkpoint")
-
-	require.NoError(t, runtime.ReportCheckpoint(context.Background(), data))
-	data[0] = 'X'
-	stored, err := store.Get(context.Background(), "runtime-checkpoint")
-	require.NoError(t, err)
-	assert.Equal(t, StateRunning, stored.Status)
-	assert.Equal(t, "checkpoint", string(stored.Checkpoint))
+	assert.Empty(t, pending.ResultData)
+	assert.Empty(t, pending.ResultError)
 }

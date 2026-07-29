@@ -30,8 +30,6 @@ const (
 	processLocalExecutorKey = "eino.dev/process-local"
 )
 
-type processLocalRuntimeKey struct{}
-
 type localWork struct {
 	work         WorkFunc
 	backgrounded chan struct{}
@@ -56,9 +54,6 @@ func newProcessLocalExecutor() *processLocalExecutor {
 }
 
 func (e *processLocalExecutor) Key() string { return processLocalExecutorKey }
-func (e *processLocalExecutor) Capabilities() []ExecutorCapability {
-	return []ExecutorCapability{{ExecutorKey: processLocalExecutorKey}}
-}
 
 func (e *processLocalExecutor) register(token string, work WorkFunc) (*localWork, error) {
 	if token == "" || work == nil {
@@ -109,7 +104,7 @@ func (e *processLocalExecutor) ValidateResume(context.Context, Spec, []byte, []b
 	return nil, errors.New("backgroundtask: process-local tasks cannot resume")
 }
 
-func (e *processLocalExecutor) Execute(ctx context.Context, task *Task, runtime Runtime) (*ExecutionResult, error) {
+func (e *processLocalExecutor) Execute(ctx context.Context, task *Task, controls <-chan ControlRequest) (*ExecutionResult, error) {
 	if task.Attempt > 1 && len(task.Checkpoint) == 0 {
 		return nil, errors.New("backgroundtask: process-local task cannot restart without a checkpoint")
 	}
@@ -123,7 +118,7 @@ func (e *processLocalExecutor) Execute(ctx context.Context, task *Task, runtime 
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
-	workCtx, cancel := context.WithCancel(context.WithValue(ctx, processLocalRuntimeKey{}, runtime))
+	workCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	type workResult struct {
 		value string
@@ -150,15 +145,15 @@ func (e *processLocalExecutor) Execute(ctx context.Context, task *Task, runtime 
 		}
 		return &ExecutionResult{
 			Status: StatusCompleted,
-			Result: &Result{Data: []byte(result.value)},
+			Data:   []byte(result.value),
 		}, nil
-	case control := <-runtime.Controls():
+	case control := <-controls:
 		cancel()
 		<-resultCh
 		if control.Kind == ControlStop {
 			return &ExecutionResult{
 				Status: StatusCanceled,
-				Result: &Result{Error: canceledError},
+				Error:  canceledError,
 			}, nil
 		}
 		return nil, ErrCheckpointUnavailable

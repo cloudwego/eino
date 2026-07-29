@@ -33,15 +33,17 @@ type Sink struct {
 	Activator backgroundtask.SessionActivator
 }
 
-func (s *Sink) Accept(ctx context.Context, notification backgroundtask.TaskNotification) error {
+// Accept rejects unrouted deliveries because Sink requires the serialized target.
+func (s *Sink) Accept(ctx context.Context, notification backgroundtask.Notification) error {
 	return errors.New("sessionnotify: routed notification target is required")
 }
 
-func (s *Sink) AcceptTarget(ctx context.Context, target backgroundtask.NotificationTarget, notification backgroundtask.TaskNotification) error {
+// AcceptTarget enqueues notification for target and requests a session turn.
+func (s *Sink) AcceptTarget(ctx context.Context, target backgroundtask.NotificationTarget, notification backgroundtask.Notification) error {
 	if s.Inbox == nil || s.Activator == nil {
 		return errors.New("sessionnotify: inbox and activator are required")
 	}
-	if notification.NotificationID == "" || target.TargetID == "" {
+	if notification.ID == "" || target.TargetID == "" {
 		return errors.New("sessionnotify: notification id and target are required")
 	}
 	item, err := s.Inbox.Enqueue(ctx, &backgroundtask.EnqueueSessionNotificationRequest{
@@ -54,6 +56,7 @@ func (s *Sink) AcceptTarget(ctx context.Context, target backgroundtask.Notificat
 	return err
 }
 
+// MemoryInbox is a process-local SessionNotificationInbox implementation.
 type MemoryInbox struct {
 	mu     sync.Mutex
 	byID   map[string]*backgroundtask.SessionInboxItem
@@ -61,6 +64,7 @@ type MemoryInbox struct {
 	now    func() time.Time
 }
 
+// NewMemoryInbox creates an empty process-local session notification inbox.
 func NewMemoryInbox() *MemoryInbox {
 	return &MemoryInbox{
 		byID:   make(map[string]*backgroundtask.SessionInboxItem),
@@ -68,24 +72,26 @@ func NewMemoryInbox() *MemoryInbox {
 	}
 }
 
+// Enqueue stores a notification unless the same notification was already seen.
 func (i *MemoryInbox) Enqueue(_ context.Context, req *backgroundtask.EnqueueSessionNotificationRequest) (*backgroundtask.SessionInboxItem, error) {
-	if req == nil || req.SessionID == "" || req.Notification.NotificationID == "" {
+	if req == nil || req.SessionID == "" || req.Notification.ID == "" {
 		return nil, errors.New("sessionnotify: session and notification id are required")
 	}
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	if item, ok := i.byNote[req.Notification.NotificationID]; ok {
+	if item, ok := i.byNote[req.Notification.ID]; ok {
 		return cloneItem(item), nil
 	}
 	item := &backgroundtask.SessionInboxItem{
-		ItemID: req.Notification.NotificationID, ItemVersion: 1,
+		ItemID: req.Notification.ID, ItemVersion: 1,
 		SessionID: req.SessionID, Notification: cloneNotification(req.Notification), CreatedAt: i.now(),
 	}
 	i.byID[item.ItemID] = item
-	i.byNote[req.Notification.NotificationID] = cloneItem(item)
+	i.byNote[req.Notification.ID] = cloneItem(item)
 	return cloneItem(item), nil
 }
 
+// ListPending lists pending inbox items for a session in creation order.
 func (i *MemoryInbox) ListPending(_ context.Context, req *backgroundtask.ListSessionNotificationsRequest) ([]*backgroundtask.SessionInboxItem, error) {
 	if req == nil || req.SessionID == "" {
 		return nil, errors.New("sessionnotify: session id is required")
@@ -109,6 +115,7 @@ func (i *MemoryInbox) ListPending(_ context.Context, req *backgroundtask.ListSes
 	return result, nil
 }
 
+// Ack removes a pending inbox item if the expected version matches.
 func (i *MemoryInbox) Ack(_ context.Context, req *backgroundtask.AckSessionNotificationRequest) error {
 	if req == nil {
 		return errors.New("sessionnotify: ack request is required")
@@ -135,7 +142,7 @@ func cloneItem(item *backgroundtask.SessionInboxItem) *backgroundtask.SessionInb
 	return &c
 }
 
-func cloneNotification(notification backgroundtask.TaskNotification) backgroundtask.TaskNotification {
+func cloneNotification(notification backgroundtask.Notification) backgroundtask.Notification {
 	cloned := notification
 	cloned.Task = cloneTaskSnapshot(notification.Task)
 	return cloned
@@ -155,17 +162,9 @@ func cloneTaskSnapshot(task *backgroundtask.Task) *backgroundtask.Task {
 		}
 		cloned.Spec.Notify = &target
 	}
-	if task.Result != nil {
-		result := *task.Result
-		result.Data = append([]byte(nil), task.Result.Data...)
-		cloned.Result = &result
-	}
+	cloned.ResultData = append([]byte(nil), task.ResultData...)
 	cloned.Checkpoint = append([]byte(nil), task.Checkpoint...)
-	if task.PendingResume != nil {
-		pending := *task.PendingResume
-		pending.Data = append([]byte(nil), task.PendingResume.Data...)
-		cloned.PendingResume = &pending
-	}
+	cloned.PendingResume = append([]byte(nil), task.PendingResume...)
 	cloned.CancelRequestedAt = cloneTime(task.CancelRequestedAt)
 	cloned.DoneAt = cloneTime(task.DoneAt)
 	return &cloned

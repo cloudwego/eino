@@ -142,22 +142,6 @@ func exactRef(name string) AgentRef {
 	}
 }
 
-type runtimeStub struct {
-	checkpoints [][]byte
-	controls    chan backgroundtask.ControlRequest
-}
-
-func newRuntimeStub() *runtimeStub {
-	return &runtimeStub{controls: make(chan backgroundtask.ControlRequest, 1)}
-}
-
-func (r *runtimeStub) ReportCheckpoint(_ context.Context, checkpoint []byte) error {
-	r.checkpoints = append(r.checkpoints, append([]byte(nil), checkpoint...))
-	return nil
-}
-
-func (r *runtimeStub) Controls() <-chan backgroundtask.ControlRequest { return r.controls }
-
 func TestAgentRegistryRequiresExactIdentity_BitsUT(t *testing.T) {
 	registry := NewAgentRegistry[*schema.Message]()
 	ref := exactRef("worker")
@@ -187,10 +171,10 @@ func TestAgentRegistryRequiresExactIdentity_BitsUT(t *testing.T) {
 	require.Error(t, err)
 }
 
-func TestExecutorAdvertisesExecutorKeyCapability_BitsUT(t *testing.T) {
+func TestExecutorRegistryListsExecutorKey_BitsUT(t *testing.T) {
 	executors := backgroundtask.NewExecutorRegistry()
 	require.NoError(t, executors.Register(&Executor[*schema.Message]{}))
-	assert.Equal(t, []backgroundtask.ExecutorCapability{{ExecutorKey: ExecutorKey}}, executors.Capabilities())
+	assert.Equal(t, []string{ExecutorKey}, executors.Keys())
 }
 
 func resumeFixture(
@@ -345,9 +329,9 @@ func TestExecutorInterruptBecomesWaitingInput_BitsUT(t *testing.T) {
 		return adk.Interrupt(ctx, "approve")
 	}}
 	executor, task, store := executionFixture(t, agent)
-	runtime := newRuntimeStub()
+	controls := make(chan backgroundtask.ControlRequest, 1)
 
-	result, err := executor.Execute(context.Background(), task, runtime)
+	result, err := executor.Execute(context.Background(), task, controls)
 	require.NoError(t, err)
 	assert.Equal(t, backgroundtask.StateWaitingInput, result.Status)
 	var state checkpointState
@@ -355,7 +339,8 @@ func TestExecutorInterruptBecomesWaitingInput_BitsUT(t *testing.T) {
 	assert.Equal(t, "task/checkpoint", state.CheckpointID)
 	require.Len(t, state.TargetIDs, 1)
 	assert.NotEmpty(t, state.TargetIDs[0])
-	assert.Nil(t, result.Result, "an interrupt is not a terminal message result")
+	assert.Empty(t, result.Data, "an interrupt is not a terminal message result")
+	assert.Empty(t, result.Error)
 	_, exists, err := store.Get(context.Background(), "task/checkpoint")
 	require.NoError(t, err)
 	assert.True(t, exists)
@@ -368,14 +353,13 @@ func TestExecutorMessageBecomesTerminalResult_BitsUT(t *testing.T) {
 	executor, task, _ := executionFixture(t, &resumableTestAgent{
 		name: "worker", events: []*adk.AgentEvent{message},
 	})
-	runtime := newRuntimeStub()
+	controls := make(chan backgroundtask.ControlRequest, 1)
 
-	result, err := executor.Execute(context.Background(), task, runtime)
+	result, err := executor.Execute(context.Background(), task, controls)
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	assert.Equal(t, backgroundtask.StatusCompleted, result.Status)
-	require.NotNil(t, result.Result)
-	assert.Contains(t, string(result.Result.Data), "progress")
+	assert.Contains(t, string(result.Data), "progress")
 }
 
 func TestExecutorDrainUsesDurableRunnerCheckpoint_BitsUT(t *testing.T) {
@@ -383,10 +367,10 @@ func TestExecutorDrainUsesDurableRunnerCheckpoint_BitsUT(t *testing.T) {
 		return adk.Interrupt(ctx, "pause for drain")
 	}}
 	executor, task, _ := executionFixture(t, agent)
-	runtime := newRuntimeStub()
-	runtime.controls <- backgroundtask.ControlRequest{Kind: backgroundtask.ControlDrain}
+	controls := make(chan backgroundtask.ControlRequest, 1)
+	controls <- backgroundtask.ControlRequest{Kind: backgroundtask.ControlDrain}
 
-	result, err := executor.Execute(context.Background(), task, runtime)
+	result, err := executor.Execute(context.Background(), task, controls)
 	require.NoError(t, err)
 	assert.Equal(t, backgroundtask.StateSuspended, result.Status)
 	var state checkpointState
@@ -414,7 +398,7 @@ func TestSubAgentTaskResumesAfterManagerReconstruction_BitsUT(t *testing.T) {
 	taskStore := backgroundtask.NewMemoryStore(nil)
 
 	manager1 := backgroundtask.New(context.Background(), &backgroundtask.Config{
-		Store: taskStore, Executors: executors, ManagerInstanceID: "worker-1",
+		Store: taskStore, Executors: executors,
 	})
 	task, err := Submit(context.Background(), manager1, &SubmitRequest{
 		Agent: ref, Prompt: "do work", Description: "durable child",
@@ -431,7 +415,7 @@ func TestSubAgentTaskResumesAfterManagerReconstruction_BitsUT(t *testing.T) {
 	require.NoError(t, manager1.Close(context.Background()))
 
 	manager2 := backgroundtask.New(context.Background(), &backgroundtask.Config{
-		Store: taskStore, Executors: executors, ManagerInstanceID: "worker-2",
+		Store: taskStore, Executors: executors,
 	})
 	defer manager2.Close(context.Background())
 	resumeData, err := json.Marshal(map[string]any{
@@ -439,7 +423,7 @@ func TestSubAgentTaskResumesAfterManagerReconstruction_BitsUT(t *testing.T) {
 	})
 	require.NoError(t, err)
 	pending, err := manager2.ResumeTask(context.Background(), &backgroundtask.ResumeTaskRequest{
-		TaskID: task.Spec.ID, ExpectedVersion: waiting.TransitionVersion,
+		TaskID: task.Spec.ID, ExpectedVersion: waiting.Version,
 		Data: resumeData,
 	})
 	require.NoError(t, err)
@@ -449,7 +433,7 @@ func TestSubAgentTaskResumesAfterManagerReconstruction_BitsUT(t *testing.T) {
 	completed, err := manager2.GetTask(context.Background(), task.Spec.ID)
 	require.NoError(t, err)
 	assert.Equal(t, backgroundtask.StateCompleted, completed.Status)
-	assert.Contains(t, string(completed.Result.Data), "approved")
+	assert.Contains(t, string(completed.ResultData), "approved")
 	assert.Equal(t, int64(2), completed.Attempt)
 
 	var persisted TaskPayload
@@ -470,7 +454,7 @@ func TestSubAgentTaskContinuesSameSessionWithoutDuplicateResumeInput_BitsUT(t *t
 	executors := backgroundtask.NewExecutorRegistry()
 	require.NoError(t, executors.Register(executor))
 	manager := backgroundtask.New(context.Background(), &backgroundtask.Config{
-		Executors: executors, ManagerInstanceID: "worker",
+		Executors: executors,
 	})
 	defer manager.Close(context.Background())
 	task, err := Submit(context.Background(), manager, &SubmitRequest{
@@ -484,7 +468,7 @@ func TestSubAgentTaskContinuesSameSessionWithoutDuplicateResumeInput_BitsUT(t *t
 	require.Equal(t, backgroundtask.StateWaitingInput, waiting.Status)
 
 	pending, err := manager.ResumeTask(context.Background(), &backgroundtask.ResumeTaskRequest{
-		TaskID: task.Spec.ID, ExpectedVersion: waiting.TransitionVersion,
+		TaskID: task.Spec.ID, ExpectedVersion: waiting.Version,
 		Data: []byte("continue"),
 	})
 	require.NoError(t, err)
@@ -508,14 +492,11 @@ func TestSubAgentTaskContinuesSameSessionWithoutDuplicateResumeInput_BitsUT(t *t
 		SessionID: payload.ChildSessionID, SessionStore: sessionStore,
 	})
 	iter, err := executor.runNextTurn(context.Background(), runner, &backgroundtask.Task{
-		Spec:       completed.Spec,
-		Status:     backgroundtask.StatusRunning,
-		Checkpoint: append([]byte(nil), waiting.Checkpoint...),
-		PendingResume: &backgroundtask.PendingResume{
-			CheckpointVersion: waiting.CheckpointVersion,
-			Data:              []byte("continue"),
-		},
-		Attempt: 2,
+		Spec:          completed.Spec,
+		Status:        backgroundtask.StatusRunning,
+		Checkpoint:    append([]byte(nil), waiting.Checkpoint...),
+		PendingResume: []byte("continue"),
+		Attempt:       2,
 	}, &payload)
 	require.NoError(t, err)
 	for {

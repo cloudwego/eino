@@ -31,17 +31,23 @@ import (
 )
 
 const (
-	ExecutorKey    = "eino.dev/subagent"
+	// ExecutorKey is the backgroundtask executor key for durable sub-agent tasks.
+	ExecutorKey = "eino.dev/subagent"
+
 	payloadVersion = 1
 )
 
+// ResumeMode describes how a sub-agent task resumes after waiting for input.
 type ResumeMode string
 
 const (
+	// ResumeNativeInterrupt resumes by passing structured interrupt responses.
 	ResumeNativeInterrupt ResumeMode = "native_interrupt"
-	ResumeNextTurn        ResumeMode = "next_turn"
+	// ResumeNextTurn resumes by appending a new user turn to the child session.
+	ResumeNextTurn ResumeMode = "next_turn"
 )
 
+// AgentRef identifies the exact resumable agent implementation for a task.
 type AgentRef struct {
 	Namespace        string `json:"namespace"`
 	Name             string `json:"name"`
@@ -50,6 +56,7 @@ type AgentRef struct {
 	DefinitionDigest string `json:"definition_digest"`
 }
 
+// TaskPayload is the executor-private serialized payload for sub-agent tasks.
 type TaskPayload struct {
 	Version          int        `json:"version"`
 	Agent            AgentRef   `json:"agent"`
@@ -69,15 +76,18 @@ type checkpointState struct {
 	Sequence     int64      `json:"sequence"`
 }
 
+// AgentRegistry resolves exact agent definitions for durable sub-agent tasks.
 type AgentRegistry[M adk.MessageType] struct {
 	mu     sync.RWMutex
 	agents map[string]adk.TypedResumableAgent[M]
 }
 
+// NewAgentRegistry creates an empty exact-match agent registry.
 func NewAgentRegistry[M adk.MessageType]() *AgentRegistry[M] {
 	return &AgentRegistry[M]{agents: make(map[string]adk.TypedResumableAgent[M])}
 }
 
+// Register associates an exact agent reference with a resumable agent.
 func (r *AgentRegistry[M]) Register(ref AgentRef, agent adk.TypedResumableAgent[M]) error {
 	if err := validateAgentRef[M](ref); err != nil {
 		return err
@@ -95,6 +105,7 @@ func (r *AgentRegistry[M]) Register(ref AgentRef, agent adk.TypedResumableAgent[
 	return nil
 }
 
+// Resolve returns the resumable agent registered for ref.
 func (r *AgentRegistry[M]) Resolve(ref AgentRef) (adk.TypedResumableAgent[M], error) {
 	if err := validateAgentRef[M](ref); err != nil {
 		return nil, err
@@ -132,17 +143,17 @@ func messageType[M adk.MessageType]() string {
 	}
 }
 
+// Executor runs durable sub-agent tasks through ADK Runner checkpointing.
 type Executor[M adk.MessageType] struct {
 	Agents          *AgentRegistry[M]
 	CheckPointStore adk.CheckPointStore
 	SessionStore    adk.SessionEventStore[M]
 }
 
+// Key returns the backgroundtask executor key for sub-agent tasks.
 func (e *Executor[M]) Key() string { return ExecutorKey }
-func (e *Executor[M]) Capabilities() []backgroundtask.ExecutorCapability {
-	return []backgroundtask.ExecutorCapability{{ExecutorKey: ExecutorKey}}
-}
 
+// Validate verifies that spec contains a compatible sub-agent payload.
 func (e *Executor[M]) Validate(spec backgroundtask.Spec) error {
 	if e == nil || e.Agents == nil || e.CheckPointStore == nil || e.SessionStore == nil {
 		return errors.New("backgroundtask/subagent: agent registry, checkpoint store, and session store are required")
@@ -176,6 +187,7 @@ func validateSpecPayload(spec backgroundtask.Spec) (*TaskPayload, error) {
 	return payload, nil
 }
 
+// ValidateCheckpoint verifies that checkpoint can resume the task described by spec.
 func (e *Executor[M]) ValidateCheckpoint(
 	_ context.Context,
 	spec backgroundtask.Spec,
@@ -200,6 +212,7 @@ func (e *Executor[M]) ValidateCheckpoint(
 	return nil
 }
 
+// ValidateResume validates and normalizes opaque resume data for a checkpoint.
 func (e *Executor[M]) ValidateResume(
 	ctx context.Context,
 	spec backgroundtask.Spec,
@@ -248,10 +261,11 @@ func (e *Executor[M]) ValidateResume(
 	return normalized, nil
 }
 
+// Execute runs or resumes the sub-agent task and returns its lifecycle outcome.
 func (e *Executor[M]) Execute(
 	ctx context.Context,
 	task *backgroundtask.Task,
-	runtime backgroundtask.Runtime,
+	controls <-chan backgroundtask.ControlRequest,
 ) (*backgroundtask.ExecutionResult, error) {
 	if task.Attempt > 1 && len(task.Checkpoint) == 0 {
 		return nil, errors.New("backgroundtask/subagent: task cannot restart without a checkpoint")
@@ -274,7 +288,7 @@ func (e *Executor[M]) Execute(
 	defer close(controlWatchDone)
 	go func() {
 		select {
-		case control := <-runtime.Controls():
+		case control := <-controls:
 			controlKinds <- control.Kind
 			cancelOptions := []adk.AgentCancelOption{adk.WithRecursive()}
 			if control.Kind == backgroundtask.ControlDrain {
@@ -294,11 +308,11 @@ func (e *Executor[M]) Execute(
 	if len(task.Checkpoint) > 0 {
 		if payload.ResumeMode == ResumeNextTurn {
 			iter, err = e.runNextTurn(ctx, runner, task, payload, cancelOption)
-		} else if task.PendingResume == nil || len(task.PendingResume.Data) == 0 {
+		} else if len(task.PendingResume) == 0 {
 			iter, err = runner.Resume(ctx, payload.CheckpointID, cancelOption)
 		} else {
 			var targets map[string]any
-			if unmarshalErr := json.Unmarshal(task.PendingResume.Data, &targets); unmarshalErr != nil {
+			if unmarshalErr := json.Unmarshal(task.PendingResume, &targets); unmarshalErr != nil {
 				return nil, unmarshalErr
 			}
 			iter, err = runner.ResumeWithParams(
@@ -399,7 +413,7 @@ func (e *Executor[M]) Execute(
 	}
 	return &backgroundtask.ExecutionResult{
 		Status: backgroundtask.StatusCompleted,
-		Result: &backgroundtask.Result{Data: final},
+		Data:   final,
 	}, nil
 }
 
@@ -412,7 +426,7 @@ func (e *Executor[M]) controlResult(
 	case backgroundtask.ControlStop:
 		return &backgroundtask.ExecutionResult{
 			Status: backgroundtask.StatusCanceled,
-			Result: &backgroundtask.Result{Error: "canceled"},
+			Error:  "canceled",
 		}, nil, true
 	case backgroundtask.ControlDrain:
 		if _, exists, err := e.CheckPointStore.Get(context.Background(), payload.CheckpointID); err != nil || !exists {
@@ -466,9 +480,7 @@ func (e *Executor[M]) runNextTurn(
 	var messages []M
 	if !seen {
 		var data []byte
-		if task.PendingResume != nil {
-			data = task.PendingResume.Data
-		}
+		data = task.PendingResume
 		message, messageErr := resumeMessage[M](string(data), marker)
 		if messageErr != nil {
 			return nil, messageErr
@@ -548,6 +560,7 @@ func nextCheckpointSequence(previous []byte) int64 {
 	return state.Sequence + 1
 }
 
+// SubmitRequest describes a durable sub-agent task to submit.
 type SubmitRequest struct {
 	Agent            AgentRef
 	Prompt           string
@@ -557,6 +570,7 @@ type SubmitRequest struct {
 	AllowEmptyResume bool
 }
 
+// Submit persists a durable sub-agent task through manager.
 func Submit(ctx context.Context, manager *backgroundtask.Manager, req *SubmitRequest) (*backgroundtask.Task, error) {
 	if manager == nil || req == nil || req.SessionID == "" {
 		return nil, errors.New("backgroundtask/subagent: manager, request, and parent session id are required")

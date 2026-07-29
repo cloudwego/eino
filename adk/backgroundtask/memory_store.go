@@ -27,52 +27,55 @@ import (
 	"time"
 )
 
+// Clock returns the Store's current time.
 type Clock func() time.Time
 
+// MemoryStoreConfig configures the in-memory reference Store.
 type MemoryStoreConfig struct {
-	Clock            Clock
-	MinLeaseDuration time.Duration
-	MaxLeaseDuration time.Duration
-	MaxValueBytes    int64
+	Clock                Clock
+	ActiveAttemptTimeout time.Duration
+	MaxValueBytes        int64
 }
 
 type memoryOutboxItem struct {
-	record       *NotificationOutboxRecord
+	record       *Notification
 	receipt      NotificationReceipt
 	visibleAfter time.Time
+}
+
+type memoryActiveAttempt struct {
+	expiresAt time.Time
 }
 
 // MemoryStore is a deterministic reference implementation of Store and
 // NotificationOutbox. It is a state-machine test double, not a durable backend.
 type MemoryStore struct {
-	mu       sync.Mutex
-	tasks    map[string]*Task
-	outbox   []*memoryOutboxItem
-	notify   chan struct{}
-	now      Clock
-	minLease time.Duration
-	maxLease time.Duration
-	maxValue int64
+	mu            sync.Mutex
+	tasks         map[string]*Task
+	active        map[string]memoryActiveAttempt
+	outbox        []*memoryOutboxItem
+	notify        chan struct{}
+	now           Clock
+	activeTimeout time.Duration
+	maxValue      int64
 }
 
+// NewMemoryStore creates an in-memory reference Store and NotificationOutbox.
 func NewMemoryStore(config *MemoryStoreConfig) *MemoryStore {
 	s := &MemoryStore{
-		tasks:    make(map[string]*Task),
-		notify:   make(chan struct{}),
-		now:      time.Now,
-		minLease: time.Millisecond,
-		maxLease: 24 * time.Hour,
-		maxValue: 1 << 20,
+		tasks:         make(map[string]*Task),
+		active:        make(map[string]memoryActiveAttempt),
+		notify:        make(chan struct{}),
+		now:           time.Now,
+		activeTimeout: 30 * time.Second,
+		maxValue:      1 << 20,
 	}
 	if config != nil {
 		if config.Clock != nil {
 			s.now = config.Clock
 		}
-		if config.MinLeaseDuration > 0 {
-			s.minLease = config.MinLeaseDuration
-		}
-		if config.MaxLeaseDuration > 0 {
-			s.maxLease = config.MaxLeaseDuration
+		if config.ActiveAttemptTimeout > 0 {
+			s.activeTimeout = config.ActiveAttemptTimeout
 		}
 		if config.MaxValueBytes > 0 {
 			s.maxValue = config.MaxValueBytes
@@ -104,10 +107,10 @@ func (s *MemoryStore) Create(_ context.Context, req *CreateTaskRequest) (*Task, 
 		spec.CreatedAt = now
 	}
 	task := &Task{
-		Spec:              spec,
-		Status:            StatusPending,
-		TransitionVersion: 1,
-		UpdatedAt:         now,
+		Spec:      spec,
+		Status:    StatusPending,
+		Version:   1,
+		UpdatedAt: now,
 	}
 	s.tasks[spec.ID] = task
 	s.signalLocked()
@@ -125,13 +128,19 @@ func (s *MemoryStore) Get(_ context.Context, taskID string) (*Task, error) {
 	return cloneTask(t), nil
 }
 
-func (s *MemoryStore) ListClaimable(_ context.Context, req *ListClaimableRequest) (*ListClaimableResult, error) {
+func (s *MemoryStore) ListPending(_ context.Context, req *ListPendingRequest) (*ListPendingResult, error) {
 	if req == nil {
-		return nil, errors.New("backgroundtask: list claimable request is required")
+		return nil, errors.New("backgroundtask: list pending request is required")
 	}
-	caps := make(map[string]struct{}, len(req.Capabilities))
-	for _, c := range req.Capabilities {
-		caps[c.ExecutorKey] = struct{}{}
+	if len(req.ExecutorKeys) == 0 {
+		return nil, errors.New("backgroundtask: list pending requires executor keys")
+	}
+	executorKeys := make(map[string]struct{}, len(req.ExecutorKeys))
+	for _, key := range req.ExecutorKeys {
+		if key == "" {
+			return nil, errors.New("backgroundtask: list pending executor key is required")
+		}
+		executorKeys[key] = struct{}{}
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -148,14 +157,14 @@ func (s *MemoryStore) ListClaimable(_ context.Context, req *ListClaimableRequest
 	if limit <= 0 || limit > 1000 {
 		limit = 100
 	}
-	result := &ListClaimableResult{}
+	result := &ListPendingResult{}
 	for i := start; i < len(ids); i++ {
 		t := s.tasks[ids[i]]
 		s.resolveExpiredLocked(t)
 		if t.Status != StatusPending {
 			continue
 		}
-		if _, ok := caps[t.Spec.ExecutorKey]; !ok {
+		if _, ok := executorKeys[t.Spec.ExecutorKey]; !ok {
 			continue
 		}
 		result.Tasks = append(result.Tasks, cloneTask(t))
@@ -167,12 +176,9 @@ func (s *MemoryStore) ListClaimable(_ context.Context, req *ListClaimableRequest
 	return result, nil
 }
 
-func (s *MemoryStore) Claim(_ context.Context, req *ClaimTaskRequest) (*ClaimTaskResult, error) {
-	if req == nil || req.LeaseOwnerID == "" {
-		return nil, errors.New("backgroundtask: claim request and lease owner id are required")
-	}
-	if err := s.validateLeaseDuration(req.LeaseDuration); err != nil {
-		return nil, err
+func (s *MemoryStore) Start(_ context.Context, req *StartTaskRequest) (*Task, error) {
+	if req == nil {
+		return nil, errors.New("backgroundtask: start request is required")
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -181,100 +187,152 @@ func (s *MemoryStore) Claim(_ context.Context, req *ClaimTaskRequest) (*ClaimTas
 		return nil, err
 	}
 	s.resolveExpiredLocked(t)
-	if t.TransitionVersion != req.ExpectedVersion {
+	if t.Version != req.ExpectedVersion {
 		return nil, ErrVersionConflict
 	}
 	if t.Status != StatusPending {
 		return nil, ErrIllegalTransition
 	}
-	if t.PendingResume != nil && t.PendingResume.CheckpointVersion != t.CheckpointVersion {
-		t.PendingResume = nil
-		s.advanceLocked(t)
-	}
 	t.Status = StatusRunning
 	t.Attempt++
-	t.LeaseOwner = req.LeaseOwnerID
-	t.LeaseGeneration++
-	t.LeaseExpiresAt = s.now().Add(req.LeaseDuration)
 	s.advanceLocked(t)
+	s.active[t.Spec.ID] = memoryActiveAttempt{expiresAt: s.now().Add(s.activeTimeout)}
 	s.signalLocked()
-	return &ClaimTaskResult{
-		Task: cloneTask(t),
-		Lease: LeaseToken{
-			TaskID: t.Spec.ID, ExpectedVersion: t.TransitionVersion,
-			LeaseOwnerID: t.LeaseOwner, Generation: t.LeaseGeneration,
-		},
-	}, nil
+	return cloneTask(t), nil
 }
 
-func (s *MemoryStore) Renew(_ context.Context, req *RenewLeaseRequest) (*Task, error) {
+func (s *MemoryStore) Heartbeat(_ context.Context, req *HeartbeatRequest) (*Task, error) {
 	if req == nil {
-		return nil, errors.New("backgroundtask: renew request is required")
+		return nil, errors.New("backgroundtask: heartbeat request is required")
 	}
-	if err := s.validateLeaseDuration(req.LeaseDuration); err != nil {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	t, err := s.activeTaskLocked(req.TaskID, req.ExpectedVersion, StatusRunning)
+	if err != nil {
+		return nil, err
+	}
+	s.advanceLocked(t)
+	s.active[t.Spec.ID] = memoryActiveAttempt{expiresAt: s.now().Add(s.activeTimeout)}
+	s.signalLocked()
+	return cloneTask(t), nil
+}
+
+func (s *MemoryStore) Complete(_ context.Context, req *CompleteTaskRequest) (*Task, error) {
+	if req == nil {
+		return nil, errors.New("backgroundtask: complete request is required")
+	}
+	if err := validateTaskSnapshot(StatusCompleted, req.Data, ""); err != nil {
+		return nil, err
+	}
+	if int64(len(req.Data)) > s.maxValue {
+		return nil, errors.New("backgroundtask: result data exceeds configured limit")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	t, err := s.activeTaskLocked(req.TaskID, req.ExpectedVersion, StatusRunning, StatusCanceling)
+	if err != nil {
+		return nil, err
+	}
+	t.Status = StatusCompleted
+	t.ResultData = cloneBytes(req.Data)
+	t.ResultError = ""
+	s.finishStoreOwnedLocked(t)
+	return cloneTask(t), nil
+}
+
+func (s *MemoryStore) Fail(_ context.Context, req *FailTaskRequest) (*Task, error) {
+	if req == nil {
+		return nil, errors.New("backgroundtask: fail request is required")
+	}
+	if err := validateTaskSnapshot(StatusFailed, nil, req.Error); err != nil {
 		return nil, err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	t, err := s.leasedTaskLocked(req.Lease, StatusRunning)
+	t, err := s.activeTaskLocked(req.TaskID, req.ExpectedVersion, StatusRunning, StatusCanceling)
 	if err != nil {
 		return nil, err
 	}
-	if !s.now().Before(t.LeaseExpiresAt) {
-		return nil, ErrLeaseLost
+	t.Status = StatusFailed
+	t.ResultData = nil
+	t.ResultError = req.Error
+	s.finishStoreOwnedLocked(t)
+	return cloneTask(t), nil
+}
+
+func (s *MemoryStore) WaitInput(_ context.Context, req *WaitInputTaskRequest) (*Task, error) {
+	if req == nil {
+		return nil, errors.New("backgroundtask: wait input request is required")
 	}
-	t.LeaseExpiresAt = s.now().Add(req.LeaseDuration)
+	if int64(len(req.Checkpoint)) > s.maxValue {
+		return nil, errors.New("backgroundtask: checkpoint exceeds configured limit")
+	}
+	if len(req.Checkpoint) == 0 {
+		return nil, errors.New("backgroundtask: checkpointed pause requires checkpoint data")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	t, err := s.activeTaskLocked(req.TaskID, req.ExpectedVersion, StatusRunning)
+	if err != nil {
+		return nil, err
+	}
+	t.Status = StatusWaitingInput
+	t.Checkpoint = cloneBytes(req.Checkpoint)
+	t.PendingResume = nil
+	s.clearActiveLocked(t)
+	s.advanceLocked(t)
+	s.enqueueLocked(t, eventForStatus(t.Status))
+	s.signalLocked()
+	return cloneTask(t), nil
+}
+
+func (s *MemoryStore) Suspend(_ context.Context, req *SuspendTaskRequest) (*Task, error) {
+	if req == nil {
+		return nil, errors.New("backgroundtask: suspend request is required")
+	}
+	if int64(len(req.Checkpoint)) > s.maxValue {
+		return nil, errors.New("backgroundtask: checkpoint exceeds configured limit")
+	}
+	if len(req.Checkpoint) == 0 {
+		return nil, errors.New("backgroundtask: checkpointed pause requires checkpoint data")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	t, err := s.activeTaskLocked(req.TaskID, req.ExpectedVersion, StatusRunning)
+	if err != nil {
+		return nil, err
+	}
+	t.Status = StatusSuspended
+	t.Checkpoint = cloneBytes(req.Checkpoint)
+	t.PendingResume = nil
+	s.clearActiveLocked(t)
 	s.advanceLocked(t)
 	s.signalLocked()
 	return cloneTask(t), nil
 }
 
-func (s *MemoryStore) Commit(_ context.Context, req *CommitTaskRequest) (*CommitTaskResult, error) {
+func (s *MemoryStore) Cancel(_ context.Context, req *CancelTaskRequest) (*Task, error) {
 	if req == nil {
-		return nil, errors.New("backgroundtask: commit request is required")
+		return nil, errors.New("backgroundtask: cancel request is required")
 	}
-	if err := validateTaskSnapshot(req.Status, req.Result); err != nil {
+	if err := validateTaskSnapshot(StatusCanceled, nil, canceledError); err != nil {
 		return nil, err
-	}
-	if int64(len(req.Checkpoint)) > s.maxValue {
-		return nil, errors.New("backgroundtask: checkpoint exceeds configured limit")
-	}
-	if req.Result != nil && int64(len(req.Result.Data)) > s.maxValue {
-		return nil, errors.New("backgroundtask: result data exceeds configured limit")
-	}
-	if (req.Status == StatusWaitingInput || req.Status == StatusSuspended) && len(req.Checkpoint) == 0 {
-		return nil, errors.New("backgroundtask: checkpointed pause requires checkpoint data")
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	t, err := s.leasedTaskLocked(req.Lease, StatusRunning, StatusCanceling)
+	t, err := s.activeTaskLocked(req.TaskID, req.ExpectedVersion, StatusCanceling)
 	if err != nil {
 		return nil, err
 	}
-	if !legalWorkerTransition(t.Status, req.Status) {
-		return nil, ErrIllegalTransition
-	}
-	t.Status = req.Status
-	if req.Checkpoint != nil {
-		t.Checkpoint = cloneBytes(req.Checkpoint)
-		t.CheckpointVersion++
-		t.PendingResume = nil
-	}
-	t.Result = cloneResult(req.Result)
-	if terminalStatus(t.Status) {
-		now := s.now()
-		t.DoneAt = &now
-	}
-	if t.Status != StatusRunning && t.Status != StatusCanceling {
-		s.clearLeaseLocked(t)
-	}
-	s.advanceLocked(t)
-	n := s.enqueueLocked(t, eventForStatus(t.Status))
-	s.signalLocked()
-	return &CommitTaskResult{Task: cloneTask(t), Notification: cloneNotification(n)}, nil
+	t.Status = StatusCanceled
+	t.ResultData = nil
+	t.ResultError = canceledError
+	t.PendingResume = nil
+	s.finishStoreOwnedLocked(t)
+	return cloneTask(t), nil
 }
 
-func (s *MemoryStore) RequestCancel(_ context.Context, req *RequestCancelRequest) (*RequestCancelResult, error) {
+func (s *MemoryStore) RequestCancel(_ context.Context, req *RequestCancelRequest) (*Task, error) {
 	if req == nil {
 		return nil, errors.New("backgroundtask: cancel request is required")
 	}
@@ -288,25 +346,26 @@ func (s *MemoryStore) RequestCancel(_ context.Context, req *RequestCancelRequest
 		return nil, ErrAlreadyTerminal
 	}
 	if t.Status == StatusCanceling {
-		return &RequestCancelResult{Task: cloneTask(t)}, nil
+		return cloneTask(t), nil
 	}
 	now := s.now()
 	t.CancelRequestedAt = &now
-	if t.Status == StatusRunning && now.Before(t.LeaseExpiresAt) {
+	if t.Status == StatusRunning {
 		t.Status = StatusCanceling
 		s.advanceLocked(t)
-		t.CancelTransitionVersion = t.TransitionVersion
+		if _, ok := s.active[t.Spec.ID]; ok {
+			s.active[t.Spec.ID] = memoryActiveAttempt{expiresAt: now.Add(s.activeTimeout)}
+		}
 	} else {
 		t.Status = StatusCanceled
-		t.Result = &Result{Error: "canceled"}
+		t.ResultError = "canceled"
 		t.PendingResume = nil
-		s.clearLeaseLocked(t)
-		s.advanceLocked(t)
-		t.DoneAt = cloneTime(&now)
+		s.finishStoreOwnedLocked(t)
+		return cloneTask(t), nil
 	}
-	n := s.enqueueLocked(t, eventForStatus(t.Status))
+	s.enqueueLocked(t, eventForStatus(t.Status))
 	s.signalLocked()
-	return &RequestCancelResult{Task: cloneTask(t), Notification: cloneNotification(n)}, nil
+	return cloneTask(t), nil
 }
 
 func (s *MemoryStore) Resume(_ context.Context, req *ResumeTaskRequest) (*Task, error) {
@@ -325,10 +384,7 @@ func (s *MemoryStore) Resume(_ context.Context, req *ResumeTaskRequest) (*Task, 
 	if t.Status != StatusWaitingInput {
 		return nil, ErrIllegalTransition
 	}
-	t.PendingResume = &PendingResume{
-		CheckpointVersion: t.CheckpointVersion,
-		Data:              cloneBytes(req.Data),
-	}
+	t.PendingResume = cloneBytes(req.Data)
 	t.Status = StatusPending
 	s.advanceLocked(t)
 	s.enqueueLocked(t, eventForStatus(t.Status))
@@ -368,7 +424,7 @@ func (s *MemoryStore) Wait(ctx context.Context, req *WaitTaskRequest) (*Task, er
 			return nil, ErrNotFound
 		}
 		s.resolveExpiredLocked(t)
-		if t.TransitionVersion > req.AfterVersion {
+		if t.Version > req.AfterVersion {
 			out := cloneTask(t)
 			s.mu.Unlock()
 			return out, nil
@@ -429,71 +485,51 @@ func (s *MemoryStore) taskVersionLocked(id string, version int64) (*Task, error)
 	if !ok {
 		return nil, ErrNotFound
 	}
-	if t.TransitionVersion != version {
+	if t.Version != version {
 		return nil, ErrVersionConflict
 	}
 	return t, nil
 }
 
-func (s *MemoryStore) leasedTaskLocked(token LeaseToken, allowed ...Status) (*Task, error) {
-	t, ok := s.tasks[token.TaskID]
+func (s *MemoryStore) activeTaskLocked(id string, version int64, allowed ...Status) (*Task, error) {
+	t, ok := s.tasks[id]
 	if !ok {
 		return nil, ErrNotFound
 	}
-	if t.TransitionVersion != token.ExpectedVersion {
+	s.resolveExpiredLocked(t)
+	if t.Version != version {
 		return nil, ErrVersionConflict
-	}
-	if t.LeaseOwner != token.LeaseOwnerID || t.LeaseGeneration != token.Generation {
-		return nil, ErrLeaseLost
 	}
 	ok = false
 	for _, status := range allowed {
 		ok = ok || t.Status == status
 	}
-	if !ok || !s.now().Before(t.LeaseExpiresAt) {
+	active, activeOK := s.active[id]
+	if !ok || !activeOK || !s.now().Before(active.expiresAt) {
 		return nil, ErrLeaseLost
 	}
 	return t, nil
 }
 
-func (s *MemoryStore) validateLeaseDuration(d time.Duration) error {
-	if d < s.minLease || d > s.maxLease {
-		return fmt.Errorf("backgroundtask: lease duration must be within [%s, %s]", s.minLease, s.maxLease)
-	}
-	return nil
-}
-
 func (s *MemoryStore) advanceLocked(t *Task) {
-	t.TransitionVersion++
+	t.Version++
 	t.UpdatedAt = s.now()
 }
 
-func (s *MemoryStore) enqueueLocked(t *Task, kind NotificationEventKind) *NotificationOutboxRecord {
+func (s *MemoryStore) enqueueLocked(t *Task, kind NotificationKind) *Notification {
 	if t.Spec.Notify == nil || kind == "" {
 		return nil
 	}
-	n := &NotificationOutboxRecord{
-		NotificationID: fmt.Sprintf("%s:%d:%s", t.Spec.ID, t.TransitionVersion, kind),
-		TaskID:         t.Spec.ID, TransitionVersion: t.TransitionVersion,
-		EventKind: kind, Target: *cloneSpec(t.Spec).Notify, CreatedAt: s.now(),
+	n := &Notification{
+		ID:     fmt.Sprintf("%s:%d:%s", t.Spec.ID, t.Version, kind),
+		TaskID: t.Spec.ID, Version: t.Version,
+		Kind: kind, Target: *cloneSpec(t.Spec).Notify, CreatedAt: s.now(),
 	}
 	s.outbox = append(s.outbox, &memoryOutboxItem{record: n})
 	return n
 }
 
-func legalWorkerTransition(from, to Status) bool {
-	if from == StatusRunning {
-		switch to {
-		case StatusRunning, StatusWaitingInput, StatusSuspended, StatusCompleted, StatusFailed:
-			return true
-		case StatusCanceled:
-			return false
-		}
-	}
-	return from == StatusCanceling && (to == StatusCanceled || to == StatusCompleted || to == StatusFailed)
-}
-
-func eventForStatus(status Status) NotificationEventKind {
+func eventForStatus(status Status) NotificationKind {
 	switch status {
 	case StatusWaitingInput:
 		return NotificationWaitingInput
@@ -508,39 +544,33 @@ func eventForStatus(status Status) NotificationEventKind {
 	}
 }
 
-func (s *MemoryStore) clearLeaseLocked(t *Task) {
-	t.LeaseOwner = ""
-	t.LeaseExpiresAt = time.Time{}
+func (s *MemoryStore) clearActiveLocked(t *Task) {
+	delete(s.active, t.Spec.ID)
 }
 
 func (s *MemoryStore) resolveExpiredLocked(t *Task) {
 	if t.Status != StatusRunning && t.Status != StatusCanceling {
 		return
 	}
-	if t.LeaseExpiresAt.IsZero() || s.now().Before(t.LeaseExpiresAt) {
+	active, ok := s.active[t.Spec.ID]
+	if ok && s.now().Before(active.expiresAt) {
 		return
 	}
+	s.clearActiveLocked(t)
 	if t.Status == StatusCanceling {
 		t.Status = StatusCanceled
-		t.Result = &Result{Error: "canceled"}
+		t.ResultError = "canceled"
 		s.finishStoreOwnedLocked(t)
 		return
 	}
 	t.Status = StatusPending
 	t.PendingResume = nil
-	s.clearLeaseLocked(t)
 	s.advanceLocked(t)
 	s.signalLocked()
 }
 
-func (s *MemoryStore) failStoreOwnedLocked(t *Task, reason string) {
-	t.Status = StatusFailed
-	t.Result = &Result{Error: reason}
-	s.finishStoreOwnedLocked(t)
-}
-
 func (s *MemoryStore) finishStoreOwnedLocked(t *Task) {
-	s.clearLeaseLocked(t)
+	s.clearActiveLocked(t)
 	s.advanceLocked(t)
 	now := s.now()
 	t.DoneAt = &now
