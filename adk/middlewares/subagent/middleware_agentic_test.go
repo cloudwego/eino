@@ -38,13 +38,12 @@ func (a agenticMockAgent) Run(context.Context, *adk.TypedAgentInput[*schema.Agen
 	return nil
 }
 
-// TestSubagent_BeforeModelRewriteState_AgenticMessage exercises the
-// *schema.AgenticMessage branches of the reminder helpers that the
-// *schema.Message tests never reach.
-func TestSubagent_BeforeModelRewriteState_AgenticMessage(t *testing.T) {
+// TestSubagent_BeforeAgent_AgenticMessage exercises the *schema.AgenticMessage
+// path of the reminder insertion done in BeforeModelRewriteState.
+func TestSubagent_BeforeAgent_AgenticMessage(t *testing.T) {
 	ctx := context.Background()
 	m := &typedSubagentMiddleware[*schema.AgenticMessage]{
-		subAgents: []adk.TypedAgent[*schema.AgenticMessage]{agenticMockAgent{name: "worker", desc: "does work"}},
+		midConversationSystemMessage: buildAgentTypesSectionFromEntries([]agentTypeEntry{{Name: "worker", Description: "does work"}}),
 	}
 
 	user := schema.UserAgenticMessage("hi")
@@ -53,21 +52,22 @@ func TestSubagent_BeforeModelRewriteState_AgenticMessage(t *testing.T) {
 	_, ns, err := m.BeforeModelRewriteState(ctx, state, nil)
 	require.NoError(t, err)
 	require.Len(t, ns.Messages, 2)
-	reminder := ns.Messages[1]
-	assert.Equal(t, schema.AgenticRoleTypeSystem, reminder.Role)
-	_, ok := reminder.Extra[agentTypesReminderExtraKey]
+	// The reminder is inserted after the latest user message.
+	assert.Equal(t, schema.AgenticRoleTypeUser, ns.Messages[0].Role)
+	rem := ns.Messages[1]
+	assert.Equal(t, schema.AgenticRoleTypeSystem, rem.Role)
+	_, ok := rem.Extra[agentTypesReminderExtraKey]
 	assert.True(t, ok)
 
-	// Idempotent re-run.
+	// Inserted exactly once: calling again is a no-op (Has guards re-insertion).
 	_, ns2, err := m.BeforeModelRewriteState(ctx, ns, nil)
 	require.NoError(t, err)
-	require.Len(t, ns2.Messages, 2)
+	assert.Len(t, ns2.Messages, 2)
 
-	// No sub-agents: buildAgentTypesSection returns ok=false and the state is untouched.
+	// No sub-agents (empty midConversationSystemMessage): nothing is inserted.
 	empty := &typedSubagentMiddleware[*schema.AgenticMessage]{}
-	_, nsEmpty, err := empty.BeforeModelRewriteState(ctx, &adk.TypedChatModelAgentState[*schema.AgenticMessage]{
-		Messages: []*schema.AgenticMessage{user},
-	}, nil)
+	stEmpty := &adk.TypedChatModelAgentState[*schema.AgenticMessage]{Messages: []*schema.AgenticMessage{user}}
+	_, nsEmpty, err := empty.BeforeModelRewriteState(ctx, stEmpty, nil)
 	require.NoError(t, err)
 	assert.Len(t, nsEmpty.Messages, 1)
 
@@ -75,24 +75,4 @@ func TestSubagent_BeforeModelRewriteState_AgenticMessage(t *testing.T) {
 	_, nsNil, err := m.BeforeModelRewriteState(ctx, nil, nil)
 	require.NoError(t, err)
 	assert.Nil(t, nsNil)
-}
-
-// TestSubagent_ReminderHelpers_AgenticMessage covers the remaining AgenticMessage
-// helper branches directly.
-func TestSubagent_ReminderHelpers_AgenticMessage(t *testing.T) {
-	user := schema.UserAgenticMessage("u")
-	assistant := &schema.AgenticMessage{Role: schema.AgenticRoleTypeAssistant}
-	system := schema.SystemAgenticMessage("s")
-
-	assert.True(t, isReminderAnchor[*schema.AgenticMessage](user))
-	assert.True(t, isReminderAnchor[*schema.AgenticMessage](assistant))
-	assert.False(t, isReminderAnchor[*schema.AgenticMessage](system))
-
-	assert.True(t, isSystemMessage[*schema.AgenticMessage](system))
-	assert.False(t, isSystemMessage[*schema.AgenticMessage](user))
-
-	reminder := newReminder[*schema.AgenticMessage]("k", "content")
-	assert.True(t, hasExtraKey[*schema.AgenticMessage](reminder, "k"))
-	assert.False(t, hasExtraKey[*schema.AgenticMessage](user, "k"))
-	assert.True(t, isSystemMessage[*schema.AgenticMessage](reminder))
 }

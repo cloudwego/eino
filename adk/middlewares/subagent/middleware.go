@@ -27,6 +27,7 @@ import (
 	"github.com/cloudwego/eino/adk/backgroundtask"
 	"github.com/cloudwego/eino/adk/filesystem"
 	"github.com/cloudwego/eino/adk/internal"
+	"github.com/cloudwego/eino/adk/middlewares/internal/sysmsg"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/schema"
 )
@@ -215,18 +216,29 @@ func NewTyped[M adk.MessageType](ctx context.Context, config *TypedConfig[M]) (a
 		})
 	}
 
+	// The sub-agent set is fixed at construction, so the available-agent-types
+	// mid-conversation system message is built once here and inserted (once) at run time.
+	var midConversationSystemMessage string
+	if len(config.SubAgents) > 0 {
+		entries := make([]agentTypeEntry, 0, len(config.SubAgents))
+		for _, a := range config.SubAgents {
+			entries = append(entries, agentTypeEntry{Name: a.Name(ctx), Description: a.Description(ctx)})
+		}
+		midConversationSystemMessage = buildAgentTypesSectionFromEntries(entries)
+	}
+
 	return &typedSubagentMiddleware[M]{
-		tools:       tools,
-		instruction: instruction,
-		subAgents:   config.SubAgents,
+		tools:                        tools,
+		instruction:                  instruction,
+		midConversationSystemMessage: midConversationSystemMessage,
 	}, nil
 }
 
 type typedSubagentMiddleware[M adk.MessageType] struct {
 	adk.TypedBaseChatModelAgentMiddleware[M]
-	tools       []tool.BaseTool
-	instruction string
-	subAgents   []adk.TypedAgent[M]
+	tools                        []tool.BaseTool
+	instruction                  string
+	midConversationSystemMessage string
 }
 
 // BeforeAgent injects sub-agent tools and instructions into the agent context.
@@ -241,9 +253,24 @@ func (m *typedSubagentMiddleware[M]) BeforeAgent(ctx context.Context, runCtx *ad
 	return ctx, &nRunCtx, nil
 }
 
+// BeforeModelRewriteState publishes the available agent types as a mid-conversation
+// system message, inserted after the latest user message. The set of sub-agents is
+// fixed at construction, so the message is inserted exactly once: Has skips
+// re-insertion when it is already in the (reconstructed) history, and Insert persists
+// it as a MessageInserted event so it carries across turns.
+func (m *typedSubagentMiddleware[M]) BeforeModelRewriteState(ctx context.Context, state *adk.TypedChatModelAgentState[M], _ *adk.TypedModelContext[M]) (context.Context, *adk.TypedChatModelAgentState[M], error) {
+	if state == nil || m.midConversationSystemMessage == "" {
+		return ctx, state, nil
+	}
+	if !sysmsg.Has(state.Messages, agentTypesReminderExtraKey) {
+		state.Messages = sysmsg.Insert(ctx, state.Messages, agentTypesReminderExtraKey, m.midConversationSystemMessage, nil)
+	}
+	return ctx, state, nil
+}
+
 const agentTypesReminderExtraKey = "__eino_subagent_available_agent_types__"
 
-func buildAgentTypesSectionFromEntries(entries []reminderEntry) string {
+func buildAgentTypesSectionFromEntries(entries []agentTypeEntry) string {
 	preamble := internal.SelectPrompt(internal.I18nPrompts{
 		English: availableAgentTypesPreamble,
 		Chinese: availableAgentTypesPreambleChinese,
@@ -256,189 +283,9 @@ func buildAgentTypesSectionFromEntries(entries []reminderEntry) string {
 	return sb.String()
 }
 
-// BeforeModelRewriteState publishes the available agent types as a system
-// reminder, inserted once: when the history already contains a reminder from this
-// middleware (identified by agentTypesReminderExtraKey) nothing is added and
-// building the agent-types section is skipped, otherwise a single reminder is
-// appended (see appendReminderIfChanged).
-//
-// When a reminder is appended, it is also emitted as a durable MessageInserted
-// session event so it is reconstructed in place on the next turn instead of
-// being dropped from the event log and re-injected at a new offset (which would
-// break cross-turn prefix caching). TypedSendEvent is a no-op outside a Runner
-// session.
-func (m *typedSubagentMiddleware[M]) BeforeModelRewriteState(ctx context.Context, state *adk.TypedChatModelAgentState[M], _ *adk.TypedModelContext[M]) (context.Context, *adk.TypedChatModelAgentState[M], error) {
-	if state == nil {
-		return ctx, state, nil
-	}
-	if len(m.subAgents) == 0 {
-		return ctx, state, nil
-	}
-	nState := *state
-
-	// Insert-once: if a reminder from this middleware already exists in history,
-	// nothing is added and building the agent-types section is skipped.
-	for _, msg := range nState.Messages {
-		if hasExtraKey(msg, agentTypesReminderExtraKey) {
-			return ctx, &nState, nil
-		}
-	}
-
-	entries := make([]reminderEntry, 0, len(m.subAgents))
-	for _, a := range m.subAgents {
-		entries = append(entries, reminderEntry{Name: a.Name(ctx), Description: a.Description(ctx)})
-	}
-	section := buildAgentTypesSectionFromEntries(entries)
-	newMsgs, insertedMsg, beforeMessageID, didInsert := appendReminderIfChanged(nState.Messages, agentTypesReminderExtraKey, section)
-	nState.Messages = newMsgs
-
-	if didInsert {
-		_ = adk.TypedSendEvent(ctx, &adk.TypedAgentEvent[M]{
-			SessionEventVariant: &adk.SessionEventVariant[M]{
-				Event: &adk.SessionEvent[M]{
-					Kind: adk.SessionEventMessageInserted,
-					MessageInserted: &adk.MessageInsertedEvent[M]{
-						Message:         insertedMsg,
-						BeforeMessageID: beforeMessageID,
-					},
-				},
-			},
-		})
-	}
-
-	return ctx, &nState, nil
-}
-
-type reminderEntry struct {
+type agentTypeEntry struct {
 	Name        string
 	Description string
-}
-
-// appendReminderIfChanged inserts the available-agent-types reminder once. The set
-// of sub-agents is fixed when the middleware is constructed and never changes during
-// a session, so there is nothing to diff: if any prior message already carries this
-// middleware's reminder (identified by extraKey), it is already present and nothing
-// is inserted. Otherwise a fresh reminder is inserted. It returns the resulting
-// messages plus, when a reminder was inserted, the inserted message, the ID of the
-// message it was inserted before (empty when it lands at the tail), and
-// didInsert=true — so the caller can persist the reminder as a MessageInserted
-// session event that reconstructs at the same spot.
-//
-// The reminder is a system message placed at a clean turn boundary — right after
-// the latest user message or final assistant answer (see isReminderAnchor) — rather
-// than at the absolute tail, so it never lands in the middle of pending
-// tool-call/tool-result scaffolding. Models that reject mid-conversation system
-// messages should convert non-leading system messages to user role in their own
-// Generate/Stream (see schema.ConvertNonLeadingSystemMessagesToUser) at model-call
-// time without touching persisted history.
-//
-// Following the mid-conversation reminder pattern, existing reminders are never
-// mutated or removed here: rewriting history would invalidate the model's KV cache
-// for every message after the edit.
-func appendReminderIfChanged[M adk.MessageType](messages []M, extraKey string, section string) (result []M, insertedMsg M, beforeMessageID string, didInsert bool) {
-	for _, msg := range messages {
-		if hasExtraKey(msg, extraKey) {
-			return messages, insertedMsg, "", false
-		}
-	}
-
-	insertAt := reminderInsertIndex(messages)
-
-	insertedMsg = newReminder[M](extraKey, section)
-	adk.EnsureMessageID(insertedMsg)
-
-	result = make([]M, 0, len(messages)+1)
-	result = append(result, messages[:insertAt]...)
-	result = append(result, insertedMsg)
-	result = append(result, messages[insertAt:]...)
-
-	// Record the ID of the message the reminder was inserted before, so the next
-	// turn can rebuild the reminder at the same spot (re-inserting it before that
-	// same message). A tail insert has no following message, so beforeMessageID
-	// stays empty and reconstruction treats it as a plain append. The message it
-	// precedes is always one the framework persists across turns
-	// (user/assistant/tool/another reminder), never the leading system instruction,
-	// which is regenerated each turn and has no stable ID to anchor to.
-	if insertAt < len(messages) {
-		beforeMessageID = adk.GetMessageID(messages[insertAt])
-	}
-	return result, insertedMsg, beforeMessageID, true
-}
-
-// reminderInsertIndex returns the index at which a fresh reminder should be
-// inserted: right after the latest turn boundary (user message or final assistant
-// answer), then past any settled system messages already sitting there — sibling or
-// stale reminders — so the fresh reminder lands after them without disturbing their
-// positions, yet never after pending tool-call/tool-result scaffolding.
-func reminderInsertIndex[M adk.MessageType](messages []M) int {
-	insertAt := len(messages)
-	for i := len(messages) - 1; i >= 0; i-- {
-		if isReminderAnchor(messages[i]) {
-			insertAt = i + 1
-			break
-		}
-	}
-	for insertAt < len(messages) && isSystemMessage(messages[insertAt]) {
-		insertAt++
-	}
-	return insertAt
-}
-
-// isReminderAnchor reports whether msg is a clean turn boundary that a reminder
-// may be inserted after: a user message or a final assistant answer (one without
-// tool calls). It mirrors the anchor rule used by the tool-search middleware.
-func isReminderAnchor[M adk.MessageType](msg M) bool {
-	switch v := any(msg).(type) {
-	case *schema.Message:
-		return v.Role == schema.User || (v.Role == schema.Assistant && len(v.ToolCalls) == 0)
-	case *schema.AgenticMessage:
-		switch v.Role {
-		case schema.AgenticRoleTypeUser:
-			return !internal.HasToolResult(v.ContentBlocks)
-		case schema.AgenticRoleTypeAssistant:
-			return !internal.HasToolCall(v.ContentBlocks)
-		}
-	}
-	return false
-}
-
-func isSystemMessage[M adk.MessageType](msg M) bool {
-	switch v := any(msg).(type) {
-	case *schema.Message:
-		return v.Role == schema.System
-	case *schema.AgenticMessage:
-		return v.Role == schema.AgenticRoleTypeSystem
-	}
-	return false
-}
-
-func hasExtraKey[M adk.MessageType](msg M, extraKey string) bool {
-	switch v := any(msg).(type) {
-	case *schema.Message:
-		_, ok := v.Extra[extraKey]
-		return ok
-	case *schema.AgenticMessage:
-		_, ok := v.Extra[extraKey]
-		return ok
-	}
-	return false
-}
-
-// newReminder builds a system reminder message carrying content and the given
-// extraKey.
-func newReminder[M adk.MessageType](extraKey string, content string) M {
-	var zero M
-	switch any(zero).(type) {
-	case *schema.Message:
-		msg := schema.SystemMessage(content)
-		msg.Extra = map[string]any{extraKey: true}
-		return any(msg).(M)
-	case *schema.AgenticMessage:
-		msg := schema.SystemAgenticMessage(content)
-		msg.Extra = map[string]any{extraKey: true}
-		return any(msg).(M)
-	}
-	panic("unreachable")
 }
 
 func validate[M adk.MessageType](ctx context.Context, c *TypedConfig[M]) error {

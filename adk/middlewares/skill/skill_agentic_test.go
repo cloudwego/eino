@@ -27,11 +27,11 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
-// TestSkill_BeforeModelRewriteState_AgenticMessage exercises the
-// *schema.AgenticMessage branches of the reminder helpers (isSystemMessage,
-// hasExtraKey, reminderContent, newReminder, isReminderAnchor,
-// appendReminderIfChanged) which the *schema.Message tests never reach.
-func TestSkill_BeforeModelRewriteState_AgenticMessage(t *testing.T) {
+// TestSkill_BeforeAgent_AgenticMessage exercises the *schema.AgenticMessage path.
+// BeforeAgent no longer mutates the message list (it stashes the pending reminder as
+// run-local state; BeforeModelRewriteState does the insertion). This test verifies
+// BeforeAgent still injects the tool and never touches AgentInput.Messages.
+func TestSkill_BeforeAgent_AgenticMessage(t *testing.T) {
 	ctx := context.Background()
 	backend := &inMemoryBackend{m: []Skill{{FrontMatter: FrontMatter{Name: "alpha", Description: "first"}}}}
 	mw, err := NewTyped[*schema.AgenticMessage](ctx, &TypedConfig[*schema.AgenticMessage]{Backend: backend})
@@ -39,95 +39,31 @@ func TestSkill_BeforeModelRewriteState_AgenticMessage(t *testing.T) {
 	h := mw.(*typedSkillHandler[*schema.AgenticMessage])
 
 	user := schema.UserAgenticMessage("hi")
-	state := &adk.TypedChatModelAgentState[*schema.AgenticMessage]{Messages: []*schema.AgenticMessage{user}}
+	runCtx := &adk.ChatModelAgentContext[*schema.AgenticMessage]{
+		AgentInput: &adk.TypedAgentInput[*schema.AgenticMessage]{Messages: []*schema.AgenticMessage{user}},
+	}
 
-	// First call inserts a reminder after the user message.
-	_, ns, err := h.BeforeModelRewriteState(ctx, state, nil)
+	// Messages are left untouched by BeforeAgent; the tool is injected.
+	_, nrc, err := h.BeforeAgent(ctx, runCtx)
 	require.NoError(t, err)
-	require.Len(t, ns.Messages, 2)
-	reminder := ns.Messages[1]
-	assert.Equal(t, schema.AgenticRoleTypeSystem, reminder.Role)
-	_, ok := reminder.Extra[skillsReminderExtraKey]
-	assert.True(t, ok)
+	require.Len(t, nrc.AgentInput.Messages, 1)
+	assert.Equal(t, user, nrc.AgentInput.Messages[0])
+	assert.Len(t, nrc.Tools, 1)
 
-	// Re-run is idempotent (exercises reminderContent's AgenticMessage
-	// single-block path returning the reminder text and matching the section).
-	_, ns2, err := h.BeforeModelRewriteState(ctx, ns, nil)
-	require.NoError(t, err)
-	require.Len(t, ns2.Messages, 2)
-
-	// Skill list changes: insert-once means no new reminder is appended once one
-	// already exists — the state is left unchanged.
-	backend.m = append(backend.m, Skill{FrontMatter: FrontMatter{Name: "beta", Description: "second"}})
-	_, ns3, err := h.BeforeModelRewriteState(ctx, ns2, nil)
-	require.NoError(t, err)
-	require.Len(t, ns3.Messages, 2)
-
-	// No skills: buildSkillsSection returns ok=false and the state is untouched.
+	// No skills: BeforeAgent still does not touch messages.
 	empty, err := NewTyped[*schema.AgenticMessage](ctx, &TypedConfig[*schema.AgenticMessage]{Backend: &inMemoryBackend{}})
 	require.NoError(t, err)
 	hEmpty := empty.(*typedSkillHandler[*schema.AgenticMessage])
-	stEmpty := &adk.TypedChatModelAgentState[*schema.AgenticMessage]{Messages: []*schema.AgenticMessage{user}}
-	_, nsEmpty, err := hEmpty.BeforeModelRewriteState(ctx, stEmpty, nil)
-	require.NoError(t, err)
-	assert.Len(t, nsEmpty.Messages, 1)
-
-	// nil state: returned unchanged (nil-guard path).
-	_, nsNil, err := h.BeforeModelRewriteState(ctx, nil, nil)
-	require.NoError(t, err)
-	assert.Nil(t, nsNil)
-}
-
-// TestSkill_BeforeModelRewriteState_AgenticMessage_InsertBeforeTrailing verifies
-// that when a non-anchor message (a tool-call assistant) trails the turn's user
-// message, the reminder is inserted after the user message and BEFORE that
-// trailing message, pinning beforeMessageID to it (the insertAt < len path).
-func TestSkill_BeforeModelRewriteState_AgenticMessage_InsertBeforeTrailing(t *testing.T) {
-	ctx := context.Background()
-	backend := &inMemoryBackend{m: []Skill{{FrontMatter: FrontMatter{Name: "alpha", Description: "first"}}}}
-	mw, err := NewTyped[*schema.AgenticMessage](ctx, &TypedConfig[*schema.AgenticMessage]{Backend: backend})
-	require.NoError(t, err)
-	h := mw.(*typedSkillHandler[*schema.AgenticMessage])
-
-	user := schema.UserAgenticMessage("hi")
-	toolCall := &schema.AgenticMessage{
-		Role: schema.AgenticRoleTypeAssistant,
-		ContentBlocks: []*schema.ContentBlock{
-			{Type: schema.ContentBlockTypeFunctionToolCall, FunctionToolCall: &schema.FunctionToolCall{}},
-		},
+	rcEmpty := &adk.ChatModelAgentContext[*schema.AgenticMessage]{
+		AgentInput: &adk.TypedAgentInput[*schema.AgenticMessage]{Messages: []*schema.AgenticMessage{user}},
 	}
-	adk.EnsureMessageID(toolCall)
-	state := &adk.TypedChatModelAgentState[*schema.AgenticMessage]{Messages: []*schema.AgenticMessage{user, toolCall}}
-
-	_, ns, err := h.BeforeModelRewriteState(ctx, state, nil)
+	_, nrcEmpty, err := hEmpty.BeforeAgent(ctx, rcEmpty)
 	require.NoError(t, err)
-	require.Len(t, ns.Messages, 3)
-	// user, reminder, toolCall — reminder lands between the anchor and the trailing
-	// tool-call message rather than at the tail.
-	reminder := ns.Messages[1]
-	assert.Equal(t, schema.AgenticRoleTypeSystem, reminder.Role)
-	_, ok := reminder.Extra[skillsReminderExtraKey]
-	assert.True(t, ok)
-	assert.Equal(t, toolCall, ns.Messages[2])
-}
+	assert.Len(t, nrcEmpty.AgentInput.Messages, 1)
 
-// TestSkill_ReminderHelpers_AgenticMessage covers the remaining AgenticMessage
-// helper branches directly.
-func TestSkill_ReminderHelpers_AgenticMessage(t *testing.T) {
-	user := schema.UserAgenticMessage("u")
-	assistant := &schema.AgenticMessage{Role: schema.AgenticRoleTypeAssistant}
-	system := schema.SystemAgenticMessage("s")
-
-	// isReminderAnchor: user and final-assistant are anchors; system is not.
-	assert.True(t, isReminderAnchor(user))
-	assert.True(t, isReminderAnchor(assistant))
-	assert.False(t, isReminderAnchor(system))
-
-	// isSystemMessage / hasExtraKey.
-	assert.True(t, isSystemMessage(system))
-	assert.False(t, isSystemMessage(user))
-	reminder := newReminder[*schema.AgenticMessage]("k", "content")
-	assert.True(t, hasExtraKey(reminder, "k"))
-	assert.False(t, hasExtraKey(user, "k"))
-	assert.True(t, isSystemMessage(reminder))
+	// nil AgentInput: guarded, no panic; instruction/tools still applied.
+	rcNil := &adk.ChatModelAgentContext[*schema.AgenticMessage]{}
+	_, nrcNil, err := h.BeforeAgent(ctx, rcNil)
+	require.NoError(t, err)
+	assert.Len(t, nrcNil.Tools, 1)
 }

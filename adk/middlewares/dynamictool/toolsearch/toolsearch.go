@@ -29,6 +29,7 @@ import (
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/adk/internal"
+	"github.com/cloudwego/eino/adk/middlewares/internal/sysmsg"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/schema"
 )
@@ -60,7 +61,7 @@ func NewTyped[M adk.MessageType](ctx context.Context, config *Config) (adk.Typed
 		return nil, fmt.Errorf("tools is required")
 	}
 
-	tpl, err := template.New("").Parse(systemReminderTpl)
+	tpl, err := template.New("").Parse(midConversationSystemMessageTpl)
 	if err != nil {
 		return nil, err
 	}
@@ -84,17 +85,17 @@ func NewTyped[M adk.MessageType](ctx context.Context, config *Config) (adk.Typed
 	}
 
 	buf := &bytes.Buffer{}
-	err = tpl.Execute(buf, systemReminder{Tools: toolNames})
+	err = tpl.Execute(buf, midConversationSystemMessageData{Tools: toolNames})
 	if err != nil {
-		return nil, fmt.Errorf("failed to format system reminder template: %w", err)
+		return nil, fmt.Errorf("failed to format mid-conversation system message template: %w", err)
 	}
 
 	return &typedMiddleware[M]{
-		dynamicTools:       config.DynamicTools,
-		mapOfDynamicTools:  mapOfDynamicTools,
-		dynamicToolInfos:   dynamicToolInfos,
-		useModelToolSearch: config.UseModelToolSearch,
-		sr:                 buf.String(),
+		dynamicTools:                 config.DynamicTools,
+		mapOfDynamicTools:            mapOfDynamicTools,
+		dynamicToolInfos:             dynamicToolInfos,
+		useModelToolSearch:           config.UseModelToolSearch,
+		midConversationSystemMessage: buf.String(),
 	}, nil
 }
 
@@ -121,17 +122,17 @@ func New(ctx context.Context, config *Config) (adk.ChatModelAgentMiddleware, err
 	return NewTyped[*schema.Message](ctx, config)
 }
 
-type systemReminder struct {
+type midConversationSystemMessageData struct {
 	Tools []string
 }
 
 type typedMiddleware[M adk.MessageType] struct {
 	*adk.TypedBaseChatModelAgentMiddleware[M]
-	dynamicTools       []tool.BaseTool
-	mapOfDynamicTools  map[string]*schema.ToolInfo
-	dynamicToolInfos   []*schema.ToolInfo
-	useModelToolSearch bool
-	sr                 string
+	dynamicTools                 []tool.BaseTool
+	mapOfDynamicTools            map[string]*schema.ToolInfo
+	dynamicToolInfos             []*schema.ToolInfo
+	useModelToolSearch           bool
+	midConversationSystemMessage string
 }
 
 func (m *typedMiddleware[M]) BeforeAgent(ctx context.Context, runCtx *adk.ChatModelAgentContext[M]) (context.Context, *adk.ChatModelAgentContext[M], error) {
@@ -147,6 +148,7 @@ func (m *typedMiddleware[M]) BeforeAgent(ctx context.Context, runCtx *adk.ChatMo
 	if m.useModelToolSearch {
 		nRunCtx.ToolSearchTool = getToolSearchToolInfo()
 	}
+
 	return ctx, &nRunCtx, nil
 }
 
@@ -165,97 +167,6 @@ func (m *typedMiddleware[M]) isInitialized(ctx context.Context) bool {
 
 func (m *typedMiddleware[M]) markInitialized(ctx context.Context) {
 	_ = adk.SetRunLocalValue(ctx, toolSearchInitializedKey, true)
-}
-
-func (m *typedMiddleware[M]) ensureReminder(msgs []M) (result []M, insertedMsg M, beforeMessageID string, didInsert bool) {
-	for _, msg := range msgs {
-		if hasToolSearchReminderExtra(msg) {
-			return msgs, insertedMsg, beforeMessageID, false
-		}
-	}
-
-	insertedMsg = makeReminderMsg[M](m.sr)
-	adk.EnsureMessageID(insertedMsg)
-
-	insertAt := reminderInsertIndexTS(msgs)
-
-	result = make([]M, 0, len(msgs)+1)
-	result = append(result, msgs[:insertAt]...)
-	result = append(result, insertedMsg)
-	result = append(result, msgs[insertAt:]...)
-	if insertAt < len(msgs) {
-		beforeMessageID = adk.GetMessageID(msgs[insertAt])
-	}
-	return result, insertedMsg, beforeMessageID, true
-}
-
-// reminderInsertIndexTS returns the index at which a fresh reminder should be
-// inserted: right after the latest turn boundary (user message or final assistant
-// answer), so it never lands in the middle of pending tool-call/tool-result
-// scaffolding.
-func reminderInsertIndexTS[M adk.MessageType](msgs []M) int {
-	insertAt := len(msgs)
-	for i := len(msgs) - 1; i >= 0; i-- {
-		if isReminderAnchorTS(msgs[i]) {
-			insertAt = i + 1
-			break
-		}
-	}
-	return insertAt
-}
-
-func isReminderAnchorTS[M adk.MessageType](msg M) bool {
-	switch m := any(msg).(type) {
-	case *schema.Message:
-		return (m.Role == schema.User) || (m.Role == schema.Assistant && len(m.ToolCalls) == 0)
-	case *schema.AgenticMessage:
-		switch m.Role {
-		case schema.AgenticRoleTypeUser:
-			return !internal.HasToolResult(m.ContentBlocks)
-		case schema.AgenticRoleTypeAssistant:
-			return !internal.HasToolCall(m.ContentBlocks)
-		}
-	}
-	return false
-}
-
-// makeReminderMsg builds the tool-search reminder as a system message carrying
-// content.
-func makeReminderMsg[M adk.MessageType](content string) M {
-	var zero M
-	switch any(zero).(type) {
-	case *schema.Message:
-		msg := schema.SystemMessage(content)
-		msg.Extra = map[string]any{toolSearchReminderExtraKey: true}
-		return any(msg).(M)
-	case *schema.AgenticMessage:
-		msg := schema.SystemAgenticMessage(content)
-		msg.Extra = map[string]any{toolSearchReminderExtraKey: true}
-		return any(msg).(M)
-	}
-	panic("unreachable")
-}
-
-func hasToolSearchReminderExtra[M adk.MessageType](msg M) bool {
-	switch v := any(msg).(type) {
-	case *schema.Message:
-		if v.Extra != nil {
-			if b, ok := v.Extra[toolSearchReminderExtraKey]; ok {
-				if bVal, _ := b.(bool); bVal {
-					return true
-				}
-			}
-		}
-	case *schema.AgenticMessage:
-		if v.Extra != nil {
-			if b, ok := v.Extra[toolSearchReminderExtraKey]; ok {
-				if bVal, _ := b.(bool); bVal {
-					return true
-				}
-			}
-		}
-	}
-	return false
 }
 
 func (m *typedMiddleware[M]) extractDynamicTools(tools []*schema.ToolInfo) []*schema.ToolInfo {
@@ -297,21 +208,13 @@ func toolNameSet(tools []*schema.ToolInfo) map[string]bool {
 }
 
 func (m *typedMiddleware[M]) BeforeModelRewriteState(ctx context.Context, state *adk.TypedChatModelAgentState[M], _ *adk.TypedModelContext[M]) (context.Context, *adk.TypedChatModelAgentState[M], error) {
-	newMsgs, insertedMsg, beforeMessageID, didInsert := m.ensureReminder(state.Messages)
-	state.Messages = newMsgs
-
-	if didInsert {
-		_ = adk.TypedSendEvent(ctx, &adk.TypedAgentEvent[M]{
-			SessionEventVariant: &adk.SessionEventVariant[M]{
-				Event: &adk.SessionEvent[M]{
-					Kind: adk.SessionEventMessageInserted,
-					MessageInserted: &adk.MessageInsertedEvent[M]{
-						Message:         insertedMsg,
-						BeforeMessageID: beforeMessageID,
-					},
-				},
-			},
-		})
+	// Publish the tool-search message as a mid-conversation system message, inserted
+	// after the latest user message. Its content is fixed, so it is inserted exactly
+	// once: Has skips re-insertion when the message is already in the (reconstructed)
+	// history, and Insert persists it as a MessageInserted event so it carries across
+	// turns.
+	if !sysmsg.Has(state.Messages, toolSearchReminderExtraKey) {
+		state.Messages = sysmsg.Insert(ctx, state.Messages, toolSearchReminderExtraKey, m.midConversationSystemMessage, nil)
 	}
 
 	if !m.isInitialized(ctx) {

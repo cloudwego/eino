@@ -39,7 +39,7 @@ Query 形式：
 - "notebook jupyter" —— 关键字搜索，返回至多 max_results 个最佳匹配
 - "+slack send" —— 要求名称中包含 "slack"，按其余词项排序`
 
-	systemReminderTpl = `The following deferred tools are now available via tool_search. Their schemas are NOT loaded — calling them directly will fail with InputValidationError. Use tool_search with query "select:<name>[,<name>...]" to load tool schemas before calling them:
+	midConversationSystemMessageTpl = `The following deferred tools are now available via tool_search. Their schemas are NOT loaded — calling them directly will fail with InputValidationError. Use tool_search with query "select:<name>[,<name>...]" to load tool schemas before calling them:
 {{- range .Tools }}
 {{ . }}
 {{- end }}`

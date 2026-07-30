@@ -18,14 +18,15 @@ package skill
 
 import (
 	"context"
-	"strings"
+	"encoding/json"
+	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/cloudwego/eino/adk"
-	"github.com/cloudwego/eino/adk/session"
+	"github.com/cloudwego/eino/adk/middlewares/internal/sysmsg"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
 )
@@ -49,92 +50,281 @@ func (m *reproRecordingModel) Stream(ctx context.Context, input []*schema.Messag
 	return schema.StreamReaderFromArray([]*schema.Message{msg}), nil
 }
 
-func drainSkillEvents(t *testing.T, iter *adk.AsyncIterator[*adk.AgentEvent]) {
+func countReminders(msgs []*schema.Message) int {
+	n := 0
+	for _, m := range msgs {
+		if _, ok := m.Extra[skillsReminderExtraKey]; ok {
+			n++
+		}
+	}
+	return n
+}
+
+func firstReminder(msgs []*schema.Message) *schema.Message {
+	for _, m := range msgs {
+		if _, ok := m.Extra[skillsReminderExtraKey]; ok {
+			return m
+		}
+	}
+	return nil
+}
+
+// assertReminderAfterUser checks the skill reminder is a System message positioned
+// after the latest user message (never at the front / index 0).
+func assertReminderAfterUser(t *testing.T, msgs []*schema.Message) {
 	t.Helper()
+	lastUser, reminderIdx := -1, -1
+	for i, m := range msgs {
+		if m.Role == schema.User {
+			lastUser = i
+		}
+		if _, ok := m.Extra[skillsReminderExtraKey]; ok {
+			assert.Equal(t, schema.System, m.Role, "reminder must be a system message")
+			reminderIdx = i
+		}
+	}
+	require.GreaterOrEqual(t, reminderIdx, 0, "a reminder must be present")
+	assert.Greater(t, reminderIdx, lastUser, "reminder must be inserted after the latest user message")
+}
+
+// runLocalProbe runs fn from inside BeforeModelRewriteState, i.e. within a live
+// agent execution where the run-local state (adk.State.Extra) exists — the same store
+// GetRunLocalValue reads. This lets tests seed the pending reminder and drive the
+// handler's insertion logic without a full Runner.
+type runLocalProbe struct {
+	*adk.BaseChatModelAgentMiddleware
+	fn func(ctx context.Context)
+}
+
+func (p *runLocalProbe) BeforeModelRewriteState(ctx context.Context, state *adk.ChatModelAgentState, _ *adk.ModelContext) (context.Context, *adk.ChatModelAgentState, error) {
+	p.fn(ctx)
+	return ctx, state, nil
+}
+
+// withRunLocalCtx executes fn inside a run-local-capable context.
+func withRunLocalCtx(t *testing.T, fn func(ctx context.Context)) {
+	t.Helper()
+	ctx := context.Background()
+	a, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
+		Name:          "probe-agent",
+		Model:         &reproRecordingModel{},
+		Handlers:      []adk.ChatModelAgentMiddleware{&runLocalProbe{fn: fn}},
+		MaxIterations: 1,
+	})
+	require.NoError(t, err)
+	iter := a.Run(ctx, &adk.AgentInput{Messages: []adk.Message{schema.UserMessage("hi")}})
 	for {
 		ev, ok := iter.Next()
 		if !ok {
-			return
+			break
 		}
-		assert.NoError(t, ev.Err)
+		require.NoError(t, ev.Err)
 	}
 }
 
-func TestSkill_ReminderInsertedOnceAcrossTurns(t *testing.T) {
-	ctx := context.Background()
-	backend := &inMemoryBackend{m: []Skill{
-		{FrontMatter: FrontMatter{Name: "alpha", Description: "first skill"}},
-	}}
-	store := session.NewInMemoryStore[*schema.Message](nil)
-	const sessionID = "skill-refresh-session"
-
-	mw, err := NewMiddleware(ctx, &Config{Backend: backend})
+// seedPending writes the pending skill snapshot into run-local state, mirroring what
+// BeforeAgent does via SetRunLocalValue: a single JSON string of []skillEntry keeping
+// each skill's name/desc/digest together, which BeforeModelRewriteState reads back to
+// diff against history and build the reminder section.
+func seedPending(t *testing.T, ctx context.Context, names, descs, digests []string) {
+	t.Helper()
+	entries := make([]skillEntry, len(names))
+	for i := range names {
+		entries[i] = skillEntry{Name: names[i], Desc: descs[i], Digest: digests[i]}
+	}
+	snapshot, err := json.Marshal(entries)
 	require.NoError(t, err)
+	require.NoError(t, adk.SetRunLocalValue(ctx, skillsReminderSnapshotKey, string(snapshot)))
+}
 
-	newAgent := func(m model.BaseChatModel) adk.Agent {
-		a, aerr := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
-			Name:     "skill-agent",
-			Model:    m,
-			Handlers: []adk.ChatModelAgentMiddleware{mw},
+// TestSkill_BeforeModelRewriteState_InsertsPending verifies the first-turn insertion:
+// given a pending reminder, BeforeModelRewriteState inserts exactly one System reminder
+// after the user message, listing the section and carrying the digest array in Extra.
+func TestSkill_BeforeModelRewriteState_InsertsPending(t *testing.T) {
+	h := &typedSkillHandler[*schema.Message]{
+		tool: &typedSkillTool[*schema.Message]{b: &inMemoryBackend{m: []Skill{
+			{FrontMatter: FrontMatter{Name: "alpha", Description: "desc-alpha"}},
+		}}},
+	}
+	skills := []FrontMatter{{Name: "alpha", Description: "desc-alpha"}}
+	digests := []string{skillDigest(skills[0])}
+
+	withRunLocalCtx(t, func(ctx context.Context) {
+		seedPending(t, ctx, []string{"alpha"}, []string{"desc-alpha"}, digests)
+
+		state := &adk.ChatModelAgentState{Messages: []*schema.Message{schema.UserMessage("hi")}}
+		_, state, err := h.BeforeModelRewriteState(ctx, state, nil)
+		require.NoError(t, err)
+
+		require.Equal(t, 1, countReminders(state.Messages), "one reminder inserted")
+		assertReminderAfterUser(t, state.Messages)
+
+		rem := firstReminder(state.Messages)
+		require.NotNil(t, rem)
+		assert.Contains(t, rem.Content, "alpha")
+		assert.Contains(t, rem.Content, "desc-alpha")
+		// The digest array is stored in Extra for the next turn's diff.
+		assert.Equal(t, digests, toStringSlice(rem.Extra[skillsDigestExtraKey]))
+		// And it is readable back via sysmsg.LatestExtra, the exact path the next turn's
+		// diff uses.
+		got, ok := sysmsg.LatestExtra(state.Messages, skillsReminderExtraKey, skillsDigestExtraKey)
+		require.True(t, ok)
+		assert.Equal(t, digests, toStringSlice(got))
+	})
+}
+
+// TestSkill_BeforeModelRewriteState_NoInsertWithoutPending verifies that when no
+// pending reminder is stashed (BeforeAgent found the skills unchanged, or List errored
+// / returned zero skills, so it cleared the stash), BeforeModelRewriteState inserts
+// nothing.
+func TestSkill_BeforeModelRewriteState_NoInsertWithoutPending(t *testing.T) {
+	h := &typedSkillHandler[*schema.Message]{
+		tool: &typedSkillTool[*schema.Message]{b: &inMemoryBackend{m: []Skill{}}},
+	}
+
+	withRunLocalCtx(t, func(ctx context.Context) {
+		// No stash at all.
+		state := &adk.ChatModelAgentState{Messages: []*schema.Message{schema.UserMessage("hi")}}
+		_, state, err := h.BeforeModelRewriteState(ctx, state, nil)
+		require.NoError(t, err)
+		assert.Equal(t, 0, countReminders(state.Messages), "no stash → no insert")
+
+		// Explicit empty stash (how BeforeAgent clears it) is also a no-op.
+		require.NoError(t, adk.SetRunLocalValue(ctx, skillsReminderSnapshotKey, ""))
+		state = &adk.ChatModelAgentState{Messages: []*schema.Message{schema.UserMessage("hi")}}
+		_, state, err = h.BeforeModelRewriteState(ctx, state, nil)
+		require.NoError(t, err)
+		assert.Equal(t, 0, countReminders(state.Messages), "nil stash → no insert")
+	})
+}
+
+// TestSkill_InsertOncePerTurn verifies BeforeModelRewriteState inserts the pending
+// reminder exactly once: the first call inserts and consumes the stash; a second call
+// in the same turn inserts nothing.
+func TestSkill_InsertOncePerTurn(t *testing.T) {
+	h := &typedSkillHandler[*schema.Message]{
+		tool: &typedSkillTool[*schema.Message]{b: &inMemoryBackend{m: []Skill{
+			{FrontMatter: FrontMatter{Name: "alpha", Description: "first"}},
+		}}},
+	}
+
+	withRunLocalCtx(t, func(ctx context.Context) {
+		seedPending(t, ctx, []string{"alpha"}, []string{"first"}, []string{"d1"})
+
+		s1 := &adk.ChatModelAgentState{Messages: []*schema.Message{schema.UserMessage("hi")}}
+		_, s1, err := h.BeforeModelRewriteState(ctx, s1, nil)
+		require.NoError(t, err)
+		assert.Equal(t, 1, countReminders(s1.Messages), "first call inserts one reminder")
+
+		s2 := &adk.ChatModelAgentState{Messages: []*schema.Message{schema.UserMessage("hi")}}
+		_, s2, err = h.BeforeModelRewriteState(ctx, s2, nil)
+		require.NoError(t, err)
+		assert.Equal(t, 0, countReminders(s2.Messages), "stash consumed → second call inserts nothing")
+	})
+}
+
+// TestSkill_BeforeAgentToRewriteState_Bridge exercises the real run-local bridge:
+// BeforeAgent lists+diffs and stashes via SetRunLocalValue (which gob-checks the
+// stashed value), then BeforeModelRewriteState reads it back and inserts. This is the
+// end-to-end path a Runner takes; a non-gob-encodable stash would make SetRunLocalValue
+// fail silently here and no reminder would be inserted.
+func TestSkill_BeforeAgentToRewriteState_Bridge(t *testing.T) {
+	newHandler := func(b Backend) *typedSkillHandler[*schema.Message] {
+		mw, err := NewMiddleware(context.Background(), &Config{Backend: b})
+		require.NoError(t, err)
+		return mw.(*typedSkillHandler[*schema.Message])
+	}
+
+	t.Run("added skill bridges through to an inserted reminder", func(t *testing.T) {
+		h := newHandler(&inMemoryBackend{m: []Skill{
+			{FrontMatter: FrontMatter{Name: "alpha", Description: "d-alpha"}},
+		}})
+		withRunLocalCtx(t, func(ctx context.Context) {
+			rc := &adk.ChatModelAgentContext[*schema.Message]{
+				AgentInput: &adk.TypedAgentInput[*schema.Message]{Messages: []*schema.Message{schema.UserMessage("hi")}},
+			}
+			_, _, err := h.BeforeAgent(ctx, rc)
+			require.NoError(t, err)
+
+			state := &adk.ChatModelAgentState{Messages: []*schema.Message{schema.UserMessage("hi")}}
+			_, state, err = h.BeforeModelRewriteState(ctx, state, nil)
+			require.NoError(t, err)
+			require.Equal(t, 1, countReminders(state.Messages), "BeforeAgent stash must bridge to an insertion")
+			assert.Contains(t, firstReminder(state.Messages).Content, "alpha")
 		})
-		require.NoError(t, aerr)
-		return a
-	}
+	})
 
-	// Turn 1: only "alpha" exists.
-	model1 := &reproRecordingModel{}
-	runner1 := adk.NewRunner(ctx, adk.RunnerConfig{Agent: newAgent(model1), SessionID: sessionID, SessionStore: store})
-	drainSkillEvents(t, runner1.Query(ctx, "hi"))
-	require.NotEmpty(t, model1.inputs)
-	turn1 := model1.inputs[len(model1.inputs)-1]
-	assert.True(t, sectionMentions(turn1, "alpha"), "turn 1 reminder should list alpha")
-	assert.False(t, sectionMentions(turn1, "beta"), "turn 1 must not mention beta yet")
+	t.Run("unchanged skills bridge to no insertion", func(t *testing.T) {
+		h := newHandler(&inMemoryBackend{m: []Skill{
+			{FrontMatter: FrontMatter{Name: "alpha", Description: "d-alpha"}},
+		}})
+		withRunLocalCtx(t, func(ctx context.Context) {
+			prior := schema.SystemMessage("AVAILABLE SKILLS\n- alpha: d-alpha")
+			prior.Extra = map[string]any{
+				skillsReminderExtraKey: true,
+				skillsDigestExtraKey:   []string{skillDigest(FrontMatter{Name: "alpha", Description: "d-alpha"})},
+			}
+			rc := &adk.ChatModelAgentContext[*schema.Message]{
+				AgentInput: &adk.TypedAgentInput[*schema.Message]{Messages: []*schema.Message{schema.UserMessage("hi")}},
+			}
+			_, _, err := h.BeforeAgent(ctx, rc)
+			require.NoError(t, err)
 
-	// Between turns: install a new skill.
-	backend.m = append(backend.m, Skill{FrontMatter: FrontMatter{Name: "beta", Description: "second skill"}})
-
-	// Turn 2: the reminder is inserted only once, so the turn-1 reminder is
-	// preserved as-is and the newly added "beta" is NOT surfaced.
-	model2 := &reproRecordingModel{}
-	runner2 := adk.NewRunner(ctx, adk.RunnerConfig{Agent: newAgent(model2), SessionID: sessionID, SessionStore: store})
-	drainSkillEvents(t, runner2.Query(ctx, "again"))
-	require.NotEmpty(t, model2.inputs)
-	turn2 := model2.inputs[len(model2.inputs)-1]
-
-	// Confirm turn 2 actually replayed the session history (not a fresh start),
-	// so insert-once is exercised against a reconstructed message list.
-	assert.True(t, containsUserText(turn2, "hi"), "turn 2 must include turn 1 history via session reconstruction")
-
-	// Exactly one reminder, carried over from turn 1, still listing alpha only.
-	reminders := 0
-	for _, m := range turn2 {
-		if _, ok := m.Extra[skillsReminderExtraKey]; ok {
-			reminders++
-		}
-	}
-	assert.Equal(t, 1, reminders, "reminder is inserted once and reused across turns")
-	assert.True(t, sectionMentions(turn2, "alpha"), "turn 2 keeps the original reminder listing alpha")
-	assert.False(t, sectionMentions(turn2, "beta"),
-		"insert-once: a skill added between turns must not be surfaced in a new reminder")
+			// The prior reminder lives in the full history (state.Messages), which is
+			// where BeforeModelRewriteState diffs — not in AgentInput.Messages.
+			state := &adk.ChatModelAgentState{Messages: []*schema.Message{prior, schema.UserMessage("hi")}}
+			_, state, err = h.BeforeModelRewriteState(ctx, state, nil)
+			require.NoError(t, err)
+			assert.Equal(t, 1, countReminders(state.Messages), "no digest change → no new insertion")
+		})
+	})
 }
 
-func containsUserText(msgs []*schema.Message, text string) bool {
-	for _, m := range msgs {
-		if m.Role == schema.User && strings.Contains(m.Content, text) {
-			return true
-		}
-	}
-	return false
-}
+// TestSkill_BeforeAgent_BackendStates verifies BeforeAgent is non-destructive and
+// error-free across backend states — with skills, with zero skills, on List error, and
+// when a prior skill reminder (carrying a digest array) is already in history. The
+// actual insertion is driven by BeforeModelRewriteState (see the tests above).
+func TestSkill_BeforeAgent_BackendStates(t *testing.T) {
+	ctx := context.Background()
 
-func sectionMentions(msgs []*schema.Message, name string) bool {
-	for _, m := range msgs {
-		if m.Role != schema.System {
-			continue
-		}
-		if _, ok := m.Extra[skillsReminderExtraKey]; ok && strings.Contains(m.Content, name) {
-			return true
-		}
+	newHandler := func(b Backend) *typedSkillHandler[*schema.Message] {
+		mw, err := NewMiddleware(ctx, &Config{Backend: b})
+		require.NoError(t, err)
+		return mw.(*typedSkillHandler[*schema.Message])
 	}
-	return false
+
+	user := schema.UserMessage("hi")
+
+	cases := map[string]Backend{
+		"with skills": &inMemoryBackend{m: []Skill{{FrontMatter: FrontMatter{Name: "alpha", Description: "d"}}}},
+		"zero skills": &inMemoryBackend{m: []Skill{}},
+		"list error":  &errorBackend{listErr: errors.New("list failed")},
+	}
+	for name, b := range cases {
+		t.Run(name, func(t *testing.T) {
+			h := newHandler(b)
+			rc := &adk.ChatModelAgentContext[*schema.Message]{
+				AgentInput: &adk.TypedAgentInput[*schema.Message]{Messages: []*schema.Message{user}},
+			}
+			_, nrc, err := h.BeforeAgent(ctx, rc)
+			require.NoError(t, err)
+			require.Len(t, nrc.AgentInput.Messages, 1, "BeforeAgent must not mutate messages")
+			assert.Equal(t, user, nrc.AgentInput.Messages[0])
+		})
+	}
+
+	t.Run("prior reminder in history does not affect BeforeAgent (diff moved to rewrite-state)", func(t *testing.T) {
+		h := newHandler(&inMemoryBackend{m: []Skill{{FrontMatter: FrontMatter{Name: "alpha", Description: "d"}}}})
+		prior := schema.SystemMessage("AVAILABLE SKILLS\n- alpha: d")
+		prior.Extra = map[string]any{
+			skillsReminderExtraKey: true,
+			skillsDigestExtraKey:   []string{skillDigest(FrontMatter{Name: "alpha", Description: "d"})},
+		}
+		rc := &adk.ChatModelAgentContext[*schema.Message]{
+			AgentInput: &adk.TypedAgentInput[*schema.Message]{Messages: []*schema.Message{prior, user}},
+		}
+		_, nrc, err := h.BeforeAgent(ctx, rc)
+		require.NoError(t, err)
+		require.Len(t, nrc.AgentInput.Messages, 2, "BeforeAgent must not mutate messages")
+	})
 }

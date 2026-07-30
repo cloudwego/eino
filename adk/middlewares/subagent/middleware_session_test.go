@@ -75,13 +75,12 @@ func countReminders(msgs []*schema.Message, extraKey string) int {
 	return n
 }
 
-// TestSubagent_ReminderPersistsInPlaceAcrossTurns verifies that the agent-types
-// reminder appended in BeforeModelRewriteState is persisted as a durable
-// MessageInserted session event, so on the next turn it is reconstructed in
-// place (before the turn's prior assistant output) rather than being dropped
-// from the event log and re-injected at the tail. Keeping it in place preserves
-// the cross-turn prefix.
-func TestSubagent_ReminderPersistsInPlaceAcrossTurns(t *testing.T) {
+// TestSubagent_ReminderPersistedInsertedOnce verifies the reminder is inserted
+// exactly once via BeforeModelRewriteState: it IS persisted as a single
+// MessageInserted session event, is present once in each turn's model input, and
+// is never re-inserted or duplicated across turns (Has skips re-insertion once the
+// reminder is in the reconstructed history).
+func TestSubagent_ReminderPersistedInsertedOnce(t *testing.T) {
 	ctx := context.Background()
 	store := session.NewInMemoryStore[*schema.Message](nil)
 	const sessionID = "subagent-reminder-session"
@@ -102,6 +101,21 @@ func TestSubagent_ReminderPersistsInPlaceAcrossTurns(t *testing.T) {
 		return a
 	}
 
+	countPersistedReminders := func() int {
+		res, lerr := store.LoadEvents(ctx, sessionID, &adk.LoadSessionEventsRequest{})
+		require.NoError(t, lerr)
+		n := 0
+		for _, ev := range res.Events {
+			if ev.MessageInserted == nil {
+				continue
+			}
+			if _, ok := ev.MessageInserted.Message.Extra[agentTypesReminderExtraKey]; ok {
+				n++
+			}
+		}
+		return n
+	}
+
 	// Turn 1.
 	model1 := &recordingModel{}
 	runner1 := adk.NewRunner(ctx, adk.RunnerConfig{
@@ -110,20 +124,13 @@ func TestSubagent_ReminderPersistsInPlaceAcrossTurns(t *testing.T) {
 		SessionStore: store,
 	})
 	drainEvents(t, runner1.Query(ctx, "hello"))
+	require.NotEmpty(t, model1.inputs)
+	// The reminder was injected for the model call this turn.
+	assert.Equal(t, 1, countReminders(model1.inputs[0], agentTypesReminderExtraKey),
+		"turn 1 model input should carry exactly one reminder")
 
-	// The reminder must have been persisted as a durable MessageInserted event.
-	res, err := store.LoadEvents(ctx, sessionID, &adk.LoadSessionEventsRequest{})
-	require.NoError(t, err)
-	persistedReminders := 0
-	for _, ev := range res.Events {
-		if ev.MessageInserted == nil {
-			continue
-		}
-		if _, ok := ev.MessageInserted.Message.Extra[agentTypesReminderExtraKey]; ok {
-			persistedReminders++
-		}
-	}
-	assert.Equal(t, 1, persistedReminders, "reminder should be persisted as a MessageInserted event exactly once")
+	// The reminder IS persisted as exactly one MessageInserted session event.
+	assert.Equal(t, 1, countPersistedReminders(), "reminder must be persisted exactly once")
 
 	// Turn 2 on the same session.
 	model2 := &recordingModel{}
@@ -137,13 +144,11 @@ func TestSubagent_ReminderPersistsInPlaceAcrossTurns(t *testing.T) {
 	require.NotEmpty(t, model2.inputs)
 	turn2Input := model2.inputs[0]
 
-	// Exactly one reminder is present (reconstructed, not re-appended as a duplicate).
+	// Exactly one reminder is present: replayed from the persisted event, not
+	// re-inserted this turn — so no duplication.
 	assert.Equal(t, 1, countReminders(turn2Input, agentTypesReminderExtraKey),
-		"turn 2 must see exactly one reminder, reconstructed in place")
+		"turn 2 must see exactly one reminder with no duplication")
 
-	// It sits in place — before the last message (the new user turn) — rather than
-	// being re-injected at the tail, which is what preserves the prefix.
-	last := turn2Input[len(turn2Input)-1]
-	_, lastIsReminder := last.Extra[agentTypesReminderExtraKey]
-	assert.False(t, lastIsReminder, "reminder must be reconstructed in place, not appended at the tail")
+	// Still persisted exactly once: turn 2 did not insert a second reminder.
+	assert.Equal(t, 1, countPersistedReminders(), "reminder still persisted exactly once after turn 2")
 }
