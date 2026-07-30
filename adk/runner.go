@@ -1132,20 +1132,20 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 		gen.Send(event)
 	}
 	if persister != nil {
-		stopReason := "end_turn"
+		stopReason := StopReasonEndTurn
 		switch {
 		case interrupted:
-			stopReason = "interrupted"
+			stopReason = StopReasonInterrupted
 		case cancelled:
-			stopReason = "cancelled"
+			stopReason = StopReasonCancelled
 		case retryExhausted:
-			stopReason = "retries_exhausted"
+			stopReason = StopReasonRetriesExhausted
 		case persistErr != nil:
-			stopReason = "failed"
+			stopReason = StopReasonFailed
 		case terminalErr != nil:
-			stopReason = "failed"
+			stopReason = StopReasonFailed
 		}
-		if stopReason == "failed" {
+		if stopReason == StopReasonFailed {
 			errMsg := ""
 			if persistErr != nil {
 				errMsg = persistErr.Error()
