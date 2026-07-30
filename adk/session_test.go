@@ -137,7 +137,7 @@ func withTestCommittedIdle[M MessageType](eventID string) *SessionEvent[M] {
 		Kind:    SessionEventSessionStatusIdle,
 		Lifecycle: &LifecycleEvent{
 			State:      SessionRunStateIdle,
-			StopReason: &StopReason{Type: "end_turn"},
+			StopReason: &StopReason{Type: StopReasonEndTurn},
 		},
 	})
 }
@@ -218,7 +218,7 @@ func appendCommittedTestTurn(t *testing.T, ctx context.Context, store testSessio
 		Kind:    SessionEventSessionStatusIdle,
 		Lifecycle: &LifecycleEvent{
 			State:      SessionRunStateIdle,
-			StopReason: &StopReason{Type: "end_turn"},
+			StopReason: &StopReason{Type: StopReasonEndTurn},
 		},
 	})
 }
@@ -3179,7 +3179,7 @@ func TestAttack_ReconstructionIncludesInterruptedTailOnResume(t *testing.T) {
 	events := []*SessionEvent[*schema.Message]{
 		{EventID: uuid.NewString(), Kind: SessionEventSessionStatusRunning, Lifecycle: &LifecycleEvent{State: SessionRunStateRunning}},
 		{EventID: uuid.NewString(), Kind: SessionEventMessage, Message: committedMsg},
-		{EventID: uuid.NewString(), Kind: SessionEventSessionStatusIdle, Lifecycle: &LifecycleEvent{State: SessionRunStateIdle, StopReason: &StopReason{Type: "end_turn"}}},
+		{EventID: uuid.NewString(), Kind: SessionEventSessionStatusIdle, Lifecycle: &LifecycleEvent{State: SessionRunStateIdle, StopReason: &StopReason{Type: StopReasonEndTurn}}},
 	}
 
 	// An interrupted run: a Message event with no committed idle.
@@ -3698,7 +3698,7 @@ func TestStreamPersistence_IncompleteStreamExcludedFromReconstruction(t *testing
 		Kind: SessionEventSessionStatusIdle,
 		Lifecycle: &LifecycleEvent{
 			State:      SessionRunStateIdle,
-			StopReason: &StopReason{Type: "end_turn"},
+			StopReason: &StopReason{Type: StopReasonEndTurn},
 		},
 	})
 

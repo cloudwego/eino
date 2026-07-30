@@ -279,8 +279,27 @@ const (
 )
 
 type StopReason struct {
+	// Type identifies why a session run returned to idle. It remains a string
+	// for gob compatibility with previously persisted SessionEvent bytes;
+	// compare it with the StopReason* constants.
 	Type string `json:"type,omitempty"`
 }
+
+// StopReasonType identifies why a session run returned to idle.
+type StopReasonType = string
+
+const (
+	// StopReasonEndTurn means the agent completed the current turn normally.
+	StopReasonEndTurn StopReasonType = "end_turn"
+	// StopReasonInterrupted means the run paused for an interrupt.
+	StopReasonInterrupted StopReasonType = "interrupted"
+	// StopReasonCancelled means the run was cancelled before normal completion.
+	StopReasonCancelled StopReasonType = "cancelled"
+	// StopReasonRetriesExhausted means model retry attempts were exhausted.
+	StopReasonRetriesExhausted StopReasonType = "retries_exhausted"
+	// StopReasonFailed means the run ended with a non-retry terminal failure.
+	StopReasonFailed StopReasonType = "failed"
+)
 
 type ModelContextEvent struct {
 	ToolInfos         []*schema.ToolInfo `json:"tool_infos,omitempty"`
@@ -302,8 +321,23 @@ const (
 )
 
 type RetryStatus struct {
+	// Type identifies whether a retry-like mechanism is still retrying or has
+	// exhausted its attempts. It remains a string for gob compatibility with
+	// previously persisted SessionEvent bytes; compare it with the RetryStatus*
+	// constants.
 	Type string `json:"type,omitempty"`
 }
+
+// RetryStatusType identifies whether a retry-like mechanism is still retrying
+// or has exhausted its configured attempts.
+type RetryStatusType = string
+
+const (
+	// RetryStatusRetrying means another retry or failover attempt will be made.
+	RetryStatusRetrying RetryStatusType = "retrying"
+	// RetryStatusExhausted means the configured retry or failover attempts are exhausted.
+	RetryStatusExhausted RetryStatusType = "exhausted"
+)
 
 type SpanEvent struct {
 	SpanID       string `json:"span_id"`
@@ -1793,5 +1827,5 @@ func isCommittedIdleEvent[M MessageType](event *SessionEvent[M]) bool {
 		event.Lifecycle != nil &&
 		event.Lifecycle.State == SessionRunStateIdle &&
 		event.Lifecycle.StopReason != nil &&
-		event.Lifecycle.StopReason.Type == "end_turn"
+		event.Lifecycle.StopReason.Type == StopReasonEndTurn
 }
