@@ -425,7 +425,7 @@ func committedIdleEvent[M adk.MessageType](id string) *adk.SessionEvent[M] {
 		Kind:    adk.SessionEventSessionStatusIdle,
 		Lifecycle: &adk.LifecycleEvent{
 			State:      adk.SessionRunStateIdle,
-			StopReason: &adk.StopReason{Type: "end_turn"},
+			StopReason: &adk.StopReason{Type: adk.StopReasonEndTurn},
 		},
 	}
 }
