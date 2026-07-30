@@ -323,7 +323,7 @@ func emitRetryingTimeline[M MessageType](ctx context.Context, err error, rejectR
 		Error: &SessionErrorEvent{
 			Type:        SessionErrorTypeModelRetry,
 			Message:     timelineErrorMessage(err, reason),
-			RetryStatus: &RetryStatus{Type: "retrying"},
+			RetryStatus: &RetryStatus{Type: RetryStatusRetrying},
 		},
 	})
 }
@@ -335,7 +335,7 @@ func emitRetryExhaustedTimeline[M MessageType](ctx context.Context, err error) {
 		Error: &SessionErrorEvent{
 			Type:        SessionErrorTypeModelRetry,
 			Message:     timelineErrorMessage(err, nil),
-			RetryStatus: &RetryStatus{Type: "exhausted"},
+			RetryStatus: &RetryStatus{Type: RetryStatusExhausted},
 		},
 	})
 }

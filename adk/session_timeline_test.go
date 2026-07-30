@@ -44,7 +44,7 @@ func init() {
 	schema.RegisterName[*sessionTimelineExtensionPayload]("_eino_adk_session_timeline_extension_payload")
 }
 
-func requireStoredIdleStopReason(t *testing.T, raw []storedSessionEvent, want string) *SessionEvent[*schema.Message] {
+func requireStoredIdleStopReason(t *testing.T, raw []storedSessionEvent, want StopReasonType) *SessionEvent[*schema.Message] {
 	t.Helper()
 	idleEvents := filterStoredSessionEvents(t, raw, func(se *SessionEvent[*schema.Message]) bool {
 		return se.Kind == SessionEventSessionStatusIdle
@@ -55,6 +55,54 @@ func requireStoredIdleStopReason(t *testing.T, raw []storedSessionEvent, want st
 	require.NotNil(t, last.Lifecycle.StopReason)
 	assert.Equal(t, want, last.Lifecycle.StopReason.Type)
 	return last
+}
+
+func TestSessionTimeline_GobDecodesLegacyStringStatusFields(t *testing.T) {
+	type legacyStopReason struct {
+		Type string
+	}
+	type legacyLifecycleEvent struct {
+		State      SessionRunState
+		StopReason *legacyStopReason
+	}
+	type legacyRetryStatus struct {
+		Type string
+	}
+	type legacySessionErrorEvent struct {
+		Type        string
+		Message     string
+		RetryStatus *legacyRetryStatus
+	}
+	type legacySessionEvent struct {
+		Kind      SessionEventKind
+		Lifecycle *legacyLifecycleEvent
+		Error     *legacySessionErrorEvent
+	}
+
+	legacy := legacySessionEvent{
+		Kind: SessionEventSessionStatusIdle,
+		Lifecycle: &legacyLifecycleEvent{
+			State:      SessionRunStateIdle,
+			StopReason: &legacyStopReason{Type: StopReasonEndTurn},
+		},
+		Error: &legacySessionErrorEvent{
+			Type:        SessionErrorTypeModelRetry,
+			Message:     "retry pending",
+			RetryStatus: &legacyRetryStatus{Type: RetryStatusRetrying},
+		},
+	}
+
+	var buf bytes.Buffer
+	require.NoError(t, gob.NewEncoder(&buf).Encode(legacy))
+
+	var decoded SessionEvent[*schema.Message]
+	require.NoError(t, gob.NewDecoder(&buf).Decode(&decoded))
+	require.NotNil(t, decoded.Lifecycle)
+	require.NotNil(t, decoded.Lifecycle.StopReason)
+	assert.Equal(t, StopReasonEndTurn, decoded.Lifecycle.StopReason.Type)
+	require.NotNil(t, decoded.Error)
+	require.NotNil(t, decoded.Error.RetryStatus)
+	assert.Equal(t, RetryStatusRetrying, decoded.Error.RetryStatus.Type)
 }
 
 func TestSessionTimeline_ClassifyAndSerializeVariants(t *testing.T) {
@@ -72,7 +120,7 @@ func TestSessionTimeline_ClassifyAndSerializeVariants(t *testing.T) {
 		},
 		{
 			name: "session error",
-			se:   &SessionEvent[*schema.Message]{Error: &SessionErrorEvent{Type: SessionErrorTypeModelRetry, Message: "busy", RetryStatus: &RetryStatus{Type: "retrying"}}},
+			se:   &SessionEvent[*schema.Message]{Error: &SessionErrorEvent{Type: SessionErrorTypeModelRetry, Message: "busy", RetryStatus: &RetryStatus{Type: RetryStatusRetrying}}},
 			kind: SessionEventSessionError,
 		},
 		{
@@ -236,7 +284,7 @@ func TestSessionTimeline_ReconstructionIgnoresNonContextVariants(t *testing.T) {
 				},
 			},
 		}},
-		{EventID: uuid.NewString(), Kind: SessionEventSessionError, Error: &SessionErrorEvent{Type: "transient", RetryStatus: &RetryStatus{Type: "retrying"}}},
+		{EventID: uuid.NewString(), Kind: SessionEventSessionError, Error: &SessionErrorEvent{Type: "transient", RetryStatus: &RetryStatus{Type: RetryStatusRetrying}}},
 		{EventID: uuid.NewString(), Kind: SessionEventModelContext, ModelContext: &ModelContextEvent{}},
 	}
 	for _, se := range events {
@@ -358,7 +406,7 @@ func TestRunner_PersistsAgentInterruptSessionEvent(t *testing.T) {
 	ctx0 := interrupts[0].Interrupt.Contexts[0]
 	assert.Equal(t, liveInterruptContexts[0].ID, ctx0.InterruptID)
 	assert.Equal(t, liveInterruptContexts[0].Info, ctx0.Info)
-	requireStoredIdleStopReason(t, store.events, "interrupted")
+	requireStoredIdleStopReason(t, store.events, StopReasonInterrupted)
 
 	committedIdleEvents := filterStoredSessionEvents(t, store.events, func(se *SessionEvent[*schema.Message]) bool {
 		return isCommittedIdleEvent(se)
@@ -382,11 +430,11 @@ func TestSessionTimeline_ReconstructionIncludesPartialContextAfterLatestCommitte
 	events := []*SessionEvent[*schema.Message]{
 		{EventID: uuid.NewString(), Kind: SessionEventMessage, Message: committedUser},
 		{EventID: uuid.NewString(), Kind: SessionEventMessage, Message: committedAssistant},
-		{EventID: uuid.NewString(), Kind: SessionEventSessionStatusIdle, Lifecycle: &LifecycleEvent{State: SessionRunStateIdle, StopReason: &StopReason{Type: "end_turn"}}},
+		{EventID: uuid.NewString(), Kind: SessionEventSessionStatusIdle, Lifecycle: &LifecycleEvent{State: SessionRunStateIdle, StopReason: &StopReason{Type: StopReasonEndTurn}}},
 		{EventID: uuid.NewString(), Kind: SessionEventSessionStatusRunning, Lifecycle: &LifecycleEvent{State: SessionRunStateRunning}},
 		{EventID: uuid.NewString(), Kind: SessionEventMessage, Message: partialUser},
 		{EventID: uuid.NewString(), Kind: SessionEventMessage, Message: partialAssistant},
-		{EventID: uuid.NewString(), Kind: SessionEventSessionError, Error: &SessionErrorEvent{Type: SessionErrorTypeModelRetry, RetryStatus: &RetryStatus{Type: "retrying"}}},
+		{EventID: uuid.NewString(), Kind: SessionEventSessionError, Error: &SessionErrorEvent{Type: SessionErrorTypeModelRetry, RetryStatus: &RetryStatus{Type: RetryStatusRetrying}}},
 	}
 	for _, se := range events {
 		require.NoError(t, store.AppendEventsForSession(ctx, sid, []*SessionEvent[*schema.Message]{se}))
@@ -415,7 +463,7 @@ func TestSessionTimeline_ReconstructionPartialContextMissingAnchorFails(t *testi
 
 	events := []*SessionEvent[*schema.Message]{
 		{EventID: uuid.NewString(), Kind: SessionEventMessage, Message: committedUser},
-		{EventID: uuid.NewString(), Kind: SessionEventSessionStatusIdle, Lifecycle: &LifecycleEvent{State: SessionRunStateIdle, StopReason: &StopReason{Type: "end_turn"}}},
+		{EventID: uuid.NewString(), Kind: SessionEventSessionStatusIdle, Lifecycle: &LifecycleEvent{State: SessionRunStateIdle, StopReason: &StopReason{Type: StopReasonEndTurn}}},
 		{EventID: uuid.NewString(), Kind: SessionEventMessageInserted, MessageInserted: &MessageInsertedEvent[*schema.Message]{
 			Message:         inserted,
 			BeforeMessageID: "missing-anchor",
@@ -439,7 +487,7 @@ func TestSessionTimeline_CommittedIdleIsReplayBoundaryOnly(t *testing.T) {
 
 	events := []*SessionEvent[*schema.Message]{
 		{EventID: uuid.NewString(), Kind: SessionEventMessage, Message: committedUser},
-		{EventID: uuid.NewString(), Kind: SessionEventSessionStatusIdle, Lifecycle: &LifecycleEvent{State: SessionRunStateIdle, StopReason: &StopReason{Type: "end_turn"}}},
+		{EventID: uuid.NewString(), Kind: SessionEventSessionStatusIdle, Lifecycle: &LifecycleEvent{State: SessionRunStateIdle, StopReason: &StopReason{Type: StopReasonEndTurn}}},
 		{EventID: uuid.NewString(), Kind: SessionEventMessage, Message: partialUser},
 		{EventID: uuid.NewString(), Kind: "turn_end"},
 	}
@@ -473,7 +521,7 @@ func TestWithTimelineEvents_LiveExposure(t *testing.T) {
 			return se.Kind == SessionEventSessionStatusRunning || se.Kind == SessionEventSessionStatusIdle
 		})
 		require.Len(t, lifecycle, 2)
-		requireStoredIdleStopReason(t, store.events, "end_turn")
+		requireStoredIdleStopReason(t, store.events, StopReasonEndTurn)
 	})
 
 	t.Run("exposed when requested", func(t *testing.T) {
@@ -1019,7 +1067,7 @@ func TestFailoverTimelineLinksAttemptsAndEmitsSessionErrors(t *testing.T) {
 	assert.Equal(t, 2, starts[1].Span.Model.Attempt)
 	assert.Equal(t, "logical-model", starts[0].Span.Model.Model)
 	require.Len(t, failoverErrors, 1)
-	assert.Equal(t, "retrying", failoverErrors[0].Error.RetryStatus.Type)
+	assert.Equal(t, RetryStatusRetrying, failoverErrors[0].Error.RetryStatus.Type)
 }
 
 func TestSessionTimeline_EventIDMismatchRejectedAtPersistenceBoundary(t *testing.T) {
@@ -1177,11 +1225,11 @@ func TestRetryAndFailoverTimelineKeepsDistinctErrorTypes(t *testing.T) {
 		}
 		switch event.SessionEventVariant.Event.Error.Type {
 		case SessionErrorTypeModelRetry:
-			if event.SessionEventVariant.Event.Error.RetryStatus != nil && event.SessionEventVariant.Event.Error.RetryStatus.Type == "exhausted" {
+			if event.SessionEventVariant.Event.Error.RetryStatus != nil && event.SessionEventVariant.Event.Error.RetryStatus.Type == RetryStatusExhausted {
 				retryExhausted = true
 			}
 		case SessionErrorTypeModelFailover:
-			if event.SessionEventVariant.Event.Error.RetryStatus != nil && event.SessionEventVariant.Event.Error.RetryStatus.Type == "retrying" {
+			if event.SessionEventVariant.Event.Error.RetryStatus != nil && event.SessionEventVariant.Event.Error.RetryStatus.Type == RetryStatusRetrying {
 				failoverRetrying = true
 			}
 		}
@@ -1228,7 +1276,7 @@ func TestRunnerTimelineRetryExhaustedStopReason(t *testing.T) {
 		}
 	}
 
-	requireStoredIdleStopReason(t, store.events, "retries_exhausted")
+	requireStoredIdleStopReason(t, store.events, StopReasonRetriesExhausted)
 
 	turnEnds := filterStoredSessionEvents(t, store.events, func(se *SessionEvent[*schema.Message]) bool {
 		return isCommittedIdleEvent(se)
@@ -1269,7 +1317,7 @@ func TestRunnerTimelineFailedStopReason(t *testing.T) {
 	require.NotNil(t, sessionErrors[len(sessionErrors)-1].Error)
 	assert.Equal(t, SessionErrorTypeFatal, sessionErrors[len(sessionErrors)-1].Error.Type)
 	assert.Equal(t, "boom", sessionErrors[len(sessionErrors)-1].Error.Message)
-	requireStoredIdleStopReason(t, store.events, "failed")
+	requireStoredIdleStopReason(t, store.events, StopReasonFailed)
 
 	committedIdleEvents := filterStoredSessionEvents(t, store.events, func(se *SessionEvent[*schema.Message]) bool {
 		return isCommittedIdleEvent(se)
@@ -1320,7 +1368,7 @@ func TestRunnerTimelineModelCallFatalDoesNotRequireCommitMarker(t *testing.T) {
 	require.NotNil(t, sessionErrors[len(sessionErrors)-1].Error)
 	assert.Equal(t, SessionErrorTypeFatal, sessionErrors[len(sessionErrors)-1].Error.Type)
 	assert.Contains(t, sessionErrors[len(sessionErrors)-1].Error.Message, modelErr.Error())
-	requireStoredIdleStopReason(t, store.events, "failed")
+	requireStoredIdleStopReason(t, store.events, StopReasonFailed)
 
 	turnEnds := filterStoredSessionEvents(t, store.events, func(se *SessionEvent[*schema.Message]) bool {
 		return isCommittedIdleEvent(se)
@@ -1386,7 +1434,7 @@ func TestRunnerTimelineCancelStopReasonAndUserInterruptPersisted(t *testing.T) {
 	assert.Equal(t, SessionEventKind("cancel"), userInterrupts[0].Kind)
 	require.NotNil(t, userInterrupts[0].Cancel)
 	assert.Equal(t, "cancelled", userInterrupts[0].Cancel.Reason)
-	requireStoredIdleStopReason(t, store.events, "cancelled")
+	requireStoredIdleStopReason(t, store.events, StopReasonCancelled)
 
 	turnEnds := filterStoredSessionEvents(t, store.events, func(se *SessionEvent[*schema.Message]) bool {
 		return isCommittedIdleEvent(se)
