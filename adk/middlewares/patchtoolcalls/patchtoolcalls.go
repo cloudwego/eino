@@ -26,14 +26,25 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
+// PatchedToolResult is the value returned by PatchedToolResultGenerator.
+//
+// Content and ToolResult are mutually exclusive:
+//   - Content: plain-text tool message (typical for InvokableTool users)
+//   - ToolResult: EnhancedTool-style result (text and/or multimodal parts)
+type PatchedToolResult struct {
+	Content    string
+	ToolResult *schema.ToolResult
+}
+
 // Config defines the configuration options for the patch tool calls middleware.
 type Config struct {
 	// PatchedContentGenerator is an optional custom function to generate the content
 	// of patched tool messages as a plain string.
 	//
-	// Deprecated: Use PatchedToolResultGenerator instead, which aligns with EnhancedTool
-	// (ToolArgument in, ToolResult out) and receives the original tool-call arguments.
-	// Kept for backward compatibility; ignored when PatchedToolResultGenerator is set.
+	// Deprecated: Use PatchedToolResultGenerator instead, which receives the original
+	// tool-call arguments and can return either plain Content or an EnhancedTool
+	// ToolResult. Kept for backward compatibility; ignored when
+	// PatchedToolResultGenerator is set.
 	//
 	// Parameters:
 	//   - ctx: the context for the operation
@@ -45,11 +56,11 @@ type Config struct {
 	//   - error: any error that occurred during generation
 	PatchedContentGenerator func(ctx context.Context, toolName, toolCallID string) (string, error)
 
-	// PatchedToolResultGenerator generates a ToolResult for a dangling tool call.
+	// PatchedToolResultGenerator generates a patched tool result for a dangling tool call.
 	// It is preferred over PatchedContentGenerator when both are set.
 	//
-	// Aligned with EnhancedTool: arguments arrive as *schema.ToolArgument and the
-	// result is a *schema.ToolResult (text and/or multimodal parts).
+	// Return PatchedToolResult.Content for plain text, or PatchedToolResult.ToolResult
+	// for EnhancedTool-style multimodal results. The two fields are mutually exclusive.
 	//
 	// Parameters:
 	//   - ctx: the context for the operation
@@ -58,19 +69,19 @@ type Config struct {
 	//   - toolArgument: the original tool-call arguments (Text is the JSON arguments string)
 	//
 	// Returns:
-	//   - *schema.ToolResult: the patched tool result to insert into history
+	//   - *PatchedToolResult: the patched tool result to insert into history
 	//   - error: any error that occurred during generation
 	PatchedToolResultGenerator func(
 		ctx context.Context,
 		toolName string,
 		toolCallID string,
 		toolArgument *schema.ToolArgument,
-	) (*schema.ToolResult, error)
+	) (*PatchedToolResult, error)
 }
 
 type patchedGenerators struct {
 	content func(ctx context.Context, toolName, toolCallID string) (string, error)
-	result  func(ctx context.Context, toolName, toolCallID string, toolArgument *schema.ToolArgument) (*schema.ToolResult, error)
+	result  func(ctx context.Context, toolName, toolCallID string, toolArgument *schema.ToolArgument) (*PatchedToolResult, error)
 }
 
 // NewTyped creates a new generic patch tool calls middleware.
@@ -258,7 +269,7 @@ func createPatchedToolMessage(ctx context.Context, gens patchedGenerators, tc sc
 		if err != nil {
 			return nil, err
 		}
-		return toolResultToMessage(tc.Function.Name, tc.ID, result)
+		return patchedToolResultToMessage(tc.Function.Name, tc.ID, result)
 	}
 	if gens.content != nil {
 		content, err := gens.content(ctx, tc.Function.Name, tc.ID)
@@ -282,7 +293,7 @@ func createPatchedAgenticToolMessage(ctx context.Context, gens patchedGenerators
 		if err != nil {
 			return nil, err
 		}
-		return toolResultToAgenticMessage(toolName, callID, result)
+		return patchedToolResultToAgenticMessage(toolName, callID, result)
 	}
 
 	var content string
@@ -300,6 +311,43 @@ func createPatchedAgenticToolMessage(ctx context.Context, gens patchedGenerators
 		content = fmt.Sprintf(tpl, toolName, callID)
 	}
 
+	return agenticTextToolResultMessage(toolName, callID, content), nil
+}
+
+func patchedToolResultToMessage(toolName, callID string, result *PatchedToolResult) (*schema.Message, error) {
+	if result == nil {
+		return schema.ToolMessage("", callID, schema.WithToolName(toolName)), nil
+	}
+	if err := validatePatchedToolResult(result); err != nil {
+		return nil, err
+	}
+	if result.ToolResult != nil {
+		return toolResultToMessage(toolName, callID, result.ToolResult)
+	}
+	return schema.ToolMessage(result.Content, callID, schema.WithToolName(toolName)), nil
+}
+
+func patchedToolResultToAgenticMessage(toolName, callID string, result *PatchedToolResult) (*schema.AgenticMessage, error) {
+	if result == nil {
+		return agenticTextToolResultMessage(toolName, callID, ""), nil
+	}
+	if err := validatePatchedToolResult(result); err != nil {
+		return nil, err
+	}
+	if result.ToolResult != nil {
+		return toolResultToAgenticMessage(toolName, callID, result.ToolResult)
+	}
+	return agenticTextToolResultMessage(toolName, callID, result.Content), nil
+}
+
+func validatePatchedToolResult(result *PatchedToolResult) error {
+	if result.Content != "" && result.ToolResult != nil {
+		return fmt.Errorf("patchtoolcalls: PatchedToolResult.Content and ToolResult are mutually exclusive")
+	}
+	return nil
+}
+
+func agenticTextToolResultMessage(toolName, callID, content string) *schema.AgenticMessage {
 	return &schema.AgenticMessage{
 		Role: schema.AgenticRoleTypeUser,
 		ContentBlocks: []*schema.ContentBlock{
@@ -311,7 +359,7 @@ func createPatchedAgenticToolMessage(ctx context.Context, gens patchedGenerators
 				},
 			}),
 		},
-	}, nil
+	}
 }
 
 // toolResultToMessage converts a ToolResult into a tool-role Message.

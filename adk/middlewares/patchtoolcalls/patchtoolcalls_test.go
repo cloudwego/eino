@@ -224,16 +224,13 @@ func testPatchToolCallsGeneric[M adk.MessageType](t *testing.T) {
 		{
 			name: "custom tool result generator",
 			config: &Config{
-				PatchedToolResultGenerator: func(ctx context.Context, toolName, toolCallID string, toolArgument *schema.ToolArgument) (*schema.ToolResult, error) {
+				PatchedToolResultGenerator: func(ctx context.Context, toolName, toolCallID string, toolArgument *schema.ToolArgument) (*PatchedToolResult, error) {
 					argText := ""
 					if toolArgument != nil {
 						argText = toolArgument.Text
 					}
-					return &schema.ToolResult{
-						Parts: []schema.ToolOutputPart{{
-							Type: schema.ToolPartTypeText,
-							Text: fmt.Sprintf("result %s %s %s", toolName, toolCallID, argText),
-						}},
+					return &PatchedToolResult{
+						Content: fmt.Sprintf("result %s %s %s", toolName, toolCallID, argText),
 					}, nil
 				},
 			},
@@ -257,13 +254,8 @@ func testPatchToolCallsGeneric[M adk.MessageType](t *testing.T) {
 				PatchedContentGenerator: func(ctx context.Context, toolName, toolCallID string) (string, error) {
 					return "legacy", nil
 				},
-				PatchedToolResultGenerator: func(ctx context.Context, toolName, toolCallID string, toolArgument *schema.ToolArgument) (*schema.ToolResult, error) {
-					return &schema.ToolResult{
-						Parts: []schema.ToolOutputPart{{
-							Type: schema.ToolPartTypeText,
-							Text: "enhanced",
-						}},
-					}, nil
+				PatchedToolResultGenerator: func(ctx context.Context, toolName, toolCallID string, toolArgument *schema.ToolArgument) (*PatchedToolResult, error) {
+					return &PatchedToolResult{Content: "enhanced"}, nil
 				},
 			},
 			messages: []M{
@@ -342,17 +334,12 @@ func TestPatchToolCallsGeneric(t *testing.T) {
 func TestPatchedToolResultGenerator_SetsContentOnlyForPlainText(t *testing.T) {
 	ctx := context.Background()
 	mw, err := New(ctx, &Config{
-		PatchedToolResultGenerator: func(ctx context.Context, toolName, toolCallID string, toolArgument *schema.ToolArgument) (*schema.ToolResult, error) {
+		PatchedToolResultGenerator: func(ctx context.Context, toolName, toolCallID string, toolArgument *schema.ToolArgument) (*PatchedToolResult, error) {
 			require.Equal(t, "tool_a", toolName)
 			require.Equal(t, "call_1", toolCallID)
 			require.NotNil(t, toolArgument)
 			require.Equal(t, `{"q":"hi"}`, toolArgument.Text)
-			return &schema.ToolResult{
-				Parts: []schema.ToolOutputPart{{
-					Type: schema.ToolPartTypeText,
-					Text: "patched text",
-				}},
-			}, nil
+			return &PatchedToolResult{Content: "patched text"}, nil
 		},
 	})
 	require.NoError(t, err)
@@ -376,6 +363,62 @@ func TestPatchedToolResultGenerator_SetsContentOnlyForPlainText(t *testing.T) {
 	assert.Equal(t, "patched text", patched.Content)
 	assert.Empty(t, patched.UserInputMultiContent,
 		"plain-text tool results must not set UserInputMultiContent (OpenAI Content/MultiContent exclusivity)")
+}
+
+func TestPatchedToolResultGenerator_ToolResultPath(t *testing.T) {
+	ctx := context.Background()
+	mw, err := New(ctx, &Config{
+		PatchedToolResultGenerator: func(context.Context, string, string, *schema.ToolArgument) (*PatchedToolResult, error) {
+			return &PatchedToolResult{
+				ToolResult: &schema.ToolResult{
+					Parts: []schema.ToolOutputPart{{
+						Type: schema.ToolPartTypeText,
+						Text: "via tool result",
+					}},
+				},
+			}, nil
+		},
+	})
+	require.NoError(t, err)
+
+	state := &adk.ChatModelAgentState{
+		Messages: []adk.Message{
+			schema.AssistantMessage("", []schema.ToolCall{
+				{ID: "call_1", Function: schema.FunctionCall{Name: "tool_a", Arguments: "{}"}},
+			}),
+		},
+	}
+	_, newState, err := mw.BeforeModelRewriteState(ctx, state, nil)
+	require.NoError(t, err)
+	require.Len(t, newState.Messages, 2)
+	assert.Equal(t, "via tool result", newState.Messages[1].Content)
+	assert.Empty(t, newState.Messages[1].UserInputMultiContent)
+}
+
+func TestPatchedToolResultGenerator_ContentAndToolResultMutuallyExclusive(t *testing.T) {
+	ctx := context.Background()
+	mw, err := New(ctx, &Config{
+		PatchedToolResultGenerator: func(context.Context, string, string, *schema.ToolArgument) (*PatchedToolResult, error) {
+			return &PatchedToolResult{
+				Content: "plain",
+				ToolResult: &schema.ToolResult{
+					Parts: []schema.ToolOutputPart{{Type: schema.ToolPartTypeText, Text: "also"}},
+				},
+			}, nil
+		},
+	})
+	require.NoError(t, err)
+
+	state := &adk.ChatModelAgentState{
+		Messages: []adk.Message{
+			schema.AssistantMessage("", []schema.ToolCall{
+				{ID: "call_1", Function: schema.FunctionCall{Name: "tool_a", Arguments: "{}"}},
+			}),
+		},
+	}
+	_, _, err = mw.BeforeModelRewriteState(ctx, state, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "mutually exclusive")
 }
 
 func TestPatchToolCallsAgenticToolSearchResult(t *testing.T) {
@@ -495,7 +538,7 @@ func TestPatchedToolResultGenerator_ErrorPropagation(t *testing.T) {
 
 	t.Run("Message", func(t *testing.T) {
 		mw, err := New(ctx, &Config{
-			PatchedToolResultGenerator: func(context.Context, string, string, *schema.ToolArgument) (*schema.ToolResult, error) {
+			PatchedToolResultGenerator: func(context.Context, string, string, *schema.ToolArgument) (*PatchedToolResult, error) {
 				return nil, wantErr
 			},
 		})
@@ -513,7 +556,7 @@ func TestPatchedToolResultGenerator_ErrorPropagation(t *testing.T) {
 
 	t.Run("AgenticMessage", func(t *testing.T) {
 		mw, err := NewTyped[*schema.AgenticMessage](ctx, &Config{
-			PatchedToolResultGenerator: func(context.Context, string, string, *schema.ToolArgument) (*schema.ToolResult, error) {
+			PatchedToolResultGenerator: func(context.Context, string, string, *schema.ToolArgument) (*PatchedToolResult, error) {
 				return nil, wantErr
 			},
 		})
@@ -732,9 +775,11 @@ func TestToolResultToFunctionBlocks_MalformedPartsError(t *testing.T) {
 func TestPatchedToolResultGenerator_AgenticNilImagePropagatesError(t *testing.T) {
 	ctx := context.Background()
 	mw, err := NewTyped[*schema.AgenticMessage](ctx, &Config{
-		PatchedToolResultGenerator: func(context.Context, string, string, *schema.ToolArgument) (*schema.ToolResult, error) {
-			return &schema.ToolResult{
-				Parts: []schema.ToolOutputPart{{Type: schema.ToolPartTypeImage}},
+		PatchedToolResultGenerator: func(context.Context, string, string, *schema.ToolArgument) (*PatchedToolResult, error) {
+			return &PatchedToolResult{
+				ToolResult: &schema.ToolResult{
+					Parts: []schema.ToolOutputPart{{Type: schema.ToolPartTypeImage}},
+				},
 			}, nil
 		},
 	})
@@ -756,15 +801,17 @@ func TestPatchedToolResultGenerator_AgenticMultimodal(t *testing.T) {
 	ctx := context.Background()
 	url := "https://example.com/img.png"
 	mw, err := NewTyped[*schema.AgenticMessage](ctx, &Config{
-		PatchedToolResultGenerator: func(ctx context.Context, toolName, toolCallID string, toolArgument *schema.ToolArgument) (*schema.ToolResult, error) {
+		PatchedToolResultGenerator: func(ctx context.Context, toolName, toolCallID string, toolArgument *schema.ToolArgument) (*PatchedToolResult, error) {
 			require.Equal(t, `{"q":1}`, toolArgument.Text)
-			return &schema.ToolResult{
-				Parts: []schema.ToolOutputPart{
-					{Type: schema.ToolPartTypeText, Text: "see image"},
-					{
-						Type: schema.ToolPartTypeImage,
-						Image: &schema.ToolOutputImage{
-							MessagePartCommon: schema.MessagePartCommon{URL: &url},
+			return &PatchedToolResult{
+				ToolResult: &schema.ToolResult{
+					Parts: []schema.ToolOutputPart{
+						{Type: schema.ToolPartTypeText, Text: "see image"},
+						{
+							Type: schema.ToolPartTypeImage,
+							Image: &schema.ToolOutputImage{
+								MessagePartCommon: schema.MessagePartCommon{URL: &url},
+							},
 						},
 					},
 				},
