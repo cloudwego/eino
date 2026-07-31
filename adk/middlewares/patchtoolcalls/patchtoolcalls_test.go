@@ -618,22 +618,38 @@ func TestToolResultToMessage_MultimodalDoesNotSetContent(t *testing.T) {
 
 func TestToolResultToAgenticMessage_ToolSearchAndEmpty(t *testing.T) {
 	search := &schema.ToolSearchResult{Tools: []*schema.ToolInfo{{Name: "dyn"}}}
-	msg := toolResultToAgenticMessage("tool_search", "call_1", &schema.ToolResult{
+	msg, err := toolResultToAgenticMessage("tool_search", "call_1", &schema.ToolResult{
 		Parts: []schema.ToolOutputPart{{
 			Type:             schema.ToolPartTypeToolSearchResult,
 			ToolSearchResult: search,
 		}},
 	})
+	require.NoError(t, err)
 	require.Len(t, msg.ContentBlocks, 1)
 	assert.Equal(t, schema.ContentBlockTypeToolSearchResult, msg.ContentBlocks[0].Type)
 	require.NotNil(t, msg.ContentBlocks[0].ToolSearchFunctionToolResult)
 	assert.Equal(t, search, msg.ContentBlocks[0].ToolSearchFunctionToolResult.Result)
 
-	empty := toolResultToAgenticMessage("tool_a", "call_2", nil)
+	empty, err := toolResultToAgenticMessage("tool_a", "call_2", nil)
+	require.NoError(t, err)
 	require.Len(t, empty.ContentBlocks, 1)
 	require.NotNil(t, empty.ContentBlocks[0].FunctionToolResult)
 	require.Len(t, empty.ContentBlocks[0].FunctionToolResult.Content, 1)
 	assert.Equal(t, "", empty.ContentBlocks[0].FunctionToolResult.Content[0].Text.Text)
+}
+
+func TestToolResultToAgenticMessage_MalformedPartsError(t *testing.T) {
+	_, err := toolResultToAgenticMessage("vision", "call_1", &schema.ToolResult{
+		Parts: []schema.ToolOutputPart{{Type: schema.ToolPartTypeImage}},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "image content is nil")
+
+	_, err = toolResultToAgenticMessage("tool_search", "call_2", &schema.ToolResult{
+		Parts: []schema.ToolOutputPart{{Type: schema.ToolPartTypeToolSearchResult}},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "tool search result is nil")
 }
 
 func TestToolResultToFunctionBlocks_AllModalities(t *testing.T) {
@@ -648,33 +664,29 @@ func TestToolResultToFunctionBlocks_AllModalities(t *testing.T) {
 					MessagePartCommon: schema.MessagePartCommon{URL: &url, Base64Data: &b64, MIMEType: "image/png"},
 				},
 			},
-			{Type: schema.ToolPartTypeImage}, // nil Image skipped
 			{
 				Type: schema.ToolPartTypeAudio,
 				Audio: &schema.ToolOutputAudio{
 					MessagePartCommon: schema.MessagePartCommon{URL: &url, MIMEType: "audio/mpeg"},
 				},
 			},
-			{Type: schema.ToolPartTypeAudio},
 			{
 				Type: schema.ToolPartTypeVideo,
 				Video: &schema.ToolOutputVideo{
 					MessagePartCommon: schema.MessagePartCommon{URL: &url, MIMEType: "video/mp4"},
 				},
 			},
-			{Type: schema.ToolPartTypeVideo},
 			{
 				Type: schema.ToolPartTypeFile,
 				File: &schema.ToolOutputFile{
 					MessagePartCommon: schema.MessagePartCommon{URL: nil, Base64Data: &b64, MIMEType: "application/pdf"},
 				},
 			},
-			{Type: schema.ToolPartTypeFile},
-			{Type: schema.ToolPartTypeToolSearchResult}, // ignored by function-block conversion
 		},
 	}
 
-	blocks := toolResultToFunctionBlocks(result)
+	blocks, err := toolResultToFunctionBlocks(result)
+	require.NoError(t, err)
 	require.Len(t, blocks, 5)
 	assert.Equal(t, schema.FunctionToolResultContentBlockTypeText, blocks[0].Type)
 	assert.Equal(t, "hello", blocks[0].Text.Text)
@@ -687,8 +699,57 @@ func TestToolResultToFunctionBlocks_AllModalities(t *testing.T) {
 	assert.Equal(t, "", blocks[4].File.URL)
 	assert.Equal(t, b64, blocks[4].File.Base64Data)
 
-	assert.Nil(t, toolResultToFunctionBlocks(nil))
-	assert.Nil(t, toolResultToFunctionBlocks(&schema.ToolResult{}))
+	blocks, err = toolResultToFunctionBlocks(nil)
+	require.NoError(t, err)
+	assert.Nil(t, blocks)
+	blocks, err = toolResultToFunctionBlocks(&schema.ToolResult{})
+	require.NoError(t, err)
+	assert.Nil(t, blocks)
+}
+
+func TestToolResultToFunctionBlocks_MalformedPartsError(t *testing.T) {
+	tests := []struct {
+		name    string
+		part    schema.ToolOutputPart
+		wantSub string
+	}{
+		{name: "nil image", part: schema.ToolOutputPart{Type: schema.ToolPartTypeImage}, wantSub: "image content is nil"},
+		{name: "nil audio", part: schema.ToolOutputPart{Type: schema.ToolPartTypeAudio}, wantSub: "audio content is nil"},
+		{name: "nil video", part: schema.ToolOutputPart{Type: schema.ToolPartTypeVideo}, wantSub: "video content is nil"},
+		{name: "nil file", part: schema.ToolOutputPart{Type: schema.ToolPartTypeFile}, wantSub: "file content is nil"},
+		{name: "tool search mixed", part: schema.ToolOutputPart{Type: schema.ToolPartTypeToolSearchResult, ToolSearchResult: &schema.ToolSearchResult{}}, wantSub: "tool search result must be the sole part"},
+		{name: "unknown type", part: schema.ToolOutputPart{Type: schema.ToolPartType("nope")}, wantSub: "unknown tool part type"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := toolResultToFunctionBlocks(&schema.ToolResult{Parts: []schema.ToolOutputPart{tt.part}})
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantSub)
+		})
+	}
+}
+
+func TestPatchedToolResultGenerator_AgenticNilImagePropagatesError(t *testing.T) {
+	ctx := context.Background()
+	mw, err := NewTyped[*schema.AgenticMessage](ctx, &Config{
+		PatchedToolResultGenerator: func(context.Context, string, string, *schema.ToolArgument) (*schema.ToolResult, error) {
+			return &schema.ToolResult{
+				Parts: []schema.ToolOutputPart{{Type: schema.ToolPartTypeImage}},
+			}, nil
+		},
+	})
+	require.NoError(t, err)
+
+	state := &adk.TypedChatModelAgentState[*schema.AgenticMessage]{
+		Messages: []*schema.AgenticMessage{
+			makeAssistantMsgWithToolCalls[*schema.AgenticMessage]("", []testToolCall{
+				{ID: "call_1", Name: "vision", Arguments: "{}"},
+			}),
+		},
+	}
+	_, _, err = mw.BeforeModelRewriteState(ctx, state, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "image content is nil")
 }
 
 func TestPatchedToolResultGenerator_AgenticMultimodal(t *testing.T) {

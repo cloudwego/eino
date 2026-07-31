@@ -282,7 +282,7 @@ func createPatchedAgenticToolMessage(ctx context.Context, gens patchedGenerators
 		if err != nil {
 			return nil, err
 		}
-		return toolResultToAgenticMessage(toolName, callID, result), nil
+		return toolResultToAgenticMessage(toolName, callID, result)
 	}
 
 	var content string
@@ -337,10 +337,11 @@ func toolResultToMessage(toolName, callID string, result *schema.ToolResult) (*s
 	return msg, nil
 }
 
-func toolResultToAgenticMessage(toolName, callID string, result *schema.ToolResult) *schema.AgenticMessage {
-	if result != nil && len(result.Parts) == 1 &&
-		result.Parts[0].Type == schema.ToolPartTypeToolSearchResult &&
-		result.Parts[0].ToolSearchResult != nil {
+func toolResultToAgenticMessage(toolName, callID string, result *schema.ToolResult) (*schema.AgenticMessage, error) {
+	if result != nil && len(result.Parts) == 1 && result.Parts[0].Type == schema.ToolPartTypeToolSearchResult {
+		if result.Parts[0].ToolSearchResult == nil {
+			return nil, fmt.Errorf("tool search result is nil for tool part type %v", result.Parts[0].Type)
+		}
 		return &schema.AgenticMessage{
 			Role: schema.AgenticRoleTypeUser,
 			ContentBlocks: []*schema.ContentBlock{
@@ -350,10 +351,15 @@ func toolResultToAgenticMessage(toolName, callID string, result *schema.ToolResu
 					Result: result.Parts[0].ToolSearchResult,
 				}),
 			},
-		}
+		}, nil
 	}
 
-	blocks := toolResultToFunctionBlocks(result)
+	blocks, err := toolResultToFunctionBlocks(result)
+	if err != nil {
+		return nil, err
+	}
+	// Empty ToolResult is valid and maps to an empty text tool result, matching
+	// toolResultToMessage which leaves Content empty for nil/empty results.
 	if len(blocks) == 0 {
 		blocks = []*schema.FunctionToolResultContentBlock{
 			{Type: schema.FunctionToolResultContentBlockTypeText, Text: &schema.UserInputText{Text: ""}},
@@ -368,7 +374,7 @@ func toolResultToAgenticMessage(toolName, callID string, result *schema.ToolResu
 				Content: blocks,
 			}),
 		},
-	}
+	}, nil
 }
 
 func singleTextToolResult(result *schema.ToolResult) (string, bool) {
@@ -378,74 +384,78 @@ func singleTextToolResult(result *schema.ToolResult) (string, bool) {
 	return result.Parts[0].Text, true
 }
 
-func toolResultToFunctionBlocks(result *schema.ToolResult) []*schema.FunctionToolResultContentBlock {
+func toolResultToFunctionBlocks(result *schema.ToolResult) ([]*schema.FunctionToolResultContentBlock, error) {
 	if result == nil || len(result.Parts) == 0 {
-		return nil
+		return nil, nil
 	}
 	blocks := make([]*schema.FunctionToolResultContentBlock, 0, len(result.Parts))
 	for _, p := range result.Parts {
-		var block *schema.FunctionToolResultContentBlock
 		switch p.Type {
 		case schema.ToolPartTypeText:
-			block = &schema.FunctionToolResultContentBlock{
+			blocks = append(blocks, &schema.FunctionToolResultContentBlock{
 				Type:  schema.FunctionToolResultContentBlockTypeText,
 				Text:  &schema.UserInputText{Text: p.Text},
 				Extra: p.Extra,
-			}
+			})
 		case schema.ToolPartTypeImage:
-			if p.Image != nil {
-				block = &schema.FunctionToolResultContentBlock{
-					Type: schema.FunctionToolResultContentBlockTypeImage,
-					Image: &schema.UserInputImage{
-						URL:        derefString(p.Image.URL),
-						Base64Data: derefString(p.Image.Base64Data),
-						MIMEType:   p.Image.MIMEType,
-					},
-					Extra: p.Extra,
-				}
+			if p.Image == nil {
+				return nil, fmt.Errorf("image content is nil for tool part type %v", p.Type)
 			}
+			blocks = append(blocks, &schema.FunctionToolResultContentBlock{
+				Type: schema.FunctionToolResultContentBlockTypeImage,
+				Image: &schema.UserInputImage{
+					URL:        derefString(p.Image.URL),
+					Base64Data: derefString(p.Image.Base64Data),
+					MIMEType:   p.Image.MIMEType,
+				},
+				Extra: p.Extra,
+			})
 		case schema.ToolPartTypeAudio:
-			if p.Audio != nil {
-				block = &schema.FunctionToolResultContentBlock{
-					Type: schema.FunctionToolResultContentBlockTypeAudio,
-					Audio: &schema.UserInputAudio{
-						URL:        derefString(p.Audio.URL),
-						Base64Data: derefString(p.Audio.Base64Data),
-						MIMEType:   p.Audio.MIMEType,
-					},
-					Extra: p.Extra,
-				}
+			if p.Audio == nil {
+				return nil, fmt.Errorf("audio content is nil for tool part type %v", p.Type)
 			}
+			blocks = append(blocks, &schema.FunctionToolResultContentBlock{
+				Type: schema.FunctionToolResultContentBlockTypeAudio,
+				Audio: &schema.UserInputAudio{
+					URL:        derefString(p.Audio.URL),
+					Base64Data: derefString(p.Audio.Base64Data),
+					MIMEType:   p.Audio.MIMEType,
+				},
+				Extra: p.Extra,
+			})
 		case schema.ToolPartTypeVideo:
-			if p.Video != nil {
-				block = &schema.FunctionToolResultContentBlock{
-					Type: schema.FunctionToolResultContentBlockTypeVideo,
-					Video: &schema.UserInputVideo{
-						URL:        derefString(p.Video.URL),
-						Base64Data: derefString(p.Video.Base64Data),
-						MIMEType:   p.Video.MIMEType,
-					},
-					Extra: p.Extra,
-				}
+			if p.Video == nil {
+				return nil, fmt.Errorf("video content is nil for tool part type %v", p.Type)
 			}
+			blocks = append(blocks, &schema.FunctionToolResultContentBlock{
+				Type: schema.FunctionToolResultContentBlockTypeVideo,
+				Video: &schema.UserInputVideo{
+					URL:        derefString(p.Video.URL),
+					Base64Data: derefString(p.Video.Base64Data),
+					MIMEType:   p.Video.MIMEType,
+				},
+				Extra: p.Extra,
+			})
 		case schema.ToolPartTypeFile:
-			if p.File != nil {
-				block = &schema.FunctionToolResultContentBlock{
-					Type: schema.FunctionToolResultContentBlockTypeFile,
-					File: &schema.UserInputFile{
-						URL:        derefString(p.File.URL),
-						Base64Data: derefString(p.File.Base64Data),
-						MIMEType:   p.File.MIMEType,
-					},
-					Extra: p.Extra,
-				}
+			if p.File == nil {
+				return nil, fmt.Errorf("file content is nil for tool part type %v", p.Type)
 			}
-		}
-		if block != nil {
-			blocks = append(blocks, block)
+			blocks = append(blocks, &schema.FunctionToolResultContentBlock{
+				Type: schema.FunctionToolResultContentBlockTypeFile,
+				File: &schema.UserInputFile{
+					URL:        derefString(p.File.URL),
+					Base64Data: derefString(p.File.Base64Data),
+					MIMEType:   p.File.MIMEType,
+				},
+				Extra: p.Extra,
+			})
+		case schema.ToolPartTypeToolSearchResult:
+			return nil, fmt.Errorf("tool search result must be the sole part of a ToolResult")
+		default:
+			return nil, fmt.Errorf("unknown tool part type: %v", p.Type)
 		}
 	}
-	return blocks
+	return blocks, nil
 }
 
 func derefString(s *string) string {
