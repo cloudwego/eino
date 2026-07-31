@@ -18,8 +18,6 @@ package backgroundtask
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
 	"fmt"
 	"sync"
 	"testing"
@@ -48,13 +46,13 @@ func runWork(m *bgtask.Manager, description string, background bool, work bgtask
 }
 
 func completedWork(result string) bgtask.WorkFunc {
-	return func(ctx context.Context, _ bgtask.TaskInfo) (string, error) {
+	return func(ctx context.Context, _ bgtask.ExecutionRuntime) (string, error) {
 		return result, nil
 	}
 }
 
 func blockingWork() bgtask.WorkFunc {
-	return func(ctx context.Context, _ bgtask.TaskInfo) (string, error) {
+	return func(ctx context.Context, _ bgtask.ExecutionRuntime) (string, error) {
 		<-ctx.Done()
 		return "", ctx.Err()
 	}
@@ -102,7 +100,7 @@ func findTool(t *testing.T, tools []tool.BaseTool, name string) tool.InvokableTo
 
 func injectedTools(t *testing.T, m *bgtask.Manager) []tool.BaseTool {
 	t.Helper()
-	mw, err := New(context.Background(), &Config{Manager: m, ManagerScopeIsolated: true})
+	mw, err := New(context.Background(), &Config{Manager: m})
 	require.NoError(t, err)
 	_, runCtx, err := mw.BeforeAgent(context.Background(), &adk.ChatModelAgentContext[*schema.Message]{})
 	require.NoError(t, err)
@@ -114,17 +112,11 @@ func TestNew_NilManager(t *testing.T) {
 	assert.Error(t, err)
 }
 
-func TestNew_RequiresAuthorizationBoundary(t *testing.T) {
+func TestNew_OnlyRequiresManager(t *testing.T) {
 	mgr := bgtask.New(context.Background(), nil)
 	defer closeWithTimeout(mgr)
 
 	_, err := New(context.Background(), &Config{Manager: mgr})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "Authorize or isolated Manager scope")
-
-	_, err = New(context.Background(), &Config{
-		Manager: mgr, ManagerScopeIsolated: true,
-	})
 	require.NoError(t, err)
 }
 
@@ -146,7 +138,7 @@ func TestMiddleware_ToolConfig_NameOverrideAndDisable(t *testing.T) {
 
 	customDesc := "custom output desc"
 	mw, err := New(context.Background(), &Config{
-		Manager: mgr, ManagerScopeIsolated: true,
+		Manager:              mgr,
 		TaskOutputToolConfig: &ToolConfig{Name: "get_output", Desc: &customDesc},
 		TaskStopToolConfig:   &ToolConfig{Disable: true},
 	})
@@ -167,7 +159,7 @@ func TestMiddleware_ToolConfig_DisableBoth(t *testing.T) {
 	defer closeWithTimeout(mgr)
 
 	mw, err := New(context.Background(), &Config{
-		Manager: mgr, ManagerScopeIsolated: true,
+		Manager:              mgr,
 		TaskOutputToolConfig: &ToolConfig{Disable: true},
 		TaskStopToolConfig:   &ToolConfig{Disable: true},
 	})
@@ -181,7 +173,7 @@ func TestMiddleware_InjectsInstruction(t *testing.T) {
 	mgr := bgtask.New(context.Background(), &bgtask.Config{})
 	defer closeWithTimeout(mgr)
 
-	mw, err := New(context.Background(), &Config{Manager: mgr, ManagerScopeIsolated: true})
+	mw, err := New(context.Background(), &Config{Manager: mgr})
 	require.NoError(t, err)
 	_, runCtx, err := mw.BeforeAgent(context.Background(), &adk.ChatModelAgentContext[*schema.Message]{Instruction: "base"})
 	require.NoError(t, err)
@@ -198,7 +190,7 @@ func TestMiddleware_InstructionUsesRenamedTool(t *testing.T) {
 	defer closeWithTimeout(mgr)
 
 	mw, err := New(context.Background(), &Config{
-		Manager: mgr, ManagerScopeIsolated: true,
+		Manager:              mgr,
 		TaskOutputToolConfig: &ToolConfig{Name: "get_task_result"},
 	})
 	require.NoError(t, err)
@@ -216,7 +208,7 @@ func TestMiddleware_InstructionOmitsDisabledTool(t *testing.T) {
 	defer closeWithTimeout(mgr)
 
 	mw, err := New(context.Background(), &Config{
-		Manager: mgr, ManagerScopeIsolated: true,
+		Manager:            mgr,
 		TaskStopToolConfig: &ToolConfig{Disable: true},
 	})
 	require.NoError(t, err)
@@ -233,7 +225,7 @@ func TestMiddleware_InstructionEmptyWhenAllDisabled(t *testing.T) {
 	defer closeWithTimeout(mgr)
 
 	mw, err := New(context.Background(), &Config{
-		Manager: mgr, ManagerScopeIsolated: true,
+		Manager:              mgr,
 		TaskOutputToolConfig: &ToolConfig{Disable: true},
 		TaskStopToolConfig:   &ToolConfig{Disable: true},
 	})
@@ -255,11 +247,9 @@ func TestTaskOutputTool(t *testing.T) {
 	tl := findTool(t, injectedTools(t, mgr), taskOutputToolName)
 	output, err := tl.InvokableRun(context.Background(), fmt.Sprintf(`{"task_id":"%s"}`, result.Spec.ID))
 	require.NoError(t, err)
-	var response taskOutputResponse
-	require.NoError(t, json.Unmarshal([]byte(output), &response))
 	assert.Contains(t, output, "test task")
 	assert.Contains(t, output, "completed")
-	assert.Equal(t, "task result", string(response.Task.ResultData))
+	assert.Contains(t, output, "Result: task result")
 }
 
 func TestTaskOutputTool_NotFound(t *testing.T) {
@@ -311,12 +301,9 @@ func TestTaskOutputNonBlockingReturnsCurrentSnapshot(t *testing.T) {
 	))
 	require.NoError(t, err)
 
-	var response taskOutputResponse
-	require.NoError(t, json.Unmarshal([]byte(output), &response))
-	require.NotNil(t, response.Task)
-	assert.Equal(t, bgtask.StateRunning, response.Task.Status)
-	assert.Empty(t, response.Task.ResultData)
-	assert.Empty(t, response.Task.ResultError)
+	assert.Contains(t, output, "Status: running")
+	assert.NotContains(t, output, "Result:")
+	assert.NotContains(t, output, "Error:")
 }
 
 func TestTaskStopTool(t *testing.T) {
@@ -350,54 +337,67 @@ func TestTaskStopTool_AlreadyDone(t *testing.T) {
 	assert.Contains(t, result, "Failed to stop")
 }
 
-func TestControlAuthorizationRunsBeforeManagerAccess(t *testing.T) {
+func TestControlToolsUsePossessionOfTaskID(t *testing.T) {
 	mgr := bgtask.New(context.Background(), &bgtask.Config{})
 	defer closeWithTimeout(mgr)
 	task, err := runWork(mgr, "secret task", true, blockingWork())
 	require.NoError(t, err)
 
-	var mu sync.Mutex
-	var calls []string
-	authorize := func(_ context.Context, operation ControlOperation, taskID string) error {
-		mu.Lock()
-		calls = append(calls, string(operation)+":"+taskID)
-		mu.Unlock()
-		return errors.New("denied")
-	}
-	mw, err := New(context.Background(), &Config{Manager: mgr, ManagerScopeIsolated: true, Authorize: authorize})
-	require.NoError(t, err)
-	_, runCtx, err := mw.BeforeAgent(
-		context.Background(),
-		&adk.ChatModelAgentContext[*schema.Message]{},
+	tools := injectedTools(t, mgr)
+	output := findTool(t, tools, taskOutputToolName)
+	stop := findTool(t, tools, taskStopToolName)
+	otherContext := context.WithValue(context.Background(), struct{}{}, "other-agent")
+	response, err := output.InvokableRun(
+		otherContext, fmt.Sprintf(`{"task_id":%q,"block":false}`, task.Spec.ID),
 	)
 	require.NoError(t, err)
-	output := findTool(t, runCtx.Tools, taskOutputToolName)
-	stop := findTool(t, runCtx.Tools, taskStopToolName)
+	assert.Contains(t, response, "Status: running")
+	response, err = stop.InvokableRun(
+		otherContext, fmt.Sprintf(`{"task_id":%q}`, task.Spec.ID),
+	)
+	require.NoError(t, err)
+	assert.Contains(t, response, "Stop requested")
+}
 
-	var responses []string
-	for _, taskID := range []string{task.Spec.ID, "missing"} {
-		response, invokeErr := output.InvokableRun(
-			context.Background(),
-			fmt.Sprintf(`{"task_id":%q,"block":false}`, taskID),
-		)
-		require.NoError(t, invokeErr)
-		responses = append(responses, response)
-		response, invokeErr = stop.InvokableRun(
-			context.Background(),
-			fmt.Sprintf(`{"task_id":%q}`, taskID),
-		)
-		require.NoError(t, invokeErr)
-		responses = append(responses, response)
+func TestFormatTaskStableNonTerminalStates(t *testing.T) {
+	for _, test := range []struct {
+		status bgtask.Status
+		want   string
+	}{
+		{bgtask.StatusPending, "Task ID: task_secret\nDescription: work\nStatus: pending"},
+		{bgtask.StatusWaitingInput, "Task ID: task_secret\nDescription: work\nStatus: waiting_input"},
+		{bgtask.StatusSuspended, "Task ID: task_secret\nDescription: work\nStatus: suspended"},
+		{bgtask.StatusCanceling, "Task ID: task_secret\nDescription: work\nStatus: canceling"},
+	} {
+		t.Run(string(test.status), func(t *testing.T) {
+			assert.Equal(t, test.want, formatTask(&bgtask.Task{
+				Spec:   bgtask.Spec{ID: "task_secret", Description: "work"},
+				Status: test.status,
+			}))
+		})
 	}
-	assert.Equal(t, []string{
-		"Task access denied", "Task access denied",
-		"Task access denied", "Task access denied",
-	}, responses)
-	assert.Equal(t, []string{
-		"read:" + task.Spec.ID, "stop:" + task.Spec.ID,
-		"read:missing", "stop:missing",
-	}, calls)
-	current, ok := mgr.Get(task.Spec.ID)
-	require.True(t, ok)
-	assert.Equal(t, bgtask.StateRunning, current.Status)
+}
+
+func TestFormatTaskOutputTranscriptSemantics(t *testing.T) {
+	reliableSubagent := &bgtask.Task{
+		Spec: bgtask.Spec{
+			ID: "subagent_secret", Description: "research", Kind: "subagent",
+			OutputFile: "/tasks/events.output",
+		},
+		Status: bgtask.StatusCompleted, ResultData: []byte("authoritative answer"),
+	}
+	rendered := formatTask(reliableSubagent)
+	assert.Contains(t, rendered, "Event transcript (JSONL): /tasks/events.output")
+	assert.NotContains(t, rendered, "authoritative answer")
+
+	incomplete := *reliableSubagent
+	incomplete.OutputFileErr = "write failed"
+	rendered = formatTask(&incomplete)
+	assert.Contains(t, rendered, "Result: authoritative answer")
+	assert.Contains(t, rendered, "incomplete — a write failed: write failed")
+
+	noFile := *reliableSubagent
+	noFile.Spec.OutputFile = ""
+	rendered = formatTask(&noFile)
+	assert.Contains(t, rendered, "Result: authoritative answer")
 }

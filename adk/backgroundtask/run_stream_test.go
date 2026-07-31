@@ -48,7 +48,7 @@ func drainStringStream(t *testing.T, sr *schema.StreamReader[string]) string {
 // streamWorkChunks returns a StreamWorkFunc that emits the given chunks, optionally
 // pausing before each so a deadline can fire mid-stream.
 func streamWorkChunks(pause time.Duration, chunks ...string) StreamWorkFunc {
-	return func(ctx context.Context, _ TaskInfo) (*schema.StreamReader[string], error) {
+	return func(ctx context.Context, _ ExecutionRuntime) (*schema.StreamReader[string], error) {
 		sr, sw := schema.Pipe[string](len(chunks))
 		go func() {
 			defer sw.Close()
@@ -146,7 +146,7 @@ func TestRunStream_ExplicitBackgroundStartupPreview(t *testing.T) {
 	defer closeWithTimeout(m)
 
 	release := make(chan struct{})
-	work := func(ctx context.Context, _ TaskInfo) (*schema.StreamReader[string], error) {
+	work := func(ctx context.Context, _ ExecutionRuntime) (*schema.StreamReader[string], error) {
 		sr, sw := schema.Pipe[string](2)
 		sw.Send("authenticate at https://example.com/oauth\n", nil)
 		go func() {
@@ -213,7 +213,7 @@ func TestRunStream_WorkError(t *testing.T) {
 	defer closeWithTimeout(m)
 
 	wantErr := errors.New("boom")
-	work := func(ctx context.Context, _ TaskInfo) (*schema.StreamReader[string], error) {
+	work := func(ctx context.Context, _ ExecutionRuntime) (*schema.StreamReader[string], error) {
 		sr, sw := schema.Pipe[string](2)
 		go func() {
 			defer sw.Close()
@@ -255,15 +255,12 @@ func TestRunStream_ConstructionErrorClosesProjection(t *testing.T) {
 	sr, err := m.RunStream(
 		context.Background(),
 		&RunInput{Description: "construction error"},
-		func(context.Context, TaskInfo) (*schema.StreamReader[string], error) {
+		func(context.Context, ExecutionRuntime) (*schema.StreamReader[string], error) {
 			return nil, wantErr
 		},
 	)
-	require.NoError(t, err)
-	defer sr.Close()
-	_, err = sr.Recv()
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), wantErr.Error())
+	require.ErrorIs(t, err, wantErr)
+	assert.Nil(t, sr)
 
 	tasks := m.List()
 	require.Len(t, tasks, 1)
@@ -278,13 +275,27 @@ func TestRunStream_NilReaderFails(t *testing.T) {
 	sr, err := m.RunStream(
 		context.Background(),
 		&RunInput{Description: "nil reader"},
-		func(context.Context, TaskInfo) (*schema.StreamReader[string], error) {
+		func(context.Context, ExecutionRuntime) (*schema.StreamReader[string], error) {
 			return nil, nil
 		},
 	)
-	require.NoError(t, err)
-	defer sr.Close()
-	_, err = sr.Recv()
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "nil reader")
+	require.ErrorContains(t, err, "nil reader")
+	assert.Nil(t, sr)
+}
+
+func TestRunStreamConstructionErrorReturnsFinalStoreFailure(t *testing.T) {
+	store := &outputFailureFaultStore{Store: NewMemoryStore(nil), failFinal: true}
+	manager := New(context.Background(), &Config{Store: store})
+	reader, err := manager.RunStream(
+		context.Background(),
+		&RunInput{Description: "construction error"},
+		func(context.Context, ExecutionRuntime) (*schema.StreamReader[string], error) {
+			return nil, errors.New("construct stream")
+		},
+	)
+	assert.Nil(t, reader)
+	require.ErrorContains(t, err, "fail unavailable")
+	tasks := manager.List()
+	require.Len(t, tasks, 1)
+	assert.NotEqual(t, StatusCompleted, tasks[0].Status)
 }

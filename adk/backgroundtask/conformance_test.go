@@ -30,11 +30,12 @@ import (
 )
 
 type scriptedExecutor struct {
-	key              string
-	validateErr      error
-	checkpointErr    error
-	normalizedResume []byte
-	execute          func(context.Context, *Task, <-chan ControlRequest) (*ExecutionResult, error)
+	key                  string
+	validateErr          error
+	validateExecutionErr error
+	checkpointErr        error
+	normalizedResume     []byte
+	execute              func(context.Context, *Task, ExecutionRuntime) (*ExecutionResult, error)
 
 	mu                  sync.Mutex
 	validated           []Spec
@@ -51,12 +52,18 @@ func (e *scriptedExecutor) Key() string {
 	return e.key
 }
 
-func (e *scriptedExecutor) Validate(spec Spec) error {
+func (e *scriptedExecutor) ValidateSpec(spec Spec) error {
 	e.mu.Lock()
 	e.validated = append(e.validated, cloneSpec(spec))
 	e.mu.Unlock()
 	return e.validateErr
 }
+
+func (e *scriptedExecutor) ValidateExecution(context.Context, *Task) error {
+	return e.validateExecutionErr
+}
+
+func (e *scriptedExecutor) SupportsDrain() bool { return true }
 
 func (e *scriptedExecutor) ValidateCheckpoint(_ context.Context, _ Spec, checkpoint []byte) error {
 	e.mu.Lock()
@@ -78,12 +85,12 @@ func (e *scriptedExecutor) ValidateResume(
 	return cloneBytes(e.normalizedResume), nil
 }
 
-func (e *scriptedExecutor) Execute(ctx context.Context, task *Task, controls <-chan ControlRequest) (*ExecutionResult, error) {
+func (e *scriptedExecutor) Execute(ctx context.Context, task *Task, runtime ExecutionRuntime) (*ExecutionResult, error) {
 	e.mu.Lock()
 	e.executed = append(e.executed, cloneTask(task))
 	e.mu.Unlock()
 	if e.execute != nil {
-		return e.execute(ctx, task, controls)
+		return e.execute(ctx, task, runtime)
 	}
 	return &ExecutionResult{Status: StatusCompleted, Data: []byte("result")}, nil
 }
@@ -152,7 +159,7 @@ func TestManagerSubmitUsesExecutorIdentityAndValidation_BitsUT(t *testing.T) {
 	assert.ErrorContains(t, err, `executor "missing" is unavailable`)
 }
 
-func TestManagerValidateIsSubmitTimeOnly_BitsUT(t *testing.T) {
+func TestManagerValidateSpecRunsBeforeSubmitAndStart_BitsUT(t *testing.T) {
 	executor := &scriptedExecutor{}
 	store := NewMemoryStore(nil)
 	manager := managerWithExecutor(t, store, executor, time.Minute)
@@ -160,12 +167,12 @@ func TestManagerValidateIsSubmitTimeOnly_BitsUT(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, executor.validated, 1)
 
-	executor.validateErr = errors.New("must not run during execute")
-	require.NoError(t, manager.Execute(context.Background(), task.Spec.ID))
-	require.Len(t, executor.validated, 1)
-	completed, err := store.Get(context.Background(), task.Spec.ID)
+	executor.validateErr = errors.New("invalid on worker")
+	require.ErrorContains(t, manager.Execute(context.Background(), task.Spec.ID), "validate spec")
+	require.Len(t, executor.validated, 2)
+	pending, err := store.Get(context.Background(), task.Spec.ID)
 	require.NoError(t, err)
-	assert.Equal(t, StateCompleted, completed.Status)
+	assert.Equal(t, StatePending, pending.Status)
 }
 
 func TestManagerExecutePersistsReturnedResultDirectly_BitsUT(t *testing.T) {
@@ -188,7 +195,7 @@ func TestManagerExecutePersistsReturnedResultDirectly_BitsUT(t *testing.T) {
 func TestManagerReducesOrdinaryErrorsToBoundedDurableStrings_BitsUT(t *testing.T) {
 	message := strings.Repeat("x", 5000)
 	executor := &scriptedExecutor{
-		execute: func(context.Context, *Task, <-chan ControlRequest) (*ExecutionResult, error) {
+		execute: func(context.Context, *Task, ExecutionRuntime) (*ExecutionResult, error) {
 			return nil, errors.New(message)
 		},
 	}
@@ -250,7 +257,7 @@ func recoveredTaskStore(t *testing.T, id string, checkpoint []byte) (*MemoryStor
 func TestNonRestartableExecutorRejectsExactMissingCheckpointDiscriminator_BitsUT(t *testing.T) {
 	executor := &scriptedExecutor{
 		checkpointErr: errors.New("corrupt"),
-		execute: func(_ context.Context, task *Task, _ <-chan ControlRequest) (*ExecutionResult, error) {
+		execute: func(_ context.Context, task *Task, _ ExecutionRuntime) (*ExecutionResult, error) {
 			if task.Attempt > 1 && len(task.Checkpoint) == 0 {
 				return nil, errors.New("unsafe restart rejected")
 			}
@@ -296,7 +303,7 @@ func TestManagerResumeValidatesAndStoresNormalizedOpaqueInput_BitsUT(t *testing.
 
 func TestManagerWaitingInputPersistsCheckpointWithoutTerminalResult_BitsUT(t *testing.T) {
 	executor := &scriptedExecutor{
-		execute: func(context.Context, *Task, <-chan ControlRequest) (*ExecutionResult, error) {
+		execute: func(context.Context, *Task, ExecutionRuntime) (*ExecutionResult, error) {
 			return &ExecutionResult{Status: StatusWaitingInput, Checkpoint: []byte("checkpoint")}, nil
 		},
 	}
@@ -316,7 +323,7 @@ func TestManagerWaitingInputPersistsCheckpointWithoutTerminalResult_BitsUT(t *te
 
 func TestManagerErrorDoesNotCreatePendingResume_BitsUT(t *testing.T) {
 	executor := &scriptedExecutor{
-		execute: func(_ context.Context, _ *Task, _ <-chan ControlRequest) (*ExecutionResult, error) {
+		execute: func(_ context.Context, _ *Task, _ ExecutionRuntime) (*ExecutionResult, error) {
 			return nil, errors.New("execution failed")
 		},
 	}
@@ -339,7 +346,7 @@ func TestCheckpointUnavailableStopsRenewalWithoutPersistingFailure_BitsUT(t *tes
 		Clock: clock.Now, ActiveAttemptTimeout: 5 * time.Second,
 	})
 	executor := &scriptedExecutor{
-		execute: func(context.Context, *Task, <-chan ControlRequest) (*ExecutionResult, error) {
+		execute: func(context.Context, *Task, ExecutionRuntime) (*ExecutionResult, error) {
 			return nil, ErrCheckpointUnavailable
 		},
 	}

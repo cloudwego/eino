@@ -25,7 +25,7 @@ import (
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/adk/backgroundtask"
-	durablesubagent "github.com/cloudwego/eino/adk/backgroundtask/subagent"
+	"github.com/cloudwego/eino/adk/filesystem"
 	"github.com/cloudwego/eino/adk/internal"
 	"github.com/cloudwego/eino/adk/middlewares/internal/systemreminder"
 	"github.com/cloudwego/eino/components/tool"
@@ -72,23 +72,32 @@ type BackgroundConfig = TypedBackgroundConfig[*schema.Message]
 // making them visible via Get/List, and the Agent tool gains a run_in_background
 // parameter.
 type TypedBackgroundConfig[M adk.MessageType] struct {
-	// Manager is the shared background-task Manager. Required (a nil Manager is the
-	// same as no BackgroundConfig). It may be shared with other middlewares (e.g.
-	// filesystem) so a single task-ID space spans agent and shell runs. The
-	// task_output/task_stop control tools are NOT injected here; wire the
-	// backgroundtask control middleware (adk/middlewares/backgroundtask) once, bound
-	// to the same Manager.
-	Manager *backgroundtask.Manager
-
-	// AgentRefs binds each model-facing sub-agent name to an exact durable
-	// definition identity. Every configured SubAgent requires one entry.
-	AgentRefs map[string]durablesubagent.AgentRef
-	// SessionID resolves the durable parent session for each tool invocation.
-	SessionID func(context.Context) (string, error)
-	// SessionStore and CheckPointStore persist child history and execution state.
-	SessionStore    adk.SessionEventStore[M]
-	CheckPointStore adk.CheckPointStore
+	Local   *TypedLocalBackgroundConfig[M]
+	Durable *TypedDurableBackgroundConfig[M]
 }
+
+type LocalBackgroundConfig = TypedLocalBackgroundConfig[*schema.Message]
+
+type TypedLocalBackgroundConfig[M adk.MessageType] struct {
+	Manager     *backgroundtask.Manager
+	OutputStore filesystem.AppendOpener
+	OutputDir   string
+	EventFormat AgentEventFormat[M]
+}
+
+type DurableBackgroundConfig = TypedDurableBackgroundConfig[*schema.Message]
+
+type TypedDurableBackgroundConfig[M adk.MessageType] struct {
+	Manager     *backgroundtask.Manager
+	OutputStore filesystem.AppendOpener
+	OutputDir   string
+	// EventFormat must remain framing-compatible across every worker that can
+	// resume the same SubAgentName. The default is eino.subagent.event/v1 JSONL.
+	// Formatter migrations require a new SubAgentName or output path.
+	EventFormat AgentEventFormat[M]
+}
+
+type AgentEventFormat[M adk.MessageType] func(context.Context, *adk.TypedAgentEvent[M]) (string, error)
 
 // New creates a ChatModelAgentMiddleware that injects sub-agent tools into the agent context.
 //
@@ -136,9 +145,8 @@ func NewTyped[M adk.MessageType](ctx context.Context, config *TypedConfig[M]) (a
 		return nil, err
 	}
 
-	backgroundEnabled := config.Background != nil && config.Background.Manager != nil
 	backgroundPrompt := ""
-	if backgroundEnabled {
+	if config.Background != nil {
 		backgroundPrompt = internal.SelectPrompt(internal.I18nPrompts{
 			English: agentToolBackgroundPrompt,
 			Chinese: agentToolBackgroundPromptChinese,
@@ -152,8 +160,20 @@ func NewTyped[M adk.MessageType](ctx context.Context, config *TypedConfig[M]) (a
 	// With a Manager, the tool exposes run_in_background and routes through the
 	// Manager; without one it is a plain foreground spawn.
 	var at tool.BaseTool
-	if backgroundEnabled {
-		at, err = newDurableAgentTool[M](ctx, config.Background, config.SubAgents, toolName, desc)
+	if config.Background != nil {
+		if config.Background.Local != nil {
+			at, err = newManagedAgentTool[M](
+				config.Background.Local.Manager, subAgentToolMap,
+				agentOutput[M]{
+					store:     config.Background.Local.OutputStore,
+					outputDir: config.Background.Local.OutputDir,
+					format:    config.Background.Local.EventFormat,
+				},
+				toolName, desc,
+			)
+		} else {
+			at, err = newDurableAgentTool[M](ctx, config.Background.Durable, config.SubAgents, toolName, desc)
+		}
 	} else {
 		at, err = newAgentTool(subAgentToolMap, toolName, desc)
 	}
@@ -174,22 +194,22 @@ func NewTyped[M adk.MessageType](ctx context.Context, config *TypedConfig[M]) (a
 		})
 	}
 
-	var reminder string
-	if len(config.SubAgents) > 0 {
-		entries := make([]agentTypeEntry, 0, len(config.SubAgents))
-		for _, agent := range config.SubAgents {
-			entries = append(entries, agentTypeEntry{
-				Name:        agent.Name(ctx),
-				Description: agent.Description(ctx),
-			})
-		}
+	entries := make([]agentTypeEntry, 0, len(config.SubAgents))
+	for _, agent := range config.SubAgents {
+		entries = append(entries, agentTypeEntry{
+			Name:        agent.Name(ctx),
+			Description: agent.Description(ctx),
+		})
+	}
+	reminder := ""
+	if len(entries) > 0 {
 		reminder = buildAgentTypesSectionFromEntries(entries)
 	}
 
 	return &typedSubagentMiddleware[M]{
 		tools:       tools,
-		instruction: instruction,
 		reminder:    reminder,
+		instruction: instruction,
 	}, nil
 }
 
@@ -212,8 +232,6 @@ func (m *typedSubagentMiddleware[M]) BeforeAgent(ctx context.Context, runCtx *ad
 	return ctx, &nRunCtx, nil
 }
 
-// BeforeModelRewriteState publishes the available agent types after the latest
-// user message and persists the reminder across turns.
 func (m *typedSubagentMiddleware[M]) BeforeModelRewriteState(ctx context.Context, state *adk.TypedChatModelAgentState[M], _ *adk.TypedModelContext[M]) (context.Context, *adk.TypedChatModelAgentState[M], error) {
 	if state == nil || m.reminder == "" {
 		return ctx, state, nil
@@ -261,13 +279,21 @@ func validate[M adk.MessageType](ctx context.Context, c *TypedConfig[M]) error {
 		}
 		names[name] = struct{}{}
 	}
-	if c.Background != nil && c.Background.Manager != nil {
-		if c.Background.SessionID == nil || c.Background.SessionStore == nil || c.Background.CheckPointStore == nil {
-			return fmt.Errorf("subagent: durable background requires SessionID, SessionStore, and CheckPointStore")
+	if c.Background != nil {
+		if (c.Background.Local == nil) == (c.Background.Durable == nil) {
+			return fmt.Errorf("subagent: exactly one of Background.Local or Background.Durable is required")
 		}
-		for name := range names {
-			if _, ok := c.Background.AgentRefs[name]; !ok {
-				return fmt.Errorf("subagent: durable AgentRef for %q is required", name)
+		if c.Background.Local != nil && c.Background.Local.Manager == nil {
+			return fmt.Errorf("subagent: local background Manager is required")
+		}
+		if c.Background.Durable != nil {
+			if c.Background.Durable.Manager == nil {
+				return fmt.Errorf("subagent: durable background Manager is required")
+			}
+			for _, agent := range c.SubAgents {
+				if _, ok := agent.(adk.TypedResumableAgent[M]); !ok {
+					return fmt.Errorf("subagent: durable agent %q is not resumable", agent.Name(ctx))
+				}
 			}
 		}
 	}

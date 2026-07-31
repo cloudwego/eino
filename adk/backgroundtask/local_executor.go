@@ -31,18 +31,8 @@ const (
 )
 
 type localWork struct {
-	work         WorkFunc
-	backgrounded chan struct{}
-	started      chan struct{}
-	proceed      chan struct{}
-	startOnce    sync.Once
-	bgOnce       sync.Once
-	proceedOnce  sync.Once
+	work WorkFunc
 }
-
-func (w *localWork) markStarted()      { w.startOnce.Do(func() { close(w.started) }) }
-func (w *localWork) markBackgrounded() { w.bgOnce.Do(func() { close(w.backgrounded) }) }
-func (w *localWork) allowStart()       { w.proceedOnce.Do(func() { close(w.proceed) }) }
 
 type processLocalExecutor struct {
 	mu    sync.Mutex
@@ -65,8 +55,7 @@ func (e *processLocalExecutor) register(token string, work WorkFunc) (*localWork
 		return nil, ErrAlreadyExists
 	}
 	entry := &localWork{
-		work:         work,
-		backgrounded: make(chan struct{}), started: make(chan struct{}), proceed: make(chan struct{}),
+		work: work,
 	}
 	e.works[token] = entry
 	return entry, nil
@@ -79,19 +68,30 @@ func (e *processLocalExecutor) remove(token string) {
 }
 
 func (e *processLocalExecutor) resolve(spec Spec) (*localWork, error) {
-	if spec.ExecutorKey != processLocalExecutorKey || len(spec.Payload) == 0 {
+	if spec.ExecutorKey != processLocalExecutorKey || spec.ID == "" {
 		return nil, errors.New("backgroundtask: invalid process-local task spec")
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	work, ok := e.works[string(spec.Payload)]
+	work, ok := e.works[spec.ID]
 	if !ok {
 		return nil, errors.New("backgroundtask: process-local work is unavailable after process loss")
 	}
 	return work, nil
 }
 
-func (e *processLocalExecutor) Validate(spec Spec) error {
+func (e *processLocalExecutor) ValidateSpec(spec Spec) error {
+	if spec.ExecutorKey != processLocalExecutorKey {
+		return errors.New("backgroundtask: invalid process-local task spec")
+	}
+	return nil
+}
+
+func (e *processLocalExecutor) ValidateExecution(_ context.Context, task *Task) error {
+	if task == nil {
+		return errors.New("backgroundtask: process-local task is required")
+	}
+	spec := task.Spec
 	_, err := e.resolve(spec)
 	return err
 }
@@ -104,7 +104,9 @@ func (e *processLocalExecutor) ValidateResume(context.Context, Spec, []byte, []b
 	return nil, errors.New("backgroundtask: process-local tasks cannot resume")
 }
 
-func (e *processLocalExecutor) Execute(ctx context.Context, task *Task, controls <-chan ControlRequest) (*ExecutionResult, error) {
+func (e *processLocalExecutor) SupportsDrain() bool { return false }
+
+func (e *processLocalExecutor) Execute(ctx context.Context, task *Task, runtime ExecutionRuntime) (*ExecutionResult, error) {
 	if task.Attempt > 1 && len(task.Checkpoint) == 0 {
 		return nil, errors.New("backgroundtask: process-local task cannot restart without a checkpoint")
 	}
@@ -112,12 +114,7 @@ func (e *processLocalExecutor) Execute(ctx context.Context, task *Task, controls
 	if err != nil {
 		return nil, err
 	}
-	entry.markStarted()
-	select {
-	case <-entry.proceed:
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	}
+	defer e.remove(task.Spec.ID)
 	workCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	type workResult struct {
@@ -133,9 +130,7 @@ func (e *processLocalExecutor) Execute(ctx context.Context, task *Task, controls
 			}
 			resultCh <- result
 		}()
-		result.value, result.err = entry.work(
-			workCtx, TaskInfo{ID: task.Spec.ID, Backgrounded: entry.backgrounded},
-		)
+		result.value, result.err = entry.work(workCtx, runtime)
 	}()
 
 	select {
@@ -147,14 +142,16 @@ func (e *processLocalExecutor) Execute(ctx context.Context, task *Task, controls
 			Status: StatusCompleted,
 			Data:   []byte(result.value),
 		}, nil
-	case control := <-controls:
+	case control := <-runtime.Controls():
 		cancel()
-		<-resultCh
 		if control.Kind == ControlStop {
 			return &ExecutionResult{
 				Status: StatusCanceled,
 				Error:  canceledError,
 			}, nil
+		}
+		if control.Kind == ControlTimeout {
+			return &ExecutionResult{Status: StatusFailed, Error: control.Reason}, nil
 		}
 		return nil, ErrCheckpointUnavailable
 	}
@@ -162,8 +159,9 @@ func (e *processLocalExecutor) Execute(ctx context.Context, task *Task, controls
 
 func processLocalSpec(id string, input *RunInput) Spec {
 	return Spec{
-		ID: id, ExecutorKey: processLocalExecutorKey, Payload: []byte(id),
-		Description: input.Description,
+		ID: id, ExecutorKey: processLocalExecutorKey, Kind: input.Type,
+		Payload: cloneBytes(input.Payload), Description: input.Description,
+		OutputFile: input.OutputFile, LeaseExpiryPolicy: LeaseExpiryFail,
 	}
 }
 
@@ -171,7 +169,7 @@ func (m *Manager) submitProcessLocal(ctx context.Context, input *RunInput, work 
 	if input == nil {
 		return nil, nil, errors.New("backgroundtask: RunInput is required")
 	}
-	id, err := m.AllocateTaskID(ctx)
+	id, err := m.AllocateTaskID(ctx, &AllocateTaskIDRequest{Kind: input.Type})
 	if err != nil {
 		return nil, nil, err
 	}
@@ -179,10 +177,22 @@ func (m *Manager) submitProcessLocal(ctx context.Context, input *RunInput, work 
 	if err != nil {
 		return nil, nil, err
 	}
-	task, err := m.Submit(ctx, processLocalSpec(id, input))
+	spec := processLocalSpec(id, input)
+	if err = m.local.ValidateSpec(spec); err != nil {
+		m.local.remove(id)
+		return nil, nil, err
+	}
+	if err = m.local.ValidateExecution(ctx, &Task{Spec: cloneSpec(spec)}); err != nil {
+		m.local.remove(id)
+		return nil, nil, err
+	}
+	task, err := m.store.CreateAndStart(ctx, &CreateTaskRequest{Spec: spec})
 	if err != nil {
 		m.local.remove(id)
-		return nil, nil, fmt.Errorf("backgroundtask: submit process-local task: %w", err)
+		return nil, nil, fmt.Errorf("backgroundtask: create and start process-local task: %w", err)
 	}
+	m.submittedMu.Lock()
+	m.submitted[task.Spec.ID] = struct{}{}
+	m.submittedMu.Unlock()
 	return task, entry, nil
 }

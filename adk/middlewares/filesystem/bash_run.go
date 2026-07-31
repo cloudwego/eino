@@ -43,12 +43,37 @@ const ExecuteTaskType = "bash"
 // such as OAuth URLs are not hidden in the background output file.
 const defaultBashStartupPreviewMs = 1_000
 
+const shellPayloadVersion = 1
+
+type shellPayloadV1 struct {
+	Version int    `json:"version"`
+	Command string `json:"command"`
+}
+
 // CommandFromTask returns the process-local shell task description.
 func CommandFromTask(t *backgroundtask.Task) string {
-	if t == nil || t.Spec.ExecutorKey == "" {
+	if t == nil || t.Spec.Kind != ExecuteTaskType {
 		return ""
 	}
-	return t.Spec.Description
+	payload, err := decodeShellPayload(t.Spec.Payload)
+	if err != nil {
+		return ""
+	}
+	return payload.Command
+}
+
+func decodeShellPayload(data []byte) (*shellPayloadV1, error) {
+	var payload shellPayloadV1
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return nil, err
+	}
+	if payload.Version != shellPayloadVersion {
+		return nil, backgroundtask.ErrUnsupportedPayloadVersion
+	}
+	if payload.Command == "" {
+		return nil, fmt.Errorf("filesystem: shell payload command is required")
+	}
+	return &payload, nil
 }
 
 // outputSink bundles the output-file configuration for a managed execute tool: a
@@ -73,11 +98,12 @@ type outputSink struct {
 // On the first append failure the file is left with a gap, so the writer reports
 // an unreliable typed update and stops attempting further writes.
 type bashOutputWriter struct {
-	store  filesystem.AppendOpener // nil => disabled
-	path   string
-	stream io.WriteCloser // opened lazily by the streaming work; nil => not open
-	ctx    context.Context
-	failed bool // set after the first append error: the file is now partial
+	store   filesystem.AppendOpener // nil => disabled
+	path    string
+	stream  io.WriteCloser // opened lazily by the streaming work; nil => not open
+	ctx     context.Context
+	runtime backgroundtask.ExecutionRuntime
+	failed  bool // set after the first append error: the file is now partial
 }
 
 // reserveBashOutput builds a writer that tees under the sink, or a disabled writer
@@ -110,36 +136,25 @@ func reserveBashOutput(ctx context.Context, sink outputSink) *bashOutputWriter {
 
 func (w *bashOutputWriter) fail(err error) error {
 	w.failed = true
-	if reportErr := w.report(false, err.Error()); reportErr != nil {
+	if w.runtime == nil {
+		return nil
+	}
+	if reportErr := w.runtime.ReportOutputFailure(w.ctx, err.Error()); reportErr != nil {
 		return fmt.Errorf("report output failure after %v: %w", err, reportErr)
 	}
 	return nil
-}
-
-func (w *bashOutputWriter) report(reliable bool, failure string) error {
-	if w.path == "" || w.ctx == nil {
-		return nil
-	}
-	_, err := json.Marshal(struct {
-		Path     string `json:"path"`
-		Reliable bool   `json:"reliable"`
-		Error    string `json:"error,omitempty"`
-	}{Path: w.path, Reliable: reliable, Error: failure})
-	return err
 }
 
 // open opens the streaming append session for a streaming run. ctx is the work's
 // context (detached from the caller), so the session outlives a backgrounded run.
 // On failure the writer is marked failed and the file unreliable, so subsequent
 // appends are no-ops. It is a no-op for a disabled writer.
-func (w *bashOutputWriter) open(ctx context.Context) error {
+func (w *bashOutputWriter) open(ctx context.Context, runtime backgroundtask.ExecutionRuntime) error {
 	if w.store == nil || w.failed {
 		return nil
 	}
 	w.ctx = ctx
-	if err := w.report(true, ""); err != nil {
-		return err
-	}
+	w.runtime = runtime
 	stream, err := w.store.OpenAppend(ctx, &filesystem.OpenAppendRequest{FilePath: w.path})
 	if err != nil {
 		return w.fail(err)
@@ -154,7 +169,11 @@ func (w *bashOutputWriter) append(content string) error {
 	if w.stream == nil || w.failed {
 		return nil
 	}
-	if _, err := io.WriteString(w.stream, content); err != nil {
+	n, err := io.WriteString(w.stream, content)
+	if err == nil && n != len(content) {
+		err = io.ErrShortWrite
+	}
+	if err != nil {
 		return w.fail(err)
 	}
 	return nil
@@ -182,8 +201,8 @@ func (w *bashOutputWriter) closeStream() error {
 // buffered (non-streaming) work, which produces no incremental chunks: it is just a
 // single-chunk stream, so it reuses the same open→append→close session as the
 // streaming path. It is a no-op for a disabled writer.
-func (w *bashOutputWriter) appendResult(ctx context.Context, content string) error {
-	if err := w.open(ctx); err != nil {
+func (w *bashOutputWriter) appendResult(ctx context.Context, runtime backgroundtask.ExecutionRuntime, content string) error {
+	if err := w.open(ctx, runtime); err != nil {
 		return err
 	}
 	if err := w.append(content); err != nil {
@@ -210,13 +229,13 @@ func outputFileName(ctx context.Context) string {
 // pushed down to the backend. On success it appends the result to the output file
 // (when one is configured) before returning, so it matches ResultData.
 func bashWork(sb filesystem.Shell, req *filesystem.ExecuteRequest, w *bashOutputWriter) backgroundtask.WorkFunc {
-	return func(ctx context.Context, _ backgroundtask.TaskInfo) (string, error) {
+	return func(ctx context.Context, runtime backgroundtask.ExecutionRuntime) (string, error) {
 		result, err := sb.Execute(ctx, req)
 		if err != nil {
 			return "", err
 		}
 		out := convExecuteResponse(result)
-		if err = w.appendResult(ctx, out); err != nil {
+		if err = w.appendResult(ctx, runtime, out); err != nil {
 			return "", err
 		}
 		return out, nil
@@ -241,14 +260,14 @@ func bashWork(sb filesystem.Shell, req *filesystem.ExecuteRequest, w *bashOutput
 // cancellation (the file is already incomplete in that case), which the AppendOpener
 // contract requires a resource-holding backend to honor.
 func bashStreamWork(sb filesystem.StreamingShell, req *filesystem.ExecuteRequest, w *bashOutputWriter) backgroundtask.StreamWorkFunc {
-	return func(ctx context.Context, _ backgroundtask.TaskInfo) (*schema.StreamReader[string], error) {
+	return func(ctx context.Context, runtime backgroundtask.ExecutionRuntime) (*schema.StreamReader[string], error) {
 		stream, err := sb.ExecuteStreaming(ctx, req)
 		if err != nil {
 			return nil, err
 		}
 		// Open the streaming append session under the work's (detached) context, so a
 		// backgrounded run keeps writing after the launching turn ends.
-		if err = w.open(ctx); err != nil {
+		if err = w.open(ctx, runtime); err != nil {
 			return nil, err
 		}
 
@@ -347,10 +366,16 @@ func newManagedExecuteTool(
 // managedRunInput builds the RunInput shared by the buffered and streaming managed
 // execute tools. w supplies the reserved output-file path (empty when output files
 // are not configured), which the work funcs write to.
-func managedRunInput(input executeManagedArgs) *backgroundtask.RunInput {
+func managedRunInput(input executeManagedArgs, writer *bashOutputWriter) (*backgroundtask.RunInput, error) {
+	payload, err := json.Marshal(shellPayloadV1{Version: shellPayloadVersion, Command: input.Command})
+	if err != nil {
+		return nil, err
+	}
 	runInput := &backgroundtask.RunInput{
 		Description:     input.Command,
 		Type:            ExecuteTaskType,
+		Payload:         payload,
+		OutputFile:      writer.path,
 		RunInBackground: input.RunInBackground,
 	}
 	// A positive timeout overrides the Manager's default foreground timeout for
@@ -359,14 +384,18 @@ func managedRunInput(input executeManagedArgs) *backgroundtask.RunInput {
 	if input.TimeoutMS > 0 {
 		runInput.ForegroundTimeoutMs = &input.TimeoutMS
 	}
-	return runInput
+	return runInput, nil
 }
 
 func newManagedBufferedExecuteTool(mgr *backgroundtask.Manager, sb filesystem.Shell, sink outputSink, toolName, desc string) (tool.BaseTool, error) {
 	return utils.InferTool(toolName, desc, func(ctx context.Context, input executeManagedArgs) (string, error) {
 		req := &filesystem.ExecuteRequest{Command: input.Command}
 		w := reserveBashOutput(ctx, sink)
-		result, err := mgr.Run(ctx, managedRunInput(input), bashWork(sb, req, w))
+		runInput, err := managedRunInput(input, w)
+		if err != nil {
+			return "", err
+		}
+		result, err := mgr.Run(ctx, runInput, bashWork(sb, req, w))
 		if err != nil {
 			return "", err
 		}
@@ -379,11 +408,11 @@ func newManagedBufferedExecuteTool(mgr *backgroundtask.Manager, sb filesystem.Sh
 			return string(result.ResultData), nil
 		case backgroundtask.StatusPending, backgroundtask.StatusRunning,
 			backgroundtask.StatusWaitingInput, backgroundtask.StatusSuspended, backgroundtask.StatusCanceling:
-			msg := fmt.Sprintf("Command task %s is %s.", result.Spec.ID, result.Status)
+			msg := fmt.Sprintf("Command running in background with ID: %s.", result.Spec.ID)
 			if w.path != "" {
 				msg += fmt.Sprintf(" Output is being written to: %s.", w.path)
 			}
-			msg += " Use task_output to inspect progress and completion."
+			msg += " You will be notified when it completes."
 			if w.path != "" {
 				msg += " To check interim output, use Read on that file path."
 			}
@@ -402,7 +431,10 @@ func newManagedStreamingExecuteTool(mgr *backgroundtask.Manager, streaming files
 	return utils.InferStreamTool(toolName, desc, func(ctx context.Context, input executeManagedArgs) (*schema.StreamReader[string], error) {
 		req := &filesystem.ExecuteRequest{Command: input.Command}
 		w := reserveBashOutput(ctx, sink)
-		runInput := managedRunInput(input)
+		runInput, err := managedRunInput(input, w)
+		if err != nil {
+			return nil, err
+		}
 		runInput.BackgroundStartupPreviewMs = defaultBashStartupPreviewMs
 		// RunStream owns the returned stream: it forwards work chunks to this caller
 		// in real time. An explicit background launch exposes only its bounded startup

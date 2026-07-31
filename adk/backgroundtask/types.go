@@ -18,6 +18,16 @@ package backgroundtask
 
 import "time"
 
+// LeaseExpiryPolicy controls how Store resolves an expired active attempt.
+type LeaseExpiryPolicy string
+
+const (
+	// LeaseExpiryRetry returns the task to pending for another durable attempt.
+	LeaseExpiryRetry LeaseExpiryPolicy = "retry"
+	// LeaseExpiryFail terminally fails work that cannot be reconstructed after process loss.
+	LeaseExpiryFail LeaseExpiryPolicy = "fail"
+)
+
 // NotificationTarget describes where lifecycle notifications should be routed.
 type NotificationTarget struct {
 	Kind     string
@@ -29,12 +39,15 @@ type NotificationTarget struct {
 type Spec struct {
 	ID          string
 	ExecutorKey string
+	Kind        string
 	Payload     []byte
 
-	Description string
-	SessionID   string
-	Notify      *NotificationTarget
-	CreatedAt   time.Time
+	Description       string
+	OutputFile        string
+	LeaseExpiryPolicy LeaseExpiryPolicy
+	SessionID         string
+	Notify            *NotificationTarget
+	CreatedAt         time.Time
 }
 
 // NotificationKind identifies the lifecycle transition that created a notification.
@@ -94,6 +107,13 @@ type StartTaskRequest struct {
 type HeartbeatRequest struct {
 	TaskID          string
 	ExpectedVersion int64
+}
+
+// ReportOutputFailureRequest records the first failure of an optional output transcript.
+type ReportOutputFailureRequest struct {
+	TaskID          string
+	ExpectedVersion int64
+	Error           string
 }
 
 // CompleteTaskRequest records successful task completion.

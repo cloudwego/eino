@@ -102,8 +102,9 @@ func TestTerminalTaskNotificationWakesParentSession_BitsUT(t *testing.T) {
 	store := backgroundtask.NewMemoryStore(nil)
 	spec := backgroundtask.Spec{
 		ID: "task-1", ExecutorKey: "test", Payload: []byte("{}"),
-		SessionID: "session-1",
-		Notify:    &backgroundtask.NotificationTarget{Kind: "session_inbox", TargetID: "session-1"},
+		LeaseExpiryPolicy: backgroundtask.LeaseExpiryRetry,
+		SessionID:         "session-1",
+		Notify:            &backgroundtask.NotificationTarget{Kind: "session_inbox", TargetID: "session-1"},
 	}
 	created, err := store.Create(context.Background(), &backgroundtask.CreateTaskRequest{Spec: spec})
 	require.NoError(t, err)

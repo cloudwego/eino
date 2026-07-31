@@ -43,15 +43,21 @@ var (
 	// compatible checkpoint. Manager stops renewing the current lease so expiry
 	// can redispatch from the last durable checkpoint.
 	ErrCheckpointUnavailable = errors.New("backgroundtask: checkpoint unavailable")
+	// ErrCloseDeadlineRequired reports that active tasks require a bounded Close context.
+	ErrCloseDeadlineRequired = errors.New("backgroundtask: close deadline is required while tasks are active")
+	// ErrUnsupportedPayloadVersion reports an executor payload version it cannot decode.
+	ErrUnsupportedPayloadVersion = errors.New("backgroundtask: unsupported payload version")
 )
 
 // Store persists task snapshots and authorizes semantic lifecycle transitions.
 type Store interface {
 	Create(context.Context, *CreateTaskRequest) (*Task, error)
+	CreateAndStart(context.Context, *CreateTaskRequest) (*Task, error)
 	Get(context.Context, string) (*Task, error)
 	ListPending(context.Context, *ListPendingRequest) (*ListPendingResult, error)
 	Start(context.Context, *StartTaskRequest) (*Task, error)
 	Heartbeat(context.Context, *HeartbeatRequest) (*Task, error)
+	ReportOutputFailure(context.Context, *ReportOutputFailureRequest) (*Task, error)
 	Complete(context.Context, *CompleteTaskRequest) (*Task, error)
 	Fail(context.Context, *FailTaskRequest) (*Task, error)
 	WaitInput(context.Context, *WaitInputTaskRequest) (*Task, error)
@@ -77,6 +83,9 @@ func validateSpec(spec Spec) error {
 	if spec.ID == "" || spec.ExecutorKey == "" {
 		return fmt.Errorf("backgroundtask: id and executor key are required")
 	}
+	if spec.LeaseExpiryPolicy != LeaseExpiryRetry && spec.LeaseExpiryPolicy != LeaseExpiryFail {
+		return fmt.Errorf("backgroundtask: lease expiry policy must be %q or %q", LeaseExpiryRetry, LeaseExpiryFail)
+	}
 	if spec.Notify != nil {
 		if spec.Notify.Kind == "" || spec.Notify.TargetID == "" {
 			return fmt.Errorf("backgroundtask: notification kind and target id are required")
@@ -92,6 +101,16 @@ func validateSpec(spec Spec) error {
 		if spec.Notify.Kind == "session_inbox" && spec.Notify.TargetID != spec.SessionID {
 			return fmt.Errorf("backgroundtask: session inbox target must match task session")
 		}
+	}
+	return nil
+}
+
+func validateOutputFailure(message string) error {
+	if message == "" {
+		return errors.New("backgroundtask: output failure requires an error")
+	}
+	if len(message) > 4096 {
+		return errors.New("backgroundtask: output failure exceeds configured bounds")
 	}
 	return nil
 }

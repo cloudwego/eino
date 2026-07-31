@@ -25,7 +25,6 @@ import (
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/adk/backgroundtask"
-	durablesubagent "github.com/cloudwego/eino/adk/backgroundtask/subagent"
 	"github.com/cloudwego/eino/adk/filesystem"
 	"github.com/cloudwego/eino/adk/internal"
 	backgroundtaskmw "github.com/cloudwego/eino/adk/middlewares/backgroundtask"
@@ -49,24 +48,21 @@ func init() {
 // It holds the shared Manager plus durable sub-agent identity and session
 // dependencies. Shell-specific output configuration remains OutputDir.
 type TypedBackgroundConfig[M adk.MessageType] struct {
-	// Manager is the shared background-task Manager. Required (a nil Manager is the
-	// same as no BackgroundConfig).
-	Manager         *backgroundtask.Manager
-	AgentRefs       map[string]durablesubagent.AgentRef
-	SessionID       func(context.Context) (string, error)
-	SessionStore    adk.SessionEventStore[M]
-	CheckPointStore adk.CheckPointStore
-	Authorize       backgroundtaskmw.AuthorizeFunc
-	// ManagerScopeIsolated asserts that this DeepAgent and its Manager task-ID
-	// space are already restricted to one authorized caller scope.
-	ManagerScopeIsolated bool
-
-	// OutputDir, when set together with Config.Backend, lets process-local shell
-	// tasks tee output to files and report their path/reliability as typed updates.
-	OutputDir string
+	Local   *TypedLocalBackgroundConfig[M]
+	Durable *TypedDurableBackgroundConfig[M]
 }
 
 type BackgroundConfig = TypedBackgroundConfig[*schema.Message]
+
+type TypedLocalBackgroundConfig[M adk.MessageType] struct {
+	Manager   *backgroundtask.Manager
+	OutputDir string
+}
+
+type TypedDurableBackgroundConfig[M adk.MessageType] struct {
+	Manager   *backgroundtask.Manager
+	OutputDir string
+}
 
 // TypedConfig defines the configuration for creating a DeepAgent parameterized by message type.
 // An Agentic DeepAgent (M = *schema.AgenticMessage) only supports Agentic sub-agents,
@@ -159,6 +155,17 @@ type Config = TypedConfig[*schema.Message]
 // This function initializes built-in tools, creates a task tool for subagent orchestration,
 // and returns a fully configured TypedChatModelAgent ready for execution.
 func NewTyped[M adk.MessageType](ctx context.Context, cfg *TypedConfig[M]) (adk.TypedResumableAgent[M], error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("deep: config is required")
+	}
+	if cfg.Background != nil {
+		if (cfg.Background.Local == nil) == (cfg.Background.Durable == nil) {
+			return nil, fmt.Errorf("deep: exactly one of Background.Local or Background.Durable is required")
+		}
+		if deepBackgroundManager(cfg.Background) == nil {
+			return nil, fmt.Errorf("deep: background Manager is required")
+		}
+	}
 	// Sub-agents never get the Manager: their shell runs stay foreground/buffered
 	// and they cannot launch background work (see Config.Manager).
 	subAgentHandlers, err := buildTypedBuiltinAgentMiddlewares(ctx, cfg, nil)
@@ -192,12 +199,8 @@ func NewTyped[M adk.MessageType](ctx context.Context, cfg *TypedConfig[M]) (adk.
 				ToolName:                 taskToolName,
 				ToolDescriptionGenerator: cfg.TaskToolDescriptionGenerator,
 			}
-			if cfg.Background != nil && cfg.Background.Manager != nil {
-				subCfg.Background = &subagent.TypedBackgroundConfig[M]{
-					Manager: cfg.Background.Manager, AgentRefs: cfg.Background.AgentRefs,
-					SessionID: cfg.Background.SessionID, SessionStore: cfg.Background.SessionStore,
-					CheckPointStore: cfg.Background.CheckPointStore,
-				}
+			if cfg.Background != nil {
+				subCfg.Background = deepSubagentBackground(cfg)
 			}
 			subagentMW, err := subagent.NewTyped(ctx, subCfg)
 			if err != nil {
@@ -209,10 +212,9 @@ func NewTyped[M adk.MessageType](ctx context.Context, cfg *TypedConfig[M]) (adk.
 
 	// When background support is configured, wire its control tools
 	// (task_output/task_stop) exactly once at the top level.
-	if cfg.Background != nil && cfg.Background.Manager != nil {
+	if manager := deepBackgroundManager(cfg.Background); manager != nil {
 		controlMW, err := backgroundtaskmw.NewTyped(ctx, &backgroundtaskmw.TypedConfig[M]{
-			Manager: cfg.Background.Manager, Authorize: cfg.Background.Authorize,
-			ManagerScopeIsolated: cfg.Background.ManagerScopeIsolated,
+			Manager: manager,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("failed to create background-task control middleware: %w", err)
@@ -337,11 +339,11 @@ func buildTypedBuiltinAgentMiddlewares[M adk.MessageType](ctx context.Context, c
 			Shell:          cfg.Shell,
 			StreamingShell: cfg.StreamingShell,
 		}
-		if background != nil && background.Manager != nil {
+		if manager := deepBackgroundManager(background); manager != nil {
 			mwCfg.Background = &filesystem2.BackgroundConfig{
-				Manager:     background.Manager,
+				Manager:     manager,
 				OutputStore: backendAppendOpener(cfg.Backend),
-				OutputDir:   background.OutputDir,
+				OutputDir:   deepBackgroundOutputDir(background),
 			}
 		}
 		fm, err := filesystem2.NewTyped[M](ctx, mwCfg)
@@ -352,6 +354,52 @@ func buildTypedBuiltinAgentMiddlewares[M adk.MessageType](ctx context.Context, c
 	}
 
 	return ms, nil
+}
+
+func deepBackgroundManager[M adk.MessageType](background *TypedBackgroundConfig[M]) *backgroundtask.Manager {
+	if background == nil {
+		return nil
+	}
+	if background.Local != nil {
+		return background.Local.Manager
+	}
+	if background.Durable != nil {
+		return background.Durable.Manager
+	}
+	return nil
+}
+
+func deepBackgroundOutputDir[M adk.MessageType](background *TypedBackgroundConfig[M]) string {
+	if background == nil {
+		return ""
+	}
+	if background.Local != nil {
+		return background.Local.OutputDir
+	}
+	if background.Durable != nil {
+		return background.Durable.OutputDir
+	}
+	return ""
+}
+
+func deepSubagentBackground[M adk.MessageType](
+	cfg *TypedConfig[M],
+) *subagent.TypedBackgroundConfig[M] {
+	outputStore := backendAppendOpener(cfg.Backend)
+	if cfg.Background.Local != nil {
+		return &subagent.TypedBackgroundConfig[M]{
+			Local: &subagent.TypedLocalBackgroundConfig[M]{
+				Manager: cfg.Background.Local.Manager, OutputStore: outputStore,
+				OutputDir: cfg.Background.Local.OutputDir,
+			},
+		}
+	}
+	return &subagent.TypedBackgroundConfig[M]{
+		Durable: &subagent.TypedDurableBackgroundConfig[M]{
+			Manager: cfg.Background.Durable.Manager, OutputStore: outputStore,
+			OutputDir: cfg.Background.Durable.OutputDir,
+		},
+	}
 }
 
 // backendAppendOpener returns b as a filesystem.AppendOpener when it supports

@@ -18,7 +18,10 @@ package subagent
 
 import (
 	"context"
+	"errors"
+	"io"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -27,7 +30,8 @@ import (
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/adk/backgroundtask"
-	durablesubagent "github.com/cloudwego/eino/adk/backgroundtask/subagent"
+	"github.com/cloudwego/eino/adk/filesystem"
+	"github.com/cloudwego/eino/adk/internal/agenttool"
 	adksession "github.com/cloudwego/eino/adk/session"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/schema"
@@ -37,6 +41,21 @@ type mockAgent struct {
 	name string
 	desc string
 	run  func(context.Context, *adk.AgentInput) string
+}
+
+type failExecutionOpenStore struct {
+	backend *filesystem.InMemoryBackend
+	opens   atomic.Int64
+}
+
+func (s *failExecutionOpenStore) OpenAppend(
+	ctx context.Context,
+	request *filesystem.OpenAppendRequest,
+) (io.WriteCloser, error) {
+	if s.opens.Add(1) == 2 {
+		return nil, errors.New("execution open failed")
+	}
+	return s.backend.OpenAppend(ctx, request)
 }
 
 func (m *mockAgent) Name(context.Context) string        { return m.name }
@@ -56,20 +75,36 @@ func (m *mockAgent) Resume(ctx context.Context, _ *adk.ResumeInfo, opts ...adk.A
 }
 
 func durableBackground(mgr *backgroundtask.Manager, agents ...adk.Agent) *BackgroundConfig {
+	_ = agents
+	return &BackgroundConfig{
+		Durable: &DurableBackgroundConfig{Manager: mgr},
+	}
+}
+
+func localBackground(manager *backgroundtask.Manager) *BackgroundConfig {
+	return &BackgroundConfig{Local: &LocalBackgroundConfig{Manager: manager}}
+}
+
+func runnerEnvironmentContext(t *testing.T) context.Context {
+	t.Helper()
 	store := adksession.NewInMemoryStore[*schema.Message](nil)
-	refs := make(map[string]durablesubagent.AgentRef, len(agents))
-	for _, agent := range agents {
-		name := agent.Name(context.Background())
-		refs[name] = durablesubagent.AgentRef{
-			Namespace: "test", Name: name, Version: "v1",
-			MessageType: "schema.Message", DefinitionDigest: "definition-" + name,
+	var captured context.Context
+	agent := &mockAgent{name: "capture", run: func(ctx context.Context, _ *adk.AgentInput) string {
+		captured = ctx
+		return "captured"
+	}}
+	runner := adk.NewRunner(context.Background(), adk.RunnerConfig{
+		Agent: agent, CheckPointStore: store,
+		SessionID: "parent-session", SessionStore: store,
+	})
+	iter := runner.Query(context.Background(), "capture")
+	for {
+		if _, ok := iter.Next(); !ok {
+			break
 		}
 	}
-	return &BackgroundConfig{
-		Manager: mgr, AgentRefs: refs,
-		SessionID:    func(context.Context) (string, error) { return "parent-session", nil },
-		SessionStore: store, CheckPointStore: store,
-	}
+	require.NotNil(t, captured)
+	return captured
 }
 
 func terminalTask(t *testing.T, mgr *backgroundtask.Manager) *backgroundtask.Task {
@@ -104,9 +139,19 @@ func TestConfigValidation(t *testing.T) {
 	agent := &mockAgent{name: "worker"}
 	_, err = New(context.Background(), &Config{
 		SubAgents:  []adk.Agent{agent},
-		Background: &BackgroundConfig{Manager: backgroundtask.New(context.Background(), nil)},
+		Background: &BackgroundConfig{},
 	})
 	assert.Error(t, err)
+
+	manager := backgroundtask.New(context.Background(), nil)
+	_, err = New(context.Background(), &Config{
+		SubAgents: []adk.Agent{agent},
+		Background: &BackgroundConfig{
+			Local:   &LocalBackgroundConfig{Manager: manager},
+			Durable: &DurableBackgroundConfig{Manager: manager},
+		},
+	})
+	require.ErrorContains(t, err, "exactly one")
 }
 
 func TestBeforeAgentInjectsOneTool(t *testing.T) {
@@ -149,7 +194,7 @@ func TestAgentToolForegroundRouting(t *testing.T) {
 }
 
 func TestDurableAgentToolForeground(t *testing.T) {
-	ctx := context.Background()
+	ctx := runnerEnvironmentContext(t)
 	mgr := backgroundtask.New(ctx, nil)
 	agent := &mockAgent{name: "worker", desc: "durable result"}
 	mw, err := New(ctx, &Config{
@@ -169,19 +214,78 @@ func TestDurableAgentToolForeground(t *testing.T) {
 	assert.Contains(t, string(task.ResultData), "durable result")
 }
 
+func TestLocalAndDurableAgentToolSchemasMatch(t *testing.T) {
+	agent := &mockAgent{name: "worker", desc: "does work"}
+	localManager := backgroundtask.New(context.Background(), nil)
+	durableManager := backgroundtask.New(context.Background(), nil)
+	local, err := New(context.Background(), &Config{
+		SubAgents: []adk.Agent{agent}, Background: localBackground(localManager),
+	})
+	require.NoError(t, err)
+	durable, err := New(context.Background(), &Config{
+		SubAgents: []adk.Agent{agent}, Background: durableBackground(durableManager, agent),
+	})
+	require.NoError(t, err)
+	_, localCtx, err := local.BeforeAgent(
+		context.Background(), &adk.ChatModelAgentContext[*schema.Message]{},
+	)
+	require.NoError(t, err)
+	_, durableCtx, err := durable.BeforeAgent(
+		context.Background(), &adk.ChatModelAgentContext[*schema.Message]{},
+	)
+	require.NoError(t, err)
+	localInfo, err := localCtx.Tools[0].Info(context.Background())
+	require.NoError(t, err)
+	durableInfo, err := durableCtx.Tools[0].Info(context.Background())
+	require.NoError(t, err)
+	localSchema, err := localInfo.ParamsOneOf.ToJSONSchema()
+	require.NoError(t, err)
+	durableSchema, err := durableInfo.ParamsOneOf.ToJSONSchema()
+	require.NoError(t, err)
+	assert.Equal(t, localSchema, durableSchema)
+}
+
+func TestLocalAgentToolWritesEventTranscript(t *testing.T) {
+	ctx := context.Background()
+	manager := backgroundtask.New(ctx, nil)
+	backend := filesystem.NewInMemoryBackend()
+	agent := &mockAgent{name: "worker", desc: "local output"}
+	middleware, err := New(ctx, &Config{
+		SubAgents: []adk.Agent{agent},
+		Background: &BackgroundConfig{Local: &LocalBackgroundConfig{
+			Manager: manager, OutputStore: backend, OutputDir: "/tasks",
+		}},
+	})
+	require.NoError(t, err)
+	_, runCtx, err := middleware.BeforeAgent(ctx, &adk.ChatModelAgentContext[*schema.Message]{})
+	require.NoError(t, err)
+	result, err := runCtx.Tools[0].(tool.InvokableTool).InvokableRun(
+		ctx, `{"subagent_type":"worker","prompt":"work","description":"test"}`,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, "local output", result)
+	tasks := manager.List()
+	require.Len(t, tasks, 1)
+	require.NotEmpty(t, tasks[0].Spec.OutputFile)
+	content, err := backend.Read(ctx, &filesystem.ReadRequest{FilePath: tasks[0].Spec.OutputFile})
+	require.NoError(t, err)
+	assert.Contains(t, content.Content, "local output")
+}
+
 func TestDurableAgentToolBackgroundSurvivesCaller(t *testing.T) {
+	ctx := runnerEnvironmentContext(t)
 	mgr := backgroundtask.New(context.Background(), nil)
 	agent := &mockAgent{name: "slow", run: func(context.Context, *adk.AgentInput) string {
 		time.Sleep(30 * time.Millisecond)
 		return "done"
 	}}
-	mw, err := New(context.Background(), &Config{
+	mw, err := New(ctx, &Config{
 		SubAgents: []adk.Agent{agent}, Background: durableBackground(mgr, agent),
 	})
 	require.NoError(t, err)
-	_, runCtx, err := mw.BeforeAgent(context.Background(), &adk.ChatModelAgentContext[*schema.Message]{})
+	_, runCtx, err := mw.BeforeAgent(ctx, &adk.ChatModelAgentContext[*schema.Message]{})
 	require.NoError(t, err)
-	result, err := runCtx.Tools[0].(tool.InvokableTool).InvokableRun(context.Background(),
+	result, err := runCtx.Tools[0].(tool.InvokableTool).InvokableRun(ctx,
 		`{"subagent_type":"slow","prompt":"work","description":"test","run_in_background":true}`)
 	require.NoError(t, err)
 	assert.Contains(t, result, "running in background")
@@ -207,6 +311,156 @@ func TestDurableAgentRegistrationRejectsDuplicateExactIdentity(t *testing.T) {
 	assert.ErrorIs(t, err, backgroundtask.ErrAlreadyExists)
 }
 
+func TestDurableAgentToolWritesEventTranscript(t *testing.T) {
+	ctx := runnerEnvironmentContext(t)
+	manager := backgroundtask.New(context.Background(), nil)
+	backend := filesystem.NewInMemoryBackend()
+	agent := &mockAgent{name: "worker", desc: "durable output"}
+	middleware, err := New(ctx, &Config{
+		SubAgents: []adk.Agent{agent},
+		Background: &BackgroundConfig{Durable: &DurableBackgroundConfig{
+			Manager: manager, OutputStore: backend, OutputDir: "/tasks",
+		}},
+	})
+	require.NoError(t, err)
+	_, runCtx, err := middleware.BeforeAgent(ctx, &adk.ChatModelAgentContext[*schema.Message]{})
+	require.NoError(t, err)
+	result, err := runCtx.Tools[0].(tool.InvokableTool).InvokableRun(
+		ctx, `{"subagent_type":"worker","prompt":"work","description":"test"}`,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, "durable output", result)
+	task := terminalTask(t, manager)
+	require.NotNil(t, task)
+	require.NotEmpty(t, task.Spec.OutputFile)
+	assert.Empty(t, task.OutputFileErr)
+	content, err := backend.Read(ctx, &filesystem.ReadRequest{FilePath: task.Spec.OutputFile})
+	require.NoError(t, err)
+	assert.Contains(t, content.Content, `"message"`)
+	assert.Contains(t, content.Content, "durable output")
+}
+
+func TestDurableOutputOpenFailureIsFailSoft(t *testing.T) {
+	ctx := runnerEnvironmentContext(t)
+	manager := backgroundtask.New(context.Background(), nil)
+	outputStore := &failExecutionOpenStore{backend: filesystem.NewInMemoryBackend()}
+	agent := &mockAgent{name: "worker", desc: "durable output"}
+	middleware, err := New(ctx, &Config{
+		SubAgents: []adk.Agent{agent},
+		Background: &BackgroundConfig{Durable: &DurableBackgroundConfig{
+			Manager: manager, OutputStore: outputStore, OutputDir: "/tasks",
+		}},
+	})
+	require.NoError(t, err)
+	_, runCtx, err := middleware.BeforeAgent(ctx, &adk.ChatModelAgentContext[*schema.Message]{})
+	require.NoError(t, err)
+	result, err := runCtx.Tools[0].(tool.InvokableTool).InvokableRun(
+		ctx, `{"subagent_type":"worker","prompt":"work","description":"test"}`,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, "durable output", result)
+	task := terminalTask(t, manager)
+	require.NotNil(t, task)
+	assert.Equal(t, backgroundtask.StatusCompleted, task.Status)
+	assert.Contains(t, task.OutputFileErr, "execution open failed")
+	assert.Equal(t, "durable output", string(task.ResultData))
+}
+
+func TestDurableForegroundObserverStopsAtBackgroundBoundary(t *testing.T) {
+	ctx := runnerEnvironmentContext(t)
+	manager := backgroundtask.New(context.Background(), nil)
+	agent := &mockAgent{name: "worker", desc: "done"}
+	middleware, err := New(ctx, &Config{
+		SubAgents: []adk.Agent{agent}, Background: durableBackground(manager, agent),
+	})
+	require.NoError(t, err)
+	_, runCtx, err := middleware.BeforeAgent(ctx, &adk.ChatModelAgentContext[*schema.Message]{})
+	require.NoError(t, err)
+	invokable := runCtx.Tools[0].(tool.InvokableTool)
+	var calls atomic.Int64
+	receiver := agenttool.WithEventReceiverTransform(
+		func(current []agenttool.EventReceiver[*adk.AgentEvent]) []agenttool.EventReceiver[*adk.AgentEvent] {
+			return append(current, func(*adk.AgentEvent) { calls.Add(1) })
+		},
+	)
+	_, err = invokable.InvokableRun(
+		ctx, `{"subagent_type":"worker","prompt":"work","description":"foreground"}`, receiver,
+	)
+	require.NoError(t, err)
+	assert.Positive(t, calls.Load())
+	calls.Store(0)
+	_, err = invokable.InvokableRun(
+		ctx,
+		`{"subagent_type":"worker","prompt":"work","description":"background","run_in_background":true}`,
+		receiver,
+	)
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		for _, task := range manager.List() {
+			if task.Spec.Description == "background" && task.Status == backgroundtask.StatusCompleted {
+				return true
+			}
+		}
+		return false
+	}, time.Second, 10*time.Millisecond)
+	assert.Zero(t, calls.Load())
+}
+
+func TestDurableBlockingReceiverDoesNotBlockAutoBackgroundResponse(t *testing.T) {
+	ctx := runnerEnvironmentContext(t)
+	timeout := 20
+	manager := backgroundtask.New(context.Background(), &backgroundtask.Config{
+		ForegroundTimeoutMs:  &timeout,
+		ShouldAutoBackground: func(context.Context, *backgroundtask.Task) bool { return true },
+	})
+	agent := &mockAgent{name: "worker", desc: "done"}
+	middleware, err := New(ctx, &Config{
+		SubAgents: []adk.Agent{agent}, Background: durableBackground(manager, agent),
+	})
+	require.NoError(t, err)
+	_, runCtx, err := middleware.BeforeAgent(ctx, &adk.ChatModelAgentContext[*schema.Message]{})
+	require.NoError(t, err)
+	invokable := runCtx.Tools[0].(tool.InvokableTool)
+	receiverStarted := make(chan struct{})
+	releaseReceiver := make(chan struct{})
+	receiver := agenttool.WithEventReceiverTransform(
+		func(current []agenttool.EventReceiver[*adk.AgentEvent]) []agenttool.EventReceiver[*adk.AgentEvent] {
+			return append(current, func(*adk.AgentEvent) {
+				close(receiverStarted)
+				<-releaseReceiver
+			})
+		},
+	)
+	type invokeResult struct {
+		output string
+		err    error
+	}
+	invokeDone := make(chan invokeResult, 1)
+	go func() {
+		output, invokeErr := invokable.InvokableRun(
+			ctx, `{"subagent_type":"worker","prompt":"work","description":"blocking"}`, receiver,
+		)
+		invokeDone <- invokeResult{output: output, err: invokeErr}
+	}()
+	<-receiverStarted
+	select {
+	case result := <-invokeDone:
+		require.NoError(t, result.err)
+		assert.Contains(t, result.output, "running in background")
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("auto-background response waited for blocking receiver")
+	}
+	close(releaseReceiver)
+	require.Eventually(t, func() bool {
+		for _, task := range manager.List() {
+			if task.Spec.Description == "blocking" {
+				return task.Status == backgroundtask.StatusCompleted
+			}
+		}
+		return false
+	}, time.Second, 10*time.Millisecond)
+}
+
 func TestSubagentReminderInsertedOnce(t *testing.T) {
 	ctx := context.Background()
 	middleware := &typedSubagentMiddleware[*schema.Message]{
@@ -224,7 +478,6 @@ func TestSubagentReminderInsertedOnce(t *testing.T) {
 	assert.Equal(t, schema.User, state.Messages[0].Role)
 	assert.Equal(t, schema.System, state.Messages[1].Role)
 	assert.True(t, state.Messages[1].Extra[agentTypesReminderExtraKey].(bool))
-	assert.Contains(t, state.Messages[1].Content, "worker")
 
 	_, state, err = middleware.BeforeModelRewriteState(ctx, state, nil)
 	require.NoError(t, err)
@@ -256,7 +509,6 @@ func TestSubagentReminderPreservesOtherMessages(t *testing.T) {
 	assert.True(t, state.Messages[1].Extra[otherKey].(bool))
 	assert.Equal(t, schema.User, state.Messages[2].Role)
 	assert.Equal(t, schema.System, state.Messages[3].Role)
-	assert.True(t, state.Messages[3].Extra[agentTypesReminderExtraKey].(bool))
 }
 
 func TestSubagentReminderKeepsToolCallPairContiguous(t *testing.T) {

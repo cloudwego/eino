@@ -50,14 +50,14 @@ func anyRunning(m *Manager) bool {
 
 // workReturning builds a WorkFunc that returns the given result/error immediately.
 func workReturning(result string, err error) WorkFunc {
-	return func(ctx context.Context, _ TaskInfo) (string, error) {
+	return func(ctx context.Context, _ ExecutionRuntime) (string, error) {
 		return result, err
 	}
 }
 
 // workSleeping builds a WorkFunc that sleeps then returns result.
 func workSleeping(d time.Duration, result string) WorkFunc {
-	return func(ctx context.Context, _ TaskInfo) (string, error) {
+	return func(ctx context.Context, _ ExecutionRuntime) (string, error) {
 		time.Sleep(d)
 		return result, nil
 	}
@@ -65,10 +65,41 @@ func workSleeping(d time.Duration, result string) WorkFunc {
 
 // workBlocking builds a WorkFunc that blocks until its context is canceled.
 func workBlocking() WorkFunc {
-	return func(ctx context.Context, _ TaskInfo) (string, error) {
+	return func(ctx context.Context, _ ExecutionRuntime) (string, error) {
 		<-ctx.Done()
 		return "", ctx.Err()
 	}
+}
+
+type outputFailureFaultStore struct {
+	Store
+	failReport bool
+	failFinal  bool
+	failCancel bool
+}
+
+func (s *outputFailureFaultStore) ReportOutputFailure(
+	context.Context,
+	*ReportOutputFailureRequest,
+) (*Task, error) {
+	if s.failReport {
+		return nil, errors.New("report unavailable")
+	}
+	return nil, errors.New("unexpected report path")
+}
+
+func (s *outputFailureFaultStore) Fail(ctx context.Context, request *FailTaskRequest) (*Task, error) {
+	if s.failFinal {
+		return nil, errors.New("fail unavailable")
+	}
+	return s.Store.Fail(ctx, request)
+}
+
+func (s *outputFailureFaultStore) Cancel(ctx context.Context, request *CancelTaskRequest) (*Task, error) {
+	if s.failCancel {
+		return nil, errors.New("cancel commit unavailable")
+	}
+	return s.Store.Cancel(ctx, request)
 }
 
 func run(m *Manager, description string, background bool, work WorkFunc) (*Task, error) {
@@ -159,7 +190,7 @@ func TestManager_RunBackground_SurvivesCallerCtxCancel(t *testing.T) {
 	started := make(chan struct{})
 	release := make(chan struct{})
 	result, err := m.Run(callerCtx, &RunInput{Description: "bg", RunInBackground: true},
-		func(ctx context.Context, _ TaskInfo) (string, error) {
+		func(ctx context.Context, _ ExecutionRuntime) (string, error) {
 			close(started)
 			select {
 			case <-release:
@@ -200,8 +231,7 @@ func TestManager_RunForeground_CallerCtxCancelStops(t *testing.T) {
 
 	result, err := m.Run(callerCtx, &RunInput{Description: "fg blocking"}, workBlocking())
 	require.NoError(t, err)
-	assert.Equal(t, StateCanceling, result.Status)
-	assert.Equal(t, StateCanceled, waitTask(t, m, result.Spec.ID).Status)
+	assert.Equal(t, StateCanceled, result.Status)
 }
 
 // The work context preserves the caller context's values (framework/session
@@ -215,7 +245,7 @@ func TestManager_RunBackground_PreservesCallerCtxValues(t *testing.T) {
 
 	got := make(chan interface{}, 1)
 	result, err := m.Run(callerCtx, &RunInput{Description: "bg", RunInBackground: true},
-		func(ctx context.Context, _ TaskInfo) (string, error) {
+		func(ctx context.Context, _ ExecutionRuntime) (string, error) {
 			got <- ctx.Value(key)
 			return "ok", nil
 		})
@@ -385,11 +415,92 @@ func TestManager_DeadlineKillsWhenNotBackgroundable(t *testing.T) {
 
 	result, err := run(m, "slow task", false, workBlocking())
 	require.NoError(t, err)
-	assert.Equal(t, StateCanceling, result.Status)
-
-	task := waitTask(t, m, result.Spec.ID)
-	assert.Equal(t, StateCanceled, task.Status)
+	assert.Equal(t, StateFailed, result.Status)
+	assert.Equal(t, "timed out after 50ms", result.ResultError)
 	assert.False(t, anyRunning(m)) // work was canceled
+}
+
+func TestManagerOutputFailureReportErrorCannotCompleteTask(t *testing.T) {
+	t.Run("final failure persists", func(t *testing.T) {
+		store := &outputFailureFaultStore{Store: NewMemoryStore(nil), failReport: true}
+		manager := New(context.Background(), &Config{Store: store})
+		task, err := manager.Run(context.Background(), &RunInput{
+			Description: "output", OutputFile: "/tasks/output",
+		}, func(ctx context.Context, runtime ExecutionRuntime) (string, error) {
+			return "", runtime.ReportOutputFailure(ctx, "write failed")
+		})
+		require.NoError(t, err)
+		assert.Equal(t, StatusFailed, task.Status)
+		assert.Contains(t, task.ResultError, "report unavailable")
+		assert.Empty(t, task.OutputFileErr)
+	})
+
+	t.Run("report and final failure return execute error", func(t *testing.T) {
+		store := &outputFailureFaultStore{
+			Store: NewMemoryStore(nil), failReport: true, failFinal: true,
+		}
+		manager := New(context.Background(), &Config{Store: store})
+		task, err := manager.Run(context.Background(), &RunInput{
+			Description: "output", OutputFile: "/tasks/output",
+		}, func(ctx context.Context, runtime ExecutionRuntime) (string, error) {
+			return "", runtime.ReportOutputFailure(ctx, "write failed")
+		})
+		require.ErrorContains(t, err, "fail unavailable")
+		assert.Nil(t, task)
+		tasks := manager.List()
+		require.Len(t, tasks, 1)
+		assert.NotEqual(t, StatusCompleted, tasks[0].Status)
+		assert.Empty(t, tasks[0].OutputFileErr)
+	})
+}
+
+func TestRunSubmittedSharesForegroundCoordinator(t *testing.T) {
+	t.Run("timeout becomes deterministic failure", func(t *testing.T) {
+		executor := &scriptedExecutor{
+			execute: func(
+				_ context.Context,
+				_ *Task,
+				runtime ExecutionRuntime,
+			) (*ExecutionResult, error) {
+				control := <-runtime.Controls()
+				return &ExecutionResult{Status: StatusFailed, Error: control.Reason}, nil
+			},
+		}
+		manager := managerWithExecutor(t, NewMemoryStore(nil), executor, time.Minute)
+		task, err := manager.Submit(context.Background(), validSpec("submitted-timeout"))
+		require.NoError(t, err)
+		timeout := 10
+		result, err := manager.RunSubmitted(context.Background(), &RunSubmittedRequest{
+			TaskID: task.Spec.ID, ForegroundTimeoutMs: &timeout,
+		})
+		require.NoError(t, err)
+		assert.Equal(t, StatusFailed, result.Status)
+		assert.Equal(t, "timed out after 10ms", result.ResultError)
+	})
+
+	t.Run("explicit background signal closes before execute", func(t *testing.T) {
+		backgrounded := make(chan bool, 1)
+		executor := &scriptedExecutor{
+			execute: func(
+				_ context.Context,
+				_ *Task,
+				runtime ExecutionRuntime,
+			) (*ExecutionResult, error) {
+				backgrounded <- isClosed(runtime.Backgrounded())
+				return &ExecutionResult{Status: StatusCompleted, Data: []byte("done")}, nil
+			},
+		}
+		manager := managerWithExecutor(t, NewMemoryStore(nil), executor, time.Minute)
+		task, err := manager.Submit(context.Background(), validSpec("submitted-background"))
+		require.NoError(t, err)
+		result, err := manager.RunSubmitted(context.Background(), &RunSubmittedRequest{
+			TaskID: task.Spec.ID, RunInBackground: true,
+		})
+		require.NoError(t, err)
+		assert.Equal(t, StatusRunning, result.Status)
+		assert.True(t, <-backgrounded)
+		assert.Equal(t, StatusCompleted, waitTask(t, manager, task.Spec.ID).Status)
+	})
 }
 
 // The hook receives the task so the business can decide per-run; here it backgrounds
@@ -409,8 +520,8 @@ func TestManager_ShouldAutoBackgroundPerTask(t *testing.T) {
 
 	killed, err := run(m, "oneshot", false, workBlocking())
 	require.NoError(t, err)
-	assert.Equal(t, StateCanceling, killed.Status)
-	assert.Equal(t, StateCanceled, waitTask(t, m, killed.Spec.ID).Status)
+	assert.Equal(t, StateFailed, killed.Status)
+	assert.Equal(t, "timed out after 40ms", killed.ResultError)
 
 	waitTask(t, m, bg.Spec.ID)
 }
@@ -520,7 +631,7 @@ func TestManager_Cancel_ForegroundReportsCanceled(t *testing.T) {
 	}()
 
 	result, err := m.Run(context.Background(), &RunInput{Description: "fg cancelable"},
-		func(ctx context.Context, _ TaskInfo) (string, error) {
+		func(ctx context.Context, _ ExecutionRuntime) (string, error) {
 			// Surface the task id to the canceller, then block until canceled.
 			for _, t := range m.List() {
 				started <- t.Spec.ID
@@ -624,6 +735,73 @@ func TestManager_Close(t *testing.T) {
 	assert.Contains(t, err.Error(), "shut down")
 }
 
+func TestManager_CloseRequiresDeadlineWhileTaskIsActive(t *testing.T) {
+	manager := New(context.Background(), &Config{})
+	task, err := run(manager, "active", true, workBlocking())
+	require.NoError(t, err)
+	err = manager.Close(context.Background())
+	assert.ErrorIs(t, err, ErrCloseDeadlineRequired)
+
+	completed, err := run(manager, "still-open", false, workReturning("done", nil))
+	require.NoError(t, err)
+	assert.Equal(t, StatusCompleted, completed.Status)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	require.NoError(t, manager.Close(ctx))
+	canceled := waitTask(t, manager, task.Spec.ID)
+	assert.Equal(t, StatusCanceled, canceled.Status)
+}
+
+func TestManagerCloseReturnsLocalCancelCommitFailure(t *testing.T) {
+	store := &outputFailureFaultStore{Store: NewMemoryStore(nil), failCancel: true}
+	manager := New(context.Background(), &Config{Store: store})
+	_, err := run(manager, "active", true, workBlocking())
+	require.NoError(t, err)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	err = manager.Close(ctx)
+	require.ErrorContains(t, err, "cancel commit unavailable")
+}
+
+func TestManagerCloseDrainsDurableAndCancelsLocalAtDeadline(t *testing.T) {
+	executor := &scriptedExecutor{
+		execute: func(
+			_ context.Context,
+			_ *Task,
+			runtime ExecutionRuntime,
+		) (*ExecutionResult, error) {
+			control := <-runtime.Controls()
+			if control.Kind != ControlDrain {
+				return nil, fmt.Errorf("unexpected control %q", control.Kind)
+			}
+			return &ExecutionResult{
+				Status: StatusSuspended, Checkpoint: []byte("checkpoint"),
+			}, nil
+		},
+	}
+	store := NewMemoryStore(nil)
+	manager := managerWithExecutor(t, store, executor, time.Minute)
+	durable, err := manager.Submit(context.Background(), validSpec("durable-close"))
+	require.NoError(t, err)
+	_, err = manager.RunSubmitted(context.Background(), &RunSubmittedRequest{
+		TaskID: durable.Spec.ID, RunInBackground: true,
+	})
+	require.NoError(t, err)
+	local, err := run(manager, "local-close", true, workBlocking())
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	require.NoError(t, manager.Close(ctx))
+	durableResult, err := store.Get(context.Background(), durable.Spec.ID)
+	require.NoError(t, err)
+	assert.Equal(t, StatusSuspended, durableResult.Status)
+	localResult, err := store.Get(context.Background(), local.Spec.ID)
+	require.NoError(t, err)
+	assert.Equal(t, StatusCanceled, localResult.Status)
+}
+
 func TestManager_RunAfterClose(t *testing.T) {
 	m := New(context.Background(), &Config{})
 	_ = m.Close(context.Background())
@@ -706,7 +884,7 @@ func TestManager_ContextCancelStopsWork(t *testing.T) {
 	defer closeWithTimeout(m)
 
 	started := make(chan struct{})
-	work := func(ctx context.Context, _ TaskInfo) (string, error) {
+	work := func(ctx context.Context, _ ExecutionRuntime) (string, error) {
 		close(started)
 		<-ctx.Done()
 		return "", errSentinel
@@ -745,8 +923,8 @@ func TestManager_Backgrounded_ExplicitClosedBeforeWork(t *testing.T) {
 	seen := make(chan bool, 1)
 	release := make(chan struct{})
 	result, err := m.Run(context.Background(), &RunInput{Description: "bg", RunInBackground: true},
-		func(_ context.Context, task TaskInfo) (string, error) {
-			seen <- isClosed(task.Backgrounded)
+		func(_ context.Context, runtime ExecutionRuntime) (string, error) {
+			seen <- isClosed(runtime.Backgrounded())
 			<-release
 			return "ok", nil
 		})
@@ -765,8 +943,8 @@ func TestManager_Backgrounded_ForegroundStaysOpen(t *testing.T) {
 	defer closeWithTimeout(m)
 
 	var duringRun bool
-	result, err := run(m, "fg", false, func(_ context.Context, task TaskInfo) (string, error) {
-		duringRun = isClosed(task.Backgrounded)
+	result, err := run(m, "fg", false, func(_ context.Context, runtime ExecutionRuntime) (string, error) {
+		duringRun = isClosed(runtime.Backgrounded())
 		return "ok", nil
 	})
 	require.NoError(t, err)
@@ -784,9 +962,9 @@ func TestManager_Backgrounded_AutoBackgroundCloses(t *testing.T) {
 	closedCh := make(chan struct{})
 	release := make(chan struct{})
 	result, err := m.Run(context.Background(), &RunInput{Description: "slow"},
-		func(_ context.Context, task TaskInfo) (string, error) {
+		func(_ context.Context, runtime ExecutionRuntime) (string, error) {
 			// Block until the deadline detaches the run, then confirm the signal fired.
-			<-task.Backgrounded
+			<-runtime.Backgrounded()
 			close(closedCh)
 			<-release
 			return "slow result", nil

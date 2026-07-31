@@ -18,6 +18,7 @@ package filesystem
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"strings"
@@ -175,7 +176,7 @@ func TestManagedExecuteTool_Background(t *testing.T) {
 
 	result, err := invokeTool(t, findExecuteTool(t, tools), `{"command":"sleep 1","run_in_background":true}`)
 	require.NoError(t, err)
-	assert.Contains(t, result, "is running")
+	assert.Contains(t, result, "Command running in background with ID:")
 
 	waitAllTasks(t, mgr)
 	tasks := mgr.List()
@@ -211,7 +212,7 @@ func TestManagedExecuteTool_TimeoutMovesToBackground(t *testing.T) {
 	// timeout=50ms < 200ms command → moved to background.
 	result, err := invokeTool(t, tools[0], `{"command":"sleep","timeout":50}`)
 	require.NoError(t, err)
-	assert.Contains(t, result, "is running")
+	assert.Contains(t, result, "Command running in background with ID:")
 
 	waitAllTasks(t, mgr)
 	tasks := mgr.List()
@@ -237,12 +238,31 @@ func TestManagedExecuteTool_TimeoutKills(t *testing.T) {
 	require.NoError(t, err)
 
 	_, err = invokeTool(t, tools[0], `{"command":"sleep","timeout":50}`)
-	require.NoError(t, err)
+	require.ErrorContains(t, err, "timed out after 50ms")
 
 	waitAllTasks(t, mgr)
 	tasks := mgr.List()
 	require.Len(t, tasks, 1)
-	assert.Equal(t, backgroundtask.StateCanceled, tasks[0].Status)
+	assert.Equal(t, backgroundtask.StateFailed, tasks[0].Status)
+	assert.Equal(t, "timed out after 50ms", tasks[0].ResultError)
+}
+
+func TestShellPayloadV1AndCommandFromTask(t *testing.T) {
+	input, err := managedRunInput(executeManagedArgs{
+		executeArgs: executeArgs{Command: "echo hello"},
+	}, &bashOutputWriter{})
+	require.NoError(t, err)
+	task := &backgroundtask.Task{Spec: backgroundtask.Spec{
+		Kind: ExecuteTaskType, Payload: input.Payload,
+	}}
+	assert.Equal(t, "echo hello", CommandFromTask(task))
+
+	payload := shellPayloadV1{Version: 2, Command: "echo hello"}
+	task.Spec.Payload, err = json.Marshal(payload)
+	require.NoError(t, err)
+	assert.Empty(t, CommandFromTask(task))
+	_, err = decodeShellPayload(task.Spec.Payload)
+	assert.ErrorIs(t, err, backgroundtask.ErrUnsupportedPayloadVersion)
 }
 
 // With a Manager, the execute tool schema gains run_in_background and timeout fields.

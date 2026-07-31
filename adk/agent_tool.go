@@ -64,9 +64,7 @@ func WithAgentInputSchema(schema *schema.ParamsOneOf) AgentToolOption {
 }
 
 func withAgentToolEnableStreaming(enabled bool) tool.Option {
-	return tool.WrapImplSpecificOptFn(func(opt *agentToolOptions) {
-		opt.enableStreaming = enabled
-	})
+	return agenttool.WithInvocationStreaming[AgentRunOption](enabled)
 }
 
 // NewAgentTool creates a tool that wraps an agent for invocation.
@@ -328,19 +326,8 @@ func (at *typedAgentTool[M]) InvokableRun(ctx context.Context, argumentsInJSON s
 	return ret, nil
 }
 
-// agentToolOptions is a wrapper structure used to convert AgentRunOption slices to tool.Option.
-// It stores the agent name and corresponding run options for tool-specific processing.
-type agentToolOptions struct {
-	agentName       string
-	opts            []AgentRunOption
-	enableStreaming bool
-}
-
 func withAgentToolOptions(agentName string, opts []AgentRunOption) tool.Option {
-	return tool.WrapImplSpecificOptFn(func(opt *agentToolOptions) {
-		opt.agentName = agentName
-		opt.opts = opts
-	})
+	return agenttool.WithInvocationOptions(agentName, opts)
 }
 
 func withParentEventReceiver[M MessageType](gen *AsyncGenerator[*TypedAgentEvent[M]]) tool.Option {
@@ -355,14 +342,11 @@ func withParentEventReceiver[M MessageType](gen *AsyncGenerator[*TypedAgentEvent
 }
 
 func getOptionsByAgentName(agentName string, opts []tool.Option) []AgentRunOption {
-	var ret []AgentRunOption
-	for _, opt := range opts {
-		o := tool.GetImplSpecificOptions[agentToolOptions](nil, opt)
-		if o != nil && o.agentName == agentName {
-			ret = append(ret, o.opts...)
-		}
-	}
-	return ret
+	_, _, resolved := agenttool.ResolveInvocationOptions[
+		*TypedAgentEvent[Message],
+		AgentRunOption,
+	](agentName, opts...)
+	return resolved
 }
 
 func extractAndDeriveAgentToolCancelCtx(ctx context.Context, agentName string, opts []tool.Option) []AgentRunOption {
@@ -372,14 +356,10 @@ func extractAndDeriveAgentToolCancelCtx(ctx context.Context, agentName string, o
 }
 
 func getEventReceiversAndEnableStreaming[M MessageType](opts []tool.Option) ([]agenttool.EventReceiver[*TypedAgentEvent[M]], bool) {
-	o := tool.GetImplSpecificOptions[agentToolOptions](nil, opts...)
-	receivers := agenttool.ResolveEventReceivers[*TypedAgentEvent[M]](opts...)
-
-	var enableStreaming bool
-	if o != nil {
-		enableStreaming = o.enableStreaming
-	}
-
+	receivers, enableStreaming, _ := agenttool.ResolveInvocationOptions[
+		*TypedAgentEvent[M],
+		AgentRunOption,
+	]("", opts...)
 	return receivers, enableStreaming
 }
 

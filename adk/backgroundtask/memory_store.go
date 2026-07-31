@@ -117,6 +117,32 @@ func (s *MemoryStore) Create(_ context.Context, req *CreateTaskRequest) (*Task, 
 	return cloneTask(task), nil
 }
 
+func (s *MemoryStore) CreateAndStart(_ context.Context, req *CreateTaskRequest) (*Task, error) {
+	if req == nil {
+		return nil, errors.New("backgroundtask: create and start request is required")
+	}
+	if err := validateSpec(req.Spec); err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.tasks[req.Spec.ID]; ok {
+		return nil, ErrAlreadyExists
+	}
+	now := s.now()
+	spec := cloneSpec(req.Spec)
+	if spec.CreatedAt.IsZero() {
+		spec.CreatedAt = now
+	}
+	task := &Task{
+		Spec: spec, Status: StatusRunning, Version: 1, Attempt: 1, UpdatedAt: now,
+	}
+	s.tasks[spec.ID] = task
+	s.active[spec.ID] = memoryActiveAttempt{expiresAt: now.Add(s.activeTimeout)}
+	s.signalLocked()
+	return cloneTask(task), nil
+}
+
 func (s *MemoryStore) Get(_ context.Context, taskID string) (*Task, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -217,6 +243,28 @@ func (s *MemoryStore) Heartbeat(_ context.Context, req *HeartbeatRequest) (*Task
 	return cloneTask(t), nil
 }
 
+func (s *MemoryStore) ReportOutputFailure(_ context.Context, req *ReportOutputFailureRequest) (*Task, error) {
+	if req == nil {
+		return nil, errors.New("backgroundtask: report output failure request is required")
+	}
+	if err := validateOutputFailure(req.Error); err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	t, err := s.activeTaskLocked(req.TaskID, req.ExpectedVersion, StatusRunning, StatusCanceling)
+	if err != nil {
+		return nil, err
+	}
+	if t.OutputFileErr != "" {
+		return cloneTask(t), nil
+	}
+	t.OutputFileErr = req.Error
+	s.advanceLocked(t)
+	s.signalLocked()
+	return cloneTask(t), nil
+}
+
 func (s *MemoryStore) Complete(_ context.Context, req *CompleteTaskRequest) (*Task, error) {
 	if req == nil {
 		return nil, errors.New("backgroundtask: complete request is required")
@@ -229,7 +277,7 @@ func (s *MemoryStore) Complete(_ context.Context, req *CompleteTaskRequest) (*Ta
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	t, err := s.activeTaskLocked(req.TaskID, req.ExpectedVersion, StatusRunning, StatusCanceling)
+	t, err := s.activeTaskLocked(req.TaskID, req.ExpectedVersion, StatusRunning)
 	if err != nil {
 		return nil, err
 	}
@@ -249,7 +297,7 @@ func (s *MemoryStore) Fail(_ context.Context, req *FailTaskRequest) (*Task, erro
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	t, err := s.activeTaskLocked(req.TaskID, req.ExpectedVersion, StatusRunning, StatusCanceling)
+	t, err := s.activeTaskLocked(req.TaskID, req.ExpectedVersion, StatusRunning)
 	if err != nil {
 		return nil, err
 	}
@@ -563,10 +611,16 @@ func (s *MemoryStore) resolveExpiredLocked(t *Task) {
 		s.finishStoreOwnedLocked(t)
 		return
 	}
-	t.Status = StatusPending
-	t.PendingResume = nil
-	s.advanceLocked(t)
-	s.signalLocked()
+	if t.Spec.LeaseExpiryPolicy == LeaseExpiryRetry {
+		t.Status = StatusPending
+		t.PendingResume = nil
+		s.advanceLocked(t)
+		s.signalLocked()
+		return
+	}
+	t.Status = StatusFailed
+	t.ResultError = "execution lease expired and retry is disabled"
+	s.finishStoreOwnedLocked(t)
 }
 
 func (s *MemoryStore) finishStoreOwnedLocked(t *Task) {

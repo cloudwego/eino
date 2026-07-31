@@ -18,6 +18,7 @@ package backgroundtask
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"strings"
 	"testing"
@@ -26,50 +27,45 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestBase62(t *testing.T) {
-	assert.Equal(t, "0", base62(0))
-	assert.Equal(t, "A", base62(10))
-	const alphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
-	for _, n := range []int64{1, 61, 100, 1 << 40, (1 << 63) - 1} {
-		value := base62(n)
-		require.NotEmpty(t, value)
-		for _, character := range value {
-			assert.True(t, strings.ContainsRune(alphabet, character))
-		}
-	}
-}
-
 func TestAllocateTaskIDIsOpaqueAndDoesNotCreateRecord(t *testing.T) {
 	manager := New(context.Background(), nil)
 	defer closeWithTimeout(manager)
 
-	seen := make(map[string]struct{}, 20_000)
-	for i := 0; i < 20_000; i++ {
-		id, err := manager.AllocateTaskID(context.Background())
-		require.NoError(t, err)
-		require.NotEmpty(t, id)
-		_, duplicate := seen[id]
-		require.False(t, duplicate)
-		seen[id] = struct{}{}
+	seen := make(map[string]struct{}, 1000)
+	for _, kind := range []string{"", "subagent", "bash"} {
+		for i := 0; i < 1000; i++ {
+			id, err := manager.AllocateTaskID(
+				context.Background(), &AllocateTaskIDRequest{Kind: kind},
+			)
+			require.NoError(t, err)
+			prefix := taskIDPrefix(kind) + "_"
+			require.True(t, strings.HasPrefix(id, prefix))
+			entropy, decodeErr := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(id, prefix))
+			require.NoError(t, decodeErr)
+			assert.Len(t, entropy, taskIDEntropyBytes)
+			_, duplicate := seen[id]
+			require.False(t, duplicate)
+			seen[id] = struct{}{}
+		}
 	}
 	assert.Empty(t, manager.List())
 }
 
 type taskIDContextKey struct{}
 
-func TestAllocateTaskIDGeneratorReceivesNoDomainInput(t *testing.T) {
+func TestAllocateTaskIDGeneratorReceivesKind(t *testing.T) {
 	const wantID = "opaque-id"
 	ctx := context.WithValue(context.Background(), taskIDContextKey{}, "trace-1")
 	manager := New(context.Background(), &Config{
-		IDGen: func(ctx context.Context, input *RunInput) (string, error) {
-			assert.Empty(t, input.Type)
+		IDGen: func(ctx context.Context, request *AllocateTaskIDRequest) (string, error) {
+			assert.Equal(t, "subagent", request.Kind)
 			assert.Equal(t, "trace-1", ctx.Value(taskIDContextKey{}))
 			return wantID, nil
 		},
 	})
 	defer closeWithTimeout(manager)
 
-	id, err := manager.AllocateTaskID(ctx)
+	id, err := manager.AllocateTaskID(ctx, &AllocateTaskIDRequest{Kind: "subagent"})
 	require.NoError(t, err)
 	assert.Equal(t, wantID, id)
 	assert.Empty(t, manager.List())
@@ -78,10 +74,10 @@ func TestAllocateTaskIDGeneratorReceivesNoDomainInput(t *testing.T) {
 func TestAllocateTaskIDRejectsInvalidGeneratorOutput(t *testing.T) {
 	t.Run("empty", func(t *testing.T) {
 		manager := New(context.Background(), &Config{
-			IDGen: func(context.Context, *RunInput) (string, error) { return "", nil },
+			IDGen: func(context.Context, *AllocateTaskIDRequest) (string, error) { return "", nil },
 		})
 		defer closeWithTimeout(manager)
-		_, err := manager.AllocateTaskID(context.Background())
+		_, err := manager.AllocateTaskID(context.Background(), &AllocateTaskIDRequest{})
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "empty id")
 	})
@@ -89,10 +85,24 @@ func TestAllocateTaskIDRejectsInvalidGeneratorOutput(t *testing.T) {
 	t.Run("error", func(t *testing.T) {
 		wantErr := errors.New("allocate id")
 		manager := New(context.Background(), &Config{
-			IDGen: func(context.Context, *RunInput) (string, error) { return "", wantErr },
+			IDGen: func(context.Context, *AllocateTaskIDRequest) (string, error) { return "", wantErr },
 		})
 		defer closeWithTimeout(manager)
-		_, err := manager.AllocateTaskID(context.Background())
+		_, err := manager.AllocateTaskID(context.Background(), &AllocateTaskIDRequest{})
 		assert.ErrorIs(t, err, wantErr)
 	})
+}
+
+func TestAllocateTaskIDRejectsClosedManagerBeforeCustomGenerator(t *testing.T) {
+	var calls int
+	manager := New(context.Background(), &Config{
+		IDGen: func(context.Context, *AllocateTaskIDRequest) (string, error) {
+			calls++
+			return "host-id", nil
+		},
+	})
+	require.NoError(t, manager.Close(context.Background()))
+	_, err := manager.AllocateTaskID(context.Background(), &AllocateTaskIDRequest{Kind: "bash"})
+	require.ErrorContains(t, err, "shut down")
+	assert.Zero(t, calls)
 }

@@ -23,6 +23,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/cloudwego/eino/adk/backgroundtask"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -308,4 +309,89 @@ func TestResumeWithMissingCheckpoint(t *testing.T) {
 			}
 		}
 	}, "ResumeWithParams with nonexistent checkpoint should not panic")
+}
+
+type runnerEnvironmentSessionStore struct{}
+
+func (*runnerEnvironmentSessionStore) LoadEvents(
+	context.Context,
+	string,
+	*LoadSessionEventsRequest,
+) (*LoadSessionEventsResult[*schema.Message], error) {
+	return &LoadSessionEventsResult[*schema.Message]{}, nil
+}
+
+func (*runnerEnvironmentSessionStore) AppendEvents(
+	context.Context,
+	string,
+	[]*SessionEvent[*schema.Message],
+) error {
+	return nil
+}
+
+type runnerEnvironmentExecutor struct {
+	environment *TypedRunnerEnvironment[*schema.Message]
+}
+
+func (*runnerEnvironmentExecutor) Key() string                            { return "runner-environment-test" }
+func (*runnerEnvironmentExecutor) ValidateSpec(backgroundtask.Spec) error { return nil }
+func (e *runnerEnvironmentExecutor) ValidateExecution(ctx context.Context, _ *backgroundtask.Task) error {
+	environment, ok := TypedRunnerEnvironmentFromContext[*schema.Message](ctx)
+	if !ok {
+		return context.Canceled
+	}
+	e.environment = environment
+	return nil
+}
+func (*runnerEnvironmentExecutor) ValidateCheckpoint(context.Context, backgroundtask.Spec, []byte) error {
+	return nil
+}
+func (*runnerEnvironmentExecutor) ValidateResume(
+	context.Context,
+	backgroundtask.Spec,
+	[]byte,
+	[]byte,
+) ([]byte, error) {
+	return nil, nil
+}
+func (*runnerEnvironmentExecutor) SupportsDrain() bool { return false }
+func (*runnerEnvironmentExecutor) Execute(
+	context.Context,
+	*backgroundtask.Task,
+	backgroundtask.ExecutionRuntime,
+) (*backgroundtask.ExecutionResult, error) {
+	return &backgroundtask.ExecutionResult{
+		Status: backgroundtask.StatusCompleted, Data: []byte("done"),
+	}, nil
+}
+
+func TestRunnerExecuteBackgroundTaskBindsEnvironmentBeforeStart(t *testing.T) {
+	sessionStore := &runnerEnvironmentSessionStore{}
+	checkPointStore := newMyStore()
+	executor := &runnerEnvironmentExecutor{}
+	registry := backgroundtask.NewExecutorRegistry()
+	require.NoError(t, registry.Register(executor))
+	manager := backgroundtask.New(context.Background(), &backgroundtask.Config{Executors: registry})
+	task, err := manager.Submit(context.Background(), backgroundtask.Spec{
+		ID: "task_secret", ExecutorKey: executor.Key(), Kind: "test",
+		LeaseExpiryPolicy: backgroundtask.LeaseExpiryRetry,
+	})
+	require.NoError(t, err)
+
+	err = manager.Execute(context.Background(), task.Spec.ID)
+	require.ErrorIs(t, err, context.Canceled)
+	pending, err := manager.GetTask(context.Background(), task.Spec.ID)
+	require.NoError(t, err)
+	assert.Equal(t, backgroundtask.StatusPending, pending.Status)
+
+	runner := NewRunner(context.Background(), RunnerConfig{
+		Agent:     &mockRunnerAgent{name: "runner", description: "runner"},
+		SessionID: "parent-session", SessionStore: sessionStore,
+		CheckPointStore: checkPointStore,
+	})
+	require.NoError(t, runner.ExecuteBackgroundTask(context.Background(), manager, task.Spec.ID))
+	require.NotNil(t, executor.environment)
+	assert.Equal(t, "parent-session", executor.environment.SessionID())
+	assert.Same(t, sessionStore, executor.environment.SessionStore())
+	assert.Same(t, checkPointStore, executor.environment.CheckPointStore())
 }

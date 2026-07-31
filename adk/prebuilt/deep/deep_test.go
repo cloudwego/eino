@@ -25,11 +25,11 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/mock/gomock"
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/adk/backgroundtask"
-	durablesubagent "github.com/cloudwego/eino/adk/backgroundtask/subagent"
 	"github.com/cloudwego/eino/adk/filesystem"
 	filesystem2 "github.com/cloudwego/eino/adk/middlewares/filesystem"
 	"github.com/cloudwego/eino/adk/prebuilt/planexecute"
@@ -420,7 +420,7 @@ func TestDeepAgentManagerWiring(t *testing.T) {
 	handlers, err := buildTypedBuiltinAgentMiddlewares(ctx, &Config{
 		WithoutWriteTodos: true,
 		Shell:             &deepMockShell{},
-	}, &BackgroundConfig{Manager: mgr, ManagerScopeIsolated: true})
+	}, &BackgroundConfig{Local: &TypedLocalBackgroundConfig[*schema.Message]{Manager: mgr}})
 	assert.NoError(t, err)
 	assert.Len(t, handlers, 1)
 
@@ -452,6 +452,18 @@ func TestDeepAgentManagerWiring(t *testing.T) {
 	assert.False(t, ok, "unmanaged execute must not expose run_in_background")
 }
 
+func TestDeepBackgroundConfigIsStrictUnion(t *testing.T) {
+	_, err := New(context.Background(), &Config{Background: &BackgroundConfig{}})
+	require.ErrorContains(t, err, "exactly one")
+
+	manager := backgroundtask.New(context.Background(), nil)
+	_, err = New(context.Background(), &Config{Background: &BackgroundConfig{
+		Local:   &TypedLocalBackgroundConfig[*schema.Message]{Manager: manager},
+		Durable: &TypedDurableBackgroundConfig[*schema.Message]{Manager: manager},
+	}})
+	require.ErrorContains(t, err, "exactly one")
+}
+
 // NewTyped with a Manager injects the task_output/task_stop control tools and a
 // background-capable subagent tool exactly once at the top level.
 func TestDeepAgentNewTypedWithManager(t *testing.T) {
@@ -460,23 +472,13 @@ func TestDeepAgentNewTypedWithManager(t *testing.T) {
 	defer func() { _ = mgr.Close(ctx) }()
 
 	cm := mockModel.NewMockToolCallingChatModel(gomock.NewController(t))
-	store := adksession.NewInMemoryStore[*schema.Message](nil)
-
 	agent, err := New(ctx, &Config{
 		Name:        "deep",
 		Description: "deep agent",
 		ChatModel:   cm,
 		Shell:       &deepMockShell{},
 		Background: &BackgroundConfig{
-			Manager: mgr, ManagerScopeIsolated: true,
-			AgentRefs: map[string]durablesubagent.AgentRef{
-				generalAgentName: {
-					Namespace: "test", Name: generalAgentName, Version: "v1",
-					MessageType: "schema.Message", DefinitionDigest: "general-definition",
-				},
-			},
-			SessionID:    func(context.Context) (string, error) { return "parent-session", nil },
-			SessionStore: store, CheckPointStore: store,
+			Durable: &TypedDurableBackgroundConfig[*schema.Message]{Manager: mgr},
 		},
 	})
 	assert.NoError(t, err)

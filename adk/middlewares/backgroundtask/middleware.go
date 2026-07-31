@@ -26,7 +26,6 @@ package backgroundtask
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -72,32 +71,12 @@ type TypedConfig[M adk.MessageType] struct {
 	// It is typically the same Manager the domain middlewares (subagent, filesystem)
 	// were given, so a single task-ID space spans agent and shell runs.
 	Manager *bgtask.Manager
-	// Authorize runs before a control can reveal task existence or mutate state.
-	// Hosts derive principals and tenancy from ctx; core task records remain neutral.
-	Authorize AuthorizeFunc
-	// ManagerScopeIsolated explicitly asserts that the injected tools and Manager
-	// task-ID space are restricted to one already-authorized caller scope. Set this
-	// only when no per-call Authorize hook is necessary.
-	ManagerScopeIsolated bool
 
 	// TaskOutputToolConfig configures the task_output tool. Optional.
 	TaskOutputToolConfig *ToolConfig
 	// TaskStopToolConfig configures the task_stop tool. Optional.
 	TaskStopToolConfig *ToolConfig
 }
-
-// ControlOperation is the task-control operation requested by an injected tool.
-type ControlOperation string
-
-const (
-	// ControlRead authorizes reading task output.
-	ControlRead ControlOperation = "read"
-	// ControlStop authorizes requesting task cancellation.
-	ControlStop ControlOperation = "stop"
-)
-
-// AuthorizeFunc decides whether a caller may perform a task-control operation.
-type AuthorizeFunc func(ctx context.Context, operation ControlOperation, taskID string) error
 
 // New creates a middleware that injects the task_output and task_stop tools, bound
 // to the Manager in config, for the standard *schema.Message message type.
@@ -111,9 +90,6 @@ func NewTyped[M adk.MessageType](_ context.Context, config *TypedConfig[M]) (adk
 	if config == nil || config.Manager == nil {
 		return nil, fmt.Errorf("backgroundtask: Manager is required")
 	}
-	if config.Authorize == nil && !config.ManagerScopeIsolated {
-		return nil, fmt.Errorf("backgroundtask: Authorize or isolated Manager scope is required")
-	}
 	mgr := config.Manager
 
 	outputEnabled := !disabled(config.TaskOutputToolConfig)
@@ -121,14 +97,14 @@ func NewTyped[M adk.MessageType](_ context.Context, config *TypedConfig[M]) (adk
 
 	var tools []tool.BaseTool
 	if outputEnabled {
-		outputTool, err := newTaskOutputTool(mgr, config.Authorize, config.TaskOutputToolConfig)
+		outputTool, err := newTaskOutputTool(mgr, config.TaskOutputToolConfig)
 		if err != nil {
 			return nil, fmt.Errorf("backgroundtask: failed to create task_output tool: %w", err)
 		}
 		tools = append(tools, outputTool)
 	}
 	if stopEnabled {
-		stopTool, err := newTaskStopTool(mgr, config.Authorize, config.TaskStopToolConfig)
+		stopTool, err := newTaskStopTool(mgr, config.TaskStopToolConfig)
 		if err != nil {
 			return nil, fmt.Errorf("backgroundtask: failed to create task_stop tool: %w", err)
 		}
@@ -232,15 +208,10 @@ const (
 	maxTaskOutputTimeoutMs     = 600000
 )
 
-func newTaskOutputTool(mgr *bgtask.Manager, authorize AuthorizeFunc, cfg *ToolConfig) (tool.InvokableTool, error) {
+func newTaskOutputTool(mgr *bgtask.Manager, cfg *ToolConfig) (tool.InvokableTool, error) {
 	name := selectToolName(cfg, taskOutputToolName)
 	desc := selectToolDesc(cfg, taskOutputToolDescription, taskOutputToolDescriptionChinese)
 	return utils.InferTool(name, desc, func(ctx context.Context, input taskOutputInput) (string, error) {
-		if authorize != nil {
-			if err := authorize(ctx, ControlRead, input.TaskID); err != nil {
-				return "Task access denied", nil
-			}
-		}
 		if task, err := mgr.GetTask(ctx, input.TaskID); err == nil {
 			return resolveDurableTask(ctx, mgr, task, input)
 		} else if errors.Is(err, bgtask.ErrNotFound) {
@@ -251,13 +222,9 @@ func newTaskOutputTool(mgr *bgtask.Manager, authorize AuthorizeFunc, cfg *ToolCo
 	})
 }
 
-type taskOutputResponse struct {
-	Task *bgtask.Task `json:"task"`
-}
-
 func resolveDurableTask(ctx context.Context, mgr *bgtask.Manager, task *bgtask.Task, input taskOutputInput) (string, error) {
 	block := input.Block == nil || *input.Block
-	if block && !isTerminal(task.Status) {
+	if block && waitableStatus(task.Status) {
 		timeout := input.Timeout
 		if timeout <= 0 {
 			timeout = defaultTaskOutputTimeoutMs
@@ -267,7 +234,7 @@ func resolveDurableTask(ctx context.Context, mgr *bgtask.Manager, task *bgtask.T
 		}
 		waitCtx, cancel := context.WithTimeout(ctx, time.Duration(timeout)*time.Millisecond)
 		defer cancel()
-		for !isTerminal(task.Status) {
+		for waitableStatus(task.Status) {
 			next, waitErr := mgr.WaitTask(waitCtx, &bgtask.WaitTaskRequest{
 				TaskID: input.TaskID, AfterVersion: task.Version,
 			})
@@ -280,28 +247,23 @@ func resolveDurableTask(ctx context.Context, mgr *bgtask.Manager, task *bgtask.T
 			task = next
 		}
 	}
-	response := taskOutputResponse{Task: task}
-	data, err := json.Marshal(response)
-	return string(data), err
+	return formatTask(task), nil
 }
 
-func isTerminal(status bgtask.Status) bool {
-	return status == bgtask.StatusCompleted || status == bgtask.StatusFailed || status == bgtask.StatusCanceled
+func waitableStatus(status bgtask.Status) bool {
+	return status == bgtask.StatusPending ||
+		status == bgtask.StatusRunning ||
+		status == bgtask.StatusCanceling
 }
 
 type taskStopInput struct {
 	TaskID string `json:"task_id" jsonschema:"required" jsonschema_description:"The ID of the background task to stop"`
 }
 
-func newTaskStopTool(mgr *bgtask.Manager, authorize AuthorizeFunc, cfg *ToolConfig) (tool.InvokableTool, error) {
+func newTaskStopTool(mgr *bgtask.Manager, cfg *ToolConfig) (tool.InvokableTool, error) {
 	name := selectToolName(cfg, taskStopToolName)
 	desc := selectToolDesc(cfg, taskStopToolDescription, taskStopToolDescriptionChinese)
 	return utils.InferTool(name, desc, func(ctx context.Context, input taskStopInput) (string, error) {
-		if authorize != nil {
-			if err := authorize(ctx, ControlStop, input.TaskID); err != nil {
-				return "Task access denied", nil
-			}
-		}
 		if _, err := mgr.GetTask(ctx, input.TaskID); err != nil && !errors.Is(err, bgtask.ErrNotFound) {
 			return "", err
 		}
@@ -311,4 +273,41 @@ func newTaskStopTool(mgr *bgtask.Manager, authorize AuthorizeFunc, cfg *ToolConf
 		}
 		return fmt.Sprintf("Stop requested for task %s (status: %s)", input.TaskID, task.Status), nil
 	})
+}
+
+func formatTask(task *bgtask.Task) string {
+	result := fmt.Sprintf(
+		"Task ID: %s\nDescription: %s\nStatus: %s",
+		task.Spec.ID, task.Spec.Description, task.Status,
+	)
+	label := "Output transcript"
+	switch task.Spec.Kind {
+	case "subagent":
+		label = "Event transcript (JSONL)"
+	case "bash":
+		label = "Command output transcript"
+	}
+	if task.Spec.OutputFile != "" && task.OutputFileErr == "" {
+		result += fmt.Sprintf("\n%s: %s (use Read on this path for the output)", label, task.Spec.OutputFile)
+	} else {
+		if len(task.ResultData) > 0 {
+			result += fmt.Sprintf("\nResult: %s", string(task.ResultData))
+		}
+		if task.Spec.OutputFile != "" {
+			result += fmt.Sprintf(
+				"\n%s: %s (incomplete — a write failed: %s; full transcript is unavailable. The Result above, if any, is the authoritative terminal result)",
+				label, task.Spec.OutputFile, task.OutputFileErr,
+			)
+		}
+	}
+	if task.ResultError != "" {
+		result += fmt.Sprintf("\nError: %s", task.ResultError)
+	}
+	if task.DoneAt != nil {
+		result += fmt.Sprintf(
+			"\nElapsed: %s",
+			task.DoneAt.Sub(task.Spec.CreatedAt).Round(time.Millisecond),
+		)
+	}
+	return result
 }

@@ -96,6 +96,8 @@ type Task struct {
 	// ResultError is the terminal failure or cancellation reason. It is meaningful
 	// only when Status is StatusFailed or StatusCanceled.
 	ResultError string
+	// OutputFileErr records the first failure while producing the optional output transcript.
+	OutputFileErr string
 	// PendingResume is a one-shot resume command for the next active attempt.
 	PendingResume []byte
 	// Version is the CAS version of this durable record.
@@ -140,8 +142,12 @@ type TaskEvent struct {
 type RunInput struct {
 	// Description is a short human-readable title for the task, stored in Spec.Description.
 	Description string
-	// Type is an optional process-local host hint. It is not persisted in Spec.
+	// Type is the persisted task category, such as "subagent" or "bash".
 	Type string
+	// Payload is opaque executor-domain metadata persisted in Spec.
+	Payload []byte
+	// OutputFile is an optional transcript path reserved before execution starts.
+	OutputFile string
 	// RunInBackground starts the task in the background. Run returns an initial
 	// StateRunning snapshot without waiting for the work. RunStream returns its
 	// caller-facing stream without waiting; consuming that stream normally yields
@@ -186,7 +192,7 @@ const defaultForegroundTimeoutMs = 120_000
 // The generator sees the run input before the task is registered and may return a
 // business-side identifier. Manager does not add the task-type prefix when IDGen
 // is configured; callers that want one should include it in the returned ID.
-type IDGenerator func(ctx context.Context, input *RunInput) (string, error)
+type IDGenerator func(ctx context.Context, request *AllocateTaskIDRequest) (string, error)
 
 // Config configures a Manager.
 type Config struct {
@@ -281,8 +287,6 @@ type Manager struct {
 	local          *processLocalExecutor
 
 	mu                   sync.Mutex
-	seq                  int64
-	lastMs               int64
 	closed               bool
 	foregroundTimeoutMs  int
 	shouldAutoBackground func(ctx context.Context, task *Task) bool
@@ -445,11 +449,19 @@ func (m *Manager) Cancel(id string) error {
 	return err
 }
 
-// Close performs graceful shutdown.
-// It waits for all running tasks to complete (up to the ctx deadline),
-// then cancels any remaining running tasks.
-// After Close returns, Run will return an error.
+// Close performs bounded graceful shutdown. When any attempt is active, ctx must
+// have a deadline or Close returns ErrCloseDeadlineRequired without closing the
+// Manager. Drainable attempts are asked to suspend immediately; non-drainable
+// attempts may finish until the deadline and are then durably canceled.
 func (m *Manager) Close(ctx context.Context) error {
+	m.attemptsMu.Lock()
+	active := len(m.activeAttempts)
+	m.attemptsMu.Unlock()
+	if active > 0 {
+		if _, ok := ctx.Deadline(); !ok {
+			return ErrCloseDeadlineRequired
+		}
+	}
 	m.mu.Lock()
 	m.closed = true
 	m.mu.Unlock()
@@ -457,15 +469,20 @@ func (m *Manager) Close(ctx context.Context) error {
 	ticker := time.NewTicker(10 * time.Millisecond)
 	defer ticker.Stop()
 	var closeErr error
-	for {
-		m.attemptsMu.Lock()
-		active := len(m.activeAttempts)
-		for _, attempt := range m.activeAttempts {
-			if attempt == nil {
-				continue
-			}
+	m.attemptsMu.Lock()
+	closingAttempts := make([]*activeAttempt, 0, len(m.activeAttempts))
+	for _, attempt := range m.activeAttempts {
+		if attempt != nil {
+			closingAttempts = append(closingAttempts, attempt)
+		}
+		if attempt != nil && attempt.supportsDrain {
 			attempt.runtime.requestControl(ControlDrain)
 		}
+	}
+	m.attemptsMu.Unlock()
+	for {
+		m.attemptsMu.Lock()
+		active = len(m.activeAttempts)
 		m.attemptsMu.Unlock()
 		if active == 0 {
 			break
@@ -474,18 +491,47 @@ func (m *Manager) Close(ctx context.Context) error {
 		case <-ticker.C:
 		case <-ctx.Done():
 			m.attemptsMu.Lock()
-			for _, attempt := range m.activeAttempts {
-				if attempt != nil {
-					attempt.cancel()
+			var localTaskIDs []string
+			for taskID, attempt := range m.activeAttempts {
+				if attempt != nil && !attempt.supportsDrain {
+					localTaskIDs = append(localTaskIDs, taskID)
 				}
 			}
 			m.attemptsMu.Unlock()
-			closeErr = ctx.Err()
+			for _, taskID := range localTaskIDs {
+				if _, err := m.RequestCancel(context.Background(), taskID); err != nil &&
+					!errors.Is(err, ErrAlreadyTerminal) {
+					closeErr = err
+				}
+			}
+			for i := 0; i < 10; i++ {
+				time.Sleep(time.Millisecond)
+				m.attemptsMu.Lock()
+				active = len(m.activeAttempts)
+				m.attemptsMu.Unlock()
+				if active == 0 {
+					break
+				}
+			}
+			if active != 0 && closeErr == nil {
+				closeErr = ctx.Err()
+			}
 			goto closed
 		}
 	}
 
 closed:
+	for _, attempt := range closingAttempts {
+		select {
+		case attemptErr := <-attempt.done:
+			if attemptErr != nil &&
+				!errors.Is(attemptErr, ErrCheckpointUnavailable) &&
+				closeErr == nil {
+				closeErr = attemptErr
+			}
+		default:
+		}
+	}
 	m.mu.Lock()
 	if m.eventBuf != nil {
 		m.eventBuf.Close()
@@ -529,29 +575,11 @@ func cloneTask(t *Task) *Task {
 	return &clone
 }
 
-// TaskInfo is a read-only snapshot of the facts the Manager establishes about a
-// task at creation, handed to the WorkFunc when it starts. It is not the live
-// Task record: it carries only identity fixed at creation, never the mutable
-// lifecycle fields, so work never races on them.
-type TaskInfo struct {
-	// ID is the Manager-generated task id. It is the one fact the work cannot
-	// otherwise obtain: the id is assigned before the closure is registered.
-	ID string
-	// Backgrounded is closed when this task moves to background execution: before
-	// the work starts for an explicit RunInBackground launch, or at the
-	// auto-background transition (foreground deadline reached and permitted). It
-	// stays open for a run that completes in the foreground. Work uses it to stop
-	// side effects that are only valid while the run is foreground — most notably
-	// forwarding events to the launching turn's live stream, which the turn closes
-	// once it ends. It is never nil.
-	Backgrounded <-chan struct{}
-}
-
 // WorkFunc performs a single managed execution. It is supplied by the caller
 // (e.g. a subagent or filesystem adapter); the Manager itself never knows what
 // the work is.
 //
-// task carries the Manager-assigned facts about this run (see TaskInfo).
+// runtime carries the Manager-assigned, attempt-scoped execution capabilities.
 //
 // ctx carries the values of the Run call's context but is detached from its
 // cancellation, so a backgrounded task outlives the turn that launched it. It is
@@ -561,7 +589,7 @@ type TaskInfo struct {
 //
 // The returned result becomes the canonical completed ResultData; a non-nil error
 // transitions the task to failed.
-type WorkFunc func(ctx context.Context, task TaskInfo) (result string, err error)
+type WorkFunc func(ctx context.Context, runtime ExecutionRuntime) (result string, err error)
 
 // detachedCtx carries its parent's values but is never canceled by the parent.
 // It mirrors context.WithoutCancel (Go 1.21+); this package targets Go 1.18.
@@ -577,6 +605,122 @@ func (detachedCtx) Done() <-chan struct{} { return nil }
 func (detachedCtx) Err() error { return nil }
 
 func (c detachedCtx) Value(key any) any { return c.parent.Value(key) }
+
+// RunSubmittedRequest coordinates an already-submitted durable task.
+type RunSubmittedRequest struct {
+	TaskID              string
+	RunInBackground     bool
+	ForegroundTimeoutMs *int
+}
+
+type submittedStartup struct {
+	task    *Task
+	runtime *taskRuntime
+	release chan struct{}
+}
+
+// RunSubmitted starts and projects an existing pending task through the common
+// foreground/background lifecycle coordinator.
+func (m *Manager) RunSubmitted(ctx context.Context, request *RunSubmittedRequest) (*Task, error) {
+	if request == nil || request.TaskID == "" {
+		return nil, errors.New("backgroundtask: submitted run request and task id are required")
+	}
+	task, err := m.store.Get(ctx, request.TaskID)
+	if err != nil {
+		return nil, err
+	}
+	if task.Status != StatusPending {
+		return nil, ErrIllegalTransition
+	}
+	startup := make(chan submittedStartup, 1)
+	done := make(chan error, 1)
+	go func() {
+		done <- m.execute(detachedCtx{parent: ctx}, request.TaskID, func(
+			started *Task,
+			runtime *taskRuntime,
+		) error {
+			release := make(chan struct{})
+			startup <- submittedStartup{task: started, runtime: runtime, release: release}
+			<-release
+			return nil
+		})
+	}()
+
+	var started submittedStartup
+	select {
+	case started = <-startup:
+	case executeErr := <-done:
+		return nil, executeErr
+	}
+	if request.RunInBackground {
+		started.runtime.markBackgrounded()
+		close(started.release)
+		m.sendTaskEvent(started.task, TaskEventBackgrounded)
+		return cloneTask(started.task), nil
+	}
+	close(started.release)
+	return m.coordinateSubmittedForeground(ctx, request, started, done)
+}
+
+func (m *Manager) coordinateSubmittedForeground(
+	ctx context.Context,
+	request *RunSubmittedRequest,
+	started submittedStartup,
+	done <-chan error,
+) (*Task, error) {
+	timeoutMs := m.foregroundTimeoutMs
+	if request.ForegroundTimeoutMs != nil {
+		timeoutMs = *request.ForegroundTimeoutMs
+	}
+	var timeout <-chan time.Time
+	var timer *time.Timer
+	if timeoutMs > 0 {
+		timer = time.NewTimer(time.Duration(timeoutMs) * time.Millisecond)
+		timeout = timer.C
+		defer timer.Stop()
+	}
+	for {
+		select {
+		case executeErr := <-done:
+			if executeErr != nil {
+				return nil, executeErr
+			}
+			return m.processLocalSnapshot(request.TaskID), nil
+		case <-ctx.Done():
+			_, cancelErr := m.RequestCancel(context.Background(), request.TaskID)
+			if cancelErr != nil && !errors.Is(cancelErr, ErrAlreadyTerminal) {
+				return nil, cancelErr
+			}
+			if executeErr := <-done; executeErr != nil {
+				return nil, executeErr
+			}
+			return m.processLocalSnapshot(request.TaskID), nil
+		case <-timeout:
+			current := m.processLocalSnapshot(request.TaskID)
+			if current == nil {
+				return nil, ErrNotFound
+			}
+			switch current.Status {
+			case StatusWaitingInput, StatusSuspended, StatusCompleted, StatusFailed, StatusCanceled:
+				return current, nil
+			case StatusCanceling:
+				timeout = nil
+				continue
+			case StatusRunning:
+				if m.allowAutoBackground(ctx, current) {
+					started.runtime.markBackgrounded()
+					m.sendTaskEvent(current, TaskEventBackgrounded)
+					return current, nil
+				}
+				reason := fmt.Sprintf("timed out after %dms", timeoutMs)
+				started.runtime.requestControlWithReason(ControlTimeout, reason)
+				timeout = nil
+			default:
+				return nil, fmt.Errorf("backgroundtask: unexpected foreground status %q", current.Status)
+			}
+		}
+	}
+}
 
 // Run executes work as a managed task on m.
 //
@@ -594,73 +738,41 @@ func (c detachedCtx) Value(key any) any { return c.parent.Value(key) }
 //
 // All runs are tracked in Manager state and visible via Get/List.
 func (m *Manager) Run(ctx context.Context, input *RunInput, work WorkFunc) (*Task, error) {
-	task, entry, err := m.submitProcessLocal(ctx, input, work)
+	task, _, err := m.submitProcessLocal(ctx, input, work)
 	if err != nil {
 		return nil, err
 	}
-	id := task.Spec.ID
-	if input.RunInBackground {
-		entry.markBackgrounded()
-	}
+	m.sendTaskEvent(task, TaskEventCreated)
+	runtime := newTaskRuntime(m.store, task.Spec.ID, task.Version)
+	startup := make(chan submittedStartup, 1)
 	done := make(chan error, 1)
 	go func() {
-		defer m.local.remove(id)
-		executeErr := m.Execute(detachedCtx{parent: ctx}, id)
-		if current, getErr := m.store.Get(context.Background(), id); getErr == nil {
-			m.sendTaskEvent(current, eventTypeForState(current.Status))
-		}
-		done <- executeErr
+		done <- m.executeStarted(
+			detachedCtx{parent: ctx}, task, m.local, runtime,
+			func(started *Task, runtime *taskRuntime) error {
+				release := make(chan struct{})
+				startup <- submittedStartup{task: started, runtime: runtime, release: release}
+				<-release
+				return nil
+			},
+		)
 	}()
+	var started submittedStartup
 	select {
-	case <-entry.started:
-		if current, getErr := m.store.Get(context.Background(), id); getErr == nil {
-			m.sendTaskEvent(current, TaskEventCreated)
-		}
-		entry.allowStart()
+	case started = <-startup:
 	case executeErr := <-done:
-		if executeErr != nil {
-			return nil, executeErr
-		}
-		return m.processLocalSnapshot(id), nil
+		return nil, executeErr
 	}
-
 	if input.RunInBackground {
-		current := m.processLocalSnapshot(id)
-		m.sendTaskEvent(current, TaskEventBackgrounded)
-		return current, nil
+		started.runtime.markBackgrounded()
+		close(started.release)
+		m.sendTaskEvent(started.task, TaskEventBackgrounded)
+		return cloneTask(started.task), nil
 	}
-
-	foregroundTimeoutMs := m.foregroundTimeoutMs
-	if input.ForegroundTimeoutMs != nil {
-		foregroundTimeoutMs = *input.ForegroundTimeoutMs
-	}
-	var timeout <-chan time.Time
-	var timer *time.Timer
-	if foregroundTimeoutMs > 0 {
-		timer = time.NewTimer(time.Duration(foregroundTimeoutMs) * time.Millisecond)
-		timeout = timer.C
-		defer timer.Stop()
-	}
-	select {
-	case executeErr := <-done:
-		if executeErr != nil {
-			return nil, executeErr
-		}
-		current := m.processLocalSnapshot(id)
-		return current, nil
-	case <-ctx.Done():
-		_, _ = m.RequestCancel(context.Background(), id)
-		return m.processLocalSnapshot(id), nil
-	case <-timeout:
-		current := m.processLocalSnapshot(id)
-		if current != nil && !terminalStatus(current.Status) && m.allowAutoBackground(ctx, current) {
-			entry.markBackgrounded()
-			m.sendTaskEvent(current, TaskEventBackgrounded)
-			return current, nil
-		}
-		_, _ = m.RequestCancel(context.Background(), id)
-		return m.processLocalSnapshot(id), nil
-	}
+	close(started.release)
+	return m.coordinateSubmittedForeground(ctx, &RunSubmittedRequest{
+		TaskID: task.Spec.ID, ForegroundTimeoutMs: input.ForegroundTimeoutMs,
+	}, started, done)
 }
 
 func (m *Manager) processLocalSnapshot(id string) *Task {
@@ -687,8 +799,8 @@ func (m *Manager) sendTaskEvent(task *Task, eventType TaskEventType) {
 // once, it returns output chunks. Manager projects those chunks live and
 // concatenates them into the canonical completed ResultData.
 //
-// task behaves exactly as for WorkFunc (see TaskInfo): it carries the task id the
-// work uses to report an output-file write failure.
+// runtime behaves exactly as for WorkFunc and exposes attempt-scoped lifecycle
+// signals and output-failure reporting.
 //
 // ctx behaves exactly as for WorkFunc (see WorkFunc): detached from the caller's
 // cancellation, stopped by Cancel/deadline/Close. Work should honor it and close
@@ -703,7 +815,7 @@ func (m *Manager) sendTaskEvent(task *Task, eventType TaskEventType) {
 // before returning. Work that blocks before returning makes the caller wait for
 // init-time plus the window rather than the window alone, and that extra wait is not
 // bounded by either timeout.
-type StreamWorkFunc func(ctx context.Context, task TaskInfo) (*schema.StreamReader[string], error)
+type StreamWorkFunc func(ctx context.Context, runtime ExecutionRuntime) (*schema.StreamReader[string], error)
 
 // RunStream executes streaming work as a managed task, returning a stream of
 // output chunks to consume in real time.
@@ -736,110 +848,134 @@ func (m *Manager) RunStream(ctx context.Context, input *RunInput, work StreamWor
 	if input == nil || work == nil {
 		return nil, errors.New("backgroundtask: RunInput and StreamWorkFunc are required")
 	}
-	sr, sw := schema.Pipe[string](streamBufferCap)
-	go m.runStreamProjection(ctx, input, work, sw)
-	return sr, nil
+	chunks := make(chan streamChunk, streamBufferCap)
+	ready := make(chan error, 1)
+	var readyOnce sync.Once
+	signalReady := func(err error) { readyOnce.Do(func() { ready <- err }) }
+	adapter := func(
+		workCtx context.Context,
+		runtime ExecutionRuntime,
+	) (result string, resultErr error) {
+		defer close(chunks)
+		defer func() {
+			if panicValue := recover(); panicValue != nil {
+				resultErr = safe.NewPanicErr(panicValue, debug.Stack())
+				signalReady(resultErr)
+			}
+		}()
+		reader, err := work(workCtx, runtime)
+		if err != nil {
+			signalReady(err)
+			return "", err
+		}
+		if reader == nil {
+			err = errors.New("backgroundtask: StreamWorkFunc returned a nil reader")
+			signalReady(err)
+			return "", err
+		}
+		signalReady(nil)
+		defer reader.Close()
+		var output strings.Builder
+		for {
+			chunk, recvErr := reader.Recv()
+			if recvErr == io.EOF {
+				return output.String(), nil
+			}
+			if recvErr != nil {
+				chunks <- streamChunk{err: recvErr}
+				return "", recvErr
+			}
+			output.WriteString(chunk)
+			chunks <- streamChunk{text: chunk}
+		}
+	}
+
+	task, _, err := m.submitProcessLocal(ctx, input, adapter)
+	if err != nil {
+		return nil, err
+	}
+	m.sendTaskEvent(task, TaskEventCreated)
+	runtime := newTaskRuntime(m.store, task.Spec.ID, task.Version)
+	startup := make(chan submittedStartup, 1)
+	done := make(chan error, 1)
+	go func() {
+		done <- m.executeStarted(
+			detachedCtx{parent: ctx}, task, m.local, runtime,
+			func(started *Task, runtime *taskRuntime) error {
+				release := make(chan struct{})
+				startup <- submittedStartup{task: started, runtime: runtime, release: release}
+				<-release
+				return nil
+			},
+		)
+	}()
+	var started submittedStartup
+	select {
+	case started = <-startup:
+	case executeErr := <-done:
+		return nil, executeErr
+	}
+	if input.RunInBackground {
+		started.runtime.markBackgrounded()
+		m.sendTaskEvent(started.task, TaskEventBackgrounded)
+	}
+	close(started.release)
+	if readyErr := <-ready; readyErr != nil {
+		if executeErr := <-done; executeErr != nil {
+			return nil, executeErr
+		}
+		return nil, readyErr
+	}
+	reader, writer := schema.Pipe[string](streamBufferCap)
+	go m.coordinateSubmittedStream(ctx, input, started, chunks, done, writer)
+	return reader, nil
 }
 
-func (m *Manager) runStreamProjection(
+func (m *Manager) coordinateSubmittedStream(
 	ctx context.Context,
 	input *RunInput,
-	work StreamWorkFunc,
+	started submittedStartup,
+	chunks <-chan streamChunk,
+	done <-chan error,
 	writer *schema.StreamWriter[string],
 ) {
-	runCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
-	chunks := make(chan streamChunk, streamBufferCap)
-	ready := make(chan struct{})
-	var readyOnce sync.Once
-	signalReady := func() { readyOnce.Do(func() { close(ready) }) }
-	var chunksOnce sync.Once
-	closeChunks := func() { chunksOnce.Do(func() { close(chunks) }) }
-	taskResult := make(chan *Task, 1)
-	go func() {
-		task, _ := m.Run(runCtx, input, func(workCtx context.Context, info TaskInfo) (result string, resultErr error) {
-			defer func() {
-				if panicValue := recover(); panicValue != nil {
-					resultErr = safe.NewPanicErr(panicValue, debug.Stack())
-					signalReady()
-					chunks <- streamChunk{err: resultErr}
-					closeChunks()
-				}
-			}()
-			reader, err := work(workCtx, info)
-			if err != nil {
-				signalReady()
-				chunks <- streamChunk{err: err}
-				closeChunks()
-				return "", err
-			}
-			if reader == nil {
-				err = errors.New("backgroundtask: StreamWorkFunc returned a nil reader")
-				signalReady()
-				chunks <- streamChunk{err: err}
-				closeChunks()
-				return "", err
-			}
-			signalReady()
-			defer reader.Close()
-			var output strings.Builder
-			for {
-				chunk, recvErr := reader.Recv()
-				if recvErr == io.EOF {
-					closeChunks()
-					return output.String(), nil
-				}
-				if recvErr != nil {
-					chunks <- streamChunk{err: recvErr}
-					closeChunks()
-					return "", recvErr
-				}
-				output.WriteString(chunk)
-				chunks <- streamChunk{text: chunk}
-			}
-		})
-		taskResult <- task
-	}()
-
-	var task *Task
 	var preview <-chan time.Time
 	if input.RunInBackground && input.BackgroundStartupPreviewMs > 0 {
-		<-ready
 		timer := time.NewTimer(time.Duration(input.BackgroundStartupPreviewMs) * time.Millisecond)
 		defer timer.Stop()
 		preview = timer.C
 	}
 	forward := !input.RunInBackground || input.BackgroundStartupPreviewMs > 0
 	callerOpen := true
-	for chunks != nil || task == nil {
+	if input.RunInBackground && preview == nil {
+		forward = false
+		writer.Send(m.backgroundStartNotice(detachedCtx{parent: ctx}, started.task.Spec.ID), nil)
+		writer.Close()
+		callerOpen = false
+	}
+	timeoutMs := m.foregroundTimeoutMs
+	if input.ForegroundTimeoutMs != nil {
+		timeoutMs = *input.ForegroundTimeoutMs
+	}
+	var timeout <-chan time.Time
+	if !input.RunInBackground && timeoutMs > 0 {
+		timer := time.NewTimer(time.Duration(timeoutMs) * time.Millisecond)
+		defer timer.Stop()
+		timeout = timer.C
+	}
+	executionDone := false
+	for chunks != nil || !executionDone {
 		select {
-		case current := <-taskResult:
-			task = current
-			deferNotice := input.RunInBackground && preview != nil
-			if task != nil && callerOpen && !deferNotice {
-				if input.RunInBackground {
-					forward = false
-					writer.Send(m.backgroundStartNotice(detachedCtx{parent: ctx}, task.Spec.ID), nil)
-					writer.Close()
-					callerOpen = false
-					continue
-				}
-				if !terminalStatus(task.Status) {
-					forward = false
-					writer.Send(m.backgroundMoveNotice(detachedCtx{parent: ctx}, task.Spec.ID), nil)
-					writer.Close()
-					callerOpen = false
-				}
+		case executeErr := <-done:
+			executionDone = true
+			if executeErr != nil && callerOpen {
+				writer.Send("", executeErr)
+				writer.Close()
+				callerOpen = false
 			}
 		case chunk, ok := <-chunks:
 			if !ok {
 				chunks = nil
-				if task != nil && callerOpen {
-					if current, done := m.Wait(ctx, task.Spec.ID); done {
-						task = current
-					}
-				}
 				continue
 			}
 			if !callerOpen || !forward {
@@ -851,29 +987,53 @@ func (m *Manager) runStreamProjection(
 				callerOpen = false
 				continue
 			}
-			if writer.Send(chunk.text, nil) && !input.RunInBackground {
-				cancel()
+			if writer.Send(chunk.text, nil) {
 				callerOpen = false
+				if !input.RunInBackground {
+					_, _ = m.RequestCancel(context.Background(), started.task.Spec.ID)
+				}
 			}
 		case <-preview:
 			preview = nil
 			forward = false
-			if task == nil {
-				task = <-taskResult
-			}
-			if task != nil {
-				if current, ok := m.Get(task.Spec.ID); ok {
-					task = current
-				}
-			}
-			if task != nil && !terminalStatus(task.Status) && callerOpen {
-				writer.Send(m.backgroundStartNotice(detachedCtx{parent: ctx}, task.Spec.ID), nil)
+			current := m.processLocalSnapshot(started.task.Spec.ID)
+			if current != nil && !terminalStatus(current.Status) && callerOpen {
+				writer.Send(m.backgroundStartNotice(detachedCtx{parent: ctx}, current.Spec.ID), nil)
 				writer.Close()
 				callerOpen = false
 			}
+		case <-timeout:
+			timeout = nil
+			current := m.processLocalSnapshot(started.task.Spec.ID)
+			if current == nil {
+				if callerOpen {
+					writer.Send("", ErrNotFound)
+					writer.Close()
+					callerOpen = false
+				}
+				continue
+			}
+			if current.Status == StatusRunning && m.allowAutoBackground(ctx, current) {
+				started.runtime.markBackgrounded()
+				m.sendTaskEvent(current, TaskEventBackgrounded)
+				forward = false
+				if callerOpen {
+					writer.Send(m.backgroundMoveNotice(detachedCtx{parent: ctx}, current.Spec.ID), nil)
+					writer.Close()
+					callerOpen = false
+				}
+			} else if current.Status == StatusRunning {
+				reason := fmt.Sprintf("timed out after %dms", timeoutMs)
+				started.runtime.requestControlWithReason(ControlTimeout, reason)
+				forward = false
+				if callerOpen {
+					writer.Close()
+					callerOpen = false
+				}
+			}
 		case <-ctx.Done():
 			if !input.RunInBackground {
-				cancel()
+				_, _ = m.RequestCancel(context.Background(), started.task.Spec.ID)
 			}
 			if callerOpen {
 				writer.Close()
@@ -915,27 +1075,39 @@ func (m *Manager) notice(ctx context.Context, id string, autoBackgrounded bool) 
 	return defaultBackgroundNotice(info)
 }
 
-const noticeTemplate = "\n[task {id}{kind} {state}.]"
+const noticeTemplate = "\n[task {id}{kind} {state}; you will be notified when it completes.{output}]"
+
+const noticeOutputTemplate = " Output is being written to: {file}." +
+	" To check interim output, use Read on that file path."
 
 // defaultBackgroundNotice is the built-in BackgroundNotice. It announces the
 // background launch and, when an output file is reserved, directs the reader to
 // Read that path for interim output. It deliberately names no control tool, since
 // the retrieval mechanism is host-specific (see Config.BackgroundNotice).
 func defaultBackgroundNotice(info NoticeInfo) string {
-	id, kind := "", ""
+	id, kind, outputFile := "", "", ""
 	if info.Task != nil {
 		id = info.Task.Spec.ID
+		if info.Task.Spec.Kind != "" {
+			kind = " (" + info.Task.Spec.Kind + ")"
+		}
+		outputFile = info.Task.Spec.OutputFile
 	}
 
 	state := "is running in the background"
 	if info.AutoBackgrounded {
 		state = "moved to the background"
 	}
+	output := ""
+	if outputFile != "" {
+		output = strings.NewReplacer("{file}", outputFile).Replace(noticeOutputTemplate)
+	}
 
 	return strings.NewReplacer(
 		"{id}", id,
 		"{kind}", kind,
 		"{state}", state,
+		"{output}", output,
 	).Replace(noticeTemplate)
 }
 
