@@ -321,8 +321,8 @@ func reserveAgentOutput(
 	return path
 }
 
-// SubagentNameFromTask returns the persisted sub-agent routing name.
-func SubagentNameFromTask(task *backgroundtask.Task) string {
+// NameFromTask returns the persisted sub-agent routing name.
+func NameFromTask(task *backgroundtask.Task) string {
 	if task == nil || task.Spec.Kind != TaskTypeSubagent {
 		return ""
 	}

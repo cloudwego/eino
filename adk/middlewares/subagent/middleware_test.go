@@ -45,14 +45,14 @@ type mockAgent struct {
 
 type failExecutionOpenStore struct {
 	backend *filesystem.InMemoryBackend
-	opens   atomic.Int64
+	opens   int64
 }
 
 func (s *failExecutionOpenStore) OpenAppend(
 	ctx context.Context,
 	request *filesystem.OpenAppendRequest,
 ) (io.WriteCloser, error) {
-	if s.opens.Add(1) == 2 {
+	if atomic.AddInt64(&s.opens, 1) == 2 {
 		return nil, errors.New("execution open failed")
 	}
 	return s.backend.OpenAppend(ctx, request)
@@ -377,18 +377,18 @@ func TestDurableForegroundObserverStopsAtBackgroundBoundary(t *testing.T) {
 	_, runCtx, err := middleware.BeforeAgent(ctx, &adk.ChatModelAgentContext[*schema.Message]{})
 	require.NoError(t, err)
 	invokable := runCtx.Tools[0].(tool.InvokableTool)
-	var calls atomic.Int64
+	var calls int64
 	receiver := agenttool.WithEventReceiverTransform(
 		func(current []agenttool.EventReceiver[*adk.AgentEvent]) []agenttool.EventReceiver[*adk.AgentEvent] {
-			return append(current, func(*adk.AgentEvent) { calls.Add(1) })
+			return append(current, func(*adk.AgentEvent) { atomic.AddInt64(&calls, 1) })
 		},
 	)
 	_, err = invokable.InvokableRun(
 		ctx, `{"subagent_type":"worker","prompt":"work","description":"foreground"}`, receiver,
 	)
 	require.NoError(t, err)
-	assert.Positive(t, calls.Load())
-	calls.Store(0)
+	assert.Positive(t, atomic.LoadInt64(&calls))
+	atomic.StoreInt64(&calls, 0)
 	_, err = invokable.InvokableRun(
 		ctx,
 		`{"subagent_type":"worker","prompt":"work","description":"background","run_in_background":true}`,
@@ -403,7 +403,7 @@ func TestDurableForegroundObserverStopsAtBackgroundBoundary(t *testing.T) {
 		}
 		return false
 	}, time.Second, 10*time.Millisecond)
-	assert.Zero(t, calls.Load())
+	assert.Zero(t, atomic.LoadInt64(&calls))
 }
 
 func TestDurableBlockingReceiverDoesNotBlockAutoBackgroundResponse(t *testing.T) {
