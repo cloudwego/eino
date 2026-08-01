@@ -368,7 +368,7 @@ func TestAgentTool_Info(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, agentToolName, info.Name)
 	// Agent types are no longer embedded in the description; they are injected as a
-	// mid-conversation system message by BeforeModelRewriteState.
+	// mid-conversation system reminder by BeforeModelRewriteState.
 	assert.NotContains(t, info.Desc, "helps with tasks")
 
 	// BeforeAgent does not touch the messages anymore.
@@ -823,7 +823,7 @@ func TestAgentTool_AutoBackground_FastAgent(t *testing.T) {
 func TestSubagent_BeforeAgent_InsertsReminderByExtra(t *testing.T) {
 	ctx := context.Background()
 	m := &typedSubagentMiddleware[*schema.Message]{
-		midConversationSystemMessage: buildAgentTypesSectionFromEntries([]agentTypeEntry{{Name: "worker", Description: "does work"}}),
+		reminder: buildAgentTypesSectionFromEntries([]agentTypeEntry{{Name: "worker", Description: "does work"}}),
 	}
 
 	state := &adk.TypedChatModelAgentState[*schema.Message]{Messages: []*schema.Message{schema.UserMessage("hi")}}
@@ -853,7 +853,7 @@ func TestSubagent_BeforeAgent_InsertsReminderByExtra(t *testing.T) {
 func TestSubagent_BeforeAgent_PreservesOtherMessages(t *testing.T) {
 	ctx := context.Background()
 	m := &typedSubagentMiddleware[*schema.Message]{
-		midConversationSystemMessage: buildAgentTypesSectionFromEntries([]agentTypeEntry{{Name: "worker", Description: "does work"}}),
+		reminder: buildAgentTypesSectionFromEntries([]agentTypeEntry{{Name: "worker", Description: "does work"}}),
 	}
 
 	// A leading instruction system message plus another middleware's reminder already
@@ -893,7 +893,7 @@ func TestSubagent_BeforeAgent_PreservesOtherMessages(t *testing.T) {
 func TestSubagent_BeforeAgent_MidConversationPosition(t *testing.T) {
 	ctx := context.Background()
 	m := &typedSubagentMiddleware[*schema.Message]{
-		midConversationSystemMessage: buildAgentTypesSectionFromEntries([]agentTypeEntry{{Name: "worker", Description: "does work"}}),
+		reminder: buildAgentTypesSectionFromEntries([]agentTypeEntry{{Name: "worker", Description: "does work"}}),
 	}
 
 	assistantToolCall := schema.AssistantMessage("", []schema.ToolCall{

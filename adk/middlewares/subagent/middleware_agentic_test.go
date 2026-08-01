@@ -43,7 +43,7 @@ func (a agenticMockAgent) Run(context.Context, *adk.TypedAgentInput[*schema.Agen
 func TestSubagent_BeforeAgent_AgenticMessage(t *testing.T) {
 	ctx := context.Background()
 	m := &typedSubagentMiddleware[*schema.AgenticMessage]{
-		midConversationSystemMessage: buildAgentTypesSectionFromEntries([]agentTypeEntry{{Name: "worker", Description: "does work"}}),
+		reminder: buildAgentTypesSectionFromEntries([]agentTypeEntry{{Name: "worker", Description: "does work"}}),
 	}
 
 	user := schema.UserAgenticMessage("hi")
@@ -64,7 +64,7 @@ func TestSubagent_BeforeAgent_AgenticMessage(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, ns2.Messages, 2)
 
-	// No sub-agents (empty midConversationSystemMessage): nothing is inserted.
+	// No sub-agents (empty reminder): nothing is inserted.
 	empty := &typedSubagentMiddleware[*schema.AgenticMessage]{}
 	stEmpty := &adk.TypedChatModelAgentState[*schema.AgenticMessage]{Messages: []*schema.AgenticMessage{user}}
 	_, nsEmpty, err := empty.BeforeModelRewriteState(ctx, stEmpty, nil)

@@ -87,7 +87,7 @@ func TestTool(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, "skill", info.Name)
 	// The available-skills list is no longer embedded in the description; it is injected
-	// as a mid-conversation system message. The description is now just the base text.
+	// as a mid-conversation system reminder. The description is now just the base text.
 	assert.Equal(t, toolDescriptionBase, info.Desc)
 
 	result, err := to.InvokableRun(ctx, `{"skill": "name1"}`)
@@ -750,7 +750,7 @@ func TestSkillToolInfo(t *testing.T) {
 		info, err := st.Info(ctx)
 		require.NoError(t, err)
 		// The skill list is no longer embedded in the description; it is injected as a
-		// mid-conversation system message by BeforeModelRewriteState. The section builder
+		// mid-conversation system reminder by BeforeModelRewriteState. The section builder
 		// is what carries the skill names/descriptions.
 		assert.NotContains(t, info.Desc, "desc-alpha")
 

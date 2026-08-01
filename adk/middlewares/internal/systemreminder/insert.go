@@ -14,14 +14,14 @@
  * limitations under the License.
  */
 
-// Package sysmsg provides the shared mid-conversation system message insertion
+// Package systemreminder provides the shared mid-conversation system reminder insertion
 // logic used by the skill, subagent and toolsearch middlewares. Each of those
-// middlewares injects a mid-conversation system message (an "available skills" /
+// middlewares injects a mid-conversation system reminder (an "available skills" /
 // "available agent types" / "tool search" message) into the message history from its
 // BeforeModelRewriteState hook.
 //
 // The message is placed right after the latest turn boundary — the last user
-// message or final assistant answer (see InsertIndex) — so it reads as context
+// message or final assistant answer (see insertIndex) — so it reads as context
 // following the user's ask and never lands in the middle of pending
 // tool-call/tool-result scaffolding.
 //
@@ -41,7 +41,7 @@
 // Inserted messages are tagged with adk.MessageExtraKeySystemReminder so the
 // framework's genModelInput preserves them instead of stripping a non-leading system
 // message as a stale instruction.
-package sysmsg
+package systemreminder
 
 import (
 	"context"
@@ -51,15 +51,15 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
-// Insert builds a mid-conversation system message carrying section (tagged with extraKey and
+// Insert builds a mid-conversation system reminder carrying section (tagged with extraKey and
 // adk.MessageExtraKeySystemReminder, plus any entries in extra), inserts it at
-// InsertIndex, and emits a MessageInserted session event so it is reconstructed in
+// insertIndex, and emits a MessageInserted session event so it is reconstructed in
 // place on the next turn. TypedSendEvent is a no-op outside a Runner session. The
 // input slice is not mutated; the updated slice is returned.
 func Insert[M adk.MessageType](ctx context.Context, messages []M, extraKey, section string, extra map[string]any) []M {
-	insertAt := InsertIndex(messages)
+	insertAt := insertIndex(messages)
 
-	msg := newMidConversationSystemMessage[M](extraKey, section, extra)
+	msg := newReminderMessage[M](extraKey, section, extra)
 	adk.EnsureMessageID(msg)
 
 	result := make([]M, 0, len(messages)+1)
@@ -118,13 +118,13 @@ func LatestExtra[M adk.MessageType](messages []M, extraKey, valueKey string) (an
 	return nil, false
 }
 
-// InsertIndex returns the position for a fresh mid-conversation system message: right
+// insertIndex returns the position for a fresh mid-conversation system reminder: right
 // after the latest turn boundary — the last user message or final assistant answer
 // (see isInsertAnchor) — then past any settled system messages already sitting there
 // (sibling or stale inserts), so it lands after them without disturbing their
 // positions and never inside pending tool-call/tool-result scaffolding. Falls back to
 // the tail when there is no anchor.
-func InsertIndex[M adk.MessageType](messages []M) int {
+func insertIndex[M adk.MessageType](messages []M) int {
 	insertAt := len(messages)
 	for i := len(messages) - 1; i >= 0; i-- {
 		if isInsertAnchor(messages[i]) {
@@ -184,12 +184,13 @@ func hasExtraKey[M adk.MessageType](msg M, key string) bool {
 	return ok
 }
 
-// newMidConversationSystemMessage builds a mid-conversation system message carrying
+// newReminderMessage builds a mid-conversation reminder message carrying
 // content, tagged with extraKey (so it is identifiable in history) and
-// adk.MessageExtraKeySystemReminder (so the framework preserves it). Any entries in
-// extra are merged into the message Extra — used by skill to stash the MD5 digest of
-// the current skill list for later diffing.
-func newMidConversationSystemMessage[M adk.MessageType](extraKey, content string, extra map[string]any) M {
+// adk.MessageExtraKeySystemReminder (so the framework preserves it). Its role follows the
+// configured internal.GetReminderMessageRole() (System by default, User for models that
+// reject non-leading system messages). Any entries in extra are merged into the message
+// Extra — used by skill to stash the MD5 digest of the current skill list for later diffing.
+func newReminderMessage[M adk.MessageType](extraKey, content string, extra map[string]any) M {
 	var zero M
 	buildExtra := func() map[string]any {
 		e := map[string]any{extraKey: true, adk.MessageExtraKeySystemReminder: true}
@@ -198,15 +199,85 @@ func newMidConversationSystemMessage[M adk.MessageType](extraKey, content string
 		}
 		return e
 	}
+	asUser := internal.GetReminderMessageRole() == internal.ReminderMessageRoleUser
 	switch any(zero).(type) {
 	case *schema.Message:
 		msg := schema.SystemMessage(content)
+		if asUser {
+			msg.Role = schema.User
+		}
 		msg.Extra = buildExtra()
 		return any(msg).(M)
 	case *schema.AgenticMessage:
 		msg := schema.SystemAgenticMessage(content)
+		if asUser {
+			msg.Role = schema.AgenticRoleTypeUser
+		}
 		msg.Extra = buildExtra()
 		return any(msg).(M)
 	}
 	panic("unreachable")
+}
+
+// NormalizeReminderRoles rewrites the role of every mid-conversation reminder message
+// (tagged adk.MessageExtraKeySystemReminder) to the configured
+// internal.GetReminderMessageRole(). Middlewares call this from BeforeModelRewriteState so
+// reminders reconstructed from history — persisted under a role that may differ from the
+// current config — match the current setting before the model call.
+//
+// Copy-on-write: the input slice and its messages are never mutated; a fresh slice is
+// allocated only when at least one role changes, otherwise the input is returned as-is.
+// It is idempotent.
+func NormalizeReminderRoles[M adk.MessageType](messages []M) []M {
+	asUser := internal.GetReminderMessageRole() == internal.ReminderMessageRoleUser
+	var result []M
+	for i, msg := range messages {
+		if !hasExtraKey(msg, adk.MessageExtraKeySystemReminder) {
+			continue
+		}
+		cp, changed := withReminderRole(msg, asUser)
+		if !changed {
+			continue
+		}
+		if result == nil {
+			result = make([]M, len(messages))
+			copy(result, messages)
+		}
+		result[i] = cp
+	}
+	if result == nil {
+		return messages
+	}
+	return result
+}
+
+// withReminderRole returns a copy of msg with its role set to the configured reminder
+// role (User when asUser, else System), reporting whether the role changed. The original
+// message is never mutated.
+func withReminderRole[M adk.MessageType](msg M, asUser bool) (M, bool) {
+	switch v := any(msg).(type) {
+	case *schema.Message:
+		want := schema.System
+		if asUser {
+			want = schema.User
+		}
+		if v.Role == want {
+			return msg, false
+		}
+		cp := *v
+		cp.Role = want
+		return any(&cp).(M), true
+	case *schema.AgenticMessage:
+		want := schema.AgenticRoleTypeSystem
+		if asUser {
+			want = schema.AgenticRoleTypeUser
+		}
+		if v.Role == want {
+			return msg, false
+		}
+		cp := *v
+		cp.Role = want
+		return any(&cp).(M), true
+	}
+	return msg, false
 }

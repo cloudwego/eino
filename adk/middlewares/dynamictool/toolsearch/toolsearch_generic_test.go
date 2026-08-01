@@ -266,9 +266,9 @@ func countRemindersGeneric[M adk.MessageType](msgs []M) int {
 // testBeforeAgentReminderGeneric verifies BeforeModelRewriteState inserts the
 // tool-search reminder mid-conversation — right after the latest user message /
 // final assistant answer, never at the front and never inside pending tool-call
-// scaffolding — and does so exactly once (sysmsg.Has guards re-insertion). The
+// scaffolding — and does so exactly once (systemreminder.Has guards re-insertion). The
 // insertion-position logic itself lives in (and is unit-tested by) the shared
-// adk/middlewares/internal/sysmsg package; these cases exercise it end-to-end through
+// adk/middlewares/internal/systemreminder package; these cases exercise it end-to-end through
 // BeforeModelRewriteState for both *schema.Message and *schema.AgenticMessage.
 func testBeforeAgentReminderGeneric[M adk.MessageType](t *testing.T) {
 	dynamicA := &simpleTool{name: "dynamic_tool_a", desc: "Dynamic tool A"}
@@ -331,7 +331,7 @@ func testBeforeAgentReminderGeneric[M adk.MessageType](t *testing.T) {
 			makeUserMsg[M]("hi"),
 		})
 		assert.Equal(t, 1, countRemindersGeneric(first))
-		// State already carries the reminder: sysmsg.Has skips re-insertion.
+		// State already carries the reminder: systemreminder.Has skips re-insertion.
 		second := rewrite(first)
 		assert.Len(t, second, len(first))
 		assert.Equal(t, 1, countRemindersGeneric(second))

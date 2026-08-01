@@ -27,7 +27,7 @@ import (
 	"github.com/cloudwego/eino/adk/backgroundtask"
 	"github.com/cloudwego/eino/adk/filesystem"
 	"github.com/cloudwego/eino/adk/internal"
-	"github.com/cloudwego/eino/adk/middlewares/internal/sysmsg"
+	"github.com/cloudwego/eino/adk/middlewares/internal/systemreminder"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/schema"
 )
@@ -217,28 +217,28 @@ func NewTyped[M adk.MessageType](ctx context.Context, config *TypedConfig[M]) (a
 	}
 
 	// The sub-agent set is fixed at construction, so the available-agent-types
-	// mid-conversation system message is built once here and inserted (once) at run time.
-	var midConversationSystemMessage string
+	// mid-conversation system reminder is built once here and inserted (once) at run time.
+	var reminder string
 	if len(config.SubAgents) > 0 {
 		entries := make([]agentTypeEntry, 0, len(config.SubAgents))
 		for _, a := range config.SubAgents {
 			entries = append(entries, agentTypeEntry{Name: a.Name(ctx), Description: a.Description(ctx)})
 		}
-		midConversationSystemMessage = buildAgentTypesSectionFromEntries(entries)
+		reminder = buildAgentTypesSectionFromEntries(entries)
 	}
 
 	return &typedSubagentMiddleware[M]{
-		tools:                        tools,
-		instruction:                  instruction,
-		midConversationSystemMessage: midConversationSystemMessage,
+		tools:       tools,
+		instruction: instruction,
+		reminder:    reminder,
 	}, nil
 }
 
 type typedSubagentMiddleware[M adk.MessageType] struct {
 	adk.TypedBaseChatModelAgentMiddleware[M]
-	tools                        []tool.BaseTool
-	instruction                  string
-	midConversationSystemMessage string
+	tools       []tool.BaseTool
+	instruction string
+	reminder    string
 }
 
 // BeforeAgent injects sub-agent tools and instructions into the agent context.
@@ -259,11 +259,14 @@ func (m *typedSubagentMiddleware[M]) BeforeAgent(ctx context.Context, runCtx *ad
 // re-insertion when it is already in the (reconstructed) history, and Insert persists
 // it as a MessageInserted event so it carries across turns.
 func (m *typedSubagentMiddleware[M]) BeforeModelRewriteState(ctx context.Context, state *adk.TypedChatModelAgentState[M], _ *adk.TypedModelContext[M]) (context.Context, *adk.TypedChatModelAgentState[M], error) {
-	if state == nil || m.midConversationSystemMessage == "" {
+	if state == nil || m.reminder == "" {
 		return ctx, state, nil
 	}
-	if !sysmsg.Has(state.Messages, agentTypesReminderExtraKey) {
-		state.Messages = sysmsg.Insert(ctx, state.Messages, agentTypesReminderExtraKey, m.midConversationSystemMessage, nil)
+	// Align any reminders reconstructed from history with the configured role; the fresh
+	// insert below is already built with that role.
+	state.Messages = systemreminder.NormalizeReminderRoles(state.Messages)
+	if !systemreminder.Has(state.Messages, agentTypesReminderExtraKey) {
+		state.Messages = systemreminder.Insert(ctx, state.Messages, agentTypesReminderExtraKey, m.reminder, nil)
 	}
 	return ctx, state, nil
 }

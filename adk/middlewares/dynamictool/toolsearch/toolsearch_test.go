@@ -375,9 +375,9 @@ func TestMiddlewareFlow(t *testing.T) {
 	// Additional: verify that the reminder lists the dynamic tool names and carries the
 	// tool_search usage preamble.
 	mwImpl := mw.(*typedMiddleware[*schema.Message])
-	assert.True(t, strings.Contains(mwImpl.midConversationSystemMessage, "dynamic_tool_a"))
-	assert.True(t, strings.Contains(mwImpl.midConversationSystemMessage, "dynamic_tool_b"))
-	assert.True(t, strings.Contains(mwImpl.midConversationSystemMessage, "tool_search"))
+	assert.True(t, strings.Contains(mwImpl.reminder, "dynamic_tool_a"))
+	assert.True(t, strings.Contains(mwImpl.reminder, "dynamic_tool_b"))
+	assert.True(t, strings.Contains(mwImpl.reminder, "tool_search"))
 }
 
 // ---------------------------------------------------------------------------

@@ -29,7 +29,7 @@ import (
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/adk/internal"
-	"github.com/cloudwego/eino/adk/middlewares/internal/sysmsg"
+	"github.com/cloudwego/eino/adk/middlewares/internal/systemreminder"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/schema"
 )
@@ -61,7 +61,7 @@ func NewTyped[M adk.MessageType](ctx context.Context, config *Config) (adk.Typed
 		return nil, fmt.Errorf("tools is required")
 	}
 
-	tpl, err := template.New("").Parse(midConversationSystemMessageTpl)
+	tpl, err := template.New("").Parse(reminderTpl)
 	if err != nil {
 		return nil, err
 	}
@@ -85,17 +85,17 @@ func NewTyped[M adk.MessageType](ctx context.Context, config *Config) (adk.Typed
 	}
 
 	buf := &bytes.Buffer{}
-	err = tpl.Execute(buf, midConversationSystemMessageData{Tools: toolNames})
+	err = tpl.Execute(buf, reminderData{Tools: toolNames})
 	if err != nil {
-		return nil, fmt.Errorf("failed to format mid-conversation system message template: %w", err)
+		return nil, fmt.Errorf("failed to format mid-conversation system reminder template: %w", err)
 	}
 
 	return &typedMiddleware[M]{
-		dynamicTools:                 config.DynamicTools,
-		mapOfDynamicTools:            mapOfDynamicTools,
-		dynamicToolInfos:             dynamicToolInfos,
-		useModelToolSearch:           config.UseModelToolSearch,
-		midConversationSystemMessage: buf.String(),
+		dynamicTools:       config.DynamicTools,
+		mapOfDynamicTools:  mapOfDynamicTools,
+		dynamicToolInfos:   dynamicToolInfos,
+		useModelToolSearch: config.UseModelToolSearch,
+		reminder:           buf.String(),
 	}, nil
 }
 
@@ -122,17 +122,17 @@ func New(ctx context.Context, config *Config) (adk.ChatModelAgentMiddleware, err
 	return NewTyped[*schema.Message](ctx, config)
 }
 
-type midConversationSystemMessageData struct {
+type reminderData struct {
 	Tools []string
 }
 
 type typedMiddleware[M adk.MessageType] struct {
 	*adk.TypedBaseChatModelAgentMiddleware[M]
-	dynamicTools                 []tool.BaseTool
-	mapOfDynamicTools            map[string]*schema.ToolInfo
-	dynamicToolInfos             []*schema.ToolInfo
-	useModelToolSearch           bool
-	midConversationSystemMessage string
+	dynamicTools       []tool.BaseTool
+	mapOfDynamicTools  map[string]*schema.ToolInfo
+	dynamicToolInfos   []*schema.ToolInfo
+	useModelToolSearch bool
+	reminder           string
 }
 
 func (m *typedMiddleware[M]) BeforeAgent(ctx context.Context, runCtx *adk.ChatModelAgentContext[M]) (context.Context, *adk.ChatModelAgentContext[M], error) {
@@ -208,13 +208,16 @@ func toolNameSet(tools []*schema.ToolInfo) map[string]bool {
 }
 
 func (m *typedMiddleware[M]) BeforeModelRewriteState(ctx context.Context, state *adk.TypedChatModelAgentState[M], _ *adk.TypedModelContext[M]) (context.Context, *adk.TypedChatModelAgentState[M], error) {
-	// Publish the tool-search message as a mid-conversation system message, inserted
+	// Publish the tool-search message as a mid-conversation system reminder, inserted
 	// after the latest user message. Its content is fixed, so it is inserted exactly
 	// once: Has skips re-insertion when the message is already in the (reconstructed)
 	// history, and Insert persists it as a MessageInserted event so it carries across
 	// turns.
-	if !sysmsg.Has(state.Messages, toolSearchReminderExtraKey) {
-		state.Messages = sysmsg.Insert(ctx, state.Messages, toolSearchReminderExtraKey, m.midConversationSystemMessage, nil)
+	// Align any reminders reconstructed from history with the configured role; the fresh
+	// insert below is already built with that role.
+	state.Messages = systemreminder.NormalizeReminderRoles(state.Messages)
+	if !systemreminder.Has(state.Messages, toolSearchReminderExtraKey) {
+		state.Messages = systemreminder.Insert(ctx, state.Messages, toolSearchReminderExtraKey, m.reminder, nil)
 	}
 
 	if !m.isInitialized(ctx) {

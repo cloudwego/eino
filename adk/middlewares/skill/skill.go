@@ -29,7 +29,7 @@ import (
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/adk/internal"
-	"github.com/cloudwego/eino/adk/middlewares/internal/sysmsg"
+	"github.com/cloudwego/eino/adk/middlewares/internal/systemreminder"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
@@ -274,17 +274,16 @@ type typedSkillHandler[M adk.MessageType] struct {
 	tool        *typedSkillTool[M]
 }
 
-// BeforeAgent injects the skill tool and system prompt, then stashes a snapshot of the
-// current skill list for the available-skills reminder.
+// BeforeAgent injects the skill tool and system prompt, then marks the start of a new
+// turn for the available-skills reminder.
 //
-// List() is called here — once per turn — to avoid a List() request on every model call
-// (which would add latency in multi-call turns). The full current snapshot (skill names,
-// descriptions, and their MD5(name+description) digests) is stashed as run-local state.
-//
-// The add/change diff is NOT done here: it needs the previous reminder's digest, which
-// lives in the full message history. runCtx.AgentInput.Messages holds only the current
-// turn's input, so the prior reminder is not visible from here. BeforeModelRewriteState —
-// which sees the complete state.Messages — reads the snapshot, diffs, and inserts.
+// It does NOT call List() or build the reminder here. Both are deferred to the first
+// model call of the turn (BeforeModelRewriteState), because the add/change diff needs the
+// previous reminder's digest, which lives in the full message history — and
+// runCtx.AgentInput.Messages holds only the current turn's input, so the prior reminder
+// is not visible from here. This hook only sets a run-local "new turn" mark;
+// BeforeModelRewriteState sees it, does List()+diff+insert once, then clears it, so a
+// multi-call ReAct turn lists skills at most once.
 func (h *typedSkillHandler[M]) BeforeAgent(ctx context.Context, runCtx *adk.ChatModelAgentContext[M]) (context.Context, *adk.ChatModelAgentContext[M], error) {
 	runCtx.Instruction = runCtx.Instruction + "\n" + h.instruction
 	runCtx.Tools = append(runCtx.Tools, h.tool)
@@ -292,42 +291,19 @@ func (h *typedSkillHandler[M]) BeforeAgent(ctx context.Context, runCtx *adk.Chat
 	if runCtx.AgentInput == nil {
 		return ctx, runCtx, nil
 	}
-	skills, err := h.tool.b.List(ctx)
-	if err != nil {
-		log.Printf("skill middleware: failed to list skills for available-skills reminder, skipping: %v", err)
-		_ = adk.SetRunLocalValue(ctx, skillsReminderSnapshotKey, "")
-		return ctx, runCtx, nil
-	}
-	if len(skills) == 0 {
-		_ = adk.SetRunLocalValue(ctx, skillsReminderSnapshotKey, "")
-		return ctx, runCtx, nil
-	}
-
-	// Stash the full current snapshot as a single run-local value: one JSON string that
-	// keeps each skill's name/description/digest together as a unit. A JSON string is a
-	// primitive, so it avoids the gob registration SetRunLocalValue would otherwise need
-	// for a custom struct. It doubles as the "pending" gate for BeforeModelRewriteState:
-	// an empty/absent snapshot means nothing to insert.
-	entries := make([]skillEntry, len(skills))
-	for i, sk := range skills {
-		entries[i] = skillEntry{Name: sk.Name, Desc: sk.Description, Digest: skillDigest(sk)}
-	}
-	snapshot, err := json.Marshal(entries)
-	if err != nil {
-		log.Printf("skill middleware: failed to marshal skills snapshot, skipping reminder: %v", err)
-		_ = adk.SetRunLocalValue(ctx, skillsReminderSnapshotKey, "")
-		return ctx, runCtx, nil
-	}
-	_ = adk.SetRunLocalValue(ctx, skillsReminderSnapshotKey, string(snapshot))
+	_ = adk.SetRunLocalValue(ctx, skillsPendingKey, true)
 	return ctx, runCtx, nil
 }
 
-// BeforeModelRewriteState diffs the skill snapshot stashed by BeforeAgent against the
-// previous reminder's digest — read from the FULL history (state.Messages) — and inserts
-// a reminder advertising only the added/changed skills, at most once per turn.
+// BeforeModelRewriteState refreshes the available-skills reminder on the first model call
+// of a turn: if BeforeAgent marked a new turn, it lists the current skills, diffs them
+// against the previous reminder's digest — read from the FULL history (state.Messages) —
+// and inserts a reminder advertising only the added/changed skills, then clears the mark
+// so later model calls in the same ReAct turn do nothing (List() runs at most once/turn).
 //
-// The diff lives here, not in BeforeAgent, because only state.Messages carries prior
-// turns' reminders; BeforeAgent's runCtx.AgentInput.Messages holds just the current input.
+// List() runs here, not in BeforeAgent, because the diff needs prior turns' reminders,
+// which only state.Messages carries; BeforeAgent's runCtx.AgentInput.Messages holds just
+// the current input.
 //
 // Design note: advertising only the delta and appending (rather than rewriting or
 // removing earlier reminders) is deliberate. A per-change delta stays compact across a
@@ -339,26 +315,34 @@ func (h *typedSkillHandler[M]) BeforeModelRewriteState(ctx context.Context, stat
 	if state == nil {
 		return ctx, state, nil
 	}
-	sv, ok, err := adk.GetRunLocalValue(ctx, skillsReminderSnapshotKey)
+	// Align any reminders reconstructed from history with the configured role before the
+	// model call; the fresh insert below is already built with that role.
+	state.Messages = systemreminder.NormalizeReminderRoles(state.Messages)
+
+	pv, ok, err := adk.GetRunLocalValue(ctx, skillsPendingKey)
 	if err != nil || !ok {
 		// err only happens when called outside a valid agent execution context (a
 		// structural misuse). The reminder is best-effort, so skip it rather than
 		// fail the whole model call.
 		return ctx, state, nil
 	}
-	snapshot, _ := sv.(string)
-	// Consume on the first model call so the reminder is inserted at most once per turn;
-	// later calls in the same turn find nothing pending.
-	_ = adk.SetRunLocalValue(ctx, skillsReminderSnapshotKey, "")
-	if snapshot == "" {
+	if pending, _ := pv.(bool); !pending {
+		// Already handled this turn (or never marked): later model calls skip.
 		return ctx, state, nil
 	}
-	var entries []skillEntry
-	if err := json.Unmarshal([]byte(snapshot), &entries); err != nil || len(entries) == 0 {
+	// Consume the new-turn mark so List()+diff runs at most once per turn.
+	_ = adk.SetRunLocalValue(ctx, skillsPendingKey, false)
+
+	skills, err := h.tool.b.List(ctx)
+	if err != nil {
+		log.Printf("skill middleware: failed to list skills for available-skills reminder, skipping: %v", err)
+		return ctx, state, nil
+	}
+	if len(skills) == 0 {
 		return ctx, state, nil
 	}
 
-	prev, _ := sysmsg.LatestExtra(state.Messages, skillsReminderExtraKey, skillsDigestExtraKey)
+	prev, _ := systemreminder.LatestExtra(state.Messages, skillsReminderExtraKey, skillsDigestExtraKey)
 	prevSet := make(map[string]struct{}, len(toStringSlice(prev)))
 	for _, d := range toStringSlice(prev) {
 		prevSet[d] = struct{}{}
@@ -368,21 +352,22 @@ func (h *typedSkillHandler[M]) BeforeModelRewriteState(ctx context.Context, stat
 	// newly added skill, or one whose name/description (hence digest) changed. `digests`
 	// is the full current snapshot, stored in the reminder's Extra so the next turn diffs
 	// against the complete advertised set, not just this delta.
-	changed := make([]FrontMatter, 0, len(entries))
-	digests := make([]string, 0, len(entries))
-	for _, e := range entries {
-		digests = append(digests, e.Digest)
-		if _, ok := prevSet[e.Digest]; ok {
+	changed := make([]FrontMatter, 0, len(skills))
+	digests := make([]string, 0, len(skills))
+	for _, sk := range skills {
+		d := skillDigest(sk)
+		digests = append(digests, d)
+		if _, ok := prevSet[d]; ok {
 			continue
 		}
-		changed = append(changed, FrontMatter{Name: e.Name, Description: e.Desc})
+		changed = append(changed, FrontMatter{Name: sk.Name, Description: sk.Description})
 	}
 	if len(changed) == 0 {
 		return ctx, state, nil
 	}
 
 	extra := map[string]any{skillsDigestExtraKey: digests}
-	state.Messages = sysmsg.Insert(ctx, state.Messages, skillsReminderExtraKey, buildSkillsSectionFromEntries(changed), extra)
+	state.Messages = systemreminder.Insert(ctx, state.Messages, skillsReminderExtraKey, buildSkillsSectionFromEntries(changed), extra)
 	return ctx, state, nil
 }
 
@@ -392,21 +377,12 @@ const (
 	// skillsDigestExtraKey stores, in a skill reminder's Extra, the JSON array of
 	// MD5(name+description) digests of the skills it advertised, for cross-turn diffing.
 	skillsDigestExtraKey = "__eino_skill_digests__"
-	// skillsReminderSnapshotKey stashes the full current skill snapshot (run-local) from
-	// BeforeAgent to BeforeModelRewriteState, as a single JSON string of []skillEntry so
-	// each skill's name/description/digest stays together as a unit. It doubles as the
-	// "pending" gate: empty/absent means nothing to insert this turn, and it is cleared
-	// to consume (insert once per turn).
-	skillsReminderSnapshotKey = "__eino_skill_reminder_snapshot__"
+	// skillsPendingKey marks (run-local) the start of a new turn, set by BeforeAgent. On
+	// the first model call of the turn BeforeModelRewriteState sees the mark, refreshes the
+	// available-skills reminder (List + diff + insert), then clears it so a multi-call ReAct
+	// turn lists skills at most once.
+	skillsPendingKey = "__eino_skill_reminder_pending__"
 )
-
-// skillEntry bundles a skill's name, description, and digest so the whole snapshot is
-// stashed as one run-local value (a JSON string) rather than parallel slices.
-type skillEntry struct {
-	Name   string `json:"n"`
-	Desc   string `json:"d"`
-	Digest string `json:"g"`
-}
 
 // skillDigest returns the MD5(name+description) digest of a single skill.
 func skillDigest(sk FrontMatter) string {
@@ -551,7 +527,7 @@ func (s *typedSkillTool[M]) Info(ctx context.Context) (*schema.ToolInfo, error) 
 		fullDesc = s.customToolDesc(ctx, skills)
 	} else {
 		// The available-skills list is no longer embedded in the tool description; it is
-		// injected as a mid-conversation system message in BeforeAgent.
+		// injected as a mid-conversation system reminder in BeforeAgent.
 		fullDesc = internal.SelectPrompt(internal.I18nPrompts{
 			English: toolDescriptionBase,
 			Chinese: toolDescriptionBaseChinese,
