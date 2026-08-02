@@ -25,6 +25,7 @@ import (
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/adk/backgroundtask"
+	durablesubagent "github.com/cloudwego/eino/adk/backgroundtask/subagent"
 	"github.com/cloudwego/eino/adk/filesystem"
 	"github.com/cloudwego/eino/adk/internal"
 	"github.com/cloudwego/eino/adk/middlewares/internal/systemreminder"
@@ -95,6 +96,10 @@ type TypedDurableBackgroundConfig[M adk.MessageType] struct {
 	// resume the same SubAgentName. The default is one JSON object per line.
 	// Formatter migrations require a new SubAgentName or output path.
 	EventFormat AgentEventFormat[M]
+	// RunOptionsFactories reconstructs deployment-owned run options by sub-agent
+	// name for every execution attempt. Every worker serving a name must configure
+	// a semantically equivalent factory.
+	RunOptionsFactories map[string]durablesubagent.RunOptionsFactory
 }
 
 type AgentEventFormat[M adk.MessageType] func(context.Context, *adk.TypedAgentEvent[M]) (string, error)

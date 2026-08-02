@@ -357,24 +357,26 @@ func newDurableAgentTool[M adk.MessageType](
 		if !ok {
 			return nil, fmt.Errorf("subagent: agent %q is not resumable", agent.Name(ctx))
 		}
-		if err := executor.Register(agent.Name(ctx), &durablesubagent.AgentRegistration[M]{
+		agentName := agent.Name(ctx)
+		if err := executor.Register(agentName, &durablesubagent.AgentRegistration[M]{
 			Agent: resumable, OutputStore: config.OutputStore,
-			EventFormat: durablesubagent.EventFormat[M](format),
+			EventFormat:       durablesubagent.EventFormat[M](format),
+			RunOptionsFactory: config.RunOptionsFactories[agentName],
 		}); err != nil {
 			return nil, err
 		}
 	}
-	registeredExecutor := executor
 	if existing, ok := config.Manager.Executors().Resolve(durablesubagent.ExecutorKey); ok {
 		typed, typeOK := existing.(*durablesubagent.Executor[M])
 		if !typeOK {
 			return nil, errors.New("subagent: registered durable executor has incompatible message type")
 		}
-		registeredExecutor = typed
 		for _, agent := range agents {
-			if err := typed.Register(agent.Name(ctx), &durablesubagent.AgentRegistration[M]{
+			agentName := agent.Name(ctx)
+			if err := typed.Register(agentName, &durablesubagent.AgentRegistration[M]{
 				Agent: agent.(adk.TypedResumableAgent[M]), OutputStore: config.OutputStore,
-				EventFormat: durablesubagent.EventFormat[M](format),
+				EventFormat:       durablesubagent.EventFormat[M](format),
+				RunOptionsFactory: config.RunOptionsFactories[agentName],
 			}); err != nil {
 				return nil, err
 			}
@@ -397,27 +399,26 @@ func newDurableAgentTool[M adk.MessageType](
 		if prompt == "" {
 			prompt = in.Description
 		}
-		taskID, err := config.Manager.AllocateTaskID(
-			callCtx, &backgroundtask.AllocateTaskIDRequest{Kind: TaskTypeSubagent},
-		)
-		if err != nil {
-			return "", err
+		receivers, enableStreaming, invocationRunOptions := agenttool.ResolveInvocationOptions[
+			*adk.TypedAgentEvent[M],
+			adk.AgentRunOption,
+		](in.SubagentType, opts...)
+		if len(invocationRunOptions) > 0 {
+			return "", errors.New(
+				"subagent: durable execution does not support invocation-scoped run options; " +
+					"configure RunOptionsFactories",
+			)
 		}
+		detach := func() {}
 		if !in.RunInBackground {
-			receivers, enableStreaming, runOptions := agenttool.ResolveInvocationOptions[
-				*adk.TypedAgentEvent[M],
-				adk.AgentRunOption,
-			](in.SubagentType, opts...)
-			if err = registeredExecutor.RegisterObserver(
-				taskID, receivers, runOptions, enableStreaming,
-			); err != nil {
-				return "", err
-			}
-			defer registeredExecutor.DeactivateObserver(taskID)
+			callCtx, detach = agenttool.WithForegroundExecution(
+				callCtx, receivers, enableStreaming,
+			)
+			defer detach()
 		}
 		outputFile := reserveAgentOutput(callCtx, config.OutputStore, config.OutputDir)
 		task, err := durablesubagent.Submit(callCtx, config.Manager, &durablesubagent.SubmitRequest{
-			TaskID: taskID, SubAgentName: in.SubagentType, Prompt: prompt, Description: in.Description,
+			SubAgentName: in.SubagentType, Prompt: prompt, Description: in.Description,
 			SessionID: environment.SessionID(), OutputFile: outputFile,
 		})
 		if err != nil {

@@ -61,21 +61,29 @@ The correct claim is therefore:
 
 The architecture is sound but the exported API is not yet minimal enough to stabilize.
 The model-facing surface is small and coherent. The application and provider surfaces
-currently overlap, and notification/observer internals leak into public APIs.
+currently overlap, and notification provider contracts enlarge the core package.
 
 Highest-priority API issues:
 
-1. `backgroundtask/subagent.Executor.RegisterObserver` is public but accepts an
-   `adk/internal/agenttool` type. External users cannot name that type, so this is not a
-   valid public API.
-2. `Manager` exposes duplicate legacy and context-aware operations:
+1. `Manager` exposes duplicate legacy and context-aware operations:
    `Get`/`GetTask`, `Wait`/`WaitTask`, and `Cancel`/`RequestCancel`.
-3. `TaskPayload` is exported while documented as executor-private, and
+2. `TaskPayload` is exported while documented as executor-private, and
    `RegisterAgent` duplicates the more complete `Register`.
-4. Completion notification is promised consistently, but delivery remains a host integration
+3. Completion notification is promised consistently, but delivery remains a host integration
    obligation rather than a construction-time guarantee.
-5. `Manager.Subscribe` and `Manager.List` are process-local views whose names imply a
+4. `Manager.Subscribe` and `Manager.List` are process-local views whose names imply a
    complete durable view.
+5. Equivalent `RunOptionsFactory` configuration across workers remains a deployment
+   invariant; task payloads currently identify only the registered sub-agent name.
+
+Resolved during this audit:
+
+- The public `RegisterObserver` / `DeactivateObserver` registry was removed.
+- Foreground parent-event forwarding and streaming presentation now use an
+  `adk/internal/agenttool` context value preserved by `RunSubmitted`.
+- Durable execution options are reconstructed from worker `AgentRegistration` on every
+  attempt. Invocation-scoped `AgentRunOption` values are rejected instead of being applied
+  only to the first same-process foreground attempt.
 
 ## 3. Current Architecture
 
@@ -85,7 +93,8 @@ Highest-priority API issues:
   output reliability, CAS version, and attempt fencing.
 - Session and checkpoint stores are authoritative for resumable agent history.
 - `OutputFile` is an optional incremental transcript, not the terminal result authority.
-- Process-local closures and foreground observers are ephemeral sidecars.
+- Process-local closures and foreground event projection are ephemeral sidecars carried
+  only through internal execution context.
 - A task ID is an opaque bearer capability. The default ID contains 128 bits of
   `crypto/rand` entropy and is not used in default output paths.
 - UUID v4 is also a valid default: it provides 122 random bits in a standard
@@ -146,6 +155,19 @@ runner.ExecuteBackgroundTask(ctx, manager, taskID)
 This binds the Runner environment before `Manager.Execute`. Missing session/checkpoint
 dependencies are rejected before `Store.Start`, leaving the task pending.
 
+The serialized `subagent_name` also selects a worker-local `AgentRegistration`.
+`RunOptionsFactory`, when configured for that registration, reconstructs fresh
+deployment-owned `AgentRunOption` values for every initial or resumed attempt. Factories
+are not serialized; every worker serving the same name must configure a semantically
+equivalent factory. The factory receives no execution context, preventing hidden
+dependence on launching-process values. Invocation-scoped options are rejected because
+they cannot be reconstructed after worker reassignment.
+
+For same-process foreground execution only, middleware attaches parent-event receivers
+and streaming presentation to an internal context value. `RunSubmitted` preserves context
+values while detaching cancellation, so the executor can project events until the task
+backgrounds. Cross-process and explicitly backgrounded execution have no such projection.
+
 ### 3.5 Output and notification behavior
 
 - Local and durable subagents use the same default JSONL event formatter.
@@ -187,6 +209,7 @@ The remaining notification concern is operational enforcement, not contradictory
 | `TypedBackgroundConfig{Local,Durable}` | Strict backend choice | Good concept. Pointer union is idiomatic enough and validated. |
 | `TypedLocalBackgroundConfig` | Manager + optional transcript policy | Good. |
 | `TypedDurableBackgroundConfig` | Same plus cross-worker formatter constraint | Good, but structurally duplicates Local config. |
+| `RunOptionsFactories` | Reconstruct deployment-owned options by serialized sub-agent name | Good boundary. Semantic equivalence across workers is an operational invariant. |
 | `AgentEventFormat` | Custom transcript framing | Useful expert extension. Compatibility responsibility is correctly documented. |
 | `NameFromTask` | Decode host policy input | Good, narrow domain helper. |
 
@@ -203,7 +226,7 @@ mode-specific evolution. That trade-off is acceptable.
 | `filesystem.ExecuteTaskType` | Stable task kind | Good. |
 | `deep.TypedBackgroundConfig{Local,Durable}` | Top-level mode selection | Useful facade, but duplicates subagent configuration. |
 | `deep.TypedLocalBackgroundConfig` | Shared Manager + output dir | Adequate. Generic parameter is unused. |
-| `deep.TypedDurableBackgroundConfig` | Shared Manager + output dir | Adequate. Generic parameter is unused. |
+| `deep.TypedDurableBackgroundConfig` | Shared Manager, output dir, and run-option factories | Adequate. It forwards worker reconstruction configuration; generic parameter is unused. |
 
 Recommended cleanup: make Deep’s two leaf background configs non-generic, or define one
 non-generic leaf config used by the strict Local/Durable wrapper.
@@ -229,7 +252,7 @@ non-generic leaf config used by the strict Local/Durable wrapper.
 | `Close` | Bounded drain/cancel shutdown | Good. Required deadline with active work is explicit and safe. |
 | `Store` | Access provider SPI | Pragmatic, but enables bypass of Manager validation. |
 | `Executors` | Access mutable registry | Needed by current middleware wiring, but leaks construction internals. |
-| `AllocateTaskID` | Preallocate bearer capability | Necessary for observer-before-submit ordering. |
+| `AllocateTaskID` | Preallocate bearer capability | Useful expert operation, but no longer required by Durable subagent middleware. |
 | `Submit` | Persist generic durable `Spec` | Good provider/application boundary. |
 | `Execute` | Claim and execute a generic pending task | Good generic worker entry, but unsafe for Runner-dependent executors unless correctly wrapped. |
 
@@ -304,20 +327,22 @@ Design assessment:
 | `ResumeMode` | Native interrupt or next-turn resume | Good and explicit. |
 | `TaskPayload` | Serialized wire payload | Bad exposure: exported but documented “executor-private.” |
 | `EventFormat` | Transcript encoding | Good expert SPI. |
-| `AgentRegistration` | Bind name to worker dependencies | Good concept. |
+| `RunOptionsFactory` | Reconstruct run options on each worker attempt | Good deployment boundary; must return fresh options and remain semantically equivalent across workers. |
+| `AgentRegistration` | Bind serialized name to worker dependencies and option factory | Good concept. |
 | `Executor` | Durable subagent executor | Good. |
 | `Register` | Register full worker dependencies | Good canonical operation. |
 | `RegisterAgent` | Register agent only | Redundant convenience operation. |
-| `RegisterObserver` / `DeactivateObserver` | Launching-turn live projection | Must be unexported; signature leaks an internal type. |
 | `SubmitRequest` / `Submit` | Persist a durable subagent task | Good application helper. |
 
 Recommended shape:
 
-- Unexport `TaskPayload`, `RegisterObserver`, and `DeactivateObserver`.
+- Unexport `TaskPayload`.
 - Keep one registration method. Prefer
   `Register(name string, registration AgentRegistration[M])`.
 - If payload inspection is a supported host capability, expose a read-only
   `DecodeTask(task) (TaskInfo, error)` rather than the wire struct.
+- If per-task option profiles become necessary, persist a versioned profile selector
+  and resolve it through registration; never serialize `AgentRunOption`.
 
 ### 4.8 Runner API
 
@@ -380,7 +405,7 @@ configuration.
 **Strong:** no generic metadata bag, resolver, version/digest identity, or model-facing resume tool
 was added.
 
-**Concern:** legacy Manager aliases, exported payload/observer internals, and notification SPIs make
+**Concern:** legacy Manager aliases, the exported payload, and notification SPIs make
 the Go API materially larger than necessary.
 
 ### 5.4 Backward Compatibility
@@ -396,8 +421,7 @@ text, and default JSONL framing match the baseline.
 
 **Strong:** durable execution is executor-driven; Manager does not understand subagent payloads.
 
-**Concern:** public observer methods depend on `adk/internal/agenttool`, and session notification
-provider contracts live in the core package.
+**Concern:** session notification provider contracts still live in the core package.
 
 ### 5.6 Cohesion vs. Tension
 
@@ -410,7 +434,7 @@ event bus, and shutdown owner. The overlap shows in duplicate methods and partia
 
 **Strong:** shared coordinator and explicit runtime remove duplicated lifecycle logic.
 
-**Concern:** `RunStream` and durable observer projection remain inherently complex. The hardest
+**Concern:** `RunStream` and Durable foreground projection remain inherently complex. The hardest
 sections are stream preview/background transitions, Durable cancellation reconciliation, and
 Durable subagent control/checkpoint handling. Local cancellation no longer participates in the
 persisted `canceling` protocol.
@@ -428,8 +452,8 @@ persisted `canceling` protocol.
 | `List` | Misleading because scope is Manager-submitted IDs, not all Store tasks. |
 | `Subscribe` | Misleading because events are process-local and incomplete. |
 | `TaskPayload` | Contradicts “executor-private” documentation. |
-| `RegisterObserver` | Leaked internal mechanism. |
 | `AgentRegistration` | Clear. |
+| `RunOptionsFactory` | Clear: deployment-owned reconstruction rather than serialized options. |
 | `ReleaseSuspension` | Clear Store transition, missing Manager-level counterpart. |
 
 ### 5.9 Readability
@@ -439,7 +463,7 @@ The three hardest sections are:
 1. `Manager.coordinateSubmittedStream`: multiple timers, caller state, execution state, and drain
    behavior interact.
 2. Durable `taskRuntime` cancellation/version reconciliation: lock ordering and CAS ownership are implicit.
-3. Durable subagent `Execute`: Runner cancellation, control translation, observer projection,
+3. Durable subagent `Execute`: Runner cancellation, control translation, foreground projection,
    output writing, interrupts, and checkpoint validation converge in one path.
 
 Existing comments are good, but state-transition tables near these functions would reduce the cost
@@ -479,8 +503,8 @@ for:
 1. Why Durable `RequestCancel` takes the active runtime lock before Store CAS, while Local
    cancellation directly signals the in-process attempt and waits for its terminal commit.
 2. Why `List` is intentionally Manager-local rather than Store-global.
-3. Why middleware must register a foreground observer before `Submit` and deactivate it without
-   waiting for in-flight receivers.
+3. Why foreground projection is internal context, why it stops at the background boundary,
+   and why detach does not wait for in-flight receivers.
 
 ## 6. Scorecard
 
@@ -488,9 +512,9 @@ for:
 |---|---:|---|
 | Concept coherence | 4/5 | Authority boundaries are strong; notification delivery is not enforced by construction. |
 | API usability | 3/5 | Model API is simple; Go API has audience ambiguity. |
-| Minimum API surface | 2/5 | Several duplicate and leaked public APIs remain. |
+| Minimum API surface | 3/5 | The observer leak is removed; Manager aliases and provider SPIs remain broad. |
 | Backward compatibility | 4/5 | Baseline text and Local behavior are restored; transcript labels and IDs intentionally differ. |
-| Module separation | 3/5 | Core/executor split is good; observer and notification boundaries leak. |
+| Module separation | 4/5 | Foreground projection is internal; notification provider contracts remain in core. |
 | Cohesion | 3/5 | Shared Manager is useful but owns too many roles. |
 | Elegance | 4/5 | Explicit runtime and shared coordinator are good solutions to inherent complexity. |
 | Naming | 3/5 | Most names are clear; `List`, `Subscribe`, and `RunSubmitted` need correction. |
@@ -501,11 +525,12 @@ for:
 
 ## 7. Prioritized Recommendations
 
-### P0: Fix public API invalidity before release
+### P0: Reduce the durable executor API before release
 
-- Unexport durable subagent observer methods.
 - Unexport `TaskPayload`, or replace it with a stable read-only decoder.
 - Remove `RegisterAgent` or `Register`; retain one canonical registration API.
+- Document `RunOptionsFactory` as deployment configuration and require equivalent
+  registration for every worker serving a serialized sub-agent name.
 
 ### P0: Enforce the notification contract
 
@@ -548,7 +573,10 @@ Executed against the current repository:
 ```bash
 git diff --check
 go test ./adk/...
-go test -race ./adk/backgroundtask ./adk/middlewares/backgroundtask
+go test -race ./adk/internal/agenttool \
+  ./adk/backgroundtask/subagent \
+  ./adk/middlewares/subagent \
+  ./adk/prebuilt/deep
 ```
 
 All commands passed.

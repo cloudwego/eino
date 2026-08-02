@@ -54,6 +54,39 @@ type cancelThenMessageAgent struct {
 	release chan struct{}
 }
 
+type registrationRunOptions struct {
+	value string
+}
+
+type optionCaptureAgent struct {
+	name string
+	seen []string
+}
+
+func (a *optionCaptureAgent) Name(context.Context) string        { return a.name }
+func (a *optionCaptureAgent) Description(context.Context) string { return "option capture" }
+func (a *optionCaptureAgent) Run(
+	_ context.Context,
+	_ *adk.AgentInput,
+	options ...adk.AgentRunOption,
+) *adk.AsyncIterator[*adk.AgentEvent] {
+	resolved := adk.GetImplSpecificOptions[registrationRunOptions](nil, options...)
+	a.seen = append(a.seen, resolved.value)
+	iter, generator := adk.NewAsyncIteratorPair[*adk.AgentEvent]()
+	generator.Send(adk.EventFromMessage(
+		schema.AssistantMessage("done", nil), nil, schema.Assistant, a.name,
+	))
+	generator.Close()
+	return iter
+}
+func (a *optionCaptureAgent) Resume(
+	ctx context.Context,
+	_ *adk.ResumeInfo,
+	options ...adk.AgentRunOption,
+) *adk.AsyncIterator[*adk.AgentEvent] {
+	return a.Run(ctx, &adk.AgentInput{}, options...)
+}
+
 func (a *cancelThenMessageAgent) Name(context.Context) string        { return a.name }
 func (a *cancelThenMessageAgent) Description(context.Context) string { return "cancel then message" }
 func (a *cancelThenMessageAgent) Run(
@@ -383,6 +416,41 @@ func TestExecutorMessageBecomesTerminalResult_BitsUT(t *testing.T) {
 	require.NotNil(t, result)
 	assert.Equal(t, backgroundtask.StatusCompleted, result.Status)
 	assert.Equal(t, "progress", string(result.ResultData))
+}
+
+func TestExecutorReconstructsRegisteredRunOptionsForEveryAttempt_BitsUT(t *testing.T) {
+	store := adksession.NewInMemoryStore[*schema.Message](nil)
+	agent := &optionCaptureAgent{name: "worker"}
+	var factoryCalls int
+	executor := &Executor[*schema.Message]{}
+	require.NoError(t, executor.Register(agent.name, &AgentRegistration[*schema.Message]{
+		Agent: agent,
+		RunOptionsFactory: func() ([]adk.AgentRunOption, error) {
+			factoryCalls++
+			return []adk.AgentRunOption{adk.WrapImplSpecificOptFn(
+				func(options *registrationRunOptions) {
+					options.value = "registered"
+				},
+			)}, nil
+		},
+	}))
+	executors := backgroundtask.NewExecutorRegistry()
+	require.NoError(t, executors.Register(executor))
+	manager := backgroundtask.New(context.Background(), &backgroundtask.Config{Executors: executors})
+	defer manager.Close(context.Background())
+	runner := adk.NewRunner(context.Background(), adk.RunnerConfig{
+		Agent: agent, CheckPointStore: store, SessionID: "parent", SessionStore: store,
+	})
+
+	for i := 0; i < 2; i++ {
+		task, err := Submit(context.Background(), manager, &SubmitRequest{
+			SubAgentName: agent.name, Prompt: "work", Description: "work", SessionID: "parent",
+		})
+		require.NoError(t, err)
+		require.NoError(t, runner.ExecuteBackgroundTask(context.Background(), manager, task.Spec.ID))
+	}
+	assert.Equal(t, 2, factoryCalls)
+	assert.Equal(t, []string{"registered", "registered"}, agent.seen)
 }
 
 func TestManagerExecuteWithoutRunnerEnvironmentLeavesTaskPending_BitsUT(t *testing.T) {

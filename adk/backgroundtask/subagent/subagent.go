@@ -75,27 +75,24 @@ type checkpointState struct {
 // EventFormat encodes one materialized event as one output transcript record.
 type EventFormat[M adk.MessageType] func(context.Context, *adk.TypedAgentEvent[M]) (string, error)
 
+// RunOptionsFactory reconstructs deployment-owned run options for each task attempt.
+// Every worker serving the same registered agent name must configure a semantically
+// equivalent factory and return fresh option values. The executor adds attempt-local
+// checkpoint and cancellation options separately.
+type RunOptionsFactory func() ([]adk.AgentRunOption, error)
+
 // AgentRegistration binds a persisted name to worker-local dependencies.
 type AgentRegistration[M adk.MessageType] struct {
-	Agent       adk.TypedResumableAgent[M]
-	OutputStore filesystem.AppendOpener
-	EventFormat EventFormat[M]
-}
-
-type foregroundObserver[M adk.MessageType] struct {
-	mu              sync.Mutex
-	active          bool
-	receivers       []agenttool.EventReceiver[*adk.TypedAgentEvent[M]]
-	runOptions      []adk.AgentRunOption
-	enableStreaming bool
+	Agent             adk.TypedResumableAgent[M]
+	OutputStore       filesystem.AppendOpener
+	EventFormat       EventFormat[M]
+	RunOptionsFactory RunOptionsFactory
 }
 
 // Executor runs durable sub-agent tasks through ADK Runner checkpointing.
 type Executor[M adk.MessageType] struct {
 	mu            sync.RWMutex
 	registrations map[string]*AgentRegistration[M]
-	observersMu   sync.Mutex
-	observers     map[string]*foregroundObserver[M]
 }
 
 // Key returns the backgroundtask executor key for sub-agent tasks.
@@ -143,86 +140,6 @@ func (e *Executor[M]) resolveAgent(name string) (adk.TypedResumableAgent[M], err
 	return registration.Agent, nil
 }
 
-// RegisterObserver attaches launching-turn receivers to one foreground task.
-func (e *Executor[M]) RegisterObserver(
-	taskID string,
-	receivers []agenttool.EventReceiver[*adk.TypedAgentEvent[M]],
-	runOptions []adk.AgentRunOption,
-	enableStreaming bool,
-) error {
-	if taskID == "" {
-		return errors.New("backgroundtask/subagent: observer task id is required")
-	}
-	e.observersMu.Lock()
-	defer e.observersMu.Unlock()
-	if e.observers == nil {
-		e.observers = make(map[string]*foregroundObserver[M])
-	}
-	if _, exists := e.observers[taskID]; exists {
-		return backgroundtask.ErrAlreadyExists
-	}
-	e.observers[taskID] = &foregroundObserver[M]{
-		active: true, receivers: append([]agenttool.EventReceiver[*adk.TypedAgentEvent[M]](nil), receivers...),
-		runOptions:      append([]adk.AgentRunOption(nil), runOptions...),
-		enableStreaming: enableStreaming,
-	}
-	return nil
-}
-
-// DeactivateObserver prevents future receiver calls and removes the registry entry.
-func (e *Executor[M]) DeactivateObserver(taskID string) {
-	e.observersMu.Lock()
-	observer := e.observers[taskID]
-	delete(e.observers, taskID)
-	e.observersMu.Unlock()
-	if observer == nil {
-		return
-	}
-	observer.mu.Lock()
-	observer.active = false
-	observer.receivers = nil
-	observer.runOptions = nil
-	observer.mu.Unlock()
-}
-
-func (e *Executor[M]) resolveObserver(taskID string) *foregroundObserver[M] {
-	e.observersMu.Lock()
-	observer := e.observers[taskID]
-	e.observersMu.Unlock()
-	return observer
-}
-
-func (o *foregroundObserver[M]) options() ([]adk.AgentRunOption, bool) {
-	if o == nil {
-		return nil, false
-	}
-	o.mu.Lock()
-	defer o.mu.Unlock()
-	if !o.active {
-		return nil, false
-	}
-	return append([]adk.AgentRunOption(nil), o.runOptions...), o.enableStreaming
-}
-
-func (o *foregroundObserver[M]) forward(
-	event *adk.TypedAgentEvent[M],
-	backgrounded <-chan struct{},
-) {
-	if o == nil || signalClosed(backgrounded) {
-		return
-	}
-	o.mu.Lock()
-	if !o.active || signalClosed(backgrounded) {
-		o.mu.Unlock()
-		return
-	}
-	receivers := append([]agenttool.EventReceiver[*adk.TypedAgentEvent[M]](nil), o.receivers...)
-	o.mu.Unlock()
-	for _, receiver := range receivers {
-		receiver(copyMaterializedEvent(event))
-	}
-}
-
 func copyMaterializedEvent[M adk.MessageType](
 	event *adk.TypedAgentEvent[M],
 ) *adk.TypedAgentEvent[M] {
@@ -240,15 +157,6 @@ func copyMaterializedEvent[M adk.MessageType](
 		copy.Output = &output
 	}
 	return &copy
-}
-
-func signalClosed(signal <-chan struct{}) bool {
-	select {
-	case <-signal:
-		return true
-	default:
-		return false
-	}
 }
 
 type eventOutputWriter[M adk.MessageType] struct {
@@ -482,14 +390,20 @@ func (e *Executor[M]) Execute(
 	if err != nil {
 		return nil, err
 	}
-	observer := e.resolveObserver(task.Spec.ID)
-	runOptions, enableStreaming := observer.options()
+	var runOptions []adk.AgentRunOption
+	if registration.RunOptionsFactory != nil {
+		runOptions, err = registration.RunOptionsFactory()
+		if err != nil {
+			return nil, fmt.Errorf("backgroundtask/subagent: reconstruct run options: %w", err)
+		}
+	}
+	foreground := agenttool.ForegroundExecutionFromContext[*adk.TypedAgentEvent[M]](ctx)
 	environment, ok := adk.TypedRunnerEnvironmentFromContext[M](ctx)
 	if !ok {
 		return nil, ErrRunnerEnvironmentRequired
 	}
 	runner := adk.NewTypedRunner(adk.TypedRunnerConfig[M]{
-		Agent: registration.Agent, EnableStreaming: enableStreaming,
+		Agent: registration.Agent, EnableStreaming: foreground.EnableStreaming(),
 		CheckPointStore: environment.CheckPointStore(),
 		SessionID:       payload.ChildSessionID, SessionStore: environment.SessionStore(),
 		SessionConfig: environment.SessionConfig(),
@@ -557,7 +471,7 @@ func (e *Executor[M]) Execute(
 		if writeErr := output.write(materialized); writeErr != nil {
 			return nil, writeErr
 		}
-		observer.forward(materialized, runtime.Backgrounded())
+		foreground.Forward(materialized, runtime.Backgrounded(), copyMaterializedEvent[M])
 	}
 	if controlResult, controlErr, controlled := e.controlResult(
 		ctx, task, payload, pollControl(controlRequests),
@@ -596,7 +510,8 @@ func (e *Executor[M]) beginRun(
 	options ...adk.AgentRunOption,
 ) (*adk.AsyncIterator[*adk.TypedAgentEvent[M]], error) {
 	if len(task.Checkpoint) == 0 {
-		queryOptions := append([]adk.AgentRunOption{adk.WithCheckPointID(payload.CheckpointID)}, options...)
+		queryOptions := append([]adk.AgentRunOption(nil), options...)
+		queryOptions = append(queryOptions, adk.WithCheckPointID(payload.CheckpointID))
 		return runner.Query(
 			ctx, payload.Prompt, queryOptions...,
 		), nil

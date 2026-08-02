@@ -30,6 +30,7 @@ import (
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/adk/backgroundtask"
+	durablesubagent "github.com/cloudwego/eino/adk/backgroundtask/subagent"
 	"github.com/cloudwego/eino/adk/filesystem"
 	filesystem2 "github.com/cloudwego/eino/adk/middlewares/filesystem"
 	"github.com/cloudwego/eino/adk/prebuilt/planexecute"
@@ -462,6 +463,29 @@ func TestDeepBackgroundConfigIsStrictUnion(t *testing.T) {
 		Durable: &TypedDurableBackgroundConfig[*schema.Message]{Manager: manager},
 	}})
 	require.ErrorContains(t, err, "exactly one")
+}
+
+func TestDeepDurableBackgroundForwardsRunOptionsFactories(t *testing.T) {
+	factory := func() ([]adk.AgentRunOption, error) {
+		return []adk.AgentRunOption{adk.WithTimelineEvents()}, nil
+	}
+	manager := backgroundtask.New(context.Background(), nil)
+	defer manager.Close(context.Background())
+	background := deepSubagentBackground(&TypedConfig[*schema.Message]{
+		Background: &TypedBackgroundConfig[*schema.Message]{
+			Durable: &TypedDurableBackgroundConfig[*schema.Message]{
+				Manager: manager,
+				RunOptionsFactories: map[string]durablesubagent.RunOptionsFactory{
+					"worker": factory,
+				},
+			},
+		},
+	})
+	require.NotNil(t, background.Durable)
+	require.NotNil(t, background.Durable.RunOptionsFactories["worker"])
+	options, err := background.Durable.RunOptionsFactories["worker"]()
+	require.NoError(t, err)
+	assert.Len(t, options, 1)
 }
 
 // NewTyped with a Manager injects the task_output/task_stop control tools and a

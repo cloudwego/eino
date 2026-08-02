@@ -25,6 +25,7 @@ import (
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/adk/backgroundtask"
+	durablesubagent "github.com/cloudwego/eino/adk/backgroundtask/subagent"
 	"github.com/cloudwego/eino/adk/filesystem"
 	"github.com/cloudwego/eino/adk/internal"
 	backgroundtaskmw "github.com/cloudwego/eino/adk/middlewares/backgroundtask"
@@ -62,6 +63,9 @@ type TypedLocalBackgroundConfig[M adk.MessageType] struct {
 type TypedDurableBackgroundConfig[M adk.MessageType] struct {
 	Manager   *backgroundtask.Manager
 	OutputDir string
+	// RunOptionsFactories reconstructs deployment-owned options on every worker
+	// attempt and is forwarded to the durable sub-agent middleware.
+	RunOptionsFactories map[string]durablesubagent.RunOptionsFactory
 }
 
 // TypedConfig defines the configuration for creating a DeepAgent parameterized by message type.
@@ -397,7 +401,8 @@ func deepSubagentBackground[M adk.MessageType](
 	return &subagent.TypedBackgroundConfig[M]{
 		Durable: &subagent.TypedDurableBackgroundConfig[M]{
 			Manager: cfg.Background.Durable.Manager, OutputStore: outputStore,
-			OutputDir: cfg.Background.Durable.OutputDir,
+			OutputDir:           cfg.Background.Durable.OutputDir,
+			RunOptionsFactories: cfg.Background.Durable.RunOptionsFactories,
 		},
 	}
 }

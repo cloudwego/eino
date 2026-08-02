@@ -31,6 +31,7 @@ import (
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/adk/backgroundtask"
+	durablesubagent "github.com/cloudwego/eino/adk/backgroundtask/subagent"
 	"github.com/cloudwego/eino/adk/filesystem"
 	"github.com/cloudwego/eino/adk/internal/agenttool"
 	adksession "github.com/cloudwego/eino/adk/session"
@@ -39,9 +40,14 @@ import (
 )
 
 type mockAgent struct {
-	name string
-	desc string
-	run  func(context.Context, *adk.AgentInput) string
+	name       string
+	desc       string
+	run        func(context.Context, *adk.AgentInput) string
+	runOptions func([]adk.AgentRunOption)
+}
+
+type middlewareRunOptions struct {
+	value string
 }
 
 type failExecutionOpenStore struct {
@@ -61,8 +67,11 @@ func (s *failExecutionOpenStore) OpenAppend(
 
 func (m *mockAgent) Name(context.Context) string        { return m.name }
 func (m *mockAgent) Description(context.Context) string { return m.desc }
-func (m *mockAgent) Run(ctx context.Context, input *adk.AgentInput, _ ...adk.AgentRunOption) *adk.AsyncIterator[*adk.AgentEvent] {
+func (m *mockAgent) Run(ctx context.Context, input *adk.AgentInput, options ...adk.AgentRunOption) *adk.AsyncIterator[*adk.AgentEvent] {
 	iter, gen := adk.NewAsyncIteratorPair[*adk.AgentEvent]()
+	if m.runOptions != nil {
+		m.runOptions(options)
+	}
 	result := m.desc
 	if m.run != nil {
 		result = m.run(ctx, input)
@@ -394,7 +403,7 @@ func TestDurableOutputOpenFailureIsFailSoft(t *testing.T) {
 	assert.Equal(t, "durable output", string(task.ResultData))
 }
 
-func TestDurableForegroundObserverStopsAtBackgroundBoundary(t *testing.T) {
+func TestDurableForegroundProjectionStopsAtBackgroundBoundary(t *testing.T) {
 	ctx := runnerEnvironmentContext(t)
 	manager := backgroundtask.New(context.Background(), nil)
 	agent := &mockAgent{name: "worker", desc: "done"}
@@ -432,6 +441,64 @@ func TestDurableForegroundObserverStopsAtBackgroundBoundary(t *testing.T) {
 		return false
 	}, time.Second, 10*time.Millisecond)
 	assert.Zero(t, atomic.LoadInt64(&calls))
+}
+
+func TestDurableAgentToolRejectsInvocationScopedRunOptions(t *testing.T) {
+	ctx := runnerEnvironmentContext(t)
+	manager := backgroundtask.New(context.Background(), nil)
+	agent := &mockAgent{name: "worker", desc: "done"}
+	middleware, err := New(ctx, &Config{
+		SubAgents: []adk.Agent{agent}, Background: durableBackground(manager, agent),
+	})
+	require.NoError(t, err)
+	_, runCtx, err := middleware.BeforeAgent(ctx, &adk.ChatModelAgentContext[*schema.Message]{})
+	require.NoError(t, err)
+	invokable := runCtx.Tools[0].(tool.InvokableTool)
+
+	_, err = invokable.InvokableRun(
+		ctx,
+		`{"subagent_type":"worker","prompt":"work","description":"foreground"}`,
+		agenttool.WithInvocationOptions(
+			"worker", []adk.AgentRunOption{adk.WithTimelineEvents()},
+		),
+	)
+	require.ErrorContains(t, err, "configure RunOptionsFactories")
+	assert.Empty(t, manager.List())
+}
+
+func TestDurableAgentToolUsesRegisteredRunOptionsFactory(t *testing.T) {
+	ctx := runnerEnvironmentContext(t)
+	manager := backgroundtask.New(context.Background(), nil)
+	var got string
+	agent := &mockAgent{
+		name: "worker", desc: "done",
+		runOptions: func(options []adk.AgentRunOption) {
+			got = adk.GetImplSpecificOptions[middlewareRunOptions](nil, options...).value
+		},
+	}
+	middleware, err := New(ctx, &Config{
+		SubAgents: []adk.Agent{agent},
+		Background: &BackgroundConfig{Durable: &DurableBackgroundConfig{
+			Manager: manager,
+			RunOptionsFactories: map[string]durablesubagent.RunOptionsFactory{
+				"worker": func() ([]adk.AgentRunOption, error) {
+					return []adk.AgentRunOption{adk.WrapImplSpecificOptFn(
+						func(options *middlewareRunOptions) {
+							options.value = "registered"
+						},
+					)}, nil
+				},
+			},
+		}},
+	})
+	require.NoError(t, err)
+	_, runCtx, err := middleware.BeforeAgent(ctx, &adk.ChatModelAgentContext[*schema.Message]{})
+	require.NoError(t, err)
+	_, err = runCtx.Tools[0].(tool.InvokableTool).InvokableRun(
+		ctx, `{"subagent_type":"worker","prompt":"work","description":"foreground"}`,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, "registered", got)
 }
 
 func TestDurableBlockingReceiverDoesNotBlockAutoBackgroundResponse(t *testing.T) {
