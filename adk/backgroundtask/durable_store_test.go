@@ -46,8 +46,7 @@ func (c *testClock) Advance(d time.Duration) {
 func validSpec(id string) Spec {
 	return Spec{
 		ID: id, ExecutorKey: "test", Payload: []byte("payload"),
-		LeaseExpiryPolicy: LeaseExpiryRetry,
-		SessionID:         "session", Notify: &NotificationTarget{
+		SessionID: "session", Notify: &NotificationTarget{
 			Kind: "session_inbox", TargetID: "session",
 			Metadata: map[string]string{"test/key": "value"},
 		},
@@ -56,7 +55,9 @@ func validSpec(id string) Spec {
 
 func createAndStart(t *testing.T, store *MemoryStore, id string) *Task {
 	t.Helper()
-	created, err := store.Create(context.Background(), &CreateTaskRequest{Spec: validSpec(id)})
+	created, err := store.Create(context.Background(), &CreateTaskRequest{
+		Spec: validSpec(id), LeaseExpiryPolicy: LeaseExpiryRetry,
+	})
 	require.NoError(t, err)
 	started, err := store.Start(context.Background(), &StartTaskRequest{
 		TaskID: id, ExpectedVersion: created.Version,
@@ -69,9 +70,12 @@ func TestMemoryStoreCreatePersistsPendingSnapshot_BitsUT(t *testing.T) {
 	store := NewMemoryStore(nil)
 	spec := validSpec("create")
 
-	created, err := store.Create(context.Background(), &CreateTaskRequest{Spec: spec})
+	created, err := store.Create(context.Background(), &CreateTaskRequest{
+		Spec: spec, LeaseExpiryPolicy: LeaseExpiryRetry,
+	})
 	require.NoError(t, err)
 	assert.Equal(t, StatusPending, created.Status)
+	assert.Equal(t, LeaseExpiryRetry, created.LeaseExpiryPolicy)
 	assert.Empty(t, created.ResultData)
 	assert.Empty(t, created.ResultError)
 	assert.Nil(t, created.PendingResume)
@@ -87,9 +91,10 @@ func TestMemoryStoreCreatePersistsPendingSnapshot_BitsUT(t *testing.T) {
 func TestMemoryStoreCreateAndStartIsAtomic_BitsUT(t *testing.T) {
 	store := NewMemoryStore(nil)
 	spec := validSpec("local")
-	spec.LeaseExpiryPolicy = LeaseExpiryFail
 	started, err := store.CreateAndStart(
-		context.Background(), &CreateTaskRequest{Spec: spec},
+		context.Background(), &CreateTaskRequest{
+			Spec: spec, LeaseExpiryPolicy: LeaseExpiryFail,
+		},
 	)
 	require.NoError(t, err)
 	assert.Equal(t, StatusRunning, started.Status)
@@ -124,6 +129,44 @@ func TestMemoryStoreReportOutputFailureIsFencedAndFirstErrorWins_BitsUT(t *testi
 		TaskID: "output", ExpectedVersion: started.Version, Error: "stale attempt",
 	})
 	assert.ErrorIs(t, err, ErrVersionConflict)
+}
+
+func TestMemoryStoreOutputFeedSupportsReplayAndAttemptFencing_BitsUT(t *testing.T) {
+	store := NewMemoryStore(nil)
+	started := createAndStart(t, store, "output-feed")
+	first, err := store.AppendOutput(context.Background(), &AppendOutputRequest{
+		TaskID: started.Spec.ID, Attempt: started.Attempt, Data: []byte("first"),
+	})
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), first.Sequence)
+	second, err := store.AppendOutput(context.Background(), &AppendOutputRequest{
+		TaskID: started.Spec.ID, Attempt: started.Attempt, Data: []byte("second"),
+	})
+	require.NoError(t, err)
+	assert.Equal(t, int64(2), second.Sequence)
+
+	page, err := store.ReadOutput(context.Background(), &ReadOutputRequest{
+		TaskID: started.Spec.ID, AfterSequence: 1,
+	})
+	require.NoError(t, err)
+	require.Len(t, page.Records, 1)
+	assert.Equal(t, "second", string(page.Records[0].Data))
+	assert.Equal(t, int64(2), page.LastSequence)
+
+	_, err = store.AppendOutput(context.Background(), &AppendOutputRequest{
+		TaskID: started.Spec.ID, Attempt: started.Attempt + 1, Data: []byte("stale"),
+	})
+	assert.ErrorIs(t, err, ErrLeaseLost)
+
+	_, err = store.Complete(context.Background(), &CompleteTaskRequest{
+		TaskID: started.Spec.ID, ExpectedVersion: started.Version, Data: []byte("done"),
+	})
+	require.NoError(t, err)
+	page, err = store.ReadOutput(context.Background(), &ReadOutputRequest{
+		TaskID: started.Spec.ID,
+	})
+	require.NoError(t, err)
+	require.Len(t, page.Records, 2)
 }
 
 func TestMemoryStoreCheckpointedPauseHasNoTerminalResult_BitsUT(t *testing.T) {
@@ -194,9 +237,10 @@ func TestMemoryStoreExpiredNonRetryableLeaseFails_BitsUT(t *testing.T) {
 		Clock: clock.Now, ActiveAttemptTimeout: 5 * time.Second,
 	})
 	spec := validSpec("local-expired")
-	spec.LeaseExpiryPolicy = LeaseExpiryFail
 	_, err := store.CreateAndStart(
-		context.Background(), &CreateTaskRequest{Spec: spec},
+		context.Background(), &CreateTaskRequest{
+			Spec: spec, LeaseExpiryPolicy: LeaseExpiryFail,
+		},
 	)
 	require.NoError(t, err)
 	clock.Advance(6 * time.Second)
@@ -207,6 +251,37 @@ func TestMemoryStoreExpiredNonRetryableLeaseFails_BitsUT(t *testing.T) {
 	require.NotNil(t, failed.DoneAt)
 }
 
+func TestMemoryStoreExpiredCanceledLeaseAlwaysCancels_BitsUT(t *testing.T) {
+	for _, policy := range []LeaseExpiryPolicy{LeaseExpiryRetry, LeaseExpiryFail} {
+		t.Run(string(policy), func(t *testing.T) {
+			clock := &testClock{now: time.Unix(100, 0)}
+			store := NewMemoryStore(&MemoryStoreConfig{
+				Clock: clock.Now, ActiveAttemptTimeout: 5 * time.Second,
+			})
+			spec := validSpec("cancel-expired-" + string(policy))
+			started, err := store.CreateAndStart(
+				context.Background(), &CreateTaskRequest{
+					Spec: spec, LeaseExpiryPolicy: policy,
+				},
+			)
+			require.NoError(t, err)
+			requested, err := store.RequestCancel(context.Background(), &RequestCancelRequest{
+				TaskID: spec.ID, ExpectedVersion: started.Version,
+			})
+			require.NoError(t, err)
+			assert.Equal(t, StatusRunning, requested.Status)
+			require.NotNil(t, requested.CancelRequestedAt)
+
+			clock.Advance(6 * time.Second)
+			canceled, err := store.Get(context.Background(), spec.ID)
+			require.NoError(t, err)
+			assert.Equal(t, StatusCanceled, canceled.Status)
+			assert.Equal(t, canceledError, canceled.ResultError)
+			require.NotNil(t, canceled.DoneAt)
+		})
+	}
+}
+
 func TestMemoryStoreResumePersistsPendingResumeBytes_BitsUT(t *testing.T) {
 	store := NewMemoryStore(nil)
 	started := createAndStart(t, store, "resume")
@@ -215,7 +290,7 @@ func TestMemoryStoreResumePersistsPendingResumeBytes_BitsUT(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	resumed, err := store.Resume(context.Background(), &ResumeTaskRequest{
+	resumed, err := store.Resume(context.Background(), &ResumeRequest{
 		TaskID: "resume", ExpectedVersion: waiting.Version,
 		Data: []byte("answer"),
 	})
@@ -239,39 +314,68 @@ func TestMemoryStoreResumeRejectsStaleTaskVersion_BitsUT(t *testing.T) {
 	store.advanceLocked(store.tasks["stale-resume"])
 	store.mu.Unlock()
 
-	_, err = store.Resume(context.Background(), &ResumeTaskRequest{
+	_, err = store.Resume(context.Background(), &ResumeRequest{
 		TaskID: "stale-resume", ExpectedVersion: waiting.Version,
 		Data: []byte("answer"),
 	})
 	assert.ErrorIs(t, err, ErrVersionConflict)
 }
 
-func TestMemoryStoreCancelingReconcilesToCanceled_BitsUT(t *testing.T) {
+func TestMemoryStoreCancellationIntentReconcilesToCanceled_BitsUT(t *testing.T) {
 	store := NewMemoryStore(nil)
 	task := createAndStart(t, store, "cancel")
 
-	canceling, err := store.RequestCancel(context.Background(), &RequestCancelRequest{
+	requested, err := store.RequestCancel(context.Background(), &RequestCancelRequest{
 		TaskID: task.Spec.ID, ExpectedVersion: task.Version,
 	})
 	require.NoError(t, err)
-	assert.Equal(t, StatusCanceling, canceling.Status)
-	assert.Empty(t, canceling.ResultData)
-	assert.Empty(t, canceling.ResultError)
+	assert.Equal(t, StatusRunning, requested.Status)
+	assert.NotNil(t, requested.CancelRequestedAt)
+	assert.Empty(t, requested.ResultData)
+	assert.Empty(t, requested.ResultError)
+	repeated, err := store.RequestCancel(context.Background(), &RequestCancelRequest{
+		TaskID: task.Spec.ID, ExpectedVersion: requested.Version,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, requested.Version, repeated.Version)
+	assert.Equal(t, requested.CancelRequestedAt, repeated.CancelRequestedAt)
+
 	_, err = store.Complete(context.Background(), &CompleteTaskRequest{
-		TaskID: "cancel", ExpectedVersion: canceling.Version, Data: []byte("late"),
+		TaskID: "cancel", ExpectedVersion: requested.Version, Data: []byte("late"),
 	})
 	assert.ErrorIs(t, err, ErrLeaseLost)
 	_, err = store.Fail(context.Background(), &FailTaskRequest{
-		TaskID: "cancel", ExpectedVersion: canceling.Version, Error: "late failure",
+		TaskID: "cancel", ExpectedVersion: requested.Version, Error: "late failure",
 	})
 	assert.ErrorIs(t, err, ErrLeaseLost)
 
 	canceled, err := store.Cancel(context.Background(), &CancelTaskRequest{
-		TaskID: "cancel", ExpectedVersion: canceling.Version,
+		TaskID: "cancel", ExpectedVersion: requested.Version,
 	})
 	require.NoError(t, err)
 	assert.Equal(t, StatusCanceled, canceled.Status)
 	assert.Equal(t, "task was canceled", canceled.ResultError)
+}
+
+func TestTaskRuntimeCommitReconcilesConcurrentCancellation_BitsUT(t *testing.T) {
+	store := NewMemoryStore(nil)
+	started := createAndStart(t, store, "cancel-before-commit")
+	runtime := newTaskRuntime(store, started.Spec.ID, started.Attempt, started.Version)
+
+	requested, err := store.RequestCancel(context.Background(), &RequestCancelRequest{
+		TaskID: started.Spec.ID, ExpectedVersion: started.Version,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, StatusRunning, requested.Status)
+
+	committed, err := runtime.commit(context.Background(), &ExecutionResult{
+		Status: StatusCompleted,
+		Data:   []byte("late completion"),
+	})
+	require.NoError(t, err)
+	assert.Equal(t, StatusCanceled, committed.Status)
+	assert.Empty(t, committed.ResultData)
+	assert.Equal(t, canceledError, committed.ResultError)
 }
 
 func TestMemoryStoreRunningAttemptCanCommitCanceled_BitsUT(t *testing.T) {

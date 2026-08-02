@@ -23,9 +23,32 @@ import (
 	"time"
 )
 
+// SessionInboxNotificationKind routes a task notification to its parent session.
+const SessionInboxNotificationKind = "session_inbox"
+
+// NotificationDeliveryValidation describes the route a model-facing constructor
+// requires before it may promise task completion notification.
+type NotificationDeliveryValidation struct {
+	Store      Store
+	TargetKind string
+}
+
+// NotificationDeliveryRuntime validates that a task Store and target kind have an
+// operationally owned delivery route.
+type NotificationDeliveryRuntime interface {
+	ValidateNotificationDelivery(context.Context, *NotificationDeliveryValidation) error
+}
+
 // NotificationSink accepts dispatcher-enriched task notifications.
 type NotificationSink interface {
 	Accept(context.Context, Notification) error
+}
+
+// ValidatingNotificationSink reports whether its required delivery dependencies
+// are structurally complete.
+type ValidatingNotificationSink interface {
+	NotificationSink
+	ValidateNotificationSink() error
 }
 
 // RoutedNotificationSink is implemented by sinks whose durable destination is

@@ -30,6 +30,7 @@ import (
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/adk/backgroundtask"
+	backgroundlocal "github.com/cloudwego/eino/adk/backgroundtask/local"
 	durablesubagent "github.com/cloudwego/eino/adk/backgroundtask/subagent"
 	"github.com/cloudwego/eino/adk/filesystem"
 	filesystem2 "github.com/cloudwego/eino/adk/middlewares/filesystem"
@@ -41,6 +42,34 @@ import (
 	mockModel "github.com/cloudwego/eino/internal/mock/components/model"
 	"github.com/cloudwego/eino/schema"
 )
+
+func mustDeepLocalRunner(
+	t *testing.T,
+	manager *backgroundtask.Manager,
+) *backgroundlocal.Runner {
+	t.Helper()
+	runner, err := backgroundlocal.New(&backgroundlocal.Config{Manager: manager})
+	require.NoError(t, err)
+	return runner
+}
+
+type notificationDeliveryStub struct{}
+
+func (notificationDeliveryStub) ValidateNotificationDelivery(
+	_ context.Context,
+	req *backgroundtask.NotificationDeliveryValidation,
+) error {
+	if req == nil || req.Store == nil ||
+		req.TargetKind != backgroundtask.SessionInboxNotificationKind {
+		return fmt.Errorf("invalid notification delivery")
+	}
+	if _, ok := req.Store.(backgroundtask.NotificationOutbox); !ok {
+		return fmt.Errorf("notification outbox is required")
+	}
+	return nil
+}
+
+var testNotifications backgroundtask.NotificationDeliveryRuntime = notificationDeliveryStub{}
 
 type sequentialAgenticModel struct {
 	responses []*schema.AgenticMessage
@@ -421,7 +450,10 @@ func TestDeepAgentManagerWiring(t *testing.T) {
 	handlers, err := buildTypedBuiltinAgentMiddlewares(ctx, &Config{
 		WithoutWriteTodos: true,
 		Shell:             &deepMockShell{},
-	}, &BackgroundConfig{Local: &TypedLocalBackgroundConfig[*schema.Message]{Manager: mgr}})
+	}, &BackgroundConfig{
+		Local:         &TypedLocalBackgroundConfig[*schema.Message]{Runner: mustDeepLocalRunner(t, mgr)},
+		Notifications: testNotifications,
+	})
 	assert.NoError(t, err)
 	assert.Len(t, handlers, 1)
 
@@ -459,10 +491,15 @@ func TestDeepBackgroundConfigIsStrictUnion(t *testing.T) {
 
 	manager := backgroundtask.New(context.Background(), nil)
 	_, err = New(context.Background(), &Config{Background: &BackgroundConfig{
-		Local:   &TypedLocalBackgroundConfig[*schema.Message]{Manager: manager},
+		Local:   &TypedLocalBackgroundConfig[*schema.Message]{Runner: mustDeepLocalRunner(t, manager)},
 		Durable: &TypedDurableBackgroundConfig[*schema.Message]{Manager: manager},
 	}})
 	require.ErrorContains(t, err, "exactly one")
+
+	_, err = New(context.Background(), &Config{Background: &BackgroundConfig{
+		Local: &TypedLocalBackgroundConfig[*schema.Message]{Runner: mustDeepLocalRunner(t, manager)},
+	}})
+	require.ErrorContains(t, err, "notification delivery is required")
 }
 
 func TestDeepDurableBackgroundForwardsRunOptionsFactories(t *testing.T) {
@@ -473,6 +510,7 @@ func TestDeepDurableBackgroundForwardsRunOptionsFactories(t *testing.T) {
 	defer manager.Close(context.Background())
 	background := deepSubagentBackground(&TypedConfig[*schema.Message]{
 		Background: &TypedBackgroundConfig[*schema.Message]{
+			Notifications: testNotifications,
 			Durable: &TypedDurableBackgroundConfig[*schema.Message]{
 				Manager: manager,
 				RunOptionsFactories: map[string]durablesubagent.RunOptionsFactory{
@@ -502,7 +540,8 @@ func TestDeepAgentNewTypedWithManager(t *testing.T) {
 		ChatModel:   cm,
 		Shell:       &deepMockShell{},
 		Background: &BackgroundConfig{
-			Durable: &TypedDurableBackgroundConfig[*schema.Message]{Manager: mgr},
+			Durable:       &TypedDurableBackgroundConfig[*schema.Message]{Manager: mgr},
+			Notifications: testNotifications,
 		},
 	})
 	assert.NoError(t, err)

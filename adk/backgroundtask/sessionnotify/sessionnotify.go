@@ -27,11 +27,89 @@ import (
 	"github.com/cloudwego/eino/adk/backgroundtask"
 )
 
+// Runtime is the construction-time proof that session notification delivery is
+// configured and operationally owned by the host.
+type Runtime struct {
+	sinks backgroundtask.NotificationSinkRegistry
+	// CheckReady must verify that outbox dispatch and session inbox consumption
+	// are running or otherwise owned by the host. It may be called repeatedly
+	// during composition and must be side-effect-free.
+	checkReady func(context.Context) error
+}
+
+// NewRuntime constructs a session notification delivery runtime.
+func NewRuntime(
+	sinks backgroundtask.NotificationSinkRegistry,
+	checkReady func(context.Context) error,
+) (*Runtime, error) {
+	if sinks == nil || checkReady == nil {
+		return nil, errors.New("sessionnotify: sink registry and readiness check are required")
+	}
+	return &Runtime{sinks: sinks, checkReady: checkReady}, nil
+}
+
+// ValidateNotificationDelivery validates the complete session-inbox route.
+func (r *Runtime) ValidateNotificationDelivery(
+	ctx context.Context,
+	req *backgroundtask.NotificationDeliveryValidation,
+) error {
+	if r == nil || req == nil || req.Store == nil {
+		return errors.New("sessionnotify: runtime and task store are required")
+	}
+	if req.TargetKind != backgroundtask.SessionInboxNotificationKind {
+		return errors.New("sessionnotify: unsupported notification target kind")
+	}
+	if _, ok := req.Store.(backgroundtask.NotificationOutbox); !ok {
+		return errors.New("sessionnotify: task store must implement NotificationOutbox")
+	}
+	if r.sinks == nil {
+		return errors.New("sessionnotify: sink registry is required")
+	}
+	sink, ok := r.sinks.Resolve(req.TargetKind)
+	if !ok {
+		return errors.New("sessionnotify: session inbox sink is unavailable")
+	}
+	if _, ok = sink.(backgroundtask.RoutedNotificationSink); !ok {
+		return errors.New("sessionnotify: session inbox sink must support routed delivery")
+	}
+	validating, ok := sink.(backgroundtask.ValidatingNotificationSink)
+	if !ok {
+		return errors.New("sessionnotify: session inbox sink must support validation")
+	}
+	if err := validating.ValidateNotificationSink(); err != nil {
+		return err
+	}
+	if r.checkReady == nil {
+		return errors.New("sessionnotify: delivery readiness check is required")
+	}
+	return r.checkReady(ctx)
+}
+
 // Sink durably enqueues before requesting activation. A delivery may be
 // acknowledged only after Accept returns nil.
 type Sink struct {
-	Inbox     backgroundtask.SessionNotificationInbox
-	Activator backgroundtask.SessionActivator
+	inbox     backgroundtask.SessionNotificationInbox
+	activator backgroundtask.SessionActivator
+}
+
+// NewSink constructs a validated session notification sink.
+func NewSink(
+	inbox backgroundtask.SessionNotificationInbox,
+	activator backgroundtask.SessionActivator,
+) (*Sink, error) {
+	sink := &Sink{inbox: inbox, activator: activator}
+	if err := sink.ValidateNotificationSink(); err != nil {
+		return nil, err
+	}
+	return sink, nil
+}
+
+// ValidateNotificationSink validates the sink's durable inbox and activation path.
+func (s *Sink) ValidateNotificationSink() error {
+	if s == nil || s.inbox == nil || s.activator == nil {
+		return errors.New("sessionnotify: inbox and activator are required")
+	}
+	return nil
 }
 
 // Accept rejects unrouted deliveries because Sink requires the serialized target.
@@ -41,19 +119,19 @@ func (s *Sink) Accept(ctx context.Context, notification backgroundtask.Notificat
 
 // AcceptTarget enqueues notification for target and requests a session turn.
 func (s *Sink) AcceptTarget(ctx context.Context, target backgroundtask.NotificationTarget, notification backgroundtask.Notification) error {
-	if s.Inbox == nil || s.Activator == nil {
-		return errors.New("sessionnotify: inbox and activator are required")
+	if err := s.ValidateNotificationSink(); err != nil {
+		return err
 	}
 	if notification.ID == "" || target.TargetID == "" {
 		return errors.New("sessionnotify: notification id and target are required")
 	}
-	item, err := s.Inbox.Enqueue(ctx, &backgroundtask.EnqueueSessionNotificationRequest{
+	item, err := s.inbox.Enqueue(ctx, &backgroundtask.EnqueueSessionNotificationRequest{
 		SessionID: target.TargetID, Notification: notification,
 	})
 	if err != nil {
 		return err
 	}
-	_, err = s.Activator.RequestTurn(ctx, &backgroundtask.SessionActivationRequest{SessionID: item.SessionID})
+	_, err = s.activator.RequestTurn(ctx, &backgroundtask.SessionActivationRequest{SessionID: item.SessionID})
 	return err
 }
 

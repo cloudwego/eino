@@ -53,6 +53,7 @@ type MemoryStore struct {
 	mu            sync.Mutex
 	tasks         map[string]*Task
 	active        map[string]memoryActiveAttempt
+	outputs       map[string][]OutputRecord
 	outbox        []*memoryOutboxItem
 	notify        chan struct{}
 	now           Clock
@@ -65,6 +66,7 @@ func NewMemoryStore(config *MemoryStoreConfig) *MemoryStore {
 	s := &MemoryStore{
 		tasks:         make(map[string]*Task),
 		active:        make(map[string]memoryActiveAttempt),
+		outputs:       make(map[string][]OutputRecord),
 		notify:        make(chan struct{}),
 		now:           time.Now,
 		activeTimeout: 30 * time.Second,
@@ -93,7 +95,7 @@ func (s *MemoryStore) Create(_ context.Context, req *CreateTaskRequest) (*Task, 
 	if req == nil {
 		return nil, errors.New("backgroundtask: create request is required")
 	}
-	if err := validateSpec(req.Spec); err != nil {
+	if err := validateCreateTaskRequest(req); err != nil {
 		return nil, err
 	}
 	s.mu.Lock()
@@ -107,10 +109,11 @@ func (s *MemoryStore) Create(_ context.Context, req *CreateTaskRequest) (*Task, 
 		spec.CreatedAt = now
 	}
 	task := &Task{
-		Spec:      spec,
-		Status:    StatusPending,
-		Version:   1,
-		UpdatedAt: now,
+		Spec:              spec,
+		LeaseExpiryPolicy: req.LeaseExpiryPolicy,
+		Status:            StatusPending,
+		Version:           1,
+		UpdatedAt:         now,
 	}
 	s.tasks[spec.ID] = task
 	s.signalLocked()
@@ -121,7 +124,7 @@ func (s *MemoryStore) CreateAndStart(_ context.Context, req *CreateTaskRequest) 
 	if req == nil {
 		return nil, errors.New("backgroundtask: create and start request is required")
 	}
-	if err := validateSpec(req.Spec); err != nil {
+	if err := validateCreateTaskRequest(req); err != nil {
 		return nil, err
 	}
 	s.mu.Lock()
@@ -135,7 +138,8 @@ func (s *MemoryStore) CreateAndStart(_ context.Context, req *CreateTaskRequest) 
 		spec.CreatedAt = now
 	}
 	task := &Task{
-		Spec: spec, Status: StatusRunning, Version: 1, Attempt: 1, UpdatedAt: now,
+		Spec: spec, LeaseExpiryPolicy: req.LeaseExpiryPolicy,
+		Status: StatusRunning, Version: 1, Attempt: 1, UpdatedAt: now,
 	}
 	s.tasks[spec.ID] = task
 	s.active[spec.ID] = memoryActiveAttempt{expiresAt: now.Add(s.activeTimeout)}
@@ -233,7 +237,7 @@ func (s *MemoryStore) Heartbeat(_ context.Context, req *HeartbeatRequest) (*Task
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	t, err := s.activeTaskLocked(req.TaskID, req.ExpectedVersion, StatusRunning)
+	t, err := s.activeUncanceledTaskLocked(req.TaskID, req.ExpectedVersion, StatusRunning)
 	if err != nil {
 		return nil, err
 	}
@@ -241,6 +245,60 @@ func (s *MemoryStore) Heartbeat(_ context.Context, req *HeartbeatRequest) (*Task
 	s.active[t.Spec.ID] = memoryActiveAttempt{expiresAt: s.now().Add(s.activeTimeout)}
 	s.signalLocked()
 	return cloneTask(t), nil
+}
+
+func (s *MemoryStore) AppendOutput(_ context.Context, req *AppendOutputRequest) (*OutputRecord, error) {
+	if req == nil || req.TaskID == "" || req.Attempt <= 0 {
+		return nil, errors.New("backgroundtask: output task id and attempt are required")
+	}
+	if len(req.Data) == 0 {
+		return nil, errors.New("backgroundtask: output data is required")
+	}
+	if int64(len(req.Data)) > s.maxValue {
+		return nil, errors.New("backgroundtask: output data exceeds configured limit")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	t, ok := s.tasks[req.TaskID]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	s.resolveExpiredLocked(t)
+	active, activeOK := s.active[req.TaskID]
+	if t.Status != StatusRunning || t.CancelRequestedAt != nil ||
+		t.Attempt != req.Attempt || !activeOK || !s.now().Before(active.expiresAt) {
+		return nil, ErrLeaseLost
+	}
+	records := s.outputs[req.TaskID]
+	record := OutputRecord{
+		TaskID: req.TaskID, Attempt: req.Attempt,
+		Sequence: int64(len(records) + 1), Data: cloneBytes(req.Data), CreatedAt: s.now(),
+	}
+	s.outputs[req.TaskID] = append(records, record)
+	return cloneOutputRecord(&record), nil
+}
+
+func (s *MemoryStore) ReadOutput(_ context.Context, req *ReadOutputRequest) (*ReadOutputResult, error) {
+	if req == nil || req.TaskID == "" || req.AfterSequence < 0 {
+		return nil, errors.New("backgroundtask: output task id and non-negative cursor are required")
+	}
+	limit := req.Limit
+	if limit <= 0 || limit > 1000 {
+		limit = 100
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.tasks[req.TaskID]; !ok {
+		return nil, ErrNotFound
+	}
+	records := s.outputs[req.TaskID]
+	result := &ReadOutputResult{LastSequence: req.AfterSequence}
+	for i := req.AfterSequence; i < int64(len(records)) && len(result.Records) < limit; i++ {
+		record := cloneOutputRecord(&records[i])
+		result.Records = append(result.Records, *record)
+		result.LastSequence = record.Sequence
+	}
+	return result, nil
 }
 
 func (s *MemoryStore) ReportOutputFailure(_ context.Context, req *ReportOutputFailureRequest) (*Task, error) {
@@ -252,7 +310,7 @@ func (s *MemoryStore) ReportOutputFailure(_ context.Context, req *ReportOutputFa
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	t, err := s.activeTaskLocked(req.TaskID, req.ExpectedVersion, StatusRunning, StatusCanceling)
+	t, err := s.activeTaskLocked(req.TaskID, req.ExpectedVersion, StatusRunning)
 	if err != nil {
 		return nil, err
 	}
@@ -277,7 +335,7 @@ func (s *MemoryStore) Complete(_ context.Context, req *CompleteTaskRequest) (*Ta
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	t, err := s.activeTaskLocked(req.TaskID, req.ExpectedVersion, StatusRunning)
+	t, err := s.activeUncanceledTaskLocked(req.TaskID, req.ExpectedVersion, StatusRunning)
 	if err != nil {
 		return nil, err
 	}
@@ -297,7 +355,7 @@ func (s *MemoryStore) Fail(_ context.Context, req *FailTaskRequest) (*Task, erro
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	t, err := s.activeTaskLocked(req.TaskID, req.ExpectedVersion, StatusRunning)
+	t, err := s.activeUncanceledTaskLocked(req.TaskID, req.ExpectedVersion, StatusRunning)
 	if err != nil {
 		return nil, err
 	}
@@ -320,7 +378,7 @@ func (s *MemoryStore) WaitInput(_ context.Context, req *WaitInputTaskRequest) (*
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	t, err := s.activeTaskLocked(req.TaskID, req.ExpectedVersion, StatusRunning)
+	t, err := s.activeUncanceledTaskLocked(req.TaskID, req.ExpectedVersion, StatusRunning)
 	if err != nil {
 		return nil, err
 	}
@@ -346,7 +404,7 @@ func (s *MemoryStore) Suspend(_ context.Context, req *SuspendTaskRequest) (*Task
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	t, err := s.activeTaskLocked(req.TaskID, req.ExpectedVersion, StatusRunning)
+	t, err := s.activeUncanceledTaskLocked(req.TaskID, req.ExpectedVersion, StatusRunning)
 	if err != nil {
 		return nil, err
 	}
@@ -368,7 +426,7 @@ func (s *MemoryStore) Cancel(_ context.Context, req *CancelTaskRequest) (*Task, 
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	t, err := s.activeTaskLocked(req.TaskID, req.ExpectedVersion, StatusRunning, StatusCanceling)
+	t, err := s.activeTaskLocked(req.TaskID, req.ExpectedVersion, StatusRunning)
 	if err != nil {
 		return nil, err
 	}
@@ -393,20 +451,19 @@ func (s *MemoryStore) RequestCancel(_ context.Context, req *RequestCancelRequest
 	if terminalStatus(t.Status) {
 		return nil, ErrAlreadyTerminal
 	}
-	if t.Status == StatusCanceling {
+	if t.CancelRequestedAt != nil {
 		return cloneTask(t), nil
 	}
 	now := s.now()
 	t.CancelRequestedAt = &now
 	if t.Status == StatusRunning {
-		t.Status = StatusCanceling
 		s.advanceLocked(t)
 		if _, ok := s.active[t.Spec.ID]; ok {
 			s.active[t.Spec.ID] = memoryActiveAttempt{expiresAt: now.Add(s.activeTimeout)}
 		}
 	} else {
 		t.Status = StatusCanceled
-		t.ResultError = "canceled"
+		t.ResultError = canceledError
 		t.PendingResume = nil
 		s.finishStoreOwnedLocked(t)
 		return cloneTask(t), nil
@@ -416,7 +473,7 @@ func (s *MemoryStore) RequestCancel(_ context.Context, req *RequestCancelRequest
 	return cloneTask(t), nil
 }
 
-func (s *MemoryStore) Resume(_ context.Context, req *ResumeTaskRequest) (*Task, error) {
+func (s *MemoryStore) Resume(_ context.Context, req *ResumeRequest) (*Task, error) {
 	if req == nil {
 		return nil, errors.New("backgroundtask: resume request is required")
 	}
@@ -460,7 +517,7 @@ func (s *MemoryStore) ReleaseSuspension(_ context.Context, req *ReleaseSuspensio
 	return cloneTask(t), nil
 }
 
-func (s *MemoryStore) Wait(ctx context.Context, req *WaitTaskRequest) (*Task, error) {
+func (s *MemoryStore) Wait(ctx context.Context, req *WaitUpdateRequest) (*Task, error) {
 	if req == nil {
 		return nil, errors.New("backgroundtask: wait request is required")
 	}
@@ -559,6 +616,21 @@ func (s *MemoryStore) activeTaskLocked(id string, version int64, allowed ...Stat
 	return t, nil
 }
 
+func (s *MemoryStore) activeUncanceledTaskLocked(
+	id string,
+	version int64,
+	allowed ...Status,
+) (*Task, error) {
+	t, err := s.activeTaskLocked(id, version, allowed...)
+	if err != nil {
+		return nil, err
+	}
+	if t.CancelRequestedAt != nil {
+		return nil, ErrLeaseLost
+	}
+	return t, nil
+}
+
 func (s *MemoryStore) advanceLocked(t *Task) {
 	t.Version++
 	t.UpdatedAt = s.now()
@@ -597,7 +669,7 @@ func (s *MemoryStore) clearActiveLocked(t *Task) {
 }
 
 func (s *MemoryStore) resolveExpiredLocked(t *Task) {
-	if t.Status != StatusRunning && t.Status != StatusCanceling {
+	if t.Status != StatusRunning {
 		return
 	}
 	active, ok := s.active[t.Spec.ID]
@@ -605,13 +677,13 @@ func (s *MemoryStore) resolveExpiredLocked(t *Task) {
 		return
 	}
 	s.clearActiveLocked(t)
-	if t.Status == StatusCanceling {
+	if t.CancelRequestedAt != nil {
 		t.Status = StatusCanceled
-		t.ResultError = "canceled"
+		t.ResultError = canceledError
 		s.finishStoreOwnedLocked(t)
 		return
 	}
-	if t.Spec.LeaseExpiryPolicy == LeaseExpiryRetry {
+	if t.LeaseExpiryPolicy == LeaseExpiryRetry {
 		t.Status = StatusPending
 		t.PendingResume = nil
 		s.advanceLocked(t)

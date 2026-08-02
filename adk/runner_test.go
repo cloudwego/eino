@@ -333,7 +333,10 @@ type runnerEnvironmentExecutor struct {
 	environment *TypedRunnerEnvironment[*schema.Message]
 }
 
-func (*runnerEnvironmentExecutor) Key() string                            { return "runner-environment-test" }
+func (*runnerEnvironmentExecutor) Key() string { return "runner-environment-test" }
+func (*runnerEnvironmentExecutor) LeaseExpiryPolicy() backgroundtask.LeaseExpiryPolicy {
+	return backgroundtask.LeaseExpiryRetry
+}
 func (*runnerEnvironmentExecutor) ValidateSpec(backgroundtask.Spec) error { return nil }
 func (e *runnerEnvironmentExecutor) ValidateExecution(ctx context.Context, _ *backgroundtask.Task) error {
 	environment, ok := TypedRunnerEnvironmentFromContext[*schema.Message](ctx)
@@ -374,13 +377,12 @@ func TestRunnerExecuteBackgroundTaskBindsEnvironmentBeforeStart(t *testing.T) {
 	manager := backgroundtask.New(context.Background(), &backgroundtask.Config{Executors: registry})
 	task, err := manager.Submit(context.Background(), backgroundtask.Spec{
 		ID: "task_secret", ExecutorKey: executor.Key(), Kind: "test",
-		LeaseExpiryPolicy: backgroundtask.LeaseExpiryRetry,
 	})
 	require.NoError(t, err)
 
 	err = manager.Execute(context.Background(), task.Spec.ID)
 	require.ErrorIs(t, err, context.Canceled)
-	pending, err := manager.GetTask(context.Background(), task.Spec.ID)
+	pending, err := manager.Get(context.Background(), task.Spec.ID)
 	require.NoError(t, err)
 	assert.Equal(t, backgroundtask.StatusPending, pending.Status)
 

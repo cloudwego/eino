@@ -49,7 +49,15 @@ var (
 	ErrUnsupportedPayloadVersion = errors.New("backgroundtask: unsupported payload version")
 )
 
-// Store persists task snapshots and authorizes semantic lifecycle transitions.
+// Store persists task snapshots, ordered output records, and semantic lifecycle
+// transitions. AppendOutput must assign task-global monotonic sequences and fence
+// records by the active attempt without advancing the task lifecycle Version.
+//
+// RequestCancel on active work keeps StatusRunning, sets CancelRequestedAt, and
+// advances Version. Once cancellation is requested, Heartbeat, Complete, Fail,
+// WaitInput, and Suspend must reject the attempt; only Cancel may terminally
+// acknowledge it. Lease expiry must also resolve such work to StatusCanceled,
+// regardless of LeaseExpiryPolicy.
 type Store interface {
 	Create(context.Context, *CreateTaskRequest) (*Task, error)
 	CreateAndStart(context.Context, *CreateTaskRequest) (*Task, error)
@@ -57,6 +65,8 @@ type Store interface {
 	ListPending(context.Context, *ListPendingRequest) (*ListPendingResult, error)
 	Start(context.Context, *StartTaskRequest) (*Task, error)
 	Heartbeat(context.Context, *HeartbeatRequest) (*Task, error)
+	AppendOutput(context.Context, *AppendOutputRequest) (*OutputRecord, error)
+	ReadOutput(context.Context, *ReadOutputRequest) (*ReadOutputResult, error)
 	ReportOutputFailure(context.Context, *ReportOutputFailureRequest) (*Task, error)
 	Complete(context.Context, *CompleteTaskRequest) (*Task, error)
 	Fail(context.Context, *FailTaskRequest) (*Task, error)
@@ -64,9 +74,9 @@ type Store interface {
 	Suspend(context.Context, *SuspendTaskRequest) (*Task, error)
 	Cancel(context.Context, *CancelTaskRequest) (*Task, error)
 	RequestCancel(context.Context, *RequestCancelRequest) (*Task, error)
-	Resume(context.Context, *ResumeTaskRequest) (*Task, error)
+	Resume(context.Context, *ResumeRequest) (*Task, error)
 	ReleaseSuspension(context.Context, *ReleaseSuspensionRequest) (*Task, error)
-	Wait(context.Context, *WaitTaskRequest) (*Task, error)
+	Wait(context.Context, *WaitUpdateRequest) (*Task, error)
 }
 
 // NotificationOutbox leases lifecycle notifications for dispatch.
@@ -82,9 +92,6 @@ func terminalStatus(status Status) bool {
 func validateSpec(spec Spec) error {
 	if spec.ID == "" || spec.ExecutorKey == "" {
 		return fmt.Errorf("backgroundtask: id and executor key are required")
-	}
-	if spec.LeaseExpiryPolicy != LeaseExpiryRetry && spec.LeaseExpiryPolicy != LeaseExpiryFail {
-		return fmt.Errorf("backgroundtask: lease expiry policy must be %q or %q", LeaseExpiryRetry, LeaseExpiryFail)
 	}
 	if spec.Notify != nil {
 		if spec.Notify.Kind == "" || spec.Notify.TargetID == "" {
@@ -105,6 +112,16 @@ func validateSpec(spec Spec) error {
 	return nil
 }
 
+func validateCreateTaskRequest(req *CreateTaskRequest) error {
+	if err := validateSpec(req.Spec); err != nil {
+		return err
+	}
+	if req.LeaseExpiryPolicy != LeaseExpiryRetry && req.LeaseExpiryPolicy != LeaseExpiryFail {
+		return fmt.Errorf("backgroundtask: lease expiry policy must be %q or %q", LeaseExpiryRetry, LeaseExpiryFail)
+	}
+	return nil
+}
+
 func validateOutputFailure(message string) error {
 	if message == "" {
 		return errors.New("backgroundtask: output failure requires an error")
@@ -117,7 +134,7 @@ func validateOutputFailure(message string) error {
 
 func validateTaskSnapshot(status Status, data []byte, resultError string) error {
 	switch status {
-	case StatusPending, StatusRunning, StatusWaitingInput, StatusSuspended, StatusCanceling:
+	case StatusPending, StatusRunning, StatusWaitingInput, StatusSuspended:
 		if len(data) != 0 || resultError != "" {
 			return fmt.Errorf("%w: non-terminal task cannot have a result", ErrInvalidResult)
 		}
@@ -160,6 +177,15 @@ func cloneBytes(v []byte) []byte {
 	c := make([]byte, len(v))
 	copy(c, v)
 	return c
+}
+
+func cloneOutputRecord(v *OutputRecord) *OutputRecord {
+	if v == nil {
+		return nil
+	}
+	c := *v
+	c.Data = cloneBytes(v.Data)
+	return &c
 }
 
 func cloneSpec(v Spec) Spec {

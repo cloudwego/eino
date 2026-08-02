@@ -42,12 +42,11 @@ type Spec struct {
 	Kind        string
 	Payload     []byte
 
-	Description       string
-	OutputFile        string
-	LeaseExpiryPolicy LeaseExpiryPolicy
-	SessionID         string
-	Notify            *NotificationTarget
-	CreatedAt         time.Time
+	Description string
+	OutputFile  string
+	SessionID   string
+	Notify      *NotificationTarget
+	CreatedAt   time.Time
 }
 
 // NotificationKind identifies the lifecycle transition that created a notification.
@@ -79,9 +78,11 @@ type Notification struct {
 	Task *Task
 }
 
-// CreateTaskRequest creates a task from immutable serialized intent.
+// CreateTaskRequest creates a task from immutable serialized intent and the
+// recovery policy owned by its registered Executor.
 type CreateTaskRequest struct {
-	Spec Spec
+	Spec              Spec
+	LeaseExpiryPolicy LeaseExpiryPolicy
 }
 
 // ListPendingRequest lists pending task candidates for the given executor keys.
@@ -150,14 +151,16 @@ type CancelTaskRequest struct {
 	ExpectedVersion int64
 }
 
-// RequestCancelRequest records durable cancellation intent.
+// RequestCancelRequest records durable cancellation intent. An active task
+// remains StatusRunning with CancelRequestedAt set until its attempt commits
+// StatusCanceled.
 type RequestCancelRequest struct {
 	TaskID          string
 	ExpectedVersion int64
 }
 
-// ResumeTaskRequest stores a one-shot resume command for a waiting task.
-type ResumeTaskRequest struct {
+// ResumeRequest stores a one-shot resume command for a waiting task.
+type ResumeRequest struct {
 	TaskID          string
 	ExpectedVersion int64
 	Data            []byte
@@ -169,10 +172,40 @@ type ReleaseSuspensionRequest struct {
 	ExpectedVersion int64
 }
 
-// WaitTaskRequest waits until a task advances beyond a known version.
-type WaitTaskRequest struct {
+// WaitUpdateRequest waits until a task advances beyond a known version.
+type WaitUpdateRequest struct {
 	TaskID       string
 	AfterVersion int64
+}
+
+// OutputRecord is one immutable task-output fragment. Sequence is monotonic
+// across all attempts of a task, allowing callers to resume reads after a cursor.
+type OutputRecord struct {
+	TaskID    string
+	Attempt   int64
+	Sequence  int64
+	Data      []byte
+	CreatedAt time.Time
+}
+
+// AppendOutputRequest appends one output fragment for the active task attempt.
+type AppendOutputRequest struct {
+	TaskID  string
+	Attempt int64
+	Data    []byte
+}
+
+// ReadOutputRequest reads output records after a known sequence.
+type ReadOutputRequest struct {
+	TaskID        string
+	AfterSequence int64
+	Limit         int
+}
+
+// ReadOutputResult contains ordered output records and the last returned sequence.
+type ReadOutputResult struct {
+	Records      []OutputRecord
+	LastSequence int64
 }
 
 // NotificationReceipt identifies a received outbox notification for acknowledgement.

@@ -32,6 +32,7 @@ import (
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/adk/backgroundtask"
+	backgroundlocal "github.com/cloudwego/eino/adk/backgroundtask/local"
 	"github.com/cloudwego/eino/adk/filesystem"
 	"github.com/cloudwego/eino/adk/internal"
 	"github.com/cloudwego/eino/components/tool"
@@ -95,11 +96,14 @@ type ExecuteToolConfig struct {
 // an auto-background transition caps it immediately. The remaining output is
 // collected into the task result.
 type BackgroundConfig struct {
-	// Manager is the shared background-task Manager. Required (a nil Manager is the
-	// same as no BackgroundConfig). It may be shared with other middlewares (e.g.
+	// Runner is the shared process-local background runner. Required (a nil Runner
+	// is the same as no BackgroundConfig). Its Manager may be shared with other middlewares (e.g.
 	// subagent) for a unified task-ID space; wire the backgroundtask control
 	// middleware once, bound to the same Manager.
-	Manager *backgroundtask.Manager
+	Runner *backgroundlocal.Runner
+	// Notifications is required because the managed execute tool promises
+	// completion notification.
+	Notifications backgroundtask.NotificationDeliveryRuntime
 
 	// OutputStore and OutputDir, when both set, give every managed run an output
 	// file at OutputDir/<id>.output: streaming runs append their chunks to it as
@@ -223,7 +227,7 @@ func NewMiddleware(ctx context.Context, config *Config) (adk.AgentMiddleware, er
 	if err != nil {
 		return adk.AgentMiddleware{}, err
 	}
-	ts, err := getFilesystemTools(ctx, &MiddlewareConfig{
+	middlewareConfig := &MiddlewareConfig{
 		Backend:                 config.Backend,
 		Shell:                   config.Shell,
 		StreamingShell:          config.StreamingShell,
@@ -242,7 +246,20 @@ func NewMiddleware(ctx context.Context, config *Config) (adk.AgentMiddleware, er
 		CustomGlobToolDesc:      config.CustomGlobToolDesc,
 		CustomWriteFileToolDesc: config.CustomWriteFileToolDesc,
 		CustomEditToolDesc:      config.CustomEditToolDesc,
-	})
+		notificationSessionID: func(ctx context.Context) (string, error) {
+			environment, ok := adk.TypedRunnerEnvironmentFromContext[*schema.Message](ctx)
+			if !ok || environment.SessionID() == "" {
+				return "", errors.New(
+					"filesystem: runner session is required for background notification",
+				)
+			}
+			return environment.SessionID(), nil
+		},
+	}
+	if err = validateBackgroundNotification(ctx, middlewareConfig.Background); err != nil {
+		return adk.AgentMiddleware{}, err
+	}
+	ts, err := getFilesystemTools(ctx, middlewareConfig)
 	if err != nil {
 		return adk.AgentMiddleware{}, err
 	}
@@ -289,6 +306,8 @@ type MiddlewareConfig struct {
 	// nil, execute runs only foreground (blocking) and is not tracked. See
 	// BackgroundConfig.
 	Background *BackgroundConfig
+
+	notificationSessionID func(context.Context) (string, error)
 
 	// LsToolConfig configures the ls tool
 	// optional
@@ -376,6 +395,24 @@ func (c *MiddlewareConfig) Validate() error {
 	return nil
 }
 
+func validateBackgroundNotification(ctx context.Context, config *BackgroundConfig) error {
+	if config == nil || config.Runner == nil {
+		return nil
+	}
+	if config.Notifications == nil {
+		return errors.New("filesystem: background notification delivery is required")
+	}
+	if err := config.Notifications.ValidateNotificationDelivery(
+		ctx,
+		&backgroundtask.NotificationDeliveryValidation{
+			Store: config.Runner.Manager().Store(), TargetKind: backgroundtask.SessionInboxNotificationKind,
+		},
+	); err != nil {
+		return fmt.Errorf("filesystem: background notification delivery: %w", err)
+	}
+	return nil
+}
+
 // mergeToolConfigWithDesc merges ToolConfig with legacy Desc field
 // Priority: ToolConfig.Desc > legacy Desc
 // Returns an empty ToolConfig if both are nil (to allow backend default implementation)
@@ -417,7 +454,20 @@ func NewTyped[M adk.MessageType](ctx context.Context, config *MiddlewareConfig) 
 	if err != nil {
 		return nil, err
 	}
-	ts, err := getFilesystemTools(ctx, config)
+	if err = validateBackgroundNotification(ctx, config.Background); err != nil {
+		return nil, err
+	}
+	typedConfig := *config
+	typedConfig.notificationSessionID = func(ctx context.Context) (string, error) {
+		environment, ok := adk.TypedRunnerEnvironmentFromContext[M](ctx)
+		if !ok || environment.SessionID() == "" {
+			return "", errors.New(
+				"filesystem: runner session is required for background notification",
+			)
+		}
+		return environment.SessionID(), nil
+	}
+	ts, err := getFilesystemTools(ctx, &typedConfig)
 	if err != nil {
 		return nil, err
 	}
@@ -595,11 +645,12 @@ func createExecuteTool(middlewareConfig *MiddlewareConfig) (tool.BaseTool, error
 		// background/auto-background runs are tracked and visible to the
 		// task_output/task_stop control tools. Without a Manager the tool is
 		// command-only with no background support.
-		if middlewareConfig.Background != nil && middlewareConfig.Background.Manager != nil {
+		if middlewareConfig.Background != nil && middlewareConfig.Background.Runner != nil {
 			return newManagedExecuteTool(
-				middlewareConfig.Background.Manager,
+				middlewareConfig.Background.Runner,
 				middlewareConfig.Shell,
 				middlewareConfig.StreamingShell,
+				middlewareConfig.notificationSessionID,
 				outputSink{
 					store:     middlewareConfig.Background.OutputStore,
 					outputDir: middlewareConfig.Background.OutputDir,

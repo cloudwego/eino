@@ -25,6 +25,7 @@ import (
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/adk/backgroundtask"
+	backgroundlocal "github.com/cloudwego/eino/adk/backgroundtask/local"
 	durablesubagent "github.com/cloudwego/eino/adk/backgroundtask/subagent"
 	"github.com/cloudwego/eino/adk/filesystem"
 	"github.com/cloudwego/eino/adk/internal"
@@ -51,20 +52,26 @@ func init() {
 type TypedBackgroundConfig[M adk.MessageType] struct {
 	Local   *TypedLocalBackgroundConfig[M]
 	Durable *TypedDurableBackgroundConfig[M]
+	// Notifications is required because DeepAgent's background tools promise
+	// completion notification.
+	Notifications backgroundtask.NotificationDeliveryRuntime
 }
 
 type BackgroundConfig = TypedBackgroundConfig[*schema.Message]
 
 type TypedLocalBackgroundConfig[M adk.MessageType] struct {
-	Manager   *backgroundtask.Manager
+	Runner    *backgroundlocal.Runner
 	OutputDir string
 }
 
 type TypedDurableBackgroundConfig[M adk.MessageType] struct {
-	Manager   *backgroundtask.Manager
-	OutputDir string
+	Manager              *backgroundtask.Manager
+	ForegroundTimeoutMs  *int
+	ShouldAutoBackground func(context.Context, *backgroundtask.Task) bool
+	OutputDir            string
 	// RunOptionsFactories reconstructs deployment-owned options on every worker
-	// attempt and is forwarded to the durable sub-agent middleware.
+	// attempt and is forwarded to the durable sub-agent middleware. Equivalent
+	// configuration must remain available for the full lifetime of resumable tasks.
 	RunOptionsFactories map[string]durablesubagent.RunOptionsFactory
 }
 
@@ -169,9 +176,12 @@ func NewTyped[M adk.MessageType](ctx context.Context, cfg *TypedConfig[M]) (adk.
 		if deepBackgroundManager(cfg.Background) == nil {
 			return nil, fmt.Errorf("deep: background Manager is required")
 		}
+		if cfg.Background.Notifications == nil {
+			return nil, fmt.Errorf("deep: background notification delivery is required")
+		}
 	}
-	// Sub-agents never get the Manager: their shell runs stay foreground/buffered
-	// and they cannot launch background work (see Config.Manager).
+	// Sub-agents never get the background configuration: their shell runs stay
+	// foreground/buffered and they cannot launch background work.
 	subAgentHandlers, err := buildTypedBuiltinAgentMiddlewares(ctx, cfg, nil)
 	if err != nil {
 		return nil, err
@@ -218,7 +228,7 @@ func NewTyped[M adk.MessageType](ctx context.Context, cfg *TypedConfig[M]) (adk.
 	// (task_output/task_stop) exactly once at the top level.
 	if manager := deepBackgroundManager(cfg.Background); manager != nil {
 		controlMW, err := backgroundtaskmw.NewTyped(ctx, &backgroundtaskmw.TypedConfig[M]{
-			Manager: manager,
+			Manager: manager, Notifications: cfg.Background.Notifications,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("failed to create background-task control middleware: %w", err)
@@ -344,10 +354,15 @@ func buildTypedBuiltinAgentMiddlewares[M adk.MessageType](ctx context.Context, c
 			StreamingShell: cfg.StreamingShell,
 		}
 		if manager := deepBackgroundManager(background); manager != nil {
+			runner, runnerErr := deepLocalRunner(background)
+			if runnerErr != nil {
+				return nil, runnerErr
+			}
 			mwCfg.Background = &filesystem2.BackgroundConfig{
-				Manager:     manager,
-				OutputStore: backendAppendOpener(cfg.Backend),
-				OutputDir:   deepBackgroundOutputDir(background),
+				Runner:        runner,
+				Notifications: background.Notifications,
+				OutputStore:   backendAppendOpener(cfg.Backend),
+				OutputDir:     deepBackgroundOutputDir(background),
 			}
 		}
 		fm, err := filesystem2.NewTyped[M](ctx, mwCfg)
@@ -365,12 +380,34 @@ func deepBackgroundManager[M adk.MessageType](background *TypedBackgroundConfig[
 		return nil
 	}
 	if background.Local != nil {
-		return background.Local.Manager
+		if background.Local.Runner == nil {
+			return nil
+		}
+		return background.Local.Runner.Manager()
 	}
 	if background.Durable != nil {
 		return background.Durable.Manager
 	}
 	return nil
+}
+
+func deepLocalRunner[M adk.MessageType](
+	background *TypedBackgroundConfig[M],
+) (*backgroundlocal.Runner, error) {
+	if background == nil {
+		return nil, nil
+	}
+	if background.Local != nil {
+		return background.Local.Runner, nil
+	}
+	if background.Durable == nil {
+		return nil, nil
+	}
+	return backgroundlocal.New(&backgroundlocal.Config{
+		Manager:              background.Durable.Manager,
+		ForegroundTimeoutMs:  background.Durable.ForegroundTimeoutMs,
+		ShouldAutoBackground: background.Durable.ShouldAutoBackground,
+	})
 }
 
 func deepBackgroundOutputDir[M adk.MessageType](background *TypedBackgroundConfig[M]) string {
@@ -392,17 +429,22 @@ func deepSubagentBackground[M adk.MessageType](
 	outputStore := backendAppendOpener(cfg.Backend)
 	if cfg.Background.Local != nil {
 		return &subagent.TypedBackgroundConfig[M]{
+			Notifications: cfg.Background.Notifications,
 			Local: &subagent.TypedLocalBackgroundConfig[M]{
-				Manager: cfg.Background.Local.Manager, OutputStore: outputStore,
+				Runner: cfg.Background.Local.Runner, OutputStore: outputStore,
 				OutputDir: cfg.Background.Local.OutputDir,
 			},
 		}
 	}
 	return &subagent.TypedBackgroundConfig[M]{
+		Notifications: cfg.Background.Notifications,
 		Durable: &subagent.TypedDurableBackgroundConfig[M]{
-			Manager: cfg.Background.Durable.Manager, OutputStore: outputStore,
-			OutputDir:           cfg.Background.Durable.OutputDir,
-			RunOptionsFactories: cfg.Background.Durable.RunOptionsFactories,
+			Manager:              cfg.Background.Durable.Manager,
+			ForegroundTimeoutMs:  cfg.Background.Durable.ForegroundTimeoutMs,
+			ShouldAutoBackground: cfg.Background.Durable.ShouldAutoBackground,
+			OutputStore:          outputStore,
+			OutputDir:            cfg.Background.Durable.OutputDir,
+			RunOptionsFactories:  cfg.Background.Durable.RunOptionsFactories,
 		},
 	}
 }

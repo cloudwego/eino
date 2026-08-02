@@ -28,10 +28,12 @@ import (
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/adk/backgroundtask"
+	backgroundlocal "github.com/cloudwego/eino/adk/backgroundtask/local"
 	durablesubagent "github.com/cloudwego/eino/adk/backgroundtask/subagent"
 	"github.com/cloudwego/eino/adk/filesystem"
 	"github.com/cloudwego/eino/adk/internal"
 	"github.com/cloudwego/eino/adk/internal/agenttool"
+	"github.com/cloudwego/eino/adk/internal/foreground"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/components/tool/utils"
 	"github.com/cloudwego/eino/compose"
@@ -77,7 +79,7 @@ type agentOutput[M adk.MessageType] struct {
 }
 
 func newManagedAgentTool[M adk.MessageType](
-	manager *backgroundtask.Manager,
+	runner *backgroundlocal.Runner,
 	subAgents map[string]tool.InvokableTool,
 	output agentOutput[M],
 	name, desc string,
@@ -94,17 +96,34 @@ func newManagedAgentTool[M adk.MessageType](
 			if err != nil {
 				return "", err
 			}
+			environment, ok := adk.TypedRunnerEnvironmentFromContext[M](ctx)
+			if !ok || environment.SessionID() == "" {
+				return "", errors.New("subagent: runner session is required for background notification")
+			}
 			outputFile := reserveAgentOutput(ctx, output.store, output.outputDir)
 			payload, err := sonic.Marshal(&subagentPayloadV1{Version: 1, SubAgentName: in.SubagentType})
 			if err != nil {
 				return "", err
 			}
-			result, err := manager.Run(ctx, &backgroundtask.RunInput{
+			result, err := runner.Run(ctx, &backgroundlocal.Input{
 				Description: in.Description, Type: TaskTypeSubagent, Payload: payload,
 				OutputFile: outputFile, RunInBackground: in.RunInBackground,
+				SessionID: environment.SessionID(),
+				Notify: &backgroundtask.NotificationTarget{
+					Kind: backgroundtask.SessionInboxNotificationKind, TargetID: environment.SessionID(),
+				},
 			}, func(workCtx context.Context, runtime backgroundtask.ExecutionRuntime) (string, error) {
-				var outputReceiver agenttool.EventReceiver[*adk.TypedAgentEvent[M]]
-				var fileReceiver *agentEventFileReceiver[M]
+				fileReceiver := &agentEventFileReceiver[M]{
+					ctx: workCtx, format: format,
+					onRecord: func(data []byte) error {
+						_, err := runtime.AppendOutput(workCtx, data)
+						return err
+					},
+					onError: func(fileErr error) error {
+						return runtime.ReportOutputFailure(workCtx, fileErr.Error())
+					},
+				}
+				var outputReceiver agenttool.EventReceiver[*adk.TypedAgentEvent[M]] = fileReceiver.receive
 				var outputWriter io.WriteCloser
 				if outputFile != "" {
 					writer, openErr := output.store.OpenAppend(
@@ -116,13 +135,7 @@ func newManagedAgentTool[M adk.MessageType](
 						}
 					} else {
 						outputWriter = writer
-						fileReceiver = &agentEventFileReceiver[M]{
-							ctx: workCtx, writer: writer, format: format,
-							onError: func(fileErr error) error {
-								return runtime.ReportOutputFailure(workCtx, fileErr.Error())
-							},
-						}
-						outputReceiver = fileReceiver.receive
+						fileReceiver.writer = writer
 					}
 				}
 				runOpts := append(opts, agenttool.WithEventReceiverTransform(
@@ -169,7 +182,7 @@ func formatManagedAgentResult(agentType string, task *backgroundtask.Task, forma
 		return message, nil
 	case backgroundtask.StatusWaitingInput:
 		return fmt.Sprintf("Agent task %s requires input. Use task_output to inspect the request.", task.Spec.ID), nil
-	case backgroundtask.StatusSuspended, backgroundtask.StatusCanceling:
+	case backgroundtask.StatusSuspended:
 		return fmt.Sprintf("Agent task %s is %s.", task.Spec.ID, task.Status), nil
 	case backgroundtask.StatusCanceled:
 		return "", fmt.Errorf(
@@ -219,6 +232,7 @@ type agentEventFileReceiver[M adk.MessageType] struct {
 	ctx       context.Context
 	writer    io.Writer
 	format    AgentEventFormat[M]
+	onRecord  func([]byte) error
 	onError   func(error) error
 	failed    bool
 	reportErr error
@@ -242,6 +256,16 @@ func (r *agentEventFileReceiver[M]) receive(event *adk.TypedAgentEvent[M]) {
 		return
 	}
 	data := line + "\n"
+	if r.onRecord != nil {
+		if err = r.onRecord([]byte(data)); err != nil {
+			r.failed = true
+			r.reportErr = err
+			return
+		}
+	}
+	if r.writer == nil {
+		return
+	}
 	n, err := io.WriteString(r.writer, data)
 	if err == nil && n != len(data) {
 		err = io.ErrShortWrite
@@ -424,9 +448,20 @@ func newDurableAgentTool[M adk.MessageType](
 		if err != nil {
 			return "", err
 		}
-		task, err = config.Manager.RunSubmitted(callCtx, &backgroundtask.RunSubmittedRequest{
-			TaskID: task.Spec.ID, RunInBackground: in.RunInBackground,
-		})
+		timeoutMs := foreground.DefaultTimeoutMs
+		if config.ForegroundTimeoutMs != nil {
+			timeoutMs = *config.ForegroundTimeoutMs
+		}
+		task, err = foreground.Run(
+			callCtx,
+			config.Manager,
+			foreground.Policy{
+				TimeoutMs: timeoutMs, ShouldAutoBackground: config.ShouldAutoBackground,
+			},
+			&foreground.Request{
+				TaskID: task.Spec.ID, RunInBackground: in.RunInBackground,
+			},
+		)
 		if err != nil {
 			return "", err
 		}

@@ -18,6 +18,7 @@ package backgroundtask
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"testing"
@@ -28,9 +29,28 @@ import (
 
 	"github.com/cloudwego/eino/adk"
 	bgtask "github.com/cloudwego/eino/adk/backgroundtask"
+	backgroundlocal "github.com/cloudwego/eino/adk/backgroundtask/local"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/schema"
 )
+
+type notificationDeliveryStub struct{}
+
+func (notificationDeliveryStub) ValidateNotificationDelivery(
+	_ context.Context,
+	req *bgtask.NotificationDeliveryValidation,
+) error {
+	if req == nil || req.Store == nil ||
+		req.TargetKind != bgtask.SessionInboxNotificationKind {
+		return errors.New("invalid notification delivery")
+	}
+	if _, ok := req.Store.(bgtask.NotificationOutbox); !ok {
+		return errors.New("notification outbox is required")
+	}
+	return nil
+}
+
+var testNotifications bgtask.NotificationDeliveryRuntime = notificationDeliveryStub{}
 
 func closeWithTimeout(m *bgtask.Manager) {
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
@@ -38,20 +58,44 @@ func closeWithTimeout(m *bgtask.Manager) {
 	_ = m.Close(ctx)
 }
 
-func runWork(m *bgtask.Manager, description string, background bool, work bgtask.WorkFunc) (*bgtask.Task, error) {
-	return m.Run(context.Background(), &bgtask.RunInput{
+func runWork(m *bgtask.Manager, description string, background bool, work backgroundlocal.WorkFunc) (*bgtask.Task, error) {
+	runner, err := backgroundlocal.New(&backgroundlocal.Config{Manager: m})
+	if err != nil {
+		return nil, err
+	}
+	return runner.Run(context.Background(), &backgroundlocal.Input{
 		Description:     description,
 		RunInBackground: background,
 	}, work)
 }
 
-func completedWork(result string) bgtask.WorkFunc {
+func waitUntilTerminal(
+	t *testing.T,
+	ctx context.Context,
+	manager *bgtask.Manager,
+	taskID string,
+) *bgtask.Task {
+	t.Helper()
+	task, err := manager.Get(ctx, taskID)
+	require.NoError(t, err)
+	for task.Status != bgtask.StatusCompleted &&
+		task.Status != bgtask.StatusFailed &&
+		task.Status != bgtask.StatusCanceled {
+		task, err = manager.WaitUpdate(ctx, &bgtask.WaitUpdateRequest{
+			TaskID: taskID, AfterVersion: task.Version,
+		})
+		require.NoError(t, err)
+	}
+	return task
+}
+
+func completedWork(result string) backgroundlocal.WorkFunc {
 	return func(ctx context.Context, _ bgtask.ExecutionRuntime) (string, error) {
 		return result, nil
 	}
 }
 
-func blockingWork() bgtask.WorkFunc {
+func blockingWork() backgroundlocal.WorkFunc {
 	return func(ctx context.Context, _ bgtask.ExecutionRuntime) (string, error) {
 		<-ctx.Done()
 		return "", ctx.Err()
@@ -82,6 +126,17 @@ func (s *staleFirstGetStore) Get(ctx context.Context, taskID string) (*bgtask.Ta
 	return task, nil
 }
 
+func (s *staleFirstGetStore) Receive(
+	ctx context.Context,
+	req *bgtask.ReceiveNotificationsRequest,
+) (*bgtask.ReceiveNotificationsResult, error) {
+	return s.Store.(bgtask.NotificationOutbox).Receive(ctx, req)
+}
+
+func (s *staleFirstGetStore) Ack(ctx context.Context, receipt bgtask.NotificationReceipt) error {
+	return s.Store.(bgtask.NotificationOutbox).Ack(ctx, receipt)
+}
+
 // findTool returns the named tool from a tool list.
 func findTool(t *testing.T, tools []tool.BaseTool, name string) tool.InvokableTool {
 	t.Helper()
@@ -100,7 +155,7 @@ func findTool(t *testing.T, tools []tool.BaseTool, name string) tool.InvokableTo
 
 func injectedTools(t *testing.T, m *bgtask.Manager) []tool.BaseTool {
 	t.Helper()
-	mw, err := New(context.Background(), &Config{Manager: m})
+	mw, err := New(context.Background(), &Config{Manager: m, Notifications: testNotifications})
 	require.NoError(t, err)
 	_, runCtx, err := mw.BeforeAgent(context.Background(), &adk.ChatModelAgentContext[*schema.Message]{})
 	require.NoError(t, err)
@@ -112,11 +167,14 @@ func TestNew_NilManager(t *testing.T) {
 	assert.Error(t, err)
 }
 
-func TestNew_OnlyRequiresManager(t *testing.T) {
+func TestNew_RequiresNotificationDelivery(t *testing.T) {
 	mgr := bgtask.New(context.Background(), nil)
 	defer closeWithTimeout(mgr)
 
 	_, err := New(context.Background(), &Config{Manager: mgr})
+	require.ErrorContains(t, err, "notification delivery is required")
+
+	_, err = New(context.Background(), &Config{Manager: mgr, Notifications: testNotifications})
 	require.NoError(t, err)
 }
 
@@ -138,7 +196,7 @@ func TestMiddleware_ToolConfig_NameOverrideAndDisable(t *testing.T) {
 
 	customDesc := "custom output desc"
 	mw, err := New(context.Background(), &Config{
-		Manager:              mgr,
+		Manager: mgr, Notifications: testNotifications,
 		TaskOutputToolConfig: &ToolConfig{Name: "get_output", Desc: &customDesc},
 		TaskStopToolConfig:   &ToolConfig{Disable: true},
 	})
@@ -173,7 +231,7 @@ func TestMiddleware_InjectsInstruction(t *testing.T) {
 	mgr := bgtask.New(context.Background(), &bgtask.Config{})
 	defer closeWithTimeout(mgr)
 
-	mw, err := New(context.Background(), &Config{Manager: mgr})
+	mw, err := New(context.Background(), &Config{Manager: mgr, Notifications: testNotifications})
 	require.NoError(t, err)
 	_, runCtx, err := mw.BeforeAgent(context.Background(), &adk.ChatModelAgentContext[*schema.Message]{Instruction: "base"})
 	require.NoError(t, err)
@@ -191,7 +249,7 @@ func TestMiddleware_InstructionUsesRenamedTool(t *testing.T) {
 	defer closeWithTimeout(mgr)
 
 	mw, err := New(context.Background(), &Config{
-		Manager:              mgr,
+		Manager: mgr, Notifications: testNotifications,
 		TaskOutputToolConfig: &ToolConfig{Name: "get_task_result"},
 	})
 	require.NoError(t, err)
@@ -210,6 +268,7 @@ func TestMiddleware_InstructionOmitsDisabledTool(t *testing.T) {
 
 	mw, err := New(context.Background(), &Config{
 		Manager:            mgr,
+		Notifications:      testNotifications,
 		TaskStopToolConfig: &ToolConfig{Disable: true},
 	})
 	require.NoError(t, err)
@@ -226,7 +285,7 @@ func TestMiddleware_InstructionEmptyWhenAllDisabled(t *testing.T) {
 	defer closeWithTimeout(mgr)
 
 	mw, err := New(context.Background(), &Config{
-		Manager:              mgr,
+		Manager: mgr, Notifications: testNotifications,
 		TaskOutputToolConfig: &ToolConfig{Disable: true},
 		TaskStopToolConfig:   &ToolConfig{Disable: true},
 	})
@@ -275,11 +334,11 @@ func TestTaskOutputTool_NonBlockingRunningThenTerminal(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, out, "running")
 
-	require.NoError(t, mgr.Cancel(runResult.Spec.ID))
+	_, err = mgr.RequestCancel(context.Background(), runResult.Spec.ID)
+	require.NoError(t, err)
 	waitCtx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	task, done := mgr.Wait(waitCtx, runResult.Spec.ID)
-	require.True(t, done)
+	task := waitUntilTerminal(t, waitCtx, mgr, runResult.Spec.ID)
 	require.NotNil(t, task)
 
 	_, err = tl.InvokableRun(context.Background(), fmt.Sprintf(`{"task_id":"%s","block":false}`, runResult.Spec.ID))
@@ -319,12 +378,11 @@ func TestTaskStopTool(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, fmt.Sprintf("Successfully stopped task: %s", runResult.Spec.ID), result)
 
-	task, done := mgr.Wait(context.Background(), runResult.Spec.ID)
-	require.True(t, done)
+	task := waitUntilTerminal(t, context.Background(), mgr, runResult.Spec.ID)
 	assert.Equal(t, bgtask.StateCanceled, task.Status)
 }
 
-func TestTaskStopTool_DurableCancelingAndCanceledText(t *testing.T) {
+func TestTaskStopTool_DurableRequestedAndCanceledText(t *testing.T) {
 	store := bgtask.NewMemoryStore(nil)
 	mgr := bgtask.New(context.Background(), &bgtask.Config{Store: store})
 	defer closeWithTimeout(mgr)
@@ -333,34 +391,34 @@ func TestTaskStopTool_DurableCancelingAndCanceledText(t *testing.T) {
 	running, err := store.CreateAndStart(context.Background(), &bgtask.CreateTaskRequest{
 		Spec: bgtask.Spec{
 			ID: "durable-running", ExecutorKey: "test",
-			LeaseExpiryPolicy: bgtask.LeaseExpiryRetry,
 		},
+		LeaseExpiryPolicy: bgtask.LeaseExpiryRetry,
 	})
 	require.NoError(t, err)
 	result, err := tl.InvokableRun(
 		context.Background(), fmt.Sprintf(`{"task_id":"%s"}`, running.Spec.ID),
 	)
 	require.NoError(t, err)
-	assert.Equal(t, "Stop requested for task durable-running (status: canceling)", result)
+	assert.Equal(t, "Stop requested for task durable-running", result)
 
 	failOnExpiry, err := store.CreateAndStart(context.Background(), &bgtask.CreateTaskRequest{
 		Spec: bgtask.Spec{
 			ID: "durable-fail-on-expiry", ExecutorKey: "test",
-			LeaseExpiryPolicy: bgtask.LeaseExpiryFail,
 		},
+		LeaseExpiryPolicy: bgtask.LeaseExpiryFail,
 	})
 	require.NoError(t, err)
 	result, err = tl.InvokableRun(
 		context.Background(), fmt.Sprintf(`{"task_id":"%s"}`, failOnExpiry.Spec.ID),
 	)
 	require.NoError(t, err)
-	assert.Equal(t, "Stop requested for task durable-fail-on-expiry (status: canceling)", result)
+	assert.Equal(t, "Stop requested for task durable-fail-on-expiry", result)
 
 	pending, err := store.Create(context.Background(), &bgtask.CreateTaskRequest{
 		Spec: bgtask.Spec{
 			ID: "durable-pending", ExecutorKey: "test",
-			LeaseExpiryPolicy: bgtask.LeaseExpiryRetry,
 		},
+		LeaseExpiryPolicy: bgtask.LeaseExpiryRetry,
 	})
 	require.NoError(t, err)
 	result, err = tl.InvokableRun(
@@ -414,7 +472,6 @@ func TestFormatTaskStableNonTerminalStates(t *testing.T) {
 		{bgtask.StatusPending, "Task ID: task_secret\nDescription: work\nStatus: pending"},
 		{bgtask.StatusWaitingInput, "Task ID: task_secret\nDescription: work\nStatus: waiting_input"},
 		{bgtask.StatusSuspended, "Task ID: task_secret\nDescription: work\nStatus: suspended"},
-		{bgtask.StatusCanceling, "Task ID: task_secret\nDescription: work\nStatus: canceling"},
 	} {
 		t.Run(string(test.status), func(t *testing.T) {
 			assert.Equal(t, test.want, formatTask(&bgtask.Task{

@@ -35,6 +35,7 @@ type scriptedExecutor struct {
 	validateExecutionErr error
 	checkpointErr        error
 	normalizedResume     []byte
+	leaseExpiryPolicy    LeaseExpiryPolicy
 	execute              func(context.Context, *Task, ExecutionRuntime) (*ExecutionResult, error)
 
 	mu                  sync.Mutex
@@ -50,6 +51,13 @@ func (e *scriptedExecutor) Key() string {
 		return "test"
 	}
 	return e.key
+}
+
+func (e *scriptedExecutor) LeaseExpiryPolicy() LeaseExpiryPolicy {
+	if e.leaseExpiryPolicy != "" {
+		return e.leaseExpiryPolicy
+	}
+	return LeaseExpiryRetry
 }
 
 func (e *scriptedExecutor) ValidateSpec(spec Spec) error {
@@ -111,9 +119,10 @@ func TestSimplifiedPublicModelHasNoOverlappingStateFields_BitsUT(t *testing.T) {
 
 	assertFieldsAbsent(t, reflect.TypeOf(Spec{}),
 		"PayloadVersion", "Recovery", "Result", "PayloadEncoding", "TraceID", "SpecVersion",
-		"Type", "ToolUseID", "Deadline")
+		"Type", "ToolUseID", "Deadline", "LeaseExpiryPolicy")
 	assertFieldsPresent(t, reflect.TypeOf(Task{}),
-		"Spec", "Status", "Checkpoint", "ResultData", "ResultError", "PendingResume", "Version")
+		"Spec", "LeaseExpiryPolicy", "Status", "Checkpoint", "ResultData", "ResultError",
+		"PendingResume", "Version")
 	field, exists := reflect.TypeOf(Task{}).FieldByName("PendingResume")
 	require.True(t, exists)
 	assert.Equal(t, reflect.TypeOf([]byte(nil)), field.Type)
@@ -160,11 +169,12 @@ func TestManagerSubmitUsesExecutorIdentityAndValidation_BitsUT(t *testing.T) {
 }
 
 func TestManagerValidateSpecRunsBeforeSubmitAndStart_BitsUT(t *testing.T) {
-	executor := &scriptedExecutor{}
+	executor := &scriptedExecutor{leaseExpiryPolicy: LeaseExpiryFail}
 	store := NewMemoryStore(nil)
 	manager := managerWithExecutor(t, store, executor, time.Minute)
 	task, err := manager.Submit(context.Background(), validSpec("validate-once"))
 	require.NoError(t, err)
+	assert.Equal(t, LeaseExpiryFail, task.LeaseExpiryPolicy)
 	require.Len(t, executor.validated, 1)
 
 	executor.validateErr = errors.New("invalid on worker")
@@ -289,7 +299,7 @@ func TestManagerResumeValidatesAndStoresNormalizedOpaqueInput_BitsUT(t *testing.
 	})
 	require.NoError(t, err)
 
-	resumed, err := manager.ResumeTask(context.Background(), &ResumeTaskRequest{
+	resumed, err := manager.Resume(context.Background(), &ResumeRequest{
 		TaskID: submitted.Spec.ID, ExpectedVersion: waiting.Version,
 		Data: []byte("raw"),
 	})

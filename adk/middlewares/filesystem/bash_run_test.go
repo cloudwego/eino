@@ -30,12 +30,62 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cloudwego/eino/adk/backgroundtask"
+	backgroundlocal "github.com/cloudwego/eino/adk/backgroundtask/local"
 	"github.com/cloudwego/eino/adk/filesystem"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/schema"
 )
 
+func testNotificationSessionID(context.Context) (string, error) {
+	return "test-session", nil
+}
+
+type notificationDeliveryStub struct{}
+
+func (notificationDeliveryStub) ValidateNotificationDelivery(
+	_ context.Context,
+	req *backgroundtask.NotificationDeliveryValidation,
+) error {
+	if req == nil || req.Store == nil ||
+		req.TargetKind != backgroundtask.SessionInboxNotificationKind {
+		return errors.New("invalid notification delivery")
+	}
+	if _, ok := req.Store.(backgroundtask.NotificationOutbox); !ok {
+		return errors.New("notification outbox is required")
+	}
+	return nil
+}
+
+var testNotifications backgroundtask.NotificationDeliveryRuntime = notificationDeliveryStub{}
+
 func intPtr(v int) *int { return &v }
+
+func mustLocalRunner(
+	t *testing.T,
+	manager *backgroundtask.Manager,
+	configure ...func(*backgroundlocal.Config),
+) *backgroundlocal.Runner {
+	t.Helper()
+	config := &backgroundlocal.Config{Manager: manager}
+	for _, apply := range configure {
+		apply(config)
+	}
+	runner, err := backgroundlocal.New(config)
+	require.NoError(t, err)
+	return runner
+}
+
+func TestManagedExecuteRequiresNotificationDelivery(t *testing.T) {
+	manager := backgroundtask.New(context.Background(), nil)
+	defer manager.Close(context.Background())
+	_, err := New(context.Background(), &MiddlewareConfig{
+		Shell: &mockShellBackend{},
+		Background: &BackgroundConfig{
+			Runner: mustLocalRunner(t, manager),
+		},
+	})
+	require.ErrorContains(t, err, "notification delivery is required")
+}
 
 func TestManagedExecutePromptPreservesCompletionNotification(t *testing.T) {
 	assert.Contains(t, ManagedExecuteToolDesc, "You will be notified when the command completes")
@@ -57,16 +107,30 @@ func findExecuteTool(t *testing.T, tools []tool.BaseTool) tool.BaseTool {
 	return nil
 }
 
-func waitAllTasks(t *testing.T, mgr *backgroundtask.Manager) {
+func waitTerminalTask(t *testing.T, manager *backgroundtask.Manager) *backgroundtask.Task {
 	t.Helper()
+	var terminal *backgroundtask.Task
 	require.Eventually(t, func() bool {
-		for _, task := range mgr.List() {
-			if task.Status == backgroundtask.StateRunning {
-				return false
+		deliveries, err := manager.Store().(backgroundtask.NotificationOutbox).Receive(
+			context.Background(),
+			&backgroundtask.ReceiveNotificationsRequest{
+				ConsumerID: "filesystem-test", Limit: 10, VisibilityTime: time.Millisecond,
+			},
+		)
+		require.NoError(t, err)
+		for _, delivery := range deliveries.Deliveries {
+			task, getErr := manager.Get(context.Background(), delivery.Record.TaskID)
+			require.NoError(t, getErr)
+			if task.Status == backgroundtask.StatusCompleted ||
+				task.Status == backgroundtask.StatusFailed ||
+				task.Status == backgroundtask.StatusCanceled {
+				terminal = task
+				return true
 			}
 		}
-		return true
+		return false
 	}, time.Second, 10*time.Millisecond)
+	return terminal
 }
 
 func filesystemOutput(t *testing.T, backend *filesystem.InMemoryBackend) (string, bool) {
@@ -96,18 +160,20 @@ func TestManagedExecuteTool_WritesOutputFile(t *testing.T) {
 		Backend: backend,
 		Shell:   &mockShellBackend{resp: &filesystem.ExecuteResponse{Output: "the output"}},
 		Background: &BackgroundConfig{
-			Manager:     mgr,
-			OutputStore: backend,
-			OutputDir:   "/tasks",
+			Runner:        mustLocalRunner(t, mgr),
+			Notifications: testNotifications,
+			OutputStore:   backend,
+			OutputDir:     "/tasks",
 		},
+		notificationSessionID: testNotificationSessionID,
 	})
 	require.NoError(t, err)
 
 	_, err = invokeTool(t, findExecuteTool(t, tools), `{"command":"echo hi"}`)
 	require.NoError(t, err)
 
-	tasks := mgr.List()
-	require.Len(t, tasks, 1)
+	task := waitTerminalTask(t, mgr)
+	require.NotNil(t, task)
 	path, found := filesystemOutput(t, backend)
 	require.NotEmpty(t, path)
 	assert.True(t, found)
@@ -142,8 +208,9 @@ func TestManagedExecuteTool_Foreground(t *testing.T) {
 	}()
 
 	tools, err := getFilesystemTools(context.Background(), &MiddlewareConfig{
-		Shell:      &mockShellBackend{resp: &filesystem.ExecuteResponse{Output: "ok"}},
-		Background: &BackgroundConfig{Manager: mgr},
+		Shell:                 &mockShellBackend{resp: &filesystem.ExecuteResponse{Output: "ok"}},
+		Background:            &BackgroundConfig{Runner: mustLocalRunner(t, mgr), Notifications: testNotifications},
+		notificationSessionID: testNotificationSessionID,
 	})
 	require.NoError(t, err)
 	require.Len(t, tools, 1)
@@ -153,10 +220,9 @@ func TestManagedExecuteTool_Foreground(t *testing.T) {
 	assert.Equal(t, "ok", result)
 
 	// The run is tracked by the Manager and tagged as a bash task.
-	tasks := mgr.List()
-	require.Len(t, tasks, 1)
-	assert.Equal(t, backgroundtask.StateCompleted, tasks[0].Status)
-	assert.Equal(t, "echo hi", tasks[0].Spec.Description)
+	task := waitTerminalTask(t, mgr)
+	assert.Equal(t, backgroundtask.StateCompleted, task.Status)
+	assert.Equal(t, "echo hi", task.Spec.Description)
 }
 
 func TestManagedExecuteTool_Background(t *testing.T) {
@@ -172,10 +238,12 @@ func TestManagedExecuteTool_Background(t *testing.T) {
 		Backend: backend,
 		Shell:   &mockShellBackend{resp: &filesystem.ExecuteResponse{Output: "done"}},
 		Background: &BackgroundConfig{
-			Manager:     mgr,
-			OutputStore: backend,
-			OutputDir:   "/tasks",
+			Runner:        mustLocalRunner(t, mgr),
+			Notifications: testNotifications,
+			OutputStore:   backend,
+			OutputDir:     "/tasks",
 		},
+		notificationSessionID: testNotificationSessionID,
 	})
 	require.NoError(t, err)
 
@@ -183,10 +251,8 @@ func TestManagedExecuteTool_Background(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, result, "Command running in background with ID:")
 
-	waitAllTasks(t, mgr)
-	tasks := mgr.List()
-	require.Len(t, tasks, 1)
-	assert.Equal(t, backgroundtask.StateCompleted, tasks[0].Status)
+	task := waitTerminalTask(t, mgr)
+	assert.Equal(t, backgroundtask.StateCompleted, task.Status)
 
 	// The background-launch message reports the (reserved) output-file path so the
 	// agent can read it once the task completes.
@@ -198,10 +264,7 @@ func TestManagedExecuteTool_Background(t *testing.T) {
 // A foreground command that outlives its timeout is moved to the background
 // (kept running) when the Manager's ShouldAutoBackground hook permits it.
 func TestManagedExecuteTool_TimeoutMovesToBackground(t *testing.T) {
-	mgr := backgroundtask.New(context.Background(), &backgroundtask.Config{
-		ForegroundTimeoutMs:  intPtr(0),
-		ShouldAutoBackground: func(context.Context, *backgroundtask.Task) bool { return true },
-	})
+	mgr := backgroundtask.New(context.Background(), nil)
 	defer func() {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
@@ -209,8 +272,16 @@ func TestManagedExecuteTool_TimeoutMovesToBackground(t *testing.T) {
 	}()
 
 	tools, err := getFilesystemTools(context.Background(), &MiddlewareConfig{
-		Shell:      &slowShell{delay: 200 * time.Millisecond, out: "slow done"},
-		Background: &BackgroundConfig{Manager: mgr},
+		Shell: &slowShell{delay: 200 * time.Millisecond, out: "slow done"},
+		Background: &BackgroundConfig{
+			Runner: mustLocalRunner(t, mgr, func(config *backgroundlocal.Config) {
+				config.ShouldAutoBackground = func(context.Context, *backgroundtask.Task) bool {
+					return true
+				}
+			}),
+			Notifications: testNotifications,
+		},
+		notificationSessionID: testNotificationSessionID,
 	})
 	require.NoError(t, err)
 
@@ -219,17 +290,15 @@ func TestManagedExecuteTool_TimeoutMovesToBackground(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, result, "Command running in background with ID:")
 
-	waitAllTasks(t, mgr)
-	tasks := mgr.List()
-	require.Len(t, tasks, 1)
-	assert.Equal(t, backgroundtask.StateCompleted, tasks[0].Status)
-	assert.Equal(t, "slow done", string(tasks[0].ResultData))
+	task := waitTerminalTask(t, mgr)
+	assert.Equal(t, backgroundtask.StateCompleted, task.Status)
+	assert.Equal(t, "slow done", string(task.ResultData))
 }
 
 // Without a ShouldAutoBackground hook, a command that outlives its timeout is
 // stopped and reported as timed out.
 func TestManagedExecuteTool_TimeoutKills(t *testing.T) {
-	mgr := backgroundtask.New(context.Background(), &backgroundtask.Config{ForegroundTimeoutMs: intPtr(0)})
+	mgr := backgroundtask.New(context.Background(), nil)
 	defer func() {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
@@ -237,25 +306,24 @@ func TestManagedExecuteTool_TimeoutKills(t *testing.T) {
 	}()
 
 	tools, err := getFilesystemTools(context.Background(), &MiddlewareConfig{
-		Shell:      &slowShell{delay: time.Second, out: "never"},
-		Background: &BackgroundConfig{Manager: mgr},
+		Shell:                 &slowShell{delay: time.Second, out: "never"},
+		Background:            &BackgroundConfig{Runner: mustLocalRunner(t, mgr), Notifications: testNotifications},
+		notificationSessionID: testNotificationSessionID,
 	})
 	require.NoError(t, err)
 
 	_, err = invokeTool(t, tools[0], `{"command":"sleep","timeout":50}`)
 	require.ErrorContains(t, err, "timed out after 50ms")
 
-	waitAllTasks(t, mgr)
-	tasks := mgr.List()
-	require.Len(t, tasks, 1)
-	assert.Equal(t, backgroundtask.StateFailed, tasks[0].Status)
-	assert.Equal(t, "timed out after 50ms", tasks[0].ResultError)
+	task := waitTerminalTask(t, mgr)
+	assert.Equal(t, backgroundtask.StateFailed, task.Status)
+	assert.Equal(t, "timed out after 50ms", task.ResultError)
 }
 
 func TestShellPayloadV1AndCommandFromTask(t *testing.T) {
 	input, err := managedRunInput(executeManagedArgs{
 		executeArgs: executeArgs{Command: "echo hello"},
-	}, &bashOutputWriter{})
+	}, &bashOutputWriter{}, "test-session")
 	require.NoError(t, err)
 	task := &backgroundtask.Task{Spec: backgroundtask.Spec{
 		Kind: ExecuteTaskType, Payload: input.Payload,
@@ -281,7 +349,9 @@ func TestManagedExecuteTool_StreamingForeground(t *testing.T) {
 		_ = mgr.Close(ctx)
 	}()
 
-	executeTool, err := newManagedExecuteTool(mgr, nil, &mockStreamingShellMultiChunk{}, outputSink{}, "", "")
+	executeTool, err := newManagedExecuteTool(
+		mustLocalRunner(t, mgr), nil, &mockStreamingShellMultiChunk{}, testNotificationSessionID, outputSink{}, "", "",
+	)
 	require.NoError(t, err)
 
 	st, ok := executeTool.(tool.StreamableTool)
@@ -293,13 +363,11 @@ func TestManagedExecuteTool_StreamingForeground(t *testing.T) {
 	assert.Contains(t, got, "chunk1")
 	assert.Contains(t, got, "chunk3")
 
-	waitAllTasks(t, mgr)
-	tasks := mgr.List()
-	require.Len(t, tasks, 1)
-	assert.Equal(t, backgroundtask.StateCompleted, tasks[0].Status)
+	task := waitTerminalTask(t, mgr)
+	assert.Equal(t, backgroundtask.StateCompleted, task.Status)
 	// The streamed chunks are also the persisted result.
-	assert.Contains(t, string(tasks[0].ResultData), "chunk1")
-	assert.Contains(t, string(tasks[0].ResultData), "chunk3")
+	assert.Contains(t, string(task.ResultData), "chunk1")
+	assert.Contains(t, string(task.ResultData), "chunk3")
 }
 
 // An explicit background launch on a streaming managed tool exposes startup
@@ -314,7 +382,10 @@ func TestManagedExecuteTool_StreamingExplicitBackground(t *testing.T) {
 		_ = mgr.Close(ctx)
 	}()
 
-	executeTool, err := newManagedExecuteTool(mgr, nil, &mockStreamingShellMultiChunk{}, outputSink{store: backend, outputDir: "/tasks"}, "", "")
+	executeTool, err := newManagedExecuteTool(
+		mustLocalRunner(t, mgr), nil, &mockStreamingShellMultiChunk{}, testNotificationSessionID,
+		outputSink{store: backend, outputDir: "/tasks"}, "", "",
+	)
 	require.NoError(t, err)
 	st := executeTool.(tool.StreamableTool)
 
@@ -325,11 +396,9 @@ func TestManagedExecuteTool_StreamingExplicitBackground(t *testing.T) {
 	assert.Contains(t, got, "chunk3")
 	assert.NotContains(t, got, "is running in the background")
 
-	waitAllTasks(t, mgr)
-	tasks := mgr.List()
-	require.Len(t, tasks, 1)
-	assert.Equal(t, backgroundtask.StateCompleted, tasks[0].Status)
-	assert.Contains(t, string(tasks[0].ResultData), "chunk1")
+	task := waitTerminalTask(t, mgr)
+	assert.Equal(t, backgroundtask.StateCompleted, task.Status)
+	assert.Contains(t, string(task.ResultData), "chunk1")
 	// The streamed output was teed to the output file as it drained in the background.
 	path, found := filesystemOutput(t, backend)
 	require.True(t, found)
@@ -368,7 +437,10 @@ func TestManagedExecuteTool_StreamingInterimOutput(t *testing.T) {
 	}()
 
 	gate := &gatedStreamingShell{release: make(chan struct{})}
-	executeTool, err := newManagedExecuteTool(mgr, nil, gate, outputSink{store: backend, outputDir: "/tasks"}, "", "")
+	executeTool, err := newManagedExecuteTool(
+		mustLocalRunner(t, mgr), nil, gate, testNotificationSessionID,
+		outputSink{store: backend, outputDir: "/tasks"}, "", "",
+	)
 	require.NoError(t, err)
 	st := executeTool.(tool.StreamableTool)
 
@@ -381,8 +453,6 @@ func TestManagedExecuteTool_StreamingInterimOutput(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, first, "first")
 
-	tasks := mgr.List()
-	require.Len(t, tasks, 1)
 	path, found := filesystemOutput(t, backend)
 	require.NotEmpty(t, path)
 	assert.True(t, found)
@@ -406,7 +476,8 @@ func TestManagedExecuteTool_StreamingInterimOutput(t *testing.T) {
 		}
 	}
 
-	waitAllTasks(t, mgr)
+	task := waitTerminalTask(t, mgr)
+	assert.Equal(t, backgroundtask.StateCompleted, task.Status)
 	final, err := backend.Read(context.Background(), &filesystem.ReadRequest{FilePath: path})
 	require.NoError(t, err)
 	assert.Contains(t, final.Content, "first")
@@ -436,7 +507,10 @@ func TestManagedExecuteTool_Schema(t *testing.T) {
 		_ = mgr.Close(ctx)
 	}()
 
-	executeTool, err := newManagedExecuteTool(mgr, &mockShellBackend{resp: &filesystem.ExecuteResponse{Output: "ok"}}, nil, outputSink{}, "", "")
+	executeTool, err := newManagedExecuteTool(
+		mustLocalRunner(t, mgr), &mockShellBackend{resp: &filesystem.ExecuteResponse{Output: "ok"}}, nil,
+		testNotificationSessionID, outputSink{}, "", "",
+	)
 	require.NoError(t, err)
 
 	info, err := executeTool.Info(context.Background())
@@ -497,20 +571,21 @@ func TestManagedExecuteTool_ReservationFailure_NoOutputFile(t *testing.T) {
 	}()
 
 	opener := &failingAppendOpener{backend: backend, failAfter: 0}
-	executeTool, err := newManagedExecuteTool(mgr, &mockShellBackend{resp: &filesystem.ExecuteResponse{Output: "the output"}}, nil,
-		outputSink{store: opener, outputDir: "/tasks"}, "", "")
+	executeTool, err := newManagedExecuteTool(
+		mustLocalRunner(t, mgr), &mockShellBackend{resp: &filesystem.ExecuteResponse{Output: "the output"}}, nil,
+		testNotificationSessionID, outputSink{store: opener, outputDir: "/tasks"}, "", "",
+	)
 	require.NoError(t, err)
 
 	result, err := invokeTool(t, executeTool, `{"command":"echo hi"}`)
 	require.NoError(t, err)
 	assert.Equal(t, "the output", result)
 
-	tasks := mgr.List()
-	require.Len(t, tasks, 1)
+	task := waitTerminalTask(t, mgr)
 	path, found := filesystemOutput(t, backend)
 	assert.Empty(t, path)
 	assert.False(t, found)
-	assert.Equal(t, "the output", string(tasks[0].ResultData))
+	assert.Equal(t, "the output", string(task.ResultData))
 }
 
 // When a write to the output file fails after reservation, the file is marked
@@ -526,20 +601,21 @@ func TestManagedExecuteTool_WriteFailure_MarksUnreliable(t *testing.T) {
 
 	// failAfter=1: the reservation open succeeds, the result open fails.
 	opener := &failingAppendOpener{backend: backend, failAfter: 1}
-	executeTool, err := newManagedExecuteTool(mgr, &mockShellBackend{resp: &filesystem.ExecuteResponse{Output: "the output"}}, nil,
-		outputSink{store: opener, outputDir: "/tasks"}, "", "")
+	executeTool, err := newManagedExecuteTool(
+		mustLocalRunner(t, mgr), &mockShellBackend{resp: &filesystem.ExecuteResponse{Output: "the output"}}, nil,
+		testNotificationSessionID, outputSink{store: opener, outputDir: "/tasks"}, "", "",
+	)
 	require.NoError(t, err)
 
 	result, err := invokeTool(t, executeTool, `{"command":"echo hi"}`)
 	require.NoError(t, err)
 	assert.Equal(t, "the output", result)
 
-	tasks := mgr.List()
-	require.Len(t, tasks, 1)
+	task := waitTerminalTask(t, mgr)
 	path, found := filesystemOutput(t, backend)
 	assert.NotEmpty(t, path)
 	assert.True(t, found)
-	assert.Equal(t, "the output", string(tasks[0].ResultData))
+	assert.Equal(t, "the output", string(task.ResultData))
 }
 
 // countingAppendOpener wraps a Backend and counts every OpenAppend and every
@@ -597,8 +673,10 @@ func TestManagedExecuteTool_StreamingSourceError_ClosesStream(t *testing.T) {
 		_ = mgr.Close(ctx)
 	}()
 
-	executeTool, err := newManagedExecuteTool(mgr, nil, &erroringStreamingShell{},
-		outputSink{store: counter, outputDir: "/tasks"}, "", "")
+	executeTool, err := newManagedExecuteTool(
+		mustLocalRunner(t, mgr), nil, &erroringStreamingShell{}, testNotificationSessionID,
+		outputSink{store: counter, outputDir: "/tasks"}, "", "",
+	)
 	require.NoError(t, err)
 	st := executeTool.(tool.StreamableTool)
 
@@ -613,7 +691,8 @@ func TestManagedExecuteTool_StreamingSourceError_ClosesStream(t *testing.T) {
 	}
 	sr.Close()
 
-	waitAllTasks(t, mgr)
+	task := waitTerminalTask(t, mgr)
+	assert.Equal(t, backgroundtask.StateFailed, task.Status)
 
 	opens := atomic.LoadInt32(&counter.opens)
 	closes := atomic.LoadInt32(&counter.closes)

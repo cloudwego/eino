@@ -122,7 +122,9 @@ func TestRouteLessTaskNeverCreatesOutbox_BitsUT(t *testing.T) {
 	store := NewMemoryStore(nil)
 	spec := validSpec("route-less")
 	spec.Notify = nil
-	created, err := store.Create(context.Background(), &CreateTaskRequest{Spec: spec})
+	created, err := store.Create(context.Background(), &CreateTaskRequest{
+		Spec: spec, LeaseExpiryPolicy: LeaseExpiryRetry,
+	})
 	require.NoError(t, err)
 	started, err := store.Start(context.Background(), &StartTaskRequest{
 		TaskID: spec.ID, ExpectedVersion: created.Version,

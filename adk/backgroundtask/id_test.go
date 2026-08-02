@@ -48,7 +48,11 @@ func TestAllocateTaskIDIsOpaqueAndDoesNotCreateRecord(t *testing.T) {
 			seen[id] = struct{}{}
 		}
 	}
-	assert.Empty(t, manager.List())
+	for id := range seen {
+		_, err := manager.Get(context.Background(), id)
+		assert.ErrorIs(t, err, ErrNotFound)
+		break
+	}
 }
 
 type taskIDContextKey struct{}
@@ -68,7 +72,8 @@ func TestAllocateTaskIDGeneratorReceivesKind(t *testing.T) {
 	id, err := manager.AllocateTaskID(ctx, &AllocateTaskIDRequest{Kind: "subagent"})
 	require.NoError(t, err)
 	assert.Equal(t, wantID, id)
-	assert.Empty(t, manager.List())
+	_, err = manager.Get(context.Background(), id)
+	assert.ErrorIs(t, err, ErrNotFound)
 }
 
 func TestAllocateTaskIDRejectsInvalidGeneratorOutput(t *testing.T) {

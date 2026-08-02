@@ -37,6 +37,53 @@ type recordingActivator struct {
 	pendingSeen int
 }
 
+func TestRuntimeValidatesCompleteDeliveryRoute(t *testing.T) {
+	store := backgroundtask.NewMemoryStore(nil)
+	inbox := NewMemoryInbox()
+	sink, err := NewSink(inbox, &recordingActivator{inbox: inbox})
+	require.NoError(t, err)
+	sinks := backgroundtask.NewSinkRegistry()
+	require.NoError(t, sinks.Register(backgroundtask.SessionInboxNotificationKind, sink))
+	readyCalls := 0
+	runtime, err := NewRuntime(
+		sinks,
+		func(context.Context) error {
+			readyCalls++
+			return nil
+		},
+	)
+	require.NoError(t, err)
+	require.NoError(t, runtime.ValidateNotificationDelivery(
+		context.Background(),
+		&backgroundtask.NotificationDeliveryValidation{
+			Store: store, TargetKind: backgroundtask.SessionInboxNotificationKind,
+		},
+	))
+	assert.Equal(t, 1, readyCalls)
+}
+
+func TestRuntimeRejectsIncompleteDeliveryRoute(t *testing.T) {
+	store := backgroundtask.NewMemoryStore(nil)
+	runtime, err := NewRuntime(
+		backgroundtask.NewSinkRegistry(),
+		func(context.Context) error { return nil },
+	)
+	require.NoError(t, err)
+	err = runtime.ValidateNotificationDelivery(
+		context.Background(),
+		&backgroundtask.NotificationDeliveryValidation{
+			Store: store, TargetKind: backgroundtask.SessionInboxNotificationKind,
+		},
+	)
+	require.ErrorContains(t, err, "sink is unavailable")
+
+	_, err = NewRuntime(backgroundtask.NewSinkRegistry(), nil)
+	require.ErrorContains(t, err, "readiness check")
+
+	_, err = NewSink(nil, nil)
+	require.ErrorContains(t, err, "inbox and activator are required")
+}
+
 func (a *recordingActivator) RequestTurn(
 	ctx context.Context,
 	req *backgroundtask.SessionActivationRequest,
@@ -69,7 +116,9 @@ func TestSinkAcceptTargetValidatesDependenciesAndIdentity(t *testing.T) {
 	require.ErrorContains(t, err, "inbox and activator are required")
 
 	inbox := NewMemoryInbox()
-	err = (&Sink{Inbox: inbox, Activator: &recordingActivator{inbox: inbox}}).AcceptTarget(
+	sink, sinkErr := NewSink(inbox, &recordingActivator{inbox: inbox})
+	require.NoError(t, sinkErr)
+	err = sink.AcceptTarget(
 		context.Background(),
 		backgroundtask.NotificationTarget{Kind: "session_inbox", TargetID: "session-1"},
 		backgroundtask.Notification{},
@@ -80,9 +129,10 @@ func TestSinkAcceptTargetValidatesDependenciesAndIdentity(t *testing.T) {
 func TestSinkAcceptTargetEnqueuesBeforeActivation_BitsUT(t *testing.T) {
 	inbox := NewMemoryInbox()
 	activator := &recordingActivator{inbox: inbox}
-	sink := &Sink{Inbox: inbox, Activator: activator}
+	sink, err := NewSink(inbox, activator)
+	require.NoError(t, err)
 
-	err := sink.AcceptTarget(context.Background(), backgroundtask.NotificationTarget{
+	err = sink.AcceptTarget(context.Background(), backgroundtask.NotificationTarget{
 		Kind: "session_inbox", TargetID: "session-1",
 	}, backgroundtask.Notification{
 		ID: "notification-1", TaskID: "task-1",
@@ -101,11 +151,10 @@ func TestSinkAcceptTargetEnqueuesBeforeActivation_BitsUT(t *testing.T) {
 func TestSinkAcceptTargetActivationFailureRetainsInboxItem_BitsUT(t *testing.T) {
 	inbox := NewMemoryInbox()
 	wantErr := errors.New("activation unavailable")
-	sink := &Sink{
-		Inbox: inbox, Activator: &recordingActivator{inbox: inbox, err: wantErr},
-	}
+	sink, err := NewSink(inbox, &recordingActivator{inbox: inbox, err: wantErr})
+	require.NoError(t, err)
 
-	err := sink.AcceptTarget(context.Background(), backgroundtask.NotificationTarget{
+	err = sink.AcceptTarget(context.Background(), backgroundtask.NotificationTarget{
 		Kind: "session_inbox", TargetID: "session-1",
 	}, backgroundtask.Notification{ID: "notification-1"})
 	assert.ErrorIs(t, err, wantErr)
@@ -122,11 +171,12 @@ func TestTerminalTaskNotificationWakesParentSession_BitsUT(t *testing.T) {
 	store := backgroundtask.NewMemoryStore(nil)
 	spec := backgroundtask.Spec{
 		ID: "task-1", ExecutorKey: "test", Payload: []byte("{}"),
-		LeaseExpiryPolicy: backgroundtask.LeaseExpiryRetry,
-		SessionID:         "session-1",
-		Notify:            &backgroundtask.NotificationTarget{Kind: "session_inbox", TargetID: "session-1"},
+		SessionID: "session-1",
+		Notify:    &backgroundtask.NotificationTarget{Kind: "session_inbox", TargetID: "session-1"},
 	}
-	created, err := store.Create(context.Background(), &backgroundtask.CreateTaskRequest{Spec: spec})
+	created, err := store.Create(context.Background(), &backgroundtask.CreateTaskRequest{
+		Spec: spec, LeaseExpiryPolicy: backgroundtask.LeaseExpiryRetry,
+	})
 	require.NoError(t, err)
 	started, err := store.Start(context.Background(), &backgroundtask.StartTaskRequest{
 		TaskID: spec.ID, ExpectedVersion: created.Version,
@@ -140,9 +190,9 @@ func TestTerminalTaskNotificationWakesParentSession_BitsUT(t *testing.T) {
 	inbox := NewMemoryInbox()
 	activator := &recordingActivator{inbox: inbox}
 	registry := backgroundtask.NewSinkRegistry()
-	require.NoError(t, registry.Register("session_inbox", &Sink{
-		Inbox: inbox, Activator: activator,
-	}))
+	sink, err := NewSink(inbox, activator)
+	require.NoError(t, err)
+	require.NoError(t, registry.Register(backgroundtask.SessionInboxNotificationKind, sink))
 	dispatcher := &backgroundtask.Dispatcher{
 		Outbox: store, Store: store, Sinks: registry, ConsumerID: "dispatcher",
 		BatchSize: 10, Visibility: time.Minute,

@@ -25,6 +25,7 @@ import (
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/adk/backgroundtask"
+	backgroundlocal "github.com/cloudwego/eino/adk/backgroundtask/local"
 	durablesubagent "github.com/cloudwego/eino/adk/backgroundtask/subagent"
 	"github.com/cloudwego/eino/adk/filesystem"
 	"github.com/cloudwego/eino/adk/internal"
@@ -75,12 +76,15 @@ type BackgroundConfig = TypedBackgroundConfig[*schema.Message]
 type TypedBackgroundConfig[M adk.MessageType] struct {
 	Local   *TypedLocalBackgroundConfig[M]
 	Durable *TypedDurableBackgroundConfig[M]
+	// Notifications is required because the model-facing background API promises
+	// completion notification.
+	Notifications backgroundtask.NotificationDeliveryRuntime
 }
 
 type LocalBackgroundConfig = TypedLocalBackgroundConfig[*schema.Message]
 
 type TypedLocalBackgroundConfig[M adk.MessageType] struct {
-	Manager     *backgroundtask.Manager
+	Runner      *backgroundlocal.Runner
 	OutputStore filesystem.AppendOpener
 	OutputDir   string
 	EventFormat AgentEventFormat[M]
@@ -89,16 +93,19 @@ type TypedLocalBackgroundConfig[M adk.MessageType] struct {
 type DurableBackgroundConfig = TypedDurableBackgroundConfig[*schema.Message]
 
 type TypedDurableBackgroundConfig[M adk.MessageType] struct {
-	Manager     *backgroundtask.Manager
-	OutputStore filesystem.AppendOpener
-	OutputDir   string
+	Manager              *backgroundtask.Manager
+	ForegroundTimeoutMs  *int
+	ShouldAutoBackground func(context.Context, *backgroundtask.Task) bool
+	OutputStore          filesystem.AppendOpener
+	OutputDir            string
 	// EventFormat must remain framing-compatible across every worker that can
 	// resume the same SubAgentName. The default is one JSON object per line.
 	// Formatter migrations require a new SubAgentName or output path.
 	EventFormat AgentEventFormat[M]
 	// RunOptionsFactories reconstructs deployment-owned run options by sub-agent
 	// name for every execution attempt. Every worker serving a name must configure
-	// a semantically equivalent factory.
+	// a semantically equivalent factory for the full lifetime of resumable tasks.
+	// Incompatible changes require draining those tasks or using a new sub-agent name.
 	RunOptionsFactories map[string]durablesubagent.RunOptionsFactory
 }
 
@@ -106,10 +113,10 @@ type AgentEventFormat[M adk.MessageType] func(context.Context, *adk.TypedAgentEv
 
 // New creates a ChatModelAgentMiddleware that injects sub-agent tools into the agent context.
 //
-// The middleware injects an Agent tool for spawning sub-agents. When Config.Manager is
-// provided, agent runs are tracked by the shared background-task Manager and the Agent
-// tool gains a run_in_background parameter. The task_output/task_stop control tools are
-// NOT injected here; wire the backgroundtask control middleware
+// The middleware injects an Agent tool for spawning sub-agents. When Background
+// is configured, agent runs are tracked by the shared background-task Manager and
+// the Agent tool gains a run_in_background parameter. The task_output/task_stop
+// control tools are NOT injected here; wire the backgroundtask control middleware
 // (adk/middlewares/backgroundtask) once, bound to the same Manager.
 func New(ctx context.Context, config *Config) (adk.ChatModelAgentMiddleware, error) {
 	return NewTyped[*schema.Message](ctx, config)
@@ -168,7 +175,7 @@ func NewTyped[M adk.MessageType](ctx context.Context, config *TypedConfig[M]) (a
 	if config.Background != nil {
 		if config.Background.Local != nil {
 			at, err = newManagedAgentTool[M](
-				config.Background.Local.Manager, subAgentToolMap,
+				config.Background.Local.Runner, subAgentToolMap,
 				agentOutput[M]{
 					store:     config.Background.Local.OutputStore,
 					outputDir: config.Background.Local.OutputDir,
@@ -288,18 +295,34 @@ func validate[M adk.MessageType](ctx context.Context, c *TypedConfig[M]) error {
 		if (c.Background.Local == nil) == (c.Background.Durable == nil) {
 			return fmt.Errorf("subagent: exactly one of Background.Local or Background.Durable is required")
 		}
-		if c.Background.Local != nil && c.Background.Local.Manager == nil {
-			return fmt.Errorf("subagent: local background Manager is required")
+		if c.Background.Notifications == nil {
+			return fmt.Errorf("subagent: background notification delivery is required")
+		}
+		var manager *backgroundtask.Manager
+		if c.Background.Local != nil && c.Background.Local.Runner == nil {
+			return fmt.Errorf("subagent: local background Runner is required")
+		}
+		if c.Background.Local != nil {
+			manager = c.Background.Local.Runner.Manager()
 		}
 		if c.Background.Durable != nil {
 			if c.Background.Durable.Manager == nil {
 				return fmt.Errorf("subagent: durable background Manager is required")
 			}
+			manager = c.Background.Durable.Manager
 			for _, agent := range c.SubAgents {
 				if _, ok := agent.(adk.TypedResumableAgent[M]); !ok {
 					return fmt.Errorf("subagent: durable agent %q is not resumable", agent.Name(ctx))
 				}
 			}
+		}
+		if err := c.Background.Notifications.ValidateNotificationDelivery(
+			ctx,
+			&backgroundtask.NotificationDeliveryValidation{
+				Store: manager.Store(), TargetKind: backgroundtask.SessionInboxNotificationKind,
+			},
+		); err != nil {
+			return fmt.Errorf("subagent: background notification delivery: %w", err)
 		}
 	}
 

@@ -31,6 +31,7 @@ import (
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/adk/backgroundtask"
+	backgroundlocal "github.com/cloudwego/eino/adk/backgroundtask/local"
 	durablesubagent "github.com/cloudwego/eino/adk/backgroundtask/subagent"
 	"github.com/cloudwego/eino/adk/filesystem"
 	"github.com/cloudwego/eino/adk/internal/agenttool"
@@ -49,6 +50,24 @@ type mockAgent struct {
 type middlewareRunOptions struct {
 	value string
 }
+
+type notificationDeliveryStub struct{}
+
+func (notificationDeliveryStub) ValidateNotificationDelivery(
+	_ context.Context,
+	req *backgroundtask.NotificationDeliveryValidation,
+) error {
+	if req == nil || req.Store == nil ||
+		req.TargetKind != backgroundtask.SessionInboxNotificationKind {
+		return errors.New("invalid notification delivery")
+	}
+	if _, ok := req.Store.(backgroundtask.NotificationOutbox); !ok {
+		return errors.New("notification outbox is required")
+	}
+	return nil
+}
+
+var testNotifications backgroundtask.NotificationDeliveryRuntime = notificationDeliveryStub{}
 
 type failExecutionOpenStore struct {
 	backend *filesystem.InMemoryBackend
@@ -87,12 +106,22 @@ func (m *mockAgent) Resume(ctx context.Context, _ *adk.ResumeInfo, opts ...adk.A
 func durableBackground(mgr *backgroundtask.Manager, agents ...adk.Agent) *BackgroundConfig {
 	_ = agents
 	return &BackgroundConfig{
-		Durable: &DurableBackgroundConfig{Manager: mgr},
+		Durable: &DurableBackgroundConfig{Manager: mgr}, Notifications: testNotifications,
 	}
 }
 
-func localBackground(manager *backgroundtask.Manager) *BackgroundConfig {
-	return &BackgroundConfig{Local: &LocalBackgroundConfig{Manager: manager}}
+func mustLocalRunner(t *testing.T, manager *backgroundtask.Manager) *backgroundlocal.Runner {
+	t.Helper()
+	runner, err := backgroundlocal.New(&backgroundlocal.Config{Manager: manager})
+	require.NoError(t, err)
+	return runner
+}
+
+func localBackground(t *testing.T, manager *backgroundtask.Manager) *BackgroundConfig {
+	return &BackgroundConfig{
+		Local:         &LocalBackgroundConfig{Runner: mustLocalRunner(t, manager)},
+		Notifications: testNotifications,
+	}
 }
 
 func runnerEnvironmentContext(t *testing.T) context.Context {
@@ -126,7 +155,7 @@ func terminalTask(t *testing.T, mgr *backgroundtask.Manager) *backgroundtask.Tas
 	require.NoError(t, err)
 	for i := len(result.Deliveries) - 1; i >= 0; i-- {
 		record := result.Deliveries[i].Record
-		task, getErr := mgr.GetTask(context.Background(), record.TaskID)
+		task, getErr := mgr.Get(context.Background(), record.TaskID)
 		require.NoError(t, getErr)
 		if task.Status == backgroundtask.StateCompleted ||
 			task.Status == backgroundtask.StateFailed ||
@@ -157,11 +186,19 @@ func TestConfigValidation(t *testing.T) {
 	_, err = New(context.Background(), &Config{
 		SubAgents: []adk.Agent{agent},
 		Background: &BackgroundConfig{
-			Local:   &LocalBackgroundConfig{Manager: manager},
+			Local:   &LocalBackgroundConfig{Runner: mustLocalRunner(t, manager)},
 			Durable: &DurableBackgroundConfig{Manager: manager},
 		},
 	})
 	require.ErrorContains(t, err, "exactly one")
+
+	_, err = New(context.Background(), &Config{
+		SubAgents: []adk.Agent{agent},
+		Background: &BackgroundConfig{
+			Local: &LocalBackgroundConfig{Runner: mustLocalRunner(t, manager)},
+		},
+	})
+	require.ErrorContains(t, err, "notification delivery is required")
 }
 
 func TestBeforeAgentInjectsOneTool(t *testing.T) {
@@ -229,7 +266,7 @@ func TestLocalAndDurableAgentToolSchemasMatch(t *testing.T) {
 	localManager := backgroundtask.New(context.Background(), nil)
 	durableManager := backgroundtask.New(context.Background(), nil)
 	local, err := New(context.Background(), &Config{
-		SubAgents: []adk.Agent{agent}, Background: localBackground(localManager),
+		SubAgents: []adk.Agent{agent}, Background: localBackground(t, localManager),
 	})
 	require.NoError(t, err)
 	durable, err := New(context.Background(), &Config{
@@ -278,15 +315,15 @@ func TestFormatManagedAgentResultPreservesDescriptionInErrors(t *testing.T) {
 }
 
 func TestLocalAgentToolWritesEventTranscript(t *testing.T) {
-	ctx := context.Background()
+	ctx := runnerEnvironmentContext(t)
 	manager := backgroundtask.New(ctx, nil)
 	backend := filesystem.NewInMemoryBackend()
 	agent := &mockAgent{name: "worker", desc: "local output"}
 	middleware, err := New(ctx, &Config{
 		SubAgents: []adk.Agent{agent},
 		Background: &BackgroundConfig{Local: &LocalBackgroundConfig{
-			Manager: manager, OutputStore: backend, OutputDir: "/tasks",
-		}},
+			Runner: mustLocalRunner(t, manager), OutputStore: backend, OutputDir: "/tasks",
+		}, Notifications: testNotifications},
 	})
 	require.NoError(t, err)
 	_, runCtx, err := middleware.BeforeAgent(ctx, &adk.ChatModelAgentContext[*schema.Message]{})
@@ -296,12 +333,22 @@ func TestLocalAgentToolWritesEventTranscript(t *testing.T) {
 	)
 	require.NoError(t, err)
 	assert.Equal(t, "local output", result)
-	tasks := manager.List()
-	require.Len(t, tasks, 1)
-	require.NotEmpty(t, tasks[0].Spec.OutputFile)
-	content, err := backend.Read(ctx, &filesystem.ReadRequest{FilePath: tasks[0].Spec.OutputFile})
+	task := terminalTask(t, manager)
+	require.NotNil(t, task)
+	assert.Equal(t, "parent-session", task.Spec.SessionID)
+	require.NotNil(t, task.Spec.Notify)
+	assert.Equal(t, backgroundtask.SessionInboxNotificationKind, task.Spec.Notify.Kind)
+	assert.Equal(t, "parent-session", task.Spec.Notify.TargetID)
+	require.NotEmpty(t, task.Spec.OutputFile)
+	content, err := backend.Read(ctx, &filesystem.ReadRequest{FilePath: task.Spec.OutputFile})
 	require.NoError(t, err)
 	assert.Contains(t, content.Content, "local output")
+	feed, err := manager.ReadOutput(ctx, &backgroundtask.ReadOutputRequest{
+		TaskID: task.Spec.ID,
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, feed.Records)
+	assert.Contains(t, string(feed.Records[0].Data), "local output")
 }
 
 func TestDurableAgentToolBackgroundSurvivesCaller(t *testing.T) {
@@ -352,7 +399,7 @@ func TestDurableAgentToolWritesEventTranscript(t *testing.T) {
 		SubAgents: []adk.Agent{agent},
 		Background: &BackgroundConfig{Durable: &DurableBackgroundConfig{
 			Manager: manager, OutputStore: backend, OutputDir: "/tasks",
-		}},
+		}, Notifications: testNotifications},
 	})
 	require.NoError(t, err)
 	_, runCtx, err := middleware.BeforeAgent(ctx, &adk.ChatModelAgentContext[*schema.Message]{})
@@ -386,7 +433,7 @@ func TestDurableOutputOpenFailureIsFailSoft(t *testing.T) {
 		SubAgents: []adk.Agent{agent},
 		Background: &BackgroundConfig{Durable: &DurableBackgroundConfig{
 			Manager: manager, OutputStore: outputStore, OutputDir: "/tasks",
-		}},
+		}, Notifications: testNotifications},
 	})
 	require.NoError(t, err)
 	_, runCtx, err := middleware.BeforeAgent(ctx, &adk.ChatModelAgentContext[*schema.Message]{})
@@ -433,12 +480,9 @@ func TestDurableForegroundProjectionStopsAtBackgroundBoundary(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.Eventually(t, func() bool {
-		for _, task := range manager.List() {
-			if task.Spec.Description == "background" && task.Status == backgroundtask.StatusCompleted {
-				return true
-			}
-		}
-		return false
+		task := terminalTask(t, manager)
+		return task != nil && task.Spec.Description == "background" &&
+			task.Status == backgroundtask.StatusCompleted
 	}, time.Second, 10*time.Millisecond)
 	assert.Zero(t, atomic.LoadInt64(&calls))
 }
@@ -463,7 +507,12 @@ func TestDurableAgentToolRejectsInvocationScopedRunOptions(t *testing.T) {
 		),
 	)
 	require.ErrorContains(t, err, "configure RunOptionsFactories")
-	assert.Empty(t, manager.List())
+	pending, listErr := manager.ListPending(
+		context.Background(),
+		&backgroundtask.ListPendingRequest{ExecutorKeys: []string{durablesubagent.ExecutorKey}},
+	)
+	require.NoError(t, listErr)
+	assert.Empty(t, pending.Tasks)
 }
 
 func TestDurableAgentToolUsesRegisteredRunOptionsFactory(t *testing.T) {
@@ -489,7 +538,7 @@ func TestDurableAgentToolUsesRegisteredRunOptionsFactory(t *testing.T) {
 					)}, nil
 				},
 			},
-		}},
+		}, Notifications: testNotifications},
 	})
 	require.NoError(t, err)
 	_, runCtx, err := middleware.BeforeAgent(ctx, &adk.ChatModelAgentContext[*schema.Message]{})
@@ -504,13 +553,13 @@ func TestDurableAgentToolUsesRegisteredRunOptionsFactory(t *testing.T) {
 func TestDurableBlockingReceiverDoesNotBlockAutoBackgroundResponse(t *testing.T) {
 	ctx := runnerEnvironmentContext(t)
 	timeout := 20
-	manager := backgroundtask.New(context.Background(), &backgroundtask.Config{
-		ForegroundTimeoutMs:  &timeout,
-		ShouldAutoBackground: func(context.Context, *backgroundtask.Task) bool { return true },
-	})
+	manager := backgroundtask.New(context.Background(), nil)
 	agent := &mockAgent{name: "worker", desc: "done"}
+	background := durableBackground(manager, agent)
+	background.Durable.ForegroundTimeoutMs = &timeout
+	background.Durable.ShouldAutoBackground = func(context.Context, *backgroundtask.Task) bool { return true }
 	middleware, err := New(ctx, &Config{
-		SubAgents: []adk.Agent{agent}, Background: durableBackground(manager, agent),
+		SubAgents: []adk.Agent{agent}, Background: background,
 	})
 	require.NoError(t, err)
 	_, runCtx, err := middleware.BeforeAgent(ctx, &adk.ChatModelAgentContext[*schema.Message]{})
@@ -547,12 +596,9 @@ func TestDurableBlockingReceiverDoesNotBlockAutoBackgroundResponse(t *testing.T)
 	}
 	close(releaseReceiver)
 	require.Eventually(t, func() bool {
-		for _, task := range manager.List() {
-			if task.Spec.Description == "blocking" {
-				return task.Status == backgroundtask.StatusCompleted
-			}
-		}
-		return false
+		task := terminalTask(t, manager)
+		return task != nil && task.Spec.Description == "blocking" &&
+			task.Status == backgroundtask.StatusCompleted
 	}, time.Second, 10*time.Millisecond)
 }
 

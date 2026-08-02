@@ -58,12 +58,14 @@ type ExecutionRuntime interface {
 	TaskID() string
 	Controls() <-chan ControlRequest
 	Backgrounded() <-chan struct{}
+	AppendOutput(context.Context, []byte) (*OutputRecord, error)
 	ReportOutputFailure(context.Context, string) error
 }
 
 // Executor reconstructs and runs durable work from a task Spec.
 type Executor interface {
 	Key() string
+	LeaseExpiryPolicy() LeaseExpiryPolicy
 	ValidateSpec(Spec) error
 	ValidateExecution(context.Context, *Task) error
 	ValidateCheckpoint(context.Context, Spec, []byte) error
@@ -120,27 +122,38 @@ type activeAttempt struct {
 	cancel        context.CancelFunc
 	runtime       *taskRuntime
 	supportsDrain bool
+	ready         chan struct{}
 	done          chan error
 }
 
 type taskRuntime struct {
-	mu             sync.Mutex
-	controlMu      sync.Mutex
-	store          Store
-	taskID         string
-	version        int64
-	controls       chan ControlRequest
-	backgrounded   chan struct{}
-	backgroundOnce sync.Once
-	poison         error
-	canceling      bool
+	mu              sync.Mutex
+	controlMu       sync.Mutex
+	store           Store
+	taskID          string
+	attempt         int64
+	version         int64
+	controls        chan ControlRequest
+	backgrounded    chan struct{}
+	backgroundOnce  sync.Once
+	poison          error
+	cancelRequested bool
 }
+
+// detachedCtx preserves values while detaching worker execution from the
+// request context that dispatched it.
+type detachedCtx struct{ parent context.Context }
+
+func (detachedCtx) Deadline() (time.Time, bool) { return time.Time{}, false }
+func (detachedCtx) Done() <-chan struct{}       { return nil }
+func (detachedCtx) Err() error                  { return nil }
+func (c detachedCtx) Value(key any) any         { return c.parent.Value(key) }
 
 var errHeartbeatStopped = errors.New("backgroundtask: heartbeat stopped")
 
-func newTaskRuntime(store Store, taskID string, version int64) *taskRuntime {
+func newTaskRuntime(store Store, taskID string, attempt, version int64) *taskRuntime {
 	return &taskRuntime{
-		store: store, taskID: taskID, version: version,
+		store: store, taskID: taskID, attempt: attempt, version: version,
 		controls: make(chan ControlRequest, 1), backgrounded: make(chan struct{}),
 	}
 }
@@ -153,6 +166,17 @@ func (r *taskRuntime) Backgrounded() <-chan struct{} { return r.backgrounded }
 
 func (r *taskRuntime) markBackgrounded() {
 	r.backgroundOnce.Do(func() { close(r.backgrounded) })
+}
+
+func (r *taskRuntime) AppendOutput(ctx context.Context, data []byte) (*OutputRecord, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.poison != nil {
+		return nil, r.poison
+	}
+	return r.store.AppendOutput(ctx, &AppendOutputRequest{
+		TaskID: r.taskID, Attempt: r.attempt, Data: cloneBytes(data),
+	})
 }
 
 func (r *taskRuntime) requestControl(kind ControlKind) {
@@ -196,7 +220,7 @@ func (r *taskRuntime) heartbeat(ctx context.Context) error {
 	if r.poison != nil {
 		return r.poison
 	}
-	if r.canceling {
+	if r.cancelRequested {
 		return errHeartbeatStopped
 	}
 	task, err := r.store.Heartbeat(ctx, &HeartbeatRequest{
@@ -222,13 +246,13 @@ func (r *taskRuntime) reconcileCancellationLocked(ctx context.Context) error {
 		r.poison = err
 		return err
 	}
-	if task.Status != StatusCanceling || task.CancelRequestedAt == nil ||
+	if task.Status != StatusRunning || task.CancelRequestedAt == nil ||
 		task.Version != r.version+1 {
 		r.poison = ErrLeaseLost
 		return r.poison
 	}
 	r.version = task.Version
-	r.canceling = true
+	r.cancelRequested = true
 	r.requestControl(ControlStop)
 	return nil
 }
@@ -242,7 +266,16 @@ func (r *taskRuntime) commit(ctx context.Context, result *ExecutionResult) (*Tas
 	if result == nil {
 		return nil, errors.New("backgroundtask: executor returned nil result")
 	}
+	if r.cancelRequested {
+		result = &ExecutionResult{Status: StatusCanceled}
+	}
 	task, err := r.commitResult(ctx, result)
+	if errors.Is(err, ErrVersionConflict) {
+		if reconcileErr := r.reconcileCancellationLocked(ctx); reconcileErr != nil {
+			return nil, reconcileErr
+		}
+		task, err = r.commitResult(ctx, &ExecutionResult{Status: StatusCanceled})
+	}
 	if err != nil {
 		r.poison = err
 		return nil, err
@@ -278,8 +311,10 @@ func (r *taskRuntime) commitResult(ctx context.Context, result *ExecutionResult)
 	}
 }
 
+// Store returns the lifecycle Store used by this Manager.
 func (m *Manager) Store() Store { return m.store }
 
+// Executors returns the worker executor registry used by this Manager.
 func (m *Manager) Executors() *ExecutorRegistry { return m.executors }
 
 // AllocateTaskIDRequest describes the task category used by the default ID generator.
@@ -287,6 +322,7 @@ type AllocateTaskIDRequest struct {
 	Kind string
 }
 
+// AllocateTaskID allocates an opaque ID for a task category.
 func (m *Manager) AllocateTaskID(ctx context.Context, request *AllocateTaskIDRequest) (string, error) {
 	if request == nil {
 		return "", errors.New("backgroundtask: allocate task id request is required")
@@ -314,6 +350,7 @@ func (m *Manager) AllocateTaskID(ctx context.Context, request *AllocateTaskIDReq
 	return id, nil
 }
 
+// Submit validates serialized intent and persists a pending task.
 func (m *Manager) Submit(ctx context.Context, spec Spec) (*Task, error) {
 	if spec.ID == "" {
 		return nil, errors.New("backgroundtask: submit requires a pre-allocated task id")
@@ -334,17 +371,17 @@ func (m *Manager) Submit(ctx context.Context, spec Spec) (*Task, error) {
 	if err := executor.ValidateSpec(cloneSpec(spec)); err != nil {
 		return nil, fmt.Errorf("backgroundtask: validate spec: %w", err)
 	}
-	task, err := m.store.Create(ctx, &CreateTaskRequest{Spec: spec})
+	task, err := m.store.Create(ctx, &CreateTaskRequest{
+		Spec: spec, LeaseExpiryPolicy: executor.LeaseExpiryPolicy(),
+	})
 	if err != nil {
 		return nil, err
 	}
-	m.submittedMu.Lock()
-	m.submitted[task.Spec.ID] = struct{}{}
-	m.submittedMu.Unlock()
 	return task, nil
 }
 
-func (m *Manager) GetTask(ctx context.Context, taskID string) (*Task, error) {
+// Get returns the authoritative task snapshot.
+func (m *Manager) Get(ctx context.Context, taskID string) (*Task, error) {
 	return m.store.Get(ctx, taskID)
 }
 
@@ -354,10 +391,17 @@ func (m *Manager) ListPending(ctx context.Context, req *ListPendingRequest) (*Li
 	return m.store.ListPending(ctx, req)
 }
 
-func (m *Manager) WaitTask(ctx context.Context, req *WaitTaskRequest) (*Task, error) {
+// WaitUpdate waits until a task advances beyond the requested version.
+func (m *Manager) WaitUpdate(ctx context.Context, req *WaitUpdateRequest) (*Task, error) {
 	return m.store.Wait(ctx, req)
 }
 
+// ReadOutput replays persisted task-output records after the supplied sequence.
+func (m *Manager) ReadOutput(ctx context.Context, req *ReadOutputRequest) (*ReadOutputResult, error) {
+	return m.store.ReadOutput(ctx, req)
+}
+
+// RequestCancel records cancellation intent and signals a local active attempt.
 func (m *Manager) RequestCancel(ctx context.Context, taskID string) (*Task, error) {
 	m.attemptsMu.Lock()
 	attempt := m.activeAttempts[taskID]
@@ -367,8 +411,11 @@ func (m *Manager) RequestCancel(ctx context.Context, taskID string) (*Task, erro
 	if err != nil {
 		return nil, err
 	}
-	if task.Spec.ExecutorKey == processLocalExecutorKey && task.Status != StatusCanceling {
-		return m.cancelProcessLocal(ctx, task, attempt)
+	if task.LeaseExpiryPolicy == LeaseExpiryFail && attempt != nil {
+		if _, err = m.activeRuntime(ctx, taskID); err != nil {
+			return nil, err
+		}
+		return m.cancelNonRecoverable(ctx, task, attempt)
 	}
 
 	if attempt != nil && attempt.runtime != nil {
@@ -398,8 +445,8 @@ func (m *Manager) RequestCancel(ctx context.Context, taskID string) (*Task, erro
 	if err != nil {
 		return nil, err
 	}
-	if result.Status == StatusCanceling && attempt != nil && attempt.runtime != nil &&
-		!attempt.runtime.canceling {
+	if result.Status == StatusRunning && result.CancelRequestedAt != nil &&
+		attempt != nil && attempt.runtime != nil && !attempt.runtime.cancelRequested {
 		if err = attempt.runtime.reconcileCancellationLocked(ctx); err != nil {
 			return result, err
 		}
@@ -407,7 +454,7 @@ func (m *Manager) RequestCancel(ctx context.Context, taskID string) (*Task, erro
 	return result, nil
 }
 
-func (m *Manager) cancelProcessLocal(
+func (m *Manager) cancelNonRecoverable(
 	ctx context.Context,
 	task *Task,
 	attempt *activeAttempt,
@@ -446,7 +493,8 @@ func (m *Manager) cancelProcessLocal(
 	return result, nil
 }
 
-func (m *Manager) ResumeTask(ctx context.Context, req *ResumeTaskRequest) (*Task, error) {
+// Resume validates and persists input for a task waiting on external input.
+func (m *Manager) Resume(ctx context.Context, req *ResumeRequest) (*Task, error) {
 	if req == nil {
 		return nil, errors.New("backgroundtask: resume request is required")
 	}
@@ -470,19 +518,59 @@ func (m *Manager) ResumeTask(ctx context.Context, req *ResumeTaskRequest) (*Task
 	if err != nil {
 		return nil, err
 	}
-	return m.store.Resume(ctx, &ResumeTaskRequest{
+	return m.store.Resume(ctx, &ResumeRequest{
 		TaskID: req.TaskID, ExpectedVersion: req.ExpectedVersion, Data: normalized,
 	})
 }
 
+// Execute claims and runs one pending task attempt on the current worker.
 func (m *Manager) Execute(ctx context.Context, taskID string) error {
-	return m.execute(ctx, taskID, nil)
+	return m.execute(ctx, taskID)
+}
+
+// MarkBackgrounded signals that foreground projection has detached from the
+// active attempt. It is intended for foreground coordinators.
+func (m *Manager) MarkBackgrounded(ctx context.Context, taskID string) error {
+	runtime, err := m.activeRuntime(ctx, taskID)
+	if err != nil {
+		return err
+	}
+	runtime.markBackgrounded()
+	return nil
+}
+
+// RequestControl sends an attempt-scoped control request to work executing in
+// this Manager. It is intended for worker-runtime coordination.
+func (m *Manager) RequestControl(ctx context.Context, taskID string, control ControlRequest) error {
+	runtime, err := m.activeRuntime(ctx, taskID)
+	if err != nil {
+		return err
+	}
+	runtime.requestControlWithReason(control.Kind, control.Reason)
+	return nil
+}
+
+func (m *Manager) activeRuntime(ctx context.Context, taskID string) (*taskRuntime, error) {
+	m.attemptsMu.Lock()
+	attempt := m.activeAttempts[taskID]
+	m.attemptsMu.Unlock()
+	if attempt == nil {
+		return nil, ErrNotFound
+	}
+	select {
+	case <-attempt.ready:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	if attempt.runtime == nil {
+		return nil, ErrIllegalTransition
+	}
+	return attempt.runtime, nil
 }
 
 func (m *Manager) execute(
 	ctx context.Context,
 	taskID string,
-	onStarted func(*Task, *taskRuntime) error,
 ) (returnErr error) {
 	if taskID == "" {
 		return errors.New("backgroundtask: execute task id is required")
@@ -498,7 +586,7 @@ func (m *Manager) execute(
 		m.mu.Unlock()
 		return errors.New("backgroundtask: task is already executing in this manager")
 	}
-	attempt := &activeAttempt{done: make(chan error, 1)}
+	attempt := &activeAttempt{ready: make(chan struct{}), done: make(chan error, 1)}
 	m.activeAttempts[taskID] = attempt
 	m.attemptsMu.Unlock()
 	m.mu.Unlock()
@@ -530,20 +618,15 @@ func (m *Manager) execute(
 	if err != nil {
 		return err
 	}
-	runtime := newTaskRuntime(m.store, taskID, started.Version)
+	runtime := newTaskRuntime(m.store, taskID, started.Attempt, started.Version)
 	runCtx, cancel := context.WithCancel(ctx)
 	m.attemptsMu.Lock()
 	attempt.cancel = cancel
 	attempt.runtime = runtime
 	attempt.supportsDrain = executor.SupportsDrain()
+	close(attempt.ready)
 	m.attemptsMu.Unlock()
 	defer cancel()
-	if onStarted != nil {
-		if err = onStarted(cloneTask(started), runtime); err != nil {
-			return err
-		}
-	}
-
 	heartbeatDone := make(chan struct{})
 	heartbeatStop := make(chan struct{})
 	go m.heartbeat(runCtx, cancel, runtime, heartbeatStop, heartbeatDone)
@@ -560,68 +643,8 @@ func (m *Manager) execute(
 	} else if result == nil {
 		result = &ExecutionResult{Status: StatusFailed, Error: "executor returned nil result"}
 	}
-	committed, err := runtime.commit(detachedCtx{parent: ctx}, result)
-	if err == nil {
-		m.sendTaskEvent(committed, eventTypeForState(committed.Status))
-	}
-	return err
-}
-
-func (m *Manager) executeStarted(
-	ctx context.Context,
-	started *Task,
-	executor Executor,
-	runtime *taskRuntime,
-	onStarted func(*Task, *taskRuntime) error,
-) (returnErr error) {
-	taskID := started.Spec.ID
-	runCtx, cancel := context.WithCancel(ctx)
-	m.attemptsMu.Lock()
-	if _, exists := m.activeAttempts[taskID]; exists {
-		m.attemptsMu.Unlock()
-		cancel()
-		return errors.New("backgroundtask: task is already executing in this manager")
-	}
-	attempt := &activeAttempt{
-		cancel: cancel, runtime: runtime, supportsDrain: executor.SupportsDrain(),
-		done: make(chan error, 1),
-	}
-	m.activeAttempts[taskID] = attempt
-	m.attemptsMu.Unlock()
-	defer func() {
-		cancel()
-		attempt.done <- returnErr
-		close(attempt.done)
-		m.attemptsMu.Lock()
-		delete(m.activeAttempts, taskID)
-		m.attemptsMu.Unlock()
-	}()
-
-	if onStarted != nil {
-		if err := onStarted(cloneTask(started), runtime); err != nil {
-			return err
-		}
-	}
-	heartbeatDone := make(chan struct{})
-	heartbeatStop := make(chan struct{})
-	go m.heartbeat(runCtx, cancel, runtime, heartbeatStop, heartbeatDone)
-
-	result, executeErr := m.executeClaim(runCtx, executor, started, runtime)
-	close(heartbeatStop)
-	<-heartbeatDone
-	if errors.Is(executeErr, ErrCheckpointUnavailable) {
-		return executeErr
-	}
-	if executeErr != nil {
-		result = &ExecutionResult{Status: StatusFailed, Error: boundedError(executeErr)}
-	} else if result == nil {
-		result = &ExecutionResult{Status: StatusFailed, Error: "executor returned nil result"}
-	}
-	committed, err := runtime.commit(detachedCtx{parent: ctx}, result)
-	if err == nil {
-		m.sendTaskEvent(committed, eventTypeForState(committed.Status))
-	}
-	return err
+	_, commitErr := runtime.commit(detachedCtx{parent: ctx}, result)
+	return commitErr
 }
 
 func (m *Manager) heartbeat(

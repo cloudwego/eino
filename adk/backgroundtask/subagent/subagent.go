@@ -53,8 +53,7 @@ const (
 	ResumeNextTurn ResumeMode = "next_turn"
 )
 
-// TaskPayload is the executor-private serialized payload for sub-agent tasks.
-type TaskPayload struct {
+type taskPayload struct {
 	Version          int        `json:"version"`
 	SubAgentName     string     `json:"subagent_name"`
 	Prompt           string     `json:"prompt"`
@@ -77,11 +76,14 @@ type EventFormat[M adk.MessageType] func(context.Context, *adk.TypedAgentEvent[M
 
 // RunOptionsFactory reconstructs deployment-owned run options for each task attempt.
 // Every worker serving the same registered agent name must configure a semantically
-// equivalent factory and return fresh option values. The executor adds attempt-local
-// checkpoint and cancellation options separately.
+// equivalent factory for the full lifetime of resumable tasks and return fresh option
+// values. The executor adds attempt-local checkpoint and cancellation options separately.
 type RunOptionsFactory func() ([]adk.AgentRunOption, error)
 
-// AgentRegistration binds a persisted name to worker-local dependencies.
+// AgentRegistration binds a persisted name to worker-local dependencies. Every worker
+// eligible to execute that name must provide a semantically equivalent registration for
+// the full lifetime of its resumable tasks. Incompatible Agent, output, event-format, or
+// run-option changes require draining existing tasks or registering a new agent name.
 type AgentRegistration[M adk.MessageType] struct {
 	Agent             adk.TypedResumableAgent[M]
 	OutputStore       filesystem.AppendOpener
@@ -98,9 +100,9 @@ type Executor[M adk.MessageType] struct {
 // Key returns the backgroundtask executor key for sub-agent tasks.
 func (e *Executor[M]) Key() string { return ExecutorKey }
 
-// RegisterAgent registers the resumable implementation used for a persisted sub-agent name.
-func (e *Executor[M]) RegisterAgent(name string, agent adk.TypedResumableAgent[M]) error {
-	return e.Register(name, &AgentRegistration[M]{Agent: agent})
+// LeaseExpiryPolicy allows another worker to resume a lost sub-agent attempt.
+func (*Executor[M]) LeaseExpiryPolicy() backgroundtask.LeaseExpiryPolicy {
+	return backgroundtask.LeaseExpiryRetry
 }
 
 // Register binds a stable sub-agent name to the implementation and output policy.
@@ -160,11 +162,11 @@ func copyMaterializedEvent[M adk.MessageType](
 }
 
 type eventOutputWriter[M adk.MessageType] struct {
-	ctx     context.Context
-	writer  io.WriteCloser
-	format  EventFormat[M]
-	runtime backgroundtask.ExecutionRuntime
-	failed  bool
+	ctx        context.Context
+	writer     io.WriteCloser
+	format     EventFormat[M]
+	runtime    backgroundtask.ExecutionRuntime
+	fileFailed bool
 }
 
 func openEventOutput[M adk.MessageType](
@@ -173,18 +175,19 @@ func openEventOutput[M adk.MessageType](
 	registration *AgentRegistration[M],
 	runtime backgroundtask.ExecutionRuntime,
 ) (*eventOutputWriter[M], error) {
+	output := &eventOutputWriter[M]{
+		ctx: ctx, format: registration.EventFormat, runtime: runtime,
+	}
 	if task.Spec.OutputFile == "" {
-		return nil, nil
+		return output, nil
 	}
 	writer, err := registration.OutputStore.OpenAppend(
 		ctx, &filesystem.OpenAppendRequest{FilePath: task.Spec.OutputFile},
 	)
-	output := &eventOutputWriter[M]{
-		ctx: ctx, writer: writer, format: registration.EventFormat, runtime: runtime,
-	}
+	output.writer = writer
 	if err != nil {
 		output.writer = nil
-		if reportErr := output.fail(err); reportErr != nil {
+		if reportErr := output.failFile(err); reportErr != nil {
 			return nil, reportErr
 		}
 	}
@@ -192,26 +195,35 @@ func openEventOutput[M adk.MessageType](
 }
 
 func (w *eventOutputWriter[M]) write(event *adk.TypedAgentEvent[M]) error {
-	if w == nil || w.failed || w.writer == nil {
+	if w == nil {
 		return nil
 	}
 	if w.format == nil {
-		return w.fail(errors.New("backgroundtask/subagent: event format is required for output file"))
+		if w.writer != nil {
+			return w.failFile(errors.New("backgroundtask/subagent: event format is required for output file"))
+		}
+		return nil
 	}
 	line, err := w.format(w.ctx, event)
 	if err != nil {
-		return w.fail(fmt.Errorf("encode agent output event: %w", err))
+		return w.failFile(fmt.Errorf("encode agent output event: %w", err))
 	}
 	if line == "" {
 		return nil
 	}
 	data := line + "\n"
+	if _, err = w.runtime.AppendOutput(w.ctx, []byte(data)); err != nil {
+		return fmt.Errorf("append durable agent output event: %w", err)
+	}
+	if w.writer == nil || w.fileFailed {
+		return nil
+	}
 	n, err := io.WriteString(w.writer, data)
 	if err == nil && n != len(data) {
 		err = io.ErrShortWrite
 	}
 	if err != nil {
-		return w.fail(fmt.Errorf("write agent output event: %w", err))
+		return w.failFile(fmt.Errorf("write agent output event: %w", err))
 	}
 	return nil
 }
@@ -222,17 +234,17 @@ func (w *eventOutputWriter[M]) close() error {
 	}
 	err := w.writer.Close()
 	w.writer = nil
-	if err != nil && !w.failed {
-		return w.fail(fmt.Errorf("close agent output file: %w", err))
+	if err != nil && !w.fileFailed {
+		return w.failFile(fmt.Errorf("close agent output file: %w", err))
 	}
 	return nil
 }
 
-func (w *eventOutputWriter[M]) fail(err error) error {
-	if w == nil || w.failed {
+func (w *eventOutputWriter[M]) failFile(err error) error {
+	if w == nil || w.fileFailed {
 		return nil
 	}
-	w.failed = true
+	w.fileFailed = true
 	if reportErr := w.runtime.ReportOutputFailure(w.ctx, err.Error()); reportErr != nil {
 		return fmt.Errorf("report output failure after %v: %w", err, reportErr)
 	}
@@ -275,7 +287,7 @@ func (e *Executor[M]) ValidateExecution(ctx context.Context, task *backgroundtas
 
 func (e *Executor[M]) SupportsDrain() bool { return true }
 
-func validateSpecPayload(spec backgroundtask.Spec) (*TaskPayload, error) {
+func validateSpecPayload(spec backgroundtask.Spec) (*taskPayload, error) {
 	if spec.ExecutorKey != ExecutorKey || spec.Kind != "subagent" {
 		return nil, errors.New("backgroundtask/subagent: invalid executor key or task kind")
 	}
@@ -506,7 +518,7 @@ func (e *Executor[M]) beginRun(
 	ctx context.Context,
 	runner *adk.TypedRunner[M],
 	task *backgroundtask.Task,
-	payload *TaskPayload,
+	payload *taskPayload,
 	options ...adk.AgentRunOption,
 ) (*adk.AsyncIterator[*adk.TypedAgentEvent[M]], error) {
 	if len(task.Checkpoint) == 0 {
@@ -535,7 +547,7 @@ func (e *Executor[M]) handleEventError(
 	ctx context.Context,
 	iter *adk.AsyncIterator[*adk.TypedAgentEvent[M]],
 	task *backgroundtask.Task,
-	payload *TaskPayload,
+	payload *taskPayload,
 	controlRequests <-chan backgroundtask.ControlRequest,
 	err error,
 ) (*backgroundtask.ExecutionResult, error) {
@@ -574,7 +586,7 @@ func waitForControl(
 func (e *Executor[M]) interruptResult(
 	ctx context.Context,
 	task *backgroundtask.Task,
-	payload *TaskPayload,
+	payload *taskPayload,
 	interrupted *adk.InterruptInfo,
 ) (*backgroundtask.ExecutionResult, error) {
 	environment, ok := adk.TypedRunnerEnvironmentFromContext[M](ctx)
@@ -612,7 +624,7 @@ func (e *Executor[M]) interruptResult(
 func (e *Executor[M]) controlResult(
 	ctx context.Context,
 	task *backgroundtask.Task,
-	payload *TaskPayload,
+	payload *taskPayload,
 	control backgroundtask.ControlRequest,
 ) (*backgroundtask.ExecutionResult, error, bool) {
 	switch control.Kind {
@@ -667,7 +679,7 @@ func (e *Executor[M]) runNextTurn(
 	ctx context.Context,
 	runner *adk.TypedRunner[M],
 	task *backgroundtask.Task,
-	payload *TaskPayload,
+	payload *taskPayload,
 	options ...adk.AgentRunOption,
 ) (*adk.AsyncIterator[*adk.TypedAgentEvent[M]], error) {
 	var state checkpointState
@@ -750,8 +762,8 @@ func messageResumeMarker[M adk.MessageType](message M) string {
 	return ""
 }
 
-func decodePayload(spec backgroundtask.Spec) (*TaskPayload, error) {
-	var payload TaskPayload
+func decodePayload(spec backgroundtask.Spec) (*taskPayload, error) {
+	var payload taskPayload
 	if err := json.Unmarshal(spec.Payload, &payload); err != nil {
 		return nil, err
 	}
@@ -792,7 +804,7 @@ func Submit(ctx context.Context, manager *backgroundtask.Manager, req *SubmitReq
 			return nil, err
 		}
 	}
-	payload := TaskPayload{
+	payload := taskPayload{
 		Version: payloadVersion, SubAgentName: req.SubAgentName, Prompt: req.Prompt,
 		ChildSessionID: id + "/session", CheckpointID: id + "/checkpoint",
 		ResumeMode: req.ResumeMode, AllowEmptyResume: req.AllowEmptyResume,
@@ -807,7 +819,9 @@ func Submit(ctx context.Context, manager *backgroundtask.Manager, req *SubmitReq
 	return manager.Submit(ctx, backgroundtask.Spec{
 		ID: id, ExecutorKey: ExecutorKey, Kind: "subagent", Payload: data,
 		Description: req.Description, OutputFile: req.OutputFile,
-		LeaseExpiryPolicy: backgroundtask.LeaseExpiryRetry, SessionID: req.SessionID,
-		Notify: &backgroundtask.NotificationTarget{Kind: "session_inbox", TargetID: req.SessionID},
+		SessionID: req.SessionID,
+		Notify: &backgroundtask.NotificationTarget{
+			Kind: backgroundtask.SessionInboxNotificationKind, TargetID: req.SessionID,
+		},
 	})
 }

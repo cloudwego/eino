@@ -71,6 +71,9 @@ type TypedConfig[M adk.MessageType] struct {
 	// It is typically the same Manager the domain middlewares (subagent, filesystem)
 	// were given, so a single task-ID space spans agent and shell runs.
 	Manager *bgtask.Manager
+	// Notifications is required because the injected model prompt promises
+	// completion notification.
+	Notifications bgtask.NotificationDeliveryRuntime
 
 	// TaskOutputToolConfig configures the task_output tool. Optional.
 	TaskOutputToolConfig *ToolConfig
@@ -86,7 +89,7 @@ func New(ctx context.Context, config *Config) (adk.ChatModelAgentMiddleware, err
 
 // NewTyped creates a background-task control middleware parameterized by message type.
 // See New for behavior details.
-func NewTyped[M adk.MessageType](_ context.Context, config *TypedConfig[M]) (adk.TypedChatModelAgentMiddleware[M], error) {
+func NewTyped[M adk.MessageType](ctx context.Context, config *TypedConfig[M]) (adk.TypedChatModelAgentMiddleware[M], error) {
 	if config == nil || config.Manager == nil {
 		return nil, fmt.Errorf("backgroundtask: Manager is required")
 	}
@@ -94,6 +97,19 @@ func NewTyped[M adk.MessageType](_ context.Context, config *TypedConfig[M]) (adk
 
 	outputEnabled := !disabled(config.TaskOutputToolConfig)
 	stopEnabled := !disabled(config.TaskStopToolConfig)
+	if outputEnabled || stopEnabled {
+		if config.Notifications == nil {
+			return nil, fmt.Errorf("backgroundtask: notification delivery is required")
+		}
+		if err := config.Notifications.ValidateNotificationDelivery(
+			ctx,
+			&bgtask.NotificationDeliveryValidation{
+				Store: config.Manager.Store(), TargetKind: bgtask.SessionInboxNotificationKind,
+			},
+		); err != nil {
+			return nil, fmt.Errorf("backgroundtask: notification delivery: %w", err)
+		}
+	}
 
 	var tools []tool.BaseTool
 	if outputEnabled {
@@ -212,7 +228,7 @@ func newTaskOutputTool(mgr *bgtask.Manager, cfg *ToolConfig) (tool.InvokableTool
 	name := selectToolName(cfg, taskOutputToolName)
 	desc := selectToolDesc(cfg, taskOutputToolDescription, taskOutputToolDescriptionChinese)
 	return utils.InferTool(name, desc, func(ctx context.Context, input taskOutputInput) (string, error) {
-		if task, err := mgr.GetTask(ctx, input.TaskID); err == nil {
+		if task, err := mgr.Get(ctx, input.TaskID); err == nil {
 			return resolveDurableTask(ctx, mgr, task, input)
 		} else if errors.Is(err, bgtask.ErrNotFound) {
 			return fmt.Sprintf("Task %q not found", input.TaskID), nil
@@ -235,7 +251,7 @@ func resolveDurableTask(ctx context.Context, mgr *bgtask.Manager, task *bgtask.T
 		waitCtx, cancel := context.WithTimeout(ctx, time.Duration(timeout)*time.Millisecond)
 		defer cancel()
 		for waitableStatus(task.Status) {
-			next, waitErr := mgr.WaitTask(waitCtx, &bgtask.WaitTaskRequest{
+			next, waitErr := mgr.WaitUpdate(waitCtx, &bgtask.WaitUpdateRequest{
 				TaskID: input.TaskID, AfterVersion: task.Version,
 			})
 			if waitErr != nil {
@@ -252,8 +268,7 @@ func resolveDurableTask(ctx context.Context, mgr *bgtask.Manager, task *bgtask.T
 
 func waitableStatus(status bgtask.Status) bool {
 	return status == bgtask.StatusPending ||
-		status == bgtask.StatusRunning ||
-		status == bgtask.StatusCanceling
+		status == bgtask.StatusRunning
 }
 
 type taskStopInput struct {
@@ -271,7 +286,7 @@ func newTaskStopTool(mgr *bgtask.Manager, cfg *ToolConfig) (tool.InvokableTool, 
 		if task.Status == bgtask.StatusCanceled {
 			return fmt.Sprintf("Successfully stopped task: %s", input.TaskID), nil
 		}
-		return fmt.Sprintf("Stop requested for task %s (status: %s)", input.TaskID, task.Status), nil
+		return fmt.Sprintf("Stop requested for task %s", input.TaskID), nil
 	})
 }
 
