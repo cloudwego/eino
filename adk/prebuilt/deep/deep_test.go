@@ -59,12 +59,9 @@ func (notificationDeliveryStub) ValidateNotificationDelivery(
 	_ context.Context,
 	req *backgroundtask.NotificationDeliveryValidation,
 ) error {
-	if req == nil || req.Store == nil ||
+	if req == nil || !req.OutboxAvailable ||
 		req.TargetKind != backgroundtask.SessionInboxNotificationKind {
 		return fmt.Errorf("invalid notification delivery")
-	}
-	if _, ok := req.Store.(backgroundtask.NotificationOutbox); !ok {
-		return fmt.Errorf("notification outbox is required")
 	}
 	return nil
 }

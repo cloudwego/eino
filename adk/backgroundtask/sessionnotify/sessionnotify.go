@@ -53,13 +53,13 @@ func (r *Runtime) ValidateNotificationDelivery(
 	ctx context.Context,
 	req *backgroundtask.NotificationDeliveryValidation,
 ) error {
-	if r == nil || req == nil || req.Store == nil {
-		return errors.New("sessionnotify: runtime and task store are required")
+	if r == nil || req == nil {
+		return errors.New("sessionnotify: runtime and validation request are required")
 	}
 	if req.TargetKind != backgroundtask.SessionInboxNotificationKind {
 		return errors.New("sessionnotify: unsupported notification target kind")
 	}
-	if _, ok := req.Store.(backgroundtask.NotificationOutbox); !ok {
+	if !req.OutboxAvailable {
 		return errors.New("sessionnotify: task store must implement NotificationOutbox")
 	}
 	if r.sinks == nil {

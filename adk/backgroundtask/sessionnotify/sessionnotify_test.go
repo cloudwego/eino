@@ -38,7 +38,6 @@ type recordingActivator struct {
 }
 
 func TestRuntimeValidatesCompleteDeliveryRoute(t *testing.T) {
-	store := backgroundtask.NewInMemoryStore(nil)
 	inbox := NewMemoryInbox()
 	sink, err := NewSink(inbox, &recordingActivator{inbox: inbox})
 	require.NoError(t, err)
@@ -56,14 +55,13 @@ func TestRuntimeValidatesCompleteDeliveryRoute(t *testing.T) {
 	require.NoError(t, runtime.ValidateNotificationDelivery(
 		context.Background(),
 		&backgroundtask.NotificationDeliveryValidation{
-			Store: store, TargetKind: backgroundtask.SessionInboxNotificationKind,
+			OutboxAvailable: true, TargetKind: backgroundtask.SessionInboxNotificationKind,
 		},
 	))
 	assert.Equal(t, 1, readyCalls)
 }
 
 func TestRuntimeRejectsIncompleteDeliveryRoute(t *testing.T) {
-	store := backgroundtask.NewInMemoryStore(nil)
 	runtime, err := NewRuntime(
 		backgroundtask.NewSinkRegistry(),
 		func(context.Context) error { return nil },
@@ -72,10 +70,18 @@ func TestRuntimeRejectsIncompleteDeliveryRoute(t *testing.T) {
 	err = runtime.ValidateNotificationDelivery(
 		context.Background(),
 		&backgroundtask.NotificationDeliveryValidation{
-			Store: store, TargetKind: backgroundtask.SessionInboxNotificationKind,
+			OutboxAvailable: true, TargetKind: backgroundtask.SessionInboxNotificationKind,
 		},
 	)
 	require.ErrorContains(t, err, "sink is unavailable")
+
+	err = runtime.ValidateNotificationDelivery(
+		context.Background(),
+		&backgroundtask.NotificationDeliveryValidation{
+			TargetKind: backgroundtask.SessionInboxNotificationKind,
+		},
+	)
+	require.ErrorContains(t, err, "must implement NotificationOutbox")
 
 	_, err = NewRuntime(backgroundtask.NewSinkRegistry(), nil)
 	require.ErrorContains(t, err, "readiness check")

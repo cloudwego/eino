@@ -40,12 +40,9 @@ func (notificationDeliveryStub) ValidateNotificationDelivery(
 	_ context.Context,
 	req *bgtask.NotificationDeliveryValidation,
 ) error {
-	if req == nil || req.Store == nil ||
+	if req == nil || !req.OutboxAvailable ||
 		req.TargetKind != bgtask.SessionInboxNotificationKind {
 		return errors.New("invalid notification delivery")
-	}
-	if _, ok := req.Store.(bgtask.NotificationOutbox); !ok {
-		return errors.New("notification outbox is required")
 	}
 	return nil
 }

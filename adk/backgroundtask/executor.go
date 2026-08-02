@@ -57,7 +57,6 @@ type ExecutionResult struct {
 type ExecutionRuntime interface {
 	TaskID() string
 	Controls() <-chan ControlRequest
-	Backgrounded() <-chan struct{}
 	AppendOutput(context.Context, []byte) (*OutputRecord, error)
 	ReportOutputFailure(context.Context, string) error
 }
@@ -87,16 +86,31 @@ func NewExecutorRegistry() *ExecutorRegistry {
 
 // Register adds an executor keyed by executor.Key().
 func (r *ExecutorRegistry) Register(executor Executor) error {
-	if executor == nil || executor.Key() == "" {
-		return errors.New("backgroundtask: executor and non-empty key are required")
+	actual, loaded, err := r.loadOrRegister(executor)
+	if err != nil {
+		return err
+	}
+	if loaded {
+		return fmt.Errorf("%w: executor %q", ErrAlreadyExists, actual.Key())
+	}
+	return nil
+}
+
+func (r *ExecutorRegistry) loadOrRegister(executor Executor) (Executor, bool, error) {
+	if executor == nil {
+		return nil, false, errors.New("backgroundtask: executor and non-empty key are required")
+	}
+	key := executor.Key()
+	if key == "" {
+		return nil, false, errors.New("backgroundtask: executor and non-empty key are required")
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if _, ok := r.executors[executor.Key()]; ok {
-		return fmt.Errorf("%w: executor %q", ErrAlreadyExists, executor.Key())
+	if actual, ok := r.executors[key]; ok {
+		return actual, true, nil
 	}
-	r.executors[executor.Key()] = executor
-	return nil
+	r.executors[key] = executor
+	return executor, false, nil
 }
 
 // Resolve returns the executor registered for key.
@@ -134,8 +148,6 @@ type taskRuntime struct {
 	attempt         int64
 	version         int64
 	controls        chan ControlRequest
-	backgrounded    chan struct{}
-	backgroundOnce  sync.Once
 	poison          error
 	cancelRequested bool
 }
@@ -154,19 +166,13 @@ var errHeartbeatStopped = errors.New("backgroundtask: heartbeat stopped")
 func newTaskRuntime(store Store, taskID string, attempt, version int64) *taskRuntime {
 	return &taskRuntime{
 		store: store, taskID: taskID, attempt: attempt, version: version,
-		controls: make(chan ControlRequest, 1), backgrounded: make(chan struct{}),
+		controls: make(chan ControlRequest, 1),
 	}
 }
 
 func (r *taskRuntime) TaskID() string { return r.taskID }
 
 func (r *taskRuntime) Controls() <-chan ControlRequest { return r.controls }
-
-func (r *taskRuntime) Backgrounded() <-chan struct{} { return r.backgrounded }
-
-func (r *taskRuntime) markBackgrounded() {
-	r.backgroundOnce.Do(func() { close(r.backgrounded) })
-}
 
 func (r *taskRuntime) AppendOutput(ctx context.Context, data []byte) (*OutputRecord, error) {
 	r.mu.Lock()
@@ -311,15 +317,20 @@ func (r *taskRuntime) commitResult(ctx context.Context, result *ExecutionResult)
 	}
 }
 
-// Store returns the lifecycle Store used by this Manager.
-func (m *Manager) Store() Store { return m.store }
-
-// Executors returns the worker executor registry used by this Manager.
-func (m *Manager) Executors() *ExecutorRegistry { return m.executors }
-
 // AllocateTaskIDRequest describes the task category used by the default ID generator.
 type AllocateTaskIDRequest struct {
 	Kind string
+}
+
+// LoadOrRegisterExecutor atomically returns the executor registered under the
+// candidate's key, registering the candidate when the key is not yet present.
+func (m *Manager) LoadOrRegisterExecutor(executor Executor) (actual Executor, loaded bool, err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.closed {
+		return nil, false, m.closedError()
+	}
+	return m.executors.loadOrRegister(executor)
 }
 
 // AllocateTaskID allocates an opaque ID for a task category.
@@ -528,25 +539,17 @@ func (m *Manager) Execute(ctx context.Context, taskID string) error {
 	return m.execute(ctx, taskID)
 }
 
-// MarkBackgrounded signals that foreground projection has detached from the
-// active attempt. It is intended for foreground coordinators.
-func (m *Manager) MarkBackgrounded(ctx context.Context, taskID string) error {
+// RequestTimeout asks work executing in this Manager to fail with a
+// deterministic timeout reason. It is intended for foreground coordination.
+func (m *Manager) RequestTimeout(ctx context.Context, taskID, reason string) error {
+	if reason == "" {
+		return errors.New("backgroundtask: timeout reason is required")
+	}
 	runtime, err := m.activeRuntime(ctx, taskID)
 	if err != nil {
 		return err
 	}
-	runtime.markBackgrounded()
-	return nil
-}
-
-// RequestControl sends an attempt-scoped control request to work executing in
-// this Manager. It is intended for worker-runtime coordination.
-func (m *Manager) RequestControl(ctx context.Context, taskID string, control ControlRequest) error {
-	runtime, err := m.activeRuntime(ctx, taskID)
-	if err != nil {
-		return err
-	}
-	runtime.requestControlWithReason(control.Kind, control.Reason)
+	runtime.requestControlWithReason(ControlTimeout, reason)
 	return nil
 }
 

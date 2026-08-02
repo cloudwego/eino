@@ -402,11 +402,8 @@ func validateBackgroundNotification(ctx context.Context, config *BackgroundConfi
 	if config.Notifications == nil {
 		return errors.New("filesystem: background notification delivery is required")
 	}
-	if err := config.Notifications.ValidateNotificationDelivery(
-		ctx,
-		&backgroundtask.NotificationDeliveryValidation{
-			Store: config.Runner.Manager().Store(), TargetKind: backgroundtask.SessionInboxNotificationKind,
-		},
+	if err := config.Runner.Manager().ValidateNotificationDelivery(
+		ctx, config.Notifications, backgroundtask.SessionInboxNotificationKind,
 	); err != nil {
 		return fmt.Errorf("filesystem: background notification delivery: %w", err)
 	}

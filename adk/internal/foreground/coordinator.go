@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/cloudwego/eino/adk/backgroundtask"
@@ -62,7 +63,8 @@ func Run(
 		return nil, backgroundtask.ErrIllegalTransition
 	}
 
-	executeCtx := detachedCtx{parent: ctx}
+	executeCtx, detachProjection := withProjection(detachedCtx{parent: ctx})
+	defer detachProjection()
 	done := make(chan error, 1)
 	go func() {
 		done <- manager.Execute(executeCtx, request.TaskID)
@@ -76,9 +78,6 @@ func Run(
 		return started, nil
 	}
 	if request.RunInBackground {
-		if err = manager.MarkBackgrounded(ctx, request.TaskID); err != nil {
-			return nil, err
-		}
 		return started, nil
 	}
 	return waitForeground(ctx, manager, policy, request, done)
@@ -184,16 +183,11 @@ func waitForeground(
 				}
 				if policy.ShouldAutoBackground != nil &&
 					policy.ShouldAutoBackground(ctx, current) {
-					if err := manager.MarkBackgrounded(context.Background(), request.TaskID); err != nil {
-						return nil, err
-					}
 					return current, nil
 				}
 				reason := fmt.Sprintf("timed out after %dms", timeoutMs)
-				if err := manager.RequestControl(context.Background(), request.TaskID,
-					backgroundtask.ControlRequest{
-						Kind: backgroundtask.ControlTimeout, Reason: reason,
-					},
+				if err := manager.RequestTimeout(
+					context.Background(), request.TaskID, reason,
 				); err != nil {
 					return nil, err
 				}
@@ -213,3 +207,31 @@ func (detachedCtx) Deadline() (time.Time, bool) { return time.Time{}, false }
 func (detachedCtx) Done() <-chan struct{}       { return nil }
 func (detachedCtx) Err() error                  { return nil }
 func (c detachedCtx) Value(key any) any         { return c.parent.Value(key) }
+
+type projectionKey struct{}
+
+type projection struct {
+	once sync.Once
+	done chan struct{}
+}
+
+func withProjection(ctx context.Context) (context.Context, func()) {
+	state := &projection{done: make(chan struct{})}
+	return context.WithValue(ctx, projectionKey{}, state), func() {
+		state.once.Do(func() { close(state.done) })
+	}
+}
+
+// ProjectionDetached returns a signal closed when foreground coordination has
+// stopped projecting the current execution. A nil signal means no coordinator
+// is attached.
+func ProjectionDetached(ctx context.Context) <-chan struct{} {
+	if ctx == nil {
+		return nil
+	}
+	state, _ := ctx.Value(projectionKey{}).(*projection)
+	if state == nil {
+		return nil
+	}
+	return state.done
+}

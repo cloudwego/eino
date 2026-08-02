@@ -134,6 +134,15 @@ func TestSimplifiedPublicModelHasNoOverlappingStateFields_BitsUT(t *testing.T) {
 		"Status", "Progress", "Checkpoint", "Result", "Reason", "SessionID",
 		deprecatedNotificationCursorField, "TransitionVersion", "NotificationID", "EventKind")
 	assertFieldsPresent(t, reflect.TypeOf(Notification{}), "ID", "Version", "Kind", "Task")
+	assertFieldsAbsent(t, reflect.TypeOf(NotificationDeliveryValidation{}), "Store")
+	assertFieldsPresent(t, reflect.TypeOf(NotificationDeliveryValidation{}),
+		"OutboxAvailable", "TargetKind")
+	assertMethodsAbsent(t, reflect.TypeOf((*Manager)(nil)),
+		"Store", "Executors", "MarkBackgrounded", "RequestControl")
+	assertMethodsPresent(t, reflect.TypeOf((*Manager)(nil)),
+		"Submit", "Get", "ListPending", "Execute", "WaitUpdate", "ReadOutput",
+		"RequestCancel", "RequestTimeout", "Resume", "AllocateTaskID",
+		"LoadOrRegisterExecutor", "ValidateNotificationDelivery", "Close")
 }
 
 func assertFieldsAbsent(t *testing.T, typ reflect.Type, names ...string) {
@@ -152,14 +161,31 @@ func assertFieldsPresent(t *testing.T, typ reflect.Type, names ...string) {
 	}
 }
 
+func assertMethodsAbsent(t *testing.T, typ reflect.Type, names ...string) {
+	t.Helper()
+	for _, name := range names {
+		_, exists := typ.MethodByName(name)
+		assert.Falsef(t, exists, "%s must not expose %s", typ, name)
+	}
+}
+
+func assertMethodsPresent(t *testing.T, typ reflect.Type, names ...string) {
+	t.Helper()
+	for _, name := range names {
+		_, exists := typ.MethodByName(name)
+		assert.Truef(t, exists, "%s must expose %s", typ, name)
+	}
+}
+
 func TestManagerSubmitUsesExecutorIdentityAndValidation_BitsUT(t *testing.T) {
 	executor := &scriptedExecutor{validateErr: errors.New("invalid payload")}
-	manager := managerWithExecutor(t, NewInMemoryStore(nil), executor, time.Minute)
+	store := NewInMemoryStore(nil)
+	manager := managerWithExecutor(t, store, executor, time.Minute)
 	spec := validSpec("invalid")
 
 	_, err := manager.Submit(context.Background(), spec)
 	require.ErrorContains(t, err, "validate spec")
-	_, getErr := manager.Store().Get(context.Background(), spec.ID)
+	_, getErr := store.Get(context.Background(), spec.ID)
 	assert.ErrorIs(t, getErr, ErrNotFound)
 	require.Len(t, executor.validated, 1)
 

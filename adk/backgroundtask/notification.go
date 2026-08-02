@@ -26,17 +26,33 @@ import (
 // SessionInboxNotificationKind routes a task notification to its parent session.
 const SessionInboxNotificationKind = "session_inbox"
 
-// NotificationDeliveryValidation describes the route a model-facing constructor
-// requires before it may promise task completion notification.
+// NotificationDeliveryValidation describes the capabilities and route a
+// model-facing constructor requires before promising task completion notification.
 type NotificationDeliveryValidation struct {
-	Store      Store
-	TargetKind string
+	OutboxAvailable bool
+	TargetKind      string
 }
 
-// NotificationDeliveryRuntime validates that a task Store and target kind have an
-// operationally owned delivery route.
+// NotificationDeliveryRuntime validates that task outbox delivery and the
+// target kind have an operationally owned route.
 type NotificationDeliveryRuntime interface {
 	ValidateNotificationDelivery(context.Context, *NotificationDeliveryValidation) error
+}
+
+// ValidateNotificationDelivery validates that this Manager's Store and the
+// requested target have an operationally owned notification route.
+func (m *Manager) ValidateNotificationDelivery(
+	ctx context.Context,
+	runtime NotificationDeliveryRuntime,
+	targetKind string,
+) error {
+	if runtime == nil || targetKind == "" {
+		return errors.New("backgroundtask: notification delivery runtime and target kind are required")
+	}
+	_, outboxAvailable := m.store.(NotificationOutbox)
+	return runtime.ValidateNotificationDelivery(ctx, &NotificationDeliveryValidation{
+		OutboxAvailable: outboxAvailable, TargetKind: targetKind,
+	})
 }
 
 // NotificationSink accepts dispatcher-enriched task notifications.

@@ -90,21 +90,18 @@ func New(config *Config) (*Runner, error) {
 	if config.ForegroundTimeoutMs != nil {
 		timeoutMs = *config.ForegroundTimeoutMs
 	}
-	var localExecutor *executor
-	if registered, ok := config.Manager.Executors().Resolve(executorKey); ok {
-		var compatible bool
-		localExecutor, compatible = registered.(*executor)
-		if !compatible {
-			return nil, fmt.Errorf(
-				"backgroundtask/local: executor key %q is already registered",
-				executorKey,
-			)
-		}
-	} else {
-		localExecutor = &executor{works: make(map[string]WorkFunc)}
-		if err := config.Manager.Executors().Register(localExecutor); err != nil {
-			return nil, err
-		}
+	registered, _, err := config.Manager.LoadOrRegisterExecutor(
+		&executor{works: make(map[string]WorkFunc)},
+	)
+	if err != nil {
+		return nil, err
+	}
+	localExecutor, compatible := registered.(*executor)
+	if !compatible {
+		return nil, fmt.Errorf(
+			"backgroundtask/local: executor key %q is already registered",
+			executorKey,
+		)
 	}
 	runner := &Runner{
 		manager:  config.Manager,

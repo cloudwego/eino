@@ -28,6 +28,7 @@ import (
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/adk/backgroundtask"
 	"github.com/cloudwego/eino/adk/internal/agenttool"
+	foregroundcoord "github.com/cloudwego/eino/adk/internal/foreground"
 )
 
 const (
@@ -334,7 +335,9 @@ func (e *Executor[M]) Execute(
 			materialized = materializedEvent(event, message)
 			final = agenttool.ExtractTextContent(message)
 		}
-		foreground.Forward(materialized, runtime.Backgrounded(), copyMaterializedEvent[M])
+		foreground.Forward(
+			materialized, foregroundcoord.ProjectionDetached(ctx), copyMaterializedEvent[M],
+		)
 	}
 	if controlResult, controlErr, controlled := e.controlResult(ctx, task, pollControl(controlRequests)); controlled {
 		return controlResult, controlErr

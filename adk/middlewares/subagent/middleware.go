@@ -314,11 +314,8 @@ func validate[M adk.MessageType](ctx context.Context, c *TypedConfig[M]) error {
 				}
 			}
 		}
-		if err := c.Background.Notifications.ValidateNotificationDelivery(
-			ctx,
-			&backgroundtask.NotificationDeliveryValidation{
-				Store: manager.Store(), TargetKind: backgroundtask.SessionInboxNotificationKind,
-			},
+		if err := manager.ValidateNotificationDelivery(
+			ctx, c.Background.Notifications, backgroundtask.SessionInboxNotificationKind,
 		); err != nil {
 			return fmt.Errorf("subagent: background notification delivery: %w", err)
 		}

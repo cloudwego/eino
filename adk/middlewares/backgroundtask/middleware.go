@@ -104,11 +104,8 @@ func NewTyped[M adk.MessageType](ctx context.Context, config *TypedConfig[M]) (a
 		if config.Notifications == nil {
 			return nil, fmt.Errorf("backgroundtask: notification delivery is required")
 		}
-		if err := config.Notifications.ValidateNotificationDelivery(
-			ctx,
-			&bgtask.NotificationDeliveryValidation{
-				Store: config.Manager.Store(), TargetKind: bgtask.SessionInboxNotificationKind,
-			},
+		if err := config.Manager.ValidateNotificationDelivery(
+			ctx, config.Notifications, bgtask.SessionInboxNotificationKind,
 		); err != nil {
 			return nil, fmt.Errorf("backgroundtask: notification delivery: %w", err)
 		}

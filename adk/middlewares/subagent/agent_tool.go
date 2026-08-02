@@ -139,7 +139,9 @@ func newManagedAgentTool[M adk.MessageType](
 					}
 				}
 				runOpts := append(opts, agenttool.WithEventReceiverTransform(
-					managedEventReceiverTransform(runtime.Backgrounded(), outputReceiver),
+					managedEventReceiverTransform(
+						foreground.ProjectionDetached(workCtx), outputReceiver,
+					),
 				))
 				out, runErr := agent.InvokableRun(workCtx, params, runOpts...)
 				if outputWriter != nil {
@@ -385,8 +387,12 @@ func newDurableAgentTool[M adk.MessageType](
 			return nil, err
 		}
 	}
-	if existing, ok := config.Manager.Executors().Resolve(durablesubagent.ExecutorKey); ok {
-		typed, typeOK := existing.(*durablesubagent.Executor[M])
+	registered, loaded, err := config.Manager.LoadOrRegisterExecutor(executor)
+	if err != nil {
+		return nil, err
+	}
+	if loaded {
+		typed, typeOK := registered.(*durablesubagent.Executor[M])
 		if !typeOK {
 			return nil, errors.New("subagent: registered durable executor has incompatible message type")
 		}
@@ -399,8 +405,6 @@ func newDurableAgentTool[M adk.MessageType](
 				return nil, err
 			}
 		}
-	} else if err := config.Manager.Executors().Register(executor); err != nil {
-		return nil, err
 	}
 
 	return utils.InferOptionableTool(name, desc, func(
