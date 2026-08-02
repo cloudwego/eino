@@ -53,8 +53,7 @@ const (
 	backgroundTaskPromptHeader = `
 ## Background Task Management
 - Some tools can launch work in the background. Background tasks keep running after the
-  tool call returns. Routed tasks may notify you about updates or completion; use the task
-  controls below whenever you need authoritative state.`
+  tool call returns; you will be notified when they complete.`
 
 	// %s is the registered task_output tool name.
 	backgroundTaskOutputLine = "\n- Use the %s tool to check a background task's status or retrieve its result by task_id."
@@ -66,8 +65,7 @@ const (
 
 	backgroundTaskPromptHeaderChinese = `
 ## 后台任务管理
-- 部分工具可以在后台启动任务。后台任务在工具调用返回后会继续运行。有通知路由的任务可能在更新或完成时唤醒你；
-  需要权威状态时，请使用下方的任务控制工具。`
+- 部分工具可以在后台启动任务。后台任务在工具调用返回后会继续运行；任务完成时你将收到通知。`
 
 	// %s is the registered task_output tool name.
 	backgroundTaskOutputLineChinese = "\n- 使用 %s 工具通过 task_id 查询后台任务的状态或获取其结果。"

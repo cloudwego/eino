@@ -180,6 +180,7 @@ func TestMiddleware_InjectsInstruction(t *testing.T) {
 	assert.Contains(t, runCtx.Instruction, "base")
 	assert.Contains(t, runCtx.Instruction, "task_output")
 	assert.Contains(t, runCtx.Instruction, "task_stop")
+	assert.Contains(t, runCtx.Instruction, "you will be notified when they complete")
 }
 
 // TestMiddleware_InstructionUsesRenamedTool verifies the instruction names the
@@ -316,11 +317,57 @@ func TestTaskStopTool(t *testing.T) {
 	tl := findTool(t, injectedTools(t, mgr), taskStopToolName)
 	result, err := tl.InvokableRun(context.Background(), fmt.Sprintf(`{"task_id":"%s"}`, runResult.Spec.ID))
 	require.NoError(t, err)
-	assert.Contains(t, result, "Stop requested")
+	assert.Equal(t, fmt.Sprintf("Successfully stopped task: %s", runResult.Spec.ID), result)
 
 	task, done := mgr.Wait(context.Background(), runResult.Spec.ID)
 	require.True(t, done)
 	assert.Equal(t, bgtask.StateCanceled, task.Status)
+}
+
+func TestTaskStopTool_DurableCancelingAndCanceledText(t *testing.T) {
+	store := bgtask.NewMemoryStore(nil)
+	mgr := bgtask.New(context.Background(), &bgtask.Config{Store: store})
+	defer closeWithTimeout(mgr)
+	tl := findTool(t, injectedTools(t, mgr), taskStopToolName)
+
+	running, err := store.CreateAndStart(context.Background(), &bgtask.CreateTaskRequest{
+		Spec: bgtask.Spec{
+			ID: "durable-running", ExecutorKey: "test",
+			LeaseExpiryPolicy: bgtask.LeaseExpiryRetry,
+		},
+	})
+	require.NoError(t, err)
+	result, err := tl.InvokableRun(
+		context.Background(), fmt.Sprintf(`{"task_id":"%s"}`, running.Spec.ID),
+	)
+	require.NoError(t, err)
+	assert.Equal(t, "Stop requested for task durable-running (status: canceling)", result)
+
+	failOnExpiry, err := store.CreateAndStart(context.Background(), &bgtask.CreateTaskRequest{
+		Spec: bgtask.Spec{
+			ID: "durable-fail-on-expiry", ExecutorKey: "test",
+			LeaseExpiryPolicy: bgtask.LeaseExpiryFail,
+		},
+	})
+	require.NoError(t, err)
+	result, err = tl.InvokableRun(
+		context.Background(), fmt.Sprintf(`{"task_id":"%s"}`, failOnExpiry.Spec.ID),
+	)
+	require.NoError(t, err)
+	assert.Equal(t, "Stop requested for task durable-fail-on-expiry (status: canceling)", result)
+
+	pending, err := store.Create(context.Background(), &bgtask.CreateTaskRequest{
+		Spec: bgtask.Spec{
+			ID: "durable-pending", ExecutorKey: "test",
+			LeaseExpiryPolicy: bgtask.LeaseExpiryRetry,
+		},
+	})
+	require.NoError(t, err)
+	result, err = tl.InvokableRun(
+		context.Background(), fmt.Sprintf(`{"task_id":"%s"}`, pending.Spec.ID),
+	)
+	require.NoError(t, err)
+	assert.Equal(t, "Successfully stopped task: durable-pending", result)
 }
 
 func TestTaskStopTool_AlreadyDone(t *testing.T) {
@@ -356,7 +403,7 @@ func TestControlToolsUsePossessionOfTaskID(t *testing.T) {
 		otherContext, fmt.Sprintf(`{"task_id":%q}`, task.Spec.ID),
 	)
 	require.NoError(t, err)
-	assert.Contains(t, response, "Stop requested")
+	assert.Equal(t, fmt.Sprintf("Successfully stopped task: %s", task.Spec.ID), response)
 }
 
 func TestFormatTaskStableNonTerminalStates(t *testing.T) {

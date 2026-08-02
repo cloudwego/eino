@@ -57,6 +57,26 @@ func (a *recordingActivator) RequestTurn(
 	}, nil
 }
 
+func TestSinkAcceptRejectsUnroutedNotification(t *testing.T) {
+	err := (&Sink{}).Accept(context.Background(), backgroundtask.Notification{ID: "notification-1"})
+	require.ErrorContains(t, err, "routed notification target is required")
+}
+
+func TestSinkAcceptTargetValidatesDependenciesAndIdentity(t *testing.T) {
+	err := (&Sink{}).AcceptTarget(context.Background(), backgroundtask.NotificationTarget{
+		Kind: "session_inbox", TargetID: "session-1",
+	}, backgroundtask.Notification{ID: "notification-1"})
+	require.ErrorContains(t, err, "inbox and activator are required")
+
+	inbox := NewMemoryInbox()
+	err = (&Sink{Inbox: inbox, Activator: &recordingActivator{inbox: inbox}}).AcceptTarget(
+		context.Background(),
+		backgroundtask.NotificationTarget{Kind: "session_inbox", TargetID: "session-1"},
+		backgroundtask.Notification{},
+	)
+	require.ErrorContains(t, err, "notification id and target are required")
+}
+
 func TestSinkAcceptTargetEnqueuesBeforeActivation_BitsUT(t *testing.T) {
 	inbox := NewMemoryInbox()
 	activator := &recordingActivator{inbox: inbox}
@@ -248,6 +268,40 @@ func TestMemoryInboxDeepCopiesNotification_DefectProbing_BitsUT(t *testing.T) {
 	assert.Equal(t, "original", again[0].Notification.Task.Spec.Notify.Metadata["test/key"])
 	assert.Equal(t, "checkpoint", string(again[0].Notification.Task.Checkpoint))
 	assert.Equal(t, "resume", string(again[0].Notification.Task.PendingResume))
+}
+
+func TestAttack_MemoryInboxDeepCopiesNotificationTargetMetadata(t *testing.T) {
+	inbox := NewMemoryInbox()
+	metadata := map[string]string{"test/key": "original"}
+	_, err := inbox.Enqueue(context.Background(), &backgroundtask.EnqueueSessionNotificationRequest{
+		SessionID: "session-1",
+		Notification: backgroundtask.Notification{
+			ID: "notification-1",
+			Target: backgroundtask.NotificationTarget{
+				Kind:     "session_inbox",
+				TargetID: "session-1",
+				Metadata: metadata,
+			},
+		},
+	})
+	require.NoError(t, err)
+	metadata["test/key"] = "mutated-after-enqueue"
+
+	pending, err := inbox.ListPending(context.Background(), &backgroundtask.ListSessionNotificationsRequest{
+		SessionID: "session-1",
+	})
+	require.NoError(t, err)
+	require.Len(t, pending, 1)
+	t.Log("stored notification target metadata must not alias the caller-owned map")
+	assert.Equal(t, "original", pending[0].Notification.Target.Metadata["test/key"])
+
+	pending[0].Notification.Target.Metadata["test/key"] = "mutated-after-list"
+	again, err := inbox.ListPending(context.Background(), &backgroundtask.ListSessionNotificationsRequest{
+		SessionID: "session-1",
+	})
+	require.NoError(t, err)
+	require.Len(t, again, 1)
+	assert.Equal(t, "original", again[0].Notification.Target.Metadata["test/key"])
 }
 
 func TestTurnLoopActivatorQueuesWakeAndStartsLoop_BitsUT(t *testing.T) {

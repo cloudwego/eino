@@ -368,7 +368,7 @@ func (s *MemoryStore) Cancel(_ context.Context, req *CancelTaskRequest) (*Task, 
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	t, err := s.activeTaskLocked(req.TaskID, req.ExpectedVersion, StatusCanceling)
+	t, err := s.activeTaskLocked(req.TaskID, req.ExpectedVersion, StatusRunning, StatusCanceling)
 	if err != nil {
 		return nil, err
 	}

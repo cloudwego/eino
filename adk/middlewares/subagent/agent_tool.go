@@ -172,9 +172,15 @@ func formatManagedAgentResult(agentType string, task *backgroundtask.Task, forma
 	case backgroundtask.StatusSuspended, backgroundtask.StatusCanceling:
 		return fmt.Sprintf("Agent task %s is %s.", task.Spec.ID, task.Status), nil
 	case backgroundtask.StatusCanceled:
-		return "", fmt.Errorf("subagent %q task %q was canceled", agentType, task.Spec.ID)
+		return "", fmt.Errorf(
+			"subagent %q task %q (%s) was canceled",
+			agentType, task.Spec.ID, task.Spec.Description,
+		)
 	case backgroundtask.StatusFailed:
-		return "", fmt.Errorf("subagent %q task %q failed: %s", agentType, task.Spec.ID, task.ResultError)
+		return "", fmt.Errorf(
+			"subagent %q task %q (%s) failed: %s",
+			agentType, task.Spec.ID, task.Spec.Description, task.ResultError,
+		)
 	default:
 		return "", fmt.Errorf("subagent %q task %q has unknown status %q", agentType, task.Spec.ID, task.Status)
 	}
@@ -219,7 +225,6 @@ type agentEventFileReceiver[M adk.MessageType] struct {
 }
 
 type agentEventRecord struct {
-	Type      string `json:"type"`
 	AgentName string `json:"agent_name,omitempty"`
 	Message   any    `json:"message"`
 }
@@ -268,8 +273,8 @@ func defaultAgentEventFormat[M adk.MessageType](
 		return "", fmt.Errorf("materialize agent output message: %w", err)
 	}
 	data, err := sonic.Marshal(&agentEventRecord{
-		Type: "eino.subagent.event/v1", AgentName: event.AgentName,
-		Message: sanitizedMessageValue(message),
+		AgentName: event.AgentName,
+		Message:   sanitizedMessageValue(message),
 	})
 	if err != nil {
 		return "", fmt.Errorf("marshal agent output event: %w", err)

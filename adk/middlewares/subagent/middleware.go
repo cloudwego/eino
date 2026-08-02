@@ -92,7 +92,7 @@ type TypedDurableBackgroundConfig[M adk.MessageType] struct {
 	OutputStore filesystem.AppendOpener
 	OutputDir   string
 	// EventFormat must remain framing-compatible across every worker that can
-	// resume the same SubAgentName. The default is eino.subagent.event/v1 JSONL.
+	// resume the same SubAgentName. The default is one JSON object per line.
 	// Formatter migrations require a new SubAgentName or output path.
 	EventFormat AgentEventFormat[M]
 }

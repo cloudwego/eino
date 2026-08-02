@@ -273,3 +273,16 @@ func TestMemoryStoreCancelingReconcilesToCanceled_BitsUT(t *testing.T) {
 	assert.Equal(t, StatusCanceled, canceled.Status)
 	assert.Equal(t, "task was canceled", canceled.ResultError)
 }
+
+func TestMemoryStoreRunningAttemptCanCommitCanceled_BitsUT(t *testing.T) {
+	store := NewMemoryStore(nil)
+	task := createAndStart(t, store, "local-cancel")
+
+	canceled, err := store.Cancel(context.Background(), &CancelTaskRequest{
+		TaskID: task.Spec.ID, ExpectedVersion: task.Version,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, StatusCanceled, canceled.Status)
+	assert.Equal(t, "task was canceled", canceled.ResultError)
+	assert.Nil(t, canceled.CancelRequestedAt)
+}

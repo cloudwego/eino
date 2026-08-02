@@ -37,6 +37,11 @@ import (
 
 func intPtr(v int) *int { return &v }
 
+func TestManagedExecutePromptPreservesCompletionNotification(t *testing.T) {
+	assert.Contains(t, ManagedExecuteToolDesc, "You will be notified when the command completes")
+	assert.Contains(t, ManagedExecuteToolDescChinese, "命令完成时你会收到通知")
+}
+
 // findExecuteTool returns the execute tool from a tool set (which, when a Backend
 // is configured, also contains the file tools).
 func findExecuteTool(t *testing.T, tools []tool.BaseTool) tool.BaseTool {

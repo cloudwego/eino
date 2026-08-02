@@ -18,6 +18,7 @@ package subagent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"strings"
@@ -245,6 +246,28 @@ func TestLocalAndDurableAgentToolSchemasMatch(t *testing.T) {
 	assert.Equal(t, localSchema, durableSchema)
 }
 
+func TestFormatManagedAgentResultPreservesDescriptionInErrors(t *testing.T) {
+	task := &backgroundtask.Task{
+		Spec: backgroundtask.Spec{
+			ID: "subagent_secret", Description: "review implementation",
+		},
+		Status:      backgroundtask.StatusFailed,
+		ResultError: "model failed",
+	}
+	_, err := formatManagedAgentResult("reviewer", task, "")
+	assert.EqualError(
+		t, err,
+		`subagent "reviewer" task "subagent_secret" (review implementation) failed: model failed`,
+	)
+
+	task.Status = backgroundtask.StatusCanceled
+	_, err = formatManagedAgentResult("reviewer", task, "")
+	assert.EqualError(
+		t, err,
+		`subagent "reviewer" task "subagent_secret" (review implementation) was canceled`,
+	)
+}
+
 func TestLocalAgentToolWritesEventTranscript(t *testing.T) {
 	ctx := context.Background()
 	manager := backgroundtask.New(ctx, nil)
@@ -338,6 +361,11 @@ func TestDurableAgentToolWritesEventTranscript(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, content.Content, `"message"`)
 	assert.Contains(t, content.Content, "durable output")
+	var record map[string]any
+	line, _, _ := strings.Cut(strings.TrimSpace(content.Content), "\n")
+	require.NoError(t, json.Unmarshal([]byte(line), &record))
+	assert.Contains(t, record, "message")
+	assert.NotContains(t, record, "type")
 }
 
 func TestDurableOutputOpenFailureIsFailSoft(t *testing.T) {

@@ -145,6 +145,10 @@ func cloneItem(item *backgroundtask.SessionInboxItem) *backgroundtask.SessionInb
 
 func cloneNotification(notification backgroundtask.Notification) backgroundtask.Notification {
 	cloned := notification
+	cloned.Target.Metadata = make(map[string]string, len(notification.Target.Metadata))
+	for key, value := range notification.Target.Metadata {
+		cloned.Target.Metadata[key] = value
+	}
 	cloned.Task = cloneTaskSnapshot(notification.Task)
 	return cloned
 }

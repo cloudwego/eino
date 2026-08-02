@@ -78,6 +78,28 @@ type outputFailureFaultStore struct {
 	failCancel bool
 }
 
+type cancelTrackingStore struct {
+	Store
+	mu                 sync.Mutex
+	requestCancelCalls int
+}
+
+func (s *cancelTrackingStore) RequestCancel(
+	ctx context.Context,
+	req *RequestCancelRequest,
+) (*Task, error) {
+	s.mu.Lock()
+	s.requestCancelCalls++
+	s.mu.Unlock()
+	return s.Store.RequestCancel(ctx, req)
+}
+
+func (s *cancelTrackingStore) requestCancelCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.requestCancelCalls
+}
+
 func (s *outputFailureFaultStore) ReportOutputFailure(
 	context.Context,
 	*ReportOutputFailureRequest,
@@ -601,7 +623,8 @@ func TestManager_List(t *testing.T) {
 // --- Cancel Tests ---
 
 func TestManager_Cancel(t *testing.T) {
-	m := New(context.Background(), &Config{})
+	store := &cancelTrackingStore{Store: NewMemoryStore(nil)}
+	m := New(context.Background(), &Config{Store: store})
 	defer closeWithTimeout(m)
 
 	result, err := run(m, "cancellable", true, workBlocking())
@@ -616,6 +639,8 @@ func TestManager_Cancel(t *testing.T) {
 	assert.NotNil(t, task.DoneAt)
 	// A canceled task carries a reason rather than an empty terminal state.
 	assert.Equal(t, canceledError, task.ResultError)
+	assert.Nil(t, task.CancelRequestedAt)
+	assert.Zero(t, store.requestCancelCount())
 }
 
 // A foreground run stopped by Cancel reports StateCanceled (with the cancel

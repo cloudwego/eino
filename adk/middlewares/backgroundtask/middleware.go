@@ -264,12 +264,12 @@ func newTaskStopTool(mgr *bgtask.Manager, cfg *ToolConfig) (tool.InvokableTool, 
 	name := selectToolName(cfg, taskStopToolName)
 	desc := selectToolDesc(cfg, taskStopToolDescription, taskStopToolDescriptionChinese)
 	return utils.InferTool(name, desc, func(ctx context.Context, input taskStopInput) (string, error) {
-		if _, err := mgr.GetTask(ctx, input.TaskID); err != nil && !errors.Is(err, bgtask.ErrNotFound) {
-			return "", err
-		}
 		task, err := mgr.RequestCancel(ctx, input.TaskID)
 		if err != nil {
 			return fmt.Sprintf("Failed to stop task %q: %s", input.TaskID, err.Error()), nil
+		}
+		if task.Status == bgtask.StatusCanceled {
+			return fmt.Sprintf("Successfully stopped task: %s", input.TaskID), nil
 		}
 		return fmt.Sprintf("Stop requested for task %s (status: %s)", input.TaskID, task.Status), nil
 	})

@@ -362,14 +362,22 @@ func (m *Manager) RequestCancel(ctx context.Context, taskID string) (*Task, erro
 	m.attemptsMu.Lock()
 	attempt := m.activeAttempts[taskID]
 	m.attemptsMu.Unlock()
-	if attempt != nil {
+
+	task, err := m.store.Get(ctx, taskID)
+	if err != nil {
+		return nil, err
+	}
+	if task.Spec.ExecutorKey == processLocalExecutorKey && task.Status != StatusCanceling {
+		return m.cancelProcessLocal(ctx, task, attempt)
+	}
+
+	if attempt != nil && attempt.runtime != nil {
 		attempt.runtime.mu.Lock()
 		defer attempt.runtime.mu.Unlock()
 	}
 
 	var result *Task
-	var err error
-	for attempt := 0; ; attempt++ {
+	for retry := 0; ; retry++ {
 		task, getErr := m.store.Get(ctx, taskID)
 		if getErr != nil {
 			return nil, getErr
@@ -380,7 +388,7 @@ func (m *Manager) RequestCancel(ctx context.Context, taskID string) (*Task, erro
 		if !errors.Is(err, ErrVersionConflict) {
 			break
 		}
-		if attempt >= 7 {
+		if retry >= 7 {
 			return nil, err
 		}
 		if ctx.Err() != nil {
@@ -390,10 +398,50 @@ func (m *Manager) RequestCancel(ctx context.Context, taskID string) (*Task, erro
 	if err != nil {
 		return nil, err
 	}
-	if result.Status == StatusCanceling && attempt != nil && !attempt.runtime.canceling {
+	if result.Status == StatusCanceling && attempt != nil && attempt.runtime != nil &&
+		!attempt.runtime.canceling {
 		if err = attempt.runtime.reconcileCancellationLocked(ctx); err != nil {
 			return result, err
 		}
+	}
+	return result, nil
+}
+
+func (m *Manager) cancelProcessLocal(
+	ctx context.Context,
+	task *Task,
+	attempt *activeAttempt,
+) (*Task, error) {
+	if terminalStatus(task.Status) {
+		return nil, ErrAlreadyTerminal
+	}
+	if task.Status != StatusRunning {
+		return nil, ErrIllegalTransition
+	}
+	if attempt == nil || attempt.runtime == nil {
+		return m.store.Cancel(ctx, &CancelTaskRequest{
+			TaskID: task.Spec.ID, ExpectedVersion: task.Version,
+		})
+	}
+
+	attempt.runtime.requestControl(ControlStop)
+	select {
+	case attemptErr := <-attempt.done:
+		if attemptErr != nil {
+			return nil, attemptErr
+		}
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	result, err := m.store.Get(ctx, task.Spec.ID)
+	if err != nil {
+		return nil, err
+	}
+	if result.Status != StatusCanceled {
+		if terminalStatus(result.Status) {
+			return nil, ErrAlreadyTerminal
+		}
+		return nil, ErrIllegalTransition
 	}
 	return result, nil
 }
