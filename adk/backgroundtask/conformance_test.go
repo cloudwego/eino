@@ -154,7 +154,7 @@ func assertFieldsPresent(t *testing.T, typ reflect.Type, names ...string) {
 
 func TestManagerSubmitUsesExecutorIdentityAndValidation_BitsUT(t *testing.T) {
 	executor := &scriptedExecutor{validateErr: errors.New("invalid payload")}
-	manager := managerWithExecutor(t, NewMemoryStore(nil), executor, time.Minute)
+	manager := managerWithExecutor(t, NewInMemoryStore(nil), executor, time.Minute)
 	spec := validSpec("invalid")
 
 	_, err := manager.Submit(context.Background(), spec)
@@ -170,7 +170,7 @@ func TestManagerSubmitUsesExecutorIdentityAndValidation_BitsUT(t *testing.T) {
 
 func TestManagerValidateSpecRunsBeforeSubmitAndStart_BitsUT(t *testing.T) {
 	executor := &scriptedExecutor{leaseExpiryPolicy: LeaseExpiryFail}
-	store := NewMemoryStore(nil)
+	store := NewInMemoryStore(nil)
 	manager := managerWithExecutor(t, store, executor, time.Minute)
 	task, err := manager.Submit(context.Background(), validSpec("validate-once"))
 	require.NoError(t, err)
@@ -187,7 +187,7 @@ func TestManagerValidateSpecRunsBeforeSubmitAndStart_BitsUT(t *testing.T) {
 
 func TestManagerExecutePersistsReturnedResultDirectly_BitsUT(t *testing.T) {
 	executor := &scriptedExecutor{}
-	store := NewMemoryStore(nil)
+	store := NewInMemoryStore(nil)
 	manager := managerWithExecutor(t, store, executor, time.Minute)
 	task, err := manager.Submit(context.Background(), validSpec("complete"))
 	require.NoError(t, err)
@@ -209,7 +209,7 @@ func TestManagerReducesOrdinaryErrorsToBoundedDurableStrings_BitsUT(t *testing.T
 			return nil, errors.New(message)
 		},
 	}
-	store := NewMemoryStore(nil)
+	store := NewInMemoryStore(nil)
 	manager := managerWithExecutor(t, store, executor, time.Minute)
 	task, err := manager.Submit(context.Background(), validSpec("failed"))
 	require.NoError(t, err)
@@ -246,10 +246,10 @@ func TestManagerValidatesCheckpointAndFallsBackToSpec_BitsUT(t *testing.T) {
 	})
 }
 
-func recoveredTaskStore(t *testing.T, id string, checkpoint []byte) (*MemoryStore, *testClock) {
+func recoveredTaskStore(t *testing.T, id string, checkpoint []byte) (*InMemoryStore, *testClock) {
 	t.Helper()
 	clock := &testClock{now: time.Unix(100, 0)}
-	store := NewMemoryStore(&MemoryStoreConfig{
+	store := NewInMemoryStore(&InMemoryStoreConfig{
 		Clock: clock.Now, ActiveAttemptTimeout: 5 * time.Second,
 	})
 	started := createAndStart(t, store, id)
@@ -286,7 +286,7 @@ func TestNonRestartableExecutorRejectsExactMissingCheckpointDiscriminator_BitsUT
 
 func TestManagerResumeValidatesAndStoresNormalizedOpaqueInput_BitsUT(t *testing.T) {
 	executor := &scriptedExecutor{normalizedResume: []byte("normalized")}
-	store := NewMemoryStore(nil)
+	store := NewInMemoryStore(nil)
 	manager := managerWithExecutor(t, store, executor, time.Minute)
 	submitted, err := manager.Submit(context.Background(), validSpec("resume-manager"))
 	require.NoError(t, err)
@@ -317,7 +317,7 @@ func TestManagerWaitingInputPersistsCheckpointWithoutTerminalResult_BitsUT(t *te
 			return &ExecutionResult{Status: StatusWaitingInput, Checkpoint: []byte("checkpoint")}, nil
 		},
 	}
-	store := NewMemoryStore(nil)
+	store := NewInMemoryStore(nil)
 	manager := managerWithExecutor(t, store, executor, time.Minute)
 	task, err := manager.Submit(context.Background(), validSpec("input"))
 	require.NoError(t, err)
@@ -337,7 +337,7 @@ func TestManagerErrorDoesNotCreatePendingResume_BitsUT(t *testing.T) {
 			return nil, errors.New("execution failed")
 		},
 	}
-	store := NewMemoryStore(nil)
+	store := NewInMemoryStore(nil)
 	manager := managerWithExecutor(t, store, executor, time.Minute)
 	task, err := manager.Submit(context.Background(), validSpec("failed-after-input"))
 	require.NoError(t, err)
@@ -352,7 +352,7 @@ func TestManagerErrorDoesNotCreatePendingResume_BitsUT(t *testing.T) {
 
 func TestCheckpointUnavailableStopsRenewalWithoutPersistingFailure_BitsUT(t *testing.T) {
 	clock := &testClock{now: time.Unix(500, 0)}
-	store := NewMemoryStore(&MemoryStoreConfig{
+	store := NewInMemoryStore(&InMemoryStoreConfig{
 		Clock: clock.Now, ActiveAttemptTimeout: 5 * time.Second,
 	})
 	executor := &scriptedExecutor{

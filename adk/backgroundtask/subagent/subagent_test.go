@@ -26,7 +26,6 @@ import (
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/adk/backgroundtask"
-	"github.com/cloudwego/eino/adk/filesystem"
 	adksession "github.com/cloudwego/eino/adk/session"
 	"github.com/cloudwego/eino/schema"
 )
@@ -460,32 +459,21 @@ func TestExecutorDrainUsesDurableRunnerCheckpoint_BitsUT(t *testing.T) {
 
 func TestSubAgentTaskResumesAfterManagerReconstruction_BitsUT(t *testing.T) {
 	sessionStore := adksession.NewInMemoryStore[*schema.Message](nil)
-	outputStore := filesystem.NewInMemoryBackend()
 	agent := &interruptThenCompleteAgent{name: "worker"}
 	executor := &Executor[*schema.Message]{}
 	require.NoError(t, executor.Register("worker", &AgentRegistration[*schema.Message]{
-		Agent: agent, OutputStore: outputStore,
-		EventFormat: func(_ context.Context, event *adk.AgentEvent) (string, error) {
-			if event == nil || event.Output == nil || event.Output.MessageOutput == nil {
-				return "", nil
-			}
-			message, err := event.Output.MessageOutput.GetMessage()
-			if err != nil {
-				return "", err
-			}
-			return message.Content, nil
-		},
+		Agent: agent,
 	}))
 	executors := backgroundtask.NewExecutorRegistry()
 	require.NoError(t, executors.Register(executor))
-	taskStore := backgroundtask.NewMemoryStore(nil)
+	taskStore := backgroundtask.NewInMemoryStore(nil)
 
 	manager1 := backgroundtask.New(context.Background(), &backgroundtask.Config{
 		Store: taskStore, Executors: executors,
 	})
 	task, err := Submit(context.Background(), manager1, &SubmitRequest{
 		SubAgentName: "worker", Query: "do work", Description: "durable child",
-		SessionID: "parent-session", OutputFile: "/tasks/worker.events",
+		SessionID: "parent-session",
 	})
 	require.NoError(t, err)
 	runner1 := adk.NewRunner(context.Background(), adk.RunnerConfig{
@@ -521,20 +509,12 @@ func TestSubAgentTaskResumesAfterManagerReconstruction_BitsUT(t *testing.T) {
 	assert.Equal(t, backgroundtask.StateCompleted, completed.Status)
 	assert.Contains(t, string(completed.ResultData), "approved")
 	assert.Equal(t, int64(2), completed.Attempt)
-	output, err := outputStore.Read(context.Background(), &filesystem.ReadRequest{
-		FilePath: completed.Spec.OutputFile,
-	})
-	require.NoError(t, err)
-	assert.Equal(t, "before interrupt\napproved\n", output.Content)
+	assert.Empty(t, completed.Spec.OutputFile)
 	feed, err := manager2.ReadOutput(context.Background(), &backgroundtask.ReadOutputRequest{
 		TaskID: completed.Spec.ID,
 	})
 	require.NoError(t, err)
-	require.Len(t, feed.Records, 2)
-	assert.Equal(t, int64(1), feed.Records[0].Attempt)
-	assert.Equal(t, int64(2), feed.Records[1].Attempt)
-	assert.Equal(t, "before interrupt\n", string(feed.Records[0].Data))
-	assert.Equal(t, "approved\n", string(feed.Records[1].Data))
+	assert.Empty(t, feed.Records)
 
 	var persisted taskPayload
 	require.NoError(t, json.Unmarshal(completed.Spec.Payload, &persisted))

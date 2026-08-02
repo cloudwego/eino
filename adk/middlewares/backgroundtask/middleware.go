@@ -74,6 +74,9 @@ type TypedConfig[M adk.MessageType] struct {
 	// Notifications is required because the injected model prompt promises
 	// completion notification.
 	Notifications bgtask.NotificationDeliveryRuntime
+	// ReadTaskProgress optionally projects executor-specific progress for
+	// task_output. It must not mutate task lifecycle state.
+	ReadTaskProgress func(context.Context, *bgtask.Task) (string, error)
 
 	// TaskOutputToolConfig configures the task_output tool. Optional.
 	TaskOutputToolConfig *ToolConfig
@@ -113,7 +116,9 @@ func NewTyped[M adk.MessageType](ctx context.Context, config *TypedConfig[M]) (a
 
 	var tools []tool.BaseTool
 	if outputEnabled {
-		outputTool, err := newTaskOutputTool(mgr, config.TaskOutputToolConfig)
+		outputTool, err := newTaskOutputTool(
+			mgr, config.TaskOutputToolConfig, config.ReadTaskProgress,
+		)
 		if err != nil {
 			return nil, fmt.Errorf("backgroundtask: failed to create task_output tool: %w", err)
 		}
@@ -224,12 +229,16 @@ const (
 	maxTaskOutputTimeoutMs     = 600000
 )
 
-func newTaskOutputTool(mgr *bgtask.Manager, cfg *ToolConfig) (tool.InvokableTool, error) {
+func newTaskOutputTool(
+	mgr *bgtask.Manager,
+	cfg *ToolConfig,
+	readProgress func(context.Context, *bgtask.Task) (string, error),
+) (tool.InvokableTool, error) {
 	name := selectToolName(cfg, taskOutputToolName)
 	desc := selectToolDesc(cfg, taskOutputToolDescription, taskOutputToolDescriptionChinese)
 	return utils.InferTool(name, desc, func(ctx context.Context, input taskOutputInput) (string, error) {
 		if task, err := mgr.Get(ctx, input.TaskID); err == nil {
-			return resolveDurableTask(ctx, mgr, task, input)
+			return resolveDurableTask(ctx, mgr, task, input, readProgress)
 		} else if errors.Is(err, bgtask.ErrNotFound) {
 			return fmt.Sprintf("Task %q not found", input.TaskID), nil
 		} else {
@@ -238,7 +247,13 @@ func newTaskOutputTool(mgr *bgtask.Manager, cfg *ToolConfig) (tool.InvokableTool
 	})
 }
 
-func resolveDurableTask(ctx context.Context, mgr *bgtask.Manager, task *bgtask.Task, input taskOutputInput) (string, error) {
+func resolveDurableTask(
+	ctx context.Context,
+	mgr *bgtask.Manager,
+	task *bgtask.Task,
+	input taskOutputInput,
+	readProgress func(context.Context, *bgtask.Task) (string, error),
+) (string, error) {
 	block := input.Block == nil || *input.Block
 	if block && waitableStatus(task.Status) {
 		timeout := input.Timeout
@@ -263,7 +278,16 @@ func resolveDurableTask(ctx context.Context, mgr *bgtask.Manager, task *bgtask.T
 			task = next
 		}
 	}
-	return formatTask(task), nil
+	result := formatTask(task)
+	if readProgress != nil {
+		progress, progressErr := readProgress(ctx, task)
+		if progressErr != nil {
+			result += fmt.Sprintf("\nTranscript unavailable: %s", progressErr)
+		} else if progress != "" {
+			result += "\n" + progress
+		}
+	}
+	return result, nil
 }
 
 func waitableStatus(status bgtask.Status) bool {
@@ -304,16 +328,14 @@ func formatTask(task *bgtask.Task) string {
 	}
 	if task.Spec.OutputFile != "" && task.OutputFileErr == "" {
 		result += fmt.Sprintf("\n%s: %s (use Read on this path for the output)", label, task.Spec.OutputFile)
-	} else {
-		if len(task.ResultData) > 0 {
-			result += fmt.Sprintf("\nResult: %s", string(task.ResultData))
-		}
-		if task.Spec.OutputFile != "" {
-			result += fmt.Sprintf(
-				"\n%s: %s (incomplete — a write failed: %s; full transcript is unavailable. The Result above, if any, is the authoritative terminal result)",
-				label, task.Spec.OutputFile, task.OutputFileErr,
-			)
-		}
+	} else if task.Spec.OutputFile != "" {
+		result += fmt.Sprintf(
+			"\n%s: %s (incomplete — a write failed: %s; full transcript is unavailable. The terminal Result, if any, remains authoritative)",
+			label, task.Spec.OutputFile, task.OutputFileErr,
+		)
+	}
+	if len(task.ResultData) > 0 {
+		result += fmt.Sprintf("\nResult: %s", string(task.ResultData))
 	}
 	if task.ResultError != "" {
 		result += fmt.Sprintf("\nError: %s", task.ResultError)

@@ -76,6 +76,9 @@ type BackgroundConfig = TypedBackgroundConfig[*schema.Message]
 type TypedBackgroundConfig[M adk.MessageType] struct {
 	Local   *TypedLocalBackgroundConfig[M]
 	Durable *TypedDurableBackgroundConfig[M]
+	// TranscriptFormat formats one materialized sub-agent message for both local
+	// output persistence and durable task_output session views.
+	TranscriptFormat TranscriptFormat[M]
 	// Notifications is required because the model-facing background API promises
 	// completion notification.
 	Notifications backgroundtask.NotificationDeliveryRuntime
@@ -87,7 +90,6 @@ type TypedLocalBackgroundConfig[M adk.MessageType] struct {
 	Runner      *backgroundlocal.Runner
 	OutputStore filesystem.AppendOpener
 	OutputDir   string
-	EventFormat AgentEventFormat[M]
 }
 
 type DurableBackgroundConfig = TypedDurableBackgroundConfig[*schema.Message]
@@ -96,12 +98,6 @@ type TypedDurableBackgroundConfig[M adk.MessageType] struct {
 	Manager              *backgroundtask.Manager
 	ForegroundTimeoutMs  *int
 	ShouldAutoBackground func(context.Context, *backgroundtask.Task) bool
-	OutputStore          filesystem.AppendOpener
-	OutputDir            string
-	// EventFormat must remain framing-compatible across every worker that can
-	// resume the same SubAgentName. The default is one JSON object per line.
-	// Formatter migrations require a new SubAgentName or output path.
-	EventFormat AgentEventFormat[M]
 	// RunOptionsFactories reconstructs deployment-owned run options by sub-agent
 	// name for every execution attempt. Every worker serving a name must configure
 	// a semantically equivalent factory for the full lifetime of resumable tasks.
@@ -109,7 +105,9 @@ type TypedDurableBackgroundConfig[M adk.MessageType] struct {
 	RunOptionsFactories map[string]durablesubagent.RunOptionsFactory
 }
 
-type AgentEventFormat[M adk.MessageType] func(context.Context, *adk.TypedAgentEvent[M]) (string, error)
+// TranscriptFormat formats one materialized sub-agent message as one transcript
+// record. Returning an empty string skips the message.
+type TranscriptFormat[M adk.MessageType] func(context.Context, string, M) (string, error)
 
 // New creates a ChatModelAgentMiddleware that injects sub-agent tools into the agent context.
 //
@@ -179,7 +177,7 @@ func NewTyped[M adk.MessageType](ctx context.Context, config *TypedConfig[M]) (a
 				agentOutput[M]{
 					store:     config.Background.Local.OutputStore,
 					outputDir: config.Background.Local.OutputDir,
-					format:    config.Background.Local.EventFormat,
+					format:    config.Background.TranscriptFormat,
 				},
 				toolName, desc,
 			)

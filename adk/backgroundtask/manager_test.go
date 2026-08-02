@@ -31,7 +31,7 @@ func closeWithTimeout(manager *Manager) {
 }
 
 func TestManagerReadOutputDelegatesToStore_BitsUT(t *testing.T) {
-	store := NewMemoryStore(nil)
+	store := NewInMemoryStore(nil)
 	manager := New(context.Background(), &Config{Store: store})
 	defer closeWithTimeout(manager)
 	started := createAndStart(t, store, "manager-output")

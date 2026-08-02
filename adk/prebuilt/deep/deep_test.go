@@ -506,11 +506,19 @@ func TestDeepDurableBackgroundForwardsRunOptionsFactories(t *testing.T) {
 	factory := func() ([]adk.AgentRunOption, error) {
 		return []adk.AgentRunOption{adk.WithTimelineEvents()}, nil
 	}
+	format := func(
+		_ context.Context,
+		agentName string,
+		message *schema.Message,
+	) (string, error) {
+		return agentName + ": " + message.Content, nil
+	}
 	manager := backgroundtask.New(context.Background(), nil)
 	defer manager.Close(context.Background())
 	background := deepSubagentBackground(&TypedConfig[*schema.Message]{
 		Background: &TypedBackgroundConfig[*schema.Message]{
-			Notifications: testNotifications,
+			Notifications:    testNotifications,
+			TranscriptFormat: format,
 			Durable: &TypedDurableBackgroundConfig[*schema.Message]{
 				Manager: manager,
 				RunOptionsFactories: map[string]durablesubagent.RunOptionsFactory{
@@ -524,6 +532,11 @@ func TestDeepDurableBackgroundForwardsRunOptionsFactories(t *testing.T) {
 	options, err := background.Durable.RunOptionsFactories["worker"]()
 	require.NoError(t, err)
 	assert.Len(t, options, 1)
+	formatted, err := background.TranscriptFormat(
+		context.Background(), "worker", schema.AssistantMessage("done", nil),
+	)
+	require.NoError(t, err)
+	assert.Equal(t, "worker: done", formatted)
 }
 
 // NewTyped with a Manager injects the task_output/task_stop control tools and a

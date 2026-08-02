@@ -51,7 +51,7 @@ func (s *routedRecordingSink) AcceptTarget(
 
 func TestDispatcherRedeliversUntilSinkAccepts_BitsUT(t *testing.T) {
 	clock := &testClock{now: time.Unix(400, 0)}
-	store := NewMemoryStore(&MemoryStoreConfig{
+	store := NewInMemoryStore(&InMemoryStoreConfig{
 		Clock: clock.Now, ActiveAttemptTimeout: time.Minute,
 	})
 	task := createAndStart(t, store, "dispatch")
@@ -91,8 +91,8 @@ func TestDispatcherRedeliversUntilSinkAccepts_BitsUT(t *testing.T) {
 	assert.Empty(t, empty.Deliveries)
 }
 
-func TestMemoryStoreTerminalCommitCreatesOneTerminalOutbox_BitsUT(t *testing.T) {
-	store := NewMemoryStore(nil)
+func TestInMemoryStoreTerminalCommitCreatesOneTerminalOutbox_BitsUT(t *testing.T) {
+	store := NewInMemoryStore(nil)
 	started := createAndStart(t, store, "one-terminal")
 	terminal, err := store.Complete(context.Background(), &CompleteTaskRequest{
 		TaskID: "one-terminal", ExpectedVersion: started.Version, Data: []byte("result"),
@@ -119,7 +119,7 @@ func TestMemoryStoreTerminalCommitCreatesOneTerminalOutbox_BitsUT(t *testing.T) 
 }
 
 func TestRouteLessTaskNeverCreatesOutbox_BitsUT(t *testing.T) {
-	store := NewMemoryStore(nil)
+	store := NewInMemoryStore(nil)
 	spec := validSpec("route-less")
 	spec.Notify = nil
 	created, err := store.Create(context.Background(), &CreateTaskRequest{

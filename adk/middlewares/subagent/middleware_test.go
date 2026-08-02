@@ -18,9 +18,7 @@ package subagent
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
-	"io"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -68,21 +66,6 @@ func (notificationDeliveryStub) ValidateNotificationDelivery(
 }
 
 var testNotifications backgroundtask.NotificationDeliveryRuntime = notificationDeliveryStub{}
-
-type failExecutionOpenStore struct {
-	backend *filesystem.InMemoryBackend
-	opens   int64
-}
-
-func (s *failExecutionOpenStore) OpenAppend(
-	ctx context.Context,
-	request *filesystem.OpenAppendRequest,
-) (io.WriteCloser, error) {
-	if atomic.AddInt64(&s.opens, 1) == 2 {
-		return nil, errors.New("execution open failed")
-	}
-	return s.backend.OpenAppend(ctx, request)
-}
 
 func (m *mockAgent) Name(context.Context) string        { return m.name }
 func (m *mockAgent) Description(context.Context) string { return m.desc }
@@ -323,6 +306,12 @@ func TestLocalAgentToolWritesEventTranscript(t *testing.T) {
 		SubAgents: []adk.Agent{agent},
 		Background: &BackgroundConfig{Local: &LocalBackgroundConfig{
 			Runner: mustLocalRunner(t, manager), OutputStore: backend, OutputDir: "/tasks",
+		}, TranscriptFormat: func(
+			_ context.Context,
+			agentName string,
+			message *schema.Message,
+		) (string, error) {
+			return agentName + ": " + message.Content, nil
 		}, Notifications: testNotifications},
 	})
 	require.NoError(t, err)
@@ -342,13 +331,13 @@ func TestLocalAgentToolWritesEventTranscript(t *testing.T) {
 	require.NotEmpty(t, task.Spec.OutputFile)
 	content, err := backend.Read(ctx, &filesystem.ReadRequest{FilePath: task.Spec.OutputFile})
 	require.NoError(t, err)
-	assert.Contains(t, content.Content, "local output")
+	assert.Equal(t, "worker: local output\n", content.Content)
 	feed, err := manager.ReadOutput(ctx, &backgroundtask.ReadOutputRequest{
 		TaskID: task.Spec.ID,
 	})
 	require.NoError(t, err)
 	require.NotEmpty(t, feed.Records)
-	assert.Contains(t, string(feed.Records[0].Data), "local output")
+	assert.Equal(t, "worker: local output\n", string(feed.Records[0].Data))
 }
 
 func TestDurableAgentToolBackgroundSurvivesCaller(t *testing.T) {
@@ -390,15 +379,14 @@ func TestDurableAgentRegistrationRejectsDuplicateExactIdentity(t *testing.T) {
 	assert.ErrorIs(t, err, backgroundtask.ErrAlreadyExists)
 }
 
-func TestDurableAgentToolWritesEventTranscript(t *testing.T) {
+func TestDurableTaskProgressReadsSessionTranscript(t *testing.T) {
 	ctx := runnerEnvironmentContext(t)
 	manager := backgroundtask.New(context.Background(), nil)
-	backend := filesystem.NewInMemoryBackend()
 	agent := &mockAgent{name: "worker", desc: "durable output"}
 	middleware, err := New(ctx, &Config{
 		SubAgents: []adk.Agent{agent},
 		Background: &BackgroundConfig{Durable: &DurableBackgroundConfig{
-			Manager: manager, OutputStore: backend, OutputDir: "/tasks",
+			Manager: manager,
 		}, Notifications: testNotifications},
 	})
 	require.NoError(t, err)
@@ -411,29 +399,29 @@ func TestDurableAgentToolWritesEventTranscript(t *testing.T) {
 	assert.Equal(t, "durable output", result)
 	task := terminalTask(t, manager)
 	require.NotNil(t, task)
-	require.NotEmpty(t, task.Spec.OutputFile)
-	assert.Empty(t, task.OutputFileErr)
-	content, err := backend.Read(ctx, &filesystem.ReadRequest{FilePath: task.Spec.OutputFile})
+	assert.Empty(t, task.Spec.OutputFile)
+	feed, err := manager.ReadOutput(ctx, &backgroundtask.ReadOutputRequest{TaskID: task.Spec.ID})
 	require.NoError(t, err)
-	assert.Contains(t, content.Content, `"message"`)
-	assert.Contains(t, content.Content, "durable output")
-	var record map[string]any
-	line, _, _ := strings.Cut(strings.TrimSpace(content.Content), "\n")
-	require.NoError(t, json.Unmarshal([]byte(line), &record))
-	assert.Contains(t, record, "message")
-	assert.NotContains(t, record, "type")
+	assert.Empty(t, feed.Records)
+	progress, err := NewDurableTaskProgressHook[*schema.Message](nil)(ctx, task)
+	require.NoError(t, err)
+	assert.Contains(t, progress, `"agent_name":"worker"`)
+	assert.Contains(t, progress, `"content":"durable output"`)
+	assert.NotContains(t, progress, `"content":"work"`)
 }
 
-func TestDurableOutputOpenFailureIsFailSoft(t *testing.T) {
+func TestDurableTaskProgressUsesSharedFormatter(t *testing.T) {
 	ctx := runnerEnvironmentContext(t)
 	manager := backgroundtask.New(context.Background(), nil)
-	outputStore := &failExecutionOpenStore{backend: filesystem.NewInMemoryBackend()}
 	agent := &mockAgent{name: "worker", desc: "durable output"}
+	format := func(_ context.Context, agentName string, message *schema.Message) (string, error) {
+		return agentName + ": " + message.Content, nil
+	}
 	middleware, err := New(ctx, &Config{
 		SubAgents: []adk.Agent{agent},
 		Background: &BackgroundConfig{Durable: &DurableBackgroundConfig{
-			Manager: manager, OutputStore: outputStore, OutputDir: "/tasks",
-		}, Notifications: testNotifications},
+			Manager: manager,
+		}, TranscriptFormat: format, Notifications: testNotifications},
 	})
 	require.NoError(t, err)
 	_, runCtx, err := middleware.BeforeAgent(ctx, &adk.ChatModelAgentContext[*schema.Message]{})
@@ -446,8 +434,11 @@ func TestDurableOutputOpenFailureIsFailSoft(t *testing.T) {
 	task := terminalTask(t, manager)
 	require.NotNil(t, task)
 	assert.Equal(t, backgroundtask.StatusCompleted, task.Status)
-	assert.Contains(t, task.OutputFileErr, "execution open failed")
 	assert.Equal(t, "durable output", string(task.ResultData))
+	progress, err := NewDurableTaskProgressHook(format)(ctx, task)
+	require.NoError(t, err)
+	assert.Contains(t, progress, "worker: durable output")
+	assert.NotContains(t, progress, "worker: work")
 }
 
 func TestDurableForegroundProjectionStopsAtBackgroundBoundary(t *testing.T) {

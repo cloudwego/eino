@@ -143,7 +143,7 @@ func New(_ context.Context, conf *Config) *Manager {
 		heartbeatEvery: 10 * time.Second,
 		activeAttempts: make(map[string]*activeAttempt),
 	}
-	m.store = NewMemoryStore(nil)
+	m.store = NewInMemoryStore(nil)
 	m.executors = NewExecutorRegistry()
 	if conf != nil {
 		if conf.Store != nil {

@@ -52,6 +52,9 @@ func init() {
 type TypedBackgroundConfig[M adk.MessageType] struct {
 	Local   *TypedLocalBackgroundConfig[M]
 	Durable *TypedDurableBackgroundConfig[M]
+	// TranscriptFormat customizes both local sub-agent transcripts and durable
+	// sub-agent session views.
+	TranscriptFormat subagent.TranscriptFormat[M]
 	// Notifications is required because DeepAgent's background tools promise
 	// completion notification.
 	Notifications backgroundtask.NotificationDeliveryRuntime
@@ -227,8 +230,15 @@ func NewTyped[M adk.MessageType](ctx context.Context, cfg *TypedConfig[M]) (adk.
 	// When background support is configured, wire its control tools
 	// (task_output/task_stop) exactly once at the top level.
 	if manager := deepBackgroundManager(cfg.Background); manager != nil {
+		var readTaskProgress func(context.Context, *backgroundtask.Task) (string, error)
+		if cfg.Background.Durable != nil {
+			readTaskProgress = subagent.NewDurableTaskProgressHook(
+				cfg.Background.TranscriptFormat,
+			)
+		}
 		controlMW, err := backgroundtaskmw.NewTyped(ctx, &backgroundtaskmw.TypedConfig[M]{
 			Manager: manager, Notifications: cfg.Background.Notifications,
+			ReadTaskProgress: readTaskProgress,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("failed to create background-task control middleware: %w", err)
@@ -429,7 +439,8 @@ func deepSubagentBackground[M adk.MessageType](
 	outputStore := backendAppendOpener(cfg.Backend)
 	if cfg.Background.Local != nil {
 		return &subagent.TypedBackgroundConfig[M]{
-			Notifications: cfg.Background.Notifications,
+			Notifications:    cfg.Background.Notifications,
+			TranscriptFormat: cfg.Background.TranscriptFormat,
 			Local: &subagent.TypedLocalBackgroundConfig[M]{
 				Runner: cfg.Background.Local.Runner, OutputStore: outputStore,
 				OutputDir: cfg.Background.Local.OutputDir,
@@ -437,13 +448,12 @@ func deepSubagentBackground[M adk.MessageType](
 		}
 	}
 	return &subagent.TypedBackgroundConfig[M]{
-		Notifications: cfg.Background.Notifications,
+		Notifications:    cfg.Background.Notifications,
+		TranscriptFormat: cfg.Background.TranscriptFormat,
 		Durable: &subagent.TypedDurableBackgroundConfig[M]{
 			Manager:              cfg.Background.Durable.Manager,
 			ForegroundTimeoutMs:  cfg.Background.Durable.ForegroundTimeoutMs,
 			ShouldAutoBackground: cfg.Background.Durable.ShouldAutoBackground,
-			OutputStore:          outputStore,
-			OutputDir:            cfg.Background.Durable.OutputDir,
 			RunOptionsFactories:  cfg.Background.Durable.RunOptionsFactories,
 		},
 	}

@@ -75,7 +75,7 @@ func newAgentTool(subAgents map[string]tool.InvokableTool, name, desc string) (t
 type agentOutput[M adk.MessageType] struct {
 	store     filesystem.AppendOpener
 	outputDir string
-	format    AgentEventFormat[M]
+	format    TranscriptFormat[M]
 }
 
 func newManagedAgentTool[M adk.MessageType](
@@ -87,7 +87,7 @@ func newManagedAgentTool[M adk.MessageType](
 	format := output.format
 	formatHint := ""
 	if format == nil {
-		format = defaultAgentEventFormat[M]
+		format = defaultTranscriptFormat[M]
 		formatHint = outputFileFormatHint
 	}
 	return utils.InferOptionableTool(name, desc,
@@ -231,7 +231,7 @@ func signalClosed(done <-chan struct{}) bool {
 type agentEventFileReceiver[M adk.MessageType] struct {
 	ctx       context.Context
 	writer    io.Writer
-	format    AgentEventFormat[M]
+	format    TranscriptFormat[M]
 	onRecord  func([]byte) error
 	onError   func(error) error
 	failed    bool
@@ -247,7 +247,15 @@ func (r *agentEventFileReceiver[M]) receive(event *adk.TypedAgentEvent[M]) {
 	if r.failed {
 		return
 	}
-	line, err := r.format(r.ctx, event)
+	if event == nil || event.Output == nil || event.Output.MessageOutput == nil {
+		return
+	}
+	message, err := event.Output.MessageOutput.GetMessage()
+	if err != nil {
+		r.fail(fmt.Errorf("materialize agent output message: %w", err))
+		return
+	}
+	line, err := r.format(r.ctx, event.AgentName, message)
 	if err != nil {
 		r.fail(fmt.Errorf("encode agent output event: %w", err))
 		return
@@ -285,19 +293,13 @@ func (r *agentEventFileReceiver[M]) fail(err error) {
 	}
 }
 
-func defaultAgentEventFormat[M adk.MessageType](
+func defaultTranscriptFormat[M adk.MessageType](
 	_ context.Context,
-	event *adk.TypedAgentEvent[M],
+	agentName string,
+	message M,
 ) (string, error) {
-	if event == nil || event.Output == nil || event.Output.MessageOutput == nil {
-		return "", nil
-	}
-	message, err := event.Output.MessageOutput.GetMessage()
-	if err != nil {
-		return "", fmt.Errorf("materialize agent output message: %w", err)
-	}
 	data, err := sonic.Marshal(&agentEventRecord{
-		AgentName: event.AgentName,
+		AgentName: agentName,
 		Message:   sanitizedMessageValue(message),
 	})
 	if err != nil {
@@ -308,14 +310,14 @@ func defaultAgentEventFormat[M adk.MessageType](
 
 func sanitizedMessageValue[M adk.MessageType](message M) any {
 	switch typed := any(message).(type) {
-	case *adk.Message:
+	case adk.Message:
 		if typed == nil {
 			return nil
 		}
 		cloned := *typed
 		cloned.Extra = nil
 		return &cloned
-	case *adk.AgenticMessage:
+	case adk.AgenticMessage:
 		if typed == nil {
 			return nil
 		}
@@ -357,7 +359,7 @@ func NameFromTask(task *backgroundtask.Task) string {
 	}
 	var payload subagentPayloadV1
 	if err := sonic.Unmarshal(task.Spec.Payload, &payload); err != nil ||
-		payload.Version != 1 || payload.SubAgentName == "" {
+		payload.Version <= 0 || payload.SubAgentName == "" {
 		return ""
 	}
 	return payload.SubAgentName
@@ -369,12 +371,6 @@ func newDurableAgentTool[M adk.MessageType](
 	agents []adk.TypedAgent[M],
 	name, desc string,
 ) (tool.BaseTool, error) {
-	format := config.EventFormat
-	formatHint := ""
-	if format == nil {
-		format = defaultAgentEventFormat[M]
-		formatHint = outputFileFormatHint
-	}
 	executor := &durablesubagent.Executor[M]{}
 	for _, agent := range agents {
 		resumable, ok := agent.(adk.TypedResumableAgent[M])
@@ -383,8 +379,7 @@ func newDurableAgentTool[M adk.MessageType](
 		}
 		agentName := agent.Name(ctx)
 		if err := executor.Register(agentName, &durablesubagent.AgentRegistration[M]{
-			Agent: resumable, OutputStore: config.OutputStore,
-			EventFormat:       durablesubagent.EventFormat[M](format),
+			Agent:             resumable,
 			RunOptionsFactory: config.RunOptionsFactories[agentName],
 		}); err != nil {
 			return nil, err
@@ -398,8 +393,7 @@ func newDurableAgentTool[M adk.MessageType](
 		for _, agent := range agents {
 			agentName := agent.Name(ctx)
 			if err := typed.Register(agentName, &durablesubagent.AgentRegistration[M]{
-				Agent: agent.(adk.TypedResumableAgent[M]), OutputStore: config.OutputStore,
-				EventFormat:       durablesubagent.EventFormat[M](format),
+				Agent:             agent.(adk.TypedResumableAgent[M]),
 				RunOptionsFactory: config.RunOptionsFactories[agentName],
 			}); err != nil {
 				return nil, err
@@ -440,10 +434,9 @@ func newDurableAgentTool[M adk.MessageType](
 			)
 			defer detach()
 		}
-		outputFile := reserveAgentOutput(callCtx, config.OutputStore, config.OutputDir)
 		task, err := durablesubagent.Submit(callCtx, config.Manager, &durablesubagent.SubmitRequest{
 			SubAgentName: in.SubagentType, Query: prompt, Description: in.Description,
-			SessionID: environment.SessionID(), OutputFile: outputFile,
+			SessionID: environment.SessionID(),
 		})
 		if err != nil {
 			return "", err
@@ -465,7 +458,7 @@ func newDurableAgentTool[M adk.MessageType](
 		if err != nil {
 			return "", err
 		}
-		return formatManagedAgentResult(in.SubagentType, task, formatHint)
+		return formatManagedAgentResult(in.SubagentType, task, "")
 	})
 }
 

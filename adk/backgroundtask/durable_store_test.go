@@ -53,7 +53,7 @@ func validSpec(id string) Spec {
 	}
 }
 
-func createAndStart(t *testing.T, store *MemoryStore, id string) *Task {
+func createAndStart(t *testing.T, store *InMemoryStore, id string) *Task {
 	t.Helper()
 	created, err := store.Create(context.Background(), &CreateTaskRequest{
 		Spec: validSpec(id), LeaseExpiryPolicy: LeaseExpiryRetry,
@@ -66,8 +66,8 @@ func createAndStart(t *testing.T, store *MemoryStore, id string) *Task {
 	return started
 }
 
-func TestMemoryStoreCreatePersistsPendingSnapshot_BitsUT(t *testing.T) {
-	store := NewMemoryStore(nil)
+func TestInMemoryStoreCreatePersistsPendingSnapshot_BitsUT(t *testing.T) {
+	store := NewInMemoryStore(nil)
 	spec := validSpec("create")
 
 	created, err := store.Create(context.Background(), &CreateTaskRequest{
@@ -88,8 +88,8 @@ func TestMemoryStoreCreatePersistsPendingSnapshot_BitsUT(t *testing.T) {
 	assert.Equal(t, "value", stored.Spec.Notify.Metadata["test/key"])
 }
 
-func TestMemoryStoreCreateAndStartIsAtomic_BitsUT(t *testing.T) {
-	store := NewMemoryStore(nil)
+func TestInMemoryStoreCreateAndStartIsAtomic_BitsUT(t *testing.T) {
+	store := NewInMemoryStore(nil)
 	spec := validSpec("local")
 	started, err := store.CreateAndStart(
 		context.Background(), &CreateTaskRequest{
@@ -107,8 +107,8 @@ func TestMemoryStoreCreateAndStartIsAtomic_BitsUT(t *testing.T) {
 	assert.Empty(t, pending.Tasks)
 }
 
-func TestMemoryStoreReportOutputFailureIsFencedAndFirstErrorWins_BitsUT(t *testing.T) {
-	store := NewMemoryStore(nil)
+func TestInMemoryStoreReportOutputFailureIsFencedAndFirstErrorWins_BitsUT(t *testing.T) {
+	store := NewInMemoryStore(nil)
 	started := createAndStart(t, store, "output")
 	reported, err := store.ReportOutputFailure(context.Background(), &ReportOutputFailureRequest{
 		TaskID: "output", ExpectedVersion: started.Version, Error: "write failed",
@@ -131,8 +131,8 @@ func TestMemoryStoreReportOutputFailureIsFencedAndFirstErrorWins_BitsUT(t *testi
 	assert.ErrorIs(t, err, ErrVersionConflict)
 }
 
-func TestMemoryStoreOutputFeedSupportsReplayAndAttemptFencing_BitsUT(t *testing.T) {
-	store := NewMemoryStore(nil)
+func TestInMemoryStoreOutputFeedSupportsReplayAndAttemptFencing_BitsUT(t *testing.T) {
+	store := NewInMemoryStore(nil)
 	started := createAndStart(t, store, "output-feed")
 	first, err := store.AppendOutput(context.Background(), &AppendOutputRequest{
 		TaskID: started.Spec.ID, Attempt: started.Attempt, Data: []byte("first"),
@@ -169,8 +169,8 @@ func TestMemoryStoreOutputFeedSupportsReplayAndAttemptFencing_BitsUT(t *testing.
 	require.Len(t, page.Records, 2)
 }
 
-func TestMemoryStoreCheckpointedPauseHasNoTerminalResult_BitsUT(t *testing.T) {
-	store := NewMemoryStore(nil)
+func TestInMemoryStoreCheckpointedPauseHasNoTerminalResult_BitsUT(t *testing.T) {
+	store := NewInMemoryStore(nil)
 	started := createAndStart(t, store, "waiting")
 
 	waiting, err := store.WaitInput(context.Background(), &WaitInputTaskRequest{
@@ -192,8 +192,8 @@ func TestMemoryStoreCheckpointedPauseHasNoTerminalResult_BitsUT(t *testing.T) {
 	assert.Equal(t, StatusRunning, stillRunning.Status)
 }
 
-func TestMemoryStoreTerminalResultInvariant_BitsUT(t *testing.T) {
-	store := NewMemoryStore(nil)
+func TestInMemoryStoreTerminalResultInvariant_BitsUT(t *testing.T) {
+	store := NewInMemoryStore(nil)
 	started := createAndStart(t, store, "terminal")
 
 	completed, err := store.Complete(context.Background(), &CompleteTaskRequest{
@@ -205,9 +205,9 @@ func TestMemoryStoreTerminalResultInvariant_BitsUT(t *testing.T) {
 	require.NotNil(t, completed.DoneAt)
 }
 
-func TestMemoryStoreExpiredLeaseRedispatchesWithCheckpoint_BitsUT(t *testing.T) {
+func TestInMemoryStoreExpiredLeaseRedispatchesWithCheckpoint_BitsUT(t *testing.T) {
 	clock := &testClock{now: time.Unix(100, 0)}
-	store := NewMemoryStore(&MemoryStoreConfig{
+	store := NewInMemoryStore(&InMemoryStoreConfig{
 		Clock: clock.Now, ActiveAttemptTimeout: 5 * time.Second,
 	})
 	started := createAndStart(t, store, "recovery")
@@ -231,9 +231,9 @@ func TestMemoryStoreExpiredLeaseRedispatchesWithCheckpoint_BitsUT(t *testing.T) 
 	assert.Equal(t, "checkpoint", string(reclaimed.Checkpoint))
 }
 
-func TestMemoryStoreExpiredNonRetryableLeaseFails_BitsUT(t *testing.T) {
+func TestInMemoryStoreExpiredNonRetryableLeaseFails_BitsUT(t *testing.T) {
 	clock := &testClock{now: time.Unix(100, 0)}
-	store := NewMemoryStore(&MemoryStoreConfig{
+	store := NewInMemoryStore(&InMemoryStoreConfig{
 		Clock: clock.Now, ActiveAttemptTimeout: 5 * time.Second,
 	})
 	spec := validSpec("local-expired")
@@ -251,11 +251,11 @@ func TestMemoryStoreExpiredNonRetryableLeaseFails_BitsUT(t *testing.T) {
 	require.NotNil(t, failed.DoneAt)
 }
 
-func TestMemoryStoreExpiredCanceledLeaseAlwaysCancels_BitsUT(t *testing.T) {
+func TestInMemoryStoreExpiredCanceledLeaseAlwaysCancels_BitsUT(t *testing.T) {
 	for _, policy := range []LeaseExpiryPolicy{LeaseExpiryRetry, LeaseExpiryFail} {
 		t.Run(string(policy), func(t *testing.T) {
 			clock := &testClock{now: time.Unix(100, 0)}
-			store := NewMemoryStore(&MemoryStoreConfig{
+			store := NewInMemoryStore(&InMemoryStoreConfig{
 				Clock: clock.Now, ActiveAttemptTimeout: 5 * time.Second,
 			})
 			spec := validSpec("cancel-expired-" + string(policy))
@@ -282,8 +282,8 @@ func TestMemoryStoreExpiredCanceledLeaseAlwaysCancels_BitsUT(t *testing.T) {
 	}
 }
 
-func TestMemoryStoreResumePersistsPendingResumeBytes_BitsUT(t *testing.T) {
-	store := NewMemoryStore(nil)
+func TestInMemoryStoreResumePersistsPendingResumeBytes_BitsUT(t *testing.T) {
+	store := NewInMemoryStore(nil)
 	started := createAndStart(t, store, "resume")
 	waiting, err := store.WaitInput(context.Background(), &WaitInputTaskRequest{
 		TaskID: "resume", ExpectedVersion: started.Version, Checkpoint: []byte("checkpoint"),
@@ -301,8 +301,8 @@ func TestMemoryStoreResumePersistsPendingResumeBytes_BitsUT(t *testing.T) {
 	assert.Equal(t, "answer", string(resumed.PendingResume))
 }
 
-func TestMemoryStoreResumeRejectsStaleTaskVersion_BitsUT(t *testing.T) {
-	store := NewMemoryStore(nil)
+func TestInMemoryStoreResumeRejectsStaleTaskVersion_BitsUT(t *testing.T) {
+	store := NewInMemoryStore(nil)
 	started := createAndStart(t, store, "stale-resume")
 	waiting, err := store.WaitInput(context.Background(), &WaitInputTaskRequest{
 		TaskID: "stale-resume", ExpectedVersion: started.Version, Checkpoint: []byte("checkpoint-1"),
@@ -321,8 +321,8 @@ func TestMemoryStoreResumeRejectsStaleTaskVersion_BitsUT(t *testing.T) {
 	assert.ErrorIs(t, err, ErrVersionConflict)
 }
 
-func TestMemoryStoreCancellationIntentReconcilesToCanceled_BitsUT(t *testing.T) {
-	store := NewMemoryStore(nil)
+func TestInMemoryStoreCancellationIntentReconcilesToCanceled_BitsUT(t *testing.T) {
+	store := NewInMemoryStore(nil)
 	task := createAndStart(t, store, "cancel")
 
 	requested, err := store.RequestCancel(context.Background(), &RequestCancelRequest{
@@ -358,7 +358,7 @@ func TestMemoryStoreCancellationIntentReconcilesToCanceled_BitsUT(t *testing.T) 
 }
 
 func TestTaskRuntimeCommitReconcilesConcurrentCancellation_BitsUT(t *testing.T) {
-	store := NewMemoryStore(nil)
+	store := NewInMemoryStore(nil)
 	started := createAndStart(t, store, "cancel-before-commit")
 	runtime := newTaskRuntime(store, started.Spec.ID, started.Attempt, started.Version)
 
@@ -378,8 +378,8 @@ func TestTaskRuntimeCommitReconcilesConcurrentCancellation_BitsUT(t *testing.T) 
 	assert.Equal(t, canceledError, committed.ResultError)
 }
 
-func TestMemoryStoreRunningAttemptCanCommitCanceled_BitsUT(t *testing.T) {
-	store := NewMemoryStore(nil)
+func TestInMemoryStoreRunningAttemptCanCommitCanceled_BitsUT(t *testing.T) {
+	store := NewInMemoryStore(nil)
 	task := createAndStart(t, store, "local-cancel")
 
 	canceled, err := store.Cancel(context.Background(), &CancelTaskRequest{

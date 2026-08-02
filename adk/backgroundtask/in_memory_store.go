@@ -30,8 +30,8 @@ import (
 // Clock returns the Store's current time.
 type Clock func() time.Time
 
-// MemoryStoreConfig configures the in-memory reference Store.
-type MemoryStoreConfig struct {
+// InMemoryStoreConfig configures the in-memory reference Store.
+type InMemoryStoreConfig struct {
 	Clock                Clock
 	ActiveAttemptTimeout time.Duration
 	MaxValueBytes        int64
@@ -47,9 +47,9 @@ type memoryActiveAttempt struct {
 	expiresAt time.Time
 }
 
-// MemoryStore is a deterministic reference implementation of Store and
+// InMemoryStore is a deterministic reference implementation of Store and
 // NotificationOutbox. It is a state-machine test double, not a durable backend.
-type MemoryStore struct {
+type InMemoryStore struct {
 	mu            sync.Mutex
 	tasks         map[string]*Task
 	active        map[string]memoryActiveAttempt
@@ -61,9 +61,9 @@ type MemoryStore struct {
 	maxValue      int64
 }
 
-// NewMemoryStore creates an in-memory reference Store and NotificationOutbox.
-func NewMemoryStore(config *MemoryStoreConfig) *MemoryStore {
-	s := &MemoryStore{
+// NewInMemoryStore creates an in-memory reference Store and NotificationOutbox.
+func NewInMemoryStore(config *InMemoryStoreConfig) *InMemoryStore {
+	s := &InMemoryStore{
 		tasks:         make(map[string]*Task),
 		active:        make(map[string]memoryActiveAttempt),
 		outputs:       make(map[string][]OutputRecord),
@@ -86,12 +86,12 @@ func NewMemoryStore(config *MemoryStoreConfig) *MemoryStore {
 	return s
 }
 
-func (s *MemoryStore) signalLocked() {
+func (s *InMemoryStore) signalLocked() {
 	close(s.notify)
 	s.notify = make(chan struct{})
 }
 
-func (s *MemoryStore) Create(_ context.Context, req *CreateTaskRequest) (*Task, error) {
+func (s *InMemoryStore) Create(_ context.Context, req *CreateTaskRequest) (*Task, error) {
 	if req == nil {
 		return nil, errors.New("backgroundtask: create request is required")
 	}
@@ -120,7 +120,7 @@ func (s *MemoryStore) Create(_ context.Context, req *CreateTaskRequest) (*Task, 
 	return cloneTask(task), nil
 }
 
-func (s *MemoryStore) CreateAndStart(_ context.Context, req *CreateTaskRequest) (*Task, error) {
+func (s *InMemoryStore) CreateAndStart(_ context.Context, req *CreateTaskRequest) (*Task, error) {
 	if req == nil {
 		return nil, errors.New("backgroundtask: create and start request is required")
 	}
@@ -147,7 +147,7 @@ func (s *MemoryStore) CreateAndStart(_ context.Context, req *CreateTaskRequest) 
 	return cloneTask(task), nil
 }
 
-func (s *MemoryStore) Get(_ context.Context, taskID string) (*Task, error) {
+func (s *InMemoryStore) Get(_ context.Context, taskID string) (*Task, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	t, ok := s.tasks[taskID]
@@ -158,7 +158,7 @@ func (s *MemoryStore) Get(_ context.Context, taskID string) (*Task, error) {
 	return cloneTask(t), nil
 }
 
-func (s *MemoryStore) ListPending(_ context.Context, req *ListPendingRequest) (*ListPendingResult, error) {
+func (s *InMemoryStore) ListPending(_ context.Context, req *ListPendingRequest) (*ListPendingResult, error) {
 	if req == nil {
 		return nil, errors.New("backgroundtask: list pending request is required")
 	}
@@ -206,7 +206,7 @@ func (s *MemoryStore) ListPending(_ context.Context, req *ListPendingRequest) (*
 	return result, nil
 }
 
-func (s *MemoryStore) Start(_ context.Context, req *StartTaskRequest) (*Task, error) {
+func (s *InMemoryStore) Start(_ context.Context, req *StartTaskRequest) (*Task, error) {
 	if req == nil {
 		return nil, errors.New("backgroundtask: start request is required")
 	}
@@ -231,7 +231,7 @@ func (s *MemoryStore) Start(_ context.Context, req *StartTaskRequest) (*Task, er
 	return cloneTask(t), nil
 }
 
-func (s *MemoryStore) Heartbeat(_ context.Context, req *HeartbeatRequest) (*Task, error) {
+func (s *InMemoryStore) Heartbeat(_ context.Context, req *HeartbeatRequest) (*Task, error) {
 	if req == nil {
 		return nil, errors.New("backgroundtask: heartbeat request is required")
 	}
@@ -247,7 +247,7 @@ func (s *MemoryStore) Heartbeat(_ context.Context, req *HeartbeatRequest) (*Task
 	return cloneTask(t), nil
 }
 
-func (s *MemoryStore) AppendOutput(_ context.Context, req *AppendOutputRequest) (*OutputRecord, error) {
+func (s *InMemoryStore) AppendOutput(_ context.Context, req *AppendOutputRequest) (*OutputRecord, error) {
 	if req == nil || req.TaskID == "" || req.Attempt <= 0 {
 		return nil, errors.New("backgroundtask: output task id and attempt are required")
 	}
@@ -278,7 +278,7 @@ func (s *MemoryStore) AppendOutput(_ context.Context, req *AppendOutputRequest) 
 	return cloneOutputRecord(&record), nil
 }
 
-func (s *MemoryStore) ReadOutput(_ context.Context, req *ReadOutputRequest) (*ReadOutputResult, error) {
+func (s *InMemoryStore) ReadOutput(_ context.Context, req *ReadOutputRequest) (*ReadOutputResult, error) {
 	if req == nil || req.TaskID == "" || req.AfterSequence < 0 {
 		return nil, errors.New("backgroundtask: output task id and non-negative cursor are required")
 	}
@@ -301,7 +301,7 @@ func (s *MemoryStore) ReadOutput(_ context.Context, req *ReadOutputRequest) (*Re
 	return result, nil
 }
 
-func (s *MemoryStore) ReportOutputFailure(_ context.Context, req *ReportOutputFailureRequest) (*Task, error) {
+func (s *InMemoryStore) ReportOutputFailure(_ context.Context, req *ReportOutputFailureRequest) (*Task, error) {
 	if req == nil {
 		return nil, errors.New("backgroundtask: report output failure request is required")
 	}
@@ -323,7 +323,7 @@ func (s *MemoryStore) ReportOutputFailure(_ context.Context, req *ReportOutputFa
 	return cloneTask(t), nil
 }
 
-func (s *MemoryStore) Complete(_ context.Context, req *CompleteTaskRequest) (*Task, error) {
+func (s *InMemoryStore) Complete(_ context.Context, req *CompleteTaskRequest) (*Task, error) {
 	if req == nil {
 		return nil, errors.New("backgroundtask: complete request is required")
 	}
@@ -346,7 +346,7 @@ func (s *MemoryStore) Complete(_ context.Context, req *CompleteTaskRequest) (*Ta
 	return cloneTask(t), nil
 }
 
-func (s *MemoryStore) Fail(_ context.Context, req *FailTaskRequest) (*Task, error) {
+func (s *InMemoryStore) Fail(_ context.Context, req *FailTaskRequest) (*Task, error) {
 	if req == nil {
 		return nil, errors.New("backgroundtask: fail request is required")
 	}
@@ -366,7 +366,7 @@ func (s *MemoryStore) Fail(_ context.Context, req *FailTaskRequest) (*Task, erro
 	return cloneTask(t), nil
 }
 
-func (s *MemoryStore) WaitInput(_ context.Context, req *WaitInputTaskRequest) (*Task, error) {
+func (s *InMemoryStore) WaitInput(_ context.Context, req *WaitInputTaskRequest) (*Task, error) {
 	if req == nil {
 		return nil, errors.New("backgroundtask: wait input request is required")
 	}
@@ -392,7 +392,7 @@ func (s *MemoryStore) WaitInput(_ context.Context, req *WaitInputTaskRequest) (*
 	return cloneTask(t), nil
 }
 
-func (s *MemoryStore) Suspend(_ context.Context, req *SuspendTaskRequest) (*Task, error) {
+func (s *InMemoryStore) Suspend(_ context.Context, req *SuspendTaskRequest) (*Task, error) {
 	if req == nil {
 		return nil, errors.New("backgroundtask: suspend request is required")
 	}
@@ -417,7 +417,7 @@ func (s *MemoryStore) Suspend(_ context.Context, req *SuspendTaskRequest) (*Task
 	return cloneTask(t), nil
 }
 
-func (s *MemoryStore) Cancel(_ context.Context, req *CancelTaskRequest) (*Task, error) {
+func (s *InMemoryStore) Cancel(_ context.Context, req *CancelTaskRequest) (*Task, error) {
 	if req == nil {
 		return nil, errors.New("backgroundtask: cancel request is required")
 	}
@@ -438,7 +438,7 @@ func (s *MemoryStore) Cancel(_ context.Context, req *CancelTaskRequest) (*Task, 
 	return cloneTask(t), nil
 }
 
-func (s *MemoryStore) RequestCancel(_ context.Context, req *RequestCancelRequest) (*Task, error) {
+func (s *InMemoryStore) RequestCancel(_ context.Context, req *RequestCancelRequest) (*Task, error) {
 	if req == nil {
 		return nil, errors.New("backgroundtask: cancel request is required")
 	}
@@ -473,7 +473,7 @@ func (s *MemoryStore) RequestCancel(_ context.Context, req *RequestCancelRequest
 	return cloneTask(t), nil
 }
 
-func (s *MemoryStore) Resume(_ context.Context, req *ResumeRequest) (*Task, error) {
+func (s *InMemoryStore) Resume(_ context.Context, req *ResumeRequest) (*Task, error) {
 	if req == nil {
 		return nil, errors.New("backgroundtask: resume request is required")
 	}
@@ -497,7 +497,7 @@ func (s *MemoryStore) Resume(_ context.Context, req *ResumeRequest) (*Task, erro
 	return cloneTask(t), nil
 }
 
-func (s *MemoryStore) ReleaseSuspension(_ context.Context, req *ReleaseSuspensionRequest) (*Task, error) {
+func (s *InMemoryStore) ReleaseSuspension(_ context.Context, req *ReleaseSuspensionRequest) (*Task, error) {
 	if req == nil {
 		return nil, errors.New("backgroundtask: release request is required")
 	}
@@ -517,7 +517,7 @@ func (s *MemoryStore) ReleaseSuspension(_ context.Context, req *ReleaseSuspensio
 	return cloneTask(t), nil
 }
 
-func (s *MemoryStore) Wait(ctx context.Context, req *WaitUpdateRequest) (*Task, error) {
+func (s *InMemoryStore) Wait(ctx context.Context, req *WaitUpdateRequest) (*Task, error) {
 	if req == nil {
 		return nil, errors.New("backgroundtask: wait request is required")
 	}
@@ -544,7 +544,7 @@ func (s *MemoryStore) Wait(ctx context.Context, req *WaitUpdateRequest) (*Task, 
 	}
 }
 
-func (s *MemoryStore) Receive(_ context.Context, req *ReceiveNotificationsRequest) (*ReceiveNotificationsResult, error) {
+func (s *InMemoryStore) Receive(_ context.Context, req *ReceiveNotificationsRequest) (*ReceiveNotificationsResult, error) {
 	if req == nil || req.ConsumerID == "" || req.VisibilityTime <= 0 {
 		return nil, errors.New("backgroundtask: consumer and positive visibility time are required")
 	}
@@ -573,7 +573,7 @@ func (s *MemoryStore) Receive(_ context.Context, req *ReceiveNotificationsReques
 	return result, nil
 }
 
-func (s *MemoryStore) Ack(_ context.Context, receipt NotificationReceipt) error {
+func (s *InMemoryStore) Ack(_ context.Context, receipt NotificationReceipt) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for i, item := range s.outbox {
@@ -585,7 +585,7 @@ func (s *MemoryStore) Ack(_ context.Context, receipt NotificationReceipt) error 
 	return ErrNotFound
 }
 
-func (s *MemoryStore) taskVersionLocked(id string, version int64) (*Task, error) {
+func (s *InMemoryStore) taskVersionLocked(id string, version int64) (*Task, error) {
 	t, ok := s.tasks[id]
 	if !ok {
 		return nil, ErrNotFound
@@ -596,7 +596,7 @@ func (s *MemoryStore) taskVersionLocked(id string, version int64) (*Task, error)
 	return t, nil
 }
 
-func (s *MemoryStore) activeTaskLocked(id string, version int64, allowed ...Status) (*Task, error) {
+func (s *InMemoryStore) activeTaskLocked(id string, version int64, allowed ...Status) (*Task, error) {
 	t, ok := s.tasks[id]
 	if !ok {
 		return nil, ErrNotFound
@@ -616,7 +616,7 @@ func (s *MemoryStore) activeTaskLocked(id string, version int64, allowed ...Stat
 	return t, nil
 }
 
-func (s *MemoryStore) activeUncanceledTaskLocked(
+func (s *InMemoryStore) activeUncanceledTaskLocked(
 	id string,
 	version int64,
 	allowed ...Status,
@@ -631,12 +631,12 @@ func (s *MemoryStore) activeUncanceledTaskLocked(
 	return t, nil
 }
 
-func (s *MemoryStore) advanceLocked(t *Task) {
+func (s *InMemoryStore) advanceLocked(t *Task) {
 	t.Version++
 	t.UpdatedAt = s.now()
 }
 
-func (s *MemoryStore) enqueueLocked(t *Task, kind NotificationKind) *Notification {
+func (s *InMemoryStore) enqueueLocked(t *Task, kind NotificationKind) *Notification {
 	if t.Spec.Notify == nil || kind == "" {
 		return nil
 	}
@@ -664,11 +664,11 @@ func eventForStatus(status Status) NotificationKind {
 	}
 }
 
-func (s *MemoryStore) clearActiveLocked(t *Task) {
+func (s *InMemoryStore) clearActiveLocked(t *Task) {
 	delete(s.active, t.Spec.ID)
 }
 
-func (s *MemoryStore) resolveExpiredLocked(t *Task) {
+func (s *InMemoryStore) resolveExpiredLocked(t *Task) {
 	if t.Status != StatusRunning {
 		return
 	}
@@ -695,7 +695,7 @@ func (s *MemoryStore) resolveExpiredLocked(t *Task) {
 	s.finishStoreOwnedLocked(t)
 }
 
-func (s *MemoryStore) finishStoreOwnedLocked(t *Task) {
+func (s *InMemoryStore) finishStoreOwnedLocked(t *Task) {
 	s.clearActiveLocked(t)
 	s.advanceLocked(t)
 	now := s.now()

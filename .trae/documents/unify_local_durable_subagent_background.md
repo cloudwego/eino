@@ -29,7 +29,10 @@ adk/internal/foreground
     foreground timeout, auto-background, and projection boundary
 
 Store output feed
-    durable ordered observation and replay
+    ordered observation and replay for Local and shell tasks
+
+Child SessionEventStore
+    durable subagent conversation and progress
 ```
 
 This removes the former false association between streaming and Local durability.
@@ -41,7 +44,10 @@ The current design is conceptually coherent:
 - Local closures are owned by `backgroundtask/local.Runner`.
 - Durable execution uses `Submit` plus worker `Execute`.
 - Foreground projection is internal ADK coordination.
-- Output records are persisted in Store independently of optional filesystem mirrors.
+- Local and shell output records are persisted in Store independently of optional
+  filesystem mirrors.
+- Durable subagent progress is read from its child SessionEventStore rather than
+  duplicated into the task output feed.
 - Recovery policy is selected by the registered `Executor`, not by `Spec`.
 - Cancellation intent is persisted without a public `canceling` status.
 - Notification delivery is validated when model-facing middleware is constructed.
@@ -95,7 +101,7 @@ running -> completed
 running -> failed
 running -> canceled
 running -> waiting_input -> pending
-running -> suspended -> pending
+running -> suspended -> pending  (after worker-runtime suspension release)
 
 running + expired lease + retry policy -> pending
 running + expired lease + fail policy  -> failed
@@ -135,7 +141,7 @@ The execution flow is:
 5. Store detects expiry atomically during access or provider-specific sweeping.
 6. Store applies the persisted executor-owned policy.
 
-`MemoryStore` performs lazy expiry resolution during Store operations. A production
+`InMemoryStore` performs lazy expiry resolution during Store operations. A production
 persistent Store may use transactional queries or a sweeper, but must preserve identical
 CAS, lease, cancellation, and attempt-fencing semantics.
 
@@ -145,8 +151,10 @@ Terminal result and incremental output are different authorities:
 
 - `Task.ResultData`: authoritative successful terminal result;
 - `Task.ResultError`: authoritative terminal failure/cancellation reason;
-- Store output feed: authoritative ordered incremental output;
-- `Spec.OutputFile`: optional compatibility mirror for filesystem-based hosts.
+- child `SessionEventStore`: authoritative durable subagent progress;
+- Store output feed: authoritative ordered incremental output for task kinds that use it,
+  including Local and shell tasks;
+- `Spec.OutputFile`: optional compatibility mirror for Local and shell hosts.
 
 ### 6.1 Store output feed
 
@@ -172,12 +180,49 @@ subscription as durable.
 - lease must still be active;
 - cancellation must not have been requested.
 
-Local streaming shell chunks and Local/Durable subagent event records are appended to
-the feed. Durable resumed subagents continue the same sequence while recording the new
-attempt number.
+Local streaming shell chunks and Local subagent transcript records are appended to the
+feed. Durable subagents do not append a second copy of their session events.
 
 There is deliberately no public live-subscription API. Ephemeral foreground projection
 and durable replay are separate contracts.
+
+### 6.2 Durable subagent session view
+
+The child session `<taskID>/session` is the sole durable source of incremental subagent
+progress. `task_output` receives one optional `ReadTaskProgress` callback from the
+model-facing middleware. The built-in durable subagent callback privately projects the
+child session without adding a public Session reader abstraction.
+
+The projection:
+
+- treats the first persisted message as the submitted query and excludes it;
+- reads a bounded recent page of subsequent message and incomplete-stream events;
+- restores chronological order after reverse pagination;
+- formats messages with the root `subagent_name` from payload v2;
+- reads the latest interrupt separately for `waiting_input`.
+
+Transferred or nested emitter names are intentionally represented as the root subagent
+name. This avoids adding persistence metadata solely for a customizable presentation
+detail.
+
+Local and Durable paths share one message-level formatter:
+
+```go
+type TranscriptFormat[M adk.MessageType] func(
+    context.Context,
+    agentName string,
+    message M,
+) (string, error)
+```
+
+The default remains one JSON object per line with `{agent_name, message}`. Local invokes
+it from live AgentEvents; Durable invokes it while reading persisted SessionEvents.
+Changing the formatter changes the Durable view of existing session history but does not
+rewrite persisted data.
+
+`task_output` always includes authoritative terminal `ResultData` or `ResultError`.
+Failure to read or format progress is displayed as transcript unavailability and never
+changes task lifecycle state.
 
 ## 7. API Inventory and Audit
 
@@ -224,7 +269,7 @@ directly to the model.
 
 `RunStream` is justified by streaming shell UX. It does not imply that Durable work
 cannot stream. Durable subagents project typed events through internal ADK context while
-foreground and persist those events to the output feed for replay.
+foreground; their durable replay source is the child SessionEventStore.
 
 ### 7.3 Internal foreground coordinator
 
@@ -284,12 +329,16 @@ Durable subagent middleware receives:
 
 - shared `Manager`;
 - optional foreground timeout and auto-background policy;
-- output mirror configuration;
 - `RunOptionsFactories`;
 - validated notification delivery runtime.
 
+The shared subagent background configuration owns one `TranscriptFormat`. Local uses it
+for output-file/feed records. Durable uses it only when `task_output` projects the child
+session. The task-control middleware accepts one optional `ReadTaskProgress` callback;
+there is no reader interface, registry, or Manager progress API.
+
 DeepAgent forwards one shared Manager and constructs/reuses a Local runner for shell work
-even when subagents use Durable execution.
+even when subagents use Durable execution. Durable `OutputDir` is shell-only.
 
 ## 8. Durable Subagent Reconstruction
 
@@ -315,25 +364,50 @@ checkpoint    = <taskID>/checkpoint
 The executor derives both from `Task.Spec.ID` on every worker. The background-task
 checkpoint envelope stores only interrupted target IDs and a sequence number.
 
+The child Session and checkpoint have different authority:
+
+- the child Session Store is the durable conversation and event timeline. It preserves
+  the initial query, agent messages, resume lifecycle events, reconstructed history, and
+  session-level concurrency across attempts;
+- the Checkpoint Store holds transient execution-continuation state such as interrupted
+  component addresses, interrupt state, and Runner context.
+
+On native resume, Runner reopens and reconstructs the child session, then restores the
+derived checkpoint. Checkpoint restoration therefore does not make the child session
+redundant. The checkpoint may be deleted after successful completion while the session
+remains the durable child-agent history. `Spec.SessionID` is separate: it identifies the
+parent session for notification routing, whereas `<taskID>/session` identifies the
+child's own execution history.
+
 Resume has one Eino-native meaning: restore and continue from the derived checkpoint.
 Empty resume input calls `Runner.Resume`, which performs implicit resume-all. Supplied
 target data is validated against the interrupted target IDs and passed to
 `Runner.ResumeWithParams`. Sending a new query to the existing child session is not a
 resume mode and is not currently exposed.
 
+External-input resume and rollout recovery are separate transitions:
+
+- an agent interrupt produces `waiting_input`; application `Resume` validates optional
+  target data and returns the task to `pending`;
+- graceful worker drain produces `suspended`; it requires worker-runtime
+  `ReleaseSuspension` to return the task to `pending`, after which a worker restores the
+  checkpoint without application resume input.
+
+The removed `allow_empty_resume` flag was never the mechanism for rollout recovery.
+Native `Runner.Resume` already permits empty input. Automatic post-drain suspension
+release remains a worker-runtime responsibility.
+
 This is an intentional Alpha wire break. Version 1 payloads are rejected as unsupported
 rather than silently reinterpreted; hosts must drain or discard version 1 tasks before
 deploying workers that only understand version 2.
 
-It does not serialize agents, functions, output backends, event formatters, or
-`AgentRunOption` values.
+It does not serialize agents, functions, transcript formatters, or `AgentRunOption`
+values.
 
 Every worker reconstructs those through `AgentRegistration`:
 
 ```text
 Agent
-OutputStore
-EventFormat
 RunOptionsFactory
 ```
 
@@ -409,7 +483,7 @@ ListPending / Execute
 
 ### 12.1 External Store conformance
 
-`MemoryStore` is a deterministic reference implementation, not a durable backend. A real
+`InMemoryStore` is a deterministic reference implementation, not a durable backend. A real
 multi-process Store must be tested for:
 
 - atomic lease claim and expiry;
@@ -429,20 +503,32 @@ Manager rather than adding more direct coordination methods.
 
 ### 12.3 Output retention and pagination
 
-The feed has bounded page reads and per-record size enforcement, but production Stores
-must define retention, total-size quotas, archival, and deletion with the owning task.
+For task kinds that use it, the feed has bounded page reads and per-record size
+enforcement, but production Stores must define retention, total-size quotas, archival,
+and deletion with the owning task. Durable subagent transcript retention follows its
+child SessionEventStore policy instead.
+
+### 12.4 Suspension release orchestration
+
+`Store.ReleaseSuspension` implements `suspended -> pending`, but the current repository
+does not wire an automatic worker-runtime caller after graceful drain. A production
+worker host must define ownership, retry, and fencing for this transition so rollout
+recovery does not leave drained tasks permanently suspended. This must not be routed
+through application `Resume`, because suspension does not represent missing external
+input.
 
 ## 13. Final Verdict
 
 | Dimension | Score | Summary |
 |---|---:|---|
-| Conceptual coherence | 5/5 | Lifecycle, Local closures, projection, and durable output have distinct owners. |
+| Conceptual coherence | 5/5 | Lifecycle, Local closures, task output feeds, and durable subagent sessions have distinct owners. |
 | Minimality | 4/5 | Legacy and observer APIs are removed; two worker-control bridges remain exported. |
 | Intuitiveness | 5/5 | Names describe task update waiting, cancellation intent, and executor ownership. |
 | Functional uniqueness | 5/5 | No duplicate Get/Wait/Cancel or Local/Durable run coordinators remain. |
 | Local compatibility | 5/5 | Existing model behavior is preserved except intentional transcript-label clarification. |
-| Durable correctness | 4/5 | Protocol is coherent; production Store conformance remains the main external obligation. |
-| Operational safety | 4/5 | Notification construction and registration homogeneity are explicit; output retention remains host-defined. |
+| Durable correctness | 4/5 | Protocol is coherent; production Store conformance and automatic suspension release remain external obligations. |
+| Operational safety | 4/5 | Notification construction and registration homogeneity are explicit; output retention and rollout recovery remain host-defined. |
 
 The API is now suitable for Alpha stabilization. The next quality gate should focus on a
-real persistent Store conformance suite rather than adding more lifecycle surface.
+real persistent Store conformance suite and worker-runtime suspension release rather than
+adding more lifecycle surface.

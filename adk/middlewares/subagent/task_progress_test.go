@@ -1,0 +1,184 @@
+/*
+ * Copyright 2026 CloudWeGo Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package subagent
+
+import (
+	"context"
+	"fmt"
+	"strings"
+	"testing"
+
+	"github.com/bytedance/sonic"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/cloudwego/eino/adk"
+	"github.com/cloudwego/eino/adk/backgroundtask"
+	adksession "github.com/cloudwego/eino/adk/session"
+	"github.com/cloudwego/eino/schema"
+)
+
+func TestReadDurableTaskProgress(t *testing.T) {
+	ctx := context.Background()
+	store := adksession.NewInMemoryStore[*schema.Message](nil)
+	task := durableProgressTask(t, backgroundtask.StatusWaitingInput)
+	sessionID := task.Spec.ID + "/session"
+	require.NoError(t, store.AppendEvents(ctx, sessionID, []*adk.SessionEvent[*schema.Message]{
+		{
+			EventID: "query", Kind: adk.SessionEventMessage,
+			Message: schema.UserMessage("submitted query"),
+		},
+		{
+			EventID: "first", Kind: adk.SessionEventMessage,
+			Message: schema.AssistantMessage("first progress", nil),
+		},
+		{
+			EventID: "partial", Kind: adk.SessionEventMessageStreamIncomplete,
+			MessageStreamIncomplete: &adk.MessageStreamIncompleteEvent[*schema.Message]{
+				Message: schema.AssistantMessage("partial progress", nil),
+				Error:   "stream interrupted",
+			},
+		},
+		{
+			EventID: "interrupt", Kind: adk.SessionEventInterrupt,
+			Interrupt: &adk.InterruptEvent{Contexts: []*adk.InterruptContext{
+				{InterruptID: "agent:worker;tool:approve:call_1", Info: "approve?"},
+			}},
+		},
+	}))
+
+	format := func(_ context.Context, agentName string, message *schema.Message) (string, error) {
+		return agentName + ": " + message.Content, nil
+	}
+	progress, err := readDurableTaskProgress[*schema.Message](
+		ctx, store, task, "worker", format,
+	)
+	require.NoError(t, err)
+	assert.Contains(t, progress, "worker: first progress\nworker: partial progress")
+	assert.NotContains(t, progress, "submitted query")
+	assert.Contains(t, progress, "Input required:")
+	assert.Contains(t, progress, "agent:worker;tool:approve:call_1")
+	assert.Contains(t, progress, "approve?")
+}
+
+func TestReadDurableTaskProgressIncludesAgenticToolResults(t *testing.T) {
+	ctx := context.Background()
+	store := adksession.NewInMemoryStore[*schema.AgenticMessage](nil)
+	task := durableProgressTask(t, backgroundtask.StatusRunning)
+	sessionID := task.Spec.ID + "/session"
+	toolResult := &schema.AgenticMessage{
+		Role: schema.AgenticRoleTypeUser,
+		ContentBlocks: []*schema.ContentBlock{{
+			Type: schema.ContentBlockTypeFunctionToolResult,
+			FunctionToolResult: &schema.FunctionToolResult{
+				CallID: "call_1",
+				Name:   "lookup",
+				Content: []*schema.FunctionToolResultContentBlock{{
+					Type: schema.FunctionToolResultContentBlockTypeText,
+					Text: &schema.UserInputText{Text: "tool result"},
+				}},
+			},
+		}},
+	}
+	require.NoError(t, store.AppendEvents(ctx, sessionID, []*adk.SessionEvent[*schema.AgenticMessage]{
+		{
+			EventID: "query", Kind: adk.SessionEventMessage,
+			Message: schema.UserAgenticMessage("submitted query"),
+		},
+		{EventID: "tool-result", Kind: adk.SessionEventMessage, Message: toolResult},
+	}))
+
+	progress, err := readDurableTaskProgress[*schema.AgenticMessage](
+		ctx, store, task, "worker",
+		func(_ context.Context, agentName string, message *schema.AgenticMessage) (string, error) {
+			return agentName + ": " + message.String(), nil
+		},
+	)
+	require.NoError(t, err)
+	assert.Contains(t, progress, "tool result")
+	assert.NotContains(t, progress, "submitted query")
+}
+
+func TestDefaultTranscriptFormatStripsMessageExtra(t *testing.T) {
+	message := schema.AssistantMessage("done", nil)
+	message.Extra = map[string]any{"private": "value"}
+	formatted, err := defaultTranscriptFormat(
+		context.Background(), "worker", message,
+	)
+	require.NoError(t, err)
+	assert.Contains(t, formatted, `"agent_name":"worker"`)
+	assert.Contains(t, formatted, `"content":"done"`)
+	assert.NotContains(t, formatted, "private")
+
+	customSawExtra := false
+	custom := TranscriptFormat[*schema.Message](func(
+		_ context.Context,
+		_ string,
+		got *schema.Message,
+	) (string, error) {
+		customSawExtra = got.Extra["private"] == "value"
+		return got.Content, nil
+	})
+	_, err = custom(context.Background(), "worker", message)
+	require.NoError(t, err)
+	assert.True(t, customSawExtra)
+}
+
+func TestReadDurableTaskProgressBoundsRecentMessages(t *testing.T) {
+	ctx := context.Background()
+	store := adksession.NewInMemoryStore[*schema.Message](nil)
+	task := durableProgressTask(t, backgroundtask.StatusRunning)
+	sessionID := task.Spec.ID + "/session"
+	events := []*adk.SessionEvent[*schema.Message]{{
+		EventID: "query", Kind: adk.SessionEventMessage,
+		Message: schema.UserMessage("submitted query"),
+	}}
+	for i := 1; i <= maxTaskProgressRecords+2; i++ {
+		events = append(events, &adk.SessionEvent[*schema.Message]{
+			EventID: fmt.Sprintf("progress-%03d", i),
+			Kind:    adk.SessionEventMessage,
+			Message: schema.AssistantMessage(fmt.Sprintf("progress-%03d", i), nil),
+		})
+	}
+	require.NoError(t, store.AppendEvents(ctx, sessionID, events))
+
+	progress, err := readDurableTaskProgress[*schema.Message](
+		ctx, store, task, "worker",
+		func(_ context.Context, agentName string, message *schema.Message) (string, error) {
+			return agentName + ": " + message.Content, nil
+		},
+	)
+	require.NoError(t, err)
+	assert.Contains(t, progress, "transcript records omitted due to display limits")
+	assert.Equal(t, maxTaskProgressRecords, strings.Count(progress, "worker: progress-"))
+	assert.NotContains(t, progress, "worker: progress-001")
+	assert.Contains(t, progress, "worker: progress-102")
+}
+
+func durableProgressTask(t *testing.T, status backgroundtask.Status) *backgroundtask.Task {
+	t.Helper()
+	payload, err := sonic.Marshal(map[string]any{
+		"version": 2, "subagent_name": "worker", "query": "submitted query",
+	})
+	require.NoError(t, err)
+	return &backgroundtask.Task{
+		Spec: backgroundtask.Spec{
+			ID: "subagent_task", Kind: TaskTypeSubagent, Payload: payload,
+		},
+		Status: status,
+	}
+}

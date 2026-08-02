@@ -346,7 +346,7 @@ func TestTaskOutputTool_NonBlockingRunningThenTerminal(t *testing.T) {
 }
 
 func TestTaskOutputNonBlockingReturnsCurrentSnapshot(t *testing.T) {
-	store := bgtask.NewMemoryStore(nil)
+	store := bgtask.NewInMemoryStore(nil)
 	submitter := bgtask.New(context.Background(), &bgtask.Config{Store: store})
 	task, err := runWork(submitter, "racing task", false, completedWork("done"))
 	require.NoError(t, err)
@@ -383,7 +383,7 @@ func TestTaskStopTool(t *testing.T) {
 }
 
 func TestTaskStopTool_DurableRequestedAndCanceledText(t *testing.T) {
-	store := bgtask.NewMemoryStore(nil)
+	store := bgtask.NewInMemoryStore(nil)
 	mgr := bgtask.New(context.Background(), &bgtask.Config{Store: store})
 	defer closeWithTimeout(mgr)
 	tl := findTool(t, injectedTools(t, mgr), taskStopToolName)
@@ -492,7 +492,7 @@ func TestFormatTaskOutputTranscriptSemantics(t *testing.T) {
 	}
 	rendered := formatTask(reliableSubagent)
 	assert.Contains(t, rendered, "Event transcript (JSONL): /tasks/events.output")
-	assert.NotContains(t, rendered, "authoritative answer")
+	assert.Contains(t, rendered, "Result: authoritative answer")
 
 	incomplete := *reliableSubagent
 	incomplete.OutputFileErr = "write failed"
@@ -504,4 +504,36 @@ func TestFormatTaskOutputTranscriptSemantics(t *testing.T) {
 	noFile.Spec.OutputFile = ""
 	rendered = formatTask(&noFile)
 	assert.Contains(t, rendered, "Result: authoritative answer")
+}
+
+func TestResolveDurableTaskAddsProgressWithoutReplacingTerminalResult(t *testing.T) {
+	block := false
+	task := &bgtask.Task{
+		Spec: bgtask.Spec{
+			ID: "subagent_secret", Description: "research", Kind: "subagent",
+		},
+		Status: bgtask.StatusCompleted, ResultData: []byte("authoritative answer"),
+	}
+	result, err := resolveDurableTask(
+		context.Background(), nil, task,
+		taskOutputInput{TaskID: task.Spec.ID, Block: &block},
+		func(_ context.Context, got *bgtask.Task) (string, error) {
+			assert.Same(t, task, got)
+			return "Transcript:\nworker: progress", nil
+		},
+	)
+	require.NoError(t, err)
+	assert.Contains(t, result, "Transcript:\nworker: progress")
+	assert.Contains(t, result, "Result: authoritative answer")
+
+	result, err = resolveDurableTask(
+		context.Background(), nil, task,
+		taskOutputInput{TaskID: task.Spec.ID, Block: &block},
+		func(context.Context, *bgtask.Task) (string, error) {
+			return "", errors.New("session unavailable")
+		},
+	)
+	require.NoError(t, err)
+	assert.Contains(t, result, "Transcript unavailable: session unavailable")
+	assert.Contains(t, result, "Result: authoritative answer")
 }

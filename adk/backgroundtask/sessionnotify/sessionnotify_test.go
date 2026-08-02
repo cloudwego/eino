@@ -38,7 +38,7 @@ type recordingActivator struct {
 }
 
 func TestRuntimeValidatesCompleteDeliveryRoute(t *testing.T) {
-	store := backgroundtask.NewMemoryStore(nil)
+	store := backgroundtask.NewInMemoryStore(nil)
 	inbox := NewMemoryInbox()
 	sink, err := NewSink(inbox, &recordingActivator{inbox: inbox})
 	require.NoError(t, err)
@@ -63,7 +63,7 @@ func TestRuntimeValidatesCompleteDeliveryRoute(t *testing.T) {
 }
 
 func TestRuntimeRejectsIncompleteDeliveryRoute(t *testing.T) {
-	store := backgroundtask.NewMemoryStore(nil)
+	store := backgroundtask.NewInMemoryStore(nil)
 	runtime, err := NewRuntime(
 		backgroundtask.NewSinkRegistry(),
 		func(context.Context) error { return nil },
@@ -168,7 +168,7 @@ func TestSinkAcceptTargetActivationFailureRetainsInboxItem_BitsUT(t *testing.T) 
 }
 
 func TestTerminalTaskNotificationWakesParentSession_BitsUT(t *testing.T) {
-	store := backgroundtask.NewMemoryStore(nil)
+	store := backgroundtask.NewInMemoryStore(nil)
 	spec := backgroundtask.Spec{
 		ID: "task-1", ExecutorKey: "test", Payload: []byte("{}"),
 		SessionID: "session-1",
