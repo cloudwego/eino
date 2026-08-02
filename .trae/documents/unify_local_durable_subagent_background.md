@@ -293,15 +293,37 @@ even when subagents use Durable execution.
 
 ## 8. Durable Subagent Reconstruction
 
-Task payload stores logical, serializable identity:
+Task payload v2 stores only non-derivable, serializable invocation data:
 
 ```text
+version
 subagent_name
-prompt
-child_session_id
-checkpoint_id
-resume_mode
+query
 ```
+
+`query` is the initial user input passed to `Runner.Query`; it is not the registered
+Agent's system `Instruction`. The model-facing tool retains its compatible `prompt`
+field and maps it to `SubmitRequest.Query`.
+
+Child identities are deterministic and therefore not persisted:
+
+```text
+child session = <taskID>/session
+checkpoint    = <taskID>/checkpoint
+```
+
+The executor derives both from `Task.Spec.ID` on every worker. The background-task
+checkpoint envelope stores only interrupted target IDs and a sequence number.
+
+Resume has one Eino-native meaning: restore and continue from the derived checkpoint.
+Empty resume input calls `Runner.Resume`, which performs implicit resume-all. Supplied
+target data is validated against the interrupted target IDs and passed to
+`Runner.ResumeWithParams`. Sending a new query to the existing child session is not a
+resume mode and is not currently exposed.
+
+This is an intentional Alpha wire break. Version 1 payloads are rejected as unsupported
+rather than silently reinterpreted; hosts must drain or discard version 1 tasks before
+deploying workers that only understand version 2.
 
 It does not serialize agents, functions, output backends, event formatters, or
 `AgentRunOption` values.
@@ -369,6 +391,9 @@ The following APIs were removed rather than retained as Alpha compatibility alia
 - public observer registration;
 - `RegisterAgent`;
 - exported durable subagent `TaskPayload`;
+- durable payload `prompt`, `child_session_id`, `checkpoint_id`, `resume_mode`, and
+  `allow_empty_resume`;
+- `ResumeMode`, `ResumeNextTurn`, and next-turn resume-marker machinery;
 - public `canceling` state;
 - caller-controlled `Spec.LeaseExpiryPolicy`.
 

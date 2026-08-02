@@ -442,7 +442,7 @@ func newDurableAgentTool[M adk.MessageType](
 		}
 		outputFile := reserveAgentOutput(callCtx, config.OutputStore, config.OutputDir)
 		task, err := durablesubagent.Submit(callCtx, config.Manager, &durablesubagent.SubmitRequest{
-			SubAgentName: in.SubagentType, Prompt: prompt, Description: in.Description,
+			SubAgentName: in.SubagentType, Query: prompt, Description: in.Description,
 			SessionID: environment.SessionID(), OutputFile: outputFile,
 		})
 		if err != nil {

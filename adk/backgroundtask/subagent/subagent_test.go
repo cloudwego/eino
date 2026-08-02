@@ -19,8 +19,6 @@ package subagent
 import (
 	"context"
 	"encoding/json"
-	"errors"
-	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -41,11 +39,6 @@ type resumableTestAgent struct {
 
 type interruptThenCompleteAgent struct {
 	name string
-}
-
-type nextTurnAgent struct {
-	name  string
-	calls int
 }
 
 type cancelThenMessageAgent struct {
@@ -111,36 +104,6 @@ func (a *cancelThenMessageAgent) Resume(
 	options ...adk.AgentRunOption,
 ) *adk.AsyncIterator[*adk.AgentEvent] {
 	return a.Run(ctx, &adk.AgentInput{}, options...)
-}
-
-func (a *nextTurnAgent) Name(context.Context) string        { return a.name }
-func (a *nextTurnAgent) Description(context.Context) string { return "next-turn agent" }
-func (a *nextTurnAgent) Run(
-	ctx context.Context,
-	_ *adk.AgentInput,
-	_ ...adk.AgentRunOption,
-) *adk.AsyncIterator[*adk.AgentEvent] {
-	a.calls++
-	iter, generator := adk.NewAsyncIteratorPair[*adk.AgentEvent]()
-	if a.calls == 1 {
-		generator.Send(adk.Interrupt(ctx, "continue in another turn"))
-	} else {
-		generator.Send(adk.EventFromMessage(
-			schema.AssistantMessage("next turn complete", nil), nil, schema.Assistant, a.name,
-		))
-	}
-	generator.Close()
-	return iter
-}
-func (a *nextTurnAgent) Resume(
-	_ context.Context,
-	_ *adk.ResumeInfo,
-	_ ...adk.AgentRunOption,
-) *adk.AsyncIterator[*adk.AgentEvent] {
-	iter, generator := adk.NewAsyncIteratorPair[*adk.AgentEvent]()
-	generator.Send(&adk.AgentEvent{Err: errors.New("native resume must not be used")})
-	generator.Close()
-	return iter
 }
 
 func (a *interruptThenCompleteAgent) Name(context.Context) string { return a.name }
@@ -230,8 +193,6 @@ func TestExecutorRegistryListsExecutorKey_BitsUT(t *testing.T) {
 
 func resumeFixture(
 	t *testing.T,
-	mode ResumeMode,
-	allowEmpty bool,
 	targets ...string,
 ) (*Executor[*schema.Message], backgroundtask.Spec, []byte) {
 	t.Helper()
@@ -240,14 +201,11 @@ func resumeFixture(
 		Agent: &resumableTestAgent{name: "worker"},
 	}))
 	state, err := json.Marshal(checkpointState{
-		CheckpointID: "task/checkpoint", TargetIDs: targets,
-		AllowEmpty: allowEmpty, Mode: mode, Sequence: 1,
+		TargetIDs: targets, Sequence: 1,
 	})
 	require.NoError(t, err)
 	payload, err := json.Marshal(taskPayload{
-		Version: payloadVersion, SubAgentName: "worker", Prompt: "prompt",
-		ChildSessionID: "task/session", CheckpointID: "task/checkpoint",
-		ResumeMode: mode, AllowEmptyResume: allowEmpty,
+		Version: payloadVersion, SubAgentName: "worker", Query: "query",
 	})
 	require.NoError(t, err)
 	return executor, backgroundtask.Spec{
@@ -255,9 +213,9 @@ func resumeFixture(
 	}, state
 }
 
-func TestExecutorValidateResumeTargetsAndModes_BitsUT(t *testing.T) {
-	t.Run("native exact target", func(t *testing.T) {
-		executor, spec, checkpoint := resumeFixture(t, ResumeNativeInterrupt, false, "approval")
+func TestExecutorValidateResumeTargets_BitsUT(t *testing.T) {
+	t.Run("exact target", func(t *testing.T) {
+		executor, spec, checkpoint := resumeFixture(t, "approval")
 		result, err := executor.ValidateResume(
 			context.Background(), spec, checkpoint, []byte(`{"approval":{"approved":true}}`),
 		)
@@ -265,8 +223,8 @@ func TestExecutorValidateResumeTargetsAndModes_BitsUT(t *testing.T) {
 		assert.JSONEq(t, `{"approval":{"approved":true}}`, string(result))
 	})
 
-	t.Run("native unknown target", func(t *testing.T) {
-		executor, spec, checkpoint := resumeFixture(t, ResumeNativeInterrupt, false, "approval")
+	t.Run("unknown target", func(t *testing.T) {
+		executor, spec, checkpoint := resumeFixture(t, "approval")
 		_, err := executor.ValidateResume(
 			context.Background(), spec, checkpoint, []byte(`{"other":"value"}`),
 		)
@@ -274,52 +232,38 @@ func TestExecutorValidateResumeTargetsAndModes_BitsUT(t *testing.T) {
 		assert.Contains(t, err.Error(), "not interrupted")
 	})
 
-	t.Run("empty acknowledgement policy", func(t *testing.T) {
-		executor, spec, checkpoint := resumeFixture(t, ResumeNativeInterrupt, false, "approval")
-		_, err := executor.ValidateResume(context.Background(), spec, checkpoint, nil)
-		require.Error(t, err)
-
-		executor, spec, checkpoint = resumeFixture(t, ResumeNativeInterrupt, true, "approval")
+	t.Run("empty resume uses implicit resume all", func(t *testing.T) {
+		executor, spec, checkpoint := resumeFixture(t, "approval")
 		result, err := executor.ValidateResume(context.Background(), spec, checkpoint, nil)
 		require.NoError(t, err)
 		assert.Empty(t, result)
 	})
 
-	t.Run("next turn requires utf8", func(t *testing.T) {
-		executor, spec, checkpoint := resumeFixture(t, ResumeNextTurn, false)
-		result, err := executor.ValidateResume(
-			context.Background(), spec, checkpoint, []byte("continue"),
-		)
-		require.NoError(t, err)
-		assert.Equal(t, []byte("continue"), result)
-
-		_, err = executor.ValidateResume(context.Background(), spec, checkpoint, []byte{0xff})
-		require.Error(t, err)
+	t.Run("non-object resume data is rejected", func(t *testing.T) {
+		executor, spec, checkpoint := resumeFixture(t, "approval")
+		_, err := executor.ValidateResume(context.Background(), spec, checkpoint, []byte("continue"))
+		require.ErrorContains(t, err, "resume targets are invalid")
 	})
 
-	t.Run("checkpoint schema must match task", func(t *testing.T) {
-		executor, spec, _ := resumeFixture(t, ResumeNativeInterrupt, true, "approval")
+	t.Run("checkpoint schema must be valid", func(t *testing.T) {
+		executor, spec, _ := resumeFixture(t, "approval")
 		_, err := executor.ValidateResume(context.Background(), spec, []byte("invalid"), nil)
 		require.Error(t, err)
 
-		executor, spec, checkpoint := resumeFixture(t, ResumeNativeInterrupt, true, "approval")
-		var state checkpointState
-		require.NoError(t, json.Unmarshal(checkpoint, &state))
-		state.Mode = ResumeNextTurn
-		payload, marshalErr := json.Marshal(state)
+		checkpoint, marshalErr := json.Marshal(checkpointState{})
 		require.NoError(t, marshalErr)
-		_, err = executor.ValidateResume(context.Background(), spec, payload, nil)
+		_, err = executor.ValidateResume(context.Background(), spec, checkpoint, nil)
 		require.Error(t, err)
 	})
 }
 
-func TestSubagentPayloadV1Validation_BitsUT(t *testing.T) {
-	executor, spec, _ := resumeFixture(t, ResumeNativeInterrupt, true, "approval")
+func TestSubagentPayloadV2Validation_BitsUT(t *testing.T) {
+	executor, spec, _ := resumeFixture(t, "approval")
 	require.NoError(t, executor.ValidateSpec(spec))
 
 	var payload taskPayload
 	require.NoError(t, json.Unmarshal(spec.Payload, &payload))
-	payload.Version = 2
+	payload.Version = 1
 	var err error
 	spec.Payload, err = json.Marshal(payload)
 	require.NoError(t, err)
@@ -330,9 +274,15 @@ func TestSubagentPayloadV1Validation_BitsUT(t *testing.T) {
 	spec.Payload, err = json.Marshal(payload)
 	require.NoError(t, err)
 	require.ErrorContains(t, executor.ValidateSpec(spec), "subagent name")
+
+	payload.SubAgentName = "worker"
+	payload.Query = ""
+	spec.Payload, err = json.Marshal(payload)
+	require.NoError(t, err)
+	require.ErrorContains(t, executor.ValidateSpec(spec), "query")
 }
 
-func TestSubmitPersistsIndependentChildIdentities_BitsUT(t *testing.T) {
+func TestSubmitPersistsMinimalPayloadAndDerivesChildIdentities_BitsUT(t *testing.T) {
 	executor := &Executor[*schema.Message]{}
 	require.NoError(t, executor.Register("worker", &AgentRegistration[*schema.Message]{
 		Agent: &resumableTestAgent{name: "worker"},
@@ -343,23 +293,19 @@ func TestSubmitPersistsIndependentChildIdentities_BitsUT(t *testing.T) {
 	defer manager.Close(context.Background())
 
 	task, err := Submit(context.Background(), manager, &SubmitRequest{
-		SubAgentName: "worker", Prompt: "work", Description: "child work",
-		SessionID: "parent-session", ResumeMode: ResumeNativeInterrupt,
+		SubAgentName: "worker", Query: "work", Description: "child work",
+		SessionID: "parent-session",
 	})
 	require.NoError(t, err)
-	var payload taskPayload
+	var payload map[string]any
 	require.NoError(t, json.Unmarshal(task.Spec.Payload, &payload))
-	assert.Equal(t, task.Spec.ID+"/session", payload.ChildSessionID)
-	assert.Equal(t, task.Spec.ID+"/checkpoint", payload.CheckpointID)
+	assert.Equal(t, map[string]any{
+		"version": float64(payloadVersion), "subagent_name": "worker", "query": "work",
+	}, payload)
+	assert.Equal(t, task.Spec.ID+"/session", childSessionID(task.Spec.ID))
+	assert.Equal(t, task.Spec.ID+"/checkpoint", checkpointID(task.Spec.ID))
 	assert.Equal(t, "parent-session", task.Spec.SessionID)
 	assert.Equal(t, task.Spec.SessionID, task.Spec.Notify.TargetID)
-
-	reconstructed, err := manager.Get(context.Background(), task.Spec.ID)
-	require.NoError(t, err)
-	var reconstructedPayload taskPayload
-	require.NoError(t, json.Unmarshal(reconstructed.Spec.Payload, &reconstructedPayload))
-	assert.Equal(t, payload.ChildSessionID, reconstructedPayload.ChildSessionID)
-	assert.Equal(t, payload.CheckpointID, reconstructedPayload.CheckpointID)
 }
 
 func executionFixture(
@@ -374,8 +320,8 @@ func executionFixture(
 	require.NoError(t, executors.Register(executor))
 	manager := backgroundtask.New(context.Background(), &backgroundtask.Config{Executors: executors})
 	task, err := Submit(context.Background(), manager, &SubmitRequest{
-		SubAgentName: agent.name, Prompt: "work", Description: "work",
-		SessionID: "parent", ResumeMode: ResumeNativeInterrupt,
+		SubAgentName: agent.name, Query: "work", Description: "work",
+		SessionID: "parent",
 	})
 	require.NoError(t, err)
 	runner := adk.NewRunner(context.Background(), adk.RunnerConfig{
@@ -398,7 +344,6 @@ func TestExecutorInterruptBecomesWaitingInput_BitsUT(t *testing.T) {
 	assert.Equal(t, backgroundtask.StateWaitingInput, result.Status)
 	var state checkpointState
 	require.NoError(t, json.Unmarshal(result.Checkpoint, &state))
-	assert.Equal(t, task.Spec.ID+"/checkpoint", state.CheckpointID)
 	require.Len(t, state.TargetIDs, 1)
 	assert.NotEmpty(t, state.TargetIDs[0])
 	assert.Empty(t, result.ResultData, "an interrupt is not a terminal message result")
@@ -451,7 +396,7 @@ func TestExecutorReconstructsRegisteredRunOptionsForEveryAttempt_BitsUT(t *testi
 
 	for i := 0; i < 2; i++ {
 		task, err := Submit(context.Background(), manager, &SubmitRequest{
-			SubAgentName: agent.name, Prompt: "work", Description: "work", SessionID: "parent",
+			SubAgentName: agent.name, Query: "work", Description: "work", SessionID: "parent",
 		})
 		require.NoError(t, err)
 		require.NoError(t, runner.ExecuteBackgroundTask(context.Background(), manager, task.Spec.ID))
@@ -481,7 +426,7 @@ func TestStopControlWinsOverLateFinalMessage_BitsUT(t *testing.T) {
 	require.NoError(t, registry.Register(executor))
 	manager := backgroundtask.New(context.Background(), &backgroundtask.Config{Executors: registry})
 	task, err := Submit(context.Background(), manager, &SubmitRequest{
-		SubAgentName: agent.name, Prompt: "work", Description: "work", SessionID: "parent",
+		SubAgentName: agent.name, Query: "work", Description: "work", SessionID: "parent",
 	})
 	require.NoError(t, err)
 	runner := adk.NewRunner(context.Background(), adk.RunnerConfig{
@@ -513,13 +458,6 @@ func TestExecutorDrainUsesDurableRunnerCheckpoint_BitsUT(t *testing.T) {
 	assert.Equal(t, backgroundtask.StateWaitingInput, result.Status)
 }
 
-func TestNextTurnResumeMarkerRoundTrip_BitsUT(t *testing.T) {
-	message, err := resumeMessage[*schema.Message]("continue", "task:1")
-	require.NoError(t, err)
-	assert.Equal(t, "task:1", messageResumeMarker(message))
-	assert.Equal(t, "continue", message.Content)
-}
-
 func TestSubAgentTaskResumesAfterManagerReconstruction_BitsUT(t *testing.T) {
 	sessionStore := adksession.NewInMemoryStore[*schema.Message](nil)
 	outputStore := filesystem.NewInMemoryBackend()
@@ -546,9 +484,8 @@ func TestSubAgentTaskResumesAfterManagerReconstruction_BitsUT(t *testing.T) {
 		Store: taskStore, Executors: executors,
 	})
 	task, err := Submit(context.Background(), manager1, &SubmitRequest{
-		SubAgentName: "worker", Prompt: "do work", Description: "durable child",
+		SubAgentName: "worker", Query: "do work", Description: "durable child",
 		SessionID: "parent-session", OutputFile: "/tasks/worker.events",
-		ResumeMode: ResumeNativeInterrupt,
 	})
 	require.NoError(t, err)
 	runner1 := adk.NewRunner(context.Background(), adk.RunnerConfig{
@@ -568,13 +505,8 @@ func TestSubAgentTaskResumesAfterManagerReconstruction_BitsUT(t *testing.T) {
 		Store: taskStore, Executors: executors,
 	})
 	defer manager2.Close(context.Background())
-	resumeData, err := json.Marshal(map[string]any{
-		state.TargetIDs[0]: map[string]any{"approved": true},
-	})
-	require.NoError(t, err)
 	pending, err := manager2.Resume(context.Background(), &backgroundtask.ResumeRequest{
 		TaskID: task.Spec.ID, ExpectedVersion: waiting.Version,
-		Data: resumeData,
 	})
 	require.NoError(t, err)
 	assert.Equal(t, backgroundtask.StatePending, pending.Status)
@@ -606,85 +538,7 @@ func TestSubAgentTaskResumesAfterManagerReconstruction_BitsUT(t *testing.T) {
 
 	var persisted taskPayload
 	require.NoError(t, json.Unmarshal(completed.Spec.Payload, &persisted))
-	assert.Equal(t, task.Spec.ID+"/session", persisted.ChildSessionID)
-	assert.Equal(t, task.Spec.ID+"/checkpoint", persisted.CheckpointID)
-}
-
-func TestSubAgentTaskContinuesSameSessionWithoutDuplicateResumeInput_BitsUT(t *testing.T) {
-	sessionStore := adksession.NewInMemoryStore[*schema.Message](nil)
-	agent := &nextTurnAgent{name: "worker"}
-	executor := &Executor[*schema.Message]{}
-	require.NoError(t, executor.Register("worker", &AgentRegistration[*schema.Message]{Agent: agent}))
-	executors := backgroundtask.NewExecutorRegistry()
-	require.NoError(t, executors.Register(executor))
-	manager := backgroundtask.New(context.Background(), &backgroundtask.Config{
-		Executors: executors,
-	})
-	defer manager.Close(context.Background())
-	task, err := Submit(context.Background(), manager, &SubmitRequest{
-		SubAgentName: "worker", Prompt: "start", Description: "multi turn",
-		SessionID: "parent-session", ResumeMode: ResumeNextTurn,
-	})
-	require.NoError(t, err)
-	parentRunner := adk.NewRunner(context.Background(), adk.RunnerConfig{
-		Agent: agent, CheckPointStore: sessionStore,
-		SessionID: "parent-session", SessionStore: sessionStore,
-	})
-	require.NoError(t, parentRunner.ExecuteBackgroundTask(context.Background(), manager, task.Spec.ID))
-	waiting, err := manager.Get(context.Background(), task.Spec.ID)
-	require.NoError(t, err)
-	require.Equal(t, backgroundtask.StateWaitingInput, waiting.Status)
-
-	pending, err := manager.Resume(context.Background(), &backgroundtask.ResumeRequest{
-		TaskID: task.Spec.ID, ExpectedVersion: waiting.Version,
-		Data: []byte("continue"),
-	})
-	require.NoError(t, err)
-	require.Equal(t, backgroundtask.StatePending, pending.Status)
-	require.NoError(t, parentRunner.ExecuteBackgroundTask(context.Background(), manager, task.Spec.ID))
-	completed, err := manager.Get(context.Background(), task.Spec.ID)
-	require.NoError(t, err)
-	require.Equal(t, backgroundtask.StateCompleted, completed.Status)
-
-	var payload taskPayload
-	require.NoError(t, json.Unmarshal(completed.Spec.Payload, &payload))
-	var checkpoint checkpointState
-	require.NoError(t, json.Unmarshal(waiting.Checkpoint, &checkpoint))
-	marker := fmt.Sprintf("%s:%d", completed.Spec.ID, checkpoint.Sequence)
-	assert.True(t, hasMarkerInSession(t, sessionStore, payload.ChildSessionID, marker))
-	assert.Equal(t, 1, countMarkerInSession(t, sessionStore, payload.ChildSessionID, marker))
-}
-
-func hasMarkerInSession(
-	t *testing.T,
-	store adk.SessionEventStore[*schema.Message],
-	sessionID, marker string,
-) bool {
-	t.Helper()
-	return countMarkerInSession(t, store, sessionID, marker) > 0
-}
-
-func countMarkerInSession(
-	t *testing.T,
-	store adk.SessionEventStore[*schema.Message],
-	sessionID, marker string,
-) int {
-	t.Helper()
-	after := ""
-	count := 0
-	for {
-		page, err := store.LoadEvents(context.Background(), sessionID, &adk.LoadSessionEventsRequest{
-			After: after, Limit: 100,
-		})
-		require.NoError(t, err)
-		for _, event := range page.Events {
-			if event != nil && messageResumeMarker(event.Message) == marker {
-				count++
-			}
-		}
-		if page.Next == "" || page.Next == after || len(page.Events) == 0 {
-			return count
-		}
-		after = page.Next
-	}
+	assert.Equal(t, "do work", persisted.Query)
+	assert.Equal(t, childSessionID(task.Spec.ID), completed.Spec.ID+"/session")
+	assert.Equal(t, checkpointID(task.Spec.ID), completed.Spec.ID+"/checkpoint")
 }
