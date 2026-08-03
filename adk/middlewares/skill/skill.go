@@ -17,17 +17,19 @@
 package skill
 
 import (
-	"bytes"
 	"context"
+	"crypto/md5"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log"
 	"strings"
-	"text/template"
 
 	"github.com/slongfield/pyfmt"
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/adk/internal"
+	"github.com/cloudwego/eino/adk/middlewares/internal/systemreminder"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
@@ -272,10 +274,150 @@ type typedSkillHandler[M adk.MessageType] struct {
 	tool        *typedSkillTool[M]
 }
 
+// BeforeAgent injects the skill tool and system prompt, then marks the start of a new
+// turn for the available-skills reminder.
+//
+// It does NOT call List() or build the reminder here. Both are deferred to the first
+// model call of the turn (BeforeModelRewriteState), because the add/change diff needs the
+// previous reminder's digest, which lives in the full message history — and
+// runCtx.AgentInput.Messages holds only the current turn's input, so the prior reminder
+// is not visible from here. This hook only sets a run-local "new turn" mark;
+// BeforeModelRewriteState sees it, does List()+diff+insert once, then clears it, so a
+// multi-call ReAct turn lists skills at most once.
 func (h *typedSkillHandler[M]) BeforeAgent(ctx context.Context, runCtx *adk.ChatModelAgentContext[M]) (context.Context, *adk.ChatModelAgentContext[M], error) {
 	runCtx.Instruction = runCtx.Instruction + "\n" + h.instruction
 	runCtx.Tools = append(runCtx.Tools, h.tool)
+
+	if runCtx.AgentInput == nil {
+		return ctx, runCtx, nil
+	}
+	_ = adk.SetRunLocalValue(ctx, skillsPendingKey, true)
 	return ctx, runCtx, nil
+}
+
+// BeforeModelRewriteState refreshes the available-skills reminder on the first model call
+// of a turn: if BeforeAgent marked a new turn, it lists the current skills, diffs them
+// against the previous reminder's digest — read from the FULL history (state.Messages) —
+// and inserts a reminder advertising only the added/changed skills, then clears the mark
+// so later model calls in the same ReAct turn do nothing (List() runs at most once/turn).
+//
+// List() runs here, not in BeforeAgent, because the diff needs prior turns' reminders,
+// which only state.Messages carries; BeforeAgent's runCtx.AgentInput.Messages holds just
+// the current input.
+//
+// Design note: advertising only the delta and appending (rather than rewriting or
+// removing earlier reminders) is deliberate. A per-change delta stays compact across a
+// long conversation and leaves the already-cached prefix (KV cache) untouched; on
+// conflicting system messages the model treats a later one as higher priority, so a
+// newer delta overrides a stale earlier reminder. A turn with no added/changed skill
+// inserts nothing (a pure removal does not trigger a reminder), so the prefix cache holds.
+func (h *typedSkillHandler[M]) BeforeModelRewriteState(ctx context.Context, state *adk.TypedChatModelAgentState[M], _ *adk.TypedModelContext[M]) (context.Context, *adk.TypedChatModelAgentState[M], error) {
+	if state == nil {
+		return ctx, state, nil
+	}
+	// Align any reminders reconstructed from history with the configured role before the
+	// model call; the fresh insert below is already built with that role.
+	state.Messages = systemreminder.NormalizeReminderRoles(state.Messages)
+
+	pv, ok, err := adk.GetRunLocalValue(ctx, skillsPendingKey)
+	if err != nil || !ok {
+		// err only happens when called outside a valid agent execution context (a
+		// structural misuse). The reminder is best-effort, so skip it rather than
+		// fail the whole model call.
+		return ctx, state, nil
+	}
+	if pending, _ := pv.(bool); !pending {
+		// Already handled this turn (or never marked): later model calls skip.
+		return ctx, state, nil
+	}
+	// Consume the new-turn mark so List()+diff runs at most once per turn.
+	_ = adk.SetRunLocalValue(ctx, skillsPendingKey, false)
+
+	skills, err := h.tool.b.List(ctx)
+	if err != nil {
+		log.Printf("skill middleware: failed to list skills for available-skills reminder, skipping: %v", err)
+		return ctx, state, nil
+	}
+	if len(skills) == 0 {
+		return ctx, state, nil
+	}
+
+	prev, _ := systemreminder.LatestExtra(state.Messages, skillsReminderExtraKey, skillsDigestExtraKey)
+	prevSet := make(map[string]struct{}, len(toStringSlice(prev)))
+	for _, d := range toStringSlice(prev) {
+		prevSet[d] = struct{}{}
+	}
+
+	// A skill is advertised only when its digest is absent from the previous reminder — a
+	// newly added skill, or one whose name/description (hence digest) changed. `digests`
+	// is the full current snapshot, stored in the reminder's Extra so the next turn diffs
+	// against the complete advertised set, not just this delta.
+	changed := make([]FrontMatter, 0, len(skills))
+	digests := make([]string, 0, len(skills))
+	for _, sk := range skills {
+		d := skillDigest(sk)
+		digests = append(digests, d)
+		if _, ok := prevSet[d]; ok {
+			continue
+		}
+		changed = append(changed, FrontMatter{Name: sk.Name, Description: sk.Description})
+	}
+	if len(changed) == 0 {
+		return ctx, state, nil
+	}
+
+	extra := map[string]any{skillsDigestExtraKey: digests}
+	state.Messages = systemreminder.Insert(ctx, state.Messages, skillsReminderExtraKey, buildSkillsSectionFromEntries(changed), extra)
+	return ctx, state, nil
+}
+
+const (
+	// skillsReminderExtraKey tags a skill reminder message in history.
+	skillsReminderExtraKey = "__eino_skill_available_skills__"
+	// skillsDigestExtraKey stores, in a skill reminder's Extra, the JSON array of
+	// MD5(name+description) digests of the skills it advertised, for cross-turn diffing.
+	skillsDigestExtraKey = "__eino_skill_digests__"
+	// skillsPendingKey marks (run-local) the start of a new turn, set by BeforeAgent. On
+	// the first model call of the turn BeforeModelRewriteState sees the mark, refreshes the
+	// available-skills reminder (List + diff + insert), then clears it so a multi-call ReAct
+	// turn lists skills at most once.
+	skillsPendingKey = "__eino_skill_reminder_pending__"
+)
+
+// skillDigest returns the MD5(name+description) digest of a single skill.
+func skillDigest(sk FrontMatter) string {
+	sum := md5.Sum([]byte(sk.Name + "\x00" + sk.Description))
+	return hex.EncodeToString(sum[:])
+}
+
+// toStringSlice coerces a value read back from message Extra (which may be []string
+// or, after a JSON round-trip through session persistence, []any) into []string.
+func toStringSlice(v any) []string {
+	switch s := v.(type) {
+	case []string:
+		return s
+	case []any:
+		out := make([]string, 0, len(s))
+		for _, e := range s {
+			str, _ := e.(string)
+			out = append(out, str)
+		}
+		return out
+	}
+	return nil
+}
+
+func buildSkillsSectionFromEntries(skills []FrontMatter) string {
+	preamble := internal.SelectPrompt(internal.I18nPrompts{
+		English: availableSkillsPreamble,
+		Chinese: availableSkillsPreambleChinese,
+	})
+	var sb strings.Builder
+	sb.WriteString(preamble)
+	for _, sk := range skills {
+		sb.WriteString(fmt.Sprintf("\n- %s: %s", sk.Name, sk.Description))
+	}
+	return sb.String()
 }
 
 func (h *typedSkillHandler[M]) WrapModel(ctx context.Context, m model.BaseModel[M], _ *adk.TypedModelContext[M]) (model.BaseModel[M], error) {
@@ -374,10 +516,6 @@ type typedSkillTool[M adk.MessageType] struct {
 	formatForkResult  func(ctx context.Context, in TypedSubAgentOutput[M]) (string, error)
 }
 
-type descriptionTemplateHelper struct {
-	Matters []FrontMatter
-}
-
 func (s *typedSkillTool[M]) Info(ctx context.Context) (*schema.ToolInfo, error) {
 	skills, err := s.b.List(ctx)
 	if err != nil {
@@ -388,16 +526,12 @@ func (s *typedSkillTool[M]) Info(ctx context.Context) (*schema.ToolInfo, error) 
 	if s.customToolDesc != nil {
 		fullDesc = s.customToolDesc(ctx, skills)
 	} else {
-		desc, renderErr := renderToolDescription(skills)
-		if renderErr != nil {
-			return nil, fmt.Errorf("failed to render skill tool description: %w", renderErr)
-		}
-
-		descBase := internal.SelectPrompt(internal.I18nPrompts{
+		// The available-skills list is no longer embedded in the tool description; it is
+		// injected as a mid-conversation system reminder in BeforeAgent.
+		fullDesc = internal.SelectPrompt(internal.I18nPrompts{
 			English: toolDescriptionBase,
 			Chinese: toolDescriptionBaseChinese,
 		})
-		fullDesc = descBase + desc
 	}
 
 	oneOf, err := s.buildParamsOneOf(ctx)
@@ -414,6 +548,7 @@ func (s *typedSkillTool[M]) Info(ctx context.Context) (*schema.ToolInfo, error) 
 
 type inputArguments struct {
 	Skill string `json:"skill"`
+	Args  string `json:"args"`
 }
 
 func (s *typedSkillTool[M]) InvokableRun(ctx context.Context, argumentsInJSON string, _ ...tool.Option) (string, error) {
@@ -446,14 +581,22 @@ func (s *typedSkillTool[M]) setActiveModel(ctx context.Context, modelName string
 
 func defaultToolParams() map[string]*schema.ParameterInfo {
 	skillParamDesc := internal.SelectPrompt(internal.I18nPrompts{
-		English: "The skill name (no arguments). E.g., \"pdf\" or \"xlsx\"",
-		Chinese: "Skill 名称（无需其他参数）。例如：\"pdf\" 或 \"xlsx\"",
+		English: "The skill name. E.g., \"pdf\" or \"xlsx\"",
+		Chinese: "Skill 名称。例如：\"pdf\" 或 \"xlsx\"",
 	})
 	return map[string]*schema.ParameterInfo{
 		"skill": {
 			Type:     schema.String,
 			Desc:     skillParamDesc,
 			Required: true,
+		},
+		"args": {
+			Type: schema.String,
+			Desc: internal.SelectPrompt(internal.I18nPrompts{
+				English: "Optional arguments for the skill",
+				Chinese: "传给该 skill 的可选参数",
+			}),
+			Required: false,
 		},
 	}
 }
@@ -485,7 +628,9 @@ func (s *typedSkillTool[M]) buildParamsOneOf(ctx context.Context) (*schema.Param
 
 func (s *typedSkillTool[M]) buildSkillResult(ctx context.Context, skill Skill, rawArguments string) (string, error) {
 	if s.buildContent == nil {
-		return s.defaultSkillContent(skill), nil
+		args := &inputArguments{}
+		_ = json.Unmarshal([]byte(rawArguments), args)
+		return s.defaultSkillContent(skill, args.Args), nil
 	}
 	content, err := s.buildContent(ctx, skill, rawArguments)
 	if err != nil {
@@ -494,7 +639,7 @@ func (s *typedSkillTool[M]) buildSkillResult(ctx context.Context, skill Skill, r
 	return content, nil
 }
 
-func (s *typedSkillTool[M]) defaultSkillContent(skill Skill) string {
+func (s *typedSkillTool[M]) defaultSkillContent(skill Skill, args string) string {
 	resultFmt := internal.SelectPrompt(internal.I18nPrompts{
 		English: toolResult,
 		Chinese: toolResultChinese,
@@ -504,7 +649,14 @@ func (s *typedSkillTool[M]) defaultSkillContent(skill Skill) string {
 		Chinese: userContentChinese,
 	})
 
-	return fmt.Sprintf(resultFmt, skill.Name) + fmt.Sprintf(contentFmt, skill.BaseDirectory, skill.Content)
+	content := fmt.Sprintf(resultFmt, skill.Name) + fmt.Sprintf(contentFmt, skill.BaseDirectory, skill.Content)
+	if args != "" {
+		content += fmt.Sprintf(internal.SelectPrompt(internal.I18nPrompts{
+			English: argumentsSuffix,
+			Chinese: argumentsSuffixChinese,
+		}), args)
+	}
+	return content
 }
 
 func (s *typedSkillTool[M]) runAgentMode(ctx context.Context, skill Skill, forkHistory bool, rawArguments string) (string, error) {
@@ -693,19 +845,4 @@ func (s *typedSkillTool[M]) getMessagesFromState(ctx context.Context) ([]M, erro
 		return nil, fmt.Errorf("fork mode is not supported for AgenticMessage; use agent mode instead")
 	}
 	return messages, nil
-}
-
-func renderToolDescription(matters []FrontMatter) (string, error) {
-	tpl, err := template.New("skills").Parse(toolDescriptionTemplate)
-	if err != nil {
-		return "", err
-	}
-
-	var buf bytes.Buffer
-	err = tpl.Execute(&buf, descriptionTemplateHelper{Matters: matters})
-	if err != nil {
-		return "", err
-	}
-
-	return buf.String(), nil
 }

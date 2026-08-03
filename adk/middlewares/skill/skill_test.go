@@ -86,27 +86,9 @@ func TestTool(t *testing.T) {
 	info, err := to.Info(ctx)
 	assert.NoError(t, err)
 	assert.Equal(t, "skill", info.Name)
-	desc := strings.TrimPrefix(info.Desc, toolDescriptionBase)
-	assert.Equal(t, `
-<available_skills>
-<skill>
-<name>
-name1
-</name>
-<description>
-desc1
-</description>
-</skill>
-<skill>
-<name>
-name2
-</name>
-<description>
-desc2
-</description>
-</skill>
-</available_skills>
-`, desc)
+	// The available-skills list is no longer embedded in the description; it is injected
+	// as a mid-conversation system reminder. The description is now just the base text.
+	assert.Equal(t, toolDescriptionBase, info.Desc)
 
 	result, err := to.InvokableRun(ctx, `{"skill": "name1"}`)
 	assert.NoError(t, err)
@@ -127,27 +109,7 @@ content1`, result)
 	info, err = to.Info(ctx)
 	assert.NoError(t, err)
 	assert.Equal(t, "skill", info.Name)
-	desc = strings.TrimPrefix(info.Desc, toolDescriptionBaseChinese)
-	assert.Equal(t, `
-<available_skills>
-<skill>
-<name>
-name1
-</name>
-<description>
-desc1
-</description>
-</skill>
-<skill>
-<name>
-name2
-</name>
-<description>
-desc2
-</description>
-</skill>
-</available_skills>
-`, desc)
+	assert.Equal(t, toolDescriptionBaseChinese, info.Desc)
 
 	result, err = to.InvokableRun(ctx, `{"skill": "name1"}`)
 	assert.NoError(t, err)
@@ -787,10 +749,18 @@ func TestSkillToolInfo(t *testing.T) {
 		}
 		info, err := st.Info(ctx)
 		require.NoError(t, err)
-		assert.Contains(t, info.Desc, "alpha")
-		assert.Contains(t, info.Desc, "desc-alpha")
-		assert.Contains(t, info.Desc, "beta")
-		assert.Contains(t, info.Desc, "desc-beta")
+		// The skill list is no longer embedded in the description; it is injected as a
+		// mid-conversation system reminder by BeforeModelRewriteState. The section builder
+		// is what carries the skill names/descriptions.
+		assert.NotContains(t, info.Desc, "desc-alpha")
+
+		skills, err := st.b.List(ctx)
+		require.NoError(t, err)
+		section := buildSkillsSectionFromEntries(skills)
+		assert.Contains(t, section, "alpha")
+		assert.Contains(t, section, "desc-alpha")
+		assert.Contains(t, section, "beta")
+		assert.Contains(t, section, "desc-beta")
 	})
 
 	t.Run("custom tool params is used", func(t *testing.T) {
@@ -1350,4 +1320,93 @@ func TestNewTypedAgenticMessage(t *testing.T) {
 	assert.NotNil(t, mw)
 
 	var _ adk.TypedChatModelAgentMiddleware[*schema.AgenticMessage] = mw
+}
+
+// TestSkill_BeforeAgent_DoesNotMutateMessages verifies the redesigned BeforeAgent no
+// longer inserts the reminder into the message list — it stashes the pending reminder
+// as run-local state and BeforeModelRewriteState performs the insertion. So BeforeAgent
+// must leave AgentInput.Messages untouched (the actual insertion is covered by the
+// Runner-based tests in skill_refresh_test.go).
+func TestSkill_BeforeAgent_DoesNotMutateMessages(t *testing.T) {
+	ctx := context.Background()
+	h := &typedSkillHandler[*schema.Message]{
+		tool: &typedSkillTool[*schema.Message]{
+			b: &inMemoryBackend{m: []Skill{
+				{FrontMatter: FrontMatter{Name: "alpha", Description: "desc-alpha"}},
+			}},
+		},
+	}
+
+	user := schema.UserMessage("hi")
+	runCtx := &adk.ChatModelAgentContext[*schema.Message]{
+		AgentInput: &adk.TypedAgentInput[*schema.Message]{Messages: []*schema.Message{user}},
+	}
+
+	_, nrc, err := h.BeforeAgent(ctx, runCtx)
+	require.NoError(t, err)
+	require.Len(t, nrc.AgentInput.Messages, 1)
+	assert.Equal(t, user, nrc.AgentInput.Messages[0])
+}
+
+// TestSkill_DigestHelpers covers the cross-turn diffing helpers: skillDigest must be
+// stable and change when a name or description changes, and toStringSlice must handle
+// the []string and JSON-round-tripped []any forms read back from message Extra.
+func TestSkill_DigestHelpers(t *testing.T) {
+	alpha := FrontMatter{Name: "alpha", Description: "d-alpha"}
+	beta := FrontMatter{Name: "beta", Description: "d-beta"}
+
+	// Identical input → identical digest.
+	assert.Equal(t, skillDigest(alpha), skillDigest(alpha))
+	// Distinct skills → distinct digests.
+	assert.NotEqual(t, skillDigest(alpha), skillDigest(beta))
+	// Description change → different digest.
+	assert.NotEqual(t, skillDigest(alpha), skillDigest(FrontMatter{Name: "alpha", Description: "d-alpha-CHANGED"}))
+	// Name change → different digest.
+	assert.NotEqual(t, skillDigest(alpha), skillDigest(FrontMatter{Name: "alpha2", Description: "d-alpha"}))
+
+	// toStringSlice handles both []string and the []any form from a JSON round-trip.
+	digests := []string{skillDigest(alpha), skillDigest(beta)}
+	assert.Equal(t, digests, toStringSlice(digests))
+	anyForm := make([]any, len(digests))
+	for i, s := range digests {
+		anyForm[i] = s
+	}
+	assert.Equal(t, digests, toStringSlice(anyForm))
+	assert.Nil(t, toStringSlice(42))
+}
+
+// TestSkill_BeforeAgent_PreservesOtherMessages verifies the skill middleware never
+// mutates or removes existing messages in BeforeAgent — including a leading system
+// message and reminders owned by other middlewares. (Insertion happens later, in
+// BeforeModelRewriteState; here we only assert BeforeAgent is non-destructive.)
+func TestSkill_BeforeAgent_PreservesOtherMessages(t *testing.T) {
+	ctx := context.Background()
+	h := &typedSkillHandler[*schema.Message]{
+		tool: &typedSkillTool[*schema.Message]{
+			b: &inMemoryBackend{m: []Skill{
+				{FrontMatter: FrontMatter{Name: "alpha", Description: "desc-alpha"}},
+			}},
+		},
+	}
+
+	const otherKey = "__eino_other_middleware_section__"
+	instruction := schema.SystemMessage("base instruction")
+	otherReminder := schema.SystemMessage("other middleware section")
+	otherReminder.Extra = map[string]any{otherKey: true}
+	runCtx := &adk.ChatModelAgentContext[*schema.Message]{
+		AgentInput: &adk.TypedAgentInput[*schema.Message]{
+			Messages: []*schema.Message{instruction, otherReminder, schema.UserMessage("hi")},
+		},
+	}
+
+	_, nrc, err := h.BeforeAgent(ctx, runCtx)
+	require.NoError(t, err)
+	// The three existing messages are preserved verbatim; nothing is added or tagged.
+	require.Len(t, nrc.AgentInput.Messages, 3)
+	assert.Equal(t, "base instruction", nrc.AgentInput.Messages[0].Content)
+	assert.Equal(t, "other middleware section", nrc.AgentInput.Messages[1].Content)
+	assert.True(t, nrc.AgentInput.Messages[1].Extra[otherKey].(bool))
+	_, mutated := nrc.AgentInput.Messages[1].Extra[skillsReminderExtraKey]
+	assert.False(t, mutated, "the other middleware's reminder must not be tagged with the skill key")
+	assert.Equal(t, schema.User, nrc.AgentInput.Messages[2].Role)
 }

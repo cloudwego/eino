@@ -19,11 +19,15 @@ package subagent
 import (
 	"context"
 	"fmt"
+	"strings"
+
+	"github.com/slongfield/pyfmt"
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/adk/backgroundtask"
 	"github.com/cloudwego/eino/adk/filesystem"
 	"github.com/cloudwego/eino/adk/internal"
+	"github.com/cloudwego/eino/adk/middlewares/internal/systemreminder"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/schema"
 )
@@ -166,10 +170,26 @@ func NewTyped[M adk.MessageType](ctx context.Context, config *TypedConfig[M]) (a
 		return nil, err
 	}
 
+	backgroundEnabled := config.Background != nil && config.Background.Manager != nil
+
+	// The background-run note now lives in the tool description (not the system prompt),
+	// filled into the {background_prompt} placeholder only when background is enabled.
+	bgPrompt := ""
+	if backgroundEnabled {
+		bgPrompt = internal.SelectPrompt(internal.I18nPrompts{
+			English: agentToolBackgroundPrompt,
+			Chinese: agentToolBackgroundPromptChinese,
+		})
+	}
+	desc, err = pyfmt.Fmt(desc, map[string]any{"background_prompt": bgPrompt})
+	if err != nil {
+		return nil, err
+	}
+
 	// With a Manager, the tool exposes run_in_background and routes through the
 	// Manager; without one it is a plain foreground spawn.
 	var at tool.BaseTool
-	if config.Background != nil && config.Background.Manager != nil {
+	if backgroundEnabled {
 		at, err = newManagedAgentTool[M](config.Background.Manager, subAgentToolMap, agentOutput[M]{
 			store:     config.Background.OutputStore,
 			outputDir: config.Background.OutputDir,
@@ -184,7 +204,8 @@ func NewTyped[M adk.MessageType](ctx context.Context, config *TypedConfig[M]) (a
 
 	tools := []tool.BaseTool{at}
 
-	// Build system prompt.
+	// Build system prompt. The background-run note is no longer appended here; it now
+	// lives in the tool description via the {background_prompt} placeholder.
 	var instruction string
 	if config.SystemPrompt != nil {
 		instruction = *config.SystemPrompt
@@ -193,17 +214,23 @@ func NewTyped[M adk.MessageType](ctx context.Context, config *TypedConfig[M]) (a
 			English: agentToolPrompt,
 			Chinese: agentToolPromptChinese,
 		})
-		if config.Background != nil && config.Background.Manager != nil {
-			instruction += internal.SelectPrompt(internal.I18nPrompts{
-				English: agentToolBackgroundPrompt,
-				Chinese: agentToolBackgroundPromptChinese,
-			})
+	}
+
+	// The sub-agent set is fixed at construction, so the available-agent-types
+	// mid-conversation system reminder is built once here and inserted (once) at run time.
+	var reminder string
+	if len(config.SubAgents) > 0 {
+		entries := make([]agentTypeEntry, 0, len(config.SubAgents))
+		for _, a := range config.SubAgents {
+			entries = append(entries, agentTypeEntry{Name: a.Name(ctx), Description: a.Description(ctx)})
 		}
+		reminder = buildAgentTypesSectionFromEntries(entries)
 	}
 
 	return &typedSubagentMiddleware[M]{
 		tools:       tools,
 		instruction: instruction,
+		reminder:    reminder,
 	}, nil
 }
 
@@ -211,6 +238,7 @@ type typedSubagentMiddleware[M adk.MessageType] struct {
 	adk.TypedBaseChatModelAgentMiddleware[M]
 	tools       []tool.BaseTool
 	instruction string
+	reminder    string
 }
 
 // BeforeAgent injects sub-agent tools and instructions into the agent context.
@@ -220,9 +248,47 @@ func (m *typedSubagentMiddleware[M]) BeforeAgent(ctx context.Context, runCtx *ad
 	}
 
 	nRunCtx := *runCtx
-	nRunCtx.Instruction += "\n" + m.instruction
+	nRunCtx.Instruction += "\n\n" + m.instruction
 	nRunCtx.Tools = append(nRunCtx.Tools, m.tools...)
 	return ctx, &nRunCtx, nil
+}
+
+// BeforeModelRewriteState publishes the available agent types as a mid-conversation
+// system message, inserted after the latest user message. The set of sub-agents is
+// fixed at construction, so the message is inserted exactly once: Has skips
+// re-insertion when it is already in the (reconstructed) history, and Insert persists
+// it as a MessageInserted event so it carries across turns.
+func (m *typedSubagentMiddleware[M]) BeforeModelRewriteState(ctx context.Context, state *adk.TypedChatModelAgentState[M], _ *adk.TypedModelContext[M]) (context.Context, *adk.TypedChatModelAgentState[M], error) {
+	if state == nil || m.reminder == "" {
+		return ctx, state, nil
+	}
+	// Align any reminders reconstructed from history with the configured role; the fresh
+	// insert below is already built with that role.
+	state.Messages = systemreminder.NormalizeReminderRoles(state.Messages)
+	if !systemreminder.Has(state.Messages, agentTypesReminderExtraKey) {
+		state.Messages = systemreminder.Insert(ctx, state.Messages, agentTypesReminderExtraKey, m.reminder, nil)
+	}
+	return ctx, state, nil
+}
+
+const agentTypesReminderExtraKey = "__eino_subagent_available_agent_types__"
+
+func buildAgentTypesSectionFromEntries(entries []agentTypeEntry) string {
+	preamble := internal.SelectPrompt(internal.I18nPrompts{
+		English: availableAgentTypesPreamble,
+		Chinese: availableAgentTypesPreambleChinese,
+	})
+	var sb strings.Builder
+	sb.WriteString(preamble)
+	for _, entry := range entries {
+		sb.WriteString(fmt.Sprintf("\n- %s: %s", entry.Name, entry.Description))
+	}
+	return sb.String()
+}
+
+type agentTypeEntry struct {
+	Name        string
+	Description string
 }
 
 func validate[M adk.MessageType](ctx context.Context, c *TypedConfig[M]) error {
