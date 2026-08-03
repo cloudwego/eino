@@ -224,6 +224,12 @@ waitReady:
 		case readyErr = <-ready:
 			break waitReady
 		case result := <-runDone:
+			select {
+			case readyErr = <-ready:
+				earlyResult = &result
+				break waitReady
+			default:
+			}
 			if result.err != nil {
 				r.removeUnstarted(task.Spec.ID)
 				return nil, result.err
