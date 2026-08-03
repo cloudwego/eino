@@ -24,6 +24,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cloudwego/eino/adk/internal/taskcontrol"
 	"github.com/cloudwego/eino/internal/safe"
 )
 
@@ -539,20 +540,6 @@ func (m *Manager) Execute(ctx context.Context, taskID string) error {
 	return m.execute(ctx, taskID)
 }
 
-// RequestTimeout asks work executing in this Manager to fail with a
-// deterministic timeout reason. It is intended for foreground coordination.
-func (m *Manager) RequestTimeout(ctx context.Context, taskID, reason string) error {
-	if reason == "" {
-		return errors.New("backgroundtask: timeout reason is required")
-	}
-	runtime, err := m.activeRuntime(ctx, taskID)
-	if err != nil {
-		return err
-	}
-	runtime.requestControlWithReason(ControlTimeout, reason)
-	return nil
-}
-
 func (m *Manager) activeRuntime(ctx context.Context, taskID string) (*taskRuntime, error) {
 	m.attemptsMu.Lock()
 	attempt := m.activeAttempts[taskID]
@@ -575,6 +562,10 @@ func (m *Manager) execute(
 	ctx context.Context,
 	taskID string,
 ) (returnErr error) {
+	timeoutController := taskcontrol.FromContext(ctx)
+	if timeoutController != nil {
+		defer timeoutController.Close()
+	}
 	if taskID == "" {
 		return errors.New("backgroundtask: execute task id is required")
 	}
@@ -634,7 +625,19 @@ func (m *Manager) execute(
 	heartbeatStop := make(chan struct{})
 	go m.heartbeat(runCtx, cancel, runtime, heartbeatStop, heartbeatDone)
 
+	timeoutStop := make(chan struct{})
+	timeoutDone := make(chan struct{})
+	if timeoutController == nil {
+		close(timeoutDone)
+	} else {
+		go serveTimeoutRequests(runtime, timeoutController, timeoutStop, timeoutDone)
+	}
 	result, executeErr := m.executeClaim(runCtx, executor, started, runtime)
+	close(timeoutStop)
+	<-timeoutDone
+	if timeoutController != nil {
+		timeoutController.Close()
+	}
 	close(heartbeatStop)
 	<-heartbeatDone
 
@@ -648,6 +651,26 @@ func (m *Manager) execute(
 	}
 	_, commitErr := runtime.commit(detachedCtx{parent: ctx}, result)
 	return commitErr
+}
+
+func serveTimeoutRequests(
+	runtime *taskRuntime,
+	controller *taskcontrol.TimeoutController,
+	stop <-chan struct{},
+	done chan<- struct{},
+) {
+	defer close(done)
+	for {
+		select {
+		case request := <-controller.Requests():
+			runtime.requestControlWithReason(ControlTimeout, request.Reason)
+			request.Complete(nil)
+		case <-controller.Done():
+			return
+		case <-stop:
+			return
+		}
+	}
 }
 
 func (m *Manager) heartbeat(

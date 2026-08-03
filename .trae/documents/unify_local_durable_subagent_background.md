@@ -177,9 +177,10 @@ Attempt-local controls are Executor coordination:
 - `ControlDrain`: checkpoint and suspend if supported;
 - `ControlTimeout`: fail with a deterministic foreground-timeout reason.
 
-The public Manager no longer accepts arbitrary `ControlRequest` values. The current
-foreground bridge is the narrower `RequestTimeout(taskID, reason)`. Stop remains owned by
-`RequestCancel`, and drain remains owned by Manager shutdown.
+The public Manager does not accept `ControlRequest` values. Foreground timeout is carried
+through an execution-scoped controller in `adk/internal/taskcontrol`; Manager binds that
+controller to the task runtime during `Execute`. Stop remains owned by `RequestCancel`,
+and drain remains owned by Manager shutdown.
 
 Timeout is not cancellation. A timeout produces `failed` and does not set
 `CancelRequestedAt`.
@@ -379,7 +380,6 @@ the same ordering.
 |---|---|---|
 | `ListPending(request)` | Find executor-key-scoped candidates | Valid worker capability, but not application lifecycle. |
 | `Execute(taskID)` | Claim and execute one attempt | Canonical worker-host operation on aggregate Manager. |
-| `RequestTimeout(taskID, reason)` | Fail the local active attempt | Narrow foreground bridge that cannot send stop or drain. |
 | `AllocateTaskID(request)` | Allocate an opaque typed ID | Required before some executor-specific submissions. |
 | `LoadOrRegisterExecutor(executor)` | Atomically resolve or install one Executor | Narrow composition operation; registry remains encapsulated. |
 | `ValidateNotificationDelivery(runtime, kind)` | Validate the Manager-owned Store route | Narrow composition operation; Store remains encapsulated. |
@@ -466,6 +466,7 @@ aliases:
 - `Manager.List`;
 - `Manager.Subscribe`;
 - generic `Manager.RequestControl`;
+- `Manager.RequestTimeout`;
 - `Manager.MarkBackgrounded`;
 - `Manager.Store`;
 - `Manager.Executors`;
@@ -481,9 +482,8 @@ aliases:
 - caller-controlled `Spec.LeaseExpiryPolicy`.
 
 The generic control method was removed because `ControlStop` overlapped with
-`RequestCancel` at the API shape while bypassing its durable semantics. `RequestTimeout`
-remains intentionally narrow: it can only request deterministic timeout failure for an
-attempt executing in the same Manager.
+`RequestCancel` at the API shape while bypassing its durable semantics. Timeout control is
+now internal and execution-scoped rather than a task-ID-addressed Manager method.
 
 ## 13. Current Assessment
 
@@ -498,7 +498,7 @@ The implemented persistence, execution, and API ownership are coherent:
 - notification delivery has an explicit structural guarantee;
 - raw Store and executor-registry getters are absent;
 - foreground projection lifetime is internal rather than Executor-facing;
-- generic control is absent while deterministic timeout remains available.
+- generic control is absent while deterministic timeout remains available internally.
 
 Manager intentionally owns both application lifecycle and worker coordination. This is
 an aggregate runtime boundary, not a lifecycle-only facade. Actual Executor
@@ -516,9 +516,6 @@ Executor-specific submit helpers:
 
 Worker hosts:
     ListPending, Execute
-
-Foreground coordination:
-    RequestTimeout
 
 Composition:
     New, LoadOrRegisterExecutor, ValidateNotificationDelivery
@@ -562,17 +559,26 @@ taskRuntime.backgrounded
 Projection state is process-local presentation coordination. It is neither persisted nor
 part of Executor reconstruction.
 
-### 14.3 Retained timeout bridge
+### 14.3 Internal timeout controller
 
-`Manager.RequestTimeout(taskID, reason)` remains as the only foreground-specific Manager
-control. It:
+`adk/internal/taskcontrol` carries timeout requests through the detached execution
+context. `foreground.Run` creates one controller per `Manager.Execute` invocation.
+Manager binds it after the active runtime is created and forwards accepted requests as
+`ControlTimeout`.
 
-- requires a non-empty deterministic reason;
-- targets only an attempt executing in the same Manager;
-- always sends `ControlTimeout`;
-- produces `failed`, not `canceled`;
-- leaves `CancelRequestedAt` unset;
-- cannot send stop or drain.
+The controller:
+
+- is unavailable to downstream applications through Go's `internal` import boundary;
+- carries no task ID;
+- accepts only a non-empty deterministic timeout reason;
+- buffers the Store-running/runtime-ready gap;
+- synchronously acknowledges accepted requests;
+- closes on every early or terminal `Execute` return;
+- reports `taskcontrol.ErrClosed` when execution wins a timeout race.
+
+Foreground treats `ErrClosed` as an already-finishing execution and waits for the normal
+`Execute` result. Timeout still produces `failed`, never sets `CancelRequestedAt`, and
+cannot express stop or drain.
 
 `RequestCancel` remains the only public cancellation operation. `ControlStop` is delivered
 internally after cancellation handling, and `ControlDrain` remains shutdown-owned.
@@ -617,6 +623,8 @@ The implemented surface is protected by tests for:
 - registration rejection after shutdown;
 - Manager-owned notification validation;
 - idempotent projection-detachment signaling;
+- timeout request acknowledgement, closure, and context cancellation;
+- controller closure on early and terminal `Execute` returns;
 - Durable foreground projection boundaries;
 - timeout failure without cancellation intent;
 - existing cancellation, shutdown, Local, and Durable behavior.
@@ -625,6 +633,7 @@ Verification completed successfully:
 
 ```bash
 go test -race ./adk/backgroundtask/... ./adk/internal/foreground \
+  ./adk/internal/taskcontrol \
   ./adk/middlewares/subagent ./adk/middlewares/filesystem
 go test ./...
 git diff --check
@@ -644,14 +653,7 @@ multi-process Store needs conformance coverage for:
 - resume one-shot consumption;
 - notification outbox atomicity.
 
-### 15.2 Timeout bridge visibility
-
-`RequestTimeout` is technically callable by applications because
-`adk/internal/foreground` crosses the backgroundtask package boundary. Its scope is
-deliberately fixed to timeout failure for a local active attempt. It cannot express
-durable cancellation, stop, or drain.
-
-### 15.3 Output retention
+### 15.2 Output retention
 
 The output feed enforces page and record bounds, but production Stores must define:
 
@@ -662,7 +664,7 @@ The output feed enforces page and record bounds, but production Stores must defi
 
 Durable subagent transcript retention follows child SessionEventStore policy.
 
-### 15.4 Suspension release
+### 15.3 Suspension release
 
 `Store.ReleaseSuspension` supports `suspended -> pending`, but automatic release after
 graceful drain is not wired in the repository. A production worker host must define
@@ -671,7 +673,7 @@ ownership, retry, and fencing so rollout recovery does not leave tasks suspended
 This transition must not use application `Resume`, because suspension does not represent
 missing external input.
 
-### 15.5 Deployment homogeneity
+### 15.4 Deployment homogeneity
 
 Durable reconstruction assumes equivalent Executor and Agent registrations across
 eligible workers. Rolling deployments must either preserve compatibility, drain existing

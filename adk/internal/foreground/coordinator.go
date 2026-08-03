@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/cloudwego/eino/adk/backgroundtask"
+	"github.com/cloudwego/eino/adk/internal/taskcontrol"
 )
 
 const DefaultTimeoutMs = 120_000
@@ -63,7 +64,10 @@ func Run(
 		return nil, backgroundtask.ErrIllegalTransition
 	}
 
-	executeCtx, detachProjection := withProjection(detachedCtx{parent: ctx})
+	executeCtx, timeoutController := taskcontrol.WithTimeoutController(
+		detachedCtx{parent: ctx},
+	)
+	executeCtx, detachProjection := withProjection(executeCtx)
 	defer detachProjection()
 	done := make(chan error, 1)
 	go func() {
@@ -80,7 +84,7 @@ func Run(
 	if request.RunInBackground {
 		return started, nil
 	}
-	return waitForeground(ctx, manager, policy, request, done)
+	return waitForeground(ctx, manager, policy, request, timeoutController, done)
 }
 
 func waitStarted(
@@ -123,6 +127,7 @@ func waitForeground(
 	manager *backgroundtask.Manager,
 	policy Policy,
 	request *Request,
+	timeoutController *taskcontrol.TimeoutController,
 	done <-chan error,
 ) (*backgroundtask.Task, error) {
 	if request.ProjectionReady != nil {
@@ -186,9 +191,9 @@ func waitForeground(
 					return current, nil
 				}
 				reason := fmt.Sprintf("timed out after %dms", timeoutMs)
-				if err := manager.RequestTimeout(
-					context.Background(), request.TaskID, reason,
-				); err != nil {
+				if err := timeoutController.RequestTimeout(
+					context.Background(), reason,
+				); err != nil && !errors.Is(err, taskcontrol.ErrClosed) {
 					return nil, err
 				}
 				timeout = nil

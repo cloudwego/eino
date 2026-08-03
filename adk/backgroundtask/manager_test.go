@@ -23,6 +23,8 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/cloudwego/eino/adk/internal/taskcontrol"
 )
 
 func closeWithTimeout(manager *Manager) {
@@ -49,8 +51,7 @@ func TestManagerReadOutputDelegatesToStore_BitsUT(t *testing.T) {
 	require.Equal(t, "record", string(result.Records[0].Data))
 }
 
-func TestManagerRequestTimeoutSendsOnlyTimeoutControl_BitsUT(t *testing.T) {
-	ready := make(chan struct{})
+func TestManagerExecuteBindsTimeoutController_BitsUT(t *testing.T) {
 	observed := make(chan ControlRequest, 1)
 	executor := &scriptedExecutor{
 		execute: func(
@@ -58,7 +59,6 @@ func TestManagerRequestTimeoutSendsOnlyTimeoutControl_BitsUT(t *testing.T) {
 			_ *Task,
 			runtime ExecutionRuntime,
 		) (*ExecutionResult, error) {
-			close(ready)
 			control := <-runtime.Controls()
 			observed <- control
 			return &ExecutionResult{Status: StatusFailed, Error: control.Reason}, nil
@@ -70,16 +70,16 @@ func TestManagerRequestTimeoutSendsOnlyTimeoutControl_BitsUT(t *testing.T) {
 	task, err := manager.Submit(context.Background(), validSpec("timeout"))
 	require.NoError(t, err)
 
+	executeCtx, timeoutController := taskcontrol.WithTimeoutController(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		done <- manager.Execute(context.Background(), task.Spec.ID)
+		done <- manager.Execute(executeCtx, task.Spec.ID)
 	}()
-	<-ready
 
-	err = manager.RequestTimeout(context.Background(), task.Spec.ID, "")
-	require.EqualError(t, err, "backgroundtask: timeout reason is required")
-	require.NoError(t, manager.RequestTimeout(
-		context.Background(), task.Spec.ID, "timed out after 10ms",
+	err = timeoutController.RequestTimeout(context.Background(), "")
+	require.EqualError(t, err, "taskcontrol: timeout reason is required")
+	require.NoError(t, timeoutController.RequestTimeout(
+		context.Background(), "timed out after 10ms",
 	))
 	require.NoError(t, <-done)
 	control := <-observed
@@ -91,6 +91,25 @@ func TestManagerRequestTimeoutSendsOnlyTimeoutControl_BitsUT(t *testing.T) {
 	require.Equal(t, StatusFailed, failed.Status)
 	require.Equal(t, "timed out after 10ms", failed.ResultError)
 	require.Nil(t, failed.CancelRequestedAt)
+	require.ErrorIs(
+		t,
+		timeoutController.RequestTimeout(context.Background(), "too late"),
+		taskcontrol.ErrClosed,
+	)
+}
+
+func TestManagerExecuteClosesTimeoutControllerOnEarlyFailure_BitsUT(t *testing.T) {
+	manager := New(context.Background(), nil)
+	defer closeWithTimeout(manager)
+	executeCtx, timeoutController := taskcontrol.WithTimeoutController(context.Background())
+
+	err := manager.Execute(executeCtx, "")
+	require.EqualError(t, err, "backgroundtask: execute task id is required")
+	require.ErrorIs(
+		t,
+		timeoutController.RequestTimeout(context.Background(), "too late"),
+		taskcontrol.ErrClosed,
+	)
 }
 
 func TestManagerLoadOrRegisterExecutorIsAtomic_BitsUT(t *testing.T) {
