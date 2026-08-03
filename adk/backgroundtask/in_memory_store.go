@@ -22,7 +22,6 @@ import (
 	"errors"
 	"fmt"
 	"sort"
-	"strconv"
 	"sync"
 	"time"
 )
@@ -181,7 +180,12 @@ func (s *InMemoryStore) ListPending(_ context.Context, req *ListPendingRequest) 
 	sort.Strings(ids)
 	start := 0
 	if req.Cursor != "" {
-		start, _ = strconv.Atoi(req.Cursor)
+		cursor, err := base64.RawURLEncoding.DecodeString(req.Cursor)
+		if err != nil {
+			return nil, errors.New("backgroundtask: invalid pending-task cursor")
+		}
+		lastID := string(cursor)
+		start = sort.Search(len(ids), func(i int) bool { return ids[i] > lastID })
 	}
 	limit := req.Limit
 	if limit <= 0 || limit > 1000 {
@@ -199,7 +203,7 @@ func (s *InMemoryStore) ListPending(_ context.Context, req *ListPendingRequest) 
 		}
 		result.Tasks = append(result.Tasks, cloneTask(t))
 		if len(result.Tasks) == limit {
-			result.NextCursor = strconv.Itoa(i + 1)
+			result.NextCursor = base64.RawURLEncoding.EncodeToString([]byte(ids[i]))
 			break
 		}
 	}

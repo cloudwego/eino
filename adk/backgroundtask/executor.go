@@ -138,7 +138,12 @@ type activeAttempt struct {
 	runtime       *taskRuntime
 	supportsDrain bool
 	ready         chan struct{}
+	readyOnce     sync.Once
 	done          chan error
+}
+
+func (a *activeAttempt) signalReady() {
+	a.readyOnce.Do(func() { close(a.ready) })
 }
 
 type taskRuntime struct {
@@ -186,22 +191,38 @@ func (r *taskRuntime) AppendOutput(ctx context.Context, data []byte) (*OutputRec
 	})
 }
 
-func (r *taskRuntime) requestControl(kind ControlKind) {
-	r.requestControlWithReason(kind, "")
+func (r *taskRuntime) requestControl(kind ControlKind) bool {
+	return r.requestControlWithReason(kind, "")
 }
 
-func (r *taskRuntime) requestControlWithReason(kind ControlKind, reason string) {
+func (r *taskRuntime) requestControlWithReason(kind ControlKind, reason string) bool {
 	r.controlMu.Lock()
 	defer r.controlMu.Unlock()
-	if kind == ControlStop {
-		select {
-		case <-r.controls:
-		default:
-		}
-	}
+	request := ControlRequest{Kind: kind, Reason: reason}
 	select {
-	case r.controls <- ControlRequest{Kind: kind, Reason: reason}:
+	case queued := <-r.controls:
+		if controlPriority(kind) > controlPriority(queued.Kind) {
+			r.controls <- request
+			return true
+		}
+		r.controls <- queued
+		return queued == request
 	default:
+		r.controls <- request
+		return true
+	}
+}
+
+func controlPriority(kind ControlKind) int {
+	switch kind {
+	case ControlStop:
+		return 3
+	case ControlTimeout:
+		return 2
+	case ControlDrain:
+		return 1
+	default:
+		return 0
 	}
 }
 
@@ -424,10 +445,12 @@ func (m *Manager) RequestCancel(ctx context.Context, taskID string) (*Task, erro
 		return nil, err
 	}
 	if task.LeaseExpiryPolicy == LeaseExpiryFail && attempt != nil {
-		if _, err = m.activeRuntime(ctx, taskID); err != nil {
+		if _, err = m.activeRuntime(ctx, taskID); err == nil {
+			return m.cancelNonRecoverable(ctx, task, attempt)
+		}
+		if !errors.Is(err, ErrNotFound) && !errors.Is(err, ErrIllegalTransition) {
 			return nil, err
 		}
-		return m.cancelNonRecoverable(ctx, task, attempt)
 	}
 
 	if attempt != nil && attempt.runtime != nil {
@@ -585,6 +608,7 @@ func (m *Manager) execute(
 	m.attemptsMu.Unlock()
 	m.mu.Unlock()
 	defer func() {
+		attempt.signalReady()
 		attempt.done <- returnErr
 		close(attempt.done)
 		m.attemptsMu.Lock()
@@ -618,7 +642,7 @@ func (m *Manager) execute(
 	attempt.cancel = cancel
 	attempt.runtime = runtime
 	attempt.supportsDrain = executor.SupportsDrain()
-	close(attempt.ready)
+	attempt.signalReady()
 	m.attemptsMu.Unlock()
 	defer cancel()
 	heartbeatDone := make(chan struct{})
@@ -663,8 +687,11 @@ func serveTimeoutRequests(
 	for {
 		select {
 		case request := <-controller.Requests():
-			runtime.requestControlWithReason(ControlTimeout, request.Reason)
-			request.Complete(nil)
+			if runtime.requestControlWithReason(ControlTimeout, request.Reason) {
+				request.Complete(nil)
+			} else {
+				request.Complete(taskcontrol.ErrClosed)
+			}
 		case <-controller.Done():
 			return
 		case <-stop:

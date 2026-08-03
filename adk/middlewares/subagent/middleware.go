@@ -86,6 +86,7 @@ type TypedBackgroundConfig[M adk.MessageType] struct {
 
 type LocalBackgroundConfig = TypedLocalBackgroundConfig[*schema.Message]
 
+// TypedLocalBackgroundConfig configures process-local managed sub-agent runs.
 type TypedLocalBackgroundConfig[M adk.MessageType] struct {
 	Runner      *backgroundlocal.Runner
 	OutputStore filesystem.AppendOpener
@@ -94,6 +95,7 @@ type TypedLocalBackgroundConfig[M adk.MessageType] struct {
 
 type DurableBackgroundConfig = TypedDurableBackgroundConfig[*schema.Message]
 
+// TypedDurableBackgroundConfig configures reconstructable sub-agent runs.
 type TypedDurableBackgroundConfig[M adk.MessageType] struct {
 	Manager              *backgroundtask.Manager
 	ForegroundTimeoutMs  *int

@@ -62,11 +62,13 @@ type TypedBackgroundConfig[M adk.MessageType] struct {
 
 type BackgroundConfig = TypedBackgroundConfig[*schema.Message]
 
+// TypedLocalBackgroundConfig configures process-local shell and sub-agent tasks.
 type TypedLocalBackgroundConfig[M adk.MessageType] struct {
 	Runner    *backgroundlocal.Runner
 	OutputDir string
 }
 
+// TypedDurableBackgroundConfig configures durable sub-agents and process-local shell tasks.
 type TypedDurableBackgroundConfig[M adk.MessageType] struct {
 	Manager              *backgroundtask.Manager
 	ForegroundTimeoutMs  *int

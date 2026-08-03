@@ -306,6 +306,171 @@ func TestFormatManagedAgentResultPreservesDescriptionInErrors(t *testing.T) {
 	)
 }
 
+func TestFormatManagedAgentResultLifecycleStates(t *testing.T) {
+	task := &backgroundtask.Task{
+		Spec: backgroundtask.Spec{
+			ID: "subagent_task", Description: "research",
+			OutputFile: "/tasks/output",
+		},
+	}
+	task.Status = backgroundtask.StatusCompleted
+	task.ResultData = []byte("done")
+	result, err := formatManagedAgentResult("worker", task, "")
+	require.NoError(t, err)
+	require.Equal(t, "done", result)
+
+	for _, status := range []backgroundtask.Status{
+		backgroundtask.StatusPending, backgroundtask.StatusRunning,
+	} {
+		task.Status = status
+		result, err = formatManagedAgentResult("worker", task, "JSONL")
+		require.NoError(t, err)
+		require.Contains(t, result, "Agent running in background")
+		require.Contains(t, result, "/tasks/output")
+		require.Contains(t, result, "JSONL")
+	}
+
+	task.Status = backgroundtask.StatusWaitingInput
+	result, err = formatManagedAgentResult("worker", task, "")
+	require.NoError(t, err)
+	require.Contains(t, result, "requires input")
+	task.Status = backgroundtask.StatusSuspended
+	result, err = formatManagedAgentResult("worker", task, "")
+	require.NoError(t, err)
+	require.Contains(t, result, "suspended")
+	task.Status = backgroundtask.Status("unknown")
+	_, err = formatManagedAgentResult("worker", task, "")
+	require.ErrorContains(t, err, `unknown status "unknown"`)
+}
+
+func TestManagedEventReceiverTransformDetachesParentOnly(t *testing.T) {
+	detached := make(chan struct{})
+	var parentCalls, taskCalls int
+	transform := managedEventReceiverTransform(
+		detached, func(string) { taskCalls++ },
+	)
+	receivers := transform([]agenttool.EventReceiver[string]{
+		func(string) { parentCalls++ },
+	})
+	require.Len(t, receivers, 2)
+	receivers[0]("before")
+	receivers[1]("before")
+	close(detached)
+	receivers[0]("after")
+	receivers[1]("after")
+	require.Equal(t, 1, parentCalls)
+	require.Equal(t, 2, taskCalls)
+	require.True(t, signalClosed(detached))
+	require.False(t, signalClosed(make(chan struct{})))
+}
+
+func TestAgentEventFileReceiverFailurePaths(t *testing.T) {
+	event := &adk.AgentEvent{
+		AgentName: "worker",
+		Output: &adk.AgentOutput{MessageOutput: &adk.MessageVariant{
+			Message: schema.AssistantMessage("done", nil),
+		}},
+	}
+	reportErr := errors.New("report failed")
+	receiver := &agentEventFileReceiver[*schema.Message]{
+		ctx: context.Background(),
+		format: func(context.Context, string, *schema.Message) (string, error) {
+			return "", errors.New("format failed")
+		},
+		onError: func(error) error { return reportErr },
+	}
+	receiver.receive(nil)
+	require.False(t, receiver.failed)
+	receiver.receive(event)
+	require.True(t, receiver.failed)
+	require.ErrorIs(t, receiver.reportErr, reportErr)
+	receiver.fail(errors.New("ignored after failure"))
+	require.ErrorIs(t, receiver.reportErr, reportErr)
+
+	recordErr := errors.New("record failed")
+	receiver = &agentEventFileReceiver[*schema.Message]{
+		ctx: context.Background(),
+		format: func(context.Context, string, *schema.Message) (string, error) {
+			return "record", nil
+		},
+		onRecord: func([]byte) error { return recordErr },
+	}
+	receiver.receive(event)
+	require.True(t, receiver.failed)
+	require.ErrorIs(t, receiver.reportErr, recordErr)
+
+	receiver = &agentEventFileReceiver[*schema.Message]{
+		ctx: context.Background(),
+		format: func(context.Context, string, *schema.Message) (string, error) {
+			return "", nil
+		},
+	}
+	receiver.fail(nil)
+	require.False(t, receiver.failed)
+	receiver.receive(event)
+	require.False(t, receiver.failed)
+
+	receiver = &agentEventFileReceiver[*schema.Message]{
+		ctx: context.Background(),
+		format: func(context.Context, string, *schema.Message) (string, error) {
+			return "record", nil
+		},
+	}
+	receiver.receive(event)
+	require.False(t, receiver.failed)
+
+	stream, streamWriter := schema.Pipe[*schema.Message](1)
+	streamErr := errors.New("stream failed")
+	streamWriter.Send(nil, streamErr)
+	streamWriter.Close()
+	receiver.receive(&adk.AgentEvent{
+		Output: &adk.AgentOutput{MessageOutput: &adk.MessageVariant{
+			IsStreaming: true, MessageStream: stream,
+		}},
+	})
+	require.True(t, receiver.failed)
+}
+
+func TestSanitizedMessageValueAndTaskName(t *testing.T) {
+	message := schema.AssistantMessage("done", nil)
+	message.Extra = map[string]any{"private": true}
+	sanitized := sanitizedMessageValue(message).(*schema.Message)
+	require.Nil(t, sanitized.Extra)
+	require.NotNil(t, message.Extra)
+	var nilMessage *schema.Message
+	require.Nil(t, sanitizedMessageValue(nilMessage))
+
+	agentic := &schema.AgenticMessage{
+		ContentBlocks: []*schema.ContentBlock{
+			schema.NewContentBlock(&schema.AssistantGenText{Text: "done"}),
+		},
+	}
+	agentic.Extra = map[string]any{"private": true}
+	sanitizedAgentic := sanitizedMessageValue(agentic).(*schema.AgenticMessage)
+	require.Nil(t, sanitizedAgentic.Extra)
+	require.NotNil(t, agentic.Extra)
+
+	require.Empty(t, NameFromTask(nil))
+	require.Empty(t, NameFromTask(&backgroundtask.Task{}))
+	require.Empty(t, NameFromTask(&backgroundtask.Task{Spec: backgroundtask.Spec{
+		Kind: TaskTypeSubagent, Payload: []byte(`{`),
+	}}))
+	require.Equal(t, "worker", NameFromTask(&backgroundtask.Task{
+		Spec: backgroundtask.Spec{
+			Kind:    TaskTypeSubagent,
+			Payload: []byte(`{"version":1,"subagent_name":"worker"}`),
+		},
+	}))
+
+	require.Empty(t, reserveAgentOutput(context.Background(), nil, "/tasks"))
+	require.Empty(t, reserveAgentOutput(
+		context.Background(), filesystem.NewInMemoryBackend(), "",
+	))
+	require.NotEmpty(t, reserveAgentOutput(
+		context.Background(), filesystem.NewInMemoryBackend(), "/tasks",
+	))
+}
+
 func TestLocalAgentToolWritesEventTranscript(t *testing.T) {
 	ctx := runnerEnvironmentContext(t)
 	manager := newTestManager(ctx)

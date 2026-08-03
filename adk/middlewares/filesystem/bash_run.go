@@ -86,6 +86,11 @@ type outputSink struct {
 	outputDir string
 }
 
+type toolDefinition struct {
+	name string
+	desc string
+}
+
 // bashOutputWriter tees a managed execute task's output to a file via a
 // filesystem.AppendOpener. It is built per invocation: when both an AppendOpener
 // and an outputDir are configured it reserves outputDir/<uuid>.output (created empty
@@ -356,14 +361,15 @@ func newManagedExecuteTool(
 	streaming filesystem.StreamingShell,
 	sessionID func(context.Context) (string, error),
 	sink outputSink,
-	name string,
-	desc string,
+	definition toolDefinition,
 ) (tool.BaseTool, error) {
 	if sessionID == nil {
 		return nil, errors.New("filesystem: notification session resolver is required")
 	}
-	toolName := selectToolName(name, ToolNameExecute)
-	d, err := selectToolDesc(desc, ManagedExecuteToolDesc, ManagedExecuteToolDescChinese)
+	toolName := selectToolName(definition.name, ToolNameExecute)
+	d, err := selectToolDesc(
+		definition.desc, ManagedExecuteToolDesc, ManagedExecuteToolDescChinese,
+	)
 	if err != nil {
 		return nil, err
 	}

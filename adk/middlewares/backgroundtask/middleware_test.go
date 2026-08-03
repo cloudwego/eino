@@ -534,3 +534,43 @@ func TestResolveDurableTaskAddsProgressWithoutReplacingTerminalResult(t *testing
 	assert.Contains(t, result, "Transcript unavailable: session unavailable")
 	assert.Contains(t, result, "Result: authoritative answer")
 }
+
+type waitErrorStore struct {
+	bgtask.Store
+	err error
+}
+
+func (s waitErrorStore) Wait(context.Context, *bgtask.WaitUpdateRequest) (*bgtask.Task, error) {
+	return nil, s.err
+}
+
+func TestResolveDurableTaskBlockingBoundaries(t *testing.T) {
+	store := bgtask.NewInMemoryStore(nil)
+	pending, err := store.Create(context.Background(), &bgtask.CreateTaskRequest{
+		Spec:              bgtask.Spec{ID: "pending", ExecutorKey: "test"},
+		LeaseExpiryPolicy: bgtask.LeaseExpiryRetry,
+	})
+	require.NoError(t, err)
+	manager := bgtask.New(context.Background(), &bgtask.Config{Store: store})
+
+	canceledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	result, err := resolveDurableTask(
+		canceledCtx, manager, pending,
+		taskOutputInput{TaskID: pending.Spec.ID, Timeout: maxTaskOutputTimeoutMs + 1},
+		nil,
+	)
+	require.NoError(t, err)
+	require.Contains(t, result, "Status: pending")
+
+	wantErr := errors.New("wait failed")
+	failingManager := bgtask.New(context.Background(), &bgtask.Config{
+		Store: waitErrorStore{Store: store, err: wantErr},
+	})
+	_, err = resolveDurableTask(
+		context.Background(), failingManager, pending,
+		taskOutputInput{TaskID: pending.Spec.ID, Timeout: 1},
+		nil,
+	)
+	require.ErrorIs(t, err, wantErr)
+}

@@ -371,6 +371,7 @@ func (*runnerEnvironmentExecutor) Execute(
 func TestRunnerExecuteBackgroundTaskBindsEnvironmentBeforeStart(t *testing.T) {
 	sessionStore := &runnerEnvironmentSessionStore{}
 	checkPointStore := newMyStore()
+	sessionConfig := &SessionConfig[*schema.Message]{}
 	executor := &runnerEnvironmentExecutor{}
 	registry := backgroundtask.NewExecutorRegistry()
 	require.NoError(t, registry.Register(executor))
@@ -389,11 +390,19 @@ func TestRunnerExecuteBackgroundTaskBindsEnvironmentBeforeStart(t *testing.T) {
 	runner := NewRunner(context.Background(), RunnerConfig{
 		Agent:     &mockRunnerAgent{name: "runner", description: "runner"},
 		SessionID: "parent-session", SessionStore: sessionStore,
-		CheckPointStore: checkPointStore,
+		CheckPointStore: checkPointStore, SessionConfig: sessionConfig,
 	})
 	require.NoError(t, runner.ExecuteBackgroundTask(context.Background(), manager, task.Spec.ID))
 	require.NotNil(t, executor.environment)
 	assert.Equal(t, "parent-session", executor.environment.SessionID())
 	assert.Same(t, sessionStore, executor.environment.SessionStore())
 	assert.Same(t, checkPointStore, executor.environment.CheckPointStore())
+	assert.Same(t, sessionConfig, executor.environment.SessionConfig())
+	require.Error(t, runner.ExecuteBackgroundTask(context.Background(), nil, task.Spec.ID))
+
+	var nilEnvironment *TypedRunnerEnvironment[*schema.Message]
+	assert.Empty(t, nilEnvironment.SessionID())
+	assert.Nil(t, nilEnvironment.SessionStore())
+	assert.Nil(t, nilEnvironment.CheckPointStore())
+	assert.Nil(t, nilEnvironment.SessionConfig())
 }

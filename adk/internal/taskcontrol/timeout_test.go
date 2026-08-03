@@ -85,3 +85,15 @@ func TestTimeoutControllerHonorsRequestContext_BitsUT(t *testing.T) {
 	request.Complete(wantErr)
 	require.ErrorIs(t, <-requestDone, wantErr)
 }
+
+func TestNilTimeoutControllerIsClosed(t *testing.T) {
+	var controller *TimeoutController
+	require.Nil(t, controller.Requests())
+	require.Nil(t, controller.Done())
+	controller.Close()
+	require.ErrorIs(
+		t,
+		controller.RequestTimeout(context.Background(), "deadline"),
+		ErrClosed,
+	)
+}

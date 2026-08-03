@@ -56,6 +56,24 @@ func (notificationDeliveryStub) ValidateNotificationDelivery(
 
 var testNotifications backgroundtask.NotificationDeliveryRuntime = notificationDeliveryStub{}
 
+type outputRuntimeStub struct {
+	reportErr error
+}
+
+func (*outputRuntimeStub) TaskID() string { return "task" }
+func (*outputRuntimeStub) Controls() <-chan backgroundtask.ControlRequest {
+	return make(chan backgroundtask.ControlRequest)
+}
+func (*outputRuntimeStub) AppendOutput(
+	context.Context,
+	[]byte,
+) (*backgroundtask.OutputRecord, error) {
+	return nil, nil
+}
+func (r *outputRuntimeStub) ReportOutputFailure(context.Context, string) error {
+	return r.reportErr
+}
+
 var testManagerStores sync.Map
 
 func newTestManager(ctx context.Context) *backgroundtask.Manager {
@@ -64,8 +82,6 @@ func newTestManager(ctx context.Context) *backgroundtask.Manager {
 	testManagerStores.Store(manager, store)
 	return manager
 }
-
-func intPtr(v int) *int { return &v }
 
 func mustLocalRunner(
 	t *testing.T,
@@ -209,6 +225,23 @@ func (s *slowShell) Execute(ctx context.Context, _ *filesystem.ExecuteRequest) (
 	}
 }
 
+type gatedShell struct {
+	release <-chan struct{}
+	out     string
+}
+
+func (s *gatedShell) Execute(
+	ctx context.Context,
+	_ *filesystem.ExecuteRequest,
+) (*filesystem.ExecuteResponse, error) {
+	select {
+	case <-s.release:
+		return &filesystem.ExecuteResponse{Output: s.out}, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
 func TestManagedExecuteTool_Foreground(t *testing.T) {
 	mgr := newTestManager(context.Background())
 	defer func() {
@@ -244,9 +277,10 @@ func TestManagedExecuteTool_Background(t *testing.T) {
 	}()
 
 	backend := setupTestBackend() // so a background launch reports an output path
+	release := make(chan struct{})
 	tools, err := getFilesystemTools(context.Background(), &MiddlewareConfig{
 		Backend: backend,
-		Shell:   &mockShellBackend{resp: &filesystem.ExecuteResponse{Output: "done"}},
+		Shell:   &gatedShell{release: release, out: "done"},
 		Background: &BackgroundConfig{
 			Runner:        mustLocalRunner(t, mgr),
 			Notifications: testNotifications,
@@ -261,6 +295,7 @@ func TestManagedExecuteTool_Background(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, result, "Command running in background with ID:")
 
+	close(release)
 	task := waitTerminalTask(t, mgr)
 	assert.Equal(t, backgroundtask.StateCompleted, task.Status)
 
@@ -360,7 +395,8 @@ func TestManagedExecuteTool_StreamingForeground(t *testing.T) {
 	}()
 
 	executeTool, err := newManagedExecuteTool(
-		mustLocalRunner(t, mgr), nil, &mockStreamingShellMultiChunk{}, testNotificationSessionID, outputSink{}, "", "",
+		mustLocalRunner(t, mgr), nil, &mockStreamingShellMultiChunk{},
+		testNotificationSessionID, outputSink{}, toolDefinition{},
 	)
 	require.NoError(t, err)
 
@@ -394,7 +430,7 @@ func TestManagedExecuteTool_StreamingExplicitBackground(t *testing.T) {
 
 	executeTool, err := newManagedExecuteTool(
 		mustLocalRunner(t, mgr), nil, &mockStreamingShellMultiChunk{}, testNotificationSessionID,
-		outputSink{store: backend, outputDir: "/tasks"}, "", "",
+		outputSink{store: backend, outputDir: "/tasks"}, toolDefinition{},
 	)
 	require.NoError(t, err)
 	st := executeTool.(tool.StreamableTool)
@@ -449,7 +485,7 @@ func TestManagedExecuteTool_StreamingInterimOutput(t *testing.T) {
 	gate := &gatedStreamingShell{release: make(chan struct{})}
 	executeTool, err := newManagedExecuteTool(
 		mustLocalRunner(t, mgr), nil, gate, testNotificationSessionID,
-		outputSink{store: backend, outputDir: "/tasks"}, "", "",
+		outputSink{store: backend, outputDir: "/tasks"}, toolDefinition{},
 	)
 	require.NoError(t, err)
 	st := executeTool.(tool.StreamableTool)
@@ -479,10 +515,10 @@ func TestManagedExecuteTool_StreamingInterimOutput(t *testing.T) {
 	// Release the rest and drain.
 	close(gate.release)
 	for {
-		if _, err := sr.Recv(); err == io.EOF {
+		if _, recvErr := sr.Recv(); recvErr == io.EOF {
 			break
 		} else {
-			require.NoError(t, err)
+			require.NoError(t, recvErr)
 		}
 	}
 
@@ -519,7 +555,7 @@ func TestManagedExecuteTool_Schema(t *testing.T) {
 
 	executeTool, err := newManagedExecuteTool(
 		mustLocalRunner(t, mgr), &mockShellBackend{resp: &filesystem.ExecuteResponse{Output: "ok"}}, nil,
-		testNotificationSessionID, outputSink{}, "", "",
+		testNotificationSessionID, outputSink{}, toolDefinition{},
 	)
 	require.NoError(t, err)
 
@@ -560,6 +596,62 @@ type failingAppendOpener struct {
 	opens     int
 }
 
+type failingStreamingShell struct {
+	err error
+}
+
+type writeErrorOpener struct{}
+
+func (writeErrorOpener) OpenAppend(
+	context.Context,
+	*filesystem.OpenAppendRequest,
+) (io.WriteCloser, error) {
+	return writeErrorCloser{}, nil
+}
+
+type writeErrorCloser struct{}
+
+func (writeErrorCloser) Write([]byte) (int, error) {
+	return 0, errors.New("write failed")
+}
+func (writeErrorCloser) Close() error { return nil }
+
+func (s failingStreamingShell) ExecuteStreaming(
+	context.Context,
+	*filesystem.ExecuteRequest,
+) (*schema.StreamReader[*filesystem.ExecuteResponse], error) {
+	return nil, s.err
+}
+
+func TestBashOutputFailurePropagation(t *testing.T) {
+	reportErr := errors.New("report failed")
+	runtime := &outputRuntimeStub{reportErr: reportErr}
+	writer := &bashOutputWriter{runtime: runtime, ctx: context.Background()}
+	err := writer.fail(errors.New("write failed"))
+	require.ErrorIs(t, err, reportErr)
+
+	writer = &bashOutputWriter{
+		store: &failingAppendOpener{
+			backend: filesystem.NewInMemoryBackend(), failAfter: 0,
+		},
+		path: "/tasks/output",
+	}
+	err = writer.appendResult(context.Background(), runtime, "output")
+	require.ErrorIs(t, err, reportErr)
+
+	writer = &bashOutputWriter{store: writeErrorOpener{}, path: "/tasks/output"}
+	err = writer.appendResult(context.Background(), runtime, "output")
+	require.ErrorIs(t, err, reportErr)
+
+	shellErr := errors.New("shell failed")
+	work := bashStreamWork(
+		failingStreamingShell{err: shellErr}, &filesystem.ExecuteRequest{}, &bashOutputWriter{},
+	)
+	stream, err := work(context.Background(), runtime)
+	require.ErrorIs(t, err, shellErr)
+	require.Nil(t, stream)
+}
+
 func (f *failingAppendOpener) OpenAppend(ctx context.Context, req *filesystem.OpenAppendRequest) (io.WriteCloser, error) {
 	if f.opens >= f.failAfter {
 		f.opens++
@@ -583,7 +675,7 @@ func TestManagedExecuteTool_ReservationFailure_NoOutputFile(t *testing.T) {
 	opener := &failingAppendOpener{backend: backend, failAfter: 0}
 	executeTool, err := newManagedExecuteTool(
 		mustLocalRunner(t, mgr), &mockShellBackend{resp: &filesystem.ExecuteResponse{Output: "the output"}}, nil,
-		testNotificationSessionID, outputSink{store: opener, outputDir: "/tasks"}, "", "",
+		testNotificationSessionID, outputSink{store: opener, outputDir: "/tasks"}, toolDefinition{},
 	)
 	require.NoError(t, err)
 
@@ -613,7 +705,7 @@ func TestManagedExecuteTool_WriteFailure_MarksUnreliable(t *testing.T) {
 	opener := &failingAppendOpener{backend: backend, failAfter: 1}
 	executeTool, err := newManagedExecuteTool(
 		mustLocalRunner(t, mgr), &mockShellBackend{resp: &filesystem.ExecuteResponse{Output: "the output"}}, nil,
-		testNotificationSessionID, outputSink{store: opener, outputDir: "/tasks"}, "", "",
+		testNotificationSessionID, outputSink{store: opener, outputDir: "/tasks"}, toolDefinition{},
 	)
 	require.NoError(t, err)
 
@@ -685,7 +777,7 @@ func TestManagedExecuteTool_StreamingSourceError_ClosesStream(t *testing.T) {
 
 	executeTool, err := newManagedExecuteTool(
 		mustLocalRunner(t, mgr), nil, &erroringStreamingShell{}, testNotificationSessionID,
-		outputSink{store: counter, outputDir: "/tasks"}, "", "",
+		outputSink{store: counter, outputDir: "/tasks"}, toolDefinition{},
 	)
 	require.NoError(t, err)
 	st := executeTool.(tool.StreamableTool)

@@ -183,7 +183,12 @@ func (i *MemoryInbox) ListPending(_ context.Context, req *backgroundtask.ListSes
 			result = append(result, cloneItem(item))
 		}
 	}
-	sort.Slice(result, func(a, b int) bool { return result[a].CreatedAt.Before(result[b].CreatedAt) })
+	sort.Slice(result, func(a, b int) bool {
+		if result[a].CreatedAt.Equal(result[b].CreatedAt) {
+			return result[a].ItemID < result[b].ItemID
+		}
+		return result[a].CreatedAt.Before(result[b].CreatedAt)
+	})
 	limit := req.Limit
 	if limit <= 0 || limit > 1000 {
 		limit = 100

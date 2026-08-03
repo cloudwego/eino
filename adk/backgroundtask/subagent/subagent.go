@@ -18,10 +18,12 @@
 package subagent
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"sync"
 	"time"
 
@@ -38,6 +40,8 @@ const (
 	payloadVersion = 2
 )
 
+// ErrRunnerEnvironmentRequired reports that durable execution was not launched
+// through an ADK Runner carrying session and checkpoint dependencies.
 var ErrRunnerEnvironmentRequired = errors.New("backgroundtask/subagent: runner environment is required")
 
 type taskPayload struct {
@@ -230,7 +234,7 @@ func (e *Executor[M]) ValidateResume(
 	if len(resumeData) == 0 {
 		return nil, nil
 	}
-	var targets map[string]any
+	var targets map[string]json.RawMessage
 	if err := json.Unmarshal(resumeData, &targets); err != nil || len(targets) == 0 {
 		return nil, errors.New("backgroundtask/subagent: resume targets are invalid")
 	}
@@ -384,13 +388,30 @@ func (e *Executor[M]) beginRun(
 	if len(task.PendingResume) == 0 {
 		return runner.Resume(ctx, id, options...)
 	}
-	var targets map[string]any
-	if err := json.Unmarshal(task.PendingResume, &targets); err != nil {
+	targets, err := decodeResumeTargets(task.PendingResume)
+	if err != nil {
 		return nil, err
 	}
 	return runner.ResumeWithParams(
 		ctx, id, &adk.ResumeParams{Targets: targets}, options...,
 	)
+}
+
+func decodeResumeTargets(data []byte) (map[string]any, error) {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	var targets map[string]any
+	if err := decoder.Decode(&targets); err != nil {
+		return nil, err
+	}
+	var extra any
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		if err == nil {
+			err = errors.New("backgroundtask/subagent: resume targets contain trailing data")
+		}
+		return nil, err
+	}
+	return targets, nil
 }
 
 func (e *Executor[M]) handleEventError(

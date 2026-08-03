@@ -82,6 +82,7 @@ type TypedRunnerEnvironment[M MessageType] struct {
 // RunnerEnvironment is the default environment type using *schema.Message.
 type RunnerEnvironment = TypedRunnerEnvironment[*schema.Message]
 
+// SessionID returns the parent Runner session identifier.
 func (e *TypedRunnerEnvironment[M]) SessionID() string {
 	if e == nil {
 		return ""
@@ -89,6 +90,7 @@ func (e *TypedRunnerEnvironment[M]) SessionID() string {
 	return e.sessionID
 }
 
+// SessionStore returns the parent Runner's session event store.
 func (e *TypedRunnerEnvironment[M]) SessionStore() SessionEventStore[M] {
 	if e == nil {
 		return nil
@@ -96,6 +98,7 @@ func (e *TypedRunnerEnvironment[M]) SessionStore() SessionEventStore[M] {
 	return e.sessionStore
 }
 
+// CheckPointStore returns the parent Runner's checkpoint store.
 func (e *TypedRunnerEnvironment[M]) CheckPointStore() CheckPointStore {
 	if e == nil {
 		return nil
@@ -103,6 +106,7 @@ func (e *TypedRunnerEnvironment[M]) CheckPointStore() CheckPointStore {
 	return e.checkPointStore
 }
 
+// SessionConfig returns the parent Runner's session persistence configuration.
 func (e *TypedRunnerEnvironment[M]) SessionConfig() *SessionConfig[M] {
 	if e == nil {
 		return nil

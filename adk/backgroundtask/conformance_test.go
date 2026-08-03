@@ -35,7 +35,9 @@ type scriptedExecutor struct {
 	validateExecutionErr error
 	checkpointErr        error
 	normalizedResume     []byte
+	resumeErr            error
 	leaseExpiryPolicy    LeaseExpiryPolicy
+	disableDrain         bool
 	execute              func(context.Context, *Task, ExecutionRuntime) (*ExecutionResult, error)
 
 	mu                  sync.Mutex
@@ -71,7 +73,7 @@ func (e *scriptedExecutor) ValidateExecution(context.Context, *Task) error {
 	return e.validateExecutionErr
 }
 
-func (e *scriptedExecutor) SupportsDrain() bool { return true }
+func (e *scriptedExecutor) SupportsDrain() bool { return !e.disableDrain }
 
 func (e *scriptedExecutor) ValidateCheckpoint(_ context.Context, _ Spec, checkpoint []byte) error {
 	e.mu.Lock()
@@ -90,7 +92,7 @@ func (e *scriptedExecutor) ValidateResume(
 	e.resumeCheckpoint = cloneBytes(checkpoint)
 	e.resumeInput = cloneBytes(resumeInput)
 	e.mu.Unlock()
-	return cloneBytes(e.normalizedResume), nil
+	return cloneBytes(e.normalizedResume), e.resumeErr
 }
 
 func (e *scriptedExecutor) Execute(ctx context.Context, task *Task, runtime ExecutionRuntime) (*ExecutionResult, error) {

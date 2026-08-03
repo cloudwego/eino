@@ -652,8 +652,7 @@ func createExecuteTool(middlewareConfig *MiddlewareConfig) (tool.BaseTool, error
 					store:     middlewareConfig.Background.OutputStore,
 					outputDir: middlewareConfig.Background.OutputDir,
 				},
-				executeConfig.Name,
-				desc,
+				toolDefinition{name: executeConfig.Name, desc: desc},
 			)
 		}
 

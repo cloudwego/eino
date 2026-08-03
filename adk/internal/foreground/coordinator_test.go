@@ -18,16 +18,126 @@ package foreground
 
 import (
 	"context"
+	"errors"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/cloudwego/eino/adk/backgroundtask"
 )
+
+type coordinatorExecutor struct {
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (*coordinatorExecutor) Key() string { return "coordinator-test" }
+
+func (*coordinatorExecutor) LeaseExpiryPolicy() backgroundtask.LeaseExpiryPolicy {
+	return backgroundtask.LeaseExpiryRetry
+}
+
+func (*coordinatorExecutor) ValidateSpec(backgroundtask.Spec) error { return nil }
+
+func (*coordinatorExecutor) ValidateExecution(context.Context, *backgroundtask.Task) error {
+	return nil
+}
+
+func (*coordinatorExecutor) ValidateCheckpoint(context.Context, backgroundtask.Spec, []byte) error {
+	return nil
+}
+
+func (*coordinatorExecutor) ValidateResume(
+	context.Context,
+	backgroundtask.Spec,
+	[]byte,
+	[]byte,
+) ([]byte, error) {
+	return nil, errors.New("resume is unsupported")
+}
+
+func (*coordinatorExecutor) SupportsDrain() bool { return false }
+
+func (e *coordinatorExecutor) Execute(
+	_ context.Context,
+	_ *backgroundtask.Task,
+	runtime backgroundtask.ExecutionRuntime,
+) (*backgroundtask.ExecutionResult, error) {
+	e.once.Do(func() { close(e.started) })
+	select {
+	case <-e.release:
+		return &backgroundtask.ExecutionResult{
+			Status: backgroundtask.StatusCompleted, Data: []byte("done"),
+		}, nil
+	case control := <-runtime.Controls():
+		switch control.Kind {
+		case backgroundtask.ControlStop:
+			return &backgroundtask.ExecutionResult{Status: backgroundtask.StatusCanceled}, nil
+		case backgroundtask.ControlTimeout:
+			return &backgroundtask.ExecutionResult{
+				Status: backgroundtask.StatusFailed, Error: control.Reason,
+			}, nil
+		default:
+			return nil, backgroundtask.ErrCheckpointUnavailable
+		}
+	}
+}
+
+func newCoordinatorTask(t *testing.T) (*backgroundtask.Manager, *coordinatorExecutor, *backgroundtask.Task) {
+	t.Helper()
+	executor := &coordinatorExecutor{
+		started: make(chan struct{}), release: make(chan struct{}),
+	}
+	executors := backgroundtask.NewExecutorRegistry()
+	require.NoError(t, executors.Register(executor))
+	manager := backgroundtask.New(context.Background(), &backgroundtask.Config{
+		Executors: executors,
+	})
+	t.Cleanup(func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_ = manager.Close(closeCtx)
+	})
+	task, err := manager.Submit(context.Background(), backgroundtask.Spec{
+		ID: "coordinator-task", ExecutorKey: executor.Key(),
+	})
+	require.NoError(t, err)
+	return manager, executor, task
+}
+
+func waitForTerminal(
+	t *testing.T,
+	manager *backgroundtask.Manager,
+	task *backgroundtask.Task,
+) *backgroundtask.Task {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	current := task
+	for current.Status == backgroundtask.StatusPending ||
+		current.Status == backgroundtask.StatusRunning {
+		next, err := manager.WaitUpdate(ctx, &backgroundtask.WaitUpdateRequest{
+			TaskID: current.Spec.ID, AfterVersion: current.Version,
+		})
+		require.NoError(t, err)
+		current = next
+	}
+	return current
+}
 
 func TestProjectionDetachedFollowsForegroundLifetime_BitsUT(t *testing.T) {
 	type contextKey struct{}
 	parent := context.WithValue(context.Background(), contextKey{}, "value")
-	ctx, detach := withProjection(detachedCtx{parent: parent})
+	detached := detachedCtx{parent: parent}
+	_, hasDeadline := detached.Deadline()
+	require.False(t, hasDeadline)
+	require.Nil(t, detached.Done())
+	require.NoError(t, detached.Err())
+	ctx, detach := withProjection(detached)
 	signal := ProjectionDetached(ctx)
 	require.NotNil(t, signal)
 	assert.Equal(t, "value", ctx.Value(contextKey{}))
@@ -46,4 +156,137 @@ func TestProjectionDetachedFollowsForegroundLifetime_BitsUT(t *testing.T) {
 		t.Fatal("projection signal remained open after detach")
 	}
 	assert.Nil(t, ProjectionDetached(context.Background()))
+}
+
+func TestRunCoordinatesForegroundLifecycle(t *testing.T) {
+	t.Run("completion", func(t *testing.T) {
+		manager, executor, task := newCoordinatorTask(t)
+		close(executor.release)
+		result, err := Run(context.Background(), manager, Policy{}, &Request{
+			TaskID: task.Spec.ID,
+		})
+		require.NoError(t, err)
+		require.Equal(t, backgroundtask.StatusCompleted, result.Status)
+		require.Equal(t, "done", string(result.ResultData))
+	})
+
+	t.Run("explicit background", func(t *testing.T) {
+		manager, executor, task := newCoordinatorTask(t)
+		result, err := Run(context.Background(), manager, Policy{}, &Request{
+			TaskID: task.Spec.ID, RunInBackground: true,
+		})
+		require.NoError(t, err)
+		require.Equal(t, backgroundtask.StatusRunning, result.Status)
+		require.NoError(t, requestStop(manager, result))
+		terminal := waitForTerminal(t, manager, result)
+		require.Equal(t, backgroundtask.StatusCanceled, terminal.Status)
+		select {
+		case <-executor.started:
+		default:
+			t.Fatal("executor did not start")
+		}
+	})
+
+	t.Run("timeout", func(t *testing.T) {
+		manager, _, task := newCoordinatorTask(t)
+		result, err := Run(context.Background(), manager, Policy{TimeoutMs: 1}, &Request{
+			TaskID: task.Spec.ID,
+		})
+		require.NoError(t, err)
+		require.Equal(t, backgroundtask.StatusFailed, result.Status)
+		require.Equal(t, "timed out after 1ms", result.ResultError)
+	})
+
+	t.Run("auto background", func(t *testing.T) {
+		manager, _, task := newCoordinatorTask(t)
+		result, err := Run(context.Background(), manager, Policy{
+			TimeoutMs: 1,
+			ShouldAutoBackground: func(context.Context, *backgroundtask.Task) bool {
+				return true
+			},
+		}, &Request{TaskID: task.Spec.ID})
+		require.NoError(t, err)
+		require.Equal(t, backgroundtask.StatusRunning, result.Status)
+		require.NoError(t, requestStop(manager, result))
+		require.Equal(t, backgroundtask.StatusCanceled, waitForTerminal(t, manager, result).Status)
+	})
+
+	t.Run("caller cancellation", func(t *testing.T) {
+		manager, executor, task := newCoordinatorTask(t)
+		done := make(chan error, 1)
+		go func() {
+			done <- manager.Execute(context.Background(), task.Spec.ID)
+		}()
+		<-executor.started
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		result, err := waitForeground(
+			ctx, manager, Policy{}, &Request{TaskID: task.Spec.ID}, nil, done,
+		)
+		require.NoError(t, err)
+		require.Equal(t, backgroundtask.StatusCanceled, result.Status)
+	})
+}
+
+func TestRunRejectsInvalidRequestAndState(t *testing.T) {
+	_, err := Run(context.Background(), nil, Policy{}, &Request{TaskID: "task"})
+	require.Error(t, err)
+
+	manager, _, task := newCoordinatorTask(t)
+	_, err = manager.RequestCancel(context.Background(), task.Spec.ID)
+	require.NoError(t, err)
+	_, err = Run(context.Background(), manager, Policy{}, &Request{TaskID: task.Spec.ID})
+	require.ErrorIs(t, err, backgroundtask.ErrIllegalTransition)
+}
+
+func TestForegroundWaitBoundaryErrors(t *testing.T) {
+	t.Run("startup context canceled", func(t *testing.T) {
+		manager, _, task := newCoordinatorTask(t)
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		_, err := waitStarted(ctx, manager, task, make(chan error))
+		require.ErrorIs(t, err, context.Canceled)
+		canceled, getErr := manager.Get(context.Background(), task.Spec.ID)
+		require.NoError(t, getErr)
+		require.Equal(t, backgroundtask.StatusCanceled, canceled.Status)
+	})
+
+	t.Run("projection context canceled", func(t *testing.T) {
+		manager, _, task := newCoordinatorTask(t)
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		_, err := waitForeground(
+			ctx, manager, Policy{}, &Request{
+				TaskID: task.Spec.ID, ProjectionReady: make(chan struct{}),
+			}, nil, make(chan error),
+		)
+		require.ErrorIs(t, err, context.Canceled)
+	})
+
+	t.Run("execution finishes before projection", func(t *testing.T) {
+		manager, _, task := newCoordinatorTask(t)
+		done := make(chan error, 1)
+		done <- nil
+		result, err := waitForeground(
+			context.Background(), manager, Policy{}, &Request{
+				TaskID: task.Spec.ID, ProjectionReady: make(chan struct{}),
+			}, nil, done,
+		)
+		require.NoError(t, err)
+		require.Equal(t, backgroundtask.StatusPending, result.Status)
+	})
+
+	t.Run("unexpected pending status at timeout", func(t *testing.T) {
+		manager, _, task := newCoordinatorTask(t)
+		_, err := waitForeground(
+			context.Background(), manager, Policy{TimeoutMs: 1},
+			&Request{TaskID: task.Spec.ID}, nil, make(chan error),
+		)
+		require.ErrorContains(t, err, "unexpected task status")
+	})
+}
+
+func requestStop(manager *backgroundtask.Manager, task *backgroundtask.Task) error {
+	_, err := manager.RequestCancel(context.Background(), task.Spec.ID)
+	return err
 }

@@ -35,10 +35,10 @@ import (
 
 func newTestRunner(t *testing.T, configure ...func(*Config)) (*Runner, *backgroundtask.Manager) {
 	t.Helper()
-	var sequence atomic.Int64
+	var sequence int64
 	manager := backgroundtask.New(context.Background(), &backgroundtask.Config{
 		IDGen: func(context.Context, *backgroundtask.AllocateTaskIDRequest) (string, error) {
-			return fmt.Sprintf("test_%d", sequence.Add(1)), nil
+			return fmt.Sprintf("test_%d", atomic.AddInt64(&sequence, 1)), nil
 		},
 	})
 	config := &Config{Manager: manager}
@@ -191,6 +191,247 @@ func TestRunnerStreamErrorFailsProjectionAndTask_BitsUT(t *testing.T) {
 	require.ErrorIs(t, recvErr, wantErr)
 	task := waitTerminal(t, manager, onlyTask(t, manager))
 	assert.Equal(t, backgroundtask.StatusFailed, task.Status)
+}
+
+func TestRunnerStreamConstructionFailures(t *testing.T) {
+	runner, _ := newTestRunner(t)
+	wantErr := errors.New("construct failed")
+	cases := []struct {
+		name string
+		work StreamWorkFunc
+	}{
+		{name: "work error", work: func(
+			context.Context, backgroundtask.ExecutionRuntime,
+		) (*schema.StreamReader[string], error) {
+			return nil, wantErr
+		}},
+		{name: "nil reader", work: func(
+			context.Context, backgroundtask.ExecutionRuntime,
+		) (*schema.StreamReader[string], error) {
+			return nil, nil
+		}},
+		{name: "panic", work: func(
+			context.Context, backgroundtask.ExecutionRuntime,
+		) (*schema.StreamReader[string], error) {
+			panic(wantErr)
+		}},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			stream, err := runner.RunStream(
+				context.Background(), &Input{Description: testCase.name}, testCase.work,
+			)
+			require.Error(t, err)
+			require.Nil(t, stream)
+		})
+	}
+	stream, err := runner.RunStream(context.Background(), nil, streamWork("ignored"))
+	require.Error(t, err)
+	require.Nil(t, stream)
+	stream, err = runner.RunStream(context.Background(), &Input{}, nil)
+	require.Error(t, err)
+	require.Nil(t, stream)
+}
+
+func TestProjectStreamTerminalBoundaries(t *testing.T) {
+	runner, _ := newTestRunner(t)
+	input := &Input{}
+
+	t.Run("run error", func(t *testing.T) {
+		chunks := make(chan streamChunk)
+		runDone := make(chan runResult, 1)
+		wantErr := errors.New("run failed")
+		runDone <- runResult{err: wantErr}
+		reader, writer := schema.Pipe[string](1)
+		done := make(chan struct{})
+		go func() {
+			runner.projectStream(
+				context.Background(), input, "task", chunks, runDone, writer,
+			)
+			close(done)
+		}()
+		_, err := reader.Recv()
+		require.ErrorIs(t, err, wantErr)
+		close(chunks)
+		<-done
+	})
+
+	t.Run("chunk error", func(t *testing.T) {
+		chunks := make(chan streamChunk, 1)
+		runDone := make(chan runResult)
+		wantErr := errors.New("chunk failed")
+		chunks <- streamChunk{err: wantErr}
+		reader, writer := schema.Pipe[string](1)
+		done := make(chan struct{})
+		go func() {
+			runner.projectStream(
+				context.Background(), input, "task", chunks, runDone, writer,
+			)
+			close(done)
+		}()
+		_, err := reader.Recv()
+		require.ErrorIs(t, err, wantErr)
+		close(chunks)
+		<-done
+	})
+
+	t.Run("caller closes projection", func(t *testing.T) {
+		chunks := make(chan streamChunk, 1)
+		runDone := make(chan runResult)
+		chunks <- streamChunk{text: "ignored"}
+		reader, writer := schema.Pipe[string](1)
+		reader.Close()
+		done := make(chan struct{})
+		go func() {
+			runner.projectStream(
+				context.Background(), input, "task", chunks, runDone, writer,
+			)
+			close(done)
+		}()
+		close(chunks)
+		<-done
+	})
+
+	t.Run("context canceled", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		chunks := make(chan streamChunk)
+		runDone := make(chan runResult)
+		reader, writer := schema.Pipe[string](1)
+		done := make(chan struct{})
+		go func() {
+			runner.projectStream(ctx, input, "task", chunks, runDone, writer)
+			close(done)
+		}()
+		_, err := reader.Recv()
+		require.ErrorIs(t, err, io.EOF)
+		close(chunks)
+		<-done
+	})
+}
+
+func TestRunnerStreamBackgroundNotices(t *testing.T) {
+	newRunner := func(t *testing.T, auto bool) (*Runner, *backgroundtask.Manager) {
+		t.Helper()
+		timeout := 1
+		return newTestRunner(t, func(config *Config) {
+			config.ForegroundTimeoutMs = &timeout
+			config.BackgroundNotice = func(_ context.Context, info NoticeInfo) string {
+				return fmt.Sprintf("notice:%t", info.AutoBackgrounded)
+			}
+			if auto {
+				config.ShouldAutoBackground = func(context.Context, *backgroundtask.Task) bool {
+					return true
+				}
+			}
+		})
+	}
+
+	t.Run("explicit background", func(t *testing.T) {
+		runner, manager := newRunner(t, false)
+		release := make(chan struct{})
+		stream, err := runner.RunStream(context.Background(), &Input{
+			Description: "background", RunInBackground: true,
+		}, gatedStreamWork(release))
+		require.NoError(t, err)
+		require.Equal(t, "notice:false", drain(t, stream))
+		close(release)
+		require.Equal(t, backgroundtask.StatusCompleted,
+			waitTerminal(t, manager, onlyTask(t, manager)).Status)
+	})
+
+	t.Run("preview expires", func(t *testing.T) {
+		runner, manager := newRunner(t, false)
+		release := make(chan struct{})
+		stream, err := runner.RunStream(context.Background(), &Input{
+			Description: "preview", RunInBackground: true, BackgroundStartupPreviewMs: 1,
+		}, gatedStreamWork(release))
+		require.NoError(t, err)
+		require.Equal(t, "notice:false", drain(t, stream))
+		close(release)
+		require.Equal(t, backgroundtask.StatusCompleted,
+			waitTerminal(t, manager, onlyTask(t, manager)).Status)
+	})
+
+	t.Run("auto background", func(t *testing.T) {
+		runner, manager := newRunner(t, true)
+		release := make(chan struct{})
+		stream, err := runner.RunStream(context.Background(), &Input{
+			Description: "auto",
+		}, gatedStreamWork(release))
+		require.NoError(t, err)
+		require.Equal(t, "notice:true", drain(t, stream))
+		close(release)
+		require.Equal(t, backgroundtask.StatusCompleted,
+			waitTerminal(t, manager, onlyTask(t, manager)).Status)
+	})
+}
+
+func TestRunnerLocalContracts(t *testing.T) {
+	runner, manager := newTestRunner(t)
+	require.Same(t, manager, runner.Manager())
+	var nilRunner *Runner
+	require.Nil(t, nilRunner.Manager())
+	require.Error(t, runner.executor.ValidateCheckpoint(
+		context.Background(), backgroundtask.Spec{}, []byte("checkpoint"),
+	))
+	_, err := runner.executor.ValidateResume(
+		context.Background(), backgroundtask.Spec{}, nil, nil,
+	)
+	require.Error(t, err)
+	require.Error(t, runner.executor.ValidateSpec(backgroundtask.Spec{
+		ExecutorKey: "wrong",
+	}))
+
+	task := &backgroundtask.Task{Spec: backgroundtask.Spec{
+		ID: "task", Kind: "bash", OutputFile: "/tasks/output",
+	}}
+	notice := defaultBackgroundNotice(context.Background(), NoticeInfo{Task: task})
+	require.Contains(t, notice, "is running in the background")
+	require.Contains(t, notice, "/tasks/output")
+	notice = defaultBackgroundNotice(context.Background(), NoticeInfo{
+		Task: task, AutoBackgrounded: true,
+	})
+	require.Contains(t, notice, "moved to the background")
+
+	work := func(context.Context, backgroundtask.ExecutionRuntime) (string, error) {
+		return "done", nil
+	}
+	result, err := nilRunner.Run(context.Background(), &Input{}, work)
+	require.Error(t, err)
+	require.Nil(t, result)
+	result, err = runner.Run(context.Background(), nil, work)
+	require.Error(t, err)
+	require.Nil(t, result)
+	result, err = runner.Run(context.Background(), &Input{}, nil)
+	require.Error(t, err)
+	require.Nil(t, result)
+	result, err = runner.Run(context.Background(), &Input{
+		Notify: &backgroundtask.NotificationTarget{},
+	}, work)
+	require.Error(t, err)
+	require.Nil(t, result)
+
+	pending, err := runner.submit(
+		context.Background(), &Input{Type: "test", Description: "pending"}, work,
+	)
+	require.NoError(t, err)
+	require.Contains(t, runner.executor.works, pending.Spec.ID)
+	runner.removeUnstarted(pending.Spec.ID)
+	require.NotContains(t, runner.executor.works, pending.Spec.ID)
+	runner.removeUnstarted("missing")
+}
+
+func gatedStreamWork(release <-chan struct{}) StreamWorkFunc {
+	return func(context.Context, backgroundtask.ExecutionRuntime) (*schema.StreamReader[string], error) {
+		reader, writer := schema.Pipe[string](1)
+		go func() {
+			<-release
+			writer.Send("done", nil)
+			writer.Close()
+		}()
+		return reader, nil
+	}
 }
 
 func streamWork(chunks ...string) StreamWorkFunc {

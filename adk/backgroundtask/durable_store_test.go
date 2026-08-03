@@ -107,6 +107,184 @@ func TestInMemoryStoreCreateAndStartIsAtomic_BitsUT(t *testing.T) {
 	assert.Empty(t, pending.Tasks)
 }
 
+func TestAttack_ListPendingCursorSurvivesEarlierInsertion(t *testing.T) {
+	store := NewInMemoryStore(nil)
+	for _, id := range []string{"task-b", "task-c"} {
+		_, err := store.Create(context.Background(), &CreateTaskRequest{
+			Spec: validSpec(id), LeaseExpiryPolicy: LeaseExpiryRetry,
+		})
+		require.NoError(t, err)
+	}
+	first, err := store.ListPending(context.Background(), &ListPendingRequest{
+		ExecutorKeys: []string{"test"}, Limit: 1,
+	})
+	require.NoError(t, err)
+	require.Len(t, first.Tasks, 1)
+	require.Equal(t, "task-b", first.Tasks[0].Spec.ID)
+	require.NotEmpty(t, first.NextCursor)
+
+	_, err = store.Create(context.Background(), &CreateTaskRequest{
+		Spec: validSpec("task-a"), LeaseExpiryPolicy: LeaseExpiryRetry,
+	})
+	require.NoError(t, err)
+	second, err := store.ListPending(context.Background(), &ListPendingRequest{
+		ExecutorKeys: []string{"test"}, Cursor: first.NextCursor, Limit: 1,
+	})
+	require.NoError(t, err)
+	require.Len(t, second.Tasks, 1)
+	t.Logf("cursor %q returned %q after an earlier task was inserted",
+		first.NextCursor, second.Tasks[0].Spec.ID)
+	require.Equal(t, "task-c", second.Tasks[0].Spec.ID)
+}
+
+func TestAttack_CancellationFencesAllNonCancelMutations(t *testing.T) {
+	store := NewInMemoryStore(nil)
+	started := createAndStart(t, store, "cancel-fence")
+	requested, err := store.RequestCancel(context.Background(), &RequestCancelRequest{
+		TaskID: started.Spec.ID, ExpectedVersion: started.Version,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, requested.CancelRequestedAt)
+
+	mutations := []struct {
+		name   string
+		mutate func() error
+	}{
+		{name: "heartbeat", mutate: func() error {
+			_, mutationErr := store.Heartbeat(context.Background(), &HeartbeatRequest{
+				TaskID: started.Spec.ID, ExpectedVersion: requested.Version,
+			})
+			return mutationErr
+		}},
+		{name: "append output", mutate: func() error {
+			_, mutationErr := store.AppendOutput(context.Background(), &AppendOutputRequest{
+				TaskID: started.Spec.ID, Attempt: started.Attempt, Data: []byte("late"),
+			})
+			return mutationErr
+		}},
+		{name: "complete", mutate: func() error {
+			_, mutationErr := store.Complete(context.Background(), &CompleteTaskRequest{
+				TaskID: started.Spec.ID, ExpectedVersion: requested.Version, Data: []byte("late"),
+			})
+			return mutationErr
+		}},
+		{name: "fail", mutate: func() error {
+			_, mutationErr := store.Fail(context.Background(), &FailTaskRequest{
+				TaskID: started.Spec.ID, ExpectedVersion: requested.Version, Error: "late",
+			})
+			return mutationErr
+		}},
+		{name: "wait input", mutate: func() error {
+			_, mutationErr := store.WaitInput(context.Background(), &WaitInputTaskRequest{
+				TaskID: started.Spec.ID, ExpectedVersion: requested.Version, Checkpoint: []byte("late"),
+			})
+			return mutationErr
+		}},
+		{name: "suspend", mutate: func() error {
+			_, mutationErr := store.Suspend(context.Background(), &SuspendTaskRequest{
+				TaskID: started.Spec.ID, ExpectedVersion: requested.Version, Checkpoint: []byte("late"),
+			})
+			return mutationErr
+		}},
+	}
+	for _, mutation := range mutations {
+		t.Run(mutation.name, func(t *testing.T) {
+			mutationErr := mutation.mutate()
+			t.Logf("mutation rejected with %v", mutationErr)
+			require.ErrorIs(t, mutationErr, ErrLeaseLost)
+		})
+	}
+
+	canceled, err := store.Cancel(context.Background(), &CancelTaskRequest{
+		TaskID: started.Spec.ID, ExpectedVersion: requested.Version,
+	})
+	require.NoError(t, err)
+	require.Equal(t, StatusCanceled, canceled.Status)
+}
+
+func TestAttack_OutputSequenceRemainsMonotonicAcrossAttempts(t *testing.T) {
+	clock := &testClock{now: time.Unix(100, 0)}
+	store := NewInMemoryStore(&InMemoryStoreConfig{
+		Clock: clock.Now, ActiveAttemptTimeout: time.Second,
+	})
+	firstAttempt := createAndStart(t, store, "output-retry")
+	first, err := store.AppendOutput(context.Background(), &AppendOutputRequest{
+		TaskID: firstAttempt.Spec.ID, Attempt: firstAttempt.Attempt, Data: []byte("first"),
+	})
+	require.NoError(t, err)
+	require.Equal(t, int64(1), first.Sequence)
+
+	clock.Advance(2 * time.Second)
+	pending, err := store.Get(context.Background(), firstAttempt.Spec.ID)
+	require.NoError(t, err)
+	require.Equal(t, StatusPending, pending.Status)
+	secondAttempt, err := store.Start(context.Background(), &StartTaskRequest{
+		TaskID: pending.Spec.ID, ExpectedVersion: pending.Version,
+	})
+	require.NoError(t, err)
+	second, err := store.AppendOutput(context.Background(), &AppendOutputRequest{
+		TaskID: secondAttempt.Spec.ID, Attempt: secondAttempt.Attempt, Data: []byte("second"),
+	})
+	require.NoError(t, err)
+	t.Logf("attempts %d and %d produced sequences %d and %d",
+		firstAttempt.Attempt, secondAttempt.Attempt, first.Sequence, second.Sequence)
+	require.Equal(t, int64(2), second.Sequence)
+
+	output, err := store.ReadOutput(context.Background(), &ReadOutputRequest{
+		TaskID: secondAttempt.Spec.ID,
+	})
+	require.NoError(t, err)
+	require.Len(t, output.Records, 2)
+	require.Equal(t, []int64{1, 2}, []int64{
+		output.Records[0].Attempt, output.Records[1].Attempt,
+	})
+	require.Equal(t, []string{"first", "second"}, []string{
+		string(output.Records[0].Data), string(output.Records[1].Data),
+	})
+}
+
+func TestInMemoryStoreHeartbeatSuspensionReleaseAndWait(t *testing.T) {
+	store := NewInMemoryStore(nil)
+	started := createAndStart(t, store, "suspension")
+	waitDone := make(chan struct {
+		task *Task
+		err  error
+	}, 1)
+	go func() {
+		task, err := store.Wait(context.Background(), &WaitUpdateRequest{
+			TaskID: started.Spec.ID, AfterVersion: started.Version,
+		})
+		waitDone <- struct {
+			task *Task
+			err  error
+		}{task: task, err: err}
+	}()
+
+	heartbeat, err := store.Heartbeat(context.Background(), &HeartbeatRequest{
+		TaskID: started.Spec.ID, ExpectedVersion: started.Version,
+	})
+	require.NoError(t, err)
+	require.Equal(t, started.Version+1, heartbeat.Version)
+	waited := <-waitDone
+	require.NoError(t, waited.err)
+	require.Equal(t, heartbeat.Version, waited.task.Version)
+
+	suspended, err := store.Suspend(context.Background(), &SuspendTaskRequest{
+		TaskID: started.Spec.ID, ExpectedVersion: heartbeat.Version,
+		Checkpoint: []byte("checkpoint"),
+	})
+	require.NoError(t, err)
+	require.Equal(t, StatusSuspended, suspended.Status)
+	require.Equal(t, "checkpoint", string(suspended.Checkpoint))
+
+	released, err := store.ReleaseSuspension(context.Background(), &ReleaseSuspensionRequest{
+		TaskID: started.Spec.ID, ExpectedVersion: suspended.Version,
+	})
+	require.NoError(t, err)
+	require.Equal(t, StatusPending, released.Status)
+	require.Equal(t, "checkpoint", string(released.Checkpoint))
+}
+
 func TestInMemoryStoreReportOutputFailureIsFencedAndFirstErrorWins_BitsUT(t *testing.T) {
 	store := NewInMemoryStore(nil)
 	started := createAndStart(t, store, "output")
@@ -389,4 +567,61 @@ func TestInMemoryStoreRunningAttemptCanCommitCanceled_BitsUT(t *testing.T) {
 	assert.Equal(t, StatusCanceled, canceled.Status)
 	assert.Equal(t, "task was canceled", canceled.ResultError)
 	assert.Nil(t, canceled.CancelRequestedAt)
+}
+
+func TestStoreValidationBoundaries(t *testing.T) {
+	specCases := []struct {
+		name string
+		spec Spec
+	}{
+		{name: "missing identity", spec: Spec{}},
+		{name: "incomplete notification", spec: Spec{
+			ID: "task", ExecutorKey: "test", Notify: &NotificationTarget{},
+		}},
+		{name: "unnamespaced metadata", spec: Spec{
+			ID: "task", ExecutorKey: "test",
+			Notify: &NotificationTarget{
+				Kind: "custom", TargetID: "target",
+				Metadata: map[string]string{"plain": "value"},
+			},
+		}},
+		{name: "session target mismatch", spec: Spec{
+			ID: "task", ExecutorKey: "test", SessionID: "session-a",
+			Notify: &NotificationTarget{
+				Kind: "session_inbox", TargetID: "session-b",
+			},
+		}},
+	}
+	for _, testCase := range specCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			require.Error(t, validateSpec(testCase.spec))
+		})
+	}
+
+	require.Error(t, validateCreateTaskRequest(&CreateTaskRequest{
+		Spec: validSpec("policy"), LeaseExpiryPolicy: LeaseExpiryPolicy("unknown"),
+	}))
+	require.Error(t, validateOutputFailure(""))
+	require.Error(t, validateOutputFailure(string(make([]byte, 4097))))
+
+	snapshotCases := []struct {
+		name        string
+		status      Status
+		data        []byte
+		resultError string
+	}{
+		{name: "pending result", status: StatusPending, data: []byte("result")},
+		{name: "unsupported status", status: Status("unknown")},
+		{name: "completed error", status: StatusCompleted, resultError: "error"},
+		{name: "failed without error", status: StatusFailed},
+		{name: "canceled data", status: StatusCanceled, data: []byte("result")},
+		{name: "oversized error", status: StatusFailed, resultError: string(make([]byte, 4097))},
+	}
+	for _, testCase := range snapshotCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			require.Error(t, validateTaskSnapshot(
+				testCase.status, testCase.data, testCase.resultError,
+			))
+		})
+	}
 }

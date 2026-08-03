@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+// Package foreground coordinates caller-visible task occupancy without owning
+// durable task lifecycle state.
 package foreground
 
 import (

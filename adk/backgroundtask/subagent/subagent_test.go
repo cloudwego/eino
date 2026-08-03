@@ -19,6 +19,7 @@ package subagent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -44,6 +45,35 @@ type cancelThenMessageAgent struct {
 	name    string
 	started chan struct{}
 	release chan struct{}
+}
+
+type contextCaptureAgent struct {
+	name     string
+	contexts chan context.Context
+	release  chan struct{}
+}
+
+func (a *contextCaptureAgent) Name(context.Context) string        { return a.name }
+func (a *contextCaptureAgent) Description(context.Context) string { return "capture context" }
+func (a *contextCaptureAgent) Run(
+	ctx context.Context,
+	_ *adk.AgentInput,
+	_ ...adk.AgentRunOption,
+) *adk.AsyncIterator[*adk.AgentEvent] {
+	iter, generator := adk.NewAsyncIteratorPair[*adk.AgentEvent]()
+	a.contexts <- ctx
+	go func() {
+		<-a.release
+		generator.Close()
+	}()
+	return iter
+}
+func (a *contextCaptureAgent) Resume(
+	ctx context.Context,
+	_ *adk.ResumeInfo,
+	options ...adk.AgentRunOption,
+) *adk.AsyncIterator[*adk.AgentEvent] {
+	return a.Run(ctx, &adk.AgentInput{}, options...)
 }
 
 type registrationRunOptions struct {
@@ -256,6 +286,111 @@ func TestExecutorValidateResumeTargets_BitsUT(t *testing.T) {
 	})
 }
 
+func TestAttack_ValidateResumePreservesLargeIntegers(t *testing.T) {
+	executor, spec, checkpoint := resumeFixture(t, "approval")
+	const resume = `{"approval":{"ticket":9007199254740993}}`
+	normalized, err := executor.ValidateResume(
+		context.Background(), spec, checkpoint, []byte(resume),
+	)
+	require.NoError(t, err)
+	t.Logf("normalized resume payload: %s", normalized)
+	require.Equal(t, resume, string(normalized))
+}
+
+func TestResumeControlHelpers(t *testing.T) {
+	targets, err := decodeResumeTargets([]byte(
+		`{"approval":{"ticket":9007199254740993}}`,
+	))
+	require.NoError(t, err)
+	approval, ok := targets["approval"].(map[string]any)
+	require.True(t, ok)
+	ticket, ok := approval["ticket"].(json.Number)
+	require.True(t, ok)
+	require.Equal(t, "9007199254740993", ticket.String())
+	_, err = decodeResumeTargets([]byte(`{"approval":true} trailing`))
+	require.Error(t, err)
+
+	controls := make(chan backgroundtask.ControlRequest, 1)
+	controls <- backgroundtask.ControlRequest{
+		Kind: backgroundtask.ControlTimeout, Reason: "deadline",
+	}
+	require.Equal(t, backgroundtask.ControlTimeout, pollControl(controls).Kind)
+	require.Empty(t, pollControl(controls).Kind)
+	controls <- backgroundtask.ControlRequest{Kind: backgroundtask.ControlStop}
+	require.Equal(t, backgroundtask.ControlStop,
+		waitForControl(context.Background(), controls).Kind)
+
+	executor := &Executor[*schema.Message]{}
+	task := &backgroundtask.Task{Spec: backgroundtask.Spec{ID: "task"}}
+	result, controlErr, controlled := executor.controlResult(
+		context.Background(), task,
+		backgroundtask.ControlRequest{Kind: backgroundtask.ControlTimeout, Reason: "deadline"},
+	)
+	require.True(t, controlled)
+	require.NoError(t, controlErr)
+	require.Equal(t, backgroundtask.StatusFailed, result.Status)
+	require.Equal(t, "deadline", result.Error)
+
+	result, controlErr, controlled = executor.controlResult(
+		context.Background(), task,
+		backgroundtask.ControlRequest{Kind: backgroundtask.ControlDrain},
+	)
+	require.True(t, controlled)
+	require.ErrorIs(t, controlErr, ErrRunnerEnvironmentRequired)
+	require.Nil(t, result)
+
+	result, controlErr, controlled = executor.controlResult(
+		context.Background(), task, backgroundtask.ControlRequest{},
+	)
+	require.False(t, controlled)
+	require.NoError(t, controlErr)
+	require.Nil(t, result)
+}
+
+func TestHandleEventErrorControlOutcomes(t *testing.T) {
+	executor := &Executor[*schema.Message]{}
+	task := &backgroundtask.Task{Spec: backgroundtask.Spec{ID: "task"}}
+
+	t.Run("ordinary error", func(t *testing.T) {
+		iter, generator := adk.NewAsyncIteratorPair[*adk.AgentEvent]()
+		generator.Close()
+		wantErr := errors.New("model failed")
+		result, err := executor.handleEventError(
+			context.Background(), iter, task,
+			make(chan backgroundtask.ControlRequest), wantErr,
+		)
+		require.ErrorIs(t, err, wantErr)
+		require.Nil(t, result)
+	})
+
+	t.Run("stop", func(t *testing.T) {
+		iter, generator := adk.NewAsyncIteratorPair[*adk.AgentEvent]()
+		generator.Close()
+		controls := make(chan backgroundtask.ControlRequest, 1)
+		controls <- backgroundtask.ControlRequest{Kind: backgroundtask.ControlStop}
+		result, err := executor.handleEventError(
+			context.Background(), iter, task, controls, context.Canceled,
+		)
+		require.NoError(t, err)
+		require.Equal(t, backgroundtask.StatusCanceled, result.Status)
+	})
+
+	t.Run("timeout", func(t *testing.T) {
+		iter, generator := adk.NewAsyncIteratorPair[*adk.AgentEvent]()
+		generator.Close()
+		controls := make(chan backgroundtask.ControlRequest, 1)
+		controls <- backgroundtask.ControlRequest{
+			Kind: backgroundtask.ControlTimeout, Reason: "deadline",
+		}
+		result, err := executor.handleEventError(
+			context.Background(), iter, task, controls, context.Canceled,
+		)
+		require.NoError(t, err)
+		require.Equal(t, backgroundtask.StatusFailed, result.Status)
+		require.Equal(t, "deadline", result.Error)
+	})
+}
+
 func TestSubagentPayloadV2Validation_BitsUT(t *testing.T) {
 	executor, spec, _ := resumeFixture(t, "approval")
 	require.NoError(t, executor.ValidateSpec(spec))
@@ -455,6 +590,84 @@ func TestExecutorDrainUsesDurableRunnerCheckpoint_BitsUT(t *testing.T) {
 	result, err := manager.Get(context.Background(), task.Spec.ID)
 	require.NoError(t, err)
 	assert.Equal(t, backgroundtask.StateWaitingInput, result.Status)
+}
+
+func TestControlAndInterruptUseRunnerCheckpoint(t *testing.T) {
+	store := adksession.NewInMemoryStore[*schema.Message](nil)
+	agent := &contextCaptureAgent{
+		name: "worker", contexts: make(chan context.Context, 1), release: make(chan struct{}),
+	}
+	executor := &Executor[*schema.Message]{}
+	require.NoError(t, executor.Register(agent.name, &AgentRegistration[*schema.Message]{
+		Agent: agent,
+	}))
+	registry := backgroundtask.NewExecutorRegistry()
+	require.NoError(t, registry.Register(executor))
+	manager := backgroundtask.New(context.Background(), &backgroundtask.Config{Executors: registry})
+	task, err := Submit(context.Background(), manager, &SubmitRequest{
+		SubAgentName: agent.name, Query: "work", Description: "work", SessionID: "parent",
+	})
+	require.NoError(t, err)
+	runner := adk.NewRunner(context.Background(), adk.RunnerConfig{
+		Agent: agent, CheckPointStore: store, SessionID: "parent", SessionStore: store,
+	})
+	executeDone := make(chan error, 1)
+	go func() {
+		executeDone <- runner.ExecuteBackgroundTask(context.Background(), manager, task.Spec.ID)
+	}()
+	runCtx := <-agent.contexts
+
+	result, controlErr, controlled := executor.controlResult(
+		runCtx, task, backgroundtask.ControlRequest{Kind: backgroundtask.ControlDrain},
+	)
+	require.True(t, controlled)
+	require.ErrorIs(t, controlErr, backgroundtask.ErrCheckpointUnavailable)
+	require.Nil(t, result)
+
+	require.NoError(t, store.Set(
+		context.Background(), checkpointID(task.Spec.ID), []byte("runner checkpoint"),
+	))
+	result, controlErr, controlled = executor.controlResult(
+		runCtx, task, backgroundtask.ControlRequest{Kind: backgroundtask.ControlDrain},
+	)
+	require.True(t, controlled)
+	require.NoError(t, controlErr)
+	require.Equal(t, backgroundtask.StatusSuspended, result.Status)
+
+	result, err = executor.interruptResult(runCtx, task, &adk.InterruptInfo{})
+	require.ErrorContains(t, err, "no resumable targets")
+	require.Nil(t, result)
+	result, err = executor.interruptResult(runCtx, task, &adk.InterruptInfo{
+		InterruptContexts: []*adk.InterruptCtx{{ID: "approval"}},
+	})
+	require.NoError(t, err)
+	require.Equal(t, backgroundtask.StatusWaitingInput, result.Status)
+
+	_, _ = executor.beginRun(
+		runCtx, runner, &backgroundtask.Task{
+			Spec: task.Spec, Checkpoint: []byte(`{"sequence":1}`),
+		}, &taskPayload{},
+	)
+	_, _ = executor.beginRun(
+		runCtx, runner, &backgroundtask.Task{
+			Spec: task.Spec, Checkpoint: []byte(`{"sequence":1}`),
+			PendingResume: []byte(`{"approval":true}`),
+		}, &taskPayload{},
+	)
+
+	close(agent.release)
+	require.NoError(t, <-executeDone)
+}
+
+func TestWaitForControlBoundaries(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	require.Empty(t, waitForControl(
+		ctx, make(chan backgroundtask.ControlRequest),
+	).Kind)
+	require.Empty(t, waitForControl(
+		context.Background(), make(chan backgroundtask.ControlRequest),
+	).Kind)
 }
 
 func TestSubAgentTaskResumesAfterManagerReconstruction_BitsUT(t *testing.T) {

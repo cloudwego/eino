@@ -18,6 +18,7 @@ package backgroundtask
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -110,6 +111,428 @@ func TestManagerExecuteClosesTimeoutControllerOnEarlyFailure_BitsUT(t *testing.T
 		timeoutController.RequestTimeout(context.Background(), "too late"),
 		taskcontrol.ErrClosed,
 	)
+}
+
+func TestManagerCloseDrainsActiveAttempt(t *testing.T) {
+	started := make(chan struct{})
+	observed := make(chan ControlKind, 1)
+	executor := &scriptedExecutor{
+		execute: func(
+			_ context.Context,
+			_ *Task,
+			runtime ExecutionRuntime,
+		) (*ExecutionResult, error) {
+			close(started)
+			control := <-runtime.Controls()
+			observed <- control.Kind
+			return &ExecutionResult{
+				Status: StatusSuspended, Checkpoint: []byte("checkpoint"),
+			}, nil
+		},
+	}
+	store := NewInMemoryStore(nil)
+	manager := managerWithExecutor(t, store, executor, time.Minute)
+	task, err := manager.Submit(context.Background(), validSpec("close-drain"))
+	require.NoError(t, err)
+	executeDone := make(chan error, 1)
+	go func() {
+		executeDone <- manager.Execute(context.Background(), task.Spec.ID)
+	}()
+	<-started
+
+	require.ErrorIs(t, manager.Close(context.Background()), ErrCloseDeadlineRequired)
+	closeCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	require.NoError(t, manager.Close(closeCtx))
+	require.NoError(t, <-executeDone)
+	require.Equal(t, ControlDrain, <-observed)
+	suspended, err := manager.Get(context.Background(), task.Spec.ID)
+	require.NoError(t, err)
+	require.Equal(t, StatusSuspended, suspended.Status)
+	require.Equal(t, "checkpoint", string(suspended.Checkpoint))
+}
+
+func TestManagerCloseCancelsNonDrainableAttemptAtDeadline(t *testing.T) {
+	started := make(chan struct{})
+	observed := make(chan ControlKind, 1)
+	executor := &scriptedExecutor{
+		disableDrain: true,
+		execute: func(
+			_ context.Context,
+			_ *Task,
+			runtime ExecutionRuntime,
+		) (*ExecutionResult, error) {
+			close(started)
+			control := <-runtime.Controls()
+			observed <- control.Kind
+			return &ExecutionResult{Status: StatusCanceled}, nil
+		},
+	}
+	store := NewInMemoryStore(nil)
+	manager := managerWithExecutor(t, store, executor, time.Minute)
+	task, err := manager.Submit(context.Background(), validSpec("close-cancel"))
+	require.NoError(t, err)
+	executeDone := make(chan error, 1)
+	go func() {
+		executeDone <- manager.Execute(context.Background(), task.Spec.ID)
+	}()
+	<-started
+
+	closeCtx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
+	defer cancel()
+	require.NoError(t, manager.Close(closeCtx))
+	require.NoError(t, <-executeDone)
+	require.Equal(t, ControlStop, <-observed)
+	canceled, err := manager.Get(context.Background(), task.Spec.ID)
+	require.NoError(t, err)
+	require.Equal(t, StatusCanceled, canceled.Status)
+}
+
+func TestManagerCancelNonRecoverableAttempt(t *testing.T) {
+	started := make(chan struct{})
+	observed := make(chan ControlKind, 1)
+	executor := &scriptedExecutor{
+		leaseExpiryPolicy: LeaseExpiryFail,
+		execute: func(
+			_ context.Context,
+			_ *Task,
+			runtime ExecutionRuntime,
+		) (*ExecutionResult, error) {
+			close(started)
+			control := <-runtime.Controls()
+			observed <- control.Kind
+			return &ExecutionResult{Status: StatusCanceled}, nil
+		},
+	}
+	store := NewInMemoryStore(nil)
+	manager := managerWithExecutor(t, store, executor, time.Minute)
+	defer closeWithTimeout(manager)
+	task, err := manager.Submit(context.Background(), validSpec("local-cancel"))
+	require.NoError(t, err)
+	executeDone := make(chan error, 1)
+	go func() {
+		executeDone <- manager.Execute(context.Background(), task.Spec.ID)
+	}()
+	<-started
+
+	canceled, err := manager.RequestCancel(context.Background(), task.Spec.ID)
+	require.NoError(t, err)
+	require.Equal(t, StatusCanceled, canceled.Status)
+	require.NoError(t, <-executeDone)
+	require.Equal(t, ControlStop, <-observed)
+}
+
+func TestManagerDispatchReadBoundaries(t *testing.T) {
+	store := NewInMemoryStore(nil)
+	manager := managerWithExecutor(t, store, &scriptedExecutor{}, time.Minute)
+	defer closeWithTimeout(manager)
+	submitted, err := manager.Submit(context.Background(), validSpec("dispatch"))
+	require.NoError(t, err)
+	pending, err := manager.ListPending(context.Background(), &ListPendingRequest{
+		ExecutorKeys: []string{"test"},
+	})
+	require.NoError(t, err)
+	require.Len(t, pending.Tasks, 1)
+	require.Equal(t, submitted.Spec.ID, pending.Tasks[0].Spec.ID)
+
+	started, err := store.Start(context.Background(), &StartTaskRequest{
+		TaskID: submitted.Spec.ID, ExpectedVersion: submitted.Version,
+	})
+	require.NoError(t, err)
+	updated, err := manager.WaitUpdate(context.Background(), &WaitUpdateRequest{
+		TaskID: submitted.Spec.ID, AfterVersion: submitted.Version,
+	})
+	require.NoError(t, err)
+	require.Equal(t, started.Version, updated.Version)
+}
+
+func TestTimeoutControlPrecedence(t *testing.T) {
+	t.Run("timeout supersedes drain", func(t *testing.T) {
+		runtime := newTaskRuntime(nil, "task", 1, 1)
+		require.True(t, runtime.requestControl(ControlDrain))
+		_, controller := taskcontrol.WithTimeoutController(context.Background())
+		stop := make(chan struct{})
+		done := make(chan struct{})
+		go serveTimeoutRequests(runtime, controller, stop, done)
+
+		require.NoError(t, controller.RequestTimeout(context.Background(), "deadline"))
+		require.Equal(t, ControlRequest{
+			Kind: ControlTimeout, Reason: "deadline",
+		}, <-runtime.Controls())
+		close(stop)
+		<-done
+	})
+
+	t.Run("stop rejects timeout", func(t *testing.T) {
+		runtime := newTaskRuntime(nil, "task", 1, 1)
+		require.True(t, runtime.requestControl(ControlStop))
+		_, controller := taskcontrol.WithTimeoutController(context.Background())
+		stop := make(chan struct{})
+		done := make(chan struct{})
+		go serveTimeoutRequests(runtime, controller, stop, done)
+
+		require.ErrorIs(
+			t,
+			controller.RequestTimeout(context.Background(), "deadline"),
+			taskcontrol.ErrClosed,
+		)
+		require.Equal(t, ControlStop, (<-runtime.Controls()).Kind)
+		close(stop)
+		<-done
+	})
+}
+
+func TestTaskRuntimeOutputFailureAndHeartbeat(t *testing.T) {
+	store := NewInMemoryStore(nil)
+	started := createAndStart(t, store, "runtime")
+	runtime := newTaskRuntime(store, started.Spec.ID, started.Attempt, started.Version)
+	require.Equal(t, started.Spec.ID, runtime.TaskID())
+
+	output, err := runtime.AppendOutput(context.Background(), []byte("output"))
+	require.NoError(t, err)
+	require.Equal(t, int64(1), output.Sequence)
+	require.NoError(t, runtime.ReportOutputFailure(context.Background(), "file failed"))
+	require.NoError(t, runtime.heartbeat(context.Background()))
+
+	current, err := store.Get(context.Background(), started.Spec.ID)
+	require.NoError(t, err)
+	require.Equal(t, "file failed", current.OutputFileErr)
+	require.Equal(t, started.Version+2, current.Version)
+}
+
+func TestTaskRuntimeReconcilesCancellationOnHeartbeat(t *testing.T) {
+	store := NewInMemoryStore(nil)
+	started := createAndStart(t, store, "heartbeat-cancel")
+	runtime := newTaskRuntime(store, started.Spec.ID, started.Attempt, started.Version)
+	_, err := store.RequestCancel(context.Background(), &RequestCancelRequest{
+		TaskID: started.Spec.ID, ExpectedVersion: started.Version,
+	})
+	require.NoError(t, err)
+	require.ErrorIs(t, runtime.heartbeat(context.Background()), errHeartbeatStopped)
+	require.True(t, runtime.cancelRequested)
+	require.Equal(t, ControlStop, (<-runtime.Controls()).Kind)
+
+	runtime.poison = ErrLeaseLost
+	require.ErrorIs(t, runtime.heartbeat(context.Background()), ErrLeaseLost)
+}
+
+type heartbeatErrorStore struct {
+	Store
+	err error
+}
+
+func (s heartbeatErrorStore) Heartbeat(context.Context, *HeartbeatRequest) (*Task, error) {
+	return nil, s.err
+}
+
+func TestManagerHeartbeatStopsAndCancelsOnLeaseError(t *testing.T) {
+	manager := New(context.Background(), nil)
+	manager.heartbeatEvery = time.Nanosecond
+	runtime := newTaskRuntime(
+		heartbeatErrorStore{Store: NewInMemoryStore(nil), err: ErrLeaseLost},
+		"task", 1, 1,
+	)
+	runCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	stop := make(chan struct{})
+	go manager.heartbeat(runCtx, cancel, runtime, stop, done)
+	<-done
+	require.ErrorIs(t, runCtx.Err(), context.Canceled)
+
+	runCtx, cancel = context.WithCancel(context.Background())
+	defer cancel()
+	runtime = newTaskRuntime(NewInMemoryStore(nil), "task", 1, 1)
+	runtime.cancelRequested = true
+	done = make(chan struct{})
+	go manager.heartbeat(runCtx, cancel, runtime, stop, done)
+	<-done
+	require.NoError(t, runCtx.Err())
+}
+
+func TestDetachedExecutionContext(t *testing.T) {
+	type key struct{}
+	ctx := detachedCtx{parent: context.WithValue(context.Background(), key{}, "value")}
+	_, hasDeadline := ctx.Deadline()
+	require.False(t, hasDeadline)
+	require.Nil(t, ctx.Done())
+	require.NoError(t, ctx.Err())
+	require.Equal(t, "value", ctx.Value(key{}))
+}
+
+func TestExecutorRegistryRegistrationBoundaries(t *testing.T) {
+	registry := NewExecutorRegistry()
+	require.Error(t, registry.Register(nil))
+	executor := &scriptedExecutor{}
+	require.NoError(t, registry.Register(executor))
+	require.ErrorIs(t, registry.Register(executor), ErrAlreadyExists)
+	resolved, ok := registry.Resolve(executor.Key())
+	require.True(t, ok)
+	require.Same(t, executor, resolved)
+}
+
+func TestRuntimeCancellationReconciliationRejectsInvalidState(t *testing.T) {
+	runtime := newTaskRuntime(NewInMemoryStore(nil), "missing", 1, 1)
+	require.ErrorIs(
+		t, runtime.reconcileCancellationLocked(context.Background()), ErrNotFound,
+	)
+	require.ErrorIs(t, runtime.poison, ErrNotFound)
+
+	store := NewInMemoryStore(nil)
+	started := createAndStart(t, store, "not-canceled")
+	runtime = newTaskRuntime(store, started.Spec.ID, started.Attempt, started.Version)
+	require.ErrorIs(
+		t, runtime.reconcileCancellationLocked(context.Background()), ErrLeaseLost,
+	)
+	require.ErrorIs(t, runtime.poison, ErrLeaseLost)
+}
+
+func TestManagerResumeValidationBoundaries(t *testing.T) {
+	store := NewInMemoryStore(nil)
+	executor := &scriptedExecutor{resumeErr: errors.New("invalid resume")}
+	manager := managerWithExecutor(t, store, executor, time.Minute)
+	require.Error(t, func() error {
+		_, err := manager.Resume(context.Background(), nil)
+		return err
+	}())
+	_, err := manager.Resume(context.Background(), &ResumeRequest{TaskID: "missing"})
+	require.ErrorIs(t, err, ErrNotFound)
+
+	pending, err := manager.Submit(context.Background(), validSpec("pending-resume"))
+	require.NoError(t, err)
+	_, err = manager.Resume(context.Background(), &ResumeRequest{
+		TaskID: pending.Spec.ID, ExpectedVersion: pending.Version,
+	})
+	require.ErrorIs(t, err, ErrIllegalTransition)
+
+	started := createAndStart(t, store, "waiting-resume")
+	waiting, err := store.WaitInput(context.Background(), &WaitInputTaskRequest{
+		TaskID: started.Spec.ID, ExpectedVersion: started.Version,
+		Checkpoint: []byte("checkpoint"),
+	})
+	require.NoError(t, err)
+	_, err = manager.Resume(context.Background(), &ResumeRequest{
+		TaskID: waiting.Spec.ID, ExpectedVersion: waiting.Version + 1,
+	})
+	require.ErrorIs(t, err, ErrVersionConflict)
+	_, err = manager.Resume(context.Background(), &ResumeRequest{
+		TaskID: waiting.Spec.ID, ExpectedVersion: waiting.Version,
+	})
+	require.ErrorContains(t, err, "invalid resume")
+
+	missingExecutorStore := NewInMemoryStore(nil)
+	started = createAndStart(t, missingExecutorStore, "missing-executor")
+	waiting, err = missingExecutorStore.WaitInput(
+		context.Background(), &WaitInputTaskRequest{
+			TaskID: started.Spec.ID, ExpectedVersion: started.Version,
+			Checkpoint: []byte("checkpoint"),
+		},
+	)
+	require.NoError(t, err)
+	missingExecutorManager := New(context.Background(), &Config{Store: missingExecutorStore})
+	_, err = missingExecutorManager.Resume(context.Background(), &ResumeRequest{
+		TaskID: waiting.Spec.ID, ExpectedVersion: waiting.Version,
+	})
+	require.ErrorContains(t, err, `executor "test" is unavailable`)
+}
+
+func TestCancelNonRecoverableBoundaryResults(t *testing.T) {
+	store := NewInMemoryStore(nil)
+	manager := New(context.Background(), &Config{Store: store})
+	_, err := manager.cancelNonRecoverable(
+		context.Background(), &Task{Status: StatusCompleted}, nil,
+	)
+	require.ErrorIs(t, err, ErrAlreadyTerminal)
+	_, err = manager.cancelNonRecoverable(
+		context.Background(), &Task{Status: StatusPending}, nil,
+	)
+	require.ErrorIs(t, err, ErrIllegalTransition)
+
+	started := createAndStart(t, store, "cancel-direct")
+	result, err := manager.cancelNonRecoverable(context.Background(), started, nil)
+	require.NoError(t, err)
+	require.Equal(t, StatusCanceled, result.Status)
+
+	attemptErr := errors.New("attempt failed")
+	attempt := &activeAttempt{
+		runtime: newTaskRuntime(store, "task", 1, 1),
+		done:    make(chan error, 1),
+	}
+	attempt.done <- attemptErr
+	_, err = manager.cancelNonRecoverable(
+		context.Background(), &Task{Status: StatusRunning}, attempt,
+	)
+	require.ErrorIs(t, err, attemptErr)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	attempt.done = make(chan error)
+	_, err = manager.cancelNonRecoverable(
+		ctx, &Task{Status: StatusRunning}, attempt,
+	)
+	require.ErrorIs(t, err, context.Canceled)
+}
+
+type firstGetBlockingStore struct {
+	Store
+	once    sync.Once
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (s *firstGetBlockingStore) Get(ctx context.Context, taskID string) (*Task, error) {
+	block := false
+	s.once.Do(func() {
+		block = true
+		close(s.entered)
+	})
+	if block {
+		select {
+		case <-s.release:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	return s.Store.Get(ctx, taskID)
+}
+
+func TestManagerCancelPendingLocalTaskAfterExecuteValidationFailure(t *testing.T) {
+	baseStore := NewInMemoryStore(nil)
+	store := &firstGetBlockingStore{
+		Store: baseStore, entered: make(chan struct{}), release: make(chan struct{}),
+	}
+	executor := &scriptedExecutor{leaseExpiryPolicy: LeaseExpiryFail}
+	manager := managerWithExecutor(t, store, executor, time.Minute)
+	defer closeWithTimeout(manager)
+	task, err := manager.Submit(context.Background(), validSpec("early-failure-cancel"))
+	require.NoError(t, err)
+	executor.validateErr = errors.New("worker validation failed")
+
+	executeDone := make(chan error, 1)
+	go func() {
+		executeDone <- manager.Execute(context.Background(), task.Spec.ID)
+	}()
+	<-store.entered
+
+	cancelCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	cancelDone := make(chan struct {
+		task *Task
+		err  error
+	}, 1)
+	go func() {
+		canceled, cancelErr := manager.RequestCancel(cancelCtx, task.Spec.ID)
+		cancelDone <- struct {
+			task *Task
+			err  error
+		}{task: canceled, err: cancelErr}
+	}()
+	close(store.release)
+
+	require.ErrorContains(t, <-executeDone, "worker validation failed")
+	result := <-cancelDone
+	require.NoError(t, result.err)
+	require.Equal(t, StatusCanceled, result.task.Status)
 }
 
 func TestManagerLoadOrRegisterExecutorIsAtomic_BitsUT(t *testing.T) {

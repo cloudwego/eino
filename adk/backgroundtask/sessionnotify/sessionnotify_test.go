@@ -19,6 +19,7 @@ package sessionnotify
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -62,11 +63,20 @@ func TestRuntimeValidatesCompleteDeliveryRoute(t *testing.T) {
 }
 
 func TestRuntimeRejectsIncompleteDeliveryRoute(t *testing.T) {
+	var nilRuntime *Runtime
+	err := nilRuntime.ValidateNotificationDelivery(context.Background(), nil)
+	require.ErrorContains(t, err, "runtime and validation request")
+
 	runtime, err := NewRuntime(
 		backgroundtask.NewSinkRegistry(),
 		func(context.Context) error { return nil },
 	)
 	require.NoError(t, err)
+	err = runtime.ValidateNotificationDelivery(
+		context.Background(),
+		&backgroundtask.NotificationDeliveryValidation{TargetKind: "unsupported"},
+	)
+	require.ErrorContains(t, err, "unsupported notification target kind")
 	err = runtime.ValidateNotificationDelivery(
 		context.Background(),
 		&backgroundtask.NotificationDeliveryValidation{
@@ -358,6 +368,33 @@ func TestAttack_MemoryInboxDeepCopiesNotificationTargetMetadata(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, again, 1)
 	assert.Equal(t, "original", again[0].Notification.Target.Metadata["test/key"])
+}
+
+func TestAttack_MemoryInboxOrdersEqualTimestampsDeterministically(t *testing.T) {
+	inbox := NewMemoryInbox()
+	inbox.now = func() time.Time { return time.Unix(100, 0) }
+	const count = 16
+	for index := count - 1; index >= 0; index-- {
+		id := fmt.Sprintf("notification-%02d", index)
+		_, err := inbox.Enqueue(context.Background(), &backgroundtask.EnqueueSessionNotificationRequest{
+			SessionID: "session",
+			Notification: backgroundtask.Notification{
+				ID: id, TaskID: "task", Kind: backgroundtask.NotificationCompleted,
+			},
+		})
+		require.NoError(t, err)
+	}
+
+	pending, err := inbox.ListPending(context.Background(), &backgroundtask.ListSessionNotificationsRequest{
+		SessionID: "session",
+	})
+	require.NoError(t, err)
+	require.Len(t, pending, count)
+	for index, item := range pending {
+		expected := fmt.Sprintf("notification-%02d", index)
+		t.Logf("position %d contains %q", index, item.ItemID)
+		require.Equal(t, expected, item.ItemID)
+	}
 }
 
 func TestTurnLoopActivatorQueuesWakeAndStartsLoop_BitsUT(t *testing.T) {
