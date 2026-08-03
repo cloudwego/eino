@@ -846,7 +846,7 @@ func newMultiModalReadFileTool(fs filesystem.Backend, name string, desc string) 
 							},
 						},
 					})
-				case filesystem.FileContentPartTypePDF:
+				case filesystem.FileContentPartTypePDF, filesystem.FileContentPartTypeBinary:
 					parts = append(parts, schema.ToolOutputPart{
 						Type: schema.ToolPartTypeFile,
 						File: &schema.ToolOutputFile{

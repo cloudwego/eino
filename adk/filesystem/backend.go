@@ -192,6 +192,8 @@ const (
 	FileContentPartTypeImage FileContentPartType = "image"
 	// FileContentPartTypePDF represents a file part (e.g. PDF).
 	FileContentPartTypePDF FileContentPartType = "pdf"
+	// FileContentPartTypeBinary represents raw binary
+	FileContentPartTypeBinary FileContentPartType = "binary"
 )
 
 // FileContentPart represents a multimodal part of file content.
@@ -201,7 +203,7 @@ type FileContentPart struct {
 	// Required.
 	Type FileContentPartType
 
-	// MIMEType is the MIME type of the content (e.g. "image/png", "application/pdf").
+	// MIMEType is the MIME type of the content (e.g. "image/png", "application/pdf", "application/octet-stream").
 	// Required.
 	MIMEType string
 

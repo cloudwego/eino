@@ -2583,6 +2583,37 @@ func TestMultiModalReadFileTool_FileType(t *testing.T) {
 	assert.Equal(t, base64.StdEncoding.EncodeToString(pdfData), *result.Parts[0].File.Base64Data)
 }
 
+func TestMultiModalReadFileTool_Binary(t *testing.T) {
+	base := setupTestBackend()
+	data := []byte("binary")
+	eb := &multiModalBackend{
+		InMemoryBackend: base,
+		multiModalReadFunc: func(ctx context.Context, req *filesystem.MultiModalReadRequest) (*filesystem.MultiFileContent, error) {
+			return &filesystem.MultiFileContent{
+				Parts: []filesystem.FileContentPart{
+					{
+						Type:     filesystem.FileContentPartTypeBinary,
+						MIMEType: "application/octet-stream",
+						Data:     data,
+					},
+				},
+			}, nil
+		},
+	}
+
+	mmTool, err := newMultiModalReadFileTool(eb, "", "")
+	assert.NoError(t, err)
+
+	result, err := mmTool.(tool.EnhancedInvokableTool).InvokableRun(
+		context.Background(), &schema.ToolArgument{Text: `{"file_path": "/doc.docx", "offset": 0, "limit": 100}`})
+	assert.NoError(t, err)
+	assert.Len(t, result.Parts, 1)
+	assert.Equal(t, schema.ToolPartTypeFile, result.Parts[0].Type)
+	assert.NotNil(t, result.Parts[0].File)
+	assert.Equal(t, "application/octet-stream", result.Parts[0].File.MIMEType)
+	assert.Equal(t, base64.StdEncoding.EncodeToString(data), *result.Parts[0].File.Base64Data)
+}
+
 func TestMultiModalReadFileTool_UnsupportedPartType(t *testing.T) {
 	base := setupTestBackend()
 	eb := &multiModalBackend{
