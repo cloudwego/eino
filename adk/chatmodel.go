@@ -333,8 +333,11 @@ func defaultGenModelInput(ctx context.Context, instruction string, input *AgentI
 		// Strip any existing leading system message from history to avoid
 		// duplication when session state carries the previous turn's system
 		// message. The fresh instruction (potentially re-formatted with current
-		// SessionValues) always takes precedence.
-		if len(inputMessages) > 0 && inputMessages[0].Role == schema.System {
+		// SessionValues) always takes precedence. A leading system reminder
+		// (re-inserted each turn by a middleware's BeforeAgent) is not a stale
+		// instruction, so it is preserved.
+		if len(inputMessages) > 0 && inputMessages[0].Role == schema.System &&
+			!isReminderExtra(inputMessages[0].Extra) {
 			inputMessages = inputMessages[1:]
 		}
 
@@ -360,8 +363,10 @@ func newDefaultGenModelInput[M MessageType]() TypedGenModelInput[M] {
 			if instruction != "" {
 				// Strip any existing leading system message from history to avoid
 				// duplication when session state carries the previous turn's system
-				// message.
-				if len(inputMessages) > 0 && inputMessages[0].Role == schema.AgenticRoleTypeSystem {
+				// message. A leading system reminder (re-inserted each turn by a
+				// middleware's BeforeAgent) is not a stale instruction, so it is preserved.
+				if len(inputMessages) > 0 && inputMessages[0].Role == schema.AgenticRoleTypeSystem &&
+					!isReminderExtra(inputMessages[0].Extra) {
 					inputMessages = inputMessages[1:]
 				}
 				msgs := make([]*schema.AgenticMessage, 0, len(inputMessages)+1)
@@ -379,6 +384,21 @@ func newDefaultGenModelInput[M MessageType]() TypedGenModelInput[M] {
 }
 
 const extraKeyRuntimeGeneratedSystemMessage = "_eino_adk_runtime_generated_system_message"
+
+// MessageExtraKeySystemReminder marks a system message as a middleware-injected
+// "system reminder" (e.g. the available-skills / available-agent-types / tool-search
+// reminders). Such reminders are re-inserted into the model input on every turn by a
+// middleware's BeforeAgent hook and are deliberately never persisted. They must survive
+// defaultGenModelInput's stale-leading-instruction stripping, so that strip skips any
+// leading system message carrying this key.
+const MessageExtraKeySystemReminder = "_eino_adk_system_reminder"
+
+// isReminderExtra reports whether an Extra map marks a system reminder (see
+// MessageExtraKeySystemReminder).
+func isReminderExtra(extra map[string]any) bool {
+	v, ok := extra[MessageExtraKeySystemReminder].(bool)
+	return ok && v
+}
 
 func ensureGeneratedMessageIDs[M MessageType](messages []M) {
 	for _, msg := range messages {

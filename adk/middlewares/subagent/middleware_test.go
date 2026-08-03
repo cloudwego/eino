@@ -230,8 +230,10 @@ func TestBeforeAgent_WithManager_InjectsAgentToolOnly(t *testing.T) {
 	// the backgroundtask control middleware.
 	assert.Len(t, newRunCtx.Tools, 1)
 
-	// Instruction should include the background-support prompt.
-	assert.Contains(t, newRunCtx.Instruction, "background")
+	// The background-support prompt now lives in the agent tool description, not the instruction.
+	toolInfo, err := newRunCtx.Tools[0].Info(ctx)
+	require.NoError(t, err)
+	assert.Contains(t, toolInfo.Desc, "background")
 }
 
 func TestBeforeAgent_CustomSystemPrompt(t *testing.T) {
@@ -356,15 +358,30 @@ func TestAgentTool_Info(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	runCtx := &adk.ChatModelAgentContext[*schema.Message]{}
+	runCtx := &adk.ChatModelAgentContext[*schema.Message]{
+		AgentInput: &adk.TypedAgentInput[*schema.Message]{Messages: []*schema.Message{schema.UserMessage("hi")}},
+	}
 	_, newRunCtx, err := mw.BeforeAgent(ctx, runCtx)
 	require.NoError(t, err)
 
 	info, err := newRunCtx.Tools[0].Info(ctx)
 	require.NoError(t, err)
 	assert.Equal(t, agentToolName, info.Name)
-	assert.Contains(t, info.Desc, "helper")
-	assert.Contains(t, info.Desc, "helps with tasks")
+	// Agent types are no longer embedded in the description; they are injected as a
+	// mid-conversation system reminder by BeforeModelRewriteState.
+	assert.NotContains(t, info.Desc, "helps with tasks")
+
+	// BeforeAgent does not touch the messages anymore.
+	require.Len(t, newRunCtx.AgentInput.Messages, 1)
+
+	// The reminder section is inserted by BeforeModelRewriteState, after the user message.
+	state := &adk.TypedChatModelAgentState[*schema.Message]{Messages: []*schema.Message{schema.UserMessage("hi")}}
+	_, ns, err := mw.BeforeModelRewriteState(ctx, state, nil)
+	require.NoError(t, err)
+	require.Len(t, ns.Messages, 2)
+	section := ns.Messages[1].Content
+	assert.Contains(t, section, "helper")
+	assert.Contains(t, section, "helps with tasks")
 }
 
 func TestAgentTool_CustomName(t *testing.T) {
@@ -801,4 +818,102 @@ func TestAgentTool_AutoBackground_FastAgent(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "fast agent", result)
 	assert.False(t, anyRunning(mgr))
+}
+
+func TestSubagent_BeforeAgent_InsertsReminderByExtra(t *testing.T) {
+	ctx := context.Background()
+	m := &typedSubagentMiddleware[*schema.Message]{
+		reminder: buildAgentTypesSectionFromEntries([]agentTypeEntry{{Name: "worker", Description: "does work"}}),
+	}
+
+	state := &adk.TypedChatModelAgentState[*schema.Message]{Messages: []*schema.Message{schema.UserMessage("hi")}}
+
+	_, ns, err := m.BeforeModelRewriteState(ctx, state, nil)
+	require.NoError(t, err)
+	require.Len(t, ns.Messages, 2)
+	// The reminder is inserted after the latest user message, not at the front.
+	assert.Equal(t, schema.User, ns.Messages[0].Role)
+	reminderMsg := ns.Messages[1]
+	assert.Equal(t, schema.System, reminderMsg.Role)
+	assert.True(t, reminderMsg.Extra[agentTypesReminderExtraKey].(bool))
+	assert.NotContains(t, reminderMsg.Content, "<!--")
+	assert.Contains(t, reminderMsg.Content, "worker")
+	assert.Contains(t, reminderMsg.Content, "does work")
+
+	// Inserted exactly once: calling again is a no-op (Has guards re-insertion).
+	_, ns2, err := m.BeforeModelRewriteState(ctx, ns, nil)
+	require.NoError(t, err)
+	assert.Len(t, ns2.Messages, 2)
+}
+
+// TestSubagent_BeforeAgent_PreservesOtherMessages verifies that the subagent
+// middleware never mutates or removes existing messages — including a leading
+// system message and reminders owned by other middlewares — and inserts its own
+// reminder at the mid-conversation position (after the latest user message).
+func TestSubagent_BeforeAgent_PreservesOtherMessages(t *testing.T) {
+	ctx := context.Background()
+	m := &typedSubagentMiddleware[*schema.Message]{
+		reminder: buildAgentTypesSectionFromEntries([]agentTypeEntry{{Name: "worker", Description: "does work"}}),
+	}
+
+	// A leading instruction system message plus another middleware's reminder already
+	// grouped at the front, guarded by its own dedicated Extra key.
+	const otherKey = "__eino_other_middleware_section__"
+	instruction := schema.SystemMessage("base instruction")
+	otherReminder := schema.SystemMessage("other middleware section")
+	otherReminder.Extra = map[string]any{otherKey: true}
+	state := &adk.TypedChatModelAgentState[*schema.Message]{
+		Messages: []*schema.Message{instruction, otherReminder, schema.UserMessage("hi")},
+	}
+
+	_, ns, err := m.BeforeModelRewriteState(ctx, state, nil)
+	require.NoError(t, err)
+	// The three existing messages are preserved verbatim; the subagent reminder is
+	// inserted after the latest user message.
+	require.Len(t, ns.Messages, 4)
+	assert.Equal(t, "base instruction", ns.Messages[0].Content)
+	assert.Equal(t, "other middleware section", ns.Messages[1].Content)
+	assert.True(t, ns.Messages[1].Extra[otherKey].(bool))
+	_, mutated := ns.Messages[1].Extra[agentTypesReminderExtraKey]
+	assert.False(t, mutated, "the other middleware's reminder must not be tagged with the subagent key")
+	assert.Equal(t, schema.User, ns.Messages[2].Role)
+
+	reminderMsg := ns.Messages[3]
+	assert.Equal(t, schema.System, reminderMsg.Role)
+	assert.True(t, reminderMsg.Extra[agentTypesReminderExtraKey].(bool))
+	assert.Contains(t, reminderMsg.Content, "worker")
+	assert.Contains(t, reminderMsg.Content, "does work")
+}
+
+// TestSubagent_BeforeAgent_MidConversationPosition verifies that when the
+// conversation ends with pending tool-call scaffolding (an assistant tool-call
+// message followed by its tool result), the reminder is inserted right after the
+// latest user message — never inside the tool-call/tool-result pair, which stays
+// intact and contiguous.
+func TestSubagent_BeforeAgent_MidConversationPosition(t *testing.T) {
+	ctx := context.Background()
+	m := &typedSubagentMiddleware[*schema.Message]{
+		reminder: buildAgentTypesSectionFromEntries([]agentTypeEntry{{Name: "worker", Description: "does work"}}),
+	}
+
+	assistantToolCall := schema.AssistantMessage("", []schema.ToolCall{
+		{ID: "call_1", Function: schema.FunctionCall{Name: "worker", Arguments: "{}"}},
+	})
+	toolResult := schema.ToolMessage("result", "call_1")
+	state := &adk.TypedChatModelAgentState[*schema.Message]{
+		Messages: []*schema.Message{schema.UserMessage("hi"), assistantToolCall, toolResult},
+	}
+
+	_, ns, err := m.BeforeModelRewriteState(ctx, state, nil)
+	require.NoError(t, err)
+	require.Len(t, ns.Messages, 4)
+
+	// User stays first, reminder sits right after it.
+	assert.Equal(t, schema.User, ns.Messages[0].Role)
+	reminderMsg := ns.Messages[1]
+	assert.Equal(t, schema.System, reminderMsg.Role)
+	assert.True(t, reminderMsg.Extra[agentTypesReminderExtraKey].(bool))
+	// The tool-call pair follows in order, intact and contiguous.
+	assert.Len(t, ns.Messages[2].ToolCalls, 1)
+	assert.Equal(t, schema.Tool, ns.Messages[3].Role)
 }
