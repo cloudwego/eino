@@ -40,14 +40,17 @@ import (
 
 // stubChatModel returns a fixed final assistant message and stops the React loop.
 type stubChatModel struct {
-	reply string
+	reply     string
+	lastInput []*schema.Message
 }
 
-func (m *stubChatModel) Generate(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.Message, error) {
+func (m *stubChatModel) Generate(_ context.Context, input []*schema.Message, _ ...model.Option) (*schema.Message, error) {
+	m.lastInput = input
 	return schema.AssistantMessage(m.reply, nil), nil
 }
 
-func (m *stubChatModel) Stream(context.Context, []*schema.Message, ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+func (m *stubChatModel) Stream(_ context.Context, input []*schema.Message, _ ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+	m.lastInput = input
 	return schema.StreamReaderFromArray([]*schema.Message{schema.AssistantMessage(m.reply, nil)}), nil
 }
 
@@ -230,11 +233,12 @@ func (t *dummyDynamicTool) InvokableRun(_ context.Context, _ string, _ ...tool.O
 	return `{"ok":true}`, nil
 }
 
-// TestToolSearchIntegration_PersistsMessageInserted is the toolsearch
-// counterpart of the agentsmd integration test: a real ChatModelAgent + real
-// toolsearch middleware + Runner + InMemoryStore. It verifies the toolsearch
-// reminder is persisted as a MessageInserted event and survives across turns.
-func TestToolSearchIntegration_PersistsMessageInserted(t *testing.T) {
+// TestToolSearchIntegration_ReminderPersistedInsertedOnce is a real
+// ChatModelAgent + real toolsearch middleware + Runner + InMemoryStore. The
+// toolsearch reminder is injected into the model input via BeforeModelRewriteState
+// and persisted exactly once as a MessageInserted session event, so it carries
+// across turns without duplicating and the prefix cache holds.
+func TestToolSearchIntegration_ReminderPersistedInsertedOnce(t *testing.T) {
 	ctx := context.Background()
 
 	mw, err := toolsearch.New(ctx, &toolsearch.Config{
@@ -273,25 +277,36 @@ func TestToolSearchIntegration_PersistsMessageInserted(t *testing.T) {
 		require.NoError(t, ev.Err)
 	}
 
+	// The reminder must have reached the model input.
+	var reminderInInput bool
+	for _, msg := range model.lastInput {
+		if msg != nil && msg.Extra != nil {
+			if v, ok := msg.Extra["__toolsearch_reminder__"].(bool); ok && v {
+				reminderInInput = true
+			}
+		}
+	}
+	assert.True(t, reminderInInput,
+		"toolsearch middleware must inject the reminder into the model input via BeforeModelRewriteState")
+
+	// The reminder must be persisted exactly once as a session event.
 	res, err := store.LoadEvents(ctx, sid, &adk.LoadSessionEventsRequest{})
 	require.NoError(t, err)
 
-	var sawInsertedReminder bool
+	persisted := 0
 	for _, se := range res.Events {
 		if se.MessageInserted == nil {
 			continue
 		}
 		ins := se.MessageInserted.Message
 		if ins != nil && ins.Extra != nil {
-			if v, ok := ins.Extra["__toolsearch_reminder__"]; ok {
-				if b, ok := v.(bool); ok && b {
-					sawInsertedReminder = true
-				}
+			if v, ok := ins.Extra["__toolsearch_reminder__"].(bool); ok && v {
+				persisted++
 			}
 		}
 	}
-	assert.True(t, sawInsertedReminder,
-		"toolsearch middleware running through ChatModelAgent + Runner must persist a MessageInserted event with the reminder marker")
+	assert.Equal(t, 1, persisted,
+		"toolsearch reminder must be persisted exactly once as a MessageInserted event")
 }
 
 // TestPatchToolCallsIntegration_PersistsMessageInserted seeds the session event

@@ -31,6 +31,15 @@ func getSystemInstruction() string {
 	})
 }
 
+// getContextManagementInstruction returns the note appended to the main agent's
+// system prompt to inform it that long conversations are summarized automatically.
+func getContextManagementInstruction() string {
+	return internal.SelectPrompt(internal.I18nPrompts{
+		English: contextManagementInstruction,
+		Chinese: contextManagementInstructionZh,
+	})
+}
+
 func getUserSummaryInstruction() string {
 	return internal.SelectPrompt(internal.I18nPrompts{
 		English: userSummaryInstruction,
@@ -76,6 +85,14 @@ func getUserMessagesReplacedNote() string {
 const systemInstruction = `You are a helpful AI assistant tasked with summarizing conversations.`
 
 const systemInstructionZh = `你是一个负责总结对话的 AI 助手。`
+
+const contextManagementInstruction = `# Context management
+
+When the conversation grows long, some or all of the current context is summarized; the summary, along with any remaining unsummarized context, is provided in the next context window so work can continue — you don't need to wrap up early or hand off mid-task.`
+
+const contextManagementInstructionZh = `# 上下文管理
+
+当对话变长时，当前上下文的部分或全部会被总结；总结连同任何剩余未被总结的上下文会在下一个上下文窗口中提供，以便继续工作——你无需提前收尾，也不必在任务中途交接。`
 
 const userSummaryInstruction = `CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.
 

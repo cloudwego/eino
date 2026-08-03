@@ -2632,3 +2632,42 @@ func TestMarkRuntimeGeneratedLeadingSystem(t *testing.T) {
 		assert.Empty(t, generated)
 	})
 }
+
+// TestDefaultGenModelInput_LeadingSystemStrip verifies that defaultGenModelInput
+// strips a stale leading system instruction from history (to avoid duplicating the
+// fresh instruction) but preserves a leading system reminder — the reminder is
+// re-inserted each turn by a middleware's BeforeAgent and must reach the model.
+func TestDefaultGenModelInput_LeadingSystemStrip(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("strips stale leading instruction", func(t *testing.T) {
+		got, err := defaultGenModelInput(ctx, "fresh instruction", &AgentInput{
+			Messages: []*schema.Message{
+				schema.SystemMessage("stale instruction"),
+				schema.UserMessage("hi"),
+			},
+		})
+		require.NoError(t, err)
+		require.Len(t, got, 2)
+		assert.Equal(t, "fresh instruction", got[0].Content)
+		assert.Equal(t, schema.User, got[1].Role)
+	})
+
+	t.Run("preserves leading system reminder", func(t *testing.T) {
+		reminder := schema.SystemMessage("<reminder>")
+		reminder.Extra = map[string]any{MessageExtraKeySystemReminder: true}
+		got, err := defaultGenModelInput(ctx, "fresh instruction", &AgentInput{
+			Messages: []*schema.Message{
+				reminder,
+				schema.UserMessage("hi"),
+			},
+		})
+		require.NoError(t, err)
+		// Instruction is prepended; the reminder is NOT stripped, landing at the
+		// fixed position right after the instruction.
+		require.Len(t, got, 3)
+		assert.Equal(t, "fresh instruction", got[0].Content)
+		assert.Equal(t, "<reminder>", got[1].Content)
+		assert.Equal(t, schema.User, got[2].Role)
+	})
+}

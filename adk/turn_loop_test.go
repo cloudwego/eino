@@ -1118,7 +1118,7 @@ func TestTurnLoop_GenInputError_RecoverItems(t *testing.T) {
 func TestTurnLoop_PrepareAgentError_RecoverItemsInOrder(t *testing.T) {
 	agentErr := errors.New("prepare agent error")
 
-	loop := newAndRunTurnLoop(context.Background(), TurnLoopConfig[string, *schema.Message]{
+	loop := NewTurnLoop(TurnLoopConfig[string, *schema.Message]{
 		GenInput: func(ctx context.Context, _ *TurnLoop[string, *schema.Message], items []string) (*GenInputResult[string, *schema.Message], error) {
 			var urgent string
 			remaining := make([]string, 0, len(items))
@@ -1147,9 +1147,13 @@ func TestTurnLoop_PrepareAgentError_RecoverItemsInOrder(t *testing.T) {
 		},
 	})
 
+	// Push before Run so all items are buffered before the loop consumes: otherwise
+	// the loop may error and exit before the last Push lands in the buffer, sending
+	// that item to lateItems (not UnhandledItems) and making this test flaky.
 	loop.Push("msg1")
 	loop.Push("urgent")
 	loop.Push("msg2")
+	loop.Run(context.Background())
 
 	result := loop.Wait()
 	assert.ErrorIs(t, result.ExitReason, agentErr)
