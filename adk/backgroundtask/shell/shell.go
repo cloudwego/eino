@@ -30,7 +30,6 @@ import (
 // It is intentionally separate from filesystem.Shell and StreamingShell, which
 // make no cross-Worker recovery claim.
 type RecoverableShell interface {
-	ValidateCheckpoint([]byte) error
 	StartCommand(context.Context, *StartCommandRequest) (backgroundtool.Run, error)
 	RecoverCommand(context.Context, *RecoverCommandRequest) (backgroundtool.Run, error)
 }
@@ -102,10 +101,6 @@ func (a *adapter) Start(
 	return a.shell.StartCommand(ctx, &StartCommandRequest{
 		TaskID: request.TaskID, Command: input.Command, Attempt: request.Attempt,
 	})
-}
-
-func (a *adapter) ValidateCheckpoint(checkpoint []byte) error {
-	return a.shell.ValidateCheckpoint(checkpoint)
 }
 
 func (a *adapter) Recover(

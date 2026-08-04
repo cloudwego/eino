@@ -109,6 +109,10 @@ Yield retains an optional opaque checkpoint or durable-state reference, ends the
 active attempt, emits no lifecycle notification, and permits a later Store-authorized
 claim.
 
+The checkpoint is an optional recovery hint, not the operation identity. `Recover`
+may ignore it, use it, or reject it directly; no separate adapter-level checkpoint
+validation capability is required.
+
 During `Manager.Close`, a recoverable executor receives `ControlDrain`, cancels local
 `Run.Wait` observation, optionally reads `Checkpointer.Checkpoint`, and yields. It
 does not call `Run.Stop`; the external operation continues. Plain executors are not
@@ -141,7 +145,6 @@ type Update struct {
     SourceID string
     Kind     string
     Data     []byte
-    MIMEType string
     Metadata map[string]string
 }
 ```
@@ -205,7 +208,6 @@ version only, so a progress append does not wake the model or parent session.
 
 ```go
 type RecoverableShell interface {
-    ValidateCheckpoint([]byte) error
     StartCommand(context.Context, *StartCommandRequest) (tool.Run, error)
     RecoverCommand(context.Context, *RecoverCommandRequest) (tool.Run, error)
 }

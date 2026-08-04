@@ -69,7 +69,6 @@ func (*fakeTool) ValidateArguments(arguments string) error {
 func (t *fakeTool) Start(ctx context.Context, request *StartRequest) (Run, error) {
 	return t.start(ctx, request)
 }
-func (*fakeTool) ValidateCheckpoint([]byte) error { return nil }
 func (t *fakeTool) Recover(ctx context.Context, request *RecoverRequest) (Run, error) {
 	return t.recover(ctx, request)
 }
@@ -276,7 +275,6 @@ func TestManagedToolStreamPersistsBeforeNDJSONProjection(t *testing.T) {
 				for _, sourceID := range []string{"event-1", "event-2", "event-3"} {
 					writer.Send(&Update{
 						SourceID: sourceID, Kind: "stdout", Data: []byte(sourceID),
-						MIMEType: "text/plain",
 					}, nil)
 				}
 				writer.Close()
@@ -408,7 +406,6 @@ func TestManagedToolMaterializerIsDerivedAndFailureIsNonTerminal(t *testing.T) {
 			go func() {
 				writer.Send(&Update{
 					SourceID: "line-1", Kind: "stdout", Data: []byte("hello"),
-					MIMEType: "text/plain",
 				}, nil)
 				writer.Close()
 				close(sent)
@@ -519,7 +516,6 @@ func TestManagedToolProjectionDetachesWhilePersistenceContinues(t *testing.T) {
 				time.Sleep(20 * time.Millisecond)
 				writer.Send(&Update{
 					SourceID: "late", Kind: "stdout", Data: []byte("late output"),
-					MIMEType: "text/plain",
 				}, nil)
 				writer.Close()
 				close(finished)

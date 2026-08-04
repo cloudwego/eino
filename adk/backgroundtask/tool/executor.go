@@ -35,7 +35,6 @@ const (
 	maxArgumentsBytes       = 1 << 20
 	maxUpdateDataBytes      = 256 << 10
 	maxUpdateKindBytes      = 128
-	maxUpdateMIMETypeBytes  = 256
 	maxUpdateMetadata       = 32
 	maxUpdateMetadataBytes  = 1024
 	terminalUpdateDrainTime = 5 * time.Second
@@ -173,11 +172,6 @@ func (e *executor) Execute(
 	}
 	var run Run
 	if e.recoverable && task.Attempt > 1 {
-		if err = registration.Tool.(RecoverableBackgroundTool).ValidateCheckpoint(
-			task.Checkpoint,
-		); err != nil {
-			return nil, fmt.Errorf("backgroundtask/tool: validate recovery checkpoint: %w", err)
-		}
 		run, err = registration.Tool.(RecoverableBackgroundTool).Recover(ctx, &RecoverRequest{
 			TaskID: task.Spec.ID, Arguments: payload.Arguments, Attempt: task.Attempt,
 			Checkpoint: append([]byte(nil), task.Checkpoint...),
@@ -458,8 +452,8 @@ func validateUpdate(update *Update) error {
 	if len(update.Data) > maxUpdateDataBytes {
 		return errors.New("backgroundtask/tool: update data exceeds configured bounds")
 	}
-	if len(update.Kind) > maxUpdateKindBytes || len(update.MIMEType) > maxUpdateMIMETypeBytes {
-		return errors.New("backgroundtask/tool: update kind or MIME type exceeds configured bounds")
+	if len(update.Kind) > maxUpdateKindBytes {
+		return errors.New("backgroundtask/tool: update kind exceeds configured bounds")
 	}
 	if len(update.Metadata) > maxUpdateMetadata {
 		return errors.New("backgroundtask/tool: update metadata exceeds configured bounds")

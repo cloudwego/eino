@@ -43,7 +43,6 @@ type BackgroundTool interface {
 // TaskID and keep recovery state durable for the task lifetime.
 type RecoverableBackgroundTool interface {
 	BackgroundTool
-	ValidateCheckpoint(checkpoint []byte) error
 	Recover(context.Context, *RecoverRequest) (Run, error)
 }
 
@@ -94,7 +93,6 @@ type Update struct {
 	SourceID string            `json:"source_id"`
 	Kind     string            `json:"kind,omitempty"`
 	Data     []byte            `json:"data,omitempty"`
-	MIMEType string            `json:"mime_type,omitempty"`
 	Metadata map[string]string `json:"metadata,omitempty"`
 }
 

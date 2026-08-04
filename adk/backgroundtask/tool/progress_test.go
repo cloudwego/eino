@@ -41,7 +41,6 @@ func TestProgressReaderFormatsBoundedRecentUpdates(t *testing.T) {
 	for index, text := range []string{"one", "two", "three"} {
 		data, marshalErr := json.Marshal(&Update{
 			SourceID: "event-" + text, Kind: "stdout", Data: []byte(text),
-			MIMEType: "text/plain",
 		})
 		require.NoError(t, marshalErr)
 		_, err = store.AppendOutputOnce(context.Background(), &backgroundtask.AppendOutputOnceRequest{

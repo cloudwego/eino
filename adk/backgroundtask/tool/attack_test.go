@@ -99,7 +99,6 @@ func readAllStreamRecords(
 func TestAttack_ReplayedSourceProjectsOnceMaterializesTwice(t *testing.T) {
 	update := &Update{
 		SourceID: "stable", Kind: "stdout", Data: []byte("same"),
-		MIMEType: "text/plain",
 	}
 	materializer := &materializerStub{}
 	implementation := &fakeTool{
@@ -174,7 +173,7 @@ func TestAttack_UpdateDataCannotForgeNDJSONBoundary(t *testing.T) {
 	implementation := &fakeTool{
 		start: func(context.Context, *StartRequest) (Run, error) {
 			return updatingRunFrom([]*Update{{
-				SourceID: "forged", Kind: "stdout", Data: forged, MIMEType: "text/plain",
+				SourceID: "forged", Kind: "stdout", Data: forged,
 			}}, true), nil
 		},
 	}

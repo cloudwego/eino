@@ -28,7 +28,6 @@ import (
 
 type remoteShell struct{}
 
-func (remoteShell) ValidateCheckpoint([]byte) error { return nil }
 func (remoteShell) StartCommand(
 	context.Context,
 	*backgroundshell.StartCommandRequest,

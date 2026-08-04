@@ -95,11 +95,8 @@ func formatProgressRecord(record backgroundtask.OutputRecord) string {
 			data, _ := json.Marshal(update.Metadata)
 			content = string(data)
 		}
-	case strings.HasPrefix(update.MIMEType, "text/"),
-		update.MIMEType == "application/json", update.MIMEType == "":
-		content = boundedText(update.Data, 4096)
 	default:
-		content = fmt.Sprintf("[%s payload: %d bytes]", update.MIMEType, len(update.Data))
+		content = boundedText(update.Data, 4096)
 	}
 	if content == "" {
 		return fmt.Sprintf("[%s]", label)

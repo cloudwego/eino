@@ -27,13 +27,11 @@ import (
 )
 
 type shellStub struct {
-	checkpointErr error
-	start         *StartCommandRequest
-	recover       *RecoverCommandRequest
-	run           backgroundtool.Run
+	start   *StartCommandRequest
+	recover *RecoverCommandRequest
+	run     backgroundtool.Run
 }
 
-func (s *shellStub) ValidateCheckpoint([]byte) error { return s.checkpointErr }
 func (s *shellStub) StartCommand(
 	_ context.Context,
 	request *StartCommandRequest,
@@ -93,10 +91,6 @@ func TestNewRegistrationAndAdapter(t *testing.T) {
 	})
 	require.Error(t, err)
 
-	checkpointErr := assertError("unsupported checkpoint")
-	backend.checkpointErr = checkpointErr
-	require.ErrorIs(t, adapted.ValidateCheckpoint([]byte("bad")), checkpointErr)
-
 	recovered, err := adapted.Recover(context.Background(), &backgroundtool.RecoverRequest{
 		TaskID: "task", Arguments: `{"command":"echo hello"}`, Attempt: 2,
 		Checkpoint: []byte("ref"),
@@ -113,7 +107,3 @@ func TestNewRegistrationAndAdapter(t *testing.T) {
 	})
 	require.Error(t, err)
 }
-
-type assertError string
-
-func (e assertError) Error() string { return string(e) }

@@ -34,7 +34,6 @@ func (t *conformanceToolStub) ValidateArguments(string) error { return t.validat
 func (t *conformanceToolStub) Start(context.Context, *StartRequest) (Run, error) {
 	return t.start()
 }
-func (*conformanceToolStub) ValidateCheckpoint([]byte) error { return nil }
 func (t *conformanceToolStub) Recover(context.Context, *RecoverRequest) (Run, error) {
 	return t.recover()
 }

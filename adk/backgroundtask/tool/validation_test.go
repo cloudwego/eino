@@ -132,7 +132,6 @@ func TestPayloadAndResultValidationBoundaries(t *testing.T) {
 		nil,
 		{Data: make([]byte, maxUpdateDataBytes+1)},
 		{Kind: strings.Repeat("k", maxUpdateKindBytes+1)},
-		{MIMEType: strings.Repeat("m", maxUpdateMIMETypeBytes+1)},
 		{Metadata: map[string]string{
 			"a": "1", "b": "2", "c": "3", "d": "4", "e": "5", "f": "6", "g": "7",
 			"h": "8", "i": "9", "j": "10", "k": "11", "l": "12", "m": "13", "n": "14",
@@ -260,9 +259,9 @@ func TestFormattingAndProjectionHelpers(t *testing.T) {
 	require.Contains(t, formatProgressRecord(backgroundtask.OutputRecord{
 		Data: []byte(`{"source_id":"id","metadata":{"artifact":"ref"}}`),
 	}), "artifact")
-	require.Contains(t, formatProgressRecord(backgroundtask.OutputRecord{
-		Data: []byte(`{"source_id":"id","mime_type":"image/png","data":"AQI="}`),
-	}), "2 bytes")
+	require.Equal(t, "[update] hello", formatProgressRecord(backgroundtask.OutputRecord{
+		Data: []byte(`{"source_id":"id","data":"aGVsbG8="}`),
+	}))
 
 	require.Nil(t, cloneUpdate(nil))
 	update := &Update{Data: []byte("data"), Metadata: map[string]string{"key": "value"}}

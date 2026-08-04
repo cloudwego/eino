@@ -35,7 +35,6 @@ type recoverableShellStub struct {
 	recoverRequest *backgroundshell.RecoverCommandRequest
 }
 
-func (*recoverableShellStub) ValidateCheckpoint([]byte) error { return nil }
 func (s *recoverableShellStub) StartCommand(
 	_ context.Context,
 	request *backgroundshell.StartCommandRequest,
