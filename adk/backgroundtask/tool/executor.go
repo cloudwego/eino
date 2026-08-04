@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"time"
 
 	"github.com/cloudwego/eino/adk/backgroundtask"
 	"github.com/cloudwego/eino/adk/internal/foreground"
@@ -31,12 +32,13 @@ import (
 const payloadVersion = 1
 
 const (
-	maxArgumentsBytes      = 1 << 20
-	maxUpdateDataBytes     = 256 << 10
-	maxUpdateKindBytes     = 128
-	maxUpdateMIMETypeBytes = 256
-	maxUpdateMetadata      = 32
-	maxUpdateMetadataBytes = 1024
+	maxArgumentsBytes       = 1 << 20
+	maxUpdateDataBytes      = 256 << 10
+	maxUpdateKindBytes      = 128
+	maxUpdateMIMETypeBytes  = 256
+	maxUpdateMetadata       = 32
+	maxUpdateMetadataBytes  = 1024
+	terminalUpdateDrainTime = 5 * time.Second
 )
 
 type taskPayload struct {
@@ -242,25 +244,17 @@ func (e *executor) Execute(
 	for {
 		select {
 		case result := <-waitResult:
-			if updateResults != nil {
-				updates.Close()
-				for received := range updateResults {
-					if received.err != nil && !errors.Is(received.err, io.EOF) {
-						return nil, received.err
-					}
-					if received.update != nil {
-						if err = e.persistUpdate(
-							ctx, task, runtime, registration, projection,
-							received.update, &materializerEnabled,
-						); err != nil {
-							return nil, err
-						}
-					}
-				}
-				updateResults = nil
-			}
 			if result.err != nil {
 				return nil, result.err
+			}
+			if updateResults != nil {
+				if err = e.drainTerminalUpdates(
+					ctx, task, runtime, registration, projection,
+					updateResults, &materializerEnabled,
+				); err != nil {
+					return nil, err
+				}
+				updateResults = nil
 			}
 			return validateOutcome(result.outcome)
 		case received, open := <-updateResults:
@@ -329,6 +323,40 @@ func (e *executor) Execute(
 				}, nil
 			}
 			return nil, ctx.Err()
+		}
+	}
+}
+
+func (e *executor) drainTerminalUpdates(
+	ctx context.Context,
+	task *backgroundtask.Task,
+	runtime backgroundtask.ExecutionRuntime,
+	registration *Registration,
+	projection *liveProjection,
+	results <-chan updateResult,
+	materializerEnabled *bool,
+) error {
+	timer := time.NewTimer(terminalUpdateDrainTime)
+	defer timer.Stop()
+	for {
+		select {
+		case received, open := <-results:
+			if !open || errors.Is(received.err, io.EOF) {
+				return nil
+			}
+			if received.err != nil {
+				return received.err
+			}
+			if err := e.persistUpdate(
+				ctx, task, runtime, registration, projection,
+				received.update, materializerEnabled,
+			); err != nil {
+				return err
+			}
+		case <-timer.C:
+			return errors.New("backgroundtask/tool: update stream did not close after terminal outcome")
+		case <-ctx.Done():
+			return ctx.Err()
 		}
 	}
 }

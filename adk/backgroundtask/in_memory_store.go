@@ -514,7 +514,9 @@ func (s *InMemoryStore) Yield(_ context.Context, req *YieldTaskRequest) (*Task, 
 		return nil, err
 	}
 	t.Status = StatusPending
-	t.Checkpoint = cloneBytes(req.Checkpoint)
+	if len(req.Checkpoint) > 0 {
+		t.Checkpoint = cloneBytes(req.Checkpoint)
+	}
 	t.PendingResume = nil
 	s.clearActiveLocked(t)
 	s.advanceLocked(t)

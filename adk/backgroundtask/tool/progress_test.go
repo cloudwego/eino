@@ -19,7 +19,9 @@ package tool
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/stretchr/testify/require"
 
@@ -76,4 +78,12 @@ func TestProgressReaderFallsBackForUnknownCompatibleRecord(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.Contains(t, progress, "legacy raw text")
+}
+
+func TestBoundedTextPreservesValidUTF8(t *testing.T) {
+	text := strings.Repeat("a", 4095) + "界"
+	rendered := boundedText([]byte(text), 4096)
+	require.True(t, utf8.ValidString(rendered))
+	require.NotContains(t, rendered, "\uFFFD")
+	require.Contains(t, rendered, "[truncated]")
 }

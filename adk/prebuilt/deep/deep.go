@@ -249,11 +249,9 @@ func NewTyped[M adk.MessageType](ctx context.Context, cfg *TypedConfig[M]) (adk.
 				cfg.Background.TranscriptFormat,
 			)
 		}
-		if cfg.RecoverableShell != nil {
-			reader := &backgroundtool.ProgressReader{Manager: manager}
-			progressReaders[backgroundtool.ExecutorKey] = reader
-			progressReaders[backgroundtool.RecoverableExecutorKey] = reader
-		}
+		reader := &backgroundtool.ProgressReader{Manager: manager}
+		progressReaders[backgroundtool.ExecutorKey] = reader
+		progressReaders[backgroundtool.RecoverableExecutorKey] = reader
 		controlMW, err := backgroundtaskmw.NewTyped(ctx, &backgroundtaskmw.TypedConfig[M]{
 			Manager: manager, Notifications: cfg.Background.Notifications,
 			ReadTaskProgress: readTaskProgress, ProgressReaders: progressReaders,

@@ -24,6 +24,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cloudwego/eino/adk/backgroundtask"
+	backgroundlocal "github.com/cloudwego/eino/adk/backgroundtask/local"
 	backgroundshell "github.com/cloudwego/eino/adk/backgroundtask/shell"
 	backgroundtool "github.com/cloudwego/eino/adk/backgroundtask/tool"
 	componenttool "github.com/cloudwego/eino/components/tool"
@@ -58,6 +59,19 @@ func (recoverableShellRun) Wait(context.Context) (*backgroundtool.Outcome, error
 	}, nil
 }
 func (recoverableShellRun) Stop(context.Context) error { return nil }
+
+type rejectingNotificationRuntime struct{}
+
+func (rejectingNotificationRuntime) ValidateNotificationDelivery(
+	context.Context,
+	*backgroundtask.NotificationDeliveryValidation,
+) error {
+	return assertError("delivery unavailable")
+}
+
+type assertError string
+
+func (e assertError) Error() string { return string(e) }
 
 func TestRecoverableShellUsesManagedToolLifecycle(t *testing.T) {
 	shell := &recoverableShellStub{}
@@ -111,4 +125,45 @@ func TestRecoverableShellConfigurationIsExclusive(t *testing.T) {
 
 	config = &MiddlewareConfig{RecoverableShell: &recoverableShellStub{}}
 	require.ErrorContains(t, config.Validate(), "requires a background Manager")
+
+	managerOne := backgroundtask.New(context.Background(), nil)
+	managerTwo := backgroundtask.New(context.Background(), nil)
+	runner, err := backgroundlocal.New(&backgroundlocal.Config{Manager: managerOne})
+	require.NoError(t, err)
+	config = &MiddlewareConfig{
+		Shell: &mockShellBackend{},
+		Background: &BackgroundConfig{
+			Runner: runner, Manager: managerTwo,
+		},
+	}
+	require.ErrorContains(t, config.Validate(), "must match Runner.Manager")
+}
+
+func TestRecoverableShellLegacyConstructorAndNotificationValidation(t *testing.T) {
+	manager := backgroundtask.New(context.Background(), nil)
+	middleware, err := NewMiddleware(context.Background(), &Config{
+		RecoverableShell: &recoverableShellStub{},
+		Background: &BackgroundConfig{
+			Manager: manager, Notifications: testNotifications,
+		},
+	})
+	require.NoError(t, err)
+	require.Len(t, middleware.AdditionalTools, 1)
+	_, err = middleware.AdditionalTools[0].(componenttool.InvokableTool).InvokableRun(
+		context.Background(), `{"command":"echo"}`,
+	)
+	require.ErrorContains(t, err, "runner session is required")
+
+	_, err = New(context.Background(), &MiddlewareConfig{
+		RecoverableShell: &recoverableShellStub{},
+		Background:       &BackgroundConfig{Manager: manager},
+	})
+	require.ErrorContains(t, err, "notification delivery is required")
+	_, err = New(context.Background(), &MiddlewareConfig{
+		RecoverableShell: &recoverableShellStub{},
+		Background: &BackgroundConfig{
+			Manager: manager, Notifications: rejectingNotificationRuntime{},
+		},
+	})
+	require.ErrorContains(t, err, "delivery unavailable")
 }

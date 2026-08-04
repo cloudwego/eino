@@ -147,6 +147,7 @@ type SuspendTaskRequest struct {
 
 // YieldTaskRequest relinquishes an active recoverable attempt and returns the
 // task to pending without implying that the underlying operation was suspended.
+// An empty Checkpoint retains the task's latest boundary checkpoint.
 type YieldTaskRequest struct {
 	TaskID          string
 	ExpectedVersion int64

@@ -63,7 +63,7 @@ func Run(
 		return nil, err
 	}
 	if task.Status != backgroundtask.StatusPending {
-		if task.Attempt > 0 {
+		if task.Attempt > 0 && authoritativeClaimStatus(task.Status) {
 			return task, nil
 		}
 		return nil, backgroundtask.ErrIllegalTransition
@@ -119,7 +119,7 @@ func waitStarted(
 	case executeErr := <-done:
 		if executeErr != nil {
 			current, getErr := manager.Get(ctx, task.Spec.ID)
-			if getErr == nil && current.Status != backgroundtask.StatusPending {
+			if getErr == nil && authoritativeClaimStatus(current.Status) {
 				return current, nil
 			}
 			return nil, executeErr
@@ -128,6 +128,16 @@ func waitStarted(
 	case <-ctx.Done():
 		_, _ = manager.RequestCancel(context.Background(), task.Spec.ID)
 		return nil, ctx.Err()
+	}
+}
+
+func authoritativeClaimStatus(status backgroundtask.Status) bool {
+	switch status {
+	case backgroundtask.StatusRunning, backgroundtask.StatusCompleted,
+		backgroundtask.StatusFailed, backgroundtask.StatusCanceled:
+		return true
+	default:
+		return false
 	}
 }
 

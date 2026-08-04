@@ -243,6 +243,9 @@ func (c *Config) Validate() error {
 	if c.RecoverableShell != nil && (c.Shell != nil || c.StreamingShell != nil) {
 		return errors.New("shell, streaming shell, and recoverable shell are mutually exclusive")
 	}
+	if err := validateBackgroundManager(c.Background); err != nil {
+		return err
+	}
 	if c.RecoverableShell != nil && backgroundManager(c.Background) == nil {
 		return errors.New("recoverable shell requires a background Manager")
 	}
@@ -431,6 +434,9 @@ func (c *MiddlewareConfig) Validate() error {
 	if c.RecoverableShell != nil && (c.Shell != nil || c.StreamingShell != nil) {
 		return errors.New("shell, streaming shell, and recoverable shell are mutually exclusive")
 	}
+	if err := validateBackgroundManager(c.Background); err != nil {
+		return err
+	}
 	if c.RecoverableShell != nil && backgroundManager(c.Background) == nil {
 		return errors.New("recoverable shell requires a background Manager")
 	}
@@ -462,6 +468,14 @@ func backgroundManager(config *BackgroundConfig) *backgroundtask.Manager {
 	}
 	if config.Runner != nil {
 		return config.Runner.Manager()
+	}
+	return nil
+}
+
+func validateBackgroundManager(config *BackgroundConfig) error {
+	if config != nil && config.Manager != nil && config.Runner != nil &&
+		config.Manager != config.Runner.Manager() {
+		return errors.New("filesystem: background Manager must match Runner.Manager")
 	}
 	return nil
 }

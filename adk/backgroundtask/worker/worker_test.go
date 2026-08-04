@@ -18,6 +18,7 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -28,7 +29,8 @@ import (
 )
 
 type testExecutor struct {
-	execute func(context.Context, *backgroundtask.Task) (*backgroundtask.ExecutionResult, error)
+	execute     func(context.Context, *backgroundtask.Task) (*backgroundtask.ExecutionResult, error)
+	validateErr error
 }
 
 func (*testExecutor) Key() string { return "worker-test" }
@@ -36,8 +38,8 @@ func (*testExecutor) LeaseExpiryPolicy() backgroundtask.LeaseExpiryPolicy {
 	return backgroundtask.LeaseExpiryRetry
 }
 func (*testExecutor) ValidateSpec(backgroundtask.Spec) error { return nil }
-func (*testExecutor) ValidateExecution(context.Context, *backgroundtask.Task) error {
-	return nil
+func (e *testExecutor) ValidateExecution(context.Context, *backgroundtask.Task) error {
+	return e.validateErr
 }
 func (*testExecutor) ValidateCheckpoint(context.Context, backgroundtask.Spec, []byte) error {
 	return nil
@@ -111,7 +113,7 @@ func TestWorkerPicksUpPendingAndYieldedTasks(t *testing.T) {
 	}
 	manager := newWorkerManager(t, executor)
 	task := submitTask(t, manager, "yielded")
-	worker, err := New(Config{
+	worker, err := NewWorker(WorkerConfig{
 		Manager: manager, ExecutorKeys: []string{"worker-test"},
 		PollInterval: time.Millisecond, MaxConcurrent: 1,
 	})
@@ -130,7 +132,7 @@ func TestWorkerPicksUpPendingAndYieldedTasks(t *testing.T) {
 func TestWorkerDelaysOnlyAttemptZeroTasks(t *testing.T) {
 	manager := newWorkerManager(t, &testExecutor{})
 	task := submitTask(t, manager, "delayed")
-	worker, err := New(Config{
+	worker, err := NewWorker(WorkerConfig{
 		Manager: manager, ExecutorKeys: []string{"worker-test"},
 		PollInterval: time.Millisecond, InitialPickupDelay: 80 * time.Millisecond,
 	})
@@ -176,7 +178,7 @@ func TestWorkerBoundsConcurrentDispatch(t *testing.T) {
 	for _, id := range []string{"one", "two", "three"} {
 		submitTask(t, manager, id)
 	}
-	worker, err := New(Config{
+	worker, err := NewWorker(WorkerConfig{
 		Manager: manager, ExecutorKeys: []string{"worker-test"},
 		PollInterval: time.Millisecond, MaxConcurrent: 2,
 	})
@@ -199,4 +201,88 @@ func TestWorkerBoundsConcurrentDispatch(t *testing.T) {
 	mu.Lock()
 	require.Equal(t, 2, maximum)
 	mu.Unlock()
+}
+
+func TestWorkerReturnsPermanentDispatchError(t *testing.T) {
+	wantErr := errors.New("worker dependency unavailable")
+	manager := newWorkerManager(t, &testExecutor{validateErr: wantErr})
+	submitTask(t, manager, "invalid")
+	worker, err := NewWorker(WorkerConfig{
+		Manager: manager, ExecutorKeys: []string{"worker-test"},
+		PollInterval: time.Millisecond,
+	})
+	require.NoError(t, err)
+	runCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	require.ErrorContains(t, worker.Run(runCtx), wantErr.Error())
+	task, err := manager.Get(context.Background(), "invalid")
+	require.NoError(t, err)
+	require.Equal(t, backgroundtask.StatusPending, task.Status)
+}
+
+func TestNewWorkerValidationAndDefaults(t *testing.T) {
+	_, err := NewWorker(WorkerConfig{})
+	require.ErrorContains(t, err, "manager is required")
+	manager := newWorkerManager(t, &testExecutor{})
+	_, err = NewWorker(WorkerConfig{Manager: manager})
+	require.ErrorContains(t, err, "executor keys")
+	_, err = NewWorker(WorkerConfig{
+		Manager: manager, ExecutorKeys: []string{""},
+	})
+	require.ErrorContains(t, err, "executor key is required")
+	_, err = NewWorker(WorkerConfig{
+		Manager: manager, ExecutorKeys: []string{"worker-test"},
+		InitialPickupDelay: -time.Second,
+	})
+	require.ErrorContains(t, err, "cannot be negative")
+
+	worker, err := NewWorker(WorkerConfig{
+		Manager: manager, ExecutorKeys: []string{"worker-test"},
+	})
+	require.NoError(t, err)
+	require.Equal(t, time.Second, worker.pollInterval)
+	require.Equal(t, 1, worker.maxConcurrent)
+}
+
+func TestBenignDispatchErrorClassification(t *testing.T) {
+	activeCtx := context.Background()
+	for _, err := range []error{
+		nil,
+		backgroundtask.ErrVersionConflict,
+		backgroundtask.ErrIllegalTransition,
+		backgroundtask.ErrAlreadyTerminal,
+		backgroundtask.ErrNotFound,
+		errors.New("backgroundtask: task is already executing in this manager"),
+	} {
+		require.True(t, benignDispatchError(activeCtx, err))
+	}
+	require.False(t, benignDispatchError(activeCtx, errors.New("dependency unavailable")))
+	canceledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	require.True(t, benignDispatchError(canceledCtx, errors.New("any error")))
+}
+
+type listErrorStore struct {
+	backgroundtask.Store
+}
+
+func (listErrorStore) ListPending(
+	context.Context,
+	*backgroundtask.ListPendingRequest,
+) (*backgroundtask.ListPendingResult, error) {
+	return nil, errors.New("list failed")
+}
+
+func TestWorkerRunValidationAndListFailure(t *testing.T) {
+	var nilWorker *Worker
+	require.ErrorContains(t, nilWorker.Run(context.Background()), "worker is required")
+
+	manager := backgroundtask.New(context.Background(), &backgroundtask.Config{
+		Store: listErrorStore{Store: backgroundtask.NewInMemoryStore(nil)},
+	})
+	worker, err := NewWorker(WorkerConfig{
+		Manager: manager, ExecutorKeys: []string{"worker-test"},
+	})
+	require.NoError(t, err)
+	require.ErrorContains(t, worker.Run(context.Background()), "list failed")
 }

@@ -237,6 +237,31 @@ func TestRunRejectsInvalidRequestAndState(t *testing.T) {
 	require.NoError(t, err)
 	_, err = Run(context.Background(), manager, Policy{}, &Request{TaskID: task.Spec.ID})
 	require.ErrorIs(t, err, backgroundtask.ErrIllegalTransition)
+
+	store := backgroundtask.NewInMemoryStore(nil)
+	created, err := store.Create(context.Background(), &backgroundtask.CreateTaskRequest{
+		Spec: backgroundtask.Spec{
+			ID: "suspended", ExecutorKey: "coordinator-test",
+		},
+		LeaseExpiryPolicy: backgroundtask.LeaseExpiryRetry,
+	})
+	require.NoError(t, err)
+	started, err := store.Start(context.Background(), &backgroundtask.StartTaskRequest{
+		TaskID: created.Spec.ID, ExpectedVersion: created.Version,
+	})
+	require.NoError(t, err)
+	_, err = store.Suspend(context.Background(), &backgroundtask.SuspendTaskRequest{
+		TaskID: started.Spec.ID, ExpectedVersion: started.Version,
+		Checkpoint: []byte("checkpoint"),
+	})
+	require.NoError(t, err)
+	suspendedManager := backgroundtask.New(
+		context.Background(), &backgroundtask.Config{Store: store},
+	)
+	_, err = Run(context.Background(), suspendedManager, Policy{}, &Request{
+		TaskID: created.Spec.ID,
+	})
+	require.ErrorIs(t, err, backgroundtask.ErrIllegalTransition)
 }
 
 func TestForegroundWaitBoundaryErrors(t *testing.T) {
@@ -284,6 +309,50 @@ func TestForegroundWaitBoundaryErrors(t *testing.T) {
 		)
 		require.ErrorContains(t, err, "unexpected task status")
 	})
+}
+
+func TestWaitStartedReconcilesWorkerClaimRace(t *testing.T) {
+	manager, _, task := newCoordinatorTask(t)
+	executeDone := make(chan error, 1)
+	go func() {
+		executeDone <- manager.Execute(context.Background(), task.Spec.ID)
+	}()
+	current := task
+	deadline := time.Now().Add(time.Second)
+	for current.Status != backgroundtask.StatusRunning && time.Now().Before(deadline) {
+		var err error
+		current, err = manager.Get(context.Background(), task.Spec.ID)
+		require.NoError(t, err)
+		time.Sleep(time.Millisecond)
+	}
+	require.Equal(t, backgroundtask.StatusRunning, current.Status)
+
+	done := make(chan error, 1)
+	done <- backgroundtask.ErrVersionConflict
+	reconciled, err := waitStarted(context.Background(), manager, task, done)
+	require.NoError(t, err)
+	require.Equal(t, backgroundtask.StatusRunning, reconciled.Status)
+	_, err = manager.RequestCancel(context.Background(), task.Spec.ID)
+	require.NoError(t, err)
+	require.NoError(t, <-executeDone)
+}
+
+func TestAuthoritativeClaimStatus(t *testing.T) {
+	for _, status := range []backgroundtask.Status{
+		backgroundtask.StatusRunning,
+		backgroundtask.StatusCompleted,
+		backgroundtask.StatusFailed,
+		backgroundtask.StatusCanceled,
+	} {
+		require.True(t, authoritativeClaimStatus(status))
+	}
+	for _, status := range []backgroundtask.Status{
+		backgroundtask.StatusPending,
+		backgroundtask.StatusWaitingInput,
+		backgroundtask.StatusSuspended,
+	} {
+		require.False(t, authoritativeClaimStatus(status))
+	}
 }
 
 func requestStop(manager *backgroundtask.Manager, task *backgroundtask.Task) error {

@@ -267,9 +267,14 @@ func TestInMemoryStoreYieldReturnsRecoverableAttemptToPending_BitsUT(t *testing.
 	})
 	require.NoError(t, err)
 	require.Equal(t, int64(2), restarted.Attempt)
+	yieldedAgain, err := store.Yield(context.Background(), &YieldTaskRequest{
+		TaskID: restarted.Spec.ID, ExpectedVersion: restarted.Version,
+	})
+	require.NoError(t, err)
+	require.Equal(t, "recovery-ref", string(yieldedAgain.Checkpoint))
 
 	_, err = store.Yield(context.Background(), &YieldTaskRequest{
-		TaskID: restarted.Spec.ID, ExpectedVersion: started.Version,
+		TaskID: yieldedAgain.Spec.ID, ExpectedVersion: started.Version,
 	})
 	require.ErrorIs(t, err, ErrVersionConflict)
 }

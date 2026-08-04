@@ -63,6 +63,10 @@ func (r *Registry) Register(registration *Registration) error {
 	if registration.Info.Name == "" {
 		return errors.New("backgroundtask/tool: tool name is required")
 	}
+	info, err := cloneToolInfo(registration.Info)
+	if err != nil {
+		return fmt.Errorf("backgroundtask/tool: clone tool info: %w", err)
+	}
 	target := r.plain
 	if _, ok := registration.Tool.(RecoverableBackgroundTool); ok {
 		target = r.recoverable
@@ -73,7 +77,8 @@ func (r *Registry) Register(registration *Registration) error {
 		return fmt.Errorf("%w: managed tool %q", backgroundtask.ErrAlreadyExists, registration.Info.Name)
 	}
 	copy := *registration
-	target[registration.Info.Name] = &copy
+	copy.Info = info
+	target[info.Name] = &copy
 	return nil
 }
 

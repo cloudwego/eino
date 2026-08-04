@@ -173,6 +173,25 @@ func decodeEvents(t *testing.T, records []string) []*ToolStreamEvent {
 	return events
 }
 
+func TestRegistrySnapshotsToolInfo(t *testing.T) {
+	info := toolInfo("stable")
+	registry := NewRegistry()
+	require.NoError(t, registry.Register(&Registration{
+		Info: info,
+		Tool: &plainFakeTool{start: func(context.Context, *StartRequest) (Run, error) {
+			return nil, nil
+		}},
+	}))
+	info.Name = "mutated"
+	info.Desc = "mutated"
+	registration, ok := registry.resolve("stable", false)
+	require.True(t, ok)
+	require.Equal(t, "stable", registration.Info.Name)
+	require.Equal(t, "Run external work", registration.Info.Desc)
+	_, ok = registry.resolve("mutated", false)
+	require.False(t, ok)
+}
+
 func TestManagedToolFastCompletionReturnsCanonicalTaskID(t *testing.T) {
 	implementation := &fakeTool{
 		start: func(_ context.Context, request *StartRequest) (Run, error) {
@@ -251,20 +270,21 @@ func TestManagedToolAutoBackgroundAndStop(t *testing.T) {
 func TestManagedToolStreamPersistsBeforeNDJSONProjection(t *testing.T) {
 	implementation := &fakeTool{
 		start: func(context.Context, *StartRequest) (Run, error) {
-			reader, writer := schema.Pipe[*Update](1)
+			reader, writer := schema.Pipe[*Update](3)
 			updateSent := make(chan struct{})
 			go func() {
-				writer.Send(&Update{
-					SourceID: "event-1", Kind: "stdout", Data: []byte("hello"),
-					MIMEType: "text/plain",
-				}, nil)
+				for _, sourceID := range []string{"event-1", "event-2", "event-3"} {
+					writer.Send(&Update{
+						SourceID: sourceID, Kind: "stdout", Data: []byte(sourceID),
+						MIMEType: "text/plain",
+					}, nil)
+				}
 				writer.Close()
 				close(updateSent)
 			}()
 			return &updatingRun{fakeRun: &fakeRun{
 				wait: func(context.Context) (*Outcome, error) {
 					<-updateSent
-					time.Sleep(time.Millisecond)
 					return &Outcome{
 						Status: backgroundtask.StatusCompleted, Data: []byte("done"),
 					}, nil
@@ -290,16 +310,18 @@ func TestManagedToolStreamPersistsBeforeNDJSONProjection(t *testing.T) {
 		records = append(records, record)
 	}
 	events := decodeEvents(t, records)
-	require.Len(t, events, 2)
-	require.Equal(t, "update", events[0].Type)
-	require.Equal(t, "launch_result", events[1].Type)
-	require.Equal(t, "task-fixed", events[1].TaskID)
+	require.Len(t, events, 4)
+	for _, event := range events[:3] {
+		require.Equal(t, "update", event.Type)
+	}
+	require.Equal(t, "launch_result", events[3].Type)
+	require.Equal(t, "task-fixed", events[3].TaskID)
 
 	output, err := manager.ReadOutput(context.Background(), &backgroundtask.ReadOutputRequest{
 		TaskID: "task-fixed",
 	})
 	require.NoError(t, err)
-	require.Len(t, output.Records, 1)
+	require.Len(t, output.Records, 3)
 	require.Equal(t, "event-1", output.Records[0].SourceID)
 }
 

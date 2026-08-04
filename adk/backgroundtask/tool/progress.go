@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/cloudwego/eino/adk/backgroundtask"
 )
@@ -107,8 +108,13 @@ func formatProgressRecord(record backgroundtask.OutputRecord) string {
 }
 
 func boundedText(data []byte, limit int) string {
-	if len(data) <= limit {
-		return string(data)
+	text := strings.ToValidUTF8(string(data), "\uFFFD")
+	if len(text) <= limit {
+		return text
 	}
-	return string(data[:limit]) + "...[truncated]"
+	end := limit
+	for end > 0 && !utf8.ValidString(text[:end]) {
+		end--
+	}
+	return text[:end] + "...[truncated]"
 }

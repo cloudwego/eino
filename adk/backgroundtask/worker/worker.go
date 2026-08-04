@@ -20,6 +20,7 @@ package worker
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"time"
 
@@ -34,9 +35,6 @@ type WorkerConfig struct {
 	InitialPickupDelay time.Duration
 	MaxConcurrent      int
 }
-
-// Config is an alias for WorkerConfig.
-type Config = WorkerConfig
 
 // Worker polls pending tasks and dispatches claims through Manager.Execute.
 // Store authorization remains authoritative when multiple Workers race.
@@ -79,11 +77,6 @@ func NewWorker(config WorkerConfig) (*Worker, error) {
 	}, nil
 }
 
-// New creates a polling Worker.
-func New(config Config) (*Worker, error) {
-	return NewWorker(config)
-}
-
 // Run polls until ctx is canceled, then stops claiming and waits for dispatch
 // calls that observe the same context to return.
 func (w *Worker) Run(ctx context.Context) error {
@@ -92,7 +85,10 @@ func (w *Worker) Run(ctx context.Context) error {
 	}
 	ticker := time.NewTicker(w.pollInterval)
 	defer ticker.Stop()
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	semaphore := make(chan struct{}, w.maxConcurrent)
+	dispatchErrors := make(chan error, w.maxConcurrent)
 	var attempts sync.WaitGroup
 	inFlight := make(map[string]struct{})
 	var inFlightMu sync.Mutex
@@ -114,7 +110,7 @@ func (w *Worker) Run(ctx context.Context) error {
 		inFlightMu.Unlock()
 		select {
 		case semaphore <- struct{}{}:
-		case <-ctx.Done():
+		case <-runCtx.Done():
 			inFlightMu.Lock()
 			delete(inFlight, taskID)
 			inFlightMu.Unlock()
@@ -129,7 +125,13 @@ func (w *Worker) Run(ctx context.Context) error {
 				delete(inFlight, taskID)
 				inFlightMu.Unlock()
 			}()
-			_ = w.manager.Execute(ctx, taskID)
+			if err := w.manager.Execute(runCtx, taskID); err != nil &&
+				!benignDispatchError(runCtx, err) {
+				select {
+				case dispatchErrors <- err:
+				case <-runCtx.Done():
+				}
+			}
 		}()
 	}
 
@@ -143,8 +145,8 @@ func (w *Worker) Run(ctx context.Context) error {
 				return err
 			}
 			for _, task := range result.Tasks {
-				if ctx.Err() != nil {
-					return ctx.Err()
+				if runCtx.Err() != nil {
+					return runCtx.Err()
 				}
 				dispatch(task)
 			}
@@ -157,7 +159,7 @@ func (w *Worker) Run(ctx context.Context) error {
 
 	for {
 		if err := poll(); err != nil {
-			if ctx.Err() != nil {
+			if runCtx.Err() != nil {
 				attempts.Wait()
 				return nil
 			}
@@ -167,8 +169,26 @@ func (w *Worker) Run(ctx context.Context) error {
 		select {
 		case <-ticker.C:
 		case <-ctx.Done():
+			cancel()
 			attempts.Wait()
 			return nil
+		case err := <-dispatchErrors:
+			cancel()
+			attempts.Wait()
+			return err
 		}
 	}
+}
+
+func benignDispatchError(ctx context.Context, err error) bool {
+	if err == nil || ctx.Err() != nil {
+		return true
+	}
+	if errors.Is(err, backgroundtask.ErrVersionConflict) ||
+		errors.Is(err, backgroundtask.ErrIllegalTransition) ||
+		errors.Is(err, backgroundtask.ErrAlreadyTerminal) ||
+		errors.Is(err, backgroundtask.ErrNotFound) {
+		return true
+	}
+	return strings.Contains(err.Error(), "task is already executing in this manager")
 }

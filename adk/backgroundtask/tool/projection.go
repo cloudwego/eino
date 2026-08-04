@@ -33,6 +33,8 @@ type liveProjection struct {
 	closeOnce  sync.Once
 	detached   chan struct{}
 	detachOnce sync.Once
+	stateMu    sync.Mutex
+	isDetached bool
 }
 
 func newLiveProjection() *liveProjection {
@@ -52,11 +54,21 @@ func (p *liveProjection) closeUpdates() {
 }
 
 func (p *liveProjection) detach() {
-	p.detachOnce.Do(func() { close(p.detached) })
+	p.stateMu.Lock()
+	p.detachOnce.Do(func() {
+		p.isDetached = true
+		close(p.detached)
+	})
+	p.stateMu.Unlock()
 }
 
 func (p *liveProjection) send(ctx context.Context, detached <-chan struct{}, update *Update) {
 	if p == nil || update == nil {
+		return
+	}
+	p.stateMu.Lock()
+	defer p.stateMu.Unlock()
+	if p.isDetached {
 		return
 	}
 	select {
