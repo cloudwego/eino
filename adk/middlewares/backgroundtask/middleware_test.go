@@ -574,3 +574,35 @@ func TestResolveDurableTaskBlockingBoundaries(t *testing.T) {
 	)
 	require.ErrorIs(t, err, wantErr)
 }
+
+type progressReaderStub struct {
+	value string
+}
+
+func (r progressReaderStub) ReadProgress(context.Context, *bgtask.Task) (string, error) {
+	return r.value, nil
+}
+
+func TestResolveDurableTaskSelectsProgressReaderByExecutorKey(t *testing.T) {
+	block := false
+	task := &bgtask.Task{
+		Spec: bgtask.Spec{
+			ID: "managed", ExecutorKey: "eino.dev/background-tool",
+			Description: "managed operation",
+		},
+		Status: bgtask.StatusRunning,
+	}
+	result, err := resolveDurableTaskWithReaders(
+		context.Background(), nil, task,
+		taskOutputInput{TaskID: task.Spec.ID, Block: &block},
+		map[string]TaskProgressReader{
+			task.Spec.ExecutorKey: progressReaderStub{value: "Recent progress:\nhello"},
+		},
+		func(context.Context, *bgtask.Task) (string, error) {
+			return "fallback", nil
+		},
+	)
+	require.NoError(t, err)
+	require.Contains(t, result, "Recent progress:\nhello")
+	require.NotContains(t, result, "fallback")
+}

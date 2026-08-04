@@ -47,17 +47,24 @@ var (
 	ErrCloseDeadlineRequired = errors.New("backgroundtask: close deadline is required while tasks are active")
 	// ErrUnsupportedPayloadVersion reports an executor payload version it cannot decode.
 	ErrUnsupportedPayloadVersion = errors.New("backgroundtask: unsupported payload version")
+	// ErrOutputConflict reports reuse of a source ID with different output bytes.
+	ErrOutputConflict = errors.New("backgroundtask: output source id conflict")
 )
 
 // Store persists task snapshots, ordered output records, and semantic lifecycle
-// transitions. AppendOutput must assign task-global monotonic sequences and fence
-// records by the active attempt without advancing the task lifecycle Version.
+// transitions. AppendOutput and AppendOutputOnce must assign task-global
+// monotonic sequences and fence records by the active attempt without advancing
+// the task lifecycle Version. AppendOutputOnce must retain task-wide SourceID
+// deduplication metadata across attempts for at least the active task lifetime.
 //
 // RequestCancel on active work keeps StatusRunning, sets CancelRequestedAt, and
 // advances Version. Once cancellation is requested, Heartbeat, Complete, Fail,
-// WaitInput, and Suspend must reject the attempt; only Cancel may terminally
-// acknowledge it. Lease expiry must also resolve such work to StatusCanceled,
-// regardless of LeaseExpiryPolicy.
+// WaitInput, Suspend, and Yield must reject the attempt; only Cancel may
+// terminally acknowledge it. Yield changes running to pending, stores its
+// optional checkpoint atomically, and emits no lifecycle notification. On
+// retry-capable work, cancel intent that outlives an attempt remains pending so
+// a recovery attempt can stop the external operation before acknowledging
+// cancellation. Non-recoverable lease expiry resolves cancellation directly.
 type Store interface {
 	Create(context.Context, *CreateTaskRequest) (*Task, error)
 	CreateAndStart(context.Context, *CreateTaskRequest) (*Task, error)
@@ -66,12 +73,15 @@ type Store interface {
 	Start(context.Context, *StartTaskRequest) (*Task, error)
 	Heartbeat(context.Context, *HeartbeatRequest) (*Task, error)
 	AppendOutput(context.Context, *AppendOutputRequest) (*OutputRecord, error)
+	AppendOutputOnce(context.Context, *AppendOutputOnceRequest) (*AppendOutputOnceResult, error)
 	ReadOutput(context.Context, *ReadOutputRequest) (*ReadOutputResult, error)
+	ReadRecentOutput(context.Context, *ReadRecentOutputRequest) (*ReadOutputResult, error)
 	ReportOutputFailure(context.Context, *ReportOutputFailureRequest) (*Task, error)
 	Complete(context.Context, *CompleteTaskRequest) (*Task, error)
 	Fail(context.Context, *FailTaskRequest) (*Task, error)
 	WaitInput(context.Context, *WaitInputTaskRequest) (*Task, error)
 	Suspend(context.Context, *SuspendTaskRequest) (*Task, error)
+	Yield(context.Context, *YieldTaskRequest) (*Task, error)
 	Cancel(context.Context, *CancelTaskRequest) (*Task, error)
 	RequestCancel(context.Context, *RequestCancelRequest) (*Task, error)
 	Resume(context.Context, *ResumeRequest) (*Task, error)

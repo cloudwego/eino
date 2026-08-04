@@ -1,0 +1,89 @@
+/*
+ * Copyright 2026 CloudWeGo Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package tool_test
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+
+	"github.com/cloudwego/eino/adk/backgroundtask"
+	backgroundtool "github.com/cloudwego/eino/adk/backgroundtask/tool"
+	componenttool "github.com/cloudwego/eino/components/tool"
+	"github.com/cloudwego/eino/schema"
+)
+
+type exampleNotifications struct{}
+
+func (exampleNotifications) ValidateNotificationDelivery(
+	context.Context,
+	*backgroundtask.NotificationDeliveryValidation,
+) error {
+	return nil
+}
+
+type exampleTool struct{}
+
+func (exampleTool) ValidateArguments(arguments string) error {
+	var input map[string]any
+	return json.Unmarshal([]byte(arguments), &input)
+}
+func (exampleTool) Start(
+	context.Context,
+	*backgroundtool.StartRequest,
+) (backgroundtool.Run, error) {
+	return exampleRun{}, nil
+}
+
+type exampleRun struct{}
+
+func (exampleRun) Wait(context.Context) (*backgroundtool.Outcome, error) {
+	return &backgroundtool.Outcome{
+		Status: backgroundtask.StatusCompleted, Data: []byte("video ready"),
+	}, nil
+}
+func (exampleRun) Stop(context.Context) error { return nil }
+
+func ExampleNewManagedTool() {
+	manager := backgroundtask.New(context.Background(), &backgroundtask.Config{
+		IDGen: func(context.Context, *backgroundtask.AllocateTaskIDRequest) (string, error) {
+			return "task_video", nil
+		},
+	})
+	registry := backgroundtool.NewRegistry()
+	_ = registry.Register(&backgroundtool.Registration{
+		Info: &schema.ToolInfo{
+			Name: "generate_video", Desc: "Generate a product video",
+			ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
+				"prompt": {Type: schema.String, Required: true},
+			}),
+		},
+		Tool: exampleTool{},
+	})
+	wrapped, _ := backgroundtool.NewManagedTool(context.Background(), &backgroundtool.ManagedToolConfig{
+		Manager: manager, Registry: registry, ToolName: "generate_video",
+		Notifications: exampleNotifications{},
+		SessionID:     func(context.Context) (string, error) { return "session", nil },
+	})
+	result, _ := wrapped.(componenttool.InvokableTool).InvokableRun(
+		context.Background(), `{"prompt":"launch"}`,
+	)
+	var event backgroundtool.ToolStreamEvent
+	_ = json.Unmarshal([]byte(result), &event)
+	fmt.Println(event.TaskID, event.Status, event.Output)
+	// Output: task_video completed video ready
+}

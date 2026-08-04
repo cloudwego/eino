@@ -159,8 +159,9 @@ func New(_ context.Context, conf *Config) *Manager {
 
 // Close performs bounded graceful shutdown. When any attempt is active, ctx must
 // have a deadline or Close returns ErrCloseDeadlineRequired without closing the
-// Manager. Drainable attempts are asked to suspend immediately; non-drainable
-// attempts may finish until the deadline and are then durably canceled.
+// Manager. Drainable attempts receive ControlDrain and may suspend or yield
+// according to their executor contract; non-drainable attempts may finish until
+// the deadline and are then durably canceled.
 func (m *Manager) Close(ctx context.Context) error {
 	m.attemptsMu.Lock()
 	active := len(m.activeAttempts)

@@ -63,6 +63,9 @@ func Run(
 		return nil, err
 	}
 	if task.Status != backgroundtask.StatusPending {
+		if task.Attempt > 0 {
+			return task, nil
+		}
 		return nil, backgroundtask.ErrIllegalTransition
 	}
 
@@ -115,6 +118,10 @@ func waitStarted(
 		return result.task, result.err
 	case executeErr := <-done:
 		if executeErr != nil {
+			current, getErr := manager.Get(ctx, task.Spec.ID)
+			if getErr == nil && current.Status != backgroundtask.StatusPending {
+				return current, nil
+			}
 			return nil, executeErr
 		}
 		return manager.Get(ctx, task.Spec.ID)

@@ -243,6 +243,118 @@ func TestAttack_OutputSequenceRemainsMonotonicAcrossAttempts(t *testing.T) {
 	})
 }
 
+func TestInMemoryStoreYieldReturnsRecoverableAttemptToPending_BitsUT(t *testing.T) {
+	store := NewInMemoryStore(nil)
+	started := createAndStart(t, store, "yield")
+	yielded, err := store.Yield(context.Background(), &YieldTaskRequest{
+		TaskID: started.Spec.ID, ExpectedVersion: started.Version,
+		Checkpoint: []byte("recovery-ref"),
+	})
+	require.NoError(t, err)
+	require.Equal(t, StatusPending, yielded.Status)
+	require.Equal(t, "recovery-ref", string(yielded.Checkpoint))
+	require.Equal(t, started.Attempt, yielded.Attempt)
+	require.Nil(t, yielded.DoneAt)
+
+	deliveries, err := store.Receive(context.Background(), &ReceiveNotificationsRequest{
+		ConsumerID: "test", Limit: 10, VisibilityTime: time.Second,
+	})
+	require.NoError(t, err)
+	require.Empty(t, deliveries.Deliveries)
+
+	restarted, err := store.Start(context.Background(), &StartTaskRequest{
+		TaskID: yielded.Spec.ID, ExpectedVersion: yielded.Version,
+	})
+	require.NoError(t, err)
+	require.Equal(t, int64(2), restarted.Attempt)
+
+	_, err = store.Yield(context.Background(), &YieldTaskRequest{
+		TaskID: restarted.Spec.ID, ExpectedVersion: started.Version,
+	})
+	require.ErrorIs(t, err, ErrVersionConflict)
+}
+
+func TestInMemoryStoreYieldRejectsCancellation_BitsUT(t *testing.T) {
+	store := NewInMemoryStore(nil)
+	started := createAndStart(t, store, "yield-canceled")
+	requested, err := store.RequestCancel(context.Background(), &RequestCancelRequest{
+		TaskID: started.Spec.ID, ExpectedVersion: started.Version,
+	})
+	require.NoError(t, err)
+	_, err = store.Yield(context.Background(), &YieldTaskRequest{
+		TaskID: requested.Spec.ID, ExpectedVersion: requested.Version,
+	})
+	require.ErrorIs(t, err, ErrLeaseLost)
+}
+
+func TestInMemoryStoreKeyedOutputDeduplicatesAcrossAttempts_BitsUT(t *testing.T) {
+	store := NewInMemoryStore(nil)
+	started := createAndStart(t, store, "keyed-output")
+	version := started.Version
+	first, err := store.AppendOutputOnce(context.Background(), &AppendOutputOnceRequest{
+		TaskID: started.Spec.ID, Attempt: started.Attempt,
+		SourceID: "event-1", Data: []byte("payload"),
+	})
+	require.NoError(t, err)
+	require.True(t, first.Inserted)
+	require.Equal(t, int64(1), first.Record.Sequence)
+
+	yielded, err := store.Yield(context.Background(), &YieldTaskRequest{
+		TaskID: started.Spec.ID, ExpectedVersion: started.Version,
+	})
+	require.NoError(t, err)
+	restarted, err := store.Start(context.Background(), &StartTaskRequest{
+		TaskID: yielded.Spec.ID, ExpectedVersion: yielded.Version,
+	})
+	require.NoError(t, err)
+	replayed, err := store.AppendOutputOnce(context.Background(), &AppendOutputOnceRequest{
+		TaskID: restarted.Spec.ID, Attempt: restarted.Attempt,
+		SourceID: "event-1", Data: []byte("payload"),
+	})
+	require.NoError(t, err)
+	require.False(t, replayed.Inserted)
+	require.Equal(t, first.Record.Sequence, replayed.Record.Sequence)
+	require.Equal(t, first.Record.Attempt, replayed.Record.Attempt)
+
+	_, err = store.AppendOutputOnce(context.Background(), &AppendOutputOnceRequest{
+		TaskID: restarted.Spec.ID, Attempt: restarted.Attempt,
+		SourceID: "event-1", Data: []byte("different"),
+	})
+	require.ErrorIs(t, err, ErrOutputConflict)
+
+	current, err := store.Get(context.Background(), restarted.Spec.ID)
+	require.NoError(t, err)
+	require.NotEqual(t, version, current.Version)
+	versionBeforeOutput := current.Version
+	_, err = store.AppendOutputOnce(context.Background(), &AppendOutputOnceRequest{
+		TaskID: restarted.Spec.ID, Attempt: restarted.Attempt,
+		SourceID: "event-2", Data: []byte("second"),
+	})
+	require.NoError(t, err)
+	current, err = store.Get(context.Background(), restarted.Spec.ID)
+	require.NoError(t, err)
+	require.Equal(t, versionBeforeOutput, current.Version)
+}
+
+func TestInMemoryStoreReadRecentOutputReturnsNewestChronologically_BitsUT(t *testing.T) {
+	store := NewInMemoryStore(nil)
+	started := createAndStart(t, store, "recent-output")
+	for _, value := range []string{"one", "two", "three"} {
+		_, err := store.AppendOutput(context.Background(), &AppendOutputRequest{
+			TaskID: started.Spec.ID, Attempt: started.Attempt, Data: []byte(value),
+		})
+		require.NoError(t, err)
+	}
+	result, err := store.ReadRecentOutput(context.Background(), &ReadRecentOutputRequest{
+		TaskID: started.Spec.ID, Limit: 2,
+	})
+	require.NoError(t, err)
+	require.Len(t, result.Records, 2)
+	require.Equal(t, "two", string(result.Records[0].Data))
+	require.Equal(t, "three", string(result.Records[1].Data))
+	require.Equal(t, int64(3), result.LastSequence)
+}
+
 func TestInMemoryStoreHeartbeatSuspensionReleaseAndWait(t *testing.T) {
 	store := NewInMemoryStore(nil)
 	started := createAndStart(t, store, "suspension")
@@ -429,7 +541,7 @@ func TestInMemoryStoreExpiredNonRetryableLeaseFails_BitsUT(t *testing.T) {
 	require.NotNil(t, failed.DoneAt)
 }
 
-func TestInMemoryStoreExpiredCanceledLeaseAlwaysCancels_BitsUT(t *testing.T) {
+func TestInMemoryStoreExpiredCanceledLeasePreservesRecoverableStop_BitsUT(t *testing.T) {
 	for _, policy := range []LeaseExpiryPolicy{LeaseExpiryRetry, LeaseExpiryFail} {
 		t.Run(string(policy), func(t *testing.T) {
 			clock := &testClock{now: time.Unix(100, 0)}
@@ -451,11 +563,17 @@ func TestInMemoryStoreExpiredCanceledLeaseAlwaysCancels_BitsUT(t *testing.T) {
 			require.NotNil(t, requested.CancelRequestedAt)
 
 			clock.Advance(6 * time.Second)
-			canceled, err := store.Get(context.Background(), spec.ID)
+			resolved, err := store.Get(context.Background(), spec.ID)
 			require.NoError(t, err)
-			assert.Equal(t, StatusCanceled, canceled.Status)
-			assert.Equal(t, canceledError, canceled.ResultError)
-			require.NotNil(t, canceled.DoneAt)
+			if policy == LeaseExpiryRetry {
+				assert.Equal(t, StatusPending, resolved.Status)
+				assert.NotNil(t, resolved.CancelRequestedAt)
+				assert.Nil(t, resolved.DoneAt)
+			} else {
+				assert.Equal(t, StatusCanceled, resolved.Status)
+				assert.Equal(t, canceledError, resolved.ResultError)
+				require.NotNil(t, resolved.DoneAt)
+			}
 		})
 	}
 }

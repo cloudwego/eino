@@ -17,6 +17,7 @@
 package backgroundtask
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"errors"
@@ -53,6 +54,7 @@ type InMemoryStore struct {
 	tasks         map[string]*Task
 	active        map[string]memoryActiveAttempt
 	outputs       map[string][]OutputRecord
+	outputKeys    map[string]map[string]OutputRecord
 	outbox        []*memoryOutboxItem
 	notify        chan struct{}
 	now           Clock
@@ -66,6 +68,7 @@ func NewInMemoryStore(config *InMemoryStoreConfig) *InMemoryStore {
 		tasks:         make(map[string]*Task),
 		active:        make(map[string]memoryActiveAttempt),
 		outputs:       make(map[string][]OutputRecord),
+		outputKeys:    make(map[string]map[string]OutputRecord),
 		notify:        make(chan struct{}),
 		now:           time.Now,
 		activeTimeout: 30 * time.Second,
@@ -282,6 +285,52 @@ func (s *InMemoryStore) AppendOutput(_ context.Context, req *AppendOutputRequest
 	return cloneOutputRecord(&record), nil
 }
 
+func (s *InMemoryStore) AppendOutputOnce(
+	_ context.Context,
+	req *AppendOutputOnceRequest,
+) (*AppendOutputOnceResult, error) {
+	if req == nil || req.TaskID == "" || req.Attempt <= 0 || req.SourceID == "" {
+		return nil, errors.New("backgroundtask: keyed output task id, attempt, and source id are required")
+	}
+	if len(req.Data) == 0 {
+		return nil, errors.New("backgroundtask: output data is required")
+	}
+	if int64(len(req.Data)) > s.maxValue {
+		return nil, errors.New("backgroundtask: output data exceeds configured limit")
+	}
+	if len(req.SourceID) > 1024 {
+		return nil, errors.New("backgroundtask: output source id exceeds configured limit")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.authorizeOutputLocked(req.TaskID, req.Attempt); err != nil {
+		return nil, err
+	}
+	keyed := s.outputKeys[req.TaskID]
+	if existing, ok := keyed[req.SourceID]; ok {
+		if !bytes.Equal(existing.Data, req.Data) {
+			return nil, ErrOutputConflict
+		}
+		return &AppendOutputOnceResult{
+			Record: cloneOutputRecord(&existing),
+		}, nil
+	}
+	records := s.outputs[req.TaskID]
+	record := OutputRecord{
+		TaskID: req.TaskID, Attempt: req.Attempt, Sequence: int64(len(records) + 1),
+		SourceID: req.SourceID, Data: cloneBytes(req.Data), CreatedAt: s.now(),
+	}
+	s.outputs[req.TaskID] = append(records, record)
+	if keyed == nil {
+		keyed = make(map[string]OutputRecord)
+		s.outputKeys[req.TaskID] = keyed
+	}
+	keyed[req.SourceID] = record
+	return &AppendOutputOnceResult{
+		Record: cloneOutputRecord(&record), Inserted: true,
+	}, nil
+}
+
 func (s *InMemoryStore) ReadOutput(_ context.Context, req *ReadOutputRequest) (*ReadOutputResult, error) {
 	if req == nil || req.TaskID == "" || req.AfterSequence < 0 {
 		return nil, errors.New("backgroundtask: output task id and non-negative cursor are required")
@@ -298,6 +347,36 @@ func (s *InMemoryStore) ReadOutput(_ context.Context, req *ReadOutputRequest) (*
 	records := s.outputs[req.TaskID]
 	result := &ReadOutputResult{LastSequence: req.AfterSequence}
 	for i := req.AfterSequence; i < int64(len(records)) && len(result.Records) < limit; i++ {
+		record := cloneOutputRecord(&records[i])
+		result.Records = append(result.Records, *record)
+		result.LastSequence = record.Sequence
+	}
+	return result, nil
+}
+
+func (s *InMemoryStore) ReadRecentOutput(
+	_ context.Context,
+	req *ReadRecentOutputRequest,
+) (*ReadOutputResult, error) {
+	if req == nil || req.TaskID == "" {
+		return nil, errors.New("backgroundtask: recent output task id is required")
+	}
+	limit := req.Limit
+	if limit <= 0 || limit > 1000 {
+		limit = 100
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.tasks[req.TaskID]; !ok {
+		return nil, ErrNotFound
+	}
+	records := s.outputs[req.TaskID]
+	start := len(records) - limit
+	if start < 0 {
+		start = 0
+	}
+	result := &ReadOutputResult{}
+	for i := start; i < len(records); i++ {
 		record := cloneOutputRecord(&records[i])
 		result.Records = append(result.Records, *record)
 		result.LastSequence = record.Sequence
@@ -421,6 +500,28 @@ func (s *InMemoryStore) Suspend(_ context.Context, req *SuspendTaskRequest) (*Ta
 	return cloneTask(t), nil
 }
 
+func (s *InMemoryStore) Yield(_ context.Context, req *YieldTaskRequest) (*Task, error) {
+	if req == nil {
+		return nil, errors.New("backgroundtask: yield request is required")
+	}
+	if int64(len(req.Checkpoint)) > s.maxValue {
+		return nil, errors.New("backgroundtask: checkpoint exceeds configured limit")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	t, err := s.activeUncanceledTaskLocked(req.TaskID, req.ExpectedVersion, StatusRunning)
+	if err != nil {
+		return nil, err
+	}
+	t.Status = StatusPending
+	t.Checkpoint = cloneBytes(req.Checkpoint)
+	t.PendingResume = nil
+	s.clearActiveLocked(t)
+	s.advanceLocked(t)
+	s.signalLocked()
+	return cloneTask(t), nil
+}
+
 func (s *InMemoryStore) Cancel(_ context.Context, req *CancelTaskRequest) (*Task, error) {
 	if req == nil {
 		return nil, errors.New("backgroundtask: cancel request is required")
@@ -465,6 +566,9 @@ func (s *InMemoryStore) RequestCancel(_ context.Context, req *RequestCancelReque
 		if _, ok := s.active[t.Spec.ID]; ok {
 			s.active[t.Spec.ID] = memoryActiveAttempt{expiresAt: now.Add(s.activeTimeout)}
 		}
+	} else if t.Status == StatusPending &&
+		t.LeaseExpiryPolicy == LeaseExpiryRetry && t.Attempt > 0 {
+		s.advanceLocked(t)
 	} else {
 		t.Status = StatusCanceled
 		t.ResultError = canceledError
@@ -635,6 +739,20 @@ func (s *InMemoryStore) activeUncanceledTaskLocked(
 	return t, nil
 }
 
+func (s *InMemoryStore) authorizeOutputLocked(taskID string, attempt int64) error {
+	t, ok := s.tasks[taskID]
+	if !ok {
+		return ErrNotFound
+	}
+	s.resolveExpiredLocked(t)
+	active, activeOK := s.active[taskID]
+	if t.Status != StatusRunning || t.CancelRequestedAt != nil ||
+		t.Attempt != attempt || !activeOK || !s.now().Before(active.expiresAt) {
+		return ErrLeaseLost
+	}
+	return nil
+}
+
 func (s *InMemoryStore) advanceLocked(t *Task) {
 	t.Version++
 	t.UpdatedAt = s.now()
@@ -682,6 +800,13 @@ func (s *InMemoryStore) resolveExpiredLocked(t *Task) {
 	}
 	s.clearActiveLocked(t)
 	if t.CancelRequestedAt != nil {
+		if t.LeaseExpiryPolicy == LeaseExpiryRetry {
+			t.Status = StatusPending
+			t.PendingResume = nil
+			s.advanceLocked(t)
+			s.signalLocked()
+			return
+		}
 		t.Status = StatusCanceled
 		t.ResultError = canceledError
 		s.finishStoreOwnedLocked(t)

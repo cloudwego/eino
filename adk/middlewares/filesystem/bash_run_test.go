@@ -70,6 +70,13 @@ func (*outputRuntimeStub) AppendOutput(
 ) (*backgroundtask.OutputRecord, error) {
 	return nil, nil
 }
+func (*outputRuntimeStub) AppendOutputOnce(
+	context.Context,
+	string,
+	[]byte,
+) (*backgroundtask.AppendOutputOnceResult, error) {
+	return nil, nil
+}
 func (r *outputRuntimeStub) ReportOutputFailure(context.Context, string) error {
 	return r.reportErr
 }

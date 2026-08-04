@@ -145,15 +145,23 @@ type SuspendTaskRequest struct {
 	Checkpoint      []byte
 }
 
+// YieldTaskRequest relinquishes an active recoverable attempt and returns the
+// task to pending without implying that the underlying operation was suspended.
+type YieldTaskRequest struct {
+	TaskID          string
+	ExpectedVersion int64
+	Checkpoint      []byte
+}
+
 // CancelTaskRequest records active-attempt acknowledgement of cancellation.
 type CancelTaskRequest struct {
 	TaskID          string
 	ExpectedVersion int64
 }
 
-// RequestCancelRequest records durable cancellation intent. An active task
-// remains StatusRunning with CancelRequestedAt set until its attempt commits
-// StatusCanceled.
+// RequestCancelRequest records durable cancellation intent. Active work remains
+// running until its attempt acknowledges cancellation. Retry-capable work whose
+// lease was lost remains pending until a recovery attempt stops the operation.
 type RequestCancelRequest struct {
 	TaskID          string
 	ExpectedVersion int64
@@ -180,10 +188,13 @@ type WaitUpdateRequest struct {
 
 // OutputRecord is one immutable task-output fragment. Sequence is monotonic
 // across all attempts of a task, allowing callers to resume reads after a cursor.
+// SourceID is empty for unkeyed records and identifies a replayable logical
+// record for keyed appends.
 type OutputRecord struct {
 	TaskID    string
 	Attempt   int64
 	Sequence  int64
+	SourceID  string
 	Data      []byte
 	CreatedAt time.Time
 }
@@ -195,11 +206,34 @@ type AppendOutputRequest struct {
 	Data    []byte
 }
 
+// AppendOutputOnceRequest appends one source-keyed output fragment for the
+// active attempt. SourceID uniqueness is task-wide across attempts.
+type AppendOutputOnceRequest struct {
+	TaskID   string
+	Attempt  int64
+	SourceID string
+	Data     []byte
+}
+
+// AppendOutputOnceResult reports whether the keyed output was newly inserted.
+// A byte-identical replay returns the original Record with Inserted false.
+type AppendOutputOnceResult struct {
+	Record   *OutputRecord
+	Inserted bool
+}
+
 // ReadOutputRequest reads output records after a known sequence.
 type ReadOutputRequest struct {
 	TaskID        string
 	AfterSequence int64
 	Limit         int
+}
+
+// ReadRecentOutputRequest requests the newest bounded presentation records.
+// Unlike ReadOutput, it is not a replay cursor API.
+type ReadRecentOutputRequest struct {
+	TaskID string
+	Limit  int
 }
 
 // ReadOutputResult contains ordered output records and the last returned sequence.

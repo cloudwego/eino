@@ -46,8 +46,18 @@ type ControlRequest struct {
 	Reason string
 }
 
+// ExecutionDirective is a non-lifecycle instruction returned by an Executor.
+type ExecutionDirective string
+
+const (
+	// ExecutionDirectiveYield relinquishes a recoverable active attempt while
+	// the logical operation continues outside the current Worker.
+	ExecutionDirectiveYield ExecutionDirective = "yield"
+)
+
 // ExecutionResult describes the lifecycle outcome returned by an executor.
 type ExecutionResult struct {
+	Directive  ExecutionDirective
 	Status     Status
 	Checkpoint []byte
 	Data       []byte
@@ -59,6 +69,7 @@ type ExecutionRuntime interface {
 	TaskID() string
 	Controls() <-chan ControlRequest
 	AppendOutput(context.Context, []byte) (*OutputRecord, error)
+	AppendOutputOnce(context.Context, string, []byte) (*AppendOutputOnceResult, error)
 	ReportOutputFailure(context.Context, string) error
 }
 
@@ -191,6 +202,21 @@ func (r *taskRuntime) AppendOutput(ctx context.Context, data []byte) (*OutputRec
 	})
 }
 
+func (r *taskRuntime) AppendOutputOnce(
+	ctx context.Context,
+	sourceID string,
+	data []byte,
+) (*AppendOutputOnceResult, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.poison != nil {
+		return nil, r.poison
+	}
+	return r.store.AppendOutputOnce(ctx, &AppendOutputOnceRequest{
+		TaskID: r.taskID, Attempt: r.attempt, SourceID: sourceID, Data: cloneBytes(data),
+	})
+}
+
 func (r *taskRuntime) requestControl(kind ControlKind) bool {
 	return r.requestControlWithReason(kind, "")
 }
@@ -313,6 +339,16 @@ func (r *taskRuntime) commit(ctx context.Context, result *ExecutionResult) (*Tas
 }
 
 func (r *taskRuntime) commitResult(ctx context.Context, result *ExecutionResult) (*Task, error) {
+	if result.Directive != "" {
+		if result.Directive != ExecutionDirectiveYield || result.Status != "" ||
+			len(result.Data) != 0 || result.Error != "" {
+			return nil, fmt.Errorf("%w: conflicting executor directive and lifecycle result", ErrInvalidResult)
+		}
+		return r.store.Yield(ctx, &YieldTaskRequest{
+			TaskID: r.taskID, ExpectedVersion: r.version,
+			Checkpoint: cloneBytes(result.Checkpoint),
+		})
+	}
 	switch result.Status {
 	case StatusCompleted:
 		return r.store.Complete(ctx, &CompleteTaskRequest{
@@ -432,6 +468,14 @@ func (m *Manager) WaitUpdate(ctx context.Context, req *WaitUpdateRequest) (*Task
 // ReadOutput replays persisted task-output records after the supplied sequence.
 func (m *Manager) ReadOutput(ctx context.Context, req *ReadOutputRequest) (*ReadOutputResult, error) {
 	return m.store.ReadOutput(ctx, req)
+}
+
+// ReadRecentOutput reads the newest bounded output records in chronological order.
+func (m *Manager) ReadRecentOutput(
+	ctx context.Context,
+	req *ReadRecentOutputRequest,
+) (*ReadOutputResult, error) {
+	return m.store.ReadRecentOutput(ctx, req)
 }
 
 // RequestCancel records cancellation intent and signals a local active attempt.
@@ -637,6 +681,10 @@ func (m *Manager) execute(
 		return err
 	}
 	runtime := newTaskRuntime(m.store, taskID, started.Attempt, started.Version)
+	if started.CancelRequestedAt != nil {
+		runtime.cancelRequested = true
+		runtime.requestControl(ControlStop)
+	}
 	runCtx, cancel := context.WithCancel(ctx)
 	m.attemptsMu.Lock()
 	attempt.cancel = cancel
