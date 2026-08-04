@@ -47,15 +47,15 @@ var (
 	ErrCloseDeadlineRequired = errors.New("backgroundtask: close deadline is required while tasks are active")
 	// ErrUnsupportedPayloadVersion reports an executor payload version it cannot decode.
 	ErrUnsupportedPayloadVersion = errors.New("backgroundtask: unsupported payload version")
-	// ErrOutputConflict reports reuse of a source ID with different output bytes.
-	ErrOutputConflict = errors.New("backgroundtask: output source id conflict")
+	// ErrTaskEventConflict reports reuse of an event ID with different bytes.
+	ErrTaskEventConflict = errors.New("backgroundtask: task event id conflict")
 )
 
-// Store persists task snapshots, ordered output records, and semantic lifecycle
-// transitions. AppendOutput and AppendOutputOnce must assign task-global
-// monotonic sequences and fence records by the active attempt without advancing
-// the task lifecycle Version. AppendOutputOnce must retain task-wide SourceID
-// deduplication metadata across attempts for at least the active task lifetime.
+// Store persists task snapshots, append-ordered progress events, and semantic
+// lifecycle transitions. AppendTaskEvent must fence writes by the active
+// attempt before task-wide EventID replay detection, retain replay metadata
+// across attempts for at least the task lifetime, and not advance lifecycle
+// Version.
 //
 // RequestCancel on active work keeps StatusRunning, sets CancelRequestedAt, and
 // advances Version. Once cancellation is requested, Heartbeat, Complete, Fail,
@@ -72,10 +72,8 @@ type Store interface {
 	ListPending(context.Context, *ListPendingRequest) (*ListPendingResult, error)
 	Start(context.Context, *StartTaskRequest) (*Task, error)
 	Heartbeat(context.Context, *HeartbeatRequest) (*Task, error)
-	AppendOutput(context.Context, *AppendOutputRequest) (*OutputRecord, error)
-	AppendOutputOnce(context.Context, *AppendOutputOnceRequest) (*AppendOutputOnceResult, error)
-	ReadOutput(context.Context, *ReadOutputRequest) (*ReadOutputResult, error)
-	ReadRecentOutput(context.Context, *ReadRecentOutputRequest) (*ReadOutputResult, error)
+	AppendTaskEvent(context.Context, *AppendTaskEventRequest) (*AppendTaskEventResult, error)
+	ReadRecentTaskEvents(context.Context, *ReadRecentTaskEventsRequest) (*ReadRecentTaskEventsResult, error)
 	ReportOutputFailure(context.Context, *ReportOutputFailureRequest) (*Task, error)
 	Complete(context.Context, *CompleteTaskRequest) (*Task, error)
 	Fail(context.Context, *FailTaskRequest) (*Task, error)
@@ -189,7 +187,7 @@ func cloneBytes(v []byte) []byte {
 	return c
 }
 
-func cloneOutputRecord(v *OutputRecord) *OutputRecord {
+func cloneTaskEvent(v *TaskEvent) *TaskEvent {
 	if v == nil {
 		return nil
 	}

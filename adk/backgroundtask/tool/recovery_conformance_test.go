@@ -83,7 +83,7 @@ func healthyConformanceTools(stopErr error) []RecoverableBackgroundTool {
 }
 
 func stableSnapshots() []*RecoverySnapshot {
-	update := &Update{SourceID: "event", Data: []byte("same")}
+	update := &Update{EventID: "event", Data: []byte("same")}
 	return []*RecoverySnapshot{
 		{LogicalOperationID: "operation", Updates: []*Update{update}},
 		{LogicalOperationID: "operation", Updates: []*Update{cloneUpdate(update)}},
@@ -189,10 +189,10 @@ func TestCompareRecoverySnapshotsRejectsInvalidUpdates(t *testing.T) {
 	))
 	require.Error(t, compareRecoverySnapshots(
 		&RecoverySnapshot{LogicalOperationID: "operation", Updates: []*Update{{
-			SourceID: "event", Data: []byte("one"),
+			EventID: "event", Data: []byte("one"),
 		}}},
 		&RecoverySnapshot{LogicalOperationID: "operation", Updates: []*Update{{
-			SourceID: "event", Data: []byte("two"),
+			EventID: "event", Data: []byte("two"),
 		}}},
 	))
 }

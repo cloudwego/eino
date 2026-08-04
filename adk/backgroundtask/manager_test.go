@@ -34,22 +34,23 @@ func closeWithTimeout(manager *Manager) {
 	_ = manager.Close(ctx)
 }
 
-func TestManagerReadOutputDelegatesToStore_BitsUT(t *testing.T) {
+func TestManagerReadRecentTaskEventsDelegatesToStore_BitsUT(t *testing.T) {
 	store := NewInMemoryStore(nil)
 	manager := New(context.Background(), &Config{Store: store})
 	defer closeWithTimeout(manager)
 	started := createAndStart(t, store, "manager-output")
-	_, err := store.AppendOutput(context.Background(), &AppendOutputRequest{
-		TaskID: started.Spec.ID, Attempt: started.Attempt, Data: []byte("record"),
+	_, err := store.AppendTaskEvent(context.Background(), &AppendTaskEventRequest{
+		TaskID: started.Spec.ID, Attempt: started.Attempt,
+		EventID: "record", Data: []byte("record"),
 	})
 	require.NoError(t, err)
 
-	result, err := manager.ReadOutput(context.Background(), &ReadOutputRequest{
+	result, err := manager.ReadRecentTaskEvents(context.Background(), &ReadRecentTaskEventsRequest{
 		TaskID: started.Spec.ID,
 	})
 	require.NoError(t, err)
-	require.Len(t, result.Records, 1)
-	require.Equal(t, "record", string(result.Records[0].Data))
+	require.Len(t, result.Events, 1)
+	require.Equal(t, "record", string(result.Events[0].Data))
 }
 
 func TestManagerExecuteBindsTimeoutController_BitsUT(t *testing.T) {
@@ -288,9 +289,14 @@ func TestTaskRuntimeOutputFailureAndHeartbeat(t *testing.T) {
 	runtime := newTaskRuntime(store, started.Spec.ID, started.Attempt, started.Version)
 	require.Equal(t, started.Spec.ID, runtime.TaskID())
 
-	output, err := runtime.AppendOutput(context.Background(), []byte("output"))
+	output, err := runtime.AppendTaskEvent(context.Background(), "", []byte("output"))
 	require.NoError(t, err)
-	require.Equal(t, int64(1), output.Sequence)
+	require.NotEmpty(t, output.Event.EventID)
+	require.True(t, output.Inserted)
+	supplied, err := runtime.AppendTaskEvent(context.Background(), "caller-event", []byte("supplied"))
+	require.NoError(t, err)
+	require.Equal(t, "caller-event", supplied.Event.EventID)
+	require.True(t, supplied.Inserted)
 	require.NoError(t, runtime.ReportOutputFailure(context.Background(), "file failed"))
 	require.NoError(t, runtime.heartbeat(context.Background()))
 

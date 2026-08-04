@@ -24,6 +24,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/cloudwego/eino/adk/internal/taskcontrol"
 	"github.com/cloudwego/eino/internal/safe"
 )
@@ -68,8 +70,7 @@ type ExecutionResult struct {
 type ExecutionRuntime interface {
 	TaskID() string
 	Controls() <-chan ControlRequest
-	AppendOutput(context.Context, []byte) (*OutputRecord, error)
-	AppendOutputOnce(context.Context, string, []byte) (*AppendOutputOnceResult, error)
+	AppendTaskEvent(context.Context, string, []byte) (*AppendTaskEventResult, error)
 	ReportOutputFailure(context.Context, string) error
 }
 
@@ -191,29 +192,21 @@ func (r *taskRuntime) TaskID() string { return r.taskID }
 
 func (r *taskRuntime) Controls() <-chan ControlRequest { return r.controls }
 
-func (r *taskRuntime) AppendOutput(ctx context.Context, data []byte) (*OutputRecord, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.poison != nil {
-		return nil, r.poison
-	}
-	return r.store.AppendOutput(ctx, &AppendOutputRequest{
-		TaskID: r.taskID, Attempt: r.attempt, Data: cloneBytes(data),
-	})
-}
-
-func (r *taskRuntime) AppendOutputOnce(
+func (r *taskRuntime) AppendTaskEvent(
 	ctx context.Context,
-	sourceID string,
+	eventID string,
 	data []byte,
-) (*AppendOutputOnceResult, error) {
+) (*AppendTaskEventResult, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.poison != nil {
 		return nil, r.poison
 	}
-	return r.store.AppendOutputOnce(ctx, &AppendOutputOnceRequest{
-		TaskID: r.taskID, Attempt: r.attempt, SourceID: sourceID, Data: cloneBytes(data),
+	if eventID == "" {
+		eventID = uuid.NewString()
+	}
+	return r.store.AppendTaskEvent(ctx, &AppendTaskEventRequest{
+		TaskID: r.taskID, Attempt: r.attempt, EventID: eventID, Data: cloneBytes(data),
 	})
 }
 
@@ -465,17 +458,12 @@ func (m *Manager) WaitUpdate(ctx context.Context, req *WaitUpdateRequest) (*Task
 	return m.store.Wait(ctx, req)
 }
 
-// ReadOutput replays persisted task-output records after the supplied sequence.
-func (m *Manager) ReadOutput(ctx context.Context, req *ReadOutputRequest) (*ReadOutputResult, error) {
-	return m.store.ReadOutput(ctx, req)
-}
-
-// ReadRecentOutput reads the newest bounded output records in chronological order.
-func (m *Manager) ReadRecentOutput(
+// ReadRecentTaskEvents reads the newest bounded progress events in chronological order.
+func (m *Manager) ReadRecentTaskEvents(
 	ctx context.Context,
-	req *ReadRecentOutputRequest,
-) (*ReadOutputResult, error) {
-	return m.store.ReadRecentOutput(ctx, req)
+	req *ReadRecentTaskEventsRequest,
+) (*ReadRecentTaskEventsResult, error) {
+	return m.store.ReadRecentTaskEvents(ctx, req)
 }
 
 // RequestCancel records cancellation intent and signals a local active attempt.

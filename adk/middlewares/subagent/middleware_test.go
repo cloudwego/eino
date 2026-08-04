@@ -506,12 +506,13 @@ func TestLocalAgentToolWritesEventTranscript(t *testing.T) {
 	content, err := backend.Read(ctx, &filesystem.ReadRequest{FilePath: task.Spec.OutputFile})
 	require.NoError(t, err)
 	assert.Equal(t, "worker: local output\n", content.Content)
-	feed, err := manager.ReadOutput(ctx, &backgroundtask.ReadOutputRequest{
+	feed, err := manager.ReadRecentTaskEvents(ctx, &backgroundtask.ReadRecentTaskEventsRequest{
 		TaskID: task.Spec.ID,
 	})
 	require.NoError(t, err)
-	require.NotEmpty(t, feed.Records)
-	assert.Equal(t, "worker: local output\n", string(feed.Records[0].Data))
+	require.NotEmpty(t, feed.Events)
+	require.NotEmpty(t, feed.Events[0].EventID)
+	assert.Equal(t, "worker: local output\n", string(feed.Events[0].Data))
 }
 
 func TestDurableAgentToolBackgroundSurvivesCaller(t *testing.T) {
@@ -574,9 +575,9 @@ func TestDurableTaskProgressReadsSessionTranscript(t *testing.T) {
 	task := terminalTask(t, manager)
 	require.NotNil(t, task)
 	assert.Empty(t, task.Spec.OutputFile)
-	feed, err := manager.ReadOutput(ctx, &backgroundtask.ReadOutputRequest{TaskID: task.Spec.ID})
+	feed, err := manager.ReadRecentTaskEvents(ctx, &backgroundtask.ReadRecentTaskEventsRequest{TaskID: task.Spec.ID})
 	require.NoError(t, err)
-	assert.Empty(t, feed.Records)
+	assert.Empty(t, feed.Events)
 	progress, err := NewDurableTaskProgressHook[*schema.Message](nil)(ctx, task)
 	require.NoError(t, err)
 	assert.Contains(t, progress, `"agent_name":"worker"`)

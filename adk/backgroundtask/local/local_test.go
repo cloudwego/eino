@@ -150,12 +150,15 @@ func TestRunnerStreamProjectsAndPersistsOutput_BitsUT(t *testing.T) {
 	task := onlyTask(t, manager)
 	task = waitTerminal(t, manager, task)
 	assert.Equal(t, "abc", string(task.ResultData))
-	output, err := manager.ReadOutput(context.Background(), &backgroundtask.ReadOutputRequest{
+	output, err := manager.ReadRecentTaskEvents(context.Background(), &backgroundtask.ReadRecentTaskEventsRequest{
 		TaskID: task.Spec.ID,
 	})
 	require.NoError(t, err)
-	require.Len(t, output.Records, 3)
-	assert.Equal(t, "b", string(output.Records[1].Data))
+	require.Len(t, output.Events, 3)
+	assert.Equal(t, "b", string(output.Events[1].Data))
+	for _, event := range output.Events {
+		require.NotEmpty(t, event.EventID)
+	}
 }
 
 func TestRunnerStreamTimeoutStartsAfterConstruction_BitsUT(t *testing.T) {

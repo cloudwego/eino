@@ -18,9 +18,11 @@ package tool
 
 import "context"
 
-// OutputMaterializer optionally projects authoritative keyed output records to
-// a deterministic file or object. AppendOutput must be idempotent by
-// (TaskID, SourceID) and apply distinct records in Sequence order.
+// OutputMaterializer optionally projects caller-identified task events to a
+// deterministic file or object. AppendOutput must durably deduplicate by
+// (TaskID, EventID) for the task's recovery and retention lifetime. Distinct
+// events must be applied in call order; EventID is opaque and must not be
+// sorted. Recoverable update sources must therefore replay in stable order.
 type OutputMaterializer interface {
 	ReserveOutput(context.Context, *ReserveOutputRequest) (string, error)
 	AppendOutput(context.Context, *MaterializeOutputRequest) error
@@ -31,11 +33,10 @@ type ReserveOutputRequest struct {
 	TaskID string
 }
 
-// MaterializeOutputRequest describes one authoritative keyed output record.
+// MaterializeOutputRequest describes one caller-identified progress event.
 type MaterializeOutputRequest struct {
-	TaskID   string
-	SourceID string
-	Sequence int64
-	Path     string
-	Data     []byte
+	TaskID  string
+	EventID string
+	Path    string
+	Data    []byte
 }

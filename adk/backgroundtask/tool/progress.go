@@ -31,7 +31,7 @@ const (
 	maxRenderedProgressBytes = 16 << 10
 )
 
-// ProgressReader formats a bounded recent view of managed-tool output records.
+// ProgressReader formats a bounded recent view of managed-tool task events.
 type ProgressReader struct {
 	Manager *backgroundtask.Manager
 	Limit   int
@@ -53,19 +53,19 @@ func (r *ProgressReader) ReadProgress(
 	if limit <= 0 {
 		limit = defaultRecentOutputLimit
 	}
-	result, err := r.Manager.ReadRecentOutput(ctx, &backgroundtask.ReadRecentOutputRequest{
+	result, err := r.Manager.ReadRecentTaskEvents(ctx, &backgroundtask.ReadRecentTaskEventsRequest{
 		TaskID: task.Spec.ID, Limit: limit,
 	})
 	if err != nil {
 		return "", err
 	}
-	if len(result.Records) == 0 {
+	if len(result.Events) == 0 {
 		return "", nil
 	}
 	var output strings.Builder
 	output.WriteString("Recent progress:")
-	for _, record := range result.Records {
-		line := formatProgressRecord(record)
+	for _, event := range result.Events {
+		line := formatProgressEvent(event)
 		if line == "" {
 			continue
 		}
@@ -79,10 +79,13 @@ func (r *ProgressReader) ReadProgress(
 	return output.String(), nil
 }
 
-func formatProgressRecord(record backgroundtask.OutputRecord) string {
+func formatProgressEvent(event *backgroundtask.TaskEvent) string {
+	if event == nil {
+		return ""
+	}
 	var update Update
-	if err := json.Unmarshal(record.Data, &update); err != nil {
-		return boundedText(record.Data, 1024)
+	if err := json.Unmarshal(event.Data, &update); err != nil {
+		return boundedText(event.Data, 1024)
 	}
 	label := update.Kind
 	if label == "" {

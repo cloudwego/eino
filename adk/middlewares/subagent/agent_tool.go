@@ -116,7 +116,7 @@ func newManagedAgentTool[M adk.MessageType](
 				fileReceiver := &agentEventFileReceiver[M]{
 					ctx: workCtx, format: format,
 					onRecord: func(data []byte) error {
-						_, appendErr := runtime.AppendOutput(workCtx, data)
+						_, appendErr := runtime.AppendTaskEvent(workCtx, "", data)
 						return appendErr
 					},
 					onError: func(fileErr error) error {

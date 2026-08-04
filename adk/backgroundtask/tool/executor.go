@@ -406,33 +406,24 @@ func (e *executor) persistUpdate(
 	if err := validateUpdate(update); err != nil {
 		return err
 	}
-	if e.recoverable && update.SourceID == "" {
-		return errors.New("backgroundtask/tool: recoverable update source id is required")
+	callerSuppliedEventID := update.EventID != ""
+	if e.recoverable && !callerSuppliedEventID {
+		return errors.New("backgroundtask/tool: recoverable update event id is required")
 	}
 	data, err := json.Marshal(update)
 	if err != nil {
 		return fmt.Errorf("backgroundtask/tool: encode update: %w", err)
 	}
-	inserted := true
-	var record *backgroundtask.OutputRecord
-	if update.SourceID == "" {
-		record, err = runtime.AppendOutput(ctx, data)
-	} else {
-		var result *backgroundtask.AppendOutputOnceResult
-		result, err = runtime.AppendOutputOnce(ctx, update.SourceID, data)
-		if result != nil {
-			record, inserted = result.Record, result.Inserted
-		}
-	}
+	result, err := runtime.AppendTaskEvent(ctx, update.EventID, data)
 	if err != nil {
 		return fmt.Errorf("backgroundtask/tool: persist update: %w", err)
 	}
-	if record == nil {
-		return errors.New("backgroundtask/tool: Store returned a nil output record")
+	if result == nil || result.Event == nil {
+		return errors.New("backgroundtask/tool: Store returned a nil task event")
 	}
-	if *materializerEnabled && update.SourceID != "" {
+	if *materializerEnabled && callerSuppliedEventID {
 		err = registration.Materializer.AppendOutput(ctx, &MaterializeOutputRequest{
-			TaskID: task.Spec.ID, SourceID: update.SourceID, Sequence: record.Sequence,
+			TaskID: task.Spec.ID, EventID: result.Event.EventID,
 			Path: task.Spec.OutputFile, Data: append([]byte(nil), update.Data...),
 		})
 		if err != nil {
@@ -442,7 +433,7 @@ func (e *executor) persistUpdate(
 			}
 		}
 	}
-	if inserted && projection != nil {
+	if result.Inserted && projection != nil {
 		projection.send(ctx, foreground.ProjectionDetached(ctx), update)
 	}
 	return nil

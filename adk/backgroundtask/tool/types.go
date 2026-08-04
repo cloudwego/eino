@@ -88,9 +88,10 @@ type Outcome struct {
 }
 
 // Update is a bounded serializable progress event. Recoverable implementations
-// must assign a non-empty, lifetime-stable SourceID.
+// must assign a non-empty, lifetime-stable EventID and replay updates in the
+// same logical order after recovery.
 type Update struct {
-	SourceID string            `json:"source_id"`
+	EventID  string            `json:"event_id,omitempty"`
 	Kind     string            `json:"kind,omitempty"`
 	Data     []byte            `json:"data,omitempty"`
 	Metadata map[string]string `json:"metadata,omitempty"`

@@ -246,7 +246,7 @@ func bashWork(sb filesystem.Shell, req *filesystem.ExecuteRequest, w *bashOutput
 			return "", err
 		}
 		if out != "" {
-			if _, err = runtime.AppendOutput(ctx, []byte(out)); err != nil {
+			if _, err = runtime.AppendTaskEvent(ctx, "", []byte(out)); err != nil {
 				return "", err
 			}
 		}

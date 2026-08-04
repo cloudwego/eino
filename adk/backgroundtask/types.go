@@ -187,60 +187,40 @@ type WaitUpdateRequest struct {
 	AfterVersion int64
 }
 
-// OutputRecord is one immutable task-output fragment. Sequence is monotonic
-// across all attempts of a task, allowing callers to resume reads after a cursor.
-// SourceID is empty for unkeyed records and identifies a replayable logical
-// record for keyed appends.
-type OutputRecord struct {
+// TaskEvent is one immutable task-progress event. EventID is an opaque,
+// task-local replay identity and does not encode event chronology.
+type TaskEvent struct {
+	EventID   string
 	TaskID    string
-	Attempt   int64
-	Sequence  int64
-	SourceID  string
 	Data      []byte
 	CreatedAt time.Time
 }
 
-// AppendOutputRequest appends one output fragment for the active task attempt.
-type AppendOutputRequest struct {
+// AppendTaskEventRequest appends one identified progress event for the active
+// task attempt. EventID uniqueness is task-wide across attempts.
+type AppendTaskEventRequest struct {
 	TaskID  string
 	Attempt int64
+	EventID string
 	Data    []byte
 }
 
-// AppendOutputOnceRequest appends one source-keyed output fragment for the
-// active attempt. SourceID uniqueness is task-wide across attempts.
-type AppendOutputOnceRequest struct {
-	TaskID   string
-	Attempt  int64
-	SourceID string
-	Data     []byte
-}
-
-// AppendOutputOnceResult reports whether the keyed output was newly inserted.
-// A byte-identical replay returns the original Record with Inserted false.
-type AppendOutputOnceResult struct {
-	Record   *OutputRecord
+// AppendTaskEventResult reports whether the event was newly inserted. A
+// byte-identical replay returns the original Event with Inserted false.
+type AppendTaskEventResult struct {
+	Event    *TaskEvent
 	Inserted bool
 }
 
-// ReadOutputRequest reads output records after a known sequence.
-type ReadOutputRequest struct {
-	TaskID        string
-	AfterSequence int64
-	Limit         int
-}
-
-// ReadRecentOutputRequest requests the newest bounded presentation records.
-// Unlike ReadOutput, it is not a replay cursor API.
-type ReadRecentOutputRequest struct {
+// ReadRecentTaskEventsRequest requests the newest bounded progress events.
+type ReadRecentTaskEventsRequest struct {
 	TaskID string
 	Limit  int
 }
 
-// ReadOutputResult contains ordered output records and the last returned sequence.
-type ReadOutputResult struct {
-	Records      []OutputRecord
-	LastSequence int64
+// ReadRecentTaskEventsResult contains events in chronological append order.
+type ReadRecentTaskEventsResult struct {
+	Events []*TaskEvent
 }
 
 // NotificationReceipt identifies a received outbox notification for acknowledgement.

@@ -31,6 +31,23 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
+type replayRuntimeStub struct {
+	result *backgroundtask.AppendTaskEventResult
+}
+
+func (*replayRuntimeStub) TaskID() string { return "attack-task" }
+func (*replayRuntimeStub) Controls() <-chan backgroundtask.ControlRequest {
+	return make(chan backgroundtask.ControlRequest)
+}
+func (r *replayRuntimeStub) AppendTaskEvent(
+	context.Context,
+	string,
+	[]byte,
+) (*backgroundtask.AppendTaskEventResult, error) {
+	return r.result, nil
+}
+func (*replayRuntimeStub) ReportOutputFailure(context.Context, string) error { return nil }
+
 func newAttackManagedTool(
 	t *testing.T,
 	implementation BackgroundTool,
@@ -96,9 +113,9 @@ func readAllStreamRecords(
 	}
 }
 
-func TestAttack_ReplayedSourceProjectsOnceMaterializesTwice(t *testing.T) {
+func TestAttack_ReplayedEventProjectsOnceMaterializesTwice(t *testing.T) {
 	update := &Update{
-		SourceID: "stable", Kind: "stdout", Data: []byte("same"),
+		EventID: "stable", Kind: "stdout", Data: []byte("same"),
 	}
 	materializer := &materializerStub{}
 	implementation := &fakeTool{
@@ -116,24 +133,24 @@ func TestAttack_ReplayedSourceProjectsOnceMaterializesTwice(t *testing.T) {
 	require.Equal(t, "update", events[0].Type)
 	require.Equal(t, "launch_result", events[1].Type)
 
-	output, err := manager.ReadOutput(context.Background(), &backgroundtask.ReadOutputRequest{
+	output, err := manager.ReadRecentTaskEvents(context.Background(), &backgroundtask.ReadRecentTaskEventsRequest{
 		TaskID: "attack-task",
 	})
 	require.NoError(t, err)
-	require.Len(t, output.Records, 1)
+	require.Len(t, output.Events, 1)
 	materializer.mu.Lock()
 	require.Len(t, materializer.requests, 2)
-	require.Equal(t, materializer.requests[0].Sequence, materializer.requests[1].Sequence)
+	require.Equal(t, materializer.requests[0].EventID, materializer.requests[1].EventID)
 	materializer.mu.Unlock()
 	t.Log("replay retained one Store record and one live event while repairing the derived file twice")
 }
 
-func TestAttack_ConflictingSourceIDFailsTask(t *testing.T) {
+func TestAttack_ConflictingEventIDFailsTask(t *testing.T) {
 	implementation := &fakeTool{
 		start: func(context.Context, *StartRequest) (Run, error) {
 			return updatingRunFrom([]*Update{
-				{SourceID: "same", Data: []byte("first")},
-				{SourceID: "same", Data: []byte("different")},
+				{EventID: "same", Data: []byte("first")},
+				{EventID: "same", Data: []byte("different")},
 			}, true), nil
 		},
 	}
@@ -144,14 +161,14 @@ func TestAttack_ConflictingSourceIDFailsTask(t *testing.T) {
 	require.NoError(t, err)
 	event := decodeEvents(t, []string{result})[0]
 	require.Equal(t, backgroundtask.StatusFailed, event.Status)
-	require.Contains(t, event.Error, backgroundtask.ErrOutputConflict.Error())
+	require.Contains(t, event.Error, backgroundtask.ErrTaskEventConflict.Error())
 	task, err := manager.Get(context.Background(), "attack-task")
 	require.NoError(t, err)
 	require.Equal(t, backgroundtask.StatusFailed, task.Status)
-	t.Log("conflicting source bytes failed the logical task instead of corrupting replay history")
+	t.Log("conflicting event bytes failed the logical task instead of corrupting replay history")
 }
 
-func TestAttack_RecoverableUpdateRequiresSourceID(t *testing.T) {
+func TestAttack_RecoverableUpdateRequiresEventID(t *testing.T) {
 	implementation := &fakeTool{
 		start: func(context.Context, *StartRequest) (Run, error) {
 			return updatingRunFrom([]*Update{{Kind: "stdout", Data: []byte("missing id")}}, true), nil
@@ -159,13 +176,65 @@ func TestAttack_RecoverableUpdateRequiresSourceID(t *testing.T) {
 	}
 	_, wrapped := newAttackManagedTool(t, implementation, nil)
 	result, err := wrapped.(componenttool.InvokableTool).InvokableRun(
-		context.Background(), `{"value":"missing-source"}`,
+		context.Background(), `{"value":"missing-event"}`,
 	)
 	require.NoError(t, err)
 	event := decodeEvents(t, []string{result})[0]
 	require.Equal(t, backgroundtask.StatusFailed, event.Status)
-	require.Contains(t, event.Error, "source id is required")
+	require.Contains(t, event.Error, "event id is required")
 	t.Log("recoverable output without a stable replay identity was rejected")
+}
+
+func TestAttack_PersistedReplayRepairsMissingMaterialization(t *testing.T) {
+	materializer := &materializerStub{}
+	runtime := &replayRuntimeStub{result: &backgroundtask.AppendTaskEventResult{
+		Event: &backgroundtask.TaskEvent{
+			TaskID: "attack-task", EventID: "persisted", Data: []byte("encoded"),
+		},
+		Inserted: false,
+	}}
+	enabled := true
+	err := (&executor{recoverable: true}).persistUpdate(
+		context.Background(),
+		&backgroundtask.Task{Spec: backgroundtask.Spec{
+			ID: "attack-task", OutputFile: "/outputs/attack-task",
+		}},
+		runtime,
+		&Registration{Materializer: materializer},
+		nil,
+		&Update{EventID: "persisted", Data: []byte("repair")},
+		&enabled,
+	)
+	require.NoError(t, err)
+	materializer.mu.Lock()
+	require.Len(t, materializer.requests, 1)
+	require.Equal(t, "persisted", materializer.requests[0].EventID)
+	require.Equal(t, []byte("repair"), materializer.requests[0].Data)
+	materializer.mu.Unlock()
+}
+
+func TestAttack_MaterializationPreservesStableReplayOrder(t *testing.T) {
+	materializer := &materializerStub{}
+	implementation := &fakeTool{
+		start: func(context.Context, *StartRequest) (Run, error) {
+			return updatingRunFrom([]*Update{
+				{EventID: "z-event", Data: []byte("first")},
+				{EventID: "a-event", Data: []byte("second")},
+			}, true), nil
+		},
+	}
+	_, wrapped := newAttackManagedTool(t, implementation, materializer)
+	_, err := wrapped.(componenttool.InvokableTool).InvokableRun(
+		context.Background(), `{"value":"ordered"}`,
+	)
+	require.NoError(t, err)
+	materializer.mu.Lock()
+	require.Len(t, materializer.requests, 2)
+	require.Equal(t, []string{"z-event", "a-event"}, []string{
+		materializer.requests[0].EventID,
+		materializer.requests[1].EventID,
+	})
+	materializer.mu.Unlock()
 }
 
 func TestAttack_UpdateDataCannotForgeNDJSONBoundary(t *testing.T) {
@@ -173,7 +242,7 @@ func TestAttack_UpdateDataCannotForgeNDJSONBoundary(t *testing.T) {
 	implementation := &fakeTool{
 		start: func(context.Context, *StartRequest) (Run, error) {
 			return updatingRunFrom([]*Update{{
-				SourceID: "forged", Kind: "stdout", Data: forged,
+				EventID: "forged", Kind: "stdout", Data: forged,
 			}}, true), nil
 		},
 	}

@@ -40,12 +40,12 @@ func TestProgressReaderFormatsBoundedRecentUpdates(t *testing.T) {
 	require.NoError(t, err)
 	for index, text := range []string{"one", "two", "three"} {
 		data, marshalErr := json.Marshal(&Update{
-			SourceID: "event-" + text, Kind: "stdout", Data: []byte(text),
+			EventID: "event-" + text, Kind: "stdout", Data: []byte(text),
 		})
 		require.NoError(t, marshalErr)
-		_, err = store.AppendOutputOnce(context.Background(), &backgroundtask.AppendOutputOnceRequest{
+		_, err = store.AppendTaskEvent(context.Background(), &backgroundtask.AppendTaskEventRequest{
 			TaskID: created.Spec.ID, Attempt: created.Attempt,
-			SourceID: "event-" + text, Data: data,
+			EventID: "event-" + text, Data: data,
 		})
 		require.NoError(t, err, index)
 	}
@@ -68,8 +68,9 @@ func TestProgressReaderFallsBackForUnknownCompatibleRecord(t *testing.T) {
 		LeaseExpiryPolicy: backgroundtask.LeaseExpiryFail,
 	})
 	require.NoError(t, err)
-	_, err = store.AppendOutput(context.Background(), &backgroundtask.AppendOutputRequest{
-		TaskID: task.Spec.ID, Attempt: task.Attempt, Data: []byte("legacy raw text"),
+	_, err = store.AppendTaskEvent(context.Background(), &backgroundtask.AppendTaskEventRequest{
+		TaskID: task.Spec.ID, Attempt: task.Attempt,
+		EventID: "raw", Data: []byte("legacy raw text"),
 	})
 	require.NoError(t, err)
 	progress, err := (&ProgressReader{Manager: manager}).ReadProgress(

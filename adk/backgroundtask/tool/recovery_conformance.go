@@ -125,9 +125,9 @@ func compareRecoverySnapshots(expected, actual *RecoverySnapshot) error {
 	}
 	for i, update := range expected.Updates {
 		replayed := actual.Updates[i]
-		if update == nil || replayed == nil || update.SourceID == "" ||
-			update.SourceID != replayed.SourceID || !bytes.Equal(update.Data, replayed.Data) {
-			return fmt.Errorf("update %d did not preserve source identity and bytes", i)
+		if update == nil || replayed == nil || update.EventID == "" ||
+			update.EventID != replayed.EventID || !bytes.Equal(update.Data, replayed.Data) {
+			return fmt.Errorf("update %d did not preserve event identity and bytes", i)
 		}
 	}
 	return nil

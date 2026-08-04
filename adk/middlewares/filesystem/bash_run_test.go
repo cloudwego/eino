@@ -64,17 +64,11 @@ func (*outputRuntimeStub) TaskID() string { return "task" }
 func (*outputRuntimeStub) Controls() <-chan backgroundtask.ControlRequest {
 	return make(chan backgroundtask.ControlRequest)
 }
-func (*outputRuntimeStub) AppendOutput(
-	context.Context,
-	[]byte,
-) (*backgroundtask.OutputRecord, error) {
-	return nil, nil
-}
-func (*outputRuntimeStub) AppendOutputOnce(
+func (*outputRuntimeStub) AppendTaskEvent(
 	context.Context,
 	string,
 	[]byte,
-) (*backgroundtask.AppendOutputOnceResult, error) {
+) (*backgroundtask.AppendTaskEventResult, error) {
 	return nil, nil
 }
 func (r *outputRuntimeStub) ReportOutputFailure(context.Context, string) error {
@@ -273,6 +267,12 @@ func TestManagedExecuteTool_Foreground(t *testing.T) {
 	task := waitTerminalTask(t, mgr)
 	assert.Equal(t, backgroundtask.StateCompleted, task.Status)
 	assert.Equal(t, "echo hi", task.Spec.Description)
+	events, err := mgr.ReadRecentTaskEvents(context.Background(), &backgroundtask.ReadRecentTaskEventsRequest{
+		TaskID: task.Spec.ID,
+	})
+	require.NoError(t, err)
+	require.Len(t, events.Events, 1)
+	require.NotEmpty(t, events.Events[0].EventID)
 }
 
 func TestManagedExecuteTool_Background(t *testing.T) {

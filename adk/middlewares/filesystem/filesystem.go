@@ -119,7 +119,7 @@ type BackgroundConfig struct {
 	// ToolRegistry may be shared with other managed background tools on the same
 	// Manager. A private registry is created when omitted.
 	ToolRegistry *backgroundtool.Registry
-	// OutputMaterializer enables a source-ID-idempotent derived output file for
+	// OutputMaterializer enables an EventID-idempotent derived output file for
 	// RecoverableShell. Without it, no OutputFile is advertised.
 	OutputMaterializer backgroundtool.OutputMaterializer
 	// ForegroundTimeoutMs and ShouldAutoBackground configure RecoverableShell.

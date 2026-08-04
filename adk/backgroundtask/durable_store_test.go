@@ -157,8 +157,9 @@ func TestAttack_CancellationFencesAllNonCancelMutations(t *testing.T) {
 			return mutationErr
 		}},
 		{name: "append output", mutate: func() error {
-			_, mutationErr := store.AppendOutput(context.Background(), &AppendOutputRequest{
-				TaskID: started.Spec.ID, Attempt: started.Attempt, Data: []byte("late"),
+			_, mutationErr := store.AppendTaskEvent(context.Background(), &AppendTaskEventRequest{
+				TaskID: started.Spec.ID, Attempt: started.Attempt,
+				EventID: "late", Data: []byte("late"),
 			})
 			return mutationErr
 		}},
@@ -202,17 +203,18 @@ func TestAttack_CancellationFencesAllNonCancelMutations(t *testing.T) {
 	require.Equal(t, StatusCanceled, canceled.Status)
 }
 
-func TestAttack_OutputSequenceRemainsMonotonicAcrossAttempts(t *testing.T) {
+func TestAttack_TaskEventOrderSpansAttemptsWithoutExposingAttempt(t *testing.T) {
 	clock := &testClock{now: time.Unix(100, 0)}
 	store := NewInMemoryStore(&InMemoryStoreConfig{
 		Clock: clock.Now, ActiveAttemptTimeout: time.Second,
 	})
 	firstAttempt := createAndStart(t, store, "output-retry")
-	first, err := store.AppendOutput(context.Background(), &AppendOutputRequest{
-		TaskID: firstAttempt.Spec.ID, Attempt: firstAttempt.Attempt, Data: []byte("first"),
+	first, err := store.AppendTaskEvent(context.Background(), &AppendTaskEventRequest{
+		TaskID: firstAttempt.Spec.ID, Attempt: firstAttempt.Attempt,
+		EventID: "first", Data: []byte("first"),
 	})
 	require.NoError(t, err)
-	require.Equal(t, int64(1), first.Sequence)
+	require.Equal(t, "first", first.Event.EventID)
 
 	clock.Advance(2 * time.Second)
 	pending, err := store.Get(context.Background(), firstAttempt.Spec.ID)
@@ -222,24 +224,23 @@ func TestAttack_OutputSequenceRemainsMonotonicAcrossAttempts(t *testing.T) {
 		TaskID: pending.Spec.ID, ExpectedVersion: pending.Version,
 	})
 	require.NoError(t, err)
-	second, err := store.AppendOutput(context.Background(), &AppendOutputRequest{
-		TaskID: secondAttempt.Spec.ID, Attempt: secondAttempt.Attempt, Data: []byte("second"),
+	second, err := store.AppendTaskEvent(context.Background(), &AppendTaskEventRequest{
+		TaskID: secondAttempt.Spec.ID, Attempt: secondAttempt.Attempt,
+		EventID: "second", Data: []byte("second"),
 	})
 	require.NoError(t, err)
-	t.Logf("attempts %d and %d produced sequences %d and %d",
-		firstAttempt.Attempt, secondAttempt.Attempt, first.Sequence, second.Sequence)
-	require.Equal(t, int64(2), second.Sequence)
+	require.Equal(t, "second", second.Event.EventID)
 
-	output, err := store.ReadOutput(context.Background(), &ReadOutputRequest{
+	output, err := store.ReadRecentTaskEvents(context.Background(), &ReadRecentTaskEventsRequest{
 		TaskID: secondAttempt.Spec.ID,
 	})
 	require.NoError(t, err)
-	require.Len(t, output.Records, 2)
-	require.Equal(t, []int64{1, 2}, []int64{
-		output.Records[0].Attempt, output.Records[1].Attempt,
+	require.Len(t, output.Events, 2)
+	require.Equal(t, []string{"first", "second"}, []string{
+		output.Events[0].EventID, output.Events[1].EventID,
 	})
 	require.Equal(t, []string{"first", "second"}, []string{
-		string(output.Records[0].Data), string(output.Records[1].Data),
+		string(output.Events[0].Data), string(output.Events[1].Data),
 	})
 }
 
@@ -292,17 +293,22 @@ func TestInMemoryStoreYieldRejectsCancellation_BitsUT(t *testing.T) {
 	require.ErrorIs(t, err, ErrLeaseLost)
 }
 
-func TestInMemoryStoreKeyedOutputDeduplicatesAcrossAttempts_BitsUT(t *testing.T) {
+func TestInMemoryStoreTaskEventDeduplicatesAcrossAttempts_BitsUT(t *testing.T) {
 	store := NewInMemoryStore(nil)
 	started := createAndStart(t, store, "keyed-output")
 	version := started.Version
-	first, err := store.AppendOutputOnce(context.Background(), &AppendOutputOnceRequest{
+	_, err := store.AppendTaskEvent(context.Background(), &AppendTaskEventRequest{
+		TaskID: started.Spec.ID, Attempt: started.Attempt, Data: []byte("missing-id"),
+	})
+	require.Error(t, err)
+	first, err := store.AppendTaskEvent(context.Background(), &AppendTaskEventRequest{
 		TaskID: started.Spec.ID, Attempt: started.Attempt,
-		SourceID: "event-1", Data: []byte("payload"),
+		EventID: "event-1", Data: []byte("payload"),
 	})
 	require.NoError(t, err)
 	require.True(t, first.Inserted)
-	require.Equal(t, int64(1), first.Record.Sequence)
+	require.Equal(t, "event-1", first.Event.EventID)
+	createdAt := first.Event.CreatedAt
 
 	yielded, err := store.Yield(context.Background(), &YieldTaskRequest{
 		TaskID: started.Spec.ID, ExpectedVersion: started.Version,
@@ -312,52 +318,59 @@ func TestInMemoryStoreKeyedOutputDeduplicatesAcrossAttempts_BitsUT(t *testing.T)
 		TaskID: yielded.Spec.ID, ExpectedVersion: yielded.Version,
 	})
 	require.NoError(t, err)
-	replayed, err := store.AppendOutputOnce(context.Background(), &AppendOutputOnceRequest{
+	replayed, err := store.AppendTaskEvent(context.Background(), &AppendTaskEventRequest{
 		TaskID: restarted.Spec.ID, Attempt: restarted.Attempt,
-		SourceID: "event-1", Data: []byte("payload"),
+		EventID: "event-1", Data: []byte("payload"),
 	})
 	require.NoError(t, err)
 	require.False(t, replayed.Inserted)
-	require.Equal(t, first.Record.Sequence, replayed.Record.Sequence)
-	require.Equal(t, first.Record.Attempt, replayed.Record.Attempt)
+	require.Equal(t, first.Event, replayed.Event)
+	require.Equal(t, createdAt, replayed.Event.CreatedAt)
 
-	_, err = store.AppendOutputOnce(context.Background(), &AppendOutputOnceRequest{
+	_, err = store.AppendTaskEvent(context.Background(), &AppendTaskEventRequest{
 		TaskID: restarted.Spec.ID, Attempt: restarted.Attempt,
-		SourceID: "event-1", Data: []byte("different"),
+		EventID: "event-1", Data: []byte("different"),
 	})
-	require.ErrorIs(t, err, ErrOutputConflict)
+	require.ErrorIs(t, err, ErrTaskEventConflict)
 
 	current, err := store.Get(context.Background(), restarted.Spec.ID)
 	require.NoError(t, err)
 	require.NotEqual(t, version, current.Version)
 	versionBeforeOutput := current.Version
-	_, err = store.AppendOutputOnce(context.Background(), &AppendOutputOnceRequest{
+	_, err = store.AppendTaskEvent(context.Background(), &AppendTaskEventRequest{
 		TaskID: restarted.Spec.ID, Attempt: restarted.Attempt,
-		SourceID: "event-2", Data: []byte("second"),
+		EventID: "event-2", Data: []byte("second"),
 	})
 	require.NoError(t, err)
 	current, err = store.Get(context.Background(), restarted.Spec.ID)
 	require.NoError(t, err)
 	require.Equal(t, versionBeforeOutput, current.Version)
+
+	first.Event.Data[0] = 'X'
+	stored, err := store.ReadRecentTaskEvents(context.Background(), &ReadRecentTaskEventsRequest{
+		TaskID: restarted.Spec.ID,
+	})
+	require.NoError(t, err)
+	require.Equal(t, "payload", string(stored.Events[0].Data))
 }
 
-func TestInMemoryStoreReadRecentOutputReturnsNewestChronologically_BitsUT(t *testing.T) {
+func TestInMemoryStoreReadRecentTaskEventsReturnsNewestChronologically_BitsUT(t *testing.T) {
 	store := NewInMemoryStore(nil)
 	started := createAndStart(t, store, "recent-output")
 	for _, value := range []string{"one", "two", "three"} {
-		_, err := store.AppendOutput(context.Background(), &AppendOutputRequest{
-			TaskID: started.Spec.ID, Attempt: started.Attempt, Data: []byte(value),
+		_, err := store.AppendTaskEvent(context.Background(), &AppendTaskEventRequest{
+			TaskID: started.Spec.ID, Attempt: started.Attempt,
+			EventID: value, Data: []byte(value),
 		})
 		require.NoError(t, err)
 	}
-	result, err := store.ReadRecentOutput(context.Background(), &ReadRecentOutputRequest{
+	result, err := store.ReadRecentTaskEvents(context.Background(), &ReadRecentTaskEventsRequest{
 		TaskID: started.Spec.ID, Limit: 2,
 	})
 	require.NoError(t, err)
-	require.Len(t, result.Records, 2)
-	require.Equal(t, "two", string(result.Records[0].Data))
-	require.Equal(t, "three", string(result.Records[1].Data))
-	require.Equal(t, int64(3), result.LastSequence)
+	require.Len(t, result.Events, 2)
+	require.Equal(t, "two", string(result.Events[0].Data))
+	require.Equal(t, "three", string(result.Events[1].Data))
 }
 
 func TestInMemoryStoreHeartbeatSuspensionReleaseAndWait(t *testing.T) {
@@ -426,30 +439,32 @@ func TestInMemoryStoreReportOutputFailureIsFencedAndFirstErrorWins_BitsUT(t *tes
 	assert.ErrorIs(t, err, ErrVersionConflict)
 }
 
-func TestInMemoryStoreOutputFeedSupportsReplayAndAttemptFencing_BitsUT(t *testing.T) {
+func TestInMemoryStoreTaskEventFeedSupportsReplayAndAttemptFencing_BitsUT(t *testing.T) {
 	store := NewInMemoryStore(nil)
 	started := createAndStart(t, store, "output-feed")
-	first, err := store.AppendOutput(context.Background(), &AppendOutputRequest{
-		TaskID: started.Spec.ID, Attempt: started.Attempt, Data: []byte("first"),
+	first, err := store.AppendTaskEvent(context.Background(), &AppendTaskEventRequest{
+		TaskID: started.Spec.ID, Attempt: started.Attempt,
+		EventID: "first", Data: []byte("first"),
 	})
 	require.NoError(t, err)
-	assert.Equal(t, int64(1), first.Sequence)
-	second, err := store.AppendOutput(context.Background(), &AppendOutputRequest{
-		TaskID: started.Spec.ID, Attempt: started.Attempt, Data: []byte("second"),
+	assert.True(t, first.Inserted)
+	second, err := store.AppendTaskEvent(context.Background(), &AppendTaskEventRequest{
+		TaskID: started.Spec.ID, Attempt: started.Attempt,
+		EventID: "second", Data: []byte("second"),
 	})
 	require.NoError(t, err)
-	assert.Equal(t, int64(2), second.Sequence)
+	assert.True(t, second.Inserted)
 
-	page, err := store.ReadOutput(context.Background(), &ReadOutputRequest{
-		TaskID: started.Spec.ID, AfterSequence: 1,
+	page, err := store.ReadRecentTaskEvents(context.Background(), &ReadRecentTaskEventsRequest{
+		TaskID: started.Spec.ID, Limit: 1,
 	})
 	require.NoError(t, err)
-	require.Len(t, page.Records, 1)
-	assert.Equal(t, "second", string(page.Records[0].Data))
-	assert.Equal(t, int64(2), page.LastSequence)
+	require.Len(t, page.Events, 1)
+	assert.Equal(t, "second", string(page.Events[0].Data))
 
-	_, err = store.AppendOutput(context.Background(), &AppendOutputRequest{
-		TaskID: started.Spec.ID, Attempt: started.Attempt + 1, Data: []byte("stale"),
+	_, err = store.AppendTaskEvent(context.Background(), &AppendTaskEventRequest{
+		TaskID: started.Spec.ID, Attempt: started.Attempt + 1,
+		EventID: "first", Data: []byte("first"),
 	})
 	assert.ErrorIs(t, err, ErrLeaseLost)
 
@@ -457,11 +472,11 @@ func TestInMemoryStoreOutputFeedSupportsReplayAndAttemptFencing_BitsUT(t *testin
 		TaskID: started.Spec.ID, ExpectedVersion: started.Version, Data: []byte("done"),
 	})
 	require.NoError(t, err)
-	page, err = store.ReadOutput(context.Background(), &ReadOutputRequest{
+	page, err = store.ReadRecentTaskEvents(context.Background(), &ReadRecentTaskEventsRequest{
 		TaskID: started.Spec.ID,
 	})
 	require.NoError(t, err)
-	require.Len(t, page.Records, 2)
+	require.Len(t, page.Events, 2)
 }
 
 func TestInMemoryStoreCheckpointedPauseHasNoTerminalResult_BitsUT(t *testing.T) {

@@ -253,14 +253,14 @@ func TestManagedToolConstructionAndSubmissionErrors(t *testing.T) {
 }
 
 func TestFormattingAndProjectionHelpers(t *testing.T) {
-	require.Equal(t, "[update]", formatProgressRecord(backgroundtask.OutputRecord{
-		Data: []byte(`{"source_id":"id"}`),
+	require.Equal(t, "[update]", formatProgressEvent(&backgroundtask.TaskEvent{
+		Data: []byte(`{"event_id":"id"}`),
 	}))
-	require.Contains(t, formatProgressRecord(backgroundtask.OutputRecord{
-		Data: []byte(`{"source_id":"id","metadata":{"artifact":"ref"}}`),
+	require.Contains(t, formatProgressEvent(&backgroundtask.TaskEvent{
+		Data: []byte(`{"event_id":"id","metadata":{"artifact":"ref"}}`),
 	}), "artifact")
-	require.Equal(t, "[update] hello", formatProgressRecord(backgroundtask.OutputRecord{
-		Data: []byte(`{"source_id":"id","data":"aGVsbG8="}`),
+	require.Equal(t, "[update] hello", formatProgressEvent(&backgroundtask.TaskEvent{
+		Data: []byte(`{"event_id":"id","data":"aGVsbG8="}`),
 	}))
 
 	require.Nil(t, cloneUpdate(nil))
@@ -273,7 +273,7 @@ func TestFormattingAndProjectionHelpers(t *testing.T) {
 
 	projection := newLiveProjection()
 	projection.detach()
-	projection.send(context.Background(), nil, &Update{SourceID: "ignored"})
+	projection.send(context.Background(), nil, &Update{EventID: "ignored"})
 	select {
 	case <-projection.updates:
 		t.Fatal("detached projection accepted an update")
@@ -490,7 +490,7 @@ func TestManagedToolProjectionErrors(t *testing.T) {
 	require.NoError(t, err)
 	reader, writer = schema.Pipe[string](1)
 	reader.Close()
-	projection.updates <- &Update{SourceID: "ignored"}
+	projection.updates <- &Update{EventID: "ignored"}
 	go managed.project(
 		context.Background(), "closed-reader", projection,
 		make(chan launchResult), writer,

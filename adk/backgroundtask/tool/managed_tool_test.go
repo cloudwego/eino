@@ -272,9 +272,9 @@ func TestManagedToolStreamPersistsBeforeNDJSONProjection(t *testing.T) {
 			reader, writer := schema.Pipe[*Update](3)
 			updateSent := make(chan struct{})
 			go func() {
-				for _, sourceID := range []string{"event-1", "event-2", "event-3"} {
+				for _, eventID := range []string{"event-1", "event-2", "event-3"} {
 					writer.Send(&Update{
-						SourceID: sourceID, Kind: "stdout", Data: []byte(sourceID),
+						EventID: eventID, Kind: "stdout", Data: []byte(eventID),
 					}, nil)
 				}
 				writer.Close()
@@ -315,12 +315,12 @@ func TestManagedToolStreamPersistsBeforeNDJSONProjection(t *testing.T) {
 	require.Equal(t, "launch_result", events[3].Type)
 	require.Equal(t, "task-fixed", events[3].TaskID)
 
-	output, err := manager.ReadOutput(context.Background(), &backgroundtask.ReadOutputRequest{
+	output, err := manager.ReadRecentTaskEvents(context.Background(), &backgroundtask.ReadRecentTaskEventsRequest{
 		TaskID: "task-fixed",
 	})
 	require.NoError(t, err)
-	require.Len(t, output.Records, 3)
-	require.Equal(t, "event-1", output.Records[0].SourceID)
+	require.Len(t, output.Events, 3)
+	require.Equal(t, "event-1", output.Events[0].EventID)
 }
 
 func TestManagedToolDrainYieldsAndRecoversWithoutStop(t *testing.T) {
@@ -405,7 +405,7 @@ func TestManagedToolMaterializerIsDerivedAndFailureIsNonTerminal(t *testing.T) {
 			sent := make(chan struct{})
 			go func() {
 				writer.Send(&Update{
-					SourceID: "line-1", Kind: "stdout", Data: []byte("hello"),
+					EventID: "line-1", Kind: "stdout", Data: []byte("hello"),
 				}, nil)
 				writer.Close()
 				close(sent)
@@ -443,15 +443,14 @@ func TestManagedToolMaterializerIsDerivedAndFailureIsNonTerminal(t *testing.T) {
 	require.Equal(t, backgroundtask.StatusCompleted, task.Status)
 	require.Equal(t, "/outputs/materialized", task.Spec.OutputFile)
 	require.Contains(t, task.OutputFileErr, "derived file unavailable")
-	output, err := manager.ReadOutput(context.Background(), &backgroundtask.ReadOutputRequest{
+	output, err := manager.ReadRecentTaskEvents(context.Background(), &backgroundtask.ReadRecentTaskEventsRequest{
 		TaskID: task.Spec.ID,
 	})
 	require.NoError(t, err)
-	require.Len(t, output.Records, 1)
+	require.Len(t, output.Events, 1)
 	materializer.mu.Lock()
 	require.Len(t, materializer.requests, 1)
-	require.Equal(t, "line-1", materializer.requests[0].SourceID)
-	require.Equal(t, int64(1), materializer.requests[0].Sequence)
+	require.Equal(t, "line-1", materializer.requests[0].EventID)
 	materializer.mu.Unlock()
 }
 
@@ -472,6 +471,47 @@ func TestManagedToolPlainRegistrationUsesFailExecutor(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, ExecutorKey, task.Spec.ExecutorKey)
 	require.Equal(t, backgroundtask.LeaseExpiryFail, task.LeaseExpiryPolicy)
+}
+
+func TestManagedToolPlainUpdateGetsGeneratedEventIDWithoutMaterialization(t *testing.T) {
+	materializer := &materializerStub{}
+	registry := NewRegistry()
+	implementation := &plainFakeTool{
+		start: func(context.Context, *StartRequest) (Run, error) {
+			return updatingRunFrom([]*Update{{
+				Kind: "stdout", Data: []byte("plain"),
+			}}, true), nil
+		},
+	}
+	require.NoError(t, registry.Register(&Registration{
+		Info: toolInfo("plain"), Tool: implementation, Materializer: materializer,
+	}))
+	manager := backgroundtask.New(context.Background(), &backgroundtask.Config{
+		IDGen: func(context.Context, *backgroundtask.AllocateTaskIDRequest) (string, error) {
+			return "plain-generated-event", nil
+		},
+	})
+	wrapped, err := NewManagedTool(context.Background(), &ManagedToolConfig{
+		Manager: manager, Registry: registry, ToolName: "plain",
+		Notifications: notificationRuntime{},
+		SessionID:     func(context.Context) (string, error) { return "session", nil },
+	})
+	require.NoError(t, err)
+	_, err = wrapped.(componenttool.InvokableTool).InvokableRun(
+		context.Background(), `{"value":"plain"}`,
+	)
+	require.NoError(t, err)
+
+	result, err := manager.ReadRecentTaskEvents(
+		context.Background(),
+		&backgroundtask.ReadRecentTaskEventsRequest{TaskID: "plain-generated-event"},
+	)
+	require.NoError(t, err)
+	require.Len(t, result.Events, 1)
+	require.NotEmpty(t, result.Events[0].EventID)
+	materializer.mu.Lock()
+	require.Empty(t, materializer.requests)
+	materializer.mu.Unlock()
 }
 
 func TestManagedToolRejectsInvalidFinalOutputWithoutPartialResult(t *testing.T) {
@@ -515,7 +555,7 @@ func TestManagedToolProjectionDetachesWhilePersistenceContinues(t *testing.T) {
 			go func() {
 				time.Sleep(20 * time.Millisecond)
 				writer.Send(&Update{
-					SourceID: "late", Kind: "stdout", Data: []byte("late output"),
+					EventID: "late", Kind: "stdout", Data: []byte("late output"),
 				}, nil)
 				writer.Close()
 				close(finished)
@@ -558,12 +598,12 @@ func TestManagedToolProjectionDetachesWhilePersistenceContinues(t *testing.T) {
 		}
 		time.Sleep(time.Millisecond)
 	}
-	output, err := manager.ReadOutput(context.Background(), &backgroundtask.ReadOutputRequest{
+	output, err := manager.ReadRecentTaskEvents(context.Background(), &backgroundtask.ReadRecentTaskEventsRequest{
 		TaskID: "task-fixed",
 	})
 	require.NoError(t, err)
-	require.Len(t, output.Records, 1)
-	require.Equal(t, "late", output.Records[0].SourceID)
+	require.Len(t, output.Events, 1)
+	require.Equal(t, "late", output.Events[0].EventID)
 }
 
 func TestRecoverableCancellationAfterLeaseLossReattachesToStop(t *testing.T) {
