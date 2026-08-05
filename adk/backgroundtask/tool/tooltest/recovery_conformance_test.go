@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-package tool
+package tooltest
 
 import (
 	"context"
@@ -22,19 +22,27 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	backgroundtool "github.com/cloudwego/eino/adk/backgroundtask/tool"
 )
 
 type conformanceToolStub struct {
 	validateErr error
-	start       func() (Run, error)
-	recover     func() (Run, error)
+	start       func() (backgroundtool.Run, error)
+	recover     func() (backgroundtool.Run, error)
 }
 
 func (t *conformanceToolStub) ValidateArguments(string) error { return t.validateErr }
-func (t *conformanceToolStub) Start(context.Context, *StartRequest) (Run, error) {
+func (t *conformanceToolStub) Start(
+	context.Context,
+	*backgroundtool.StartRequest,
+) (backgroundtool.Run, error) {
 	return t.start()
 }
-func (t *conformanceToolStub) Recover(context.Context, *RecoverRequest) (Run, error) {
+func (t *conformanceToolStub) Recover(
+	context.Context,
+	*backgroundtool.RecoverRequest,
+) (backgroundtool.Run, error) {
 	return t.recover()
 }
 
@@ -42,11 +50,13 @@ type conformanceRunStub struct {
 	stopErr error
 }
 
-func (*conformanceRunStub) Wait(context.Context) (*Outcome, error) { return nil, nil }
-func (r *conformanceRunStub) Stop(context.Context) error           { return r.stopErr }
+func (*conformanceRunStub) Wait(context.Context) (*backgroundtool.Outcome, error) {
+	return nil, nil
+}
+func (r *conformanceRunStub) Stop(context.Context) error { return r.stopErr }
 
 func conformanceConfig(
-	tools []RecoverableBackgroundTool,
+	tools []backgroundtool.RecoverableBackgroundTool,
 	snapshots []*RecoverySnapshot,
 	snapshotErrAt int,
 ) *RecoveryConformanceConfig {
@@ -54,7 +64,7 @@ func conformanceConfig(
 	snapshotIndex := 0
 	return &RecoveryConformanceConfig{
 		TaskID: "task", Arguments: `{"value":"x"}`,
-		NewTool: func() RecoverableBackgroundTool {
+		NewTool: func() backgroundtool.RecoverableBackgroundTool {
 			tool := tools[toolIndex]
 			toolIndex++
 			return tool
@@ -70,25 +80,36 @@ func conformanceConfig(
 	}
 }
 
-func healthyConformanceTools(stopErr error) []RecoverableBackgroundTool {
-	newTool := func() RecoverableBackgroundTool {
+func healthyConformanceTools(stopErr error) []backgroundtool.RecoverableBackgroundTool {
+	newTool := func() backgroundtool.RecoverableBackgroundTool {
 		return &conformanceToolStub{
-			start: func() (Run, error) { return &conformanceRunStub{}, nil },
-			recover: func() (Run, error) {
+			start: func() (backgroundtool.Run, error) {
+				return &conformanceRunStub{}, nil
+			},
+			recover: func() (backgroundtool.Run, error) {
 				return &conformanceRunStub{stopErr: stopErr}, nil
 			},
 		}
 	}
-	return []RecoverableBackgroundTool{newTool(), newTool(), newTool()}
+	return []backgroundtool.RecoverableBackgroundTool{newTool(), newTool(), newTool()}
 }
 
 func stableSnapshots() []*RecoverySnapshot {
-	update := &Update{EventID: "event", Data: []byte("same")}
+	update := &backgroundtool.Update{EventID: "event", Data: []byte("same")}
 	return []*RecoverySnapshot{
-		{LogicalOperationID: "operation", Updates: []*Update{update}},
-		{LogicalOperationID: "operation", Updates: []*Update{cloneUpdate(update)}},
-		{LogicalOperationID: "operation", Updates: []*Update{cloneUpdate(update)}},
+		{LogicalOperationID: "operation", Updates: []*backgroundtool.Update{update}},
+		{LogicalOperationID: "operation", Updates: []*backgroundtool.Update{cloneUpdate(update)}},
+		{LogicalOperationID: "operation", Updates: []*backgroundtool.Update{cloneUpdate(update)}},
 	}
+}
+
+func cloneUpdate(update *backgroundtool.Update) *backgroundtool.Update {
+	if update == nil {
+		return nil
+	}
+	cloned := *update
+	cloned.Data = append([]byte(nil), update.Data...)
+	return &cloned
 }
 
 func TestCheckRecoveryConformance(t *testing.T) {
@@ -100,8 +121,13 @@ func TestCheckRecoveryConformance(t *testing.T) {
 	for _, config := range []*RecoveryConformanceConfig{
 		nil,
 		{},
-		{TaskID: "task", Arguments: "{}", NewTool: func() RecoverableBackgroundTool { return nil },
-			Snapshot: func(context.Context, string) (*RecoverySnapshot, error) { return nil, nil }},
+		{
+			TaskID: "task", Arguments: "{}",
+			NewTool: func() backgroundtool.RecoverableBackgroundTool { return nil },
+			Snapshot: func(context.Context, string) (*RecoverySnapshot, error) {
+				return nil, nil
+			},
+		},
 	} {
 		require.Error(t, CheckRecoveryConformance(context.Background(), config))
 	}
@@ -117,14 +143,16 @@ func TestCheckRecoveryConformanceFailures(t *testing.T) {
 	})
 	t.Run("first start", func(t *testing.T) {
 		tools := healthyConformanceTools(nil)
-		tools[0].(*conformanceToolStub).start = func() (Run, error) {
+		tools[0].(*conformanceToolStub).start = func() (backgroundtool.Run, error) {
 			return nil, errors.New("start failed")
 		}
 		require.ErrorContains(t, CheckRecoveryConformance(
 			context.Background(), conformanceConfig(tools, stableSnapshots(), -1),
 		), "first start")
 		tools = healthyConformanceTools(nil)
-		tools[0].(*conformanceToolStub).start = func() (Run, error) { return nil, nil }
+		tools[0].(*conformanceToolStub).start = func() (backgroundtool.Run, error) {
+			return nil, nil
+		}
 		require.ErrorContains(t, CheckRecoveryConformance(
 			context.Background(), conformanceConfig(tools, stableSnapshots(), -1),
 		), "nil run")
@@ -149,34 +177,42 @@ func TestCheckRecoveryConformanceFailures(t *testing.T) {
 	})
 	t.Run("duplicate start", func(t *testing.T) {
 		tools := healthyConformanceTools(nil)
-		tools[1].(*conformanceToolStub).start = func() (Run, error) {
+		tools[1].(*conformanceToolStub).start = func() (backgroundtool.Run, error) {
 			return nil, errors.New("duplicate failed")
 		}
 		require.ErrorContains(t, CheckRecoveryConformance(
 			context.Background(), conformanceConfig(tools, stableSnapshots(), -1),
 		), "duplicate start")
 		tools = healthyConformanceTools(nil)
-		tools[1].(*conformanceToolStub).start = func() (Run, error) { return nil, nil }
+		tools[1].(*conformanceToolStub).start = func() (backgroundtool.Run, error) {
+			return nil, nil
+		}
 		require.ErrorContains(t, CheckRecoveryConformance(
 			context.Background(), conformanceConfig(tools, stableSnapshots(), -1),
 		), "nil run")
 	})
 	t.Run("recover and stop", func(t *testing.T) {
 		tools := healthyConformanceTools(nil)
-		tools[2].(*conformanceToolStub).recover = func() (Run, error) {
+		tools[2].(*conformanceToolStub).recover = func() (backgroundtool.Run, error) {
 			return nil, errors.New("recover failed")
 		}
 		require.ErrorContains(t, CheckRecoveryConformance(
 			context.Background(), conformanceConfig(tools, stableSnapshots(), -1),
 		), "recover")
 		tools = healthyConformanceTools(nil)
-		tools[2].(*conformanceToolStub).recover = func() (Run, error) { return nil, nil }
+		tools[2].(*conformanceToolStub).recover = func() (backgroundtool.Run, error) {
+			return nil, nil
+		}
 		require.ErrorContains(t, CheckRecoveryConformance(
 			context.Background(), conformanceConfig(tools, stableSnapshots(), -1),
 		), "nil run")
 		require.ErrorContains(t, CheckRecoveryConformance(
 			context.Background(),
-			conformanceConfig(healthyConformanceTools(errors.New("stop failed")), stableSnapshots(), -1),
+			conformanceConfig(
+				healthyConformanceTools(errors.New("stop failed")),
+				stableSnapshots(),
+				-1,
+			),
 		), "stop recovered operation")
 	})
 }
@@ -184,15 +220,27 @@ func TestCheckRecoveryConformanceFailures(t *testing.T) {
 func TestCompareRecoverySnapshotsRejectsInvalidUpdates(t *testing.T) {
 	require.Error(t, compareRecoverySnapshots(nil, nil))
 	require.Error(t, compareRecoverySnapshots(
-		&RecoverySnapshot{LogicalOperationID: "operation", Updates: []*Update{nil}},
-		&RecoverySnapshot{LogicalOperationID: "operation", Updates: []*Update{nil}},
+		&RecoverySnapshot{
+			LogicalOperationID: "operation",
+			Updates:            []*backgroundtool.Update{nil},
+		},
+		&RecoverySnapshot{
+			LogicalOperationID: "operation",
+			Updates:            []*backgroundtool.Update{nil},
+		},
 	))
 	require.Error(t, compareRecoverySnapshots(
-		&RecoverySnapshot{LogicalOperationID: "operation", Updates: []*Update{{
-			EventID: "event", Data: []byte("one"),
-		}}},
-		&RecoverySnapshot{LogicalOperationID: "operation", Updates: []*Update{{
-			EventID: "event", Data: []byte("two"),
-		}}},
+		&RecoverySnapshot{
+			LogicalOperationID: "operation",
+			Updates: []*backgroundtool.Update{{
+				EventID: "event", Data: []byte("one"),
+			}},
+		},
+		&RecoverySnapshot{
+			LogicalOperationID: "operation",
+			Updates: []*backgroundtool.Update{{
+				EventID: "event", Data: []byte("two"),
+			}},
+		},
 	))
 }

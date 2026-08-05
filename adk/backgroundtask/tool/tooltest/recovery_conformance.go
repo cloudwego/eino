@@ -14,13 +14,17 @@
  * limitations under the License.
  */
 
-package tool
+// Package tooltest provides conformance checks for managed background tool
+// implementations.
+package tooltest
 
 import (
 	"bytes"
 	"context"
 	"errors"
 	"fmt"
+
+	backgroundtool "github.com/cloudwego/eino/adk/backgroundtask/tool"
 )
 
 // RecoverySnapshot exposes backend identity and replay state to the reusable
@@ -28,14 +32,14 @@ import (
 // production task APIs continue to expose only the Eino task ID.
 type RecoverySnapshot struct {
 	LogicalOperationID string
-	Updates            []*Update
+	Updates            []*backgroundtool.Update
 }
 
 // RecoveryConformanceConfig configures CheckRecoveryConformance.
 type RecoveryConformanceConfig struct {
 	TaskID    string
 	Arguments string
-	NewTool   func() RecoverableBackgroundTool
+	NewTool   func() backgroundtool.RecoverableBackgroundTool
 	Snapshot  func(context.Context, string) (*RecoverySnapshot, error)
 }
 
@@ -48,64 +52,64 @@ func CheckRecoveryConformance(
 ) error {
 	if config == nil || config.TaskID == "" || config.Arguments == "" ||
 		config.NewTool == nil || config.Snapshot == nil {
-		return errors.New("backgroundtask/tool: complete recovery conformance config is required")
+		return errors.New("backgroundtask/tool/tooltest: complete recovery conformance config is required")
 	}
 	first := config.NewTool()
 	second := config.NewTool()
 	third := config.NewTool()
 	if first == nil || second == nil || third == nil {
-		return errors.New("backgroundtask/tool: recovery factory returned nil")
+		return errors.New("backgroundtask/tool/tooltest: recovery factory returned nil")
 	}
 	if err := first.ValidateArguments(config.Arguments); err != nil {
-		return fmt.Errorf("backgroundtask/tool: validate conformance arguments: %w", err)
+		return fmt.Errorf("backgroundtask/tool/tooltest: validate conformance arguments: %w", err)
 	}
-	firstRun, err := first.Start(ctx, &StartRequest{
+	firstRun, err := first.Start(ctx, &backgroundtool.StartRequest{
 		TaskID: config.TaskID, Arguments: config.Arguments, Attempt: 1,
 	})
 	if err != nil {
-		return fmt.Errorf("backgroundtask/tool: first start: %w", err)
+		return fmt.Errorf("backgroundtask/tool/tooltest: first start: %w", err)
 	}
 	if firstRun == nil {
-		return errors.New("backgroundtask/tool: first start returned nil run")
+		return errors.New("backgroundtask/tool/tooltest: first start returned nil run")
 	}
 	before, err := config.Snapshot(ctx, config.TaskID)
 	if err != nil {
-		return fmt.Errorf("backgroundtask/tool: snapshot after first start: %w", err)
+		return fmt.Errorf("backgroundtask/tool/tooltest: snapshot after first start: %w", err)
 	}
-	duplicateRun, err := second.Start(ctx, &StartRequest{
+	duplicateRun, err := second.Start(ctx, &backgroundtool.StartRequest{
 		TaskID: config.TaskID, Arguments: config.Arguments, Attempt: 1,
 	})
 	if err != nil {
-		return fmt.Errorf("backgroundtask/tool: duplicate start: %w", err)
+		return fmt.Errorf("backgroundtask/tool/tooltest: duplicate start: %w", err)
 	}
 	if duplicateRun == nil {
-		return errors.New("backgroundtask/tool: duplicate start returned nil run")
+		return errors.New("backgroundtask/tool/tooltest: duplicate start returned nil run")
 	}
 	afterDuplicate, err := config.Snapshot(ctx, config.TaskID)
 	if err != nil {
-		return fmt.Errorf("backgroundtask/tool: snapshot after duplicate start: %w", err)
+		return fmt.Errorf("backgroundtask/tool/tooltest: snapshot after duplicate start: %w", err)
 	}
 	if err = compareRecoverySnapshots(before, afterDuplicate); err != nil {
-		return fmt.Errorf("backgroundtask/tool: duplicate start: %w", err)
+		return fmt.Errorf("backgroundtask/tool/tooltest: duplicate start: %w", err)
 	}
-	recoveredRun, err := third.Recover(ctx, &RecoverRequest{
+	recoveredRun, err := third.Recover(ctx, &backgroundtool.RecoverRequest{
 		TaskID: config.TaskID, Arguments: config.Arguments, Attempt: 2,
 	})
 	if err != nil {
-		return fmt.Errorf("backgroundtask/tool: recover: %w", err)
+		return fmt.Errorf("backgroundtask/tool/tooltest: recover: %w", err)
 	}
 	if recoveredRun == nil {
-		return errors.New("backgroundtask/tool: recover returned nil run")
+		return errors.New("backgroundtask/tool/tooltest: recover returned nil run")
 	}
 	afterRecover, err := config.Snapshot(ctx, config.TaskID)
 	if err != nil {
-		return fmt.Errorf("backgroundtask/tool: snapshot after recover: %w", err)
+		return fmt.Errorf("backgroundtask/tool/tooltest: snapshot after recover: %w", err)
 	}
 	if err = compareRecoverySnapshots(before, afterRecover); err != nil {
-		return fmt.Errorf("backgroundtask/tool: recover: %w", err)
+		return fmt.Errorf("backgroundtask/tool/tooltest: recover: %w", err)
 	}
 	if err = recoveredRun.Stop(ctx); err != nil {
-		return fmt.Errorf("backgroundtask/tool: stop recovered operation: %w", err)
+		return fmt.Errorf("backgroundtask/tool/tooltest: stop recovered operation: %w", err)
 	}
 	return nil
 }
