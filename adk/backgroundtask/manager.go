@@ -54,20 +54,6 @@ const (
 	StatusCanceled Status = "canceled"
 )
 
-// State aliases are kept for source compatibility while Status is the canonical
-// lifecycle name.
-type State = Status
-
-const (
-	StatePending      = StatusPending
-	StateRunning      = StatusRunning
-	StateWaitingInput = StatusWaitingInput
-	StateSuspended    = StatusSuspended
-	StateCompleted    = StatusCompleted
-	StateFailed       = StatusFailed
-	StateCanceled     = StatusCanceled
-)
-
 // Task represents a single managed execution record.
 type Task struct {
 	// Spec is the immutable serialized intent for this task.
@@ -96,6 +82,9 @@ type Task struct {
 	// CancelRequestedAt records durable explicit stop intent while Status remains
 	// StatusRunning until the active attempt acknowledges it as StatusCanceled.
 	CancelRequestedAt *time.Time
+	// CancelReason is the optional first-write reason accompanying durable stop
+	// intent. It becomes ResultError when the task reaches StatusCanceled.
+	CancelReason string
 	// UpdatedAt is the Store mutation time.
 	UpdatedAt time.Time
 	// DoneAt is the time the task reached a terminal state. Nil if still running.
@@ -123,6 +112,36 @@ type Config struct {
 	// must return a non-empty ID. The returned ID must be unique among this
 	// Manager's registered tasks; a duplicate fails task creation.
 	IDGen IDGenerator
+}
+
+type closeOptions struct {
+	drainReason string
+}
+
+// CloseOption configures Manager shutdown.
+type CloseOption func(*closeOptions)
+
+// WithDrainReason attaches an optional advisory reason to drain controls sent
+// while closing a Manager. The reason is not persisted as terminal task state.
+func WithDrainReason(reason string) CloseOption {
+	return func(options *closeOptions) {
+		options.drainReason = reason
+	}
+}
+
+type requestCancelOptions struct {
+	reason string
+}
+
+// RequestCancelOption configures durable cancellation intent.
+type RequestCancelOption func(*requestCancelOptions)
+
+// WithCancellationReason records an optional durable reason for stopping a
+// task. The first cancellation request wins.
+func WithCancellationReason(reason string) RequestCancelOption {
+	return func(options *requestCancelOptions) {
+		options.reason = reason
+	}
 }
 
 // Manager owns Store-backed task lifecycle and worker coordination.
@@ -162,7 +181,16 @@ func New(_ context.Context, conf *Config) *Manager {
 // Manager. Drainable attempts receive ControlDrain and may suspend or yield
 // according to their executor contract; non-drainable attempts may finish until
 // the deadline and are then durably canceled.
-func (m *Manager) Close(ctx context.Context) error {
+func (m *Manager) Close(ctx context.Context, options ...CloseOption) error {
+	closeConfig := closeOptions{}
+	for _, option := range options {
+		if option != nil {
+			option(&closeConfig)
+		}
+	}
+	if len(closeConfig.drainReason) > 4096 {
+		return errors.New("backgroundtask: drain reason exceeds 4096 bytes")
+	}
 	m.attemptsMu.Lock()
 	active := len(m.activeAttempts)
 	m.attemptsMu.Unlock()
@@ -185,7 +213,7 @@ func (m *Manager) Close(ctx context.Context) error {
 			closingAttempts = append(closingAttempts, attempt)
 		}
 		if attempt != nil && attempt.supportsDrain {
-			attempt.runtime.requestControl(ControlDrain)
+			attempt.runtime.requestControlWithReason(ControlDrain, closeConfig.drainReason)
 		}
 	}
 	m.attemptsMu.Unlock()
@@ -248,8 +276,6 @@ func (m *Manager) closedError() error {
 	return fmt.Errorf("the background task manager has shut down and is no longer accepting new tasks. " +
 		"Do not retry this; finish using any results you already have")
 }
-
-const canceledError = "task was canceled"
 
 func cloneTask(t *Task) *Task {
 	if t == nil {

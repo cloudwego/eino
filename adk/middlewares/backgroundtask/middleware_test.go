@@ -299,7 +299,7 @@ func TestTaskOutputTool(t *testing.T) {
 
 	result, err := runWork(mgr, "test task", false, completedWork("task result"))
 	require.NoError(t, err)
-	require.Equal(t, bgtask.StateCompleted, result.Status)
+	require.Equal(t, bgtask.StatusCompleted, result.Status)
 
 	tl := findTool(t, injectedTools(t, mgr), taskOutputToolName)
 	output, err := tl.InvokableRun(context.Background(), fmt.Sprintf(`{"task_id":"%s"}`, result.Spec.ID))
@@ -371,12 +371,17 @@ func TestTaskStopTool(t *testing.T) {
 	require.NoError(t, err)
 
 	tl := findTool(t, injectedTools(t, mgr), taskStopToolName)
-	result, err := tl.InvokableRun(context.Background(), fmt.Sprintf(`{"task_id":"%s"}`, runResult.Spec.ID))
+	result, err := tl.InvokableRun(
+		context.Background(),
+		fmt.Sprintf(`{"task_id":"%s","reason":"no longer needed"}`, runResult.Spec.ID),
+	)
 	require.NoError(t, err)
 	assert.Equal(t, fmt.Sprintf("Successfully stopped task: %s", runResult.Spec.ID), result)
 
 	task := waitUntilTerminal(t, context.Background(), mgr, runResult.Spec.ID)
-	assert.Equal(t, bgtask.StateCanceled, task.Status)
+	assert.Equal(t, bgtask.StatusCanceled, task.Status)
+	assert.Equal(t, "no longer needed", task.CancelReason)
+	assert.Equal(t, "no longer needed", task.ResultError)
 }
 
 func TestTaskStopTool_DurableRequestedAndCanceledText(t *testing.T) {
@@ -431,7 +436,7 @@ func TestTaskStopTool_AlreadyDone(t *testing.T) {
 
 	runResult, err := runWork(mgr, "done task", false, completedWork("done"))
 	require.NoError(t, err)
-	require.Equal(t, bgtask.StateCompleted, runResult.Status)
+	require.Equal(t, bgtask.StatusCompleted, runResult.Status)
 
 	tl := findTool(t, injectedTools(t, mgr), taskStopToolName)
 	result, err := tl.InvokableRun(context.Background(), fmt.Sprintf(`{"task_id":"%s"}`, runResult.Spec.ID))

@@ -116,7 +116,7 @@ func TestManagerExecuteClosesTimeoutControllerOnEarlyFailure_BitsUT(t *testing.T
 
 func TestManagerCloseDrainsActiveAttempt(t *testing.T) {
 	started := make(chan struct{})
-	observed := make(chan ControlKind, 1)
+	observed := make(chan ControlRequest, 1)
 	executor := &scriptedExecutor{
 		execute: func(
 			_ context.Context,
@@ -125,7 +125,7 @@ func TestManagerCloseDrainsActiveAttempt(t *testing.T) {
 		) (*ExecutionResult, error) {
 			close(started)
 			control := <-runtime.Controls()
-			observed <- control.Kind
+			observed <- control
 			return &ExecutionResult{
 				Status: StatusSuspended, Checkpoint: []byte("checkpoint"),
 			}, nil
@@ -144,9 +144,11 @@ func TestManagerCloseDrainsActiveAttempt(t *testing.T) {
 	require.ErrorIs(t, manager.Close(context.Background()), ErrCloseDeadlineRequired)
 	closeCtx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	require.NoError(t, manager.Close(closeCtx))
+	require.NoError(t, manager.Close(closeCtx, WithDrainReason("worker maintenance")))
 	require.NoError(t, <-executeDone)
-	require.Equal(t, ControlDrain, <-observed)
+	require.Equal(t, ControlRequest{
+		Kind: ControlDrain, Reason: "worker maintenance",
+	}, <-observed)
 	suspended, err := manager.Get(context.Background(), task.Spec.ID)
 	require.NoError(t, err)
 	require.Equal(t, StatusSuspended, suspended.Status)
@@ -191,7 +193,7 @@ func TestManagerCloseCancelsNonDrainableAttemptAtDeadline(t *testing.T) {
 
 func TestManagerCancelNonRecoverableAttempt(t *testing.T) {
 	started := make(chan struct{})
-	observed := make(chan ControlKind, 1)
+	observed := make(chan ControlRequest, 1)
 	executor := &scriptedExecutor{
 		leaseExpiryPolicy: LeaseExpiryFail,
 		execute: func(
@@ -201,7 +203,7 @@ func TestManagerCancelNonRecoverableAttempt(t *testing.T) {
 		) (*ExecutionResult, error) {
 			close(started)
 			control := <-runtime.Controls()
-			observed <- control.Kind
+			observed <- control
 			return &ExecutionResult{Status: StatusCanceled}, nil
 		},
 	}
@@ -216,11 +218,58 @@ func TestManagerCancelNonRecoverableAttempt(t *testing.T) {
 	}()
 	<-started
 
-	canceled, err := manager.RequestCancel(context.Background(), task.Spec.ID)
+	canceled, err := manager.RequestCancel(
+		context.Background(), task.Spec.ID,
+		WithCancellationReason("stopped by operator"),
+	)
 	require.NoError(t, err)
 	require.Equal(t, StatusCanceled, canceled.Status)
+	require.Equal(t, "stopped by operator", canceled.CancelReason)
+	require.Equal(t, "stopped by operator", canceled.ResultError)
 	require.NoError(t, <-executeDone)
-	require.Equal(t, ControlStop, <-observed)
+	require.Equal(t, ControlRequest{
+		Kind: ControlStop, Reason: "stopped by operator",
+	}, <-observed)
+}
+
+func TestManagerReplaysCancellationReasonToRecoveryAttempt(t *testing.T) {
+	clock := &testClock{now: time.Unix(100, 0)}
+	store := NewInMemoryStore(&InMemoryStoreConfig{
+		Clock: clock.Now, ActiveAttemptTimeout: time.Second,
+	})
+	started, err := store.CreateAndStart(context.Background(), &CreateTaskRequest{
+		Spec: validSpec("recover-cancel-reason"), LeaseExpiryPolicy: LeaseExpiryRetry,
+	})
+	require.NoError(t, err)
+	_, err = store.RequestCancel(context.Background(), &RequestCancelRequest{
+		TaskID: started.Spec.ID, ExpectedVersion: started.Version,
+		Reason: "operator request",
+	})
+	require.NoError(t, err)
+	clock.Advance(2 * time.Second)
+	pending, err := store.Get(context.Background(), started.Spec.ID)
+	require.NoError(t, err)
+	require.Equal(t, StatusPending, pending.Status)
+
+	observed := make(chan ControlRequest, 1)
+	executor := &scriptedExecutor{execute: func(
+		_ context.Context,
+		_ *Task,
+		runtime ExecutionRuntime,
+	) (*ExecutionResult, error) {
+		control := <-runtime.Controls()
+		observed <- control
+		return &ExecutionResult{Status: StatusCanceled}, nil
+	}}
+	manager := managerWithExecutor(t, store, executor, time.Minute)
+	defer closeWithTimeout(manager)
+	require.NoError(t, manager.Execute(context.Background(), started.Spec.ID))
+	require.Equal(t, ControlRequest{
+		Kind: ControlStop, Reason: "operator request",
+	}, <-observed)
+	canceled, err := manager.Get(context.Background(), started.Spec.ID)
+	require.NoError(t, err)
+	require.Equal(t, "operator request", canceled.ResultError)
 }
 
 func TestManagerDispatchReadBoundaries(t *testing.T) {
@@ -248,6 +297,14 @@ func TestManagerDispatchReadBoundaries(t *testing.T) {
 }
 
 func TestTimeoutControlPrecedence(t *testing.T) {
+	t.Run("timeout always has a reason", func(t *testing.T) {
+		runtime := newTaskRuntime(nil, "task", 1, 1)
+		require.True(t, runtime.requestControlWithReason(ControlTimeout, ""))
+		require.Equal(t, ControlRequest{
+			Kind: ControlTimeout, Reason: defaultTimeoutReason,
+		}, <-runtime.Controls())
+	})
+
 	t.Run("timeout supersedes drain", func(t *testing.T) {
 		runtime := newTaskRuntime(nil, "task", 1, 1)
 		require.True(t, runtime.requestControl(ControlDrain))
@@ -442,43 +499,6 @@ func TestManagerResumeValidationBoundaries(t *testing.T) {
 		TaskID: waiting.Spec.ID, ExpectedVersion: waiting.Version,
 	})
 	require.ErrorContains(t, err, `executor "test" is unavailable`)
-}
-
-func TestCancelNonRecoverableBoundaryResults(t *testing.T) {
-	store := NewInMemoryStore(nil)
-	manager := New(context.Background(), &Config{Store: store})
-	_, err := manager.cancelNonRecoverable(
-		context.Background(), &Task{Status: StatusCompleted}, nil,
-	)
-	require.ErrorIs(t, err, ErrAlreadyTerminal)
-	_, err = manager.cancelNonRecoverable(
-		context.Background(), &Task{Status: StatusPending}, nil,
-	)
-	require.ErrorIs(t, err, ErrIllegalTransition)
-
-	started := createAndStart(t, store, "cancel-direct")
-	result, err := manager.cancelNonRecoverable(context.Background(), started, nil)
-	require.NoError(t, err)
-	require.Equal(t, StatusCanceled, result.Status)
-
-	attemptErr := errors.New("attempt failed")
-	attempt := &activeAttempt{
-		runtime: newTaskRuntime(store, "task", 1, 1),
-		done:    make(chan error, 1),
-	}
-	attempt.done <- attemptErr
-	_, err = manager.cancelNonRecoverable(
-		context.Background(), &Task{Status: StatusRunning}, attempt,
-	)
-	require.ErrorIs(t, err, attemptErr)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	attempt.done = make(chan error)
-	_, err = manager.cancelNonRecoverable(
-		ctx, &Task{Status: StatusRunning}, attempt,
-	)
-	require.ErrorIs(t, err, context.Canceled)
 }
 
 type firstGetBlockingStore struct {

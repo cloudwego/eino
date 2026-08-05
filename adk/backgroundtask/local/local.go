@@ -375,8 +375,12 @@ func (e *executor) Execute(
 		cancel()
 		switch control.Kind {
 		case backgroundtask.ControlStop:
+			reason := control.Reason
+			if reason == "" {
+				reason = "task was canceled"
+			}
 			return &backgroundtask.ExecutionResult{
-				Status: backgroundtask.StatusCanceled, Error: "task was canceled",
+				Status: backgroundtask.StatusCanceled, Error: reason,
 			}, nil
 		case backgroundtask.ControlTimeout:
 			return &backgroundtask.ExecutionResult{

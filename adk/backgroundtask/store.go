@@ -57,8 +57,9 @@ var (
 // across attempts for at least the task lifetime, and not advance lifecycle
 // Version.
 //
-// RequestCancel on active work keeps StatusRunning, sets CancelRequestedAt, and
-// advances Version. Once cancellation is requested, Heartbeat, Complete, Fail,
+// RequestCancel on active work keeps StatusRunning, sets CancelRequestedAt and
+// the first-write optional CancelReason, and advances Version. Once
+// cancellation is requested, Heartbeat, Complete, Fail,
 // WaitInput, Suspend, and Yield must reject the attempt; only Cancel may
 // terminally acknowledge it. Yield changes running to pending, stores its
 // optional checkpoint atomically, and emits no lifecycle notification. On

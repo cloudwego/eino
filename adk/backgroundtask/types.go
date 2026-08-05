@@ -158,6 +158,8 @@ type YieldTaskRequest struct {
 type CancelTaskRequest struct {
 	TaskID          string
 	ExpectedVersion int64
+	// Reason is used when no durable cancellation reason was previously recorded.
+	Reason string
 }
 
 // RequestCancelRequest records durable cancellation intent. Active work remains
@@ -166,6 +168,8 @@ type CancelTaskRequest struct {
 type RequestCancelRequest struct {
 	TaskID          string
 	ExpectedVersion int64
+	// Reason is optional and first-write for repeated cancellation requests.
+	Reason string
 }
 
 // ResumeRequest stores a one-shot resume command for a waiting task.

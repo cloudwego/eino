@@ -34,15 +34,23 @@ import (
 type ControlKind string
 
 const (
-	// ControlStop asks the executor to stop as soon as practical.
+	defaultCanceledReason = "task was canceled"
+	defaultTimeoutReason  = "background task timed out"
+
+	// ControlStop asks the executor to stop as soon as practical. Reason is the
+	// optional durable cancellation reason.
 	ControlStop ControlKind = "stop"
 	// ControlDrain asks the executor to checkpoint and suspend if possible.
+	// Reason is optional advisory operational context.
 	ControlDrain ControlKind = "drain"
-	// ControlTimeout asks the executor to fail with the supplied deterministic reason.
+	// ControlTimeout asks the executor to fail with a non-empty deterministic reason.
 	ControlTimeout ControlKind = "timeout"
 )
 
-// ControlRequest carries a Manager control signal to an executor.
+// ControlRequest carries a Manager control signal to an executor. For
+// ControlStop, Reason is optional and sourced from durable cancellation intent.
+// It is optional and advisory for ControlDrain, and always non-empty for
+// ControlTimeout.
 type ControlRequest struct {
 	Kind   ControlKind
 	Reason string
@@ -167,6 +175,7 @@ type taskRuntime struct {
 	controls        chan ControlRequest
 	poison          error
 	cancelRequested bool
+	cancelReason    string
 }
 
 // detachedCtx preserves values while detaching worker execution from the
@@ -214,6 +223,9 @@ func (r *taskRuntime) requestControl(kind ControlKind) bool {
 }
 
 func (r *taskRuntime) requestControlWithReason(kind ControlKind, reason string) bool {
+	if kind == ControlTimeout && reason == "" {
+		reason = defaultTimeoutReason
+	}
 	r.controlMu.Lock()
 	defer r.controlMu.Unlock()
 	request := ControlRequest{Kind: kind, Reason: reason}
@@ -299,7 +311,8 @@ func (r *taskRuntime) reconcileCancellationLocked(ctx context.Context) error {
 	}
 	r.version = task.Version
 	r.cancelRequested = true
-	r.requestControl(ControlStop)
+	r.cancelReason = task.CancelReason
+	r.requestControlWithReason(ControlStop, r.cancelReason)
 	return nil
 }
 
@@ -313,14 +326,16 @@ func (r *taskRuntime) commit(ctx context.Context, result *ExecutionResult) (*Tas
 		return nil, errors.New("backgroundtask: executor returned nil result")
 	}
 	if r.cancelRequested {
-		result = &ExecutionResult{Status: StatusCanceled}
+		result = &ExecutionResult{Status: StatusCanceled, Error: r.cancelReason}
 	}
 	task, err := r.commitResult(ctx, result)
 	if errors.Is(err, ErrVersionConflict) {
 		if reconcileErr := r.reconcileCancellationLocked(ctx); reconcileErr != nil {
 			return nil, reconcileErr
 		}
-		task, err = r.commitResult(ctx, &ExecutionResult{Status: StatusCanceled})
+		task, err = r.commitResult(ctx, &ExecutionResult{
+			Status: StatusCanceled, Error: r.cancelReason,
+		})
 	}
 	if err != nil {
 		r.poison = err
@@ -352,7 +367,7 @@ func (r *taskRuntime) commitResult(ctx context.Context, result *ExecutionResult)
 		})
 	case StatusCanceled:
 		return r.store.Cancel(ctx, &CancelTaskRequest{
-			TaskID: r.taskID, ExpectedVersion: r.version,
+			TaskID: r.taskID, ExpectedVersion: r.version, Reason: result.Error,
 		})
 	case StatusWaitingInput:
 		return r.store.WaitInput(ctx, &WaitInputTaskRequest{
@@ -466,37 +481,35 @@ func (m *Manager) ReadRecentTaskEvents(
 }
 
 // RequestCancel records cancellation intent and signals a local active attempt.
-func (m *Manager) RequestCancel(ctx context.Context, taskID string) (*Task, error) {
+// An optional reason is durable and first-write across repeated requests.
+func (m *Manager) RequestCancel(
+	ctx context.Context,
+	taskID string,
+	options ...RequestCancelOption,
+) (*Task, error) {
+	cancelConfig := requestCancelOptions{}
+	for _, option := range options {
+		if option != nil {
+			option(&cancelConfig)
+		}
+	}
+	if len(cancelConfig.reason) > 4096 {
+		return nil, errors.New("backgroundtask: cancellation reason exceeds 4096 bytes")
+	}
+
 	m.attemptsMu.Lock()
 	attempt := m.activeAttempts[taskID]
 	m.attemptsMu.Unlock()
 
-	task, err := m.store.Get(ctx, taskID)
-	if err != nil {
-		return nil, err
-	}
-	if task.LeaseExpiryPolicy == LeaseExpiryFail && attempt != nil {
-		if _, err = m.activeRuntime(ctx, taskID); err == nil {
-			return m.cancelNonRecoverable(ctx, task, attempt)
-		}
-		if !errors.Is(err, ErrNotFound) && !errors.Is(err, ErrIllegalTransition) {
-			return nil, err
-		}
-	}
-
-	if attempt != nil && attempt.runtime != nil {
-		attempt.runtime.mu.Lock()
-		defer attempt.runtime.mu.Unlock()
-	}
-
 	var result *Task
+	var err error
 	for retry := 0; ; retry++ {
 		task, getErr := m.store.Get(ctx, taskID)
 		if getErr != nil {
 			return nil, getErr
 		}
 		result, err = m.store.RequestCancel(ctx, &RequestCancelRequest{
-			TaskID: taskID, ExpectedVersion: task.Version,
+			TaskID: taskID, ExpectedVersion: task.Version, Reason: cancelConfig.reason,
 		})
 		if !errors.Is(err, ErrVersionConflict) {
 			break
@@ -512,49 +525,44 @@ func (m *Manager) RequestCancel(ctx context.Context, taskID string) (*Task, erro
 		return nil, err
 	}
 	if result.Status == StatusRunning && result.CancelRequestedAt != nil &&
-		attempt != nil && attempt.runtime != nil && !attempt.runtime.cancelRequested {
-		if err = attempt.runtime.reconcileCancellationLocked(ctx); err != nil {
-			return result, err
+		attempt != nil {
+		select {
+		case <-attempt.ready:
+		case <-ctx.Done():
+			return result, ctx.Err()
+		}
+		if attempt.runtime != nil {
+			attempt.runtime.mu.Lock()
+			if !attempt.runtime.cancelRequested {
+				err = attempt.runtime.reconcileCancellationLocked(ctx)
+			}
+			attempt.runtime.mu.Unlock()
+			if err != nil {
+				return result, err
+			}
 		}
 	}
-	return result, nil
-}
-
-func (m *Manager) cancelNonRecoverable(
-	ctx context.Context,
-	task *Task,
-	attempt *activeAttempt,
-) (*Task, error) {
-	if terminalStatus(task.Status) {
-		return nil, ErrAlreadyTerminal
-	}
-	if task.Status != StatusRunning {
-		return nil, ErrIllegalTransition
-	}
-	if attempt == nil || attempt.runtime == nil {
-		return m.store.Cancel(ctx, &CancelTaskRequest{
-			TaskID: task.Spec.ID, ExpectedVersion: task.Version,
-		})
-	}
-
-	attempt.runtime.requestControl(ControlStop)
-	select {
-	case attemptErr := <-attempt.done:
-		if attemptErr != nil {
-			return nil, attemptErr
+	if result.LeaseExpiryPolicy == LeaseExpiryFail && result.Status == StatusRunning &&
+		attempt != nil {
+		select {
+		case attemptErr := <-attempt.done:
+			if attemptErr != nil {
+				return nil, attemptErr
+			}
+		case <-ctx.Done():
+			return nil, ctx.Err()
 		}
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	}
-	result, err := m.store.Get(ctx, task.Spec.ID)
-	if err != nil {
-		return nil, err
-	}
-	if result.Status != StatusCanceled {
-		if terminalStatus(result.Status) {
-			return nil, ErrAlreadyTerminal
+		terminal, getErr := m.store.Get(ctx, taskID)
+		if getErr != nil {
+			return nil, getErr
 		}
-		return nil, ErrIllegalTransition
+		if terminal.Status != StatusCanceled {
+			if terminalStatus(terminal.Status) {
+				return nil, ErrAlreadyTerminal
+			}
+			return nil, ErrIllegalTransition
+		}
+		return terminal, nil
 	}
 	return result, nil
 }
@@ -592,24 +600,6 @@ func (m *Manager) Resume(ctx context.Context, req *ResumeRequest) (*Task, error)
 // Execute claims and runs one pending task attempt on the current worker.
 func (m *Manager) Execute(ctx context.Context, taskID string) error {
 	return m.execute(ctx, taskID)
-}
-
-func (m *Manager) activeRuntime(ctx context.Context, taskID string) (*taskRuntime, error) {
-	m.attemptsMu.Lock()
-	attempt := m.activeAttempts[taskID]
-	m.attemptsMu.Unlock()
-	if attempt == nil {
-		return nil, ErrNotFound
-	}
-	select {
-	case <-attempt.ready:
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	}
-	if attempt.runtime == nil {
-		return nil, ErrIllegalTransition
-	}
-	return attempt.runtime, nil
 }
 
 func (m *Manager) execute(
@@ -670,7 +660,8 @@ func (m *Manager) execute(
 	runtime := newTaskRuntime(m.store, taskID, started.Attempt, started.Version)
 	if started.CancelRequestedAt != nil {
 		runtime.cancelRequested = true
-		runtime.requestControl(ControlStop)
+		runtime.cancelReason = started.CancelReason
+		runtime.requestControlWithReason(ControlStop, runtime.cancelReason)
 	}
 	runCtx, cancel := context.WithCancel(ctx)
 	m.attemptsMu.Lock()

@@ -472,7 +472,10 @@ func (s *InMemoryStore) Cancel(_ context.Context, req *CancelTaskRequest) (*Task
 	if req == nil {
 		return nil, errors.New("backgroundtask: cancel request is required")
 	}
-	if err := validateTaskSnapshot(StatusCanceled, nil, canceledError); err != nil {
+	if len(req.Reason) > 4096 {
+		return nil, errors.New("backgroundtask: cancellation reason exceeds 4096 bytes")
+	}
+	if err := validateTaskSnapshot(StatusCanceled, nil, req.Reason); err != nil {
 		return nil, err
 	}
 	s.mu.Lock()
@@ -481,9 +484,16 @@ func (s *InMemoryStore) Cancel(_ context.Context, req *CancelTaskRequest) (*Task
 	if err != nil {
 		return nil, err
 	}
+	reason := t.CancelReason
+	if reason == "" {
+		reason = req.Reason
+	}
+	if reason == "" {
+		reason = defaultCanceledReason
+	}
 	t.Status = StatusCanceled
 	t.ResultData = nil
-	t.ResultError = canceledError
+	t.ResultError = reason
 	t.PendingResume = nil
 	s.finishStoreOwnedLocked(t)
 	return cloneTask(t), nil
@@ -492,6 +502,9 @@ func (s *InMemoryStore) Cancel(_ context.Context, req *CancelTaskRequest) (*Task
 func (s *InMemoryStore) RequestCancel(_ context.Context, req *RequestCancelRequest) (*Task, error) {
 	if req == nil {
 		return nil, errors.New("backgroundtask: cancel request is required")
+	}
+	if len(req.Reason) > 4096 {
+		return nil, errors.New("backgroundtask: cancellation reason exceeds 4096 bytes")
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -507,6 +520,7 @@ func (s *InMemoryStore) RequestCancel(_ context.Context, req *RequestCancelReque
 	}
 	now := s.now()
 	t.CancelRequestedAt = &now
+	t.CancelReason = req.Reason
 	if t.Status == StatusRunning {
 		s.advanceLocked(t)
 		if _, ok := s.active[t.Spec.ID]; ok {
@@ -517,7 +531,10 @@ func (s *InMemoryStore) RequestCancel(_ context.Context, req *RequestCancelReque
 		s.advanceLocked(t)
 	} else {
 		t.Status = StatusCanceled
-		t.ResultError = canceledError
+		t.ResultError = t.CancelReason
+		if t.ResultError == "" {
+			t.ResultError = defaultCanceledReason
+		}
 		t.PendingResume = nil
 		s.finishStoreOwnedLocked(t)
 		return cloneTask(t), nil
@@ -754,7 +771,10 @@ func (s *InMemoryStore) resolveExpiredLocked(t *Task) {
 			return
 		}
 		t.Status = StatusCanceled
-		t.ResultError = canceledError
+		t.ResultError = t.CancelReason
+		if t.ResultError == "" {
+			t.ResultError = defaultCanceledReason
+		}
 		s.finishStoreOwnedLocked(t)
 		return
 	}

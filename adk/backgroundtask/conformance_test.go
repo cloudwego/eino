@@ -203,7 +203,7 @@ func TestManagerValidateSpecRunsBeforeSubmitAndStart_BitsUT(t *testing.T) {
 	require.Len(t, executor.validated, 2)
 	pending, err := store.Get(context.Background(), task.Spec.ID)
 	require.NoError(t, err)
-	assert.Equal(t, StatePending, pending.Status)
+	assert.Equal(t, StatusPending, pending.Status)
 }
 
 func TestManagerExecutePersistsReturnedResultDirectly_BitsUT(t *testing.T) {
@@ -216,7 +216,7 @@ func TestManagerExecutePersistsReturnedResultDirectly_BitsUT(t *testing.T) {
 	require.NoError(t, manager.Execute(context.Background(), task.Spec.ID))
 	completed, err := store.Get(context.Background(), task.Spec.ID)
 	require.NoError(t, err)
-	assert.Equal(t, StateCompleted, completed.Status)
+	assert.Equal(t, StatusCompleted, completed.Status)
 	assert.Equal(t, "result", string(completed.ResultData))
 	assert.Empty(t, completed.ResultError)
 	require.Len(t, executor.executed, 1)
@@ -238,7 +238,7 @@ func TestManagerReducesOrdinaryErrorsToBoundedDurableStrings_BitsUT(t *testing.T
 	require.NoError(t, manager.Execute(context.Background(), task.Spec.ID))
 	failed, err := store.Get(context.Background(), task.Spec.ID)
 	require.NoError(t, err)
-	assert.Equal(t, StateFailed, failed.Status)
+	assert.Equal(t, StatusFailed, failed.Status)
 	assert.Len(t, failed.ResultError, 4096)
 	assert.Nil(t, failed.ResultData)
 }
@@ -265,11 +265,11 @@ func recoveredTaskStore(t *testing.T, id string, checkpoint []byte) (*InMemorySt
 	store.mu.Lock()
 	store.tasks[id].Checkpoint = checkpoint
 	store.mu.Unlock()
-	require.Equal(t, StateRunning, started.Status)
+	require.Equal(t, StatusRunning, started.Status)
 	clock.Advance(6 * time.Second)
 	pending, err := store.Get(context.Background(), id)
 	require.NoError(t, err)
-	require.Equal(t, StatePending, pending.Status)
+	require.Equal(t, StatusPending, pending.Status)
 	return store, clock
 }
 
@@ -288,7 +288,7 @@ func TestExecutorOwnsCheckpointCompatibility_BitsUT(t *testing.T) {
 	require.NoError(t, manager.Execute(context.Background(), "non-restartable"))
 	failed, err := store.Get(context.Background(), "non-restartable")
 	require.NoError(t, err)
-	assert.Equal(t, StateFailed, failed.Status)
+	assert.Equal(t, StatusFailed, failed.Status)
 	assert.Equal(t, "unsafe checkpoint rejected", failed.ResultError)
 }
 
@@ -316,7 +316,7 @@ func TestManagerResumeValidatesAndStoresNormalizedOpaqueInput_BitsUT(t *testing.
 	assert.Equal(t, "raw", string(executor.resumeInput))
 	require.NotNil(t, resumed.PendingResume)
 	assert.Equal(t, "normalized", string(resumed.PendingResume))
-	assert.Equal(t, StatePending, resumed.Status)
+	assert.Equal(t, StatusPending, resumed.Status)
 }
 
 func TestManagerWaitingInputPersistsCheckpointWithoutTerminalResult_BitsUT(t *testing.T) {
@@ -333,7 +333,7 @@ func TestManagerWaitingInputPersistsCheckpointWithoutTerminalResult_BitsUT(t *te
 	require.NoError(t, manager.Execute(context.Background(), task.Spec.ID))
 	waiting, err := store.Get(context.Background(), task.Spec.ID)
 	require.NoError(t, err)
-	assert.Equal(t, StateWaitingInput, waiting.Status)
+	assert.Equal(t, StatusWaitingInput, waiting.Status)
 	assert.Equal(t, "checkpoint", string(waiting.Checkpoint))
 	assert.Empty(t, waiting.ResultData)
 	assert.Empty(t, waiting.ResultError)
@@ -353,7 +353,7 @@ func TestManagerErrorDoesNotCreatePendingResume_BitsUT(t *testing.T) {
 	require.NoError(t, manager.Execute(context.Background(), task.Spec.ID))
 	failed, err := store.Get(context.Background(), task.Spec.ID)
 	require.NoError(t, err)
-	assert.Equal(t, StateFailed, failed.Status)
+	assert.Equal(t, StatusFailed, failed.Status)
 	assert.Equal(t, "execution failed", failed.ResultError)
 	assert.Nil(t, failed.PendingResume)
 }
@@ -376,14 +376,14 @@ func TestCheckpointUnavailableStopsRenewalWithoutPersistingFailure_BitsUT(t *tes
 	assert.ErrorIs(t, err, ErrCheckpointUnavailable)
 	running, getErr := store.Get(context.Background(), task.Spec.ID)
 	require.NoError(t, getErr)
-	assert.Equal(t, StateRunning, running.Status)
+	assert.Equal(t, StatusRunning, running.Status)
 	assert.Empty(t, running.ResultData)
 	assert.Empty(t, running.ResultError)
 
 	clock.Advance(6 * time.Second)
 	pending, getErr := store.Get(context.Background(), task.Spec.ID)
 	require.NoError(t, getErr)
-	assert.Equal(t, StatePending, pending.Status)
+	assert.Equal(t, StatusPending, pending.Status)
 	assert.Empty(t, pending.ResultData)
 	assert.Empty(t, pending.ResultError)
 }

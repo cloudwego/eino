@@ -524,7 +524,7 @@ func TestExecutorInterruptBecomesWaitingInput_BitsUT(t *testing.T) {
 	require.NoError(t, manager.Execute(context.Background(), task.Spec.ID))
 	result, err := manager.Get(context.Background(), task.Spec.ID)
 	require.NoError(t, err)
-	assert.Equal(t, backgroundtask.StateWaitingInput, result.Status)
+	assert.Equal(t, backgroundtask.StatusWaitingInput, result.Status)
 	var state checkpointState
 	require.NoError(t, json.Unmarshal(result.Checkpoint, &state))
 	require.Len(t, state.TargetIDs, 1)
@@ -651,7 +651,7 @@ func TestExecutorDrainUsesDurableRunnerCheckpoint_BitsUT(t *testing.T) {
 	require.NoError(t, manager.Execute(context.Background(), task.Spec.ID))
 	result, err := manager.Get(context.Background(), task.Spec.ID)
 	require.NoError(t, err)
-	assert.Equal(t, backgroundtask.StateWaitingInput, result.Status)
+	assert.Equal(t, backgroundtask.StatusWaitingInput, result.Status)
 }
 
 func TestControlAndInterruptUseRunnerCheckpoint(t *testing.T) {
@@ -754,7 +754,7 @@ func TestSubAgentTaskResumesAfterManagerReconstruction_BitsUT(t *testing.T) {
 	require.NoError(t, manager1.Execute(context.Background(), task.Spec.ID))
 	waiting, err := manager1.Get(context.Background(), task.Spec.ID)
 	require.NoError(t, err)
-	require.Equal(t, backgroundtask.StateWaitingInput, waiting.Status)
+	require.Equal(t, backgroundtask.StatusWaitingInput, waiting.Status)
 	var state checkpointState
 	require.NoError(t, json.Unmarshal(waiting.Checkpoint, &state))
 	require.Len(t, state.TargetIDs, 1)
@@ -768,12 +768,12 @@ func TestSubAgentTaskResumesAfterManagerReconstruction_BitsUT(t *testing.T) {
 		TaskID: task.Spec.ID, ExpectedVersion: waiting.Version,
 	})
 	require.NoError(t, err)
-	assert.Equal(t, backgroundtask.StatePending, pending.Status)
+	assert.Equal(t, backgroundtask.StatusPending, pending.Status)
 	require.NoError(t, manager2.Execute(context.Background(), task.Spec.ID))
 
 	completed, err := manager2.Get(context.Background(), task.Spec.ID)
 	require.NoError(t, err)
-	assert.Equal(t, backgroundtask.StateCompleted, completed.Status)
+	assert.Equal(t, backgroundtask.StatusCompleted, completed.Status)
 	assert.Contains(t, string(completed.ResultData), "approved")
 	assert.Equal(t, int64(2), completed.Attempt)
 	assert.Empty(t, completed.Spec.OutputFile)

@@ -74,7 +74,7 @@ func TestDispatcherRedeliversUntilSinkAccepts_BitsUT(t *testing.T) {
 	assert.Equal(t, completed.Spec.ID, sink.notifications[0].TaskID)
 	assert.Equal(t, task.Spec.SessionID, sink.targets[0].TargetID)
 	require.NotNil(t, sink.notifications[0].Task)
-	assert.Equal(t, StateCompleted, sink.notifications[0].Task.Status)
+	assert.Equal(t, StatusCompleted, sink.notifications[0].Task.Status)
 
 	clock.Advance(time.Second)
 	sink.fail = false

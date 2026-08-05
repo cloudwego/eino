@@ -618,10 +618,12 @@ func TestInMemoryStoreExpiredCanceledLeasePreservesRecoverableStop_BitsUT(t *tes
 			require.NoError(t, err)
 			requested, err := store.RequestCancel(context.Background(), &RequestCancelRequest{
 				TaskID: spec.ID, ExpectedVersion: started.Version,
+				Reason: "deployment shutdown",
 			})
 			require.NoError(t, err)
 			assert.Equal(t, StatusRunning, requested.Status)
 			require.NotNil(t, requested.CancelRequestedAt)
+			assert.Equal(t, "deployment shutdown", requested.CancelReason)
 
 			clock.Advance(6 * time.Second)
 			resolved, err := store.Get(context.Background(), spec.ID)
@@ -629,10 +631,11 @@ func TestInMemoryStoreExpiredCanceledLeasePreservesRecoverableStop_BitsUT(t *tes
 			if policy == LeaseExpiryRetry {
 				assert.Equal(t, StatusPending, resolved.Status)
 				assert.NotNil(t, resolved.CancelRequestedAt)
+				assert.Equal(t, "deployment shutdown", resolved.CancelReason)
 				assert.Nil(t, resolved.DoneAt)
 			} else {
 				assert.Equal(t, StatusCanceled, resolved.Status)
-				assert.Equal(t, canceledError, resolved.ResultError)
+				assert.Equal(t, "deployment shutdown", resolved.ResultError)
 				require.NotNil(t, resolved.DoneAt)
 			}
 		})
@@ -683,19 +686,21 @@ func TestInMemoryStoreCancellationIntentReconcilesToCanceled_BitsUT(t *testing.T
 	task := createAndStart(t, store, "cancel")
 
 	requested, err := store.RequestCancel(context.Background(), &RequestCancelRequest{
-		TaskID: task.Spec.ID, ExpectedVersion: task.Version,
+		TaskID: task.Spec.ID, ExpectedVersion: task.Version, Reason: "operator request",
 	})
 	require.NoError(t, err)
 	assert.Equal(t, StatusRunning, requested.Status)
 	assert.NotNil(t, requested.CancelRequestedAt)
+	assert.Equal(t, "operator request", requested.CancelReason)
 	assert.Empty(t, requested.ResultData)
 	assert.Empty(t, requested.ResultError)
 	repeated, err := store.RequestCancel(context.Background(), &RequestCancelRequest{
-		TaskID: task.Spec.ID, ExpectedVersion: requested.Version,
+		TaskID: task.Spec.ID, ExpectedVersion: requested.Version, Reason: "changed reason",
 	})
 	require.NoError(t, err)
 	assert.Equal(t, requested.Version, repeated.Version)
 	assert.Equal(t, requested.CancelRequestedAt, repeated.CancelRequestedAt)
+	assert.Equal(t, "operator request", repeated.CancelReason)
 
 	_, err = store.Complete(context.Background(), &CompleteTaskRequest{
 		TaskID: "cancel", ExpectedVersion: requested.Version, Data: []byte("late"),
@@ -707,11 +712,11 @@ func TestInMemoryStoreCancellationIntentReconcilesToCanceled_BitsUT(t *testing.T
 	assert.ErrorIs(t, err, ErrLeaseLost)
 
 	canceled, err := store.Cancel(context.Background(), &CancelTaskRequest{
-		TaskID: "cancel", ExpectedVersion: requested.Version,
+		TaskID: "cancel", ExpectedVersion: requested.Version, Reason: "executor reason",
 	})
 	require.NoError(t, err)
 	assert.Equal(t, StatusCanceled, canceled.Status)
-	assert.Equal(t, "task was canceled", canceled.ResultError)
+	assert.Equal(t, "operator request", canceled.ResultError)
 }
 
 func TestTaskRuntimeCommitReconcilesConcurrentCancellation_BitsUT(t *testing.T) {
@@ -720,7 +725,7 @@ func TestTaskRuntimeCommitReconcilesConcurrentCancellation_BitsUT(t *testing.T) 
 	runtime := newTaskRuntime(store, started.Spec.ID, started.Attempt, started.Version)
 
 	requested, err := store.RequestCancel(context.Background(), &RequestCancelRequest{
-		TaskID: started.Spec.ID, ExpectedVersion: started.Version,
+		TaskID: started.Spec.ID, ExpectedVersion: started.Version, Reason: "operator request",
 	})
 	require.NoError(t, err)
 	assert.Equal(t, StatusRunning, requested.Status)
@@ -732,7 +737,7 @@ func TestTaskRuntimeCommitReconcilesConcurrentCancellation_BitsUT(t *testing.T) 
 	require.NoError(t, err)
 	assert.Equal(t, StatusCanceled, committed.Status)
 	assert.Empty(t, committed.ResultData)
-	assert.Equal(t, canceledError, committed.ResultError)
+	assert.Equal(t, "operator request", committed.ResultError)
 }
 
 func TestInMemoryStoreRunningAttemptCanCommitCanceled_BitsUT(t *testing.T) {

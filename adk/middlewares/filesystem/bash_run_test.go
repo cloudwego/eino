@@ -265,7 +265,7 @@ func TestManagedExecuteTool_Foreground(t *testing.T) {
 
 	// The run is tracked by the Manager and tagged as a bash task.
 	task := waitTerminalTask(t, mgr)
-	assert.Equal(t, backgroundtask.StateCompleted, task.Status)
+	assert.Equal(t, backgroundtask.StatusCompleted, task.Status)
 	assert.Equal(t, "echo hi", task.Spec.Description)
 	events, err := mgr.ReadRecentTaskEvents(context.Background(), &backgroundtask.ReadRecentTaskEventsRequest{
 		TaskID: task.Spec.ID,
@@ -305,7 +305,7 @@ func TestManagedExecuteTool_Background(t *testing.T) {
 
 	close(release)
 	task := waitTerminalTask(t, mgr)
-	assert.Equal(t, backgroundtask.StateCompleted, task.Status)
+	assert.Equal(t, backgroundtask.StatusCompleted, task.Status)
 
 	// The background-launch message reports the (reserved) output-file path so the
 	// agent can read it once the task completes.
@@ -344,7 +344,7 @@ func TestManagedExecuteTool_TimeoutMovesToBackground(t *testing.T) {
 	assert.Contains(t, result, "Command running in background with ID:")
 
 	task := waitTerminalTask(t, mgr)
-	assert.Equal(t, backgroundtask.StateCompleted, task.Status)
+	assert.Equal(t, backgroundtask.StatusCompleted, task.Status)
 	assert.Equal(t, "slow done", string(task.ResultData))
 }
 
@@ -369,7 +369,7 @@ func TestManagedExecuteTool_TimeoutKills(t *testing.T) {
 	require.ErrorContains(t, err, "timed out after 50ms")
 
 	task := waitTerminalTask(t, mgr)
-	assert.Equal(t, backgroundtask.StateFailed, task.Status)
+	assert.Equal(t, backgroundtask.StatusFailed, task.Status)
 	assert.Equal(t, "timed out after 50ms", task.ResultError)
 }
 
@@ -418,7 +418,7 @@ func TestManagedExecuteTool_StreamingForeground(t *testing.T) {
 	assert.Contains(t, got, "chunk3")
 
 	task := waitTerminalTask(t, mgr)
-	assert.Equal(t, backgroundtask.StateCompleted, task.Status)
+	assert.Equal(t, backgroundtask.StatusCompleted, task.Status)
 	// The streamed chunks are also the persisted result.
 	assert.Contains(t, string(task.ResultData), "chunk1")
 	assert.Contains(t, string(task.ResultData), "chunk3")
@@ -451,7 +451,7 @@ func TestManagedExecuteTool_StreamingExplicitBackground(t *testing.T) {
 	assert.NotContains(t, got, "is running in the background")
 
 	task := waitTerminalTask(t, mgr)
-	assert.Equal(t, backgroundtask.StateCompleted, task.Status)
+	assert.Equal(t, backgroundtask.StatusCompleted, task.Status)
 	assert.Contains(t, string(task.ResultData), "chunk1")
 	// The streamed output was teed to the output file as it drained in the background.
 	path, found := filesystemOutput(t, backend)
@@ -531,7 +531,7 @@ func TestManagedExecuteTool_StreamingInterimOutput(t *testing.T) {
 	}
 
 	task := waitTerminalTask(t, mgr)
-	assert.Equal(t, backgroundtask.StateCompleted, task.Status)
+	assert.Equal(t, backgroundtask.StatusCompleted, task.Status)
 	final, err := backend.Read(context.Background(), &filesystem.ReadRequest{FilePath: path})
 	require.NoError(t, err)
 	assert.Contains(t, final.Content, "first")
@@ -802,7 +802,7 @@ func TestManagedExecuteTool_StreamingSourceError_ClosesStream(t *testing.T) {
 	sr.Close()
 
 	task := waitTerminalTask(t, mgr)
-	assert.Equal(t, backgroundtask.StateFailed, task.Status)
+	assert.Equal(t, backgroundtask.StatusFailed, task.Status)
 
 	opens := atomic.LoadInt32(&counter.opens)
 	closes := atomic.LoadInt32(&counter.closes)

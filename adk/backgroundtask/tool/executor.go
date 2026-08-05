@@ -182,7 +182,9 @@ func (e *executor) Execute(
 		if err = run.Stop(context.Background()); err != nil {
 			return nil, fmt.Errorf("backgroundtask/tool: stop recovered canceled operation: %w", err)
 		}
-		return &backgroundtask.ExecutionResult{Status: backgroundtask.StatusCanceled}, nil
+		return &backgroundtask.ExecutionResult{
+			Status: backgroundtask.StatusCanceled, Error: task.CancelReason,
+		}, nil
 	}
 
 	waitCtx, cancelWait := context.WithCancel(ctx)
@@ -264,7 +266,9 @@ func (e *executor) Execute(
 					return nil, fmt.Errorf("backgroundtask/tool: stop operation: %w", err)
 				}
 				cancelWait()
-				return &backgroundtask.ExecutionResult{Status: backgroundtask.StatusCanceled}, nil
+				return &backgroundtask.ExecutionResult{
+					Status: backgroundtask.StatusCanceled, Error: control.Reason,
+				}, nil
 			case backgroundtask.ControlTimeout:
 				stopErr := run.Stop(context.Background())
 				cancelWait()

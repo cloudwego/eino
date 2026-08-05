@@ -329,13 +329,16 @@ func waitableStatus(status bgtask.Status) bool {
 
 type taskStopInput struct {
 	TaskID string `json:"task_id" jsonschema:"required" jsonschema_description:"The ID of the background task to stop"`
+	Reason string `json:"reason,omitempty" jsonschema_description:"Optional reason for stopping the background task"`
 }
 
 func newTaskStopTool(mgr *bgtask.Manager, cfg *ToolConfig) (tool.InvokableTool, error) {
 	name := selectToolName(cfg, taskStopToolName)
 	desc := selectToolDesc(cfg, taskStopToolDescription, taskStopToolDescriptionChinese)
 	return utils.InferTool(name, desc, func(ctx context.Context, input taskStopInput) (string, error) {
-		task, err := mgr.RequestCancel(ctx, input.TaskID)
+		task, err := mgr.RequestCancel(
+			ctx, input.TaskID, bgtask.WithCancellationReason(input.Reason),
+		)
 		if err != nil {
 			return fmt.Sprintf("Failed to stop task %q: %s", input.TaskID, err.Error()), nil
 		}

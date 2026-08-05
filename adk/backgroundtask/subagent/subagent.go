@@ -524,9 +524,13 @@ func (e *Executor[M]) controlResult(
 ) (*backgroundtask.ExecutionResult, error, bool) {
 	switch control.Kind {
 	case backgroundtask.ControlStop:
+		reason := control.Reason
+		if reason == "" {
+			reason = "task was canceled"
+		}
 		return &backgroundtask.ExecutionResult{
 			Status: backgroundtask.StatusCanceled,
-			Error:  "canceled",
+			Error:  reason,
 		}, nil, true
 	case backgroundtask.ControlDrain:
 		if _, exists, err := e.checkPointStore.Get(
