@@ -462,10 +462,10 @@ func TestInMemoryStoreHeartbeatSuspensionReleaseAndWait(t *testing.T) {
 	require.Equal(t, "checkpoint", string(released.Checkpoint))
 }
 
-func TestInMemoryStoreReportOutputFailureIsFencedAndFirstErrorWins_BitsUT(t *testing.T) {
+func TestInMemoryStoreReportTranscriptFailureIsFencedAndFirstErrorWins_BitsUT(t *testing.T) {
 	store := NewInMemoryStore(nil)
 	started := createAndStart(t, store, "output")
-	reported, err := store.ReportOutputFailure(context.Background(), &ReportOutputFailureRequest{
+	reported, err := store.ReportTranscriptFailure(context.Background(), &ReportTranscriptFailureRequest{
 		TaskID: "output", ExpectedVersion: started.Version, Error: "write failed",
 	})
 	require.NoError(t, err)
@@ -473,14 +473,14 @@ func TestInMemoryStoreReportOutputFailureIsFencedAndFirstErrorWins_BitsUT(t *tes
 	assert.Equal(t, started.Version+1, reported.Version)
 	assert.Equal(t, StatusRunning, reported.Status)
 
-	repeated, err := store.ReportOutputFailure(context.Background(), &ReportOutputFailureRequest{
+	repeated, err := store.ReportTranscriptFailure(context.Background(), &ReportTranscriptFailureRequest{
 		TaskID: "output", ExpectedVersion: reported.Version, Error: "close failed",
 	})
 	require.NoError(t, err)
 	assert.Equal(t, "write failed", repeated.OutputFileErr)
 	assert.Equal(t, reported.Version, repeated.Version)
 
-	_, err = store.ReportOutputFailure(context.Background(), &ReportOutputFailureRequest{
+	_, err = store.ReportTranscriptFailure(context.Background(), &ReportTranscriptFailureRequest{
 		TaskID: "output", ExpectedVersion: started.Version, Error: "stale attempt",
 	})
 	assert.ErrorIs(t, err, ErrVersionConflict)
@@ -785,8 +785,8 @@ func TestStoreValidationBoundaries(t *testing.T) {
 	require.Error(t, validateCreateTaskRequest(&CreateTaskRequest{
 		Spec: validSpec("policy"), LeaseExpiryPolicy: LeaseExpiryPolicy("unknown"),
 	}))
-	require.Error(t, validateOutputFailure(""))
-	require.Error(t, validateOutputFailure(string(make([]byte, 4097))))
+	require.Error(t, validateTranscriptFailure(""))
+	require.Error(t, validateTranscriptFailure(string(make([]byte, 4097))))
 
 	snapshotCases := []struct {
 		name        string

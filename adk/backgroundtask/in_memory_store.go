@@ -329,11 +329,11 @@ func (s *InMemoryStore) ReadRecentTaskEvents(
 	return result, nil
 }
 
-func (s *InMemoryStore) ReportOutputFailure(_ context.Context, req *ReportOutputFailureRequest) (*Task, error) {
+func (s *InMemoryStore) ReportTranscriptFailure(_ context.Context, req *ReportTranscriptFailureRequest) (*Task, error) {
 	if req == nil {
-		return nil, errors.New("backgroundtask: report output failure request is required")
+		return nil, errors.New("backgroundtask: report transcript failure request is required")
 	}
-	if err := validateOutputFailure(req.Error); err != nil {
+	if err := validateTranscriptFailure(req.Error); err != nil {
 		return nil, err
 	}
 	s.mu.Lock()

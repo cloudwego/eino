@@ -116,7 +116,9 @@ func TestSimplifiedPublicModelHasNoOverlappingStateFields_BitsUT(t *testing.T) {
 	assertFieldsPresent(t, reflect.TypeOf(Config{}), "Tasks", "TaskEvents", "Executors", "IDGen")
 	assertFieldsAbsent(t, reflect.TypeOf(Config{}), "Store")
 	assertMethodsAbsent(t, reflect.TypeOf((*TaskStore)(nil)).Elem(),
-		"AppendTaskEvent", "ReadRecentTaskEvents")
+		"AppendTaskEvent", "ReadRecentTaskEvents", "ReportOutputFailure")
+	assertMethodsPresent(t, reflect.TypeOf((*TaskStore)(nil)).Elem(),
+		"ReportTranscriptFailure")
 	assertMethodsPresent(t, reflect.TypeOf((*TaskEventStore)(nil)).Elem(),
 		"AppendTaskEvent", "ReadRecentTaskEvents")
 	assertMethodsAbsent(t, reflect.TypeOf((*Manager)(nil)),
@@ -131,6 +133,11 @@ func TestSimplifiedPublicModelHasNoOverlappingStateFields_BitsUT(t *testing.T) {
 	assertMethodsPresent(t, reflect.TypeOf((*InMemoryStore)(nil)),
 		"ListSuspended", "AckCancel", "ReleaseSuspension")
 	assertMethodsAbsent(t, reflect.TypeOf((*Executor)(nil)).Elem(), "ValidateResume")
+	assertMethodsAbsent(t, reflect.TypeOf((*ExecutionRuntime)(nil)).Elem(),
+		"TaskID", "AppendTaskEvent", "ReportOutputFailure")
+	assertMethodsPresent(t, reflect.TypeOf((*ExecutionRuntime)(nil)).Elem(),
+		"EmitProgress", "ReportTranscriptFailure")
+	assertFieldsPresent(t, reflect.TypeOf(ProgressEmission{}), "EventID", "FirstEmission")
 	assertFieldsPresent(t, reflect.TypeOf(TaskEvent{}), "EventID", "TaskID", "Data", "CreatedAt")
 	assertFieldsAbsent(t, reflect.TypeOf(TaskEvent{}), "SourceID", "Sequence", "Attempt")
 }

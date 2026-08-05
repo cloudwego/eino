@@ -32,21 +32,20 @@ import (
 )
 
 type replayRuntimeStub struct {
-	result *backgroundtask.AppendTaskEventResult
+	result backgroundtask.ProgressEmission
 }
 
-func (*replayRuntimeStub) TaskID() string { return "attack-task" }
 func (*replayRuntimeStub) Controls() <-chan backgroundtask.ControlRequest {
 	return make(chan backgroundtask.ControlRequest)
 }
-func (r *replayRuntimeStub) AppendTaskEvent(
+func (r *replayRuntimeStub) EmitProgress(
 	context.Context,
 	string,
 	[]byte,
-) (*backgroundtask.AppendTaskEventResult, error) {
+) (backgroundtask.ProgressEmission, error) {
 	return r.result, nil
 }
-func (*replayRuntimeStub) ReportOutputFailure(context.Context, string) error { return nil }
+func (*replayRuntimeStub) ReportTranscriptFailure(context.Context, error) error { return nil }
 
 func newAttackManagedTool(
 	t *testing.T,
@@ -189,11 +188,8 @@ func TestAttack_RecoverableUpdateRequiresEventID(t *testing.T) {
 
 func TestAttack_PersistedReplayRepairsMissingMaterialization(t *testing.T) {
 	materializer := &materializerStub{}
-	runtime := &replayRuntimeStub{result: &backgroundtask.AppendTaskEventResult{
-		Event: &backgroundtask.TaskEvent{
-			TaskID: "attack-task", EventID: "persisted", Data: []byte("encoded"),
-		},
-		Inserted: false,
+	runtime := &replayRuntimeStub{result: backgroundtask.ProgressEmission{
+		EventID: "persisted", FirstEmission: false,
 	}}
 	enabled := true
 	err := (&executor{recoverable: true}).persistUpdate(

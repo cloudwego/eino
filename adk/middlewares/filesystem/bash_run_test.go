@@ -60,18 +60,17 @@ type outputRuntimeStub struct {
 	reportErr error
 }
 
-func (*outputRuntimeStub) TaskID() string { return "task" }
 func (*outputRuntimeStub) Controls() <-chan backgroundtask.ControlRequest {
 	return make(chan backgroundtask.ControlRequest)
 }
-func (*outputRuntimeStub) AppendTaskEvent(
+func (*outputRuntimeStub) EmitProgress(
 	context.Context,
 	string,
 	[]byte,
-) (*backgroundtask.AppendTaskEventResult, error) {
-	return nil, nil
+) (backgroundtask.ProgressEmission, error) {
+	return backgroundtask.ProgressEmission{}, nil
 }
-func (r *outputRuntimeStub) ReportOutputFailure(context.Context, string) error {
+func (r *outputRuntimeStub) ReportTranscriptFailure(context.Context, error) error {
 	return r.reportErr
 }
 

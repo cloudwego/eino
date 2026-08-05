@@ -74,12 +74,20 @@ type ExecutionResult struct {
 	Error      string
 }
 
+// ProgressEmission reports the stable identity and replay status of one
+// executor progress event.
+type ProgressEmission struct {
+	EventID string
+	// FirstEmission is false for an idempotent replay of an event already
+	// accepted for this task.
+	FirstEmission bool
+}
+
 // ExecutionRuntime exposes attempt-scoped coordination capabilities to an executor.
 type ExecutionRuntime interface {
-	TaskID() string
 	Controls() <-chan ControlRequest
-	AppendTaskEvent(context.Context, string, []byte) (*AppendTaskEventResult, error)
-	ReportOutputFailure(context.Context, string) error
+	EmitProgress(context.Context, string, []byte) (ProgressEmission, error)
+	ReportTranscriptFailure(context.Context, error) error
 }
 
 // Executor reconstructs and runs durable work from a task Spec.
@@ -204,26 +212,35 @@ func newTaskRuntime(
 	}
 }
 
-func (r *taskRuntime) TaskID() string { return r.taskID }
-
 func (r *taskRuntime) Controls() <-chan ControlRequest { return r.controls }
 
-func (r *taskRuntime) AppendTaskEvent(
+func (r *taskRuntime) EmitProgress(
 	ctx context.Context,
 	eventID string,
 	data []byte,
-) (*AppendTaskEventResult, error) {
+) (ProgressEmission, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.poison != nil {
-		return nil, r.poison
+		return ProgressEmission{}, r.poison
 	}
 	if eventID == "" {
 		eventID = uuid.NewString()
 	}
-	return r.taskEvents.AppendTaskEvent(ctx, &AppendTaskEventRequest{
+	result, err := r.taskEvents.AppendTaskEvent(ctx, &AppendTaskEventRequest{
 		TaskID: r.taskID, Attempt: r.attempt, EventID: eventID, Data: cloneBytes(data),
 	})
+	if err != nil {
+		return ProgressEmission{}, err
+	}
+	if result == nil || result.Event == nil || result.Event.EventID == "" {
+		return ProgressEmission{}, errors.New(
+			"backgroundtask: task event store returned an incomplete append result",
+		)
+	}
+	return ProgressEmission{
+		EventID: result.Event.EventID, FirstEmission: result.Inserted,
+	}, nil
 }
 
 func (r *taskRuntime) requestControl(kind ControlKind) bool {
@@ -264,14 +281,14 @@ func controlPriority(kind ControlKind) int {
 	}
 }
 
-func (r *taskRuntime) ReportOutputFailure(ctx context.Context, message string) error {
+func (r *taskRuntime) ReportTranscriptFailure(ctx context.Context, cause error) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.poison != nil {
 		return r.poison
 	}
-	task, err := r.tasks.ReportOutputFailure(ctx, &ReportOutputFailureRequest{
-		TaskID: r.taskID, ExpectedVersion: r.version, Error: boundedError(errors.New(message)),
+	task, err := r.tasks.ReportTranscriptFailure(ctx, &ReportTranscriptFailureRequest{
+		TaskID: r.taskID, ExpectedVersion: r.version, Error: boundedError(cause),
 	})
 	if err != nil {
 		return err

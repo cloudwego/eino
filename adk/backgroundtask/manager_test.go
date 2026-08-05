@@ -397,23 +397,22 @@ func TestTimeoutControlPrecedence(t *testing.T) {
 	})
 }
 
-func TestTaskRuntimeOutputFailureAndHeartbeat(t *testing.T) {
+func TestTaskRuntimeTranscriptFailureAndHeartbeat(t *testing.T) {
 	store := NewInMemoryStore(nil)
 	started := createAndStart(t, store, "runtime")
 	runtime := newTaskRuntime(store, store, started.Spec.ID, started.Attempt, started.Version)
-	require.Equal(t, started.Spec.ID, runtime.TaskID())
 
-	output, err := runtime.AppendTaskEvent(context.Background(), "", []byte("output"))
+	output, err := runtime.EmitProgress(context.Background(), "", []byte("output"))
 	require.NoError(t, err)
-	require.NotNil(t, output.Event)
-	require.NotEmpty(t, output.Event.EventID)
-	require.True(t, output.Inserted)
-	supplied, err := runtime.AppendTaskEvent(context.Background(), "caller-event", []byte("supplied"))
+	require.NotEmpty(t, output.EventID)
+	require.True(t, output.FirstEmission)
+	supplied, err := runtime.EmitProgress(context.Background(), "caller-event", []byte("supplied"))
 	require.NoError(t, err)
-	require.NotNil(t, supplied.Event)
-	require.Equal(t, "caller-event", supplied.Event.EventID)
-	require.True(t, supplied.Inserted)
-	require.NoError(t, runtime.ReportOutputFailure(context.Background(), "file failed"))
+	require.Equal(t, "caller-event", supplied.EventID)
+	require.True(t, supplied.FirstEmission)
+	require.NoError(t, runtime.ReportTranscriptFailure(
+		context.Background(), errors.New("file failed"),
+	))
 	require.NoError(t, runtime.heartbeat(context.Background()))
 
 	current, err := store.Get(context.Background(), started.Spec.ID)

@@ -74,7 +74,7 @@ type TaskStore interface {
 	ListSuspended(context.Context, *ListSuspendedRequest) (*ListSuspendedResult, error)
 	Start(context.Context, *StartTaskRequest) (*Task, error)
 	Heartbeat(context.Context, *HeartbeatRequest) (*Task, error)
-	ReportOutputFailure(context.Context, *ReportOutputFailureRequest) (*Task, error)
+	ReportTranscriptFailure(context.Context, *ReportTranscriptFailureRequest) (*Task, error)
 	Complete(context.Context, *CompleteTaskRequest) (*Task, error)
 	Fail(context.Context, *FailTaskRequest) (*Task, error)
 	WaitInput(context.Context, *WaitInputTaskRequest) (*Task, error)
@@ -155,12 +155,12 @@ func validateCreateTaskRequest(req *CreateTaskRequest) error {
 	return nil
 }
 
-func validateOutputFailure(message string) error {
+func validateTranscriptFailure(message string) error {
 	if message == "" {
-		return errors.New("backgroundtask: output failure requires an error")
+		return errors.New("backgroundtask: transcript failure requires an error")
 	}
 	if len(message) > 4096 {
-		return errors.New("backgroundtask: output failure exceeds configured bounds")
+		return errors.New("backgroundtask: transcript failure exceeds configured bounds")
 	}
 	return nil
 }

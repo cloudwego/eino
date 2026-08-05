@@ -384,28 +384,25 @@ func (e *executor) persistUpdate(
 	if err != nil {
 		return fmt.Errorf("backgroundtask/tool: encode update: %w", err)
 	}
-	result, err := runtime.AppendTaskEvent(ctx, update.EventID, data)
+	result, err := runtime.EmitProgress(ctx, update.EventID, data)
 	if err != nil {
 		return fmt.Errorf("backgroundtask/tool: persist update: %w", err)
 	}
-	if result == nil || result.Event == nil {
-		return errors.New("backgroundtask/tool: task event store returned a nil event")
-	}
 	if *materializerEnabled && callerSuppliedEventID {
 		err = registration.Materializer.AppendOutput(ctx, &MaterializeOutputRequest{
-			TaskID: task.Spec.ID, EventID: result.Event.EventID,
+			TaskID: task.Spec.ID, EventID: result.EventID,
 			Path: task.Spec.OutputFile, Data: append([]byte(nil), update.Data...),
 		})
 		if err != nil {
 			*materializerEnabled = false
-			if reportErr := runtime.ReportOutputFailure(ctx, err.Error()); reportErr != nil {
-				return fmt.Errorf("backgroundtask/tool: report output materialization failure: %w", reportErr)
+			if reportErr := runtime.ReportTranscriptFailure(ctx, err); reportErr != nil {
+				return fmt.Errorf("backgroundtask/tool: report transcript materialization failure: %w", reportErr)
 			}
 		}
 	}
-	if result.Inserted && projection != nil {
+	if result.FirstEmission && projection != nil {
 		projected := cloneUpdate(update)
-		projected.EventID = result.Event.EventID
+		projected.EventID = result.EventID
 		projection.send(ctx, foreground.ProjectionDetached(ctx), projected)
 	}
 	return nil

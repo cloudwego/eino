@@ -195,7 +195,7 @@ func (r *Runner) RunStream(
 				chunks <- streamChunk{err: recvErr}
 				return "", recvErr
 			}
-			if _, appendErr := runtime.AppendTaskEvent(workCtx, "", []byte(chunk)); appendErr != nil {
+			if _, appendErr := runtime.EmitProgress(workCtx, "", []byte(chunk)); appendErr != nil {
 				chunks <- streamChunk{err: appendErr}
 				return "", appendErr
 			}

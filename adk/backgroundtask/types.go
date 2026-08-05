@@ -123,8 +123,8 @@ type HeartbeatRequest struct {
 	ExpectedVersion int64
 }
 
-// ReportOutputFailureRequest records the first failure of an optional output transcript.
-type ReportOutputFailureRequest struct {
+// ReportTranscriptFailureRequest records the first failure of an optional output transcript.
+type ReportTranscriptFailureRequest struct {
 	TaskID          string
 	ExpectedVersion int64
 	Error           string

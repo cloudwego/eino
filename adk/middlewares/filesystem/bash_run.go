@@ -146,8 +146,8 @@ func (w *bashOutputWriter) fail(err error) error {
 	if w.runtime == nil {
 		return nil
 	}
-	if reportErr := w.runtime.ReportOutputFailure(w.ctx, err.Error()); reportErr != nil {
-		return fmt.Errorf("report output failure after %v: %w", err, reportErr)
+	if reportErr := w.runtime.ReportTranscriptFailure(w.ctx, err); reportErr != nil {
+		return fmt.Errorf("report transcript failure after %v: %w", err, reportErr)
 	}
 	return nil
 }
@@ -246,7 +246,7 @@ func bashWork(sb filesystem.Shell, req *filesystem.ExecuteRequest, w *bashOutput
 			return "", err
 		}
 		if out != "" {
-			if _, err = runtime.AppendTaskEvent(ctx, "", []byte(out)); err != nil {
+			if _, err = runtime.EmitProgress(ctx, "", []byte(out)); err != nil {
 				return "", err
 			}
 		}
