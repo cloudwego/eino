@@ -37,6 +37,15 @@ func mustNewBackgroundManager(
 	config *backgroundtask.Config,
 ) *backgroundtask.Manager {
 	t.Helper()
+	if config == nil {
+		config = &backgroundtask.Config{}
+	} else {
+		copy := *config
+		config = &copy
+	}
+	if config.SendTaskCreatedEvent == nil {
+		config.SendTaskCreatedEvent = func(context.Context, *backgroundtask.Task) error { return nil }
+	}
 	manager, err := backgroundtask.New(ctx, config)
 	require.NoError(t, err)
 	return manager

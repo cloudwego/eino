@@ -119,6 +119,11 @@ type Config struct {
 	TaskEvents TaskEventStore
 	// Executors resolves serialized task intent to local implementations.
 	Executors *ExecutorRegistry
+	// SendTaskCreatedEvent emits a TaskCreated timeline event after a task is
+	// durably created. It may be called concurrently. Tasks without a parent
+	// SessionID do not emit this event. Use TaskCreatedSessionEventSender so the
+	// active Runner assigns and persists the event in causal turn order.
+	SendTaskCreatedEvent func(context.Context, *Task) error
 	// IDGen, when set, decides the full ID of every task created by this Manager.
 	// If nil, Manager uses its default task-type-prefixed Base64URL ID.
 	//
@@ -160,15 +165,17 @@ func WithCancellationReason(reason string) RequestCancelOption {
 
 // Manager owns TaskStore-backed lifecycle and worker coordination.
 type Manager struct {
-	tasks          TaskStore
-	taskEvents     TaskEventStore
-	executors      *ExecutorRegistry
-	heartbeatEvery time.Duration
-	attemptsMu     sync.Mutex
-	activeAttempts map[string]*activeAttempt
-	mu             sync.Mutex
-	closed         bool
-	idGen          IDGenerator
+	tasks                   TaskStore
+	taskEvents              TaskEventStore
+	executors               *ExecutorRegistry
+	heartbeatEvery          time.Duration
+	attemptsMu              sync.Mutex
+	activeAttempts          map[string]*activeAttempt
+	mu                      sync.Mutex
+	closed                  bool
+	failedTaskCreatedEvents map[string]struct{}
+	idGen                   IDGenerator
+	sendTaskCreatedEvent    func(context.Context, *Task) error
 }
 
 // New creates a Manager. A nil Config installs the in-memory reference stores
@@ -178,10 +185,11 @@ type Manager struct {
 func New(_ context.Context, conf *Config) (*Manager, error) {
 	defaults := NewInMemoryStore(nil)
 	m := &Manager{
-		heartbeatEvery: 10 * time.Second,
-		activeAttempts: make(map[string]*activeAttempt),
-		tasks:          defaults,
-		taskEvents:     defaults,
+		heartbeatEvery:          10 * time.Second,
+		activeAttempts:          make(map[string]*activeAttempt),
+		failedTaskCreatedEvents: make(map[string]struct{}),
+		tasks:                   defaults,
+		taskEvents:              defaults,
 	}
 	m.executors = NewExecutorRegistry()
 	if conf != nil {
@@ -203,6 +211,7 @@ func New(_ context.Context, conf *Config) (*Manager, error) {
 		if conf.Executors != nil {
 			m.executors = conf.Executors
 		}
+		m.sendTaskCreatedEvent = conf.SendTaskCreatedEvent
 		m.idGen = conf.IDGen
 	}
 	return m, nil

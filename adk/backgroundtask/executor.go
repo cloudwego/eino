@@ -17,6 +17,7 @@
 package backgroundtask
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -486,7 +487,11 @@ func (m *Manager) AllocateTaskID(ctx context.Context, request *AllocateTaskIDReq
 	return id, nil
 }
 
-// Submit validates serialized intent and persists a pending task.
+// Submit validates serialized intent, persists a pending task, and emits its
+// TaskCreated parent-session event before returning success. If event emission
+// fails after persistence, Submit returns the task with the error; retrying the
+// identical Spec on the same Manager retries that failed emission. Other
+// duplicate task IDs return ErrAlreadyExists.
 func (m *Manager) Submit(ctx context.Context, spec Spec) (*Task, error) {
 	if spec.ID == "" {
 		return nil, errors.New("backgroundtask: submit requires a pre-allocated task id")
@@ -511,16 +516,70 @@ func (m *Manager) Submit(ctx context.Context, spec Spec) (*Task, error) {
 			)
 		}
 	}
+	if spec.SessionID != "" && m.sendTaskCreatedEvent == nil {
+		return nil, errors.New(
+			"backgroundtask: task-created session event sender is required for parent-session tasks",
+		)
+	}
 	if err := executor.ValidateSpec(cloneSpec(spec)); err != nil {
 		return nil, fmt.Errorf("backgroundtask: validate spec: %w", err)
 	}
+	policy := executor.LeaseExpiryPolicy()
 	task, err := m.tasks.Create(ctx, &CreateTaskRequest{
-		Spec: spec, LeaseExpiryPolicy: executor.LeaseExpiryPolicy(),
+		Spec: spec, LeaseExpiryPolicy: policy,
 	})
 	if err != nil {
-		return nil, err
+		if !errors.Is(err, ErrAlreadyExists) || spec.SessionID == "" ||
+			!m.taskCreatedEventFailed(spec.ID) {
+			return nil, err
+		}
+		existing, loadErr := m.tasks.Get(ctx, spec.ID)
+		if loadErr != nil || !sameSpec(existing.Spec, spec) ||
+			existing.LeaseExpiryPolicy != policy {
+			return nil, err
+		}
+		task = existing
+	}
+	if spec.SessionID != "" {
+		if sendErr := m.sendTaskCreatedEvent(ctx, cloneTask(task)); sendErr != nil {
+			m.setTaskCreatedEventFailed(task.Spec.ID, true)
+			return task, fmt.Errorf(
+				"backgroundtask: send task-created session event for %q: %w",
+				task.Spec.ID,
+				sendErr,
+			)
+		}
+		m.setTaskCreatedEventFailed(task.Spec.ID, false)
 	}
 	return task, nil
+}
+
+func (m *Manager) taskCreatedEventFailed(taskID string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	_, failed := m.failedTaskCreatedEvents[taskID]
+	return failed
+}
+
+func (m *Manager) setTaskCreatedEventFailed(taskID string, failed bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if failed {
+		m.failedTaskCreatedEvents[taskID] = struct{}{}
+		return
+	}
+	delete(m.failedTaskCreatedEvents, taskID)
+}
+
+func sameSpec(left, right Spec) bool {
+	return left.ID == right.ID &&
+		left.ExecutorKey == right.ExecutorKey &&
+		left.Kind == right.Kind &&
+		bytes.Equal(left.Payload, right.Payload) &&
+		left.Description == right.Description &&
+		left.OutputFile == right.OutputFile &&
+		left.SessionID == right.SessionID &&
+		left.NotifySession == right.NotifySession
 }
 
 // Get returns the authoritative task snapshot.

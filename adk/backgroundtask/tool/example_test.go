@@ -53,6 +53,9 @@ func ExampleNewManagedTool() {
 	executors := backgroundtask.NewExecutorRegistry()
 	manager, err := backgroundtask.New(context.Background(), &backgroundtask.Config{
 		Executors: executors,
+		SendTaskCreatedEvent: func(context.Context, *backgroundtask.Task) error {
+			return nil
+		},
 		IDGen: func(context.Context, *backgroundtask.AllocateTaskIDRequest) (string, error) {
 			return "task_video", nil
 		},

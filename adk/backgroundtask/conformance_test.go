@@ -44,6 +44,15 @@ type scriptedExecutor struct {
 
 func mustNewManager(t testing.TB, ctx context.Context, config *Config) *Manager {
 	t.Helper()
+	if config == nil {
+		config = &Config{}
+	} else {
+		copy := *config
+		config = &copy
+	}
+	if config.SendTaskCreatedEvent == nil {
+		config.SendTaskCreatedEvent = func(context.Context, *Task) error { return nil }
+	}
 	manager, err := New(ctx, config)
 	require.NoError(t, err)
 	return manager
@@ -129,7 +138,8 @@ func TestSimplifiedPublicModelHasNoOverlappingStateFields_BitsUT(t *testing.T) {
 	assertFieldsPresent(t, reflect.TypeOf(ListTaskEventsRequest{}),
 		"TaskID", "Cursor", "Limit", "NewestFirst")
 	assertFieldsPresent(t, reflect.TypeOf(ListTaskEventsResult{}), "Events", "NextCursor")
-	assertFieldsPresent(t, reflect.TypeOf(Config{}), "Tasks", "TaskEvents", "Executors", "IDGen")
+	assertFieldsPresent(t, reflect.TypeOf(Config{}),
+		"Tasks", "TaskEvents", "Executors", "SendTaskCreatedEvent", "IDGen")
 	assertFieldsAbsent(t, reflect.TypeOf(Config{}), "Store")
 	assertMethodsAbsent(t, reflect.TypeOf((*TaskStore)(nil)).Elem(),
 		"AppendTaskEvent", "ListTaskEvents", "ReadRecentTaskEvents", "ReportOutputFailure")
