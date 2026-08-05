@@ -59,20 +59,15 @@ const (
 	NotificationCanceled NotificationKind = "canceled"
 )
 
-// Notification is only a durable wake-up pointer.
-// Dispatcher loads authoritative task data before session inbox delivery.
+// Notification is a durable session-routing pointer to one task lifecycle
+// transition. Consumers load authoritative task state by TaskID when needed.
 type Notification struct {
 	ID        string
 	TaskID    string
+	SessionID string
 	Version   int64
 	Kind      NotificationKind
 	CreatedAt time.Time
-
-	// Task is nil for pointer-only outbox storage and populated from the latest
-	// authoritative snapshot before session-inbox delivery. That snapshot may
-	// be newer than Version and Kind, which identify the transition that
-	// created this notification.
-	Task *Task
 }
 
 // CreateTaskRequest creates a task from immutable serialized intent and the

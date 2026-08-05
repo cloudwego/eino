@@ -120,10 +120,10 @@ func TestSimplifiedPublicModelHasNoOverlappingStateFields_BitsUT(t *testing.T) {
 		deprecatedTaskCursorField, "LatestProgress", "TransitionVersion", "CheckpointVersion",
 		"CancelTransitionVersion", "LeaseOwner", "LeaseGeneration", "LeaseExpiresAt")
 	assertFieldsAbsent(t, reflect.TypeOf(Notification{}),
-		"Status", "Progress", "Checkpoint", "Result", "Reason", "SessionID",
+		"Status", "Progress", "Checkpoint", "Result", "Reason", "Task",
 		deprecatedNotificationCursorField, "TransitionVersion", "NotificationID", "EventKind", "Target")
 	assertFieldsPresent(t, reflect.TypeOf(Notification{}),
-		"ID", "Version", "Kind", "Task")
+		"ID", "TaskID", "SessionID", "Version", "Kind", "CreatedAt")
 	assertFieldsPresent(t, reflect.TypeOf(ReceiveNotificationsRequest{}), "Limit", "LeaseDuration")
 	assertFieldsAbsent(t, reflect.TypeOf(ReceiveNotificationsRequest{}), "ConsumerID", "VisibilityTime")
 	assertFieldsPresent(t, reflect.TypeOf(ListTaskEventsRequest{}),

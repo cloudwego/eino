@@ -217,6 +217,5 @@ func cloneNotification(v *Notification) *Notification {
 		return nil
 	}
 	c := *v
-	c.Task = cloneTask(v.Task)
 	return &c
 }

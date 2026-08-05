@@ -840,9 +840,11 @@ func (s *InMemoryStore) enqueueLocked(t *Task, kind NotificationKind) *Notificat
 		return nil
 	}
 	n := &Notification{
-		ID:     fmt.Sprintf("%s:%d:%s", t.Spec.ID, t.Version, kind),
-		TaskID: t.Spec.ID, Version: t.Version,
-		Kind: kind, CreatedAt: s.now(),
+		ID:        fmt.Sprintf("%s:%d:%s", t.Spec.ID, t.Version, kind),
+		TaskID:    t.Spec.ID,
+		SessionID: t.Spec.SessionID,
+		Version:   t.Version,
+		Kind:      kind, CreatedAt: s.now(),
 	}
 	s.outbox = append(s.outbox, &memoryOutboxItem{record: n})
 	return n

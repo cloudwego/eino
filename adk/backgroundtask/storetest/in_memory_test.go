@@ -21,7 +21,6 @@ import (
 	"time"
 
 	"github.com/cloudwego/eino/adk/backgroundtask"
-	"github.com/cloudwego/eino/adk/backgroundtask/sessionnotify"
 )
 
 func TestInMemoryTaskStoreConformance(t *testing.T) {
@@ -63,14 +62,6 @@ func TestInMemoryNotificationOutboxConformance(t *testing.T) {
 			duration time.Duration,
 		) {
 			time.Sleep(2 * duration)
-		},
-	})
-}
-
-func TestMemorySessionInboxConformance(t *testing.T) {
-	RunSessionInboxConformance(t, SessionInboxConfig{
-		New: func(testing.TB) sessionnotify.Inbox {
-			return sessionnotify.NewMemoryInbox()
 		},
 	})
 }
