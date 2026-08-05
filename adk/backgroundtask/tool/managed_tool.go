@@ -377,13 +377,8 @@ func cloneToolInfo(info *schema.ToolInfo) (*schema.ToolInfo, error) {
 }
 
 func sessionIDFromContext(ctx context.Context) (string, error) {
-	if environment, ok := adk.TypedRunnerEnvironmentFromContext[*schema.Message](ctx); ok &&
-		environment.SessionID() != "" {
-		return environment.SessionID(), nil
-	}
-	if environment, ok := adk.TypedRunnerEnvironmentFromContext[*schema.AgenticMessage](ctx); ok &&
-		environment.SessionID() != "" {
-		return environment.SessionID(), nil
+	if sessionID, ok := adk.RunnerSessionID(ctx); ok {
+		return sessionID, nil
 	}
 	return "", errors.New("backgroundtask/tool: runner session is required")
 }

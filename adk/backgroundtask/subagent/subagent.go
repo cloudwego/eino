@@ -40,10 +40,6 @@ const (
 	payloadVersion = 2
 )
 
-// ErrRunnerEnvironmentRequired reports that durable execution was not launched
-// through an ADK Runner carrying session and checkpoint dependencies.
-var ErrRunnerEnvironmentRequired = errors.New("backgroundtask/subagent: runner environment is required")
-
 type taskPayload struct {
 	Version      int    `json:"version"`
 	SubAgentName string `json:"subagent_name"`
@@ -70,10 +66,52 @@ type AgentRegistration[M adk.MessageType] struct {
 	RunOptionsFactory RunOptionsFactory
 }
 
+// ExecutorConfig provides the durable session dependencies shared by every
+// sub-agent task executed by an Executor.
+type ExecutorConfig[M adk.MessageType] struct {
+	// SessionStore persists the child session event log for every executed task.
+	SessionStore adk.SessionEventStore[M]
+	// CheckPointStore persists ADK Runner checkpoints for interruption and recovery.
+	CheckPointStore adk.CheckPointStore
+	// SessionConfig optionally customizes child-session persistence.
+	SessionConfig *adk.SessionConfig[M]
+}
+
 // Executor runs durable sub-agent tasks through ADK Runner checkpointing.
 type Executor[M adk.MessageType] struct {
+	sessionStore    adk.SessionEventStore[M]
+	checkPointStore adk.CheckPointStore
+	sessionConfig   *adk.SessionConfig[M]
+
 	mu            sync.RWMutex
 	registrations map[string]*AgentRegistration[M]
+}
+
+// NewExecutor constructs a durable sub-agent executor with explicit session
+// and checkpoint dependencies.
+func NewExecutor[M adk.MessageType](config *ExecutorConfig[M]) (*Executor[M], error) {
+	if config == nil || config.SessionStore == nil || config.CheckPointStore == nil {
+		return nil, errors.New(
+			"backgroundtask/subagent: session store and checkpoint store are required",
+		)
+	}
+	var sessionConfig *adk.SessionConfig[M]
+	if config.SessionConfig != nil {
+		copy := *config.SessionConfig
+		sessionConfig = &copy
+	}
+	return &Executor[M]{
+		sessionStore: config.SessionStore, checkPointStore: config.CheckPointStore,
+		sessionConfig: sessionConfig,
+	}, nil
+}
+
+// SessionEventStore returns the store used for durable child-session progress.
+func (e *Executor[M]) SessionEventStore() adk.SessionEventStore[M] {
+	if e == nil {
+		return nil
+	}
+	return e.sessionStore
 }
 
 // Key returns the backgroundtask executor key for sub-agent tasks.
@@ -151,14 +189,12 @@ func (e *Executor[M]) ValidateSpec(spec backgroundtask.Spec) error {
 }
 
 // ValidateExecution verifies worker dependencies without mutating external state.
-func (e *Executor[M]) ValidateExecution(ctx context.Context, task *backgroundtask.Task) error {
+func (e *Executor[M]) ValidateExecution(_ context.Context, task *backgroundtask.Task) error {
 	if task == nil {
 		return errors.New("backgroundtask/subagent: task is required")
 	}
-	environment, ok := adk.TypedRunnerEnvironmentFromContext[M](ctx)
-	if !ok || environment.SessionID() == "" ||
-		environment.SessionStore() == nil || environment.CheckPointStore() == nil {
-		return ErrRunnerEnvironmentRequired
+	if e == nil || e.sessionStore == nil || e.checkPointStore == nil {
+		return errors.New("backgroundtask/subagent: executor dependencies are unavailable")
 	}
 	payload, err := validateSpecPayload(task.Spec)
 	if err != nil {
@@ -279,15 +315,11 @@ func (e *Executor[M]) Execute(
 		}
 	}
 	foreground := agenttool.ForegroundExecutionFromContext[*adk.TypedAgentEvent[M]](ctx)
-	environment, ok := adk.TypedRunnerEnvironmentFromContext[M](ctx)
-	if !ok {
-		return nil, ErrRunnerEnvironmentRequired
-	}
 	runner := adk.NewTypedRunner(adk.TypedRunnerConfig[M]{
 		Agent: registration.Agent, EnableStreaming: foreground.EnableStreaming(),
-		CheckPointStore: environment.CheckPointStore(),
-		SessionID:       childSessionID(task.Spec.ID), SessionStore: environment.SessionStore(),
-		SessionConfig: environment.SessionConfig(),
+		CheckPointStore: e.checkPointStore,
+		SessionID:       childSessionID(task.Spec.ID), SessionStore: e.sessionStore,
+		SessionConfig: e.sessionConfig,
 	})
 	cancelOption, cancelRun := adk.WithCancel()
 	controlRequests := make(chan backgroundtask.ControlRequest, 1)
@@ -458,11 +490,7 @@ func (e *Executor[M]) interruptResult(
 	task *backgroundtask.Task,
 	interrupted *adk.InterruptInfo,
 ) (*backgroundtask.ExecutionResult, error) {
-	environment, ok := adk.TypedRunnerEnvironmentFromContext[M](ctx)
-	if !ok {
-		return nil, ErrRunnerEnvironmentRequired
-	}
-	if _, exists, err := environment.CheckPointStore().Get(ctx, checkpointID(task.Spec.ID)); err != nil || !exists {
+	if _, exists, err := e.checkPointStore.Get(ctx, checkpointID(task.Spec.ID)); err != nil || !exists {
 		if err == nil {
 			err = errors.New("backgroundtask/subagent: runner checkpoint is missing")
 		}
@@ -490,7 +518,7 @@ func (e *Executor[M]) interruptResult(
 }
 
 func (e *Executor[M]) controlResult(
-	ctx context.Context,
+	_ context.Context,
 	task *backgroundtask.Task,
 	control backgroundtask.ControlRequest,
 ) (*backgroundtask.ExecutionResult, error, bool) {
@@ -501,11 +529,7 @@ func (e *Executor[M]) controlResult(
 			Error:  "canceled",
 		}, nil, true
 	case backgroundtask.ControlDrain:
-		environment, ok := adk.TypedRunnerEnvironmentFromContext[M](ctx)
-		if !ok {
-			return nil, ErrRunnerEnvironmentRequired, true
-		}
-		if _, exists, err := environment.CheckPointStore().Get(
+		if _, exists, err := e.checkPointStore.Get(
 			context.Background(), checkpointID(task.Spec.ID),
 		); err != nil || !exists {
 			if err == nil {

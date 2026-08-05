@@ -21,12 +21,14 @@ import (
 	"encoding/json"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/adk/backgroundtask"
+	backgroundworker "github.com/cloudwego/eino/adk/backgroundtask/worker"
 	adksession "github.com/cloudwego/eino/adk/session"
 	"github.com/cloudwego/eino/schema"
 )
@@ -196,8 +198,33 @@ func (a *resumableTestAgent) Resume(
 	return a.Run(ctx, &adk.AgentInput{}, options...)
 }
 
+func newTestExecutor(
+	t *testing.T,
+	store *adksession.InMemoryStore[*schema.Message],
+) *Executor[*schema.Message] {
+	t.Helper()
+	if store == nil {
+		store = adksession.NewInMemoryStore[*schema.Message](nil)
+	}
+	executor, err := NewExecutor(&ExecutorConfig[*schema.Message]{
+		SessionStore: store, CheckPointStore: store,
+	})
+	require.NoError(t, err)
+	return executor
+}
+
+func TestNewExecutorRequiresDependencies_BitsUT(t *testing.T) {
+	_, err := NewExecutor[*schema.Message](nil)
+	require.Error(t, err)
+	store := adksession.NewInMemoryStore[*schema.Message](nil)
+	_, err = NewExecutor(&ExecutorConfig[*schema.Message]{SessionStore: store})
+	require.Error(t, err)
+	var executor *Executor[*schema.Message]
+	require.Nil(t, executor.SessionEventStore())
+}
+
 func TestExecutorRegistersAgentsByStableName_BitsUT(t *testing.T) {
-	executor := &Executor[*schema.Message]{}
+	executor := newTestExecutor(t, nil)
 	agent := &resumableTestAgent{name: "worker"}
 	require.NoError(t, executor.Register("worker", &AgentRegistration[*schema.Message]{Agent: agent}))
 	assert.ErrorIs(
@@ -216,7 +243,7 @@ func TestExecutorRegistersAgentsByStableName_BitsUT(t *testing.T) {
 
 func TestExecutorRegistryListsExecutorKey_BitsUT(t *testing.T) {
 	executors := backgroundtask.NewExecutorRegistry()
-	require.NoError(t, executors.Register(&Executor[*schema.Message]{}))
+	require.NoError(t, executors.Register(newTestExecutor(t, nil)))
 	assert.Equal(t, []string{ExecutorKey}, executors.Keys())
 }
 
@@ -225,7 +252,7 @@ func resumeFixture(
 	targets ...string,
 ) (*Executor[*schema.Message], backgroundtask.Spec, []byte) {
 	t.Helper()
-	executor := &Executor[*schema.Message]{}
+	executor := newTestExecutor(t, nil)
 	require.NoError(t, executor.Register("worker", &AgentRegistration[*schema.Message]{
 		Agent: &resumableTestAgent{name: "worker"},
 	}))
@@ -342,7 +369,7 @@ func TestResumeControlHelpers(t *testing.T) {
 	require.Equal(t, backgroundtask.ControlStop,
 		waitForControl(context.Background(), controls).Kind)
 
-	executor := &Executor[*schema.Message]{}
+	executor := newTestExecutor(t, nil)
 	task := &backgroundtask.Task{Spec: backgroundtask.Spec{ID: "task"}}
 	result, controlErr, controlled := executor.controlResult(
 		context.Background(), task,
@@ -358,7 +385,7 @@ func TestResumeControlHelpers(t *testing.T) {
 		backgroundtask.ControlRequest{Kind: backgroundtask.ControlDrain},
 	)
 	require.True(t, controlled)
-	require.ErrorIs(t, controlErr, ErrRunnerEnvironmentRequired)
+	require.ErrorIs(t, controlErr, backgroundtask.ErrCheckpointUnavailable)
 	require.Nil(t, result)
 
 	result, controlErr, controlled = executor.controlResult(
@@ -370,7 +397,7 @@ func TestResumeControlHelpers(t *testing.T) {
 }
 
 func TestHandleEventErrorControlOutcomes(t *testing.T) {
-	executor := &Executor[*schema.Message]{}
+	executor := newTestExecutor(t, nil)
 	task := &backgroundtask.Task{Spec: backgroundtask.Spec{ID: "task"}}
 
 	t.Run("ordinary error", func(t *testing.T) {
@@ -439,7 +466,7 @@ func TestSubagentPayloadV2Validation_BitsUT(t *testing.T) {
 }
 
 func TestSubmitPersistsMinimalPayloadAndDerivesChildIdentities_BitsUT(t *testing.T) {
-	executor := &Executor[*schema.Message]{}
+	executor := newTestExecutor(t, nil)
 	require.NoError(t, executor.Register("worker", &AgentRegistration[*schema.Message]{
 		Agent: &resumableTestAgent{name: "worker"},
 	}))
@@ -470,7 +497,7 @@ func executionFixture(
 ) (*backgroundtask.Manager, *adk.Runner, *backgroundtask.Task, *adksession.InMemoryStore[*schema.Message]) {
 	t.Helper()
 	store := adksession.NewInMemoryStore[*schema.Message](nil)
-	executor := &Executor[*schema.Message]{}
+	executor := newTestExecutor(t, store)
 	require.NoError(t, executor.Register(agent.name, &AgentRegistration[*schema.Message]{Agent: agent}))
 	executors := backgroundtask.NewExecutorRegistry()
 	require.NoError(t, executors.Register(executor))
@@ -491,10 +518,10 @@ func TestExecutorInterruptBecomesWaitingInput_BitsUT(t *testing.T) {
 	agent := &resumableTestAgent{name: "worker", eventFactory: func(ctx context.Context) *adk.AgentEvent {
 		return adk.Interrupt(ctx, "approve")
 	}}
-	manager, runner, task, store := executionFixture(t, agent)
+	manager, _, task, store := executionFixture(t, agent)
 	defer manager.Close(context.Background())
 
-	require.NoError(t, runner.ExecuteBackgroundTask(context.Background(), manager, task.Spec.ID))
+	require.NoError(t, manager.Execute(context.Background(), task.Spec.ID))
 	result, err := manager.Get(context.Background(), task.Spec.ID)
 	require.NoError(t, err)
 	assert.Equal(t, backgroundtask.StateWaitingInput, result.Status)
@@ -513,12 +540,12 @@ func TestExecutorMessageBecomesTerminalResult_BitsUT(t *testing.T) {
 	message := adk.EventFromMessage(
 		schema.AssistantMessage("progress", nil), nil, schema.Assistant, "worker",
 	)
-	manager, runner, task, _ := executionFixture(t, &resumableTestAgent{
+	manager, _, task, _ := executionFixture(t, &resumableTestAgent{
 		name: "worker", events: []*adk.AgentEvent{message},
 	})
 	defer manager.Close(context.Background())
 
-	require.NoError(t, runner.ExecuteBackgroundTask(context.Background(), manager, task.Spec.ID))
+	require.NoError(t, manager.Execute(context.Background(), task.Spec.ID))
 	result, err := manager.Get(context.Background(), task.Spec.ID)
 	require.NoError(t, err)
 	require.NotNil(t, result)
@@ -530,7 +557,7 @@ func TestExecutorReconstructsRegisteredRunOptionsForEveryAttempt_BitsUT(t *testi
 	store := adksession.NewInMemoryStore[*schema.Message](nil)
 	agent := &optionCaptureAgent{name: "worker"}
 	var factoryCalls int
-	executor := &Executor[*schema.Message]{}
+	executor := newTestExecutor(t, store)
 	require.NoError(t, executor.Register(agent.name, &AgentRegistration[*schema.Message]{
 		Agent: agent,
 		RunOptionsFactory: func() ([]adk.AgentRunOption, error) {
@@ -546,29 +573,45 @@ func TestExecutorReconstructsRegisteredRunOptionsForEveryAttempt_BitsUT(t *testi
 	require.NoError(t, executors.Register(executor))
 	manager := backgroundtask.New(context.Background(), &backgroundtask.Config{Executors: executors})
 	defer manager.Close(context.Background())
-	runner := adk.NewRunner(context.Background(), adk.RunnerConfig{
-		Agent: agent, CheckPointStore: store, SessionID: "parent", SessionStore: store,
-	})
-
 	for i := 0; i < 2; i++ {
 		task, err := Submit(context.Background(), manager, &SubmitRequest{
 			SubAgentName: agent.name, Query: "work", Description: "work", SessionID: "parent",
 		})
 		require.NoError(t, err)
-		require.NoError(t, runner.ExecuteBackgroundTask(context.Background(), manager, task.Spec.ID))
+		require.NoError(t, manager.Execute(context.Background(), task.Spec.ID))
 	}
 	assert.Equal(t, 2, factoryCalls)
 	assert.Equal(t, []string{"registered", "registered"}, agent.seen)
 }
 
-func TestManagerExecuteWithoutRunnerEnvironmentLeavesTaskPending_BitsUT(t *testing.T) {
+func TestManagerExecuteUsesConfiguredDependencies_BitsUT(t *testing.T) {
 	manager, _, task, _ := executionFixture(t, &resumableTestAgent{name: "worker"})
-	err := manager.Execute(context.Background(), task.Spec.ID)
-	assert.ErrorIs(t, err, ErrRunnerEnvironmentRequired)
-	pending, getErr := manager.Get(context.Background(), task.Spec.ID)
-	require.NoError(t, getErr)
-	assert.Equal(t, backgroundtask.StatusPending, pending.Status)
-	assert.Zero(t, pending.Attempt)
+	require.NoError(t, manager.Execute(context.Background(), task.Spec.ID))
+	completed, err := manager.Get(context.Background(), task.Spec.ID)
+	require.NoError(t, err)
+	assert.Equal(t, backgroundtask.StatusCompleted, completed.Status)
+	assert.Equal(t, int64(1), completed.Attempt)
+}
+
+func TestPollingWorkerExecutesConfiguredSubAgent_BitsUT(t *testing.T) {
+	manager, _, task, _ := executionFixture(t, &resumableTestAgent{name: "worker"})
+	defer manager.Close(context.Background())
+	poller, err := backgroundworker.NewWorker(backgroundworker.WorkerConfig{
+		Manager: manager, ExecutorKeys: []string{ExecutorKey},
+		PollInterval: time.Millisecond, MaxConcurrent: 1,
+	})
+	require.NoError(t, err)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- poller.Run(ctx)
+	}()
+	require.Eventually(t, func() bool {
+		result, getErr := manager.Get(context.Background(), task.Spec.ID)
+		return getErr == nil && result.Status == backgroundtask.StatusCompleted
+	}, time.Second, 10*time.Millisecond)
+	cancel()
+	require.NoError(t, <-done)
 }
 
 func TestStopControlWinsOverLateFinalMessage_BitsUT(t *testing.T) {
@@ -576,7 +619,7 @@ func TestStopControlWinsOverLateFinalMessage_BitsUT(t *testing.T) {
 	agent := &cancelThenMessageAgent{
 		name: "worker", started: make(chan struct{}), release: make(chan struct{}),
 	}
-	executor := &Executor[*schema.Message]{}
+	executor := newTestExecutor(t, store)
 	require.NoError(t, executor.Register(agent.name, &AgentRegistration[*schema.Message]{Agent: agent}))
 	registry := backgroundtask.NewExecutorRegistry()
 	require.NoError(t, registry.Register(executor))
@@ -585,12 +628,9 @@ func TestStopControlWinsOverLateFinalMessage_BitsUT(t *testing.T) {
 		SubAgentName: agent.name, Query: "work", Description: "work", SessionID: "parent",
 	})
 	require.NoError(t, err)
-	runner := adk.NewRunner(context.Background(), adk.RunnerConfig{
-		Agent: agent, CheckPointStore: store, SessionID: "parent", SessionStore: store,
-	})
 	executeDone := make(chan error, 1)
 	go func() {
-		executeDone <- runner.ExecuteBackgroundTask(context.Background(), manager, task.Spec.ID)
+		executeDone <- manager.Execute(context.Background(), task.Spec.ID)
 	}()
 	<-agent.started
 	_, err = manager.RequestCancel(context.Background(), task.Spec.ID)
@@ -607,8 +647,8 @@ func TestExecutorDrainUsesDurableRunnerCheckpoint_BitsUT(t *testing.T) {
 	agent := &resumableTestAgent{name: "worker", eventFactory: func(ctx context.Context) *adk.AgentEvent {
 		return adk.Interrupt(ctx, "pause for drain")
 	}}
-	manager, runner, task, _ := executionFixture(t, agent)
-	require.NoError(t, runner.ExecuteBackgroundTask(context.Background(), manager, task.Spec.ID))
+	manager, _, task, _ := executionFixture(t, agent)
+	require.NoError(t, manager.Execute(context.Background(), task.Spec.ID))
 	result, err := manager.Get(context.Background(), task.Spec.ID)
 	require.NoError(t, err)
 	assert.Equal(t, backgroundtask.StateWaitingInput, result.Status)
@@ -619,7 +659,7 @@ func TestControlAndInterruptUseRunnerCheckpoint(t *testing.T) {
 	agent := &contextCaptureAgent{
 		name: "worker", contexts: make(chan context.Context, 1), release: make(chan struct{}),
 	}
-	executor := &Executor[*schema.Message]{}
+	executor := newTestExecutor(t, store)
 	require.NoError(t, executor.Register(agent.name, &AgentRegistration[*schema.Message]{
 		Agent: agent,
 	}))
@@ -635,7 +675,7 @@ func TestControlAndInterruptUseRunnerCheckpoint(t *testing.T) {
 	})
 	executeDone := make(chan error, 1)
 	go func() {
-		executeDone <- runner.ExecuteBackgroundTask(context.Background(), manager, task.Spec.ID)
+		executeDone <- manager.Execute(context.Background(), task.Spec.ID)
 	}()
 	runCtx := <-agent.contexts
 
@@ -695,7 +735,7 @@ func TestWaitForControlBoundaries(t *testing.T) {
 func TestSubAgentTaskResumesAfterManagerReconstruction_BitsUT(t *testing.T) {
 	sessionStore := adksession.NewInMemoryStore[*schema.Message](nil)
 	agent := &interruptThenCompleteAgent{name: "worker"}
-	executor := &Executor[*schema.Message]{}
+	executor := newTestExecutor(t, sessionStore)
 	require.NoError(t, executor.Register("worker", &AgentRegistration[*schema.Message]{
 		Agent: agent,
 	}))
@@ -711,11 +751,7 @@ func TestSubAgentTaskResumesAfterManagerReconstruction_BitsUT(t *testing.T) {
 		SessionID: "parent-session",
 	})
 	require.NoError(t, err)
-	runner1 := adk.NewRunner(context.Background(), adk.RunnerConfig{
-		Agent: agent, CheckPointStore: sessionStore,
-		SessionID: "parent-session", SessionStore: sessionStore,
-	})
-	require.NoError(t, runner1.ExecuteBackgroundTask(context.Background(), manager1, task.Spec.ID))
+	require.NoError(t, manager1.Execute(context.Background(), task.Spec.ID))
 	waiting, err := manager1.Get(context.Background(), task.Spec.ID)
 	require.NoError(t, err)
 	require.Equal(t, backgroundtask.StateWaitingInput, waiting.Status)
@@ -733,11 +769,7 @@ func TestSubAgentTaskResumesAfterManagerReconstruction_BitsUT(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Equal(t, backgroundtask.StatePending, pending.Status)
-	runner2 := adk.NewRunner(context.Background(), adk.RunnerConfig{
-		Agent: agent, CheckPointStore: sessionStore,
-		SessionID: "parent-session", SessionStore: sessionStore,
-	})
-	require.NoError(t, runner2.ExecuteBackgroundTask(context.Background(), manager2, task.Spec.ID))
+	require.NoError(t, manager2.Execute(context.Background(), task.Spec.ID))
 
 	completed, err := manager2.Get(context.Background(), task.Spec.ID)
 	require.NoError(t, err)

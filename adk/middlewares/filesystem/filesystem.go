@@ -284,13 +284,13 @@ func NewMiddleware(ctx context.Context, config *Config) (adk.AgentMiddleware, er
 		CustomWriteFileToolDesc: config.CustomWriteFileToolDesc,
 		CustomEditToolDesc:      config.CustomEditToolDesc,
 		notificationSessionID: func(ctx context.Context) (string, error) {
-			environment, ok := adk.TypedRunnerEnvironmentFromContext[*schema.Message](ctx)
-			if !ok || environment.SessionID() == "" {
+			sessionID, ok := adk.RunnerSessionID(ctx)
+			if !ok {
 				return "", errors.New(
 					"filesystem: runner session is required for background notification",
 				)
 			}
-			return environment.SessionID(), nil
+			return sessionID, nil
 		},
 	}
 	if err = validateBackgroundNotification(ctx, middlewareConfig.Background); err != nil {
@@ -526,13 +526,13 @@ func NewTyped[M adk.MessageType](ctx context.Context, config *MiddlewareConfig) 
 	}
 	typedConfig := *config
 	typedConfig.notificationSessionID = func(ctx context.Context) (string, error) {
-		environment, ok := adk.TypedRunnerEnvironmentFromContext[M](ctx)
-		if !ok || environment.SessionID() == "" {
+		sessionID, ok := adk.RunnerSessionID(ctx)
+		if !ok {
 			return "", errors.New(
 				"filesystem: runner session is required for background notification",
 			)
 		}
-		return environment.SessionID(), nil
+		return sessionID, nil
 	}
 	ts, err := getFilesystemTools(ctx, &typedConfig)
 	if err != nil {

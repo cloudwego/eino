@@ -36,6 +36,7 @@ const (
 // NewDurableTaskProgressHook returns a task_output progress callback backed by
 // the durable sub-agent's child session.
 func NewDurableTaskProgressHook[M adk.MessageType](
+	store adk.SessionEventStore[M],
 	format TranscriptFormat[M],
 ) func(context.Context, *backgroundtask.Task) (string, error) {
 	if format == nil {
@@ -46,16 +47,15 @@ func NewDurableTaskProgressHook[M adk.MessageType](
 			task.Spec.Kind != TaskTypeSubagent {
 			return "", nil
 		}
-		environment, ok := adk.TypedRunnerEnvironmentFromContext[M](ctx)
-		if !ok || environment.SessionStore() == nil {
-			return "", errors.New("subagent: runner session store is required to read task progress")
+		if store == nil {
+			return "", errors.New("subagent: session store is required to read task progress")
 		}
 		agentName := NameFromTask(task)
 		if agentName == "" {
 			return "", errors.New("subagent: task payload does not contain a valid agent name")
 		}
 		return readDurableTaskProgress(
-			ctx, environment.SessionStore(), task, agentName, format,
+			ctx, store, task, agentName, format,
 		)
 	}
 }

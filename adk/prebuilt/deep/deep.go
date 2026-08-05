@@ -72,7 +72,10 @@ type TypedLocalBackgroundConfig[M adk.MessageType] struct {
 
 // TypedDurableBackgroundConfig configures durable sub-agents and process-local shell tasks.
 type TypedDurableBackgroundConfig[M adk.MessageType] struct {
-	Manager              *backgroundtask.Manager
+	Manager *backgroundtask.Manager
+	// Executor owns durable sub-agent session dependencies. It is required when
+	// the general sub-agent or any configured SubAgents are enabled.
+	Executor             *durablesubagent.Executor[M]
 	ForegroundTimeoutMs  *int
 	ShouldAutoBackground func(context.Context, *backgroundtask.Task) bool
 	OutputDir            string
@@ -187,6 +190,10 @@ func NewTyped[M adk.MessageType](ctx context.Context, cfg *TypedConfig[M]) (adk.
 		if deepBackgroundManager(cfg.Background) == nil {
 			return nil, fmt.Errorf("deep: background Manager is required")
 		}
+		if cfg.Background.Durable != nil && cfg.Background.Durable.Executor == nil &&
+			(!cfg.WithoutGeneralSubAgent || len(cfg.SubAgents) > 0) {
+			return nil, fmt.Errorf("deep: durable background Executor is required")
+		}
 		if cfg.Background.Notifications == nil {
 			return nil, fmt.Errorf("deep: background notification delivery is required")
 		}
@@ -244,8 +251,9 @@ func NewTyped[M adk.MessageType](ctx context.Context, cfg *TypedConfig[M]) (adk.
 	if manager := deepBackgroundManager(cfg.Background); manager != nil {
 		var readTaskProgress func(context.Context, *backgroundtask.Task) (string, error)
 		progressReaders := make(map[string]backgroundtaskmw.TaskProgressReader)
-		if cfg.Background.Durable != nil {
+		if cfg.Background.Durable != nil && cfg.Background.Durable.Executor != nil {
 			readTaskProgress = subagent.NewDurableTaskProgressHook(
+				cfg.Background.Durable.Executor.SessionEventStore(),
 				cfg.Background.TranscriptFormat,
 			)
 		}
@@ -475,6 +483,7 @@ func deepSubagentBackground[M adk.MessageType](
 		TranscriptFormat: cfg.Background.TranscriptFormat,
 		Durable: &subagent.TypedDurableBackgroundConfig[M]{
 			Manager:              cfg.Background.Durable.Manager,
+			Executor:             cfg.Background.Durable.Executor,
 			ForegroundTimeoutMs:  cfg.Background.Durable.ForegroundTimeoutMs,
 			ShouldAutoBackground: cfg.Background.Durable.ShouldAutoBackground,
 			RunOptionsFactories:  cfg.Background.Durable.RunOptionsFactories,

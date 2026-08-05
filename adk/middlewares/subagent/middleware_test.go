@@ -93,10 +93,24 @@ func (m *mockAgent) Resume(ctx context.Context, _ *adk.ResumeInfo, opts ...adk.A
 	return m.Run(ctx, &adk.AgentInput{}, opts...)
 }
 
-func durableBackground(mgr *backgroundtask.Manager, agents ...adk.Agent) *BackgroundConfig {
+func durableExecutor(t *testing.T) *durablesubagent.Executor[*schema.Message] {
+	t.Helper()
+	store := adksession.NewInMemoryStore[*schema.Message](nil)
+	executor, err := durablesubagent.NewExecutor(&durablesubagent.ExecutorConfig[*schema.Message]{
+		SessionStore: store, CheckPointStore: store,
+	})
+	require.NoError(t, err)
+	return executor
+}
+
+func durableBackground(t *testing.T, mgr *backgroundtask.Manager, agents ...adk.Agent) *BackgroundConfig {
+	t.Helper()
 	_ = agents
 	return &BackgroundConfig{
-		Durable: &DurableBackgroundConfig{Manager: mgr}, Notifications: testNotifications,
+		Durable: &DurableBackgroundConfig{
+			Manager: mgr, Executor: durableExecutor(t),
+		},
+		Notifications: testNotifications,
 	}
 }
 
@@ -187,6 +201,15 @@ func TestConfigValidation(t *testing.T) {
 	_, err = New(context.Background(), &Config{
 		SubAgents: []adk.Agent{agent},
 		Background: &BackgroundConfig{
+			Durable:       &DurableBackgroundConfig{Manager: manager},
+			Notifications: testNotifications,
+		},
+	})
+	require.ErrorContains(t, err, "Manager and Executor")
+
+	_, err = New(context.Background(), &Config{
+		SubAgents: []adk.Agent{agent},
+		Background: &BackgroundConfig{
 			Local: &LocalBackgroundConfig{Runner: mustLocalRunner(t, manager)},
 		},
 	})
@@ -237,7 +260,7 @@ func TestDurableAgentToolForeground(t *testing.T) {
 	mgr := newTestManager(ctx)
 	agent := &mockAgent{name: "worker", desc: "durable result"}
 	mw, err := New(ctx, &Config{
-		SubAgents: []adk.Agent{agent}, Background: durableBackground(mgr, agent),
+		SubAgents: []adk.Agent{agent}, Background: durableBackground(t, mgr, agent),
 	})
 	require.NoError(t, err)
 	_, runCtx, err := mw.BeforeAgent(ctx, &adk.ChatModelAgentContext[*schema.Message]{})
@@ -262,7 +285,7 @@ func TestLocalAndDurableAgentToolSchemasMatch(t *testing.T) {
 	})
 	require.NoError(t, err)
 	durable, err := New(context.Background(), &Config{
-		SubAgents: []adk.Agent{agent}, Background: durableBackground(durableManager, agent),
+		SubAgents: []adk.Agent{agent}, Background: durableBackground(t, durableManager, agent),
 	})
 	require.NoError(t, err)
 	_, localCtx, err := local.BeforeAgent(
@@ -524,7 +547,7 @@ func TestDurableAgentToolBackgroundSurvivesCaller(t *testing.T) {
 		return "done"
 	}}
 	mw, err := New(ctx, &Config{
-		SubAgents: []adk.Agent{agent}, Background: durableBackground(mgr, agent),
+		SubAgents: []adk.Agent{agent}, Background: durableBackground(t, mgr, agent),
 	})
 	require.NoError(t, err)
 	_, runCtx, err := mw.BeforeAgent(ctx, &adk.ChatModelAgentContext[*schema.Message]{})
@@ -545,12 +568,13 @@ func TestDurableAgentRegistrationRejectsDuplicateExactIdentity(t *testing.T) {
 	mgr := newTestManager(ctx)
 	first := &mockAgent{name: "worker", desc: "first"}
 	second := &mockAgent{name: "worker", desc: "second"}
+	background := durableBackground(t, mgr, first)
 	_, err := New(ctx, &Config{
-		SubAgents: []adk.Agent{first}, Background: durableBackground(mgr, first),
+		SubAgents: []adk.Agent{first}, Background: background,
 	})
 	require.NoError(t, err)
 	_, err = New(ctx, &Config{
-		SubAgents: []adk.Agent{second}, Background: durableBackground(mgr, second),
+		SubAgents: []adk.Agent{second}, Background: background,
 	})
 	assert.ErrorIs(t, err, backgroundtask.ErrAlreadyExists)
 }
@@ -559,10 +583,11 @@ func TestDurableTaskProgressReadsSessionTranscript(t *testing.T) {
 	ctx := runnerEnvironmentContext(t)
 	manager := newTestManager(context.Background())
 	agent := &mockAgent{name: "worker", desc: "durable output"}
+	executor := durableExecutor(t)
 	middleware, err := New(ctx, &Config{
 		SubAgents: []adk.Agent{agent},
 		Background: &BackgroundConfig{Durable: &DurableBackgroundConfig{
-			Manager: manager,
+			Manager: manager, Executor: executor,
 		}, Notifications: testNotifications},
 	})
 	require.NoError(t, err)
@@ -579,7 +604,9 @@ func TestDurableTaskProgressReadsSessionTranscript(t *testing.T) {
 	feed, err := manager.ReadRecentTaskEvents(ctx, &backgroundtask.ReadRecentTaskEventsRequest{TaskID: task.Spec.ID})
 	require.NoError(t, err)
 	assert.Empty(t, feed.Events)
-	progress, err := NewDurableTaskProgressHook[*schema.Message](nil)(ctx, task)
+	progress, err := NewDurableTaskProgressHook(
+		executor.SessionEventStore(), TranscriptFormat[*schema.Message](nil),
+	)(ctx, task)
 	require.NoError(t, err)
 	assert.Contains(t, progress, `"agent_name":"worker"`)
 	assert.Contains(t, progress, `"content":"durable output"`)
@@ -590,13 +617,14 @@ func TestDurableTaskProgressUsesSharedFormatter(t *testing.T) {
 	ctx := runnerEnvironmentContext(t)
 	manager := newTestManager(context.Background())
 	agent := &mockAgent{name: "worker", desc: "durable output"}
+	executor := durableExecutor(t)
 	format := func(_ context.Context, agentName string, message *schema.Message) (string, error) {
 		return agentName + ": " + message.Content, nil
 	}
 	middleware, err := New(ctx, &Config{
 		SubAgents: []adk.Agent{agent},
 		Background: &BackgroundConfig{Durable: &DurableBackgroundConfig{
-			Manager: manager,
+			Manager: manager, Executor: executor,
 		}, TranscriptFormat: format, Notifications: testNotifications},
 	})
 	require.NoError(t, err)
@@ -611,7 +639,7 @@ func TestDurableTaskProgressUsesSharedFormatter(t *testing.T) {
 	require.NotNil(t, task)
 	assert.Equal(t, backgroundtask.StatusCompleted, task.Status)
 	assert.Equal(t, "durable output", string(task.ResultData))
-	progress, err := NewDurableTaskProgressHook(format)(ctx, task)
+	progress, err := NewDurableTaskProgressHook(executor.SessionEventStore(), format)(ctx, task)
 	require.NoError(t, err)
 	assert.Contains(t, progress, "worker: durable output")
 	assert.NotContains(t, progress, "worker: work")
@@ -622,7 +650,7 @@ func TestDurableForegroundProjectionStopsAtBackgroundBoundary(t *testing.T) {
 	manager := newTestManager(context.Background())
 	agent := &mockAgent{name: "worker", desc: "done"}
 	middleware, err := New(ctx, &Config{
-		SubAgents: []adk.Agent{agent}, Background: durableBackground(manager, agent),
+		SubAgents: []adk.Agent{agent}, Background: durableBackground(t, manager, agent),
 	})
 	require.NoError(t, err)
 	_, runCtx, err := middleware.BeforeAgent(ctx, &adk.ChatModelAgentContext[*schema.Message]{})
@@ -659,7 +687,7 @@ func TestDurableAgentToolRejectsInvocationScopedRunOptions(t *testing.T) {
 	manager := newTestManager(context.Background())
 	agent := &mockAgent{name: "worker", desc: "done"}
 	middleware, err := New(ctx, &Config{
-		SubAgents: []adk.Agent{agent}, Background: durableBackground(manager, agent),
+		SubAgents: []adk.Agent{agent}, Background: durableBackground(t, manager, agent),
 	})
 	require.NoError(t, err)
 	_, runCtx, err := middleware.BeforeAgent(ctx, &adk.ChatModelAgentContext[*schema.Message]{})
@@ -692,10 +720,11 @@ func TestDurableAgentToolUsesRegisteredRunOptionsFactory(t *testing.T) {
 			got = adk.GetImplSpecificOptions[middlewareRunOptions](nil, options...).value
 		},
 	}
+	executor := durableExecutor(t)
 	middleware, err := New(ctx, &Config{
 		SubAgents: []adk.Agent{agent},
 		Background: &BackgroundConfig{Durable: &DurableBackgroundConfig{
-			Manager: manager,
+			Manager: manager, Executor: executor,
 			RunOptionsFactories: map[string]durablesubagent.RunOptionsFactory{
 				"worker": func() ([]adk.AgentRunOption, error) {
 					return []adk.AgentRunOption{adk.WrapImplSpecificOptFn(
@@ -722,7 +751,7 @@ func TestDurableBlockingReceiverDoesNotBlockAutoBackgroundResponse(t *testing.T)
 	timeout := 20
 	manager := newTestManager(context.Background())
 	agent := &mockAgent{name: "worker", desc: "done"}
-	background := durableBackground(manager, agent)
+	background := durableBackground(t, manager, agent)
 	background.Durable.ForegroundTimeoutMs = &timeout
 	background.Durable.ShouldAutoBackground = func(context.Context, *backgroundtask.Task) bool { return true }
 	middleware, err := New(ctx, &Config{

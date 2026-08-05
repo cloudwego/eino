@@ -96,8 +96,8 @@ func newManagedAgentTool[M adk.MessageType](
 			if err != nil {
 				return "", err
 			}
-			environment, ok := adk.TypedRunnerEnvironmentFromContext[M](ctx)
-			if !ok || environment.SessionID() == "" {
+			sessionID, ok := adk.RunnerSessionID(ctx)
+			if !ok {
 				return "", errors.New("subagent: runner session is required for background notification")
 			}
 			outputFile := reserveAgentOutput(ctx, output.store, output.outputDir)
@@ -108,9 +108,9 @@ func newManagedAgentTool[M adk.MessageType](
 			result, err := runner.Run(ctx, &backgroundlocal.Input{
 				Description: in.Description, Type: TaskTypeSubagent, Payload: payload,
 				OutputFile: outputFile, RunInBackground: in.RunInBackground,
-				SessionID: environment.SessionID(),
+				SessionID: sessionID,
 				Notify: &backgroundtask.NotificationTarget{
-					Kind: backgroundtask.SessionInboxNotificationKind, TargetID: environment.SessionID(),
+					Kind: backgroundtask.SessionInboxNotificationKind, TargetID: sessionID,
 				},
 			}, func(workCtx context.Context, runtime backgroundtask.ExecutionRuntime) (string, error) {
 				fileReceiver := &agentEventFileReceiver[M]{
@@ -373,7 +373,7 @@ func newDurableAgentTool[M adk.MessageType](
 	agents []adk.TypedAgent[M],
 	name, desc string,
 ) (tool.BaseTool, error) {
-	executor := &durablesubagent.Executor[M]{}
+	executor := config.Executor
 	for _, agent := range agents {
 		resumable, ok := agent.(adk.TypedResumableAgent[M])
 		if !ok {
@@ -387,24 +387,15 @@ func newDurableAgentTool[M adk.MessageType](
 			return nil, err
 		}
 	}
-	registered, loaded, err := config.Manager.LoadOrRegisterExecutor(executor)
+	registered, _, err := config.Manager.LoadOrRegisterExecutor(executor)
 	if err != nil {
 		return nil, err
 	}
-	if loaded {
-		typed, typeOK := registered.(*durablesubagent.Executor[M])
-		if !typeOK {
-			return nil, errors.New("subagent: registered durable executor has incompatible message type")
-		}
-		for _, agent := range agents {
-			agentName := agent.Name(ctx)
-			if err := typed.Register(agentName, &durablesubagent.AgentRegistration[M]{
-				Agent:             agent.(adk.TypedResumableAgent[M]),
-				RunOptionsFactory: config.RunOptionsFactories[agentName],
-			}); err != nil {
-				return nil, err
-			}
-		}
+	typed, typeOK := registered.(*durablesubagent.Executor[M])
+	if !typeOK || typed != executor {
+		return nil, errors.New(
+			"subagent: Manager is already bound to a different durable Executor",
+		)
 	}
 
 	return utils.InferOptionableTool(name, desc, func(
@@ -412,10 +403,11 @@ func newDurableAgentTool[M adk.MessageType](
 		in agentManagedInput,
 		opts ...tool.Option,
 	) (string, error) {
-		environment, ok := adk.TypedRunnerEnvironmentFromContext[M](callCtx)
-		if !ok || environment.SessionID() == "" ||
-			environment.SessionStore() == nil || environment.CheckPointStore() == nil {
-			return "", durablesubagent.ErrRunnerEnvironmentRequired
+		sessionID, ok := adk.RunnerSessionID(callCtx)
+		if !ok {
+			return "", errors.New(
+				"subagent: runner session is required for background notification",
+			)
 		}
 		prompt := in.Prompt
 		if prompt == "" {
@@ -440,7 +432,7 @@ func newDurableAgentTool[M adk.MessageType](
 		}
 		task, err := durablesubagent.Submit(callCtx, config.Manager, &durablesubagent.SubmitRequest{
 			SubAgentName: in.SubagentType, Query: prompt, Description: in.Description,
-			SessionID: environment.SessionID(),
+			SessionID: sessionID,
 		})
 		if err != nil {
 			return "", err

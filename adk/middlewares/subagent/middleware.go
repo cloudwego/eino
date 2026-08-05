@@ -97,7 +97,10 @@ type DurableBackgroundConfig = TypedDurableBackgroundConfig[*schema.Message]
 
 // TypedDurableBackgroundConfig configures reconstructable sub-agent runs.
 type TypedDurableBackgroundConfig[M adk.MessageType] struct {
-	Manager              *backgroundtask.Manager
+	Manager *backgroundtask.Manager
+	// Executor owns the durable session dependencies and must be the same
+	// instance on every middleware sharing Manager.
+	Executor             *durablesubagent.Executor[M]
 	ForegroundTimeoutMs  *int
 	ShouldAutoBackground func(context.Context, *backgroundtask.Task) bool
 	// RunOptionsFactories reconstructs deployment-owned run options by sub-agent
@@ -306,8 +309,11 @@ func validate[M adk.MessageType](ctx context.Context, c *TypedConfig[M]) error {
 			manager = c.Background.Local.Runner.Manager()
 		}
 		if c.Background.Durable != nil {
-			if c.Background.Durable.Manager == nil {
-				return fmt.Errorf("subagent: durable background Manager is required")
+			if c.Background.Durable.Manager == nil ||
+				c.Background.Durable.Executor == nil {
+				return fmt.Errorf(
+					"subagent: durable background Manager and Executor are required",
+				)
 			}
 			manager = c.Background.Durable.Manager
 			for _, agent := range c.SubAgents {

@@ -27,7 +27,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/cloudwego/eino/adk/backgroundtask"
 	"github.com/cloudwego/eino/internal/core"
 	"github.com/cloudwego/eino/internal/safe"
 	"github.com/cloudwego/eino/schema"
@@ -69,74 +68,17 @@ type TypedRunner[M MessageType] struct {
 // Runner is the default runner type using *schema.Message.
 type Runner = TypedRunner[*schema.Message]
 
-type runnerEnvironmentContextKey struct{}
+type runnerSessionIDContextKey struct{}
 
-// TypedRunnerEnvironment is the immutable execution environment propagated by a Runner.
-type TypedRunnerEnvironment[M MessageType] struct {
-	sessionID       string
-	sessionStore    SessionEventStore[M]
-	checkPointStore CheckPointStore
-	sessionConfig   *SessionConfig[M]
+// RunnerSessionID returns the current Runner invocation's session ID. It is
+// request-scoped routing metadata, not a container for Runner dependencies.
+func RunnerSessionID(ctx context.Context) (string, bool) {
+	sessionID, ok := ctx.Value(runnerSessionIDContextKey{}).(string)
+	return sessionID, ok && sessionID != ""
 }
 
-// RunnerEnvironment is the default environment type using *schema.Message.
-type RunnerEnvironment = TypedRunnerEnvironment[*schema.Message]
-
-// SessionID returns the parent Runner session identifier.
-func (e *TypedRunnerEnvironment[M]) SessionID() string {
-	if e == nil {
-		return ""
-	}
-	return e.sessionID
-}
-
-// SessionStore returns the parent Runner's session event store.
-func (e *TypedRunnerEnvironment[M]) SessionStore() SessionEventStore[M] {
-	if e == nil {
-		return nil
-	}
-	return e.sessionStore
-}
-
-// CheckPointStore returns the parent Runner's checkpoint store.
-func (e *TypedRunnerEnvironment[M]) CheckPointStore() CheckPointStore {
-	if e == nil {
-		return nil
-	}
-	return e.checkPointStore
-}
-
-// SessionConfig returns the parent Runner's session persistence configuration.
-func (e *TypedRunnerEnvironment[M]) SessionConfig() *SessionConfig[M] {
-	if e == nil {
-		return nil
-	}
-	return e.sessionConfig
-}
-
-// TypedRunnerEnvironmentFromContext returns the Runner environment bound to ctx.
-func TypedRunnerEnvironmentFromContext[M MessageType](ctx context.Context) (*TypedRunnerEnvironment[M], bool) {
-	environment, ok := ctx.Value(runnerEnvironmentContextKey{}).(*TypedRunnerEnvironment[M])
-	return environment, ok && environment != nil
-}
-
-func (r *TypedRunner[M]) withExecutionEnvironment(ctx context.Context) context.Context {
-	return context.WithValue(ctx, runnerEnvironmentContextKey{}, &TypedRunnerEnvironment[M]{
-		sessionID: r.sessionID, sessionStore: r.sessionStore,
-		checkPointStore: r.store, sessionConfig: r.sessionConfig,
-	})
-}
-
-// ExecuteBackgroundTask binds this Runner's environment before executing a durable task.
-func (r *TypedRunner[M]) ExecuteBackgroundTask(
-	ctx context.Context,
-	manager *backgroundtask.Manager,
-	taskID string,
-) error {
-	if manager == nil {
-		return errors.New("adk: background task manager is required")
-	}
-	return manager.Execute(r.withExecutionEnvironment(ctx), taskID)
+func (r *TypedRunner[M]) withRunnerSession(ctx context.Context) context.Context {
+	return context.WithValue(ctx, runnerSessionIDContextKey{}, r.sessionID)
 }
 
 type CheckPointStore = core.CheckPointStore
@@ -188,7 +130,7 @@ func (r *TypedRunner[M]) Run(ctx context.Context, messages []M,
 	opts ...AgentRunOption) *AsyncIterator[*TypedAgentEvent[M]] {
 	return typedRunnerRunImpl(
 		r.a, r.enableStreaming, r.store, r.sessionID, r.sessionStore, r.sessionConfig,
-		r.withExecutionEnvironment(ctx), messages, opts...,
+		r.withRunnerSession(ctx), messages, opts...,
 	)
 }
 
@@ -240,7 +182,7 @@ func (r *TypedRunner[M]) resumeInternal(ctx context.Context, checkPointID string
 	opts ...AgentRunOption) (*AsyncIterator[*TypedAgentEvent[M]], error) {
 	return typedRunnerResumeInternalImpl(
 		r.a, r.store, r.sessionID, r.sessionStore, r.sessionConfig,
-		r.withExecutionEnvironment(ctx), checkPointID, resumeData, opts...,
+		r.withRunnerSession(ctx), checkPointID, resumeData, opts...,
 	)
 }
 

@@ -53,6 +53,20 @@ func mustDeepLocalRunner(
 	return runner
 }
 
+func mustDeepDurableExecutor(
+	t *testing.T,
+) *durablesubagent.Executor[*schema.Message] {
+	t.Helper()
+	store := adksession.NewInMemoryStore[*schema.Message](nil)
+	executor, err := durablesubagent.NewExecutor(
+		&durablesubagent.ExecutorConfig[*schema.Message]{
+			SessionStore: store, CheckPointStore: store,
+		},
+	)
+	require.NoError(t, err)
+	return executor
+}
+
 type notificationDeliveryStub struct{}
 
 func (notificationDeliveryStub) ValidateNotificationDelivery(
@@ -497,6 +511,12 @@ func TestDeepBackgroundConfigIsStrictUnion(t *testing.T) {
 		Local: &TypedLocalBackgroundConfig[*schema.Message]{Runner: mustDeepLocalRunner(t, manager)},
 	}})
 	require.ErrorContains(t, err, "notification delivery is required")
+
+	_, err = New(context.Background(), &Config{Background: &BackgroundConfig{
+		Durable:       &TypedDurableBackgroundConfig[*schema.Message]{Manager: manager},
+		Notifications: testNotifications,
+	}})
+	require.ErrorContains(t, err, "Executor is required")
 }
 
 func TestDeepDurableBackgroundForwardsRunOptionsFactories(t *testing.T) {
@@ -517,7 +537,7 @@ func TestDeepDurableBackgroundForwardsRunOptionsFactories(t *testing.T) {
 			Notifications:    testNotifications,
 			TranscriptFormat: format,
 			Durable: &TypedDurableBackgroundConfig[*schema.Message]{
-				Manager: manager,
+				Manager: manager, Executor: mustDeepDurableExecutor(t),
 				RunOptionsFactories: map[string]durablesubagent.RunOptionsFactory{
 					"worker": factory,
 				},
@@ -550,7 +570,9 @@ func TestDeepAgentNewTypedWithManager(t *testing.T) {
 		ChatModel:   cm,
 		Shell:       &deepMockShell{},
 		Background: &BackgroundConfig{
-			Durable:       &TypedDurableBackgroundConfig[*schema.Message]{Manager: mgr},
+			Durable: &TypedDurableBackgroundConfig[*schema.Message]{
+				Manager: mgr, Executor: mustDeepDurableExecutor(t),
+			},
 			Notifications: testNotifications,
 		},
 	})

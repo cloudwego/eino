@@ -27,7 +27,6 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/adk/backgroundtask"
 	"github.com/cloudwego/eino/schema"
 )
@@ -271,86 +270,6 @@ func TestCloneToolInfoRejectsInvalidMetadata(t *testing.T) {
 		Name: "invalid", Extra: map[string]any{"channel": make(chan struct{})},
 	})
 	require.Error(t, err)
-}
-
-type sessionCaptureExecutor struct {
-	key       string
-	sessionID string
-}
-
-func (e *sessionCaptureExecutor) Key() string { return e.key }
-func (*sessionCaptureExecutor) LeaseExpiryPolicy() backgroundtask.LeaseExpiryPolicy {
-	return backgroundtask.LeaseExpiryFail
-}
-func (*sessionCaptureExecutor) ValidateSpec(backgroundtask.Spec) error { return nil }
-func (e *sessionCaptureExecutor) ValidateExecution(
-	ctx context.Context,
-	_ *backgroundtask.Task,
-) error {
-	sessionID, err := sessionIDFromContext(ctx)
-	e.sessionID = sessionID
-	return err
-}
-func (*sessionCaptureExecutor) ValidateResume(
-	context.Context,
-	backgroundtask.Spec,
-	[]byte,
-	[]byte,
-) ([]byte, error) {
-	return nil, nil
-}
-func (*sessionCaptureExecutor) SupportsDrain() bool { return false }
-func (*sessionCaptureExecutor) Execute(
-	context.Context,
-	*backgroundtask.Task,
-	backgroundtask.ExecutionRuntime,
-) (*backgroundtask.ExecutionResult, error) {
-	return &backgroundtask.ExecutionResult{Status: backgroundtask.StatusCompleted}, nil
-}
-
-func TestSessionIDFromRunnerContexts(t *testing.T) {
-	require.Error(t, func() error {
-		_, err := sessionIDFromContext(context.Background())
-		return err
-	}())
-	for _, testCase := range []struct {
-		name    string
-		execute func(*backgroundtask.Manager, string) error
-	}{
-		{
-			name: "standard",
-			execute: func(manager *backgroundtask.Manager, taskID string) error {
-				runner := adk.NewRunner(context.Background(), adk.RunnerConfig{
-					SessionID: "standard-session",
-				})
-				return runner.ExecuteBackgroundTask(context.Background(), manager, taskID)
-			},
-		},
-		{
-			name: "agentic",
-			execute: func(manager *backgroundtask.Manager, taskID string) error {
-				runner := adk.NewTypedRunner(adk.TypedRunnerConfig[*schema.AgenticMessage]{
-					SessionID: "agentic-session",
-				})
-				return runner.ExecuteBackgroundTask(context.Background(), manager, taskID)
-			},
-		},
-	} {
-		t.Run(testCase.name, func(t *testing.T) {
-			executor := &sessionCaptureExecutor{key: "session-" + testCase.name}
-			registry := backgroundtask.NewExecutorRegistry()
-			require.NoError(t, registry.Register(executor))
-			manager := backgroundtask.New(context.Background(), &backgroundtask.Config{
-				Executors: registry,
-			})
-			task, err := manager.Submit(context.Background(), backgroundtask.Spec{
-				ID: "task-" + testCase.name, ExecutorKey: executor.key,
-			})
-			require.NoError(t, err)
-			require.NoError(t, testCase.execute(manager, task.Spec.ID))
-			require.Equal(t, testCase.name+"-session", executor.sessionID)
-		})
-	}
 }
 
 func TestManagedToolTimeoutOverrideStopsRun(t *testing.T) {
