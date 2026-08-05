@@ -45,6 +45,17 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
+func mustNewBackgroundManager(
+	t testing.TB,
+	ctx context.Context,
+	config *backgroundtask.Config,
+) *backgroundtask.Manager {
+	t.Helper()
+	manager, err := backgroundtask.New(ctx, config)
+	require.NoError(t, err)
+	return manager
+}
+
 func mustDeepDurableExecutor(
 	t *testing.T,
 ) *durablesubagent.Executor[*schema.Message] {
@@ -448,7 +459,7 @@ func TestDeepAgentManagerWiring(t *testing.T) {
 
 	// With a Manager, the top-level built-in handlers route execute through it, so
 	// the execute tool gains a run_in_background field.
-	mgr := backgroundtask.New(ctx, &backgroundtask.Config{})
+	mgr := mustNewBackgroundManager(t, ctx, &backgroundtask.Config{})
 	defer func() { _ = mgr.Close(ctx) }()
 
 	handlers, err := buildTypedBuiltinAgentMiddlewares(ctx, &Config{
@@ -490,7 +501,7 @@ func TestDeepAgentManagerWiring(t *testing.T) {
 }
 
 func TestDeepRecoverableShellDoesNotCreateLocalRunner(t *testing.T) {
-	manager := backgroundtask.New(context.Background(), nil)
+	manager := mustNewBackgroundManager(t, context.Background(), nil)
 	defer manager.Close(context.Background())
 	shell := &deepRecoverableShellStub{}
 	background := &BackgroundConfig{
@@ -535,7 +546,7 @@ func TestDeepBackgroundConfigRequiresExplicitCapabilities(t *testing.T) {
 	_, err := New(context.Background(), &Config{Background: &BackgroundConfig{}})
 	require.ErrorContains(t, err, "Manager is required")
 
-	manager := backgroundtask.New(context.Background(), nil)
+	manager := mustNewBackgroundManager(t, context.Background(), nil)
 	_, err = New(context.Background(), &Config{Background: &BackgroundConfig{
 		Manager:   manager,
 		Executors: backgroundtask.NewExecutorRegistry(),
@@ -569,7 +580,7 @@ func TestDeepSubAgentBackgroundForwardsRunOptionsFactories(t *testing.T) {
 	) (string, error) {
 		return agentName + ": " + message.Content, nil
 	}
-	manager := backgroundtask.New(context.Background(), nil)
+	manager := mustNewBackgroundManager(t, context.Background(), nil)
 	defer manager.Close(context.Background())
 	background := deepSubagentBackground(&TypedConfig[*schema.Message]{
 		Background: &TypedBackgroundConfig[*schema.Message]{
@@ -600,7 +611,7 @@ func TestDeepSubAgentBackgroundForwardsRunOptionsFactories(t *testing.T) {
 // background-capable subagent tool exactly once at the top level.
 func TestDeepAgentNewTypedWithManager(t *testing.T) {
 	ctx := context.Background()
-	mgr := backgroundtask.New(ctx, &backgroundtask.Config{})
+	mgr := mustNewBackgroundManager(t, ctx, &backgroundtask.Config{})
 	defer func() { _ = mgr.Close(ctx) }()
 
 	cm := mockModel.NewMockToolCallingChatModel(gomock.NewController(t))

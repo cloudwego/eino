@@ -32,6 +32,17 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
+func mustNewBackgroundManager(
+	t testing.TB,
+	ctx context.Context,
+	config *backgroundtask.Config,
+) *backgroundtask.Manager {
+	t.Helper()
+	manager, err := backgroundtask.New(ctx, config)
+	require.NoError(t, err)
+	return manager
+}
+
 func encodedPayload(t *testing.T, name, arguments string) []byte {
 	t.Helper()
 	data, err := json.Marshal(&taskPayload{
@@ -182,7 +193,7 @@ func TestManagedToolConstructionAndSubmissionErrors(t *testing.T) {
 	registry := NewRegistry()
 	executors := backgroundtask.NewExecutorRegistry()
 	_, err = NewManagedTool(context.Background(), &ManagedToolConfig{
-		Manager:   backgroundtask.New(context.Background(), nil),
+		Manager:   mustNewBackgroundManager(t, context.Background(), nil),
 		Executors: executors,
 		Registry:  registry, ToolName: "missing",
 	})
@@ -195,7 +206,7 @@ func TestManagedToolConstructionAndSubmissionErrors(t *testing.T) {
 	}}
 	require.NoError(t, registry.Register(&Registration{Info: toolInfo("plain"), Tool: plain}))
 	executors = backgroundtask.NewExecutorRegistry()
-	manager := backgroundtask.New(context.Background(), &backgroundtask.Config{Executors: executors})
+	manager := mustNewBackgroundManager(t, context.Background(), &backgroundtask.Config{Executors: executors})
 	wrapped, err := NewManagedTool(context.Background(), &ManagedToolConfig{
 		Manager: manager, Executors: executors, Registry: registry, ToolName: "plain",
 		SessionID: func(context.Context) (string, error) {
@@ -228,7 +239,7 @@ func TestManagedToolConstructionAndSubmissionErrors(t *testing.T) {
 			Info: toolInfo("materialized"), Tool: plain, Materializer: testCase.materializer,
 		}))
 		localExecutors := backgroundtask.NewExecutorRegistry()
-		localManager := backgroundtask.New(context.Background(), &backgroundtask.Config{
+		localManager := mustNewBackgroundManager(t, context.Background(), &backgroundtask.Config{
 			Executors: localExecutors,
 		})
 		localWrapped, createErr := NewManagedTool(context.Background(), &ManagedToolConfig{
@@ -301,7 +312,7 @@ func TestManagedToolTimeoutOverrideStopsRun(t *testing.T) {
 		Info: toolInfo("timeout"), Tool: implementation,
 	}))
 	executors := backgroundtask.NewExecutorRegistry()
-	manager := backgroundtask.New(context.Background(), &backgroundtask.Config{Executors: executors})
+	manager := mustNewBackgroundManager(t, context.Background(), &backgroundtask.Config{Executors: executors})
 	timeoutMs := 5
 	wrapped, err := NewManagedTool(context.Background(), &ManagedToolConfig{
 		Manager: manager, Executors: executors, Registry: registry, ToolName: "timeout",

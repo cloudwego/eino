@@ -130,7 +130,7 @@ func newTestManagedTool(
 		Description: func(string) string { return "External operation" },
 	}))
 	executors := backgroundtask.NewExecutorRegistry()
-	manager := backgroundtask.New(context.Background(), &backgroundtask.Config{
+	manager := mustNewBackgroundManager(t, context.Background(), &backgroundtask.Config{
 		Executors: executors,
 		IDGen: func(context.Context, *backgroundtask.AllocateTaskIDRequest) (string, error) {
 			return "task-fixed", nil
@@ -345,7 +345,7 @@ func TestManagedToolDrainYieldsAndRecoversWithoutStop(t *testing.T) {
 		Info: toolInfo("external"), Tool: implementation,
 	}))
 	executorsOne := backgroundtask.NewExecutorRegistry()
-	managerOne := backgroundtask.New(context.Background(), &backgroundtask.Config{
+	managerOne := mustNewBackgroundManager(t, context.Background(), &backgroundtask.Config{
 		Tasks: store, Executors: executorsOne,
 		IDGen: func(context.Context, *backgroundtask.AllocateTaskIDRequest) (string, error) {
 			return "recover-task", nil
@@ -374,7 +374,7 @@ func TestManagedToolDrainYieldsAndRecoversWithoutStop(t *testing.T) {
 	require.Empty(t, yielded.Checkpoint)
 
 	executorsTwo := backgroundtask.NewExecutorRegistry()
-	managerTwo := backgroundtask.New(context.Background(), &backgroundtask.Config{
+	managerTwo := mustNewBackgroundManager(t, context.Background(), &backgroundtask.Config{
 		Tasks: store, Executors: executorsTwo,
 	})
 	require.NoError(t, RegisterExecutors(executorsTwo, registry))
@@ -415,7 +415,7 @@ func TestManagedToolMaterializerIsDerivedAndFailureIsNonTerminal(t *testing.T) {
 		Info: toolInfo("external"), Tool: implementation, Materializer: materializer,
 	}))
 	executors := backgroundtask.NewExecutorRegistry()
-	manager := backgroundtask.New(context.Background(), &backgroundtask.Config{
+	manager := mustNewBackgroundManager(t, context.Background(), &backgroundtask.Config{
 		Executors: executors,
 		IDGen: func(context.Context, *backgroundtask.AllocateTaskIDRequest) (string, error) {
 			return "materialized", nil
@@ -479,7 +479,7 @@ func TestAttack_PlainUpdateGeneratedEventIDNotMaterialized(t *testing.T) {
 		Info: toolInfo("plain"), Tool: implementation, Materializer: materializer,
 	}))
 	executors := backgroundtask.NewExecutorRegistry()
-	manager := backgroundtask.New(context.Background(), &backgroundtask.Config{
+	manager := mustNewBackgroundManager(t, context.Background(), &backgroundtask.Config{
 		Executors: executors,
 		IDGen: func(context.Context, *backgroundtask.AllocateTaskIDRequest) (string, error) {
 			return "plain-generated-event", nil
@@ -530,7 +530,7 @@ func TestManagedToolRejectsInvalidFinalOutputWithoutPartialResult(t *testing.T) 
 		},
 	}))
 	executors := backgroundtask.NewExecutorRegistry()
-	manager := backgroundtask.New(context.Background(), &backgroundtask.Config{
+	manager := mustNewBackgroundManager(t, context.Background(), &backgroundtask.Config{
 		Executors: executors,
 		IDGen: func(context.Context, *backgroundtask.AllocateTaskIDRequest) (string, error) {
 			return "invalid-output", nil
@@ -652,7 +652,7 @@ func TestRecoverableCancellationAfterLeaseLossReattachesToStop(t *testing.T) {
 	time.Sleep(10 * time.Millisecond)
 
 	executors := backgroundtask.NewExecutorRegistry()
-	manager := backgroundtask.New(context.Background(), &backgroundtask.Config{
+	manager := mustNewBackgroundManager(t, context.Background(), &backgroundtask.Config{
 		Tasks: store, Executors: executors,
 	})
 	require.NoError(t, RegisterExecutors(executors, registry))

@@ -51,12 +51,15 @@ func (exampleRun) Stop(context.Context) error { return nil }
 
 func ExampleNewManagedTool() {
 	executors := backgroundtask.NewExecutorRegistry()
-	manager := backgroundtask.New(context.Background(), &backgroundtask.Config{
+	manager, err := backgroundtask.New(context.Background(), &backgroundtask.Config{
 		Executors: executors,
 		IDGen: func(context.Context, *backgroundtask.AllocateTaskIDRequest) (string, error) {
 			return "task_video", nil
 		},
 	})
+	if err != nil {
+		panic(err)
+	}
 	registry := backgroundtool.NewRegistry()
 	_ = registry.Register(&backgroundtool.Registration{
 		Info: &schema.ToolInfo{

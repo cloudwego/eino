@@ -26,8 +26,8 @@
 // describe an optional derived transcript projection; transcript failure never
 // changes authoritative lifecycle status or replaces terminal ResultData.
 //
-// The task, event, outbox, and session-activation SPIs are provisional.
-// Promotion requires conformance against external multi-process providers.
+// Persistence providers should run the reusable suites in
+// adk/backgroundtask/storetest before deployment.
 package backgroundtask
 
 import (
@@ -92,6 +92,8 @@ type Task struct {
 	// CancelReason is the optional first-write reason accompanying durable stop
 	// intent. It becomes ResultError when the task reaches StatusCanceled.
 	CancelReason string
+	// CreatedAt is the TaskStore-assigned creation time.
+	CreatedAt time.Time
 	// UpdatedAt is the TaskStore mutation time.
 	UpdatedAt time.Time
 	// DoneAt is the time the task reached a terminal state. Nil if still running.
@@ -170,9 +172,10 @@ type Manager struct {
 }
 
 // New creates a Manager. A nil Config installs the in-memory reference stores
-// and a new executor registry. The context is reserved for constructor
+// and a new executor registry. When Tasks is supplied without TaskEvents, Tasks
+// must also implement TaskEventStore. The context is reserved for constructor
 // symmetry; Manager does not retain it or derive task lifetime from it.
-func New(_ context.Context, conf *Config) *Manager {
+func New(_ context.Context, conf *Config) (*Manager, error) {
 	defaults := NewInMemoryStore(nil)
 	m := &Manager{
 		heartbeatEvery: 10 * time.Second,
@@ -188,7 +191,9 @@ func New(_ context.Context, conf *Config) *Manager {
 				if events, ok := conf.Tasks.(TaskEventStore); ok {
 					m.taskEvents = events
 				} else {
-					m.taskEvents = unavailableTaskEventStore{}
+					return nil, errors.New(
+						"backgroundtask: task event store is required when task store does not implement TaskEventStore",
+					)
 				}
 			}
 		}
@@ -200,7 +205,7 @@ func New(_ context.Context, conf *Config) *Manager {
 		}
 		m.idGen = conf.IDGen
 	}
-	return m
+	return m, nil
 }
 
 // Close performs bounded graceful shutdown. When any attempt is active, ctx must

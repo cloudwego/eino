@@ -28,6 +28,17 @@ import (
 	"github.com/cloudwego/eino/adk/backgroundtask"
 )
 
+func mustNewBackgroundManager(
+	t testing.TB,
+	ctx context.Context,
+	config *backgroundtask.Config,
+) *backgroundtask.Manager {
+	t.Helper()
+	manager, err := backgroundtask.New(ctx, config)
+	require.NoError(t, err)
+	return manager
+}
+
 type coordinatorExecutor struct {
 	started chan struct{}
 	release chan struct{}
@@ -80,7 +91,7 @@ func newCoordinatorTask(t *testing.T) (*backgroundtask.Manager, *coordinatorExec
 	}
 	executors := backgroundtask.NewExecutorRegistry()
 	require.NoError(t, executors.Register(executor))
-	manager := backgroundtask.New(context.Background(), &backgroundtask.Config{
+	manager := mustNewBackgroundManager(t, context.Background(), &backgroundtask.Config{
 		Executors: executors,
 	})
 	t.Cleanup(func() {
@@ -241,7 +252,7 @@ func TestRunRejectsInvalidRequestAndState(t *testing.T) {
 		Checkpoint: []byte("checkpoint"),
 	})
 	require.NoError(t, err)
-	suspendedManager := backgroundtask.New(
+	suspendedManager := mustNewBackgroundManager(t,
 		context.Background(), &backgroundtask.Config{Tasks: store},
 	)
 	_, err = Run(context.Background(), suspendedManager, Policy{}, &Request{

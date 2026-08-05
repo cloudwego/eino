@@ -33,7 +33,7 @@ type SessionNotificationInbox interface {
 
 // SessionActivator requests that a session process pending notifications.
 type SessionActivator interface {
-	RequestTurn(context.Context, *SessionActivationRequest) (*SessionActivationResult, error)
+	RequestTurn(context.Context, *SessionActivationRequest) error
 }
 
 // EnqueueSessionNotificationRequest enqueues a notification for a session.
@@ -70,26 +70,10 @@ type SessionActivationRequest struct {
 	SessionID string
 }
 
-// SessionActivationDisposition describes how an activation request was handled.
-type SessionActivationDisposition string
-
-const (
-	// SessionActivationStarted means the session turn started immediately.
-	SessionActivationStarted SessionActivationDisposition = "started"
-	// SessionActivationQueued means the session turn was queued for later execution.
-	SessionActivationQueued SessionActivationDisposition = "queued"
-)
-
-// SessionActivationResult reports the activation disposition.
-type SessionActivationResult struct {
-	Disposition SessionActivationDisposition
-}
-
-// Dispatcher delivers task notifications from an outbox to session inboxes.
-// All dependency fields are required when DispatchOnce is called. BatchSize
-// defaults to the outbox default and LeaseDuration defaults to 30 seconds.
-// Fields must not be mutated concurrently with DispatchOnce.
-type Dispatcher struct {
+// DispatcherConfig configures a notification Dispatcher. All dependency fields
+// are required. BatchSize defaults to the outbox default and LeaseDuration
+// defaults to 30 seconds.
+type DispatcherConfig struct {
 	Outbox        NotificationOutbox
 	Tasks         TaskStore
 	Inbox         SessionNotificationInbox
@@ -98,21 +82,45 @@ type Dispatcher struct {
 	LeaseDuration time.Duration
 }
 
+// Dispatcher delivers task notifications from an outbox to session inboxes.
+// Its dependencies and delivery policy are immutable after construction.
+type Dispatcher struct {
+	outbox        NotificationOutbox
+	tasks         TaskStore
+	inbox         SessionNotificationInbox
+	activator     SessionActivator
+	batchSize     int
+	leaseDuration time.Duration
+}
+
+// NewDispatcher validates config and creates an immutable Dispatcher.
+func NewDispatcher(config *DispatcherConfig) (*Dispatcher, error) {
+	if config == nil || config.Outbox == nil || config.Tasks == nil ||
+		config.Inbox == nil || config.Activator == nil {
+		return nil, errors.New(
+			"backgroundtask: dispatcher outbox, task store, session inbox, and activator are required",
+		)
+	}
+	leaseDuration := config.LeaseDuration
+	if leaseDuration <= 0 {
+		leaseDuration = 30 * time.Second
+	}
+	return &Dispatcher{
+		outbox: config.Outbox, tasks: config.Tasks, inbox: config.Inbox,
+		activator: config.Activator, batchSize: config.BatchSize,
+		leaseDuration: leaseDuration,
+	}, nil
+}
+
 // DispatchOnce receives and dispatches one batch of visible notifications.
 // Delivery and activation are at least once: inboxes must deduplicate enqueue
 // and activators must coalesce repeated requests for the same pending work.
 func (d *Dispatcher) DispatchOnce(ctx context.Context) (int, error) {
-	if d.Outbox == nil || d.Tasks == nil || d.Inbox == nil || d.Activator == nil {
-		return 0, errors.New(
-			"backgroundtask: dispatcher outbox, task store, session inbox, and activator are required",
-		)
+	if d == nil {
+		return 0, errors.New("backgroundtask: dispatcher is required")
 	}
-	leaseDuration := d.LeaseDuration
-	if leaseDuration <= 0 {
-		leaseDuration = 30 * time.Second
-	}
-	deliveries, err := d.Outbox.Receive(ctx, &ReceiveNotificationsRequest{
-		Limit: d.BatchSize, LeaseDuration: leaseDuration,
+	deliveries, err := d.outbox.Receive(ctx, &ReceiveNotificationsRequest{
+		Limit: d.batchSize, LeaseDuration: d.leaseDuration,
 	})
 	if err != nil {
 		return 0, err
@@ -120,24 +128,24 @@ func (d *Dispatcher) DispatchOnce(ctx context.Context) (int, error) {
 	accepted := 0
 	for _, delivery := range deliveries.Deliveries {
 		record := delivery.Record
-		task, loadErr := d.Tasks.Get(ctx, record.TaskID)
+		task, loadErr := d.tasks.Get(ctx, record.TaskID)
 		if loadErr != nil {
 			return accepted, loadErr
 		}
 		notification := record
 		notification.Task = task
-		item, enqueueErr := d.Inbox.Enqueue(ctx, &EnqueueSessionNotificationRequest{
+		item, enqueueErr := d.inbox.Enqueue(ctx, &EnqueueSessionNotificationRequest{
 			SessionID: task.Spec.SessionID, Notification: notification,
 		})
 		if enqueueErr != nil {
 			return accepted, enqueueErr
 		}
-		if _, err = d.Activator.RequestTurn(ctx, &SessionActivationRequest{
+		if err = d.activator.RequestTurn(ctx, &SessionActivationRequest{
 			SessionID: item.SessionID,
 		}); err != nil {
 			return accepted, err
 		}
-		if err = d.Outbox.Ack(ctx, delivery.Receipt); err != nil {
+		if err = d.outbox.Ack(ctx, delivery.Receipt); err != nil {
 			return accepted, err
 		}
 		accepted++

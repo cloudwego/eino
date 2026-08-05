@@ -39,6 +39,17 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
+func mustNewBackgroundManager(
+	t testing.TB,
+	ctx context.Context,
+	config *backgroundtask.Config,
+) *backgroundtask.Manager {
+	t.Helper()
+	manager, err := backgroundtask.New(ctx, config)
+	require.NoError(t, err)
+	return manager
+}
+
 type mockAgent struct {
 	name       string
 	desc       string
@@ -53,10 +64,10 @@ type middlewareRunOptions struct {
 var testManagerStores sync.Map
 var testManagerExecutors sync.Map
 
-func newTestManager(ctx context.Context) *backgroundtask.Manager {
+func newTestManager(t testing.TB, ctx context.Context) *backgroundtask.Manager {
 	store := backgroundtask.NewInMemoryStore(nil)
 	executors := backgroundtask.NewExecutorRegistry()
-	manager := backgroundtask.New(ctx, &backgroundtask.Config{
+	manager := mustNewBackgroundManager(t, ctx, &backgroundtask.Config{
 		Tasks: store, Executors: executors,
 	})
 	testManagerStores.Store(manager, store)
@@ -190,7 +201,7 @@ func TestConfigValidation(t *testing.T) {
 	})
 	assert.Error(t, err)
 
-	manager := newTestManager(context.Background())
+	manager := newTestManager(t, context.Background())
 	_, err = New(context.Background(), &Config{
 		SubAgents: []adk.Agent{agent},
 		Background: &BackgroundConfig{
@@ -258,7 +269,7 @@ func TestAgentToolForegroundRouting(t *testing.T) {
 
 func TestDurableAgentToolForeground(t *testing.T) {
 	ctx := runnerEnvironmentContext(t)
-	mgr := newTestManager(ctx)
+	mgr := newTestManager(t, ctx)
 	agent := &mockAgent{name: "worker", desc: "durable result"}
 	mw, err := New(ctx, &Config{
 		SubAgents: []adk.Agent{agent}, Background: durableBackground(t, mgr, agent),
@@ -279,8 +290,8 @@ func TestDurableAgentToolForeground(t *testing.T) {
 
 func TestLocalAndDurableAgentToolSchemasMatch(t *testing.T) {
 	agent := &mockAgent{name: "worker", desc: "does work"}
-	localManager := newTestManager(context.Background())
-	durableManager := newTestManager(context.Background())
+	localManager := newTestManager(t, context.Background())
+	durableManager := newTestManager(t, context.Background())
 	local, err := New(context.Background(), &Config{
 		SubAgents: []adk.Agent{agent}, Background: localBackground(t, localManager),
 	})
@@ -497,7 +508,7 @@ func TestSanitizedMessageValueAndTaskName(t *testing.T) {
 
 func TestLocalAgentToolWritesEventTranscript(t *testing.T) {
 	ctx := runnerEnvironmentContext(t)
-	manager := newTestManager(ctx)
+	manager := newTestManager(t, ctx)
 	backend := filesystem.NewInMemoryBackend()
 	agent := &mockAgent{name: "worker", desc: "local output"}
 	middleware, err := New(ctx, &Config{
@@ -540,7 +551,7 @@ func TestLocalAgentToolWritesEventTranscript(t *testing.T) {
 
 func TestDurableAgentToolBackgroundSurvivesCaller(t *testing.T) {
 	ctx := runnerEnvironmentContext(t)
-	mgr := newTestManager(context.Background())
+	mgr := newTestManager(t, context.Background())
 	agent := &mockAgent{name: "slow", run: func(context.Context, *adk.AgentInput) string {
 		time.Sleep(30 * time.Millisecond)
 		return "done"
@@ -564,7 +575,7 @@ func TestDurableAgentToolBackgroundSurvivesCaller(t *testing.T) {
 
 func TestDurableAgentRegistrationRejectsDuplicateExactIdentity(t *testing.T) {
 	ctx := context.Background()
-	mgr := newTestManager(ctx)
+	mgr := newTestManager(t, ctx)
 	first := &mockAgent{name: "worker", desc: "first"}
 	second := &mockAgent{name: "worker", desc: "second"}
 	background := durableBackground(t, mgr, first)
@@ -580,7 +591,7 @@ func TestDurableAgentRegistrationRejectsDuplicateExactIdentity(t *testing.T) {
 
 func TestDurableTaskProgressReadsSessionTranscript(t *testing.T) {
 	ctx := runnerEnvironmentContext(t)
-	manager := newTestManager(context.Background())
+	manager := newTestManager(t, context.Background())
 	agent := &mockAgent{name: "worker", desc: "durable output"}
 	executor := durableExecutor(t)
 	middleware, err := New(ctx, &Config{
@@ -616,7 +627,7 @@ func TestDurableTaskProgressReadsSessionTranscript(t *testing.T) {
 
 func TestDurableTaskProgressUsesSharedFormatter(t *testing.T) {
 	ctx := runnerEnvironmentContext(t)
-	manager := newTestManager(context.Background())
+	manager := newTestManager(t, context.Background())
 	agent := &mockAgent{name: "worker", desc: "durable output"}
 	executor := durableExecutor(t)
 	format := func(_ context.Context, agentName string, message *schema.Message) (string, error) {
@@ -652,7 +663,7 @@ func TestDurableTaskProgressUsesSharedFormatter(t *testing.T) {
 
 func TestDurableForegroundProjectionStopsAtBackgroundBoundary(t *testing.T) {
 	ctx := runnerEnvironmentContext(t)
-	manager := newTestManager(context.Background())
+	manager := newTestManager(t, context.Background())
 	agent := &mockAgent{name: "worker", desc: "done"}
 	middleware, err := New(ctx, &Config{
 		SubAgents: []adk.Agent{agent}, Background: durableBackground(t, manager, agent),
@@ -689,7 +700,7 @@ func TestDurableForegroundProjectionStopsAtBackgroundBoundary(t *testing.T) {
 
 func TestDurableAgentToolRejectsInvocationScopedRunOptions(t *testing.T) {
 	ctx := runnerEnvironmentContext(t)
-	manager := newTestManager(context.Background())
+	manager := newTestManager(t, context.Background())
 	agent := &mockAgent{name: "worker", desc: "done"}
 	middleware, err := New(ctx, &Config{
 		SubAgents: []adk.Agent{agent}, Background: durableBackground(t, manager, agent),
@@ -717,7 +728,7 @@ func TestDurableAgentToolRejectsInvocationScopedRunOptions(t *testing.T) {
 
 func TestDurableAgentToolUsesRegisteredRunOptionsFactory(t *testing.T) {
 	ctx := runnerEnvironmentContext(t)
-	manager := newTestManager(context.Background())
+	manager := newTestManager(t, context.Background())
 	var got string
 	agent := &mockAgent{
 		name: "worker", desc: "done",
@@ -754,7 +765,7 @@ func TestDurableAgentToolUsesRegisteredRunOptionsFactory(t *testing.T) {
 func TestDurableBlockingReceiverDoesNotBlockAutoBackgroundResponse(t *testing.T) {
 	ctx := runnerEnvironmentContext(t)
 	timeout := 20
-	manager := newTestManager(context.Background())
+	manager := newTestManager(t, context.Background())
 	agent := &mockAgent{name: "worker", desc: "done"}
 	background := durableBackground(t, manager, agent)
 	background.Durable.ForegroundTimeoutMs = &timeout

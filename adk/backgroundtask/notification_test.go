@@ -65,12 +65,18 @@ type recordingSessionActivator struct {
 func (a *recordingSessionActivator) RequestTurn(
 	_ context.Context,
 	req *SessionActivationRequest,
-) (*SessionActivationResult, error) {
+) error {
 	a.sessionIDs = append(a.sessionIDs, req.SessionID)
-	if a.err != nil {
-		return nil, a.err
-	}
-	return &SessionActivationResult{Disposition: SessionActivationQueued}, nil
+	return a.err
+}
+
+func TestNewDispatcherValidatesDependencies_BitsUT(t *testing.T) {
+	_, err := NewDispatcher(nil)
+	require.EqualError(
+		t,
+		err,
+		"backgroundtask: dispatcher outbox, task store, session inbox, and activator are required",
+	)
 }
 
 func TestDispatcherRedeliversUntilSessionActivationSucceeds_BitsUT(t *testing.T) {
@@ -87,10 +93,11 @@ func TestDispatcherRedeliversUntilSessionActivationSucceeds_BitsUT(t *testing.T)
 
 	inbox := &recordingNotificationInbox{}
 	activator := &recordingSessionActivator{err: errors.New("activation unavailable")}
-	dispatcher := &Dispatcher{
+	dispatcher, err := NewDispatcher(&DispatcherConfig{
 		Outbox: store, Tasks: store, Inbox: inbox, Activator: activator,
 		BatchSize: 10, LeaseDuration: time.Second,
-	}
+	})
+	require.NoError(t, err)
 	accepted, err := dispatcher.DispatchOnce(context.Background())
 	require.Error(t, err)
 	assert.Zero(t, accepted)

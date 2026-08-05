@@ -41,21 +41,16 @@ type recordingActivator struct {
 func (a *recordingActivator) RequestTurn(
 	ctx context.Context,
 	req *backgroundtask.SessionActivationRequest,
-) (*backgroundtask.SessionActivationResult, error) {
+) error {
 	a.sessionID = req.SessionID
 	pending, err := a.inbox.ListPending(ctx, &backgroundtask.ListSessionNotificationsRequest{
 		SessionID: req.SessionID,
 	})
 	if err != nil {
-		return nil, err
+		return err
 	}
 	a.pendingSeen = len(pending)
-	if a.err != nil {
-		return nil, a.err
-	}
-	return &backgroundtask.SessionActivationResult{
-		Disposition: backgroundtask.SessionActivationQueued,
-	}, nil
+	return a.err
 }
 
 func TestTerminalTaskNotificationWakesParentSession_BitsUT(t *testing.T) {
@@ -79,10 +74,11 @@ func TestTerminalTaskNotificationWakesParentSession_BitsUT(t *testing.T) {
 
 	inbox := NewMemoryInbox()
 	activator := &recordingActivator{inbox: inbox}
-	dispatcher := &backgroundtask.Dispatcher{
+	dispatcher, err := backgroundtask.NewDispatcher(&backgroundtask.DispatcherConfig{
 		Outbox: store, Tasks: store, Inbox: inbox, Activator: activator,
 		BatchSize: 10, LeaseDuration: time.Minute,
-	}
+	})
+	require.NoError(t, err)
 	delivered, err := dispatcher.DispatchOnce(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, 1, delivered)
@@ -284,11 +280,10 @@ func TestTurnLoopActivatorQueuesWakeAndStartsLoop_BitsUT(t *testing.T) {
 		},
 	}
 
-	result, err := activator.RequestTurn(context.Background(), &backgroundtask.SessionActivationRequest{
+	err := activator.RequestTurn(context.Background(), &backgroundtask.SessionActivationRequest{
 		SessionID: "session-1",
 	})
 	require.NoError(t, err)
-	assert.Equal(t, backgroundtask.SessionActivationQueued, result.Disposition)
 	select {
 	case items := <-received:
 		assert.Equal(t, []string{"wake:session-1"}, items)
@@ -327,7 +322,7 @@ func TestTurnLoopActivatorRejectsStoppedLoop_BitsUT(t *testing.T) {
 		},
 	}
 
-	_, err := activator.RequestTurn(context.Background(), &backgroundtask.SessionActivationRequest{
+	err := activator.RequestTurn(context.Background(), &backgroundtask.SessionActivationRequest{
 		SessionID: "session-1",
 	})
 	require.Error(t, err)

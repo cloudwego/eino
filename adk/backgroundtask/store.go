@@ -106,22 +106,6 @@ type TaskEventStore interface {
 	ListTaskEvents(context.Context, *ListTaskEventsRequest) (*ListTaskEventsResult, error)
 }
 
-type unavailableTaskEventStore struct{}
-
-func (unavailableTaskEventStore) AppendTaskEvent(
-	context.Context,
-	*AppendTaskEventRequest,
-) (*AppendTaskEventResult, error) {
-	return nil, errors.New("backgroundtask: task event store is not configured")
-}
-
-func (unavailableTaskEventStore) ListTaskEvents(
-	context.Context,
-	*ListTaskEventsRequest,
-) (*ListTaskEventsResult, error) {
-	return nil, errors.New("backgroundtask: task event store is not configured")
-}
-
 // NotificationOutbox leases lifecycle notifications for dispatch. Ack must
 // accept only the opaque receipt for the notification's current unexpired
 // lease; an expired or superseded receipt must not acknowledge the notification.

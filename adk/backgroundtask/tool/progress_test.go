@@ -28,9 +28,14 @@ import (
 	"github.com/cloudwego/eino/adk/backgroundtask"
 )
 
+func TestNewProgressReaderRequiresManager(t *testing.T) {
+	_, err := NewProgressReader(nil, 0)
+	require.EqualError(t, err, "backgroundtask/tool: progress reader manager is required")
+}
+
 func TestProgressReaderFormatsBoundedRecentUpdates(t *testing.T) {
 	store := backgroundtask.NewInMemoryStore(nil)
-	manager := backgroundtask.New(context.Background(), &backgroundtask.Config{Tasks: store})
+	manager := mustNewBackgroundManager(t, context.Background(), &backgroundtask.Config{Tasks: store})
 	created, err := store.Create(context.Background(), &backgroundtask.CreateTaskRequest{
 		Spec: backgroundtask.Spec{
 			ID: "progress", ExecutorKey: RecoverableExecutorKey, Kind: "background_tool",
@@ -53,7 +58,8 @@ func TestProgressReaderFormatsBoundedRecentUpdates(t *testing.T) {
 		})
 		require.NoError(t, err, index)
 	}
-	reader := &ProgressReader{Manager: manager, Limit: 2}
+	reader, err := NewProgressReader(manager, 2)
+	require.NoError(t, err)
 	progress, err := reader.ReadProgress(context.Background(), created)
 	require.NoError(t, err)
 	require.NotContains(t, progress, "one")
@@ -64,7 +70,7 @@ func TestProgressReaderFormatsBoundedRecentUpdates(t *testing.T) {
 
 func TestProgressReaderFallsBackForUnknownCompatibleRecord(t *testing.T) {
 	store := backgroundtask.NewInMemoryStore(nil)
-	manager := backgroundtask.New(context.Background(), &backgroundtask.Config{Tasks: store})
+	manager := mustNewBackgroundManager(t, context.Background(), &backgroundtask.Config{Tasks: store})
 	task, err := store.Create(context.Background(), &backgroundtask.CreateTaskRequest{
 		Spec: backgroundtask.Spec{
 			ID: "raw", ExecutorKey: ExecutorKey, Kind: "background_tool",
@@ -81,9 +87,9 @@ func TestProgressReaderFallsBackForUnknownCompatibleRecord(t *testing.T) {
 		EventID: "raw", Data: []byte("legacy raw text"),
 	})
 	require.NoError(t, err)
-	progress, err := (&ProgressReader{Manager: manager}).ReadProgress(
-		context.Background(), task,
-	)
+	reader, err := NewProgressReader(manager, 0)
+	require.NoError(t, err)
+	progress, err := reader.ReadProgress(context.Background(), task)
 	require.NoError(t, err)
 	require.Contains(t, progress, "legacy raw text")
 }

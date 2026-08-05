@@ -364,7 +364,7 @@ func formatTask(task *bgtask.Task) string {
 	if task.DoneAt != nil {
 		result += fmt.Sprintf(
 			"\nElapsed: %s",
-			task.DoneAt.Sub(task.Spec.CreatedAt).Round(time.Millisecond),
+			task.DoneAt.Sub(task.CreatedAt).Round(time.Millisecond),
 		)
 	}
 	return result

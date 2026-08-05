@@ -120,14 +120,12 @@ func (s *InMemoryStore) Create(_ context.Context, req *CreateTaskRequest) (*Task
 	}
 	now := s.now()
 	spec := cloneSpec(req.Spec)
-	if spec.CreatedAt.IsZero() {
-		spec.CreatedAt = now
-	}
 	task := &Task{
 		Spec:              spec,
 		LeaseExpiryPolicy: req.LeaseExpiryPolicy,
 		Status:            StatusPending,
 		Version:           1,
+		CreatedAt:         now,
 		UpdatedAt:         now,
 	}
 	s.tasks[spec.ID] = task

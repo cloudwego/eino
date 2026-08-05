@@ -58,7 +58,7 @@ func newAttackManagedTool(
 		Info: toolInfo("attack"), Tool: implementation, Materializer: materializer,
 	}))
 	executors := backgroundtask.NewExecutorRegistry()
-	manager := backgroundtask.New(context.Background(), &backgroundtask.Config{
+	manager := mustNewBackgroundManager(t, context.Background(), &backgroundtask.Config{
 		Executors: executors,
 		IDGen: func(context.Context, *backgroundtask.AllocateTaskIDRequest) (string, error) {
 			return "attack-task", nil

@@ -31,6 +31,17 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
+func mustNewBackgroundManager(
+	t testing.TB,
+	ctx context.Context,
+	config *backgroundtask.Config,
+) *backgroundtask.Manager {
+	t.Helper()
+	manager, err := backgroundtask.New(ctx, config)
+	require.NoError(t, err)
+	return manager
+}
+
 type resumableTestAgent struct {
 	name         string
 	events       []*adk.AgentEvent
@@ -485,7 +496,7 @@ func TestSubmitPersistsMinimalPayloadAndDerivesChildIdentities_BitsUT(t *testing
 	}))
 	executors := backgroundtask.NewExecutorRegistry()
 	require.NoError(t, executors.Register(executor))
-	manager := backgroundtask.New(context.Background(), &backgroundtask.Config{Executors: executors})
+	manager := mustNewBackgroundManager(t, context.Background(), &backgroundtask.Config{Executors: executors})
 	defer manager.Close(context.Background())
 
 	task, err := Submit(context.Background(), manager, &SubmitRequest{
@@ -514,7 +525,7 @@ func executionFixture(
 	require.NoError(t, executor.Register(agent.name, &AgentRegistration[*schema.Message]{Agent: agent}))
 	executors := backgroundtask.NewExecutorRegistry()
 	require.NoError(t, executors.Register(executor))
-	manager := backgroundtask.New(context.Background(), &backgroundtask.Config{Executors: executors})
+	manager := mustNewBackgroundManager(t, context.Background(), &backgroundtask.Config{Executors: executors})
 	task, err := Submit(context.Background(), manager, &SubmitRequest{
 		SubAgentName: agent.name, Query: "work", Description: "work",
 		SessionID: "parent",
@@ -584,7 +595,7 @@ func TestExecutorReconstructsRegisteredRunOptionsForEveryAttempt_BitsUT(t *testi
 	}))
 	executors := backgroundtask.NewExecutorRegistry()
 	require.NoError(t, executors.Register(executor))
-	manager := backgroundtask.New(context.Background(), &backgroundtask.Config{Executors: executors})
+	manager := mustNewBackgroundManager(t, context.Background(), &backgroundtask.Config{Executors: executors})
 	defer manager.Close(context.Background())
 	for i := 0; i < 2; i++ {
 		task, err := Submit(context.Background(), manager, &SubmitRequest{
@@ -615,7 +626,7 @@ func TestStopControlWinsOverLateFinalMessage_BitsUT(t *testing.T) {
 	require.NoError(t, executor.Register(agent.name, &AgentRegistration[*schema.Message]{Agent: agent}))
 	registry := backgroundtask.NewExecutorRegistry()
 	require.NoError(t, registry.Register(executor))
-	manager := backgroundtask.New(context.Background(), &backgroundtask.Config{Executors: registry})
+	manager := mustNewBackgroundManager(t, context.Background(), &backgroundtask.Config{Executors: registry})
 	task, err := Submit(context.Background(), manager, &SubmitRequest{
 		SubAgentName: agent.name, Query: "work", Description: "work", SessionID: "parent",
 	})
@@ -657,7 +668,7 @@ func TestControlAndInterruptUseRunnerCheckpoint(t *testing.T) {
 	}))
 	registry := backgroundtask.NewExecutorRegistry()
 	require.NoError(t, registry.Register(executor))
-	manager := backgroundtask.New(context.Background(), &backgroundtask.Config{Executors: registry})
+	manager := mustNewBackgroundManager(t, context.Background(), &backgroundtask.Config{Executors: registry})
 	task, err := Submit(context.Background(), manager, &SubmitRequest{
 		SubAgentName: agent.name, Query: "work", Description: "work", SessionID: "parent",
 	})
@@ -735,7 +746,7 @@ func TestSubAgentTaskResumesAfterManagerReconstruction_BitsUT(t *testing.T) {
 	require.NoError(t, executors.Register(executor))
 	taskStore := backgroundtask.NewInMemoryStore(nil)
 
-	manager1 := backgroundtask.New(context.Background(), &backgroundtask.Config{
+	manager1 := mustNewBackgroundManager(t, context.Background(), &backgroundtask.Config{
 		Tasks: taskStore, Executors: executors,
 	})
 	task, err := Submit(context.Background(), manager1, &SubmitRequest{
@@ -752,7 +763,7 @@ func TestSubAgentTaskResumesAfterManagerReconstruction_BitsUT(t *testing.T) {
 	require.Len(t, state.TargetIDs, 1)
 	require.NoError(t, manager1.Close(context.Background()))
 
-	manager2 := backgroundtask.New(context.Background(), &backgroundtask.Config{
+	manager2 := mustNewBackgroundManager(t, context.Background(), &backgroundtask.Config{
 		Tasks: taskStore, Executors: executors,
 	})
 	defer manager2.Close(context.Background())

@@ -28,11 +28,11 @@ const (
 	LeaseExpiryFail LeaseExpiryPolicy = "fail"
 )
 
-// Spec is immutable serialized task intent. Callers supply every field except
-// CreatedAt, which TaskStore assigns when it is zero. Payload and all returned
-// byte slices must be copied across provider boundaries. OutputFile names an
-// optional derived transcript destination; it is not authoritative task output.
-// Providers may impose documented size bounds such as InMemoryStoreConfig.
+// Spec is immutable serialized task intent supplied by the caller. Payload and
+// all returned byte slices must be copied across provider boundaries.
+// OutputFile names an optional derived transcript destination; it is not
+// authoritative task output. Providers may impose documented size bounds such
+// as InMemoryStoreConfig.
 type Spec struct {
 	ID          string
 	ExecutorKey string
@@ -43,7 +43,6 @@ type Spec struct {
 	OutputFile    string
 	SessionID     string
 	NotifySession bool
-	CreatedAt     time.Time
 }
 
 // NotificationKind identifies the lifecycle transition that created a notification.
@@ -77,7 +76,8 @@ type Notification struct {
 }
 
 // CreateTaskRequest creates a task from immutable serialized intent and the
-// recovery policy owned by its registered Executor.
+// recovery policy owned by its registered Executor. TaskStore assigns all
+// lifecycle timestamps, including Task.CreatedAt.
 type CreateTaskRequest struct {
 	Spec              Spec
 	LeaseExpiryPolicy LeaseExpiryPolicy

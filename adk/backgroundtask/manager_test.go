@@ -53,7 +53,7 @@ func (s *firstReleaseConflictStore) ReleaseSuspension(
 
 func TestManagerListTaskEventsDelegatesToStore_BitsUT(t *testing.T) {
 	store := NewInMemoryStore(nil)
-	manager := New(context.Background(), &Config{
+	manager := mustNewManager(t, context.Background(), &Config{
 		Tasks: lifecycleStoreOnly{TaskStore: store}, TaskEvents: store,
 	})
 	defer closeWithTimeout(manager)
@@ -120,7 +120,7 @@ func TestManagerExecuteBindsTimeoutController_BitsUT(t *testing.T) {
 }
 
 func TestManagerExecuteClosesTimeoutControllerOnEarlyFailure_BitsUT(t *testing.T) {
-	manager := New(context.Background(), nil)
+	manager := mustNewManager(t, context.Background(), nil)
 	defer closeWithTimeout(manager)
 	executeCtx, timeoutController := taskcontrol.WithTimeoutController(context.Background())
 
@@ -204,8 +204,8 @@ func TestManagerReleaseSuspensionRetriesVersionConflict_BitsUT(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	manager := New(context.Background(), &Config{
-		Tasks: &firstReleaseConflictStore{TaskStore: store},
+	manager := mustNewManager(t, context.Background(), &Config{
+		Tasks: &firstReleaseConflictStore{TaskStore: store}, TaskEvents: store,
 	})
 	defer closeWithTimeout(manager)
 	released, err := manager.ReleaseSuspension(context.Background(), suspended.Spec.ID)
@@ -447,11 +447,12 @@ func (s heartbeatErrorStore) Heartbeat(context.Context, *HeartbeatRequest) (*Tas
 }
 
 func TestManagerHeartbeatStopsAndCancelsOnLeaseError(t *testing.T) {
-	manager := New(context.Background(), nil)
+	manager := mustNewManager(t, context.Background(), nil)
 	manager.heartbeatEvery = time.Nanosecond
+	events := NewInMemoryStore(nil)
 	runtime := newTaskRuntime(
 		heartbeatErrorStore{TaskStore: NewInMemoryStore(nil), err: ErrLeaseLost},
-		unavailableTaskEventStore{},
+		events,
 		"task", 1, 1,
 	)
 	runCtx, cancel := context.WithCancel(context.Background())
@@ -464,7 +465,7 @@ func TestManagerHeartbeatStopsAndCancelsOnLeaseError(t *testing.T) {
 
 	runCtx, cancel = context.WithCancel(context.Background())
 	defer cancel()
-	runtime = newTaskRuntime(NewInMemoryStore(nil), unavailableTaskEventStore{}, "task", 1, 1)
+	runtime = newTaskRuntime(NewInMemoryStore(nil), events, "task", 1, 1)
 	runtime.cancelRequested = true
 	done = make(chan struct{})
 	go manager.heartbeat(runCtx, cancel, runtime, stop, done)
@@ -494,13 +495,13 @@ func TestExecutorRegistryRegistrationBoundaries(t *testing.T) {
 }
 
 func TestRuntimeCancellationReconciliationRejectsInvalidState(t *testing.T) {
-	runtime := newTaskRuntime(NewInMemoryStore(nil), unavailableTaskEventStore{}, "missing", 1, 1)
+	store := NewInMemoryStore(nil)
+	runtime := newTaskRuntime(store, store, "missing", 1, 1)
 	require.ErrorIs(
 		t, runtime.reconcileCancellationLocked(context.Background()), ErrNotFound,
 	)
 	require.ErrorIs(t, runtime.poison, ErrNotFound)
 
-	store := NewInMemoryStore(nil)
 	started := createAndStart(t, store, "not-canceled")
 	runtime = newTaskRuntime(store, store, started.Spec.ID, started.Attempt, started.Version)
 	require.ErrorIs(
@@ -553,7 +554,7 @@ func TestManagerResumeLifecycleBoundaries(t *testing.T) {
 		},
 	)
 	require.NoError(t, err)
-	missingExecutorManager := New(context.Background(), &Config{Tasks: missingExecutorStore})
+	missingExecutorManager := mustNewManager(t, context.Background(), &Config{Tasks: missingExecutorStore})
 	resumed, err = missingExecutorManager.Resume(context.Background(), &ResumeRequest{
 		TaskID: waiting.Spec.ID, ExpectedVersion: waiting.Version,
 	})
@@ -672,6 +673,17 @@ func TestExecutorRegistryLoadOrRegisterIsAtomic_BitsUT(t *testing.T) {
 
 type lifecycleStoreOnly struct {
 	TaskStore
+}
+
+func TestNewRejectsMissingTaskEventStore_BitsUT(t *testing.T) {
+	_, err := New(context.Background(), &Config{
+		Tasks: lifecycleStoreOnly{TaskStore: NewInMemoryStore(nil)},
+	})
+	require.EqualError(
+		t,
+		err,
+		"backgroundtask: task event store is required when task store does not implement TaskEventStore",
+	)
 }
 
 func TestManagerSubmitNotificationRequiresOutbox_BitsUT(t *testing.T) {

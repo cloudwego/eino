@@ -139,11 +139,6 @@ type Config struct {
 	// At least one of Backend, Shell, or StreamingShell must be set.
 	// Mutually exclusive with Shell.
 	StreamingShell filesystem.StreamingShell
-	// Background configures background-task execution for the execute tool. When
-	// nil, execute runs only foreground (blocking) and is not tracked. See
-	// BackgroundConfig.
-	Background *BackgroundConfig
-
 	// LsToolConfig configures the ls tool
 	// optional
 	LsToolConfig *ToolConfig
@@ -212,14 +207,13 @@ func (c *Config) Validate() error {
 	if c == nil {
 		return errors.New("config should not be nil")
 	}
-	if c.Backend == nil && c.Shell == nil && c.StreamingShell == nil &&
-		recoverableBackground(c.Background) == nil {
+	if c.Backend == nil && c.Shell == nil && c.StreamingShell == nil {
 		return errors.New("at least one of backend, shell, or streaming shell should be set")
 	}
 	if c.Shell != nil && c.StreamingShell != nil {
 		return errors.New("shell and streaming shell should not be both set")
 	}
-	return validateBackgroundConfig(c.Background, c.Shell, c.StreamingShell)
+	return nil
 }
 
 // NewMiddleware constructs and returns the filesystem middleware.
@@ -237,7 +231,6 @@ func NewMiddleware(ctx context.Context, config *Config) (adk.AgentMiddleware, er
 		Backend:                 config.Backend,
 		Shell:                   config.Shell,
 		StreamingShell:          config.StreamingShell,
-		Background:              config.Background,
 		LsToolConfig:            config.LsToolConfig,
 		ReadFileToolConfig:      config.ReadFileToolConfig,
 		WriteFileToolConfig:     config.WriteFileToolConfig,

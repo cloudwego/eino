@@ -46,30 +46,28 @@ type TurnLoopActivator[T any, M adk.MessageType] struct {
 func (a *TurnLoopActivator[T, M]) RequestTurn(
 	ctx context.Context,
 	req *backgroundtask.SessionActivationRequest,
-) (*backgroundtask.SessionActivationResult, error) {
+) error {
 	if req == nil || req.SessionID == "" {
-		return nil, errors.New("sessionnotify: session id is required")
+		return errors.New("sessionnotify: session id is required")
 	}
 	if a == nil || a.Resolve == nil || a.WakeItem == nil {
-		return nil, errors.New("sessionnotify: turn loop resolver and wake item encoder are required")
+		return errors.New("sessionnotify: turn loop resolver and wake item encoder are required")
 	}
 	target, err := a.Resolve(ctx, req.SessionID)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	if target == nil || target.Loop == nil || target.RunContext == nil {
-		return nil, errors.New("sessionnotify: resolved turn loop target is incomplete")
+		return errors.New("sessionnotify: resolved turn loop target is incomplete")
 	}
 	item, err := a.WakeItem(req)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	accepted, _ := target.Loop.Push(item)
 	if !accepted {
-		return nil, errors.New("sessionnotify: resolved turn loop is stopped")
+		return errors.New("sessionnotify: resolved turn loop is stopped")
 	}
 	target.Loop.Run(target.RunContext)
-	return &backgroundtask.SessionActivationResult{
-		Disposition: backgroundtask.SessionActivationQueued,
-	}, nil
+	return nil
 }

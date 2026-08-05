@@ -28,7 +28,7 @@ import (
 )
 
 func TestAllocateTaskIDIsOpaqueAndDoesNotCreateRecord(t *testing.T) {
-	manager := New(context.Background(), nil)
+	manager := mustNewManager(t, context.Background(), nil)
 	defer closeWithTimeout(manager)
 
 	seen := make(map[string]struct{}, 1000)
@@ -60,7 +60,7 @@ type taskIDContextKey struct{}
 func TestAllocateTaskIDGeneratorReceivesKind(t *testing.T) {
 	const wantID = "opaque-id"
 	ctx := context.WithValue(context.Background(), taskIDContextKey{}, "trace-1")
-	manager := New(context.Background(), &Config{
+	manager := mustNewManager(t, context.Background(), &Config{
 		IDGen: func(ctx context.Context, request *AllocateTaskIDRequest) (string, error) {
 			assert.Equal(t, "subagent", request.Kind)
 			assert.Equal(t, "trace-1", ctx.Value(taskIDContextKey{}))
@@ -78,7 +78,7 @@ func TestAllocateTaskIDGeneratorReceivesKind(t *testing.T) {
 
 func TestAllocateTaskIDRejectsInvalidGeneratorOutput(t *testing.T) {
 	t.Run("empty", func(t *testing.T) {
-		manager := New(context.Background(), &Config{
+		manager := mustNewManager(t, context.Background(), &Config{
 			IDGen: func(context.Context, *AllocateTaskIDRequest) (string, error) { return "", nil },
 		})
 		defer closeWithTimeout(manager)
@@ -89,7 +89,7 @@ func TestAllocateTaskIDRejectsInvalidGeneratorOutput(t *testing.T) {
 
 	t.Run("error", func(t *testing.T) {
 		wantErr := errors.New("allocate id")
-		manager := New(context.Background(), &Config{
+		manager := mustNewManager(t, context.Background(), &Config{
 			IDGen: func(context.Context, *AllocateTaskIDRequest) (string, error) { return "", wantErr },
 		})
 		defer closeWithTimeout(manager)
@@ -99,7 +99,7 @@ func TestAllocateTaskIDRejectsInvalidGeneratorOutput(t *testing.T) {
 }
 
 func TestAllocateTaskIDRejectsUnsafeKind_BitsUT(t *testing.T) {
-	manager := New(context.Background(), nil)
+	manager := mustNewManager(t, context.Background(), nil)
 	defer closeWithTimeout(manager)
 	for _, kind := range []string{"path/segment", "has space", strings.Repeat("x", maxTaskIDKindBytes+1)} {
 		_, err := manager.AllocateTaskID(
@@ -111,7 +111,7 @@ func TestAllocateTaskIDRejectsUnsafeKind_BitsUT(t *testing.T) {
 
 func TestAllocateTaskIDRejectsClosedManagerBeforeCustomGenerator(t *testing.T) {
 	var calls int
-	manager := New(context.Background(), &Config{
+	manager := mustNewManager(t, context.Background(), &Config{
 		IDGen: func(context.Context, *AllocateTaskIDRequest) (string, error) {
 			calls++
 			return "host-id", nil

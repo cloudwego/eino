@@ -294,7 +294,10 @@ func NewTyped[M adk.MessageType](ctx context.Context, cfg *TypedConfig[M]) (adk.
 			}
 			progressReaders[durablesubagent.ExecutorKey] = subagentReader
 		}
-		reader := &backgroundtool.ProgressReader{Manager: manager}
+		reader, err := backgroundtool.NewProgressReader(manager, 0)
+		if err != nil {
+			return nil, fmt.Errorf("create managed-tool progress reader: %w", err)
+		}
 		progressReaders[backgroundtool.ExecutorKey] = reader
 		progressReaders[backgroundtool.RecoverableExecutorKey] = reader
 		controlMW, err := backgroundtaskmw.NewTyped(ctx, &backgroundtaskmw.TypedConfig[M]{

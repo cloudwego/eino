@@ -37,6 +37,17 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
+func mustNewBackgroundManager(
+	t testing.TB,
+	ctx context.Context,
+	config *backgroundtask.Config,
+) *backgroundtask.Manager {
+	t.Helper()
+	manager, err := backgroundtask.New(ctx, config)
+	require.NoError(t, err)
+	return manager
+}
+
 func testNotificationSessionID(context.Context) (string, error) {
 	return "test-session", nil
 }
@@ -62,10 +73,10 @@ func (r *outputRuntimeStub) ReportTranscriptFailure(context.Context, error) erro
 var testManagerStores sync.Map
 var testManagerExecutors sync.Map
 
-func newTestManager(ctx context.Context) *backgroundtask.Manager {
+func newTestManager(t testing.TB, ctx context.Context) *backgroundtask.Manager {
 	store := backgroundtask.NewInMemoryStore(nil)
 	executors := backgroundtask.NewExecutorRegistry()
-	manager := backgroundtask.New(ctx, &backgroundtask.Config{
+	manager := mustNewBackgroundManager(t, ctx, &backgroundtask.Config{
 		Tasks: store, Executors: executors,
 	})
 	testManagerStores.Store(manager, store)
@@ -93,7 +104,7 @@ func mustLocalRunner(
 }
 
 func TestManagedExecuteAcceptsBackgroundRunner(t *testing.T) {
-	manager := newTestManager(context.Background())
+	manager := newTestManager(t, context.Background())
 	defer manager.Close(context.Background())
 	_, err := New(context.Background(), &MiddlewareConfig{
 		Shell: &mockShellBackend{},
@@ -169,7 +180,7 @@ func filesystemOutput(t *testing.T, backend *filesystem.InMemoryBackend) (string
 // task's output to a file under that directory, and the file is readable back.
 func TestManagedExecuteTool_WritesOutputFile(t *testing.T) {
 	backend := setupTestBackend()
-	mgr := newTestManager(context.Background())
+	mgr := newTestManager(t, context.Background())
 	defer func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 		defer cancel()
@@ -236,7 +247,7 @@ func (s *gatedShell) Execute(
 }
 
 func TestManagedExecuteTool_Foreground(t *testing.T) {
-	mgr := newTestManager(context.Background())
+	mgr := newTestManager(t, context.Background())
 	defer func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 		defer cancel()
@@ -271,7 +282,7 @@ func TestManagedExecuteTool_Foreground(t *testing.T) {
 }
 
 func TestManagedExecuteTool_Background(t *testing.T) {
-	mgr := newTestManager(context.Background())
+	mgr := newTestManager(t, context.Background())
 	defer func() {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
@@ -310,7 +321,7 @@ func TestManagedExecuteTool_Background(t *testing.T) {
 // A foreground command that outlives its timeout is moved to the background
 // (kept running) when the Manager's ShouldAutoBackground hook permits it.
 func TestManagedExecuteTool_TimeoutMovesToBackground(t *testing.T) {
-	mgr := newTestManager(context.Background())
+	mgr := newTestManager(t, context.Background())
 	defer func() {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
@@ -345,7 +356,7 @@ func TestManagedExecuteTool_TimeoutMovesToBackground(t *testing.T) {
 // Without a ShouldAutoBackground hook, a command that outlives its timeout is
 // stopped and reported as timed out.
 func TestManagedExecuteTool_TimeoutKills(t *testing.T) {
-	mgr := newTestManager(context.Background())
+	mgr := newTestManager(t, context.Background())
 	defer func() {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
@@ -391,7 +402,7 @@ func TestShellPayloadV1AndCommandFromTask(t *testing.T) {
 // With a StreamingShell backend the managed execute tool is a StreamableTool that
 // streams foreground output live while still tracking the run in the Manager.
 func TestManagedExecuteTool_StreamingForeground(t *testing.T) {
-	mgr := newTestManager(context.Background())
+	mgr := newTestManager(t, context.Background())
 	defer func() {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
@@ -425,7 +436,7 @@ func TestManagedExecuteTool_StreamingForeground(t *testing.T) {
 // output reaches the caller without a stale background notice.
 func TestManagedExecuteTool_StreamingExplicitBackground(t *testing.T) {
 	backend := setupTestBackend()
-	mgr := newTestManager(context.Background())
+	mgr := newTestManager(t, context.Background())
 	defer func() {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
@@ -479,7 +490,7 @@ func (g *gatedStreamingShell) ExecuteStreaming(ctx context.Context, _ *filesyste
 // reader sees interim output (a growing prefix) before the run completes.
 func TestManagedExecuteTool_StreamingInterimOutput(t *testing.T) {
 	backend := setupTestBackend()
-	mgr := newTestManager(context.Background())
+	mgr := newTestManager(t, context.Background())
 	defer func() {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
@@ -550,7 +561,7 @@ func drainToolStream(t *testing.T, sr *schema.StreamReader[string]) string {
 }
 
 func TestManagedExecuteTool_Schema(t *testing.T) {
-	mgr := newTestManager(context.Background())
+	mgr := newTestManager(t, context.Background())
 	defer func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 		defer cancel()
@@ -669,7 +680,7 @@ func (f *failingAppendOpener) OpenAppend(ctx context.Context, req *filesystem.Op
 // so consumers fall back to the in-memory ResultData.
 func TestManagedExecuteTool_ReservationFailure_NoOutputFile(t *testing.T) {
 	backend := setupTestBackend()
-	mgr := newTestManager(context.Background())
+	mgr := newTestManager(t, context.Background())
 	defer func() {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
@@ -698,7 +709,7 @@ func TestManagedExecuteTool_ReservationFailure_NoOutputFile(t *testing.T) {
 // unreliable (OutputFileErr set) while the in-memory ResultData stays complete.
 func TestManagedExecuteTool_WriteFailure_MarksUnreliable(t *testing.T) {
 	backend := setupTestBackend()
-	mgr := newTestManager(context.Background())
+	mgr := newTestManager(t, context.Background())
 	defer func() {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
@@ -772,7 +783,7 @@ func (e *erroringStreamingShell) ExecuteStreaming(ctx context.Context, _ *filesy
 func TestManagedExecuteTool_StreamingSourceError_ClosesStream(t *testing.T) {
 	backend := setupTestBackend()
 	counter := &countingAppendOpener{backend: backend}
-	mgr := newTestManager(context.Background())
+	mgr := newTestManager(t, context.Background())
 	defer func() {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()

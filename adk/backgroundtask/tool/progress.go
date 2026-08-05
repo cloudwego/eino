@@ -19,6 +19,7 @@ package tool
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"unicode/utf8"
@@ -33,10 +34,21 @@ const (
 
 // ProgressReader formats a bounded recent view of managed-tool task events.
 type ProgressReader struct {
-	Manager *backgroundtask.Manager
-	// Limit is the number of newest events rendered. Non-positive values use 20;
-	// values above the store maximum are capped by ListTaskEvents.
-	Limit int
+	manager *backgroundtask.Manager
+	limit   int
+}
+
+// NewProgressReader creates a managed-tool progress reader. Limit is the number
+// of newest events rendered; non-positive values use 20 and values above the
+// store maximum are capped by ListTaskEvents.
+func NewProgressReader(
+	manager *backgroundtask.Manager,
+	limit int,
+) (*ProgressReader, error) {
+	if manager == nil {
+		return nil, errors.New("backgroundtask/tool: progress reader manager is required")
+	}
+	return &ProgressReader{manager: manager, limit: limit}, nil
 }
 
 // ReadProgress implements middleware executor-specific progress projection.
@@ -44,18 +56,18 @@ func (r *ProgressReader) ReadProgress(
 	ctx context.Context,
 	task *backgroundtask.Task,
 ) (string, error) {
-	if r == nil || r.Manager == nil || task == nil {
+	if r == nil || task == nil {
 		return "", nil
 	}
 	if task.Spec.ExecutorKey != ExecutorKey &&
 		task.Spec.ExecutorKey != RecoverableExecutorKey {
 		return "", nil
 	}
-	limit := r.Limit
+	limit := r.limit
 	if limit <= 0 {
 		limit = defaultRecentOutputLimit
 	}
-	result, err := r.Manager.ListTaskEvents(ctx, &backgroundtask.ListTaskEventsRequest{
+	result, err := r.manager.ListTaskEvents(ctx, &backgroundtask.ListTaskEventsRequest{
 		TaskID: task.Spec.ID, Limit: limit, NewestFirst: true,
 	})
 	if err != nil {

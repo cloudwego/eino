@@ -42,6 +42,13 @@ type scriptedExecutor struct {
 	executed  []*Task
 }
 
+func mustNewManager(t testing.TB, ctx context.Context, config *Config) *Manager {
+	t.Helper()
+	manager, err := New(ctx, config)
+	require.NoError(t, err)
+	return manager
+}
+
 func (e *scriptedExecutor) Key() string {
 	if e.key == "" {
 		return "test"
@@ -83,8 +90,12 @@ func managerWithExecutor(t *testing.T, tasks TaskStore, executor Executor, lease
 	t.Helper()
 	registry := NewExecutorRegistry()
 	require.NoError(t, registry.Register(executor))
-	return New(context.Background(), &Config{
-		Tasks: tasks, Executors: registry,
+	taskEvents, ok := tasks.(TaskEventStore)
+	if !ok {
+		taskEvents = NewInMemoryStore(nil)
+	}
+	return mustNewManager(t, context.Background(), &Config{
+		Tasks: tasks, TaskEvents: taskEvents, Executors: registry,
 	})
 }
 
@@ -97,9 +108,10 @@ func TestSimplifiedPublicModelHasNoOverlappingStateFields_BitsUT(t *testing.T) {
 		"PayloadVersion", "Recovery", "Result", "PayloadEncoding", "TraceID", "SpecVersion",
 		"Type", "ToolUseID", "Deadline", "LeaseExpiryPolicy", "Notify")
 	assertFieldsPresent(t, reflect.TypeOf(Spec{}), "SessionID", "NotifySession")
+	assertFieldsAbsent(t, reflect.TypeOf(Spec{}), "CreatedAt")
 	assertFieldsPresent(t, reflect.TypeOf(Task{}),
 		"Spec", "LeaseExpiryPolicy", "Status", "Checkpoint", "ResultData", "ResultError",
-		"PendingResume", "Version")
+		"PendingResume", "Version", "CreatedAt")
 	field, exists := reflect.TypeOf(Task{}).FieldByName("PendingResume")
 	require.True(t, exists)
 	assert.Equal(t, reflect.TypeOf([]byte(nil)), field.Type)
@@ -117,9 +129,11 @@ func TestSimplifiedPublicModelHasNoOverlappingStateFields_BitsUT(t *testing.T) {
 	assertFieldsPresent(t, reflect.TypeOf(ListTaskEventsRequest{}),
 		"TaskID", "Cursor", "Limit", "NewestFirst")
 	assertFieldsPresent(t, reflect.TypeOf(ListTaskEventsResult{}), "Events", "NextCursor")
-	assertFieldsPresent(t, reflect.TypeOf(Dispatcher{}),
+	assertFieldsPresent(t, reflect.TypeOf(DispatcherConfig{}),
 		"Outbox", "Tasks", "Inbox", "Activator", "BatchSize", "LeaseDuration")
 	assertFieldsAbsent(t, reflect.TypeOf(Dispatcher{}), "ConsumerID", "Visibility", "Sinks")
+	assertFieldsAbsent(t, reflect.TypeOf(Dispatcher{}),
+		"Outbox", "Tasks", "Inbox", "Activator", "BatchSize", "LeaseDuration")
 	assertFieldsPresent(t, reflect.TypeOf(Config{}), "Tasks", "TaskEvents", "Executors", "IDGen")
 	assertFieldsAbsent(t, reflect.TypeOf(Config{}), "Store")
 	assertMethodsAbsent(t, reflect.TypeOf((*TaskStore)(nil)).Elem(),

@@ -34,6 +34,17 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
+func mustNewBackgroundManager(
+	t testing.TB,
+	ctx context.Context,
+	config *backgroundtask.Config,
+) *backgroundtask.Manager {
+	t.Helper()
+	manager, err := backgroundtask.New(ctx, config)
+	require.NoError(t, err)
+	return manager
+}
+
 func TestInputUsesKindVocabulary_BitsUT(t *testing.T) {
 	inputType := reflect.TypeOf(Input{})
 	_, hasKind := inputType.FieldByName("Kind")
@@ -46,7 +57,7 @@ func newTestRunner(t *testing.T, configure ...func(*Config)) (*Runner, *backgrou
 	t.Helper()
 	var sequence int64
 	executors := backgroundtask.NewExecutorRegistry()
-	manager := backgroundtask.New(context.Background(), &backgroundtask.Config{
+	manager := mustNewBackgroundManager(t, context.Background(), &backgroundtask.Config{
 		Executors: executors,
 		IDGen: func(context.Context, *backgroundtask.AllocateTaskIDRequest) (string, error) {
 			return fmt.Sprintf("test_%d", atomic.AddInt64(&sequence, 1)), nil
