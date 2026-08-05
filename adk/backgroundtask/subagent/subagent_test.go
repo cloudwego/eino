@@ -229,7 +229,12 @@ func TestNewExecutorRequiresDependencies_BitsUT(t *testing.T) {
 	_, err = NewExecutor(&ExecutorConfig[*schema.Message]{SessionStore: store})
 	require.Error(t, err)
 	var executor *Executor[*schema.Message]
-	require.Nil(t, executor.SessionEventStore())
+	_, err = executor.ReadProgress(
+		context.Background(),
+		&backgroundtask.Task{Spec: backgroundtask.Spec{ExecutorKey: ExecutorKey}},
+		func(context.Context, string, *schema.Message) (string, error) { return "", nil },
+	)
+	require.Error(t, err)
 }
 
 func TestExecutorRegistersAgentsByStableName_BitsUT(t *testing.T) {

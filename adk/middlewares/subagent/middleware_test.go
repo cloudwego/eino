@@ -615,7 +615,7 @@ func TestDurableTaskProgressReadsSessionTranscript(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, feed.Events)
 	reader, err := NewDurableTaskProgressReader(
-		executor.SessionEventStore(), TranscriptFormat[*schema.Message](nil),
+		executor, TranscriptFormat[*schema.Message](nil),
 	)
 	require.NoError(t, err)
 	progress, err := reader.ReadProgress(ctx, task)
@@ -652,7 +652,7 @@ func TestDurableTaskProgressUsesSharedFormatter(t *testing.T) {
 	assert.Equal(t, backgroundtask.StatusCompleted, task.Status)
 	assert.Equal(t, "durable output", string(task.ResultData))
 	reader, err := NewDurableTaskProgressReader(
-		executor.SessionEventStore(), format,
+		executor, format,
 	)
 	require.NoError(t, err)
 	progress, err := reader.ReadProgress(ctx, task)

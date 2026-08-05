@@ -107,14 +107,6 @@ func NewExecutor[M adk.MessageType](config *ExecutorConfig[M]) (*Executor[M], er
 	}, nil
 }
 
-// SessionEventStore returns the store used for durable child-session progress.
-func (e *Executor[M]) SessionEventStore() adk.SessionEventStore[M] {
-	if e == nil {
-		return nil
-	}
-	return e.sessionStore
-}
-
 // Key returns the backgroundtask executor key for sub-agent tasks.
 func (e *Executor[M]) Key() string { return ExecutorKey }
 

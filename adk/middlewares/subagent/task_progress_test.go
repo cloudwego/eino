@@ -28,11 +28,14 @@ import (
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/adk/backgroundtask"
+	durablesubagent "github.com/cloudwego/eino/adk/backgroundtask/subagent"
 	adksession "github.com/cloudwego/eino/adk/session"
 	"github.com/cloudwego/eino/schema"
 )
 
-func TestNewDurableTaskProgressReaderRequiresStore_BitsUT(t *testing.T) {
+const expectedProgressRecords = 100
+
+func TestNewDurableTaskProgressReaderRequiresExecutor_BitsUT(t *testing.T) {
 	reader, err := NewDurableTaskProgressReader[*schema.Message](nil, nil)
 	require.Error(t, err)
 	require.Nil(t, reader)
@@ -70,8 +73,9 @@ func TestReadDurableTaskProgress(t *testing.T) {
 	format := func(_ context.Context, agentName string, message *schema.Message) (string, error) {
 		return agentName + ": " + message.Content, nil
 	}
-	progress, err := readDurableTaskProgress[*schema.Message](
-		ctx, store, task, "worker", format,
+	executor := progressExecutor(t, store)
+	progress, err := executor.ReadProgress(
+		ctx, task, durablesubagent.ProgressFormatter[*schema.Message](format),
 	)
 	require.NoError(t, err)
 	assert.Contains(t, progress, "worker: first progress\nworker: partial progress")
@@ -108,8 +112,9 @@ func TestReadDurableTaskProgressIncludesAgenticToolResults(t *testing.T) {
 		{EventID: "tool-result", Kind: adk.SessionEventMessage, Message: toolResult},
 	}))
 
-	progress, err := readDurableTaskProgress[*schema.AgenticMessage](
-		ctx, store, task, "worker",
+	executor := progressExecutor(t, store)
+	progress, err := executor.ReadProgress(
+		ctx, task,
 		func(_ context.Context, agentName string, message *schema.AgenticMessage) (string, error) {
 			return agentName + ": " + message.String(), nil
 		},
@@ -153,7 +158,7 @@ func TestReadDurableTaskProgressBoundsRecentMessages(t *testing.T) {
 		EventID: "query", Kind: adk.SessionEventMessage,
 		Message: schema.UserMessage("submitted query"),
 	}}
-	for i := 1; i <= maxTaskProgressRecords+2; i++ {
+	for i := 1; i <= expectedProgressRecords+2; i++ {
 		events = append(events, &adk.SessionEvent[*schema.Message]{
 			EventID: fmt.Sprintf("progress-%03d", i),
 			Kind:    adk.SessionEventMessage,
@@ -162,15 +167,16 @@ func TestReadDurableTaskProgressBoundsRecentMessages(t *testing.T) {
 	}
 	require.NoError(t, store.AppendEvents(ctx, sessionID, events))
 
-	progress, err := readDurableTaskProgress[*schema.Message](
-		ctx, store, task, "worker",
+	executor := progressExecutor(t, store)
+	progress, err := executor.ReadProgress(
+		ctx, task,
 		func(_ context.Context, agentName string, message *schema.Message) (string, error) {
 			return agentName + ": " + message.Content, nil
 		},
 	)
 	require.NoError(t, err)
 	assert.Contains(t, progress, "transcript records omitted due to display limits")
-	assert.Equal(t, maxTaskProgressRecords, strings.Count(progress, "worker: progress-"))
+	assert.Equal(t, expectedProgressRecords, strings.Count(progress, "worker: progress-"))
 	assert.NotContains(t, progress, "worker: progress-001")
 	assert.Contains(t, progress, "worker: progress-102")
 }
@@ -183,8 +189,21 @@ func durableProgressTask(t *testing.T, status backgroundtask.Status) *background
 	require.NoError(t, err)
 	return &backgroundtask.Task{
 		Spec: backgroundtask.Spec{
-			ID: "subagent_task", Kind: TaskKindSubagent, Payload: payload,
+			ID: "subagent_task", ExecutorKey: durablesubagent.ExecutorKey,
+			Kind: TaskKindSubagent, Payload: payload,
 		},
 		Status: status,
 	}
+}
+
+func progressExecutor[M adk.MessageType](
+	t *testing.T,
+	store *adksession.InMemoryStore[M],
+) *durablesubagent.Executor[M] {
+	t.Helper()
+	executor, err := durablesubagent.NewExecutor(&durablesubagent.ExecutorConfig[M]{
+		SessionStore: store, CheckPointStore: store,
+	})
+	require.NoError(t, err)
+	return executor
 }

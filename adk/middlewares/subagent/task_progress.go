@@ -19,40 +19,32 @@ package subagent
 import (
 	"context"
 	"errors"
-	"strings"
-
-	"github.com/bytedance/sonic"
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/adk/backgroundtask"
 	durablesubagent "github.com/cloudwego/eino/adk/backgroundtask/subagent"
 )
 
-const (
-	maxTaskProgressRecords = 100
-	maxTaskProgressBytes   = 64 << 10
-)
-
 // DurableTaskProgressReader projects a durable sub-agent's child session for
-// task_output without mutating task lifecycle state.
+// task_output without exposing its session store.
 type DurableTaskProgressReader[M adk.MessageType] struct {
-	store  adk.SessionEventStore[M]
-	format TranscriptFormat[M]
+	executor *durablesubagent.Executor[M]
+	format   TranscriptFormat[M]
 }
 
-// NewDurableTaskProgressReader constructs a durable sub-agent progress reader.
-// The store is validated when ReadProgress handles a matching sub-agent task.
+// NewDurableTaskProgressReader constructs a durable sub-agent progress reader
+// from the executor that owns the matching child-session authority.
 func NewDurableTaskProgressReader[M adk.MessageType](
-	store adk.SessionEventStore[M],
+	executor *durablesubagent.Executor[M],
 	format TranscriptFormat[M],
 ) (*DurableTaskProgressReader[M], error) {
-	if store == nil {
-		return nil, errors.New("subagent: session store is required to read task progress")
+	if executor == nil {
+		return nil, errors.New("subagent: durable executor is required to read task progress")
 	}
 	if format == nil {
 		format = defaultTranscriptFormat[M]
 	}
-	return &DurableTaskProgressReader[M]{store: store, format: format}, nil
+	return &DurableTaskProgressReader[M]{executor: executor, format: format}, nil
 }
 
 // ReadProgress returns a bounded transcript for a matching durable sub-agent
@@ -61,134 +53,12 @@ func (r *DurableTaskProgressReader[M]) ReadProgress(
 	ctx context.Context,
 	task *backgroundtask.Task,
 ) (string, error) {
-	if task == nil || task.Spec.ExecutorKey != durablesubagent.ExecutorKey ||
-		task.Spec.Kind != TaskKindSubagent {
-		return "", nil
+	if r == nil || r.executor == nil {
+		return "", errors.New("subagent: durable executor is required to read task progress")
 	}
-	if r == nil {
-		return "", errors.New("subagent: session store is required to read task progress")
-	}
-	agentName := NameFromTask(task)
-	if agentName == "" {
-		return "", errors.New("subagent: task payload does not contain a valid agent name")
-	}
-	return readDurableTaskProgress(ctx, r.store, task, agentName, r.format)
-}
-
-func readDurableTaskProgress[M adk.MessageType](
-	ctx context.Context,
-	store adk.SessionEventStore[M],
-	task *backgroundtask.Task,
-	agentName string,
-	format TranscriptFormat[M],
-) (string, error) {
-	sessionID := task.Spec.ID + "/session"
-	first, err := store.LoadEvents(ctx, sessionID, &adk.LoadSessionEventsRequest{
-		Limit: 1,
-		Kinds: []adk.SessionEventKind{adk.SessionEventMessage},
-	})
-	if err != nil {
-		return "", err
-	}
-	var inputEventID string
-	if len(first.Events) > 0 {
-		inputEventID = first.Events[0].EventID
-	}
-
-	recent, err := store.LoadEvents(ctx, sessionID, &adk.LoadSessionEventsRequest{
-		Limit:   maxTaskProgressRecords + 1,
-		Reverse: true,
-		Kinds: []adk.SessionEventKind{
-			adk.SessionEventMessage,
-			adk.SessionEventMessageStreamIncomplete,
-		},
-	})
-	if err != nil {
-		return "", err
-	}
-
-	lines := make([]string, 0, len(recent.Events))
-	usedBytes := 0
-	truncated := recent.Next != ""
-	for _, event := range recent.Events {
-		if event == nil || event.EventID == inputEventID {
-			continue
-		}
-		var message M
-		switch event.Kind {
-		case adk.SessionEventMessage:
-			message = event.Message
-		case adk.SessionEventMessageStreamIncomplete:
-			if event.MessageStreamIncomplete != nil {
-				message = event.MessageStreamIncomplete.Message
-			}
-		}
-		if nilTranscriptMessage(message) {
-			continue
-		}
-		line, formatErr := format(ctx, agentName, message)
-		if formatErr != nil {
-			return "", formatErr
-		}
-		if line == "" {
-			continue
-		}
-		if len(lines) >= maxTaskProgressRecords ||
-			usedBytes+len(line)+1 > maxTaskProgressBytes {
-			truncated = true
-			break
-		}
-		lines = append(lines, line)
-		usedBytes += len(line) + 1
-	}
-	reverseStrings(lines)
-
-	var sections []string
-	if len(lines) > 0 || truncated {
-		var transcript strings.Builder
-		transcript.WriteString("Transcript:")
-		if truncated {
-			transcript.WriteString("\n[transcript records omitted due to display limits]")
-		}
-		if len(lines) > 0 {
-			transcript.WriteByte('\n')
-			transcript.WriteString(strings.Join(lines, "\n"))
-		}
-		sections = append(sections, transcript.String())
-	}
-	if task.Status == backgroundtask.StatusWaitingInput {
-		interrupt, loadErr := store.LoadEvents(ctx, sessionID, &adk.LoadSessionEventsRequest{
-			Limit:   1,
-			Reverse: true,
-			Kinds:   []adk.SessionEventKind{adk.SessionEventInterrupt},
-		})
-		if loadErr != nil {
-			return "", loadErr
-		}
-		if len(interrupt.Events) > 0 && interrupt.Events[0].Interrupt != nil {
-			data, marshalErr := sonic.Marshal(interrupt.Events[0].Interrupt.Contexts)
-			if marshalErr != nil {
-				return "", marshalErr
-			}
-			sections = append(sections, "Input required:\n"+string(data))
-		}
-	}
-	return strings.Join(sections, "\n"), nil
-}
-
-func reverseStrings(values []string) {
-	for left, right := 0, len(values)-1; left < right; left, right = left+1, right-1 {
-		values[left], values[right] = values[right], values[left]
-	}
-}
-
-func nilTranscriptMessage[M adk.MessageType](message M) bool {
-	switch typed := any(message).(type) {
-	case adk.Message:
-		return typed == nil
-	case adk.AgenticMessage:
-		return typed == nil
-	default:
-		return true
-	}
+	return r.executor.ReadProgress(
+		ctx,
+		task,
+		durablesubagent.ProgressFormatter[M](r.format),
+	)
 }

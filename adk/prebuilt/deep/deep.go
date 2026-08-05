@@ -286,7 +286,7 @@ func NewTyped[M adk.MessageType](ctx context.Context, cfg *TypedConfig[M]) (adk.
 		progressReaders := make(map[string]backgroundtaskmw.TaskProgressReader)
 		if cfg.Background.SubAgents != nil {
 			subagentReader, err := subagent.NewDurableTaskProgressReader(
-				cfg.Background.SubAgents.Executor.SessionEventStore(),
+				cfg.Background.SubAgents.Executor,
 				cfg.Background.TranscriptFormat,
 			)
 			if err != nil {
