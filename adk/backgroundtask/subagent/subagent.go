@@ -67,11 +67,24 @@ type AgentRegistration[M adk.MessageType] struct {
 	RunOptionsFactory RunOptionsFactory
 }
 
+// SessionStoreFactory constructs the child Session store for one authorized
+// execution attempt. Durable providers use task ID and attempt to bind append
+// authorization to the active task lease. It may be called concurrently and
+// must return a fresh, semantically equivalent store on every call.
+type SessionStoreFactory[M adk.MessageType] func(
+	context.Context,
+	*backgroundtask.Task,
+) (adk.SessionEventStore[M], error)
+
 // ExecutorConfig provides the durable session dependencies shared by every
 // sub-agent task executed by an Executor.
 type ExecutorConfig[M adk.MessageType] struct {
-	// SessionStore persists the child session event log for every executed task.
+	// SessionStore persists child events without attempt-specific construction.
+	// It is retained for providers whose store performs fencing by another
+	// mechanism. Configure exactly one of SessionStore and SessionStoreFactory.
 	SessionStore adk.SessionEventStore[M]
+	// SessionStoreFactory constructs an attempt-bound child event store.
+	SessionStoreFactory SessionStoreFactory[M]
 	// CheckPointStore persists ADK Runner checkpoints for interruption and recovery.
 	CheckPointStore adk.CheckPointStore
 	// SessionConfig optionally customizes child-session persistence.
@@ -80,9 +93,10 @@ type ExecutorConfig[M adk.MessageType] struct {
 
 // Executor runs durable sub-agent tasks through ADK Runner checkpointing.
 type Executor[M adk.MessageType] struct {
-	sessionStore    adk.SessionEventStore[M]
-	checkPointStore adk.CheckPointStore
-	sessionConfig   *adk.SessionConfig[M]
+	sessionStore        adk.SessionEventStore[M]
+	sessionStoreFactory SessionStoreFactory[M]
+	checkPointStore     adk.CheckPointStore
+	sessionConfig       *adk.SessionConfig[M]
 
 	mu            sync.RWMutex
 	registrations map[string]*AgentRegistration[M]
@@ -91,9 +105,10 @@ type Executor[M adk.MessageType] struct {
 // NewExecutor constructs a durable sub-agent executor with explicit session
 // and checkpoint dependencies.
 func NewExecutor[M adk.MessageType](config *ExecutorConfig[M]) (*Executor[M], error) {
-	if config == nil || config.SessionStore == nil || config.CheckPointStore == nil {
+	if config == nil || config.CheckPointStore == nil ||
+		(config.SessionStore == nil) == (config.SessionStoreFactory == nil) {
 		return nil, errors.New(
-			"backgroundtask/subagent: session store and checkpoint store are required",
+			"backgroundtask/subagent: exactly one session store or factory and a checkpoint store are required",
 		)
 	}
 	var sessionConfig *adk.SessionConfig[M]
@@ -102,8 +117,10 @@ func NewExecutor[M adk.MessageType](config *ExecutorConfig[M]) (*Executor[M], er
 		sessionConfig = &copy
 	}
 	return &Executor[M]{
-		sessionStore: config.SessionStore, checkPointStore: config.CheckPointStore,
-		sessionConfig: sessionConfig,
+		sessionStore:        config.SessionStore,
+		sessionStoreFactory: config.SessionStoreFactory,
+		checkPointStore:     config.CheckPointStore,
+		sessionConfig:       sessionConfig,
 	}, nil
 }
 
@@ -186,7 +203,8 @@ func (e *Executor[M]) ValidateExecution(_ context.Context, task *backgroundtask.
 	if task == nil {
 		return errors.New("backgroundtask/subagent: task is required")
 	}
-	if e == nil || e.sessionStore == nil || e.checkPointStore == nil {
+	if e == nil || (e.sessionStore == nil && e.sessionStoreFactory == nil) ||
+		e.checkPointStore == nil {
 		return errors.New("backgroundtask/subagent: executor dependencies are unavailable")
 	}
 	payload, err := validateSpecPayload(task.Spec)
@@ -322,10 +340,25 @@ func (e *Executor[M]) Execute(
 		}
 	}
 	foreground := agenttool.ForegroundExecutionFromContext[*adk.TypedAgentEvent[M]](ctx)
+	sessionStore := e.sessionStore
+	if e.sessionStoreFactory != nil {
+		sessionStore, err = e.sessionStoreFactory(ctx, task)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"backgroundtask/subagent: construct attempt session store: %w",
+				err,
+			)
+		}
+		if sessionStore == nil {
+			return nil, errors.New(
+				"backgroundtask/subagent: attempt session store factory returned nil",
+			)
+		}
+	}
 	runner := adk.NewTypedRunner(adk.TypedRunnerConfig[M]{
 		Agent: registration.Agent, EnableStreaming: foreground.EnableStreaming(),
 		CheckPointStore: e.checkPointStore,
-		SessionID:       childSessionID(task.Spec.ID), SessionStore: e.sessionStore,
+		SessionID:       childSessionID(task.Spec.ID), SessionStore: sessionStore,
 		SessionConfig: e.sessionConfig,
 	})
 	cancelOption, cancelRun := adk.WithCancel()

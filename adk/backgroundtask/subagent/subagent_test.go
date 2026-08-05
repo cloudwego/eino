@@ -237,6 +237,17 @@ func TestNewExecutorRequiresDependencies_BitsUT(t *testing.T) {
 	store := adksession.NewInMemoryStore[*schema.Message](nil)
 	_, err = NewExecutor(&ExecutorConfig[*schema.Message]{SessionStore: store})
 	require.Error(t, err)
+	_, err = NewExecutor(&ExecutorConfig[*schema.Message]{
+		SessionStore: store,
+		SessionStoreFactory: func(
+			context.Context,
+			*backgroundtask.Task,
+		) (adk.SessionEventStore[*schema.Message], error) {
+			return store, nil
+		},
+		CheckPointStore: store,
+	})
+	require.Error(t, err)
 	var executor *Executor[*schema.Message]
 	_, err = executor.ReadProgress(
 		context.Background(),
@@ -244,6 +255,41 @@ func TestNewExecutorRequiresDependencies_BitsUT(t *testing.T) {
 		func(context.Context, string, *schema.Message) (string, error) { return "", nil },
 	)
 	require.Error(t, err)
+}
+
+func TestExecutorBuildsSessionStoreForAuthorizedAttempt_BitsUT(t *testing.T) {
+	store := adksession.NewInMemoryStore[*schema.Message](nil)
+	var seenTask *backgroundtask.Task
+	executor, err := NewExecutor(&ExecutorConfig[*schema.Message]{
+		SessionStoreFactory: func(
+			_ context.Context,
+			task *backgroundtask.Task,
+		) (adk.SessionEventStore[*schema.Message], error) {
+			seenTask = task
+			return store, nil
+		},
+		CheckPointStore: store,
+	})
+	require.NoError(t, err)
+	require.NoError(t, executor.Register("worker", &AgentRegistration[*schema.Message]{
+		Agent: &resumableTestAgent{name: "worker"},
+	}))
+	executors := backgroundtask.NewExecutorRegistry()
+	require.NoError(t, executors.Register(executor))
+	manager := mustNewBackgroundManager(
+		t,
+		context.Background(),
+		&backgroundtask.Config{Executors: executors},
+	)
+	defer manager.Close(context.Background())
+	task, err := Submit(context.Background(), manager, &SubmitRequest{
+		SubAgentName: "worker", Query: "work", SessionID: "parent",
+	})
+	require.NoError(t, err)
+	require.NoError(t, manager.Execute(context.Background(), task.Spec.ID))
+	require.NotNil(t, seenTask)
+	require.Equal(t, task.Spec.ID, seenTask.Spec.ID)
+	require.Equal(t, int64(1), seenTask.Attempt)
 }
 
 func TestExecutorRegistersAgentsByStableName_BitsUT(t *testing.T) {
