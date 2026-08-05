@@ -36,7 +36,7 @@
 | `TaskEvent` | Precisely names progress-only task events without implying lifecycle authority. |
 | `AppendTaskEventRequest`, `AppendTaskEventResult` | Clearly separates write authorization from persisted event data and reports replay insertion. |
 | `ReadRecentTaskEventsRequest`, `ReadRecentTaskEventsResult` | Explicitly bounded presentation API with no replay-cursor implication. |
-| `ErrTaskEventConflict` | Accurately identifies same-EventID/different-bytes corruption prevention. |
+| `ErrTaskEventIDConflict` | Accurately identifies same-EventID/different-bytes corruption prevention. |
 | `Store.AppendTaskEvent`, `Store.ReadRecentTaskEvents` | Minimal Store surface aligned with the target event model. |
 | `ExecutionRuntime.AppendTaskEvent` | Correct single generation boundary for managed and raw callers. |
 | `Manager.ReadRecentTaskEvents` | Direct delegation without exposing Store or cursor internals. |

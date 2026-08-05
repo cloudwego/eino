@@ -349,7 +349,7 @@ func (r *taskRuntime) commitResult(ctx context.Context, result *ExecutionResult)
 	if result.Directive != "" {
 		if result.Directive != ExecutionDirectiveYield || result.Status != "" ||
 			len(result.Data) != 0 || result.Error != "" {
-			return nil, fmt.Errorf("%w: conflicting executor directive and lifecycle result", ErrInvalidResult)
+			return nil, fmt.Errorf("%w: conflicting executor directive and lifecycle result", ErrInvalidExecutionResult)
 		}
 		return r.store.Yield(ctx, &YieldTaskRequest{
 			TaskID: r.taskID, ExpectedVersion: r.version,
@@ -378,7 +378,7 @@ func (r *taskRuntime) commitResult(ctx context.Context, result *ExecutionResult)
 			TaskID: r.taskID, ExpectedVersion: r.version, Checkpoint: cloneBytes(result.Checkpoint),
 		})
 	default:
-		return nil, fmt.Errorf("%w: unsupported executor result status %q", ErrInvalidResult, result.Status)
+		return nil, fmt.Errorf("%w: unsupported executor result status %q", ErrInvalidExecutionResult, result.Status)
 	}
 }
 
@@ -691,7 +691,7 @@ func (m *Manager) execute(
 	close(heartbeatStop)
 	<-heartbeatDone
 
-	if errors.Is(executeErr, ErrCheckpointUnavailable) {
+	if errors.Is(executeErr, ErrDrainCheckpointUnavailable) {
 		return executeErr
 	}
 	if executeErr != nil {

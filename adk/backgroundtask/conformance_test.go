@@ -365,7 +365,7 @@ func TestCheckpointUnavailableStopsRenewalWithoutPersistingFailure_BitsUT(t *tes
 	})
 	executor := &scriptedExecutor{
 		execute: func(context.Context, *Task, ExecutionRuntime) (*ExecutionResult, error) {
-			return nil, ErrCheckpointUnavailable
+			return nil, ErrDrainCheckpointUnavailable
 		},
 	}
 	manager := managerWithExecutor(t, store, executor, 5*time.Second)
@@ -373,7 +373,7 @@ func TestCheckpointUnavailableStopsRenewalWithoutPersistingFailure_BitsUT(t *tes
 	require.NoError(t, err)
 
 	err = manager.Execute(context.Background(), task.Spec.ID)
-	assert.ErrorIs(t, err, ErrCheckpointUnavailable)
+	assert.ErrorIs(t, err, ErrDrainCheckpointUnavailable)
 	running, getErr := store.Get(context.Background(), task.Spec.ID)
 	require.NoError(t, getErr)
 	assert.Equal(t, StatusRunning, running.Status)

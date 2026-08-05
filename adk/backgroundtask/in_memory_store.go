@@ -278,7 +278,7 @@ func (s *InMemoryStore) AppendTaskEvent(
 	keyed := s.taskEventKeys[req.TaskID]
 	if existing, ok := keyed[req.EventID]; ok {
 		if !bytes.Equal(existing.Data, req.Data) {
-			return nil, ErrTaskEventConflict
+			return nil, ErrTaskEventIDConflict
 		}
 		return &AppendTaskEventResult{
 			Event: cloneTaskEvent(&existing),

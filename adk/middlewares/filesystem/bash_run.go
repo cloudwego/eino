@@ -70,7 +70,7 @@ func decodeShellPayload(data []byte) (*shellPayloadV1, error) {
 		return nil, err
 	}
 	if payload.Version != shellPayloadVersion {
-		return nil, backgroundtask.ErrUnsupportedPayloadVersion
+		return nil, backgroundtask.ErrUnsupportedExecutorPayloadVersion
 	}
 	if payload.Command == "" {
 		return nil, fmt.Errorf("filesystem: shell payload command is required")

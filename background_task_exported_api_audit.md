@@ -105,12 +105,12 @@ Sources:
 | `ErrVersionConflict` | **Keep** | Necessary CAS failure classification. |
 | `ErrLeaseLost` | **Keep** | Necessary fencing failure classification. |
 | `ErrIllegalTransition` | **Keep** | Appropriate lifecycle rejection sentinel. |
-| `ErrInvalidResult` | **Keep** | Appropriate malformed executor-result sentinel. |
+| `ErrInvalidExecutionResult` | **Keep** | Classifies executor results and Store transition payloads that violate lifecycle result invariants. |
 | `ErrAlreadyTerminal` | **Keep** | Useful distinction from a generic illegal transition. |
-| `ErrCheckpointUnavailable` | **Keep; document** | Semantics are non-obvious: Manager stops renewing and relies on lease expiry. Keep the sentinel, but link it from `ExecutionResult` and `Checkpointer`. |
-| `ErrCloseDeadlineRequired` | **Keep** | Makes bounded shutdown requirements machine-checkable. |
-| `ErrUnsupportedPayloadVersion` | **Keep** | Shared classification is valuable for versioned executor payloads. |
-| `ErrTaskEventConflict` | **Keep** | Required to distinguish idempotent replay from EventID misuse. |
+| `ErrDrainCheckpointUnavailable` | **Keep** | Precisely identifies planned drain failure; Manager stops lease renewal so recovery can use the last durable checkpoint. |
+| `ErrCloseDeadlineRequired` | **Keep** | Makes bounded shutdown requirements machine-checkable and leaves Manager open. |
+| `ErrUnsupportedExecutorPayloadVersion` | **Keep** | Precisely classifies a selected executor that cannot decode persisted `Spec.Payload`. |
+| `ErrTaskEventIDConflict` | **Keep** | Distinguishes identical idempotent replay from same-EventID/different-bytes misuse. |
 
 ### Task Identity, Intent, and Snapshot
 
@@ -361,7 +361,7 @@ Sources:
 | `StartRequest` | Fields: `TaskID`, `Arguments`, `Attempt` | **Keep** | Minimal initial-attempt envelope. |
 | `RecoverRequest` | Fields: `TaskID`, `Arguments`, `Attempt`, `Checkpoint` | **Keep** | Correctly delegates opaque checkpoint interpretation to the tool. |
 | `Run` | Methods: `Wait`, `Stop` | **Keep; document** | Good attempt-local observation handle. Specify whether `Stop` must be idempotent and how repeated/concurrent calls behave. |
-| `Checkpointer` | Method: `Checkpoint` | **Keep; document** | Good optional capability. Link `ErrCheckpointUnavailable` and size/lifetime expectations. |
+| `Checkpointer` | Method: `Checkpoint` | **Keep; document** | Good optional capability. Link `ErrDrainCheckpointUnavailable` and size/lifetime expectations. |
 | `UpdateSource` | Method: `Updates` | **Keep; document** | Good optional capability. Document whether each call may be made once, stream closure ownership, and replay starting point. |
 | `Outcome` | Fields: `Status`, `Data`, `Error` | **Keep; document** | Necessary logical terminal result; document valid status/field combinations. |
 | `Update` | Fields: `EventID`, `Kind`, `Data`, `Metadata` with JSON tags | **Keep; document** | Strong stable-ID contract. Document size bounds, metadata key rules, and that framework-generated IDs are not written back into the original update object. |

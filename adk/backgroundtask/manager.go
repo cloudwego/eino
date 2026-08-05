@@ -262,7 +262,7 @@ closed:
 		select {
 		case attemptErr := <-attempt.done:
 			if attemptErr != nil &&
-				!errors.Is(attemptErr, ErrCheckpointUnavailable) &&
+				!errors.Is(attemptErr, ErrDrainCheckpointUnavailable) &&
 				closeErr == nil {
 				closeErr = attemptErr
 			}

@@ -78,7 +78,7 @@ func (e *coordinatorExecutor) Execute(
 				Status: backgroundtask.StatusFailed, Error: control.Reason,
 			}, nil
 		default:
-			return nil, backgroundtask.ErrCheckpointUnavailable
+			return nil, backgroundtask.ErrDrainCheckpointUnavailable
 		}
 	}
 }

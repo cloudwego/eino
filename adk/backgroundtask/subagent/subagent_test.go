@@ -385,7 +385,7 @@ func TestResumeControlHelpers(t *testing.T) {
 		backgroundtask.ControlRequest{Kind: backgroundtask.ControlDrain},
 	)
 	require.True(t, controlled)
-	require.ErrorIs(t, controlErr, backgroundtask.ErrCheckpointUnavailable)
+	require.ErrorIs(t, controlErr, backgroundtask.ErrDrainCheckpointUnavailable)
 	require.Nil(t, result)
 
 	result, controlErr, controlled = executor.controlResult(
@@ -450,7 +450,7 @@ func TestSubagentPayloadV2Validation_BitsUT(t *testing.T) {
 	var err error
 	spec.Payload, err = json.Marshal(payload)
 	require.NoError(t, err)
-	assert.ErrorIs(t, executor.ValidateSpec(spec), backgroundtask.ErrUnsupportedPayloadVersion)
+	assert.ErrorIs(t, executor.ValidateSpec(spec), backgroundtask.ErrUnsupportedExecutorPayloadVersion)
 
 	payload.Version = payloadVersion
 	payload.SubAgentName = ""
@@ -683,7 +683,7 @@ func TestControlAndInterruptUseRunnerCheckpoint(t *testing.T) {
 		runCtx, task, backgroundtask.ControlRequest{Kind: backgroundtask.ControlDrain},
 	)
 	require.True(t, controlled)
-	require.ErrorIs(t, controlErr, backgroundtask.ErrCheckpointUnavailable)
+	require.ErrorIs(t, controlErr, backgroundtask.ErrDrainCheckpointUnavailable)
 	require.Nil(t, result)
 
 	require.NoError(t, store.Set(

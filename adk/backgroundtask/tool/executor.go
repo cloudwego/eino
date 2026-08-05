@@ -341,7 +341,7 @@ func checkpointRun(run Run) ([]byte, error) {
 	}
 	checkpoint, err := checkpointer.Checkpoint(context.Background())
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", backgroundtask.ErrCheckpointUnavailable, err)
+		return nil, fmt.Errorf("%w: %v", backgroundtask.ErrDrainCheckpointUnavailable, err)
 	}
 	return checkpoint, nil
 }
@@ -473,7 +473,7 @@ func (e *executor) decodePayload(spec backgroundtask.Spec) (*taskPayload, error)
 		return nil, fmt.Errorf("backgroundtask/tool: decode payload: %w", err)
 	}
 	if payload.Version != payloadVersion {
-		return nil, fmt.Errorf("%w: managed-tool payload version %d", backgroundtask.ErrUnsupportedPayloadVersion, payload.Version)
+		return nil, fmt.Errorf("%w: managed-tool payload version %d", backgroundtask.ErrUnsupportedExecutorPayloadVersion, payload.Version)
 	}
 	if payload.ToolName == "" || payload.Arguments == "" {
 		return nil, errors.New("backgroundtask/tool: payload tool name and arguments are required")

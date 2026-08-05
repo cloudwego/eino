@@ -161,7 +161,7 @@ func TestAttack_ConflictingEventIDFailsTask(t *testing.T) {
 	require.NoError(t, err)
 	event := decodeEvents(t, []string{result})[0]
 	require.Equal(t, backgroundtask.StatusFailed, event.Status)
-	require.Contains(t, event.Error, backgroundtask.ErrTaskEventConflict.Error())
+	require.Contains(t, event.Error, backgroundtask.ErrTaskEventIDConflict.Error())
 	task, err := manager.Get(context.Background(), "attack-task")
 	require.NoError(t, err)
 	require.Equal(t, backgroundtask.StatusFailed, task.Status)

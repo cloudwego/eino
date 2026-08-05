@@ -388,7 +388,7 @@ func TestShellPayloadV1AndCommandFromTask(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, CommandFromTask(task))
 	_, err = decodeShellPayload(task.Spec.Payload)
-	assert.ErrorIs(t, err, backgroundtask.ErrUnsupportedPayloadVersion)
+	assert.ErrorIs(t, err, backgroundtask.ErrUnsupportedExecutorPayloadVersion)
 }
 
 // With a Manager, the execute tool schema gains run_in_background and timeout fields.

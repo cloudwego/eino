@@ -360,7 +360,7 @@ func TestInMemoryStoreTaskEventDeduplicatesAcrossAttempts_BitsUT(t *testing.T) {
 		TaskID: restarted.Spec.ID, Attempt: restarted.Attempt,
 		EventID: "event-1", Data: []byte("different"),
 	})
-	require.ErrorIs(t, err, ErrTaskEventConflict)
+	require.ErrorIs(t, err, ErrTaskEventIDConflict)
 
 	current, err := store.Get(context.Background(), restarted.Spec.ID)
 	require.NoError(t, err)

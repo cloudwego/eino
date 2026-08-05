@@ -215,7 +215,7 @@ func validateSpecPayload(spec backgroundtask.Spec) (*taskPayload, error) {
 		return nil, err
 	}
 	if payload.Version != payloadVersion {
-		return nil, fmt.Errorf("%w: subagent payload version %d", backgroundtask.ErrUnsupportedPayloadVersion, payload.Version)
+		return nil, fmt.Errorf("%w: subagent payload version %d", backgroundtask.ErrUnsupportedExecutorPayloadVersion, payload.Version)
 	}
 	if payload.SubAgentName == "" || payload.Query == "" {
 		return nil, errors.New("backgroundtask/subagent: subagent name and query are required")
@@ -539,7 +539,7 @@ func (e *Executor[M]) controlResult(
 			if err == nil {
 				err = errors.New("runner checkpoint is missing")
 			}
-			return nil, fmt.Errorf("%w: %v", backgroundtask.ErrCheckpointUnavailable, err), true
+			return nil, fmt.Errorf("%w: %v", backgroundtask.ErrDrainCheckpointUnavailable, err), true
 		}
 		stateBytes, err := json.Marshal(checkpointState{
 			Sequence: nextCheckpointSequence(task.Checkpoint),

@@ -35,20 +35,24 @@ var (
 	ErrLeaseLost = errors.New("backgroundtask: lease lost")
 	// ErrIllegalTransition reports that a requested lifecycle transition is invalid.
 	ErrIllegalTransition = errors.New("backgroundtask: illegal state transition")
-	// ErrInvalidResult reports an invalid terminal result or lifecycle output.
-	ErrInvalidResult = errors.New("backgroundtask: invalid result")
+	// ErrInvalidExecutionResult reports that an executor result or Store
+	// transition payload violates lifecycle result invariants.
+	ErrInvalidExecutionResult = errors.New("backgroundtask: invalid execution result")
 	// ErrAlreadyTerminal reports that a task has already reached a terminal status.
 	ErrAlreadyTerminal = errors.New("backgroundtask: task is already terminal")
-	// ErrCheckpointUnavailable reports that a planned drain reached no safe,
-	// compatible checkpoint. Manager stops renewing the current lease so expiry
-	// can redispatch from the last durable checkpoint.
-	ErrCheckpointUnavailable = errors.New("backgroundtask: checkpoint unavailable")
-	// ErrCloseDeadlineRequired reports that active tasks require a bounded Close context.
+	// ErrDrainCheckpointUnavailable reports that a planned drain could not
+	// produce or locate a safe compatible checkpoint. Manager stops renewing the
+	// current lease so expiry can redispatch from the last durable checkpoint.
+	ErrDrainCheckpointUnavailable = errors.New("backgroundtask: drain checkpoint unavailable")
+	// ErrCloseDeadlineRequired reports that Manager.Close was called with active
+	// attempts but its context has no deadline. The Manager remains open.
 	ErrCloseDeadlineRequired = errors.New("backgroundtask: close deadline is required while tasks are active")
-	// ErrUnsupportedPayloadVersion reports an executor payload version it cannot decode.
-	ErrUnsupportedPayloadVersion = errors.New("backgroundtask: unsupported payload version")
-	// ErrTaskEventConflict reports reuse of an event ID with different bytes.
-	ErrTaskEventConflict = errors.New("backgroundtask: task event id conflict")
+	// ErrUnsupportedExecutorPayloadVersion reports that the selected executor
+	// cannot decode the version of the persisted Spec.Payload envelope.
+	ErrUnsupportedExecutorPayloadVersion = errors.New("backgroundtask: unsupported executor payload version")
+	// ErrTaskEventIDConflict reports that one task-local EventID was replayed
+	// with bytes different from the originally persisted event.
+	ErrTaskEventIDConflict = errors.New("backgroundtask: task event id conflict")
 )
 
 // Store persists task snapshots, append-ordered progress events, and semantic
@@ -145,11 +149,11 @@ func validateTaskSnapshot(status Status, data []byte, resultError string) error 
 	switch status {
 	case StatusPending, StatusRunning, StatusWaitingInput, StatusSuspended:
 		if len(data) != 0 || resultError != "" {
-			return fmt.Errorf("%w: non-terminal task cannot have a result", ErrInvalidResult)
+			return fmt.Errorf("%w: non-terminal task cannot have a result", ErrInvalidExecutionResult)
 		}
 	case StatusCompleted, StatusFailed, StatusCanceled:
 	default:
-		return fmt.Errorf("%w: unsupported status %q", ErrInvalidResult, status)
+		return fmt.Errorf("%w: unsupported status %q", ErrInvalidExecutionResult, status)
 	}
 	if len(resultError) > 4096 {
 		return errors.New("backgroundtask: result error exceeds configured bounds")
@@ -157,15 +161,15 @@ func validateTaskSnapshot(status Status, data []byte, resultError string) error 
 	switch status {
 	case StatusCompleted:
 		if resultError != "" {
-			return fmt.Errorf("%w: completed result cannot carry an error", ErrInvalidResult)
+			return fmt.Errorf("%w: completed result cannot carry an error", ErrInvalidExecutionResult)
 		}
 	case StatusFailed:
 		if resultError == "" {
-			return fmt.Errorf("%w: failed result requires an error", ErrInvalidResult)
+			return fmt.Errorf("%w: failed result requires an error", ErrInvalidExecutionResult)
 		}
 	case StatusCanceled:
 		if len(data) != 0 {
-			return fmt.Errorf("%w: canceled result cannot carry data", ErrInvalidResult)
+			return fmt.Errorf("%w: canceled result cannot carry data", ErrInvalidExecutionResult)
 		}
 	}
 	return nil
