@@ -57,7 +57,7 @@ const (
 )
 
 // Notification is only a durable wake-up pointer.
-// Authoritative task data is loaded by the consumer.
+// Dispatcher loads authoritative task data before session inbox delivery.
 type Notification struct {
 	ID        string
 	TaskID    string
@@ -66,7 +66,7 @@ type Notification struct {
 	CreatedAt time.Time
 
 	// Task is nil for pointer-only outbox storage and populated for delivered
-	// notifications passed to sinks or stored in session inboxes.
+	// notifications stored in session inboxes.
 	Task *Task
 }
 
