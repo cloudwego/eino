@@ -592,7 +592,9 @@ func TestManagerCancelPendingLocalTaskAfterExecuteValidationFailure(t *testing.T
 	executor := &scriptedExecutor{leaseExpiryPolicy: LeaseExpiryFail}
 	manager := managerWithExecutor(t, store, executor, time.Minute)
 	defer closeWithTimeout(manager)
-	task, err := manager.Submit(context.Background(), validSpec("early-failure-cancel"))
+	spec := validSpec("early-failure-cancel")
+	spec.NotifySession = false
+	task, err := manager.Submit(context.Background(), spec)
 	require.NoError(t, err)
 	executor.validateErr = errors.New("worker validation failed")
 
@@ -668,50 +670,28 @@ func TestExecutorRegistryLoadOrRegisterIsAtomic_BitsUT(t *testing.T) {
 
 }
 
-type recordingNotificationDelivery struct {
-	request *NotificationDeliveryValidation
-}
-
 type lifecycleStoreOnly struct {
 	TaskStore
 }
 
-func (r *recordingNotificationDelivery) ValidateNotificationDelivery(
-	_ context.Context,
-	request *NotificationDeliveryValidation,
-) error {
-	r.request = request
-	return nil
-}
-
-func TestManagerValidateNotificationDeliveryReportsOwnedStoreCapabilities_BitsUT(t *testing.T) {
+func TestManagerSubmitNotificationRequiresOutbox_BitsUT(t *testing.T) {
 	store := NewInMemoryStore(nil)
-	manager := New(context.Background(), &Config{Tasks: store})
+	manager := managerWithExecutor(
+		t,
+		lifecycleStoreOnly{TaskStore: store},
+		&scriptedExecutor{},
+		time.Minute,
+	)
 	defer closeWithTimeout(manager)
-	runtime := &recordingNotificationDelivery{}
+	spec := validSpec("notification-without-outbox")
+	spec.NotifySession = true
 
-	require.NoError(t, manager.ValidateNotificationDelivery(
-		context.Background(), runtime, SessionInboxNotificationKind,
-	))
-	require.NotNil(t, runtime.request)
-	require.True(t, runtime.request.OutboxAvailable)
-	require.Equal(t, SessionInboxNotificationKind, runtime.request.TargetKind)
-
-	managerWithoutOutbox := New(context.Background(), &Config{
-		Tasks: lifecycleStoreOnly{TaskStore: NewInMemoryStore(nil)},
-	})
-	defer closeWithTimeout(managerWithoutOutbox)
-	runtimeWithoutOutbox := &recordingNotificationDelivery{}
-	require.NoError(t, managerWithoutOutbox.ValidateNotificationDelivery(
-		context.Background(), runtimeWithoutOutbox, SessionInboxNotificationKind,
-	))
-	require.False(t, runtimeWithoutOutbox.request.OutboxAvailable)
-
-	err := manager.ValidateNotificationDelivery(
-		context.Background(), nil, SessionInboxNotificationKind,
-	)
+	_, err := manager.Submit(context.Background(), spec)
 	require.EqualError(
-		t, err,
-		"backgroundtask: notification delivery runtime and target kind are required",
+		t,
+		err,
+		"backgroundtask: task store must implement NotificationOutbox for notification-bearing tasks",
 	)
+	_, getErr := store.Get(context.Background(), spec.ID)
+	require.ErrorIs(t, getErr, ErrNotFound)
 }

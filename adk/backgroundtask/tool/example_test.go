@@ -27,15 +27,6 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
-type exampleNotifications struct{}
-
-func (exampleNotifications) ValidateNotificationDelivery(
-	context.Context,
-	*backgroundtask.NotificationDeliveryValidation,
-) error {
-	return nil
-}
-
 type exampleTool struct{}
 
 func (exampleTool) ValidateArguments(arguments string) error {
@@ -78,8 +69,7 @@ func ExampleNewManagedTool() {
 	})
 	wrapped, _ := backgroundtool.NewManagedTool(context.Background(), &backgroundtool.ManagedToolConfig{
 		Manager: manager, Executors: executors, Registry: registry, ToolName: "generate_video",
-		Notifications: exampleNotifications{},
-		SessionID:     func(context.Context) (string, error) { return "session", nil },
+		SessionID: func(context.Context) (string, error) { return "session", nil },
 	})
 	result, _ := wrapped.(componenttool.InvokableTool).InvokableRun(
 		context.Background(), `{"prompt":"launch"}`,

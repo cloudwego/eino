@@ -50,21 +50,6 @@ type middlewareRunOptions struct {
 	value string
 }
 
-type notificationDeliveryStub struct{}
-
-func (notificationDeliveryStub) ValidateNotificationDelivery(
-	_ context.Context,
-	req *backgroundtask.NotificationDeliveryValidation,
-) error {
-	if req == nil || !req.OutboxAvailable ||
-		req.TargetKind != backgroundtask.SessionInboxNotificationKind {
-		return errors.New("invalid notification delivery")
-	}
-	return nil
-}
-
-var testNotifications backgroundtask.NotificationDeliveryRuntime = notificationDeliveryStub{}
-
 var testManagerStores sync.Map
 var testManagerExecutors sync.Map
 
@@ -125,7 +110,6 @@ func durableBackground(t *testing.T, mgr *backgroundtask.Manager, agents ...adk.
 			Manager: mgr, Executors: executors.(*backgroundtask.ExecutorRegistry),
 			Executor: durableExecutor(t),
 		},
-		Notifications: testNotifications,
 	}
 }
 
@@ -142,8 +126,7 @@ func mustLocalRunner(t *testing.T, manager *backgroundtask.Manager) *backgroundl
 
 func localBackground(t *testing.T, manager *backgroundtask.Manager) *BackgroundConfig {
 	return &BackgroundConfig{
-		Local:         &LocalBackgroundConfig{Runner: mustLocalRunner(t, manager)},
-		Notifications: testNotifications,
+		Local: &LocalBackgroundConfig{Runner: mustLocalRunner(t, manager)},
 	}
 }
 
@@ -175,7 +158,7 @@ func terminalTask(t *testing.T, mgr *backgroundtask.Manager) *backgroundtask.Tas
 	require.True(t, ok, "test Manager Store is unavailable")
 	outbox := store.(backgroundtask.NotificationOutbox)
 	result, err := outbox.Receive(context.Background(), &backgroundtask.ReceiveNotificationsRequest{
-		ConsumerID: "test", Limit: 100, VisibilityTime: time.Millisecond,
+		Limit: 100, LeaseDuration: time.Millisecond,
 	})
 	require.NoError(t, err)
 	for i := len(result.Deliveries) - 1; i >= 0; i-- {
@@ -220,8 +203,7 @@ func TestConfigValidation(t *testing.T) {
 	_, err = New(context.Background(), &Config{
 		SubAgents: []adk.Agent{agent},
 		Background: &BackgroundConfig{
-			Durable:       &DurableBackgroundConfig{Manager: manager, Executors: executorsForTest(t, manager)},
-			Notifications: testNotifications,
+			Durable: &DurableBackgroundConfig{Manager: manager, Executors: executorsForTest(t, manager)},
 		},
 	})
 	require.ErrorContains(t, err, "Manager, executor registry, and Executor")
@@ -232,7 +214,7 @@ func TestConfigValidation(t *testing.T) {
 			Local: &LocalBackgroundConfig{Runner: mustLocalRunner(t, manager)},
 		},
 	})
-	require.ErrorContains(t, err, "notification delivery is required")
+	require.NoError(t, err)
 }
 
 func TestBeforeAgentInjectsOneTool(t *testing.T) {
@@ -528,7 +510,7 @@ func TestLocalAgentToolWritesEventTranscript(t *testing.T) {
 			message *schema.Message,
 		) (string, error) {
 			return agentName + ": " + message.Content, nil
-		}, Notifications: testNotifications},
+		}},
 	})
 	require.NoError(t, err)
 	_, runCtx, err := middleware.BeforeAgent(ctx, &adk.ChatModelAgentContext[*schema.Message]{})
@@ -541,9 +523,7 @@ func TestLocalAgentToolWritesEventTranscript(t *testing.T) {
 	task := terminalTask(t, manager)
 	require.NotNil(t, task)
 	assert.Equal(t, "parent-session", task.Spec.SessionID)
-	require.NotNil(t, task.Spec.Notify)
-	assert.Equal(t, backgroundtask.SessionInboxNotificationKind, task.Spec.Notify.Kind)
-	assert.Equal(t, "parent-session", task.Spec.Notify.TargetID)
+	assert.True(t, task.Spec.NotifySession)
 	require.NotEmpty(t, task.Spec.OutputFile)
 	content, err := backend.Read(ctx, &filesystem.ReadRequest{FilePath: task.Spec.OutputFile})
 	require.NoError(t, err)
@@ -607,7 +587,7 @@ func TestDurableTaskProgressReadsSessionTranscript(t *testing.T) {
 		SubAgents: []adk.Agent{agent},
 		Background: &BackgroundConfig{Durable: &DurableBackgroundConfig{
 			Manager: manager, Executors: executorsForTest(t, manager), Executor: executor,
-		}, Notifications: testNotifications},
+		}},
 	})
 	require.NoError(t, err)
 	_, runCtx, err := middleware.BeforeAgent(ctx, &adk.ChatModelAgentContext[*schema.Message]{})
@@ -644,7 +624,7 @@ func TestDurableTaskProgressUsesSharedFormatter(t *testing.T) {
 		SubAgents: []adk.Agent{agent},
 		Background: &BackgroundConfig{Durable: &DurableBackgroundConfig{
 			Manager: manager, Executors: executorsForTest(t, manager), Executor: executor,
-		}, TranscriptFormat: format, Notifications: testNotifications},
+		}, TranscriptFormat: format},
 	})
 	require.NoError(t, err)
 	_, runCtx, err := middleware.BeforeAgent(ctx, &adk.ChatModelAgentContext[*schema.Message]{})
@@ -753,7 +733,7 @@ func TestDurableAgentToolUsesRegisteredRunOptionsFactory(t *testing.T) {
 					)}, nil
 				},
 			},
-		}, Notifications: testNotifications},
+		}},
 	})
 	require.NoError(t, err)
 	_, runCtx, err := middleware.BeforeAgent(ctx, &adk.ChatModelAgentContext[*schema.Message]{})

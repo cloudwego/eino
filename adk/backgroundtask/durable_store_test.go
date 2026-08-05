@@ -55,10 +55,7 @@ func newInMemoryStoreWithClock(
 func validSpec(id string) Spec {
 	return Spec{
 		ID: id, ExecutorKey: "test", Payload: []byte("payload"),
-		SessionID: "session", Notify: &NotificationTarget{
-			Kind: "session_inbox", TargetID: "session",
-			Metadata: map[string]string{"test/key": "value"},
-		},
+		SessionID: "session", NotifySession: true,
 	}
 }
 
@@ -99,11 +96,10 @@ func TestInMemoryStoreCreatePersistsPendingSnapshot_BitsUT(t *testing.T) {
 	assert.Nil(t, created.PendingResume)
 
 	spec.Payload[0] = 'X'
-	spec.Notify.Metadata["test/key"] = "changed"
 	stored, err := store.Get(context.Background(), created.Spec.ID)
 	require.NoError(t, err)
 	assert.Equal(t, "payload", string(stored.Spec.Payload))
-	assert.Equal(t, "value", stored.Spec.Notify.Metadata["test/key"])
+	assert.True(t, stored.Spec.NotifySession)
 }
 
 func TestAttack_ListPendingCursorSurvivesEarlierInsertion(t *testing.T) {
@@ -285,7 +281,7 @@ func TestInMemoryStoreYieldReturnsRecoverableAttemptToPending_BitsUT(t *testing.
 	require.Nil(t, yielded.DoneAt)
 
 	deliveries, err := store.Receive(context.Background(), &ReceiveNotificationsRequest{
-		ConsumerID: "test", Limit: 10, VisibilityTime: time.Second,
+		Limit: 10, LeaseDuration: time.Second,
 	})
 	require.NoError(t, err)
 	require.Empty(t, deliveries.Deliveries)
@@ -759,21 +755,8 @@ func TestStoreValidationBoundaries(t *testing.T) {
 		spec Spec
 	}{
 		{name: "missing identity", spec: Spec{}},
-		{name: "incomplete notification", spec: Spec{
-			ID: "task", ExecutorKey: "test", Notify: &NotificationTarget{},
-		}},
-		{name: "unnamespaced metadata", spec: Spec{
-			ID: "task", ExecutorKey: "test",
-			Notify: &NotificationTarget{
-				Kind: "custom", TargetID: "target",
-				Metadata: map[string]string{"plain": "value"},
-			},
-		}},
-		{name: "session target mismatch", spec: Spec{
-			ID: "task", ExecutorKey: "test", SessionID: "session-a",
-			Notify: &NotificationTarget{
-				Kind: "session_inbox", TargetID: "session-b",
-			},
+		{name: "notification without session", spec: Spec{
+			ID: "task", ExecutorKey: "test", NotifySession: true,
 		}},
 	}
 	for _, testCase := range specCases {

@@ -66,8 +66,7 @@ func newAttackManagedTool(
 	})
 	wrapped, err := NewManagedTool(context.Background(), &ManagedToolConfig{
 		Manager: manager, Executors: executors, Registry: registry, ToolName: "attack",
-		Notifications: notificationRuntime{},
-		SessionID:     func(context.Context) (string, error) { return "session", nil },
+		SessionID: func(context.Context) (string, error) { return "session", nil },
 	})
 	require.NoError(t, err)
 	return manager, wrapped

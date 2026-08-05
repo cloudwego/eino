@@ -32,19 +32,6 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
-type notificationRuntime struct{}
-
-func (notificationRuntime) ValidateNotificationDelivery(
-	_ context.Context,
-	request *backgroundtask.NotificationDeliveryValidation,
-) error {
-	if request == nil || !request.OutboxAvailable ||
-		request.TargetKind != backgroundtask.SessionInboxNotificationKind {
-		return errors.New("invalid notification delivery")
-	}
-	return nil
-}
-
 type fakeTool struct {
 	start   func(context.Context, *StartRequest) (Run, error)
 	recover func(context.Context, *RecoverRequest) (Run, error)
@@ -156,8 +143,8 @@ func newTestManagedTool(
 	timeoutMs := int(timeout / time.Millisecond)
 	wrapped, err := NewManagedTool(context.Background(), &ManagedToolConfig{
 		Manager: manager, Executors: executors, Registry: registry, ToolName: "external",
-		Notifications: notificationRuntime{}, ForegroundTimeoutMs: &timeoutMs,
-		SessionID: func(context.Context) (string, error) { return "session", nil },
+		ForegroundTimeoutMs: &timeoutMs,
+		SessionID:           func(context.Context) (string, error) { return "session", nil },
 	})
 	require.NoError(t, err)
 	return manager, wrapped
@@ -372,8 +359,8 @@ func TestManagedToolDrainYieldsAndRecoversWithoutStop(t *testing.T) {
 	timeoutMs := int(timeout / time.Millisecond)
 	wrapped, err := NewManagedTool(context.Background(), &ManagedToolConfig{
 		Manager: managerOne, Executors: executorsOne, Registry: registry, ToolName: "external",
-		Notifications: notificationRuntime{}, ForegroundTimeoutMs: &timeoutMs,
-		SessionID: func(context.Context) (string, error) { return "session", nil },
+		ForegroundTimeoutMs: &timeoutMs,
+		SessionID:           func(context.Context) (string, error) { return "session", nil },
 	})
 	require.NoError(t, err)
 	_, err = wrapped.(componenttool.InvokableTool).InvokableRun(
@@ -439,8 +426,7 @@ func TestManagedToolMaterializerIsDerivedAndFailureIsNonTerminal(t *testing.T) {
 	})
 	wrapped, err := NewManagedTool(context.Background(), &ManagedToolConfig{
 		Manager: manager, Executors: executors, Registry: registry, ToolName: "external",
-		Notifications: notificationRuntime{},
-		SessionID:     func(context.Context) (string, error) { return "session", nil },
+		SessionID: func(context.Context) (string, error) { return "session", nil },
 	})
 	require.NoError(t, err)
 	_, err = wrapped.(componenttool.InvokableTool).InvokableRun(
@@ -504,8 +490,7 @@ func TestAttack_PlainUpdateGeneratedEventIDNotMaterialized(t *testing.T) {
 	})
 	wrapped, err := NewManagedTool(context.Background(), &ManagedToolConfig{
 		Manager: manager, Executors: executors, Registry: registry, ToolName: "plain",
-		Notifications: notificationRuntime{},
-		SessionID:     func(context.Context) (string, error) { return "session", nil },
+		SessionID: func(context.Context) (string, error) { return "session", nil },
 	})
 	require.NoError(t, err)
 	stream, err := wrapped.(componenttool.StreamableTool).StreamableRun(
@@ -556,8 +541,7 @@ func TestManagedToolRejectsInvalidFinalOutputWithoutPartialResult(t *testing.T) 
 	})
 	wrapped, err := NewManagedTool(context.Background(), &ManagedToolConfig{
 		Manager: manager, Executors: executors, Registry: registry, ToolName: "external",
-		Notifications: notificationRuntime{},
-		SessionID:     func(context.Context) (string, error) { return "session", nil },
+		SessionID: func(context.Context) (string, error) { return "session", nil },
 	})
 	require.NoError(t, err)
 	result, err := wrapped.(componenttool.InvokableTool).InvokableRun(

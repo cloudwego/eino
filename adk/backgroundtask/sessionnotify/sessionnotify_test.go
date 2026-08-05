@@ -38,68 +38,6 @@ type recordingActivator struct {
 	pendingSeen int
 }
 
-func TestRuntimeValidatesCompleteDeliveryRoute(t *testing.T) {
-	inbox := NewMemoryInbox()
-	sink, err := NewSink(inbox, &recordingActivator{inbox: inbox})
-	require.NoError(t, err)
-	sinks := backgroundtask.NewSinkRegistry()
-	require.NoError(t, sinks.Register(backgroundtask.SessionInboxNotificationKind, sink))
-	readyCalls := 0
-	runtime, err := NewRuntime(
-		sinks,
-		func(context.Context) error {
-			readyCalls++
-			return nil
-		},
-	)
-	require.NoError(t, err)
-	require.NoError(t, runtime.ValidateNotificationDelivery(
-		context.Background(),
-		&backgroundtask.NotificationDeliveryValidation{
-			OutboxAvailable: true, TargetKind: backgroundtask.SessionInboxNotificationKind,
-		},
-	))
-	assert.Equal(t, 1, readyCalls)
-}
-
-func TestRuntimeRejectsIncompleteDeliveryRoute(t *testing.T) {
-	var nilRuntime *Runtime
-	err := nilRuntime.ValidateNotificationDelivery(context.Background(), nil)
-	require.ErrorContains(t, err, "runtime and validation request")
-
-	runtime, err := NewRuntime(
-		backgroundtask.NewSinkRegistry(),
-		func(context.Context) error { return nil },
-	)
-	require.NoError(t, err)
-	err = runtime.ValidateNotificationDelivery(
-		context.Background(),
-		&backgroundtask.NotificationDeliveryValidation{TargetKind: "unsupported"},
-	)
-	require.ErrorContains(t, err, "unsupported notification target kind")
-	err = runtime.ValidateNotificationDelivery(
-		context.Background(),
-		&backgroundtask.NotificationDeliveryValidation{
-			OutboxAvailable: true, TargetKind: backgroundtask.SessionInboxNotificationKind,
-		},
-	)
-	require.ErrorContains(t, err, "sink is unavailable")
-
-	err = runtime.ValidateNotificationDelivery(
-		context.Background(),
-		&backgroundtask.NotificationDeliveryValidation{
-			TargetKind: backgroundtask.SessionInboxNotificationKind,
-		},
-	)
-	require.ErrorContains(t, err, "must implement NotificationOutbox")
-
-	_, err = NewRuntime(backgroundtask.NewSinkRegistry(), nil)
-	require.ErrorContains(t, err, "readiness check")
-
-	_, err = NewSink(nil, nil)
-	require.ErrorContains(t, err, "inbox and activator are required")
-}
-
 func (a *recordingActivator) RequestTurn(
 	ctx context.Context,
 	req *backgroundtask.SessionActivationRequest,
@@ -120,75 +58,11 @@ func (a *recordingActivator) RequestTurn(
 	}, nil
 }
 
-func TestSinkAcceptRejectsUnroutedNotification(t *testing.T) {
-	err := (&Sink{}).Accept(context.Background(), backgroundtask.Notification{ID: "notification-1"})
-	require.ErrorContains(t, err, "routed notification target is required")
-}
-
-func TestSinkAcceptTargetValidatesDependenciesAndIdentity(t *testing.T) {
-	err := (&Sink{}).AcceptTarget(context.Background(), backgroundtask.NotificationTarget{
-		Kind: "session_inbox", TargetID: "session-1",
-	}, backgroundtask.Notification{ID: "notification-1"})
-	require.ErrorContains(t, err, "inbox and activator are required")
-
-	inbox := NewMemoryInbox()
-	sink, sinkErr := NewSink(inbox, &recordingActivator{inbox: inbox})
-	require.NoError(t, sinkErr)
-	err = sink.AcceptTarget(
-		context.Background(),
-		backgroundtask.NotificationTarget{Kind: "session_inbox", TargetID: "session-1"},
-		backgroundtask.Notification{},
-	)
-	require.ErrorContains(t, err, "notification id and target are required")
-}
-
-func TestSinkAcceptTargetEnqueuesBeforeActivation_BitsUT(t *testing.T) {
-	inbox := NewMemoryInbox()
-	activator := &recordingActivator{inbox: inbox}
-	sink, err := NewSink(inbox, activator)
-	require.NoError(t, err)
-
-	err = sink.AcceptTarget(context.Background(), backgroundtask.NotificationTarget{
-		Kind: "session_inbox", TargetID: "session-1",
-	}, backgroundtask.Notification{
-		ID: "notification-1", TaskID: "task-1",
-		Kind: backgroundtask.NotificationCompleted,
-		Task: &backgroundtask.Task{
-			Spec:       backgroundtask.Spec{ID: "task-1"},
-			Status:     backgroundtask.StatusCompleted,
-			ResultData: []byte("done"),
-		},
-	})
-	require.NoError(t, err)
-	assert.Equal(t, "session-1", activator.sessionID)
-	assert.Equal(t, 1, activator.pendingSeen)
-}
-
-func TestSinkAcceptTargetActivationFailureRetainsInboxItem_BitsUT(t *testing.T) {
-	inbox := NewMemoryInbox()
-	wantErr := errors.New("activation unavailable")
-	sink, err := NewSink(inbox, &recordingActivator{inbox: inbox, err: wantErr})
-	require.NoError(t, err)
-
-	err = sink.AcceptTarget(context.Background(), backgroundtask.NotificationTarget{
-		Kind: "session_inbox", TargetID: "session-1",
-	}, backgroundtask.Notification{ID: "notification-1"})
-	assert.ErrorIs(t, err, wantErr)
-
-	pending, listErr := inbox.ListPending(context.Background(), &backgroundtask.ListSessionNotificationsRequest{
-		SessionID: "session-1",
-	})
-	require.NoError(t, listErr)
-	require.Len(t, pending, 1)
-	assert.Equal(t, "notification-1", pending[0].Notification.ID)
-}
-
 func TestTerminalTaskNotificationWakesParentSession_BitsUT(t *testing.T) {
 	store := backgroundtask.NewInMemoryStore(nil)
 	spec := backgroundtask.Spec{
 		ID: "task-1", ExecutorKey: "test", Payload: []byte("{}"),
-		SessionID: "session-1",
-		Notify:    &backgroundtask.NotificationTarget{Kind: "session_inbox", TargetID: "session-1"},
+		SessionID: "session-1", NotifySession: true,
 	}
 	created, err := store.Create(context.Background(), &backgroundtask.CreateTaskRequest{
 		Spec: spec, LeaseExpiryPolicy: backgroundtask.LeaseExpiryRetry,
@@ -205,13 +79,9 @@ func TestTerminalTaskNotificationWakesParentSession_BitsUT(t *testing.T) {
 
 	inbox := NewMemoryInbox()
 	activator := &recordingActivator{inbox: inbox}
-	registry := backgroundtask.NewSinkRegistry()
-	sink, err := NewSink(inbox, activator)
-	require.NoError(t, err)
-	require.NoError(t, registry.Register(backgroundtask.SessionInboxNotificationKind, sink))
 	dispatcher := &backgroundtask.Dispatcher{
-		Outbox: store, Tasks: store, Sinks: registry, ConsumerID: "dispatcher",
-		BatchSize: 10, Visibility: time.Minute,
+		Outbox: store, Tasks: store, Inbox: inbox, Activator: activator,
+		BatchSize: 10, LeaseDuration: time.Minute,
 	}
 	delivered, err := dispatcher.DispatchOnce(context.Background())
 	require.NoError(t, err)
@@ -293,11 +163,7 @@ func TestMemoryInboxDeepCopiesNotification_DefectProbing_BitsUT(t *testing.T) {
 		ID: "notification-1",
 		Task: &backgroundtask.Task{
 			Spec: backgroundtask.Spec{
-				ID: "task-1",
-				Notify: &backgroundtask.NotificationTarget{
-					Kind: "session_inbox", TargetID: "session-1",
-					Metadata: map[string]string{"test/key": "original"},
-				},
+				ID: "task-1", SessionID: "session-1", NotifySession: true,
 			},
 			Status:        backgroundtask.StatusCompleted,
 			ResultData:    payload,
@@ -323,7 +189,6 @@ func TestMemoryInboxDeepCopiesNotification_DefectProbing_BitsUT(t *testing.T) {
 	assert.Equal(t, "resume", string(pending[0].Notification.Task.PendingResume))
 
 	pending[0].Notification.Task.ResultData[0] = 'Y'
-	pending[0].Notification.Task.Spec.Notify.Metadata["test/key"] = "mutated"
 	pending[0].Notification.Task.Checkpoint[0] = 'Y'
 	pending[0].Notification.Task.PendingResume[0] = 'Y'
 	again, err := inbox.ListPending(context.Background(), &backgroundtask.ListSessionNotificationsRequest{
@@ -331,43 +196,10 @@ func TestMemoryInboxDeepCopiesNotification_DefectProbing_BitsUT(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Equal(t, "result", string(again[0].Notification.Task.ResultData))
-	assert.Equal(t, "original", again[0].Notification.Task.Spec.Notify.Metadata["test/key"])
+	assert.Equal(t, "session-1", again[0].Notification.Task.Spec.SessionID)
+	assert.True(t, again[0].Notification.Task.Spec.NotifySession)
 	assert.Equal(t, "checkpoint", string(again[0].Notification.Task.Checkpoint))
 	assert.Equal(t, "resume", string(again[0].Notification.Task.PendingResume))
-}
-
-func TestAttack_MemoryInboxDeepCopiesNotificationTargetMetadata(t *testing.T) {
-	inbox := NewMemoryInbox()
-	metadata := map[string]string{"test/key": "original"}
-	_, err := inbox.Enqueue(context.Background(), &backgroundtask.EnqueueSessionNotificationRequest{
-		SessionID: "session-1",
-		Notification: backgroundtask.Notification{
-			ID: "notification-1",
-			Target: backgroundtask.NotificationTarget{
-				Kind:     "session_inbox",
-				TargetID: "session-1",
-				Metadata: metadata,
-			},
-		},
-	})
-	require.NoError(t, err)
-	metadata["test/key"] = "mutated-after-enqueue"
-
-	pending, err := inbox.ListPending(context.Background(), &backgroundtask.ListSessionNotificationsRequest{
-		SessionID: "session-1",
-	})
-	require.NoError(t, err)
-	require.Len(t, pending, 1)
-	t.Log("stored notification target metadata must not alias the caller-owned map")
-	assert.Equal(t, "original", pending[0].Notification.Target.Metadata["test/key"])
-
-	pending[0].Notification.Target.Metadata["test/key"] = "mutated-after-list"
-	again, err := inbox.ListPending(context.Background(), &backgroundtask.ListSessionNotificationsRequest{
-		SessionID: "session-1",
-	})
-	require.NoError(t, err)
-	require.Len(t, again, 1)
-	assert.Equal(t, "original", again[0].Notification.Target.Metadata["test/key"])
 }
 
 func TestAttack_MemoryInboxOrdersEqualTimestampsDeterministically(t *testing.T) {

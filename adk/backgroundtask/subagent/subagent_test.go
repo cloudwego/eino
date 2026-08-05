@@ -503,7 +503,7 @@ func TestSubmitPersistsMinimalPayloadAndDerivesChildIdentities_BitsUT(t *testing
 	assert.Equal(t, task.Spec.ID+"/session", childSessionID(task.Spec.ID))
 	assert.Equal(t, task.Spec.ID+"/checkpoint", checkpointID(task.Spec.ID))
 	assert.Equal(t, "parent-session", task.Spec.SessionID)
-	assert.Equal(t, task.Spec.SessionID, task.Spec.Notify.TargetID)
+	assert.True(t, task.Spec.NotifySession)
 }
 
 func executionFixture(

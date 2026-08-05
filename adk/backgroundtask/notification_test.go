@@ -26,30 +26,54 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-type routedRecordingSink struct {
-	fail          bool
-	targets       []NotificationTarget
+type recordingNotificationInbox struct {
+	sessionIDs    []string
 	notifications []Notification
 }
 
-func (s *routedRecordingSink) Accept(context.Context, Notification) error {
-	return errors.New("unexpected non-routed delivery")
+func (i *recordingNotificationInbox) Enqueue(
+	_ context.Context,
+	req *EnqueueSessionNotificationRequest,
+) (*SessionInboxItem, error) {
+	i.sessionIDs = append(i.sessionIDs, req.SessionID)
+	i.notifications = append(i.notifications, req.Notification)
+	return &SessionInboxItem{
+		ItemID: req.Notification.ID, ItemVersion: 1,
+		SessionID: req.SessionID, Notification: req.Notification,
+	}, nil
 }
 
-func (s *routedRecordingSink) AcceptTarget(
-	_ context.Context,
-	target NotificationTarget,
-	notification Notification,
+func (*recordingNotificationInbox) ListPending(
+	context.Context,
+	*ListSessionNotificationsRequest,
+) ([]*SessionInboxItem, error) {
+	return nil, nil
+}
+
+func (*recordingNotificationInbox) Ack(
+	context.Context,
+	*AckSessionNotificationRequest,
 ) error {
-	s.targets = append(s.targets, target)
-	s.notifications = append(s.notifications, notification)
-	if s.fail {
-		return errors.New("sink unavailable")
-	}
 	return nil
 }
 
-func TestDispatcherRedeliversUntilSinkAccepts_BitsUT(t *testing.T) {
+type recordingSessionActivator struct {
+	sessionIDs []string
+	err        error
+}
+
+func (a *recordingSessionActivator) RequestTurn(
+	_ context.Context,
+	req *SessionActivationRequest,
+) (*SessionActivationResult, error) {
+	a.sessionIDs = append(a.sessionIDs, req.SessionID)
+	if a.err != nil {
+		return nil, a.err
+	}
+	return &SessionActivationResult{Disposition: SessionActivationQueued}, nil
+}
+
+func TestDispatcherRedeliversUntilSessionActivationSucceeds_BitsUT(t *testing.T) {
 	clock := &testClock{now: time.Unix(400, 0)}
 	store := newInMemoryStoreWithClock(
 		&InMemoryStoreConfig{ActiveAttemptTimeout: time.Minute},
@@ -61,32 +85,33 @@ func TestDispatcherRedeliversUntilSinkAccepts_BitsUT(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	sink := &routedRecordingSink{fail: true}
-	registry := NewSinkRegistry()
-	require.NoError(t, registry.Register("session_inbox", sink))
+	inbox := &recordingNotificationInbox{}
+	activator := &recordingSessionActivator{err: errors.New("activation unavailable")}
 	dispatcher := &Dispatcher{
-		Outbox: store, Tasks: store, Sinks: registry, ConsumerID: "dispatcher",
-		BatchSize: 10, Visibility: time.Second,
+		Outbox: store, Tasks: store, Inbox: inbox, Activator: activator,
+		BatchSize: 10, LeaseDuration: time.Second,
 	}
 	accepted, err := dispatcher.DispatchOnce(context.Background())
 	require.Error(t, err)
 	assert.Zero(t, accepted)
-	require.Len(t, sink.notifications, 1)
-	assert.Equal(t, completed.Spec.ID, sink.notifications[0].TaskID)
-	assert.Equal(t, task.Spec.SessionID, sink.targets[0].TargetID)
-	require.NotNil(t, sink.notifications[0].Task)
-	assert.Equal(t, StatusCompleted, sink.notifications[0].Task.Status)
+	require.Len(t, inbox.notifications, 1)
+	assert.Equal(t, completed.Spec.ID, inbox.notifications[0].TaskID)
+	assert.Equal(t, task.Spec.SessionID, inbox.sessionIDs[0])
+	require.NotNil(t, inbox.notifications[0].Task)
+	assert.Equal(t, StatusCompleted, inbox.notifications[0].Task.Status)
+	assert.Equal(t, []string{task.Spec.SessionID}, activator.sessionIDs)
 
 	clock.Advance(time.Second)
-	sink.fail = false
+	activator.err = nil
 	accepted, err = dispatcher.DispatchOnce(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, 1, accepted)
-	require.Len(t, sink.notifications, 2)
-	assert.Equal(t, sink.notifications[0].ID, sink.notifications[1].ID)
+	require.Len(t, inbox.notifications, 2)
+	assert.Equal(t, inbox.notifications[0].ID, inbox.notifications[1].ID)
+	assert.Equal(t, []string{task.Spec.SessionID, task.Spec.SessionID}, activator.sessionIDs)
 
 	empty, err := store.Receive(context.Background(), &ReceiveNotificationsRequest{
-		ConsumerID: "verify", Limit: 10, VisibilityTime: time.Second,
+		Limit: 10, LeaseDuration: time.Second,
 	})
 	require.NoError(t, err)
 	assert.Empty(t, empty.Deliveries)
@@ -106,7 +131,7 @@ func TestInMemoryStoreTerminalCommitCreatesOneTerminalOutbox_BitsUT(t *testing.T
 	require.Error(t, err)
 
 	deliveries, err := store.Receive(context.Background(), &ReceiveNotificationsRequest{
-		ConsumerID: "consumer", Limit: 10, VisibilityTime: time.Minute,
+		Limit: 10, LeaseDuration: time.Minute,
 	})
 	require.NoError(t, err)
 	terminalCount := 0
@@ -119,10 +144,10 @@ func TestInMemoryStoreTerminalCommitCreatesOneTerminalOutbox_BitsUT(t *testing.T
 	assert.Equal(t, 1, terminalCount)
 }
 
-func TestRouteLessTaskNeverCreatesOutbox_BitsUT(t *testing.T) {
+func TestTaskWithoutSessionNotificationNeverCreatesOutbox_BitsUT(t *testing.T) {
 	store := NewInMemoryStore(nil)
 	spec := validSpec("route-less")
-	spec.Notify = nil
+	spec.NotifySession = false
 	created, err := store.Create(context.Background(), &CreateTaskRequest{
 		Spec: spec, LeaseExpiryPolicy: LeaseExpiryRetry,
 	})
@@ -137,8 +162,45 @@ func TestRouteLessTaskNeverCreatesOutbox_BitsUT(t *testing.T) {
 	require.NoError(t, err)
 
 	outbox, err := store.Receive(context.Background(), &ReceiveNotificationsRequest{
-		ConsumerID: "consumer", Limit: 10, VisibilityTime: time.Minute,
+		Limit: 10, LeaseDuration: time.Minute,
 	})
 	require.NoError(t, err)
 	assert.Empty(t, outbox.Deliveries)
+}
+
+func TestInMemoryStoreAckRequiresCurrentUnexpiredLease_BitsUT(t *testing.T) {
+	clock := &testClock{now: time.Unix(500, 0)}
+	store := newInMemoryStoreWithClock(nil, clock.Now)
+	started := createAndStart(t, store, "lease-validation")
+	_, err := store.Complete(context.Background(), &CompleteTaskRequest{
+		TaskID: started.Spec.ID, ExpectedVersion: started.Version,
+	})
+	require.NoError(t, err)
+
+	first, err := store.Receive(context.Background(), &ReceiveNotificationsRequest{
+		Limit: 1, LeaseDuration: time.Second,
+	})
+	require.NoError(t, err)
+	require.Len(t, first.Deliveries, 1)
+	firstReceipt := first.Deliveries[0].Receipt
+
+	concurrent, err := store.Receive(context.Background(), &ReceiveNotificationsRequest{
+		Limit: 1, LeaseDuration: time.Second,
+	})
+	require.NoError(t, err)
+	require.Empty(t, concurrent.Deliveries)
+
+	clock.Advance(time.Second)
+	require.ErrorIs(t, store.Ack(context.Background(), firstReceipt), ErrLeaseLost)
+
+	second, err := store.Receive(context.Background(), &ReceiveNotificationsRequest{
+		Limit: 1, LeaseDuration: time.Second,
+	})
+	require.NoError(t, err)
+	require.Len(t, second.Deliveries, 1)
+	secondReceipt := second.Deliveries[0].Receipt
+	require.NotEqual(t, firstReceipt, secondReceipt)
+
+	require.Error(t, store.Ack(context.Background(), firstReceipt))
+	require.NoError(t, store.Ack(context.Background(), secondReceipt))
 }

@@ -34,9 +34,9 @@ type InMemoryStoreConfig struct {
 }
 
 type memoryOutboxItem struct {
-	record       *Notification
-	receipt      NotificationReceipt
-	visibleAfter time.Time
+	record         *Notification
+	receipt        NotificationReceipt
+	leaseExpiresAt time.Time
 }
 
 type memoryActiveAttempt struct {
@@ -53,6 +53,7 @@ type InMemoryStore struct {
 	taskEvents    map[string][]TaskEvent
 	taskEventKeys map[string]map[string]TaskEvent
 	outbox        []*memoryOutboxItem
+	outboxLeaseID uint64
 	notify        chan struct{}
 	now           func() time.Time
 	activeTimeout time.Duration
@@ -619,8 +620,8 @@ func (s *InMemoryStore) WaitForTaskVersion(ctx context.Context, req *WaitForTask
 }
 
 func (s *InMemoryStore) Receive(_ context.Context, req *ReceiveNotificationsRequest) (*ReceiveNotificationsResult, error) {
-	if req == nil || req.ConsumerID == "" || req.VisibilityTime <= 0 {
-		return nil, errors.New("backgroundtask: consumer and positive visibility time are required")
+	if req == nil || req.LeaseDuration <= 0 {
+		return nil, errors.New("backgroundtask: positive lease duration is required")
 	}
 	limit := req.Limit
 	if limit <= 0 || limit > 1000 {
@@ -630,16 +631,16 @@ func (s *InMemoryStore) Receive(_ context.Context, req *ReceiveNotificationsRequ
 	defer s.mu.Unlock()
 	now := s.now()
 	result := &ReceiveNotificationsResult{}
-	for i, item := range s.outbox {
+	for _, item := range s.outbox {
 		if len(result.Deliveries) == limit {
 			break
 		}
-		if item.visibleAfter.After(now) {
+		if item.leaseExpiresAt.After(now) {
 			continue
 		}
-		item.receipt = NotificationReceipt(base64.RawURLEncoding.EncodeToString(
-			[]byte(fmt.Sprintf("%s:%d:%d", req.ConsumerID, i, now.UnixNano()))))
-		item.visibleAfter = now.Add(req.VisibilityTime)
+		s.outboxLeaseID++
+		item.receipt = NotificationReceipt(fmt.Appendf(nil, "lease:%d", s.outboxLeaseID))
+		item.leaseExpiresAt = now.Add(req.LeaseDuration)
 		result.Deliveries = append(result.Deliveries, NotificationDelivery{
 			Record: *cloneNotification(item.record), Receipt: append(NotificationReceipt(nil), item.receipt...),
 		})
@@ -651,7 +652,10 @@ func (s *InMemoryStore) Ack(_ context.Context, receipt NotificationReceipt) erro
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for i, item := range s.outbox {
-		if string(item.receipt) == string(receipt) && len(receipt) > 0 {
+		if len(receipt) > 0 && bytes.Equal(item.receipt, receipt) {
+			if !s.now().Before(item.leaseExpiresAt) {
+				return ErrLeaseLost
+			}
 			s.outbox = append(s.outbox[:i], s.outbox[i+1:]...)
 			return nil
 		}
@@ -725,13 +729,13 @@ func (s *InMemoryStore) advanceLocked(t *Task) {
 }
 
 func (s *InMemoryStore) enqueueLocked(t *Task, kind NotificationKind) *Notification {
-	if t.Spec.Notify == nil || kind == "" {
+	if !t.Spec.NotifySession || kind == "" {
 		return nil
 	}
 	n := &Notification{
 		ID:     fmt.Sprintf("%s:%d:%s", t.Spec.ID, t.Version, kind),
 		TaskID: t.Spec.ID, Version: t.Version,
-		Kind: kind, Target: *cloneSpec(t.Spec).Notify, CreatedAt: s.now(),
+		Kind: kind, CreatedAt: s.now(),
 	}
 	s.outbox = append(s.outbox, &memoryOutboxItem{record: n})
 	return n

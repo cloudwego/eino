@@ -108,10 +108,7 @@ func newManagedAgentTool[M adk.MessageType](
 			result, err := runner.Run(ctx, &backgroundlocal.Input{
 				Description: in.Description, Type: TaskTypeSubagent, Payload: payload,
 				OutputFile: outputFile, RunInBackground: in.RunInBackground,
-				SessionID: sessionID,
-				Notify: &backgroundtask.NotificationTarget{
-					Kind: backgroundtask.SessionInboxNotificationKind, TargetID: sessionID,
-				},
+				SessionID: sessionID, NotifySession: true,
 			}, func(workCtx context.Context, runtime backgroundtask.ExecutionRuntime) (string, error) {
 				fileReceiver := &agentEventFileReceiver[M]{
 					ctx: workCtx, format: format,

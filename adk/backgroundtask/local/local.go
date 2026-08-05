@@ -53,7 +53,7 @@ type Input struct {
 	Payload                    []byte
 	OutputFile                 string
 	SessionID                  string
-	Notify                     *backgroundtask.NotificationTarget
+	NotifySession              bool
 	RunInBackground            bool
 	BackgroundStartupPreviewMs int
 	ForegroundTimeoutMs        *int
@@ -281,7 +281,7 @@ func (r *Runner) submit(
 	task, err := r.manager.Submit(ctx, backgroundtask.Spec{
 		ID: id, ExecutorKey: executorKey, Kind: input.Type,
 		Payload: append([]byte(nil), input.Payload...), Description: input.Description,
-		OutputFile: input.OutputFile, SessionID: input.SessionID, Notify: input.Notify,
+		OutputFile: input.OutputFile, SessionID: input.SessionID, NotifySession: input.NotifySession,
 	})
 	if err != nil {
 		r.executor.remove(id)

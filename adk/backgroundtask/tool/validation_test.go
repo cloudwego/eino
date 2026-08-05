@@ -139,15 +139,6 @@ func TestPayloadAndResultValidationBoundaries(t *testing.T) {
 	}
 }
 
-type rejectingNotifications struct{}
-
-func (rejectingNotifications) ValidateNotificationDelivery(
-	context.Context,
-	*backgroundtask.NotificationDeliveryValidation,
-) error {
-	return errors.New("route unavailable")
-}
-
 type reserveFailure struct {
 	path string
 	err  error
@@ -168,13 +159,7 @@ func TestManagedToolConstructionAndSubmissionErrors(t *testing.T) {
 		Executors: executors,
 		Registry:  registry, ToolName: "missing",
 	})
-	require.ErrorContains(t, err, "notification delivery")
-	_, err = NewManagedTool(context.Background(), &ManagedToolConfig{
-		Manager:   backgroundtask.New(context.Background(), nil),
-		Executors: executors,
-		Registry:  registry, ToolName: "missing", Notifications: rejectingNotifications{},
-	})
-	require.ErrorContains(t, err, "route unavailable")
+	require.ErrorContains(t, err, `tool "missing" is not registered`)
 
 	plain := &plainFakeTool{start: func(context.Context, *StartRequest) (Run, error) {
 		return &fakeRun{wait: func(context.Context) (*Outcome, error) {
@@ -186,7 +171,6 @@ func TestManagedToolConstructionAndSubmissionErrors(t *testing.T) {
 	manager := backgroundtask.New(context.Background(), &backgroundtask.Config{Executors: executors})
 	wrapped, err := NewManagedTool(context.Background(), &ManagedToolConfig{
 		Manager: manager, Executors: executors, Registry: registry, ToolName: "plain",
-		Notifications: notificationRuntime{},
 		SessionID: func(context.Context) (string, error) {
 			return "", errors.New("session unavailable")
 		},
@@ -223,8 +207,7 @@ func TestManagedToolConstructionAndSubmissionErrors(t *testing.T) {
 		localWrapped, createErr := NewManagedTool(context.Background(), &ManagedToolConfig{
 			Manager: localManager, Executors: localExecutors,
 			Registry: localRegistry, ToolName: "materialized",
-			Notifications: notificationRuntime{},
-			SessionID:     func(context.Context) (string, error) { return "session", nil },
+			SessionID: func(context.Context) (string, error) { return "session", nil },
 		})
 		require.NoError(t, createErr)
 		_, runErr := localWrapped.(*managedTool).InvokableRun(context.Background(), `{}`)
@@ -295,7 +278,6 @@ func TestManagedToolTimeoutOverrideStopsRun(t *testing.T) {
 	timeoutMs := 5
 	wrapped, err := NewManagedTool(context.Background(), &ManagedToolConfig{
 		Manager: manager, Executors: executors, Registry: registry, ToolName: "timeout",
-		Notifications: notificationRuntime{},
 		ShouldAutoBackground: func(context.Context, *backgroundtask.Task) bool {
 			return false
 		},

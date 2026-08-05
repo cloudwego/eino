@@ -406,7 +406,7 @@ func TestRunnerLocalContracts(t *testing.T) {
 	require.Error(t, err)
 	require.Nil(t, result)
 	result, err = runner.Run(context.Background(), &Input{
-		Notify: &backgroundtask.NotificationTarget{},
+		NotifySession: true,
 	}, work)
 	require.Error(t, err)
 	require.Nil(t, result)

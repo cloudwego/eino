@@ -59,21 +59,6 @@ func mustDeepDurableExecutor(
 	return executor
 }
 
-type notificationDeliveryStub struct{}
-
-func (notificationDeliveryStub) ValidateNotificationDelivery(
-	_ context.Context,
-	req *backgroundtask.NotificationDeliveryValidation,
-) error {
-	if req == nil || !req.OutboxAvailable ||
-		req.TargetKind != backgroundtask.SessionInboxNotificationKind {
-		return fmt.Errorf("invalid notification delivery")
-	}
-	return nil
-}
-
-var testNotifications backgroundtask.NotificationDeliveryRuntime = notificationDeliveryStub{}
-
 type sequentialAgenticModel struct {
 	responses []*schema.AgenticMessage
 	callCount int32
@@ -469,10 +454,9 @@ func TestDeepAgentManagerWiring(t *testing.T) {
 	handlers, err := buildTypedBuiltinAgentMiddlewares(ctx, &Config{
 		WithoutWriteTodos: true,
 	}, &BackgroundConfig{
-		Manager:       mgr,
-		Executors:     backgroundtask.NewExecutorRegistry(),
-		LocalShell:    &LocalShellConfig{Shell: &deepMockShell{}},
-		Notifications: testNotifications,
+		Manager:    mgr,
+		Executors:  backgroundtask.NewExecutorRegistry(),
+		LocalShell: &LocalShellConfig{Shell: &deepMockShell{}},
 	})
 	assert.NoError(t, err)
 	assert.Len(t, handlers, 1)
@@ -515,7 +499,6 @@ func TestDeepRecoverableShellDoesNotCreateLocalRunner(t *testing.T) {
 		RecoverableShell: &RecoverableShellConfig{
 			Shell: shell, OutputDir: "/tmp/output",
 		},
-		Notifications: testNotifications,
 	}
 
 	require.Same(t, shell, deepRecoverableShell(background))
@@ -567,10 +550,9 @@ func TestDeepBackgroundConfigRequiresExplicitCapabilities(t *testing.T) {
 	require.ErrorContains(t, err, "requires Shell or StreamingShell")
 
 	_, err = New(context.Background(), &Config{Background: &BackgroundConfig{
-		Manager:       manager,
-		Executors:     backgroundtask.NewExecutorRegistry(),
-		SubAgents:     &TypedDurableSubAgentConfig[*schema.Message]{},
-		Notifications: testNotifications,
+		Manager:   manager,
+		Executors: backgroundtask.NewExecutorRegistry(),
+		SubAgents: &TypedDurableSubAgentConfig[*schema.Message]{},
 	}})
 	require.ErrorContains(t, err, "Executor is required")
 
@@ -593,7 +575,6 @@ func TestDeepSubAgentBackgroundForwardsRunOptionsFactories(t *testing.T) {
 		Background: &TypedBackgroundConfig[*schema.Message]{
 			Manager:          manager,
 			Executors:        backgroundtask.NewExecutorRegistry(),
-			Notifications:    testNotifications,
 			TranscriptFormat: format,
 			SubAgents: &TypedDurableSubAgentConfig[*schema.Message]{
 				Executor: mustDeepDurableExecutor(t),
@@ -634,7 +615,6 @@ func TestDeepAgentNewTypedWithManager(t *testing.T) {
 			SubAgents: &TypedDurableSubAgentConfig[*schema.Message]{
 				Executor: mustDeepDurableExecutor(t),
 			},
-			Notifications: testNotifications,
 		},
 	})
 	assert.NoError(t, err)

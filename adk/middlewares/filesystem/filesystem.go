@@ -128,9 +128,6 @@ type BackgroundConfig struct {
 	// ForegroundTimeoutMs and ShouldAutoBackground configure RecoverableShell.
 	ForegroundTimeoutMs  *int
 	ShouldAutoBackground func(context.Context, *backgroundtask.Task) bool
-	// Notifications is required because the managed execute tool promises
-	// completion notification.
-	Notifications backgroundtask.NotificationDeliveryRuntime
 
 	// OutputStore and OutputDir, when both set, give every managed run an output
 	// file at OutputDir/<id>.output: streaming runs append their chunks to it as
@@ -299,9 +296,6 @@ func NewMiddleware(ctx context.Context, config *Config) (adk.AgentMiddleware, er
 			return sessionID, nil
 		},
 	}
-	if err = validateBackgroundNotification(ctx, middlewareConfig.Background); err != nil {
-		return adk.AgentMiddleware{}, err
-	}
 	ts, err := getFilesystemTools(ctx, middlewareConfig)
 	if err != nil {
 		return adk.AgentMiddleware{}, err
@@ -452,22 +446,6 @@ func (c *MiddlewareConfig) Validate() error {
 	return nil
 }
 
-func validateBackgroundNotification(ctx context.Context, config *BackgroundConfig) error {
-	manager := backgroundManager(config)
-	if manager == nil {
-		return nil
-	}
-	if config.Notifications == nil {
-		return errors.New("filesystem: background notification delivery is required")
-	}
-	if err := manager.ValidateNotificationDelivery(
-		ctx, config.Notifications, backgroundtask.SessionInboxNotificationKind,
-	); err != nil {
-		return fmt.Errorf("filesystem: background notification delivery: %w", err)
-	}
-	return nil
-}
-
 func backgroundManager(config *BackgroundConfig) *backgroundtask.Manager {
 	if config == nil {
 		return nil
@@ -528,9 +506,6 @@ func (c *MiddlewareConfig) mergeToolConfigWithDesc(
 func NewTyped[M adk.MessageType](ctx context.Context, config *MiddlewareConfig) (adk.TypedChatModelAgentMiddleware[M], error) {
 	err := config.Validate()
 	if err != nil {
-		return nil, err
-	}
-	if err = validateBackgroundNotification(ctx, config.Background); err != nil {
 		return nil, err
 	}
 	typedConfig := *config
@@ -796,7 +771,6 @@ func newRecoverableExecuteTool(
 	return backgroundtool.NewManagedTool(ctx, &backgroundtool.ManagedToolConfig{
 		Manager: manager, Executors: background.Executors,
 		Registry: registry, ToolName: toolName,
-		Notifications:        background.Notifications,
 		ForegroundTimeoutMs:  background.ForegroundTimeoutMs,
 		ShouldAutoBackground: background.ShouldAutoBackground,
 		SessionID:            middlewareConfig.notificationSessionID,

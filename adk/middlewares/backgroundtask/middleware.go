@@ -76,9 +76,6 @@ type TypedConfig[M adk.MessageType] struct {
 	// It is typically the same Manager the domain middlewares (subagent, filesystem)
 	// were given, so a single task-ID space spans agent and shell runs.
 	Manager *bgtask.Manager
-	// Notifications is required because the injected model prompt promises
-	// completion notification.
-	Notifications bgtask.NotificationDeliveryRuntime
 	// ReadTaskProgress optionally projects executor-specific progress for
 	// task_output. It must not mutate task lifecycle state.
 	ReadTaskProgress func(context.Context, *bgtask.Task) (string, error)
@@ -108,16 +105,6 @@ func NewTyped[M adk.MessageType](ctx context.Context, config *TypedConfig[M]) (a
 
 	outputEnabled := !disabled(config.TaskOutputToolConfig)
 	stopEnabled := !disabled(config.TaskStopToolConfig)
-	if outputEnabled || stopEnabled {
-		if config.Notifications == nil {
-			return nil, fmt.Errorf("backgroundtask: notification delivery is required")
-		}
-		if err := config.Manager.ValidateNotificationDelivery(
-			ctx, config.Notifications, bgtask.SessionInboxNotificationKind,
-		); err != nil {
-			return nil, fmt.Errorf("backgroundtask: notification delivery: %w", err)
-		}
-	}
 
 	var tools []tool.BaseTool
 	if outputEnabled {

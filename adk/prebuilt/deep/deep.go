@@ -62,9 +62,6 @@ type TypedBackgroundConfig[M adk.MessageType] struct {
 	ShouldAutoBackground func(context.Context, *backgroundtask.Task) bool
 	// TranscriptFormat customizes durable sub-agent session views.
 	TranscriptFormat subagent.TranscriptFormat[M]
-	// Notifications is required because DeepAgent's background tools promise
-	// completion notification.
-	Notifications backgroundtask.NotificationDeliveryRuntime
 }
 
 type BackgroundConfig = TypedBackgroundConfig[*schema.Message]
@@ -239,9 +236,6 @@ func NewTyped[M adk.MessageType](ctx context.Context, cfg *TypedConfig[M]) (adk.
 				"deep: Background.RecoverableShell and Background.LocalShell are mutually exclusive",
 			)
 		}
-		if cfg.Background.Notifications == nil {
-			return nil, fmt.Errorf("deep: background notification delivery is required")
-		}
 	}
 	// Sub-agents never get the background configuration: their shell runs stay
 	// foreground/buffered and they cannot launch background work.
@@ -302,7 +296,7 @@ func NewTyped[M adk.MessageType](ctx context.Context, cfg *TypedConfig[M]) (adk.
 		progressReaders[backgroundtool.ExecutorKey] = reader
 		progressReaders[backgroundtool.RecoverableExecutorKey] = reader
 		controlMW, err := backgroundtaskmw.NewTyped(ctx, &backgroundtaskmw.TypedConfig[M]{
-			Manager: manager, Notifications: cfg.Background.Notifications,
+			Manager:          manager,
 			ReadTaskProgress: readTaskProgress, ProgressReaders: progressReaders,
 		})
 		if err != nil {
@@ -445,7 +439,6 @@ func buildTypedBuiltinAgentMiddlewares[M adk.MessageType](ctx context.Context, c
 			}
 			mwCfg.Background = &filesystem2.BackgroundConfig{
 				Runner: runner, Manager: background.Manager, Executors: background.Executors,
-				Notifications:        background.Notifications,
 				OutputStore:          backendAppendOpener(cfg.Backend),
 				OutputDir:            deepShellOutputDir(background),
 				ForegroundTimeoutMs:  background.ForegroundTimeoutMs,
@@ -529,7 +522,6 @@ func deepSubagentBackground[M adk.MessageType](
 	cfg *TypedConfig[M],
 ) *subagent.TypedBackgroundConfig[M] {
 	return &subagent.TypedBackgroundConfig[M]{
-		Notifications:    cfg.Background.Notifications,
 		TranscriptFormat: cfg.Background.TranscriptFormat,
 		Durable: &subagent.TypedDurableBackgroundConfig[M]{
 			Manager:              cfg.Background.Manager,

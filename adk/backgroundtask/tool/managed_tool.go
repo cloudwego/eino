@@ -32,11 +32,10 @@ import (
 
 // ManagedToolConfig configures the framework-owned model-facing wrapper.
 type ManagedToolConfig struct {
-	Manager       *backgroundtask.Manager
-	Executors     *backgroundtask.ExecutorRegistry
-	Registry      *Registry
-	ToolName      string
-	Notifications backgroundtask.NotificationDeliveryRuntime
+	Manager   *backgroundtask.Manager
+	Executors *backgroundtask.ExecutorRegistry
+	Registry  *Registry
+	ToolName  string
 
 	ForegroundTimeoutMs  *int
 	ShouldAutoBackground func(context.Context, *backgroundtask.Task) bool
@@ -69,14 +68,6 @@ func NewManagedTool(
 		return nil, errors.New(
 			"backgroundtask/tool: manager, executor registry, tool registry, and tool name are required",
 		)
-	}
-	if config.Notifications == nil {
-		return nil, errors.New("backgroundtask/tool: notification delivery is required")
-	}
-	if err := config.Manager.ValidateNotificationDelivery(
-		ctx, config.Notifications, backgroundtask.SessionInboxNotificationKind,
-	); err != nil {
-		return nil, fmt.Errorf("backgroundtask/tool: notification delivery: %w", err)
 	}
 	if err := RegisterExecutors(config.Executors, config.Registry); err != nil {
 		return nil, err
@@ -302,9 +293,7 @@ func (t *managedTool) submit(
 	task, err := t.manager.Submit(ctx, backgroundtask.Spec{
 		ID: taskID, ExecutorKey: executorKey, Kind: "background_tool",
 		Payload: payload, Description: description, OutputFile: outputFile,
-		SessionID: sessionID, Notify: &backgroundtask.NotificationTarget{
-			Kind: backgroundtask.SessionInboxNotificationKind, TargetID: sessionID,
-		},
+		SessionID: sessionID, NotifySession: true,
 	})
 	if err != nil {
 		removeProjection()

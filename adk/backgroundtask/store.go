@@ -20,7 +20,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 )
 
@@ -31,7 +30,7 @@ var (
 	ErrAlreadyExists = errors.New("backgroundtask: task already exists")
 	// ErrVersionConflict reports that ExpectedVersion no longer matches the stored record.
 	ErrVersionConflict = errors.New("backgroundtask: task version conflict")
-	// ErrLeaseLost reports that an active attempt is no longer authorized.
+	// ErrLeaseLost reports that an operation is no longer authorized by its lease.
 	ErrLeaseLost = errors.New("backgroundtask: lease lost")
 	// ErrIllegalTransition reports that a requested lifecycle transition is invalid.
 	ErrIllegalTransition = errors.New("backgroundtask: illegal state transition")
@@ -112,7 +111,9 @@ func (unavailableTaskEventStore) ReadRecentTaskEvents(
 	return nil, errors.New("backgroundtask: task event store is not configured")
 }
 
-// NotificationOutbox leases lifecycle notifications for dispatch.
+// NotificationOutbox leases lifecycle notifications for dispatch. Ack must
+// accept only the opaque receipt for the notification's current unexpired
+// lease; an expired or superseded receipt must not acknowledge the notification.
 type NotificationOutbox interface {
 	Receive(context.Context, *ReceiveNotificationsRequest) (*ReceiveNotificationsResult, error)
 	Ack(context.Context, NotificationReceipt) error
@@ -126,21 +127,8 @@ func validateSpec(spec Spec) error {
 	if spec.ID == "" || spec.ExecutorKey == "" {
 		return fmt.Errorf("backgroundtask: id and executor key are required")
 	}
-	if spec.Notify != nil {
-		if spec.Notify.Kind == "" || spec.Notify.TargetID == "" {
-			return fmt.Errorf("backgroundtask: notification kind and target id are required")
-		}
-		if len(spec.Notify.Kind) > 128 || len(spec.Notify.TargetID) > 512 || len(spec.Notify.Metadata) > 32 {
-			return fmt.Errorf("backgroundtask: notification target exceeds bounds")
-		}
-		for key, value := range spec.Notify.Metadata {
-			if !strings.Contains(key, "/") || len(key) > 256 || len(value) > 1024 {
-				return fmt.Errorf("backgroundtask: notification metadata must use bounded namespaced keys")
-			}
-		}
-		if spec.Notify.Kind == "session_inbox" && spec.Notify.TargetID != spec.SessionID {
-			return fmt.Errorf("backgroundtask: session inbox target must match task session")
-		}
+	if spec.NotifySession && spec.SessionID == "" {
+		return fmt.Errorf("backgroundtask: notification session id is required")
 	}
 	return nil
 }
@@ -224,14 +212,6 @@ func cloneTaskEvent(v *TaskEvent) *TaskEvent {
 func cloneSpec(v Spec) Spec {
 	c := v
 	c.Payload = cloneBytes(v.Payload)
-	if v.Notify != nil {
-		n := *v.Notify
-		n.Metadata = make(map[string]string, len(v.Notify.Metadata))
-		for k, value := range v.Notify.Metadata {
-			n.Metadata[k] = value
-		}
-		c.Notify = &n
-	}
 	return c
 }
 
@@ -240,10 +220,6 @@ func cloneNotification(v *Notification) *Notification {
 		return nil
 	}
 	c := *v
-	c.Target.Metadata = make(map[string]string, len(v.Target.Metadata))
-	for k, value := range v.Target.Metadata {
-		c.Target.Metadata[k] = value
-	}
 	c.Task = cloneTask(v.Task)
 	return &c
 }

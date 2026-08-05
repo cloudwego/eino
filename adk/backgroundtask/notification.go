@@ -19,97 +19,8 @@ package backgroundtask
 import (
 	"context"
 	"errors"
-	"sync"
 	"time"
 )
-
-// SessionInboxNotificationKind routes a task notification to its parent session.
-const SessionInboxNotificationKind = "session_inbox"
-
-// NotificationDeliveryValidation describes the capabilities and route a
-// model-facing constructor requires before promising task completion notification.
-type NotificationDeliveryValidation struct {
-	OutboxAvailable bool
-	TargetKind      string
-}
-
-// NotificationDeliveryRuntime validates that task outbox delivery and the
-// target kind have an operationally owned route.
-type NotificationDeliveryRuntime interface {
-	ValidateNotificationDelivery(context.Context, *NotificationDeliveryValidation) error
-}
-
-// ValidateNotificationDelivery validates that this Manager's TaskStore and the
-// requested target have an operationally owned notification route.
-func (m *Manager) ValidateNotificationDelivery(
-	ctx context.Context,
-	runtime NotificationDeliveryRuntime,
-	targetKind string,
-) error {
-	if runtime == nil || targetKind == "" {
-		return errors.New("backgroundtask: notification delivery runtime and target kind are required")
-	}
-	_, outboxAvailable := m.tasks.(NotificationOutbox)
-	return runtime.ValidateNotificationDelivery(ctx, &NotificationDeliveryValidation{
-		OutboxAvailable: outboxAvailable, TargetKind: targetKind,
-	})
-}
-
-// NotificationSink accepts dispatcher-enriched task notifications.
-type NotificationSink interface {
-	Accept(context.Context, Notification) error
-}
-
-// ValidatingNotificationSink reports whether its required delivery dependencies
-// are structurally complete.
-type ValidatingNotificationSink interface {
-	NotificationSink
-	ValidateNotificationSink() error
-}
-
-// RoutedNotificationSink is implemented by sinks whose durable destination is
-// selected by the serialized target rather than by sink kind alone.
-type RoutedNotificationSink interface {
-	AcceptTarget(context.Context, NotificationTarget, Notification) error
-}
-
-// NotificationSinkRegistry resolves sinks by notification target kind.
-type NotificationSinkRegistry interface {
-	Resolve(kind string) (NotificationSink, bool)
-}
-
-// SinkRegistry is an in-memory NotificationSinkRegistry implementation.
-type SinkRegistry struct {
-	mu    sync.RWMutex
-	sinks map[string]NotificationSink
-}
-
-// NewSinkRegistry creates an empty sink registry.
-func NewSinkRegistry() *SinkRegistry {
-	return &SinkRegistry{sinks: make(map[string]NotificationSink)}
-}
-
-// Register associates a target kind with a notification sink.
-func (r *SinkRegistry) Register(kind string, sink NotificationSink) error {
-	if kind == "" || sink == nil {
-		return errors.New("backgroundtask: sink kind and implementation are required")
-	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if _, exists := r.sinks[kind]; exists {
-		return ErrAlreadyExists
-	}
-	r.sinks[kind] = sink
-	return nil
-}
-
-// Resolve returns the sink registered for kind.
-func (r *SinkRegistry) Resolve(kind string) (NotificationSink, bool) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	sink, ok := r.sinks[kind]
-	return sink, ok
-}
 
 // SessionNotificationInbox stores notifications awaiting parent session turns.
 type SessionNotificationInbox interface {
@@ -171,37 +82,35 @@ type SessionActivationResult struct {
 	Disposition SessionActivationDisposition
 }
 
-// Dispatcher delivers notifications from an outbox to registered sinks.
+// Dispatcher delivers task notifications from an outbox to session inboxes.
 type Dispatcher struct {
-	Outbox     NotificationOutbox
-	Tasks      TaskStore
-	Sinks      NotificationSinkRegistry
-	ConsumerID string
-	BatchSize  int
-	Visibility time.Duration
+	Outbox        NotificationOutbox
+	Tasks         TaskStore
+	Inbox         SessionNotificationInbox
+	Activator     SessionActivator
+	BatchSize     int
+	LeaseDuration time.Duration
 }
 
 // DispatchOnce receives and dispatches one batch of visible notifications.
 func (d *Dispatcher) DispatchOnce(ctx context.Context) (int, error) {
-	if d.Outbox == nil || d.Tasks == nil || d.Sinks == nil || d.ConsumerID == "" {
-		return 0, errors.New("backgroundtask: dispatcher outbox, task store, sinks, and consumer id are required")
+	if d.Outbox == nil || d.Tasks == nil || d.Inbox == nil || d.Activator == nil {
+		return 0, errors.New(
+			"backgroundtask: dispatcher outbox, task store, session inbox, and activator are required",
+		)
 	}
-	visibility := d.Visibility
-	if visibility <= 0 {
-		visibility = 30 * time.Second
+	leaseDuration := d.LeaseDuration
+	if leaseDuration <= 0 {
+		leaseDuration = 30 * time.Second
 	}
 	deliveries, err := d.Outbox.Receive(ctx, &ReceiveNotificationsRequest{
-		ConsumerID: d.ConsumerID, Limit: d.BatchSize, VisibilityTime: visibility,
+		Limit: d.BatchSize, LeaseDuration: leaseDuration,
 	})
 	if err != nil {
 		return 0, err
 	}
 	accepted := 0
 	for _, delivery := range deliveries.Deliveries {
-		sink, ok := d.Sinks.Resolve(delivery.Record.Target.Kind)
-		if !ok {
-			return accepted, errors.New("backgroundtask: notification sink is unavailable")
-		}
 		record := delivery.Record
 		task, loadErr := d.Tasks.Get(ctx, record.TaskID)
 		if loadErr != nil {
@@ -209,12 +118,15 @@ func (d *Dispatcher) DispatchOnce(ctx context.Context) (int, error) {
 		}
 		notification := record
 		notification.Task = task
-		if routed, routedOK := sink.(RoutedNotificationSink); routedOK {
-			err = routed.AcceptTarget(ctx, record.Target, notification)
-		} else {
-			err = sink.Accept(ctx, notification)
+		item, enqueueErr := d.Inbox.Enqueue(ctx, &EnqueueSessionNotificationRequest{
+			SessionID: task.Spec.SessionID, Notification: notification,
+		})
+		if enqueueErr != nil {
+			return accepted, enqueueErr
 		}
-		if err != nil {
+		if _, err = d.Activator.RequestTurn(ctx, &SessionActivationRequest{
+			SessionID: item.SessionID,
+		}); err != nil {
 			return accepted, err
 		}
 		if err = d.Outbox.Ack(ctx, delivery.Receipt); err != nil {

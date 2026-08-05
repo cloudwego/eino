@@ -28,13 +28,6 @@ const (
 	LeaseExpiryFail LeaseExpiryPolicy = "fail"
 )
 
-// NotificationTarget describes where lifecycle notifications should be routed.
-type NotificationTarget struct {
-	Kind     string
-	TargetID string
-	Metadata map[string]string
-}
-
 // Spec is immutable serialized task intent.
 type Spec struct {
 	ID          string
@@ -42,11 +35,11 @@ type Spec struct {
 	Kind        string
 	Payload     []byte
 
-	Description string
-	OutputFile  string
-	SessionID   string
-	Notify      *NotificationTarget
-	CreatedAt   time.Time
+	Description   string
+	OutputFile    string
+	SessionID     string
+	NotifySession bool
+	CreatedAt     time.Time
 }
 
 // NotificationKind identifies the lifecycle transition that created a notification.
@@ -63,14 +56,13 @@ const (
 	NotificationCanceled NotificationKind = "canceled"
 )
 
-// Notification is only a durable wake-up and routing pointer.
+// Notification is only a durable wake-up pointer.
 // Authoritative task data is loaded by the consumer.
 type Notification struct {
 	ID        string
 	TaskID    string
 	Version   int64
 	Kind      NotificationKind
-	Target    NotificationTarget
 	CreatedAt time.Time
 
 	// Task is nil for pointer-only outbox storage and populated for delivered
@@ -241,14 +233,14 @@ type ReadRecentTaskEventsResult struct {
 	Events []*TaskEvent
 }
 
-// NotificationReceipt identifies a received outbox notification for acknowledgement.
+// NotificationReceipt is an opaque token authorizing acknowledgement of one
+// notification during its current lease.
 type NotificationReceipt []byte
 
 // ReceiveNotificationsRequest leases visible notifications from an outbox.
 type ReceiveNotificationsRequest struct {
-	ConsumerID     string
-	Limit          int
-	VisibilityTime time.Duration
+	Limit         int
+	LeaseDuration time.Duration
 }
 
 // NotificationDelivery contains a notification and its acknowledgement receipt.

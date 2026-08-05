@@ -458,6 +458,13 @@ func (m *Manager) Submit(ctx context.Context, spec Spec) (*Task, error) {
 	if err := validateSpec(spec); err != nil {
 		return nil, err
 	}
+	if spec.NotifySession {
+		if _, ok := m.tasks.(NotificationOutbox); !ok {
+			return nil, errors.New(
+				"backgroundtask: task store must implement NotificationOutbox for notification-bearing tasks",
+			)
+		}
+	}
 	if err := executor.ValidateSpec(cloneSpec(spec)); err != nil {
 		return nil, fmt.Errorf("backgroundtask: validate spec: %w", err)
 	}

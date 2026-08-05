@@ -41,21 +41,6 @@ func testNotificationSessionID(context.Context) (string, error) {
 	return "test-session", nil
 }
 
-type notificationDeliveryStub struct{}
-
-func (notificationDeliveryStub) ValidateNotificationDelivery(
-	_ context.Context,
-	req *backgroundtask.NotificationDeliveryValidation,
-) error {
-	if req == nil || !req.OutboxAvailable ||
-		req.TargetKind != backgroundtask.SessionInboxNotificationKind {
-		return errors.New("invalid notification delivery")
-	}
-	return nil
-}
-
-var testNotifications backgroundtask.NotificationDeliveryRuntime = notificationDeliveryStub{}
-
 type outputRuntimeStub struct {
 	reportErr error
 }
@@ -107,7 +92,7 @@ func mustLocalRunner(
 	return runner
 }
 
-func TestManagedExecuteRequiresNotificationDelivery(t *testing.T) {
+func TestManagedExecuteAcceptsBackgroundRunner(t *testing.T) {
 	manager := newTestManager(context.Background())
 	defer manager.Close(context.Background())
 	_, err := New(context.Background(), &MiddlewareConfig{
@@ -116,7 +101,7 @@ func TestManagedExecuteRequiresNotificationDelivery(t *testing.T) {
 			Runner: mustLocalRunner(t, manager),
 		},
 	})
-	require.ErrorContains(t, err, "notification delivery is required")
+	require.NoError(t, err)
 }
 
 func TestManagedExecutePromptPreservesCompletionNotification(t *testing.T) {
@@ -149,7 +134,7 @@ func waitTerminalTask(t *testing.T, manager *backgroundtask.Manager) *background
 		deliveries, err := outbox.Receive(
 			context.Background(),
 			&backgroundtask.ReceiveNotificationsRequest{
-				ConsumerID: "filesystem-test", Limit: 10, VisibilityTime: time.Millisecond,
+				Limit: 10, LeaseDuration: time.Millisecond,
 			},
 		)
 		require.NoError(t, err)
@@ -195,10 +180,9 @@ func TestManagedExecuteTool_WritesOutputFile(t *testing.T) {
 		Backend: backend,
 		Shell:   &mockShellBackend{resp: &filesystem.ExecuteResponse{Output: "the output"}},
 		Background: &BackgroundConfig{
-			Runner:        mustLocalRunner(t, mgr),
-			Notifications: testNotifications,
-			OutputStore:   backend,
-			OutputDir:     "/tasks",
+			Runner:      mustLocalRunner(t, mgr),
+			OutputStore: backend,
+			OutputDir:   "/tasks",
 		},
 		notificationSessionID: testNotificationSessionID,
 	})
@@ -261,7 +245,7 @@ func TestManagedExecuteTool_Foreground(t *testing.T) {
 
 	tools, err := getFilesystemTools(context.Background(), &MiddlewareConfig{
 		Shell:                 &mockShellBackend{resp: &filesystem.ExecuteResponse{Output: "ok"}},
-		Background:            &BackgroundConfig{Runner: mustLocalRunner(t, mgr), Notifications: testNotifications},
+		Background:            &BackgroundConfig{Runner: mustLocalRunner(t, mgr)},
 		notificationSessionID: testNotificationSessionID,
 	})
 	require.NoError(t, err)
@@ -298,10 +282,9 @@ func TestManagedExecuteTool_Background(t *testing.T) {
 		Backend: backend,
 		Shell:   &gatedShell{release: release, out: "done"},
 		Background: &BackgroundConfig{
-			Runner:        mustLocalRunner(t, mgr),
-			Notifications: testNotifications,
-			OutputStore:   backend,
-			OutputDir:     "/tasks",
+			Runner:      mustLocalRunner(t, mgr),
+			OutputStore: backend,
+			OutputDir:   "/tasks",
 		},
 		notificationSessionID: testNotificationSessionID,
 	})
@@ -340,7 +323,6 @@ func TestManagedExecuteTool_TimeoutMovesToBackground(t *testing.T) {
 					return true
 				}
 			}),
-			Notifications: testNotifications,
 		},
 		notificationSessionID: testNotificationSessionID,
 	})
@@ -368,7 +350,7 @@ func TestManagedExecuteTool_TimeoutKills(t *testing.T) {
 
 	tools, err := getFilesystemTools(context.Background(), &MiddlewareConfig{
 		Shell:                 &slowShell{delay: time.Second, out: "never"},
-		Background:            &BackgroundConfig{Runner: mustLocalRunner(t, mgr), Notifications: testNotifications},
+		Background:            &BackgroundConfig{Runner: mustLocalRunner(t, mgr)},
 		notificationSessionID: testNotificationSessionID,
 	})
 	require.NoError(t, err)

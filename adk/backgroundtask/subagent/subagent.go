@@ -630,8 +630,6 @@ func Submit(ctx context.Context, manager *backgroundtask.Manager, req *SubmitReq
 	return manager.Submit(ctx, backgroundtask.Spec{
 		ID: id, ExecutorKey: ExecutorKey, Kind: "subagent", Payload: data,
 		Description: req.Description, SessionID: req.SessionID,
-		Notify: &backgroundtask.NotificationTarget{
-			Kind: backgroundtask.SessionInboxNotificationKind, TargetID: req.SessionID,
-		},
+		NotifySession: true,
 	})
 }

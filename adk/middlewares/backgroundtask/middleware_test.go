@@ -34,20 +34,6 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
-type notificationDeliveryStub struct{}
-
-func (notificationDeliveryStub) ValidateNotificationDelivery(
-	_ context.Context,
-	req *bgtask.NotificationDeliveryValidation,
-) error {
-	if req == nil || !req.OutboxAvailable ||
-		req.TargetKind != bgtask.SessionInboxNotificationKind {
-		return errors.New("invalid notification delivery")
-	}
-	return nil
-}
-
-var testNotifications bgtask.NotificationDeliveryRuntime = notificationDeliveryStub{}
 var managerExecutors sync.Map
 
 func newBackgroundManager(ctx context.Context, config *bgtask.Config) *bgtask.Manager {
@@ -192,7 +178,7 @@ func findTool(t *testing.T, tools []tool.BaseTool, name string) tool.InvokableTo
 
 func injectedTools(t *testing.T, m *bgtask.Manager) []tool.BaseTool {
 	t.Helper()
-	mw, err := New(context.Background(), &Config{Manager: m, Notifications: testNotifications})
+	mw, err := New(context.Background(), &Config{Manager: m})
 	require.NoError(t, err)
 	_, runCtx, err := mw.BeforeAgent(context.Background(), &adk.ChatModelAgentContext[*schema.Message]{})
 	require.NoError(t, err)
@@ -204,14 +190,11 @@ func TestNew_NilManager(t *testing.T) {
 	assert.Error(t, err)
 }
 
-func TestNew_RequiresNotificationDelivery(t *testing.T) {
+func TestNew_WithManager(t *testing.T) {
 	mgr := newBackgroundManager(context.Background(), nil)
 	defer closeWithTimeout(mgr)
 
 	_, err := New(context.Background(), &Config{Manager: mgr})
-	require.ErrorContains(t, err, "notification delivery is required")
-
-	_, err = New(context.Background(), &Config{Manager: mgr, Notifications: testNotifications})
 	require.NoError(t, err)
 }
 
@@ -233,7 +216,7 @@ func TestMiddleware_ToolConfig_NameOverrideAndDisable(t *testing.T) {
 
 	customDesc := "custom output desc"
 	mw, err := New(context.Background(), &Config{
-		Manager: mgr, Notifications: testNotifications,
+		Manager:              mgr,
 		TaskOutputToolConfig: &ToolConfig{Name: "get_output", Desc: &customDesc},
 		TaskStopToolConfig:   &ToolConfig{Disable: true},
 	})
@@ -268,7 +251,7 @@ func TestMiddleware_InjectsInstruction(t *testing.T) {
 	mgr := newBackgroundManager(context.Background(), &bgtask.Config{})
 	defer closeWithTimeout(mgr)
 
-	mw, err := New(context.Background(), &Config{Manager: mgr, Notifications: testNotifications})
+	mw, err := New(context.Background(), &Config{Manager: mgr})
 	require.NoError(t, err)
 	_, runCtx, err := mw.BeforeAgent(context.Background(), &adk.ChatModelAgentContext[*schema.Message]{Instruction: "base"})
 	require.NoError(t, err)
@@ -286,7 +269,7 @@ func TestMiddleware_InstructionUsesRenamedTool(t *testing.T) {
 	defer closeWithTimeout(mgr)
 
 	mw, err := New(context.Background(), &Config{
-		Manager: mgr, Notifications: testNotifications,
+		Manager:              mgr,
 		TaskOutputToolConfig: &ToolConfig{Name: "get_task_result"},
 	})
 	require.NoError(t, err)
@@ -305,7 +288,6 @@ func TestMiddleware_InstructionOmitsDisabledTool(t *testing.T) {
 
 	mw, err := New(context.Background(), &Config{
 		Manager:            mgr,
-		Notifications:      testNotifications,
 		TaskStopToolConfig: &ToolConfig{Disable: true},
 	})
 	require.NoError(t, err)
@@ -322,7 +304,7 @@ func TestMiddleware_InstructionEmptyWhenAllDisabled(t *testing.T) {
 	defer closeWithTimeout(mgr)
 
 	mw, err := New(context.Background(), &Config{
-		Manager: mgr, Notifications: testNotifications,
+		Manager:              mgr,
 		TaskOutputToolConfig: &ToolConfig{Disable: true},
 		TaskStopToolConfig:   &ToolConfig{Disable: true},
 	})

@@ -399,9 +399,7 @@ func managedRunInput(
 		OutputFile:      writer.path,
 		RunInBackground: input.RunInBackground,
 		SessionID:       sessionID,
-		Notify: &backgroundtask.NotificationTarget{
-			Kind: backgroundtask.SessionInboxNotificationKind, TargetID: sessionID,
-		},
+		NotifySession:   true,
 	}
 	// A positive timeout overrides the Manager's default foreground timeout for
 	// this command. When the deadline expires, the Manager's policy decides

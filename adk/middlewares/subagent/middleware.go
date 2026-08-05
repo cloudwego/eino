@@ -79,9 +79,6 @@ type TypedBackgroundConfig[M adk.MessageType] struct {
 	// TranscriptFormat formats one materialized sub-agent message for both local
 	// output persistence and durable task_output session views.
 	TranscriptFormat TranscriptFormat[M]
-	// Notifications is required because the model-facing background API promises
-	// completion notification.
-	Notifications backgroundtask.NotificationDeliveryRuntime
 }
 
 type LocalBackgroundConfig = TypedLocalBackgroundConfig[*schema.Message]
@@ -299,15 +296,8 @@ func validate[M adk.MessageType](ctx context.Context, c *TypedConfig[M]) error {
 		if (c.Background.Local == nil) == (c.Background.Durable == nil) {
 			return fmt.Errorf("subagent: exactly one of Background.Local or Background.Durable is required")
 		}
-		if c.Background.Notifications == nil {
-			return fmt.Errorf("subagent: background notification delivery is required")
-		}
-		var manager *backgroundtask.Manager
 		if c.Background.Local != nil && c.Background.Local.Runner == nil {
 			return fmt.Errorf("subagent: local background Runner is required")
-		}
-		if c.Background.Local != nil {
-			manager = c.Background.Local.Runner.Manager()
 		}
 		if c.Background.Durable != nil {
 			if c.Background.Durable.Manager == nil ||
@@ -317,17 +307,11 @@ func validate[M adk.MessageType](ctx context.Context, c *TypedConfig[M]) error {
 					"subagent: durable background Manager, executor registry, and Executor are required",
 				)
 			}
-			manager = c.Background.Durable.Manager
 			for _, agent := range c.SubAgents {
 				if _, ok := agent.(adk.TypedResumableAgent[M]); !ok {
 					return fmt.Errorf("subagent: durable agent %q is not resumable", agent.Name(ctx))
 				}
 			}
-		}
-		if err := manager.ValidateNotificationDelivery(
-			ctx, c.Background.Notifications, backgroundtask.SessionInboxNotificationKind,
-		); err != nil {
-			return fmt.Errorf("subagent: background notification delivery: %w", err)
 		}
 	}
 
