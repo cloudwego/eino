@@ -22,6 +22,10 @@
 // is deliberately non-generic so one instance can serve heterogeneous executor
 // domains under one task-ID space.
 //
+// TaskEvent is append-only progress. Spec.OutputFile and Task.OutputFileErr
+// describe an optional derived transcript projection; transcript failure never
+// changes authoritative lifecycle status or replaces terminal ResultData.
+//
 // The task, event, outbox, and session-activation SPIs are provisional.
 // Promotion requires conformance against external multi-process providers.
 package backgroundtask
@@ -45,6 +49,7 @@ const (
 	// StatusWaitingInput indicates execution is checkpointed pending external input.
 	StatusWaitingInput Status = "waiting_input"
 	// StatusSuspended indicates execution is checkpointed for a planned pause.
+	// It is not claimable until Manager.ReleaseSuspension returns it to pending.
 	StatusSuspended Status = "suspended"
 	// StatusCompleted indicates the task finished successfully.
 	StatusCompleted Status = "completed"
@@ -54,7 +59,9 @@ const (
 	StatusCanceled Status = "canceled"
 )
 
-// Task represents a single managed execution record.
+// Task represents one independently owned snapshot. Providers and callers must
+// deep-copy mutable slices and time pointers when snapshots cross their
+// boundary; mutating a returned Task must never alter persisted state.
 type Task struct {
 	// Spec is the immutable serialized intent for this task.
 	Spec Spec
@@ -162,7 +169,9 @@ type Manager struct {
 	idGen          IDGenerator
 }
 
-// New creates a new Manager.
+// New creates a Manager. A nil Config installs the in-memory reference stores
+// and a new executor registry. The context is reserved for constructor
+// symmetry; Manager does not retain it or derive task lifetime from it.
 func New(_ context.Context, conf *Config) *Manager {
 	defaults := NewInMemoryStore(nil)
 	m := &Manager{
@@ -198,7 +207,9 @@ func New(_ context.Context, conf *Config) *Manager {
 // have a deadline or Close returns ErrCloseDeadlineRequired without closing the
 // Manager. Drainable attempts receive ControlDrain and may suspend or yield
 // according to their executor contract; non-drainable attempts may finish until
-// the deadline and are then durably canceled.
+// the deadline and are then durably canceled. Deadline expiry cannot force an
+// uncooperative executor to return; Manager remains closed to new submissions,
+// while read and cancellation methods remain available.
 func (m *Manager) Close(ctx context.Context, options ...CloseOption) error {
 	closeConfig := closeOptions{}
 	for _, option := range options {

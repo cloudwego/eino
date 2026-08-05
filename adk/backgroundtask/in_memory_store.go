@@ -30,8 +30,11 @@ import (
 
 // InMemoryStoreConfig configures the in-memory reference task provider.
 type InMemoryStoreConfig struct {
+	// ActiveAttemptTimeout defaults to 30 seconds.
 	ActiveAttemptTimeout time.Duration
-	MaxValueBytes        int64
+	// MaxValueBytes defaults to 1 MiB and bounds each checkpoint, successful
+	// result, resume input, and task-event data value.
+	MaxValueBytes int64
 }
 
 type memoryOutboxItem struct {
@@ -102,6 +105,7 @@ func (s *InMemoryStore) signalLocked() {
 	s.notify = make(chan struct{})
 }
 
+// Create inserts one pending task and returns an independent snapshot.
 func (s *InMemoryStore) Create(_ context.Context, req *CreateTaskRequest) (*Task, error) {
 	if req == nil {
 		return nil, errors.New("backgroundtask: create request is required")
@@ -131,6 +135,7 @@ func (s *InMemoryStore) Create(_ context.Context, req *CreateTaskRequest) (*Task
 	return cloneTask(task), nil
 }
 
+// Get returns an independent authoritative snapshot and resolves expired leases.
 func (s *InMemoryStore) Get(_ context.Context, taskID string) (*Task, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -142,6 +147,7 @@ func (s *InMemoryStore) Get(_ context.Context, taskID string) (*Task, error) {
 	return cloneTask(t), nil
 }
 
+// ListPending returns task-ID-ordered pending snapshots.
 func (s *InMemoryStore) ListPending(_ context.Context, req *ListPendingRequest) (*ListPendingResult, error) {
 	if req == nil {
 		return nil, errors.New("backgroundtask: list pending request is required")
@@ -155,6 +161,7 @@ func (s *InMemoryStore) ListPending(_ context.Context, req *ListPendingRequest) 
 	return &ListPendingResult{Tasks: tasks, NextCursor: nextCursor}, nil
 }
 
+// ListSuspended returns task-ID-ordered suspended snapshots.
 func (s *InMemoryStore) ListSuspended(
 	_ context.Context,
 	req *ListSuspendedRequest,
@@ -201,13 +208,15 @@ func (s *InMemoryStore) listByStatus(
 	if cursor != "" {
 		decoded, err := base64.RawURLEncoding.DecodeString(cursor)
 		if err != nil {
-			return nil, "", fmt.Errorf("backgroundtask: invalid %s-task cursor", name)
+			return nil, "", fmt.Errorf("%w: %s-task cursor", ErrInvalidCursor, name)
 		}
 		lastID := string(decoded)
 		start = sort.Search(len(ids), func(i int) bool { return ids[i] > lastID })
 	}
-	if limit <= 0 || limit > 1000 {
+	if limit <= 0 {
 		limit = 100
+	} else if limit > 1000 {
+		limit = 1000
 	}
 	var tasks []*Task
 	var nextCursor string
@@ -229,6 +238,7 @@ func (s *InMemoryStore) listByStatus(
 	return tasks, nextCursor, nil
 }
 
+// Start claims a pending task and creates a fenced active attempt.
 func (s *InMemoryStore) Start(_ context.Context, req *StartTaskRequest) (*Task, error) {
 	if req == nil {
 		return nil, errors.New("backgroundtask: start request is required")
@@ -254,6 +264,7 @@ func (s *InMemoryStore) Start(_ context.Context, req *StartTaskRequest) (*Task, 
 	return cloneTask(t), nil
 }
 
+// Heartbeat renews the current active attempt lease.
 func (s *InMemoryStore) Heartbeat(_ context.Context, req *HeartbeatRequest) (*Task, error) {
 	if req == nil {
 		return nil, errors.New("backgroundtask: heartbeat request is required")
@@ -270,6 +281,7 @@ func (s *InMemoryStore) Heartbeat(_ context.Context, req *HeartbeatRequest) (*Ta
 	return cloneTask(t), nil
 }
 
+// AppendTaskEvent fences by attempt before task-wide EventID deduplication.
 func (s *InMemoryStore) AppendTaskEvent(
 	_ context.Context,
 	req *AppendTaskEventRequest,
@@ -316,6 +328,7 @@ func (s *InMemoryStore) AppendTaskEvent(
 	}, nil
 }
 
+// ListTaskEvents returns one snapshot-stable append-order page.
 func (s *InMemoryStore) ListTaskEvents(
 	_ context.Context,
 	req *ListTaskEventsRequest,
@@ -411,6 +424,7 @@ func decodeTaskEventCursor(value string) (taskEventCursor, error) {
 	return cursor, nil
 }
 
+// ReportTranscriptFailure records the first derived-transcript error.
 func (s *InMemoryStore) ReportTranscriptFailure(_ context.Context, req *ReportTranscriptFailureRequest) (*Task, error) {
 	if req == nil {
 		return nil, errors.New("backgroundtask: report transcript failure request is required")
@@ -433,6 +447,7 @@ func (s *InMemoryStore) ReportTranscriptFailure(_ context.Context, req *ReportTr
 	return cloneTask(t), nil
 }
 
+// Complete commits successful terminal output.
 func (s *InMemoryStore) Complete(_ context.Context, req *CompleteTaskRequest) (*Task, error) {
 	if req == nil {
 		return nil, errors.New("backgroundtask: complete request is required")
@@ -456,6 +471,7 @@ func (s *InMemoryStore) Complete(_ context.Context, req *CompleteTaskRequest) (*
 	return cloneTask(t), nil
 }
 
+// Fail commits terminal failure.
 func (s *InMemoryStore) Fail(_ context.Context, req *FailTaskRequest) (*Task, error) {
 	if req == nil {
 		return nil, errors.New("backgroundtask: fail request is required")
@@ -476,6 +492,7 @@ func (s *InMemoryStore) Fail(_ context.Context, req *FailTaskRequest) (*Task, er
 	return cloneTask(t), nil
 }
 
+// WaitInput commits a checkpointed wait for external input.
 func (s *InMemoryStore) WaitInput(_ context.Context, req *WaitInputTaskRequest) (*Task, error) {
 	if req == nil {
 		return nil, errors.New("backgroundtask: wait input request is required")
@@ -502,6 +519,7 @@ func (s *InMemoryStore) WaitInput(_ context.Context, req *WaitInputTaskRequest) 
 	return cloneTask(t), nil
 }
 
+// Suspend commits a checkpointed planned pause.
 func (s *InMemoryStore) Suspend(_ context.Context, req *SuspendTaskRequest) (*Task, error) {
 	if req == nil {
 		return nil, errors.New("backgroundtask: suspend request is required")
@@ -527,6 +545,7 @@ func (s *InMemoryStore) Suspend(_ context.Context, req *SuspendTaskRequest) (*Ta
 	return cloneTask(t), nil
 }
 
+// Yield relinquishes an attempt and returns the task to pending.
 func (s *InMemoryStore) Yield(_ context.Context, req *YieldTaskRequest) (*Task, error) {
 	if req == nil {
 		return nil, errors.New("backgroundtask: yield request is required")
@@ -551,6 +570,7 @@ func (s *InMemoryStore) Yield(_ context.Context, req *YieldTaskRequest) (*Task, 
 	return cloneTask(t), nil
 }
 
+// AckCancel commits terminal acknowledgement of durable cancellation intent.
 func (s *InMemoryStore) AckCancel(_ context.Context, req *AckCancelRequest) (*Task, error) {
 	if req == nil {
 		return nil, errors.New("backgroundtask: acknowledge cancellation request is required")
@@ -582,6 +602,7 @@ func (s *InMemoryStore) AckCancel(_ context.Context, req *AckCancelRequest) (*Ta
 	return cloneTask(t), nil
 }
 
+// RequestCancel records first-write cancellation intent.
 func (s *InMemoryStore) RequestCancel(_ context.Context, req *RequestCancelRequest) (*Task, error) {
 	if req == nil {
 		return nil, errors.New("backgroundtask: cancel request is required")
@@ -627,6 +648,7 @@ func (s *InMemoryStore) RequestCancel(_ context.Context, req *RequestCancelReque
 	return cloneTask(t), nil
 }
 
+// Resume stores one opaque input and returns a waiting task to pending.
 func (s *InMemoryStore) Resume(_ context.Context, req *ResumeRequest) (*Task, error) {
 	if req == nil {
 		return nil, errors.New("backgroundtask: resume request is required")
@@ -651,6 +673,7 @@ func (s *InMemoryStore) Resume(_ context.Context, req *ResumeRequest) (*Task, er
 	return cloneTask(t), nil
 }
 
+// ReleaseSuspension returns a suspended task to pending.
 func (s *InMemoryStore) ReleaseSuspension(_ context.Context, req *ReleaseSuspensionRequest) (*Task, error) {
 	if req == nil {
 		return nil, errors.New("backgroundtask: release request is required")
@@ -673,6 +696,7 @@ func (s *InMemoryStore) ReleaseSuspension(_ context.Context, req *ReleaseSuspens
 
 // WaitForTaskVersion blocks until the stored task has a Version greater than
 // req.AfterVersion.
+// WaitForTaskVersion waits until Task.Version exceeds AfterVersion.
 func (s *InMemoryStore) WaitForTaskVersion(ctx context.Context, req *WaitForTaskVersionRequest) (*Task, error) {
 	if req == nil {
 		return nil, errors.New("backgroundtask: wait for task version request is required")
@@ -700,13 +724,16 @@ func (s *InMemoryStore) WaitForTaskVersion(ctx context.Context, req *WaitForTask
 	}
 }
 
+// Receive leases visible notifications with fresh opaque receipts.
 func (s *InMemoryStore) Receive(_ context.Context, req *ReceiveNotificationsRequest) (*ReceiveNotificationsResult, error) {
 	if req == nil || req.LeaseDuration <= 0 {
 		return nil, errors.New("backgroundtask: positive lease duration is required")
 	}
 	limit := req.Limit
-	if limit <= 0 || limit > 1000 {
+	if limit <= 0 {
 		limit = 100
+	} else if limit > 1000 {
+		limit = 1000
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -729,6 +756,7 @@ func (s *InMemoryStore) Receive(_ context.Context, req *ReceiveNotificationsRequ
 	return result, nil
 }
 
+// Ack removes the notification authorized by a current unexpired receipt.
 func (s *InMemoryStore) Ack(_ context.Context, receipt NotificationReceipt) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

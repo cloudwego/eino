@@ -57,15 +57,6 @@ const (
 	noMatchesFound = "No matches found"
 )
 
-// RecoverableShell is the durable logical-command contract used by Background.
-type RecoverableShell = backgroundshell.RecoverableShell
-
-// StartCommandRequest describes the first attempt of a recoverable command.
-type StartCommandRequest = backgroundshell.StartCommandRequest
-
-// RecoverCommandRequest describes a later attempt of a recoverable command.
-type RecoverCommandRequest = backgroundshell.RecoverCommandRequest
-
 // ToolConfig configures a filesystem tool
 type ToolConfig struct {
 	// Name overrides the tool name used in tool registration
@@ -98,49 +89,40 @@ type ExecuteToolConfig struct {
 	ToolConfig
 }
 
-// BackgroundConfig enables background-task execution for the execute tool.
-//
-// When set, the execute tool gains a run_in_background field and routes runs
-// through the shared Manager, so background and auto-background runs are tracked
-// and visible to the task_output/task_stop control tools. With a StreamingShell
-// backend the foreground phase still streams in real time. An explicit background
-// launch briefly previews startup output before its stream is capped with a notice;
-// an auto-background transition caps it immediately. The remaining output is
-// collected into the task result.
+// BackgroundConfig selects exactly one background execution mode.
 type BackgroundConfig struct {
-	// Runner is the shared process-local background runner. Required (a nil Runner
-	// is the same as no BackgroundConfig). Its Manager may be shared with other middlewares (e.g.
-	// subagent) for a unified task-ID space; wire the backgroundtask control
-	// middleware once, bound to the same Manager.
-	Runner *backgroundlocal.Runner
-	// Manager is required for RecoverableShell. When omitted and Runner is set,
-	// Runner.Manager is used for backward compatibility.
-	Manager *backgroundtask.Manager
-	// Executors is the registry configured on Manager. It is required for
-	// RecoverableShell executor installation.
-	Executors *backgroundtask.ExecutorRegistry
-	// ToolRegistry may be shared with other managed background tools on the same
-	// Manager. A private registry is created when omitted.
-	ToolRegistry *backgroundtool.Registry
-	// OutputMaterializer enables an EventID-idempotent derived output file for
-	// RecoverableShell. Without it, no OutputFile is advertised.
-	OutputMaterializer backgroundtool.OutputMaterializer
-	// ForegroundTimeoutMs and ShouldAutoBackground configure RecoverableShell.
-	ForegroundTimeoutMs  *int
-	ShouldAutoBackground func(context.Context, *backgroundtask.Task) bool
+	Local       *LocalBackgroundConfig
+	Recoverable *RecoverableBackgroundConfig
+}
 
-	// OutputStore and OutputDir, when both set, give every managed run an output
-	// file at OutputDir/<id>.output: streaming runs append their chunks to it as
-	// they arrive (interim output), buffered runs append their result on completion.
-	// Path and reliability are reported through namespaced durable task updates.
-	// OutputStore is a filesystem.AppendOpener (filesystem.InMemoryBackend
-	// implements it); supply your own to direct output elsewhere. When either is
-	// unset, runs have no output file.
+// LocalBackgroundConfig configures process-local background execution for the
+// top-level Shell or StreamingShell.
+type LocalBackgroundConfig struct {
+	// Runner owns task lifecycle and process-local closures.
+	Runner *backgroundlocal.Runner
+	// OutputStore and OutputDir optionally materialize managed output.
 	OutputStore filesystem.AppendOpener
 	OutputDir   string
 }
 
-// Config is the configuration for the filesystem middleware
+// RecoverableBackgroundConfig configures cross-worker shell execution. Shell
+// owns durable command state keyed by task ID.
+type RecoverableBackgroundConfig struct {
+	Shell backgroundshell.RecoverableShell
+	// Manager and Executors must be the same authorities used by the host worker.
+	Manager            *backgroundtask.Manager
+	Executors          *backgroundtask.ExecutorRegistry
+	ToolRegistry       *backgroundtool.Registry
+	OutputMaterializer backgroundtool.OutputMaterializer
+	// ForegroundTimeoutMs is in milliseconds. ShouldAutoBackground may be called
+	// concurrently and must not mutate the task.
+	ForegroundTimeoutMs  *int
+	ShouldAutoBackground func(context.Context, *backgroundtask.Task) bool
+}
+
+// Config is the legacy configuration for the filesystem middleware.
+//
+// Deprecated: use MiddlewareConfig with New or NewTyped.
 type Config struct {
 	// Backend provides filesystem operations used by tools and offloading.
 	// If set, filesystem tools (read_file, write_file, edit_file, glob, grep) will be registered.
@@ -157,10 +139,6 @@ type Config struct {
 	// At least one of Backend, Shell, or StreamingShell must be set.
 	// Mutually exclusive with Shell.
 	StreamingShell filesystem.StreamingShell
-	// RecoverableShell provides task-ID-keyed command start and recovery.
-	// It is mutually exclusive with Shell and StreamingShell and requires Background.
-	RecoverableShell backgroundshell.RecoverableShell
-
 	// Background configures background-task execution for the execute tool. When
 	// nil, execute runs only foreground (blocking) and is not tracked. See
 	// BackgroundConfig.
@@ -234,25 +212,14 @@ func (c *Config) Validate() error {
 	if c == nil {
 		return errors.New("config should not be nil")
 	}
-	if c.Backend == nil && c.Shell == nil && c.StreamingShell == nil && c.RecoverableShell == nil {
+	if c.Backend == nil && c.Shell == nil && c.StreamingShell == nil &&
+		recoverableBackground(c.Background) == nil {
 		return errors.New("at least one of backend, shell, or streaming shell should be set")
 	}
 	if c.Shell != nil && c.StreamingShell != nil {
 		return errors.New("shell and streaming shell should not be both set")
 	}
-	if c.RecoverableShell != nil && (c.Shell != nil || c.StreamingShell != nil) {
-		return errors.New("shell, streaming shell, and recoverable shell are mutually exclusive")
-	}
-	if err := validateBackgroundManager(c.Background); err != nil {
-		return err
-	}
-	if c.RecoverableShell != nil && backgroundManager(c.Background) == nil {
-		return errors.New("recoverable shell requires a background Manager")
-	}
-	if c.RecoverableShell != nil && c.Background.Executors == nil {
-		return errors.New("recoverable shell requires a background executor registry")
-	}
-	return nil
+	return validateBackgroundConfig(c.Background, c.Shell, c.StreamingShell)
 }
 
 // NewMiddleware constructs and returns the filesystem middleware.
@@ -270,7 +237,6 @@ func NewMiddleware(ctx context.Context, config *Config) (adk.AgentMiddleware, er
 		Backend:                 config.Backend,
 		Shell:                   config.Shell,
 		StreamingShell:          config.StreamingShell,
-		RecoverableShell:        config.RecoverableShell,
 		Background:              config.Background,
 		LsToolConfig:            config.LsToolConfig,
 		ReadFileToolConfig:      config.ReadFileToolConfig,
@@ -338,9 +304,6 @@ type MiddlewareConfig struct {
 	// At least one of Backend, Shell, or StreamingShell must be set.
 	// Mutually exclusive with Shell.
 	StreamingShell filesystem.StreamingShell
-	// RecoverableShell provides durable logical-command recovery.
-	RecoverableShell backgroundshell.RecoverableShell
-
 	// Background configures background-task execution for the execute tool. When
 	// nil, execute runs only foreground (blocking) and is not tracked. See
 	// BackgroundConfig.
@@ -425,44 +388,49 @@ func (c *MiddlewareConfig) Validate() error {
 	if c == nil {
 		return errors.New("config should not be nil")
 	}
-	if c.Backend == nil && c.Shell == nil && c.StreamingShell == nil && c.RecoverableShell == nil {
+	if c.Backend == nil && c.Shell == nil && c.StreamingShell == nil &&
+		recoverableBackground(c.Background) == nil {
 		return errors.New("at least one of backend, shell, or streaming shell should be set")
 	}
 	if c.Shell != nil && c.StreamingShell != nil {
 		return errors.New("shell and streaming shell should not be both set")
 	}
-	if c.RecoverableShell != nil && (c.Shell != nil || c.StreamingShell != nil) {
-		return errors.New("shell, streaming shell, and recoverable shell are mutually exclusive")
-	}
-	if err := validateBackgroundManager(c.Background); err != nil {
-		return err
-	}
-	if c.RecoverableShell != nil && backgroundManager(c.Background) == nil {
-		return errors.New("recoverable shell requires a background Manager")
-	}
-	if c.RecoverableShell != nil && c.Background.Executors == nil {
-		return errors.New("recoverable shell requires a background executor registry")
-	}
-	return nil
+	return validateBackgroundConfig(c.Background, c.Shell, c.StreamingShell)
 }
 
-func backgroundManager(config *BackgroundConfig) *backgroundtask.Manager {
+func recoverableBackground(config *BackgroundConfig) *RecoverableBackgroundConfig {
 	if config == nil {
 		return nil
 	}
-	if config.Manager != nil {
-		return config.Manager
-	}
-	if config.Runner != nil {
-		return config.Runner.Manager()
-	}
-	return nil
+	return config.Recoverable
 }
 
-func validateBackgroundManager(config *BackgroundConfig) error {
-	if config != nil && config.Manager != nil && config.Runner != nil &&
-		config.Manager != config.Runner.Manager() {
-		return errors.New("filesystem: background Manager must match Runner.Manager")
+func validateBackgroundConfig(
+	config *BackgroundConfig,
+	shell filesystem.Shell,
+	streamingShell filesystem.StreamingShell,
+) error {
+	if config == nil {
+		return nil
+	}
+	if (config.Local == nil) == (config.Recoverable == nil) {
+		return errors.New("filesystem: background requires exactly one of Local or Recoverable")
+	}
+	if config.Local != nil {
+		if config.Local.Runner == nil {
+			return errors.New("filesystem: local background Runner is required")
+		}
+		if shell == nil && streamingShell == nil {
+			return errors.New("filesystem: local background requires Shell or StreamingShell")
+		}
+		return nil
+	}
+	recoverable := config.Recoverable
+	if shell != nil || streamingShell != nil {
+		return errors.New("filesystem: foreground and recoverable background shells are mutually exclusive")
+	}
+	if recoverable.Shell == nil || recoverable.Manager == nil || recoverable.Executors == nil {
+		return errors.New("filesystem: recoverable background Shell, Manager, and Executors are required")
 	}
 	return nil
 }
@@ -665,7 +633,7 @@ func getFilesystemTools(ctx context.Context, middlewareConfig *MiddlewareConfig)
 	}
 
 	if middlewareConfig.StreamingShell != nil || middlewareConfig.Shell != nil ||
-		middlewareConfig.RecoverableShell != nil {
+		recoverableBackground(middlewareConfig.Background) != nil {
 		executeTool, err := createExecuteTool(ctx, middlewareConfig)
 		if err != nil {
 			return nil, err
@@ -697,18 +665,18 @@ func createExecuteTool(ctx context.Context, middlewareConfig *MiddlewareConfig) 
 		// background/auto-background runs are tracked and visible to the
 		// task_output/task_stop control tools. Without a Manager the tool is
 		// command-only with no background support.
-		if middlewareConfig.RecoverableShell != nil {
+		if recoverableBackground(middlewareConfig.Background) != nil {
 			return newRecoverableExecuteTool(ctx, middlewareConfig, executeConfig, desc)
 		}
-		if middlewareConfig.Background != nil && middlewareConfig.Background.Runner != nil {
+		if middlewareConfig.Background != nil && middlewareConfig.Background.Local != nil {
+			local := middlewareConfig.Background.Local
 			return newManagedExecuteTool(
-				middlewareConfig.Background.Runner,
+				local.Runner,
 				middlewareConfig.Shell,
 				middlewareConfig.StreamingShell,
 				middlewareConfig.notificationSessionID,
 				outputSink{
-					store:     middlewareConfig.Background.OutputStore,
-					outputDir: middlewareConfig.Background.OutputDir,
+					store: local.OutputStore, outputDir: local.OutputDir,
 				},
 				toolDefinition{name: executeConfig.Name, desc: desc},
 			)
@@ -726,11 +694,8 @@ func newRecoverableExecuteTool(
 	executeConfig *ExecuteToolConfig,
 	description string,
 ) (tool.BaseTool, error) {
-	background := middlewareConfig.Background
-	manager := backgroundManager(background)
-	if manager == nil {
-		return nil, errors.New("filesystem: recoverable shell requires a background Manager")
-	}
+	background := recoverableBackground(middlewareConfig.Background)
+	manager := background.Manager
 	toolName := selectToolName(executeConfig.Name, ToolNameExecute)
 	desc, err := selectToolDesc(
 		description, ManagedExecuteToolDesc, ManagedExecuteToolDescChinese,
@@ -756,11 +721,11 @@ func newRecoverableExecuteTool(
 				},
 				"timeout": {
 					Type: schema.Integer,
-					Desc: "Optional foreground timeout in milliseconds",
+					Desc: "Optional foreground timeout in milliseconds; ignored when run_in_background is true",
 				},
 			}),
 		},
-		Shell: middlewareConfig.RecoverableShell, Materializer: background.OutputMaterializer,
+		Shell: background.Shell, Materializer: background.OutputMaterializer,
 	})
 	if err != nil {
 		return nil, err
@@ -1274,7 +1239,7 @@ type executeManagedArgs struct {
 	// default applies. Ignored when run_in_background is true. What happens at the
 	// deadline (move to background vs. stop) is decided by the Manager's
 	// ShouldAutoBackground policy and is intentionally not surfaced to the model.
-	TimeoutMS int `json:"timeout,omitempty" jsonschema_description:"Optional timeout in milliseconds. The maximum time to wait for the command. Omit to use the default."`
+	TimeoutMS int `json:"timeout,omitempty" jsonschema_description:"Optional foreground wait in milliseconds. Ignored when run_in_background is true. At expiry, host policy either detaches the command or stops it. Omit to use the configured default."`
 }
 
 func newExecuteTool(sb filesystem.Shell, name string, desc string) (tool.BaseTool, error) {

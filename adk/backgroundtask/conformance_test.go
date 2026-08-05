@@ -350,6 +350,41 @@ func TestManagerWaitingInputPersistsCheckpointWithoutTerminalResult_BitsUT(t *te
 	assert.Empty(t, waiting.ResultError)
 }
 
+func TestManagerRejectsMixedExecutionResultVariants_BitsUT(t *testing.T) {
+	for name, result := range map[string]*ExecutionResult{
+		"completed checkpoint": {
+			Status: StatusCompleted, Checkpoint: []byte("checkpoint"),
+		},
+		"failed data": {
+			Status: StatusFailed, Data: []byte("data"), Error: "failed",
+		},
+		"canceled data": {
+			Status: StatusCanceled, Data: []byte("data"),
+		},
+		"waiting error": {
+			Status: StatusWaitingInput, Error: "failed",
+		},
+		"suspended data": {
+			Status: StatusSuspended, Data: []byte("data"),
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			executor := &scriptedExecutor{
+				execute: func(context.Context, *Task, ExecutionRuntime) (*ExecutionResult, error) {
+					return result, nil
+				},
+			}
+			store := NewInMemoryStore(nil)
+			manager := managerWithExecutor(t, store, executor, time.Minute)
+			task, err := manager.Submit(context.Background(), validSpec("mixed-result"))
+			require.NoError(t, err)
+
+			err = manager.Execute(context.Background(), task.Spec.ID)
+			require.ErrorIs(t, err, ErrInvalidExecutionResult)
+		})
+	}
+}
+
 func TestManagerErrorDoesNotCreatePendingResume_BitsUT(t *testing.T) {
 	executor := &scriptedExecutor{
 		execute: func(_ context.Context, _ *Task, _ ExecutionRuntime) (*ExecutionResult, error) {

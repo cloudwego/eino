@@ -60,6 +60,10 @@ var (
 // TaskStore persists authoritative task snapshots and semantic lifecycle
 // transitions.
 //
+// Every returned Task and mutable field is independently owned by the caller.
+// ListPending and ListSuspended follow their request ordering, cursor, and limit
+// contracts; malformed cursors return ErrInvalidCursor.
+//
 // RequestCancel on active work keeps StatusRunning, sets CancelRequestedAt and
 // the first-write optional CancelReason, and advances Version. Once
 // cancellation is requested, Heartbeat, Complete, Fail,
@@ -95,6 +99,8 @@ type TaskStore interface {
 // attempts for at least the task lifetime, and not advance Task.Version.
 // ListTaskEvents must keep each cursor on the snapshot captured by its first
 // page and order events by append position, reversed when NewestFirst is true.
+// Event data and result pages are independently owned. Successful events and
+// cursor positions remain readable for at least the lifetime of their task.
 type TaskEventStore interface {
 	AppendTaskEvent(context.Context, *AppendTaskEventRequest) (*AppendTaskEventResult, error)
 	ListTaskEvents(context.Context, *ListTaskEventsRequest) (*ListTaskEventsResult, error)
@@ -119,6 +125,8 @@ func (unavailableTaskEventStore) ListTaskEvents(
 // NotificationOutbox leases lifecycle notifications for dispatch. Ack must
 // accept only the opaque receipt for the notification's current unexpired
 // lease; an expired or superseded receipt must not acknowledge the notification.
+// Receive normalizes limits to default 100 and maximum 1000. Both sides copy
+// receipt bytes, and successful notification records remain until acknowledged.
 type NotificationOutbox interface {
 	Receive(context.Context, *ReceiveNotificationsRequest) (*ReceiveNotificationsResult, error)
 	Ack(context.Context, NotificationReceipt) error

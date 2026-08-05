@@ -98,7 +98,7 @@ func TestManagedExecuteAcceptsBackgroundRunner(t *testing.T) {
 	_, err := New(context.Background(), &MiddlewareConfig{
 		Shell: &mockShellBackend{},
 		Background: &BackgroundConfig{
-			Runner: mustLocalRunner(t, manager),
+			Local: &LocalBackgroundConfig{Runner: mustLocalRunner(t, manager)},
 		},
 	})
 	require.NoError(t, err)
@@ -180,9 +180,9 @@ func TestManagedExecuteTool_WritesOutputFile(t *testing.T) {
 		Backend: backend,
 		Shell:   &mockShellBackend{resp: &filesystem.ExecuteResponse{Output: "the output"}},
 		Background: &BackgroundConfig{
-			Runner:      mustLocalRunner(t, mgr),
-			OutputStore: backend,
-			OutputDir:   "/tasks",
+			Local: &LocalBackgroundConfig{
+				Runner: mustLocalRunner(t, mgr), OutputStore: backend, OutputDir: "/tasks",
+			},
 		},
 		notificationSessionID: testNotificationSessionID,
 	})
@@ -244,8 +244,10 @@ func TestManagedExecuteTool_Foreground(t *testing.T) {
 	}()
 
 	tools, err := getFilesystemTools(context.Background(), &MiddlewareConfig{
-		Shell:                 &mockShellBackend{resp: &filesystem.ExecuteResponse{Output: "ok"}},
-		Background:            &BackgroundConfig{Runner: mustLocalRunner(t, mgr)},
+		Shell: &mockShellBackend{resp: &filesystem.ExecuteResponse{Output: "ok"}},
+		Background: &BackgroundConfig{
+			Local: &LocalBackgroundConfig{Runner: mustLocalRunner(t, mgr)},
+		},
 		notificationSessionID: testNotificationSessionID,
 	})
 	require.NoError(t, err)
@@ -282,9 +284,9 @@ func TestManagedExecuteTool_Background(t *testing.T) {
 		Backend: backend,
 		Shell:   &gatedShell{release: release, out: "done"},
 		Background: &BackgroundConfig{
-			Runner:      mustLocalRunner(t, mgr),
-			OutputStore: backend,
-			OutputDir:   "/tasks",
+			Local: &LocalBackgroundConfig{
+				Runner: mustLocalRunner(t, mgr), OutputStore: backend, OutputDir: "/tasks",
+			},
 		},
 		notificationSessionID: testNotificationSessionID,
 	})
@@ -318,11 +320,13 @@ func TestManagedExecuteTool_TimeoutMovesToBackground(t *testing.T) {
 	tools, err := getFilesystemTools(context.Background(), &MiddlewareConfig{
 		Shell: &slowShell{delay: 200 * time.Millisecond, out: "slow done"},
 		Background: &BackgroundConfig{
-			Runner: mustLocalRunner(t, mgr, func(config *backgroundlocal.Config) {
-				config.ShouldAutoBackground = func(context.Context, *backgroundtask.Task) bool {
-					return true
-				}
-			}),
+			Local: &LocalBackgroundConfig{
+				Runner: mustLocalRunner(t, mgr, func(config *backgroundlocal.Config) {
+					config.ShouldAutoBackground = func(context.Context, *backgroundtask.Task) bool {
+						return true
+					}
+				}),
+			},
 		},
 		notificationSessionID: testNotificationSessionID,
 	})
@@ -349,8 +353,10 @@ func TestManagedExecuteTool_TimeoutKills(t *testing.T) {
 	}()
 
 	tools, err := getFilesystemTools(context.Background(), &MiddlewareConfig{
-		Shell:                 &slowShell{delay: time.Second, out: "never"},
-		Background:            &BackgroundConfig{Runner: mustLocalRunner(t, mgr)},
+		Shell: &slowShell{delay: time.Second, out: "never"},
+		Background: &BackgroundConfig{
+			Local: &LocalBackgroundConfig{Runner: mustLocalRunner(t, mgr)},
+		},
 		notificationSessionID: testNotificationSessionID,
 	})
 	require.NoError(t, err)
@@ -369,7 +375,7 @@ func TestShellPayloadV1AndCommandFromTask(t *testing.T) {
 	}, &bashOutputWriter{}, "test-session")
 	require.NoError(t, err)
 	task := &backgroundtask.Task{Spec: backgroundtask.Spec{
-		Kind: ExecuteTaskType, Payload: input.Payload,
+		Kind: ExecuteTaskKind, Payload: input.Payload,
 	}}
 	assert.Equal(t, "echo hello", CommandFromTask(task))
 

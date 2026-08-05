@@ -33,31 +33,46 @@ const (
 	maxTaskProgressBytes   = 64 << 10
 )
 
-// NewDurableTaskProgressHook returns a task_output progress callback backed by
-// the durable sub-agent's child session.
-func NewDurableTaskProgressHook[M adk.MessageType](
+// DurableTaskProgressReader projects a durable sub-agent's child session for
+// task_output without mutating task lifecycle state.
+type DurableTaskProgressReader[M adk.MessageType] struct {
+	store  adk.SessionEventStore[M]
+	format TranscriptFormat[M]
+}
+
+// NewDurableTaskProgressReader constructs a durable sub-agent progress reader.
+// The store is validated when ReadProgress handles a matching sub-agent task.
+func NewDurableTaskProgressReader[M adk.MessageType](
 	store adk.SessionEventStore[M],
 	format TranscriptFormat[M],
-) func(context.Context, *backgroundtask.Task) (string, error) {
+) (*DurableTaskProgressReader[M], error) {
+	if store == nil {
+		return nil, errors.New("subagent: session store is required to read task progress")
+	}
 	if format == nil {
 		format = defaultTranscriptFormat[M]
 	}
-	return func(ctx context.Context, task *backgroundtask.Task) (string, error) {
-		if task == nil || task.Spec.ExecutorKey != durablesubagent.ExecutorKey ||
-			task.Spec.Kind != TaskTypeSubagent {
-			return "", nil
-		}
-		if store == nil {
-			return "", errors.New("subagent: session store is required to read task progress")
-		}
-		agentName := NameFromTask(task)
-		if agentName == "" {
-			return "", errors.New("subagent: task payload does not contain a valid agent name")
-		}
-		return readDurableTaskProgress(
-			ctx, store, task, agentName, format,
-		)
+	return &DurableTaskProgressReader[M]{store: store, format: format}, nil
+}
+
+// ReadProgress returns a bounded transcript for a matching durable sub-agent
+// task and an empty string for tasks owned by other executors.
+func (r *DurableTaskProgressReader[M]) ReadProgress(
+	ctx context.Context,
+	task *backgroundtask.Task,
+) (string, error) {
+	if task == nil || task.Spec.ExecutorKey != durablesubagent.ExecutorKey ||
+		task.Spec.Kind != TaskKindSubagent {
+		return "", nil
 	}
+	if r == nil {
+		return "", errors.New("subagent: session store is required to read task progress")
+	}
+	agentName := NameFromTask(task)
+	if agentName == "" {
+		return "", errors.New("subagent: task payload does not contain a valid agent name")
+	}
+	return readDurableTaskProgress(ctx, r.store, task, agentName, r.format)
 }
 
 func readDurableTaskProgress[M adk.MessageType](

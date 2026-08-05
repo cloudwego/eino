@@ -19,6 +19,7 @@ package filesystem
 import (
 	"context"
 	"encoding/json"
+	"reflect"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -33,6 +34,21 @@ import (
 type recoverableShellStub struct {
 	startRequest   *backgroundshell.StartCommandRequest
 	recoverRequest *backgroundshell.RecoverCommandRequest
+}
+
+func TestBackgroundConfigSeparatesExecutionModes_BitsUT(t *testing.T) {
+	configType := reflect.TypeOf(BackgroundConfig{})
+	for _, field := range []string{"Local", "Recoverable"} {
+		_, ok := configType.FieldByName(field)
+		require.True(t, ok)
+	}
+	for _, field := range []string{"Runner", "Manager", "Executors", "OutputStore"} {
+		_, ok := configType.FieldByName(field)
+		require.False(t, ok)
+	}
+	middlewareType := reflect.TypeOf(MiddlewareConfig{})
+	_, hasRecoverableShell := middlewareType.FieldByName("RecoverableShell")
+	require.False(t, hasRecoverableShell)
 }
 
 func (s *recoverableShellStub) StartCommand(
@@ -69,9 +85,10 @@ func TestRecoverableShellUsesManagedToolLifecycle(t *testing.T) {
 		},
 	})
 	config := &MiddlewareConfig{
-		RecoverableShell: shell,
 		Background: &BackgroundConfig{
-			Manager: manager, Executors: executors,
+			Recoverable: &RecoverableBackgroundConfig{
+				Shell: shell, Manager: manager, Executors: executors,
+			},
 		},
 		notificationSessionID: func(context.Context) (string, error) {
 			return "session", nil
@@ -86,7 +103,7 @@ func TestRecoverableShellUsesManagedToolLifecycle(t *testing.T) {
 	require.NoError(t, err)
 	var event backgroundtool.ToolStreamEvent
 	require.NoError(t, json.Unmarshal([]byte(result), &event))
-	require.Equal(t, "launch_result", event.Type)
+	require.Equal(t, backgroundtool.ToolStreamEventLaunchResult, event.Type)
 	require.Equal(t, "shell-task", event.TaskID)
 	require.Equal(t, backgroundtask.StatusCompleted, event.Status)
 	require.Equal(t, "command output", event.Output)
@@ -102,36 +119,46 @@ func TestRecoverableShellUsesManagedToolLifecycle(t *testing.T) {
 
 func TestRecoverableShellConfigurationIsExclusive(t *testing.T) {
 	config := &MiddlewareConfig{
-		Shell:            &mockShellBackend{},
-		RecoverableShell: &recoverableShellStub{},
+		Shell: &mockShellBackend{},
 		Background: &BackgroundConfig{
-			Manager: backgroundtask.New(context.Background(), nil),
+			Recoverable: &RecoverableBackgroundConfig{
+				Shell:     &recoverableShellStub{},
+				Manager:   backgroundtask.New(context.Background(), nil),
+				Executors: backgroundtask.NewExecutorRegistry(),
+			},
 		},
 	}
 	require.ErrorContains(t, config.Validate(), "mutually exclusive")
 
-	config = &MiddlewareConfig{RecoverableShell: &recoverableShellStub{}}
-	require.ErrorContains(t, config.Validate(), "requires a background Manager")
+	config = &MiddlewareConfig{Background: &BackgroundConfig{
+		Recoverable: &RecoverableBackgroundConfig{Shell: &recoverableShellStub{}},
+	}}
+	require.ErrorContains(t, config.Validate(), "Shell, Manager, and Executors are required")
 
 	managerOne := backgroundtask.New(context.Background(), nil)
-	managerTwo := backgroundtask.New(context.Background(), nil)
 	runner, err := backgroundlocal.New(&backgroundlocal.Config{Manager: managerOne, Executors: backgroundtask.NewExecutorRegistry()})
 	require.NoError(t, err)
 	config = &MiddlewareConfig{
 		Shell: &mockShellBackend{},
 		Background: &BackgroundConfig{
-			Runner: runner, Manager: managerTwo,
+			Local: &LocalBackgroundConfig{Runner: runner},
+			Recoverable: &RecoverableBackgroundConfig{
+				Shell: &recoverableShellStub{}, Manager: managerOne,
+				Executors: backgroundtask.NewExecutorRegistry(),
+			},
 		},
 	}
-	require.ErrorContains(t, config.Validate(), "must match Runner.Manager")
+	require.ErrorContains(t, config.Validate(), "exactly one")
 }
 
 func TestRecoverableShellConstructors(t *testing.T) {
 	manager := backgroundtask.New(context.Background(), nil)
 	middleware, err := NewMiddleware(context.Background(), &Config{
-		RecoverableShell: &recoverableShellStub{},
 		Background: &BackgroundConfig{
-			Manager: manager, Executors: backgroundtask.NewExecutorRegistry(),
+			Recoverable: &RecoverableBackgroundConfig{
+				Shell: &recoverableShellStub{}, Manager: manager,
+				Executors: backgroundtask.NewExecutorRegistry(),
+			},
 		},
 	})
 	require.NoError(t, err)
@@ -142,8 +169,10 @@ func TestRecoverableShellConstructors(t *testing.T) {
 	require.ErrorContains(t, err, "runner session is required")
 
 	_, err = New(context.Background(), &MiddlewareConfig{
-		RecoverableShell: &recoverableShellStub{},
-		Background:       &BackgroundConfig{Manager: manager, Executors: backgroundtask.NewExecutorRegistry()},
+		Background: &BackgroundConfig{Recoverable: &RecoverableBackgroundConfig{
+			Shell: &recoverableShellStub{}, Manager: manager,
+			Executors: backgroundtask.NewExecutorRegistry(),
+		}},
 	})
 	require.NoError(t, err)
 }

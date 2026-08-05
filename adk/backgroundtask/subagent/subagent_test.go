@@ -21,14 +21,12 @@ import (
 	"encoding/json"
 	"errors"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/adk/backgroundtask"
-	backgroundworker "github.com/cloudwego/eino/adk/backgroundtask/worker"
 	adksession "github.com/cloudwego/eino/adk/session"
 	"github.com/cloudwego/eino/schema"
 )
@@ -606,27 +604,6 @@ func TestManagerExecuteUsesConfiguredDependencies_BitsUT(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, backgroundtask.StatusCompleted, completed.Status)
 	assert.Equal(t, int64(1), completed.Attempt)
-}
-
-func TestPollingWorkerExecutesConfiguredSubAgent_BitsUT(t *testing.T) {
-	manager, _, task, _ := executionFixture(t, &resumableTestAgent{name: "worker"})
-	defer manager.Close(context.Background())
-	poller, err := backgroundworker.NewWorker(backgroundworker.WorkerConfig{
-		Manager: manager, ExecutorKeys: []string{ExecutorKey},
-		PollInterval: time.Millisecond, MaxConcurrent: 1,
-	})
-	require.NoError(t, err)
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() {
-		done <- poller.Run(ctx)
-	}()
-	require.Eventually(t, func() bool {
-		result, getErr := manager.Get(context.Background(), task.Spec.ID)
-		return getErr == nil && result.Status == backgroundtask.StatusCompleted
-	}, time.Second, 10*time.Millisecond)
-	cancel()
-	require.NoError(t, <-done)
 }
 
 func TestStopControlWinsOverLateFinalMessage_BitsUT(t *testing.T) {

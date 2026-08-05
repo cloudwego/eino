@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -35,6 +36,14 @@ import (
 )
 
 var managerExecutors sync.Map
+
+func TestTypedConfigUsesExecutorKeyedProgressReaders_BitsUT(t *testing.T) {
+	configType := reflect.TypeOf(TypedConfig[*schema.Message]{})
+	_, hasReaders := configType.FieldByName("ProgressReadersByExecutorKey")
+	_, hasFallback := configType.FieldByName("ReadTaskProgress")
+	require.True(t, hasReaders)
+	require.False(t, hasFallback)
+}
 
 func newBackgroundManager(ctx context.Context, config *bgtask.Config) *bgtask.Manager {
 	if config == nil {
@@ -623,11 +632,7 @@ func TestResolveDurableTaskSelectsProgressReaderByExecutorKey(t *testing.T) {
 		map[string]TaskProgressReader{
 			task.Spec.ExecutorKey: progressReaderStub{value: "Recent progress:\nhello"},
 		},
-		func(context.Context, *bgtask.Task) (string, error) {
-			return "fallback", nil
-		},
 	)
 	require.NoError(t, err)
 	require.Contains(t, result, "Recent progress:\nhello")
-	require.NotContains(t, result, "fallback")
 }

@@ -22,6 +22,7 @@ import (
 )
 
 const taskIDEntropyBytes = 16
+const maxTaskIDKindBytes = 64
 
 // defaultTaskIDPrefix is used when a task has no Type tag.
 const defaultTaskIDPrefix = "task"
@@ -42,4 +43,18 @@ func defaultTaskID(kind string) (string, error) {
 		return "", err
 	}
 	return taskIDPrefix(kind) + "_" + base64.RawURLEncoding.EncodeToString(entropy[:]), nil
+}
+
+func validTaskIDKind(kind string) bool {
+	if len(kind) > maxTaskIDKindBytes {
+		return false
+	}
+	for i := 0; i < len(kind); i++ {
+		c := kind[i]
+		if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') &&
+			(c < '0' || c > '9') && c != '-' && c != '_' {
+			return false
+		}
+	}
+	return true
 }

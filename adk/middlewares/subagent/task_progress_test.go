@@ -32,6 +32,12 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
+func TestNewDurableTaskProgressReaderRequiresStore_BitsUT(t *testing.T) {
+	reader, err := NewDurableTaskProgressReader[*schema.Message](nil, nil)
+	require.Error(t, err)
+	require.Nil(t, reader)
+}
+
 func TestReadDurableTaskProgress(t *testing.T) {
 	ctx := context.Background()
 	store := adksession.NewInMemoryStore[*schema.Message](nil)
@@ -177,7 +183,7 @@ func durableProgressTask(t *testing.T, status backgroundtask.Status) *background
 	require.NoError(t, err)
 	return &backgroundtask.Task{
 		Spec: backgroundtask.Spec{
-			ID: "subagent_task", Kind: TaskTypeSubagent, Payload: payload,
+			ID: "subagent_task", Kind: TaskKindSubagent, Payload: payload,
 		},
 		Status: status,
 	}

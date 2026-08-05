@@ -87,6 +87,8 @@ func (e *executor) LeaseExpiryPolicy() backgroundtask.LeaseExpiryPolicy {
 	return backgroundtask.LeaseExpiryFail
 }
 
+// SupportsDrain reports whether the tool can reattach by task ID after a
+// checkpointless yield.
 func (e *executor) SupportsDrain() bool { return e.recoverable }
 
 func (e *executor) ValidateSpec(spec backgroundtask.Spec) error {
@@ -418,6 +420,9 @@ func validateOutcome(outcome *Outcome) (*backgroundtask.ExecutionResult, error) 
 	case backgroundtask.StatusFailed:
 		if outcome.Error == "" {
 			return nil, errors.New("backgroundtask/tool: failed outcome requires an error")
+		}
+		if len(outcome.Data) != 0 {
+			return nil, errors.New("backgroundtask/tool: failed outcome cannot contain data")
 		}
 	case backgroundtask.StatusCanceled:
 		if len(outcome.Data) != 0 {

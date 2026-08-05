@@ -32,16 +32,29 @@ import (
 
 // ManagedToolConfig configures the framework-owned model-facing wrapper.
 type ManagedToolConfig struct {
+	// Manager and Executors are required; Executors must be the registry used by
+	// Manager's workers.
 	Manager   *backgroundtask.Manager
 	Executors *backgroundtask.ExecutorRegistry
-	Registry  *Registry
-	ToolName  string
+	// Registry and ToolName select a required registered implementation.
+	Registry *Registry
+	ToolName string
 
-	ForegroundTimeoutMs  *int
+	// ForegroundTimeoutMs overrides the default foreground observation timeout.
+	// Nil uses the framework default; non-positive disables the timer.
+	ForegroundTimeoutMs *int
+	// ShouldAutoBackground is evaluated after foreground timeout. Nil means
+	// timeout the operation instead of detaching. It may be called concurrently.
 	ShouldAutoBackground func(context.Context, *backgroundtask.Task) bool
-	RunInBackground      func(context.Context, string) bool
-	InvocationTimeoutMs  func(context.Context, string) *int
-	SessionID            func(context.Context) (string, error)
+	// RunInBackground requests explicit detachment from JSON arguments. Nil
+	// never requests it and takes precedence over foreground timeout.
+	RunInBackground func(context.Context, string) bool
+	// InvocationTimeoutMs returns an optional operation timeout in milliseconds.
+	// Nil or a nil result means no operation timeout.
+	InvocationTimeoutMs func(context.Context, string) *int
+	// SessionID resolves the parent session for notification. Nil reads request
+	// identity from context.
+	SessionID func(context.Context) (string, error)
 }
 
 type managedTool struct {
@@ -56,8 +69,10 @@ type managedTool struct {
 	sessionID         func(context.Context) (string, error)
 }
 
-// NewManagedTool creates an invokable and streamable wrapper for a registered
-// managed tool.
+// NewManagedTool creates a wrapper implementing both InvokableTool and
+// StreamableTool. Invokable execution returns one NDJSON launch-result record;
+// streaming execution emits progress records followed by launch-result.
+// Detaching closes only the caller projection; durable persistence continues.
 func NewManagedTool(
 	ctx context.Context,
 	config *ManagedToolConfig,
@@ -85,10 +100,6 @@ func NewManagedTool(
 	if config.ForegroundTimeoutMs != nil {
 		timeoutMs = *config.ForegroundTimeoutMs
 	}
-	autoBackground := config.ShouldAutoBackground
-	if autoBackground == nil {
-		autoBackground = func(context.Context, *backgroundtask.Task) bool { return true }
-	}
 	sessionID := config.SessionID
 	if sessionID == nil {
 		sessionID = sessionIDFromContext
@@ -97,7 +108,7 @@ func NewManagedTool(
 		manager: config.Manager, registry: config.Registry, registration: registration,
 		recoverable: recoverable, info: info,
 		policy: foreground.Policy{
-			TimeoutMs: timeoutMs, ShouldAutoBackground: autoBackground,
+			TimeoutMs: timeoutMs, ShouldAutoBackground: config.ShouldAutoBackground,
 		},
 		runInBackground: config.RunInBackground, invocationTimeout: config.InvocationTimeoutMs,
 		sessionID: sessionID,
@@ -170,7 +181,7 @@ func (t *managedTool) project(
 				updates = nil
 				continue
 			}
-			record, err := encodeEvent(&ToolStreamEvent{Type: "update", Update: update})
+			record, err := encodeEvent(&ToolStreamEvent{Type: ToolStreamEventUpdate, Update: update})
 			if err != nil {
 				t.registry.projections.remove(taskID)
 				writer.Send("", err)
@@ -193,7 +204,7 @@ func (t *managedTool) project(
 			}
 			if result.task.Status != backgroundtask.StatusRunning && updates != nil {
 				for update := range updates {
-					record, encodeErr := encodeEvent(&ToolStreamEvent{Type: "update", Update: update})
+					record, encodeErr := encodeEvent(&ToolStreamEvent{Type: ToolStreamEventUpdate, Update: update})
 					if encodeErr != nil {
 						t.registry.projections.remove(taskID)
 						writer.Send("", encodeErr)
@@ -321,7 +332,7 @@ func (t *managedTool) encodeLaunchResult(
 		return "", errors.New("backgroundtask/tool: launch result requires a task id")
 	}
 	event := &ToolStreamEvent{
-		Type: "launch_result", TaskID: task.Spec.ID, Status: task.Status,
+		Type: ToolStreamEventLaunchResult, TaskID: task.Spec.ID, Status: task.Status,
 		Description: task.Spec.Description,
 	}
 	if task.Status == backgroundtask.StatusCompleted {
@@ -347,11 +358,41 @@ func (t *managedTool) encodeLaunchResult(
 }
 
 func encodeEvent(event *ToolStreamEvent) (string, error) {
+	if err := validateToolStreamEvent(event); err != nil {
+		return "", err
+	}
 	data, err := json.Marshal(event)
 	if err != nil {
 		return "", fmt.Errorf("backgroundtask/tool: encode stream event: %w", err)
 	}
 	return string(data) + "\n", nil
+}
+
+func validateToolStreamEvent(event *ToolStreamEvent) error {
+	if event == nil {
+		return errors.New("backgroundtask/tool: stream event is required")
+	}
+	switch event.Type {
+	case ToolStreamEventUpdate:
+		if event.Update == nil || event.TaskID != "" || event.Status != "" ||
+			event.Description != "" || event.Output != nil || event.Error != "" {
+			return errors.New("backgroundtask/tool: invalid update stream event")
+		}
+	case ToolStreamEventLaunchResult:
+		if event.TaskID == "" || event.Status == "" || event.Update != nil {
+			return errors.New("backgroundtask/tool: invalid launch-result stream event")
+		}
+		if event.Status == backgroundtask.StatusCompleted {
+			if event.Error != "" {
+				return errors.New("backgroundtask/tool: completed launch result cannot contain error")
+			}
+		} else if event.Output != nil {
+			return errors.New("backgroundtask/tool: non-completed launch result cannot contain output")
+		}
+	default:
+		return errors.New("backgroundtask/tool: unknown stream event type")
+	}
+	return nil
 }
 
 func cloneToolInfo(info *schema.ToolInfo) (*schema.ToolInfo, error) {

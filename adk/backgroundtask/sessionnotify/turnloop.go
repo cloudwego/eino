@@ -25,7 +25,8 @@ import (
 )
 
 // TurnLoopTarget is a deployment-owned session loop and its process-lifetime
-// context. The context must not be derived from a notification dispatch request.
+// context. The context must not be derived from a notification dispatch
+// request; the deployment owns cancellation after all users release the target.
 type TurnLoopTarget[T any, M adk.MessageType] struct {
 	Loop       *adk.TurnLoop[T, M]
 	RunContext context.Context
@@ -33,7 +34,10 @@ type TurnLoopTarget[T any, M adk.MessageType] struct {
 
 // TurnLoopActivator bridges durable session wake requests to the ADK TurnLoop.
 // The loop's GenInput implementation remains responsible for reading and
-// acknowledging durable inbox items.
+// acknowledging durable inbox items. Resolve and WakeItem may be called
+// concurrently, must not panic, and must tolerate repeated activation for the
+// same pending notification. Resolve lends the target for one RequestTurn call;
+// it must remain valid through Loop.Run.
 type TurnLoopActivator[T any, M adk.MessageType] struct {
 	Resolve  func(context.Context, string) (*TurnLoopTarget[T, M], error)
 	WakeItem func(*backgroundtask.SessionActivationRequest) (T, error)

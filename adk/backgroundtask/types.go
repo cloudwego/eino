@@ -28,7 +28,11 @@ const (
 	LeaseExpiryFail LeaseExpiryPolicy = "fail"
 )
 
-// Spec is immutable serialized task intent.
+// Spec is immutable serialized task intent. Callers supply every field except
+// CreatedAt, which TaskStore assigns when it is zero. Payload and all returned
+// byte slices must be copied across provider boundaries. OutputFile names an
+// optional derived transcript destination; it is not authoritative task output.
+// Providers may impose documented size bounds such as InMemoryStoreConfig.
 type Spec struct {
 	ID          string
 	ExecutorKey string
@@ -65,8 +69,10 @@ type Notification struct {
 	Kind      NotificationKind
 	CreatedAt time.Time
 
-	// Task is nil for pointer-only outbox storage and populated for delivered
-	// notifications stored in session inboxes.
+	// Task is nil for pointer-only outbox storage and populated from the latest
+	// authoritative snapshot before session-inbox delivery. That snapshot may
+	// be newer than Version and Kind, which identify the transition that
+	// created this notification.
 	Task *Task
 }
 
@@ -78,26 +84,32 @@ type CreateTaskRequest struct {
 }
 
 // ListPendingRequest lists pending task candidates for the given executor keys.
+// Results use stable task-ID order. Cursor continues after the previous page;
+// it is scoped to the same provider and filter. Limit defaults to 100 and is
+// capped at 1000.
 type ListPendingRequest struct {
 	ExecutorKeys []string
 	Cursor       string
 	Limit        int
 }
 
-// ListPendingResult contains pending task candidates and an optional cursor.
+// ListPendingResult contains independent task snapshots. NextCursor is empty
+// when the current traversal is exhausted.
 type ListPendingResult struct {
 	Tasks      []*Task
 	NextCursor string
 }
 
-// ListSuspendedRequest lists suspended tasks for the given executor keys.
+// ListSuspendedRequest lists suspended tasks with the same ordering, cursor,
+// filter, and limit rules as ListPendingRequest.
 type ListSuspendedRequest struct {
 	ExecutorKeys []string
 	Cursor       string
 	Limit        int
 }
 
-// ListSuspendedResult contains suspended task snapshots and an optional cursor.
+// ListSuspendedResult contains independent task snapshots. NextCursor is empty
+// when the current traversal is exhausted.
 type ListSuspendedResult struct {
 	Tasks      []*Task
 	NextCursor string
@@ -115,7 +127,9 @@ type HeartbeatRequest struct {
 	ExpectedVersion int64
 }
 
-// ReportTranscriptFailureRequest records the first failure of an optional output transcript.
+// ReportTranscriptFailureRequest records the first failure of an optional
+// derived transcript. It does not change task lifecycle status; later reports
+// preserve the first recorded error.
 type ReportTranscriptFailureRequest struct {
 	TaskID          string
 	ExpectedVersion int64
@@ -225,7 +239,8 @@ type AppendTaskEventResult struct {
 // ListTaskEventsRequest requests one snapshot-stable page of task events.
 // NewestFirst selects reverse append order; Cursor continues the same task,
 // direction, and snapshot established by the first page. Limit defaults to 100
-// and is capped at 1000.
+// and is capped at 1000; callers may change Limit between pages. An empty first
+// page has no continuation cursor.
 type ListTaskEventsRequest struct {
 	TaskID      string
 	Cursor      string
@@ -233,18 +248,21 @@ type ListTaskEventsRequest struct {
 	NewestFirst bool
 }
 
-// ListTaskEventsResult contains one page and an opaque continuation cursor.
-// NextCursor is empty when the snapshot has been exhausted.
+// ListTaskEventsResult contains an independently owned page and an opaque
+// continuation cursor. NextCursor is empty when the captured snapshot has been
+// exhausted.
 type ListTaskEventsResult struct {
 	Events     []*TaskEvent
 	NextCursor string
 }
 
 // NotificationReceipt is an opaque token authorizing acknowledgement of one
-// notification during its current lease.
+// notification during its current lease. Callers and providers must copy its
+// bytes and must not mutate a receipt after passing it across the SPI.
 type NotificationReceipt []byte
 
 // ReceiveNotificationsRequest leases visible notifications from an outbox.
+// Limit defaults to 100 and is capped at 1000. LeaseDuration must be positive.
 type ReceiveNotificationsRequest struct {
 	Limit         int
 	LeaseDuration time.Duration

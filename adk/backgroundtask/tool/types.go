@@ -31,8 +31,9 @@ const (
 	RecoverableExecutorKey = "eino.dev/recoverable-background-tool"
 )
 
-// BackgroundTool starts one logical external operation. Start receives the Eino
-// task ID before any external side effect occurs.
+// BackgroundTool starts one logical external operation. ValidateArguments must
+// be repeatable and side-effect free. Start receives the Eino task ID before
+// any external side effect occurs.
 type BackgroundTool interface {
 	ValidateArguments(arguments string) error
 	Start(context.Context, *StartRequest) (Run, error)
@@ -61,28 +62,36 @@ type RecoverRequest struct {
 }
 
 // Run is an attempt-local handle for one logical external operation. Canceling
-// the context passed to Wait stops observation only; Stop explicitly requests
-// logical-operation cancellation.
+// Wait stops observation only. Stop requests logical cancellation and must be
+// safe under repeated or concurrent calls.
 type Run interface {
 	Wait(context.Context) (*Outcome, error)
 	Stop(context.Context) error
 }
 
-// UpdateSource optionally exposes replayable incremental updates.
+// UpdateSource optionally exposes replayable incremental updates. The framework
+// calls Updates once per Run, owns and closes the returned reader, and expects
+// it to close shortly after Wait reaches a terminal outcome. Recovery starts at
+// the beginning of the replayable history; EventID deduplication removes repeats.
 type UpdateSource interface {
 	Updates() *schema.StreamReader[*Update]
 }
 
-// Outcome is the authoritative logical-operation terminal result.
+// Outcome is the authoritative logical-operation terminal result. Completed
+// outcomes may contain Data and no Error. Failed outcomes require Error and no
+// Data. Canceled outcomes may contain Error and no Data.
 type Outcome struct {
 	Status backgroundtask.Status
 	Data   []byte
 	Error  string
 }
 
-// Update is a bounded serializable progress event. Recoverable implementations
-// must assign a non-empty, lifetime-stable EventID and replay updates in the
-// same logical order after recovery.
+// Update is a bounded serializable progress event. Data is limited to 256 KiB,
+// Kind to 128 bytes, and Metadata to 32 entries with keys and values at most
+// 1024 bytes each. Recoverable implementations must assign a non-empty,
+// lifetime-stable EventID and replay updates in logical order. For plain tools,
+// the framework may generate an ID without mutating this value. EventID is not
+// an ordering key or pagination cursor.
 type Update struct {
 	EventID  string            `json:"event_id,omitempty"`
 	Kind     string            `json:"kind,omitempty"`
@@ -90,9 +99,25 @@ type Update struct {
 	Metadata map[string]string `json:"metadata,omitempty"`
 }
 
-// ToolStreamEvent is the framework-owned model-facing NDJSON envelope.
+// ToolStreamEventType identifies one model-facing managed-tool stream variant.
+type ToolStreamEventType string
+
+const (
+	// ToolStreamEventUpdate carries one live progress Update. All other
+	// ToolStreamEvent fields are empty.
+	ToolStreamEventUpdate ToolStreamEventType = "update"
+	// ToolStreamEventLaunchResult carries the task launch or foreground result.
+	// Update is nil; the remaining fields describe the task and its current or
+	// terminal outcome.
+	ToolStreamEventLaunchResult ToolStreamEventType = "launch_result"
+)
+
+// ToolStreamEvent is the framework-owned model-facing NDJSON envelope. Type
+// determines the legal variant: update events set only Update, while
+// launch-result events set task identity, status, description, and optional
+// terminal Output or Error.
 type ToolStreamEvent struct {
-	Type        string                `json:"type"`
+	Type        ToolStreamEventType   `json:"type"`
 	TaskID      string                `json:"task_id,omitempty"`
 	Status      backgroundtask.Status `json:"status,omitempty"`
 	Description string                `json:"description,omitempty"`

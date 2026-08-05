@@ -229,6 +229,30 @@ func TestAttack_MemoryInboxOrdersEqualTimestampsDeterministically(t *testing.T) 
 	}
 }
 
+func TestMemoryInboxScopesNotificationDeduplicationBySession_BitsUT(t *testing.T) {
+	inbox := NewMemoryInbox()
+	for _, sessionID := range []string{"session-a", "session-b"} {
+		item, err := inbox.Enqueue(context.Background(), &backgroundtask.EnqueueSessionNotificationRequest{
+			SessionID: sessionID,
+			Notification: backgroundtask.Notification{
+				ID: "same-notification", TaskID: "task-" + sessionID,
+				Kind: backgroundtask.NotificationCompleted,
+			},
+		})
+		require.NoError(t, err)
+		require.Equal(t, sessionID, item.SessionID)
+	}
+	for _, sessionID := range []string{"session-a", "session-b"} {
+		pending, err := inbox.ListPending(
+			context.Background(),
+			&backgroundtask.ListSessionNotificationsRequest{SessionID: sessionID},
+		)
+		require.NoError(t, err)
+		require.Len(t, pending, 1)
+		require.Equal(t, sessionID, pending[0].SessionID)
+	}
+}
+
 func TestTurnLoopActivatorQueuesWakeAndStartsLoop_BitsUT(t *testing.T) {
 	received := make(chan []string, 1)
 	loop := adk.NewTurnLoop(adk.TurnLoopConfig[string, *schema.Message]{

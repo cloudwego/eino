@@ -44,26 +44,30 @@ func NewMemoryInbox() *MemoryInbox {
 	}
 }
 
-// Enqueue stores a notification unless the same notification was already seen.
+// Enqueue stores a notification unless the same notification ID was already
+// seen in that session. Deduplication survives acknowledgement for the lifetime
+// of this process-local inbox.
 func (i *MemoryInbox) Enqueue(_ context.Context, req *backgroundtask.EnqueueSessionNotificationRequest) (*backgroundtask.SessionInboxItem, error) {
 	if req == nil || req.SessionID == "" || req.Notification.ID == "" {
 		return nil, errors.New("sessionnotify: session and notification id are required")
 	}
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	if item, ok := i.byNote[req.Notification.ID]; ok {
+	key := inboxKey(req.SessionID, req.Notification.ID)
+	if item, ok := i.byNote[key]; ok {
 		return cloneItem(item), nil
 	}
 	item := &backgroundtask.SessionInboxItem{
 		ItemID: req.Notification.ID, ItemVersion: 1,
 		SessionID: req.SessionID, Notification: cloneNotification(req.Notification), CreatedAt: i.now(),
 	}
-	i.byID[item.ItemID] = item
-	i.byNote[req.Notification.ID] = cloneItem(item)
+	i.byID[key] = item
+	i.byNote[key] = cloneItem(item)
 	return cloneItem(item), nil
 }
 
-// ListPending lists pending inbox items for a session in creation order.
+// ListPending lists pending inbox items for a session in creation order. Limit
+// defaults to 100 and is capped at 1000.
 func (i *MemoryInbox) ListPending(_ context.Context, req *backgroundtask.ListSessionNotificationsRequest) ([]*backgroundtask.SessionInboxItem, error) {
 	if req == nil || req.SessionID == "" {
 		return nil, errors.New("sessionnotify: session id is required")
@@ -83,8 +87,10 @@ func (i *MemoryInbox) ListPending(_ context.Context, req *backgroundtask.ListSes
 		return result[a].CreatedAt.Before(result[b].CreatedAt)
 	})
 	limit := req.Limit
-	if limit <= 0 || limit > 1000 {
+	if limit <= 0 {
 		limit = 100
+	} else if limit > 1000 {
+		limit = 1000
 	}
 	if len(result) > limit {
 		result = result[:limit]
@@ -99,15 +105,20 @@ func (i *MemoryInbox) Ack(_ context.Context, req *backgroundtask.AckSessionNotif
 	}
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	item, ok := i.byID[req.ItemID]
+	key := inboxKey(req.SessionID, req.ItemID)
+	item, ok := i.byID[key]
 	if !ok {
 		return nil
 	}
 	if item.SessionID != req.SessionID || item.ItemVersion != req.ExpectedVersion {
 		return backgroundtask.ErrVersionConflict
 	}
-	delete(i.byID, req.ItemID)
+	delete(i.byID, key)
 	return nil
+}
+
+func inboxKey(sessionID, itemID string) string {
+	return sessionID + "\x00" + itemID
 }
 
 func cloneItem(item *backgroundtask.SessionInboxItem) *backgroundtask.SessionInboxItem {

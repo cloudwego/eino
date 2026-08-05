@@ -34,7 +34,9 @@ const (
 // ProgressReader formats a bounded recent view of managed-tool task events.
 type ProgressReader struct {
 	Manager *backgroundtask.Manager
-	Limit   int
+	// Limit is the number of newest events rendered. Non-positive values use 20;
+	// values above the store maximum are capped by ListTaskEvents.
+	Limit int
 }
 
 // ReadProgress implements middleware executor-specific progress projection.

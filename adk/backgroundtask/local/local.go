@@ -46,10 +46,12 @@ type StreamWorkFunc func(
 	runtime backgroundtask.ExecutionRuntime,
 ) (*schema.StreamReader[string], error)
 
-// Input describes one process-local execution.
+// Input describes one process-local execution. ForegroundTimeoutMs overrides
+// Config.ForegroundTimeoutMs. RunInBackground bypasses foreground timeout;
+// BackgroundStartupPreviewMs applies only to its streaming startup preview.
 type Input struct {
 	Description                string
-	Type                       string
+	Kind                       string
 	Payload                    []byte
 	OutputFile                 string
 	SessionID                  string
@@ -59,13 +61,17 @@ type Input struct {
 	ForegroundTimeoutMs        *int
 }
 
-// NoticeInfo carries lifecycle facts for a background stream notice.
+// NoticeInfo carries lifecycle facts for a background stream notice. Task may
+// be nil when authoritative loading fails.
 type NoticeInfo struct {
 	Task             *backgroundtask.Task
 	AutoBackgrounded bool
 }
 
-// Config configures process-local execution and ephemeral foreground projection.
+// Config configures process-local execution and ephemeral foreground
+// projection. Policy callbacks may run concurrently and must not panic or
+// mutate the supplied task. Nil ShouldAutoBackground disables automatic
+// detachment; nil BackgroundNotice uses the default notice.
 type Config struct {
 	Manager              *backgroundtask.Manager
 	Executors            *backgroundtask.ExecutorRegistry
@@ -143,7 +149,10 @@ func (r *Runner) Run(ctx context.Context, input *Input, work WorkFunc) (*backgro
 }
 
 // RunStream executes streaming process-local work and returns its ephemeral
-// caller-facing projection. Every chunk is also appended to the task-event feed.
+// caller-facing projection. Every chunk is also appended to the task-event
+// feed. Closing the returned reader requests cancellation of this process-local
+// operation; callers that want execution to continue must explicitly launch it
+// in the background rather than abandoning the stream.
 func (r *Runner) RunStream(
 	ctx context.Context,
 	input *Input,
@@ -270,7 +279,7 @@ func (r *Runner) submit(
 		return nil, errors.New("backgroundtask/local: runner, input, and work are required")
 	}
 	id, err := r.manager.AllocateTaskID(ctx, &backgroundtask.AllocateTaskIDRequest{
-		Kind: input.Type,
+		Kind: input.Kind,
 	})
 	if err != nil {
 		return nil, err
@@ -279,7 +288,7 @@ func (r *Runner) submit(
 		return nil, err
 	}
 	task, err := r.manager.Submit(ctx, backgroundtask.Spec{
-		ID: id, ExecutorKey: executorKey, Kind: input.Type,
+		ID: id, ExecutorKey: executorKey, Kind: input.Kind,
 		Payload: append([]byte(nil), input.Payload...), Description: input.Description,
 		OutputFile: input.OutputFile, SessionID: input.SessionID, NotifySession: input.NotifySession,
 	})
@@ -323,6 +332,8 @@ func (e *executor) ValidateExecution(_ context.Context, task *backgroundtask.Tas
 	return err
 }
 
+// SupportsDrain is false because process-local closures cannot be reconstructed
+// on another worker.
 func (*executor) SupportsDrain() bool { return false }
 
 func (e *executor) Execute(

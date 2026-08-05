@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"runtime/debug"
+	"sort"
 	"sync"
 	"time"
 
@@ -40,8 +41,9 @@ const (
 	// ControlStop asks the executor to stop as soon as practical. Reason is the
 	// optional durable cancellation reason.
 	ControlStop ControlKind = "stop"
-	// ControlDrain asks the executor to checkpoint and suspend if possible.
-	// Reason is optional advisory operational context.
+	// ControlDrain asks the executor to relinquish gracefully. The executor may
+	// checkpoint and suspend or yield without a checkpoint according to its
+	// recovery model. Reason is optional advisory operational context.
 	ControlDrain ControlKind = "drain"
 	// ControlTimeout asks the executor to fail with a non-empty deterministic reason.
 	ControlTimeout ControlKind = "timeout"
@@ -65,7 +67,13 @@ const (
 	ExecutionDirectiveYield ExecutionDirective = "yield"
 )
 
-// ExecutionResult describes the lifecycle outcome returned by an executor.
+// ExecutionResult describes one legal executor outcome:
+//   - Yield: DirectiveYield plus an optional Checkpoint; all lifecycle fields empty.
+//   - Completed: StatusCompleted plus optional Data.
+//   - Failed or Canceled: the corresponding status plus Error.
+//   - WaitingInput or Suspended: the corresponding status plus Checkpoint.
+//
+// Fields from different variants must not be combined.
 type ExecutionResult struct {
 	Directive  ExecutionDirective
 	Status     Status
@@ -83,20 +91,37 @@ type ProgressEmission struct {
 	FirstEmission bool
 }
 
-// ExecutionRuntime exposes attempt-scoped coordination capabilities to an executor.
+// ExecutionRuntime exposes concurrency-safe, attempt-scoped capabilities.
+// Storage fencing fields remain private to the runtime.
 type ExecutionRuntime interface {
+	// Controls returns a runtime-owned channel. Signals may be coalesced; the
+	// executor must stop selecting it when the attempt context ends.
 	Controls() <-chan ControlRequest
+	// EmitProgress appends replayable progress. An empty event ID requests a
+	// framework-generated stable ID. FirstEmission is false when the same ID and
+	// bytes were already accepted for the task.
 	EmitProgress(context.Context, string, []byte) (ProgressEmission, error)
+	// ReportTranscriptFailure records the first non-lifecycle failure of the
+	// optional derived transcript.
 	ReportTranscriptFailure(context.Context, error) error
 }
 
 // Executor reconstructs and runs durable work from a task Spec.
 type Executor interface {
+	// Key is a stable persisted routing key.
 	Key() string
+	// LeaseExpiryPolicy is immutable for tasks created by this executor.
 	LeaseExpiryPolicy() LeaseExpiryPolicy
+	// ValidateSpec is repeatable, side-effect free, and runs before persistence.
 	ValidateSpec(Spec) error
+	// ValidateExecution performs side-effect-free validation immediately before
+	// an attempt is claimed.
 	ValidateExecution(context.Context, *Task) error
+	// SupportsDrain reports whether Execute handles ControlDrain by returning a
+	// resumable suspended or yielded result.
 	SupportsDrain() bool
+	// Execute owns the attempt until it returns. It must observe ctx and runtime
+	// controls and return exactly one legal ExecutionResult variant.
 	Execute(context.Context, *Task, ExecutionRuntime) (*ExecutionResult, error)
 }
 
@@ -158,6 +183,7 @@ func (r *ExecutorRegistry) Keys() []string {
 	for key := range r.executors {
 		result = append(result, key)
 	}
+	sort.Strings(result)
 	return result
 }
 
@@ -383,22 +409,37 @@ func (r *taskRuntime) commitResult(ctx context.Context, result *ExecutionResult)
 	}
 	switch result.Status {
 	case StatusCompleted:
+		if len(result.Checkpoint) != 0 || result.Error != "" {
+			return nil, fmt.Errorf("%w: completed result contains checkpoint or error", ErrInvalidExecutionResult)
+		}
 		return r.tasks.Complete(ctx, &CompleteTaskRequest{
 			TaskID: r.taskID, ExpectedVersion: r.version, Data: cloneBytes(result.Data),
 		})
 	case StatusFailed:
+		if len(result.Checkpoint) != 0 || len(result.Data) != 0 {
+			return nil, fmt.Errorf("%w: failed result contains checkpoint or data", ErrInvalidExecutionResult)
+		}
 		return r.tasks.Fail(ctx, &FailTaskRequest{
 			TaskID: r.taskID, ExpectedVersion: r.version, Error: result.Error,
 		})
 	case StatusCanceled:
+		if len(result.Checkpoint) != 0 || len(result.Data) != 0 {
+			return nil, fmt.Errorf("%w: canceled result contains checkpoint or data", ErrInvalidExecutionResult)
+		}
 		return r.tasks.AckCancel(ctx, &AckCancelRequest{
 			TaskID: r.taskID, ExpectedVersion: r.version, Reason: result.Error,
 		})
 	case StatusWaitingInput:
+		if len(result.Data) != 0 || result.Error != "" {
+			return nil, fmt.Errorf("%w: waiting-input result contains data or error", ErrInvalidExecutionResult)
+		}
 		return r.tasks.WaitInput(ctx, &WaitInputTaskRequest{
 			TaskID: r.taskID, ExpectedVersion: r.version, Checkpoint: cloneBytes(result.Checkpoint),
 		})
 	case StatusSuspended:
+		if len(result.Data) != 0 || result.Error != "" {
+			return nil, fmt.Errorf("%w: suspended result contains data or error", ErrInvalidExecutionResult)
+		}
 		return r.tasks.Suspend(ctx, &SuspendTaskRequest{
 			TaskID: r.taskID, ExpectedVersion: r.version, Checkpoint: cloneBytes(result.Checkpoint),
 		})
@@ -407,7 +448,9 @@ func (r *taskRuntime) commitResult(ctx context.Context, result *ExecutionResult)
 	}
 }
 
-// AllocateTaskIDRequest describes the task category used by the default ID generator.
+// AllocateTaskIDRequest describes the task category used by the default ID
+// generator. Kind is not persisted independently and must be empty or a
+// 64-byte ASCII identifier segment containing letters, digits, '-' or '_'.
 type AllocateTaskIDRequest struct {
 	Kind string
 }
@@ -416,6 +459,9 @@ type AllocateTaskIDRequest struct {
 func (m *Manager) AllocateTaskID(ctx context.Context, request *AllocateTaskIDRequest) (string, error) {
 	if request == nil {
 		return "", errors.New("backgroundtask: allocate task id request is required")
+	}
+	if !validTaskIDKind(request.Kind) {
+		return "", errors.New("backgroundtask: task id kind is not a safe identifier segment")
 	}
 	m.mu.Lock()
 	closed := m.closed
@@ -484,12 +530,13 @@ func (m *Manager) Get(ctx context.Context, taskID string) (*Task, error) {
 
 // ListPending is the read-only dispatch boundary. A worker may select and
 // dispatch a task ID from this result; only Execute performs start authorization.
+// Ordering, cursor, limit, and snapshot ownership follow ListPendingRequest.
 func (m *Manager) ListPending(ctx context.Context, req *ListPendingRequest) (*ListPendingResult, error) {
 	return m.tasks.ListPending(ctx, req)
 }
 
 // ListSuspended returns checkpointed tasks that require an explicit release
-// before workers may claim them again.
+// before workers may claim them again. Pagination follows ListPendingRequest.
 func (m *Manager) ListSuspended(
 	ctx context.Context,
 	req *ListSuspendedRequest,
@@ -514,6 +561,8 @@ func (m *Manager) ListTaskEvents(
 
 // RequestCancel records cancellation intent and signals a local active attempt.
 // An optional reason is durable and first-write across repeated requests.
+// Process-local non-recoverable work may wait for terminal acknowledgement;
+// recoverable work may return the still-running snapshot after intent is durable.
 func (m *Manager) RequestCancel(
 	ctx context.Context,
 	taskID string,
@@ -629,7 +678,8 @@ func (m *Manager) ReleaseSuspension(ctx context.Context, taskID string) (*Task, 
 }
 
 // Resume persists opaque input for a task waiting on external input. The
-// concrete executor owns any domain-specific validation of that input.
+// concrete executor must defensively validate the persisted input before use;
+// Manager intentionally does not know executor-specific resume schemas.
 func (m *Manager) Resume(ctx context.Context, req *ResumeRequest) (*Task, error) {
 	if req == nil {
 		return nil, errors.New("backgroundtask: resume request is required")

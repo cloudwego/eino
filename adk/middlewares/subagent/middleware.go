@@ -109,8 +109,13 @@ type TypedDurableBackgroundConfig[M adk.MessageType] struct {
 }
 
 // TranscriptFormat formats one materialized sub-agent message as one transcript
-// record. Returning an empty string skips the message.
-type TranscriptFormat[M adk.MessageType] func(context.Context, string, M) (string, error)
+// record. Returning an empty string skips the message. It may be called
+// concurrently and must not mutate the message.
+type TranscriptFormat[M adk.MessageType] func(
+	ctx context.Context,
+	agentName string,
+	message M,
+) (string, error)
 
 // New creates a ChatModelAgentMiddleware that injects sub-agent tools into the agent context.
 //

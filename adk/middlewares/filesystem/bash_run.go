@@ -35,9 +35,9 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
-// ExecuteTaskType identifies shell-command tasks in host-side policy. The core
+// ExecuteTaskKind identifies shell-command tasks in host-side policy. The core
 // backgroundtask Spec does not persist display/filter labels.
-const ExecuteTaskType = "bash"
+const ExecuteTaskKind = "bash"
 
 // defaultBashStartupPreviewMs is the caller-visible startup window for an
 // explicitly backgrounded StreamingShell run. The task is backgrounded from the
@@ -54,7 +54,7 @@ type shellPayloadV1 struct {
 
 // CommandFromTask returns the process-local shell task description.
 func CommandFromTask(t *backgroundtask.Task) string {
-	if t == nil || t.Spec.Kind != ExecuteTaskType {
+	if t == nil || t.Spec.Kind != ExecuteTaskKind {
 		return ""
 	}
 	payload, err := decodeShellPayload(t.Spec.Payload)
@@ -394,7 +394,7 @@ func managedRunInput(
 	}
 	runInput := &backgroundlocal.Input{
 		Description:     input.Command,
-		Type:            ExecuteTaskType,
+		Kind:            ExecuteTaskKind,
 		Payload:         payload,
 		OutputFile:      writer.path,
 		RunInBackground: input.RunInBackground,

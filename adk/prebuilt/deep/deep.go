@@ -81,7 +81,6 @@ type DurableSubAgentConfig = TypedDurableSubAgentConfig[*schema.Message]
 // RecoverableShellConfig configures recoverable managed shell commands.
 type RecoverableShellConfig struct {
 	Shell              backgroundshell.RecoverableShell
-	OutputDir          string
 	OutputMaterializer backgroundtool.OutputMaterializer
 }
 
@@ -284,20 +283,22 @@ func NewTyped[M adk.MessageType](ctx context.Context, cfg *TypedConfig[M]) (adk.
 	// When background support is configured, wire its control tools
 	// (task_output/task_stop) exactly once at the top level.
 	if manager := deepBackgroundManager(cfg.Background); manager != nil {
-		var readTaskProgress func(context.Context, *backgroundtask.Task) (string, error)
 		progressReaders := make(map[string]backgroundtaskmw.TaskProgressReader)
 		if cfg.Background.SubAgents != nil {
-			readTaskProgress = subagent.NewDurableTaskProgressHook(
+			subagentReader, err := subagent.NewDurableTaskProgressReader(
 				cfg.Background.SubAgents.Executor.SessionEventStore(),
 				cfg.Background.TranscriptFormat,
 			)
+			if err != nil {
+				return nil, fmt.Errorf("create durable sub-agent progress reader: %w", err)
+			}
+			progressReaders[durablesubagent.ExecutorKey] = subagentReader
 		}
 		reader := &backgroundtool.ProgressReader{Manager: manager}
 		progressReaders[backgroundtool.ExecutorKey] = reader
 		progressReaders[backgroundtool.RecoverableExecutorKey] = reader
 		controlMW, err := backgroundtaskmw.NewTyped(ctx, &backgroundtaskmw.TypedConfig[M]{
-			Manager:          manager,
-			ReadTaskProgress: readTaskProgress, ProgressReaders: progressReaders,
+			Manager: manager, ProgressReadersByExecutorKey: progressReaders,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("failed to create background-task control middleware: %w", err)
@@ -427,26 +428,30 @@ func buildTypedBuiltinAgentMiddlewares[M adk.MessageType](ctx context.Context, c
 	if cfg.Backend != nil || shell != nil || streamingShell != nil ||
 		recoverableShell != nil {
 		mwCfg := &filesystem2.MiddlewareConfig{
-			Backend:          cfg.Backend,
-			Shell:            shell,
-			StreamingShell:   streamingShell,
-			RecoverableShell: recoverableShell,
+			Backend: cfg.Backend, Shell: shell, StreamingShell: streamingShell,
 		}
 		if deepFilesystemBackgroundEnabled(background) {
-			runner, err := deepLocalShellRunner(background)
-			if err != nil {
-				return nil, err
-			}
-			mwCfg.Background = &filesystem2.BackgroundConfig{
-				Runner: runner, Manager: background.Manager, Executors: background.Executors,
-				OutputStore:          backendAppendOpener(cfg.Backend),
-				OutputDir:            deepShellOutputDir(background),
-				ForegroundTimeoutMs:  background.ForegroundTimeoutMs,
-				ShouldAutoBackground: background.ShouldAutoBackground,
-			}
 			if background.RecoverableShell != nil {
-				mwCfg.Background.OutputMaterializer =
-					background.RecoverableShell.OutputMaterializer
+				mwCfg.Background = &filesystem2.BackgroundConfig{
+					Recoverable: &filesystem2.RecoverableBackgroundConfig{
+						Shell: recoverableShell, Manager: background.Manager,
+						Executors:            background.Executors,
+						OutputMaterializer:   background.RecoverableShell.OutputMaterializer,
+						ForegroundTimeoutMs:  background.ForegroundTimeoutMs,
+						ShouldAutoBackground: background.ShouldAutoBackground,
+					},
+				}
+			} else {
+				runner, err := deepLocalShellRunner(background)
+				if err != nil {
+					return nil, err
+				}
+				mwCfg.Background = &filesystem2.BackgroundConfig{
+					Local: &filesystem2.LocalBackgroundConfig{
+						Runner: runner, OutputStore: backendAppendOpener(cfg.Backend),
+						OutputDir: deepShellOutputDir(background),
+					},
+				}
 			}
 		}
 		fm, err := filesystem2.NewTyped[M](ctx, mwCfg)
@@ -511,9 +516,6 @@ func deepShellOutputDir[M adk.MessageType](background *TypedBackgroundConfig[M])
 	}
 	if background.LocalShell != nil {
 		return background.LocalShell.OutputDir
-	}
-	if background.RecoverableShell != nil {
-		return background.RecoverableShell.OutputDir
 	}
 	return ""
 }

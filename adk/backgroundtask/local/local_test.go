@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -32,6 +33,14 @@ import (
 	"github.com/cloudwego/eino/adk/backgroundtask"
 	"github.com/cloudwego/eino/schema"
 )
+
+func TestInputUsesKindVocabulary_BitsUT(t *testing.T) {
+	inputType := reflect.TypeOf(Input{})
+	_, hasKind := inputType.FieldByName("Kind")
+	_, hasType := inputType.FieldByName("Type")
+	require.True(t, hasKind)
+	require.False(t, hasType)
+}
 
 func newTestRunner(t *testing.T, configure ...func(*Config)) (*Runner, *backgroundtask.Manager) {
 	t.Helper()
@@ -412,7 +421,7 @@ func TestRunnerLocalContracts(t *testing.T) {
 	require.Nil(t, result)
 
 	pending, err := runner.submit(
-		context.Background(), &Input{Type: "test", Description: "pending"}, work,
+		context.Background(), &Input{Kind: "test", Description: "pending"}, work,
 	)
 	require.NoError(t, err)
 	require.Contains(t, runner.executor.works, pending.Spec.ID)

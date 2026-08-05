@@ -137,10 +137,31 @@ func TestPayloadAndResultValidationBoundaries(t *testing.T) {
 		nil,
 		{Status: backgroundtask.StatusCompleted, Error: "bad"},
 		{Status: backgroundtask.StatusFailed},
+		{Status: backgroundtask.StatusFailed, Error: "bad", Data: []byte("bad")},
 		{Status: backgroundtask.StatusCanceled, Data: []byte("bad")},
 		{Status: backgroundtask.StatusRunning},
 	} {
 		_, err = validateOutcome(outcome)
+		require.Error(t, err)
+	}
+}
+
+func TestEncodeEventRejectsMixedVariants_BitsUT(t *testing.T) {
+	for _, event := range []*ToolStreamEvent{
+		nil,
+		{Type: ToolStreamEventUpdate},
+		{Type: ToolStreamEventUpdate, Update: &Update{}, TaskID: "task"},
+		{Type: ToolStreamEventLaunchResult},
+		{
+			Type: ToolStreamEventLaunchResult, TaskID: "task",
+			Status: backgroundtask.StatusRunning, Output: "not terminal",
+		},
+		{
+			Type: ToolStreamEventLaunchResult, TaskID: "task",
+			Status: backgroundtask.StatusCompleted, Error: "bad",
+		},
+	} {
+		_, err := encodeEvent(event)
 		require.Error(t, err)
 	}
 }

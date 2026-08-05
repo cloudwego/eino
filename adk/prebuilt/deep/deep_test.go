@@ -497,12 +497,12 @@ func TestDeepRecoverableShellDoesNotCreateLocalRunner(t *testing.T) {
 		Manager:   manager,
 		Executors: backgroundtask.NewExecutorRegistry(),
 		RecoverableShell: &RecoverableShellConfig{
-			Shell: shell, OutputDir: "/tmp/output",
+			Shell: shell,
 		},
 	}
 
 	require.Same(t, shell, deepRecoverableShell(background))
-	require.Equal(t, "/tmp/output", deepShellOutputDir(background))
+	require.Empty(t, deepShellOutputDir(background))
 	runner, err := deepLocalShellRunner(background)
 	require.NoError(t, err)
 	require.Nil(t, runner)

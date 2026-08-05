@@ -139,8 +139,9 @@ func newTestManagedTool(
 	timeoutMs := int(timeout / time.Millisecond)
 	wrapped, err := NewManagedTool(context.Background(), &ManagedToolConfig{
 		Manager: manager, Executors: executors, Registry: registry, ToolName: "external",
-		ForegroundTimeoutMs: &timeoutMs,
-		SessionID:           func(context.Context) (string, error) { return "session", nil },
+		ForegroundTimeoutMs:  &timeoutMs,
+		ShouldAutoBackground: func(context.Context, *backgroundtask.Task) bool { return true },
+		SessionID:            func(context.Context) (string, error) { return "session", nil },
 	})
 	require.NoError(t, err)
 	return manager, wrapped
@@ -196,7 +197,7 @@ func TestManagedToolFastCompletionReturnsCanonicalTaskID(t *testing.T) {
 	)
 	require.NoError(t, err)
 	events := decodeEvents(t, []string{result})
-	require.Equal(t, "launch_result", events[0].Type)
+	require.Equal(t, ToolStreamEventLaunchResult, events[0].Type)
 	require.Equal(t, "task-fixed", events[0].TaskID)
 	require.Equal(t, backgroundtask.StatusCompleted, events[0].Status)
 	require.Equal(t, map[string]any{"answer": float64(42)}, events[0].Output)
@@ -295,9 +296,9 @@ func TestManagedToolStreamPersistsBeforeNDJSONProjection(t *testing.T) {
 	events := decodeEvents(t, records)
 	require.Len(t, events, 4)
 	for _, event := range events[:3] {
-		require.Equal(t, "update", event.Type)
+		require.Equal(t, ToolStreamEventUpdate, event.Type)
 	}
-	require.Equal(t, "launch_result", events[3].Type)
+	require.Equal(t, ToolStreamEventLaunchResult, events[3].Type)
 	require.Equal(t, "task-fixed", events[3].TaskID)
 
 	output, err := manager.ListTaskEvents(context.Background(), &backgroundtask.ListTaskEventsRequest{
@@ -354,8 +355,9 @@ func TestManagedToolDrainYieldsAndRecoversWithoutStop(t *testing.T) {
 	timeoutMs := int(timeout / time.Millisecond)
 	wrapped, err := NewManagedTool(context.Background(), &ManagedToolConfig{
 		Manager: managerOne, Executors: executorsOne, Registry: registry, ToolName: "external",
-		ForegroundTimeoutMs: &timeoutMs,
-		SessionID:           func(context.Context) (string, error) { return "session", nil },
+		ForegroundTimeoutMs:  &timeoutMs,
+		ShouldAutoBackground: func(context.Context, *backgroundtask.Task) bool { return true },
+		SessionID:            func(context.Context) (string, error) { return "session", nil },
 	})
 	require.NoError(t, err)
 	_, err = wrapped.(componenttool.InvokableTool).InvokableRun(
@@ -494,7 +496,7 @@ func TestAttack_PlainUpdateGeneratedEventIDNotMaterialized(t *testing.T) {
 	require.NoError(t, err)
 	projected := decodeEvents(t, readAllStreamRecords(t, stream))
 	require.Len(t, projected, 2)
-	require.Equal(t, "update", projected[0].Type)
+	require.Equal(t, ToolStreamEventUpdate, projected[0].Type)
 	require.NotNil(t, projected[0].Update)
 	require.NotEmpty(t, projected[0].Update.EventID)
 
@@ -585,7 +587,7 @@ func TestManagedToolProjectionDetachesWhilePersistenceContinues(t *testing.T) {
 	}
 	events := decodeEvents(t, records)
 	require.Len(t, events, 1)
-	require.Equal(t, "launch_result", events[0].Type)
+	require.Equal(t, ToolStreamEventLaunchResult, events[0].Type)
 	require.Equal(t, backgroundtask.StatusRunning, events[0].Status)
 
 	deadline := time.Now().Add(time.Second)

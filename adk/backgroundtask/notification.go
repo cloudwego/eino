@@ -23,6 +23,8 @@ import (
 )
 
 // SessionNotificationInbox stores notifications awaiting parent session turns.
+// Enqueue deduplicates by (SessionID, Notification.ID), ListPending returns
+// creation order with provider-normalized bounds, and Ack uses ItemVersion CAS.
 type SessionNotificationInbox interface {
 	Enqueue(context.Context, *EnqueueSessionNotificationRequest) (*SessionInboxItem, error)
 	ListPending(context.Context, *ListSessionNotificationsRequest) ([]*SessionInboxItem, error)
@@ -49,7 +51,8 @@ type SessionInboxItem struct {
 	CreatedAt    time.Time
 }
 
-// ListSessionNotificationsRequest lists pending notifications for a session.
+// ListSessionNotificationsRequest lists pending notifications for a session in
+// creation order. Limit defaults to 100 and is capped at 1000.
 type ListSessionNotificationsRequest struct {
 	SessionID string
 	Limit     int
@@ -83,6 +86,9 @@ type SessionActivationResult struct {
 }
 
 // Dispatcher delivers task notifications from an outbox to session inboxes.
+// All dependency fields are required when DispatchOnce is called. BatchSize
+// defaults to the outbox default and LeaseDuration defaults to 30 seconds.
+// Fields must not be mutated concurrently with DispatchOnce.
 type Dispatcher struct {
 	Outbox        NotificationOutbox
 	Tasks         TaskStore
@@ -93,6 +99,8 @@ type Dispatcher struct {
 }
 
 // DispatchOnce receives and dispatches one batch of visible notifications.
+// Delivery and activation are at least once: inboxes must deduplicate enqueue
+// and activators must coalesce repeated requests for the same pending work.
 func (d *Dispatcher) DispatchOnce(ctx context.Context) (int, error) {
 	if d.Outbox == nil || d.Tasks == nil || d.Inbox == nil || d.Activator == nil {
 		return 0, errors.New(

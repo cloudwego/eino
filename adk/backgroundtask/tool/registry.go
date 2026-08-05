@@ -30,10 +30,17 @@ import (
 // Equivalent registrations must be installed on every Worker eligible to claim
 // tasks for the selected executor key.
 type Registration struct {
-	Info         *schema.ToolInfo
-	Tool         BackgroundTool
-	Description  func(arguments string) string
+	// Info and Tool are required and snapshotted by Register.
+	Info *schema.ToolInfo
+	Tool BackgroundTool
+	// Description formats persisted arguments for task presentation. Nil uses
+	// the tool name. It may be called concurrently and must not panic.
+	Description func(arguments string) string
+	// LaunchOutput formats a successfully completed foreground result. Nil uses
+	// raw result bytes. It may be called concurrently; errors are returned to
+	// the invoking model call without changing terminal task state.
 	LaunchOutput func(context.Context, *backgroundtask.Task) (any, error)
+	// Materializer optionally derives an EventID-idempotent output file.
 	Materializer OutputMaterializer
 }
 

@@ -51,10 +51,11 @@ type checkpointState struct {
 	Sequence  int64    `json:"sequence"`
 }
 
-// RunOptionsFactory reconstructs deployment-owned run options for each task attempt.
-// Every worker serving the same registered agent name must configure a semantically
-// equivalent factory for the full lifetime of resumable tasks and return fresh option
-// values. The executor adds attempt-local checkpoint and cancellation options separately.
+// RunOptionsFactory reconstructs deployment-owned run options for each task
+// attempt. It may be called concurrently, must return fresh option values, and
+// must not panic. Every worker serving the same registered agent name must
+// configure a semantically equivalent factory for the full task lifetime. An
+// error fails that attempt before agent execution.
 type RunOptionsFactory func() ([]adk.AgentRunOption, error)
 
 // AgentRegistration binds a persisted name to worker-local dependencies. Every worker
@@ -204,6 +205,8 @@ func (e *Executor[M]) ValidateExecution(_ context.Context, task *backgroundtask.
 	return err
 }
 
+// SupportsDrain reports true because sub-agent drain captures an ADK Runner
+// checkpoint before returning a suspended result.
 func (e *Executor[M]) SupportsDrain() bool { return true }
 
 func validateSpecPayload(spec backgroundtask.Spec) (*taskPayload, error) {
@@ -597,7 +600,9 @@ func nextCheckpointSequence(previous []byte) int64 {
 	return state.Sequence + 1
 }
 
-// SubmitRequest describes a durable sub-agent task to submit.
+// SubmitRequest describes a durable sub-agent task to submit. Empty TaskID asks
+// Manager to allocate one. SessionID identifies the parent session notified
+// when the child waits for input or terminates.
 type SubmitRequest struct {
 	TaskID       string
 	SubAgentName string

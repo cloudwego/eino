@@ -62,7 +62,8 @@ type ToolConfig struct {
 // *schema.Message message type. It is the default specialization of TypedConfig.
 type Config = TypedConfig[*schema.Message]
 
-// TaskProgressReader projects executor-specific progress without mutating task state.
+// TaskProgressReader projects executor-specific progress without mutating task
+// state. Implementations may be called concurrently.
 type TaskProgressReader interface {
 	ReadProgress(context.Context, *bgtask.Task) (string, error)
 }
@@ -76,12 +77,9 @@ type TypedConfig[M adk.MessageType] struct {
 	// It is typically the same Manager the domain middlewares (subagent, filesystem)
 	// were given, so a single task-ID space spans agent and shell runs.
 	Manager *bgtask.Manager
-	// ReadTaskProgress optionally projects executor-specific progress for
-	// task_output. It must not mutate task lifecycle state.
-	ReadTaskProgress func(context.Context, *bgtask.Task) (string, error)
-	// ProgressReaders selects progress projections by persisted ExecutorKey.
-	// ReadTaskProgress remains the compatibility fallback when no reader matches.
-	ProgressReaders map[string]TaskProgressReader
+	// ProgressReadersByExecutorKey selects progress projections by persisted ExecutorKey.
+	// Readers may be called concurrently and must not mutate task lifecycle state.
+	ProgressReadersByExecutorKey map[string]TaskProgressReader
 
 	// TaskOutputToolConfig configures the task_output tool. Optional.
 	TaskOutputToolConfig *ToolConfig
@@ -108,16 +106,13 @@ func NewTyped[M adk.MessageType](ctx context.Context, config *TypedConfig[M]) (a
 
 	var tools []tool.BaseTool
 	if outputEnabled {
-		progressReaders := make(map[string]TaskProgressReader, len(config.ProgressReaders))
-		for key, reader := range config.ProgressReaders {
+		progressReaders := make(map[string]TaskProgressReader, len(config.ProgressReadersByExecutorKey))
+		for key, reader := range config.ProgressReadersByExecutorKey {
 			if key != "" && reader != nil {
 				progressReaders[key] = reader
 			}
 		}
-		outputTool, err := newTaskOutputTool(
-			mgr, config.TaskOutputToolConfig, progressReaders,
-			config.ReadTaskProgress,
-		)
+		outputTool, err := newTaskOutputTool(mgr, config.TaskOutputToolConfig, progressReaders)
 		if err != nil {
 			return nil, fmt.Errorf("backgroundtask: failed to create task_output tool: %w", err)
 		}
@@ -219,7 +214,7 @@ type taskOutputInput struct {
 	TaskID string `json:"task_id" jsonschema:"required" jsonschema_description:"The task ID to get output from"`
 	// Block defaults to true (wait for the task to finish). A *bool distinguishes
 	// "omitted" (wait) from an explicit false (return the current status now).
-	Block   *bool `json:"block,omitempty" jsonschema_description:"Whether to wait for the task to complete. Defaults to true; set false to return the current status immediately."`
+	Block   *bool `json:"block,omitempty" jsonschema_description:"Whether to wait for a lifecycle state change or completion. Defaults to true; progress events alone do not wake this wait. Set false to return current state immediately."`
 	Timeout int   `json:"timeout,omitempty" jsonschema_description:"Maximum time to wait in milliseconds when blocking. Defaults to 30000; capped at 600000."`
 }
 
@@ -232,14 +227,13 @@ func newTaskOutputTool(
 	mgr *bgtask.Manager,
 	cfg *ToolConfig,
 	progressReaders map[string]TaskProgressReader,
-	readProgress func(context.Context, *bgtask.Task) (string, error),
 ) (tool.InvokableTool, error) {
 	name := selectToolName(cfg, taskOutputToolName)
 	desc := selectToolDesc(cfg, taskOutputToolDescription, taskOutputToolDescriptionChinese)
 	return utils.InferTool(name, desc, func(ctx context.Context, input taskOutputInput) (string, error) {
 		if task, err := mgr.Get(ctx, input.TaskID); err == nil {
 			return resolveDurableTaskWithReaders(
-				ctx, mgr, task, input, progressReaders, readProgress,
+				ctx, mgr, task, input, progressReaders,
 			)
 		} else if errors.Is(err, bgtask.ErrNotFound) {
 			return fmt.Sprintf("Task %q not found", input.TaskID), nil
@@ -256,7 +250,19 @@ func resolveDurableTask(
 	input taskOutputInput,
 	readProgress func(context.Context, *bgtask.Task) (string, error),
 ) (string, error) {
-	return resolveDurableTaskWithReaders(ctx, mgr, task, input, nil, readProgress)
+	if readProgress == nil {
+		return resolveDurableTaskWithReaders(ctx, mgr, task, input, nil)
+	}
+	readers := map[string]TaskProgressReader{
+		task.Spec.ExecutorKey: taskProgressReaderFunc(readProgress),
+	}
+	return resolveDurableTaskWithReaders(ctx, mgr, task, input, readers)
+}
+
+type taskProgressReaderFunc func(context.Context, *bgtask.Task) (string, error)
+
+func (f taskProgressReaderFunc) ReadProgress(ctx context.Context, task *bgtask.Task) (string, error) {
+	return f(ctx, task)
 }
 
 func resolveDurableTaskWithReaders(
@@ -265,7 +271,6 @@ func resolveDurableTaskWithReaders(
 	task *bgtask.Task,
 	input taskOutputInput,
 	progressReaders map[string]TaskProgressReader,
-	readProgress func(context.Context, *bgtask.Task) (string, error),
 ) (string, error) {
 	block := input.Block == nil || *input.Block
 	if block && waitableStatus(task.Status) {
@@ -292,14 +297,8 @@ func resolveDurableTaskWithReaders(
 		}
 	}
 	result := formatTask(task)
-	var progressReader func(context.Context, *bgtask.Task) (string, error)
 	if reader := progressReaders[task.Spec.ExecutorKey]; reader != nil {
-		progressReader = reader.ReadProgress
-	} else {
-		progressReader = readProgress
-	}
-	if progressReader != nil {
-		progress, progressErr := progressReader(ctx, task)
+		progress, progressErr := reader.ReadProgress(ctx, task)
 		if progressErr != nil {
 			result += fmt.Sprintf("\nTranscript unavailable: %s", progressErr)
 		} else if progress != "" {

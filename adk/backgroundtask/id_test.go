@@ -98,6 +98,17 @@ func TestAllocateTaskIDRejectsInvalidGeneratorOutput(t *testing.T) {
 	})
 }
 
+func TestAllocateTaskIDRejectsUnsafeKind_BitsUT(t *testing.T) {
+	manager := New(context.Background(), nil)
+	defer closeWithTimeout(manager)
+	for _, kind := range []string{"path/segment", "has space", strings.Repeat("x", maxTaskIDKindBytes+1)} {
+		_, err := manager.AllocateTaskID(
+			context.Background(), &AllocateTaskIDRequest{Kind: kind},
+		)
+		require.ErrorContains(t, err, "safe identifier segment")
+	}
+}
+
 func TestAllocateTaskIDRejectsClosedManagerBeforeCustomGenerator(t *testing.T) {
 	var calls int
 	manager := New(context.Background(), &Config{

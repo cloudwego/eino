@@ -41,7 +41,7 @@ import (
 
 const (
 	agentToolName        = "agent"
-	TaskTypeSubagent     = "subagent"
+	TaskKindSubagent     = "subagent"
 	outputFileFormatHint = `JSONL — one JSON object per line, each a materialized event {agent_name, message}.`
 )
 
@@ -106,7 +106,7 @@ func newManagedAgentTool[M adk.MessageType](
 				return "", err
 			}
 			result, err := runner.Run(ctx, &backgroundlocal.Input{
-				Description: in.Description, Type: TaskTypeSubagent, Payload: payload,
+				Description: in.Description, Kind: TaskKindSubagent, Payload: payload,
 				OutputFile: outputFile, RunInBackground: in.RunInBackground,
 				SessionID: sessionID, NotifySession: true,
 			}, func(workCtx context.Context, runtime backgroundtask.ExecutionRuntime) (string, error) {
@@ -353,7 +353,7 @@ func reserveAgentOutput(
 
 // NameFromTask returns the persisted sub-agent routing name.
 func NameFromTask(task *backgroundtask.Task) string {
-	if task == nil || task.Spec.Kind != TaskTypeSubagent {
+	if task == nil || task.Spec.Kind != TaskKindSubagent {
 		return ""
 	}
 	var payload subagentPayloadV1

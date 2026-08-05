@@ -477,11 +477,11 @@ func TestSanitizedMessageValueAndTaskName(t *testing.T) {
 	require.Empty(t, NameFromTask(nil))
 	require.Empty(t, NameFromTask(&backgroundtask.Task{}))
 	require.Empty(t, NameFromTask(&backgroundtask.Task{Spec: backgroundtask.Spec{
-		Kind: TaskTypeSubagent, Payload: []byte(`{`),
+		Kind: TaskKindSubagent, Payload: []byte(`{`),
 	}}))
 	require.Equal(t, "worker", NameFromTask(&backgroundtask.Task{
 		Spec: backgroundtask.Spec{
-			Kind:    TaskTypeSubagent,
+			Kind:    TaskKindSubagent,
 			Payload: []byte(`{"version":1,"subagent_name":"worker"}`),
 		},
 	}))
@@ -603,9 +603,11 @@ func TestDurableTaskProgressReadsSessionTranscript(t *testing.T) {
 	feed, err := manager.ListTaskEvents(ctx, &backgroundtask.ListTaskEventsRequest{TaskID: task.Spec.ID})
 	require.NoError(t, err)
 	assert.Empty(t, feed.Events)
-	progress, err := NewDurableTaskProgressHook(
+	reader, err := NewDurableTaskProgressReader(
 		executor.SessionEventStore(), TranscriptFormat[*schema.Message](nil),
-	)(ctx, task)
+	)
+	require.NoError(t, err)
+	progress, err := reader.ReadProgress(ctx, task)
 	require.NoError(t, err)
 	assert.Contains(t, progress, `"agent_name":"worker"`)
 	assert.Contains(t, progress, `"content":"durable output"`)
@@ -638,7 +640,11 @@ func TestDurableTaskProgressUsesSharedFormatter(t *testing.T) {
 	require.NotNil(t, task)
 	assert.Equal(t, backgroundtask.StatusCompleted, task.Status)
 	assert.Equal(t, "durable output", string(task.ResultData))
-	progress, err := NewDurableTaskProgressHook(executor.SessionEventStore(), format)(ctx, task)
+	reader, err := NewDurableTaskProgressReader(
+		executor.SessionEventStore(), format,
+	)
+	require.NoError(t, err)
+	progress, err := reader.ReadProgress(ctx, task)
 	require.NoError(t, err)
 	assert.Contains(t, progress, "worker: durable output")
 	assert.NotContains(t, progress, "worker: work")
