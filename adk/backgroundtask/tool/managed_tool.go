@@ -124,6 +124,10 @@ func (t *managedTool) InvokableRun(
 	arguments string,
 	_ ...componenttool.Option,
 ) (string, error) {
+	arguments, err := t.prepareInput(ctx, arguments)
+	if err != nil {
+		return "", err
+	}
 	task, _, err := t.submit(ctx, arguments, false)
 	if err != nil {
 		return "", err
@@ -143,6 +147,10 @@ func (t *managedTool) StreamableRun(
 	arguments string,
 	_ ...componenttool.Option,
 ) (*schema.StreamReader[string], error) {
+	arguments, err := t.prepareInput(ctx, arguments)
+	if err != nil {
+		return nil, err
+	}
 	task, projection, err := t.submit(ctx, arguments, true)
 	if err != nil {
 		return nil, err
@@ -237,15 +245,6 @@ func (t *managedTool) submit(
 	arguments string,
 	withProjection bool,
 ) (*backgroundtask.Task, *liveProjection, error) {
-	if arguments == "" {
-		return nil, nil, errors.New("backgroundtask/tool: arguments are required")
-	}
-	if len(arguments) > maxArgumentsBytes {
-		return nil, nil, errors.New("backgroundtask/tool: arguments exceed configured bounds")
-	}
-	if err := t.registration.Tool.ValidateArguments(arguments); err != nil {
-		return nil, nil, fmt.Errorf("backgroundtask/tool: validate arguments: %w", err)
-	}
 	sessionID, err := t.sessionID(ctx)
 	if err != nil {
 		return nil, nil, err
@@ -311,6 +310,40 @@ func (t *managedTool) submit(
 		return nil, nil, err
 	}
 	return task, projection, nil
+}
+
+func (t *managedTool) prepareInput(
+	ctx context.Context,
+	arguments string,
+) (string, error) {
+	if arguments == "" {
+		return "", errors.New("backgroundtask/tool: arguments are required")
+	}
+	if len(arguments) > maxArgumentsBytes {
+		return "", errors.New("backgroundtask/tool: arguments exceed configured bounds")
+	}
+	prepared := arguments
+	if preparer, ok := t.registration.Tool.(InputPreparer); ok {
+		var err error
+		prepared, err = preparer.PrepareInput(ctx, arguments)
+		if err != nil {
+			return "", err
+		}
+		if prepared == "" {
+			return "", errors.New(
+				"backgroundtask/tool: input preparer returned empty arguments",
+			)
+		}
+		if len(prepared) > maxArgumentsBytes {
+			return "", errors.New(
+				"backgroundtask/tool: prepared arguments exceed configured bounds",
+			)
+		}
+	}
+	if err := t.registration.Tool.ValidateArguments(prepared); err != nil {
+		return "", fmt.Errorf("backgroundtask/tool: validate arguments: %w", err)
+	}
+	return prepared, nil
 }
 
 func (t *managedTool) shouldRunInBackground(ctx context.Context, arguments string) bool {

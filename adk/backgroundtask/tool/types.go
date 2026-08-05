@@ -33,10 +33,29 @@ const (
 
 // BackgroundTool starts one logical external operation. ValidateArguments must
 // be repeatable and side-effect free. Start receives the Eino task ID before
-// any external side effect occurs.
+// any external side effect occurs. Runner interrupts are supported only through
+// InputPreparer before the durable task is created; an error from Start is a
+// durable execution failure.
 type BackgroundTool interface {
 	ValidateArguments(arguments string) error
 	Start(context.Context, *StartRequest) (Run, error)
+}
+
+// InputPreparer optionally completes or rewrites tool arguments before durable
+// task creation. The managed-tool wrapper calls PrepareInput synchronously in
+// the parent Runner tool invocation, before task ID allocation, output
+// reservation, or persistence. Implementations may use components/tool
+// StatefulInterrupt, GetInterruptState, and GetResumeContext normally.
+//
+// PrepareInput may be re-entered by Runner and must not start the external
+// operation or perform non-idempotent side effects. Its non-empty result must
+// be the final JSON arguments: the framework validates, persists, and supplies
+// them to policy callbacks and Start or Recover.
+type InputPreparer interface {
+	PrepareInput(
+		ctx context.Context,
+		arguments string,
+	) (preparedArguments string, err error)
 }
 
 // RecoverableBackgroundTool reconstructs the same logical operation after a

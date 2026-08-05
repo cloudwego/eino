@@ -29,6 +29,7 @@ import (
 
 	"github.com/cloudwego/eino/adk/backgroundtask"
 	componenttool "github.com/cloudwego/eino/components/tool"
+	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -39,6 +40,18 @@ type fakeTool struct {
 
 type plainFakeTool struct {
 	start func(context.Context, *StartRequest) (Run, error)
+}
+
+type preparingPlainTool struct {
+	*plainFakeTool
+	prepare func(context.Context, string) (string, error)
+}
+
+func (t *preparingPlainTool) PrepareInput(
+	ctx context.Context,
+	arguments string,
+) (string, error) {
+	return t.prepare(ctx, arguments)
 }
 
 func (*plainFakeTool) ValidateArguments(arguments string) error {
@@ -156,6 +169,202 @@ func decodeEvents(t *testing.T, records []string) []*ManagedToolResponseEvent {
 		events = append(events, &event)
 	}
 	return events
+}
+
+func TestManagedToolPreparesInputBeforeTaskCreation_BitsUT(t *testing.T) {
+	prepareErr := errors.New("input preparation interrupted")
+	implementation := &preparingPlainTool{
+		plainFakeTool: &plainFakeTool{
+			start: func(context.Context, *StartRequest) (Run, error) {
+				t.Fatal("Start must not run when input preparation fails")
+				return nil, nil
+			},
+		},
+		prepare: func(context.Context, string) (string, error) {
+			return "", prepareErr
+		},
+	}
+	manager, wrapped := newTestManagedTool(t, implementation, time.Second)
+
+	_, err := wrapped.(componenttool.InvokableTool).InvokableRun(
+		context.Background(), `{"value":"original"}`,
+	)
+	require.ErrorIs(t, err, prepareErr)
+	_, err = manager.Get(context.Background(), "task-fixed")
+	require.ErrorIs(t, err, backgroundtask.ErrNotFound)
+
+	reader, err := wrapped.(componenttool.StreamableTool).StreamableRun(
+		context.Background(), `{"value":"original"}`,
+	)
+	require.ErrorIs(t, err, prepareErr)
+	require.Nil(t, reader)
+}
+
+func TestManagedToolInputPreparerSupportsTargetedResume_BitsUT(t *testing.T) {
+	ctx := context.Background()
+	implementation := &interruptingInputTool{}
+	manager, wrapped := newTestManagedTool(t, implementation, time.Second)
+	toolsNode, err := compose.NewToolNode(ctx, &compose.ToolsNodeConfig{
+		Tools: []componenttool.BaseTool{wrapped},
+	})
+	require.NoError(t, err)
+	graph := compose.NewGraph[*schema.Message, []*schema.Message]()
+	require.NoError(t, graph.AddToolsNode("tools", toolsNode))
+	require.NoError(t, graph.AddEdge(compose.START, "tools"))
+	require.NoError(t, graph.AddEdge("tools", compose.END))
+	runnable, err := graph.Compile(
+		ctx,
+		compose.WithGraphName("managed_input_preparation"),
+		compose.WithCheckPointStore(newManagedToolCheckpointStore()),
+	)
+	require.NoError(t, err)
+	const checkpointID = "managed-input-preparation"
+	input := &schema.Message{
+		Role: schema.Assistant,
+		ToolCalls: []schema.ToolCall{{
+			ID: "call_prepare",
+			Function: schema.FunctionCall{
+				Name: "external", Arguments: `{"value":"original"}`,
+			},
+		}},
+	}
+
+	_, err = runnable.Invoke(ctx, input, compose.WithCheckPointID(checkpointID))
+	require.Error(t, err)
+	interrupt, ok := compose.ExtractInterruptInfo(err)
+	require.True(t, ok)
+	require.Len(t, interrupt.InterruptContexts, 1)
+	require.Equal(t, "Which region should be used?", interrupt.InterruptContexts[0].Info)
+	_, err = manager.Get(ctx, "task-fixed")
+	require.ErrorIs(t, err, backgroundtask.ErrNotFound)
+	require.Equal(t, 0, implementation.startCount())
+
+	resumeCtx := compose.ResumeWithData(
+		ctx,
+		interrupt.InterruptContexts[0].ID,
+		"us-east",
+	)
+	_, err = runnable.Invoke(
+		resumeCtx,
+		input,
+		compose.WithCheckPointID(checkpointID),
+	)
+	require.NoError(t, err)
+	require.Equal(t, 1, implementation.startCount())
+	require.JSONEq(
+		t,
+		`{"value":"original","region":"us-east"}`,
+		implementation.startedArguments(),
+	)
+	task, err := manager.Get(ctx, "task-fixed")
+	require.NoError(t, err)
+	require.Equal(t, backgroundtask.StatusCompleted, task.Status)
+}
+
+type interruptingInputTool struct {
+	mu        sync.Mutex
+	starts    int
+	arguments string
+}
+
+func (*interruptingInputTool) PrepareInput(
+	ctx context.Context,
+	arguments string,
+) (string, error) {
+	wasInterrupted, hasState, state := componenttool.GetInterruptState[map[string]string](ctx)
+	if !wasInterrupted {
+		return "", componenttool.StatefulInterrupt(
+			ctx,
+			"Which region should be used?",
+			map[string]string{"arguments": arguments},
+		)
+	}
+	if !hasState || state["arguments"] == "" {
+		return "", errors.New("input preparation state is unavailable")
+	}
+	isTarget, hasData, region := componenttool.GetResumeContext[string](ctx)
+	if !isTarget {
+		return "", componenttool.StatefulInterrupt(ctx, nil, state)
+	}
+	if !hasData || region == "" {
+		return "", errors.New("region is required")
+	}
+	var prepared map[string]any
+	if err := json.Unmarshal([]byte(state["arguments"]), &prepared); err != nil {
+		return "", err
+	}
+	prepared["region"] = region
+	data, err := json.Marshal(prepared)
+	return string(data), err
+}
+
+func (*interruptingInputTool) ValidateArguments(arguments string) error {
+	var prepared struct {
+		Value  string `json:"value"`
+		Region string `json:"region"`
+	}
+	if err := json.Unmarshal([]byte(arguments), &prepared); err != nil {
+		return err
+	}
+	if prepared.Value == "" || prepared.Region == "" {
+		return errors.New("value and region are required")
+	}
+	return nil
+}
+
+func (t *interruptingInputTool) Start(
+	_ context.Context,
+	request *StartRequest,
+) (Run, error) {
+	t.mu.Lock()
+	t.starts++
+	t.arguments = request.Arguments
+	t.mu.Unlock()
+	return &fakeRun{wait: func(context.Context) (*Outcome, error) {
+		return &Outcome{Status: backgroundtask.StatusCompleted}, nil
+	}}, nil
+}
+
+func (t *interruptingInputTool) startCount() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.starts
+}
+
+func (t *interruptingInputTool) startedArguments() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.arguments
+}
+
+type managedToolCheckpointStore struct {
+	mu   sync.Mutex
+	data map[string][]byte
+}
+
+func newManagedToolCheckpointStore() *managedToolCheckpointStore {
+	return &managedToolCheckpointStore{data: make(map[string][]byte)}
+}
+
+func (s *managedToolCheckpointStore) Get(
+	_ context.Context,
+	checkpointID string,
+) ([]byte, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	value, ok := s.data[checkpointID]
+	return append([]byte(nil), value...), ok, nil
+}
+
+func (s *managedToolCheckpointStore) Set(
+	_ context.Context,
+	checkpointID string,
+	value []byte,
+) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.data[checkpointID] = append([]byte(nil), value...)
+	return nil
 }
 
 func TestRegistrySnapshotsToolInfo(t *testing.T) {
