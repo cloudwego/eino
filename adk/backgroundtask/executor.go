@@ -88,7 +88,6 @@ type Executor interface {
 	LeaseExpiryPolicy() LeaseExpiryPolicy
 	ValidateSpec(Spec) error
 	ValidateExecution(context.Context, *Task) error
-	ValidateResume(context.Context, Spec, []byte, []byte) ([]byte, error)
 	SupportsDrain() bool
 	Execute(context.Context, *Task, ExecutionRuntime) (*ExecutionResult, error)
 }
@@ -106,7 +105,7 @@ func NewExecutorRegistry() *ExecutorRegistry {
 
 // Register adds an executor keyed by executor.Key().
 func (r *ExecutorRegistry) Register(executor Executor) error {
-	actual, loaded, err := r.loadOrRegister(executor)
+	actual, loaded, err := r.LoadOrRegister(executor)
 	if err != nil {
 		return err
 	}
@@ -116,7 +115,9 @@ func (r *ExecutorRegistry) Register(executor Executor) error {
 	return nil
 }
 
-func (r *ExecutorRegistry) loadOrRegister(executor Executor) (Executor, bool, error) {
+// LoadOrRegister atomically returns the executor registered under the
+// candidate's key, registering the candidate when the key is not yet present.
+func (r *ExecutorRegistry) LoadOrRegister(executor Executor) (Executor, bool, error) {
 	if executor == nil {
 		return nil, false, errors.New("backgroundtask: executor and non-empty key are required")
 	}
@@ -366,7 +367,7 @@ func (r *taskRuntime) commitResult(ctx context.Context, result *ExecutionResult)
 			TaskID: r.taskID, ExpectedVersion: r.version, Error: result.Error,
 		})
 	case StatusCanceled:
-		return r.store.Cancel(ctx, &CancelTaskRequest{
+		return r.store.AckCancel(ctx, &AckCancelRequest{
 			TaskID: r.taskID, ExpectedVersion: r.version, Reason: result.Error,
 		})
 	case StatusWaitingInput:
@@ -385,17 +386,6 @@ func (r *taskRuntime) commitResult(ctx context.Context, result *ExecutionResult)
 // AllocateTaskIDRequest describes the task category used by the default ID generator.
 type AllocateTaskIDRequest struct {
 	Kind string
-}
-
-// LoadOrRegisterExecutor atomically returns the executor registered under the
-// candidate's key, registering the candidate when the key is not yet present.
-func (m *Manager) LoadOrRegisterExecutor(executor Executor) (actual Executor, loaded bool, err error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.closed {
-		return nil, false, m.closedError()
-	}
-	return m.executors.loadOrRegister(executor)
 }
 
 // AllocateTaskID allocates an opaque ID for a task category.
@@ -467,9 +457,20 @@ func (m *Manager) ListPending(ctx context.Context, req *ListPendingRequest) (*Li
 	return m.store.ListPending(ctx, req)
 }
 
-// WaitUpdate waits until a task advances beyond the requested version.
-func (m *Manager) WaitUpdate(ctx context.Context, req *WaitUpdateRequest) (*Task, error) {
-	return m.store.Wait(ctx, req)
+// ListSuspended returns checkpointed tasks that require an explicit release
+// before workers may claim them again.
+func (m *Manager) ListSuspended(
+	ctx context.Context,
+	req *ListSuspendedRequest,
+) (*ListSuspendedResult, error) {
+	return m.store.ListSuspended(ctx, req)
+}
+
+// WaitForTaskVersion blocks until the authoritative task snapshot has a
+// Version greater than req.AfterVersion. Task progress events do not advance
+// Version and therefore do not satisfy the wait.
+func (m *Manager) WaitForTaskVersion(ctx context.Context, req *WaitForTaskVersionRequest) (*Task, error) {
+	return m.store.WaitForTaskVersion(ctx, req)
 }
 
 // ReadRecentTaskEvents reads the newest bounded progress events in chronological order.
@@ -567,33 +568,43 @@ func (m *Manager) RequestCancel(
 	return result, nil
 }
 
-// Resume validates and persists input for a task waiting on external input.
+// ReleaseSuspension returns a suspended task to pending so a worker can claim
+// a new attempt from its persisted checkpoint.
+func (m *Manager) ReleaseSuspension(ctx context.Context, taskID string) (*Task, error) {
+	if taskID == "" {
+		return nil, errors.New("backgroundtask: release suspension task id is required")
+	}
+	for retry := 0; ; retry++ {
+		task, err := m.store.Get(ctx, taskID)
+		if err != nil {
+			return nil, err
+		}
+		if task.Status != StatusSuspended {
+			return nil, ErrIllegalTransition
+		}
+		released, err := m.store.ReleaseSuspension(ctx, &ReleaseSuspensionRequest{
+			TaskID: taskID, ExpectedVersion: task.Version,
+		})
+		if !errors.Is(err, ErrVersionConflict) {
+			return released, err
+		}
+		if retry >= 7 {
+			return nil, err
+		}
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+	}
+}
+
+// Resume persists opaque input for a task waiting on external input. The
+// concrete executor owns any domain-specific validation of that input.
 func (m *Manager) Resume(ctx context.Context, req *ResumeRequest) (*Task, error) {
 	if req == nil {
 		return nil, errors.New("backgroundtask: resume request is required")
 	}
-	task, err := m.store.Get(ctx, req.TaskID)
-	if err != nil {
-		return nil, err
-	}
-	if task.Version != req.ExpectedVersion {
-		return nil, ErrVersionConflict
-	}
-	if task.Status != StatusWaitingInput {
-		return nil, ErrIllegalTransition
-	}
-	executor, ok := m.executors.Resolve(task.Spec.ExecutorKey)
-	if !ok {
-		return nil, fmt.Errorf("backgroundtask: executor %q is unavailable", task.Spec.ExecutorKey)
-	}
-	normalized, err := executor.ValidateResume(
-		ctx, cloneSpec(task.Spec), cloneBytes(task.Checkpoint), cloneBytes(req.Data),
-	)
-	if err != nil {
-		return nil, err
-	}
 	return m.store.Resume(ctx, &ResumeRequest{
-		TaskID: req.TaskID, ExpectedVersion: req.ExpectedVersion, Data: normalized,
+		TaskID: req.TaskID, ExpectedVersion: req.ExpectedVersion, Data: cloneBytes(req.Data),
 	})
 }
 

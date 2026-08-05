@@ -53,15 +53,15 @@ type executor struct {
 }
 
 // RegisterExecutors installs the plain and recoverable managed-tool executors.
-func RegisterExecutors(manager *backgroundtask.Manager, registry *Registry) error {
-	if manager == nil || registry == nil {
-		return errors.New("backgroundtask/tool: manager and registry are required")
+func RegisterExecutors(executors *backgroundtask.ExecutorRegistry, registry *Registry) error {
+	if executors == nil || registry == nil {
+		return errors.New("backgroundtask/tool: executor registry and tool registry are required")
 	}
 	for _, candidate := range []*executor{
 		{registry: registry},
 		{registry: registry, recoverable: true},
 	} {
-		actual, _, err := manager.LoadOrRegisterExecutor(candidate)
+		actual, _, err := executors.LoadOrRegister(candidate)
 		if err != nil {
 			return err
 		}
@@ -121,15 +121,6 @@ func (e *executor) ValidateExecution(ctx context.Context, task *backgroundtask.T
 		return fmt.Errorf("backgroundtask/tool: tool %q is unavailable", payload.ToolName)
 	}
 	return nil
-}
-
-func (*executor) ValidateResume(
-	context.Context,
-	backgroundtask.Spec,
-	[]byte,
-	[]byte,
-) ([]byte, error) {
-	return nil, errors.New("backgroundtask/tool: waiting-input resume is unsupported")
 }
 
 func (e *executor) Execute(

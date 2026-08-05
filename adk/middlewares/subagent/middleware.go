@@ -97,7 +97,8 @@ type DurableBackgroundConfig = TypedDurableBackgroundConfig[*schema.Message]
 
 // TypedDurableBackgroundConfig configures reconstructable sub-agent runs.
 type TypedDurableBackgroundConfig[M adk.MessageType] struct {
-	Manager *backgroundtask.Manager
+	Manager   *backgroundtask.Manager
+	Executors *backgroundtask.ExecutorRegistry
 	// Executor owns the durable session dependencies and must be the same
 	// instance on every middleware sharing Manager.
 	Executor             *durablesubagent.Executor[M]
@@ -310,9 +311,10 @@ func validate[M adk.MessageType](ctx context.Context, c *TypedConfig[M]) error {
 		}
 		if c.Background.Durable != nil {
 			if c.Background.Durable.Manager == nil ||
+				c.Background.Durable.Executors == nil ||
 				c.Background.Durable.Executor == nil {
 				return fmt.Errorf(
-					"subagent: durable background Manager and Executor are required",
+					"subagent: durable background Manager, executor registry, and Executor are required",
 				)
 			}
 			manager = c.Background.Durable.Manager

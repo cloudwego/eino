@@ -18,7 +18,6 @@ package foreground
 
 import (
 	"context"
-	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -45,15 +44,6 @@ func (*coordinatorExecutor) ValidateSpec(backgroundtask.Spec) error { return nil
 
 func (*coordinatorExecutor) ValidateExecution(context.Context, *backgroundtask.Task) error {
 	return nil
-}
-
-func (*coordinatorExecutor) ValidateResume(
-	context.Context,
-	backgroundtask.Spec,
-	[]byte,
-	[]byte,
-) ([]byte, error) {
-	return nil, errors.New("resume is unsupported")
 }
 
 func (*coordinatorExecutor) SupportsDrain() bool { return false }
@@ -116,7 +106,7 @@ func waitForTerminal(
 	current := task
 	for current.Status == backgroundtask.StatusPending ||
 		current.Status == backgroundtask.StatusRunning {
-		next, err := manager.WaitUpdate(ctx, &backgroundtask.WaitUpdateRequest{
+		next, err := manager.WaitForTaskVersion(ctx, &backgroundtask.WaitForTaskVersionRequest{
 			TaskID: current.Spec.ID, AfterVersion: current.Version,
 		})
 		require.NoError(t, err)

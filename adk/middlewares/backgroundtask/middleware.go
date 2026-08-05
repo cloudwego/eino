@@ -292,7 +292,7 @@ func resolveDurableTaskWithReaders(
 		waitCtx, cancel := context.WithTimeout(ctx, time.Duration(timeout)*time.Millisecond)
 		defer cancel()
 		for waitableStatus(task.Status) {
-			next, waitErr := mgr.WaitUpdate(waitCtx, &bgtask.WaitUpdateRequest{
+			next, waitErr := mgr.WaitForTaskVersion(waitCtx, &bgtask.WaitForTaskVersionRequest{
 				TaskID: input.TaskID, AfterVersion: task.Version,
 			})
 			if waitErr != nil {

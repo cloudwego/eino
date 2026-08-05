@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"reflect"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -30,8 +31,9 @@ import (
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/adk/backgroundtask"
-	backgroundlocal "github.com/cloudwego/eino/adk/backgroundtask/local"
+	backgroundshell "github.com/cloudwego/eino/adk/backgroundtask/shell"
 	durablesubagent "github.com/cloudwego/eino/adk/backgroundtask/subagent"
+	backgroundtool "github.com/cloudwego/eino/adk/backgroundtask/tool"
 	"github.com/cloudwego/eino/adk/filesystem"
 	filesystem2 "github.com/cloudwego/eino/adk/middlewares/filesystem"
 	"github.com/cloudwego/eino/adk/prebuilt/planexecute"
@@ -42,16 +44,6 @@ import (
 	mockModel "github.com/cloudwego/eino/internal/mock/components/model"
 	"github.com/cloudwego/eino/schema"
 )
-
-func mustDeepLocalRunner(
-	t *testing.T,
-	manager *backgroundtask.Manager,
-) *backgroundlocal.Runner {
-	t.Helper()
-	runner, err := backgroundlocal.New(&backgroundlocal.Config{Manager: manager})
-	require.NoError(t, err)
-	return runner
-}
 
 func mustDeepDurableExecutor(
 	t *testing.T,
@@ -203,6 +195,22 @@ type deepMockShell struct{}
 
 func (m *deepMockShell) Execute(ctx context.Context, req *filesystem.ExecuteRequest) (*filesystem.ExecuteResponse, error) {
 	return &filesystem.ExecuteResponse{Output: "ok"}, nil
+}
+
+type deepRecoverableShellStub struct{}
+
+func (*deepRecoverableShellStub) StartCommand(
+	context.Context,
+	*backgroundshell.StartCommandRequest,
+) (backgroundtool.Run, error) {
+	return nil, nil
+}
+
+func (*deepRecoverableShellStub) RecoverCommand(
+	context.Context,
+	*backgroundshell.RecoverCommandRequest,
+) (backgroundtool.Run, error) {
+	return nil, nil
 }
 
 func TestGenModelInput(t *testing.T) {
@@ -460,9 +468,10 @@ func TestDeepAgentManagerWiring(t *testing.T) {
 
 	handlers, err := buildTypedBuiltinAgentMiddlewares(ctx, &Config{
 		WithoutWriteTodos: true,
-		Shell:             &deepMockShell{},
 	}, &BackgroundConfig{
-		Local:         &TypedLocalBackgroundConfig[*schema.Message]{Runner: mustDeepLocalRunner(t, mgr)},
+		Manager:       mgr,
+		Executors:     backgroundtask.NewExecutorRegistry(),
+		LocalShell:    &LocalShellConfig{Shell: &deepMockShell{}},
 		Notifications: testNotifications,
 	})
 	assert.NoError(t, err)
@@ -496,30 +505,78 @@ func TestDeepAgentManagerWiring(t *testing.T) {
 	assert.False(t, ok, "unmanaged execute must not expose run_in_background")
 }
 
-func TestDeepBackgroundConfigIsStrictUnion(t *testing.T) {
+func TestDeepRecoverableShellDoesNotCreateLocalRunner(t *testing.T) {
+	manager := backgroundtask.New(context.Background(), nil)
+	defer manager.Close(context.Background())
+	shell := &deepRecoverableShellStub{}
+	background := &BackgroundConfig{
+		Manager:   manager,
+		Executors: backgroundtask.NewExecutorRegistry(),
+		RecoverableShell: &RecoverableShellConfig{
+			Shell: shell, OutputDir: "/tmp/output",
+		},
+		Notifications: testNotifications,
+	}
+
+	require.Same(t, shell, deepRecoverableShell(background))
+	require.Equal(t, "/tmp/output", deepShellOutputDir(background))
+	runner, err := deepLocalShellRunner(background)
+	require.NoError(t, err)
+	require.Nil(t, runner)
+
+	handlers, err := buildTypedBuiltinAgentMiddlewares(
+		context.Background(),
+		&Config{WithoutWriteTodos: true},
+		background,
+	)
+	require.NoError(t, err)
+	require.Len(t, handlers, 1)
+}
+
+func TestDeepBackgroundConfigRequiresExplicitCapabilities(t *testing.T) {
+	backgroundType := reflect.TypeOf(BackgroundConfig{})
+	for _, field := range []string{
+		"Manager", "SubAgents", "RecoverableShell", "LocalShell",
+		"ForegroundTimeoutMs", "ShouldAutoBackground",
+	} {
+		_, ok := backgroundType.FieldByName(field)
+		require.True(t, ok, "BackgroundConfig.%s must exist", field)
+	}
+	for _, field := range []string{"Local", "Durable"} {
+		_, ok := backgroundType.FieldByName(field)
+		require.False(t, ok, "BackgroundConfig.%s must stay removed", field)
+	}
+	_, hasLegacyRecoverableShell := reflect.TypeOf(Config{}).FieldByName("RecoverableShell")
+	require.False(t, hasLegacyRecoverableShell)
+
 	_, err := New(context.Background(), &Config{Background: &BackgroundConfig{}})
-	require.ErrorContains(t, err, "exactly one")
+	require.ErrorContains(t, err, "Manager is required")
 
 	manager := backgroundtask.New(context.Background(), nil)
 	_, err = New(context.Background(), &Config{Background: &BackgroundConfig{
-		Local:   &TypedLocalBackgroundConfig[*schema.Message]{Runner: mustDeepLocalRunner(t, manager)},
-		Durable: &TypedDurableBackgroundConfig[*schema.Message]{Manager: manager},
+		Manager:   manager,
+		Executors: backgroundtask.NewExecutorRegistry(),
 	}})
-	require.ErrorContains(t, err, "exactly one")
+	require.ErrorContains(t, err, "at least one background capability is required")
 
 	_, err = New(context.Background(), &Config{Background: &BackgroundConfig{
-		Local: &TypedLocalBackgroundConfig[*schema.Message]{Runner: mustDeepLocalRunner(t, manager)},
+		Manager:    manager,
+		Executors:  backgroundtask.NewExecutorRegistry(),
+		LocalShell: &LocalShellConfig{},
 	}})
-	require.ErrorContains(t, err, "notification delivery is required")
+	require.ErrorContains(t, err, "requires Shell or StreamingShell")
 
 	_, err = New(context.Background(), &Config{Background: &BackgroundConfig{
-		Durable:       &TypedDurableBackgroundConfig[*schema.Message]{Manager: manager},
+		Manager:       manager,
+		Executors:     backgroundtask.NewExecutorRegistry(),
+		SubAgents:     &TypedDurableSubAgentConfig[*schema.Message]{},
 		Notifications: testNotifications,
 	}})
 	require.ErrorContains(t, err, "Executor is required")
+
 }
 
-func TestDeepDurableBackgroundForwardsRunOptionsFactories(t *testing.T) {
+func TestDeepSubAgentBackgroundForwardsRunOptionsFactories(t *testing.T) {
 	factory := func() ([]adk.AgentRunOption, error) {
 		return []adk.AgentRunOption{adk.WithTimelineEvents()}, nil
 	}
@@ -534,10 +591,12 @@ func TestDeepDurableBackgroundForwardsRunOptionsFactories(t *testing.T) {
 	defer manager.Close(context.Background())
 	background := deepSubagentBackground(&TypedConfig[*schema.Message]{
 		Background: &TypedBackgroundConfig[*schema.Message]{
+			Manager:          manager,
+			Executors:        backgroundtask.NewExecutorRegistry(),
 			Notifications:    testNotifications,
 			TranscriptFormat: format,
-			Durable: &TypedDurableBackgroundConfig[*schema.Message]{
-				Manager: manager, Executor: mustDeepDurableExecutor(t),
+			SubAgents: &TypedDurableSubAgentConfig[*schema.Message]{
+				Executor: mustDeepDurableExecutor(t),
 				RunOptionsFactories: map[string]durablesubagent.RunOptionsFactory{
 					"worker": factory,
 				},
@@ -570,8 +629,10 @@ func TestDeepAgentNewTypedWithManager(t *testing.T) {
 		ChatModel:   cm,
 		Shell:       &deepMockShell{},
 		Background: &BackgroundConfig{
-			Durable: &TypedDurableBackgroundConfig[*schema.Message]{
-				Manager: mgr, Executor: mustDeepDurableExecutor(t),
+			Manager:   mgr,
+			Executors: backgroundtask.NewExecutorRegistry(),
+			SubAgents: &TypedDurableSubAgentConfig[*schema.Message]{
+				Executor: mustDeepDurableExecutor(t),
 			},
 			Notifications: testNotifications,
 		},

@@ -116,6 +116,9 @@ type BackgroundConfig struct {
 	// Manager is required for RecoverableShell. When omitted and Runner is set,
 	// Runner.Manager is used for backward compatibility.
 	Manager *backgroundtask.Manager
+	// Executors is the registry configured on Manager. It is required for
+	// RecoverableShell executor installation.
+	Executors *backgroundtask.ExecutorRegistry
 	// ToolRegistry may be shared with other managed background tools on the same
 	// Manager. A private registry is created when omitted.
 	ToolRegistry *backgroundtool.Registry
@@ -248,6 +251,9 @@ func (c *Config) Validate() error {
 	}
 	if c.RecoverableShell != nil && backgroundManager(c.Background) == nil {
 		return errors.New("recoverable shell requires a background Manager")
+	}
+	if c.RecoverableShell != nil && c.Background.Executors == nil {
+		return errors.New("recoverable shell requires a background executor registry")
 	}
 	return nil
 }
@@ -439,6 +445,9 @@ func (c *MiddlewareConfig) Validate() error {
 	}
 	if c.RecoverableShell != nil && backgroundManager(c.Background) == nil {
 		return errors.New("recoverable shell requires a background Manager")
+	}
+	if c.RecoverableShell != nil && c.Background.Executors == nil {
+		return errors.New("recoverable shell requires a background executor registry")
 	}
 	return nil
 }
@@ -785,7 +794,8 @@ func newRecoverableExecuteTool(
 		return nil, err
 	}
 	return backgroundtool.NewManagedTool(ctx, &backgroundtool.ManagedToolConfig{
-		Manager: manager, Registry: registry, ToolName: toolName,
+		Manager: manager, Executors: background.Executors,
+		Registry: registry, ToolName: toolName,
 		Notifications:        background.Notifications,
 		ForegroundTimeoutMs:  background.ForegroundTimeoutMs,
 		ShouldAutoBackground: background.ShouldAutoBackground,

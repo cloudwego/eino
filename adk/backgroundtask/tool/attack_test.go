@@ -58,13 +58,15 @@ func newAttackManagedTool(
 	require.NoError(t, registry.Register(&Registration{
 		Info: toolInfo("attack"), Tool: implementation, Materializer: materializer,
 	}))
+	executors := backgroundtask.NewExecutorRegistry()
 	manager := backgroundtask.New(context.Background(), &backgroundtask.Config{
+		Executors: executors,
 		IDGen: func(context.Context, *backgroundtask.AllocateTaskIDRequest) (string, error) {
 			return "attack-task", nil
 		},
 	})
 	wrapped, err := NewManagedTool(context.Background(), &ManagedToolConfig{
-		Manager: manager, Registry: registry, ToolName: "attack",
+		Manager: manager, Executors: executors, Registry: registry, ToolName: "attack",
 		Notifications: notificationRuntime{},
 		SessionID:     func(context.Context) (string, error) { return "session", nil },
 	})

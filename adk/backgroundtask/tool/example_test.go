@@ -59,7 +59,9 @@ func (exampleRun) Wait(context.Context) (*backgroundtool.Outcome, error) {
 func (exampleRun) Stop(context.Context) error { return nil }
 
 func ExampleNewManagedTool() {
+	executors := backgroundtask.NewExecutorRegistry()
 	manager := backgroundtask.New(context.Background(), &backgroundtask.Config{
+		Executors: executors,
 		IDGen: func(context.Context, *backgroundtask.AllocateTaskIDRequest) (string, error) {
 			return "task_video", nil
 		},
@@ -75,7 +77,7 @@ func ExampleNewManagedTool() {
 		Tool: exampleTool{},
 	})
 	wrapped, _ := backgroundtool.NewManagedTool(context.Background(), &backgroundtool.ManagedToolConfig{
-		Manager: manager, Registry: registry, ToolName: "generate_video",
+		Manager: manager, Executors: executors, Registry: registry, ToolName: "generate_video",
 		Notifications: exampleNotifications{},
 		SessionID:     func(context.Context) (string, error) { return "session", nil },
 	})

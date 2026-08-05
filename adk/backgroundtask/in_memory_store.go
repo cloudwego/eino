@@ -27,12 +27,8 @@ import (
 	"time"
 )
 
-// Clock returns the Store's current time.
-type Clock func() time.Time
-
 // InMemoryStoreConfig configures the in-memory reference Store.
 type InMemoryStoreConfig struct {
-	Clock                Clock
 	ActiveAttemptTimeout time.Duration
 	MaxValueBytes        int64
 }
@@ -57,7 +53,7 @@ type InMemoryStore struct {
 	taskEventKeys map[string]map[string]TaskEvent
 	outbox        []*memoryOutboxItem
 	notify        chan struct{}
-	now           Clock
+	now           func() time.Time
 	activeTimeout time.Duration
 	maxValue      int64
 }
@@ -75,9 +71,6 @@ func NewInMemoryStore(config *InMemoryStoreConfig) *InMemoryStore {
 		maxValue:      1 << 20,
 	}
 	if config != nil {
-		if config.Clock != nil {
-			s.now = config.Clock
-		}
 		if config.ActiveAttemptTimeout > 0 {
 			s.activeTimeout = config.ActiveAttemptTimeout
 		}
@@ -122,33 +115,6 @@ func (s *InMemoryStore) Create(_ context.Context, req *CreateTaskRequest) (*Task
 	return cloneTask(task), nil
 }
 
-func (s *InMemoryStore) CreateAndStart(_ context.Context, req *CreateTaskRequest) (*Task, error) {
-	if req == nil {
-		return nil, errors.New("backgroundtask: create and start request is required")
-	}
-	if err := validateCreateTaskRequest(req); err != nil {
-		return nil, err
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if _, ok := s.tasks[req.Spec.ID]; ok {
-		return nil, ErrAlreadyExists
-	}
-	now := s.now()
-	spec := cloneSpec(req.Spec)
-	if spec.CreatedAt.IsZero() {
-		spec.CreatedAt = now
-	}
-	task := &Task{
-		Spec: spec, LeaseExpiryPolicy: req.LeaseExpiryPolicy,
-		Status: StatusRunning, Version: 1, Attempt: 1, UpdatedAt: now,
-	}
-	s.tasks[spec.ID] = task
-	s.active[spec.ID] = memoryActiveAttempt{expiresAt: now.Add(s.activeTimeout)}
-	s.signalLocked()
-	return cloneTask(task), nil
-}
-
 func (s *InMemoryStore) Get(_ context.Context, taskID string) (*Task, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -164,13 +130,47 @@ func (s *InMemoryStore) ListPending(_ context.Context, req *ListPendingRequest) 
 	if req == nil {
 		return nil, errors.New("backgroundtask: list pending request is required")
 	}
-	if len(req.ExecutorKeys) == 0 {
-		return nil, errors.New("backgroundtask: list pending requires executor keys")
+	tasks, nextCursor, err := s.listByStatus(
+		req.ExecutorKeys, req.Cursor, req.Limit, StatusPending, "pending",
+	)
+	if err != nil {
+		return nil, err
 	}
-	executorKeys := make(map[string]struct{}, len(req.ExecutorKeys))
-	for _, key := range req.ExecutorKeys {
+	return &ListPendingResult{Tasks: tasks, NextCursor: nextCursor}, nil
+}
+
+func (s *InMemoryStore) ListSuspended(
+	_ context.Context,
+	req *ListSuspendedRequest,
+) (*ListSuspendedResult, error) {
+	if req == nil {
+		return nil, errors.New("backgroundtask: list suspended request is required")
+	}
+	tasks, nextCursor, err := s.listByStatus(
+		req.ExecutorKeys, req.Cursor, req.Limit, StatusSuspended, "suspended",
+	)
+	if err != nil {
+		return nil, err
+	}
+	return &ListSuspendedResult{Tasks: tasks, NextCursor: nextCursor}, nil
+}
+
+func (s *InMemoryStore) listByStatus(
+	keys []string,
+	cursor string,
+	limit int,
+	status Status,
+	name string,
+) ([]*Task, string, error) {
+	if len(keys) == 0 {
+		return nil, "", fmt.Errorf("backgroundtask: list %s requires executor keys", name)
+	}
+	executorKeys := make(map[string]struct{}, len(keys))
+	for _, key := range keys {
 		if key == "" {
-			return nil, errors.New("backgroundtask: list pending executor key is required")
+			return nil, "", fmt.Errorf(
+				"backgroundtask: list %s executor key is required", name,
+			)
 		}
 		executorKeys[key] = struct{}{}
 	}
@@ -182,35 +182,35 @@ func (s *InMemoryStore) ListPending(_ context.Context, req *ListPendingRequest) 
 	}
 	sort.Strings(ids)
 	start := 0
-	if req.Cursor != "" {
-		cursor, err := base64.RawURLEncoding.DecodeString(req.Cursor)
+	if cursor != "" {
+		decoded, err := base64.RawURLEncoding.DecodeString(cursor)
 		if err != nil {
-			return nil, errors.New("backgroundtask: invalid pending-task cursor")
+			return nil, "", fmt.Errorf("backgroundtask: invalid %s-task cursor", name)
 		}
-		lastID := string(cursor)
+		lastID := string(decoded)
 		start = sort.Search(len(ids), func(i int) bool { return ids[i] > lastID })
 	}
-	limit := req.Limit
 	if limit <= 0 || limit > 1000 {
 		limit = 100
 	}
-	result := &ListPendingResult{}
+	var tasks []*Task
+	var nextCursor string
 	for i := start; i < len(ids); i++ {
 		t := s.tasks[ids[i]]
 		s.resolveExpiredLocked(t)
-		if t.Status != StatusPending {
+		if t.Status != status {
 			continue
 		}
 		if _, ok := executorKeys[t.Spec.ExecutorKey]; !ok {
 			continue
 		}
-		result.Tasks = append(result.Tasks, cloneTask(t))
-		if len(result.Tasks) == limit {
-			result.NextCursor = base64.RawURLEncoding.EncodeToString([]byte(ids[i]))
+		tasks = append(tasks, cloneTask(t))
+		if len(tasks) == limit {
+			nextCursor = base64.RawURLEncoding.EncodeToString([]byte(ids[i]))
 			break
 		}
 	}
-	return result, nil
+	return tasks, nextCursor, nil
 }
 
 func (s *InMemoryStore) Start(_ context.Context, req *StartTaskRequest) (*Task, error) {
@@ -468,9 +468,9 @@ func (s *InMemoryStore) Yield(_ context.Context, req *YieldTaskRequest) (*Task, 
 	return cloneTask(t), nil
 }
 
-func (s *InMemoryStore) Cancel(_ context.Context, req *CancelTaskRequest) (*Task, error) {
+func (s *InMemoryStore) AckCancel(_ context.Context, req *AckCancelRequest) (*Task, error) {
 	if req == nil {
-		return nil, errors.New("backgroundtask: cancel request is required")
+		return nil, errors.New("backgroundtask: acknowledge cancellation request is required")
 	}
 	if len(req.Reason) > 4096 {
 		return nil, errors.New("backgroundtask: cancellation reason exceeds 4096 bytes")
@@ -588,9 +588,11 @@ func (s *InMemoryStore) ReleaseSuspension(_ context.Context, req *ReleaseSuspens
 	return cloneTask(t), nil
 }
 
-func (s *InMemoryStore) Wait(ctx context.Context, req *WaitUpdateRequest) (*Task, error) {
+// WaitForTaskVersion blocks until the stored task has a Version greater than
+// req.AfterVersion.
+func (s *InMemoryStore) WaitForTaskVersion(ctx context.Context, req *WaitForTaskVersionRequest) (*Task, error) {
 	if req == nil {
-		return nil, errors.New("backgroundtask: wait request is required")
+		return nil, errors.New("backgroundtask: wait for task version request is required")
 	}
 	for {
 		s.mu.Lock()

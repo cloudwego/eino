@@ -33,6 +33,7 @@ import (
 // ManagedToolConfig configures the framework-owned model-facing wrapper.
 type ManagedToolConfig struct {
 	Manager       *backgroundtask.Manager
+	Executors     *backgroundtask.ExecutorRegistry
 	Registry      *Registry
 	ToolName      string
 	Notifications backgroundtask.NotificationDeliveryRuntime
@@ -62,9 +63,12 @@ func NewManagedTool(
 	ctx context.Context,
 	config *ManagedToolConfig,
 ) (componenttool.BaseTool, error) {
-	if config == nil || config.Manager == nil || config.Registry == nil ||
+	if config == nil || config.Manager == nil || config.Executors == nil ||
+		config.Registry == nil ||
 		config.ToolName == "" {
-		return nil, errors.New("backgroundtask/tool: manager, registry, and tool name are required")
+		return nil, errors.New(
+			"backgroundtask/tool: manager, executor registry, tool registry, and tool name are required",
+		)
 	}
 	if config.Notifications == nil {
 		return nil, errors.New("backgroundtask/tool: notification delivery is required")
@@ -74,7 +78,7 @@ func NewManagedTool(
 	); err != nil {
 		return nil, fmt.Errorf("backgroundtask/tool: notification delivery: %w", err)
 	}
-	if err := RegisterExecutors(config.Manager, config.Registry); err != nil {
+	if err := RegisterExecutors(config.Executors, config.Registry); err != nil {
 		return nil, err
 	}
 	registration, recoverable, ok := config.Registry.resolveAny(config.ToolName)

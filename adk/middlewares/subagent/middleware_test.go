@@ -66,12 +66,24 @@ func (notificationDeliveryStub) ValidateNotificationDelivery(
 var testNotifications backgroundtask.NotificationDeliveryRuntime = notificationDeliveryStub{}
 
 var testManagerStores sync.Map
+var testManagerExecutors sync.Map
 
 func newTestManager(ctx context.Context) *backgroundtask.Manager {
 	store := backgroundtask.NewInMemoryStore(nil)
-	manager := backgroundtask.New(ctx, &backgroundtask.Config{Store: store})
+	executors := backgroundtask.NewExecutorRegistry()
+	manager := backgroundtask.New(ctx, &backgroundtask.Config{
+		Store: store, Executors: executors,
+	})
 	testManagerStores.Store(manager, store)
+	testManagerExecutors.Store(manager, executors)
 	return manager
+}
+
+func executorsForTest(t *testing.T, manager *backgroundtask.Manager) *backgroundtask.ExecutorRegistry {
+	t.Helper()
+	executors, ok := testManagerExecutors.Load(manager)
+	require.True(t, ok)
+	return executors.(*backgroundtask.ExecutorRegistry)
 }
 
 func (m *mockAgent) Name(context.Context) string        { return m.name }
@@ -106,9 +118,12 @@ func durableExecutor(t *testing.T) *durablesubagent.Executor[*schema.Message] {
 func durableBackground(t *testing.T, mgr *backgroundtask.Manager, agents ...adk.Agent) *BackgroundConfig {
 	t.Helper()
 	_ = agents
+	executors, ok := testManagerExecutors.Load(mgr)
+	require.True(t, ok)
 	return &BackgroundConfig{
 		Durable: &DurableBackgroundConfig{
-			Manager: mgr, Executor: durableExecutor(t),
+			Manager: mgr, Executors: executors.(*backgroundtask.ExecutorRegistry),
+			Executor: durableExecutor(t),
 		},
 		Notifications: testNotifications,
 	}
@@ -116,7 +131,11 @@ func durableBackground(t *testing.T, mgr *backgroundtask.Manager, agents ...adk.
 
 func mustLocalRunner(t *testing.T, manager *backgroundtask.Manager) *backgroundlocal.Runner {
 	t.Helper()
-	runner, err := backgroundlocal.New(&backgroundlocal.Config{Manager: manager})
+	executors, ok := testManagerExecutors.Load(manager)
+	require.True(t, ok)
+	runner, err := backgroundlocal.New(&backgroundlocal.Config{
+		Manager: manager, Executors: executors.(*backgroundtask.ExecutorRegistry),
+	})
 	require.NoError(t, err)
 	return runner
 }
@@ -193,7 +212,7 @@ func TestConfigValidation(t *testing.T) {
 		SubAgents: []adk.Agent{agent},
 		Background: &BackgroundConfig{
 			Local:   &LocalBackgroundConfig{Runner: mustLocalRunner(t, manager)},
-			Durable: &DurableBackgroundConfig{Manager: manager},
+			Durable: &DurableBackgroundConfig{Manager: manager, Executors: executorsForTest(t, manager)},
 		},
 	})
 	require.ErrorContains(t, err, "exactly one")
@@ -201,11 +220,11 @@ func TestConfigValidation(t *testing.T) {
 	_, err = New(context.Background(), &Config{
 		SubAgents: []adk.Agent{agent},
 		Background: &BackgroundConfig{
-			Durable:       &DurableBackgroundConfig{Manager: manager},
+			Durable:       &DurableBackgroundConfig{Manager: manager, Executors: executorsForTest(t, manager)},
 			Notifications: testNotifications,
 		},
 	})
-	require.ErrorContains(t, err, "Manager and Executor")
+	require.ErrorContains(t, err, "Manager, executor registry, and Executor")
 
 	_, err = New(context.Background(), &Config{
 		SubAgents: []adk.Agent{agent},
@@ -587,7 +606,7 @@ func TestDurableTaskProgressReadsSessionTranscript(t *testing.T) {
 	middleware, err := New(ctx, &Config{
 		SubAgents: []adk.Agent{agent},
 		Background: &BackgroundConfig{Durable: &DurableBackgroundConfig{
-			Manager: manager, Executor: executor,
+			Manager: manager, Executors: executorsForTest(t, manager), Executor: executor,
 		}, Notifications: testNotifications},
 	})
 	require.NoError(t, err)
@@ -624,7 +643,7 @@ func TestDurableTaskProgressUsesSharedFormatter(t *testing.T) {
 	middleware, err := New(ctx, &Config{
 		SubAgents: []adk.Agent{agent},
 		Background: &BackgroundConfig{Durable: &DurableBackgroundConfig{
-			Manager: manager, Executor: executor,
+			Manager: manager, Executors: executorsForTest(t, manager), Executor: executor,
 		}, TranscriptFormat: format, Notifications: testNotifications},
 	})
 	require.NoError(t, err)
@@ -724,7 +743,7 @@ func TestDurableAgentToolUsesRegisteredRunOptionsFactory(t *testing.T) {
 	middleware, err := New(ctx, &Config{
 		SubAgents: []adk.Agent{agent},
 		Background: &BackgroundConfig{Durable: &DurableBackgroundConfig{
-			Manager: manager, Executor: executor,
+			Manager: manager, Executors: executorsForTest(t, manager), Executor: executor,
 			RunOptionsFactories: map[string]durablesubagent.RunOptionsFactory{
 				"worker": func() ([]adk.AgentRunOption, error) {
 					return []adk.AgentRunOption{adk.WrapImplSpecificOptFn(

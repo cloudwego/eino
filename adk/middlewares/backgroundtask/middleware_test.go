@@ -48,6 +48,22 @@ func (notificationDeliveryStub) ValidateNotificationDelivery(
 }
 
 var testNotifications bgtask.NotificationDeliveryRuntime = notificationDeliveryStub{}
+var managerExecutors sync.Map
+
+func newBackgroundManager(ctx context.Context, config *bgtask.Config) *bgtask.Manager {
+	if config == nil {
+		config = &bgtask.Config{}
+	} else {
+		copy := *config
+		config = &copy
+	}
+	if config.Executors == nil {
+		config.Executors = bgtask.NewExecutorRegistry()
+	}
+	manager := bgtask.New(ctx, config)
+	managerExecutors.Store(manager, config.Executors)
+	return manager
+}
 
 func closeWithTimeout(m *bgtask.Manager) {
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
@@ -56,7 +72,13 @@ func closeWithTimeout(m *bgtask.Manager) {
 }
 
 func runWork(m *bgtask.Manager, description string, background bool, work backgroundlocal.WorkFunc) (*bgtask.Task, error) {
-	runner, err := backgroundlocal.New(&backgroundlocal.Config{Manager: m})
+	executors, ok := managerExecutors.Load(m)
+	if !ok {
+		return nil, errors.New("test manager executor registry is unavailable")
+	}
+	runner, err := backgroundlocal.New(&backgroundlocal.Config{
+		Manager: m, Executors: executors.(*bgtask.ExecutorRegistry),
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -78,11 +100,29 @@ func waitUntilTerminal(
 	for task.Status != bgtask.StatusCompleted &&
 		task.Status != bgtask.StatusFailed &&
 		task.Status != bgtask.StatusCanceled {
-		task, err = manager.WaitUpdate(ctx, &bgtask.WaitUpdateRequest{
+		task, err = manager.WaitForTaskVersion(ctx, &bgtask.WaitForTaskVersionRequest{
 			TaskID: taskID, AfterVersion: task.Version,
 		})
 		require.NoError(t, err)
 	}
+	return task
+}
+
+func createAndStartTask(
+	t *testing.T,
+	store *bgtask.InMemoryStore,
+	spec bgtask.Spec,
+	policy bgtask.LeaseExpiryPolicy,
+) *bgtask.Task {
+	t.Helper()
+	task, err := store.Create(context.Background(), &bgtask.CreateTaskRequest{
+		Spec: spec, LeaseExpiryPolicy: policy,
+	})
+	require.NoError(t, err)
+	task, err = store.Start(context.Background(), &bgtask.StartTaskRequest{
+		TaskID: task.Spec.ID, ExpectedVersion: task.Version,
+	})
+	require.NoError(t, err)
 	return task
 }
 
@@ -165,7 +205,7 @@ func TestNew_NilManager(t *testing.T) {
 }
 
 func TestNew_RequiresNotificationDelivery(t *testing.T) {
-	mgr := bgtask.New(context.Background(), nil)
+	mgr := newBackgroundManager(context.Background(), nil)
 	defer closeWithTimeout(mgr)
 
 	_, err := New(context.Background(), &Config{Manager: mgr})
@@ -176,7 +216,7 @@ func TestNew_RequiresNotificationDelivery(t *testing.T) {
 }
 
 func TestMiddleware_InjectsControlTools(t *testing.T) {
-	mgr := bgtask.New(context.Background(), &bgtask.Config{})
+	mgr := newBackgroundManager(context.Background(), &bgtask.Config{})
 	defer closeWithTimeout(mgr)
 
 	tools := injectedTools(t, mgr)
@@ -188,7 +228,7 @@ func TestMiddleware_InjectsControlTools(t *testing.T) {
 }
 
 func TestMiddleware_ToolConfig_NameOverrideAndDisable(t *testing.T) {
-	mgr := bgtask.New(context.Background(), &bgtask.Config{})
+	mgr := newBackgroundManager(context.Background(), &bgtask.Config{})
 	defer closeWithTimeout(mgr)
 
 	customDesc := "custom output desc"
@@ -210,7 +250,7 @@ func TestMiddleware_ToolConfig_NameOverrideAndDisable(t *testing.T) {
 }
 
 func TestMiddleware_ToolConfig_DisableBoth(t *testing.T) {
-	mgr := bgtask.New(context.Background(), &bgtask.Config{})
+	mgr := newBackgroundManager(context.Background(), &bgtask.Config{})
 	defer closeWithTimeout(mgr)
 
 	mw, err := New(context.Background(), &Config{
@@ -225,7 +265,7 @@ func TestMiddleware_ToolConfig_DisableBoth(t *testing.T) {
 }
 
 func TestMiddleware_InjectsInstruction(t *testing.T) {
-	mgr := bgtask.New(context.Background(), &bgtask.Config{})
+	mgr := newBackgroundManager(context.Background(), &bgtask.Config{})
 	defer closeWithTimeout(mgr)
 
 	mw, err := New(context.Background(), &Config{Manager: mgr, Notifications: testNotifications})
@@ -242,7 +282,7 @@ func TestMiddleware_InjectsInstruction(t *testing.T) {
 // tool as registered: a renamed task_output is referenced by its new name, and
 // the default name no longer appears.
 func TestMiddleware_InstructionUsesRenamedTool(t *testing.T) {
-	mgr := bgtask.New(context.Background(), &bgtask.Config{})
+	mgr := newBackgroundManager(context.Background(), &bgtask.Config{})
 	defer closeWithTimeout(mgr)
 
 	mw, err := New(context.Background(), &Config{
@@ -260,7 +300,7 @@ func TestMiddleware_InstructionUsesRenamedTool(t *testing.T) {
 // TestMiddleware_InstructionOmitsDisabledTool verifies a disabled tool's sentence
 // is dropped so the model is never told to call a tool that was not registered.
 func TestMiddleware_InstructionOmitsDisabledTool(t *testing.T) {
-	mgr := bgtask.New(context.Background(), &bgtask.Config{})
+	mgr := newBackgroundManager(context.Background(), &bgtask.Config{})
 	defer closeWithTimeout(mgr)
 
 	mw, err := New(context.Background(), &Config{
@@ -278,7 +318,7 @@ func TestMiddleware_InstructionOmitsDisabledTool(t *testing.T) {
 // TestMiddleware_InstructionEmptyWhenAllDisabled verifies a fully-disabled
 // middleware injects neither tools nor a background-task instruction.
 func TestMiddleware_InstructionEmptyWhenAllDisabled(t *testing.T) {
-	mgr := bgtask.New(context.Background(), &bgtask.Config{})
+	mgr := newBackgroundManager(context.Background(), &bgtask.Config{})
 	defer closeWithTimeout(mgr)
 
 	mw, err := New(context.Background(), &Config{
@@ -294,7 +334,7 @@ func TestMiddleware_InstructionEmptyWhenAllDisabled(t *testing.T) {
 }
 
 func TestTaskOutputTool(t *testing.T) {
-	mgr := bgtask.New(context.Background(), &bgtask.Config{})
+	mgr := newBackgroundManager(context.Background(), &bgtask.Config{})
 	defer closeWithTimeout(mgr)
 
 	result, err := runWork(mgr, "test task", false, completedWork("task result"))
@@ -310,7 +350,7 @@ func TestTaskOutputTool(t *testing.T) {
 }
 
 func TestTaskOutputTool_NotFound(t *testing.T) {
-	mgr := bgtask.New(context.Background(), &bgtask.Config{})
+	mgr := newBackgroundManager(context.Background(), &bgtask.Config{})
 	defer closeWithTimeout(mgr)
 
 	tl := findTool(t, injectedTools(t, mgr), taskOutputToolName)
@@ -320,7 +360,7 @@ func TestTaskOutputTool_NotFound(t *testing.T) {
 }
 
 func TestTaskOutputTool_NonBlockingRunningThenTerminal(t *testing.T) {
-	mgr := bgtask.New(context.Background(), &bgtask.Config{})
+	mgr := newBackgroundManager(context.Background(), &bgtask.Config{})
 	defer closeWithTimeout(mgr)
 
 	runResult, err := runWork(mgr, "running task", true, blockingWork())
@@ -344,13 +384,13 @@ func TestTaskOutputTool_NonBlockingRunningThenTerminal(t *testing.T) {
 
 func TestTaskOutputNonBlockingReturnsCurrentSnapshot(t *testing.T) {
 	store := bgtask.NewInMemoryStore(nil)
-	submitter := bgtask.New(context.Background(), &bgtask.Config{Store: store})
+	submitter := newBackgroundManager(context.Background(), &bgtask.Config{Store: store})
 	task, err := runWork(submitter, "racing task", false, completedWork("done"))
 	require.NoError(t, err)
 	require.NoError(t, submitter.Close(context.Background()))
 
 	racingStore := &staleFirstGetStore{Store: store, first: true}
-	reader := bgtask.New(context.Background(), &bgtask.Config{Store: racingStore})
+	reader := newBackgroundManager(context.Background(), &bgtask.Config{Store: racingStore})
 	defer closeWithTimeout(reader)
 	outputTool := findTool(t, injectedTools(t, reader), taskOutputToolName)
 	output, err := outputTool.InvokableRun(context.Background(), fmt.Sprintf(
@@ -364,7 +404,7 @@ func TestTaskOutputNonBlockingReturnsCurrentSnapshot(t *testing.T) {
 }
 
 func TestTaskStopTool(t *testing.T) {
-	mgr := bgtask.New(context.Background(), &bgtask.Config{})
+	mgr := newBackgroundManager(context.Background(), &bgtask.Config{})
 	defer closeWithTimeout(mgr)
 
 	runResult, err := runWork(mgr, "running task", true, blockingWork())
@@ -386,30 +426,28 @@ func TestTaskStopTool(t *testing.T) {
 
 func TestTaskStopTool_DurableRequestedAndCanceledText(t *testing.T) {
 	store := bgtask.NewInMemoryStore(nil)
-	mgr := bgtask.New(context.Background(), &bgtask.Config{Store: store})
+	mgr := newBackgroundManager(context.Background(), &bgtask.Config{Store: store})
 	defer closeWithTimeout(mgr)
 	tl := findTool(t, injectedTools(t, mgr), taskStopToolName)
 
-	running, err := store.CreateAndStart(context.Background(), &bgtask.CreateTaskRequest{
-		Spec: bgtask.Spec{
+	running := createAndStartTask(
+		t, store, bgtask.Spec{
 			ID: "durable-running", ExecutorKey: "test",
 		},
-		LeaseExpiryPolicy: bgtask.LeaseExpiryRetry,
-	})
-	require.NoError(t, err)
+		bgtask.LeaseExpiryRetry,
+	)
 	result, err := tl.InvokableRun(
 		context.Background(), fmt.Sprintf(`{"task_id":"%s"}`, running.Spec.ID),
 	)
 	require.NoError(t, err)
 	assert.Equal(t, "Stop requested for task durable-running", result)
 
-	failOnExpiry, err := store.CreateAndStart(context.Background(), &bgtask.CreateTaskRequest{
-		Spec: bgtask.Spec{
+	failOnExpiry := createAndStartTask(
+		t, store, bgtask.Spec{
 			ID: "durable-fail-on-expiry", ExecutorKey: "test",
 		},
-		LeaseExpiryPolicy: bgtask.LeaseExpiryFail,
-	})
-	require.NoError(t, err)
+		bgtask.LeaseExpiryFail,
+	)
 	result, err = tl.InvokableRun(
 		context.Background(), fmt.Sprintf(`{"task_id":"%s"}`, failOnExpiry.Spec.ID),
 	)
@@ -431,7 +469,7 @@ func TestTaskStopTool_DurableRequestedAndCanceledText(t *testing.T) {
 }
 
 func TestTaskStopTool_AlreadyDone(t *testing.T) {
-	mgr := bgtask.New(context.Background(), &bgtask.Config{})
+	mgr := newBackgroundManager(context.Background(), &bgtask.Config{})
 	defer closeWithTimeout(mgr)
 
 	runResult, err := runWork(mgr, "done task", false, completedWork("done"))
@@ -445,7 +483,7 @@ func TestTaskStopTool_AlreadyDone(t *testing.T) {
 }
 
 func TestControlToolsUsePossessionOfTaskID(t *testing.T) {
-	mgr := bgtask.New(context.Background(), &bgtask.Config{})
+	mgr := newBackgroundManager(context.Background(), &bgtask.Config{})
 	defer closeWithTimeout(mgr)
 	task, err := runWork(mgr, "secret task", true, blockingWork())
 	require.NoError(t, err)
@@ -545,7 +583,7 @@ type waitErrorStore struct {
 	err error
 }
 
-func (s waitErrorStore) Wait(context.Context, *bgtask.WaitUpdateRequest) (*bgtask.Task, error) {
+func (s waitErrorStore) WaitForTaskVersion(context.Context, *bgtask.WaitForTaskVersionRequest) (*bgtask.Task, error) {
 	return nil, s.err
 }
 
@@ -556,7 +594,7 @@ func TestResolveDurableTaskBlockingBoundaries(t *testing.T) {
 		LeaseExpiryPolicy: bgtask.LeaseExpiryRetry,
 	})
 	require.NoError(t, err)
-	manager := bgtask.New(context.Background(), &bgtask.Config{Store: store})
+	manager := newBackgroundManager(context.Background(), &bgtask.Config{Store: store})
 
 	canceledCtx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -569,7 +607,7 @@ func TestResolveDurableTaskBlockingBoundaries(t *testing.T) {
 	require.Contains(t, result, "Status: pending")
 
 	wantErr := errors.New("wait failed")
-	failingManager := bgtask.New(context.Background(), &bgtask.Config{
+	failingManager := newBackgroundManager(context.Background(), &bgtask.Config{
 		Store: waitErrorStore{Store: store, err: wantErr},
 	})
 	_, err = resolveDurableTask(

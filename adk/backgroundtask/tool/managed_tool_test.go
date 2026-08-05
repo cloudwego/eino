@@ -146,14 +146,16 @@ func newTestManagedTool(
 		Info: toolInfo("external"), Tool: implementation,
 		Description: func(string) string { return "External operation" },
 	}))
+	executors := backgroundtask.NewExecutorRegistry()
 	manager := backgroundtask.New(context.Background(), &backgroundtask.Config{
+		Executors: executors,
 		IDGen: func(context.Context, *backgroundtask.AllocateTaskIDRequest) (string, error) {
 			return "task-fixed", nil
 		},
 	})
 	timeoutMs := int(timeout / time.Millisecond)
 	wrapped, err := NewManagedTool(context.Background(), &ManagedToolConfig{
-		Manager: manager, Registry: registry, ToolName: "external",
+		Manager: manager, Executors: executors, Registry: registry, ToolName: "external",
 		Notifications: notificationRuntime{}, ForegroundTimeoutMs: &timeoutMs,
 		SessionID: func(context.Context) (string, error) { return "session", nil },
 	})
@@ -359,15 +361,17 @@ func TestManagedToolDrainYieldsAndRecoversWithoutStop(t *testing.T) {
 	require.NoError(t, registry.Register(&Registration{
 		Info: toolInfo("external"), Tool: implementation,
 	}))
+	executorsOne := backgroundtask.NewExecutorRegistry()
 	managerOne := backgroundtask.New(context.Background(), &backgroundtask.Config{
-		Store: store, IDGen: func(context.Context, *backgroundtask.AllocateTaskIDRequest) (string, error) {
+		Store: store, Executors: executorsOne,
+		IDGen: func(context.Context, *backgroundtask.AllocateTaskIDRequest) (string, error) {
 			return "recover-task", nil
 		},
 	})
 	timeout := time.Millisecond
 	timeoutMs := int(timeout / time.Millisecond)
 	wrapped, err := NewManagedTool(context.Background(), &ManagedToolConfig{
-		Manager: managerOne, Registry: registry, ToolName: "external",
+		Manager: managerOne, Executors: executorsOne, Registry: registry, ToolName: "external",
 		Notifications: notificationRuntime{}, ForegroundTimeoutMs: &timeoutMs,
 		SessionID: func(context.Context) (string, error) { return "session", nil },
 	})
@@ -384,8 +388,11 @@ func TestManagedToolDrainYieldsAndRecoversWithoutStop(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, backgroundtask.StatusPending, yielded.Status)
 
-	managerTwo := backgroundtask.New(context.Background(), &backgroundtask.Config{Store: store})
-	require.NoError(t, RegisterExecutors(managerTwo, registry))
+	executorsTwo := backgroundtask.NewExecutorRegistry()
+	managerTwo := backgroundtask.New(context.Background(), &backgroundtask.Config{
+		Store: store, Executors: executorsTwo,
+	})
+	require.NoError(t, RegisterExecutors(executorsTwo, registry))
 	require.NoError(t, managerTwo.Execute(context.Background(), "recover-task"))
 	request := <-recovered
 	require.Equal(t, "recover-task", request.TaskID)
@@ -423,13 +430,15 @@ func TestManagedToolMaterializerIsDerivedAndFailureIsNonTerminal(t *testing.T) {
 	require.NoError(t, registry.Register(&Registration{
 		Info: toolInfo("external"), Tool: implementation, Materializer: materializer,
 	}))
+	executors := backgroundtask.NewExecutorRegistry()
 	manager := backgroundtask.New(context.Background(), &backgroundtask.Config{
+		Executors: executors,
 		IDGen: func(context.Context, *backgroundtask.AllocateTaskIDRequest) (string, error) {
 			return "materialized", nil
 		},
 	})
 	wrapped, err := NewManagedTool(context.Background(), &ManagedToolConfig{
-		Manager: manager, Registry: registry, ToolName: "external",
+		Manager: manager, Executors: executors, Registry: registry, ToolName: "external",
 		Notifications: notificationRuntime{},
 		SessionID:     func(context.Context) (string, error) { return "session", nil },
 	})
@@ -486,13 +495,15 @@ func TestAttack_PlainUpdateGeneratedEventIDNotMaterialized(t *testing.T) {
 	require.NoError(t, registry.Register(&Registration{
 		Info: toolInfo("plain"), Tool: implementation, Materializer: materializer,
 	}))
+	executors := backgroundtask.NewExecutorRegistry()
 	manager := backgroundtask.New(context.Background(), &backgroundtask.Config{
+		Executors: executors,
 		IDGen: func(context.Context, *backgroundtask.AllocateTaskIDRequest) (string, error) {
 			return "plain-generated-event", nil
 		},
 	})
 	wrapped, err := NewManagedTool(context.Background(), &ManagedToolConfig{
-		Manager: manager, Registry: registry, ToolName: "plain",
+		Manager: manager, Executors: executors, Registry: registry, ToolName: "plain",
 		Notifications: notificationRuntime{},
 		SessionID:     func(context.Context) (string, error) { return "session", nil },
 	})
@@ -536,13 +547,15 @@ func TestManagedToolRejectsInvalidFinalOutputWithoutPartialResult(t *testing.T) 
 			return func() {}, nil
 		},
 	}))
+	executors := backgroundtask.NewExecutorRegistry()
 	manager := backgroundtask.New(context.Background(), &backgroundtask.Config{
+		Executors: executors,
 		IDGen: func(context.Context, *backgroundtask.AllocateTaskIDRequest) (string, error) {
 			return "invalid-output", nil
 		},
 	})
 	wrapped, err := NewManagedTool(context.Background(), &ManagedToolConfig{
-		Manager: manager, Registry: registry, ToolName: "external",
+		Manager: manager, Executors: executors, Registry: registry, ToolName: "external",
 		Notifications: notificationRuntime{},
 		SessionID:     func(context.Context) (string, error) { return "session", nil },
 	})
@@ -657,8 +670,11 @@ func TestRecoverableCancellationAfterLeaseLossReattachesToStop(t *testing.T) {
 	require.NoError(t, err)
 	time.Sleep(10 * time.Millisecond)
 
-	manager := backgroundtask.New(context.Background(), &backgroundtask.Config{Store: store})
-	require.NoError(t, RegisterExecutors(manager, registry))
+	executors := backgroundtask.NewExecutorRegistry()
+	manager := backgroundtask.New(context.Background(), &backgroundtask.Config{
+		Store: store, Executors: executors,
+	})
+	require.NoError(t, RegisterExecutors(executors, registry))
 	pending, err := manager.Get(context.Background(), created.Spec.ID)
 	require.NoError(t, err)
 	require.Equal(t, backgroundtask.StatusPending, pending.Status)

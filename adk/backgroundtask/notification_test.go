@@ -51,9 +51,10 @@ func (s *routedRecordingSink) AcceptTarget(
 
 func TestDispatcherRedeliversUntilSinkAccepts_BitsUT(t *testing.T) {
 	clock := &testClock{now: time.Unix(400, 0)}
-	store := NewInMemoryStore(&InMemoryStoreConfig{
-		Clock: clock.Now, ActiveAttemptTimeout: time.Minute,
-	})
+	store := newInMemoryStoreWithClock(
+		&InMemoryStoreConfig{ActiveAttemptTimeout: time.Minute},
+		clock.Now,
+	)
 	task := createAndStart(t, store, "dispatch")
 	completed, err := store.Complete(context.Background(), &CompleteTaskRequest{
 		TaskID: "dispatch", ExpectedVersion: task.Version, Data: []byte("result"),

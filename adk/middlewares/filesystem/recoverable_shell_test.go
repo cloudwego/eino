@@ -74,7 +74,9 @@ func (e assertError) Error() string { return string(e) }
 
 func TestRecoverableShellUsesManagedToolLifecycle(t *testing.T) {
 	shell := &recoverableShellStub{}
+	executors := backgroundtask.NewExecutorRegistry()
 	manager := backgroundtask.New(context.Background(), &backgroundtask.Config{
+		Executors: executors,
 		IDGen: func(context.Context, *backgroundtask.AllocateTaskIDRequest) (string, error) {
 			return "shell-task", nil
 		},
@@ -82,7 +84,7 @@ func TestRecoverableShellUsesManagedToolLifecycle(t *testing.T) {
 	config := &MiddlewareConfig{
 		RecoverableShell: shell,
 		Background: &BackgroundConfig{
-			Manager: manager, Notifications: testNotifications,
+			Manager: manager, Executors: executors, Notifications: testNotifications,
 		},
 		notificationSessionID: func(context.Context) (string, error) {
 			return "session", nil
@@ -127,7 +129,7 @@ func TestRecoverableShellConfigurationIsExclusive(t *testing.T) {
 
 	managerOne := backgroundtask.New(context.Background(), nil)
 	managerTwo := backgroundtask.New(context.Background(), nil)
-	runner, err := backgroundlocal.New(&backgroundlocal.Config{Manager: managerOne})
+	runner, err := backgroundlocal.New(&backgroundlocal.Config{Manager: managerOne, Executors: backgroundtask.NewExecutorRegistry()})
 	require.NoError(t, err)
 	config = &MiddlewareConfig{
 		Shell: &mockShellBackend{},
@@ -143,7 +145,7 @@ func TestRecoverableShellLegacyConstructorAndNotificationValidation(t *testing.T
 	middleware, err := NewMiddleware(context.Background(), &Config{
 		RecoverableShell: &recoverableShellStub{},
 		Background: &BackgroundConfig{
-			Manager: manager, Notifications: testNotifications,
+			Manager: manager, Executors: backgroundtask.NewExecutorRegistry(), Notifications: testNotifications,
 		},
 	})
 	require.NoError(t, err)
@@ -155,13 +157,13 @@ func TestRecoverableShellLegacyConstructorAndNotificationValidation(t *testing.T
 
 	_, err = New(context.Background(), &MiddlewareConfig{
 		RecoverableShell: &recoverableShellStub{},
-		Background:       &BackgroundConfig{Manager: manager},
+		Background:       &BackgroundConfig{Manager: manager, Executors: backgroundtask.NewExecutorRegistry()},
 	})
 	require.ErrorContains(t, err, "notification delivery is required")
 	_, err = New(context.Background(), &MiddlewareConfig{
 		RecoverableShell: &recoverableShellStub{},
 		Background: &BackgroundConfig{
-			Manager: manager, Notifications: rejectingNotificationRuntime{},
+			Manager: manager, Executors: backgroundtask.NewExecutorRegistry(), Notifications: rejectingNotificationRuntime{},
 		},
 	})
 	require.ErrorContains(t, err, "delivery unavailable")

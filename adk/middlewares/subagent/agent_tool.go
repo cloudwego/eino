@@ -387,7 +387,7 @@ func newDurableAgentTool[M adk.MessageType](
 			return nil, err
 		}
 	}
-	registered, _, err := config.Manager.LoadOrRegisterExecutor(executor)
+	registered, _, err := config.Executors.LoadOrRegister(executor)
 	if err != nil {
 		return nil, err
 	}

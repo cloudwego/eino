@@ -31,11 +31,15 @@ import (
 func TestProgressReaderFormatsBoundedRecentUpdates(t *testing.T) {
 	store := backgroundtask.NewInMemoryStore(nil)
 	manager := backgroundtask.New(context.Background(), &backgroundtask.Config{Store: store})
-	created, err := store.CreateAndStart(context.Background(), &backgroundtask.CreateTaskRequest{
+	created, err := store.Create(context.Background(), &backgroundtask.CreateTaskRequest{
 		Spec: backgroundtask.Spec{
 			ID: "progress", ExecutorKey: RecoverableExecutorKey, Kind: "background_tool",
 		},
 		LeaseExpiryPolicy: backgroundtask.LeaseExpiryRetry,
+	})
+	require.NoError(t, err)
+	created, err = store.Start(context.Background(), &backgroundtask.StartTaskRequest{
+		TaskID: created.Spec.ID, ExpectedVersion: created.Version,
 	})
 	require.NoError(t, err)
 	for index, text := range []string{"one", "two", "three"} {
@@ -61,11 +65,15 @@ func TestProgressReaderFormatsBoundedRecentUpdates(t *testing.T) {
 func TestProgressReaderFallsBackForUnknownCompatibleRecord(t *testing.T) {
 	store := backgroundtask.NewInMemoryStore(nil)
 	manager := backgroundtask.New(context.Background(), &backgroundtask.Config{Store: store})
-	task, err := store.CreateAndStart(context.Background(), &backgroundtask.CreateTaskRequest{
+	task, err := store.Create(context.Background(), &backgroundtask.CreateTaskRequest{
 		Spec: backgroundtask.Spec{
 			ID: "raw", ExecutorKey: ExecutorKey, Kind: "background_tool",
 		},
 		LeaseExpiryPolicy: backgroundtask.LeaseExpiryFail,
+	})
+	require.NoError(t, err)
+	task, err = store.Start(context.Background(), &backgroundtask.StartTaskRequest{
+		TaskID: task.Spec.ID, ExpectedVersion: task.Version,
 	})
 	require.NoError(t, err)
 	_, err = store.AppendTaskEvent(context.Background(), &backgroundtask.AppendTaskEventRequest{

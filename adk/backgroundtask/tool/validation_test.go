@@ -89,8 +89,6 @@ func TestExecutorValidationBoundaries(t *testing.T) {
 			Payload: encodedPayload(t, "plain", `{}`),
 		},
 	}))
-	_, err := plainExecutor.ValidateResume(context.Background(), backgroundtask.Spec{}, nil, nil)
-	require.ErrorContains(t, err, "unsupported")
 }
 
 func TestPayloadAndResultValidationBoundaries(t *testing.T) {
@@ -172,14 +170,17 @@ func TestManagedToolConstructionAndSubmissionErrors(t *testing.T) {
 	_, err := NewManagedTool(context.Background(), nil)
 	require.Error(t, err)
 	registry := NewRegistry()
+	executors := backgroundtask.NewExecutorRegistry()
 	_, err = NewManagedTool(context.Background(), &ManagedToolConfig{
-		Manager:  backgroundtask.New(context.Background(), nil),
-		Registry: registry, ToolName: "missing",
+		Manager:   backgroundtask.New(context.Background(), nil),
+		Executors: executors,
+		Registry:  registry, ToolName: "missing",
 	})
 	require.ErrorContains(t, err, "notification delivery")
 	_, err = NewManagedTool(context.Background(), &ManagedToolConfig{
-		Manager:  backgroundtask.New(context.Background(), nil),
-		Registry: registry, ToolName: "missing", Notifications: rejectingNotifications{},
+		Manager:   backgroundtask.New(context.Background(), nil),
+		Executors: executors,
+		Registry:  registry, ToolName: "missing", Notifications: rejectingNotifications{},
 	})
 	require.ErrorContains(t, err, "route unavailable")
 
@@ -189,9 +190,10 @@ func TestManagedToolConstructionAndSubmissionErrors(t *testing.T) {
 		}}, nil
 	}}
 	require.NoError(t, registry.Register(&Registration{Info: toolInfo("plain"), Tool: plain}))
-	manager := backgroundtask.New(context.Background(), nil)
+	executors = backgroundtask.NewExecutorRegistry()
+	manager := backgroundtask.New(context.Background(), &backgroundtask.Config{Executors: executors})
 	wrapped, err := NewManagedTool(context.Background(), &ManagedToolConfig{
-		Manager: manager, Registry: registry, ToolName: "plain",
+		Manager: manager, Executors: executors, Registry: registry, ToolName: "plain",
 		Notifications: notificationRuntime{},
 		SessionID: func(context.Context) (string, error) {
 			return "", errors.New("session unavailable")
@@ -222,8 +224,12 @@ func TestManagedToolConstructionAndSubmissionErrors(t *testing.T) {
 		require.NoError(t, localRegistry.Register(&Registration{
 			Info: toolInfo("materialized"), Tool: plain, Materializer: testCase.materializer,
 		}))
+		localExecutors := backgroundtask.NewExecutorRegistry()
+		localManager := backgroundtask.New(context.Background(), &backgroundtask.Config{
+			Executors: localExecutors,
+		})
 		localWrapped, createErr := NewManagedTool(context.Background(), &ManagedToolConfig{
-			Manager:  backgroundtask.New(context.Background(), nil),
+			Manager: localManager, Executors: localExecutors,
 			Registry: localRegistry, ToolName: "materialized",
 			Notifications: notificationRuntime{},
 			SessionID:     func(context.Context) (string, error) { return "session", nil },
@@ -292,10 +298,11 @@ func TestManagedToolTimeoutOverrideStopsRun(t *testing.T) {
 	require.NoError(t, registry.Register(&Registration{
 		Info: toolInfo("timeout"), Tool: implementation,
 	}))
-	manager := backgroundtask.New(context.Background(), nil)
+	executors := backgroundtask.NewExecutorRegistry()
+	manager := backgroundtask.New(context.Background(), &backgroundtask.Config{Executors: executors})
 	timeoutMs := 5
 	wrapped, err := NewManagedTool(context.Background(), &ManagedToolConfig{
-		Manager: manager, Registry: registry, ToolName: "timeout",
+		Manager: manager, Executors: executors, Registry: registry, ToolName: "timeout",
 		Notifications: notificationRuntime{},
 		ShouldAutoBackground: func(context.Context, *backgroundtask.Task) bool {
 			return false

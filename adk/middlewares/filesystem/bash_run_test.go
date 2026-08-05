@@ -76,11 +76,16 @@ func (r *outputRuntimeStub) ReportOutputFailure(context.Context, string) error {
 }
 
 var testManagerStores sync.Map
+var testManagerExecutors sync.Map
 
 func newTestManager(ctx context.Context) *backgroundtask.Manager {
 	store := backgroundtask.NewInMemoryStore(nil)
-	manager := backgroundtask.New(ctx, &backgroundtask.Config{Store: store})
+	executors := backgroundtask.NewExecutorRegistry()
+	manager := backgroundtask.New(ctx, &backgroundtask.Config{
+		Store: store, Executors: executors,
+	})
 	testManagerStores.Store(manager, store)
+	testManagerExecutors.Store(manager, executors)
 	return manager
 }
 
@@ -90,7 +95,11 @@ func mustLocalRunner(
 	configure ...func(*backgroundlocal.Config),
 ) *backgroundlocal.Runner {
 	t.Helper()
-	config := &backgroundlocal.Config{Manager: manager}
+	executors, ok := testManagerExecutors.Load(manager)
+	require.True(t, ok)
+	config := &backgroundlocal.Config{
+		Manager: manager, Executors: executors.(*backgroundtask.ExecutorRegistry),
+	}
 	for _, apply := range configure {
 		apply(config)
 	}

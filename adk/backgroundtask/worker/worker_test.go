@@ -41,9 +41,6 @@ func (*testExecutor) ValidateSpec(backgroundtask.Spec) error { return nil }
 func (e *testExecutor) ValidateExecution(context.Context, *backgroundtask.Task) error {
 	return e.validateErr
 }
-func (*testExecutor) ValidateResume(context.Context, backgroundtask.Spec, []byte, []byte) ([]byte, error) {
-	return nil, nil
-}
 func (*testExecutor) SupportsDrain() bool { return true }
 func (e *testExecutor) Execute(
 	ctx context.Context,

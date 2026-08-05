@@ -68,6 +68,7 @@ type NoticeInfo struct {
 // Config configures process-local execution and ephemeral foreground projection.
 type Config struct {
 	Manager              *backgroundtask.Manager
+	Executors            *backgroundtask.ExecutorRegistry
 	ForegroundTimeoutMs  *int
 	ShouldAutoBackground func(context.Context, *backgroundtask.Task) bool
 	BackgroundNotice     func(context.Context, NoticeInfo) string
@@ -83,14 +84,14 @@ type Runner struct {
 
 // New constructs a Runner and registers its process-local executor.
 func New(config *Config) (*Runner, error) {
-	if config == nil || config.Manager == nil {
-		return nil, errors.New("backgroundtask/local: manager is required")
+	if config == nil || config.Manager == nil || config.Executors == nil {
+		return nil, errors.New("backgroundtask/local: manager and executor registry are required")
 	}
 	timeoutMs := foreground.DefaultTimeoutMs
 	if config.ForegroundTimeoutMs != nil {
 		timeoutMs = *config.ForegroundTimeoutMs
 	}
-	registered, _, err := config.Manager.LoadOrRegisterExecutor(
+	registered, _, err := config.Executors.LoadOrRegister(
 		&executor{works: make(map[string]WorkFunc)},
 	)
 	if err != nil {
@@ -320,15 +321,6 @@ func (e *executor) ValidateExecution(_ context.Context, task *backgroundtask.Tas
 	}
 	_, err := e.resolve(task.Spec)
 	return err
-}
-
-func (*executor) ValidateResume(
-	context.Context,
-	backgroundtask.Spec,
-	[]byte,
-	[]byte,
-) ([]byte, error) {
-	return nil, errors.New("backgroundtask/local: process-local tasks cannot resume")
 }
 
 func (*executor) SupportsDrain() bool { return false }

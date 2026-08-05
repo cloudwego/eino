@@ -36,12 +36,14 @@ import (
 func newTestRunner(t *testing.T, configure ...func(*Config)) (*Runner, *backgroundtask.Manager) {
 	t.Helper()
 	var sequence int64
+	executors := backgroundtask.NewExecutorRegistry()
 	manager := backgroundtask.New(context.Background(), &backgroundtask.Config{
+		Executors: executors,
 		IDGen: func(context.Context, *backgroundtask.AllocateTaskIDRequest) (string, error) {
 			return fmt.Sprintf("test_%d", atomic.AddInt64(&sequence, 1)), nil
 		},
 	})
-	config := &Config{Manager: manager}
+	config := &Config{Manager: manager, Executors: executors}
 	for _, apply := range configure {
 		apply(config)
 	}
@@ -65,7 +67,7 @@ func waitTerminal(
 	defer cancel()
 	for task.Status == backgroundtask.StatusPending ||
 		task.Status == backgroundtask.StatusRunning {
-		next, err := manager.WaitUpdate(ctx, &backgroundtask.WaitUpdateRequest{
+		next, err := manager.WaitForTaskVersion(ctx, &backgroundtask.WaitForTaskVersionRequest{
 			TaskID: task.Spec.ID, AfterVersion: task.Version,
 		})
 		require.NoError(t, err)
@@ -376,10 +378,6 @@ func TestRunnerLocalContracts(t *testing.T) {
 	require.Same(t, manager, runner.Manager())
 	var nilRunner *Runner
 	require.Nil(t, nilRunner.Manager())
-	_, err := runner.executor.ValidateResume(
-		context.Background(), backgroundtask.Spec{}, nil, nil,
-	)
-	require.Error(t, err)
 	require.Error(t, runner.executor.ValidateSpec(backgroundtask.Spec{
 		ExecutorKey: "wrong",
 	}))

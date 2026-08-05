@@ -34,6 +34,23 @@ func closeWithTimeout(manager *Manager) {
 	_ = manager.Close(ctx)
 }
 
+type firstReleaseConflictStore struct {
+	Store
+	once sync.Once
+}
+
+func (s *firstReleaseConflictStore) ReleaseSuspension(
+	ctx context.Context,
+	req *ReleaseSuspensionRequest,
+) (*Task, error) {
+	conflict := false
+	s.once.Do(func() { conflict = true })
+	if conflict {
+		return nil, ErrVersionConflict
+	}
+	return s.Store.ReleaseSuspension(ctx, req)
+}
+
 func TestManagerReadRecentTaskEventsDelegatesToStore_BitsUT(t *testing.T) {
 	store := NewInMemoryStore(nil)
 	manager := New(context.Background(), &Config{Store: store})
@@ -153,6 +170,46 @@ func TestManagerCloseDrainsActiveAttempt(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, StatusSuspended, suspended.Status)
 	require.Equal(t, "checkpoint", string(suspended.Checkpoint))
+
+	discovered, err := manager.ListSuspended(
+		context.Background(),
+		&ListSuspendedRequest{ExecutorKeys: []string{"test"}},
+	)
+	require.NoError(t, err)
+	require.Len(t, discovered.Tasks, 1)
+	require.Equal(t, task.Spec.ID, discovered.Tasks[0].Spec.ID)
+
+	released, err := manager.ReleaseSuspension(context.Background(), task.Spec.ID)
+	require.NoError(t, err)
+	require.Equal(t, StatusPending, released.Status)
+	require.Equal(t, "checkpoint", string(released.Checkpoint))
+
+	pending, err := manager.ListPending(
+		context.Background(),
+		&ListPendingRequest{ExecutorKeys: []string{"test"}},
+	)
+	require.NoError(t, err)
+	require.Len(t, pending.Tasks, 1)
+	require.Equal(t, task.Spec.ID, pending.Tasks[0].Spec.ID)
+}
+
+func TestManagerReleaseSuspensionRetriesVersionConflict_BitsUT(t *testing.T) {
+	store := NewInMemoryStore(nil)
+	started := createAndStart(t, store, "release-retry")
+	suspended, err := store.Suspend(context.Background(), &SuspendTaskRequest{
+		TaskID: started.Spec.ID, ExpectedVersion: started.Version,
+		Checkpoint: []byte("checkpoint"),
+	})
+	require.NoError(t, err)
+
+	manager := New(context.Background(), &Config{
+		Store: &firstReleaseConflictStore{Store: store},
+	})
+	defer closeWithTimeout(manager)
+	released, err := manager.ReleaseSuspension(context.Background(), suspended.Spec.ID)
+	require.NoError(t, err)
+	require.Equal(t, StatusPending, released.Status)
+	require.Equal(t, "checkpoint", string(released.Checkpoint))
 }
 
 func TestManagerCloseCancelsNonDrainableAttemptAtDeadline(t *testing.T) {
@@ -234,14 +291,12 @@ func TestManagerCancelNonRecoverableAttempt(t *testing.T) {
 
 func TestManagerReplaysCancellationReasonToRecoveryAttempt(t *testing.T) {
 	clock := &testClock{now: time.Unix(100, 0)}
-	store := NewInMemoryStore(&InMemoryStoreConfig{
-		Clock: clock.Now, ActiveAttemptTimeout: time.Second,
-	})
-	started, err := store.CreateAndStart(context.Background(), &CreateTaskRequest{
-		Spec: validSpec("recover-cancel-reason"), LeaseExpiryPolicy: LeaseExpiryRetry,
-	})
-	require.NoError(t, err)
-	_, err = store.RequestCancel(context.Background(), &RequestCancelRequest{
+	store := newInMemoryStoreWithClock(
+		&InMemoryStoreConfig{ActiveAttemptTimeout: time.Second},
+		clock.Now,
+	)
+	started := createAndStart(t, store, "recover-cancel-reason")
+	_, err := store.RequestCancel(context.Background(), &RequestCancelRequest{
 		TaskID: started.Spec.ID, ExpectedVersion: started.Version,
 		Reason: "operator request",
 	})
@@ -289,7 +344,7 @@ func TestManagerDispatchReadBoundaries(t *testing.T) {
 		TaskID: submitted.Spec.ID, ExpectedVersion: submitted.Version,
 	})
 	require.NoError(t, err)
-	updated, err := manager.WaitUpdate(context.Background(), &WaitUpdateRequest{
+	updated, err := manager.WaitForTaskVersion(context.Background(), &WaitForTaskVersionRequest{
 		TaskID: submitted.Spec.ID, AfterVersion: submitted.Version,
 	})
 	require.NoError(t, err)
@@ -452,9 +507,9 @@ func TestRuntimeCancellationReconciliationRejectsInvalidState(t *testing.T) {
 	require.ErrorIs(t, runtime.poison, ErrLeaseLost)
 }
 
-func TestManagerResumeValidationBoundaries(t *testing.T) {
+func TestManagerResumeLifecycleBoundaries(t *testing.T) {
 	store := NewInMemoryStore(nil)
-	executor := &scriptedExecutor{resumeErr: errors.New("invalid resume")}
+	executor := &scriptedExecutor{}
 	manager := managerWithExecutor(t, store, executor, time.Minute)
 	require.Error(t, func() error {
 		_, err := manager.Resume(context.Background(), nil)
@@ -480,10 +535,12 @@ func TestManagerResumeValidationBoundaries(t *testing.T) {
 		TaskID: waiting.Spec.ID, ExpectedVersion: waiting.Version + 1,
 	})
 	require.ErrorIs(t, err, ErrVersionConflict)
-	_, err = manager.Resume(context.Background(), &ResumeRequest{
+	resumed, err := manager.Resume(context.Background(), &ResumeRequest{
 		TaskID: waiting.Spec.ID, ExpectedVersion: waiting.Version,
+		Data: []byte("opaque"),
 	})
-	require.ErrorContains(t, err, "invalid resume")
+	require.NoError(t, err)
+	require.Equal(t, []byte("opaque"), resumed.PendingResume)
 
 	missingExecutorStore := NewInMemoryStore(nil)
 	started = createAndStart(t, missingExecutorStore, "missing-executor")
@@ -495,10 +552,11 @@ func TestManagerResumeValidationBoundaries(t *testing.T) {
 	)
 	require.NoError(t, err)
 	missingExecutorManager := New(context.Background(), &Config{Store: missingExecutorStore})
-	_, err = missingExecutorManager.Resume(context.Background(), &ResumeRequest{
+	resumed, err = missingExecutorManager.Resume(context.Background(), &ResumeRequest{
 		TaskID: waiting.Spec.ID, ExpectedVersion: waiting.Version,
 	})
-	require.ErrorContains(t, err, `executor "test" is unavailable`)
+	require.NoError(t, err)
+	require.Equal(t, StatusPending, resumed.Status)
 }
 
 type firstGetBlockingStore struct {
@@ -563,10 +621,8 @@ func TestManagerCancelPendingLocalTaskAfterExecuteValidationFailure(t *testing.T
 	require.Equal(t, StatusCanceled, result.task.Status)
 }
 
-func TestManagerLoadOrRegisterExecutorIsAtomic_BitsUT(t *testing.T) {
-	manager := New(context.Background(), nil)
-	defer closeWithTimeout(manager)
-
+func TestExecutorRegistryLoadOrRegisterIsAtomic_BitsUT(t *testing.T) {
+	registry := NewExecutorRegistry()
 	const callers = 32
 	type result struct {
 		actual Executor
@@ -581,7 +637,7 @@ func TestManagerLoadOrRegisterExecutorIsAtomic_BitsUT(t *testing.T) {
 		go func() {
 			defer group.Done()
 			<-start
-			actual, loaded, err := manager.LoadOrRegisterExecutor(
+			actual, loaded, err := registry.LoadOrRegister(
 				&scriptedExecutor{key: "atomic"},
 			)
 			results <- result{actual: actual, loaded: loaded, err: err}
@@ -608,9 +664,6 @@ func TestManagerLoadOrRegisterExecutorIsAtomic_BitsUT(t *testing.T) {
 	}
 	require.Equal(t, 1, registrations)
 
-	require.NoError(t, manager.Close(context.Background()))
-	_, _, err := manager.LoadOrRegisterExecutor(&scriptedExecutor{key: "closed"})
-	require.ErrorContains(t, err, "has shut down")
 }
 
 type recordingNotificationDelivery struct {

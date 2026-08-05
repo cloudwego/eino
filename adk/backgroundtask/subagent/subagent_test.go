@@ -269,11 +269,11 @@ func resumeFixture(
 	}, state
 }
 
-func TestExecutorValidateResumeTargets_BitsUT(t *testing.T) {
+func TestExecutorValidatesResumeTargets_BitsUT(t *testing.T) {
 	t.Run("exact target", func(t *testing.T) {
 		executor, spec, checkpoint := resumeFixture(t, "approval")
-		result, err := executor.ValidateResume(
-			context.Background(), spec, checkpoint, []byte(`{"approval":{"approved":true}}`),
+		result, err := executor.validateResume(
+			spec, checkpoint, []byte(`{"approval":{"approved":true}}`),
 		)
 		require.NoError(t, err)
 		assert.JSONEq(t, `{"approval":{"approved":true}}`, string(result))
@@ -281,8 +281,8 @@ func TestExecutorValidateResumeTargets_BitsUT(t *testing.T) {
 
 	t.Run("unknown target", func(t *testing.T) {
 		executor, spec, checkpoint := resumeFixture(t, "approval")
-		_, err := executor.ValidateResume(
-			context.Background(), spec, checkpoint, []byte(`{"other":"value"}`),
+		_, err := executor.validateResume(
+			spec, checkpoint, []byte(`{"other":"value"}`),
 		)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "not interrupted")
@@ -290,25 +290,25 @@ func TestExecutorValidateResumeTargets_BitsUT(t *testing.T) {
 
 	t.Run("empty resume uses implicit resume all", func(t *testing.T) {
 		executor, spec, checkpoint := resumeFixture(t, "approval")
-		result, err := executor.ValidateResume(context.Background(), spec, checkpoint, nil)
+		result, err := executor.validateResume(spec, checkpoint, nil)
 		require.NoError(t, err)
 		assert.Empty(t, result)
 	})
 
 	t.Run("non-object resume data is rejected", func(t *testing.T) {
 		executor, spec, checkpoint := resumeFixture(t, "approval")
-		_, err := executor.ValidateResume(context.Background(), spec, checkpoint, []byte("continue"))
+		_, err := executor.validateResume(spec, checkpoint, []byte("continue"))
 		require.ErrorContains(t, err, "resume targets are invalid")
 	})
 
 	t.Run("checkpoint schema must be valid", func(t *testing.T) {
 		executor, spec, _ := resumeFixture(t, "approval")
-		_, err := executor.ValidateResume(context.Background(), spec, []byte("invalid"), nil)
+		_, err := executor.validateResume(spec, []byte("invalid"), nil)
 		require.Error(t, err)
 
 		checkpoint, marshalErr := json.Marshal(checkpointState{})
 		require.NoError(t, marshalErr)
-		_, err = executor.ValidateResume(context.Background(), spec, checkpoint, nil)
+		_, err = executor.validateResume(spec, checkpoint, nil)
 		require.Error(t, err)
 	})
 }
@@ -335,11 +335,26 @@ func TestExecutorValidatesRecoveryCheckpoint_BitsUT(t *testing.T) {
 	}
 }
 
-func TestAttack_ValidateResumePreservesLargeIntegers(t *testing.T) {
+func TestExecutorRejectsInvalidPersistedResumeWithoutFailingTask_BitsUT(t *testing.T) {
+	executor, spec, checkpoint := resumeFixture(t, "approval")
+	result, err := executor.Execute(
+		context.Background(),
+		&backgroundtask.Task{
+			Spec: spec, Attempt: 2, Checkpoint: checkpoint,
+			PendingResume: []byte(`{"other":"value"}`),
+		},
+		nil,
+	)
+	require.NoError(t, err)
+	require.Equal(t, backgroundtask.StatusWaitingInput, result.Status)
+	require.Equal(t, checkpoint, result.Checkpoint)
+}
+
+func TestAttack_ResumeValidationPreservesLargeIntegers(t *testing.T) {
 	executor, spec, checkpoint := resumeFixture(t, "approval")
 	const resume = `{"approval":{"ticket":9007199254740993}}`
-	normalized, err := executor.ValidateResume(
-		context.Background(), spec, checkpoint, []byte(resume),
+	normalized, err := executor.validateResume(
+		spec, checkpoint, []byte(resume),
 	)
 	require.NoError(t, err)
 	t.Logf("normalized resume payload: %s", normalized)

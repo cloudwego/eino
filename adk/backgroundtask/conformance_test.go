@@ -33,17 +33,13 @@ type scriptedExecutor struct {
 	key                  string
 	validateErr          error
 	validateExecutionErr error
-	normalizedResume     []byte
-	resumeErr            error
 	leaseExpiryPolicy    LeaseExpiryPolicy
 	disableDrain         bool
 	execute              func(context.Context, *Task, ExecutionRuntime) (*ExecutionResult, error)
 
-	mu               sync.Mutex
-	validated        []Spec
-	resumeCheckpoint []byte
-	resumeInput      []byte
-	executed         []*Task
+	mu        sync.Mutex
+	validated []Spec
+	executed  []*Task
 }
 
 func (e *scriptedExecutor) Key() string {
@@ -72,19 +68,6 @@ func (e *scriptedExecutor) ValidateExecution(context.Context, *Task) error {
 }
 
 func (e *scriptedExecutor) SupportsDrain() bool { return !e.disableDrain }
-
-func (e *scriptedExecutor) ValidateResume(
-	_ context.Context,
-	_ Spec,
-	checkpoint []byte,
-	resumeInput []byte,
-) ([]byte, error) {
-	e.mu.Lock()
-	e.resumeCheckpoint = cloneBytes(checkpoint)
-	e.resumeInput = cloneBytes(resumeInput)
-	e.mu.Unlock()
-	return cloneBytes(e.normalizedResume), e.resumeErr
-}
 
 func (e *scriptedExecutor) Execute(ctx context.Context, task *Task, runtime ExecutionRuntime) (*ExecutionResult, error) {
 	e.mu.Lock()
@@ -131,11 +114,17 @@ func TestSimplifiedPublicModelHasNoOverlappingStateFields_BitsUT(t *testing.T) {
 	assertFieldsPresent(t, reflect.TypeOf(NotificationDeliveryValidation{}),
 		"OutboxAvailable", "TargetKind")
 	assertMethodsAbsent(t, reflect.TypeOf((*Manager)(nil)),
-		"Store", "Executors", "MarkBackgrounded", "RequestControl", "RequestTimeout", "ReadOutput")
+		"Store", "Executors", "MarkBackgrounded", "RequestControl", "RequestTimeout", "ReadOutput",
+		"WaitUpdate", "CreateAndStart", "LoadOrRegisterExecutor")
 	assertMethodsPresent(t, reflect.TypeOf((*Manager)(nil)),
-		"Submit", "Get", "ListPending", "Execute", "WaitUpdate", "ReadRecentTaskEvents",
-		"RequestCancel", "Resume", "AllocateTaskID",
-		"LoadOrRegisterExecutor", "ValidateNotificationDelivery", "Close")
+		"Submit", "Get", "ListPending", "ListSuspended", "Execute", "WaitForTaskVersion",
+		"ReadRecentTaskEvents", "RequestCancel", "ReleaseSuspension", "Resume", "AllocateTaskID",
+		"ValidateNotificationDelivery", "Close")
+	assertMethodsPresent(t, reflect.TypeOf((*ExecutorRegistry)(nil)), "LoadOrRegister")
+	assertMethodsAbsent(t, reflect.TypeOf((*InMemoryStore)(nil)), "CreateAndStart", "Cancel")
+	assertMethodsPresent(t, reflect.TypeOf((*InMemoryStore)(nil)),
+		"ListSuspended", "AckCancel", "ReleaseSuspension")
+	assertMethodsAbsent(t, reflect.TypeOf((*Executor)(nil)).Elem(), "ValidateResume")
 	assertFieldsPresent(t, reflect.TypeOf(TaskEvent{}), "EventID", "TaskID", "Data", "CreatedAt")
 	assertFieldsAbsent(t, reflect.TypeOf(TaskEvent{}), "SourceID", "Sequence", "Attempt")
 }
@@ -258,9 +247,10 @@ func TestManagerPassesCheckpointUnchangedToExecutor_BitsUT(t *testing.T) {
 func recoveredTaskStore(t *testing.T, id string, checkpoint []byte) (*InMemoryStore, *testClock) {
 	t.Helper()
 	clock := &testClock{now: time.Unix(100, 0)}
-	store := NewInMemoryStore(&InMemoryStoreConfig{
-		Clock: clock.Now, ActiveAttemptTimeout: 5 * time.Second,
-	})
+	store := newInMemoryStoreWithClock(
+		&InMemoryStoreConfig{ActiveAttemptTimeout: 5 * time.Second},
+		clock.Now,
+	)
 	started := createAndStart(t, store, id)
 	store.mu.Lock()
 	store.tasks[id].Checkpoint = checkpoint
@@ -292,8 +282,8 @@ func TestExecutorOwnsCheckpointCompatibility_BitsUT(t *testing.T) {
 	assert.Equal(t, "unsafe checkpoint rejected", failed.ResultError)
 }
 
-func TestManagerResumeValidatesAndStoresNormalizedOpaqueInput_BitsUT(t *testing.T) {
-	executor := &scriptedExecutor{normalizedResume: []byte("normalized")}
+func TestManagerResumeStoresOpaqueInputWithoutExecutorContract_BitsUT(t *testing.T) {
+	executor := &scriptedExecutor{}
 	store := NewInMemoryStore(nil)
 	manager := managerWithExecutor(t, store, executor, time.Minute)
 	submitted, err := manager.Submit(context.Background(), validSpec("resume-manager"))
@@ -312,10 +302,8 @@ func TestManagerResumeValidatesAndStoresNormalizedOpaqueInput_BitsUT(t *testing.
 		Data: []byte("raw"),
 	})
 	require.NoError(t, err)
-	assert.Equal(t, "checkpoint", string(executor.resumeCheckpoint))
-	assert.Equal(t, "raw", string(executor.resumeInput))
 	require.NotNil(t, resumed.PendingResume)
-	assert.Equal(t, "normalized", string(resumed.PendingResume))
+	assert.Equal(t, "raw", string(resumed.PendingResume))
 	assert.Equal(t, StatusPending, resumed.Status)
 }
 
@@ -360,9 +348,10 @@ func TestManagerErrorDoesNotCreatePendingResume_BitsUT(t *testing.T) {
 
 func TestCheckpointUnavailableStopsRenewalWithoutPersistingFailure_BitsUT(t *testing.T) {
 	clock := &testClock{now: time.Unix(500, 0)}
-	store := NewInMemoryStore(&InMemoryStoreConfig{
-		Clock: clock.Now, ActiveAttemptTimeout: 5 * time.Second,
-	})
+	store := newInMemoryStoreWithClock(
+		&InMemoryStoreConfig{ActiveAttemptTimeout: 5 * time.Second},
+		clock.Now,
+	)
 	executor := &scriptedExecutor{
 		execute: func(context.Context, *Task, ExecutionRuntime) (*ExecutionResult, error) {
 			return nil, ErrDrainCheckpointUnavailable

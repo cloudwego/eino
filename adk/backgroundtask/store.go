@@ -64,7 +64,7 @@ var (
 // RequestCancel on active work keeps StatusRunning, sets CancelRequestedAt and
 // the first-write optional CancelReason, and advances Version. Once
 // cancellation is requested, Heartbeat, Complete, Fail,
-// WaitInput, Suspend, and Yield must reject the attempt; only Cancel may
+// WaitInput, Suspend, and Yield must reject the attempt; only AckCancel may
 // terminally acknowledge it. Yield changes running to pending, stores its
 // optional checkpoint atomically, and emits no lifecycle notification. On
 // retry-capable work, cancel intent that outlives an attempt remains pending so
@@ -72,9 +72,9 @@ var (
 // cancellation. Non-recoverable lease expiry resolves cancellation directly.
 type Store interface {
 	Create(context.Context, *CreateTaskRequest) (*Task, error)
-	CreateAndStart(context.Context, *CreateTaskRequest) (*Task, error)
 	Get(context.Context, string) (*Task, error)
 	ListPending(context.Context, *ListPendingRequest) (*ListPendingResult, error)
+	ListSuspended(context.Context, *ListSuspendedRequest) (*ListSuspendedResult, error)
 	Start(context.Context, *StartTaskRequest) (*Task, error)
 	Heartbeat(context.Context, *HeartbeatRequest) (*Task, error)
 	AppendTaskEvent(context.Context, *AppendTaskEventRequest) (*AppendTaskEventResult, error)
@@ -85,11 +85,11 @@ type Store interface {
 	WaitInput(context.Context, *WaitInputTaskRequest) (*Task, error)
 	Suspend(context.Context, *SuspendTaskRequest) (*Task, error)
 	Yield(context.Context, *YieldTaskRequest) (*Task, error)
-	Cancel(context.Context, *CancelTaskRequest) (*Task, error)
+	AckCancel(context.Context, *AckCancelRequest) (*Task, error)
 	RequestCancel(context.Context, *RequestCancelRequest) (*Task, error)
 	Resume(context.Context, *ResumeRequest) (*Task, error)
 	ReleaseSuspension(context.Context, *ReleaseSuspensionRequest) (*Task, error)
-	Wait(context.Context, *WaitUpdateRequest) (*Task, error)
+	WaitForTaskVersion(context.Context, *WaitForTaskVersionRequest) (*Task, error)
 }
 
 // NotificationOutbox leases lifecycle notifications for dispatch.

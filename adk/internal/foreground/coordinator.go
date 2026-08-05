@@ -105,7 +105,7 @@ func waitStarted(
 		err  error
 	}, 1)
 	go func() {
-		next, err := manager.WaitUpdate(waitCtx, &backgroundtask.WaitUpdateRequest{
+		next, err := manager.WaitForTaskVersion(waitCtx, &backgroundtask.WaitForTaskVersionRequest{
 			TaskID: task.Spec.ID, AfterVersion: task.Version,
 		})
 		wait <- struct {

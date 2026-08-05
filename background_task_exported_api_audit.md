@@ -44,16 +44,12 @@ by its verdict.
 
 ### Blockers Before Stabilization
 
-1. **`backgroundtask.Executor.ValidateResume` is an interface tax.** Only the
-   durable sub-agent executor has meaningful resume input. Local and managed
-   tool executors implement unsupported stubs. Replace it with an optional
-   `ResumeValidator` capability interface checked by `Manager.Resume`.
-   See `adk/backgroundtask/executor.go`, `Executor`.
-2. **`filesystem.BackgroundConfig` has two Manager authorities.** `Runner`
+1. **`filesystem.BackgroundConfig` has two Manager authorities.** `Runner`
    owns one Manager while `Manager` may independently specify another; runtime
    validation rejects disagreement, but the API permits it. Split local and
-   recoverable configurations, matching the sub-agent and DeepAgent APIs.
-3. **The Store and notification SPIs are public but explicitly provisional.**
+   recoverable configurations under one Manager, following DeepAgent's
+   capability-based API.
+2. **The Store and notification SPIs are public but explicitly provisional.**
    They expose a large implementation commitment without a durable-provider
    conformance package. Either move them under an experimental package or ship
    a reusable conformance suite before declaring stability.
@@ -63,14 +59,36 @@ by its verdict.
 1. Replace `ToolStreamEvent.Type string` with a typed discriminator and exported
    constants. The current wire contract relies on undocumented string literals.
 2. Document limit normalization for `ReadRecentTaskEvents`, `ListPending`,
-   inbox listing, and outbox receive APIs. Current concrete defaults are not
-   part of the interface contract.
+   `ListSuspended`, inbox listing, and outbox receive APIs. Current concrete
+   defaults are not part of the interface contract.
 3. Rename `NotificationDeliveryRuntime` to
    `NotificationDeliveryValidator` or `NotificationRouteValidator`; it
    validates construction-time routing and does not deliver notifications.
 4. Mark legacy filesystem `Config` itself deprecated, not only
    `NewMiddleware`, because every new background field is otherwise duplicated
    across two public configuration types.
+
+### Recently Resolved
+
+1. Removed the unused `CreateAndStart` Store transition; submission and attempt
+   claiming now have one path through `Create` and `Start`.
+2. Renamed active-attempt cancellation acknowledgement from `Cancel` to
+   `AckCancel`, preserving the distinction from durable `RequestCancel` intent.
+3. Renamed the lifecycle long poll to `WaitForTaskVersion` and documented its
+   exact `Task.Version > AfterVersion` predicate.
+4. Added suspended-task discovery and Manager-owned release, closing the
+   operational gap that could leave planned suspensions stranded.
+5. Removed the exported test-only clock hook from `InMemoryStoreConfig`.
+6. Replaced DeepAgent's ambiguous `Local`/`Durable` background mode with one
+   Manager and explicit durable-sub-agent, recoverable-shell, and local-shell
+   capability blocks.
+7. Removed `ValidateResume` from the generic `Executor` contract. Manager now
+   persists opaque resume input, while the durable sub-agent executor privately
+   validates target data and defensively returns invalid persisted input to
+   `waiting_input`.
+8. Moved atomic idempotent executor installation from Manager to
+   `ExecutorRegistry.LoadOrRegister`; integration configs now receive the
+   registry explicitly instead of using Manager as a registry service locator.
 
 ## 1. Core Package: `adk/backgroundtask`
 
@@ -120,7 +138,6 @@ Sources:
 | `IDGenerator` | `func(context.Context, *AllocateTaskIDRequest) (string, error)` | **Keep** | Centralized generation is necessary and concurrency semantics are documented. |
 | `Spec` | Fields: `ID`, `ExecutorKey`, `Kind`, `Payload`, `Description`, `OutputFile`, `SessionID`, `Notify`, `CreatedAt` | **Keep; document** | Coherent immutable envelope. Clarify which fields are caller supplied versus Store assigned (`CreatedAt`), maximum sizes, and whether `OutputFile` is authoritative or derived. |
 | `Task` | Fields: `Spec`, `LeaseExpiryPolicy`, `Status`, `Checkpoint`, `ResultData`, `ResultError`, `OutputFileErr`, `PendingResume`, `Version`, `Attempt`, `CancelRequestedAt`, `CancelReason`, `UpdatedAt`, `DoneAt` | **Keep; document** | Necessary snapshot. `CancelReason` durably carries first-write stop intent into replacement attempts and terminal `ResultError`. Add explicit copy ownership for byte slices and time pointers returned by Stores. |
-| `Clock` | `func() time.Time` | **Remove unless downstream deterministic testing is supported** | It is used only by in-package tests. Internal tests can set the unexported in-memory clock through a package-local helper. |
 | `Config` | Fields: `Store`, `Executors`, `IDGen` | **Keep** | Minimal Manager construction surface with sensible nil defaults. |
 | `New` | `func(context.Context, *Config) *Manager` | **Keep; document** | A constructor that cannot fail is convenient, but nil `Config` behavior and why `context.Context` is currently unused should be explicit. |
 
@@ -138,14 +155,16 @@ All fields listed below are part of the exported API.
 | `WaitInputTaskRequest` | `TaskID`, `ExpectedVersion`, `Checkpoint` | **Keep** | Correct atomic checkpoint plus waiting transition. |
 | `SuspendTaskRequest` | `TaskID`, `ExpectedVersion`, `Checkpoint` | **Keep** | Correct atomic planned-suspension transition. |
 | `YieldTaskRequest` | `TaskID`, `ExpectedVersion`, `Checkpoint` | **Keep** | The empty-checkpoint retention rule is documented and important. |
-| `CancelTaskRequest` | `TaskID`, `ExpectedVersion`, `Reason` | **Keep** | Active-attempt acknowledgement; a previously persisted cancellation reason remains authoritative. |
+| `AckCancelRequest` | `TaskID`, `ExpectedVersion`, `Reason` | **Keep** | Precisely names active-attempt acknowledgement; a previously persisted cancellation reason remains authoritative. |
 | `RequestCancelRequest` | `TaskID`, `ExpectedVersion`, `Reason` | **Keep** | Durable first-write intent transition, distinct from acknowledgement. |
 | `ResumeRequest` | `TaskID`, `ExpectedVersion`, `Data` | **Keep** | Correct one-shot external input command. |
-| `ReleaseSuspensionRequest` | `TaskID`, `ExpectedVersion` | **Incomplete capability** | The transition lacks a Manager entry point and suspended-task discovery. |
-| `WaitUpdateRequest` | `TaskID`, `AfterVersion` | **Rename** | Prefer `WaitForTaskVersionRequest`; heartbeats and other snapshot mutations wake it, while task events do not. |
+| `ReleaseSuspensionRequest` | `TaskID`, `ExpectedVersion` | **Keep** | Correct Store-level CAS transition; Manager hides the version retry from application callers. |
+| `WaitForTaskVersionRequest` | `TaskID`, `AfterVersion` | **Keep** | Precisely names the long-poll predicate; heartbeats and other snapshot mutations can satisfy it, while task events cannot. |
 | `ReportOutputFailureRequest` | `TaskID`, `ExpectedVersion`, `Error` | **Keep; document** | Clear but narrowly named. Document first-error-wins behavior and that transcript failure is non-terminal. |
 | `ListPendingRequest` | `ExecutorKeys`, `Cursor`, `Limit` | **Keep; document** | Necessary dispatcher query. Cursor validity, ordering, unknown cursor behavior, and limit defaults must be SPI contract text. |
 | `ListPendingResult` | `Tasks`, `NextCursor` | **Keep; document** | Good shape; define whether empty `NextCursor` is terminal and whether returned tasks are snapshots. |
+| `ListSuspendedRequest` | `ExecutorKeys`, `Cursor`, `Limit` | **Keep; document** | Provides explicit discovery for planned suspensions using the same filtering and cursor model as pending dispatch. |
+| `ListSuspendedResult` | `Tasks`, `NextCursor` | **Keep; document** | Returns authoritative suspended snapshots for operational release workflows. |
 
 ### Task Progress Events
 
@@ -161,26 +180,26 @@ All fields listed below are part of the exported API.
 
 | Exported API | Methods | Verdict | Audit |
 |---|---|---|---|
-| `Store` | `Create`, `CreateAndStart`, `Get`, `ListPending`, `Start`, `Heartbeat`, `AppendTaskEvent`, `ReadRecentTaskEvents`, `ReportOutputFailure`, `Complete`, `Fail`, `WaitInput`, `Suspend`, `Yield`, `Cancel`, `RequestCancel`, `Resume`, `ReleaseSuspension`, `Wait` | **Rework** | Semantics are strong, especially fencing-before-deduplication, but this 19-method provisional SPI is expensive to implement and stabilize. Split read/query, lifecycle mutation, and event capabilities or provide a conformance suite before release. |
+| `Store` | `Create`, `Get`, `ListPending`, `ListSuspended`, `Start`, `Heartbeat`, `AppendTaskEvent`, `ReadRecentTaskEvents`, `ReportOutputFailure`, `Complete`, `Fail`, `WaitInput`, `Suspend`, `Yield`, `AckCancel`, `RequestCancel`, `Resume`, `ReleaseSuspension`, `WaitForTaskVersion` | **Rework** | Semantics are strong, especially fencing-before-deduplication, but this provisional SPI remains expensive to implement and stabilize. Split read/query, lifecycle mutation, and event capabilities or provide a conformance suite before release. |
 
 Method-level audit:
 
 | Method | Verdict | Audit |
 |---|---|---|
 | `Create` | **Keep** | Needed for pending durable submission. |
-| `CreateAndStart` | **Remove** | No production caller exists. Retain only if a real atomic submit-and-execute Manager API is introduced. |
 | `Get` | **Keep** | Authoritative snapshot read. |
 | `ListPending` | **Keep; document** | Define stable ordering and cursor semantics. |
+| `ListSuspended` | **Keep; document** | Required discovery boundary for planned suspensions; shares executor filtering and cursor semantics with `ListPending`. |
 | `Start` | **Keep** | Authoritative attempt claim. |
 | `Heartbeat` | **Keep** | Required lease renewal. |
 | `AppendTaskEvent` | **Keep** | Fencing and idempotency contract is well designed. |
 | `ReadRecentTaskEvents` | **Keep; document** | Define bounds uniformly across providers. |
 | `ReportOutputFailure` | **Keep** | Preserves optional-output failure without corrupting lifecycle status. |
-| `Complete`, `Fail`, `WaitInput`, `Yield`, `Cancel` | **Keep** | Explicit semantic transitions are preferable to a generic update API. `Cancel` is the executor acknowledgement after durable cancellation intent. |
-| `Suspend`, `ReleaseSuspension` | **Incomplete capability** | Suspend is used by sub-agent drain, but no Manager release method or suspended-task discovery exists. Add a coherent release workflow or use `Yield` when immediate redispatch is acceptable. |
+| `Complete`, `Fail`, `WaitInput`, `Yield`, `AckCancel` | **Keep** | Explicit semantic transitions are preferable to a generic update API. `AckCancel` clearly identifies executor acknowledgement after durable cancellation intent. |
+| `Suspend`, `ReleaseSuspension` | **Keep** | Planned suspension is now coherent: Store persists the checkpointed pause, Manager exposes discovery, and Manager release returns it to pending. |
 | `RequestCancel` | **Keep** | Correctly separates durable intent from active acknowledgement. |
 | `Resume` | **Keep** | Atomic one-shot input persistence. |
-| `Wait` | **Rename** | It long-polls until `Task.Version > AfterVersion`, including heartbeat mutations but excluding task events. Prefer `WaitForTaskVersion`. |
+| `WaitForTaskVersion` | **Keep** | It precisely exposes the long-poll predicate `Task.Version > AfterVersion`, including heartbeat mutations but excluding task events. |
 
 ### Execution Boundary
 
@@ -188,12 +207,13 @@ Method-level audit:
 |---|---|---|---|
 | `ExecutionResult` | Fields: `Directive`, `Status`, `Checkpoint`, `Data`, `Error` | **Keep; document** | Coherent result union, but valid combinations are enforced only by code. Add a table documenting legal directive/status/field combinations. |
 | `ExecutionRuntime` | Methods: `TaskID`, `Controls`, `AppendTaskEvent`, `ReportOutputFailure` | **Keep; document** | Minimal attempt-scoped runtime. Document that empty EventID requests framework generation, generated IDs are reused across internal retries, and append is fenced by the current attempt. |
-| `Executor` | Methods: `Key`, `LeaseExpiryPolicy`, `ValidateSpec`, `ValidateExecution`, `ValidateResume`, `SupportsDrain`, `Execute` | **Rework** | Most methods belong. `ValidateResume` does not: only sub-agents use it, while other executors return unsupported errors. Extract optional `ResumeValidator`. |
+| `Executor` | Methods: `Key`, `LeaseExpiryPolicy`, `ValidateSpec`, `ValidateExecution`, `SupportsDrain`, `Execute` | **Keep** | Minimal generic execution contract; resume-data interpretation is no longer imposed on unrelated executors. |
 | `ExecutorRegistry` | Opaque registry | **Keep** | Necessary worker-local implementation registry. |
 | `NewExecutorRegistry` | Constructor | **Keep** | Appropriate. |
 | `ExecutorRegistry.Register` | `Register(Executor) error` | **Keep** | Correct duplicate rejection. |
+| `ExecutorRegistry.LoadOrRegister` | `LoadOrRegister(Executor) (Executor, bool, error)` | **Keep** | Correct atomic idempotent installation boundary for independently constructed integrations. |
 | `ExecutorRegistry.Resolve` | `Resolve(string) (Executor, bool)` | **Keep** | Conventional lookup API. |
-| `ExecutorRegistry.Keys` | `Keys() []string` | **Keep** | Useful worker filter discovery; deterministic sorting is implemented. |
+| `ExecutorRegistry.Keys` | `Keys() []string` | **Keep; fix/document** | Useful worker filter discovery, but current map iteration is nondeterministic. Sort the result or explicitly disclaim ordering. |
 
 ### Manager
 
@@ -204,25 +224,26 @@ Method-level audit:
 | `Manager.Submit` | **Keep** | Appropriate validated persistence boundary. |
 | `Manager.Get` | **Keep** | Appropriate authoritative read. |
 | `Manager.ListPending` | **Keep** | Correct read-only dispatch boundary. |
+| `Manager.ListSuspended` | **Keep; document** | Provides the missing discovery boundary for checkpointed planned suspensions; ordering, cursor, and limit rules need an interface contract. |
 | `Manager.Execute` | **Keep** | Necessary worker entry point. Concrete executors own their dependencies, so every worker uses this same path. |
-| `Manager.WaitUpdate` | **Rename** | Prefer `WaitForTaskVersion` to expose the exact long-poll predicate. |
+| `Manager.WaitForTaskVersion` | **Keep** | Exposes the exact long-poll predicate without the ambiguous “update” vocabulary. |
 | `Manager.ReadRecentTaskEvents` | **Keep** | Thin delegation is useful to avoid exposing Store ownership to callers. |
 | `Manager.RequestCancel` | **Keep** | Combines durable intent with best-effort local signaling appropriately. |
 | `RequestCancelOption`, `WithCancellationReason` | **Keep** | Optional caller reason is durably first-write and becomes cancellation `ResultError`. |
-| `Manager.Resume` | **Rework** | Method belongs, but should discover an optional resume capability rather than require every `Executor` to implement `ValidateResume`. |
+| `Manager.ReleaseSuspension` | **Keep** | Owns the read/CAS-retry workflow and returns suspended work to pending without exposing Store details. |
+| `Manager.Resume` | **Keep; document** | Persists opaque one-shot input through the lifecycle Store. Concrete executors own domain validation and must defensively validate persisted input before use. |
 | `Manager.Close` | **Keep** | Strong bounded-shutdown contract and explicit deadline error. |
 | `CloseOption`, `WithDrainReason` | **Keep** | Allows an optional advisory operational reason without treating drain as terminal failure. |
-| `Manager.LoadOrRegisterExecutor` | **Rework** | Registry operation leaks through Manager. Prefer an idempotent `ExecutorRegistry.LoadOrRegister`, or make executor installation an explicit construction phase. |
 | `Manager.ValidateNotificationDelivery` | **Keep; rename dependency** | Construction-time validation is valuable. The dependency type is misnamed as a runtime. |
 
 ### In-Memory Reference Store
 
 | Exported API | Shape | Verdict | Audit |
 |---|---|---|---|
-| `InMemoryStoreConfig` | Fields: `Clock`, `ActiveAttemptTimeout`, `MaxValueBytes` | **Rework** | Remove `Clock` unless downstream deterministic testing is supported; document the remaining defaults and byte limits. |
+| `InMemoryStoreConfig` | Fields: `ActiveAttemptTimeout`, `MaxValueBytes` | **Keep; document** | Document defaults and which values count toward `MaxValueBytes`. |
 | `InMemoryStore` | Implements `Store` and `NotificationOutbox` | **Keep** | Valuable reference state machine and test double; clearly documented as non-durable. |
 | `NewInMemoryStore` | Constructor | **Keep** | Appropriate nil-default constructor. |
-| `InMemoryStore.Create`, `CreateAndStart`, `Get`, `ListPending`, `Start`, `Heartbeat`, `AppendTaskEvent`, `ReadRecentTaskEvents`, `ReportOutputFailure`, `Complete`, `Fail`, `WaitInput`, `Suspend`, `Yield`, `Cancel`, `RequestCancel`, `Resume`, `ReleaseSuspension`, `Wait`, `Receive`, `Ack` | Exported concrete methods | **Keep; document** | Required for interface satisfaction and direct reference-store use. Most lack method comments in `go doc`; document non-obvious defaults and avoid making implementation-specific behavior accidental SPI contract. |
+| `InMemoryStore.Create`, `Get`, `ListPending`, `ListSuspended`, `Start`, `Heartbeat`, `AppendTaskEvent`, `ReadRecentTaskEvents`, `ReportOutputFailure`, `Complete`, `Fail`, `WaitInput`, `Suspend`, `Yield`, `AckCancel`, `RequestCancel`, `Resume`, `ReleaseSuspension`, `WaitForTaskVersion`, `Receive`, `Ack` | Exported concrete methods | **Keep; document** | Required for interface satisfaction and direct reference-store use. Most lack method comments in `go doc`; document non-obvious defaults and avoid making implementation-specific behavior accidental SPI contract. |
 
 ### Notifications
 
@@ -271,7 +292,7 @@ Source: [`local.go`](adk/backgroundtask/local/local.go) and
 
 | Exported API | Shape | Verdict | Audit |
 |---|---|---|---|
-| `Config` | Fields: `Manager`, `ForegroundTimeoutMs`, `ShouldAutoBackground`, `BackgroundNotice` | **Keep** | Coherent runner-wide policy. `BackgroundNotice` receives structured `NoticeInfo`, which is preferable to exposing formatter internals. |
+| `Config` | Fields: `Manager`, `Executors`, `ForegroundTimeoutMs`, `ShouldAutoBackground`, `BackgroundNotice` | **Keep** | Coherent runner-wide policy. The explicit registry must be the one configured on Manager and prevents registration through Manager. |
 | `Input` | Fields: `Description`, `Type`, `Payload`, `OutputFile`, `SessionID`, `Notify`, `RunInBackground`, `BackgroundStartupPreviewMs`, `ForegroundTimeoutMs` | **Rework** | Powerful but low level. Rename `Type` to `Kind` to match `Spec.Kind`; document timeout precedence and that startup preview applies only to explicitly backgrounded streams. |
 | `NoticeInfo` | Fields: `Task`, `AutoBackgrounded` | **Keep** | Minimal formatter context. |
 | `WorkFunc` | `func(context.Context, ExecutionRuntime) (string, error)` | **Keep** | Good buffered closure boundary. |
@@ -334,9 +355,8 @@ Source: [`subagent.go`](adk/backgroundtask/subagent/subagent.go).
 | `Executor.LeaseExpiryPolicy` | Retry policy | **Keep** | Correct durable recovery policy. |
 | `Executor.ValidateSpec` | Submission validation | **Keep** | Ensures payload and registration compatibility. |
 | `Executor.ValidateExecution` | Runner-environment validation | **Keep** | Important side-effect-free pre-claim check. |
-| `Executor.ValidateResume` | Resume normalization | **Keep on concrete type; remove from generic interface** | Meaningful here and reusable directly, but should satisfy an optional resume capability. |
 | `Executor.SupportsDrain` | Drain capability | **Keep; document** | Exported because of interface satisfaction; add a doc comment. |
-| `Executor.Execute` | Durable run/resume | **Keep** | Correct executor boundary; checkpoint compatibility is now owned internally. |
+| `Executor.Execute` | Durable run/resume | **Keep** | Correct executor boundary; checkpoint compatibility and resume-target validation are owned privately and invalid persisted input returns to `waiting_input`. |
 | `SubmitRequest` | Fields: `TaskID`, `SubAgentName`, `Query`, `Description`, `SessionID` | **Keep; document** | Good domain-specific request. Document that empty `TaskID` allocates one and `SessionID` also determines notification routing. |
 | `Submit` | Domain submission helper | **Keep** | Avoids exposing serialized payload format. |
 
@@ -374,8 +394,8 @@ Sources:
 | `Registry` | Separate plain/recoverable maps | **Keep** | Capability-class separation is an excellent compatibility property. |
 | `NewRegistry` | Constructor | **Keep** | Appropriate. |
 | `Registry.Register` | Registration method | **Keep** | Correct class-specific duplicate behavior. |
-| `RegisterExecutors` | Manager/registry installation | **Keep** | Useful one-call adapter setup. |
-| `ManagedToolConfig` | Fields: `Manager`, `Registry`, `ToolName`, `Notifications`, `ForegroundTimeoutMs`, `ShouldAutoBackground`, `RunInBackground`, `InvocationTimeoutMs`, `SessionID` | **Keep; document** | Necessary wrapper policy. Document callback precedence, concurrency, nil semantics, and timeout units/defaults in field comments. |
+| `RegisterExecutors` | Executor-registry/tool-registry installation | **Keep** | Useful one-call adapter setup without leaking registry operations through Manager. |
+| `ManagedToolConfig` | Fields: `Manager`, `Executors`, `Registry`, `ToolName`, `Notifications`, `ForegroundTimeoutMs`, `ShouldAutoBackground`, `RunInBackground`, `InvocationTimeoutMs`, `SessionID` | **Keep; document** | Necessary wrapper policy. `Executors` must be the registry configured on Manager; document callback precedence, concurrency, nil semantics, and timeout units/defaults. |
 | `NewManagedTool` | Model-facing wrapper constructor | **Keep** | Correctly owns task creation and foreground/background projection. |
 | `ArgumentsFromTask` | Extractor | **Keep** | Useful host policy helper that hides payload encoding. |
 
@@ -453,7 +473,7 @@ Only background-related exports and constructors that expose them are listed.
 | `RecoverableShell` | Alias of `backgroundtask/shell.RecoverableShell` | **Compatibility/convenience** | Convenient discovery at the integration package, but duplicates the canonical API. Keep only if filesystem is the intended user entry point. |
 | `StartCommandRequest` | Alias | **Compatibility/convenience** | Same trade-off as `RecoverableShell`. |
 | `RecoverCommandRequest` | Alias | **Compatibility/convenience** | Same trade-off as `RecoverableShell`. |
-| `BackgroundConfig` | Fields: `Runner`, `Manager`, `ToolRegistry`, `OutputMaterializer`, `ForegroundTimeoutMs`, `ShouldAutoBackground`, `Notifications`, `OutputStore`, `OutputDir` | **Rework** | Conflates process-local and recoverable modes and permits two Manager authorities. Split into explicit local/recoverable variants. |
+| `BackgroundConfig` | Fields: `Runner`, `Manager`, `Executors`, `ToolRegistry`, `OutputMaterializer`, `ForegroundTimeoutMs`, `ShouldAutoBackground`, `Notifications`, `OutputStore`, `OutputDir` | **Rework** | Conflates process-local and recoverable modes and permits two Manager authorities. `Executors` at least makes installation ownership explicit. Split into explicit local/recoverable variants. |
 | `ExecuteToolConfig` | Embeds `ToolConfig` | **Keep** | Appropriate extension point even though managed input shape is selected by background configuration. |
 | `Config.RecoverableShell`, `Config.Background`, `Config.ExecuteToolConfig` | Legacy middleware fields | **Compatibility** | Required while `NewMiddleware` remains, but `Config` should itself be marked deprecated. |
 | `MiddlewareConfig.RecoverableShell`, `MiddlewareConfig.Background`, `MiddlewareConfig.ExecuteToolConfig` | Current middleware fields | **Keep after `BackgroundConfig` rework** | Correct placement in current constructor config. |
@@ -475,7 +495,7 @@ Sources:
 | `TranscriptFormat[M]` | `func(context.Context, string, M) (string, error)` | **Keep; document** | Good customization point. Name the string parameter (`agentName`) in docs/signature and state concurrency requirements. |
 | `TypedLocalBackgroundConfig[M]` | Fields: `Runner`, `OutputStore`, `OutputDir` | **Keep** | Clear local mode. Generic parameter is phantom but preserves nesting consistency. |
 | `LocalBackgroundConfig` | Standard-message alias | **Keep** | Consistent specialization. |
-| `TypedDurableBackgroundConfig[M]` | Fields: `Manager`, `Executor`, `ForegroundTimeoutMs`, `ShouldAutoBackground`, `RunOptionsFactories` | **Keep** | Clear durable mode; the dependency-bearing executor is explicit and shared with Manager registration. |
+| `TypedDurableBackgroundConfig[M]` | Fields: `Manager`, `Executors`, `Executor`, `ForegroundTimeoutMs`, `ShouldAutoBackground`, `RunOptionsFactories` | **Keep** | Clear durable mode; the dependency-bearing executor and its installation registry are explicit. |
 | `DurableBackgroundConfig` | Standard-message alias | **Keep** | Consistent specialization. |
 | `TypedBackgroundConfig[M]` | Fields: `Local`, `Durable`, `TranscriptFormat`, `Notifications` | **Keep** | Explicit exactly-one mode is better than filesystem's dual authority. A sum type is impossible in idiomatic Go; constructor validation is acceptable. |
 | `BackgroundConfig` | Standard-message alias | **Keep** | Consistent specialization. |
@@ -492,12 +512,13 @@ and constructors that expose them are listed.
 
 | Exported API | Shape | Verdict | Audit |
 |---|---|---|---|
-| `TypedLocalBackgroundConfig[M]` | Fields: `Runner`, `OutputDir` | **Keep** | Clear process-local mode. |
-| `TypedDurableBackgroundConfig[M]` | Fields: `Manager`, `Executor`, `ForegroundTimeoutMs`, `ShouldAutoBackground`, `OutputDir`, `OutputMaterializer`, `RunOptionsFactories` | **Rework naming/docs** | Durable applies to sub-agents and recoverable shells, while ordinary shell execution remains process-local. `Executor` is required when sub-agents are enabled. Document this mixed behavior or rename the mode around shared Manager/recovery capability. |
-| `TypedBackgroundConfig[M]` | Fields: `Local`, `Durable`, `TranscriptFormat`, `Notifications` | **Keep** | Coherent top-level mode and one task-ID space. |
+| `TypedDurableSubAgentConfig[M]` | Fields: `Executor`, `RunOptionsFactories` | **Keep** | Durability is scoped precisely to reconstructable sub-agent execution. |
+| `DurableSubAgentConfig` | Standard-message alias | **Keep** | Consistent specialization. |
+| `RecoverableShellConfig` | Fields: `Shell`, `OutputDir`, `OutputMaterializer` | **Keep** | Groups only cross-worker shell recovery dependencies and output projection. |
+| `LocalShellConfig` | Fields: `Shell`, `StreamingShell`, `OutputDir` | **Keep** | Owns the process-local managed shell backend explicitly without claiming durability. |
+| `TypedBackgroundConfig[M]` | Fields: `Manager`, `Executors`, `SubAgents`, `RecoverableShell`, `LocalShell`, `ForegroundTimeoutMs`, `ShouldAutoBackground`, `TranscriptFormat`, `Notifications` | **Keep** | One Manager and one explicit executor-registry authority with independently enabled capability blocks; durability is no longer an ambiguous umbrella mode. |
 | `BackgroundConfig` | Standard-message alias | **Keep** | Consistent specialization. |
 | `TypedConfig.Background` | Optional background capability | **Keep** | Correct top-level ownership; intentionally not propagated to child agents. |
-| `TypedConfig.RecoverableShell` | Recoverable shell dependency | **Keep** | Correctly requires durable background mode. |
 | `NewTyped`, `New` | DeepAgent constructors exposing background config | **Keep** | Appropriate integration entry points. |
 
 The DeepAgent configuration duplicates several fields from filesystem and
@@ -558,12 +579,12 @@ observable contracts of the capability.
 |---|---:|---|
 | Concept coherence | 4/5 | Snapshot lifecycle, progress events, and child session events remain correctly separate. |
 | API usability | 4/5 | Executor dependencies are explicit; filesystem Manager selection remains a trap. |
-| Minimum API surface | 3/5 | `ValidateResume`, compatibility aliases, and duplicated configs add avoidable surface. |
-| Backward compatibility | 4/5 | Separate executor keys and registries preserve persisted-task compatibility well. |
+| Minimum API surface | 3/5 | Compatibility aliases and duplicated configs still add avoidable surface; the generic resume-validation tax is resolved. |
+| Backward compatibility | 4/5 | Alpha source APIs intentionally changed without aliases; persisted task data and executor keys remain compatible. |
 | Module separation | 4/5 | Core/domain/presentation boundaries are mostly clean. Notification validation types are awkwardly placed. |
 | Cohesion | 4/5 | Dedicated packages are cohesive; filesystem `BackgroundConfig` mixes capability modes. |
 | Elegance | 3/5 | Core state transitions are explicit and strong, but provisional SPI and config plumbing are large. |
-| Naming | 3/5 | Mostly precise; `Runtime`, local `Type`, and DeepAgent `Durable` need correction. |
+| Naming | 4/5 | DeepAgent now names durability per capability; `Runtime` and local `Type` remain ambiguous. |
 | Readability | 4/5 | Public concepts are understandable; valid union combinations need tables. |
 | Duplication | 3/5 | Typed aliases are justified; filesystem legacy/current configs and facade forwarding duplicate more than ideal. |
 | Public API documentation | 3/5 | Critical distributed-system contracts are good, operational defaults and callbacks are incomplete. |
@@ -571,52 +592,35 @@ observable contracts of the capability.
 
 ## Recommended API Changes
 
-### 1. Make Resume Validation Optional
-
-```go
-type Executor interface {
-    Key() string
-    LeaseExpiryPolicy() LeaseExpiryPolicy
-    ValidateSpec(Spec) error
-    ValidateExecution(context.Context, *Task) error
-    SupportsDrain() bool
-    Execute(context.Context, *Task, ExecutionRuntime) (*ExecutionResult, error)
-}
-
-type ResumeValidator interface {
-    ValidateResume(context.Context, Spec, []byte, []byte) ([]byte, error)
-}
-```
-
-`Manager.Resume` should return a dedicated unsupported-resume error when the
-resolved executor does not implement `ResumeValidator`.
-
-### 2. Split Filesystem Background Modes
+### 1. Split Filesystem Background Modes
 
 ```go
 type BackgroundConfig struct {
-    Local       *LocalBackgroundConfig
-    Recoverable *RecoverableBackgroundConfig
+    Manager       *backgroundtask.Manager
+    Local         *LocalBackgroundConfig
+    Recoverable   *RecoverableBackgroundConfig
     Notifications backgroundtask.NotificationDeliveryRuntime
 }
 ```
 
-This removes dual Manager authority and aligns filesystem configuration with
-sub-agent and DeepAgent configuration.
+`LocalBackgroundConfig` should own its process-local runner policy without
+introducing another Manager, while `RecoverableBackgroundConfig` should own the
+recoverable shell, registry, and materializer. This removes dual Manager
+authority and follows the capability-based DeepAgent configuration.
 
-### 3. Stabilize or Isolate Provider SPIs
+### 2. Stabilize or Isolate Provider SPIs
 
 Publish reusable conformance suites for:
 
 - Store lifecycle/CAS/fencing/lease behavior
 - EventID replay and conflict behavior
-- pending-list cursor behavior
+- pending- and suspended-list cursor behavior
 - notification visibility/acknowledgement
 - session inbox deduplication/order/CAS
 
 Until then, keep provider SPIs explicitly experimental.
 
-### 4. Type the Managed Tool Stream
+### 3. Type the Managed Tool Stream
 
 ```go
 type ToolStreamEventType string

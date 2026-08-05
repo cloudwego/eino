@@ -43,6 +43,15 @@ func (c *testClock) Advance(d time.Duration) {
 	c.mu.Unlock()
 }
 
+func newInMemoryStoreWithClock(
+	config *InMemoryStoreConfig,
+	now func() time.Time,
+) *InMemoryStore {
+	store := NewInMemoryStore(config)
+	store.now = now
+	return store
+}
+
 func validSpec(id string) Spec {
 	return Spec{
 		ID: id, ExecutorKey: "test", Payload: []byte("payload"),
@@ -54,9 +63,18 @@ func validSpec(id string) Spec {
 }
 
 func createAndStart(t *testing.T, store *InMemoryStore, id string) *Task {
+	return createAndStartWithPolicy(t, store, id, LeaseExpiryRetry)
+}
+
+func createAndStartWithPolicy(
+	t *testing.T,
+	store *InMemoryStore,
+	id string,
+	policy LeaseExpiryPolicy,
+) *Task {
 	t.Helper()
 	created, err := store.Create(context.Background(), &CreateTaskRequest{
-		Spec: validSpec(id), LeaseExpiryPolicy: LeaseExpiryRetry,
+		Spec: validSpec(id), LeaseExpiryPolicy: policy,
 	})
 	require.NoError(t, err)
 	started, err := store.Start(context.Background(), &StartTaskRequest{
@@ -86,25 +104,6 @@ func TestInMemoryStoreCreatePersistsPendingSnapshot_BitsUT(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "payload", string(stored.Spec.Payload))
 	assert.Equal(t, "value", stored.Spec.Notify.Metadata["test/key"])
-}
-
-func TestInMemoryStoreCreateAndStartIsAtomic_BitsUT(t *testing.T) {
-	store := NewInMemoryStore(nil)
-	spec := validSpec("local")
-	started, err := store.CreateAndStart(
-		context.Background(), &CreateTaskRequest{
-			Spec: spec, LeaseExpiryPolicy: LeaseExpiryFail,
-		},
-	)
-	require.NoError(t, err)
-	assert.Equal(t, StatusRunning, started.Status)
-	assert.Equal(t, int64(1), started.Attempt)
-	assert.Equal(t, int64(1), started.Version)
-	pending, err := store.ListPending(context.Background(), &ListPendingRequest{
-		ExecutorKeys: []string{"test"},
-	})
-	require.NoError(t, err)
-	assert.Empty(t, pending.Tasks)
 }
 
 func TestAttack_ListPendingCursorSurvivesEarlierInsertion(t *testing.T) {
@@ -196,7 +195,7 @@ func TestAttack_CancellationFencesAllNonCancelMutations(t *testing.T) {
 		})
 	}
 
-	canceled, err := store.Cancel(context.Background(), &CancelTaskRequest{
+	canceled, err := store.AckCancel(context.Background(), &AckCancelRequest{
 		TaskID: started.Spec.ID, ExpectedVersion: requested.Version,
 	})
 	require.NoError(t, err)
@@ -205,9 +204,10 @@ func TestAttack_CancellationFencesAllNonCancelMutations(t *testing.T) {
 
 func TestAttack_TaskEventOrderSpansAttemptsWithoutExposingAttempt(t *testing.T) {
 	clock := &testClock{now: time.Unix(100, 0)}
-	store := NewInMemoryStore(&InMemoryStoreConfig{
-		Clock: clock.Now, ActiveAttemptTimeout: time.Second,
-	})
+	store := newInMemoryStoreWithClock(
+		&InMemoryStoreConfig{ActiveAttemptTimeout: time.Second},
+		clock.Now,
+	)
 	firstAttempt := createAndStart(t, store, "output-retry")
 	first, err := store.AppendTaskEvent(context.Background(), &AppendTaskEventRequest{
 		TaskID: firstAttempt.Spec.ID, Attempt: firstAttempt.Attempt,
@@ -421,7 +421,7 @@ func TestInMemoryStoreHeartbeatSuspensionReleaseAndWait(t *testing.T) {
 		err  error
 	}, 1)
 	go func() {
-		task, err := store.Wait(context.Background(), &WaitUpdateRequest{
+		task, err := store.WaitForTaskVersion(context.Background(), &WaitForTaskVersionRequest{
 			TaskID: started.Spec.ID, AfterVersion: started.Version,
 		})
 		waitDone <- struct {
@@ -446,6 +446,13 @@ func TestInMemoryStoreHeartbeatSuspensionReleaseAndWait(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, StatusSuspended, suspended.Status)
 	require.Equal(t, "checkpoint", string(suspended.Checkpoint))
+
+	listed, err := store.ListSuspended(context.Background(), &ListSuspendedRequest{
+		ExecutorKeys: []string{"test"},
+	})
+	require.NoError(t, err)
+	require.Len(t, listed.Tasks, 1)
+	require.Equal(t, suspended.Spec.ID, listed.Tasks[0].Spec.ID)
 
 	released, err := store.ReleaseSuspension(context.Background(), &ReleaseSuspensionRequest{
 		TaskID: started.Spec.ID, ExpectedVersion: suspended.Version,
@@ -558,9 +565,10 @@ func TestInMemoryStoreTerminalResultInvariant_BitsUT(t *testing.T) {
 
 func TestInMemoryStoreExpiredLeaseRedispatchesWithCheckpoint_BitsUT(t *testing.T) {
 	clock := &testClock{now: time.Unix(100, 0)}
-	store := NewInMemoryStore(&InMemoryStoreConfig{
-		Clock: clock.Now, ActiveAttemptTimeout: 5 * time.Second,
-	})
+	store := newInMemoryStoreWithClock(
+		&InMemoryStoreConfig{ActiveAttemptTimeout: 5 * time.Second},
+		clock.Now,
+	)
 	started := createAndStart(t, store, "recovery")
 	store.mu.Lock()
 	store.tasks["recovery"].Checkpoint = []byte("checkpoint")
@@ -584,16 +592,12 @@ func TestInMemoryStoreExpiredLeaseRedispatchesWithCheckpoint_BitsUT(t *testing.T
 
 func TestInMemoryStoreExpiredNonRetryableLeaseFails_BitsUT(t *testing.T) {
 	clock := &testClock{now: time.Unix(100, 0)}
-	store := NewInMemoryStore(&InMemoryStoreConfig{
-		Clock: clock.Now, ActiveAttemptTimeout: 5 * time.Second,
-	})
-	spec := validSpec("local-expired")
-	_, err := store.CreateAndStart(
-		context.Background(), &CreateTaskRequest{
-			Spec: spec, LeaseExpiryPolicy: LeaseExpiryFail,
-		},
+	store := newInMemoryStoreWithClock(
+		&InMemoryStoreConfig{ActiveAttemptTimeout: 5 * time.Second},
+		clock.Now,
 	)
-	require.NoError(t, err)
+	spec := validSpec("local-expired")
+	createAndStartWithPolicy(t, store, spec.ID, LeaseExpiryFail)
 	clock.Advance(6 * time.Second)
 	failed, err := store.Get(context.Background(), spec.ID)
 	require.NoError(t, err)
@@ -606,16 +610,12 @@ func TestInMemoryStoreExpiredCanceledLeasePreservesRecoverableStop_BitsUT(t *tes
 	for _, policy := range []LeaseExpiryPolicy{LeaseExpiryRetry, LeaseExpiryFail} {
 		t.Run(string(policy), func(t *testing.T) {
 			clock := &testClock{now: time.Unix(100, 0)}
-			store := NewInMemoryStore(&InMemoryStoreConfig{
-				Clock: clock.Now, ActiveAttemptTimeout: 5 * time.Second,
-			})
-			spec := validSpec("cancel-expired-" + string(policy))
-			started, err := store.CreateAndStart(
-				context.Background(), &CreateTaskRequest{
-					Spec: spec, LeaseExpiryPolicy: policy,
-				},
+			store := newInMemoryStoreWithClock(
+				&InMemoryStoreConfig{ActiveAttemptTimeout: 5 * time.Second},
+				clock.Now,
 			)
-			require.NoError(t, err)
+			spec := validSpec("cancel-expired-" + string(policy))
+			started := createAndStartWithPolicy(t, store, spec.ID, policy)
 			requested, err := store.RequestCancel(context.Background(), &RequestCancelRequest{
 				TaskID: spec.ID, ExpectedVersion: started.Version,
 				Reason: "deployment shutdown",
@@ -711,7 +711,7 @@ func TestInMemoryStoreCancellationIntentReconcilesToCanceled_BitsUT(t *testing.T
 	})
 	assert.ErrorIs(t, err, ErrLeaseLost)
 
-	canceled, err := store.Cancel(context.Background(), &CancelTaskRequest{
+	canceled, err := store.AckCancel(context.Background(), &AckCancelRequest{
 		TaskID: "cancel", ExpectedVersion: requested.Version, Reason: "executor reason",
 	})
 	require.NoError(t, err)
@@ -744,7 +744,7 @@ func TestInMemoryStoreRunningAttemptCanCommitCanceled_BitsUT(t *testing.T) {
 	store := NewInMemoryStore(nil)
 	task := createAndStart(t, store, "local-cancel")
 
-	canceled, err := store.Cancel(context.Background(), &CancelTaskRequest{
+	canceled, err := store.AckCancel(context.Background(), &AckCancelRequest{
 		TaskID: task.Spec.ID, ExpectedVersion: task.Version,
 	})
 	require.NoError(t, err)

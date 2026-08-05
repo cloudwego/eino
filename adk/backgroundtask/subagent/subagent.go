@@ -248,9 +248,7 @@ func validateCheckpoint(
 	return nil
 }
 
-// ValidateResume validates and normalizes opaque resume data for a checkpoint.
-func (e *Executor[M]) ValidateResume(
-	_ context.Context,
+func (e *Executor[M]) validateResume(
 	spec backgroundtask.Spec,
 	checkpoint []byte,
 	resumeData []byte,
@@ -298,6 +296,20 @@ func (e *Executor[M]) Execute(
 		if err = validateCheckpoint(task.Spec, task.Checkpoint); err != nil {
 			return nil, err
 		}
+	}
+	if len(task.PendingResume) > 0 {
+		normalized, resumeErr := e.validateResume(
+			task.Spec, task.Checkpoint, task.PendingResume,
+		)
+		if resumeErr != nil {
+			// Resume input may have been persisted through the generic lifecycle
+			// API. Keep the task resumable instead of terminally failing it.
+			return &backgroundtask.ExecutionResult{
+				Status:     backgroundtask.StatusWaitingInput,
+				Checkpoint: append([]byte(nil), task.Checkpoint...),
+			}, nil
+		}
+		task.PendingResume = normalized
 	}
 	payload, err := decodePayload(task.Spec)
 	if err != nil {

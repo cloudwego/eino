@@ -98,6 +98,19 @@ type ListPendingResult struct {
 	NextCursor string
 }
 
+// ListSuspendedRequest lists suspended tasks for the given executor keys.
+type ListSuspendedRequest struct {
+	ExecutorKeys []string
+	Cursor       string
+	Limit        int
+}
+
+// ListSuspendedResult contains suspended task snapshots and an optional cursor.
+type ListSuspendedResult struct {
+	Tasks      []*Task
+	NextCursor string
+}
+
 // StartTaskRequest asks the Store to authorize a new active attempt.
 type StartTaskRequest struct {
 	TaskID          string
@@ -154,8 +167,8 @@ type YieldTaskRequest struct {
 	Checkpoint      []byte
 }
 
-// CancelTaskRequest records active-attempt acknowledgement of cancellation.
-type CancelTaskRequest struct {
+// AckCancelRequest records active-attempt acknowledgement of cancellation.
+type AckCancelRequest struct {
 	TaskID          string
 	ExpectedVersion int64
 	// Reason is used when no durable cancellation reason was previously recorded.
@@ -185,8 +198,9 @@ type ReleaseSuspensionRequest struct {
 	ExpectedVersion int64
 }
 
-// WaitUpdateRequest waits until a task advances beyond a known version.
-type WaitUpdateRequest struct {
+// WaitForTaskVersionRequest identifies a task and the latest snapshot version
+// observed by the caller. Task progress events do not advance Version.
+type WaitForTaskVersionRequest struct {
 	TaskID       string
 	AfterVersion int64
 }
