@@ -2,8 +2,7 @@
 
 ## Basis
 
-Fresh audit of the current `feat/durabletask` worktree after resolving the
-stabilization findings. Reviewed:
+Fresh audit through commit `7e034db0` on `feat/durabletask`. Reviewed:
 
 - `adk/backgroundtask` and all subpackages
 - background-task, filesystem, and sub-agent middleware integrations
@@ -40,16 +39,24 @@ not an assumption made from interface shape alone.
   `ManagedToolResponseEvent` and typed and validated its response variants.
 - Validated legal `ExecutionResult` and managed-tool `Outcome` combinations.
 - Sorted executor-registry keys and constrained generated ID kinds.
-- Scoped inbox deduplication by session and notification ID.
 - Completed ownership, pagination, callback, shutdown, drain, resume,
   transcript, notification, and stream-lifetime documentation.
 - Added reusable conformance suites for lifecycle stores, event stores,
-  notification outboxes, and session inboxes.
+  and notification outboxes.
 - Made Manager construction reject missing event-store capability.
 - Moved creation time from caller `Spec` to provider-owned `Task.CreatedAt`.
-- Reduced session activation to success or failure.
-- Made Dispatcher and managed-tool progress-reader dependencies immutable after
-  validated construction.
+- Removed the speculative session inbox, dispatcher, activation, and TurnLoop
+  adapter. Host applications own all session runtime behavior.
+- Made notification outbox records self-contained for routing with immutable
+  `SessionID` and `TaskID`.
+- Made managed-tool progress-reader dependencies immutable after validated
+  construction.
+- Replaced the durable sub-agent's raw session-store accessor with semantic,
+  bounded `Executor.ReadProgress`.
+- Added a typed TaskCreated session extension event emitted by Manager after
+  authoritative creation and persisted in causal turn order by Runner.
+- Made TaskCreated delivery crash-recoverable through an atomically created
+  outbox record and a deterministic session-event ID.
 - Removed alpha background configuration from the deprecated filesystem
   constructor.
 
@@ -73,7 +80,7 @@ not an assumption made from interface shape alone.
 |---|---|---|
 | `Spec{ID, ExecutorKey, Kind, Payload, Description, OutputFile, SessionID, NotifySession}` | **Keep** | Pure caller intent; `OutputFile` is correctly documented as derived. |
 | `Task{Spec, LeaseExpiryPolicy, Status, Checkpoint, ResultData, ResultError, OutputFileErr, PendingResume, Version, Attempt, CancelRequestedAt, CancelReason, CreatedAt, UpdatedAt, DoneAt}` | **Keep** | Necessary authoritative snapshot. Timestamps are provider-owned and mutable ownership is documented. |
-| `Config{Tasks, TaskEvents, Executors, IDGen}` | **Keep** | Explicit lifecycle/event/implementation authorities. Misconfiguration handling belongs to `New`. |
+| `Config{Tasks, TaskEvents, Executors, SendTaskCreatedEvent, IDGen}` | **Keep** | Explicit lifecycle/event/implementation authorities. The typed sender callback bridges non-generic Manager to the active generic Runner without exposing a session store. |
 | `New(context.Context, *Config) (*Manager, error)` | **Keep** | Rejects a supplied lifecycle store without a matching event-store capability at construction. |
 | `Manager` | **Keep** | Correct heterogeneous lifecycle coordinator. |
 
@@ -105,13 +112,22 @@ All exported fields are included below.
 | `ListTaskEventsRequest{TaskID, Cursor, Limit, NewestFirst}` | **Keep** | Supports complete replay and efficient recent reads with opaque cursors. |
 | `ListTaskEventsResult{Events, NextCursor}` | **Keep** | Minimal snapshot-page result. |
 
+### Parent session creation event
+
+| Exported API | Verdict | Audit |
+|---|---|---|
+| `SessionEventTaskCreated` | **Keep** | Stable extension kind `x.eino.background_task.created`; it does not enter model context. |
+| `TaskCreatedSessionEvent{TaskID}` | **Keep** | Minimal application-facing payload for later task reads and controls. |
+| `TaskCreatedSessionEventID` | **Keep** | Deterministic identity lets immediate emission and outbox recovery converge idempotently. |
+| `TaskCreatedSessionEventSender[M]` | **Keep** | Necessary generic bridge to `TypedSendEvent`; Runner remains the sole parent-session writer and assigns causal `TurnID`. |
+
 ### Storage interfaces
 
 | Exported API | Verdict | Audit |
 |---|---|---|
-| `TaskStore` and all 18 methods | **Keep** | Cohesive explicit state machine with reusable lifecycle, lease, CAS, list, and cancellation conformance. |
+| `TaskStore` and all 18 methods | **Keep** | Cohesive explicit state machine. A provider paired with `NotificationOutbox` atomically creates the TaskCreated recovery record for parent-owned tasks. |
 | `TaskEventStore.AppendTaskEvent`, `ListTaskEvents` | **Keep** | Fencing, replay, retention, order, cursor, and snapshot contracts have reusable conformance. |
-| `NotificationOutbox.Receive`, `Ack` | **Keep** | Opaque receipt lease with reusable exclusion, expiry, redelivery, and acknowledgement conformance. |
+| `NotificationOutbox.Receive`, `Ack` | **Keep** | Opaque receipt lease with reusable exclusion, expiry, redelivery, acknowledgement, and TaskCreated recovery conformance. |
 
 ### Execution boundary
 
@@ -127,7 +143,7 @@ All exported fields are included below.
 
 | Exported API | Verdict | Audit |
 |---|---|---|
-| `Submit`, `Get`, `ListPending`, `ListSuspended`, `ListTaskEvents`, `WaitForTaskVersion` | **Keep** | Appropriate validated persistence and read boundaries. |
+| `Submit`, `Get`, `ListPending`, `ListSuspended`, `ListTaskEvents`, `WaitForTaskVersion` | **Keep** | Submit emits TaskCreated after authoritative creation; a send failure returns the persisted task and supports one exact-spec repair retry on the same Manager. Other methods remain appropriate validated persistence and read boundaries. |
 | `Execute` | **Keep** | Single generic claim/run entry point; no polling policy is embedded. |
 | `RequestCancel`; `RequestCancelOption`; `WithCancellationReason` | **Keep** | Durable first-write reason plus best-effort local signaling. |
 | `Resume`, `ReleaseSuspension` | **Keep** | Manager owns generic persistence/CAS while executor owns domain validation. |
@@ -145,15 +161,15 @@ All exported fields are included below.
 
 | Exported API | Verdict | Audit |
 |---|---|---|
-| `NotificationKind`; four `Notification*` constants | **Keep** | Exactly the notification-producing lifecycle transitions. |
-| `Notification{ID, TaskID, Version, Kind, CreatedAt, Task}` | **Keep** | Pointer-only outbox and enriched inbox phases are documented. |
+| `NotificationKind`; five `Notification*` constants | **Keep** | One creation-recovery record plus the four notification-producing lifecycle transitions. |
+| `Notification{ID, TaskID, SessionID, Version, Kind, CreatedAt}` | **Keep** | Self-contained durable routing pointer. Host runtimes may load authoritative task state by `TaskID`. |
 | `NotificationReceipt`; `ReceiveNotificationsRequest{Limit, LeaseDuration}`; `NotificationDelivery{Record, Receipt}`; `ReceiveNotificationsResult{Deliveries}` | **Keep** | Correct opaque leased-delivery model with reusable provider conformance. |
-| `EnqueueSessionNotificationRequest{SessionID, Notification}` | **Keep** | Single supported notification destination. |
-| `SessionInboxItem{ItemID, ItemVersion, SessionID, Notification, CreatedAt}` | **Keep** | Coherent durable inbox record. |
-| `ListSessionNotificationsRequest{SessionID, Limit}`, `AckSessionNotificationRequest{SessionID, ItemID, ExpectedVersion}` | **Keep** | Ordering, limits, and CAS are explicit. |
-| `SessionNotificationInbox` | **Keep** | Deduplication, order, limits, and CAS have reusable conformance. |
-| `SessionActivationRequest{SessionID}`, `SessionActivator.RequestTurn(...) error` | **Keep** | Host scheduling remains separate from persistence and exposes only consumed semantics. |
-| `DispatcherConfig{Outbox, Tasks, Inbox, Activator, BatchSize, LeaseDuration}`; `NewDispatcher`; `Dispatcher.DispatchOnce` | **Keep** | Validated construction freezes dependencies and policy; dispatch retains the correct at-least-once sequence. |
+
+Lifecycle notifications stop at the durable task-notification outbox. The
+TaskCreated record also lets a host reconcile the direct Runner timeline event
+after a crash using the same deterministic EventID. The capability exposes no
+session inbox, activation, dispatch, or TurnLoop policy. Host applications own
+outbox consumption, later notification delivery, scheduling, and wake-up.
 
 ## 3. `backgroundtask/local`
 
@@ -165,15 +181,7 @@ All exported fields are included below.
 | `Config{Manager, Executors, ForegroundTimeoutMs, ShouldAutoBackground, BackgroundNotice}` | **Keep** | Explicit authorities and policy semantics. |
 | `Runner`; `New`; `Manager`; `Run`; `RunStream` | **Keep** | Correctly owns non-serializable work; stream-close cancellation is explicit. |
 
-## 4. `backgroundtask/sessionnotify`
-
-| Exported API | Verdict | Audit |
-|---|---|---|
-| `MemoryInbox`; constructor; `Enqueue`, `ListPending`, `Ack` | **Keep** | Session-scoped deduplication, ordering, limits, tombstones, and CAS are documented. |
-| `TurnLoopTarget{Loop, RunContext}` | **Keep** | Deployment lifetime and borrowed-target rules are explicit. |
-| `TurnLoopActivator{Resolve, WakeItem}`; `RequestTurn` | **Keep** | Correct bridge returning only activation success or failure. |
-
-## 5. Recoverable Shell
+## 4. Recoverable Shell
 
 | Exported API | Verdict | Audit |
 |---|---|---|
@@ -181,18 +189,18 @@ All exported fields are included below.
 | `StartCommandRequest{TaskID, Command, Attempt}`, `RecoverCommandRequest{TaskID, Command, Attempt}` | **Keep** | Minimal identity/attempt envelopes without checkpoints. |
 | `RegistrationConfig{Info, Shell, Materializer}`; `NewRegistration` | **Keep** | Small adapter boundary that hides generic managed-tool plumbing. |
 
-## 6. Durable Sub-Agent
+## 5. Durable Sub-Agent
 
 | Exported API | Verdict | Audit |
 |---|---|---|
 | `ExecutorKey` | **Keep** | Stable persisted routing key. |
 | `RunOptionsFactory`; `AgentRegistration{Agent, RunOptionsFactory}` | **Keep** | Worker-equivalence and concurrency requirements are explicit. |
 | `ExecutorConfig{SessionStore, CheckPointStore, SessionConfig}`; `Executor`; `NewExecutor` | **Keep** | Durable dependencies are constructor-injected, not context-injected. |
-| `Executor.SessionEventStore` | **Keep narrowly** | Needed to construct the matching progress reader from the same authority. |
+| `Executor.ReadProgress` | **Keep** | Semantic bounded transcript projection with an inline formatting callback; the executor retains exclusive access to its child-session store. |
 | `Register`, `Key`, `LeaseExpiryPolicy`, `ValidateSpec`, `ValidateExecution`, `SupportsDrain`, `Execute` | **Keep** | Interface and registration surface is coherent; checkpoint logic stays sub-agent-specific. |
 | `SubmitRequest{TaskID, SubAgentName, Query, Description, SessionID}`; `Submit` | **Keep** | Hides payload encoding and clearly identifies parent session. |
 
-## 7. Managed Background Tools
+## 6. Managed Background Tools
 
 | Exported API | Verdict | Audit |
 |---|---|---|
@@ -223,10 +231,9 @@ All exported fields are included below.
 |---|---|---|
 | `TaskStoreConfig{New, ExpireActiveAttempt}`; `RunTaskStoreConformance` | **Keep** | Reusable lifecycle, CAS, ownership, transition, listing, cancellation, and lease-expiry gate. |
 | `TaskEventStoreConfig{New}`; `RunTaskEventStoreConformance` | **Keep** | Reusable fencing-before-deduplication, replay, ordering, cursor, and snapshot-pagination gate. |
-| `NotificationOutboxConfig{New, ExpireLease}`; `RunNotificationOutboxConformance` | **Keep** | Reusable lease exclusion, expiry, redelivery, stale-receipt, and acknowledgement gate. |
-| `SessionInboxConfig{New}`; `RunSessionInboxConformance` | **Keep** | Reusable session-scoped deduplication, ordering, limit, CAS, and tombstone gate. |
+| `NotificationOutboxConfig{New, ExpireLease}`; `RunNotificationOutboxConformance` | **Keep** | Reusable TaskCreated creation, lease exclusion, expiry, redelivery, stale-receipt, and acknowledgement gate. |
 
-## 8. Control Middleware
+## 7. Control Middleware
 
 | Exported API | Verdict | Audit |
 |---|---|---|
@@ -242,7 +249,7 @@ Model-facing contracts:
 | `task_output{task_id, block?, timeout?}` | **Keep** | Lifecycle-only blocking and limits are explicit. |
 | `task_stop{task_id, reason?}` | **Keep** | Optional reason becomes durable first-write cancellation intent. |
 
-## 9. Filesystem Integration
+## 8. Filesystem Integration
 
 | Exported API | Verdict | Audit |
 |---|---|---|
@@ -255,7 +262,7 @@ Model-facing contracts:
 | legacy `Config`; `NewMiddleware` | **Compatibility** | Pre-existing filesystem compatibility only; the alpha background capability is intentionally absent. |
 | model `execute.run_in_background`, `execute.timeout` | **Keep** | Explicit detachment and timeout stop/detach policy are documented. |
 
-## 10. Sub-Agent Middleware
+## 9. Sub-Agent Middleware
 
 | Exported API | Verdict | Audit |
 |---|---|---|
@@ -265,10 +272,10 @@ Model-facing contracts:
 | `TypedDurableBackgroundConfig{Manager, Executors, Executor, ForegroundTimeoutMs, ShouldAutoBackground, RunOptionsFactories}` and alias | **Keep** | Explicit reconstruction dependencies. |
 | `TypedBackgroundConfig{Local, Durable, TranscriptFormat}` and alias | **Keep** | Exactly-one mode is constructor-validated. |
 | `TypedConfig` background-related fields; `Config`; `NewTyped`; `New` | **Keep** | Coherent optional integration. |
-| `DurableTaskProgressReader`; `NewDurableTaskProgressReader`; `ReadProgress` | **Keep** | Concrete capability with validated session-store injection. |
+| `DurableTaskProgressReader`; `NewDurableTaskProgressReader`; `ReadProgress` | **Keep** | Adapts the durable executor's semantic progress projection to control middleware without exposing storage. |
 | model `agent.run_in_background` | **Keep** | Consistent explicit detachment control. |
 
-## 11. DeepAgent and Runner Integration
+## 10. DeepAgent and Runner Integration
 
 | Exported API | Verdict | Audit |
 |---|---|---|
