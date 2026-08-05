@@ -434,7 +434,9 @@ func (e *executor) persistUpdate(
 		}
 	}
 	if result.Inserted && projection != nil {
-		projection.send(ctx, foreground.ProjectionDetached(ctx), update)
+		projected := cloneUpdate(update)
+		projected.EventID = result.Event.EventID
+		projection.send(ctx, foreground.ProjectionDetached(ctx), projected)
 	}
 	return nil
 }

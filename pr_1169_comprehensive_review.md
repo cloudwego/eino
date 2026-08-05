@@ -3,12 +3,12 @@
 ## Scope And Baseline
 
 - PR: `#1169 feat(adk): add durable background task execution`
-- Focus commit: `637a5bc2 feat(adk): add durable background tool execution`
-- Focus size: 30 files, +3857/-37
-- Baseline targeted tests: pass
-- Baseline race tests: pass
-- Baseline full `go test ./...`: pass
-- Baseline Go 1.18 targeted tests: pass
+- Focus commit: `fd060d58 refactor(adk): simplify task progress events`
+- Focus range: `3138bf74..fd060d58`
+- Focus size: 25 files, +383/-340
+- Baseline `go build ./...`: pass
+- Baseline `go test ./...`: pass
+- Baseline `git diff --check`: pass
 
 ## Stage 1: Design Review
 
@@ -16,105 +16,56 @@
 
 | Dimension | Rating | Notes |
 | --- | --- | --- |
-| Concept coherence | 4/5 | Plain and recoverable executor classes are explicit; yield is separate from suspension. |
-| API usability | 4/5 | Main contracts are direct, but manager mismatch is not rejected. |
-| Minimum API surface | 4/5 | Worker exposes redundant `Config`/`New` aliases in a new package. |
-| Backward compatibility | 5/5 | Existing shell, streaming shell, and progress callback paths remain intact. |
-| Module separation | 5/5 | Core lifecycle, generic tool, shell adapter, middleware, and worker responsibilities are separated. |
-| Cohesion | 4/5 | Deep progress wiring is unnecessarily conditional on recoverable shell configuration. |
-| Elegance/complexity | 4/5 | Projection and recovery responsibilities are explicit; terminal update draining needs correction. |
-| Naming | 5/5 | Public names match the durable-task vocabulary and executor namespace. |
-| Readability | 4/5 | `executor.Execute`, stream projection, and Worker dispatch are the hardest sections but locally structured. |
-| Duplication | 4/5 | Drain/context-yield checkpoint logic is shared; Worker compatibility aliases are redundant. |
-| Public API documentation | 4/5 | Public contracts are documented; field-level semantics can be expanded in follow-up API docs. |
-| Internal comments | 4/5 | Critical persistence-before-projection and recovery rules are explained in code and design docs. |
+| Concept coherence | 5/5 | Task lifecycle snapshots and append-ordered progress events remain independent domains. |
+| API usability | 4/5 | The unified append API is direct, but plain live updates discard the resolved generated EventID. |
+| Minimum API surface | 5/5 | The split append APIs and unused replay cursor are removed without replacement. |
+| Backward compatibility | 5/5 | The affected progress contracts are unreleased; lifecycle, notification, and SessionEvent APIs are unchanged. |
+| Module separation | 5/5 | Runtime owns generation, Store owns fencing/deduplication, and materializers own derived output. |
+| Cohesion | 5/5 | Event identity and replay semantics are centralized without cross-store ordering. |
+| Elegance/complexity | 5/5 | One idempotent append path replaces keyed/unkeyed branching and public sequence state. |
+| Naming | 5/5 | Public names consistently use TaskEvent and EventID vocabulary. |
+| Readability | 4/5 | `persistUpdate`, Store append authorization, and recovery materialization are the densest sections. |
+| Duplication | 5/5 | Raw runtime callers share the same empty-ID generation path. |
+| Public API documentation | 4/5 | Core contracts are documented, including opaque EventID and stable replay order. |
+| Internal comments | 5/5 | Non-obvious materialization and ordering constraints are recorded at their ownership boundary. |
 
 ### New Public Name Assessment
 
 | Public name(s) | Assessment |
 | --- | --- |
-| `ExecutionDirective`, `ExecutionDirectiveYield`, `ExecutionResult.Directive` | Clearly separates executor control flow from persisted lifecycle status. |
-| `YieldTaskRequest`, `Store.Yield` | Accurately names Worker attempt relinquishment without implying suspension. |
-| `OutputRecord.SourceID` | Stable replay identity is explicit and optional for legacy records. |
-| `AppendOutputOnceRequest`, `AppendOutputOnceResult`, `Store.AppendOutputOnce`, `ExecutionRuntime.AppendOutputOnce` | Consistent once-only keyed append vocabulary across SPI and attempt runtime. |
-| `ReadRecentOutputRequest`, `Store.ReadRecentOutput`, `Manager.ReadRecentOutput` | Clearly presentation-oriented alongside forward `ReadOutput`. |
-| `ErrOutputConflict` | Precisely describes same-source/different-bytes corruption risk. |
-| `ExecutorKey`, `RecoverableExecutorKey` | Stable capability-class identities in the existing Eino namespace. |
-| `BackgroundTool`, `RecoverableBackgroundTool` | Minimal baseline with explicit opt-in recovery capability. |
-| `StartRequest`, `RecoverRequest` | Symmetric request names with task ID, arguments, attempt, and boundary checkpoint. |
-| `Run`, `Checkpointer`, `UpdateSource` | Small attempt-local capability interfaces; no flag-based capability drift. |
-| `Outcome`, `Update`, `ToolStreamEvent` | Distinguishes terminal authority, durable progress, and model-facing wire events. |
-| `Registration`, `Registry`, `NewRegistry`, `Registry.Register` | Conventional registry vocabulary and stable name binding. |
-| `RegisterExecutors`, `ArgumentsFromTask` | Directly describes executor installation and payload inspection. |
-| `ManagedToolConfig`, `NewManagedTool` | Matches repository constructor/config conventions. |
-| `OutputMaterializer`, `ReserveOutputRequest`, `MaterializeOutputRequest` | Communicates derived output projection and deterministic reservation. |
-| `ProgressReader` | Concise executor-specific recent progress adapter. |
-| `RecoverySnapshot`, `RecoveryConformanceConfig`, `CheckRecoveryConformance` | Clear reusable backend contract verification names. |
-| `shell.RecoverableShell`, `StartCommandRequest`, `RecoverCommandRequest` | Shell-domain names preserve generic task recovery semantics. |
-| `shell.RegistrationConfig`, `shell.NewRegistration` | Conventional adapter construction names. |
-| `WorkerConfig`, `Worker`, `NewWorker`, `Worker.Run` | Minimal operational polling Worker API matching the design. |
-| `TaskProgressReader`, `TypedConfig.ProgressReaders` | Executor-key-aware progress composition without model pagination. |
-| `filesystem.RecoverableShell`, `filesystem.StartCommandRequest`, `filesystem.RecoverCommandRequest` | Discoverable aliases at the middleware integration boundary. |
-| `BackgroundConfig.Manager`, `ToolRegistry`, `OutputMaterializer`, `ForegroundTimeoutMs`, `ShouldAutoBackground` | Required shared lifecycle and foreground policy dependencies are explicit. |
-| `deep.TypedConfig.RecoverableShell`, `TypedDurableBackgroundConfig.OutputMaterializer` | Direct DeepAgent wiring with durable-only recovery requirements. |
+| `TaskEvent` | Precisely names progress-only task events without implying lifecycle authority. |
+| `AppendTaskEventRequest`, `AppendTaskEventResult` | Clearly separates write authorization from persisted event data and reports replay insertion. |
+| `ReadRecentTaskEventsRequest`, `ReadRecentTaskEventsResult` | Explicitly bounded presentation API with no replay-cursor implication. |
+| `ErrTaskEventConflict` | Accurately identifies same-EventID/different-bytes corruption prevention. |
+| `Store.AppendTaskEvent`, `Store.ReadRecentTaskEvents` | Minimal Store surface aligned with the target event model. |
+| `ExecutionRuntime.AppendTaskEvent` | Correct single generation boundary for managed and raw callers. |
+| `Manager.ReadRecentTaskEvents` | Direct delegation without exposing Store or cursor internals. |
+| `Update.EventID` | Consistent stable identity for recoverable update sources. |
+| `MaterializeOutputRequest.EventID` | Correct idempotency key for derived output. |
 
 ### Iteration 1 Findings And Verdicts
 
 | # | Severity | Dimension | Finding | Validation And Counterargument | Verdict |
 | --- | --- | --- | --- | --- | --- |
-| D1 | Blocker | Reliability | `adk/backgroundtask/worker/worker.go` ignores every `Manager.Execute` error, causing permanent validation/configuration failures to hot-loop as pending work without host visibility. | Claim conflicts are expected and must be ignored, but non-conflict errors indicate an operationally broken Worker. Returning the first non-benign error adds no task-state complexity. | Fixed |
-| D2 | High | Lifecycle integrity | `InMemoryStore.Yield` overwrites an existing checkpoint with nil when the current Run has no `Checkpointer`. | Nil is explicitly optional. Clearing the last boundary reference loses recovery information; retaining it is safer and matches “latest checkpoint.” | Fixed |
-| D3 | High | Data integrity | On terminal `Run.Wait`, the executor closes `UpdateSource` before naturally draining it, so buffered final updates can be lost. | An abandoned stream must not hang forever, but immediate close violates the documented terminal ordering. Drain naturally with a bounded timeout. | Fixed |
-| D4 | High | API usability | Filesystem `BackgroundConfig` accepts different `Manager` and `Runner.Manager()` values, validating notifications against one while process-local execution uses the other. | Supporting two Managers in one execute configuration has no coherent use case and breaks the shared ID-space promise. | Fixed |
-| D5 | Medium | Backward compatibility | Foreground Worker-race fallback accepts any non-pending task with `Attempt > 0`, including waiting-input and suspended states. | Managed tools need running or terminal authority only. Broadening other lifecycle behavior is unnecessary. | Fixed |
-| D6 | Medium | State integrity | `Registry.Register` stores the caller-owned `ToolInfo` pointer, allowing post-registration mutation and races. | Implementations and callbacks are intentionally live objects, but metadata is declarative registration state and should be copied. | Fixed |
-| D7 | Medium | Cohesion | DeepAgent registers managed-tool progress readers only when `RecoverableShell` is set, so generic managed tools sharing the Manager show no progress. | Registering readers for the stable executor keys is harmless when unused and correctly composes all managed tools. | Fixed |
-| D8 | Low | Minimum API surface | New Worker package exposes both `WorkerConfig`/`NewWorker` and aliases `Config`/`New`. | There is no compatibility obligation for this new package, and the plan specifies one constructor pair. | Fixed |
-| D9 | Low | Readability | Bounded progress fallback may split UTF-8 at a byte boundary. | Output remains bounded and Go permits invalid strings, but model-facing text should remain valid UTF-8. The fix is small and does not alter storage. | Fixed |
+| D1 | Medium | API usability | `adk/backgroundtask/tool/executor.go:417-437` receives a resolved generated EventID but projects the original plain `Update` with an empty EventID. | Persistence readers can obtain identity from `TaskEvent`, but the plan requires callers to receive generated IDs and makes runtime return the resolved event for that purpose. Projecting a clone with the resolved ID preserves caller-supplied materialization gating. | Fix |
 
 ### Top Recommendations
 
-1. Preserve durable authority on every handoff: checkpoint retention, cancel recovery, and terminal update draining.
-2. Make host scheduling failures observable while continuing to tolerate expected claim races.
-3. Reject configuration combinations that violate the single shared Manager/task-ID space.
+1. Preserve the resolved EventID at every caller-visible projection boundary.
+2. Keep attempt fencing before EventID replay lookup in every Store implementation.
+3. Retain deterministic source replay order as an explicit materializer precondition.
 
 ### Iteration 1 Fix Log
 
-- D1: Worker now ignores only expected claim races, cancels sibling dispatches on a
-  permanent dispatch error, and returns that error to the host. Added
-  `TestWorkerReturnsPermanentDispatchError`.
-- D1 verification: `go build ./...` and `go test ./... -count=1` pass.
-- D2: Empty yield checkpoints now retain the latest durable boundary checkpoint;
-  the Store conformance test verifies retention across a second attempt.
-- D2 verification: `go build ./...` and `go test ./... -count=1` pass.
-- D3: Terminal outcomes now drain updates to natural EOF with a five-second
-  abandonment bound. The streaming test publishes three buffered final records
-  without timing sleeps and verifies all three precede `launch_result`.
-- D3 verification: `go build ./...` and `go test ./... -count=1` pass.
-- D4: Both filesystem config variants now reject a `Background.Manager` that
-  differs from `Background.Runner.Manager()`. Added a configuration regression test.
-- D4 verification: `go build ./...` and `go test ./... -count=1` pass.
-- D5: Foreground race reconciliation now accepts only running or terminal tasks;
-  suspended and waiting-input states remain illegal launch states. Added suspended-state coverage.
-- D5 verification: `go build ./...` and `go test ./... -count=1` pass.
-- D6: Registry registration now deep-copies `schema.ToolInfo`; mutation of the
-  caller-owned metadata cannot rename or race the stored registration.
-- D6 verification: `go build ./...` and `go test ./... -count=1` pass.
-- D7: DeepAgent now always registers readers for both managed-tool executor keys
-  whenever background support is enabled, independently of shell configuration.
-- D7 verification: `go build ./...` and `go test ./... -count=1` pass.
-- D8: Removed the redundant Worker `Config` alias and `New` constructor; the
-  package now exposes only `WorkerConfig` and `NewWorker`.
-- D8 verification: `go build ./...` and `go test ./... -count=1` pass.
-- D9: Progress text now replaces invalid input and backs truncation up to a valid
-  UTF-8 boundary. Added a multibyte boundary regression test.
-- D9 verification: `go build ./...` and `go test ./... -count=1` pass.
+- D1: Live projection now clones the update and assigns the resolved
+  `TaskEvent.EventID`. The pre-call `callerSuppliedEventID` flag remains the
+  materialization gate, so generated IDs do not make plain updates materializable.
+- D1 verification: `go build ./...`, `go test ./...`, and `git diff --check` pass.
 
 ### Iteration 1 Re-Review
 
-All nine findings are resolved. Re-review of reliability, lifecycle integrity,
-data integrity, API usability, backward compatibility, cohesion, minimum surface,
-and readability found no new concerns.
+D1 is resolved. Re-review of API usability, materialization gating, projection
+aliasing, and replay behavior found no new concerns.
 
 | Dimension | Final Rating |
 | --- | --- |
@@ -124,160 +75,165 @@ and readability found no new concerns.
 | Backward compatibility | 5/5 |
 | Module separation | 5/5 |
 | Cohesion | 5/5 |
-| Elegance/complexity | 4/5 |
+| Elegance/complexity | 5/5 |
 | Naming | 5/5 |
 | Readability | 4/5 |
 | Duplication | 5/5 |
 | Public API documentation | 4/5 |
-| Internal comments | 4/5 |
+| Internal comments | 5/5 |
 
 ## Stage 2: Attack Review
 
-### Iteration 1 Attack Results
+### Iteration 1 Results
 
 | # | Severity | Issue | Test | Status |
 | --- | --- | --- | --- | --- |
-| A1 | OK | Replayed source event must not duplicate Store or live projection, but must reapply derived materialization. | `TestAttack_ReplayedSourceProjectsOnceMaterializesTwice` | Verified |
-| A2 | OK | Reusing a source ID with different bytes must fail instead of corrupting history. | `TestAttack_ConflictingSourceIDFailsTask` | Verified |
-| A3 | OK | Recoverable output without a lifetime-stable source ID must be rejected. | `TestAttack_RecoverableUpdateRequiresSourceID` | Verified |
-| A4 | OK | Update bytes containing newline-delimited fake JSON must not forge a lifecycle record. | `TestAttack_UpdateDataCannotForgeNDJSONBoundary` | Verified |
-| A5 | OK | A terminal operation whose update stream never closes must fail within a bound. | `TestAttack_AbandonedUpdateStreamFailsBoundedly` | Verified |
+| A1 | OK | Byte-identical replay must not duplicate Store or live projection but must retry materialization. | `TestAttack_ReplayedEventProjectsOnceMaterializesTwice` | Verified |
+| A2 | OK | Same EventID with different bytes must fail deterministically. | `TestAttack_ConflictingEventIDFailsTask` | Verified |
+| A3 | OK | Recoverable updates without stable identity must fail. | `TestAttack_RecoverableUpdateRequiresEventID` | Verified |
+| A4 | OK | A persisted replay must repair missing materialization even when `Inserted=false`. | `TestAttack_PersistedReplayRepairsMissingMaterialization` | Verified |
+| A5 | OK | Materialization must preserve source replay order instead of sorting EventID. | `TestAttack_MaterializationPreservesStableReplayOrder` | Verified |
+| A6 | OK | Plain updates must receive generated IDs without becoming materializable. | `TestAttack_PlainUpdateGeneratedEventIDNotMaterialized` | Verified |
+| A7 | OK | Identical EventIDs in different tasks must not conflict. | `TestAttack_EventIDIsTaskLocal` | Verified |
+| A8 | OK | Recent reads must preserve append order independent of lexical EventID order. | `TestAttack_RecentTaskEventsIgnoreEventIDLexicalOrder` | Verified |
+| A9 | OK | Stale attempts must receive `ErrLeaseLost` before replay success. | `TestAttack_TaskEventReplayFencesStaleAttempt` | Verified |
+| A10 | OK | Append order must span attempts without exposing attempt in events. | `TestAttack_TaskEventOrderSpansAttemptsWithoutExposingAttempt` | Verified |
 
-No attack failed. Validation confirmed each expectation follows the persisted-output,
-canonical-result, or bounded-drain contract; no counterargument justified weakening
-those expectations.
+Validation confirmed each expectation follows the plan's identity, fencing,
+ordering, or materialization contract. Counterarguments based on Store-internal
+position or generated-ID materialization would violate the intentionally minimal
+public model, so none justified weakening the tests.
 
 Final command:
 
 ```text
-go test ./adk/backgroundtask/tool -run 'TestAttack_' -v -count=1
+go test ./adk/backgroundtask/... ./adk/middlewares/filesystem ./adk/middlewares/subagent -run 'TestAttack_' -v -count=1
 ```
 
-Result: 5/5 passing, zero confirmed bugs, Stage 2 complete in one iteration.
+Result: all scoped attack tests pass, zero confirmed bugs, Stage 2 complete in one iteration.
 
 ## Stage 3: Test Audit
 
 ### Iteration 1 Findings
 
-| Priority | Category | Finding | Verdict |
-| --- | --- | --- | --- |
-| High | Coverage gap | `adk/backgroundtask/shell` had 7.1% coverage. | Fix |
-| High | Coverage gap | Recovery conformance helpers had 0% coverage. | Fix |
-| High | Coverage gap | `adk/backgroundtask/tool` had 62.8% coverage with validation and wrapper branches below 70%. | Fix |
-| High | Coverage gap | `adk/backgroundtask/worker` had 75.6% coverage and constructor/error classification below 70%. | Fix |
-| Medium | Coverage gap | Touched foreground and filesystem functions remained below the 70% function floor. | Fix |
-| None | Duplicates | No true or near-duplicate test with identical semantic value found. | Won't Fix |
-| None | Assertions | No assertion weaker than the known contract found; `require.NotNil` usages guard later dereferences or timestamp presence. | Won't Fix |
-| None | Boilerplate/grouping | Existing helpers remove repeated setup; separate lifecycle tests preserve failure isolation. | Won't Fix |
+| Priority | Category | Finding | Count | Estimated LOC Impact | Verdict |
+| --- | --- | --- | --- | --- | --- |
+| Medium | Assertion quality | New result-pointer assertions could panic before identifying a nil contract violation, and one validation test accepted any error. | 16 sites | +15 LOC | Fix |
+| None | Duplicates | Event ordering, replay, task-local identity, and materialization tests have distinct semantic contracts. | 0 | 0 | Won't Fix |
+| None | Boilerplate | Repeated setup remains below the three-occurrence extraction threshold or uses existing helpers. | 0 | 0 | Won't Fix |
+| None | Logical grouping | Separate attack names preserve independent failure isolation. | 0 | 0 | Won't Fix |
+| None | Semantic value | Every new test protects an explicit plan requirement or review finding. | 0 | 0 | Won't Fix |
+| None | Coverage gaps | Production diff coverage is 89.7%; every changed function is at least 70% covered. | 0 | 0 | Won't Fix |
 
-Counterargument considered: package-level coverage can incentivize branch-only tests.
-The added cases were retained only where each branch represents a distinct public
-contract or failure mode: payload validation, recovery identity, cancellation,
-projection detachment, scheduler errors, and notification configuration.
+Validation confirmed that explicit `require.NotNil` and exact error matching improve
+failure diagnosis without coupling tests to implementation details. The counterargument
+that a panic still fails the test was rejected because it obscures the violated contract.
 
 ### Iteration 1 Fixes
 
-- Added direct recoverable-shell adapter tests: 100% package coverage.
-- Added success and failure coverage for the reusable recovery conformance harness:
-  95% and 100% per function.
-- Added table-driven executor payload/update/outcome validation, standard and agentic
-  Runner session extraction, timeout control, projection errors, and formatting tests.
-- Added Worker constructor, Store-list failure, nil receiver, and benign-error
-  classification tests.
-- Added focused foreground claim-race and filesystem legacy constructor/notification
-  tests.
+- Added nil guards before dereferencing returned `TaskEvent`, append results, and
+  projected updates.
+- Replaced the generic empty-EventID error assertion with the expected validation text.
+- Replaced a non-empty event-list assertion with the exact expected length.
 
-### Cross-Stage Production Finding
+### Iteration 1 Re-Audit
 
-The projection audit test exposed a real race: when detachment and a buffered send
-were simultaneously ready, `select` could enqueue progress after detachment. The
-projection now linearizes send against detach under state synchronization. The
-regression test verifies a pre-detached projection cannot accept an update.
-
-### Iteration 2 Re-Audit
-
-- Combined scoped coverage: 86.0%.
-- New package coverage: shell 100.0%, tool 85.4%, Worker 89.5%.
-- Touched foreground coverage: 82.5%.
-- Touched filesystem middleware coverage: 87.9%.
-- Functions below 70% in reviewed/touched scope: none.
+- Exact production diff coverage: 89.7% (61/68 changed executable lines).
+- Combined scoped package coverage: 86.1%.
+- Changed functions below 70%: none.
 - High-priority findings remaining: none.
-- Duplicate, assertion, boilerplate, grouping, and semantic-value re-audit: clear.
+- Duplicate, boilerplate, grouping, semantic-value, and assertion re-audit: clear.
+- `go test ./...`: pass.
 
 # Comprehensive Review Summary: PR #1169
 
 ## Overview
 
-- Total iterations: Stage 1: 1, Stage 2: 1, Stage 3: 2.
-- Focus implementation and review: 36 files, +5543/-37.
-- Review-fix worktree: 21 files, +1752/-66.
-- Remaining blockers or deferred items: none.
+- **Total iterations**: Stage 1: 1, Stage 2: 1, Stage 3: 1
+- **Focus implementation**: `3138bf74..fd060d58`
+- **Files modified**: 25 Go files plus this review report
+- **Reviewed Go delta**: +440 / -342 (net +98)
+- **Review fixes after implementation commit**: 7 Go files, +65 / -10
 
 ## Stage 1: Design Review Changes
 
-| # | Dimension | Finding | Fix Applied | Primary Files |
-| --- | --- | --- | --- | --- |
-| D1 | Reliability | Worker swallowed permanent dispatch errors. | Return non-benign errors while tolerating claim races. | `worker/worker.go` |
-| D2 | Lifecycle integrity | Empty yield erased the last boundary checkpoint. | Retain the latest checkpoint when yield omits one. | `in_memory_store.go` |
-| D3 | Data integrity | Terminal outcome could close before final updates drained. | Drain naturally with a bounded abandonment timeout. | `tool/executor.go` |
-| D4 | API usability | Filesystem config allowed divergent Managers. | Reject Manager/Runner.Manager mismatch. | `filesystem.go` |
-| D5 | Compatibility | Worker-race fallback accepted paused states. | Accept only running or terminal authority. | `foreground/coordinator.go` |
-| D6 | State integrity | Registry retained mutable caller ToolInfo. | Deep-copy registration metadata. | `tool/registry.go` |
-| D7 | Cohesion | Deep progress depended on recoverable shell presence. | Always install readers for managed executor keys. | `deep.go` |
-| D8 | API surface | Worker exposed duplicate constructor names. | Keep only `WorkerConfig` and `NewWorker`. | `worker/worker.go` |
-| D9 | Readability | Progress truncation could split UTF-8. | Truncate at a valid UTF-8 boundary. | `tool/progress.go` |
+### Findings Resolved
 
-Final design score: all 12 dimensions at least 4/5, with no unresolved blocker.
+| # | Dimension | Finding | Fix Applied | Files |
+| --- | --- | --- | --- | --- |
+| D1 | API usability | Generated EventID was persisted but discarded from the live plain-update projection. | Project a cloned update carrying the resolved `TaskEvent.EventID` while retaining caller-supplied identity as the materialization gate. | `adk/backgroundtask/tool/executor.go` |
+
+### Design Scorecard (Final)
+
+| Dimension | Before | After |
+| --- | --- | --- |
+| API usability | 4/5 | 5/5 |
+| All other dimensions | 4-5/5 | 4-5/5 |
 
 ## Stage 2: Attack Review Changes
 
-No new production fix was required by Stage 2.
+### Bugs Fixed
 
-- Total attack tests: 5.
-- Data corruption, conflict, validation, NDJSON framing, and abandonment attacks: all passing.
-- Confirmed bugs remaining: zero.
+No additional confirmed bug was found after the Stage 1 fix.
+
+### Attack Test Results (Final)
+
+- Task-event-specific attack tests: 10
+- All passing: yes
+- Confirmed bugs remaining: zero
 
 ## Stage 3: Test Audit Changes
 
-| # | Category | Change |
-| --- | --- | --- |
-| T1 | Coverage | Added direct recoverable-shell adapter tests. |
-| T2 | Coverage | Added reusable recovery conformance success/failure tests. |
-| T3 | Coverage | Added executor, wrapper, projection, payload, outcome, and update branch tests. |
-| T4 | Coverage | Added Worker validation, Store failure, and error-classification tests. |
-| T5 | Coverage | Added foreground race and filesystem legacy/notification tests. |
-| T6 | Production bug | Linearized projection send against detach after a regression test exposed the race. |
+### Improvements Applied
 
-Final coverage:
+| # | Category | Change | LOC Impact |
+| --- | --- | --- | --- |
+| T1 | Assertion quality | Guard result pointers and projected updates before dereference. | +14 |
+| T2 | Assertion quality | Require the specific empty-EventID validation error and exact event count. | +1 |
 
-- Combined reviewed scope: 86.0%.
-- Shell: 100.0%.
-- Managed tool: 85.4%.
-- Worker: 89.5%.
-- Touched foreground: 82.5%.
-- Touched filesystem middleware: 87.9%.
-- Reviewed functions below 70%: none.
+### Coverage (Final)
+
+- Overall production diff coverage: 89.7%
+- Combined scoped package coverage: 86.1%
+- Changed functions below 70%: none
 
 ## Cumulative File Change List
 
-| Area | Stage(s) | Summary |
+| File or Area | Stage(s) | Summary of Changes |
 | --- | --- | --- |
-| Core background task lifecycle | Implementation, 1, 3 | Yield, keyed output, recent output, cancellation recovery, conformance tests. |
-| Managed background tool | Implementation, 1, 2, 3 | Contracts, executor classes, canonical wrapper, projection, materializer, progress, attacks, coverage. |
-| Recoverable shell | Implementation, 3 | Adapter contract, middleware wiring, examples, direct tests. |
-| Reference Worker | Implementation, 1, 3 | Polling dispatch, bounded concurrency, observable permanent errors, coverage. |
-| Foreground coordinator | Implementation, 1, 3 | Worker-first claim reconciliation limited to running/terminal states. |
-| Background-task middleware | Implementation | Executor-key-aware progress reader composition. |
-| Filesystem and DeepAgent | Implementation, 1, 3 | Recoverable shell, shared Manager validation, generic managed progress wiring. |
-| Documentation | Implementation, 4 | Maintainer design document and this comprehensive review report. |
+| `adk/backgroundtask/types.go` | Implementation | Replaced output records and cursor types with TaskEvent APIs. |
+| `adk/backgroundtask/store.go` | Implementation | Unified append/read Store surface and conflict sentinel. |
+| `adk/backgroundtask/in_memory_store.go` | Implementation | Added fenced task-wide EventID deduplication and bounded recent reads. |
+| `adk/backgroundtask/executor.go` | Implementation | Centralized missing EventID generation and Manager delegation. |
+| `adk/backgroundtask/conformance_test.go` | Implementation | Enforced the new public shape and removed cursor API. |
+| `adk/backgroundtask/durable_store_test.go` | Implementation, 2, 3 | Covered replay, conflict, fencing, ordering, task locality, bounds, and cloning. |
+| `adk/backgroundtask/manager_test.go` | Implementation, 3 | Covered generated and supplied runtime EventIDs. |
+| `adk/backgroundtask/local/local.go` | Implementation | Routed raw stream chunks through runtime generation. |
+| `adk/backgroundtask/local/local_test.go` | Implementation, 3 | Verified generated IDs for local raw callers. |
+| `adk/backgroundtask/subagent/subagent_test.go` | Implementation | Migrated cursor-free progress assertions without changing checkpoint sequence. |
+| `adk/backgroundtask/tool/types.go` | Implementation | Replaced Update.SourceID with stable EventID. |
+| `adk/backgroundtask/tool/executor.go` | Implementation, 1 | Unified persistence and projected resolved generated identities. |
+| `adk/backgroundtask/tool/materializer.go` | Implementation | Made EventID the durable derived-output idempotency key. |
+| `adk/backgroundtask/tool/progress.go` | Implementation | Read bounded recent TaskEvents without exposing identity to task_output. |
+| `adk/backgroundtask/tool/recovery_conformance.go` | Implementation | Compared stable EventID and bytes across recovery. |
+| `adk/backgroundtask/tool/attack_test.go` | Implementation, 2 | Added replay, conflict, repair, order, and framing attacks. |
+| `adk/backgroundtask/tool/managed_tool_test.go` | Implementation, 1, 2, 3 | Covered generation, projection, materialization gating, and recent reads. |
+| `adk/backgroundtask/tool/progress_test.go` | Implementation | Covered bounded cursor-free rendering. |
+| `adk/backgroundtask/tool/recovery_conformance_test.go` | Implementation | Migrated recovery identity assertions. |
+| `adk/backgroundtask/tool/validation_test.go` | Implementation | Migrated TaskEvent formatting and projection helpers. |
+| `adk/middlewares/filesystem/bash_run.go` | Implementation | Routed raw shell output through runtime generation. |
+| `adk/middlewares/filesystem/bash_run_test.go` | Implementation, 3 | Verified generated shell event identity. |
+| `adk/middlewares/filesystem/filesystem.go` | Implementation | Updated materializer contract documentation. |
+| `adk/middlewares/subagent/agent_tool.go` | Implementation | Routed raw agent transcript events through runtime generation. |
+| `adk/middlewares/subagent/middleware_test.go` | Implementation, 3 | Verified generated sub-agent event identity and cursor-free reads. |
 
 ## Final Verification
 
 - `go build ./...`: pass.
-- `go test ./... -count=1`: pass.
-- Targeted race suite: pass.
-- Go 1.18 targeted suite: pass.
-- All `TestAttack_` tests: pass.
+- `go test ./...`: pass.
+- Scoped `TestAttack_` suite: pass.
+- Exact production diff coverage: 89.7%.
+- Scoped package coverage: 86.1%.
 - `git diff --check`: pass.
 
 ## Remaining Items

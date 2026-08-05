@@ -272,6 +272,7 @@ func TestManagedExecuteTool_Foreground(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Len(t, events.Events, 1)
+	require.NotNil(t, events.Events[0])
 	require.NotEmpty(t, events.Events[0].EventID)
 }
 

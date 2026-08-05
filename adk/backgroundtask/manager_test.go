@@ -291,10 +291,12 @@ func TestTaskRuntimeOutputFailureAndHeartbeat(t *testing.T) {
 
 	output, err := runtime.AppendTaskEvent(context.Background(), "", []byte("output"))
 	require.NoError(t, err)
+	require.NotNil(t, output.Event)
 	require.NotEmpty(t, output.Event.EventID)
 	require.True(t, output.Inserted)
 	supplied, err := runtime.AppendTaskEvent(context.Background(), "caller-event", []byte("supplied"))
 	require.NoError(t, err)
+	require.NotNil(t, supplied.Event)
 	require.Equal(t, "caller-event", supplied.Event.EventID)
 	require.True(t, supplied.Inserted)
 	require.NoError(t, runtime.ReportOutputFailure(context.Background(), "file failed"))

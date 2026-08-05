@@ -510,7 +510,8 @@ func TestLocalAgentToolWritesEventTranscript(t *testing.T) {
 		TaskID: task.Spec.ID,
 	})
 	require.NoError(t, err)
-	require.NotEmpty(t, feed.Events)
+	require.Len(t, feed.Events, 1)
+	require.NotNil(t, feed.Events[0])
 	require.NotEmpty(t, feed.Events[0].EventID)
 	assert.Equal(t, "worker: local output\n", string(feed.Events[0].Data))
 }

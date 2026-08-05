@@ -155,10 +155,11 @@ func TestRunnerStreamProjectsAndPersistsOutput_BitsUT(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Len(t, output.Events, 3)
-	assert.Equal(t, "b", string(output.Events[1].Data))
 	for _, event := range output.Events {
+		require.NotNil(t, event)
 		require.NotEmpty(t, event.EventID)
 	}
+	assert.Equal(t, "b", string(output.Events[1].Data))
 }
 
 func TestRunnerStreamTimeoutStartsAfterConstruction_BitsUT(t *testing.T) {

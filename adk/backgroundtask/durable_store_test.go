@@ -214,6 +214,7 @@ func TestAttack_TaskEventOrderSpansAttemptsWithoutExposingAttempt(t *testing.T) 
 		EventID: "first", Data: []byte("first"),
 	})
 	require.NoError(t, err)
+	require.NotNil(t, first.Event)
 	require.Equal(t, "first", first.Event.EventID)
 
 	clock.Advance(2 * time.Second)
@@ -229,6 +230,7 @@ func TestAttack_TaskEventOrderSpansAttemptsWithoutExposingAttempt(t *testing.T) 
 		EventID: "second", Data: []byte("second"),
 	})
 	require.NoError(t, err)
+	require.NotNil(t, second.Event)
 	require.Equal(t, "second", second.Event.EventID)
 
 	output, err := store.ReadRecentTaskEvents(context.Background(), &ReadRecentTaskEventsRequest{
@@ -236,12 +238,37 @@ func TestAttack_TaskEventOrderSpansAttemptsWithoutExposingAttempt(t *testing.T) 
 	})
 	require.NoError(t, err)
 	require.Len(t, output.Events, 2)
+	require.NotNil(t, output.Events[0])
+	require.NotNil(t, output.Events[1])
 	require.Equal(t, []string{"first", "second"}, []string{
 		output.Events[0].EventID, output.Events[1].EventID,
 	})
 	require.Equal(t, []string{"first", "second"}, []string{
 		string(output.Events[0].Data), string(output.Events[1].Data),
 	})
+}
+
+func TestAttack_EventIDIsTaskLocal(t *testing.T) {
+	store := NewInMemoryStore(nil)
+	first := createAndStart(t, store, "event-id-task-one")
+	second := createAndStart(t, store, "event-id-task-two")
+
+	firstResult, err := store.AppendTaskEvent(context.Background(), &AppendTaskEventRequest{
+		TaskID: first.Spec.ID, Attempt: first.Attempt,
+		EventID: "shared", Data: []byte("first"),
+	})
+	require.NoError(t, err)
+	require.True(t, firstResult.Inserted)
+	require.NotNil(t, firstResult.Event)
+	secondResult, err := store.AppendTaskEvent(context.Background(), &AppendTaskEventRequest{
+		TaskID: second.Spec.ID, Attempt: second.Attempt,
+		EventID: "shared", Data: []byte("second"),
+	})
+	require.NoError(t, err)
+	require.True(t, secondResult.Inserted)
+	require.NotNil(t, secondResult.Event)
+	require.Equal(t, first.Spec.ID, firstResult.Event.TaskID)
+	require.Equal(t, second.Spec.ID, secondResult.Event.TaskID)
 }
 
 func TestInMemoryStoreYieldReturnsRecoverableAttemptToPending_BitsUT(t *testing.T) {
@@ -300,13 +327,14 @@ func TestInMemoryStoreTaskEventDeduplicatesAcrossAttempts_BitsUT(t *testing.T) {
 	_, err := store.AppendTaskEvent(context.Background(), &AppendTaskEventRequest{
 		TaskID: started.Spec.ID, Attempt: started.Attempt, Data: []byte("missing-id"),
 	})
-	require.Error(t, err)
+	require.ErrorContains(t, err, "event id are required")
 	first, err := store.AppendTaskEvent(context.Background(), &AppendTaskEventRequest{
 		TaskID: started.Spec.ID, Attempt: started.Attempt,
 		EventID: "event-1", Data: []byte("payload"),
 	})
 	require.NoError(t, err)
 	require.True(t, first.Inserted)
+	require.NotNil(t, first.Event)
 	require.Equal(t, "event-1", first.Event.EventID)
 	createdAt := first.Event.CreatedAt
 
@@ -324,6 +352,7 @@ func TestInMemoryStoreTaskEventDeduplicatesAcrossAttempts_BitsUT(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.False(t, replayed.Inserted)
+	require.NotNil(t, replayed.Event)
 	require.Equal(t, first.Event, replayed.Event)
 	require.Equal(t, createdAt, replayed.Event.CreatedAt)
 
@@ -351,16 +380,25 @@ func TestInMemoryStoreTaskEventDeduplicatesAcrossAttempts_BitsUT(t *testing.T) {
 		TaskID: restarted.Spec.ID,
 	})
 	require.NoError(t, err)
+	require.NotEmpty(t, stored.Events)
+	require.NotNil(t, stored.Events[0])
 	require.Equal(t, "payload", string(stored.Events[0].Data))
 }
 
-func TestInMemoryStoreReadRecentTaskEventsReturnsNewestChronologically_BitsUT(t *testing.T) {
+func TestAttack_RecentTaskEventsIgnoreEventIDLexicalOrder(t *testing.T) {
 	store := NewInMemoryStore(nil)
 	started := createAndStart(t, store, "recent-output")
-	for _, value := range []string{"one", "two", "three"} {
+	for _, event := range []struct {
+		id   string
+		data string
+	}{
+		{id: "z-event", data: "one"},
+		{id: "a-event", data: "two"},
+		{id: "m-event", data: "three"},
+	} {
 		_, err := store.AppendTaskEvent(context.Background(), &AppendTaskEventRequest{
 			TaskID: started.Spec.ID, Attempt: started.Attempt,
-			EventID: value, Data: []byte(value),
+			EventID: event.id, Data: []byte(event.data),
 		})
 		require.NoError(t, err)
 	}
@@ -369,6 +407,8 @@ func TestInMemoryStoreReadRecentTaskEventsReturnsNewestChronologically_BitsUT(t 
 	})
 	require.NoError(t, err)
 	require.Len(t, result.Events, 2)
+	require.NotNil(t, result.Events[0])
+	require.NotNil(t, result.Events[1])
 	require.Equal(t, "two", string(result.Events[0].Data))
 	require.Equal(t, "three", string(result.Events[1].Data))
 }
@@ -439,7 +479,7 @@ func TestInMemoryStoreReportOutputFailureIsFencedAndFirstErrorWins_BitsUT(t *tes
 	assert.ErrorIs(t, err, ErrVersionConflict)
 }
 
-func TestInMemoryStoreTaskEventFeedSupportsReplayAndAttemptFencing_BitsUT(t *testing.T) {
+func TestAttack_TaskEventReplayFencesStaleAttempt(t *testing.T) {
 	store := NewInMemoryStore(nil)
 	started := createAndStart(t, store, "output-feed")
 	first, err := store.AppendTaskEvent(context.Background(), &AppendTaskEventRequest{
@@ -460,6 +500,7 @@ func TestInMemoryStoreTaskEventFeedSupportsReplayAndAttemptFencing_BitsUT(t *tes
 	})
 	require.NoError(t, err)
 	require.Len(t, page.Events, 1)
+	require.NotNil(t, page.Events[0])
 	assert.Equal(t, "second", string(page.Events[0].Data))
 
 	_, err = store.AppendTaskEvent(context.Background(), &AppendTaskEventRequest{

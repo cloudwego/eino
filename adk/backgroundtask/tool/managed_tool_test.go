@@ -473,7 +473,7 @@ func TestManagedToolPlainRegistrationUsesFailExecutor(t *testing.T) {
 	require.Equal(t, backgroundtask.LeaseExpiryFail, task.LeaseExpiryPolicy)
 }
 
-func TestManagedToolPlainUpdateGetsGeneratedEventIDWithoutMaterialization(t *testing.T) {
+func TestAttack_PlainUpdateGeneratedEventIDNotMaterialized(t *testing.T) {
 	materializer := &materializerStub{}
 	registry := NewRegistry()
 	implementation := &plainFakeTool{
@@ -497,10 +497,15 @@ func TestManagedToolPlainUpdateGetsGeneratedEventIDWithoutMaterialization(t *tes
 		SessionID:     func(context.Context) (string, error) { return "session", nil },
 	})
 	require.NoError(t, err)
-	_, err = wrapped.(componenttool.InvokableTool).InvokableRun(
+	stream, err := wrapped.(componenttool.StreamableTool).StreamableRun(
 		context.Background(), `{"value":"plain"}`,
 	)
 	require.NoError(t, err)
+	projected := decodeEvents(t, readAllStreamRecords(t, stream))
+	require.Len(t, projected, 2)
+	require.Equal(t, "update", projected[0].Type)
+	require.NotNil(t, projected[0].Update)
+	require.NotEmpty(t, projected[0].Update.EventID)
 
 	result, err := manager.ReadRecentTaskEvents(
 		context.Background(),
@@ -508,7 +513,9 @@ func TestManagedToolPlainUpdateGetsGeneratedEventIDWithoutMaterialization(t *tes
 	)
 	require.NoError(t, err)
 	require.Len(t, result.Events, 1)
+	require.NotNil(t, result.Events[0])
 	require.NotEmpty(t, result.Events[0].EventID)
+	require.Equal(t, result.Events[0].EventID, projected[0].Update.EventID)
 	materializer.mu.Lock()
 	require.Empty(t, materializer.requests)
 	materializer.mu.Unlock()
