@@ -147,11 +147,11 @@ func newTestManagedTool(
 	return manager, wrapped
 }
 
-func decodeEvents(t *testing.T, records []string) []*ToolStreamEvent {
+func decodeEvents(t *testing.T, records []string) []*ManagedToolResponseEvent {
 	t.Helper()
-	events := make([]*ToolStreamEvent, 0, len(records))
+	events := make([]*ManagedToolResponseEvent, 0, len(records))
 	for _, record := range records {
-		var event ToolStreamEvent
+		var event ManagedToolResponseEvent
 		require.NoError(t, json.Unmarshal([]byte(record), &event))
 		events = append(events, &event)
 	}
@@ -197,7 +197,7 @@ func TestManagedToolFastCompletionReturnsCanonicalTaskID(t *testing.T) {
 	)
 	require.NoError(t, err)
 	events := decodeEvents(t, []string{result})
-	require.Equal(t, ToolStreamEventLaunchResult, events[0].Type)
+	require.Equal(t, ManagedToolResponseEventLaunchResult, events[0].Type)
 	require.Equal(t, "task-fixed", events[0].TaskID)
 	require.Equal(t, backgroundtask.StatusCompleted, events[0].Status)
 	require.Equal(t, map[string]any{"answer": float64(42)}, events[0].Output)
@@ -296,9 +296,9 @@ func TestManagedToolStreamPersistsBeforeNDJSONProjection(t *testing.T) {
 	events := decodeEvents(t, records)
 	require.Len(t, events, 4)
 	for _, event := range events[:3] {
-		require.Equal(t, ToolStreamEventUpdate, event.Type)
+		require.Equal(t, ManagedToolResponseEventUpdate, event.Type)
 	}
-	require.Equal(t, ToolStreamEventLaunchResult, events[3].Type)
+	require.Equal(t, ManagedToolResponseEventLaunchResult, events[3].Type)
 	require.Equal(t, "task-fixed", events[3].TaskID)
 
 	output, err := manager.ListTaskEvents(context.Background(), &backgroundtask.ListTaskEventsRequest{
@@ -496,7 +496,7 @@ func TestAttack_PlainUpdateGeneratedEventIDNotMaterialized(t *testing.T) {
 	require.NoError(t, err)
 	projected := decodeEvents(t, readAllStreamRecords(t, stream))
 	require.Len(t, projected, 2)
-	require.Equal(t, ToolStreamEventUpdate, projected[0].Type)
+	require.Equal(t, ManagedToolResponseEventUpdate, projected[0].Type)
 	require.NotNil(t, projected[0].Update)
 	require.NotEmpty(t, projected[0].Update.EventID)
 
@@ -587,7 +587,7 @@ func TestManagedToolProjectionDetachesWhilePersistenceContinues(t *testing.T) {
 	}
 	events := decodeEvents(t, records)
 	require.Len(t, events, 1)
-	require.Equal(t, ToolStreamEventLaunchResult, events[0].Type)
+	require.Equal(t, ManagedToolResponseEventLaunchResult, events[0].Type)
 	require.Equal(t, backgroundtask.StatusRunning, events[0].Status)
 
 	deadline := time.Now().Add(time.Second)

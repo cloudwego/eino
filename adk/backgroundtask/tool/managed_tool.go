@@ -181,7 +181,7 @@ func (t *managedTool) project(
 				updates = nil
 				continue
 			}
-			record, err := encodeEvent(&ToolStreamEvent{Type: ToolStreamEventUpdate, Update: update})
+			record, err := encodeEvent(&ManagedToolResponseEvent{Type: ManagedToolResponseEventUpdate, Update: update})
 			if err != nil {
 				t.registry.projections.remove(taskID)
 				writer.Send("", err)
@@ -204,7 +204,7 @@ func (t *managedTool) project(
 			}
 			if result.task.Status != backgroundtask.StatusRunning && updates != nil {
 				for update := range updates {
-					record, encodeErr := encodeEvent(&ToolStreamEvent{Type: ToolStreamEventUpdate, Update: update})
+					record, encodeErr := encodeEvent(&ManagedToolResponseEvent{Type: ManagedToolResponseEventUpdate, Update: update})
 					if encodeErr != nil {
 						t.registry.projections.remove(taskID)
 						writer.Send("", encodeErr)
@@ -331,8 +331,8 @@ func (t *managedTool) encodeLaunchResult(
 	if task == nil || task.Spec.ID == "" {
 		return "", errors.New("backgroundtask/tool: launch result requires a task id")
 	}
-	event := &ToolStreamEvent{
-		Type: ToolStreamEventLaunchResult, TaskID: task.Spec.ID, Status: task.Status,
+	event := &ManagedToolResponseEvent{
+		Type: ManagedToolResponseEventLaunchResult, TaskID: task.Spec.ID, Status: task.Status,
 		Description: task.Spec.Description,
 	}
 	if task.Status == backgroundtask.StatusCompleted {
@@ -357,8 +357,8 @@ func (t *managedTool) encodeLaunchResult(
 	return encodeEvent(event)
 }
 
-func encodeEvent(event *ToolStreamEvent) (string, error) {
-	if err := validateToolStreamEvent(event); err != nil {
+func encodeEvent(event *ManagedToolResponseEvent) (string, error) {
+	if err := validateManagedToolResponseEvent(event); err != nil {
 		return "", err
 	}
 	data, err := json.Marshal(event)
@@ -368,17 +368,17 @@ func encodeEvent(event *ToolStreamEvent) (string, error) {
 	return string(data) + "\n", nil
 }
 
-func validateToolStreamEvent(event *ToolStreamEvent) error {
+func validateManagedToolResponseEvent(event *ManagedToolResponseEvent) error {
 	if event == nil {
 		return errors.New("backgroundtask/tool: stream event is required")
 	}
 	switch event.Type {
-	case ToolStreamEventUpdate:
+	case ManagedToolResponseEventUpdate:
 		if event.Update == nil || event.TaskID != "" || event.Status != "" ||
 			event.Description != "" || event.Output != nil || event.Error != "" {
 			return errors.New("backgroundtask/tool: invalid update stream event")
 		}
-	case ToolStreamEventLaunchResult:
+	case ManagedToolResponseEventLaunchResult:
 		if event.TaskID == "" || event.Status == "" || event.Update != nil {
 			return errors.New("backgroundtask/tool: invalid launch-result stream event")
 		}

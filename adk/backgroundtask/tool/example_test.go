@@ -74,7 +74,7 @@ func ExampleNewManagedTool() {
 	result, _ := wrapped.(componenttool.InvokableTool).InvokableRun(
 		context.Background(), `{"prompt":"launch"}`,
 	)
-	var event backgroundtool.ToolStreamEvent
+	var event backgroundtool.ManagedToolResponseEvent
 	_ = json.Unmarshal([]byte(result), &event)
 	fmt.Println(event.TaskID, event.Status, event.Output)
 	// Output: task_video completed video ready

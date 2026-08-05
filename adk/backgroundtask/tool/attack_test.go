@@ -130,8 +130,8 @@ func TestAttack_ReplayedEventProjectsOnceMaterializesTwice(t *testing.T) {
 	require.NoError(t, err)
 	events := decodeEvents(t, readAllStreamRecords(t, stream))
 	require.Len(t, events, 2)
-	require.Equal(t, ToolStreamEventUpdate, events[0].Type)
-	require.Equal(t, ToolStreamEventLaunchResult, events[1].Type)
+	require.Equal(t, ManagedToolResponseEventUpdate, events[0].Type)
+	require.Equal(t, ManagedToolResponseEventLaunchResult, events[1].Type)
 
 	output, err := manager.ListTaskEvents(context.Background(), &backgroundtask.ListTaskEventsRequest{
 		TaskID: "attack-task",
@@ -251,7 +251,7 @@ func TestAttack_UpdateDataCannotForgeNDJSONBoundary(t *testing.T) {
 	records := readAllStreamRecords(t, stream)
 	require.Len(t, records, 2)
 	for _, record := range records {
-		var event ToolStreamEvent
+		var event ManagedToolResponseEvent
 		require.NoError(t, json.Unmarshal([]byte(record), &event))
 	}
 	events := decodeEvents(t, records)

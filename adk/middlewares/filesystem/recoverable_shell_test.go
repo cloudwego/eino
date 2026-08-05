@@ -101,9 +101,9 @@ func TestRecoverableShellUsesManagedToolLifecycle(t *testing.T) {
 		context.Background(), `{"command":"echo hello"}`,
 	)
 	require.NoError(t, err)
-	var event backgroundtool.ToolStreamEvent
+	var event backgroundtool.ManagedToolResponseEvent
 	require.NoError(t, json.Unmarshal([]byte(result), &event))
-	require.Equal(t, backgroundtool.ToolStreamEventLaunchResult, event.Type)
+	require.Equal(t, backgroundtool.ManagedToolResponseEventLaunchResult, event.Type)
 	require.Equal(t, "shell-task", event.TaskID)
 	require.Equal(t, backgroundtask.StatusCompleted, event.Status)
 	require.Equal(t, "command output", event.Output)

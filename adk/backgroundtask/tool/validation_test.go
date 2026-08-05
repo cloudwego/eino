@@ -147,17 +147,17 @@ func TestPayloadAndResultValidationBoundaries(t *testing.T) {
 }
 
 func TestEncodeEventRejectsMixedVariants_BitsUT(t *testing.T) {
-	for _, event := range []*ToolStreamEvent{
+	for _, event := range []*ManagedToolResponseEvent{
 		nil,
-		{Type: ToolStreamEventUpdate},
-		{Type: ToolStreamEventUpdate, Update: &Update{}, TaskID: "task"},
-		{Type: ToolStreamEventLaunchResult},
+		{Type: ManagedToolResponseEventUpdate},
+		{Type: ManagedToolResponseEventUpdate, Update: &Update{}, TaskID: "task"},
+		{Type: ManagedToolResponseEventLaunchResult},
 		{
-			Type: ToolStreamEventLaunchResult, TaskID: "task",
+			Type: ManagedToolResponseEventLaunchResult, TaskID: "task",
 			Status: backgroundtask.StatusRunning, Output: "not terminal",
 		},
 		{
-			Type: ToolStreamEventLaunchResult, TaskID: "task",
+			Type: ManagedToolResponseEventLaunchResult, TaskID: "task",
 			Status: backgroundtask.StatusCompleted, Error: "bad",
 		},
 	} {

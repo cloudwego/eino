@@ -99,29 +99,29 @@ type Update struct {
 	Metadata map[string]string `json:"metadata,omitempty"`
 }
 
-// ToolStreamEventType identifies one model-facing managed-tool stream variant.
-type ToolStreamEventType string
+// ManagedToolResponseEventType identifies one model-facing managed-tool stream variant.
+type ManagedToolResponseEventType string
 
 const (
-	// ToolStreamEventUpdate carries one live progress Update. All other
-	// ToolStreamEvent fields are empty.
-	ToolStreamEventUpdate ToolStreamEventType = "update"
-	// ToolStreamEventLaunchResult carries the task launch or foreground result.
+	// ManagedToolResponseEventUpdate carries one live progress Update. All other
+	// ManagedToolResponseEvent fields are empty.
+	ManagedToolResponseEventUpdate ManagedToolResponseEventType = "update"
+	// ManagedToolResponseEventLaunchResult carries the task launch or foreground result.
 	// Update is nil; the remaining fields describe the task and its current or
 	// terminal outcome.
-	ToolStreamEventLaunchResult ToolStreamEventType = "launch_result"
+	ManagedToolResponseEventLaunchResult ManagedToolResponseEventType = "launch_result"
 )
 
-// ToolStreamEvent is the framework-owned model-facing NDJSON envelope. Type
+// ManagedToolResponseEvent is the framework-owned model-facing NDJSON envelope. Type
 // determines the legal variant: update events set only Update, while
 // launch-result events set task identity, status, description, and optional
 // terminal Output or Error.
-type ToolStreamEvent struct {
-	Type        ToolStreamEventType   `json:"type"`
-	TaskID      string                `json:"task_id,omitempty"`
-	Status      backgroundtask.Status `json:"status,omitempty"`
-	Description string                `json:"description,omitempty"`
-	Output      any                   `json:"output,omitempty"`
-	Error       string                `json:"error,omitempty"`
-	Update      *Update               `json:"update,omitempty"`
+type ManagedToolResponseEvent struct {
+	Type        ManagedToolResponseEventType `json:"type"`
+	TaskID      string                       `json:"task_id,omitempty"`
+	Status      backgroundtask.Status        `json:"status,omitempty"`
+	Description string                       `json:"description,omitempty"`
+	Output      any                          `json:"output,omitempty"`
+	Error       string                       `json:"error,omitempty"`
+	Update      *Update                      `json:"update,omitempty"`
 }
