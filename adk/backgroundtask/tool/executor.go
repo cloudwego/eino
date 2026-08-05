@@ -163,13 +163,18 @@ func (e *executor) Execute(
 			TaskID: task.Spec.ID, Arguments: payload.Arguments, Attempt: task.Attempt,
 			RequestID: inputRequest.ID, Data: append([]byte(nil), task.PendingResume...),
 		}
-		if validateErr := resumable.ValidateResume(resumeRequest); validateErr != nil {
+		run, err = resumable.Resume(ctx, resumeRequest)
+		if errors.Is(err, ErrResumeInputRejected) {
+			if run != nil {
+				return nil, errors.New(
+					"backgroundtask/tool: rejected resume returned a non-nil run",
+				)
+			}
 			return &backgroundtask.ExecutionResult{
 				Status:     backgroundtask.StatusWaitingInput,
 				Checkpoint: append([]byte(nil), task.Checkpoint...),
 			}, nil
 		}
-		run, err = resumable.Resume(ctx, resumeRequest)
 	} else if e.recoverable && task.Attempt > 1 {
 		run, err = registration.Tool.(RecoverableBackgroundTool).Recover(ctx, &RecoverRequest{
 			TaskID: task.Spec.ID, Arguments: payload.Arguments, Attempt: task.Attempt,

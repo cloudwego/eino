@@ -20,9 +20,20 @@ package tool
 import (
 	"context"
 	"encoding/json"
+	"errors"
 
 	"github.com/cloudwego/eino/adk/backgroundtask"
 	"github.com/cloudwego/eino/schema"
+)
+
+var (
+	// ErrResumeInputRejected reports that resume data is invalid for the
+	// current InputRequest. ResumableBackgroundTool.Resume must return this
+	// error before applying side effects and with a nil Run. The framework
+	// leaves the task waiting on the same request.
+	ErrResumeInputRejected = errors.New(
+		"backgroundtask/tool: resume input rejected",
+	)
 )
 
 const (
@@ -77,9 +88,9 @@ type RecoverableBackgroundTool interface {
 // data; it does not checkpoint implementation state.
 type ResumableBackgroundTool interface {
 	RecoverableBackgroundTool
-	// ValidateResume is repeatable and side-effect free. Invalid caller input
-	// leaves the task waiting on the same InputRequest.
-	ValidateResume(*ResumeRequest) error
+	// Resume validates and applies input atomically from the framework's
+	// perspective. Invalid input returns ErrResumeInputRejected before any side
+	// effect; other errors are durable execution failures.
 	Resume(context.Context, *ResumeRequest) (Run, error)
 }
 

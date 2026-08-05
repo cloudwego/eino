@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"sync"
 	"testing"
@@ -40,12 +41,7 @@ type fakeTool struct {
 
 type resumableFakeTool struct {
 	*fakeTool
-	validateResume func(*ResumeRequest) error
-	resume         func(context.Context, *ResumeRequest) (Run, error)
-}
-
-func (t *resumableFakeTool) ValidateResume(request *ResumeRequest) error {
-	return t.validateResume(request)
+	resume func(context.Context, *ResumeRequest) (Run, error)
 }
 
 func (t *resumableFakeTool) Resume(
@@ -461,13 +457,13 @@ func TestManagedToolDurableInputResume_BitsUT(t *testing.T) {
 				return nil, nil
 			},
 		},
-		validateResume: func(request *ResumeRequest) error {
-			if request.RequestID == "approval" && string(request.Data) != "approve" {
-				return errors.New("approval must be explicit")
-			}
-			return nil
-		},
 		resume: func(_ context.Context, request *ResumeRequest) (Run, error) {
+			if request.RequestID == "approval" && string(request.Data) != "approve" {
+				return nil, fmt.Errorf(
+					"%w: approval must be explicit",
+					ErrResumeInputRejected,
+				)
+			}
 			mu.Lock()
 			copy := *request
 			copy.Data = append([]byte(nil), request.Data...)
@@ -586,7 +582,6 @@ func TestManagedToolReplaysResumeAfterWorkerHandoff_BitsUT(t *testing.T) {
 				return nil, nil
 			},
 		},
-		validateResume: func(*ResumeRequest) error { return nil },
 		resume: func(_ context.Context, request *ResumeRequest) (Run, error) {
 			mu.Lock()
 			copy := *request
