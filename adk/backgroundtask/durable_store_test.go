@@ -824,6 +824,48 @@ func TestInMemoryStoreResumePersistsPendingResumeBytes_BitsUT(t *testing.T) {
 	assert.Equal(t, "answer", string(resumed.PendingResume))
 }
 
+func TestInMemoryStoreResumeSurvivesRecoverableAttemptLoss_BitsUT(t *testing.T) {
+	clock := &testClock{now: time.Unix(100, 0)}
+	store := newInMemoryStoreWithClock(
+		&InMemoryStoreConfig{ActiveAttemptTimeout: 5 * time.Second},
+		clock.Now,
+	)
+	started := createAndStartWithPolicy(
+		t, store, "resume-replay", LeaseExpiryRetry,
+	)
+	waiting, err := store.WaitInput(context.Background(), &WaitInputTaskRequest{
+		TaskID: started.Spec.ID, ExpectedVersion: started.Version,
+		Checkpoint: []byte("request-1"),
+	})
+	require.NoError(t, err)
+	pending, err := store.Resume(context.Background(), &ResumeRequest{
+		TaskID: waiting.Spec.ID, ExpectedVersion: waiting.Version,
+		Data: []byte("answer-1"),
+	})
+	require.NoError(t, err)
+	running, err := store.Start(context.Background(), &StartTaskRequest{
+		TaskID: pending.Spec.ID, ExpectedVersion: pending.Version,
+	})
+	require.NoError(t, err)
+
+	yielded, err := store.Yield(context.Background(), &YieldTaskRequest{
+		TaskID: running.Spec.ID, ExpectedVersion: running.Version,
+	})
+	require.NoError(t, err)
+	require.Equal(t, []byte("answer-1"), yielded.PendingResume)
+	running, err = store.Start(context.Background(), &StartTaskRequest{
+		TaskID: yielded.Spec.ID, ExpectedVersion: yielded.Version,
+	})
+	require.NoError(t, err)
+
+	clock.Advance(6 * time.Second)
+	recovered, err := store.Get(context.Background(), running.Spec.ID)
+	require.NoError(t, err)
+	require.Equal(t, StatusPending, recovered.Status)
+	require.Equal(t, []byte("request-1"), recovered.Checkpoint)
+	require.Equal(t, []byte("answer-1"), recovered.PendingResume)
+}
+
 func TestInMemoryStoreResumeRejectsStaleTaskVersion_BitsUT(t *testing.T) {
 	store := NewInMemoryStore(nil)
 	started := createAndStart(t, store, "stale-resume")

@@ -19,6 +19,7 @@ package tool
 
 import (
 	"context"
+	"encoding/json"
 
 	"github.com/cloudwego/eino/adk/backgroundtask"
 	"github.com/cloudwego/eino/schema"
@@ -33,9 +34,10 @@ const (
 
 // BackgroundTool starts one logical external operation. ValidateArguments must
 // be repeatable and side-effect free. Start receives the Eino task ID before
-// any external side effect occurs. Runner interrupts are supported only through
-// InputPreparer before the durable task is created; an error from Start is a
-// durable execution failure.
+// any external side effect occurs. InputPreparer supports ordinary Runner
+// interruption before durable task creation. ResumableBackgroundTool supports
+// durable input requests after creation. An error from Start is a durable
+// execution failure.
 type BackgroundTool interface {
 	ValidateArguments(arguments string) error
 	Start(context.Context, *StartRequest) (Run, error)
@@ -66,6 +68,21 @@ type RecoverableBackgroundTool interface {
 	Recover(context.Context, *RecoverRequest) (Run, error)
 }
 
+// ResumableBackgroundTool supports durable input requests after the operation
+// has started. Resume must apply the same RequestID and Data idempotently:
+// Worker loss may cause the framework to repeat the call on a later attempt.
+//
+// Implementations keep operation state in their external durable backend. The
+// framework persists only the current InputRequest and the caller's resume
+// data; it does not checkpoint implementation state.
+type ResumableBackgroundTool interface {
+	RecoverableBackgroundTool
+	// ValidateResume is repeatable and side-effect free. Invalid caller input
+	// leaves the task waiting on the same InputRequest.
+	ValidateResume(*ResumeRequest) error
+	Resume(context.Context, *ResumeRequest) (Run, error)
+}
+
 // StartRequest describes an initial external-operation start.
 type StartRequest struct {
 	TaskID    string
@@ -78,6 +95,17 @@ type RecoverRequest struct {
 	TaskID    string
 	Arguments string
 	Attempt   int64
+}
+
+// ResumeRequest applies durable external input to a waiting logical operation.
+// RequestID identifies the exact InputRequest being answered. Data is opaque to
+// the framework and may be empty. A later attempt may replay the same request.
+type ResumeRequest struct {
+	TaskID    string
+	Arguments string
+	Attempt   int64
+	RequestID string
+	Data      []byte
 }
 
 // Run is an attempt-local handle for one logical external operation. Canceling
@@ -96,13 +124,23 @@ type UpdateSource interface {
 	Updates() *schema.StreamReader[*Update]
 }
 
-// Outcome is the authoritative logical-operation terminal result. Completed
-// outcomes may contain Data and no Error. Failed outcomes require Error and no
-// Data. Canceled outcomes may contain Error and no Data.
+// InputRequest describes the current durable question from a managed tool.
+// ID must be stable for this question across recovery. Data must contain one
+// valid JSON value and is embedded unchanged in model-facing responses.
+type InputRequest struct {
+	ID   string          `json:"id"`
+	Data json.RawMessage `json:"data,omitempty"`
+}
+
+// Outcome is the authoritative logical-operation result. Completed outcomes
+// may contain Data and no Error. Failed outcomes require Error and no Data.
+// Canceled outcomes may contain Error and no Data. Waiting-input outcomes set
+// only InputRequest and are supported only by ResumableBackgroundTool.
 type Outcome struct {
-	Status backgroundtask.Status
-	Data   []byte
-	Error  string
+	Status       backgroundtask.Status
+	Data         []byte
+	Error        string
+	InputRequest *InputRequest
 }
 
 // Update is a bounded serializable progress event. Data is limited to 256 KiB,
@@ -136,14 +174,15 @@ const (
 // envelope. The enhanced managed-tool wrapper encodes it as the first text part
 // of every ToolResult; streaming uses one newline-terminated record per chunk.
 // Type determines the legal variant: update events set only Update, while
-// launch-result events set task identity, status, description, and optional
-// terminal Output or Error.
+// launch-result events set task identity, status, description, and either a
+// waiting InputRequest or terminal Output or Error.
 type ManagedToolResponseEvent struct {
-	Type        ManagedToolResponseEventType `json:"type"`
-	TaskID      string                       `json:"task_id,omitempty"`
-	Status      backgroundtask.Status        `json:"status,omitempty"`
-	Description string                       `json:"description,omitempty"`
-	Output      any                          `json:"output,omitempty"`
-	Error       string                       `json:"error,omitempty"`
-	Update      *Update                      `json:"update,omitempty"`
+	Type         ManagedToolResponseEventType `json:"type"`
+	TaskID       string                       `json:"task_id,omitempty"`
+	Status       backgroundtask.Status        `json:"status,omitempty"`
+	Description  string                       `json:"description,omitempty"`
+	Output       any                          `json:"output,omitempty"`
+	Error        string                       `json:"error,omitempty"`
+	InputRequest *InputRequest                `json:"input_request,omitempty"`
+	Update       *Update                      `json:"update,omitempty"`
 }

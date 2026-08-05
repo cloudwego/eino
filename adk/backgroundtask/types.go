@@ -164,7 +164,8 @@ type SuspendTaskRequest struct {
 
 // YieldTaskRequest relinquishes an active recoverable attempt and returns the
 // task to pending without implying that the underlying operation was suspended.
-// An empty Checkpoint retains the task's latest boundary checkpoint.
+// An empty Checkpoint retains the task's latest boundary checkpoint. Any
+// pending resume command is also retained for idempotent replay.
 type YieldTaskRequest struct {
 	TaskID          string
 	ExpectedVersion int64
@@ -189,7 +190,10 @@ type RequestCancelRequest struct {
 	Reason string
 }
 
-// ResumeRequest stores a one-shot resume command for a waiting task.
+// ResumeRequest stores input for the current waiting checkpoint and returns the
+// task to pending. ExpectedVersion binds the input to that exact request. The
+// command remains durable across retry-capable attempt loss until execution
+// reaches another waiting or suspended checkpoint, or a terminal state.
 type ResumeRequest struct {
 	TaskID          string
 	ExpectedVersion int64

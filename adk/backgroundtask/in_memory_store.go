@@ -562,7 +562,6 @@ func (s *InMemoryStore) Yield(_ context.Context, req *YieldTaskRequest) (*Task, 
 	if len(req.Checkpoint) > 0 {
 		t.Checkpoint = cloneBytes(req.Checkpoint)
 	}
-	t.PendingResume = nil
 	s.clearActiveLocked(t)
 	s.advanceLocked(t)
 	s.signalLocked()
@@ -883,7 +882,6 @@ func (s *InMemoryStore) resolveExpiredLocked(t *Task) {
 	if t.CancelRequestedAt != nil {
 		if t.LeaseExpiryPolicy == LeaseExpiryRetry {
 			t.Status = StatusPending
-			t.PendingResume = nil
 			s.advanceLocked(t)
 			s.signalLocked()
 			return
@@ -898,7 +896,6 @@ func (s *InMemoryStore) resolveExpiredLocked(t *Task) {
 	}
 	if t.LeaseExpiryPolicy == LeaseExpiryRetry {
 		t.Status = StatusPending
-		t.PendingResume = nil
 		s.advanceLocked(t)
 		s.signalLocked()
 		return
@@ -910,6 +907,7 @@ func (s *InMemoryStore) resolveExpiredLocked(t *Task) {
 
 func (s *InMemoryStore) finishStoreOwnedLocked(t *Task) {
 	s.clearActiveLocked(t)
+	t.PendingResume = nil
 	s.advanceLocked(t)
 	now := s.now()
 	t.DoneAt = &now

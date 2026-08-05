@@ -402,6 +402,13 @@ func (t *managedTool) renderLaunchResult(
 	if task.Status == backgroundtask.StatusFailed || task.Status == backgroundtask.StatusCanceled {
 		event.Error = task.ResultError
 	}
+	if task.Status == backgroundtask.StatusWaitingInput {
+		var err error
+		event.InputRequest, err = ReadInputRequest(task)
+		if err != nil {
+			return nil, fmt.Errorf("backgroundtask/tool: render input request: %w", err)
+		}
+	}
 	result, err := renderEvent(event)
 	if err != nil {
 		return nil, err
@@ -441,7 +448,8 @@ func validateManagedToolResponseEvent(event *ManagedToolResponseEvent) error {
 	switch event.Type {
 	case ManagedToolResponseEventUpdate:
 		if event.Update == nil || event.TaskID != "" || event.Status != "" ||
-			event.Description != "" || event.Output != nil || event.Error != "" {
+			event.Description != "" || event.Output != nil || event.Error != "" ||
+			event.InputRequest != nil {
 			return errors.New("backgroundtask/tool: invalid update response event")
 		}
 	case ManagedToolResponseEventLaunchResult:
@@ -454,6 +462,17 @@ func validateManagedToolResponseEvent(event *ManagedToolResponseEvent) error {
 			}
 		} else if event.Output != nil {
 			return errors.New("backgroundtask/tool: non-completed launch result cannot contain output")
+		}
+		if event.Status == backgroundtask.StatusWaitingInput {
+			if event.InputRequest == nil || event.Error != "" {
+				return errors.New(
+					"backgroundtask/tool: waiting launch result requires only an input request",
+				)
+			}
+		} else if event.InputRequest != nil {
+			return errors.New(
+				"backgroundtask/tool: non-waiting launch result cannot contain an input request",
+			)
 		}
 	default:
 		return errors.New("backgroundtask/tool: unknown response event type")

@@ -117,6 +117,15 @@ func RunTaskStoreConformance(t *testing.T, config TaskStoreConfig) {
 			TaskID: resumed.Spec.ID, ExpectedVersion: resumed.Version,
 		})
 		require.NoError(t, err)
+		yielded, err := store.Yield(context.Background(), &backgroundtask.YieldTaskRequest{
+			TaskID: started.Spec.ID, ExpectedVersion: started.Version,
+		})
+		require.NoError(t, err)
+		require.Equal(t, "input", string(yielded.PendingResume))
+		started, err = store.Start(context.Background(), &backgroundtask.StartTaskRequest{
+			TaskID: yielded.Spec.ID, ExpectedVersion: yielded.Version,
+		})
+		require.NoError(t, err)
 		suspended, err := store.Suspend(context.Background(), &backgroundtask.SuspendTaskRequest{
 			TaskID: started.Spec.ID, ExpectedVersion: started.Version, Checkpoint: []byte("safe"),
 		})
@@ -129,7 +138,7 @@ func RunTaskStoreConformance(t *testing.T, config TaskStoreConfig) {
 			TaskID: released.Spec.ID, ExpectedVersion: released.Version,
 		})
 		require.NoError(t, err)
-		yielded, err := store.Yield(context.Background(), &backgroundtask.YieldTaskRequest{
+		yielded, err = store.Yield(context.Background(), &backgroundtask.YieldTaskRequest{
 			TaskID: started.Spec.ID, ExpectedVersion: started.Version,
 		})
 		require.NoError(t, err)

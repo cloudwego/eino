@@ -38,6 +38,23 @@ type fakeTool struct {
 	recover func(context.Context, *RecoverRequest) (Run, error)
 }
 
+type resumableFakeTool struct {
+	*fakeTool
+	validateResume func(*ResumeRequest) error
+	resume         func(context.Context, *ResumeRequest) (Run, error)
+}
+
+func (t *resumableFakeTool) ValidateResume(request *ResumeRequest) error {
+	return t.validateResume(request)
+}
+
+func (t *resumableFakeTool) Resume(
+	ctx context.Context,
+	request *ResumeRequest,
+) (Run, error) {
+	return t.resume(ctx, request)
+}
+
 type plainFakeTool struct {
 	start func(context.Context, *StartRequest) (Run, error)
 }
@@ -422,6 +439,227 @@ func TestManagedToolFastCompletionReturnsCanonicalTaskID(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, backgroundtask.StatusCompleted, task.Status)
 	require.Equal(t, RecoverableExecutorKey, task.Spec.ExecutorKey)
+}
+
+func TestManagedToolDurableInputResume_BitsUT(t *testing.T) {
+	var mu sync.Mutex
+	var resumeRequests []*ResumeRequest
+	implementation := &resumableFakeTool{
+		fakeTool: &fakeTool{
+			start: func(context.Context, *StartRequest) (Run, error) {
+				return &fakeRun{wait: func(context.Context) (*Outcome, error) {
+					return &Outcome{
+						Status: backgroundtask.StatusWaitingInput,
+						InputRequest: &InputRequest{
+							ID: "approval", Data: []byte(`{"question":"Approve?"}`),
+						},
+					}, nil
+				}}, nil
+			},
+			recover: func(context.Context, *RecoverRequest) (Run, error) {
+				t.Fatal("ordinary recovery must not consume resume input")
+				return nil, nil
+			},
+		},
+		validateResume: func(request *ResumeRequest) error {
+			if request.RequestID == "approval" && string(request.Data) != "approve" {
+				return errors.New("approval must be explicit")
+			}
+			return nil
+		},
+		resume: func(_ context.Context, request *ResumeRequest) (Run, error) {
+			mu.Lock()
+			copy := *request
+			copy.Data = append([]byte(nil), request.Data...)
+			resumeRequests = append(resumeRequests, &copy)
+			mu.Unlock()
+			return &fakeRun{wait: func(context.Context) (*Outcome, error) {
+				if request.RequestID == "approval" {
+					return &Outcome{
+						Status: backgroundtask.StatusWaitingInput,
+						InputRequest: &InputRequest{
+							ID: "region", Data: []byte(`{"question":"Which region?"}`),
+						},
+					}, nil
+				}
+				return &Outcome{
+					Status: backgroundtask.StatusCompleted, Data: []byte("done"),
+				}, nil
+			}}, nil
+		},
+	}
+	store := backgroundtask.NewInMemoryStore(nil)
+	registry := NewRegistry()
+	require.NoError(t, registry.Register(&Registration{
+		Info: toolInfo("external"), Tool: implementation,
+	}))
+	executors := backgroundtask.NewExecutorRegistry()
+	require.NoError(t, RegisterExecutors(executors, registry))
+	manager := mustNewBackgroundManager(t, context.Background(), &backgroundtask.Config{
+		Tasks: store, Executors: executors,
+	})
+	task, err := manager.Submit(context.Background(), backgroundtask.Spec{
+		ID: "durable-input", ExecutorKey: RecoverableExecutorKey,
+		Kind:    "background_tool",
+		Payload: encodedPayload(t, "external", `{"value":"work"}`),
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, manager.Execute(context.Background(), task.Spec.ID))
+	waiting, err := manager.Get(context.Background(), task.Spec.ID)
+	require.NoError(t, err)
+	require.Equal(t, backgroundtask.StatusWaitingInput, waiting.Status)
+	input, err := ReadInputRequest(waiting)
+	require.NoError(t, err)
+	require.Equal(t, "approval", input.ID)
+	require.JSONEq(t, `{"question":"Approve?"}`, string(input.Data))
+	rendered, err := (&managedTool{registration: &Registration{}}).
+		renderLaunchResult(context.Background(), waiting)
+	require.NoError(t, err)
+	require.Contains(t, rendered.Parts[0].Text, `"data":{"question":"Approve?"}`)
+	response := decodeEvents(t, []*schema.ToolResult{rendered})[0]
+	require.Equal(t, backgroundtask.StatusWaitingInput, response.Status)
+	require.NotNil(t, response.InputRequest)
+	require.Equal(t, "approval", response.InputRequest.ID)
+	require.JSONEq(t, `{"question":"Approve?"}`, string(response.InputRequest.Data))
+
+	pending, err := manager.Resume(context.Background(), &backgroundtask.ResumeRequest{
+		TaskID: task.Spec.ID, ExpectedVersion: waiting.Version, Data: []byte("reject"),
+	})
+	require.NoError(t, err)
+	require.NoError(t, manager.Execute(context.Background(), pending.Spec.ID))
+	stillWaiting, err := manager.Get(context.Background(), task.Spec.ID)
+	require.NoError(t, err)
+	require.Equal(t, backgroundtask.StatusWaitingInput, stillWaiting.Status)
+	require.Empty(t, resumeRequests)
+	input, err = ReadInputRequest(stillWaiting)
+	require.NoError(t, err)
+	require.Equal(t, "approval", input.ID)
+
+	pending, err = manager.Resume(context.Background(), &backgroundtask.ResumeRequest{
+		TaskID: task.Spec.ID, ExpectedVersion: stillWaiting.Version, Data: []byte("approve"),
+	})
+	require.NoError(t, err)
+	require.NoError(t, manager.Execute(context.Background(), pending.Spec.ID))
+	waiting, err = manager.Get(context.Background(), task.Spec.ID)
+	require.NoError(t, err)
+	input, err = ReadInputRequest(waiting)
+	require.NoError(t, err)
+	require.Equal(t, "region", input.ID)
+
+	pending, err = manager.Resume(context.Background(), &backgroundtask.ResumeRequest{
+		TaskID: task.Spec.ID, ExpectedVersion: waiting.Version, Data: []byte("us-east"),
+	})
+	require.NoError(t, err)
+	require.NoError(t, manager.Execute(context.Background(), pending.Spec.ID))
+	completed, err := manager.Get(context.Background(), task.Spec.ID)
+	require.NoError(t, err)
+	require.Equal(t, backgroundtask.StatusCompleted, completed.Status)
+	require.Equal(t, "done", string(completed.ResultData))
+	require.Nil(t, completed.PendingResume)
+	require.Len(t, resumeRequests, 2)
+	require.Equal(t, "approval", resumeRequests[0].RequestID)
+	require.Equal(t, "approve", string(resumeRequests[0].Data))
+	require.Equal(t, "region", resumeRequests[1].RequestID)
+	require.Equal(t, "us-east", string(resumeRequests[1].Data))
+}
+
+func TestManagedToolReplaysResumeAfterWorkerHandoff_BitsUT(t *testing.T) {
+	resumeStarted := make(chan struct{})
+	var startOnce sync.Once
+	var mu sync.Mutex
+	var resumeRequests []*ResumeRequest
+	implementation := &resumableFakeTool{
+		fakeTool: &fakeTool{
+			start: func(context.Context, *StartRequest) (Run, error) {
+				return &fakeRun{wait: func(context.Context) (*Outcome, error) {
+					return &Outcome{
+						Status: backgroundtask.StatusWaitingInput,
+						InputRequest: &InputRequest{
+							ID: "approval", Data: []byte(`{"question":"Approve?"}`),
+						},
+					}, nil
+				}}, nil
+			},
+			recover: func(context.Context, *RecoverRequest) (Run, error) {
+				t.Fatal("waiting-input recovery must replay Resume")
+				return nil, nil
+			},
+		},
+		validateResume: func(*ResumeRequest) error { return nil },
+		resume: func(_ context.Context, request *ResumeRequest) (Run, error) {
+			mu.Lock()
+			copy := *request
+			copy.Data = append([]byte(nil), request.Data...)
+			resumeRequests = append(resumeRequests, &copy)
+			call := len(resumeRequests)
+			mu.Unlock()
+			if call == 1 {
+				return &fakeRun{wait: func(ctx context.Context) (*Outcome, error) {
+					startOnce.Do(func() { close(resumeStarted) })
+					<-ctx.Done()
+					return nil, ctx.Err()
+				}}, nil
+			}
+			return &fakeRun{wait: func(context.Context) (*Outcome, error) {
+				return &Outcome{
+					Status: backgroundtask.StatusCompleted, Data: []byte("approved"),
+				}, nil
+			}}, nil
+		},
+	}
+	store := backgroundtask.NewInMemoryStore(nil)
+	registry := NewRegistry()
+	require.NoError(t, registry.Register(&Registration{
+		Info: toolInfo("external"), Tool: implementation,
+	}))
+	executorsOne := backgroundtask.NewExecutorRegistry()
+	require.NoError(t, RegisterExecutors(executorsOne, registry))
+	managerOne := mustNewBackgroundManager(t, context.Background(), &backgroundtask.Config{
+		Tasks: store, Executors: executorsOne,
+	})
+	task, err := managerOne.Submit(context.Background(), backgroundtask.Spec{
+		ID: "resume-handoff", ExecutorKey: RecoverableExecutorKey,
+		Kind:    "background_tool",
+		Payload: encodedPayload(t, "external", `{"value":"work"}`),
+	})
+	require.NoError(t, err)
+	require.NoError(t, managerOne.Execute(context.Background(), task.Spec.ID))
+	waiting, err := managerOne.Get(context.Background(), task.Spec.ID)
+	require.NoError(t, err)
+	pending, err := managerOne.Resume(context.Background(), &backgroundtask.ResumeRequest{
+		TaskID: task.Spec.ID, ExpectedVersion: waiting.Version, Data: []byte("yes"),
+	})
+	require.NoError(t, err)
+
+	executeDone := make(chan error, 1)
+	go func() {
+		executeDone <- managerOne.Execute(context.Background(), pending.Spec.ID)
+	}()
+	<-resumeStarted
+	closeCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	require.NoError(t, managerOne.Close(closeCtx))
+	cancel()
+	require.NoError(t, <-executeDone)
+	yielded, err := managerOne.Get(context.Background(), task.Spec.ID)
+	require.NoError(t, err)
+	require.Equal(t, backgroundtask.StatusPending, yielded.Status)
+	require.Equal(t, []byte("yes"), yielded.PendingResume)
+
+	executorsTwo := backgroundtask.NewExecutorRegistry()
+	require.NoError(t, RegisterExecutors(executorsTwo, registry))
+	managerTwo := mustNewBackgroundManager(t, context.Background(), &backgroundtask.Config{
+		Tasks: store, Executors: executorsTwo,
+	})
+	require.NoError(t, managerTwo.Execute(context.Background(), task.Spec.ID))
+	completed, err := managerTwo.Get(context.Background(), task.Spec.ID)
+	require.NoError(t, err)
+	require.Equal(t, backgroundtask.StatusCompleted, completed.Status)
+	require.Equal(t, "approved", string(completed.ResultData))
+	require.Equal(t, int64(3), completed.Attempt)
+	require.Len(t, resumeRequests, 2)
+	require.Equal(t, resumeRequests[0].RequestID, resumeRequests[1].RequestID)
+	require.Equal(t, resumeRequests[0].Data, resumeRequests[1].Data)
 }
 
 func TestManagedToolAutoBackgroundAndStop(t *testing.T) {

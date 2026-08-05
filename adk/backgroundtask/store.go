@@ -71,7 +71,10 @@ var (
 // cancellation is requested, Heartbeat, Complete, Fail,
 // WaitInput, Suspend, and Yield must reject the attempt; only AckCancel may
 // terminally acknowledge it. Yield changes running to pending, stores its
-// optional checkpoint atomically, and emits no lifecycle notification. On
+// optional checkpoint atomically, preserves PendingResume for idempotent
+// replay, and emits no lifecycle notification. Retry-capable lease expiry also
+// preserves PendingResume. A later WaitInput, Suspend, or terminal transition
+// consumes it. On
 // retry-capable work, cancel intent that outlives an attempt remains pending so
 // a recovery attempt can stop the external operation before acknowledging
 // cancellation. Non-recoverable lease expiry resolves cancellation directly.

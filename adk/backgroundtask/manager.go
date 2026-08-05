@@ -80,7 +80,10 @@ type Task struct {
 	ResultError string
 	// OutputFileErr records the first failure while producing the optional output transcript.
 	OutputFileErr string
-	// PendingResume is a one-shot resume command for the next active attempt.
+	// PendingResume is the durable resume command for the current checkpoint.
+	// Retry-capable attempt loss or yield preserves it for idempotent replay. A
+	// subsequent wait-input or suspended checkpoint, or a terminal transition,
+	// consumes it.
 	PendingResume []byte
 	// Version is the CAS version of this durable record.
 	Version int64

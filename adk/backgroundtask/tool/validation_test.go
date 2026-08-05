@@ -150,18 +150,45 @@ func TestPayloadAndResultValidationBoundaries(t *testing.T) {
 
 	valid, err := validateOutcome(&Outcome{
 		Status: backgroundtask.StatusCompleted, Data: []byte("done"),
-	})
+	}, false)
 	require.NoError(t, err)
 	require.Equal(t, backgroundtask.StatusCompleted, valid.Status)
-	for _, outcome := range []*Outcome{
-		nil,
-		{Status: backgroundtask.StatusCompleted, Error: "bad"},
-		{Status: backgroundtask.StatusFailed},
-		{Status: backgroundtask.StatusFailed, Error: "bad", Data: []byte("bad")},
-		{Status: backgroundtask.StatusCanceled, Data: []byte("bad")},
-		{Status: backgroundtask.StatusRunning},
+	waiting, err := validateOutcome(&Outcome{
+		Status: backgroundtask.StatusWaitingInput,
+		InputRequest: &InputRequest{
+			ID: "approval", Data: []byte(`{"question":"approve?"}`),
+		},
+	}, true)
+	require.NoError(t, err)
+	require.NotEmpty(t, waiting.Checkpoint)
+	for _, testCase := range []struct {
+		outcome        *Outcome
+		supportsResume bool
+	}{
+		{outcome: nil},
+		{outcome: &Outcome{Status: backgroundtask.StatusCompleted, Error: "bad"}},
+		{outcome: &Outcome{Status: backgroundtask.StatusFailed}},
+		{outcome: &Outcome{
+			Status: backgroundtask.StatusFailed, Error: "bad", Data: []byte("bad"),
+		}},
+		{outcome: &Outcome{
+			Status: backgroundtask.StatusCanceled, Data: []byte("bad"),
+		}},
+		{outcome: &Outcome{Status: backgroundtask.StatusRunning}},
+		{outcome: &Outcome{
+			Status:       backgroundtask.StatusWaitingInput,
+			InputRequest: &InputRequest{ID: "approval"},
+		}},
+		{outcome: &Outcome{
+			Status: backgroundtask.StatusWaitingInput,
+		}, supportsResume: true},
+		{outcome: &Outcome{
+			Status:       backgroundtask.StatusWaitingInput,
+			Data:         []byte("terminal"),
+			InputRequest: &InputRequest{ID: "approval"},
+		}, supportsResume: true},
 	} {
-		_, err = validateOutcome(outcome)
+		_, err = validateOutcome(testCase.outcome, testCase.supportsResume)
 		require.Error(t, err)
 	}
 }
