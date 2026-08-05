@@ -133,7 +133,7 @@ func TestAttack_ReplayedEventProjectsOnceMaterializesTwice(t *testing.T) {
 	require.Equal(t, "update", events[0].Type)
 	require.Equal(t, "launch_result", events[1].Type)
 
-	output, err := manager.ReadRecentTaskEvents(context.Background(), &backgroundtask.ReadRecentTaskEventsRequest{
+	output, err := manager.ListTaskEvents(context.Background(), &backgroundtask.ListTaskEventsRequest{
 		TaskID: "attack-task",
 	})
 	require.NoError(t, err)

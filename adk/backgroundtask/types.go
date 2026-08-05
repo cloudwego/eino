@@ -222,15 +222,22 @@ type AppendTaskEventResult struct {
 	Inserted bool
 }
 
-// ReadRecentTaskEventsRequest requests the newest bounded progress events.
-type ReadRecentTaskEventsRequest struct {
-	TaskID string
-	Limit  int
+// ListTaskEventsRequest requests one snapshot-stable page of task events.
+// NewestFirst selects reverse append order; Cursor continues the same task,
+// direction, and snapshot established by the first page. Limit defaults to 100
+// and is capped at 1000.
+type ListTaskEventsRequest struct {
+	TaskID      string
+	Cursor      string
+	Limit       int
+	NewestFirst bool
 }
 
-// ReadRecentTaskEventsResult contains events in chronological append order.
-type ReadRecentTaskEventsResult struct {
-	Events []*TaskEvent
+// ListTaskEventsResult contains one page and an opaque continuation cursor.
+// NextCursor is empty when the snapshot has been exhausted.
+type ListTaskEventsResult struct {
+	Events     []*TaskEvent
+	NextCursor string
 }
 
 // NotificationReceipt is an opaque token authorizing acknowledgement of one

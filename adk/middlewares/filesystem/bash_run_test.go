@@ -259,7 +259,7 @@ func TestManagedExecuteTool_Foreground(t *testing.T) {
 	task := waitTerminalTask(t, mgr)
 	assert.Equal(t, backgroundtask.StatusCompleted, task.Status)
 	assert.Equal(t, "echo hi", task.Spec.Description)
-	events, err := mgr.ReadRecentTaskEvents(context.Background(), &backgroundtask.ReadRecentTaskEventsRequest{
+	events, err := mgr.ListTaskEvents(context.Background(), &backgroundtask.ListTaskEventsRequest{
 		TaskID: task.Spec.ID,
 	})
 	require.NoError(t, err)

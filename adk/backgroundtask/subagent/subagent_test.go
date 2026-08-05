@@ -792,7 +792,7 @@ func TestSubAgentTaskResumesAfterManagerReconstruction_BitsUT(t *testing.T) {
 	assert.Contains(t, string(completed.ResultData), "approved")
 	assert.Equal(t, int64(2), completed.Attempt)
 	assert.Empty(t, completed.Spec.OutputFile)
-	feed, err := manager2.ReadRecentTaskEvents(context.Background(), &backgroundtask.ReadRecentTaskEventsRequest{
+	feed, err := manager2.ListTaskEvents(context.Background(), &backgroundtask.ListTaskEventsRequest{
 		TaskID: completed.Spec.ID,
 	})
 	require.NoError(t, err)

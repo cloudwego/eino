@@ -114,26 +114,32 @@ func TestSimplifiedPublicModelHasNoOverlappingStateFields_BitsUT(t *testing.T) {
 		"ID", "Version", "Kind", "Task")
 	assertFieldsPresent(t, reflect.TypeOf(ReceiveNotificationsRequest{}), "Limit", "LeaseDuration")
 	assertFieldsAbsent(t, reflect.TypeOf(ReceiveNotificationsRequest{}), "ConsumerID", "VisibilityTime")
+	assertFieldsPresent(t, reflect.TypeOf(ListTaskEventsRequest{}),
+		"TaskID", "Cursor", "Limit", "NewestFirst")
+	assertFieldsPresent(t, reflect.TypeOf(ListTaskEventsResult{}), "Events", "NextCursor")
 	assertFieldsPresent(t, reflect.TypeOf(Dispatcher{}),
 		"Outbox", "Tasks", "Inbox", "Activator", "BatchSize", "LeaseDuration")
 	assertFieldsAbsent(t, reflect.TypeOf(Dispatcher{}), "ConsumerID", "Visibility", "Sinks")
 	assertFieldsPresent(t, reflect.TypeOf(Config{}), "Tasks", "TaskEvents", "Executors", "IDGen")
 	assertFieldsAbsent(t, reflect.TypeOf(Config{}), "Store")
 	assertMethodsAbsent(t, reflect.TypeOf((*TaskStore)(nil)).Elem(),
-		"AppendTaskEvent", "ReadRecentTaskEvents", "ReportOutputFailure")
+		"AppendTaskEvent", "ListTaskEvents", "ReadRecentTaskEvents", "ReportOutputFailure")
 	assertMethodsPresent(t, reflect.TypeOf((*TaskStore)(nil)).Elem(),
 		"ReportTranscriptFailure")
 	assertMethodsPresent(t, reflect.TypeOf((*TaskEventStore)(nil)).Elem(),
-		"AppendTaskEvent", "ReadRecentTaskEvents")
+		"AppendTaskEvent", "ListTaskEvents")
+	assertMethodsAbsent(t, reflect.TypeOf((*TaskEventStore)(nil)).Elem(), "ReadRecentTaskEvents")
 	assertMethodsAbsent(t, reflect.TypeOf((*Manager)(nil)),
 		"Store", "Executors", "MarkBackgrounded", "RequestControl", "RequestTimeout", "ReadOutput",
-		"WaitUpdate", "CreateAndStart", "LoadOrRegisterExecutor", "ValidateNotificationDelivery")
+		"ReadRecentTaskEvents", "WaitUpdate", "CreateAndStart", "LoadOrRegisterExecutor",
+		"ValidateNotificationDelivery")
 	assertMethodsPresent(t, reflect.TypeOf((*Manager)(nil)),
 		"Submit", "Get", "ListPending", "ListSuspended", "Execute", "WaitForTaskVersion",
-		"ReadRecentTaskEvents", "RequestCancel", "ReleaseSuspension", "Resume", "AllocateTaskID",
+		"ListTaskEvents", "RequestCancel", "ReleaseSuspension", "Resume", "AllocateTaskID",
 		"Close")
 	assertMethodsPresent(t, reflect.TypeOf((*ExecutorRegistry)(nil)), "LoadOrRegister")
-	assertMethodsAbsent(t, reflect.TypeOf((*InMemoryStore)(nil)), "CreateAndStart", "Cancel")
+	assertMethodsAbsent(t, reflect.TypeOf((*InMemoryStore)(nil)),
+		"CreateAndStart", "Cancel", "ReadRecentTaskEvents")
 	assertMethodsPresent(t, reflect.TypeOf((*InMemoryStore)(nil)),
 		"ListSuspended", "AckCancel", "ReleaseSuspension")
 	assertMethodsAbsent(t, reflect.TypeOf((*Executor)(nil)).Elem(), "ValidateResume")

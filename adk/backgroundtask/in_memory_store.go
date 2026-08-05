@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -41,6 +42,19 @@ type memoryOutboxItem struct {
 
 type memoryActiveAttempt struct {
 	expiresAt time.Time
+}
+
+const (
+	defaultTaskEventPageSize = 100
+	maxTaskEventPageSize     = 1000
+)
+
+type taskEventCursor struct {
+	Version     int    `json:"v"`
+	TaskID      string `json:"t"`
+	SnapshotEnd int    `json:"s"`
+	Position    int    `json:"p"`
+	NewestFirst bool   `json:"n"`
 }
 
 // InMemoryStore is a deterministic reference implementation of TaskStore,
@@ -302,16 +316,18 @@ func (s *InMemoryStore) AppendTaskEvent(
 	}, nil
 }
 
-func (s *InMemoryStore) ReadRecentTaskEvents(
+func (s *InMemoryStore) ListTaskEvents(
 	_ context.Context,
-	req *ReadRecentTaskEventsRequest,
-) (*ReadRecentTaskEventsResult, error) {
+	req *ListTaskEventsRequest,
+) (*ListTaskEventsResult, error) {
 	if req == nil || req.TaskID == "" {
-		return nil, errors.New("backgroundtask: recent task events task id is required")
+		return nil, errors.New("backgroundtask: list task events task id is required")
 	}
 	limit := req.Limit
-	if limit <= 0 || limit > 1000 {
-		limit = 100
+	if limit <= 0 {
+		limit = defaultTaskEventPageSize
+	} else if limit > maxTaskEventPageSize {
+		limit = maxTaskEventPageSize
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -319,15 +335,80 @@ func (s *InMemoryStore) ReadRecentTaskEvents(
 		return nil, ErrNotFound
 	}
 	events := s.taskEvents[req.TaskID]
-	start := len(events) - limit
-	if start < 0 {
-		start = 0
+	cursor := taskEventCursor{
+		Version: 1, TaskID: req.TaskID, SnapshotEnd: len(events),
+		NewestFirst: req.NewestFirst,
 	}
-	result := &ReadRecentTaskEventsResult{}
-	for i := start; i < len(events); i++ {
+	if req.NewestFirst {
+		cursor.Position = cursor.SnapshotEnd
+	}
+	if req.Cursor != "" {
+		decoded, err := decodeTaskEventCursor(req.Cursor)
+		if err != nil || decoded.TaskID != req.TaskID ||
+			decoded.NewestFirst != req.NewestFirst ||
+			decoded.SnapshotEnd < 0 || decoded.SnapshotEnd > len(events) ||
+			decoded.Position < 0 || decoded.Position > decoded.SnapshotEnd {
+			return nil, ErrInvalidCursor
+		}
+		cursor = decoded
+	}
+
+	result := &ListTaskEventsResult{}
+	if cursor.NewestFirst {
+		start := cursor.Position - limit
+		if start < 0 {
+			start = 0
+		}
+		for i := cursor.Position - 1; i >= start; i-- {
+			result.Events = append(result.Events, cloneTaskEvent(&events[i]))
+		}
+		if start > 0 {
+			cursor.Position = start
+			nextCursor, err := encodeTaskEventCursor(cursor)
+			if err != nil {
+				return nil, fmt.Errorf("backgroundtask: encode task event cursor: %w", err)
+			}
+			result.NextCursor = nextCursor
+		}
+		return result, nil
+	}
+
+	end := cursor.Position + limit
+	if end > cursor.SnapshotEnd {
+		end = cursor.SnapshotEnd
+	}
+	for i := cursor.Position; i < end; i++ {
 		result.Events = append(result.Events, cloneTaskEvent(&events[i]))
 	}
+	if end < cursor.SnapshotEnd {
+		cursor.Position = end
+		nextCursor, err := encodeTaskEventCursor(cursor)
+		if err != nil {
+			return nil, fmt.Errorf("backgroundtask: encode task event cursor: %w", err)
+		}
+		result.NextCursor = nextCursor
+	}
 	return result, nil
+}
+
+func encodeTaskEventCursor(cursor taskEventCursor) (string, error) {
+	data, err := json.Marshal(cursor)
+	if err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(data), nil
+}
+
+func decodeTaskEventCursor(value string) (taskEventCursor, error) {
+	data, err := base64.RawURLEncoding.DecodeString(value)
+	if err != nil {
+		return taskEventCursor{}, err
+	}
+	var cursor taskEventCursor
+	if err = json.Unmarshal(data, &cursor); err != nil || cursor.Version != 1 {
+		return taskEventCursor{}, ErrInvalidCursor
+	}
+	return cursor, nil
 }
 
 func (s *InMemoryStore) ReportTranscriptFailure(_ context.Context, req *ReportTranscriptFailureRequest) (*Task, error) {

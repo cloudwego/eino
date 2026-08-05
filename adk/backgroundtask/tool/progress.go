@@ -53,8 +53,8 @@ func (r *ProgressReader) ReadProgress(
 	if limit <= 0 {
 		limit = defaultRecentOutputLimit
 	}
-	result, err := r.Manager.ReadRecentTaskEvents(ctx, &backgroundtask.ReadRecentTaskEventsRequest{
-		TaskID: task.Spec.ID, Limit: limit,
+	result, err := r.Manager.ListTaskEvents(ctx, &backgroundtask.ListTaskEventsRequest{
+		TaskID: task.Spec.ID, Limit: limit, NewestFirst: true,
 	})
 	if err != nil {
 		return "", err
@@ -64,7 +64,8 @@ func (r *ProgressReader) ReadProgress(
 	}
 	var output strings.Builder
 	output.WriteString("Recent progress:")
-	for _, event := range result.Events {
+	for i := len(result.Events) - 1; i >= 0; i-- {
+		event := result.Events[i]
 		line := formatProgressEvent(event)
 		if line == "" {
 			continue

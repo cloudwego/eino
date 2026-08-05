@@ -300,7 +300,7 @@ func TestManagedToolStreamPersistsBeforeNDJSONProjection(t *testing.T) {
 	require.Equal(t, "launch_result", events[3].Type)
 	require.Equal(t, "task-fixed", events[3].TaskID)
 
-	output, err := manager.ReadRecentTaskEvents(context.Background(), &backgroundtask.ReadRecentTaskEventsRequest{
+	output, err := manager.ListTaskEvents(context.Background(), &backgroundtask.ListTaskEventsRequest{
 		TaskID: "task-fixed",
 	})
 	require.NoError(t, err)
@@ -433,7 +433,7 @@ func TestManagedToolMaterializerIsDerivedAndFailureIsNonTerminal(t *testing.T) {
 	require.Equal(t, backgroundtask.StatusCompleted, task.Status)
 	require.Equal(t, "/outputs/materialized", task.Spec.OutputFile)
 	require.Contains(t, task.OutputFileErr, "derived file unavailable")
-	output, err := manager.ReadRecentTaskEvents(context.Background(), &backgroundtask.ReadRecentTaskEventsRequest{
+	output, err := manager.ListTaskEvents(context.Background(), &backgroundtask.ListTaskEventsRequest{
 		TaskID: task.Spec.ID,
 	})
 	require.NoError(t, err)
@@ -498,9 +498,9 @@ func TestAttack_PlainUpdateGeneratedEventIDNotMaterialized(t *testing.T) {
 	require.NotNil(t, projected[0].Update)
 	require.NotEmpty(t, projected[0].Update.EventID)
 
-	result, err := manager.ReadRecentTaskEvents(
+	result, err := manager.ListTaskEvents(
 		context.Background(),
-		&backgroundtask.ReadRecentTaskEventsRequest{TaskID: "plain-generated-event"},
+		&backgroundtask.ListTaskEventsRequest{TaskID: "plain-generated-event"},
 	)
 	require.NoError(t, err)
 	require.Len(t, result.Events, 1)
@@ -597,7 +597,7 @@ func TestManagedToolProjectionDetachesWhilePersistenceContinues(t *testing.T) {
 		}
 		time.Sleep(time.Millisecond)
 	}
-	output, err := manager.ReadRecentTaskEvents(context.Background(), &backgroundtask.ReadRecentTaskEventsRequest{
+	output, err := manager.ListTaskEvents(context.Background(), &backgroundtask.ListTaskEventsRequest{
 		TaskID: "task-fixed",
 	})
 	require.NoError(t, err)

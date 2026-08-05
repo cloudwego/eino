@@ -52,6 +52,9 @@ var (
 	// ErrTaskEventIDConflict reports that one task-local EventID was replayed
 	// with bytes different from the originally persisted event.
 	ErrTaskEventIDConflict = errors.New("backgroundtask: task event id conflict")
+	// ErrInvalidCursor reports that a pagination cursor is malformed or cannot
+	// continue the requested task-event snapshot and ordering.
+	ErrInvalidCursor = errors.New("backgroundtask: invalid cursor")
 )
 
 // TaskStore persists authoritative task snapshots and semantic lifecycle
@@ -90,9 +93,11 @@ type TaskStore interface {
 // lifecycle snapshots. AppendTaskEvent must fence writes by the active attempt
 // before task-wide EventID replay detection, retain replay metadata across
 // attempts for at least the task lifetime, and not advance Task.Version.
+// ListTaskEvents must keep each cursor on the snapshot captured by its first
+// page and order events by append position, reversed when NewestFirst is true.
 type TaskEventStore interface {
 	AppendTaskEvent(context.Context, *AppendTaskEventRequest) (*AppendTaskEventResult, error)
-	ReadRecentTaskEvents(context.Context, *ReadRecentTaskEventsRequest) (*ReadRecentTaskEventsResult, error)
+	ListTaskEvents(context.Context, *ListTaskEventsRequest) (*ListTaskEventsResult, error)
 }
 
 type unavailableTaskEventStore struct{}
@@ -104,10 +109,10 @@ func (unavailableTaskEventStore) AppendTaskEvent(
 	return nil, errors.New("backgroundtask: task event store is not configured")
 }
 
-func (unavailableTaskEventStore) ReadRecentTaskEvents(
+func (unavailableTaskEventStore) ListTaskEvents(
 	context.Context,
-	*ReadRecentTaskEventsRequest,
-) (*ReadRecentTaskEventsResult, error) {
+	*ListTaskEventsRequest,
+) (*ListTaskEventsResult, error) {
 	return nil, errors.New("backgroundtask: task event store is not configured")
 }
 

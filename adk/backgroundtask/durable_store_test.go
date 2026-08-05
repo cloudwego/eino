@@ -18,6 +18,7 @@ package backgroundtask
 
 import (
 	"context"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -229,7 +230,7 @@ func TestAttack_TaskEventOrderSpansAttemptsWithoutExposingAttempt(t *testing.T) 
 	require.NotNil(t, second.Event)
 	require.Equal(t, "second", second.Event.EventID)
 
-	output, err := store.ReadRecentTaskEvents(context.Background(), &ReadRecentTaskEventsRequest{
+	output, err := store.ListTaskEvents(context.Background(), &ListTaskEventsRequest{
 		TaskID: secondAttempt.Spec.ID,
 	})
 	require.NoError(t, err)
@@ -372,7 +373,7 @@ func TestInMemoryStoreTaskEventDeduplicatesAcrossAttempts_BitsUT(t *testing.T) {
 	require.Equal(t, versionBeforeOutput, current.Version)
 
 	first.Event.Data[0] = 'X'
-	stored, err := store.ReadRecentTaskEvents(context.Background(), &ReadRecentTaskEventsRequest{
+	stored, err := store.ListTaskEvents(context.Background(), &ListTaskEventsRequest{
 		TaskID: restarted.Spec.ID,
 	})
 	require.NoError(t, err)
@@ -381,7 +382,7 @@ func TestInMemoryStoreTaskEventDeduplicatesAcrossAttempts_BitsUT(t *testing.T) {
 	require.Equal(t, "payload", string(stored.Events[0].Data))
 }
 
-func TestAttack_RecentTaskEventsIgnoreEventIDLexicalOrder(t *testing.T) {
+func TestAttack_NewestTaskEventsIgnoreEventIDLexicalOrder(t *testing.T) {
 	store := NewInMemoryStore(nil)
 	started := createAndStart(t, store, "recent-output")
 	for _, event := range []struct {
@@ -398,15 +399,174 @@ func TestAttack_RecentTaskEventsIgnoreEventIDLexicalOrder(t *testing.T) {
 		})
 		require.NoError(t, err)
 	}
-	result, err := store.ReadRecentTaskEvents(context.Background(), &ReadRecentTaskEventsRequest{
-		TaskID: started.Spec.ID, Limit: 2,
+	result, err := store.ListTaskEvents(context.Background(), &ListTaskEventsRequest{
+		TaskID: started.Spec.ID, Limit: 2, NewestFirst: true,
 	})
 	require.NoError(t, err)
 	require.Len(t, result.Events, 2)
 	require.NotNil(t, result.Events[0])
 	require.NotNil(t, result.Events[1])
-	require.Equal(t, "two", string(result.Events[0].Data))
-	require.Equal(t, "three", string(result.Events[1].Data))
+	require.Equal(t, "three", string(result.Events[0].Data))
+	require.Equal(t, "two", string(result.Events[1].Data))
+}
+
+func TestInMemoryStoreListTaskEventsExhaustsStableSnapshots_BitsUT(t *testing.T) {
+	store := NewInMemoryStore(nil)
+	started := createAndStart(t, store, "paginated-events")
+	appendEvent := func(id string) {
+		t.Helper()
+		_, err := store.AppendTaskEvent(context.Background(), &AppendTaskEventRequest{
+			TaskID: started.Spec.ID, Attempt: started.Attempt,
+			EventID: id, Data: []byte(id),
+		})
+		require.NoError(t, err)
+	}
+	eventIDs := func(events []*TaskEvent) []string {
+		t.Helper()
+		ids := make([]string, len(events))
+		for i, event := range events {
+			require.NotNil(t, event)
+			ids[i] = event.EventID
+		}
+		return ids
+	}
+	for _, id := range []string{"one", "two", "three", "four", "five"} {
+		appendEvent(id)
+	}
+
+	first, err := store.ListTaskEvents(context.Background(), &ListTaskEventsRequest{
+		TaskID: started.Spec.ID, Limit: 2,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"one", "two"}, eventIDs(first.Events))
+	require.NotEmpty(t, first.NextCursor)
+	appendEvent("six")
+
+	second, err := store.ListTaskEvents(context.Background(), &ListTaskEventsRequest{
+		TaskID: started.Spec.ID, Cursor: first.NextCursor, Limit: 2,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"three", "four"}, eventIDs(second.Events))
+	require.NotEmpty(t, second.NextCursor)
+	third, err := store.ListTaskEvents(context.Background(), &ListTaskEventsRequest{
+		TaskID: started.Spec.ID, Cursor: second.NextCursor, Limit: 2,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"five"}, eventIDs(third.Events))
+	assert.Empty(t, third.NextCursor)
+
+	newest, err := store.ListTaskEvents(context.Background(), &ListTaskEventsRequest{
+		TaskID: started.Spec.ID, Limit: 2, NewestFirst: true,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"six", "five"}, eventIDs(newest.Events))
+	require.NotEmpty(t, newest.NextCursor)
+	appendEvent("seven")
+
+	var newestSnapshot []string
+	cursor := newest.NextCursor
+	for cursor != "" {
+		page, listErr := store.ListTaskEvents(context.Background(), &ListTaskEventsRequest{
+			TaskID: started.Spec.ID, Cursor: cursor, Limit: 2, NewestFirst: true,
+		})
+		require.NoError(t, listErr)
+		newestSnapshot = append(newestSnapshot, eventIDs(page.Events)...)
+		cursor = page.NextCursor
+	}
+	assert.Equal(t, []string{"four", "three", "two", "one"}, newestSnapshot)
+
+	fresh, err := store.ListTaskEvents(context.Background(), &ListTaskEventsRequest{
+		TaskID: started.Spec.ID, Limit: 10,
+	})
+	require.NoError(t, err)
+	assert.Equal(t,
+		[]string{"one", "two", "three", "four", "five", "six", "seven"},
+		eventIDs(fresh.Events),
+	)
+	assert.Empty(t, fresh.NextCursor)
+}
+
+func TestInMemoryStoreListTaskEventsRejectsInvalidCursors_BitsUT(t *testing.T) {
+	store := NewInMemoryStore(nil)
+	started := createAndStart(t, store, "cursor-events")
+	for _, id := range []string{"one", "two"} {
+		_, err := store.AppendTaskEvent(context.Background(), &AppendTaskEventRequest{
+			TaskID: started.Spec.ID, Attempt: started.Attempt,
+			EventID: id, Data: []byte(id),
+		})
+		require.NoError(t, err)
+	}
+	first, err := store.ListTaskEvents(context.Background(), &ListTaskEventsRequest{
+		TaskID: started.Spec.ID, Limit: 1,
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, first.NextCursor)
+	other := createAndStart(t, store, "other-cursor-events")
+
+	for name, request := range map[string]*ListTaskEventsRequest{
+		"malformed": {
+			TaskID: started.Spec.ID, Cursor: "not-a-cursor",
+		},
+		"other task": {
+			TaskID: other.Spec.ID, Cursor: first.NextCursor,
+		},
+		"other direction": {
+			TaskID: started.Spec.ID, Cursor: first.NextCursor, NewestFirst: true,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, listErr := store.ListTaskEvents(context.Background(), request)
+			require.ErrorIs(t, listErr, ErrInvalidCursor)
+		})
+	}
+
+	for name, cursor := range map[string]taskEventCursor{
+		"unsupported version": {
+			Version: 2, TaskID: started.Spec.ID, SnapshotEnd: 2, Position: 1,
+		},
+		"future snapshot": {
+			Version: 1, TaskID: started.Spec.ID, SnapshotEnd: 3, Position: 1,
+		},
+		"position outside snapshot": {
+			Version: 1, TaskID: started.Spec.ID, SnapshotEnd: 2, Position: 3,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			encoded, encodeErr := encodeTaskEventCursor(cursor)
+			require.NoError(t, encodeErr)
+			_, listErr := store.ListTaskEvents(context.Background(), &ListTaskEventsRequest{
+				TaskID: started.Spec.ID, Cursor: encoded,
+			})
+			require.ErrorIs(t, listErr, ErrInvalidCursor)
+		})
+	}
+}
+
+func TestInMemoryStoreListTaskEventsNormalizesLimit_BitsUT(t *testing.T) {
+	store := NewInMemoryStore(nil)
+	started := createAndStart(t, store, "event-limits")
+	for i := 0; i < maxTaskEventPageSize+1; i++ {
+		id := "event-" + strconv.Itoa(i)
+		_, err := store.AppendTaskEvent(context.Background(), &AppendTaskEventRequest{
+			TaskID: started.Spec.ID, Attempt: started.Attempt,
+			EventID: id, Data: []byte(id),
+		})
+		require.NoError(t, err)
+	}
+
+	defaultPage, err := store.ListTaskEvents(context.Background(), &ListTaskEventsRequest{
+		TaskID: started.Spec.ID,
+	})
+	require.NoError(t, err)
+	require.Len(t, defaultPage.Events, defaultTaskEventPageSize)
+	require.NotEmpty(t, defaultPage.NextCursor)
+
+	cappedPage, err := store.ListTaskEvents(context.Background(), &ListTaskEventsRequest{
+		TaskID: started.Spec.ID, Limit: maxTaskEventPageSize + 1,
+	})
+	require.NoError(t, err)
+	require.Len(t, cappedPage.Events, maxTaskEventPageSize)
+	require.NotEmpty(t, cappedPage.NextCursor)
 }
 
 func TestInMemoryStoreHeartbeatSuspensionReleaseAndWait(t *testing.T) {
@@ -498,8 +658,8 @@ func TestAttack_TaskEventReplayFencesStaleAttempt(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, second.Inserted)
 
-	page, err := store.ReadRecentTaskEvents(context.Background(), &ReadRecentTaskEventsRequest{
-		TaskID: started.Spec.ID, Limit: 1,
+	page, err := store.ListTaskEvents(context.Background(), &ListTaskEventsRequest{
+		TaskID: started.Spec.ID, Limit: 1, NewestFirst: true,
 	})
 	require.NoError(t, err)
 	require.Len(t, page.Events, 1)
@@ -516,7 +676,7 @@ func TestAttack_TaskEventReplayFencesStaleAttempt(t *testing.T) {
 		TaskID: started.Spec.ID, ExpectedVersion: started.Version, Data: []byte("done"),
 	})
 	require.NoError(t, err)
-	page, err = store.ReadRecentTaskEvents(context.Background(), &ReadRecentTaskEventsRequest{
+	page, err = store.ListTaskEvents(context.Background(), &ListTaskEventsRequest{
 		TaskID: started.Spec.ID,
 	})
 	require.NoError(t, err)

@@ -504,12 +504,12 @@ func (m *Manager) WaitForTaskVersion(ctx context.Context, req *WaitForTaskVersio
 	return m.tasks.WaitForTaskVersion(ctx, req)
 }
 
-// ReadRecentTaskEvents reads the newest bounded progress events in chronological order.
-func (m *Manager) ReadRecentTaskEvents(
+// ListTaskEvents reads one snapshot-stable page of task events.
+func (m *Manager) ListTaskEvents(
 	ctx context.Context,
-	req *ReadRecentTaskEventsRequest,
-) (*ReadRecentTaskEventsResult, error) {
-	return m.taskEvents.ReadRecentTaskEvents(ctx, req)
+	req *ListTaskEventsRequest,
+) (*ListTaskEventsResult, error) {
+	return m.taskEvents.ListTaskEvents(ctx, req)
 }
 
 // RequestCancel records cancellation intent and signals a local active attempt.

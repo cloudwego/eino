@@ -51,7 +51,7 @@ func (s *firstReleaseConflictStore) ReleaseSuspension(
 	return s.TaskStore.ReleaseSuspension(ctx, req)
 }
 
-func TestManagerReadRecentTaskEventsDelegatesToStore_BitsUT(t *testing.T) {
+func TestManagerListTaskEventsDelegatesToStore_BitsUT(t *testing.T) {
 	store := NewInMemoryStore(nil)
 	manager := New(context.Background(), &Config{
 		Tasks: lifecycleStoreOnly{TaskStore: store}, TaskEvents: store,
@@ -64,7 +64,7 @@ func TestManagerReadRecentTaskEventsDelegatesToStore_BitsUT(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	result, err := manager.ReadRecentTaskEvents(context.Background(), &ReadRecentTaskEventsRequest{
+	result, err := manager.ListTaskEvents(context.Background(), &ListTaskEventsRequest{
 		TaskID: started.Spec.ID,
 	})
 	require.NoError(t, err)

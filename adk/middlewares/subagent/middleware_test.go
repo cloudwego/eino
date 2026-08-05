@@ -528,7 +528,7 @@ func TestLocalAgentToolWritesEventTranscript(t *testing.T) {
 	content, err := backend.Read(ctx, &filesystem.ReadRequest{FilePath: task.Spec.OutputFile})
 	require.NoError(t, err)
 	assert.Equal(t, "worker: local output\n", content.Content)
-	feed, err := manager.ReadRecentTaskEvents(ctx, &backgroundtask.ReadRecentTaskEventsRequest{
+	feed, err := manager.ListTaskEvents(ctx, &backgroundtask.ListTaskEventsRequest{
 		TaskID: task.Spec.ID,
 	})
 	require.NoError(t, err)
@@ -600,7 +600,7 @@ func TestDurableTaskProgressReadsSessionTranscript(t *testing.T) {
 	task := terminalTask(t, manager)
 	require.NotNil(t, task)
 	assert.Empty(t, task.Spec.OutputFile)
-	feed, err := manager.ReadRecentTaskEvents(ctx, &backgroundtask.ReadRecentTaskEventsRequest{TaskID: task.Spec.ID})
+	feed, err := manager.ListTaskEvents(ctx, &backgroundtask.ListTaskEventsRequest{TaskID: task.Spec.ID})
 	require.NoError(t, err)
 	assert.Empty(t, feed.Events)
 	progress, err := NewDurableTaskProgressHook(

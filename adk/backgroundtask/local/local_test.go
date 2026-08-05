@@ -152,7 +152,7 @@ func TestRunnerStreamProjectsAndPersistsOutput_BitsUT(t *testing.T) {
 	task := onlyTask(t, manager)
 	task = waitTerminal(t, manager, task)
 	assert.Equal(t, "abc", string(task.ResultData))
-	output, err := manager.ReadRecentTaskEvents(context.Background(), &backgroundtask.ReadRecentTaskEventsRequest{
+	output, err := manager.ListTaskEvents(context.Background(), &backgroundtask.ListTaskEventsRequest{
 		TaskID: task.Spec.ID,
 	})
 	require.NoError(t, err)
