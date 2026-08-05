@@ -129,6 +129,7 @@ func (s *InMemoryStore) Create(_ context.Context, req *CreateTaskRequest) (*Task
 		UpdatedAt:         now,
 	}
 	s.tasks[spec.ID] = task
+	s.enqueueLocked(task, NotificationTaskCreated)
 	s.signalLocked()
 	return cloneTask(task), nil
 }
@@ -836,7 +837,8 @@ func (s *InMemoryStore) advanceLocked(t *Task) {
 }
 
 func (s *InMemoryStore) enqueueLocked(t *Task, kind NotificationKind) *Notification {
-	if !t.Spec.NotifySession || kind == "" {
+	if kind == "" || t.Spec.SessionID == "" ||
+		(kind != NotificationTaskCreated && !t.Spec.NotifySession) {
 		return nil
 	}
 	n := &Notification{

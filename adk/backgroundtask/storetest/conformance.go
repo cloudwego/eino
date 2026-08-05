@@ -263,22 +263,14 @@ func RunNotificationOutboxConformance(t *testing.T, config NotificationOutboxCon
 	tasks, outbox := config.New(t)
 	spec := testSpec("notification")
 	spec.SessionID = "session"
-	spec.NotifySession = true
-	created := create(t, tasks, spec, backgroundtask.LeaseExpiryRetry)
-	started, err := tasks.Start(context.Background(), &backgroundtask.StartTaskRequest{
-		TaskID: created.Spec.ID, ExpectedVersion: created.Version,
-	})
-	require.NoError(t, err)
-	_, err = tasks.Complete(context.Background(), &backgroundtask.CompleteTaskRequest{
-		TaskID: started.Spec.ID, ExpectedVersion: started.Version,
-	})
-	require.NoError(t, err)
+	create(t, tasks, spec, backgroundtask.LeaseExpiryRetry)
 	lease := 20 * time.Millisecond
 	first, err := outbox.Receive(context.Background(), &backgroundtask.ReceiveNotificationsRequest{
 		Limit: 1, LeaseDuration: lease,
 	})
 	require.NoError(t, err)
 	require.Len(t, first.Deliveries, 1)
+	require.Equal(t, backgroundtask.NotificationTaskCreated, first.Deliveries[0].Record.Kind)
 	require.Equal(t, spec.SessionID, first.Deliveries[0].Record.SessionID)
 	concurrent, err := outbox.Receive(context.Background(), &backgroundtask.ReceiveNotificationsRequest{
 		Limit: 1, LeaseDuration: lease,

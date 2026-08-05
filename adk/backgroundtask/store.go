@@ -63,6 +63,8 @@ var (
 // Every returned Task and mutable field is independently owned by the caller.
 // ListPending and ListSuspended follow their request ordering, cursor, and limit
 // contracts; malformed cursors return ErrInvalidCursor.
+// When the provider also implements NotificationOutbox, Create atomically
+// enqueues NotificationTaskCreated for every task with a parent SessionID.
 //
 // RequestCancel on active work keeps StatusRunning, sets CancelRequestedAt and
 // the first-write optional CancelReason, and advances Version. Once
@@ -106,7 +108,10 @@ type TaskEventStore interface {
 	ListTaskEvents(context.Context, *ListTaskEventsRequest) (*ListTaskEventsResult, error)
 }
 
-// NotificationOutbox leases lifecycle notifications for dispatch. Ack must
+// NotificationOutbox leases task notifications for dispatch. The
+// NotificationTaskCreated record is the durable recovery source for reconciling
+// a TaskCreated parent-session event if the creating process exits before
+// Runner persists its immediate timeline emission. Ack must
 // accept only the opaque receipt for the notification's current unexpired
 // lease; an expired or superseded receipt must not acknowledge the notification.
 // Receive normalizes limits to default 100 and maximum 1000. Both sides copy

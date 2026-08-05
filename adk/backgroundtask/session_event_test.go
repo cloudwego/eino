@@ -111,7 +111,7 @@ func TestManagerSubmitAppendsTaskCreatedSessionEvent_BitsUT(t *testing.T) {
 	event := result.Events[0]
 	require.True(t, task.CreatedAt.Equal(event.Timestamp))
 	require.Equal(t, SessionEventTaskCreated, event.Kind)
-	require.NotEmpty(t, event.EventID)
+	require.Equal(t, TaskCreatedSessionEventID(task.Spec.ID), event.EventID)
 	require.NotEmpty(t, event.TurnID)
 	require.NotNil(t, event.Extension)
 	payload, ok := event.Extension.Data.(*TaskCreatedSessionEvent)

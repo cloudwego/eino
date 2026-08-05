@@ -52,7 +52,7 @@ func TestInMemoryStoreTerminalCommitCreatesOneTerminalOutbox_BitsUT(t *testing.T
 	assert.Equal(t, 1, terminalCount)
 }
 
-func TestTaskWithoutSessionNotificationNeverCreatesOutbox_BitsUT(t *testing.T) {
+func TestTaskWithoutLifecycleNotificationsStillCreatesRecoveryOutbox_BitsUT(t *testing.T) {
 	store := NewInMemoryStore(nil)
 	spec := validSpec("route-less")
 	spec.NotifySession = false
@@ -73,15 +73,17 @@ func TestTaskWithoutSessionNotificationNeverCreatesOutbox_BitsUT(t *testing.T) {
 		Limit: 10, LeaseDuration: time.Minute,
 	})
 	require.NoError(t, err)
-	assert.Empty(t, outbox.Deliveries)
+	require.Len(t, outbox.Deliveries, 1)
+	assert.Equal(t, NotificationTaskCreated, outbox.Deliveries[0].Record.Kind)
 }
 
 func TestInMemoryStoreAckRequiresCurrentUnexpiredLease_BitsUT(t *testing.T) {
 	clock := &testClock{now: time.Unix(500, 0)}
 	store := newInMemoryStoreWithClock(nil, clock.Now)
-	started := createAndStart(t, store, "lease-validation")
-	_, err := store.Complete(context.Background(), &CompleteTaskRequest{
-		TaskID: started.Spec.ID, ExpectedVersion: started.Version,
+	spec := validSpec("lease-validation")
+	spec.NotifySession = false
+	_, err := store.Create(context.Background(), &CreateTaskRequest{
+		Spec: spec, LeaseExpiryPolicy: LeaseExpiryRetry,
 	})
 	require.NoError(t, err)
 

@@ -595,6 +595,7 @@ func TestManagerCancelPendingLocalTaskAfterExecuteValidationFailure(t *testing.T
 	defer closeWithTimeout(manager)
 	spec := validSpec("early-failure-cancel")
 	spec.NotifySession = false
+	spec.SessionID = ""
 	task, err := manager.Submit(context.Background(), spec)
 	require.NoError(t, err)
 	executor.validateErr = errors.New("worker validation failed")
@@ -686,7 +687,7 @@ func TestNewRejectsMissingTaskEventStore_BitsUT(t *testing.T) {
 	)
 }
 
-func TestManagerSubmitNotificationRequiresOutbox_BitsUT(t *testing.T) {
+func TestManagerSubmitParentSessionRequiresOutbox_BitsUT(t *testing.T) {
 	store := NewInMemoryStore(nil)
 	manager := managerWithExecutor(
 		t,
@@ -702,7 +703,7 @@ func TestManagerSubmitNotificationRequiresOutbox_BitsUT(t *testing.T) {
 	require.EqualError(
 		t,
 		err,
-		"backgroundtask: task store must implement NotificationOutbox for notification-bearing tasks",
+		"backgroundtask: task store must implement NotificationOutbox for parent-session tasks",
 	)
 	_, getErr := store.Get(context.Background(), spec.ID)
 	require.ErrorIs(t, getErr, ErrNotFound)

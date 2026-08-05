@@ -20,6 +20,8 @@ import (
 	"context"
 	"errors"
 
+	"github.com/google/uuid"
+
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/schema"
 )
@@ -34,10 +36,19 @@ type TaskCreatedSessionEvent struct {
 	TaskID string `json:"task_id"`
 }
 
+var taskCreatedSessionEventNamespace = uuid.MustParse("fddebb92-8d8a-4ae4-a652-7a49bbb4de2e")
+
 func init() {
 	schema.RegisterName[*TaskCreatedSessionEvent](
 		"_eino_adk_background_task_created_session_event",
 	)
+}
+
+// TaskCreatedSessionEventID returns the deterministic session-local EventID
+// for taskID. Immediate Runner emission and outbox-based recovery must use the
+// same ID so TaskCreated delivery is idempotent.
+func TaskCreatedSessionEventID(taskID string) string {
+	return uuid.NewSHA1(taskCreatedSessionEventNamespace, []byte(taskID)).String()
 }
 
 // TaskCreatedSessionEventSender creates a Config.SendTaskCreatedEvent callback.
@@ -60,6 +71,7 @@ func TaskCreatedSessionEventSender[M adk.MessageType]() func(context.Context, *T
 			SessionEventVariant: &adk.SessionEventVariant[M]{
 				SessionID: sessionID,
 				Event: &adk.SessionEvent[M]{
+					EventID:   TaskCreatedSessionEventID(task.Spec.ID),
 					Timestamp: task.CreatedAt,
 					Kind:      SessionEventTaskCreated,
 					Extension: &adk.SessionExtensionEvent{

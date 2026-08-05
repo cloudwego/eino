@@ -509,10 +509,10 @@ func (m *Manager) Submit(ctx context.Context, spec Spec) (*Task, error) {
 	if err := validateSpec(spec); err != nil {
 		return nil, err
 	}
-	if spec.NotifySession {
+	if spec.SessionID != "" {
 		if _, ok := m.tasks.(NotificationOutbox); !ok {
 			return nil, errors.New(
-				"backgroundtask: task store must implement NotificationOutbox for notification-bearing tasks",
+				"backgroundtask: task store must implement NotificationOutbox for parent-session tasks",
 			)
 		}
 	}

@@ -49,6 +49,9 @@ type Spec struct {
 type NotificationKind string
 
 const (
+	// NotificationTaskCreated reports that a parent-owned task was created. It
+	// is the durable recovery source for TaskCreated session-event delivery.
+	NotificationTaskCreated NotificationKind = "task_created"
 	// NotificationWaitingInput reports that a task is paused waiting for resume input.
 	NotificationWaitingInput NotificationKind = "waiting_input"
 	// NotificationCompleted reports that a task completed successfully.

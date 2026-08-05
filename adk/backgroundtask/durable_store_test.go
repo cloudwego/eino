@@ -271,6 +271,13 @@ func TestAttack_EventIDIsTaskLocal(t *testing.T) {
 func TestInMemoryStoreYieldReturnsRecoverableAttemptToPending_BitsUT(t *testing.T) {
 	store := NewInMemoryStore(nil)
 	started := createAndStart(t, store, "yield")
+	createdDelivery, err := store.Receive(context.Background(), &ReceiveNotificationsRequest{
+		Limit: 1, LeaseDuration: time.Second,
+	})
+	require.NoError(t, err)
+	require.Len(t, createdDelivery.Deliveries, 1)
+	require.Equal(t, NotificationTaskCreated, createdDelivery.Deliveries[0].Record.Kind)
+	require.NoError(t, store.Ack(context.Background(), createdDelivery.Deliveries[0].Receipt))
 	yielded, err := store.Yield(context.Background(), &YieldTaskRequest{
 		TaskID: started.Spec.ID, ExpectedVersion: started.Version,
 		Checkpoint: []byte("recovery-ref"),
