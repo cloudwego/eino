@@ -59,6 +59,6 @@ func (r *DurableTaskProgressReader[M]) ReadProgress(
 	return r.executor.ReadProgress(
 		ctx,
 		task,
-		durablesubagent.ProgressFormatter[M](r.format),
+		r.format,
 	)
 }

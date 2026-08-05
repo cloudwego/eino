@@ -75,7 +75,7 @@ func TestReadDurableTaskProgress(t *testing.T) {
 	}
 	executor := progressExecutor(t, store)
 	progress, err := executor.ReadProgress(
-		ctx, task, durablesubagent.ProgressFormatter[*schema.Message](format),
+		ctx, task, format,
 	)
 	require.NoError(t, err)
 	assert.Contains(t, progress, "worker: first progress\nworker: partial progress")

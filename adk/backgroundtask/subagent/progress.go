@@ -32,22 +32,15 @@ const (
 	maxProgressBytes   = 64 << 10
 )
 
-// ProgressFormatter formats one materialized child-session message as one
-// transcript record. Returning an empty string skips the message. It may be
-// called concurrently and must not mutate the message.
-type ProgressFormatter[M adk.MessageType] func(
-	ctx context.Context,
-	agentName string,
-	message M,
-) (string, error)
-
 // ReadProgress projects a bounded child-session transcript without exposing
 // the Executor's session store. It returns an empty string for tasks owned by
-// another executor.
+// another executor. format converts one materialized child-session message to
+// one transcript record; an empty result skips the message. It may be called
+// concurrently and must not mutate the message.
 func (e *Executor[M]) ReadProgress(
 	ctx context.Context,
 	task *backgroundtask.Task,
-	format ProgressFormatter[M],
+	format func(context.Context, string, M) (string, error),
 ) (string, error) {
 	if task == nil || task.Spec.ExecutorKey != ExecutorKey {
 		return "", nil
@@ -70,7 +63,7 @@ func readProgress[M adk.MessageType](
 	store adk.SessionEventStore[M],
 	task *backgroundtask.Task,
 	agentName string,
-	format ProgressFormatter[M],
+	format func(context.Context, string, M) (string, error),
 ) (string, error) {
 	sessionID := childSessionID(task.Spec.ID)
 	first, err := store.LoadEvents(ctx, sessionID, &adk.LoadSessionEventsRequest{
