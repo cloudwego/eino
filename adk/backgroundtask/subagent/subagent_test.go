@@ -759,7 +759,7 @@ func TestSubAgentTaskResumesAfterManagerReconstruction_BitsUT(t *testing.T) {
 	taskStore := backgroundtask.NewInMemoryStore(nil)
 
 	manager1 := backgroundtask.New(context.Background(), &backgroundtask.Config{
-		Store: taskStore, Executors: executors,
+		Tasks: taskStore, Executors: executors,
 	})
 	task, err := Submit(context.Background(), manager1, &SubmitRequest{
 		SubAgentName: "worker", Query: "do work", Description: "durable child",
@@ -776,7 +776,7 @@ func TestSubAgentTaskResumesAfterManagerReconstruction_BitsUT(t *testing.T) {
 	require.NoError(t, manager1.Close(context.Background()))
 
 	manager2 := backgroundtask.New(context.Background(), &backgroundtask.Config{
-		Store: taskStore, Executors: executors,
+		Tasks: taskStore, Executors: executors,
 	})
 	defer manager2.Close(context.Background())
 	pending, err := manager2.Resume(context.Background(), &backgroundtask.ResumeRequest{

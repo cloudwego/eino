@@ -79,12 +79,12 @@ func (e *scriptedExecutor) Execute(ctx context.Context, task *Task, runtime Exec
 	return &ExecutionResult{Status: StatusCompleted, Data: []byte("result")}, nil
 }
 
-func managerWithExecutor(t *testing.T, store Store, executor Executor, lease time.Duration) *Manager {
+func managerWithExecutor(t *testing.T, tasks TaskStore, executor Executor, lease time.Duration) *Manager {
 	t.Helper()
 	registry := NewExecutorRegistry()
 	require.NoError(t, registry.Register(executor))
 	return New(context.Background(), &Config{
-		Store: store, Executors: registry,
+		Tasks: tasks, Executors: registry,
 	})
 }
 
@@ -113,6 +113,12 @@ func TestSimplifiedPublicModelHasNoOverlappingStateFields_BitsUT(t *testing.T) {
 	assertFieldsAbsent(t, reflect.TypeOf(NotificationDeliveryValidation{}), "Store")
 	assertFieldsPresent(t, reflect.TypeOf(NotificationDeliveryValidation{}),
 		"OutboxAvailable", "TargetKind")
+	assertFieldsPresent(t, reflect.TypeOf(Config{}), "Tasks", "TaskEvents", "Executors", "IDGen")
+	assertFieldsAbsent(t, reflect.TypeOf(Config{}), "Store")
+	assertMethodsAbsent(t, reflect.TypeOf((*TaskStore)(nil)).Elem(),
+		"AppendTaskEvent", "ReadRecentTaskEvents")
+	assertMethodsPresent(t, reflect.TypeOf((*TaskEventStore)(nil)).Elem(),
+		"AppendTaskEvent", "ReadRecentTaskEvents")
 	assertMethodsAbsent(t, reflect.TypeOf((*Manager)(nil)),
 		"Store", "Executors", "MarkBackgrounded", "RequestControl", "RequestTimeout", "ReadOutput",
 		"WaitUpdate", "CreateAndStart", "LoadOrRegisterExecutor")

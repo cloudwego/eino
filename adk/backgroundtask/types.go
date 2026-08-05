@@ -18,7 +18,7 @@ package backgroundtask
 
 import "time"
 
-// LeaseExpiryPolicy controls how Store resolves an expired active attempt.
+// LeaseExpiryPolicy controls how TaskStore resolves an expired active attempt.
 type LeaseExpiryPolicy string
 
 const (
@@ -111,7 +111,7 @@ type ListSuspendedResult struct {
 	NextCursor string
 }
 
-// StartTaskRequest asks the Store to authorize a new active attempt.
+// StartTaskRequest asks the TaskStore to authorize a new active attempt.
 type StartTaskRequest struct {
 	TaskID          string
 	ExpectedVersion int64

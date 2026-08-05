@@ -18,12 +18,12 @@
 // executions (sub-agents, shell commands, ...) that may outlive the tool call
 // that launched them.
 //
-// Manager coordinates Store-backed task submission, execution, and control. It
+// Manager coordinates TaskStore-backed submission, execution, and control. It
 // is deliberately non-generic so one instance can serve heterogeneous executor
 // domains under one task-ID space.
 //
-// The Store, outbox, and session-activation SPIs are provisional. Promotion
-// requires conformance against external multi-process providers.
+// The task, event, outbox, and session-activation SPIs are provisional.
+// Promotion requires conformance against external multi-process providers.
 package backgroundtask
 
 import (
@@ -85,7 +85,7 @@ type Task struct {
 	// CancelReason is the optional first-write reason accompanying durable stop
 	// intent. It becomes ResultError when the task reaches StatusCanceled.
 	CancelReason string
-	// UpdatedAt is the Store mutation time.
+	// UpdatedAt is the TaskStore mutation time.
 	UpdatedAt time.Time
 	// DoneAt is the time the task reached a terminal state. Nil if still running.
 	DoneAt *time.Time
@@ -100,9 +100,14 @@ type IDGenerator func(ctx context.Context, request *AllocateTaskIDRequest) (stri
 
 // Config configures a Manager.
 type Config struct {
-	// Store is the authoritative task state provider. When nil, New installs an
-	// in-memory reference store.
-	Store Store
+	// Tasks is the authoritative task lifecycle provider. When nil, New installs
+	// an in-memory reference provider.
+	Tasks TaskStore
+	// TaskEvents persists append-only progress in the same task namespace and
+	// must fence appends against the active attempt authorized by Tasks. When
+	// nil, New reuses Tasks when it also implements TaskEventStore. If both are
+	// nil, the same in-memory reference provider supplies both capabilities.
+	TaskEvents TaskEventStore
 	// Executors resolves serialized task intent to local implementations.
 	Executors *ExecutorRegistry
 	// IDGen, when set, decides the full ID of every task created by this Manager.
@@ -144,9 +149,10 @@ func WithCancellationReason(reason string) RequestCancelOption {
 	}
 }
 
-// Manager owns Store-backed task lifecycle and worker coordination.
+// Manager owns TaskStore-backed lifecycle and worker coordination.
 type Manager struct {
-	store          Store
+	tasks          TaskStore
+	taskEvents     TaskEventStore
 	executors      *ExecutorRegistry
 	heartbeatEvery time.Duration
 	attemptsMu     sync.Mutex
@@ -158,15 +164,27 @@ type Manager struct {
 
 // New creates a new Manager.
 func New(_ context.Context, conf *Config) *Manager {
+	defaults := NewInMemoryStore(nil)
 	m := &Manager{
 		heartbeatEvery: 10 * time.Second,
 		activeAttempts: make(map[string]*activeAttempt),
+		tasks:          defaults,
+		taskEvents:     defaults,
 	}
-	m.store = NewInMemoryStore(nil)
 	m.executors = NewExecutorRegistry()
 	if conf != nil {
-		if conf.Store != nil {
-			m.store = conf.Store
+		if conf.Tasks != nil {
+			m.tasks = conf.Tasks
+			if conf.TaskEvents == nil {
+				if events, ok := conf.Tasks.(TaskEventStore); ok {
+					m.taskEvents = events
+				} else {
+					m.taskEvents = unavailableTaskEventStore{}
+				}
+			}
+		}
+		if conf.TaskEvents != nil {
+			m.taskEvents = conf.TaskEvents
 		}
 		if conf.Executors != nil {
 			m.executors = conf.Executors

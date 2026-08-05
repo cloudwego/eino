@@ -144,7 +144,7 @@ func TestAttack_ReplayedEventProjectsOnceMaterializesTwice(t *testing.T) {
 	require.Len(t, materializer.requests, 2)
 	require.Equal(t, materializer.requests[0].EventID, materializer.requests[1].EventID)
 	materializer.mu.Unlock()
-	t.Log("replay retained one Store record and one live event while repairing the derived file twice")
+	t.Log("replay retained one task-event record and one live event while repairing the derived file twice")
 }
 
 func TestAttack_ConflictingEventIDFailsTask(t *testing.T) {

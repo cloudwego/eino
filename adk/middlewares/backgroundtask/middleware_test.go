@@ -140,13 +140,13 @@ func blockingWork() backgroundlocal.WorkFunc {
 }
 
 type staleFirstGetStore struct {
-	bgtask.Store
+	bgtask.TaskStore
 	mu    sync.Mutex
 	first bool
 }
 
 func (s *staleFirstGetStore) Get(ctx context.Context, taskID string) (*bgtask.Task, error) {
-	task, err := s.Store.Get(ctx, taskID)
+	task, err := s.TaskStore.Get(ctx, taskID)
 	if err != nil {
 		return nil, err
 	}
@@ -167,11 +167,11 @@ func (s *staleFirstGetStore) Receive(
 	ctx context.Context,
 	req *bgtask.ReceiveNotificationsRequest,
 ) (*bgtask.ReceiveNotificationsResult, error) {
-	return s.Store.(bgtask.NotificationOutbox).Receive(ctx, req)
+	return s.TaskStore.(bgtask.NotificationOutbox).Receive(ctx, req)
 }
 
 func (s *staleFirstGetStore) Ack(ctx context.Context, receipt bgtask.NotificationReceipt) error {
-	return s.Store.(bgtask.NotificationOutbox).Ack(ctx, receipt)
+	return s.TaskStore.(bgtask.NotificationOutbox).Ack(ctx, receipt)
 }
 
 // findTool returns the named tool from a tool list.
@@ -384,13 +384,13 @@ func TestTaskOutputTool_NonBlockingRunningThenTerminal(t *testing.T) {
 
 func TestTaskOutputNonBlockingReturnsCurrentSnapshot(t *testing.T) {
 	store := bgtask.NewInMemoryStore(nil)
-	submitter := newBackgroundManager(context.Background(), &bgtask.Config{Store: store})
+	submitter := newBackgroundManager(context.Background(), &bgtask.Config{Tasks: store})
 	task, err := runWork(submitter, "racing task", false, completedWork("done"))
 	require.NoError(t, err)
 	require.NoError(t, submitter.Close(context.Background()))
 
-	racingStore := &staleFirstGetStore{Store: store, first: true}
-	reader := newBackgroundManager(context.Background(), &bgtask.Config{Store: racingStore})
+	racingStore := &staleFirstGetStore{TaskStore: store, first: true}
+	reader := newBackgroundManager(context.Background(), &bgtask.Config{Tasks: racingStore})
 	defer closeWithTimeout(reader)
 	outputTool := findTool(t, injectedTools(t, reader), taskOutputToolName)
 	output, err := outputTool.InvokableRun(context.Background(), fmt.Sprintf(
@@ -426,7 +426,7 @@ func TestTaskStopTool(t *testing.T) {
 
 func TestTaskStopTool_DurableRequestedAndCanceledText(t *testing.T) {
 	store := bgtask.NewInMemoryStore(nil)
-	mgr := newBackgroundManager(context.Background(), &bgtask.Config{Store: store})
+	mgr := newBackgroundManager(context.Background(), &bgtask.Config{Tasks: store})
 	defer closeWithTimeout(mgr)
 	tl := findTool(t, injectedTools(t, mgr), taskStopToolName)
 
@@ -579,7 +579,7 @@ func TestResolveDurableTaskAddsProgressWithoutReplacingTerminalResult(t *testing
 }
 
 type waitErrorStore struct {
-	bgtask.Store
+	bgtask.TaskStore
 	err error
 }
 
@@ -594,7 +594,7 @@ func TestResolveDurableTaskBlockingBoundaries(t *testing.T) {
 		LeaseExpiryPolicy: bgtask.LeaseExpiryRetry,
 	})
 	require.NoError(t, err)
-	manager := newBackgroundManager(context.Background(), &bgtask.Config{Store: store})
+	manager := newBackgroundManager(context.Background(), &bgtask.Config{Tasks: store})
 
 	canceledCtx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -608,7 +608,7 @@ func TestResolveDurableTaskBlockingBoundaries(t *testing.T) {
 
 	wantErr := errors.New("wait failed")
 	failingManager := newBackgroundManager(context.Background(), &bgtask.Config{
-		Store: waitErrorStore{Store: store, err: wantErr},
+		Tasks: waitErrorStore{TaskStore: store, err: wantErr},
 	})
 	_, err = resolveDurableTask(
 		context.Background(), failingManager, pending,

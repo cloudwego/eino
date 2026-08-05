@@ -143,7 +143,7 @@ func (r *Runner) Run(ctx context.Context, input *Input, work WorkFunc) (*backgro
 }
 
 // RunStream executes streaming process-local work and returns its ephemeral
-// caller-facing projection. Every chunk is also appended to the Store task-event feed.
+// caller-facing projection. Every chunk is also appended to the task-event feed.
 func (r *Runner) RunStream(
 	ctx context.Context,
 	input *Input,

@@ -65,7 +65,7 @@ func TestDispatcherRedeliversUntilSinkAccepts_BitsUT(t *testing.T) {
 	registry := NewSinkRegistry()
 	require.NoError(t, registry.Register("session_inbox", sink))
 	dispatcher := &Dispatcher{
-		Outbox: store, Store: store, Sinks: registry, ConsumerID: "dispatcher",
+		Outbox: store, Tasks: store, Sinks: registry, ConsumerID: "dispatcher",
 		BatchSize: 10, Visibility: time.Second,
 	}
 	accepted, err := dispatcher.DispatchOnce(context.Background())

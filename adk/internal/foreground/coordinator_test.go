@@ -242,7 +242,7 @@ func TestRunRejectsInvalidRequestAndState(t *testing.T) {
 	})
 	require.NoError(t, err)
 	suspendedManager := backgroundtask.New(
-		context.Background(), &backgroundtask.Config{Store: store},
+		context.Background(), &backgroundtask.Config{Tasks: store},
 	)
 	_, err = Run(context.Background(), suspendedManager, Policy{}, &Request{
 		TaskID: created.Spec.ID,

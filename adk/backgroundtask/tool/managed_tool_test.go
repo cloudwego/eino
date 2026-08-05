@@ -363,7 +363,7 @@ func TestManagedToolDrainYieldsAndRecoversWithoutStop(t *testing.T) {
 	}))
 	executorsOne := backgroundtask.NewExecutorRegistry()
 	managerOne := backgroundtask.New(context.Background(), &backgroundtask.Config{
-		Store: store, Executors: executorsOne,
+		Tasks: store, Executors: executorsOne,
 		IDGen: func(context.Context, *backgroundtask.AllocateTaskIDRequest) (string, error) {
 			return "recover-task", nil
 		},
@@ -390,7 +390,7 @@ func TestManagedToolDrainYieldsAndRecoversWithoutStop(t *testing.T) {
 
 	executorsTwo := backgroundtask.NewExecutorRegistry()
 	managerTwo := backgroundtask.New(context.Background(), &backgroundtask.Config{
-		Store: store, Executors: executorsTwo,
+		Tasks: store, Executors: executorsTwo,
 	})
 	require.NoError(t, RegisterExecutors(executorsTwo, registry))
 	require.NoError(t, managerTwo.Execute(context.Background(), "recover-task"))
@@ -672,7 +672,7 @@ func TestRecoverableCancellationAfterLeaseLossReattachesToStop(t *testing.T) {
 
 	executors := backgroundtask.NewExecutorRegistry()
 	manager := backgroundtask.New(context.Background(), &backgroundtask.Config{
-		Store: store, Executors: executors,
+		Tasks: store, Executors: executors,
 	})
 	require.NoError(t, RegisterExecutors(executors, registry))
 	pending, err := manager.Get(context.Background(), created.Spec.ID)

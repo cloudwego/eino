@@ -169,7 +169,8 @@ func (a *activeAttempt) signalReady() {
 type taskRuntime struct {
 	mu              sync.Mutex
 	controlMu       sync.Mutex
-	store           Store
+	tasks           TaskStore
+	taskEvents      TaskEventStore
 	taskID          string
 	attempt         int64
 	version         int64
@@ -190,9 +191,15 @@ func (c detachedCtx) Value(key any) any         { return c.parent.Value(key) }
 
 var errHeartbeatStopped = errors.New("backgroundtask: heartbeat stopped")
 
-func newTaskRuntime(store Store, taskID string, attempt, version int64) *taskRuntime {
+func newTaskRuntime(
+	tasks TaskStore,
+	taskEvents TaskEventStore,
+	taskID string,
+	attempt, version int64,
+) *taskRuntime {
 	return &taskRuntime{
-		store: store, taskID: taskID, attempt: attempt, version: version,
+		tasks: tasks, taskEvents: taskEvents,
+		taskID: taskID, attempt: attempt, version: version,
 		controls: make(chan ControlRequest, 1),
 	}
 }
@@ -214,7 +221,7 @@ func (r *taskRuntime) AppendTaskEvent(
 	if eventID == "" {
 		eventID = uuid.NewString()
 	}
-	return r.store.AppendTaskEvent(ctx, &AppendTaskEventRequest{
+	return r.taskEvents.AppendTaskEvent(ctx, &AppendTaskEventRequest{
 		TaskID: r.taskID, Attempt: r.attempt, EventID: eventID, Data: cloneBytes(data),
 	})
 }
@@ -263,7 +270,7 @@ func (r *taskRuntime) ReportOutputFailure(ctx context.Context, message string) e
 	if r.poison != nil {
 		return r.poison
 	}
-	task, err := r.store.ReportOutputFailure(ctx, &ReportOutputFailureRequest{
+	task, err := r.tasks.ReportOutputFailure(ctx, &ReportOutputFailureRequest{
 		TaskID: r.taskID, ExpectedVersion: r.version, Error: boundedError(errors.New(message)),
 	})
 	if err != nil {
@@ -282,7 +289,7 @@ func (r *taskRuntime) heartbeat(ctx context.Context) error {
 	if r.cancelRequested {
 		return errHeartbeatStopped
 	}
-	task, err := r.store.Heartbeat(ctx, &HeartbeatRequest{
+	task, err := r.tasks.Heartbeat(ctx, &HeartbeatRequest{
 		TaskID: r.taskID, ExpectedVersion: r.version,
 	})
 	if err != nil {
@@ -300,7 +307,7 @@ func (r *taskRuntime) heartbeat(ctx context.Context) error {
 }
 
 func (r *taskRuntime) reconcileCancellationLocked(ctx context.Context) error {
-	task, err := r.store.Get(ctx, r.taskID)
+	task, err := r.tasks.Get(ctx, r.taskID)
 	if err != nil {
 		r.poison = err
 		return err
@@ -352,30 +359,30 @@ func (r *taskRuntime) commitResult(ctx context.Context, result *ExecutionResult)
 			len(result.Data) != 0 || result.Error != "" {
 			return nil, fmt.Errorf("%w: conflicting executor directive and lifecycle result", ErrInvalidExecutionResult)
 		}
-		return r.store.Yield(ctx, &YieldTaskRequest{
+		return r.tasks.Yield(ctx, &YieldTaskRequest{
 			TaskID: r.taskID, ExpectedVersion: r.version,
 			Checkpoint: cloneBytes(result.Checkpoint),
 		})
 	}
 	switch result.Status {
 	case StatusCompleted:
-		return r.store.Complete(ctx, &CompleteTaskRequest{
+		return r.tasks.Complete(ctx, &CompleteTaskRequest{
 			TaskID: r.taskID, ExpectedVersion: r.version, Data: cloneBytes(result.Data),
 		})
 	case StatusFailed:
-		return r.store.Fail(ctx, &FailTaskRequest{
+		return r.tasks.Fail(ctx, &FailTaskRequest{
 			TaskID: r.taskID, ExpectedVersion: r.version, Error: result.Error,
 		})
 	case StatusCanceled:
-		return r.store.AckCancel(ctx, &AckCancelRequest{
+		return r.tasks.AckCancel(ctx, &AckCancelRequest{
 			TaskID: r.taskID, ExpectedVersion: r.version, Reason: result.Error,
 		})
 	case StatusWaitingInput:
-		return r.store.WaitInput(ctx, &WaitInputTaskRequest{
+		return r.tasks.WaitInput(ctx, &WaitInputTaskRequest{
 			TaskID: r.taskID, ExpectedVersion: r.version, Checkpoint: cloneBytes(result.Checkpoint),
 		})
 	case StatusSuspended:
-		return r.store.Suspend(ctx, &SuspendTaskRequest{
+		return r.tasks.Suspend(ctx, &SuspendTaskRequest{
 			TaskID: r.taskID, ExpectedVersion: r.version, Checkpoint: cloneBytes(result.Checkpoint),
 		})
 	default:
@@ -437,7 +444,7 @@ func (m *Manager) Submit(ctx context.Context, spec Spec) (*Task, error) {
 	if err := executor.ValidateSpec(cloneSpec(spec)); err != nil {
 		return nil, fmt.Errorf("backgroundtask: validate spec: %w", err)
 	}
-	task, err := m.store.Create(ctx, &CreateTaskRequest{
+	task, err := m.tasks.Create(ctx, &CreateTaskRequest{
 		Spec: spec, LeaseExpiryPolicy: executor.LeaseExpiryPolicy(),
 	})
 	if err != nil {
@@ -448,13 +455,13 @@ func (m *Manager) Submit(ctx context.Context, spec Spec) (*Task, error) {
 
 // Get returns the authoritative task snapshot.
 func (m *Manager) Get(ctx context.Context, taskID string) (*Task, error) {
-	return m.store.Get(ctx, taskID)
+	return m.tasks.Get(ctx, taskID)
 }
 
 // ListPending is the read-only dispatch boundary. A worker may select and
 // dispatch a task ID from this result; only Execute performs start authorization.
 func (m *Manager) ListPending(ctx context.Context, req *ListPendingRequest) (*ListPendingResult, error) {
-	return m.store.ListPending(ctx, req)
+	return m.tasks.ListPending(ctx, req)
 }
 
 // ListSuspended returns checkpointed tasks that require an explicit release
@@ -463,14 +470,14 @@ func (m *Manager) ListSuspended(
 	ctx context.Context,
 	req *ListSuspendedRequest,
 ) (*ListSuspendedResult, error) {
-	return m.store.ListSuspended(ctx, req)
+	return m.tasks.ListSuspended(ctx, req)
 }
 
 // WaitForTaskVersion blocks until the authoritative task snapshot has a
 // Version greater than req.AfterVersion. Task progress events do not advance
 // Version and therefore do not satisfy the wait.
 func (m *Manager) WaitForTaskVersion(ctx context.Context, req *WaitForTaskVersionRequest) (*Task, error) {
-	return m.store.WaitForTaskVersion(ctx, req)
+	return m.tasks.WaitForTaskVersion(ctx, req)
 }
 
 // ReadRecentTaskEvents reads the newest bounded progress events in chronological order.
@@ -478,7 +485,7 @@ func (m *Manager) ReadRecentTaskEvents(
 	ctx context.Context,
 	req *ReadRecentTaskEventsRequest,
 ) (*ReadRecentTaskEventsResult, error) {
-	return m.store.ReadRecentTaskEvents(ctx, req)
+	return m.taskEvents.ReadRecentTaskEvents(ctx, req)
 }
 
 // RequestCancel records cancellation intent and signals a local active attempt.
@@ -505,11 +512,11 @@ func (m *Manager) RequestCancel(
 	var result *Task
 	var err error
 	for retry := 0; ; retry++ {
-		task, getErr := m.store.Get(ctx, taskID)
+		task, getErr := m.tasks.Get(ctx, taskID)
 		if getErr != nil {
 			return nil, getErr
 		}
-		result, err = m.store.RequestCancel(ctx, &RequestCancelRequest{
+		result, err = m.tasks.RequestCancel(ctx, &RequestCancelRequest{
 			TaskID: taskID, ExpectedVersion: task.Version, Reason: cancelConfig.reason,
 		})
 		if !errors.Is(err, ErrVersionConflict) {
@@ -553,7 +560,7 @@ func (m *Manager) RequestCancel(
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		}
-		terminal, getErr := m.store.Get(ctx, taskID)
+		terminal, getErr := m.tasks.Get(ctx, taskID)
 		if getErr != nil {
 			return nil, getErr
 		}
@@ -575,14 +582,14 @@ func (m *Manager) ReleaseSuspension(ctx context.Context, taskID string) (*Task, 
 		return nil, errors.New("backgroundtask: release suspension task id is required")
 	}
 	for retry := 0; ; retry++ {
-		task, err := m.store.Get(ctx, taskID)
+		task, err := m.tasks.Get(ctx, taskID)
 		if err != nil {
 			return nil, err
 		}
 		if task.Status != StatusSuspended {
 			return nil, ErrIllegalTransition
 		}
-		released, err := m.store.ReleaseSuspension(ctx, &ReleaseSuspensionRequest{
+		released, err := m.tasks.ReleaseSuspension(ctx, &ReleaseSuspensionRequest{
 			TaskID: taskID, ExpectedVersion: task.Version,
 		})
 		if !errors.Is(err, ErrVersionConflict) {
@@ -603,7 +610,7 @@ func (m *Manager) Resume(ctx context.Context, req *ResumeRequest) (*Task, error)
 	if req == nil {
 		return nil, errors.New("backgroundtask: resume request is required")
 	}
-	return m.store.Resume(ctx, &ResumeRequest{
+	return m.tasks.Resume(ctx, &ResumeRequest{
 		TaskID: req.TaskID, ExpectedVersion: req.ExpectedVersion, Data: cloneBytes(req.Data),
 	})
 }
@@ -648,7 +655,7 @@ func (m *Manager) execute(
 		m.attemptsMu.Unlock()
 	}()
 
-	task, err := m.store.Get(ctx, taskID)
+	task, err := m.tasks.Get(ctx, taskID)
 	if err != nil {
 		return err
 	}
@@ -662,13 +669,15 @@ func (m *Manager) execute(
 	if err = executor.ValidateExecution(ctx, cloneTask(task)); err != nil {
 		return fmt.Errorf("backgroundtask: validate execution: %w", err)
 	}
-	started, err := m.store.Start(ctx, &StartTaskRequest{
+	started, err := m.tasks.Start(ctx, &StartTaskRequest{
 		TaskID: taskID, ExpectedVersion: task.Version,
 	})
 	if err != nil {
 		return err
 	}
-	runtime := newTaskRuntime(m.store, taskID, started.Attempt, started.Version)
+	runtime := newTaskRuntime(
+		m.tasks, m.taskEvents, taskID, started.Attempt, started.Version,
+	)
 	if started.CancelRequestedAt != nil {
 		runtime.cancelRequested = true
 		runtime.cancelReason = started.CancelReason

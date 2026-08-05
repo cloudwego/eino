@@ -27,7 +27,7 @@ import (
 	"time"
 )
 
-// InMemoryStoreConfig configures the in-memory reference Store.
+// InMemoryStoreConfig configures the in-memory reference task provider.
 type InMemoryStoreConfig struct {
 	ActiveAttemptTimeout time.Duration
 	MaxValueBytes        int64
@@ -43,8 +43,9 @@ type memoryActiveAttempt struct {
 	expiresAt time.Time
 }
 
-// InMemoryStore is a deterministic reference implementation of Store and
-// NotificationOutbox. It is a state-machine test double, not a durable backend.
+// InMemoryStore is a deterministic reference implementation of TaskStore,
+// TaskEventStore, and NotificationOutbox. It is a state-machine test double,
+// not a durable backend.
 type InMemoryStore struct {
 	mu            sync.Mutex
 	tasks         map[string]*Task
@@ -58,7 +59,7 @@ type InMemoryStore struct {
 	maxValue      int64
 }
 
-// NewInMemoryStore creates an in-memory reference Store and NotificationOutbox.
+// NewInMemoryStore creates an in-memory reference task provider and outbox.
 func NewInMemoryStore(config *InMemoryStoreConfig) *InMemoryStore {
 	s := &InMemoryStore{
 		tasks:         make(map[string]*Task),
@@ -800,3 +801,8 @@ func (s *InMemoryStore) finishStoreOwnedLocked(t *Task) {
 	s.enqueueLocked(t, eventForStatus(t.Status))
 	s.signalLocked()
 }
+
+var (
+	_ TaskStore      = (*InMemoryStore)(nil)
+	_ TaskEventStore = (*InMemoryStore)(nil)
+)

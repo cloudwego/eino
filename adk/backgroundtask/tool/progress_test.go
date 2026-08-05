@@ -30,7 +30,7 @@ import (
 
 func TestProgressReaderFormatsBoundedRecentUpdates(t *testing.T) {
 	store := backgroundtask.NewInMemoryStore(nil)
-	manager := backgroundtask.New(context.Background(), &backgroundtask.Config{Store: store})
+	manager := backgroundtask.New(context.Background(), &backgroundtask.Config{Tasks: store})
 	created, err := store.Create(context.Background(), &backgroundtask.CreateTaskRequest{
 		Spec: backgroundtask.Spec{
 			ID: "progress", ExecutorKey: RecoverableExecutorKey, Kind: "background_tool",
@@ -64,7 +64,7 @@ func TestProgressReaderFormatsBoundedRecentUpdates(t *testing.T) {
 
 func TestProgressReaderFallsBackForUnknownCompatibleRecord(t *testing.T) {
 	store := backgroundtask.NewInMemoryStore(nil)
-	manager := backgroundtask.New(context.Background(), &backgroundtask.Config{Store: store})
+	manager := backgroundtask.New(context.Background(), &backgroundtask.Config{Tasks: store})
 	task, err := store.Create(context.Background(), &backgroundtask.CreateTaskRequest{
 		Spec: backgroundtask.Spec{
 			ID: "raw", ExecutorKey: ExecutorKey, Kind: "background_tool",

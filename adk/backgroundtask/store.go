@@ -35,7 +35,7 @@ var (
 	ErrLeaseLost = errors.New("backgroundtask: lease lost")
 	// ErrIllegalTransition reports that a requested lifecycle transition is invalid.
 	ErrIllegalTransition = errors.New("backgroundtask: illegal state transition")
-	// ErrInvalidExecutionResult reports that an executor result or Store
+	// ErrInvalidExecutionResult reports that an executor result or TaskStore
 	// transition payload violates lifecycle result invariants.
 	ErrInvalidExecutionResult = errors.New("backgroundtask: invalid execution result")
 	// ErrAlreadyTerminal reports that a task has already reached a terminal status.
@@ -55,11 +55,8 @@ var (
 	ErrTaskEventIDConflict = errors.New("backgroundtask: task event id conflict")
 )
 
-// Store persists task snapshots, append-ordered progress events, and semantic
-// lifecycle transitions. AppendTaskEvent must fence writes by the active
-// attempt before task-wide EventID replay detection, retain replay metadata
-// across attempts for at least the task lifetime, and not advance lifecycle
-// Version.
+// TaskStore persists authoritative task snapshots and semantic lifecycle
+// transitions.
 //
 // RequestCancel on active work keeps StatusRunning, sets CancelRequestedAt and
 // the first-write optional CancelReason, and advances Version. Once
@@ -70,15 +67,13 @@ var (
 // retry-capable work, cancel intent that outlives an attempt remains pending so
 // a recovery attempt can stop the external operation before acknowledging
 // cancellation. Non-recoverable lease expiry resolves cancellation directly.
-type Store interface {
+type TaskStore interface {
 	Create(context.Context, *CreateTaskRequest) (*Task, error)
 	Get(context.Context, string) (*Task, error)
 	ListPending(context.Context, *ListPendingRequest) (*ListPendingResult, error)
 	ListSuspended(context.Context, *ListSuspendedRequest) (*ListSuspendedResult, error)
 	Start(context.Context, *StartTaskRequest) (*Task, error)
 	Heartbeat(context.Context, *HeartbeatRequest) (*Task, error)
-	AppendTaskEvent(context.Context, *AppendTaskEventRequest) (*AppendTaskEventResult, error)
-	ReadRecentTaskEvents(context.Context, *ReadRecentTaskEventsRequest) (*ReadRecentTaskEventsResult, error)
 	ReportOutputFailure(context.Context, *ReportOutputFailureRequest) (*Task, error)
 	Complete(context.Context, *CompleteTaskRequest) (*Task, error)
 	Fail(context.Context, *FailTaskRequest) (*Task, error)
@@ -90,6 +85,31 @@ type Store interface {
 	Resume(context.Context, *ResumeRequest) (*Task, error)
 	ReleaseSuspension(context.Context, *ReleaseSuspensionRequest) (*Task, error)
 	WaitForTaskVersion(context.Context, *WaitForTaskVersionRequest) (*Task, error)
+}
+
+// TaskEventStore persists append-ordered task progress independently from
+// lifecycle snapshots. AppendTaskEvent must fence writes by the active attempt
+// before task-wide EventID replay detection, retain replay metadata across
+// attempts for at least the task lifetime, and not advance Task.Version.
+type TaskEventStore interface {
+	AppendTaskEvent(context.Context, *AppendTaskEventRequest) (*AppendTaskEventResult, error)
+	ReadRecentTaskEvents(context.Context, *ReadRecentTaskEventsRequest) (*ReadRecentTaskEventsResult, error)
+}
+
+type unavailableTaskEventStore struct{}
+
+func (unavailableTaskEventStore) AppendTaskEvent(
+	context.Context,
+	*AppendTaskEventRequest,
+) (*AppendTaskEventResult, error) {
+	return nil, errors.New("backgroundtask: task event store is not configured")
+}
+
+func (unavailableTaskEventStore) ReadRecentTaskEvents(
+	context.Context,
+	*ReadRecentTaskEventsRequest,
+) (*ReadRecentTaskEventsResult, error) {
+	return nil, errors.New("backgroundtask: task event store is not configured")
 }
 
 // NotificationOutbox leases lifecycle notifications for dispatch.

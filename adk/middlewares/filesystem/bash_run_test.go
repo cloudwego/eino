@@ -82,7 +82,7 @@ func newTestManager(ctx context.Context) *backgroundtask.Manager {
 	store := backgroundtask.NewInMemoryStore(nil)
 	executors := backgroundtask.NewExecutorRegistry()
 	manager := backgroundtask.New(ctx, &backgroundtask.Config{
-		Store: store, Executors: executors,
+		Tasks: store, Executors: executors,
 	})
 	testManagerStores.Store(manager, store)
 	testManagerExecutors.Store(manager, executors)

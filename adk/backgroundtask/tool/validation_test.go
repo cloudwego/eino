@@ -93,14 +93,6 @@ func TestExecutorValidationBoundaries(t *testing.T) {
 
 func TestPayloadAndResultValidationBoundaries(t *testing.T) {
 	executor := &executor{}
-	require.Empty(t, ArgumentsFromTask(nil))
-	require.Empty(t, ArgumentsFromTask(&backgroundtask.Task{}))
-	task := &backgroundtask.Task{Spec: backgroundtask.Spec{
-		ExecutorKey: ExecutorKey, Kind: "background_tool",
-		Payload: encodedPayload(t, "plain", `{"value":1}`),
-	}}
-	require.Equal(t, `{"value":1}`, ArgumentsFromTask(task))
-
 	oversized := strings.Repeat("x", maxArgumentsBytes+1)
 	_, err := executor.decodePayload(backgroundtask.Spec{
 		ExecutorKey: ExecutorKey, Kind: "background_tool",

@@ -210,7 +210,7 @@ func TestTerminalTaskNotificationWakesParentSession_BitsUT(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, registry.Register(backgroundtask.SessionInboxNotificationKind, sink))
 	dispatcher := &backgroundtask.Dispatcher{
-		Outbox: store, Store: store, Sinks: registry, ConsumerID: "dispatcher",
+		Outbox: store, Tasks: store, Sinks: registry, ConsumerID: "dispatcher",
 		BatchSize: 10, Visibility: time.Minute,
 	}
 	delivered, err := dispatcher.DispatchOnce(context.Background())

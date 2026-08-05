@@ -389,7 +389,7 @@ func (e *executor) persistUpdate(
 		return fmt.Errorf("backgroundtask/tool: persist update: %w", err)
 	}
 	if result == nil || result.Event == nil {
-		return errors.New("backgroundtask/tool: Store returned a nil task event")
+		return errors.New("backgroundtask/tool: task event store returned a nil event")
 	}
 	if *materializerEnabled && callerSuppliedEventID {
 		err = registration.Materializer.AppendOutput(ctx, &MaterializeOutputRequest{
@@ -473,20 +473,6 @@ func (e *executor) decodePayload(spec backgroundtask.Spec) (*taskPayload, error)
 		return nil, errors.New("backgroundtask/tool: payload arguments exceed configured bounds")
 	}
 	return &payload, nil
-}
-
-// ArgumentsFromTask returns serialized arguments from a managed-tool task.
-func ArgumentsFromTask(task *backgroundtask.Task) string {
-	if task == nil {
-		return ""
-	}
-	recoverable := task.Spec.ExecutorKey == RecoverableExecutorKey
-	executor := &executor{recoverable: recoverable}
-	payload, err := executor.decodePayload(task.Spec)
-	if err != nil {
-		return ""
-	}
-	return payload.Arguments
 }
 
 var (

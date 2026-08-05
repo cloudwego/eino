@@ -39,7 +39,7 @@ type NotificationDeliveryRuntime interface {
 	ValidateNotificationDelivery(context.Context, *NotificationDeliveryValidation) error
 }
 
-// ValidateNotificationDelivery validates that this Manager's Store and the
+// ValidateNotificationDelivery validates that this Manager's TaskStore and the
 // requested target have an operationally owned notification route.
 func (m *Manager) ValidateNotificationDelivery(
 	ctx context.Context,
@@ -49,7 +49,7 @@ func (m *Manager) ValidateNotificationDelivery(
 	if runtime == nil || targetKind == "" {
 		return errors.New("backgroundtask: notification delivery runtime and target kind are required")
 	}
-	_, outboxAvailable := m.store.(NotificationOutbox)
+	_, outboxAvailable := m.tasks.(NotificationOutbox)
 	return runtime.ValidateNotificationDelivery(ctx, &NotificationDeliveryValidation{
 		OutboxAvailable: outboxAvailable, TargetKind: targetKind,
 	})
@@ -174,7 +174,7 @@ type SessionActivationResult struct {
 // Dispatcher delivers notifications from an outbox to registered sinks.
 type Dispatcher struct {
 	Outbox     NotificationOutbox
-	Store      Store
+	Tasks      TaskStore
 	Sinks      NotificationSinkRegistry
 	ConsumerID string
 	BatchSize  int
@@ -183,8 +183,8 @@ type Dispatcher struct {
 
 // DispatchOnce receives and dispatches one batch of visible notifications.
 func (d *Dispatcher) DispatchOnce(ctx context.Context) (int, error) {
-	if d.Outbox == nil || d.Store == nil || d.Sinks == nil || d.ConsumerID == "" {
-		return 0, errors.New("backgroundtask: dispatcher outbox, store, sinks, and consumer id are required")
+	if d.Outbox == nil || d.Tasks == nil || d.Sinks == nil || d.ConsumerID == "" {
+		return 0, errors.New("backgroundtask: dispatcher outbox, task store, sinks, and consumer id are required")
 	}
 	visibility := d.Visibility
 	if visibility <= 0 {
@@ -203,7 +203,7 @@ func (d *Dispatcher) DispatchOnce(ctx context.Context) (int, error) {
 			return accepted, errors.New("backgroundtask: notification sink is unavailable")
 		}
 		record := delivery.Record
-		task, loadErr := d.Store.Get(ctx, record.TaskID)
+		task, loadErr := d.Tasks.Get(ctx, record.TaskID)
 		if loadErr != nil {
 			return accepted, loadErr
 		}

@@ -111,7 +111,6 @@ func TestRecoverableShellUsesManagedToolLifecycle(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, backgroundtool.RecoverableExecutorKey, task.Spec.ExecutorKey)
 	require.Empty(t, task.Spec.OutputFile)
-	require.Equal(t, `{"command":"echo hello"}`, backgroundtool.ArgumentsFromTask(task))
 }
 
 func TestRecoverableShellConfigurationIsExclusive(t *testing.T) {

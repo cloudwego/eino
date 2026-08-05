@@ -257,7 +257,7 @@ func TestBenignDispatchErrorClassification(t *testing.T) {
 }
 
 type listErrorStore struct {
-	backgroundtask.Store
+	backgroundtask.TaskStore
 }
 
 func (listErrorStore) ListPending(
@@ -272,7 +272,7 @@ func TestWorkerRunValidationAndListFailure(t *testing.T) {
 	require.ErrorContains(t, nilWorker.Run(context.Background()), "worker is required")
 
 	manager := backgroundtask.New(context.Background(), &backgroundtask.Config{
-		Store: listErrorStore{Store: backgroundtask.NewInMemoryStore(nil)},
+		Tasks: listErrorStore{TaskStore: backgroundtask.NewInMemoryStore(nil)},
 	})
 	worker, err := NewWorker(WorkerConfig{
 		Manager: manager, ExecutorKeys: []string{"worker-test"},

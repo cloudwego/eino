@@ -37,7 +37,7 @@ type WorkerConfig struct {
 }
 
 // Worker polls pending tasks and dispatches claims through Manager.Execute.
-// Store authorization remains authoritative when multiple Workers race.
+// TaskStore authorization remains authoritative when multiple Workers race.
 type Worker struct {
 	manager            *backgroundtask.Manager
 	executorKeys       []string

@@ -722,7 +722,7 @@ func TestInMemoryStoreCancellationIntentReconcilesToCanceled_BitsUT(t *testing.T
 func TestTaskRuntimeCommitReconcilesConcurrentCancellation_BitsUT(t *testing.T) {
 	store := NewInMemoryStore(nil)
 	started := createAndStart(t, store, "cancel-before-commit")
-	runtime := newTaskRuntime(store, started.Spec.ID, started.Attempt, started.Version)
+	runtime := newTaskRuntime(store, store, started.Spec.ID, started.Attempt, started.Version)
 
 	requested, err := store.RequestCancel(context.Background(), &RequestCancelRequest{
 		TaskID: started.Spec.ID, ExpectedVersion: started.Version, Reason: "operator request",

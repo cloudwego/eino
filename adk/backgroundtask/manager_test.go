@@ -35,7 +35,7 @@ func closeWithTimeout(manager *Manager) {
 }
 
 type firstReleaseConflictStore struct {
-	Store
+	TaskStore
 	once sync.Once
 }
 
@@ -48,12 +48,14 @@ func (s *firstReleaseConflictStore) ReleaseSuspension(
 	if conflict {
 		return nil, ErrVersionConflict
 	}
-	return s.Store.ReleaseSuspension(ctx, req)
+	return s.TaskStore.ReleaseSuspension(ctx, req)
 }
 
 func TestManagerReadRecentTaskEventsDelegatesToStore_BitsUT(t *testing.T) {
 	store := NewInMemoryStore(nil)
-	manager := New(context.Background(), &Config{Store: store})
+	manager := New(context.Background(), &Config{
+		Tasks: lifecycleStoreOnly{TaskStore: store}, TaskEvents: store,
+	})
 	defer closeWithTimeout(manager)
 	started := createAndStart(t, store, "manager-output")
 	_, err := store.AppendTaskEvent(context.Background(), &AppendTaskEventRequest{
@@ -203,7 +205,7 @@ func TestManagerReleaseSuspensionRetriesVersionConflict_BitsUT(t *testing.T) {
 	require.NoError(t, err)
 
 	manager := New(context.Background(), &Config{
-		Store: &firstReleaseConflictStore{Store: store},
+		Tasks: &firstReleaseConflictStore{TaskStore: store},
 	})
 	defer closeWithTimeout(manager)
 	released, err := manager.ReleaseSuspension(context.Background(), suspended.Spec.ID)
@@ -353,7 +355,7 @@ func TestManagerDispatchReadBoundaries(t *testing.T) {
 
 func TestTimeoutControlPrecedence(t *testing.T) {
 	t.Run("timeout always has a reason", func(t *testing.T) {
-		runtime := newTaskRuntime(nil, "task", 1, 1)
+		runtime := newTaskRuntime(nil, nil, "task", 1, 1)
 		require.True(t, runtime.requestControlWithReason(ControlTimeout, ""))
 		require.Equal(t, ControlRequest{
 			Kind: ControlTimeout, Reason: defaultTimeoutReason,
@@ -361,7 +363,7 @@ func TestTimeoutControlPrecedence(t *testing.T) {
 	})
 
 	t.Run("timeout supersedes drain", func(t *testing.T) {
-		runtime := newTaskRuntime(nil, "task", 1, 1)
+		runtime := newTaskRuntime(nil, nil, "task", 1, 1)
 		require.True(t, runtime.requestControl(ControlDrain))
 		_, controller := taskcontrol.WithTimeoutController(context.Background())
 		stop := make(chan struct{})
@@ -377,7 +379,7 @@ func TestTimeoutControlPrecedence(t *testing.T) {
 	})
 
 	t.Run("stop rejects timeout", func(t *testing.T) {
-		runtime := newTaskRuntime(nil, "task", 1, 1)
+		runtime := newTaskRuntime(nil, nil, "task", 1, 1)
 		require.True(t, runtime.requestControl(ControlStop))
 		_, controller := taskcontrol.WithTimeoutController(context.Background())
 		stop := make(chan struct{})
@@ -398,7 +400,7 @@ func TestTimeoutControlPrecedence(t *testing.T) {
 func TestTaskRuntimeOutputFailureAndHeartbeat(t *testing.T) {
 	store := NewInMemoryStore(nil)
 	started := createAndStart(t, store, "runtime")
-	runtime := newTaskRuntime(store, started.Spec.ID, started.Attempt, started.Version)
+	runtime := newTaskRuntime(store, store, started.Spec.ID, started.Attempt, started.Version)
 	require.Equal(t, started.Spec.ID, runtime.TaskID())
 
 	output, err := runtime.AppendTaskEvent(context.Background(), "", []byte("output"))
@@ -423,7 +425,7 @@ func TestTaskRuntimeOutputFailureAndHeartbeat(t *testing.T) {
 func TestTaskRuntimeReconcilesCancellationOnHeartbeat(t *testing.T) {
 	store := NewInMemoryStore(nil)
 	started := createAndStart(t, store, "heartbeat-cancel")
-	runtime := newTaskRuntime(store, started.Spec.ID, started.Attempt, started.Version)
+	runtime := newTaskRuntime(store, store, started.Spec.ID, started.Attempt, started.Version)
 	_, err := store.RequestCancel(context.Background(), &RequestCancelRequest{
 		TaskID: started.Spec.ID, ExpectedVersion: started.Version,
 	})
@@ -437,7 +439,7 @@ func TestTaskRuntimeReconcilesCancellationOnHeartbeat(t *testing.T) {
 }
 
 type heartbeatErrorStore struct {
-	Store
+	TaskStore
 	err error
 }
 
@@ -449,7 +451,8 @@ func TestManagerHeartbeatStopsAndCancelsOnLeaseError(t *testing.T) {
 	manager := New(context.Background(), nil)
 	manager.heartbeatEvery = time.Nanosecond
 	runtime := newTaskRuntime(
-		heartbeatErrorStore{Store: NewInMemoryStore(nil), err: ErrLeaseLost},
+		heartbeatErrorStore{TaskStore: NewInMemoryStore(nil), err: ErrLeaseLost},
+		unavailableTaskEventStore{},
 		"task", 1, 1,
 	)
 	runCtx, cancel := context.WithCancel(context.Background())
@@ -462,7 +465,7 @@ func TestManagerHeartbeatStopsAndCancelsOnLeaseError(t *testing.T) {
 
 	runCtx, cancel = context.WithCancel(context.Background())
 	defer cancel()
-	runtime = newTaskRuntime(NewInMemoryStore(nil), "task", 1, 1)
+	runtime = newTaskRuntime(NewInMemoryStore(nil), unavailableTaskEventStore{}, "task", 1, 1)
 	runtime.cancelRequested = true
 	done = make(chan struct{})
 	go manager.heartbeat(runCtx, cancel, runtime, stop, done)
@@ -492,7 +495,7 @@ func TestExecutorRegistryRegistrationBoundaries(t *testing.T) {
 }
 
 func TestRuntimeCancellationReconciliationRejectsInvalidState(t *testing.T) {
-	runtime := newTaskRuntime(NewInMemoryStore(nil), "missing", 1, 1)
+	runtime := newTaskRuntime(NewInMemoryStore(nil), unavailableTaskEventStore{}, "missing", 1, 1)
 	require.ErrorIs(
 		t, runtime.reconcileCancellationLocked(context.Background()), ErrNotFound,
 	)
@@ -500,7 +503,7 @@ func TestRuntimeCancellationReconciliationRejectsInvalidState(t *testing.T) {
 
 	store := NewInMemoryStore(nil)
 	started := createAndStart(t, store, "not-canceled")
-	runtime = newTaskRuntime(store, started.Spec.ID, started.Attempt, started.Version)
+	runtime = newTaskRuntime(store, store, started.Spec.ID, started.Attempt, started.Version)
 	require.ErrorIs(
 		t, runtime.reconcileCancellationLocked(context.Background()), ErrLeaseLost,
 	)
@@ -551,7 +554,7 @@ func TestManagerResumeLifecycleBoundaries(t *testing.T) {
 		},
 	)
 	require.NoError(t, err)
-	missingExecutorManager := New(context.Background(), &Config{Store: missingExecutorStore})
+	missingExecutorManager := New(context.Background(), &Config{Tasks: missingExecutorStore})
 	resumed, err = missingExecutorManager.Resume(context.Background(), &ResumeRequest{
 		TaskID: waiting.Spec.ID, ExpectedVersion: waiting.Version,
 	})
@@ -560,7 +563,7 @@ func TestManagerResumeLifecycleBoundaries(t *testing.T) {
 }
 
 type firstGetBlockingStore struct {
-	Store
+	TaskStore
 	once    sync.Once
 	entered chan struct{}
 	release chan struct{}
@@ -579,13 +582,13 @@ func (s *firstGetBlockingStore) Get(ctx context.Context, taskID string) (*Task, 
 			return nil, ctx.Err()
 		}
 	}
-	return s.Store.Get(ctx, taskID)
+	return s.TaskStore.Get(ctx, taskID)
 }
 
 func TestManagerCancelPendingLocalTaskAfterExecuteValidationFailure(t *testing.T) {
 	baseStore := NewInMemoryStore(nil)
 	store := &firstGetBlockingStore{
-		Store: baseStore, entered: make(chan struct{}), release: make(chan struct{}),
+		TaskStore: baseStore, entered: make(chan struct{}), release: make(chan struct{}),
 	}
 	executor := &scriptedExecutor{leaseExpiryPolicy: LeaseExpiryFail}
 	manager := managerWithExecutor(t, store, executor, time.Minute)
@@ -671,7 +674,7 @@ type recordingNotificationDelivery struct {
 }
 
 type lifecycleStoreOnly struct {
-	Store
+	TaskStore
 }
 
 func (r *recordingNotificationDelivery) ValidateNotificationDelivery(
@@ -684,7 +687,7 @@ func (r *recordingNotificationDelivery) ValidateNotificationDelivery(
 
 func TestManagerValidateNotificationDeliveryReportsOwnedStoreCapabilities_BitsUT(t *testing.T) {
 	store := NewInMemoryStore(nil)
-	manager := New(context.Background(), &Config{Store: store})
+	manager := New(context.Background(), &Config{Tasks: store})
 	defer closeWithTimeout(manager)
 	runtime := &recordingNotificationDelivery{}
 
@@ -696,7 +699,7 @@ func TestManagerValidateNotificationDeliveryReportsOwnedStoreCapabilities_BitsUT
 	require.Equal(t, SessionInboxNotificationKind, runtime.request.TargetKind)
 
 	managerWithoutOutbox := New(context.Background(), &Config{
-		Store: lifecycleStoreOnly{Store: NewInMemoryStore(nil)},
+		Tasks: lifecycleStoreOnly{TaskStore: NewInMemoryStore(nil)},
 	})
 	defer closeWithTimeout(managerWithoutOutbox)
 	runtimeWithoutOutbox := &recordingNotificationDelivery{}
