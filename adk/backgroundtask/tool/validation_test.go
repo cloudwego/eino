@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -38,6 +39,11 @@ func encodedPayload(t *testing.T, name, arguments string) []byte {
 	})
 	require.NoError(t, err)
 	return data
+}
+
+func TestRecoverRequestHasNoCheckpoint_BitsUT(t *testing.T) {
+	_, exists := reflect.TypeOf(RecoverRequest{}).FieldByName("Checkpoint")
+	require.False(t, exists)
 }
 
 func TestExecutorValidationBoundaries(t *testing.T) {

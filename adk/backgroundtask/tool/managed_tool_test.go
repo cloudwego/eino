@@ -61,9 +61,8 @@ func (t *fakeTool) Recover(ctx context.Context, request *RecoverRequest) (Run, e
 }
 
 type fakeRun struct {
-	wait       func(context.Context) (*Outcome, error)
-	stop       func(context.Context) error
-	checkpoint []byte
+	wait func(context.Context) (*Outcome, error)
+	stop func(context.Context) error
 }
 
 type materializerStub struct {
@@ -101,9 +100,6 @@ func (r *fakeRun) Stop(ctx context.Context) error {
 		return r.stop(ctx)
 	}
 	return nil
-}
-func (r *fakeRun) Checkpoint(context.Context) ([]byte, error) {
-	return append([]byte(nil), r.checkpoint...), nil
 }
 
 type updatingRun struct {
@@ -322,7 +318,6 @@ func TestManagedToolDrainYieldsAndRecoversWithoutStop(t *testing.T) {
 	implementation := &fakeTool{
 		start: func(context.Context, *StartRequest) (Run, error) {
 			return &fakeRun{
-				checkpoint: []byte("ref"),
 				wait: func(ctx context.Context) (*Outcome, error) {
 					close(started)
 					<-ctx.Done()
@@ -374,6 +369,7 @@ func TestManagedToolDrainYieldsAndRecoversWithoutStop(t *testing.T) {
 	yielded, err := managerOne.Get(context.Background(), "recover-task")
 	require.NoError(t, err)
 	require.Equal(t, backgroundtask.StatusPending, yielded.Status)
+	require.Empty(t, yielded.Checkpoint)
 
 	executorsTwo := backgroundtask.NewExecutorRegistry()
 	managerTwo := backgroundtask.New(context.Background(), &backgroundtask.Config{
@@ -384,7 +380,6 @@ func TestManagedToolDrainYieldsAndRecoversWithoutStop(t *testing.T) {
 	request := <-recovered
 	require.Equal(t, "recover-task", request.TaskID)
 	require.Equal(t, int64(2), request.Attempt)
-	require.Equal(t, "ref", string(request.Checkpoint))
 	mu.Lock()
 	require.Zero(t, stopCalls)
 	mu.Unlock()

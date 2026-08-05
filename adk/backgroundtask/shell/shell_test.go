@@ -18,6 +18,7 @@ package shell
 
 import (
 	"context"
+	"reflect"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -30,6 +31,11 @@ type shellStub struct {
 	start   *StartCommandRequest
 	recover *RecoverCommandRequest
 	run     backgroundtool.Run
+}
+
+func TestRecoverCommandRequestHasNoCheckpoint_BitsUT(t *testing.T) {
+	_, exists := reflect.TypeOf(RecoverCommandRequest{}).FieldByName("Checkpoint")
+	require.False(t, exists)
 }
 
 func (s *shellStub) StartCommand(
@@ -93,12 +99,11 @@ func TestNewRegistrationAndAdapter(t *testing.T) {
 
 	recovered, err := adapted.Recover(context.Background(), &backgroundtool.RecoverRequest{
 		TaskID: "task", Arguments: `{"command":"echo hello"}`, Attempt: 2,
-		Checkpoint: []byte("ref"),
 	})
 	require.NoError(t, err)
 	require.Equal(t, backend.run, recovered)
 	require.Equal(t, &RecoverCommandRequest{
-		TaskID: "task", Command: "echo hello", Attempt: 2, Checkpoint: []byte("ref"),
+		TaskID: "task", Command: "echo hello", Attempt: 2,
 	}, backend.recover)
 	_, err = adapted.Recover(context.Background(), nil)
 	require.Error(t, err)

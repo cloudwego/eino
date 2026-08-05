@@ -43,10 +43,9 @@ type StartCommandRequest struct {
 
 // RecoverCommandRequest describes reconstruction of a logical command.
 type RecoverCommandRequest struct {
-	TaskID     string
-	Command    string
-	Attempt    int64
-	Checkpoint []byte
+	TaskID  string
+	Command string
+	Attempt int64
 }
 
 // RegistrationConfig configures a recoverable shell registration.
@@ -116,7 +115,6 @@ func (a *adapter) Recover(
 	}
 	return a.shell.RecoverCommand(ctx, &RecoverCommandRequest{
 		TaskID: request.TaskID, Command: input.Command, Attempt: request.Attempt,
-		Checkpoint: append([]byte(nil), request.Checkpoint...),
 	})
 }
 

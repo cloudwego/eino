@@ -140,7 +140,6 @@ func (e *executor) Execute(
 	if e.recoverable && task.Attempt > 1 {
 		run, err = registration.Tool.(RecoverableBackgroundTool).Recover(ctx, &RecoverRequest{
 			TaskID: task.Spec.ID, Arguments: payload.Arguments, Attempt: task.Attempt,
-			Checkpoint: append([]byte(nil), task.Checkpoint...),
 		})
 	} else {
 		run, err = registration.Tool.Start(ctx, &StartRequest{
@@ -243,14 +242,9 @@ func (e *executor) Execute(
 				if !e.recoverable {
 					return nil, errors.New("backgroundtask/tool: plain tool cannot drain")
 				}
-				checkpoint, checkpointErr := checkpointRun(run)
-				if checkpointErr != nil {
-					return nil, checkpointErr
-				}
 				cancelWait()
 				return &backgroundtask.ExecutionResult{
-					Directive:  backgroundtask.ExecutionDirectiveYield,
-					Checkpoint: checkpoint,
+					Directive: backgroundtask.ExecutionDirectiveYield,
 				}, nil
 			case backgroundtask.ControlStop:
 				if err = run.Stop(context.Background()); err != nil {
@@ -277,13 +271,8 @@ func (e *executor) Execute(
 		case <-ctx.Done():
 			cancelWait()
 			if e.recoverable {
-				checkpoint, checkpointErr := checkpointRun(run)
-				if checkpointErr != nil {
-					return nil, checkpointErr
-				}
 				return &backgroundtask.ExecutionResult{
-					Directive:  backgroundtask.ExecutionDirectiveYield,
-					Checkpoint: checkpoint,
+					Directive: backgroundtask.ExecutionDirectiveYield,
 				}, nil
 			}
 			return nil, ctx.Err()
@@ -323,18 +312,6 @@ func (e *executor) drainTerminalUpdates(
 			return ctx.Err()
 		}
 	}
-}
-
-func checkpointRun(run Run) ([]byte, error) {
-	checkpointer, supported := run.(Checkpointer)
-	if !supported {
-		return nil, nil
-	}
-	checkpoint, err := checkpointer.Checkpoint(context.Background())
-	if err != nil {
-		return nil, fmt.Errorf("%w: %v", backgroundtask.ErrDrainCheckpointUnavailable, err)
-	}
-	return checkpoint, nil
 }
 
 type updateResult struct {

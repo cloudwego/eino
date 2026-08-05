@@ -55,10 +55,9 @@ type StartRequest struct {
 
 // RecoverRequest describes reconstruction of an existing logical operation.
 type RecoverRequest struct {
-	TaskID     string
-	Arguments  string
-	Attempt    int64
-	Checkpoint []byte
+	TaskID    string
+	Arguments string
+	Attempt   int64
 }
 
 // Run is an attempt-local handle for one logical external operation. Canceling
@@ -67,12 +66,6 @@ type RecoverRequest struct {
 type Run interface {
 	Wait(context.Context) (*Outcome, error)
 	Stop(context.Context) error
-}
-
-// Checkpointer optionally supplies a small checkpoint or durable-state reference
-// to commit atomically when the current Worker yields.
-type Checkpointer interface {
-	Checkpoint(context.Context) ([]byte, error)
 }
 
 // UpdateSource optionally exposes replayable incremental updates.
