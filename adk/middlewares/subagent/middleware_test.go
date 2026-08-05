@@ -19,12 +19,13 @@ package subagent
 import (
 	"context"
 	"errors"
-	"strings"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/bytedance/sonic"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -297,7 +298,7 @@ func TestDurableAgentToolForeground(t *testing.T) {
 	assert.Contains(t, string(task.ResultData), "durable result")
 }
 
-func TestLocalAndDurableAgentToolSchemasMatch(t *testing.T) {
+func TestOnlyDurableAgentToolExposesPersistentChildSession(t *testing.T) {
 	agent := &mockAgent{name: "worker", desc: "does work"}
 	localManager := newTestManager(t, context.Background())
 	durableManager := newTestManager(t, context.Background())
@@ -325,7 +326,25 @@ func TestLocalAndDurableAgentToolSchemasMatch(t *testing.T) {
 	require.NoError(t, err)
 	durableSchema, err := durableInfo.ParamsOneOf.ToJSONSchema()
 	require.NoError(t, err)
-	assert.Equal(t, localSchema, durableSchema)
+	localJSON, err := sonic.MarshalString(localSchema)
+	require.NoError(t, err)
+	durableJSON, err := sonic.MarshalString(durableSchema)
+	require.NoError(t, err)
+	assert.NotContains(t, localJSON, "child_session_id")
+	assert.Contains(t, durableJSON, "child_session_id")
+}
+
+func decodeDurableAgentToolResult(
+	t *testing.T,
+	value string,
+) *durableAgentToolResult {
+	t.Helper()
+	var result durableAgentToolResult
+	require.NoError(t, sonic.UnmarshalString(value, &result))
+	require.NotEmpty(t, result.TaskID)
+	require.NotEmpty(t, result.ChildSessionID)
+	require.NotEmpty(t, result.Status)
+	return &result
 }
 
 func TestFormatManagedAgentResultPreservesDescriptionInErrors(t *testing.T) {
@@ -574,12 +593,66 @@ func TestDurableAgentToolBackgroundSurvivesCaller(t *testing.T) {
 	result, err := runCtx.Tools[0].(tool.InvokableTool).InvokableRun(ctx,
 		`{"subagent_type":"slow","prompt":"work","description":"test","run_in_background":true}`)
 	require.NoError(t, err)
-	assert.Contains(t, result, "running in background")
-	assert.True(t, strings.Contains(result, "ID:"))
+	decoded := decodeDurableAgentToolResult(t, result)
+	assert.Equal(t, backgroundtask.StatusRunning, decoded.Status)
 	require.Eventually(t, func() bool {
 		task := terminalTask(t, mgr)
 		return task != nil && task.Status == backgroundtask.StatusCompleted
 	}, time.Second, 10*time.Millisecond)
+}
+
+func TestDurableAgentToolReusesChildSessionAcrossTasks_BitsUT(t *testing.T) {
+	ctx := runnerEnvironmentContext(t)
+	manager := newTestManager(t, context.Background())
+	var runs [][]string
+	agent := &mockAgent{name: "worker", run: func(
+		_ context.Context,
+		input *adk.AgentInput,
+	) string {
+		contents := make([]string, 0, len(input.Messages))
+		for _, message := range input.Messages {
+			contents = append(contents, message.Content)
+		}
+		runs = append(runs, contents)
+		return fmt.Sprintf("reply-%d", len(runs))
+	}}
+	middleware, err := New(ctx, &Config{
+		SubAgents:  []adk.Agent{agent},
+		Background: durableBackground(t, manager, agent),
+	})
+	require.NoError(t, err)
+	_, runCtx, err := middleware.BeforeAgent(
+		ctx, &adk.ChatModelAgentContext[*schema.Message]{},
+	)
+	require.NoError(t, err)
+	invokable := runCtx.Tools[0].(tool.InvokableTool)
+
+	firstRaw, err := invokable.InvokableRun(
+		ctx,
+		`{"subagent_type":"worker","prompt":"first","description":"first turn"}`,
+	)
+	require.NoError(t, err)
+	first := decodeDurableAgentToolResult(t, firstRaw)
+	require.Equal(t, backgroundtask.StatusCompleted, first.Status)
+	require.Equal(t, "reply-1", first.Result)
+
+	secondRaw, err := invokable.InvokableRun(
+		ctx,
+		fmt.Sprintf(
+			`{"subagent_type":"worker","prompt":"second","description":"second turn","child_session_id":%q}`,
+			first.ChildSessionID,
+		),
+	)
+	require.NoError(t, err)
+	second := decodeDurableAgentToolResult(t, secondRaw)
+	require.Equal(t, backgroundtask.StatusCompleted, second.Status)
+	require.Equal(t, "reply-2", second.Result)
+	require.NotEqual(t, first.TaskID, second.TaskID)
+	require.Equal(t, first.ChildSessionID, second.ChildSessionID)
+	require.Equal(t, [][]string{
+		{"first"},
+		{"first", "reply-1", "second"},
+	}, runs)
 }
 
 func TestDurableAgentRegistrationRejectsDuplicateExactIdentity(t *testing.T) {
@@ -616,7 +689,9 @@ func TestDurableTaskProgressReadsSessionTranscript(t *testing.T) {
 		ctx, `{"subagent_type":"worker","prompt":"work","description":"test"}`,
 	)
 	require.NoError(t, err)
-	assert.Equal(t, "durable output", result)
+	decoded := decodeDurableAgentToolResult(t, result)
+	assert.Equal(t, "durable output", decoded.Result)
+	assert.Equal(t, backgroundtask.StatusCompleted, decoded.Status)
 	task := terminalTask(t, manager)
 	require.NotNil(t, task)
 	assert.Empty(t, task.Spec.OutputFile)
@@ -655,7 +730,9 @@ func TestDurableTaskProgressUsesSharedFormatter(t *testing.T) {
 		ctx, `{"subagent_type":"worker","prompt":"work","description":"test"}`,
 	)
 	require.NoError(t, err)
-	assert.Equal(t, "durable output", result)
+	decoded := decodeDurableAgentToolResult(t, result)
+	assert.Equal(t, "durable output", decoded.Result)
+	assert.Equal(t, backgroundtask.StatusCompleted, decoded.Status)
 	task := terminalTask(t, manager)
 	require.NotNil(t, task)
 	assert.Equal(t, backgroundtask.StatusCompleted, task.Status)
@@ -811,7 +888,8 @@ func TestDurableBlockingReceiverDoesNotBlockAutoBackgroundResponse(t *testing.T)
 	select {
 	case result := <-invokeDone:
 		require.NoError(t, result.err)
-		assert.Contains(t, result.output, "running in background")
+		decoded := decodeDurableAgentToolResult(t, result.output)
+		assert.Equal(t, backgroundtask.StatusRunning, decoded.Status)
 	case <-time.After(250 * time.Millisecond):
 		t.Fatal("auto-background response waited for blocking receiver")
 	}

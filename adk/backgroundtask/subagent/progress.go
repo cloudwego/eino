@@ -55,46 +55,51 @@ func (e *Executor[M]) ReadProgress(
 	if err != nil {
 		return "", err
 	}
-	return readProgress(ctx, e.sessionStore, task, payload.SubAgentName, format)
+	return readProgress(
+		ctx,
+		e.sessionStore,
+		task,
+		payload.ChildSessionID,
+		payload.SubAgentName,
+		format,
+	)
 }
 
 func readProgress[M adk.MessageType](
 	ctx context.Context,
 	store adk.SessionEventStore[M],
 	task *backgroundtask.Task,
+	sessionID string,
 	agentName string,
 	format func(context.Context, string, M) (string, error),
 ) (string, error) {
-	sessionID := childSessionID(task.Spec.ID)
-	first, err := store.LoadEvents(ctx, sessionID, &adk.LoadSessionEventsRequest{
-		Limit: 1,
-		Kinds: []adk.SessionEventKind{adk.SessionEventMessage},
-	})
+	inputEventID, err := firstTaskMessageEventID(
+		ctx, store, sessionID, task.Spec.ID,
+	)
 	if err != nil {
 		return "", err
 	}
-	var inputEventID string
-	if len(first.Events) > 0 {
-		inputEventID = first.Events[0].EventID
-	}
 
-	recent, err := store.LoadEvents(ctx, sessionID, &adk.LoadSessionEventsRequest{
-		Limit:   maxProgressRecords + 1,
-		Reverse: true,
-		Kinds: []adk.SessionEventKind{
+	recent, moreRecent, err := loadTaskEventsReverse(
+		ctx,
+		store,
+		sessionID,
+		task.Spec.ID,
+		maxProgressRecords+1,
+		[]adk.SessionEventKind{
 			adk.SessionEventMessage,
 			adk.SessionEventMessageStreamIncomplete,
 		},
-	})
+	)
 	if err != nil {
 		return "", err
 	}
 
-	lines := make([]string, 0, len(recent.Events))
+	lines := make([]string, 0, len(recent))
 	usedBytes := 0
-	truncated := recent.Next != ""
-	for _, event := range recent.Events {
-		if event == nil || event.EventID == inputEventID {
+	truncated := moreRecent
+	for _, event := range recent {
+		if event.EventID == inputEventID {
 			continue
 		}
 		var message M
@@ -140,16 +145,19 @@ func readProgress[M adk.MessageType](
 		sections = append(sections, transcript.String())
 	}
 	if task.Status == backgroundtask.StatusWaitingInput {
-		interrupt, loadErr := store.LoadEvents(ctx, sessionID, &adk.LoadSessionEventsRequest{
-			Limit:   1,
-			Reverse: true,
-			Kinds:   []adk.SessionEventKind{adk.SessionEventInterrupt},
-		})
+		interrupts, _, loadErr := loadTaskEventsReverse(
+			ctx,
+			store,
+			sessionID,
+			task.Spec.ID,
+			1,
+			[]adk.SessionEventKind{adk.SessionEventInterrupt},
+		)
 		if loadErr != nil {
 			return "", loadErr
 		}
-		if len(interrupt.Events) > 0 && interrupt.Events[0].Interrupt != nil {
-			data, marshalErr := sonic.Marshal(interrupt.Events[0].Interrupt.Contexts)
+		if len(interrupts) > 0 && interrupts[0].Interrupt != nil {
+			data, marshalErr := sonic.Marshal(interrupts[0].Interrupt.Contexts)
 			if marshalErr != nil {
 				return "", marshalErr
 			}
@@ -157,6 +165,77 @@ func readProgress[M adk.MessageType](
 		}
 	}
 	return strings.Join(sections, "\n"), nil
+}
+
+func firstTaskMessageEventID[M adk.MessageType](
+	ctx context.Context,
+	store adk.SessionEventStore[M],
+	sessionID,
+	taskID string,
+) (string, error) {
+	cursor := ""
+	for {
+		page, err := store.LoadEvents(ctx, sessionID, &adk.LoadSessionEventsRequest{
+			After: cursor, Limit: maxProgressRecords,
+			Kinds: []adk.SessionEventKind{adk.SessionEventMessage},
+		})
+		if err != nil {
+			return "", err
+		}
+		for _, event := range page.Events {
+			if eventBelongsToTask(event, taskID) {
+				return event.EventID, nil
+			}
+		}
+		if page.Next == "" {
+			return "", nil
+		}
+		cursor = page.Next
+	}
+}
+
+func loadTaskEventsReverse[M adk.MessageType](
+	ctx context.Context,
+	store adk.SessionEventStore[M],
+	sessionID,
+	taskID string,
+	limit int,
+	kinds []adk.SessionEventKind,
+) ([]*adk.SessionEvent[M], bool, error) {
+	cursor := ""
+	result := make([]*adk.SessionEvent[M], 0, limit)
+	for {
+		page, err := store.LoadEvents(ctx, sessionID, &adk.LoadSessionEventsRequest{
+			After: cursor, Limit: maxProgressRecords, Reverse: true, Kinds: kinds,
+		})
+		if err != nil {
+			return nil, false, err
+		}
+		for _, event := range page.Events {
+			if !eventBelongsToTask(event, taskID) {
+				continue
+			}
+			if len(result) == limit {
+				return result, true, nil
+			}
+			result = append(result, event)
+		}
+		if page.Next == "" {
+			return result, false, nil
+		}
+		cursor = page.Next
+	}
+}
+
+func eventBelongsToTask[M adk.MessageType](
+	event *adk.SessionEvent[M],
+	taskID string,
+) bool {
+	if event == nil || event.Extra == nil {
+		return false
+	}
+	value, ok := event.Extra[taskIDEventExtraKey].(string)
+	return ok && value == taskID
 }
 
 func reverseProgress(values []string) {

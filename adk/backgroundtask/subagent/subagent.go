@@ -20,10 +20,12 @@ package subagent
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 	"time"
 
@@ -37,13 +39,16 @@ const (
 	// ExecutorKey is the backgroundtask executor key for durable sub-agent tasks.
 	ExecutorKey = "eino.dev/subagent"
 
-	payloadVersion = 2
+	payloadVersion          = 3
+	maxChildSessionIDLength = 1024
+	taskIDEventExtraKey     = "eino.background_task.id"
 )
 
 type taskPayload struct {
-	Version      int    `json:"version"`
-	SubAgentName string `json:"subagent_name"`
-	Query        string `json:"query"`
+	Version        int    `json:"version"`
+	SubAgentName   string `json:"subagent_name"`
+	Query          string `json:"query"`
+	ChildSessionID string `json:"child_session_id"`
 }
 
 type checkpointState struct {
@@ -81,9 +86,14 @@ type SessionStoreFactory[M adk.MessageType] func(
 type ExecutorConfig[M adk.MessageType] struct {
 	// SessionStore persists child events without attempt-specific construction.
 	// It is retained for providers whose store performs fencing by another
-	// mechanism. Configure exactly one of SessionStore and SessionStoreFactory.
+	// mechanism. Persistent child sessions may be used by multiple task IDs, so
+	// production providers must serialize concurrent turns for one session
+	// across workers. Configure exactly one of SessionStore and
+	// SessionStoreFactory.
 	SessionStore adk.SessionEventStore[M]
 	// SessionStoreFactory constructs an attempt-bound child event store.
+	// Stores returned for tasks sharing a ChildSessionID must coordinate the
+	// same durable session and serialize concurrent turns across workers.
 	SessionStoreFactory SessionStoreFactory[M]
 	// CheckPointStore persists ADK Runner checkpoints for interruption and recovery.
 	CheckPointStore adk.CheckPointStore
@@ -230,14 +240,50 @@ func validateSpecPayload(spec backgroundtask.Spec) (*taskPayload, error) {
 	if payload.Version != payloadVersion {
 		return nil, fmt.Errorf("%w: subagent payload version %d", backgroundtask.ErrUnsupportedExecutorPayloadVersion, payload.Version)
 	}
-	if payload.SubAgentName == "" || payload.Query == "" {
-		return nil, errors.New("backgroundtask/subagent: subagent name and query are required")
+	if payload.SubAgentName == "" || payload.Query == "" ||
+		payload.ChildSessionID == "" {
+		return nil, errors.New(
+			"backgroundtask/subagent: subagent name, query, and child session id are required",
+		)
+	}
+	if len(payload.ChildSessionID) > maxChildSessionIDLength {
+		return nil, errors.New(
+			"backgroundtask/subagent: child session id exceeds configured bounds",
+		)
+	}
+	if err := validateChildSessionOwner(
+		payload.ChildSessionID,
+		spec.SessionID,
+		payload.SubAgentName,
+	); err != nil {
+		return nil, err
 	}
 	return payload, nil
 }
 
-func childSessionID(taskID string) string {
-	return taskID + "/session"
+func childSessionPrefix(parentSessionID, subAgentName string) string {
+	return "subagent-session/" +
+		base64.RawURLEncoding.EncodeToString([]byte(parentSessionID)) + "/" +
+		base64.RawURLEncoding.EncodeToString([]byte(subAgentName)) + "/"
+}
+
+func defaultChildSessionID(parentSessionID, subAgentName, taskID string) string {
+	return childSessionPrefix(parentSessionID, subAgentName) + taskID
+}
+
+func validateChildSessionOwner(
+	childSessionID,
+	parentSessionID,
+	subAgentName string,
+) error {
+	prefix := childSessionPrefix(parentSessionID, subAgentName)
+	if !strings.HasPrefix(childSessionID, prefix) ||
+		len(childSessionID) == len(prefix) {
+		return errors.New(
+			"backgroundtask/subagent: child session does not belong to the parent session and sub-agent",
+		)
+	}
+	return nil
 }
 
 func checkpointID(taskID string) string {
@@ -358,8 +404,8 @@ func (e *Executor[M]) Execute(
 	runner := adk.NewTypedRunner(adk.TypedRunnerConfig[M]{
 		Agent: registration.Agent, EnableStreaming: foreground.EnableStreaming(),
 		CheckPointStore: e.checkPointStore,
-		SessionID:       childSessionID(task.Spec.ID), SessionStore: sessionStore,
-		SessionConfig: e.sessionConfig,
+		SessionID:       payload.ChildSessionID, SessionStore: sessionStore,
+		SessionConfig: e.sessionConfigForTask(task.Spec.ID),
 	})
 	cancelOption, cancelRun := adk.WithCancel()
 	controlRequests := make(chan backgroundtask.ControlRequest, 1)
@@ -425,6 +471,34 @@ func (e *Executor[M]) Execute(
 		Status: backgroundtask.StatusCompleted,
 		Data:   []byte(final),
 	}, nil
+}
+
+func (e *Executor[M]) sessionConfigForTask(taskID string) *adk.SessionConfig[M] {
+	config := &adk.SessionConfig[M]{}
+	if e.sessionConfig != nil {
+		*config = *e.sessionConfig
+	}
+	base := config.EventExtraProvider
+	config.EventExtraProvider = func(
+		ctx context.Context,
+		event *adk.SessionEvent[M],
+	) (map[string]any, error) {
+		var extra map[string]any
+		if base != nil {
+			var err error
+			extra, err = base(ctx, event)
+			if err != nil {
+				return nil, err
+			}
+		}
+		result := make(map[string]any, len(extra)+1)
+		for key, value := range extra {
+			result[key] = value
+		}
+		result[taskIDEventExtraKey] = taskID
+		return result, nil
+	}
+	return config
 }
 
 func materializedEvent[M adk.MessageType](
@@ -507,6 +581,12 @@ func (e *Executor[M]) handleEventError(
 	}
 	if result, controlErr, controlled := e.controlResult(ctx, task, control); controlled {
 		return result, controlErr
+	}
+	if errors.Is(err, adk.ErrSessionBusy) {
+		return &backgroundtask.ExecutionResult{
+			Directive:  backgroundtask.ExecutionDirectiveYield,
+			Checkpoint: append([]byte(nil), task.Checkpoint...),
+		}, nil
 	}
 	return nil, err
 }
@@ -627,13 +707,16 @@ func nextCheckpointSequence(previous []byte) int64 {
 
 // SubmitRequest describes a durable sub-agent task to submit. Empty TaskID asks
 // Manager to allocate one. SessionID identifies the parent session notified
-// when the child waits for input or terminates.
+// when the child waits for input or terminates. Empty ChildSessionID creates a
+// new child session derived from the allocated task ID; a non-empty value
+// continues that existing child session and inherits its committed history.
 type SubmitRequest struct {
-	TaskID       string
-	SubAgentName string
-	Query        string
-	Description  string
-	SessionID    string
+	TaskID         string
+	SubAgentName   string
+	Query          string
+	Description    string
+	SessionID      string
+	ChildSessionID string
 }
 
 // Submit persists a durable sub-agent task through manager.
@@ -652,6 +735,26 @@ func Submit(ctx context.Context, manager *backgroundtask.Manager, req *SubmitReq
 	}
 	payload := taskPayload{
 		Version: payloadVersion, SubAgentName: req.SubAgentName, Query: req.Query,
+		ChildSessionID: req.ChildSessionID,
+	}
+	if payload.ChildSessionID == "" {
+		payload.ChildSessionID = defaultChildSessionID(
+			req.SessionID,
+			req.SubAgentName,
+			id,
+		)
+	}
+	if len(payload.ChildSessionID) > maxChildSessionIDLength {
+		return nil, errors.New(
+			"backgroundtask/subagent: child session id exceeds configured bounds",
+		)
+	}
+	if err := validateChildSessionOwner(
+		payload.ChildSessionID,
+		req.SessionID,
+		req.SubAgentName,
+	); err != nil {
+		return nil, err
 	}
 	data, err := json.Marshal(payload)
 	if err != nil {
@@ -662,4 +765,17 @@ func Submit(ctx context.Context, manager *backgroundtask.Manager, req *SubmitReq
 		Description: req.Description, SessionID: req.SessionID,
 		NotifySession: true,
 	})
+}
+
+// ChildSessionIDFromTask returns the persistent child session owned by a
+// durable sub-agent task.
+func ChildSessionIDFromTask(task *backgroundtask.Task) (string, error) {
+	if task == nil {
+		return "", errors.New("backgroundtask/subagent: task is required")
+	}
+	payload, err := validateSpecPayload(task.Spec)
+	if err != nil {
+		return "", err
+	}
+	return payload.ChildSessionID, nil
 }

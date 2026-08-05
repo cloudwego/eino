@@ -61,6 +61,11 @@ type agentManagedInput struct {
 	RunInBackground bool `json:"run_in_background,omitempty" jsonschema_description:"Set to true to run this agent in the background. You will be notified when it completes."`
 }
 
+type agentDurableInput struct {
+	agentManagedInput
+	ChildSessionID string `json:"child_session_id,omitempty" jsonschema_description:"Continue a previous child session by ID and inherit its history. Omit to create a new child session."`
+}
+
 func newAgentTool(subAgents map[string]tool.InvokableTool, name, desc string) (tool.BaseTool, error) {
 	return utils.InferOptionableTool(name, desc,
 		func(ctx context.Context, in agentInput, opts ...tool.Option) (string, error) {
@@ -195,6 +200,61 @@ func formatManagedAgentResult(agentType string, task *backgroundtask.Task, forma
 		)
 	default:
 		return "", fmt.Errorf("subagent %q task %q has unknown status %q", agentType, task.Spec.ID, task.Status)
+	}
+}
+
+type durableAgentToolResult struct {
+	TaskID         string                `json:"task_id"`
+	ChildSessionID string                `json:"child_session_id"`
+	Status         backgroundtask.Status `json:"status"`
+	Result         string                `json:"result,omitempty"`
+	OutputFile     string                `json:"output_file,omitempty"`
+}
+
+func formatDurableAgentResult(
+	agentType string,
+	task *backgroundtask.Task,
+) (string, error) {
+	if task == nil {
+		return "", errors.New("subagent: durable task result is required")
+	}
+	childSessionID, err := durablesubagent.ChildSessionIDFromTask(task)
+	if err != nil {
+		return "", err
+	}
+	switch task.Status {
+	case backgroundtask.StatusCompleted,
+		backgroundtask.StatusPending,
+		backgroundtask.StatusRunning,
+		backgroundtask.StatusWaitingInput,
+		backgroundtask.StatusSuspended:
+		result := &durableAgentToolResult{
+			TaskID: task.Spec.ID, ChildSessionID: childSessionID,
+			Status: task.Status, OutputFile: task.Spec.OutputFile,
+		}
+		if task.Status == backgroundtask.StatusCompleted {
+			result.Result = string(task.ResultData)
+		}
+		data, marshalErr := sonic.MarshalString(result)
+		if marshalErr != nil {
+			return "", marshalErr
+		}
+		return data, nil
+	case backgroundtask.StatusCanceled:
+		return "", fmt.Errorf(
+			"subagent %q task %q (%s) was canceled",
+			agentType, task.Spec.ID, task.Spec.Description,
+		)
+	case backgroundtask.StatusFailed:
+		return "", fmt.Errorf(
+			"subagent %q task %q (%s) failed: %s",
+			agentType, task.Spec.ID, task.Spec.Description, task.ResultError,
+		)
+	default:
+		return "", fmt.Errorf(
+			"subagent %q task %q has unknown status %q",
+			agentType, task.Spec.ID, task.Status,
+		)
 	}
 }
 
@@ -397,7 +457,7 @@ func newDurableAgentTool[M adk.MessageType](
 
 	return utils.InferOptionableTool(name, desc, func(
 		callCtx context.Context,
-		in agentManagedInput,
+		in agentDurableInput,
 		opts ...tool.Option,
 	) (string, error) {
 		sessionID, ok := adk.RunnerSessionID(callCtx)
@@ -429,7 +489,7 @@ func newDurableAgentTool[M adk.MessageType](
 		}
 		task, err := durablesubagent.Submit(callCtx, config.Manager, &durablesubagent.SubmitRequest{
 			SubAgentName: in.SubagentType, Query: prompt, Description: in.Description,
-			SessionID: sessionID,
+			SessionID: sessionID, ChildSessionID: in.ChildSessionID,
 		})
 		if err != nil {
 			return "", err
@@ -451,7 +511,7 @@ func newDurableAgentTool[M adk.MessageType](
 		if err != nil {
 			return "", err
 		}
-		return formatManagedAgentResult(in.SubagentType, task, "")
+		return formatDurableAgentResult(in.SubagentType, task)
 	})
 }
 

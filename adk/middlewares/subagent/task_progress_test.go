@@ -45,30 +45,33 @@ func TestReadDurableTaskProgress(t *testing.T) {
 	ctx := context.Background()
 	store := adksession.NewInMemoryStore[*schema.Message](nil)
 	task := durableProgressTask(t, backgroundtask.StatusWaitingInput)
-	sessionID := task.Spec.ID + "/session"
-	require.NoError(t, store.AppendEvents(ctx, sessionID, []*adk.SessionEvent[*schema.Message]{
-		{
-			EventID: "query", Kind: adk.SessionEventMessage,
-			Message: schema.UserMessage("submitted query"),
-		},
-		{
-			EventID: "first", Kind: adk.SessionEventMessage,
-			Message: schema.AssistantMessage("first progress", nil),
-		},
-		{
-			EventID: "partial", Kind: adk.SessionEventMessageStreamIncomplete,
-			MessageStreamIncomplete: &adk.MessageStreamIncompleteEvent[*schema.Message]{
-				Message: schema.AssistantMessage("partial progress", nil),
-				Error:   "stream interrupted",
+	sessionID := progressChildSessionID
+	require.NoError(t, store.AppendEvents(ctx, sessionID, taskProgressEvents(
+		task.Spec.ID,
+		[]*adk.SessionEvent[*schema.Message]{
+			{
+				EventID: "query", Kind: adk.SessionEventMessage,
+				Message: schema.UserMessage("submitted query"),
+			},
+			{
+				EventID: "first", Kind: adk.SessionEventMessage,
+				Message: schema.AssistantMessage("first progress", nil),
+			},
+			{
+				EventID: "partial", Kind: adk.SessionEventMessageStreamIncomplete,
+				MessageStreamIncomplete: &adk.MessageStreamIncompleteEvent[*schema.Message]{
+					Message: schema.AssistantMessage("partial progress", nil),
+					Error:   "stream interrupted",
+				},
+			},
+			{
+				EventID: "interrupt", Kind: adk.SessionEventInterrupt,
+				Interrupt: &adk.InterruptEvent{Contexts: []*adk.InterruptContext{
+					{InterruptID: "agent:worker;tool:approve:call_1", Info: "approve?"},
+				}},
 			},
 		},
-		{
-			EventID: "interrupt", Kind: adk.SessionEventInterrupt,
-			Interrupt: &adk.InterruptEvent{Contexts: []*adk.InterruptContext{
-				{InterruptID: "agent:worker;tool:approve:call_1", Info: "approve?"},
-			}},
-		},
-	}))
+	)))
 
 	format := func(_ context.Context, agentName string, message *schema.Message) (string, error) {
 		return agentName + ": " + message.Content, nil
@@ -89,7 +92,7 @@ func TestReadDurableTaskProgressIncludesAgenticToolResults(t *testing.T) {
 	ctx := context.Background()
 	store := adksession.NewInMemoryStore[*schema.AgenticMessage](nil)
 	task := durableProgressTask(t, backgroundtask.StatusRunning)
-	sessionID := task.Spec.ID + "/session"
+	sessionID := progressChildSessionID
 	toolResult := &schema.AgenticMessage{
 		Role: schema.AgenticRoleTypeUser,
 		ContentBlocks: []*schema.ContentBlock{{
@@ -104,13 +107,16 @@ func TestReadDurableTaskProgressIncludesAgenticToolResults(t *testing.T) {
 			},
 		}},
 	}
-	require.NoError(t, store.AppendEvents(ctx, sessionID, []*adk.SessionEvent[*schema.AgenticMessage]{
-		{
-			EventID: "query", Kind: adk.SessionEventMessage,
-			Message: schema.UserAgenticMessage("submitted query"),
+	require.NoError(t, store.AppendEvents(ctx, sessionID, taskProgressEvents(
+		task.Spec.ID,
+		[]*adk.SessionEvent[*schema.AgenticMessage]{
+			{
+				EventID: "query", Kind: adk.SessionEventMessage,
+				Message: schema.UserAgenticMessage("submitted query"),
+			},
+			{EventID: "tool-result", Kind: adk.SessionEventMessage, Message: toolResult},
 		},
-		{EventID: "tool-result", Kind: adk.SessionEventMessage, Message: toolResult},
-	}))
+	)))
 
 	executor := progressExecutor(t, store)
 	progress, err := executor.ReadProgress(
@@ -153,7 +159,7 @@ func TestReadDurableTaskProgressBoundsRecentMessages(t *testing.T) {
 	ctx := context.Background()
 	store := adksession.NewInMemoryStore[*schema.Message](nil)
 	task := durableProgressTask(t, backgroundtask.StatusRunning)
-	sessionID := task.Spec.ID + "/session"
+	sessionID := progressChildSessionID
 	events := []*adk.SessionEvent[*schema.Message]{{
 		EventID: "query", Kind: adk.SessionEventMessage,
 		Message: schema.UserMessage("submitted query"),
@@ -165,7 +171,9 @@ func TestReadDurableTaskProgressBoundsRecentMessages(t *testing.T) {
 			Message: schema.AssistantMessage(fmt.Sprintf("progress-%03d", i), nil),
 		})
 	}
-	require.NoError(t, store.AppendEvents(ctx, sessionID, events))
+	require.NoError(t, store.AppendEvents(
+		ctx, sessionID, taskProgressEvents(task.Spec.ID, events),
+	))
 
 	executor := progressExecutor(t, store)
 	progress, err := executor.ReadProgress(
@@ -181,16 +189,77 @@ func TestReadDurableTaskProgressBoundsRecentMessages(t *testing.T) {
 	assert.Contains(t, progress, "worker: progress-102")
 }
 
+func TestReadDurableTaskProgressScansSharedSessionPages_BitsUT(t *testing.T) {
+	ctx := context.Background()
+	store := adksession.NewInMemoryStore[*schema.Message](nil)
+	task := durableProgressTask(t, backgroundtask.StatusCompleted)
+	events := taskProgressEvents(task.Spec.ID, []*adk.SessionEvent[*schema.Message]{
+		{
+			EventID: "target-query", Kind: adk.SessionEventMessage,
+			Message: schema.UserMessage("target query"),
+		},
+		{
+			EventID: "target-result", Kind: adk.SessionEventMessage,
+			Message: schema.AssistantMessage("target result", nil),
+		},
+	})
+	for index := 0; index < 150; index++ {
+		events = append(events, taskProgressEvents(
+			"other-task",
+			[]*adk.SessionEvent[*schema.Message]{{
+				EventID: fmt.Sprintf("other-%03d", index),
+				Kind:    adk.SessionEventMessage,
+				Message: schema.AssistantMessage("other result", nil),
+			}},
+		)...)
+	}
+	require.NoError(t, store.AppendEvents(
+		ctx, progressChildSessionID, events,
+	))
+
+	executor := progressExecutor(t, store)
+	progress, err := executor.ReadProgress(
+		ctx,
+		task,
+		func(
+			_ context.Context,
+			_ string,
+			message *schema.Message,
+		) (string, error) {
+			return message.Content, nil
+		},
+	)
+	require.NoError(t, err)
+	require.Contains(t, progress, "target result")
+	require.NotContains(t, progress, "target query")
+	require.NotContains(t, progress, "other result")
+}
+
+const progressChildSessionID = "subagent-session/cGFyZW50/d29ya2Vy/subagent_task"
+
+func taskProgressEvents[M adk.MessageType](
+	taskID string,
+	events []*adk.SessionEvent[M],
+) []*adk.SessionEvent[M] {
+	for _, event := range events {
+		if event != nil {
+			event.Extra = map[string]any{"eino.background_task.id": taskID}
+		}
+	}
+	return events
+}
+
 func durableProgressTask(t *testing.T, status backgroundtask.Status) *backgroundtask.Task {
 	t.Helper()
 	payload, err := sonic.Marshal(map[string]any{
-		"version": 2, "subagent_name": "worker", "query": "submitted query",
+		"version": 3, "subagent_name": "worker", "query": "submitted query",
+		"child_session_id": progressChildSessionID,
 	})
 	require.NoError(t, err)
 	return &backgroundtask.Task{
 		Spec: backgroundtask.Spec{
 			ID: "subagent_task", ExecutorKey: durablesubagent.ExecutorKey,
-			Kind: TaskKindSubagent, Payload: payload,
+			Kind: TaskKindSubagent, Payload: payload, SessionID: "parent",
 		},
 		Status: status,
 	}

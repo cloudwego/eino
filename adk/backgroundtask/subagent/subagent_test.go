@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -71,6 +72,43 @@ type contextCaptureAgent struct {
 	name     string
 	contexts chan context.Context
 	release  chan struct{}
+}
+
+type historyCaptureAgent struct {
+	name string
+	runs [][]string
+}
+
+func (a *historyCaptureAgent) Name(context.Context) string        { return a.name }
+func (a *historyCaptureAgent) Description(context.Context) string { return "capture history" }
+func (a *historyCaptureAgent) Run(
+	_ context.Context,
+	input *adk.AgentInput,
+	_ ...adk.AgentRunOption,
+) *adk.AsyncIterator[*adk.AgentEvent] {
+	contents := make([]string, 0, len(input.Messages))
+	for _, message := range input.Messages {
+		contents = append(contents, message.Content)
+	}
+	a.runs = append(a.runs, contents)
+	iter, generator := adk.NewAsyncIteratorPair[*adk.AgentEvent]()
+	generator.Send(adk.EventFromMessage(
+		schema.AssistantMessage(
+			fmt.Sprintf("reply-%d", len(a.runs)), nil,
+		),
+		nil,
+		schema.Assistant,
+		a.name,
+	))
+	generator.Close()
+	return iter
+}
+func (a *historyCaptureAgent) Resume(
+	ctx context.Context,
+	_ *adk.ResumeInfo,
+	options ...adk.AgentRunOption,
+) *adk.AsyncIterator[*adk.AgentEvent] {
+	return a.Run(ctx, &adk.AgentInput{}, options...)
 }
 
 func (a *contextCaptureAgent) Name(context.Context) string        { return a.name }
@@ -331,10 +369,12 @@ func resumeFixture(
 	require.NoError(t, err)
 	payload, err := json.Marshal(taskPayload{
 		Version: payloadVersion, SubAgentName: "worker", Query: "query",
+		ChildSessionID: defaultChildSessionID("parent", "worker", "task"),
 	})
 	require.NoError(t, err)
 	return executor, backgroundtask.Spec{
-		ID: "task", ExecutorKey: ExecutorKey, Kind: "subagent", Payload: payload,
+		ID: "task", ExecutorKey: ExecutorKey, Kind: "subagent",
+		Payload: payload, SessionID: "parent",
 	}, state
 }
 
@@ -496,6 +536,24 @@ func TestHandleEventErrorControlOutcomes(t *testing.T) {
 		require.Nil(t, result)
 	})
 
+	t.Run("busy child session yields", func(t *testing.T) {
+		iter, generator := adk.NewAsyncIteratorPair[*adk.AgentEvent]()
+		generator.Close()
+		result, err := executor.handleEventError(
+			context.Background(),
+			iter,
+			task,
+			make(chan backgroundtask.ControlRequest),
+			adk.ErrSessionBusy,
+		)
+		require.NoError(t, err)
+		require.Equal(
+			t,
+			backgroundtask.ExecutionDirectiveYield,
+			result.Directive,
+		)
+	})
+
 	t.Run("stop", func(t *testing.T) {
 		iter, generator := adk.NewAsyncIteratorPair[*adk.AgentEvent]()
 		generator.Close()
@@ -524,7 +582,7 @@ func TestHandleEventErrorControlOutcomes(t *testing.T) {
 	})
 }
 
-func TestSubagentPayloadV2Validation_BitsUT(t *testing.T) {
+func TestSubagentPayloadV3Validation_BitsUT(t *testing.T) {
 	executor, spec, _ := resumeFixture(t, "approval")
 	require.NoError(t, executor.ValidateSpec(spec))
 
@@ -547,9 +605,15 @@ func TestSubagentPayloadV2Validation_BitsUT(t *testing.T) {
 	spec.Payload, err = json.Marshal(payload)
 	require.NoError(t, err)
 	require.ErrorContains(t, executor.ValidateSpec(spec), "query")
+
+	payload.Query = "query"
+	payload.ChildSessionID = ""
+	spec.Payload, err = json.Marshal(payload)
+	require.NoError(t, err)
+	require.ErrorContains(t, executor.ValidateSpec(spec), "child session id")
 }
 
-func TestSubmitPersistsMinimalPayloadAndDerivesChildIdentities_BitsUT(t *testing.T) {
+func TestSubmitPersistsChildSessionIdentity_BitsUT(t *testing.T) {
 	executor := newTestExecutor(t, nil)
 	require.NoError(t, executor.Register("worker", &AgentRegistration[*schema.Message]{
 		Agent: &resumableTestAgent{name: "worker"},
@@ -566,13 +630,112 @@ func TestSubmitPersistsMinimalPayloadAndDerivesChildIdentities_BitsUT(t *testing
 	require.NoError(t, err)
 	var payload map[string]any
 	require.NoError(t, json.Unmarshal(task.Spec.Payload, &payload))
+	expectedChildSessionID := defaultChildSessionID(
+		"parent-session",
+		"worker",
+		task.Spec.ID,
+	)
 	assert.Equal(t, map[string]any{
 		"version": float64(payloadVersion), "subagent_name": "worker", "query": "work",
+		"child_session_id": expectedChildSessionID,
 	}, payload)
-	assert.Equal(t, task.Spec.ID+"/session", childSessionID(task.Spec.ID))
+	childSessionID, err := ChildSessionIDFromTask(task)
+	require.NoError(t, err)
+	assert.Equal(t, expectedChildSessionID, childSessionID)
 	assert.Equal(t, task.Spec.ID+"/checkpoint", checkpointID(task.Spec.ID))
 	assert.Equal(t, "parent-session", task.Spec.SessionID)
 	assert.True(t, task.Spec.NotifySession)
+}
+
+func TestTasksCanReusePersistentChildSessionHistory_BitsUT(t *testing.T) {
+	sessionStore := adksession.NewInMemoryStore[*schema.Message](nil)
+	agent := &historyCaptureAgent{name: "worker"}
+	executor := newTestExecutor(t, sessionStore)
+	require.NoError(t, executor.Register("worker", &AgentRegistration[*schema.Message]{
+		Agent: agent,
+	}))
+	executors := backgroundtask.NewExecutorRegistry()
+	require.NoError(t, executors.Register(executor))
+	manager := mustNewBackgroundManager(
+		t,
+		context.Background(),
+		&backgroundtask.Config{Executors: executors},
+	)
+	defer manager.Close(context.Background())
+
+	childSessionID := defaultChildSessionID(
+		"parent",
+		"worker",
+		"persistent-child",
+	)
+	first, err := Submit(context.Background(), manager, &SubmitRequest{
+		SubAgentName: "worker", Query: "first request",
+		SessionID: "parent", ChildSessionID: childSessionID,
+	})
+	require.NoError(t, err)
+	require.NoError(t, manager.Execute(context.Background(), first.Spec.ID))
+	second, err := Submit(context.Background(), manager, &SubmitRequest{
+		SubAgentName: "worker", Query: "second request",
+		SessionID: "parent", ChildSessionID: childSessionID,
+	})
+	require.NoError(t, err)
+	require.NotEqual(t, first.Spec.ID, second.Spec.ID)
+	require.NoError(t, manager.Execute(context.Background(), second.Spec.ID))
+
+	require.Equal(t, [][]string{
+		{"first request"},
+		{"first request", "reply-1", "second request"},
+	}, agent.runs)
+	firstChild, err := ChildSessionIDFromTask(first)
+	require.NoError(t, err)
+	secondChild, err := ChildSessionIDFromTask(second)
+	require.NoError(t, err)
+	require.Equal(t, childSessionID, firstChild)
+	require.Equal(t, firstChild, secondChild)
+	format := func(
+		_ context.Context,
+		_ string,
+		message *schema.Message,
+	) (string, error) {
+		return message.Content, nil
+	}
+	firstProgress, err := executor.ReadProgress(
+		context.Background(), first, format,
+	)
+	require.NoError(t, err)
+	require.Contains(t, firstProgress, "reply-1")
+	require.NotContains(t, firstProgress, "reply-2")
+	secondProgress, err := executor.ReadProgress(
+		context.Background(), second, format,
+	)
+	require.NoError(t, err)
+	require.Contains(t, secondProgress, "reply-2")
+	require.NotContains(t, secondProgress, "reply-1")
+}
+
+func TestSubmitRejectsChildSessionFromAnotherOwner_BitsUT(t *testing.T) {
+	executor := newTestExecutor(t, nil)
+	require.NoError(t, executor.Register("worker", &AgentRegistration[*schema.Message]{
+		Agent: &resumableTestAgent{name: "worker"},
+	}))
+	executors := backgroundtask.NewExecutorRegistry()
+	require.NoError(t, executors.Register(executor))
+	manager := mustNewBackgroundManager(
+		t,
+		context.Background(),
+		&backgroundtask.Config{Executors: executors},
+	)
+
+	_, err := Submit(context.Background(), manager, &SubmitRequest{
+		SubAgentName: "worker", Query: "work", SessionID: "parent",
+		ChildSessionID: defaultChildSessionID("other-parent", "worker", "child"),
+	})
+	require.ErrorContains(t, err, "does not belong")
+	_, err = Submit(context.Background(), manager, &SubmitRequest{
+		SubAgentName: "worker", Query: "work", SessionID: "parent",
+		ChildSessionID: defaultChildSessionID("parent", "other-agent", "child"),
+	})
+	require.ErrorContains(t, err, "does not belong")
 }
 
 func executionFixture(
@@ -849,6 +1012,10 @@ func TestSubAgentTaskResumesAfterManagerReconstruction_BitsUT(t *testing.T) {
 	var persisted taskPayload
 	require.NoError(t, json.Unmarshal(completed.Spec.Payload, &persisted))
 	assert.Equal(t, "do work", persisted.Query)
-	assert.Equal(t, childSessionID(task.Spec.ID), completed.Spec.ID+"/session")
+	assert.Equal(
+		t,
+		defaultChildSessionID("parent-session", "worker", task.Spec.ID),
+		persisted.ChildSessionID,
+	)
 	assert.Equal(t, checkpointID(task.Spec.ID), completed.Spec.ID+"/checkpoint")
 }
