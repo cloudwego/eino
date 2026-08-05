@@ -286,6 +286,28 @@ func TestExecutorValidateResumeTargets_BitsUT(t *testing.T) {
 	})
 }
 
+func TestExecutorValidatesRecoveryCheckpoint_BitsUT(t *testing.T) {
+	executor, spec, _ := resumeFixture(t, "approval")
+	for _, testCase := range []struct {
+		name       string
+		checkpoint []byte
+		errorText  string
+	}{
+		{name: "missing", errorText: "compatible checkpoint is required"},
+		{name: "malformed", checkpoint: []byte("invalid"), errorText: "checkpoint state does not match task"},
+		{name: "invalid state", checkpoint: []byte(`{"sequence":0}`), errorText: "checkpoint state does not match task"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			_, err := executor.Execute(
+				context.Background(),
+				&backgroundtask.Task{Spec: spec, Attempt: 2, Checkpoint: testCase.checkpoint},
+				nil,
+			)
+			require.ErrorContains(t, err, testCase.errorText)
+		})
+	}
+}
+
 func TestAttack_ValidateResumePreservesLargeIntegers(t *testing.T) {
 	executor, spec, checkpoint := resumeFixture(t, "approval")
 	const resume = `{"approval":{"ticket":9007199254740993}}`

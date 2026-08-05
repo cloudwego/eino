@@ -346,9 +346,6 @@ func (e *runnerEnvironmentExecutor) ValidateExecution(ctx context.Context, _ *ba
 	e.environment = environment
 	return nil
 }
-func (*runnerEnvironmentExecutor) ValidateCheckpoint(context.Context, backgroundtask.Spec, []byte) error {
-	return nil
-}
 func (*runnerEnvironmentExecutor) ValidateResume(
 	context.Context,
 	backgroundtask.Spec,

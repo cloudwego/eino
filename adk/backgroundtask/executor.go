@@ -80,7 +80,6 @@ type Executor interface {
 	LeaseExpiryPolicy() LeaseExpiryPolicy
 	ValidateSpec(Spec) error
 	ValidateExecution(context.Context, *Task) error
-	ValidateCheckpoint(context.Context, Spec, []byte) error
 	ValidateResume(context.Context, Spec, []byte, []byte) ([]byte, error)
 	SupportsDrain() bool
 	Execute(context.Context, *Task, ExecutionRuntime) (*ExecutionResult, error)
@@ -779,16 +778,7 @@ func (m *Manager) executeClaim(
 			err = safe.NewPanicErr(p, debug.Stack())
 		}
 	}()
-	executionTask := cloneTask(claimed)
-	if len(executionTask.Checkpoint) > 0 {
-		if checkpointErr := executor.ValidateCheckpoint(
-			ctx, cloneSpec(executionTask.Spec), cloneBytes(executionTask.Checkpoint),
-		); checkpointErr != nil {
-			executionTask.Checkpoint = nil
-			executionTask.PendingResume = nil
-		}
-	}
-	return executor.Execute(ctx, executionTask, runtime)
+	return executor.Execute(ctx, cloneTask(claimed), runtime)
 }
 
 func boundedError(err error) string {

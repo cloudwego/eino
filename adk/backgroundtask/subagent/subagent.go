@@ -195,9 +195,7 @@ func checkpointID(taskID string) string {
 	return taskID + "/checkpoint"
 }
 
-// ValidateCheckpoint verifies that checkpoint can resume the task described by spec.
-func (e *Executor[M]) ValidateCheckpoint(
-	_ context.Context,
+func validateCheckpoint(
 	spec backgroundtask.Spec,
 	checkpoint []byte,
 ) error {
@@ -216,7 +214,7 @@ func (e *Executor[M]) ValidateCheckpoint(
 
 // ValidateResume validates and normalizes opaque resume data for a checkpoint.
 func (e *Executor[M]) ValidateResume(
-	ctx context.Context,
+	_ context.Context,
 	spec backgroundtask.Spec,
 	checkpoint []byte,
 	resumeData []byte,
@@ -224,7 +222,7 @@ func (e *Executor[M]) ValidateResume(
 	if err := e.ValidateSpec(spec); err != nil {
 		return nil, err
 	}
-	if err := e.ValidateCheckpoint(ctx, spec, checkpoint); err != nil {
+	if err := validateCheckpoint(spec, checkpoint); err != nil {
 		return nil, err
 	}
 	var state checkpointState
@@ -260,8 +258,10 @@ func (e *Executor[M]) Execute(
 	task *backgroundtask.Task,
 	runtime backgroundtask.ExecutionRuntime,
 ) (result *backgroundtask.ExecutionResult, err error) {
-	if task.Attempt > 1 && len(task.Checkpoint) == 0 {
-		return nil, errors.New("backgroundtask/subagent: task cannot restart without a checkpoint")
+	if task.Attempt > 1 || len(task.Checkpoint) > 0 {
+		if err = validateCheckpoint(task.Spec, task.Checkpoint); err != nil {
+			return nil, err
+		}
 	}
 	payload, err := decodePayload(task.Spec)
 	if err != nil {

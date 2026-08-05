@@ -47,10 +47,6 @@ func (*coordinatorExecutor) ValidateExecution(context.Context, *backgroundtask.T
 	return nil
 }
 
-func (*coordinatorExecutor) ValidateCheckpoint(context.Context, backgroundtask.Spec, []byte) error {
-	return nil
-}
-
 func (*coordinatorExecutor) ValidateResume(
 	context.Context,
 	backgroundtask.Spec,

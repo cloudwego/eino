@@ -123,31 +123,6 @@ func (e *executor) ValidateExecution(ctx context.Context, task *backgroundtask.T
 	return nil
 }
 
-func (e *executor) ValidateCheckpoint(
-	_ context.Context,
-	spec backgroundtask.Spec,
-	checkpoint []byte,
-) error {
-	if !e.recoverable {
-		if len(checkpoint) != 0 {
-			return errors.New("backgroundtask/tool: plain tool cannot recover a checkpoint")
-		}
-		return nil
-	}
-	payload, err := e.decodePayload(spec)
-	if err != nil {
-		return err
-	}
-	_, ok := e.registry.resolve(payload.ToolName, true)
-	if !ok {
-		return fmt.Errorf("backgroundtask/tool: recoverable tool %q is unavailable", payload.ToolName)
-	}
-	// Managed tools validate inside Execute so an incompatible boundary
-	// checkpoint fails the claimed attempt instead of being silently discarded
-	// by Manager's compatibility fallback.
-	return nil
-}
-
 func (*executor) ValidateResume(
 	context.Context,
 	backgroundtask.Spec,

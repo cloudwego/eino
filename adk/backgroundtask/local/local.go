@@ -322,10 +322,6 @@ func (e *executor) ValidateExecution(_ context.Context, task *backgroundtask.Tas
 	return err
 }
 
-func (*executor) ValidateCheckpoint(context.Context, backgroundtask.Spec, []byte) error {
-	return errors.New("backgroundtask/local: process-local tasks do not support checkpoints")
-}
-
 func (*executor) ValidateResume(
 	context.Context,
 	backgroundtask.Spec,

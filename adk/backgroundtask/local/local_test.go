@@ -376,9 +376,6 @@ func TestRunnerLocalContracts(t *testing.T) {
 	require.Same(t, manager, runner.Manager())
 	var nilRunner *Runner
 	require.Nil(t, nilRunner.Manager())
-	require.Error(t, runner.executor.ValidateCheckpoint(
-		context.Background(), backgroundtask.Spec{}, []byte("checkpoint"),
-	))
 	_, err := runner.executor.ValidateResume(
 		context.Background(), backgroundtask.Spec{}, nil, nil,
 	)

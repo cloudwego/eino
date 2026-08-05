@@ -90,23 +90,6 @@ func TestExecutorValidationBoundaries(t *testing.T) {
 			Payload: encodedPayload(t, "plain", `{}`),
 		},
 	}))
-	require.Error(t, plainExecutor.ValidateCheckpoint(
-		context.Background(), backgroundtask.Spec{}, []byte("checkpoint"),
-	))
-	require.NoError(t, plainExecutor.ValidateCheckpoint(
-		context.Background(), backgroundtask.Spec{}, nil,
-	))
-	require.Error(t, recoverableExecutor.ValidateCheckpoint(
-		context.Background(), backgroundtask.Spec{}, nil,
-	))
-	require.NoError(t, recoverableExecutor.ValidateCheckpoint(
-		context.Background(),
-		backgroundtask.Spec{
-			ExecutorKey: RecoverableExecutorKey, Kind: "background_tool",
-			Payload: encodedPayload(t, "recoverable", `{}`),
-		},
-		[]byte("opaque"),
-	))
 	_, err := plainExecutor.ValidateResume(context.Background(), backgroundtask.Spec{}, nil, nil)
 	require.ErrorContains(t, err, "unsupported")
 }
@@ -307,13 +290,6 @@ func (e *sessionCaptureExecutor) ValidateExecution(
 	sessionID, err := sessionIDFromContext(ctx)
 	e.sessionID = sessionID
 	return err
-}
-func (*sessionCaptureExecutor) ValidateCheckpoint(
-	context.Context,
-	backgroundtask.Spec,
-	[]byte,
-) error {
-	return nil
 }
 func (*sessionCaptureExecutor) ValidateResume(
 	context.Context,

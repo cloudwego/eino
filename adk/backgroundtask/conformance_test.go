@@ -33,19 +33,17 @@ type scriptedExecutor struct {
 	key                  string
 	validateErr          error
 	validateExecutionErr error
-	checkpointErr        error
 	normalizedResume     []byte
 	resumeErr            error
 	leaseExpiryPolicy    LeaseExpiryPolicy
 	disableDrain         bool
 	execute              func(context.Context, *Task, ExecutionRuntime) (*ExecutionResult, error)
 
-	mu                  sync.Mutex
-	validated           []Spec
-	checkpointValidated [][]byte
-	resumeCheckpoint    []byte
-	resumeInput         []byte
-	executed            []*Task
+	mu               sync.Mutex
+	validated        []Spec
+	resumeCheckpoint []byte
+	resumeInput      []byte
+	executed         []*Task
 }
 
 func (e *scriptedExecutor) Key() string {
@@ -74,13 +72,6 @@ func (e *scriptedExecutor) ValidateExecution(context.Context, *Task) error {
 }
 
 func (e *scriptedExecutor) SupportsDrain() bool { return !e.disableDrain }
-
-func (e *scriptedExecutor) ValidateCheckpoint(_ context.Context, _ Spec, checkpoint []byte) error {
-	e.mu.Lock()
-	e.checkpointValidated = append(e.checkpointValidated, cloneBytes(checkpoint))
-	e.mu.Unlock()
-	return e.checkpointErr
-}
 
 func (e *scriptedExecutor) ValidateResume(
 	_ context.Context,
@@ -252,28 +243,16 @@ func TestManagerReducesOrdinaryErrorsToBoundedDurableStrings_BitsUT(t *testing.T
 	assert.Nil(t, failed.ResultData)
 }
 
-func TestManagerValidatesCheckpointAndFallsBackToSpec_BitsUT(t *testing.T) {
-	t.Run("compatible checkpoint is passed through", func(t *testing.T) {
-		executor := &scriptedExecutor{}
-		store, clock := recoveredTaskStore(t, "compatible", []byte("checkpoint"))
-		manager := managerWithExecutor(t, store, executor, 5*time.Second)
+func TestManagerPassesCheckpointUnchangedToExecutor_BitsUT(t *testing.T) {
+	executor := &scriptedExecutor{}
+	store, clock := recoveredTaskStore(t, "opaque", []byte("executor-owned"))
+	manager := managerWithExecutor(t, store, executor, 5*time.Second)
 
-		require.NoError(t, manager.Execute(context.Background(), "compatible"))
-		require.Len(t, executor.executed, 1)
-		assert.Equal(t, "checkpoint", string(executor.executed[0].Checkpoint))
-		assert.Equal(t, time.Unix(106, 0), clock.Now())
-	})
-
-	t.Run("invalid checkpoint is unavailable to executor", func(t *testing.T) {
-		executor := &scriptedExecutor{checkpointErr: errors.New("incompatible")}
-		store, _ := recoveredTaskStore(t, "incompatible", []byte("bad"))
-		manager := managerWithExecutor(t, store, executor, 5*time.Second)
-
-		require.NoError(t, manager.Execute(context.Background(), "incompatible"))
-		require.Len(t, executor.executed, 1)
-		assert.Equal(t, int64(2), executor.executed[0].Attempt)
-		assert.Nil(t, executor.executed[0].Checkpoint)
-	})
+	require.NoError(t, manager.Execute(context.Background(), "opaque"))
+	require.Len(t, executor.executed, 1)
+	assert.Equal(t, int64(2), executor.executed[0].Attempt)
+	assert.Equal(t, "executor-owned", string(executor.executed[0].Checkpoint))
+	assert.Equal(t, time.Unix(106, 0), clock.Now())
 }
 
 func recoveredTaskStore(t *testing.T, id string, checkpoint []byte) (*InMemoryStore, *testClock) {
@@ -294,12 +273,11 @@ func recoveredTaskStore(t *testing.T, id string, checkpoint []byte) (*InMemorySt
 	return store, clock
 }
 
-func TestNonRestartableExecutorRejectsExactMissingCheckpointDiscriminator_BitsUT(t *testing.T) {
+func TestExecutorOwnsCheckpointCompatibility_BitsUT(t *testing.T) {
 	executor := &scriptedExecutor{
-		checkpointErr: errors.New("corrupt"),
 		execute: func(_ context.Context, task *Task, _ ExecutionRuntime) (*ExecutionResult, error) {
-			if task.Attempt > 1 && len(task.Checkpoint) == 0 {
-				return nil, errors.New("unsafe restart rejected")
+			if task.Attempt > 1 && string(task.Checkpoint) != "valid" {
+				return nil, errors.New("unsafe checkpoint rejected")
 			}
 			return &ExecutionResult{Status: StatusCompleted, Data: []byte("ok")}, nil
 		},
@@ -311,7 +289,7 @@ func TestNonRestartableExecutorRejectsExactMissingCheckpointDiscriminator_BitsUT
 	failed, err := store.Get(context.Background(), "non-restartable")
 	require.NoError(t, err)
 	assert.Equal(t, StateFailed, failed.Status)
-	assert.Equal(t, "unsafe restart rejected", failed.ResultError)
+	assert.Equal(t, "unsafe checkpoint rejected", failed.ResultError)
 }
 
 func TestManagerResumeValidatesAndStoresNormalizedOpaqueInput_BitsUT(t *testing.T) {
