@@ -36,10 +36,12 @@ type Registration struct {
 	// Description formats persisted arguments for task presentation. Nil uses
 	// the tool name. It may be called concurrently and must not panic.
 	Description func(arguments string) string
-	// LaunchOutput formats a successfully completed foreground result. Nil uses
-	// raw result bytes. It may be called concurrently; errors are returned to
-	// the invoking model call without changing terminal task state.
-	LaunchOutput func(context.Context, *backgroundtask.Task) (any, error)
+	// RenderResult returns rich content for a successfully completed foreground
+	// result. The framework prepends its text control envelope to the returned
+	// parts. Nil embeds raw result bytes in that envelope. It may be called
+	// concurrently; errors are returned to the invoking model call without
+	// changing terminal task state.
+	RenderResult func(context.Context, *backgroundtask.Task) (*schema.ToolResult, error)
 	// Materializer optionally derives an EventID-idempotent output file.
 	Materializer OutputMaterializer
 }

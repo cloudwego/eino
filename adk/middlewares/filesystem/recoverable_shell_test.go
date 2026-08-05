@@ -29,6 +29,7 @@ import (
 	backgroundshell "github.com/cloudwego/eino/adk/backgroundtask/shell"
 	backgroundtool "github.com/cloudwego/eino/adk/backgroundtask/tool"
 	componenttool "github.com/cloudwego/eino/components/tool"
+	"github.com/cloudwego/eino/schema"
 )
 
 type recoverableShellStub struct {
@@ -99,12 +100,13 @@ func TestRecoverableShellUsesManagedToolLifecycle(t *testing.T) {
 	tools, err := getFilesystemTools(context.Background(), config)
 	require.NoError(t, err)
 	require.Len(t, tools, 1)
-	result, err := tools[0].(componenttool.InvokableTool).InvokableRun(
-		context.Background(), `{"command":"echo hello"}`,
+	result, err := tools[0].(componenttool.EnhancedInvokableTool).InvokableRun(
+		context.Background(), &schema.ToolArgument{Text: `{"command":"echo hello"}`},
 	)
 	require.NoError(t, err)
+	require.NotEmpty(t, result.Parts)
 	var event backgroundtool.ManagedToolResponseEvent
-	require.NoError(t, json.Unmarshal([]byte(result), &event))
+	require.NoError(t, json.Unmarshal([]byte(result.Parts[0].Text), &event))
 	require.Equal(t, backgroundtool.ManagedToolResponseEventLaunchResult, event.Type)
 	require.Equal(t, "shell-task", event.TaskID)
 	require.Equal(t, backgroundtask.StatusCompleted, event.Status)

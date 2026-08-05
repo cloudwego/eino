@@ -118,7 +118,8 @@ type Update struct {
 	Metadata map[string]string `json:"metadata,omitempty"`
 }
 
-// ManagedToolResponseEventType identifies one model-facing managed-tool stream variant.
+// ManagedToolResponseEventType identifies one model-facing managed-tool
+// response variant.
 type ManagedToolResponseEventType string
 
 const (
@@ -131,8 +132,10 @@ const (
 	ManagedToolResponseEventLaunchResult ManagedToolResponseEventType = "launch_result"
 )
 
-// ManagedToolResponseEvent is the framework-owned model-facing NDJSON envelope. Type
-// determines the legal variant: update events set only Update, while
+// ManagedToolResponseEvent is the framework-owned model-facing text control
+// envelope. The enhanced managed-tool wrapper encodes it as the first text part
+// of every ToolResult; streaming uses one newline-terminated record per chunk.
+// Type determines the legal variant: update events set only Update, while
 // launch-result events set task identity, status, description, and optional
 // terminal Output or Error.
 type ManagedToolResponseEvent struct {

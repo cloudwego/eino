@@ -96,20 +96,20 @@ func updatingRunFrom(
 	}
 }
 
-func readAllStreamRecords(
+func readAllStreamResults(
 	t *testing.T,
-	stream *schema.StreamReader[string],
-) []string {
+	stream *schema.StreamReader[*schema.ToolResult],
+) []*schema.ToolResult {
 	t.Helper()
 	defer stream.Close()
-	var records []string
+	var results []*schema.ToolResult
 	for {
-		record, err := stream.Recv()
+		result, err := stream.Recv()
 		if errors.Is(err, io.EOF) {
-			return records
+			return results
 		}
 		require.NoError(t, err)
-		records = append(records, record)
+		results = append(results, result)
 	}
 }
 
@@ -124,11 +124,11 @@ func TestAttack_ReplayedEventProjectsOnceMaterializesTwice(t *testing.T) {
 		},
 	}
 	manager, wrapped := newAttackManagedTool(t, implementation, materializer)
-	stream, err := wrapped.(componenttool.StreamableTool).StreamableRun(
-		context.Background(), `{"value":"replay"}`,
+	stream, err := wrapped.(componenttool.EnhancedStreamableTool).StreamableRun(
+		context.Background(), toolArgument(`{"value":"replay"}`),
 	)
 	require.NoError(t, err)
-	events := decodeEvents(t, readAllStreamRecords(t, stream))
+	events := decodeEvents(t, readAllStreamResults(t, stream))
 	require.Len(t, events, 2)
 	require.Equal(t, ManagedToolResponseEventUpdate, events[0].Type)
 	require.Equal(t, ManagedToolResponseEventLaunchResult, events[1].Type)
@@ -155,11 +155,11 @@ func TestAttack_ConflictingEventIDFailsTask(t *testing.T) {
 		},
 	}
 	manager, wrapped := newAttackManagedTool(t, implementation, nil)
-	result, err := wrapped.(componenttool.InvokableTool).InvokableRun(
-		context.Background(), `{"value":"conflict"}`,
+	result, err := wrapped.(componenttool.EnhancedInvokableTool).InvokableRun(
+		context.Background(), toolArgument(`{"value":"conflict"}`),
 	)
 	require.NoError(t, err)
-	event := decodeEvents(t, []string{result})[0]
+	event := decodeEvents(t, []*schema.ToolResult{result})[0]
 	require.Equal(t, backgroundtask.StatusFailed, event.Status)
 	require.Contains(t, event.Error, backgroundtask.ErrTaskEventIDConflict.Error())
 	task, err := manager.Get(context.Background(), "attack-task")
@@ -175,11 +175,11 @@ func TestAttack_RecoverableUpdateRequiresEventID(t *testing.T) {
 		},
 	}
 	_, wrapped := newAttackManagedTool(t, implementation, nil)
-	result, err := wrapped.(componenttool.InvokableTool).InvokableRun(
-		context.Background(), `{"value":"missing-event"}`,
+	result, err := wrapped.(componenttool.EnhancedInvokableTool).InvokableRun(
+		context.Background(), toolArgument(`{"value":"missing-event"}`),
 	)
 	require.NoError(t, err)
-	event := decodeEvents(t, []string{result})[0]
+	event := decodeEvents(t, []*schema.ToolResult{result})[0]
 	require.Equal(t, backgroundtask.StatusFailed, event.Status)
 	require.Contains(t, event.Error, "event id is required")
 	t.Log("recoverable output without a stable replay identity was rejected")
@@ -221,8 +221,8 @@ func TestAttack_MaterializationPreservesStableReplayOrder(t *testing.T) {
 		},
 	}
 	_, wrapped := newAttackManagedTool(t, implementation, materializer)
-	_, err := wrapped.(componenttool.InvokableTool).InvokableRun(
-		context.Background(), `{"value":"ordered"}`,
+	_, err := wrapped.(componenttool.EnhancedInvokableTool).InvokableRun(
+		context.Background(), toolArgument(`{"value":"ordered"}`),
 	)
 	require.NoError(t, err)
 	materializer.mu.Lock()
@@ -244,15 +244,17 @@ func TestAttack_UpdateDataCannotForgeNDJSONBoundary(t *testing.T) {
 		},
 	}
 	_, wrapped := newAttackManagedTool(t, implementation, nil)
-	stream, err := wrapped.(componenttool.StreamableTool).StreamableRun(
-		context.Background(), `{"value":"ndjson"}`,
+	stream, err := wrapped.(componenttool.EnhancedStreamableTool).StreamableRun(
+		context.Background(), toolArgument(`{"value":"ndjson"}`),
 	)
 	require.NoError(t, err)
-	records := readAllStreamRecords(t, stream)
+	records := readAllStreamResults(t, stream)
 	require.Len(t, records, 2)
 	for _, record := range records {
+		require.NotNil(t, record)
+		require.NotEmpty(t, record.Parts)
 		var event ManagedToolResponseEvent
-		require.NoError(t, json.Unmarshal([]byte(record), &event))
+		require.NoError(t, json.Unmarshal([]byte(record.Parts[0].Text), &event))
 	}
 	events := decodeEvents(t, records)
 	require.Equal(t, forged, events[0].Update.Data)
@@ -268,12 +270,12 @@ func TestAttack_AbandonedUpdateStreamFailsBoundedly(t *testing.T) {
 	}
 	_, wrapped := newAttackManagedTool(t, implementation, nil)
 	started := time.Now()
-	result, err := wrapped.(componenttool.InvokableTool).InvokableRun(
-		context.Background(), `{"value":"abandoned"}`,
+	result, err := wrapped.(componenttool.EnhancedInvokableTool).InvokableRun(
+		context.Background(), toolArgument(`{"value":"abandoned"}`),
 	)
 	require.NoError(t, err)
 	require.Less(t, time.Since(started), terminalUpdateDrainTime+time.Second)
-	event := decodeEvents(t, []string{result})[0]
+	event := decodeEvents(t, []*schema.ToolResult{result})[0]
 	require.Equal(t, backgroundtask.StatusFailed, event.Status)
 	require.Contains(t, event.Error, "update stream did not close")
 	t.Log("a terminal operation with an abandoned update stream failed within the configured bound")

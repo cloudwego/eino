@@ -77,11 +77,11 @@ func ExampleNewManagedTool() {
 		Manager: manager, Executors: executors, Registry: registry, ToolName: "generate_video",
 		SessionID: func(context.Context) (string, error) { return "session", nil },
 	})
-	result, _ := wrapped.(componenttool.InvokableTool).InvokableRun(
-		context.Background(), `{"prompt":"launch"}`,
+	result, _ := wrapped.(componenttool.EnhancedInvokableTool).InvokableRun(
+		context.Background(), &schema.ToolArgument{Text: `{"prompt":"launch"}`},
 	)
 	var event backgroundtool.ManagedToolResponseEvent
-	_ = json.Unmarshal([]byte(result), &event)
+	_ = json.Unmarshal([]byte(result.Parts[0].Text), &event)
 	fmt.Println(event.TaskID, event.Status, event.Output)
 	// Output: task_video completed video ready
 }

@@ -69,10 +69,11 @@ type managedTool struct {
 	sessionID         func(context.Context) (string, error)
 }
 
-// NewManagedTool creates a wrapper implementing both InvokableTool and
-// StreamableTool. Invokable execution returns one NDJSON launch-result record;
-// streaming execution emits progress records followed by launch-result.
-// Detaching closes only the caller projection; durable persistence continues.
+// NewManagedTool creates a wrapper implementing EnhancedInvokableTool and
+// EnhancedStreamableTool. Every result includes a text control envelope;
+// completed foreground results may append rich parts through
+// Registration.RenderResult. Detaching closes only the caller projection;
+// durable persistence continues.
 func NewManagedTool(
 	ctx context.Context,
 	config *ManagedToolConfig,
@@ -121,32 +122,40 @@ func (t *managedTool) Info(context.Context) (*schema.ToolInfo, error) {
 
 func (t *managedTool) InvokableRun(
 	ctx context.Context,
-	arguments string,
+	toolArgument *schema.ToolArgument,
 	_ ...componenttool.Option,
-) (string, error) {
+) (*schema.ToolResult, error) {
+	if toolArgument == nil {
+		return nil, errors.New("backgroundtask/tool: tool argument is required")
+	}
+	arguments := toolArgument.Text
 	arguments, err := t.prepareInput(ctx, arguments)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	task, _, err := t.submit(ctx, arguments, false)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	task, err = foreground.Run(ctx, t.manager, t.policy, &foreground.Request{
 		TaskID: task.Spec.ID, RunInBackground: t.shouldRunInBackground(ctx, arguments),
 		TimeoutMs: t.timeout(ctx, arguments),
 	})
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	return t.encodeLaunchResult(ctx, task)
+	return t.renderLaunchResult(ctx, task)
 }
 
 func (t *managedTool) StreamableRun(
 	ctx context.Context,
-	arguments string,
+	toolArgument *schema.ToolArgument,
 	_ ...componenttool.Option,
-) (*schema.StreamReader[string], error) {
+) (*schema.StreamReader[*schema.ToolResult], error) {
+	if toolArgument == nil {
+		return nil, errors.New("backgroundtask/tool: tool argument is required")
+	}
+	arguments := toolArgument.Text
 	arguments, err := t.prepareInput(ctx, arguments)
 	if err != nil {
 		return nil, err
@@ -163,7 +172,7 @@ func (t *managedTool) StreamableRun(
 		})
 		runDone <- launchResult{task: result, err: runErr}
 	}()
-	reader, writer := schema.Pipe[string](projectionBuffer)
+	reader, writer := schema.Pipe[*schema.ToolResult](projectionBuffer)
 	go t.project(ctx, task.Spec.ID, projection, runDone, writer)
 	return reader, nil
 }
@@ -178,7 +187,7 @@ func (t *managedTool) project(
 	taskID string,
 	projection *liveProjection,
 	runDone <-chan launchResult,
-	writer *schema.StreamWriter[string],
+	writer *schema.StreamWriter[*schema.ToolResult],
 ) {
 	defer writer.Close()
 	updates := projection.updates
@@ -189,10 +198,10 @@ func (t *managedTool) project(
 				updates = nil
 				continue
 			}
-			record, err := encodeEvent(&ManagedToolResponseEvent{Type: ManagedToolResponseEventUpdate, Update: update})
+			record, err := renderEvent(&ManagedToolResponseEvent{Type: ManagedToolResponseEventUpdate, Update: update})
 			if err != nil {
 				t.registry.projections.remove(taskID)
-				writer.Send("", err)
+				writer.Send(nil, err)
 				return
 			}
 			if writer.Send(record, nil) {
@@ -202,20 +211,20 @@ func (t *managedTool) project(
 		case result := <-runDone:
 			if result.err != nil {
 				t.registry.projections.remove(taskID)
-				writer.Send("", result.err)
+				writer.Send(nil, result.err)
 				return
 			}
 			if result.task == nil {
 				t.registry.projections.remove(taskID)
-				writer.Send("", errors.New("backgroundtask/tool: foreground returned a nil task"))
+				writer.Send(nil, errors.New("backgroundtask/tool: foreground returned a nil task"))
 				return
 			}
 			if result.task.Status != backgroundtask.StatusRunning && updates != nil {
 				for update := range updates {
-					record, encodeErr := encodeEvent(&ManagedToolResponseEvent{Type: ManagedToolResponseEventUpdate, Update: update})
+					record, encodeErr := renderEvent(&ManagedToolResponseEvent{Type: ManagedToolResponseEventUpdate, Update: update})
 					if encodeErr != nil {
 						t.registry.projections.remove(taskID)
-						writer.Send("", encodeErr)
+						writer.Send(nil, encodeErr)
 						return
 					}
 					if writer.Send(record, nil) {
@@ -225,16 +234,16 @@ func (t *managedTool) project(
 				}
 			}
 			t.registry.projections.remove(taskID)
-			final, encodeErr := t.encodeLaunchResult(ctx, result.task)
+			final, encodeErr := t.renderLaunchResult(ctx, result.task)
 			if encodeErr != nil {
-				writer.Send("", encodeErr)
+				writer.Send(nil, encodeErr)
 				return
 			}
 			writer.Send(final, nil)
 			return
 		case <-ctx.Done():
 			t.registry.projections.remove(taskID)
-			writer.Send("", ctx.Err())
+			writer.Send(nil, ctx.Err())
 			return
 		}
 	}
@@ -357,24 +366,30 @@ func (t *managedTool) timeout(ctx context.Context, arguments string) *int {
 	return t.invocationTimeout(ctx, arguments)
 }
 
-func (t *managedTool) encodeLaunchResult(
+func (t *managedTool) renderLaunchResult(
 	ctx context.Context,
 	task *backgroundtask.Task,
-) (string, error) {
+) (*schema.ToolResult, error) {
 	if task == nil || task.Spec.ID == "" {
-		return "", errors.New("backgroundtask/tool: launch result requires a task id")
+		return nil, errors.New("backgroundtask/tool: launch result requires a task id")
 	}
 	event := &ManagedToolResponseEvent{
 		Type: ManagedToolResponseEventLaunchResult, TaskID: task.Spec.ID, Status: task.Status,
 		Description: task.Spec.Description,
 	}
+	var rich *schema.ToolResult
 	if task.Status == backgroundtask.StatusCompleted {
-		if t.registration.LaunchOutput != nil {
-			output, err := t.registration.LaunchOutput(ctx, task)
+		if t.registration.RenderResult != nil {
+			var err error
+			rich, err = t.registration.RenderResult(ctx, task)
 			if err != nil {
-				return "", fmt.Errorf("backgroundtask/tool: build launch output: %w", err)
+				return nil, fmt.Errorf("backgroundtask/tool: render completed result: %w", err)
 			}
-			event.Output = output
+			if rich == nil {
+				return nil, errors.New(
+					"backgroundtask/tool: result renderer returned nil",
+				)
+			}
 		} else if len(task.ResultData) > 0 {
 			var output any
 			if json.Unmarshal(task.ResultData, &output) == nil {
@@ -387,7 +402,25 @@ func (t *managedTool) encodeLaunchResult(
 	if task.Status == backgroundtask.StatusFailed || task.Status == backgroundtask.StatusCanceled {
 		event.Error = task.ResultError
 	}
-	return encodeEvent(event)
+	result, err := renderEvent(event)
+	if err != nil {
+		return nil, err
+	}
+	if rich != nil {
+		result.Parts = append(result.Parts, rich.Parts...)
+	}
+	return result, nil
+}
+
+func renderEvent(event *ManagedToolResponseEvent) (*schema.ToolResult, error) {
+	record, err := encodeEvent(event)
+	if err != nil {
+		return nil, err
+	}
+	return &schema.ToolResult{Parts: []schema.ToolOutputPart{{
+		Type: schema.ToolPartTypeText,
+		Text: record,
+	}}}, nil
 }
 
 func encodeEvent(event *ManagedToolResponseEvent) (string, error) {
@@ -396,24 +429,24 @@ func encodeEvent(event *ManagedToolResponseEvent) (string, error) {
 	}
 	data, err := json.Marshal(event)
 	if err != nil {
-		return "", fmt.Errorf("backgroundtask/tool: encode stream event: %w", err)
+		return "", fmt.Errorf("backgroundtask/tool: encode response event: %w", err)
 	}
 	return string(data) + "\n", nil
 }
 
 func validateManagedToolResponseEvent(event *ManagedToolResponseEvent) error {
 	if event == nil {
-		return errors.New("backgroundtask/tool: stream event is required")
+		return errors.New("backgroundtask/tool: response event is required")
 	}
 	switch event.Type {
 	case ManagedToolResponseEventUpdate:
 		if event.Update == nil || event.TaskID != "" || event.Status != "" ||
 			event.Description != "" || event.Output != nil || event.Error != "" {
-			return errors.New("backgroundtask/tool: invalid update stream event")
+			return errors.New("backgroundtask/tool: invalid update response event")
 		}
 	case ManagedToolResponseEventLaunchResult:
 		if event.TaskID == "" || event.Status == "" || event.Update != nil {
-			return errors.New("backgroundtask/tool: invalid launch-result stream event")
+			return errors.New("backgroundtask/tool: invalid launch-result response event")
 		}
 		if event.Status == backgroundtask.StatusCompleted {
 			if event.Error != "" {
@@ -423,7 +456,7 @@ func validateManagedToolResponseEvent(event *ManagedToolResponseEvent) error {
 			return errors.New("backgroundtask/tool: non-completed launch result cannot contain output")
 		}
 	default:
-		return errors.New("backgroundtask/tool: unknown stream event type")
+		return errors.New("backgroundtask/tool: unknown response event type")
 	}
 	return nil
 }
@@ -451,6 +484,6 @@ func sessionIDFromContext(ctx context.Context) (string, error) {
 }
 
 var (
-	_ componenttool.InvokableTool  = (*managedTool)(nil)
-	_ componenttool.StreamableTool = (*managedTool)(nil)
+	_ componenttool.EnhancedInvokableTool  = (*managedTool)(nil)
+	_ componenttool.EnhancedStreamableTool = (*managedTool)(nil)
 )

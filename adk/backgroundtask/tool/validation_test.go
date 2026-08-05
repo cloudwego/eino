@@ -225,15 +225,17 @@ func TestManagedToolConstructionAndSubmissionErrors(t *testing.T) {
 	require.NoError(t, err)
 	_, err = wrapped.Info(context.Background())
 	require.NoError(t, err)
-	_, err = wrapped.(*managedTool).InvokableRun(context.Background(), "")
+	_, err = wrapped.(*managedTool).InvokableRun(context.Background(), nil)
+	require.ErrorContains(t, err, "tool argument is required")
+	_, err = wrapped.(*managedTool).InvokableRun(context.Background(), toolArgument(""))
 	require.ErrorContains(t, err, "arguments are required")
 	_, err = wrapped.(*managedTool).InvokableRun(
-		context.Background(), strings.Repeat("x", maxArgumentsBytes+1),
+		context.Background(), toolArgument(strings.Repeat("x", maxArgumentsBytes+1)),
 	)
 	require.ErrorContains(t, err, "arguments exceed")
-	_, err = wrapped.(*managedTool).InvokableRun(context.Background(), `{`)
+	_, err = wrapped.(*managedTool).InvokableRun(context.Background(), toolArgument(`{`))
 	require.ErrorContains(t, err, "validate arguments")
-	_, err = wrapped.(*managedTool).InvokableRun(context.Background(), `{}`)
+	_, err = wrapped.(*managedTool).InvokableRun(context.Background(), toolArgument(`{}`))
 	require.ErrorContains(t, err, "session unavailable")
 
 	for _, testCase := range []struct {
@@ -257,7 +259,9 @@ func TestManagedToolConstructionAndSubmissionErrors(t *testing.T) {
 			SessionID: func(context.Context) (string, error) { return "session", nil },
 		})
 		require.NoError(t, createErr)
-		_, runErr := localWrapped.(*managedTool).InvokableRun(context.Background(), `{}`)
+		_, runErr := localWrapped.(*managedTool).InvokableRun(
+			context.Background(), toolArgument(`{}`),
+		)
 		require.ErrorContains(t, runErr, testCase.errorText)
 	}
 }
@@ -332,9 +336,11 @@ func TestManagedToolTimeoutOverrideStopsRun(t *testing.T) {
 		SessionID:           func(context.Context) (string, error) { return "session", nil },
 	})
 	require.NoError(t, err)
-	result, err := wrapped.(*managedTool).InvokableRun(context.Background(), `{}`)
+	result, err := wrapped.(*managedTool).InvokableRun(
+		context.Background(), toolArgument(`{}`),
+	)
 	require.NoError(t, err)
-	event := decodeEvents(t, []string{result})[0]
+	event := decodeEvents(t, []*schema.ToolResult{result})[0]
 	require.Equal(t, backgroundtask.StatusFailed, event.Status)
 	require.Contains(t, event.Error, "timed out")
 	select {
@@ -357,14 +363,14 @@ func TestManagedToolProjectionErrors(t *testing.T) {
 		ctx context.Context,
 		taskID string,
 		result launchResult,
-	) ([]string, error) {
+	) ([]*schema.ToolResult, error) {
 		t.Helper()
 		projection, err := managed.registry.projections.register(taskID)
 		require.NoError(t, err)
 		if result.task != nil && result.task.Status != backgroundtask.StatusRunning {
 			projection.closeUpdates()
 		}
-		reader, writer := schema.Pipe[string](2)
+		reader, writer := schema.Pipe[*schema.ToolResult](2)
 		done := make(chan launchResult, 1)
 		done <- result
 		go managed.project(ctx, taskID, projection, done, writer)
@@ -383,8 +389,8 @@ func TestManagedToolProjectionErrors(t *testing.T) {
 
 	invalidRegistration := &Registration{
 		Info: toolInfo("project"),
-		LaunchOutput: func(context.Context, *backgroundtask.Task) (any, error) {
-			return make(chan struct{}), nil
+		RenderResult: func(context.Context, *backgroundtask.Task) (*schema.ToolResult, error) {
+			return nil, errors.New("render failed")
 		},
 	}
 	managed = newManaged(invalidRegistration)
@@ -394,14 +400,14 @@ func TestManagedToolProjectionErrors(t *testing.T) {
 			Status: backgroundtask.StatusCompleted,
 		},
 	})
-	require.ErrorContains(t, err, "encode stream event")
+	require.ErrorContains(t, err, "render failed")
 
 	managed = newManaged(registration)
 	canceledCtx, cancel := context.WithCancel(context.Background())
 	cancel()
 	projection, err := managed.registry.projections.register("canceled")
 	require.NoError(t, err)
-	reader, writer := schema.Pipe[string](1)
+	reader, writer := schema.Pipe[*schema.ToolResult](1)
 	go managed.project(
 		canceledCtx, "canceled", projection, make(chan launchResult), writer,
 	)
@@ -411,7 +417,7 @@ func TestManagedToolProjectionErrors(t *testing.T) {
 	managed = newManaged(registration)
 	projection, err = managed.registry.projections.register("closed-reader")
 	require.NoError(t, err)
-	reader, writer = schema.Pipe[string](1)
+	reader, writer = schema.Pipe[*schema.ToolResult](1)
 	reader.Close()
 	projection.updates <- &Update{EventID: "ignored"}
 	go managed.project(
@@ -429,11 +435,11 @@ func newRegistryWithProjection() *Registry {
 
 func receiveProjectResult(
 	t *testing.T,
-	reader *schema.StreamReader[string],
-) ([]string, error) {
+	reader *schema.StreamReader[*schema.ToolResult],
+) ([]*schema.ToolResult, error) {
 	t.Helper()
 	defer reader.Close()
-	var records []string
+	var records []*schema.ToolResult
 	for {
 		record, err := reader.Recv()
 		if err != nil {

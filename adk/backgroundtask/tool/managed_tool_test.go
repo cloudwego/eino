@@ -160,12 +160,19 @@ func newTestManagedTool(
 	return manager, wrapped
 }
 
-func decodeEvents(t *testing.T, records []string) []*ManagedToolResponseEvent {
+func toolArgument(text string) *schema.ToolArgument {
+	return &schema.ToolArgument{Text: text}
+}
+
+func decodeEvents(t *testing.T, results []*schema.ToolResult) []*ManagedToolResponseEvent {
 	t.Helper()
-	events := make([]*ManagedToolResponseEvent, 0, len(records))
-	for _, record := range records {
+	events := make([]*ManagedToolResponseEvent, 0, len(results))
+	for _, result := range results {
+		require.NotNil(t, result)
+		require.NotEmpty(t, result.Parts)
+		require.Equal(t, schema.ToolPartTypeText, result.Parts[0].Type)
 		var event ManagedToolResponseEvent
-		require.NoError(t, json.Unmarshal([]byte(record), &event))
+		require.NoError(t, json.Unmarshal([]byte(result.Parts[0].Text), &event))
 		events = append(events, &event)
 	}
 	return events
@@ -186,15 +193,15 @@ func TestManagedToolPreparesInputBeforeTaskCreation_BitsUT(t *testing.T) {
 	}
 	manager, wrapped := newTestManagedTool(t, implementation, time.Second)
 
-	_, err := wrapped.(componenttool.InvokableTool).InvokableRun(
-		context.Background(), `{"value":"original"}`,
+	_, err := wrapped.(componenttool.EnhancedInvokableTool).InvokableRun(
+		context.Background(), toolArgument(`{"value":"original"}`),
 	)
 	require.ErrorIs(t, err, prepareErr)
 	_, err = manager.Get(context.Background(), "task-fixed")
 	require.ErrorIs(t, err, backgroundtask.ErrNotFound)
 
-	reader, err := wrapped.(componenttool.StreamableTool).StreamableRun(
-		context.Background(), `{"value":"original"}`,
+	reader, err := wrapped.(componenttool.EnhancedStreamableTool).StreamableRun(
+		context.Background(), toolArgument(`{"value":"original"}`),
 	)
 	require.ErrorIs(t, err, prepareErr)
 	require.Nil(t, reader)
@@ -401,11 +408,11 @@ func TestManagedToolFastCompletionReturnsCanonicalTaskID(t *testing.T) {
 		},
 	}
 	manager, wrapped := newTestManagedTool(t, implementation, time.Second)
-	result, err := wrapped.(componenttool.InvokableTool).InvokableRun(
-		context.Background(), `{"value":"x"}`,
+	result, err := wrapped.(componenttool.EnhancedInvokableTool).InvokableRun(
+		context.Background(), toolArgument(`{"value":"x"}`),
 	)
 	require.NoError(t, err)
-	events := decodeEvents(t, []string{result})
+	events := decodeEvents(t, []*schema.ToolResult{result})
 	require.Equal(t, ManagedToolResponseEventLaunchResult, events[0].Type)
 	require.Equal(t, "task-fixed", events[0].TaskID)
 	require.Equal(t, backgroundtask.StatusCompleted, events[0].Status)
@@ -439,11 +446,11 @@ func TestManagedToolAutoBackgroundAndStop(t *testing.T) {
 		},
 	}
 	manager, wrapped := newTestManagedTool(t, implementation, 5*time.Millisecond)
-	result, err := wrapped.(componenttool.InvokableTool).InvokableRun(
-		context.Background(), `{"value":"slow"}`,
+	result, err := wrapped.(componenttool.EnhancedInvokableTool).InvokableRun(
+		context.Background(), toolArgument(`{"value":"slow"}`),
 	)
 	require.NoError(t, err)
-	event := decodeEvents(t, []string{result})[0]
+	event := decodeEvents(t, []*schema.ToolResult{result})[0]
 	require.Equal(t, backgroundtask.StatusRunning, event.Status)
 	task, err := manager.Get(context.Background(), event.TaskID)
 	require.NoError(t, err)
@@ -488,12 +495,12 @@ func TestManagedToolStreamPersistsBeforeNDJSONProjection(t *testing.T) {
 		},
 	}
 	manager, wrapped := newTestManagedTool(t, implementation, time.Second)
-	stream, err := wrapped.(componenttool.StreamableTool).StreamableRun(
-		context.Background(), `{"value":"stream"}`,
+	stream, err := wrapped.(componenttool.EnhancedStreamableTool).StreamableRun(
+		context.Background(), toolArgument(`{"value":"stream"}`),
 	)
 	require.NoError(t, err)
 	defer stream.Close()
-	var records []string
+	var records []*schema.ToolResult
 	for {
 		record, recvErr := stream.Recv()
 		if errors.Is(recvErr, io.EOF) {
@@ -569,8 +576,8 @@ func TestManagedToolDrainYieldsAndRecoversWithoutStop(t *testing.T) {
 		SessionID:            func(context.Context) (string, error) { return "session", nil },
 	})
 	require.NoError(t, err)
-	_, err = wrapped.(componenttool.InvokableTool).InvokableRun(
-		context.Background(), `{"value":"recover"}`,
+	_, err = wrapped.(componenttool.EnhancedInvokableTool).InvokableRun(
+		context.Background(), toolArgument(`{"value":"recover"}`),
 	)
 	require.NoError(t, err)
 	<-started
@@ -635,8 +642,8 @@ func TestManagedToolMaterializerIsDerivedAndFailureIsNonTerminal(t *testing.T) {
 		SessionID: func(context.Context) (string, error) { return "session", nil },
 	})
 	require.NoError(t, err)
-	_, err = wrapped.(componenttool.InvokableTool).InvokableRun(
-		context.Background(), `{"value":"x"}`,
+	_, err = wrapped.(componenttool.EnhancedInvokableTool).InvokableRun(
+		context.Background(), toolArgument(`{"value":"x"}`),
 	)
 	require.NoError(t, err)
 	task, err := manager.Get(context.Background(), "materialized")
@@ -664,8 +671,8 @@ func TestManagedToolPlainRegistrationUsesFailExecutor(t *testing.T) {
 		},
 	}
 	manager, wrapped := newTestManagedTool(t, implementation, time.Second)
-	_, err := wrapped.(componenttool.InvokableTool).InvokableRun(
-		context.Background(), `{"value":"plain"}`,
+	_, err := wrapped.(componenttool.EnhancedInvokableTool).InvokableRun(
+		context.Background(), toolArgument(`{"value":"plain"}`),
 	)
 	require.NoError(t, err)
 	task, err := manager.Get(context.Background(), "task-fixed")
@@ -699,11 +706,11 @@ func TestAttack_PlainUpdateGeneratedEventIDNotMaterialized(t *testing.T) {
 		SessionID: func(context.Context) (string, error) { return "session", nil },
 	})
 	require.NoError(t, err)
-	stream, err := wrapped.(componenttool.StreamableTool).StreamableRun(
-		context.Background(), `{"value":"plain"}`,
+	stream, err := wrapped.(componenttool.EnhancedStreamableTool).StreamableRun(
+		context.Background(), toolArgument(`{"value":"plain"}`),
 	)
 	require.NoError(t, err)
-	projected := decodeEvents(t, readAllStreamRecords(t, stream))
+	projected := decodeEvents(t, readAllStreamResults(t, stream))
 	require.Len(t, projected, 2)
 	require.Equal(t, ManagedToolResponseEventUpdate, projected[0].Type)
 	require.NotNil(t, projected[0].Update)
@@ -723,7 +730,7 @@ func TestAttack_PlainUpdateGeneratedEventIDNotMaterialized(t *testing.T) {
 	materializer.mu.Unlock()
 }
 
-func TestManagedToolRejectsInvalidFinalOutputWithoutPartialResult(t *testing.T) {
+func TestManagedToolRejectsNilRichResultWithoutPartialResult(t *testing.T) {
 	registry := NewRegistry()
 	implementation := &plainFakeTool{
 		start: func(context.Context, *StartRequest) (Run, error) {
@@ -734,8 +741,8 @@ func TestManagedToolRejectsInvalidFinalOutputWithoutPartialResult(t *testing.T) 
 	}
 	require.NoError(t, registry.Register(&Registration{
 		Info: toolInfo("external"), Tool: implementation,
-		LaunchOutput: func(context.Context, *backgroundtask.Task) (any, error) {
-			return func() {}, nil
+		RenderResult: func(context.Context, *backgroundtask.Task) (*schema.ToolResult, error) {
+			return nil, nil
 		},
 	}))
 	executors := backgroundtask.NewExecutorRegistry()
@@ -750,11 +757,77 @@ func TestManagedToolRejectsInvalidFinalOutputWithoutPartialResult(t *testing.T) 
 		SessionID: func(context.Context) (string, error) { return "session", nil },
 	})
 	require.NoError(t, err)
-	result, err := wrapped.(componenttool.InvokableTool).InvokableRun(
-		context.Background(), `{"value":"x"}`,
+	result, err := wrapped.(componenttool.EnhancedInvokableTool).InvokableRun(
+		context.Background(), toolArgument(`{"value":"x"}`),
 	)
-	require.ErrorContains(t, err, "encode stream event")
-	require.Empty(t, result)
+	require.ErrorContains(t, err, "result renderer returned nil")
+	require.Nil(t, result)
+}
+
+func TestManagedToolReturnsControlEnvelopeAndRichResult_BitsUT(t *testing.T) {
+	imageURL := "https://example.com/result.png"
+	registry := NewRegistry()
+	implementation := &plainFakeTool{
+		start: func(context.Context, *StartRequest) (Run, error) {
+			return &fakeRun{wait: func(context.Context) (*Outcome, error) {
+				return &Outcome{
+					Status: backgroundtask.StatusCompleted,
+					Data:   []byte(`{"internal":"result"}`),
+				}, nil
+			}}, nil
+		},
+	}
+	require.NoError(t, registry.Register(&Registration{
+		Info: toolInfo("external"), Tool: implementation,
+		RenderResult: func(
+			_ context.Context,
+			task *backgroundtask.Task,
+		) (*schema.ToolResult, error) {
+			require.JSONEq(t, `{"internal":"result"}`, string(task.ResultData))
+			return &schema.ToolResult{Parts: []schema.ToolOutputPart{
+				{Type: schema.ToolPartTypeText, Text: "render complete"},
+				{
+					Type: schema.ToolPartTypeImage,
+					Image: &schema.ToolOutputImage{MessagePartCommon: schema.MessagePartCommon{
+						URL: &imageURL,
+					}},
+				},
+			}}, nil
+		},
+	}))
+	executors := backgroundtask.NewExecutorRegistry()
+	manager := mustNewBackgroundManager(t, context.Background(), &backgroundtask.Config{
+		Executors: executors,
+		IDGen: func(context.Context, *backgroundtask.AllocateTaskIDRequest) (string, error) {
+			return "rich-output", nil
+		},
+	})
+	wrapped, err := NewManagedTool(context.Background(), &ManagedToolConfig{
+		Manager: manager, Executors: executors, Registry: registry, ToolName: "external",
+		SessionID: func(context.Context) (string, error) { return "session", nil },
+	})
+	require.NoError(t, err)
+
+	_, isStandardInvoke := wrapped.(componenttool.InvokableTool)
+	_, isStandardStream := wrapped.(componenttool.StreamableTool)
+	require.False(t, isStandardInvoke)
+	require.False(t, isStandardStream)
+	require.Implements(t, (*componenttool.EnhancedInvokableTool)(nil), wrapped)
+	require.Implements(t, (*componenttool.EnhancedStreamableTool)(nil), wrapped)
+
+	result, err := wrapped.(componenttool.EnhancedInvokableTool).InvokableRun(
+		context.Background(), toolArgument(`{"value":"x"}`),
+	)
+	require.NoError(t, err)
+	require.Len(t, result.Parts, 3)
+	event := decodeEvents(t, []*schema.ToolResult{result})[0]
+	require.Equal(t, "rich-output", event.TaskID)
+	require.Equal(t, backgroundtask.StatusCompleted, event.Status)
+	require.Nil(t, event.Output)
+	require.Equal(t, schema.ToolPartTypeText, result.Parts[1].Type)
+	require.Equal(t, "render complete", result.Parts[1].Text)
+	require.Equal(t, schema.ToolPartTypeImage, result.Parts[2].Type)
+	require.Equal(t, imageURL, *result.Parts[2].Image.URL)
 }
 
 func TestManagedToolProjectionDetachesWhilePersistenceContinues(t *testing.T) {
@@ -780,12 +853,12 @@ func TestManagedToolProjectionDetachesWhilePersistenceContinues(t *testing.T) {
 		},
 	}
 	manager, wrapped := newTestManagedTool(t, implementation, 5*time.Millisecond)
-	stream, err := wrapped.(componenttool.StreamableTool).StreamableRun(
-		context.Background(), `{"value":"detach"}`,
+	stream, err := wrapped.(componenttool.EnhancedStreamableTool).StreamableRun(
+		context.Background(), toolArgument(`{"value":"detach"}`),
 	)
 	require.NoError(t, err)
 	defer stream.Close()
-	var records []string
+	var records []*schema.ToolResult
 	for {
 		record, recvErr := stream.Recv()
 		if errors.Is(recvErr, io.EOF) {
