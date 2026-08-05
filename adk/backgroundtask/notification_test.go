@@ -18,111 +18,12 @@ package backgroundtask
 
 import (
 	"context"
-	"errors"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-type recordingNotificationInbox struct {
-	sessionIDs    []string
-	notifications []Notification
-}
-
-func (i *recordingNotificationInbox) Enqueue(
-	_ context.Context,
-	req *EnqueueSessionNotificationRequest,
-) (*SessionInboxItem, error) {
-	i.sessionIDs = append(i.sessionIDs, req.SessionID)
-	i.notifications = append(i.notifications, req.Notification)
-	return &SessionInboxItem{
-		ItemID: req.Notification.ID, ItemVersion: 1,
-		SessionID: req.SessionID, Notification: req.Notification,
-	}, nil
-}
-
-func (*recordingNotificationInbox) ListPending(
-	context.Context,
-	*ListSessionNotificationsRequest,
-) ([]*SessionInboxItem, error) {
-	return nil, nil
-}
-
-func (*recordingNotificationInbox) Ack(
-	context.Context,
-	*AckSessionNotificationRequest,
-) error {
-	return nil
-}
-
-type recordingSessionActivator struct {
-	sessionIDs []string
-	err        error
-}
-
-func (a *recordingSessionActivator) RequestTurn(
-	_ context.Context,
-	req *SessionActivationRequest,
-) error {
-	a.sessionIDs = append(a.sessionIDs, req.SessionID)
-	return a.err
-}
-
-func TestNewDispatcherValidatesDependencies_BitsUT(t *testing.T) {
-	_, err := NewDispatcher(nil)
-	require.EqualError(
-		t,
-		err,
-		"backgroundtask: dispatcher outbox, task store, session inbox, and activator are required",
-	)
-}
-
-func TestDispatcherRedeliversUntilSessionActivationSucceeds_BitsUT(t *testing.T) {
-	clock := &testClock{now: time.Unix(400, 0)}
-	store := newInMemoryStoreWithClock(
-		&InMemoryStoreConfig{ActiveAttemptTimeout: time.Minute},
-		clock.Now,
-	)
-	task := createAndStart(t, store, "dispatch")
-	completed, err := store.Complete(context.Background(), &CompleteTaskRequest{
-		TaskID: "dispatch", ExpectedVersion: task.Version, Data: []byte("result"),
-	})
-	require.NoError(t, err)
-
-	inbox := &recordingNotificationInbox{}
-	activator := &recordingSessionActivator{err: errors.New("activation unavailable")}
-	dispatcher, err := NewDispatcher(&DispatcherConfig{
-		Outbox: store, Tasks: store, Inbox: inbox, Activator: activator,
-		BatchSize: 10, LeaseDuration: time.Second,
-	})
-	require.NoError(t, err)
-	accepted, err := dispatcher.DispatchOnce(context.Background())
-	require.Error(t, err)
-	assert.Zero(t, accepted)
-	require.Len(t, inbox.notifications, 1)
-	assert.Equal(t, completed.Spec.ID, inbox.notifications[0].TaskID)
-	assert.Equal(t, task.Spec.SessionID, inbox.sessionIDs[0])
-	require.NotNil(t, inbox.notifications[0].Task)
-	assert.Equal(t, StatusCompleted, inbox.notifications[0].Task.Status)
-	assert.Equal(t, []string{task.Spec.SessionID}, activator.sessionIDs)
-
-	clock.Advance(time.Second)
-	activator.err = nil
-	accepted, err = dispatcher.DispatchOnce(context.Background())
-	require.NoError(t, err)
-	assert.Equal(t, 1, accepted)
-	require.Len(t, inbox.notifications, 2)
-	assert.Equal(t, inbox.notifications[0].ID, inbox.notifications[1].ID)
-	assert.Equal(t, []string{task.Spec.SessionID, task.Spec.SessionID}, activator.sessionIDs)
-
-	empty, err := store.Receive(context.Background(), &ReceiveNotificationsRequest{
-		Limit: 10, LeaseDuration: time.Second,
-	})
-	require.NoError(t, err)
-	assert.Empty(t, empty.Deliveries)
-}
 
 func TestInMemoryStoreTerminalCommitCreatesOneTerminalOutbox_BitsUT(t *testing.T) {
 	store := NewInMemoryStore(nil)

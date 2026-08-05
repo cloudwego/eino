@@ -32,25 +32,36 @@ import (
 )
 
 type recordingActivator struct {
-	inbox       backgroundtask.SessionNotificationInbox
+	inbox       Inbox
 	err         error
 	sessionID   string
 	pendingSeen int
+	calls       int
 }
 
-func (a *recordingActivator) RequestTurn(
+func (a *recordingActivator) ActivateSession(
 	ctx context.Context,
-	req *backgroundtask.SessionActivationRequest,
+	sessionID string,
 ) error {
-	a.sessionID = req.SessionID
-	pending, err := a.inbox.ListPending(ctx, &backgroundtask.ListSessionNotificationsRequest{
-		SessionID: req.SessionID,
+	a.calls++
+	a.sessionID = sessionID
+	pending, err := a.inbox.ListPending(ctx, &ListRequest{
+		SessionID: sessionID,
 	})
 	if err != nil {
 		return err
 	}
 	a.pendingSeen = len(pending)
 	return a.err
+}
+
+func TestNewDispatcherValidatesDependencies_BitsUT(t *testing.T) {
+	_, err := NewDispatcher(nil)
+	require.EqualError(
+		t,
+		err,
+		"sessionnotify: dispatcher outbox, task store, inbox, and session activation are required",
+	)
 }
 
 func TestTerminalTaskNotificationWakesParentSession_BitsUT(t *testing.T) {
@@ -74,9 +85,10 @@ func TestTerminalTaskNotificationWakesParentSession_BitsUT(t *testing.T) {
 
 	inbox := NewMemoryInbox()
 	activator := &recordingActivator{inbox: inbox}
-	dispatcher, err := backgroundtask.NewDispatcher(&backgroundtask.DispatcherConfig{
-		Outbox: store, Tasks: store, Inbox: inbox, Activator: activator,
-		BatchSize: 10, LeaseDuration: time.Minute,
+	dispatcher, err := NewDispatcher(&DispatcherConfig{
+		Outbox: store, Tasks: store, Inbox: inbox,
+		ActivateSession: activator.ActivateSession,
+		BatchSize:       10, LeaseDuration: time.Minute,
 	})
 	require.NoError(t, err)
 	delivered, err := dispatcher.DispatchOnce(context.Background())
@@ -84,12 +96,12 @@ func TestTerminalTaskNotificationWakesParentSession_BitsUT(t *testing.T) {
 	assert.Equal(t, 1, delivered)
 	assert.Equal(t, spec.SessionID, activator.sessionID)
 
-	pending, err := inbox.ListPending(context.Background(), &backgroundtask.ListSessionNotificationsRequest{
+	pending, err := inbox.ListPending(context.Background(), &ListRequest{
 		SessionID: spec.SessionID, Limit: 10,
 	})
 	require.NoError(t, err)
 	require.Len(t, pending, 1)
-	var completion *backgroundtask.SessionInboxItem
+	var completion *InboxItem
 	for _, item := range pending {
 		if item.Notification.Kind == backgroundtask.NotificationCompleted {
 			completion = item
@@ -100,9 +112,56 @@ func TestTerminalTaskNotificationWakesParentSession_BitsUT(t *testing.T) {
 	assert.Equal(t, "done", string(completion.Notification.Task.ResultData))
 }
 
+func TestDispatcherRedeliversUntilSessionActivationSucceeds_BitsUT(t *testing.T) {
+	store := backgroundtask.NewInMemoryStore(nil)
+	spec := backgroundtask.Spec{
+		ID: "redelivery", ExecutorKey: "test",
+		SessionID: "session-1", NotifySession: true,
+	}
+	created, err := store.Create(context.Background(), &backgroundtask.CreateTaskRequest{
+		Spec: spec, LeaseExpiryPolicy: backgroundtask.LeaseExpiryRetry,
+	})
+	require.NoError(t, err)
+	started, err := store.Start(context.Background(), &backgroundtask.StartTaskRequest{
+		TaskID: spec.ID, ExpectedVersion: created.Version,
+	})
+	require.NoError(t, err)
+	_, err = store.Complete(context.Background(), &backgroundtask.CompleteTaskRequest{
+		TaskID: spec.ID, ExpectedVersion: started.Version,
+	})
+	require.NoError(t, err)
+
+	inbox := NewMemoryInbox()
+	activator := &recordingActivator{
+		inbox: inbox, err: errors.New("activation unavailable"),
+	}
+	const lease = 20 * time.Millisecond
+	dispatcher, err := NewDispatcher(&DispatcherConfig{
+		Outbox: store, Tasks: store, Inbox: inbox,
+		ActivateSession: activator.ActivateSession,
+		LeaseDuration:   lease,
+	})
+	require.NoError(t, err)
+	delivered, err := dispatcher.DispatchOnce(context.Background())
+	require.EqualError(t, err, "activation unavailable")
+	require.Zero(t, delivered)
+
+	time.Sleep(2 * lease)
+	activator.err = nil
+	delivered, err = dispatcher.DispatchOnce(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, 1, delivered)
+	require.Equal(t, 2, activator.calls)
+	pending, err := inbox.ListPending(context.Background(), &ListRequest{
+		SessionID: spec.SessionID,
+	})
+	require.NoError(t, err)
+	require.Len(t, pending, 1)
+}
+
 func TestMemoryInboxDeduplicatesAcrossAckAndRedelivery_BitsUT(t *testing.T) {
 	inbox := NewMemoryInbox()
-	request := &backgroundtask.EnqueueSessionNotificationRequest{
+	request := &EnqueueRequest{
 		SessionID: "session-1",
 		Notification: backgroundtask.Notification{
 			ID: "notification-1", TaskID: "task-1",
@@ -114,14 +173,14 @@ func TestMemoryInboxDeduplicatesAcrossAckAndRedelivery_BitsUT(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, first.ItemID, duplicate.ItemID)
 
-	require.NoError(t, inbox.Ack(context.Background(), &backgroundtask.AckSessionNotificationRequest{
+	require.NoError(t, inbox.Ack(context.Background(), &AckRequest{
 		SessionID: first.SessionID, ItemID: first.ItemID, ExpectedVersion: first.ItemVersion,
 	}))
 	redelivery, err := inbox.Enqueue(context.Background(), request)
 	require.NoError(t, err)
 	assert.Equal(t, first.ItemID, redelivery.ItemID)
 
-	pending, err := inbox.ListPending(context.Background(), &backgroundtask.ListSessionNotificationsRequest{
+	pending, err := inbox.ListPending(context.Background(), &ListRequest{
 		SessionID: "session-1",
 	})
 	require.NoError(t, err)
@@ -130,7 +189,7 @@ func TestMemoryInboxDeduplicatesAcrossAckAndRedelivery_BitsUT(t *testing.T) {
 
 func TestMemoryInboxAckUsesVersionCAS_BitsUT(t *testing.T) {
 	inbox := NewMemoryInbox()
-	item, err := inbox.Enqueue(context.Background(), &backgroundtask.EnqueueSessionNotificationRequest{
+	item, err := inbox.Enqueue(context.Background(), &EnqueueRequest{
 		SessionID: "session-1",
 		Notification: backgroundtask.Notification{
 			ID: "notification-1",
@@ -138,12 +197,12 @@ func TestMemoryInboxAckUsesVersionCAS_BitsUT(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	err = inbox.Ack(context.Background(), &backgroundtask.AckSessionNotificationRequest{
+	err = inbox.Ack(context.Background(), &AckRequest{
 		SessionID: item.SessionID, ItemID: item.ItemID, ExpectedVersion: item.ItemVersion + 1,
 	})
 	assert.ErrorIs(t, err, backgroundtask.ErrVersionConflict)
 
-	pending, err := inbox.ListPending(context.Background(), &backgroundtask.ListSessionNotificationsRequest{
+	pending, err := inbox.ListPending(context.Background(), &ListRequest{
 		SessionID: item.SessionID,
 	})
 	require.NoError(t, err)
@@ -167,7 +226,7 @@ func TestMemoryInboxDeepCopiesNotification_DefectProbing_BitsUT(t *testing.T) {
 			PendingResume: pendingResume,
 		},
 	}
-	_, err := inbox.Enqueue(context.Background(), &backgroundtask.EnqueueSessionNotificationRequest{
+	_, err := inbox.Enqueue(context.Background(), &EnqueueRequest{
 		SessionID: "session-1", Notification: notification,
 	})
 	require.NoError(t, err)
@@ -175,7 +234,7 @@ func TestMemoryInboxDeepCopiesNotification_DefectProbing_BitsUT(t *testing.T) {
 	checkpoint[0] = 'X'
 	pendingResume[0] = 'X'
 
-	pending, err := inbox.ListPending(context.Background(), &backgroundtask.ListSessionNotificationsRequest{
+	pending, err := inbox.ListPending(context.Background(), &ListRequest{
 		SessionID: "session-1",
 	})
 	require.NoError(t, err)
@@ -187,7 +246,7 @@ func TestMemoryInboxDeepCopiesNotification_DefectProbing_BitsUT(t *testing.T) {
 	pending[0].Notification.Task.ResultData[0] = 'Y'
 	pending[0].Notification.Task.Checkpoint[0] = 'Y'
 	pending[0].Notification.Task.PendingResume[0] = 'Y'
-	again, err := inbox.ListPending(context.Background(), &backgroundtask.ListSessionNotificationsRequest{
+	again, err := inbox.ListPending(context.Background(), &ListRequest{
 		SessionID: "session-1",
 	})
 	require.NoError(t, err)
@@ -204,7 +263,7 @@ func TestAttack_MemoryInboxOrdersEqualTimestampsDeterministically(t *testing.T) 
 	const count = 16
 	for index := count - 1; index >= 0; index-- {
 		id := fmt.Sprintf("notification-%02d", index)
-		_, err := inbox.Enqueue(context.Background(), &backgroundtask.EnqueueSessionNotificationRequest{
+		_, err := inbox.Enqueue(context.Background(), &EnqueueRequest{
 			SessionID: "session",
 			Notification: backgroundtask.Notification{
 				ID: id, TaskID: "task", Kind: backgroundtask.NotificationCompleted,
@@ -213,7 +272,7 @@ func TestAttack_MemoryInboxOrdersEqualTimestampsDeterministically(t *testing.T) 
 		require.NoError(t, err)
 	}
 
-	pending, err := inbox.ListPending(context.Background(), &backgroundtask.ListSessionNotificationsRequest{
+	pending, err := inbox.ListPending(context.Background(), &ListRequest{
 		SessionID: "session",
 	})
 	require.NoError(t, err)
@@ -228,7 +287,7 @@ func TestAttack_MemoryInboxOrdersEqualTimestampsDeterministically(t *testing.T) 
 func TestMemoryInboxScopesNotificationDeduplicationBySession_BitsUT(t *testing.T) {
 	inbox := NewMemoryInbox()
 	for _, sessionID := range []string{"session-a", "session-b"} {
-		item, err := inbox.Enqueue(context.Background(), &backgroundtask.EnqueueSessionNotificationRequest{
+		item, err := inbox.Enqueue(context.Background(), &EnqueueRequest{
 			SessionID: sessionID,
 			Notification: backgroundtask.Notification{
 				ID: "same-notification", TaskID: "task-" + sessionID,
@@ -241,7 +300,7 @@ func TestMemoryInboxScopesNotificationDeduplicationBySession_BitsUT(t *testing.T
 	for _, sessionID := range []string{"session-a", "session-b"} {
 		pending, err := inbox.ListPending(
 			context.Background(),
-			&backgroundtask.ListSessionNotificationsRequest{SessionID: sessionID},
+			&ListRequest{SessionID: sessionID},
 		)
 		require.NoError(t, err)
 		require.Len(t, pending, 1)
@@ -275,14 +334,12 @@ func TestTurnLoopActivatorQueuesWakeAndStartsLoop_BitsUT(t *testing.T) {
 				Loop: loop, RunContext: context.Background(),
 			}, nil
 		},
-		WakeItem: func(req *backgroundtask.SessionActivationRequest) (string, error) {
-			return "wake:" + req.SessionID, nil
+		WakeItem: func(sessionID string) (string, error) {
+			return "wake:" + sessionID, nil
 		},
 	}
 
-	err := activator.RequestTurn(context.Background(), &backgroundtask.SessionActivationRequest{
-		SessionID: "session-1",
-	})
+	err := activator.ActivateSession(context.Background(), "session-1")
 	require.NoError(t, err)
 	select {
 	case items := <-received:
@@ -317,14 +374,12 @@ func TestTurnLoopActivatorRejectsStoppedLoop_BitsUT(t *testing.T) {
 				Loop: loop, RunContext: context.Background(),
 			}, nil
 		},
-		WakeItem: func(*backgroundtask.SessionActivationRequest) (string, error) {
+		WakeItem: func(string) (string, error) {
 			return "wake", nil
 		},
 	}
 
-	err := activator.RequestTurn(context.Background(), &backgroundtask.SessionActivationRequest{
-		SessionID: "session-1",
-	})
+	err := activator.ActivateSession(context.Background(), "session-1")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "stopped")
 }

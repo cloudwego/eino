@@ -21,7 +21,6 @@ import (
 	"errors"
 
 	"github.com/cloudwego/eino/adk"
-	"github.com/cloudwego/eino/adk/backgroundtask"
 )
 
 // TurnLoopTarget is a deployment-owned session loop and its process-lifetime
@@ -32,35 +31,36 @@ type TurnLoopTarget[T any, M adk.MessageType] struct {
 	RunContext context.Context
 }
 
-// TurnLoopActivator bridges durable session wake requests to the ADK TurnLoop.
+// TurnLoopActivator bridges session wake requests to the ADK TurnLoop.
 // The loop's GenInput implementation remains responsible for reading and
 // acknowledging durable inbox items. Resolve and WakeItem may be called
 // concurrently, must not panic, and must tolerate repeated activation for the
-// same pending notification. Resolve lends the target for one RequestTurn call;
-// it must remain valid through Loop.Run.
+// same pending notification. Resolve lends the target for one ActivateSession
+// call; it must remain valid through Loop.Run.
 type TurnLoopActivator[T any, M adk.MessageType] struct {
 	Resolve  func(context.Context, string) (*TurnLoopTarget[T, M], error)
-	WakeItem func(*backgroundtask.SessionActivationRequest) (T, error)
+	WakeItem func(string) (T, error)
 }
 
-func (a *TurnLoopActivator[T, M]) RequestTurn(
+// ActivateSession requests a TurnLoop run for sessionID.
+func (a *TurnLoopActivator[T, M]) ActivateSession(
 	ctx context.Context,
-	req *backgroundtask.SessionActivationRequest,
+	sessionID string,
 ) error {
-	if req == nil || req.SessionID == "" {
+	if sessionID == "" {
 		return errors.New("sessionnotify: session id is required")
 	}
 	if a == nil || a.Resolve == nil || a.WakeItem == nil {
 		return errors.New("sessionnotify: turn loop resolver and wake item encoder are required")
 	}
-	target, err := a.Resolve(ctx, req.SessionID)
+	target, err := a.Resolve(ctx, sessionID)
 	if err != nil {
 		return err
 	}
 	if target == nil || target.Loop == nil || target.RunContext == nil {
 		return errors.New("sessionnotify: resolved turn loop target is incomplete")
 	}
-	item, err := a.WakeItem(req)
+	item, err := a.WakeItem(sessionID)
 	if err != nil {
 		return err
 	}

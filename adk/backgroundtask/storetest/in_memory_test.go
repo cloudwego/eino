@@ -69,7 +69,7 @@ func TestInMemoryNotificationOutboxConformance(t *testing.T) {
 
 func TestMemorySessionInboxConformance(t *testing.T) {
 	RunSessionInboxConformance(t, SessionInboxConfig{
-		New: func(testing.TB) backgroundtask.SessionNotificationInbox {
+		New: func(testing.TB) sessionnotify.Inbox {
 			return sessionnotify.NewMemoryInbox()
 		},
 	})

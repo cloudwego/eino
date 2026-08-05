@@ -14,8 +14,8 @@
  * limitations under the License.
  */
 
-// Package sessionnotify provides session inbox and activation implementations
-// for background task notifications.
+// Package sessionnotify provides durable session delivery for background task
+// notifications.
 package sessionnotify
 
 import (
@@ -28,26 +28,64 @@ import (
 	"github.com/cloudwego/eino/adk/backgroundtask"
 )
 
-// MemoryInbox is a process-local SessionNotificationInbox implementation.
+// Inbox stores notifications awaiting parent session turns. Enqueue
+// deduplicates by (SessionID, Notification.ID), ListPending returns creation
+// order with provider-normalized bounds, and Ack uses ItemVersion CAS.
+type Inbox interface {
+	Enqueue(context.Context, *EnqueueRequest) (*InboxItem, error)
+	ListPending(context.Context, *ListRequest) ([]*InboxItem, error)
+	Ack(context.Context, *AckRequest) error
+}
+
+// EnqueueRequest enqueues a notification for a session.
+type EnqueueRequest struct {
+	SessionID    string
+	Notification backgroundtask.Notification
+}
+
+// InboxItem is a durable session notification inbox entry.
+type InboxItem struct {
+	ItemID       string
+	ItemVersion  int64
+	SessionID    string
+	Notification backgroundtask.Notification
+	CreatedAt    time.Time
+}
+
+// ListRequest lists pending notifications for a session in creation order.
+// Limit defaults to 100 and is capped at 1000.
+type ListRequest struct {
+	SessionID string
+	Limit     int
+}
+
+// AckRequest acknowledges a session inbox item.
+type AckRequest struct {
+	SessionID       string
+	ItemID          string
+	ExpectedVersion int64
+}
+
+// MemoryInbox is a process-local Inbox implementation.
 type MemoryInbox struct {
 	mu     sync.Mutex
-	byID   map[string]*backgroundtask.SessionInboxItem
-	byNote map[string]*backgroundtask.SessionInboxItem
+	byID   map[string]*InboxItem
+	byNote map[string]*InboxItem
 	now    func() time.Time
 }
 
 // NewMemoryInbox creates an empty process-local session notification inbox.
 func NewMemoryInbox() *MemoryInbox {
 	return &MemoryInbox{
-		byID:   make(map[string]*backgroundtask.SessionInboxItem),
-		byNote: make(map[string]*backgroundtask.SessionInboxItem), now: time.Now,
+		byID:   make(map[string]*InboxItem),
+		byNote: make(map[string]*InboxItem), now: time.Now,
 	}
 }
 
 // Enqueue stores a notification unless the same notification ID was already
 // seen in that session. Deduplication survives acknowledgement for the lifetime
 // of this process-local inbox.
-func (i *MemoryInbox) Enqueue(_ context.Context, req *backgroundtask.EnqueueSessionNotificationRequest) (*backgroundtask.SessionInboxItem, error) {
+func (i *MemoryInbox) Enqueue(_ context.Context, req *EnqueueRequest) (*InboxItem, error) {
 	if req == nil || req.SessionID == "" || req.Notification.ID == "" {
 		return nil, errors.New("sessionnotify: session and notification id are required")
 	}
@@ -57,7 +95,7 @@ func (i *MemoryInbox) Enqueue(_ context.Context, req *backgroundtask.EnqueueSess
 	if item, ok := i.byNote[key]; ok {
 		return cloneItem(item), nil
 	}
-	item := &backgroundtask.SessionInboxItem{
+	item := &InboxItem{
 		ItemID: req.Notification.ID, ItemVersion: 1,
 		SessionID: req.SessionID, Notification: cloneNotification(req.Notification), CreatedAt: i.now(),
 	}
@@ -68,13 +106,13 @@ func (i *MemoryInbox) Enqueue(_ context.Context, req *backgroundtask.EnqueueSess
 
 // ListPending lists pending inbox items for a session in creation order. Limit
 // defaults to 100 and is capped at 1000.
-func (i *MemoryInbox) ListPending(_ context.Context, req *backgroundtask.ListSessionNotificationsRequest) ([]*backgroundtask.SessionInboxItem, error) {
+func (i *MemoryInbox) ListPending(_ context.Context, req *ListRequest) ([]*InboxItem, error) {
 	if req == nil || req.SessionID == "" {
 		return nil, errors.New("sessionnotify: session id is required")
 	}
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	result := make([]*backgroundtask.SessionInboxItem, 0)
+	result := make([]*InboxItem, 0)
 	for _, item := range i.byID {
 		if item.SessionID == req.SessionID {
 			result = append(result, cloneItem(item))
@@ -99,7 +137,7 @@ func (i *MemoryInbox) ListPending(_ context.Context, req *backgroundtask.ListSes
 }
 
 // Ack removes a pending inbox item if the expected version matches.
-func (i *MemoryInbox) Ack(_ context.Context, req *backgroundtask.AckSessionNotificationRequest) error {
+func (i *MemoryInbox) Ack(_ context.Context, req *AckRequest) error {
 	if req == nil {
 		return errors.New("sessionnotify: ack request is required")
 	}
@@ -121,7 +159,7 @@ func inboxKey(sessionID, itemID string) string {
 	return sessionID + "\x00" + itemID
 }
 
-func cloneItem(item *backgroundtask.SessionInboxItem) *backgroundtask.SessionInboxItem {
+func cloneItem(item *InboxItem) *InboxItem {
 	if item == nil {
 		return nil
 	}

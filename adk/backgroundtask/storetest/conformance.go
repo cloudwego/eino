@@ -27,6 +27,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cloudwego/eino/adk/backgroundtask"
+	"github.com/cloudwego/eino/adk/backgroundtask/sessionnotify"
 )
 
 // TaskStoreConfig configures TaskStore conformance. New returns an isolated
@@ -51,9 +52,9 @@ type NotificationOutboxConfig struct {
 	ExpireLease func(testing.TB, backgroundtask.NotificationOutbox, time.Duration)
 }
 
-// SessionInboxConfig configures SessionNotificationInbox conformance.
+// SessionInboxConfig configures sessionnotify.Inbox conformance.
 type SessionInboxConfig struct {
-	New func(testing.TB) backgroundtask.SessionNotificationInbox
+	New func(testing.TB) sessionnotify.Inbox
 }
 
 // RunTaskStoreConformance checks lifecycle transitions, CAS, cancellation,
@@ -313,22 +314,22 @@ func RunSessionInboxConformance(t *testing.T, config SessionInboxConfig) {
 	other := enqueue(t, inbox, "session-b", "same")
 	require.Equal(t, "session-b", other.SessionID)
 	enqueue(t, inbox, "session-a", "later")
-	pending, err := inbox.ListPending(context.Background(), &backgroundtask.ListSessionNotificationsRequest{
+	pending, err := inbox.ListPending(context.Background(), &sessionnotify.ListRequest{
 		SessionID: "session-a", Limit: 1,
 	})
 	require.NoError(t, err)
 	require.Len(t, pending, 1)
 	require.Equal(t, first.ItemID, pending[0].ItemID)
-	err = inbox.Ack(context.Background(), &backgroundtask.AckSessionNotificationRequest{
+	err = inbox.Ack(context.Background(), &sessionnotify.AckRequest{
 		SessionID: "session-a", ItemID: first.ItemID, ExpectedVersion: first.ItemVersion + 1,
 	})
 	require.ErrorIs(t, err, backgroundtask.ErrVersionConflict)
-	require.NoError(t, inbox.Ack(context.Background(), &backgroundtask.AckSessionNotificationRequest{
+	require.NoError(t, inbox.Ack(context.Background(), &sessionnotify.AckRequest{
 		SessionID: "session-a", ItemID: first.ItemID, ExpectedVersion: first.ItemVersion,
 	}))
 	replayedAfterAck := enqueue(t, inbox, "session-a", "same")
 	require.Equal(t, first.ItemID, replayedAfterAck.ItemID)
-	pending, err = inbox.ListPending(context.Background(), &backgroundtask.ListSessionNotificationsRequest{
+	pending, err = inbox.ListPending(context.Background(), &sessionnotify.ListRequest{
 		SessionID: "session-a",
 	})
 	require.NoError(t, err)
@@ -387,12 +388,12 @@ func appendEvent(
 
 func enqueue(
 	t testing.TB,
-	inbox backgroundtask.SessionNotificationInbox,
+	inbox sessionnotify.Inbox,
 	sessionID string,
 	notificationID string,
-) *backgroundtask.SessionInboxItem {
+) *sessionnotify.InboxItem {
 	t.Helper()
-	item, err := inbox.Enqueue(context.Background(), &backgroundtask.EnqueueSessionNotificationRequest{
+	item, err := inbox.Enqueue(context.Background(), &sessionnotify.EnqueueRequest{
 		SessionID: sessionID,
 		Notification: backgroundtask.Notification{
 			ID: notificationID, TaskID: "task", Kind: backgroundtask.NotificationCompleted,
@@ -418,7 +419,7 @@ func eventIDs(events []*backgroundtask.TaskEvent) []string {
 	return result
 }
 
-func inboxIDs(items []*backgroundtask.SessionInboxItem) []string {
+func inboxIDs(items []*sessionnotify.InboxItem) []string {
 	result := make([]string, len(items))
 	for i, item := range items {
 		result[i] = item.Notification.ID
