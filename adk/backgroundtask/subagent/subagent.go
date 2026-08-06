@@ -33,22 +33,23 @@ import (
 	"github.com/cloudwego/eino/adk/backgroundtask"
 	"github.com/cloudwego/eino/adk/internal/agenttool"
 	foregroundcoord "github.com/cloudwego/eino/adk/internal/foreground"
+	"github.com/cloudwego/eino/schema"
 )
 
 const (
 	// ExecutorKey is the backgroundtask executor key for durable sub-agent tasks.
 	ExecutorKey = "eino.dev/subagent"
 
-	payloadVersion          = 3
+	payloadVersion          = 4
 	maxChildSessionIDLength = 1024
 	taskIDEventExtraKey     = "eino.background_task.id"
 )
 
 type taskPayload struct {
-	Version        int    `json:"version"`
-	SubAgentName   string `json:"subagent_name"`
-	Query          string `json:"query"`
-	ChildSessionID string `json:"child_session_id"`
+	Version        int             `json:"version"`
+	SubAgentName   string          `json:"subagent_name"`
+	Input          json.RawMessage `json:"input,omitempty"`
+	ChildSessionID string          `json:"child_session_id"`
 }
 
 type checkpointState struct {
@@ -206,6 +207,9 @@ func (e *Executor[M]) ValidateSpec(spec backgroundtask.Spec) error {
 	if err != nil {
 		return err
 	}
+	if _, err = decodeTypedInput[M](payload.Input); err != nil {
+		return err
+	}
 	_, err = e.resolveRegistration(payload.SubAgentName)
 	return err
 }
@@ -219,12 +223,7 @@ func (e *Executor[M]) ValidateExecution(_ context.Context, task *backgroundtask.
 		e.checkPointStore == nil {
 		return errors.New("backgroundtask/subagent: executor dependencies are unavailable")
 	}
-	payload, err := validateSpecPayload(task.Spec)
-	if err != nil {
-		return err
-	}
-	_, err = e.resolveRegistration(payload.SubAgentName)
-	return err
+	return e.ValidateSpec(task.Spec)
 }
 
 // SupportsDrain reports true because sub-agent drain captures an ADK Runner
@@ -242,11 +241,13 @@ func validateSpecPayload(spec backgroundtask.Spec) (*taskPayload, error) {
 	if payload.Version != payloadVersion {
 		return nil, fmt.Errorf("%w: subagent payload version %d", backgroundtask.ErrUnsupportedExecutorPayloadVersion, payload.Version)
 	}
-	if payload.SubAgentName == "" || payload.Query == "" ||
-		payload.ChildSessionID == "" {
+	if payload.SubAgentName == "" || payload.ChildSessionID == "" {
 		return nil, errors.New(
-			"backgroundtask/subagent: subagent name, query, and child session id are required",
+			"backgroundtask/subagent: subagent name and child session id are required",
 		)
+	}
+	if len(payload.Input) == 0 || !json.Valid(payload.Input) {
+		return nil, errors.New("backgroundtask/subagent: typed input is required")
 	}
 	if len(payload.ChildSessionID) > maxChildSessionIDLength {
 		return nil, errors.New(
@@ -388,6 +389,13 @@ func (e *Executor[M]) Execute(
 		}
 	}
 	foreground := agenttool.ForegroundExecutionFromContext[*adk.TypedAgentEvent[M]](ctx)
+	var initialInput *adk.TypedAgentInput[M]
+	if len(task.Checkpoint) == 0 {
+		initialInput, err = decodeTypedInput[M](payload.Input)
+		if err != nil {
+			return nil, err
+		}
+	}
 	sessionStore := e.sessionStore
 	if e.sessionStoreFactory != nil {
 		sessionStore, err = e.sessionStoreFactory(ctx, task)
@@ -404,7 +412,9 @@ func (e *Executor[M]) Execute(
 		}
 	}
 	runner := adk.NewTypedRunner(adk.TypedRunnerConfig[M]{
-		Agent: registration.Agent, EnableStreaming: foreground.EnableStreaming(),
+		Agent: registration.Agent,
+		EnableStreaming: foreground.EnableStreaming() ||
+			(initialInput != nil && initialInput.EnableStreaming),
 		CheckPointStore: e.checkPointStore,
 		SessionID:       payload.ChildSessionID, SessionStore: sessionStore,
 		SessionConfig: e.sessionConfigForTask(task.Spec.ID),
@@ -432,7 +442,7 @@ func (e *Executor[M]) Execute(
 		}
 	}()
 	runOptions = append(runOptions, cancelOption)
-	iter, err := e.beginRun(ctx, runner, task, payload, runOptions...)
+	iter, err := e.beginRun(ctx, runner, task, payload, initialInput, runOptions...)
 	if err != nil {
 		return nil, err
 	}
@@ -523,15 +533,17 @@ func (e *Executor[M]) beginRun(
 	runner *adk.TypedRunner[M],
 	task *backgroundtask.Task,
 	payload *taskPayload,
+	initialInput *adk.TypedAgentInput[M],
 	options ...adk.AgentRunOption,
 ) (*adk.AsyncIterator[*adk.TypedAgentEvent[M]], error) {
 	id := checkpointID(task.Spec.ID)
 	if len(task.Checkpoint) == 0 {
-		queryOptions := append([]adk.AgentRunOption(nil), options...)
-		queryOptions = append(queryOptions, adk.WithCheckPointID(id))
-		return runner.Query(
-			ctx, payload.Query, queryOptions...,
-		), nil
+		runOptions := append([]adk.AgentRunOption(nil), options...)
+		runOptions = append(runOptions, adk.WithCheckPointID(id))
+		if initialInput == nil {
+			return nil, errors.New("backgroundtask/subagent: typed input is required")
+		}
+		return runner.Run(ctx, initialInput.Messages, runOptions...), nil
 	}
 	if len(task.PendingResume) == 0 {
 		return runner.Resume(ctx, id, options...)
@@ -699,6 +711,58 @@ func decodePayload(spec backgroundtask.Spec) (*taskPayload, error) {
 	return &payload, nil
 }
 
+func encodeTypedInput[M adk.MessageType](
+	input *adk.TypedAgentInput[M],
+) (json.RawMessage, error) {
+	if err := validateTypedInput(input); err != nil {
+		return nil, err
+	}
+	serializer := &schema.HumanReadableSerializer{}
+	data, err := serializer.Marshal(input)
+	if err != nil {
+		return nil, fmt.Errorf("backgroundtask/subagent: serialize typed input: %w", err)
+	}
+	if _, err = decodeTypedInput[M](data); err != nil {
+		return nil, err
+	}
+	return append(json.RawMessage(nil), data...), nil
+}
+
+func decodeTypedInput[M adk.MessageType](
+	data []byte,
+) (*adk.TypedAgentInput[M], error) {
+	if len(data) == 0 {
+		return nil, errors.New("backgroundtask/subagent: typed input is required")
+	}
+	var decoded any
+	if err := (&schema.HumanReadableSerializer{}).Unmarshal(data, &decoded); err != nil {
+		return nil, fmt.Errorf("backgroundtask/subagent: deserialize typed input: %w", err)
+	}
+	input, ok := decoded.(*adk.TypedAgentInput[M])
+	if !ok {
+		return nil, errors.New(
+			"backgroundtask/subagent: typed input message type does not match executor",
+		)
+	}
+	if err := validateTypedInput(input); err != nil {
+		return nil, err
+	}
+	return input, nil
+}
+
+func validateTypedInput[M adk.MessageType](input *adk.TypedAgentInput[M]) error {
+	if input == nil || len(input.Messages) == 0 {
+		return errors.New("backgroundtask/subagent: typed input messages are required")
+	}
+	var zero M
+	for _, message := range input.Messages {
+		if any(message) == any(zero) {
+			return errors.New("backgroundtask/subagent: typed input contains a nil message")
+		}
+	}
+	return nil
+}
+
 func nextCheckpointSequence(previous []byte) int64 {
 	var state checkpointState
 	if len(previous) == 0 || json.Unmarshal(previous, &state) != nil || state.Sequence < 1 {
@@ -707,41 +771,53 @@ func nextCheckpointSequence(previous []byte) int64 {
 	return state.Sequence + 1
 }
 
-// SubmitRequest describes a durable sub-agent task to submit. Empty TaskID asks
-// Manager to allocate one. SessionID identifies the parent session notified
-// when the child waits for input or terminates. Empty ChildSessionID creates a
-// new child session derived from the allocated task ID; a non-empty value
-// continues that existing child session and inherits its committed history.
-// DisableLifecycleNotifications suppresses automatic waiting and terminal
-// notifications without suppressing TaskCreated recovery.
-type SubmitRequest struct {
+// SubmitRequest describes a durable sub-agent task. Input is serialized by
+// Eino before persistence. Empty TaskID asks Manager to allocate one. SessionID
+// identifies the parent session notified when the child waits for input or
+// terminates. Empty ChildSessionID creates a new child session derived from the
+// allocated task ID; a non-empty value continues that existing child session
+// and inherits its committed history. DisableLifecycleNotifications suppresses
+// automatic waiting and terminal notifications without suppressing TaskCreated
+// recovery.
+type SubmitRequest[M adk.MessageType] struct {
 	TaskID                        string
 	SubAgentName                  string
-	Query                         string
+	Input                         *adk.TypedAgentInput[M]
 	Description                   string
 	SessionID                     string
 	ChildSessionID                string
 	DisableLifecycleNotifications bool
 }
 
-// Submit persists a durable sub-agent task through manager.
-func Submit(ctx context.Context, manager *backgroundtask.Manager, req *SubmitRequest) (*backgroundtask.Task, error) {
-	if manager == nil || req == nil || req.SessionID == "" ||
-		req.SubAgentName == "" || req.Query == "" {
-		return nil, errors.New("backgroundtask/subagent: manager, parent session, subagent name, and query are required")
+// Submit serializes and persists a durable sub-agent task through manager.
+func Submit[M adk.MessageType](
+	ctx context.Context,
+	manager *backgroundtask.Manager,
+	req *SubmitRequest[M],
+) (*backgroundtask.Task, error) {
+	if manager == nil || req == nil || req.SessionID == "" || req.SubAgentName == "" {
+		return nil, errors.New(
+			"backgroundtask/subagent: manager, parent session, and subagent name are required",
+		)
+	}
+	input, err := encodeTypedInput(req.Input)
+	if err != nil {
+		return nil, err
 	}
 	id := req.TaskID
 	if id == "" {
-		var err error
-		id, err = manager.AllocateTaskID(ctx, &backgroundtask.AllocateTaskIDRequest{Kind: "subagent"})
+		id, err = manager.AllocateTaskID(
+			ctx,
+			&backgroundtask.AllocateTaskIDRequest{Kind: "subagent"},
+		)
 		if err != nil {
 			return nil, err
 		}
 	}
-	payload := taskPayload{
-		Version: payloadVersion, SubAgentName: req.SubAgentName, Query: req.Query,
-		ChildSessionID: req.ChildSessionID,
+	payload := &taskPayload{
+		Version: payloadVersion, SubAgentName: req.SubAgentName, Input: input,
 	}
+	payload.ChildSessionID = req.ChildSessionID
 	if payload.ChildSessionID == "" {
 		payload.ChildSessionID = defaultChildSessionID(
 			req.SessionID,
@@ -754,11 +830,12 @@ func Submit(ctx context.Context, manager *backgroundtask.Manager, req *SubmitReq
 			"backgroundtask/subagent: child session id exceeds configured bounds",
 		)
 	}
-	if err := validateChildSessionOwner(
+	err = validateChildSessionOwner(
 		payload.ChildSessionID,
 		req.SessionID,
 		req.SubAgentName,
-	); err != nil {
+	)
+	if err != nil {
 		return nil, err
 	}
 	data, err := json.Marshal(payload)

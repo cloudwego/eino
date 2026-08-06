@@ -37,6 +37,7 @@ import (
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/components/tool/utils"
 	"github.com/cloudwego/eino/compose"
+	"github.com/cloudwego/eino/schema"
 )
 
 const (
@@ -484,8 +485,8 @@ func newDurableAgentTool[M adk.MessageType](
 			)
 			defer detach()
 		}
-		task, err := durablesubagent.Submit(callCtx, config.Manager, &durablesubagent.SubmitRequest{
-			SubAgentName: in.SubagentType, Query: prompt, Description: in.Description,
+		task, err := durablesubagent.Submit(callCtx, config.Manager, &durablesubagent.SubmitRequest[M]{
+			SubAgentName: in.SubagentType, Input: newTypedUserInput[M](prompt), Description: in.Description,
 			SessionID: sessionID, ChildSessionID: in.ChildSessionID,
 		})
 		if err != nil {
@@ -510,6 +511,22 @@ func newDurableAgentTool[M adk.MessageType](
 		}
 		return formatDurableAgentResult(in.SubagentType, task)
 	})
+}
+
+func newTypedUserInput[M adk.MessageType](query string) *adk.TypedAgentInput[M] {
+	var zero M
+	switch any(zero).(type) {
+	case *schema.Message:
+		return &adk.TypedAgentInput[M]{
+			Messages: []M{any(schema.UserMessage(query)).(M)},
+		}
+	case *schema.AgenticMessage:
+		return &adk.TypedAgentInput[M]{
+			Messages: []M{any(schema.UserAgenticMessage(query)).(M)},
+		}
+	default:
+		panic("unreachable: unsupported message type")
+	}
 }
 
 func resolveSubAgent(subAgents map[string]tool.InvokableTool, subagentType, prompt, description string) (tool.InvokableTool, string, error) {

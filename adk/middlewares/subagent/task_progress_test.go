@@ -18,6 +18,7 @@ package subagent
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
@@ -44,7 +45,7 @@ func TestNewDurableTaskProgressReaderRequiresExecutor_BitsUT(t *testing.T) {
 func TestDurableTaskProgressReaderDelegatesAndRejectsNilReceiver_BitsUT(t *testing.T) {
 	ctx := context.Background()
 	store := adksession.NewInMemoryStore[*schema.Message](nil)
-	task := durableProgressTask(t, backgroundtask.StatusRunning)
+	task := durableProgressTask[*schema.Message](t, backgroundtask.StatusRunning)
 	reader, err := NewDurableTaskProgressReader(progressExecutor(t, store), nil)
 	require.NoError(t, err)
 
@@ -61,7 +62,7 @@ func TestDurableTaskProgressReaderDelegatesAndRejectsNilReceiver_BitsUT(t *testi
 func TestReadDurableTaskProgress(t *testing.T) {
 	ctx := context.Background()
 	store := adksession.NewInMemoryStore[*schema.Message](nil)
-	task := durableProgressTask(t, backgroundtask.StatusWaitingInput)
+	task := durableProgressTask[*schema.Message](t, backgroundtask.StatusWaitingInput)
 	sessionID := progressChildSessionID
 	require.NoError(t, store.AppendEvents(ctx, sessionID, taskProgressEvents(
 		task.Spec.ID,
@@ -108,7 +109,7 @@ func TestReadDurableTaskProgress(t *testing.T) {
 func TestReadDurableTaskProgressIncludesAgenticToolResults(t *testing.T) {
 	ctx := context.Background()
 	store := adksession.NewInMemoryStore[*schema.AgenticMessage](nil)
-	task := durableProgressTask(t, backgroundtask.StatusRunning)
+	task := durableProgressTask[*schema.AgenticMessage](t, backgroundtask.StatusRunning)
 	sessionID := progressChildSessionID
 	toolResult := &schema.AgenticMessage{
 		Role: schema.AgenticRoleTypeUser,
@@ -175,7 +176,7 @@ func TestDefaultTranscriptFormatStripsMessageExtra(t *testing.T) {
 func TestReadDurableTaskProgressBoundsRecentMessages(t *testing.T) {
 	ctx := context.Background()
 	store := adksession.NewInMemoryStore[*schema.Message](nil)
-	task := durableProgressTask(t, backgroundtask.StatusRunning)
+	task := durableProgressTask[*schema.Message](t, backgroundtask.StatusRunning)
 	sessionID := progressChildSessionID
 	events := []*adk.SessionEvent[*schema.Message]{{
 		EventID: "query", Kind: adk.SessionEventMessage,
@@ -209,7 +210,7 @@ func TestReadDurableTaskProgressBoundsRecentMessages(t *testing.T) {
 func TestAttack_SharedSessionProgressDoesNotLeakAcrossTasks(t *testing.T) {
 	ctx := context.Background()
 	store := adksession.NewInMemoryStore[*schema.Message](nil)
-	task := durableProgressTask(t, backgroundtask.StatusCompleted)
+	task := durableProgressTask[*schema.Message](t, backgroundtask.StatusCompleted)
 	events := taskProgressEvents(task.Spec.ID, []*adk.SessionEvent[*schema.Message]{
 		{
 			EventID: "target-query", Kind: adk.SessionEventMessage,
@@ -266,10 +267,17 @@ func taskProgressEvents[M adk.MessageType](
 	return events
 }
 
-func durableProgressTask(t *testing.T, status backgroundtask.Status) *backgroundtask.Task {
+func durableProgressTask[M adk.MessageType](
+	t *testing.T,
+	status backgroundtask.Status,
+) *backgroundtask.Task {
 	t.Helper()
+	input, err := (&schema.HumanReadableSerializer{}).Marshal(
+		newTypedUserInput[M]("submitted query"),
+	)
+	require.NoError(t, err)
 	payload, err := sonic.Marshal(map[string]any{
-		"version": 3, "subagent_name": "worker", "query": "submitted query",
+		"version": 4, "subagent_name": "worker", "input": json.RawMessage(input),
 		"child_session_id": progressChildSessionID,
 	})
 	require.NoError(t, err)

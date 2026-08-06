@@ -269,6 +269,10 @@ func newTestExecutor(
 	return executor
 }
 
+func textInput(query string) *adk.AgentInput {
+	return &adk.AgentInput{Messages: []*schema.Message{schema.UserMessage(query)}}
+}
+
 func TestNewExecutorRequiresDependencies_BitsUT(t *testing.T) {
 	_, err := NewExecutor[*schema.Message](nil)
 	require.Error(t, err)
@@ -333,8 +337,8 @@ func TestAttack_FactoryBackedExecutorExecutesAndReadsProgress(t *testing.T) {
 		&backgroundtask.Config{Executors: executors},
 	)
 	defer manager.Close(context.Background())
-	task, err := Submit(context.Background(), manager, &SubmitRequest{
-		SubAgentName: "worker", Query: "work", SessionID: "parent",
+	task, err := Submit(context.Background(), manager, &SubmitRequest[*schema.Message]{
+		SubAgentName: "worker", Input: textInput("work"), SessionID: "parent",
 	})
 	require.NoError(t, err)
 	require.NoError(t, manager.Execute(context.Background(), task.Spec.ID))
@@ -441,8 +445,10 @@ func resumeFixture(
 		TargetIDs: targets, Sequence: 1,
 	})
 	require.NoError(t, err)
+	input, err := encodeTypedInput(textInput("query"))
+	require.NoError(t, err)
 	payload, err := json.Marshal(taskPayload{
-		Version: payloadVersion, SubAgentName: "worker", Query: "query",
+		Version: payloadVersion, SubAgentName: "worker", Input: input,
 		ChildSessionID: defaultChildSessionID("parent", "worker", "task"),
 	})
 	require.NoError(t, err)
@@ -656,7 +662,7 @@ func TestHandleEventErrorControlOutcomes(t *testing.T) {
 	})
 }
 
-func TestSubagentPayloadV3Validation_BitsUT(t *testing.T) {
+func TestSubagentPayloadValidation_BitsUT(t *testing.T) {
 	executor, spec, _ := resumeFixture(t, "approval")
 	require.NoError(t, executor.ValidateSpec(spec))
 
@@ -675,12 +681,13 @@ func TestSubagentPayloadV3Validation_BitsUT(t *testing.T) {
 	require.ErrorContains(t, executor.ValidateSpec(spec), "subagent name")
 
 	payload.SubAgentName = "worker"
-	payload.Query = ""
+	payload.Input = nil
 	spec.Payload, err = json.Marshal(payload)
 	require.NoError(t, err)
-	require.ErrorContains(t, executor.ValidateSpec(spec), "query")
+	require.ErrorContains(t, executor.ValidateSpec(spec), "typed input")
 
-	payload.Query = "query"
+	payload.Input, err = encodeTypedInput(textInput("query"))
+	require.NoError(t, err)
 	payload.ChildSessionID = ""
 	spec.Payload, err = json.Marshal(payload)
 	require.NoError(t, err)
@@ -697,22 +704,23 @@ func TestSubmitPersistsChildSessionIdentity_BitsUT(t *testing.T) {
 	manager := mustNewBackgroundManager(t, context.Background(), &backgroundtask.Config{Executors: executors})
 	defer manager.Close(context.Background())
 
-	task, err := Submit(context.Background(), manager, &SubmitRequest{
-		SubAgentName: "worker", Query: "work", Description: "child work",
+	task, err := Submit(context.Background(), manager, &SubmitRequest[*schema.Message]{
+		SubAgentName: "worker", Input: textInput("work"), Description: "child work",
 		SessionID: "parent-session",
 	})
 	require.NoError(t, err)
-	var payload map[string]any
-	require.NoError(t, json.Unmarshal(task.Spec.Payload, &payload))
+	payload, err := decodePayload(task.Spec)
+	require.NoError(t, err)
 	expectedChildSessionID := defaultChildSessionID(
 		"parent-session",
 		"worker",
 		task.Spec.ID,
 	)
-	assert.Equal(t, map[string]any{
-		"version": float64(payloadVersion), "subagent_name": "worker", "query": "work",
-		"child_session_id": expectedChildSessionID,
-	}, payload)
+	assert.Equal(t, payloadVersion, payload.Version)
+	assert.Equal(t, expectedChildSessionID, payload.ChildSessionID)
+	persistedInput, err := decodeTypedInput[*schema.Message](payload.Input)
+	require.NoError(t, err)
+	require.Equal(t, "work", persistedInput.Messages[0].Content)
 	childSessionID, err := ChildSessionIDFromTask(task)
 	require.NoError(t, err)
 	assert.Equal(t, expectedChildSessionID, childSessionID)
@@ -720,8 +728,8 @@ func TestSubmitPersistsChildSessionIdentity_BitsUT(t *testing.T) {
 	assert.Equal(t, "parent-session", task.Spec.SessionID)
 	assert.True(t, task.Spec.NotifySession)
 
-	disabled, err := Submit(context.Background(), manager, &SubmitRequest{
-		SubAgentName: "worker", Query: "silent work",
+	disabled, err := Submit(context.Background(), manager, &SubmitRequest[*schema.Message]{
+		SubAgentName: "worker", Input: textInput("silent work"),
 		SessionID: "parent-session", DisableLifecycleNotifications: true,
 	})
 	require.NoError(t, err)
@@ -749,14 +757,14 @@ func TestTasksCanReusePersistentChildSessionHistory_BitsUT(t *testing.T) {
 		"worker",
 		"persistent-child",
 	)
-	first, err := Submit(context.Background(), manager, &SubmitRequest{
-		SubAgentName: "worker", Query: "first request",
+	first, err := Submit(context.Background(), manager, &SubmitRequest[*schema.Message]{
+		SubAgentName: "worker", Input: textInput("first request"),
 		SessionID: "parent", ChildSessionID: childSessionID,
 	})
 	require.NoError(t, err)
 	require.NoError(t, manager.Execute(context.Background(), first.Spec.ID))
-	second, err := Submit(context.Background(), manager, &SubmitRequest{
-		SubAgentName: "worker", Query: "second request",
+	second, err := Submit(context.Background(), manager, &SubmitRequest[*schema.Message]{
+		SubAgentName: "worker", Input: textInput("second request"),
 		SessionID: "parent", ChildSessionID: childSessionID,
 	})
 	require.NoError(t, err)
@@ -807,13 +815,13 @@ func TestSubmitRejectsChildSessionFromAnotherOwner_BitsUT(t *testing.T) {
 		&backgroundtask.Config{Executors: executors},
 	)
 
-	_, err := Submit(context.Background(), manager, &SubmitRequest{
-		SubAgentName: "worker", Query: "work", SessionID: "parent",
+	_, err := Submit(context.Background(), manager, &SubmitRequest[*schema.Message]{
+		SubAgentName: "worker", Input: textInput("work"), SessionID: "parent",
 		ChildSessionID: defaultChildSessionID("other-parent", "worker", "child"),
 	})
 	require.ErrorContains(t, err, "does not belong")
-	_, err = Submit(context.Background(), manager, &SubmitRequest{
-		SubAgentName: "worker", Query: "work", SessionID: "parent",
+	_, err = Submit(context.Background(), manager, &SubmitRequest[*schema.Message]{
+		SubAgentName: "worker", Input: textInput("work"), SessionID: "parent",
 		ChildSessionID: defaultChildSessionID("parent", "other-agent", "child"),
 	})
 	require.ErrorContains(t, err, "does not belong")
@@ -830,8 +838,8 @@ func executionFixture(
 	executors := backgroundtask.NewExecutorRegistry()
 	require.NoError(t, executors.Register(executor))
 	manager := mustNewBackgroundManager(t, context.Background(), &backgroundtask.Config{Executors: executors})
-	task, err := Submit(context.Background(), manager, &SubmitRequest{
-		SubAgentName: agent.name, Query: "work", Description: "work",
+	task, err := Submit(context.Background(), manager, &SubmitRequest[*schema.Message]{
+		SubAgentName: agent.name, Input: textInput("work"), Description: "work",
 		SessionID: "parent",
 	})
 	require.NoError(t, err)
@@ -902,8 +910,8 @@ func TestExecutorReconstructsRegisteredRunOptionsForEveryAttempt_BitsUT(t *testi
 	manager := mustNewBackgroundManager(t, context.Background(), &backgroundtask.Config{Executors: executors})
 	defer manager.Close(context.Background())
 	for i := 0; i < 2; i++ {
-		task, err := Submit(context.Background(), manager, &SubmitRequest{
-			SubAgentName: agent.name, Query: "work", Description: "work", SessionID: "parent",
+		task, err := Submit(context.Background(), manager, &SubmitRequest[*schema.Message]{
+			SubAgentName: agent.name, Input: textInput("work"), Description: "work", SessionID: "parent",
 		})
 		require.NoError(t, err)
 		require.NoError(t, manager.Execute(context.Background(), task.Spec.ID))
@@ -931,8 +939,8 @@ func TestStopControlWinsOverLateFinalMessage_BitsUT(t *testing.T) {
 	registry := backgroundtask.NewExecutorRegistry()
 	require.NoError(t, registry.Register(executor))
 	manager := mustNewBackgroundManager(t, context.Background(), &backgroundtask.Config{Executors: registry})
-	task, err := Submit(context.Background(), manager, &SubmitRequest{
-		SubAgentName: agent.name, Query: "work", Description: "work", SessionID: "parent",
+	task, err := Submit(context.Background(), manager, &SubmitRequest[*schema.Message]{
+		SubAgentName: agent.name, Input: textInput("work"), Description: "work", SessionID: "parent",
 	})
 	require.NoError(t, err)
 	executeDone := make(chan error, 1)
@@ -973,8 +981,8 @@ func TestControlAndInterruptUseRunnerCheckpoint(t *testing.T) {
 	registry := backgroundtask.NewExecutorRegistry()
 	require.NoError(t, registry.Register(executor))
 	manager := mustNewBackgroundManager(t, context.Background(), &backgroundtask.Config{Executors: registry})
-	task, err := Submit(context.Background(), manager, &SubmitRequest{
-		SubAgentName: agent.name, Query: "work", Description: "work", SessionID: "parent",
+	task, err := Submit(context.Background(), manager, &SubmitRequest[*schema.Message]{
+		SubAgentName: agent.name, Input: textInput("work"), Description: "work", SessionID: "parent",
 	})
 	require.NoError(t, err)
 	runner := adk.NewRunner(context.Background(), adk.RunnerConfig{
@@ -1015,13 +1023,13 @@ func TestControlAndInterruptUseRunnerCheckpoint(t *testing.T) {
 	_, _ = executor.beginRun(
 		runCtx, runner, &backgroundtask.Task{
 			Spec: task.Spec, Checkpoint: []byte(`{"sequence":1}`),
-		}, &taskPayload{},
+		}, &taskPayload{}, nil,
 	)
 	_, _ = executor.beginRun(
 		runCtx, runner, &backgroundtask.Task{
 			Spec: task.Spec, Checkpoint: []byte(`{"sequence":1}`),
 			PendingResume: []byte(`{"approval":true}`),
-		}, &taskPayload{},
+		}, &taskPayload{}, nil,
 	)
 
 	close(agent.release)
@@ -1053,8 +1061,8 @@ func TestSubAgentTaskResumesAfterManagerReconstruction_BitsUT(t *testing.T) {
 	manager1 := mustNewBackgroundManager(t, context.Background(), &backgroundtask.Config{
 		Tasks: taskStore, Executors: executors,
 	})
-	task, err := Submit(context.Background(), manager1, &SubmitRequest{
-		SubAgentName: "worker", Query: "do work", Description: "durable child",
+	task, err := Submit(context.Background(), manager1, &SubmitRequest[*schema.Message]{
+		SubAgentName: "worker", Input: textInput("do work"), Description: "durable child",
 		SessionID: "parent-session",
 	})
 	require.NoError(t, err)
@@ -1092,7 +1100,10 @@ func TestSubAgentTaskResumesAfterManagerReconstruction_BitsUT(t *testing.T) {
 
 	var persisted taskPayload
 	require.NoError(t, json.Unmarshal(completed.Spec.Payload, &persisted))
-	assert.Equal(t, "do work", persisted.Query)
+	assert.Equal(t, payloadVersion, persisted.Version)
+	persistedInput, err := decodeTypedInput[*schema.Message](persisted.Input)
+	require.NoError(t, err)
+	assert.Equal(t, "do work", persistedInput.Messages[0].Content)
 	assert.Equal(
 		t,
 		defaultChildSessionID("parent-session", "worker", task.Spec.ID),
