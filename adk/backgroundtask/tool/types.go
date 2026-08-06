@@ -48,10 +48,11 @@ const (
 // any external side effect occurs. InputPreparer supports ordinary Runner
 // interruption before durable task creation. ResumableBackgroundTool supports
 // durable input requests after creation. An error from Start is a durable
-// execution failure.
+// execution failure. For recoverable tools, Eino commits StartResult.Checkpoint
+// and the external-start boundary before calling Run.Wait.
 type BackgroundTool interface {
 	ValidateArguments(arguments string) error
-	Start(context.Context, *StartRequest) (Run, error)
+	Start(context.Context, *StartRequest) (*StartResult, error)
 }
 
 // InputPreparer optionally completes or rewrites tool arguments before durable
@@ -74,8 +75,7 @@ type InputPreparer interface {
 // RecoverableBackgroundTool reconstructs the same logical operation after a
 // Worker loss or graceful yield. Implementations must make Start idempotent by
 // TaskID because Worker loss may occur after the external start but before Eino
-// checkpoints the started marker. Run may implement RecoveryMetadataSource
-// when Recover or Resume needs an opaque backend identity.
+// persists StartResult.Checkpoint and the started marker.
 type RecoverableBackgroundTool interface {
 	BackgroundTool
 	Recover(context.Context, *RecoverRequest) (Run, error)
@@ -86,8 +86,8 @@ type RecoverableBackgroundTool interface {
 // Worker loss may cause the framework to repeat the call on a later attempt.
 //
 // Implementations keep operation state in their external durable backend. The
-// framework persists only the current InputRequest and the caller's resume
-// data; it does not checkpoint implementation state.
+// framework persists opaque tool checkpoints and the current InputRequest but
+// never interprets tool checkpoint bytes.
 type ResumableBackgroundTool interface {
 	RecoverableBackgroundTool
 	// Resume validates and applies input atomically from the framework's
@@ -103,27 +103,36 @@ type StartRequest struct {
 	Attempt   int64
 }
 
+// StartResult contains the attempt-local Run and the initial opaque tool
+// checkpoint. Eino persists an independently owned copy before calling
+// Run.Wait. Checkpoint may be empty when TaskID alone is sufficient to recover.
+type StartResult struct {
+	Run        Run
+	Checkpoint []byte
+}
+
 // RecoverRequest describes reconstruction of an existing logical operation.
+// Checkpoint is an independently owned copy of the latest opaque tool
+// checkpoint.
 type RecoverRequest struct {
-	TaskID    string
-	Arguments string
-	Attempt   int64
-	// RecoveryMetadata is an independently owned copy returned by the initial
-	// Run's RecoveryMetadataSource. It is nil when that capability was absent.
-	RecoveryMetadata []byte
+	TaskID     string
+	Arguments  string
+	Attempt    int64
+	Checkpoint []byte
 }
 
 // ResumeRequest applies durable external input to a waiting logical operation.
 // RequestID identifies the exact InputRequest being answered. Data is opaque to
-// the framework and may be empty. A later attempt may replay the same request.
+// the framework and may be empty. Checkpoint is an independently owned copy of
+// the checkpoint persisted at that waiting boundary. A later attempt may replay
+// the same request.
 type ResumeRequest struct {
-	TaskID    string
-	Arguments string
-	Attempt   int64
-	RequestID string
-	Data      []byte
-	// RecoveryMetadata has the same ownership and origin as on RecoverRequest.
-	RecoveryMetadata []byte
+	TaskID     string
+	Arguments  string
+	Attempt    int64
+	RequestID  string
+	Data       []byte
+	Checkpoint []byte
 }
 
 // Run is an attempt-local handle for one logical external operation. Canceling
@@ -142,15 +151,6 @@ type UpdateSource interface {
 	Updates() *schema.StreamReader[*Update]
 }
 
-// RecoveryMetadataSource optionally exposes opaque recovery metadata from the
-// Run returned by the initial Start call. Eino copies and checkpoints the bytes
-// before observing the Run, then supplies them to later Recover and Resume
-// calls. Implementations must return stable bytes when Start is retried with
-// the same TaskID.
-type RecoveryMetadataSource interface {
-	RecoveryMetadata(context.Context) ([]byte, error)
-}
-
 // InputRequest describes the current durable question from a managed tool.
 // ID must be stable for this question across recovery. Data must contain one
 // valid JSON value and is embedded unchanged in model-facing responses.
@@ -162,12 +162,19 @@ type InputRequest struct {
 // Outcome is the authoritative logical-operation result. Completed outcomes
 // may contain Data and no Error. Failed outcomes require Error and no Data.
 // Canceled outcomes may contain Error and no Data. Waiting-input outcomes set
-// only InputRequest and are supported only by ResumableBackgroundTool.
+// InputRequest and may set Checkpoint; a non-empty Checkpoint replaces the
+// latest tool checkpoint while an empty value retains it. Other statuses must
+// leave InputRequest and Checkpoint empty. Waiting input is supported only by
+// ResumableBackgroundTool.
 type Outcome struct {
 	Status       backgroundtask.Status
 	Data         []byte
 	Error        string
 	InputRequest *InputRequest
+	// Checkpoint replaces the latest opaque tool checkpoint when Status is
+	// StatusWaitingInput and this field is non-empty. Empty retains the latest
+	// checkpoint. Other statuses must leave it empty.
+	Checkpoint []byte
 }
 
 // Update is a bounded serializable progress event. Data is limited to 256 KiB,

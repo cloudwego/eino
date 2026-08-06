@@ -341,13 +341,13 @@ func (s *InMemoryStore) Heartbeat(_ context.Context, req *HeartbeatRequest) (*Ta
 	return cloneTask(t), nil
 }
 
-// SaveCheckpoint persists recovery state for the current running attempt.
-func (s *InMemoryStore) SaveCheckpoint(
+// CommitStart records the external-start boundary for the running attempt.
+func (s *InMemoryStore) CommitStart(
 	_ context.Context,
-	req *SaveCheckpointRequest,
+	req *CommitStartRequest,
 ) (*Task, error) {
 	if req == nil {
-		return nil, errors.New("backgroundtask: save checkpoint request is required")
+		return nil, errors.New("backgroundtask: commit start request is required")
 	}
 	if len(req.Checkpoint) == 0 {
 		return nil, errors.New("backgroundtask: checkpoint data is required")
@@ -364,6 +364,9 @@ func (s *InMemoryStore) SaveCheckpoint(
 	)
 	if err != nil {
 		return nil, err
+	}
+	if len(t.Checkpoint) != 0 {
+		return nil, ErrIllegalTransition
 	}
 	t.Checkpoint = cloneBytes(req.Checkpoint)
 	s.advanceLocked(t)
@@ -1080,7 +1083,6 @@ func (s *InMemoryStore) finishStoreOwnedLocked(t *Task) {
 
 var (
 	_ TaskStore          = (*InMemoryStore)(nil)
-	_ CheckpointWriter   = (*InMemoryStore)(nil)
 	_ TaskEventStore     = (*InMemoryStore)(nil)
 	_ NotificationWriter = (*InMemoryStore)(nil)
 	_ NotificationOutbox = (*InMemoryStore)(nil)

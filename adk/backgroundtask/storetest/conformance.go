@@ -38,12 +38,6 @@ type TaskStoreConfig struct {
 	ExpireActiveAttempt func(testing.TB, backgroundtask.TaskStore, *backgroundtask.Task)
 }
 
-// CheckpointWriterConfig configures running-checkpoint conformance. New returns
-// lifecycle and checkpoint capabilities sharing one task namespace.
-type CheckpointWriterConfig struct {
-	New func(testing.TB) (backgroundtask.TaskStore, backgroundtask.CheckpointWriter)
-}
-
 // TaskEventStoreConfig configures TaskEventStore conformance. New returns
 // lifecycle and event capabilities sharing one task namespace.
 type TaskEventStoreConfig struct {
@@ -120,6 +114,53 @@ func RunTaskStoreConformance(t *testing.T, config TaskStoreConfig) {
 			errors.Is(err, backgroundtask.ErrAlreadyTerminal) ||
 				errors.Is(err, backgroundtask.ErrLeaseLost),
 		)
+	})
+
+	t.Run("start_commit_is_owned_and_retained", func(t *testing.T) {
+		store := config.New(t)
+		started := createAndStart(
+			t,
+			store,
+			"running-checkpoint",
+			backgroundtask.LeaseExpiryRetry,
+		)
+		checkpoint := []byte("recovery")
+		saved, err := store.CommitStart(
+			context.Background(),
+			&backgroundtask.CommitStartRequest{
+				TaskID: started.Spec.ID, ExpectedVersion: started.Version,
+				Checkpoint: checkpoint,
+			},
+		)
+		require.NoError(t, err)
+		checkpoint[0] = 'X'
+		require.Equal(t, backgroundtask.StatusRunning, saved.Status)
+		require.Equal(t, started.Version+1, saved.Version)
+		require.Equal(t, "recovery", string(saved.Checkpoint))
+		_, err = store.CommitStart(
+			context.Background(),
+			&backgroundtask.CommitStartRequest{
+				TaskID: saved.Spec.ID, ExpectedVersion: started.Version,
+				Checkpoint: []byte("stale"),
+			},
+		)
+		require.ErrorIs(t, err, backgroundtask.ErrVersionConflict)
+		_, err = store.CommitStart(
+			context.Background(),
+			&backgroundtask.CommitStartRequest{
+				TaskID: saved.Spec.ID, ExpectedVersion: saved.Version,
+				Checkpoint: []byte("duplicate"),
+			},
+		)
+		require.ErrorIs(t, err, backgroundtask.ErrIllegalTransition)
+		yielded, err := store.Yield(
+			context.Background(),
+			&backgroundtask.YieldTaskRequest{
+				TaskID: saved.Spec.ID, ExpectedVersion: saved.Version,
+			},
+		)
+		require.NoError(t, err)
+		require.Equal(t, "recovery", string(yielded.Checkpoint))
 	})
 
 	t.Run("waiting_resume_suspend_release_and_yield", func(t *testing.T) {
@@ -227,54 +268,6 @@ func RunTaskStoreConformance(t *testing.T, config TaskStoreConfig) {
 			}
 		})
 	}
-}
-
-// RunCheckpointWriterConformance checks fencing, copy ownership, versioning,
-// and retention across a recoverable yield.
-func RunCheckpointWriterConformance(
-	t *testing.T,
-	config CheckpointWriterConfig,
-) {
-	t.Helper()
-	require.NotNil(t, config.New)
-	tasks, writer := config.New(t)
-	require.NotNil(t, tasks)
-	require.NotNil(t, writer)
-	started := createAndStart(
-		t,
-		tasks,
-		"running-checkpoint",
-		backgroundtask.LeaseExpiryRetry,
-	)
-	checkpoint := []byte("recovery")
-	saved, err := writer.SaveCheckpoint(
-		context.Background(),
-		&backgroundtask.SaveCheckpointRequest{
-			TaskID: started.Spec.ID, ExpectedVersion: started.Version,
-			Checkpoint: checkpoint,
-		},
-	)
-	require.NoError(t, err)
-	checkpoint[0] = 'X'
-	require.Equal(t, backgroundtask.StatusRunning, saved.Status)
-	require.Equal(t, started.Version+1, saved.Version)
-	require.Equal(t, "recovery", string(saved.Checkpoint))
-	_, err = writer.SaveCheckpoint(
-		context.Background(),
-		&backgroundtask.SaveCheckpointRequest{
-			TaskID: saved.Spec.ID, ExpectedVersion: started.Version,
-			Checkpoint: []byte("stale"),
-		},
-	)
-	require.ErrorIs(t, err, backgroundtask.ErrVersionConflict)
-	yielded, err := tasks.Yield(
-		context.Background(),
-		&backgroundtask.YieldTaskRequest{
-			TaskID: saved.Spec.ID, ExpectedVersion: saved.Version,
-		},
-	)
-	require.NoError(t, err)
-	require.Equal(t, "recovery", string(yielded.Checkpoint))
 }
 
 // append ordering, cursor validation, and snapshot-stable pagination.

@@ -147,9 +147,9 @@ type ReportTranscriptFailureRequest struct {
 	Error           string
 }
 
-// SaveCheckpointRequest persists executor-owned recovery state without
-// changing the running task's lifecycle status.
-type SaveCheckpointRequest struct {
+// CommitStartRequest records that the external operation for the current
+// running attempt was established and persists its initial checkpoint.
+type CommitStartRequest struct {
 	TaskID          string
 	ExpectedVersion int64
 	Checkpoint      []byte

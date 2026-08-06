@@ -36,8 +36,8 @@ func (exampleTool) ValidateArguments(arguments string) error {
 func (exampleTool) Start(
 	context.Context,
 	*backgroundtool.StartRequest,
-) (backgroundtool.Run, error) {
-	return exampleRun{}, nil
+) (*backgroundtool.StartResult, error) {
+	return &backgroundtool.StartResult{Run: exampleRun{}}, nil
 }
 
 type exampleRun struct{}

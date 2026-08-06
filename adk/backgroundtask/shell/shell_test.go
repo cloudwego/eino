@@ -86,7 +86,8 @@ func TestNewRegistrationAndAdapter(t *testing.T) {
 		TaskID: "task", Arguments: `{"command":"echo hello"}`, Attempt: 1,
 	})
 	require.NoError(t, err)
-	require.Equal(t, backend.run, started)
+	require.Equal(t, backend.run, started.Run)
+	require.Empty(t, started.Checkpoint)
 	require.Equal(t, &StartCommandRequest{
 		TaskID: "task", Command: "echo hello", Attempt: 1,
 	}, backend.start)

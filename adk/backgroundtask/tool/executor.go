@@ -35,7 +35,7 @@ const (
 	maxArgumentsBytes        = 1 << 20
 	maxInputRequestIDBytes   = 256
 	maxInputRequestDataBytes = 256 << 10
-	maxRecoveryMetadataBytes = 256 << 10
+	maxToolCheckpointBytes   = 256 << 10
 	maxUpdateDataBytes       = 256 << 10
 	maxUpdateKindBytes       = 128
 	maxUpdateMetadata        = 32
@@ -51,10 +51,10 @@ type taskPayload struct {
 }
 
 type managedCheckpoint struct {
-	Version          int           `json:"version"`
-	Started          bool          `json:"started"`
-	RecoveryMetadata []byte        `json:"recovery_metadata,omitempty"`
-	Request          *InputRequest `json:"request,omitempty"`
+	Version        int           `json:"version"`
+	Started        bool          `json:"started"`
+	ToolCheckpoint []byte        `json:"tool_checkpoint,omitempty"`
+	Request        *InputRequest `json:"request,omitempty"`
 }
 
 const managedCheckpointVersion = 1
@@ -151,7 +151,7 @@ func (e *executor) Execute(
 		return nil, fmt.Errorf("backgroundtask/tool: tool %q is unavailable", payload.ToolName)
 	}
 	var run Run
-	inputRequest, recoveryMetadata, started, err := decodeManagedCheckpoint(
+	inputRequest, toolCheckpoint, started, err := decodeManagedCheckpoint(
 		task.Checkpoint,
 	)
 	if err != nil {
@@ -159,7 +159,7 @@ func (e *executor) Execute(
 	}
 	hasInputRequest := inputRequest != nil
 	resumable, supportsResume := registration.Tool.(ResumableBackgroundTool)
-	checkpointRuntime, supportsCheckpoint := runtime.(backgroundtask.CheckpointRuntime)
+	startCommitRuntime, supportsStartCommit := runtime.(backgroundtask.StartCommitRuntime)
 	startedRun := false
 	if hasInputRequest {
 		if !supportsResume {
@@ -170,7 +170,7 @@ func (e *executor) Execute(
 		resumeRequest := &ResumeRequest{
 			TaskID: task.Spec.ID, Arguments: payload.Arguments, Attempt: task.Attempt,
 			RequestID: inputRequest.ID, Data: append([]byte(nil), task.PendingResume...),
-			RecoveryMetadata: append([]byte(nil), recoveryMetadata...),
+			Checkpoint: append([]byte(nil), toolCheckpoint...),
 		}
 		run, err = resumable.Resume(ctx, resumeRequest)
 		if errors.Is(err, ErrResumeInputRejected) {
@@ -187,18 +187,28 @@ func (e *executor) Execute(
 	} else if e.recoverable && task.Attempt > 1 && started {
 		run, err = registration.Tool.(RecoverableBackgroundTool).Recover(ctx, &RecoverRequest{
 			TaskID: task.Spec.ID, Arguments: payload.Arguments, Attempt: task.Attempt,
-			RecoveryMetadata: append([]byte(nil), recoveryMetadata...),
+			Checkpoint: append([]byte(nil), toolCheckpoint...),
 		})
 	} else {
-		if e.recoverable && !supportsCheckpoint {
+		if e.recoverable && !supportsStartCommit {
 			return nil, errors.New(
-				"backgroundtask/tool: execution runtime cannot persist recovery metadata",
+				"backgroundtask/tool: execution runtime cannot commit external start",
 			)
 		}
 		startedRun = true
-		run, err = registration.Tool.Start(ctx, &StartRequest{
+		var startResult *StartResult
+		startResult, err = registration.Tool.Start(ctx, &StartRequest{
 			TaskID: task.Spec.ID, Arguments: payload.Arguments, Attempt: task.Attempt,
 		})
+		if err == nil {
+			if startResult == nil {
+				return nil, errors.New(
+					"backgroundtask/tool: implementation returned a nil start result",
+				)
+			}
+			run = startResult.Run
+			toolCheckpoint = append([]byte(nil), startResult.Checkpoint...)
+		}
 	}
 	if err != nil {
 		return nil, err
@@ -206,32 +216,22 @@ func (e *executor) Execute(
 	if run == nil {
 		return nil, errors.New("backgroundtask/tool: implementation returned a nil run")
 	}
+	if startedRun && !e.recoverable && len(toolCheckpoint) > 0 {
+		return nil, stopRunAfterStartCommitFailure(run, errors.New(
+			"backgroundtask/tool: plain tool cannot return a checkpoint",
+		))
+	}
 	if startedRun && e.recoverable {
-		if source, ok := run.(RecoveryMetadataSource); ok {
-			recoveryMetadata, err = source.RecoveryMetadata(ctx)
-			if err != nil {
-				return nil, stopRunAfterMetadataFailure(run, fmt.Errorf(
-					"backgroundtask/tool: read recovery metadata: %w",
-					err,
-				))
-			}
-			if len(recoveryMetadata) == 0 {
-				return nil, stopRunAfterMetadataFailure(run, errors.New(
-					"backgroundtask/tool: recovery metadata source returned empty metadata",
-				))
-			}
-			recoveryMetadata = append([]byte(nil), recoveryMetadata...)
-		}
 		checkpoint, checkpointErr := encodeManagedCheckpoint(
 			nil,
-			recoveryMetadata,
+			toolCheckpoint,
 		)
 		if checkpointErr != nil {
-			return nil, stopRunAfterMetadataFailure(run, checkpointErr)
+			return nil, stopRunAfterStartCommitFailure(run, checkpointErr)
 		}
-		if err = checkpointRuntime.SaveCheckpoint(ctx, checkpoint); err != nil {
-			return nil, stopRunAfterMetadataFailure(run, fmt.Errorf(
-				"backgroundtask/tool: persist recovery metadata: %w",
+		if err = startCommitRuntime.CommitStart(ctx, checkpoint); err != nil {
+			return nil, stopRunAfterStartCommitFailure(run, fmt.Errorf(
+				"backgroundtask/tool: commit external start: %w",
 				err,
 			))
 		}
@@ -304,7 +304,7 @@ func (e *executor) Execute(
 			return validateOutcome(
 				result.outcome,
 				supportsResume,
-				recoveryMetadata,
+				toolCheckpoint,
 			)
 		case received, open := <-updateResults:
 			if !open {
@@ -426,7 +426,7 @@ func receiveUpdates(
 	}
 }
 
-func stopRunAfterMetadataFailure(run Run, cause error) error {
+func stopRunAfterStartCommitFailure(run Run, cause error) error {
 	if stopErr := run.Stop(context.Background()); stopErr != nil {
 		return fmt.Errorf("%w; stop operation: %v", cause, stopErr)
 	}
@@ -501,7 +501,7 @@ func validateUpdate(update *Update) error {
 func validateOutcome(
 	outcome *Outcome,
 	supportsResume bool,
-	recoveryMetadata []byte,
+	toolCheckpoint []byte,
 ) (*backgroundtask.ExecutionResult, error) {
 	if outcome == nil {
 		return nil, errors.New("backgroundtask/tool: run returned a nil outcome")
@@ -511,24 +511,27 @@ func validateOutcome(
 	}
 	switch outcome.Status {
 	case backgroundtask.StatusCompleted:
-		if outcome.Error != "" || outcome.InputRequest != nil {
+		if outcome.Error != "" || outcome.InputRequest != nil ||
+			len(outcome.Checkpoint) > 0 {
 			return nil, errors.New(
-				"backgroundtask/tool: completed outcome cannot contain an error or input request",
+				"backgroundtask/tool: completed outcome cannot contain an error, input request, or checkpoint",
 			)
 		}
 	case backgroundtask.StatusFailed:
 		if outcome.Error == "" {
 			return nil, errors.New("backgroundtask/tool: failed outcome requires an error")
 		}
-		if len(outcome.Data) != 0 || outcome.InputRequest != nil {
+		if len(outcome.Data) != 0 || outcome.InputRequest != nil ||
+			len(outcome.Checkpoint) > 0 {
 			return nil, errors.New(
-				"backgroundtask/tool: failed outcome cannot contain data or an input request",
+				"backgroundtask/tool: failed outcome cannot contain data, an input request, or a checkpoint",
 			)
 		}
 	case backgroundtask.StatusCanceled:
-		if len(outcome.Data) != 0 || outcome.InputRequest != nil {
+		if len(outcome.Data) != 0 || outcome.InputRequest != nil ||
+			len(outcome.Checkpoint) > 0 {
 			return nil, errors.New(
-				"backgroundtask/tool: canceled outcome cannot contain data or an input request",
+				"backgroundtask/tool: canceled outcome cannot contain data, an input request, or a checkpoint",
 			)
 		}
 	case backgroundtask.StatusWaitingInput:
@@ -547,9 +550,12 @@ func validateOutcome(
 				"backgroundtask/tool: waiting-input outcome requires an input request ID",
 			)
 		}
+		if len(outcome.Checkpoint) > 0 {
+			toolCheckpoint = outcome.Checkpoint
+		}
 		checkpoint, err := encodeManagedCheckpoint(
 			outcome.InputRequest,
-			recoveryMetadata,
+			toolCheckpoint,
 		)
 		if err != nil {
 			return nil, err
@@ -563,11 +569,11 @@ func validateOutcome(
 
 func encodeManagedCheckpoint(
 	request *InputRequest,
-	recoveryMetadata []byte,
+	toolCheckpoint []byte,
 ) ([]byte, error) {
-	if len(recoveryMetadata) > maxRecoveryMetadataBytes {
+	if len(toolCheckpoint) > maxToolCheckpointBytes {
 		return nil, errors.New(
-			"backgroundtask/tool: recovery metadata exceeds configured bounds",
+			"backgroundtask/tool: tool checkpoint exceeds configured bounds",
 		)
 	}
 	if request != nil {
@@ -587,9 +593,9 @@ func encodeManagedCheckpoint(
 		}
 	}
 	checkpoint := &managedCheckpoint{
-		Version:          managedCheckpointVersion,
-		Started:          true,
-		RecoveryMetadata: append([]byte(nil), recoveryMetadata...),
+		Version:        managedCheckpointVersion,
+		Started:        true,
+		ToolCheckpoint: append([]byte(nil), toolCheckpoint...),
 	}
 	if request != nil {
 		checkpoint.Request = &InputRequest{
@@ -617,7 +623,7 @@ func decodeManagedCheckpoint(
 		)
 	}
 	if checkpoint.Version != managedCheckpointVersion ||
-		len(checkpoint.RecoveryMetadata) > maxRecoveryMetadataBytes ||
+		len(checkpoint.ToolCheckpoint) > maxToolCheckpointBytes ||
 		(!checkpoint.Started && checkpoint.Request == nil) {
 		return nil, nil, false, errors.New(
 			"backgroundtask/tool: incompatible managed-tool checkpoint",
@@ -637,7 +643,7 @@ func decodeManagedCheckpoint(
 			Data: append(json.RawMessage(nil), checkpoint.Request.Data...),
 		}
 	}
-	return request, append([]byte(nil), checkpoint.RecoveryMetadata...),
+	return request, append([]byte(nil), checkpoint.ToolCheckpoint...),
 		checkpoint.Started, nil
 }
 

@@ -63,39 +63,31 @@ func CheckRecoveryConformance(
 	if err := first.ValidateArguments(config.Arguments); err != nil {
 		return fmt.Errorf("backgroundtask/tool/tooltest: validate conformance arguments: %w", err)
 	}
-	firstRun, err := first.Start(ctx, &backgroundtool.StartRequest{
+	firstResult, err := first.Start(ctx, &backgroundtool.StartRequest{
 		TaskID: config.TaskID, Arguments: config.Arguments, Attempt: 1,
 	})
 	if err != nil {
 		return fmt.Errorf("backgroundtask/tool/tooltest: first start: %w", err)
 	}
-	if firstRun == nil {
+	if firstResult == nil || firstResult.Run == nil {
 		return errors.New("backgroundtask/tool/tooltest: first start returned nil run")
-	}
-	recoveryMetadata, err := readRecoveryMetadata(ctx, firstRun)
-	if err != nil {
-		return fmt.Errorf("backgroundtask/tool/tooltest: first start: %w", err)
 	}
 	before, err := config.Snapshot(ctx, config.TaskID)
 	if err != nil {
 		return fmt.Errorf("backgroundtask/tool/tooltest: snapshot after first start: %w", err)
 	}
-	duplicateRun, err := second.Start(ctx, &backgroundtool.StartRequest{
+	duplicateResult, err := second.Start(ctx, &backgroundtool.StartRequest{
 		TaskID: config.TaskID, Arguments: config.Arguments, Attempt: 1,
 	})
 	if err != nil {
 		return fmt.Errorf("backgroundtask/tool/tooltest: duplicate start: %w", err)
 	}
-	if duplicateRun == nil {
+	if duplicateResult == nil || duplicateResult.Run == nil {
 		return errors.New("backgroundtask/tool/tooltest: duplicate start returned nil run")
 	}
-	duplicateMetadata, err := readRecoveryMetadata(ctx, duplicateRun)
-	if err != nil {
-		return fmt.Errorf("backgroundtask/tool/tooltest: duplicate start: %w", err)
-	}
-	if !bytes.Equal(recoveryMetadata, duplicateMetadata) {
+	if !bytes.Equal(firstResult.Checkpoint, duplicateResult.Checkpoint) {
 		return errors.New(
-			"backgroundtask/tool/tooltest: duplicate start changed recovery metadata",
+			"backgroundtask/tool/tooltest: duplicate start changed checkpoint",
 		)
 	}
 	afterDuplicate, err := config.Snapshot(ctx, config.TaskID)
@@ -107,7 +99,7 @@ func CheckRecoveryConformance(
 	}
 	recoveredRun, err := third.Recover(ctx, &backgroundtool.RecoverRequest{
 		TaskID: config.TaskID, Arguments: config.Arguments, Attempt: 2,
-		RecoveryMetadata: append([]byte(nil), recoveryMetadata...),
+		Checkpoint: append([]byte(nil), firstResult.Checkpoint...),
 	})
 	if err != nil {
 		return fmt.Errorf("backgroundtask/tool/tooltest: recover: %w", err)
@@ -126,21 +118,6 @@ func CheckRecoveryConformance(
 		return fmt.Errorf("backgroundtask/tool/tooltest: stop recovered operation: %w", err)
 	}
 	return nil
-}
-
-func readRecoveryMetadata(ctx context.Context, run backgroundtool.Run) ([]byte, error) {
-	source, ok := run.(backgroundtool.RecoveryMetadataSource)
-	if !ok {
-		return nil, nil
-	}
-	metadata, err := source.RecoveryMetadata(ctx)
-	if err != nil {
-		return nil, err
-	}
-	if len(metadata) == 0 {
-		return nil, errors.New("recovery metadata source returned empty metadata")
-	}
-	return append([]byte(nil), metadata...), nil
 }
 
 func compareRecoverySnapshots(expected, actual *RecoverySnapshot) error {

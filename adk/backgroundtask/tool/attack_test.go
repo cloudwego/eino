@@ -47,12 +47,12 @@ func (r *replayRuntimeStub) EmitProgress(
 }
 func (*replayRuntimeStub) ReportTranscriptFailure(context.Context, error) error { return nil }
 
-type failingCheckpointRuntime struct {
+type failingStartCommitRuntime struct {
 	*replayRuntimeStub
 	err error
 }
 
-func (r *failingCheckpointRuntime) SaveCheckpoint(context.Context, []byte) error {
+func (r *failingStartCommitRuntime) CommitStart(context.Context, []byte) error {
 	return r.err
 }
 
@@ -194,20 +194,18 @@ func TestAttack_RecoverableUpdateRequiresEventID(t *testing.T) {
 	t.Log("recoverable output without a stable replay identity was rejected")
 }
 
-func TestAttack_RecoveryMetadataPersistenceFailureStopsRun(t *testing.T) {
+func TestAttack_StartCommitFailureStopsRun(t *testing.T) {
 	stopped := false
 	implementation := &fakeTool{
+		startCheckpoint: []byte(`{"run_id":"business-run"}`),
 		start: func(context.Context, *StartRequest) (Run, error) {
-			return &metadataRun{
-				metadata: []byte(`{"run_id":"business-run"}`),
-				fakeRun: &fakeRun{
-					wait: func(context.Context) (*Outcome, error) {
-						return nil, errors.New("wait must not start")
-					},
-					stop: func(context.Context) error {
-						stopped = true
-						return errors.New("stop unavailable")
-					},
+			return &fakeRun{
+				wait: func(context.Context) (*Outcome, error) {
+					return nil, errors.New("wait must not start")
+				},
+				stop: func(context.Context) error {
+					stopped = true
+					return errors.New("stop unavailable")
 				},
 			}, nil
 		},
@@ -229,91 +227,60 @@ func TestAttack_RecoveryMetadataPersistenceFailureStopsRun(t *testing.T) {
 			},
 			Status: backgroundtask.StatusRunning, Attempt: 1,
 		},
-		&failingCheckpointRuntime{
+		&failingStartCommitRuntime{
 			replayRuntimeStub: &replayRuntimeStub{},
-			err:               errors.New("checkpoint unavailable"),
+			err:               errors.New("commit unavailable"),
 		},
 	)
 	require.Nil(t, result)
-	require.ErrorContains(t, err, "persist recovery metadata")
+	require.ErrorContains(t, err, "commit external start")
 	require.ErrorContains(t, err, "stop operation: stop unavailable")
 	require.True(t, stopped)
 	t.Log("an uncheckpointed external run was stopped before the attempt failed")
 }
 
-func TestAttack_InvalidRecoveryMetadataStopsRun(t *testing.T) {
-	for _, testCase := range []struct {
-		name      string
-		metadata  []byte
-		sourceErr error
-		errorText string
-	}{
-		{
-			name: "source error", sourceErr: errors.New("backend unavailable"),
-			errorText: "read recovery metadata",
+func TestAttack_OversizedStartCheckpointStopsRun(t *testing.T) {
+	stopped := false
+	implementation := &fakeTool{
+		startCheckpoint: make([]byte, maxToolCheckpointBytes+1),
+		start: func(context.Context, *StartRequest) (Run, error) {
+			return &fakeRun{
+				wait: func(context.Context) (*Outcome, error) {
+					return nil, errors.New("wait must not start")
+				},
+				stop: func(context.Context) error {
+					stopped = true
+					return nil
+				},
+			}, nil
 		},
-		{name: "empty", errorText: "returned empty metadata"},
-		{
-			name:      "oversized",
-			metadata:  make([]byte, maxRecoveryMetadataBytes+1),
-			errorText: "exceeds configured bounds",
+		recover: func(context.Context, *RecoverRequest) (Run, error) {
+			return nil, errors.New("recover must not run")
 		},
-	} {
-		t.Run(testCase.name, func(t *testing.T) {
-			stopped := false
-			implementation := &fakeTool{
-				start: func(context.Context, *StartRequest) (Run, error) {
-					return &metadataRun{
-						metadata: testCase.metadata,
-						err:      testCase.sourceErr,
-						fakeRun: &fakeRun{
-							wait: func(context.Context) (*Outcome, error) {
-								return nil, errors.New("wait must not start")
-							},
-							stop: func(context.Context) error {
-								stopped = true
-								return nil
-							},
-						},
-					}, nil
-				},
-				recover: func(context.Context, *RecoverRequest) (Run, error) {
-					return nil, errors.New("recover must not run")
-				},
-			}
-			registry := NewRegistry()
-			require.NoError(t, registry.Register(&Registration{
-				Info: toolInfo("attack"), Tool: implementation,
-			}))
-			result, err := (&executor{
-				registry: registry, recoverable: true,
-			}).Execute(
-				context.Background(),
-				&backgroundtask.Task{
-					Spec: backgroundtask.Spec{
-						ID: "attack-task", ExecutorKey: RecoverableExecutorKey,
-						Kind: "background_tool",
-						Payload: encodedPayload(
-							t,
-							"attack",
-							`{"value":"metadata"}`,
-						),
-					},
-					Status: backgroundtask.StatusRunning, Attempt: 1,
-				},
-				&failingCheckpointRuntime{
-					replayRuntimeStub: &replayRuntimeStub{},
-				},
-			)
-			require.Nil(t, result)
-			require.ErrorContains(t, err, testCase.errorText)
-			require.True(t, stopped)
-		})
 	}
-	t.Log("invalid metadata never reached Wait or durable checkpoint storage")
+	registry := NewRegistry()
+	require.NoError(t, registry.Register(&Registration{
+		Info: toolInfo("attack"), Tool: implementation,
+	}))
+	result, err := (&executor{registry: registry, recoverable: true}).Execute(
+		context.Background(),
+		&backgroundtask.Task{
+			Spec: backgroundtask.Spec{
+				ID: "attack-task", ExecutorKey: RecoverableExecutorKey,
+				Kind:    "background_tool",
+				Payload: encodedPayload(t, "attack", `{"value":"checkpoint"}`),
+			},
+			Status: backgroundtask.StatusRunning, Attempt: 1,
+		},
+		&failingStartCommitRuntime{replayRuntimeStub: &replayRuntimeStub{}},
+	)
+	require.Nil(t, result)
+	require.ErrorContains(t, err, "tool checkpoint exceeds")
+	require.True(t, stopped)
+	t.Log("oversized initial checkpoint never reached Wait or durable storage")
 }
 
-func TestAttack_MissingCheckpointCapabilityRejectsBeforeStart(t *testing.T) {
+func TestAttack_MissingStartCommitCapabilityRejectsBeforeStart(t *testing.T) {
 	started := false
 	implementation := &fakeTool{
 		start: func(context.Context, *StartRequest) (Run, error) {
@@ -341,9 +308,9 @@ func TestAttack_MissingCheckpointCapabilityRejectsBeforeStart(t *testing.T) {
 		&replayRuntimeStub{},
 	)
 	require.Nil(t, result)
-	require.ErrorContains(t, err, "cannot persist recovery metadata")
+	require.ErrorContains(t, err, "cannot commit external start")
 	require.False(t, started)
-	t.Log("missing Store capability was rejected before external side effects")
+	t.Log("missing start-commit runtime was rejected before external side effects")
 }
 
 func TestAttack_PersistedReplayRepairsMissingMaterialization(t *testing.T) {

@@ -29,6 +29,7 @@ import (
 type conformanceToolStub struct {
 	validateErr        error
 	start              func() (backgroundtool.Run, error)
+	startCheckpoint    []byte
 	recover            func() (backgroundtool.Run, error)
 	recoverWithRequest func(*backgroundtool.RecoverRequest) (backgroundtool.Run, error)
 }
@@ -37,8 +38,14 @@ func (t *conformanceToolStub) ValidateArguments(string) error { return t.validat
 func (t *conformanceToolStub) Start(
 	context.Context,
 	*backgroundtool.StartRequest,
-) (backgroundtool.Run, error) {
-	return t.start()
+) (*backgroundtool.StartResult, error) {
+	run, err := t.start()
+	if err != nil {
+		return nil, err
+	}
+	return &backgroundtool.StartResult{
+		Run: run, Checkpoint: append([]byte(nil), t.startCheckpoint...),
+	}, nil
 }
 func (t *conformanceToolStub) Recover(
 	_ context.Context,
@@ -58,17 +65,6 @@ func (*conformanceRunStub) Wait(context.Context) (*backgroundtool.Outcome, error
 	return nil, nil
 }
 func (r *conformanceRunStub) Stop(context.Context) error { return r.stopErr }
-
-type conformanceMetadataRun struct {
-	*conformanceRunStub
-	metadata []byte
-}
-
-func (r *conformanceMetadataRun) RecoveryMetadata(
-	context.Context,
-) ([]byte, error) {
-	return r.metadata, nil
-}
 
 func conformanceConfig(
 	tools []backgroundtool.RecoverableBackgroundTool,
@@ -148,15 +144,13 @@ func TestCheckRecoveryConformance(t *testing.T) {
 	}
 }
 
-func TestCheckRecoveryConformancePassesStableMetadata(t *testing.T) {
-	metadata := []byte(`{"run_id":"business-run"}`)
+func TestCheckRecoveryConformancePassesStableCheckpoint(t *testing.T) {
+	checkpoint := []byte(`{"run_id":"business-run"}`)
 	newStartingTool := func() backgroundtool.RecoverableBackgroundTool {
 		return &conformanceToolStub{
+			startCheckpoint: append([]byte(nil), checkpoint...),
 			start: func() (backgroundtool.Run, error) {
-				return &conformanceMetadataRun{
-					conformanceRunStub: &conformanceRunStub{},
-					metadata:           append([]byte(nil), metadata...),
-				}, nil
+				return &conformanceRunStub{}, nil
 			},
 		}
 	}
@@ -164,7 +158,7 @@ func TestCheckRecoveryConformancePassesStableMetadata(t *testing.T) {
 		recoverWithRequest: func(
 			request *backgroundtool.RecoverRequest,
 		) (backgroundtool.Run, error) {
-			require.Equal(t, metadata, request.RecoveryMetadata)
+			require.Equal(t, checkpoint, request.Checkpoint)
 			return &conformanceRunStub{}, nil
 		},
 	}

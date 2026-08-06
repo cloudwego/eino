@@ -35,8 +35,9 @@ import (
 )
 
 type fakeTool struct {
-	start   func(context.Context, *StartRequest) (Run, error)
-	recover func(context.Context, *RecoverRequest) (Run, error)
+	start           func(context.Context, *StartRequest) (Run, error)
+	startCheckpoint []byte
+	recover         func(context.Context, *RecoverRequest) (Run, error)
 }
 
 type resumableFakeTool struct {
@@ -52,7 +53,8 @@ func (t *resumableFakeTool) Resume(
 }
 
 type plainFakeTool struct {
-	start func(context.Context, *StartRequest) (Run, error)
+	start           func(context.Context, *StartRequest) (Run, error)
+	startCheckpoint []byte
 }
 
 type preparingPlainTool struct {
@@ -71,16 +73,34 @@ func (*plainFakeTool) ValidateArguments(arguments string) error {
 	var value map[string]any
 	return json.Unmarshal([]byte(arguments), &value)
 }
-func (t *plainFakeTool) Start(ctx context.Context, request *StartRequest) (Run, error) {
-	return t.start(ctx, request)
+func (t *plainFakeTool) Start(
+	ctx context.Context,
+	request *StartRequest,
+) (*StartResult, error) {
+	run, err := t.start(ctx, request)
+	if err != nil {
+		return nil, err
+	}
+	return &StartResult{
+		Run: run, Checkpoint: append([]byte(nil), t.startCheckpoint...),
+	}, nil
 }
 
 func (*fakeTool) ValidateArguments(arguments string) error {
 	var value map[string]any
 	return json.Unmarshal([]byte(arguments), &value)
 }
-func (t *fakeTool) Start(ctx context.Context, request *StartRequest) (Run, error) {
-	return t.start(ctx, request)
+func (t *fakeTool) Start(
+	ctx context.Context,
+	request *StartRequest,
+) (*StartResult, error) {
+	run, err := t.start(ctx, request)
+	if err != nil {
+		return nil, err
+	}
+	return &StartResult{
+		Run: run, Checkpoint: append([]byte(nil), t.startCheckpoint...),
+	}, nil
 }
 func (t *fakeTool) Recover(ctx context.Context, request *RecoverRequest) (Run, error) {
 	return t.recover(ctx, request)
@@ -89,16 +109,6 @@ func (t *fakeTool) Recover(ctx context.Context, request *RecoverRequest) (Run, e
 type fakeRun struct {
 	wait func(context.Context) (*Outcome, error)
 	stop func(context.Context) error
-}
-
-type metadataRun struct {
-	*fakeRun
-	metadata []byte
-	err      error
-}
-
-func (r *metadataRun) RecoveryMetadata(context.Context) ([]byte, error) {
-	return r.metadata, r.err
 }
 
 type materializerStub struct {
@@ -345,13 +355,15 @@ func (*interruptingInputTool) ValidateArguments(arguments string) error {
 func (t *interruptingInputTool) Start(
 	_ context.Context,
 	request *StartRequest,
-) (Run, error) {
+) (*StartResult, error) {
 	t.mu.Lock()
 	t.starts++
 	t.arguments = request.Arguments
 	t.mu.Unlock()
-	return &fakeRun{wait: func(context.Context) (*Outcome, error) {
-		return &Outcome{Status: backgroundtask.StatusCompleted}, nil
+	return &StartResult{Run: &fakeRun{
+		wait: func(context.Context) (*Outcome, error) {
+			return &Outcome{Status: backgroundtask.StatusCompleted}, nil
+		},
 	}}, nil
 }
 
@@ -452,17 +464,17 @@ func TestManagedToolDurableInputResume_BitsUT(t *testing.T) {
 	var resumeRequests []*ResumeRequest
 	implementation := &resumableFakeTool{
 		fakeTool: &fakeTool{
+			startCheckpoint: []byte(`{"run_id":"input-run","stage":"approval"}`),
 			start: func(context.Context, *StartRequest) (Run, error) {
-				return &metadataRun{
-					metadata: []byte(`{"run_id":"input-run"}`),
-					fakeRun: &fakeRun{wait: func(context.Context) (*Outcome, error) {
+				return &fakeRun{
+					wait: func(context.Context) (*Outcome, error) {
 						return &Outcome{
 							Status: backgroundtask.StatusWaitingInput,
 							InputRequest: &InputRequest{
 								ID: "approval", Data: []byte(`{"question":"Approve?"}`),
 							},
 						}, nil
-					}},
+					},
 				}, nil
 			},
 			recover: func(context.Context, *RecoverRequest) (Run, error) {
@@ -471,10 +483,14 @@ func TestManagedToolDurableInputResume_BitsUT(t *testing.T) {
 			},
 		},
 		resume: func(_ context.Context, request *ResumeRequest) (Run, error) {
+			expectedCheckpoint := `{"run_id":"input-run","stage":"approval"}`
+			if request.RequestID == "region" {
+				expectedCheckpoint = `{"run_id":"input-run","stage":"region"}`
+			}
 			require.JSONEq(
 				t,
-				`{"run_id":"input-run"}`,
-				string(request.RecoveryMetadata),
+				expectedCheckpoint,
+				string(request.Checkpoint),
 			)
 			if request.RequestID == "approval" && string(request.Data) != "approve" {
 				return nil, fmt.Errorf(
@@ -485,10 +501,7 @@ func TestManagedToolDurableInputResume_BitsUT(t *testing.T) {
 			mu.Lock()
 			copy := *request
 			copy.Data = append([]byte(nil), request.Data...)
-			copy.RecoveryMetadata = append(
-				[]byte(nil),
-				request.RecoveryMetadata...,
-			)
+			copy.Checkpoint = append([]byte(nil), request.Checkpoint...)
 			resumeRequests = append(resumeRequests, &copy)
 			mu.Unlock()
 			return &fakeRun{wait: func(context.Context) (*Outcome, error) {
@@ -498,6 +511,9 @@ func TestManagedToolDurableInputResume_BitsUT(t *testing.T) {
 						InputRequest: &InputRequest{
 							ID: "region", Data: []byte(`{"question":"Which region?"}`),
 						},
+						Checkpoint: []byte(
+							`{"run_id":"input-run","stage":"region"}`,
+						),
 					}, nil
 				}
 				return &Outcome{
@@ -580,15 +596,15 @@ func TestManagedToolDurableInputResume_BitsUT(t *testing.T) {
 	require.Equal(t, "approve", string(resumeRequests[0].Data))
 	require.JSONEq(
 		t,
-		`{"run_id":"input-run"}`,
-		string(resumeRequests[0].RecoveryMetadata),
+		`{"run_id":"input-run","stage":"approval"}`,
+		string(resumeRequests[0].Checkpoint),
 	)
 	require.Equal(t, "region", resumeRequests[1].RequestID)
 	require.Equal(t, "us-east", string(resumeRequests[1].Data))
 	require.JSONEq(
 		t,
-		`{"run_id":"input-run"}`,
-		string(resumeRequests[1].RecoveryMetadata),
+		`{"run_id":"input-run","stage":"region"}`,
+		string(resumeRequests[1].Checkpoint),
 	)
 }
 
@@ -795,25 +811,23 @@ func TestManagedToolDrainYieldsAndRecoversWithoutStop(t *testing.T) {
 	registry := NewRegistry()
 	started := make(chan struct{})
 	recovered := make(chan *RecoverRequest, 1)
-	recoveryMetadata := []byte(`{"run_id":"business-run"}`)
+	toolCheckpoint := []byte(`{"run_id":"business-run"}`)
 	var stopCalls int
 	var mu sync.Mutex
 	implementation := &fakeTool{
+		startCheckpoint: toolCheckpoint,
 		start: func(context.Context, *StartRequest) (Run, error) {
-			return &metadataRun{
-				metadata: recoveryMetadata,
-				fakeRun: &fakeRun{
-					wait: func(ctx context.Context) (*Outcome, error) {
-						close(started)
-						<-ctx.Done()
-						return nil, ctx.Err()
-					},
-					stop: func(context.Context) error {
-						mu.Lock()
-						stopCalls++
-						mu.Unlock()
-						return nil
-					},
+			return &fakeRun{
+				wait: func(ctx context.Context) (*Outcome, error) {
+					close(started)
+					<-ctx.Done()
+					return nil, ctx.Err()
+				},
+				stop: func(context.Context) error {
+					mu.Lock()
+					stopCalls++
+					mu.Unlock()
+					return nil
 				},
 			}, nil
 		},
@@ -850,7 +864,7 @@ func TestManagedToolDrainYieldsAndRecoversWithoutStop(t *testing.T) {
 	)
 	require.NoError(t, err)
 	<-started
-	recoveryMetadata[0] = 'X'
+	toolCheckpoint[0] = 'X'
 	closeCtx, cancel := context.WithTimeout(context.Background(), time.Second)
 	require.NoError(t, managerOne.Close(closeCtx))
 	cancel()
@@ -871,14 +885,14 @@ func TestManagedToolDrainYieldsAndRecoversWithoutStop(t *testing.T) {
 	require.JSONEq(
 		t,
 		`{"run_id":"business-run"}`,
-		string(request.RecoveryMetadata),
+		string(request.Checkpoint),
 	)
 	mu.Lock()
 	require.Zero(t, stopCalls)
 	mu.Unlock()
 }
 
-func TestRecoverWithoutMetadataUsesPersistedStartedGate(t *testing.T) {
+func TestRecoverWithoutCheckpointUsesPersistedStartedGate(t *testing.T) {
 	recovered := false
 	implementation := &fakeTool{
 		start: func(context.Context, *StartRequest) (Run, error) {
@@ -886,7 +900,7 @@ func TestRecoverWithoutMetadataUsesPersistedStartedGate(t *testing.T) {
 		},
 		recover: func(_ context.Context, request *RecoverRequest) (Run, error) {
 			recovered = true
-			require.Nil(t, request.RecoveryMetadata)
+			require.Nil(t, request.Checkpoint)
 			return &fakeRun{wait: func(context.Context) (*Outcome, error) {
 				return &Outcome{Status: backgroundtask.StatusCompleted}, nil
 			}}, nil

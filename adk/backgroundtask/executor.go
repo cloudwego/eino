@@ -107,12 +107,12 @@ type ExecutionRuntime interface {
 	ReportTranscriptFailure(context.Context, error) error
 }
 
-// CheckpointRuntime is an optional execution capability for persisting opaque
-// executor recovery state while a task remains running. Manager-provided
+// StartCommitRuntime is an optional execution capability for atomically
+// recording that an executor established its external operation. Manager
 // runtimes implement it; keeping it separate preserves ExecutionRuntime source
 // compatibility for custom executors and test doubles.
-type CheckpointRuntime interface {
-	SaveCheckpoint(context.Context, []byte) error
+type StartCommitRuntime interface {
+	CommitStart(context.Context, []byte) error
 }
 
 // Executor reconstructs and runs durable work from a task Spec.
@@ -222,11 +222,6 @@ type taskRuntime struct {
 	poison             error
 	cancelRequested    bool
 	cancelReason       string
-}
-
-type checkpointTaskRuntime struct {
-	*taskRuntime
-	writer CheckpointWriter
 }
 
 // detachedCtx preserves values while detaching worker execution from the
@@ -386,7 +381,7 @@ func (r *taskRuntime) ReportTranscriptFailure(ctx context.Context, cause error) 
 	return nil
 }
 
-func (r *checkpointTaskRuntime) SaveCheckpoint(
+func (r *taskRuntime) CommitStart(
 	ctx context.Context,
 	checkpoint []byte,
 ) error {
@@ -395,7 +390,7 @@ func (r *checkpointTaskRuntime) SaveCheckpoint(
 	if r.poison != nil {
 		return r.poison
 	}
-	task, err := r.writer.SaveCheckpoint(ctx, &SaveCheckpointRequest{
+	task, err := r.tasks.CommitStart(ctx, &CommitStartRequest{
 		TaskID: r.taskID, ExpectedVersion: r.version,
 		Checkpoint: cloneBytes(checkpoint),
 	})
@@ -927,19 +922,7 @@ func (m *Manager) execute(
 	} else {
 		go serveTimeoutRequests(runtime, timeoutController, timeoutStop, timeoutDone)
 	}
-	var executionRuntime ExecutionRuntime = runtime
-	if m.checkpointWriter != nil {
-		executionRuntime = &checkpointTaskRuntime{
-			taskRuntime: runtime,
-			writer:      m.checkpointWriter,
-		}
-	}
-	result, executeErr := m.executeClaim(
-		runCtx,
-		executor,
-		started,
-		executionRuntime,
-	)
+	result, executeErr := m.executeClaim(runCtx, executor, started, runtime)
 	close(timeoutStop)
 	<-timeoutDone
 	if timeoutController != nil {
@@ -1042,6 +1025,6 @@ func boundedError(err error) string {
 }
 
 var (
-	_ ExecutionRuntime  = (*taskRuntime)(nil)
-	_ CheckpointRuntime = (*checkpointTaskRuntime)(nil)
+	_ ExecutionRuntime   = (*taskRuntime)(nil)
+	_ StartCommitRuntime = (*taskRuntime)(nil)
 )

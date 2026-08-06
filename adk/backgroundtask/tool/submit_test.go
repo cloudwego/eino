@@ -39,7 +39,10 @@ func (t *submitValidationTool) ValidateArguments(arguments string) error {
 	return nil
 }
 
-func (*submitValidationTool) Start(context.Context, *StartRequest) (Run, error) {
+func (*submitValidationTool) Start(
+	context.Context,
+	*StartRequest,
+) (*StartResult, error) {
 	return nil, errors.New("not executed")
 }
 
@@ -267,7 +270,7 @@ func TestSubmitRejectsInvalidRequestsAndDependencyFailures_BitsUT(t *testing.T) 
 			err: "backgroundtask/tool: reserve output: reservation failed",
 		},
 		{
-			name: "empty reservation",
+			name:         "empty reservation",
 			materializer: reserveFailure{},
 			err:          "backgroundtask/tool: output materializer returned an empty path",
 		},

@@ -61,12 +61,10 @@ func encodedPayload(t *testing.T, name, arguments string) []byte {
 	return data
 }
 
-func TestRecoverRequestExposesOnlyRecoveryMetadata_BitsUT(t *testing.T) {
+func TestRecoveryRequestsExposeCheckpoint_BitsUT(t *testing.T) {
 	_, exists := reflect.TypeOf(RecoverRequest{}).FieldByName("Checkpoint")
-	require.False(t, exists)
-	_, exists = reflect.TypeOf(RecoverRequest{}).FieldByName("RecoveryMetadata")
 	require.True(t, exists)
-	_, exists = reflect.TypeOf(ResumeRequest{}).FieldByName("RecoveryMetadata")
+	_, exists = reflect.TypeOf(ResumeRequest{}).FieldByName("Checkpoint")
 	require.True(t, exists)
 }
 
@@ -162,19 +160,33 @@ func TestPayloadAndResultValidationBoundaries(t *testing.T) {
 		InputRequest: &InputRequest{
 			ID: "approval", Data: []byte(`{"question":"approve?"}`),
 		},
-	}, true, nil)
+	}, true, []byte("current"))
 	require.NoError(t, err)
 	require.NotEmpty(t, waiting.Checkpoint)
-	recoveryMetadata := []byte("business-run")
-	checkpoint, err := encodeManagedCheckpoint(nil, recoveryMetadata)
+	_, retained, _, err := decodeManagedCheckpoint(waiting.Checkpoint)
 	require.NoError(t, err)
-	recoveryMetadata[0] = 'X'
-	request, decodedMetadata, started, err := decodeManagedCheckpoint(checkpoint)
+	require.Equal(t, "current", string(retained))
+	waiting, err = validateOutcome(&Outcome{
+		Status: backgroundtask.StatusWaitingInput,
+		InputRequest: &InputRequest{
+			ID: "approval", Data: []byte(`{"question":"approve?"}`),
+		},
+		Checkpoint: []byte("next"),
+	}, true, []byte("current"))
+	require.NoError(t, err)
+	_, replaced, _, err := decodeManagedCheckpoint(waiting.Checkpoint)
+	require.NoError(t, err)
+	require.Equal(t, "next", string(replaced))
+	toolCheckpoint := []byte("business-run")
+	checkpoint, err := encodeManagedCheckpoint(nil, toolCheckpoint)
+	require.NoError(t, err)
+	toolCheckpoint[0] = 'X'
+	request, decodedCheckpoint, started, err := decodeManagedCheckpoint(checkpoint)
 	require.NoError(t, err)
 	require.Nil(t, request)
 	require.True(t, started)
-	require.Equal(t, "business-run", string(decodedMetadata))
-	decodedMetadata[0] = 'Y'
+	require.Equal(t, "business-run", string(decodedCheckpoint))
+	decodedCheckpoint[0] = 'Y'
 	_, decodedAgain, _, err := decodeManagedCheckpoint(checkpoint)
 	require.NoError(t, err)
 	require.Equal(t, "business-run", string(decodedAgain))
@@ -212,21 +224,31 @@ func TestPayloadAndResultValidationBoundaries(t *testing.T) {
 	}
 	_, err = encodeManagedCheckpoint(
 		nil,
-		make([]byte, maxRecoveryMetadataBytes+1),
+		make([]byte, maxToolCheckpointBytes+1),
 	)
-	require.ErrorContains(t, err, "recovery metadata exceeds")
+	require.ErrorContains(t, err, "tool checkpoint exceeds")
 	for _, testCase := range []struct {
 		outcome        *Outcome
 		supportsResume bool
 	}{
 		{outcome: nil},
 		{outcome: &Outcome{Status: backgroundtask.StatusCompleted, Error: "bad"}},
+		{outcome: &Outcome{
+			Status: backgroundtask.StatusCompleted, Checkpoint: []byte("bad"),
+		}},
 		{outcome: &Outcome{Status: backgroundtask.StatusFailed}},
 		{outcome: &Outcome{
 			Status: backgroundtask.StatusFailed, Error: "bad", Data: []byte("bad"),
 		}},
 		{outcome: &Outcome{
+			Status: backgroundtask.StatusFailed, Error: "bad",
+			Checkpoint: []byte("bad"),
+		}},
+		{outcome: &Outcome{
 			Status: backgroundtask.StatusCanceled, Data: []byte("bad"),
+		}},
+		{outcome: &Outcome{
+			Status: backgroundtask.StatusCanceled, Checkpoint: []byte("bad"),
 		}},
 		{outcome: &Outcome{Status: backgroundtask.StatusRunning}},
 		{outcome: &Outcome{
@@ -240,6 +262,11 @@ func TestPayloadAndResultValidationBoundaries(t *testing.T) {
 			Status:       backgroundtask.StatusWaitingInput,
 			Data:         []byte("terminal"),
 			InputRequest: &InputRequest{ID: "approval"},
+		}, supportsResume: true},
+		{outcome: &Outcome{
+			Status:       backgroundtask.StatusWaitingInput,
+			InputRequest: &InputRequest{ID: "approval"},
+			Checkpoint:   make([]byte, maxToolCheckpointBytes+1),
 		}, supportsResume: true},
 	} {
 		_, err = validateOutcome(testCase.outcome, testCase.supportsResume, nil)

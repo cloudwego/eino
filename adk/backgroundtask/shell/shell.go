@@ -89,7 +89,7 @@ func (a *adapter) ValidateArguments(value string) error {
 func (a *adapter) Start(
 	ctx context.Context,
 	request *backgroundtool.StartRequest,
-) (backgroundtool.Run, error) {
+) (*backgroundtool.StartResult, error) {
 	if request == nil {
 		return nil, errors.New("backgroundtask/shell: start request is required")
 	}
@@ -97,9 +97,13 @@ func (a *adapter) Start(
 	if err != nil {
 		return nil, err
 	}
-	return a.shell.StartCommand(ctx, &StartCommandRequest{
+	run, err := a.shell.StartCommand(ctx, &StartCommandRequest{
 		TaskID: request.TaskID, Command: input.Command, Attempt: request.Attempt,
 	})
+	if err != nil {
+		return nil, err
+	}
+	return &backgroundtool.StartResult{Run: run}, nil
 }
 
 func (a *adapter) Recover(

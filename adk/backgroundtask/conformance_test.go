@@ -144,11 +144,9 @@ func TestSimplifiedPublicModelHasNoOverlappingStateFields_BitsUT(t *testing.T) {
 	assertFieldsAbsent(t, reflect.TypeOf(Config{}), "Store", "NotificationWriter")
 	assertMethodsAbsent(t, reflect.TypeOf((*TaskStore)(nil)).Elem(),
 		"AppendTaskEvent", "ListTaskEvents", "ReadRecentTaskEvents", "ReportOutputFailure",
-		"SaveCheckpoint")
+	)
 	assertMethodsPresent(t, reflect.TypeOf((*TaskStore)(nil)).Elem(),
-		"ReportTranscriptFailure")
-	assertMethodsPresent(t, reflect.TypeOf((*CheckpointWriter)(nil)).Elem(),
-		"SaveCheckpoint")
+		"CommitStart", "ReportTranscriptFailure")
 	assertMethodsPresent(t, reflect.TypeOf((*TaskEventStore)(nil)).Elem(),
 		"AppendTaskEvent", "ListTaskEvents")
 	assertMethodsPresent(t, reflect.TypeOf((*NotificationWriter)(nil)).Elem(),
@@ -166,15 +164,15 @@ func TestSimplifiedPublicModelHasNoOverlappingStateFields_BitsUT(t *testing.T) {
 	assertMethodsAbsent(t, reflect.TypeOf((*InMemoryStore)(nil)),
 		"CreateAndStart", "Cancel", "ReadRecentTaskEvents")
 	assertMethodsPresent(t, reflect.TypeOf((*InMemoryStore)(nil)),
-		"ListSuspended", "AckCancel", "ReleaseSuspension", "SaveCheckpoint")
+		"ListSuspended", "AckCancel", "ReleaseSuspension", "CommitStart")
 	assertMethodsAbsent(t, reflect.TypeOf((*Executor)(nil)).Elem(), "ValidateResume")
 	assertMethodsAbsent(t, reflect.TypeOf((*ExecutionRuntime)(nil)).Elem(),
-		"TaskID", "AppendTaskEvent", "ReportOutputFailure", "SaveCheckpoint")
+		"TaskID", "AppendTaskEvent", "ReportOutputFailure", "CommitStart")
 	assertMethodsPresent(t, reflect.TypeOf((*ExecutionRuntime)(nil)).Elem(),
 		"EmitProgress", "ReportTranscriptFailure")
-	assertMethodsPresent(t, reflect.TypeOf((*CheckpointRuntime)(nil)).Elem(),
-		"SaveCheckpoint")
-	assertFieldsPresent(t, reflect.TypeOf(SaveCheckpointRequest{}),
+	assertMethodsPresent(t, reflect.TypeOf((*StartCommitRuntime)(nil)).Elem(),
+		"CommitStart")
+	assertFieldsPresent(t, reflect.TypeOf(CommitStartRequest{}),
 		"TaskID", "ExpectedVersion", "Checkpoint")
 	assertFieldsPresent(t, reflect.TypeOf(ProgressEmission{}), "EventID", "FirstEmission")
 	assertFieldsPresent(t, reflect.TypeOf(TaskEvent{}), "EventID", "TaskID", "Data", "CreatedAt")
