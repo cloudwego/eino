@@ -105,7 +105,8 @@ type StartRequest struct {
 
 // StartResult contains the attempt-local Run and the initial opaque tool
 // checkpoint. Eino persists an independently owned copy before calling
-// Run.Wait. Checkpoint may be empty when TaskID alone is sufficient to recover.
+// Run.Wait. Checkpoint may be empty when TaskID alone is sufficient to recover
+// and must be empty for a non-recoverable BackgroundTool.
 type StartResult struct {
 	Run        Run
 	Checkpoint []byte

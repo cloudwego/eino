@@ -52,6 +52,19 @@ type failingStartCommitRuntime struct {
 	err error
 }
 
+type startResultTool struct {
+	result *StartResult
+	err    error
+}
+
+func (*startResultTool) ValidateArguments(string) error { return nil }
+func (t *startResultTool) Start(
+	context.Context,
+	*StartRequest,
+) (*StartResult, error) {
+	return t.result, t.err
+}
+
 func (r *failingStartCommitRuntime) CommitStart(context.Context, []byte) error {
 	return r.err
 }
@@ -311,6 +324,59 @@ func TestAttack_MissingStartCommitCapabilityRejectsBeforeStart(t *testing.T) {
 	require.ErrorContains(t, err, "cannot commit external start")
 	require.False(t, started)
 	t.Log("missing start-commit runtime was rejected before external side effects")
+}
+
+func TestAttack_InvalidStartResultIsRejected(t *testing.T) {
+	stopped := false
+	for _, testCase := range []struct {
+		name      string
+		result    *StartResult
+		errorText string
+	}{
+		{name: "nil result", errorText: "nil start result"},
+		{name: "nil run", result: &StartResult{}, errorText: "nil run"},
+		{
+			name: "plain checkpoint",
+			result: &StartResult{
+				Run: &fakeRun{
+					stop: func(context.Context) error {
+						stopped = true
+						return nil
+					},
+				},
+				Checkpoint: []byte("unexpected"),
+			},
+			errorText: "plain tool cannot return a checkpoint",
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			registry := NewRegistry()
+			require.NoError(t, registry.Register(&Registration{
+				Info: toolInfo("attack"),
+				Tool: &startResultTool{result: testCase.result},
+			}))
+			result, err := (&executor{registry: registry}).Execute(
+				context.Background(),
+				&backgroundtask.Task{
+					Spec: backgroundtask.Spec{
+						ID: "attack-task", ExecutorKey: ExecutorKey,
+						Kind: "background_tool",
+						Payload: encodedPayload(
+							t,
+							"attack",
+							`{"value":"start-result"}`,
+						),
+					},
+					Status: backgroundtask.StatusRunning, Attempt: 1,
+				},
+				&replayRuntimeStub{},
+			)
+			require.Nil(t, result)
+			require.ErrorContains(t, err, testCase.errorText)
+		})
+	}
+	require.True(t, stopped)
+	t.Log("invalid StartResult variants were rejected before Wait")
 }
 
 func TestAttack_PersistedReplayRepairsMissingMaterialization(t *testing.T) {

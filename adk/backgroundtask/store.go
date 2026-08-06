@@ -83,7 +83,8 @@ var (
 // WaitInput, Suspend, and Yield must reject the attempt; only AckCancel may
 // terminally acknowledge it. CommitStart records the successful external-start
 // boundary while retaining StatusRunning, requires a non-empty initial
-// checkpoint envelope, and advances Version. Yield changes running to pending,
+// checkpoint envelope, advances Version, and must reject a second start commit
+// while that checkpoint remains present. Yield changes running to pending,
 // stores its optional checkpoint atomically, preserves PendingResume for
 // idempotent replay, and emits no lifecycle notification. Retry-capable lease
 // expiry also preserves PendingResume. A later WaitInput, Suspend, or terminal
