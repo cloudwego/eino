@@ -440,7 +440,8 @@ func (s *InMemoryStore) EnqueueTaskNotification(
 func customNotificationID(taskID string, eventID string) string {
 	return "eino.custom:" +
 		base64.RawURLEncoding.EncodeToString([]byte(taskID)) + ":" +
-		base64.RawURLEncoding.EncodeToString([]byte(eventID))
+		base64.RawURLEncoding.EncodeToString([]byte(eventID)) +
+		":application-event"
 }
 
 // ListTaskEvents returns one snapshot-stable append-order page.

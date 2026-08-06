@@ -40,6 +40,70 @@ func TestNotifyParentRequiresManagedAttemptContext_BitsUT(t *testing.T) {
 	}))
 }
 
+func TestNotifyParentValidatesRequestBoundsBeforeAuthority_BitsUT(t *testing.T) {
+	tests := []struct {
+		name string
+		req  *NotifyParentRequest
+		err  string
+	}{
+		{
+			name: "nil request",
+			err:  "backgroundtask: parent notification request is required",
+		},
+		{
+			name: "empty event id",
+			req:  &NotifyParentRequest{Kind: "application.update"},
+			err:  "backgroundtask: notification event id is required",
+		},
+		{
+			name: "long event id",
+			req: &NotifyParentRequest{
+				EventID: string(make([]byte, 1025)), Kind: "application.update",
+			},
+			err: "backgroundtask: notification event id exceeds configured bounds",
+		},
+		{
+			name: "empty kind",
+			req:  &NotifyParentRequest{EventID: "event"},
+			err:  "backgroundtask: notification kind is required",
+		},
+		{
+			name: "long kind",
+			req: &NotifyParentRequest{
+				EventID: "event", Kind: NotificationKind(string(make([]byte, 65))),
+			},
+			err: "backgroundtask: notification kind exceeds configured bounds",
+		},
+		{
+			name: "reserved prefix",
+			req: &NotifyParentRequest{
+				EventID: "event", Kind: "eino.application",
+			},
+			err: "backgroundtask: notification kind is reserved",
+		},
+		{
+			name: "lifecycle kind",
+			req: &NotifyParentRequest{
+				EventID: "event", Kind: NotificationCompleted,
+			},
+			err: "backgroundtask: notification kind is reserved",
+		},
+		{
+			name: "large data",
+			req: &NotifyParentRequest{
+				EventID: "event", Kind: "application.update",
+				Data: make([]byte, (256<<10)+1),
+			},
+			err: "backgroundtask: notification data exceeds configured bounds",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			require.EqualError(t, NotifyParent(context.Background(), test.req), test.err)
+		})
+	}
+}
+
 func TestManagerBindsFreshNotifyParentAuthorityPerAttempt_BitsUT(t *testing.T) {
 	var firstContext context.Context
 	executor := &scriptedExecutor{

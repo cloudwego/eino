@@ -138,3 +138,44 @@ func TestExpiredNotificationWriteDoesNotResolveTaskLease_BitsUT(t *testing.T) {
 	require.Equal(t, started, stored)
 	require.Equal(t, clock.Now(), active.expiresAt)
 }
+
+func TestInMemoryNotificationWriterRejectsInvalidAuthority_BitsUT(t *testing.T) {
+	store := NewInMemoryStore(nil)
+	req := &NotifyParentRequest{
+		EventID: "event", Kind: "application.progress",
+	}
+	require.EqualError(
+		t,
+		store.EnqueueTaskNotification(context.Background(), "", 1, req),
+		"backgroundtask: notification task id and attempt are required",
+	)
+	require.EqualError(
+		t,
+		store.EnqueueTaskNotification(context.Background(), "task", 0, req),
+		"backgroundtask: notification task id and attempt are required",
+	)
+	require.ErrorIs(
+		t,
+		store.EnqueueTaskNotification(context.Background(), "missing", 1, req),
+		ErrNotFound,
+	)
+
+	spec := validSpec("no-parent")
+	spec.SessionID = ""
+	spec.NotifySession = false
+	created, err := store.Create(context.Background(), &CreateTaskRequest{
+		Spec: spec, LeaseExpiryPolicy: LeaseExpiryRetry,
+	})
+	require.NoError(t, err)
+	started, err := store.Start(context.Background(), &StartTaskRequest{
+		TaskID: created.Spec.ID, ExpectedVersion: created.Version,
+	})
+	require.NoError(t, err)
+	require.ErrorIs(
+		t,
+		store.EnqueueTaskNotification(
+			context.Background(), started.Spec.ID, started.Attempt, req,
+		),
+		ErrNotificationUnavailable,
+	)
+}

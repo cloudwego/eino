@@ -542,6 +542,7 @@ func receiveNotificationKindsWithLease(
 		}
 	}
 	require.NotEmpty(t, custom.Record.ID)
+	require.NotEmpty(t, lifecycle.Record.ID)
 	return custom, lifecycle
 }
 

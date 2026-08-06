@@ -159,6 +159,146 @@ func TestSubmitValidatesBeforeAllocationAndReservation_BitsUT(t *testing.T) {
 	require.Empty(t, materializer.reserved)
 }
 
+func TestSubmitRejectsInvalidRequestsAndDependencyFailures_BitsUT(t *testing.T) {
+	registry := NewRegistry()
+	require.NoError(t, registry.Register(&Registration{
+		Info: toolInfo("direct"), Tool: &submitValidationTool{},
+	}))
+	executors := backgroundtask.NewExecutorRegistry()
+	require.NoError(t, RegisterExecutors(executors, registry))
+	manager := mustNewBackgroundManager(t, context.Background(), &backgroundtask.Config{
+		Executors: executors,
+	})
+	valid := &SubmitRequest{
+		TaskID: "task", ToolName: "direct", Arguments: "{}", SessionID: "parent",
+	}
+	for _, test := range []struct {
+		name     string
+		manager  *backgroundtask.Manager
+		registry *Registry
+		req      *SubmitRequest
+		err      string
+	}{
+		{
+			name: "nil manager", registry: registry, req: valid,
+			err: "backgroundtask/tool: manager, tool registry, and submit request are required",
+		},
+		{
+			name: "nil registry", manager: manager, req: valid,
+			err: "backgroundtask/tool: manager, tool registry, and submit request are required",
+		},
+		{
+			name: "nil request", manager: manager, registry: registry,
+			err: "backgroundtask/tool: manager, tool registry, and submit request are required",
+		},
+		{
+			name: "empty tool name", manager: manager, registry: registry,
+			req: &SubmitRequest{Arguments: "{}", SessionID: "parent"},
+			err: "backgroundtask/tool: tool name and parent session are required",
+		},
+		{
+			name: "empty parent session", manager: manager, registry: registry,
+			req: &SubmitRequest{ToolName: "direct", Arguments: "{}"},
+			err: "backgroundtask/tool: tool name and parent session are required",
+		},
+		{
+			name: "unregistered tool", manager: manager, registry: registry,
+			req: &SubmitRequest{
+				ToolName: "missing", Arguments: "{}", SessionID: "parent",
+			},
+			err: `backgroundtask/tool: tool "missing" is not registered`,
+		},
+		{
+			name: "empty arguments", manager: manager, registry: registry,
+			req: &SubmitRequest{ToolName: "direct", SessionID: "parent"},
+			err: "backgroundtask/tool: arguments are required",
+		},
+		{
+			name: "large arguments", manager: manager, registry: registry,
+			req: &SubmitRequest{
+				ToolName: "direct", Arguments: string(make([]byte, maxArgumentsBytes+1)),
+				SessionID: "parent",
+			},
+			err: "backgroundtask/tool: arguments exceed configured bounds",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := Submit(
+				context.Background(), test.manager, test.registry, test.req,
+			)
+			require.EqualError(t, err, test.err)
+		})
+	}
+
+	allocationErr := errors.New("allocation failed")
+	allocationManager := mustNewBackgroundManager(
+		t,
+		context.Background(),
+		&backgroundtask.Config{
+			Executors: executors,
+			IDGen: func(
+				context.Context,
+				*backgroundtask.AllocateTaskIDRequest,
+			) (string, error) {
+				return "", allocationErr
+			},
+		},
+	)
+	_, err := Submit(
+		context.Background(),
+		allocationManager,
+		registry,
+		&SubmitRequest{
+			ToolName: "direct", Arguments: "{}", SessionID: "parent",
+		},
+	)
+	require.ErrorIs(t, err, allocationErr)
+
+	for _, test := range []struct {
+		name         string
+		materializer OutputMaterializer
+		err          string
+	}{
+		{
+			name: "reservation error",
+			materializer: reserveFailure{
+				err: errors.New("reservation failed"),
+			},
+			err: "backgroundtask/tool: reserve output: reservation failed",
+		},
+		{
+			name:         "empty reservation",
+			materializer: reserveFailure{},
+			err:          "backgroundtask/tool: output materializer returned an empty path",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			localRegistry := NewRegistry()
+			require.NoError(t, localRegistry.Register(&Registration{
+				Info: toolInfo("materialized"), Tool: &submitValidationTool{},
+				Materializer: test.materializer,
+			}))
+			localExecutors := backgroundtask.NewExecutorRegistry()
+			require.NoError(t, RegisterExecutors(localExecutors, localRegistry))
+			localManager := mustNewBackgroundManager(
+				t,
+				context.Background(),
+				&backgroundtask.Config{Executors: localExecutors},
+			)
+			_, submitErr := Submit(
+				context.Background(),
+				localManager,
+				localRegistry,
+				&SubmitRequest{
+					TaskID: "materialized-task", ToolName: "materialized",
+					Arguments: "{}", SessionID: "parent",
+				},
+			)
+			require.EqualError(t, submitErr, test.err)
+		})
+	}
+}
+
 func TestSubmitPreservesManagerTaskCreatedRetry_BitsUT(t *testing.T) {
 	registry := NewRegistry()
 	materializer := &countingMaterializer{}
