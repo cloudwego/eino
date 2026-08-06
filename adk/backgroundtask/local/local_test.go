@@ -268,6 +268,26 @@ func TestRunnerStreamConstructionFailures(t *testing.T) {
 	require.Nil(t, stream)
 }
 
+func TestAttack_EarlyStreamConstructionErrorWinsTerminalRace(t *testing.T) {
+	runner, _ := newTestRunner(t)
+	wantErr := errors.New("immediate construction failure")
+	for iteration := 0; iteration < 32; iteration++ {
+		stream, err := runner.RunStream(
+			context.Background(),
+			&Input{Description: "immediate failure"},
+			func(
+				context.Context,
+				backgroundtask.ExecutionRuntime,
+			) (*schema.StreamReader[string], error) {
+				return nil, wantErr
+			},
+		)
+		require.ErrorIs(t, err, wantErr)
+		require.Nil(t, stream)
+	}
+	t.Log("the original stream construction error won every terminal race")
+}
+
 func TestProjectStreamTerminalBoundaries(t *testing.T) {
 	runner, _ := newTestRunner(t)
 	input := &Input{}

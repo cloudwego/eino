@@ -162,6 +162,39 @@ func TestPayloadAndResultValidationBoundaries(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, waiting.Checkpoint)
 	for _, testCase := range []struct {
+		name    string
+		request *InputRequest
+	}{
+		{name: "missing request"},
+		{
+			name: "oversized id",
+			request: &InputRequest{
+				ID: strings.Repeat("i", maxInputRequestIDBytes+1),
+			},
+		},
+		{
+			name: "oversized data",
+			request: &InputRequest{
+				ID: "request",
+				Data: []byte(
+					`"` + strings.Repeat("d", maxInputRequestDataBytes) + `"`,
+				),
+			},
+		},
+		{
+			name: "invalid json",
+			request: &InputRequest{
+				ID:   "request",
+				Data: []byte(`{`),
+			},
+		},
+	} {
+		t.Run("input checkpoint "+testCase.name, func(t *testing.T) {
+			_, encodeErr := encodeInputCheckpoint(testCase.request)
+			require.Error(t, encodeErr)
+		})
+	}
+	for _, testCase := range []struct {
 		outcome        *Outcome
 		supportsResume bool
 	}{

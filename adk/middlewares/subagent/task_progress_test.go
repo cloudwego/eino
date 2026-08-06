@@ -41,6 +41,23 @@ func TestNewDurableTaskProgressReaderRequiresExecutor_BitsUT(t *testing.T) {
 	require.Nil(t, reader)
 }
 
+func TestDurableTaskProgressReaderDelegatesAndRejectsNilReceiver_BitsUT(t *testing.T) {
+	ctx := context.Background()
+	store := adksession.NewInMemoryStore[*schema.Message](nil)
+	task := durableProgressTask(t, backgroundtask.StatusRunning)
+	reader, err := NewDurableTaskProgressReader(progressExecutor(t, store), nil)
+	require.NoError(t, err)
+
+	progress, err := reader.ReadProgress(ctx, task)
+	require.NoError(t, err)
+	require.Empty(t, progress)
+
+	var nilReader *DurableTaskProgressReader[*schema.Message]
+	progress, err = nilReader.ReadProgress(ctx, task)
+	require.Empty(t, progress)
+	require.EqualError(t, err, "subagent: durable executor is required to read task progress")
+}
+
 func TestReadDurableTaskProgress(t *testing.T) {
 	ctx := context.Background()
 	store := adksession.NewInMemoryStore[*schema.Message](nil)
@@ -189,7 +206,7 @@ func TestReadDurableTaskProgressBoundsRecentMessages(t *testing.T) {
 	assert.Contains(t, progress, "worker: progress-102")
 }
 
-func TestReadDurableTaskProgressScansSharedSessionPages_BitsUT(t *testing.T) {
+func TestAttack_SharedSessionProgressDoesNotLeakAcrossTasks(t *testing.T) {
 	ctx := context.Background()
 	store := adksession.NewInMemoryStore[*schema.Message](nil)
 	task := durableProgressTask(t, backgroundtask.StatusCompleted)

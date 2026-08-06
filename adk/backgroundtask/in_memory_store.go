@@ -60,6 +60,13 @@ type taskEventCursor struct {
 	NewestFirst bool   `json:"n"`
 }
 
+type taskListCursor struct {
+	Version      int      `json:"v"`
+	Status       Status   `json:"s"`
+	ExecutorKeys []string `json:"e"`
+	LastID       string   `json:"l"`
+}
+
 // InMemoryStore is a deterministic reference implementation of TaskStore,
 // TaskEventStore, and NotificationOutbox. It is a state-machine test double,
 // not a durable backend.
@@ -196,6 +203,11 @@ func (s *InMemoryStore) listByStatus(
 		}
 		executorKeys[key] = struct{}{}
 	}
+	normalizedKeys := make([]string, 0, len(executorKeys))
+	for key := range executorKeys {
+		normalizedKeys = append(normalizedKeys, key)
+	}
+	sort.Strings(normalizedKeys)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	ids := make([]string, 0, len(s.tasks))
@@ -205,19 +217,22 @@ func (s *InMemoryStore) listByStatus(
 	sort.Strings(ids)
 	start := 0
 	if cursor != "" {
-		decoded, err := base64.RawURLEncoding.DecodeString(cursor)
-		if err != nil {
+		decoded, err := decodeTaskListCursor(cursor)
+		if err != nil || decoded.Status != status ||
+			!equalStrings(decoded.ExecutorKeys, normalizedKeys) {
 			return nil, "", fmt.Errorf("%w: %s-task cursor", ErrInvalidCursor, name)
 		}
-		lastID := string(decoded)
-		start = sort.Search(len(ids), func(i int) bool { return ids[i] > lastID })
+		if _, ok := s.tasks[decoded.LastID]; !ok {
+			return nil, "", fmt.Errorf("%w: %s-task cursor", ErrInvalidCursor, name)
+		}
+		start = sort.Search(len(ids), func(i int) bool { return ids[i] > decoded.LastID })
 	}
 	if limit <= 0 {
 		limit = 100
 	} else if limit > 1000 {
 		limit = 1000
 	}
-	var tasks []*Task
+	tasks := make([]*Task, 0, limit+1)
 	var nextCursor string
 	for i := start; i < len(ids); i++ {
 		t := s.tasks[ids[i]]
@@ -229,12 +244,56 @@ func (s *InMemoryStore) listByStatus(
 			continue
 		}
 		tasks = append(tasks, cloneTask(t))
-		if len(tasks) == limit {
-			nextCursor = base64.RawURLEncoding.EncodeToString([]byte(ids[i]))
+		if len(tasks) > limit {
+			lastID := tasks[limit-1].Spec.ID
+			encoded, encodeErr := encodeTaskListCursor(taskListCursor{
+				Version: 1, Status: status,
+				ExecutorKeys: normalizedKeys, LastID: lastID,
+			})
+			if encodeErr != nil {
+				return nil, "", fmt.Errorf(
+					"backgroundtask: encode %s-task cursor: %w", name, encodeErr,
+				)
+			}
+			nextCursor = encoded
+			tasks = tasks[:limit]
 			break
 		}
 	}
 	return tasks, nextCursor, nil
+}
+
+func encodeTaskListCursor(cursor taskListCursor) (string, error) {
+	data, err := json.Marshal(cursor)
+	if err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(data), nil
+}
+
+func decodeTaskListCursor(value string) (taskListCursor, error) {
+	data, err := base64.RawURLEncoding.DecodeString(value)
+	if err != nil {
+		return taskListCursor{}, err
+	}
+	var cursor taskListCursor
+	if err = json.Unmarshal(data, &cursor); err != nil || cursor.Version != 1 ||
+		cursor.Status == "" || len(cursor.ExecutorKeys) == 0 || cursor.LastID == "" {
+		return taskListCursor{}, ErrInvalidCursor
+	}
+	return cursor, nil
+}
+
+func equalStrings(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if left[i] != right[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // Start claims a pending task and creates a fenced active attempt.

@@ -293,17 +293,30 @@ func TestNewExecutorRequiresDependencies_BitsUT(t *testing.T) {
 		func(context.Context, string, *schema.Message) (string, error) { return "", nil },
 	)
 	require.Error(t, err)
+	err = executor.ValidateExecution(
+		context.Background(),
+		&backgroundtask.Task{},
+	)
+	require.ErrorContains(t, err, "dependencies are unavailable")
+	executor, err = NewExecutor(&ExecutorConfig[*schema.Message]{
+		SessionStore: store, CheckPointStore: store,
+	})
+	require.NoError(t, err)
+	err = executor.ValidateExecution(context.Background(), nil)
+	require.ErrorContains(t, err, "task is required")
 }
 
-func TestExecutorBuildsSessionStoreForAuthorizedAttempt_BitsUT(t *testing.T) {
+func TestAttack_FactoryBackedExecutorExecutesAndReadsProgress(t *testing.T) {
 	store := adksession.NewInMemoryStore[*schema.Message](nil)
 	var seenTask *backgroundtask.Task
+	factoryCalls := 0
 	executor, err := NewExecutor(&ExecutorConfig[*schema.Message]{
 		SessionStoreFactory: func(
 			_ context.Context,
 			task *backgroundtask.Task,
 		) (adk.SessionEventStore[*schema.Message], error) {
 			seenTask = task
+			factoryCalls++
 			return store, nil
 		},
 		CheckPointStore: store,
@@ -328,6 +341,67 @@ func TestExecutorBuildsSessionStoreForAuthorizedAttempt_BitsUT(t *testing.T) {
 	require.NotNil(t, seenTask)
 	require.Equal(t, task.Spec.ID, seenTask.Spec.ID)
 	require.Equal(t, int64(1), seenTask.Attempt)
+	completed, err := manager.Get(context.Background(), task.Spec.ID)
+	require.NoError(t, err)
+	progress, err := executor.ReadProgress(
+		context.Background(),
+		completed,
+		func(
+			_ context.Context,
+			_ string,
+			message *schema.Message,
+		) (string, error) {
+			return message.Content, nil
+		},
+	)
+	require.NoError(t, err)
+	require.Contains(t, progress, "done")
+	require.Equal(t, 2, factoryCalls)
+}
+
+func TestSessionHelpersHandleEmptyProgressAndMergeTaskMetadata_BitsUT(t *testing.T) {
+	store := adksession.NewInMemoryStore[*schema.Message](nil)
+	var eventStore adk.SessionEventStore[*schema.Message] = store
+	eventID, err := firstTaskMessageEventID(
+		context.Background(),
+		eventStore,
+		"empty-session",
+		"task",
+	)
+	require.NoError(t, err)
+	require.Empty(t, eventID)
+
+	baseExtra := map[string]any{
+		"application":       "value",
+		taskIDEventExtraKey: "caller-value",
+	}
+	executor, err := NewExecutor(&ExecutorConfig[*schema.Message]{
+		SessionStore:    store,
+		CheckPointStore: store,
+		SessionConfig: &adk.SessionConfig[*schema.Message]{
+			EventExtraProvider: func(
+				context.Context,
+				*adk.SessionEvent[*schema.Message],
+			) (map[string]any, error) {
+				return baseExtra, nil
+			},
+		},
+	})
+	require.NoError(t, err)
+	config := executor.sessionConfigForTask("task")
+	extra, err := config.EventExtraProvider(
+		context.Background(),
+		&adk.SessionEvent[*schema.Message]{},
+	)
+	require.NoError(t, err)
+	require.Equal(t, map[string]any{
+		"application":       "value",
+		taskIDEventExtraKey: "task",
+	}, extra)
+	require.Equal(t, "caller-value", baseExtra[taskIDEventExtraKey])
+
+	_, err = ChildSessionIDFromTask(nil)
+	require.ErrorContains(t, err, "task is required")
 }
 
 func TestExecutorRegistersAgentsByStableName_BitsUT(t *testing.T) {

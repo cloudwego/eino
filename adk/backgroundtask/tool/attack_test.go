@@ -280,3 +280,33 @@ func TestAttack_AbandonedUpdateStreamFailsBoundedly(t *testing.T) {
 	require.Contains(t, event.Error, "update stream did not close")
 	t.Log("a terminal operation with an abandoned update stream failed within the configured bound")
 }
+
+func TestAttack_ReadInputRequestRejectsForeignTaskAndOwnsData(t *testing.T) {
+	checkpoint, err := encodeInputCheckpoint(&InputRequest{
+		ID: "approval", Data: []byte(`{"question":"approve?"}`),
+	})
+	require.NoError(t, err)
+	task := &backgroundtask.Task{
+		Spec: backgroundtask.Spec{
+			ExecutorKey: RecoverableExecutorKey,
+			Kind:        "background_tool",
+		},
+		Status:     backgroundtask.StatusWaitingInput,
+		Checkpoint: checkpoint,
+	}
+	request, err := ReadInputRequest(task)
+	require.NoError(t, err)
+	request.Data[0] = '['
+	reloaded, err := ReadInputRequest(task)
+	require.NoError(t, err)
+	require.JSONEq(t, `{"question":"approve?"}`, string(reloaded.Data))
+
+	task.Spec.ExecutorKey = "eino.dev/subagent"
+	_, err = ReadInputRequest(task)
+	require.ErrorContains(t, err, "waiting managed-tool task is required")
+	task.Spec.ExecutorKey = RecoverableExecutorKey
+	task.Spec.Kind = "subagent"
+	_, err = ReadInputRequest(task)
+	require.ErrorContains(t, err, "waiting managed-tool task is required")
+	t.Log("foreign waiting tasks cannot be confused with managed-tool input checkpoints")
+}

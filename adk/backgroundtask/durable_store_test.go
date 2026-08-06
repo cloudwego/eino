@@ -133,6 +133,72 @@ func TestAttack_ListPendingCursorSurvivesEarlierInsertion(t *testing.T) {
 	require.Equal(t, "task-c", second.Tasks[0].Spec.ID)
 }
 
+func TestAttack_ListCursorBindsQueryAndSignalsExactExhaustion(t *testing.T) {
+	exhaustedStore := NewInMemoryStore(nil)
+	_, err := exhaustedStore.Create(context.Background(), &CreateTaskRequest{
+		Spec: validSpec("only"), LeaseExpiryPolicy: LeaseExpiryRetry,
+	})
+	require.NoError(t, err)
+	exhausted, err := exhaustedStore.ListPending(
+		context.Background(),
+		&ListPendingRequest{ExecutorKeys: []string{"test"}, Limit: 1},
+	)
+	require.NoError(t, err)
+	require.Len(t, exhausted.Tasks, 1)
+	require.Empty(t, exhausted.NextCursor)
+
+	store := NewInMemoryStore(nil)
+	for _, item := range []struct {
+		id          string
+		executorKey string
+	}{
+		{id: "a-test", executorKey: "test"},
+		{id: "b-other", executorKey: "other"},
+		{id: "c-test", executorKey: "test"},
+	} {
+		spec := validSpec(item.id)
+		spec.ExecutorKey = item.executorKey
+		_, err = store.Create(context.Background(), &CreateTaskRequest{
+			Spec: spec, LeaseExpiryPolicy: LeaseExpiryRetry,
+		})
+		require.NoError(t, err)
+	}
+	first, err := store.ListPending(context.Background(), &ListPendingRequest{
+		ExecutorKeys: []string{"test", "other"}, Limit: 1,
+	})
+	require.NoError(t, err)
+	require.Len(t, first.Tasks, 1)
+	require.NotEmpty(t, first.NextCursor)
+
+	reordered, err := store.ListPending(context.Background(), &ListPendingRequest{
+		ExecutorKeys: []string{"other", "test"},
+		Cursor:       first.NextCursor,
+		Limit:        1,
+	})
+	require.NoError(t, err)
+	require.Len(t, reordered.Tasks, 1)
+
+	_, err = store.ListPending(context.Background(), &ListPendingRequest{
+		ExecutorKeys: []string{"test"}, Cursor: first.NextCursor,
+	})
+	require.ErrorIs(t, err, ErrInvalidCursor)
+	_, err = store.ListSuspended(context.Background(), &ListSuspendedRequest{
+		ExecutorKeys: []string{"test", "other"}, Cursor: first.NextCursor,
+	})
+	require.ErrorIs(t, err, ErrInvalidCursor)
+
+	forged, err := encodeTaskListCursor(taskListCursor{
+		Version: 1, Status: StatusPending,
+		ExecutorKeys: []string{"other", "test"}, LastID: "missing",
+	})
+	require.NoError(t, err)
+	_, err = store.ListPending(context.Background(), &ListPendingRequest{
+		ExecutorKeys: []string{"test", "other"}, Cursor: forged,
+	})
+	require.ErrorIs(t, err, ErrInvalidCursor)
+	t.Log("list cursors are query-bound and empty at exact exhaustion")
+}
+
 func TestAttack_CancellationFencesAllNonCancelMutations(t *testing.T) {
 	store := NewInMemoryStore(nil)
 	started := createAndStart(t, store, "cancel-fence")
@@ -510,36 +576,60 @@ func TestInMemoryStoreListTaskEventsRejectsInvalidCursors_BitsUT(t *testing.T) {
 	require.NotEmpty(t, first.NextCursor)
 	other := createAndStart(t, store, "other-cursor-events")
 
-	for name, request := range map[string]*ListTaskEventsRequest{
-		"malformed": {
-			TaskID: started.Spec.ID, Cursor: "not-a-cursor",
+	for _, testCase := range []struct {
+		name    string
+		request *ListTaskEventsRequest
+	}{
+		{
+			name: "malformed",
+			request: &ListTaskEventsRequest{
+				TaskID: started.Spec.ID, Cursor: "not-a-cursor",
+			},
 		},
-		"other task": {
-			TaskID: other.Spec.ID, Cursor: first.NextCursor,
+		{
+			name: "other task",
+			request: &ListTaskEventsRequest{
+				TaskID: other.Spec.ID, Cursor: first.NextCursor,
+			},
 		},
-		"other direction": {
-			TaskID: started.Spec.ID, Cursor: first.NextCursor, NewestFirst: true,
+		{
+			name: "other direction",
+			request: &ListTaskEventsRequest{
+				TaskID: started.Spec.ID, Cursor: first.NextCursor, NewestFirst: true,
+			},
 		},
 	} {
-		t.Run(name, func(t *testing.T) {
-			_, listErr := store.ListTaskEvents(context.Background(), request)
+		t.Run(testCase.name, func(t *testing.T) {
+			_, listErr := store.ListTaskEvents(context.Background(), testCase.request)
 			require.ErrorIs(t, listErr, ErrInvalidCursor)
 		})
 	}
 
-	for name, cursor := range map[string]taskEventCursor{
-		"unsupported version": {
-			Version: 2, TaskID: started.Spec.ID, SnapshotEnd: 2, Position: 1,
+	for _, testCase := range []struct {
+		name   string
+		cursor taskEventCursor
+	}{
+		{
+			name: "unsupported version",
+			cursor: taskEventCursor{
+				Version: 2, TaskID: started.Spec.ID, SnapshotEnd: 2, Position: 1,
+			},
 		},
-		"future snapshot": {
-			Version: 1, TaskID: started.Spec.ID, SnapshotEnd: 3, Position: 1,
+		{
+			name: "future snapshot",
+			cursor: taskEventCursor{
+				Version: 1, TaskID: started.Spec.ID, SnapshotEnd: 3, Position: 1,
+			},
 		},
-		"position outside snapshot": {
-			Version: 1, TaskID: started.Spec.ID, SnapshotEnd: 2, Position: 3,
+		{
+			name: "position outside snapshot",
+			cursor: taskEventCursor{
+				Version: 1, TaskID: started.Spec.ID, SnapshotEnd: 2, Position: 3,
+			},
 		},
 	} {
-		t.Run(name, func(t *testing.T) {
-			encoded, encodeErr := encodeTaskEventCursor(cursor)
+		t.Run(testCase.name, func(t *testing.T) {
+			encoded, encodeErr := encodeTaskEventCursor(testCase.cursor)
 			require.NoError(t, encodeErr)
 			_, listErr := store.ListTaskEvents(context.Background(), &ListTaskEventsRequest{
 				TaskID: started.Spec.ID, Cursor: encoded,

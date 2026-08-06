@@ -214,6 +214,40 @@ func TestManagerReleaseSuspensionRetriesVersionConflict_BitsUT(t *testing.T) {
 	require.Equal(t, "checkpoint", string(released.Checkpoint))
 }
 
+func TestManagerReleaseSuspensionRejectsInvalidTargets_BitsUT(t *testing.T) {
+	store := NewInMemoryStore(nil)
+	manager := managerWithExecutor(t, store, &scriptedExecutor{}, time.Minute)
+	defer closeWithTimeout(manager)
+
+	released, err := manager.ReleaseSuspension(context.Background(), "")
+	require.Nil(t, released)
+	require.EqualError(t, err, "backgroundtask: release suspension task id is required")
+
+	task, err := manager.Submit(context.Background(), validSpec("not-suspended"))
+	require.NoError(t, err)
+	released, err = manager.ReleaseSuspension(context.Background(), task.Spec.ID)
+	require.Nil(t, released)
+	require.ErrorIs(t, err, ErrIllegalTransition)
+}
+
+func TestManagerExecutorPanicFailsTask_BitsUT(t *testing.T) {
+	executor := &scriptedExecutor{
+		execute: func(context.Context, *Task, ExecutionRuntime) (*ExecutionResult, error) {
+			panic("executor panic")
+		},
+	}
+	store := NewInMemoryStore(nil)
+	manager := managerWithExecutor(t, store, executor, time.Minute)
+	task, err := manager.Submit(context.Background(), validSpec("executor-panic"))
+	require.NoError(t, err)
+
+	require.NoError(t, manager.Execute(context.Background(), task.Spec.ID))
+	failed, err := manager.Get(context.Background(), task.Spec.ID)
+	require.NoError(t, err)
+	require.Equal(t, StatusFailed, failed.Status)
+	require.Contains(t, failed.ResultError, "executor panic")
+}
+
 func TestManagerCloseCancelsNonDrainableAttemptAtDeadline(t *testing.T) {
 	started := make(chan struct{})
 	observed := make(chan ControlKind, 1)

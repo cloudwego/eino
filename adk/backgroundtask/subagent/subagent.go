@@ -72,10 +72,12 @@ type AgentRegistration[M adk.MessageType] struct {
 	RunOptionsFactory RunOptionsFactory
 }
 
-// SessionStoreFactory constructs the child Session store for one authorized
-// execution attempt. Durable providers use task ID and attempt to bind append
-// authorization to the active task lease. It may be called concurrently and
-// must return a fresh, semantically equivalent store on every call.
+// SessionStoreFactory constructs the child Session store for one task access.
+// It is called for execution attempts and progress reads. Durable providers use
+// task ID and attempt to bind append authorization to the active task lease
+// while retaining read access after the attempt ends. It may be called
+// concurrently and must return a fresh, semantically equivalent store on every
+// call.
 type SessionStoreFactory[M adk.MessageType] func(
 	context.Context,
 	*backgroundtask.Task,
@@ -91,7 +93,7 @@ type ExecutorConfig[M adk.MessageType] struct {
 	// across workers. Configure exactly one of SessionStore and
 	// SessionStoreFactory.
 	SessionStore adk.SessionEventStore[M]
-	// SessionStoreFactory constructs an attempt-bound child event store.
+	// SessionStoreFactory constructs a task-bound child event store.
 	// Stores returned for tasks sharing a ChildSessionID must coordinate the
 	// same durable session and serialize concurrent turns across workers.
 	SessionStoreFactory SessionStoreFactory[M]

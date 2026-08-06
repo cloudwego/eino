@@ -547,7 +547,9 @@ func decodeInputCheckpoint(data []byte) (*InputRequest, bool, error) {
 // ReadInputRequest returns the application-facing request for a managed tool
 // currently in StatusWaitingInput. The returned value owns its Data bytes.
 func ReadInputRequest(task *backgroundtask.Task) (*InputRequest, error) {
-	if task == nil || task.Status != backgroundtask.StatusWaitingInput {
+	if task == nil || task.Status != backgroundtask.StatusWaitingInput ||
+		task.Spec.ExecutorKey != RecoverableExecutorKey ||
+		task.Spec.Kind != "background_tool" {
 		return nil, errors.New(
 			"backgroundtask/tool: waiting managed-tool task is required",
 		)

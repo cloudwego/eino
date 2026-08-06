@@ -209,6 +209,7 @@ type durableAgentToolResult struct {
 	Status         backgroundtask.Status `json:"status"`
 	Result         string                `json:"result,omitempty"`
 	OutputFile     string                `json:"output_file,omitempty"`
+	Error          string                `json:"error,omitempty"`
 }
 
 func formatDurableAgentResult(
@@ -227,7 +228,9 @@ func formatDurableAgentResult(
 		backgroundtask.StatusPending,
 		backgroundtask.StatusRunning,
 		backgroundtask.StatusWaitingInput,
-		backgroundtask.StatusSuspended:
+		backgroundtask.StatusSuspended,
+		backgroundtask.StatusCanceled,
+		backgroundtask.StatusFailed:
 		result := &durableAgentToolResult{
 			TaskID: task.Spec.ID, ChildSessionID: childSessionID,
 			Status: task.Status, OutputFile: task.Spec.OutputFile,
@@ -235,21 +238,15 @@ func formatDurableAgentResult(
 		if task.Status == backgroundtask.StatusCompleted {
 			result.Result = string(task.ResultData)
 		}
+		if task.Status == backgroundtask.StatusCanceled ||
+			task.Status == backgroundtask.StatusFailed {
+			result.Error = task.ResultError
+		}
 		data, marshalErr := sonic.MarshalString(result)
 		if marshalErr != nil {
 			return "", marshalErr
 		}
 		return data, nil
-	case backgroundtask.StatusCanceled:
-		return "", fmt.Errorf(
-			"subagent %q task %q (%s) was canceled",
-			agentType, task.Spec.ID, task.Spec.Description,
-		)
-	case backgroundtask.StatusFailed:
-		return "", fmt.Errorf(
-			"subagent %q task %q (%s) failed: %s",
-			agentType, task.Spec.ID, task.Spec.Description, task.ResultError,
-		)
 	default:
 		return "", fmt.Errorf(
 			"subagent %q task %q has unknown status %q",

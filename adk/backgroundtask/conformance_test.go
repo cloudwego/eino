@@ -370,27 +370,45 @@ func TestManagerWaitingInputPersistsCheckpointWithoutTerminalResult_BitsUT(t *te
 }
 
 func TestManagerRejectsMixedExecutionResultVariants_BitsUT(t *testing.T) {
-	for name, result := range map[string]*ExecutionResult{
-		"completed checkpoint": {
-			Status: StatusCompleted, Checkpoint: []byte("checkpoint"),
+	for _, testCase := range []struct {
+		name   string
+		result *ExecutionResult
+	}{
+		{
+			name: "completed checkpoint",
+			result: &ExecutionResult{
+				Status: StatusCompleted, Checkpoint: []byte("checkpoint"),
+			},
 		},
-		"failed data": {
-			Status: StatusFailed, Data: []byte("data"), Error: "failed",
+		{
+			name: "failed data",
+			result: &ExecutionResult{
+				Status: StatusFailed, Data: []byte("data"), Error: "failed",
+			},
 		},
-		"canceled data": {
-			Status: StatusCanceled, Data: []byte("data"),
+		{
+			name: "canceled data",
+			result: &ExecutionResult{
+				Status: StatusCanceled, Data: []byte("data"),
+			},
 		},
-		"waiting error": {
-			Status: StatusWaitingInput, Error: "failed",
+		{
+			name: "waiting error",
+			result: &ExecutionResult{
+				Status: StatusWaitingInput, Error: "failed",
+			},
 		},
-		"suspended data": {
-			Status: StatusSuspended, Data: []byte("data"),
+		{
+			name: "suspended data",
+			result: &ExecutionResult{
+				Status: StatusSuspended, Data: []byte("data"),
+			},
 		},
 	} {
-		t.Run(name, func(t *testing.T) {
+		t.Run(testCase.name, func(t *testing.T) {
 			executor := &scriptedExecutor{
 				execute: func(context.Context, *Task, ExecutionRuntime) (*ExecutionResult, error) {
-					return result, nil
+					return testCase.result, nil
 				},
 			}
 			store := NewInMemoryStore(nil)

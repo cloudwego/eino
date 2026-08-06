@@ -19,6 +19,7 @@ package subagent
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 
 	"github.com/bytedance/sonic"
@@ -45,7 +46,7 @@ func (e *Executor[M]) ReadProgress(
 	if task == nil || task.Spec.ExecutorKey != ExecutorKey {
 		return "", nil
 	}
-	if e == nil || e.sessionStore == nil {
+	if e == nil || (e.sessionStore == nil && e.sessionStoreFactory == nil) {
 		return "", errors.New("backgroundtask/subagent: executor is required to read progress")
 	}
 	if format == nil {
@@ -55,9 +56,24 @@ func (e *Executor[M]) ReadProgress(
 	if err != nil {
 		return "", err
 	}
+	sessionStore := e.sessionStore
+	if e.sessionStoreFactory != nil {
+		sessionStore, err = e.sessionStoreFactory(ctx, task)
+		if err != nil {
+			return "", fmt.Errorf(
+				"backgroundtask/subagent: construct progress session store: %w",
+				err,
+			)
+		}
+		if sessionStore == nil {
+			return "", errors.New(
+				"backgroundtask/subagent: session store factory returned nil",
+			)
+		}
+	}
 	return readProgress(
 		ctx,
-		e.sessionStore,
+		sessionStore,
 		task,
 		payload.ChildSessionID,
 		payload.SubAgentName,

@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -148,6 +149,51 @@ func TestManagerSubmitRepairsTaskCreatedEventAfterSendFailure_BitsUT(t *testing.
 	require.Nil(t, duplicate)
 	require.ErrorIs(t, err, ErrAlreadyExists)
 	require.Equal(t, 2, calls)
+}
+
+func TestAttack_TaskCreatedFailureLeavesSingleRecoveryRecord(t *testing.T) {
+	sendErr := errors.New("session timeline unavailable")
+	calls := 0
+	registry := NewExecutorRegistry()
+	require.NoError(t, registry.Register(&scriptedExecutor{}))
+	store := NewInMemoryStore(nil)
+	manager := mustNewManager(t, context.Background(), &Config{
+		Tasks: store, Executors: registry,
+		SendTaskCreatedEvent: func(context.Context, *Task) error {
+			calls++
+			if calls == 1 {
+				return sendErr
+			}
+			return nil
+		},
+	})
+	spec := validSpec("task-created-recovery")
+
+	persisted, err := manager.Submit(context.Background(), spec)
+	require.ErrorIs(t, err, sendErr)
+	require.NotNil(t, persisted)
+	recovery, err := store.Receive(
+		context.Background(),
+		&ReceiveNotificationsRequest{Limit: 10, LeaseDuration: time.Second},
+	)
+	require.NoError(t, err)
+	require.Len(t, recovery.Deliveries, 1)
+	require.Equal(t, NotificationTaskCreated, recovery.Deliveries[0].Record.Kind)
+	require.Equal(t, spec.ID, recovery.Deliveries[0].Record.TaskID)
+	require.Equal(t, spec.SessionID, recovery.Deliveries[0].Record.SessionID)
+	require.NoError(t, store.Ack(context.Background(), recovery.Deliveries[0].Receipt))
+
+	repaired, err := manager.Submit(context.Background(), spec)
+	require.NoError(t, err)
+	require.Equal(t, persisted.Spec.ID, repaired.Spec.ID)
+	remaining, err := store.Receive(
+		context.Background(),
+		&ReceiveNotificationsRequest{Limit: 10, LeaseDuration: time.Second},
+	)
+	require.NoError(t, err)
+	require.Empty(t, remaining.Deliveries)
+	require.Equal(t, 2, calls)
+	t.Log("sender failure retained exactly one durable TaskCreated recovery record")
 }
 
 func TestManagerSubmitRequiresTaskCreatedSenderBeforeCreate_BitsUT(t *testing.T) {

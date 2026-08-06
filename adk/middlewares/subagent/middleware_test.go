@@ -369,6 +369,42 @@ func TestFormatManagedAgentResultPreservesDescriptionInErrors(t *testing.T) {
 	)
 }
 
+func TestAttack_DurableTerminalResultPreservesChildSessionIdentity(t *testing.T) {
+	ctx := runnerEnvironmentContext(t)
+	manager := newTestManager(t, ctx)
+	agent := &mockAgent{name: "worker", desc: "done"}
+	middleware, err := New(ctx, &Config{
+		SubAgents:  []adk.Agent{agent},
+		Background: durableBackground(t, manager, agent),
+	})
+	require.NoError(t, err)
+	_, runCtx, err := middleware.BeforeAgent(
+		ctx,
+		&adk.ChatModelAgentContext[*schema.Message]{},
+	)
+	require.NoError(t, err)
+	_, err = runCtx.Tools[0].(tool.InvokableTool).InvokableRun(
+		ctx,
+		`{"subagent_type":"worker","prompt":"work","description":"test"}`,
+	)
+	require.NoError(t, err)
+	task := terminalTask(t, manager)
+	require.NotNil(t, task)
+
+	for _, status := range []backgroundtask.Status{
+		backgroundtask.StatusFailed,
+		backgroundtask.StatusCanceled,
+	} {
+		task.Status = status
+		task.ResultError = "terminal error"
+		raw, formatErr := formatDurableAgentResult("worker", task)
+		require.NoError(t, formatErr)
+		result := decodeDurableAgentToolResult(t, raw)
+		require.Equal(t, status, result.Status)
+		require.Equal(t, "terminal error", result.Error)
+	}
+}
+
 func TestFormatManagedAgentResultLifecycleStates(t *testing.T) {
 	task := &backgroundtask.Task{
 		Spec: backgroundtask.Spec{
