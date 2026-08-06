@@ -113,7 +113,8 @@ type IDGenerator func(ctx context.Context, request *AllocateTaskIDRequest) (stri
 // Config configures a Manager.
 type Config struct {
 	// Tasks is the authoritative task lifecycle provider. When nil, New installs
-	// an in-memory reference provider.
+	// an in-memory reference provider. Manager also discovers optional
+	// CheckpointWriter and NotificationWriter capabilities from this provider.
 	Tasks TaskStore
 	// TaskEvents persists append-only progress in the same task namespace and
 	// must fence appends against the active attempt authorized by Tasks. When
@@ -170,6 +171,7 @@ func WithCancellationReason(reason string) RequestCancelOption {
 type Manager struct {
 	tasks                   TaskStore
 	taskEvents              TaskEventStore
+	checkpointWriter        CheckpointWriter
 	notificationWriter      NotificationWriter
 	executors               *ExecutorRegistry
 	heartbeatEvery          time.Duration
@@ -218,6 +220,7 @@ func New(_ context.Context, conf *Config) (*Manager, error) {
 		m.sendTaskCreatedEvent = conf.SendTaskCreatedEvent
 		m.idGen = conf.IDGen
 	}
+	m.checkpointWriter, _ = m.tasks.(CheckpointWriter)
 	m.notificationWriter, _ = m.tasks.(NotificationWriter)
 	return m, nil
 }

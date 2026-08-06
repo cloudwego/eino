@@ -41,6 +41,18 @@ func TestInMemoryTaskStoreConformance(t *testing.T) {
 	})
 }
 
+func TestInMemoryCheckpointWriterConformance(t *testing.T) {
+	RunCheckpointWriterConformance(t, CheckpointWriterConfig{
+		New: func(testing.TB) (
+			backgroundtask.TaskStore,
+			backgroundtask.CheckpointWriter,
+		) {
+			store := backgroundtask.NewInMemoryStore(nil)
+			return store, store
+		},
+	})
+}
+
 func TestInMemoryTaskEventStoreConformance(t *testing.T) {
 	RunTaskEventStoreConformance(t, TaskEventStoreConfig{
 		New: func(testing.TB) (backgroundtask.TaskStore, backgroundtask.TaskEventStore) {

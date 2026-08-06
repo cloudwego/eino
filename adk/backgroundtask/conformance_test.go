@@ -143,9 +143,12 @@ func TestSimplifiedPublicModelHasNoOverlappingStateFields_BitsUT(t *testing.T) {
 		"Tasks", "TaskEvents", "Executors", "SendTaskCreatedEvent", "IDGen")
 	assertFieldsAbsent(t, reflect.TypeOf(Config{}), "Store", "NotificationWriter")
 	assertMethodsAbsent(t, reflect.TypeOf((*TaskStore)(nil)).Elem(),
-		"AppendTaskEvent", "ListTaskEvents", "ReadRecentTaskEvents", "ReportOutputFailure")
+		"AppendTaskEvent", "ListTaskEvents", "ReadRecentTaskEvents", "ReportOutputFailure",
+		"SaveCheckpoint")
 	assertMethodsPresent(t, reflect.TypeOf((*TaskStore)(nil)).Elem(),
-		"SaveCheckpoint", "ReportTranscriptFailure")
+		"ReportTranscriptFailure")
+	assertMethodsPresent(t, reflect.TypeOf((*CheckpointWriter)(nil)).Elem(),
+		"SaveCheckpoint")
 	assertMethodsPresent(t, reflect.TypeOf((*TaskEventStore)(nil)).Elem(),
 		"AppendTaskEvent", "ListTaskEvents")
 	assertMethodsPresent(t, reflect.TypeOf((*NotificationWriter)(nil)).Elem(),
@@ -163,7 +166,7 @@ func TestSimplifiedPublicModelHasNoOverlappingStateFields_BitsUT(t *testing.T) {
 	assertMethodsAbsent(t, reflect.TypeOf((*InMemoryStore)(nil)),
 		"CreateAndStart", "Cancel", "ReadRecentTaskEvents")
 	assertMethodsPresent(t, reflect.TypeOf((*InMemoryStore)(nil)),
-		"ListSuspended", "AckCancel", "ReleaseSuspension")
+		"ListSuspended", "AckCancel", "ReleaseSuspension", "SaveCheckpoint")
 	assertMethodsAbsent(t, reflect.TypeOf((*Executor)(nil)).Elem(), "ValidateResume")
 	assertMethodsAbsent(t, reflect.TypeOf((*ExecutionRuntime)(nil)).Elem(),
 		"TaskID", "AppendTaskEvent", "ReportOutputFailure", "SaveCheckpoint")

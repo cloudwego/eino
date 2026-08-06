@@ -81,12 +81,11 @@ var (
 // the first-write optional CancelReason, and advances Version. Once
 // cancellation is requested, Heartbeat, Complete, Fail,
 // WaitInput, Suspend, and Yield must reject the attempt; only AckCancel may
-// terminally acknowledge it. SaveCheckpoint replaces opaque executor recovery
-// state while retaining StatusRunning and advances Version. Yield changes
-// running to pending, stores its optional checkpoint atomically, preserves
-// PendingResume for idempotent replay, and emits no lifecycle notification.
-// Retry-capable lease expiry also preserves PendingResume. A later WaitInput,
-// Suspend, or terminal transition consumes it. On
+// terminally acknowledge it. Yield changes running to pending, stores its
+// optional checkpoint atomically, preserves PendingResume for idempotent
+// replay, and emits no lifecycle notification. Retry-capable lease expiry also
+// preserves PendingResume. A later WaitInput, Suspend, or terminal transition
+// consumes it. On
 // retry-capable work, cancel intent that outlives an attempt remains pending so
 // a recovery attempt can stop the external operation before acknowledging
 // cancellation. Non-recoverable lease expiry resolves cancellation directly.
@@ -97,7 +96,6 @@ type TaskStore interface {
 	ListSuspended(context.Context, *ListSuspendedRequest) (*ListSuspendedResult, error)
 	Start(context.Context, *StartTaskRequest) (*Task, error)
 	Heartbeat(context.Context, *HeartbeatRequest) (*Task, error)
-	SaveCheckpoint(context.Context, *SaveCheckpointRequest) (*Task, error)
 	ReportTranscriptFailure(context.Context, *ReportTranscriptFailureRequest) (*Task, error)
 	Complete(context.Context, *CompleteTaskRequest) (*Task, error)
 	Fail(context.Context, *FailTaskRequest) (*Task, error)
@@ -109,6 +107,15 @@ type TaskStore interface {
 	Resume(context.Context, *ResumeRequest) (*Task, error)
 	ReleaseSuspension(context.Context, *ReleaseSuspensionRequest) (*Task, error)
 	WaitForTaskVersion(context.Context, *WaitForTaskVersionRequest) (*Task, error)
+}
+
+// CheckpointWriter persists opaque executor recovery state for the exact
+// active, uncanceled task version. SaveCheckpoint retains StatusRunning,
+// replaces Checkpoint, advances Version, and returns an independently owned
+// snapshot. Implementations must reject stale, expired, canceled, and
+// non-running attempts and copy request bytes before retaining them.
+type CheckpointWriter interface {
+	SaveCheckpoint(context.Context, *SaveCheckpointRequest) (*Task, error)
 }
 
 // TaskEventStore persists append-ordered task progress independently from

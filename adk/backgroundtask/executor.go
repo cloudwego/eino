@@ -224,6 +224,11 @@ type taskRuntime struct {
 	cancelReason       string
 }
 
+type checkpointTaskRuntime struct {
+	*taskRuntime
+	writer CheckpointWriter
+}
+
 // detachedCtx preserves values while detaching worker execution from the
 // request context that dispatched it.
 type detachedCtx struct{ parent context.Context }
@@ -381,13 +386,16 @@ func (r *taskRuntime) ReportTranscriptFailure(ctx context.Context, cause error) 
 	return nil
 }
 
-func (r *taskRuntime) SaveCheckpoint(ctx context.Context, checkpoint []byte) error {
+func (r *checkpointTaskRuntime) SaveCheckpoint(
+	ctx context.Context,
+	checkpoint []byte,
+) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.poison != nil {
 		return r.poison
 	}
-	task, err := r.tasks.SaveCheckpoint(ctx, &SaveCheckpointRequest{
+	task, err := r.writer.SaveCheckpoint(ctx, &SaveCheckpointRequest{
 		TaskID: r.taskID, ExpectedVersion: r.version,
 		Checkpoint: cloneBytes(checkpoint),
 	})
@@ -919,7 +927,19 @@ func (m *Manager) execute(
 	} else {
 		go serveTimeoutRequests(runtime, timeoutController, timeoutStop, timeoutDone)
 	}
-	result, executeErr := m.executeClaim(runCtx, executor, started, runtime)
+	var executionRuntime ExecutionRuntime = runtime
+	if m.checkpointWriter != nil {
+		executionRuntime = &checkpointTaskRuntime{
+			taskRuntime: runtime,
+			writer:      m.checkpointWriter,
+		}
+	}
+	result, executeErr := m.executeClaim(
+		runCtx,
+		executor,
+		started,
+		executionRuntime,
+	)
 	close(timeoutStop)
 	<-timeoutDone
 	if timeoutController != nil {
@@ -998,7 +1018,7 @@ func (m *Manager) executeClaim(
 	ctx context.Context,
 	executor Executor,
 	claimed *Task,
-	runtime *taskRuntime,
+	runtime ExecutionRuntime,
 ) (result *ExecutionResult, err error) {
 	defer func() {
 		if p := recover(); p != nil {
@@ -1023,5 +1043,5 @@ func boundedError(err error) string {
 
 var (
 	_ ExecutionRuntime  = (*taskRuntime)(nil)
-	_ CheckpointRuntime = (*taskRuntime)(nil)
+	_ CheckpointRuntime = (*checkpointTaskRuntime)(nil)
 )

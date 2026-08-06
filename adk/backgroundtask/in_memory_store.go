@@ -1080,6 +1080,7 @@ func (s *InMemoryStore) finishStoreOwnedLocked(t *Task) {
 
 var (
 	_ TaskStore          = (*InMemoryStore)(nil)
+	_ CheckpointWriter   = (*InMemoryStore)(nil)
 	_ TaskEventStore     = (*InMemoryStore)(nil)
 	_ NotificationWriter = (*InMemoryStore)(nil)
 	_ NotificationOutbox = (*InMemoryStore)(nil)

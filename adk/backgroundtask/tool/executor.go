@@ -159,6 +159,7 @@ func (e *executor) Execute(
 	}
 	hasInputRequest := inputRequest != nil
 	resumable, supportsResume := registration.Tool.(ResumableBackgroundTool)
+	checkpointRuntime, supportsCheckpoint := runtime.(backgroundtask.CheckpointRuntime)
 	startedRun := false
 	if hasInputRequest {
 		if !supportsResume {
@@ -189,6 +190,11 @@ func (e *executor) Execute(
 			RecoveryMetadata: append([]byte(nil), recoveryMetadata...),
 		})
 	} else {
+		if e.recoverable && !supportsCheckpoint {
+			return nil, errors.New(
+				"backgroundtask/tool: execution runtime cannot persist recovery metadata",
+			)
+		}
 		startedRun = true
 		run, err = registration.Tool.Start(ctx, &StartRequest{
 			TaskID: task.Spec.ID, Arguments: payload.Arguments, Attempt: task.Attempt,
@@ -222,12 +228,6 @@ func (e *executor) Execute(
 		)
 		if checkpointErr != nil {
 			return nil, stopRunAfterMetadataFailure(run, checkpointErr)
-		}
-		checkpointRuntime, ok := runtime.(backgroundtask.CheckpointRuntime)
-		if !ok {
-			return nil, stopRunAfterMetadataFailure(run, errors.New(
-				"backgroundtask/tool: execution runtime cannot persist recovery metadata",
-			))
 		}
 		if err = checkpointRuntime.SaveCheckpoint(ctx, checkpoint); err != nil {
 			return nil, stopRunAfterMetadataFailure(run, fmt.Errorf(
