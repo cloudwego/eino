@@ -46,10 +46,15 @@ const (
 )
 
 type taskPayload struct {
-	Version        int             `json:"version"`
-	SubAgentName   string          `json:"subagent_name"`
-	Input          json.RawMessage `json:"input,omitempty"`
-	ChildSessionID string          `json:"child_session_id"`
+	Version        int                   `json:"version"`
+	SubAgentName   string                `json:"subagent_name"`
+	Input          *serializedTypedInput `json:"input,omitempty"`
+	ChildSessionID string                `json:"child_session_id"`
+}
+
+type serializedTypedInput struct {
+	Messages        json.RawMessage `json:"messages"`
+	EnableStreaming bool            `json:"enable_streaming,omitempty"`
 }
 
 type checkpointState struct {
@@ -246,7 +251,7 @@ func validateSpecPayload(spec backgroundtask.Spec) (*taskPayload, error) {
 			"backgroundtask/subagent: subagent name and child session id are required",
 		)
 	}
-	if len(payload.Input) == 0 || !json.Valid(payload.Input) {
+	if payload.Input == nil {
 		return nil, errors.New("backgroundtask/subagent: typed input is required")
 	}
 	if len(payload.ChildSessionID) > maxChildSessionIDLength {
@@ -442,7 +447,7 @@ func (e *Executor[M]) Execute(
 		}
 	}()
 	runOptions = append(runOptions, cancelOption)
-	iter, err := e.beginRun(ctx, runner, task, payload, initialInput, runOptions...)
+	iter, err := e.beginRun(ctx, runner, task, initialInput, runOptions...)
 	if err != nil {
 		return nil, err
 	}
@@ -532,7 +537,6 @@ func (e *Executor[M]) beginRun(
 	ctx context.Context,
 	runner *adk.TypedRunner[M],
 	task *backgroundtask.Task,
-	payload *taskPayload,
 	initialInput *adk.TypedAgentInput[M],
 	options ...adk.AgentRunOption,
 ) (*adk.AsyncIterator[*adk.TypedAgentEvent[M]], error) {
@@ -713,36 +717,47 @@ func decodePayload(spec backgroundtask.Spec) (*taskPayload, error) {
 
 func encodeTypedInput[M adk.MessageType](
 	input *adk.TypedAgentInput[M],
-) (json.RawMessage, error) {
+) (*serializedTypedInput, error) {
 	if err := validateTypedInput(input); err != nil {
 		return nil, err
 	}
 	serializer := &schema.HumanReadableSerializer{}
-	data, err := serializer.Marshal(input)
+	messages, err := serializer.Marshal(input.Messages)
 	if err != nil {
 		return nil, fmt.Errorf("backgroundtask/subagent: serialize typed input: %w", err)
 	}
-	if _, err = decodeTypedInput[M](data); err != nil {
+	encoded := &serializedTypedInput{
+		Messages:        append(json.RawMessage(nil), messages...),
+		EnableStreaming: input.EnableStreaming,
+	}
+	if _, err = decodeTypedInput[M](encoded); err != nil {
 		return nil, err
 	}
-	return append(json.RawMessage(nil), data...), nil
+	return encoded, nil
 }
 
 func decodeTypedInput[M adk.MessageType](
-	data []byte,
+	encoded *serializedTypedInput,
 ) (*adk.TypedAgentInput[M], error) {
-	if len(data) == 0 {
+	if encoded == nil || len(encoded.Messages) == 0 {
 		return nil, errors.New("backgroundtask/subagent: typed input is required")
 	}
 	var decoded any
-	if err := (&schema.HumanReadableSerializer{}).Unmarshal(data, &decoded); err != nil {
+	if err := (&schema.HumanReadableSerializer{}).Unmarshal(
+		encoded.Messages,
+		&decoded,
+	); err != nil {
 		return nil, fmt.Errorf("backgroundtask/subagent: deserialize typed input: %w", err)
 	}
-	input, ok := decoded.(*adk.TypedAgentInput[M])
+	messages, ok := decoded.([]M)
 	if !ok {
 		return nil, errors.New(
 			"backgroundtask/subagent: typed input message type does not match executor",
 		)
+	}
+	input := &adk.TypedAgentInput[M]{
+		Messages:        messages,
+		EnableStreaming: encoded.EnableStreaming,
 	}
 	if err := validateTypedInput(input); err != nil {
 		return nil, err
@@ -771,14 +786,15 @@ func nextCheckpointSequence(previous []byte) int64 {
 	return state.Sequence + 1
 }
 
-// SubmitRequest describes a durable sub-agent task. Input is serialized by
-// Eino before persistence. Empty TaskID asks Manager to allocate one. SessionID
-// identifies the parent session notified when the child waits for input or
-// terminates. Empty ChildSessionID creates a new child session derived from the
-// allocated task ID; a non-empty value continues that existing child session
-// and inherits its committed history. DisableLifecycleNotifications suppresses
-// automatic waiting and terminal notifications without suppressing TaskCreated
-// recovery.
+// SubmitRequest describes a durable sub-agent task. Input must be non-nil and
+// contain at least one non-nil message. Eino serializes it before persistence;
+// concrete values stored in interface fields must be registered with schema.
+// Empty TaskID asks Manager to allocate one. SessionID identifies the parent
+// session notified when the child waits for input or terminates. Empty
+// ChildSessionID creates a new child session derived from the allocated task
+// ID; a non-empty value continues that existing child session and inherits its
+// committed history. DisableLifecycleNotifications suppresses automatic
+// waiting and terminal notifications without suppressing TaskCreated recovery.
 type SubmitRequest[M adk.MessageType] struct {
 	TaskID                        string
 	SubAgentName                  string

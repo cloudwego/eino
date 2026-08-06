@@ -140,7 +140,6 @@ func init() {
 	gob.Register(&AgentEvent{})
 	gob.Register(0)
 
-	schema.RegisterName[*TypedAgentInput[*schema.Message]]("_eino_adk_agent_input")
 	schema.RegisterName[*TypedAgentInput[*schema.AgenticMessage]]("_eino_adk_agentic_agent_input")
 	schema.RegisterName[*typedAgentEventWrapper[*schema.AgenticMessage]]("_eino_adk_agentic_event_wrapper")
 	schema.RegisterName[*[]*typedAgentEventWrapper[*schema.AgenticMessage]]("_eino_adk_agentic_event_wrapper_slice")

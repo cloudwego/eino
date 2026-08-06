@@ -1023,13 +1023,13 @@ func TestControlAndInterruptUseRunnerCheckpoint(t *testing.T) {
 	_, _ = executor.beginRun(
 		runCtx, runner, &backgroundtask.Task{
 			Spec: task.Spec, Checkpoint: []byte(`{"sequence":1}`),
-		}, &taskPayload{}, nil,
+		}, nil,
 	)
 	_, _ = executor.beginRun(
 		runCtx, runner, &backgroundtask.Task{
 			Spec: task.Spec, Checkpoint: []byte(`{"sequence":1}`),
 			PendingResume: []byte(`{"approval":true}`),
-		}, &taskPayload{}, nil,
+		}, nil,
 	)
 
 	close(agent.release)

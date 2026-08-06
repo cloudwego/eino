@@ -272,12 +272,12 @@ func durableProgressTask[M adk.MessageType](
 	status backgroundtask.Status,
 ) *backgroundtask.Task {
 	t.Helper()
-	input, err := (&schema.HumanReadableSerializer{}).Marshal(
-		newTypedUserInput[M]("submitted query"),
-	)
+	input := newTypedUserInput[M]("submitted query")
+	messages, err := (&schema.HumanReadableSerializer{}).Marshal(input.Messages)
 	require.NoError(t, err)
 	payload, err := sonic.Marshal(map[string]any{
-		"version": 4, "subagent_name": "worker", "input": json.RawMessage(input),
+		"version": 4, "subagent_name": "worker",
+		"input":            map[string]any{"messages": json.RawMessage(messages)},
 		"child_session_id": progressChildSessionID,
 	})
 	require.NoError(t, err)

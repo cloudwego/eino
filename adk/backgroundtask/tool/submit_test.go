@@ -267,7 +267,7 @@ func TestSubmitRejectsInvalidRequestsAndDependencyFailures_BitsUT(t *testing.T) 
 			err: "backgroundtask/tool: reserve output: reservation failed",
 		},
 		{
-			name:         "empty reservation",
+			name: "empty reservation",
 			materializer: reserveFailure{},
 			err:          "backgroundtask/tool: output materializer returned an empty path",
 		},

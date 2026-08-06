@@ -25,6 +25,7 @@ import (
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/adk/backgroundtask"
+	"github.com/cloudwego/eino/adk/internal/agenttool"
 	adksession "github.com/cloudwego/eino/adk/session"
 	"github.com/cloudwego/eino/schema"
 )
@@ -245,7 +246,7 @@ func TestSubmitSupportsAgenticInput(t *testing.T) {
 	require.Nil(t, input.Messages[0].Extra)
 }
 
-func TestTypedInputRecoveryDoesNotReplayInitialInput(t *testing.T) {
+func TestAttack_TypedInputRecoveryDoesNotReplayInitialInput(t *testing.T) {
 	store := adksession.NewInMemoryStore[*schema.Message](nil)
 	agent := &typedInterruptAgent{name: "worker"}
 	executor := newTestExecutor(t, store)
@@ -283,9 +284,31 @@ func TestTypedInputRecoveryDoesNotReplayInitialInput(t *testing.T) {
 	require.NoError(t, manager.Execute(context.Background(), task.Spec.ID))
 	require.Len(t, agent.runInputs, 1)
 	require.Equal(t, 1, agent.resumeCalls)
+	t.Log("checkpoint recovery called Resume without a second Run")
 }
 
 func TestSubmitValidatesInputBeforePersistence(t *testing.T) {
+	_, err := Submit[*schema.Message](context.Background(), nil, nil)
+	require.EqualError(
+		t,
+		err,
+		"backgroundtask/subagent: manager, parent session, and subagent name are required",
+	)
+	_, err = decodeTypedInput[*schema.Message](nil)
+	require.EqualError(t, err, "backgroundtask/subagent: typed input is required")
+	_, err = decodeTypedInput[*schema.Message](&serializedTypedInput{
+		Messages: json.RawMessage(`{`),
+	})
+	require.ErrorContains(t, err, "deserialize typed input")
+	emptyMessages, err := (&schema.HumanReadableSerializer{}).Marshal(
+		[]*schema.Message{},
+	)
+	require.NoError(t, err)
+	_, err = decodeTypedInput[*schema.Message](&serializedTypedInput{
+		Messages: emptyMessages,
+	})
+	require.ErrorContains(t, err, "messages are required")
+
 	store := adksession.NewInMemoryStore[*schema.Message](nil)
 	executor := newTestExecutor(t, store)
 	require.NoError(t, executor.Register("worker", &AgentRegistration[*schema.Message]{
@@ -323,12 +346,12 @@ func TestSubmitValidatesInputBeforePersistence(t *testing.T) {
 			})
 			require.ErrorContains(t, err, testCase.err)
 			_, getErr := manager.Get(context.Background(), "must-not-persist")
-			require.Error(t, getErr)
+			require.ErrorIs(t, getErr, backgroundtask.ErrNotFound)
 		})
 	}
 }
 
-func TestTypedPayloadRejectsMismatchedExecutorMessageType(t *testing.T) {
+func TestAttack_TypedPayloadRejectsMismatchedExecutorMessageType(t *testing.T) {
 	input, err := encodeTypedInput(&adk.TypedAgentInput[*schema.AgenticMessage]{
 		Messages: []*schema.AgenticMessage{schema.UserAgenticMessage("input")},
 	})
@@ -348,4 +371,71 @@ func TestTypedPayloadRejectsMismatchedExecutorMessageType(t *testing.T) {
 		Payload: payload, SessionID: "parent",
 	})
 	require.ErrorContains(t, err, "message type does not match executor")
+	t.Log("executor rejected an AgenticMessage payload registered as Message")
+}
+
+func TestAttack_TypedInputRoundTripPreservesNestedExtraAndLargeInteger(t *testing.T) {
+	const ticket = int64(9007199254740993)
+	nested := map[string]any{"value": "original"}
+	input := &adk.AgentInput{Messages: []*schema.Message{{
+		Role:    schema.User,
+		Content: "input",
+		Extra: map[string]any{
+			"ticket": ticket,
+			"nested": nested,
+		},
+	}}}
+
+	encoded, err := encodeTypedInput(input)
+	require.NoError(t, err)
+	nested["value"] = "mutated"
+	input.Messages[0].Extra["ticket"] = int64(1)
+
+	decoded, err := decodeTypedInput[*schema.Message](encoded)
+	require.NoError(t, err)
+	require.Equal(t, ticket, decoded.Messages[0].Extra["ticket"])
+	decodedNested, ok := decoded.Messages[0].Extra["nested"].(map[string]any)
+	require.True(t, ok)
+	require.Equal(
+		t,
+		"original",
+		decodedNested["value"],
+	)
+	t.Log("serializer preserved concrete integer type and isolated nested aliases")
+}
+
+func TestAttack_ForegroundStreamingOverridesPersistedInputMode(t *testing.T) {
+	store := adksession.NewInMemoryStore[*schema.Message](nil)
+	agent := &typedInputCaptureAgent{name: "worker"}
+	executor := newTestExecutor(t, store)
+	require.NoError(t, executor.Register("worker", &AgentRegistration[*schema.Message]{
+		Agent: agent,
+	}))
+	executors := backgroundtask.NewExecutorRegistry()
+	require.NoError(t, executors.Register(executor))
+	manager := mustNewBackgroundManager(
+		t,
+		context.Background(),
+		&backgroundtask.Config{Executors: executors},
+	)
+	defer manager.Close(context.Background())
+
+	task, err := Submit(context.Background(), manager, &SubmitRequest[*schema.Message]{
+		SubAgentName: "worker",
+		Input: &adk.AgentInput{
+			Messages: []*schema.Message{schema.UserMessage("input")},
+		},
+		SessionID: "parent",
+	})
+	require.NoError(t, err)
+	runCtx, detach := agenttool.WithForegroundExecution[*adk.AgentEvent](
+		context.Background(),
+		nil,
+		true,
+	)
+	defer detach()
+	require.NoError(t, manager.Execute(runCtx, task.Spec.ID))
+	require.Len(t, agent.inputs, 1)
+	require.True(t, agent.inputs[0].EnableStreaming)
+	t.Log("foreground projection enabled streaming without mutating persisted input")
 }
