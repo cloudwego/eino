@@ -712,13 +712,16 @@ func nextCheckpointSequence(previous []byte) int64 {
 // when the child waits for input or terminates. Empty ChildSessionID creates a
 // new child session derived from the allocated task ID; a non-empty value
 // continues that existing child session and inherits its committed history.
+// DisableLifecycleNotifications suppresses automatic waiting and terminal
+// notifications without suppressing TaskCreated recovery.
 type SubmitRequest struct {
-	TaskID         string
-	SubAgentName   string
-	Query          string
-	Description    string
-	SessionID      string
-	ChildSessionID string
+	TaskID                        string
+	SubAgentName                  string
+	Query                         string
+	Description                   string
+	SessionID                     string
+	ChildSessionID                string
+	DisableLifecycleNotifications bool
 }
 
 // Submit persists a durable sub-agent task through manager.
@@ -765,7 +768,7 @@ func Submit(ctx context.Context, manager *backgroundtask.Manager, req *SubmitReq
 	return manager.Submit(ctx, backgroundtask.Spec{
 		ID: id, ExecutorKey: ExecutorKey, Kind: "subagent", Payload: data,
 		Description: req.Description, SessionID: req.SessionID,
-		NotifySession: true,
+		NotifySession: !req.DisableLifecycleNotifications,
 	})
 }
 

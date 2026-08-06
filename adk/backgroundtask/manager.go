@@ -170,6 +170,7 @@ func WithCancellationReason(reason string) RequestCancelOption {
 type Manager struct {
 	tasks                   TaskStore
 	taskEvents              TaskEventStore
+	notificationWriter      NotificationWriter
 	executors               *ExecutorRegistry
 	heartbeatEvery          time.Duration
 	attemptsMu              sync.Mutex
@@ -217,6 +218,7 @@ func New(_ context.Context, conf *Config) (*Manager, error) {
 		m.sendTaskCreatedEvent = conf.SendTaskCreatedEvent
 		m.idGen = conf.IDGen
 	}
+	m.notificationWriter, _ = m.tasks.(NotificationWriter)
 	return m, nil
 }
 

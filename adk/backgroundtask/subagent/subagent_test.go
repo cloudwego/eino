@@ -719,6 +719,13 @@ func TestSubmitPersistsChildSessionIdentity_BitsUT(t *testing.T) {
 	assert.Equal(t, task.Spec.ID+"/checkpoint", checkpointID(task.Spec.ID))
 	assert.Equal(t, "parent-session", task.Spec.SessionID)
 	assert.True(t, task.Spec.NotifySession)
+
+	disabled, err := Submit(context.Background(), manager, &SubmitRequest{
+		SubAgentName: "worker", Query: "silent work",
+		SessionID: "parent-session", DisableLifecycleNotifications: true,
+	})
+	require.NoError(t, err)
+	assert.False(t, disabled.Spec.NotifySession)
 }
 
 func TestTasksCanReusePersistentChildSessionHistory_BitsUT(t *testing.T) {

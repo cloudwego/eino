@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -55,6 +56,16 @@ var (
 	// ErrInvalidCursor reports that a pagination cursor is malformed or cannot
 	// continue the requested task-event snapshot and ordering.
 	ErrInvalidCursor = errors.New("backgroundtask: invalid cursor")
+	// ErrNotificationUnavailable reports that the current context or task store
+	// cannot route an application notification to a parent session.
+	ErrNotificationUnavailable = errors.New(
+		"backgroundtask: parent notification unavailable",
+	)
+	// ErrNotificationEventIDConflict reports that a task-local notification
+	// EventID was replayed with different Kind or Data.
+	ErrNotificationEventIDConflict = errors.New(
+		"backgroundtask: notification event id conflict",
+	)
 )
 
 // TaskStore persists authoritative task snapshots and semantic lifecycle
@@ -111,6 +122,21 @@ type TaskEventStore interface {
 	ListTaskEvents(context.Context, *ListTaskEventsRequest) (*ListTaskEventsResult, error)
 }
 
+// NotificationWriter atomically authorizes and enqueues application
+// notifications from the exact active task attempt. Implementations derive the
+// immutable parent SessionID from the stored Spec, fence attempt, lease, and
+// cancellation before replay lookup, and retain replay metadata for at least
+// the task lifetime. Notification.Version captures the current Task version
+// without advancing it. Implementations copy request Data before retaining it.
+type NotificationWriter interface {
+	EnqueueTaskNotification(
+		ctx context.Context,
+		taskID string,
+		attempt int64,
+		req *NotifyParentRequest,
+	) error
+}
+
 // NotificationOutbox leases task notifications for dispatch. The
 // NotificationTaskCreated record is the durable recovery source for reconciling
 // a TaskCreated parent-session event if the creating process exits before
@@ -156,6 +182,44 @@ func validateTranscriptFailure(message string) error {
 		return errors.New("backgroundtask: transcript failure exceeds configured bounds")
 	}
 	return nil
+}
+
+func validateNotifyParentRequest(req *NotifyParentRequest) error {
+	if req == nil {
+		return errors.New("backgroundtask: parent notification request is required")
+	}
+	if req.EventID == "" {
+		return errors.New("backgroundtask: notification event id is required")
+	}
+	if len(req.EventID) > 1024 {
+		return errors.New("backgroundtask: notification event id exceeds configured bounds")
+	}
+	if req.Kind == "" {
+		return errors.New("backgroundtask: notification kind is required")
+	}
+	if len(req.Kind) > 64 {
+		return errors.New("backgroundtask: notification kind exceeds configured bounds")
+	}
+	if strings.HasPrefix(string(req.Kind), "eino.") || lifecycleNotificationKind(req.Kind) {
+		return errors.New("backgroundtask: notification kind is reserved")
+	}
+	if len(req.Data) > 256<<10 {
+		return errors.New("backgroundtask: notification data exceeds configured bounds")
+	}
+	return nil
+}
+
+func lifecycleNotificationKind(kind NotificationKind) bool {
+	switch kind {
+	case NotificationTaskCreated,
+		NotificationWaitingInput,
+		NotificationCompleted,
+		NotificationFailed,
+		NotificationCanceled:
+		return true
+	default:
+		return false
+	}
 }
 
 func validateTaskSnapshot(status Status, data []byte, resultError string) error {
@@ -225,5 +289,6 @@ func cloneNotification(v *Notification) *Notification {
 		return nil
 	}
 	c := *v
+	c.Data = cloneBytes(v.Data)
 	return &c
 }

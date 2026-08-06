@@ -65,3 +65,25 @@ func TestInMemoryNotificationOutboxConformance(t *testing.T) {
 		},
 	})
 }
+
+func TestInMemoryNotificationWriterConformance(t *testing.T) {
+	const attemptTimeout = 20 * time.Millisecond
+	RunNotificationWriterConformance(t, NotificationWriterConfig{
+		New: func(testing.TB) (
+			backgroundtask.TaskStore,
+			backgroundtask.NotificationOutbox,
+		) {
+			store := backgroundtask.NewInMemoryStore(&backgroundtask.InMemoryStoreConfig{
+				ActiveAttemptTimeout: attemptTimeout,
+			})
+			return store, store
+		},
+		ExpireActiveAttempt: func(
+			_ testing.TB,
+			_ backgroundtask.TaskStore,
+			_ *backgroundtask.Task,
+		) {
+			time.Sleep(2 * attemptTimeout)
+		},
+	})
+}

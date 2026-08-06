@@ -21,6 +21,7 @@ package storetest
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -49,6 +50,21 @@ type TaskEventStoreConfig struct {
 type NotificationOutboxConfig struct {
 	New         func(testing.TB) (backgroundtask.TaskStore, backgroundtask.NotificationOutbox)
 	ExpireLease func(testing.TB, backgroundtask.NotificationOutbox, time.Duration)
+}
+
+// NotificationWriterConfig configures NotificationWriter conformance. New
+// returns lifecycle and outbox capabilities sharing one task namespace; the
+// returned TaskStore must also implement backgroundtask.NotificationWriter.
+type NotificationWriterConfig struct {
+	New func(testing.TB) (
+		backgroundtask.TaskStore,
+		backgroundtask.NotificationOutbox,
+	)
+	ExpireActiveAttempt func(
+		testing.TB,
+		backgroundtask.TaskStore,
+		*backgroundtask.Task,
+	)
 }
 
 // RunTaskStoreConformance checks lifecycle transitions, CAS, cancellation,
@@ -296,6 +312,237 @@ func RunNotificationOutboxConformance(t *testing.T, config NotificationOutboxCon
 	require.NotEqual(t, first.Deliveries[0].Receipt, second.Deliveries[0].Receipt)
 	require.Error(t, outbox.Ack(context.Background(), first.Deliveries[0].Receipt))
 	require.NoError(t, outbox.Ack(context.Background(), second.Deliveries[0].Receipt))
+}
+
+// RunNotificationWriterConformance checks authorization-before-replay,
+// idempotency, bounds, identity, state preservation, and copy ownership.
+func RunNotificationWriterConformance(t *testing.T, config NotificationWriterConfig) {
+	t.Helper()
+	require.NotNil(t, config.New)
+	require.NotNil(t, config.ExpireActiveAttempt)
+
+	t.Run("replay_follows_authorization_and_survives_ack", func(t *testing.T) {
+		tasks, outbox := config.New(t)
+		writer := notificationWriter(t, tasks)
+		started := createParentAndStart(t, tasks, "notify-replay")
+		req := &backgroundtask.NotifyParentRequest{
+			EventID: "event", Kind: "application.update", Data: []byte("original"),
+		}
+		require.NoError(t, writer.EnqueueTaskNotification(
+			context.Background(), started.Spec.ID, started.Attempt, req,
+		))
+		req.Data[0] = 'X'
+		custom, lifecycle := receiveNotificationKinds(t, outbox)
+		require.Equal(t, "original", string(custom.Record.Data))
+		require.NotEqual(t, lifecycle.Record.ID, custom.Record.ID)
+		require.NoError(t, outbox.Ack(context.Background(), custom.Receipt))
+
+		yielded, err := tasks.Yield(context.Background(), &backgroundtask.YieldTaskRequest{
+			TaskID: started.Spec.ID, ExpectedVersion: started.Version,
+		})
+		require.NoError(t, err)
+		restarted, err := tasks.Start(context.Background(), &backgroundtask.StartTaskRequest{
+			TaskID: yielded.Spec.ID, ExpectedVersion: yielded.Version,
+		})
+		require.NoError(t, err)
+		original := &backgroundtask.NotifyParentRequest{
+			EventID: "event", Kind: "application.update", Data: []byte("original"),
+		}
+		require.ErrorIs(t, writer.EnqueueTaskNotification(
+			context.Background(),
+			started.Spec.ID,
+			started.Attempt,
+			&backgroundtask.NotifyParentRequest{
+				EventID: "event", Kind: "application.changed", Data: []byte("changed"),
+			},
+		), backgroundtask.ErrLeaseLost)
+		require.NoError(t, writer.EnqueueTaskNotification(
+			context.Background(), restarted.Spec.ID, restarted.Attempt, original,
+		))
+		require.ErrorIs(t, writer.EnqueueTaskNotification(
+			context.Background(),
+			restarted.Spec.ID,
+			restarted.Attempt,
+			&backgroundtask.NotifyParentRequest{
+				EventID: "event", Kind: "application.changed", Data: []byte("changed"),
+			},
+		), backgroundtask.ErrNotificationEventIDConflict)
+		afterReplay, err := outbox.Receive(
+			context.Background(),
+			&backgroundtask.ReceiveNotificationsRequest{
+				Limit: 100, LeaseDuration: time.Second,
+			},
+		)
+		require.NoError(t, err)
+		for _, delivery := range afterReplay.Deliveries {
+			require.NotEqual(t, "application.update", string(delivery.Record.Kind))
+		}
+
+		config.ExpireActiveAttempt(t, tasks, restarted)
+		require.ErrorIs(t, writer.EnqueueTaskNotification(
+			context.Background(), restarted.Spec.ID, restarted.Attempt, original,
+		), backgroundtask.ErrLeaseLost)
+		pending, err := tasks.Get(context.Background(), restarted.Spec.ID)
+		require.NoError(t, err)
+		current, err := tasks.Start(context.Background(), &backgroundtask.StartTaskRequest{
+			TaskID: pending.Spec.ID, ExpectedVersion: pending.Version,
+		})
+		require.NoError(t, err)
+		canceled, err := tasks.RequestCancel(
+			context.Background(),
+			&backgroundtask.RequestCancelRequest{
+				TaskID: current.Spec.ID, ExpectedVersion: current.Version,
+			},
+		)
+		require.NoError(t, err)
+		require.ErrorIs(t, writer.EnqueueTaskNotification(
+			context.Background(), canceled.Spec.ID, current.Attempt, original,
+		), backgroundtask.ErrLeaseLost)
+	})
+
+	t.Run("identity_state_version_and_copy_ownership", func(t *testing.T) {
+		tasks, outbox := config.New(t)
+		writer := notificationWriter(t, tasks)
+		started := createParentAndStart(t, tasks, "notify-state")
+		before, err := tasks.Get(context.Background(), started.Spec.ID)
+		require.NoError(t, err)
+		req := &backgroundtask.NotifyParentRequest{
+			EventID: "state-event", Kind: "application.state", Data: []byte("data"),
+		}
+		require.NoError(t, writer.EnqueueTaskNotification(
+			context.Background(), started.Spec.ID, started.Attempt, req,
+		))
+		after, err := tasks.Get(context.Background(), started.Spec.ID)
+		require.NoError(t, err)
+		require.Equal(t, before, after)
+
+		custom, _ := receiveNotificationKindsWithLease(t, outbox, time.Millisecond)
+		require.Equal(t, started.Spec.ID, custom.Record.TaskID)
+		require.Equal(t, "parent-session", custom.Record.SessionID)
+		require.Equal(t, started.Version, custom.Record.Version)
+		require.Equal(t, backgroundtask.NotificationKind("application.state"), custom.Record.Kind)
+		require.Equal(t, "data", string(custom.Record.Data))
+		firstID := custom.Record.ID
+		custom.Record.Data[0] = 'X'
+		time.Sleep(2 * time.Millisecond)
+		redelivered, _ := receiveNotificationKinds(t, outbox)
+		require.Equal(t, firstID, redelivered.Record.ID)
+		require.Equal(t, "data", string(redelivered.Record.Data))
+		require.NoError(t, writer.EnqueueTaskNotification(
+			context.Background(),
+			started.Spec.ID,
+			started.Attempt,
+			&backgroundtask.NotifyParentRequest{
+				EventID: "state-event", Kind: "application.state", Data: []byte("data"),
+			},
+		))
+
+		otherTasks, otherOutbox := config.New(t)
+		otherWriter := notificationWriter(t, otherTasks)
+		otherStarted := createParentAndStart(t, otherTasks, "notify-state")
+		require.NoError(t, otherWriter.EnqueueTaskNotification(
+			context.Background(), otherStarted.Spec.ID, otherStarted.Attempt,
+			&backgroundtask.NotifyParentRequest{
+				EventID: "state-event", Kind: "application.state", Data: []byte("data"),
+			},
+		))
+		otherCustom, _ := receiveNotificationKinds(t, otherOutbox)
+		require.Equal(t, firstID, otherCustom.Record.ID)
+	})
+
+	t.Run("validation_bounds_and_nil_empty_replay", func(t *testing.T) {
+		tasks, _ := config.New(t)
+		writer := notificationWriter(t, tasks)
+		started := createParentAndStart(t, tasks, "notify-validation")
+		write := func(req *backgroundtask.NotifyParentRequest) error {
+			return writer.EnqueueTaskNotification(
+				context.Background(), started.Spec.ID, started.Attempt, req,
+			)
+		}
+		for _, req := range []*backgroundtask.NotifyParentRequest{
+			nil,
+			{Kind: "application.valid"},
+			{EventID: strings.Repeat("e", 1025), Kind: "application.valid"},
+			{EventID: "empty-kind"},
+			{EventID: "long-kind", Kind: backgroundtask.NotificationKind(strings.Repeat("k", 65))},
+			{EventID: "lifecycle", Kind: backgroundtask.NotificationCompleted},
+			{EventID: "reserved", Kind: "eino.application"},
+			{EventID: "large-data", Kind: "application.valid", Data: make([]byte, (256<<10)+1)},
+		} {
+			require.Error(t, write(req))
+		}
+		require.NoError(t, write(&backgroundtask.NotifyParentRequest{
+			EventID: strings.Repeat("e", 1024),
+			Kind:    backgroundtask.NotificationKind(strings.Repeat("k", 64)),
+			Data:    make([]byte, 256<<10),
+		}))
+		require.NoError(t, write(&backgroundtask.NotifyParentRequest{
+			EventID: "nil-empty", Kind: "application.empty",
+		}))
+		require.NoError(t, write(&backgroundtask.NotifyParentRequest{
+			EventID: "nil-empty", Kind: "application.empty", Data: []byte{},
+		}))
+	})
+}
+
+func notificationWriter(
+	t testing.TB,
+	tasks backgroundtask.TaskStore,
+) backgroundtask.NotificationWriter {
+	t.Helper()
+	writer, ok := tasks.(backgroundtask.NotificationWriter)
+	require.True(t, ok)
+	return writer
+}
+
+func createParentAndStart(
+	t testing.TB,
+	tasks backgroundtask.TaskStore,
+	id string,
+) *backgroundtask.Task {
+	t.Helper()
+	spec := testSpec(id)
+	spec.SessionID = "parent-session"
+	created := create(t, tasks, spec, backgroundtask.LeaseExpiryRetry)
+	started, err := tasks.Start(context.Background(), &backgroundtask.StartTaskRequest{
+		TaskID: created.Spec.ID, ExpectedVersion: created.Version,
+	})
+	require.NoError(t, err)
+	return started
+}
+
+func receiveNotificationKinds(
+	t testing.TB,
+	outbox backgroundtask.NotificationOutbox,
+) (backgroundtask.NotificationDelivery, backgroundtask.NotificationDelivery) {
+	t.Helper()
+	return receiveNotificationKindsWithLease(t, outbox, time.Second)
+}
+
+func receiveNotificationKindsWithLease(
+	t testing.TB,
+	outbox backgroundtask.NotificationOutbox,
+	lease time.Duration,
+) (backgroundtask.NotificationDelivery, backgroundtask.NotificationDelivery) {
+	t.Helper()
+	result, err := outbox.Receive(
+		context.Background(),
+		&backgroundtask.ReceiveNotificationsRequest{
+			Limit: 100, LeaseDuration: lease,
+		},
+	)
+	require.NoError(t, err)
+	var custom backgroundtask.NotificationDelivery
+	var lifecycle backgroundtask.NotificationDelivery
+	for _, delivery := range result.Deliveries {
+		if delivery.Record.Kind == backgroundtask.NotificationTaskCreated {
+			lifecycle = delivery
+		} else {
+			custom = delivery
+		}
+	}
+	require.NotEmpty(t, custom.Record.ID)
+	return custom, lifecycle
 }
 
 func testSpec(id string) backgroundtask.Spec {

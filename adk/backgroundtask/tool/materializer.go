@@ -24,6 +24,8 @@ import "context"
 // events must be applied in call order; EventID is opaque and must not be
 // sorted. Recoverable update sources must therefore replay in stable order.
 type OutputMaterializer interface {
+	// ReserveOutput must return the same path when repeated with one TaskID.
+	// A reservation may remain unused when later task submission fails.
 	ReserveOutput(context.Context, *ReserveOutputRequest) (string, error)
 	AppendOutput(context.Context, *MaterializeOutputRequest) error
 }

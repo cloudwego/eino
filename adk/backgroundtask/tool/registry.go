@@ -34,7 +34,8 @@ type Registration struct {
 	Info *schema.ToolInfo
 	Tool BackgroundTool
 	// Description formats persisted arguments for task presentation. Nil uses
-	// the tool name. It may be called concurrently and must not panic.
+	// the tool name. It may be called concurrently, must not panic, and must
+	// return the same value when repeated with the same arguments.
 	Description func(arguments string) string
 	// RenderResult returns rich content for a successfully completed foreground
 	// result. The framework prepends its text control envelope to the returned

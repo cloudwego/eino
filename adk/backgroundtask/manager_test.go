@@ -389,7 +389,7 @@ func TestManagerDispatchReadBoundaries(t *testing.T) {
 
 func TestTimeoutControlPrecedence(t *testing.T) {
 	t.Run("timeout always has a reason", func(t *testing.T) {
-		runtime := newTaskRuntime(nil, nil, "task", 1, 1)
+		runtime := newTaskRuntime(nil, nil, "task", 1, 1, nil)
 		require.True(t, runtime.requestControlWithReason(ControlTimeout, ""))
 		require.Equal(t, ControlRequest{
 			Kind: ControlTimeout, Reason: defaultTimeoutReason,
@@ -397,7 +397,7 @@ func TestTimeoutControlPrecedence(t *testing.T) {
 	})
 
 	t.Run("timeout supersedes drain", func(t *testing.T) {
-		runtime := newTaskRuntime(nil, nil, "task", 1, 1)
+		runtime := newTaskRuntime(nil, nil, "task", 1, 1, nil)
 		require.True(t, runtime.requestControl(ControlDrain))
 		_, controller := taskcontrol.WithTimeoutController(context.Background())
 		stop := make(chan struct{})
@@ -413,7 +413,7 @@ func TestTimeoutControlPrecedence(t *testing.T) {
 	})
 
 	t.Run("stop rejects timeout", func(t *testing.T) {
-		runtime := newTaskRuntime(nil, nil, "task", 1, 1)
+		runtime := newTaskRuntime(nil, nil, "task", 1, 1, nil)
 		require.True(t, runtime.requestControl(ControlStop))
 		_, controller := taskcontrol.WithTimeoutController(context.Background())
 		stop := make(chan struct{})
@@ -434,7 +434,9 @@ func TestTimeoutControlPrecedence(t *testing.T) {
 func TestTaskRuntimeTranscriptFailureAndHeartbeat(t *testing.T) {
 	store := NewInMemoryStore(nil)
 	started := createAndStart(t, store, "runtime")
-	runtime := newTaskRuntime(store, store, started.Spec.ID, started.Attempt, started.Version)
+	runtime := newTaskRuntime(
+		store, store, started.Spec.ID, started.Attempt, started.Version, nil,
+	)
 
 	output, err := runtime.EmitProgress(context.Background(), "", []byte("output"))
 	require.NoError(t, err)
@@ -458,7 +460,9 @@ func TestTaskRuntimeTranscriptFailureAndHeartbeat(t *testing.T) {
 func TestTaskRuntimeReconcilesCancellationOnHeartbeat(t *testing.T) {
 	store := NewInMemoryStore(nil)
 	started := createAndStart(t, store, "heartbeat-cancel")
-	runtime := newTaskRuntime(store, store, started.Spec.ID, started.Attempt, started.Version)
+	runtime := newTaskRuntime(
+		store, store, started.Spec.ID, started.Attempt, started.Version, nil,
+	)
 	_, err := store.RequestCancel(context.Background(), &RequestCancelRequest{
 		TaskID: started.Spec.ID, ExpectedVersion: started.Version,
 	})
@@ -488,6 +492,7 @@ func TestManagerHeartbeatStopsAndCancelsOnLeaseError(t *testing.T) {
 		heartbeatErrorStore{TaskStore: NewInMemoryStore(nil), err: ErrLeaseLost},
 		events,
 		"task", 1, 1,
+		nil,
 	)
 	runCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -499,7 +504,7 @@ func TestManagerHeartbeatStopsAndCancelsOnLeaseError(t *testing.T) {
 
 	runCtx, cancel = context.WithCancel(context.Background())
 	defer cancel()
-	runtime = newTaskRuntime(NewInMemoryStore(nil), events, "task", 1, 1)
+	runtime = newTaskRuntime(NewInMemoryStore(nil), events, "task", 1, 1, nil)
 	runtime.cancelRequested = true
 	done = make(chan struct{})
 	go manager.heartbeat(runCtx, cancel, runtime, stop, done)
@@ -530,14 +535,16 @@ func TestExecutorRegistryRegistrationBoundaries(t *testing.T) {
 
 func TestRuntimeCancellationReconciliationRejectsInvalidState(t *testing.T) {
 	store := NewInMemoryStore(nil)
-	runtime := newTaskRuntime(store, store, "missing", 1, 1)
+	runtime := newTaskRuntime(store, store, "missing", 1, 1, nil)
 	require.ErrorIs(
 		t, runtime.reconcileCancellationLocked(context.Background()), ErrNotFound,
 	)
 	require.ErrorIs(t, runtime.poison, ErrNotFound)
 
 	started := createAndStart(t, store, "not-canceled")
-	runtime = newTaskRuntime(store, store, started.Spec.ID, started.Attempt, started.Version)
+	runtime = newTaskRuntime(
+		store, store, started.Spec.ID, started.Attempt, started.Version, nil,
+	)
 	require.ErrorIs(
 		t, runtime.reconcileCancellationLocked(context.Background()), ErrLeaseLost,
 	)

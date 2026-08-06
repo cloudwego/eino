@@ -202,22 +202,27 @@ func (a *activeAttempt) signalReady() {
 }
 
 type taskRuntime struct {
-	mu              sync.Mutex
-	controlMu       sync.Mutex
-	tasks           TaskStore
-	taskEvents      TaskEventStore
-	taskID          string
-	attempt         int64
-	version         int64
-	controls        chan ControlRequest
-	poison          error
-	cancelRequested bool
-	cancelReason    string
+	mu                 sync.Mutex
+	controlMu          sync.Mutex
+	tasks              TaskStore
+	taskEvents         TaskEventStore
+	notificationWriter NotificationWriter
+	taskID             string
+	attempt            int64
+	version            int64
+	controls           chan ControlRequest
+	poison             error
+	cancelRequested    bool
+	cancelReason       string
 }
 
 // detachedCtx preserves values while detaching worker execution from the
 // request context that dispatched it.
 type detachedCtx struct{ parent context.Context }
+
+type notifyParentContextKey struct{}
+
+type notifyParentCallback func(context.Context, *NotifyParentRequest) error
 
 func (detachedCtx) Deadline() (time.Time, bool) { return time.Time{}, false }
 func (detachedCtx) Done() <-chan struct{}       { return nil }
@@ -231,15 +236,59 @@ func newTaskRuntime(
 	taskEvents TaskEventStore,
 	taskID string,
 	attempt, version int64,
+	notificationWriter NotificationWriter,
 ) *taskRuntime {
 	return &taskRuntime{
 		tasks: tasks, taskEvents: taskEvents,
-		taskID: taskID, attempt: attempt, version: version,
+		notificationWriter: notificationWriter,
+		taskID:             taskID, attempt: attempt, version: version,
 		controls: make(chan ControlRequest, 1),
 	}
 }
 
 func (r *taskRuntime) Controls() <-chan ControlRequest { return r.controls }
+
+// NotifyParent emits one idempotent application notification using authority
+// bound to the current managed attempt context. It returns
+// ErrNotificationUnavailable outside a managed attempt or when the configured
+// TaskStore lacks NotificationWriter. Store errors are returned unchanged.
+func NotifyParent(ctx context.Context, req *NotifyParentRequest) error {
+	if err := validateNotifyParentRequest(req); err != nil {
+		return err
+	}
+	if ctx == nil {
+		return ErrNotificationUnavailable
+	}
+	notify, ok := ctx.Value(notifyParentContextKey{}).(notifyParentCallback)
+	if !ok || notify == nil {
+		return ErrNotificationUnavailable
+	}
+	cloned := *req
+	cloned.Data = cloneBytes(req.Data)
+	return notify(ctx, &cloned)
+}
+
+func (r *taskRuntime) notifyParent(
+	ctx context.Context,
+	req *NotifyParentRequest,
+) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.poison != nil {
+		return r.poison
+	}
+	if r.notificationWriter == nil {
+		return ErrNotificationUnavailable
+	}
+	cloned := *req
+	cloned.Data = cloneBytes(req.Data)
+	return r.notificationWriter.EnqueueTaskNotification(
+		ctx,
+		r.taskID,
+		r.attempt,
+		&cloned,
+	)
+}
 
 func (r *taskRuntime) EmitProgress(
 	ctx context.Context,
@@ -809,7 +858,12 @@ func (m *Manager) execute(
 		return err
 	}
 	runtime := newTaskRuntime(
-		m.tasks, m.taskEvents, taskID, started.Attempt, started.Version,
+		m.tasks,
+		m.taskEvents,
+		taskID,
+		started.Attempt,
+		started.Version,
+		m.notificationWriter,
 	)
 	if started.CancelRequestedAt != nil {
 		runtime.cancelRequested = true
@@ -817,6 +871,11 @@ func (m *Manager) execute(
 		runtime.requestControlWithReason(ControlStop, runtime.cancelReason)
 	}
 	runCtx, cancel := context.WithCancel(ctx)
+	runCtx = context.WithValue(
+		runCtx,
+		notifyParentContextKey{},
+		notifyParentCallback(runtime.notifyParent),
+	)
 	m.attemptsMu.Lock()
 	attempt.cancel = cancel
 	attempt.runtime = runtime

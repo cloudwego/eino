@@ -62,15 +62,28 @@ const (
 	NotificationCanceled NotificationKind = "canceled"
 )
 
-// Notification is a durable session-routing pointer to one task lifecycle
-// transition. Consumers load authoritative task state by TaskID when needed.
+// Notification is one durable session-routed lifecycle or application event.
+// Lifecycle records have empty Data; consumers load authoritative task state
+// by TaskID when needed. Application Data is opaque and independently owned.
 type Notification struct {
 	ID        string
 	TaskID    string
 	SessionID string
 	Version   int64
 	Kind      NotificationKind
+	Data      []byte
 	CreatedAt time.Time
+}
+
+// NotifyParentRequest describes one application notification emitted by the
+// current durable attempt. EventID is task-local, idempotent, required, and
+// limited to 1024 bytes. Kind is required, limited to 64 bytes, and must not
+// use a lifecycle kind or the reserved "eino." prefix. Data is opaque and
+// limited to 256 KiB. Bounds are measured in bytes.
+type NotifyParentRequest struct {
+	EventID string
+	Kind    NotificationKind
+	Data    []byte
 }
 
 // CreateTaskRequest creates a task from immutable serialized intent and the

@@ -26,7 +26,6 @@ import (
 	"github.com/cloudwego/eino/adk/backgroundtask"
 	"github.com/cloudwego/eino/adk/internal/foreground"
 	componenttool "github.com/cloudwego/eino/components/tool"
-	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -293,27 +292,22 @@ func (t *managedTool) submit(
 			return nil, nil, errors.New("backgroundtask/tool: output materializer returned an empty path")
 		}
 	}
-	payload, err := json.Marshal(&taskPayload{
-		Version: payloadVersion, ToolName: t.registration.Info.Name,
-		ToolCallID: compose.GetToolCallID(ctx), Arguments: arguments,
-	})
+	spec, err := buildTaskSpec(
+		ctx,
+		t.registration,
+		t.recoverable,
+		taskID,
+		arguments,
+		"",
+		outputFile,
+		sessionID,
+		true,
+	)
 	if err != nil {
 		removeProjection()
-		return nil, nil, fmt.Errorf("backgroundtask/tool: encode payload: %w", err)
+		return nil, nil, err
 	}
-	description := t.registration.Info.Name
-	if t.registration.Description != nil {
-		description = t.registration.Description(arguments)
-	}
-	executorKey := ExecutorKey
-	if t.recoverable {
-		executorKey = RecoverableExecutorKey
-	}
-	task, err := t.manager.Submit(ctx, backgroundtask.Spec{
-		ID: taskID, ExecutorKey: executorKey, Kind: "background_tool",
-		Payload: payload, Description: description, OutputFile: outputFile,
-		SessionID: sessionID, NotifySession: true,
-	})
+	task, err := t.manager.Submit(ctx, spec)
 	if err != nil {
 		removeProjection()
 		return nil, nil, err
@@ -325,14 +319,14 @@ func (t *managedTool) prepareInput(
 	ctx context.Context,
 	arguments string,
 ) (string, error) {
-	if arguments == "" {
-		return "", errors.New("backgroundtask/tool: arguments are required")
-	}
-	if len(arguments) > maxArgumentsBytes {
-		return "", errors.New("backgroundtask/tool: arguments exceed configured bounds")
-	}
 	prepared := arguments
 	if preparer, ok := t.registration.Tool.(InputPreparer); ok {
+		if arguments == "" {
+			return "", errors.New("backgroundtask/tool: arguments are required")
+		}
+		if len(arguments) > maxArgumentsBytes {
+			return "", errors.New("backgroundtask/tool: arguments exceed configured bounds")
+		}
 		var err error
 		prepared, err = preparer.PrepareInput(ctx, arguments)
 		if err != nil {
@@ -349,8 +343,8 @@ func (t *managedTool) prepareInput(
 			)
 		}
 	}
-	if err := t.registration.Tool.ValidateArguments(prepared); err != nil {
-		return "", fmt.Errorf("backgroundtask/tool: validate arguments: %w", err)
+	if err := validateArguments(t.registration, prepared); err != nil {
+		return "", err
 	}
 	return prepared, nil
 }

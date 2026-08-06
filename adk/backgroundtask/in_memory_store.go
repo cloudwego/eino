@@ -68,33 +68,35 @@ type taskListCursor struct {
 }
 
 // InMemoryStore is a deterministic reference implementation of TaskStore,
-// TaskEventStore, and NotificationOutbox. It is a state-machine test double,
-// not a durable backend.
+// TaskEventStore, NotificationWriter, and NotificationOutbox. It is a
+// state-machine test double, not a durable backend.
 type InMemoryStore struct {
-	mu            sync.Mutex
-	tasks         map[string]*Task
-	active        map[string]memoryActiveAttempt
-	taskEvents    map[string][]TaskEvent
-	taskEventKeys map[string]map[string]TaskEvent
-	outbox        []*memoryOutboxItem
-	outboxLeaseID uint64
-	notify        chan struct{}
-	now           func() time.Time
-	activeTimeout time.Duration
-	maxValue      int64
+	mu                  sync.Mutex
+	tasks               map[string]*Task
+	active              map[string]memoryActiveAttempt
+	taskEvents          map[string][]TaskEvent
+	taskEventKeys       map[string]map[string]TaskEvent
+	customNotifications map[string]map[string]Notification
+	outbox              []*memoryOutboxItem
+	outboxLeaseID       uint64
+	notify              chan struct{}
+	now                 func() time.Time
+	activeTimeout       time.Duration
+	maxValue            int64
 }
 
 // NewInMemoryStore creates an in-memory reference task provider and outbox.
 func NewInMemoryStore(config *InMemoryStoreConfig) *InMemoryStore {
 	s := &InMemoryStore{
-		tasks:         make(map[string]*Task),
-		active:        make(map[string]memoryActiveAttempt),
-		taskEvents:    make(map[string][]TaskEvent),
-		taskEventKeys: make(map[string]map[string]TaskEvent),
-		notify:        make(chan struct{}),
-		now:           time.Now,
-		activeTimeout: 30 * time.Second,
-		maxValue:      1 << 20,
+		tasks:               make(map[string]*Task),
+		active:              make(map[string]memoryActiveAttempt),
+		taskEvents:          make(map[string][]TaskEvent),
+		taskEventKeys:       make(map[string]map[string]TaskEvent),
+		customNotifications: make(map[string]map[string]Notification),
+		notify:              make(chan struct{}),
+		now:                 time.Now,
+		activeTimeout:       30 * time.Second,
+		maxValue:            1 << 20,
 	}
 	if config != nil {
 		if config.ActiveAttemptTimeout > 0 {
@@ -384,6 +386,61 @@ func (s *InMemoryStore) AppendTaskEvent(
 	return &AppendTaskEventResult{
 		Event: cloneTaskEvent(&event), Inserted: true,
 	}, nil
+}
+
+// EnqueueTaskNotification fences by attempt before task-wide EventID replay
+// detection and atomically records replay metadata with its outbox item.
+func (s *InMemoryStore) EnqueueTaskNotification(
+	_ context.Context,
+	taskID string,
+	attempt int64,
+	req *NotifyParentRequest,
+) error {
+	if taskID == "" || attempt <= 0 {
+		return errors.New(
+			"backgroundtask: notification task id and attempt are required",
+		)
+	}
+	if err := validateNotifyParentRequest(req); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.authorizeNotificationLocked(taskID, attempt); err != nil {
+		return err
+	}
+	task := s.tasks[taskID]
+	if task.Spec.SessionID == "" {
+		return ErrNotificationUnavailable
+	}
+	keyed := s.customNotifications[taskID]
+	if existing, ok := keyed[req.EventID]; ok {
+		if existing.Kind != req.Kind || !bytes.Equal(existing.Data, req.Data) {
+			return ErrNotificationEventIDConflict
+		}
+		return nil
+	}
+	record := Notification{
+		ID:     customNotificationID(taskID, req.EventID),
+		TaskID: taskID, SessionID: task.Spec.SessionID,
+		Version: task.Version, Kind: req.Kind,
+		Data: cloneBytes(req.Data), CreatedAt: s.now(),
+	}
+	if keyed == nil {
+		keyed = make(map[string]Notification)
+		s.customNotifications[taskID] = keyed
+	}
+	keyed[req.EventID] = *cloneNotification(&record)
+	s.outbox = append(s.outbox, &memoryOutboxItem{
+		record: cloneNotification(&record),
+	})
+	return nil
+}
+
+func customNotificationID(taskID string, eventID string) string {
+	return "eino.custom:" +
+		base64.RawURLEncoding.EncodeToString([]byte(taskID)) + ":" +
+		base64.RawURLEncoding.EncodeToString([]byte(eventID))
 }
 
 // ListTaskEvents returns one snapshot-stable append-order page.
@@ -889,6 +946,22 @@ func (s *InMemoryStore) authorizeOutputLocked(taskID string, attempt int64) erro
 	return nil
 }
 
+func (s *InMemoryStore) authorizeNotificationLocked(
+	taskID string,
+	attempt int64,
+) error {
+	t, ok := s.tasks[taskID]
+	if !ok {
+		return ErrNotFound
+	}
+	active, activeOK := s.active[taskID]
+	if t.Status != StatusRunning || t.CancelRequestedAt != nil ||
+		t.Attempt != attempt || !activeOK || !s.now().Before(active.expiresAt) {
+		return ErrLeaseLost
+	}
+	return nil
+}
+
 func (s *InMemoryStore) advanceLocked(t *Task) {
 	t.Version++
 	t.UpdatedAt = s.now()
@@ -975,6 +1048,8 @@ func (s *InMemoryStore) finishStoreOwnedLocked(t *Task) {
 }
 
 var (
-	_ TaskStore      = (*InMemoryStore)(nil)
-	_ TaskEventStore = (*InMemoryStore)(nil)
+	_ TaskStore          = (*InMemoryStore)(nil)
+	_ TaskEventStore     = (*InMemoryStore)(nil)
+	_ NotificationWriter = (*InMemoryStore)(nil)
+	_ NotificationOutbox = (*InMemoryStore)(nil)
 )

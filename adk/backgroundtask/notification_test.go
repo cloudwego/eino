@@ -114,3 +114,27 @@ func TestInMemoryStoreAckRequiresCurrentUnexpiredLease_BitsUT(t *testing.T) {
 	require.Error(t, store.Ack(context.Background(), firstReceipt))
 	require.NoError(t, store.Ack(context.Background(), secondReceipt))
 }
+
+func TestExpiredNotificationWriteDoesNotResolveTaskLease_BitsUT(t *testing.T) {
+	clock := &testClock{now: time.Unix(600, 0)}
+	store := newInMemoryStoreWithClock(&InMemoryStoreConfig{
+		ActiveAttemptTimeout: time.Second,
+	}, clock.Now)
+	started := createAndStart(t, store, "expired-notification")
+	clock.Advance(time.Second)
+
+	err := store.EnqueueTaskNotification(
+		context.Background(),
+		started.Spec.ID,
+		started.Attempt,
+		&NotifyParentRequest{EventID: "event", Kind: "application.progress"},
+	)
+	require.ErrorIs(t, err, ErrLeaseLost)
+
+	store.mu.Lock()
+	stored := cloneTask(store.tasks[started.Spec.ID])
+	active := store.active[started.Spec.ID]
+	store.mu.Unlock()
+	require.Equal(t, started, stored)
+	require.Equal(t, clock.Now(), active.expiresAt)
+}
