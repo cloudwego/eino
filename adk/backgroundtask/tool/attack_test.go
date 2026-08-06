@@ -185,6 +185,49 @@ func TestAttack_RecoverableUpdateRequiresEventID(t *testing.T) {
 	t.Log("recoverable output without a stable replay identity was rejected")
 }
 
+func TestAttack_RecoveryMetadataPersistenceFailureStopsRun(t *testing.T) {
+	stopped := false
+	implementation := &fakeTool{
+		start: func(context.Context, *StartRequest) (Run, error) {
+			return &metadataRun{
+				metadata: []byte(`{"run_id":"business-run"}`),
+				fakeRun: &fakeRun{
+					wait: func(context.Context) (*Outcome, error) {
+						return nil, errors.New("wait must not start")
+					},
+					stop: func(context.Context) error {
+						stopped = true
+						return nil
+					},
+				},
+			}, nil
+		},
+		recover: func(context.Context, *RecoverRequest) (Run, error) {
+			return nil, errors.New("recover must not run")
+		},
+	}
+	registry := NewRegistry()
+	require.NoError(t, registry.Register(&Registration{
+		Info: toolInfo("attack"), Tool: implementation,
+	}))
+	result, err := (&executor{registry: registry, recoverable: true}).Execute(
+		context.Background(),
+		&backgroundtask.Task{
+			Spec: backgroundtask.Spec{
+				ID: "attack-task", ExecutorKey: RecoverableExecutorKey,
+				Kind:    "background_tool",
+				Payload: encodedPayload(t, "attack", `{"value":"metadata"}`),
+			},
+			Status: backgroundtask.StatusRunning, Attempt: 1,
+		},
+		&replayRuntimeStub{},
+	)
+	require.Nil(t, result)
+	require.ErrorContains(t, err, "cannot persist recovery metadata")
+	require.True(t, stopped)
+	t.Log("an uncheckpointed external run was stopped before the attempt failed")
+}
+
 func TestAttack_PersistedReplayRepairsMissingMaterialization(t *testing.T) {
 	materializer := &materializerStub{}
 	runtime := &replayRuntimeStub{result: backgroundtask.ProgressEmission{
@@ -282,9 +325,9 @@ func TestAttack_AbandonedUpdateStreamFailsBoundedly(t *testing.T) {
 }
 
 func TestAttack_ReadInputRequestRejectsForeignTaskAndOwnsData(t *testing.T) {
-	checkpoint, err := encodeInputCheckpoint(&InputRequest{
+	checkpoint, err := encodeManagedCheckpoint(&InputRequest{
 		ID: "approval", Data: []byte(`{"question":"approve?"}`),
-	})
+	}, nil)
 	require.NoError(t, err)
 	task := &backgroundtask.Task{
 		Spec: backgroundtask.Spec{

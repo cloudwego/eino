@@ -81,11 +81,12 @@ var (
 // the first-write optional CancelReason, and advances Version. Once
 // cancellation is requested, Heartbeat, Complete, Fail,
 // WaitInput, Suspend, and Yield must reject the attempt; only AckCancel may
-// terminally acknowledge it. Yield changes running to pending, stores its
-// optional checkpoint atomically, preserves PendingResume for idempotent
-// replay, and emits no lifecycle notification. Retry-capable lease expiry also
-// preserves PendingResume. A later WaitInput, Suspend, or terminal transition
-// consumes it. On
+// terminally acknowledge it. SaveCheckpoint replaces opaque executor recovery
+// state while retaining StatusRunning and advances Version. Yield changes
+// running to pending, stores its optional checkpoint atomically, preserves
+// PendingResume for idempotent replay, and emits no lifecycle notification.
+// Retry-capable lease expiry also preserves PendingResume. A later WaitInput,
+// Suspend, or terminal transition consumes it. On
 // retry-capable work, cancel intent that outlives an attempt remains pending so
 // a recovery attempt can stop the external operation before acknowledging
 // cancellation. Non-recoverable lease expiry resolves cancellation directly.
@@ -96,6 +97,7 @@ type TaskStore interface {
 	ListSuspended(context.Context, *ListSuspendedRequest) (*ListSuspendedResult, error)
 	Start(context.Context, *StartTaskRequest) (*Task, error)
 	Heartbeat(context.Context, *HeartbeatRequest) (*Task, error)
+	SaveCheckpoint(context.Context, *SaveCheckpointRequest) (*Task, error)
 	ReportTranscriptFailure(context.Context, *ReportTranscriptFailureRequest) (*Task, error)
 	Complete(context.Context, *CompleteTaskRequest) (*Task, error)
 	Fail(context.Context, *FailTaskRequest) (*Task, error)

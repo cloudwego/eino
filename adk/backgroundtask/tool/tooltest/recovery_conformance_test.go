@@ -27,9 +27,10 @@ import (
 )
 
 type conformanceToolStub struct {
-	validateErr error
-	start       func() (backgroundtool.Run, error)
-	recover     func() (backgroundtool.Run, error)
+	validateErr        error
+	start              func() (backgroundtool.Run, error)
+	recover            func() (backgroundtool.Run, error)
+	recoverWithRequest func(*backgroundtool.RecoverRequest) (backgroundtool.Run, error)
 }
 
 func (t *conformanceToolStub) ValidateArguments(string) error { return t.validateErr }
@@ -40,9 +41,12 @@ func (t *conformanceToolStub) Start(
 	return t.start()
 }
 func (t *conformanceToolStub) Recover(
-	context.Context,
-	*backgroundtool.RecoverRequest,
+	_ context.Context,
+	request *backgroundtool.RecoverRequest,
 ) (backgroundtool.Run, error) {
+	if t.recoverWithRequest != nil {
+		return t.recoverWithRequest(request)
+	}
 	return t.recover()
 }
 
@@ -54,6 +58,17 @@ func (*conformanceRunStub) Wait(context.Context) (*backgroundtool.Outcome, error
 	return nil, nil
 }
 func (r *conformanceRunStub) Stop(context.Context) error { return r.stopErr }
+
+type conformanceMetadataRun struct {
+	*conformanceRunStub
+	metadata []byte
+}
+
+func (r *conformanceMetadataRun) RecoveryMetadata(
+	context.Context,
+) ([]byte, error) {
+	return r.metadata, nil
+}
 
 func conformanceConfig(
 	tools []backgroundtool.RecoverableBackgroundTool,
@@ -131,6 +146,40 @@ func TestCheckRecoveryConformance(t *testing.T) {
 	} {
 		require.Error(t, CheckRecoveryConformance(context.Background(), config))
 	}
+}
+
+func TestCheckRecoveryConformancePassesStableMetadata(t *testing.T) {
+	metadata := []byte(`{"run_id":"business-run"}`)
+	newStartingTool := func() backgroundtool.RecoverableBackgroundTool {
+		return &conformanceToolStub{
+			start: func() (backgroundtool.Run, error) {
+				return &conformanceMetadataRun{
+					conformanceRunStub: &conformanceRunStub{},
+					metadata:           append([]byte(nil), metadata...),
+				}, nil
+			},
+		}
+	}
+	recovering := &conformanceToolStub{
+		recoverWithRequest: func(
+			request *backgroundtool.RecoverRequest,
+		) (backgroundtool.Run, error) {
+			require.Equal(t, metadata, request.RecoveryMetadata)
+			return &conformanceRunStub{}, nil
+		},
+	}
+	require.NoError(t, CheckRecoveryConformance(
+		context.Background(),
+		conformanceConfig(
+			[]backgroundtool.RecoverableBackgroundTool{
+				newStartingTool(),
+				newStartingTool(),
+				recovering,
+			},
+			stableSnapshots(),
+			-1,
+		),
+	))
 }
 
 func TestCheckRecoveryConformanceFailures(t *testing.T) {

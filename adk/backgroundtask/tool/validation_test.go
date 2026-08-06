@@ -61,9 +61,13 @@ func encodedPayload(t *testing.T, name, arguments string) []byte {
 	return data
 }
 
-func TestRecoverRequestHasNoCheckpoint_BitsUT(t *testing.T) {
+func TestRecoverRequestExposesOnlyRecoveryMetadata_BitsUT(t *testing.T) {
 	_, exists := reflect.TypeOf(RecoverRequest{}).FieldByName("Checkpoint")
 	require.False(t, exists)
+	_, exists = reflect.TypeOf(RecoverRequest{}).FieldByName("RecoveryMetadata")
+	require.True(t, exists)
+	_, exists = reflect.TypeOf(ResumeRequest{}).FieldByName("RecoveryMetadata")
+	require.True(t, exists)
 }
 
 func TestExecutorValidationBoundaries(t *testing.T) {
@@ -150,7 +154,7 @@ func TestPayloadAndResultValidationBoundaries(t *testing.T) {
 
 	valid, err := validateOutcome(&Outcome{
 		Status: backgroundtask.StatusCompleted, Data: []byte("done"),
-	}, false)
+	}, false, nil)
 	require.NoError(t, err)
 	require.Equal(t, backgroundtask.StatusCompleted, valid.Status)
 	waiting, err := validateOutcome(&Outcome{
@@ -158,14 +162,26 @@ func TestPayloadAndResultValidationBoundaries(t *testing.T) {
 		InputRequest: &InputRequest{
 			ID: "approval", Data: []byte(`{"question":"approve?"}`),
 		},
-	}, true)
+	}, true, nil)
 	require.NoError(t, err)
 	require.NotEmpty(t, waiting.Checkpoint)
+	recoveryMetadata := []byte("business-run")
+	checkpoint, err := encodeManagedCheckpoint(nil, recoveryMetadata)
+	require.NoError(t, err)
+	recoveryMetadata[0] = 'X'
+	request, decodedMetadata, started, err := decodeManagedCheckpoint(checkpoint)
+	require.NoError(t, err)
+	require.Nil(t, request)
+	require.True(t, started)
+	require.Equal(t, "business-run", string(decodedMetadata))
+	decodedMetadata[0] = 'Y'
+	_, decodedAgain, _, err := decodeManagedCheckpoint(checkpoint)
+	require.NoError(t, err)
+	require.Equal(t, "business-run", string(decodedAgain))
 	for _, testCase := range []struct {
 		name    string
 		request *InputRequest
 	}{
-		{name: "missing request"},
 		{
 			name: "oversized id",
 			request: &InputRequest{
@@ -190,10 +206,15 @@ func TestPayloadAndResultValidationBoundaries(t *testing.T) {
 		},
 	} {
 		t.Run("input checkpoint "+testCase.name, func(t *testing.T) {
-			_, encodeErr := encodeInputCheckpoint(testCase.request)
+			_, encodeErr := encodeManagedCheckpoint(testCase.request, nil)
 			require.Error(t, encodeErr)
 		})
 	}
+	_, err = encodeManagedCheckpoint(
+		nil,
+		make([]byte, maxRecoveryMetadataBytes+1),
+	)
+	require.ErrorContains(t, err, "recovery metadata exceeds")
 	for _, testCase := range []struct {
 		outcome        *Outcome
 		supportsResume bool
@@ -221,7 +242,7 @@ func TestPayloadAndResultValidationBoundaries(t *testing.T) {
 			InputRequest: &InputRequest{ID: "approval"},
 		}, supportsResume: true},
 	} {
-		_, err = validateOutcome(testCase.outcome, testCase.supportsResume)
+		_, err = validateOutcome(testCase.outcome, testCase.supportsResume, nil)
 		require.Error(t, err)
 	}
 }

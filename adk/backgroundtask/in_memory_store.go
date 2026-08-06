@@ -341,6 +341,36 @@ func (s *InMemoryStore) Heartbeat(_ context.Context, req *HeartbeatRequest) (*Ta
 	return cloneTask(t), nil
 }
 
+// SaveCheckpoint persists recovery state for the current running attempt.
+func (s *InMemoryStore) SaveCheckpoint(
+	_ context.Context,
+	req *SaveCheckpointRequest,
+) (*Task, error) {
+	if req == nil {
+		return nil, errors.New("backgroundtask: save checkpoint request is required")
+	}
+	if len(req.Checkpoint) == 0 {
+		return nil, errors.New("backgroundtask: checkpoint data is required")
+	}
+	if int64(len(req.Checkpoint)) > s.maxValue {
+		return nil, errors.New("backgroundtask: checkpoint exceeds configured limit")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	t, err := s.activeUncanceledTaskLocked(
+		req.TaskID,
+		req.ExpectedVersion,
+		StatusRunning,
+	)
+	if err != nil {
+		return nil, err
+	}
+	t.Checkpoint = cloneBytes(req.Checkpoint)
+	s.advanceLocked(t)
+	s.signalLocked()
+	return cloneTask(t), nil
+}
+
 // AppendTaskEvent fences by attempt before task-wide EventID deduplication.
 func (s *InMemoryStore) AppendTaskEvent(
 	_ context.Context,

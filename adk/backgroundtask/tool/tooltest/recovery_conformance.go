@@ -72,6 +72,10 @@ func CheckRecoveryConformance(
 	if firstRun == nil {
 		return errors.New("backgroundtask/tool/tooltest: first start returned nil run")
 	}
+	recoveryMetadata, err := readRecoveryMetadata(ctx, firstRun)
+	if err != nil {
+		return fmt.Errorf("backgroundtask/tool/tooltest: first start: %w", err)
+	}
 	before, err := config.Snapshot(ctx, config.TaskID)
 	if err != nil {
 		return fmt.Errorf("backgroundtask/tool/tooltest: snapshot after first start: %w", err)
@@ -85,6 +89,15 @@ func CheckRecoveryConformance(
 	if duplicateRun == nil {
 		return errors.New("backgroundtask/tool/tooltest: duplicate start returned nil run")
 	}
+	duplicateMetadata, err := readRecoveryMetadata(ctx, duplicateRun)
+	if err != nil {
+		return fmt.Errorf("backgroundtask/tool/tooltest: duplicate start: %w", err)
+	}
+	if !bytes.Equal(recoveryMetadata, duplicateMetadata) {
+		return errors.New(
+			"backgroundtask/tool/tooltest: duplicate start changed recovery metadata",
+		)
+	}
 	afterDuplicate, err := config.Snapshot(ctx, config.TaskID)
 	if err != nil {
 		return fmt.Errorf("backgroundtask/tool/tooltest: snapshot after duplicate start: %w", err)
@@ -94,6 +107,7 @@ func CheckRecoveryConformance(
 	}
 	recoveredRun, err := third.Recover(ctx, &backgroundtool.RecoverRequest{
 		TaskID: config.TaskID, Arguments: config.Arguments, Attempt: 2,
+		RecoveryMetadata: append([]byte(nil), recoveryMetadata...),
 	})
 	if err != nil {
 		return fmt.Errorf("backgroundtask/tool/tooltest: recover: %w", err)
@@ -112,6 +126,21 @@ func CheckRecoveryConformance(
 		return fmt.Errorf("backgroundtask/tool/tooltest: stop recovered operation: %w", err)
 	}
 	return nil
+}
+
+func readRecoveryMetadata(ctx context.Context, run backgroundtool.Run) ([]byte, error) {
+	source, ok := run.(backgroundtool.RecoveryMetadataSource)
+	if !ok {
+		return nil, nil
+	}
+	metadata, err := source.RecoveryMetadata(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if len(metadata) == 0 {
+		return nil, errors.New("recovery metadata source returned empty metadata")
+	}
+	return append([]byte(nil), metadata...), nil
 }
 
 func compareRecoverySnapshots(expected, actual *RecoverySnapshot) error {

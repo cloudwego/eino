@@ -107,6 +107,14 @@ type ExecutionRuntime interface {
 	ReportTranscriptFailure(context.Context, error) error
 }
 
+// CheckpointRuntime is an optional execution capability for persisting opaque
+// executor recovery state while a task remains running. Manager-provided
+// runtimes implement it; keeping it separate preserves ExecutionRuntime source
+// compatibility for custom executors and test doubles.
+type CheckpointRuntime interface {
+	SaveCheckpoint(context.Context, []byte) error
+}
+
 // Executor reconstructs and runs durable work from a task Spec.
 type Executor interface {
 	// Key is a stable persisted routing key.
@@ -365,6 +373,23 @@ func (r *taskRuntime) ReportTranscriptFailure(ctx context.Context, cause error) 
 	}
 	task, err := r.tasks.ReportTranscriptFailure(ctx, &ReportTranscriptFailureRequest{
 		TaskID: r.taskID, ExpectedVersion: r.version, Error: boundedError(cause),
+	})
+	if err != nil {
+		return err
+	}
+	r.version = task.Version
+	return nil
+}
+
+func (r *taskRuntime) SaveCheckpoint(ctx context.Context, checkpoint []byte) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.poison != nil {
+		return r.poison
+	}
+	task, err := r.tasks.SaveCheckpoint(ctx, &SaveCheckpointRequest{
+		TaskID: r.taskID, ExpectedVersion: r.version,
+		Checkpoint: cloneBytes(checkpoint),
 	})
 	if err != nil {
 		return err
@@ -995,3 +1020,8 @@ func boundedError(err error) string {
 	}
 	return message[:max]
 }
+
+var (
+	_ ExecutionRuntime  = (*taskRuntime)(nil)
+	_ CheckpointRuntime = (*taskRuntime)(nil)
+)

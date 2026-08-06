@@ -147,6 +147,14 @@ type ReportTranscriptFailureRequest struct {
 	Error           string
 }
 
+// SaveCheckpointRequest persists executor-owned recovery state without
+// changing the running task's lifecycle status.
+type SaveCheckpointRequest struct {
+	TaskID          string
+	ExpectedVersion int64
+	Checkpoint      []byte
+}
+
 // CompleteTaskRequest records successful task completion.
 type CompleteTaskRequest struct {
 	TaskID          string

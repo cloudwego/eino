@@ -116,6 +116,45 @@ func RunTaskStoreConformance(t *testing.T, config TaskStoreConfig) {
 		)
 	})
 
+	t.Run("running_checkpoint_is_owned_and_retained", func(t *testing.T) {
+		store := config.New(t)
+		started := createAndStart(
+			t,
+			store,
+			"running-checkpoint",
+			backgroundtask.LeaseExpiryRetry,
+		)
+		checkpoint := []byte("recovery")
+		saved, err := store.SaveCheckpoint(
+			context.Background(),
+			&backgroundtask.SaveCheckpointRequest{
+				TaskID: started.Spec.ID, ExpectedVersion: started.Version,
+				Checkpoint: checkpoint,
+			},
+		)
+		require.NoError(t, err)
+		checkpoint[0] = 'X'
+		require.Equal(t, backgroundtask.StatusRunning, saved.Status)
+		require.Equal(t, started.Version+1, saved.Version)
+		require.Equal(t, "recovery", string(saved.Checkpoint))
+		_, err = store.SaveCheckpoint(
+			context.Background(),
+			&backgroundtask.SaveCheckpointRequest{
+				TaskID: saved.Spec.ID, ExpectedVersion: started.Version,
+				Checkpoint: []byte("stale"),
+			},
+		)
+		require.ErrorIs(t, err, backgroundtask.ErrVersionConflict)
+		yielded, err := store.Yield(
+			context.Background(),
+			&backgroundtask.YieldTaskRequest{
+				TaskID: saved.Spec.ID, ExpectedVersion: saved.Version,
+			},
+		)
+		require.NoError(t, err)
+		require.Equal(t, "recovery", string(yielded.Checkpoint))
+	})
+
 	t.Run("waiting_resume_suspend_release_and_yield", func(t *testing.T) {
 		store := config.New(t)
 		started := createAndStart(t, store, "waiting", backgroundtask.LeaseExpiryRetry)

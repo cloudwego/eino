@@ -73,7 +73,9 @@ type InputPreparer interface {
 
 // RecoverableBackgroundTool reconstructs the same logical operation after a
 // Worker loss or graceful yield. Implementations must make Start idempotent by
-// TaskID and keep recovery state durable for the task lifetime.
+// TaskID because Worker loss may occur after the external start but before Eino
+// checkpoints the started marker. Run may implement RecoveryMetadataSource
+// when Recover or Resume needs an opaque backend identity.
 type RecoverableBackgroundTool interface {
 	BackgroundTool
 	Recover(context.Context, *RecoverRequest) (Run, error)
@@ -106,6 +108,9 @@ type RecoverRequest struct {
 	TaskID    string
 	Arguments string
 	Attempt   int64
+	// RecoveryMetadata is an independently owned copy returned by the initial
+	// Run's RecoveryMetadataSource. It is nil when that capability was absent.
+	RecoveryMetadata []byte
 }
 
 // ResumeRequest applies durable external input to a waiting logical operation.
@@ -117,6 +122,8 @@ type ResumeRequest struct {
 	Attempt   int64
 	RequestID string
 	Data      []byte
+	// RecoveryMetadata has the same ownership and origin as on RecoverRequest.
+	RecoveryMetadata []byte
 }
 
 // Run is an attempt-local handle for one logical external operation. Canceling
@@ -133,6 +140,15 @@ type Run interface {
 // the beginning of the replayable history; EventID deduplication removes repeats.
 type UpdateSource interface {
 	Updates() *schema.StreamReader[*Update]
+}
+
+// RecoveryMetadataSource optionally exposes opaque recovery metadata from the
+// Run returned by the initial Start call. Eino copies and checkpoints the bytes
+// before observing the Run, then supplies them to later Recover and Resume
+// calls. Implementations must return stable bytes when Start is retried with
+// the same TaskID.
+type RecoveryMetadataSource interface {
+	RecoveryMetadata(context.Context) ([]byte, error)
 }
 
 // InputRequest describes the current durable question from a managed tool.
