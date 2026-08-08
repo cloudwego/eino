@@ -296,12 +296,10 @@ func (t *managedTool) submit(
 		ctx,
 		t.registration,
 		t.recoverable,
-		taskID,
-		arguments,
-		"",
-		outputFile,
-		sessionID,
-		true,
+		&taskSpecInput{
+			taskID: taskID, arguments: arguments, outputFile: outputFile,
+			sessionID: sessionID, notifySession: true,
+		},
 	)
 	if err != nil {
 		removeProjection()

@@ -384,17 +384,16 @@ func TestAttack_PersistedReplayRepairsMissingMaterialization(t *testing.T) {
 	runtime := &replayRuntimeStub{result: backgroundtask.ProgressEmission{
 		EventID: "persisted", FirstEmission: false,
 	}}
-	enabled := true
 	err := (&executor{recoverable: true}).persistUpdate(
 		context.Background(),
-		&backgroundtask.Task{Spec: backgroundtask.Spec{
-			ID: "attack-task", OutputFile: "/outputs/attack-task",
-		}},
-		runtime,
-		&Registration{Materializer: materializer},
-		nil,
+		&updatePersistence{
+			task: &backgroundtask.Task{Spec: backgroundtask.Spec{
+				ID: "attack-task", OutputFile: "/outputs/attack-task",
+			}},
+			runtime: runtime, registration: &Registration{Materializer: materializer},
+			materializerEnabled: true,
+		},
 		&Update{EventID: "persisted", Data: []byte("repair")},
-		&enabled,
 	)
 	require.NoError(t, err)
 	materializer.mu.Lock()

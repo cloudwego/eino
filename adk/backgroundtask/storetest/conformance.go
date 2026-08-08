@@ -270,7 +270,8 @@ func RunTaskStoreConformance(t *testing.T, config TaskStoreConfig) {
 	}
 }
 
-// append ordering, cursor validation, and snapshot-stable pagination.
+// RunTaskEventStoreConformance validates append ordering, cursor validation,
+// and snapshot-stable pagination.
 func RunTaskEventStoreConformance(t *testing.T, config TaskEventStoreConfig) {
 	t.Helper()
 	require.NotNil(t, config.New)

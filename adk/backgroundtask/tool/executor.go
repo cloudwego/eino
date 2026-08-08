@@ -137,7 +137,7 @@ func (e *executor) ValidateExecution(ctx context.Context, task *backgroundtask.T
 	return nil
 }
 
-func (e *executor) Execute(
+func (e *executor) Execute( //nolint:cyclop,funlen // execution coordinates the managed-tool state machine
 	ctx context.Context,
 	task *backgroundtask.Task,
 	runtime backgroundtask.ExecutionRuntime,
@@ -284,8 +284,11 @@ func (e *executor) Execute(
 		defer close(stopUpdates)
 		go receiveUpdates(updates, results, stopUpdates)
 	}
-	materializerEnabled := registration.Materializer != nil &&
-		task.Spec.OutputFile != "" && task.OutputFileErr == ""
+	persistence := &updatePersistence{
+		task: task, runtime: runtime, registration: registration, projection: projection,
+		materializerEnabled: registration.Materializer != nil &&
+			task.Spec.OutputFile != "" && task.OutputFileErr == "",
+	}
 	for {
 		select {
 		case result := <-waitResult:
@@ -294,8 +297,7 @@ func (e *executor) Execute(
 			}
 			if updateResults != nil {
 				if err = e.drainTerminalUpdates(
-					ctx, task, runtime, registration, projection,
-					updateResults, &materializerEnabled,
+					ctx, persistence, updateResults,
 				); err != nil {
 					return nil, err
 				}
@@ -319,8 +321,7 @@ func (e *executor) Execute(
 				return nil, received.err
 			}
 			if err = e.persistUpdate(
-				ctx, task, runtime, registration, projection,
-				received.update, &materializerEnabled,
+				ctx, persistence, received.update,
 			); err != nil {
 				return nil, err
 			}
@@ -370,12 +371,8 @@ func (e *executor) Execute(
 
 func (e *executor) drainTerminalUpdates(
 	ctx context.Context,
-	task *backgroundtask.Task,
-	runtime backgroundtask.ExecutionRuntime,
-	registration *Registration,
-	projection *liveProjection,
+	persistence *updatePersistence,
 	results <-chan updateResult,
-	materializerEnabled *bool,
 ) error {
 	timer := time.NewTimer(terminalUpdateDrainTime)
 	defer timer.Stop()
@@ -389,8 +386,7 @@ func (e *executor) drainTerminalUpdates(
 				return received.err
 			}
 			if err := e.persistUpdate(
-				ctx, task, runtime, registration, projection,
-				received.update, materializerEnabled,
+				ctx, persistence, received.update,
 			); err != nil {
 				return err
 			}
@@ -405,6 +401,14 @@ func (e *executor) drainTerminalUpdates(
 type updateResult struct {
 	update *Update
 	err    error
+}
+
+type updatePersistence struct {
+	task                *backgroundtask.Task
+	runtime             backgroundtask.ExecutionRuntime
+	registration        *Registration
+	projection          *liveProjection
+	materializerEnabled bool
 }
 
 func receiveUpdates(
@@ -435,12 +439,8 @@ func stopRunAfterStartCommitFailure(run Run, cause error) error {
 
 func (e *executor) persistUpdate(
 	ctx context.Context,
-	task *backgroundtask.Task,
-	runtime backgroundtask.ExecutionRuntime,
-	registration *Registration,
-	projection *liveProjection,
+	persistence *updatePersistence,
 	update *Update,
-	materializerEnabled *bool,
 ) error {
 	if update == nil {
 		return errors.New("backgroundtask/tool: update must not be nil")
@@ -456,26 +456,26 @@ func (e *executor) persistUpdate(
 	if err != nil {
 		return fmt.Errorf("backgroundtask/tool: encode update: %w", err)
 	}
-	result, err := runtime.EmitProgress(ctx, update.EventID, data)
+	result, err := persistence.runtime.EmitProgress(ctx, update.EventID, data)
 	if err != nil {
 		return fmt.Errorf("backgroundtask/tool: persist update: %w", err)
 	}
-	if *materializerEnabled && callerSuppliedEventID {
-		err = registration.Materializer.AppendOutput(ctx, &MaterializeOutputRequest{
-			TaskID: task.Spec.ID, EventID: result.EventID,
-			Path: task.Spec.OutputFile, Data: append([]byte(nil), update.Data...),
+	if persistence.materializerEnabled && callerSuppliedEventID {
+		err = persistence.registration.Materializer.AppendOutput(ctx, &MaterializeOutputRequest{
+			TaskID: persistence.task.Spec.ID, EventID: result.EventID,
+			Path: persistence.task.Spec.OutputFile, Data: append([]byte(nil), update.Data...),
 		})
 		if err != nil {
-			*materializerEnabled = false
-			if reportErr := runtime.ReportTranscriptFailure(ctx, err); reportErr != nil {
+			persistence.materializerEnabled = false
+			if reportErr := persistence.runtime.ReportTranscriptFailure(ctx, err); reportErr != nil {
 				return fmt.Errorf("backgroundtask/tool: report transcript materialization failure: %w", reportErr)
 			}
 		}
 	}
-	if result.FirstEmission && projection != nil {
+	if result.FirstEmission && persistence.projection != nil {
 		projected := cloneUpdate(update)
 		projected.EventID = result.EventID
-		projection.send(ctx, foreground.ProjectionDetached(ctx), projected)
+		persistence.projection.send(ctx, foreground.ProjectionDetached(ctx), projected)
 	}
 	return nil
 }

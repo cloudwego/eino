@@ -895,7 +895,7 @@ func (s *InMemoryStore) Receive(_ context.Context, req *ReceiveNotificationsRequ
 			continue
 		}
 		s.outboxLeaseID++
-		item.receipt = NotificationReceipt(fmt.Appendf(nil, "lease:%d", s.outboxLeaseID))
+		item.receipt = NotificationReceipt([]byte(fmt.Sprintf("lease:%d", s.outboxLeaseID)))
 		item.leaseExpiresAt = now.Add(req.LeaseDuration)
 		result.Deliveries = append(result.Deliveries, NotificationDelivery{
 			Record: *cloneNotification(item.record), Receipt: append(NotificationReceipt(nil), item.receipt...),

@@ -100,12 +100,11 @@ func Submit(
 		ctx,
 		registration,
 		recoverable,
-		taskID,
-		req.Arguments,
-		req.Description,
-		outputFile,
-		req.SessionID,
-		!req.DisableLifecycleNotifications,
+		&taskSpecInput{
+			taskID: taskID, arguments: req.Arguments, description: req.Description,
+			outputFile: outputFile, sessionID: req.SessionID,
+			notifySession: !req.DisableLifecycleNotifications,
+		},
 	)
 	if err != nil {
 		return nil, err
@@ -126,20 +125,24 @@ func validateArguments(registration *Registration, arguments string) error {
 	return nil
 }
 
+type taskSpecInput struct {
+	taskID        string
+	arguments     string
+	description   string
+	outputFile    string
+	sessionID     string
+	notifySession bool
+}
+
 func buildTaskSpec(
 	ctx context.Context,
 	registration *Registration,
 	recoverable bool,
-	taskID string,
-	arguments string,
-	description string,
-	outputFile string,
-	sessionID string,
-	notifySession bool,
+	input *taskSpecInput,
 ) (backgroundtask.Spec, error) {
 	payload, err := json.Marshal(&taskPayload{
 		Version: payloadVersion, ToolName: registration.Info.Name,
-		ToolCallID: compose.GetToolCallID(ctx), Arguments: arguments,
+		ToolCallID: compose.GetToolCallID(ctx), Arguments: input.arguments,
 	})
 	if err != nil {
 		return backgroundtask.Spec{}, fmt.Errorf(
@@ -147,10 +150,11 @@ func buildTaskSpec(
 			err,
 		)
 	}
+	description := input.description
 	if description == "" {
 		description = registration.Info.Name
 		if registration.Description != nil {
-			description = registration.Description(arguments)
+			description = registration.Description(input.arguments)
 		}
 	}
 	executorKey := ExecutorKey
@@ -158,8 +162,8 @@ func buildTaskSpec(
 		executorKey = RecoverableExecutorKey
 	}
 	return backgroundtask.Spec{
-		ID: taskID, ExecutorKey: executorKey, Kind: "background_tool",
-		Payload: payload, Description: description, OutputFile: outputFile,
-		SessionID: sessionID, NotifySession: notifySession,
+		ID: input.taskID, ExecutorKey: executorKey, Kind: "background_tool",
+		Payload: payload, Description: description, OutputFile: input.outputFile,
+		SessionID: input.sessionID, NotifySession: input.notifySession,
 	}, nil
 }

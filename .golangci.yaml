@@ -76,6 +76,9 @@ linters:
       # Run `go tool vet help` to see all analyzers.
       disable:
         - fieldalignment
+        # The inline analyzer recommends reflect.Pointer, which is unavailable
+        # under the repository's supported Go 1.18 toolchain.
+        - inline
     revive:
       # Sets the default failure confidence.
       # This means that linting errors with less than 0.8 confidence will be ignored.

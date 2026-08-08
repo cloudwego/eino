@@ -176,65 +176,73 @@ type TypedConfig[M adk.MessageType] struct {
 // Config defines the configuration for creating a standard DeepAgent.
 type Config = TypedConfig[*schema.Message]
 
+func validateTypedConfig[M adk.MessageType](cfg *TypedConfig[M]) error {
+	if cfg == nil {
+		return fmt.Errorf("deep: config is required")
+	}
+	if cfg.Background == nil {
+		return nil
+	}
+	if cfg.Background.Manager == nil {
+		return fmt.Errorf("deep: background Manager is required")
+	}
+	if cfg.Background.Executors == nil {
+		return fmt.Errorf("deep: background executor registry is required")
+	}
+	if cfg.Background.SubAgents == nil &&
+		cfg.Background.RecoverableShell == nil &&
+		cfg.Background.LocalShell == nil {
+		return fmt.Errorf("deep: at least one background capability is required")
+	}
+	if cfg.Background.SubAgents != nil &&
+		cfg.Background.SubAgents.Executor == nil {
+		return fmt.Errorf("deep: background SubAgents Executor is required")
+	}
+	if cfg.Background.RecoverableShell != nil &&
+		cfg.Background.RecoverableShell.Shell == nil {
+		return fmt.Errorf("deep: background RecoverableShell Shell is required")
+	}
+	if cfg.Background.LocalShell != nil &&
+		cfg.Background.LocalShell.Shell == nil &&
+		cfg.Background.LocalShell.StreamingShell == nil {
+		return fmt.Errorf(
+			"deep: Background.LocalShell requires Shell or StreamingShell",
+		)
+	}
+	if cfg.Background.LocalShell != nil &&
+		cfg.Background.LocalShell.Shell != nil &&
+		cfg.Background.LocalShell.StreamingShell != nil {
+		return fmt.Errorf(
+			"deep: Background.LocalShell Shell and StreamingShell are mutually exclusive",
+		)
+	}
+	if cfg.Background.LocalShell != nil &&
+		(cfg.Shell != nil || cfg.StreamingShell != nil) {
+		return fmt.Errorf(
+			"deep: foreground Shell or StreamingShell cannot be combined with Background.LocalShell",
+		)
+	}
+	if cfg.Background.RecoverableShell != nil &&
+		(cfg.Shell != nil || cfg.StreamingShell != nil) {
+		return fmt.Errorf(
+			"deep: recoverable shell, Shell, and StreamingShell are mutually exclusive",
+		)
+	}
+	if cfg.Background.RecoverableShell != nil &&
+		cfg.Background.LocalShell != nil {
+		return fmt.Errorf(
+			"deep: Background.RecoverableShell and Background.LocalShell are mutually exclusive",
+		)
+	}
+	return nil
+}
+
 // NewTyped creates a new typed Deep agent instance with the provided configuration.
 // This function initializes built-in tools, creates a task tool for subagent orchestration,
 // and returns a fully configured TypedChatModelAgent ready for execution.
 func NewTyped[M adk.MessageType](ctx context.Context, cfg *TypedConfig[M]) (adk.TypedResumableAgent[M], error) {
-	if cfg == nil {
-		return nil, fmt.Errorf("deep: config is required")
-	}
-	if cfg.Background != nil {
-		if cfg.Background.Manager == nil {
-			return nil, fmt.Errorf("deep: background Manager is required")
-		}
-		if cfg.Background.Executors == nil {
-			return nil, fmt.Errorf("deep: background executor registry is required")
-		}
-		if cfg.Background.SubAgents == nil &&
-			cfg.Background.RecoverableShell == nil &&
-			cfg.Background.LocalShell == nil {
-			return nil, fmt.Errorf("deep: at least one background capability is required")
-		}
-		if cfg.Background.SubAgents != nil &&
-			cfg.Background.SubAgents.Executor == nil {
-			return nil, fmt.Errorf("deep: background SubAgents Executor is required")
-		}
-		if cfg.Background.RecoverableShell != nil &&
-			cfg.Background.RecoverableShell.Shell == nil {
-			return nil, fmt.Errorf("deep: background RecoverableShell Shell is required")
-		}
-		if cfg.Background.LocalShell != nil &&
-			cfg.Background.LocalShell.Shell == nil &&
-			cfg.Background.LocalShell.StreamingShell == nil {
-			return nil, fmt.Errorf(
-				"deep: Background.LocalShell requires Shell or StreamingShell",
-			)
-		}
-		if cfg.Background.LocalShell != nil &&
-			cfg.Background.LocalShell.Shell != nil &&
-			cfg.Background.LocalShell.StreamingShell != nil {
-			return nil, fmt.Errorf(
-				"deep: Background.LocalShell Shell and StreamingShell are mutually exclusive",
-			)
-		}
-		if cfg.Background.LocalShell != nil &&
-			(cfg.Shell != nil || cfg.StreamingShell != nil) {
-			return nil, fmt.Errorf(
-				"deep: foreground Shell or StreamingShell cannot be combined with Background.LocalShell",
-			)
-		}
-		if cfg.Background.RecoverableShell != nil &&
-			(cfg.Shell != nil || cfg.StreamingShell != nil) {
-			return nil, fmt.Errorf(
-				"deep: recoverable shell, Shell, and StreamingShell are mutually exclusive",
-			)
-		}
-		if cfg.Background.RecoverableShell != nil &&
-			cfg.Background.LocalShell != nil {
-			return nil, fmt.Errorf(
-				"deep: Background.RecoverableShell and Background.LocalShell are mutually exclusive",
-			)
-		}
+	if err := validateTypedConfig(cfg); err != nil {
+		return nil, err
 	}
 	// Sub-agents never get the background configuration: their shell runs stay
 	// foreground/buffered and they cannot launch background work.
