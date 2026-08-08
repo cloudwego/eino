@@ -3318,12 +3318,19 @@ func TestAttack_ResumeAfterInterruptedRunWritesSessionEvents(t *testing.T) {
 	require.Greater(t, len(store.events), eventsBeforeResume)
 	resumeEvents := filterStoredSessionEvents(t, store.events[eventsBeforeResume:], func(se *SessionEvent[*schema.Message]) bool {
 		return se.Kind == SessionEventKind(SessionEventExtensionPrefix+"resume.request_started") ||
+			se.Kind == SessionEventSessionStatusRunning ||
 			se.Kind == SessionEventSessionStatusIdle
 	})
-	require.NotEmpty(t, resumeEvents)
+	require.Len(t, resumeEvents, 3)
+	assert.Equal(t, SessionEventKind(SessionEventExtensionPrefix+"resume.request_started"), resumeEvents[0].Kind)
+	assert.Equal(t, SessionEventSessionStatusRunning, resumeEvents[1].Kind)
+	assert.Equal(t, SessionEventSessionStatusIdle, resumeEvents[2].Kind)
 	for _, event := range resumeEvents {
 		assert.Equal(t, interruptedTurnID, event.TurnID, "kind=%s", event.Kind)
 	}
+	require.NotNil(t, resumeEvents[1].Lifecycle)
+	assert.Equal(t, SessionRunStateRunning, resumeEvents[1].Lifecycle.State)
+	assert.NotEqual(t, resumeEvents[1].EventID, resumeEvents[1].TurnID)
 }
 
 func TestAttack_FreshRunIgnoresInterruptedSuffixExtra(t *testing.T) {
