@@ -19,6 +19,7 @@ package filesystem
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -32,6 +33,9 @@ import (
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/adk/backgroundtask"
+	backgroundlocal "github.com/cloudwego/eino/adk/backgroundtask/local"
+	backgroundshell "github.com/cloudwego/eino/adk/backgroundtask/shell"
+	backgroundtool "github.com/cloudwego/eino/adk/backgroundtask/tool"
 	"github.com/cloudwego/eino/adk/filesystem"
 	"github.com/cloudwego/eino/adk/internal"
 	"github.com/cloudwego/eino/components/tool"
@@ -85,34 +89,40 @@ type ExecuteToolConfig struct {
 	ToolConfig
 }
 
-// BackgroundConfig enables background-task execution for the execute tool.
-//
-// When set, the execute tool gains a run_in_background field and routes runs
-// through the shared Manager, so background and auto-background runs are tracked
-// and visible to the task_output/task_stop control tools. With a StreamingShell
-// backend the foreground phase still streams in real time. An explicit background
-// launch briefly previews startup output before its stream is capped with a notice;
-// an auto-background transition caps it immediately. The remaining output is
-// collected into the task result.
+// BackgroundConfig selects exactly one background execution mode.
 type BackgroundConfig struct {
-	// Manager is the shared background-task Manager. Required (a nil Manager is the
-	// same as no BackgroundConfig). It may be shared with other middlewares (e.g.
-	// subagent) for a unified task-ID space; wire the backgroundtask control
-	// middleware once, bound to the same Manager.
-	Manager *backgroundtask.Manager
+	Local       *LocalBackgroundConfig
+	Recoverable *RecoverableBackgroundConfig
+}
 
-	// OutputStore and OutputDir, when both set, give every managed run an output
-	// file at OutputDir/<id>.output: streaming runs append their chunks to it as
-	// they arrive (interim output), buffered runs append their result on completion.
-	// The path is recorded on Task.OutputFile and surfaced in the background notice.
-	// OutputStore is a filesystem.AppendOpener (filesystem.InMemoryBackend
-	// implements it); supply your own to direct output elsewhere. When either is
-	// unset, runs have no output file.
+// LocalBackgroundConfig configures process-local background execution for the
+// top-level Shell or StreamingShell.
+type LocalBackgroundConfig struct {
+	// Runner owns task lifecycle and process-local closures.
+	Runner *backgroundlocal.Runner
+	// OutputStore and OutputDir optionally materialize managed output.
 	OutputStore filesystem.AppendOpener
 	OutputDir   string
 }
 
-// Config is the configuration for the filesystem middleware
+// RecoverableBackgroundConfig configures cross-worker shell execution. Shell
+// owns durable command state keyed by task ID.
+type RecoverableBackgroundConfig struct {
+	Shell backgroundshell.RecoverableShell
+	// Manager and Executors must be the same authorities used by the host worker.
+	Manager            *backgroundtask.Manager
+	Executors          *backgroundtask.ExecutorRegistry
+	ToolRegistry       *backgroundtool.Registry
+	OutputMaterializer backgroundtool.OutputMaterializer
+	// ForegroundTimeoutMs is in milliseconds. ShouldAutoBackground may be called
+	// concurrently and must not mutate the task.
+	ForegroundTimeoutMs  *int
+	ShouldAutoBackground func(context.Context, *backgroundtask.Task) bool
+}
+
+// Config is the legacy configuration for the filesystem middleware.
+//
+// Deprecated: use MiddlewareConfig with New or NewTyped.
 type Config struct {
 	// Backend provides filesystem operations used by tools and offloading.
 	// If set, filesystem tools (read_file, write_file, edit_file, glob, grep) will be registered.
@@ -129,12 +139,6 @@ type Config struct {
 	// At least one of Backend, Shell, or StreamingShell must be set.
 	// Mutually exclusive with Shell.
 	StreamingShell filesystem.StreamingShell
-
-	// Background configures background-task execution for the execute tool. When
-	// nil, execute runs only foreground (blocking) and is not tracked. See
-	// BackgroundConfig.
-	Background *BackgroundConfig
-
 	// LsToolConfig configures the ls tool
 	// optional
 	LsToolConfig *ToolConfig
@@ -206,7 +210,7 @@ func (c *Config) Validate() error {
 	if c.Backend == nil && c.Shell == nil && c.StreamingShell == nil {
 		return errors.New("at least one of backend, shell, or streaming shell should be set")
 	}
-	if c.StreamingShell != nil && c.Shell != nil {
+	if c.Shell != nil && c.StreamingShell != nil {
 		return errors.New("shell and streaming shell should not be both set")
 	}
 	return nil
@@ -223,11 +227,10 @@ func NewMiddleware(ctx context.Context, config *Config) (adk.AgentMiddleware, er
 	if err != nil {
 		return adk.AgentMiddleware{}, err
 	}
-	ts, err := getFilesystemTools(ctx, &MiddlewareConfig{
+	middlewareConfig := &MiddlewareConfig{
 		Backend:                 config.Backend,
 		Shell:                   config.Shell,
 		StreamingShell:          config.StreamingShell,
-		Background:              config.Background,
 		LsToolConfig:            config.LsToolConfig,
 		ReadFileToolConfig:      config.ReadFileToolConfig,
 		WriteFileToolConfig:     config.WriteFileToolConfig,
@@ -242,7 +245,17 @@ func NewMiddleware(ctx context.Context, config *Config) (adk.AgentMiddleware, er
 		CustomGlobToolDesc:      config.CustomGlobToolDesc,
 		CustomWriteFileToolDesc: config.CustomWriteFileToolDesc,
 		CustomEditToolDesc:      config.CustomEditToolDesc,
-	})
+		notificationSessionID: func(ctx context.Context) (string, error) {
+			sessionID, ok := adk.RunnerSessionID(ctx)
+			if !ok {
+				return "", errors.New(
+					"filesystem: runner session is required for background notification",
+				)
+			}
+			return sessionID, nil
+		},
+	}
+	ts, err := getFilesystemTools(ctx, middlewareConfig)
 	if err != nil {
 		return adk.AgentMiddleware{}, err
 	}
@@ -284,11 +297,12 @@ type MiddlewareConfig struct {
 	// At least one of Backend, Shell, or StreamingShell must be set.
 	// Mutually exclusive with Shell.
 	StreamingShell filesystem.StreamingShell
-
 	// Background configures background-task execution for the execute tool. When
 	// nil, execute runs only foreground (blocking) and is not tracked. See
 	// BackgroundConfig.
 	Background *BackgroundConfig
+
+	notificationSessionID func(context.Context) (string, error)
 
 	// LsToolConfig configures the ls tool
 	// optional
@@ -367,11 +381,49 @@ func (c *MiddlewareConfig) Validate() error {
 	if c == nil {
 		return errors.New("config should not be nil")
 	}
-	if c.Backend == nil && c.Shell == nil && c.StreamingShell == nil {
+	if c.Backend == nil && c.Shell == nil && c.StreamingShell == nil &&
+		recoverableBackground(c.Background) == nil {
 		return errors.New("at least one of backend, shell, or streaming shell should be set")
 	}
-	if c.StreamingShell != nil && c.Shell != nil {
+	if c.Shell != nil && c.StreamingShell != nil {
 		return errors.New("shell and streaming shell should not be both set")
+	}
+	return validateBackgroundConfig(c.Background, c.Shell, c.StreamingShell)
+}
+
+func recoverableBackground(config *BackgroundConfig) *RecoverableBackgroundConfig {
+	if config == nil {
+		return nil
+	}
+	return config.Recoverable
+}
+
+func validateBackgroundConfig(
+	config *BackgroundConfig,
+	shell filesystem.Shell,
+	streamingShell filesystem.StreamingShell,
+) error {
+	if config == nil {
+		return nil
+	}
+	if (config.Local == nil) == (config.Recoverable == nil) {
+		return errors.New("filesystem: background requires exactly one of Local or Recoverable")
+	}
+	if config.Local != nil {
+		if config.Local.Runner == nil {
+			return errors.New("filesystem: local background Runner is required")
+		}
+		if shell == nil && streamingShell == nil {
+			return errors.New("filesystem: local background requires Shell or StreamingShell")
+		}
+		return nil
+	}
+	recoverable := config.Recoverable
+	if shell != nil || streamingShell != nil {
+		return errors.New("filesystem: foreground and recoverable background shells are mutually exclusive")
+	}
+	if recoverable.Shell == nil || recoverable.Manager == nil || recoverable.Executors == nil {
+		return errors.New("filesystem: recoverable background Shell, Manager, and Executors are required")
 	}
 	return nil
 }
@@ -417,7 +469,17 @@ func NewTyped[M adk.MessageType](ctx context.Context, config *MiddlewareConfig) 
 	if err != nil {
 		return nil, err
 	}
-	ts, err := getFilesystemTools(ctx, config)
+	typedConfig := *config
+	typedConfig.notificationSessionID = func(ctx context.Context) (string, error) {
+		sessionID, ok := adk.RunnerSessionID(ctx)
+		if !ok {
+			return "", errors.New(
+				"filesystem: runner session is required for background notification",
+			)
+		}
+		return sessionID, nil
+	}
+	ts, err := getFilesystemTools(ctx, &typedConfig)
 	if err != nil {
 		return nil, err
 	}
@@ -484,7 +546,7 @@ type toolSpec struct {
 	createFunc func(name, desc string) (tool.BaseTool, error)
 }
 
-func getFilesystemTools(_ context.Context, middlewareConfig *MiddlewareConfig) ([]tool.BaseTool, error) {
+func getFilesystemTools(ctx context.Context, middlewareConfig *MiddlewareConfig) ([]tool.BaseTool, error) {
 	var tools []tool.BaseTool
 
 	toolSpecs := []toolSpec{
@@ -563,8 +625,9 @@ func getFilesystemTools(_ context.Context, middlewareConfig *MiddlewareConfig) (
 		}
 	}
 
-	if middlewareConfig.StreamingShell != nil || middlewareConfig.Shell != nil {
-		executeTool, err := createExecuteTool(middlewareConfig)
+	if middlewareConfig.StreamingShell != nil || middlewareConfig.Shell != nil ||
+		recoverableBackground(middlewareConfig.Background) != nil {
+		executeTool, err := createExecuteTool(ctx, middlewareConfig)
 		if err != nil {
 			return nil, err
 		}
@@ -576,7 +639,7 @@ func getFilesystemTools(_ context.Context, middlewareConfig *MiddlewareConfig) (
 	return tools, nil
 }
 
-func createExecuteTool(middlewareConfig *MiddlewareConfig) (tool.BaseTool, error) {
+func createExecuteTool(ctx context.Context, middlewareConfig *MiddlewareConfig) (tool.BaseTool, error) {
 	executeConfig := middlewareConfig.ExecuteToolConfig
 	if executeConfig == nil {
 		executeConfig = &ExecuteToolConfig{}
@@ -595,24 +658,91 @@ func createExecuteTool(middlewareConfig *MiddlewareConfig) (tool.BaseTool, error
 		// background/auto-background runs are tracked and visible to the
 		// task_output/task_stop control tools. Without a Manager the tool is
 		// command-only with no background support.
-		if middlewareConfig.Background != nil && middlewareConfig.Background.Manager != nil {
+		if recoverableBackground(middlewareConfig.Background) != nil {
+			return newRecoverableExecuteTool(ctx, middlewareConfig, executeConfig, desc)
+		}
+		if middlewareConfig.Background != nil && middlewareConfig.Background.Local != nil {
+			local := middlewareConfig.Background.Local
 			return newManagedExecuteTool(
-				middlewareConfig.Background.Manager,
+				local.Runner,
 				middlewareConfig.Shell,
 				middlewareConfig.StreamingShell,
+				middlewareConfig.notificationSessionID,
 				outputSink{
-					store:     middlewareConfig.Background.OutputStore,
-					outputDir: middlewareConfig.Background.OutputDir,
+					store: local.OutputStore, outputDir: local.OutputDir,
 				},
-				executeConfig.Name,
-				desc,
+				toolDefinition{name: executeConfig.Name, desc: desc},
 			)
 		}
-
 		if middlewareConfig.StreamingShell != nil {
 			return newStreamingExecuteTool(middlewareConfig.StreamingShell, executeConfig.Name, desc)
 		}
 		return newExecuteTool(middlewareConfig.Shell, executeConfig.Name, desc)
+	})
+}
+
+func newRecoverableExecuteTool(
+	ctx context.Context,
+	middlewareConfig *MiddlewareConfig,
+	executeConfig *ExecuteToolConfig,
+	description string,
+) (tool.BaseTool, error) {
+	background := recoverableBackground(middlewareConfig.Background)
+	manager := background.Manager
+	toolName := selectToolName(executeConfig.Name, ToolNameExecute)
+	desc, err := selectToolDesc(
+		description, ManagedExecuteToolDesc, ManagedExecuteToolDescChinese,
+	)
+	if err != nil {
+		return nil, err
+	}
+	registry := background.ToolRegistry
+	if registry == nil {
+		registry = backgroundtool.NewRegistry()
+	}
+	registration, err := backgroundshell.NewRegistration(&backgroundshell.RegistrationConfig{
+		Info: &schema.ToolInfo{
+			Name: toolName, Desc: desc,
+			ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
+				"command": {
+					Type: schema.String, Required: true,
+					Desc: "The command to execute",
+				},
+				"run_in_background": {
+					Type: schema.Boolean,
+					Desc: "Set to true to return after the durable command starts",
+				},
+				"timeout": {
+					Type: schema.Integer,
+					Desc: "Optional foreground timeout in milliseconds; ignored when run_in_background is true",
+				},
+			}),
+		},
+		Shell: background.Shell, Materializer: background.OutputMaterializer,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if err = registry.Register(registration); err != nil {
+		return nil, err
+	}
+	return backgroundtool.NewManagedTool(ctx, &backgroundtool.ManagedToolConfig{
+		Manager: manager, Executors: background.Executors,
+		Registry: registry, ToolName: toolName,
+		ForegroundTimeoutMs:  background.ForegroundTimeoutMs,
+		ShouldAutoBackground: background.ShouldAutoBackground,
+		SessionID:            middlewareConfig.notificationSessionID,
+		RunInBackground: func(_ context.Context, arguments string) bool {
+			var input executeManagedArgs
+			return json.Unmarshal([]byte(arguments), &input) == nil && input.RunInBackground
+		},
+		InvocationTimeoutMs: func(_ context.Context, arguments string) *int {
+			var input executeManagedArgs
+			if json.Unmarshal([]byte(arguments), &input) != nil || input.TimeoutMS <= 0 {
+				return nil
+			}
+			return &input.TimeoutMS
+		},
 	})
 }
 
@@ -1113,12 +1243,12 @@ type executeArgs struct {
 // Manager is configured: the model may additionally request background execution.
 type executeManagedArgs struct {
 	executeArgs
-	RunInBackground bool `json:"run_in_background,omitempty" jsonschema_description:"Set to true to run the command in the background. You will be notified when it completes; use task_output to query it and task_stop to cancel it."`
+	RunInBackground bool `json:"run_in_background,omitempty" jsonschema_description:"Set to true to run the command in the background. Use task_output to query it and task_stop to cancel it."`
 	// TimeoutMS is the foreground timeout in milliseconds. When omitted, the configured
 	// default applies. Ignored when run_in_background is true. What happens at the
 	// deadline (move to background vs. stop) is decided by the Manager's
 	// ShouldAutoBackground policy and is intentionally not surfaced to the model.
-	TimeoutMS int `json:"timeout,omitempty" jsonschema_description:"Optional timeout in milliseconds. The maximum time to wait for the command. Omit to use the default."`
+	TimeoutMS int `json:"timeout,omitempty" jsonschema_description:"Optional foreground wait in milliseconds. Ignored when run_in_background is true. At expiry, host policy either detaches the command or stops it. Omit to use the configured default."`
 }
 
 func newExecuteTool(sb filesystem.Shell, name string, desc string) (tool.BaseTool, error) {

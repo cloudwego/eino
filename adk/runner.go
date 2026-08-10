@@ -68,6 +68,19 @@ type TypedRunner[M MessageType] struct {
 // Runner is the default runner type using *schema.Message.
 type Runner = TypedRunner[*schema.Message]
 
+type runnerSessionIDContextKey struct{}
+
+// RunnerSessionID returns the current Runner invocation's session ID. It is
+// request-scoped routing metadata, not a container for Runner dependencies.
+func RunnerSessionID(ctx context.Context) (string, bool) {
+	sessionID, ok := ctx.Value(runnerSessionIDContextKey{}).(string)
+	return sessionID, ok && sessionID != ""
+}
+
+func (r *TypedRunner[M]) withRunnerSession(ctx context.Context) context.Context {
+	return context.WithValue(ctx, runnerSessionIDContextKey{}, r.sessionID)
+}
+
 type CheckPointStore = core.CheckPointStore
 
 type CheckPointDeleter = core.CheckPointDeleter
@@ -115,7 +128,10 @@ func NewTypedRunner[M MessageType](conf TypedRunnerConfig[M]) *TypedRunner[M] {
 
 func (r *TypedRunner[M]) Run(ctx context.Context, messages []M,
 	opts ...AgentRunOption) *AsyncIterator[*TypedAgentEvent[M]] {
-	return typedRunnerRunImpl(r.a, r.enableStreaming, r.store, r.sessionID, r.sessionStore, r.sessionConfig, ctx, messages, opts...)
+	return typedRunnerRunImpl(
+		r.a, r.enableStreaming, r.store, r.sessionID, r.sessionStore, r.sessionConfig,
+		r.withRunnerSession(ctx), messages, opts...,
+	)
 }
 
 // Query is a convenience method that starts a new execution with a single user query string.
@@ -164,7 +180,10 @@ func (r *TypedRunner[M]) ResumeWithParams(ctx context.Context, checkPointID stri
 
 func (r *TypedRunner[M]) resumeInternal(ctx context.Context, checkPointID string, resumeData map[string]any,
 	opts ...AgentRunOption) (*AsyncIterator[*TypedAgentEvent[M]], error) {
-	return typedRunnerResumeInternalImpl(r.a, r.store, r.sessionID, r.sessionStore, r.sessionConfig, ctx, checkPointID, resumeData, opts...)
+	return typedRunnerResumeInternalImpl(
+		r.a, r.store, r.sessionID, r.sessionStore, r.sessionConfig,
+		r.withRunnerSession(ctx), checkPointID, resumeData, opts...,
+	)
 }
 
 type runnerSessionRunState[M MessageType] struct {
@@ -286,24 +305,10 @@ func prepareRunnerSessionRun[M MessageType]( //nolint:revive // argument-limit
 	if reconstructResult != nil && reconstructResult.state != nil {
 		state.latestState = reconstructResult.state
 	}
-	runningEvent := &SessionEvent[M]{
-		Timestamp: newEventTimestamp(),
-		Kind:      SessionEventSessionStatusRunning,
-		Lifecycle: &LifecycleEvent{State: SessionRunStateRunning},
-	}
-	err = prepareSessionEventEnvelope(ctx, runningEvent, state.sessionConfig.EventIDGenerator, state.sessionConfig.EventExtraProvider, sessionEventEnvelopeOptions{})
-	if err != nil {
+	if err = appendRunnerSessionRunningEvent(ctx, state); err != nil {
 		_ = state.sessionHandle.close(ctx)
 		return nil, err
 	}
-	state.turnID = runningEvent.EventID
-	runningEvent.TurnID = state.turnID
-	err = appendRunnerSessionControlEvent(ctx, state, runningEvent)
-	if err != nil {
-		_ = state.sessionHandle.close(ctx)
-		return nil, err
-	}
-	state.initialTimeline = append(state.initialTimeline, runningEvent)
 
 	if isNilCheckPointStore(checkPointStore) {
 		return state, nil
@@ -417,6 +422,29 @@ func prepareRunnerSessionResume[M MessageType]( //nolint:revive // argument-limi
 	}
 	state.initialTimeline = append(state.initialTimeline, resumeEvent)
 	return state, effectiveCheckPointID, nil
+}
+
+func appendRunnerSessionRunningEvent[M MessageType](
+	ctx context.Context,
+	state *runnerSessionRunState[M],
+) error {
+	runningEvent := &SessionEvent[M]{
+		Timestamp: newEventTimestamp(),
+		Kind:      SessionEventSessionStatusRunning,
+		Lifecycle: &LifecycleEvent{State: SessionRunStateRunning},
+	}
+	if err := prepareSessionEventEnvelope(ctx, runningEvent, state.sessionConfig.EventIDGenerator, state.sessionConfig.EventExtraProvider, sessionEventEnvelopeOptions{}); err != nil {
+		return err
+	}
+	if state.turnID == "" {
+		state.turnID = runningEvent.EventID
+	}
+	runningEvent.TurnID = state.turnID
+	if err := appendRunnerSessionControlEvent(ctx, state, runningEvent); err != nil {
+		return err
+	}
+	state.initialTimeline = append(state.initialTimeline, runningEvent)
+	return nil
 }
 
 func appendRunnerSessionControlEvent[M MessageType](
@@ -714,6 +742,12 @@ func typedRunnerResumeInternalImpl[M MessageType](a TypedAgent[M], store CheckPo
 			}
 			return nil, fmt.Errorf("agent %T does not support resume", a)
 		}
+		if sessionState.enabled {
+			if err := appendRunnerSessionRunningEvent(ctx, sessionState); err != nil {
+				_ = sessionState.sessionHandle.close(ctx)
+				return nil, err
+			}
+		}
 		aIter := ra.Resume(ctx, resumeInfo, opts...)
 
 		niter, gen := NewAsyncIteratorPair[*TypedAgentEvent[M]]()
@@ -728,6 +762,12 @@ func typedRunnerResumeInternalImpl[M MessageType](a TypedAgent[M], store CheckPo
 			_ = sessionState.sessionHandle.close(ctx)
 		}
 		return nil, fmt.Errorf("agent %T does not support resume", a)
+	}
+	if sessionState.enabled {
+		if err := appendRunnerSessionRunningEvent(ctx, sessionState); err != nil {
+			_ = sessionState.sessionHandle.close(ctx)
+			return nil, err
+		}
 	}
 	aIter := ra.Resume(ctx, resumeInfo, opts...)
 

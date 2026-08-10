@@ -3318,12 +3318,109 @@ func TestAttack_ResumeAfterInterruptedRunWritesSessionEvents(t *testing.T) {
 	require.Greater(t, len(store.events), eventsBeforeResume)
 	resumeEvents := filterStoredSessionEvents(t, store.events[eventsBeforeResume:], func(se *SessionEvent[*schema.Message]) bool {
 		return se.Kind == SessionEventKind(SessionEventExtensionPrefix+"resume.request_started") ||
+			se.Kind == SessionEventSessionStatusRunning ||
 			se.Kind == SessionEventSessionStatusIdle
 	})
-	require.NotEmpty(t, resumeEvents)
+	require.Len(t, resumeEvents, 3)
+	assert.Equal(t, SessionEventKind(SessionEventExtensionPrefix+"resume.request_started"), resumeEvents[0].Kind)
+	assert.Equal(t, SessionEventSessionStatusRunning, resumeEvents[1].Kind)
+	assert.Equal(t, SessionEventSessionStatusIdle, resumeEvents[2].Kind)
 	for _, event := range resumeEvents {
 		assert.Equal(t, interruptedTurnID, event.TurnID, "kind=%s", event.Kind)
 	}
+	require.NotNil(t, resumeEvents[1].Lifecycle)
+	assert.Equal(t, SessionRunStateRunning, resumeEvents[1].Lifecycle.State)
+	assert.NotEqual(t, resumeEvents[1].EventID, resumeEvents[1].TurnID)
+}
+
+func TestAttack_ResumeCheckpointDecodeFailureDoesNotMarkRunning(t *testing.T) {
+	ctx := context.Background()
+	store := newSessionHelperStore()
+	sessionID := "resume-corrupt-checkpoint"
+	checkpointID := sessionRunnerCheckpointID(sessionID)
+	checkpoint, err := encodeRunnerSessionCheckpoint(&runnerSessionCheckpoint{
+		TurnID:  "interrupted-turn",
+		Payload: []byte("corrupt"),
+	})
+	require.NoError(t, err)
+	require.NoError(t, store.Set(ctx, checkpointID, checkpoint))
+
+	runner := NewRunner(ctx, RunnerConfig{
+		Agent:           &runnerInterruptAgent{},
+		SessionID:       sessionID,
+		SessionStore:    store,
+		CheckPointStore: store,
+	})
+	_, err = runner.Resume(ctx, "")
+	require.ErrorContains(t, err, "failed to decode checkpoint")
+
+	events := decodeStoredSessionEvents(t, store.events)
+	require.Len(t, events, 1)
+	assert.Equal(t, SessionEventKind(SessionEventExtensionPrefix+"resume.request_started"), events[0].Kind)
+	assert.Equal(t, "interrupted-turn", events[0].TurnID)
+	t.Log("checkpoint decode failure persisted resume intent without a running transition")
+}
+
+func TestAttack_AgenticResumeMarksSessionRunning(t *testing.T) {
+	ctx := context.Background()
+	store := newAgenticSessionHelperStore()
+	sessionID := "agentic-resume-running"
+	agent := &myAgenticAgent{
+		name: "agentic-resume-agent",
+		runFn: func(ctx context.Context, _ *TypedAgentInput[*schema.AgenticMessage], _ ...AgentRunOption) *AsyncIterator[*TypedAgentEvent[*schema.AgenticMessage]] {
+			iter, gen := NewAsyncIteratorPair[*TypedAgentEvent[*schema.AgenticMessage]]()
+			go func() {
+				defer gen.Close()
+				gen.Send(TypedInterrupt[*schema.AgenticMessage](ctx, "confirm?"))
+			}()
+			return iter
+		},
+		resumeFn: func(_ context.Context, _ *ResumeInfo, _ ...AgentRunOption) *AsyncIterator[*TypedAgentEvent[*schema.AgenticMessage]] {
+			iter, gen := NewAsyncIteratorPair[*TypedAgentEvent[*schema.AgenticMessage]]()
+			gen.Close()
+			return iter
+		},
+	}
+	runner := NewTypedRunner(TypedRunnerConfig[*schema.AgenticMessage]{
+		Agent:           agent,
+		SessionID:       sessionID,
+		SessionStore:    store,
+		CheckPointStore: store,
+	})
+
+	drainAgenticSessionEvents(t, runner.Run(ctx, []*schema.AgenticMessage{schema.UserAgenticMessage("start")}))
+	beforeResume := loadAgenticSessionEvents(t, ctx, store, sessionID)
+	var runningEvents []*SessionEvent[*schema.AgenticMessage]
+	for _, event := range beforeResume {
+		if event.Kind == SessionEventSessionStatusRunning {
+			runningEvents = append(runningEvents, event)
+		}
+	}
+	require.Len(t, runningEvents, 1)
+	turnID := runningEvents[0].TurnID
+	require.NotEmpty(t, turnID)
+
+	resumeIter, err := runner.Resume(ctx, "")
+	require.NoError(t, err)
+	drainAgenticSessionEvents(t, resumeIter)
+
+	allEvents := loadAgenticSessionEvents(t, ctx, store, sessionID)
+	var controlEvents []*SessionEvent[*schema.AgenticMessage]
+	for _, event := range allEvents[len(beforeResume):] {
+		if event.Kind == SessionEventKind(SessionEventExtensionPrefix+"resume.request_started") ||
+			event.Kind == SessionEventSessionStatusRunning ||
+			event.Kind == SessionEventSessionStatusIdle {
+			controlEvents = append(controlEvents, event)
+		}
+	}
+	require.Len(t, controlEvents, 3)
+	assert.Equal(t, SessionEventKind(SessionEventExtensionPrefix+"resume.request_started"), controlEvents[0].Kind)
+	assert.Equal(t, SessionEventSessionStatusRunning, controlEvents[1].Kind)
+	assert.Equal(t, SessionEventSessionStatusIdle, controlEvents[2].Kind)
+	for _, event := range controlEvents {
+		assert.Equal(t, turnID, event.TurnID, "kind=%s", event.Kind)
+	}
+	t.Log("agentic resume emitted request, running, and idle under the interrupted turn ID")
 }
 
 func TestAttack_FreshRunIgnoresInterruptedSuffixExtra(t *testing.T) {
@@ -4444,13 +4541,31 @@ func TestTailReplay_EmptySnapshotCursor(t *testing.T) {
 }
 
 type agenticSessionHelperStore struct {
-	mu         sync.Mutex
-	events     []storedSessionEvent
-	eventIDIdx map[string]int
+	mu          sync.Mutex
+	events      []storedSessionEvent
+	eventIDIdx  map[string]int
+	checkpoints map[string][]byte
 }
 
 func newAgenticSessionHelperStore() *agenticSessionHelperStore {
-	return &agenticSessionHelperStore{eventIDIdx: make(map[string]int)}
+	return &agenticSessionHelperStore{
+		eventIDIdx:  make(map[string]int),
+		checkpoints: make(map[string][]byte),
+	}
+}
+
+func (s *agenticSessionHelperStore) Set(_ context.Context, key string, value []byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.checkpoints[key] = append([]byte{}, value...)
+	return nil
+}
+
+func (s *agenticSessionHelperStore) Get(_ context.Context, key string) ([]byte, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	value, ok := s.checkpoints[key]
+	return append([]byte{}, value...), ok, nil
 }
 
 func (s *agenticSessionHelperStore) AppendEvents(ctx context.Context, sessionID string, events []*SessionEvent[*schema.AgenticMessage]) error {

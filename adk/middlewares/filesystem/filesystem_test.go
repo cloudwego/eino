@@ -2438,6 +2438,17 @@ func TestNewMiddleware_WithShell(t *testing.T) {
 		assert.Len(t, m.AdditionalTools, 7)
 	})
 
+	t.Run("backend enables prompt and large-result offloading", func(t *testing.T) {
+		prompt := "Use the workspace filesystem."
+		m, err := NewMiddleware(ctx, &Config{
+			Backend: backend, CustomSystemPrompt: &prompt,
+		})
+		assert.NoError(t, err)
+		assert.Equal(t, prompt, m.AdditionalInstruction)
+		assert.NotNil(t, m.WrapToolCall.Invokable)
+		assert.NotNil(t, m.WrapToolCall.Streamable)
+	})
+
 	t.Run("shell-only config skips large tool result offloading", func(t *testing.T) {
 		m, err := NewMiddleware(ctx, &Config{
 			Shell: &mockShellBackend{resp: &filesystem.ExecuteResponse{Output: "ok"}},
