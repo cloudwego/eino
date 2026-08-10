@@ -18,6 +18,7 @@ package subagent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"path/filepath"
@@ -27,186 +28,238 @@ import (
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/adk/backgroundtask"
+	backgroundlocal "github.com/cloudwego/eino/adk/backgroundtask/local"
+	durablesubagent "github.com/cloudwego/eino/adk/backgroundtask/subagent"
 	"github.com/cloudwego/eino/adk/filesystem"
 	"github.com/cloudwego/eino/adk/internal"
 	"github.com/cloudwego/eino/adk/internal/agenttool"
+	"github.com/cloudwego/eino/adk/internal/foreground"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/components/tool/utils"
 	"github.com/cloudwego/eino/compose"
+	"github.com/cloudwego/eino/schema"
 )
 
 const (
-	agentToolName = "agent"
-	// TaskTypeSubagent is the backgroundtask Task.Type tag for sub-agent tasks
-	// launched by the agent tool, letting a shared Manager distinguish them from
-	// shell tasks.
-	TaskTypeSubagent = "subagent"
-
-	// MetadataKeySubagentType is the RunInput.Metadata / Task.Metadata key under
-	// which the agent tool records the sub-agent type for a task. A
-	// ShouldAutoBackground hook reads it (via TypeFromTask) to apply
-	// agent-type-specific policy without parsing the human-readable Description. The
-	// value is a string.
-	MetadataKeySubagentType = "subagent_type"
+	agentToolName        = "agent"
+	TaskKindSubagent     = "subagent"
+	outputFileFormatHint = `JSONL — one JSON object per line, each a materialized event {agent_name, message}.`
 )
 
-// TypeFromTask returns the sub-agent type recorded in a sub-agent task's
-// metadata under MetadataKeySubagentType, or "" if absent (e.g. the task is not a
-// sub-agent run). It is the intended way for a ShouldAutoBackground hook to recover
-// the agent type.
-func TypeFromTask(t *backgroundtask.Task) string {
-	if t == nil {
-		return ""
-	}
-	st, _ := t.Metadata[MetadataKeySubagentType].(string)
-	return st
+type subagentPayloadV1 struct {
+	Version      int    `json:"version"`
+	SubAgentName string `json:"subagent_name"`
 }
 
-// agentInput is the agent tool's input when no Manager is configured: spawn a
-// sub-agent synchronously in the foreground.
 type agentInput struct {
 	SubagentType string `json:"subagent_type" jsonschema:"required" jsonschema_description:"The type of specialized agent to use for this task"`
 	Prompt       string `json:"prompt" jsonschema:"required" jsonschema_description:"The task for the agent to perform"`
 	Description  string `json:"description" jsonschema:"required" jsonschema_description:"A short (3-5 word) description of the task"`
 }
 
-// agentManagedInput is the agent tool's input when a Manager is configured: it adds
-// run_in_background so the model can spawn the sub-agent in the background.
 type agentManagedInput struct {
 	agentInput
 	RunInBackground bool `json:"run_in_background,omitempty" jsonschema_description:"Set to true to run this agent in the background. You will be notified when it completes."`
 }
 
-// newAgentTool builds the foreground-only agent tool (no Manager): it invokes the
-// agent-as-tool adapter directly, forwarding opts so event forwarding, session
-// sharing and interrupt/resume behave exactly as a normal agent-as-tool call.
+type agentDurableInput struct {
+	agentManagedInput
+	ChildSessionID string `json:"child_session_id,omitempty" jsonschema_description:"Continue a previous child session by ID and inherit its history. Omit to create a new child session."`
+}
+
 func newAgentTool(subAgents map[string]tool.InvokableTool, name, desc string) (tool.BaseTool, error) {
 	return utils.InferOptionableTool(name, desc,
 		func(ctx context.Context, in agentInput, opts ...tool.Option) (string, error) {
-			a, params, err := resolveSubAgent(subAgents, in.SubagentType, in.Prompt, in.Description)
+			agent, params, err := resolveSubAgent(subAgents, in.SubagentType, in.Prompt, in.Description)
 			if err != nil {
 				return "", err
 			}
-			return a.InvokableRun(ctx, params, opts...)
+			return agent.InvokableRun(ctx, params, opts...)
 		})
 }
 
-// newManagedAgentTool builds the Manager-backed agent tool. It wraps the same
-// agent-as-tool invocation in a managed task, so foreground behavior is identical
-// and only lifecycle/background switching is layered on top.
-//
-// agentOutput bundles the output-file configuration for a managed agent tool: the
-// AppendOpener to write through, the directory to reserve paths under, and the
-// per-event encoder. A zero store or outputDir disables output files. A nil format
-// selects the built-in default encoder (see defaultAgentEventFormat).
 type agentOutput[M adk.MessageType] struct {
 	store     filesystem.AppendOpener
 	outputDir string
-	format    AgentEventFormat[M]
+	format    TranscriptFormat[M]
 }
 
-// When sink.store and sink.outputDir are both set, each run is given an output file
-// at outputDir/<uuid>.output, and the work callback lazily creates it and keeps one
-// append writer open while the sub-agent runs, writing one line per materialized
-// AgentEvent through sink.format (or the default encoder when it is nil). The path is
-// allocated before the run. The Manager never writes — the tool owns the writer.
-// sink.store is a filesystem.AppendOpener; output files require one (no rewrite
-// fallback).
-func newManagedAgentTool[M adk.MessageType](mgr *backgroundtask.Manager, subAgents map[string]tool.InvokableTool, sink agentOutput[M], name, desc string) (tool.BaseTool, error) {
-	format := sink.format
-	var formatHint string // set only for the default encoder, whose format we can describe
+func newManagedAgentTool[M adk.MessageType](
+	runner *backgroundlocal.Runner,
+	subAgents map[string]tool.InvokableTool,
+	output agentOutput[M],
+	name, desc string,
+) (tool.BaseTool, error) {
+	format := output.format
+	formatHint := ""
 	if format == nil {
-		format, formatHint = defaultAgentEventFormat[M], outputFileFormatHint
+		format = defaultTranscriptFormat[M]
+		formatHint = outputFileFormatHint
 	}
 	return utils.InferOptionableTool(name, desc,
 		func(ctx context.Context, in agentManagedInput, opts ...tool.Option) (string, error) {
-			a, params, err := resolveSubAgent(subAgents, in.SubagentType, in.Prompt, in.Description)
+			agent, params, err := resolveSubAgent(subAgents, in.SubagentType, in.Prompt, in.Description)
 			if err != nil {
 				return "", err
 			}
-
-			outputFile := agentOutputFilePath(ctx, sink.store, sink.outputDir)
-
-			result, err := mgr.Run(ctx, &backgroundtask.RunInput{
-				Description:     in.Description,
-				Type:            TaskTypeSubagent,
-				ToolUseID:       compose.GetToolCallID(ctx),
-				RunInBackground: in.RunInBackground,
-				Metadata:        map[string]any{MetadataKeySubagentType: in.SubagentType},
-				OutputFile:      outputFile,
-			}, func(workCtx context.Context, task backgroundtask.TaskInfo) (string, error) {
-				var outputReceiver agenttool.EventReceiver[*adk.TypedAgentEvent[M]]
+			sessionID, ok := adk.RunnerSessionID(ctx)
+			if !ok {
+				return "", errors.New("subagent: runner session is required for background notification")
+			}
+			outputFile := reserveAgentOutput(ctx, output.store, output.outputDir)
+			payload, err := sonic.Marshal(&subagentPayloadV1{Version: 1, SubAgentName: in.SubagentType})
+			if err != nil {
+				return "", err
+			}
+			result, err := runner.Run(ctx, &backgroundlocal.Input{
+				Description: in.Description, Kind: TaskKindSubagent, Payload: payload,
+				OutputFile: outputFile, RunInBackground: in.RunInBackground,
+				SessionID: sessionID, NotifySession: true,
+			}, func(workCtx context.Context, runtime backgroundtask.ExecutionRuntime) (string, error) {
+				fileReceiver := &agentEventFileReceiver[M]{
+					ctx: workCtx, format: format,
+					onRecord: func(data []byte) error {
+						_, appendErr := runtime.EmitProgress(workCtx, "", data)
+						return appendErr
+					},
+					onError: func(fileErr error) error {
+						return runtime.ReportTranscriptFailure(workCtx, fileErr)
+					},
+				}
+				var outputReceiver agenttool.EventReceiver[*adk.TypedAgentEvent[M]] = fileReceiver.receive
+				var outputWriter io.WriteCloser
 				if outputFile != "" {
-					writer, openErr := sink.store.OpenAppend(workCtx, &filesystem.OpenAppendRequest{FilePath: outputFile})
+					writer, openErr := output.store.OpenAppend(
+						workCtx, &filesystem.OpenAppendRequest{FilePath: outputFile},
+					)
 					if openErr != nil {
-						mgr.MarkOutputFileUnreliable(task.ID, openErr.Error())
-					} else {
-						fileReceiver := &agentEventFileReceiver[M]{
-							ctx:    workCtx,
-							writer: writer,
-							format: format,
-							onError: func(err error) {
-								mgr.MarkOutputFileUnreliable(task.ID, err.Error())
-							},
+						if reportErr := runtime.ReportTranscriptFailure(workCtx, openErr); reportErr != nil {
+							return "", reportErr
 						}
-						outputReceiver = fileReceiver.receive
-						defer func() {
-							if closeErr := writer.Close(); closeErr != nil {
-								fileReceiver.fail(fmt.Errorf("close agent output file: %w", closeErr))
-							}
-						}()
+					} else {
+						outputWriter = writer
+						fileReceiver.writer = writer
 					}
 				}
-
-				// Existing receivers came from the launching parent agent. Gate only
-				// those receivers when the task is backgrounded, then append the task's
-				// output-file receiver (nil when output files are off) after the gate so
-				// it continues receiving events.
 				runOpts := append(opts, agenttool.WithEventReceiverTransform(
-					managedEventReceiverTransform(task.Backgrounded, outputReceiver)))
-				out, runErr := a.InvokableRun(workCtx, params, runOpts...)
+					managedEventReceiverTransform(
+						foreground.ProjectionDetached(workCtx), outputReceiver,
+					),
+				))
+				out, runErr := agent.InvokableRun(workCtx, params, runOpts...)
+				if outputWriter != nil {
+					if closeErr := outputWriter.Close(); closeErr != nil {
+						fileReceiver.fail(fmt.Errorf("close agent output file: %w", closeErr))
+					}
+				}
 				if runErr != nil {
 					return "", runErr
+				}
+				if fileReceiver.reportErr != nil {
+					return "", fileReceiver.reportErr
 				}
 				return out, nil
 			})
 			if err != nil {
 				return "", err
 			}
-
-			switch result.Status {
-			case backgroundtask.StatusCompleted:
-				return result.Result, nil
-			case backgroundtask.StatusRunning:
-				msg := fmt.Sprintf("Agent running in background with ID: %s.", result.ID)
-				if result.OutputFile != "" {
-					msg += fmt.Sprintf(" Output is being written to: %s.", result.OutputFile)
-				}
-				msg += " You will be notified when it completes."
-				if result.OutputFile != "" {
-					if formatHint != "" {
-						msg += fmt.Sprintf(" To check interim output, use Read on that file path (%s).", formatHint)
-					} else {
-						msg += " To check interim output, use Read on that file path."
-					}
-				}
-				return msg, nil
-			case backgroundtask.StatusFailed:
-				return "", fmt.Errorf("subagent %q task %q (%s) failed: %s",
-					in.SubagentType, result.ID, in.Description, result.Error)
-			case backgroundtask.StatusCanceled:
-				return "", fmt.Errorf("subagent %q task %q (%s) was canceled",
-					in.SubagentType, result.ID, in.Description)
-			default:
-				return result.Result, nil
-			}
+			return formatManagedAgentResult(in.SubagentType, result, formatHint)
 		})
 }
 
-// managedEventReceiverTransform gates the parent receivers configured before
-// it and then appends the task receiver. An empty current slice is valid: that
-// is the EmitInternalEvents=false path, where only task output is needed.
-func managedEventReceiverTransform[E any](backgrounded <-chan struct{}, taskReceiver agenttool.EventReceiver[E]) agenttool.EventReceiverTransform[E] {
+func formatManagedAgentResult(agentType string, task *backgroundtask.Task, formatHint string) (string, error) {
+	switch task.Status {
+	case backgroundtask.StatusCompleted:
+		return string(task.ResultData), nil
+	case backgroundtask.StatusPending, backgroundtask.StatusRunning:
+		message := fmt.Sprintf("Agent running in background with ID: %s.", task.Spec.ID)
+		if task.Spec.OutputFile != "" {
+			message += fmt.Sprintf(" Output is being written to: %s.", task.Spec.OutputFile)
+		}
+		message += " You will be notified when it completes."
+		if task.Spec.OutputFile != "" {
+			message += " To check interim output, use Read on that file path"
+			if formatHint != "" {
+				message += fmt.Sprintf(" (%s)", formatHint)
+			}
+			message += "."
+		}
+		return message, nil
+	case backgroundtask.StatusWaitingInput:
+		return fmt.Sprintf("Agent task %s requires input. Use task_output to inspect the request.", task.Spec.ID), nil
+	case backgroundtask.StatusSuspended:
+		return fmt.Sprintf("Agent task %s is %s.", task.Spec.ID, task.Status), nil
+	case backgroundtask.StatusCanceled:
+		return "", fmt.Errorf(
+			"subagent %q task %q (%s) was canceled",
+			agentType, task.Spec.ID, task.Spec.Description,
+		)
+	case backgroundtask.StatusFailed:
+		return "", fmt.Errorf(
+			"subagent %q task %q (%s) failed: %s",
+			agentType, task.Spec.ID, task.Spec.Description, task.ResultError,
+		)
+	default:
+		return "", fmt.Errorf("subagent %q task %q has unknown status %q", agentType, task.Spec.ID, task.Status)
+	}
+}
+
+type durableAgentToolResult struct {
+	TaskID         string                `json:"task_id"`
+	ChildSessionID string                `json:"child_session_id"`
+	Status         backgroundtask.Status `json:"status"`
+	Result         string                `json:"result,omitempty"`
+	OutputFile     string                `json:"output_file,omitempty"`
+	Error          string                `json:"error,omitempty"`
+}
+
+func formatDurableAgentResult(
+	agentType string,
+	task *backgroundtask.Task,
+) (string, error) {
+	if task == nil {
+		return "", errors.New("subagent: durable task result is required")
+	}
+	childSessionID, err := durablesubagent.ChildSessionIDFromTask(task)
+	if err != nil {
+		return "", err
+	}
+	switch task.Status {
+	case backgroundtask.StatusCompleted,
+		backgroundtask.StatusPending,
+		backgroundtask.StatusRunning,
+		backgroundtask.StatusWaitingInput,
+		backgroundtask.StatusSuspended,
+		backgroundtask.StatusCanceled,
+		backgroundtask.StatusFailed:
+		result := &durableAgentToolResult{
+			TaskID: task.Spec.ID, ChildSessionID: childSessionID,
+			Status: task.Status, OutputFile: task.Spec.OutputFile,
+		}
+		if task.Status == backgroundtask.StatusCompleted {
+			result.Result = string(task.ResultData)
+		}
+		if task.Status == backgroundtask.StatusCanceled ||
+			task.Status == backgroundtask.StatusFailed {
+			result.Error = task.ResultError
+		}
+		data, marshalErr := sonic.MarshalString(result)
+		if marshalErr != nil {
+			return "", marshalErr
+		}
+		return data, nil
+	default:
+		return "", fmt.Errorf(
+			"subagent %q task %q has unknown status %q",
+			agentType, task.Spec.ID, task.Status,
+		)
+	}
+}
+
+func managedEventReceiverTransform[E any](
+	backgrounded <-chan struct{},
+	taskReceiver agenttool.EventReceiver[E],
+) agenttool.EventReceiverTransform[E] {
 	return func(current []agenttool.EventReceiver[E]) []agenttool.EventReceiver[E] {
 		for i := range current {
 			receiver := current[i]
@@ -224,9 +277,6 @@ func managedEventReceiverTransform[E any](backgrounded <-chan struct{}, taskRece
 }
 
 func signalClosed(done <-chan struct{}) bool {
-	if done == nil {
-		return false
-	}
 	select {
 	case <-done:
 		return true
@@ -236,11 +286,13 @@ func signalClosed(done <-chan struct{}) bool {
 }
 
 type agentEventFileReceiver[M adk.MessageType] struct {
-	ctx     context.Context
-	writer  io.Writer
-	format  AgentEventFormat[M]
-	onError func(error)
-	failed  bool
+	ctx       context.Context
+	writer    io.Writer
+	format    TranscriptFormat[M]
+	onRecord  func([]byte) error
+	onError   func(error) error
+	failed    bool
+	reportErr error
 }
 
 type agentEventRecord struct {
@@ -248,30 +300,37 @@ type agentEventRecord struct {
 	Message   any    `json:"message"`
 }
 
-// receive encodes one event through the configured format and appends it as a line.
-// An empty line skips the event — nothing is written; a non-nil error marks the file
-// unreliable and stops further writes.
 func (r *agentEventFileReceiver[M]) receive(event *adk.TypedAgentEvent[M]) {
 	if r.failed {
 		return
 	}
-
-	line, err := r.format(r.ctx, event)
+	if event == nil || event.Output == nil || event.Output.MessageOutput == nil {
+		return
+	}
+	message, err := event.Output.MessageOutput.GetMessage()
+	if err != nil {
+		r.fail(fmt.Errorf("materialize agent output message: %w", err))
+		return
+	}
+	line, err := r.format(r.ctx, event.AgentName, message)
 	if err != nil {
 		r.fail(fmt.Errorf("encode agent output event: %w", err))
 		return
 	}
 	if line == "" {
-		return // skip: no line to write for this event
+		return
 	}
-
-	// Write the line and its newline in one call: a single write halves per-write
-	// backend overhead (lock/RPC) and keeps the line and its terminator atomic at the
-	// write boundary; the extra newline concat is cheap. io.WriteString uses the
-	// backend's StringWriter fast path when available, avoiding a []byte copy. Treat a
-	// short write as an error even when the writer reports nil, so a truncated line
-	// marks the file unreliable rather than being trusted as authoritative.
 	data := line + "\n"
+	if r.onRecord != nil {
+		if err = r.onRecord([]byte(data)); err != nil {
+			r.failed = true
+			r.reportErr = err
+			return
+		}
+	}
+	if r.writer == nil {
+		return
+	}
 	n, err := io.WriteString(r.writer, data)
 	if err == nil && n != len(data) {
 		err = io.ErrShortWrite
@@ -281,22 +340,24 @@ func (r *agentEventFileReceiver[M]) receive(event *adk.TypedAgentEvent[M]) {
 	}
 }
 
-// defaultAgentEventFormat is the built-in AgentEventFormat: it emits one JSON object
-// per message-bearing event — {agent_name, message} with the event's message (root
-// Extra stripped) — and skips (returns "") events that carry no materialized message.
-// The event kind is read from the message's own role and tool calls, so no separate
-// type field is added. It does not use ctx.
-func defaultAgentEventFormat[M adk.MessageType](_ context.Context, event *adk.TypedAgentEvent[M]) (string, error) {
-	if event == nil || event.Output == nil || event.Output.MessageOutput == nil {
-		return "", nil // skip: nothing to record
+func (r *agentEventFileReceiver[M]) fail(err error) {
+	if err == nil || r.failed {
+		return
 	}
-	msg, err := event.Output.MessageOutput.GetMessage()
-	if err != nil {
-		return "", fmt.Errorf("materialize agent output message: %w", err)
+	r.failed = true
+	if r.onError != nil {
+		r.reportErr = r.onError(err)
 	}
+}
+
+func defaultTranscriptFormat[M adk.MessageType](
+	_ context.Context,
+	agentName string,
+	message M,
+) (string, error) {
 	data, err := sonic.Marshal(&agentEventRecord{
-		AgentName: event.AgentName,
-		Message:   sanitizedMessageValue(msg),
+		AgentName: agentName,
+		Message:   sanitizedMessageValue(message),
 	})
 	if err != nil {
 		return "", fmt.Errorf("marshal agent output event: %w", err)
@@ -304,45 +365,32 @@ func defaultAgentEventFormat[M adk.MessageType](_ context.Context, event *adk.Ty
 	return string(data), nil
 }
 
-func (r *agentEventFileReceiver[M]) fail(err error) {
-	if err == nil || r.failed {
-		return
-	}
-	r.failed = true
-	if r.onError != nil {
-		r.onError(err)
-	}
-}
-
-// sanitizedMessageValue makes a non-mutating copy of a schema message and
-// removes its root Extra field before JSON serialization. Nested Extra fields,
-// custom extensions, and provider extensions remain part of the output.
-func sanitizedMessageValue[M adk.MessageType](msg M) any {
-	switch m := any(msg).(type) {
+func sanitizedMessageValue[M adk.MessageType](message M) any {
+	switch typed := any(message).(type) {
 	case adk.Message:
-		if m == nil {
+		if typed == nil {
 			return nil
 		}
-		cloned := *m
+		cloned := *typed
 		cloned.Extra = nil
 		return &cloned
 	case adk.AgenticMessage:
-		if m == nil {
+		if typed == nil {
 			return nil
 		}
-		cloned := *m
+		cloned := *typed
 		cloned.Extra = nil
 		return &cloned
+	default:
+		return message
 	}
-	return msg
 }
 
-// agentOutputFilePath allocates an output-file path under outputDir without
-// opening it. The work callback creates the file lazily through its single
-// append session. The file is named after the launching tool-call id (so it
-// matches Task.ToolUseID), falling back to a uuid when no tool-call id is in
-// context. Returns "" when output files are not configured.
-func agentOutputFilePath(ctx context.Context, store filesystem.AppendOpener, outputDir string) string {
+func reserveAgentOutput(
+	ctx context.Context,
+	store filesystem.AppendOpener,
+	outputDir string,
+) string {
 	if store == nil || outputDir == "" {
 		return ""
 	}
@@ -350,14 +398,139 @@ func agentOutputFilePath(ctx context.Context, store filesystem.AppendOpener, out
 	if name == "" {
 		name = uuid.NewString()
 	}
-	return filepath.Join(outputDir, name+".output")
+	path := filepath.Join(outputDir, name+".output")
+	writer, err := store.OpenAppend(ctx, &filesystem.OpenAppendRequest{FilePath: path})
+	if err != nil {
+		return ""
+	}
+	if err = writer.Close(); err != nil {
+		return ""
+	}
+	return path
 }
 
-// resolveSubAgent looks up the agent-as-tool adapter for subagentType and builds
-// the marshaled request for it. If prompt is empty, description is used as the
-// task request.
+// NameFromTask returns the persisted sub-agent routing name.
+func NameFromTask(task *backgroundtask.Task) string {
+	if task == nil || task.Spec.Kind != TaskKindSubagent {
+		return ""
+	}
+	var payload subagentPayloadV1
+	if err := sonic.Unmarshal(task.Spec.Payload, &payload); err != nil ||
+		payload.Version <= 0 || payload.SubAgentName == "" {
+		return ""
+	}
+	return payload.SubAgentName
+}
+
+func newDurableAgentTool[M adk.MessageType](
+	ctx context.Context,
+	config *TypedDurableBackgroundConfig[M],
+	agents []adk.TypedAgent[M],
+	name, desc string,
+) (tool.BaseTool, error) {
+	executor := config.Executor
+	for _, agent := range agents {
+		resumable, ok := agent.(adk.TypedResumableAgent[M])
+		if !ok {
+			return nil, fmt.Errorf("subagent: agent %q is not resumable", agent.Name(ctx))
+		}
+		agentName := agent.Name(ctx)
+		if err := executor.Register(agentName, &durablesubagent.AgentRegistration[M]{
+			Agent:             resumable,
+			RunOptionsFactory: config.RunOptionsFactories[agentName],
+		}); err != nil {
+			return nil, err
+		}
+	}
+	registered, _, err := config.Executors.LoadOrRegister(executor)
+	if err != nil {
+		return nil, err
+	}
+	typed, typeOK := registered.(*durablesubagent.Executor[M])
+	if !typeOK || typed != executor {
+		return nil, errors.New(
+			"subagent: Manager is already bound to a different durable Executor",
+		)
+	}
+
+	return utils.InferOptionableTool(name, desc, func(
+		callCtx context.Context,
+		in agentDurableInput,
+		opts ...tool.Option,
+	) (string, error) {
+		sessionID, ok := adk.RunnerSessionID(callCtx)
+		if !ok {
+			return "", errors.New(
+				"subagent: runner session is required for background notification",
+			)
+		}
+		prompt := in.Prompt
+		if prompt == "" {
+			prompt = in.Description
+		}
+		receivers, enableStreaming, invocationRunOptions := agenttool.ResolveInvocationOptions[
+			*adk.TypedAgentEvent[M],
+			adk.AgentRunOption,
+		](in.SubagentType, opts...)
+		if len(invocationRunOptions) > 0 {
+			return "", errors.New(
+				"subagent: durable execution does not support invocation-scoped run options; " +
+					"configure RunOptionsFactories",
+			)
+		}
+		detach := func() {}
+		if !in.RunInBackground {
+			callCtx, detach = agenttool.WithForegroundExecution(
+				callCtx, receivers, enableStreaming,
+			)
+			defer detach()
+		}
+		task, err := durablesubagent.Submit(callCtx, config.Manager, &durablesubagent.SubmitRequest[M]{
+			SubAgentName: in.SubagentType, Input: newTypedUserInput[M](prompt), Description: in.Description,
+			SessionID: sessionID, ChildSessionID: in.ChildSessionID,
+		})
+		if err != nil {
+			return "", err
+		}
+		timeoutMs := foreground.DefaultTimeoutMs
+		if config.ForegroundTimeoutMs != nil {
+			timeoutMs = *config.ForegroundTimeoutMs
+		}
+		task, err = foreground.Run(
+			callCtx,
+			config.Manager,
+			foreground.Policy{
+				TimeoutMs: timeoutMs, ShouldAutoBackground: config.ShouldAutoBackground,
+			},
+			&foreground.Request{
+				TaskID: task.Spec.ID, RunInBackground: in.RunInBackground,
+			},
+		)
+		if err != nil {
+			return "", err
+		}
+		return formatDurableAgentResult(in.SubagentType, task)
+	})
+}
+
+func newTypedUserInput[M adk.MessageType](query string) *adk.TypedAgentInput[M] {
+	var zero M
+	switch any(zero).(type) {
+	case *schema.Message:
+		return &adk.TypedAgentInput[M]{
+			Messages: []M{any(schema.UserMessage(query)).(M)},
+		}
+	case *schema.AgenticMessage:
+		return &adk.TypedAgentInput[M]{
+			Messages: []M{any(schema.UserAgenticMessage(query)).(M)},
+		}
+	default:
+		panic("unreachable: unsupported message type")
+	}
+}
+
 func resolveSubAgent(subAgents map[string]tool.InvokableTool, subagentType, prompt, description string) (tool.InvokableTool, string, error) {
-	a, ok := subAgents[subagentType]
+	agent, ok := subAgents[subagentType]
 	if !ok {
 		return nil, "", fmt.Errorf("subagent type %q not found", subagentType)
 	}
@@ -368,13 +541,12 @@ func resolveSubAgent(subAgents map[string]tool.InvokableTool, subagentType, prom
 	if err != nil {
 		return nil, "", err
 	}
-	return a, params, nil
+	return agent, params, nil
 }
 
-// defaultAgentToolDescription returns the agent tool description. The available
-// agent types are no longer embedded here (they are injected as a mid-conversation
-// system message); the {background_prompt} placeholder is filled by the middleware.
-func defaultAgentToolDescription[M adk.MessageType](ctx context.Context, subAgents []adk.TypedAgent[M]) (string, error) {
+// defaultAgentToolDescription returns the agent tool description. Available
+// agent types are injected as a mid-conversation system message.
+func defaultAgentToolDescription[M adk.MessageType](context.Context, []adk.TypedAgent[M]) (string, error) {
 	return internal.SelectPrompt(internal.I18nPrompts{
 		English: agentToolDescription,
 		Chinese: agentToolDescriptionChinese,

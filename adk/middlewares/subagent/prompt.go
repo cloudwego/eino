@@ -123,11 +123,11 @@ Reach for this when the task matches an available agent type, when you have inde
 
 	agentToolBackgroundPrompt = `
 
-Subagents run in the foreground by default; the tool call returns only once the sub-agent completes. Pass ` + "`" + `run_in_background: true` + "`" + ` to run it in the background instead — you'll be notified when it completes.`
+Subagents run in the foreground by default; the tool call returns only once the sub-agent completes. Pass ` + "`" + `run_in_background: true` + "`" + ` to run it in the background instead — you'll be notified when it completes. The result includes ` + "`" + `child_session_id` + "`" + `; pass it to a later agent call to continue the same child session with its prior history, or omit it to start a new child session.`
 
 	agentToolBackgroundPromptChinese = `
 
-子智能体默认在前台运行；工具调用会等到子智能体完成后才返回。若要改为后台运行，传 ` + "`" + `run_in_background: true` + "`" + `——完成时你会收到通知。`
+子智能体默认在前台运行；工具调用会等到子智能体完成后才返回。若要改为后台运行，传 ` + "`" + `run_in_background: true` + "`" + `——完成时你会收到通知。结果包含 ` + "`" + `child_session_id` + "`" + `；后续调用可传入该值以继承同一子会话的历史，省略则创建新的子会话。`
 
 	availableAgentTypesPreamble = `Available agent types for the Agent tool:`
 

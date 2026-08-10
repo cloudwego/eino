@@ -25,6 +25,10 @@ import (
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/adk/backgroundtask"
+	backgroundlocal "github.com/cloudwego/eino/adk/backgroundtask/local"
+	backgroundshell "github.com/cloudwego/eino/adk/backgroundtask/shell"
+	durablesubagent "github.com/cloudwego/eino/adk/backgroundtask/subagent"
+	backgroundtool "github.com/cloudwego/eino/adk/backgroundtask/tool"
 	"github.com/cloudwego/eino/adk/filesystem"
 	"github.com/cloudwego/eino/adk/internal"
 	backgroundtaskmw "github.com/cloudwego/eino/adk/middlewares/backgroundtask"
@@ -40,29 +44,51 @@ func init() {
 	schema.RegisterName[[]TODO]("_eino_adk_prebuilt_deep_todo_slice")
 }
 
-// BackgroundConfig enables background-task execution for a DeepAgent's top-level
-// agent. When set, shell commands and sub-agent runs can execute as managed
-// background tasks under one task-ID space, and the task_output/task_stop control
-// tools are injected once.
-//
-// It holds only configuration shared by both task kinds (shell and sub-agent). Knobs
-// that apply to only one kind — e.g. a custom sub-agent event encoder
-// (subagent.AgentEventFormat) — are intentionally not exposed here; compose the
-// subagent middleware directly when you need them.
-type BackgroundConfig struct {
-	// Manager is the shared background-task Manager. Required (a nil Manager is the
-	// same as no BackgroundConfig).
+// TypedBackgroundConfig enables selected background-task capabilities for a
+// DeepAgent's top-level agent under one shared task-ID space.
+type TypedBackgroundConfig[M adk.MessageType] struct {
+	// Manager is the single lifecycle authority shared by every enabled capability.
 	Manager *backgroundtask.Manager
+	// Executors is the registry configured on Manager and shared by every capability.
+	Executors *backgroundtask.ExecutorRegistry
+	// SubAgents enables reconstructable sub-agent runs.
+	SubAgents *TypedDurableSubAgentConfig[M]
+	// RecoverableShell enables task-ID-keyed commands that workers can recover.
+	RecoverableShell *RecoverableShellConfig
+	// LocalShell enables managed process-local Shell or StreamingShell runs.
+	LocalShell *LocalShellConfig
+	// ForegroundTimeoutMs and ShouldAutoBackground apply to every enabled capability.
+	ForegroundTimeoutMs  *int
+	ShouldAutoBackground func(context.Context, *backgroundtask.Task) bool
+	// TranscriptFormat customizes durable sub-agent session views.
+	TranscriptFormat subagent.TranscriptFormat[M]
+}
 
-	// OutputDir, when set together with Config.Backend, gives every managed
-	// background task (shell command or sub-agent run) an output file under this
-	// directory. Shell runs tee their output there as it streams (interim output);
-	// sub-agent runs write one JSON line per materialized event (the default encoder).
-	// The path is recorded on Task.OutputFile and surfaced when the task is launched
-	// in the background, so a backgrounded task's output is retrievable by path.
-	// Sub-agent output files are created lazily, so the path may briefly be visible
-	// before the file exists. When empty, tasks have no output file.
-	OutputDir string
+type BackgroundConfig = TypedBackgroundConfig[*schema.Message]
+
+// TypedDurableSubAgentConfig configures reconstructable sub-agent runs.
+type TypedDurableSubAgentConfig[M adk.MessageType] struct {
+	// Executor owns durable sub-agent session dependencies.
+	Executor *durablesubagent.Executor[M]
+	// RunOptionsFactories reconstructs deployment-owned options on every worker
+	// attempt and is forwarded to the durable sub-agent middleware. Equivalent
+	// configuration must remain available for the full lifetime of resumable tasks.
+	RunOptionsFactories map[string]durablesubagent.RunOptionsFactory
+}
+
+type DurableSubAgentConfig = TypedDurableSubAgentConfig[*schema.Message]
+
+// RecoverableShellConfig configures recoverable managed shell commands.
+type RecoverableShellConfig struct {
+	Shell              backgroundshell.RecoverableShell
+	OutputMaterializer backgroundtool.OutputMaterializer
+}
+
+// LocalShellConfig configures managed process-local shell commands.
+type LocalShellConfig struct {
+	Shell          filesystem.Shell
+	StreamingShell filesystem.StreamingShell
+	OutputDir      string
 }
 
 // TypedConfig defines the configuration for creating a DeepAgent parameterized by message type.
@@ -101,23 +127,21 @@ type TypedConfig[M adk.MessageType] struct {
 	// If set, an execute tool will be registered to support shell command execution.
 	// For advanced filesystem middleware configuration, leave Backend, Shell, and StreamingShell empty
 	// and pass a manually constructed filesystem middleware through Handlers.
-	// Optional. Mutually exclusive with StreamingShell.
+	// Optional. Mutually exclusive with StreamingShell and Background.LocalShell.
 	Shell filesystem.Shell
 	// StreamingShell provides streaming shell command execution capability.
 	// If set, a streaming execute tool will be registered to support streaming shell command execution.
 	// For advanced filesystem middleware configuration, leave Backend, Shell, and StreamingShell empty
 	// and pass a manually constructed filesystem middleware through Handlers.
-	// Optional. Mutually exclusive with Shell.
+	// Optional. Mutually exclusive with Shell and Background.LocalShell.
 	StreamingShell filesystem.StreamingShell
-
-	// Background configures background-task execution for the top-level agent: it
-	// can spawn sub-agents and run shell commands as managed background tasks under
-	// one task-ID space, and the task_output/task_stop control tools are injected
+	// Background configures selected background-task capabilities for the
+	// top-level agent under one task-ID space, and injects task_output/task_stop
 	// once. Background is intentionally NOT propagated to the general or user
 	// sub-agents: their shell runs stay foreground/buffered and they cannot launch
 	// background work, so background orchestration is a top-level concern only. When
 	// nil, the top-level agent has no background-task support. See BackgroundConfig.
-	Background *BackgroundConfig
+	Background *TypedBackgroundConfig[M]
 
 	// WithoutWriteTodos disables the built-in write_todos tool when set to true.
 	WithoutWriteTodos bool
@@ -152,12 +176,76 @@ type TypedConfig[M adk.MessageType] struct {
 // Config defines the configuration for creating a standard DeepAgent.
 type Config = TypedConfig[*schema.Message]
 
+func validateTypedConfig[M adk.MessageType](cfg *TypedConfig[M]) error {
+	if cfg == nil {
+		return fmt.Errorf("deep: config is required")
+	}
+	if cfg.Background == nil {
+		return nil
+	}
+	if cfg.Background.Manager == nil {
+		return fmt.Errorf("deep: background Manager is required")
+	}
+	if cfg.Background.Executors == nil {
+		return fmt.Errorf("deep: background executor registry is required")
+	}
+	if cfg.Background.SubAgents == nil &&
+		cfg.Background.RecoverableShell == nil &&
+		cfg.Background.LocalShell == nil {
+		return fmt.Errorf("deep: at least one background capability is required")
+	}
+	if cfg.Background.SubAgents != nil &&
+		cfg.Background.SubAgents.Executor == nil {
+		return fmt.Errorf("deep: background SubAgents Executor is required")
+	}
+	if cfg.Background.RecoverableShell != nil &&
+		cfg.Background.RecoverableShell.Shell == nil {
+		return fmt.Errorf("deep: background RecoverableShell Shell is required")
+	}
+	if cfg.Background.LocalShell != nil &&
+		cfg.Background.LocalShell.Shell == nil &&
+		cfg.Background.LocalShell.StreamingShell == nil {
+		return fmt.Errorf(
+			"deep: Background.LocalShell requires Shell or StreamingShell",
+		)
+	}
+	if cfg.Background.LocalShell != nil &&
+		cfg.Background.LocalShell.Shell != nil &&
+		cfg.Background.LocalShell.StreamingShell != nil {
+		return fmt.Errorf(
+			"deep: Background.LocalShell Shell and StreamingShell are mutually exclusive",
+		)
+	}
+	if cfg.Background.LocalShell != nil &&
+		(cfg.Shell != nil || cfg.StreamingShell != nil) {
+		return fmt.Errorf(
+			"deep: foreground Shell or StreamingShell cannot be combined with Background.LocalShell",
+		)
+	}
+	if cfg.Background.RecoverableShell != nil &&
+		(cfg.Shell != nil || cfg.StreamingShell != nil) {
+		return fmt.Errorf(
+			"deep: recoverable shell, Shell, and StreamingShell are mutually exclusive",
+		)
+	}
+	if cfg.Background.RecoverableShell != nil &&
+		cfg.Background.LocalShell != nil {
+		return fmt.Errorf(
+			"deep: Background.RecoverableShell and Background.LocalShell are mutually exclusive",
+		)
+	}
+	return nil
+}
+
 // NewTyped creates a new typed Deep agent instance with the provided configuration.
 // This function initializes built-in tools, creates a task tool for subagent orchestration,
 // and returns a fully configured TypedChatModelAgent ready for execution.
 func NewTyped[M adk.MessageType](ctx context.Context, cfg *TypedConfig[M]) (adk.TypedResumableAgent[M], error) {
-	// Sub-agents never get the Manager: their shell runs stay foreground/buffered
-	// and they cannot launch background work (see Config.Manager).
+	if err := validateTypedConfig(cfg); err != nil {
+		return nil, err
+	}
+	// Sub-agents never get the background configuration: their shell runs stay
+	// foreground/buffered and they cannot launch background work.
 	subAgentHandlers, err := buildTypedBuiltinAgentMiddlewares(ctx, cfg, nil)
 	if err != nil {
 		return nil, err
@@ -189,15 +277,10 @@ func NewTyped[M adk.MessageType](ctx context.Context, cfg *TypedConfig[M]) (adk.
 				ToolName:                 taskToolName,
 				ToolDescriptionGenerator: cfg.TaskToolDescriptionGenerator,
 			}
-			if cfg.Background != nil && cfg.Background.Manager != nil {
-				subCfg.Background = &subagent.TypedBackgroundConfig[M]{
-					Manager:     cfg.Background.Manager,
-					OutputStore: backendAppendOpener(cfg.Backend),
-					OutputDir:   cfg.Background.OutputDir,
-					// EventFormat left nil => subagent's default encoder.
-				}
+			if cfg.Background != nil && cfg.Background.SubAgents != nil {
+				subCfg.Background = deepSubagentBackground(cfg)
 			}
-			subagentMW, err := subagent.NewTyped[M](ctx, subCfg)
+			subagentMW, err := subagent.NewTyped(ctx, subCfg)
 			if err != nil {
 				return nil, fmt.Errorf("failed to create subagent middleware: %w", err)
 			}
@@ -207,8 +290,27 @@ func NewTyped[M adk.MessageType](ctx context.Context, cfg *TypedConfig[M]) (adk.
 
 	// When background support is configured, wire its control tools
 	// (task_output/task_stop) exactly once at the top level.
-	if cfg.Background != nil && cfg.Background.Manager != nil {
-		controlMW, err := backgroundtaskmw.NewTyped[M](ctx, &backgroundtaskmw.TypedConfig[M]{Manager: cfg.Background.Manager})
+	if manager := deepBackgroundManager(cfg.Background); manager != nil {
+		progressReaders := make(map[string]backgroundtaskmw.TaskProgressReader)
+		if cfg.Background.SubAgents != nil {
+			subagentReader, err := subagent.NewDurableTaskProgressReader(
+				cfg.Background.SubAgents.Executor,
+				cfg.Background.TranscriptFormat,
+			)
+			if err != nil {
+				return nil, fmt.Errorf("create durable sub-agent progress reader: %w", err)
+			}
+			progressReaders[durablesubagent.ExecutorKey] = subagentReader
+		}
+		reader, err := backgroundtool.NewProgressReader(manager, 0)
+		if err != nil {
+			return nil, fmt.Errorf("create managed-tool progress reader: %w", err)
+		}
+		progressReaders[backgroundtool.ExecutorKey] = reader
+		progressReaders[backgroundtool.RecoverableExecutorKey] = reader
+		controlMW, err := backgroundtaskmw.NewTyped(ctx, &backgroundtaskmw.TypedConfig[M]{
+			Manager: manager, ProgressReadersByExecutorKey: progressReaders,
+		})
 		if err != nil {
 			return nil, fmt.Errorf("failed to create background-task control middleware: %w", err)
 		}
@@ -316,7 +418,7 @@ func buildSubAgentsList[M adk.MessageType](ctx context.Context, cfg *TypedConfig
 	return allSubAgents, nil
 }
 
-func buildTypedBuiltinAgentMiddlewares[M adk.MessageType](ctx context.Context, cfg *TypedConfig[M], background *BackgroundConfig) ([]adk.TypedChatModelAgentMiddleware[M], error) {
+func buildTypedBuiltinAgentMiddlewares[M adk.MessageType](ctx context.Context, cfg *TypedConfig[M], background *TypedBackgroundConfig[M]) ([]adk.TypedChatModelAgentMiddleware[M], error) {
 	var ms []adk.TypedChatModelAgentMiddleware[M]
 	if !cfg.WithoutWriteTodos {
 		t, err := typedNewWriteTodos[M]()
@@ -326,17 +428,41 @@ func buildTypedBuiltinAgentMiddlewares[M adk.MessageType](ctx context.Context, c
 		ms = append(ms, t)
 	}
 
-	if cfg.Backend != nil || cfg.Shell != nil || cfg.StreamingShell != nil {
+	recoverableShell := deepRecoverableShell(background)
+	localShell, localStreamingShell := deepLocalShells(background)
+	shell := cfg.Shell
+	streamingShell := cfg.StreamingShell
+	if localShell != nil || localStreamingShell != nil {
+		shell = localShell
+		streamingShell = localStreamingShell
+	}
+	if cfg.Backend != nil || shell != nil || streamingShell != nil ||
+		recoverableShell != nil {
 		mwCfg := &filesystem2.MiddlewareConfig{
-			Backend:        cfg.Backend,
-			Shell:          cfg.Shell,
-			StreamingShell: cfg.StreamingShell,
+			Backend: cfg.Backend, Shell: shell, StreamingShell: streamingShell,
 		}
-		if background != nil && background.Manager != nil {
-			mwCfg.Background = &filesystem2.BackgroundConfig{
-				Manager:     background.Manager,
-				OutputStore: backendAppendOpener(cfg.Backend),
-				OutputDir:   background.OutputDir,
+		if deepFilesystemBackgroundEnabled(background) {
+			if background.RecoverableShell != nil {
+				mwCfg.Background = &filesystem2.BackgroundConfig{
+					Recoverable: &filesystem2.RecoverableBackgroundConfig{
+						Shell: recoverableShell, Manager: background.Manager,
+						Executors:            background.Executors,
+						OutputMaterializer:   background.RecoverableShell.OutputMaterializer,
+						ForegroundTimeoutMs:  background.ForegroundTimeoutMs,
+						ShouldAutoBackground: background.ShouldAutoBackground,
+					},
+				}
+			} else {
+				runner, err := deepLocalShellRunner(background)
+				if err != nil {
+					return nil, err
+				}
+				mwCfg.Background = &filesystem2.BackgroundConfig{
+					Local: &filesystem2.LocalBackgroundConfig{
+						Runner: runner, OutputStore: backendAppendOpener(cfg.Backend),
+						OutputDir: deepShellOutputDir(background),
+					},
+				}
 			}
 		}
 		fm, err := filesystem2.NewTyped[M](ctx, mwCfg)
@@ -347,6 +473,78 @@ func buildTypedBuiltinAgentMiddlewares[M adk.MessageType](ctx context.Context, c
 	}
 
 	return ms, nil
+}
+
+func deepBackgroundManager[M adk.MessageType](background *TypedBackgroundConfig[M]) *backgroundtask.Manager {
+	if background == nil {
+		return nil
+	}
+	return background.Manager
+}
+
+func deepLocalShellRunner[M adk.MessageType](
+	background *TypedBackgroundConfig[M],
+) (*backgroundlocal.Runner, error) {
+	if background == nil || background.LocalShell == nil {
+		return nil, nil
+	}
+	return backgroundlocal.New(&backgroundlocal.Config{
+		Manager:              background.Manager,
+		Executors:            background.Executors,
+		ForegroundTimeoutMs:  background.ForegroundTimeoutMs,
+		ShouldAutoBackground: background.ShouldAutoBackground,
+	})
+}
+
+func deepRecoverableShell[M adk.MessageType](
+	background *TypedBackgroundConfig[M],
+) backgroundshell.RecoverableShell {
+	if background == nil || background.RecoverableShell == nil {
+		return nil
+	}
+	return background.RecoverableShell.Shell
+}
+
+func deepLocalShells[M adk.MessageType](
+	background *TypedBackgroundConfig[M],
+) (filesystem.Shell, filesystem.StreamingShell) {
+	if background == nil || background.LocalShell == nil {
+		return nil, nil
+	}
+	return background.LocalShell.Shell, background.LocalShell.StreamingShell
+}
+
+func deepFilesystemBackgroundEnabled[M adk.MessageType](
+	background *TypedBackgroundConfig[M],
+) bool {
+	return background != nil &&
+		(background.LocalShell != nil || background.RecoverableShell != nil)
+}
+
+func deepShellOutputDir[M adk.MessageType](background *TypedBackgroundConfig[M]) string {
+	if background == nil {
+		return ""
+	}
+	if background.LocalShell != nil {
+		return background.LocalShell.OutputDir
+	}
+	return ""
+}
+
+func deepSubagentBackground[M adk.MessageType](
+	cfg *TypedConfig[M],
+) *subagent.TypedBackgroundConfig[M] {
+	return &subagent.TypedBackgroundConfig[M]{
+		TranscriptFormat: cfg.Background.TranscriptFormat,
+		Durable: &subagent.TypedDurableBackgroundConfig[M]{
+			Manager:              cfg.Background.Manager,
+			Executors:            cfg.Background.Executors,
+			Executor:             cfg.Background.SubAgents.Executor,
+			ForegroundTimeoutMs:  cfg.Background.ForegroundTimeoutMs,
+			ShouldAutoBackground: cfg.Background.ShouldAutoBackground,
+			RunOptionsFactories:  cfg.Background.SubAgents.RunOptionsFactories,
+		},
+	}
 }
 
 // backendAppendOpener returns b as a filesystem.AppendOpener when it supports

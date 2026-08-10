@@ -53,3 +53,19 @@ func TestResolveEventReceivers_TransformsInOptionOrder(t *testing.T) {
 	}
 	assert.Equal(t, []string{"before", "first", "second"}, calls)
 }
+
+func TestResolveInvocationOptionsFiltersAgentAndPreservesOrder(t *testing.T) {
+	receivers, streaming, options := ResolveInvocationOptions[int, string](
+		"worker",
+		WithInvocationOptions("other", []string{"ignored"}),
+		WithInvocationOptions("worker", []string{"first"}),
+		WithInvocationStreaming[string](true),
+		WithInvocationOptions("worker", []string{"second"}),
+		WithEventReceiverTransform(func(current []EventReceiver[int]) []EventReceiver[int] {
+			return append(current, func(int) {})
+		}),
+	)
+	assert.True(t, streaming)
+	assert.Equal(t, []string{"first", "second"}, options)
+	assert.Len(t, receivers, 1)
+}

@@ -26,8 +26,8 @@ package backgroundtask
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"sync"
 	"time"
 
 	"github.com/cloudwego/eino/adk"
@@ -62,6 +62,12 @@ type ToolConfig struct {
 // *schema.Message message type. It is the default specialization of TypedConfig.
 type Config = TypedConfig[*schema.Message]
 
+// TaskProgressReader projects executor-specific progress without mutating task
+// state. Implementations may be called concurrently.
+type TaskProgressReader interface {
+	ReadProgress(context.Context, *bgtask.Task) (string, error)
+}
+
 // TypedConfig configures the background-task control middleware, parameterized by
 // message type.
 type TypedConfig[M adk.MessageType] struct {
@@ -71,6 +77,9 @@ type TypedConfig[M adk.MessageType] struct {
 	// It is typically the same Manager the domain middlewares (subagent, filesystem)
 	// were given, so a single task-ID space spans agent and shell runs.
 	Manager *bgtask.Manager
+	// ProgressReadersByExecutorKey selects progress projections by persisted ExecutorKey.
+	// Readers may be called concurrently and must not mutate task lifecycle state.
+	ProgressReadersByExecutorKey map[string]TaskProgressReader
 
 	// TaskOutputToolConfig configures the task_output tool. Optional.
 	TaskOutputToolConfig *ToolConfig
@@ -81,24 +90,29 @@ type TypedConfig[M adk.MessageType] struct {
 // New creates a middleware that injects the task_output and task_stop tools, bound
 // to the Manager in config, for the standard *schema.Message message type.
 func New(ctx context.Context, config *Config) (adk.ChatModelAgentMiddleware, error) {
-	return NewTyped[*schema.Message](ctx, config)
+	return NewTyped(ctx, config)
 }
 
 // NewTyped creates a background-task control middleware parameterized by message type.
 // See New for behavior details.
-func NewTyped[M adk.MessageType](_ context.Context, config *TypedConfig[M]) (adk.TypedChatModelAgentMiddleware[M], error) {
+func NewTyped[M adk.MessageType](ctx context.Context, config *TypedConfig[M]) (adk.TypedChatModelAgentMiddleware[M], error) {
 	if config == nil || config.Manager == nil {
 		return nil, fmt.Errorf("backgroundtask: Manager is required")
 	}
 	mgr := config.Manager
-	queried := newQueryTracker()
 
 	outputEnabled := !disabled(config.TaskOutputToolConfig)
 	stopEnabled := !disabled(config.TaskStopToolConfig)
 
 	var tools []tool.BaseTool
 	if outputEnabled {
-		outputTool, err := newTaskOutputTool(mgr, queried, config.TaskOutputToolConfig)
+		progressReaders := make(map[string]TaskProgressReader, len(config.ProgressReadersByExecutorKey))
+		for key, reader := range config.ProgressReadersByExecutorKey {
+			if key != "" && reader != nil {
+				progressReaders[key] = reader
+			}
+		}
+		outputTool, err := newTaskOutputTool(mgr, config.TaskOutputToolConfig, progressReaders)
 		if err != nil {
 			return nil, fmt.Errorf("backgroundtask: failed to create task_output tool: %w", err)
 		}
@@ -200,25 +214,8 @@ type taskOutputInput struct {
 	TaskID string `json:"task_id" jsonschema:"required" jsonschema_description:"The task ID to get output from"`
 	// Block defaults to true (wait for the task to finish). A *bool distinguishes
 	// "omitted" (wait) from an explicit false (return the current status now).
-	Block   *bool `json:"block,omitempty" jsonschema_description:"Whether to wait for the task to complete. Defaults to true; set false to return the current status immediately."`
+	Block   *bool `json:"block,omitempty" jsonschema_description:"Whether to wait for a lifecycle state change or completion. Defaults to true; progress events alone do not wake this wait. Set false to return current state immediately."`
 	Timeout int   `json:"timeout,omitempty" jsonschema_description:"Maximum time to wait in milliseconds when blocking. Defaults to 30000; capped at 600000."`
-}
-
-// queryTracker is owned by the task_output middleware, not by Manager. It keeps
-// consumption bookkeeping out of the lifecycle registry.
-type queryTracker struct {
-	mu      sync.Mutex
-	queried map[string]struct{}
-}
-
-func newQueryTracker() *queryTracker {
-	return &queryTracker{queried: make(map[string]struct{})}
-}
-
-func (q *queryTracker) mark(id string) {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	q.queried[id] = struct{}{}
 }
 
 const (
@@ -226,99 +223,149 @@ const (
 	maxTaskOutputTimeoutMs     = 600000
 )
 
-func newTaskOutputTool(mgr *bgtask.Manager, queried *queryTracker, cfg *ToolConfig) (tool.InvokableTool, error) {
+func newTaskOutputTool(
+	mgr *bgtask.Manager,
+	cfg *ToolConfig,
+	progressReaders map[string]TaskProgressReader,
+) (tool.InvokableTool, error) {
 	name := selectToolName(cfg, taskOutputToolName)
 	desc := selectToolDesc(cfg, taskOutputToolDescription, taskOutputToolDescriptionChinese)
 	return utils.InferTool(name, desc, func(ctx context.Context, input taskOutputInput) (string, error) {
-		task, ok := resolveTask(ctx, mgr, input)
-		if !ok {
+		if task, err := mgr.Get(ctx, input.TaskID); err == nil {
+			return resolveDurableTaskWithReaders(
+				ctx, mgr, task, input, progressReaders,
+			)
+		} else if errors.Is(err, bgtask.ErrNotFound) {
 			return fmt.Sprintf("Task %q not found", input.TaskID), nil
+		} else {
+			return "", err
 		}
-
-		// Only mark the result as consumed once the task has actually finished.
-		// A still-running task has no final result yet, so polling its status
-		// must not mark a never-read result as consumed.
-		if task.Status != bgtask.StatusRunning {
-			queried.mark(input.TaskID)
-		}
-
-		return formatTask(task), nil
 	})
 }
 
-// resolveTask fetches the task, optionally blocking until it finishes. Blocking is
-// the default; it is bounded by input.Timeout (clamped to [0, max], default 30s).
-// The returned bool reports whether the task exists (not whether it finished).
-func resolveTask(ctx context.Context, mgr *bgtask.Manager, input taskOutputInput) (*bgtask.Task, bool) {
-	if input.Block != nil && !*input.Block {
-		return mgr.Get(input.TaskID)
+func resolveDurableTask(
+	ctx context.Context,
+	mgr *bgtask.Manager,
+	task *bgtask.Task,
+	input taskOutputInput,
+	readProgress func(context.Context, *bgtask.Task) (string, error),
+) (string, error) {
+	if readProgress == nil {
+		return resolveDurableTaskWithReaders(ctx, mgr, task, input, nil)
 	}
+	readers := map[string]TaskProgressReader{
+		task.Spec.ExecutorKey: taskProgressReaderFunc(readProgress),
+	}
+	return resolveDurableTaskWithReaders(ctx, mgr, task, input, readers)
+}
 
-	timeoutMs := input.Timeout
-	if timeoutMs <= 0 {
-		timeoutMs = defaultTaskOutputTimeoutMs
-	}
-	if timeoutMs > maxTaskOutputTimeoutMs {
-		timeoutMs = maxTaskOutputTimeoutMs
-	}
+type taskProgressReaderFunc func(context.Context, *bgtask.Task) (string, error)
 
-	waitCtx, cancel := context.WithTimeout(ctx, time.Duration(timeoutMs)*time.Millisecond)
-	defer cancel()
-	// Wait's bool reports whether the task reached a terminal state; for the tool we
-	// only care whether the task exists, so translate via the returned snapshot.
-	task, _ := mgr.Wait(waitCtx, input.TaskID)
-	return task, task != nil
+func (f taskProgressReaderFunc) ReadProgress(ctx context.Context, task *bgtask.Task) (string, error) {
+	return f(ctx, task)
+}
+
+func resolveDurableTaskWithReaders(
+	ctx context.Context,
+	mgr *bgtask.Manager,
+	task *bgtask.Task,
+	input taskOutputInput,
+	progressReaders map[string]TaskProgressReader,
+) (string, error) {
+	block := input.Block == nil || *input.Block
+	if block && waitableStatus(task.Status) {
+		timeout := input.Timeout
+		if timeout <= 0 {
+			timeout = defaultTaskOutputTimeoutMs
+		}
+		if timeout > maxTaskOutputTimeoutMs {
+			timeout = maxTaskOutputTimeoutMs
+		}
+		waitCtx, cancel := context.WithTimeout(ctx, time.Duration(timeout)*time.Millisecond)
+		defer cancel()
+		for waitableStatus(task.Status) {
+			next, waitErr := mgr.WaitForTaskVersion(waitCtx, &bgtask.WaitForTaskVersionRequest{
+				TaskID: input.TaskID, AfterVersion: task.Version,
+			})
+			if waitErr != nil {
+				if errors.Is(waitErr, context.DeadlineExceeded) || errors.Is(waitErr, context.Canceled) {
+					break
+				}
+				return "", waitErr
+			}
+			task = next
+		}
+	}
+	result := formatTask(task)
+	if reader := progressReaders[task.Spec.ExecutorKey]; reader != nil {
+		progress, progressErr := reader.ReadProgress(ctx, task)
+		if progressErr != nil {
+			result += fmt.Sprintf("\nTranscript unavailable: %s", progressErr)
+		} else if progress != "" {
+			result += "\n" + progress
+		}
+	}
+	return result, nil
+}
+
+func waitableStatus(status bgtask.Status) bool {
+	return status == bgtask.StatusPending ||
+		status == bgtask.StatusRunning
 }
 
 type taskStopInput struct {
 	TaskID string `json:"task_id" jsonschema:"required" jsonschema_description:"The ID of the background task to stop"`
+	Reason string `json:"reason,omitempty" jsonschema_description:"Optional reason for stopping the background task"`
 }
 
 func newTaskStopTool(mgr *bgtask.Manager, cfg *ToolConfig) (tool.InvokableTool, error) {
 	name := selectToolName(cfg, taskStopToolName)
 	desc := selectToolDesc(cfg, taskStopToolDescription, taskStopToolDescriptionChinese)
 	return utils.InferTool(name, desc, func(ctx context.Context, input taskStopInput) (string, error) {
-		if err := mgr.Cancel(input.TaskID); err != nil {
+		task, err := mgr.RequestCancel(
+			ctx, input.TaskID, bgtask.WithCancellationReason(input.Reason),
+		)
+		if err != nil {
 			return fmt.Sprintf("Failed to stop task %q: %s", input.TaskID, err.Error()), nil
 		}
-		return fmt.Sprintf("Successfully stopped task: %s", input.TaskID), nil
+		if task.Status == bgtask.StatusCanceled {
+			return fmt.Sprintf("Successfully stopped task: %s", input.TaskID), nil
+		}
+		return fmt.Sprintf("Stop requested for task %s", input.TaskID), nil
 	})
 }
 
 func formatTask(task *bgtask.Task) string {
-	result := fmt.Sprintf("Task ID: %s\nDescription: %s\nStatus: %s",
-		task.ID, task.Description, task.Status)
-
-	// When the task has a reliable output file, the file is authoritative — point at
-	// it and do not inline Result. The file carries the same (or interim) output and
-	// may be large, so Read'ing it selectively avoids inlining the whole blob. When a
-	// write to the file failed (OutputFileErr set), neither side is the complete
-	// output: the file has a gap, and Result is only what the worker returned (which
-	// may be empty while the task runs, or a partial projection of the file). Report
-	// the failure honestly and surface Result as best-effort current data rather than
-	// presenting either as authoritative. Without an output file, Result is the only
-	// copy, so inline it.
-	if task.OutputFile != "" && task.OutputFileErr == "" {
-		result += fmt.Sprintf("\nOutput file: %s (use Read on this path for the output)", task.OutputFile)
-	} else {
-		if task.Result != "" {
-			result += fmt.Sprintf("\nResult: %s", task.Result)
-		}
-		if task.OutputFile != "" {
-			result += fmt.Sprintf("\nOutput file: %s (incomplete — a write failed: %s; full output is unavailable. The Result above, if any, is the best-effort output captured so far and may be empty or partial)",
-				task.OutputFile, task.OutputFileErr)
-		}
+	result := fmt.Sprintf(
+		"Task ID: %s\nDescription: %s\nStatus: %s",
+		task.Spec.ID, task.Spec.Description, task.Status,
+	)
+	label := "Output transcript"
+	switch task.Spec.Kind {
+	case "subagent":
+		label = "Event transcript (JSONL)"
+	case "bash":
+		label = "Command output transcript"
 	}
-	if task.Error != "" {
-		result += fmt.Sprintf("\nError: %s", task.Error)
+	if task.Spec.OutputFile != "" && task.OutputFileErr == "" {
+		result += fmt.Sprintf("\n%s: %s (use Read on this path for the output)", label, task.Spec.OutputFile)
+	} else if task.Spec.OutputFile != "" {
+		result += fmt.Sprintf(
+			"\n%s: %s (incomplete — a write failed: %s; full transcript is unavailable. The terminal Result, if any, remains authoritative)",
+			label, task.Spec.OutputFile, task.OutputFileErr,
+		)
+	}
+	if len(task.ResultData) > 0 {
+		result += fmt.Sprintf("\nResult: %s", string(task.ResultData))
+	}
+	if task.ResultError != "" {
+		result += fmt.Sprintf("\nError: %s", task.ResultError)
 	}
 	if task.DoneAt != nil {
-		// Report elapsed time rather than an absolute timestamp: a wall-clock time
-		// carries no zone here and is ambiguous, while the duration is zone-independent
-		// and more useful. Duration.String() picks a readable unit (ms/s/m); Round trims
-		// sub-millisecond noise.
-		result += fmt.Sprintf("\nElapsed: %s", task.DoneAt.Sub(task.CreatedAt).Round(time.Millisecond))
+		result += fmt.Sprintf(
+			"\nElapsed: %s",
+			task.DoneAt.Sub(task.CreatedAt).Round(time.Millisecond),
+		)
 	}
-
 	return result
 }
