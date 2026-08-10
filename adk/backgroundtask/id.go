@@ -17,83 +17,12 @@
 package backgroundtask
 
 import (
-	"math/rand"
-	"time"
+	"crypto/rand"
+	"encoding/base64"
 )
 
-// Task-id layout: a positive int64 (63 usable bits) packed as
-//
-//	[ 41 bits ms timestamp ][ 12 bits sequence ][ 10 bits random ]
-//
-// Uniqueness within a process is guaranteed by (timestamp, sequence): the
-// sequence resets each millisecond and increments for every id minted within the
-// same millisecond, all under the Manager lock. If more than 2^12 ids are minted
-// in a single millisecond the generator spins to the next millisecond rather than
-// wrapping the sequence, so (timestamp, sequence) never repeats. The random low
-// bits only make ids look unordered/unpredictable; they are not relied upon for
-// uniqueness.
-//
-// 41 bits of milliseconds covers ~69 years; 12 bits allows 4096 ids per
-// millisecond before the generator advances to the next millisecond.
-const (
-	idSeqBits    = 12
-	idRandomBits = 10
-	idSeqLimit   = 1 << idSeqBits
-	idRandomMask = (1 << idRandomBits) - 1
-)
-
-// nextRawID packs the next task id integer. Must be called with m.mu held, as it
-// reads and advances m.seq / m.lastMs.
-func (m *Manager) nextRawID() int64 {
-	ms := time.Now().UnixMilli()
-	switch {
-	case ms > m.lastMs:
-		m.lastMs = ms
-		m.seq = 0
-	default:
-		// Same millisecond (or a backward clock step): keep the id monotonic by
-		// staying on lastMs and advancing the sequence. On sequence overflow, move
-		// to the next millisecond so (timestamp, sequence) stays unique.
-		ms = m.lastMs
-		m.seq++
-		if m.seq >= idSeqLimit {
-			ms = m.waitNextMs(m.lastMs)
-			m.lastMs = ms
-			m.seq = 0
-		}
-	}
-
-	//nolint:gosec // non-cryptographic: random bits only diffuse the id's look.
-	r := int64(rand.Intn(idRandomMask + 1))
-	return (ms << (idSeqBits + idRandomBits)) | (m.seq << idRandomBits) | r
-}
-
-// waitNextMs busy-waits until the wall clock advances past prevMs. Reached only
-// when more than 2^12 ids are minted within one millisecond.
-func (m *Manager) waitNextMs(prevMs int64) int64 {
-	ms := time.Now().UnixMilli()
-	for ms <= prevMs {
-		ms = time.Now().UnixMilli()
-	}
-	return ms
-}
-
-// base62 encodes a non-negative int64 using [0-9A-Za-z]. It is the compact,
-// URL-safe textual form of a task id's integer.
-func base62(n int64) string {
-	const alphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
-	if n == 0 {
-		return "0"
-	}
-	var buf [11]byte // ceil(63 / log2(62)) = 11
-	i := len(buf)
-	for n > 0 {
-		i--
-		buf[i] = alphabet[n%62]
-		n /= 62
-	}
-	return string(buf[i:])
-}
+const taskIDEntropyBytes = 16
+const maxTaskIDKindBytes = 64
 
 // defaultTaskIDPrefix is used when a task has no Type tag.
 const defaultTaskIDPrefix = "task"
@@ -106,4 +35,26 @@ func taskIDPrefix(taskType string) string {
 		return defaultTaskIDPrefix
 	}
 	return taskType
+}
+
+func defaultTaskID(kind string) (string, error) {
+	var entropy [taskIDEntropyBytes]byte
+	if _, err := rand.Read(entropy[:]); err != nil {
+		return "", err
+	}
+	return taskIDPrefix(kind) + "_" + base64.RawURLEncoding.EncodeToString(entropy[:]), nil
+}
+
+func validTaskIDKind(kind string) bool {
+	if len(kind) > maxTaskIDKindBytes {
+		return false
+	}
+	for i := 0; i < len(kind); i++ {
+		c := kind[i]
+		if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') &&
+			(c < '0' || c > '9') && c != '-' && c != '_' {
+			return false
+		}
+	}
+	return true
 }

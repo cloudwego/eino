@@ -20,15 +20,20 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"reflect"
 	"sync"
 	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/mock/gomock"
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/adk/backgroundtask"
+	backgroundshell "github.com/cloudwego/eino/adk/backgroundtask/shell"
+	durablesubagent "github.com/cloudwego/eino/adk/backgroundtask/subagent"
+	backgroundtool "github.com/cloudwego/eino/adk/backgroundtask/tool"
 	"github.com/cloudwego/eino/adk/filesystem"
 	filesystem2 "github.com/cloudwego/eino/adk/middlewares/filesystem"
 	"github.com/cloudwego/eino/adk/prebuilt/planexecute"
@@ -39,6 +44,40 @@ import (
 	mockModel "github.com/cloudwego/eino/internal/mock/components/model"
 	"github.com/cloudwego/eino/schema"
 )
+
+func mustNewBackgroundManager(
+	t testing.TB,
+	ctx context.Context,
+	config *backgroundtask.Config,
+) *backgroundtask.Manager {
+	t.Helper()
+	if config == nil {
+		config = &backgroundtask.Config{}
+	} else {
+		copy := *config
+		config = &copy
+	}
+	if config.SendTaskCreatedEvent == nil {
+		config.SendTaskCreatedEvent = func(context.Context, *backgroundtask.Task) error { return nil }
+	}
+	manager, err := backgroundtask.New(ctx, config)
+	require.NoError(t, err)
+	return manager
+}
+
+func mustDeepDurableExecutor(
+	t *testing.T,
+) *durablesubagent.Executor[*schema.Message] {
+	t.Helper()
+	store := adksession.NewInMemoryStore[*schema.Message](nil)
+	executor, err := durablesubagent.NewExecutor(
+		&durablesubagent.ExecutorConfig[*schema.Message]{
+			SessionStore: store, CheckPointStore: store,
+		},
+	)
+	require.NoError(t, err)
+	return executor
+}
 
 type sequentialAgenticModel struct {
 	responses []*schema.AgenticMessage
@@ -161,6 +200,22 @@ type deepMockShell struct{}
 
 func (m *deepMockShell) Execute(ctx context.Context, req *filesystem.ExecuteRequest) (*filesystem.ExecuteResponse, error) {
 	return &filesystem.ExecuteResponse{Output: "ok"}, nil
+}
+
+type deepRecoverableShellStub struct{}
+
+func (*deepRecoverableShellStub) StartCommand(
+	context.Context,
+	*backgroundshell.StartCommandRequest,
+) (backgroundtool.Run, error) {
+	return nil, nil
+}
+
+func (*deepRecoverableShellStub) RecoverCommand(
+	context.Context,
+	*backgroundshell.RecoverCommandRequest,
+) (backgroundtool.Run, error) {
+	return nil, nil
 }
 
 func TestGenModelInput(t *testing.T) {
@@ -413,13 +468,16 @@ func TestDeepAgentManagerWiring(t *testing.T) {
 
 	// With a Manager, the top-level built-in handlers route execute through it, so
 	// the execute tool gains a run_in_background field.
-	mgr := backgroundtask.New(ctx, &backgroundtask.Config{})
+	mgr := mustNewBackgroundManager(t, ctx, &backgroundtask.Config{})
 	defer func() { _ = mgr.Close(ctx) }()
 
 	handlers, err := buildTypedBuiltinAgentMiddlewares(ctx, &Config{
 		WithoutWriteTodos: true,
-		Shell:             &deepMockShell{},
-	}, &BackgroundConfig{Manager: mgr})
+	}, &BackgroundConfig{
+		Manager:    mgr,
+		Executors:  backgroundtask.NewExecutorRegistry(),
+		LocalShell: &LocalShellConfig{Shell: &deepMockShell{}},
+	})
 	assert.NoError(t, err)
 	assert.Len(t, handlers, 1)
 
@@ -451,21 +509,133 @@ func TestDeepAgentManagerWiring(t *testing.T) {
 	assert.False(t, ok, "unmanaged execute must not expose run_in_background")
 }
 
+func TestDeepRecoverableShellDoesNotCreateLocalRunner(t *testing.T) {
+	manager := mustNewBackgroundManager(t, context.Background(), nil)
+	defer manager.Close(context.Background())
+	shell := &deepRecoverableShellStub{}
+	background := &BackgroundConfig{
+		Manager:   manager,
+		Executors: backgroundtask.NewExecutorRegistry(),
+		RecoverableShell: &RecoverableShellConfig{
+			Shell: shell,
+		},
+	}
+
+	require.Same(t, shell, deepRecoverableShell(background))
+	require.Empty(t, deepShellOutputDir(background))
+	runner, err := deepLocalShellRunner(background)
+	require.NoError(t, err)
+	require.Nil(t, runner)
+
+	handlers, err := buildTypedBuiltinAgentMiddlewares(
+		context.Background(),
+		&Config{WithoutWriteTodos: true},
+		background,
+	)
+	require.NoError(t, err)
+	require.Len(t, handlers, 1)
+}
+
+func TestDeepBackgroundConfigRequiresExplicitCapabilities(t *testing.T) {
+	backgroundType := reflect.TypeOf(BackgroundConfig{})
+	for _, field := range []string{
+		"Manager", "SubAgents", "RecoverableShell", "LocalShell",
+		"ForegroundTimeoutMs", "ShouldAutoBackground",
+	} {
+		_, ok := backgroundType.FieldByName(field)
+		require.True(t, ok, "BackgroundConfig.%s must exist", field)
+	}
+	for _, field := range []string{"Local", "Durable"} {
+		_, ok := backgroundType.FieldByName(field)
+		require.False(t, ok, "BackgroundConfig.%s must stay removed", field)
+	}
+	_, hasLegacyRecoverableShell := reflect.TypeOf(Config{}).FieldByName("RecoverableShell")
+	require.False(t, hasLegacyRecoverableShell)
+
+	_, err := New(context.Background(), &Config{Background: &BackgroundConfig{}})
+	require.ErrorContains(t, err, "Manager is required")
+
+	manager := mustNewBackgroundManager(t, context.Background(), nil)
+	_, err = New(context.Background(), &Config{Background: &BackgroundConfig{
+		Manager:   manager,
+		Executors: backgroundtask.NewExecutorRegistry(),
+	}})
+	require.ErrorContains(t, err, "at least one background capability is required")
+
+	_, err = New(context.Background(), &Config{Background: &BackgroundConfig{
+		Manager:    manager,
+		Executors:  backgroundtask.NewExecutorRegistry(),
+		LocalShell: &LocalShellConfig{},
+	}})
+	require.ErrorContains(t, err, "requires Shell or StreamingShell")
+
+	_, err = New(context.Background(), &Config{Background: &BackgroundConfig{
+		Manager:   manager,
+		Executors: backgroundtask.NewExecutorRegistry(),
+		SubAgents: &TypedDurableSubAgentConfig[*schema.Message]{},
+	}})
+	require.ErrorContains(t, err, "Executor is required")
+
+}
+
+func TestDeepSubAgentBackgroundForwardsRunOptionsFactories(t *testing.T) {
+	factory := func() ([]adk.AgentRunOption, error) {
+		return []adk.AgentRunOption{adk.WithTimelineEvents()}, nil
+	}
+	format := func(
+		_ context.Context,
+		agentName string,
+		message *schema.Message,
+	) (string, error) {
+		return agentName + ": " + message.Content, nil
+	}
+	manager := mustNewBackgroundManager(t, context.Background(), nil)
+	defer manager.Close(context.Background())
+	background := deepSubagentBackground(&TypedConfig[*schema.Message]{
+		Background: &TypedBackgroundConfig[*schema.Message]{
+			Manager:          manager,
+			Executors:        backgroundtask.NewExecutorRegistry(),
+			TranscriptFormat: format,
+			SubAgents: &TypedDurableSubAgentConfig[*schema.Message]{
+				Executor: mustDeepDurableExecutor(t),
+				RunOptionsFactories: map[string]durablesubagent.RunOptionsFactory{
+					"worker": factory,
+				},
+			},
+		},
+	})
+	require.NotNil(t, background.Durable)
+	require.NotNil(t, background.Durable.RunOptionsFactories["worker"])
+	options, err := background.Durable.RunOptionsFactories["worker"]()
+	require.NoError(t, err)
+	assert.Len(t, options, 1)
+	formatted, err := background.TranscriptFormat(
+		context.Background(), "worker", schema.AssistantMessage("done", nil),
+	)
+	require.NoError(t, err)
+	assert.Equal(t, "worker: done", formatted)
+}
+
 // NewTyped with a Manager injects the task_output/task_stop control tools and a
 // background-capable subagent tool exactly once at the top level.
 func TestDeepAgentNewTypedWithManager(t *testing.T) {
 	ctx := context.Background()
-	mgr := backgroundtask.New(ctx, &backgroundtask.Config{})
+	mgr := mustNewBackgroundManager(t, ctx, &backgroundtask.Config{})
 	defer func() { _ = mgr.Close(ctx) }()
 
 	cm := mockModel.NewMockToolCallingChatModel(gomock.NewController(t))
-
 	agent, err := New(ctx, &Config{
 		Name:        "deep",
 		Description: "deep agent",
 		ChatModel:   cm,
 		Shell:       &deepMockShell{},
-		Background:  &BackgroundConfig{Manager: mgr},
+		Background: &BackgroundConfig{
+			Manager:   mgr,
+			Executors: backgroundtask.NewExecutorRegistry(),
+			SubAgents: &TypedDurableSubAgentConfig[*schema.Message]{
+				Executor: mustDeepDurableExecutor(t),
+			},
+		},
 	})
 	assert.NoError(t, err)
 	assert.NotNil(t, agent)

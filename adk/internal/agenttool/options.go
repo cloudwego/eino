@@ -34,6 +34,12 @@ type eventReceiverOptions[E any] struct {
 	transforms []EventReceiverTransform[E]
 }
 
+type invocationOptions[O any] struct {
+	agentName       string
+	options         []O
+	enableStreaming bool
+}
+
 // WithEventReceiverTransform adds an internal receiver-list transform to an
 // AgentTool invocation.
 func WithEventReceiverTransform[E any](transform EventReceiverTransform[E]) tool.Option {
@@ -52,4 +58,40 @@ func ResolveEventReceivers[E any](opts ...tool.Option) []EventReceiver[E] {
 		receivers = transform(receivers)
 	}
 	return receivers
+}
+
+// WithInvocationOptions associates agent run options with one AgentTool target.
+func WithInvocationOptions[O any](agentName string, options []O) tool.Option {
+	return tool.WrapImplSpecificOptFn(func(o *invocationOptions[O]) {
+		o.agentName = agentName
+		o.options = options
+	})
+}
+
+// WithInvocationStreaming configures whether an AgentTool should stream its inner run.
+func WithInvocationStreaming[O any](enabled bool) tool.Option {
+	return tool.WrapImplSpecificOptFn(func(o *invocationOptions[O]) {
+		o.enableStreaming = enabled
+	})
+}
+
+// ResolveInvocationOptions preserves tool-option order while selecting options for agentName.
+func ResolveInvocationOptions[E any, O any](
+	agentName string,
+	opts ...tool.Option,
+) ([]EventReceiver[E], bool, []O) {
+	receivers := ResolveEventReceivers[E](opts...)
+	var options []O
+	var enableStreaming bool
+	for _, opt := range opts {
+		resolved := tool.GetImplSpecificOptions[invocationOptions[O]](nil, opt)
+		if resolved == nil {
+			continue
+		}
+		enableStreaming = enableStreaming || resolved.enableStreaming
+		if resolved.agentName == agentName {
+			options = append(options, resolved.options...)
+		}
+	}
+	return receivers, enableStreaming, options
 }

@@ -25,6 +25,8 @@ import (
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/adk/backgroundtask"
+	backgroundlocal "github.com/cloudwego/eino/adk/backgroundtask/local"
+	durablesubagent "github.com/cloudwego/eino/adk/backgroundtask/subagent"
 	"github.com/cloudwego/eino/adk/filesystem"
 	"github.com/cloudwego/eino/adk/internal"
 	"github.com/cloudwego/eino/adk/middlewares/internal/systemreminder"
@@ -72,64 +74,55 @@ type BackgroundConfig = TypedBackgroundConfig[*schema.Message]
 // making them visible via Get/List, and the Agent tool gains a run_in_background
 // parameter.
 type TypedBackgroundConfig[M adk.MessageType] struct {
-	// Manager is the shared background-task Manager. Required (a nil Manager is the
-	// same as no BackgroundConfig). It may be shared with other middlewares (e.g.
-	// filesystem) so a single task-ID space spans agent and shell runs. The
-	// task_output/task_stop control tools are NOT injected here; wire the
-	// backgroundtask control middleware (adk/middlewares/backgroundtask) once, bound
-	// to the same Manager.
-	Manager *backgroundtask.Manager
-
-	// OutputStore and OutputDir, when both set, give every managed sub-agent run an
-	// output file at OutputDir/<id>.output and record the path on Task.OutputFile, so
-	// a backgrounded run's output is retrievable by path (and large results need not
-	// be inlined). The path is allocated before the run and the file is created
-	// lazily by the work callback, so a newly returned background task may briefly
-	// advertise the path before it exists. The Manager itself never writes.
-	//
-	// The output file is line-oriented: one line per materialized AgentEvent,
-	// appended as events arrive so a backgrounded run's interim output is visible
-	// before it completes. EventFormat encodes each event into its line (see
-	// AgentEventFormat) and therefore defines the file's actual format. When
-	// EventFormat is nil, the default encoder writes one JSON object per line (JSONL):
-	// {agent_name, message}, with the event's message (root Extra stripped) carrying
-	// its own role and any tool calls/results — no separate type field. A custom
-	// EventFormat may emit any per-line text and may skip events — e.g. skipping every
-	// event but the final assistant answer to get a final-result-only file.
-	//
-	// OutputStore is a filesystem.AppendOpener (filesystem.InMemoryBackend
-	// implements it); output files require one. When either is unset, runs have no
-	// output file.
-	OutputStore filesystem.AppendOpener
-	OutputDir   string
-	EventFormat AgentEventFormat[M]
+	Local   *TypedLocalBackgroundConfig[M]
+	Durable *TypedDurableBackgroundConfig[M]
+	// TranscriptFormat formats one materialized sub-agent message for both local
+	// output persistence and durable task_output session views.
+	TranscriptFormat TranscriptFormat[M]
 }
 
-// AgentEventFormat encodes one materialized AgentEvent into the text of a single
-// output-file line (the framework appends the newline). It runs once per event, on
-// the run's Recv stack (serially, single-consumer), so it needs no synchronization.
-// ctx is the run's (detached) context; honor it for cancellation and read request
-// values from it as needed.
-//
-// Returns:
-//   - (line, nil) with line != "": the line is written, followed by a newline.
-//   - ("", nil): skip — the event contributes no line. Skipping every event but the
-//     final answer yields a final-result-only file.
-//   - (_, err): the write is abandoned and the output file is marked unreliable, so
-//     task_output reports the file's failed state instead of trusting a partial file.
-type AgentEventFormat[M adk.MessageType] func(ctx context.Context, event *adk.TypedAgentEvent[M]) (string, error)
+type LocalBackgroundConfig = TypedLocalBackgroundConfig[*schema.Message]
 
-// outputFileFormatHint is the human-readable description of the default encoder's
-// output, surfaced to the launcher in the managed agent tool's background-run message
-// so the reader knows to interpret the file as JSONL.
-const outputFileFormatHint = `JSONL — one JSON object per line, each a materialized event {agent_name, message}; the message carries its own role and any tool calls/results.`
+// TypedLocalBackgroundConfig configures process-local managed sub-agent runs.
+type TypedLocalBackgroundConfig[M adk.MessageType] struct {
+	Runner      *backgroundlocal.Runner
+	OutputStore filesystem.AppendOpener
+	OutputDir   string
+}
+
+type DurableBackgroundConfig = TypedDurableBackgroundConfig[*schema.Message]
+
+// TypedDurableBackgroundConfig configures reconstructable sub-agent runs.
+type TypedDurableBackgroundConfig[M adk.MessageType] struct {
+	Manager   *backgroundtask.Manager
+	Executors *backgroundtask.ExecutorRegistry
+	// Executor owns the durable session dependencies and must be the same
+	// instance on every middleware sharing Manager.
+	Executor             *durablesubagent.Executor[M]
+	ForegroundTimeoutMs  *int
+	ShouldAutoBackground func(context.Context, *backgroundtask.Task) bool
+	// RunOptionsFactories reconstructs deployment-owned run options by sub-agent
+	// name for every execution attempt. Every worker serving a name must configure
+	// a semantically equivalent factory for the full lifetime of resumable tasks.
+	// Incompatible changes require draining those tasks or using a new sub-agent name.
+	RunOptionsFactories map[string]durablesubagent.RunOptionsFactory
+}
+
+// TranscriptFormat formats one materialized sub-agent message as one transcript
+// record. Returning an empty string skips the message. It may be called
+// concurrently and must not mutate the message.
+type TranscriptFormat[M adk.MessageType] func(
+	ctx context.Context,
+	agentName string,
+	message M,
+) (string, error)
 
 // New creates a ChatModelAgentMiddleware that injects sub-agent tools into the agent context.
 //
-// The middleware injects an Agent tool for spawning sub-agents. When Config.Manager is
-// provided, agent runs are tracked by the shared background-task Manager and the Agent
-// tool gains a run_in_background parameter. The task_output/task_stop control tools are
-// NOT injected here; wire the backgroundtask control middleware
+// The middleware injects an Agent tool for spawning sub-agents. When Background
+// is configured, agent runs are tracked by the shared background-task Manager and
+// the Agent tool gains a run_in_background parameter. The task_output/task_stop
+// control tools are NOT injected here; wire the backgroundtask control middleware
 // (adk/middlewares/backgroundtask) once, bound to the same Manager.
 func New(ctx context.Context, config *Config) (adk.ChatModelAgentMiddleware, error) {
 	return NewTyped[*schema.Message](ctx, config)
@@ -170,18 +163,14 @@ func NewTyped[M adk.MessageType](ctx context.Context, config *TypedConfig[M]) (a
 		return nil, err
 	}
 
-	backgroundEnabled := config.Background != nil && config.Background.Manager != nil
-
-	// The background-run note now lives in the tool description (not the system prompt),
-	// filled into the {background_prompt} placeholder only when background is enabled.
-	bgPrompt := ""
-	if backgroundEnabled {
-		bgPrompt = internal.SelectPrompt(internal.I18nPrompts{
+	backgroundPrompt := ""
+	if config.Background != nil {
+		backgroundPrompt = internal.SelectPrompt(internal.I18nPrompts{
 			English: agentToolBackgroundPrompt,
 			Chinese: agentToolBackgroundPromptChinese,
 		})
 	}
-	desc, err = pyfmt.Fmt(desc, map[string]any{"background_prompt": bgPrompt})
+	desc, err = pyfmt.Fmt(desc, map[string]any{"background_prompt": backgroundPrompt})
 	if err != nil {
 		return nil, err
 	}
@@ -189,12 +178,20 @@ func NewTyped[M adk.MessageType](ctx context.Context, config *TypedConfig[M]) (a
 	// With a Manager, the tool exposes run_in_background and routes through the
 	// Manager; without one it is a plain foreground spawn.
 	var at tool.BaseTool
-	if backgroundEnabled {
-		at, err = newManagedAgentTool[M](config.Background.Manager, subAgentToolMap, agentOutput[M]{
-			store:     config.Background.OutputStore,
-			outputDir: config.Background.OutputDir,
-			format:    config.Background.EventFormat,
-		}, toolName, desc)
+	if config.Background != nil {
+		if config.Background.Local != nil {
+			at, err = newManagedAgentTool[M](
+				config.Background.Local.Runner, subAgentToolMap,
+				agentOutput[M]{
+					store:     config.Background.Local.OutputStore,
+					outputDir: config.Background.Local.OutputDir,
+					format:    config.Background.TranscriptFormat,
+				},
+				toolName, desc,
+			)
+		} else {
+			at, err = newDurableAgentTool[M](ctx, config.Background.Durable, config.SubAgents, toolName, desc)
+		}
 	} else {
 		at, err = newAgentTool(subAgentToolMap, toolName, desc)
 	}
@@ -204,8 +201,7 @@ func NewTyped[M adk.MessageType](ctx context.Context, config *TypedConfig[M]) (a
 
 	tools := []tool.BaseTool{at}
 
-	// Build system prompt. The background-run note is no longer appended here; it now
-	// lives in the tool description via the {background_prompt} placeholder.
+	// Build system prompt.
 	var instruction string
 	if config.SystemPrompt != nil {
 		instruction = *config.SystemPrompt
@@ -216,21 +212,22 @@ func NewTyped[M adk.MessageType](ctx context.Context, config *TypedConfig[M]) (a
 		})
 	}
 
-	// The sub-agent set is fixed at construction, so the available-agent-types
-	// mid-conversation system reminder is built once here and inserted (once) at run time.
-	var reminder string
-	if len(config.SubAgents) > 0 {
-		entries := make([]agentTypeEntry, 0, len(config.SubAgents))
-		for _, a := range config.SubAgents {
-			entries = append(entries, agentTypeEntry{Name: a.Name(ctx), Description: a.Description(ctx)})
-		}
+	entries := make([]agentTypeEntry, 0, len(config.SubAgents))
+	for _, agent := range config.SubAgents {
+		entries = append(entries, agentTypeEntry{
+			Name:        agent.Name(ctx),
+			Description: agent.Description(ctx),
+		})
+	}
+	reminder := ""
+	if len(entries) > 0 {
 		reminder = buildAgentTypesSectionFromEntries(entries)
 	}
 
 	return &typedSubagentMiddleware[M]{
 		tools:       tools,
-		instruction: instruction,
 		reminder:    reminder,
+		instruction: instruction,
 	}, nil
 }
 
@@ -253,17 +250,10 @@ func (m *typedSubagentMiddleware[M]) BeforeAgent(ctx context.Context, runCtx *ad
 	return ctx, &nRunCtx, nil
 }
 
-// BeforeModelRewriteState publishes the available agent types as a mid-conversation
-// system message, inserted after the latest user message. The set of sub-agents is
-// fixed at construction, so the message is inserted exactly once: Has skips
-// re-insertion when it is already in the (reconstructed) history, and Insert persists
-// it as a MessageInserted event so it carries across turns.
 func (m *typedSubagentMiddleware[M]) BeforeModelRewriteState(ctx context.Context, state *adk.TypedChatModelAgentState[M], _ *adk.TypedModelContext[M]) (context.Context, *adk.TypedChatModelAgentState[M], error) {
 	if state == nil || m.reminder == "" {
 		return ctx, state, nil
 	}
-	// Align any reminders reconstructed from history with the configured role; the fresh
-	// insert below is already built with that role.
 	state.Messages = systemreminder.NormalizeReminderRoles(state.Messages)
 	if !systemreminder.Has(state.Messages, agentTypesReminderExtraKey) {
 		state.Messages = systemreminder.Insert(ctx, state.Messages, agentTypesReminderExtraKey, m.reminder, nil)
@@ -278,12 +268,12 @@ func buildAgentTypesSectionFromEntries(entries []agentTypeEntry) string {
 		English: availableAgentTypesPreamble,
 		Chinese: availableAgentTypesPreambleChinese,
 	})
-	var sb strings.Builder
-	sb.WriteString(preamble)
+	var builder strings.Builder
+	builder.WriteString(preamble)
 	for _, entry := range entries {
-		sb.WriteString(fmt.Sprintf("\n- %s: %s", entry.Name, entry.Description))
+		_, _ = fmt.Fprintf(&builder, "\n- %s: %s", entry.Name, entry.Description)
 	}
-	return sb.String()
+	return builder.String()
 }
 
 type agentTypeEntry struct {
@@ -292,6 +282,9 @@ type agentTypeEntry struct {
 }
 
 func validate[M adk.MessageType](ctx context.Context, c *TypedConfig[M]) error {
+	if c == nil {
+		return fmt.Errorf("subagent: config is required")
+	}
 	if len(c.SubAgents) == 0 {
 		return fmt.Errorf("subagent: SubAgents must not be empty")
 	}
@@ -303,6 +296,28 @@ func validate[M adk.MessageType](ctx context.Context, c *TypedConfig[M]) error {
 			return fmt.Errorf("subagent: duplicate agent name %q", name)
 		}
 		names[name] = struct{}{}
+	}
+	if c.Background != nil {
+		if (c.Background.Local == nil) == (c.Background.Durable == nil) {
+			return fmt.Errorf("subagent: exactly one of Background.Local or Background.Durable is required")
+		}
+		if c.Background.Local != nil && c.Background.Local.Runner == nil {
+			return fmt.Errorf("subagent: local background Runner is required")
+		}
+		if c.Background.Durable != nil {
+			if c.Background.Durable.Manager == nil ||
+				c.Background.Durable.Executors == nil ||
+				c.Background.Durable.Executor == nil {
+				return fmt.Errorf(
+					"subagent: durable background Manager, executor registry, and Executor are required",
+				)
+			}
+			for _, agent := range c.SubAgents {
+				if _, ok := agent.(adk.TypedResumableAgent[M]); !ok {
+					return fmt.Errorf("subagent: durable agent %q is not resumable", agent.Name(ctx))
+				}
+			}
+		}
 	}
 
 	return nil

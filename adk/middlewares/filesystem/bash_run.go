@@ -18,6 +18,8 @@ package filesystem
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"path/filepath"
@@ -25,6 +27,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/cloudwego/eino/adk/backgroundtask"
+	backgroundlocal "github.com/cloudwego/eino/adk/backgroundtask/local"
 	"github.com/cloudwego/eino/adk/filesystem"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/components/tool/utils"
@@ -32,17 +35,9 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
-// ExecuteTaskType is the backgroundtask Task.Type tag for shell-command tasks
-// launched by the execute tool. A shared Manager's ShouldAutoBackground hook can
-// match on it to apply shell-specific policy, recovering the command via
-// CommandFromTask.
-//
-// When the filesystem middleware is configured with both a Backend and an
-// OutputDir, the managed execute tool writes each task's output to a file under
-// that directory and records the path on Task.OutputFile (streaming runs tee
-// chunks as interim output; buffered runs write the result on completion). The
-// Manager itself never writes — the execute tool owns it.
-const ExecuteTaskType = "bash"
+// ExecuteTaskKind identifies shell-command tasks in host-side policy. The core
+// backgroundtask Spec does not persist display/filter labels.
+const ExecuteTaskKind = "bash"
 
 // defaultBashStartupPreviewMs is the caller-visible startup window for an
 // explicitly backgrounded StreamingShell run. The task is backgrounded from the
@@ -50,22 +45,37 @@ const ExecuteTaskType = "bash"
 // such as OAuth URLs are not hidden in the background output file.
 const defaultBashStartupPreviewMs = 1_000
 
-// MetadataKeyCommand is the RunInput.Metadata / Task.Metadata key under which the
-// execute tool records the shell command for a task. A ShouldAutoBackground hook
-// reads it (via CommandFromTask) to apply command-specific policy without parsing
-// the human-readable Description. The value is a string.
-const MetadataKeyCommand = "command"
+const shellPayloadVersion = 1
 
-// CommandFromTask returns the shell command recorded in a shell task's metadata
-// under MetadataKeyCommand. The execute tool always records it for shell tasks, so
-// a hook receiving a task of ExecuteTaskType can rely on a non-empty result; it
-// returns "" only when given a nil or non-shell task.
+type shellPayloadV1 struct {
+	Version int    `json:"version"`
+	Command string `json:"command"`
+}
+
+// CommandFromTask returns the process-local shell task description.
 func CommandFromTask(t *backgroundtask.Task) string {
-	if t == nil {
+	if t == nil || t.Spec.Kind != ExecuteTaskKind {
 		return ""
 	}
-	cmd, _ := t.Metadata[MetadataKeyCommand].(string)
-	return cmd
+	payload, err := decodeShellPayload(t.Spec.Payload)
+	if err != nil {
+		return ""
+	}
+	return payload.Command
+}
+
+func decodeShellPayload(data []byte) (*shellPayloadV1, error) {
+	var payload shellPayloadV1
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return nil, err
+	}
+	if payload.Version != shellPayloadVersion {
+		return nil, backgroundtask.ErrUnsupportedExecutorPayloadVersion
+	}
+	if payload.Command == "" {
+		return nil, fmt.Errorf("filesystem: shell payload command is required")
+	}
+	return &payload, nil
 }
 
 // outputSink bundles the output-file configuration for a managed execute tool: a
@@ -74,6 +84,11 @@ func CommandFromTask(t *backgroundtask.Task) string {
 type outputSink struct {
 	store     filesystem.AppendOpener
 	outputDir string
+}
+
+type toolDefinition struct {
+	name string
+	desc string
 }
 
 // bashOutputWriter tees a managed execute task's output to a file via a
@@ -87,17 +102,15 @@ type outputSink struct {
 // output as chunks arrive. It is single-consumer: append is called serially on
 // the StreamReaderWithConvert Recv stack, so no synchronization is needed.
 //
-// On the first append failure the file is left with a gap, so the writer records
-// the failure via mgr.MarkOutputFileUnreliable (keyed by taskID, which the work
-// func receives from the Manager and sets on the writer before its first append)
-// and stops attempting further writes.
+// On the first append failure the file is left with a gap, so the writer reports
+// an unreliable typed update and stops attempting further writes.
 type bashOutputWriter struct {
-	mgr    *backgroundtask.Manager
-	store  filesystem.AppendOpener // nil => disabled
-	path   string
-	stream io.WriteCloser // opened lazily by the streaming work; nil => not open
-	taskID string         // set by the work func once the Manager assigns it
-	failed bool           // set after the first append error: the file is now partial
+	store   filesystem.AppendOpener // nil => disabled
+	path    string
+	stream  io.WriteCloser // opened lazily by the streaming work; nil => not open
+	ctx     context.Context
+	runtime backgroundtask.ExecutionRuntime
+	failed  bool // set after the first append error: the file is now partial
 }
 
 // reserveBashOutput builds a writer that tees under the sink, or a disabled writer
@@ -105,12 +118,12 @@ type bashOutputWriter struct {
 // empty up front (open+close, which creates the file on open) so the advertised path
 // exists before any output; if even that reservation fails, it returns a disabled
 // writer so the task advertises no output file and consumers fall back to the
-// in-memory Result. The file is named after the launching tool-call id (so it matches
-// Task.ToolUseID), falling back to a uuid when no tool-call id is in context.
+// in-memory ResultData. The file is named after the launching tool-call id, falling
+// back to a uuid when no tool-call id is in context.
 //
 // The streaming append session is not opened here: it is opened by the work func
 // (see open) under the work's context, so it survives the run being backgrounded.
-func reserveBashOutput(ctx context.Context, mgr *backgroundtask.Manager, sink outputSink) *bashOutputWriter {
+func reserveBashOutput(ctx context.Context, sink outputSink) *bashOutputWriter {
 	if sink.store == nil || sink.outputDir == "" {
 		return &bashOutputWriter{}
 	}
@@ -123,45 +136,54 @@ func reserveBashOutput(ctx context.Context, mgr *backgroundtask.Manager, sink ou
 		return &bashOutputWriter{}
 	}
 	return &bashOutputWriter{
-		mgr:   mgr,
 		store: sink.store,
 		path:  path,
 	}
 }
 
-// fail records that a write to the output file failed: it stops further writes and
-// marks the file unreliable (by task id) so task_output reports the file's failed
-// state instead of trusting the partial file.
-func (w *bashOutputWriter) fail(err error) {
+func (w *bashOutputWriter) fail(err error) error {
 	w.failed = true
-	w.mgr.MarkOutputFileUnreliable(w.taskID, err.Error())
+	if w.runtime == nil {
+		return nil
+	}
+	if reportErr := w.runtime.ReportTranscriptFailure(w.ctx, err); reportErr != nil {
+		return fmt.Errorf("report transcript failure after %v: %w", err, reportErr)
+	}
+	return nil
 }
 
 // open opens the streaming append session for a streaming run. ctx is the work's
 // context (detached from the caller), so the session outlives a backgrounded run.
 // On failure the writer is marked failed and the file unreliable, so subsequent
 // appends are no-ops. It is a no-op for a disabled writer.
-func (w *bashOutputWriter) open(ctx context.Context) {
+func (w *bashOutputWriter) open(ctx context.Context, runtime backgroundtask.ExecutionRuntime) error {
 	if w.store == nil || w.failed {
-		return
+		return nil
 	}
+	w.ctx = ctx
+	w.runtime = runtime
 	stream, err := w.store.OpenAppend(ctx, &filesystem.OpenAppendRequest{FilePath: w.path})
 	if err != nil {
-		w.fail(err)
-		return
+		return w.fail(err)
 	}
 	w.stream = stream
+	return nil
 }
 
 // append tees content to the open streaming session. The session binds its context
 // at open, so no ctx is needed here.
-func (w *bashOutputWriter) append(content string) {
+func (w *bashOutputWriter) append(content string) error {
 	if w.stream == nil || w.failed {
-		return
+		return nil
 	}
-	if _, err := io.WriteString(w.stream, content); err != nil {
-		w.fail(err)
+	n, err := io.WriteString(w.stream, content)
+	if err == nil && n != len(content) {
+		err = io.ErrShortWrite
 	}
+	if err != nil {
+		return w.fail(err)
+	}
+	return nil
 }
 
 // closeStream finalizes the streaming session, flushing buffered content and
@@ -170,30 +192,37 @@ func (w *bashOutputWriter) append(content string) {
 // on context cancellation; only a fresh Close error marks the file unreliable, since
 // a stream broken by an earlier write was already marked there. No-op for a disabled
 // writer.
-func (w *bashOutputWriter) closeStream() {
+func (w *bashOutputWriter) closeStream() error {
 	if w.stream == nil {
-		return
+		return nil
 	}
 	if err := w.stream.Close(); err != nil && !w.failed {
-		w.mgr.MarkOutputFileUnreliable(w.taskID, err.Error())
+		w.stream = nil
+		return w.fail(err)
 	}
 	w.stream = nil
+	return nil
 }
 
 // appendResult writes the full buffered result to the output file. Used by the
 // buffered (non-streaming) work, which produces no incremental chunks: it is just a
 // single-chunk stream, so it reuses the same open→append→close session as the
 // streaming path. It is a no-op for a disabled writer.
-func (w *bashOutputWriter) appendResult(ctx context.Context, content string) {
-	w.open(ctx)
-	w.append(content)
-	w.closeStream()
+func (w *bashOutputWriter) appendResult(ctx context.Context, runtime backgroundtask.ExecutionRuntime, content string) error {
+	if err := w.open(ctx, runtime); err != nil {
+		return err
+	}
+	if err := w.append(content); err != nil {
+		_ = w.closeStream()
+		return err
+	}
+	return w.closeStream()
 }
 
 // outputFileName returns the base name (without extension) for a task's output
-// file: the launching tool-call id when present (so the file matches
-// Task.ToolUseID), or a uuid fallback when no tool-call id is in context — the
-// fallback keeps names unique so concurrent untagged tasks don't collide.
+// file: the launching tool-call id when present, or a uuid fallback when no
+// tool-call id is in context. The fallback keeps names unique so concurrent
+// untagged tasks don't collide.
 func outputFileName(ctx context.Context) string {
 	if id := compose.GetToolCallID(ctx); id != "" {
 		return id
@@ -201,25 +230,31 @@ func outputFileName(ctx context.Context) string {
 	return uuid.NewString()
 }
 
-// bashWork adapts a blocking shell execution into a backgroundtask.WorkFunc.
+// bashWork adapts blocking shell execution into process-local managed work.
 // The request carries only the command; the Manager is the sole owner of
 // foreground/background/auto-background switching, so no background hint is
 // pushed down to the backend. On success it appends the result to the output file
-// (when one is configured) before returning, so the file matches Task.Result.
-func bashWork(sb filesystem.Shell, req *filesystem.ExecuteRequest, w *bashOutputWriter) backgroundtask.WorkFunc {
-	return func(ctx context.Context, task backgroundtask.TaskInfo) (string, error) {
-		w.taskID = task.ID
+// (when one is configured) before returning, so it matches ResultData.
+func bashWork(sb filesystem.Shell, req *filesystem.ExecuteRequest, w *bashOutputWriter) backgroundlocal.WorkFunc {
+	return func(ctx context.Context, runtime backgroundtask.ExecutionRuntime) (string, error) {
 		result, err := sb.Execute(ctx, req)
 		if err != nil {
 			return "", err
 		}
 		out := convExecuteResponse(result)
-		w.appendResult(ctx, out)
+		if err = w.appendResult(ctx, runtime, out); err != nil {
+			return "", err
+		}
+		if out != "" {
+			if _, err = runtime.EmitProgress(ctx, "", []byte(out)); err != nil {
+				return "", err
+			}
+		}
 		return out, nil
 	}
 }
 
-// bashStreamWork adapts a streaming shell execution into a backgroundtask.StreamWorkFunc.
+// bashStreamWork adapts streaming shell execution into process-local managed work.
 // It returns a stream of formatted output chunks; the Manager forwards them to the
 // caller in real time (for the foreground phase) and accumulates them into the
 // task's final result. The terminal note (exit code / no-output) is emitted as a
@@ -236,16 +271,17 @@ func bashWork(sb filesystem.Shell, req *filesystem.ExecuteRequest, w *bashOutput
 // without either hook firing; the session is then released by the work context's
 // cancellation (the file is already incomplete in that case), which the AppendOpener
 // contract requires a resource-holding backend to honor.
-func bashStreamWork(sb filesystem.StreamingShell, req *filesystem.ExecuteRequest, w *bashOutputWriter) backgroundtask.StreamWorkFunc {
-	return func(ctx context.Context, task backgroundtask.TaskInfo) (*schema.StreamReader[string], error) {
-		w.taskID = task.ID
+func bashStreamWork(sb filesystem.StreamingShell, req *filesystem.ExecuteRequest, w *bashOutputWriter) backgroundlocal.StreamWorkFunc {
+	return func(ctx context.Context, runtime backgroundtask.ExecutionRuntime) (*schema.StreamReader[string], error) {
 		stream, err := sb.ExecuteStreaming(ctx, req)
 		if err != nil {
 			return nil, err
 		}
 		// Open the streaming append session under the work's (detached) context, so a
 		// backgrounded run keeps writing after the launching turn ends.
-		w.open(ctx)
+		if err = w.open(ctx, runtime); err != nil {
+			return nil, err
+		}
 
 		// exitCode/hasContent accumulate across chunks: convert writes them per
 		// chunk, the OnEOF hook reads them to build the terminal note. The convert
@@ -268,16 +304,22 @@ func bashStreamWork(sb filesystem.StreamingShell, req *filesystem.ExecuteRequest
 					return "", schema.ErrNoValue
 				}
 				hasContent = true
-				w.append(text)
+				if err = w.append(text); err != nil {
+					return "", err
+				}
 				return text, nil
 			},
 			schema.WithOnEOF(func() (any, error) {
 				note := execTerminalNote(exitCode, hasContent)
 				if note != "" {
-					w.append(note)
+					if err = w.append(note); err != nil {
+						return nil, err
+					}
 				}
 				// Source exhausted: flush and finalize the file before ending the stream.
-				w.closeStream()
+				if err = w.closeStream(); err != nil {
+					return nil, err
+				}
 				if note != "" {
 					return note, nil
 				}
@@ -288,7 +330,9 @@ func bashStreamWork(sb filesystem.StreamingShell, req *filesystem.ExecuteRequest
 				// finalize the file so the handle is released rather than leaked to
 				// context cancellation. closeStream is idempotent, so this never
 				// races OnEOF (a stream ends with either EOF or an error).
-				w.closeStream()
+				if closeErr := w.closeStream(); closeErr != nil {
+					return fmt.Errorf("%w; close output: %v", err, closeErr)
+				}
 				return err
 			}),
 		), nil
@@ -312,36 +356,50 @@ func bashStreamWork(sb filesystem.StreamingShell, req *filesystem.ExecuteRequest
 // (AppendOpener + dir), enables per-task output files (the tool appends output to
 // outputDir/<id>.output); otherwise runs have no output file.
 func newManagedExecuteTool(
-	mgr *backgroundtask.Manager,
+	runner *backgroundlocal.Runner,
 	sb filesystem.Shell,
 	streaming filesystem.StreamingShell,
+	sessionID func(context.Context) (string, error),
 	sink outputSink,
-	name string,
-	desc string,
+	definition toolDefinition,
 ) (tool.BaseTool, error) {
-	toolName := selectToolName(name, ToolNameExecute)
-	d, err := selectToolDesc(desc, ManagedExecuteToolDesc, ManagedExecuteToolDescChinese)
+	if sessionID == nil {
+		return nil, errors.New("filesystem: notification session resolver is required")
+	}
+	toolName := selectToolName(definition.name, ToolNameExecute)
+	d, err := selectToolDesc(
+		definition.desc, ManagedExecuteToolDesc, ManagedExecuteToolDescChinese,
+	)
 	if err != nil {
 		return nil, err
 	}
 
 	if streaming != nil {
-		return newManagedStreamingExecuteTool(mgr, streaming, sink, toolName, d)
+		return newManagedStreamingExecuteTool(runner, streaming, sessionID, sink, toolName, d)
 	}
-	return newManagedBufferedExecuteTool(mgr, sb, sink, toolName, d)
+	return newManagedBufferedExecuteTool(runner, sb, sessionID, sink, toolName, d)
 }
 
 // managedRunInput builds the RunInput shared by the buffered and streaming managed
 // execute tools. w supplies the reserved output-file path (empty when output files
 // are not configured), which the work funcs write to.
-func managedRunInput(ctx context.Context, input executeManagedArgs, w *bashOutputWriter) *backgroundtask.RunInput {
-	runInput := &backgroundtask.RunInput{
+func managedRunInput(
+	input executeManagedArgs,
+	writer *bashOutputWriter,
+	sessionID string,
+) (*backgroundlocal.Input, error) {
+	payload, err := json.Marshal(shellPayloadV1{Version: shellPayloadVersion, Command: input.Command})
+	if err != nil {
+		return nil, err
+	}
+	runInput := &backgroundlocal.Input{
 		Description:     input.Command,
-		Type:            ExecuteTaskType,
-		ToolUseID:       compose.GetToolCallID(ctx),
+		Kind:            ExecuteTaskKind,
+		Payload:         payload,
+		OutputFile:      writer.path,
 		RunInBackground: input.RunInBackground,
-		Metadata:        map[string]any{MetadataKeyCommand: input.Command},
-		OutputFile:      w.path,
+		SessionID:       sessionID,
+		NotifySession:   true,
 	}
 	// A positive timeout overrides the Manager's default foreground timeout for
 	// this command. When the deadline expires, the Manager's policy decides
@@ -349,51 +407,82 @@ func managedRunInput(ctx context.Context, input executeManagedArgs, w *bashOutpu
 	if input.TimeoutMS > 0 {
 		runInput.ForegroundTimeoutMs = &input.TimeoutMS
 	}
-	return runInput
+	return runInput, nil
 }
 
-func newManagedBufferedExecuteTool(mgr *backgroundtask.Manager, sb filesystem.Shell, sink outputSink, toolName, desc string) (tool.BaseTool, error) {
+func newManagedBufferedExecuteTool(
+	runner *backgroundlocal.Runner,
+	sb filesystem.Shell,
+	sessionID func(context.Context) (string, error),
+	sink outputSink,
+	toolName, desc string,
+) (tool.BaseTool, error) {
 	return utils.InferTool(toolName, desc, func(ctx context.Context, input executeManagedArgs) (string, error) {
+		parentSessionID, err := sessionID(ctx)
+		if err != nil {
+			return "", err
+		}
 		req := &filesystem.ExecuteRequest{Command: input.Command}
-		w := reserveBashOutput(ctx, mgr, sink)
-		result, err := mgr.Run(ctx, managedRunInput(ctx, input, w), bashWork(sb, req, w))
+		w := reserveBashOutput(ctx, sink)
+		runInput, err := managedRunInput(input, w, parentSessionID)
+		if err != nil {
+			return "", err
+		}
+		result, err := runner.Run(ctx, runInput, bashWork(sb, req, w))
 		if err != nil {
 			return "", err
 		}
 
 		switch result.Status {
 		case backgroundtask.StatusCompleted:
-			return result.Result, nil
-		case backgroundtask.StatusRunning:
-			msg := fmt.Sprintf("Command running in background with ID: %s.", result.ID)
-			if result.OutputFile != "" {
-				msg += fmt.Sprintf(" Output is being written to: %s.", result.OutputFile)
+			if result.ResultData == nil {
+				return "", fmt.Errorf("execute task %q completed without a result", result.Spec.ID)
+			}
+			return string(result.ResultData), nil
+		case backgroundtask.StatusPending, backgroundtask.StatusRunning,
+			backgroundtask.StatusWaitingInput, backgroundtask.StatusSuspended:
+			msg := fmt.Sprintf("Command running in background with ID: %s.", result.Spec.ID)
+			if w.path != "" {
+				msg += fmt.Sprintf(" Output is being written to: %s.", w.path)
 			}
 			msg += " You will be notified when it completes."
-			if result.OutputFile != "" {
+			if w.path != "" {
 				msg += " To check interim output, use Read on that file path."
 			}
 			return msg, nil
 		case backgroundtask.StatusFailed:
-			return "", fmt.Errorf("execute task %q failed: %s", result.ID, result.Error)
+			return "", fmt.Errorf("execute task %q failed: %s", result.Spec.ID, result.ResultError)
 		case backgroundtask.StatusCanceled:
-			return "", fmt.Errorf("execute task %q was canceled", result.ID)
+			return "", fmt.Errorf("execute task %q was canceled", result.Spec.ID)
 		default:
-			return result.Result, nil
+			return "", fmt.Errorf("execute task %q has unknown status %q", result.Spec.ID, result.Status)
 		}
 	})
 }
 
-func newManagedStreamingExecuteTool(mgr *backgroundtask.Manager, streaming filesystem.StreamingShell, sink outputSink, toolName, desc string) (tool.BaseTool, error) {
+func newManagedStreamingExecuteTool(
+	runner *backgroundlocal.Runner,
+	streaming filesystem.StreamingShell,
+	sessionID func(context.Context) (string, error),
+	sink outputSink,
+	toolName, desc string,
+) (tool.BaseTool, error) {
 	return utils.InferStreamTool(toolName, desc, func(ctx context.Context, input executeManagedArgs) (*schema.StreamReader[string], error) {
+		parentSessionID, err := sessionID(ctx)
+		if err != nil {
+			return nil, err
+		}
 		req := &filesystem.ExecuteRequest{Command: input.Command}
-		w := reserveBashOutput(ctx, mgr, sink)
-		runInput := managedRunInput(ctx, input, w)
+		w := reserveBashOutput(ctx, sink)
+		runInput, err := managedRunInput(input, w, parentSessionID)
+		if err != nil {
+			return nil, err
+		}
 		runInput.BackgroundStartupPreviewMs = defaultBashStartupPreviewMs
 		// RunStream owns the returned stream: it forwards work chunks to this caller
 		// in real time. An explicit background launch exposes only its bounded startup
 		// preview before the notice; auto-background caps the stream at the transition.
 		// In either case the remaining output is drained into the task result.
-		return mgr.RunStream(ctx, runInput, bashStreamWork(streaming, req, w))
+		return runner.RunStream(ctx, runInput, bashStreamWork(streaming, req, w))
 	})
 }
