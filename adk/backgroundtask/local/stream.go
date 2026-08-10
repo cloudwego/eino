@@ -52,6 +52,7 @@ func (r *Runner) projectStream(
 	}
 	forward := !input.RunInBackground || preview != nil
 	callerOpen := true
+	callerDone := ctx.Done()
 	if input.RunInBackground && preview == nil {
 		r.sendNotice(ctx, writer, taskID, false)
 		writer.Close()
@@ -109,7 +110,8 @@ func (r *Runner) projectStream(
 				writer.Close()
 				callerOpen = false
 			}
-		case <-ctx.Done():
+		case <-callerDone:
+			callerDone = nil
 			if !input.RunInBackground {
 				_, _ = r.manager.RequestCancel(context.Background(), taskID)
 			}

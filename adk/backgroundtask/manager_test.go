@@ -195,6 +195,62 @@ func TestManagerCloseDrainsActiveAttempt(t *testing.T) {
 	require.Equal(t, task.Spec.ID, pending.Tasks[0].Spec.ID)
 }
 
+func TestManagerCloseDrainsAttemptInitializedDuringClose(t *testing.T) {
+	baseStore := NewInMemoryStore(nil)
+	store := &firstGetBlockingStore{
+		TaskStore: baseStore, entered: make(chan struct{}), release: make(chan struct{}),
+	}
+	observed := make(chan ControlRequest, 1)
+	executor := &scriptedExecutor{
+		execute: func(
+			_ context.Context,
+			_ *Task,
+			runtime ExecutionRuntime,
+		) (*ExecutionResult, error) {
+			control := <-runtime.Controls()
+			observed <- control
+			return &ExecutionResult{
+				Status: StatusSuspended, Checkpoint: []byte("checkpoint"),
+			}, nil
+		},
+	}
+	manager := managerWithExecutor(t, store, executor, time.Minute)
+	spec := validSpec("close-initializing")
+	spec.SessionID = ""
+	spec.NotifySession = false
+	task, err := manager.Submit(context.Background(), spec)
+	require.NoError(t, err)
+	executeDone := make(chan error, 1)
+	go func() {
+		executeDone <- manager.Execute(context.Background(), task.Spec.ID)
+	}()
+	<-store.entered
+
+	closeCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	closeDone := make(chan error, 1)
+	go func() {
+		closeDone <- manager.Close(closeCtx, WithDrainReason("worker maintenance"))
+	}()
+	require.Eventually(t, func() bool {
+		manager.mu.Lock()
+		defer manager.mu.Unlock()
+		return manager.closed
+	}, time.Second, time.Millisecond)
+	time.Sleep(10 * time.Millisecond)
+	close(store.release)
+
+	require.NoError(t, <-closeDone)
+	require.NoError(t, <-executeDone)
+	require.Equal(t, ControlRequest{
+		Kind: ControlDrain, Reason: "worker maintenance",
+	}, <-observed)
+	suspended, err := manager.Get(context.Background(), task.Spec.ID)
+	require.NoError(t, err)
+	require.Equal(t, StatusSuspended, suspended.Status)
+	require.Equal(t, "checkpoint", string(suspended.Checkpoint))
+}
+
 func TestManagerReleaseSuspensionRetriesVersionConflict_BitsUT(t *testing.T) {
 	store := NewInMemoryStore(nil)
 	started := createAndStart(t, store, "release-retry")

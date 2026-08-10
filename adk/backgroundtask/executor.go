@@ -203,6 +203,8 @@ type activeAttempt struct {
 	ready         chan struct{}
 	readyOnce     sync.Once
 	done          chan error
+	drainOnReady  bool
+	drainReason   string
 }
 
 func (a *activeAttempt) signalReady() {
@@ -908,6 +910,9 @@ func (m *Manager) execute(
 	attempt.cancel = cancel
 	attempt.runtime = runtime
 	attempt.supportsDrain = executor.SupportsDrain()
+	if attempt.drainOnReady && attempt.supportsDrain {
+		runtime.requestControlWithReason(ControlDrain, attempt.drainReason)
+	}
 	attempt.signalReady()
 	m.attemptsMu.Unlock()
 	defer cancel()

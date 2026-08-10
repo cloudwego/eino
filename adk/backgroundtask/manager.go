@@ -260,9 +260,16 @@ func (m *Manager) Close(ctx context.Context, options ...CloseOption) error {
 	for _, attempt := range m.activeAttempts {
 		if attempt != nil {
 			closingAttempts = append(closingAttempts, attempt)
-		}
-		if attempt != nil && attempt.supportsDrain {
-			attempt.runtime.requestControlWithReason(ControlDrain, closeConfig.drainReason)
+			if !attempt.drainOnReady {
+				attempt.drainOnReady = true
+				attempt.drainReason = closeConfig.drainReason
+			}
+			if attempt.supportsDrain && attempt.runtime != nil {
+				attempt.runtime.requestControlWithReason(
+					ControlDrain,
+					attempt.drainReason,
+				)
+			}
 		}
 	}
 	m.attemptsMu.Unlock()
