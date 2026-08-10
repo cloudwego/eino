@@ -54,6 +54,19 @@ func mustNewBackgroundManager(
 	return manager
 }
 
+type countingGetStore struct {
+	*backgroundtask.InMemoryStore
+	getCount int64
+}
+
+func (s *countingGetStore) Get(
+	ctx context.Context,
+	taskID string,
+) (*backgroundtask.Task, error) {
+	atomic.AddInt64(&s.getCount, 1)
+	return s.InMemoryStore.Get(ctx, taskID)
+}
+
 func TestInputUsesKindVocabulary_BitsUT(t *testing.T) {
 	inputType := reflect.TypeOf(Input{})
 	_, hasKind := inputType.FieldByName("Kind")
@@ -348,6 +361,13 @@ func TestProjectStreamTerminalBoundaries(t *testing.T) {
 	})
 
 	t.Run("context canceled", func(t *testing.T) {
+		store := &countingGetStore{
+			InMemoryStore: backgroundtask.NewInMemoryStore(nil),
+		}
+		manager := mustNewBackgroundManager(t, context.Background(), &backgroundtask.Config{
+			Tasks: store, TaskEvents: store,
+		})
+		runner := &Runner{manager: manager}
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
 		chunks := make(chan streamChunk)
@@ -360,6 +380,8 @@ func TestProjectStreamTerminalBoundaries(t *testing.T) {
 		}()
 		_, err := reader.Recv()
 		require.ErrorIs(t, err, io.EOF)
+		time.Sleep(20 * time.Millisecond)
+		require.Equal(t, int64(1), atomic.LoadInt64(&store.getCount))
 		close(chunks)
 		<-done
 	})
