@@ -153,13 +153,13 @@ func TestSimplifiedPublicModelHasNoOverlappingStateFields_BitsUT(t *testing.T) {
 		"EnqueueTaskNotification")
 	assertMethodsAbsent(t, reflect.TypeOf((*TaskEventStore)(nil)).Elem(), "ReadRecentTaskEvents")
 	assertMethodsAbsent(t, reflect.TypeOf((*Manager)(nil)),
-		"Store", "Executors", "MarkBackgrounded", "RequestControl", "RequestTimeout", "ReadOutput",
+		"Store", "Executors", "RequestControl", "RequestTimeout", "ReadOutput",
 		"ReadRecentTaskEvents", "WaitUpdate", "CreateAndStart", "LoadOrRegisterExecutor",
 		"ValidateNotificationDelivery")
 	assertMethodsPresent(t, reflect.TypeOf((*Manager)(nil)),
 		"Submit", "Get", "ListPending", "ListSuspended", "Execute", "WaitForTaskVersion",
 		"ListTaskEvents", "RequestCancel", "ReleaseSuspension", "Resume", "AllocateTaskID",
-		"Close")
+		"Close", "MarkBackgrounded")
 	assertMethodsPresent(t, reflect.TypeOf((*ExecutorRegistry)(nil)), "LoadOrRegister")
 	assertMethodsAbsent(t, reflect.TypeOf((*InMemoryStore)(nil)),
 		"CreateAndStart", "Cancel", "ReadRecentTaskEvents")

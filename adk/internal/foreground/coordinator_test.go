@@ -365,3 +365,106 @@ func requestStop(manager *backgroundtask.Manager, task *backgroundtask.Task) err
 	_, err := manager.RequestCancel(context.Background(), task.Spec.ID)
 	return err
 }
+
+// newDeferredCoordinatorTask builds a session-bound task whose Spec defers the
+// TaskCreated announcement until it detaches into the background, mirroring the
+// process-local Runner. It returns the manager, executor, task, a pointer to the
+// count of live TaskCreated emissions, and the backing store for durable records.
+func newDeferredCoordinatorTask(
+	t *testing.T,
+) (*backgroundtask.Manager, *coordinatorExecutor, *backgroundtask.Task, *int, *backgroundtask.InMemoryStore) {
+	t.Helper()
+	executor := &coordinatorExecutor{
+		started: make(chan struct{}), release: make(chan struct{}),
+	}
+	executors := backgroundtask.NewExecutorRegistry()
+	require.NoError(t, executors.Register(executor))
+	store := backgroundtask.NewInMemoryStore(nil)
+	sent := 0
+	manager := mustNewBackgroundManager(t, context.Background(), &backgroundtask.Config{
+		Executors: executors,
+		Tasks:     store,
+		SendTaskCreatedEvent: func(context.Context, *backgroundtask.Task) error {
+			sent++
+			return nil
+		},
+	})
+	t.Cleanup(func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_ = manager.Close(closeCtx)
+	})
+	task, err := manager.Submit(context.Background(), backgroundtask.Spec{
+		ID: "deferred-coordinator-task", ExecutorKey: executor.Key(),
+		SessionID: "parent-session", NotifySession: true,
+		EmitCreatedOnBackground: true,
+	})
+	require.NoError(t, err)
+	require.Equal(t, 0, sent, "Submit must not emit the created event for a deferred task")
+	return manager, executor, task, &sent, store
+}
+
+func countCreatedRecords(t *testing.T, store *backgroundtask.InMemoryStore) int {
+	t.Helper()
+	result, err := store.Receive(context.Background(), &backgroundtask.ReceiveNotificationsRequest{
+		Limit: 100, LeaseDuration: time.Second,
+	})
+	require.NoError(t, err)
+	count := 0
+	for _, delivery := range result.Deliveries {
+		if delivery.Record.Kind == backgroundtask.NotificationTaskCreated {
+			count++
+		}
+	}
+	return count
+}
+
+// TestRunEmitsTaskCreatedOnDetachForDeferredTasks verifies that a deferred task
+// announces itself only when it actually detaches into the background: never on
+// foreground completion, exactly once on explicit background, and exactly once
+// on auto-background at the foreground timeout.
+func TestRunEmitsTaskCreatedOnDetachForDeferredTasks(t *testing.T) {
+	t.Run("foreground completion emits nothing", func(t *testing.T) {
+		manager, executor, task, sent, store := newDeferredCoordinatorTask(t)
+		close(executor.release)
+		result, err := Run(context.Background(), manager, Policy{}, &Request{
+			TaskID: task.Spec.ID,
+		})
+		require.NoError(t, err)
+		require.Equal(t, backgroundtask.StatusCompleted, result.Status)
+		require.Equal(t, 0, *sent, "foreground-completed task must not announce as background")
+		require.Equal(t, 0, countCreatedRecords(t, store),
+			"foreground-completed task must not enqueue a durable created record")
+	})
+
+	t.Run("explicit background emits once", func(t *testing.T) {
+		manager, _, task, sent, store := newDeferredCoordinatorTask(t)
+		result, err := Run(context.Background(), manager, Policy{}, &Request{
+			TaskID: task.Spec.ID, RunInBackground: true,
+		})
+		require.NoError(t, err)
+		require.Equal(t, backgroundtask.StatusRunning, result.Status)
+		require.Equal(t, 1, *sent, "explicit background must emit the created event once")
+		require.Equal(t, 0, countCreatedRecords(t, store),
+			"explicit background announces live-only and must not enqueue a durable record")
+		require.NoError(t, requestStop(manager, result))
+		require.Equal(t, backgroundtask.StatusCanceled, waitForTerminal(t, manager, result).Status)
+	})
+
+	t.Run("auto background emits once", func(t *testing.T) {
+		manager, _, task, sent, store := newDeferredCoordinatorTask(t)
+		result, err := Run(context.Background(), manager, Policy{
+			TimeoutMs: 1,
+			ShouldAutoBackground: func(context.Context, *backgroundtask.Task) bool {
+				return true
+			},
+		}, &Request{TaskID: task.Spec.ID})
+		require.NoError(t, err)
+		require.Equal(t, backgroundtask.StatusRunning, result.Status)
+		require.Equal(t, 1, *sent, "auto-background must emit the created event once")
+		require.Equal(t, 0, countCreatedRecords(t, store),
+			"auto-background announces live-only and must not enqueue a durable record")
+		require.NoError(t, requestStop(manager, result))
+		require.Equal(t, backgroundtask.StatusCanceled, waitForTerminal(t, manager, result).Status)
+	})
+}
