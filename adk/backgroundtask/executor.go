@@ -619,7 +619,10 @@ func (m *Manager) Submit(ctx context.Context, spec Spec) (*Task, error) {
 		}
 		task = existing
 	}
-	if spec.SessionID != "" {
+	// Tasks that defer their created announcement until they detach into the
+	// background emit the TaskCreated event later, via MarkBackgrounded; they do
+	// not announce themselves at creation.
+	if spec.SessionID != "" && !spec.EmitCreatedOnBackground {
 		if sendErr := m.sendTaskCreatedEvent(ctx, cloneTask(task)); sendErr != nil {
 			m.setTaskCreatedEventFailed(task.Spec.ID, true)
 			return task, fmt.Errorf(
@@ -629,6 +632,41 @@ func (m *Manager) Submit(ctx context.Context, spec Spec) (*Task, error) {
 			)
 		}
 		m.setTaskCreatedEventFailed(task.Spec.ID, false)
+	}
+	return task, nil
+}
+
+// MarkBackgrounded announces the deferred TaskCreated session event for a task
+// that has just detached into the background (explicit background run or
+// auto-background at the foreground timeout).
+//
+// The announcement is best-effort and UNRECOVERABLE: it performs a single live
+// emission with no durable store write, so a send failure permanently drops the
+// TaskCreated event for this task — the parent session will never learn the
+// task ID, even though later lifecycle notifications for it are still delivered.
+// This is an accepted trade-off, not an oversight: EmitCreatedOnBackground is
+// used only by process-local foreground runs, whose work cannot survive process
+// exit anyway, so a durable created-record (and the Store surface it would
+// require) is not worth its cost against a low-probability live-send failure.
+//
+// The send error is intentionally swallowed rather than returned: the task is
+// already running in the background, so the detach must not be aborted. There
+// is deliberately NO retry bookkeeping here — a failure is not recorded in the
+// taskCreatedEventFailed set, because MarkBackgrounded has no resubmission that
+// could act on it (Submit's created gate excludes EmitCreatedOnBackground
+// tasks) and recording it would only wrongly relax the duplicate-Submit guard
+// for this task ID.
+//
+// It returns the store error (e.g. ErrNotFound) if the task cannot be loaded.
+func (m *Manager) MarkBackgrounded(ctx context.Context, taskID string) (*Task, error) {
+	task, err := m.tasks.Get(ctx, taskID)
+	if err != nil {
+		return nil, err
+	}
+	if task.Spec.SessionID != "" && m.sendTaskCreatedEvent != nil {
+		// Best-effort live-only emission; see the doc comment for why the error
+		// is swallowed and why no failure marker is set.
+		_ = m.sendTaskCreatedEvent(ctx, cloneTask(task))
 	}
 	return task, nil
 }
@@ -658,7 +696,8 @@ func sameSpec(left, right Spec) bool {
 		left.Description == right.Description &&
 		left.OutputFile == right.OutputFile &&
 		left.SessionID == right.SessionID &&
-		left.NotifySession == right.NotifySession
+		left.NotifySession == right.NotifySession &&
+		left.EmitCreatedOnBackground == right.EmitCreatedOnBackground
 }
 
 // Get returns the authoritative task snapshot.

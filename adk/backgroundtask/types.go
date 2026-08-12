@@ -43,6 +43,15 @@ type Spec struct {
 	OutputFile    string
 	SessionID     string
 	NotifySession bool
+
+	// EmitCreatedOnBackground defers the TaskCreated parent-session event until
+	// the task actually detaches into the background (explicit background run or
+	// auto-background at the foreground timeout) instead of emitting it at
+	// creation. Foreground-style callers (e.g. the process-local Runner) set
+	// this so a task that completes in the foreground never announces itself as
+	// a background task. Tasks that are background by construction leave it false
+	// and keep emitting the created event at creation.
+	EmitCreatedOnBackground bool
 }
 
 // NotificationKind identifies the lifecycle transition that created a notification.
