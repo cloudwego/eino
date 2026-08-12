@@ -75,7 +75,10 @@ var (
 // ListPending and ListSuspended follow their request ordering, cursor, and limit
 // contracts; malformed cursors return ErrInvalidCursor.
 // When the provider also implements NotificationOutbox, Create atomically
-// enqueues NotificationTaskCreated for every task with a parent SessionID.
+// enqueues NotificationTaskCreated for every task with a parent SessionID,
+// except when Spec.EmitCreatedOnBackground is set: such tasks are announced
+// live by the Manager at the moment they detach into the background (see
+// Manager.MarkBackgrounded), so Create simply omits the record for them.
 //
 // RequestCancel on active work keeps StatusRunning, sets CancelRequestedAt and
 // the first-write optional CancelReason, and advances Version. Once
