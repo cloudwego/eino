@@ -138,7 +138,12 @@ func (s *InMemoryStore) Create(_ context.Context, req *CreateTaskRequest) (*Task
 		UpdatedAt:         now,
 	}
 	s.tasks[spec.ID] = task
-	s.enqueueLocked(task, NotificationTaskCreated)
+	// Tasks that defer their created announcement until they detach into the
+	// background are announced live by the Manager (MarkBackgrounded); Create
+	// omits the durable record for them.
+	if !spec.EmitCreatedOnBackground {
+		s.enqueueLocked(task, NotificationTaskCreated)
+	}
 	s.signalLocked()
 	return cloneTask(task), nil
 }

@@ -87,9 +87,31 @@ func Run(
 		return started, nil
 	}
 	if request.RunInBackground {
+		if err := markBackgrounded(ctx, manager, started); err != nil {
+			return nil, err
+		}
 		return started, nil
 	}
 	return waitForeground(ctx, manager, policy, request, timeoutController, done)
+}
+
+// markBackgrounded announces the deferred TaskCreated event at the moment a task
+// detaches into the background. It is a no-op for tasks that emit the created
+// event at creation (Spec.EmitCreatedOnBackground unset) and for tasks without a
+// parent session (nothing to announce), keeping the born-background submit path
+// and session-less local runs unchanged.
+func markBackgrounded(
+	ctx context.Context,
+	manager *backgroundtask.Manager,
+	task *backgroundtask.Task,
+) error {
+	if task == nil || !task.Spec.EmitCreatedOnBackground || task.Spec.SessionID == "" {
+		return nil
+	}
+	if _, err := manager.MarkBackgrounded(ctx, task.Spec.ID); err != nil {
+		return err
+	}
+	return nil
 }
 
 func waitStarted(
@@ -207,6 +229,9 @@ func waitForeground(
 				}
 				if policy.ShouldAutoBackground != nil &&
 					policy.ShouldAutoBackground(ctx, current) {
+					if err := markBackgrounded(ctx, manager, current); err != nil {
+						return nil, err
+					}
 					return current, nil
 				}
 				reason := fmt.Sprintf("timed out after %dms", timeoutMs)

@@ -291,6 +291,11 @@ func (r *Runner) submit(
 		ID: id, ExecutorKey: executorKey, Kind: input.Kind,
 		Payload: append([]byte(nil), input.Payload...), Description: input.Description,
 		OutputFile: input.OutputFile, SessionID: input.SessionID, NotifySession: input.NotifySession,
+		// Process-local tasks may complete in the foreground. Defer the
+		// TaskCreated announcement until the task actually detaches into the
+		// background so a foreground-completed run never appears as a background
+		// task.
+		EmitCreatedOnBackground: true,
 	})
 	if err != nil {
 		r.executor.remove(id)
