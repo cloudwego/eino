@@ -274,34 +274,33 @@ type typedSkillHandler[M adk.MessageType] struct {
 	tool        *typedSkillTool[M]
 }
 
-// BeforeAgent injects the skill tool and system prompt, then marks the start of a new
-// turn for the available-skills reminder.
+// BeforeAgent injects the skill tool and system prompt.
 //
-// It does NOT call List() or build the reminder here. Both are deferred to the first
-// model call of the turn (BeforeModelRewriteState), because the add/change diff needs the
-// previous reminder's digest, which lives in the full message history — and
-// runCtx.AgentInput.Messages holds only the current turn's input, so the prior reminder
-// is not visible from here. This hook only sets a run-local "new turn" mark;
-// BeforeModelRewriteState sees it, does List()+diff+insert once, then clears it, so a
-// multi-call ReAct turn lists skills at most once.
+// It does NOT touch the available-skills reminder. The reminder is refreshed on the
+// first model call (BeforeModelRewriteState), for two reasons: the add/change diff needs
+// the previous reminder's digest, which lives in the full message history (not in
+// runCtx.AgentInput.Messages, which holds only the current input); and run-local values
+// are backed by the compose graph State, which does not exist yet here — BeforeAgent runs
+// before the graph is invoked, so a SetRunLocalValue here is silently dropped.
 func (h *typedSkillHandler[M]) BeforeAgent(ctx context.Context, runCtx *adk.ChatModelAgentContext[M]) (context.Context, *adk.ChatModelAgentContext[M], error) {
 	runCtx.Instruction = runCtx.Instruction + "\n" + h.instruction
 	runCtx.Tools = append(runCtx.Tools, h.tool)
-
-	if runCtx.AgentInput == nil {
-		return ctx, runCtx, nil
-	}
-	_ = adk.SetRunLocalValue(ctx, skillsPendingKey, true)
 	return ctx, runCtx, nil
 }
 
 // BeforeModelRewriteState refreshes the available-skills reminder on the first model call
-// of a turn: if BeforeAgent marked a new turn, it lists the current skills, diffs them
-// against the previous reminder's digest — read from the FULL history (state.Messages) —
-// and inserts a reminder advertising only the added/changed skills, then clears the mark
-// so later model calls in the same ReAct turn do nothing (List() runs at most once/turn).
+// of a turn: it lists the current skills, diffs them against the previous reminder's
+// digest — read from the FULL history (state.Messages) — and inserts a reminder advertising
+// only the added/changed skills. A run-local mark makes this run at most once per agent Run:
+// the first model call finds the mark absent, does the work, and sets it; later model calls
+// in the same ReAct turn find it set and skip.
 //
-// List() runs here, not in BeforeAgent, because the diff needs prior turns' reminders,
+// The mark lives here, not in BeforeAgent, because run-local values are backed by the
+// compose graph State, which is not built until the graph runs — after BeforeAgent. Set in
+// BeforeAgent it would be silently dropped. Run-local state is fresh per Run (and restored
+// across interrupt/resume), so the mark naturally scopes to one logical turn.
+//
+// List() runs here, not in BeforeAgent, because the diff also needs prior turns' reminders,
 // which only state.Messages carries; BeforeAgent's runCtx.AgentInput.Messages holds just
 // the current input.
 //
@@ -319,19 +318,15 @@ func (h *typedSkillHandler[M]) BeforeModelRewriteState(ctx context.Context, stat
 	// model call; the fresh insert below is already built with that role.
 	state.Messages = systemreminder.NormalizeReminderRoles(state.Messages)
 
-	pv, ok, err := adk.GetRunLocalValue(ctx, skillsPendingKey)
-	if err != nil || !ok {
-		// err only happens when called outside a valid agent execution context (a
-		// structural misuse). The reminder is best-effort, so skip it rather than
-		// fail the whole model call.
+	// Once per agent Run: the mark's presence means this turn already refreshed the
+	// reminder, so later model calls in the same ReAct turn skip. Absent = new turn.
+	if _, handled, _ := adk.GetRunLocalValue(ctx, skillsHandledKey); handled {
 		return ctx, state, nil
 	}
-	if pending, _ := pv.(bool); !pending {
-		// Already handled this turn (or never marked): later model calls skip.
-		return ctx, state, nil
-	}
-	// Consume the new-turn mark so List()+diff runs at most once per turn.
-	_ = adk.SetRunLocalValue(ctx, skillsPendingKey, false)
+	// Mark before doing the work so a multi-call ReAct turn lists skills at most once.
+	// A best-effort set failure only means a redundant List() on the next model call
+	// (the history digest still dedups the insert), so the reminder stays correct.
+	_ = adk.SetRunLocalValue(ctx, skillsHandledKey, true)
 
 	skills, err := h.tool.b.List(ctx)
 	if err != nil {
@@ -377,11 +372,12 @@ const (
 	// skillsDigestExtraKey stores, in a skill reminder's Extra, the JSON array of
 	// MD5(name+description) digests of the skills it advertised, for cross-turn diffing.
 	skillsDigestExtraKey = "__eino_skill_digests__"
-	// skillsPendingKey marks (run-local) the start of a new turn, set by BeforeAgent. On
-	// the first model call of the turn BeforeModelRewriteState sees the mark, refreshes the
-	// available-skills reminder (List + diff + insert), then clears it so a multi-call ReAct
-	// turn lists skills at most once.
-	skillsPendingKey = "__eino_skill_reminder_pending__"
+	// skillsHandledKey marks (run-local) that the available-skills reminder has already been
+	// refreshed this agent Run. The first model call of the turn finds it absent, does
+	// List()+diff+insert, and sets it; later model calls in the same ReAct turn find it set
+	// and skip, so List() runs at most once per turn. It lives in run-local (compose State)
+	// rather than being set in BeforeAgent, where the State does not exist yet.
+	skillsHandledKey = "__eino_skill_reminder_handled__"
 )
 
 // skillDigest returns the MD5(name+description) digest of a single skill.
