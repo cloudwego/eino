@@ -26,10 +26,25 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
+// PatchedToolResult is the value returned by PatchedToolResultGenerator.
+//
+// Content and ToolResult are mutually exclusive:
+//   - Content: plain-text tool message (typical for InvokableTool users)
+//   - ToolResult: EnhancedTool-style result (text and/or multimodal parts)
+type PatchedToolResult struct {
+	Content    string
+	ToolResult *schema.ToolResult
+}
+
 // Config defines the configuration options for the patch tool calls middleware.
 type Config struct {
 	// PatchedContentGenerator is an optional custom function to generate the content
-	// of patched tool messages. If not provided, a default message will be used.
+	// of patched tool messages as a plain string.
+	//
+	// Deprecated: Use PatchedToolResultGenerator instead, which receives the original
+	// tool-call arguments and can return either plain Content or an EnhancedTool
+	// ToolResult. Kept for backward compatibility; ignored when
+	// PatchedToolResultGenerator is set.
 	//
 	// Parameters:
 	//   - ctx: the context for the operation
@@ -40,6 +55,33 @@ type Config struct {
 	//   - string: the content to use for the patched tool message
 	//   - error: any error that occurred during generation
 	PatchedContentGenerator func(ctx context.Context, toolName, toolCallID string) (string, error)
+
+	// PatchedToolResultGenerator generates a patched tool result for a dangling tool call.
+	// It is preferred over PatchedContentGenerator when both are set.
+	//
+	// Return PatchedToolResult.Content for plain text, or PatchedToolResult.ToolResult
+	// for EnhancedTool-style multimodal results. The two fields are mutually exclusive.
+	//
+	// Parameters:
+	//   - ctx: the context for the operation
+	//   - toolName: the name of the tool that was called
+	//   - toolCallID: the id of the tool call
+	//   - toolArgument: the original tool-call arguments (Text is the JSON arguments string)
+	//
+	// Returns:
+	//   - *PatchedToolResult: the patched tool result to insert into history
+	//   - error: any error that occurred during generation
+	PatchedToolResultGenerator func(
+		ctx context.Context,
+		toolName string,
+		toolCallID string,
+		toolArgument *schema.ToolArgument,
+	) (*PatchedToolResult, error)
+}
+
+type patchedGenerators struct {
+	content func(ctx context.Context, toolName, toolCallID string) (string, error)
+	result  func(ctx context.Context, toolName, toolCallID string, toolArgument *schema.ToolArgument) (*PatchedToolResult, error)
 }
 
 // NewTyped creates a new generic patch tool calls middleware.
@@ -51,7 +93,10 @@ func NewTyped[M adk.MessageType](_ context.Context, cfg *Config) (adk.TypedChatM
 		cfg = &Config{}
 	}
 	return &typedMiddleware[M]{
-		gen: cfg.PatchedContentGenerator,
+		gens: patchedGenerators{
+			content: cfg.PatchedContentGenerator,
+			result:  cfg.PatchedToolResultGenerator,
+		},
 	}, nil
 }
 
@@ -65,7 +110,7 @@ func New(ctx context.Context, cfg *Config) (adk.ChatModelAgentMiddleware, error)
 
 type typedMiddleware[M adk.MessageType] struct {
 	*adk.TypedBaseChatModelAgentMiddleware[M]
-	gen func(ctx context.Context, toolName, toolCallID string) (string, error)
+	gens patchedGenerators
 }
 
 func (m *typedMiddleware[M]) BeforeModelRewriteState(ctx context.Context, state *adk.TypedChatModelAgentState[M],
@@ -78,16 +123,16 @@ func (m *typedMiddleware[M]) BeforeModelRewriteState(ctx context.Context, state 
 	var zero M
 	switch any(zero).(type) {
 	case *schema.Message:
-		return patchToolCallsForMessage(ctx, m.gen, any(state).(*adk.TypedChatModelAgentState[*schema.Message]), mc)
+		return patchToolCallsForMessage(ctx, m.gens, any(state).(*adk.TypedChatModelAgentState[*schema.Message]), mc)
 	case *schema.AgenticMessage:
-		return patchToolCallsForAgenticMessage(ctx, m.gen, any(state).(*adk.TypedChatModelAgentState[*schema.AgenticMessage]), mc)
+		return patchToolCallsForAgenticMessage(ctx, m.gens, any(state).(*adk.TypedChatModelAgentState[*schema.AgenticMessage]), mc)
 	default:
 		panic("unreachable: unknown MessageType")
 	}
 }
 
 func patchToolCallsForMessage[M adk.MessageType](ctx context.Context,
-	gen func(ctx context.Context, toolName, toolCallID string) (string, error),
+	gens patchedGenerators,
 	state *adk.TypedChatModelAgentState[*schema.Message],
 	_ *adk.TypedModelContext[M],
 ) (context.Context, *adk.TypedChatModelAgentState[M], error) {
@@ -105,7 +150,7 @@ func patchToolCallsForMessage[M adk.MessageType](ctx context.Context,
 				continue
 			}
 
-			toolMsg, err := createPatchedToolMessage(ctx, gen, tc)
+			toolMsg, err := createPatchedToolMessage(ctx, gens, tc)
 			if err != nil {
 				return ctx, nil, err
 			}
@@ -119,7 +164,7 @@ func patchToolCallsForMessage[M adk.MessageType](ctx context.Context,
 }
 
 func patchToolCallsForAgenticMessage[M adk.MessageType](ctx context.Context,
-	gen func(ctx context.Context, toolName, toolCallID string) (string, error),
+	gens patchedGenerators,
 	state *adk.TypedChatModelAgentState[*schema.AgenticMessage],
 	_ *adk.TypedModelContext[M],
 ) (context.Context, *adk.TypedChatModelAgentState[M], error) {
@@ -136,13 +181,19 @@ func patchToolCallsForAgenticMessage[M adk.MessageType](ctx context.Context,
 		var toolCalls []struct {
 			callID string
 			name   string
+			args   string
 		}
 		for _, block := range msg.ContentBlocks {
 			if block != nil && block.Type == schema.ContentBlockTypeFunctionToolCall && block.FunctionToolCall != nil {
 				toolCalls = append(toolCalls, struct {
 					callID string
 					name   string
-				}{callID: block.FunctionToolCall.CallID, name: block.FunctionToolCall.Name})
+					args   string
+				}{
+					callID: block.FunctionToolCall.CallID,
+					name:   block.FunctionToolCall.Name,
+					args:   block.FunctionToolCall.Arguments,
+				})
 			}
 		}
 		if len(toolCalls) == 0 {
@@ -154,7 +205,7 @@ func patchToolCallsForAgenticMessage[M adk.MessageType](ctx context.Context,
 				continue
 			}
 
-			toolMsg, err := createPatchedAgenticToolMessage(ctx, gen, tc.name, tc.callID)
+			toolMsg, err := createPatchedAgenticToolMessage(ctx, gens, tc.name, tc.callID, tc.args)
 			if err != nil {
 				return ctx, nil, err
 			}
@@ -211,9 +262,17 @@ func hasCorrespondingAgenticToolResult(messages []*schema.AgenticMessage, toolCa
 	return false
 }
 
-func createPatchedToolMessage(ctx context.Context, gen func(ctx context.Context, toolName, toolCallID string) (string, error), tc schema.ToolCall) (*schema.Message, error) {
-	if gen != nil {
-		content, err := gen(ctx, tc.Function.Name, tc.ID)
+func createPatchedToolMessage(ctx context.Context, gens patchedGenerators, tc schema.ToolCall) (*schema.Message, error) {
+	if gens.result != nil {
+		arg := &schema.ToolArgument{Text: tc.Function.Arguments}
+		result, err := gens.result(ctx, tc.Function.Name, tc.ID, arg)
+		if err != nil {
+			return nil, err
+		}
+		return patchedToolResultToMessage(tc.Function.Name, tc.ID, result)
+	}
+	if gens.content != nil {
+		content, err := gens.content(ctx, tc.Function.Name, tc.ID)
 		if err != nil {
 			return nil, err
 		}
@@ -227,11 +286,20 @@ func createPatchedToolMessage(ctx context.Context, gen func(ctx context.Context,
 	return schema.ToolMessage(fmt.Sprintf(tpl, tc.Function.Name, tc.ID), tc.ID, schema.WithToolName(tc.Function.Name)), nil
 }
 
-func createPatchedAgenticToolMessage(ctx context.Context, gen func(ctx context.Context, toolName, toolCallID string) (string, error), toolName, callID string) (*schema.AgenticMessage, error) {
+func createPatchedAgenticToolMessage(ctx context.Context, gens patchedGenerators, toolName, callID, arguments string) (*schema.AgenticMessage, error) {
+	if gens.result != nil {
+		arg := &schema.ToolArgument{Text: arguments}
+		result, err := gens.result(ctx, toolName, callID, arg)
+		if err != nil {
+			return nil, err
+		}
+		return patchedToolResultToAgenticMessage(toolName, callID, result)
+	}
+
 	var content string
-	if gen != nil {
+	if gens.content != nil {
 		var err error
-		content, err = gen(ctx, toolName, callID)
+		content, err = gens.content(ctx, toolName, callID)
 		if err != nil {
 			return nil, err
 		}
@@ -243,6 +311,43 @@ func createPatchedAgenticToolMessage(ctx context.Context, gen func(ctx context.C
 		content = fmt.Sprintf(tpl, toolName, callID)
 	}
 
+	return agenticTextToolResultMessage(toolName, callID, content), nil
+}
+
+func patchedToolResultToMessage(toolName, callID string, result *PatchedToolResult) (*schema.Message, error) {
+	if result == nil {
+		return schema.ToolMessage("", callID, schema.WithToolName(toolName)), nil
+	}
+	if err := validatePatchedToolResult(result); err != nil {
+		return nil, err
+	}
+	if result.ToolResult != nil {
+		return toolResultToMessage(toolName, callID, result.ToolResult)
+	}
+	return schema.ToolMessage(result.Content, callID, schema.WithToolName(toolName)), nil
+}
+
+func patchedToolResultToAgenticMessage(toolName, callID string, result *PatchedToolResult) (*schema.AgenticMessage, error) {
+	if result == nil {
+		return agenticTextToolResultMessage(toolName, callID, ""), nil
+	}
+	if err := validatePatchedToolResult(result); err != nil {
+		return nil, err
+	}
+	if result.ToolResult != nil {
+		return toolResultToAgenticMessage(toolName, callID, result.ToolResult)
+	}
+	return agenticTextToolResultMessage(toolName, callID, result.Content), nil
+}
+
+func validatePatchedToolResult(result *PatchedToolResult) error {
+	if result.Content != "" && result.ToolResult != nil {
+		return fmt.Errorf("patchtoolcalls: PatchedToolResult.Content and ToolResult are mutually exclusive")
+	}
+	return nil
+}
+
+func agenticTextToolResultMessage(toolName, callID, content string) *schema.AgenticMessage {
 	return &schema.AgenticMessage{
 		Role: schema.AgenticRoleTypeUser,
 		ContentBlocks: []*schema.ContentBlock{
@@ -254,7 +359,158 @@ func createPatchedAgenticToolMessage(ctx context.Context, gen func(ctx context.C
 				},
 			}),
 		},
+	}
+}
+
+// toolResultToMessage converts a ToolResult into a tool-role Message.
+//
+// Pure-text results (single text part) only set Content. Setting both Content
+// and UserInputMultiContent would break OpenAI-compatible serializers that
+// reject ChatCompletionMessage with Content and MultiContent simultaneously.
+// Multimodal / non-text parts go exclusively into UserInputMultiContent.
+func toolResultToMessage(toolName, callID string, result *schema.ToolResult) (*schema.Message, error) {
+	msg := schema.ToolMessage("", callID, schema.WithToolName(toolName))
+	if result == nil || len(result.Parts) == 0 {
+		return msg, nil
+	}
+	if text, ok := singleTextToolResult(result); ok {
+		msg.Content = text
+		return msg, nil
+	}
+	parts, err := result.ToMessageInputParts()
+	if err != nil {
+		return nil, err
+	}
+	msg.UserInputMultiContent = parts
+	return msg, nil
+}
+
+func toolResultToAgenticMessage(toolName, callID string, result *schema.ToolResult) (*schema.AgenticMessage, error) {
+	if result != nil && len(result.Parts) == 1 && result.Parts[0].Type == schema.ToolPartTypeToolSearchResult {
+		if result.Parts[0].ToolSearchResult == nil {
+			return nil, fmt.Errorf("tool search result is nil for tool part type %v", result.Parts[0].Type)
+		}
+		return &schema.AgenticMessage{
+			Role: schema.AgenticRoleTypeUser,
+			ContentBlocks: []*schema.ContentBlock{
+				schema.NewContentBlock(&schema.ToolSearchFunctionToolResult{
+					CallID: callID,
+					Name:   toolName,
+					Result: result.Parts[0].ToolSearchResult,
+				}),
+			},
+		}, nil
+	}
+
+	blocks, err := toolResultToFunctionBlocks(result)
+	if err != nil {
+		return nil, err
+	}
+	// Empty ToolResult is valid and maps to an empty text tool result, matching
+	// toolResultToMessage which leaves Content empty for nil/empty results.
+	if len(blocks) == 0 {
+		blocks = []*schema.FunctionToolResultContentBlock{
+			{Type: schema.FunctionToolResultContentBlockTypeText, Text: &schema.UserInputText{Text: ""}},
+		}
+	}
+	return &schema.AgenticMessage{
+		Role: schema.AgenticRoleTypeUser,
+		ContentBlocks: []*schema.ContentBlock{
+			schema.NewContentBlock(&schema.FunctionToolResult{
+				CallID:  callID,
+				Name:    toolName,
+				Content: blocks,
+			}),
+		},
 	}, nil
+}
+
+func singleTextToolResult(result *schema.ToolResult) (string, bool) {
+	if result == nil || len(result.Parts) != 1 || result.Parts[0].Type != schema.ToolPartTypeText {
+		return "", false
+	}
+	return result.Parts[0].Text, true
+}
+
+func toolResultToFunctionBlocks(result *schema.ToolResult) ([]*schema.FunctionToolResultContentBlock, error) {
+	if result == nil || len(result.Parts) == 0 {
+		return nil, nil
+	}
+	blocks := make([]*schema.FunctionToolResultContentBlock, 0, len(result.Parts))
+	for _, p := range result.Parts {
+		switch p.Type {
+		case schema.ToolPartTypeText:
+			blocks = append(blocks, &schema.FunctionToolResultContentBlock{
+				Type:  schema.FunctionToolResultContentBlockTypeText,
+				Text:  &schema.UserInputText{Text: p.Text},
+				Extra: p.Extra,
+			})
+		case schema.ToolPartTypeImage:
+			if p.Image == nil {
+				return nil, fmt.Errorf("image content is nil for tool part type %v", p.Type)
+			}
+			blocks = append(blocks, &schema.FunctionToolResultContentBlock{
+				Type: schema.FunctionToolResultContentBlockTypeImage,
+				Image: &schema.UserInputImage{
+					URL:        derefString(p.Image.URL),
+					Base64Data: derefString(p.Image.Base64Data),
+					MIMEType:   p.Image.MIMEType,
+				},
+				Extra: p.Extra,
+			})
+		case schema.ToolPartTypeAudio:
+			if p.Audio == nil {
+				return nil, fmt.Errorf("audio content is nil for tool part type %v", p.Type)
+			}
+			blocks = append(blocks, &schema.FunctionToolResultContentBlock{
+				Type: schema.FunctionToolResultContentBlockTypeAudio,
+				Audio: &schema.UserInputAudio{
+					URL:        derefString(p.Audio.URL),
+					Base64Data: derefString(p.Audio.Base64Data),
+					MIMEType:   p.Audio.MIMEType,
+				},
+				Extra: p.Extra,
+			})
+		case schema.ToolPartTypeVideo:
+			if p.Video == nil {
+				return nil, fmt.Errorf("video content is nil for tool part type %v", p.Type)
+			}
+			blocks = append(blocks, &schema.FunctionToolResultContentBlock{
+				Type: schema.FunctionToolResultContentBlockTypeVideo,
+				Video: &schema.UserInputVideo{
+					URL:        derefString(p.Video.URL),
+					Base64Data: derefString(p.Video.Base64Data),
+					MIMEType:   p.Video.MIMEType,
+				},
+				Extra: p.Extra,
+			})
+		case schema.ToolPartTypeFile:
+			if p.File == nil {
+				return nil, fmt.Errorf("file content is nil for tool part type %v", p.Type)
+			}
+			blocks = append(blocks, &schema.FunctionToolResultContentBlock{
+				Type: schema.FunctionToolResultContentBlockTypeFile,
+				File: &schema.UserInputFile{
+					URL:        derefString(p.File.URL),
+					Base64Data: derefString(p.File.Base64Data),
+					MIMEType:   p.File.MIMEType,
+				},
+				Extra: p.Extra,
+			})
+		case schema.ToolPartTypeToolSearchResult:
+			return nil, fmt.Errorf("tool search result must be the sole part of a ToolResult")
+		default:
+			return nil, fmt.Errorf("unknown tool part type: %v", p.Type)
+		}
+	}
+	return blocks, nil
+}
+
+func derefString(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
 }
 
 const (
