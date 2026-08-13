@@ -137,18 +137,30 @@ func concatMaps(ms reflect.Value) (reflect.Value, error) {
 		vals := rms.MapIndex(key)
 
 		anyVals := vals.Interface().([]any)
-		if len(anyVals) == 1 {
-			ele := anyVals[0]
-			if ele == nil { // we cannot SetMapIndex with nil because it will delete the key
-				ret.SetMapIndex(key, reflect.Zero(typ.Elem()))
-				continue
-			}
 
-			ret.SetMapIndex(key, reflect.ValueOf(ele))
+		// nil represents an absent/empty value for this key in a chunk.
+		// Filter nils out so concat is order-independent and toSliceValue
+		// never receives a nil element (reflect.TypeOf(nil) returns a nil
+		// reflect.Type, which makes reflect.SliceOf(nil) panic).
+		nonNil := make([]any, 0, len(anyVals))
+		for _, v := range anyVals {
+			if v != nil {
+				nonNil = append(nonNil, v)
+			}
+		}
+
+		switch len(nonNil) {
+		case 0:
+			// all chunks had a nil value for this key; preserve the key with a zero value.
+			// we cannot SetMapIndex with nil because it will delete the key.
+			ret.SetMapIndex(key, reflect.Zero(typ.Elem()))
+			continue
+		case 1:
+			ret.SetMapIndex(key, reflect.ValueOf(nonNil[0]))
 			continue
 		}
 
-		v, err := toSliceValue(anyVals)
+		v, err := toSliceValue(nonNil)
 		if err != nil {
 			return reflect.Value{}, err
 		}
