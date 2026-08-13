@@ -121,19 +121,19 @@ func withRunLocalCtx(t *testing.T, fn func(ctx context.Context)) {
 	}
 }
 
-// markPending sets the run-local "new turn" mark, mirroring what BeforeAgent does via
-// SetRunLocalValue. BeforeModelRewriteState reads it back, then lists the backend's
-// skills, diffs against history, and builds the reminder section.
-func markPending(t *testing.T, ctx context.Context) {
+// markHandled sets the run-local "already refreshed this Run" mark, mirroring what the
+// first BeforeModelRewriteState call does after it inserts. A later model call in the same
+// Run reads it back and skips, so the reminder is refreshed at most once per turn.
+func markHandled(t *testing.T, ctx context.Context) {
 	t.Helper()
-	require.NoError(t, adk.SetRunLocalValue(ctx, skillsPendingKey, true))
+	require.NoError(t, adk.SetRunLocalValue(ctx, skillsHandledKey, true))
 }
 
-// TestSkill_BeforeModelRewriteState_InsertsPending verifies the first-turn insertion:
-// given a pending mark, BeforeModelRewriteState lists skills and inserts exactly one
-// System reminder after the user message, listing the section and carrying the digest
-// array in Extra.
-func TestSkill_BeforeModelRewriteState_InsertsPending(t *testing.T) {
+// TestSkill_BeforeModelRewriteState_InsertsOnFreshRun verifies the first-call insertion:
+// with no handled mark yet (a fresh Run), BeforeModelRewriteState lists skills and inserts
+// exactly one System reminder after the user message, listing the section and carrying the
+// digest array in Extra.
+func TestSkill_BeforeModelRewriteState_InsertsOnFreshRun(t *testing.T) {
 	h := &typedSkillHandler[*schema.Message]{
 		tool: &typedSkillTool[*schema.Message]{b: &inMemoryBackend{m: []Skill{
 			{FrontMatter: FrontMatter{Name: "alpha", Description: "desc-alpha"}},
@@ -143,8 +143,7 @@ func TestSkill_BeforeModelRewriteState_InsertsPending(t *testing.T) {
 	digests := []string{skillDigest(skills[0])}
 
 	withRunLocalCtx(t, func(ctx context.Context) {
-		markPending(t, ctx)
-
+		// No handled mark → this is the turn's first model call → insert.
 		state := &adk.ChatModelAgentState{Messages: []*schema.Message{schema.UserMessage("hi")}}
 		_, state, err := h.BeforeModelRewriteState(ctx, state, nil)
 		require.NoError(t, err)
@@ -166,10 +165,10 @@ func TestSkill_BeforeModelRewriteState_InsertsPending(t *testing.T) {
 	})
 }
 
-// TestSkill_BeforeModelRewriteState_NoInsertWithoutPending verifies that when no new-turn
-// mark is set (BeforeAgent never ran, or the mark was already consumed this turn),
+// TestSkill_BeforeModelRewriteState_NoInsertWhenHandled verifies that once the run-local
+// handled mark is set (an earlier model call this Run already refreshed the reminder),
 // BeforeModelRewriteState inserts nothing.
-func TestSkill_BeforeModelRewriteState_NoInsertWithoutPending(t *testing.T) {
+func TestSkill_BeforeModelRewriteState_NoInsertWhenHandled(t *testing.T) {
 	h := &typedSkillHandler[*schema.Message]{
 		tool: &typedSkillTool[*schema.Message]{b: &inMemoryBackend{m: []Skill{
 			{FrontMatter: FrontMatter{Name: "alpha", Description: "desc-alpha"}},
@@ -177,24 +176,18 @@ func TestSkill_BeforeModelRewriteState_NoInsertWithoutPending(t *testing.T) {
 	}
 
 	withRunLocalCtx(t, func(ctx context.Context) {
-		// No mark at all.
+		// Simulate an earlier model call in this Run having already refreshed the reminder.
+		markHandled(t, ctx)
 		state := &adk.ChatModelAgentState{Messages: []*schema.Message{schema.UserMessage("hi")}}
 		_, state, err := h.BeforeModelRewriteState(ctx, state, nil)
 		require.NoError(t, err)
-		assert.Equal(t, 0, countReminders(state.Messages), "no mark → no insert")
-
-		// A consumed mark (false, how BeforeModelRewriteState clears it) is also a no-op.
-		require.NoError(t, adk.SetRunLocalValue(ctx, skillsPendingKey, false))
-		state = &adk.ChatModelAgentState{Messages: []*schema.Message{schema.UserMessage("hi")}}
-		_, state, err = h.BeforeModelRewriteState(ctx, state, nil)
-		require.NoError(t, err)
-		assert.Equal(t, 0, countReminders(state.Messages), "consumed mark → no insert")
+		assert.Equal(t, 0, countReminders(state.Messages), "handled mark set → no insert")
 	})
 }
 
 // TestSkill_InsertOncePerTurn verifies BeforeModelRewriteState inserts the reminder
-// exactly once: the first call lists+inserts and consumes the new-turn mark; a second
-// call in the same turn inserts nothing.
+// exactly once: the first call lists+inserts and sets the handled mark; a second call in
+// the same Run finds the mark set and inserts nothing.
 func TestSkill_InsertOncePerTurn(t *testing.T) {
 	h := &typedSkillHandler[*schema.Message]{
 		tool: &typedSkillTool[*schema.Message]{b: &inMemoryBackend{m: []Skill{
@@ -203,8 +196,6 @@ func TestSkill_InsertOncePerTurn(t *testing.T) {
 	}
 
 	withRunLocalCtx(t, func(ctx context.Context) {
-		markPending(t, ctx)
-
 		s1 := &adk.ChatModelAgentState{Messages: []*schema.Message{schema.UserMessage("hi")}}
 		_, s1, err := h.BeforeModelRewriteState(ctx, s1, nil)
 		require.NoError(t, err)
@@ -213,14 +204,14 @@ func TestSkill_InsertOncePerTurn(t *testing.T) {
 		s2 := &adk.ChatModelAgentState{Messages: []*schema.Message{schema.UserMessage("hi")}}
 		_, s2, err = h.BeforeModelRewriteState(ctx, s2, nil)
 		require.NoError(t, err)
-		assert.Equal(t, 0, countReminders(s2.Messages), "stash consumed → second call inserts nothing")
+		assert.Equal(t, 0, countReminders(s2.Messages), "handled mark set → second call inserts nothing")
 	})
 }
 
-// TestSkill_BeforeAgentToRewriteState_Bridge exercises the real run-local bridge:
-// BeforeAgent marks a new turn via SetRunLocalValue (which gob-checks the stored value),
-// then BeforeModelRewriteState reads it back, lists+diffs, and inserts. This is the
-// end-to-end path a Runner takes.
+// TestSkill_BeforeAgentToRewriteState_Bridge exercises the real end-to-end path a Runner
+// takes: BeforeAgent injects the tool + instruction (no run-local, no List), then the
+// first BeforeModelRewriteState of the turn lists+diffs and inserts. The handled mark is
+// self-managed inside BeforeModelRewriteState — BeforeAgent no longer seeds it.
 func TestSkill_BeforeAgentToRewriteState_Bridge(t *testing.T) {
 	newHandler := func(b Backend) *typedSkillHandler[*schema.Message] {
 		mw, err := NewMiddleware(context.Background(), &Config{Backend: b})
@@ -242,7 +233,7 @@ func TestSkill_BeforeAgentToRewriteState_Bridge(t *testing.T) {
 			state := &adk.ChatModelAgentState{Messages: []*schema.Message{schema.UserMessage("hi")}}
 			_, state, err = h.BeforeModelRewriteState(ctx, state, nil)
 			require.NoError(t, err)
-			require.Equal(t, 1, countReminders(state.Messages), "BeforeAgent stash must bridge to an insertion")
+			require.Equal(t, 1, countReminders(state.Messages), "first model call of the turn must insert")
 			assert.Contains(t, firstReminder(state.Messages).Content, "alpha")
 		})
 	})
