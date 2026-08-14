@@ -76,6 +76,26 @@ func TestInMemoryBackend_WriteAndRead(t *testing.T) {
 	}
 }
 
+func TestInMemoryBackend_NormalizePath_WindowsSeparator(t *testing.T) {
+	b := NewInMemoryBackend()
+	ctx := context.Background()
+
+	err := b.Write(ctx, &WriteRequest{
+		FilePath: "\\windows\\style\\file.txt",
+		Content:  "hello",
+	})
+	if err != nil {
+		t.Fatalf("Write failed: %v", err)
+	}
+
+	out, err := b.Read(ctx, &ReadRequest{FilePath: "/windows/style/file.txt"})
+	if err != nil {
+		t.Fatalf("Read failed: %v", err)
+	}
+	if out.Content != "hello" {
+		t.Fatalf("expected %q, got %q", "hello", out.Content)
+	}
+}
 func TestInMemoryBackend_LsInfo(t *testing.T) {
 	backend := NewInMemoryBackend()
 	ctx := context.Background()
