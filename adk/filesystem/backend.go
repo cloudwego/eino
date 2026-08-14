@@ -159,6 +159,12 @@ type WriteRequest struct {
 	Content string
 }
 
+// UploadRequest contains parameters for uploading a file's content
+type UploadRequest struct {
+	// FilePath is the path of the file to upload.
+	FilePath string
+}
+
 // OpenAppendRequest contains parameters for opening an append stream.
 type OpenAppendRequest struct {
 	// FilePath is the path of the file to append to; it is created if absent.
@@ -241,6 +247,29 @@ type MultiFileContent struct {
 //     or use the built-in reduction middleware with configurable policies.
 type MultiModalReader interface {
 	MultiModalRead(ctx context.Context, req *MultiModalReadRequest) (*MultiFileContent, error)
+}
+
+// MultiModalURLReader is an optional Backend extension for backends that cannot
+// stream a file's bytes back to the caller. Instead of returning content, it makes the
+// file's content fetchable by uploading it to temporary object storage and
+// returning a URL that a downstream parser or fetch service can retrieve
+// directly.
+//
+// A backend that implements this is preferred over MultiModalReader by callers
+// that can consume a URL. Backends that can return bytes directly implement MultiModalReader instead.
+// Size limits are the implementation's responsibility, since the caller never sees the bytes.
+type MultiModalURLReader interface {
+	MultiModalReadAsURL(ctx context.Context, req *MultiModalReadRequest) (*MultiModalURLContent, error)
+}
+
+// MultiModalURLContent is the result of MultiModalReadAsURL: a fetchable URL for
+// the file's content. It is a struct rather than a bare URL string so future
+// backends can attach metadata (MIME type, size, expiry) without changing the
+// interface signature.
+type MultiModalURLContent struct {
+	// URL is the fetchable location of the file's content in temporary object
+	// storage.
+	URL string
 }
 
 // AppendOpener opens a write-only, tail-appending session to a file, letting
