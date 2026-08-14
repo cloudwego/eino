@@ -27,7 +27,7 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
-// concurrentStubTC is a ToolCallingChatModel that returns one empty assistant message.
+// concurrentStubTC is a ToolCallingChatModel that returns one assistant message.
 type concurrentStubTC struct{}
 
 func (concurrentStubTC) WithTools([]*schema.ToolInfo) (model.ToolCallingChatModel, error) {
@@ -73,8 +73,48 @@ func TestConcurrentRunSharedAgentWithTools(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			iter := agent.Run(context.Background(), &AgentInput{
-				Messages:        []*schema.Message{schema.UserMessage("q")},
-				EnableStreaming: false,
+				Messages: []*schema.Message{schema.UserMessage("q")},
+			})
+			for {
+				ev, ok := iter.Next()
+				if !ok {
+					return
+				}
+				if ev != nil && ev.Err != nil {
+					t.Errorf("run err: %v", ev.Err)
+				}
+			}
+		}()
+	}
+	wg.Wait()
+}
+
+func TestConcurrentRunSharedAgenticModelWithTools(t *testing.T) {
+	ctx := context.Background()
+	agent, err := NewTypedChatModelAgent(ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
+		Name:        "shared",
+		Description: "race repro",
+		Instruction: "hi",
+		Model: &mockAgenticModel{generateFn: func(context.Context, []*schema.AgenticMessage, ...model.Option) (*schema.AgenticMessage, error) {
+			return agenticMsg("ok"), nil
+		}},
+		ToolsConfig: ToolsConfig{
+			ToolsNodeConfig: compose.ToolsNodeConfig{
+				Tools: []tool.BaseTool{concurrentNoopTool{}},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			iter := agent.Run(context.Background(), &TypedAgentInput[*schema.AgenticMessage]{
+				Messages: []*schema.AgenticMessage{schema.UserAgenticMessage("q")},
 			})
 			for {
 				ev, ok := iter.Next()
