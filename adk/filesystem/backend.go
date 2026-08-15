@@ -188,25 +188,33 @@ type EditRequest struct {
 type FileContentPartType string
 
 const (
-	// FileContentPartTypeImage represents an image part (e.g. PNG, JPG).
+	// FileContentPartTypeText represents a plain-text part.
+	FileContentPartTypeText FileContentPartType = "text"
+	// FileContentPartTypeImage represents an image part.
 	FileContentPartTypeImage FileContentPartType = "image"
-	// FileContentPartTypePDF represents a file part (e.g. PDF).
+	// FileContentPartTypePDF represents a PDF file part.
 	FileContentPartTypePDF FileContentPartType = "pdf"
 )
 
 // FileContentPart represents a multimodal part of file content.
-// Data holds raw bytes; encoding (e.g. base64) is handled by the consumer.
+//
+// The payload is selected by Type:
+//   - FileContentPartTypeText  → Data holds UTF-8 text bytes; MIMEType unused.
+//   - FileContentPartTypeImage → Data holds raw image bytes; MIMEType required.
+//   - FileContentPartTypePDF   → Data holds raw pdf bytes; MIMEType required.
+//
+// For binary parts, further encoding (e.g. base64) is handled by the consumer.
 type FileContentPart struct {
 	// Type is the kind of content this part represents.
 	// Required.
 	Type FileContentPartType
 
 	// MIMEType is the MIME type of the content (e.g. "image/png", "application/pdf").
-	// Required.
+	// Required for inline binary parts (image, pdf); unused for text parts.
 	MIMEType string
 
-	// Data is the raw binary content.
-	// Required.
+	// Data holds the inline payload: UTF-8 text bytes for text parts, raw binary
+	// for image/pdf parts.
 	Data []byte
 }
 
@@ -218,15 +226,18 @@ type FileContent struct {
 
 // MultiFileContent holds the result of a MultiModalRead operation.
 //
-// FileContent and Parts are mutually exclusive (one-of):
-//   - Set FileContent for plain text results (same as a normal Read).
-//   - Set Parts for multimodal results (images, PDFs, etc.).
+// Exactly one of FileContent / Parts is set:
+//   - Set FileContent for a plain-text result (same as a normal Read).
+//   - Set Parts for a multimodal result. Parts is an ordered list that MAY
+//     interleave text, image, and pdf parts in reading order — e.g. a parsed
+//     document returning per-page markdown followed by that page's images.
 //
 // When Parts is non-empty, FileContent is ignored.
 type MultiFileContent struct {
 	*FileContent
 
-	// Parts holds multimodal output parts (e.g. image, PDF).
+	// Parts holds ordered multimodal output parts (text, image, pdf) produced by
+	// the backend itself.
 	Parts []FileContentPart
 }
 
