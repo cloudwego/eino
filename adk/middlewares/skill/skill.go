@@ -165,6 +165,12 @@ type TypedConfig[M adk.MessageType] struct {
 	// The function receives all available skill front matters as a parameter.
 	CustomToolDescription ToolDescriptionFunc
 
+	// CustomFormatReminder customizes the mid-conversation system reminder that advertises
+	// the available skills. When nil, the default reminder is used. Returning a nil output
+	// or an error keeps the default reminder; returning an output whose Reminder is ""
+	// suppresses the reminder this turn (the skills stay pending and are re-offered next turn).
+	CustomFormatReminder func(ctx context.Context, in *FormatReminderInput) (*FormatReminderOutput, error)
+
 	// CustomToolParams customizes tool parameters for the skill tool.
 	// defaults is the default schema with only the required "skill" field.
 	// optional
@@ -190,6 +196,23 @@ type TypedConfig[M adk.MessageType] struct {
 
 // Config is a backward-compatible alias for TypedConfig instantiated with *schema.Message.
 type Config = TypedConfig[*schema.Message]
+
+// FormatReminderInput is the input to TypedConfig.CustomFormatReminder.
+type FormatReminderInput struct {
+	// DefaultReminder is the reminder the middleware would insert by default (advertising Changed).
+	DefaultReminder string
+	// Current is the full skill list read this turn.
+	Current []FrontMatter
+	// Changed is the added/changed subset the middleware would advertise by default.
+	// The previously-advertised set is Current minus Changed.
+	Changed []FrontMatter
+}
+
+// FormatReminderOutput is the result of TypedConfig.CustomFormatReminder.
+type FormatReminderOutput struct {
+	// Reminder is the reminder text to insert. An empty string suppresses the reminder this turn.
+	Reminder string
+}
 
 // NewTyped creates a generic skill middleware handler for TypedChatModelAgent.
 //
@@ -223,7 +246,8 @@ func NewTyped[M adk.MessageType](ctx context.Context, config *TypedConfig[M]) (a
 	}
 
 	return &typedSkillHandler[M]{
-		instruction: instruction,
+		instruction:          instruction,
+		customFormatReminder: config.CustomFormatReminder,
 		tool: &typedSkillTool[M]{
 			b:                 config.Backend,
 			toolName:          name,
@@ -270,8 +294,9 @@ func NewMiddleware(ctx context.Context, config *Config) (adk.ChatModelAgentMiddl
 
 type typedSkillHandler[M adk.MessageType] struct {
 	*adk.TypedBaseChatModelAgentMiddleware[M]
-	instruction string
-	tool        *typedSkillTool[M]
+	instruction          string
+	customFormatReminder func(ctx context.Context, in *FormatReminderInput) (*FormatReminderOutput, error)
+	tool                 *typedSkillTool[M]
 }
 
 // BeforeAgent injects the skill tool and system prompt.
@@ -337,9 +362,9 @@ func (h *typedSkillHandler[M]) BeforeModelRewriteState(ctx context.Context, stat
 		return ctx, state, nil
 	}
 
-	prev, _ := systemreminder.LatestExtra(state.Messages, skillsReminderExtraKey, skillsDigestExtraKey)
-	prevSet := make(map[string]struct{}, len(toStringSlice(prev)))
-	for _, d := range toStringSlice(prev) {
+	prevDigests, _ := systemreminder.LatestExtra(state.Messages, skillsReminderExtraKey, skillsDigestExtraKey)
+	prevSet := make(map[string]struct{}, len(toStringSlice(prevDigests)))
+	for _, d := range toStringSlice(prevDigests) {
 		prevSet[d] = struct{}{}
 	}
 
@@ -361,8 +386,25 @@ func (h *typedSkillHandler[M]) BeforeModelRewriteState(ctx context.Context, stat
 		return ctx, state, nil
 	}
 
+	section := buildSkillsSectionFromEntries(changed)
+	if h.customFormatReminder != nil {
+		out, ferr := h.customFormatReminder(ctx, &FormatReminderInput{
+			DefaultReminder: section,
+			Current:         skills,
+			Changed:         changed,
+		})
+		if ferr != nil {
+			log.Printf("skill middleware: CustomFormatReminder failed, using default reminder: %v", ferr)
+		} else if out != nil {
+			if out.Reminder == "" {
+				return ctx, state, nil
+			}
+			section = out.Reminder
+		}
+	}
+
 	extra := map[string]any{skillsDigestExtraKey: digests}
-	state.Messages = systemreminder.Insert(ctx, state.Messages, skillsReminderExtraKey, buildSkillsSectionFromEntries(changed), extra)
+	state.Messages = systemreminder.Insert(ctx, state.Messages, skillsReminderExtraKey, section, extra)
 	return ctx, state, nil
 }
 

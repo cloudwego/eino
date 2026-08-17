@@ -22,6 +22,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"sort"
 	"strings"
 	"text/template"
@@ -48,6 +49,26 @@ type Config struct {
 	// invalidate the model's KV-cache (as the tool list changes between calls), and effectiveness
 	// depends on the model's ability to work with a dynamically changing tool set.
 	UseModelToolSearch bool
+
+	// CustomFormatReminder customizes the mid-conversation system reminder that advertises
+	// the deferred tools. When nil, the default reminder is used. Returning a nil output or
+	// an error keeps the default reminder; returning an output whose Reminder is "" suppresses
+	// the reminder message entirely.
+	CustomFormatReminder func(ctx context.Context, in *FormatReminderInput) (*FormatReminderOutput, error)
+}
+
+// FormatReminderInput is the input to Config.CustomFormatReminder.
+type FormatReminderInput struct {
+	// DefaultReminder is the reminder the middleware would insert by default.
+	DefaultReminder string
+	// Tools are the dynamic tools advertised by the reminder.
+	Tools []*schema.ToolInfo
+}
+
+// FormatReminderOutput is the result of Config.CustomFormatReminder.
+type FormatReminderOutput struct {
+	// Reminder is the reminder text to insert. An empty string suppresses the reminder message.
+	Reminder string
 }
 
 // NewTyped constructs and returns the generic tool search middleware.
@@ -90,12 +111,21 @@ func NewTyped[M adk.MessageType](ctx context.Context, config *Config) (adk.Typed
 		return nil, fmt.Errorf("failed to format mid-conversation system reminder template: %w", err)
 	}
 
+	reminder := buf.String()
+	if config.CustomFormatReminder != nil {
+		if out, ferr := config.CustomFormatReminder(ctx, &FormatReminderInput{DefaultReminder: reminder, Tools: dynamicToolInfos}); ferr != nil {
+			log.Printf("toolsearch middleware: CustomFormatReminder failed, using default reminder: %v", ferr)
+		} else if out != nil {
+			reminder = out.Reminder
+		}
+	}
+
 	return &typedMiddleware[M]{
 		dynamicTools:       config.DynamicTools,
 		mapOfDynamicTools:  mapOfDynamicTools,
 		dynamicToolInfos:   dynamicToolInfos,
 		useModelToolSearch: config.UseModelToolSearch,
-		reminder:           buf.String(),
+		reminder:           reminder,
 	}, nil
 }
 
@@ -216,7 +246,7 @@ func (m *typedMiddleware[M]) BeforeModelRewriteState(ctx context.Context, state 
 	// Align any reminders reconstructed from history with the configured role; the fresh
 	// insert below is already built with that role.
 	state.Messages = systemreminder.NormalizeReminderRoles(state.Messages)
-	if !systemreminder.Has(state.Messages, toolSearchReminderExtraKey) {
+	if m.reminder != "" && !systemreminder.Has(state.Messages, toolSearchReminderExtraKey) {
 		state.Messages = systemreminder.Insert(ctx, state.Messages, toolSearchReminderExtraKey, m.reminder, nil)
 	}
 
