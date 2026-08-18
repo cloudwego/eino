@@ -2613,6 +2613,71 @@ func TestMultiModalReadFileTool_NilResult(t *testing.T) {
 	assert.Contains(t, result.Parts[0].Text, "/missing.txt")
 }
 
+// TestFormatLineNumbers_EmptyContent verifies that empty content produces no
+// output at all, instead of one blank line numbered startLine — which used to
+// render as the bare offset value (e.g. "   300\t").
+func TestFormatLineNumbers_EmptyContent(t *testing.T) {
+	assert.Equal(t, "", formatLineNumbers("", 300))
+	assert.Equal(t, "   300\ta", formatLineNumbers("a", 300))
+}
+
+// TestReadFileTool_OffsetBeyondEOF verifies that an Offset past the last line
+// of the file yields an explanatory message rather than the offset value.
+func TestReadFileTool_OffsetBeyondEOF(t *testing.T) {
+	backend := setupTestBackend()
+	readTool, err := newReadFileTool(backend, "", "")
+	assert.NoError(t, err)
+
+	// /file1.txt has 5 lines.
+	out, err := invokeTool(t, readTool, `{"file_path": "/file1.txt", "offset": 300, "limit": 100}`)
+	assert.NoError(t, err)
+	assert.NotEqual(t, "   300\t", out)
+	assert.Contains(t, out, "/file1.txt")
+	assert.Contains(t, out, "offset 300")
+}
+
+// TestReadFileTool_EmptyFile verifies that reading a legitimately empty file
+// reports no content instead of a phantom line 1.
+func TestReadFileTool_EmptyFile(t *testing.T) {
+	backend := setupTestBackend()
+	err := backend.Write(context.Background(), &filesystem.WriteRequest{FilePath: "/empty.txt", Content: ""})
+	assert.NoError(t, err)
+
+	readTool, err := newReadFileTool(backend, "", "")
+	assert.NoError(t, err)
+
+	out, err := invokeTool(t, readTool, `{"file_path": "/empty.txt"}`)
+	assert.NoError(t, err)
+	assert.NotEqual(t, "     1\t", out)
+	assert.Contains(t, out, "/empty.txt")
+}
+
+// TestMultiModalReadFileTool_OffsetBeyondEOF verifies the multimodal read tool
+// shares the out-of-range handling of the plain read tool.
+func TestMultiModalReadFileTool_OffsetBeyondEOF(t *testing.T) {
+	base := setupTestBackend()
+	eb := &multiModalBackend{
+		InMemoryBackend: base,
+		multiModalReadFunc: func(ctx context.Context, req *filesystem.MultiModalReadRequest) (*filesystem.MultiFileContent, error) {
+			fc, err := base.Read(ctx, &req.ReadRequest)
+			if err != nil {
+				return nil, err
+			}
+			return &filesystem.MultiFileContent{FileContent: fc}, nil
+		},
+	}
+
+	mmTool, err := newMultiModalReadFileTool(eb, "", "")
+	assert.NoError(t, err)
+
+	result, err := mmTool.(tool.EnhancedInvokableTool).InvokableRun(
+		context.Background(), &schema.ToolArgument{Text: `{"file_path": "/file1.txt", "offset": 300, "limit": 100}`})
+	assert.NoError(t, err)
+	assert.Len(t, result.Parts, 1)
+	assert.NotEqual(t, "   300\t", result.Parts[0].Text)
+	assert.Contains(t, result.Parts[0].Text, "offset 300")
+}
+
 func TestValidatePages(t *testing.T) {
 	tests := []struct {
 		name    string
