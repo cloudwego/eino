@@ -54,3 +54,26 @@ func TestBeforeAgent_AppendsContextManagementNote(t *testing.T) {
 	assert.Contains(t, rc2.Instruction, "base instruction")
 	assert.Contains(t, rc2.Instruction, note)
 }
+
+func TestBeforeAgent_CustomFormatContextManagementInstruction(t *testing.T) {
+	ctx := context.Background()
+
+	newMW := func(fn func(context.Context) string) *TypedMiddleware[*schema.Message] {
+		return &TypedMiddleware[*schema.Message]{cfg: &TypedConfig[*schema.Message]{CustomFormatContextManagementInstruction: fn}}
+	}
+
+	t.Run("custom replaces the default note", func(t *testing.T) {
+		mw := newMW(func(context.Context) string { return "CUSTOM NOTE" })
+		_, rc, err := mw.BeforeAgent(ctx, &adk.ChatModelAgentContext[*schema.Message]{Instruction: "base"})
+		require.NoError(t, err)
+		assert.Contains(t, rc.Instruction, "CUSTOM NOTE")
+		assert.NotContains(t, rc.Instruction, getContextManagementInstruction())
+	})
+
+	t.Run("empty result suppresses the note", func(t *testing.T) {
+		mw := newMW(func(context.Context) string { return "" })
+		_, rc, err := mw.BeforeAgent(ctx, &adk.ChatModelAgentContext[*schema.Message]{Instruction: "base"})
+		require.NoError(t, err)
+		assert.Equal(t, "base", rc.Instruction, "empty note → instruction untouched")
+	})
+}
