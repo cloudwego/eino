@@ -348,6 +348,47 @@ func TestMiddleware_InstructionEmptyWhenAllDisabled(t *testing.T) {
 	assert.Empty(t, runCtx.Tools)
 }
 
+// TestMiddleware_CustomSystemPrompt verifies CustomSystemPrompt fully replaces the
+// built-in instruction and receives the default control-tool names.
+func TestMiddleware_CustomSystemPrompt(t *testing.T) {
+	mgr := newBackgroundManager(t, context.Background(), &bgtask.Config{})
+	defer closeWithTimeout(mgr)
+
+	var got *SystemPromptInput
+	mw, err := New(context.Background(), &Config{
+		Manager: mgr,
+		CustomSystemPrompt: func(_ context.Context, in *SystemPromptInput) string {
+			got = in
+			return "CUSTOM " + in.DefaultTaskOutputToolName
+		},
+	})
+	require.NoError(t, err)
+	_, runCtx, err := mw.BeforeAgent(context.Background(), &adk.ChatModelAgentContext[*schema.Message]{Instruction: "base"})
+	require.NoError(t, err)
+
+	require.NotNil(t, got)
+	assert.Equal(t, taskOutputToolName, got.DefaultTaskOutputToolName)
+	assert.Equal(t, taskStopToolName, got.DefaultTaskStopToolName)
+	assert.Equal(t, "base\nCUSTOM task_output", runCtx.Instruction)
+	assert.NotContains(t, runCtx.Instruction, "you will be notified when they complete")
+}
+
+// TestMiddleware_CustomSystemPromptEmptyInjectsNothing verifies returning "" from
+// CustomSystemPrompt appends no instruction.
+func TestMiddleware_CustomSystemPromptEmptyInjectsNothing(t *testing.T) {
+	mgr := newBackgroundManager(t, context.Background(), &bgtask.Config{})
+	defer closeWithTimeout(mgr)
+
+	mw, err := New(context.Background(), &Config{
+		Manager:            mgr,
+		CustomSystemPrompt: func(context.Context, *SystemPromptInput) string { return "" },
+	})
+	require.NoError(t, err)
+	_, runCtx, err := mw.BeforeAgent(context.Background(), &adk.ChatModelAgentContext[*schema.Message]{Instruction: "base"})
+	require.NoError(t, err)
+	assert.Equal(t, "base", runCtx.Instruction)
+}
+
 func TestTaskOutputTool(t *testing.T) {
 	mgr := newBackgroundManager(t, context.Background(), &bgtask.Config{})
 	defer closeWithTimeout(mgr)

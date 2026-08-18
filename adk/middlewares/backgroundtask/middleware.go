@@ -85,6 +85,20 @@ type TypedConfig[M adk.MessageType] struct {
 	TaskOutputToolConfig *ToolConfig
 	// TaskStopToolConfig configures the task_stop tool. Optional.
 	TaskStopToolConfig *ToolConfig
+
+	// CustomSystemPrompt fully replaces the default background-task instruction
+	// appended to the agent instruction. Optional; when nil the built-in instruction
+	// is used. It receives the default control-tool names so the returned text can
+	// reference them; returning "" injects no instruction.
+	CustomSystemPrompt func(ctx context.Context, in *SystemPromptInput) string
+}
+
+// SystemPromptInput carries the default control-tool names passed to CustomSystemPrompt.
+type SystemPromptInput struct {
+	// the default task_output tool name.
+	DefaultTaskOutputToolName string
+	// the default task_stop tool name.
+	DefaultTaskStopToolName string
 }
 
 // New creates a middleware that injects the task_output and task_stop tools, bound
@@ -127,6 +141,12 @@ func NewTyped[M adk.MessageType](ctx context.Context, config *TypedConfig[M]) (a
 	}
 
 	instruction := buildInstruction(config.TaskOutputToolConfig, outputEnabled, config.TaskStopToolConfig, stopEnabled)
+	if config.CustomSystemPrompt != nil {
+		instruction = config.CustomSystemPrompt(ctx, &SystemPromptInput{
+			DefaultTaskOutputToolName: taskOutputToolName,
+			DefaultTaskStopToolName:   taskStopToolName,
+		})
+	}
 
 	return &typedMiddleware[M]{
 		tools:       tools,
