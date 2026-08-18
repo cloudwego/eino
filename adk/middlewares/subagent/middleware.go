@@ -58,10 +58,28 @@ type TypedConfig[M adk.MessageType] struct {
 	// Defined as *string because an empty string may be an intentional user value.
 	SystemPrompt *string
 
+	// CustomFormatReminder customizes the mid-conversation system reminder that advertises
+	// the available agent types. When nil, the default reminder is used. Returning an error
+	// aborts construction; returning a nil output keeps the default reminder; returning an
+	// output whose Reminder is "" suppresses the reminder message entirely.
+	CustomFormatReminder func(ctx context.Context, in *FormatReminderInput[M]) (*FormatReminderOutput, error)
+
 	// Background configures background-task execution for sub-agent runs. When nil,
 	// only foreground (blocking) agent execution is available and runs are NOT
 	// tracked. See BackgroundConfig.
 	Background *TypedBackgroundConfig[M]
+}
+
+// FormatReminderInput is the input to TypedConfig.CustomFormatReminder.
+type FormatReminderInput[M adk.MessageType] struct {
+	// SubAgents are the sub-agents advertised by the reminder.
+	SubAgents []adk.TypedAgent[M]
+}
+
+// FormatReminderOutput is the result of TypedConfig.CustomFormatReminder.
+type FormatReminderOutput struct {
+	// Reminder is the reminder text to insert. An empty string suppresses the reminder message.
+	Reminder string
 }
 
 // BackgroundConfig enables background-task execution for the standard
@@ -222,6 +240,15 @@ func NewTyped[M adk.MessageType](ctx context.Context, config *TypedConfig[M]) (a
 	reminder := ""
 	if len(entries) > 0 {
 		reminder = buildAgentTypesSectionFromEntries(entries)
+	}
+	if config.CustomFormatReminder != nil {
+		out, ferr := config.CustomFormatReminder(ctx, &FormatReminderInput[M]{SubAgents: config.SubAgents})
+		if ferr != nil {
+			return nil, fmt.Errorf("subagent middleware: CustomFormatReminder failed: %w", ferr)
+		}
+		if out != nil {
+			reminder = out.Reminder
+		}
 	}
 
 	return &typedSubagentMiddleware[M]{
