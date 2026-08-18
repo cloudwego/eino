@@ -55,11 +55,11 @@ func TestBeforeAgent_AppendsContextManagementNote(t *testing.T) {
 	assert.Contains(t, rc2.Instruction, note)
 }
 
-func TestBeforeAgent_CustomFormatContextInstruction(t *testing.T) {
+func TestBeforeAgent_CustomFormatContextManagementInstruction(t *testing.T) {
 	ctx := context.Background()
 
 	newMW := func(fn func(context.Context) string) *TypedMiddleware[*schema.Message] {
-		return &TypedMiddleware[*schema.Message]{cfg: &TypedConfig[*schema.Message]{CustomFormatContextInstruction: fn}}
+		return &TypedMiddleware[*schema.Message]{cfg: &TypedConfig[*schema.Message]{CustomFormatContextManagementInstruction: fn}}
 	}
 
 	t.Run("custom replaces the default note", func(t *testing.T) {

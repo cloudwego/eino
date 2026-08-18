@@ -54,33 +54,30 @@ func TestToolSearch_CustomFormatReminder(t *testing.T) {
 		assert.Contains(t, reminderOf(mw), "dynamic_tool_a")
 	})
 
-	t.Run("custom rewrites and receives default + tool infos", func(t *testing.T) {
-		var gotDefault string
+	t.Run("custom rewrites and receives tool infos", func(t *testing.T) {
 		var gotTools []*schema.ToolInfo
 		mw, err := New(ctx, &Config{
 			DynamicTools: []tool.BaseTool{dynamicA, dynamicB},
 			CustomFormatReminder: func(_ context.Context, in *FormatReminderInput) (*FormatReminderOutput, error) {
-				gotDefault = in.DefaultReminder
-				gotTools = in.Tools
+				gotTools = in.DynamicTools
 				return &FormatReminderOutput{Reminder: "CUSTOM REMINDER"}, nil
 			},
 		})
 		require.NoError(t, err)
 		assert.Equal(t, "CUSTOM REMINDER", reminderOf(mw))
-		assert.Contains(t, gotDefault, "dynamic_tool_a", "formatter gets the default reminder")
 		require.Len(t, gotTools, 2, "formatter gets full ToolInfos, not just names")
 		assert.Equal(t, "Dynamic tool A", gotTools[0].Desc, "ToolInfo carries description beyond the name")
 	})
 
-	t.Run("error keeps default reminder", func(t *testing.T) {
-		mw, err := New(ctx, &Config{
+	t.Run("error propagates and fails construction", func(t *testing.T) {
+		_, err := New(ctx, &Config{
 			DynamicTools: []tool.BaseTool{dynamicA},
 			CustomFormatReminder: func(_ context.Context, _ *FormatReminderInput) (*FormatReminderOutput, error) {
 				return nil, errors.New("boom")
 			},
 		})
-		require.NoError(t, err)
-		assert.Contains(t, reminderOf(mw), "dynamic_tool_a")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "boom")
 	})
 
 	t.Run("empty result suppresses the reminder message", func(t *testing.T) {

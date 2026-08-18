@@ -19,7 +19,6 @@ package subagent
 import (
 	"context"
 	"fmt"
-	"log"
 	"strings"
 
 	"github.com/slongfield/pyfmt"
@@ -60,9 +59,9 @@ type TypedConfig[M adk.MessageType] struct {
 	SystemPrompt *string
 
 	// CustomFormatReminder customizes the mid-conversation system reminder that advertises
-	// the available agent types. When nil, the default reminder is used. Returning a nil
-	// output or an error keeps the default reminder; returning an output whose Reminder is
-	// "" suppresses the reminder message entirely.
+	// the available agent types. When nil, the default reminder is used. Returning an error
+	// aborts construction; returning a nil output keeps the default reminder; returning an
+	// output whose Reminder is "" suppresses the reminder message entirely.
 	CustomFormatReminder func(ctx context.Context, in *FormatReminderInput[M]) (*FormatReminderOutput, error)
 
 	// Background configures background-task execution for sub-agent runs. When nil,
@@ -73,8 +72,6 @@ type TypedConfig[M adk.MessageType] struct {
 
 // FormatReminderInput is the input to TypedConfig.CustomFormatReminder.
 type FormatReminderInput[M adk.MessageType] struct {
-	// DefaultReminder is the reminder the middleware would insert by default.
-	DefaultReminder string
 	// SubAgents are the sub-agents advertised by the reminder.
 	SubAgents []adk.TypedAgent[M]
 }
@@ -245,9 +242,11 @@ func NewTyped[M adk.MessageType](ctx context.Context, config *TypedConfig[M]) (a
 		reminder = buildAgentTypesSectionFromEntries(entries)
 	}
 	if config.CustomFormatReminder != nil {
-		if out, ferr := config.CustomFormatReminder(ctx, &FormatReminderInput[M]{DefaultReminder: reminder, SubAgents: config.SubAgents}); ferr != nil {
-			log.Printf("subagent middleware: CustomFormatReminder failed, using default reminder: %v", ferr)
-		} else if out != nil {
+		out, ferr := config.CustomFormatReminder(ctx, &FormatReminderInput[M]{SubAgents: config.SubAgents})
+		if ferr != nil {
+			return nil, fmt.Errorf("subagent middleware: CustomFormatReminder failed: %w", ferr)
+		}
+		if out != nil {
 			reminder = out.Reminder
 		}
 	}

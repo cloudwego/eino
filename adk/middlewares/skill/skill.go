@@ -166,9 +166,10 @@ type TypedConfig[M adk.MessageType] struct {
 	CustomToolDescription ToolDescriptionFunc
 
 	// CustomFormatReminder customizes the mid-conversation system reminder that advertises
-	// the available skills. When nil, the default reminder is used. Returning a nil output
-	// or an error keeps the default reminder; returning an output whose Reminder is ""
-	// suppresses the reminder this turn (the skills stay pending and are re-offered next turn).
+	// the available skills. When nil, the default reminder is used. Returning an error aborts
+	// the turn; returning a nil output keeps the default reminder; returning an output whose
+	// Reminder is "" suppresses the reminder this turn (the skills stay pending and are
+	// re-offered next turn).
 	CustomFormatReminder func(ctx context.Context, in *FormatReminderInput) (*FormatReminderOutput, error)
 
 	// CustomToolParams customizes tool parameters for the skill tool.
@@ -199,12 +200,9 @@ type Config = TypedConfig[*schema.Message]
 
 // FormatReminderInput is the input to TypedConfig.CustomFormatReminder.
 type FormatReminderInput struct {
-	// DefaultReminder is the reminder the middleware would insert by default (advertising Changed).
-	DefaultReminder string
 	// Current is the full skill list read this turn.
 	Current []FrontMatter
 	// Changed is the added/changed subset the middleware would advertise by default.
-	// The previously-advertised set is Current minus Changed.
 	Changed []FrontMatter
 }
 
@@ -389,13 +387,13 @@ func (h *typedSkillHandler[M]) BeforeModelRewriteState(ctx context.Context, stat
 	section := buildSkillsSectionFromEntries(changed)
 	if h.customFormatReminder != nil {
 		out, ferr := h.customFormatReminder(ctx, &FormatReminderInput{
-			DefaultReminder: section,
-			Current:         skills,
-			Changed:         changed,
+			Current: skills,
+			Changed: changed,
 		})
 		if ferr != nil {
-			log.Printf("skill middleware: CustomFormatReminder failed, using default reminder: %v", ferr)
-		} else if out != nil {
+			return ctx, state, fmt.Errorf("skill middleware: CustomFormatReminder failed: %w", ferr)
+		}
+		if out != nil {
 			if out.Reminder == "" {
 				return ctx, state, nil
 			}

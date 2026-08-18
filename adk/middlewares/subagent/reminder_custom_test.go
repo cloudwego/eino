@@ -58,32 +58,29 @@ func TestSubagent_CustomFormatReminder(t *testing.T) {
 		assert.Contains(t, rem, "does research")
 	})
 
-	t.Run("custom rewrites and receives default + sub-agents", func(t *testing.T) {
-		var gotDefault string
+	t.Run("custom rewrites and receives sub-agents", func(t *testing.T) {
 		var gotAgents []adk.TypedAgent[*schema.Message]
 		mw, err := NewTyped[*schema.Message](ctx, &TypedConfig[*schema.Message]{
 			SubAgents: subAgents,
 			CustomFormatReminder: func(_ context.Context, in *FormatReminderInput[*schema.Message]) (*FormatReminderOutput, error) {
-				gotDefault = in.DefaultReminder
 				gotAgents = in.SubAgents
 				return &FormatReminderOutput{Reminder: "CUSTOM AGENTS"}, nil
 			},
 		})
 		require.NoError(t, err)
 		assert.Equal(t, "CUSTOM AGENTS", reminderOfMiddleware(t, mw))
-		assert.Contains(t, gotDefault, "researcher")
 		assert.Len(t, gotAgents, 2)
 	})
 
-	t.Run("error keeps default reminder", func(t *testing.T) {
-		mw, err := NewTyped[*schema.Message](ctx, &TypedConfig[*schema.Message]{
+	t.Run("error propagates and fails construction", func(t *testing.T) {
+		_, err := NewTyped[*schema.Message](ctx, &TypedConfig[*schema.Message]{
 			SubAgents: subAgents,
 			CustomFormatReminder: func(_ context.Context, _ *FormatReminderInput[*schema.Message]) (*FormatReminderOutput, error) {
 				return nil, errors.New("boom")
 			},
 		})
-		require.NoError(t, err)
-		assert.Contains(t, reminderOfMiddleware(t, mw), "researcher")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "boom")
 	})
 
 	t.Run("empty result suppresses the reminder message", func(t *testing.T) {

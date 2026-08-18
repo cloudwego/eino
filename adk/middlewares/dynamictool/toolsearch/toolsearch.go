@@ -22,7 +22,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"sort"
 	"strings"
 	"text/template"
@@ -51,18 +50,16 @@ type Config struct {
 	UseModelToolSearch bool
 
 	// CustomFormatReminder customizes the mid-conversation system reminder that advertises
-	// the deferred tools. When nil, the default reminder is used. Returning a nil output or
-	// an error keeps the default reminder; returning an output whose Reminder is "" suppresses
-	// the reminder message entirely.
+	// the deferred tools. When nil, the default reminder is used. Returning an error aborts
+	// construction; returning a nil output keeps the default reminder; returning an output
+	// whose Reminder is "" suppresses the reminder message entirely.
 	CustomFormatReminder func(ctx context.Context, in *FormatReminderInput) (*FormatReminderOutput, error)
 }
 
 // FormatReminderInput is the input to Config.CustomFormatReminder.
 type FormatReminderInput struct {
-	// DefaultReminder is the reminder the middleware would insert by default.
-	DefaultReminder string
-	// Tools are the dynamic tools advertised by the reminder.
-	Tools []*schema.ToolInfo
+	// DynamicTools are the dynamic tools advertised by the reminder.
+	DynamicTools []*schema.ToolInfo
 }
 
 // FormatReminderOutput is the result of Config.CustomFormatReminder.
@@ -113,9 +110,11 @@ func NewTyped[M adk.MessageType](ctx context.Context, config *Config) (adk.Typed
 
 	reminder := buf.String()
 	if config.CustomFormatReminder != nil {
-		if out, ferr := config.CustomFormatReminder(ctx, &FormatReminderInput{DefaultReminder: reminder, Tools: dynamicToolInfos}); ferr != nil {
-			log.Printf("toolsearch middleware: CustomFormatReminder failed, using default reminder: %v", ferr)
-		} else if out != nil {
+		out, ferr := config.CustomFormatReminder(ctx, &FormatReminderInput{DynamicTools: dynamicToolInfos})
+		if ferr != nil {
+			return nil, fmt.Errorf("toolsearch middleware: CustomFormatReminder failed: %w", ferr)
+		}
+		if out != nil {
 			reminder = out.Reminder
 		}
 	}

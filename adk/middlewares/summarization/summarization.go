@@ -162,12 +162,12 @@ type TypedConfig[M adk.MessageType] struct {
 	// Optional. Defaults to no retries.
 	Retry *TypedRetryConfig[M]
 
-	// CustomFormatContextInstruction customizes the context-management note that BeforeAgent
-	// appends to the agent system prompt (the note telling the model long conversations are
-	// summarized automatically). When nil, the default note is used; returning "" suppresses
-	// the note entirely.
+	// CustomFormatContextManagementInstruction customizes the context-management note that
+	// BeforeAgent appends to the agent system prompt (the note telling the model long
+	// conversations are summarized automatically). When nil, the default note is used;
+	// returning "" suppresses the note entirely.
 	// Optional.
-	CustomFormatContextInstruction func(ctx context.Context) string
+	CustomFormatContextManagementInstruction func(ctx context.Context) string
 
 	// Failover configures fallback behavior when summary generation on the primary model fails.
 	// Optional.
@@ -363,8 +363,8 @@ func (m *TypedMiddleware[M]) BeforeAgent(ctx context.Context, runCtx *adk.ChatMo
 	// Append the context-management note to the agent system prompt so the model knows
 	// long conversations are summarized automatically ({{summarization prompt}}).
 	note := getContextManagementInstruction()
-	if m.cfg != nil && m.cfg.CustomFormatContextInstruction != nil {
-		note = m.cfg.CustomFormatContextInstruction(ctx)
+	if m.cfg != nil && m.cfg.CustomFormatContextManagementInstruction != nil {
+		note = m.cfg.CustomFormatContextManagementInstruction(ctx)
 	}
 	if strings.TrimSpace(note) != "" {
 		nRunCtx := *runCtx

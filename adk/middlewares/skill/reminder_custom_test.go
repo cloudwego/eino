@@ -40,7 +40,7 @@ func TestSkill_CustomFormatReminder(t *testing.T) {
 		{FrontMatter: FrontMatter{Name: "alpha", Description: "d-alpha"}},
 	}}
 
-	t.Run("custom rewrites and receives default + current + changed", func(t *testing.T) {
+	t.Run("custom rewrites and receives current + changed", func(t *testing.T) {
 		var in *FormatReminderInput
 		h := newReminderHandler(backend, func(_ context.Context, i *FormatReminderInput) (*FormatReminderOutput, error) {
 			in = i
@@ -55,7 +55,6 @@ func TestSkill_CustomFormatReminder(t *testing.T) {
 			assert.Equal(t, "CUSTOM SKILLS", firstReminder(state.Messages).Content)
 
 			require.NotNil(t, in)
-			assert.Contains(t, in.DefaultReminder, "alpha")
 			assert.Len(t, in.Current, 1)
 			assert.Len(t, in.Changed, 1, "fresh run → every skill is changed")
 		})
@@ -69,7 +68,7 @@ func TestSkill_CustomFormatReminder(t *testing.T) {
 		var in *FormatReminderInput
 		h := newReminderHandler(twoSkills, func(_ context.Context, i *FormatReminderInput) (*FormatReminderOutput, error) {
 			in = i
-			return &FormatReminderOutput{Reminder: i.DefaultReminder}, nil
+			return &FormatReminderOutput{Reminder: "kept"}, nil
 		})
 		withRunLocalCtx(t, func(ctx context.Context) {
 			// A prior reminder already advertised alpha (its digest is in history).
@@ -101,16 +100,16 @@ func TestSkill_CustomFormatReminder(t *testing.T) {
 		})
 	})
 
-	t.Run("error keeps default reminder", func(t *testing.T) {
+	t.Run("error propagates instead of falling back", func(t *testing.T) {
 		h := newReminderHandler(backend, func(_ context.Context, _ *FormatReminderInput) (*FormatReminderOutput, error) {
 			return nil, errors.New("boom")
 		})
 		withRunLocalCtx(t, func(ctx context.Context) {
 			state := &adk.ChatModelAgentState{Messages: []*schema.Message{schema.UserMessage("hi")}}
 			_, state, err := h.BeforeModelRewriteState(ctx, state, nil)
-			require.NoError(t, err)
-			require.Equal(t, 1, countReminders(state.Messages))
-			assert.Contains(t, firstReminder(state.Messages).Content, "alpha", "falls back to default reminder")
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "boom")
+			assert.Equal(t, 0, countReminders(state.Messages), "no reminder inserted on error")
 		})
 	})
 }
