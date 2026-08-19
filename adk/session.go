@@ -1309,7 +1309,12 @@ func applySessionEvent[M MessageType](messages *[]M, event *SessionEvent[M]) err
 	if !isContextSessionEvent(event) {
 		return nil
 	}
-	return applyContextSessionEventInPlace(event, messages)
+	replay := newMessageReplay(*messages)
+	if err := replay.apply(event); err != nil {
+		return err
+	}
+	*messages = replay.visibleMessages()
+	return nil
 }
 
 func isContextSessionEvent[M MessageType](event *SessionEvent[M]) bool {
@@ -1320,101 +1325,110 @@ func isContextSessionEvent[M MessageType](event *SessionEvent[M]) bool {
 		event.MessageUpdated != nil || event.MessageInserted != nil || event.MessagesDeleted != nil
 }
 
-func applyContextSessionEvent[M MessageType](messages []M, event *SessionEvent[M]) ([]M, error) {
-	out := append([]M{}, messages...)
-	err := applyContextSessionEventInPlace(event, &out)
-	return out, err
+type messageReplayEntry[M MessageType] struct {
+	message M
+	deleted bool
 }
 
-func applyContextSessionEventInPlace[M MessageType](event *SessionEvent[M], out *[]M) error {
+// messageReplay retains deleted entries as positional tombstones until replay completes.
+// Tombstones remain valid insertion anchors, but updates and repeated deletes still
+// require a visible target so replay continues to reject corrupted event sequences.
+type messageReplay[M MessageType] struct {
+	entries []messageReplayEntry[M]
+}
+
+func newMessageReplay[M MessageType](messages []M) *messageReplay[M] {
+	replay := &messageReplay[M]{entries: make([]messageReplayEntry[M], 0, len(messages))}
+	for _, message := range messages {
+		replay.entries = append(replay.entries, messageReplayEntry[M]{message: message})
+	}
+	return replay
+}
+
+func (r *messageReplay[M]) apply(event *SessionEvent[M]) error {
+	if !isContextSessionEvent(event) {
+		return nil
+	}
+
 	switch {
 	case event.MessagesReplaced != nil:
-		*out = append([]M{}, *event.MessagesReplaced...)
+		r.entries = newMessageReplay(*event.MessagesReplaced).entries
 
 	case event.MessageUpdated != nil:
 		upd := event.MessageUpdated
 		if replacementID := GetMessageID(upd.Message); replacementID != "" && replacementID != upd.MessageID {
 			return fmt.Errorf("apply event: MessageUpdated target %q but replacement has ID %q — identity mismatch", upd.MessageID, replacementID)
 		}
-		if err := replaceMessageByID(out, upd.MessageID, upd.Message); err != nil {
-			return err
+		for i := range r.entries {
+			if !r.entries[i].deleted && GetMessageID(r.entries[i].message) == upd.MessageID {
+				r.entries[i].message = upd.Message
+				return nil
+			}
 		}
+		return fmt.Errorf("reconstruct: target message %q not found for update", upd.MessageID)
 
 	case event.MessageInserted != nil:
 		ins := event.MessageInserted
+		entry := messageReplayEntry[M]{message: ins.Message}
 		if ins.BeforeMessageID == "" {
-			*out = append(*out, ins.Message)
-		} else {
-			inserted := false
-			for j, msg := range *out {
-				if GetMessageID(msg) == ins.BeforeMessageID {
-					var zero M
-					*out = append(*out, zero)
-					copy((*out)[j+1:], (*out)[j:])
-					(*out)[j] = ins.Message
-					inserted = true
-					break
-				}
-			}
-			if !inserted {
-				return fmt.Errorf("apply event: anchor message %q not found for insertion", ins.BeforeMessageID)
+			r.entries = append(r.entries, entry)
+			return nil
+		}
+		for i := range r.entries {
+			if GetMessageID(r.entries[i].message) == ins.BeforeMessageID {
+				r.entries = append(r.entries, messageReplayEntry[M]{})
+				copy(r.entries[i+1:], r.entries[i:])
+				r.entries[i] = entry
+				return nil
 			}
 		}
+		return fmt.Errorf("apply event: anchor message %q not found for insertion", ins.BeforeMessageID)
 
 	case event.MessagesDeleted != nil:
-		if err := deleteMessagesByID(out, event.MessagesDeleted.MessageIDs); err != nil {
+		ids := event.MessagesDeleted.MessageIDs
+		if err := validateMessageIDs("MessagesDeleted.MessageIDs", ids); err != nil {
 			return err
+		}
+		targets := make(map[string]struct{}, len(ids))
+		for _, id := range ids {
+			targets[id] = struct{}{}
+		}
+		found := make(map[string]struct{}, len(ids))
+		for i := range r.entries {
+			if r.entries[i].deleted {
+				continue
+			}
+			if _, ok := targets[GetMessageID(r.entries[i].message)]; ok {
+				found[GetMessageID(r.entries[i].message)] = struct{}{}
+			}
+		}
+		for _, id := range ids {
+			if _, ok := found[id]; !ok {
+				return fmt.Errorf("reconstruct: target message %q not found for deletion", id)
+			}
+		}
+		for i := range r.entries {
+			if _, ok := targets[GetMessageID(r.entries[i].message)]; ok {
+				r.entries[i].deleted = true
+			}
 		}
 
 	default:
 		if !isNilMessage(event.Message) {
-			*out = append(*out, event.Message)
+			r.entries = append(r.entries, messageReplayEntry[M]{message: event.Message})
 		}
 	}
 	return nil
 }
 
-// replaceMessageByID finds the message with the given ID and replaces it.
-func replaceMessageByID[M MessageType](messages *[]M, msgID string, newMsg M) error {
-	for i, msg := range *messages {
-		if GetMessageID(msg) == msgID {
-			(*messages)[i] = newMsg
-			return nil
+func (r *messageReplay[M]) visibleMessages() []M {
+	messages := make([]M, 0, len(r.entries))
+	for _, entry := range r.entries {
+		if !entry.deleted {
+			messages = append(messages, entry.message)
 		}
 	}
-	return fmt.Errorf("reconstruct: target message %q not found for update", msgID)
-}
-
-func deleteMessagesByID[M MessageType](messages *[]M, ids []string) error {
-	if err := validateMessageIDs("MessagesDeleted.MessageIDs", ids); err != nil {
-		return err
-	}
-	targets := make(map[string]struct{}, len(ids))
-	for _, id := range ids {
-		targets[id] = struct{}{}
-	}
-	found := make(map[string]struct{}, len(ids))
-	for _, msg := range *messages {
-		id := GetMessageID(msg)
-		if _, ok := targets[id]; ok {
-			found[id] = struct{}{}
-		}
-	}
-	for _, id := range ids {
-		if _, ok := found[id]; !ok {
-			return fmt.Errorf("reconstruct: target message %q not found for deletion", id)
-		}
-	}
-
-	retained := (*messages)[:0]
-	for _, msg := range *messages {
-		if _, ok := targets[GetMessageID(msg)]; ok {
-			continue
-		}
-		retained = append(retained, msg)
-	}
-	*messages = retained
-	return nil
+	return messages
 }
 
 func validateMessageIDs(field string, ids []string) error {
@@ -1806,9 +1820,10 @@ func replayDurableContextEvents[M MessageType](events []*SessionEvent[M]) (*reco
 	// (sawModelContext starts false) even when the tool set is unchanged — an
 	// extra audit event, not a correctness issue, since reconstructed ToolInfos
 	// feed only the change-detection baseline and never the model itself.
+	replay := newMessageReplay(messages)
 	state := &reconstructedSessionState[M]{Messages: messages}
 	for i := startIdx; i < len(events); i++ {
-		if err := applySessionEvent(&messages, events[i]); err != nil {
+		if err := replay.apply(events[i]); err != nil {
 			return nil, fmt.Errorf("reconstruct: %w", err)
 		}
 		if events[i] != nil && events[i].ModelContext != nil {
@@ -1817,7 +1832,7 @@ func replayDurableContextEvents[M MessageType](events []*SessionEvent[M]) (*reco
 			state.sawModelContext = true
 		}
 	}
-	state.Messages = messages
+	state.Messages = replay.visibleMessages()
 	return state, nil
 }
 

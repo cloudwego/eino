@@ -5580,6 +5580,82 @@ func TestReconstructSessionState_MessagesDeletedMissingTargetFails(t *testing.T)
 	assert.Contains(t, err.Error(), "ghost-id")
 }
 
+func TestReconstructSessionState_MessageInsertedBeforeDeletedAnchor(t *testing.T) {
+	ctx := context.Background()
+	store := newSessionHelperStore()
+	sid := "insert-before-deleted-anchor"
+
+	before := schema.UserMessage("before")
+	anchor := schema.AssistantMessage("anchor", nil)
+	after := schema.UserMessage("after")
+	inserted := schema.SystemMessage("inserted")
+	for _, msg := range []*schema.Message{before, anchor, after, inserted} {
+		EnsureMessageID(msg)
+	}
+
+	events := []*SessionEvent[*schema.Message]{
+		withTestEventID(&SessionEvent[*schema.Message]{Kind: SessionEventMessage, Message: before}),
+		withTestEventID(&SessionEvent[*schema.Message]{Kind: SessionEventMessage, Message: anchor}),
+		withTestEventID(&SessionEvent[*schema.Message]{Kind: SessionEventMessage, Message: after}),
+		withTestEventID(&SessionEvent[*schema.Message]{
+			Kind:            SessionEventMessagesDeleted,
+			MessagesDeleted: &MessagesDeletedEvent{MessageIDs: []string{GetMessageID(anchor)}},
+		}),
+		withTestEventID(&SessionEvent[*schema.Message]{
+			Kind: SessionEventMessageInserted,
+			MessageInserted: &MessageInsertedEvent[*schema.Message]{
+				Message:         inserted,
+				BeforeMessageID: GetMessageID(anchor),
+			},
+		}),
+	}
+	require.NoError(t, store.AppendEventsForSession(ctx, sid, events))
+
+	result, err := reconstructSessionState[*schema.Message](ctx, store, sid, defaultLoadPageSize)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.NotNil(t, result.state)
+	require.Len(t, result.state.Messages, 3)
+	assert.Equal(t, "before", result.state.Messages[0].Content)
+	assert.Equal(t, "inserted", result.state.Messages[1].Content)
+	assert.Equal(t, "after", result.state.Messages[2].Content)
+}
+
+func TestReconstructSessionState_MessageInsertedAnchorBeforeReplacementFails(t *testing.T) {
+	ctx := context.Background()
+	store := newSessionHelperStore()
+	sid := "insert-anchor-before-replacement"
+
+	oldAnchor := schema.UserMessage("old anchor")
+	replacement := schema.UserMessage("replacement")
+	inserted := schema.SystemMessage("inserted")
+	for _, msg := range []*schema.Message{oldAnchor, replacement, inserted} {
+		EnsureMessageID(msg)
+	}
+	replacementMessages := []*schema.Message{replacement}
+
+	events := []*SessionEvent[*schema.Message]{
+		withTestEventID(&SessionEvent[*schema.Message]{Kind: SessionEventMessage, Message: oldAnchor}),
+		withTestEventID(&SessionEvent[*schema.Message]{
+			Kind:             SessionEventMessagesReplaced,
+			MessagesReplaced: &replacementMessages,
+		}),
+		withTestEventID(&SessionEvent[*schema.Message]{
+			Kind: SessionEventMessageInserted,
+			MessageInserted: &MessageInsertedEvent[*schema.Message]{
+				Message:         inserted,
+				BeforeMessageID: GetMessageID(oldAnchor),
+			},
+		}),
+	}
+	require.NoError(t, store.AppendEventsForSession(ctx, sid, events))
+
+	_, err := reconstructSessionState[*schema.Message](ctx, store, sid, defaultLoadPageSize)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), GetMessageID(oldAnchor))
+	assert.Contains(t, err.Error(), "anchor message")
+}
+
 // TestAgentTool_ChildSessionID_FiltersFromParentLog verifies that events
 // forwarded from an inner agent (via AgentTool) are tagged with the child
 // SessionEvent.SessionID and are NOT persisted into the parent's session event
@@ -6042,11 +6118,107 @@ func TestAttack_ApplySessionEventMessageUpdatedIdentityMismatch(t *testing.T) {
 	}
 
 	err := applySessionEvent(&messages, ev)
-	if err == nil {
-		t.Log("MessageUpdated with matching ID applied OK")
-	} else {
-		t.Logf("MessageUpdated result: %v", err)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "identity mismatch")
+	assert.Equal(t, []Message{msg}, messages)
+	t.Logf("correctly rejected MessageUpdated identity mismatch: %v", err)
+}
+
+func TestAttack_MessageReplayMultipleInsertionsBeforeDeletedAnchor(t *testing.T) {
+	before := schema.UserMessage("before")
+	anchor := schema.AssistantMessage("anchor", nil)
+	after := schema.UserMessage("after")
+	first := schema.SystemMessage("first")
+	second := schema.SystemMessage("second")
+	for _, msg := range []*schema.Message{before, anchor, after, first, second} {
+		EnsureMessageID(msg)
 	}
+
+	events := []*SessionEvent[*schema.Message]{
+		{Message: before},
+		{Message: anchor},
+		{Message: after},
+		{MessagesDeleted: &MessagesDeletedEvent{MessageIDs: []string{GetMessageID(anchor)}}},
+		{MessageInserted: &MessageInsertedEvent[*schema.Message]{
+			Message:         first,
+			BeforeMessageID: GetMessageID(anchor),
+		}},
+		{MessageInserted: &MessageInsertedEvent[*schema.Message]{
+			Message:         second,
+			BeforeMessageID: GetMessageID(anchor),
+		}},
+	}
+
+	state, err := replayDurableContextEvents(events)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	require.Len(t, state.Messages, 4)
+	assert.Equal(t, []*schema.Message{before, first, second, after}, state.Messages)
+	t.Log("repeated insertions preserve event order immediately before the hidden anchor")
+}
+
+func TestAttack_MessageReplayDeletedTargetRemainsMutationInvalid(t *testing.T) {
+	t.Run("update", func(t *testing.T) {
+		target := schema.UserMessage("target")
+		EnsureMessageID(target)
+		replacement := schema.AssistantMessage("replacement", nil)
+		setMessageIDForTest(replacement, GetMessageID(target))
+
+		events := []*SessionEvent[*schema.Message]{
+			{Message: target},
+			{MessagesDeleted: &MessagesDeletedEvent{MessageIDs: []string{GetMessageID(target)}}},
+			{MessageUpdated: &MessageUpdatedEvent[*schema.Message]{
+				MessageID: GetMessageID(target),
+				Message:   replacement,
+			}},
+		}
+
+		_, err := replayDurableContextEvents(events)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "not found for update")
+		t.Log("a tombstone is not a visible update target")
+	})
+
+	t.Run("delete again", func(t *testing.T) {
+		target := schema.UserMessage("target")
+		EnsureMessageID(target)
+
+		events := []*SessionEvent[*schema.Message]{
+			{Message: target},
+			{MessagesDeleted: &MessagesDeletedEvent{MessageIDs: []string{GetMessageID(target)}}},
+			{MessagesDeleted: &MessagesDeletedEvent{MessageIDs: []string{GetMessageID(target)}}},
+		}
+
+		_, err := replayDurableContextEvents(events)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "not found for deletion")
+		t.Log("a tombstone does not make repeated deletion valid")
+	})
+}
+
+func TestAttack_AgenticMessageReplayInsertsBeforeDeletedAnchor(t *testing.T) {
+	anchor := schema.UserAgenticMessage("anchor")
+	after := schema.UserAgenticMessage("after")
+	inserted := schema.SystemAgenticMessage("inserted")
+	for _, msg := range []*schema.AgenticMessage{anchor, after, inserted} {
+		EnsureMessageID(msg)
+	}
+
+	events := []*SessionEvent[*schema.AgenticMessage]{
+		{Message: anchor},
+		{Message: after},
+		{MessagesDeleted: &MessagesDeletedEvent{MessageIDs: []string{GetMessageID(anchor)}}},
+		{MessageInserted: &MessageInsertedEvent[*schema.AgenticMessage]{
+			Message:         inserted,
+			BeforeMessageID: GetMessageID(anchor),
+		}},
+	}
+
+	state, err := replayDurableContextEvents(events)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	assert.Equal(t, []*schema.AgenticMessage{inserted, after}, state.Messages)
+	t.Log("the generic replay projection preserves tombstone semantics for AgenticMessage")
 }
 
 func TestAttack_IsContextSessionEventEdgeCases(t *testing.T) {
