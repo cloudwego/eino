@@ -238,6 +238,7 @@ type ToolsNodeConfig struct {
 	// This field is optional. When not set, calling a non-existent tool will result in an error.
 	// When provided, if the LLM attempts to call a tool that doesn't exist in the Tools list,
 	// this handler will be invoked instead of returning an error, allowing graceful handling of hallucinated tools.
+	// Its result is processed as an invokable tool call and passes through invokable ToolCallMiddlewares.
 	// Parameters:
 	//   - ctx: The context for the tool call
 	//   - name: The name of the non-existent tool
@@ -266,6 +267,7 @@ type ToolsNodeConfig struct {
 	// ToolCallMiddlewares configures middleware for tool calls.
 	// Each element can contain Invokable and/or Streamable middleware.
 	// Invokable middleware only applies to tools implementing InvokableTool interface.
+	// It also applies to UnknownToolsHandler, which is executed as an invokable tool call.
 	// Streamable middleware only applies to tools implementing StreamableTool interface.
 	ToolCallMiddlewares []ToolMiddleware
 }
@@ -946,7 +948,13 @@ func (tn *ToolsNode) genToolCallTasks(ctx context.Context, tuple *toolsTuple,
 			if tn.unknownToolHandler == nil {
 				return nil, fmt.Errorf("tool %s not found in toolsNode indexes", toolCall.Function.Name)
 			}
-			toolCallTasks[i] = newUnknownToolTask(toolCall.Function.Name, toolCall.Function.Arguments, toolCall.ID, tn.unknownToolHandler)
+			toolCallTasks[i] = newUnknownToolTask(
+				toolCall.Function.Name,
+				toolCall.Function.Arguments,
+				toolCall.ID,
+				tn.unknownToolHandler,
+				tn.toolCallMiddlewares,
+			)
 		} else {
 			toolCallTasks[i].meta = tuple.meta[index]
 			toolCallTasks[i].name = toolCall.Function.Name
@@ -990,7 +998,11 @@ func (tn *ToolsNode) genToolCallTasks(ctx context.Context, tuple *toolsTuple,
 	return toolCallTasks, nil
 }
 
-func newUnknownToolTask(name, arg, callID string, unknownToolHandler func(ctx context.Context, name, input string) (string, error)) toolCallTask {
+func newUnknownToolTask(
+	name, arg, callID string,
+	unknownToolHandler func(ctx context.Context, name, input string) (string, error),
+	middlewares []invokableToolMiddlewareSpec,
+) toolCallTask {
 	endpoint := func(ctx context.Context, input *ToolInput) (*ToolOutput, error) {
 		result, err := unknownToolHandler(ctx, input.Name, input.Arguments)
 		if err != nil {
@@ -999,6 +1011,9 @@ func newUnknownToolTask(name, arg, callID string, unknownToolHandler func(ctx co
 		return &ToolOutput{
 			Result: result,
 		}, nil
+	}
+	for i := len(middlewares) - 1; i >= 0; i-- {
+		endpoint = wrapInvokableToolMiddleware(middlewares[i], endpoint)
 	}
 	return toolCallTask{
 		endpoint:       endpoint,
