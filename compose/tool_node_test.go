@@ -27,6 +27,7 @@ import (
 
 	"github.com/bytedance/sonic"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
@@ -746,6 +747,142 @@ func TestUnknownTool(t *testing.T) {
 		}
 	}
 	assert.Equal(t, expected, result)
+}
+
+func TestAttack_UnknownToolPreservesInvokableMiddlewareSemantics(t *testing.T) {
+	ctx := context.Background()
+	var calls []string
+	var inputs []*ToolInput
+	tn, err := NewToolNode(ctx, &ToolsNodeConfig{
+		UnknownToolsHandler: func(_ context.Context, _, _ string) (string, error) {
+			calls = append(calls, "handler")
+			return "unknown", nil
+		},
+		ToolCallMiddlewares: []ToolMiddleware{
+			{
+				Invokable: func(next InvokableToolEndpoint) InvokableToolEndpoint {
+					return func(ctx context.Context, input *ToolInput) (*ToolOutput, error) {
+						calls = append(calls, "outer-before")
+						inputs = append(inputs, input)
+						output, err := next(ctx, input)
+						if err != nil {
+							return nil, err
+						}
+						calls = append(calls, "outer-after")
+						output.Result = "outer:" + output.Result
+						return output, nil
+					}
+				},
+			},
+			{
+				Invokable: func(next InvokableToolEndpoint) InvokableToolEndpoint {
+					return func(ctx context.Context, input *ToolInput) (*ToolOutput, error) {
+						calls = append(calls, "inner-before")
+						output, err := next(ctx, input)
+						if err != nil {
+							return nil, err
+						}
+						calls = append(calls, "inner-after")
+						output.Result = "inner:" + output.Result
+						return output, nil
+					}
+				},
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	input := schema.AssistantMessage("", []schema.ToolCall{{
+		ID: "call-1",
+		Function: schema.FunctionCall{
+			Name:      "missing_tool",
+			Arguments: `{"input":"test"}`,
+		},
+	}})
+
+	result, err := tn.Invoke(ctx, input)
+	require.NoError(t, err)
+	require.Len(t, result, 1)
+	assert.Equal(t, "outer:inner:unknown", result[0].Content)
+	assert.Equal(t, []string{"outer-before", "inner-before", "handler", "inner-after", "outer-after"}, calls)
+
+	calls = nil
+	streamResult, err := tn.Stream(ctx, input)
+	require.NoError(t, err)
+	var streamed []*schema.Message
+	for {
+		chunk, recvErr := streamResult.Recv()
+		if recvErr == io.EOF {
+			break
+		}
+		require.NoError(t, recvErr)
+		for i := range chunk {
+			if chunk[i] != nil {
+				streamed = append(streamed, chunk[i])
+			}
+		}
+	}
+	require.Len(t, streamed, 1)
+	assert.Equal(t, "outer:inner:unknown", streamed[0].Content)
+	assert.Equal(t, []string{"outer-before", "inner-before", "handler", "inner-after", "outer-after"}, calls)
+
+	require.Len(t, inputs, 2)
+	for _, got := range inputs {
+		assert.Equal(t, "missing_tool", got.Name)
+		assert.Equal(t, "call-1", got.CallID)
+		assert.Equal(t, `{"input":"test"}`, got.Arguments)
+	}
+	t.Log("unknown-tool endpoints preserve registered invokable middleware order in invoke and stream modes")
+}
+
+func TestAttack_UnknownToolMiddlewareErrorPropagates(t *testing.T) {
+	sentinel := errors.New("middleware rejected unknown tool")
+	for _, tt := range []struct {
+		name string
+		run  func(*ToolsNode, *schema.Message) error
+	}{
+		{
+			name: "invoke",
+			run: func(tn *ToolsNode, input *schema.Message) error {
+				_, err := tn.Invoke(context.Background(), input)
+				return err
+			},
+		},
+		{
+			name: "stream",
+			run: func(tn *ToolsNode, input *schema.Message) error {
+				_, err := tn.Stream(context.Background(), input)
+				return err
+			},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			handlerCalled := false
+			tn, err := NewToolNode(context.Background(), &ToolsNodeConfig{
+				UnknownToolsHandler: func(_ context.Context, _, _ string) (string, error) {
+					handlerCalled = true
+					return "unexpected", nil
+				},
+				ToolCallMiddlewares: []ToolMiddleware{{
+					Invokable: func(InvokableToolEndpoint) InvokableToolEndpoint {
+						return func(context.Context, *ToolInput) (*ToolOutput, error) {
+							return nil, sentinel
+						}
+					},
+				}},
+			})
+			require.NoError(t, err)
+
+			input := schema.AssistantMessage("", []schema.ToolCall{{
+				ID:       "call-1",
+				Function: schema.FunctionCall{Name: "missing_tool", Arguments: `{}`},
+			}})
+			err = tt.run(tn, input)
+			require.ErrorIs(t, err, sentinel)
+			assert.False(t, handlerCalled)
+			t.Log("middleware errors stop the synthetic endpoint before it can enter conversation state")
+		})
+	}
 }
 
 func TestToolRerun(t *testing.T) {
