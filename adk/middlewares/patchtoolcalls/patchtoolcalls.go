@@ -221,7 +221,7 @@ func buildMessageNormalizationPlan(ctx context.Context, cfg Config, messages []*
 			continue
 		}
 		for _, tc := range msg.ToolCalls {
-			if tc.ID == "" || hasCorrespondingToolMessage(messages[i+1:], tc.ID) {
+			if tc.ID == "" || hasCorrespondingKeptToolMessage(messages, keep, i+1, tc.ID) {
 				continue
 			}
 			toolMsg, err := createPatchedToolMessage(ctx, cfg, tc)
@@ -256,33 +256,52 @@ func buildMessageNormalizationPlan(ctx context.Context, cfg Config, messages []*
 
 func analyzeMessages(messages []*schema.Message) mismatchCounts {
 	var counts mismatchCounts
-	previousCalls := make(map[string]struct{})
-	seenResults := make(map[string]struct{})
+	var scope *toolResultScope
 
-	for i, msg := range messages {
-		if msg.Role == schema.Tool {
-			if _, ok := previousCalls[msg.ToolCallID]; !ok {
-				counts.orphan++
-			} else if _, ok := seenResults[msg.ToolCallID]; ok {
-				counts.duplicate++
-			} else {
-				seenResults[msg.ToolCallID] = struct{}{}
+	finishScope := func() {
+		if scope == nil {
+			return
+		}
+		for callID := range scope.callIDs {
+			if _, ok := scope.seen[callID]; !ok {
+				counts.missing++
 			}
 		}
+		scope = nil
+	}
+
+	for _, msg := range messages {
+		if msg.Role == schema.Tool {
+			if scope == nil {
+				counts.orphan++
+				continue
+			}
+			if _, ok := scope.callIDs[msg.ToolCallID]; !ok {
+				counts.orphan++
+			} else if _, ok := scope.seen[msg.ToolCallID]; ok {
+				counts.duplicate++
+			} else {
+				scope.seen[msg.ToolCallID] = struct{}{}
+			}
+			continue
+		}
+		finishScope()
 		if msg.Role != schema.Assistant {
 			continue
 		}
+		callIDs := make(map[string]struct{})
 		for _, tc := range msg.ToolCalls {
 			if tc.ID == "" {
 				counts.emptyID++
 				continue
 			}
-			previousCalls[tc.ID] = struct{}{}
-			if !hasCorrespondingToolMessage(messages[i+1:], tc.ID) {
-				counts.missing++
-			}
+			callIDs[tc.ID] = struct{}{}
+		}
+		if len(callIDs) > 0 {
+			scope = &toolResultScope{callIDs: callIDs, seen: make(map[string]struct{})}
 		}
 	}
+	finishScope()
 
 	return counts
 }
@@ -295,30 +314,39 @@ func ensureMessageIDs[M adk.MessageType](messages []M) {
 
 func keptMessages(messages []*schema.Message, cfg Config) []bool {
 	keep := make([]bool, len(messages))
-	previousCalls := make(map[string]struct{})
-	seenResults := make(map[string]struct{})
+	var scope *toolResultScope
 
 	for i, msg := range messages {
 		keep[i] = true
 		if msg.Role == schema.Tool {
-			_, valid := previousCalls[msg.ToolCallID]
-			_, duplicate := seenResults[msg.ToolCallID]
+			valid := false
+			duplicate := false
+			if scope != nil {
+				_, valid = scope.callIDs[msg.ToolCallID]
+				_, duplicate = scope.seen[msg.ToolCallID]
+			}
 			if !valid && cfg.RemoveOrphanResults {
 				keep[i] = false
 			} else if valid && duplicate && cfg.RemoveDuplicateResults {
 				keep[i] = false
 			}
 			if valid && !duplicate {
-				seenResults[msg.ToolCallID] = struct{}{}
+				scope.seen[msg.ToolCallID] = struct{}{}
 			}
+			continue
 		}
+		scope = nil
 		if msg.Role != schema.Assistant {
 			continue
 		}
+		callIDs := make(map[string]struct{})
 		for _, tc := range msg.ToolCalls {
 			if tc.ID != "" {
-				previousCalls[tc.ID] = struct{}{}
+				callIDs[tc.ID] = struct{}{}
 			}
+		}
+		if len(callIDs) > 0 {
+			scope = &toolResultScope{callIDs: callIDs, seen: make(map[string]struct{})}
 		}
 	}
 
@@ -356,7 +384,7 @@ func buildAgenticNormalizationPlan(ctx context.Context, cfg Config, messages []*
 			continue
 		}
 		for _, tc := range collectAgenticToolCalls(msg) {
-			if tc.callID == "" || hasCorrespondingAgenticToolResult(messages[i+1:], tc.callID) {
+			if tc.callID == "" || hasCorrespondingRewrittenAgenticToolResult(rewrites, i+1, tc.callID) {
 				continue
 			}
 			toolMsg, err := createPatchedAgenticToolMessage(ctx, cfg, tc.name, tc.callID, tc.args)
@@ -399,6 +427,13 @@ type agenticToolCall struct {
 	args   string
 }
 
+// toolResultScope is limited to one assistant tool-call message plus the
+// immediately following contiguous tool-result window.
+type toolResultScope struct {
+	callIDs map[string]struct{}
+	seen    map[string]struct{}
+}
+
 type agenticRewrite struct {
 	message *schema.AgenticMessage
 	keep    bool
@@ -407,94 +442,205 @@ type agenticRewrite struct {
 
 func analyzeAgenticMessages(messages []*schema.AgenticMessage) mismatchCounts {
 	var counts mismatchCounts
-	previousCalls := make(map[string]struct{})
-	seenResults := make(map[string]struct{})
+	var scope *toolResultScope
 
-	for i, msg := range messages {
-		for _, block := range msg.ContentBlocks {
-			callID, ok := agenticResultCallID(block)
-			if !ok {
-				continue
+	finishScope := func() {
+		if scope == nil {
+			return
+		}
+		for callID := range scope.callIDs {
+			if _, ok := scope.seen[callID]; !ok {
+				counts.missing++
 			}
-			if _, valid := previousCalls[callID]; !valid {
-				counts.orphan++
-			} else if _, duplicate := seenResults[callID]; duplicate {
-				counts.duplicate++
-			} else {
-				seenResults[callID] = struct{}{}
+		}
+		scope = nil
+	}
+
+	for _, msg := range messages {
+		hasToolResult := agenticMessageHasToolResult(msg)
+		if msg.Role == schema.AgenticRoleTypeUser && hasToolResult {
+			for _, block := range msg.ContentBlocks {
+				callID, ok := agenticResultCallID(block)
+				if !ok {
+					continue
+				}
+				if scope == nil {
+					counts.orphan++
+					continue
+				}
+				if _, valid := scope.callIDs[callID]; !valid {
+					counts.orphan++
+				} else if _, duplicate := scope.seen[callID]; duplicate {
+					counts.duplicate++
+				} else {
+					scope.seen[callID] = struct{}{}
+				}
+			}
+			continue
+		}
+
+		finishScope()
+		if hasToolResult {
+			for _, block := range msg.ContentBlocks {
+				if _, ok := agenticResultCallID(block); ok {
+					counts.orphan++
+				}
 			}
 		}
 		if msg.Role != schema.AgenticRoleTypeAssistant {
 			continue
 		}
+		callIDs := make(map[string]struct{})
 		for _, tc := range collectAgenticToolCalls(msg) {
 			if tc.callID == "" {
 				counts.emptyID++
 				continue
 			}
-			previousCalls[tc.callID] = struct{}{}
-			if !hasCorrespondingAgenticToolResult(messages[i+1:], tc.callID) {
-				counts.missing++
-			}
+			callIDs[tc.callID] = struct{}{}
+		}
+		if len(callIDs) > 0 {
+			scope = &toolResultScope{callIDs: callIDs, seen: make(map[string]struct{})}
 		}
 	}
+	finishScope()
 
 	return counts
 }
 
 func agenticMessageRewrites(messages []*schema.AgenticMessage, cfg Config) []agenticRewrite {
 	rewrites := make([]agenticRewrite, len(messages))
-	previousCalls := make(map[string]struct{})
-	seenResults := make(map[string]struct{})
+	var scope *toolResultScope
 
 	for i, msg := range messages {
 		rewrite := agenticRewrite{message: msg, keep: true}
-		blocks := make([]*schema.ContentBlock, 0, len(msg.ContentBlocks))
-		removedBlock := false
+		hasToolResult := agenticMessageHasToolResult(msg)
 
-		for _, block := range msg.ContentBlocks {
-			callID, ok := agenticResultCallID(block)
-			if !ok {
-				blocks = append(blocks, block)
-				continue
+		switch {
+		case msg.Role == schema.AgenticRoleTypeUser && hasToolResult:
+			rewrite = rewriteAgenticResultBlocks(msg, scope, cfg)
+			if scope != nil && rewrite.keep && !agenticMessageHasToolResult(rewrite.message) {
+				scope = nil
 			}
-			_, valid := previousCalls[callID]
-			_, duplicate := seenResults[callID]
-			remove := (!valid && cfg.RemoveOrphanResults) || (valid && duplicate && cfg.RemoveDuplicateResults)
-			if remove {
-				removedBlock = true
-			} else {
-				blocks = append(blocks, block)
+		default:
+			if hasToolResult {
+				rewrite = rewriteAgenticResultBlocks(msg, nil, cfg)
 			}
-			if valid && !duplicate {
-				seenResults[callID] = struct{}{}
+			if rewrite.keep {
+				scope = nil
 			}
-		}
-
-		if removedBlock {
-			if len(blocks) == 0 {
-				rewrite.keep = false
-			} else {
-				adk.EnsureMessageID(msg)
-				cp := *msg
-				cp.ContentBlocks = blocks
-				cp.Extra = copyStringAnyMap(msg.Extra)
-				rewrite.message = &cp
-				rewrite.updated = true
-			}
-		}
-
-		if msg.Role == schema.AgenticRoleTypeAssistant {
-			for _, tc := range collectAgenticToolCalls(msg) {
-				if tc.callID != "" {
-					previousCalls[tc.callID] = struct{}{}
+			if msg.Role == schema.AgenticRoleTypeAssistant && rewrite.keep {
+				callIDs := make(map[string]struct{})
+				for _, tc := range collectAgenticToolCalls(rewrite.message) {
+					if tc.callID != "" {
+						callIDs[tc.callID] = struct{}{}
+					}
+				}
+				if len(callIDs) > 0 {
+					scope = &toolResultScope{callIDs: callIDs, seen: make(map[string]struct{})}
 				}
 			}
 		}
+
 		rewrites[i] = rewrite
 	}
 
 	return rewrites
+}
+
+func rewriteAgenticResultBlocks(msg *schema.AgenticMessage, scope *toolResultScope, cfg Config) agenticRewrite {
+	rewrite := agenticRewrite{message: msg, keep: true}
+	blocks := make([]*schema.ContentBlock, 0, len(msg.ContentBlocks))
+	removedBlock := false
+
+	for _, block := range msg.ContentBlocks {
+		callID, ok := agenticResultCallID(block)
+		if !ok {
+			blocks = append(blocks, block)
+			continue
+		}
+		valid := false
+		duplicate := false
+		if scope != nil {
+			_, valid = scope.callIDs[callID]
+			_, duplicate = scope.seen[callID]
+		}
+		remove := (!valid && cfg.RemoveOrphanResults) || (valid && duplicate && cfg.RemoveDuplicateResults)
+		if remove {
+			removedBlock = true
+		} else {
+			blocks = append(blocks, block)
+		}
+		if valid && !duplicate {
+			scope.seen[callID] = struct{}{}
+		}
+	}
+
+	if removedBlock {
+		if len(blocks) == 0 {
+			rewrite.keep = false
+		} else {
+			adk.EnsureMessageID(msg)
+			cp := *msg
+			cp.ContentBlocks = blocks
+			cp.Extra = copyStringAnyMap(msg.Extra)
+			rewrite.message = &cp
+			rewrite.updated = true
+		}
+	}
+
+	return rewrite
+}
+
+func agenticMessageHasToolResult(msg *schema.AgenticMessage) bool {
+	for _, block := range msg.ContentBlocks {
+		if _, ok := agenticResultCallID(block); ok {
+			return true
+		}
+	}
+	return false
+}
+
+func hasCorrespondingKeptToolMessage(messages []*schema.Message, keep []bool, start int, toolCallID string) bool {
+	for i := start; i < len(messages); i++ {
+		if !keep[i] {
+			continue
+		}
+		msg := messages[i]
+		if msg.Role != schema.Tool {
+			return false
+		}
+		if msg.ToolCallID == toolCallID {
+			return true
+		}
+	}
+	return false
+}
+
+func hasCorrespondingRewrittenAgenticToolResult(rewrites []agenticRewrite, start int, toolCallID string) bool {
+	for i := start; i < len(rewrites); i++ {
+		rewrite := rewrites[i]
+		if !rewrite.keep {
+			continue
+		}
+		msg := rewrite.message
+		if msg.Role != schema.AgenticRoleTypeUser {
+			return false
+		}
+		hasToolResult := false
+		for _, block := range msg.ContentBlocks {
+			callID, ok := agenticResultCallID(block)
+			if ok {
+				hasToolResult = true
+				if callID == toolCallID {
+					return true
+				}
+			}
+		}
+		if !hasToolResult {
+			return false
+		}
+	}
+	return false
 }
 
 func collectAgenticToolCalls(msg *schema.AgenticMessage) []agenticToolCall {
@@ -522,42 +668,6 @@ func agenticResultCallID(block *schema.ContentBlock) (string, bool) {
 		return block.ToolSearchFunctionToolResult.CallID, true
 	}
 	return "", false
-}
-
-func hasCorrespondingToolMessage(messages []*schema.Message, toolCallID string) bool {
-	for _, msg := range messages {
-		// Only consider successive tool messages after the tool call message
-		if msg.Role != schema.Tool {
-			return false
-		}
-		if msg.ToolCallID == toolCallID {
-			return true
-		}
-	}
-	return false
-}
-
-func hasCorrespondingAgenticToolResult(messages []*schema.AgenticMessage, toolCallID string) bool {
-	for _, msg := range messages {
-		// Only consider successive tool messages after the tool call message
-		if msg.Role != schema.AgenticRoleTypeUser {
-			return false
-		}
-		hasToolResult := false
-		for _, block := range msg.ContentBlocks {
-			callID, ok := agenticResultCallID(block)
-			if ok {
-				hasToolResult = true
-				if callID == toolCallID {
-					return true
-				}
-			}
-		}
-		if !hasToolResult {
-			return false
-		}
-	}
-	return false
 }
 
 func firstKeptMessageID(messages []*schema.Message, keep []bool, start int) string {

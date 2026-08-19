@@ -486,6 +486,31 @@ func TestPatchToolCallsRemoveDuplicateResults(t *testing.T) {
 	t.Run("AgenticMessage", testPatchToolCallsRemoveDuplicateResults[*schema.AgenticMessage])
 }
 
+func testAttackPatchToolCallsAllowsRepeatedCallIDAcrossWindows[M adk.MessageType](t *testing.T) {
+	ctx := context.Background()
+	mw, err := NewTyped[M](ctx, &Config{Strict: true, RemoveDuplicateResults: true})
+	require.NoError(t, err)
+
+	state := &adk.TypedChatModelAgentState[M]{Messages: []M{
+		makeAssistantMsgWithToolCalls[M]("", []testToolCall{{ID: "call_1", Name: "tool_a", Arguments: "{}"}}),
+		makeToolResultMsg[M]("result_a", "call_1", "tool_a"),
+		makeAssistantMsgWithToolCalls[M]("", []testToolCall{{ID: "call_1", Name: "tool_b", Arguments: "{}"}}),
+		makeToolResultMsg[M]("result_b", "call_1", "tool_b"),
+	}}
+	_, newState, err := mw.BeforeModelRewriteState(ctx, state, nil)
+	require.NoError(t, err)
+	require.Len(t, newState.Messages, 4)
+	assert.Equal(t, []string{"call_1", "call_1"}, collectToolResultIDs(newState.Messages))
+	assertMsgContent(t, newState.Messages[1], "result_a")
+	assertMsgContent(t, newState.Messages[3], "result_b")
+}
+
+func TestAttack_PatchToolCallsAllowsRepeatedCallIDAcrossWindows(t *testing.T) {
+	t.Log("reused provider call IDs must be scoped to each assistant tool-call message's contiguous result window")
+	t.Run("Message", testAttackPatchToolCallsAllowsRepeatedCallIDAcrossWindows[*schema.Message])
+	t.Run("AgenticMessage", testAttackPatchToolCallsAllowsRepeatedCallIDAcrossWindows[*schema.AgenticMessage])
+}
+
 func testPatchToolCallsSkipsEmptyIDInNonStrictMode[M adk.MessageType](t *testing.T) {
 	ctx := context.Background()
 	mw, err := NewTyped[M](ctx, nil)
@@ -590,6 +615,36 @@ func TestPatchToolCallsMixedAgenticBlockRemovalUpdatesMessage(t *testing.T) {
 	assert.Equal(t, adk.SessionEventMessageUpdated, plan.events[0].Kind)
 	assert.Equal(t, originalID, plan.events[0].MessageUpdated.MessageID)
 	assert.Equal(t, originalID, adk.GetMessageID(plan.events[0].MessageUpdated.Message))
+}
+
+func TestAttack_PatchToolCallsAgenticRechecksWindowAfterBlockRemoval(t *testing.T) {
+	t.Log("missing detection must use the rewritten result window after orphan blocks are removed")
+	ctx := context.Background()
+	assistant := makeAssistantMsgWithToolCalls[*schema.AgenticMessage]("", []testToolCall{{ID: "call_1", Name: "tool_a", Arguments: "{}"}})
+	mixed := &schema.AgenticMessage{
+		Role: schema.AgenticRoleTypeUser,
+		ContentBlocks: []*schema.ContentBlock{
+			schema.NewContentBlock(&schema.UserInputText{Text: "keep"}),
+			schema.NewContentBlock(&schema.FunctionToolResult{CallID: "call_orphan", Name: "tool_orphan"}),
+		},
+	}
+	delayed := makeToolResultMsg[*schema.AgenticMessage]("delayed", "call_1", "tool_a")
+
+	plan, err := buildAgenticNormalizationPlan(ctx, Config{RemoveOrphanResults: true}, []*schema.AgenticMessage{
+		assistant,
+		mixed,
+		delayed,
+	})
+	require.NoError(t, err)
+	require.Len(t, plan.messages, 3)
+	assert.Equal(t, []string{"call_1"}, collectToolResultIDs(plan.messages))
+	assertMsgContent(t, plan.messages[1], fmt.Sprintf(defaultPatchedToolMessageTemplate, "tool_a", "call_1"))
+	require.Len(t, plan.messages[2].ContentBlocks, 1)
+	assert.Equal(t, schema.ContentBlockTypeUserInputText, plan.messages[2].ContentBlocks[0].Type)
+	assert.Len(t, plan.events, 3)
+	assert.Equal(t, adk.SessionEventMessageInserted, plan.events[0].Kind)
+	assert.Equal(t, adk.SessionEventMessageUpdated, plan.events[1].Kind)
+	assert.Equal(t, adk.SessionEventMessagesDeleted, plan.events[2].Kind)
 }
 
 func TestPatchToolCallsInsertionEventAnchorsReplayOrder(t *testing.T) {
