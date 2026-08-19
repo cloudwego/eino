@@ -1529,6 +1529,105 @@ func TestToolSpan_PersistedAroundToolCallAndLinksToMessages(t *testing.T) {
 	assert.Equal(t, toolStart.Span.ParentSpanID, toolEnd.Span.ParentSpanID)
 }
 
+func TestAttack_UnknownToolResultPersistsSessionEvent(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		streaming bool
+	}{
+		{name: "invoke"},
+		{name: "stream", streaming: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			const (
+				unknownToolName      = "missing_tool"
+				unknownToolResult    = `{"error":"unknown_tool"}`
+				toolResultBusinessID = "unknown-tool-result-id"
+			)
+			var handledToolNames []string
+
+			agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+				Name:        "UnknownToolEventAgent",
+				Description: "unknown tool event agent",
+				Model:       &mockToolCallingModel{toolCallName: unknownToolName},
+				ToolsConfig: ToolsConfig{
+					ToolsNodeConfig: compose.ToolsNodeConfig{
+						Tools: []tool.BaseTool{
+							&invokableTestTool{name: "registered_tool", result: "unused"},
+						},
+						UnknownToolsHandler: func(_ context.Context, name, _ string) (string, error) {
+							handledToolNames = append(handledToolNames, name)
+							return unknownToolResult, nil
+						},
+					},
+				},
+			})
+			require.NoError(t, err)
+
+			gen := func(_ context.Context, event *SessionEvent[*schema.Message]) (string, error) {
+				if event != nil && event.Kind == SessionEventMessage &&
+					event.Message != nil && event.Message.Role == schema.Tool {
+					return toolResultBusinessID, nil
+				}
+				return DefaultSessionEventIDGenerator[*schema.Message](ctx, event)
+			}
+			store := newSessionHelperStore()
+			runner := NewRunner(ctx, RunnerConfig{
+				Agent:           agent,
+				EnableStreaming: tt.streaming,
+				SessionID:       "unknown-tool-event-" + tt.name,
+				SessionStore:    store,
+				SessionConfig: &SessionConfig[*schema.Message]{
+					EventIDGenerator: gen,
+				},
+			})
+
+			iter := runner.Query(ctx, "call a missing tool")
+			for {
+				event, ok := iter.Next()
+				if !ok {
+					break
+				}
+				require.NoError(t, event.Err)
+			}
+
+			stored := filterStoredSessionEvents(t, store.events, func(_ *SessionEvent[*schema.Message]) bool {
+				return true
+			})
+			var (
+				toolResults []*SessionEvent[*schema.Message]
+				toolStarts  []*SessionEvent[*schema.Message]
+				toolEnds    []*SessionEvent[*schema.Message]
+			)
+			for _, event := range stored {
+				switch {
+				case event.Kind == SessionEventMessage && event.Message != nil &&
+					event.Message.Role == schema.Tool && event.Message.ToolName == unknownToolName:
+					toolResults = append(toolResults, event)
+				case event.Kind == SessionEventSpanToolCallStart && event.Span != nil &&
+					event.Span.Tool != nil && event.Span.Tool.Name == unknownToolName:
+					toolStarts = append(toolStarts, event)
+				case event.Kind == SessionEventSpanToolCallEnd && event.Span != nil &&
+					event.Span.Tool != nil && event.Span.Tool.Name == unknownToolName:
+					toolEnds = append(toolEnds, event)
+				}
+			}
+
+			require.Equal(t, []string{unknownToolName}, handledToolNames)
+			require.Len(t, toolResults, 1, "expected exactly one durable unknown-tool result message")
+			require.Len(t, toolStarts, 1, "expected exactly one unknown-tool start span")
+			require.Len(t, toolEnds, 1, "expected exactly one unknown-tool end span")
+			toolResult := toolResults[0]
+			toolStart := toolStarts[0]
+			toolEnd := toolEnds[0]
+			assert.Equal(t, unknownToolResult, toolResult.Message.Content)
+			assert.Equal(t, toolResultBusinessID, toolResult.EventID)
+			assert.Equal(t, toolStart.EventID, toolEnd.Span.Tool.ToolCallStartEventID)
+			assert.Equal(t, toolResult.EventID, toolEnd.Span.Tool.ToolResultMessageEventID)
+		})
+	}
+}
+
 // TestSessionEventIDGenerator_CustomToolResultBusinessID 验证：configured
 // generator 看到 tool result message 草稿时返回业务 ID，持久化的 message
 // EventID 与对应 tool span end 的 ToolResultMessageEventID 必须等于该业务 ID
