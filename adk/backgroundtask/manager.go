@@ -85,6 +85,10 @@ type Task struct {
 	// subsequent wait-input or suspended checkpoint, or a terminal transition,
 	// consumes it.
 	PendingResume []byte
+	// ContextSnapshot is an opaque manager-owned snapshot used to restore
+	// deployment-selected context values for future execution attempts. It is
+	// captured only when Manager is configured with a ContextSnapshotter.
+	ContextSnapshot []byte
 	// Version is the CAS version of this durable record.
 	Version int64
 	// Attempt counts successful claims.
@@ -109,6 +113,17 @@ type Task struct {
 // business-side identifier. Manager does not add the task-type prefix when IDGen
 // is configured; callers that want one should include it in the returned ID.
 type IDGenerator func(ctx context.Context, request *AllocateTaskIDRequest) (string, error)
+
+// ContextSnapshotter captures deployment-owned context values into an opaque
+// byte snapshot and restores them for later execution attempts. Implementations
+// decide which values are serializable and stable enough to persist. Every
+// worker that may execute tasks carrying a snapshot must configure a
+// semantically equivalent snapshotter; otherwise execution fails instead of
+// silently dropping the snapshot.
+type ContextSnapshotter interface {
+	CaptureContext(context.Context) ([]byte, error)
+	RestoreContext(context.Context, []byte) (context.Context, error)
+}
 
 // Config configures a Manager.
 type Config struct {
@@ -135,6 +150,10 @@ type Config struct {
 	// must return a non-empty ID. The returned ID must be unique among this
 	// Manager's registered tasks; a duplicate fails task creation.
 	IDGen IDGenerator
+	// ContextSnapshotter optionally persists deployment-selected context values
+	// for background execution and later recovery. Snapshots are captured during
+	// Submit, Resume, and ReleaseSuspension, then restored before task execution.
+	ContextSnapshotter ContextSnapshotter
 }
 
 type closeOptions struct {
@@ -180,6 +199,7 @@ type Manager struct {
 	closed               bool
 	idGen                IDGenerator
 	sendTaskCreatedEvent func(context.Context, *Task) error
+	contextSnapshotter   ContextSnapshotter
 }
 
 // New creates a Manager. A nil Config installs the in-memory reference stores
@@ -216,6 +236,7 @@ func New(_ context.Context, conf *Config) (*Manager, error) {
 		}
 		m.sendTaskCreatedEvent = conf.SendTaskCreatedEvent
 		m.idGen = conf.IDGen
+		m.contextSnapshotter = conf.ContextSnapshotter
 	}
 	m.notificationWriter, _ = m.tasks.(NotificationWriter)
 	return m, nil
@@ -340,6 +361,7 @@ func cloneTask(t *Task) *Task {
 	clone.Checkpoint = cloneBytes(t.Checkpoint)
 	clone.ResultData = cloneBytes(t.ResultData)
 	clone.PendingResume = cloneBytes(t.PendingResume)
+	clone.ContextSnapshot = cloneBytes(t.ContextSnapshot)
 	clone.CancelRequestedAt = cloneTime(t.CancelRequestedAt)
 	clone.DoneAt = cloneTime(t.DoneAt)
 	return &clone
