@@ -464,7 +464,7 @@ func TestTaskOutputNonBlockingReturnsCurrentSnapshot(t *testing.T) {
 	task, err := runWork(submitter, "racing task", true, completedWork("done"))
 	require.NoError(t, err)
 	task = waitUntilTerminal(t, context.Background(), submitter, task.Spec.ID)
-	require.NoError(t, submitter.Close(context.Background()))
+	closeWithTimeout(submitter)
 
 	racingStore := &staleFirstGetStore{TaskStore: store, first: true}
 	reader := newBackgroundManager(t, context.Background(), &bgtask.Config{

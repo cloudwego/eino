@@ -358,7 +358,7 @@ func TestAttack_TypedPayloadRejectsMismatchedExecutorMessageType(t *testing.T) {
 	require.NoError(t, err)
 	payload, err := json.Marshal(taskPayload{
 		Version: payloadVersion, SubAgentName: "worker", Input: input,
-		ChildSessionID: defaultChildSessionID("parent", "worker", "task"),
+		ChildSessionID: "42",
 	})
 	require.NoError(t, err)
 
