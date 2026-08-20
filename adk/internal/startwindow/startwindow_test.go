@@ -31,12 +31,12 @@ type markerKey struct{}
 
 func TestWindowTimeoutAndCancellationCloseRelay(t *testing.T) {
 	t.Run("timeout", func(t *testing.T) {
-		var sends atomic.Int64
+		var sends int64
 		parent := context.WithValue(context.Background(), markerKey{}, "parent-marker")
 		parent = WithSender(parent, func(ctx context.Context, event any) error {
 			require.Equal(t, "parent-marker", ctx.Value(markerKey{}))
 			require.Equal(t, "before", event)
-			sends.Add(1)
+			atomic.AddInt64(&sends, 1)
 			return nil
 		})
 		backgroundCtx, window := Open(parent)
@@ -49,7 +49,7 @@ func TestWindowTimeoutAndCancellationCloseRelay(t *testing.T) {
 		require.True(t, handled)
 		require.ErrorIs(t, err, ErrWindowClosed)
 		Signal(backgroundCtx)
-		require.Equal(t, int64(1), sends.Load())
+		require.Equal(t, int64(1), atomic.LoadInt64(&sends))
 	})
 
 	t.Run("cancellation", func(t *testing.T) {
