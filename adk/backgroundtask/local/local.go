@@ -148,7 +148,7 @@ func (r *Runner) Run(ctx context.Context, input *Input, work WorkFunc) (*backgro
 			return nil, err
 		}
 		go func() {
-			_ = r.manager.Execute(detachedContext{parent: context.Background()}, task.Spec.ID)
+			_ = r.manager.Execute(detachedContext{parent: ctx}, task.Spec.ID)
 		}()
 		return task, nil
 	}
@@ -243,7 +243,7 @@ func (r *Runner) adoptForeground(
 	if err != nil {
 		if errors.Is(err, backgroundtask.ErrTaskCreatedEventUndelivered) && task != nil {
 			go func() {
-				_ = r.manager.Execute(detachedContext{parent: context.Background()}, task.Spec.ID)
+				_ = r.manager.Execute(detachedContext{parent: ctx}, task.Spec.ID)
 			}()
 			return task, nil
 		}
@@ -251,7 +251,7 @@ func (r *Runner) adoptForeground(
 		return nil, err
 	}
 	go func() {
-		_ = r.manager.Execute(detachedContext{parent: context.Background()}, task.Spec.ID)
+		_ = r.manager.Execute(detachedContext{parent: ctx}, task.Spec.ID)
 	}()
 	return task, nil
 }
@@ -358,7 +358,7 @@ func (r *Runner) RunStream(
 	}
 	runDone := make(chan runResult, 1)
 	go func() {
-		runErr := r.manager.Execute(detachedContext{parent: context.Background()}, task.Spec.ID)
+		runErr := r.manager.Execute(detachedContext{parent: ctx}, task.Spec.ID)
 		current, getErr := r.manager.Get(context.Background(), task.Spec.ID)
 		if runErr == nil {
 			runErr = getErr

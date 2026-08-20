@@ -64,6 +64,11 @@ type interruptThenCompleteAgent struct {
 	name string
 }
 
+type resumeContextCaptureAgent struct {
+	name       string
+	resumeCtxs chan context.Context
+}
+
 type cancelThenMessageAgent struct {
 	name    string
 	started chan struct{}
@@ -225,6 +230,34 @@ func (a *interruptThenCompleteAgent) Resume(
 	return iter
 }
 
+func (a *resumeContextCaptureAgent) Name(context.Context) string { return a.name }
+func (a *resumeContextCaptureAgent) Description(context.Context) string {
+	return "capture resume context"
+}
+func (a *resumeContextCaptureAgent) Run(
+	ctx context.Context,
+	_ *adk.AgentInput,
+	_ ...adk.AgentRunOption,
+) *adk.AsyncIterator[*adk.AgentEvent] {
+	iter, generator := adk.NewAsyncIteratorPair[*adk.AgentEvent]()
+	generator.Send(adk.Interrupt(ctx, "approve"))
+	generator.Close()
+	return iter
+}
+func (a *resumeContextCaptureAgent) Resume(
+	ctx context.Context,
+	_ *adk.ResumeInfo,
+	_ ...adk.AgentRunOption,
+) *adk.AsyncIterator[*adk.AgentEvent] {
+	a.resumeCtxs <- ctx
+	iter, generator := adk.NewAsyncIteratorPair[*adk.AgentEvent]()
+	generator.Send(adk.EventFromMessage(
+		schema.AssistantMessage("resumed", nil), nil, schema.Assistant, a.name,
+	))
+	generator.Close()
+	return iter
+}
+
 func (a *resumableTestAgent) Name(context.Context) string        { return a.name }
 func (a *resumableTestAgent) Description(context.Context) string { return "test agent" }
 func (a *resumableTestAgent) Run(
@@ -269,6 +302,22 @@ func newTestExecutor(
 	})
 	require.NoError(t, err)
 	return executor
+}
+
+type subagentContextSnapshotKey struct{}
+
+type subagentContextSnapshotter struct{}
+
+func (subagentContextSnapshotter) CaptureContext(ctx context.Context) ([]byte, error) {
+	value, _ := ctx.Value(subagentContextSnapshotKey{}).(string)
+	if value == "" {
+		return nil, nil
+	}
+	return []byte(value), nil
+}
+
+func (subagentContextSnapshotter) RestoreContext(ctx context.Context, snapshot []byte) (context.Context, error) {
+	return context.WithValue(ctx, subagentContextSnapshotKey{}, string(snapshot)), nil
 }
 
 func textInput(query string) *adk.AgentInput {
@@ -1089,6 +1138,54 @@ func TestWaitForControlBoundaries(t *testing.T) {
 	require.Empty(t, waitForControl(
 		context.Background(), make(chan backgroundtask.ControlRequest),
 	).Kind)
+}
+
+func TestSubAgentTaskResumeRestoresLatestContextSnapshot(t *testing.T) {
+	sessionStore := adksession.NewInMemoryStore[*schema.Message](nil)
+	agent := &resumeContextCaptureAgent{
+		name: "worker", resumeCtxs: make(chan context.Context, 1),
+	}
+	executor := newTestExecutor(t, sessionStore)
+	require.NoError(t, executor.Register("worker", &AgentRegistration[*schema.Message]{
+		Agent: agent,
+	}))
+	executors := backgroundtask.NewExecutorRegistry()
+	require.NoError(t, executors.Register(executor))
+	manager := mustNewBackgroundManager(t, context.Background(), &backgroundtask.Config{
+		Executors:          executors,
+		ContextSnapshotter: subagentContextSnapshotter{},
+	})
+	defer manager.Close(context.Background())
+
+	submitCtx := context.WithValue(
+		context.Background(), subagentContextSnapshotKey{}, "submit-trace",
+	)
+	task, err := Submit(submitCtx, manager, &SubmitRequest[*schema.Message]{
+		SubAgentName: "worker", Input: textInput("do work"), Description: "durable child",
+		SessionID: "parent-session",
+	})
+	require.NoError(t, err)
+	require.Equal(t, "submit-trace", string(task.ContextSnapshot))
+	require.NoError(t, manager.Execute(context.Background(), task.Spec.ID))
+	waiting, err := manager.Get(context.Background(), task.Spec.ID)
+	require.NoError(t, err)
+	require.Equal(t, backgroundtask.StatusWaitingInput, waiting.Status)
+
+	resumeCtx := context.WithValue(
+		context.Background(), subagentContextSnapshotKey{}, "resume-trace",
+	)
+	pending, err := manager.Resume(resumeCtx, &backgroundtask.ResumeRequest{
+		TaskID: task.Spec.ID, ExpectedVersion: waiting.Version,
+	})
+	require.NoError(t, err)
+	require.Equal(t, "resume-trace", string(pending.ContextSnapshot))
+	require.NoError(t, manager.Execute(context.Background(), task.Spec.ID))
+
+	runCtx := <-agent.resumeCtxs
+	require.Equal(t, "resume-trace", runCtx.Value(subagentContextSnapshotKey{}))
+	completed, err := manager.Get(context.Background(), task.Spec.ID)
+	require.NoError(t, err)
+	require.Equal(t, backgroundtask.StatusCompleted, completed.Status)
 }
 
 func TestSubAgentTaskResumesAfterManagerReconstruction_BitsUT(t *testing.T) {
