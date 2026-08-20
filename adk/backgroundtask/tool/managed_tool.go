@@ -218,13 +218,22 @@ type foregroundStart struct {
 	toolCheckpoint []byte
 }
 
+type detachedContext struct {
+	parent context.Context
+}
+
+func (detachedContext) Deadline() (time.Time, bool) { return time.Time{}, false }
+func (detachedContext) Done() <-chan struct{}       { return nil }
+func (detachedContext) Err() error                  { return nil }
+func (c detachedContext) Value(key any) any         { return c.parent.Value(key) }
+
 func (t *managedTool) executeBackgroundUntilStart(ctx context.Context, taskID string) {
 	_, window := t.startBackgroundExecution(ctx, taskID)
 	_ = window.Wait(ctx, t.startWindowTimeout())
 }
 
 func (t *managedTool) startBackgroundExecution(ctx context.Context, taskID string) (context.Context, *startwindow.Window) {
-	backgroundCtx, window := startwindow.Open(ctx)
+	backgroundCtx, window := startwindow.Open(detachedContext{parent: ctx})
 	go func() {
 		defer startwindow.Signal(backgroundCtx)
 		_ = t.manager.Execute(backgroundCtx, taskID)
@@ -750,7 +759,7 @@ func (t *managedTool) tryHandoff(
 		return nil, err
 	}
 	go func() {
-		_ = t.manager.Execute(context.Background(), task.Spec.ID)
+		_ = t.manager.Execute(detachedContext{parent: ctx}, task.Spec.ID)
 	}()
 	return task, nil
 }

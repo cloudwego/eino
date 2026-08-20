@@ -425,6 +425,50 @@ func TestAttack_DurableTerminalResultPreservesChildSessionIdentity(t *testing.T)
 	}
 }
 
+func TestDurableAgentToolBackgroundPreservesParentContextValues(t *testing.T) {
+	type traceKey struct{}
+	const traceValue = "trace-123"
+
+	parentCtx := context.WithValue(runnerEnvironmentContext(t), traceKey{}, traceValue)
+	callCtx, cancelCall := context.WithCancel(parentCtx)
+	defer cancelCall()
+	manager := newTestManager(t, parentCtx)
+	seenValue := make(chan any, 1)
+	seenErr := make(chan error, 1)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	agent := &mockAgent{name: "worker", run: func(ctx context.Context, _ *adk.AgentInput) string {
+		seenValue <- ctx.Value(traceKey{})
+		close(started)
+		<-release
+		seenErr <- ctx.Err()
+		return "done"
+	}}
+	middleware, err := New(parentCtx, &Config{
+		SubAgents:  []adk.Agent{agent},
+		Background: durableBackground(t, manager, agent),
+	})
+	require.NoError(t, err)
+	_, runCtx, err := middleware.BeforeAgent(
+		parentCtx,
+		&adk.ChatModelAgentContext[*schema.Message]{},
+	)
+	require.NoError(t, err)
+	_, err = runCtx.Tools[0].(tool.InvokableTool).InvokableRun(
+		callCtx,
+		`{"subagent_type":"worker","prompt":"work","description":"test","run_in_background":true}`,
+	)
+	require.NoError(t, err)
+	<-started
+	cancelCall()
+	close(release)
+	task := terminalTask(t, manager)
+	require.NotNil(t, task)
+	require.Equal(t, backgroundtask.StatusCompleted, task.Status)
+	require.Equal(t, traceValue, <-seenValue)
+	require.NoError(t, <-seenErr)
+}
+
 func TestFormatManagedAgentResultLifecycleStates(t *testing.T) {
 	task := &backgroundtask.Task{
 		Spec: backgroundtask.Spec{
