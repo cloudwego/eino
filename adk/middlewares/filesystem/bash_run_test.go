@@ -33,6 +33,7 @@ import (
 	"github.com/cloudwego/eino/adk/backgroundtask"
 	backgroundlocal "github.com/cloudwego/eino/adk/backgroundtask/local"
 	"github.com/cloudwego/eino/adk/filesystem"
+	"github.com/cloudwego/eino/adk/internal/foreground"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/schema"
 )
@@ -208,7 +209,7 @@ func TestManagedExecuteTool_WritesOutputFile(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	_, err = invokeTool(t, findExecuteTool(t, tools), `{"command":"echo hi"}`)
+	_, err = invokeTool(t, findExecuteTool(t, tools), `{"command":"echo hi","run_in_background":true}`)
 	require.NoError(t, err)
 
 	task := waitTerminalTask(t, mgr)
@@ -277,17 +278,10 @@ func TestManagedExecuteTool_Foreground(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "ok", result)
 
-	// The run is tracked by the Manager and tagged as a bash task.
-	task := waitTerminalTask(t, mgr)
-	assert.Equal(t, backgroundtask.StatusCompleted, task.Status)
-	assert.Equal(t, "echo hi", task.Spec.Description)
-	events, err := mgr.ListTaskEvents(context.Background(), &backgroundtask.ListTaskEventsRequest{
-		TaskID: task.Spec.ID,
+	_, err = mgr.ListPending(context.Background(), &backgroundtask.ListPendingRequest{
+		ExecutorKeys: []string{"eino.dev/process-local"},
 	})
 	require.NoError(t, err)
-	require.Len(t, events.Events, 1)
-	require.NotNil(t, events.Events[0])
-	require.NotEmpty(t, events.Events[0].EventID)
 }
 
 func TestManagedExecuteTool_Background(t *testing.T) {
@@ -342,7 +336,7 @@ func TestManagedExecuteTool_TimeoutMovesToBackground(t *testing.T) {
 		Background: &BackgroundConfig{
 			Local: &LocalBackgroundConfig{
 				Runner: mustLocalRunner(t, mgr, func(config *backgroundlocal.Config) {
-					config.ShouldAutoBackground = func(context.Context, *backgroundtask.Task) bool {
+					config.ShouldAutoBackground = func(context.Context, *foreground.CandidateInfo) bool {
 						return true
 					}
 				}),
@@ -383,10 +377,6 @@ func TestManagedExecuteTool_TimeoutKills(t *testing.T) {
 
 	_, err = invokeTool(t, tools[0], `{"command":"sleep","timeout":50}`)
 	require.ErrorContains(t, err, "timed out after 50ms")
-
-	task := waitTerminalTask(t, mgr)
-	assert.Equal(t, backgroundtask.StatusFailed, task.Status)
-	assert.Equal(t, "timed out after 50ms", task.ResultError)
 }
 
 func TestShellPayloadV1AndCommandFromTask(t *testing.T) {
@@ -432,12 +422,6 @@ func TestManagedExecuteTool_StreamingForeground(t *testing.T) {
 	got := drainToolStream(t, sr)
 	assert.Contains(t, got, "chunk1")
 	assert.Contains(t, got, "chunk3")
-
-	task := waitTerminalTask(t, mgr)
-	assert.Equal(t, backgroundtask.StatusCompleted, task.Status)
-	// The streamed chunks are also the persisted result.
-	assert.Contains(t, string(task.ResultData), "chunk1")
-	assert.Contains(t, string(task.ResultData), "chunk3")
 }
 
 // An explicit background launch on a streaming managed tool exposes startup
@@ -463,11 +447,11 @@ func TestManagedExecuteTool_StreamingExplicitBackground(t *testing.T) {
 	require.NoError(t, err)
 	got := drainToolStream(t, sr)
 	assert.Contains(t, got, "chunk1")
-	assert.Contains(t, got, "chunk3")
-	assert.NotContains(t, got, "is running in the background")
+	assert.Contains(t, got, "is running in the background")
 
 	task := waitTerminalTask(t, mgr)
 	assert.Equal(t, backgroundtask.StatusCompleted, task.Status)
+	assert.Contains(t, string(task.ResultData), "chunk3")
 	assert.Contains(t, string(task.ResultData), "chunk1")
 	// The streamed output was teed to the output file as it drained in the background.
 	path, found := filesystemOutput(t, backend)
@@ -546,8 +530,6 @@ func TestManagedExecuteTool_StreamingInterimOutput(t *testing.T) {
 		}
 	}
 
-	task := waitTerminalTask(t, mgr)
-	assert.Equal(t, backgroundtask.StatusCompleted, task.Status)
 	final, err := backend.Read(context.Background(), &filesystem.ReadRequest{FilePath: path})
 	require.NoError(t, err)
 	assert.Contains(t, final.Content, "first")
@@ -703,9 +685,9 @@ func TestManagedExecuteTool_ReservationFailure_NoOutputFile(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	result, err := invokeTool(t, executeTool, `{"command":"echo hi"}`)
+	result, err := invokeTool(t, executeTool, `{"command":"echo hi","run_in_background":true}`)
 	require.NoError(t, err)
-	assert.Equal(t, "the output", result)
+	assert.Contains(t, result, "running in background")
 
 	task := waitTerminalTask(t, mgr)
 	path, found := filesystemOutput(t, backend)
@@ -733,9 +715,9 @@ func TestManagedExecuteTool_WriteFailure_MarksUnreliable(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	result, err := invokeTool(t, executeTool, `{"command":"echo hi"}`)
+	result, err := invokeTool(t, executeTool, `{"command":"echo hi","run_in_background":true}`)
 	require.NoError(t, err)
-	assert.Equal(t, "the output", result)
+	assert.Contains(t, result, "running in background")
 
 	task := waitTerminalTask(t, mgr)
 	path, found := filesystemOutput(t, backend)
@@ -806,7 +788,7 @@ func TestManagedExecuteTool_StreamingSourceError_ClosesStream(t *testing.T) {
 	require.NoError(t, err)
 	st := executeTool.(tool.StreamableTool)
 
-	sr, err := st.StreamableRun(context.Background(), `{"command":"boom"}`)
+	sr, err := st.StreamableRun(context.Background(), `{"command":"boom","run_in_background":true}`)
 	require.NoError(t, err)
 	// Drain to termination, tolerating the terminal shell error (the point of the
 	// test is the append session lifecycle, not the surfaced error).

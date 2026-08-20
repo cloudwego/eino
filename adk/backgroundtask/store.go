@@ -66,7 +66,44 @@ var (
 	ErrNotificationEventIDConflict = errors.New(
 		"backgroundtask: notification event id conflict",
 	)
+	// ErrTaskCreatedEventUndelivered reports that Submit durably created the
+	// task but failed to send the immediate parent-session TaskCreated event.
+	// The durable notification outbox remains authoritative for recovery, so
+	// callers must treat ownership as transferred when this wraps the error.
+	ErrTaskCreatedEventUndelivered = errors.New(
+		"backgroundtask: immediate task-created event was not delivered",
+	)
 )
+
+// SubmitRequest describes one background task submission. InitialCheckpoint is
+// copied into Task.Checkpoint in the same atomic create operation as the task
+// record and TaskCreated outbox entry. It is opaque to Manager.
+type SubmitRequest struct {
+	Spec              Spec
+	InitialCheckpoint []byte
+}
+
+type taskCreatedEventUndeliveredError struct {
+	taskID string
+	cause  error
+}
+
+func (e *taskCreatedEventUndeliveredError) Error() string {
+	return fmt.Sprintf(
+		"%s: send task-created session event for %q: %v",
+		ErrTaskCreatedEventUndelivered,
+		e.taskID,
+		e.cause,
+	)
+}
+
+func (e *taskCreatedEventUndeliveredError) Unwrap() error {
+	return e.cause
+}
+
+func (e *taskCreatedEventUndeliveredError) Is(target error) bool {
+	return target == ErrTaskCreatedEventUndelivered
+}
 
 // TaskStore persists authoritative task snapshots and semantic lifecycle
 // transitions.
@@ -75,10 +112,7 @@ var (
 // ListPending and ListSuspended follow their request ordering, cursor, and limit
 // contracts; malformed cursors return ErrInvalidCursor.
 // When the provider also implements NotificationOutbox, Create atomically
-// enqueues NotificationTaskCreated for every task with a parent SessionID,
-// except when Spec.EmitCreatedOnBackground is set: such tasks are announced
-// live by the Manager at the moment they detach into the background (see
-// Manager.MarkBackgrounded), so Create simply omits the record for them.
+// enqueues NotificationTaskCreated for every task with a parent SessionID.
 //
 // RequestCancel on active work keeps StatusRunning, sets CancelRequestedAt and
 // the first-write optional CancelReason, and advances Version. Once

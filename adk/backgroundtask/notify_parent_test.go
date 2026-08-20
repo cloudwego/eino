@@ -136,7 +136,7 @@ func TestManagerBindsFreshNotifyParentAuthorityPerAttempt_BitsUT(t *testing.T) {
 	store := NewInMemoryStore(nil)
 	manager := managerWithExecutor(t, store, executor, time.Minute)
 	defer closeWithTimeout(manager)
-	task, err := manager.Submit(context.Background(), validSpec("notify-attempt"))
+	task, err := manager.Submit(context.Background(), &SubmitRequest{Spec: validSpec("notify-attempt")})
 	require.NoError(t, err)
 	require.NoError(t, manager.Execute(context.Background(), task.Spec.ID))
 	require.NotNil(t, firstContext)
@@ -183,8 +183,10 @@ func TestManagerNotifyParentUnavailableWithoutStoreCapability_BitsUT(t *testing.
 		time.Minute,
 	)
 	defer closeWithTimeout(manager)
-	task, err := manager.Submit(context.Background(), Spec{
-		ID: "notify-unavailable", ExecutorKey: "test", Payload: []byte("payload"),
+	task, err := manager.Submit(context.Background(), &SubmitRequest{
+		Spec: Spec{
+			ID: "notify-unavailable", ExecutorKey: "test", Payload: []byte("payload"),
+		},
 	})
 	require.NoError(t, err)
 	require.NoError(t, manager.Execute(context.Background(), task.Spec.ID))

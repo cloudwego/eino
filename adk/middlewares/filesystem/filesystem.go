@@ -38,6 +38,7 @@ import (
 	backgroundtool "github.com/cloudwego/eino/adk/backgroundtask/tool"
 	"github.com/cloudwego/eino/adk/filesystem"
 	"github.com/cloudwego/eino/adk/internal"
+	"github.com/cloudwego/eino/adk/internal/foreground"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/components/tool/utils"
 	"github.com/cloudwego/eino/compose"
@@ -115,9 +116,9 @@ type RecoverableBackgroundConfig struct {
 	ToolRegistry       *backgroundtool.Registry
 	OutputMaterializer backgroundtool.OutputMaterializer
 	// ForegroundTimeoutMs is in milliseconds. ShouldAutoBackground may be called
-	// concurrently and must not mutate the task.
+	// concurrently and must not mutate the candidate.
 	ForegroundTimeoutMs  *int
-	ShouldAutoBackground func(context.Context, *backgroundtask.Task) bool
+	ShouldAutoBackground func(context.Context, *foreground.CandidateInfo) bool
 }
 
 // Config is the legacy configuration for the filesystem middleware.

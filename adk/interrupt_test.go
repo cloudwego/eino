@@ -131,6 +131,14 @@ func TestInterruptFunctionsPopulateInterruptContextsImmediately(t *testing.T) {
 		assert.True(t, event.Action.Interrupted.InterruptContexts[0].IsRootCause)
 	})
 
+	t.Run("InterruptSignalFromEvent exposes signal as error", func(t *testing.T) {
+		event := StatefulInterrupt(ctx, "stateful info", "my state")
+		err := InterruptSignalFromEvent(event)
+		assert.Error(t, err)
+		assert.Nil(t, InterruptSignalFromEvent[*schema.Message](nil))
+		assert.Nil(t, InterruptSignalFromEvent(&AgentEvent{}))
+	})
+
 	t.Run("CompositeInterrupt populates InterruptContexts with filtered parent chain", func(t *testing.T) {
 		subCtx := AppendAddressSegment(ctx, AddressSegmentAgent, "SubAgent")
 		subEvent := Interrupt(subCtx, "sub info")

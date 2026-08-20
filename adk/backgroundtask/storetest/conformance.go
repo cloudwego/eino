@@ -75,17 +75,11 @@ func RunTaskStoreConformance(t *testing.T, config TaskStoreConfig) {
 	require.NotNil(t, config.ExpireActiveAttempt)
 
 	t.Run("create_owns_timestamp_and_snapshot", func(t *testing.T) {
-		store := config.New(t)
-		spec := testSpec("create")
-		created := create(t, store, spec, backgroundtask.LeaseExpiryRetry)
-		require.False(t, created.CreatedAt.IsZero())
-		require.Equal(t, created.CreatedAt, created.UpdatedAt)
-		require.Equal(t, backgroundtask.StatusPending, created.Status)
-		spec.Payload[0] = 'X'
-		created.Spec.Payload[0] = 'Y'
-		stored, err := store.Get(context.Background(), spec.ID)
-		require.NoError(t, err)
-		require.Equal(t, "payload", string(stored.Spec.Payload))
+		runCreateSnapshotConformance(t, config.New(t))
+	})
+
+	t.Run("create_copies_initial_checkpoint", func(t *testing.T) {
+		runCreateInitialCheckpointConformance(t, config.New(t))
 	})
 
 	t.Run("transitions_and_cas", func(t *testing.T) {
@@ -597,6 +591,40 @@ func testSpec(id string) backgroundtask.Spec {
 	return backgroundtask.Spec{
 		ID: id, ExecutorKey: "test", Payload: []byte("payload"),
 	}
+}
+
+func runCreateSnapshotConformance(t testing.TB, store backgroundtask.TaskStore) {
+	t.Helper()
+	spec := testSpec("create")
+	created := create(t, store, spec, backgroundtask.LeaseExpiryRetry)
+	require.False(t, created.CreatedAt.IsZero())
+	require.Equal(t, created.CreatedAt, created.UpdatedAt)
+	require.Equal(t, backgroundtask.StatusPending, created.Status)
+	spec.Payload[0] = 'X'
+	created.Spec.Payload[0] = 'Y'
+	stored, err := store.Get(context.Background(), spec.ID)
+	require.NoError(t, err)
+	require.Equal(t, "payload", string(stored.Spec.Payload))
+}
+
+func runCreateInitialCheckpointConformance(
+	t testing.TB,
+	store backgroundtask.TaskStore,
+) {
+	t.Helper()
+	spec := testSpec("initial-checkpoint")
+	checkpoint := []byte("checkpoint")
+	created, err := store.Create(context.Background(), &backgroundtask.CreateTaskRequest{
+		Spec: spec, LeaseExpiryPolicy: backgroundtask.LeaseExpiryRetry,
+		Checkpoint: checkpoint,
+	})
+	require.NoError(t, err)
+	require.Equal(t, "checkpoint", string(created.Checkpoint))
+	checkpoint[0] = 'X'
+	created.Checkpoint[0] = 'Y'
+	stored, err := store.Get(context.Background(), spec.ID)
+	require.NoError(t, err)
+	require.Equal(t, "checkpoint", string(stored.Checkpoint))
 }
 
 func create(
