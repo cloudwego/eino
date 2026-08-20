@@ -23,11 +23,16 @@ import (
 	"io"
 	"reflect"
 
+	"github.com/cloudwego/eino/adk/internal/startwindow"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
 )
+
+// ErrStartWindowClosed is returned by TypedSendEvent when a background managed
+// tool's explicit Start event relay has already closed.
+var ErrStartWindowClosed = startwindow.ErrWindowClosed
 
 // InvokableToolCallEndpoint is the function signature for invoking a tool synchronously.
 // Middleware authors implement wrappers around this endpoint to add custom behavior.
@@ -435,15 +440,27 @@ func DeleteRunLocalValue(ctx context.Context, key string) error {
 // need the ID before emitting the event, for example to build another event that
 // references the message by ID.
 //
-// When called outside of an agent execution context, or from a path without an
-// event generator, this function is a no-op.
+// During an explicit background managed-tool launch, TypedSendEvent also
+// supports synchronous events emitted from BackgroundTool.Start. That start
+// window closes when Start reaches its durable boundary, the parent context is
+// canceled, or the configured foreground timeout expires. After the sender-backed
+// window closes, TypedSendEvent returns ErrStartWindowClosed. Events emitted
+// later from background Wait or from goroutines outliving Start are not
+// delivered to the parent session.
+//
+// When called outside of an agent execution context or a managed-tool start
+// window, this function is a no-op.
 func TypedSendEvent[M MessageType](ctx context.Context, event *TypedAgentEvent[M]) error {
 	execCtx := getTypedChatModelAgentExecCtx[M](ctx)
-	if execCtx == nil || execCtx.generator == nil {
+	if execCtx != nil && execCtx.generator != nil {
+		execCtx.send(ctx, event)
 		return nil
 	}
 
-	execCtx.send(ctx, event)
+	handled, err := startwindow.TrySend(ctx, event)
+	if handled {
+		return err
+	}
 	return nil
 }
 

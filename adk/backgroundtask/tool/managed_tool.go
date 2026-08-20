@@ -28,6 +28,7 @@ import (
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/adk/backgroundtask"
 	"github.com/cloudwego/eino/adk/internal/foreground"
+	"github.com/cloudwego/eino/adk/internal/startwindow"
 	componenttool "github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/schema"
 )
@@ -157,9 +158,7 @@ func (t *managedTool) InvokableRun(
 		if err != nil {
 			return nil, err
 		}
-		go func() {
-			_ = t.manager.Execute(detachedContext{parent: context.Background()}, task.Spec.ID)
-		}()
+		t.executeBackgroundUntilStart(ctx, task.Spec.ID)
 		return t.renderLaunchResult(ctx, task)
 	}
 	return t.runForeground(ctx, arguments)
@@ -194,11 +193,12 @@ func (t *managedTool) StreamableRun(
 			return nil, err
 		}
 		runDone := make(chan launchResult, 1)
+		_, window := t.startBackgroundExecution(ctx, task.Spec.ID)
+		// The projection must drain updates before waiting on Start; otherwise
+		// the executor can stall on the projection buffer before detach.
+		go t.project(context.Background(), task.Spec.ID, projection, runDone, writer)
+		_ = window.Wait(ctx, t.startWindowTimeout())
 		runDone <- launchResult{task: task}
-		go func() {
-			_ = t.manager.Execute(detachedContext{parent: context.Background()}, task.Spec.ID)
-		}()
-		go t.project(ctx, task.Spec.ID, projection, runDone, writer)
 		return reader, nil
 	}
 	go t.streamForeground(ctx, arguments, writer)
@@ -218,14 +218,23 @@ type foregroundStart struct {
 	toolCheckpoint []byte
 }
 
-type detachedContext struct {
-	parent context.Context
+func (t *managedTool) executeBackgroundUntilStart(ctx context.Context, taskID string) {
+	_, window := t.startBackgroundExecution(ctx, taskID)
+	_ = window.Wait(ctx, t.startWindowTimeout())
 }
 
-func (detachedContext) Deadline() (time.Time, bool) { return time.Time{}, false }
-func (detachedContext) Done() <-chan struct{}       { return nil }
-func (detachedContext) Err() error                  { return nil }
-func (c detachedContext) Value(key any) any         { return c.parent.Value(key) }
+func (t *managedTool) startBackgroundExecution(ctx context.Context, taskID string) (context.Context, *startwindow.Window) {
+	backgroundCtx, window := startwindow.Open(ctx)
+	go func() {
+		defer startwindow.Signal(backgroundCtx)
+		_ = t.manager.Execute(backgroundCtx, taskID)
+	}()
+	return backgroundCtx, window
+}
+
+func (t *managedTool) startWindowTimeout() time.Duration {
+	return time.Duration(t.policy.TimeoutMs) * time.Millisecond
+}
 
 func (t *managedTool) runForeground(
 	ctx context.Context,
@@ -741,7 +750,7 @@ func (t *managedTool) tryHandoff(
 		return nil, err
 	}
 	go func() {
-		_ = t.manager.Execute(detachedContext{parent: context.Background()}, task.Spec.ID)
+		_ = t.manager.Execute(context.Background(), task.Spec.ID)
 	}()
 	return task, nil
 }
@@ -783,20 +792,8 @@ func (t *managedTool) project(
 				writer.Send(nil, errors.New("backgroundtask/tool: foreground returned a nil task"))
 				return
 			}
-			if result.task.Status != backgroundtask.StatusRunning && updates != nil {
-				for update := range updates {
-					record, encodeErr := renderEvent(&ManagedToolResponseEvent{Type: ManagedToolResponseEventUpdate, Update: update})
-					if encodeErr != nil {
-						t.registry.projections.remove(taskID)
-						writer.Send(nil, encodeErr)
-						return
-					}
-					if writer.Send(record, nil) {
-						t.registry.projections.remove(taskID)
-						return
-					}
-				}
-			}
+			// runDone is the explicit detach command for the caller-side
+			// projection; durable progress continues on the background task.
 			t.registry.projections.remove(taskID)
 			final, encodeErr := t.renderLaunchResult(ctx, result.task)
 			if encodeErr != nil {
