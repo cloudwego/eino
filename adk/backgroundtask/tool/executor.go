@@ -26,6 +26,7 @@ import (
 
 	"github.com/cloudwego/eino/adk/backgroundtask"
 	"github.com/cloudwego/eino/adk/internal/foreground"
+	"github.com/cloudwego/eino/adk/internal/startwindow"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -159,8 +160,6 @@ func (e *executor) Execute( //nolint:cyclop,funlen // execution coordinates the 
 	}
 	hasInputRequest := inputRequest != nil
 	resumable, supportsResume := registration.Tool.(ResumableBackgroundTool)
-	startCommitRuntime, supportsStartCommit := runtime.(backgroundtask.StartCommitRuntime)
-	startedRun := false
 	if !hasInputRequest && task.Attempt == 1 {
 		if adopted := e.registry.adopted.consume(task.Spec.ID); adopted != nil {
 			run = adopted.run
@@ -199,51 +198,13 @@ func (e *executor) Execute( //nolint:cyclop,funlen // execution coordinates the 
 			Checkpoint: append([]byte(nil), toolCheckpoint...),
 		})
 	} else {
-		if e.recoverable && !supportsStartCommit {
-			return nil, errors.New(
-				"backgroundtask/tool: execution runtime cannot commit external start",
-			)
-		}
-		startedRun = true
-		var startResult *StartResult
-		startResult, err = registration.Tool.Start(ctx, &StartRequest{
-			TaskID: task.Spec.ID, Arguments: payload.Arguments, Attempt: task.Attempt,
-		})
-		if err == nil {
-			if startResult == nil {
-				return nil, errors.New(
-					"backgroundtask/tool: implementation returned a nil start result",
-				)
-			}
-			run = startResult.Run
-			toolCheckpoint = append([]byte(nil), startResult.Checkpoint...)
-		}
+		run, toolCheckpoint, err = e.startRun(ctx, registration, runtime, task, payload)
 	}
 	if err != nil {
 		return nil, err
 	}
 	if run == nil {
 		return nil, errors.New("backgroundtask/tool: implementation returned a nil run")
-	}
-	if startedRun && !e.recoverable && len(toolCheckpoint) > 0 {
-		return nil, stopRunAfterStartCommitFailure(run, errors.New(
-			"backgroundtask/tool: plain tool cannot return a checkpoint",
-		))
-	}
-	if startedRun && e.recoverable {
-		checkpoint, checkpointErr := encodeManagedCheckpoint(
-			nil,
-			toolCheckpoint,
-		)
-		if checkpointErr != nil {
-			return nil, stopRunAfterStartCommitFailure(run, checkpointErr)
-		}
-		if err = startCommitRuntime.CommitStart(ctx, checkpoint); err != nil {
-			return nil, stopRunAfterStartCommitFailure(run, fmt.Errorf(
-				"backgroundtask/tool: commit external start: %w",
-				err,
-			))
-		}
 	}
 
 	projection := e.registry.projections.load(task.Spec.ID)
@@ -376,6 +337,56 @@ func (e *executor) Execute( //nolint:cyclop,funlen // execution coordinates the 
 			return nil, ctx.Err()
 		}
 	}
+}
+
+func (e *executor) startRun(
+	ctx context.Context,
+	registration *Registration,
+	runtime backgroundtask.ExecutionRuntime,
+	task *backgroundtask.Task,
+	payload *taskPayload,
+) (Run, []byte, error) {
+	defer startwindow.Signal(ctx)
+	if e.recoverable {
+		if _, ok := runtime.(backgroundtask.StartCommitRuntime); !ok {
+			return nil, nil, errors.New(
+				"backgroundtask/tool: execution runtime cannot commit external start",
+			)
+		}
+	}
+	startResult, err := registration.Tool.Start(ctx, &StartRequest{
+		TaskID: task.Spec.ID, Arguments: payload.Arguments, Attempt: task.Attempt,
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	if startResult == nil {
+		return nil, nil, errors.New("backgroundtask/tool: implementation returned a nil start result")
+	}
+	if startResult.Run == nil {
+		return nil, nil, errors.New("backgroundtask/tool: implementation returned a nil run")
+	}
+	run := startResult.Run
+	toolCheckpoint := append([]byte(nil), startResult.Checkpoint...)
+	if !e.recoverable && len(toolCheckpoint) > 0 {
+		return nil, nil, stopRunAfterStartCommitFailure(run, errors.New(
+			"backgroundtask/tool: plain tool cannot return a checkpoint",
+		))
+	}
+	if e.recoverable {
+		checkpoint, checkpointErr := encodeManagedCheckpoint(nil, toolCheckpoint)
+		if checkpointErr != nil {
+			return nil, nil, stopRunAfterStartCommitFailure(run, checkpointErr)
+		}
+		startCommitRuntime := runtime.(backgroundtask.StartCommitRuntime)
+		if err = startCommitRuntime.CommitStart(ctx, checkpoint); err != nil {
+			return nil, nil, stopRunAfterStartCommitFailure(run, fmt.Errorf(
+				"backgroundtask/tool: commit external start: %w",
+				err,
+			))
+		}
+	}
+	return run, toolCheckpoint, nil
 }
 
 func (e *executor) drainTerminalUpdates(
