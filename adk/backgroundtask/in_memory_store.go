@@ -122,6 +122,9 @@ func (s *InMemoryStore) Create(_ context.Context, req *CreateTaskRequest) (*Task
 	if err := validateCreateTaskRequest(req); err != nil {
 		return nil, err
 	}
+	if int64(len(req.Checkpoint)) > s.maxValue {
+		return nil, errors.New("backgroundtask: checkpoint exceeds configured bounds")
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, ok := s.tasks[req.Spec.ID]; ok {
@@ -133,17 +136,13 @@ func (s *InMemoryStore) Create(_ context.Context, req *CreateTaskRequest) (*Task
 		Spec:              spec,
 		LeaseExpiryPolicy: req.LeaseExpiryPolicy,
 		Status:            StatusPending,
+		Checkpoint:        cloneBytes(req.Checkpoint),
 		Version:           1,
 		CreatedAt:         now,
 		UpdatedAt:         now,
 	}
 	s.tasks[spec.ID] = task
-	// Tasks that defer their created announcement until they detach into the
-	// background are announced live by the Manager (MarkBackgrounded); Create
-	// omits the durable record for them.
-	if !spec.EmitCreatedOnBackground {
-		s.enqueueLocked(task, NotificationTaskCreated)
-	}
+	s.enqueueLocked(task, NotificationTaskCreated)
 	s.signalLocked()
 	return cloneTask(task), nil
 }

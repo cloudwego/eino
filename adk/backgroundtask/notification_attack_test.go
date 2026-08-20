@@ -48,7 +48,7 @@ func TestAttack_DisabledLifecycleStillAllowsExplicitParentNotification(t *testin
 	defer closeWithTimeout(manager)
 	spec := validSpec("explicit-without-lifecycle")
 	spec.NotifySession = false
-	task, err := manager.Submit(context.Background(), spec)
+	task, err := manager.Submit(context.Background(), &SubmitRequest{Spec: spec})
 	require.NoError(t, err)
 	require.NoError(t, manager.Execute(context.Background(), task.Spec.ID))
 

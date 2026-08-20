@@ -107,18 +107,14 @@ func TestRecoverableShellUsesManagedToolLifecycle(t *testing.T) {
 	require.NotEmpty(t, result.Parts)
 	var event backgroundtool.ManagedToolResponseEvent
 	require.NoError(t, json.Unmarshal([]byte(result.Parts[0].Text), &event))
-	require.Equal(t, backgroundtool.ManagedToolResponseEventLaunchResult, event.Type)
-	require.Equal(t, "shell-task", event.TaskID)
+	require.Equal(t, backgroundtool.ManagedToolResponseEventForegroundResult, event.Type)
+	require.Empty(t, event.TaskID)
 	require.Equal(t, backgroundtask.StatusCompleted, event.Status)
 	require.Equal(t, "command output", event.Output)
 	require.NotNil(t, shell.startRequest)
 	require.Equal(t, "shell-task", shell.startRequest.TaskID)
+	require.Equal(t, int64(0), shell.startRequest.Attempt)
 	require.Equal(t, "echo hello", shell.startRequest.Command)
-
-	task, err := manager.Get(context.Background(), "shell-task")
-	require.NoError(t, err)
-	require.Equal(t, backgroundtool.RecoverableExecutorKey, task.Spec.ExecutorKey)
-	require.Empty(t, task.Spec.OutputFile)
 }
 
 func TestRecoverableShellConfigurationIsExclusive(t *testing.T) {
