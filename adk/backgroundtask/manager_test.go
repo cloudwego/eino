@@ -34,6 +34,34 @@ func closeWithTimeout(manager *Manager) {
 	_ = manager.Close(ctx)
 }
 
+type managerContextSnapshotKey struct{}
+
+type testContextSnapshotter struct{}
+
+func (testContextSnapshotter) CaptureContext(ctx context.Context) ([]byte, error) {
+	value, _ := ctx.Value(managerContextSnapshotKey{}).(string)
+	if value == "" {
+		return nil, nil
+	}
+	return []byte(value), nil
+}
+
+func (testContextSnapshotter) RestoreContext(ctx context.Context, snapshot []byte) (context.Context, error) {
+	return context.WithValue(ctx, managerContextSnapshotKey{}, string(snapshot)), nil
+}
+
+type failingRestoreSnapshotter struct {
+	err error
+}
+
+func (f failingRestoreSnapshotter) CaptureContext(context.Context) ([]byte, error) {
+	return nil, nil
+}
+
+func (f failingRestoreSnapshotter) RestoreContext(context.Context, []byte) (context.Context, error) {
+	return nil, f.err
+}
+
 type firstReleaseConflictStore struct {
 	TaskStore
 	once sync.Once
@@ -417,6 +445,146 @@ func TestManagerReplaysCancellationReasonToRecoveryAttempt(t *testing.T) {
 	canceled, err := manager.Get(context.Background(), started.Spec.ID)
 	require.NoError(t, err)
 	require.Equal(t, "operator request", canceled.ResultError)
+}
+
+func TestManagerRestoresContextSnapshotAcrossRecoveryAndResume(t *testing.T) {
+	store := NewInMemoryStore(nil)
+	observed := make(chan string, 2)
+	attempt := 0
+	executor := &scriptedExecutor{execute: func(
+		ctx context.Context,
+		_ *Task,
+		_ ExecutionRuntime,
+	) (*ExecutionResult, error) {
+		attempt++
+		value, _ := ctx.Value(managerContextSnapshotKey{}).(string)
+		observed <- value
+		if attempt == 1 {
+			return &ExecutionResult{
+				Status:     StatusWaitingInput,
+				Checkpoint: []byte("checkpoint"),
+			}, nil
+		}
+		return &ExecutionResult{Status: StatusCompleted, Data: []byte("done")}, nil
+	}}
+	registry := NewExecutorRegistry()
+	require.NoError(t, registry.Register(executor))
+	manager := mustNewManager(t, context.Background(), &Config{
+		Tasks: store, Executors: registry,
+		ContextSnapshotter: testContextSnapshotter{},
+	})
+	defer closeWithTimeout(manager)
+
+	submitCtx := context.WithValue(
+		context.Background(), managerContextSnapshotKey{}, "submit-trace",
+	)
+	task, err := manager.Submit(submitCtx, &SubmitRequest{
+		Spec: validSpec("ctx-snapshot"),
+	})
+	require.NoError(t, err)
+	require.Equal(t, "submit-trace", string(task.ContextSnapshot))
+	require.NoError(t, manager.Execute(context.Background(), task.Spec.ID))
+	require.Equal(t, "submit-trace", <-observed)
+
+	waiting, err := manager.Get(context.Background(), task.Spec.ID)
+	require.NoError(t, err)
+	require.Equal(t, StatusWaitingInput, waiting.Status)
+	resumeCtx := context.WithValue(
+		context.Background(), managerContextSnapshotKey{}, "resume-trace",
+	)
+	resumed, err := manager.Resume(resumeCtx, &ResumeRequest{
+		TaskID: task.Spec.ID, ExpectedVersion: waiting.Version,
+		Data: []byte(`{"approval":true}`),
+	})
+	require.NoError(t, err)
+	require.Equal(t, "resume-trace", string(resumed.ContextSnapshot))
+	require.NoError(t, manager.Execute(context.Background(), task.Spec.ID))
+	require.Equal(t, "resume-trace", <-observed)
+
+	completed, err := manager.Get(context.Background(), task.Spec.ID)
+	require.NoError(t, err)
+	require.Equal(t, StatusCompleted, completed.Status)
+}
+
+func TestManagerExecuteRequiresContextSnapshotterForPersistedSnapshot(t *testing.T) {
+	store := NewInMemoryStore(nil)
+	created, err := store.Create(context.Background(), &CreateTaskRequest{
+		Spec: validSpec("missing-restorer"), LeaseExpiryPolicy: LeaseExpiryRetry,
+		ContextSnapshot: []byte("trace"),
+	})
+	require.NoError(t, err)
+	manager := managerWithExecutor(t, store, &scriptedExecutor{}, time.Minute)
+	defer closeWithTimeout(manager)
+
+	err = manager.Execute(context.Background(), created.Spec.ID)
+	require.EqualError(
+		t,
+		err,
+		"backgroundtask: context snapshotter is required to restore task context",
+	)
+	current, getErr := manager.Get(context.Background(), created.Spec.ID)
+	require.NoError(t, getErr)
+	require.Equal(t, StatusPending, current.Status)
+}
+
+func TestManagerResumeWithoutSnapshotterPreservesExistingContextSnapshot(t *testing.T) {
+	store := NewInMemoryStore(nil)
+	created, err := store.Create(context.Background(), &CreateTaskRequest{
+		Spec: validSpec("preserve-snapshot"), LeaseExpiryPolicy: LeaseExpiryRetry,
+		ContextSnapshot: []byte("submit-trace"),
+	})
+	require.NoError(t, err)
+	started, err := store.Start(context.Background(), &StartTaskRequest{
+		TaskID: created.Spec.ID, ExpectedVersion: created.Version,
+	})
+	require.NoError(t, err)
+	waiting, err := store.WaitInput(context.Background(), &WaitInputTaskRequest{
+		TaskID: created.Spec.ID, ExpectedVersion: started.Version,
+		Checkpoint: []byte("checkpoint"),
+	})
+	require.NoError(t, err)
+	manager := managerWithExecutor(t, store, &scriptedExecutor{}, time.Minute)
+	defer closeWithTimeout(manager)
+
+	resumed, err := manager.Resume(context.Background(), &ResumeRequest{
+		TaskID: created.Spec.ID, ExpectedVersion: waiting.Version,
+	})
+	require.NoError(t, err)
+	require.Equal(t, "submit-trace", string(resumed.ContextSnapshot))
+}
+
+func TestAttack_ContextSnapshotRestoreFailureDoesNotStartTask(t *testing.T) {
+	restoreErr := errors.New("restore failed")
+	store := NewInMemoryStore(nil)
+	created, err := store.Create(context.Background(), &CreateTaskRequest{
+		Spec: validSpec("restore-failure"), LeaseExpiryPolicy: LeaseExpiryRetry,
+		ContextSnapshot: []byte("trace"),
+	})
+	require.NoError(t, err)
+	executeCalled := false
+	executor := &scriptedExecutor{execute: func(
+		context.Context,
+		*Task,
+		ExecutionRuntime,
+	) (*ExecutionResult, error) {
+		executeCalled = true
+		return &ExecutionResult{Status: StatusCompleted, Data: []byte("unexpected")}, nil
+	}}
+	registry := NewExecutorRegistry()
+	require.NoError(t, registry.Register(executor))
+	manager := mustNewManager(t, context.Background(), &Config{
+		Tasks: store, Executors: registry,
+		ContextSnapshotter: failingRestoreSnapshotter{err: restoreErr},
+	})
+	defer closeWithTimeout(manager)
+
+	err = manager.Execute(context.Background(), created.Spec.ID)
+	require.ErrorIs(t, err, restoreErr)
+	require.False(t, executeCalled)
+	current, getErr := manager.Get(context.Background(), created.Spec.ID)
+	require.NoError(t, getErr)
+	require.Equal(t, StatusPending, current.Status)
+	require.Equal(t, int64(0), current.Attempt)
 }
 
 func TestManagerDispatchReadBoundaries(t *testing.T) {

@@ -93,6 +93,9 @@ type CreateTaskRequest struct {
 	Spec              Spec
 	LeaseExpiryPolicy LeaseExpiryPolicy
 	Checkpoint        []byte
+	// ContextSnapshot is an opaque manager-owned snapshot of selected context
+	// values captured at submission time.
+	ContextSnapshot []byte
 }
 
 // ListPendingRequest lists pending task candidates for the given executor keys.
@@ -220,12 +223,22 @@ type ResumeRequest struct {
 	TaskID          string
 	ExpectedVersion int64
 	Data            []byte
+	// ContextSnapshot is Manager-owned. Manager callers should leave it empty;
+	// Manager captures it from Config.ContextSnapshotter. TaskStore
+	// implementations replace the task's stored context snapshot when this field
+	// is non-nil. An empty non-nil slice clears it.
+	ContextSnapshot []byte
 }
 
 // ReleaseSuspensionRequest returns a suspended task to pending.
 type ReleaseSuspensionRequest struct {
 	TaskID          string
 	ExpectedVersion int64
+	// ContextSnapshot is Manager-owned. Manager callers should leave it empty;
+	// Manager captures it from Config.ContextSnapshotter. TaskStore
+	// implementations replace the task's stored context snapshot when this field
+	// is non-nil. An empty non-nil slice clears it.
+	ContextSnapshot []byte
 }
 
 // WaitForTaskVersionRequest identifies a task and the latest snapshot version

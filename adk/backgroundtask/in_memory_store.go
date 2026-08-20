@@ -125,6 +125,9 @@ func (s *InMemoryStore) Create(_ context.Context, req *CreateTaskRequest) (*Task
 	if int64(len(req.Checkpoint)) > s.maxValue {
 		return nil, errors.New("backgroundtask: checkpoint exceeds configured bounds")
 	}
+	if int64(len(req.ContextSnapshot)) > s.maxValue {
+		return nil, errors.New("backgroundtask: context snapshot exceeds configured bounds")
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, ok := s.tasks[req.Spec.ID]; ok {
@@ -137,6 +140,7 @@ func (s *InMemoryStore) Create(_ context.Context, req *CreateTaskRequest) (*Task
 		LeaseExpiryPolicy: req.LeaseExpiryPolicy,
 		Status:            StatusPending,
 		Checkpoint:        cloneBytes(req.Checkpoint),
+		ContextSnapshot:   cloneBytes(req.ContextSnapshot),
 		Version:           1,
 		CreatedAt:         now,
 		UpdatedAt:         now,
@@ -808,6 +812,9 @@ func (s *InMemoryStore) Resume(_ context.Context, req *ResumeRequest) (*Task, er
 	if int64(len(req.Data)) > s.maxValue {
 		return nil, errors.New("backgroundtask: resume data exceeds configured limit")
 	}
+	if int64(len(req.ContextSnapshot)) > s.maxValue {
+		return nil, errors.New("backgroundtask: context snapshot exceeds configured bounds")
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	t, err := s.taskVersionLocked(req.TaskID, req.ExpectedVersion)
@@ -818,6 +825,9 @@ func (s *InMemoryStore) Resume(_ context.Context, req *ResumeRequest) (*Task, er
 		return nil, ErrIllegalTransition
 	}
 	t.PendingResume = cloneBytes(req.Data)
+	if req.ContextSnapshot != nil {
+		t.ContextSnapshot = cloneBytes(req.ContextSnapshot)
+	}
 	t.Status = StatusPending
 	s.advanceLocked(t)
 	s.enqueueLocked(t, eventForStatus(t.Status))
@@ -830,6 +840,9 @@ func (s *InMemoryStore) ReleaseSuspension(_ context.Context, req *ReleaseSuspens
 	if req == nil {
 		return nil, errors.New("backgroundtask: release request is required")
 	}
+	if int64(len(req.ContextSnapshot)) > s.maxValue {
+		return nil, errors.New("backgroundtask: context snapshot exceeds configured bounds")
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	t, err := s.taskVersionLocked(req.TaskID, req.ExpectedVersion)
@@ -838,6 +851,9 @@ func (s *InMemoryStore) ReleaseSuspension(_ context.Context, req *ReleaseSuspens
 	}
 	if t.Status != StatusSuspended {
 		return nil, ErrIllegalTransition
+	}
+	if req.ContextSnapshot != nil {
+		t.ContextSnapshot = cloneBytes(req.ContextSnapshot)
 	}
 	t.Status = StatusPending
 	s.advanceLocked(t)

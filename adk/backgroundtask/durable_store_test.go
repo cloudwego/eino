@@ -88,6 +88,7 @@ func TestInMemoryStoreCreatePersistsPendingSnapshot_BitsUT(t *testing.T) {
 
 	created, err := store.Create(context.Background(), &CreateTaskRequest{
 		Spec: spec, LeaseExpiryPolicy: LeaseExpiryRetry,
+		ContextSnapshot: []byte("ctx-snapshot"),
 	})
 	require.NoError(t, err)
 	assert.Equal(t, StatusPending, created.Status)
@@ -95,11 +96,14 @@ func TestInMemoryStoreCreatePersistsPendingSnapshot_BitsUT(t *testing.T) {
 	assert.Empty(t, created.ResultData)
 	assert.Empty(t, created.ResultError)
 	assert.Nil(t, created.PendingResume)
+	assert.Equal(t, "ctx-snapshot", string(created.ContextSnapshot))
 
 	spec.Payload[0] = 'X'
+	created.ContextSnapshot[0] = 'X'
 	stored, err := store.Get(context.Background(), created.Spec.ID)
 	require.NoError(t, err)
 	assert.Equal(t, "payload", string(stored.Spec.Payload))
+	assert.Equal(t, "ctx-snapshot", string(stored.ContextSnapshot))
 	assert.True(t, stored.Spec.NotifySession)
 }
 
@@ -905,13 +909,14 @@ func TestInMemoryStoreResumePersistsPendingResumeBytes_BitsUT(t *testing.T) {
 
 	resumed, err := store.Resume(context.Background(), &ResumeRequest{
 		TaskID: "resume", ExpectedVersion: waiting.Version,
-		Data: []byte("answer"),
+		Data: []byte("answer"), ContextSnapshot: []byte("resume-context"),
 	})
 	require.NoError(t, err)
 	assert.Equal(t, StatusPending, resumed.Status)
 	assert.Equal(t, "checkpoint", string(resumed.Checkpoint))
 	require.NotNil(t, resumed.PendingResume)
 	assert.Equal(t, "answer", string(resumed.PendingResume))
+	assert.Equal(t, "resume-context", string(resumed.ContextSnapshot))
 }
 
 func TestInMemoryStoreResumeSurvivesRecoverableAttemptLoss_BitsUT(t *testing.T) {

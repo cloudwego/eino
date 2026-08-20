@@ -565,6 +565,39 @@ func (m *Manager) AllocateTaskID(ctx context.Context, request *AllocateTaskIDReq
 	return id, nil
 }
 
+func (m *Manager) captureContextSnapshot(ctx context.Context) ([]byte, bool, error) {
+	if m.contextSnapshotter == nil {
+		return nil, false, nil
+	}
+	snapshot, err := m.contextSnapshotter.CaptureContext(ctx)
+	if err != nil {
+		return nil, false, fmt.Errorf("backgroundtask: capture context snapshot: %w", err)
+	}
+	if snapshot == nil {
+		snapshot = []byte{}
+	}
+	return cloneBytes(snapshot), true, nil
+}
+
+func (m *Manager) restoreExecutionContext(ctx context.Context, task *Task) (context.Context, error) {
+	if task == nil || len(task.ContextSnapshot) == 0 {
+		return ctx, nil
+	}
+	if m.contextSnapshotter == nil {
+		return nil, errors.New(
+			"backgroundtask: context snapshotter is required to restore task context",
+		)
+	}
+	restored, err := m.contextSnapshotter.RestoreContext(ctx, cloneBytes(task.ContextSnapshot))
+	if err != nil {
+		return nil, fmt.Errorf("backgroundtask: restore context snapshot: %w", err)
+	}
+	if restored == nil {
+		return nil, errors.New("backgroundtask: restore context snapshot returned nil context")
+	}
+	return restored, nil
+}
+
 // Submit validates serialized intent, persists a pending background task, and
 // attempts to emit its low-latency TaskCreated parent-session event before
 // returning. Create atomically writes the durable TaskCreated outbox record; if
@@ -607,9 +640,14 @@ func (m *Manager) Submit(ctx context.Context, req *SubmitRequest) (*Task, error)
 	if err := executor.ValidateSpec(cloneSpec(spec)); err != nil {
 		return nil, fmt.Errorf("backgroundtask: validate spec: %w", err)
 	}
+	contextSnapshot, _, err := m.captureContextSnapshot(ctx)
+	if err != nil {
+		return nil, err
+	}
 	policy := executor.LeaseExpiryPolicy()
 	task, err := m.tasks.Create(ctx, &CreateTaskRequest{
 		Spec: spec, LeaseExpiryPolicy: policy, Checkpoint: cloneBytes(req.InitialCheckpoint),
+		ContextSnapshot: contextSnapshot,
 	})
 	if err != nil {
 		return nil, err
@@ -756,6 +794,10 @@ func (m *Manager) ReleaseSuspension(ctx context.Context, taskID string) (*Task, 
 	if taskID == "" {
 		return nil, errors.New("backgroundtask: release suspension task id is required")
 	}
+	contextSnapshot, capturedContextSnapshot, err := m.captureContextSnapshot(ctx)
+	if err != nil {
+		return nil, err
+	}
 	for retry := 0; ; retry++ {
 		task, err := m.tasks.Get(ctx, taskID)
 		if err != nil {
@@ -764,9 +806,13 @@ func (m *Manager) ReleaseSuspension(ctx context.Context, taskID string) (*Task, 
 		if task.Status != StatusSuspended {
 			return nil, ErrIllegalTransition
 		}
-		released, err := m.tasks.ReleaseSuspension(ctx, &ReleaseSuspensionRequest{
+		req := &ReleaseSuspensionRequest{
 			TaskID: taskID, ExpectedVersion: task.Version,
-		})
+		}
+		if capturedContextSnapshot {
+			req.ContextSnapshot = contextSnapshot
+		}
+		released, err := m.tasks.ReleaseSuspension(ctx, req)
 		if !errors.Is(err, ErrVersionConflict) {
 			return released, err
 		}
@@ -786,9 +832,17 @@ func (m *Manager) Resume(ctx context.Context, req *ResumeRequest) (*Task, error)
 	if req == nil {
 		return nil, errors.New("backgroundtask: resume request is required")
 	}
-	return m.tasks.Resume(ctx, &ResumeRequest{
+	contextSnapshot, capturedContextSnapshot, err := m.captureContextSnapshot(ctx)
+	if err != nil {
+		return nil, err
+	}
+	next := &ResumeRequest{
 		TaskID: req.TaskID, ExpectedVersion: req.ExpectedVersion, Data: cloneBytes(req.Data),
-	})
+	}
+	if capturedContextSnapshot {
+		next.ContextSnapshot = contextSnapshot
+	}
+	return m.tasks.Resume(ctx, next)
 }
 
 // Execute claims and runs one pending task attempt on the current worker.
@@ -832,6 +886,10 @@ func (m *Manager) execute(
 	}()
 
 	task, err := m.tasks.Get(ctx, taskID)
+	if err != nil {
+		return err
+	}
+	ctx, err = m.restoreExecutionContext(ctx, task)
 	if err != nil {
 		return err
 	}

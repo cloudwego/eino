@@ -120,7 +120,7 @@ func TestSimplifiedPublicModelHasNoOverlappingStateFields_BitsUT(t *testing.T) {
 	assertFieldsAbsent(t, reflect.TypeOf(Spec{}), "CreatedAt")
 	assertFieldsPresent(t, reflect.TypeOf(Task{}),
 		"Spec", "LeaseExpiryPolicy", "Status", "Checkpoint", "ResultData", "ResultError",
-		"PendingResume", "Version", "CreatedAt")
+		"PendingResume", "ContextSnapshot", "Version", "CreatedAt")
 	field, exists := reflect.TypeOf(Task{}).FieldByName("PendingResume")
 	require.True(t, exists)
 	assert.Equal(t, reflect.TypeOf([]byte(nil)), field.Type)
@@ -140,7 +140,7 @@ func TestSimplifiedPublicModelHasNoOverlappingStateFields_BitsUT(t *testing.T) {
 		"TaskID", "Cursor", "Limit", "NewestFirst")
 	assertFieldsPresent(t, reflect.TypeOf(ListTaskEventsResult{}), "Events", "NextCursor")
 	assertFieldsPresent(t, reflect.TypeOf(Config{}),
-		"Tasks", "TaskEvents", "Executors", "SendTaskCreatedEvent", "IDGen")
+		"Tasks", "TaskEvents", "Executors", "SendTaskCreatedEvent", "IDGen", "ContextSnapshotter")
 	assertFieldsAbsent(t, reflect.TypeOf(Config{}), "Store", "NotificationWriter")
 	assertMethodsAbsent(t, reflect.TypeOf((*TaskStore)(nil)).Elem(),
 		"AppendTaskEvent", "ListTaskEvents", "ReadRecentTaskEvents", "ReportOutputFailure",
@@ -162,7 +162,11 @@ func TestSimplifiedPublicModelHasNoOverlappingStateFields_BitsUT(t *testing.T) {
 		"Close")
 	assertFieldsPresent(t, reflect.TypeOf(SubmitRequest{}), "Spec", "InitialCheckpoint")
 	assertFieldsPresent(t, reflect.TypeOf(CreateTaskRequest{}),
-		"Spec", "LeaseExpiryPolicy", "Checkpoint")
+		"Spec", "LeaseExpiryPolicy", "Checkpoint", "ContextSnapshot")
+	assertFieldsPresent(t, reflect.TypeOf(ResumeRequest{}),
+		"TaskID", "ExpectedVersion", "Data", "ContextSnapshot")
+	assertFieldsPresent(t, reflect.TypeOf(ReleaseSuspensionRequest{}),
+		"TaskID", "ExpectedVersion", "ContextSnapshot")
 	assertMethodsPresent(t, reflect.TypeOf((*ExecutorRegistry)(nil)), "LoadOrRegister")
 	assertMethodsAbsent(t, reflect.TypeOf((*InMemoryStore)(nil)),
 		"CreateAndStart", "Cancel", "ReadRecentTaskEvents")

@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"time"
 
 	"github.com/bytedance/sonic"
 	"github.com/google/uuid"
@@ -285,6 +286,15 @@ func signalClosed(done <-chan struct{}) bool {
 	}
 }
 
+type detachedExecutionContext struct {
+	parent context.Context
+}
+
+func (detachedExecutionContext) Deadline() (time.Time, bool) { return time.Time{}, false }
+func (detachedExecutionContext) Done() <-chan struct{}       { return nil }
+func (detachedExecutionContext) Err() error                  { return nil }
+func (c detachedExecutionContext) Value(key any) any         { return c.parent.Value(key) }
+
 type agentEventFileReceiver[M adk.MessageType] struct {
 	ctx       context.Context
 	writer    io.Writer
@@ -509,7 +519,7 @@ func newDurableAgentTool[M adk.MessageType](
 			return "", err
 		}
 		go func() {
-			_ = config.Manager.Execute(context.Background(), task.Spec.ID)
+			_ = config.Manager.Execute(detachedExecutionContext{parent: callCtx}, task.Spec.ID)
 		}()
 		return formatDurableAgentResult(in.SubagentType, task)
 	})
