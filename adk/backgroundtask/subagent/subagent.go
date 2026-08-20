@@ -20,12 +20,13 @@ package subagent
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
+	"crypto/rand"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"strings"
+	"strconv"
 	"sync"
 	"time"
 
@@ -44,6 +45,29 @@ const (
 	maxChildSessionIDLength = 1024
 	taskIDEventExtraKey     = "eino.background_task.id"
 )
+
+type taskContextKey struct{}
+
+// TaskContext describes the durable task currently executing a sub-agent. The
+// child session ID is opaque; use TaskID for task-owned metadata lookups.
+type TaskContext struct {
+	TaskID          string
+	ParentSessionID string
+	SubAgentName    string
+	ChildSessionID  string
+	Attempt         int64
+}
+
+// TaskContextFromContext returns durable sub-agent task metadata for the current
+// execution attempt.
+func TaskContextFromContext(ctx context.Context) (TaskContext, bool) {
+	taskCtx, ok := ctx.Value(taskContextKey{}).(TaskContext)
+	return taskCtx, ok && taskCtx.TaskID != "" && taskCtx.ChildSessionID != ""
+}
+
+func contextWithTaskContext(ctx context.Context, taskCtx TaskContext) context.Context {
+	return context.WithValue(ctx, taskContextKey{}, taskCtx)
+}
 
 type taskPayload struct {
 	Version        int                   `json:"version"`
@@ -259,39 +283,19 @@ func validateSpecPayload(spec backgroundtask.Spec) (*taskPayload, error) {
 			"backgroundtask/subagent: child session id exceeds configured bounds",
 		)
 	}
-	if err := validateChildSessionOwner(
-		payload.ChildSessionID,
-		spec.SessionID,
-		payload.SubAgentName,
-	); err != nil {
-		return nil, err
-	}
 	return payload, nil
 }
 
-func childSessionPrefix(parentSessionID, subAgentName string) string {
-	return "subagent-session/" +
-		base64.RawURLEncoding.EncodeToString([]byte(parentSessionID)) + "/" +
-		base64.RawURLEncoding.EncodeToString([]byte(subAgentName)) + "/"
-}
-
-func defaultChildSessionID(parentSessionID, subAgentName, taskID string) string {
-	return childSessionPrefix(parentSessionID, subAgentName) + taskID
-}
-
-func validateChildSessionOwner(
-	childSessionID,
-	parentSessionID,
-	subAgentName string,
-) error {
-	prefix := childSessionPrefix(parentSessionID, subAgentName)
-	if !strings.HasPrefix(childSessionID, prefix) ||
-		len(childSessionID) == len(prefix) {
-		return errors.New(
-			"backgroundtask/subagent: child session does not belong to the parent session and sub-agent",
-		)
+func defaultChildSessionID() (string, error) {
+	var entropy [8]byte
+	if _, err := rand.Read(entropy[:]); err != nil {
+		return "", err
 	}
-	return nil
+	value := binary.BigEndian.Uint64(entropy[:]) & ((uint64(1) << 63) - 1)
+	if value == 0 {
+		value = 1
+	}
+	return strconv.FormatInt(int64(value), 10), nil
 }
 
 func checkpointID(taskID string) string {
@@ -423,6 +427,13 @@ func (e *Executor[M]) Execute(
 		CheckPointStore: e.checkPointStore,
 		SessionID:       payload.ChildSessionID, SessionStore: sessionStore,
 		SessionConfig: e.sessionConfigForTask(task.Spec.ID),
+	})
+	ctx = contextWithTaskContext(ctx, TaskContext{
+		TaskID:          task.Spec.ID,
+		ParentSessionID: task.Spec.SessionID,
+		SubAgentName:    payload.SubAgentName,
+		ChildSessionID:  payload.ChildSessionID,
+		Attempt:         task.Attempt,
 	})
 	cancelOption, cancelRun := adk.WithCancel()
 	controlRequests := make(chan backgroundtask.ControlRequest, 1)
@@ -791,10 +802,10 @@ func nextCheckpointSequence(previous []byte) int64 {
 // concrete values stored in interface fields must be registered with schema.
 // Empty TaskID asks Manager to allocate one. SessionID identifies the parent
 // session notified when the child waits for input or terminates. Empty
-// ChildSessionID creates a new child session derived from the allocated task
-// ID; a non-empty value continues that existing child session and inherits its
-// committed history. DisableLifecycleNotifications suppresses automatic
-// waiting and terminal notifications without suppressing TaskCreated recovery.
+// ChildSessionID creates a new opaque child session when empty; a non-empty
+// value is used as-is and continues that existing child session with its
+// committed history. DisableLifecycleNotifications suppresses automatic waiting
+// and terminal notifications without suppressing TaskCreated recovery.
 type SubmitRequest[M adk.MessageType] struct {
 	TaskID                        string
 	SubAgentName                  string
@@ -839,24 +850,15 @@ func Submit[M adk.MessageType](
 	}
 	payload.ChildSessionID = req.ChildSessionID
 	if payload.ChildSessionID == "" {
-		payload.ChildSessionID = defaultChildSessionID(
-			req.SessionID,
-			req.SubAgentName,
-			id,
-		)
+		payload.ChildSessionID, err = defaultChildSessionID()
+		if err != nil {
+			return nil, err
+		}
 	}
 	if len(payload.ChildSessionID) > maxChildSessionIDLength {
 		return nil, errors.New(
 			"backgroundtask/subagent: child session id exceeds configured bounds",
 		)
-	}
-	err = validateChildSessionOwner(
-		payload.ChildSessionID,
-		req.SessionID,
-		req.SubAgentName,
-	)
-	if err != nil {
-		return nil, err
 	}
 	data, err := json.Marshal(payload)
 	if err != nil {
