@@ -122,6 +122,25 @@ func (a *adapter) Recover(
 	})
 }
 
+func (a *adapter) Adopt(
+	_ context.Context,
+	request *backgroundtool.AdoptRequest,
+) (*backgroundtool.AdoptResult, error) {
+	if request == nil {
+		return nil, errors.New("backgroundtask/shell: adopt request is required")
+	}
+	if request.Run == nil {
+		return nil, errors.New("backgroundtask/shell: adopt run is required")
+	}
+	if _, err := decodeArguments(request.Arguments); err != nil {
+		return nil, err
+	}
+	return &backgroundtool.AdoptResult{
+		Run:            request.Run,
+		ToolCheckpoint: append([]byte(nil), request.ToolCheckpoint...),
+	}, nil
+}
+
 func decodeArguments(value string) (*arguments, error) {
 	var input arguments
 	if err := json.Unmarshal([]byte(value), &input); err != nil {
@@ -134,3 +153,4 @@ func decodeArguments(value string) (*arguments, error) {
 }
 
 var _ backgroundtool.RecoverableBackgroundTool = (*adapter)(nil)
+var _ backgroundtool.ForegroundHandoffTool = (*adapter)(nil)

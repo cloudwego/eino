@@ -127,6 +127,24 @@ func waitUntilTerminal(
 	return task
 }
 
+func waitUntilRunning(
+	t *testing.T,
+	ctx context.Context,
+	manager *bgtask.Manager,
+	taskID string,
+) *bgtask.Task {
+	t.Helper()
+	task, err := manager.Get(ctx, taskID)
+	require.NoError(t, err)
+	for task.Status == bgtask.StatusPending {
+		task, err = manager.WaitForTaskVersion(ctx, &bgtask.WaitForTaskVersionRequest{
+			TaskID: taskID, AfterVersion: task.Version,
+		})
+		require.NoError(t, err)
+	}
+	return task
+}
+
 func createAndStartTask(
 	t *testing.T,
 	store *bgtask.InMemoryStore,
@@ -393,8 +411,9 @@ func TestTaskOutputTool(t *testing.T) {
 	mgr := newBackgroundManager(t, context.Background(), &bgtask.Config{})
 	defer closeWithTimeout(mgr)
 
-	result, err := runWork(mgr, "test task", false, completedWork("task result"))
+	result, err := runWork(mgr, "test task", true, completedWork("task result"))
 	require.NoError(t, err)
+	result = waitUntilTerminal(t, context.Background(), mgr, result.Spec.ID)
 	require.Equal(t, bgtask.StatusCompleted, result.Status)
 
 	tl := findTool(t, injectedTools(t, mgr), taskOutputToolName)
@@ -421,6 +440,7 @@ func TestTaskOutputTool_NonBlockingRunningThenTerminal(t *testing.T) {
 
 	runResult, err := runWork(mgr, "running task", true, blockingWork())
 	require.NoError(t, err)
+	runResult = waitUntilRunning(t, context.Background(), mgr, runResult.Spec.ID)
 
 	tl := findTool(t, injectedTools(t, mgr), taskOutputToolName)
 	out, err := tl.InvokableRun(context.Background(), fmt.Sprintf(`{"task_id":"%s","block":false}`, runResult.Spec.ID))
@@ -441,8 +461,9 @@ func TestTaskOutputTool_NonBlockingRunningThenTerminal(t *testing.T) {
 func TestTaskOutputNonBlockingReturnsCurrentSnapshot(t *testing.T) {
 	store := bgtask.NewInMemoryStore(nil)
 	submitter := newBackgroundManager(t, context.Background(), &bgtask.Config{Tasks: store})
-	task, err := runWork(submitter, "racing task", false, completedWork("done"))
+	task, err := runWork(submitter, "racing task", true, completedWork("done"))
 	require.NoError(t, err)
+	task = waitUntilTerminal(t, context.Background(), submitter, task.Spec.ID)
 	require.NoError(t, submitter.Close(context.Background()))
 
 	racingStore := &staleFirstGetStore{TaskStore: store, first: true}
@@ -545,6 +566,7 @@ func TestControlToolsUsePossessionOfTaskID(t *testing.T) {
 	defer closeWithTimeout(mgr)
 	task, err := runWork(mgr, "secret task", true, blockingWork())
 	require.NoError(t, err)
+	task = waitUntilRunning(t, context.Background(), mgr, task.Spec.ID)
 
 	tools := injectedTools(t, mgr)
 	output := findTool(t, tools, taskOutputToolName)

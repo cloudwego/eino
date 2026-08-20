@@ -45,11 +45,15 @@ const (
 
 // BackgroundTool starts one logical external operation. ValidateArguments must
 // be repeatable and side-effect free. Start receives the Eino task ID before
-// any external side effect occurs. InputPreparer supports ordinary Runner
-// interruption before durable task creation. ResumableBackgroundTool supports
-// durable input requests after creation. An error from Start is a durable
-// execution failure. For recoverable tools, Eino commits StartResult.Checkpoint
-// and the external-start boundary before calling Run.Wait.
+// any external side effect occurs. Attempt 0 is a parent-owned foreground
+// invocation with no persisted task or store-authorized attempt; background
+// attempts start at 1 and must be preceded by Manager.Submit. InputPreparer
+// supports ordinary Runner interruption before durable task creation.
+// ResumableBackgroundTool supports durable input requests after creation. An
+// error from Start is a durable execution failure for background attempts and a
+// model-visible foreground failure for Attempt 0. For recoverable tools, Eino
+// commits StartResult.Checkpoint and the external-start boundary before calling
+// Run.Wait only for background attempts.
 type BackgroundTool interface {
 	ValidateArguments(arguments string) error
 	Start(context.Context, *StartRequest) (*StartResult, error)
@@ -96,6 +100,13 @@ type ResumableBackgroundTool interface {
 	Resume(context.Context, *ResumeRequest) (Run, error)
 }
 
+// ForegroundHandoffTool can adopt a running Attempt 0 foreground operation into
+// background ownership without repeating its side effects.
+type ForegroundHandoffTool interface {
+	BackgroundTool
+	Adopt(context.Context, *AdoptRequest) (*AdoptResult, error)
+}
+
 // StartRequest describes an initial external-operation start.
 type StartRequest struct {
 	TaskID    string
@@ -104,12 +115,30 @@ type StartRequest struct {
 }
 
 // StartResult contains the attempt-local Run and the initial opaque tool
-// checkpoint. Eino persists an independently owned copy before calling
-// Run.Wait. Checkpoint may be empty when TaskID alone is sufficient to recover
-// and must be empty for a non-recoverable BackgroundTool.
+// checkpoint. For Attempt >= 1, Eino persists an independently owned copy
+// before calling Run.Wait. For Attempt 0, the checkpoint is held in memory until
+// foreground handoff or stored in the parent Runner checkpoint for foreground
+// waiting-input. Checkpoint may be empty when TaskID alone is sufficient to
+// recover and must be empty for a non-recoverable BackgroundTool.
 type StartResult struct {
 	Run        Run
 	Checkpoint []byte
+}
+
+// AdoptRequest transfers an Attempt 0 foreground operation into background
+// ownership. Run must be the live handle returned by the matching Start call.
+type AdoptRequest struct {
+	TaskID         string
+	Arguments      string
+	Run            Run
+	ToolCheckpoint []byte
+}
+
+// AdoptResult contains the background-owned run handle and checkpoint to use
+// for the first durable attempt after handoff.
+type AdoptResult struct {
+	Run            Run
+	ToolCheckpoint []byte
 }
 
 // RecoverRequest describes reconstruction of an existing logical operation.
@@ -203,6 +232,9 @@ const (
 	// Update is nil; the remaining fields describe the task and its current or
 	// terminal outcome.
 	ManagedToolResponseEventLaunchResult ManagedToolResponseEventType = "launch_result"
+	// ManagedToolResponseEventForegroundResult carries a synchronous foreground
+	// result. No TaskID is set because no background task was persisted.
+	ManagedToolResponseEventForegroundResult ManagedToolResponseEventType = "foreground_result"
 )
 
 // ManagedToolResponseEvent is the framework-owned model-facing text control

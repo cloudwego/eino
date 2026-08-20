@@ -161,7 +161,16 @@ func (e *executor) Execute( //nolint:cyclop,funlen // execution coordinates the 
 	resumable, supportsResume := registration.Tool.(ResumableBackgroundTool)
 	startCommitRuntime, supportsStartCommit := runtime.(backgroundtask.StartCommitRuntime)
 	startedRun := false
-	if hasInputRequest {
+	if !hasInputRequest && task.Attempt == 1 {
+		if adopted := e.registry.adopted.consume(task.Spec.ID); adopted != nil {
+			run = adopted.run
+			toolCheckpoint = append([]byte(nil), adopted.checkpoint...)
+		}
+	}
+	if run != nil {
+		// The foreground owner already established the operation and handed its
+		// checkpoint to Task.Checkpoint during Submit.
+	} else if hasInputRequest {
 		if !supportsResume {
 			return nil, errors.New(
 				"backgroundtask/tool: waiting task implementation is not resumable",
@@ -184,7 +193,7 @@ func (e *executor) Execute( //nolint:cyclop,funlen // execution coordinates the 
 				Checkpoint: append([]byte(nil), task.Checkpoint...),
 			}, nil
 		}
-	} else if e.recoverable && task.Attempt > 1 && started {
+	} else if e.recoverable && started {
 		run, err = registration.Tool.(RecoverableBackgroundTool).Recover(ctx, &RecoverRequest{
 			TaskID: task.Spec.ID, Arguments: payload.Arguments, Attempt: task.Attempt,
 			Checkpoint: append([]byte(nil), toolCheckpoint...),

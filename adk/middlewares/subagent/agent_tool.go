@@ -428,7 +428,13 @@ func newDurableAgentTool[M adk.MessageType](
 	agents []adk.TypedAgent[M],
 	name, desc string,
 ) (tool.BaseTool, error) {
+	if config.ShouldAutoBackground != nil {
+		return nil, errors.New(
+			"subagent: durable auto-background requires checkpoint handoff support",
+		)
+	}
 	executor := config.Executor
+	foregroundTools := make(map[string]tool.InvokableTool, len(agents))
 	for _, agent := range agents {
 		resumable, ok := agent.(adk.TypedResumableAgent[M])
 		if !ok {
@@ -441,6 +447,11 @@ func newDurableAgentTool[M adk.MessageType](
 		}); err != nil {
 			return nil, err
 		}
+		foregroundTool, ok := adk.NewTypedAgentTool(ctx, agent).(tool.InvokableTool)
+		if !ok {
+			return nil, fmt.Errorf("subagent: agent %q foreground tool is not invokable", agentName)
+		}
+		foregroundTools[agentName] = foregroundTool
 	}
 	registered, _, err := config.Executors.LoadOrRegister(executor)
 	if err != nil {
@@ -458,57 +469,48 @@ func newDurableAgentTool[M adk.MessageType](
 		in agentDurableInput,
 		opts ...tool.Option,
 	) (string, error) {
+		prompt := in.Prompt
+		if prompt == "" {
+			prompt = in.Description
+		}
+		_, _, invocationRunOptions := agenttool.ResolveInvocationOptions[
+			*adk.TypedAgentEvent[M],
+			adk.AgentRunOption,
+		](in.SubagentType, opts...)
+		if !in.RunInBackground && config.ShouldAutoBackground == nil {
+			agent, params, err := resolveSubAgent(
+				foregroundTools,
+				in.SubagentType,
+				prompt,
+				in.Description,
+			)
+			if err != nil {
+				return "", err
+			}
+			return agent.InvokableRun(callCtx, params, opts...)
+		}
 		sessionID, ok := adk.RunnerSessionID(callCtx)
 		if !ok {
 			return "", errors.New(
 				"subagent: runner session is required for background notification",
 			)
 		}
-		prompt := in.Prompt
-		if prompt == "" {
-			prompt = in.Description
-		}
-		receivers, enableStreaming, invocationRunOptions := agenttool.ResolveInvocationOptions[
-			*adk.TypedAgentEvent[M],
-			adk.AgentRunOption,
-		](in.SubagentType, opts...)
 		if len(invocationRunOptions) > 0 {
 			return "", errors.New(
 				"subagent: durable execution does not support invocation-scoped run options; " +
 					"configure RunOptionsFactories",
 			)
 		}
-		detach := func() {}
-		if !in.RunInBackground {
-			callCtx, detach = agenttool.WithForegroundExecution(
-				callCtx, receivers, enableStreaming,
-			)
-			defer detach()
-		}
 		task, err := durablesubagent.Submit(callCtx, config.Manager, &durablesubagent.SubmitRequest[M]{
 			SubAgentName: in.SubagentType, Input: newTypedUserInput[M](prompt), Description: in.Description,
 			SessionID: sessionID, ChildSessionID: in.ChildSessionID,
 		})
-		if err != nil {
+		if err != nil && !(errors.Is(err, backgroundtask.ErrTaskCreatedEventUndelivered) && task != nil) {
 			return "", err
 		}
-		timeoutMs := foreground.DefaultTimeoutMs
-		if config.ForegroundTimeoutMs != nil {
-			timeoutMs = *config.ForegroundTimeoutMs
-		}
-		task, err = foreground.Run(
-			callCtx,
-			config.Manager,
-			foreground.Policy{
-				TimeoutMs: timeoutMs, ShouldAutoBackground: config.ShouldAutoBackground,
-			},
-			&foreground.Request{
-				TaskID: task.Spec.ID, RunInBackground: in.RunInBackground,
-			},
-		)
-		if err != nil {
-			return "", err
-		}
+		go func() {
+			_ = config.Manager.Execute(context.Background(), task.Spec.ID)
+		}()
 		return formatDurableAgentResult(in.SubagentType, task)
 	})
 }

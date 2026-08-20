@@ -31,6 +31,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cloudwego/eino/adk/backgroundtask"
+	"github.com/cloudwego/eino/adk/internal/foreground"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -136,7 +137,7 @@ func TestRunnerBufferedForegroundAndBackground_BitsUT(t *testing.T) {
 		return "later", nil
 	})
 	require.NoError(t, err)
-	assert.Equal(t, backgroundtask.StatusRunning, background.Status)
+	assert.Equal(t, backgroundtask.StatusPending, background.Status)
 	background = waitTerminal(t, manager, background)
 	assert.Equal(t, backgroundtask.StatusCompleted, background.Status)
 	assert.Equal(t, "later", string(background.ResultData))
@@ -163,7 +164,7 @@ func TestRunnerForegroundTimeoutPolicies_BitsUT(t *testing.T) {
 		timeout := 10
 		runner, manager := newTestRunner(t, func(config *Config) {
 			config.ForegroundTimeoutMs = &timeout
-			config.ShouldAutoBackground = func(context.Context, *backgroundtask.Task) bool {
+			config.ShouldAutoBackground = func(context.Context, *foreground.CandidateInfo) bool {
 				return true
 			}
 		})
@@ -174,13 +175,13 @@ func TestRunnerForegroundTimeoutPolicies_BitsUT(t *testing.T) {
 			},
 		)
 		require.NoError(t, err)
-		assert.Equal(t, backgroundtask.StatusRunning, task.Status)
+		assert.Equal(t, backgroundtask.StatusPending, task.Status)
 		task = waitTerminal(t, manager, task)
 		assert.Equal(t, backgroundtask.StatusCompleted, task.Status)
 	})
 }
 
-func TestRunnerStreamProjectsAndPersistsOutput_BitsUT(t *testing.T) {
+func TestRunnerStreamProjectsForegroundOutput_BitsUT(t *testing.T) {
 	timeout := 0
 	runner, manager := newTestRunner(t, func(config *Config) {
 		config.ForegroundTimeoutMs = &timeout
@@ -191,19 +192,8 @@ func TestRunnerStreamProjectsAndPersistsOutput_BitsUT(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "abc", drain(t, stream))
 
-	task := onlyTask(t, manager)
-	task = waitTerminal(t, manager, task)
-	assert.Equal(t, "abc", string(task.ResultData))
-	output, err := manager.ListTaskEvents(context.Background(), &backgroundtask.ListTaskEventsRequest{
-		TaskID: task.Spec.ID,
-	})
-	require.NoError(t, err)
-	require.Len(t, output.Events, 3)
-	for _, event := range output.Events {
-		require.NotNil(t, event)
-		require.NotEmpty(t, event.EventID)
-	}
-	assert.Equal(t, "b", string(output.Events[1].Data))
+	_, err = manager.Get(context.Background(), "test_1")
+	require.ErrorIs(t, err, backgroundtask.ErrNotFound)
 }
 
 func TestRunnerStreamTimeoutStartsAfterConstruction_BitsUT(t *testing.T) {
@@ -237,8 +227,8 @@ func TestRunnerStreamErrorFailsProjectionAndTask_BitsUT(t *testing.T) {
 	require.NoError(t, err)
 	_, recvErr := stream.Recv()
 	require.ErrorIs(t, recvErr, wantErr)
-	task := waitTerminal(t, manager, onlyTask(t, manager))
-	assert.Equal(t, backgroundtask.StatusFailed, task.Status)
+	_, err = manager.Get(context.Background(), "test_1")
+	require.ErrorIs(t, err, backgroundtask.ErrNotFound)
 }
 
 func TestRunnerStreamConstructionFailures(t *testing.T) {
@@ -397,7 +387,7 @@ func TestRunnerStreamBackgroundNotices(t *testing.T) {
 				return fmt.Sprintf("notice:%t", info.AutoBackgrounded)
 			}
 			if auto {
-				config.ShouldAutoBackground = func(context.Context, *backgroundtask.Task) bool {
+				config.ShouldAutoBackground = func(context.Context, *foreground.CandidateInfo) bool {
 					return true
 				}
 			}
@@ -479,8 +469,8 @@ func TestRunnerLocalContracts(t *testing.T) {
 	result, err = runner.Run(context.Background(), &Input{
 		NotifySession: true,
 	}, work)
-	require.Error(t, err)
-	require.Nil(t, result)
+	require.NoError(t, err)
+	require.NotNil(t, result)
 
 	pending, err := runner.submit(
 		context.Background(), &Input{Kind: "test", Description: "pending"}, work,

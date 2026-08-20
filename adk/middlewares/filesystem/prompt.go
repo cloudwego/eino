@@ -150,12 +150,12 @@ When to use: creating a new file, or fully replacing one you've already Read. Ov
 - Working directory persists between calls, but prefer absolute paths — ` + "`" + `cd` + "`" + ` in a compound command can trigger a permission prompt. Shell state (env vars, functions) does not persist; the shell is initialized from the user's profile.
 - IMPORTANT: Avoid using this tool to run ` + "`" + `cat` + "`" + `, ` + "`" + `head` + "`" + `, ` + "`" + `tail` + "`" + `, ` + "`" + `sed` + "`" + `, ` + "`" + `awk` + "`" + `, or ` + "`" + `echo` + "`" + ` commands, unless explicitly instructed or after you have verified that a dedicated tool cannot accomplish your task. Instead, use the appropriate dedicated tool as this will provide a much better experience for the user.
 - ` + "`" + `timeout` + "`" + ` is in milliseconds: default 120000, max 600000.
-- ` + "`" + `run_in_background` + "`" + ` runs the command detached: it keeps running across turns and re-invokes you when it exits. You will be notified when the command completes. No ` + "`" + `&` + "`" + ` needed. Foreground ` + "`" + `sleep` + "`" + ` is blocked; use Monitor with an until-loop to wait on a condition.`
+- ` + "`" + `run_in_background` + "`" + ` starts a background task immediately: the tool result returns a task_id/startup preview, and completion arrives through notification even if the command finishes quickly. You will be notified when the command completes. Use task_output after notification to read the terminal result. No ` + "`" + `&` + "`" + ` needed. Foreground runs are synchronous and do not create a task unless the host supports safe auto-background handoff. Foreground ` + "`" + `sleep` + "`" + ` is blocked; use Monitor with an until-loop to wait on a condition.`
 
 	ManagedExecuteToolDescChinese = `执行一条 bash 命令并返回其输出。
 
 - 工作目录在多次调用间保持，但优先使用绝对路径 —— 复合命令中的 ` + "`" + `cd` + "`" + ` 可能触发权限确认。Shell 状态（环境变量、函数）不会保留；shell 以用户的 profile 初始化。
 - 重要：除非明确要求，或你已确认没有专用工具能完成任务，否则避免用本工具运行 ` + "`" + `cat` + "`" + `、` + "`" + `head` + "`" + `、` + "`" + `tail` + "`" + `、` + "`" + `sed` + "`" + `、` + "`" + `awk` + "`" + `、` + "`" + `echo` + "`" + ` 命令。请改用相应的专用工具，这会带来更好的体验。
 - ` + "`" + `timeout` + "`" + ` 单位为毫秒：默认 120000，最大 600000。
-- ` + "`" + `run_in_background` + "`" + ` 以分离方式运行命令：它跨轮次持续运行，退出时会重新唤起你。命令完成时你会收到通知。无需 ` + "`" + `&` + "`" + `。前台 ` + "`" + `sleep` + "`" + ` 被禁止；用 Monitor 配合 until 循环来等待某个条件。`
+- ` + "`" + `run_in_background` + "`" + ` 会立即创建后台任务：工具结果返回 task_id/启动预览，即使命令很快完成，最终结果也通过完成通知到达。命令完成时你会收到通知。收到通知后用 task_output 读取终态结果。无需 ` + "`" + `&` + "`" + `。前台运行是同步执行，除非宿主支持安全 auto-background handoff，否则不会创建 task。前台 ` + "`" + `sleep` + "`" + ` 被禁止；用 Monitor 配合 until 循环来等待某个条件。`
 )

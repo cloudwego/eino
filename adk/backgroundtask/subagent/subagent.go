@@ -803,9 +803,13 @@ type SubmitRequest[M adk.MessageType] struct {
 	SessionID                     string
 	ChildSessionID                string
 	DisableLifecycleNotifications bool
+	InitialCheckpoint             []byte
 }
 
-// Submit serializes and persists a durable sub-agent task through manager.
+// Submit serializes and persists a durable sub-agent task through manager. If
+// the returned error wraps backgroundtask.ErrTaskCreatedEventUndelivered and
+// task is non-nil, durable ownership has transferred and callers must not retry
+// Submit.
 func Submit[M adk.MessageType](
 	ctx context.Context,
 	manager *backgroundtask.Manager,
@@ -858,10 +862,13 @@ func Submit[M adk.MessageType](
 	if err != nil {
 		return nil, err
 	}
-	return manager.Submit(ctx, backgroundtask.Spec{
-		ID: id, ExecutorKey: ExecutorKey, Kind: "subagent", Payload: data,
-		Description: req.Description, SessionID: req.SessionID,
-		NotifySession: !req.DisableLifecycleNotifications,
+	return manager.Submit(ctx, &backgroundtask.SubmitRequest{
+		Spec: backgroundtask.Spec{
+			ID: id, ExecutorKey: ExecutorKey, Kind: "subagent", Payload: data,
+			Description: req.Description, SessionID: req.SessionID,
+			NotifySession: !req.DisableLifecycleNotifications,
+		},
+		InitialCheckpoint: append([]byte(nil), req.InitialCheckpoint...),
 	})
 }
 

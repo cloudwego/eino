@@ -42,7 +42,9 @@ type SubmitRequest struct {
 
 // Submit validates and persists one registered managed tool without invoking
 // InputPreparer or exposing the private executor payload. Managed-tool
-// executors for registry must already be registered with manager.
+// executors for registry must already be registered with manager. If the
+// returned error wraps backgroundtask.ErrTaskCreatedEventUndelivered and task is
+// non-nil, durable ownership has transferred and callers must not retry Submit.
 func Submit(
 	ctx context.Context,
 	manager *backgroundtask.Manager,
@@ -80,6 +82,10 @@ func Submit(
 		if err != nil {
 			return nil, err
 		}
+	} else if existing, getErr := manager.Get(ctx, taskID); getErr == nil {
+		return nil, fmt.Errorf("%w: %s", backgroundtask.ErrAlreadyExists, existing.Spec.ID)
+	} else if !errors.Is(getErr, backgroundtask.ErrNotFound) {
+		return nil, getErr
 	}
 	outputFile := ""
 	if registration.Materializer != nil {
@@ -109,7 +115,7 @@ func Submit(
 	if err != nil {
 		return nil, err
 	}
-	return manager.Submit(ctx, spec)
+	return manager.Submit(ctx, &backgroundtask.SubmitRequest{Spec: spec})
 }
 
 func validateArguments(registration *Registration, arguments string) error {

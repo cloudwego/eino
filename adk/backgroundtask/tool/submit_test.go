@@ -327,12 +327,12 @@ func TestSubmitPreservesManagerTaskCreatedRetry_BitsUT(t *testing.T) {
 		Arguments: "{}", SessionID: "parent",
 	}
 	persisted, err := Submit(context.Background(), manager, registry, req)
-	require.Error(t, err)
+	require.ErrorIs(t, err, backgroundtask.ErrTaskCreatedEventUndelivered)
 	require.NotNil(t, persisted)
 	retried, err := Submit(context.Background(), manager, registry, req)
-	require.NoError(t, err)
-	require.Equal(t, persisted, retried)
-	require.Equal(t, []string{"stable-task", "stable-task"}, materializer.reserved)
+	require.Nil(t, retried)
+	require.ErrorIs(t, err, backgroundtask.ErrAlreadyExists)
+	require.Equal(t, []string{"stable-task"}, materializer.reserved)
 
 	_, err = Submit(context.Background(), manager, registry, &SubmitRequest{
 		TaskID: "stable-task", ToolName: "direct",

@@ -129,6 +129,16 @@ func StatefulInterrupt(ctx context.Context, info any, state any) *AgentEvent {
 	return TypedStatefulInterrupt[*schema.Message](ctx, info, state)
 }
 
+// InterruptSignalFromEvent returns the internal interrupt signal carried by an
+// interrupt event as an error. Nil events, events without actions, and
+// non-interrupt events return nil.
+func InterruptSignalFromEvent[M MessageType](event *TypedAgentEvent[M]) error {
+	if event == nil || event.Action == nil || event.Action.Interrupted == nil {
+		return nil
+	}
+	return event.Action.internalInterrupted
+}
+
 // TypedCompositeInterrupt creates a typed interrupt event that aggregates sub-interrupt signals.
 // It is the generic counterpart of CompositeInterrupt; see CompositeInterrupt for full documentation.
 func TypedCompositeInterrupt[M MessageType](ctx context.Context, info any, state any,

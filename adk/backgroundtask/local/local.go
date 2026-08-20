@@ -25,6 +25,7 @@ import (
 	"runtime/debug"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/cloudwego/eino/adk/backgroundtask"
 	"github.com/cloudwego/eino/adk/internal/foreground"
@@ -70,13 +71,13 @@ type NoticeInfo struct {
 
 // Config configures process-local execution and ephemeral foreground
 // projection. Policy callbacks may run concurrently and must not panic or
-// mutate the supplied task. Nil ShouldAutoBackground disables automatic
+// mutate the supplied candidate. Nil ShouldAutoBackground disables automatic
 // detachment; nil BackgroundNotice uses the default notice.
 type Config struct {
 	Manager              *backgroundtask.Manager
 	Executors            *backgroundtask.ExecutorRegistry
 	ForegroundTimeoutMs  *int
-	ShouldAutoBackground func(context.Context, *backgroundtask.Task) bool
+	ShouldAutoBackground func(context.Context, *foreground.CandidateInfo) bool
 	BackgroundNotice     func(context.Context, NoticeInfo) string
 }
 
@@ -134,25 +135,157 @@ func (r *Runner) Manager() *backgroundtask.Manager {
 
 // Run executes buffered process-local work.
 func (r *Runner) Run(ctx context.Context, input *Input, work WorkFunc) (*backgroundtask.Task, error) {
-	task, err := r.submit(ctx, input, work)
+	if input == nil || work == nil {
+		return nil, errors.New("backgroundtask/local: input and work are required")
+	}
+	spec, err := r.newSpec(ctx, input)
 	if err != nil {
 		return nil, err
 	}
-	task, err = foreground.Run(ctx, r.manager, r.policy, &foreground.Request{
-		TaskID: task.Spec.ID, RunInBackground: input.RunInBackground,
-		TimeoutMs: input.ForegroundTimeoutMs,
-	})
-	if err != nil {
-		r.removeUnstarted(task.Spec.ID)
+	if input.RunInBackground {
+		task, err := r.submitSpec(ctx, spec, work)
+		if err != nil {
+			return nil, err
+		}
+		go func() {
+			_ = r.manager.Execute(detachedContext{parent: context.Background()}, task.Spec.ID)
+		}()
+		return task, nil
 	}
-	return task, err
+	return r.runForeground(ctx, input, spec, work)
+}
+
+func (r *Runner) runForeground(
+	ctx context.Context,
+	input *Input,
+	spec backgroundtask.Spec,
+	work WorkFunc,
+) (*backgroundtask.Task, error) {
+	startedAt := time.Now()
+	workCtx, cancel := context.WithCancel(ctx)
+	adopted := false
+	defer func() {
+		if !adopted {
+			cancel()
+		}
+	}()
+	resultCh := make(chan struct {
+		value string
+		err   error
+	}, 1)
+	go func() {
+		result := struct {
+			value string
+			err   error
+		}{}
+		defer func() {
+			if panicValue := recover(); panicValue != nil {
+				result.err = safe.NewPanicErr(panicValue, debug.Stack())
+			}
+			resultCh <- result
+		}()
+		result.value, result.err = work(workCtx, foregroundRuntime{})
+	}()
+	timeoutMs := r.policy.TimeoutMs
+	if input.ForegroundTimeoutMs != nil {
+		timeoutMs = *input.ForegroundTimeoutMs
+	}
+	var timeout <-chan time.Time
+	var timer *time.Timer
+	if timeoutMs > 0 {
+		timer = time.NewTimer(time.Duration(timeoutMs) * time.Millisecond)
+		timeout = timer.C
+		defer timer.Stop()
+	}
+	select {
+	case result := <-resultCh:
+		return r.resultTask(spec, result.value, result.err), nil
+	case <-ctx.Done():
+		cancel()
+		return nil, ctx.Err()
+	case <-timeout:
+		candidate := &foreground.CandidateInfo{
+			TaskID: spec.ID, Kind: spec.Kind, Description: spec.Description,
+			OutputFile: spec.OutputFile, StartedAt: startedAt,
+			Elapsed: time.Since(startedAt),
+		}
+		if r.policy.ShouldAutoBackground != nil &&
+			r.policy.ShouldAutoBackground(ctx, candidate) {
+			task, err := r.adoptForeground(ctx, spec, resultCh)
+			if err != nil {
+				cancel()
+				return r.failedTask(spec, fmt.Sprintf("handoff failed after %dms: %v", timeoutMs, err)), nil
+			}
+			adopted = true
+			return task, nil
+		}
+		cancel()
+		return r.failedTask(spec, fmt.Sprintf("timed out after %dms", timeoutMs)), nil
+	}
+}
+
+func (r *Runner) adoptForeground(
+	ctx context.Context,
+	spec backgroundtask.Spec,
+	resultCh <-chan struct {
+		value string
+		err   error
+	},
+) (*backgroundtask.Task, error) {
+	waitWork := func(context.Context, backgroundtask.ExecutionRuntime) (string, error) {
+		result := <-resultCh
+		return result.value, result.err
+	}
+	if err := r.executor.register(spec.ID, waitWork); err != nil {
+		return nil, err
+	}
+	task, err := r.manager.Submit(ctx, &backgroundtask.SubmitRequest{Spec: spec})
+	if err != nil {
+		if errors.Is(err, backgroundtask.ErrTaskCreatedEventUndelivered) && task != nil {
+			go func() {
+				_ = r.manager.Execute(detachedContext{parent: context.Background()}, task.Spec.ID)
+			}()
+			return task, nil
+		}
+		r.executor.remove(spec.ID)
+		return nil, err
+	}
+	go func() {
+		_ = r.manager.Execute(detachedContext{parent: context.Background()}, task.Spec.ID)
+	}()
+	return task, nil
+}
+
+func (r *Runner) resultTask(spec backgroundtask.Spec, value string, err error) *backgroundtask.Task {
+	if err != nil {
+		return r.failedTask(spec, err.Error())
+	}
+	return &backgroundtask.Task{
+		Spec:       spec,
+		Status:     backgroundtask.StatusCompleted,
+		ResultData: []byte(value),
+		CreatedAt:  time.Now(),
+		UpdatedAt:  time.Now(),
+	}
+}
+
+func (r *Runner) failedTask(spec backgroundtask.Spec, reason string) *backgroundtask.Task {
+	now := time.Now()
+	return &backgroundtask.Task{
+		Spec:        spec,
+		Status:      backgroundtask.StatusFailed,
+		ResultError: reason,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+		DoneAt:      &now,
+	}
 }
 
 // RunStream executes streaming process-local work and returns its ephemeral
-// caller-facing projection. Every chunk is also appended to the task-event
-// feed. Closing the returned reader requests cancellation of this process-local
-// operation; callers that want execution to continue must explicitly launch it
-// in the background rather than abandoning the stream.
+// caller-facing projection. Foreground chunks are not task events because no
+// durable task exists until explicit background launch or successful handoff.
+// Closing a foreground reader requests cancellation of this process-local
+// operation; closing a background preview only closes the caller projection.
 func (r *Runner) RunStream(
 	ctx context.Context,
 	input *Input,
@@ -212,17 +345,25 @@ func (r *Runner) RunStream(
 			chunks <- streamChunk{text: chunk}
 		}
 	}
-	task, err := r.submit(ctx, input, adapter)
+	spec, err := r.newSpec(ctx, input)
+	if err != nil {
+		return nil, err
+	}
+	if !input.RunInBackground {
+		return r.runForegroundStream(ctx, input, spec, adapter, chunks, ready)
+	}
+	task, err := r.submitSpec(ctx, spec, adapter)
 	if err != nil {
 		return nil, err
 	}
 	runDone := make(chan runResult, 1)
 	go func() {
-		result, runErr := foreground.Run(ctx, r.manager, r.policy, &foreground.Request{
-			TaskID: task.Spec.ID, RunInBackground: input.RunInBackground,
-			TimeoutMs: input.ForegroundTimeoutMs, ProjectionReady: projectionReady,
-		})
-		runDone <- runResult{task: result, err: runErr}
+		runErr := r.manager.Execute(detachedContext{parent: context.Background()}, task.Spec.ID)
+		current, getErr := r.manager.Get(context.Background(), task.Spec.ID)
+		if runErr == nil {
+			runErr = getErr
+		}
+		runDone <- runResult{task: current, err: runErr}
 	}()
 	var (
 		readyErr    error
@@ -270,6 +411,38 @@ waitReady:
 	return reader, nil
 }
 
+func (r *Runner) runForegroundStream(
+	ctx context.Context,
+	input *Input,
+	spec backgroundtask.Spec,
+	work WorkFunc,
+	chunks <-chan streamChunk,
+	ready <-chan error,
+) (*schema.StreamReader[string], error) {
+	workCtx, cancel := context.WithCancel(ctx)
+	resultCh := make(chan struct {
+		value string
+		err   error
+	}, 1)
+	go func() {
+		value, err := work(workCtx, foregroundRuntime{})
+		resultCh <- struct {
+			value string
+			err   error
+		}{value: value, err: err}
+	}()
+	if err := <-ready; err != nil {
+		cancel()
+		return nil, err
+	}
+	reader, writer := schema.Pipe[string](streamBufferCap)
+	go r.projectForegroundStream(&foregroundStreamProjection{
+		ctx: ctx, input: input, spec: spec, chunks: chunks,
+		resultCh: resultCh, writer: writer, cancel: cancel,
+	})
+	return reader, nil
+}
+
 func (r *Runner) submit(
 	ctx context.Context,
 	input *Input,
@@ -278,28 +451,48 @@ func (r *Runner) submit(
 	if r == nil || r.manager == nil || r.executor == nil || input == nil || work == nil {
 		return nil, errors.New("backgroundtask/local: runner, input, and work are required")
 	}
+	spec, err := r.newSpec(ctx, input)
+	if err != nil {
+		return nil, err
+	}
+	return r.submitSpec(ctx, spec, work)
+}
+
+func (r *Runner) newSpec(ctx context.Context, input *Input) (backgroundtask.Spec, error) {
+	if r == nil || r.manager == nil || input == nil {
+		return backgroundtask.Spec{}, errors.New("backgroundtask/local: runner and input are required")
+	}
 	id, err := r.manager.AllocateTaskID(ctx, &backgroundtask.AllocateTaskIDRequest{
 		Kind: input.Kind,
 	})
 	if err != nil {
-		return nil, err
+		return backgroundtask.Spec{}, err
 	}
-	if err = r.executor.register(id, work); err != nil {
-		return nil, err
-	}
-	task, err := r.manager.Submit(ctx, backgroundtask.Spec{
+	return backgroundtask.Spec{
 		ID: id, ExecutorKey: executorKey, Kind: input.Kind,
 		Payload: append([]byte(nil), input.Payload...), Description: input.Description,
 		OutputFile: input.OutputFile, SessionID: input.SessionID, NotifySession: input.NotifySession,
-		// Process-local tasks may complete in the foreground. Defer the
-		// TaskCreated announcement until the task actually detaches into the
-		// background so a foreground-completed run never appears as a background
-		// task.
-		EmitCreatedOnBackground: true,
-	})
-	if err != nil {
-		r.executor.remove(id)
+	}, nil
+}
+
+func (r *Runner) submitSpec(
+	ctx context.Context,
+	spec backgroundtask.Spec,
+	work WorkFunc,
+) (*backgroundtask.Task, error) {
+	if err := r.executor.register(spec.ID, work); err != nil {
 		return nil, err
+	}
+	task, err := r.manager.Submit(ctx, &backgroundtask.SubmitRequest{Spec: spec})
+	if err != nil && !errors.Is(err, backgroundtask.ErrTaskCreatedEventUndelivered) {
+		r.executor.remove(spec.ID)
+		return nil, err
+	}
+	if err != nil && task == nil {
+		r.executor.remove(spec.ID)
+		return nil, errors.New(
+			"backgroundtask/local: task-created delivery failed without persisted task",
+		)
 	}
 	return task, nil
 }
@@ -314,6 +507,27 @@ func (r *Runner) removeUnstarted(taskID string) {
 type executor struct {
 	mu    sync.Mutex
 	works map[string]WorkFunc
+}
+
+type detachedContext struct {
+	parent context.Context
+}
+
+func (detachedContext) Deadline() (time.Time, bool) { return time.Time{}, false }
+func (detachedContext) Done() <-chan struct{}       { return nil }
+func (detachedContext) Err() error                  { return nil }
+func (c detachedContext) Value(key any) any         { return c.parent.Value(key) }
+
+type foregroundRuntime struct{}
+
+func (foregroundRuntime) Controls() <-chan backgroundtask.ControlRequest { return nil }
+
+func (foregroundRuntime) EmitProgress(_ context.Context, eventID string, _ []byte) (backgroundtask.ProgressEmission, error) {
+	return backgroundtask.ProgressEmission{EventID: eventID, FirstEmission: true}, nil
+}
+
+func (foregroundRuntime) ReportTranscriptFailure(context.Context, error) error {
+	return nil
 }
 
 func (*executor) Key() string { return executorKey }

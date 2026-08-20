@@ -17,7 +17,6 @@
 package backgroundtask
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -566,12 +565,17 @@ func (m *Manager) AllocateTaskID(ctx context.Context, request *AllocateTaskIDReq
 	return id, nil
 }
 
-// Submit validates serialized intent, persists a pending task, and emits its
-// TaskCreated parent-session event before returning success. If event emission
-// fails after persistence, Submit returns the task with the error; retrying the
-// identical Spec on the same Manager retries that failed emission. Other
-// duplicate task IDs return ErrAlreadyExists.
-func (m *Manager) Submit(ctx context.Context, spec Spec) (*Task, error) {
+// Submit validates serialized intent, persists a pending background task, and
+// attempts to emit its low-latency TaskCreated parent-session event before
+// returning. Create atomically writes the durable TaskCreated outbox record; if
+// only the immediate event send fails, Submit returns the non-nil task with an
+// error wrapping ErrTaskCreatedEventUndelivered. Callers must treat that case as
+// ownership transferred and rely on the outbox for recovery.
+func (m *Manager) Submit(ctx context.Context, req *SubmitRequest) (*Task, error) {
+	if req == nil {
+		return nil, errors.New("backgroundtask: submit request is required")
+	}
+	spec := req.Spec
 	if spec.ID == "" {
 		return nil, errors.New("backgroundtask: submit requires a pre-allocated task id")
 	}
@@ -605,99 +609,20 @@ func (m *Manager) Submit(ctx context.Context, spec Spec) (*Task, error) {
 	}
 	policy := executor.LeaseExpiryPolicy()
 	task, err := m.tasks.Create(ctx, &CreateTaskRequest{
-		Spec: spec, LeaseExpiryPolicy: policy,
+		Spec: spec, LeaseExpiryPolicy: policy, Checkpoint: cloneBytes(req.InitialCheckpoint),
 	})
-	if err != nil {
-		if !errors.Is(err, ErrAlreadyExists) || spec.SessionID == "" ||
-			!m.taskCreatedEventFailed(spec.ID) {
-			return nil, err
-		}
-		existing, loadErr := m.tasks.Get(ctx, spec.ID)
-		if loadErr != nil || !sameSpec(existing.Spec, spec) ||
-			existing.LeaseExpiryPolicy != policy {
-			return nil, err
-		}
-		task = existing
-	}
-	// Tasks that defer their created announcement until they detach into the
-	// background emit the TaskCreated event later, via MarkBackgrounded; they do
-	// not announce themselves at creation.
-	if spec.SessionID != "" && !spec.EmitCreatedOnBackground {
-		if sendErr := m.sendTaskCreatedEvent(ctx, cloneTask(task)); sendErr != nil {
-			m.setTaskCreatedEventFailed(task.Spec.ID, true)
-			return task, fmt.Errorf(
-				"backgroundtask: send task-created session event for %q: %w",
-				task.Spec.ID,
-				sendErr,
-			)
-		}
-		m.setTaskCreatedEventFailed(task.Spec.ID, false)
-	}
-	return task, nil
-}
-
-// MarkBackgrounded announces the deferred TaskCreated session event for a task
-// that has just detached into the background (explicit background run or
-// auto-background at the foreground timeout).
-//
-// The announcement is best-effort and UNRECOVERABLE: it performs a single live
-// emission with no durable store write, so a send failure permanently drops the
-// TaskCreated event for this task — the parent session will never learn the
-// task ID, even though later lifecycle notifications for it are still delivered.
-// This is an accepted trade-off, not an oversight: EmitCreatedOnBackground is
-// used only by process-local foreground runs, whose work cannot survive process
-// exit anyway, so a durable created-record (and the Store surface it would
-// require) is not worth its cost against a low-probability live-send failure.
-//
-// The send error is intentionally swallowed rather than returned: the task is
-// already running in the background, so the detach must not be aborted. There
-// is deliberately NO retry bookkeeping here — a failure is not recorded in the
-// taskCreatedEventFailed set, because MarkBackgrounded has no resubmission that
-// could act on it (Submit's created gate excludes EmitCreatedOnBackground
-// tasks) and recording it would only wrongly relax the duplicate-Submit guard
-// for this task ID.
-//
-// It returns the store error (e.g. ErrNotFound) if the task cannot be loaded.
-func (m *Manager) MarkBackgrounded(ctx context.Context, taskID string) (*Task, error) {
-	task, err := m.tasks.Get(ctx, taskID)
 	if err != nil {
 		return nil, err
 	}
-	if task.Spec.SessionID != "" && m.sendTaskCreatedEvent != nil {
-		// Best-effort live-only emission; see the doc comment for why the error
-		// is swallowed and why no failure marker is set.
-		_ = m.sendTaskCreatedEvent(ctx, cloneTask(task))
+	if spec.SessionID != "" {
+		if sendErr := m.sendTaskCreatedEvent(ctx, cloneTask(task)); sendErr != nil {
+			return task, &taskCreatedEventUndeliveredError{
+				taskID: task.Spec.ID,
+				cause:  sendErr,
+			}
+		}
 	}
 	return task, nil
-}
-
-func (m *Manager) taskCreatedEventFailed(taskID string) bool {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	_, failed := m.failedTaskCreatedEvents[taskID]
-	return failed
-}
-
-func (m *Manager) setTaskCreatedEventFailed(taskID string, failed bool) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if failed {
-		m.failedTaskCreatedEvents[taskID] = struct{}{}
-		return
-	}
-	delete(m.failedTaskCreatedEvents, taskID)
-}
-
-func sameSpec(left, right Spec) bool {
-	return left.ID == right.ID &&
-		left.ExecutorKey == right.ExecutorKey &&
-		left.Kind == right.Kind &&
-		bytes.Equal(left.Payload, right.Payload) &&
-		left.Description == right.Description &&
-		left.OutputFile == right.OutputFile &&
-		left.SessionID == right.SessionID &&
-		left.NotifySession == right.NotifySession &&
-		left.EmitCreatedOnBackground == right.EmitCreatedOnBackground
 }
 
 // Get returns the authoritative task snapshot.

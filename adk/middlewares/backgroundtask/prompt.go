@@ -53,7 +53,9 @@ const (
 	backgroundTaskPromptHeader = `
 ## Background Task Management
 - Some tools can launch work in the background. Background tasks keep running after the
-  tool call returns; you will be notified when they complete.`
+  tool call returns; you will be notified when they complete.
+- A task_id means the work was created as a background task. Foreground tool results
+  are synchronous and do not need the output tool.`
 
 	// %s is the registered task_output tool name.
 	backgroundTaskOutputLine = "\n- Use the %s tool to check a background task's status or retrieve its result by task_id."
@@ -61,11 +63,12 @@ const (
 	// %s is the registered task_stop tool name.
 	backgroundTaskStopLine = "\n- Use the %s tool to cancel a running background task by task_id."
 
-	backgroundTaskPromptFooter = "\n- These tasks are running executions, not planning to-dos.\n"
+	backgroundTaskPromptFooter = "\n- These tasks are running executions, not planning to-dos.\n- If a background task finishes quickly, wait for its completion notification before using the output tool; do not poll immediately in a loop.\n"
 
 	backgroundTaskPromptHeaderChinese = `
 ## 后台任务管理
-- 部分工具可以在后台启动任务。后台任务在工具调用返回后会继续运行；任务完成时你将收到通知。`
+- 部分工具可以在后台启动任务。后台任务在工具调用返回后会继续运行；任务完成时你将收到通知。
+- 出现 task_id 表示工作已经创建为后台任务。前台工具结果是同步结果，不需要使用输出查询工具。`
 
 	// %s is the registered task_output tool name.
 	backgroundTaskOutputLineChinese = "\n- 使用 %s 工具通过 task_id 查询后台任务的状态或获取其结果。"
@@ -73,5 +76,5 @@ const (
 	// %s is the registered task_stop tool name.
 	backgroundTaskStopLineChinese = "\n- 使用 %s 工具通过 task_id 取消正在运行的后台任务。"
 
-	backgroundTaskPromptFooterChinese = "\n- 这些任务是正在运行的执行实例，而非用于规划的待办事项。\n"
+	backgroundTaskPromptFooterChinese = "\n- 这些任务是正在运行的执行实例，而非用于规划的待办事项。\n- 如果后台任务很快完成，请等待完成通知后再使用输出查询工具；不要立即循环轮询。\n"
 )
