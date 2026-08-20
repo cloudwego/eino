@@ -84,7 +84,7 @@ func TestManagerSubmitAppendsTaskCreatedSessionEvent_BitsUT(t *testing.T) {
 				spec.SessionID = sessionID
 				spec.NotifySession = false
 				var submitErr error
-				task, submitErr = manager.Submit(runCtx, spec)
+				task, submitErr = manager.Submit(runCtx, &SubmitRequest{Spec: spec})
 				return submitErr
 			},
 		}},
@@ -120,7 +120,7 @@ func TestManagerSubmitAppendsTaskCreatedSessionEvent_BitsUT(t *testing.T) {
 	require.Equal(t, task.Spec.ID, payload.TaskID)
 }
 
-func TestManagerSubmitRepairsTaskCreatedEventAfterSendFailure_BitsUT(t *testing.T) {
+func TestManagerSubmitReturnsUndeliveredSentinelAfterCreate_BitsUT(t *testing.T) {
 	sendErr := errors.New("session timeline unavailable")
 	calls := 0
 	manager := managerWithTaskCreatedSender(
@@ -135,20 +135,16 @@ func TestManagerSubmitRepairsTaskCreatedEventAfterSendFailure_BitsUT(t *testing.
 	)
 	spec := validSpec("task-created-repair")
 
-	persisted, err := manager.Submit(context.Background(), spec)
+	persisted, err := manager.Submit(context.Background(), &SubmitRequest{Spec: spec})
+	require.ErrorIs(t, err, ErrTaskCreatedEventUndelivered)
 	require.ErrorIs(t, err, sendErr)
 	require.NotNil(t, persisted)
 	require.Equal(t, spec.ID, persisted.Spec.ID)
 
-	repaired, err := manager.Submit(context.Background(), spec)
-	require.NoError(t, err)
-	require.Equal(t, persisted.Spec.ID, repaired.Spec.ID)
-	require.Equal(t, 2, calls)
-
-	duplicate, err := manager.Submit(context.Background(), spec)
+	duplicate, err := manager.Submit(context.Background(), &SubmitRequest{Spec: spec})
 	require.Nil(t, duplicate)
 	require.ErrorIs(t, err, ErrAlreadyExists)
-	require.Equal(t, 2, calls)
+	require.Equal(t, 1, calls)
 }
 
 func TestAttack_TaskCreatedFailureLeavesSingleRecoveryRecord(t *testing.T) {
@@ -169,7 +165,8 @@ func TestAttack_TaskCreatedFailureLeavesSingleRecoveryRecord(t *testing.T) {
 	})
 	spec := validSpec("task-created-recovery")
 
-	persisted, err := manager.Submit(context.Background(), spec)
+	persisted, err := manager.Submit(context.Background(), &SubmitRequest{Spec: spec})
+	require.ErrorIs(t, err, ErrTaskCreatedEventUndelivered)
 	require.ErrorIs(t, err, sendErr)
 	require.NotNil(t, persisted)
 	recovery, err := store.Receive(
@@ -183,16 +180,16 @@ func TestAttack_TaskCreatedFailureLeavesSingleRecoveryRecord(t *testing.T) {
 	require.Equal(t, spec.SessionID, recovery.Deliveries[0].Record.SessionID)
 	require.NoError(t, store.Ack(context.Background(), recovery.Deliveries[0].Receipt))
 
-	repaired, err := manager.Submit(context.Background(), spec)
-	require.NoError(t, err)
-	require.Equal(t, persisted.Spec.ID, repaired.Spec.ID)
+	retried, err := manager.Submit(context.Background(), &SubmitRequest{Spec: spec})
+	require.Nil(t, retried)
+	require.ErrorIs(t, err, ErrAlreadyExists)
 	remaining, err := store.Receive(
 		context.Background(),
 		&ReceiveNotificationsRequest{Limit: 10, LeaseDuration: time.Second},
 	)
 	require.NoError(t, err)
 	require.Empty(t, remaining.Deliveries)
-	require.Equal(t, 2, calls)
+	require.Equal(t, 1, calls)
 	t.Log("sender failure retained exactly one durable TaskCreated recovery record")
 }
 
@@ -206,7 +203,7 @@ func TestManagerSubmitRequiresTaskCreatedSenderBeforeCreate_BitsUT(t *testing.T)
 	require.NoError(t, err)
 	spec := validSpec("missing-task-created-sender")
 
-	task, err := manager.Submit(context.Background(), spec)
+	task, err := manager.Submit(context.Background(), &SubmitRequest{Spec: spec})
 	require.Nil(t, task)
 	require.EqualError(
 		t,

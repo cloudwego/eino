@@ -29,6 +29,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cloudwego/eino/adk/backgroundtask"
+	"github.com/cloudwego/eino/adk/internal/foreground"
 	componenttool "github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
@@ -43,6 +44,17 @@ type fakeTool struct {
 type resumableFakeTool struct {
 	*fakeTool
 	resume func(context.Context, *ResumeRequest) (Run, error)
+}
+
+type handoffFakeTool struct {
+	*fakeTool
+}
+
+func (*handoffFakeTool) Adopt(_ context.Context, req *AdoptRequest) (*AdoptResult, error) {
+	return &AdoptResult{
+		Run:            req.Run,
+		ToolCheckpoint: append([]byte(nil), req.ToolCheckpoint...),
+	}, nil
 }
 
 func (t *resumableFakeTool) Resume(
@@ -183,12 +195,17 @@ func newTestManagedTool(
 		},
 	})
 	timeoutMs := int(timeout / time.Millisecond)
-	wrapped, err := NewManagedTool(context.Background(), &ManagedToolConfig{
+	config := &ManagedToolConfig{
 		Manager: manager, Executors: executors, Registry: registry, ToolName: "external",
-		ForegroundTimeoutMs:  &timeoutMs,
-		ShouldAutoBackground: func(context.Context, *backgroundtask.Task) bool { return true },
-		SessionID:            func(context.Context) (string, error) { return "session", nil },
-	})
+		ForegroundTimeoutMs: &timeoutMs,
+		SessionID:           func(context.Context) (string, error) { return "session", nil },
+	}
+	if _, ok := implementation.(ForegroundHandoffTool); ok {
+		config.ShouldAutoBackground = func(context.Context, *foreground.CandidateInfo) bool {
+			return true
+		}
+	}
+	wrapped, err := NewManagedTool(context.Background(), config)
 	require.NoError(t, err)
 	return manager, wrapped
 }
@@ -209,6 +226,20 @@ func decodeEvents(t *testing.T, results []*schema.ToolResult) []*ManagedToolResp
 		events = append(events, &event)
 	}
 	return events
+}
+
+func waitTaskAttempt(t *testing.T, manager *backgroundtask.Manager, taskID string) *backgroundtask.Task {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for {
+		task, err := manager.Get(context.Background(), taskID)
+		require.NoError(t, err)
+		if task.Attempt > 0 || task.Status != backgroundtask.StatusPending {
+			return task
+		}
+		require.True(t, time.Now().Before(deadline), "task was not claimed")
+		time.Sleep(time.Millisecond)
+	}
 }
 
 func TestManagedToolPreparesInputBeforeTaskCreation_BitsUT(t *testing.T) {
@@ -272,7 +303,7 @@ func TestManagedToolInputPreparerSupportsTargetedResume_BitsUT(t *testing.T) {
 	_, err = runnable.Invoke(ctx, input, compose.WithCheckPointID(checkpointID))
 	require.Error(t, err)
 	interrupt, ok := compose.ExtractInterruptInfo(err)
-	require.True(t, ok)
+	require.True(t, ok, "err: %v", err)
 	require.Len(t, interrupt.InterruptContexts, 1)
 	require.Equal(t, "Which region should be used?", interrupt.InterruptContexts[0].Info)
 	_, err = manager.Get(ctx, "task-fixed")
@@ -296,9 +327,8 @@ func TestManagedToolInputPreparerSupportsTargetedResume_BitsUT(t *testing.T) {
 		`{"value":"original","region":"us-east"}`,
 		implementation.startedArguments(),
 	)
-	task, err := manager.Get(ctx, "task-fixed")
-	require.NoError(t, err)
-	require.Equal(t, backgroundtask.StatusCompleted, task.Status)
+	_, err = manager.Get(ctx, "task-fixed")
+	require.ErrorIs(t, err, backgroundtask.ErrNotFound)
 }
 
 type interruptingInputTool struct {
@@ -448,15 +478,119 @@ func TestManagedToolFastCompletionReturnsCanonicalTaskID(t *testing.T) {
 	)
 	require.NoError(t, err)
 	events := decodeEvents(t, []*schema.ToolResult{result})
-	require.Equal(t, ManagedToolResponseEventLaunchResult, events[0].Type)
-	require.Equal(t, "task-fixed", events[0].TaskID)
+	require.Equal(t, ManagedToolResponseEventForegroundResult, events[0].Type)
+	require.Empty(t, events[0].TaskID)
 	require.Equal(t, backgroundtask.StatusCompleted, events[0].Status)
 	require.Equal(t, map[string]any{"answer": float64(42)}, events[0].Output)
 
-	task, err := manager.Get(context.Background(), "task-fixed")
+	_, err = manager.Get(context.Background(), "task-fixed")
+	require.ErrorIs(t, err, backgroundtask.ErrNotFound)
+}
+
+func TestManagedToolForegroundWaitingInputResumesWithoutTask(t *testing.T) {
+	ctx := context.Background()
+	var (
+		mu             sync.Mutex
+		startRequests  []*StartRequest
+		resumeRequests []*ResumeRequest
+	)
+	implementation := &resumableFakeTool{
+		fakeTool: &fakeTool{
+			startCheckpoint: []byte(`{"run_id":"foreground"}`),
+			start: func(_ context.Context, request *StartRequest) (Run, error) {
+				mu.Lock()
+				copy := *request
+				startRequests = append(startRequests, &copy)
+				mu.Unlock()
+				return &fakeRun{
+					wait: func(context.Context) (*Outcome, error) {
+						return &Outcome{
+							Status: backgroundtask.StatusWaitingInput,
+							InputRequest: &InputRequest{
+								ID: "approval", Data: []byte(`{"question":"Approve?"}`),
+							},
+						}, nil
+					},
+				}, nil
+			},
+			recover: func(context.Context, *RecoverRequest) (Run, error) {
+				t.Fatal("foreground resume must not use background recovery")
+				return nil, nil
+			},
+		},
+		resume: func(_ context.Context, request *ResumeRequest) (Run, error) {
+			mu.Lock()
+			copy := *request
+			copy.Data = append([]byte(nil), request.Data...)
+			copy.Checkpoint = append([]byte(nil), request.Checkpoint...)
+			resumeRequests = append(resumeRequests, &copy)
+			mu.Unlock()
+			return &fakeRun{wait: func(context.Context) (*Outcome, error) {
+				return &Outcome{
+					Status: backgroundtask.StatusCompleted,
+					Data:   []byte(`{"approved":true}`),
+				}, nil
+			}}, nil
+		},
+	}
+	manager, wrapped := newTestManagedTool(t, implementation, time.Second)
+	toolsNode, err := compose.NewToolNode(ctx, &compose.ToolsNodeConfig{
+		Tools: []componenttool.BaseTool{wrapped},
+	})
 	require.NoError(t, err)
-	require.Equal(t, backgroundtask.StatusCompleted, task.Status)
-	require.Equal(t, RecoverableExecutorKey, task.Spec.ExecutorKey)
+	graph := compose.NewGraph[*schema.Message, []*schema.Message]()
+	require.NoError(t, graph.AddToolsNode("tools", toolsNode))
+	require.NoError(t, graph.AddEdge(compose.START, "tools"))
+	require.NoError(t, graph.AddEdge("tools", compose.END))
+	runnable, err := graph.Compile(
+		ctx,
+		compose.WithGraphName("managed_tool_foreground_wait"),
+		compose.WithCheckPointStore(newManagedToolCheckpointStore()),
+	)
+	require.NoError(t, err)
+	input := &schema.Message{
+		Role: schema.Assistant,
+		ToolCalls: []schema.ToolCall{{
+			ID: "call_wait",
+			Function: schema.FunctionCall{
+				Name: "external", Arguments: `{"value":"work"}`,
+			},
+		}},
+	}
+
+	_, err = runnable.Invoke(ctx, input, compose.WithCheckPointID("foreground-wait"))
+	require.Error(t, err)
+	interrupt, ok := compose.ExtractInterruptInfo(err)
+	require.True(t, ok)
+	require.Len(t, interrupt.InterruptContexts, 1)
+	require.JSONEq(t, `{"question":"Approve?"}`, string(interrupt.InterruptContexts[0].Info.(json.RawMessage)))
+	_, err = manager.Get(ctx, "task-fixed")
+	require.ErrorIs(t, err, backgroundtask.ErrNotFound)
+
+	resumeCtx := compose.ResumeWithData(
+		ctx,
+		interrupt.InterruptContexts[0].ID,
+		json.RawMessage(`"yes"`),
+	)
+	_, err = runnable.Invoke(
+		resumeCtx,
+		input,
+		compose.WithCheckPointID("foreground-wait"),
+	)
+	require.NoError(t, err)
+	_, err = manager.Get(ctx, "task-fixed")
+	require.ErrorIs(t, err, backgroundtask.ErrNotFound)
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.Len(t, startRequests, 1)
+	require.Equal(t, int64(0), startRequests[0].Attempt)
+	require.Len(t, resumeRequests, 1)
+	require.Equal(t, int64(0), resumeRequests[0].Attempt)
+	require.Equal(t, "task-fixed", resumeRequests[0].TaskID)
+	require.Equal(t, "approval", resumeRequests[0].RequestID)
+	require.Equal(t, `"yes"`, string(resumeRequests[0].Data))
+	require.JSONEq(t, `{"run_id":"foreground"}`, string(resumeRequests[0].Checkpoint))
 }
 
 func TestManagedToolDurableInputResume_BitsUT(t *testing.T) {
@@ -532,10 +666,12 @@ func TestManagedToolDurableInputResume_BitsUT(t *testing.T) {
 	manager := mustNewBackgroundManager(t, context.Background(), &backgroundtask.Config{
 		Tasks: store, Executors: executors,
 	})
-	task, err := manager.Submit(context.Background(), backgroundtask.Spec{
-		ID: "durable-input", ExecutorKey: RecoverableExecutorKey,
-		Kind:    "background_tool",
-		Payload: encodedPayload(t, "external", `{"value":"work"}`),
+	task, err := manager.Submit(context.Background(), &backgroundtask.SubmitRequest{
+		Spec: backgroundtask.Spec{
+			ID: "durable-input", ExecutorKey: RecoverableExecutorKey,
+			Kind:    "background_tool",
+			Payload: encodedPayload(t, "external", `{"value":"work"}`),
+		},
 	})
 	require.NoError(t, err)
 
@@ -661,10 +797,12 @@ func TestManagedToolReplaysResumeAfterWorkerHandoff_BitsUT(t *testing.T) {
 	managerOne := mustNewBackgroundManager(t, context.Background(), &backgroundtask.Config{
 		Tasks: store, Executors: executorsOne,
 	})
-	task, err := managerOne.Submit(context.Background(), backgroundtask.Spec{
-		ID: "resume-handoff", ExecutorKey: RecoverableExecutorKey,
-		Kind:    "background_tool",
-		Payload: encodedPayload(t, "external", `{"value":"work"}`),
+	task, err := managerOne.Submit(context.Background(), &backgroundtask.SubmitRequest{
+		Spec: backgroundtask.Spec{
+			ID: "resume-handoff", ExecutorKey: RecoverableExecutorKey,
+			Kind:    "background_tool",
+			Payload: encodedPayload(t, "external", `{"value":"work"}`),
+		},
 	})
 	require.NoError(t, err)
 	require.NoError(t, managerOne.Execute(context.Background(), task.Spec.ID))
@@ -708,7 +846,7 @@ func TestManagedToolReplaysResumeAfterWorkerHandoff_BitsUT(t *testing.T) {
 func TestManagedToolAutoBackgroundAndStop(t *testing.T) {
 	stopped := make(chan struct{})
 	var stopOnce sync.Once
-	implementation := &fakeTool{
+	implementation := &handoffFakeTool{fakeTool: &fakeTool{
 		start: func(context.Context, *StartRequest) (Run, error) {
 			return &fakeRun{
 				wait: func(ctx context.Context) (*Outcome, error) {
@@ -725,16 +863,15 @@ func TestManagedToolAutoBackgroundAndStop(t *testing.T) {
 				},
 			}, nil
 		},
-	}
+	}}
 	manager, wrapped := newTestManagedTool(t, implementation, 5*time.Millisecond)
 	result, err := wrapped.(componenttool.EnhancedInvokableTool).InvokableRun(
 		context.Background(), toolArgument(`{"value":"slow"}`),
 	)
 	require.NoError(t, err)
 	event := decodeEvents(t, []*schema.ToolResult{result})[0]
-	require.Equal(t, backgroundtask.StatusRunning, event.Status)
-	task, err := manager.Get(context.Background(), event.TaskID)
-	require.NoError(t, err)
+	require.Equal(t, backgroundtask.StatusPending, event.Status)
+	task := waitTaskAttempt(t, manager, event.TaskID)
 	require.Equal(t, int64(1), task.Attempt)
 
 	stoppedTask, err := manager.RequestCancel(context.Background(), event.TaskID)
@@ -795,31 +932,28 @@ func TestManagedToolStreamPersistsBeforeNDJSONProjection(t *testing.T) {
 	for _, event := range events[:3] {
 		require.Equal(t, ManagedToolResponseEventUpdate, event.Type)
 	}
-	require.Equal(t, ManagedToolResponseEventLaunchResult, events[3].Type)
-	require.Equal(t, "task-fixed", events[3].TaskID)
+	require.Equal(t, ManagedToolResponseEventForegroundResult, events[3].Type)
+	require.Empty(t, events[3].TaskID)
 
-	output, err := manager.ListTaskEvents(context.Background(), &backgroundtask.ListTaskEventsRequest{
-		TaskID: "task-fixed",
-	})
-	require.NoError(t, err)
-	require.Len(t, output.Events, 3)
-	require.Equal(t, "event-1", output.Events[0].EventID)
+	_, err = manager.Get(context.Background(), "task-fixed")
+	require.ErrorIs(t, err, backgroundtask.ErrNotFound)
 }
 
 func TestManagedToolDrainYieldsAndRecoversWithoutStop(t *testing.T) {
 	store := backgroundtask.NewInMemoryStore(nil)
 	registry := NewRegistry()
 	started := make(chan struct{})
+	var startedOnce sync.Once
 	recovered := make(chan *RecoverRequest, 1)
 	toolCheckpoint := []byte(`{"run_id":"business-run"}`)
 	var stopCalls int
 	var mu sync.Mutex
-	implementation := &fakeTool{
+	implementation := &handoffFakeTool{fakeTool: &fakeTool{
 		startCheckpoint: toolCheckpoint,
 		start: func(context.Context, *StartRequest) (Run, error) {
 			return &fakeRun{
 				wait: func(ctx context.Context) (*Outcome, error) {
-					close(started)
+					startedOnce.Do(func() { close(started) })
 					<-ctx.Done()
 					return nil, ctx.Err()
 				},
@@ -839,7 +973,7 @@ func TestManagedToolDrainYieldsAndRecoversWithoutStop(t *testing.T) {
 				},
 			}, nil
 		},
-	}
+	}}
 	require.NoError(t, registry.Register(&Registration{
 		Info: toolInfo("external"), Tool: implementation,
 	}))
@@ -855,7 +989,7 @@ func TestManagedToolDrainYieldsAndRecoversWithoutStop(t *testing.T) {
 	wrapped, err := NewManagedTool(context.Background(), &ManagedToolConfig{
 		Manager: managerOne, Executors: executorsOne, Registry: registry, ToolName: "external",
 		ForegroundTimeoutMs:  &timeoutMs,
-		ShouldAutoBackground: func(context.Context, *backgroundtask.Task) bool { return true },
+		ShouldAutoBackground: func(context.Context, *foreground.CandidateInfo) bool { return true },
 		SessionID:            func(context.Context) (string, error) { return "session", nil },
 	})
 	require.NoError(t, err)
@@ -864,6 +998,7 @@ func TestManagedToolDrainYieldsAndRecoversWithoutStop(t *testing.T) {
 	)
 	require.NoError(t, err)
 	<-started
+	waitTaskAttempt(t, managerOne, "recover-task")
 	toolCheckpoint[0] = 'X'
 	closeCtx, cancel := context.WithTimeout(context.Background(), time.Second)
 	require.NoError(t, managerOne.Close(closeCtx))
@@ -894,7 +1029,7 @@ func TestManagedToolDrainYieldsAndRecoversWithoutStop(t *testing.T) {
 
 func TestRecoverWithoutCheckpointUsesPersistedStartedGate(t *testing.T) {
 	recovered := false
-	implementation := &fakeTool{
+	implementation := &handoffFakeTool{fakeTool: &fakeTool{
 		start: func(context.Context, *StartRequest) (Run, error) {
 			return nil, errors.New("started operation must not restart")
 		},
@@ -905,7 +1040,7 @@ func TestRecoverWithoutCheckpointUsesPersistedStartedGate(t *testing.T) {
 				return &Outcome{Status: backgroundtask.StatusCompleted}, nil
 			}}, nil
 		},
-	}
+	}}
 	registry := NewRegistry()
 	require.NoError(t, registry.Register(&Registration{
 		Info: toolInfo("external"), Tool: implementation,
@@ -966,15 +1101,22 @@ func TestManagedToolMaterializerIsDerivedAndFailureIsNonTerminal(t *testing.T) {
 	})
 	wrapped, err := NewManagedTool(context.Background(), &ManagedToolConfig{
 		Manager: manager, Executors: executors, Registry: registry, ToolName: "external",
-		SessionID: func(context.Context) (string, error) { return "session", nil },
+		RunInBackground: func(context.Context, string) bool { return true },
+		SessionID:       func(context.Context) (string, error) { return "session", nil },
 	})
 	require.NoError(t, err)
 	_, err = wrapped.(componenttool.EnhancedInvokableTool).InvokableRun(
 		context.Background(), toolArgument(`{"value":"x"}`),
 	)
 	require.NoError(t, err)
-	task, err := manager.Get(context.Background(), "materialized")
-	require.NoError(t, err)
+	task := waitTaskAttempt(t, manager, "materialized")
+	deadline := time.Now().Add(time.Second)
+	for task.Status == backgroundtask.StatusPending || task.Status == backgroundtask.StatusRunning {
+		require.True(t, time.Now().Before(deadline), "task did not finish")
+		time.Sleep(time.Millisecond)
+		task, err = manager.Get(context.Background(), "materialized")
+		require.NoError(t, err)
+	}
 	require.Equal(t, backgroundtask.StatusCompleted, task.Status)
 	require.Equal(t, "/outputs/materialized", task.Spec.OutputFile)
 	require.Contains(t, task.OutputFileErr, "derived file unavailable")
@@ -998,12 +1140,12 @@ func TestManagedToolPlainRegistrationUsesFailExecutor(t *testing.T) {
 		},
 	}
 	manager, wrapped := newTestManagedTool(t, implementation, time.Second)
+	wrapped.(*managedTool).runInBackground = func(context.Context, string) bool { return true }
 	_, err := wrapped.(componenttool.EnhancedInvokableTool).InvokableRun(
 		context.Background(), toolArgument(`{"value":"plain"}`),
 	)
 	require.NoError(t, err)
-	task, err := manager.Get(context.Background(), "task-fixed")
-	require.NoError(t, err)
+	task := waitTaskAttempt(t, manager, "task-fixed")
 	require.Equal(t, ExecutorKey, task.Spec.ExecutorKey)
 	require.Equal(t, backgroundtask.LeaseExpiryFail, task.LeaseExpiryPolicy)
 }
@@ -1030,7 +1172,8 @@ func TestAttack_PlainUpdateGeneratedEventIDNotMaterialized(t *testing.T) {
 	})
 	wrapped, err := NewManagedTool(context.Background(), &ManagedToolConfig{
 		Manager: manager, Executors: executors, Registry: registry, ToolName: "plain",
-		SessionID: func(context.Context) (string, error) { return "session", nil },
+		RunInBackground: func(context.Context, string) bool { return true },
+		SessionID:       func(context.Context) (string, error) { return "session", nil },
 	})
 	require.NoError(t, err)
 	stream, err := wrapped.(componenttool.EnhancedStreamableTool).StreamableRun(
@@ -1148,7 +1291,8 @@ func TestManagedToolReturnsControlEnvelopeAndRichResult_BitsUT(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, result.Parts, 3)
 	event := decodeEvents(t, []*schema.ToolResult{result})[0]
-	require.Equal(t, "rich-output", event.TaskID)
+	require.Equal(t, ManagedToolResponseEventForegroundResult, event.Type)
+	require.Empty(t, event.TaskID)
 	require.Equal(t, backgroundtask.StatusCompleted, event.Status)
 	require.Nil(t, event.Output)
 	require.Equal(t, schema.ToolPartTypeText, result.Parts[1].Type)
@@ -1159,7 +1303,7 @@ func TestManagedToolReturnsControlEnvelopeAndRichResult_BitsUT(t *testing.T) {
 
 func TestManagedToolProjectionDetachesWhilePersistenceContinues(t *testing.T) {
 	finished := make(chan struct{})
-	implementation := &fakeTool{
+	implementation := &handoffFakeTool{fakeTool: &fakeTool{
 		start: func(context.Context, *StartRequest) (Run, error) {
 			reader, writer := schema.Pipe[*Update](1)
 			go func() {
@@ -1178,7 +1322,7 @@ func TestManagedToolProjectionDetachesWhilePersistenceContinues(t *testing.T) {
 				updates: reader,
 			}, nil
 		},
-	}
+	}}
 	manager, wrapped := newTestManagedTool(t, implementation, 5*time.Millisecond)
 	stream, err := wrapped.(componenttool.EnhancedStreamableTool).StreamableRun(
 		context.Background(), toolArgument(`{"value":"detach"}`),
@@ -1197,7 +1341,8 @@ func TestManagedToolProjectionDetachesWhilePersistenceContinues(t *testing.T) {
 	events := decodeEvents(t, records)
 	require.Len(t, events, 1)
 	require.Equal(t, ManagedToolResponseEventLaunchResult, events[0].Type)
-	require.Equal(t, backgroundtask.StatusRunning, events[0].Status)
+	require.Equal(t, backgroundtask.StatusPending, events[0].Status)
+	waitTaskAttempt(t, manager, "task-fixed")
 
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {

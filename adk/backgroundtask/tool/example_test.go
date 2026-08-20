@@ -83,5 +83,5 @@ func ExampleNewManagedTool() {
 	var event backgroundtool.ManagedToolResponseEvent
 	_ = json.Unmarshal([]byte(result.Parts[0].Text), &event)
 	fmt.Println(event.TaskID, event.Status, event.Output)
-	// Output: task_video completed video ready
+	// Output:  completed video ready
 }

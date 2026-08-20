@@ -155,11 +155,14 @@ func TestSimplifiedPublicModelHasNoOverlappingStateFields_BitsUT(t *testing.T) {
 	assertMethodsAbsent(t, reflect.TypeOf((*Manager)(nil)),
 		"Store", "Executors", "RequestControl", "RequestTimeout", "ReadOutput",
 		"ReadRecentTaskEvents", "WaitUpdate", "CreateAndStart", "LoadOrRegisterExecutor",
-		"ValidateNotificationDelivery")
+		"ValidateNotificationDelivery", "MarkBackgrounded")
 	assertMethodsPresent(t, reflect.TypeOf((*Manager)(nil)),
 		"Submit", "Get", "ListPending", "ListSuspended", "Execute", "WaitForTaskVersion",
 		"ListTaskEvents", "RequestCancel", "ReleaseSuspension", "Resume", "AllocateTaskID",
-		"Close", "MarkBackgrounded")
+		"Close")
+	assertFieldsPresent(t, reflect.TypeOf(SubmitRequest{}), "Spec", "InitialCheckpoint")
+	assertFieldsPresent(t, reflect.TypeOf(CreateTaskRequest{}),
+		"Spec", "LeaseExpiryPolicy", "Checkpoint")
 	assertMethodsPresent(t, reflect.TypeOf((*ExecutorRegistry)(nil)), "LoadOrRegister")
 	assertMethodsAbsent(t, reflect.TypeOf((*InMemoryStore)(nil)),
 		"CreateAndStart", "Cancel", "ReadRecentTaskEvents")
@@ -217,14 +220,14 @@ func TestManagerSubmitUsesExecutorIdentityAndValidation_BitsUT(t *testing.T) {
 	manager := managerWithExecutor(t, store, executor, time.Minute)
 	spec := validSpec("invalid")
 
-	_, err := manager.Submit(context.Background(), spec)
+	_, err := manager.Submit(context.Background(), &SubmitRequest{Spec: spec})
 	require.ErrorContains(t, err, "validate spec")
 	_, getErr := store.Get(context.Background(), spec.ID)
 	assert.ErrorIs(t, getErr, ErrNotFound)
 	require.Len(t, executor.validated, 1)
 
 	spec.ExecutorKey = "missing"
-	_, err = manager.Submit(context.Background(), spec)
+	_, err = manager.Submit(context.Background(), &SubmitRequest{Spec: spec})
 	assert.ErrorContains(t, err, `executor "missing" is unavailable`)
 }
 
@@ -232,7 +235,7 @@ func TestManagerValidateSpecRunsBeforeSubmitAndStart_BitsUT(t *testing.T) {
 	executor := &scriptedExecutor{leaseExpiryPolicy: LeaseExpiryFail}
 	store := NewInMemoryStore(nil)
 	manager := managerWithExecutor(t, store, executor, time.Minute)
-	task, err := manager.Submit(context.Background(), validSpec("validate-once"))
+	task, err := manager.Submit(context.Background(), &SubmitRequest{Spec: validSpec("validate-once")})
 	require.NoError(t, err)
 	assert.Equal(t, LeaseExpiryFail, task.LeaseExpiryPolicy)
 	require.Len(t, executor.validated, 1)
@@ -249,7 +252,7 @@ func TestManagerExecutePersistsReturnedResultDirectly_BitsUT(t *testing.T) {
 	executor := &scriptedExecutor{}
 	store := NewInMemoryStore(nil)
 	manager := managerWithExecutor(t, store, executor, time.Minute)
-	task, err := manager.Submit(context.Background(), validSpec("complete"))
+	task, err := manager.Submit(context.Background(), &SubmitRequest{Spec: validSpec("complete")})
 	require.NoError(t, err)
 
 	require.NoError(t, manager.Execute(context.Background(), task.Spec.ID))
@@ -271,7 +274,7 @@ func TestManagerReducesOrdinaryErrorsToBoundedDurableStrings_BitsUT(t *testing.T
 	}
 	store := NewInMemoryStore(nil)
 	manager := managerWithExecutor(t, store, executor, time.Minute)
-	task, err := manager.Submit(context.Background(), validSpec("failed"))
+	task, err := manager.Submit(context.Background(), &SubmitRequest{Spec: validSpec("failed")})
 	require.NoError(t, err)
 
 	require.NoError(t, manager.Execute(context.Background(), task.Spec.ID))
@@ -336,7 +339,7 @@ func TestManagerResumeStoresOpaqueInputWithoutExecutorContract_BitsUT(t *testing
 	executor := &scriptedExecutor{}
 	store := NewInMemoryStore(nil)
 	manager := managerWithExecutor(t, store, executor, time.Minute)
-	submitted, err := manager.Submit(context.Background(), validSpec("resume-manager"))
+	submitted, err := manager.Submit(context.Background(), &SubmitRequest{Spec: validSpec("resume-manager")})
 	require.NoError(t, err)
 	started, err := store.Start(context.Background(), &StartTaskRequest{
 		TaskID: submitted.Spec.ID, ExpectedVersion: submitted.Version,
@@ -365,7 +368,7 @@ func TestManagerWaitingInputPersistsCheckpointWithoutTerminalResult_BitsUT(t *te
 	}
 	store := NewInMemoryStore(nil)
 	manager := managerWithExecutor(t, store, executor, time.Minute)
-	task, err := manager.Submit(context.Background(), validSpec("input"))
+	task, err := manager.Submit(context.Background(), &SubmitRequest{Spec: validSpec("input")})
 	require.NoError(t, err)
 
 	require.NoError(t, manager.Execute(context.Background(), task.Spec.ID))
@@ -421,7 +424,7 @@ func TestManagerRejectsMixedExecutionResultVariants_BitsUT(t *testing.T) {
 			}
 			store := NewInMemoryStore(nil)
 			manager := managerWithExecutor(t, store, executor, time.Minute)
-			task, err := manager.Submit(context.Background(), validSpec("mixed-result"))
+			task, err := manager.Submit(context.Background(), &SubmitRequest{Spec: validSpec("mixed-result")})
 			require.NoError(t, err)
 
 			err = manager.Execute(context.Background(), task.Spec.ID)
@@ -438,7 +441,7 @@ func TestManagerErrorDoesNotCreatePendingResume_BitsUT(t *testing.T) {
 	}
 	store := NewInMemoryStore(nil)
 	manager := managerWithExecutor(t, store, executor, time.Minute)
-	task, err := manager.Submit(context.Background(), validSpec("failed-after-input"))
+	task, err := manager.Submit(context.Background(), &SubmitRequest{Spec: validSpec("failed-after-input")})
 	require.NoError(t, err)
 
 	require.NoError(t, manager.Execute(context.Background(), task.Spec.ID))
@@ -461,7 +464,7 @@ func TestCheckpointUnavailableStopsRenewalWithoutPersistingFailure_BitsUT(t *tes
 		},
 	}
 	manager := managerWithExecutor(t, store, executor, 5*time.Second)
-	task, err := manager.Submit(context.Background(), validSpec("drain"))
+	task, err := manager.Submit(context.Background(), &SubmitRequest{Spec: validSpec("drain")})
 	require.NoError(t, err)
 
 	err = manager.Execute(context.Background(), task.Spec.ID)

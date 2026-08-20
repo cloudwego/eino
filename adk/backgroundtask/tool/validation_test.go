@@ -437,9 +437,6 @@ func TestManagedToolTimeoutOverrideStopsRun(t *testing.T) {
 	timeoutMs := 5
 	wrapped, err := NewManagedTool(context.Background(), &ManagedToolConfig{
 		Manager: manager, Executors: executors, Registry: registry, ToolName: "timeout",
-		ShouldAutoBackground: func(context.Context, *backgroundtask.Task) bool {
-			return false
-		},
 		InvocationTimeoutMs: func(context.Context, string) *int { return &timeoutMs },
 		SessionID:           func(context.Context) (string, error) { return "session", nil },
 	})

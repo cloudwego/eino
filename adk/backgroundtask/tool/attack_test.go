@@ -88,7 +88,8 @@ func newAttackManagedTool(
 	})
 	wrapped, err := NewManagedTool(context.Background(), &ManagedToolConfig{
 		Manager: manager, Executors: executors, Registry: registry, ToolName: "attack",
-		SessionID: func(context.Context) (string, error) { return "session", nil },
+		RunInBackground: func(context.Context, string) bool { return true },
+		SessionID:       func(context.Context) (string, error) { return "session", nil },
 	})
 	require.NoError(t, err)
 	return manager, wrapped
@@ -135,6 +136,21 @@ func readAllStreamResults(
 	}
 }
 
+func waitAttackTask(t *testing.T, manager *backgroundtask.Manager) *backgroundtask.Task {
+	t.Helper()
+	deadline := time.Now().Add(terminalUpdateDrainTime + time.Second)
+	for {
+		task, err := manager.Get(context.Background(), "attack-task")
+		require.NoError(t, err)
+		if task.Status != backgroundtask.StatusPending &&
+			task.Status != backgroundtask.StatusRunning {
+			return task
+		}
+		require.True(t, time.Now().Before(deadline), "task did not finish")
+		time.Sleep(time.Millisecond)
+	}
+}
+
 func TestAttack_ReplayedEventProjectsOnceMaterializesTwice(t *testing.T) {
 	update := &Update{
 		EventID: "stable", Kind: "stdout", Data: []byte("same"),
@@ -154,6 +170,7 @@ func TestAttack_ReplayedEventProjectsOnceMaterializesTwice(t *testing.T) {
 	require.Len(t, events, 2)
 	require.Equal(t, ManagedToolResponseEventUpdate, events[0].Type)
 	require.Equal(t, ManagedToolResponseEventLaunchResult, events[1].Type)
+	waitAttackTask(t, manager)
 
 	output, err := manager.ListTaskEvents(context.Background(), &backgroundtask.ListTaskEventsRequest{
 		TaskID: "attack-task",
@@ -182,11 +199,10 @@ func TestAttack_ConflictingEventIDFailsTask(t *testing.T) {
 	)
 	require.NoError(t, err)
 	event := decodeEvents(t, []*schema.ToolResult{result})[0]
-	require.Equal(t, backgroundtask.StatusFailed, event.Status)
-	require.Contains(t, event.Error, backgroundtask.ErrTaskEventIDConflict.Error())
-	task, err := manager.Get(context.Background(), "attack-task")
-	require.NoError(t, err)
+	require.Equal(t, backgroundtask.StatusPending, event.Status)
+	task := waitAttackTask(t, manager)
 	require.Equal(t, backgroundtask.StatusFailed, task.Status)
+	require.Contains(t, task.ResultError, backgroundtask.ErrTaskEventIDConflict.Error())
 	t.Log("conflicting event bytes failed the logical task instead of corrupting replay history")
 }
 
@@ -196,14 +212,16 @@ func TestAttack_RecoverableUpdateRequiresEventID(t *testing.T) {
 			return updatingRunFrom([]*Update{{Kind: "stdout", Data: []byte("missing id")}}, true), nil
 		},
 	}
-	_, wrapped := newAttackManagedTool(t, implementation, nil)
+	manager, wrapped := newAttackManagedTool(t, implementation, nil)
 	result, err := wrapped.(componenttool.EnhancedInvokableTool).InvokableRun(
 		context.Background(), toolArgument(`{"value":"missing-event"}`),
 	)
 	require.NoError(t, err)
 	event := decodeEvents(t, []*schema.ToolResult{result})[0]
-	require.Equal(t, backgroundtask.StatusFailed, event.Status)
-	require.Contains(t, event.Error, "event id is required")
+	require.Equal(t, backgroundtask.StatusPending, event.Status)
+	task := waitAttackTask(t, manager)
+	require.Equal(t, backgroundtask.StatusFailed, task.Status)
+	require.Contains(t, task.ResultError, "event id is required")
 	t.Log("recoverable output without a stable replay identity was rejected")
 }
 
@@ -413,11 +431,12 @@ func TestAttack_MaterializationPreservesStableReplayOrder(t *testing.T) {
 			}, true), nil
 		},
 	}
-	_, wrapped := newAttackManagedTool(t, implementation, materializer)
+	manager, wrapped := newAttackManagedTool(t, implementation, materializer)
 	_, err := wrapped.(componenttool.EnhancedInvokableTool).InvokableRun(
 		context.Background(), toolArgument(`{"value":"ordered"}`),
 	)
 	require.NoError(t, err)
+	waitAttackTask(t, manager)
 	materializer.mu.Lock()
 	require.Len(t, materializer.requests, 2)
 	require.Equal(t, []string{"z-event", "a-event"}, []string{
@@ -461,7 +480,7 @@ func TestAttack_AbandonedUpdateStreamFailsBoundedly(t *testing.T) {
 			return updatingRunFrom(nil, false), nil
 		},
 	}
-	_, wrapped := newAttackManagedTool(t, implementation, nil)
+	manager, wrapped := newAttackManagedTool(t, implementation, nil)
 	started := time.Now()
 	result, err := wrapped.(componenttool.EnhancedInvokableTool).InvokableRun(
 		context.Background(), toolArgument(`{"value":"abandoned"}`),
@@ -469,8 +488,10 @@ func TestAttack_AbandonedUpdateStreamFailsBoundedly(t *testing.T) {
 	require.NoError(t, err)
 	require.Less(t, time.Since(started), terminalUpdateDrainTime+time.Second)
 	event := decodeEvents(t, []*schema.ToolResult{result})[0]
-	require.Equal(t, backgroundtask.StatusFailed, event.Status)
-	require.Contains(t, event.Error, "update stream did not close")
+	require.Equal(t, backgroundtask.StatusPending, event.Status)
+	task := waitAttackTask(t, manager)
+	require.Equal(t, backgroundtask.StatusFailed, task.Status)
+	require.Contains(t, task.ResultError, "update stream did not close")
 	t.Log("a terminal operation with an abandoned update stream failed within the configured bound")
 }
 

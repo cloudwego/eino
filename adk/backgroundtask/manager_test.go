@@ -88,7 +88,7 @@ func TestManagerExecuteBindsTimeoutController_BitsUT(t *testing.T) {
 	store := NewInMemoryStore(nil)
 	manager := managerWithExecutor(t, store, executor, time.Minute)
 	defer closeWithTimeout(manager)
-	task, err := manager.Submit(context.Background(), validSpec("timeout"))
+	task, err := manager.Submit(context.Background(), &SubmitRequest{Spec: validSpec("timeout")})
 	require.NoError(t, err)
 
 	executeCtx, timeoutController := taskcontrol.WithTimeoutController(context.Background())
@@ -152,7 +152,7 @@ func TestManagerCloseDrainsActiveAttempt(t *testing.T) {
 	}
 	store := NewInMemoryStore(nil)
 	manager := managerWithExecutor(t, store, executor, time.Minute)
-	task, err := manager.Submit(context.Background(), validSpec("close-drain"))
+	task, err := manager.Submit(context.Background(), &SubmitRequest{Spec: validSpec("close-drain")})
 	require.NoError(t, err)
 	executeDone := make(chan error, 1)
 	go func() {
@@ -218,7 +218,7 @@ func TestManagerCloseDrainsAttemptInitializedDuringClose(t *testing.T) {
 	spec := validSpec("close-initializing")
 	spec.SessionID = ""
 	spec.NotifySession = false
-	task, err := manager.Submit(context.Background(), spec)
+	task, err := manager.Submit(context.Background(), &SubmitRequest{Spec: spec})
 	require.NoError(t, err)
 	executeDone := make(chan error, 1)
 	go func() {
@@ -279,7 +279,7 @@ func TestManagerReleaseSuspensionRejectsInvalidTargets_BitsUT(t *testing.T) {
 	require.Nil(t, released)
 	require.EqualError(t, err, "backgroundtask: release suspension task id is required")
 
-	task, err := manager.Submit(context.Background(), validSpec("not-suspended"))
+	task, err := manager.Submit(context.Background(), &SubmitRequest{Spec: validSpec("not-suspended")})
 	require.NoError(t, err)
 	released, err = manager.ReleaseSuspension(context.Background(), task.Spec.ID)
 	require.Nil(t, released)
@@ -294,7 +294,7 @@ func TestManagerExecutorPanicFailsTask_BitsUT(t *testing.T) {
 	}
 	store := NewInMemoryStore(nil)
 	manager := managerWithExecutor(t, store, executor, time.Minute)
-	task, err := manager.Submit(context.Background(), validSpec("executor-panic"))
+	task, err := manager.Submit(context.Background(), &SubmitRequest{Spec: validSpec("executor-panic")})
 	require.NoError(t, err)
 
 	require.NoError(t, manager.Execute(context.Background(), task.Spec.ID))
@@ -322,7 +322,7 @@ func TestManagerCloseCancelsNonDrainableAttemptAtDeadline(t *testing.T) {
 	}
 	store := NewInMemoryStore(nil)
 	manager := managerWithExecutor(t, store, executor, time.Minute)
-	task, err := manager.Submit(context.Background(), validSpec("close-cancel"))
+	task, err := manager.Submit(context.Background(), &SubmitRequest{Spec: validSpec("close-cancel")})
 	require.NoError(t, err)
 	executeDone := make(chan error, 1)
 	go func() {
@@ -359,7 +359,7 @@ func TestManagerCancelNonRecoverableAttempt(t *testing.T) {
 	store := NewInMemoryStore(nil)
 	manager := managerWithExecutor(t, store, executor, time.Minute)
 	defer closeWithTimeout(manager)
-	task, err := manager.Submit(context.Background(), validSpec("local-cancel"))
+	task, err := manager.Submit(context.Background(), &SubmitRequest{Spec: validSpec("local-cancel")})
 	require.NoError(t, err)
 	executeDone := make(chan error, 1)
 	go func() {
@@ -423,7 +423,7 @@ func TestManagerDispatchReadBoundaries(t *testing.T) {
 	store := NewInMemoryStore(nil)
 	manager := managerWithExecutor(t, store, &scriptedExecutor{}, time.Minute)
 	defer closeWithTimeout(manager)
-	submitted, err := manager.Submit(context.Background(), validSpec("dispatch"))
+	submitted, err := manager.Submit(context.Background(), &SubmitRequest{Spec: validSpec("dispatch")})
 	require.NoError(t, err)
 	pending, err := manager.ListPending(context.Background(), &ListPendingRequest{
 		ExecutorKeys: []string{"test"},
@@ -618,7 +618,7 @@ func TestManagerResumeLifecycleBoundaries(t *testing.T) {
 	_, err := manager.Resume(context.Background(), &ResumeRequest{TaskID: "missing"})
 	require.ErrorIs(t, err, ErrNotFound)
 
-	pending, err := manager.Submit(context.Background(), validSpec("pending-resume"))
+	pending, err := manager.Submit(context.Background(), &SubmitRequest{Spec: validSpec("pending-resume")})
 	require.NoError(t, err)
 	_, err = manager.Resume(context.Background(), &ResumeRequest{
 		TaskID: pending.Spec.ID, ExpectedVersion: pending.Version,
@@ -693,7 +693,7 @@ func TestManagerCancelPendingLocalTaskAfterExecuteValidationFailure(t *testing.T
 	spec := validSpec("early-failure-cancel")
 	spec.NotifySession = false
 	spec.SessionID = ""
-	task, err := manager.Submit(context.Background(), spec)
+	task, err := manager.Submit(context.Background(), &SubmitRequest{Spec: spec})
 	require.NoError(t, err)
 	executor.validateErr = errors.New("worker validation failed")
 
@@ -796,7 +796,7 @@ func TestManagerSubmitParentSessionRequiresOutbox_BitsUT(t *testing.T) {
 	spec := validSpec("notification-without-outbox")
 	spec.NotifySession = true
 
-	_, err := manager.Submit(context.Background(), spec)
+	_, err := manager.Submit(context.Background(), &SubmitRequest{Spec: spec})
 	require.EqualError(
 		t,
 		err,

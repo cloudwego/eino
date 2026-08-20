@@ -169,18 +169,17 @@ func WithCancellationReason(reason string) RequestCancelOption {
 
 // Manager owns TaskStore-backed lifecycle and worker coordination.
 type Manager struct {
-	tasks                   TaskStore
-	taskEvents              TaskEventStore
-	notificationWriter      NotificationWriter
-	executors               *ExecutorRegistry
-	heartbeatEvery          time.Duration
-	attemptsMu              sync.Mutex
-	activeAttempts          map[string]*activeAttempt
-	mu                      sync.Mutex
-	closed                  bool
-	failedTaskCreatedEvents map[string]struct{}
-	idGen                   IDGenerator
-	sendTaskCreatedEvent    func(context.Context, *Task) error
+	tasks                TaskStore
+	taskEvents           TaskEventStore
+	notificationWriter   NotificationWriter
+	executors            *ExecutorRegistry
+	heartbeatEvery       time.Duration
+	attemptsMu           sync.Mutex
+	activeAttempts       map[string]*activeAttempt
+	mu                   sync.Mutex
+	closed               bool
+	idGen                IDGenerator
+	sendTaskCreatedEvent func(context.Context, *Task) error
 }
 
 // New creates a Manager. A nil Config installs the in-memory reference stores
@@ -190,11 +189,10 @@ type Manager struct {
 func New(_ context.Context, conf *Config) (*Manager, error) {
 	defaults := NewInMemoryStore(nil)
 	m := &Manager{
-		heartbeatEvery:          10 * time.Second,
-		activeAttempts:          make(map[string]*activeAttempt),
-		failedTaskCreatedEvents: make(map[string]struct{}),
-		tasks:                   defaults,
-		taskEvents:              defaults,
+		heartbeatEvery: 10 * time.Second,
+		activeAttempts: make(map[string]*activeAttempt),
+		tasks:          defaults,
+		taskEvents:     defaults,
 	}
 	m.executors = NewExecutorRegistry()
 	if conf != nil {
