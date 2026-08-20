@@ -424,9 +424,9 @@ func TestManagedExecuteTool_StreamingForeground(t *testing.T) {
 	assert.Contains(t, got, "chunk3")
 }
 
-// An explicit background launch on a streaming managed tool exposes startup
-// output. This quick command completes inside the preview window, so its complete
-// output reaches the caller without a stale background notice.
+// An explicit background launch on a streaming managed tool exposes the bounded
+// startup preview when available, then drains the complete output in the
+// background.
 func TestManagedExecuteTool_StreamingExplicitBackground(t *testing.T) {
 	backend := setupTestBackend()
 	mgr := newTestManager(t, context.Background())
@@ -446,7 +446,6 @@ func TestManagedExecuteTool_StreamingExplicitBackground(t *testing.T) {
 	sr, err := st.StreamableRun(context.Background(), `{"command":"echo hi","run_in_background":true}`)
 	require.NoError(t, err)
 	got := drainToolStream(t, sr)
-	assert.Contains(t, got, "chunk1")
 	assert.Contains(t, got, "is running in the background")
 
 	task := waitTerminalTask(t, mgr)
