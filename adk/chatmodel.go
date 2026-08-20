@@ -32,6 +32,7 @@ import (
 
 	"github.com/cloudwego/eino/adk/internal"
 	"github.com/cloudwego/eino/adk/internal/agenttool"
+	"github.com/cloudwego/eino/adk/internal/startwindow"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/prompt"
 	"github.com/cloudwego/eino/components/tool"
@@ -214,6 +215,15 @@ func initTypedChatModelAgentExecCtx[M MessageType](
 ) (context.Context, *typedChatModelAgentExecCtx[M]) {
 	execCtx := newTypedChatModelAgentExecCtx(generator, cancelCtx, sessionEvents, timelineEvents, internalTimelineEvents)
 	ctx = withTypedChatModelAgentExecCtx(ctx, execCtx)
+	sender := startwindow.EventSender(func(parentCtx context.Context, event any) error {
+		typedEvent, ok := event.(*TypedAgentEvent[M])
+		if !ok {
+			return fmt.Errorf("adk: start-window event type mismatch: got %T", event)
+		}
+		execCtx.send(parentCtx, typedEvent)
+		return nil
+	})
+	ctx = startwindow.WithSender(ctx, sender)
 	return ctx, execCtx
 }
 

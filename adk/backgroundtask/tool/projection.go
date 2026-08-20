@@ -67,13 +67,15 @@ func (p *liveProjection) send(ctx context.Context, detached <-chan struct{}, upd
 		return
 	}
 	p.stateMu.Lock()
-	defer p.stateMu.Unlock()
 	if p.isDetached {
+		p.stateMu.Unlock()
 		return
 	}
+	projectionDetached := p.detached
+	p.stateMu.Unlock()
 	select {
 	case p.updates <- cloneUpdate(update):
-	case <-p.detached:
+	case <-projectionDetached:
 	case <-detached:
 	case <-ctx.Done():
 	}

@@ -28,8 +28,11 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/adk/backgroundtask"
 	"github.com/cloudwego/eino/adk/internal/foreground"
+	adksession "github.com/cloudwego/eino/adk/session"
+	"github.com/cloudwego/eino/components/model"
 	componenttool "github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
@@ -167,6 +170,69 @@ type updatingRun struct {
 
 func (r *updatingRun) Updates() *schema.StreamReader[*Update] { return r.updates }
 
+type managedToolStartEventModel struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (m *managedToolStartEventModel) Generate(
+	_ context.Context,
+	_ []*schema.Message,
+	_ ...model.Option,
+) (*schema.Message, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.calls++
+	if m.calls == 1 {
+		return schema.AssistantMessage("call external", []schema.ToolCall{{
+			ID: "call_start_event",
+			Function: schema.FunctionCall{
+				Name:      "external",
+				Arguments: `{"value":"work"}`,
+			},
+		}}), nil
+	}
+	return schema.AssistantMessage("done", nil), nil
+}
+
+func (m *managedToolStartEventModel) Stream(
+	ctx context.Context,
+	input []*schema.Message,
+	opts ...model.Option,
+) (*schema.StreamReader[*schema.Message], error) {
+	message, err := m.Generate(ctx, input, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return schema.StreamReaderFromArray([]*schema.Message{message}), nil
+}
+
+func (m *managedToolStartEventModel) WithTools(
+	_ []*schema.ToolInfo,
+) (model.ToolCallingChatModel, error) {
+	return m, nil
+}
+
+type managedToolStartEventMarkerKey struct{}
+
+type managedToolStartEventMarkerMiddleware struct {
+	*adk.TypedBaseChatModelAgentMiddleware[*schema.Message]
+}
+
+func (m *managedToolStartEventMarkerMiddleware) WrapEnhancedInvokableToolCall(
+	_ context.Context,
+	endpoint adk.EnhancedInvokableToolCallEndpoint,
+	_ *adk.ToolContext,
+) (adk.EnhancedInvokableToolCallEndpoint, error) {
+	return func(ctx context.Context, argument *schema.ToolArgument, opts ...componenttool.Option) (*schema.ToolResult, error) {
+		return endpoint(
+			context.WithValue(ctx, managedToolStartEventMarkerKey{}, "tool-call-marker"),
+			argument,
+			opts...,
+		)
+	}, nil
+}
+
 func toolInfo(name string) *schema.ToolInfo {
 	return &schema.ToolInfo{
 		Name: name, Desc: "Run external work",
@@ -240,6 +306,32 @@ func waitTaskAttempt(t *testing.T, manager *backgroundtask.Manager, taskID strin
 		require.True(t, time.Now().Before(deadline), "task was not claimed")
 		time.Sleep(time.Millisecond)
 	}
+}
+
+func waitTaskTerminal(t *testing.T, manager *backgroundtask.Manager, taskID string) *backgroundtask.Task {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for {
+		task, err := manager.Get(context.Background(), taskID)
+		require.NoError(t, err)
+		if task.Status != backgroundtask.StatusPending && task.Status != backgroundtask.StatusRunning {
+			return task
+		}
+		require.True(t, time.Now().Before(deadline), "task did not finish")
+		time.Sleep(time.Millisecond)
+	}
+}
+
+type startFailStore struct {
+	*backgroundtask.InMemoryStore
+	err     error
+	started chan struct{}
+	once    sync.Once
+}
+
+func (s *startFailStore) Start(context.Context, *backgroundtask.StartTaskRequest) (*backgroundtask.Task, error) {
+	s.once.Do(func() { close(s.started) })
+	return nil, s.err
 }
 
 func TestManagedToolPreparesInputBeforeTaskCreation_BitsUT(t *testing.T) {
@@ -485,6 +577,677 @@ func TestManagedToolFastCompletionReturnsCanonicalTaskID(t *testing.T) {
 
 	_, err = manager.Get(context.Background(), "task-fixed")
 	require.ErrorIs(t, err, backgroundtask.ErrNotFound)
+}
+
+func TestManagedToolForegroundStartCanSendParentSessionEvent(t *testing.T) {
+	ctx := context.Background()
+	const parentSessionID = "managed-tool-start-parent"
+	startEventKind := adk.SessionEventKind(adk.SessionEventExtensionPrefix + "managed_tool.start")
+	implementation := &fakeTool{
+		start: func(ctx context.Context, request *StartRequest) (Run, error) {
+			require.Equal(t, int64(0), request.Attempt)
+			require.Equal(t, "task-fixed", request.TaskID)
+			err := adk.TypedSendEvent(ctx, &adk.TypedAgentEvent[*schema.Message]{
+				SessionEventVariant: &adk.SessionEventVariant[*schema.Message]{
+					Event: &adk.SessionEvent[*schema.Message]{
+						Kind:      startEventKind,
+						Extension: &adk.SessionExtensionEvent{},
+					},
+				},
+			})
+			require.NoError(t, err)
+			return &fakeRun{wait: func(context.Context) (*Outcome, error) {
+				return &Outcome{
+					Status: backgroundtask.StatusCompleted,
+					Data:   []byte(`{"ok":true}`),
+				}, nil
+			}}, nil
+		},
+	}
+	registry := NewRegistry()
+	require.NoError(t, registry.Register(&Registration{
+		Info:        toolInfo("external"),
+		Tool:        implementation,
+		Description: func(string) string { return "External operation" },
+	}))
+	executors := backgroundtask.NewExecutorRegistry()
+	manager := mustNewBackgroundManager(t, ctx, &backgroundtask.Config{
+		Executors: executors,
+		IDGen: func(context.Context, *backgroundtask.AllocateTaskIDRequest) (string, error) {
+			return "task-fixed", nil
+		},
+	})
+	timeoutMs := int(time.Second / time.Millisecond)
+	wrapped, err := NewManagedTool(ctx, &ManagedToolConfig{
+		Manager: manager, Executors: executors, Registry: registry, ToolName: "external",
+		ForegroundTimeoutMs: &timeoutMs,
+	})
+	require.NoError(t, err)
+	agent, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
+		Name:        "managed-tool-start-event-agent",
+		Instruction: "call external once",
+		Model:       &managedToolStartEventModel{},
+		ToolsConfig: adk.ToolsConfig{
+			ToolsNodeConfig: compose.ToolsNodeConfig{
+				Tools: []componenttool.BaseTool{wrapped},
+			},
+		},
+	})
+	require.NoError(t, err)
+	sessionStore := adksession.NewInMemoryStore[*schema.Message](nil)
+	runner := adk.NewRunner(ctx, adk.RunnerConfig{
+		Agent: agent, SessionID: parentSessionID, SessionStore: sessionStore,
+	})
+
+	iterator := runner.Query(ctx, "start external work")
+	for {
+		event, ok := iterator.Next()
+		if !ok {
+			break
+		}
+		require.NoError(t, event.Err)
+	}
+
+	result, err := sessionStore.LoadEvents(ctx, parentSessionID, &adk.LoadSessionEventsRequest{
+		Kinds: []adk.SessionEventKind{startEventKind},
+	})
+	require.NoError(t, err)
+	require.Len(t, result.Events, 1)
+	require.Equal(t, startEventKind, result.Events[0].Kind)
+	require.NotEmpty(t, result.Events[0].EventID)
+	require.NotEmpty(t, result.Events[0].TurnID)
+	require.NotNil(t, result.Events[0].Extension)
+}
+
+func TestManagedToolBackgroundStartCanSendParentSessionEvent(t *testing.T) {
+	ctx := context.Background()
+	const parentSessionID = "managed-tool-background-start-parent"
+	startEventKind := adk.SessionEventKind(adk.SessionEventExtensionPrefix + "managed_tool.background_start")
+	implementation := &fakeTool{
+		start: func(ctx context.Context, request *StartRequest) (Run, error) {
+			require.Equal(t, int64(1), request.Attempt)
+			require.Equal(t, "task-fixed", request.TaskID)
+			require.Nil(t, ctx.Value(managedToolStartEventMarkerKey{}))
+			err := adk.TypedSendEvent(ctx, &adk.TypedAgentEvent[*schema.Message]{
+				SessionEventVariant: &adk.SessionEventVariant[*schema.Message]{
+					Event: &adk.SessionEvent[*schema.Message]{
+						Kind:      startEventKind,
+						Extension: &adk.SessionExtensionEvent{},
+					},
+				},
+			})
+			require.NoError(t, err)
+			return &fakeRun{wait: func(context.Context) (*Outcome, error) {
+				return &Outcome{Status: backgroundtask.StatusCompleted}, nil
+			}}, nil
+		},
+	}
+	registry := NewRegistry()
+	require.NoError(t, registry.Register(&Registration{
+		Info:        toolInfo("external"),
+		Tool:        implementation,
+		Description: func(string) string { return "External operation" },
+	}))
+	executors := backgroundtask.NewExecutorRegistry()
+	manager := mustNewBackgroundManager(t, ctx, &backgroundtask.Config{
+		Executors: executors,
+		IDGen: func(context.Context, *backgroundtask.AllocateTaskIDRequest) (string, error) {
+			return "task-fixed", nil
+		},
+	})
+	timeoutMs := int(time.Second / time.Millisecond)
+	wrapped, err := NewManagedTool(ctx, &ManagedToolConfig{
+		Manager: manager, Executors: executors, Registry: registry, ToolName: "external",
+		ForegroundTimeoutMs: &timeoutMs,
+		RunInBackground:     func(context.Context, string) bool { return true },
+	})
+	require.NoError(t, err)
+	agent, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
+		Name:        "managed-tool-background-start-event-agent",
+		Instruction: "call external once",
+		Model:       &managedToolStartEventModel{},
+		ToolsConfig: adk.ToolsConfig{
+			ToolsNodeConfig: compose.ToolsNodeConfig{
+				Tools: []componenttool.BaseTool{wrapped},
+			},
+		},
+		Handlers: []adk.ChatModelAgentMiddleware{
+			&managedToolStartEventMarkerMiddleware{
+				TypedBaseChatModelAgentMiddleware: &adk.TypedBaseChatModelAgentMiddleware[*schema.Message]{},
+			},
+		},
+	})
+	require.NoError(t, err)
+	sessionStore := adksession.NewInMemoryStore[*schema.Message](nil)
+	runner := adk.NewRunner(ctx, adk.RunnerConfig{
+		Agent: agent, SessionID: parentSessionID, SessionStore: sessionStore,
+		SessionConfig: &adk.SessionConfig[*schema.Message]{
+			EventIDGenerator: func(ctx context.Context, event *adk.SessionEvent[*schema.Message]) (string, error) {
+				if event.Kind == startEventKind {
+					return "start-event-id", nil
+				}
+				return adk.DefaultSessionEventIDGenerator[*schema.Message](ctx, event)
+			},
+			EventExtraProvider: func(ctx context.Context, _ *adk.SessionEvent[*schema.Message]) (map[string]any, error) {
+				marker, _ := ctx.Value(managedToolStartEventMarkerKey{}).(string)
+				if marker == "" {
+					return nil, nil
+				}
+				return map[string]any{"marker": marker}, nil
+			},
+		},
+	})
+
+	iterator := runner.Query(ctx, "start external work")
+	for {
+		event, ok := iterator.Next()
+		if !ok {
+			break
+		}
+		require.NoError(t, event.Err)
+	}
+
+	result, err := sessionStore.LoadEvents(ctx, parentSessionID, &adk.LoadSessionEventsRequest{
+		Kinds: []adk.SessionEventKind{startEventKind},
+	})
+	require.NoError(t, err)
+	require.Len(t, result.Events, 1)
+	require.Equal(t, "start-event-id", result.Events[0].EventID)
+	require.NotEmpty(t, result.Events[0].TurnID)
+	require.Equal(t, "tool-call-marker", result.Events[0].Extra["marker"])
+	_, err = manager.Get(ctx, "task-fixed")
+	require.NoError(t, err)
+}
+
+func TestManagedToolBackgroundWaitCannotSendParentSessionEvent(t *testing.T) {
+	ctx := context.Background()
+	const parentSessionID = "managed-tool-background-wait-parent"
+	waitEventKind := adk.SessionEventKind(adk.SessionEventExtensionPrefix + "managed_tool.wait")
+	waitSent := make(chan error, 1)
+	implementation := &fakeTool{
+		start: func(context.Context, *StartRequest) (Run, error) {
+			return &fakeRun{wait: func(ctx context.Context) (*Outcome, error) {
+				waitSent <- adk.TypedSendEvent(ctx, &adk.TypedAgentEvent[*schema.Message]{
+					SessionEventVariant: &adk.SessionEventVariant[*schema.Message]{
+						Event: &adk.SessionEvent[*schema.Message]{
+							Kind:      waitEventKind,
+							Extension: &adk.SessionExtensionEvent{},
+						},
+					},
+				})
+				return &Outcome{Status: backgroundtask.StatusCompleted}, nil
+			}}, nil
+		},
+	}
+	registry := NewRegistry()
+	require.NoError(t, registry.Register(&Registration{
+		Info:        toolInfo("external"),
+		Tool:        implementation,
+		Description: func(string) string { return "External operation" },
+	}))
+	executors := backgroundtask.NewExecutorRegistry()
+	manager := mustNewBackgroundManager(t, ctx, &backgroundtask.Config{
+		Executors: executors,
+		IDGen: func(context.Context, *backgroundtask.AllocateTaskIDRequest) (string, error) {
+			return "task-fixed", nil
+		},
+	})
+	timeoutMs := int(time.Second / time.Millisecond)
+	wrapped, err := NewManagedTool(ctx, &ManagedToolConfig{
+		Manager: manager, Executors: executors, Registry: registry, ToolName: "external",
+		ForegroundTimeoutMs: &timeoutMs,
+		RunInBackground:     func(context.Context, string) bool { return true },
+	})
+	require.NoError(t, err)
+	agent, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
+		Name:        "managed-tool-background-wait-event-agent",
+		Instruction: "call external once",
+		Model:       &managedToolStartEventModel{},
+		ToolsConfig: adk.ToolsConfig{
+			ToolsNodeConfig: compose.ToolsNodeConfig{
+				Tools: []componenttool.BaseTool{wrapped},
+			},
+		},
+	})
+	require.NoError(t, err)
+	sessionStore := adksession.NewInMemoryStore[*schema.Message](nil)
+	runner := adk.NewRunner(ctx, adk.RunnerConfig{
+		Agent: agent, SessionID: parentSessionID, SessionStore: sessionStore,
+	})
+
+	iterator := runner.Query(ctx, "start external work")
+	for {
+		event, ok := iterator.Next()
+		if !ok {
+			break
+		}
+		require.NoError(t, event.Err)
+	}
+	require.ErrorIs(t, <-waitSent, adk.ErrStartWindowClosed)
+	result, err := sessionStore.LoadEvents(ctx, parentSessionID, &adk.LoadSessionEventsRequest{
+		Kinds: []adk.SessionEventKind{waitEventKind},
+	})
+	require.NoError(t, err)
+	require.Empty(t, result.Events)
+}
+
+func TestManagedToolBackgroundStartWindowDoesNotHangOnPreExecuteFailure(t *testing.T) {
+	startErr := errors.New("claim unavailable")
+	store := &startFailStore{
+		InMemoryStore: backgroundtask.NewInMemoryStore(nil),
+		err:           startErr,
+		started:       make(chan struct{}),
+	}
+	implementation := &fakeTool{
+		start: func(context.Context, *StartRequest) (Run, error) {
+			t.Fatal("Start must not run when TaskStore.Start fails")
+			return nil, nil
+		},
+	}
+	registry := NewRegistry()
+	require.NoError(t, registry.Register(&Registration{
+		Info: toolInfo("external"), Tool: implementation,
+	}))
+	executors := backgroundtask.NewExecutorRegistry()
+	manager := mustNewBackgroundManager(t, context.Background(), &backgroundtask.Config{
+		Tasks: store, Executors: executors,
+		IDGen: func(context.Context, *backgroundtask.AllocateTaskIDRequest) (string, error) {
+			return "pre-execute-failure", nil
+		},
+	})
+	timeoutMs := int(time.Second / time.Millisecond)
+	wrapped, err := NewManagedTool(context.Background(), &ManagedToolConfig{
+		Manager: manager, Executors: executors, Registry: registry, ToolName: "external",
+		ForegroundTimeoutMs: &timeoutMs,
+		RunInBackground:     func(context.Context, string) bool { return true },
+		SessionID:           func(context.Context) (string, error) { return "session", nil },
+	})
+	require.NoError(t, err)
+
+	done := make(chan struct {
+		result *schema.ToolResult
+		err    error
+	}, 1)
+	go func() {
+		result, runErr := wrapped.(componenttool.EnhancedInvokableTool).InvokableRun(
+			context.Background(), toolArgument(`{"value":"x"}`),
+		)
+		done <- struct {
+			result *schema.ToolResult
+			err    error
+		}{result: result, err: runErr}
+	}()
+	select {
+	case <-store.started:
+	case <-time.After(time.Second):
+		t.Fatal("TaskStore.Start was not reached")
+	}
+	select {
+	case received := <-done:
+		require.NoError(t, received.err)
+		event := decodeEvents(t, []*schema.ToolResult{received.result})[0]
+		require.Equal(t, ManagedToolResponseEventLaunchResult, event.Type)
+		require.Equal(t, "pre-execute-failure", event.TaskID)
+	case <-time.After(time.Second):
+		t.Fatal("background launch hung after pre-execute failure")
+	}
+}
+
+func TestManagedToolBackgroundStartWindowTimeoutReturnsLaunchResult(t *testing.T) {
+	ctx := context.Background()
+	const parentSessionID = "managed-tool-background-timeout-parent"
+	startEventKind := adk.SessionEventKind(adk.SessionEventExtensionPrefix + "managed_tool.timeout")
+	startEntered := make(chan struct{})
+	continueStart := make(chan struct{})
+	sendErr := make(chan error, 1)
+	implementation := &fakeTool{
+		start: func(ctx context.Context, request *StartRequest) (Run, error) {
+			require.Equal(t, int64(1), request.Attempt)
+			close(startEntered)
+			<-continueStart
+			sendErr <- adk.TypedSendEvent(ctx, &adk.TypedAgentEvent[*schema.Message]{
+				SessionEventVariant: &adk.SessionEventVariant[*schema.Message]{
+					Event: &adk.SessionEvent[*schema.Message]{
+						Kind:      startEventKind,
+						Extension: &adk.SessionExtensionEvent{},
+					},
+				},
+			})
+			return &fakeRun{wait: func(context.Context) (*Outcome, error) {
+				return &Outcome{Status: backgroundtask.StatusCompleted}, nil
+			}}, nil
+		},
+	}
+	registry := NewRegistry()
+	require.NoError(t, registry.Register(&Registration{
+		Info:        toolInfo("external"),
+		Tool:        implementation,
+		Description: func(string) string { return "External operation" },
+	}))
+	executors := backgroundtask.NewExecutorRegistry()
+	manager := mustNewBackgroundManager(t, ctx, &backgroundtask.Config{
+		Executors: executors,
+		IDGen: func(context.Context, *backgroundtask.AllocateTaskIDRequest) (string, error) {
+			return "task-fixed", nil
+		},
+	})
+	timeoutMs := 50
+	wrapped, err := NewManagedTool(ctx, &ManagedToolConfig{
+		Manager: manager, Executors: executors, Registry: registry, ToolName: "external",
+		ForegroundTimeoutMs: &timeoutMs,
+		RunInBackground:     func(context.Context, string) bool { return true },
+	})
+	require.NoError(t, err)
+	agent, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
+		Name:        "managed-tool-background-timeout-agent",
+		Instruction: "call external once",
+		Model:       &managedToolStartEventModel{},
+		ToolsConfig: adk.ToolsConfig{
+			ToolsNodeConfig: compose.ToolsNodeConfig{
+				Tools: []componenttool.BaseTool{wrapped},
+			},
+		},
+	})
+	require.NoError(t, err)
+	sessionStore := adksession.NewInMemoryStore[*schema.Message](nil)
+	runner := adk.NewRunner(ctx, adk.RunnerConfig{
+		Agent: agent, SessionID: parentSessionID, SessionStore: sessionStore,
+	})
+
+	startedAt := time.Now()
+	iterator := runner.Query(ctx, "start external work")
+	for {
+		event, ok := iterator.Next()
+		if !ok {
+			break
+		}
+		require.NoError(t, event.Err)
+	}
+	require.GreaterOrEqual(t, time.Since(startedAt), 40*time.Millisecond)
+	select {
+	case <-startEntered:
+	default:
+		t.Fatal("Start was not reached before the launch result returned")
+	}
+	task, err := manager.Get(ctx, "task-fixed")
+	require.NoError(t, err)
+	require.Equal(t, backgroundtask.StatusRunning, task.Status)
+	close(continueStart)
+	require.ErrorIs(t, <-sendErr, adk.ErrStartWindowClosed)
+	terminal := waitTaskTerminal(t, manager, "task-fixed")
+	require.Equal(t, backgroundtask.StatusCompleted, terminal.Status)
+
+	result, err := sessionStore.LoadEvents(ctx, parentSessionID, &adk.LoadSessionEventsRequest{
+		Kinds: []adk.SessionEventKind{startEventKind},
+	})
+	require.NoError(t, err)
+	require.Empty(t, result.Events)
+}
+
+func TestManagedToolBackgroundStartWindowWithoutSenderStillWaits(t *testing.T) {
+	startEntered := make(chan struct{})
+	continueStart := make(chan struct{})
+	implementation := &fakeTool{
+		start: func(context.Context, *StartRequest) (Run, error) {
+			close(startEntered)
+			<-continueStart
+			return &fakeRun{wait: func(context.Context) (*Outcome, error) {
+				return &Outcome{Status: backgroundtask.StatusCompleted}, nil
+			}}, nil
+		},
+	}
+	manager, wrapped := newTestManagedTool(t, implementation, time.Second)
+	wrapped.(*managedTool).runInBackground = func(context.Context, string) bool { return true }
+	wrapped.(*managedTool).policy.TimeoutMs = 40
+	t.Cleanup(func() { close(continueStart) })
+
+	startedAt := time.Now()
+	result, err := wrapped.(componenttool.EnhancedInvokableTool).InvokableRun(
+		context.Background(), toolArgument(`{"value":"x"}`),
+	)
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, time.Since(startedAt), 30*time.Millisecond)
+	select {
+	case <-startEntered:
+	default:
+		t.Fatal("Start was not reached")
+	}
+	event := decodeEvents(t, []*schema.ToolResult{result})[0]
+	require.Equal(t, ManagedToolResponseEventLaunchResult, event.Type)
+	require.Equal(t, "task-fixed", event.TaskID)
+	task, err := manager.Get(context.Background(), "task-fixed")
+	require.NoError(t, err)
+	require.Equal(t, backgroundtask.StatusRunning, task.Status)
+}
+
+func TestManagedToolBackgroundStreamReturnsLaunchBeforeTaskTerminal(t *testing.T) {
+	waitReleased := make(chan struct{})
+	implementation := &fakeTool{
+		start: func(context.Context, *StartRequest) (Run, error) {
+			return &fakeRun{wait: func(context.Context) (*Outcome, error) {
+				<-waitReleased
+				return &Outcome{Status: backgroundtask.StatusCompleted}, nil
+			}}, nil
+		},
+	}
+	manager, wrapped := newTestManagedTool(t, implementation, time.Second)
+	wrapped.(*managedTool).runInBackground = func(context.Context, string) bool { return true }
+	t.Cleanup(func() { close(waitReleased) })
+
+	stream, err := wrapped.(componenttool.EnhancedStreamableTool).StreamableRun(
+		context.Background(), toolArgument(`{"value":"stream"}`),
+	)
+	require.NoError(t, err)
+	defer stream.Close()
+	result, recvErr := stream.Recv()
+	require.NoError(t, recvErr)
+	event := decodeEvents(t, []*schema.ToolResult{result})[0]
+	require.Equal(t, ManagedToolResponseEventLaunchResult, event.Type)
+	require.Equal(t, "task-fixed", event.TaskID)
+	task, err := manager.Get(context.Background(), "task-fixed")
+	require.NoError(t, err)
+	require.Equal(t, backgroundtask.StatusRunning, task.Status)
+}
+
+func TestAttack_BackgroundStreamParentCancelReturnsLaunchResult(t *testing.T) {
+	startEntered := make(chan struct{})
+	continueStart := make(chan struct{})
+	var releaseOnce sync.Once
+	implementation := &fakeTool{
+		start: func(context.Context, *StartRequest) (Run, error) {
+			close(startEntered)
+			<-continueStart
+			return &fakeRun{wait: func(context.Context) (*Outcome, error) {
+				return &Outcome{Status: backgroundtask.StatusCompleted}, nil
+			}}, nil
+		},
+	}
+	manager, wrapped := newTestManagedTool(t, implementation, time.Second)
+	wrapped.(*managedTool).runInBackground = func(context.Context, string) bool { return true }
+	t.Cleanup(func() { releaseOnce.Do(func() { close(continueStart) }) })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct {
+		stream *schema.StreamReader[*schema.ToolResult]
+		err    error
+	}, 1)
+	go func() {
+		stream, err := wrapped.(componenttool.EnhancedStreamableTool).StreamableRun(
+			ctx, toolArgument(`{"value":"stream"}`),
+		)
+		done <- struct {
+			stream *schema.StreamReader[*schema.ToolResult]
+			err    error
+		}{stream: stream, err: err}
+	}()
+	select {
+	case <-startEntered:
+	case <-time.After(time.Second):
+		t.Fatal("Start was not reached")
+	}
+	cancel()
+	var received struct {
+		stream *schema.StreamReader[*schema.ToolResult]
+		err    error
+	}
+	select {
+	case received = <-done:
+	case <-time.After(time.Second):
+		t.Fatal("StreamableRun did not return after parent cancellation")
+	}
+	require.NoError(t, received.err)
+	defer received.stream.Close()
+	result, recvErr := received.stream.Recv()
+	require.NoError(t, recvErr)
+	event := decodeEvents(t, []*schema.ToolResult{result})[0]
+	require.Equal(t, ManagedToolResponseEventLaunchResult, event.Type)
+	require.Equal(t, "task-fixed", event.TaskID)
+	task, err := manager.Get(context.Background(), "task-fixed")
+	require.NoError(t, err)
+	require.Equal(t, backgroundtask.StatusRunning, task.Status)
+	releaseOnce.Do(func() { close(continueStart) })
+}
+
+func TestManagedToolBackgroundStreamProjectionHandlesUpdatePressure(t *testing.T) {
+	waitReleased := make(chan struct{})
+	updates := make([]*Update, 0, projectionBuffer+8)
+	for i := 0; i < projectionBuffer+8; i++ {
+		updates = append(updates, &Update{
+			EventID: fmt.Sprintf("event-%d", i),
+			Kind:    "stdout",
+			Data:    []byte(fmt.Sprintf("line-%d", i)),
+		})
+	}
+	implementation := &fakeTool{
+		start: func(context.Context, *StartRequest) (Run, error) {
+			return &updatingRun{
+				fakeRun: &fakeRun{wait: func(context.Context) (*Outcome, error) {
+					<-waitReleased
+					return &Outcome{Status: backgroundtask.StatusCompleted}, nil
+				}},
+				updates: schema.StreamReaderFromArray(updates),
+			}, nil
+		},
+	}
+	manager, wrapped := newTestManagedTool(t, implementation, time.Second)
+	wrapped.(*managedTool).runInBackground = func(context.Context, string) bool { return true }
+	t.Cleanup(func() { close(waitReleased) })
+
+	stream, err := wrapped.(componenttool.EnhancedStreamableTool).StreamableRun(
+		context.Background(), toolArgument(`{"value":"stream"}`),
+	)
+	require.NoError(t, err)
+	done := make(chan []*ManagedToolResponseEvent, 1)
+	go func() {
+		done <- decodeEvents(t, readAllStreamResults(t, stream))
+	}()
+	select {
+	case events := <-done:
+		require.NotEmpty(t, events)
+		require.Equal(t, ManagedToolResponseEventLaunchResult, events[len(events)-1].Type)
+		require.Equal(t, "task-fixed", events[len(events)-1].TaskID)
+	case <-time.After(time.Second):
+		t.Fatal("stream projection did not detach under update pressure")
+	}
+	task, err := manager.Get(context.Background(), "task-fixed")
+	require.NoError(t, err)
+	require.Equal(t, backgroundtask.StatusRunning, task.Status)
+}
+
+func TestManagedToolBackgroundStartWindowStartErrorReturnsLaunchResult(t *testing.T) {
+	implementation := &fakeTool{
+		start: func(context.Context, *StartRequest) (Run, error) {
+			return nil, errors.New("start failed")
+		},
+	}
+	manager, wrapped := newTestManagedTool(t, implementation, time.Second)
+	wrapped.(*managedTool).runInBackground = func(context.Context, string) bool { return true }
+
+	result, err := wrapped.(componenttool.EnhancedInvokableTool).InvokableRun(
+		context.Background(), toolArgument(`{"value":"x"}`),
+	)
+	require.NoError(t, err)
+	event := decodeEvents(t, []*schema.ToolResult{result})[0]
+	require.Equal(t, ManagedToolResponseEventLaunchResult, event.Type)
+	require.Equal(t, "task-fixed", event.TaskID)
+	task := waitTaskTerminal(t, manager, "task-fixed")
+	require.Equal(t, backgroundtask.StatusFailed, task.Status)
+	require.Contains(t, task.ResultError, "start failed")
+}
+
+func TestManagedToolBackgroundStartWindowIgnoresInvocationTimeout(t *testing.T) {
+	ctx := context.Background()
+	const parentSessionID = "managed-tool-background-invocation-timeout-parent"
+	startEventKind := adk.SessionEventKind(adk.SessionEventExtensionPrefix + "managed_tool.invocation_timeout")
+	implementation := &fakeTool{
+		start: func(ctx context.Context, request *StartRequest) (Run, error) {
+			require.Equal(t, int64(1), request.Attempt)
+			time.Sleep(40 * time.Millisecond)
+			err := adk.TypedSendEvent(ctx, &adk.TypedAgentEvent[*schema.Message]{
+				SessionEventVariant: &adk.SessionEventVariant[*schema.Message]{
+					Event: &adk.SessionEvent[*schema.Message]{
+						Kind:      startEventKind,
+						Extension: &adk.SessionExtensionEvent{},
+					},
+				},
+			})
+			require.NoError(t, err)
+			return &fakeRun{wait: func(context.Context) (*Outcome, error) {
+				return &Outcome{Status: backgroundtask.StatusCompleted}, nil
+			}}, nil
+		},
+	}
+	registry := NewRegistry()
+	require.NoError(t, registry.Register(&Registration{
+		Info:        toolInfo("external"),
+		Tool:        implementation,
+		Description: func(string) string { return "External operation" },
+	}))
+	executors := backgroundtask.NewExecutorRegistry()
+	manager := mustNewBackgroundManager(t, ctx, &backgroundtask.Config{
+		Executors: executors,
+		IDGen: func(context.Context, *backgroundtask.AllocateTaskIDRequest) (string, error) {
+			return "task-fixed", nil
+		},
+	})
+	foregroundTimeoutMs := 200
+	invocationTimeoutMs := 10
+	wrapped, err := NewManagedTool(ctx, &ManagedToolConfig{
+		Manager: manager, Executors: executors, Registry: registry, ToolName: "external",
+		ForegroundTimeoutMs: &foregroundTimeoutMs,
+		RunInBackground:     func(context.Context, string) bool { return true },
+		InvocationTimeoutMs: func(context.Context, string) *int { return &invocationTimeoutMs },
+	})
+	require.NoError(t, err)
+	agent, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
+		Name:        "managed-tool-background-invocation-timeout-agent",
+		Instruction: "call external once",
+		Model:       &managedToolStartEventModel{},
+		ToolsConfig: adk.ToolsConfig{
+			ToolsNodeConfig: compose.ToolsNodeConfig{
+				Tools: []componenttool.BaseTool{wrapped},
+			},
+		},
+	})
+	require.NoError(t, err)
+	sessionStore := adksession.NewInMemoryStore[*schema.Message](nil)
+	runner := adk.NewRunner(ctx, adk.RunnerConfig{
+		Agent: agent, SessionID: parentSessionID, SessionStore: sessionStore,
+	})
+
+	iterator := runner.Query(ctx, "start external work")
+	for {
+		event, ok := iterator.Next()
+		if !ok {
+			break
+		}
+		require.NoError(t, event.Err)
+	}
+	result, err := sessionStore.LoadEvents(ctx, parentSessionID, &adk.LoadSessionEventsRequest{
+		Kinds: []adk.SessionEventKind{startEventKind},
+	})
+	require.NoError(t, err)
+	require.Len(t, result.Events, 1)
 }
 
 func TestManagedToolForegroundWaitingInputResumesWithoutTask(t *testing.T) {
@@ -1181,10 +1944,17 @@ func TestAttack_PlainUpdateGeneratedEventIDNotMaterialized(t *testing.T) {
 	)
 	require.NoError(t, err)
 	projected := decodeEvents(t, readAllStreamResults(t, stream))
-	require.Len(t, projected, 2)
-	require.Equal(t, ManagedToolResponseEventUpdate, projected[0].Type)
-	require.NotNil(t, projected[0].Update)
-	require.NotEmpty(t, projected[0].Update.EventID)
+	require.NotEmpty(t, projected)
+	require.Equal(t, ManagedToolResponseEventLaunchResult, projected[len(projected)-1].Type)
+	projectedUpdateIDs := make(map[string]struct{})
+	for _, event := range projected[:len(projected)-1] {
+		require.Equal(t, ManagedToolResponseEventUpdate, event.Type)
+		require.NotNil(t, event.Update)
+		require.NotEmpty(t, event.Update.EventID)
+		projectedUpdateIDs[event.Update.EventID] = struct{}{}
+	}
+	task := waitTaskTerminal(t, manager, "plain-generated-event")
+	require.Equal(t, backgroundtask.StatusCompleted, task.Status)
 
 	result, err := manager.ListTaskEvents(
 		context.Background(),
@@ -1194,7 +1964,10 @@ func TestAttack_PlainUpdateGeneratedEventIDNotMaterialized(t *testing.T) {
 	require.Len(t, result.Events, 1)
 	require.NotNil(t, result.Events[0])
 	require.NotEmpty(t, result.Events[0].EventID)
-	require.Equal(t, result.Events[0].EventID, projected[0].Update.EventID)
+	if len(projectedUpdateIDs) > 0 {
+		_, ok := projectedUpdateIDs[result.Events[0].EventID]
+		require.True(t, ok)
+	}
 	materializer.mu.Lock()
 	require.Empty(t, materializer.requests)
 	materializer.mu.Unlock()
