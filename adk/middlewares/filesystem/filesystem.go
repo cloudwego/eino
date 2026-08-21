@@ -94,6 +94,10 @@ type ExecuteToolConfig struct {
 type BackgroundConfig struct {
 	Local       *LocalBackgroundConfig
 	Recoverable *RecoverableBackgroundConfig
+	// NotificationSessionID resolves the optional session that receives task
+	// lifecycle notifications. An empty result disables session-routed
+	// notifications. Nil does not infer a session from the current Runner.
+	NotificationSessionID func(context.Context) (string, error)
 }
 
 // LocalBackgroundConfig configures process-local background execution for the
@@ -246,15 +250,7 @@ func NewMiddleware(ctx context.Context, config *Config) (adk.AgentMiddleware, er
 		CustomGlobToolDesc:      config.CustomGlobToolDesc,
 		CustomWriteFileToolDesc: config.CustomWriteFileToolDesc,
 		CustomEditToolDesc:      config.CustomEditToolDesc,
-		notificationSessionID: func(ctx context.Context) (string, error) {
-			sessionID, ok := adk.RunnerSessionID(ctx)
-			if !ok {
-				return "", errors.New(
-					"filesystem: runner session is required for background notification",
-				)
-			}
-			return sessionID, nil
-		},
+		notificationSessionID:   noNotificationSessionID,
 	}
 	ts, err := getFilesystemTools(ctx, middlewareConfig)
 	if err != nil {
@@ -471,14 +467,9 @@ func NewTyped[M adk.MessageType](ctx context.Context, config *MiddlewareConfig) 
 		return nil, err
 	}
 	typedConfig := *config
-	typedConfig.notificationSessionID = func(ctx context.Context) (string, error) {
-		sessionID, ok := adk.RunnerSessionID(ctx)
-		if !ok {
-			return "", errors.New(
-				"filesystem: runner session is required for background notification",
-			)
-		}
-		return sessionID, nil
+	typedConfig.notificationSessionID = noNotificationSessionID
+	if typedConfig.Background != nil && typedConfig.Background.NotificationSessionID != nil {
+		typedConfig.notificationSessionID = typedConfig.Background.NotificationSessionID
 	}
 	ts, err := getFilesystemTools(ctx, &typedConfig)
 	if err != nil {
