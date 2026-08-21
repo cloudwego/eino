@@ -39,9 +39,14 @@ type Spec struct {
 	Kind        string
 	Payload     []byte
 
-	Description   string
-	OutputFile    string
-	SessionID     string
+	Description string
+	OutputFile  string
+	// SessionID is an optional session notification target. It is routing
+	// metadata, not the task's execution identity and not necessarily the
+	// session of an agent executing the task.
+	SessionID string
+	// NotifySession enables waiting and terminal lifecycle notifications when
+	// SessionID is non-empty. Tasks do not otherwise require a session.
 	NotifySession bool
 }
 

@@ -27,9 +27,9 @@ import (
 )
 
 // SubmitRequest describes a registered managed tool submitted directly as a
-// durable task. Empty TaskID asks Manager to allocate one. SessionID identifies
-// the immutable parent session. DisableLifecycleNotifications suppresses only
-// automatic waiting and terminal notifications.
+// durable task. Empty TaskID asks Manager to allocate one. SessionID optionally
+// identifies the session notification target. It may be empty only when
+// DisableLifecycleNotifications is true.
 type SubmitRequest struct {
 	TaskID      string
 	ToolName    string
@@ -56,9 +56,14 @@ func Submit(
 			"backgroundtask/tool: manager, tool registry, and submit request are required",
 		)
 	}
-	if req.ToolName == "" || req.SessionID == "" {
+	if req.ToolName == "" {
 		return nil, errors.New(
-			"backgroundtask/tool: tool name and parent session are required",
+			"backgroundtask/tool: tool name is required",
+		)
+	}
+	if req.SessionID == "" && !req.DisableLifecycleNotifications {
+		return nil, errors.New(
+			"backgroundtask/tool: notification session is required when lifecycle notifications are enabled",
 		)
 	}
 	registration, recoverable, ok := registry.resolveAny(req.ToolName)

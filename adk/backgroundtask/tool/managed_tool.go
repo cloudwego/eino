@@ -61,8 +61,9 @@ type ManagedToolConfig struct {
 	// InvocationTimeoutMs returns an optional operation timeout in milliseconds.
 	// Nil or a nil result means no operation timeout.
 	InvocationTimeoutMs func(context.Context, string) *int
-	// SessionID resolves the parent session for notification. Nil reads request
-	// identity from context.
+	// SessionID resolves the optional session notification target. An empty
+	// result disables session-routed lifecycle notifications. Nil uses the
+	// current Runner session when one exists and otherwise disables notification.
 	SessionID func(context.Context) (string, error)
 }
 
@@ -859,9 +860,6 @@ func (t *managedTool) newSpec(ctx context.Context, arguments string) (string, ba
 	if err != nil {
 		return "", backgroundtask.Spec{}, err
 	}
-	if sessionID == "" {
-		return "", backgroundtask.Spec{}, errors.New("backgroundtask/tool: parent session is required")
-	}
 	taskID, err := t.manager.AllocateTaskID(ctx, &backgroundtask.AllocateTaskIDRequest{
 		Kind: "background_tool",
 	})
@@ -886,7 +884,7 @@ func (t *managedTool) newSpec(ctx context.Context, arguments string) (string, ba
 		t.recoverable,
 		&taskSpecInput{
 			taskID: taskID, arguments: arguments, outputFile: outputFile,
-			sessionID: sessionID, notifySession: true,
+			sessionID: sessionID, notifySession: sessionID != "",
 		},
 	)
 	if err != nil {
@@ -905,16 +903,13 @@ func (t *managedTool) specForTaskID(
 	if err != nil {
 		return "", backgroundtask.Spec{}, err
 	}
-	if sessionID == "" {
-		return "", backgroundtask.Spec{}, errors.New("backgroundtask/tool: parent session is required")
-	}
 	spec, err := buildTaskSpec(
 		ctx,
 		t.registration,
 		t.recoverable,
 		&taskSpecInput{
 			taskID: taskID, arguments: arguments, outputFile: outputFile,
-			sessionID: sessionID, notifySession: true,
+			sessionID: sessionID, notifySession: sessionID != "",
 		},
 	)
 	if err != nil {
@@ -1196,7 +1191,7 @@ func sessionIDFromContext(ctx context.Context) (string, error) {
 	if sessionID, ok := adk.RunnerSessionID(ctx); ok {
 		return sessionID, nil
 	}
-	return "", errors.New("backgroundtask/tool: runner session is required")
+	return "", nil
 }
 
 var (
