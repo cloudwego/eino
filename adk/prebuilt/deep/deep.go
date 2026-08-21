@@ -445,6 +445,7 @@ func buildTypedBuiltinAgentMiddlewares[M adk.MessageType](ctx context.Context, c
 		if deepFilesystemBackgroundEnabled(background) {
 			if background.RecoverableShell != nil {
 				mwCfg.Background = &filesystem2.BackgroundConfig{
+					NotificationSessionID: deepNotificationSessionID,
 					Recoverable: &filesystem2.RecoverableBackgroundConfig{
 						Shell: recoverableShell, Manager: background.Manager,
 						Executors:            background.Executors,
@@ -459,6 +460,7 @@ func buildTypedBuiltinAgentMiddlewares[M adk.MessageType](ctx context.Context, c
 					return nil, err
 				}
 				mwCfg.Background = &filesystem2.BackgroundConfig{
+					NotificationSessionID: deepNotificationSessionID,
 					Local: &filesystem2.LocalBackgroundConfig{
 						Runner: runner, OutputStore: backendAppendOpener(cfg.Backend),
 						OutputDir: deepShellOutputDir(background),
@@ -474,6 +476,11 @@ func buildTypedBuiltinAgentMiddlewares[M adk.MessageType](ctx context.Context, c
 	}
 
 	return ms, nil
+}
+
+func deepNotificationSessionID(ctx context.Context) (string, error) {
+	sessionID, _ := adk.RunnerSessionID(ctx)
+	return sessionID, nil
 }
 
 func deepBackgroundManager[M adk.MessageType](background *TypedBackgroundConfig[M]) *backgroundtask.Manager {

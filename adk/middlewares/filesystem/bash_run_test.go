@@ -125,9 +125,11 @@ func TestManagedExecuteAcceptsBackgroundRunner(t *testing.T) {
 	require.NoError(t, err)
 }
 
-func TestManagedExecutePromptPreservesCompletionNotification(t *testing.T) {
-	assert.Contains(t, ManagedExecuteToolDesc, "You will be notified when the command completes")
-	assert.Contains(t, ManagedExecuteToolDescChinese, "命令完成时你会收到通知")
+func TestManagedExecutePromptDoesNotPromiseCompletionNotification(t *testing.T) {
+	assert.NotContains(t, ManagedExecuteToolDesc, "You will be notified")
+	assert.NotContains(t, ManagedExecuteToolDescChinese, "你会收到通知")
+	assert.Contains(t, ManagedExecuteToolDesc, "task_output")
+	assert.Contains(t, ManagedExecuteToolDescChinese, "task_output")
 }
 
 // findExecuteTool returns the execute tool from a tool set (which, when a Backend
@@ -284,6 +286,78 @@ func TestManagedExecuteTool_Foreground(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestManagedExecuteTool_ForegroundWithoutNotificationSession(t *testing.T) {
+	mgr := newTestManager(t, context.Background())
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		defer cancel()
+		_ = mgr.Close(ctx)
+	}()
+
+	middleware, err := New(context.Background(), &MiddlewareConfig{
+		Shell: &mockShellBackend{resp: &filesystem.ExecuteResponse{Output: "ok"}},
+		Background: &BackgroundConfig{
+			Local: &LocalBackgroundConfig{Runner: mustLocalRunner(t, mgr)},
+		},
+	})
+	require.NoError(t, err)
+	typed, ok := middleware.(*typedFilesystemMiddleware[*schema.Message])
+	require.True(t, ok)
+
+	result, err := invokeTool(
+		t, findExecuteTool(t, typed.additionalTools), `{"command":"echo hi"}`,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, "ok", result)
+}
+
+func TestManagedExecuteTool_BackgroundWithoutNotificationSession(t *testing.T) {
+	mgr := newTestManager(t, context.Background())
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_ = mgr.Close(ctx)
+	}()
+
+	release := make(chan struct{})
+	middleware, err := New(context.Background(), &MiddlewareConfig{
+		Shell: &gatedShell{release: release, out: "done"},
+		Background: &BackgroundConfig{
+			Local: &LocalBackgroundConfig{Runner: mustLocalRunner(t, mgr)},
+		},
+	})
+	require.NoError(t, err)
+	typed, ok := middleware.(*typedFilesystemMiddleware[*schema.Message])
+	require.True(t, ok)
+
+	result, err := invokeTool(
+		t,
+		findExecuteTool(t, typed.additionalTools),
+		`{"command":"sleep 1","run_in_background":true}`,
+	)
+	require.NoError(t, err)
+	assert.Contains(t, result, "Use task_output")
+	assert.NotContains(t, result, "You will be notified")
+
+	pending, err := mgr.ListPending(context.Background(), &backgroundtask.ListPendingRequest{
+		ExecutorKeys: []string{"eino.dev/process-local"},
+	})
+	require.NoError(t, err)
+	require.Len(t, pending.Tasks, 1)
+	assert.Empty(t, pending.Tasks[0].Spec.SessionID)
+	assert.False(t, pending.Tasks[0].Spec.NotifySession)
+
+	store, ok := testManagerStores.Load(mgr)
+	require.True(t, ok)
+	deliveries, err := store.(backgroundtask.NotificationOutbox).Receive(
+		context.Background(),
+		&backgroundtask.ReceiveNotificationsRequest{Limit: 10, LeaseDuration: time.Second},
+	)
+	require.NoError(t, err)
+	assert.Empty(t, deliveries.Deliveries)
+	close(release)
+}
+
 func TestManagedExecuteTool_Background(t *testing.T) {
 	mgr := newTestManager(t, context.Background())
 	defer func() {
@@ -294,25 +368,29 @@ func TestManagedExecuteTool_Background(t *testing.T) {
 
 	backend := setupTestBackend() // so a background launch reports an output path
 	release := make(chan struct{})
-	tools, err := getFilesystemTools(context.Background(), &MiddlewareConfig{
+	middleware, err := New(context.Background(), &MiddlewareConfig{
 		Backend: backend,
 		Shell:   &gatedShell{release: release, out: "done"},
 		Background: &BackgroundConfig{
+			NotificationSessionID: testNotificationSessionID,
 			Local: &LocalBackgroundConfig{
 				Runner: mustLocalRunner(t, mgr), OutputStore: backend, OutputDir: "/tasks",
 			},
 		},
-		notificationSessionID: testNotificationSessionID,
 	})
 	require.NoError(t, err)
+	typed, ok := middleware.(*typedFilesystemMiddleware[*schema.Message])
+	require.True(t, ok)
 
-	result, err := invokeTool(t, findExecuteTool(t, tools), `{"command":"sleep 1","run_in_background":true}`)
+	result, err := invokeTool(t, findExecuteTool(t, typed.additionalTools), `{"command":"sleep 1","run_in_background":true}`)
 	require.NoError(t, err)
 	assert.Contains(t, result, "Command running in background with ID:")
 
 	close(release)
 	task := waitTerminalTask(t, mgr)
 	assert.Equal(t, backgroundtask.StatusCompleted, task.Status)
+	assert.Equal(t, "test-session", task.Spec.SessionID)
+	assert.True(t, task.Spec.NotifySession)
 
 	// The background-launch message reports the (reserved) output-file path so the
 	// agent can read it once the task completes.

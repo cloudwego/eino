@@ -54,10 +54,10 @@ func (m *sessionContextModel) Stream(
 	return schema.StreamReaderFromArray([]*schema.Message{message}), nil
 }
 
-func TestSessionIDFromContextRequiresRunnerAndReadsSession_BitsUT(t *testing.T) {
+func TestSessionIDFromContextIsOptionalAndReadsRunnerSession_BitsUT(t *testing.T) {
 	sessionID, err := sessionIDFromContext(context.Background())
 	require.Empty(t, sessionID)
-	require.EqualError(t, err, "backgroundtask/tool: runner session is required")
+	require.NoError(t, err)
 
 	const expectedSessionID = "managed-tool-parent"
 	chatModel := &sessionContextModel{}

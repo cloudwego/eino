@@ -19,7 +19,6 @@ package filesystem
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"path/filepath"
@@ -364,7 +363,7 @@ func newManagedExecuteTool(
 	definition toolDefinition,
 ) (tool.BaseTool, error) {
 	if sessionID == nil {
-		return nil, errors.New("filesystem: notification session resolver is required")
+		sessionID = noNotificationSessionID
 	}
 	toolName := selectToolName(definition.name, ToolNameExecute)
 	d, err := selectToolDesc(
@@ -399,7 +398,7 @@ func managedRunInput(
 		OutputFile:      writer.path,
 		RunInBackground: input.RunInBackground,
 		SessionID:       sessionID,
-		NotifySession:   true,
+		NotifySession:   sessionID != "",
 	}
 	// A positive timeout overrides the Manager's default foreground timeout for
 	// this command. When the deadline expires, the Manager's policy decides
@@ -445,7 +444,11 @@ func newManagedBufferedExecuteTool(
 			if w.path != "" {
 				msg += fmt.Sprintf(" Output is being written to: %s.", w.path)
 			}
-			msg += " You will be notified when it completes."
+			if result.Spec.NotifySession {
+				msg += " You will be notified when it completes."
+			} else {
+				msg += " Use task_output to check status and retrieve the result."
+			}
 			if w.path != "" {
 				msg += " To check interim output, use Read on that file path."
 			}
@@ -458,6 +461,10 @@ func newManagedBufferedExecuteTool(
 			return "", fmt.Errorf("execute task %q has unknown status %q", result.Spec.ID, result.Status)
 		}
 	})
+}
+
+func noNotificationSessionID(context.Context) (string, error) {
+	return "", nil
 }
 
 func newManagedStreamingExecuteTool(

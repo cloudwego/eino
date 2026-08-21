@@ -449,10 +449,14 @@ func TestRunnerLocalContracts(t *testing.T) {
 	notice := defaultBackgroundNotice(context.Background(), NoticeInfo{Task: task})
 	require.Contains(t, notice, "is running in the background")
 	require.Contains(t, notice, "/tasks/output")
+	require.Contains(t, notice, "task_output")
+	require.NotContains(t, notice, "you will be notified")
+	task.Spec.NotifySession = true
 	notice = defaultBackgroundNotice(context.Background(), NoticeInfo{
 		Task: task, AutoBackgrounded: true,
 	})
 	require.Contains(t, notice, "moved to the background")
+	require.Contains(t, notice, "you will be notified")
 
 	work := func(context.Context, backgroundtask.ExecutionRuntime) (string, error) {
 		return "done", nil
