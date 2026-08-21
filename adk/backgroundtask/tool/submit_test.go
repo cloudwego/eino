@@ -129,6 +129,30 @@ func TestSubmitBuildsManagedToolSpecWithoutInputPreparer_BitsUT(t *testing.T) {
 	}, payload)
 }
 
+func TestSubmitWithoutNotificationSession_BitsUT(t *testing.T) {
+	registry := NewRegistry()
+	require.NoError(t, registry.Register(&Registration{
+		Info: toolInfo("direct"),
+		Tool: &submitValidationTool{},
+	}))
+	executors := backgroundtask.NewExecutorRegistry()
+	require.NoError(t, RegisterExecutors(executors, registry))
+	manager := mustNewBackgroundManager(t, context.Background(), &backgroundtask.Config{
+		Executors: executors,
+		IDGen: func(context.Context, *backgroundtask.AllocateTaskIDRequest) (string, error) {
+			return "task-without-notification", nil
+		},
+	})
+
+	task, err := Submit(context.Background(), manager, registry, &SubmitRequest{
+		ToolName: "direct", Arguments: `{"value":"input"}`,
+		DisableLifecycleNotifications: true,
+	})
+	require.NoError(t, err)
+	require.Empty(t, task.Spec.SessionID)
+	require.False(t, task.Spec.NotifySession)
+}
+
 func TestSubmitValidatesBeforeAllocationAndReservation_BitsUT(t *testing.T) {
 	validationErr := errors.New("invalid arguments")
 	materializer := &countingMaterializer{}
@@ -197,12 +221,12 @@ func TestSubmitRejectsInvalidRequestsAndDependencyFailures_BitsUT(t *testing.T) 
 		{
 			name: "empty tool name", manager: manager, registry: registry,
 			req: &SubmitRequest{Arguments: "{}", SessionID: "parent"},
-			err: "backgroundtask/tool: tool name and parent session are required",
+			err: "backgroundtask/tool: tool name is required",
 		},
 		{
 			name: "empty parent session", manager: manager, registry: registry,
 			req: &SubmitRequest{ToolName: "direct", Arguments: "{}"},
-			err: "backgroundtask/tool: tool name and parent session are required",
+			err: "backgroundtask/tool: notification session is required when lifecycle notifications are enabled",
 		},
 		{
 			name: "unregistered tool", manager: manager, registry: registry,

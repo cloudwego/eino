@@ -39,7 +39,7 @@ type recoverableShellStub struct {
 
 func TestBackgroundConfigSeparatesExecutionModes_BitsUT(t *testing.T) {
 	configType := reflect.TypeOf(BackgroundConfig{})
-	for _, field := range []string{"Local", "Recoverable"} {
+	for _, field := range []string{"Local", "Recoverable", "NotificationSessionID"} {
 		_, ok := configType.FieldByName(field)
 		require.True(t, ok)
 	}

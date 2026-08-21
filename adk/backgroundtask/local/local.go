@@ -645,12 +645,14 @@ func (e *executor) remove(taskID string) {
 
 func defaultBackgroundNotice(_ context.Context, info NoticeInfo) string {
 	id, kind, outputFile := "", "", ""
+	notifySession := false
 	if info.Task != nil {
 		id = info.Task.Spec.ID
 		if info.Task.Spec.Kind != "" {
 			kind = " (" + info.Task.Spec.Kind + ")"
 		}
 		outputFile = info.Task.Spec.OutputFile
+		notifySession = info.Task.Spec.NotifySession
 	}
 	state := "is running in the background"
 	if info.AutoBackgrounded {
@@ -663,8 +665,9 @@ func defaultBackgroundNotice(_ context.Context, info NoticeInfo) string {
 			outputFile,
 		)
 	}
-	return fmt.Sprintf(
-		"\n[task %s%s %s; you will be notified when it completes.%s]",
-		id, kind, state, output,
-	)
+	completion := "; use task_output to check status and retrieve the result."
+	if notifySession {
+		completion = "; you will be notified when it completes."
+	}
+	return fmt.Sprintf("\n[task %s%s %s%s%s]", id, kind, state, completion, output)
 }
