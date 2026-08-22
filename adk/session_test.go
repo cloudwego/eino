@@ -539,6 +539,18 @@ type testSessionHandle struct {
 	sessionID string
 }
 
+type recordingSessionHandle struct {
+	sessionHandle[*schema.Message]
+	loadRequests []*LoadSessionEventsRequest
+}
+
+func (h *recordingSessionHandle) loadEvents(ctx context.Context, req *LoadSessionEventsRequest) (*LoadSessionEventsResult[*schema.Message], error) {
+	recorded := *req
+	recorded.Kinds = append([]SessionEventKind(nil), req.Kinds...)
+	h.loadRequests = append(h.loadRequests, &recorded)
+	return h.sessionHandle.loadEvents(ctx, req)
+}
+
 func (h *testSessionHandle) loadEvents(ctx context.Context, req *LoadSessionEventsRequest) (*LoadSessionEventsResult[*schema.Message], error) {
 	if req == nil {
 		req = &LoadSessionEventsRequest{}
@@ -2358,41 +2370,256 @@ func TestReconstructFromEventLog_CorruptEventReturnsError(t *testing.T) {
 	require.Error(t, err, "corrupt event must cause reconstruction failure")
 }
 
-// TestReconstructFromEventLog_WithSummarizationBoundary: events before
-// MessagesReplaced are ignored; reconstruction starts from boundary.
-func TestReconstructFromEventLog_WithSummarizationBoundary(t *testing.T) {
-	store := newSessionHelperStore()
+func TestReconstructSessionStateStopsAtMessagesReplaced(t *testing.T) {
 	ctx := context.Background()
-	sid := "with-boundary"
 
-	// Pre-boundary events (should be ignored).
-	for i := 0; i < 3; i++ {
-		m := schema.UserMessage("pre")
-		EnsureMessageID(m)
-		se := withTestEventID(&SessionEvent[*schema.Message]{Message: m})
-		require.NoError(t, store.AppendEventsForSession(ctx, sid, []*SessionEvent[*schema.Message]{se}))
+	appendEvents := func(t *testing.T, store *sessionHelperStore, sid string, events ...*SessionEvent[*schema.Message]) {
+		t.Helper()
+		for _, event := range events {
+			appendTestSessionEvent(t, ctx, store, sid, event)
+		}
+	}
+	messageEvent := func(content string) *SessionEvent[*schema.Message] {
+		return &SessionEvent[*schema.Message]{
+			Kind:    SessionEventMessage,
+			Message: testMessageWithID(content, schema.User),
+		}
+	}
+	replacementEvent := func(messages []*schema.Message) *SessionEvent[*schema.Message] {
+		return &SessionEvent[*schema.Message]{
+			Kind:             SessionEventMessagesReplaced,
+			MessagesReplaced: &messages,
+		}
+	}
+	reconstruct := func(t *testing.T, store *sessionHelperStore, sid string, pageSize int) (*sessionReconstructResult[*schema.Message], *recordingSessionHandle) {
+		t.Helper()
+		handle := &recordingSessionHandle{sessionHandle: store}
+		result, err := reconstructSessionState[*schema.Message](ctx, handle, sid, pageSize)
+		require.NoError(t, err)
+		require.NotNil(t, result)
+		require.NotNil(t, result.state)
+		return result, handle
 	}
 
-	// Boundary: summary of all messages.
-	summary := schema.UserMessage("summary")
-	EnsureMessageID(summary)
-	repl := []*schema.Message{summary}
-	se := withTestEventID(&SessionEvent[*schema.Message]{MessagesReplaced: &repl})
-	require.NoError(t, store.AppendEventsForSession(ctx, sid, []*SessionEvent[*schema.Message]{se}))
+	for _, tc := range []struct {
+		name      string
+		preCount  int
+		postCount int
+		pageSize  int
+		wantLoads int
+	}{
+		{name: "replacement in first page middle", preCount: 2, postCount: 1, pageSize: 3, wantLoads: 1},
+		{name: "replacement in later page middle", preCount: 2, postCount: 4, pageSize: 3, wantLoads: 2},
+		{name: "replacement at page boundary", preCount: 2, postCount: 2, pageSize: 2, wantLoads: 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := newSessionHelperStore()
+			sid := tc.name
+			for i := 0; i < tc.preCount; i++ {
+				appendEvents(t, store, sid, messageEvent(fmt.Sprintf("pre-%d", i)))
+			}
+			summary := testMessageWithID("summary", schema.User)
+			appendEvents(t, store, sid, replacementEvent([]*schema.Message{summary}))
+			for i := 0; i < tc.postCount; i++ {
+				appendEvents(t, store, sid, messageEvent(fmt.Sprintf("post-%d", i)))
+			}
 
-	// Post-boundary events.
-	post := schema.AssistantMessage("post", nil)
-	EnsureMessageID(post)
-	se = withTestEventID(&SessionEvent[*schema.Message]{Message: post})
-	require.NoError(t, store.AppendEventsForSession(ctx, sid, []*SessionEvent[*schema.Message]{se}))
+			result, handle := reconstruct(t, store, sid, tc.pageSize)
 
-	result, err := reconstructSessionState[*schema.Message](ctx, store, sid, defaultLoadPageSize)
-	require.NoError(t, err)
-	require.NotNil(t, result)
-	require.NotNil(t, result.state)
-	require.Len(t, result.state.Messages, 2)
-	assert.Equal(t, "summary", result.state.Messages[0].Content)
-	assert.Equal(t, "post", result.state.Messages[1].Content)
+			require.Len(t, handle.loadRequests, tc.wantLoads)
+			require.Len(t, result.state.Messages, tc.postCount+1)
+			assert.Equal(t, "summary", result.state.Messages[0].Content)
+			for i := 0; i < tc.postCount; i++ {
+				assert.Equal(t, fmt.Sprintf("post-%d", i), result.state.Messages[i+1].Content)
+			}
+		})
+	}
+
+	t.Run("empty replacement is a boundary", func(t *testing.T) {
+		store := newSessionHelperStore()
+		sid := "empty-replacement"
+		empty := []*schema.Message{}
+		appendEvents(t, store, sid,
+			messageEvent("pre-0"),
+			messageEvent("pre-1"),
+			replacementEvent(empty),
+			messageEvent("post"),
+		)
+
+		result, handle := reconstruct(t, store, sid, 3)
+
+		require.Len(t, handle.loadRequests, 1)
+		require.Len(t, result.state.Messages, 1)
+		assert.Equal(t, "post", result.state.Messages[0].Content)
+	})
+
+	t.Run("message mutations and model context after replacement", func(t *testing.T) {
+		store := newSessionHelperStore()
+		sid := "replacement-increments"
+		first := testMessageWithID("first", schema.User)
+		second := testMessageWithID("second", schema.User)
+		deleted := testMessageWithID("deleted", schema.User)
+		updated := testMessageWithID("first-updated", schema.Assistant)
+		setMessageIDForTest(updated, GetMessageID(first))
+		inserted := testMessageWithID("inserted", schema.User)
+		tools := []*schema.ToolInfo{{Name: "tool"}}
+		deferredTools := []*schema.ToolInfo{{Name: "deferred-tool"}}
+		boundary := replacementEvent([]*schema.Message{first, second, deleted})
+		boundary.Extra = map[string]any{"reason": "opaque-to-eino"}
+		appendEvents(t, store, sid,
+			messageEvent("pre"),
+			boundary,
+			&SessionEvent[*schema.Message]{
+				Kind: SessionEventMessageUpdated,
+				MessageUpdated: &MessageUpdatedEvent[*schema.Message]{
+					MessageID: GetMessageID(first),
+					Message:   updated,
+				},
+			},
+			&SessionEvent[*schema.Message]{
+				Kind: SessionEventMessageInserted,
+				MessageInserted: &MessageInsertedEvent[*schema.Message]{
+					Message:         inserted,
+					BeforeMessageID: GetMessageID(second),
+				},
+			},
+			&SessionEvent[*schema.Message]{
+				Kind:            SessionEventMessagesDeleted,
+				MessagesDeleted: &MessagesDeletedEvent{MessageIDs: []string{GetMessageID(deleted)}},
+			},
+			&SessionEvent[*schema.Message]{
+				Kind: SessionEventModelContext,
+				ModelContext: &ModelContextEvent{
+					ToolInfos:         tools,
+					DeferredToolInfos: deferredTools,
+				},
+			},
+		)
+
+		result, _ := reconstruct(t, store, sid, 10)
+
+		assert.Equal(t, []*schema.Message{updated, inserted, second}, result.state.Messages)
+		assert.Equal(t, tools, result.state.ToolInfos)
+		assert.Equal(t, deferredTools, result.state.DeferredToolInfos)
+		assert.True(t, result.state.sawModelContext)
+
+		fullEvents, err := loadActiveSessionEventsReverse[*schema.Message](ctx, store, sid, 2)
+		require.NoError(t, err)
+		fullState, err := replayDurableContextEvents(fullEvents)
+		require.NoError(t, err)
+		assert.Equal(t, fullState, result.state)
+	})
+
+	t.Run("rollback after replacement falls back to full history", func(t *testing.T) {
+		store := newSessionHelperStore()
+		sid := "rollback-after-replacement"
+		appendEvents(t, store, sid,
+			messageEvent("Q1"),
+			messageEvent("A1"),
+		)
+		firstIdle := withTestCommittedIdle[*schema.Message]("turn-1")
+		require.NoError(t, store.AppendEventsForSession(ctx, sid, []*SessionEvent[*schema.Message]{firstIdle}))
+		appendEvents(t, store, sid,
+			replacementEvent([]*schema.Message{testMessageWithID("summary", schema.User)}),
+			messageEvent("post"),
+		)
+		secondIdle := withTestCommittedIdle[*schema.Message]("turn-2")
+		require.NoError(t, store.AppendEventsForSession(ctx, sid, []*SessionEvent[*schema.Message]{secondIdle}))
+		appendEvents(t, store, sid, &SessionEvent[*schema.Message]{
+			Kind: SessionEventRollback,
+			Rollback: &SessionRollbackEvent{
+				ToEventID:                 firstIdle.EventID,
+				PreviousHeadCommitEventID: secondIdle.EventID,
+			},
+		})
+
+		result, handle := reconstruct(t, store, sid, 4)
+
+		require.Len(t, handle.loadRequests, 2)
+		require.Len(t, result.state.Messages, 2)
+		assert.Equal(t, "Q1", result.state.Messages[0].Content)
+		assert.Equal(t, "A1", result.state.Messages[1].Content)
+	})
+
+	t.Run("session without replacement loads all pages unchanged", func(t *testing.T) {
+		store := newSessionHelperStore()
+		sid := "without-replacement"
+		for i := 0; i < 5; i++ {
+			appendEvents(t, store, sid, messageEvent(fmt.Sprintf("message-%d", i)))
+		}
+
+		result, handle := reconstruct(t, store, sid, 2)
+
+		require.Len(t, handle.loadRequests, 3)
+		require.Len(t, result.state.Messages, 5)
+		fullEvents, err := loadActiveSessionEventsReverse[*schema.Message](ctx, store, sid, 2)
+		require.NoError(t, err)
+		fullState, err := replayDurableContextEvents(fullEvents)
+		require.NoError(t, err)
+		assert.Equal(t, fullState, result.state)
+	})
+}
+
+func TestAttack_ReconstructionReplacementBoundaryOrdering(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("older rollback does not suppress newer replacement", func(t *testing.T) {
+		store := newSessionHelperStore()
+		sid := "older-rollback"
+		appendCommittedTestTurn(t, ctx, store, sid, "turn-1", "Q1", "A1")
+		appendCommittedTestTurn(t, ctx, store, sid, "turn-2", "Q2", "A2")
+		require.NoError(t, RollbackSession[*schema.Message](ctx, store, sid, "turn-1"))
+
+		summary := testMessageWithID("summary", schema.User)
+		replacement := []*schema.Message{summary}
+		appendTestSessionEvent(t, ctx, store, sid, &SessionEvent[*schema.Message]{
+			Kind:             SessionEventMessagesReplaced,
+			MessagesReplaced: &replacement,
+		})
+		post := testMessageWithID("post", schema.Assistant)
+		appendTestSessionEvent(t, ctx, store, sid, &SessionEvent[*schema.Message]{
+			Kind:    SessionEventMessage,
+			Message: post,
+		})
+
+		handle := &recordingSessionHandle{sessionHandle: store}
+		result, err := reconstructSessionState[*schema.Message](ctx, handle, sid, 4)
+		require.NoError(t, err)
+		require.NotNil(t, result)
+		require.NotNil(t, result.state)
+		assert.Equal(t, []*schema.Message{summary, post}, result.state.Messages)
+		assert.Len(t, handle.loadRequests, 1)
+		t.Log("a rollback older than the latest replacement remains outside the replay window")
+	})
+
+	t.Run("latest replacement wins", func(t *testing.T) {
+		store := newSessionHelperStore()
+		sid := "latest-replacement"
+		firstSummary := testMessageWithID("first-summary", schema.User)
+		firstReplacement := []*schema.Message{firstSummary}
+		secondSummary := testMessageWithID("second-summary", schema.User)
+		secondReplacement := []*schema.Message{secondSummary}
+		for _, event := range []*SessionEvent[*schema.Message]{
+			{Kind: SessionEventMessage, Message: testMessageWithID("pre", schema.User)},
+			{Kind: SessionEventMessagesReplaced, MessagesReplaced: &firstReplacement},
+			{Kind: SessionEventMessage, Message: testMessageWithID("between", schema.Assistant)},
+			{Kind: SessionEventMessagesReplaced, MessagesReplaced: &secondReplacement},
+			{Kind: SessionEventMessage, Message: testMessageWithID("post", schema.Assistant)},
+		} {
+			appendTestSessionEvent(t, ctx, store, sid, event)
+		}
+
+		handle := &recordingSessionHandle{sessionHandle: store}
+		result, err := reconstructSessionState[*schema.Message](ctx, handle, sid, 4)
+		require.NoError(t, err)
+		require.NotNil(t, result)
+		require.NotNil(t, result.state)
+		require.Len(t, result.state.Messages, 2)
+		assert.Equal(t, "second-summary", result.state.Messages[0].Content)
+		assert.Equal(t, "post", result.state.Messages[1].Content)
+		assert.Len(t, handle.loadRequests, 1)
+		t.Log("the newest replacement is selected without reading through an older replacement")
+	})
 }
 
 func TestSessionRollbackEventRoundTrip(t *testing.T) {
