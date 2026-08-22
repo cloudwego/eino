@@ -205,18 +205,30 @@ func ConcatSliceValue(val reflect.Value) (reflect.Value, error) {
 }
 
 func toSliceValue(vs []any) (reflect.Value, error) {
-	typ := reflect.TypeOf(vs[0])
+	// Filter out nil elements and find the first non-nil element's type.
+	var nonNil []any
+	for _, v := range vs {
+		if v != nil {
+			nonNil = append(nonNil, v)
+		}
+	}
 
-	ret := reflect.MakeSlice(reflect.SliceOf(typ), len(vs), len(vs))
-	ret.Index(0).Set(reflect.ValueOf(vs[0]))
+	if len(nonNil) == 0 {
+		// All elements are nil; return an empty []any slice.
+		return reflect.ValueOf([]any{}), nil
+	}
 
-	for i := 1; i < len(vs); i++ {
-		v := vs[i]
+	typ := reflect.TypeOf(nonNil[0])
+	for i, v := range nonNil {
 		vt := reflect.TypeOf(v)
 		if typ != vt {
 			return reflect.Value{}, fmt.Errorf("unexpected slice element type. Got %v, expected %v", typ, vt)
 		}
+		_ = i
+	}
 
+	ret := reflect.MakeSlice(reflect.SliceOf(typ), len(nonNil), len(nonNil))
+	for i, v := range nonNil {
 		ret.Index(i).Set(reflect.ValueOf(v))
 	}
 
