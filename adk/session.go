@@ -1617,7 +1617,7 @@ func reconstructSessionState[M MessageType](
 	sessionID string,
 	pageSize int,
 ) (*sessionReconstructResult[M], error) {
-	allEvents, err := loadActiveSessionEventsReverse[M](ctx, handle, sessionID, pageSize)
+	allEvents, err := loadSessionEventsForReconstructionReverse[M](ctx, handle, pageSize)
 	if err != nil {
 		return nil, err
 	}
@@ -1632,17 +1632,35 @@ func reconstructSessionState[M MessageType](
 	return &sessionReconstructResult[M]{state: state}, nil
 }
 
+func loadSessionEventsForReconstructionReverse[M MessageType](
+	ctx context.Context,
+	handle sessionHandle[M],
+	pageSize int,
+) ([]*SessionEvent[M], error) {
+	return loadProjectedSessionEventsReverse(ctx, handle, pageSize, true)
+}
+
 func loadActiveSessionEventsReverse[M MessageType](
 	ctx context.Context,
 	handle sessionHandle[M],
 	sessionID string,
 	pageSize int,
 ) ([]*SessionEvent[M], error) {
+	return loadProjectedSessionEventsReverse(ctx, handle, pageSize, false)
+}
+
+func loadProjectedSessionEventsReverse[M MessageType](
+	ctx context.Context,
+	handle sessionHandle[M],
+	pageSize int,
+	stopAtMessagesReplaced bool,
+) ([]*SessionEvent[M], error) {
 	if pageSize <= 0 {
 		pageSize = defaultLoadPageSize
 	}
 	var physicalReverse []*SessionEvent[M]
 	var after string
+	var sawRollback bool
 	for {
 		result, err := handle.loadEvents(ctx, &LoadSessionEventsRequest{
 			After:   after,
@@ -1656,7 +1674,28 @@ func loadActiveSessionEventsReverse[M MessageType](
 		if result == nil || len(result.Events) == 0 {
 			break
 		}
-		physicalReverse = append(physicalReverse, result.Events...)
+
+		stopAt := len(result.Events)
+		foundBoundary := false
+		if stopAtMessagesReplaced && !sawRollback {
+			for i, event := range result.Events {
+				// A newer rollback may project the active head before this replacement,
+				// so reconstruction needs the complete physical history.
+				if event.Kind == SessionEventRollback {
+					sawRollback = true
+					break
+				}
+				if event.MessagesReplaced != nil {
+					stopAt = i + 1
+					foundBoundary = true
+					break
+				}
+			}
+		}
+		physicalReverse = append(physicalReverse, result.Events[:stopAt]...)
+		if foundBoundary {
+			break
+		}
 		if result.Next == "" {
 			break
 		}
