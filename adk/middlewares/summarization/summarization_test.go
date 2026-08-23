@@ -1122,6 +1122,44 @@ func TestWindowMessagesByTokenLimit(t *testing.T) {
 	assert.Same(t, recentMessage, window[0])
 
 	assert.Nil(t, windowMessagesByTokenLimit(messages, 0))
+
+	t.Run("drops an orphaned message tool result at the boundary", func(t *testing.T) {
+		toolCall := schema.AssistantMessage("", []schema.ToolCall{{
+			ID: "call_1",
+			Function: schema.FunctionCall{
+				Name: "lookup",
+			},
+		}})
+		toolResult := schema.ToolMessage("result", "call_1")
+		messages := []adk.Message{toolCall, toolResult, recentMessage}
+		limit := estimateTypedMessageTokens(toolResult) + estimateTypedMessageTokens(recentMessage)
+
+		window := windowMessagesByTokenLimit(messages, limit)
+		require.Len(t, window, 1)
+		assert.Same(t, recentMessage, window[0])
+	})
+
+	t.Run("drops an orphaned agentic tool result at the boundary", func(t *testing.T) {
+		toolCall := &schema.AgenticMessage{
+			Role: schema.AgenticRoleTypeAssistant,
+			ContentBlocks: []*schema.ContentBlock{
+				schema.NewContentBlock(&schema.FunctionToolCall{CallID: "call_1", Name: "lookup"}),
+			},
+		}
+		toolResult := &schema.AgenticMessage{
+			Role: schema.AgenticRoleTypeUser,
+			ContentBlocks: []*schema.ContentBlock{
+				schema.NewContentBlock(&schema.FunctionToolResult{CallID: "call_1", Name: "lookup"}),
+			},
+		}
+		recentMessage := schema.UserAgenticMessage("recent")
+		messages := []*schema.AgenticMessage{toolCall, toolResult, recentMessage}
+		limit := estimateTypedMessageTokens(toolResult) + estimateTypedMessageTokens(recentMessage)
+
+		window := windowMessagesByTokenLimit(messages, limit)
+		require.Len(t, window, 1)
+		assert.Same(t, recentMessage, window[0])
+	})
 }
 
 func TestMiddlewareSummarize(t *testing.T) {

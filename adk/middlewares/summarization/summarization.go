@@ -655,8 +655,31 @@ func windowMessagesByTokenLimit[M adk.MessageType](messages []M, tokenLimit int)
 		total += tokens
 		start = i
 	}
+	// A token boundary can land between an assistant tool call and its result.
+	// Do not send an orphaned leading result to the summarization model: providers
+	// generally require every tool result to follow its corresponding tool call.
+	for start < len(messages) && isToolResultMessage(messages[start]) {
+		start++
+	}
 
 	return messages[start:]
+}
+
+func isToolResultMessage[M adk.MessageType](msg M) bool {
+	switch m := any(msg).(type) {
+	case *schema.Message:
+		return m != nil && m.Role == schema.Tool
+	case *schema.AgenticMessage:
+		if m == nil || m.Role != schema.AgenticRoleTypeUser {
+			return false
+		}
+		for _, block := range m.ContentBlocks {
+			if block != nil && block.Type == schema.ContentBlockTypeFunctionToolResult {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (m *TypedMiddleware[M]) getModelInstructions() (M, M) {
