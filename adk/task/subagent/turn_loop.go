@@ -592,7 +592,7 @@ func (r *Controller[M]) Wait(
 			return result, err
 		case <-ctx.Done():
 			cancelErr := r.Cancel(context.Background(), runID)
-			return nil, errors.Join(ctx.Err(), cancelErr)
+			return nil, joinErrors(ctx.Err(), cancelErr)
 		}
 	}
 	return r.waitTask(ctx, runID)
@@ -685,7 +685,7 @@ func (r *Controller[M]) runAttached(
 		if persistErr := r.failAttached(
 			context.Background(), active.handle.ID(), status, err,
 		); persistErr != nil {
-			active.err = errors.Join(err, persistErr)
+			active.err = joinErrors(err, persistErr)
 			return
 		}
 		active.err = err
@@ -708,7 +708,7 @@ func (r *Controller[M]) runAttached(
 		if persistErr := r.failAttached(
 			context.Background(), active.handle.ID(), task.OutcomeFailed, err,
 		); persistErr != nil {
-			active.err = errors.Join(err, persistErr)
+			active.err = joinErrors(err, persistErr)
 			return
 		}
 		active.err = err
@@ -720,7 +720,7 @@ func (r *Controller[M]) runAttached(
 			active.handle.ID(),
 			background.WithCancellationReason("parent canceled sub-agent"),
 		)
-		active.err = errors.Join(ctx.Err(), cancelErr)
+		active.err = joinErrors(ctx.Err(), cancelErr)
 		return
 	}
 	go func() {
@@ -1866,6 +1866,16 @@ func nilRuntimeMessage[M adk.MessageType](message M) bool {
 	default:
 		return true
 	}
+}
+
+func joinErrors(primary, secondary error) error {
+	if primary == nil {
+		return secondary
+	}
+	if secondary == nil {
+		return primary
+	}
+	return fmt.Errorf("%w: %v", primary, secondary)
 }
 
 func checkpointCursor(checkpoint []byte) int64 {
