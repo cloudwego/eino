@@ -50,7 +50,7 @@ func (f cancellationHookFunc) OnCancel(
 
 type preemptModel struct {
 	started chan struct{}
-	runs    atomic.Int64
+	runs    int64
 }
 
 type resumableTestAgent struct {
@@ -179,7 +179,7 @@ func (m *preemptModel) Generate(
 	_ []*schema.Message,
 	_ ...model.Option,
 ) (*schema.Message, error) {
-	if m.runs.Add(1) == 1 {
+	if atomic.AddInt64(&m.runs, 1) == 1 {
 		close(m.started)
 		<-ctx.Done()
 		return nil, ctx.Err()
@@ -681,14 +681,14 @@ func TestAttack_MultipleResumeInputsFailClosed(t *testing.T) {
 
 func TestControllerBarrierWaitThenInput(t *testing.T) {
 	ctx := context.Background()
-	var barrierCalls atomic.Int64
+	var barrierCalls int64
 	runtime, manager, _ := newControllerForTest(
 		t,
 		completionBarrierFunc[*schema.Message](func(
 			context.Context,
 			*CompletionContext[*schema.Message],
 		) (CompletionAction, error) {
-			if barrierCalls.Add(1) > 1 {
+			if atomic.AddInt64(&barrierCalls, 1) > 1 {
 				return CompletionComplete, nil
 			}
 			return CompletionWaitInput, nil
@@ -928,7 +928,7 @@ func TestForegroundInputCanPreemptActiveTurn(t *testing.T) {
 	result, err := runtime.Wait(ctx, handle.ID())
 	require.NoError(t, err)
 	require.Equal(t, "preempted", result.FinalMessage.Content)
-	require.Equal(t, int64(2), model.runs.Load())
+	require.Equal(t, int64(2), atomic.LoadInt64(&model.runs))
 }
 
 func TestAttack_ReplayIdentityIgnoresFrameworkMessageID(t *testing.T) {
@@ -1080,14 +1080,14 @@ func TestAttack_StartHonorsStreamingAndTerminalCancelIsIdempotent(t *testing.T) 
 		}),
 		testEventMapper,
 	)
-	var canceled atomic.Int64
+	var canceled int64
 	runtime.cancellationHook = cancellationHookFunc(func(
 		context.Context,
 		string,
 		string,
 		string,
 	) error {
-		canceled.Add(1)
+		atomic.AddInt64(&canceled, 1)
 		return nil
 	})
 	handle, err := runtime.Start(ctx, &StartRequest[*schema.Message]{
@@ -1102,7 +1102,7 @@ func TestAttack_StartHonorsStreamingAndTerminalCancelIsIdempotent(t *testing.T) 
 	require.NoError(t, err)
 	require.True(t, <-streaming)
 	require.NoError(t, runtime.Cancel(ctx, handle.ID()))
-	require.Zero(t, canceled.Load())
+	require.Zero(t, atomic.LoadInt64(&canceled))
 }
 
 func TestAttack_BackgroundAgentErrorIsDurablyFailed(t *testing.T) {
@@ -1145,14 +1145,14 @@ func TestControllerBackgroundControlResults(t *testing.T) {
 		}),
 		testEventMapper,
 	)
-	var canceled atomic.Int64
+	var canceled int64
 	runtime.cancellationHook = cancellationHookFunc(func(
 		context.Context,
 		string,
 		string,
 		string,
 	) error {
-		canceled.Add(1)
+		atomic.AddInt64(&canceled, 1)
 		return nil
 	})
 	backgroundTask := &background.TaskSnapshot{
@@ -1171,7 +1171,7 @@ func TestControllerBackgroundControlResults(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.Equal(t, background.ExecutionActionCancel, result.Action)
-	require.Equal(t, int64(1), canceled.Load())
+	require.Equal(t, int64(1), atomic.LoadInt64(&canceled))
 
 	result, err = runtime.controlResult(
 		context.Background(),

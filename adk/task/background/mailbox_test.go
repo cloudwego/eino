@@ -306,13 +306,13 @@ func TestAttack_CompleteIfNoInputsReturnsTaskToPendingOnRace(t *testing.T) {
 
 func TestAttack_ManagerRedispatchesInputRace(t *testing.T) {
 	store := NewInMemoryStore(nil)
-	var attempts atomic.Int64
+	var attempts int64
 	executor := &scriptedExecutor{execute: func(
 		ctx context.Context,
 		backgroundTask *TaskSnapshot,
 		runtime ExecutionRuntime,
 	) (*ExecutionResult, error) {
-		if attempts.Add(1) == 1 {
+		if atomic.AddInt64(&attempts, 1) == 1 {
 			_, err := store.SendInput(ctx, &task.SendInputRequest{
 				TaskID: backgroundTask.Spec.ID,
 				Input:  task.Input{EventID: "late", Kind: "event"},
@@ -350,7 +350,7 @@ func TestAttack_ManagerRedispatchesInputRace(t *testing.T) {
 		current, getErr := manager.Get(context.Background(), backgroundTask.Spec.ID)
 		return getErr == nil && current.Status == StatusCompleted
 	}, time.Second, time.Millisecond)
-	require.Equal(t, int64(2), attempts.Load())
+	require.Equal(t, int64(2), atomic.LoadInt64(&attempts))
 }
 
 func TestAttack_TerminalFailureSealsMailboxWithPendingInput(t *testing.T) {
