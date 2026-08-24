@@ -480,6 +480,10 @@ func (e *Executor[M]) Execute(
 		if event.Output != nil && event.Output.MessageOutput != nil {
 			message, messageErr := event.Output.MessageOutput.GetMessage()
 			if messageErr != nil {
+				var retryErr *adk.WillRetryError
+				if errors.As(messageErr, &retryErr) {
+					continue
+				}
 				return nil, messageErr
 			}
 			materialized = materializedEvent(event, message)
