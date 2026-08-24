@@ -24,8 +24,8 @@ import (
 	"io"
 	"time"
 
-	"github.com/cloudwego/eino/adk/internal/foreground"
 	"github.com/cloudwego/eino/adk/internal/startwindow"
+	"github.com/cloudwego/eino/adk/internal/taskfirst"
 	taskcore "github.com/cloudwego/eino/adk/task"
 	"github.com/cloudwego/eino/adk/task/background"
 	"github.com/cloudwego/eino/schema"
@@ -163,16 +163,7 @@ func (e *executor) Execute( //nolint:cyclop,funlen // execution coordinates the 
 	resumable, supportsResume := registration.Tool.(ResumableTool)
 	var resumeCursor int64
 	var resumeCheckpoint []byte
-	if !hasInputRequest && task.Attempt == 1 {
-		if adopted := e.registry.adopted.consume(task.Spec.ID); adopted != nil {
-			run = adopted.run
-			toolCheckpoint = append([]byte(nil), adopted.checkpoint...)
-		}
-	}
-	if run != nil {
-		// The foreground owner already established the operation and handed its
-		// checkpoint to TaskSnapshot.Checkpoint during Submit.
-	} else if hasInputRequest {
+	if hasInputRequest {
 		if !supportsResume {
 			return nil, errors.New(
 				"task/tool: waiting task implementation is not resumable",
@@ -539,7 +530,7 @@ func (e *executor) persistUpdate(
 	if result.FirstEmission && persistence.projection != nil {
 		projected := cloneUpdate(update)
 		projected.EventID = result.EventID
-		persistence.projection.send(ctx, foreground.ProjectionDetached(ctx), projected)
+		persistence.projection.send(ctx, taskfirst.ProjectionDetached(ctx), projected)
 	}
 	return nil
 }

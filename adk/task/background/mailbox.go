@@ -59,6 +59,7 @@ func (s *InMemoryStore) AdoptForeground(
 	if existing := s.tasks[req.Spec.ID]; existing != nil {
 		mailbox := s.mailboxes[req.Spec.ID]
 		if mailbox != nil && mailbox.mailbox.State == task.MailboxBackground &&
+			existing.Publication == PublicationOnBackground &&
 			bytes.Equal(existing.Checkpoint, req.InitialCheckpoint) &&
 			equalSpec(existing.Spec, req.Spec) {
 			return cloneTask(existing), nil
@@ -89,7 +90,8 @@ func (s *InMemoryStore) AdoptForeground(
 	}
 	backgroundTask := &TaskSnapshot{
 		Spec: cloneSpec(req.Spec), LeaseExpiryPolicy: req.LeaseExpiryPolicy,
-		Status: status, Checkpoint: cloneBytes(req.InitialCheckpoint),
+		Publication: PublicationOnBackground,
+		Status:      status, Checkpoint: cloneBytes(req.InitialCheckpoint),
 		ContextSnapshot: cloneBytes(req.ContextSnapshot),
 		Version:         1, CreatedAt: now, UpdatedAt: now,
 	}

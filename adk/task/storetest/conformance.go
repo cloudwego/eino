@@ -82,6 +82,8 @@ func RunLifecycleStoreConformance(t *testing.T, config LifecycleStoreConfig) {
 		runCreateInitialCheckpointConformance(t, config.New(t))
 	})
 
+	runPublicationConformance(t, config.New)
+
 	t.Run("transitions_and_cas", func(t *testing.T) {
 		store := config.New(t)
 		started := createAndStart(t, store, "transitions", background.LeaseExpiryRetry)
@@ -342,6 +344,67 @@ func RunNotificationOutboxConformance(t *testing.T, config NotificationOutboxCon
 	require.NotEqual(t, first.Deliveries[0].Receipt, second.Deliveries[0].Receipt)
 	require.Error(t, outbox.Ack(context.Background(), first.Deliveries[0].Receipt))
 	require.NoError(t, outbox.Ack(context.Background(), second.Deliveries[0].Receipt))
+
+	deferredSpec := testSpec("deferred-notification")
+	deferredSpec.RootSessionID = "session"
+	deferredSpec.NotifySession = true
+	deferred, err := tasks.Create(
+		context.Background(),
+		&background.CreateTaskRequest{
+			Spec: deferredSpec, Publication: background.PublicationDeferred,
+			LeaseExpiryPolicy: background.LeaseExpiryRetry,
+		},
+	)
+	require.NoError(t, err)
+	hidden, err := outbox.Receive(
+		context.Background(),
+		&background.ReceiveNotificationsRequest{
+			Limit: 10, LeaseDuration: lease,
+		},
+	)
+	require.NoError(t, err)
+	require.Empty(t, hidden.Deliveries)
+	published, err := tasks.Publish(
+		context.Background(),
+		&background.PublishTaskRequest{
+			TaskID: deferred.Spec.ID, ExpectedVersion: deferred.Version,
+		},
+	)
+	require.NoError(t, err)
+	require.Equal(t, background.PublicationOnBackground, published.Publication)
+	backgrounded, err := outbox.Receive(
+		context.Background(),
+		&background.ReceiveNotificationsRequest{
+			Limit: 10, LeaseDuration: lease,
+		},
+	)
+	require.NoError(t, err)
+	require.Len(t, backgrounded.Deliveries, 1)
+	require.Equal(
+		t,
+		background.NotificationTaskBackgrounded,
+		backgrounded.Deliveries[0].Record.Kind,
+	)
+	require.NoError(t, outbox.Ack(
+		context.Background(),
+		backgrounded.Deliveries[0].Receipt,
+	))
+	replayed, err := tasks.Publish(
+		context.Background(),
+		&background.PublishTaskRequest{
+			TaskID: published.Spec.ID, ExpectedVersion: published.Version,
+		},
+	)
+	require.NoError(t, err)
+	require.Equal(t, published.Version, replayed.Version)
+	duplicate, err := outbox.Receive(
+		context.Background(),
+		&background.ReceiveNotificationsRequest{
+			Limit: 10, LeaseDuration: lease,
+		},
+	)
+	require.NoError(t, err)
+	require.Empty(t, duplicate.Deliveries)
 }
 
 // RunNotificationWriterConformance checks authorization-before-replay,
@@ -589,6 +652,7 @@ func runCreateSnapshotConformance(t testing.TB, store background.TaskStore) {
 	require.False(t, created.CreatedAt.IsZero())
 	require.Equal(t, created.CreatedAt, created.UpdatedAt)
 	require.Equal(t, background.StatusPending, created.Status)
+	require.Equal(t, background.PublicationOnCreate, created.Publication)
 	spec.Payload[0] = 'X'
 	created.Spec.Payload[0] = 'Y'
 	stored, err := store.Get(context.Background(), spec.ID)
@@ -614,6 +678,87 @@ func runCreateInitialCheckpointConformance(
 	stored, err := store.Get(context.Background(), spec.ID)
 	require.NoError(t, err)
 	require.Equal(t, "checkpoint", string(stored.Checkpoint))
+}
+
+func runPublicationConformance(
+	t *testing.T,
+	newStore func(testing.TB) background.LifecycleStore,
+) {
+	t.Helper()
+	t.Run("publication_transition_and_replay", func(t *testing.T) {
+		store := newStore(t)
+		created, err := store.Create(
+			context.Background(),
+			&background.CreateTaskRequest{
+				Spec:              testSpec("deferred-publication"),
+				Publication:       background.PublicationDeferred,
+				LeaseExpiryPolicy: background.LeaseExpiryRetry,
+			},
+		)
+		require.NoError(t, err)
+		require.Equal(t, background.PublicationDeferred, created.Publication)
+		published, err := store.Publish(
+			context.Background(),
+			&background.PublishTaskRequest{
+				TaskID: created.Spec.ID, ExpectedVersion: created.Version,
+			},
+		)
+		require.NoError(t, err)
+		require.Equal(t, background.PublicationOnBackground, published.Publication)
+		require.Equal(t, created.Version, published.Version)
+		replayed, err := store.Publish(
+			context.Background(),
+			&background.PublishTaskRequest{
+				TaskID: published.Spec.ID, ExpectedVersion: published.Version,
+			},
+		)
+		require.NoError(t, err)
+		require.Equal(t, published.Version, replayed.Version)
+
+		created = create(
+			t,
+			store,
+			testSpec("created-publication"),
+			background.LeaseExpiryRetry,
+		)
+		require.Equal(t, background.PublicationOnCreate, created.Publication)
+		_, err = store.Publish(
+			context.Background(),
+			&background.PublishTaskRequest{
+				TaskID: created.Spec.ID, ExpectedVersion: created.Version,
+			},
+		)
+		require.ErrorIs(t, err, background.ErrIllegalTransition)
+	})
+
+	t.Run("terminal_deferred_task_cannot_publish", func(t *testing.T) {
+		store := newStore(t)
+		created, err := store.Create(
+			context.Background(),
+			&background.CreateTaskRequest{
+				Spec:              testSpec("terminal-deferred"),
+				Publication:       background.PublicationDeferred,
+				LeaseExpiryPolicy: background.LeaseExpiryRetry,
+			},
+		)
+		require.NoError(t, err)
+		canceled, err := store.RequestCancel(
+			context.Background(),
+			&background.RequestCancelRequest{
+				TaskID: created.Spec.ID, ExpectedVersion: created.Version,
+				Reason: "foreground timeout",
+			},
+		)
+		require.NoError(t, err)
+		require.Equal(t, background.StatusCanceled, canceled.Status)
+		_, err = store.Publish(
+			context.Background(),
+			&background.PublishTaskRequest{
+				TaskID: canceled.Spec.ID, ExpectedVersion: canceled.Version,
+			},
+		)
+		require.ErrorIs(t, err, background.ErrAlreadyTerminal)
+	})
 }
 
 func create(

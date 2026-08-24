@@ -20,7 +20,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
 	"reflect"
 	"strings"
 	"testing"
@@ -447,107 +446,5 @@ func TestManagedToolTimeoutOverrideStopsRun(t *testing.T) {
 	case <-stopped:
 	case <-time.After(time.Second):
 		t.Fatal("timeout did not stop the logical operation")
-	}
-}
-
-func TestManagedToolProjectionErrors(t *testing.T) {
-	newManaged := func(registration *Registration) *managedTool {
-		return &managedTool{
-			registry:     newRegistryWithProjection(),
-			registration: registration,
-		}
-	}
-	runProject := func(
-		t *testing.T,
-		managed *managedTool,
-		ctx context.Context,
-		taskID string,
-		result launchResult,
-	) ([]*schema.ToolResult, error) {
-		t.Helper()
-		projection, err := managed.registry.projections.register(taskID)
-		require.NoError(t, err)
-		if result.task != nil && result.task.Status != background.StatusRunning {
-			projection.closeUpdates()
-		}
-		reader, writer := schema.Pipe[*schema.ToolResult](2)
-		done := make(chan launchResult, 1)
-		done <- result
-		go managed.project(ctx, taskID, projection, done, writer)
-		return receiveProjectResult(t, reader)
-	}
-	registration := &Registration{Info: toolInfo("project")}
-	managed := newManaged(registration)
-	_, err := runProject(t, managed, context.Background(), "run-error", launchResult{
-		err: errors.New("run failed"),
-	})
-	require.ErrorContains(t, err, "run failed")
-
-	managed = newManaged(registration)
-	_, err = runProject(t, managed, context.Background(), "nil-task", launchResult{})
-	require.ErrorContains(t, err, "nil task")
-
-	invalidRegistration := &Registration{
-		Info: toolInfo("project"),
-		RenderResult: func(context.Context, *background.TaskSnapshot) (*schema.ToolResult, error) {
-			return nil, errors.New("render failed")
-		},
-	}
-	managed = newManaged(invalidRegistration)
-	_, err = runProject(t, managed, context.Background(), "invalid-final", launchResult{
-		task: &background.TaskSnapshot{
-			Spec:   background.Spec{ID: "invalid-final"},
-			Status: background.StatusCompleted,
-		},
-	})
-	require.ErrorContains(t, err, "render failed")
-
-	managed = newManaged(registration)
-	canceledCtx, cancel := context.WithCancel(context.Background())
-	cancel()
-	projection, err := managed.registry.projections.register("canceled")
-	require.NoError(t, err)
-	reader, writer := schema.Pipe[*schema.ToolResult](1)
-	go managed.project(
-		canceledCtx, "canceled", projection, make(chan launchResult), writer,
-	)
-	_, err = receiveProjectResult(t, reader)
-	require.ErrorIs(t, err, context.Canceled)
-
-	managed = newManaged(registration)
-	projection, err = managed.registry.projections.register("closed-reader")
-	require.NoError(t, err)
-	reader, writer = schema.Pipe[*schema.ToolResult](1)
-	reader.Close()
-	projection.updates <- &Update{EventID: "ignored"}
-	go managed.project(
-		context.Background(), "closed-reader", projection,
-		make(chan launchResult), writer,
-	)
-	require.Eventually(t, func() bool {
-		return managed.registry.projections.load("closed-reader") == nil
-	}, time.Second, time.Millisecond)
-}
-
-func newRegistryWithProjection() *Registry {
-	return NewRegistry()
-}
-
-func receiveProjectResult(
-	t *testing.T,
-	reader *schema.StreamReader[*schema.ToolResult],
-) ([]*schema.ToolResult, error) {
-	t.Helper()
-	defer reader.Close()
-	var records []*schema.ToolResult
-	for {
-		record, err := reader.Recv()
-		if err != nil {
-			if errors.Is(err, io.EOF) {
-				return records, nil
-			}
-			return records, err
-		}
-		records = append(records, record)
 	}
 }

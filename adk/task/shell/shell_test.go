@@ -78,7 +78,6 @@ func TestNewRegistrationAndAdapter(t *testing.T) {
 	require.Equal(t, "Run shell command", registration.Description(`{"command":`))
 
 	adapted := registration.Tool.(backgroundtool.RecoverableTool)
-	handoff := registration.Tool.(backgroundtool.ForegroundHandoffTool)
 	require.NoError(t, adapted.ValidateArguments(`{"command":"echo hello"}`))
 	require.Error(t, adapted.ValidateArguments(`{"command":""}`))
 	require.Error(t, adapted.ValidateArguments(`{`))
@@ -111,24 +110,6 @@ func TestNewRegistrationAndAdapter(t *testing.T) {
 	require.Error(t, err)
 	_, err = adapted.Recover(context.Background(), &backgroundtool.RecoverRequest{
 		Arguments: `{`,
-	})
-	require.Error(t, err)
-
-	adopted, err := handoff.Adopt(context.Background(), &backgroundtool.AdoptRequest{
-		TaskID: "task", Arguments: `{"command":"echo hello"}`, Run: backend.run,
-		ToolCheckpoint: []byte("checkpoint"),
-	})
-	require.NoError(t, err)
-	require.Equal(t, backend.run, adopted.Run)
-	require.Equal(t, "checkpoint", string(adopted.ToolCheckpoint))
-	_, err = handoff.Adopt(context.Background(), nil)
-	require.Error(t, err)
-	_, err = handoff.Adopt(context.Background(), &backgroundtool.AdoptRequest{
-		Arguments: `{"command":"echo hello"}`,
-	})
-	require.Error(t, err)
-	_, err = handoff.Adopt(context.Background(), &backgroundtool.AdoptRequest{
-		Arguments: `{`, Run: backend.run,
 	})
 	require.Error(t, err)
 }

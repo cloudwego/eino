@@ -32,6 +32,18 @@ const (
 	LeaseExpiryFail LeaseExpiryPolicy = "fail"
 )
 
+// Publication records when a task becomes visible to its parent.
+type Publication string
+
+const (
+	// PublicationDeferred keeps a task hidden while it is observed in the foreground.
+	PublicationDeferred Publication = "deferred"
+	// PublicationOnCreate publishes a task atomically with creation.
+	PublicationOnCreate Publication = "on_create"
+	// PublicationOnBackground publishes a task when foreground observation detaches.
+	PublicationOnBackground Publication = "on_background"
+)
+
 // Spec is immutable serialized task intent supplied by the caller. Payload and
 // all returned byte slices must be copied across provider boundaries.
 // OutputFile names an optional derived transcript destination; it is not
@@ -62,7 +74,7 @@ const (
 	// NotificationTaskCreated reports that a parent-owned task was created. It
 	// is the durable recovery source for TaskCreated session-event delivery.
 	NotificationTaskCreated NotificationKind = "task_created"
-	// NotificationTaskBackgrounded reports foreground ownership transfer.
+	// NotificationTaskBackgrounded reports that a foreground projection detached.
 	NotificationTaskBackgrounded NotificationKind = "task_backgrounded"
 	// NotificationWaitingInput reports that a task is paused waiting for resume input.
 	NotificationWaitingInput NotificationKind = "waiting_input"
@@ -100,11 +112,13 @@ type NotifyParentRequest struct {
 	Delivery task.InputDelivery
 }
 
-// CreateTaskRequest creates a task from immutable serialized intent and the
-// recovery policy owned by its registered Executor. TaskStore assigns all
-// lifecycle timestamps, including TaskSnapshot.CreatedAt.
+// CreateTaskRequest creates a task from immutable serialized intent, its
+// publication timing, and the recovery policy owned by its registered
+// Executor. TaskStore assigns all lifecycle timestamps, including
+// TaskSnapshot.CreatedAt.
 type CreateTaskRequest struct {
 	Spec              Spec
+	Publication       Publication
 	LeaseExpiryPolicy LeaseExpiryPolicy
 	Checkpoint        []byte
 	// ParentExecution authorizes creation under Spec.ParentTaskID.

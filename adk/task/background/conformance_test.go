@@ -125,7 +125,7 @@ func TestSimplifiedPublicModelHasNoOverlappingStateFields_BitsUT(t *testing.T) {
 	assertFieldsPresent(t, reflect.TypeOf(Spec{}), "RootSessionID", "NotifySession")
 	assertFieldsAbsent(t, reflect.TypeOf(Spec{}), "CreatedAt")
 	assertFieldsPresent(t, reflect.TypeOf(TaskSnapshot{}),
-		"Spec", "LeaseExpiryPolicy", "Status", "Checkpoint", "ResultData", "ResultError",
+		"Spec", "Publication", "LeaseExpiryPolicy", "Status", "Checkpoint", "ResultData", "ResultError",
 		"ContextSnapshot", "Version", "CreatedAt")
 	assertFieldsAbsent(t, reflect.TypeOf(TaskSnapshot{}),
 		"ID", "Result", "ResultRef", "TerminalReason", deprecatedResumeField, "ResumeEncoding",
@@ -151,7 +151,7 @@ func TestSimplifiedPublicModelHasNoOverlappingStateFields_BitsUT(t *testing.T) {
 		"Complete", "WaitInput", "Suspend",
 	)
 	assertMethodsPresent(t, reflect.TypeOf((*TaskStore)(nil)).Elem(),
-		"CommitStart", "ReportTranscriptFailure")
+		"CommitStart", "Publish", "ReportTranscriptFailure")
 	assertMethodsPresent(t, reflect.TypeOf((*LifecycleStore)(nil)).Elem(),
 		"CommitInput", "CompleteIfNoInputs", "WaitInputIfNoInputs",
 		"SuspendIfNoInputs")
@@ -165,12 +165,12 @@ func TestSimplifiedPublicModelHasNoOverlappingStateFields_BitsUT(t *testing.T) {
 		"ReadRecentTaskEvents", "WaitUpdate", "CreateAndStart",
 		"ValidateNotificationDelivery", "MarkBackgrounded")
 	assertMethodsPresent(t, reflect.TypeOf((*Manager)(nil)),
-		"Submit", "Get", "ListPending", "ListSuspended", "Execute", "WaitForTaskVersion",
+		"Submit", "Publish", "Get", "ListPending", "ListSuspended", "Execute", "WaitForTaskVersion",
 		"ListTaskEvents", "RequestCancel", "ReleaseSuspension", "AllocateTaskID",
 		"LoadOrRegisterExecutor", "Close")
-	assertFieldsPresent(t, reflect.TypeOf(SubmitRequest{}), "Spec", "InitialCheckpoint")
+	assertFieldsPresent(t, reflect.TypeOf(SubmitRequest{}), "Spec", "InitialCheckpoint", "Publication")
 	assertFieldsPresent(t, reflect.TypeOf(CreateTaskRequest{}),
-		"Spec", "LeaseExpiryPolicy", "Checkpoint", "ContextSnapshot")
+		"Spec", "Publication", "LeaseExpiryPolicy", "Checkpoint", "ContextSnapshot")
 	assertFieldsPresent(t, reflect.TypeOf(ReleaseSuspensionRequest{}),
 		"TaskID", "ExpectedVersion", "ContextSnapshot")
 	assertMethodsAbsent(t, reflect.TypeOf((*InMemoryStore)(nil)),

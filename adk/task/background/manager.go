@@ -66,6 +66,8 @@ const (
 type TaskSnapshot struct {
 	// Spec is the immutable serialized intent for this task.
 	Spec Spec
+	// Publication records when this task became visible to its parent.
+	Publication Publication
 	// LeaseExpiryPolicy is the immutable recovery policy selected by the
 	// registered Executor when the task is created.
 	LeaseExpiryPolicy LeaseExpiryPolicy
@@ -88,7 +90,9 @@ type TaskSnapshot struct {
 	// deployment-selected context values for future execution attempts. It is
 	// captured only when Manager is configured with a ContextSnapshotter.
 	ContextSnapshot []byte
-	// Version is the CAS version of this durable record.
+	// Version is the CAS version of lifecycle state. Publication is fenced by
+	// Version but does not advance it, so publishing cannot invalidate an
+	// active attempt.
 	Version int64
 	// Attempt counts successful claims.
 	Attempt int64

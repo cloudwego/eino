@@ -2,12 +2,12 @@
 
 ## Status
 
-Implemented on `feat/durabletask`.
+Implemented on `feat/task-ownership-runtime`.
 
 ## Purpose
 
-`adk/backgroundtask/tool` lets explicitly capable tools launch external operations
-under the existing durable task lifecycle. `adk/backgroundtask/shell` adapts remote
+`adk/task/tool` lets explicitly capable tools launch external operations
+under the shared Task lifecycle. `adk/task/shell` adapts remote
 shell backends that can recover a logical command after an Eino Worker changes.
 
 The integration does not parse arbitrary tool output and does not expose an external
@@ -47,12 +47,12 @@ The managed wrapper performs:
 validate serialized arguments
   -> allocate Eino task ID
   -> reserve an optional deterministic derived output path
-  -> persist pending Spec
-  -> foreground coordinator calls Manager.Execute
+  -> persist pending Spec as OnCreate or Deferred
+  -> task-first coordinator calls Manager.Execute
   -> Store claims and fences an attempt
   -> executor calls Start(TaskID)
-  -> persist updates
-  -> complete in foreground or detach at the foreground policy boundary
+  -> persist updates before live projection
+  -> complete internally or publish at the foreground policy boundary
 ```
 
 The persisted payload contains a version, tool name, tool-call correlation ID, and
@@ -64,7 +64,7 @@ Terminal lifecycle notifications continue to use the existing outbox and session
 inbox. Progress records never enqueue notifications and never advance task lifecycle
 version.
 
-## Foreground Result
+## Foreground Projection
 
 Invokable tools return one JSON record. Streamable tools return newline-delimited
 records, one complete record per chunk:
@@ -79,9 +79,21 @@ framework-owned. Registration-specific completed output is nested under `output`
 Concatenating stream chunks therefore remains valid NDJSON and cannot merge raw
 stdout with lifecycle JSON.
 
+Auto-backgroundable work is Manager-owned from the beginning. The foreground
+caller observes a live projection of that task; it never starts an Attempt 0
+operation and never transfers a running handle between owners.
+
 The default policy waits up to the configured foreground timeout, then allows
-automatic backgrounding. This changes caller occupancy only: task status remains
-`running`, the attempt and lease are unchanged, and update persistence continues.
+automatic backgrounding. The task starts with `PublicationDeferred`. If it
+finishes first, the caller receives an ordinary foreground result and no
+lifecycle notification is emitted. If timeout wins, `Publish` atomically changes
+publication to `PublicationOnBackground`, emits `TaskBackgrounded`, and closes
+only the projection. Task status remains `running`, the attempt and lease are
+unchanged, and update persistence continues.
+
+Explicit background launch uses the same Manager execution path with
+`PublicationOnCreate`; only the initial publication and projection behavior
+differ.
 
 If another Worker wins the initial claim, foreground coordination reloads the
 authoritative running or terminal task and returns a canonical launch result without
@@ -99,7 +111,7 @@ Worker lists pending task
   -> implementation loads its own durable running state
 ```
 
-`ExecutionDirectiveYield` is distinct from lifecycle status. It commits:
+`ExecutionActionYield` is distinct from lifecycle status. It commits:
 
 ```text
 running -> pending
@@ -122,19 +134,12 @@ Unexpected process loss is resolved by Store lease expiry. Retry-capable tasks r
 to pending, and a polling Worker dispatches the next recovery attempt. The parent
 session is not involved.
 
-## Reference Worker
+## Worker Dispatch
 
-`adk/backgroundtask/worker` is a minimal host dispatcher. It:
-
-- polls `Manager.ListPending` for configured executor keys;
-- dispatches through `Manager.Execute`;
-- bounds concurrent attempts;
-- tolerates duplicate listings and claim races through Store authorization;
-- delays only attempt-zero tasks by `InitialPickupDelay`;
-- immediately considers yielded and lease-expired tasks.
-
-Production schedulers may replace it, but a host must provide an equivalent pending
-task dispatch path for recovery to operate.
+A host scheduler polls `Manager.ListPending` for configured executor keys and
+dispatches through `Manager.Execute`. Duplicate listings and claim races are
+resolved by Store authorization. Yielded and lease-expired tasks become pending
+and are eligible for a later attempt.
 
 ## Incremental Output
 
@@ -142,7 +147,7 @@ task dispatch path for recovery to operate.
 
 ```go
 type Update struct {
-    SourceID string
+    EventID  string
     Kind     string
     Data     []byte
     Metadata map[string]string
@@ -150,21 +155,20 @@ type Update struct {
 ```
 
 Plain producers may publish unkeyed updates. Recoverable producers must provide a
-non-empty lifetime-stable `SourceID`.
+non-empty lifetime-stable `EventID`.
 
-`AppendOutputOnce(TaskID, Attempt, SourceID, Data)` is task-wide across attempts:
+`AppendTaskEvent(TaskID, Attempt, EventID, Data)` is task-wide across attempts:
 
 - first append allocates a monotonic sequence and returns `Inserted=true`;
 - byte-identical replay returns the original record and sequence;
-- different bytes under the same source ID return `ErrOutputConflict`;
+- different bytes under the same event ID return `ErrTaskEventIDConflict`;
 - attempt fencing and cancellation still apply;
 - output writes do not advance lifecycle version.
 
 Persistence precedes live projection. Replayed records are not projected twice.
 Correctness does not depend on an exact backend resume cursor.
 
-`ReadOutput` remains the forward replay API. `ReadRecentOutput` returns the newest
-bounded records in chronological order for model-facing presentation.
+`ListTaskEvents` provides snapshot-stable forward or reverse pagination.
 
 ## Derived Output Files
 
@@ -173,8 +177,8 @@ before task submission. The returned deterministic path is persisted in
 `Spec.OutputFile`.
 
 Every keyed record, including a replay, is sent to the materializer with TaskID,
-SourceID, Store sequence, path, and data. The implementation must be idempotent by
-`(TaskID, SourceID)` and preserve sequence order.
+EventID, path, and data. The implementation must be idempotent by
+`(TaskID, EventID)` and preserve event order.
 
 The Store output feed remains authoritative. On the first materializer error, the
 executor records `OutputFileErr`, disables later writes for the attempt, and continues
@@ -186,7 +190,7 @@ configured.
 
 ## Model-Facing Progress
 
-Background-task middleware resolves `TaskProgressReader` by persisted executor key.
+Task middleware resolves `TaskProgressReader` by persisted executor key.
 Managed tools use `ProgressReader`, which reads a bounded recent Store view. Durable
 sub-agents retain their child `SessionEventStore` projection through the compatibility
 fallback.
@@ -226,6 +230,11 @@ and keeps all three shell choices mutually exclusive.
 - `ControlStop` calls `Run.Stop` and acknowledges `canceled`.
 - `ControlTimeout` calls `Stop` best-effort and returns deterministic failure.
 - `ControlDrain` never calls `Stop`; recoverable work yields.
+- Caller cancellation or reader closure defaults to publishing and detaching
+  the foreground projection. A host may explicitly configure it to request
+  Task cancellation instead.
+- A failed publication after caller abort falls back to Task cancellation so an
+  undiscoverable internal operation cannot remain running.
 - Cancel intent remains durable. A later recovery attempt observes Manager control
   and stops the recovered logical operation.
 - Completion/cancel races remain Store-version and active-attempt fenced.
@@ -235,9 +244,13 @@ not treat it as logical-operation cancellation.
 
 ## Compatibility
 
-- Existing `Shell`, `StreamingShell`, process-local tasks, and durable sub-agents keep
-  their existing executor paths.
-- Existing unkeyed output records have an empty `SourceID`.
+- Existing `run_in_background`, timeout, task_output, task_stop, and foreground
+  result formats remain unchanged.
+- Auto-background and explicit background now share one task-owned executor path.
+- Direct foreground execution without an auto-background policy may retain
+  Attempt 0 and parent-owned cancellation.
+- Plain producers may leave `Update.EventID` empty; the framework assigns the
+  persisted event ID.
 - Existing `ReadTaskProgress` remains the middleware fallback.
 - Store SPI additions are alpha lifecycle extensions.
 - Public code remains compatible with Go 1.18.

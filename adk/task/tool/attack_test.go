@@ -295,7 +295,10 @@ func TestAttack_ConflictingEventIDFailsTask(t *testing.T) {
 	)
 	require.NoError(t, err)
 	event := decodeEvents(t, []*schema.ToolResult{result})[0]
-	require.Equal(t, background.StatusPending, event.Status)
+	require.Contains(t, []background.Status{
+		background.StatusRunning,
+		background.StatusFailed,
+	}, event.Status)
 	task := waitAttackTask(t, manager)
 	require.Equal(t, background.StatusFailed, task.Status)
 	require.Contains(t, task.ResultError, background.ErrTaskEventIDConflict.Error())
@@ -314,7 +317,10 @@ func TestAttack_RecoverableUpdateRequiresEventID(t *testing.T) {
 	)
 	require.NoError(t, err)
 	event := decodeEvents(t, []*schema.ToolResult{result})[0]
-	require.Equal(t, background.StatusPending, event.Status)
+	require.Contains(t, []background.Status{
+		background.StatusRunning,
+		background.StatusFailed,
+	}, event.Status)
 	task := waitAttackTask(t, manager)
 	require.Equal(t, background.StatusFailed, task.Status)
 	require.Contains(t, task.ResultError, "event id is required")
@@ -554,7 +560,10 @@ func TestAttack_AbandonedUpdateStreamFailsBoundedly(t *testing.T) {
 	require.NoError(t, err)
 	require.Less(t, time.Since(started), terminalUpdateDrainTime+time.Second)
 	event := decodeEvents(t, []*schema.ToolResult{result})[0]
-	require.Equal(t, background.StatusPending, event.Status)
+	require.Contains(t, []background.Status{
+		background.StatusRunning,
+		background.StatusFailed,
+	}, event.Status)
 	task := waitAttackTask(t, manager)
 	require.Equal(t, background.StatusFailed, task.Status)
 	require.Contains(t, task.ResultError, "update stream did not close")

@@ -710,17 +710,24 @@ func (m *Manager) restoreExecutionContext(ctx context.Context, task *TaskSnapsho
 	return restored, nil
 }
 
-// Submit validates serialized intent, persists a pending task, and
-// attempts to emit its low-latency TaskCreated parent-session event before
-// returning. Create atomically writes the durable TaskCreated outbox record; if
-// only the immediate event send fails, Submit returns the non-nil task with an
-// error wrapping ErrTaskCreatedEventUndelivered. Callers must treat that case as
-// ownership transferred and rely on the outbox for recovery.
+// Submit validates serialized intent and persists a pending task. The default
+// PublicationOnCreate mode atomically writes the durable TaskCreated
+// notification and attempts its low-latency parent-session event before
+// returning. PublicationDeferred keeps the task internal until Publish.
 func (m *Manager) Submit(ctx context.Context, req *SubmitRequest) (*TaskSnapshot, error) {
 	if req == nil {
 		return nil, errors.New("task/background: submit request is required")
 	}
 	spec := req.Spec
+	publication, err := normalizePublication(req.Publication)
+	if err != nil {
+		return nil, err
+	}
+	if publication == PublicationOnBackground {
+		return nil, errors.New(
+			"task/background: on-background publication requires Publish",
+		)
+	}
 	if spec.ID == "" {
 		return nil, errors.New("task/background: submit requires a pre-allocated task id")
 	}
@@ -757,7 +764,8 @@ func (m *Manager) Submit(ctx context.Context, req *SubmitRequest) (*TaskSnapshot
 			)
 		}
 	}
-	if spec.ParentTaskID == "" && spec.RootSessionID != "" &&
+	if publication == PublicationOnCreate &&
+		spec.ParentTaskID == "" && spec.RootSessionID != "" &&
 		m.sendTaskCreatedEvent == nil {
 		return nil, errors.New(
 			"task/background: task-created session event sender is required for parent-session tasks",
@@ -772,13 +780,15 @@ func (m *Manager) Submit(ctx context.Context, req *SubmitRequest) (*TaskSnapshot
 	}
 	policy := executor.LeaseExpiryPolicy()
 	task, err := m.tasks.Create(ctx, &CreateTaskRequest{
-		Spec: spec, LeaseExpiryPolicy: policy, Checkpoint: cloneBytes(req.InitialCheckpoint),
+		Spec: spec, Publication: publication,
+		LeaseExpiryPolicy: policy, Checkpoint: cloneBytes(req.InitialCheckpoint),
 		ContextSnapshot: contextSnapshot, ParentExecution: parentExecution,
 	})
 	if err != nil {
 		return nil, err
 	}
-	if spec.ParentTaskID == "" && spec.RootSessionID != "" {
+	if publication == PublicationOnCreate &&
+		spec.ParentTaskID == "" && spec.RootSessionID != "" {
 		if sendErr := m.sendTaskCreatedEvent(ctx, cloneTask(task)); sendErr != nil {
 			return task, &taskCreatedEventUndeliveredError{
 				taskID: task.Spec.ID,
@@ -787,6 +797,50 @@ func (m *Manager) Submit(ctx context.Context, req *SubmitRequest) (*TaskSnapshot
 		}
 	}
 	return task, nil
+}
+
+// Publish atomically exposes one deferred task as background work.
+func (m *Manager) Publish(
+	ctx context.Context,
+	taskID string,
+) (*TaskSnapshot, error) {
+	if taskID == "" {
+		return nil, errors.New("task/background: publish task id is required")
+	}
+	for retry := 0; ; retry++ {
+		current, err := m.tasks.Get(ctx, taskID)
+		if err != nil {
+			return nil, err
+		}
+		publication, err := normalizePublication(current.Publication)
+		if err != nil {
+			return nil, err
+		}
+		switch publication {
+		case PublicationOnBackground:
+			return current, nil
+		case PublicationOnCreate:
+			return nil, ErrIllegalTransition
+		case PublicationDeferred:
+		default:
+			return nil, ErrIllegalTransition
+		}
+		if terminalStatus(current.Status) {
+			return nil, ErrAlreadyTerminal
+		}
+		published, err := m.tasks.Publish(ctx, &PublishTaskRequest{
+			TaskID: taskID, ExpectedVersion: current.Version,
+		})
+		if !errors.Is(err, ErrVersionConflict) {
+			return published, err
+		}
+		if retry >= 7 {
+			return nil, err
+		}
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+	}
 }
 
 // Get returns the authoritative task snapshot.

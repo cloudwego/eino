@@ -39,7 +39,7 @@ Task 模块解决的是一个简单但容易被混淆的问题：
 | `adk/task/background` | 管理可持久化、可恢复的后台生命周期。 |
 | `adk/task/subagent` | 用 TurnLoop 执行可持续对话的 Sub-agent Task。 |
 | `adk/task/local` | 把当前进程中的闭包包装成可前台运行、可转后台观察的 Task。 |
-| `adk/task/tool` | 把外部工具适配为支持恢复、等待输入和 handoff 的 Task。 |
+| `adk/task/tool` | 把外部工具适配为支持恢复、等待输入和 task-first projection 的 Task。 |
 | `adk/task/shell` | 把可恢复 shell 实现适配为 managed tool。 |
 | `adk/middlewares/task` | 向 Agent 注入 `task_output` 和 `task_stop`。 |
 
@@ -118,6 +118,29 @@ Generation: n -> n + 1
 ```
 
 `Generation` 用于阻止旧 owner 在 handoff 后继续写入。
+
+### Task-first foreground projection
+
+允许自动后台化的 Local/Managed Tool 不使用上述 owner transfer。它们从开始就由
+`background.Manager` 执行，foreground 只是调用方观察同一个 Task 的临时窗口：
+
+```text
+Manager-owned Task execution
+      |
+      +-- terminal before timeout -> return ordinary foreground result
+      |
+      +-- timeout/caller abort ----> publish Task and close projection
+                                      execution continues unchanged
+```
+
+这里必须区分：
+
+- foreground/background 是调用方是否仍在观察；
+- Parent/Manager 是谁拥有 execution lifecycle；
+- Deferred/OnCreate/OnBackground 是 Task 何时对 parent 可见。
+
+因此，支持自动后台化不等于先由 Parent 执行再 handoff。Local、Managed Tool 以及
+未来的 auto-background Sub-agent 都应使用 task-first projection。
 
 ***
 
@@ -439,6 +462,30 @@ type RegisterMailboxRequest struct {
 
 ***
 
+## `adk/task/foreground` API
+
+该包只定义宿主配置 foreground projection 时需要公开引用的类型：
+
+```go
+type ShouldAutoBackground func(
+	context.Context,
+	*CandidateInfo,
+) bool
+
+type ShouldCancelOnCallerAbort func(
+	context.Context,
+	*CallerAbortInfo,
+) bool
+```
+
+`ShouldCancelOnCallerAbort` 为空或返回 false 时，调用断开只会 detach
+foreground projection，Task 继续运行；返回 true 时才请求 Task cancellation。
+
+Task 启动、timer、terminal watcher 和 publish 竞态由
+`adk/internal/taskfirst` 实现，不属于公开 API。
+
+***
+
 ## `adk/task/background` API
 
 ### 概述
@@ -506,6 +553,7 @@ type Spec struct {
 `TaskSnapshot` 是后台生命周期记录的独立快照，包含：
 
 - `Spec`
+- `Publication`
 - `Status`
 - `Checkpoint`
 - `ResultData` / `ResultError`
@@ -514,6 +562,23 @@ type Spec struct {
 - 创建、更新时间和完成时间
 
 修改返回的切片或时间指针不得影响 Store 中的数据。
+
+#### `Publication`
+
+```go
+const (
+	PublicationDeferred     Publication = "deferred"
+	PublicationOnCreate     Publication = "on_create"
+	PublicationOnBackground Publication = "on_background"
+)
+```
+
+- `Deferred`：Task 已存在且可执行，但尚未对 parent 发布 lifecycle notification。
+- `OnCreate`：显式后台 Task 在创建时发布。
+- `OnBackground`：foreground projection detach 时通过 `Manager.Publish` 发布。
+
+Publication 不推进 lifecycle `Version`，因此不会让正在运行的 attempt 失去 CAS
+authority。
 
 #### `Status`
 
@@ -597,7 +662,24 @@ func (m *Manager) Submit(
 ) (*TaskSnapshot, error)
 ```
 
-持久化一个 Pending Task。嵌套调用会从 `ExecutionContext` 自动继承 parent 和 root scope。
+持久化一个 Pending Task。`SubmitRequest.Publication` 默认为
+`PublicationOnCreate`；设置为 `PublicationDeferred` 时 Task 可以执行，但在
+`Publish` 前不会发送 lifecycle notification。嵌套调用会从
+`ExecutionContext` 自动继承 parent 和 root scope。
+
+#### `Manager.Publish`
+
+```go
+func (m *Manager) Publish(
+	ctx context.Context,
+	taskID string,
+) (*TaskSnapshot, error)
+```
+
+原子执行唯一合法的 publication transition：
+`PublicationDeferred -> PublicationOnBackground`。目标状态由方法语义固定，不由
+调用方传入。若 terminal commit 先完成，返回 `ErrAlreadyTerminal`，Task 保持
+Deferred。
 
 #### `Manager.Execute`
 
@@ -668,6 +750,7 @@ func (m *Manager) Close(
 | `ListPending` | worker 获取可 claim 的 Task。 |
 | `ListSuspended` | 运维或调度器查看暂停 Task。 |
 | `WaitForTaskVersion` | 等待生命周期版本变化。 |
+| `Publish` | 把 Deferred Task 原子发布为 OnBackground。 |
 | `ListTaskEvents` | 查询追加式进度。 |
 | `RegisterMailbox` | 创建或幂等重放 foreground Mailbox。 |
 | `GetMailbox` | 读取 Mailbox。 |
@@ -683,7 +766,9 @@ func (m *Manager) Close(
 
 #### `TaskStore`
 
-持久化后台生命周期、lease、attempt、checkpoint 和 terminal result。
+持久化后台生命周期、publication、lease、attempt、checkpoint 和 terminal
+result。`PublicationDeferred` 的 Task 可执行但不发送 lifecycle notification；
+`Publish` 原子切换为 `PublicationOnBackground`。
 
 #### `LifecycleStore`
 
@@ -987,11 +1072,13 @@ type StreamWorkFunc func(
 
 #### `Runner.Run`
 
-执行 buffered work。它可以 foreground 返回，也可以显式或超时后转为后台 Task。
+执行 buffered work。配置 auto-background 时，work 从开始就在 Manager attempt
+context 中执行；如果 foreground timeout 或调用方断开，只改变观察和 publication。
 
 #### `Runner.RunStream`
 
-执行 streaming work。Foreground chunk 只是当前调用的临时投影；handoff 后，调用方收到后台通知，持久进度由 TaskEvent 管理。
+执行 streaming work。Foreground chunk 只是 Manager-owned Task 的临时投影；
+detach 后调用方收到后台通知，底层 work 不重启，持久进度继续由 TaskEvent 管理。
 
 `local` 不承诺跨进程恢复，因为闭包只存在于当前进程。
 
@@ -1009,9 +1096,6 @@ type StreamWorkFunc func(
 Tool
   +-- RecoverableTool
         +-- ResumableTool
-
-Tool
-  +-- ForegroundHandoffTool
 ```
 
 #### `Tool`
@@ -1030,10 +1114,6 @@ Worker 丢失后通过 TaskID 和 checkpoint 恢复同一个外部操作。
 #### `ResumableTool`
 
 在 `OutcomeInterrupted` 后接收 durable input，并继续原来的逻辑操作。
-
-#### `ForegroundHandoffTool`
-
-把 Attempt 0 已经启动的操作交给后台 owner，不重复副作用。
 
 #### `Run`
 
@@ -1071,7 +1151,8 @@ type Outcome struct {
 
 #### `NewManagedTool`
 
-创建支持 foreground、显式 background、自动 handoff、streaming projection 和 waiting input 的工具包装。
+创建支持 direct foreground、显式 background、task-first auto-background、
+streaming projection 和 waiting input 的工具包装。
 
 #### `Submit`
 

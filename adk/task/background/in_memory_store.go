@@ -142,6 +142,10 @@ func (s *InMemoryStore) Create(_ context.Context, req *CreateTaskRequest) (*Task
 	if err := validateCreateTaskRequest(req); err != nil {
 		return nil, err
 	}
+	publication, err := normalizePublication(req.Publication)
+	if err != nil {
+		return nil, err
+	}
 	if int64(len(req.Checkpoint)) > s.maxValue {
 		return nil, errors.New("task/background: checkpoint exceeds configured bounds")
 	}
@@ -168,6 +172,7 @@ func (s *InMemoryStore) Create(_ context.Context, req *CreateTaskRequest) (*Task
 	spec := cloneSpec(req.Spec)
 	task := &TaskSnapshot{
 		Spec:              spec,
+		Publication:       publication,
 		LeaseExpiryPolicy: req.LeaseExpiryPolicy,
 		Status:            StatusPending,
 		Checkpoint:        cloneBytes(req.Checkpoint),
@@ -190,9 +195,66 @@ func (s *InMemoryStore) Create(_ context.Context, req *CreateTaskRequest) (*Task
 		rootSessionID: mailbox.RootSessionID,
 		invocationID:  mailbox.InvocationID,
 	}] = spec.ID
-	s.enqueueLocked(task, NotificationTaskCreated)
+	if publication == PublicationOnCreate {
+		s.enqueueLocked(task, NotificationTaskCreated)
+	}
 	s.signalLocked()
 	return cloneTask(task), nil
+}
+
+// Publish atomically exposes one active deferred task as background work.
+func (s *InMemoryStore) Publish(
+	_ context.Context,
+	req *PublishTaskRequest,
+) (*TaskSnapshot, error) {
+	if req == nil || req.TaskID == "" || req.ExpectedVersion <= 0 {
+		return nil, errors.New("task/background: publish request is invalid")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	t, err := s.taskVersionLocked(req.TaskID, req.ExpectedVersion)
+	if err != nil {
+		return nil, err
+	}
+	publication, err := normalizePublication(t.Publication)
+	if err != nil {
+		return nil, err
+	}
+	switch publication {
+	case PublicationOnBackground:
+		return cloneTask(t), nil
+	case PublicationOnCreate:
+		return nil, ErrIllegalTransition
+	case PublicationDeferred:
+	default:
+		return nil, ErrIllegalTransition
+	}
+	if terminalStatus(t.Status) {
+		return nil, ErrAlreadyTerminal
+	}
+	if t.Spec.ParentTaskID != "" {
+		shadow := cloneTask(t)
+		if _, err = s.enqueueParentInputLocked(
+			shadow,
+			fmt.Sprintf(
+				"%s:%d:%s",
+				t.Spec.ID,
+				t.Version,
+				NotificationTaskBackgrounded,
+			),
+			string(NotificationTaskBackgrounded),
+			[]byte(t.Spec.ID),
+			taskcore.InputQueued,
+		); err != nil {
+			return nil, err
+		}
+	}
+	t.Publication = PublicationOnBackground
+	if t.Spec.ParentTaskID == "" {
+		s.enqueueLocked(t, NotificationTaskBackgrounded)
+	}
+	s.signalLocked()
+	return cloneTask(t), nil
 }
 
 // Get returns an independent authoritative snapshot and resolves expired leases.
@@ -970,6 +1032,10 @@ func (s *InMemoryStore) advanceLocked(t *TaskSnapshot) {
 }
 
 func (s *InMemoryStore) enqueueLocked(t *TaskSnapshot, kind NotificationKind) *Notification {
+	publication, err := normalizePublication(t.Publication)
+	if err != nil || publication == PublicationDeferred {
+		return nil
+	}
 	if kind == "" ||
 		(kind != NotificationTaskCreated &&
 			kind != NotificationTaskBackgrounded &&
@@ -977,7 +1043,7 @@ func (s *InMemoryStore) enqueueLocked(t *TaskSnapshot, kind NotificationKind) *N
 		return nil
 	}
 	if t.Spec.ParentTaskID != "" {
-		_, err := s.enqueueParentInputLocked(
+		_, err = s.enqueueParentInputLocked(
 			t,
 			fmt.Sprintf("%s:%d:%s", t.Spec.ID, t.Version, kind),
 			string(kind),

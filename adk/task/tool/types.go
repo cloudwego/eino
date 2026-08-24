@@ -106,13 +106,6 @@ type ResumableTool interface {
 	Resume(context.Context, *ResumeRequest) (Run, error)
 }
 
-// ForegroundHandoffTool can adopt a running Attempt 0 foreground operation into
-// background ownership without repeating its side effects.
-type ForegroundHandoffTool interface {
-	Tool
-	Adopt(context.Context, *AdoptRequest) (*AdoptResult, error)
-}
-
 // StartRequest describes an initial external-operation start.
 type StartRequest struct {
 	TaskID    string
@@ -122,29 +115,13 @@ type StartRequest struct {
 
 // StartResult contains the attempt-local Run and the initial opaque tool
 // checkpoint. For Attempt >= 1, Eino persists an independently owned copy
-// before calling Run.Wait. For Attempt 0, the checkpoint is held in memory until
-// foreground handoff or stored in the parent Runner checkpoint for foreground
-// waiting-input. Checkpoint may be empty when TaskID alone is sufficient to
-// recover and must be empty for a non-recoverable Tool.
+// before calling Run.Wait. Attempt 0 is restricted to direct foreground
+// execution that cannot become background work. Checkpoint may be empty when
+// TaskID alone is sufficient to recover and must be empty for a non-recoverable
+// Tool.
 type StartResult struct {
 	Run        Run
 	Checkpoint []byte
-}
-
-// AdoptRequest transfers an Attempt 0 foreground operation into background
-// ownership. Run must be the live handle returned by the matching Start call.
-type AdoptRequest struct {
-	TaskID         string
-	Arguments      string
-	Run            Run
-	ToolCheckpoint []byte
-}
-
-// AdoptResult contains the background-owned run handle and checkpoint to use
-// for the first durable attempt after handoff.
-type AdoptResult struct {
-	Run            Run
-	ToolCheckpoint []byte
 }
 
 // RecoverRequest describes reconstruction of an existing logical operation.

@@ -77,12 +77,20 @@ var (
 	)
 )
 
-// SubmitRequest describes one task submission. InitialCheckpoint is
-// copied into TaskSnapshot.Checkpoint in the same atomic create operation as
-// the task record and TaskCreated outbox entry. It is opaque to Manager.
+// SubmitRequest describes one task submission. InitialCheckpoint is copied
+// into TaskSnapshot.Checkpoint in the same atomic create operation. Publication
+// defaults to PublicationOnCreate; PublicationDeferred suppresses lifecycle
+// notifications until Publish succeeds.
 type SubmitRequest struct {
 	Spec              Spec
 	InitialCheckpoint []byte
+	Publication       Publication
+}
+
+// PublishTaskRequest atomically exposes one deferred task as background work.
+type PublishTaskRequest struct {
+	TaskID          string
+	ExpectedVersion int64
 }
 
 // AdoptForegroundRequest atomically transfers one foreground mailbox to a
@@ -160,8 +168,10 @@ func (e *taskCreatedEventUndeliveredError) Is(target error) bool {
 // Every returned Task and mutable field is independently owned by the caller.
 // ListPending and ListSuspended follow their request ordering, cursor, and limit
 // contracts; malformed cursors return ErrInvalidCursor.
-// When the provider also implements NotificationOutbox, Create atomically
-// enqueues NotificationTaskCreated for every task with a RootSessionID.
+// When Publication is PublicationOnCreate and the provider also implements
+// NotificationOutbox, Create atomically enqueues NotificationTaskCreated for
+// every task with a RootSessionID. PublicationDeferred suppresses lifecycle
+// notifications until Publish atomically changes it to PublicationOnBackground.
 //
 // RequestCancel on active work keeps StatusRunning, sets CancelRequestedAt and
 // the first-write optional CancelReason, and advances Version. Once
@@ -177,6 +187,7 @@ func (e *taskCreatedEventUndeliveredError) Is(target error) bool {
 // cancellation. Non-recoverable lease expiry resolves cancellation directly.
 type TaskStore interface {
 	Create(context.Context, *CreateTaskRequest) (*TaskSnapshot, error)
+	Publish(context.Context, *PublishTaskRequest) (*TaskSnapshot, error)
 	Get(context.Context, string) (*TaskSnapshot, error)
 	ListPending(context.Context, *ListPendingRequest) (*ListPendingResult, error)
 	ListSuspended(context.Context, *ListSuspendedRequest) (*ListSuspendedResult, error)
@@ -260,9 +271,32 @@ func validateSpec(spec Spec) error {
 	return nil
 }
 
+func normalizePublication(publication Publication) (Publication, error) {
+	switch publication {
+	case "":
+		return PublicationOnCreate, nil
+	case PublicationDeferred, PublicationOnCreate, PublicationOnBackground:
+		return publication, nil
+	default:
+		return "", fmt.Errorf(
+			"task/background: unsupported publication %q",
+			publication,
+		)
+	}
+}
+
 func validateCreateTaskRequest(req *CreateTaskRequest) error {
 	if err := validateSpec(req.Spec); err != nil {
 		return err
+	}
+	publication, err := normalizePublication(req.Publication)
+	if err != nil {
+		return err
+	}
+	if publication == PublicationOnBackground {
+		return fmt.Errorf(
+			"task/background: on-background publication requires Publish",
+		)
 	}
 	if req.LeaseExpiryPolicy != LeaseExpiryRetry && req.LeaseExpiryPolicy != LeaseExpiryFail {
 		return fmt.Errorf("task/background: lease expiry policy must be %q or %q", LeaseExpiryRetry, LeaseExpiryFail)

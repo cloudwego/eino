@@ -54,7 +54,6 @@ type Registry struct {
 	plain       map[string]*Registration
 	recoverable map[string]*Registration
 	projections *projectionRegistry
-	adopted     *adoptedRegistry
 }
 
 // NewRegistry creates an empty managed-tool registry.
@@ -62,7 +61,6 @@ func NewRegistry() *Registry {
 	return &Registry{
 		plain: make(map[string]*Registration), recoverable: make(map[string]*Registration),
 		projections: newProjectionRegistry(),
-		adopted:     newAdoptedRegistry(),
 	}
 }
 
@@ -118,51 +116,4 @@ func (r *Registry) resolveAny(name string) (*Registration, bool, bool) {
 	}
 	registration, ok := r.resolve(name, false)
 	return registration, false, ok
-}
-
-type adoptedRun struct {
-	run        Run
-	checkpoint []byte
-}
-
-type adoptedRegistry struct {
-	mu   sync.Mutex
-	runs map[string]*adoptedRun
-}
-
-func newAdoptedRegistry() *adoptedRegistry {
-	return &adoptedRegistry{runs: make(map[string]*adoptedRun)}
-}
-
-func (r *adoptedRegistry) register(taskID string, run Run, checkpoint []byte) error {
-	if r == nil || taskID == "" || run == nil {
-		return errors.New("task/tool: adopted task id and run are required")
-	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if _, exists := r.runs[taskID]; exists {
-		return background.ErrAlreadyExists
-	}
-	r.runs[taskID] = &adoptedRun{run: run, checkpoint: append([]byte(nil), checkpoint...)}
-	return nil
-}
-
-func (r *adoptedRegistry) consume(taskID string) *adoptedRun {
-	if r == nil || taskID == "" {
-		return nil
-	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	run := r.runs[taskID]
-	delete(r.runs, taskID)
-	return run
-}
-
-func (r *adoptedRegistry) remove(taskID string) {
-	if r == nil || taskID == "" {
-		return
-	}
-	r.mu.Lock()
-	delete(r.runs, taskID)
-	r.mu.Unlock()
 }

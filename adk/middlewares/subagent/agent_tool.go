@@ -30,7 +30,7 @@ import (
 	"github.com/cloudwego/eino/adk/filesystem"
 	"github.com/cloudwego/eino/adk/internal"
 	"github.com/cloudwego/eino/adk/internal/agenttool"
-	"github.com/cloudwego/eino/adk/internal/foreground"
+	"github.com/cloudwego/eino/adk/internal/taskfirst"
 	"github.com/cloudwego/eino/adk/task"
 	"github.com/cloudwego/eino/adk/task/background"
 	backgroundlocal "github.com/cloudwego/eino/adk/task/local"
@@ -151,7 +151,7 @@ func newManagedAgentTool[M adk.MessageType](
 				}
 				runOpts := append(opts, agenttool.WithEventReceiverTransform(
 					managedEventReceiverTransform(
-						foreground.ProjectionDetached(workCtx), outputReceiver,
+						taskfirst.ProjectionDetached(workCtx), outputReceiver,
 					),
 				))
 				out, runErr := agent.InvokableRun(workCtx, params, runOpts...)
