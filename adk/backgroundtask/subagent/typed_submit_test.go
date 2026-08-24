@@ -19,7 +19,10 @@ package subagent
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -27,8 +30,47 @@ import (
 	"github.com/cloudwego/eino/adk/backgroundtask"
 	"github.com/cloudwego/eino/adk/internal/agenttool"
 	adksession "github.com/cloudwego/eino/adk/session"
+	componentmodel "github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
 )
+
+type retryingAgenticStreamModel struct {
+	calls int32
+}
+
+func (*retryingAgenticStreamModel) Generate(
+	context.Context,
+	[]*schema.AgenticMessage,
+	...componentmodel.Option,
+) (*schema.AgenticMessage, error) {
+	return nil, errors.New("unexpected Generate call")
+}
+
+func (m *retryingAgenticStreamModel) Stream(
+	context.Context,
+	[]*schema.AgenticMessage,
+	...componentmodel.Option,
+) (*schema.StreamReader[*schema.AgenticMessage], error) {
+	if atomic.AddInt32(&m.calls, 1) > 1 {
+		return schema.StreamReaderFromArray([]*schema.AgenticMessage{
+			{
+				Role: schema.AgenticRoleTypeAssistant,
+				ContentBlocks: []*schema.ContentBlock{
+					schema.NewContentBlock(&schema.AssistantGenText{Text: "retry succeeded"}),
+				},
+			},
+		}), nil
+	}
+	reader, writer := schema.Pipe[*schema.AgenticMessage](2)
+	writer.Send(&schema.AgenticMessage{
+		Role: schema.AgenticRoleTypeAssistant,
+		ContentBlocks: []*schema.ContentBlock{
+			schema.NewContentBlock(&schema.AssistantGenText{Text: "rejected partial output"}),
+		},
+	}, nil)
+	writer.Send(nil, errors.New("provider error: special token bracket mismatch"))
+	return reader, nil
+}
 
 type typedInputCaptureAgent struct {
 	name   string
@@ -244,6 +286,57 @@ func TestSubmitSupportsAgenticInput(t *testing.T) {
 	require.NotNil(t, agent.input)
 	require.Equal(t, input.Messages[0].ContentBlocks, agent.input.Messages[0].ContentBlocks)
 	require.Nil(t, input.Messages[0].Extra)
+}
+
+func TestAgenticModelStreamErrorRetriesWithinDurableAttempt(t *testing.T) {
+	ctx := context.Background()
+	store := adksession.NewInMemoryStore[*schema.AgenticMessage](nil)
+	executor, err := NewExecutor(&ExecutorConfig[*schema.AgenticMessage]{
+		SessionStore: store, CheckPointStore: store,
+	})
+	require.NoError(t, err)
+	model := &retryingAgenticStreamModel{}
+	agent, err := adk.NewTypedChatModelAgent(
+		ctx,
+		&adk.TypedChatModelAgentConfig[*schema.AgenticMessage]{
+			Name:  "worker",
+			Model: model,
+			ModelRetryConfig: &adk.TypedModelRetryConfig[*schema.AgenticMessage]{
+				MaxRetries: 1,
+				BackoffFunc: func(context.Context, int) time.Duration {
+					return time.Nanosecond
+				},
+			},
+		},
+	)
+	require.NoError(t, err)
+	require.NoError(t, executor.Register("worker", &AgentRegistration[*schema.AgenticMessage]{
+		Agent: agent,
+	}))
+	executors := backgroundtask.NewExecutorRegistry()
+	require.NoError(t, executors.Register(executor))
+	manager := mustNewBackgroundManager(
+		t,
+		ctx,
+		&backgroundtask.Config{Executors: executors},
+	)
+	defer manager.Close(context.Background())
+
+	task, err := Submit(ctx, manager, &SubmitRequest[*schema.AgenticMessage]{
+		SubAgentName: "worker",
+		Input: &adk.TypedAgentInput[*schema.AgenticMessage]{
+			Messages:        []*schema.AgenticMessage{schema.UserAgenticMessage("retry the model")},
+			EnableStreaming: true,
+		},
+		SessionID: "parent",
+	})
+	require.NoError(t, err)
+	require.NoError(t, manager.Execute(ctx, task.Spec.ID))
+	completed, err := manager.Get(ctx, task.Spec.ID)
+	require.NoError(t, err)
+	require.Equal(t, backgroundtask.StatusCompleted, completed.Status, completed.ResultError)
+	require.Equal(t, "retry succeeded", string(completed.ResultData))
+	require.Equal(t, int32(2), atomic.LoadInt32(&model.calls))
 }
 
 func TestAttack_TypedInputRecoveryDoesNotReplayInitialInput(t *testing.T) {
