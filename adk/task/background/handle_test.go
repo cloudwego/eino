@@ -18,7 +18,9 @@ package background
 
 import (
 	"context"
+	"errors"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -93,4 +95,83 @@ func TestHandleReportsWaitingInputAndValidation(t *testing.T) {
 	require.ErrorIs(t, handle.SendInput(ctx, nil), taskcore.ErrInputRequired)
 	_, err = manager.Handle("")
 	require.Error(t, err)
+}
+
+func TestHandleReportsTerminalFailuresAndWaitCancellation(t *testing.T) {
+	tests := []struct {
+		name       string
+		transition func(*InMemoryStore, *TaskSnapshot) error
+		status     taskcore.OutcomeStatus
+		reason     string
+	}{
+		{
+			name: "failed",
+			transition: func(store *InMemoryStore, started *TaskSnapshot) error {
+				_, err := store.Fail(context.Background(), &FailTaskRequest{
+					TaskID: started.Spec.ID, ExpectedVersion: started.Version,
+					Error: "execution failed",
+				})
+				return err
+			},
+			status: taskcore.OutcomeFailed,
+			reason: "execution failed",
+		},
+		{
+			name: "canceled",
+			transition: func(store *InMemoryStore, started *TaskSnapshot) error {
+				requested, err := store.RequestCancel(
+					context.Background(),
+					&RequestCancelRequest{
+						TaskID: started.Spec.ID, ExpectedVersion: started.Version,
+						Reason: "operator canceled",
+					},
+				)
+				if err != nil {
+					return err
+				}
+				_, err = store.AckCancel(context.Background(), &AckCancelRequest{
+					TaskID: started.Spec.ID, ExpectedVersion: requested.Version,
+				})
+				return err
+			},
+			status: taskcore.OutcomeCanceled,
+			reason: "operator canceled",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			store := NewInMemoryStore(nil)
+			manager := managerWithExecutor(t, store, &scriptedExecutor{}, 0)
+			created, err := manager.Submit(ctx, &SubmitRequest{
+				Spec: validSpec("handle-" + test.name),
+			})
+			require.NoError(t, err)
+			started, err := store.Start(ctx, &StartTaskRequest{
+				TaskID: created.Spec.ID, ExpectedVersion: created.Version,
+			})
+			require.NoError(t, err)
+			require.NoError(t, test.transition(store, started))
+
+			handle, err := manager.Handle(created.Spec.ID)
+			require.NoError(t, err)
+			outcome, err := handle.Wait(ctx)
+			require.NoError(t, err)
+			require.Equal(t, test.status, outcome.Status)
+			require.Equal(t, test.reason, outcome.Error)
+		})
+	}
+
+	store := NewInMemoryStore(nil)
+	manager := managerWithExecutor(t, store, &scriptedExecutor{}, 0)
+	created, err := manager.Submit(context.Background(), &SubmitRequest{
+		Spec: validSpec("handle-context"),
+	})
+	require.NoError(t, err)
+	handle, err := manager.Handle(created.Spec.ID)
+	require.NoError(t, err)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
+	defer cancel()
+	_, err = handle.Wait(ctx)
+	require.True(t, errors.Is(err, context.DeadlineExceeded))
 }
