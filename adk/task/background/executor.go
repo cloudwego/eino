@@ -754,8 +754,8 @@ func (m *Manager) Submit(ctx context.Context, req *SubmitRequest) (*TaskSnapshot
 	if !ok {
 		return nil, fmt.Errorf("task/background: executor %q is unavailable", spec.ExecutorKey)
 	}
-	if err := validateSpec(spec); err != nil {
-		return nil, err
+	if validationErr := validateSpec(spec); validationErr != nil {
+		return nil, validationErr
 	}
 	if spec.ParentTaskID == "" && spec.RootSessionID != "" {
 		if _, ok := m.tasks.(NotificationOutbox); !ok {
@@ -771,8 +771,11 @@ func (m *Manager) Submit(ctx context.Context, req *SubmitRequest) (*TaskSnapshot
 			"task/background: task-created session event sender is required for parent-session tasks",
 		)
 	}
-	if err := executor.ValidateSpec(cloneSpec(spec)); err != nil {
-		return nil, fmt.Errorf("task/background: validate spec: %w", err)
+	if validationErr := executor.ValidateSpec(cloneSpec(spec)); validationErr != nil {
+		return nil, fmt.Errorf(
+			"task/background: validate spec: %w",
+			validationErr,
+		)
 	}
 	contextSnapshot, _, err := m.captureContextSnapshot(ctx)
 	if err != nil {
