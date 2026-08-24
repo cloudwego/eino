@@ -118,9 +118,10 @@ func (t *agenticLateErrorTool) Info(_ context.Context) (*schema.ToolInfo, error)
 func (t *agenticLateErrorTool) StreamableRun(_ context.Context, _ string, _ ...tool.Option) (*schema.StreamReader[string], error) {
 	switch atomic.AddInt32(&t.callCount, 1) {
 	case 1:
-		r, w := schema.Pipe[string](1)
+		r, w := schema.Pipe[string](2)
 		go func() {
 			defer w.Close()
+			w.Send("partial", nil)
 			w.Send("", errAgenticSandboxEscapeRequired)
 		}()
 		return r, nil
@@ -144,12 +145,20 @@ func agenticLateInterruptMiddleware() compose.ToolMiddleware {
 				if !hasState {
 					return nil, errors.New("permission middleware: missing interrupt state")
 				}
-				isResume, hasData, _ := tool.GetResumeContext[string](ctx)
+				isResume, hasData, resumeData := tool.GetResumeContext[string](ctx)
 				if !isResume || !hasData {
 					return nil, errors.New("permission middleware: missing resume data")
 				}
-				if state != "awaiting_first_approval" && state != "awaiting_second_approval" {
+				expectedResumeData := map[string]string{
+					"awaiting_first_approval":  "approved_1",
+					"awaiting_second_approval": "approved_2",
+				}
+				expected, ok := expectedResumeData[state]
+				if !ok {
 					return nil, fmt.Errorf("permission middleware: unexpected interrupt state %q", state)
+				}
+				if resumeData != expected {
+					return nil, fmt.Errorf("permission middleware: state %q received resume data %q, want %q", state, resumeData, expected)
 				}
 
 				output, err := next(ctx, input)
@@ -779,7 +788,7 @@ func testAgenticLateStreamInterruptWithRunner(t *testing.T, enableStreaming bool
 	require.NotNil(t, last.Output.MessageOutput)
 	finalMessage, err := last.Output.MessageOutput.GetMessage()
 	require.NoError(t, err)
-	assert.Contains(t, agenticTextContent(finalMessage), "operation completed")
+	assert.Equal(t, "operation completed", agenticTextContent(finalMessage))
 	assert.Equal(t, int32(1), atomic.LoadInt32(&lateErrorTool.sideEffectCount))
 	assert.Equal(t, int32(2), atomic.LoadInt32(modelCallCount))
 }
@@ -834,7 +843,7 @@ func testAgenticLateStreamInterruptWithTurnLoop(t *testing.T, enableStreaming bo
 	require.NotNil(t, last.Output.MessageOutput)
 	finalMessage, err := last.Output.MessageOutput.GetMessage()
 	require.NoError(t, err)
-	assert.Contains(t, agenticTextContent(finalMessage), "operation completed")
+	assert.Equal(t, "operation completed", agenticTextContent(finalMessage))
 	assert.Equal(t, int32(1), atomic.LoadInt32(&lateErrorTool.sideEffectCount))
 	assert.Equal(t, int32(2), atomic.LoadInt32(modelCallCount))
 }

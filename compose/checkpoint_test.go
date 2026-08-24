@@ -2045,9 +2045,74 @@ func TestCheckpointStreamConversionIgnoresOnlyRecordedInterrupt(t *testing.T) {
 	require.NoError(t, pointer.convertCheckPoint(cp, true))
 	assert.Equal(t, "partial", cp.Inputs["node"])
 
+	cp, pointer = newCheckpoint(&subGraphInterruptError{signal: recordedSignal})
+	require.NoError(t, pointer.convertCheckPoint(cp, true))
+	assert.Equal(t, "partial", cp.Inputs["node"])
+
 	cp, pointer = newCheckpoint(errors.New("ordinary stream failure"))
 	err := pointer.convertCheckPoint(cp, true)
 	require.ErrorContains(t, err, "ordinary stream failure")
+}
+
+func TestAttack_CheckpointStreamConversionRejectsUnrecordedInterrupt(t *testing.T) {
+	ctx := context.Background()
+	recordedErr := StatefulInterrupt(ctx, "recorded", "recorded-state")
+	recordedSignal := &core.InterruptSignal{}
+	require.ErrorAs(t, recordedErr, &recordedSignal)
+	id2Addr, id2State := core.SignalToPersistenceMaps(recordedSignal)
+
+	unrecordedErr := StatefulInterrupt(ctx, "unrecorded", "unrecorded-state")
+	r, w := schema.Pipe[string](1)
+	w.Send("", unrecordedErr)
+	w.Close()
+	cp := &checkpoint{
+		Inputs:            map[string]any{"node": packStreamReader(r)},
+		InterruptID2Addr:  id2Addr,
+		InterruptID2State: id2State,
+	}
+	pointer := newCheckPointer(map[string]streamConvertPair{
+		"node": defaultStreamConvertPair[string](),
+	}, nil, nil, nil)
+
+	err := pointer.convertCheckPoint(cp, true)
+	require.Error(t, err)
+	_, isInterrupt := IsInterruptRerunError(err)
+	assert.True(t, isInterrupt)
+}
+
+func TestAttack_InterruptOriginUsesCurrentGraphBoundary(t *testing.T) {
+	ctx := AppendAddressSegment(context.Background(), AddressSegmentRunnable, "root")
+	taskCtx := AppendAddressSegment(ctx, AddressSegmentNode, "node_1")
+	r := &runner{chanSubscribeTo: map[string]*chanCall{
+		"node_1":   {},
+		"ToolNode": {},
+	}}
+	completedTask := &task{ctx: taskCtx, nodeKey: "node_1"}
+
+	t.Run("selects node at current graph boundary", func(t *testing.T) {
+		interruptAddress := Address{
+			{Type: AddressSegmentRunnable, ID: "root"},
+			{Type: AddressSegmentNode, ID: "node_1"},
+			{Type: AddressSegmentNode, ID: "ToolNode"},
+			{Type: AddressSegmentMiddleware, ID: "permission"},
+		}
+		assert.Equal(t, "node_1", r.interruptOriginNodeKey(completedTask, interruptAddress))
+	})
+
+	t.Run("falls back when address belongs to another graph", func(t *testing.T) {
+		interruptAddress := Address{
+			{Type: AddressSegmentRunnable, ID: "other"},
+			{Type: AddressSegmentNode, ID: "ToolNode"},
+		}
+		assert.Equal(t, "node_1", r.interruptOriginNodeKey(completedTask, interruptAddress))
+	})
+
+	t.Run("falls back when task has no execution address", func(t *testing.T) {
+		assert.Equal(t, "node_1", r.interruptOriginNodeKey(&task{
+			ctx:     context.Background(),
+			nodeKey: "node_1",
+		}, nil))
+	})
 }
 
 func TestRestoreRejectsInputlessSubGraphRerunCheckpoint(t *testing.T) {
