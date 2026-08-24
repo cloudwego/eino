@@ -434,6 +434,54 @@ func TestRunnerStreamBackgroundNotices(t *testing.T) {
 	})
 }
 
+func TestRunnerStreamExplicitBackgroundReturnsBeforeStreamConstruction_BitsUT(t *testing.T) {
+	runner, manager := newTestRunner(t)
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	released := false
+	defer func() {
+		if !released {
+			close(release)
+		}
+	}()
+
+	type result struct {
+		stream *schema.StreamReader[string]
+		err    error
+	}
+	returned := make(chan result, 1)
+	go func() {
+		stream, err := runner.RunStream(context.Background(), &Input{
+			Description: "blocking construction", RunInBackground: true,
+			BackgroundStartupPreviewMs: 1,
+		}, func(context.Context, backgroundtask.ExecutionRuntime) (*schema.StreamReader[string], error) {
+			close(entered)
+			<-release
+			return streamWork("done")(context.Background(), nil)
+		})
+		returned <- result{stream: stream, err: err}
+	}()
+
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("background work did not begin")
+	}
+	select {
+	case got := <-returned:
+		require.NoError(t, got.err)
+		require.NotNil(t, got.stream)
+		require.Contains(t, drain(t, got.stream), "running in the background")
+	case <-time.After(time.Second):
+		t.Fatal("explicit background run waited for stream construction")
+	}
+
+	close(release)
+	released = true
+	require.Equal(t, backgroundtask.StatusCompleted,
+		waitTerminal(t, manager, onlyTask(t, manager)).Status)
+}
+
 func TestRunnerLocalContracts(t *testing.T) {
 	runner, manager := newTestRunner(t)
 	require.Same(t, manager, runner.Manager())

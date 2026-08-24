@@ -365,48 +365,11 @@ func (r *Runner) RunStream(
 		}
 		runDone <- runResult{task: current, err: runErr}
 	}()
-	var (
-		readyErr    error
-		earlyResult *runResult
-	)
-waitReady:
-	for {
-		select {
-		case readyErr = <-ready:
-			break waitReady
-		case result := <-runDone:
-			select {
-			case readyErr = <-ready:
-				earlyResult = &result
-				break waitReady
-			default:
-			}
-			if result.err != nil {
-				r.removeUnstarted(task.Spec.ID)
-				return nil, result.err
-			}
-			if result.task == nil || result.task.Status != backgroundtask.StatusRunning {
-				r.removeUnstarted(task.Spec.ID)
-				return nil, errors.New("backgroundtask/local: task ended before stream construction")
-			}
-			earlyResult = &result
-			runDone = nil
-		}
-	}
-	if readyErr != nil {
-		if earlyResult == nil {
-			result := <-runDone
-			if result.err != nil {
-				return nil, result.err
-			}
-		}
-		return nil, readyErr
-	}
-	if earlyResult != nil {
-		runDone = make(chan runResult, 1)
-		runDone <- *earlyResult
-	}
 	reader, writer := schema.Pipe[string](streamBufferCap)
+	// A successful submission is the acknowledgement boundary for an explicit
+	// background run. In particular, a StreamingShell may block while creating
+	// its reader (for example, when adapting a synchronous RPC), but that must
+	// not delay returning the persisted task to the caller.
 	go r.projectStream(ctx, input, task.Spec.ID, chunks, runDone, writer)
 	return reader, nil
 }
