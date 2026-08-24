@@ -35,7 +35,7 @@ import (
 )
 
 type retryingAgenticStreamModel struct {
-	calls atomic.Int32
+	calls int32
 }
 
 func (*retryingAgenticStreamModel) Generate(
@@ -51,7 +51,7 @@ func (m *retryingAgenticStreamModel) Stream(
 	[]*schema.AgenticMessage,
 	...componentmodel.Option,
 ) (*schema.StreamReader[*schema.AgenticMessage], error) {
-	if m.calls.Add(1) > 1 {
+	if atomic.AddInt32(&m.calls, 1) > 1 {
 		return schema.StreamReaderFromArray([]*schema.AgenticMessage{
 			{
 				Role: schema.AgenticRoleTypeAssistant,
@@ -336,7 +336,7 @@ func TestAgenticModelStreamErrorRetriesWithinDurableAttempt(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, backgroundtask.StatusCompleted, completed.Status, completed.ResultError)
 	require.Equal(t, "retry succeeded", string(completed.ResultData))
-	require.Equal(t, int32(2), model.calls.Load())
+	require.Equal(t, int32(2), atomic.LoadInt32(&model.calls))
 }
 
 func TestAttack_TypedInputRecoveryDoesNotReplayInitialInput(t *testing.T) {
