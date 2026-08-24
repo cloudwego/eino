@@ -2113,6 +2113,14 @@ func TestAttack_InterruptOriginUsesCurrentGraphBoundary(t *testing.T) {
 			nodeKey: "node_1",
 		}, nil))
 	})
+
+	t.Run("falls back when addressed node is not in current graph", func(t *testing.T) {
+		interruptAddress := Address{
+			{Type: AddressSegmentRunnable, ID: "root"},
+			{Type: AddressSegmentNode, ID: "missing"},
+		}
+		assert.Equal(t, "node_1", r.interruptOriginNodeKey(completedTask, interruptAddress))
+	})
 }
 
 func TestRestoreRejectsInputlessSubGraphRerunCheckpoint(t *testing.T) {
@@ -2145,6 +2153,37 @@ func TestRestoreRejectsInputlessSubGraphRerunCheckpoint(t *testing.T) {
 	require.NoError(t, store.Set(ctx, "malformed", data))
 
 	_, err = runnable.Invoke(ctx, "", WithCheckPointID("malformed"))
+	require.ErrorContains(t, err, `invalid checkpoint: subgraph node "nested" is marked for rerun without a nested checkpoint or persisted input`)
+	assert.False(t, childExecuted)
+
+	nestedStore := newInMemoryStore()
+	middle := NewGraph[string, string]()
+	require.NoError(t, middle.AddGraphNode("nested", child))
+	require.NoError(t, middle.AddEdge(START, "nested"))
+	require.NoError(t, middle.AddEdge("nested", END))
+
+	root := NewGraph[string, string]()
+	require.NoError(t, root.AddGraphNode("middle", middle))
+	require.NoError(t, root.AddEdge(START, "middle"))
+	require.NoError(t, root.AddEdge("middle", END))
+
+	nestedRunnable, err := root.Compile(ctx, WithCheckPointStore(nestedStore))
+	require.NoError(t, err)
+	data, err = (&serialization.InternalSerializer{}).Marshal(&checkpoint{
+		Inputs:     map[string]any{},
+		RerunNodes: []string{"middle"},
+		SubGraphs: map[string]*checkpoint{
+			"middle": {
+				Inputs:     map[string]any{},
+				RerunNodes: []string{"nested"},
+				SubGraphs:  map[string]*checkpoint{},
+			},
+		},
+	})
+	require.NoError(t, err)
+	require.NoError(t, nestedStore.Set(ctx, "nested-malformed", data))
+
+	_, err = nestedRunnable.Invoke(ctx, "", WithCheckPointID("nested-malformed"))
 	require.ErrorContains(t, err, `invalid checkpoint: subgraph node "nested" is marked for rerun without a nested checkpoint or persisted input`)
 	assert.False(t, childExecuted)
 }

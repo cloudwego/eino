@@ -63,13 +63,16 @@ No confirmed bugs remain after the first attack iteration.
 | Medium | The late-error fixture emitted no data before the terminal error | Emit a partial chunk before the error |
 | Medium | The nested `subGraphInterruptError` filter branch was uncovered | Add a typed nested-interrupt conversion case |
 | Medium | Address fallback behavior and repeated nested node names needed explicit coverage | Add boundary and fallback attack subtests |
+| Medium | The standard ReAct nil-input guard was uncovered | Add the symmetric standard ReAct assertion |
+| Low | `handleInterrupt` validated a checkpoint shape that cannot contain rerun nodes | Remove the unreachable validation branch |
 
 No true duplicate or coverage-only tests were found. The direct Runner and TurnLoop cases are intentionally paired, as are streaming and non-streaming modes.
 
 ### Coverage
 
 - Combined `adk` and `compose` statement coverage: 88.1%.
-- Changed critical functions range from 83.3% to 100%.
+- Incremental executable-line coverage: 94.57%.
+- Changed critical functions range from 85.7% to 100%.
 - Every changed function with important branching logic is above the 70% hard floor.
 - `interruptOriginNodeKey` increased from 81.8% to 90.9%.
 
@@ -79,8 +82,7 @@ No true duplicate or coverage-only tests were found. The direct Runner and TurnL
 
 - **Iterations**: Design 1, Attack 1, Test Audit 1
 - **Production files modified**: 5
-- **Test files modified**: 2
-- **Production and test diff**: +620 / -14 before this report
+- **Test files modified**: 3
 
 ## Changes
 
@@ -88,7 +90,7 @@ No true duplicate or coverage-only tests were found. The direct Runner and TurnL
 |-------|--------|
 | Design | No blocking findings; no public API changes |
 | Attack | Three high-value edge cases verified; no confirmed bugs |
-| Test Audit | Strengthened middleware state assertions and boundary coverage |
+| Test Audit | Strengthened middleware state assertions, removed one unreachable check, and raised incremental coverage to 94.57% |
 
 The final test matrix covers direct Runner and TurnLoop execution in both streaming and non-streaming modes. The streaming case uses a named tool-call middleware, a successful stream return, a partial chunk, an ordinary terminal error, and `schema.WithErrWrapper` conversion to a second `tool.StatefulInterrupt`.
 

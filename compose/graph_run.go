@@ -581,9 +581,6 @@ func (r *runner) handleInterrupt(
 	for _, t := range nextTasks {
 		cp.Inputs[t.nodeKey] = t.input
 	}
-	if err = r.validateCheckpointIntegrity(cp); err != nil {
-		return fmt.Errorf("invalid checkpoint: %w", err)
-	}
 	err = r.checkPointer.convertCheckPoint(cp, isStream)
 	if err != nil {
 		return fmt.Errorf("failed to convert checkpoint: %w", err)
