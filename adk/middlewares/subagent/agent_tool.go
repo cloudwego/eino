@@ -22,19 +22,19 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
-	"time"
 
 	"github.com/bytedance/sonic"
 	"github.com/google/uuid"
 
 	"github.com/cloudwego/eino/adk"
-	"github.com/cloudwego/eino/adk/backgroundtask"
-	backgroundlocal "github.com/cloudwego/eino/adk/backgroundtask/local"
-	durablesubagent "github.com/cloudwego/eino/adk/backgroundtask/subagent"
 	"github.com/cloudwego/eino/adk/filesystem"
 	"github.com/cloudwego/eino/adk/internal"
 	"github.com/cloudwego/eino/adk/internal/agenttool"
 	"github.com/cloudwego/eino/adk/internal/foreground"
+	"github.com/cloudwego/eino/adk/task"
+	"github.com/cloudwego/eino/adk/task/background"
+	backgroundlocal "github.com/cloudwego/eino/adk/task/local"
+	durablesubagent "github.com/cloudwego/eino/adk/task/subagent"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/components/tool/utils"
 	"github.com/cloudwego/eino/compose"
@@ -66,6 +66,12 @@ type agentManagedInput struct {
 type agentDurableInput struct {
 	agentManagedInput
 	ChildSessionID string `json:"child_session_id,omitempty" jsonschema_description:"Continue a previous child session by ID and inherit its history. Omit to create a new child session."`
+}
+
+type runtimeAgentInterruptState struct {
+	Handle             durablesubagent.Handle `json:"handle"`
+	TargetIDs          []string               `json:"target_ids"`
+	NextResumeSequence int64                  `json:"next_resume_sequence"`
 }
 
 func newAgentTool(subAgents map[string]tool.InvokableTool, name, desc string) (tool.BaseTool, error) {
@@ -116,7 +122,7 @@ func newManagedAgentTool[M adk.MessageType](
 				Description: in.Description, Kind: TaskKindSubagent, Payload: payload,
 				OutputFile: outputFile, RunInBackground: in.RunInBackground,
 				SessionID: sessionID, NotifySession: true,
-			}, func(workCtx context.Context, runtime backgroundtask.ExecutionRuntime) (string, error) {
+			}, func(workCtx context.Context, runtime background.ExecutionRuntime) (string, error) {
 				fileReceiver := &agentEventFileReceiver[M]{
 					ctx: workCtx, format: format,
 					onRecord: func(data []byte) error {
@@ -168,11 +174,11 @@ func newManagedAgentTool[M adk.MessageType](
 		})
 }
 
-func formatManagedAgentResult(agentType string, task *backgroundtask.Task, formatHint string) (string, error) {
+func formatManagedAgentResult(agentType string, task *background.TaskSnapshot, formatHint string) (string, error) {
 	switch task.Status {
-	case backgroundtask.StatusCompleted:
+	case background.StatusCompleted:
 		return string(task.ResultData), nil
-	case backgroundtask.StatusPending, backgroundtask.StatusRunning:
+	case background.StatusPending, background.StatusRunning:
 		message := fmt.Sprintf("Agent running in background with ID: %s.", task.Spec.ID)
 		if task.Spec.OutputFile != "" {
 			message += fmt.Sprintf(" Output is being written to: %s.", task.Spec.OutputFile)
@@ -186,16 +192,16 @@ func formatManagedAgentResult(agentType string, task *backgroundtask.Task, forma
 			message += "."
 		}
 		return message, nil
-	case backgroundtask.StatusWaitingInput:
+	case background.StatusWaitingInput:
 		return fmt.Sprintf("Agent task %s requires input. Use task_output to inspect the request.", task.Spec.ID), nil
-	case backgroundtask.StatusSuspended:
+	case background.StatusSuspended:
 		return fmt.Sprintf("Agent task %s is %s.", task.Spec.ID, task.Status), nil
-	case backgroundtask.StatusCanceled:
+	case background.StatusCanceled:
 		return "", fmt.Errorf(
 			"subagent %q task %q (%s) was canceled",
 			agentType, task.Spec.ID, task.Spec.Description,
 		)
-	case backgroundtask.StatusFailed:
+	case background.StatusFailed:
 		return "", fmt.Errorf(
 			"subagent %q task %q (%s) failed: %s",
 			agentType, task.Spec.ID, task.Spec.Description, task.ResultError,
@@ -206,55 +212,12 @@ func formatManagedAgentResult(agentType string, task *backgroundtask.Task, forma
 }
 
 type durableAgentToolResult struct {
-	TaskID         string                `json:"task_id"`
-	ChildSessionID string                `json:"child_session_id"`
-	Status         backgroundtask.Status `json:"status"`
-	Result         string                `json:"result,omitempty"`
-	OutputFile     string                `json:"output_file,omitempty"`
-	Error          string                `json:"error,omitempty"`
-}
-
-func formatDurableAgentResult(
-	agentType string,
-	task *backgroundtask.Task,
-) (string, error) {
-	if task == nil {
-		return "", errors.New("subagent: durable task result is required")
-	}
-	childSessionID, err := durablesubagent.ChildSessionIDFromTask(task)
-	if err != nil {
-		return "", err
-	}
-	switch task.Status {
-	case backgroundtask.StatusCompleted,
-		backgroundtask.StatusPending,
-		backgroundtask.StatusRunning,
-		backgroundtask.StatusWaitingInput,
-		backgroundtask.StatusSuspended,
-		backgroundtask.StatusCanceled,
-		backgroundtask.StatusFailed:
-		result := &durableAgentToolResult{
-			TaskID: task.Spec.ID, ChildSessionID: childSessionID,
-			Status: task.Status, OutputFile: task.Spec.OutputFile,
-		}
-		if task.Status == backgroundtask.StatusCompleted {
-			result.Result = string(task.ResultData)
-		}
-		if task.Status == backgroundtask.StatusCanceled ||
-			task.Status == backgroundtask.StatusFailed {
-			result.Error = task.ResultError
-		}
-		data, marshalErr := sonic.MarshalString(result)
-		if marshalErr != nil {
-			return "", marshalErr
-		}
-		return data, nil
-	default:
-		return "", fmt.Errorf(
-			"subagent %q task %q has unknown status %q",
-			agentType, task.Spec.ID, task.Status,
-		)
-	}
+	TaskID         string            `json:"task_id"`
+	ChildSessionID string            `json:"child_session_id"`
+	Status         background.Status `json:"status"`
+	Result         string            `json:"result,omitempty"`
+	OutputFile     string            `json:"output_file,omitempty"`
+	Error          string            `json:"error,omitempty"`
 }
 
 func managedEventReceiverTransform[E any](
@@ -285,15 +248,6 @@ func signalClosed(done <-chan struct{}) bool {
 		return false
 	}
 }
-
-type detachedExecutionContext struct {
-	parent context.Context
-}
-
-func (detachedExecutionContext) Deadline() (time.Time, bool) { return time.Time{}, false }
-func (detachedExecutionContext) Done() <-chan struct{}       { return nil }
-func (detachedExecutionContext) Err() error                  { return nil }
-func (c detachedExecutionContext) Value(key any) any         { return c.parent.Value(key) }
 
 type agentEventFileReceiver[M adk.MessageType] struct {
 	ctx       context.Context
@@ -420,7 +374,7 @@ func reserveAgentOutput(
 }
 
 // NameFromTask returns the persisted sub-agent routing name.
-func NameFromTask(task *backgroundtask.Task) string {
+func NameFromTask(task *background.TaskSnapshot) string {
 	if task == nil || task.Spec.Kind != TaskKindSubagent {
 		return ""
 	}
@@ -434,95 +388,206 @@ func NameFromTask(task *backgroundtask.Task) string {
 
 func newDurableAgentTool[M adk.MessageType](
 	ctx context.Context,
-	config *TypedDurableBackgroundConfig[M],
+	config *TypedDurableTaskConfig[M],
 	agents []adk.TypedAgent[M],
 	name, desc string,
 ) (tool.BaseTool, error) {
-	if config.ShouldAutoBackground != nil {
-		return nil, errors.New(
-			"subagent: durable auto-background requires checkpoint handoff support",
-		)
+	if config.Runtime == nil {
+		return nil, errors.New("subagent: durable Controller is required")
 	}
-	executor := config.Executor
-	foregroundTools := make(map[string]tool.InvokableTool, len(agents))
 	for _, agent := range agents {
 		resumable, ok := agent.(adk.TypedResumableAgent[M])
 		if !ok {
 			return nil, fmt.Errorf("subagent: agent %q is not resumable", agent.Name(ctx))
 		}
 		agentName := agent.Name(ctx)
-		if err := executor.Register(agentName, &durablesubagent.AgentRegistration[M]{
+		if err := config.Runtime.RegisterAgent(agentName, &durablesubagent.AgentRegistration[M]{
 			Agent:             resumable,
 			RunOptionsFactory: config.RunOptionsFactories[agentName],
 		}); err != nil {
 			return nil, err
 		}
-		foregroundTool, ok := adk.NewTypedAgentTool(ctx, agent).(tool.InvokableTool)
-		if !ok {
-			return nil, fmt.Errorf("subagent: agent %q foreground tool is not invokable", agentName)
-		}
-		foregroundTools[agentName] = foregroundTool
 	}
-	registered, _, err := config.Executors.LoadOrRegister(executor)
-	if err != nil {
-		return nil, err
-	}
-	typed, typeOK := registered.(*durablesubagent.Executor[M])
-	if !typeOK || typed != executor {
-		return nil, errors.New(
-			"subagent: Manager is already bound to a different durable Executor",
-		)
-	}
+	return newControllerAgentTool[M](
+		ctx, config.Runtime, agents, name, desc,
+	)
+}
 
+func newControllerAgentTool[M adk.MessageType](
+	ctx context.Context,
+	runtime *durablesubagent.Controller[M],
+	agents []adk.TypedAgent[M],
+	name, desc string,
+) (tool.BaseTool, error) {
+	available := make(map[string]struct{}, len(agents))
+	for _, agent := range agents {
+		available[agent.Name(ctx)] = struct{}{}
+	}
 	return utils.InferOptionableTool(name, desc, func(
 		callCtx context.Context,
 		in agentDurableInput,
 		opts ...tool.Option,
 	) (string, error) {
+		if _, ok := available[in.SubagentType]; !ok {
+			return "", fmt.Errorf("subagent type %q not found", in.SubagentType)
+		}
+		parentSessionID, ok := adk.RunnerSessionID(callCtx)
+		if !ok {
+			return "", errors.New(
+				"subagent: runner session is required for durable runtime",
+			)
+		}
+		toolCallID := compose.GetToolCallID(callCtx)
+		if toolCallID == "" {
+			// Direct programmatic tool calls do not have graph tool-call
+			// identity and therefore cannot be replayed by the parent Runner.
+			toolCallID = uuid.NewString()
+		}
+		receivers, enableStreaming, runOptions := agenttool.ResolveInvocationOptions[
+			*adk.TypedAgentEvent[M],
+			adk.AgentRunOption,
+		](in.SubagentType, opts...)
+		if len(runOptions) > 0 {
+			return "", errors.New(
+				"subagent: runtime execution does not support invocation-scoped run options; " +
+					"configure RunOptionsFactories",
+			)
+		}
 		prompt := in.Prompt
 		if prompt == "" {
 			prompt = in.Description
 		}
-		_, _, invocationRunOptions := agenttool.ResolveInvocationOptions[
-			*adk.TypedAgentEvent[M],
-			adk.AgentRunOption,
-		](in.SubagentType, opts...)
-		if !in.RunInBackground && config.ShouldAutoBackground == nil {
-			agent, params, err := resolveSubAgent(
-				foregroundTools,
-				in.SubagentType,
-				prompt,
-				in.Description,
-			)
-			if err != nil {
+		mode := task.ModeForeground
+		if in.RunInBackground {
+			mode = task.ModeBackground
+		}
+		wasInterrupted, hasState, interruptState :=
+			tool.GetInterruptState[runtimeAgentInterruptState](callCtx)
+		nextResumeSequence := int64(1)
+		if wasInterrupted {
+			if !hasState || interruptState.Handle.TaskID == "" ||
+				len(interruptState.TargetIDs) == 0 {
+				return "", errors.New(
+					"subagent: runtime interrupt state is unavailable",
+				)
+			}
+			isTarget, hasData, resumeData := tool.GetResumeContext[any](callCtx)
+			if !isTarget {
+				return "", errors.New("subagent: runtime resume target is unavailable")
+			}
+			targets := make(map[string]any, len(interruptState.TargetIDs))
+			for _, targetID := range interruptState.TargetIDs {
+				if hasData {
+					targets[targetID] = resumeData
+				} else {
+					targets[targetID] = nil
+				}
+			}
+			data, marshalErr := sonic.Marshal(targets)
+			if marshalErr != nil {
+				return "", marshalErr
+			}
+			resumeSequence := interruptState.NextResumeSequence
+			if resumeSequence <= 0 {
+				resumeSequence = 1
+			}
+			eventID := "resume:" + uuid.NewSHA1(
+				uuid.Nil,
+				[]byte(fmt.Sprintf(
+					"%s:%d", interruptState.Handle.TaskID, resumeSequence,
+				)),
+			).String()
+			if err := runtime.SendInput(
+				callCtx,
+				interruptState.Handle.TaskID,
+				&task.Input{
+					EventID: eventID, Kind: durablesubagent.ResumeInputKind,
+					Data: data,
+				},
+			); err != nil {
 				return "", err
 			}
-			return agent.InvokableRun(callCtx, params, opts...)
+			in.ChildSessionID = interruptState.Handle.ChildSessionID
+			nextResumeSequence = resumeSequence + 1
 		}
-		sessionID, ok := adk.RunnerSessionID(callCtx)
-		if !ok {
-			return "", errors.New(
-				"subagent: runner session is required for background notification",
+		onEvent := func(event *adk.TypedAgentEvent[M]) {
+			for _, receiver := range receivers {
+				receiver(event)
+			}
+		}
+		var (
+			handle *durablesubagent.Handle
+			err    error
+		)
+		if !wasInterrupted && in.ChildSessionID != "" {
+			handle, err = runtime.Continue(
+				callCtx,
+				&durablesubagent.ContinueRequest[M]{
+					ChildSessionID: in.ChildSessionID,
+					InvocationID:   parentSessionID + ":" + toolCallID,
+					Input:          newTypedUserInput[M](prompt),
+					IfIdle: &durablesubagent.StartOptions[M]{
+						ParentSessionID: parentSessionID,
+						AgentName:       in.SubagentType,
+						Description:     in.Description,
+						Mode:            mode,
+						EnableStreaming: enableStreaming,
+						OnEvent:         onEvent,
+					},
+				},
 			)
+		} else {
+			handle, err = runtime.Start(callCtx, &durablesubagent.StartRequest[M]{
+				InvocationID:    parentSessionID + ":" + toolCallID,
+				ParentSessionID: parentSessionID, ChildSessionID: in.ChildSessionID,
+				AgentName: in.SubagentType, Description: in.Description,
+				Input: newTypedUserInput[M](prompt), Mode: mode,
+				EnableStreaming: enableStreaming, OnEvent: onEvent,
+			})
 		}
-		if len(invocationRunOptions) > 0 {
-			return "", errors.New(
-				"subagent: durable execution does not support invocation-scoped run options; " +
-					"configure RunOptionsFactories",
-			)
-		}
-		task, err := durablesubagent.Submit(callCtx, config.Manager, &durablesubagent.SubmitRequest[M]{
-			SubAgentName: in.SubagentType, Input: newTypedUserInput[M](prompt), Description: in.Description,
-			SessionID: sessionID, ChildSessionID: in.ChildSessionID,
-		})
-		if err != nil && !(errors.Is(err, backgroundtask.ErrTaskCreatedEventUndelivered) && task != nil) {
+		if err != nil {
 			return "", err
 		}
-		go func() {
-			_ = config.Manager.Execute(detachedExecutionContext{parent: callCtx}, task.Spec.ID)
-		}()
-		return formatDurableAgentResult(in.SubagentType, task)
+		if in.RunInBackground {
+			return formatRuntimeHandle(handle, background.StatusPending)
+		}
+		result, err := runtime.Wait(callCtx, handle.TaskID)
+		if err != nil {
+			return "", err
+		}
+		if result.Interrupted != nil {
+			state := runtimeAgentInterruptState{
+				Handle: *handle, NextResumeSequence: nextResumeSequence,
+			}
+			for _, interruptContext := range result.Interrupted.InterruptContexts {
+				if interruptContext.ID != "" {
+					state.TargetIDs = append(state.TargetIDs, interruptContext.ID)
+				}
+			}
+			return "", tool.StatefulInterrupt(callCtx, result.Interrupted, state)
+		}
+		content := agenttool.ExtractTextContent(result.FinalMessage)
+		return sonic.MarshalString(&durableAgentToolResult{
+			TaskID: handle.TaskID, ChildSessionID: handle.ChildSessionID,
+			Status: background.StatusCompleted, Result: content,
+		})
 	})
+}
+
+func formatRuntimeHandle(
+	handle *durablesubagent.Handle,
+	status background.Status,
+) (string, error) {
+	if handle == nil || handle.TaskID == "" || handle.ChildSessionID == "" {
+		return "", errors.New("subagent: runtime returned an invalid handle")
+	}
+	data, err := sonic.MarshalString(&durableAgentToolResult{
+		TaskID: handle.TaskID, ChildSessionID: handle.ChildSessionID, Status: status,
+	})
+	if err != nil {
+		return "", err
+	}
+	return data, nil
 }
 
 func newTypedUserInput[M adk.MessageType](query string) *adk.TypedAgentInput[M] {

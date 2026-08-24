@@ -20,19 +20,24 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"path"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/cloudwego/eino/adk/backgroundtask"
-	backgroundlocal "github.com/cloudwego/eino/adk/backgroundtask/local"
 	"github.com/cloudwego/eino/adk/filesystem"
+	"github.com/cloudwego/eino/adk/task"
+	"github.com/cloudwego/eino/adk/task/background"
+	"github.com/cloudwego/eino/adk/task/foreground"
+	backgroundlocal "github.com/cloudwego/eino/adk/task/local"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/schema"
 )
@@ -40,19 +45,19 @@ import (
 func mustNewBackgroundManager(
 	t testing.TB,
 	ctx context.Context,
-	config *backgroundtask.Config,
-) *backgroundtask.Manager {
+	config *background.Config,
+) *background.Manager {
 	t.Helper()
 	if config == nil {
-		config = &backgroundtask.Config{}
+		config = &background.Config{}
 	} else {
 		copy := *config
 		config = &copy
 	}
 	if config.SendTaskCreatedEvent == nil {
-		config.SendTaskCreatedEvent = func(context.Context, *backgroundtask.Task) error { return nil }
+		config.SendTaskCreatedEvent = func(context.Context, *background.TaskSnapshot) error { return nil }
 	}
-	manager, err := backgroundtask.New(ctx, config)
+	manager, err := background.New(ctx, config)
 	require.NoError(t, err)
 	return manager
 }
@@ -65,52 +70,101 @@ type outputRuntimeStub struct {
 	reportErr error
 }
 
-func (*outputRuntimeStub) Controls() <-chan backgroundtask.ControlRequest {
-	return make(chan backgroundtask.ControlRequest)
+type nilResultWaitStore struct {
+	*background.InMemoryStore
 }
-func (*outputRuntimeStub) EmitProgress(
-	context.Context,
-	string,
-	[]byte,
-) (backgroundtask.ProgressEmission, error) {
-	return backgroundtask.ProgressEmission{}, nil
+
+func (s *nilResultWaitStore) WaitForTaskVersion(
+	ctx context.Context,
+	req *background.WaitForTaskVersionRequest,
+) (*background.TaskSnapshot, error) {
+	snapshot, err := s.InMemoryStore.WaitForTaskVersion(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	if snapshot.Status == background.StatusCompleted {
+		copy := *snapshot
+		copy.ResultData = nil
+		return &copy, nil
+	}
+	return snapshot, nil
+}
+
+func (*outputRuntimeStub) Controls() <-chan background.ControlRequest {
+	return make(chan background.ControlRequest)
+}
+func (*outputRuntimeStub) NewTaskEventWriter(
+	eventID string,
+) (background.TaskEventScope, background.TaskEventWriter) {
+	if eventID == "" {
+		eventID = "event"
+	}
+	scope := background.TaskEventScope{
+		TaskID: "task", Attempt: 1, EventID: eventID,
+	}
+	return scope, outputTaskEventWriter{scope: scope}
+}
+
+type outputTaskEventWriter struct {
+	scope background.TaskEventScope
+}
+
+func (w outputTaskEventWriter) Append(
+	_ context.Context,
+	part *background.TaskEventPartInput,
+) (*background.AppendTaskEventResult, error) {
+	return &background.AppendTaskEventResult{
+		Part: &background.TaskEventPart{
+			TaskID: w.scope.TaskID, EventID: w.scope.EventID,
+			PartID: part.PartID, Data: append([]byte(nil), part.Data...),
+			Final: part.Final,
+		},
+		Inserted: true,
+	}, nil
 }
 func (r *outputRuntimeStub) ReportTranscriptFailure(context.Context, error) error {
 	return r.reportErr
 }
+func (*outputRuntimeStub) ListInputs(context.Context, int64, int) (*task.ListInputsResult, error) {
+	return &task.ListInputsResult{}, nil
+}
+func (*outputRuntimeStub) WaitInputs(ctx context.Context, _ int64) (*task.ListInputsResult, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+func (*outputRuntimeStub) AdvanceInputCursor(context.Context, int64, int64) error {
+	return nil
+}
+func (*outputRuntimeStub) CommitInput(context.Context, int64, int64, []byte) error {
+	return nil
+}
+func (*outputRuntimeStub) CommitStart(context.Context, []byte) error { return nil }
 
 var testManagerStores sync.Map
-var testManagerExecutors sync.Map
 
 func newTestManager(
 	t testing.TB,
 	ctx context.Context,
-	configure ...func(*backgroundtask.Config),
-) *backgroundtask.Manager {
-	store := backgroundtask.NewInMemoryStore(nil)
-	executors := backgroundtask.NewExecutorRegistry()
-	config := &backgroundtask.Config{
-		Tasks: store, Executors: executors,
-	}
+	configure ...func(*background.Config),
+) *background.Manager {
+	store := background.NewInMemoryStore(nil)
+	config := &background.Config{Tasks: store}
 	for _, apply := range configure {
 		apply(config)
 	}
 	manager := mustNewBackgroundManager(t, ctx, config)
 	testManagerStores.Store(manager, store)
-	testManagerExecutors.Store(manager, executors)
 	return manager
 }
 
 func mustLocalRunner(
 	t *testing.T,
-	manager *backgroundtask.Manager,
+	manager *background.Manager,
 	configure ...func(*backgroundlocal.Config),
 ) *backgroundlocal.Runner {
 	t.Helper()
-	executors, ok := testManagerExecutors.Load(manager)
-	require.True(t, ok)
 	config := &backgroundlocal.Config{
-		Manager: manager, Executors: executors.(*backgroundtask.ExecutorRegistry),
+		Manager: manager,
 	}
 	for _, apply := range configure {
 		apply(config)
@@ -154,16 +208,16 @@ func findExecuteTool(t *testing.T, tools []tool.BaseTool) tool.BaseTool {
 	return nil
 }
 
-func waitTerminalTask(t *testing.T, manager *backgroundtask.Manager) *backgroundtask.Task {
+func waitTerminalTask(t *testing.T, manager *background.Manager) *background.TaskSnapshot {
 	t.Helper()
 	store, ok := testManagerStores.Load(manager)
 	require.True(t, ok, "test Manager Store is unavailable")
-	outbox := store.(backgroundtask.NotificationOutbox)
-	var terminal *backgroundtask.Task
+	outbox := store.(background.NotificationOutbox)
+	var terminal *background.TaskSnapshot
 	require.Eventually(t, func() bool {
 		deliveries, err := outbox.Receive(
 			context.Background(),
-			&backgroundtask.ReceiveNotificationsRequest{
+			&background.ReceiveNotificationsRequest{
 				Limit: 10, LeaseDuration: time.Millisecond,
 			},
 		)
@@ -171,9 +225,9 @@ func waitTerminalTask(t *testing.T, manager *backgroundtask.Manager) *background
 		for _, delivery := range deliveries.Deliveries {
 			task, getErr := manager.Get(context.Background(), delivery.Record.TaskID)
 			require.NoError(t, getErr)
-			if task.Status == backgroundtask.StatusCompleted ||
-				task.Status == backgroundtask.StatusFailed ||
-				task.Status == backgroundtask.StatusCanceled {
+			if task.Status == background.StatusCompleted ||
+				task.Status == background.StatusFailed ||
+				task.Status == background.StatusCanceled {
 				terminal = task
 				return true
 			}
@@ -193,6 +247,27 @@ func filesystemOutput(t *testing.T, backend *filesystem.InMemoryBackend) (string
 		}
 	}
 	return "", false
+}
+
+func TestReserveBashOutputFallbackCreatesEmptyFile(t *testing.T) {
+	backend := filesystem.NewInMemoryBackend()
+	first := reserveBashOutput(context.Background(), outputSink{
+		store: backend, outputDir: "/tasks",
+	})
+	second := reserveBashOutput(context.Background(), outputSink{
+		store: backend, outputDir: "/tasks",
+	})
+	require.NotEmpty(t, first.path)
+	require.NotEqual(t, first.path, second.path)
+	require.Equal(t, "/tasks", path.Dir(first.path))
+	require.Equal(t, ".output", path.Ext(first.path))
+	_, err := uuid.Parse(strings.TrimSuffix(path.Base(first.path), ".output"))
+	require.NoError(t, err)
+	reserved, err := backend.Read(context.Background(), &filesystem.ReadRequest{
+		FilePath: first.path,
+	})
+	require.NoError(t, err)
+	require.Empty(t, reserved.Content)
 }
 
 // With a Backend and OutputDir configured, the managed execute tool writes each
@@ -248,36 +323,15 @@ func (s *slowShell) Execute(ctx context.Context, _ *filesystem.ExecuteRequest) (
 	}
 }
 
-type slowRecordingShell struct {
-	delay time.Duration
-	out   string
-	req   *filesystem.ExecuteRequest
-}
-
-func (s *slowRecordingShell) Execute(
-	ctx context.Context,
-	req *filesystem.ExecuteRequest,
-) (*filesystem.ExecuteResponse, error) {
-	s.req = req
-	select {
-	case <-time.After(s.delay):
-		return &filesystem.ExecuteResponse{Output: s.out}, nil
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	}
-}
-
 type gatedShell struct {
 	release <-chan struct{}
 	out     string
-	req     *filesystem.ExecuteRequest
 }
 
 func (s *gatedShell) Execute(
 	ctx context.Context,
-	req *filesystem.ExecuteRequest,
+	_ *filesystem.ExecuteRequest,
 ) (*filesystem.ExecuteResponse, error) {
-	s.req = req
 	select {
 	case <-s.release:
 		return &filesystem.ExecuteResponse{Output: s.out}, nil
@@ -286,8 +340,171 @@ func (s *gatedShell) Execute(
 	}
 }
 
+type taskOwnedShell struct {
+	started  chan struct{}
+	release  chan struct{}
+	canceled chan struct{}
+}
+
+type shellFunc func(
+	context.Context,
+	*filesystem.ExecuteRequest,
+) (*filesystem.ExecuteResponse, error)
+
+func (f shellFunc) Execute(
+	ctx context.Context,
+	req *filesystem.ExecuteRequest,
+) (*filesystem.ExecuteResponse, error) {
+	return f(ctx, req)
+}
+
+func (s *taskOwnedShell) Execute(
+	ctx context.Context,
+	_ *filesystem.ExecuteRequest,
+) (*filesystem.ExecuteResponse, error) {
+	close(s.started)
+	select {
+	case <-s.release:
+		return &filesystem.ExecuteResponse{Output: "done"}, nil
+	case <-ctx.Done():
+		close(s.canceled)
+		return nil, ctx.Err()
+	}
+}
+
+func TestNewManagedBufferedExecuteToolErrors(t *testing.T) {
+	t.Run("session resolution failure is returned before execution", func(t *testing.T) {
+		manager := newTestManager(t, context.Background())
+		t.Cleanup(func() {
+			require.NoError(t, manager.Close(context.Background()))
+		})
+		shell := &mockShellBackend{
+			resp: &filesystem.ExecuteResponse{Output: "must not run"},
+		}
+		sessionErr := errors.New("resolve notification session")
+		executeTool, err := newManagedBufferedExecuteTool(
+			mustLocalRunner(t, manager),
+			shell,
+			func(context.Context) (string, error) {
+				return "", sessionErr
+			},
+			outputSink{},
+			"managed_execute",
+			"Execute a managed command.",
+		)
+		require.NoError(t, err)
+
+		result, err := invokeTool(t, executeTool, `{"command":"echo hi"}`)
+		require.Empty(t, result)
+		require.Nil(t, shell.req)
+		require.ErrorIs(t, err, sessionErr)
+		require.EqualError(
+			t,
+			err,
+			"[LocalFunc] failed to invoke tool, toolName=managed_execute, err=resolve notification session",
+		)
+	})
+
+	for _, testCase := range []struct {
+		name      string
+		shellErr  error
+		wantError func(string) string
+	}{
+		{
+			name:     "foreground failure",
+			shellErr: errors.New("shell failed"),
+			wantError: func(id string) string {
+				return fmt.Sprintf(`execute %q failed: shell failed`, id)
+			},
+		},
+		{
+			name:     "foreground cancellation",
+			shellErr: context.Canceled,
+			wantError: func(id string) string {
+				return fmt.Sprintf(`execute %q was canceled: context canceled`, id)
+			},
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			const taskID = "foreground-result"
+			manager := newTestManager(t, context.Background(), func(config *background.Config) {
+				config.IDGen = func(
+					context.Context,
+					*background.AllocateTaskIDRequest,
+				) (string, error) {
+					return taskID, nil
+				}
+			})
+			t.Cleanup(func() {
+				require.NoError(t, manager.Close(context.Background()))
+			})
+			executeTool, err := newManagedBufferedExecuteTool(
+				mustLocalRunner(t, manager),
+				shellFunc(func(
+					context.Context,
+					*filesystem.ExecuteRequest,
+				) (*filesystem.ExecuteResponse, error) {
+					return nil, testCase.shellErr
+				}),
+				testNotificationSessionID,
+				outputSink{},
+				"managed_execute",
+				"Execute a managed command.",
+			)
+			require.NoError(t, err)
+
+			result, err := invokeTool(t, executeTool, `{"command":"echo hi"}`)
+			require.Empty(t, result)
+			require.EqualError(
+				t,
+				err,
+				"[LocalFunc] failed to invoke tool, toolName=managed_execute, err="+
+					testCase.wantError(taskID),
+			)
+		})
+	}
+
+	t.Run("manager-owned completed result is returned", func(t *testing.T) {
+		manager := newTestManager(t, context.Background())
+		t.Cleanup(func() {
+			require.NoError(t, manager.Close(context.Background()))
+		})
+		timeout := 100
+		runner := mustLocalRunner(t, manager, func(config *backgroundlocal.Config) {
+			config.ForegroundTimeoutMs = &timeout
+			config.ShouldAutoBackground = func(
+				context.Context,
+				*foreground.CandidateInfo,
+			) bool {
+				return true
+			}
+		})
+		executeTool, err := newManagedBufferedExecuteTool(
+			runner,
+			&mockShellBackend{resp: &filesystem.ExecuteResponse{Output: "done"}},
+			testNotificationSessionID,
+			outputSink{},
+			"managed_execute",
+			"Execute a managed command.",
+		)
+		require.NoError(t, err)
+
+		result, err := invokeTool(t, executeTool, `{"command":"echo hi"}`)
+		require.NoError(t, err)
+		require.Equal(t, "done", result)
+	})
+}
+
 func TestManagedExecuteTool_Foreground(t *testing.T) {
-	mgr := newTestManager(t, context.Background())
+	const taskID = "direct-foreground"
+	mgr := newTestManager(t, context.Background(), func(config *background.Config) {
+		config.IDGen = func(
+			context.Context,
+			*background.AllocateTaskIDRequest,
+		) (string, error) {
+			return taskID, nil
+		}
+	})
 	defer func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 		defer cancel()
@@ -308,10 +525,8 @@ func TestManagedExecuteTool_Foreground(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "ok", result)
 
-	_, err = mgr.ListPending(context.Background(), &backgroundtask.ListPendingRequest{
-		ExecutorKeys: []string{"eino.dev/process-local"},
-	})
-	require.NoError(t, err)
+	_, err = mgr.Get(context.Background(), taskID)
+	require.ErrorIs(t, err, background.ErrNotFound)
 }
 
 func TestManagedExecuteTool_ForegroundWithoutNotificationSession(t *testing.T) {
@@ -339,137 +554,12 @@ func TestManagedExecuteTool_ForegroundWithoutNotificationSession(t *testing.T) {
 	assert.Equal(t, "ok", result)
 }
 
-func TestManagedExecuteTool_TimeoutDoesNotSetExecutionTimeout(t *testing.T) {
-	mgr := newTestManager(t, context.Background())
-	defer func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-		defer cancel()
-		_ = mgr.Close(ctx)
-	}()
-
-	shell := &mockShellBackend{resp: &filesystem.ExecuteResponse{Output: "ok"}}
-	tools, err := getFilesystemTools(context.Background(), &MiddlewareConfig{
-		Shell: shell,
-		Background: &BackgroundConfig{
-			Local: &LocalBackgroundConfig{Runner: mustLocalRunner(t, mgr)},
-		},
-		notificationSessionID: testNotificationSessionID,
-	})
-	require.NoError(t, err)
-
-	result, err := invokeTool(t, tools[0], `{"command":"echo hi","timeout":10}`)
-	require.NoError(t, err)
-	assert.Equal(t, "ok", result)
-	require.NotNil(t, shell.req)
-	assert.Nil(t, shell.req.Timeout)
-}
-
-// A backend that stopped the command on its own budget reports TimedOut, and the
-// tool result names the timeout instead of the kill signal's exit code — that is the
-// fact the agent can act on.
-func TestManagedExecuteTool_BackendOwnsCommandTimeoutBackendTimedOut(t *testing.T) {
-	mgr := newTestManager(t, context.Background())
-	defer func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-		defer cancel()
-		_ = mgr.Close(ctx)
-	}()
-
-	shell := &mockShellBackend{resp: &filesystem.ExecuteResponse{
-		Output:   "partial output",
-		ExitCode: ptrOf(137),
-		TimedOut: true,
-	}}
-	tools, err := getFilesystemTools(context.Background(), &MiddlewareConfig{
-		Shell: shell,
-		Background: &BackgroundConfig{Local: &LocalBackgroundConfig{
-			Runner: mustLocalRunner(t, mgr), BackendOwnsCommandTimeout: true,
-		}},
-		notificationSessionID: testNotificationSessionID,
-	})
-	require.NoError(t, err)
-
-	result, err := invokeTool(t, tools[0], `{"command":"sleep 100","timeout":1}`)
-	require.NoError(t, err)
-	assert.Contains(t, result, "partial output")
-	assert.Contains(t, result, commandTimedOutNote)
-	assert.NotContains(t, result, "exit code")
-	require.NotNil(t, shell.req)
-	require.NotNil(t, shell.req.Timeout)
-	assert.Equal(t, time.Second, *shell.req.Timeout)
-}
-
-func TestManagedExecuteTool_BackendOwnsCommandTimeoutUsesCommandExecutionTimeout(t *testing.T) {
-	mgr := newTestManager(t, context.Background())
-	defer func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-		defer cancel()
-		_ = mgr.Close(ctx)
-	}()
-
-	shell := &slowRecordingShell{delay: 20 * time.Millisecond, out: "done"}
-	tools, err := getFilesystemTools(context.Background(), &MiddlewareConfig{
-		Shell: shell,
-		Background: &BackgroundConfig{
-			Local: &LocalBackgroundConfig{
-				Runner: mustLocalRunner(t, mgr, func(config *backgroundlocal.Config) {
-					foregroundTimeoutMs := 5
-					config.ForegroundTimeoutMs = &foregroundTimeoutMs
-					config.ShouldAutoBackground = func(context.Context, *backgroundtask.ForegroundCandidate) bool {
-						return true
-					}
-				}),
-				BackendOwnsCommandTimeout: true,
-			},
-		},
-		notificationSessionID: testNotificationSessionID,
-	})
-	require.NoError(t, err)
-
-	result, err := invokeTool(t, tools[0], `{"command":"sleep","timeout":10}`)
-	require.NoError(t, err)
-	assert.Equal(t, "done", result)
-	require.NotNil(t, shell.req)
-	require.NotNil(t, shell.req.Timeout)
-	assert.Equal(t, 10*time.Second, *shell.req.Timeout)
-}
-
-func TestManagedExecuteTool_BackendOwnsCommandTimeoutExplicitBackgroundIgnoresTimeout(t *testing.T) {
-	mgr := newTestManager(t, context.Background())
-	defer func() {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
-		_ = mgr.Close(ctx)
-	}()
-
-	release := make(chan struct{})
-	shell := &gatedShell{release: release, out: "done"}
-	tools, err := getFilesystemTools(context.Background(), &MiddlewareConfig{
-		Shell: shell,
-		Background: &BackgroundConfig{Local: &LocalBackgroundConfig{
-			Runner: mustLocalRunner(t, mgr), BackendOwnsCommandTimeout: true,
-		}},
-		notificationSessionID: testNotificationSessionID,
-	})
-	require.NoError(t, err)
-
-	result, err := invokeTool(
-		t, tools[0], `{"command":"sleep","run_in_background":true,"timeout":10}`,
-	)
-	require.NoError(t, err)
-	assert.Contains(t, result, "Command running in background with ID:")
-	close(release)
-	_ = waitTerminalTask(t, mgr)
-	require.NotNil(t, shell.req)
-	assert.Nil(t, shell.req.Timeout)
-}
-
 func TestManagedExecuteTool_BackgroundWithoutNotificationSession(t *testing.T) {
 	const taskID = "background-without-notification-session"
-	mgr := newTestManager(t, context.Background(), func(config *backgroundtask.Config) {
+	mgr := newTestManager(t, context.Background(), func(config *background.Config) {
 		config.IDGen = func(
 			context.Context,
-			*backgroundtask.AllocateTaskIDRequest,
+			*background.AllocateTaskIDRequest,
 		) (string, error) {
 			return taskID, nil
 		}
@@ -502,18 +592,18 @@ func TestManagedExecuteTool_BackgroundWithoutNotificationSession(t *testing.T) {
 
 	task, err := mgr.Get(context.Background(), taskID)
 	require.NoError(t, err)
-	assert.Contains(t, []backgroundtask.Status{
-		backgroundtask.StatusPending,
-		backgroundtask.StatusRunning,
+	assert.Contains(t, []background.Status{
+		background.StatusPending,
+		background.StatusRunning,
 	}, task.Status)
-	assert.Empty(t, task.Spec.SessionID)
+	assert.Empty(t, task.Spec.RootSessionID)
 	assert.False(t, task.Spec.NotifySession)
 
 	store, ok := testManagerStores.Load(mgr)
 	require.True(t, ok)
-	deliveries, err := store.(backgroundtask.NotificationOutbox).Receive(
+	deliveries, err := store.(background.NotificationOutbox).Receive(
 		context.Background(),
-		&backgroundtask.ReceiveNotificationsRequest{Limit: 10, LeaseDuration: time.Second},
+		&background.ReceiveNotificationsRequest{Limit: 10, LeaseDuration: time.Second},
 	)
 	require.NoError(t, err)
 	assert.Empty(t, deliveries.Deliveries)
@@ -550,9 +640,16 @@ func TestManagedExecuteTool_Background(t *testing.T) {
 
 	close(release)
 	task := waitTerminalTask(t, mgr)
-	assert.Equal(t, backgroundtask.StatusCompleted, task.Status)
-	assert.Equal(t, "test-session", task.Spec.SessionID)
+	assert.Equal(t, background.StatusCompleted, task.Status)
+	assert.Equal(t, "test-session", task.Spec.RootSessionID)
 	assert.True(t, task.Spec.NotifySession)
+	events, err := mgr.ListTaskEvents(context.Background(), &background.ListTaskEventsRequest{
+		TaskID: task.Spec.ID,
+	})
+	require.NoError(t, err)
+	require.Len(t, events.Parts, 1)
+	assert.Equal(t, []byte("done"), events.Parts[0].Data)
+	assert.True(t, events.Parts[0].Final)
 
 	// The background-launch message reports the (reserved) output-file path so the
 	// agent can read it once the task completes.
@@ -576,7 +673,7 @@ func TestManagedExecuteTool_TimeoutMovesToBackground(t *testing.T) {
 		Background: &BackgroundConfig{
 			Local: &LocalBackgroundConfig{
 				Runner: mustLocalRunner(t, mgr, func(config *backgroundlocal.Config) {
-					config.ShouldAutoBackground = func(context.Context, *backgroundtask.ForegroundCandidate) bool {
+					config.ShouldAutoBackground = func(context.Context, *foreground.CandidateInfo) bool {
 						return true
 					}
 				}),
@@ -592,8 +689,84 @@ func TestManagedExecuteTool_TimeoutMovesToBackground(t *testing.T) {
 	assert.Contains(t, result, "Command running in background with ID:")
 
 	task := waitTerminalTask(t, mgr)
-	assert.Equal(t, backgroundtask.StatusCompleted, task.Status)
+	assert.Equal(t, background.StatusCompleted, task.Status)
 	assert.Equal(t, "slow done", string(task.ResultData))
+}
+
+func TestManagedExecuteTool_CallerAbortDetachesTaskOwnedShell(t *testing.T) {
+	mgr := newTestManager(t, context.Background())
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_ = mgr.Close(ctx)
+	}()
+	timeout := 0
+	shell := &taskOwnedShell{
+		started:  make(chan struct{}),
+		release:  make(chan struct{}),
+		canceled: make(chan struct{}),
+	}
+	tools, err := getFilesystemTools(context.Background(), &MiddlewareConfig{
+		Shell: shell,
+		Background: &BackgroundConfig{
+			Local: &LocalBackgroundConfig{
+				Runner: mustLocalRunner(t, mgr, func(config *backgroundlocal.Config) {
+					config.ForegroundTimeoutMs = &timeout
+					config.ShouldAutoBackground = func(
+						context.Context,
+						*foreground.CandidateInfo,
+					) bool {
+						return true
+					}
+				}),
+			},
+		},
+		notificationSessionID: testNotificationSessionID,
+	})
+	require.NoError(t, err)
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan struct {
+		value string
+		err   error
+	}, 1)
+	go func() {
+		value, runErr := tools[0].(tool.InvokableTool).InvokableRun(
+			ctx,
+			`{"command":"sleep"}`,
+		)
+		result <- struct {
+			value string
+			err   error
+		}{value: value, err: runErr}
+	}()
+	select {
+	case <-shell.started:
+	case <-time.After(time.Second):
+		t.Fatal("shell did not start")
+	}
+	store, ok := testManagerStores.Load(mgr)
+	require.True(t, ok)
+	beforeDetach, err := store.(background.NotificationOutbox).Receive(
+		context.Background(),
+		&background.ReceiveNotificationsRequest{
+			Limit: 10, LeaseDuration: time.Second,
+		},
+	)
+	require.NoError(t, err)
+	require.Empty(t, beforeDetach.Deliveries)
+	cancel()
+	returned := <-result
+	require.NoError(t, returned.err)
+	require.Contains(t, returned.value, "Command running in background with ID:")
+	select {
+	case <-shell.canceled:
+		t.Fatal("caller cancellation reached task-owned shell")
+	default:
+	}
+	close(shell.release)
+	task := waitTerminalTask(t, mgr)
+	require.Equal(t, background.StatusCompleted, task.Status)
+	require.Equal(t, background.PublicationOnBackground, task.Publication)
 }
 
 // Without a ShouldAutoBackground hook, a command that outlives its timeout is
@@ -617,23 +790,18 @@ func TestManagedExecuteTool_TimeoutKills(t *testing.T) {
 
 	_, err = invokeTool(t, tools[0], `{"command":"sleep","timeout":1}`)
 	require.ErrorIs(t, err, context.DeadlineExceeded)
-	var timeoutErr *backgroundtask.ForegroundTimeoutError
+	var timeoutErr *task.ForegroundTimeoutError
 	require.ErrorAs(t, err, &timeoutErr)
 	require.Equal(t, time.Second, timeoutErr.Timeout)
 	require.NotEmpty(t, timeoutErr.TaskID)
 }
 
 func TestShellPayloadV1AndCommandFromTask(t *testing.T) {
-	const (
-		managerOwnsTimeout = false
-		backendOwnsTimeout = true
-	)
-
 	input, err := managedRunInput(executeManagedArgs{
 		executeArgs: executeArgs{Command: "echo hello"},
-	}, &bashOutputWriter{}, "test-session", managerOwnsTimeout)
+	}, &bashOutputWriter{}, "test-session")
 	require.NoError(t, err)
-	task := &backgroundtask.Task{Spec: backgroundtask.Spec{
+	task := &background.TaskSnapshot{Spec: background.Spec{
 		Kind: ExecuteTaskKind, Payload: input.Payload,
 	}}
 	assert.Equal(t, "echo hello", CommandFromTask(task))
@@ -641,54 +809,17 @@ func TestShellPayloadV1AndCommandFromTask(t *testing.T) {
 	input, err = managedRunInput(executeManagedArgs{
 		executeArgs:    executeArgs{Command: "echo hello"},
 		TimeoutSeconds: 2,
-	}, &bashOutputWriter{}, "test-session", managerOwnsTimeout)
+	}, &bashOutputWriter{}, "test-session")
 	require.NoError(t, err)
 	require.NotNil(t, input.ForegroundTimeoutMs)
 	assert.Equal(t, 2000, *input.ForegroundTimeoutMs)
-
-	// The backend enforces the command budget, so the Manager's foreground timer is
-	// disabled rather than racing it.
-	input, err = managedRunInput(executeManagedArgs{
-		executeArgs:    executeArgs{Command: "echo hello"},
-		TimeoutSeconds: 2,
-	}, &bashOutputWriter{}, "test-session", backendOwnsTimeout)
-	require.NoError(t, err)
-	require.NotNil(t, input.ForegroundTimeoutMs)
-	assert.Zero(t, *input.ForegroundTimeoutMs)
-
-	// An explicit background launch never waits in the foreground, so it leaves the
-	// timer at the Runner's default instead of encoding a meaningless override.
-	input, err = managedRunInput(executeManagedArgs{
-		executeArgs:     executeArgs{Command: "echo hello"},
-		TimeoutSeconds:  2,
-		RunInBackground: true,
-	}, &bashOutputWriter{}, "test-session", managerOwnsTimeout)
-	require.NoError(t, err)
-	assert.Nil(t, input.ForegroundTimeoutMs)
 
 	payload := shellPayloadV1{Version: 2, Command: "echo hello"}
 	task.Spec.Payload, err = json.Marshal(payload)
 	require.NoError(t, err)
 	assert.Empty(t, CommandFromTask(task))
 	_, err = decodeShellPayload(task.Spec.Payload)
-	assert.ErrorIs(t, err, backgroundtask.ErrUnsupportedExecutorPayloadVersion)
-}
-
-// Only a foreground run hands the timeout argument to the backend: an explicit
-// background launch ignores it in either mode.
-func TestBackendOwnsTimeoutForRun(t *testing.T) {
-	foreground := executeManagedArgs{executeArgs: executeArgs{Command: "cmd"}}
-	background := executeManagedArgs{
-		executeArgs: executeArgs{Command: "cmd"}, RunInBackground: true,
-	}
-
-	assert.False(t, backendOwnsTimeoutForRun(foreground, false))
-	assert.True(t, backendOwnsTimeoutForRun(foreground, true))
-	assert.False(t, backendOwnsTimeoutForRun(background, false))
-	assert.False(t, backendOwnsTimeoutForRun(background, true))
-
-	assert.Nil(t, managedExecuteRequest(foreground, false).Timeout)
-	assert.Nil(t, managedExecuteRequest(background, true).Timeout)
+	assert.ErrorIs(t, err, background.ErrUnsupportedExecutorPayloadVersion)
 }
 
 func TestForegroundTimeoutMsForToolArgument(t *testing.T) {
@@ -713,57 +844,6 @@ func TestForegroundTimeoutMsForToolArgument(t *testing.T) {
 			assert.Equal(t, test.want, *timeout)
 		})
 	}
-}
-
-// mockStreamingShellTimedOutChunks reports the timeout on a terminal chunk that
-// carries no output, so the note must come from state accumulated across chunks.
-type mockStreamingShellTimedOutChunks struct{}
-
-func (m *mockStreamingShellTimedOutChunks) ExecuteStreaming(
-	ctx context.Context, input *filesystem.ExecuteRequest,
-) (*schema.StreamReader[*filesystem.ExecuteResponse], error) {
-	sr, sw := schema.Pipe[*filesystem.ExecuteResponse](10)
-	go func() {
-		defer sw.Close()
-		sw.Send(&filesystem.ExecuteResponse{Output: "chunk1\n"}, nil)
-		sw.Send(&filesystem.ExecuteResponse{TimedOut: true, ExitCode: ptrOf(137)}, nil)
-	}()
-	return sr, nil
-}
-
-func TestManagedExecuteTool_StreamingBackendTimedOut(t *testing.T) {
-	mgr := newTestManager(t, context.Background())
-	defer func() {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
-		_ = mgr.Close(ctx)
-	}()
-
-	executeTool, err := newManagedExecuteTool(
-		mustLocalRunner(t, mgr), nil, &mockStreamingShellTimedOutChunks{},
-		testNotificationSessionID, outputSink{}, toolDefinition{backendOwnsCommandTimeout: true},
-	)
-	require.NoError(t, err)
-
-	st, ok := executeTool.(tool.StreamableTool)
-	require.True(t, ok)
-	sr, err := st.StreamableRun(context.Background(), `{"command":"sleep 100","timeout":1}`)
-	require.NoError(t, err)
-	defer sr.Close()
-
-	var sb strings.Builder
-	for {
-		chunk, recvErr := sr.Recv()
-		if recvErr == io.EOF {
-			break
-		}
-		require.NoError(t, recvErr)
-		sb.WriteString(chunk)
-	}
-	result := sb.String()
-	assert.Contains(t, result, "chunk1")
-	assert.Contains(t, result, commandTimedOutNote)
-	assert.NotContains(t, result, "exit code")
 }
 
 // With a Manager, the execute tool schema gains run_in_background and timeout fields.
@@ -793,32 +873,6 @@ func TestManagedExecuteTool_StreamingForeground(t *testing.T) {
 	assert.Contains(t, got, "chunk3")
 }
 
-func TestManagedExecuteTool_StreamingBackendOwnsCommandTimeoutUsesCommandExecutionTimeout(t *testing.T) {
-	mgr := newTestManager(t, context.Background())
-	defer func() {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
-		_ = mgr.Close(ctx)
-	}()
-
-	shell := &mockStreamingShell{}
-	executeTool, err := newManagedExecuteTool(
-		mustLocalRunner(t, mgr), nil, shell, testNotificationSessionID,
-		outputSink{}, toolDefinition{backendOwnsCommandTimeout: true},
-	)
-	require.NoError(t, err)
-
-	stream := executeTool.(tool.StreamableTool)
-	sr, err := stream.StreamableRun(
-		context.Background(), `{"command":"echo hi","timeout":10}`,
-	)
-	require.NoError(t, err)
-	_ = drainToolStream(t, sr)
-	require.NotNil(t, shell.req)
-	require.NotNil(t, shell.req.Timeout)
-	assert.Equal(t, 10*time.Second, *shell.req.Timeout)
-}
-
 // An explicit background launch on a streaming managed tool exposes the bounded
 // startup preview when available, then drains the complete output in the
 // background.
@@ -844,7 +898,7 @@ func TestManagedExecuteTool_StreamingExplicitBackground(t *testing.T) {
 	assert.Contains(t, got, "is running in the background")
 
 	task := waitTerminalTask(t, mgr)
-	assert.Equal(t, backgroundtask.StatusCompleted, task.Status)
+	assert.Equal(t, background.StatusCompleted, task.Status)
 	assert.Contains(t, string(task.ResultData), "chunk3")
 	assert.Contains(t, string(task.ResultData), "chunk1")
 	// The streamed output was teed to the output file as it drained in the background.
@@ -961,68 +1015,39 @@ func TestManagedExecuteTool_Schema(t *testing.T) {
 
 	info, err := executeTool.Info(context.Background())
 	require.NoError(t, err)
+	require.Equal(t, ToolNameExecute, info.Name)
+	require.Equal(t, ManagedExecuteToolDesc, info.Desc)
 	js, err := info.ParamsOneOf.ToJSONSchema()
 	require.NoError(t, err)
-	assert.Equal(t, 3, js.Properties.Len())
-	_, ok := js.Properties.Get("command")
-	assert.True(t, ok)
-	_, ok = js.Properties.Get("run_in_background")
-	assert.True(t, ok)
-	timeout, ok := js.Properties.Get("timeout")
-	assert.True(t, ok)
-	assert.Contains(t, timeout.Description, "seconds")
-	// The schema is derived from the arg struct tag once, so it must not claim
-	// either mode's meaning; the tool description carries that.
-	assert.Contains(t, timeout.Description, "Ignored when run_in_background is true")
-	assert.NotContains(t, timeout.Description, "limits command execution")
-	assert.NotContains(t, timeout.Description, "limits foreground waiting")
-	// The default (auto-background) mode describes the timeout as a wait bound.
-	assert.Contains(t, info.Desc, "bounds how long this call waits for the command")
-}
-
-// The timeout argument means different things in the two modes, so the tool
-// description — fixed at construction, unlike the arg schema — must be selected
-// per mode.
-func TestManagedExecuteTool_BackendOwnsCommandTimeoutDesc(t *testing.T) {
-	mgr := newTestManager(t, context.Background())
-	defer func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-		defer cancel()
-		_ = mgr.Close(ctx)
-	}()
-
-	shell := &mockShellBackend{resp: &filesystem.ExecuteResponse{Output: "ok"}}
-	runner := mustLocalRunner(t, mgr)
-
-	autoTool, err := newManagedExecuteTool(
-		runner, shell, nil, testNotificationSessionID, outputSink{}, toolDefinition{},
-	)
-	require.NoError(t, err)
-	autoInfo, err := autoTool.Info(context.Background())
-	require.NoError(t, err)
-
-	fgTool, err := newManagedExecuteTool(
-		runner, shell, nil, testNotificationSessionID, outputSink{},
-		toolDefinition{backendOwnsCommandTimeout: true},
-	)
-	require.NoError(t, err)
-	fgInfo, err := fgTool.Info(context.Background())
-	require.NoError(t, err)
-
-	assert.NotEqual(t, autoInfo.Desc, fgInfo.Desc)
-	assert.Contains(t, fgInfo.Desc, "bounds how long the command itself may run")
-	assert.Contains(t, fgInfo.Desc, "never handed off to a background task")
-	assert.NotContains(t, fgInfo.Desc, "auto-background handoff")
-
-	// An explicit description still wins over both defaults.
-	customTool, err := newManagedExecuteTool(
-		runner, shell, nil, testNotificationSessionID, outputSink{},
-		toolDefinition{desc: "custom desc", backendOwnsCommandTimeout: true},
-	)
-	require.NoError(t, err)
-	customInfo, err := customTool.Info(context.Background())
-	require.NoError(t, err)
-	assert.Equal(t, "custom desc", customInfo.Desc)
+	require.Equal(t, "object", js.Type)
+	require.Equal(t, []string{"command"}, js.Required)
+	require.Equal(t, 3, js.Properties.Len())
+	for name, expected := range map[string]struct {
+		schemaType  string
+		description string
+	}{
+		"command": {
+			schemaType:  "string",
+			description: "The command to execute",
+		},
+		"run_in_background": {
+			schemaType: "boolean",
+			description: "Set to true to run the command in the background. " +
+				"Use task_output to query it and task_stop to cancel it.",
+		},
+		"timeout": {
+			schemaType: "integer",
+			description: "Optional foreground wait in seconds, up to 3 days. " +
+				"Ignored when run_in_background is true. At expiry, the command stops " +
+				"unless the host allows automatic backgrounding for this command; then " +
+				"it continues as a background task. Omit to use the configured default.",
+		},
+	} {
+		property, ok := js.Properties.Get(name)
+		require.True(t, ok, "missing schema property %q", name)
+		require.Equal(t, expected.schemaType, property.Type)
+		require.Equal(t, expected.description, property.Description)
+	}
 }
 
 // Without a Manager, the execute tool is command-only and untracked.
@@ -1118,7 +1143,14 @@ func (f *failingAppendOpener) OpenAppend(ctx context.Context, req *filesystem.Op
 // so consumers fall back to the in-memory ResultData.
 func TestManagedExecuteTool_ReservationFailure_NoOutputFile(t *testing.T) {
 	backend := setupTestBackend()
-	mgr := newTestManager(t, context.Background())
+	mgr := newTestManager(t, context.Background(), func(config *background.Config) {
+		config.IDGen = func(
+			context.Context,
+			*background.AllocateTaskIDRequest,
+		) (string, error) {
+			return "reservation-failure", nil
+		}
+	})
 	defer func() {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
@@ -1134,7 +1166,12 @@ func TestManagedExecuteTool_ReservationFailure_NoOutputFile(t *testing.T) {
 
 	result, err := invokeTool(t, executeTool, `{"command":"echo hi","run_in_background":true}`)
 	require.NoError(t, err)
-	assert.Contains(t, result, "running in background")
+	require.Equal(
+		t,
+		"Command running in background with ID: reservation-failure. "+
+			"You will be notified when it completes.",
+		result,
+	)
 
 	task := waitTerminalTask(t, mgr)
 	path, found := filesystemOutput(t, backend)
@@ -1171,6 +1208,51 @@ func TestManagedExecuteTool_WriteFailure_MarksUnreliable(t *testing.T) {
 	assert.NotEmpty(t, path)
 	assert.True(t, found)
 	assert.Equal(t, "the output", string(task.ResultData))
+	require.Contains(t, task.OutputFileErr, "append failed")
+}
+
+func TestManagedExecuteTool_CompletedTaskWithoutResultFails(t *testing.T) {
+	store := &nilResultWaitStore{
+		InMemoryStore: background.NewInMemoryStore(nil),
+	}
+	manager := mustNewBackgroundManager(t, context.Background(), &background.Config{
+		Tasks: store, TaskEvents: store,
+		IDGen: func(context.Context, *background.AllocateTaskIDRequest) (string, error) {
+			return "missing-result", nil
+		},
+	})
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_ = manager.Close(ctx)
+	})
+	timeout := 100
+	runner := mustLocalRunner(t, manager, func(config *backgroundlocal.Config) {
+		config.ForegroundTimeoutMs = &timeout
+		config.ShouldAutoBackground = func(
+			context.Context,
+			*foreground.CandidateInfo,
+		) bool {
+			return true
+		}
+	})
+	executeTool, err := newManagedExecuteTool(
+		runner,
+		&mockShellBackend{resp: &filesystem.ExecuteResponse{Output: "discarded"}},
+		nil,
+		testNotificationSessionID,
+		outputSink{},
+		toolDefinition{},
+	)
+	require.NoError(t, err)
+
+	result, err := invokeTool(t, executeTool, `{"command":"echo hi"}`)
+	require.Empty(t, result)
+	require.EqualError(
+		t,
+		err,
+		`[LocalFunc] failed to invoke tool, toolName=execute, err=execute task "missing-result" completed without a result`,
+	)
 }
 
 // countingAppendOpener wraps a Backend and counts every OpenAppend and every
@@ -1247,7 +1329,7 @@ func TestManagedExecuteTool_StreamingSourceError_ClosesStream(t *testing.T) {
 	sr.Close()
 
 	task := waitTerminalTask(t, mgr)
-	assert.Equal(t, backgroundtask.StatusFailed, task.Status)
+	assert.Equal(t, background.StatusFailed, task.Status)
 
 	opens := atomic.LoadInt32(&counter.opens)
 	closes := atomic.LoadInt32(&counter.closes)

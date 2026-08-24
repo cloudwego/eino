@@ -34,7 +34,7 @@ type Policy struct {
 
 // CandidateInfo describes a process-local foreground execution that may be
 // handed off to background ownership. TaskID is pre-allocated for correlation;
-// no backgroundtask.Task exists until a handoff callback submits one.
+// no task/background.TaskSnapshot exists until a handoff callback submits one.
 type CandidateInfo struct {
 	TaskID      string
 	Kind        string

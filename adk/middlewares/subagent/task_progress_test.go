@@ -18,7 +18,7 @@ package subagent
 
 import (
 	"context"
-	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -28,41 +28,42 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cloudwego/eino/adk"
-	"github.com/cloudwego/eino/adk/backgroundtask"
-	durablesubagent "github.com/cloudwego/eino/adk/backgroundtask/subagent"
 	adksession "github.com/cloudwego/eino/adk/session"
+	"github.com/cloudwego/eino/adk/task"
+	"github.com/cloudwego/eino/adk/task/background"
+	durablesubagent "github.com/cloudwego/eino/adk/task/subagent"
 	"github.com/cloudwego/eino/schema"
 )
 
 const expectedProgressRecords = 100
 
-func TestNewDurableTaskProgressReaderRequiresExecutor_BitsUT(t *testing.T) {
-	reader, err := NewDurableTaskProgressReader[*schema.Message](nil, nil)
+func TestNewDurableProgressReaderRequiresExecutor_BitsUT(t *testing.T) {
+	reader, err := NewDurableProgressReader[*schema.Message](nil, nil)
 	require.Error(t, err)
 	require.Nil(t, reader)
 }
 
-func TestDurableTaskProgressReaderDelegatesAndRejectsNilReceiver_BitsUT(t *testing.T) {
+func TestDurableProgressReaderDelegatesAndRejectsNilReceiver_BitsUT(t *testing.T) {
 	ctx := context.Background()
 	store := adksession.NewInMemoryStore[*schema.Message](nil)
-	task := durableProgressTask[*schema.Message](t, backgroundtask.StatusRunning)
-	reader, err := NewDurableTaskProgressReader(progressExecutor(t, store), nil)
+	task := durableProgressTask[*schema.Message](t, background.StatusRunning)
+	reader, err := NewDurableProgressReader(progressController(t, store), nil)
 	require.NoError(t, err)
 
 	progress, err := reader.ReadProgress(ctx, task)
 	require.NoError(t, err)
 	require.Empty(t, progress)
 
-	var nilReader *DurableTaskProgressReader[*schema.Message]
+	var nilReader *DurableProgressReader[*schema.Message]
 	progress, err = nilReader.ReadProgress(ctx, task)
 	require.Empty(t, progress)
-	require.EqualError(t, err, "subagent: durable executor is required to read task progress")
+	require.EqualError(t, err, "subagent: durable Controller is required to read task progress")
 }
 
 func TestReadDurableTaskProgress(t *testing.T) {
 	ctx := context.Background()
 	store := adksession.NewInMemoryStore[*schema.Message](nil)
-	task := durableProgressTask[*schema.Message](t, backgroundtask.StatusWaitingInput)
+	task := durableProgressTask[*schema.Message](t, background.StatusWaitingInput)
 	sessionID := progressChildSessionID
 	require.NoError(t, store.AppendEvents(ctx, sessionID, taskProgressEvents(
 		task.Spec.ID,
@@ -94,8 +95,8 @@ func TestReadDurableTaskProgress(t *testing.T) {
 	format := func(_ context.Context, agentName string, message *schema.Message) (string, error) {
 		return agentName + ": " + message.Content, nil
 	}
-	executor := progressExecutor(t, store)
-	progress, err := executor.ReadProgress(
+	controller := progressController(t, store)
+	progress, err := controller.ReadProgress(
 		ctx, task, format,
 	)
 	require.NoError(t, err)
@@ -109,7 +110,7 @@ func TestReadDurableTaskProgress(t *testing.T) {
 func TestReadDurableTaskProgressIncludesAgenticToolResults(t *testing.T) {
 	ctx := context.Background()
 	store := adksession.NewInMemoryStore[*schema.AgenticMessage](nil)
-	task := durableProgressTask[*schema.AgenticMessage](t, backgroundtask.StatusRunning)
+	task := durableProgressTask[*schema.AgenticMessage](t, background.StatusRunning)
 	sessionID := progressChildSessionID
 	toolResult := &schema.AgenticMessage{
 		Role: schema.AgenticRoleTypeUser,
@@ -136,8 +137,8 @@ func TestReadDurableTaskProgressIncludesAgenticToolResults(t *testing.T) {
 		},
 	)))
 
-	executor := progressExecutor(t, store)
-	progress, err := executor.ReadProgress(
+	controller := progressController(t, store)
+	progress, err := controller.ReadProgress(
 		ctx, task,
 		func(_ context.Context, agentName string, message *schema.AgenticMessage) (string, error) {
 			return agentName + ": " + message.String(), nil
@@ -176,7 +177,7 @@ func TestDefaultTranscriptFormatStripsMessageExtra(t *testing.T) {
 func TestReadDurableTaskProgressBoundsRecentMessages(t *testing.T) {
 	ctx := context.Background()
 	store := adksession.NewInMemoryStore[*schema.Message](nil)
-	task := durableProgressTask[*schema.Message](t, backgroundtask.StatusRunning)
+	task := durableProgressTask[*schema.Message](t, background.StatusRunning)
 	sessionID := progressChildSessionID
 	events := []*adk.SessionEvent[*schema.Message]{{
 		EventID: "query", Kind: adk.SessionEventMessage,
@@ -193,8 +194,8 @@ func TestReadDurableTaskProgressBoundsRecentMessages(t *testing.T) {
 		ctx, sessionID, taskProgressEvents(task.Spec.ID, events),
 	))
 
-	executor := progressExecutor(t, store)
-	progress, err := executor.ReadProgress(
+	controller := progressController(t, store)
+	progress, err := controller.ReadProgress(
 		ctx, task,
 		func(_ context.Context, agentName string, message *schema.Message) (string, error) {
 			return agentName + ": " + message.Content, nil
@@ -210,7 +211,7 @@ func TestReadDurableTaskProgressBoundsRecentMessages(t *testing.T) {
 func TestAttack_SharedSessionProgressDoesNotLeakAcrossTasks(t *testing.T) {
 	ctx := context.Background()
 	store := adksession.NewInMemoryStore[*schema.Message](nil)
-	task := durableProgressTask[*schema.Message](t, backgroundtask.StatusCompleted)
+	task := durableProgressTask[*schema.Message](t, background.StatusCompleted)
 	events := taskProgressEvents(task.Spec.ID, []*adk.SessionEvent[*schema.Message]{
 		{
 			EventID: "target-query", Kind: adk.SessionEventMessage,
@@ -235,8 +236,8 @@ func TestAttack_SharedSessionProgressDoesNotLeakAcrossTasks(t *testing.T) {
 		ctx, progressChildSessionID, events,
 	))
 
-	executor := progressExecutor(t, store)
-	progress, err := executor.ReadProgress(
+	controller := progressController(t, store)
+	progress, err := controller.ReadProgress(
 		ctx,
 		task,
 		func(
@@ -261,7 +262,7 @@ func taskProgressEvents[M adk.MessageType](
 ) []*adk.SessionEvent[M] {
 	for _, event := range events {
 		if event != nil {
-			event.Extra = map[string]any{"eino.background_task.id": taskID}
+			event.Extra = map[string]any{"eino.task.id": taskID}
 		}
 	}
 	return events
@@ -269,20 +270,16 @@ func taskProgressEvents[M adk.MessageType](
 
 func durableProgressTask[M adk.MessageType](
 	t *testing.T,
-	status backgroundtask.Status,
-) *backgroundtask.Task {
+	status background.Status,
+) *background.TaskSnapshot {
 	t.Helper()
-	input := newTypedUserInput[M]("submitted query")
-	messages, err := (&schema.HumanReadableSerializer{}).Marshal(input.Messages)
-	require.NoError(t, err)
 	payload, err := sonic.Marshal(map[string]any{
-		"version": 4, "subagent_name": "worker",
-		"input":            map[string]any{"messages": json.RawMessage(messages)},
+		"version": 1, "subagent_name": "worker",
 		"child_session_id": progressChildSessionID,
 	})
 	require.NoError(t, err)
-	return &backgroundtask.Task{
-		Spec: backgroundtask.Spec{
+	return &background.TaskSnapshot{
+		Spec: background.Spec{
 			ID: "subagent_task", ExecutorKey: durablesubagent.ExecutorKey,
 			Kind: TaskKindSubagent, Payload: payload, SessionID: "parent",
 		},
@@ -290,14 +287,66 @@ func durableProgressTask[M adk.MessageType](
 	}
 }
 
-func progressExecutor[M adk.MessageType](
+type progressAgent[M adk.MessageType] struct{}
+
+func (*progressAgent[M]) Name(context.Context) string        { return "worker" }
+func (*progressAgent[M]) Description(context.Context) string { return "worker" }
+func (*progressAgent[M]) Run(
+	context.Context,
+	*adk.TypedAgentInput[M],
+	...adk.AgentRunOption,
+) *adk.AsyncIterator[*adk.TypedAgentEvent[M]] {
+	iter, generator := adk.NewAsyncIteratorPair[*adk.TypedAgentEvent[M]]()
+	generator.Close()
+	return iter
+}
+func (a *progressAgent[M]) Resume(
+	ctx context.Context,
+	_ *adk.ResumeInfo,
+	options ...adk.AgentRunOption,
+) *adk.AsyncIterator[*adk.TypedAgentEvent[M]] {
+	return a.Run(ctx, &adk.TypedAgentInput[M]{}, options...)
+}
+
+type progressBarrier[M adk.MessageType] struct{}
+
+func (progressBarrier[M]) Check(
+	context.Context,
+	*durablesubagent.CompletionContext[M],
+) (durablesubagent.CompletionDecision, error) {
+	return durablesubagent.Complete, nil
+}
+
+func progressController[M adk.MessageType](
 	t *testing.T,
 	store *adksession.InMemoryStore[M],
-) *durablesubagent.Executor[M] {
+) *durablesubagent.Controller[M] {
 	t.Helper()
-	executor, err := durablesubagent.NewExecutor(&durablesubagent.ExecutorConfig[M]{
-		SessionStore: store, CheckPointStore: store,
+	taskStore := background.NewInMemoryStore(nil)
+	manager, err := background.New(context.Background(), &background.Config{
+		Tasks: taskStore, TaskEvents: taskStore,
+		SendTaskCreatedEvent: func(context.Context, *background.TaskSnapshot) error {
+			return nil
+		},
 	})
 	require.NoError(t, err)
-	return executor
+	controller, err := durablesubagent.NewController(
+		&durablesubagent.ControllerConfig[M]{
+			Manager: manager,
+			Barrier: progressBarrier[M]{},
+			EventToInput: func(
+				context.Context,
+				[]*task.Input,
+			) (*adk.TypedAgentInput[M], error) {
+				return nil, errors.New("unused")
+			},
+			SessionStore: store, CheckPointStore: store,
+		},
+	)
+	require.NoError(t, err)
+	require.NoError(t, controller.RegisterAgent(
+		"worker",
+		&durablesubagent.AgentRegistration[M]{Agent: &progressAgent[M]{}},
+	))
+	return controller
 }

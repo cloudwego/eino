@@ -25,9 +25,9 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/cloudwego/eino/adk/backgroundtask"
-	backgroundlocal "github.com/cloudwego/eino/adk/backgroundtask/local"
 	"github.com/cloudwego/eino/adk/filesystem"
+	"github.com/cloudwego/eino/adk/task/background"
+	backgroundlocal "github.com/cloudwego/eino/adk/task/local"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/components/tool/utils"
 	"github.com/cloudwego/eino/compose"
@@ -35,7 +35,7 @@ import (
 )
 
 // ExecuteTaskKind identifies shell-command tasks in host-side policy. The core
-// backgroundtask Spec does not persist display/filter labels.
+// A background Task Spec does not persist display/filter labels.
 const ExecuteTaskKind = "bash"
 
 // defaultBashStartupPreviewMs is the caller-visible startup window for an
@@ -52,7 +52,7 @@ type shellPayloadV1 struct {
 }
 
 // CommandFromTask returns the process-local shell task description.
-func CommandFromTask(t *backgroundtask.Task) string {
+func CommandFromTask(t *background.TaskSnapshot) string {
 	if t == nil || t.Spec.Kind != ExecuteTaskKind {
 		return ""
 	}
@@ -69,7 +69,7 @@ func decodeShellPayload(data []byte) (*shellPayloadV1, error) {
 		return nil, err
 	}
 	if payload.Version != shellPayloadVersion {
-		return nil, backgroundtask.ErrUnsupportedExecutorPayloadVersion
+		return nil, background.ErrUnsupportedExecutorPayloadVersion
 	}
 	if payload.Command == "" {
 		return nil, fmt.Errorf("filesystem: shell payload command is required")
@@ -109,7 +109,7 @@ type bashOutputWriter struct {
 	path    string
 	stream  io.WriteCloser // opened lazily by the streaming work; nil => not open
 	ctx     context.Context
-	runtime backgroundtask.ExecutionRuntime
+	runtime background.ExecutionRuntime
 	failed  bool // set after the first append error: the file is now partial
 }
 
@@ -156,7 +156,7 @@ func (w *bashOutputWriter) fail(err error) error {
 // context (detached from the caller), so the session outlives a backgrounded run.
 // On failure the writer is marked failed and the file unreliable, so subsequent
 // appends are no-ops. It is a no-op for a disabled writer.
-func (w *bashOutputWriter) open(ctx context.Context, runtime backgroundtask.ExecutionRuntime) error {
+func (w *bashOutputWriter) open(ctx context.Context, runtime background.ExecutionRuntime) error {
 	if w.store == nil || w.failed {
 		return nil
 	}
@@ -208,7 +208,7 @@ func (w *bashOutputWriter) closeStream() error {
 // buffered (non-streaming) work, which produces no incremental chunks: it is just a
 // single-chunk stream, so it reuses the same open→append→close session as the
 // streaming path. It is a no-op for a disabled writer.
-func (w *bashOutputWriter) appendResult(ctx context.Context, runtime backgroundtask.ExecutionRuntime, content string) error {
+func (w *bashOutputWriter) appendResult(ctx context.Context, runtime background.ExecutionRuntime, content string) error {
 	if err := w.open(ctx, runtime); err != nil {
 		return err
 	}
@@ -237,7 +237,7 @@ func outputFileName(ctx context.Context) string {
 // On success it appends the result to the output file (when one is configured)
 // before returning, so it matches ResultData.
 func bashWork(sb filesystem.Shell, req *filesystem.ExecuteRequest, w *bashOutputWriter) backgroundlocal.WorkFunc {
-	return func(ctx context.Context, runtime backgroundtask.ExecutionRuntime) (string, error) {
+	return func(ctx context.Context, runtime background.ExecutionRuntime) (string, error) {
 		result, err := sb.Execute(ctx, req)
 		if err != nil {
 			return "", err
@@ -273,7 +273,7 @@ func bashWork(sb filesystem.Shell, req *filesystem.ExecuteRequest, w *bashOutput
 // cancellation (the file is already incomplete in that case), which the AppendOpener
 // contract requires a resource-holding backend to honor.
 func bashStreamWork(sb filesystem.StreamingShell, req *filesystem.ExecuteRequest, w *bashOutputWriter) backgroundlocal.StreamWorkFunc {
-	return func(ctx context.Context, runtime backgroundtask.ExecutionRuntime) (*schema.StreamReader[string], error) {
+	return func(ctx context.Context, runtime background.ExecutionRuntime) (*schema.StreamReader[string], error) {
 		stream, err := sb.ExecuteStreaming(ctx, req)
 		if err != nil {
 			return nil, err
@@ -486,13 +486,13 @@ func newManagedBufferedExecuteTool(
 		}
 
 		switch result.Status {
-		case backgroundtask.StatusCompleted:
+		case background.StatusCompleted:
 			if result.ResultData == nil {
 				return "", fmt.Errorf("execute task %q completed without a result", result.Spec.ID)
 			}
 			return string(result.ResultData), nil
-		case backgroundtask.StatusPending, backgroundtask.StatusRunning,
-			backgroundtask.StatusWaitingInput, backgroundtask.StatusSuspended:
+		case background.StatusPending, background.StatusRunning,
+			background.StatusWaitingInput, background.StatusSuspended:
 			msg := fmt.Sprintf("Command running in background with ID: %s.", result.Spec.ID)
 			if w.path != "" {
 				msg += fmt.Sprintf(" Output is being written to: %s.", w.path)
@@ -506,9 +506,9 @@ func newManagedBufferedExecuteTool(
 				msg += " To check interim output, use Read on that file path."
 			}
 			return msg, nil
-		case backgroundtask.StatusFailed:
+		case background.StatusFailed:
 			return "", fmt.Errorf("execute task %q failed: %s", result.Spec.ID, result.ResultError)
-		case backgroundtask.StatusCanceled:
+		case background.StatusCanceled:
 			return "", fmt.Errorf("execute task %q was canceled", result.Spec.ID)
 		default:
 			return "", fmt.Errorf("execute task %q has unknown status %q", result.Spec.ID, result.Status)
