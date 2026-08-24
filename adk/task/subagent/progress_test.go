@@ -35,8 +35,8 @@ func TestControllerReadProgressIsolatesPersistentSessionByTask(t *testing.T) {
 		completionBarrierFunc[*schema.Message](func(
 			context.Context,
 			*CompletionContext[*schema.Message],
-		) (CompletionDecision, error) {
-			return Complete, nil
+		) (CompletionAction, error) {
+			return CompletionComplete, nil
 		}),
 		testEventMapper,
 	)
@@ -109,8 +109,8 @@ func TestControllerReadProgressValidation(t *testing.T) {
 		completionBarrierFunc[*schema.Message](func(
 			context.Context,
 			*CompletionContext[*schema.Message],
-		) (CompletionDecision, error) {
-			return Complete, nil
+		) (CompletionAction, error) {
+			return CompletionComplete, nil
 		}),
 		testEventMapper,
 	)

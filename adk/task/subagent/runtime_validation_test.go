@@ -68,8 +68,8 @@ func TestSignalsToInputMergesMessagesAndExternalEvents(t *testing.T) {
 		completionBarrierFunc[*schema.Message](func(
 			context.Context,
 			*CompletionContext[*schema.Message],
-		) (CompletionDecision, error) {
-			return Complete, nil
+		) (CompletionAction, error) {
+			return CompletionComplete, nil
 		}),
 		func(
 			_ context.Context,
@@ -150,8 +150,8 @@ func TestExecutorPayloadValidation(t *testing.T) {
 		completionBarrierFunc[*schema.Message](func(
 			context.Context,
 			*CompletionContext[*schema.Message],
-		) (CompletionDecision, error) {
-			return Complete, nil
+		) (CompletionAction, error) {
+			return CompletionComplete, nil
 		}),
 		testEventMapper,
 	)

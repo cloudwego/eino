@@ -32,7 +32,6 @@ const (
 type StartRequest[M adk.MessageType] struct {
 	InvocationID    string
 	ParentSessionID string
-	ParentTaskID    string
 	ChildSessionID  string
 	AgentName       string
 	Description     string
@@ -104,7 +103,6 @@ type Result[M adk.MessageType] struct {
 // child session.
 type StartOptions[M adk.MessageType] struct {
 	ParentSessionID string
-	ParentTaskID    string
 	AgentName       string
 	Description     string
 	StartMode       task.StartMode
@@ -122,13 +120,13 @@ type ContinueRequest[M adk.MessageType] struct {
 	IfIdle         *StartOptions[M]
 }
 
-// CompletionDecision controls whether the finite task completes or transfers
+// CompletionAction controls whether the finite task completes or transfers
 // to background ownership to wait for more input.
-type CompletionDecision uint8
+type CompletionAction uint8
 
 const (
-	Complete CompletionDecision = iota
-	Wait
+	CompletionComplete CompletionAction = iota
+	CompletionWaitInput
 )
 
 // CompletionContext describes one completed child-agent turn.
@@ -141,11 +139,11 @@ type CompletionContext[M adk.MessageType] struct {
 
 // CompletionBarrier decides whether the current finite task may complete.
 type CompletionBarrier[M adk.MessageType] interface {
-	Check(context.Context, *CompletionContext[M]) (CompletionDecision, error)
+	Check(context.Context, *CompletionContext[M]) (CompletionAction, error)
 }
 
-// LifecycleHook owns domain-specific cancellation cleanup.
-type LifecycleHook interface {
+// CancellationHook owns domain-specific cancellation cleanup.
+type CancellationHook interface {
 	OnCancel(ctx context.Context, taskID, childSessionID, reason string) error
 }
 

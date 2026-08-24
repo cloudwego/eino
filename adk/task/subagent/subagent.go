@@ -173,10 +173,10 @@ func (e *executor[M]) AcknowledgeCancellation(
 	if e == nil || e.controller == nil {
 		return errors.New("task/subagent: controller is unavailable")
 	}
-	if e.controller.lifecycleHook == nil {
+	if e.controller.cancellationHook == nil {
 		return nil
 	}
-	return e.controller.lifecycleHook.OnCancel(
+	return e.controller.cancellationHook.OnCancel(
 		ctx, task.Spec.ID, payload.ChildSessionID, reason,
 	)
 }

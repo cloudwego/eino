@@ -52,9 +52,15 @@
 - Initial placement uses `StartMode`; active authority uses
   `Owner` plus `Generation`. Background specs name their root scope explicitly
   as `RootSessionID`.
+- Nested mailbox registration accepts only `ParentExecution`; the store derives
+  direct-parent and root scope from the authoritative parent mailbox.
 - Deep Agent derives its shared Manager from the durable Sub-agent Controller
   when omitted and rejects conflicting Manager instances.
-- Business terminal states are returned through one `OutcomeStatus` field.
+- Generic handles and managed tools use the same `OutcomeStatus`; managed-tool
+  implementations cannot return background-only lifecycle states.
+- Sub-agent policies use explicit `CompletionAction`,
+  `CompletionComplete`/`CompletionWaitInput`, `CancellationHook`, and
+  `InputsToAgentInput` names.
 - Lifecycle transitions are exposed only through mailbox-aware atomic store
   operations; the old split transition and capability interfaces are removed.
 

@@ -46,8 +46,8 @@ const (
 
 var childSessionNamespace = uuid.MustParse("a78763c0-a953-40d6-a88e-a9ca706cb88f")
 
-// EventToInput converts durable non-resume events into one child-agent turn.
-type EventToInput[M adk.MessageType] func(
+// InputsToAgentInput converts durable non-resume inputs into one child-agent turn.
+type InputsToAgentInput[M adk.MessageType] func(
 	context.Context,
 	[]*task.InputRecord,
 ) (*adk.TypedAgentInput[M], error)
@@ -59,10 +59,10 @@ type ControllerConfig[M adk.MessageType] struct {
 
 	// Barrier decides whether a completed turn ends or waits for another signal.
 	Barrier CompletionBarrier[M]
-	// EventToInput maps durable application events to child-agent input.
-	EventToInput EventToInput[M]
-	// LifecycleHook performs optional business-owned cancellation side effects.
-	LifecycleHook LifecycleHook
+	// InputsToAgentInput maps durable application inputs to child-agent input.
+	InputsToAgentInput InputsToAgentInput[M]
+	// CancellationHook performs optional business-owned cancellation side effects.
+	CancellationHook CancellationHook
 	// InputPreemptPolicy constrains durable preempt intents. Nil uses AnySafePoint.
 	InputPreemptPolicy InputPreemptPolicy[M]
 
@@ -85,10 +85,10 @@ type Controller[M adk.MessageType] struct {
 	manager  *background.Manager
 	executor *executor[M]
 
-	barrier       CompletionBarrier[M]
-	eventToInput  EventToInput[M]
-	lifecycleHook LifecycleHook
-	preemptPolicy InputPreemptPolicy[M]
+	barrier            CompletionBarrier[M]
+	inputsToAgentInput InputsToAgentInput[M]
+	cancellationHook   CancellationHook
+	preemptPolicy      InputPreemptPolicy[M]
 
 	sessionStore        adk.SessionEventStore[M]
 	sessionStoreFactory RuntimeSessionStoreFactory[M]
@@ -138,7 +138,7 @@ type foregroundResultCheckpoint struct {
 }
 
 type activationResult[M adk.MessageType] struct {
-	decision    CompletionDecision
+	decision    CompletionAction
 	final       M
 	interrupted *adk.InterruptInfo
 	cursor      int64
@@ -160,7 +160,7 @@ func NewController[M adk.MessageType](
 	config *ControllerConfig[M],
 ) (*Controller[M], error) {
 	if config == nil || config.Manager == nil || config.Barrier == nil ||
-		config.EventToInput == nil || config.CheckPointStore == nil {
+		config.InputsToAgentInput == nil || config.CheckPointStore == nil {
 		return nil, errors.New(
 			"task/subagent: turn loop runtime dependencies are required",
 		)
@@ -181,8 +181,8 @@ func NewController[M adk.MessageType](
 	}
 	runtime := &Controller[M]{
 		manager: config.Manager,
-		barrier: config.Barrier, eventToInput: config.EventToInput,
-		lifecycleHook: config.LifecycleHook, preemptPolicy: config.InputPreemptPolicy,
+		barrier: config.Barrier, inputsToAgentInput: config.InputsToAgentInput,
+		cancellationHook: config.CancellationHook, preemptPolicy: config.InputPreemptPolicy,
 		sessionStore: config.SessionStore, sessionStoreFactory: config.SessionStoreFactory,
 		checkPointStore: config.CheckPointStore, sessionConfig: sessionConfig,
 		inputBatchSize: batchSize, active: make(map[string]*activeRun[M]),
@@ -278,17 +278,13 @@ func (r *Controller[M]) Start(
 	if err != nil {
 		return nil, err
 	}
-	parentTaskID := req.ParentTaskID
+	parentTaskID := ""
 	rootSessionID := req.ParentSessionID
 	var parentExecution *task.ExecutionContext
 	if execution, ok := task.ExecutionContextFromContext(ctx); ok {
-		if parentTaskID == "" {
-			parentTaskID = execution.TaskID
-		}
-		if parentTaskID == execution.TaskID {
-			copy := execution
-			parentExecution = &copy
-		}
+		parentTaskID = execution.TaskID
+		copy := execution
+		parentExecution = &copy
 		if execution.RootSessionID != "" {
 			rootSessionID = execution.RootSessionID
 		}
@@ -310,14 +306,18 @@ func (r *Controller[M]) Start(
 	if err != nil {
 		return nil, err
 	}
+	registerRequest := &task.RegisterMailboxRequest{
+		CandidateTaskID: candidate, InvocationID: req.InvocationID,
+		Identity: metadataBytes, ChildSessionID: childSessionID,
+	}
+	if parentExecution == nil {
+		registerRequest.RootSessionID = rootSessionID
+	} else {
+		registerRequest.ParentExecution = parentExecution
+	}
 	reserved, err := r.manager.RegisterMailbox(
 		ctx,
-		&task.RegisterMailboxRequest{
-			CandidateTaskID: candidate, InvocationID: req.InvocationID,
-			Identity: metadataBytes, ParentTaskID: parentTaskID,
-			RootSessionID: rootSessionID, ChildSessionID: childSessionID,
-			ParentExecution: parentExecution,
-		},
+		registerRequest,
 	)
 	if err != nil {
 		return nil, err
@@ -528,7 +528,6 @@ func (r *Controller[M]) Continue(
 		handle, startErr := r.Start(ctx, &StartRequest[M]{
 			InvocationID:    req.InvocationID,
 			ParentSessionID: req.IfIdle.ParentSessionID,
-			ParentTaskID:    req.IfIdle.ParentTaskID,
 			ChildSessionID:  req.ChildSessionID,
 			AgentName:       req.IfIdle.AgentName,
 			Description:     req.IfIdle.Description,
@@ -654,14 +653,14 @@ func (r *Controller[M]) invokeCancelHook(
 	if stream.State == task.MailboxSealed {
 		return nil
 	}
-	if r.lifecycleHook == nil {
+	if r.cancellationHook == nil {
 		return nil
 	}
 	metadata, streamErr := decodeRuntimeMetadata(stream.Identity)
 	if streamErr != nil {
 		return streamErr
 	}
-	return r.lifecycleHook.OnCancel(ctx, runID, metadata.ChildSessionID, reason)
+	return r.cancellationHook.OnCancel(ctx, runID, metadata.ChildSessionID, reason)
 }
 
 func (r *Controller[M]) runAttached(
@@ -699,7 +698,7 @@ func (r *Controller[M]) runAttached(
 		}
 		return
 	}
-	if result.decision == Complete {
+	if result.decision == CompletionComplete {
 		active.result = &Result[M]{
 			Handle: active.handle, FinalMessage: result.final,
 		}
@@ -926,7 +925,7 @@ func (r *Controller[M]) executeTask(
 	if result.control.Kind != "" {
 		return r.controlResult(ctx, task, metadata, result)
 	}
-	if result.decision == Complete {
+	if result.decision == CompletionComplete {
 		data, encodeErr := encodeRuntimeMessage(result.final)
 		if encodeErr != nil {
 			return nil, encodeErr
@@ -1004,7 +1003,7 @@ func (r *Controller[M]) runActivation( //nolint:cyclop,funlen,revive // Coordina
 			return nil, nil, recoverErr
 		}
 		return &activationResult[M]{
-			decision: Complete, final: recovered.FinalMessage, cursor: cursor,
+			decision: CompletionComplete, final: recovered.FinalMessage, cursor: cursor,
 		}, nil, nil
 	}
 	if backgroundTask != nil && len(backgroundTask.Checkpoint) > 0 {
@@ -1227,11 +1226,11 @@ func (r *Controller[M]) runActivation( //nolint:cyclop,funlen,revive // Coordina
 			if barrierErr != nil {
 				return barrierErr
 			}
-			if barrierErr = validateCompletionDecision(decision); barrierErr != nil {
+			if barrierErr = validateCompletionAction(decision); barrierErr != nil {
 				return barrierErr
 			}
 			result.decision = decision
-			if decision == Complete && req.attached {
+			if decision == CompletionComplete && req.attached {
 				_, completeErr := r.completeAttached(
 					turnCtx, runID, result.cursor, result.final,
 				)
@@ -1282,11 +1281,11 @@ func (r *Controller[M]) runActivation( //nolint:cyclop,funlen,revive // Coordina
 		if barrierErr != nil {
 			return nil, nil, barrierErr
 		}
-		if barrierErr = validateCompletionDecision(decision); barrierErr != nil {
+		if barrierErr = validateCompletionAction(decision); barrierErr != nil {
 			return nil, nil, barrierErr
 		}
 		result.decision = decision
-		if decision == Complete && req.attached {
+		if decision == CompletionComplete && req.attached {
 			if _, completeErr := r.completeAttached(
 				ctx, runID, result.cursor, result.final,
 			); completeErr != nil {
@@ -1393,14 +1392,14 @@ func (r *Controller[M]) runActivation( //nolint:cyclop,funlen,revive // Coordina
 	return result, checkpoint, err
 }
 
-func validateCompletionDecision(decision CompletionDecision) error {
-	switch decision {
-	case Complete, Wait:
+func validateCompletionAction(action CompletionAction) error {
+	switch action {
+	case CompletionComplete, CompletionWaitInput:
 		return nil
 	default:
 		return fmt.Errorf(
-			"task/subagent: invalid completion decision %d",
-			decision,
+			"task/subagent: invalid completion action %d",
+			action,
 		)
 	}
 }
@@ -1519,8 +1518,8 @@ func (r *Controller[M]) controlResult(
 		if reason == "" {
 			reason = "task was canceled"
 		}
-		if r.lifecycleHook != nil {
-			if err := r.lifecycleHook.OnCancel(
+		if r.cancellationHook != nil {
+			if err := r.cancellationHook.OnCancel(
 				ctx, task.Spec.ID, metadata.ChildSessionID, reason,
 			); err != nil {
 				return nil, err
@@ -1582,12 +1581,12 @@ func (r *Controller[M]) signalsToInput(
 		})
 	}
 	if len(external) > 0 {
-		input, err := r.eventToInput(ctx, external)
+		input, err := r.inputsToAgentInput(ctx, external)
 		if err != nil {
 			return nil, err
 		}
 		if input == nil {
-			return nil, errors.New("task/subagent: EventToInput returned nil")
+			return nil, errors.New("task/subagent: InputsToAgentInput returned nil")
 		}
 		result.Messages = append(result.Messages, input.Messages...)
 		result.EnableStreaming = result.EnableStreaming || input.EnableStreaming

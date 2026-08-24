@@ -20,7 +20,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/cloudwego/eino/adk/task/background"
+	"github.com/cloudwego/eino/adk/task"
 	backgroundshell "github.com/cloudwego/eino/adk/task/shell"
 	backgroundtool "github.com/cloudwego/eino/adk/task/tool"
 	"github.com/cloudwego/eino/schema"
@@ -45,7 +45,7 @@ type commandRun struct{}
 
 func (commandRun) Wait(context.Context) (*backgroundtool.Outcome, error) {
 	return &backgroundtool.Outcome{
-		Status: background.StatusCompleted, Data: []byte("ok"),
+		Status: task.OutcomeCompleted, Data: []byte("ok"),
 	}, nil
 }
 func (commandRun) Stop(context.Context) error { return nil }

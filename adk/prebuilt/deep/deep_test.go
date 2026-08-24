@@ -71,8 +71,8 @@ type deepCompletionBarrier struct{}
 func (deepCompletionBarrier) Check(
 	context.Context,
 	*durablesubagent.CompletionContext[*schema.Message],
-) (durablesubagent.CompletionDecision, error) {
-	return durablesubagent.Complete, nil
+) (durablesubagent.CompletionAction, error) {
+	return durablesubagent.CompletionComplete, nil
 }
 
 func mustDeepController(
@@ -85,7 +85,7 @@ func mustDeepController(
 		&durablesubagent.ControllerConfig[*schema.Message]{
 			Manager: manager,
 			Barrier: deepCompletionBarrier{},
-			EventToInput: func(
+			InputsToAgentInput: func(
 				context.Context,
 				[]*task.InputRecord,
 			) (*adk.AgentInput, error) {

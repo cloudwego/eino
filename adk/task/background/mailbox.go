@@ -318,17 +318,32 @@ func (s *InMemoryStore) Register(
 	if int64(len(req.Identity)) > s.maxValue {
 		return nil, errors.New("task/background: mailbox identity exceeds configured limit")
 	}
+	if req.ParentExecution != nil && req.RootSessionID != "" {
+		return nil, errors.New(
+			"task/background: nested mailbox root session is derived from its parent",
+		)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	parentTaskID := ""
+	rootSessionID := req.RootSessionID
+	if req.ParentExecution != nil {
+		parentTaskID = req.ParentExecution.TaskID
+		parent := s.mailboxes[parentTaskID]
+		if parent == nil {
+			return nil, task.ErrMailboxNotFound
+		}
+		rootSessionID = parent.mailbox.RootSessionID
+	}
 	invocationKey := mailboxInvocationKey{
-		parentTaskID: req.ParentTaskID, rootSessionID: req.RootSessionID,
+		parentTaskID: parentTaskID, rootSessionID: rootSessionID,
 		invocationID: req.InvocationID,
 	}
 	if taskID := s.mailboxInvocations[invocationKey]; taskID != "" {
 		current := s.mailboxes[taskID]
 		if current == nil || !bytes.Equal(current.mailbox.Identity, req.Identity) ||
-			current.mailbox.ParentTaskID != req.ParentTaskID ||
-			current.mailbox.RootSessionID != req.RootSessionID ||
+			current.mailbox.ParentTaskID != parentTaskID ||
+			current.mailbox.RootSessionID != rootSessionID ||
 			current.mailbox.ChildSessionID != req.ChildSessionID {
 			return nil, task.ErrMailboxIdentityConflict
 		}
@@ -346,15 +361,15 @@ func (s *InMemoryStore) Register(
 			delete(s.activeSessionTasks, req.ChildSessionID)
 		}
 	}
-	if req.ParentTaskID != "" {
-		if err := s.authorizeParentLocked(req.ParentTaskID, req.ParentExecution); err != nil {
+	if parentTaskID != "" {
+		if err := s.authorizeParentLocked(parentTaskID, req.ParentExecution); err != nil {
 			return nil, err
 		}
 	}
 	mailbox := &task.Mailbox{
 		TaskID: req.CandidateTaskID, InvocationID: req.InvocationID,
-		Identity: cloneBytes(req.Identity), ParentTaskID: req.ParentTaskID,
-		RootSessionID: req.RootSessionID, ChildSessionID: req.ChildSessionID,
+		Identity: cloneBytes(req.Identity), ParentTaskID: parentTaskID,
+		RootSessionID: rootSessionID, ChildSessionID: req.ChildSessionID,
 		State:      task.MailboxForeground,
 		Generation: 1,
 	}

@@ -575,7 +575,7 @@ func validateOutcome(
 		Data: append([]byte(nil), outcome.Data...), Error: outcome.Error,
 	}
 	switch outcome.Status {
-	case background.StatusCompleted:
+	case taskcore.OutcomeCompleted:
 		result.Action = background.ExecutionActionComplete
 		if outcome.Error != "" || outcome.InputRequest != nil ||
 			len(outcome.Checkpoint) > 0 {
@@ -584,7 +584,7 @@ func validateOutcome(
 			)
 		}
 		result.InputCursor = inputCursor
-	case background.StatusFailed:
+	case taskcore.OutcomeFailed:
 		result.Action = background.ExecutionActionFail
 		if outcome.Error == "" {
 			return nil, errors.New("task/tool: failed outcome requires an error")
@@ -595,7 +595,7 @@ func validateOutcome(
 				"task/tool: failed outcome cannot contain data, an input request, or a checkpoint",
 			)
 		}
-	case background.StatusCanceled:
+	case taskcore.OutcomeCanceled:
 		result.Action = background.ExecutionActionCancel
 		if len(outcome.Data) != 0 || outcome.InputRequest != nil ||
 			len(outcome.Checkpoint) > 0 {
@@ -603,7 +603,7 @@ func validateOutcome(
 				"task/tool: canceled outcome cannot contain data, an input request, or a checkpoint",
 			)
 		}
-	case background.StatusWaitingInput:
+	case taskcore.OutcomeInterrupted:
 		result.Action = background.ExecutionActionWaitInput
 		if !supportsResume {
 			return nil, errors.New(
@@ -634,7 +634,7 @@ func validateOutcome(
 		result.Checkpoint = checkpoint
 		result.InputCursor = inputCursor
 	default:
-		return nil, fmt.Errorf("task/tool: unsupported outcome status %q", outcome.Status)
+		return nil, fmt.Errorf("task/tool: unsupported outcome status %v", outcome.Status)
 	}
 	return result, nil
 }

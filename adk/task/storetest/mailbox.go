@@ -211,10 +211,18 @@ func RunMailboxStoreConformance( //nolint:funlen // Conformance cases stay toget
 		store := config.New(t)
 		ctx := context.Background()
 		parent := registerMailbox(t, store, "parent")
+		_, err := store.Register(ctx, &task.RegisterMailboxRequest{
+			CandidateTaskID: "conflicting-child", InvocationID: "conflicting-child",
+			RootSessionID: "forged-root",
+			ParentExecution: &task.ExecutionContext{
+				TaskID: parent.TaskID, Owner: task.OwnerParent,
+				Generation: parent.Generation,
+			},
+		})
+		require.Error(t, err)
 		child, err := store.Register(ctx, &task.RegisterMailboxRequest{
 			CandidateTaskID: "child", InvocationID: "child-invocation",
-			Identity: []byte("child"), ParentTaskID: parent.TaskID,
-			RootSessionID: "session",
+			Identity: []byte("child"),
 			ParentExecution: &task.ExecutionContext{
 				TaskID: parent.TaskID, Owner: task.OwnerParent,
 				Generation: parent.Generation,
@@ -222,6 +230,7 @@ func RunMailboxStoreConformance( //nolint:funlen // Conformance cases stay toget
 		})
 		require.NoError(t, err)
 		require.Equal(t, parent.TaskID, child.Mailbox.ParentTaskID)
+		require.Equal(t, parent.RootSessionID, child.Mailbox.RootSessionID)
 		children, err := store.ListChildren(ctx, &task.ListChildrenRequest{
 			ParentTaskID: parent.TaskID,
 		})

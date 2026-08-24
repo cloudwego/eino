@@ -28,7 +28,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	taskcore "github.com/cloudwego/eino/adk/task"
+	"github.com/cloudwego/eino/adk/task"
 	"github.com/cloudwego/eino/adk/task/background"
 	"github.com/cloudwego/eino/schema"
 )
@@ -152,12 +152,12 @@ func TestPayloadAndResultValidationBoundaries(t *testing.T) {
 	require.NoError(t, validateUpdate(&Update{Metadata: map[string]string{"key": "value"}}))
 
 	valid, err := validateOutcome(&Outcome{
-		Status: background.StatusCompleted, Data: []byte("done"),
+		Status: task.OutcomeCompleted, Data: []byte("done"),
 	}, false, nil, 0)
 	require.NoError(t, err)
 	require.Equal(t, background.ExecutionActionComplete, valid.Action)
 	waiting, err := validateOutcome(&Outcome{
-		Status: background.StatusWaitingInput,
+		Status: task.OutcomeInterrupted,
 		InputRequest: &InputRequest{
 			ID: "approval", Data: []byte(`{"question":"approve?"}`),
 		},
@@ -168,7 +168,7 @@ func TestPayloadAndResultValidationBoundaries(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "current", string(retained))
 	waiting, err = validateOutcome(&Outcome{
-		Status: background.StatusWaitingInput,
+		Status: task.OutcomeInterrupted,
 		InputRequest: &InputRequest{
 			ID: "approval", Data: []byte(`{"question":"approve?"}`),
 		},
@@ -233,39 +233,39 @@ func TestPayloadAndResultValidationBoundaries(t *testing.T) {
 		supportsResume bool
 	}{
 		{outcome: nil},
-		{outcome: &Outcome{Status: background.StatusCompleted, Error: "bad"}},
+		{outcome: &Outcome{Status: task.OutcomeCompleted, Error: "bad"}},
 		{outcome: &Outcome{
-			Status: background.StatusCompleted, Checkpoint: []byte("bad"),
+			Status: task.OutcomeCompleted, Checkpoint: []byte("bad"),
 		}},
-		{outcome: &Outcome{Status: background.StatusFailed}},
+		{outcome: &Outcome{Status: task.OutcomeFailed}},
 		{outcome: &Outcome{
-			Status: background.StatusFailed, Error: "bad", Data: []byte("bad"),
+			Status: task.OutcomeFailed, Error: "bad", Data: []byte("bad"),
 		}},
 		{outcome: &Outcome{
-			Status: background.StatusFailed, Error: "bad",
+			Status: task.OutcomeFailed, Error: "bad",
 			Checkpoint: []byte("bad"),
 		}},
 		{outcome: &Outcome{
-			Status: background.StatusCanceled, Data: []byte("bad"),
+			Status: task.OutcomeCanceled, Data: []byte("bad"),
 		}},
 		{outcome: &Outcome{
-			Status: background.StatusCanceled, Checkpoint: []byte("bad"),
+			Status: task.OutcomeCanceled, Checkpoint: []byte("bad"),
 		}},
-		{outcome: &Outcome{Status: background.StatusRunning}},
+		{outcome: &Outcome{Status: task.OutcomeStatus(99)}},
 		{outcome: &Outcome{
-			Status:       background.StatusWaitingInput,
+			Status:       task.OutcomeInterrupted,
 			InputRequest: &InputRequest{ID: "approval"},
 		}},
 		{outcome: &Outcome{
-			Status: background.StatusWaitingInput,
+			Status: task.OutcomeInterrupted,
 		}, supportsResume: true},
 		{outcome: &Outcome{
-			Status:       background.StatusWaitingInput,
+			Status:       task.OutcomeInterrupted,
 			Data:         []byte("terminal"),
 			InputRequest: &InputRequest{ID: "approval"},
 		}, supportsResume: true},
 		{outcome: &Outcome{
-			Status:       background.StatusWaitingInput,
+			Status:       task.OutcomeInterrupted,
 			InputRequest: &InputRequest{ID: "approval"},
 			Checkpoint:   make([]byte, maxToolCheckpointBytes+1),
 		}, supportsResume: true},
@@ -317,7 +317,7 @@ func TestManagedToolConstructionAndSubmissionErrors(t *testing.T) {
 
 	plain := &plainFakeTool{start: func(context.Context, *StartRequest) (Run, error) {
 		return &fakeRun{wait: func(context.Context) (*Outcome, error) {
-			return &Outcome{Status: background.StatusCompleted}, nil
+			return &Outcome{Status: task.OutcomeCompleted}, nil
 		}}, nil
 	}}
 	require.NoError(t, registry.Register(&Registration{Info: toolInfo("plain"), Tool: plain}))
@@ -439,7 +439,7 @@ func TestManagedToolTimeoutOverrideStopsRun(t *testing.T) {
 	)
 	require.Nil(t, result)
 	require.ErrorIs(t, err, context.DeadlineExceeded)
-	var timeoutErr *taskcore.ForegroundTimeoutError
+	var timeoutErr *task.ForegroundTimeoutError
 	require.ErrorAs(t, err, &timeoutErr)
 	require.Equal(t, 5*time.Millisecond, timeoutErr.Timeout)
 	require.NotEmpty(t, timeoutErr.TaskID)

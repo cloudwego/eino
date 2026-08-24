@@ -100,7 +100,6 @@ type RegisterMailboxRequest struct {
 	CandidateTaskID string
 	InvocationID    string
 	Identity        []byte
-	ParentTaskID    string
 	RootSessionID   string
 	ChildSessionID  string
 	ParentExecution *ExecutionContext

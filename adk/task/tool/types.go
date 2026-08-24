@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"errors"
 
+	"github.com/cloudwego/eino/adk/task"
 	"github.com/cloudwego/eino/adk/task/background"
 	"github.com/cloudwego/eino/schema"
 )
@@ -196,18 +197,18 @@ type InputRequest struct {
 
 // Outcome is the authoritative logical-operation result. Completed outcomes
 // may contain Data and no Error. Failed outcomes require Error and no Data.
-// Canceled outcomes may contain Error and no Data. Waiting-input outcomes set
+// Canceled outcomes may contain Error and no Data. Interrupted outcomes set
 // InputRequest and may set Checkpoint; a non-empty Checkpoint replaces the
 // latest tool checkpoint while an empty value retains it. Other statuses must
-// leave InputRequest and Checkpoint empty. Waiting input is supported only by
+// leave InputRequest and Checkpoint empty. Interruption is supported only by
 // ResumableTool.
 type Outcome struct {
-	Status       background.Status
+	Status       task.OutcomeStatus
 	Data         []byte
 	Error        string
 	InputRequest *InputRequest
 	// Checkpoint replaces the latest opaque tool checkpoint when Status is
-	// StatusWaitingInput and this field is non-empty. Empty retains the latest
+	// task.OutcomeInterrupted and this field is non-empty. Empty retains the latest
 	// checkpoint. Other statuses must leave it empty.
 	Checkpoint []byte
 }

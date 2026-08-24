@@ -37,11 +37,11 @@ import (
 type completionBarrierFunc[M adk.MessageType] func(
 	context.Context,
 	*CompletionContext[M],
-) (CompletionDecision, error)
+) (CompletionAction, error)
 
-type lifecycleHookFunc func(context.Context, string, string, string) error
+type cancellationHookFunc func(context.Context, string, string, string) error
 
-func (f lifecycleHookFunc) OnCancel(
+func (f cancellationHookFunc) OnCancel(
 	ctx context.Context,
 	taskID, childSessionID, reason string,
 ) error {
@@ -202,14 +202,14 @@ func (m *preemptModel) Stream(
 func (f completionBarrierFunc[M]) Check(
 	ctx context.Context,
 	input *CompletionContext[M],
-) (CompletionDecision, error) {
+) (CompletionAction, error) {
 	return f(ctx, input)
 }
 
 func newControllerForTest(
 	t *testing.T,
 	barrier CompletionBarrier[*schema.Message],
-	mapper EventToInput[*schema.Message],
+	mapper InputsToAgentInput[*schema.Message],
 ) (*Controller[*schema.Message], *background.Manager, *adksession.InMemoryStore[*schema.Message]) {
 	return newControllerWithAgentForTest(
 		t, &resumableTestAgent{name: "worker"}, barrier, mapper,
@@ -220,7 +220,7 @@ func newControllerWithAgentForTest(
 	t *testing.T,
 	agent adk.ResumableAgent,
 	barrier CompletionBarrier[*schema.Message],
-	mapper EventToInput[*schema.Message],
+	mapper InputsToAgentInput[*schema.Message],
 ) (*Controller[*schema.Message], *background.Manager, *adksession.InMemoryStore[*schema.Message]) {
 	t.Helper()
 	ctx := context.Background()
@@ -235,7 +235,7 @@ func newControllerWithAgentForTest(
 	require.NoError(t, err)
 	runtime, err := NewController(&ControllerConfig[*schema.Message]{
 		Manager: manager,
-		Barrier: barrier, EventToInput: mapper,
+		Barrier: barrier, InputsToAgentInput: mapper,
 		SessionStore: sessionStore, CheckPointStore: sessionStore,
 	})
 	require.NoError(t, err)
@@ -262,8 +262,8 @@ func TestControllerForegroundCompletesWithoutBackgroundRecord(t *testing.T) {
 		completionBarrierFunc[*schema.Message](func(
 			context.Context,
 			*CompletionContext[*schema.Message],
-		) (CompletionDecision, error) {
-			return Complete, nil
+		) (CompletionAction, error) {
+			return CompletionComplete, nil
 		}),
 		testEventMapper,
 	)
@@ -311,8 +311,8 @@ func TestAttack_InactiveForegroundNotificationSurvivesReplay(t *testing.T) {
 		completionBarrierFunc[*schema.Message](func(
 			context.Context,
 			*CompletionContext[*schema.Message],
-		) (CompletionDecision, error) {
-			return Complete, nil
+		) (CompletionAction, error) {
+			return CompletionComplete, nil
 		}),
 		testEventMapper,
 	)
@@ -377,8 +377,8 @@ func TestAttack_ForegroundTerminalCandidateSealsWithoutReplay(t *testing.T) {
 		completionBarrierFunc[*schema.Message](func(
 			context.Context,
 			*CompletionContext[*schema.Message],
-		) (CompletionDecision, error) {
-			return Complete, nil
+		) (CompletionAction, error) {
+			return CompletionComplete, nil
 		}),
 		testEventMapper,
 	)
@@ -449,8 +449,8 @@ func TestAttack_ForegroundFailureIsReplayableAndReleasesSession(t *testing.T) {
 		completionBarrierFunc[*schema.Message](func(
 			context.Context,
 			*CompletionContext[*schema.Message],
-		) (CompletionDecision, error) {
-			return Complete, errors.New("barrier failed")
+		) (CompletionAction, error) {
+			return CompletionComplete, errors.New("barrier failed")
 		}),
 		testEventMapper,
 	)
@@ -499,13 +499,13 @@ func TestAttack_InactiveForegroundCancelSealsMailbox(t *testing.T) {
 		completionBarrierFunc[*schema.Message](func(
 			context.Context,
 			*CompletionContext[*schema.Message],
-		) (CompletionDecision, error) {
-			return Complete, nil
+		) (CompletionAction, error) {
+			return CompletionComplete, nil
 		}),
 		testEventMapper,
 	)
 	var reason string
-	runtime.lifecycleHook = lifecycleHookFunc(func(
+	runtime.cancellationHook = cancellationHookFunc(func(
 		_ context.Context,
 		_, _, value string,
 	) error {
@@ -544,8 +544,8 @@ func TestControllerBackgroundCompletes(t *testing.T) {
 		completionBarrierFunc[*schema.Message](func(
 			context.Context,
 			*CompletionContext[*schema.Message],
-		) (CompletionDecision, error) {
-			return Complete, nil
+		) (CompletionAction, error) {
+			return CompletionComplete, nil
 		}),
 		testEventMapper,
 	)
@@ -573,8 +573,8 @@ func TestControllerForegroundInterruptResumesFromMailbox(t *testing.T) {
 		completionBarrierFunc[*schema.Message](func(
 			context.Context,
 			*CompletionContext[*schema.Message],
-		) (CompletionDecision, error) {
-			return Complete, nil
+		) (CompletionAction, error) {
+			return CompletionComplete, nil
 		}),
 		testEventMapper,
 	)
@@ -616,8 +616,8 @@ func TestAttack_BackgroundInterruptResumeWakesTask(t *testing.T) {
 		completionBarrierFunc[*schema.Message](func(
 			context.Context,
 			*CompletionContext[*schema.Message],
-		) (CompletionDecision, error) {
-			return Complete, nil
+		) (CompletionAction, error) {
+			return CompletionComplete, nil
 		}),
 		testEventMapper,
 	)
@@ -650,8 +650,8 @@ func TestAttack_MultipleResumeInputsFailClosed(t *testing.T) {
 		completionBarrierFunc[*schema.Message](func(
 			context.Context,
 			*CompletionContext[*schema.Message],
-		) (CompletionDecision, error) {
-			return Complete, nil
+		) (CompletionAction, error) {
+			return CompletionComplete, nil
 		}),
 		testEventMapper,
 	)
@@ -687,11 +687,11 @@ func TestControllerBarrierWaitThenInput(t *testing.T) {
 		completionBarrierFunc[*schema.Message](func(
 			context.Context,
 			*CompletionContext[*schema.Message],
-		) (CompletionDecision, error) {
+		) (CompletionAction, error) {
 			if barrierCalls.Add(1) > 1 {
-				return Complete, nil
+				return CompletionComplete, nil
 			}
-			return Wait, nil
+			return CompletionWaitInput, nil
 		}),
 		testEventMapper,
 	)
@@ -730,10 +730,10 @@ func TestAttack_CancelRacingForegroundHandoffCancelsNewBackgroundTask(t *testing
 		completionBarrierFunc[*schema.Message](func(
 			context.Context,
 			*CompletionContext[*schema.Message],
-		) (CompletionDecision, error) {
+		) (CompletionAction, error) {
 			close(barrierEntered)
 			<-releaseBarrier
-			return Wait, nil
+			return CompletionWaitInput, nil
 		}),
 		testEventMapper,
 	)
@@ -764,8 +764,8 @@ func TestContinueCreatesNewTaskInPersistentChildSession(t *testing.T) {
 		completionBarrierFunc[*schema.Message](func(
 			context.Context,
 			*CompletionContext[*schema.Message],
-		) (CompletionDecision, error) {
-			return Complete, nil
+		) (CompletionAction, error) {
+			return CompletionComplete, nil
 		}),
 		testEventMapper,
 	)
@@ -817,8 +817,8 @@ func TestContinueIdleSessionRequiresStartOptions(t *testing.T) {
 		completionBarrierFunc[*schema.Message](func(
 			context.Context,
 			*CompletionContext[*schema.Message],
-		) (CompletionDecision, error) {
-			return Complete, nil
+		) (CompletionAction, error) {
+			return CompletionComplete, nil
 		}),
 		testEventMapper,
 	)
@@ -839,8 +839,8 @@ func TestNestedSubAgentMailboxUsesDirectParent(t *testing.T) {
 		completionBarrierFunc[*schema.Message](func(
 			context.Context,
 			*CompletionContext[*schema.Message],
-		) (CompletionDecision, error) {
-			return Complete, nil
+		) (CompletionAction, error) {
+			return CompletionComplete, nil
 		}),
 		testEventMapper,
 	)
@@ -890,11 +890,11 @@ func TestForegroundInputCanPreemptActiveTurn(t *testing.T) {
 		Barrier: completionBarrierFunc[*schema.Message](func(
 			context.Context,
 			*CompletionContext[*schema.Message],
-		) (CompletionDecision, error) {
-			return Complete, nil
+		) (CompletionAction, error) {
+			return CompletionComplete, nil
 		}),
-		EventToInput: testEventMapper,
-		SessionStore: sessionStore, CheckPointStore: sessionStore,
+		InputsToAgentInput: testEventMapper,
+		SessionStore:       sessionStore, CheckPointStore: sessionStore,
 		InputPreemptPolicy: func(
 			context.Context,
 			*task.InputRecord,
@@ -938,8 +938,8 @@ func TestAttack_ReplayIdentityIgnoresFrameworkMessageID(t *testing.T) {
 		completionBarrierFunc[*schema.Message](func(
 			context.Context,
 			*CompletionContext[*schema.Message],
-		) (CompletionDecision, error) {
-			return Complete, nil
+		) (CompletionAction, error) {
+			return CompletionComplete, nil
 		}),
 		testEventMapper,
 	)
@@ -974,8 +974,8 @@ func TestControllerValidationAndContextHelpers(t *testing.T) {
 		completionBarrierFunc[*schema.Message](func(
 			context.Context,
 			*CompletionContext[*schema.Message],
-		) (CompletionDecision, error) {
-			return Complete, nil
+		) (CompletionAction, error) {
+			return CompletionComplete, nil
 		}),
 		testEventMapper,
 	)
@@ -1023,8 +1023,8 @@ func TestControllerRejectsInvalidCompletionAndMissingFinal(t *testing.T) {
 		completionBarrierFunc[*schema.Message](func(
 			context.Context,
 			*CompletionContext[*schema.Message],
-		) (CompletionDecision, error) {
-			return CompletionDecision(99), nil
+		) (CompletionAction, error) {
+			return CompletionAction(99), nil
 		}),
 		testEventMapper,
 	)
@@ -1037,7 +1037,7 @@ func TestControllerRejectsInvalidCompletionAndMissingFinal(t *testing.T) {
 	})
 	require.NoError(t, err)
 	_, err = runtime.Wait(ctx, handle.ID())
-	require.ErrorContains(t, err, "invalid completion decision")
+	require.ErrorContains(t, err, "invalid completion action")
 
 	emptyRuntime, _, _ := newControllerWithAgentForTest(
 		t,
@@ -1045,8 +1045,8 @@ func TestControllerRejectsInvalidCompletionAndMissingFinal(t *testing.T) {
 		completionBarrierFunc[*schema.Message](func(
 			context.Context,
 			*CompletionContext[*schema.Message],
-		) (CompletionDecision, error) {
-			return Complete, nil
+		) (CompletionAction, error) {
+			return CompletionComplete, nil
 		}),
 		testEventMapper,
 	)
@@ -1075,13 +1075,13 @@ func TestAttack_StartHonorsStreamingAndTerminalCancelIsIdempotent(t *testing.T) 
 		completionBarrierFunc[*schema.Message](func(
 			context.Context,
 			*CompletionContext[*schema.Message],
-		) (CompletionDecision, error) {
-			return Complete, nil
+		) (CompletionAction, error) {
+			return CompletionComplete, nil
 		}),
 		testEventMapper,
 	)
 	var canceled atomic.Int64
-	runtime.lifecycleHook = lifecycleHookFunc(func(
+	runtime.cancellationHook = cancellationHookFunc(func(
 		context.Context,
 		string,
 		string,
@@ -1113,8 +1113,8 @@ func TestAttack_BackgroundAgentErrorIsDurablyFailed(t *testing.T) {
 		completionBarrierFunc[*schema.Message](func(
 			context.Context,
 			*CompletionContext[*schema.Message],
-		) (CompletionDecision, error) {
-			return Complete, nil
+		) (CompletionAction, error) {
+			return CompletionComplete, nil
 		}),
 		testEventMapper,
 	)
@@ -1140,13 +1140,13 @@ func TestControllerBackgroundControlResults(t *testing.T) {
 		completionBarrierFunc[*schema.Message](func(
 			context.Context,
 			*CompletionContext[*schema.Message],
-		) (CompletionDecision, error) {
-			return Complete, nil
+		) (CompletionAction, error) {
+			return CompletionComplete, nil
 		}),
 		testEventMapper,
 	)
 	var canceled atomic.Int64
-	runtime.lifecycleHook = lifecycleHookFunc(func(
+	runtime.cancellationHook = cancellationHookFunc(func(
 		context.Context,
 		string,
 		string,

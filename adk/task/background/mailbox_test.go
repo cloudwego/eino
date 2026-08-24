@@ -216,7 +216,6 @@ func TestBackgroundParentOwnershipFencesNestedCreation(t *testing.T) {
 	require.NoError(t, err)
 	_, err = store.Register(ctx, &task.RegisterMailboxRequest{
 		CandidateTaskID: "bad-child", InvocationID: "bad-child",
-		ParentTaskID: parent.Spec.ID,
 		ParentExecution: &task.ExecutionContext{
 			TaskID: parent.Spec.ID, Owner: task.OwnerManager,
 			Generation: parentMailbox.Generation, Attempt: started.Attempt + 1,
@@ -225,7 +224,6 @@ func TestBackgroundParentOwnershipFencesNestedCreation(t *testing.T) {
 	require.ErrorIs(t, err, ErrLeaseLost)
 	child, err := store.Register(ctx, &task.RegisterMailboxRequest{
 		CandidateTaskID: "child", InvocationID: "child",
-		ParentTaskID: parent.Spec.ID,
 		ParentExecution: &task.ExecutionContext{
 			TaskID: parent.Spec.ID, Owner: task.OwnerManager,
 			Generation: parentMailbox.Generation, Attempt: started.Attempt,
@@ -242,7 +240,6 @@ func TestListChildrenPaginationAndCursorValidation(t *testing.T) {
 	for _, childID := range []string{"child-c", "child-a", "child-b"} {
 		_, err := store.Register(ctx, &task.RegisterMailboxRequest{
 			CandidateTaskID: childID, InvocationID: childID,
-			ParentTaskID: parent.TaskID,
 			ParentExecution: &task.ExecutionContext{
 				TaskID: parent.TaskID, Owner: task.OwnerParent,
 				Generation: parent.Generation,

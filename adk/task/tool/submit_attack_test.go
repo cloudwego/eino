@@ -23,6 +23,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/cloudwego/eino/adk/task"
 	"github.com/cloudwego/eino/adk/task/background"
 	componenttool "github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
@@ -63,7 +64,7 @@ func TestAttack_DirectSubmitPreservesToolCallIDFromToolNode(t *testing.T) {
 			start: func(context.Context, *StartRequest) (Run, error) {
 				return &fakeRun{
 					wait: func(context.Context) (*Outcome, error) {
-						return &Outcome{Status: background.StatusCompleted}, nil
+						return &Outcome{Status: task.OutcomeCompleted}, nil
 					},
 				}, nil
 			},
@@ -103,7 +104,7 @@ func TestAttack_CompletedOutcomeDataRemainsByteIdentical(t *testing.T) {
 				return &fakeRun{
 					wait: func(context.Context) (*Outcome, error) {
 						return &Outcome{
-							Status: background.StatusCompleted,
+							Status: task.OutcomeCompleted,
 							Data:   source,
 						}, nil
 					},

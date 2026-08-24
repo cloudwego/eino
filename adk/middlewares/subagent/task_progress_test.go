@@ -313,8 +313,8 @@ type progressBarrier[M adk.MessageType] struct{}
 func (progressBarrier[M]) Check(
 	context.Context,
 	*durablesubagent.CompletionContext[M],
-) (durablesubagent.CompletionDecision, error) {
-	return durablesubagent.Complete, nil
+) (durablesubagent.CompletionAction, error) {
+	return durablesubagent.CompletionComplete, nil
 }
 
 func progressController[M adk.MessageType](
@@ -334,7 +334,7 @@ func progressController[M adk.MessageType](
 		&durablesubagent.ControllerConfig[M]{
 			Manager: manager,
 			Barrier: progressBarrier[M]{},
-			EventToInput: func(
+			InputsToAgentInput: func(
 				context.Context,
 				[]*task.InputRecord,
 			) (*adk.TypedAgentInput[M], error) {

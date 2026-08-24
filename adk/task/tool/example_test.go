@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/cloudwego/eino/adk/task"
 	"github.com/cloudwego/eino/adk/task/background"
 	backgroundtool "github.com/cloudwego/eino/adk/task/tool"
 	componenttool "github.com/cloudwego/eino/components/tool"
@@ -44,7 +45,7 @@ type exampleRun struct{}
 
 func (exampleRun) Wait(context.Context) (*backgroundtool.Outcome, error) {
 	return &backgroundtool.Outcome{
-		Status: background.StatusCompleted, Data: []byte("video ready"),
+		Status: task.OutcomeCompleted, Data: []byte("video ready"),
 	}, nil
 }
 func (exampleRun) Stop(context.Context) error { return nil }

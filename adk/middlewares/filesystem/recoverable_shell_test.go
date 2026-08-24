@@ -24,6 +24,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/cloudwego/eino/adk/task"
 	"github.com/cloudwego/eino/adk/task/background"
 	backgroundlocal "github.com/cloudwego/eino/adk/task/local"
 	backgroundshell "github.com/cloudwego/eino/adk/task/shell"
@@ -73,7 +74,7 @@ type recoverableShellRun struct{}
 
 func (recoverableShellRun) Wait(context.Context) (*backgroundtool.Outcome, error) {
 	return &backgroundtool.Outcome{
-		Status: background.StatusCompleted, Data: []byte("command output"),
+		Status: task.OutcomeCompleted, Data: []byte("command output"),
 	}, nil
 }
 func (recoverableShellRun) Stop(context.Context) error { return nil }
