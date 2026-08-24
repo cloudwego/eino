@@ -48,6 +48,10 @@ func RegisterStreamChunkConcatFunc[T any](fn func([]T) (T, error)) {
 var emptyStreamConcatErr = errors.New("stream reader is empty, concat fail")
 
 func concatStreamReader[T any](sr *schema.StreamReader[T]) (T, error) {
+	return concatStreamReaderWithErrorFilter(sr, nil)
+}
+
+func concatStreamReaderWithErrorFilter[T any](sr *schema.StreamReader[T], ignoreError func(error) bool) (T, error) {
 	defer sr.Close()
 
 	var items []T
@@ -61,6 +65,9 @@ func concatStreamReader[T any](sr *schema.StreamReader[T]) (T, error) {
 
 			if _, ok := schema.GetSourceName(err); ok {
 				continue
+			}
+			if ignoreError != nil && ignoreError(err) {
+				break
 			}
 
 			var t T

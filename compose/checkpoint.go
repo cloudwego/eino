@@ -18,6 +18,7 @@ package compose
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"reflect"
 
@@ -297,21 +298,45 @@ func migrateCheckpoint(cp *checkpoint, migrate func(state any) (any, bool, error
 
 // convertCheckPoint if value in checkpoint is streamReader, convert it to non-stream
 func (c *checkPointer) convertCheckPoint(cp *checkpoint, isStream bool) (err error) {
+	ignoreInterrupt := func(err error) bool {
+		// The checkpoint maps already carry this control signal. A copied data
+		// stream may surface it again while being materialized.
+		return checkpointContainsInterrupt(cp, err)
+	}
 	for _, ch := range cp.Channels {
 		err = ch.convertValues(func(m map[string]any) error {
-			return c.sc.convertOutputs(isStream, m)
+			return c.sc.convertOutputs(isStream, m, ignoreInterrupt)
 		})
 		if err != nil {
 			return err
 		}
 	}
 
-	err = c.sc.convertInputs(isStream, cp.Inputs)
+	err = c.sc.convertInputs(isStream, cp.Inputs, ignoreInterrupt)
 	if err != nil {
 		return err
 	}
 
 	return nil
+}
+
+func checkpointContainsInterrupt(cp *checkpoint, err error) bool {
+	if cp == nil || err == nil {
+		return false
+	}
+
+	signal := &core.InterruptSignal{}
+	if errors.As(err, &signal) {
+		_, ok := cp.InterruptID2Addr[signal.ID]
+		return ok
+	}
+
+	if nested := isSubGraphInterrupt(err); nested != nil && nested.signal != nil {
+		_, ok := cp.InterruptID2Addr[nested.signal.ID]
+		return ok
+	}
+
+	return false
 }
 
 // convertCheckPoint convert values in checkpoint to streamReader if needed
@@ -344,23 +369,23 @@ type streamConverter struct {
 	inputPairs, outputPairs map[string]streamConvertPair
 }
 
-func (s *streamConverter) convertInputs(isStream bool, values map[string]any) error {
-	return convert(values, s.inputPairs, isStream)
+func (s *streamConverter) convertInputs(isStream bool, values map[string]any, ignoreError func(error) bool) error {
+	return convert(values, s.inputPairs, isStream, ignoreError)
 }
 
 func (s *streamConverter) restoreInputs(isStream bool, values map[string]any) error {
 	return restore(values, s.inputPairs, isStream)
 }
 
-func (s *streamConverter) convertOutputs(isStream bool, values map[string]any) error {
-	return convert(values, s.outputPairs, isStream)
+func (s *streamConverter) convertOutputs(isStream bool, values map[string]any, ignoreError func(error) bool) error {
+	return convert(values, s.outputPairs, isStream, ignoreError)
 }
 
 func (s *streamConverter) restoreOutputs(isStream bool, values map[string]any) error {
 	return restore(values, s.outputPairs, isStream)
 }
 
-func convert(values map[string]any, convPairs map[string]streamConvertPair, isStream bool) error {
+func convert(values map[string]any, convPairs map[string]streamConvertPair, isStream bool, ignoreError func(error) bool) error {
 	if !isStream {
 		return nil
 	}
@@ -373,7 +398,7 @@ func convert(values map[string]any, convPairs map[string]streamConvertPair, isSt
 		if !ok {
 			return fmt.Errorf("checkpoint conv stream fail, value of [%s] isn't stream", key)
 		}
-		nValue, err := convPair.concatStream(sr)
+		nValue, err := convPair.concatStream(sr, ignoreError)
 		if err != nil {
 			return err
 		}

@@ -159,6 +159,9 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 		// in subgraph, try to load checkpoint from ctx
 		initialized = true
 
+		if err = r.validateCheckpointIntegrity(cp); err != nil {
+			return nil, newGraphRunError(fmt.Errorf("invalid checkpoint: %w", err))
+		}
 		ctx, err = r.restoreCheckPointState(ctx, *path, getStateModifier(ctx), cp, isStream, cm)
 		if err != nil {
 			return nil, err
@@ -180,6 +183,9 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 			// load checkpoint from store
 			initialized = true
 
+			if err = r.validateCheckpointIntegrity(cp); err != nil {
+				return nil, newGraphRunError(fmt.Errorf("invalid checkpoint: %w", err))
+			}
 			ctx = setStateModifier(ctx, stateModifier)
 			ctx = setCheckPointToCtx(ctx, cp)
 
@@ -426,12 +432,14 @@ func (r *runner) restoreCheckPointState(
 func newInterruptTempInfo() *interruptTempInfo {
 	return &interruptTempInfo{
 		subGraphInterrupts:  map[string]*subGraphInterruptError{},
+		interruptTaskNodes:  map[string]struct{}{},
 		interruptRerunExtra: map[string]any{},
 	}
 }
 
 type interruptTempInfo struct {
 	subGraphInterrupts   map[string]*subGraphInterruptError
+	interruptTaskNodes   map[string]struct{}
 	interruptRerunNodes  []string
 	interruptBeforeNodes []string
 	interruptAfterNodes  []string
@@ -467,9 +475,13 @@ func (r *runner) resolveInterruptCompletedTasks(tempInfo *interruptTempInfo, com
 
 			ire := &core.InterruptSignal{}
 			if errors.As(completedTask.err, &ire) {
-				tempInfo.interruptRerunNodes = append(tempInfo.interruptRerunNodes, completedTask.nodeKey)
+				tempInfo.interruptTaskNodes[completedTask.nodeKey] = struct{}{}
+				// A downstream node can observe an interrupt while consuming a
+				// stream produced by an earlier node. Rerun the addressed node.
+				rerunNodeKey := r.interruptOriginNodeKey(completedTask, ire.Address)
+				tempInfo.interruptRerunNodes = appendIfNotExist(tempInfo.interruptRerunNodes, rerunNodeKey)
 				if ire.Info != nil {
-					tempInfo.interruptRerunExtra[completedTask.nodeKey] = ire.InterruptInfo.Info
+					tempInfo.interruptRerunExtra[rerunNodeKey] = ire.InterruptInfo.Info
 				}
 
 				tempInfo.signals = append(tempInfo.signals, ire)
@@ -487,6 +499,26 @@ func (r *runner) resolveInterruptCompletedTasks(tempInfo *interruptTempInfo, com
 		}
 	}
 	return nil
+}
+
+func (r *runner) interruptOriginNodeKey(completedTask *task, address Address) string {
+	taskAddress := GetCurrentAddress(completedTask.ctx)
+	if len(taskAddress) == 0 || taskAddress[len(taskAddress)-1].Type != AddressSegmentNode {
+		return completedTask.nodeKey
+	}
+
+	graphAddress := taskAddress[:len(taskAddress)-1]
+	if len(address) <= len(graphAddress) || !address[:len(graphAddress)].Equals(graphAddress) {
+		return completedTask.nodeKey
+	}
+
+	segment := address[len(graphAddress)]
+	if segment.Type == AddressSegmentNode {
+		if _, ok := r.chanSubscribeTo[segment.ID]; ok {
+			return segment.ID
+		}
+	}
+	return completedTask.nodeKey
 }
 
 func getHitKey(tasks []*task, keys []string) []string {
@@ -548,6 +580,9 @@ func (r *runner) handleInterrupt(
 
 	for _, t := range nextTasks {
 		cp.Inputs[t.nodeKey] = t.input
+	}
+	if err = r.validateCheckpointIntegrity(cp); err != nil {
+		return fmt.Errorf("invalid checkpoint: %w", err)
 	}
 	err = r.checkPointer.convertCheckPoint(cp, isStream)
 	if err != nil {
@@ -612,6 +647,15 @@ func (r *runner) handleInterruptWithSubGraphAndRerunNodes(
 		if _, ok := tempInfo.subGraphInterrupts[t.nodeKey]; ok {
 			subgraphTasks = append(subgraphTasks, t)
 			skipPreHandler[t.nodeKey] = true // subgraph won't run pre-handler again, but rerun nodes will
+			continue
+		}
+		if _, ok := tempInfo.interruptTaskNodes[t.nodeKey]; ok {
+			for _, key := range tempInfo.interruptRerunNodes {
+				if key == t.nodeKey {
+					rerunTasks = append(rerunTasks, t)
+					break
+				}
+			}
 			continue
 		}
 		rerun := false
@@ -683,11 +727,14 @@ func (r *runner) handleInterruptWithSubGraphAndRerunNodes(
 		cp.SubGraphs[t.nodeKey] = tempInfo.subGraphInterrupts[t.nodeKey].CheckPoint
 		intInfo.SubGraphs[t.nodeKey] = tempInfo.subGraphInterrupts[t.nodeKey].Info
 	}
+	cp.RerunNodes = append(cp.RerunNodes, tempInfo.interruptRerunNodes...)
 	for _, t := range rerunTasks {
-		cp.RerunNodes = append(cp.RerunNodes, t.nodeKey)
 		if t.originalInput != nil {
 			cp.Inputs[t.nodeKey] = t.originalInput
 		}
+	}
+	if err = r.validateCheckpointIntegrity(cp); err != nil {
+		return fmt.Errorf("invalid checkpoint: %w", err)
 	}
 	err = r.checkPointer.convertCheckPoint(cp, isStream)
 	if err != nil {
@@ -955,6 +1002,27 @@ func (r *runner) restoreTasks(
 		ret = append(ret, newTask)
 	}
 	return ret, nil
+}
+
+func (r *runner) validateCheckpointIntegrity(cp *checkpoint) error {
+	for _, key := range cp.RerunNodes {
+		call, ok := r.chanSubscribeTo[key]
+		if !ok || call.action.meta == nil {
+			continue
+		}
+		component := call.action.meta.component
+		if component != ComponentOfGraph && component != ComponentOfChain && component != ComponentOfWorkflow {
+			continue
+		}
+		if subCP, hasSubGraph := cp.SubGraphs[key]; hasSubGraph && subCP != nil {
+			continue
+		}
+		if _, hasInput := cp.Inputs[key]; hasInput {
+			continue
+		}
+		return fmt.Errorf("subgraph node %q is marked for rerun without a nested checkpoint or persisted input", key)
+	}
+	return nil
 }
 
 func (r *runner) resolveCompletedTasks(ctx context.Context, completedTasks []*task, isStream bool, cm *channelManager) (map[string]map[string]any, map[string][]string, error) {

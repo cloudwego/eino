@@ -161,19 +161,19 @@ type handlerPair struct {
 }
 
 type streamConvertPair struct {
-	concatStream  func(sr streamReader) (any, error)
+	concatStream  func(sr streamReader, ignoreError func(error) bool) (any, error)
 	restoreStream func(any) (streamReader, error)
 }
 
 func defaultStreamConvertPair[T any]() streamConvertPair {
 	var t T
 	return streamConvertPair{
-		concatStream: func(sr streamReader) (any, error) {
+		concatStream: func(sr streamReader, ignoreError func(error) bool) (any, error) {
 			tsr, ok := unpackStreamReader[T](sr)
 			if !ok {
 				return nil, fmt.Errorf("cannot convert sr to streamReader[%T]", t)
 			}
-			value, err := concatStreamReader(tsr)
+			value, err := concatStreamReaderWithErrorFilter(tsr, ignoreError)
 			if err != nil {
 				if errors.Is(err, emptyStreamConcatErr) {
 					return nil, nil

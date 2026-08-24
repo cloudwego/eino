@@ -409,6 +409,9 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 	cancelCtx := config.cancelCtx
 	g := compose.NewGraph[*reactInput, Message](compose.WithGenLocalState(genReactState(config)))
 	_ = g.AddLambdaNode(initNode_, compose.InvokableLambda(func(ctx context.Context, input *reactInput) ([]Message, error) {
+		if input == nil {
+			return nil, errors.New("react: init input is nil")
+		}
 		_ = compose.ProcessState(ctx, func(_ context.Context, st *State) error {
 			st.Messages = append(st.Messages, input.Messages...)
 			return nil
@@ -660,6 +663,9 @@ func newAgenticReact(ctx context.Context, config *agenticReactConfig) (agenticRe
 	g := compose.NewGraph[*agenticReactInput, *schema.AgenticMessage](
 		compose.WithGenLocalState(genAgenticReactState(config)))
 	_ = g.AddLambdaNode(initNode_, compose.InvokableLambda(func(ctx context.Context, input *agenticReactInput) ([]*schema.AgenticMessage, error) {
+		if input == nil {
+			return nil, errors.New("agentic react: init input is nil")
+		}
 		_ = compose.ProcessState(ctx, func(_ context.Context, st *agenticState) error {
 			st.Messages = append(st.Messages, input.Messages...)
 			return nil
