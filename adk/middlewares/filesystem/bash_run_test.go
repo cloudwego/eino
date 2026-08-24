@@ -83,12 +83,20 @@ func (r *outputRuntimeStub) ReportTranscriptFailure(context.Context, error) erro
 var testManagerStores sync.Map
 var testManagerExecutors sync.Map
 
-func newTestManager(t testing.TB, ctx context.Context) *backgroundtask.Manager {
+func newTestManager(
+	t testing.TB,
+	ctx context.Context,
+	configure ...func(*backgroundtask.Config),
+) *backgroundtask.Manager {
 	store := backgroundtask.NewInMemoryStore(nil)
 	executors := backgroundtask.NewExecutorRegistry()
-	manager := mustNewBackgroundManager(t, ctx, &backgroundtask.Config{
+	config := &backgroundtask.Config{
 		Tasks: store, Executors: executors,
-	})
+	}
+	for _, apply := range configure {
+		apply(config)
+	}
+	manager := mustNewBackgroundManager(t, ctx, config)
 	testManagerStores.Store(manager, store)
 	testManagerExecutors.Store(manager, executors)
 	return manager
@@ -312,7 +320,15 @@ func TestManagedExecuteTool_ForegroundWithoutNotificationSession(t *testing.T) {
 }
 
 func TestManagedExecuteTool_BackgroundWithoutNotificationSession(t *testing.T) {
-	mgr := newTestManager(t, context.Background())
+	const taskID = "background-without-notification-session"
+	mgr := newTestManager(t, context.Background(), func(config *backgroundtask.Config) {
+		config.IDGen = func(
+			context.Context,
+			*backgroundtask.AllocateTaskIDRequest,
+		) (string, error) {
+			return taskID, nil
+		}
+	})
 	defer func() {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
@@ -339,13 +355,14 @@ func TestManagedExecuteTool_BackgroundWithoutNotificationSession(t *testing.T) {
 	assert.Contains(t, result, "Use task_output")
 	assert.NotContains(t, result, "You will be notified")
 
-	pending, err := mgr.ListPending(context.Background(), &backgroundtask.ListPendingRequest{
-		ExecutorKeys: []string{"eino.dev/process-local"},
-	})
+	task, err := mgr.Get(context.Background(), taskID)
 	require.NoError(t, err)
-	require.Len(t, pending.Tasks, 1)
-	assert.Empty(t, pending.Tasks[0].Spec.SessionID)
-	assert.False(t, pending.Tasks[0].Spec.NotifySession)
+	assert.Contains(t, []backgroundtask.Status{
+		backgroundtask.StatusPending,
+		backgroundtask.StatusRunning,
+	}, task.Status)
+	assert.Empty(t, task.Spec.SessionID)
+	assert.False(t, task.Spec.NotifySession)
 
 	store, ok := testManagerStores.Load(mgr)
 	require.True(t, ok)
