@@ -106,13 +106,13 @@ func TestAttack_NestedNotificationFailureDoesNotPoisonReplay(t *testing.T) {
 	child, err := store.Create(ctx, &CreateTaskRequest{
 		Spec: Spec{
 			ID: "child", ExecutorKey: "executor", Kind: "tool",
-			ParentTaskID: parent.Mailbox.TaskID, SessionID: "root",
+			ParentTaskID: parent.Mailbox.TaskID, RootSessionID: "root",
 			NotifySession: true,
 		},
 		LeaseExpiryPolicy: LeaseExpiryRetry,
 		ParentExecution: &taskcore.ExecutionContext{
-			TaskID: parent.Mailbox.TaskID, Mode: taskcore.ModeForeground,
-			OwnerEpoch: parent.Mailbox.Generation,
+			TaskID: parent.Mailbox.TaskID, Owner: taskcore.OwnerParent,
+			Generation: parent.Mailbox.Generation,
 		},
 	})
 	require.NoError(t, err)
@@ -171,8 +171,8 @@ func TestAttack_NotificationReplayDetectsDeliveryConflict(t *testing.T) {
 		},
 		LeaseExpiryPolicy: LeaseExpiryRetry,
 		ParentExecution: &taskcore.ExecutionContext{
-			TaskID: parent.Mailbox.TaskID, Mode: taskcore.ModeForeground,
-			OwnerEpoch: parent.Mailbox.Generation,
+			TaskID: parent.Mailbox.TaskID, Owner: taskcore.OwnerParent,
+			Generation: parent.Mailbox.Generation,
 		},
 	})
 	require.NoError(t, err)

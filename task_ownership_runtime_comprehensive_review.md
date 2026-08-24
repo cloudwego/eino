@@ -45,6 +45,15 @@
   independently configurable status and directive fields.
 - Task input uses `SendInput`; sub-agent conversation reuse uses
   `Continue` with explicit `IfIdle` start options.
+- `Input` is a caller-owned send intent; `InputRecord` adds persisted routing,
+  sequence, and timestamp fields.
+- Sub-agent `Handle` keeps identity private and is restored through
+  `Controller.Handle`, so serialized state stores IDs rather than inert handles.
+- Initial placement uses `StartMode`; active authority uses
+  `Owner` plus `Generation`. Background specs name their root scope explicitly
+  as `RootSessionID`.
+- Deep Agent derives its shared Manager from the durable Sub-agent Controller
+  when omitted and rejects conflicting Manager instances.
 - Business terminal states are returned through one `OutcomeStatus` field.
 - Lifecycle transitions are exposed only through mailbox-aware atomic store
   operations; the old split transition and capability interfaces are removed.

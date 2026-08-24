@@ -35,7 +35,7 @@ import (
 )
 
 const (
-	runtimeMetadataVersion   = 1
+	runtimeMetadataVersion   = 2
 	runtimeCheckpointVersion = 1
 	foregroundResultVersion  = 1
 	initialSignalKind        = "eino.subagent.initial"
@@ -49,7 +49,7 @@ var childSessionNamespace = uuid.MustParse("a78763c0-a953-40d6-a88e-a9ca706cb88f
 // EventToInput converts durable non-resume events into one child-agent turn.
 type EventToInput[M adk.MessageType] func(
 	context.Context,
-	[]*task.Input,
+	[]*task.InputRecord,
 ) (*adk.TypedAgentInput[M], error)
 
 // ControllerConfig configures a durable TurnLoop-backed sub-agent runtime.
@@ -110,15 +110,15 @@ type activeRun[M adk.MessageType] struct {
 }
 
 type runtimeMetadata struct {
-	Version         int       `json:"version"`
-	ParentSessionID string    `json:"parent_session_id"`
-	RootSessionID   string    `json:"root_session_id"`
-	ParentTaskID    string    `json:"parent_task_id,omitempty"`
-	ChildSessionID  string    `json:"child_session_id"`
-	AgentName       string    `json:"agent_name"`
-	Description     string    `json:"description,omitempty"`
-	Mode            task.Mode `json:"mode"`
-	InputHash       []byte    `json:"input_hash"`
+	Version         int            `json:"version"`
+	ParentSessionID string         `json:"parent_session_id"`
+	RootSessionID   string         `json:"root_session_id"`
+	ParentTaskID    string         `json:"parent_task_id,omitempty"`
+	ChildSessionID  string         `json:"child_session_id"`
+	AgentName       string         `json:"agent_name"`
+	Description     string         `json:"description,omitempty"`
+	StartMode       task.StartMode `json:"start_mode"`
+	InputHash       []byte         `json:"input_hash"`
 }
 
 type turnLoopCheckpoint struct {
@@ -211,6 +211,33 @@ func (r *Controller[M]) RegisterAgent(
 	return r.executor.register(name, registration)
 }
 
+// Manager returns the lifecycle manager shared by this Controller.
+func (r *Controller[M]) Manager() *background.Manager {
+	if r == nil {
+		return nil
+	}
+	return r.manager
+}
+
+// Handle restores an operational handle for an existing task mailbox.
+func (r *Controller[M]) Handle(
+	ctx context.Context,
+	taskID string,
+) (*Handle, error) {
+	if r == nil || r.manager == nil || taskID == "" {
+		return nil, task.ErrMailboxNotFound
+	}
+	mailbox, err := r.manager.GetMailbox(ctx, taskID)
+	if err != nil {
+		return nil, err
+	}
+	metadata, err := decodeRuntimeMetadata(mailbox.Identity)
+	if err != nil {
+		return nil, err
+	}
+	return r.newHandle(mailbox.TaskID, metadata.ChildSessionID), nil
+}
+
 // Start reserves a stable run and starts attached or detached execution.
 func (r *Controller[M]) Start(
 	ctx context.Context,
@@ -220,7 +247,8 @@ func (r *Controller[M]) Start(
 		req.AgentName == "" || req.Input == nil || len(req.Input.Messages) == 0 {
 		return nil, errors.New("task/subagent: runtime start request is incomplete")
 	}
-	if req.Mode != task.ModeForeground && req.Mode != task.ModeBackground {
+	if req.StartMode != task.StartModeForeground &&
+		req.StartMode != task.StartModeBackground {
 		return nil, errors.New("task/subagent: runtime start mode is invalid")
 	}
 	if len(req.ChildSessionID) > maxChildSessionIDLength {
@@ -269,7 +297,7 @@ func (r *Controller[M]) Start(
 		Version: runtimeMetadataVersion, ParentSessionID: req.ParentSessionID,
 		RootSessionID: rootSessionID, ParentTaskID: parentTaskID,
 		ChildSessionID: childSessionID, AgentName: req.AgentName,
-		Description: req.Description, Mode: req.Mode,
+		Description: req.Description, StartMode: req.StartMode,
 		InputHash: inputHash,
 	})
 	if err != nil {
@@ -298,10 +326,7 @@ func (r *Controller[M]) Start(
 	if err != nil {
 		return nil, err
 	}
-	handle := Handle{
-		TaskID: reserved.Mailbox.TaskID, ChildSessionID: metadata.ChildSessionID,
-	}
-	r.bindHandle(&handle)
+	handle := r.newHandle(reserved.Mailbox.TaskID, metadata.ChildSessionID)
 	terminal, err := r.prepareStartMailbox(
 		ctx, reserved, req.InvocationID, serializedInput,
 	)
@@ -309,37 +334,37 @@ func (r *Controller[M]) Start(
 		return nil, err
 	}
 	if terminal {
-		return &handle, nil
+		return handle, nil
 	}
-	if req.Mode == task.ModeBackground {
-		if _, err = r.submitTask(ctx, &handle, metadata, nil); err != nil {
+	if req.StartMode == task.StartModeBackground {
+		if _, err = r.submitTask(ctx, handle, metadata, nil); err != nil {
 			return nil, err
 		}
-		go func() { _ = r.manager.Execute(detachedRuntimeContext{parent: ctx}, handle.TaskID) }()
-		return &handle, nil
+		go func() { _ = r.manager.Execute(detachedRuntimeContext{parent: ctx}, handle.ID()) }()
+		return handle, nil
 	}
 
 	r.activeMu.Lock()
-	if current := r.active[handle.TaskID]; current != nil {
+	if current := r.active[handle.ID()]; current != nil {
 		select {
 		case <-current.done:
 			if current.err == nil && current.result != nil &&
 				current.result.Interrupted == nil {
 				r.activeMu.Unlock()
-				return &handle, nil
+				return handle, nil
 			}
-			delete(r.active, handle.TaskID)
+			delete(r.active, handle.ID())
 		default:
 			r.activeMu.Unlock()
-			return &handle, nil
+			return handle, nil
 		}
 	}
 	runCtx, cancel := context.WithCancel(ctx)
-	active := &activeRun[M]{handle: handle, cancel: cancel, done: make(chan struct{})}
-	r.active[handle.TaskID] = active
+	active := &activeRun[M]{handle: *handle, cancel: cancel, done: make(chan struct{})}
+	r.active[handle.ID()] = active
 	r.activeMu.Unlock()
 	go r.runAttached(runCtx, active, metadata, req)
-	return &handle, nil
+	return handle, nil
 }
 
 func (r *Controller[M]) prepareStartMailbox(
@@ -350,8 +375,11 @@ func (r *Controller[M]) prepareStartMailbox(
 ) (bool, error) {
 	if reserved.Created {
 		if _, enqueueErr := r.manager.SendInput(ctx, &task.SendInputRequest{
-			TaskID: reserved.Mailbox.TaskID, EventID: invocationID + ":initial",
-			Kind: initialSignalKind, Data: serializedInput,
+			TaskID: reserved.Mailbox.TaskID,
+			Input: task.Input{
+				EventID: invocationID + ":initial",
+				Kind:    initialSignalKind, Data: serializedInput,
+			},
 		}); enqueueErr != nil && !errors.Is(enqueueErr, task.ErrMailboxSealed) {
 			return false, enqueueErr
 		}
@@ -365,8 +393,11 @@ func (r *Controller[M]) prepareStartMailbox(
 		}
 		if len(signals.Inputs) == 0 {
 			if _, enqueueErr := r.manager.SendInput(ctx, &task.SendInputRequest{
-				TaskID: reserved.Mailbox.TaskID, EventID: invocationID + ":initial",
-				Kind: initialSignalKind, Data: serializedInput,
+				TaskID: reserved.Mailbox.TaskID,
+				Input: task.Input{
+					EventID: invocationID + ":initial",
+					Kind:    initialSignalKind, Data: serializedInput,
+				},
 			}); enqueueErr != nil {
 				return false, enqueueErr
 			}
@@ -384,11 +415,8 @@ func (r *Controller[M]) prepareStartMailbox(
 	return false, nil
 }
 
-func (r *Controller[M]) bindHandle(handle *Handle) {
-	if handle == nil {
-		return
-	}
-	taskID := handle.TaskID
+func (r *Controller[M]) newHandle(taskID, childSessionID string) *Handle {
+	handle := &Handle{taskID: taskID, childSessionID: childSessionID}
 	handle.sendInput = func(ctx context.Context, input *task.Input) error {
 		return r.SendInput(ctx, taskID, input)
 	}
@@ -398,6 +426,7 @@ func (r *Controller[M]) bindHandle(handle *Handle) {
 	handle.cancel = func(ctx context.Context, reason string) error {
 		return r.cancelTask(ctx, taskID, reason)
 	}
+	return handle
 }
 
 func (r *Controller[M]) waitOutcome(
@@ -475,9 +504,8 @@ func (r *Controller[M]) Continue(
 			req.ChildSessionID,
 		)
 		if lookupErr == nil {
-			handle := &Handle{TaskID: active.TaskID, ChildSessionID: req.ChildSessionID}
-			r.bindHandle(handle)
-			if pushErr := r.SendInput(ctx, handle.TaskID, &task.Input{
+			handle := r.newHandle(active.TaskID, req.ChildSessionID)
+			if pushErr := handle.SendInput(ctx, &task.Input{
 				EventID: req.InvocationID + ":send", Kind: messageInputKind,
 				Data: data, Delivery: req.Delivery,
 			}); pushErr != nil {
@@ -505,7 +533,7 @@ func (r *Controller[M]) Continue(
 			AgentName:       req.IfIdle.AgentName,
 			Description:     req.IfIdle.Description,
 			Input:           req.Input,
-			Mode:            req.IfIdle.Mode,
+			StartMode:       req.IfIdle.StartMode,
 			EnableStreaming: req.IfIdle.EnableStreaming,
 			OnEvent:         req.IfIdle.OnEvent,
 		})
@@ -526,8 +554,11 @@ func (r *Controller[M]) SendInput(
 		return errors.New("task/subagent: runtime event identity is required")
 	}
 	_, err := r.manager.SendInput(ctx, &task.SendInputRequest{
-		TaskID: runID, EventID: event.EventID, Kind: event.Kind,
-		Data: append([]byte(nil), event.Data...), Delivery: event.Delivery,
+		TaskID: runID,
+		Input: task.Input{
+			EventID: event.EventID, Kind: event.Kind,
+			Data: append([]byte(nil), event.Data...), Delivery: event.Delivery,
+		},
 	})
 	if err == nil {
 		if backgroundTask, getErr := r.manager.Get(ctx, runID); getErr == nil &&
@@ -643,7 +674,7 @@ func (r *Controller[M]) runAttached(
 	result, checkpoint, err := r.runActivation(
 		ctx,
 		&activationRequest[M]{
-			runID: active.handle.TaskID, metadata: metadata,
+			runID: active.handle.ID(), metadata: metadata,
 			attached: true, onEvent: req.OnEvent,
 		},
 	)
@@ -653,7 +684,7 @@ func (r *Controller[M]) runAttached(
 			status = task.OutcomeCanceled
 		}
 		if persistErr := r.failAttached(
-			context.Background(), active.handle.TaskID, status, err,
+			context.Background(), active.handle.ID(), status, err,
 		); persistErr != nil {
 			active.err = errors.Join(err, persistErr)
 			return
@@ -676,7 +707,7 @@ func (r *Controller[M]) runAttached(
 	}
 	if _, err = r.submitTask(ctx, &active.handle, metadata, checkpoint); err != nil {
 		if persistErr := r.failAttached(
-			context.Background(), active.handle.TaskID, task.OutcomeFailed, err,
+			context.Background(), active.handle.ID(), task.OutcomeFailed, err,
 		); persistErr != nil {
 			active.err = errors.Join(err, persistErr)
 			return
@@ -687,16 +718,16 @@ func (r *Controller[M]) runAttached(
 	if ctx.Err() != nil {
 		_, cancelErr := r.manager.RequestCancel(
 			context.Background(),
-			active.handle.TaskID,
+			active.handle.ID(),
 			background.WithCancellationReason("parent canceled sub-agent"),
 		)
 		active.err = errors.Join(ctx.Err(), cancelErr)
 		return
 	}
 	go func() {
-		_ = r.manager.Execute(detachedRuntimeContext{parent: ctx}, active.handle.TaskID)
+		_ = r.manager.Execute(detachedRuntimeContext{parent: ctx}, active.handle.ID())
 	}()
-	active.result, active.err = r.waitTask(ctx, active.handle.TaskID)
+	active.result, active.err = r.waitTask(ctx, active.handle.ID())
 }
 
 func (r *Controller[M]) waitTask(
@@ -733,9 +764,7 @@ func (r *Controller[M]) waitTask(
 				return nil, streamErr
 			}
 			return &Result[M]{
-				Handle: Handle{
-					TaskID: runID, ChildSessionID: metadata.ChildSessionID,
-				},
+				Handle:       *r.newHandle(runID, metadata.ChildSessionID),
 				FinalMessage: final,
 			}, nil
 		case background.StatusFailed, background.StatusCanceled:
@@ -789,9 +818,7 @@ func (r *Controller[M]) recoverForegroundResult(
 		return nil, err
 	}
 	return &Result[M]{
-		Handle: Handle{
-			TaskID: mailbox.TaskID, ChildSessionID: metadata.ChildSessionID,
-		},
+		Handle:       *r.newHandle(mailbox.TaskID, metadata.ChildSessionID),
 		FinalMessage: final,
 	}, nil
 }
@@ -833,7 +860,7 @@ func (r *Controller[M]) submitTask(
 	metadata *runtimeMetadata,
 	checkpoint []byte,
 ) (*background.TaskSnapshot, error) {
-	if task, err := r.manager.Get(ctx, handle.TaskID); err == nil {
+	if task, err := r.manager.Get(ctx, handle.ID()); err == nil {
 		return task, nil
 	} else if !errors.Is(err, background.ErrNotFound) {
 		return nil, err
@@ -847,10 +874,10 @@ func (r *Controller[M]) submitTask(
 	}
 	task, err := r.manager.AdoptForeground(ctx, &background.AdoptForegroundRequest{
 		Spec: background.Spec{
-			ID: handle.TaskID, ExecutorKey: ExecutorKey, Kind: "subagent",
+			ID: handle.ID(), ExecutorKey: ExecutorKey, Kind: "subagent",
 			Payload: payloadBytes, Description: metadata.Description,
-			ParentTaskID: metadata.ParentTaskID,
-			SessionID:    metadata.RootSessionID, NotifySession: true,
+			ParentTaskID:  metadata.ParentTaskID,
+			RootSessionID: metadata.RootSessionID, NotifySession: true,
 		},
 		ExpectedGeneration: 1,
 		InputCursor:        checkpointCursor(checkpoint),
@@ -1019,20 +1046,20 @@ func (r *Controller[M]) runActivation( //nolint:cyclop,funlen,revive // Coordina
 		}
 	}
 	result := &activationResult[M]{cursor: cursor, final: final}
-	executionMode := task.ModeForeground
+	owner := task.OwnerParent
 	attempt := int64(0)
 	if backgroundTask != nil {
-		executionMode = task.ModeBackground
+		owner = task.OwnerManager
 		attempt = backgroundTask.Attempt
 	}
 	executionContext := task.ExecutionContext{
-		TaskID: runID, Mode: executionMode, OwnerEpoch: stream.Generation,
+		TaskID: runID, Owner: owner, Generation: stream.Generation,
 		Attempt: attempt, RootSessionID: metadata.RootSessionID,
 	}
-	var loop *adk.TurnLoop[*task.Input, M]
+	var loop *adk.TurnLoop[*task.InputRecord, M]
 	var observedMu sync.Mutex
 	observedSequence := cursor
-	pushInput := func(input *task.Input) {
+	pushInput := func(input *task.InputRecord) {
 		if input == nil {
 			return
 		}
@@ -1050,26 +1077,26 @@ func (r *Controller[M]) runActivation( //nolint:cyclop,funlen,revive // Coordina
 		loop.Push(input, adk.WithPushStrategy(
 			func(
 				pushCtx context.Context,
-				turn *adk.TurnContext[*task.Input, M],
-			) []adk.PushOption[*task.Input, M] {
+				turn *adk.TurnContext[*task.InputRecord, M],
+			) []adk.PushOption[*task.InputRecord, M] {
 				if r.preemptPolicy != nil {
 					return r.preemptPolicy(pushCtx, input, turn)
 				}
-				return []adk.PushOption[*task.Input, M]{
-					adk.WithPreempt[*task.Input, M](adk.AnySafePoint),
+				return []adk.PushOption[*task.InputRecord, M]{
+					adk.WithPreempt[*task.InputRecord, M](adk.AnySafePoint),
 				}
 			},
 		))
 	}
-	loop = adk.NewTurnLoop(adk.TurnLoopConfig[*task.Input, M]{
+	loop = adk.NewTurnLoop(adk.TurnLoopConfig[*task.InputRecord, M]{
 		Store: r.checkPointStore, CheckpointID: runtimeTurnLoopCheckpointID(runID),
 		SessionID: metadata.ChildSessionID, SessionStore: sessionStore,
 		SessionConfig: sessionConfigForTask(r.sessionConfig, runID),
 		GenInput: func(
 			turnCtx context.Context,
-			_ *adk.TurnLoop[*task.Input, M],
-			signals []*task.Input,
-		) (*adk.GenInputResult[*task.Input, M], error) {
+			_ *adk.TurnLoop[*task.InputRecord, M],
+			signals []*task.InputRecord,
+		) (*adk.GenInputResult[*task.InputRecord, M], error) {
 			input, inputErr := r.signalsToInput(turnCtx, signals)
 			if inputErr != nil {
 				return nil, inputErr
@@ -1077,7 +1104,7 @@ func (r *Controller[M]) runActivation( //nolint:cyclop,funlen,revive // Coordina
 			stampRuntimeInputIDs(input, signals)
 			runCtx := task.WithExecutionContext(turnCtx, executionContext)
 			runCtx = WithRuntimeContext(runCtx, runID, metadata.ChildSessionID)
-			return &adk.GenInputResult[*task.Input, M]{
+			return &adk.GenInputResult[*task.InputRecord, M]{
 				RunCtx: runCtx,
 				Input:  input, RunOpts: append([]adk.AgentRunOption(nil), runOptions...),
 				Consumed: signals,
@@ -1085,14 +1112,14 @@ func (r *Controller[M]) runActivation( //nolint:cyclop,funlen,revive // Coordina
 		},
 		GenResume: func(
 			resumeCtx context.Context,
-			_ *adk.TurnLoop[*task.Input, M],
-			interrupted, unhandled, newItems []*task.Input,
-		) (*adk.GenResumeResult[*task.Input, M], error) {
+			_ *adk.TurnLoop[*task.InputRecord, M],
+			interrupted, unhandled, newItems []*task.InputRecord,
+		) (*adk.GenResumeResult[*task.InputRecord, M], error) {
 			var resumeParams *adk.ResumeParams
-			var resumeSignals []*task.Input
-			var remaining []*task.Input
+			var resumeSignals []*task.InputRecord
+			var remaining []*task.InputRecord
 			for _, signal := range append(
-				append([]*task.Input(nil), unhandled...),
+				append([]*task.InputRecord(nil), unhandled...),
 				newItems...,
 			) {
 				if signal.Kind != ResumeInputKind {
@@ -1113,12 +1140,12 @@ func (r *Controller[M]) runActivation( //nolint:cyclop,funlen,revive // Coordina
 			}
 			runCtx := task.WithExecutionContext(resumeCtx, executionContext)
 			runCtx = WithRuntimeContext(runCtx, runID, metadata.ChildSessionID)
-			resume := &adk.GenResumeResult[*task.Input, M]{
+			resume := &adk.GenResumeResult[*task.InputRecord, M]{
 				RunCtx:       runCtx,
 				Decision:     adk.TurnLoopResumeDecisionResume,
 				ResumeParams: resumeParams,
 				Consumed: append(
-					append([]*task.Input(nil), interrupted...),
+					append([]*task.InputRecord(nil), interrupted...),
 					resumeSignals...,
 				),
 				Remaining: remaining,
@@ -1127,14 +1154,14 @@ func (r *Controller[M]) runActivation( //nolint:cyclop,funlen,revive // Coordina
 		},
 		PrepareAgent: func(
 			context.Context,
-			*adk.TurnLoop[*task.Input, M],
-			[]*task.Input,
+			*adk.TurnLoop[*task.InputRecord, M],
+			[]*task.InputRecord,
 		) (adk.TypedAgent[M], error) {
 			return registration.Agent, nil
 		},
 		OnAgentEvents: func(
 			turnCtx context.Context,
-			tc *adk.TurnContext[*task.Input, M],
+			tc *adk.TurnContext[*task.InputRecord, M],
 			events *adk.AsyncIterator[*adk.TypedAgentEvent[M]],
 		) error {
 			for {
@@ -1526,10 +1553,10 @@ func (r *Controller[M]) controlResult(
 
 func (r *Controller[M]) signalsToInput(
 	ctx context.Context,
-	signals []*task.Input,
+	signals []*task.InputRecord,
 ) (*adk.TypedAgentInput[M], error) {
 	result := &adk.TypedAgentInput[M]{}
-	var external []*task.Input
+	var external []*task.InputRecord
 	for _, signal := range signals {
 		if signal.Kind == initialSignalKind || signal.Kind == messageInputKind {
 			var encoded serializedTypedInput
@@ -1547,9 +1574,11 @@ func (r *Controller[M]) signalsToInput(
 		if signal.Kind == ResumeInputKind {
 			continue
 		}
-		external = append(external, &task.Input{
-			EventID: signal.EventID, Kind: signal.Kind,
-			Data: append([]byte(nil), signal.Data...),
+		external = append(external, &task.InputRecord{
+			Input: task.Input{
+				EventID: signal.EventID, Kind: signal.Kind,
+				Data: append([]byte(nil), signal.Data...), Delivery: signal.Delivery,
+			},
 		})
 	}
 	if len(external) > 0 {
@@ -1574,7 +1603,7 @@ func (r *Controller[M]) signalsToInput(
 
 func stampRuntimeInputIDs[M adk.MessageType](
 	input *adk.TypedAgentInput[M],
-	signals []*task.Input,
+	signals []*task.InputRecord,
 ) {
 	if input == nil {
 		return
@@ -1750,7 +1779,9 @@ func decodeRuntimeMetadata(data []byte) (*runtimeMetadata, error) {
 	}
 	if metadata.Version != runtimeMetadataVersion || metadata.ParentSessionID == "" ||
 		metadata.RootSessionID == "" ||
-		metadata.ChildSessionID == "" || metadata.AgentName == "" {
+		metadata.ChildSessionID == "" || metadata.AgentName == "" ||
+		(metadata.StartMode != task.StartModeForeground &&
+			metadata.StartMode != task.StartModeBackground) {
 		return nil, errors.New("task/subagent: invalid runtime metadata")
 	}
 	return &metadata, nil

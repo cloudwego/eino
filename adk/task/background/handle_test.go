@@ -51,7 +51,7 @@ func TestHandleImplementsOwnerNeutralTaskOperations(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, store.AdvanceCursor(ctx, &taskcore.AdvanceCursorRequest{
 		TaskID: created.Spec.ID, ExpectedCursor: 0,
-		Cursor: inputs.LatestSequence, ExpectedGeneration: inputs.OwnerGeneration,
+		Cursor: inputs.LatestSequence, ExpectedGeneration: inputs.Generation,
 		Attempt: started.Attempt,
 	}))
 	completed, err := store.CompleteIfNoInputs(ctx, &CompleteIfNoInputsRequest{

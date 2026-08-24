@@ -248,7 +248,7 @@ func newControllerWithAgentForTest(
 
 func testEventMapper(
 	context.Context,
-	[]*task.Input,
+	[]*task.InputRecord,
 ) (*adk.AgentInput, error) {
 	return &adk.AgentInput{
 		Messages: []*schema.Message{schema.UserMessage("background event")},
@@ -272,29 +272,36 @@ func TestControllerForegroundCompletesWithoutBackgroundRecord(t *testing.T) {
 		AgentName: "worker", Input: &adk.AgentInput{
 			Messages: []*schema.Message{schema.UserMessage("work")},
 		},
-		Mode: task.ModeForeground,
+		StartMode: task.StartModeForeground,
 	}
 	handle, err := runtime.Start(ctx, request)
 	require.NoError(t, err)
-	result, err := runtime.Wait(ctx, handle.TaskID)
+	result, err := runtime.Wait(ctx, handle.ID())
 	require.NoError(t, err)
 	require.Equal(t, "done", result.FinalMessage.Content)
-	_, err = manager.Get(ctx, handle.TaskID)
+	_, err = manager.Get(ctx, handle.ID())
 	require.ErrorIs(t, err, background.ErrNotFound)
-	mailbox, err := manager.GetMailbox(ctx, handle.TaskID)
+	mailbox, err := manager.GetMailbox(ctx, handle.ID())
 	require.NoError(t, err)
 	require.Equal(t, task.MailboxSealed, mailbox.State)
 	events, err := sessionStore.LoadEvents(
-		ctx, handle.ChildSessionID, &adk.LoadSessionEventsRequest{},
+		ctx, handle.ChildSessionID(), &adk.LoadSessionEventsRequest{},
 	)
 	require.NoError(t, err)
 	require.NotEmpty(t, events.Events)
 	replayedHandle, err := runtime.Start(ctx, request)
 	require.NoError(t, err)
-	require.Equal(t, handle.TaskID, replayedHandle.TaskID)
-	replayed, err := runtime.Wait(ctx, replayedHandle.TaskID)
+	require.Equal(t, handle.ID(), replayedHandle.ID())
+	replayed, err := runtime.Wait(ctx, replayedHandle.ID())
 	require.NoError(t, err)
 	require.Equal(t, "done", replayed.FinalMessage.Content)
+	restoredHandle, err := runtime.Handle(ctx, handle.ID())
+	require.NoError(t, err)
+	require.Equal(t, handle.ID(), restoredHandle.ID())
+	require.Equal(t, handle.ChildSessionID(), restoredHandle.ChildSessionID())
+	outcome, err := restoredHandle.Wait(ctx)
+	require.NoError(t, err)
+	require.Equal(t, task.OutcomeCompleted, outcome.Status)
 }
 
 func TestAttack_InactiveForegroundNotificationSurvivesReplay(t *testing.T) {
@@ -317,7 +324,7 @@ func TestAttack_InactiveForegroundNotificationSurvivesReplay(t *testing.T) {
 	metadata, err := json.Marshal(&runtimeMetadata{
 		Version: runtimeMetadataVersion, ParentSessionID: "parent",
 		RootSessionID: "parent", ChildSessionID: "persistent-child",
-		AgentName: "worker", Mode: task.ModeForeground, InputHash: inputHash,
+		AgentName: "worker", StartMode: task.StartModeForeground, InputHash: inputHash,
 	})
 	require.NoError(t, err)
 	_, err = manager.RegisterMailbox(ctx, &task.RegisterMailboxRequest{
@@ -331,27 +338,33 @@ func TestAttack_InactiveForegroundNotificationSurvivesReplay(t *testing.T) {
 	initialData, err := json.Marshal(encoded)
 	require.NoError(t, err)
 	_, err = manager.SendInput(ctx, &task.SendInputRequest{
-		TaskID: "orphaned-foreground", EventID: "parent:orphaned:initial",
-		Kind: initialSignalKind, Data: initialData,
+		TaskID: "orphaned-foreground",
+		Input: task.Input{
+			EventID: "parent:orphaned:initial",
+			Kind:    initialSignalKind, Data: initialData,
+		},
 	})
 	require.NoError(t, err)
 	_, err = manager.SendInput(ctx, &task.SendInputRequest{
-		TaskID: "orphaned-foreground", EventID: "notification",
-		Kind: "child.completed", Data: []byte("child"),
+		TaskID: "orphaned-foreground",
+		Input: task.Input{
+			EventID: "notification",
+			Kind:    "child.completed", Data: []byte("child"),
+		},
 	})
 	require.NoError(t, err)
 
 	handle, err := runtime.Start(ctx, &StartRequest[*schema.Message]{
 		InvocationID: "parent:orphaned", ParentSessionID: "parent",
 		ChildSessionID: "persistent-child", AgentName: "worker",
-		Input: input, Mode: task.ModeForeground,
+		Input: input, StartMode: task.StartModeForeground,
 	})
 	require.NoError(t, err)
-	require.Equal(t, "orphaned-foreground", handle.TaskID)
-	result, err := runtime.Wait(ctx, handle.TaskID)
+	require.Equal(t, "orphaned-foreground", handle.ID())
+	result, err := runtime.Wait(ctx, handle.ID())
 	require.NoError(t, err)
 	require.Equal(t, "done", result.FinalMessage.Content)
-	mailbox, err := manager.GetMailbox(ctx, handle.TaskID)
+	mailbox, err := manager.GetMailbox(ctx, handle.ID())
 	require.NoError(t, err)
 	require.Equal(t, int64(2), mailbox.ConsumedCursor)
 	require.Equal(t, task.MailboxSealed, mailbox.State)
@@ -377,7 +390,7 @@ func TestAttack_ForegroundTerminalCandidateSealsWithoutReplay(t *testing.T) {
 	metadata, err := json.Marshal(&runtimeMetadata{
 		Version: runtimeMetadataVersion, ParentSessionID: "parent",
 		RootSessionID: "parent", ChildSessionID: "persistent-child",
-		AgentName: "worker", Mode: task.ModeForeground, InputHash: inputHash,
+		AgentName: "worker", StartMode: task.StartModeForeground, InputHash: inputHash,
 	})
 	require.NoError(t, err)
 	registered, err := manager.RegisterMailbox(ctx, &task.RegisterMailboxRequest{
@@ -391,8 +404,11 @@ func TestAttack_ForegroundTerminalCandidateSealsWithoutReplay(t *testing.T) {
 	initialData, err := json.Marshal(encoded)
 	require.NoError(t, err)
 	_, err = manager.SendInput(ctx, &task.SendInputRequest{
-		TaskID: registered.Mailbox.TaskID, EventID: "parent:candidate:initial",
-		Kind: initialSignalKind, Data: initialData,
+		TaskID: registered.Mailbox.TaskID,
+		Input: task.Input{
+			EventID: "parent:candidate:initial",
+			Kind:    initialSignalKind, Data: initialData,
+		},
 	})
 	require.NoError(t, err)
 	require.NoError(t, manager.AdvanceInputCursor(ctx, &task.AdvanceCursorRequest{
@@ -415,13 +431,13 @@ func TestAttack_ForegroundTerminalCandidateSealsWithoutReplay(t *testing.T) {
 	handle, err := runtime.Start(ctx, &StartRequest[*schema.Message]{
 		InvocationID: "parent:candidate", ParentSessionID: "parent",
 		ChildSessionID: "persistent-child", AgentName: "worker",
-		Input: input, Mode: task.ModeForeground,
+		Input: input, StartMode: task.StartModeForeground,
 	})
 	require.NoError(t, err)
-	result, err := runtime.Wait(ctx, handle.TaskID)
+	result, err := runtime.Wait(ctx, handle.ID())
 	require.NoError(t, err)
 	require.Equal(t, "candidate", result.FinalMessage.Content)
-	mailbox, err := manager.GetMailbox(ctx, handle.TaskID)
+	mailbox, err := manager.GetMailbox(ctx, handle.ID())
 	require.NoError(t, err)
 	require.Equal(t, task.MailboxSealed, mailbox.State)
 }
@@ -444,36 +460,36 @@ func TestAttack_ForegroundFailureIsReplayableAndReleasesSession(t *testing.T) {
 		Input: &adk.AgentInput{
 			Messages: []*schema.Message{schema.UserMessage("work")},
 		},
-		Mode: task.ModeForeground,
+		StartMode: task.StartModeForeground,
 	}
 	handle, err := runtime.Start(ctx, request)
 	require.NoError(t, err)
-	_, err = runtime.Wait(ctx, handle.TaskID)
+	_, err = runtime.Wait(ctx, handle.ID())
 	require.EqualError(t, err, "barrier failed")
 	outcome, err := handle.Wait(ctx)
 	require.NoError(t, err)
 	require.Equal(t, task.OutcomeFailed, outcome.Status)
 	require.Equal(t, "barrier failed", outcome.Error)
-	mailbox, err := manager.GetMailbox(ctx, handle.TaskID)
+	mailbox, err := manager.GetMailbox(ctx, handle.ID())
 	require.NoError(t, err)
 	require.Equal(t, task.MailboxSealed, mailbox.State)
 
 	replayed, err := runtime.Start(ctx, request)
 	require.NoError(t, err)
-	require.Equal(t, handle.TaskID, replayed.TaskID)
-	_, err = runtime.Wait(ctx, replayed.TaskID)
+	require.Equal(t, handle.ID(), replayed.ID())
+	_, err = runtime.Wait(ctx, replayed.ID())
 	require.EqualError(t, err, "barrier failed")
 
 	next, err := runtime.Start(ctx, &StartRequest[*schema.Message]{
 		InvocationID: "parent:next", ParentSessionID: "parent",
-		ChildSessionID: handle.ChildSessionID, AgentName: "worker",
+		ChildSessionID: handle.ChildSessionID(), AgentName: "worker",
 		Input: &adk.AgentInput{
 			Messages: []*schema.Message{schema.UserMessage("next")},
 		},
-		Mode: task.ModeForeground,
+		StartMode: task.StartModeForeground,
 	})
 	require.NoError(t, err)
-	require.NotEqual(t, handle.TaskID, next.TaskID)
+	require.NotEqual(t, handle.ID(), next.ID())
 }
 
 func TestAttack_InactiveForegroundCancelSealsMailbox(t *testing.T) {
@@ -499,7 +515,7 @@ func TestAttack_InactiveForegroundCancelSealsMailbox(t *testing.T) {
 	metadata, err := json.Marshal(&runtimeMetadata{
 		Version: runtimeMetadataVersion, ParentSessionID: "parent",
 		RootSessionID: "parent", ChildSessionID: "child",
-		AgentName: "worker", Mode: task.ModeForeground,
+		AgentName: "worker", StartMode: task.StartModeForeground,
 	})
 	require.NoError(t, err)
 	registered, err := manager.RegisterMailbox(ctx, &task.RegisterMailboxRequest{
@@ -507,20 +523,17 @@ func TestAttack_InactiveForegroundCancelSealsMailbox(t *testing.T) {
 		Identity: metadata, RootSessionID: "parent", ChildSessionID: "child",
 	})
 	require.NoError(t, err)
-	handle := &Handle{
-		TaskID: registered.Mailbox.TaskID, ChildSessionID: "child",
-	}
-	runtime.bindHandle(handle)
+	handle := runtime.newHandle(registered.Mailbox.TaskID, "child")
 	require.NoError(t, handle.Cancel(ctx, "operator canceled"))
 	require.Equal(t, "operator canceled", reason)
-	mailbox, err := manager.GetMailbox(ctx, handle.TaskID)
+	mailbox, err := manager.GetMailbox(ctx, handle.ID())
 	require.NoError(t, err)
 	require.Equal(t, task.MailboxSealed, mailbox.State)
 	outcome, err := handle.Wait(ctx)
 	require.NoError(t, err)
 	require.Equal(t, task.OutcomeCanceled, outcome.Status)
 	require.Equal(t, "operator canceled", outcome.Error)
-	_, err = runtime.Wait(ctx, handle.TaskID)
+	_, err = runtime.Wait(ctx, handle.ID())
 	require.EqualError(t, err, "operator canceled")
 }
 
@@ -541,13 +554,13 @@ func TestControllerBackgroundCompletes(t *testing.T) {
 		AgentName: "worker", Input: &adk.AgentInput{
 			Messages: []*schema.Message{schema.UserMessage("work")},
 		},
-		Mode: task.ModeBackground,
+		StartMode: task.StartModeBackground,
 	})
 	require.NoError(t, err)
-	result, err := runtime.Wait(ctx, handle.TaskID)
+	result, err := runtime.Wait(ctx, handle.ID())
 	require.NoError(t, err)
 	require.Equal(t, "done", result.FinalMessage.Content)
-	replayed, err := runtime.Wait(ctx, handle.TaskID)
+	replayed, err := runtime.Wait(ctx, handle.ID())
 	require.NoError(t, err)
 	require.Equal(t, "done", replayed.FinalMessage.Content)
 }
@@ -567,14 +580,14 @@ func TestControllerForegroundInterruptResumesFromMailbox(t *testing.T) {
 	)
 	request := &StartRequest[*schema.Message]{
 		InvocationID: "parent:interrupt", ParentSessionID: "parent",
-		AgentName: "worker", Mode: task.ModeForeground,
+		AgentName: "worker", StartMode: task.StartModeForeground,
 		Input: &adk.AgentInput{
 			Messages: []*schema.Message{schema.UserMessage("work")},
 		},
 	}
 	handle, err := runtime.Start(ctx, request)
 	require.NoError(t, err)
-	first, err := runtime.Wait(ctx, handle.TaskID)
+	first, err := runtime.Wait(ctx, handle.ID())
 	require.NoError(t, err)
 	require.NotNil(t, first.Interrupted)
 	targets := make(map[string]any)
@@ -583,13 +596,13 @@ func TestControllerForegroundInterruptResumesFromMailbox(t *testing.T) {
 	}
 	data, err := json.Marshal(targets)
 	require.NoError(t, err)
-	require.NoError(t, runtime.SendInput(ctx, handle.TaskID, &task.Input{
+	require.NoError(t, runtime.SendInput(ctx, handle.ID(), &task.Input{
 		EventID: "resume", Kind: ResumeInputKind, Data: data,
 	}))
 	replayed, err := runtime.Start(ctx, request)
 	require.NoError(t, err)
-	require.Equal(t, handle.TaskID, replayed.TaskID)
-	second, err := runtime.Wait(ctx, handle.TaskID)
+	require.Equal(t, handle.ID(), replayed.ID())
+	second, err := runtime.Wait(ctx, handle.ID())
 	require.NoError(t, err)
 	require.Nil(t, second.Interrupted)
 	require.Equal(t, "approved", second.FinalMessage.Content)
@@ -610,21 +623,21 @@ func TestAttack_BackgroundInterruptResumeWakesTask(t *testing.T) {
 	)
 	handle, err := runtime.Start(ctx, &StartRequest[*schema.Message]{
 		InvocationID: "parent:background-interrupt", ParentSessionID: "parent",
-		AgentName: "worker", Mode: task.ModeBackground,
+		AgentName: "worker", StartMode: task.StartModeBackground,
 		Input: &adk.AgentInput{
 			Messages: []*schema.Message{schema.UserMessage("work")},
 		},
 	})
 	require.NoError(t, err)
 	require.Eventually(t, func() bool {
-		backgroundTask, getErr := manager.Get(ctx, handle.TaskID)
+		backgroundTask, getErr := manager.Get(ctx, handle.ID())
 		return getErr == nil && backgroundTask.Status == background.StatusWaitingInput
 	}, time.Second, time.Millisecond)
-	require.NoError(t, runtime.SendInput(ctx, handle.TaskID, &task.Input{
+	require.NoError(t, runtime.SendInput(ctx, handle.ID(), &task.Input{
 		EventID: "resume", Kind: ResumeInputKind,
 		Data: []byte(`{"approve":"yes"}`),
 	}))
-	result, err := runtime.Wait(ctx, handle.TaskID)
+	result, err := runtime.Wait(ctx, handle.ID())
 	require.NoError(t, err)
 	require.Equal(t, "approved", result.FinalMessage.Content)
 }
@@ -644,25 +657,25 @@ func TestAttack_MultipleResumeInputsFailClosed(t *testing.T) {
 	)
 	request := &StartRequest[*schema.Message]{
 		InvocationID: "parent:ambiguous-resume", ParentSessionID: "parent",
-		AgentName: "worker", Mode: task.ModeForeground,
+		AgentName: "worker", StartMode: task.StartModeForeground,
 		Input: &adk.AgentInput{
 			Messages: []*schema.Message{schema.UserMessage("work")},
 		},
 	}
 	handle, err := runtime.Start(ctx, request)
 	require.NoError(t, err)
-	result, err := runtime.Wait(ctx, handle.TaskID)
+	result, err := runtime.Wait(ctx, handle.ID())
 	require.NoError(t, err)
 	require.NotNil(t, result.Interrupted)
 	for _, eventID := range []string{"resume-1", "resume-2"} {
-		require.NoError(t, runtime.SendInput(ctx, handle.TaskID, &task.Input{
+		require.NoError(t, runtime.SendInput(ctx, handle.ID(), &task.Input{
 			EventID: eventID, Kind: ResumeInputKind,
 			Data: []byte(`{"approve":true}`),
 		}))
 	}
 	_, err = runtime.Start(ctx, request)
 	require.NoError(t, err)
-	_, err = runtime.Wait(ctx, handle.TaskID)
+	_, err = runtime.Wait(ctx, handle.ID())
 	require.ErrorContains(t, err, "multiple resume")
 }
 
@@ -687,23 +700,23 @@ func TestControllerBarrierWaitThenInput(t *testing.T) {
 		AgentName: "worker", Input: &adk.AgentInput{
 			Messages: []*schema.Message{schema.UserMessage("work")},
 		},
-		Mode: task.ModeForeground,
+		StartMode: task.StartModeForeground,
 	})
 	require.NoError(t, err)
 	require.Eventually(t, func() bool {
-		backgroundTask, getErr := manager.Get(ctx, handle.TaskID)
+		backgroundTask, getErr := manager.Get(ctx, handle.ID())
 		return getErr == nil && backgroundTask.Status == background.StatusSuspended
 	}, 3*time.Second, 10*time.Millisecond)
 	sent, err := runtime.Continue(ctx, &ContinueRequest[*schema.Message]{
-		ChildSessionID: handle.ChildSessionID,
+		ChildSessionID: handle.ChildSessionID(),
 		InvocationID:   "parent:wait:send",
 		Input: &adk.AgentInput{
 			Messages: []*schema.Message{schema.UserMessage("continue")},
 		},
 	})
 	require.NoError(t, err)
-	require.Equal(t, handle.TaskID, sent.TaskID)
-	result, err := runtime.Wait(ctx, handle.TaskID)
+	require.Equal(t, handle.ID(), sent.ID())
+	result, err := runtime.Wait(ctx, handle.ID())
 	require.NoError(t, err)
 	require.Equal(t, "done", result.FinalMessage.Content)
 }
@@ -726,7 +739,7 @@ func TestAttack_CancelRacingForegroundHandoffCancelsNewBackgroundTask(t *testing
 	)
 	handle, err := runtime.Start(ctx, &StartRequest[*schema.Message]{
 		InvocationID: "parent:cancel-handoff", ParentSessionID: "parent",
-		AgentName: "worker", Mode: task.ModeForeground,
+		AgentName: "worker", StartMode: task.StartModeForeground,
 		Input: &adk.AgentInput{
 			Messages: []*schema.Message{schema.UserMessage("work")},
 		},
@@ -736,7 +749,7 @@ func TestAttack_CancelRacingForegroundHandoffCancelsNewBackgroundTask(t *testing
 	require.NoError(t, handle.Cancel(ctx, "cancel"))
 	close(releaseBarrier)
 	require.Eventually(t, func() bool {
-		backgroundTask, getErr := manager.Get(ctx, handle.TaskID)
+		backgroundTask, getErr := manager.Get(ctx, handle.ID())
 		return getErr == nil && backgroundTask.Status == background.StatusCanceled
 	}, time.Second, time.Millisecond)
 	outcome, err := handle.Wait(ctx)
@@ -766,11 +779,11 @@ func TestContinueCreatesNewTaskInPersistentChildSession(t *testing.T) {
 		IfIdle: &StartOptions[*schema.Message]{
 			ParentSessionID: "parent",
 			AgentName:       "worker",
-			Mode:            task.ModeForeground,
+			StartMode:       task.StartModeForeground,
 		},
 	})
 	require.NoError(t, err)
-	_, err = runtime.Wait(ctx, first.TaskID)
+	_, err = runtime.Wait(ctx, first.ID())
 	require.NoError(t, err)
 	second, err := runtime.Continue(ctx, &ContinueRequest[*schema.Message]{
 		ChildSessionID: childSessionID,
@@ -781,13 +794,13 @@ func TestContinueCreatesNewTaskInPersistentChildSession(t *testing.T) {
 		IfIdle: &StartOptions[*schema.Message]{
 			ParentSessionID: "parent",
 			AgentName:       "worker",
-			Mode:            task.ModeForeground,
+			StartMode:       task.StartModeForeground,
 		},
 	})
 	require.NoError(t, err)
-	require.NotEqual(t, first.TaskID, second.TaskID)
-	require.Equal(t, first.ChildSessionID, second.ChildSessionID)
-	_, err = runtime.Wait(ctx, second.TaskID)
+	require.NotEqual(t, first.ID(), second.ID())
+	require.Equal(t, first.ChildSessionID(), second.ChildSessionID())
+	_, err = runtime.Wait(ctx, second.ID())
 	require.NoError(t, err)
 	events, err := sessionStore.LoadEvents(
 		ctx,
@@ -837,20 +850,20 @@ func TestNestedSubAgentMailboxUsesDirectParent(t *testing.T) {
 	})
 	require.NoError(t, err)
 	ctx = task.WithExecutionContext(ctx, task.ExecutionContext{
-		TaskID: parent.Mailbox.TaskID, Mode: task.ModeForeground,
-		OwnerEpoch: parent.Mailbox.Generation, RootSessionID: "root-session",
+		TaskID: parent.Mailbox.TaskID, Owner: task.OwnerParent,
+		Generation: parent.Mailbox.Generation, RootSessionID: "root-session",
 	})
 	child, err := runtime.Start(ctx, &StartRequest[*schema.Message]{
 		InvocationID: "parent-task:child", ParentSessionID: "parent-child-session",
-		AgentName: "worker", Mode: task.ModeForeground,
+		AgentName: "worker", StartMode: task.StartModeForeground,
 		Input: &adk.AgentInput{
 			Messages: []*schema.Message{schema.UserMessage("work")},
 		},
 	})
 	require.NoError(t, err)
-	_, err = runtime.Wait(ctx, child.TaskID)
+	_, err = runtime.Wait(ctx, child.ID())
 	require.NoError(t, err)
-	mailbox, err := manager.GetMailbox(ctx, child.TaskID)
+	mailbox, err := manager.GetMailbox(ctx, child.ID())
 	require.NoError(t, err)
 	require.Equal(t, parent.Mailbox.TaskID, mailbox.ParentTaskID)
 	require.Equal(t, "root-session", mailbox.RootSessionID)
@@ -884,11 +897,11 @@ func TestForegroundInputCanPreemptActiveTurn(t *testing.T) {
 		SessionStore: sessionStore, CheckPointStore: sessionStore,
 		InputPreemptPolicy: func(
 			context.Context,
-			*task.Input,
-			*adk.TurnContext[*task.Input, *schema.Message],
-		) []adk.PushOption[*task.Input, *schema.Message] {
-			return []adk.PushOption[*task.Input, *schema.Message]{
-				adk.WithPreemptTimeout[*task.Input, *schema.Message](
+			*task.InputRecord,
+			*adk.TurnContext[*task.InputRecord, *schema.Message],
+		) []adk.PushOption[*task.InputRecord, *schema.Message] {
+			return []adk.PushOption[*task.InputRecord, *schema.Message]{
+				adk.WithPreemptTimeout[*task.InputRecord, *schema.Message](
 					adk.AnySafePoint,
 					20*time.Millisecond,
 				),
@@ -902,17 +915,17 @@ func TestForegroundInputCanPreemptActiveTurn(t *testing.T) {
 	))
 	handle, err := runtime.Start(ctx, &StartRequest[*schema.Message]{
 		InvocationID: "parent:preempt", ParentSessionID: "parent",
-		AgentName: "worker", Mode: task.ModeForeground,
+		AgentName: "worker", StartMode: task.StartModeForeground,
 		Input: &adk.AgentInput{
 			Messages: []*schema.Message{schema.UserMessage("slow")},
 		},
 	})
 	require.NoError(t, err)
 	<-model.started
-	require.NoError(t, runtime.SendInput(ctx, handle.TaskID, &task.Input{
+	require.NoError(t, runtime.SendInput(ctx, handle.ID(), &task.Input{
 		EventID: "urgent", Kind: "external", Delivery: task.InputPreempt,
 	}))
-	result, err := runtime.Wait(ctx, handle.TaskID)
+	result, err := runtime.Wait(ctx, handle.ID())
 	require.NoError(t, err)
 	require.Equal(t, "preempted", result.FinalMessage.Content)
 	require.Equal(t, int64(2), model.runs.Load())
@@ -938,17 +951,17 @@ func TestAttack_ReplayIdentityIgnoresFrameworkMessageID(t *testing.T) {
 		}
 		return &StartRequest[*schema.Message]{
 			InvocationID: "parent:identity", ParentSessionID: "parent",
-			AgentName: "worker", Mode: task.ModeForeground,
+			AgentName: "worker", StartMode: task.StartModeForeground,
 			Input: &adk.AgentInput{Messages: []*schema.Message{message}},
 		}
 	}
 	first, err := runtime.Start(ctx, request("generated-1", "tenant-a"))
 	require.NoError(t, err)
-	_, err = runtime.Wait(ctx, first.TaskID)
+	_, err = runtime.Wait(ctx, first.ID())
 	require.NoError(t, err)
 	replayed, err := runtime.Start(ctx, request("generated-2", "tenant-a"))
 	require.NoError(t, err)
-	require.Equal(t, first.TaskID, replayed.TaskID)
+	require.Equal(t, first.ID(), replayed.ID())
 	_, err = runtime.Start(ctx, request("generated-3", "tenant-b"))
 	require.ErrorIs(t, err, task.ErrMailboxIdentityConflict)
 }
@@ -970,7 +983,7 @@ func TestControllerValidationAndContextHelpers(t *testing.T) {
 	require.Error(t, err)
 	_, err = runtime.Start(context.Background(), &StartRequest[*schema.Message]{
 		InvocationID: "invalid-mode", ParentSessionID: "parent",
-		AgentName: "worker", Mode: task.Mode(99),
+		AgentName: "worker", StartMode: task.StartMode(99),
 		Input: &adk.AgentInput{
 			Messages: []*schema.Message{schema.UserMessage("work")},
 		},
@@ -979,7 +992,7 @@ func TestControllerValidationAndContextHelpers(t *testing.T) {
 	_, err = runtime.Start(context.Background(), &StartRequest[*schema.Message]{
 		InvocationID: "oversized", ParentSessionID: "parent",
 		ChildSessionID: string(make([]byte, maxChildSessionIDLength+1)),
-		AgentName:      "worker", Mode: task.ModeForeground,
+		AgentName:      "worker", StartMode: task.StartModeForeground,
 		Input: &adk.AgentInput{
 			Messages: []*schema.Message{schema.UserMessage("work")},
 		},
@@ -1017,13 +1030,13 @@ func TestControllerRejectsInvalidCompletionAndMissingFinal(t *testing.T) {
 	)
 	handle, err := runtime.Start(ctx, &StartRequest[*schema.Message]{
 		InvocationID: "invalid-completion", ParentSessionID: "parent",
-		AgentName: "worker", Mode: task.ModeForeground,
+		AgentName: "worker", StartMode: task.StartModeForeground,
 		Input: &adk.AgentInput{
 			Messages: []*schema.Message{schema.UserMessage("work")},
 		},
 	})
 	require.NoError(t, err)
-	_, err = runtime.Wait(ctx, handle.TaskID)
+	_, err = runtime.Wait(ctx, handle.ID())
 	require.ErrorContains(t, err, "invalid completion decision")
 
 	emptyRuntime, _, _ := newControllerWithAgentForTest(
@@ -1039,13 +1052,13 @@ func TestControllerRejectsInvalidCompletionAndMissingFinal(t *testing.T) {
 	)
 	empty, err := emptyRuntime.Start(ctx, &StartRequest[*schema.Message]{
 		InvocationID: "missing-final", ParentSessionID: "parent",
-		AgentName: "empty", Mode: task.ModeForeground,
+		AgentName: "empty", StartMode: task.StartModeForeground,
 		Input: &adk.AgentInput{
 			Messages: []*schema.Message{schema.UserMessage("work")},
 		},
 	})
 	require.NoError(t, err)
-	_, err = emptyRuntime.Wait(ctx, empty.TaskID)
+	_, err = emptyRuntime.Wait(ctx, empty.ID())
 	require.ErrorContains(t, err, "runtime final message is required")
 }
 
@@ -1079,16 +1092,16 @@ func TestAttack_StartHonorsStreamingAndTerminalCancelIsIdempotent(t *testing.T) 
 	})
 	handle, err := runtime.Start(ctx, &StartRequest[*schema.Message]{
 		InvocationID: "streaming", ParentSessionID: "parent",
-		AgentName: "worker", Mode: task.ModeBackground, EnableStreaming: true,
+		AgentName: "worker", StartMode: task.StartModeBackground, EnableStreaming: true,
 		Input: &adk.AgentInput{
 			Messages: []*schema.Message{schema.UserMessage("work")},
 		},
 	})
 	require.NoError(t, err)
-	_, err = runtime.Wait(ctx, handle.TaskID)
+	_, err = runtime.Wait(ctx, handle.ID())
 	require.NoError(t, err)
 	require.True(t, <-streaming)
-	require.NoError(t, runtime.Cancel(ctx, handle.TaskID))
+	require.NoError(t, runtime.Cancel(ctx, handle.ID()))
 	require.Zero(t, canceled.Load())
 }
 
@@ -1107,15 +1120,15 @@ func TestAttack_BackgroundAgentErrorIsDurablyFailed(t *testing.T) {
 	)
 	handle, err := runtime.Start(ctx, &StartRequest[*schema.Message]{
 		InvocationID: "background-error", ParentSessionID: "parent",
-		AgentName: "worker", Mode: task.ModeBackground,
+		AgentName: "worker", StartMode: task.StartModeBackground,
 		Input: &adk.AgentInput{
 			Messages: []*schema.Message{schema.UserMessage("work")},
 		},
 	})
 	require.NoError(t, err)
-	_, err = runtime.Wait(ctx, handle.TaskID)
+	_, err = runtime.Wait(ctx, handle.ID())
 	require.ErrorContains(t, err, "agent failed")
-	failed, err := manager.Get(ctx, handle.TaskID)
+	failed, err := manager.Get(ctx, handle.ID())
 	require.NoError(t, err)
 	require.Equal(t, background.StatusFailed, failed.Status)
 	require.Contains(t, failed.ResultError, "agent failed")

@@ -51,8 +51,8 @@ type memoryActiveAttempt struct {
 
 type memoryMailbox struct {
 	mailbox *taskcore.Mailbox
-	inputs  []*taskcore.Input
-	byID    map[string]*taskcore.Input
+	inputs  []*taskcore.InputRecord
+	byID    map[string]*taskcore.InputRecord
 }
 
 type mailboxInvocationKey struct {
@@ -180,11 +180,11 @@ func (s *InMemoryStore) Create(_ context.Context, req *CreateTaskRequest) (*Task
 	mailbox := &taskcore.Mailbox{
 		TaskID: spec.ID, InvocationID: "background:" + spec.ID,
 		Identity: cloneBytes(spec.Payload), ParentTaskID: spec.ParentTaskID,
-		RootSessionID: spec.SessionID, State: taskcore.MailboxBackground,
+		RootSessionID: spec.RootSessionID, State: taskcore.MailboxBackground,
 		Generation: 1,
 	}
 	s.mailboxes[spec.ID] = &memoryMailbox{
-		mailbox: mailbox, byID: make(map[string]*taskcore.Input),
+		mailbox: mailbox, byID: make(map[string]*taskcore.InputRecord),
 	}
 	s.mailboxInvocations[mailboxInvocationKey{
 		rootSessionID: mailbox.RootSessionID,
@@ -495,7 +495,7 @@ func (s *InMemoryStore) EnqueueTaskNotification(
 		return err
 	}
 	task := s.tasks[taskID]
-	if task.Spec.ParentTaskID == "" && task.Spec.SessionID == "" {
+	if task.Spec.ParentTaskID == "" && task.Spec.RootSessionID == "" {
 		return ErrNotificationUnavailable
 	}
 	keyed := s.customNotifications[taskID]
@@ -508,7 +508,7 @@ func (s *InMemoryStore) EnqueueTaskNotification(
 	}
 	record := Notification{
 		ID:     customNotificationID(taskID, req.EventID),
-		TaskID: taskID, SessionID: task.Spec.SessionID,
+		TaskID: taskID, SessionID: task.Spec.RootSessionID,
 		Version: task.Version, Kind: req.Kind,
 		Data: cloneBytes(req.Data), Delivery: req.Delivery, CreatedAt: s.now(),
 	}
@@ -989,13 +989,13 @@ func (s *InMemoryStore) enqueueLocked(t *TaskSnapshot, kind NotificationKind) *N
 		}
 		return nil
 	}
-	if t.Spec.SessionID == "" {
+	if t.Spec.RootSessionID == "" {
 		return nil
 	}
 	n := &Notification{
 		ID:        fmt.Sprintf("%s:%d:%s", t.Spec.ID, t.Version, kind),
 		TaskID:    t.Spec.ID,
-		SessionID: t.Spec.SessionID,
+		SessionID: t.Spec.RootSessionID,
 		Version:   t.Version,
 		Kind:      kind, CreatedAt: s.now(),
 	}
@@ -1009,7 +1009,7 @@ func (s *InMemoryStore) enqueueParentInputLocked(
 	kind string,
 	data []byte,
 	delivery taskcore.InputDelivery,
-) (*taskcore.Input, error) {
+) (*taskcore.InputRecord, error) {
 	parent := s.mailboxes[child.Spec.ParentTaskID]
 	if parent == nil {
 		return nil, taskcore.ErrMailboxNotFound
@@ -1025,11 +1025,13 @@ func (s *InMemoryStore) enqueueParentInputLocked(
 		return existing, nil
 	}
 	parent.mailbox.LatestSequence++
-	input := &taskcore.Input{
-		TaskID:   child.Spec.ParentTaskID,
-		Sequence: parent.mailbox.LatestSequence,
-		EventID:  eventID, Kind: kind, Data: cloneBytes(data),
-		Delivery: delivery, CreatedAt: s.now(),
+	input := &taskcore.InputRecord{
+		TaskID: child.Spec.ParentTaskID, Sequence: parent.mailbox.LatestSequence,
+		Input: taskcore.Input{
+			EventID: eventID, Kind: kind, Data: cloneBytes(data),
+			Delivery: delivery,
+		},
+		CreatedAt: s.now(),
 	}
 	parent.inputs = append(parent.inputs, input)
 	parent.byID[eventID] = input

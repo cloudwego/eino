@@ -46,12 +46,12 @@ type Spec struct {
 	Description  string
 	OutputFile   string
 	ParentTaskID string
-	// SessionID is an optional session notification target. It is routing
+	// RootSessionID is an optional session notification target. It is routing
 	// metadata, not the task's execution identity and not necessarily the
 	// session of an agent executing the task.
-	SessionID string
+	RootSessionID string
 	// NotifySession enables waiting and terminal lifecycle notifications when
-	// SessionID is non-empty. Tasks do not otherwise require a session.
+	// RootSessionID is non-empty. Tasks do not otherwise require a session.
 	NotifySession bool
 }
 

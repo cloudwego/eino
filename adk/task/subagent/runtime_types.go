@@ -37,15 +37,15 @@ type StartRequest[M adk.MessageType] struct {
 	AgentName       string
 	Description     string
 	Input           *adk.TypedAgentInput[M]
-	Mode            task.Mode
+	StartMode       task.StartMode
 	EnableStreaming bool
 	OnEvent         func(*adk.TypedAgentEvent[M])
 }
 
 // Handle identifies one finite task and its persistent child session.
 type Handle struct {
-	TaskID         string
-	ChildSessionID string
+	taskID         string
+	childSessionID string
 	sendInput      func(context.Context, *task.Input) error
 	wait           func(context.Context) (*task.Outcome, error)
 	cancel         func(context.Context, string) error
@@ -56,7 +56,15 @@ func (h *Handle) ID() string {
 	if h == nil {
 		return ""
 	}
-	return h.TaskID
+	return h.taskID
+}
+
+// ChildSessionID returns the persistent child session associated with the task.
+func (h *Handle) ChildSessionID() string {
+	if h == nil {
+		return ""
+	}
+	return h.childSessionID
 }
 
 // SendInput implements task.Handle.
@@ -99,7 +107,7 @@ type StartOptions[M adk.MessageType] struct {
 	ParentTaskID    string
 	AgentName       string
 	Description     string
-	Mode            task.Mode
+	StartMode       task.StartMode
 	EnableStreaming bool
 	OnEvent         func(*adk.TypedAgentEvent[M])
 }
@@ -145,9 +153,9 @@ type LifecycleHook interface {
 // result safely downgrades the input to queued delivery.
 type InputPreemptPolicy[M adk.MessageType] func(
 	context.Context,
-	*task.Input,
-	*adk.TurnContext[*task.Input, M],
-) []adk.PushOption[*task.Input, M]
+	*task.InputRecord,
+	*adk.TurnContext[*task.InputRecord, M],
+) []adk.PushOption[*task.InputRecord, M]
 
 type runtimeContextKey struct{}
 

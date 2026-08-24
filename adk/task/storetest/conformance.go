@@ -317,7 +317,7 @@ func RunNotificationOutboxConformance(t *testing.T, config NotificationOutboxCon
 	require.NotNil(t, config.ExpireLease)
 	tasks, outbox := config.New(t)
 	spec := testSpec("notification")
-	spec.SessionID = "session"
+	spec.RootSessionID = "session"
 	create(t, tasks, spec, background.LeaseExpiryRetry)
 	lease := 20 * time.Millisecond
 	first, err := outbox.Receive(context.Background(), &background.ReceiveNotificationsRequest{
@@ -326,7 +326,7 @@ func RunNotificationOutboxConformance(t *testing.T, config NotificationOutboxCon
 	require.NoError(t, err)
 	require.Len(t, first.Deliveries, 1)
 	require.Equal(t, background.NotificationTaskCreated, first.Deliveries[0].Record.Kind)
-	require.Equal(t, spec.SessionID, first.Deliveries[0].Record.SessionID)
+	require.Equal(t, spec.RootSessionID, first.Deliveries[0].Record.SessionID)
 	concurrent, err := outbox.Receive(context.Background(), &background.ReceiveNotificationsRequest{
 		Limit: 1, LeaseDuration: lease,
 	})
@@ -532,7 +532,7 @@ func createParentAndStart(
 ) *background.TaskSnapshot {
 	t.Helper()
 	spec := testSpec(id)
-	spec.SessionID = "parent-session"
+	spec.RootSessionID = "parent-session"
 	created := create(t, tasks, spec, background.LeaseExpiryRetry)
 	started, err := tasks.Start(context.Background(), &background.StartTaskRequest{
 		TaskID: created.Spec.ID, ExpectedVersion: created.Version,

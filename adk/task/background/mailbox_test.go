@@ -39,7 +39,7 @@ func TestInMemoryStoreAdoptForeground(t *testing.T) {
 		AdoptForegroundRequest: AdoptForegroundRequest{
 			Spec: Spec{
 				ID: "task", ExecutorKey: "executor", Kind: "subagent",
-				SessionID: "session",
+				RootSessionID: "session",
 			},
 			ExpectedGeneration: registered.Mailbox.Generation,
 			InitialCheckpoint:  []byte("checkpoint"),
@@ -84,7 +84,8 @@ func TestAttack_AdoptForegroundDoesNotLoseRacingInput(t *testing.T) {
 	})
 	require.NoError(t, err)
 	_, err = store.SendInput(ctx, &task.SendInputRequest{
-		TaskID: "task", EventID: "late", Kind: "event",
+		TaskID: "task",
+		Input:  task.Input{EventID: "late", Kind: "event"},
 	})
 	require.NoError(t, err)
 	_, err = store.AdoptForeground(ctx, &AdoptForegroundStoreRequest{
@@ -127,13 +128,13 @@ func TestBackgroundChildLifecycleNotifiesForegroundParent(t *testing.T) {
 	child, err := store.Create(ctx, &CreateTaskRequest{
 		Spec: Spec{
 			ID: "child", ExecutorKey: "executor", Kind: "tool",
-			ParentTaskID: parent.Mailbox.TaskID, SessionID: "root-session",
+			ParentTaskID: parent.Mailbox.TaskID, RootSessionID: "root-session",
 			NotifySession: true,
 		},
 		LeaseExpiryPolicy: LeaseExpiryRetry,
 		ParentExecution: &task.ExecutionContext{
-			TaskID: parent.Mailbox.TaskID, Mode: task.ModeForeground,
-			OwnerEpoch: parent.Mailbox.Generation, RootSessionID: "root-session",
+			TaskID: parent.Mailbox.TaskID, Owner: task.OwnerParent,
+			Generation: parent.Mailbox.Generation, RootSessionID: "root-session",
 		},
 	})
 	require.NoError(t, err)
@@ -180,16 +181,16 @@ func TestAttack_NestedSubmitDoesNotEmitRootSessionEvent(t *testing.T) {
 	)
 	require.NoError(t, err)
 	ctx := task.WithExecutionContext(context.Background(), task.ExecutionContext{
-		TaskID: parent.Mailbox.TaskID, Mode: task.ModeForeground,
-		OwnerEpoch: parent.Mailbox.Generation, RootSessionID: "root-session",
+		TaskID: parent.Mailbox.TaskID, Owner: task.OwnerParent,
+		Generation: parent.Mailbox.Generation, RootSessionID: "root-session",
 	})
 	child, err := manager.Submit(ctx, &SubmitRequest{Spec: Spec{
 		ID: "child", ExecutorKey: "test", Kind: "test",
-		SessionID: "immediate-parent-session", NotifySession: true,
+		RootSessionID: "immediate-parent-session", NotifySession: true,
 	}})
 	require.NoError(t, err)
 	require.Equal(t, parent.Mailbox.TaskID, child.Spec.ParentTaskID)
-	require.Equal(t, "root-session", child.Spec.SessionID)
+	require.Equal(t, "root-session", child.Spec.RootSessionID)
 	require.Zero(t, rootEvents)
 	inputs, err := manager.ListInputs(ctx, &task.ListInputsRequest{
 		TaskID: parent.Mailbox.TaskID,
@@ -217,8 +218,8 @@ func TestBackgroundParentOwnershipFencesNestedCreation(t *testing.T) {
 		CandidateTaskID: "bad-child", InvocationID: "bad-child",
 		ParentTaskID: parent.Spec.ID,
 		ParentExecution: &task.ExecutionContext{
-			TaskID: parent.Spec.ID, Mode: task.ModeBackground,
-			OwnerEpoch: parentMailbox.Generation, Attempt: started.Attempt + 1,
+			TaskID: parent.Spec.ID, Owner: task.OwnerManager,
+			Generation: parentMailbox.Generation, Attempt: started.Attempt + 1,
 		},
 	})
 	require.ErrorIs(t, err, ErrLeaseLost)
@@ -226,8 +227,8 @@ func TestBackgroundParentOwnershipFencesNestedCreation(t *testing.T) {
 		CandidateTaskID: "child", InvocationID: "child",
 		ParentTaskID: parent.Spec.ID,
 		ParentExecution: &task.ExecutionContext{
-			TaskID: parent.Spec.ID, Mode: task.ModeBackground,
-			OwnerEpoch: parentMailbox.Generation, Attempt: started.Attempt,
+			TaskID: parent.Spec.ID, Owner: task.OwnerManager,
+			Generation: parentMailbox.Generation, Attempt: started.Attempt,
 		},
 	})
 	require.NoError(t, err)
@@ -243,8 +244,8 @@ func TestListChildrenPaginationAndCursorValidation(t *testing.T) {
 			CandidateTaskID: childID, InvocationID: childID,
 			ParentTaskID: parent.TaskID,
 			ParentExecution: &task.ExecutionContext{
-				TaskID: parent.TaskID, Mode: task.ModeForeground,
-				OwnerEpoch: parent.Generation,
+				TaskID: parent.TaskID, Owner: task.OwnerParent,
+				Generation: parent.Generation,
 			},
 		})
 		require.NoError(t, err)
@@ -294,7 +295,8 @@ func TestAttack_CompleteIfNoInputsReturnsTaskToPendingOnRace(t *testing.T) {
 	})
 	require.NoError(t, err)
 	_, err = store.SendInput(ctx, &task.SendInputRequest{
-		TaskID: created.Spec.ID, EventID: "late", Kind: "event",
+		TaskID: created.Spec.ID,
+		Input:  task.Input{EventID: "late", Kind: "event"},
 	})
 	require.NoError(t, err)
 	result, err := store.CompleteIfNoInputs(ctx, &CompleteIfNoInputsRequest{
@@ -315,7 +317,8 @@ func TestAttack_ManagerRedispatchesInputRace(t *testing.T) {
 	) (*ExecutionResult, error) {
 		if attempts.Add(1) == 1 {
 			_, err := store.SendInput(ctx, &task.SendInputRequest{
-				TaskID: backgroundTask.Spec.ID, EventID: "late", Kind: "event",
+				TaskID: backgroundTask.Spec.ID,
+				Input:  task.Input{EventID: "late", Kind: "event"},
 			})
 			require.NoError(t, err)
 			return &ExecutionResult{
@@ -366,7 +369,8 @@ func TestAttack_TerminalFailureSealsMailboxWithPendingInput(t *testing.T) {
 	})
 	require.NoError(t, err)
 	_, err = store.SendInput(ctx, &task.SendInputRequest{
-		TaskID: created.Spec.ID, EventID: "late", Kind: "event",
+		TaskID: created.Spec.ID,
+		Input:  task.Input{EventID: "late", Kind: "event"},
 	})
 	require.NoError(t, err)
 	_, err = store.Fail(ctx, &FailTaskRequest{
@@ -378,7 +382,8 @@ func TestAttack_TerminalFailureSealsMailboxWithPendingInput(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, task.MailboxSealed, mailbox.State)
 	_, err = store.SendInput(ctx, &task.SendInputRequest{
-		TaskID: created.Spec.ID, EventID: "after", Kind: "event",
+		TaskID: created.Spec.ID,
+		Input:  task.Input{EventID: "after", Kind: "event"},
 	})
 	require.ErrorIs(t, err, task.ErrMailboxSealed)
 }
@@ -396,7 +401,8 @@ func TestCommitInputAndWaitAreAtomicWithMailboxCursor(t *testing.T) {
 	})
 	require.NoError(t, err)
 	_, err = store.SendInput(ctx, &task.SendInputRequest{
-		TaskID: created.Spec.ID, EventID: "resume", Kind: "resume",
+		TaskID: created.Spec.ID,
+		Input:  task.Input{EventID: "resume", Kind: "resume"},
 	})
 	require.NoError(t, err)
 	committed, err := store.CommitInput(ctx, &CommitInputRequest{
@@ -436,7 +442,8 @@ func TestSuspendIfNoInputsSuccessAndRace(t *testing.T) {
 		require.NoError(t, err)
 		if withInput {
 			_, err = store.SendInput(ctx, &task.SendInputRequest{
-				TaskID: id, EventID: "late", Kind: "event",
+				TaskID: id,
+				Input:  task.Input{EventID: "late", Kind: "event"},
 			})
 			require.NoError(t, err)
 		}
@@ -470,7 +477,8 @@ func TestWaitInputIfNoInputsPersistsCheckpointOnInputRace(t *testing.T) {
 	require.NoError(t, err)
 	for _, eventID := range []string{"consumed", "late"} {
 		_, err = store.SendInput(ctx, &task.SendInputRequest{
-			TaskID: created.Spec.ID, EventID: eventID, Kind: "event",
+			TaskID: created.Spec.ID,
+			Input:  task.Input{EventID: eventID, Kind: "event"},
 		})
 		require.NoError(t, err)
 	}
@@ -504,12 +512,15 @@ func TestMailboxValidationBoundaries(t *testing.T) {
 	_, err = store.SendInput(ctx, nil)
 	require.Error(t, err)
 	_, err = store.SendInput(ctx, &task.SendInputRequest{
-		TaskID: "missing", EventID: "event", Kind: "kind",
+		TaskID: "missing",
+		Input:  task.Input{EventID: "event", Kind: "kind"},
 	})
 	require.ErrorIs(t, err, task.ErrMailboxNotFound)
 	_, err = store.SendInput(ctx, &task.SendInputRequest{
-		TaskID: "missing", EventID: "event", Kind: "kind",
-		Delivery: task.InputDelivery(99),
+		TaskID: "missing",
+		Input: task.Input{
+			EventID: "event", Kind: "kind", Delivery: task.InputDelivery(99),
+		},
 	})
 	require.Error(t, err)
 	_, err = store.ListInputs(ctx, nil)
@@ -535,7 +546,8 @@ func TestMailboxValidationBoundaries(t *testing.T) {
 
 	mailbox := registerMailboxForTest(t, store, "mailbox")
 	_, err = store.SendInput(ctx, &task.SendInputRequest{
-		TaskID: mailbox.TaskID, EventID: "event", Kind: "kind",
+		TaskID: mailbox.TaskID,
+		Input:  task.Input{EventID: "event", Kind: "kind"},
 	})
 	require.NoError(t, err)
 	require.ErrorIs(t, store.AdvanceCursor(ctx, &task.AdvanceCursorRequest{

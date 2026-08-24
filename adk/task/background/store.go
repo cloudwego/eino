@@ -161,7 +161,7 @@ func (e *taskCreatedEventUndeliveredError) Is(target error) bool {
 // ListPending and ListSuspended follow their request ordering, cursor, and limit
 // contracts; malformed cursors return ErrInvalidCursor.
 // When the provider also implements NotificationOutbox, Create atomically
-// enqueues NotificationTaskCreated for every task with a parent SessionID.
+// enqueues NotificationTaskCreated for every task with a RootSessionID.
 //
 // RequestCancel on active work keeps StatusRunning, sets CancelRequestedAt and
 // the first-write optional CancelReason, and advances Version. Once
@@ -220,7 +220,7 @@ type TaskEventStore interface {
 
 // NotificationWriter atomically authorizes and enqueues application
 // notifications from the exact active task attempt. Implementations derive the
-// immutable parent SessionID from the stored Spec, fence attempt, lease, and
+// immutable root session ID from the stored Spec, fence attempt, lease, and
 // cancellation before replay lookup, and retain replay metadata for at least
 // the task lifetime. Notification.Version captures the current Task version
 // without advancing it. Implementations copy request Data before retaining it.
@@ -254,7 +254,7 @@ func validateSpec(spec Spec) error {
 	if spec.ID == "" || spec.ExecutorKey == "" {
 		return fmt.Errorf("task/background: id and executor key are required")
 	}
-	if spec.NotifySession && spec.SessionID == "" {
+	if spec.NotifySession && spec.RootSessionID == "" {
 		return fmt.Errorf("task/background: notification session id is required")
 	}
 	return nil

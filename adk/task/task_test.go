@@ -18,6 +18,7 @@ package task_test
 
 import (
 	"context"
+	"reflect"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -25,6 +26,24 @@ import (
 	"github.com/cloudwego/eino/adk/task"
 	"github.com/cloudwego/eino/adk/task/background"
 )
+
+func TestInputSeparatesSendIntentFromPersistedRecord(t *testing.T) {
+	inputType := reflect.TypeOf(task.Input{})
+	for _, field := range []string{"EventID", "Kind", "Data", "Delivery"} {
+		_, ok := inputType.FieldByName(field)
+		require.True(t, ok, "Input.%s must exist", field)
+	}
+	for _, field := range []string{"TaskID", "Sequence", "CreatedAt"} {
+		_, ok := inputType.FieldByName(field)
+		require.False(t, ok, "Input.%s belongs to InputRecord", field)
+	}
+
+	recordType := reflect.TypeOf(task.InputRecord{})
+	for _, field := range []string{"TaskID", "Sequence", "Input", "CreatedAt"} {
+		_, ok := recordType.FieldByName(field)
+		require.True(t, ok, "InputRecord.%s must exist", field)
+	}
+}
 
 func TestClientSendInput(t *testing.T) {
 	ctx := context.Background()
@@ -51,8 +70,8 @@ func TestClientSendInput(t *testing.T) {
 
 func TestExecutionContextRoundTrip(t *testing.T) {
 	execution := task.ExecutionContext{
-		TaskID: "parent", Mode: task.ModeBackground,
-		OwnerEpoch: 2, Attempt: 3, RootSessionID: "root",
+		TaskID: "task-1", Owner: task.OwnerManager,
+		Generation: 2, Attempt: 3, RootSessionID: "root",
 	}
 	ctx := task.WithExecutionContext(context.Background(), execution)
 	actual, ok := task.ExecutionContextFromContext(ctx)

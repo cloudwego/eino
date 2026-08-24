@@ -178,6 +178,6 @@ func buildTaskSpec(
 	return background.Spec{
 		ID: input.taskID, ExecutorKey: executorKey, Kind: "background_tool",
 		Payload: payload, Description: description, OutputFile: input.outputFile,
-		SessionID: input.sessionID, NotifySession: input.notifySession,
+		RootSessionID: input.sessionID, NotifySession: input.notifySession,
 	}, nil
 }

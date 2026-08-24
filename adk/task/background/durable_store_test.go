@@ -56,7 +56,7 @@ func newInMemoryStoreWithClock(
 func validSpec(id string) Spec {
 	return Spec{
 		ID: id, ExecutorKey: "test", Payload: []byte("payload"),
-		SessionID: "session", NotifySession: true,
+		RootSessionID: "session", NotifySession: true,
 	}
 }
 

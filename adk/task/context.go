@@ -21,8 +21,8 @@ import "context"
 // ExecutionContext is the authority inherited by nested task creation.
 type ExecutionContext struct {
 	TaskID        string
-	Mode          Mode
-	OwnerEpoch    int64
+	Owner         Owner
+	Generation    int64
 	Attempt       int64
 	RootSessionID string
 }

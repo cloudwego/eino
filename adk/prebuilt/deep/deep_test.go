@@ -87,7 +87,7 @@ func mustDeepController(
 			Barrier: deepCompletionBarrier{},
 			EventToInput: func(
 				context.Context,
-				[]*task.Input,
+				[]*task.InputRecord,
 			) (*adk.AgentInput, error) {
 				return &adk.AgentInput{
 					Messages: []*schema.Message{schema.UserMessage("event")},
@@ -592,6 +592,22 @@ func TestDeepTaskConfigRequiresExplicitCapabilities(t *testing.T) {
 	}})
 	require.ErrorContains(t, err, "Controller is required")
 
+	controllerManager := mustNewBackgroundManager(t, context.Background(), nil)
+	defer controllerManager.Close(context.Background())
+	controller := mustDeepController(t, controllerManager)
+	derived := &TaskConfig{
+		SubAgents: &TypedDurableSubAgentConfig[*schema.Message]{
+			Runtime: controller,
+		},
+	}
+	require.NoError(t, validateTypedConfig(&Config{Tasks: derived}))
+	require.Same(t, controllerManager, deepBackgroundManager(derived))
+
+	otherManager := mustNewBackgroundManager(t, context.Background(), nil)
+	defer otherManager.Close(context.Background())
+	derived.Manager = otherManager
+	err = validateTypedConfig(&Config{Tasks: derived})
+	require.ErrorContains(t, err, "must share the same Manager")
 }
 
 func TestDeepSubAgentBackgroundForwardsRunOptionsFactories(t *testing.T) {
@@ -633,9 +649,9 @@ func TestDeepSubAgentBackgroundForwardsRunOptionsFactories(t *testing.T) {
 	assert.Equal(t, "worker: done", formatted)
 }
 
-// NewTyped with a Manager injects the task_output/task_stop control tools and a
-// background-capable subagent tool exactly once at the top level.
-func TestDeepAgentNewTypedWithManager(t *testing.T) {
+// NewTyped derives the shared Manager from the Controller and injects the
+// task_output/task_stop control tools exactly once at the top level.
+func TestDeepAgentNewTypedWithControllerManager(t *testing.T) {
 	ctx := context.Background()
 	store := background.NewInMemoryStore(nil)
 	mgr := mustNewBackgroundManager(t, ctx, &background.Config{
@@ -650,7 +666,6 @@ func TestDeepAgentNewTypedWithManager(t *testing.T) {
 		ChatModel:   cm,
 		Shell:       &deepMockShell{},
 		Tasks: &TaskConfig{
-			Manager: mgr,
 			SubAgents: &TypedDurableSubAgentConfig[*schema.Message]{
 				Runtime: controller,
 			},

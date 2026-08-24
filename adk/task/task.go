@@ -21,14 +21,24 @@ package task
 
 import "context"
 
-// Mode identifies the current lifecycle owner of a logical task.
-type Mode uint8
+// StartMode selects the initial lifecycle owner of a task.
+type StartMode uint8
 
 const (
-	// ModeForeground means the parent execution owns the task lifecycle.
-	ModeForeground Mode = iota
-	// ModeBackground means a background manager owns the task lifecycle.
-	ModeBackground
+	// StartModeForeground starts with the parent execution as lifecycle owner.
+	StartModeForeground StartMode = iota
+	// StartModeBackground starts with a background manager as lifecycle owner.
+	StartModeBackground
+)
+
+// Owner identifies the current lifecycle authority of an executing task.
+type Owner uint8
+
+const (
+	// OwnerParent means the parent execution owns the task lifecycle.
+	OwnerParent Owner = iota
+	// OwnerManager means a background manager owns the task lifecycle.
+	OwnerManager
 )
 
 // OutcomeStatus identifies one owner-neutral wait result.
@@ -83,7 +93,10 @@ func (c *InputClient) SendInput(
 		return nil, ErrInputRequired
 	}
 	return c.Sender.SendInput(ctx, &SendInputRequest{
-		TaskID: taskID, EventID: input.EventID, Kind: input.Kind,
-		Data: append([]byte(nil), input.Data...), Delivery: input.Delivery,
+		TaskID: taskID,
+		Input: Input{
+			EventID: input.EventID, Kind: input.Kind,
+			Data: append([]byte(nil), input.Data...), Delivery: input.Delivery,
+		},
 	})
 }

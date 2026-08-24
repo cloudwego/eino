@@ -73,7 +73,7 @@ func TestSignalsToInputMergesMessagesAndExternalEvents(t *testing.T) {
 		}),
 		func(
 			_ context.Context,
-			inputs []*task.Input,
+			inputs []*task.InputRecord,
 		) (*adk.AgentInput, error) {
 			require.Len(t, inputs, 1)
 			require.Equal(t, "external", inputs[0].Kind)
@@ -88,21 +88,25 @@ func TestSignalsToInputMergesMessagesAndExternalEvents(t *testing.T) {
 	require.NoError(t, err)
 	data, err := json.Marshal(encoded)
 	require.NoError(t, err)
-	input, err := runtime.signalsToInput(context.Background(), []*task.Input{
-		{EventID: "initial", Kind: initialSignalKind, Data: data},
-		{EventID: "resume", Kind: ResumeInputKind, Data: []byte(`{"target":true}`)},
-		{EventID: "external", Kind: "external", Data: []byte("event")},
+	input, err := runtime.signalsToInput(context.Background(), []*task.InputRecord{
+		{Input: task.Input{EventID: "initial", Kind: initialSignalKind, Data: data}},
+		{Input: task.Input{EventID: "resume", Kind: ResumeInputKind, Data: []byte(`{"target":true}`)}},
+		{Input: task.Input{EventID: "external", Kind: "external", Data: []byte("event")}},
 	})
 	require.NoError(t, err)
 	require.Len(t, input.Messages, 2)
 	require.Equal(t, "initial", input.Messages[0].Content)
 	require.Equal(t, "external", input.Messages[1].Content)
-	stampRuntimeInputIDs(input, []*task.Input{{EventID: "batch"}})
+	stampRuntimeInputIDs(input, []*task.InputRecord{{
+		Input: task.Input{EventID: "batch"},
+	}})
 	require.NotEmpty(t, input.Messages[0].Extra)
 	require.NotEmpty(t, input.Messages[1].Extra)
 
-	_, err = runtime.signalsToInput(context.Background(), []*task.Input{{
-		EventID: "broken", Kind: initialSignalKind, Data: []byte("{"),
+	_, err = runtime.signalsToInput(context.Background(), []*task.InputRecord{{
+		Input: task.Input{
+			EventID: "broken", Kind: initialSignalKind, Data: []byte("{"),
+		},
 	}})
 	require.Error(t, err)
 }

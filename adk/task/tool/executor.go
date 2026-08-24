@@ -182,7 +182,7 @@ func (e *executor) Execute( //nolint:cyclop,funlen // execution coordinates the 
 		if listErr != nil {
 			return nil, listErr
 		}
-		var resumeInput *taskcore.Input
+		var resumeInput *taskcore.InputRecord
 		for _, input := range inputs.Inputs {
 			if input.Kind == ResumeInputKind {
 				resumeInput = input

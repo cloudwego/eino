@@ -69,9 +69,10 @@ type agentDurableInput struct {
 }
 
 type runtimeAgentInterruptState struct {
-	Handle             durablesubagent.Handle `json:"handle"`
-	TargetIDs          []string               `json:"target_ids"`
-	NextResumeSequence int64                  `json:"next_resume_sequence"`
+	TaskID             string   `json:"task_id"`
+	ChildSessionID     string   `json:"child_session_id"`
+	TargetIDs          []string `json:"target_ids"`
+	NextResumeSequence int64    `json:"next_resume_sequence"`
 }
 
 func newAgentTool(subAgents map[string]tool.InvokableTool, name, desc string) (tool.BaseTool, error) {
@@ -457,15 +458,20 @@ func newControllerAgentTool[M adk.MessageType](
 		if prompt == "" {
 			prompt = in.Description
 		}
-		mode := task.ModeForeground
+		startMode := task.StartModeForeground
 		if in.RunInBackground {
-			mode = task.ModeBackground
+			startMode = task.StartModeBackground
 		}
 		wasInterrupted, hasState, interruptState :=
 			tool.GetInterruptState[runtimeAgentInterruptState](callCtx)
 		nextResumeSequence := int64(1)
+		var (
+			handle *durablesubagent.Handle
+			err    error
+		)
 		if wasInterrupted {
-			if !hasState || interruptState.Handle.TaskID == "" ||
+			if !hasState || interruptState.TaskID == "" ||
+				interruptState.ChildSessionID == "" ||
 				len(interruptState.TargetIDs) == 0 {
 				return "", errors.New(
 					"subagent: runtime interrupt state is unavailable",
@@ -494,20 +500,24 @@ func newControllerAgentTool[M adk.MessageType](
 			eventID := "resume:" + uuid.NewSHA1(
 				uuid.Nil,
 				[]byte(fmt.Sprintf(
-					"%s:%d", interruptState.Handle.TaskID, resumeSequence,
+					"%s:%d", interruptState.TaskID, resumeSequence,
 				)),
 			).String()
-			if err := runtime.SendInput(
+			if sendErr := runtime.SendInput(
 				callCtx,
-				interruptState.Handle.TaskID,
+				interruptState.TaskID,
 				&task.Input{
 					EventID: eventID, Kind: durablesubagent.ResumeInputKind,
 					Data: data,
 				},
-			); err != nil {
+			); sendErr != nil {
+				return "", sendErr
+			}
+			handle, err = runtime.Handle(callCtx, interruptState.TaskID)
+			if err != nil {
 				return "", err
 			}
-			in.ChildSessionID = interruptState.Handle.ChildSessionID
+			in.ChildSessionID = interruptState.ChildSessionID
 			nextResumeSequence = resumeSequence + 1
 		}
 		onEvent := func(event *adk.TypedAgentEvent[M]) {
@@ -515,35 +525,33 @@ func newControllerAgentTool[M adk.MessageType](
 				receiver(event)
 			}
 		}
-		var (
-			handle *durablesubagent.Handle
-			err    error
-		)
-		if !wasInterrupted && in.ChildSessionID != "" {
-			handle, err = runtime.Continue(
-				callCtx,
-				&durablesubagent.ContinueRequest[M]{
-					ChildSessionID: in.ChildSessionID,
-					InvocationID:   parentSessionID + ":" + toolCallID,
-					Input:          newTypedUserInput[M](prompt),
-					IfIdle: &durablesubagent.StartOptions[M]{
-						ParentSessionID: parentSessionID,
-						AgentName:       in.SubagentType,
-						Description:     in.Description,
-						Mode:            mode,
-						EnableStreaming: enableStreaming,
-						OnEvent:         onEvent,
+		if !wasInterrupted {
+			if in.ChildSessionID != "" {
+				handle, err = runtime.Continue(
+					callCtx,
+					&durablesubagent.ContinueRequest[M]{
+						ChildSessionID: in.ChildSessionID,
+						InvocationID:   parentSessionID + ":" + toolCallID,
+						Input:          newTypedUserInput[M](prompt),
+						IfIdle: &durablesubagent.StartOptions[M]{
+							ParentSessionID: parentSessionID,
+							AgentName:       in.SubagentType,
+							Description:     in.Description,
+							StartMode:       startMode,
+							EnableStreaming: enableStreaming,
+							OnEvent:         onEvent,
+						},
 					},
-				},
-			)
-		} else {
-			handle, err = runtime.Start(callCtx, &durablesubagent.StartRequest[M]{
-				InvocationID:    parentSessionID + ":" + toolCallID,
-				ParentSessionID: parentSessionID, ChildSessionID: in.ChildSessionID,
-				AgentName: in.SubagentType, Description: in.Description,
-				Input: newTypedUserInput[M](prompt), Mode: mode,
-				EnableStreaming: enableStreaming, OnEvent: onEvent,
-			})
+				)
+			} else {
+				handle, err = runtime.Start(callCtx, &durablesubagent.StartRequest[M]{
+					InvocationID:    parentSessionID + ":" + toolCallID,
+					ParentSessionID: parentSessionID, ChildSessionID: in.ChildSessionID,
+					AgentName: in.SubagentType, Description: in.Description,
+					Input: newTypedUserInput[M](prompt), StartMode: startMode,
+					EnableStreaming: enableStreaming, OnEvent: onEvent,
+				})
+			}
 		}
 		if err != nil {
 			return "", err
@@ -551,13 +559,14 @@ func newControllerAgentTool[M adk.MessageType](
 		if in.RunInBackground {
 			return formatRuntimeHandle(handle, background.StatusPending)
 		}
-		result, err := runtime.Wait(callCtx, handle.TaskID)
+		result, err := runtime.Wait(callCtx, handle.ID())
 		if err != nil {
 			return "", err
 		}
 		if result.Interrupted != nil {
 			state := runtimeAgentInterruptState{
-				Handle: *handle, NextResumeSequence: nextResumeSequence,
+				TaskID: handle.ID(), ChildSessionID: handle.ChildSessionID(),
+				NextResumeSequence: nextResumeSequence,
 			}
 			for _, interruptContext := range result.Interrupted.InterruptContexts {
 				if interruptContext.ID != "" {
@@ -568,7 +577,7 @@ func newControllerAgentTool[M adk.MessageType](
 		}
 		content := agenttool.ExtractTextContent(result.FinalMessage)
 		return sonic.MarshalString(&durableAgentToolResult{
-			TaskID: handle.TaskID, ChildSessionID: handle.ChildSessionID,
+			TaskID: handle.ID(), ChildSessionID: handle.ChildSessionID(),
 			Status: background.StatusCompleted, Result: content,
 		})
 	})
@@ -578,11 +587,11 @@ func formatRuntimeHandle(
 	handle *durablesubagent.Handle,
 	status background.Status,
 ) (string, error) {
-	if handle == nil || handle.TaskID == "" || handle.ChildSessionID == "" {
+	if handle == nil || handle.ID() == "" || handle.ChildSessionID() == "" {
 		return "", errors.New("subagent: runtime returned an invalid handle")
 	}
 	data, err := sonic.MarshalString(&durableAgentToolResult{
-		TaskID: handle.TaskID, ChildSessionID: handle.ChildSessionID, Status: status,
+		TaskID: handle.ID(), ChildSessionID: handle.ChildSessionID(), Status: status,
 	})
 	if err != nil {
 		return "", err

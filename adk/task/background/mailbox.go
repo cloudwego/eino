@@ -359,7 +359,7 @@ func (s *InMemoryStore) Register(
 		Generation: 1,
 	}
 	s.mailboxes[mailbox.TaskID] = &memoryMailbox{
-		mailbox: mailbox, byID: make(map[string]*task.Input),
+		mailbox: mailbox, byID: make(map[string]*task.InputRecord),
 	}
 	s.mailboxInvocations[invocationKey] = mailbox.TaskID
 	if mailbox.ChildSessionID != "" {
@@ -401,16 +401,16 @@ func (s *InMemoryStore) authorizeParentLocked(
 		return task.ErrMailboxSealed
 	}
 	if execution == nil || execution.TaskID != parentTaskID ||
-		execution.OwnerEpoch != parent.mailbox.Generation {
+		execution.Generation != parent.mailbox.Generation {
 		return task.ErrOwnershipLost
 	}
 	switch parent.mailbox.State {
 	case task.MailboxForeground:
-		if execution.Mode != task.ModeForeground || execution.Attempt != 0 {
+		if execution.Owner != task.OwnerParent || execution.Attempt != 0 {
 			return task.ErrOwnershipLost
 		}
 	case task.MailboxBackground:
-		if execution.Mode != task.ModeBackground || execution.Attempt <= 0 {
+		if execution.Owner != task.OwnerManager || execution.Attempt <= 0 {
 			return task.ErrOwnershipLost
 		}
 		if err := s.authorizeOutputLocked(parentTaskID, execution.Attempt); err != nil {
@@ -441,16 +441,18 @@ func (s *InMemoryStore) SendInput(
 	_ context.Context,
 	req *task.SendInputRequest,
 ) (*task.SendInputResult, error) {
-	if req == nil || req.TaskID == "" || req.EventID == "" || req.Kind == "" {
+	if req == nil || req.TaskID == "" ||
+		req.Input.EventID == "" || req.Input.Kind == "" {
 		return nil, errors.New("task/background: input identity is required")
 	}
-	if len(req.EventID) > 1024 || len(req.Kind) > 128 {
+	if len(req.Input.EventID) > 1024 || len(req.Input.Kind) > 128 {
 		return nil, errors.New("task/background: input identity exceeds configured limit")
 	}
-	if int64(len(req.Data)) > s.maxValue {
+	if int64(len(req.Input.Data)) > s.maxValue {
 		return nil, errors.New("task/background: input data exceeds configured limit")
 	}
-	if req.Delivery != task.InputQueued && req.Delivery != task.InputPreempt {
+	if req.Input.Delivery != task.InputQueued &&
+		req.Input.Delivery != task.InputPreempt {
 		return nil, errors.New("task/background: input delivery is invalid")
 	}
 	s.mu.Lock()
@@ -459,9 +461,10 @@ func (s *InMemoryStore) SendInput(
 	if current == nil {
 		return nil, task.ErrMailboxNotFound
 	}
-	if existing := current.byID[req.EventID]; existing != nil {
-		if existing.Kind != req.Kind || !bytes.Equal(existing.Data, req.Data) ||
-			existing.Delivery != req.Delivery {
+	if existing := current.byID[req.Input.EventID]; existing != nil {
+		if existing.Kind != req.Input.Kind ||
+			!bytes.Equal(existing.Data, req.Input.Data) ||
+			existing.Delivery != req.Input.Delivery {
 			return nil, task.ErrInputConflict
 		}
 		return &task.SendInputResult{Input: cloneInput(existing)}, nil
@@ -470,10 +473,13 @@ func (s *InMemoryStore) SendInput(
 		return nil, task.ErrMailboxSealed
 	}
 	current.mailbox.LatestSequence++
-	input := &task.Input{
+	input := &task.InputRecord{
 		TaskID: req.TaskID, Sequence: current.mailbox.LatestSequence,
-		EventID: req.EventID, Kind: req.Kind, Data: cloneBytes(req.Data),
-		Delivery: req.Delivery, CreatedAt: s.now(),
+		Input: task.Input{
+			EventID: req.Input.EventID, Kind: req.Input.Kind,
+			Data: cloneBytes(req.Input.Data), Delivery: req.Input.Delivery,
+		},
+		CreatedAt: s.now(),
 	}
 	current.inputs = append(current.inputs, input)
 	current.byID[input.EventID] = input
@@ -519,10 +525,10 @@ func (s *InMemoryStore) listInputsLocked(
 		limit = 1000
 	}
 	result := &task.ListInputsResult{
-		LatestSequence:  current.mailbox.LatestSequence,
-		ConsumedCursor:  current.mailbox.ConsumedCursor,
-		MailboxState:    current.mailbox.State,
-		OwnerGeneration: current.mailbox.Generation,
+		LatestSequence: current.mailbox.LatestSequence,
+		ConsumedCursor: current.mailbox.ConsumedCursor,
+		MailboxState:   current.mailbox.State,
+		Generation:     current.mailbox.Generation,
 	}
 	for _, input := range current.inputs {
 		if input.Sequence <= req.AfterSequence {
@@ -756,7 +762,7 @@ func cloneMailbox(mailbox *task.Mailbox) *task.Mailbox {
 	return &copy
 }
 
-func cloneInput(input *task.Input) *task.Input {
+func cloneInput(input *task.InputRecord) *task.InputRecord {
 	if input == nil {
 		return nil
 	}
@@ -773,7 +779,7 @@ func equalSpec(left, right Spec) bool {
 		left.Description == right.Description &&
 		left.OutputFile == right.OutputFile &&
 		left.ParentTaskID == right.ParentTaskID &&
-		left.SessionID == right.SessionID &&
+		left.RootSessionID == right.RootSessionID &&
 		left.NotifySession == right.NotifySession
 }
 

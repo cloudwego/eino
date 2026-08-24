@@ -57,7 +57,7 @@ func (r *Controller[M]) ReadProgress(
 		return "", err
 	}
 	sessionStore, err := r.sessionStoreFor(
-		ctx, task.Spec.ID, task.Spec.SessionID, payload.ChildSessionID,
+		ctx, task.Spec.ID, task.Spec.RootSessionID, payload.ChildSessionID,
 		task, false,
 	)
 	if err != nil {

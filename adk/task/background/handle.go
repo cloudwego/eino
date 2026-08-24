@@ -51,8 +51,11 @@ func (h *Handle) SendInput(ctx context.Context, input *task.Input) error {
 		return task.ErrInputRequired
 	}
 	_, err := h.manager.SendInput(ctx, &task.SendInputRequest{
-		TaskID: h.taskID, EventID: input.EventID, Kind: input.Kind,
-		Data: append([]byte(nil), input.Data...), Delivery: input.Delivery,
+		TaskID: h.taskID,
+		Input: task.Input{
+			EventID: input.EventID, Kind: input.Kind,
+			Data: append([]byte(nil), input.Data...), Delivery: input.Delivery,
+		},
 	})
 	return err
 }

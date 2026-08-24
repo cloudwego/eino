@@ -730,7 +730,7 @@ func (m *Manager) Submit(ctx context.Context, req *SubmitRequest) (*TaskSnapshot
 			spec.ParentTaskID = execution.TaskID
 		}
 		if execution.RootSessionID != "" {
-			spec.SessionID = execution.RootSessionID
+			spec.RootSessionID = execution.RootSessionID
 		}
 		if spec.ParentTaskID == execution.TaskID {
 			copy := execution
@@ -750,14 +750,15 @@ func (m *Manager) Submit(ctx context.Context, req *SubmitRequest) (*TaskSnapshot
 	if err := validateSpec(spec); err != nil {
 		return nil, err
 	}
-	if spec.ParentTaskID == "" && spec.SessionID != "" {
+	if spec.ParentTaskID == "" && spec.RootSessionID != "" {
 		if _, ok := m.tasks.(NotificationOutbox); !ok {
 			return nil, errors.New(
 				"task/background: task store must implement NotificationOutbox for parent-session tasks",
 			)
 		}
 	}
-	if spec.ParentTaskID == "" && spec.SessionID != "" && m.sendTaskCreatedEvent == nil {
+	if spec.ParentTaskID == "" && spec.RootSessionID != "" &&
+		m.sendTaskCreatedEvent == nil {
 		return nil, errors.New(
 			"task/background: task-created session event sender is required for parent-session tasks",
 		)
@@ -777,7 +778,7 @@ func (m *Manager) Submit(ctx context.Context, req *SubmitRequest) (*TaskSnapshot
 	if err != nil {
 		return nil, err
 	}
-	if spec.ParentTaskID == "" && spec.SessionID != "" {
+	if spec.ParentTaskID == "" && spec.RootSessionID != "" {
 		if sendErr := m.sendTaskCreatedEvent(ctx, cloneTask(task)); sendErr != nil {
 			return task, &taskCreatedEventUndeliveredError{
 				taskID: task.Spec.ID,
@@ -1073,9 +1074,9 @@ func (m *Manager) execute(
 		return mailboxErr
 	}
 	runCtx = taskcore.WithExecutionContext(runCtx, taskcore.ExecutionContext{
-		TaskID: taskID, Mode: taskcore.ModeBackground,
-		OwnerEpoch: mailbox.Generation, Attempt: started.Attempt,
-		RootSessionID: started.Spec.SessionID,
+		TaskID: taskID, Owner: taskcore.OwnerManager,
+		Generation: mailbox.Generation, Attempt: started.Attempt,
+		RootSessionID: started.Spec.RootSessionID,
 	})
 	runCtx = context.WithValue(
 		runCtx,

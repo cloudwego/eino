@@ -81,7 +81,7 @@ func TestManagerSubmitAppendsTaskCreatedSessionEvent_BitsUT(t *testing.T) {
 			BaseChatModelAgentMiddleware: &adk.BaseChatModelAgentMiddleware{},
 			submit: func(runCtx context.Context) error {
 				spec := validSpec("task-created")
-				spec.SessionID = sessionID
+				spec.RootSessionID = sessionID
 				spec.NotifySession = false
 				spec.Description = "Research task creation"
 				var submitErr error
@@ -179,7 +179,7 @@ func TestAttack_TaskCreatedFailureLeavesSingleRecoveryRecord(t *testing.T) {
 	require.Len(t, recovery.Deliveries, 1)
 	require.Equal(t, NotificationTaskCreated, recovery.Deliveries[0].Record.Kind)
 	require.Equal(t, spec.ID, recovery.Deliveries[0].Record.TaskID)
-	require.Equal(t, spec.SessionID, recovery.Deliveries[0].Record.SessionID)
+	require.Equal(t, spec.RootSessionID, recovery.Deliveries[0].Record.SessionID)
 	require.NoError(t, store.Ack(context.Background(), recovery.Deliveries[0].Receipt))
 
 	retried, err := manager.Submit(context.Background(), &SubmitRequest{Spec: spec})

@@ -90,25 +90,35 @@ func RunMailboxStoreConformance( //nolint:funlen // Conformance cases stay toget
 		ctx := context.Background()
 		mailbox := registerMailbox(t, store, "fifo")
 		first, err := store.SendInput(ctx, &task.SendInputRequest{
-			TaskID: mailbox.TaskID, EventID: "one", Kind: "event",
-			Data: []byte("first"), Delivery: task.InputQueued,
+			TaskID: mailbox.TaskID,
+			Input: task.Input{
+				EventID: "one", Kind: "event",
+				Data: []byte("first"), Delivery: task.InputQueued,
+			},
 		})
 		require.NoError(t, err)
 		require.True(t, first.Inserted)
 		replay, err := store.SendInput(ctx, &task.SendInputRequest{
-			TaskID: mailbox.TaskID, EventID: "one", Kind: "event",
-			Data: []byte("first"), Delivery: task.InputQueued,
+			TaskID: mailbox.TaskID,
+			Input: task.Input{
+				EventID: "one", Kind: "event",
+				Data: []byte("first"), Delivery: task.InputQueued,
+			},
 		})
 		require.NoError(t, err)
 		require.False(t, replay.Inserted)
 		_, err = store.SendInput(ctx, &task.SendInputRequest{
-			TaskID: mailbox.TaskID, EventID: "one", Kind: "event",
-			Data: []byte("changed"),
+			TaskID: mailbox.TaskID,
+			Input: task.Input{
+				EventID: "one", Kind: "event", Data: []byte("changed"),
+			},
 		})
 		require.ErrorIs(t, err, task.ErrInputConflict)
 		_, err = store.SendInput(ctx, &task.SendInputRequest{
-			TaskID: mailbox.TaskID, EventID: "two", Kind: "urgent",
-			Delivery: task.InputPreempt,
+			TaskID: mailbox.TaskID,
+			Input: task.Input{
+				EventID: "two", Kind: "urgent", Delivery: task.InputPreempt,
+			},
 		})
 		require.NoError(t, err)
 		page, err := store.ListInputs(ctx, &task.ListInputsRequest{
@@ -141,7 +151,8 @@ func RunMailboxStoreConformance( //nolint:funlen // Conformance cases stay toget
 			result <- page
 		}()
 		_, err := store.SendInput(ctx, &task.SendInputRequest{
-			TaskID: mailbox.TaskID, EventID: "wake", Kind: "event",
+			TaskID: mailbox.TaskID,
+			Input:  task.Input{EventID: "wake", Kind: "event"},
 		})
 		require.NoError(t, err)
 		require.Len(t, (<-result).Inputs, 1)
@@ -157,7 +168,8 @@ func RunMailboxStoreConformance( //nolint:funlen // Conformance cases stay toget
 		require.NoError(t, err)
 		require.Equal(t, task.MailboxSealed, sealed.State)
 		_, err = store.SendInput(ctx, &task.SendInputRequest{
-			TaskID: mailbox.TaskID, EventID: "late", Kind: "event",
+			TaskID: mailbox.TaskID,
+			Input:  task.Input{EventID: "late", Kind: "event"},
 		})
 		require.ErrorIs(t, err, task.ErrMailboxSealed)
 	})
@@ -167,7 +179,8 @@ func RunMailboxStoreConformance( //nolint:funlen // Conformance cases stay toget
 		ctx := context.Background()
 		mailbox := registerMailbox(t, store, "pending")
 		_, err := store.SendInput(ctx, &task.SendInputRequest{
-			TaskID: mailbox.TaskID, EventID: "pending", Kind: "event",
+			TaskID: mailbox.TaskID,
+			Input:  task.Input{EventID: "pending", Kind: "event"},
 		})
 		require.NoError(t, err)
 		current, err := store.SealIfIdle(ctx, &task.SealMailboxRequest{
@@ -182,7 +195,8 @@ func RunMailboxStoreConformance( //nolint:funlen // Conformance cases stay toget
 		ctx := context.Background()
 		mailbox := registerMailbox(t, store, "abandon")
 		_, err := store.SendInput(ctx, &task.SendInputRequest{
-			TaskID: mailbox.TaskID, EventID: "pending", Kind: "event",
+			TaskID: mailbox.TaskID,
+			Input:  task.Input{EventID: "pending", Kind: "event"},
 		})
 		require.NoError(t, err)
 		sealed, err := store.Abandon(ctx, &task.AbandonMailboxRequest{
@@ -202,8 +216,8 @@ func RunMailboxStoreConformance( //nolint:funlen // Conformance cases stay toget
 			Identity: []byte("child"), ParentTaskID: parent.TaskID,
 			RootSessionID: "session",
 			ParentExecution: &task.ExecutionContext{
-				TaskID: parent.TaskID, Mode: task.ModeForeground,
-				OwnerEpoch: parent.Generation,
+				TaskID: parent.TaskID, Owner: task.OwnerParent,
+				Generation: parent.Generation,
 			},
 		})
 		require.NoError(t, err)

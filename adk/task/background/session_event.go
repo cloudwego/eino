@@ -57,13 +57,13 @@ func TaskCreatedSessionEventID(taskID string) string {
 // writer of the parent session timeline.
 func TaskCreatedSessionEventSender[M adk.MessageType]() func(context.Context, *TaskSnapshot) error {
 	return func(ctx context.Context, task *TaskSnapshot) error {
-		if task == nil || task.Spec.ID == "" || task.Spec.SessionID == "" {
+		if task == nil || task.Spec.ID == "" || task.Spec.RootSessionID == "" {
 			return errors.New(
 				"task/background: task id and parent session id are required for task-created event",
 			)
 		}
 		sessionID, ok := adk.RunnerSessionID(ctx)
-		if !ok || sessionID != task.Spec.SessionID {
+		if !ok || sessionID != task.Spec.RootSessionID {
 			return errors.New(
 				"task/background: task-created event requires the matching parent Runner session",
 			)

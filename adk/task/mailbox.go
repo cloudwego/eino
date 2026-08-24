@@ -78,15 +78,20 @@ const (
 	InputPreempt
 )
 
-// Input is one immutable, idempotent mailbox item. Sending any input wakes a
-// background task that is waiting or suspended.
+// Input is one immutable, idempotent input to send to a task.
 type Input struct {
-	TaskID    string
-	Sequence  int64
-	EventID   string
-	Kind      string
-	Data      []byte
-	Delivery  InputDelivery
+	EventID  string
+	Kind     string
+	Data     []byte
+	Delivery InputDelivery
+}
+
+// InputRecord is one persisted mailbox input. Sending any input wakes a
+// background task that is waiting or suspended.
+type InputRecord struct {
+	TaskID   string
+	Sequence int64
+	Input
 	CreatedAt time.Time
 }
 
@@ -109,16 +114,13 @@ type RegisterMailboxResult struct {
 
 // SendInputRequest appends one input idempotently.
 type SendInputRequest struct {
-	TaskID   string
-	EventID  string
-	Kind     string
-	Data     []byte
-	Delivery InputDelivery
+	TaskID string
+	Input  Input
 }
 
 // SendInputResult describes one durable append.
 type SendInputResult struct {
-	Input    *Input
+	Input    *InputRecord
 	Inserted bool
 }
 
@@ -131,11 +133,11 @@ type ListInputsRequest struct {
 
 // ListInputsResult is one FIFO page plus authoritative mailbox cursors.
 type ListInputsResult struct {
-	Inputs          []*Input
-	LatestSequence  int64
-	ConsumedCursor  int64
-	MailboxState    MailboxState
-	OwnerGeneration int64
+	Inputs         []*InputRecord
+	LatestSequence int64
+	ConsumedCursor int64
+	MailboxState   MailboxState
+	Generation     int64
 }
 
 // WaitInputsRequest waits until input exists after AfterSequence.

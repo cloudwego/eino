@@ -249,7 +249,7 @@ func TestManagerCloseDrainsAttemptInitializedDuringClose(t *testing.T) {
 	}
 	manager := managerWithExecutor(t, store, executor, time.Minute)
 	spec := validSpec("close-initializing")
-	spec.SessionID = ""
+	spec.RootSessionID = ""
 	spec.NotifySession = false
 	task, err := manager.Submit(context.Background(), &SubmitRequest{Spec: spec})
 	require.NoError(t, err)
@@ -513,8 +513,11 @@ func TestManagerPreservesContextSnapshotAcrossMailboxWake(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, StatusWaitingInput, waiting.Status)
 	_, err = manager.SendInput(context.Background(), &taskcore.SendInputRequest{
-		TaskID: task.Spec.ID, EventID: "approval", Kind: "approval",
-		Data: []byte(`{"approval":true}`),
+		TaskID: task.Spec.ID,
+		Input: taskcore.Input{
+			EventID: "approval", Kind: "approval",
+			Data: []byte(`{"approval":true}`),
+		},
 	})
 	require.NoError(t, err)
 	require.NoError(t, manager.Execute(context.Background(), task.Spec.ID))
@@ -814,7 +817,7 @@ func TestManagerCancelPendingLocalTaskAfterExecuteValidationFailure(t *testing.T
 	defer closeWithTimeout(manager)
 	spec := validSpec("early-failure-cancel")
 	spec.NotifySession = false
-	spec.SessionID = ""
+	spec.RootSessionID = ""
 	task, err := manager.Submit(context.Background(), &SubmitRequest{Spec: spec})
 	require.NoError(t, err)
 	executor.validateErr = errors.New("worker validation failed")

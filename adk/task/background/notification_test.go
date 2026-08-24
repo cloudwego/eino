@@ -173,7 +173,7 @@ func TestInMemoryNotificationWriterRejectsInvalidAuthority_BitsUT(t *testing.T) 
 	)
 
 	spec := validSpec("no-parent")
-	spec.SessionID = ""
+	spec.RootSessionID = ""
 	spec.NotifySession = false
 	created, err := store.Create(context.Background(), &CreateTaskRequest{
 		Spec: spec, LeaseExpiryPolicy: LeaseExpiryRetry,

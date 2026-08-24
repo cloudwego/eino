@@ -281,7 +281,7 @@ func durableProgressTask[M adk.MessageType](
 	return &background.TaskSnapshot{
 		Spec: background.Spec{
 			ID: "subagent_task", ExecutorKey: durablesubagent.ExecutorKey,
-			Kind: TaskKindSubagent, Payload: payload, SessionID: "parent",
+			Kind: TaskKindSubagent, Payload: payload, RootSessionID: "parent",
 		},
 		Status: status,
 	}
@@ -336,7 +336,7 @@ func progressController[M adk.MessageType](
 			Barrier: progressBarrier[M]{},
 			EventToInput: func(
 				context.Context,
-				[]*task.Input,
+				[]*task.InputRecord,
 			) (*adk.TypedAgentInput[M], error) {
 				return nil, errors.New("unused")
 			},

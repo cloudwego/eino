@@ -135,8 +135,8 @@ type Config struct {
 	// nil, the same in-memory reference provider supplies both capabilities.
 	TaskEvents TaskEventStore
 	// SendTaskCreatedEvent emits a TaskCreated timeline event after a task is
-	// durably created. It may be called concurrently. Tasks without a parent
-	// SessionID do not emit this event. Use TaskCreatedSessionEventSender so the
+	// durably created. It may be called concurrently. Root tasks without a
+	// RootSessionID do not emit this event. Use TaskCreatedSessionEventSender so the
 	// active Runner assigns and persists the event in causal turn order.
 	SendTaskCreatedEvent func(context.Context, *TaskSnapshot) error
 	// IDGen, when set, decides the full ID of every task created by this Manager.
