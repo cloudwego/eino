@@ -1010,8 +1010,8 @@ func (r *runner) validateCheckpointIntegrity(cp *checkpoint) error {
 		if !ok || call.action.meta == nil {
 			continue
 		}
-		component := call.action.meta.component
-		if component != ComponentOfGraph && component != ComponentOfChain && component != ComponentOfWorkflow {
+		cmp := call.action.meta.component
+		if cmp != ComponentOfGraph && cmp != ComponentOfChain && cmp != ComponentOfWorkflow {
 			continue
 		}
 		if subCP, hasSubGraph := cp.SubGraphs[key]; hasSubGraph && subCP != nil {
