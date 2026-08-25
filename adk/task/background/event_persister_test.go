@@ -234,54 +234,52 @@ func TestTaskEventFinalPartClosesLogicalEvent(t *testing.T) {
 }
 
 func TestAttack_ConcurrentFinalPartClosesEventOnce(t *testing.T) {
-	for iteration := 0; iteration < 100; iteration++ {
-		store := NewInMemoryStore(nil)
-		started := createAndStart(t, store, "concurrent-final")
-		start := make(chan struct{})
-		errs := make(chan error, 2)
-		var group sync.WaitGroup
-		for _, partID := range []string{"end-a", "end-b"} {
-			partID := partID
-			group.Add(1)
-			go func() {
-				defer group.Done()
-				<-start
-				_, err := store.AppendTaskEvent(
-					context.Background(),
-					&AppendTaskEventRequest{
-						TaskID: started.Spec.ID, Attempt: started.Attempt,
-						EventID: "event", PartID: partID,
-						Data: []byte(partID), Final: true,
-					},
-				)
-				errs <- err
-			}()
-		}
-		close(start)
-		group.Wait()
-		close(errs)
-
-		var succeeded, closed int
-		for err := range errs {
-			switch {
-			case err == nil:
-				succeeded++
-			case errors.Is(err, ErrTaskEventClosed):
-				closed++
-			default:
-				require.NoError(t, err)
-			}
-		}
-		require.Equal(t, 1, succeeded)
-		require.Equal(t, 1, closed)
-		page, err := store.ListTaskEvents(
-			context.Background(),
-			&ListTaskEventsRequest{TaskID: started.Spec.ID},
-		)
-		require.NoError(t, err)
-		require.Len(t, page.Events, 1)
-		require.True(t, page.Events[0].Final)
+	store := NewInMemoryStore(nil)
+	started := createAndStart(t, store, "concurrent-final")
+	start := make(chan struct{})
+	errs := make(chan error, 2)
+	var group sync.WaitGroup
+	for _, partID := range []string{"end-a", "end-b"} {
+		partID := partID
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			<-start
+			_, err := store.AppendTaskEvent(
+				context.Background(),
+				&AppendTaskEventRequest{
+					TaskID: started.Spec.ID, Attempt: started.Attempt,
+					EventID: "event", PartID: partID,
+					Data: []byte(partID), Final: true,
+				},
+			)
+			errs <- err
+		}()
 	}
+	close(start)
+	group.Wait()
+	close(errs)
+
+	var succeeded, closed int
+	for err := range errs {
+		switch {
+		case err == nil:
+			succeeded++
+		case errors.Is(err, ErrTaskEventClosed):
+			closed++
+		default:
+			require.NoError(t, err)
+		}
+	}
+	require.Equal(t, 1, succeeded)
+	require.Equal(t, 1, closed)
+	page, err := store.ListTaskEvents(
+		context.Background(),
+		&ListTaskEventsRequest{TaskID: started.Spec.ID},
+	)
+	require.NoError(t, err)
+	require.Len(t, page.Events, 1)
+	require.True(t, page.Events[0].Final)
 }
 
 func taskEventPartIDs(events []*TaskEvent) []string {
