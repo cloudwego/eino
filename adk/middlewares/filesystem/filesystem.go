@@ -28,6 +28,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/slongfield/pyfmt"
 
@@ -706,7 +707,7 @@ func newRecoverableExecuteTool(
 				},
 				"timeout": {
 					Type: schema.Integer,
-					Desc: "Optional foreground timeout in milliseconds; ignored when run_in_background is true",
+					Desc: "Optional foreground timeout in seconds, up to 3 days. Ignored when run_in_background is true. At expiry, the command stops unless the host allows automatic backgrounding for this command; then it continues as a background task.",
 				},
 			}),
 		},
@@ -730,10 +731,10 @@ func newRecoverableExecuteTool(
 		},
 		InvocationTimeoutMs: func(_ context.Context, arguments string) *int {
 			var input executeManagedArgs
-			if json.Unmarshal([]byte(arguments), &input) != nil || input.TimeoutMS <= 0 {
+			if json.Unmarshal([]byte(arguments), &input) != nil {
 				return nil
 			}
-			return &input.TimeoutMS
+			return foregroundTimeoutMsForToolArgument(input.TimeoutSeconds)
 		},
 	})
 }
@@ -1236,11 +1237,24 @@ type executeArgs struct {
 type executeManagedArgs struct {
 	executeArgs
 	RunInBackground bool `json:"run_in_background,omitempty" jsonschema_description:"Set to true to run the command in the background. Use task_output to query it and task_stop to cancel it."`
-	// TimeoutMS is the foreground timeout in milliseconds. When omitted, the configured
-	// default applies. Ignored when run_in_background is true. What happens at the
-	// deadline (move to background vs. stop) is decided by the Manager's
-	// ShouldAutoBackground policy and is intentionally not surfaced to the model.
-	TimeoutMS int `json:"timeout,omitempty" jsonschema_description:"Optional foreground wait in milliseconds. Ignored when run_in_background is true. At expiry, host policy either detaches the command or stops it. Omit to use the configured default."`
+	// TimeoutSeconds is the foreground timeout in seconds. When omitted, the configured
+	// default applies. Ignored when run_in_background is true. At expiry, the
+	// command stops unless the Manager's ShouldAutoBackground policy allows
+	// automatic backgrounding for this command.
+	TimeoutSeconds int `json:"timeout,omitempty" jsonschema_description:"Optional foreground wait in seconds, up to 3 days. Ignored when run_in_background is true. At expiry, the command stops unless the host allows automatic backgrounding for this command; then it continues as a background task. Omit to use the configured default."`
+}
+
+const maxToolArgumentTimeoutSeconds = 3 * 24 * 60 * 60
+
+func foregroundTimeoutMsForToolArgument(seconds int) *int {
+	if seconds <= 0 {
+		return nil
+	}
+	if seconds > maxToolArgumentTimeoutSeconds {
+		seconds = maxToolArgumentTimeoutSeconds
+	}
+	timeoutMs := seconds * int(time.Second/time.Millisecond)
+	return &timeoutMs
 }
 
 func newExecuteTool(sb filesystem.Shell, name string, desc string) (tool.BaseTool, error) {
