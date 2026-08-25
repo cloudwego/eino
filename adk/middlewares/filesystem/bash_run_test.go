@@ -427,7 +427,7 @@ func TestManagedExecuteTool_TimeoutMovesToBackground(t *testing.T) {
 	}()
 
 	tools, err := getFilesystemTools(context.Background(), &MiddlewareConfig{
-		Shell: &slowShell{delay: 200 * time.Millisecond, out: "slow done"},
+		Shell: &slowShell{delay: 1200 * time.Millisecond, out: "slow done"},
 		Background: &BackgroundConfig{
 			Local: &LocalBackgroundConfig{
 				Runner: mustLocalRunner(t, mgr, func(config *backgroundlocal.Config) {
@@ -441,8 +441,8 @@ func TestManagedExecuteTool_TimeoutMovesToBackground(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// timeout=50ms < 200ms command → moved to background.
-	result, err := invokeTool(t, tools[0], `{"command":"sleep","timeout":50}`)
+	// timeout=1s < 1.2s command → moved to background.
+	result, err := invokeTool(t, tools[0], `{"command":"sleep","timeout":1}`)
 	require.NoError(t, err)
 	assert.Contains(t, result, "Command running in background with ID:")
 
@@ -462,7 +462,7 @@ func TestManagedExecuteTool_TimeoutKills(t *testing.T) {
 	}()
 
 	tools, err := getFilesystemTools(context.Background(), &MiddlewareConfig{
-		Shell: &slowShell{delay: time.Second, out: "never"},
+		Shell: &slowShell{delay: 2 * time.Second, out: "never"},
 		Background: &BackgroundConfig{
 			Local: &LocalBackgroundConfig{Runner: mustLocalRunner(t, mgr)},
 		},
@@ -470,8 +470,8 @@ func TestManagedExecuteTool_TimeoutKills(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	_, err = invokeTool(t, tools[0], `{"command":"sleep","timeout":50}`)
-	require.ErrorContains(t, err, "timed out after 50ms")
+	_, err = invokeTool(t, tools[0], `{"command":"sleep","timeout":1}`)
+	require.ErrorContains(t, err, "timed out after 1000ms")
 }
 
 func TestShellPayloadV1AndCommandFromTask(t *testing.T) {
@@ -484,12 +484,44 @@ func TestShellPayloadV1AndCommandFromTask(t *testing.T) {
 	}}
 	assert.Equal(t, "echo hello", CommandFromTask(task))
 
+	input, err = managedRunInput(executeManagedArgs{
+		executeArgs:    executeArgs{Command: "echo hello"},
+		TimeoutSeconds: 2,
+	}, &bashOutputWriter{}, "test-session")
+	require.NoError(t, err)
+	require.NotNil(t, input.ForegroundTimeoutMs)
+	assert.Equal(t, 2000, *input.ForegroundTimeoutMs)
+
 	payload := shellPayloadV1{Version: 2, Command: "echo hello"}
 	task.Spec.Payload, err = json.Marshal(payload)
 	require.NoError(t, err)
 	assert.Empty(t, CommandFromTask(task))
 	_, err = decodeShellPayload(task.Spec.Payload)
 	assert.ErrorIs(t, err, backgroundtask.ErrUnsupportedExecutorPayloadVersion)
+}
+
+func TestForegroundTimeoutMsForToolArgument(t *testing.T) {
+	tests := []struct {
+		name    string
+		seconds int
+		want    int
+	}{
+		{name: "omitted", seconds: 0},
+		{name: "one second", seconds: 1, want: 1000},
+		{name: "maximum", seconds: 3 * 24 * 60 * 60, want: 3 * 24 * 60 * 60 * 1000},
+		{name: "clamped", seconds: 3*24*60*60 + 1, want: 3 * 24 * 60 * 60 * 1000},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			timeout := foregroundTimeoutMsForToolArgument(test.seconds)
+			if test.seconds <= 0 {
+				assert.Nil(t, timeout)
+				return
+			}
+			require.NotNil(t, timeout)
+			assert.Equal(t, test.want, *timeout)
+		})
+	}
 }
 
 // With a Manager, the execute tool schema gains run_in_background and timeout fields.
@@ -668,8 +700,10 @@ func TestManagedExecuteTool_Schema(t *testing.T) {
 	assert.True(t, ok)
 	_, ok = js.Properties.Get("run_in_background")
 	assert.True(t, ok)
-	_, ok = js.Properties.Get("timeout")
+	timeout, ok := js.Properties.Get("timeout")
 	assert.True(t, ok)
+	assert.Contains(t, timeout.Description, "seconds")
+	assert.Contains(t, timeout.Description, "stops unless the host allows automatic backgrounding")
 }
 
 // Without a Manager, the execute tool is command-only and untracked.

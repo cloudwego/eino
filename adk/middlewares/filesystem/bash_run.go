@@ -400,11 +400,11 @@ func managedRunInput(
 		SessionID:       sessionID,
 		NotifySession:   sessionID != "",
 	}
-	// A positive timeout overrides the Manager's default foreground timeout for
-	// this command. When the deadline expires, the Manager's policy decides
-	// whether to move the task to the background or stop it.
-	if input.TimeoutMS > 0 {
-		runInput.ForegroundTimeoutMs = &input.TimeoutMS
+	// A positive timeout in seconds overrides the Manager's default foreground
+	// timeout for this command. When the deadline expires, the Manager's policy
+	// decides whether to move the task to the background or stop it.
+	if timeoutMs := foregroundTimeoutMsForToolArgument(input.TimeoutSeconds); timeoutMs != nil {
+		runInput.ForegroundTimeoutMs = timeoutMs
 	}
 	return runInput, nil
 }
