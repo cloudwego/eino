@@ -2123,6 +2123,50 @@ func TestAttack_InterruptOriginUsesCurrentGraphBoundary(t *testing.T) {
 	})
 }
 
+func TestAttack_FanOutLateInterruptIsDeduplicated(t *testing.T) {
+	ctx := context.Background()
+	producer := StreamableLambda(func(ctx context.Context, _ string) (*schema.StreamReader[string], error) {
+		interruptErr := StatefulInterrupt(ctx, "approval", "state")
+		r, w := schema.Pipe[string](1)
+		w.Send("", interruptErr)
+		w.Close()
+		return r, nil
+	})
+	consumer := func(_ context.Context, input *schema.StreamReader[string]) (string, error) {
+		return concatStreamReader(input)
+	}
+
+	graph := NewGraph[string, string]()
+	require.NoError(t, graph.AddLambdaNode("ToolNode", producer))
+	require.NoError(t, graph.AddLambdaNode("consumer_a", CollectableLambda(consumer)))
+	require.NoError(t, graph.AddLambdaNode("consumer_b", CollectableLambda(consumer)))
+	require.NoError(t, graph.AddEdge(START, "ToolNode"))
+	require.NoError(t, graph.AddEdge("ToolNode", "consumer_a"))
+	require.NoError(t, graph.AddEdge("ToolNode", "consumer_b"))
+	require.NoError(t, graph.AddEdge("consumer_a", END))
+	require.NoError(t, graph.AddEdge("consumer_b", END))
+
+	runnable, err := graph.Compile(ctx, WithCheckPointStore(newInMemoryStore()))
+	require.NoError(t, err)
+	_, err = runnable.Stream(ctx, "input", WithCheckPointID("fan-out-interrupt"))
+	info, ok := ExtractInterruptInfo(err)
+	require.True(t, ok)
+	assert.Equal(t, []string{"ToolNode"}, info.RerunNodes)
+	require.Len(t, info.InterruptContexts, 1)
+}
+
+func TestAttack_EmptyIDInterruptSignalsRemainDistinct(t *testing.T) {
+	first := &core.InterruptSignal{}
+	second := &core.InterruptSignal{}
+	tempInfo := newInterruptTempInfo()
+
+	tempInfo.appendSignal(first)
+	tempInfo.appendSignal(second)
+	tempInfo.appendSignal(first)
+
+	assert.Equal(t, []*core.InterruptSignal{first, second}, tempInfo.signals)
+}
+
 func TestRestoreRejectsInputlessSubGraphRerunCheckpoint(t *testing.T) {
 	ctx := context.Background()
 	store := newInMemoryStore()

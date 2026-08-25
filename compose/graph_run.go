@@ -448,6 +448,18 @@ type interruptTempInfo struct {
 	signals []*core.InterruptSignal
 }
 
+func (ti *interruptTempInfo) appendSignal(signal *core.InterruptSignal) {
+	if signal == nil {
+		return
+	}
+	for _, existing := range ti.signals {
+		if existing == signal || signal.ID != "" && existing.ID == signal.ID {
+			return
+		}
+	}
+	ti.signals = append(ti.signals, signal)
+}
+
 func (ti *interruptTempInfo) collectCanceledInfo(canceled bool, canceledTasks, completedTasks []*task) {
 	if !canceled {
 		return
@@ -469,7 +481,7 @@ func (r *runner) resolveInterruptCompletedTasks(tempInfo *interruptTempInfo, com
 		if completedTask.err != nil {
 			if info := isSubGraphInterrupt(completedTask.err); info != nil {
 				tempInfo.subGraphInterrupts[completedTask.nodeKey] = info
-				tempInfo.signals = append(tempInfo.signals, info.signal)
+				tempInfo.appendSignal(info.signal)
 				continue
 			}
 
@@ -484,7 +496,7 @@ func (r *runner) resolveInterruptCompletedTasks(tempInfo *interruptTempInfo, com
 					tempInfo.interruptRerunExtra[rerunNodeKey] = ire.InterruptInfo.Info
 				}
 
-				tempInfo.signals = append(tempInfo.signals, ire)
+				tempInfo.appendSignal(ire)
 				continue
 			}
 

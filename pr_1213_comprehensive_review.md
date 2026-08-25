@@ -10,7 +10,7 @@
 
 ### Findings
 
-No blocking design findings.
+No blocking design findings in either review pass.
 
 1. **Concept coherence (5/5)**: interrupt control metadata remains separate from materialized stream data.
 2. **API usability (5/5)**: no public API changes.
@@ -48,10 +48,12 @@ All recommendations are verification work; no design change is required before S
 | High | A stream emits data before its terminal interrupt | `TestAgenticReact_LateStreamInterruptResume` | Pass |
 | High | An unrecorded interrupt must not be swallowed during checkpoint conversion | `TestAttack_CheckpointStreamConversionRejectsUnrecordedInterrupt` | Pass |
 | Medium | Reused node names across nested graph boundaries must not change ownership | `TestAttack_InterruptOriginUsesCurrentGraphBoundary` | Pass |
+| High | Fan-out consumers must not duplicate one late interrupt context | `TestAttack_FanOutLateInterruptIsDeduplicated` | Fixed and passing |
+| Medium | Independent legacy signals with empty IDs must remain distinct | `TestAttack_EmptyIDInterruptSignalsRemainDistinct` | Pass |
 
 The initial attack test had a compile-only assertion error because `IsInterruptRerunError` returns two values. The test was corrected without changing production code, then all attack tests passed.
 
-No confirmed bugs remain after the first attack iteration.
+The second review pass found one confirmed fan-out bug. `interruptTempInfo.appendSignal` now deduplicates the same signal pointer or non-empty signal ID while preserving distinct empty-ID signals. Re-attack and the full suite pass.
 
 ## Stage 3: Test Audit
 
@@ -71,16 +73,17 @@ No true duplicate or coverage-only tests were found. The direct Runner and TurnL
 ### Coverage
 
 - Combined `adk` and `compose` statement coverage: 88.1%.
-- Incremental executable-line coverage: 94.57%.
-- Changed critical functions range from 85.7% to 100%.
+- Incremental executable-line coverage after the second review: 93.20%.
+- Changed critical functions range from 83.3% to 100%.
 - Every changed function with important branching logic is above the 70% hard floor.
 - `interruptOriginNodeKey` increased from 81.8% to 90.9%.
+- New `appendSignal` coverage is 83.3%.
 
 ## Final Summary
 
 ## Overview
 
-- **Iterations**: Design 1, Attack 1, Test Audit 1
+- **Iterations**: Design 2, Attack 2, Test Audit 2
 - **Production files modified**: 5
 - **Test files modified**: 3
 
@@ -89,10 +92,12 @@ No true duplicate or coverage-only tests were found. The direct Runner and TurnL
 | Stage | Result |
 |-------|--------|
 | Design | No blocking findings; no public API changes |
-| Attack | Three high-value edge cases verified; no confirmed bugs |
+| Attack | One fan-out duplication bug fixed; all attack tests pass |
 | Test Audit | Strengthened middleware state assertions, removed one unreachable check, and raised incremental coverage to 94.57% |
 
 The final test matrix covers direct Runner and TurnLoop execution in both streaming and non-streaming modes. The streaming case uses a named tool-call middleware, a successful stream return, a partial chunk, an ordinary terminal error, and `schema.WithErrWrapper` conversion to a second `tool.StatefulInterrupt`.
+
+The second attack pass additionally proves that multiple consumers of the same interrupted stream produce one user-facing interrupt context, while independent empty-ID legacy signals are not collapsed.
 
 ## Verification
 
