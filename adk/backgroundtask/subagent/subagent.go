@@ -604,6 +604,8 @@ func decodeResumeTargets(data []byte) (map[string]any, error) {
 	return targets, nil
 }
 
+// handleRunError translates agent event and output materialization errors into
+// durable task lifecycle outcomes when a control request is active.
 func (e *Executor[M]) handleRunError(
 	ctx context.Context,
 	iter *adk.AsyncIterator[*adk.TypedAgentEvent[M]],

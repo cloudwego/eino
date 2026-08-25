@@ -946,6 +946,45 @@ func TestHandleRunErrorControlOutcomes(t *testing.T) {
 	})
 }
 
+func TestAttack_StreamCanceledWithoutControlRemainsFailure(t *testing.T) {
+	executor := newTestExecutor(t, nil)
+	task := &backgroundtask.Task{Spec: backgroundtask.Spec{ID: "task"}}
+	iter, generator := adk.NewAsyncIteratorPair[*adk.AgentEvent]()
+	generator.Close()
+
+	result, err := executor.handleRunError(
+		context.Background(), iter, task,
+		make(chan backgroundtask.ControlRequest), adk.ErrStreamCanceled,
+	)
+
+	require.Nil(t, result)
+	require.ErrorIs(t, err, adk.ErrStreamCanceled)
+}
+
+func TestAttack_DrainControlAfterStreamCancellationSuspends(t *testing.T) {
+	store := adksession.NewInMemoryStore[*schema.Message](nil)
+	executor := newTestExecutor(t, store)
+	task := &backgroundtask.Task{Spec: backgroundtask.Spec{ID: "task"}}
+	require.NoError(t, store.Set(
+		context.Background(), checkpointID(task.Spec.ID), []byte("runner checkpoint"),
+	))
+	iter, generator := adk.NewAsyncIteratorPair[*adk.AgentEvent]()
+	generator.Close()
+	controls := make(chan backgroundtask.ControlRequest)
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		controls <- backgroundtask.ControlRequest{Kind: backgroundtask.ControlDrain}
+	}()
+
+	result, err := executor.handleRunError(
+		context.Background(), iter, task, controls, adk.ErrStreamCanceled,
+	)
+
+	require.NoError(t, err)
+	require.Equal(t, backgroundtask.StatusSuspended, result.Status)
+	require.JSONEq(t, `{"sequence":1}`, string(result.Checkpoint))
+}
+
 func TestSubagentPayloadValidation_BitsUT(t *testing.T) {
 	executor, spec, _ := resumeFixture(t, "approval")
 	require.NoError(t, executor.ValidateSpec(spec))
