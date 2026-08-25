@@ -23,7 +23,9 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -31,6 +33,9 @@ import (
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/adk/backgroundtask"
 	adksession "github.com/cloudwego/eino/adk/session"
+	"github.com/cloudwego/eino/components/model"
+	componenttool "github.com/cloudwego/eino/components/tool"
+	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -79,6 +84,105 @@ type contextCaptureAgent struct {
 	name     string
 	contexts chan context.Context
 	release  chan struct{}
+}
+
+type drainTimeoutModel struct {
+	started chan struct{}
+	calls   int32
+}
+
+func (m *drainTimeoutModel) Generate(
+	ctx context.Context,
+	_ []*schema.Message,
+	_ ...model.Option,
+) (*schema.Message, error) {
+	if atomic.AddInt32(&m.calls, 1) == 1 {
+		close(m.started)
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	return schema.AssistantMessage("resumed", nil), nil
+}
+
+func (m *drainTimeoutModel) Stream(
+	ctx context.Context,
+	input []*schema.Message,
+	options ...model.Option,
+) (*schema.StreamReader[*schema.Message], error) {
+	message, err := m.Generate(ctx, input, options...)
+	if err != nil {
+		return nil, err
+	}
+	return schema.StreamReaderFromArray([]*schema.Message{message}), nil
+}
+
+func (*drainTimeoutModel) BindTools([]*schema.ToolInfo) error { return nil }
+
+type drainTimeoutToolModel struct {
+	calls int32
+}
+
+func (m *drainTimeoutToolModel) Generate(
+	_ context.Context,
+	_ []*schema.Message,
+	_ ...model.Option,
+) (*schema.Message, error) {
+	if atomic.AddInt32(&m.calls, 1) == 1 {
+		return &schema.Message{
+			Role: schema.Assistant,
+			ToolCalls: []schema.ToolCall{{
+				ID:   "call-1",
+				Type: "function",
+				Function: schema.FunctionCall{
+					Name:      "wait",
+					Arguments: `{"input":"work"}`,
+				},
+			}},
+		}, nil
+	}
+	return schema.AssistantMessage("resumed", nil), nil
+}
+
+func (m *drainTimeoutToolModel) Stream(
+	ctx context.Context,
+	input []*schema.Message,
+	options ...model.Option,
+) (*schema.StreamReader[*schema.Message], error) {
+	message, err := m.Generate(ctx, input, options...)
+	if err != nil {
+		return nil, err
+	}
+	return schema.StreamReaderFromArray([]*schema.Message{message}), nil
+}
+
+func (*drainTimeoutToolModel) BindTools([]*schema.ToolInfo) error { return nil }
+
+type drainTimeoutTool struct {
+	started chan struct{}
+	calls   int32
+}
+
+func (*drainTimeoutTool) Info(context.Context) (*schema.ToolInfo, error) {
+	return &schema.ToolInfo{
+		Name: "wait",
+		Desc: "waits for cancellation",
+		ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
+			"input": {Type: schema.String},
+		}),
+	}, nil
+}
+
+func (t *drainTimeoutTool) InvokableRun(
+	ctx context.Context,
+	_ string,
+	_ ...componenttool.Option,
+) (string, error) {
+	if atomic.AddInt32(&t.calls, 1) == 1 {
+		close(t.started)
+		<-ctx.Done()
+		return "", ctx.Err()
+	}
+	return "resumed tool", nil
 }
 
 type historyCaptureAgent struct {
@@ -322,6 +426,96 @@ func (subagentContextSnapshotter) RestoreContext(ctx context.Context, snapshot [
 
 func textInput(query string) *adk.AgentInput {
 	return &adk.AgentInput{Messages: []*schema.Message{schema.UserMessage(query)}}
+}
+
+func executeDrainTimeout(
+	t *testing.T,
+	agent adk.ResumableAgent,
+	waitUntilRunning <-chan struct{},
+) (*backgroundtask.Task, *adksession.InMemoryStore[*schema.Message]) {
+	t.Helper()
+	store := adksession.NewInMemoryStore[*schema.Message](nil)
+	executor, err := NewExecutor(&ExecutorConfig[*schema.Message]{
+		SessionStore:       store,
+		CheckPointStore:    store,
+		DrainCancelTimeout: 20 * time.Millisecond,
+	})
+	require.NoError(t, err)
+	require.NoError(t, executor.Register("worker", &AgentRegistration[*schema.Message]{
+		Agent: agent,
+	}))
+	registry := backgroundtask.NewExecutorRegistry()
+	require.NoError(t, registry.Register(executor))
+	manager := mustNewBackgroundManager(t, context.Background(), &backgroundtask.Config{
+		Executors: registry,
+	})
+	task, err := Submit(context.Background(), manager, &SubmitRequest[*schema.Message]{
+		SubAgentName: "worker",
+		Input: &adk.AgentInput{
+			Messages:        []*schema.Message{schema.UserMessage("work")},
+			EnableStreaming: true,
+		},
+		SessionID: "parent",
+	})
+	require.NoError(t, err)
+
+	executeDone := make(chan error, 1)
+	go func() {
+		executeDone <- manager.Execute(context.Background(), task.Spec.ID)
+	}()
+	select {
+	case <-waitUntilRunning:
+	case <-time.After(time.Second):
+		t.Fatal("sub-agent did not reach the blocked operation")
+	}
+
+	closeCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	require.NoError(t, manager.Close(closeCtx))
+	require.NoError(t, <-executeDone)
+
+	suspended, err := manager.Get(context.Background(), task.Spec.ID)
+	require.NoError(t, err)
+	require.Equal(t, backgroundtask.StatusSuspended, suspended.Status)
+	_, exists, err := store.Get(context.Background(), checkpointID(task.Spec.ID))
+	require.NoError(t, err)
+	require.True(t, exists)
+	return task, store
+}
+
+func requireDrainCheckpointResumes(
+	t *testing.T,
+	task *backgroundtask.Task,
+	store *adksession.InMemoryStore[*schema.Message],
+	agent adk.ResumableAgent,
+) {
+	t.Helper()
+	childSessionID, err := ChildSessionIDFromTask(task)
+	require.NoError(t, err)
+	runner := adk.NewRunner(context.Background(), adk.RunnerConfig{
+		Agent:           agent,
+		EnableStreaming: true,
+		CheckPointStore: store,
+		SessionID:       childSessionID,
+		SessionStore:    store,
+	})
+	iter, err := runner.Resume(context.Background(), checkpointID(task.Spec.ID))
+	require.NoError(t, err)
+	var final string
+	for {
+		event, open := iter.Next()
+		if !open {
+			break
+		}
+		require.NoError(t, event.Err)
+		if event.Output == nil || event.Output.MessageOutput == nil {
+			continue
+		}
+		message, messageErr := event.Output.MessageOutput.GetMessage()
+		require.NoError(t, messageErr)
+		final = message.Content
+	}
+	require.Equal(t, "resumed", final)
 }
 
 func TestNewExecutorRequiresDependencies_BitsUT(t *testing.T) {
@@ -1053,6 +1247,36 @@ func TestExecutorDrainUsesDurableRunnerCheckpoint_BitsUT(t *testing.T) {
 	result, err := manager.Get(context.Background(), task.Spec.ID)
 	require.NoError(t, err)
 	assert.Equal(t, backgroundtask.StatusWaitingInput, result.Status)
+}
+
+func TestExecutorDrainTimeoutEscalatesBlockedModelAndResumes_BitsUT(t *testing.T) {
+	model := &drainTimeoutModel{started: make(chan struct{})}
+	agent, err := adk.NewChatModelAgent(context.Background(), &adk.ChatModelAgentConfig{
+		Name: "worker", Description: "drain timeout test", Model: model,
+	})
+	require.NoError(t, err)
+
+	task, store := executeDrainTimeout(t, agent, model.started)
+	requireDrainCheckpointResumes(t, task, store, agent)
+	require.GreaterOrEqual(t, atomic.LoadInt32(&model.calls), int32(2))
+}
+
+func TestExecutorDrainTimeoutEscalatesBlockedToolAndResumes_BitsUT(t *testing.T) {
+	model := &drainTimeoutToolModel{}
+	tool := &drainTimeoutTool{started: make(chan struct{})}
+	agent, err := adk.NewChatModelAgent(context.Background(), &adk.ChatModelAgentConfig{
+		Name: "worker", Description: "drain timeout test", Model: model,
+		ToolsConfig: adk.ToolsConfig{
+			ToolsNodeConfig: compose.ToolsNodeConfig{
+				Tools: []componenttool.BaseTool{tool},
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	task, store := executeDrainTimeout(t, agent, tool.started)
+	requireDrainCheckpointResumes(t, task, store, agent)
+	require.GreaterOrEqual(t, atomic.LoadInt32(&model.calls), int32(2))
 }
 
 func TestControlAndInterruptUseRunnerCheckpoint(t *testing.T) {

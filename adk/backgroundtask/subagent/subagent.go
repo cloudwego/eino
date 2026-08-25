@@ -131,6 +131,11 @@ type ExecutorConfig[M adk.MessageType] struct {
 	CheckPointStore adk.CheckPointStore
 	// SessionConfig optionally customizes child-session persistence.
 	SessionConfig *adk.SessionConfig[M]
+	// DrainCancelTimeout bounds safe-point cancellation during ControlDrain. A
+	// positive value escalates the cancellation to checkpointable immediate
+	// cancellation when the safe point is not reached before the timeout.
+	// Zero preserves unbounded safe-point cancellation.
+	DrainCancelTimeout time.Duration
 }
 
 // Executor runs durable sub-agent tasks through ADK Runner checkpointing.
@@ -139,6 +144,7 @@ type Executor[M adk.MessageType] struct {
 	sessionStoreFactory SessionStoreFactory[M]
 	checkPointStore     adk.CheckPointStore
 	sessionConfig       *adk.SessionConfig[M]
+	drainCancelTimeout  time.Duration
 
 	mu            sync.RWMutex
 	registrations map[string]*AgentRegistration[M]
@@ -163,6 +169,7 @@ func NewExecutor[M adk.MessageType](config *ExecutorConfig[M]) (*Executor[M], er
 		sessionStoreFactory: config.SessionStoreFactory,
 		checkPointStore:     config.CheckPointStore,
 		sessionConfig:       sessionConfig,
+		drainCancelTimeout:  config.DrainCancelTimeout,
 	}, nil
 }
 
@@ -447,6 +454,10 @@ func (e *Executor[M]) Execute(
 			if control.Kind == backgroundtask.ControlDrain {
 				cancelOptions = append(cancelOptions,
 					adk.WithAgentCancelMode(adk.CancelAfterChatModel|adk.CancelAfterToolCalls))
+				if e.drainCancelTimeout > 0 {
+					cancelOptions = append(cancelOptions,
+						adk.WithAgentCancelTimeout(e.drainCancelTimeout))
+				}
 			} else {
 				cancelOptions = append(cancelOptions, adk.WithAgentCancelMode(adk.CancelImmediate))
 			}
