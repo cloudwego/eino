@@ -639,7 +639,7 @@ type ExecutionResult struct {
 ```go
 type ExecutionRuntime interface {
 	Controls() <-chan ControlRequest
-	EmitProgress(context.Context, string, []byte) (ProgressEmission, error)
+	NewTaskEventWriter(string) (TaskEventScope, TaskEventWriter)
 	ReportTranscriptFailure(context.Context, error) error
 	ListInputs(context.Context, int64, int) (*task.ListInputsResult, error)
 	WaitInputs(context.Context, int64) (*task.ListInputsResult, error)
@@ -650,6 +650,30 @@ type ExecutionRuntime interface {
 ```
 
 它是 attempt-scoped 能力。Executor 不应自行拼接 version、generation 或 lease token。
+`NewTaskEventWriter` 生成或绑定 logical EventID，返回的 writer 在每次 part 写入时
+重新校验 attempt authority。
+
+原始事件和 stream 不在这里提前变成 `[]byte`。Executor 使用泛型 persister：
+
+```go
+type TaskEventEnvelope[E, Chunk any] struct {
+	Event  E
+	Stream *schema.StreamReader[Chunk]
+}
+
+type TaskEventPersister[E, Chunk any] interface {
+	Persist(
+		context.Context,
+		TaskEventScope,
+		*TaskEventEnvelope[E, Chunk],
+		TaskEventWriter,
+	) ([]*AppendTaskEventResult, error)
+}
+```
+
+`Stream` 必须是 persistence-owned copy。Persister 自行序列化 Event、消费并关闭
+stream，再通过 `TaskEventWriter.Append` 写入一个或多个 durable part。live
+projection 必须使用另一份 stream copy。
 
 ### Manager 方法
 
@@ -789,7 +813,18 @@ type LifecycleStore interface {
 
 #### `TaskEventStore`
 
-保存 append-only 进度事件。EventID 在一个 Task 生命周期内幂等。
+保存 append-only event parts：
+
+- `EventID` 标识一个 logical event。
+- `PartID` 标识该 event 中可幂等重放的一部分。
+- `(TaskID, EventID, PartID)` 相同且内容相同是幂等 replay。
+- 同 key 不同内容返回 `ErrTaskEventPartConflict`。
+- `Final=true` 后拒绝该 EventID 的新 part。
+- 每次 part append 都必须重新校验 active attempt，不能在整个 stream 期间持有
+  一次性 authorization。
+
+Store 只负责 durable bytes 和 fencing；typed event 序列化及 stream 处理由
+executor-specific `TaskEventPersister` 完成。
 
 #### `NotificationWriter`
 
@@ -1070,6 +1105,10 @@ type StreamWorkFunc func(
 ) (*schema.StreamReader[string], error)
 ```
 
+`local.Config.EventPersister` 可以替换默认的 UTF-8 chunk 序列化。Persister
+接收原始 string event；streaming work 的每个输出 chunk 是一个独立 logical
+event。
+
 #### `Runner.Run`
 
 执行 buffered work。配置 auto-background 时，work 从开始就在 Manager attempt
@@ -1114,6 +1153,9 @@ Worker 丢失后通过 TaskID 和 checkpoint 恢复同一个外部操作。
 #### `ResumableTool`
 
 在 `OutcomeInterrupted` 后接收 durable input，并继续原来的逻辑操作。
+
+`tool.Registration.EventPersister` 可以替换默认 JSON `Update` 序列化。自定义
+persister 与对应的 `ProgressReader` 应使用同一 durable record 格式。
 
 #### `Run`
 
@@ -1204,6 +1246,13 @@ type TypedTaskConfig[M adk.MessageType] struct {
 	TranscriptFormat TranscriptFormat[M]
 }
 
+type TypedLocalTaskConfig[M adk.MessageType] struct {
+	Runner         *local.Runner
+	OutputStore    filesystem.AppendOpener
+	OutputDir      string
+	EventPersister background.TaskEventPersister[*adk.TypedAgentEvent[M], M]
+}
+
 type TypedDurableTaskConfig[M adk.MessageType] struct {
 	Runtime             *tasksubagent.Controller[M]
 	RunOptionsFactories map[string]tasksubagent.RunOptionsFactory
@@ -1211,6 +1260,10 @@ type TypedDurableTaskConfig[M adk.MessageType] struct {
 ```
 
 `Local` 和 `Durable` 必须且只能配置一个。
+
+Local Sub-agent 的 `EventPersister` 会收到不包含 reader 的原始 AgentEvent 元数据，
+以及单独的 persistence stream copy。它可以自行决定 event/chunk 的序列化与
+part 划分；live AgentEvent 使用另一份 copy。
 
 ### Filesystem middleware
 

@@ -157,6 +157,8 @@ func TestSimplifiedPublicModelHasNoOverlappingStateFields_BitsUT(t *testing.T) {
 		"SuspendIfNoInputs")
 	assertMethodsPresent(t, reflect.TypeOf((*TaskEventStore)(nil)).Elem(),
 		"AppendTaskEvent", "ListTaskEvents")
+	assertMethodsPresent(t, reflect.TypeOf((*TaskEventWriter)(nil)).Elem(),
+		"Append")
 	assertMethodsPresent(t, reflect.TypeOf((*NotificationWriter)(nil)).Elem(),
 		"EnqueueTaskNotification")
 	assertMethodsAbsent(t, reflect.TypeOf((*TaskEventStore)(nil)).Elem(), "ReadRecentTaskEvents")
@@ -180,16 +182,23 @@ func TestSimplifiedPublicModelHasNoOverlappingStateFields_BitsUT(t *testing.T) {
 		"ListSuspended", "AckCancel", "ReleaseSuspension", "CommitStart")
 	assertMethodsAbsent(t, reflect.TypeOf((*Executor)(nil)).Elem(), "ValidateResume")
 	assertMethodsAbsent(t, reflect.TypeOf((*ExecutionRuntime)(nil)).Elem(),
-		"TaskID", "AppendTaskEvent", "ReportOutputFailure")
+		"TaskID", "AppendTaskEvent", "EmitProgress", "ReportOutputFailure")
 	assertMethodsPresent(t, reflect.TypeOf((*ExecutionRuntime)(nil)).Elem(),
-		"EmitProgress", "ReportTranscriptFailure", "CommitStart", "CommitInput")
+		"NewTaskEventWriter", "ReportTranscriptFailure", "CommitStart", "CommitInput")
 	assertFieldsPresent(t, reflect.TypeOf(ExecutionResult{}),
 		"Action", "Checkpoint", "Data", "Error", "InputCursor")
 	assertFieldsAbsent(t, reflect.TypeOf(ExecutionResult{}), "Status", "Directive")
 	assertFieldsPresent(t, reflect.TypeOf(CommitStartRequest{}),
 		"TaskID", "ExpectedVersion", "Checkpoint")
-	assertFieldsPresent(t, reflect.TypeOf(ProgressEmission{}), "EventID", "FirstEmission")
-	assertFieldsPresent(t, reflect.TypeOf(TaskEvent{}), "EventID", "TaskID", "Data", "CreatedAt")
+	assertFieldsPresent(t, reflect.TypeOf(TaskEventScope{}), "TaskID", "Attempt", "EventID")
+	assertFieldsPresent(t, reflect.TypeOf(TaskEventPart{}), "PartID", "Data", "Final")
+	assertFieldsPresent(t, reflect.TypeOf(TaskEventEnvelope[string, string]{}),
+		"Event", "Stream")
+	assertFieldsPresent(t, reflect.TypeOf(TaskEventPersistResult{}), "Scope", "Parts")
+	assertFieldsPresent(t, reflect.TypeOf(AppendTaskEventRequest{}),
+		"TaskID", "Attempt", "EventID", "PartID", "Data", "Final")
+	assertFieldsPresent(t, reflect.TypeOf(TaskEvent{}),
+		"EventID", "PartID", "TaskID", "Data", "Final", "CreatedAt")
 	assertFieldsAbsent(t, reflect.TypeOf(TaskEvent{}), "SourceID", "Sequence", "Attempt")
 }
 

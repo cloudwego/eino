@@ -81,6 +81,11 @@ type taskListCursor struct {
 	LastID       string   `json:"l"`
 }
 
+type taskEventPartKey struct {
+	eventID string
+	partID  string
+}
+
 // InMemoryStore is a deterministic reference implementation of LifecycleStore,
 // TaskEventStore, NotificationWriter, and NotificationOutbox. It is a
 // state-machine test double, not a durable backend.
@@ -89,7 +94,8 @@ type InMemoryStore struct {
 	tasks               map[string]*TaskSnapshot
 	active              map[string]memoryActiveAttempt
 	taskEvents          map[string][]TaskEvent
-	taskEventKeys       map[string]map[string]TaskEvent
+	taskEventKeys       map[string]map[taskEventPartKey]TaskEvent
+	closedTaskEvents    map[string]map[string]struct{}
 	customNotifications map[string]map[string]Notification
 	outbox              []*memoryOutboxItem
 	outboxLeaseID       uint64
@@ -108,7 +114,8 @@ func NewInMemoryStore(config *InMemoryStoreConfig) *InMemoryStore {
 		tasks:               make(map[string]*TaskSnapshot),
 		active:              make(map[string]memoryActiveAttempt),
 		taskEvents:          make(map[string][]TaskEvent),
-		taskEventKeys:       make(map[string]map[string]TaskEvent),
+		taskEventKeys:       make(map[string]map[taskEventPartKey]TaskEvent),
+		closedTaskEvents:    make(map[string]map[string]struct{}),
 		customNotifications: make(map[string]map[string]Notification),
 		mailboxes:           make(map[string]*memoryMailbox),
 		mailboxInvocations:  make(map[mailboxInvocationKey]string),
@@ -493,17 +500,25 @@ func (s *InMemoryStore) AppendTaskEvent(
 	_ context.Context,
 	req *AppendTaskEventRequest,
 ) (*AppendTaskEventResult, error) {
-	if req == nil || req.TaskID == "" || req.Attempt <= 0 || req.EventID == "" {
-		return nil, errors.New("task/background: task event task id, attempt, and event id are required")
+	if req == nil || req.TaskID == "" || req.Attempt <= 0 ||
+		req.EventID == "" {
+		return nil, errors.New(
+			"task/background: task event task id, attempt, and event id are required",
+		)
 	}
-	if len(req.Data) == 0 {
-		return nil, errors.New("task/background: task event data is required")
+	partID, final := req.PartID, req.Final
+	if partID == "" {
+		partID, final = "event", true
 	}
 	if int64(len(req.Data)) > s.maxValue {
-		return nil, errors.New("task/background: task event data exceeds configured limit")
+		return nil, errors.New(
+			"task/background: task event part data exceeds configured limit",
+		)
 	}
-	if len(req.EventID) > 1024 {
-		return nil, errors.New("task/background: task event id exceeds configured limit")
+	if len(req.EventID) > 1024 || len(partID) > 1024 {
+		return nil, errors.New(
+			"task/background: task event or part id exceeds configured limit",
+		)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -511,25 +526,38 @@ func (s *InMemoryStore) AppendTaskEvent(
 		return nil, err
 	}
 	keyed := s.taskEventKeys[req.TaskID]
-	if existing, ok := keyed[req.EventID]; ok {
-		if !bytes.Equal(existing.Data, req.Data) {
-			return nil, ErrTaskEventIDConflict
+	key := taskEventPartKey{eventID: req.EventID, partID: partID}
+	if existing, ok := keyed[key]; ok {
+		if existing.Final != final ||
+			!bytes.Equal(existing.Data, req.Data) {
+			return nil, ErrTaskEventPartConflict
 		}
 		return &AppendTaskEventResult{
 			Event: cloneTaskEvent(&existing),
 		}, nil
 	}
+	if _, closed := s.closedTaskEvents[req.TaskID][req.EventID]; closed {
+		return nil, ErrTaskEventClosed
+	}
 	events := s.taskEvents[req.TaskID]
 	event := TaskEvent{
-		EventID: req.EventID, TaskID: req.TaskID,
-		Data: cloneBytes(req.Data), CreatedAt: s.now(),
+		EventID: req.EventID, PartID: partID, TaskID: req.TaskID,
+		Data: cloneBytes(req.Data), Final: final, CreatedAt: s.now(),
 	}
 	s.taskEvents[req.TaskID] = append(events, event)
 	if keyed == nil {
-		keyed = make(map[string]TaskEvent)
+		keyed = make(map[taskEventPartKey]TaskEvent)
 		s.taskEventKeys[req.TaskID] = keyed
 	}
-	keyed[req.EventID] = event
+	keyed[key] = event
+	if final {
+		closed := s.closedTaskEvents[req.TaskID]
+		if closed == nil {
+			closed = make(map[string]struct{})
+			s.closedTaskEvents[req.TaskID] = closed
+		}
+		closed[req.EventID] = struct{}{}
+	}
 	return &AppendTaskEventResult{
 		Event: cloneTaskEvent(&event), Inserted: true,
 	}, nil

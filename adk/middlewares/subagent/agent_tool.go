@@ -90,6 +90,7 @@ type agentOutput[M adk.MessageType] struct {
 	store     filesystem.AppendOpener
 	outputDir string
 	format    TranscriptFormat[M]
+	persister background.TaskEventPersister[*adk.TypedAgentEvent[M], M]
 }
 
 func newManagedAgentTool[M adk.MessageType](
@@ -103,6 +104,10 @@ func newManagedAgentTool[M adk.MessageType](
 	if format == nil {
 		format = defaultTranscriptFormat[M]
 		formatHint = outputFileFormatHint
+	}
+	persister := output.persister
+	if persister == nil {
+		persister = agentTaskEventPersister[M]{format: format}
 	}
 	return utils.InferOptionableTool(name, desc,
 		func(ctx context.Context, in agentManagedInput, opts ...tool.Option) (string, error) {
@@ -124,12 +129,9 @@ func newManagedAgentTool[M adk.MessageType](
 				OutputFile: outputFile, RunInBackground: in.RunInBackground,
 				SessionID: sessionID, NotifySession: true,
 			}, func(workCtx context.Context, runtime background.ExecutionRuntime) (string, error) {
-				fileReceiver := &agentEventFileReceiver[M]{
+				fileReceiver := &agentEventPersistenceReceiver[M]{
 					ctx: workCtx, format: format,
-					onRecord: func(data []byte) error {
-						_, appendErr := runtime.EmitProgress(workCtx, "", data)
-						return appendErr
-					},
+					runtime: runtime, persister: persister,
 					onError: func(fileErr error) error {
 						return runtime.ReportTranscriptFailure(workCtx, fileErr)
 					},
@@ -250,11 +252,12 @@ func signalClosed(done <-chan struct{}) bool {
 	}
 }
 
-type agentEventFileReceiver[M adk.MessageType] struct {
+type agentEventPersistenceReceiver[M adk.MessageType] struct {
 	ctx       context.Context
 	writer    io.Writer
 	format    TranscriptFormat[M]
-	onRecord  func([]byte) error
+	runtime   background.ExecutionRuntime
+	persister background.TaskEventPersister[*adk.TypedAgentEvent[M], M]
 	onError   func(error) error
 	failed    bool
 	reportErr error
@@ -265,47 +268,80 @@ type agentEventRecord struct {
 	Message   any    `json:"message"`
 }
 
-func (r *agentEventFileReceiver[M]) receive(event *adk.TypedAgentEvent[M]) {
+func (r *agentEventPersistenceReceiver[M]) receive(event *adk.TypedAgentEvent[M]) {
 	if r.failed {
 		return
 	}
-	if event == nil || event.Output == nil || event.Output.MessageOutput == nil {
+	if event == nil {
 		return
 	}
-	message, err := event.Output.MessageOutput.GetMessage()
+	if r.runtime == nil || r.persister == nil {
+		if event.Output == nil || event.Output.MessageOutput == nil {
+			return
+		}
+		if err := r.writeTranscript(event); err != nil {
+			r.fail(err)
+		}
+		return
+	}
+	persistEvent, persistStream := splitAgentTaskEvent(event)
+	persisted, err := background.PersistTaskEvent[*adk.TypedAgentEvent[M], M](
+		r.ctx,
+		r.runtime,
+		agentTaskEventID(persistEvent),
+		&background.TaskEventEnvelope[*adk.TypedAgentEvent[M], M]{
+			Event: persistEvent, Stream: persistStream,
+		},
+		r.persister,
+	)
 	if err != nil {
-		r.fail(fmt.Errorf("materialize agent output message: %w", err))
+		r.failed = true
+		r.reportErr = err
 		return
 	}
-	line, err := r.format(r.ctx, event.AgentName, message)
-	if err != nil {
-		r.fail(fmt.Errorf("encode agent output event: %w", err))
-		return
-	}
-	if line == "" {
-		return
-	}
-	data := line + "\n"
-	if r.onRecord != nil {
-		if err = r.onRecord([]byte(data)); err != nil {
-			r.failed = true
-			r.reportErr = err
+	for _, part := range persisted.Parts {
+		if r.writer == nil || part == nil || part.Event == nil {
+			continue
+		}
+		if err := r.writeRecord(part.Event.Data); err != nil {
+			r.fail(err)
 			return
 		}
 	}
-	if r.writer == nil {
-		return
-	}
-	n, err := io.WriteString(r.writer, data)
+}
+
+func (r *agentEventPersistenceReceiver[M]) writeRecord(data []byte) error {
+	n, err := r.writer.Write(data)
 	if err == nil && n != len(data) {
 		err = io.ErrShortWrite
 	}
 	if err != nil {
-		r.fail(fmt.Errorf("write agent output: %w", err))
+		return fmt.Errorf("write agent output: %w", err)
 	}
+	return nil
 }
 
-func (r *agentEventFileReceiver[M]) fail(err error) {
+func (r *agentEventPersistenceReceiver[M]) writeTranscript(
+	event *adk.TypedAgentEvent[M],
+) error {
+	message, err := event.Output.MessageOutput.GetMessage()
+	if err != nil {
+		return fmt.Errorf("materialize agent output message: %w", err)
+	}
+	line, err := r.format(r.ctx, event.AgentName, message)
+	if err != nil {
+		return fmt.Errorf("encode agent output event: %w", err)
+	}
+	if line == "" {
+		return nil
+	}
+	if r.writer == nil {
+		return nil
+	}
+	return r.writeRecord([]byte(line + "\n"))
+}
+
+func (r *agentEventPersistenceReceiver[M]) fail(err error) {
 	if err == nil || r.failed {
 		return
 	}
@@ -313,6 +349,97 @@ func (r *agentEventFileReceiver[M]) fail(err error) {
 	if r.onError != nil {
 		r.reportErr = r.onError(err)
 	}
+}
+
+type agentTaskEventPersister[M adk.MessageType] struct {
+	format TranscriptFormat[M]
+}
+
+func (p agentTaskEventPersister[M]) Persist(
+	ctx context.Context,
+	_ background.TaskEventScope,
+	input *background.TaskEventEnvelope[*adk.TypedAgentEvent[M], M],
+	writer background.TaskEventWriter,
+) ([]*background.AppendTaskEventResult, error) {
+	if input.Event == nil || input.Event.Output == nil ||
+		input.Event.Output.MessageOutput == nil {
+		return nil, nil
+	}
+	event := withAgentTaskEventStream(input.Event, input.Stream)
+	message, err := event.Output.MessageOutput.GetMessage()
+	if err != nil {
+		return nil, fmt.Errorf("materialize agent output message: %w", err)
+	}
+	line, err := p.format(ctx, event.AgentName, message)
+	if err != nil {
+		return nil, fmt.Errorf("encode agent output event: %w", err)
+	}
+	if line == "" {
+		return nil, nil
+	}
+	result, err := writer.Append(ctx, &background.TaskEventPart{
+		PartID: "event", Data: []byte(line + "\n"), Final: true,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return []*background.AppendTaskEventResult{result}, nil
+}
+
+func splitAgentTaskEvent[M adk.MessageType](
+	event *adk.TypedAgentEvent[M],
+) (
+	persistEvent *adk.TypedAgentEvent[M],
+	persistStream *schema.StreamReader[M],
+) {
+	if event.Output == nil || event.Output.MessageOutput == nil {
+		return event, nil
+	}
+	persistEvent = cloneAgentTaskEvent(event, nil)
+	message := event.Output.MessageOutput
+	if !message.IsStreaming || message.MessageStream == nil {
+		return persistEvent, nil
+	}
+	return persistEvent, message.MessageStream
+}
+
+func cloneAgentTaskEvent[M adk.MessageType](
+	event *adk.TypedAgentEvent[M],
+	stream *schema.StreamReader[M],
+) *adk.TypedAgentEvent[M] {
+	cloned := *event
+	cloned.RunPath = append([]adk.RunStep(nil), event.RunPath...)
+	output := *event.Output
+	message := *event.Output.MessageOutput
+	message.MessageStream = stream
+	output.MessageOutput = &message
+	cloned.Output = &output
+	return &cloned
+}
+
+func withAgentTaskEventStream[M adk.MessageType](
+	event *adk.TypedAgentEvent[M],
+	stream *schema.StreamReader[M],
+) *adk.TypedAgentEvent[M] {
+	if stream == nil {
+		return event
+	}
+	return cloneAgentTaskEvent(event, stream)
+}
+
+func agentTaskEventID[M adk.MessageType](
+	event *adk.TypedAgentEvent[M],
+) string {
+	if event == nil || event.SessionEventVariant == nil {
+		return ""
+	}
+	if event.SessionEventVariant.Event != nil {
+		return event.SessionEventVariant.Event.EventID
+	}
+	if event.SessionEventVariant.MessageStreamRef != nil {
+		return event.SessionEventVariant.MessageStreamRef.EventID
+	}
+	return ""
 }
 
 func defaultTranscriptFormat[M adk.MessageType](

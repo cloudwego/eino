@@ -271,9 +271,46 @@ func RunTaskEventStoreConformance(t *testing.T, config TaskEventStoreConfig) {
 	_, err = events.AppendTaskEvent(context.Background(), &background.AppendTaskEventRequest{
 		TaskID: started.Spec.ID, Attempt: started.Attempt, EventID: "one", Data: []byte("different"),
 	})
-	require.ErrorIs(t, err, background.ErrTaskEventIDConflict)
+	require.ErrorIs(t, err, background.ErrTaskEventPartConflict)
 	appendEvent(t, events, started, "two", "two")
 	appendEvent(t, events, started, "three", "three")
+	firstPart, err := events.AppendTaskEvent(
+		context.Background(),
+		&background.AppendTaskEventRequest{
+			TaskID: started.Spec.ID, Attempt: started.Attempt,
+			EventID: "stream", PartID: "chunk-0", Data: []byte("a"),
+		},
+	)
+	require.NoError(t, err)
+	require.True(t, firstPart.Inserted)
+	finalPart, err := events.AppendTaskEvent(
+		context.Background(),
+		&background.AppendTaskEventRequest{
+			TaskID: started.Spec.ID, Attempt: started.Attempt,
+			EventID: "stream", PartID: "end", Data: []byte("done"),
+			Final: true,
+		},
+	)
+	require.NoError(t, err)
+	require.True(t, finalPart.Inserted)
+	replayedFinal, err := events.AppendTaskEvent(
+		context.Background(),
+		&background.AppendTaskEventRequest{
+			TaskID: started.Spec.ID, Attempt: started.Attempt,
+			EventID: "stream", PartID: "end", Data: []byte("done"),
+			Final: true,
+		},
+	)
+	require.NoError(t, err)
+	require.False(t, replayedFinal.Inserted)
+	_, err = events.AppendTaskEvent(
+		context.Background(),
+		&background.AppendTaskEventRequest{
+			TaskID: started.Spec.ID, Attempt: started.Attempt,
+			EventID: "stream", PartID: "late", Data: []byte("late"),
+		},
+	)
+	require.ErrorIs(t, err, background.ErrTaskEventClosed)
 	first, err := events.ListTaskEvents(context.Background(), &background.ListTaskEventsRequest{
 		TaskID: started.Spec.ID, Limit: 2,
 	})
@@ -284,12 +321,17 @@ func RunTaskEventStoreConformance(t *testing.T, config TaskEventStoreConfig) {
 		TaskID: started.Spec.ID, Cursor: first.NextCursor, Limit: 2,
 	})
 	require.NoError(t, err)
-	require.Equal(t, []string{"three"}, eventIDs(second.Events))
+	require.Equal(t, []string{"three", "stream"}, eventIDs(second.Events))
+	third, err := events.ListTaskEvents(context.Background(), &background.ListTaskEventsRequest{
+		TaskID: started.Spec.ID, Cursor: second.NextCursor, Limit: 2,
+	})
+	require.NoError(t, err)
+	require.Equal(t, []string{"stream"}, eventIDs(third.Events))
 	recent, err := events.ListTaskEvents(context.Background(), &background.ListTaskEventsRequest{
 		TaskID: started.Spec.ID, Limit: 2, NewestFirst: true,
 	})
 	require.NoError(t, err)
-	require.Equal(t, []string{"four", "three"}, eventIDs(recent.Events))
+	require.Equal(t, []string{"four", "stream"}, eventIDs(recent.Events))
 
 	yielded, err := tasks.Yield(context.Background(), &background.YieldTaskRequest{
 		TaskID: started.Spec.ID, ExpectedVersion: started.Version,

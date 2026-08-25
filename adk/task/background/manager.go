@@ -133,10 +133,12 @@ type Config struct {
 	// Tasks atomically owns task lifecycle, mailbox transitions, and parent
 	// notification writes. When nil, New installs an in-memory reference provider.
 	Tasks LifecycleStore
-	// TaskEvents persists append-only progress in the same task namespace and
-	// must fence appends against the active attempt authorized by Tasks. When
-	// nil, New reuses Tasks when it also implements TaskEventStore. If both are
-	// nil, the same in-memory reference provider supplies both capabilities.
+	// TaskEvents persists append-only serialized event parts in the same task
+	// namespace and must fence every append against the active attempt.
+	// Executor-specific TaskEventPersister implementations serialize typed
+	// events and consume streams before this boundary. When nil, New reuses Tasks
+	// when it also implements TaskEventStore. If both are nil, the same in-memory
+	// reference provider supplies both capabilities.
 	TaskEvents TaskEventStore
 	// SendTaskCreatedEvent emits a TaskCreated timeline event after a task is
 	// durably created. It may be called concurrently. Root tasks without a

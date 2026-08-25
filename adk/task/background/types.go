@@ -253,26 +253,50 @@ type WaitForTaskVersionRequest struct {
 	AfterVersion int64
 }
 
-// TaskEvent is one immutable task-progress event. EventID is an opaque,
-// task-local replay identity and does not encode event chronology.
+// TaskEvent is one immutable persisted part of a logical task event. EventID
+// identifies the logical event; PartID identifies one replayable part within
+// that event. Append order, not either identifier, defines chronology.
 type TaskEvent struct {
 	EventID   string
+	PartID    string
 	TaskID    string
 	Data      []byte
+	Final     bool
 	CreatedAt time.Time
 }
 
-// AppendTaskEventRequest appends one identified progress event for the active
-// task attempt. EventID uniqueness is task-wide across attempts.
+// TaskEventPart is serialized output produced by a TaskEventPersister.
+// PartID must be stable when a recoverable producer replays the same logical
+// event. Data may be empty for a metadata-only part. Final closes the logical
+// event after this part is accepted.
+type TaskEventPart struct {
+	PartID string
+	Data   []byte
+	Final  bool
+}
+
+// TaskEventScope is the framework-owned identity and fencing context of one
+// logical task event.
+type TaskEventScope struct {
+	TaskID  string
+	Attempt int64
+	EventID string
+}
+
+// AppendTaskEventRequest appends one serialized part for the active task
+// attempt. The pair (EventID, PartID) is unique within a task. An empty PartID
+// is shorthand for the single final part named "event".
 type AppendTaskEventRequest struct {
 	TaskID  string
 	Attempt int64
 	EventID string
+	PartID  string
 	Data    []byte
+	Final   bool
 }
 
-// AppendTaskEventResult reports whether the event was newly inserted. A
-// byte-identical replay returns the original Event with Inserted false.
+// AppendTaskEventResult reports whether the part was newly inserted. An
+// identical replay returns the original Event with Inserted false.
 type AppendTaskEventResult struct {
 	Event    *TaskEvent
 	Inserted bool

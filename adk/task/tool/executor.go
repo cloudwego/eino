@@ -466,6 +466,30 @@ type updatePersistence struct {
 	materializerEnabled bool
 }
 
+type jsonUpdateEventPersister struct{}
+
+func (jsonUpdateEventPersister) Persist(
+	ctx context.Context,
+	_ background.TaskEventScope,
+	input *background.TaskEventEnvelope[*Update, *Update],
+	writer background.TaskEventWriter,
+) ([]*background.AppendTaskEventResult, error) {
+	if input == nil || input.Event == nil {
+		return nil, errors.New("task/tool: update event is required")
+	}
+	data, err := json.Marshal(input.Event)
+	if err != nil {
+		return nil, fmt.Errorf("task/tool: encode update: %w", err)
+	}
+	result, err := writer.Append(ctx, &background.TaskEventPart{
+		PartID: "event", Data: data, Final: true,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return []*background.AppendTaskEventResult{result}, nil
+}
+
 func receiveUpdates(
 	reader *schema.StreamReader[*Update],
 	results chan<- updateResult,
@@ -507,17 +531,30 @@ func (e *executor) persistUpdate(
 	if e.recoverable && !callerSuppliedEventID {
 		return errors.New("task/tool: recoverable update event id is required")
 	}
-	data, err := json.Marshal(update)
-	if err != nil {
-		return fmt.Errorf("task/tool: encode update: %w", err)
+	persister := persistence.registration.EventPersister
+	if persister == nil {
+		persister = jsonUpdateEventPersister{}
 	}
-	result, err := persistence.runtime.EmitProgress(ctx, update.EventID, data)
+	persisted, err := background.PersistTaskEvent[*Update, *Update](
+		ctx,
+		persistence.runtime,
+		update.EventID,
+		&background.TaskEventEnvelope[*Update, *Update]{Event: update},
+		persister,
+	)
 	if err != nil {
 		return fmt.Errorf("task/tool: persist update: %w", err)
 	}
+	if len(persisted.Parts) == 0 {
+		return errors.New("task/tool: event persister emitted no parts")
+	}
+	firstEmission := false
+	for _, part := range persisted.Parts {
+		firstEmission = firstEmission || part != nil && part.Inserted
+	}
 	if persistence.materializerEnabled && callerSuppliedEventID {
 		err = persistence.registration.Materializer.AppendOutput(ctx, &MaterializeOutputRequest{
-			TaskID: persistence.task.Spec.ID, EventID: result.EventID,
+			TaskID: persistence.task.Spec.ID, EventID: persisted.Scope.EventID,
 			Path: persistence.task.Spec.OutputFile, Data: append([]byte(nil), update.Data...),
 		})
 		if err != nil {
@@ -527,9 +564,9 @@ func (e *executor) persistUpdate(
 			}
 		}
 	}
-	if result.FirstEmission && persistence.projection != nil {
+	if firstEmission && persistence.projection != nil {
 		projected := cloneUpdate(update)
-		projected.EventID = result.EventID
+		projected.EventID = persisted.Scope.EventID
 		persistence.projection.send(ctx, taskfirst.ProjectionDetached(ctx), projected)
 	}
 	return nil

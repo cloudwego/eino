@@ -143,30 +143,41 @@ and are eligible for a later attempt.
 
 ## Incremental Output
 
-`Update` is the managed integration envelope:
+Typed events are serialized by executor-specific `TaskEventPersister`
+implementations rather than by `ExecutionRuntime`. A persister receives the
+original event plus an optional persistence-owned stream copy:
 
 ```go
-type Update struct {
-    EventID  string
-    Kind     string
-    Data     []byte
-    Metadata map[string]string
+type TaskEventEnvelope[E, Chunk any] struct {
+    Event  E
+    Stream *schema.StreamReader[Chunk]
 }
 ```
 
-Plain producers may publish unkeyed updates. Recoverable producers must provide a
-non-empty lifetime-stable `EventID`.
+The runtime creates a `TaskEventWriter` bound to `(TaskID, Attempt, EventID)`.
+The persister may serialize one event into multiple durable parts:
 
-`AppendTaskEvent(TaskID, Attempt, EventID, Data)` is task-wide across attempts:
+```go
+type TaskEventPart struct {
+    PartID string
+    Data   []byte
+    Final  bool
+}
+```
 
-- first append allocates a monotonic sequence and returns `Inserted=true`;
-- byte-identical replay returns the original record and sequence;
-- different bytes under the same event ID return `ErrTaskEventIDConflict`;
-- attempt fencing and cancellation still apply;
-- output writes do not advance lifecycle version.
+- `EventID` identifies one logical event.
+- `PartID` is stable across recoverable replay.
+- identical `(TaskID, EventID, PartID)` replay returns `Inserted=false`.
+- conflicting replay returns `ErrTaskEventPartConflict`.
+- `Final` closes the logical event and later new parts are rejected.
+- every part append revalidates attempt fencing and cancellation.
+- event-part writes do not advance lifecycle version.
 
-Persistence precedes live projection. Replayed records are not projected twice.
-Correctness does not depend on an exact backend resume cursor.
+For a streaming AgentEvent, the framework copies the stream before invoking the
+persister: one copy remains live and one belongs exclusively to persistence.
+The persister consumes and closes its copy, decides how to serialize the event
+and chunks, and may record an incomplete final part when the source errors.
+No Store lock or transaction spans the lifetime of the stream.
 
 `ListTaskEvents` provides snapshot-stable forward or reverse pagination.
 

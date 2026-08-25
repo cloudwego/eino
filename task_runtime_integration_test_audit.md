@@ -21,8 +21,10 @@
 - Added integration tests:
   - `adk/internal/taskfirst/coordinator_test.go`
   - `adk/task/background/publication_test.go`
+  - `adk/task/background/event_persister_test.go`
   - task-first cases in `adk/task/local/local_test.go`
   - task-first cases in `adk/task/tool/managed_tool_test.go`
+  - typed event persistence in `adk/middlewares/subagent/middleware_test.go`
   - caller-abort coverage in `adk/middlewares/filesystem/bash_run_test.go`
   - `adk/task/subagent/integration_test.go`
 
@@ -78,6 +80,8 @@ routing, or session invariant across multiple runtime layers.
 | Local | `TestRunnerTaskFirstCallerAbortDetaches`, `TestRunnerTaskFirstForegroundCompletionStaysDeferred`, `TestRunnerTaskFirstCancelStopsUnderlyingWork` | Local work is Manager-owned from Attempt 1, foreground completion stays hidden, and cancellation reaches the real work context. |
 | Managed Tool | `TestManagedToolPlainToolCanAutoBackgroundTaskFirst`, `TestManagedToolTaskFirstCallerAbortPolicy`, `TestManagedToolTaskFirstWaitingInputResumesSameTask`, `TestManagedToolTaskFirstForegroundCompletionStaysDeferred` | Plain and recoverable tools share task-first ownership, waiting-input resumes the same Task, and foreground completion emits no lifecycle notification. |
 | Filesystem | `TestManagedExecuteTool_CallerAbortDetachesTaskOwnedShell` | Caller cancellation detaches the shell projection without canceling the task-owned command. |
+| Event persistence | `TestPersistTaskEventPassesTypedEventAndStream`, `TestTaskEventStreamErrorCanReplayPersistedPrefix`, `TestTaskEventWriterFencesEveryStreamPart`, `TestTaskEventFinalPartClosesLogicalEvent`, `TestAttack_ConcurrentFinalPartClosesEventOnce` | Persisters receive typed events and stream copies; durable parts are replayable, finality-aware, and attempt-fenced. |
+| Event persistence | `TestRunnerStreamUsesConfiguredEventPersister`, `TestManagedToolUsesRegistrationEventPersister`, `TestAgentEventPersisterReceivesRawEventAndSeparateStream` | Local, Tool, and Local Sub-agent callers can own serialization without consuming the live stream. |
 
 ## 1. Duplicate Analysis
 
@@ -257,9 +261,29 @@ SPI behavior, but a deployment should additionally run the same restart and
 concurrent-admission scenarios against its real database implementation and
 worker scheduler. That belongs in provider/system tests, not this package.
 
+### Closed: typed streaming event persistence
+
+```text
+Production:
+  adk/task/background/executor.go
+  adk/task/background/in_memory_store.go
+  adk/middlewares/subagent/agent_tool.go
+Risk:
+  Executor code serializes events before the persistence boundary, live and
+  durable consumers race on one stream, or a stale attempt appends later parts
+  after ownership changes.
+Tests:
+  TestPersistTaskEventPassesTypedEventAndStream
+  TestTaskEventStreamErrorCanReplayPersistedPrefix
+  TestTaskEventWriterFencesEveryStreamPart
+  TestTaskEventFinalPartClosesLogicalEvent
+  TestAttack_ConcurrentFinalPartClosesEventOnce
+  TestAgentEventPersisterReceivesRawEventAndSeparateStream
+```
+
 ## Coverage
 
-- `go test -coverpkg=./adk/task/... ./adk/task/...`: 80.8% aggregate Task
+- `go test -coverpkg=./adk/task/... ./adk/task/...`: 81.1% aggregate Task
   runtime coverage.
 - `go test -coverprofile=/tmp/subagent-integration.cover
   ./adk/task/subagent -run '^TestIntegration_'`: the four integration tests
@@ -280,5 +304,6 @@ broad integration scenarios.
 | High | Missing concurrent ChildSession admission coverage | 1 | Fixed |
 | High | Missing task-first publication/terminal race coverage | 3 | Fixed |
 | High | Missing caller-abort and timeout policy coverage | 4 | Fixed |
+| High | Missing typed streaming event persistence coverage | 5 | Fixed |
 | Medium | Real provider and scheduler process test | 1 | Deferred to deployment integration suite |
 | Low | Weak assertion over framework-owned event count | 1 | Kept with justification |

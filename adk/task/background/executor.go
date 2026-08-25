@@ -17,6 +17,7 @@
 package background
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -30,6 +31,7 @@ import (
 	"github.com/cloudwego/eino/adk/internal/taskcontrol"
 	taskcore "github.com/cloudwego/eino/adk/task"
 	"github.com/cloudwego/eino/internal/safe"
+	"github.com/cloudwego/eino/schema"
 )
 
 // ControlKind identifies a Manager control signal sent to an executor.
@@ -95,13 +97,59 @@ type ExecutionResult struct {
 	InputCursor int64
 }
 
-// ProgressEmission reports the stable identity and replay status of one
-// executor progress event.
-type ProgressEmission struct {
-	EventID string
-	// FirstEmission is false for an idempotent replay of an event already
-	// accepted for this task.
-	FirstEmission bool
+// TaskEventEnvelope carries the original typed event and an optional
+// persistence-owned stream copy. A persister must consume or deliberately stop
+// reading Stream before returning; PersistTaskEvent closes it. The live
+// projection must use a different stream copy.
+type TaskEventEnvelope[E, Chunk any] struct {
+	Event  E
+	Stream *schema.StreamReader[Chunk]
+}
+
+// TaskEventWriter appends serialized parts under one framework-owned event
+// scope. Each Append revalidates the active attempt.
+type TaskEventWriter interface {
+	Append(context.Context, *TaskEventPart) (*AppendTaskEventResult, error)
+}
+
+// TaskEventPersister owns event serialization and persistence-stream
+// processing for one executor-specific event type. It may read but must not
+// mutate Event or stream chunks.
+type TaskEventPersister[E, Chunk any] interface {
+	Persist(
+		context.Context,
+		TaskEventScope,
+		*TaskEventEnvelope[E, Chunk],
+		TaskEventWriter,
+	) ([]*AppendTaskEventResult, error)
+}
+
+// TaskEventPersisterFunc adapts a function to TaskEventPersister.
+type TaskEventPersisterFunc[E, Chunk any] func(
+	context.Context,
+	TaskEventScope,
+	*TaskEventEnvelope[E, Chunk],
+	TaskEventWriter,
+) ([]*AppendTaskEventResult, error)
+
+// Persist implements TaskEventPersister.
+func (f TaskEventPersisterFunc[E, Chunk]) Persist(
+	ctx context.Context,
+	scope TaskEventScope,
+	input *TaskEventEnvelope[E, Chunk],
+	writer TaskEventWriter,
+) ([]*AppendTaskEventResult, error) {
+	if f == nil {
+		return nil, errors.New("task/background: task event persister function is nil")
+	}
+	return f(ctx, scope, input, writer)
+}
+
+// TaskEventPersistResult contains the framework-owned event scope and the
+// persister's append results.
+type TaskEventPersistResult struct {
+	Scope TaskEventScope
+	Parts []*AppendTaskEventResult
 }
 
 // ExecutionRuntime exposes concurrency-safe, attempt-scoped capabilities.
@@ -110,10 +158,9 @@ type ExecutionRuntime interface {
 	// Controls returns a runtime-owned channel. Signals may be coalesced; the
 	// executor must stop selecting it when the attempt context ends.
 	Controls() <-chan ControlRequest
-	// EmitProgress appends replayable progress. An empty event ID requests a
-	// framework-generated stable ID. FirstEmission is false when the same ID and
-	// bytes were already accepted for the task.
-	EmitProgress(context.Context, string, []byte) (ProgressEmission, error)
+	// NewTaskEventWriter binds a logical event to this attempt. An empty event
+	// ID requests a framework-generated stable ID.
+	NewTaskEventWriter(string) (TaskEventScope, TaskEventWriter)
 	// ReportTranscriptFailure records the first non-lifecycle failure of the
 	// optional derived transcript.
 	ReportTranscriptFailure(context.Context, error) error
@@ -129,6 +176,48 @@ type ExecutionRuntime interface {
 	// CommitStart atomically records that an executor established its external
 	// operation.
 	CommitStart(context.Context, []byte) error
+}
+
+// PersistTaskEvent gives an executor-specific persister the original typed
+// event and its optional persistence stream while retaining framework-owned
+// task identity and attempt fencing.
+func PersistTaskEvent[E, Chunk any](
+	ctx context.Context,
+	runtime ExecutionRuntime,
+	eventID string,
+	input *TaskEventEnvelope[E, Chunk],
+	persister TaskEventPersister[E, Chunk],
+) (*TaskEventPersistResult, error) {
+	if input != nil && input.Stream != nil {
+		defer input.Stream.Close()
+	}
+	if runtime == nil || input == nil || persister == nil {
+		return nil, errors.New(
+			"task/background: runtime, event envelope, and persister are required",
+		)
+	}
+	scope, writer := runtime.NewTaskEventWriter(eventID)
+	if writer == nil || scope.TaskID == "" || scope.Attempt <= 0 ||
+		scope.EventID == "" {
+		return nil, errors.New(
+			"task/background: runtime returned an incomplete task event writer",
+		)
+	}
+	parts, err := persister.Persist(ctx, scope, input, writer)
+	if err != nil {
+		return nil, err
+	}
+	for _, part := range parts {
+		if part == nil || part.Event == nil ||
+			part.Event.TaskID != scope.TaskID ||
+			part.Event.EventID != scope.EventID ||
+			part.Event.PartID == "" {
+			return nil, errors.New(
+				"task/background: event persister returned an incomplete part",
+			)
+		}
+	}
+	return &TaskEventPersistResult{Scope: scope, Parts: parts}, nil
 }
 
 // CancellationAcknowledger performs idempotent business cleanup before durable
@@ -369,33 +458,57 @@ func (r *taskRuntime) notifyParent(
 	)
 }
 
-func (r *taskRuntime) EmitProgress(
-	ctx context.Context,
+type attemptTaskEventWriter struct {
+	runtime *taskRuntime
+	scope   TaskEventScope
+}
+
+func (r *taskRuntime) NewTaskEventWriter(
 	eventID string,
-	data []byte,
-) (ProgressEmission, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.poison != nil {
-		return ProgressEmission{}, r.poison
-	}
+) (TaskEventScope, TaskEventWriter) {
 	if eventID == "" {
 		eventID = uuid.NewString()
 	}
+	scope := TaskEventScope{
+		TaskID: r.taskID, Attempt: r.attempt, EventID: eventID,
+	}
+	return scope, &attemptTaskEventWriter{runtime: r, scope: scope}
+}
+
+func (w *attemptTaskEventWriter) Append(
+	ctx context.Context,
+	part *TaskEventPart,
+) (*AppendTaskEventResult, error) {
+	if w == nil || w.runtime == nil || part == nil || part.PartID == "" {
+		return nil, errors.New(
+			"task/background: task event writer and non-empty part id are required",
+		)
+	}
+	r := w.runtime
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.poison != nil {
+		return nil, r.poison
+	}
 	result, err := r.taskEvents.AppendTaskEvent(ctx, &AppendTaskEventRequest{
-		TaskID: r.taskID, Attempt: r.attempt, EventID: eventID, Data: cloneBytes(data),
+		TaskID: w.scope.TaskID, Attempt: w.scope.Attempt,
+		EventID: w.scope.EventID, PartID: part.PartID,
+		Data: cloneBytes(part.Data), Final: part.Final,
 	})
 	if err != nil {
-		return ProgressEmission{}, err
+		return nil, err
 	}
-	if result == nil || result.Event == nil || result.Event.EventID == "" {
-		return ProgressEmission{}, errors.New(
+	if result == nil || result.Event == nil ||
+		result.Event.TaskID != w.scope.TaskID ||
+		result.Event.EventID != w.scope.EventID ||
+		result.Event.PartID != part.PartID ||
+		result.Event.Final != part.Final ||
+		!bytes.Equal(result.Event.Data, part.Data) {
+		return nil, errors.New(
 			"task/background: task event store returned an incomplete append result",
 		)
 	}
-	return ProgressEmission{
-		EventID: result.Event.EventID, FirstEmission: result.Inserted,
-	}, nil
+	return result, nil
 }
 
 func (r *taskRuntime) requestControl(kind ControlKind) bool {

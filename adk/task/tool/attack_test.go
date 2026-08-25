@@ -34,18 +34,68 @@ import (
 )
 
 type replayRuntimeStub struct {
-	result background.ProgressEmission
+	inserted bool
+	parts    []*background.TaskEventPart
 }
 
 func (*replayRuntimeStub) Controls() <-chan background.ControlRequest {
 	return make(chan background.ControlRequest)
 }
-func (r *replayRuntimeStub) EmitProgress(
-	context.Context,
-	string,
-	[]byte,
-) (background.ProgressEmission, error) {
-	return r.result, nil
+func (r *replayRuntimeStub) NewTaskEventWriter(
+	eventID string,
+) (background.TaskEventScope, background.TaskEventWriter) {
+	if eventID == "" {
+		eventID = "generated"
+	}
+	scope := background.TaskEventScope{
+		TaskID: "attack-task", Attempt: 1, EventID: eventID,
+	}
+	return scope, replayTaskEventWriter{
+		scope: scope, inserted: r.inserted, runtime: r,
+	}
+}
+
+type replayTaskEventWriter struct {
+	scope    background.TaskEventScope
+	inserted bool
+	runtime  *replayRuntimeStub
+}
+
+func (w replayTaskEventWriter) Append(
+	_ context.Context,
+	part *background.TaskEventPart,
+) (*background.AppendTaskEventResult, error) {
+	copy := *part
+	copy.Data = append([]byte(nil), part.Data...)
+	w.runtime.parts = append(w.runtime.parts, &copy)
+	return &background.AppendTaskEventResult{
+		Event: &background.TaskEvent{
+			TaskID: w.scope.TaskID, EventID: w.scope.EventID,
+			PartID: copy.PartID, Data: copy.Data, Final: copy.Final,
+		},
+		Inserted: w.inserted,
+	}, nil
+}
+
+type customUpdateEventPersister struct {
+	event *Update
+}
+
+func (p *customUpdateEventPersister) Persist(
+	ctx context.Context,
+	_ background.TaskEventScope,
+	input *background.TaskEventEnvelope[*Update, *Update],
+	writer background.TaskEventWriter,
+) ([]*background.AppendTaskEventResult, error) {
+	p.event = cloneUpdate(input.Event)
+	result, err := writer.Append(ctx, &background.TaskEventPart{
+		PartID: "custom", Data: append([]byte("custom:"), input.Event.Data...),
+		Final: true,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return []*background.AppendTaskEventResult{result}, nil
 }
 func (*replayRuntimeStub) ReportTranscriptFailure(context.Context, error) error { return nil }
 func (*replayRuntimeStub) ListInputs(
@@ -301,7 +351,7 @@ func TestAttack_ConflictingEventIDFailsTask(t *testing.T) {
 	}, event.Status)
 	task := waitAttackTask(t, manager)
 	require.Equal(t, background.StatusFailed, task.Status)
-	require.Contains(t, task.ResultError, background.ErrTaskEventIDConflict.Error())
+	require.Contains(t, task.ResultError, background.ErrTaskEventPartConflict.Error())
 	t.Log("conflicting event bytes failed the logical task instead of corrupting replay history")
 }
 
@@ -468,9 +518,7 @@ func TestAttack_InvalidStartResultIsRejected(t *testing.T) {
 
 func TestAttack_PersistedReplayRepairsMissingMaterialization(t *testing.T) {
 	materializer := &materializerStub{}
-	runtime := &replayRuntimeStub{result: background.ProgressEmission{
-		EventID: "persisted", FirstEmission: false,
-	}}
+	runtime := &replayRuntimeStub{}
 	err := (&executor{recoverable: true}).persistUpdate(
 		context.Background(),
 		&updatePersistence{
@@ -488,6 +536,33 @@ func TestAttack_PersistedReplayRepairsMissingMaterialization(t *testing.T) {
 	require.Equal(t, "persisted", materializer.requests[0].EventID)
 	require.Equal(t, []byte("repair"), materializer.requests[0].Data)
 	materializer.mu.Unlock()
+}
+
+func TestManagedToolUsesRegistrationEventPersister(t *testing.T) {
+	runtime := &replayRuntimeStub{inserted: true}
+	persister := &customUpdateEventPersister{}
+	update := &Update{
+		EventID: "custom-event", Kind: "stdout", Data: []byte("value"),
+	}
+	err := (&executor{}).persistUpdate(
+		context.Background(),
+		&updatePersistence{
+			task: &background.TaskSnapshot{
+				Spec: background.Spec{ID: "attack-task"},
+			},
+			runtime: runtime,
+			registration: &Registration{
+				EventPersister: persister,
+			},
+		},
+		update,
+	)
+	require.NoError(t, err)
+	require.Equal(t, update, persister.event)
+	require.Len(t, runtime.parts, 1)
+	require.Equal(t, "custom", runtime.parts[0].PartID)
+	require.Equal(t, "custom:value", string(runtime.parts[0].Data))
+	require.True(t, runtime.parts[0].Final)
 }
 
 func TestAttack_MaterializationPreservesStableReplayOrder(t *testing.T) {

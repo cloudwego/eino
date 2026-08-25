@@ -661,14 +661,22 @@ func TestTaskRuntimeTranscriptFailureAndHeartbeat(t *testing.T) {
 		store, store, started.Spec.ID, started.Attempt, started.Version, nil,
 	)
 
-	output, err := runtime.EmitProgress(context.Background(), "", []byte("output"))
+	outputScope, outputWriter := runtime.NewTaskEventWriter("")
+	output, err := outputWriter.Append(
+		context.Background(),
+		&TaskEventPart{PartID: "event", Data: []byte("output"), Final: true},
+	)
 	require.NoError(t, err)
-	require.NotEmpty(t, output.EventID)
-	require.True(t, output.FirstEmission)
-	supplied, err := runtime.EmitProgress(context.Background(), "caller-event", []byte("supplied"))
+	require.NotEmpty(t, outputScope.EventID)
+	require.True(t, output.Inserted)
+	suppliedScope, suppliedWriter := runtime.NewTaskEventWriter("caller-event")
+	supplied, err := suppliedWriter.Append(
+		context.Background(),
+		&TaskEventPart{PartID: "event", Data: []byte("supplied"), Final: true},
+	)
 	require.NoError(t, err)
-	require.Equal(t, "caller-event", supplied.EventID)
-	require.True(t, supplied.FirstEmission)
+	require.Equal(t, "caller-event", suppliedScope.EventID)
+	require.True(t, supplied.Inserted)
 	require.NoError(t, runtime.ReportTranscriptFailure(
 		context.Background(), errors.New("file failed"),
 	))

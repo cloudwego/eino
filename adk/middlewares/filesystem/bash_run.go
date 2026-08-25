@@ -230,6 +230,23 @@ func outputFileName(ctx context.Context) string {
 	return uuid.NewString()
 }
 
+type shellOutputEventPersister struct{}
+
+func (shellOutputEventPersister) Persist(
+	ctx context.Context,
+	_ background.TaskEventScope,
+	input *background.TaskEventEnvelope[string, string],
+	writer background.TaskEventWriter,
+) ([]*background.AppendTaskEventResult, error) {
+	result, err := writer.Append(ctx, &background.TaskEventPart{
+		PartID: "event", Data: []byte(input.Event), Final: true,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return []*background.AppendTaskEventResult{result}, nil
+}
+
 // bashWork adapts blocking shell execution into process-local managed work.
 // The request carries the command and, when the backend owns the command budget,
 // its timeout; the Manager remains the sole owner of foreground/background/
@@ -247,7 +264,13 @@ func bashWork(sb filesystem.Shell, req *filesystem.ExecuteRequest, w *bashOutput
 			return "", err
 		}
 		if out != "" {
-			if _, err = runtime.EmitProgress(ctx, "", []byte(out)); err != nil {
+			if _, err = background.PersistTaskEvent[string, string](
+				ctx,
+				runtime,
+				"",
+				&background.TaskEventEnvelope[string, string]{Event: out},
+				shellOutputEventPersister{},
+			); err != nil {
 				return "", err
 			}
 		}

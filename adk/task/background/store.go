@@ -52,9 +52,14 @@ var (
 	// ErrUnsupportedExecutorPayloadVersion reports that the selected executor
 	// cannot decode the version of the persisted Spec.Payload envelope.
 	ErrUnsupportedExecutorPayloadVersion = errors.New("task/background: unsupported executor payload version")
-	// ErrTaskEventIDConflict reports that one task-local EventID was replayed
-	// with bytes different from the originally persisted event.
-	ErrTaskEventIDConflict = errors.New("task/background: task event id conflict")
+	// ErrTaskEventPartConflict reports that one task-local event part was
+	// replayed with content different from the originally persisted part.
+	ErrTaskEventPartConflict = errors.New(
+		"task/background: task event part conflict",
+	)
+	// ErrTaskEventClosed reports a new part appended after the logical event's
+	// final part was accepted.
+	ErrTaskEventClosed = errors.New("task/background: task event is closed")
 	// ErrInvalidCursor reports that a pagination cursor is malformed or cannot
 	// continue the requested task-event snapshot and ordering.
 	ErrInvalidCursor = errors.New("task/background: invalid cursor")
@@ -216,13 +221,14 @@ type LifecycleStore interface {
 	CompleteIfNoInputs(context.Context, *CompleteIfNoInputsRequest) (*TaskSnapshot, error)
 }
 
-// TaskEventStore persists append-ordered task progress independently from
+// TaskEventStore persists append-ordered event parts independently from
 // lifecycle snapshots. AppendTaskEvent must fence writes by the active attempt
-// before task-wide EventID replay detection, retain replay metadata across
-// attempts for at least the task lifetime, and not advance TaskSnapshot.Version.
+// before task-wide (EventID, PartID) replay detection, retain replay metadata
+// across attempts for at least the task lifetime, and not advance
+// TaskSnapshot.Version.
 // ListTaskEvents must keep each cursor on the snapshot captured by its first
-// page and order events by append position, reversed when NewestFirst is true.
-// Event data and result pages are independently owned. Successful events and
+// page and order parts by append position, reversed when NewestFirst is true.
+// Part data and result pages are independently owned. Successful parts and
 // cursor positions remain readable for at least the lifetime of their task.
 type TaskEventStore interface {
 	AppendTaskEvent(context.Context, *AppendTaskEventRequest) (*AppendTaskEventResult, error)
