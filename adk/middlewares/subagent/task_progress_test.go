@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/bytedance/sonic"
 	"github.com/stretchr/testify/assert"
@@ -47,7 +48,7 @@ func TestDurableProgressReaderDelegatesAndRejectsNilReceiver_BitsUT(t *testing.T
 	ctx := context.Background()
 	store := adksession.NewInMemoryStore[*schema.Message](nil)
 	task := durableProgressTask[*schema.Message](t, background.StatusRunning)
-	reader, err := NewDurableProgressReader(progressController(t, store), nil)
+	reader, err := NewDurableProgressReader(progressController(t, store, task), nil)
 	require.NoError(t, err)
 
 	progress, err := reader.ReadProgress(ctx, task)
@@ -95,7 +96,7 @@ func TestReadDurableTaskProgress(t *testing.T) {
 	format := func(_ context.Context, agentName string, message *schema.Message) (string, error) {
 		return agentName + ": " + message.Content, nil
 	}
-	controller := progressController(t, store)
+	controller := progressController(t, store, task)
 	progress, err := controller.ReadProgress(
 		ctx, task, format,
 	)
@@ -137,7 +138,7 @@ func TestReadDurableTaskProgressIncludesAgenticToolResults(t *testing.T) {
 		},
 	)))
 
-	controller := progressController(t, store)
+	controller := progressController(t, store, task)
 	progress, err := controller.ReadProgress(
 		ctx, task,
 		func(_ context.Context, agentName string, message *schema.AgenticMessage) (string, error) {
@@ -194,7 +195,7 @@ func TestReadDurableTaskProgressBoundsRecentMessages(t *testing.T) {
 		ctx, sessionID, taskProgressEvents(task.Spec.ID, events),
 	))
 
-	controller := progressController(t, store)
+	controller := progressController(t, store, task)
 	progress, err := controller.ReadProgress(
 		ctx, task,
 		func(_ context.Context, agentName string, message *schema.Message) (string, error) {
@@ -236,7 +237,7 @@ func TestAttack_SharedSessionProgressDoesNotLeakAcrossTasks(t *testing.T) {
 		ctx, progressChildSessionID, events,
 	))
 
-	controller := progressController(t, store)
+	controller := progressController(t, store, task)
 	progress, err := controller.ReadProgress(
 		ctx,
 		task,
@@ -254,7 +255,12 @@ func TestAttack_SharedSessionProgressDoesNotLeakAcrossTasks(t *testing.T) {
 	require.NotContains(t, progress, "other result")
 }
 
-const progressChildSessionID = "subagent-session/cGFyZW50/d29ya2Vy/subagent_task"
+const (
+	progressRootSessionID   = "root-session"
+	progressParentTaskID    = "parent-task"
+	progressParentSessionID = "parent-child-session"
+	progressChildSessionID  = "subagent-session/cGFyZW50/d29ya2Vy/subagent_task"
+)
 
 func taskProgressEvents[M adk.MessageType](
 	taskID string,
@@ -281,7 +287,8 @@ func durableProgressTask[M adk.MessageType](
 	return &background.TaskSnapshot{
 		Spec: background.Spec{
 			ID: "subagent_task", ExecutorKey: durablesubagent.ExecutorKey,
-			Kind: TaskKindSubagent, Payload: payload, RootSessionID: "parent",
+			Kind: TaskKindSubagent, Payload: payload,
+			ParentTaskID: progressParentTaskID, RootSessionID: progressRootSessionID,
 		},
 		Status: status,
 	}
@@ -320,16 +327,58 @@ func (progressBarrier[M]) Check(
 func progressController[M adk.MessageType](
 	t *testing.T,
 	store *adksession.InMemoryStore[M],
+	runtimeTask *background.TaskSnapshot,
 ) *durablesubagent.Controller[M] {
 	t.Helper()
+	ctx := context.Background()
 	taskStore := background.NewInMemoryStore(nil)
-	manager, err := background.New(context.Background(), &background.Config{
+	manager, err := background.New(ctx, &background.Config{
 		Tasks: taskStore, TaskEvents: taskStore,
 		SendTaskCreatedEvent: func(context.Context, *background.TaskSnapshot) error {
 			return nil
 		},
 	})
 	require.NoError(t, err)
+	t.Cleanup(func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		require.NoError(t, manager.Close(closeCtx))
+	})
+	parent, err := manager.RegisterMailbox(ctx, &task.RegisterMailboxRequest{
+		CandidateTaskID: progressParentTaskID,
+		InvocationID:    progressParentTaskID,
+		RootSessionID:   progressRootSessionID,
+		ChildSessionID:  progressParentSessionID,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, parent.Mailbox)
+	metadata, err := sonic.Marshal(map[string]any{
+		"version":           2,
+		"parent_session_id": progressParentSessionID,
+		"root_session_id":   progressRootSessionID,
+		"parent_task_id":    parent.Mailbox.TaskID,
+		"child_session_id":  progressChildSessionID,
+		"agent_name":        "worker",
+		"start_mode":        task.StartModeBackground,
+	})
+	require.NoError(t, err)
+	registered, err := manager.RegisterMailbox(ctx, &task.RegisterMailboxRequest{
+		CandidateTaskID: runtimeTask.Spec.ID,
+		InvocationID:    runtimeTask.Spec.ID,
+		Identity:        metadata,
+		ChildSessionID:  progressChildSessionID,
+		ParentExecution: &task.ExecutionContext{
+			TaskID: parent.Mailbox.TaskID, Owner: task.OwnerParent,
+			Generation:    parent.Mailbox.Generation,
+			RootSessionID: parent.Mailbox.RootSessionID,
+		},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, registered.Mailbox)
+	require.Equal(t, runtimeTask.Spec.ParentTaskID, registered.Mailbox.ParentTaskID)
+	require.Equal(t, runtimeTask.Spec.RootSessionID, registered.Mailbox.RootSessionID)
+	require.Equal(t, progressChildSessionID, registered.Mailbox.ChildSessionID)
+	require.NotEqual(t, runtimeTask.Spec.RootSessionID, progressParentSessionID)
 	controller, err := durablesubagent.NewController(
 		&durablesubagent.ControllerConfig[M]{
 			Manager: manager,
@@ -340,7 +389,23 @@ func progressController[M adk.MessageType](
 			) (*adk.TypedAgentInput[M], error) {
 				return nil, errors.New("unused")
 			},
-			SessionStore: store, CheckPointStore: store,
+			SessionStoreFactory: func(
+				_ context.Context,
+				request *durablesubagent.RuntimeSessionStoreRequest,
+			) (adk.SessionEventStore[M], error) {
+				require.NotNil(t, request)
+				require.Equal(
+					t,
+					durablesubagent.RuntimeSessionStoreAccessReadProgress,
+					request.AccessMode,
+				)
+				require.Equal(t, runtimeTask.Spec.ID, request.TaskID)
+				require.Equal(t, progressParentSessionID, request.ParentSessionID)
+				require.Equal(t, progressChildSessionID, request.ChildSessionID)
+				require.Same(t, runtimeTask, request.Task)
+				return store, nil
+			},
+			CheckPointStore: store,
 		},
 	)
 	require.NoError(t, err)

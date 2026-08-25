@@ -24,6 +24,10 @@ import (
 	"github.com/cloudwego/eino/adk/task"
 )
 
+// The methods in this file are runtime-facing convenience facades over the
+// configured LifecycleStore. They do not keep mailbox state in Manager; the
+// store remains authoritative for every read, fence, and transition.
+
 // RegisterMailbox creates or replays one foreground communication endpoint.
 func (m *Manager) RegisterMailbox(
 	ctx context.Context,

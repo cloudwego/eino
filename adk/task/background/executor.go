@@ -109,19 +109,22 @@ type TaskEventEnvelope[E, Chunk any] struct {
 // TaskEventWriter appends serialized parts under one framework-owned event
 // scope. Each Append revalidates the active attempt.
 type TaskEventWriter interface {
-	Append(context.Context, *TaskEventPart) (*AppendTaskEventResult, error)
+	Append(context.Context, *TaskEventPartInput) (*AppendTaskEventResult, error)
 }
 
 // TaskEventPersister owns event serialization and persistence-stream
 // processing for one executor-specific event type. It may read but must not
-// mutate Event or stream chunks.
+// mutate Event or stream chunks. Persist returns only an error; the framework
+// tracks and validates every successful writer append. Per-event Local and Tool
+// calls pass a nil Stream. Sub-agent events may pass an independent,
+// persistence-owned stream copy.
 type TaskEventPersister[E, Chunk any] interface {
 	Persist(
 		context.Context,
 		TaskEventScope,
 		*TaskEventEnvelope[E, Chunk],
 		TaskEventWriter,
-	) ([]*AppendTaskEventResult, error)
+	) error
 }
 
 // TaskEventPersisterFunc adapts a function to TaskEventPersister.
@@ -130,7 +133,7 @@ type TaskEventPersisterFunc[E, Chunk any] func(
 	TaskEventScope,
 	*TaskEventEnvelope[E, Chunk],
 	TaskEventWriter,
-) ([]*AppendTaskEventResult, error)
+) error
 
 // Persist implements TaskEventPersister.
 func (f TaskEventPersisterFunc[E, Chunk]) Persist(
@@ -138,18 +141,19 @@ func (f TaskEventPersisterFunc[E, Chunk]) Persist(
 	scope TaskEventScope,
 	input *TaskEventEnvelope[E, Chunk],
 	writer TaskEventWriter,
-) ([]*AppendTaskEventResult, error) {
+) error {
 	if f == nil {
-		return nil, errors.New("task/background: task event persister function is nil")
+		return errors.New("task/background: task event persister function is nil")
 	}
 	return f(ctx, scope, input, writer)
 }
 
 // TaskEventPersistResult contains the framework-owned event scope and the
-// persister's append results.
+// validated results of every successful writer append, including a persisted
+// prefix when PersistTaskEvent also returns an error.
 type TaskEventPersistResult struct {
-	Scope TaskEventScope
-	Parts []*AppendTaskEventResult
+	Scope   TaskEventScope
+	Appends []*AppendTaskEventResult
 }
 
 // ExecutionRuntime exposes concurrency-safe, attempt-scoped capabilities.
@@ -203,25 +207,85 @@ func PersistTaskEvent[E, Chunk any](
 			"task/background: runtime returned an incomplete task event writer",
 		)
 	}
-	parts, err := persister.Persist(ctx, scope, input, writer)
-	if err != nil {
-		return nil, err
+	tracker := &trackingTaskEventWriter{scope: scope, writer: writer}
+	persistErr := persister.Persist(ctx, scope, input, tracker)
+	result := &TaskEventPersistResult{
+		Scope:   scope,
+		Appends: tracker.results(),
 	}
-	for _, part := range parts {
-		if part == nil || part.Event == nil ||
-			part.Event.TaskID != scope.TaskID ||
-			part.Event.EventID != scope.EventID ||
-			part.Event.PartID == "" {
-			return nil, errors.New(
-				"task/background: event persister returned an incomplete part",
-			)
+	writerErr := tracker.appendError()
+	if writerErr != nil {
+		if persistErr == nil {
+			return result, writerErr
 		}
+		if errors.Is(persistErr, writerErr) {
+			return result, persistErr
+		}
+		return result, fmt.Errorf("%w; task event writer: %v", persistErr, writerErr)
 	}
-	return &TaskEventPersistResult{Scope: scope, Parts: parts}, nil
+	return result, persistErr
 }
 
-// CancellationAcknowledger performs idempotent business cleanup before durable
-// cancellation is committed.
+type trackingTaskEventWriter struct {
+	mu     sync.Mutex
+	scope  TaskEventScope
+	writer TaskEventWriter
+	parts  []*AppendTaskEventResult
+	err    error
+}
+
+func (w *trackingTaskEventWriter) Append(
+	ctx context.Context,
+	input *TaskEventPartInput,
+) (*AppendTaskEventResult, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.err != nil {
+		return nil, w.err
+	}
+	if input == nil || input.PartID == "" {
+		w.err = errors.New(
+			"task/background: task event writer and non-empty part id are required",
+		)
+		return nil, w.err
+	}
+	result, err := w.writer.Append(ctx, input)
+	if err != nil {
+		w.err = err
+		return nil, err
+	}
+	if result == nil || result.Part == nil ||
+		result.Part.TaskID != w.scope.TaskID ||
+		result.Part.EventID != w.scope.EventID ||
+		result.Part.PartID != input.PartID ||
+		result.Part.Final != input.Final ||
+		!bytes.Equal(result.Part.Data, input.Data) {
+		w.err = errors.New(
+			"task/background: task event writer returned an incomplete append result",
+		)
+		return nil, w.err
+	}
+	w.parts = append(w.parts, &AppendTaskEventResult{
+		Part: cloneTaskEventPart(result.Part), Inserted: result.Inserted,
+	})
+	return result, nil
+}
+
+func (w *trackingTaskEventWriter) results() []*AppendTaskEventResult {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return append([]*AppendTaskEventResult(nil), w.parts...)
+}
+
+func (w *trackingTaskEventWriter) appendError() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.err
+}
+
+// CancellationAcknowledger performs idempotent business cleanup after
+// cancellation intent is durable and before Manager signals a local attempt.
+// An error leaves the durable intent available for a later retry or recovery.
 type CancellationAcknowledger interface {
 	AcknowledgeCancellation(context.Context, *TaskSnapshot, string) error
 }
@@ -305,18 +369,20 @@ func (a *activeAttempt) signalReady() {
 }
 
 type taskRuntime struct {
-	mu                 sync.Mutex
-	controlMu          sync.Mutex
-	tasks              LifecycleStore
-	taskEvents         TaskEventStore
-	notificationWriter NotificationWriter
-	taskID             string
-	attempt            int64
-	version            int64
-	controls           chan ControlRequest
-	poison             error
-	cancelRequested    bool
-	cancelReason       string
+	mu                       sync.Mutex
+	controlMu                sync.Mutex
+	tasks                    LifecycleStore
+	taskEvents               TaskEventStore
+	notificationWriter       NotificationWriter
+	cancellationAcknowledger CancellationAcknowledger
+	taskID                   string
+	attempt                  int64
+	version                  int64
+	controls                 chan ControlRequest
+	poison                   error
+	cancelRequested          bool
+	cancelAcknowledged       bool
+	cancelReason             string
 }
 
 // detachedCtx preserves values while detaching worker execution from the
@@ -477,7 +543,7 @@ func (r *taskRuntime) NewTaskEventWriter(
 
 func (w *attemptTaskEventWriter) Append(
 	ctx context.Context,
-	part *TaskEventPart,
+	part *TaskEventPartInput,
 ) (*AppendTaskEventResult, error) {
 	if w == nil || w.runtime == nil || part == nil || part.PartID == "" {
 		return nil, errors.New(
@@ -498,12 +564,12 @@ func (w *attemptTaskEventWriter) Append(
 	if err != nil {
 		return nil, err
 	}
-	if result == nil || result.Event == nil ||
-		result.Event.TaskID != w.scope.TaskID ||
-		result.Event.EventID != w.scope.EventID ||
-		result.Event.PartID != part.PartID ||
-		result.Event.Final != part.Final ||
-		!bytes.Equal(result.Event.Data, part.Data) {
+	if result == nil || result.Part == nil ||
+		result.Part.TaskID != w.scope.TaskID ||
+		result.Part.EventID != w.scope.EventID ||
+		result.Part.PartID != part.PartID ||
+		result.Part.Final != part.Final ||
+		!bytes.Equal(result.Part.Data, part.Data) {
 		return nil, errors.New(
 			"task/background: task event store returned an incomplete append result",
 		)
@@ -622,9 +688,34 @@ func (r *taskRuntime) reconcileCancellationLocked(ctx context.Context) error {
 		r.poison = ErrLeaseLost
 		return r.poison
 	}
+	return r.acceptCancellationLocked(ctx, task)
+}
+
+func (r *taskRuntime) acceptCancellationLocked(
+	ctx context.Context,
+	task *TaskSnapshot,
+) error {
+	reason := task.CancelReason
+	if reason == "" {
+		reason = defaultCanceledReason
+	}
+	if r.cancellationAcknowledger != nil && !r.cancelAcknowledged {
+		if err := acknowledgeCancellation(
+			ctx,
+			r.cancellationAcknowledger,
+			task,
+			reason,
+		); err != nil {
+			return fmt.Errorf(
+				"task/background: acknowledge cancellation: %w",
+				err,
+			)
+		}
+		r.cancelAcknowledged = true
+	}
 	r.version = task.Version
 	r.cancelRequested = true
-	r.cancelReason = task.CancelReason
+	r.cancelReason = reason
 	r.requestControlWithReason(ControlStop, r.cancelReason)
 	return nil
 }
@@ -995,7 +1086,8 @@ func (m *Manager) ListTaskEvents(
 	return m.taskEvents.ListTaskEvents(ctx, req)
 }
 
-// RequestCancel records cancellation intent and signals a local active attempt.
+// RequestCancel durably records cancellation intent before a local active
+// attempt acknowledges optional domain cleanup and receives its stop signal.
 // An optional reason is durable and first-write across repeated requests.
 // Process-local non-recoverable work may wait for terminal acknowledgement;
 // recoverable work may return the still-running snapshot after intent is durable.
@@ -1027,22 +1119,6 @@ func (m *Manager) RequestCancel(
 		}
 		if terminalStatus(task.Status) {
 			return nil, ErrAlreadyTerminal
-		}
-		reason := cancelConfig.reason
-		if reason == "" {
-			reason = defaultCanceledReason
-		}
-		if executor, ok := m.executors.resolve(task.Spec.ExecutorKey); ok {
-			if acknowledger, supports := executor.(CancellationAcknowledger); supports {
-				if ackErr := acknowledgeCancellation(
-					ctx,
-					acknowledger,
-					task,
-					reason,
-				); ackErr != nil {
-					return nil, ackErr
-				}
-			}
 		}
 		result, err = m.tasks.RequestCancel(ctx, &RequestCancelRequest{
 			TaskID: taskID, ExpectedVersion: task.Version, Reason: cancelConfig.reason,
@@ -1083,20 +1159,20 @@ func (m *Manager) RequestCancel(
 		select {
 		case attemptErr := <-attempt.done:
 			if attemptErr != nil {
-				return nil, attemptErr
+				return result, attemptErr
 			}
 		case <-ctx.Done():
-			return nil, ctx.Err()
+			return result, ctx.Err()
 		}
 		terminal, getErr := m.tasks.Get(ctx, taskID)
 		if getErr != nil {
-			return nil, getErr
+			return result, getErr
 		}
 		if terminal.Status != StatusCanceled {
 			if terminalStatus(terminal.Status) {
-				return nil, ErrAlreadyTerminal
+				return terminal, ErrAlreadyTerminal
 			}
-			return nil, ErrIllegalTransition
+			return terminal, ErrIllegalTransition
 		}
 		return terminal, nil
 	}
@@ -1232,10 +1308,16 @@ func (m *Manager) execute(
 		started.Version,
 		m.tasks,
 	)
+	if acknowledger, ok := executor.(CancellationAcknowledger); ok {
+		runtime.cancellationAcknowledger = acknowledger
+	}
 	if started.CancelRequestedAt != nil {
-		runtime.cancelRequested = true
-		runtime.cancelReason = started.CancelReason
-		runtime.requestControlWithReason(ControlStop, runtime.cancelReason)
+		runtime.mu.Lock()
+		err = runtime.acceptCancellationLocked(ctx, started)
+		runtime.mu.Unlock()
+		if err != nil {
+			return err
+		}
 	}
 	runCtx, cancel := context.WithCancel(ctx)
 	mailbox, mailboxErr := m.tasks.GetMailbox(runCtx, taskID)

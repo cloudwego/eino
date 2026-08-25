@@ -95,14 +95,15 @@ Pending -> Running -> Completed
                    -> Failed
                    -> Canceled
                    -> WaitingInput -- new input --> Pending
-                   -> Suspended ---- release/new input --> Pending
+                   -> Suspended ---- ReleaseSuspension/Continue --> Pending
                    -> Yield ---------------------> Pending
 ```
 
 `WaitingInput` 和 `Suspended` 都必须保存 checkpoint。两者的区别是：
 
 - `WaitingInput`：缺少业务输入，收到输入后自动重新调度。
-- `Suspended`：主动让出执行权，可由 `ReleaseSuspension` 或新输入重新激活。
+- `Suspended`：计划内暂停；普通输入和子 Task 通知只入队，不会唤醒。只有
+  `Manager.ReleaseSuspension` 或 Sub-agent `Controller.Continue` 会显式恢复。
 - `Yield`：当前 worker 放弃 attempt，但逻辑操作仍存在，后续 worker 可重新 claim。
 
 ### Handoff
@@ -481,8 +482,31 @@ type ShouldCancelOnCallerAbort func(
 `ShouldCancelOnCallerAbort` 为空或返回 false 时，调用断开只会 detach
 foreground projection，Task 继续运行；返回 true 时才请求 Task cancellation。
 
-Task 启动、timer、terminal watcher 和 publish 竞态由
+Task 启动、timer、boundary watcher 和 publish 竞态由
 `adk/internal/taskfirst` 实现，不属于公开 API。
+
+对 internal coordinator 而言，foreground observation 等待的是
+`Boundary`，不是只等待 lifecycle terminal：
+
+```go
+func (e *Execution) Boundary() <-chan struct{}
+func (e *Execution) WaitBoundary(
+	ctx context.Context,
+) (*background.TaskSnapshot, error)
+```
+
+`Boundary` 在 Task 进入 `WaitingInput`、`Completed`、`Failed` 或 `Canceled`
+时关闭。`WaitingInput` 会结束当前 foreground observation，但不是终态；
+streaming consumer 必须用 `WaitBoundary` 读取权威快照，再按状态渲染等待输入或
+终态结果。`Boundary()` 和 `Timeout()` 都返回稳定的 single-shot channel。
+
+取消等待使用独立的有界 cleanup context。正常 timeout 拒绝后台化或
+caller-abort policy 请求取消时，只有在 cleanup bound 内观察到 boundary 才返回
+`Outcome`；请求取消、domain cleanup 或等待超时会返回 `nil Outcome` 和
+infrastructure error，不暴露 running partial outcome。若先发生 publication
+failure，返回值始终保留原 publish error：cleanup 成功时同时返回最新权威
+snapshot，cleanup 失败时返回包含 publish/cleanup 两个 cause 的 error，并尽量
+返回已写入 cancel intent 的最新 snapshot。
 
 ***
 
@@ -667,13 +691,45 @@ type TaskEventPersister[E, Chunk any] interface {
 		TaskEventScope,
 		*TaskEventEnvelope[E, Chunk],
 		TaskEventWriter,
-	) ([]*AppendTaskEventResult, error)
+	) error
+}
+
+type TaskEventWriter interface {
+	Append(context.Context, *TaskEventPartInput) (*AppendTaskEventResult, error)
+}
+
+type TaskEventPartInput struct {
+	PartID string
+	Data   []byte
+	Final  bool
+}
+
+type TaskEventPersistResult struct {
+	Scope   TaskEventScope
+	Appends []*AppendTaskEventResult
+}
+
+type TaskEventPart struct {
+	EventID   string
+	PartID    string
+	TaskID    string
+	Data      []byte
+	Final     bool
+	CreatedAt time.Time
 }
 ```
 
-`Stream` 必须是 persistence-owned copy。Persister 自行序列化 Event、消费并关闭
-stream，再通过 `TaskEventWriter.Append` 写入一个或多个 durable part。live
-projection 必须使用另一份 stream copy。
+`Stream` 非 nil 时必须是 persistence-owned copy。Persister 自行序列化 Event、
+消费 stream，并通过 `TaskEventWriter.Append` 写入一个或多个 durable part；
+`PersistTaskEvent` 在 persister 返回后关闭 stream。live projection 必须使用
+另一份 stream copy。
+
+Persister 只返回 error，不回传 append results。Framework 使用 tracking writer
+收集并校验每次成功 `Append` 的结果；即使 persister 后续返回 error，
+`PersistTaskEvent` 也会通过 `TaskEventPersistResult.Appends` 同时返回已经持久化
+的 prefix。传给 `TaskEventWriter.Append` 的 `TaskEventPartInput.PartID` 必填；
+只有更底层的 `AppendTaskEventRequest.PartID` 允许空值，表示名为 `"event"` 的
+single-part shorthand。
 
 ### Manager 方法
 
@@ -815,6 +871,11 @@ type LifecycleStore interface {
 
 保存 append-only event parts：
 
+- `TaskEventPartInput` 是 writer 的写入输入，`TaskEventPart` 是包含 `TaskID`、
+  `EventID`、`CreatedAt` 的持久化记录；Store SPI 使用
+  `AppendTaskEventRequest`。
+- `AppendTaskEventResult.Part` 返回单个持久化 record；
+  `ListTaskEventsResult.Parts` 返回分页 record 列表。
 - `EventID` 标识一个 logical event。
 - `PartID` 标识该 event 中可幂等重放的一部分。
 - `(TaskID, EventID, PartID)` 相同且内容相同是幂等 replay。
@@ -925,6 +986,36 @@ type ControllerConfig[M adk.MessageType] struct {
 
 `SessionStore` 和 `SessionStoreFactory` 必须且只能配置一个。
 
+#### `RuntimeSessionStoreAccessMode`
+
+`RuntimeSessionStoreFactory` 的请求通过 `AccessMode` 区分
+三种互斥访问：
+
+| Access mode | 权限 | `Task` |
+|---|---|---|
+| `RuntimeSessionStoreAccessForegroundExecute` | caller-owned foreground TurnLoop 读写 | 必须为 nil |
+| `RuntimeSessionStoreAccessManagedExecute` | Manager-owned attempt TurnLoop 读写 | 必须是当前 attempt snapshot |
+| `RuntimeSessionStoreAccessReadProgress` | transcript/progress 只读 | 必须是被投影的 snapshot |
+
+`RuntimeSessionStoreAccessUnknown` 是非法零值。`AccessMode` 是唯一 authority
+判别字段；factory 不应根据 `Task` 是否为空或其他字段猜测访问目的。
+
+#### `RuntimeSessionStoreRequest`
+
+```go
+type RuntimeSessionStoreRequest struct {
+	TaskID          string
+	ParentSessionID string
+	ChildSessionID  string
+	Task            *background.TaskSnapshot
+	AccessMode      RuntimeSessionStoreAccessMode
+}
+```
+
+`ParentSessionID` 始终是 child 的直接 parent session；深层 nested Task 不使用
+root session 代替。`ManagedExecute` 和 `ReadProgress` 还要求
+`Task.Spec.ID == TaskID`。
+
 #### `Handle`
 
 Sub-agent Handle 除了实现 `task.Handle`，还提供：
@@ -946,12 +1037,12 @@ type StartRequest[M adk.MessageType] struct {
 	Description     string
 	Input           *adk.TypedAgentInput[M]
 	StartMode       task.StartMode
-	EnableStreaming bool
 	OnEvent         func(*adk.TypedAgentEvent[M])
 }
 ```
 
-`ChildSessionID` 为空时，会根据 `InvocationID` 生成稳定 ID。
+`ChildSessionID` 为空时，会根据 `InvocationID` 生成稳定 ID。是否 streaming 由
+`Input.EnableStreaming` 唯一决定。
 
 #### `ContinueRequest`
 
@@ -966,6 +1057,8 @@ type ContinueRequest[M adk.MessageType] struct {
 ```
 
 - ChildSession 有 active Task：输入发给该 Task。
+- active Task 为 `Suspended`：输入持久化后，`Continue` 显式调用
+  `ReleaseSuspension` 并重新调度；单独 `SendInput` 不会恢复它。
 - ChildSession 空闲且 `IfIdle != nil`：创建新 Task。
 - ChildSession 空闲且没有 `IfIdle`：返回 `task.ErrMailboxNotFound`。
 
@@ -973,13 +1066,16 @@ type ContinueRequest[M adk.MessageType] struct {
 
 ```go
 const (
-	CompletionComplete CompletionAction = iota
-	CompletionWaitInput
+	CompletionUnknown CompletionAction = iota
+	CompletionComplete
+	CompletionSuspend
 )
 ```
 
+- `CompletionUnknown`：非法零值，runtime fail closed。
 - `CompletionComplete`：本次 Task 结束并 seal Mailbox。
-- `CompletionWaitInput`：保持 ChildSession 活跃；foreground 会 handoff 给 Manager。
+- `CompletionSuspend`：计划内暂停并保持 ChildSession 活跃；后续由
+  `Controller.Continue` 恢复。
 
 #### `CompletionBarrier`
 
@@ -1004,6 +1100,11 @@ type CancellationHook interface {
 	) error
 }
 ```
+
+Manager 先持久化 cancel intent，再调用 hook；成功的 acknowledgement 在同一
+active attempt 内只执行一次。跨请求或恢复 attempt（包括另一 worker/process）
+仍可能重试，因此 `OnCancel` 实现必须幂等；失败会保留 durable intent 供后续
+取消请求或恢复 attempt 重试。
 
 #### `InputsToAgentInput`
 
@@ -1079,11 +1180,12 @@ func (r *Controller[M]) Wait(
 ### Runtime context
 
 ```go
-func TaskID(ctx context.Context) (string, bool)
 func ChildSessionID(ctx context.Context) (string, bool)
 ```
 
-Sub-agent 内部启动 nested Task 时，可以读取当前 Task 和 ChildSession 身份。通常无需直接调用 `WithRuntimeContext`；Controller 会自动设置。
+当前 Task authority 使用通用的 `task.ExecutionContextFromContext` 读取；
+Sub-agent 包只额外公开 `ChildSessionID`。Controller 自动安装两者，调用方不应
+自行构造 runtime context。
 
 ***
 
@@ -1105,21 +1207,70 @@ type StreamWorkFunc func(
 ) (*schema.StreamReader[string], error)
 ```
 
+#### `RunResult`
+
+`RunResult` 明确区分 direct foreground outcome 与 durable Task snapshot。
+
+```go
+type RunResult struct {
+	// unexported fields
+}
+
+func (r *RunResult) ID() string
+func (r *RunResult) Foreground() (*task.Outcome, bool)
+func (r *RunResult) Task() (*background.TaskSnapshot, bool)
+```
+
+**行为：**
+
+- `Foreground` 和 `Task` 对合法返回值恰好一个返回 `ok=true`。
+- direct parent-owned foreground 返回 `Foreground`；它没有
+  `background.TaskSnapshot`，`ID` 只标识本次逻辑执行及 foreground Mailbox。
+- explicit background，以及配置 auto-background/caller-abort policy 后的
+  Manager-owned execution，始终返回 `Task`，即使它在 foreground observation
+  期间已经完成。
+- `ID` 对两种结果都可用；调用方必须先检查 accessor 的 `ok`，不能用 ID 是否为空
+  推断 durability。
+
 `local.Config.EventPersister` 可以替换默认的 UTF-8 chunk 序列化。Persister
 接收原始 string event；streaming work 的每个输出 chunk 是一个独立 logical
-event。
+event，因此每次 per-event 调用的 `TaskEventEnvelope.Stream` 都是 nil。
 
 #### `Runner.Run`
 
-执行 buffered work。配置 auto-background 时，work 从开始就在 Manager attempt
-context 中执行；如果 foreground timeout 或调用方断开，只改变观察和 publication。
+```go
+func (r *Runner) Run(
+	ctx context.Context,
+	input *Input,
+	work WorkFunc,
+) (*RunResult, error)
+```
+
+执行 buffered work。配置 auto-background 或 caller-abort policy 时，work 从开始
+就在 Manager attempt context 中执行；如果 foreground timeout 或调用方断开，只
+改变观察、publication 或显式 cancellation。调用方通过 `RunResult.Foreground`
+与 `RunResult.Task` 区分 non-durable outcome 和 durable snapshot。
 
 #### `Runner.RunStream`
 
 执行 streaming work。Foreground chunk 只是 Manager-owned Task 的临时投影；
-detach 后调用方收到后台通知，底层 work 不重启，持久进度继续由 TaskEvent 管理。
+detach 后调用方收到后台通知，底层 work 不重启，持久进度继续由 durable
+Task event parts 管理。
 
 `local` 不承诺跨进程恢复，因为闭包只存在于当前进程。
+
+### Direct foreground Mailbox finalization
+
+Local 与 Managed Tool 的 direct foreground 路径都使用同一套 bounded finalizer：
+
+- completed outcome 调用 `SealIfIdle`，同时校验启动时捕获的 generation 和 cursor；
+- failed、canceled、timeout、caller abort、constructor/start failure 与 reader
+  close 调用 `Abandon`；
+- waiting-input 不 finalize，interrupt state 保存 generation/cursor，resume 后再
+  完成；
+- `ErrInputsPending` 不丢弃输入，也不封存 Mailbox；结果与该错误一起返回；
+- finalization 与 caller context 解耦，并有固定上界；Store error 不被吞掉；
+- finalizer 最多执行一次，重复调用返回同一结果。
 
 ***
 
@@ -1155,7 +1306,9 @@ Worker 丢失后通过 TaskID 和 checkpoint 恢复同一个外部操作。
 在 `OutcomeInterrupted` 后接收 durable input，并继续原来的逻辑操作。
 
 `tool.Registration.EventPersister` 可以替换默认 JSON `Update` 序列化。自定义
-persister 与对应的 `ProgressReader` 应使用同一 durable record 格式。
+persister 与对应的 `ProgressReader` 应使用同一 durable record 格式。每个
+`Update` 都是独立 logical event，因此每次调用的 `TaskEventEnvelope.Stream`
+都是 nil。
 
 #### `Run`
 
@@ -1195,6 +1348,17 @@ type Outcome struct {
 
 创建支持 direct foreground、显式 background、task-first auto-background、
 streaming projection 和 waiting input 的工具包装。
+
+Model-facing envelope 对 `task_id` 的规则是：
+
+- `launch_result` 只表示已发布的 background handle，并携带 `task_id`；
+  调用方可以用 `task_output` / `task_stop` 操作该 durable Task；
+- `foreground_result` 是本次调用的同步 wire result，可能来自 direct execution，
+  也可能来自在 foreground boundary 前完成、尚未发布的 deferred Task；它不承诺
+  model-facing `task_id`，不能作为 control handle 使用；
+- `update` 不携带 `task_id`；它只是当前调用中的 live projection；
+- framework 内部分配过 execution ID 或保留 deferred snapshot，不等于把
+  `task_id` 暴露为 model-facing control handle。
 
 #### `Submit`
 
@@ -1265,6 +1429,10 @@ Local Sub-agent 的 `EventPersister` 会收到不包含 reader 的原始 AgentEv
 以及单独的 persistence stream copy。它可以自行决定 event/chunk 的序列化与
 part 划分；live AgentEvent 使用另一份 copy。
 
+只有默认 `EventPersister` 与默认 `TranscriptFormat` 组合会在启动结果中声明
+JSONL 格式。自定义 persister 的格式由调用方定义；通用 `task_output` 只标记为
+event transcript，不假设底层一定是 JSONL。
+
 ### Filesystem middleware
 
 - `LocalBackgroundConfig`：使用 `local.Runner`，仅支持当前进程。
@@ -1289,6 +1457,17 @@ type TypedTaskConfig[M adk.MessageType] struct {
 ```
 
 如果配置了 `SubAgents.Runtime`，可以省略 `Manager`，Deep Agent 会使用 Controller 已绑定的 Manager。如果同时提供二者，它们必须是同一个实例。
+
+能力传播范围是显式的：
+
+- 顶层 Deep Agent 获得 `Tasks` 中配置的 Sub-agent、Local/Recoverable Shell
+  launch capability，并只注入一组 `task_output`/`task_stop`。
+- 只有生成的 general Sub-agent 会在启用 durable Sub-agent runtime 时获得共享
+  Manager 的 `task_output`/`task_stop`；它不会继承 managed Local/Recoverable
+  Shell，但仍保留顶层显式配置的普通 `Shell`/`StreamingShell`。
+- 用户提供的 Sub-agent 不会被 Deep 自动注入 launch capability 或 task control。
+- `ForegroundTimeoutMs` 和 `ShouldAutoBackground` 只作用于 managed
+  Local/Recoverable Shell，不作用于 Sub-agent 或普通 Shell。
 
 ***
 

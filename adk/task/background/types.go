@@ -253,10 +253,10 @@ type WaitForTaskVersionRequest struct {
 	AfterVersion int64
 }
 
-// TaskEvent is one immutable persisted part of a logical task event. EventID
+// TaskEventPart is one immutable persisted part of a logical task event. EventID
 // identifies the logical event; PartID identifies one replayable part within
 // that event. Append order, not either identifier, defines chronology.
-type TaskEvent struct {
+type TaskEventPart struct {
 	EventID   string
 	PartID    string
 	TaskID    string
@@ -265,11 +265,13 @@ type TaskEvent struct {
 	CreatedAt time.Time
 }
 
-// TaskEventPart is serialized output produced by a TaskEventPersister.
-// PartID must be stable when a recoverable producer replays the same logical
-// event. Data may be empty for a metadata-only part. Final closes the logical
-// event after this part is accepted.
-type TaskEventPart struct {
+// TaskEventPartInput is serialized output submitted by a TaskEventPersister.
+// PartID is required by TaskEventWriter.Append and must be stable when a
+// recoverable producer replays the same logical event. The lower-level
+// AppendTaskEventRequest separately accepts an empty PartID as single-part
+// shorthand. Data may be empty for a metadata-only part. Final closes the
+// logical event after this part is accepted.
+type TaskEventPartInput struct {
 	PartID string
 	Data   []byte
 	Final  bool
@@ -296,9 +298,9 @@ type AppendTaskEventRequest struct {
 }
 
 // AppendTaskEventResult reports whether the part was newly inserted. An
-// identical replay returns the original Event with Inserted false.
+// identical replay returns the original Part with Inserted false.
 type AppendTaskEventResult struct {
-	Event    *TaskEvent
+	Part     *TaskEventPart
 	Inserted bool
 }
 
@@ -318,7 +320,7 @@ type ListTaskEventsRequest struct {
 // continuation cursor. NextCursor is empty when the captured snapshot has been
 // exhausted.
 type ListTaskEventsResult struct {
-	Events     []*TaskEvent
+	Parts      []*TaskEventPart
 	NextCursor string
 }
 

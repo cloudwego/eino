@@ -30,10 +30,16 @@ import (
 	"github.com/cloudwego/eino/adk/task/foreground"
 )
 
+const defaultCleanupTimeout = 5 * time.Second
+
 type Policy struct {
 	TimeoutMs                 int
 	ShouldAutoBackground      foreground.ShouldAutoBackground
 	ShouldCancelOnCallerAbort foreground.ShouldCancelOnCallerAbort
+	// CleanupTimeout bounds cancellation and boundary observation after the
+	// foreground projection can no longer safely retain ownership.
+	// Zero uses defaultCleanupTimeout.
+	CleanupTimeout time.Duration
 }
 
 type StartRequest struct {
@@ -49,7 +55,7 @@ type Outcome struct {
 }
 
 // Execution is driven either by one Await call or by one streaming observer
-// using Terminal, Timeout, and one resolution method. The modes must not be
+// using Boundary, Timeout, and one resolution method. The modes must not be
 // mixed and an Execution must not have multiple concurrent observers.
 type Execution struct {
 	manager   *background.Manager
@@ -172,7 +178,7 @@ func launch(
 	runCtx := context.WithValue(
 		windowCtx,
 		projectionContextKey{},
-		execution.detached,
+		(<-chan struct{})(execution.detached),
 	)
 	watchCtx, stopWatch := context.WithCancel(runCtx)
 	execution.stopWatch = stopWatch
@@ -228,7 +234,7 @@ func (e *Execution) Await(callerCtx context.Context) (*Outcome, error) {
 	}
 	select {
 	case <-e.boundary:
-		task, err := e.WaitTerminal(context.Background())
+		task, err := e.WaitBoundary(context.Background())
 		return &Outcome{Task: task}, err
 	case <-e.timeout:
 		outcome, err := e.ResolveTimeout(callerCtx)
@@ -241,7 +247,10 @@ func (e *Execution) Await(callerCtx context.Context) (*Outcome, error) {
 	}
 }
 
-func (e *Execution) Terminal() <-chan struct{} {
+// Boundary returns a stable signal closed when foreground observation must
+// resolve. WaitingInput is a foreground boundary, not a lifecycle terminal
+// state; completed, failed, and canceled tasks are both.
+func (e *Execution) Boundary() <-chan struct{} {
 	if e == nil {
 		return nil
 	}
@@ -267,7 +276,8 @@ func (e *Execution) ForegroundTimeoutError() error {
 	}
 }
 
-func (e *Execution) WaitTerminal(ctx context.Context) (*background.TaskSnapshot, error) {
+// WaitBoundary returns the snapshot that closed Boundary.
+func (e *Execution) WaitBoundary(ctx context.Context) (*background.TaskSnapshot, error) {
 	if e == nil {
 		return nil, errors.New("taskfirst: execution is required")
 	}
@@ -322,24 +332,12 @@ func (e *Execution) resolve(ctx context.Context, callerAbort error) (*Outcome, e
 				)
 				return
 			}
-			e.resolveValue, e.resolveErr = e.detach(policyCtx)
-			if e.resolveErr != nil {
-				_, _ = e.cancelAndWait(
-					policyCtx,
-					"foreground projection publication failed",
-				)
-			}
+			e.resolveValue, e.resolveErr = e.detachOrCancel(policyCtx)
 			return
 		}
 		if e.policy.ShouldAutoBackground != nil &&
 			e.policy.ShouldAutoBackground(policyCtx, &e.candidate) {
-			e.resolveValue, e.resolveErr = e.detach(policyCtx)
-			if e.resolveErr != nil {
-				_, _ = e.cancelAndWait(
-					policyCtx,
-					"foreground projection publication failed",
-				)
-			}
+			e.resolveValue, e.resolveErr = e.detachOrCancel(policyCtx)
 			return
 		}
 		e.resolveValue, e.resolveErr = e.cancelAndWait(
@@ -354,7 +352,7 @@ func (e *Execution) resolve(ctx context.Context, callerAbort error) (*Outcome, e
 func (e *Execution) detach(ctx context.Context) (*Outcome, error) {
 	published, err := e.manager.Publish(ctx, e.TaskID())
 	if errors.Is(err, background.ErrAlreadyTerminal) {
-		task, waitErr := e.WaitTerminal(ctx)
+		task, waitErr := e.WaitBoundary(ctx)
 		return &Outcome{Task: task}, waitErr
 	}
 	if err != nil {
@@ -364,23 +362,89 @@ func (e *Execution) detach(ctx context.Context) (*Outcome, error) {
 	return &Outcome{Task: published, Backgrounded: true}, nil
 }
 
+func (e *Execution) detachOrCancel(ctx context.Context) (*Outcome, error) {
+	outcome, publishErr := e.detach(ctx)
+	if publishErr == nil {
+		return outcome, nil
+	}
+	cleanupTask, cleanupErr := e.cancelAndWaitSnapshot(
+		ctx,
+		"foreground projection publication failed",
+	)
+	var cleanupOutcome *Outcome
+	if cleanupTask != nil {
+		cleanupOutcome = &Outcome{Task: cleanupTask}
+	}
+	if cleanupErr == nil {
+		return cleanupOutcome, publishErr
+	}
+	return cleanupOutcome, &publicationCleanupError{
+		publishErr: publishErr,
+		cleanupErr: cleanupErr,
+	}
+}
+
 func (e *Execution) cancelAndWait(
 	ctx context.Context,
 	reason string,
 ) (*Outcome, error) {
-	_, err := e.manager.RequestCancel(
-		ctx,
-		e.TaskID(),
-		background.WithCancellationReason(reason),
-	)
-	if err != nil && !errors.Is(err, background.ErrAlreadyTerminal) {
-		return nil, err
-	}
-	task, err := e.WaitTerminal(ctx)
+	task, err := e.cancelAndWaitSnapshot(ctx, reason)
 	if err != nil {
 		return nil, err
 	}
 	return &Outcome{Task: task}, nil
+}
+
+// cancelAndWaitSnapshot retains the latest authoritative snapshot for the
+// publication-failure path. Normal cancellation callers use cancelAndWait so
+// they cannot observe a running partial Outcome when cleanup fails.
+func (e *Execution) cancelAndWaitSnapshot(
+	ctx context.Context,
+	reason string,
+) (*background.TaskSnapshot, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	timeout := e.policy.CleanupTimeout
+	if timeout <= 0 {
+		timeout = defaultCleanupTimeout
+	}
+	cleanupCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	requested, err := e.manager.RequestCancel(
+		cleanupCtx,
+		e.TaskID(),
+		background.WithCancellationReason(reason),
+	)
+	if err != nil && !errors.Is(err, background.ErrAlreadyTerminal) {
+		return requested, err
+	}
+	task, err := e.WaitBoundary(cleanupCtx)
+	if err != nil {
+		return requested, err
+	}
+	return task, nil
+}
+
+type publicationCleanupError struct {
+	publishErr error
+	cleanupErr error
+}
+
+func (e *publicationCleanupError) Error() string {
+	return fmt.Sprintf(
+		"%v; cancellation cleanup failed: %v",
+		e.publishErr,
+		e.cleanupErr,
+	)
+}
+
+func (e *publicationCleanupError) Unwrap() error {
+	return e.publishErr
+}
+
+func (e *publicationCleanupError) Is(target error) bool {
+	return errors.Is(e.publishErr, target) || errors.Is(e.cleanupErr, target)
 }
 
 func (e *Execution) watchBoundary(ctx context.Context) {

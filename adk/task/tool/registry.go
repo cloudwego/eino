@@ -45,8 +45,8 @@ type Registration struct {
 	RenderResult func(context.Context, *background.TaskSnapshot) (*schema.ToolResult, error)
 	// Materializer optionally derives an EventID-idempotent output file.
 	Materializer OutputMaterializer
-	// EventPersister serializes Updates and may consume an optional
-	// persistence-owned update stream. Nil uses the JSON persister.
+	// EventPersister serializes each Update. Each call receives one Update as
+	// Event and a nil Stream. Nil uses the JSON persister.
 	EventPersister background.TaskEventPersister[*Update, *Update]
 }
 

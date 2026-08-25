@@ -30,7 +30,6 @@ import (
 	"github.com/cloudwego/eino/adk/filesystem"
 	"github.com/cloudwego/eino/adk/internal"
 	"github.com/cloudwego/eino/adk/internal/agenttool"
-	"github.com/cloudwego/eino/adk/internal/taskfirst"
 	"github.com/cloudwego/eino/adk/task"
 	"github.com/cloudwego/eino/adk/task/background"
 	backgroundlocal "github.com/cloudwego/eino/adk/task/local"
@@ -103,11 +102,13 @@ func newManagedAgentTool[M adk.MessageType](
 	formatHint := ""
 	if format == nil {
 		format = defaultTranscriptFormat[M]
-		formatHint = outputFileFormatHint
 	}
 	persister := output.persister
 	if persister == nil {
 		persister = agentTaskEventPersister[M]{format: format}
+		if output.format == nil {
+			formatHint = outputFileFormatHint
+		}
 	}
 	return utils.InferOptionableTool(name, desc,
 		func(ctx context.Context, in agentManagedInput, opts ...tool.Option) (string, error) {
@@ -153,7 +154,7 @@ func newManagedAgentTool[M adk.MessageType](
 				}
 				runOpts := append(opts, agenttool.WithEventReceiverTransform(
 					managedEventReceiverTransform(
-						taskfirst.ProjectionDetached(workCtx), outputReceiver,
+						backgroundlocal.ProjectionDetached(workCtx), outputReceiver,
 					),
 				))
 				out, runErr := agent.InvokableRun(workCtx, params, runOpts...)
@@ -177,17 +178,60 @@ func newManagedAgentTool[M adk.MessageType](
 		})
 }
 
-func formatManagedAgentResult(agentType string, task *background.TaskSnapshot, formatHint string) (string, error) {
-	switch task.Status {
+func formatManagedAgentResult(
+	agentType string,
+	result *backgroundlocal.RunResult,
+	formatHint string,
+) (string, error) {
+	if outcome, ok := result.Foreground(); ok {
+		switch outcome.Status {
+		case task.OutcomeCompleted:
+			return string(outcome.Data), nil
+		case task.OutcomeFailed:
+			return "", fmt.Errorf(
+				"subagent %q execution %q failed: %s",
+				agentType,
+				result.ID(),
+				outcome.Error,
+			)
+		case task.OutcomeCanceled:
+			return "", fmt.Errorf(
+				"subagent %q execution %q was canceled: %s",
+				agentType,
+				result.ID(),
+				outcome.Error,
+			)
+		default:
+			return "", fmt.Errorf(
+				"subagent %q execution %q returned unsupported foreground status %d",
+				agentType,
+				result.ID(),
+				outcome.Status,
+			)
+		}
+	}
+	backgroundTask, ok := result.Task()
+	if !ok {
+		return "", errors.New("subagent: invalid local run result")
+	}
+	return formatManagedAgentTaskResult(agentType, backgroundTask, formatHint)
+}
+
+func formatManagedAgentTaskResult(
+	agentType string,
+	backgroundTask *background.TaskSnapshot,
+	formatHint string,
+) (string, error) {
+	switch backgroundTask.Status {
 	case background.StatusCompleted:
-		return string(task.ResultData), nil
+		return string(backgroundTask.ResultData), nil
 	case background.StatusPending, background.StatusRunning:
-		message := fmt.Sprintf("Agent running in background with ID: %s.", task.Spec.ID)
-		if task.Spec.OutputFile != "" {
-			message += fmt.Sprintf(" Output is being written to: %s.", task.Spec.OutputFile)
+		message := fmt.Sprintf("Agent running in background with ID: %s.", backgroundTask.Spec.ID)
+		if backgroundTask.Spec.OutputFile != "" {
+			message += fmt.Sprintf(" Output is being written to: %s.", backgroundTask.Spec.OutputFile)
 		}
 		message += " You will be notified when it completes."
-		if task.Spec.OutputFile != "" {
+		if backgroundTask.Spec.OutputFile != "" {
 			message += " To check interim output, use Read on that file path"
 			if formatHint != "" {
 				message += fmt.Sprintf(" (%s)", formatHint)
@@ -196,21 +240,36 @@ func formatManagedAgentResult(agentType string, task *background.TaskSnapshot, f
 		}
 		return message, nil
 	case background.StatusWaitingInput:
-		return fmt.Sprintf("Agent task %s requires input. Use task_output to inspect the request.", task.Spec.ID), nil
+		return fmt.Sprintf(
+			"Agent task %s requires input. Use task_output to inspect the request.",
+			backgroundTask.Spec.ID,
+		), nil
 	case background.StatusSuspended:
-		return fmt.Sprintf("Agent task %s is %s.", task.Spec.ID, task.Status), nil
+		return fmt.Sprintf(
+			"Agent task %s is %s.",
+			backgroundTask.Spec.ID,
+			backgroundTask.Status,
+		), nil
 	case background.StatusCanceled:
 		return "", fmt.Errorf(
 			"subagent %q task %q (%s) was canceled",
-			agentType, task.Spec.ID, task.Spec.Description,
+			agentType, backgroundTask.Spec.ID, backgroundTask.Spec.Description,
 		)
 	case background.StatusFailed:
 		return "", fmt.Errorf(
 			"subagent %q task %q (%s) failed: %s",
-			agentType, task.Spec.ID, task.Spec.Description, task.ResultError,
+			agentType,
+			backgroundTask.Spec.ID,
+			backgroundTask.Spec.Description,
+			backgroundTask.ResultError,
 		)
 	default:
-		return "", fmt.Errorf("subagent %q task %q has unknown status %q", agentType, task.Spec.ID, task.Status)
+		return "", fmt.Errorf(
+			"subagent %q task %q has unknown status %q",
+			agentType,
+			backgroundTask.Spec.ID,
+			backgroundTask.Status,
+		)
 	}
 }
 
@@ -294,19 +353,22 @@ func (r *agentEventPersistenceReceiver[M]) receive(event *adk.TypedAgentEvent[M]
 		},
 		r.persister,
 	)
+	if persisted != nil {
+		for _, part := range persisted.Appends {
+			if r.writer == nil || part == nil || part.Part == nil ||
+				!part.Inserted {
+				continue
+			}
+			if writeErr := r.writeRecord(part.Part.Data); writeErr != nil {
+				r.fail(writeErr)
+				return
+			}
+		}
+	}
 	if err != nil {
 		r.failed = true
 		r.reportErr = err
 		return
-	}
-	for _, part := range persisted.Parts {
-		if r.writer == nil || part == nil || part.Event == nil {
-			continue
-		}
-		if err := r.writeRecord(part.Event.Data); err != nil {
-			r.fail(err)
-			return
-		}
 	}
 }
 
@@ -360,30 +422,27 @@ func (p agentTaskEventPersister[M]) Persist(
 	_ background.TaskEventScope,
 	input *background.TaskEventEnvelope[*adk.TypedAgentEvent[M], M],
 	writer background.TaskEventWriter,
-) ([]*background.AppendTaskEventResult, error) {
+) error {
 	if input.Event == nil || input.Event.Output == nil ||
 		input.Event.Output.MessageOutput == nil {
-		return nil, nil
+		return nil
 	}
 	event := withAgentTaskEventStream(input.Event, input.Stream)
 	message, err := event.Output.MessageOutput.GetMessage()
 	if err != nil {
-		return nil, fmt.Errorf("materialize agent output message: %w", err)
+		return fmt.Errorf("materialize agent output message: %w", err)
 	}
 	line, err := p.format(ctx, event.AgentName, message)
 	if err != nil {
-		return nil, fmt.Errorf("encode agent output event: %w", err)
+		return fmt.Errorf("encode agent output event: %w", err)
 	}
 	if line == "" {
-		return nil, nil
+		return nil
 	}
-	result, err := writer.Append(ctx, &background.TaskEventPart{
+	_, err = writer.Append(ctx, &background.TaskEventPartInput{
 		PartID: "event", Data: []byte(line + "\n"), Final: true,
 	})
-	if err != nil {
-		return nil, err
-	}
-	return []*background.AppendTaskEventResult{result}, nil
+	return err
 }
 
 func splitAgentTaskEvent[M adk.MessageType](
@@ -659,13 +718,12 @@ func newControllerAgentTool[M adk.MessageType](
 					&durablesubagent.ContinueRequest[M]{
 						ChildSessionID: in.ChildSessionID,
 						InvocationID:   parentSessionID + ":" + toolCallID,
-						Input:          newTypedUserInput[M](prompt),
+						Input:          newTypedUserInput[M](prompt, enableStreaming),
 						IfIdle: &durablesubagent.StartOptions[M]{
 							ParentSessionID: parentSessionID,
 							AgentName:       in.SubagentType,
 							Description:     in.Description,
 							StartMode:       startMode,
-							EnableStreaming: enableStreaming,
 							OnEvent:         onEvent,
 						},
 					},
@@ -675,8 +733,8 @@ func newControllerAgentTool[M adk.MessageType](
 					InvocationID:    parentSessionID + ":" + toolCallID,
 					ParentSessionID: parentSessionID, ChildSessionID: in.ChildSessionID,
 					AgentName: in.SubagentType, Description: in.Description,
-					Input: newTypedUserInput[M](prompt), StartMode: startMode,
-					EnableStreaming: enableStreaming, OnEvent: onEvent,
+					Input:     newTypedUserInput[M](prompt, enableStreaming),
+					StartMode: startMode, OnEvent: onEvent,
 				})
 			}
 		}
@@ -726,16 +784,21 @@ func formatRuntimeHandle(
 	return data, nil
 }
 
-func newTypedUserInput[M adk.MessageType](query string) *adk.TypedAgentInput[M] {
+func newTypedUserInput[M adk.MessageType](
+	query string,
+	enableStreaming bool,
+) *adk.TypedAgentInput[M] {
 	var zero M
 	switch any(zero).(type) {
 	case *schema.Message:
 		return &adk.TypedAgentInput[M]{
-			Messages: []M{any(schema.UserMessage(query)).(M)},
+			Messages:        []M{any(schema.UserMessage(query)).(M)},
+			EnableStreaming: enableStreaming,
 		}
 	case *schema.AgenticMessage:
 		return &adk.TypedAgentInput[M]{
-			Messages: []M{any(schema.UserAgenticMessage(query)).(M)},
+			Messages:        []M{any(schema.UserAgenticMessage(query)).(M)},
+			EnableStreaming: enableStreaming,
 		}
 	default:
 		panic("unreachable: unsupported message type")

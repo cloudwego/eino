@@ -24,13 +24,14 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cloudwego/eino/adk"
+	"github.com/cloudwego/eino/adk/task"
 	"github.com/cloudwego/eino/adk/task/background"
 	"github.com/cloudwego/eino/schema"
 )
 
 func TestControllerReadProgressIsolatesPersistentSessionByTask(t *testing.T) {
 	ctx := context.Background()
-	controller, _, sessionStore := newControllerForTest(
+	controller, manager, sessionStore := newControllerForTest(
 		t,
 		completionBarrierFunc[*schema.Message](func(
 			context.Context,
@@ -40,6 +41,18 @@ func TestControllerReadProgressIsolatesPersistentSessionByTask(t *testing.T) {
 		}),
 		testEventMapper,
 	)
+	metadata, err := json.Marshal(&runtimeMetadata{
+		Version: runtimeMetadataVersion, ParentSessionID: "parent",
+		RootSessionID: "parent", ChildSessionID: "shared-child",
+		AgentName: "worker", StartMode: task.StartModeBackground,
+	})
+	require.NoError(t, err)
+	_, err = manager.RegisterMailbox(ctx, &task.RegisterMailboxRequest{
+		CandidateTaskID: "target", InvocationID: "target",
+		Identity: metadata, RootSessionID: "parent",
+		ChildSessionID: "shared-child",
+	})
+	require.NoError(t, err)
 	payload, err := json.Marshal(&taskPayload{
 		Version: payloadVersion, SubAgentName: "worker",
 		ChildSessionID: "shared-child",
@@ -48,7 +61,7 @@ func TestControllerReadProgressIsolatesPersistentSessionByTask(t *testing.T) {
 	backgroundTask := &background.TaskSnapshot{
 		Spec: background.Spec{
 			ID: "target", ExecutorKey: ExecutorKey, Kind: "subagent",
-			Payload: payload,
+			Payload: payload, RootSessionID: "parent",
 		},
 		Status: background.StatusWaitingInput,
 	}
@@ -123,4 +136,68 @@ func TestControllerReadProgressValidation(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.Empty(t, progress)
+}
+
+func TestControllerReadProgressValidatesPersistedRuntimeMetadata(t *testing.T) {
+	ctx := context.Background()
+	controller, manager, _ := newControllerForTest(
+		t,
+		completionBarrierFunc[*schema.Message](func(
+			context.Context,
+			*CompletionContext[*schema.Message],
+		) (CompletionAction, error) {
+			return CompletionComplete, nil
+		}),
+		testEventMapper,
+	)
+	validMetadata, err := json.Marshal(&runtimeMetadata{
+		Version: runtimeMetadataVersion, ParentSessionID: "direct-parent",
+		RootSessionID: "root", ChildSessionID: "other-child",
+		AgentName: "worker", StartMode: task.StartModeBackground,
+	})
+	require.NoError(t, err)
+	for _, testCase := range []struct {
+		name      string
+		identity  []byte
+		childID   string
+		errorText string
+	}{
+		{
+			name: "malformed identity", identity: []byte("{"),
+			childID: "child", errorText: "decode progress runtime metadata",
+		},
+		{
+			name: "payload mismatch", identity: validMetadata,
+			childID: "other-child", errorText: "do not match",
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			taskID := "task-" + testCase.name
+			_, registerErr := manager.RegisterMailbox(
+				ctx,
+				&task.RegisterMailboxRequest{
+					CandidateTaskID: taskID, InvocationID: taskID,
+					Identity: testCase.identity, RootSessionID: "root",
+					ChildSessionID: testCase.childID,
+				},
+			)
+			require.NoError(t, registerErr)
+			payload, marshalErr := json.Marshal(&taskPayload{
+				Version: payloadVersion, SubAgentName: "worker",
+				ChildSessionID: "child",
+			})
+			require.NoError(t, marshalErr)
+			_, readErr := controller.ReadProgress(
+				ctx,
+				&background.TaskSnapshot{Spec: background.Spec{
+					ID: taskID, ExecutorKey: ExecutorKey, Kind: "subagent",
+					Payload: payload, RootSessionID: "root",
+				}},
+				func(context.Context, string, *schema.Message) (string, error) {
+					return "", nil
+				},
+			)
+			require.ErrorContains(t, readErr, testCase.errorText)
+		})
+	}
 }

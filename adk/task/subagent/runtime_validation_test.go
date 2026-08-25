@@ -62,6 +62,15 @@ func TestRuntimeCheckpointValidation(t *testing.T) {
 	require.Equal(t, json.Number("9007199254740993"), targets["target"])
 }
 
+func TestCompletionActionZeroValueFailsClosed(t *testing.T) {
+	require.Equal(t, CompletionUnknown, CompletionAction(0))
+	require.ErrorContains(
+		t,
+		validateCompletionAction(CompletionAction(0)),
+		"invalid completion action",
+	)
+}
+
 func TestSignalsToInputMergesMessagesAndExternalEvents(t *testing.T) {
 	runtime, _, _ := newControllerForTest(
 		t,
@@ -129,6 +138,45 @@ func TestRuntimeMetadataAndForegroundResultValidation(t *testing.T) {
 		`{"version":1,"final_message":{},"error":"both"}`,
 	))
 	require.Error(t, err)
+}
+
+func TestExecutorProtocolDoesNotClaimLegacyV4Tasks(t *testing.T) {
+	const legacyExecutorKey = "eino.dev/subagent"
+
+	require.Equal(t, "eino.dev/task-subagent", ExecutorKey)
+	require.Equal(t, 1, payloadVersion)
+
+	legacySpec := background.Spec{
+		ID: "legacy-v4", ExecutorKey: legacyExecutorKey, Kind: "subagent",
+		Payload: []byte(
+			`{"version":4,"subagent_name":"worker","input":{"messages":[]},"child_session_id":"child"}`,
+		),
+	}
+	executor := newExecutor[*schema.Message](nil)
+	require.ErrorContains(t, executor.ValidateSpec(legacySpec), "invalid executor key")
+
+	store := background.NewInMemoryStore(nil)
+	created, err := store.Create(context.Background(), &background.CreateTaskRequest{
+		Spec: legacySpec, LeaseExpiryPolicy: background.LeaseExpiryRetry,
+	})
+	require.NoError(t, err)
+	manager, err := background.New(context.Background(), &background.Config{
+		Tasks: store, TaskEvents: store,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, manager.Close(context.Background()))
+	})
+	_, loaded, err := manager.LoadOrRegisterExecutor(executor)
+	require.NoError(t, err)
+	require.False(t, loaded)
+
+	err = manager.Execute(context.Background(), created.Spec.ID)
+	require.ErrorContains(t, err, `executor "eino.dev/subagent" is unavailable`)
+	current, err := manager.Get(context.Background(), created.Spec.ID)
+	require.NoError(t, err)
+	require.Equal(t, background.StatusPending, current.Status)
+	require.Zero(t, current.Attempt)
 }
 
 func TestExecutorPayloadValidation(t *testing.T) {

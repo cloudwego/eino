@@ -473,21 +473,18 @@ func (jsonUpdateEventPersister) Persist(
 	_ background.TaskEventScope,
 	input *background.TaskEventEnvelope[*Update, *Update],
 	writer background.TaskEventWriter,
-) ([]*background.AppendTaskEventResult, error) {
+) error {
 	if input == nil || input.Event == nil {
-		return nil, errors.New("task/tool: update event is required")
+		return errors.New("task/tool: update event is required")
 	}
 	data, err := json.Marshal(input.Event)
 	if err != nil {
-		return nil, fmt.Errorf("task/tool: encode update: %w", err)
+		return fmt.Errorf("task/tool: encode update: %w", err)
 	}
-	result, err := writer.Append(ctx, &background.TaskEventPart{
+	_, err = writer.Append(ctx, &background.TaskEventPartInput{
 		PartID: "event", Data: data, Final: true,
 	})
-	if err != nil {
-		return nil, err
-	}
-	return []*background.AppendTaskEventResult{result}, nil
+	return err
 }
 
 func receiveUpdates(
@@ -545,11 +542,11 @@ func (e *executor) persistUpdate(
 	if err != nil {
 		return fmt.Errorf("task/tool: persist update: %w", err)
 	}
-	if len(persisted.Parts) == 0 {
+	if len(persisted.Appends) == 0 {
 		return errors.New("task/tool: event persister emitted no parts")
 	}
 	firstEmission := false
-	for _, part := range persisted.Parts {
+	for _, part := range persisted.Appends {
 		firstEmission = firstEmission || part != nil && part.Inserted
 	}
 	if persistence.materializerEnabled && callerSuppliedEventID {

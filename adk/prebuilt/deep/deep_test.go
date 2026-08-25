@@ -36,6 +36,7 @@ import (
 	adksession "github.com/cloudwego/eino/adk/session"
 	"github.com/cloudwego/eino/adk/task"
 	"github.com/cloudwego/eino/adk/task/background"
+	"github.com/cloudwego/eino/adk/task/foreground"
 	backgroundshell "github.com/cloudwego/eino/adk/task/shell"
 	durablesubagent "github.com/cloudwego/eino/adk/task/subagent"
 	backgroundtool "github.com/cloudwego/eino/adk/task/tool"
@@ -237,6 +238,45 @@ func (*deepRecoverableShellStub) RecoverCommand(
 	*backgroundshell.RecoverCommandRequest,
 ) (backgroundtool.Run, error) {
 	return nil, nil
+}
+
+func toolsFromDeepHandlers(
+	t *testing.T,
+	handlers []adk.ChatModelAgentMiddleware,
+) map[string]tool.BaseTool {
+	t.Helper()
+	ctx := context.Background()
+	runCtx := &adk.ChatModelAgentContext[*schema.Message]{}
+	for _, handler := range handlers {
+		var err error
+		ctx, runCtx, err = handler.BeforeAgent(ctx, runCtx)
+		require.NoError(t, err)
+		require.NotNil(t, runCtx)
+	}
+	tools := make(map[string]tool.BaseTool, len(runCtx.Tools))
+	for _, tl := range runCtx.Tools {
+		info, err := tl.Info(ctx)
+		require.NoError(t, err)
+		require.NotContains(t, tools, info.Name)
+		tools[info.Name] = tl
+	}
+	return tools
+}
+
+func requireRunInBackgroundField(
+	t *testing.T,
+	ctx context.Context,
+	tl tool.BaseTool,
+	want bool,
+) {
+	t.Helper()
+	require.NotNil(t, tl)
+	info, err := tl.Info(ctx)
+	require.NoError(t, err)
+	js, err := info.ParamsOneOf.ToJSONSchema()
+	require.NoError(t, err)
+	_, ok := js.Properties.Get("run_in_background")
+	require.Equal(t, want, ok)
 }
 
 func TestGenModelInput(t *testing.T) {
@@ -527,6 +567,127 @@ func TestDeepAgentManagerWiring(t *testing.T) {
 	assert.NoError(t, err)
 	_, ok = plainJS.Properties.Get("run_in_background")
 	assert.False(t, ok, "unmanaged execute must not expose run_in_background")
+}
+
+func TestDeepGeneratedGeneralDoesNotInheritManagedShell(t *testing.T) {
+	ctx := context.Background()
+	tests := []struct {
+		name      string
+		configure func(*TaskConfig)
+	}{
+		{
+			name: "local",
+			configure: func(tasks *TaskConfig) {
+				tasks.LocalShell = &LocalShellConfig{Shell: &deepMockShell{}}
+			},
+		},
+		{
+			name: "recoverable",
+			configure: func(tasks *TaskConfig) {
+				tasks.RecoverableShell = &RecoverableShellConfig{
+					Shell: &deepRecoverableShellStub{},
+				}
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			manager := mustNewBackgroundManager(t, ctx, nil)
+			defer func() { require.NoError(t, manager.Close(ctx)) }()
+			tasks := &TaskConfig{
+				Manager: manager,
+				SubAgents: &DurableSubAgentConfig{
+					Runtime: mustDeepController(t, manager),
+				},
+			}
+			timeoutMs := 1
+			tasks.ForegroundTimeoutMs = &timeoutMs
+			tasks.ShouldAutoBackground = func(
+				context.Context,
+				*foreground.CandidateInfo,
+			) bool {
+				return true
+			}
+			tt.configure(tasks)
+			cfg := &Config{WithoutWriteTodos: true, Tasks: tasks}
+
+			childHandlers, err := buildGeneratedGeneralAgentMiddlewares(ctx, cfg)
+			require.NoError(t, err)
+			childTools := toolsFromDeepHandlers(t, childHandlers)
+			require.Len(t, childTools, 2)
+			require.Contains(t, childTools, "task_output")
+			require.Contains(t, childTools, "task_stop")
+			require.NotContains(t, childTools, filesystem2.ToolNameExecute)
+
+			topHandlers, err := buildTypedBuiltinAgentMiddlewares(ctx, cfg, tasks)
+			require.NoError(t, err)
+			topTools := toolsFromDeepHandlers(t, topHandlers)
+			require.Len(t, topTools, 1)
+			requireRunInBackgroundField(
+				t, ctx, topTools[filesystem2.ToolNameExecute], true,
+			)
+		})
+	}
+}
+
+func TestDeepGeneratedGeneralKeepsPlainShellAndSharedTaskControls(t *testing.T) {
+	ctx := context.Background()
+	manager := mustNewBackgroundManager(t, ctx, nil)
+	defer func() { require.NoError(t, manager.Close(ctx)) }()
+	timeoutMs := 1
+	cfg := &Config{
+		WithoutWriteTodos: true,
+		Shell:             &deepMockShell{},
+		Tasks: &TaskConfig{
+			Manager: manager,
+			SubAgents: &DurableSubAgentConfig{
+				Runtime: mustDeepController(t, manager),
+			},
+			ForegroundTimeoutMs: &timeoutMs,
+			ShouldAutoBackground: func(
+				context.Context,
+				*foreground.CandidateInfo,
+			) bool {
+				return true
+			},
+		},
+	}
+
+	handlers, err := buildGeneratedGeneralAgentMiddlewares(ctx, cfg)
+	require.NoError(t, err)
+	tools := toolsFromDeepHandlers(t, handlers)
+	require.Len(t, tools, 3)
+	require.Contains(t, tools, "task_output")
+	require.Contains(t, tools, "task_stop")
+	requireRunInBackgroundField(
+		t, ctx, tools[filesystem2.ToolNameExecute], false,
+	)
+}
+
+func TestDeepUserSubAgentsAreNotInjected(t *testing.T) {
+	ctx := context.Background()
+	manager := mustNewBackgroundManager(t, ctx, nil)
+	defer func() { require.NoError(t, manager.Close(ctx)) }()
+	userSubAgent := &spySubAgent{}
+	cfg := &Config{
+		ChatModel: &recordingDeepModel{},
+		SubAgents: []adk.Agent{userSubAgent},
+		Tasks: &TaskConfig{
+			Manager: manager,
+			SubAgents: &DurableSubAgentConfig{
+				Runtime: mustDeepController(t, manager),
+			},
+			LocalShell: &LocalShellConfig{Shell: &deepMockShell{}},
+		},
+	}
+	handlers, err := buildGeneratedGeneralAgentMiddlewares(ctx, cfg)
+	require.NoError(t, err)
+
+	subAgents, err := buildSubAgentsList(ctx, cfg, "instruction", handlers)
+	require.NoError(t, err)
+	require.Len(t, subAgents, 2)
+	require.Equal(t, generalAgentName, subAgents[0].Name(ctx))
+	require.Same(t, userSubAgent, subAgents[1])
 }
 
 func TestDeepRecoverableShellDoesNotCreateLocalRunner(t *testing.T) {

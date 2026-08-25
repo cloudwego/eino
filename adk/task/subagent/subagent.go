@@ -31,27 +31,51 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
+// RuntimeSessionStoreAccessMode identifies the authority under which the
+// runtime accesses a child session store.
+type RuntimeSessionStoreAccessMode uint8
+
+const (
+	// RuntimeSessionStoreAccessUnknown is the invalid zero value.
+	RuntimeSessionStoreAccessUnknown RuntimeSessionStoreAccessMode = iota
+	// RuntimeSessionStoreAccessForegroundExecute permits a caller-owned
+	// foreground execution to read and write. Task must be nil.
+	RuntimeSessionStoreAccessForegroundExecute
+	// RuntimeSessionStoreAccessManagedExecute permits a Manager-owned execution
+	// attempt to read and write. Task must contain the current attempt snapshot.
+	RuntimeSessionStoreAccessManagedExecute
+	// RuntimeSessionStoreAccessReadProgress requests read-only progress access.
+	// Task must contain the snapshot being projected.
+	RuntimeSessionStoreAccessReadProgress
+)
+
 // RuntimeSessionStoreRequest identifies one TurnLoop runtime session access.
-// Implementations may use ParentSessionID to enforce child-session ownership.
+// ParentSessionID is the child's direct parent session, including for deeply
+// nested tasks. Implementations may use it to enforce child-session ownership.
+// AccessMode is the sole execution-authority discriminator and determines
+// whether Task must be nil or non-nil.
 type RuntimeSessionStoreRequest struct {
 	TaskID          string
 	ParentSessionID string
 	ChildSessionID  string
 	Task            *background.TaskSnapshot
-	Attached        bool
+	AccessMode      RuntimeSessionStoreAccessMode
 }
 
 // RuntimeSessionStoreFactory constructs a session store for foreground execution,
-// background attempts, and progress reads of one logical task.
+// managed execution attempts, and progress reads of one logical task.
 type RuntimeSessionStoreFactory[M adk.MessageType] func(
 	context.Context,
 	*RuntimeSessionStoreRequest,
 ) (adk.SessionEventStore[M], error)
 
 const (
-	// ExecutorKey is the background executor key for durable sub-agent tasks.
-	ExecutorKey = "eino.dev/subagent"
+	// ExecutorKey identifies the TurnLoop task runtime protocol for durable
+	// sub-agent tasks. Its payload versions are scoped to this persisted key;
+	// version 1 is not compatible with the legacy eino.dev/subagent payload v4.
+	ExecutorKey = "eino.dev/task-subagent"
 
+	// payloadVersion is the first payload version under ExecutorKey.
 	payloadVersion          = 1
 	maxChildSessionIDLength = 1024
 	taskIDEventExtraKey     = "eino.task.id"
@@ -157,7 +181,7 @@ func (e *executor[M]) ValidateExecution(_ context.Context, task *background.Task
 // SupportsDrain reports true because Controller checkpoints every turn boundary.
 func (*executor[M]) SupportsDrain() bool { return true }
 
-// AcknowledgeCancellation runs domain cleanup before Manager commits cancellation.
+// AcknowledgeCancellation runs domain cleanup after Manager persists cancel intent.
 func (e *executor[M]) AcknowledgeCancellation(
 	ctx context.Context,
 	task *background.TaskSnapshot,

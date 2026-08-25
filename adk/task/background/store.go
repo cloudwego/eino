@@ -167,8 +167,10 @@ func (e *taskCreatedEventUndeliveredError) Is(target error) bool {
 	return target == ErrTaskCreatedEventUndelivered
 }
 
-// TaskStore persists authoritative task snapshots and semantic lifecycle
-// transitions.
+// TaskStore is the persistence-provider SPI for authoritative task snapshots
+// and semantic lifecycle transitions. Manager is a facade over this contract,
+// not a competing state owner; production providers must make each transition
+// authoritative before returning it.
 //
 // Every returned Task and mutable field is independently owned by the caller.
 // ListPending and ListSuspended follow their request ordering, cursor, and limit
@@ -208,8 +210,10 @@ type TaskStore interface {
 	WaitForTaskVersion(context.Context, *WaitForTaskVersionRequest) (*TaskSnapshot, error)
 }
 
-// LifecycleStore is the atomic provider contract for background ownership and
-// task mailbox transitions.
+// LifecycleStore is the complete persistence-provider SPI for background
+// ownership. It combines lifecycle, mailbox, and parent-notification writes so
+// cross-plane transitions can be committed atomically. Manager delegates
+// authoritative state changes to this single store.
 type LifecycleStore interface {
 	TaskStore
 	task.MailboxStore
@@ -409,7 +413,7 @@ func cloneBytes(v []byte) []byte {
 	return c
 }
 
-func cloneTaskEvent(v *TaskEvent) *TaskEvent {
+func cloneTaskEventPart(v *TaskEventPart) *TaskEventPart {
 	if v == nil {
 		return nil
 	}

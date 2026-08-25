@@ -168,6 +168,19 @@ func TestHandleReportsTerminalFailuresAndWaitCancellation(t *testing.T) {
 		Spec: validSpec("handle-context"),
 	})
 	require.NoError(t, err)
+	started, err := store.Start(context.Background(), &StartTaskRequest{
+		TaskID: created.Spec.ID, ExpectedVersion: created.Version,
+	})
+	require.NoError(t, err)
+	suspended, err := store.SuspendIfNoInputs(
+		context.Background(),
+		&SuspendIfNoInputsRequest{
+			TaskID: created.Spec.ID, ExpectedVersion: started.Version,
+			Attempt: started.Attempt, Checkpoint: []byte("suspended"),
+		},
+	)
+	require.NoError(t, err)
+	require.Equal(t, StatusSuspended, suspended.Status)
 	handle, err := manager.Handle(created.Spec.ID)
 	require.NoError(t, err)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)

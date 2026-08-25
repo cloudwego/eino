@@ -25,6 +25,7 @@ import (
 	"github.com/bytedance/sonic"
 
 	"github.com/cloudwego/eino/adk"
+	"github.com/cloudwego/eino/adk/task"
 	"github.com/cloudwego/eino/adk/task/background"
 )
 
@@ -37,7 +38,8 @@ const (
 // the Controller's session store. It returns an empty string for tasks owned by
 // another executor. format converts one materialized child-session message to
 // one transcript record; an empty result skips the message. It may be called
-// concurrently and must not mutate the message.
+// concurrently and must not mutate the message. Factory access is scoped by
+// the direct parent session persisted in the task mailbox.
 func (r *Controller[M]) ReadProgress(
 	ctx context.Context,
 	task *background.TaskSnapshot,
@@ -56,9 +58,17 @@ func (r *Controller[M]) ReadProgress(
 	if err != nil {
 		return "", err
 	}
+	mailbox, err := r.manager.GetMailbox(ctx, task.Spec.ID)
+	if err != nil {
+		return "", fmt.Errorf("task/subagent: load progress mailbox: %w", err)
+	}
+	metadata, err := validateProgressRuntimeMetadata(task, payload, mailbox)
+	if err != nil {
+		return "", err
+	}
 	sessionStore, err := r.sessionStoreFor(
-		ctx, task.Spec.ID, task.Spec.RootSessionID, payload.ChildSessionID,
-		task, false,
+		ctx, task.Spec.ID, metadata.ParentSessionID, metadata.ChildSessionID,
+		task, RuntimeSessionStoreAccessReadProgress,
 	)
 	if err != nil {
 		return "", fmt.Errorf(
@@ -70,10 +80,40 @@ func (r *Controller[M]) ReadProgress(
 		ctx,
 		sessionStore,
 		task,
-		payload.ChildSessionID,
-		payload.SubAgentName,
+		metadata.ChildSessionID,
+		metadata.AgentName,
 		format,
 	)
+}
+
+func validateProgressRuntimeMetadata(
+	runtimeTask *background.TaskSnapshot,
+	payload *taskPayload,
+	mailbox *task.Mailbox,
+) (*runtimeMetadata, error) {
+	if mailbox == nil {
+		return nil, errors.New("task/subagent: progress mailbox is nil")
+	}
+	metadata, err := decodeRuntimeMetadata(mailbox.Identity)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"task/subagent: decode progress runtime metadata: %w",
+			err,
+		)
+	}
+	if mailbox.TaskID != runtimeTask.Spec.ID ||
+		mailbox.ParentTaskID != metadata.ParentTaskID ||
+		mailbox.RootSessionID != metadata.RootSessionID ||
+		mailbox.ChildSessionID != metadata.ChildSessionID ||
+		runtimeTask.Spec.ParentTaskID != metadata.ParentTaskID ||
+		runtimeTask.Spec.RootSessionID != metadata.RootSessionID ||
+		payload.ChildSessionID != metadata.ChildSessionID ||
+		payload.SubAgentName != metadata.AgentName {
+		return nil, errors.New(
+			"task/subagent: progress task and runtime metadata do not match",
+		)
+	}
+	return metadata, nil
 }
 
 func readProgress[M adk.MessageType](

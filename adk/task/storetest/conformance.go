@@ -27,6 +27,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/cloudwego/eino/adk/task"
 	"github.com/cloudwego/eino/adk/task/background"
 )
 
@@ -190,6 +191,45 @@ func RunLifecycleStoreConformance(t *testing.T, config LifecycleStoreConfig) {
 		require.Equal(t, "safe", string(yielded.Checkpoint))
 	})
 
+	t.Run("ordinary_input_only_wakes_waiting_input", func(t *testing.T) {
+		store := config.New(t)
+		waiting := waitForInput(t, store, "input-waiting")
+		_, err := store.SendInput(context.Background(), &task.SendInputRequest{
+			TaskID: waiting.Spec.ID,
+			Input:  task.Input{EventID: "waiting-input", Kind: "input"},
+		})
+		require.NoError(t, err)
+		woken, err := store.Get(context.Background(), waiting.Spec.ID)
+		require.NoError(t, err)
+		require.Equal(t, background.StatusPending, woken.Status)
+
+		suspended := suspend(t, store, "input-suspended")
+		_, err = store.SendInput(context.Background(), &task.SendInputRequest{
+			TaskID: suspended.Spec.ID,
+			Input:  task.Input{EventID: "suspended-input", Kind: "input"},
+		})
+		require.NoError(t, err)
+		stillSuspended, err := store.Get(context.Background(), suspended.Spec.ID)
+		require.NoError(t, err)
+		require.Equal(t, background.StatusSuspended, stillSuspended.Status)
+		require.Equal(t, suspended.Version, stillSuspended.Version)
+
+		released, err := store.ReleaseSuspension(
+			context.Background(),
+			&background.ReleaseSuspensionRequest{
+				TaskID: suspended.Spec.ID, ExpectedVersion: suspended.Version,
+			},
+		)
+		require.NoError(t, err)
+		require.Equal(t, background.StatusPending, released.Status)
+	})
+
+	t.Run("child_notification_only_wakes_waiting_input", func(t *testing.T) {
+		store := config.New(t)
+		assertChildPublicationWake(t, store, "notification-waiting", false)
+		assertChildPublicationWake(t, store, "notification-suspended", true)
+	})
+
 	t.Run("cancellation_is_first_write_and_fences", func(t *testing.T) {
 		store := config.New(t)
 		started := createAndStart(t, store, "cancel", background.LeaseExpiryRetry)
@@ -315,23 +355,23 @@ func RunTaskEventStoreConformance(t *testing.T, config TaskEventStoreConfig) {
 		TaskID: started.Spec.ID, Limit: 2,
 	})
 	require.NoError(t, err)
-	require.Equal(t, []string{"one", "two"}, eventIDs(first.Events))
+	require.Equal(t, []string{"one", "two"}, eventIDs(first.Parts))
 	appendEvent(t, events, started, "four", "four")
 	second, err := events.ListTaskEvents(context.Background(), &background.ListTaskEventsRequest{
 		TaskID: started.Spec.ID, Cursor: first.NextCursor, Limit: 2,
 	})
 	require.NoError(t, err)
-	require.Equal(t, []string{"three", "stream"}, eventIDs(second.Events))
+	require.Equal(t, []string{"three", "stream"}, eventIDs(second.Parts))
 	third, err := events.ListTaskEvents(context.Background(), &background.ListTaskEventsRequest{
 		TaskID: started.Spec.ID, Cursor: second.NextCursor, Limit: 2,
 	})
 	require.NoError(t, err)
-	require.Equal(t, []string{"stream"}, eventIDs(third.Events))
+	require.Equal(t, []string{"stream"}, eventIDs(third.Parts))
 	recent, err := events.ListTaskEvents(context.Background(), &background.ListTaskEventsRequest{
 		TaskID: started.Spec.ID, Limit: 2, NewestFirst: true,
 	})
 	require.NoError(t, err)
-	require.Equal(t, []string{"four", "stream"}, eventIDs(recent.Events))
+	require.Equal(t, []string{"four", "stream"}, eventIDs(recent.Parts))
 
 	yielded, err := tasks.Yield(context.Background(), &background.YieldTaskRequest{
 		TaskID: started.Spec.ID, ExpectedVersion: started.Version,
@@ -654,6 +694,119 @@ func receiveNotificationKinds(
 	return receiveNotificationKindsWithLease(t, outbox, time.Second)
 }
 
+func waitForInput(
+	t testing.TB,
+	store background.LifecycleStore,
+	id string,
+) *background.TaskSnapshot {
+	t.Helper()
+	started := createAndStart(t, store, id, background.LeaseExpiryRetry)
+	waiting, err := store.WaitInputIfNoInputs(
+		context.Background(),
+		&background.WaitInputIfNoInputsRequest{
+			TaskID: id, ExpectedVersion: started.Version,
+			Attempt: started.Attempt, Checkpoint: []byte("waiting"),
+		},
+	)
+	require.NoError(t, err)
+	require.Equal(t, background.StatusWaitingInput, waiting.Status)
+	return waiting
+}
+
+func suspend(
+	t testing.TB,
+	store background.LifecycleStore,
+	id string,
+) *background.TaskSnapshot {
+	t.Helper()
+	started := createAndStart(t, store, id, background.LeaseExpiryRetry)
+	suspended, err := store.SuspendIfNoInputs(
+		context.Background(),
+		&background.SuspendIfNoInputsRequest{
+			TaskID: id, ExpectedVersion: started.Version,
+			Attempt: started.Attempt, Checkpoint: []byte("suspended"),
+		},
+	)
+	require.NoError(t, err)
+	require.Equal(t, background.StatusSuspended, suspended.Status)
+	return suspended
+}
+
+func assertChildPublicationWake(
+	t testing.TB,
+	store background.LifecycleStore,
+	id string,
+	suspended bool,
+) {
+	t.Helper()
+	ctx := context.Background()
+	parentSpec := testSpec(id + "-parent")
+	parentSpec.RootSessionID = id + "-root"
+	parent := create(t, store, parentSpec, background.LeaseExpiryRetry)
+	started, err := store.Start(ctx, &background.StartTaskRequest{
+		TaskID: parent.Spec.ID, ExpectedVersion: parent.Version,
+	})
+	require.NoError(t, err)
+	mailbox, err := store.GetMailbox(ctx, parent.Spec.ID)
+	require.NoError(t, err)
+	child, err := store.Create(ctx, &background.CreateTaskRequest{
+		Spec: background.Spec{
+			ID: id + "-child", ExecutorKey: "test",
+			ParentTaskID: parent.Spec.ID, RootSessionID: parent.Spec.RootSessionID,
+		},
+		Publication:       background.PublicationDeferred,
+		LeaseExpiryPolicy: background.LeaseExpiryRetry,
+		ParentExecution: &task.ExecutionContext{
+			TaskID: parent.Spec.ID, Owner: task.OwnerManager,
+			Generation: mailbox.Generation, Attempt: started.Attempt,
+		},
+	})
+	require.NoError(t, err)
+	var idle *background.TaskSnapshot
+	if suspended {
+		idle, err = store.SuspendIfNoInputs(
+			ctx,
+			&background.SuspendIfNoInputsRequest{
+				TaskID: parent.Spec.ID, ExpectedVersion: started.Version,
+				Attempt: started.Attempt, Checkpoint: []byte("suspended"),
+			},
+		)
+	} else {
+		idle, err = store.WaitInputIfNoInputs(
+			ctx,
+			&background.WaitInputIfNoInputsRequest{
+				TaskID: parent.Spec.ID, ExpectedVersion: started.Version,
+				Attempt: started.Attempt, Checkpoint: []byte("waiting"),
+			},
+		)
+	}
+	require.NoError(t, err)
+
+	_, err = store.Publish(ctx, &background.PublishTaskRequest{
+		TaskID: child.Spec.ID, ExpectedVersion: child.Version,
+	})
+	require.NoError(t, err)
+	current, err := store.Get(ctx, parent.Spec.ID)
+	require.NoError(t, err)
+	if suspended {
+		require.Equal(t, background.StatusSuspended, current.Status)
+		require.Equal(t, idle.Version, current.Version)
+	} else {
+		require.Equal(t, background.StatusPending, current.Status)
+		require.Greater(t, current.Version, idle.Version)
+	}
+	inputs, err := store.ListInputs(ctx, &task.ListInputsRequest{
+		TaskID: parent.Spec.ID,
+	})
+	require.NoError(t, err)
+	require.Len(t, inputs.Inputs, 1)
+	require.Equal(
+		t,
+		string(background.NotificationTaskBackgrounded),
+		inputs.Inputs[0].Kind,
+	)
+}
+
 func receiveNotificationKindsWithLease(
 	t testing.TB,
 	outbox background.NotificationOutbox,
@@ -855,7 +1008,7 @@ func taskIDs(tasks []*background.TaskSnapshot) []string {
 	return result
 }
 
-func eventIDs(events []*background.TaskEvent) []string {
+func eventIDs(events []*background.TaskEventPart) []string {
 	result := make([]string, len(events))
 	for i, event := range events {
 		result[i] = event.EventID

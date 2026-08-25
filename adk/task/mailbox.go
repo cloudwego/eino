@@ -86,8 +86,8 @@ type Input struct {
 	Delivery InputDelivery
 }
 
-// InputRecord is one persisted mailbox input. Sending any input wakes a
-// background task that is waiting or suspended.
+// InputRecord is one persisted mailbox input. Sending input wakes a background
+// task in waiting-input; a suspended task requires an explicit release.
 type InputRecord struct {
 	TaskID   string
 	Sequence int64

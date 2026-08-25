@@ -61,6 +61,11 @@ func encodedPayload(t *testing.T, name, arguments string) []byte {
 	return data
 }
 
+func TestPersistedExecutorKeysRemainCompatible(t *testing.T) {
+	require.Equal(t, "eino.dev/background-tool", ExecutorKey)
+	require.Equal(t, "eino.dev/recoverable-background-tool", RecoverableExecutorKey)
+}
+
 func TestRecoveryRequestsExposeCheckpoint_BitsUT(t *testing.T) {
 	_, exists := reflect.TypeOf(RecoverRequest{}).FieldByName("Checkpoint")
 	require.True(t, exists)
@@ -368,13 +373,13 @@ func TestManagedToolConstructionAndSubmissionErrors(t *testing.T) {
 }
 
 func TestFormattingAndProjectionHelpers(t *testing.T) {
-	require.Equal(t, "[update]", formatProgressEvent(&background.TaskEvent{
+	require.Equal(t, "[update]", formatProgressEvent(&background.TaskEventPart{
 		Data: []byte(`{"event_id":"id"}`),
 	}))
-	require.Contains(t, formatProgressEvent(&background.TaskEvent{
+	require.Contains(t, formatProgressEvent(&background.TaskEventPart{
 		Data: []byte(`{"event_id":"id","metadata":{"artifact":"ref"}}`),
 	}), "artifact")
-	require.Equal(t, "[update] hello", formatProgressEvent(&background.TaskEvent{
+	require.Equal(t, "[update] hello", formatProgressEvent(&background.TaskEventPart{
 		Data: []byte(`{"event_id":"id","data":"aGVsbG8="}`),
 	}))
 
@@ -429,8 +434,10 @@ func TestManagedToolTimeoutOverrideStopsRun(t *testing.T) {
 	timeoutMs := 5
 	wrapped, err := NewManagedTool(context.Background(), &ManagedToolConfig{
 		Manager: manager, Registry: registry, ToolName: "timeout",
-		InvocationTimeoutMs: func(context.Context, string) *int { return &timeoutMs },
-		SessionID:           func(context.Context) (string, error) { return "session", nil },
+		ForegroundTimeoutMsForInvocation: func(context.Context, string) *int {
+			return &timeoutMs
+		},
+		SessionID: func(context.Context) (string, error) { return "session", nil },
 	})
 	require.NoError(t, err)
 	result, err := wrapped.(*managedTool).InvokableRun(

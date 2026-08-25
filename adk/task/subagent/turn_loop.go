@@ -69,8 +69,9 @@ type ControllerConfig[M adk.MessageType] struct {
 	// Configure exactly one of SessionStore and SessionStoreFactory.
 	SessionStore adk.SessionEventStore[M]
 	// SessionStoreFactory may enforce deployment-specific child-session access
-	// and fencing. It must return stores backed by the same durable session data
-	// on every worker.
+	// and fencing from AccessMode and the direct ParentSessionID. Task is nil
+	// only for foreground execution. The factory must return stores backed by
+	// the same durable session data on every worker.
 	SessionStoreFactory RuntimeSessionStoreFactory[M]
 	// CheckPointStore persists TurnLoop and Runner recovery state.
 	CheckPointStore adk.CheckPointStore
@@ -260,7 +261,6 @@ func (r *Controller[M]) Start(
 		return nil, err
 	}
 	input := *req.Input
-	input.EnableStreaming = input.EnableStreaming || req.EnableStreaming
 	inputBytes, err := encodeTypedInput(&input)
 	if err != nil {
 		return nil, err
@@ -475,8 +475,9 @@ func (r *Controller[M]) waitOutcome(
 	return nil, err
 }
 
-// Continue sends input to the active finite task, or uses IfIdle to start a new
-// task in the same persistent child session.
+// Continue sends input to the active finite task and explicitly releases it
+// when suspended, or uses IfIdle to start a new task in the same persistent
+// child session.
 func (r *Controller[M]) Continue(
 	ctx context.Context,
 	req *ContinueRequest[M],
@@ -514,6 +515,9 @@ func (r *Controller[M]) Continue(
 					return nil, pushErr
 				}
 			} else {
+				if releaseErr := r.releaseSuspended(ctx, handle.ID()); releaseErr != nil {
+					return nil, releaseErr
+				}
 				return handle, nil
 			}
 			continue
@@ -533,7 +537,6 @@ func (r *Controller[M]) Continue(
 			Description:     req.IfIdle.Description,
 			Input:           req.Input,
 			StartMode:       req.IfIdle.StartMode,
-			EnableStreaming: req.IfIdle.EnableStreaming,
 			OnEvent:         req.IfIdle.OnEvent,
 		})
 		if errors.Is(startErr, task.ErrSessionBusy) {
@@ -568,6 +571,27 @@ func (r *Controller[M]) SendInput(
 		}
 	}
 	return err
+}
+
+func (r *Controller[M]) releaseSuspended(ctx context.Context, runID string) error {
+	current, err := r.manager.Get(ctx, runID)
+	if errors.Is(err, background.ErrNotFound) {
+		return nil
+	}
+	if err != nil || current.Status != background.StatusSuspended {
+		return err
+	}
+	released, err := r.manager.ReleaseSuspension(ctx, runID)
+	if errors.Is(err, background.ErrIllegalTransition) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	go func() {
+		_ = r.manager.Execute(detachedRuntimeContext{parent: ctx}, released.Spec.ID)
+	}()
+	return nil
 }
 
 // Wait blocks for an attached result or a durable task terminal state.
@@ -923,7 +947,7 @@ func (r *Controller[M]) executeTask(
 		return r.interruptResult(ctx, task, result)
 	}
 	if result.control.Kind != "" {
-		return r.controlResult(ctx, task, metadata, result)
+		return r.controlResult(result)
 	}
 	if result.decision == CompletionComplete {
 		data, encodeErr := encodeRuntimeMessage(result.final)
@@ -1026,9 +1050,13 @@ func (r *Controller[M]) runActivation( //nolint:cyclop,funlen,revive // Coordina
 			final = cp.Final
 		}
 	}
+	accessMode := RuntimeSessionStoreAccessForegroundExecute
+	if backgroundTask != nil {
+		accessMode = RuntimeSessionStoreAccessManagedExecute
+	}
 	sessionStore, err := r.sessionStoreFor(
 		ctx, runID, metadata.ParentSessionID, metadata.ChildSessionID,
-		backgroundTask, req.attached,
+		backgroundTask, accessMode,
 	)
 	if err != nil {
 		return nil, nil, err
@@ -1102,7 +1130,7 @@ func (r *Controller[M]) runActivation( //nolint:cyclop,funlen,revive // Coordina
 			}
 			stampRuntimeInputIDs(input, signals)
 			runCtx := task.WithExecutionContext(turnCtx, executionContext)
-			runCtx = WithRuntimeContext(runCtx, runID, metadata.ChildSessionID)
+			runCtx = withChildSessionID(runCtx, metadata.ChildSessionID)
 			return &adk.GenInputResult[*task.InputRecord, M]{
 				RunCtx: runCtx,
 				Input:  input, RunOpts: append([]adk.AgentRunOption(nil), runOptions...),
@@ -1138,7 +1166,7 @@ func (r *Controller[M]) runActivation( //nolint:cyclop,funlen,revive // Coordina
 				resumeSignals = append(resumeSignals, signal)
 			}
 			runCtx := task.WithExecutionContext(resumeCtx, executionContext)
-			runCtx = WithRuntimeContext(runCtx, runID, metadata.ChildSessionID)
+			runCtx = withChildSessionID(runCtx, metadata.ChildSessionID)
 			resume := &adk.GenResumeResult[*task.InputRecord, M]{
 				RunCtx:       runCtx,
 				Decision:     adk.TurnLoopResumeDecisionResume,
@@ -1394,7 +1422,7 @@ func (r *Controller[M]) runActivation( //nolint:cyclop,funlen,revive // Coordina
 
 func validateCompletionAction(action CompletionAction) error {
 	switch action {
-	case CompletionComplete, CompletionWaitInput:
+	case CompletionComplete, CompletionSuspend:
 		return nil
 	default:
 		return fmt.Errorf(
@@ -1507,9 +1535,6 @@ func validForegroundOutcome(checkpoint foregroundResultCheckpoint) bool {
 }
 
 func (r *Controller[M]) controlResult(
-	ctx context.Context,
-	task *background.TaskSnapshot,
-	metadata *runtimeMetadata,
 	result *activationResult[M],
 ) (*background.ExecutionResult, error) {
 	switch result.control.Kind {
@@ -1517,13 +1542,6 @@ func (r *Controller[M]) controlResult(
 		reason := result.control.Reason
 		if reason == "" {
 			reason = "task was canceled"
-		}
-		if r.cancellationHook != nil {
-			if err := r.cancellationHook.OnCancel(
-				ctx, task.Spec.ID, metadata.ChildSessionID, reason,
-			); err != nil {
-				return nil, err
-			}
 		}
 		return &background.ExecutionResult{
 			Action: background.ExecutionActionCancel, Error: reason,
@@ -1654,17 +1672,21 @@ func (r *Controller[M]) advanceCursor(
 func (r *Controller[M]) sessionStoreFor(
 	ctx context.Context,
 	runID, parentSessionID, childSessionID string,
-	task *background.TaskSnapshot,
-	attached bool,
+	runtimeTask *background.TaskSnapshot,
+	accessMode RuntimeSessionStoreAccessMode,
 ) (adk.SessionEventStore[M], error) {
+	request := &RuntimeSessionStoreRequest{
+		TaskID: runID, ParentSessionID: parentSessionID,
+		ChildSessionID: childSessionID,
+		Task:           runtimeTask, AccessMode: accessMode,
+	}
+	if err := validateRuntimeSessionStoreRequest(request); err != nil {
+		return nil, err
+	}
 	store := r.sessionStore
 	var err error
 	if r.sessionStoreFactory != nil {
-		store, err = r.sessionStoreFactory(ctx, &RuntimeSessionStoreRequest{
-			TaskID: runID, ParentSessionID: parentSessionID,
-			ChildSessionID: childSessionID,
-			Task:           task, Attached: attached,
-		})
+		store, err = r.sessionStoreFactory(ctx, request)
 	}
 	if err != nil {
 		return nil, err
@@ -1673,6 +1695,36 @@ func (r *Controller[M]) sessionStoreFor(
 		return nil, errors.New("task/subagent: runtime session store is nil")
 	}
 	return store, nil
+}
+
+func validateRuntimeSessionStoreRequest(request *RuntimeSessionStoreRequest) error {
+	if request == nil || request.TaskID == "" || request.ParentSessionID == "" ||
+		request.ChildSessionID == "" {
+		return errors.New("task/subagent: runtime session store request is incomplete")
+	}
+	switch request.AccessMode {
+	case RuntimeSessionStoreAccessForegroundExecute:
+		if request.Task != nil {
+			return errors.New(
+				"task/subagent: foreground session store access must not include a task",
+			)
+		}
+	case RuntimeSessionStoreAccessManagedExecute,
+		RuntimeSessionStoreAccessReadProgress:
+		if request.Task == nil {
+			return errors.New(
+				"task/subagent: non-foreground session store access requires a task",
+			)
+		}
+		if request.Task.Spec.ID != request.TaskID {
+			return errors.New(
+				"task/subagent: session store task snapshot ID does not match request",
+			)
+		}
+	default:
+		return errors.New("task/subagent: runtime session store access mode is invalid")
+	}
+	return nil
 }
 
 func encodeRuntimeCheckpoint[M adk.MessageType](cursor int64, final M) ([]byte, error) {

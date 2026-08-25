@@ -10,10 +10,11 @@ Implemented on `feat/task-ownership-runtime`.
 under the shared Task lifecycle. `adk/task/shell` adapts remote
 shell backends that can recover a logical command after an Eino Worker changes.
 
-The integration does not parse arbitrary tool output and does not expose an external
-service operation ID to the model. The framework allocates and persists the Eino task
-before external work starts, and every successful model-facing result ends with a
-framework-owned `launch_result` containing that task ID.
+The integration does not parse arbitrary tool output and does not expose an
+external service operation ID to the model. A published background operation
+returns a framework-owned `launch_result` containing its Eino task ID. A
+synchronous operation returns `foreground_result`, whether it ran directly or
+completed as a deferred Task before publication.
 
 ## Capability Classes
 
@@ -24,8 +25,8 @@ Two persisted executor keys prevent runtime capability drift:
 | `eino.dev/background-tool` | fail | no | process may observe and stop the operation |
 | `eino.dev/recoverable-background-tool` | retry | yield | durable task-ID-keyed recovery |
 
-A plain `BackgroundTool` must not be retried after Worker loss. A
-`RecoverableBackgroundTool` must satisfy all of these requirements:
+A plain `Tool` must not be retried after Worker loss. A `RecoverableTool` must
+satisfy all of these requirements:
 
 1. `Start(TaskID)` is idempotent for the full task lifetime.
 2. A fresh adapter instance can locate the same logical operation by TaskID.
@@ -38,6 +39,21 @@ A plain `BackgroundTool` must not be retried after Worker loss. A
 A short request-deduplication cache or an adapter mapping written after an unkeyed
 side effect is insufficient. Backends that cannot meet these requirements must use
 the plain executor.
+
+### Durable Migration Matrix
+
+Persisted executor keys are protocol identifiers, not implementation names:
+
+| Domain | Persisted key | Payload | Migration rule |
+| --- | --- | --- | --- |
+| Plain Tool | `eino.dev/background-tool` | v1 | Key is retained; existing tasks continue on upgraded Workers. |
+| Recoverable Tool | `eino.dev/recoverable-background-tool` | v1 | Key is retained; existing tasks continue on upgraded Workers. |
+| Legacy Sub-agent | `eino.dev/subagent` | v4 | New Workers must not claim it. Old Workers must drain every non-terminal v4 task before retirement. |
+| Task runtime Sub-agent | `eino.dev/task-subagent` | v1 | New tasks use this key; v1 is scoped to this key and is not a decoder for legacy v4. |
+
+There is intentionally no mixed-version decoder for the two Sub-agent protocols.
+Deployment must stop creation of legacy tasks, keep old Workers available until
+their v4 backlog is empty, and only then remove those Workers.
 
 ## Launch Ordering
 
@@ -59,10 +75,11 @@ The persisted payload contains a version, tool name, tool-call correlation ID, a
 serialized arguments. Clients, credentials, callbacks, and live run handles are not
 serialized.
 
-The wrapper requires a parent Runner session and a validated notification route.
-Terminal lifecycle notifications continue to use the existing outbox and session
-inbox. Progress records never enqueue notifications and never advance task lifecycle
-version.
+The wrapper may use a parent Runner session or an explicit `SessionID` as its
+notification route. An empty route disables session-routed lifecycle
+notifications. When enabled, terminal lifecycle notifications continue to use
+the existing outbox and session inbox. Progress records never enqueue
+notifications and never advance task lifecycle version.
 
 ## Foreground Projection
 
@@ -74,10 +91,16 @@ records, one complete record per chunk:
 {"type":"launch_result","task_id":"task_abc","status":"running"}
 ```
 
-The final record is always `launch_result`. `type`, `task_id`, and `status` are
-framework-owned. Registration-specific completed output is nested under `output`.
-Concatenating stream chunks therefore remains valid NDJSON and cannot merge raw
-stdout with lifecycle JSON.
+The final record is `launch_result` only when the framework publishes a
+background handle, and `foreground_result` for a synchronous wire result.
+`type` and `status` are framework-owned. A `launch_result` contains `task_id`,
+which is the model-facing handle for `task_output` and `task_stop`. A
+`foreground_result` may come from direct execution or a deferred, Manager-owned
+Task that completed inside the foreground observation window without being
+published; it does not promise a model-facing `task_id` and must not be used as
+a control handle. Update records also omit `task_id`. Registration-specific
+completed output is nested under `output`. Concatenating stream chunks therefore
+remains valid NDJSON and cannot merge raw stdout with lifecycle JSON.
 
 Auto-backgroundable work is Manager-owned from the beginning. The foreground
 caller observes a live projection of that task; it never starts an Attempt 0
@@ -94,6 +117,13 @@ unchanged, and update persistence continues.
 Explicit background launch uses the same Manager execution path with
 `PublicationOnCreate`; only the initial publication and projection behavior
 differ.
+
+Foreground observation resolves at a boundary rather than only at a terminal
+state. `Execution.Boundary()` closes for `WaitingInput`, `Completed`, `Failed`,
+or `Canceled`, and `Execution.WaitBoundary()` returns the snapshot responsible
+for that boundary. `WaitingInput` ends the current projection so the wrapper can
+emit an interrupt/input request, but it remains a non-terminal durable state.
+Both `Boundary()` and `Timeout()` expose stable single-shot channels.
 
 If another Worker wins the initial claim, foreground coordination reloads the
 authoritative running or terminal task and returns a canonical launch result without
@@ -154,16 +184,39 @@ type TaskEventEnvelope[E, Chunk any] struct {
 }
 ```
 
-The runtime creates a `TaskEventWriter` bound to `(TaskID, Attempt, EventID)`.
-The persister may serialize one event into multiple durable parts:
+The runtime creates a tracking `TaskEventWriter` bound to
+`(TaskID, Attempt, EventID)`. The persister returns only an error; the framework
+collects and validates every successful append and returns the persisted prefix
+even when the persister later fails. A persister may serialize one event into
+multiple durable parts:
 
 ```go
-type TaskEventPart struct {
+type TaskEventPartInput struct {
     PartID string
     Data   []byte
     Final  bool
 }
+
+type TaskEventPersistResult struct {
+    Scope   TaskEventScope
+    Appends []*AppendTaskEventResult
+}
+
+type TaskEventPart struct {
+    TaskID    string
+    EventID   string
+    PartID    string
+    Data      []byte
+    Final     bool
+    CreatedAt time.Time
+}
 ```
+
+`AppendTaskEventResult.Part` contains one persisted record, while
+`ListTaskEventsResult.Parts` contains a page of persisted records.
+`TaskEventWriter.Append` requires a non-empty `TaskEventPartInput.PartID`; only
+the lower-level `AppendTaskEventRequest` accepts an empty `PartID` as the
+single-part `"event"` shorthand.
 
 - `EventID` identifies one logical event.
 - `PartID` is stable across recoverable replay.
@@ -175,9 +228,14 @@ type TaskEventPart struct {
 
 For a streaming AgentEvent, the framework copies the stream before invoking the
 persister: one copy remains live and one belongs exclusively to persistence.
-The persister consumes and closes its copy, decides how to serialize the event
-and chunks, and may record an incomplete final part when the source errors.
-No Store lock or transaction spans the lifetime of the stream.
+The persister consumes its copy and decides how to serialize the event and
+chunks; `PersistTaskEvent` closes the copy after the persister returns. The
+persister may record an incomplete final part when the source errors. No Store
+lock or transaction spans the lifetime of the stream.
+
+Local and managed Tool persisters are called once per event with `Stream=nil`.
+Only a streaming Sub-agent event passes an independent persistence-owned stream
+copy.
 
 `ListTaskEvents` provides snapshot-stable forward or reverse pagination.
 
@@ -201,10 +259,10 @@ configured.
 
 ## Model-Facing Progress
 
-Task middleware resolves `TaskProgressReader` by persisted executor key.
-Managed tools use `ProgressReader`, which reads a bounded recent Store view. Durable
-sub-agents retain their child `SessionEventStore` projection through the compatibility
-fallback.
+Task middleware resolves a `ProgressReader` from
+`ProgressReadersByExecutorKey` using the persisted executor key. Managed tools use
+their bounded recent Store view; durable Sub-agents register a reader backed by
+their child `SessionEventStore`.
 
 The `task_output` input remains:
 
@@ -216,6 +274,21 @@ timeout
 
 No Store cursor or page limit is exposed to the model. Blocking waits on lifecycle
 version only, so a progress append does not wake the model or parent session.
+
+## Sub-Agent Session Store Access
+
+`RuntimeSessionStoreFactory` receives one explicit access mode:
+
+| Mode | Authority | Snapshot |
+| --- | --- | --- |
+| `RuntimeSessionStoreAccessForegroundExecute` | caller-owned TurnLoop read/write | `Task` must be nil |
+| `RuntimeSessionStoreAccessManagedExecute` | Manager-owned attempt read/write | `Task` is the current attempt snapshot |
+| `RuntimeSessionStoreAccessReadProgress` | transcript/progress read-only | `Task` is the projected snapshot |
+
+`RuntimeSessionStoreAccessUnknown` is invalid. The mode is the sole authority
+discriminator; implementations must not infer access from snapshot presence.
+For nested tasks, `ParentSessionID` is the direct parent session rather than the
+root session.
 
 ## Recoverable Shell
 
@@ -244,8 +317,21 @@ and keeps all three shell choices mutually exclusive.
 - Caller cancellation or reader closure defaults to publishing and detaching
   the foreground projection. A host may explicitly configure it to request
   Task cancellation instead.
-- A failed publication after caller abort falls back to Task cancellation so an
-  undiscoverable internal operation cannot remain running.
+- A failed publication at a timeout or caller-abort boundary triggers bounded
+  cancellation cleanup.
+  Cancel intent is persisted before optional domain cleanup. The cleanup context
+  is detached from caller cancellation and defaults to a five-second bound.
+- Normal cancellation resolution, including rejected auto-background timeout or
+  an explicit caller-abort cancellation policy, returns an `Outcome` only after
+  a boundary is observed. Request, domain cleanup, Store, or boundary timeout
+  failure returns a nil `Outcome` and the infrastructure error; a running
+  cancel-requested partial outcome is never exposed on this path.
+- Publication-failure fallback always preserves the original publication error.
+  If cancellation reaches a boundary within the bound, the API also returns the
+  latest authoritative snapshot. If cleanup fails or times out, the error
+  matches both publication and cleanup causes and the API returns the latest
+  available snapshot, which may still be running with durable cancel intent.
+  Synchronous terminal cancellation is therefore not guaranteed.
 - Cancel intent remains durable. A later recovery attempt observes Manager control
   and stops the recovered logical operation.
 - Completion/cancel races remain Store-version and active-attempt fenced.
@@ -253,17 +339,35 @@ and keeps all three shell choices mutually exclusive.
 `Run.Wait` context cancellation stops local observation only. Implementations must
 not treat it as logical-operation cancellation.
 
+## Direct Foreground Mailbox Finalization
+
+Direct Attempt 0 execution has a foreground Mailbox but no durable lifecycle
+snapshot. Local and managed Tool adapters finalize that Mailbox through one
+bounded, at-most-once helper:
+
+- completed outcomes call `SealIfIdle` with the captured generation and cursor;
+- failed/canceled outcomes, timeout, caller abort, start/construction failure,
+  stream failure, and reader close call `Abandon`;
+- waiting-input keeps the Mailbox open and persists generation/cursor in
+  interrupt state for resume;
+- `ErrInputsPending` leaves the Mailbox foreground and preserves every input;
+- finalization uses a caller-independent bounded context, and Store errors are
+  returned instead of being discarded.
+
 ## Compatibility
 
 - Existing `run_in_background`, timeout, task_output, task_stop, and foreground
   result formats remain unchanged.
 - Auto-background and explicit background now share one task-owned executor path.
-- Direct foreground execution without an auto-background policy may retain
-  Attempt 0 and parent-owned cancellation.
+- Direct foreground execution without auto-background or caller-abort policy may
+  retain Attempt 0 and parent-owned cancellation.
 - Plain producers may leave `Update.EventID` empty; the framework assigns the
   persisted event ID.
-- Existing `ReadTaskProgress` remains the middleware fallback.
 - Store SPI additions are alpha lifecycle extensions.
+- The source packages are alpha and this branch intentionally makes breaking Go
+  API changes, including package moves, renamed types and fields, and removed
+  helpers. No compatibility shim for the old alpha package surface is provided;
+  callers must migrate source code together with the upgrade.
 - Public code remains compatible with Go 1.18.
 
 ## Verification

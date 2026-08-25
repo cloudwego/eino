@@ -44,9 +44,9 @@ var (
 
 const (
 	// ExecutorKey identifies non-recoverable managed tools.
-	ExecutorKey = "eino.dev/task-tool"
+	ExecutorKey = "eino.dev/background-tool"
 	// RecoverableExecutorKey identifies managed tools that support Worker handoff.
-	RecoverableExecutorKey = "eino.dev/recoverable-task-tool"
+	RecoverableExecutorKey = "eino.dev/recoverable-background-tool"
 )
 
 // Tool starts one logical external operation. ValidateArguments must
@@ -211,12 +211,12 @@ const (
 	// ManagedToolResponseEventUpdate carries one live progress Update. All other
 	// ManagedToolResponseEvent fields are empty.
 	ManagedToolResponseEventUpdate ManagedToolResponseEventType = "update"
-	// ManagedToolResponseEventLaunchResult carries the task launch or foreground result.
-	// Update is nil; the remaining fields describe the task and its current or
-	// terminal outcome.
+	// ManagedToolResponseEventLaunchResult carries a published background Task
+	// handle. TaskID is non-empty and can be used with task control tools.
 	ManagedToolResponseEventLaunchResult ManagedToolResponseEventType = "launch_result"
 	// ManagedToolResponseEventForegroundResult carries a synchronous foreground
-	// result. No TaskID is set because no task was persisted.
+	// wire result from either direct execution or an unpublished deferred Task.
+	// It does not expose TaskID as a model-facing control handle.
 	ManagedToolResponseEventForegroundResult ManagedToolResponseEventType = "foreground_result"
 )
 
@@ -224,8 +224,10 @@ const (
 // envelope. The enhanced managed-tool wrapper encodes it as the first text part
 // of every ToolResult; streaming uses one newline-terminated record per chunk.
 // Type determines the legal variant: update events set only Update, while
-// launch-result events set task identity, status, description, and either a
-// waiting InputRequest or terminal Output or Error.
+// launch-result events expose a published TaskID. Foreground-result events omit
+// TaskID but may describe either a direct or unpublished deferred execution.
+// Result events set status, description, and either a waiting InputRequest or
+// terminal Output or Error.
 type ManagedToolResponseEvent struct {
 	Type         ManagedToolResponseEventType `json:"type"`
 	TaskID       string                       `json:"task_id,omitempty"`

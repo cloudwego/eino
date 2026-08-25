@@ -291,7 +291,7 @@ func completeAfterNestedTask(
 		completion.FinalMessage.Content == string(background.NotificationCompleted) {
 		return CompletionComplete, nil
 	}
-	return CompletionWaitInput, nil
+	return CompletionSuspend, nil
 }
 
 func TestIntegration_ForegroundHandoffConsumesNestedCompletion(t *testing.T) {
@@ -352,10 +352,12 @@ func TestIntegration_ForegroundHandoffConsumesNestedCompletion(t *testing.T) {
 	require.Equal(t, handle.ID(), child.Spec.ParentTaskID)
 	require.Equal(t, "root-session", child.Spec.RootSessionID)
 
-	require.Eventually(t, func() bool {
-		snapshot, getErr := manager.Get(ctx, handle.ID())
-		return getErr == nil && snapshot.Status == background.StatusPending
-	}, time.Second, time.Millisecond)
+	suspended, err := manager.Get(ctx, handle.ID())
+	require.NoError(t, err)
+	require.Equal(t, background.StatusSuspended, suspended.Status)
+	released, err := manager.ReleaseSuspension(ctx, handle.ID())
+	require.NoError(t, err)
+	require.Equal(t, background.StatusPending, released.Status)
 	require.NoError(t, manager.Execute(ctx, handle.ID()))
 
 	result, err := controller.Wait(ctx, handle.ID())

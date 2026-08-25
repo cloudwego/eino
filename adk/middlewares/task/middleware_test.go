@@ -29,6 +29,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cloudwego/eino/adk"
+	taskcore "github.com/cloudwego/eino/adk/task"
 	bgtask "github.com/cloudwego/eino/adk/task/background"
 	backgroundlocal "github.com/cloudwego/eino/adk/task/local"
 	"github.com/cloudwego/eino/components/tool"
@@ -84,7 +85,12 @@ func closeWithTimeout(m *bgtask.Manager) {
 	_ = m.Close(ctx)
 }
 
-func runWork(m *bgtask.Manager, description string, background bool, work backgroundlocal.WorkFunc) (*bgtask.TaskSnapshot, error) {
+func runWork(
+	m *bgtask.Manager,
+	description string,
+	background bool,
+	work backgroundlocal.WorkFunc,
+) (*backgroundlocal.RunResult, error) {
 	runner, err := backgroundlocal.New(&backgroundlocal.Config{
 		Manager: m,
 	})
@@ -95,6 +101,17 @@ func runWork(m *bgtask.Manager, description string, background bool, work backgr
 		Description:     description,
 		RunInBackground: background,
 	}, work)
+}
+
+func requireRunTask(
+	t testing.TB,
+	result *backgroundlocal.RunResult,
+) *bgtask.TaskSnapshot {
+	t.Helper()
+	task, ok := result.Task()
+	require.True(t, ok)
+	require.NotNil(t, task)
+	return task
 }
 
 func waitUntilTerminal(
@@ -401,8 +418,9 @@ func TestTaskOutputTool(t *testing.T) {
 	mgr := newBackgroundManager(t, context.Background(), &bgtask.Config{})
 	defer closeWithTimeout(mgr)
 
-	result, err := runWork(mgr, "test task", true, completedWork("task result"))
+	runResult, err := runWork(mgr, "test task", true, completedWork("task result"))
 	require.NoError(t, err)
+	result := requireRunTask(t, runResult)
 	result = waitUntilTerminal(t, context.Background(), mgr, result.Spec.ID)
 	require.Equal(t, bgtask.StatusCompleted, result.Status)
 
@@ -430,29 +448,31 @@ func TestTaskOutputTool_NonBlockingRunningThenTerminal(t *testing.T) {
 
 	runResult, err := runWork(mgr, "running task", true, blockingWork())
 	require.NoError(t, err)
-	runResult = waitUntilRunning(t, context.Background(), mgr, runResult.Spec.ID)
+	task := requireRunTask(t, runResult)
+	task = waitUntilRunning(t, context.Background(), mgr, task.Spec.ID)
 
 	tl := findTool(t, injectedTools(t, mgr), taskOutputToolName)
-	out, err := tl.InvokableRun(context.Background(), fmt.Sprintf(`{"task_id":"%s","block":false}`, runResult.Spec.ID))
+	out, err := tl.InvokableRun(context.Background(), fmt.Sprintf(`{"task_id":"%s","block":false}`, task.Spec.ID))
 	require.NoError(t, err)
 	assert.Contains(t, out, "running")
 
-	_, err = mgr.RequestCancel(context.Background(), runResult.Spec.ID)
+	_, err = mgr.RequestCancel(context.Background(), task.Spec.ID)
 	require.NoError(t, err)
 	waitCtx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	task := waitUntilTerminal(t, waitCtx, mgr, runResult.Spec.ID)
+	task = waitUntilTerminal(t, waitCtx, mgr, task.Spec.ID)
 	require.NotNil(t, task)
 
-	_, err = tl.InvokableRun(context.Background(), fmt.Sprintf(`{"task_id":"%s","block":false}`, runResult.Spec.ID))
+	_, err = tl.InvokableRun(context.Background(), fmt.Sprintf(`{"task_id":"%s","block":false}`, task.Spec.ID))
 	require.NoError(t, err)
 }
 
 func TestTaskOutputNonBlockingReturnsCurrentSnapshot(t *testing.T) {
 	store := bgtask.NewInMemoryStore(nil)
 	submitter := newBackgroundManager(t, context.Background(), &bgtask.Config{Tasks: store})
-	task, err := runWork(submitter, "racing task", true, completedWork("done"))
+	runResult, err := runWork(submitter, "racing task", true, completedWork("done"))
 	require.NoError(t, err)
+	task := requireRunTask(t, runResult)
 	task = waitUntilTerminal(t, context.Background(), submitter, task.Spec.ID)
 	closeWithTimeout(submitter)
 
@@ -478,16 +498,17 @@ func TestTaskStopTool(t *testing.T) {
 
 	runResult, err := runWork(mgr, "running task", true, blockingWork())
 	require.NoError(t, err)
+	task := requireRunTask(t, runResult)
 
 	tl := findTool(t, injectedTools(t, mgr), taskStopToolName)
 	result, err := tl.InvokableRun(
 		context.Background(),
-		fmt.Sprintf(`{"task_id":"%s","reason":"no longer needed"}`, runResult.Spec.ID),
+		fmt.Sprintf(`{"task_id":"%s","reason":"no longer needed"}`, task.Spec.ID),
 	)
 	require.NoError(t, err)
-	assert.Equal(t, fmt.Sprintf("Successfully stopped task: %s", runResult.Spec.ID), result)
+	assert.Equal(t, fmt.Sprintf("Successfully stopped task: %s", task.Spec.ID), result)
 
-	task := waitUntilTerminal(t, context.Background(), mgr, runResult.Spec.ID)
+	task = waitUntilTerminal(t, context.Background(), mgr, task.Spec.ID)
 	assert.Equal(t, bgtask.StatusCanceled, task.Status)
 	assert.Equal(t, "no longer needed", task.CancelReason)
 	assert.Equal(t, "no longer needed", task.ResultError)
@@ -543,10 +564,15 @@ func TestTaskStopTool_AlreadyDone(t *testing.T) {
 
 	runResult, err := runWork(mgr, "done task", false, completedWork("done"))
 	require.NoError(t, err)
-	require.Equal(t, bgtask.StatusCompleted, runResult.Status)
+	outcome, ok := runResult.Foreground()
+	require.True(t, ok)
+	require.Equal(t, taskcore.OutcomeCompleted, outcome.Status)
 
 	tl := findTool(t, injectedTools(t, mgr), taskStopToolName)
-	result, err := tl.InvokableRun(context.Background(), fmt.Sprintf(`{"task_id":"%s"}`, runResult.Spec.ID))
+	result, err := tl.InvokableRun(
+		context.Background(),
+		fmt.Sprintf(`{"task_id":"%s"}`, runResult.ID()),
+	)
 	require.NoError(t, err)
 	assert.Contains(t, result, "Failed to stop")
 }
@@ -554,8 +580,9 @@ func TestTaskStopTool_AlreadyDone(t *testing.T) {
 func TestControlToolsUsePossessionOfTaskID(t *testing.T) {
 	mgr := newBackgroundManager(t, context.Background(), &bgtask.Config{})
 	defer closeWithTimeout(mgr)
-	task, err := runWork(mgr, "secret task", true, blockingWork())
+	runResult, err := runWork(mgr, "secret task", true, blockingWork())
 	require.NoError(t, err)
+	task := requireRunTask(t, runResult)
 	task = waitUntilRunning(t, context.Background(), mgr, task.Spec.ID)
 
 	tools := injectedTools(t, mgr)
@@ -601,7 +628,8 @@ func TestFormatTaskOutputTranscriptSemantics(t *testing.T) {
 		Status: bgtask.StatusCompleted, ResultData: []byte("authoritative answer"),
 	}
 	rendered := formatTask(reliableSubagent)
-	assert.Contains(t, rendered, "Event transcript (JSONL): /tasks/events.output")
+	assert.Contains(t, rendered, "Event transcript: /tasks/events.output")
+	assert.NotContains(t, rendered, "JSONL")
 	assert.Contains(t, rendered, "Result: authoritative answer")
 
 	incomplete := *reliableSubagent

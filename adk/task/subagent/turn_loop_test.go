@@ -565,6 +565,53 @@ func TestControllerBackgroundCompletes(t *testing.T) {
 	require.Equal(t, "done", replayed.FinalMessage.Content)
 }
 
+func TestControllerActiveCancellationInvokesHookOnce(t *testing.T) {
+	ctx := context.Background()
+	agent := &blockingCaptureAgent{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	t.Cleanup(agent.unblock)
+	runtime, manager, _ := newControllerWithAgentForTest(
+		t,
+		agent,
+		completionBarrierFunc[*schema.Message](func(
+			context.Context,
+			*CompletionContext[*schema.Message],
+		) (CompletionAction, error) {
+			return CompletionComplete, nil
+		}),
+		testEventMapper,
+	)
+	var cancellationCalls int64
+	runtime.cancellationHook = cancellationHookFunc(func(
+		context.Context,
+		string,
+		string,
+		string,
+	) error {
+		atomic.AddInt64(&cancellationCalls, 1)
+		return nil
+	})
+	handle, err := runtime.Start(ctx, &StartRequest[*schema.Message]{
+		InvocationID: "parent:cancel-active", ParentSessionID: "parent",
+		AgentName: agent.Name(ctx), StartMode: task.StartModeBackground,
+		Input: &adk.AgentInput{
+			Messages: []*schema.Message{schema.UserMessage("work")},
+		},
+	})
+	require.NoError(t, err)
+	<-agent.started
+
+	require.NoError(t, runtime.Cancel(ctx, handle.ID()))
+	agent.unblock()
+	require.Eventually(t, func() bool {
+		snapshot, getErr := manager.Get(ctx, handle.ID())
+		return getErr == nil && snapshot.Status == background.StatusCanceled
+	}, time.Second, time.Millisecond)
+	require.Equal(t, int64(1), atomic.LoadInt64(&cancellationCalls))
+}
+
 func TestControllerForegroundInterruptResumesFromMailbox(t *testing.T) {
 	ctx := context.Background()
 	runtime, _, _ := newControllerWithAgentForTest(
@@ -679,7 +726,7 @@ func TestAttack_MultipleResumeInputsFailClosed(t *testing.T) {
 	require.ErrorContains(t, err, "multiple resume")
 }
 
-func TestControllerBarrierWaitThenInput(t *testing.T) {
+func TestControllerBarrierSuspendThenContinue(t *testing.T) {
 	ctx := context.Background()
 	var barrierCalls int64
 	runtime, manager, _ := newControllerForTest(
@@ -691,7 +738,7 @@ func TestControllerBarrierWaitThenInput(t *testing.T) {
 			if atomic.AddInt64(&barrierCalls, 1) > 1 {
 				return CompletionComplete, nil
 			}
-			return CompletionWaitInput, nil
+			return CompletionSuspend, nil
 		}),
 		testEventMapper,
 	)
@@ -733,7 +780,7 @@ func TestAttack_CancelRacingForegroundHandoffCancelsNewBackgroundTask(t *testing
 		) (CompletionAction, error) {
 			close(barrierEntered)
 			<-releaseBarrier
-			return CompletionWaitInput, nil
+			return CompletionSuspend, nil
 		}),
 		testEventMapper,
 	)
@@ -1000,13 +1047,18 @@ func TestControllerValidationAndContextHelpers(t *testing.T) {
 	require.Error(t, err)
 	require.Error(t, runtime.SendInput(context.Background(), "", nil))
 
-	ctx := WithRuntimeContext(context.Background(), "task", "child")
-	taskID, ok := TaskID(ctx)
+	ctx := task.WithExecutionContext(context.Background(), task.ExecutionContext{
+		TaskID: "task",
+	})
+	ctx = withChildSessionID(ctx, "child")
+	execution, ok := task.ExecutionContextFromContext(ctx)
 	require.True(t, ok)
-	require.Equal(t, "task", taskID)
+	require.Equal(t, "task", execution.TaskID)
 	childSessionID, ok := ChildSessionID(ctx)
 	require.True(t, ok)
 	require.Equal(t, "child", childSessionID)
+	_, ok = ChildSessionID(nil)
+	require.False(t, ok)
 
 	var nilHandle *Handle
 	require.Empty(t, nilHandle.ID())
@@ -1092,9 +1144,10 @@ func TestAttack_StartHonorsStreamingAndTerminalCancelIsIdempotent(t *testing.T) 
 	})
 	handle, err := runtime.Start(ctx, &StartRequest[*schema.Message]{
 		InvocationID: "streaming", ParentSessionID: "parent",
-		AgentName: "worker", StartMode: task.StartModeBackground, EnableStreaming: true,
+		AgentName: "worker", StartMode: task.StartModeBackground,
 		Input: &adk.AgentInput{
-			Messages: []*schema.Message{schema.UserMessage("work")},
+			Messages:        []*schema.Message{schema.UserMessage("work")},
+			EnableStreaming: true,
 		},
 	})
 	require.NoError(t, err)
@@ -1145,24 +1198,7 @@ func TestControllerBackgroundControlResults(t *testing.T) {
 		}),
 		testEventMapper,
 	)
-	var canceled int64
-	runtime.cancellationHook = cancellationHookFunc(func(
-		context.Context,
-		string,
-		string,
-		string,
-	) error {
-		atomic.AddInt64(&canceled, 1)
-		return nil
-	})
-	backgroundTask := &background.TaskSnapshot{
-		Spec: background.Spec{ID: "task"},
-	}
-	metadata := &runtimeMetadata{ChildSessionID: "child"}
 	result, err := runtime.controlResult(
-		context.Background(),
-		backgroundTask,
-		metadata,
 		&activationResult[*schema.Message]{
 			control: background.ControlRequest{
 				Kind: background.ControlStop, Reason: "stop",
@@ -1171,12 +1207,8 @@ func TestControllerBackgroundControlResults(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.Equal(t, background.ExecutionActionCancel, result.Action)
-	require.Equal(t, int64(1), atomic.LoadInt64(&canceled))
 
 	result, err = runtime.controlResult(
-		context.Background(),
-		backgroundTask,
-		metadata,
 		&activationResult[*schema.Message]{
 			control: background.ControlRequest{Kind: background.ControlDrain},
 			cursor:  3, final: schema.AssistantMessage("partial", nil),
@@ -1189,9 +1221,6 @@ func TestControllerBackgroundControlResults(t *testing.T) {
 	require.Equal(t, int64(3), checkpoint.InputCursor)
 
 	result, err = runtime.controlResult(
-		context.Background(),
-		backgroundTask,
-		metadata,
 		&activationResult[*schema.Message]{
 			control: background.ControlRequest{Kind: background.ControlTimeout},
 		},
@@ -1201,9 +1230,6 @@ func TestControllerBackgroundControlResults(t *testing.T) {
 	require.NotEmpty(t, result.Error)
 
 	_, err = runtime.controlResult(
-		context.Background(),
-		backgroundTask,
-		metadata,
 		&activationResult[*schema.Message]{
 			control: background.ControlRequest{Kind: "unknown"},
 		},

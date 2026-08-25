@@ -73,14 +73,14 @@ func (r *ProgressReader) ReadProgress(
 	if err != nil {
 		return "", err
 	}
-	if len(result.Events) == 0 {
+	if len(result.Parts) == 0 {
 		return "", nil
 	}
 	var output strings.Builder
 	output.WriteString("Recent progress:")
-	for i := len(result.Events) - 1; i >= 0; i-- {
-		event := result.Events[i]
-		line := formatProgressEvent(event)
+	for i := len(result.Parts) - 1; i >= 0; i-- {
+		part := result.Parts[i]
+		line := formatProgressEvent(part)
 		if line == "" {
 			continue
 		}
@@ -94,13 +94,13 @@ func (r *ProgressReader) ReadProgress(
 	return output.String(), nil
 }
 
-func formatProgressEvent(event *background.TaskEvent) string {
-	if event == nil {
+func formatProgressEvent(part *background.TaskEventPart) string {
+	if part == nil {
 		return ""
 	}
 	var update Update
-	if err := json.Unmarshal(event.Data, &update); err != nil {
-		return boundedText(event.Data, 1024)
+	if err := json.Unmarshal(part.Data, &update); err != nil {
+		return boundedText(part.Data, 1024)
 	}
 	label := update.Kind
 	if label == "" {

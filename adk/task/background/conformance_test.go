@@ -141,7 +141,7 @@ func TestSimplifiedPublicModelHasNoOverlappingStateFields_BitsUT(t *testing.T) {
 	assertFieldsAbsent(t, reflect.TypeOf(ReceiveNotificationsRequest{}), "ConsumerID", "VisibilityTime")
 	assertFieldsPresent(t, reflect.TypeOf(ListTaskEventsRequest{}),
 		"TaskID", "Cursor", "Limit", "NewestFirst")
-	assertFieldsPresent(t, reflect.TypeOf(ListTaskEventsResult{}), "Events", "NextCursor")
+	assertFieldsPresent(t, reflect.TypeOf(ListTaskEventsResult{}), "Parts", "NextCursor")
 	assertFieldsPresent(t, reflect.TypeOf(Config{}),
 		"Tasks", "TaskEvents", "SendTaskCreatedEvent", "IDGen", "ContextSnapshotter")
 	assertFieldsAbsent(t, reflect.TypeOf(Config{}),
@@ -191,15 +191,15 @@ func TestSimplifiedPublicModelHasNoOverlappingStateFields_BitsUT(t *testing.T) {
 	assertFieldsPresent(t, reflect.TypeOf(CommitStartRequest{}),
 		"TaskID", "ExpectedVersion", "Checkpoint")
 	assertFieldsPresent(t, reflect.TypeOf(TaskEventScope{}), "TaskID", "Attempt", "EventID")
-	assertFieldsPresent(t, reflect.TypeOf(TaskEventPart{}), "PartID", "Data", "Final")
+	assertFieldsPresent(t, reflect.TypeOf(TaskEventPartInput{}), "PartID", "Data", "Final")
 	assertFieldsPresent(t, reflect.TypeOf(TaskEventEnvelope[string, string]{}),
 		"Event", "Stream")
-	assertFieldsPresent(t, reflect.TypeOf(TaskEventPersistResult{}), "Scope", "Parts")
+	assertFieldsPresent(t, reflect.TypeOf(TaskEventPersistResult{}), "Scope", "Appends")
 	assertFieldsPresent(t, reflect.TypeOf(AppendTaskEventRequest{}),
 		"TaskID", "Attempt", "EventID", "PartID", "Data", "Final")
-	assertFieldsPresent(t, reflect.TypeOf(TaskEvent{}),
+	assertFieldsPresent(t, reflect.TypeOf(TaskEventPart{}),
 		"EventID", "PartID", "TaskID", "Data", "Final", "CreatedAt")
-	assertFieldsAbsent(t, reflect.TypeOf(TaskEvent{}), "SourceID", "Sequence", "Attempt")
+	assertFieldsAbsent(t, reflect.TypeOf(TaskEventPart{}), "SourceID", "Sequence", "Attempt")
 }
 
 func assertFieldsAbsent(t *testing.T, typ reflect.Type, names ...string) {

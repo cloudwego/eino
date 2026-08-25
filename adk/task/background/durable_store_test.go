@@ -292,8 +292,8 @@ func TestAttack_TaskEventOrderSpansAttemptsWithoutExposingAttempt(t *testing.T) 
 		EventID: "first", Data: []byte("first"),
 	})
 	require.NoError(t, err)
-	require.NotNil(t, first.Event)
-	require.Equal(t, "first", first.Event.EventID)
+	require.NotNil(t, first.Part)
+	require.Equal(t, "first", first.Part.EventID)
 
 	clock.Advance(2 * time.Second)
 	pending, err := store.Get(context.Background(), firstAttempt.Spec.ID)
@@ -308,21 +308,21 @@ func TestAttack_TaskEventOrderSpansAttemptsWithoutExposingAttempt(t *testing.T) 
 		EventID: "second", Data: []byte("second"),
 	})
 	require.NoError(t, err)
-	require.NotNil(t, second.Event)
-	require.Equal(t, "second", second.Event.EventID)
+	require.NotNil(t, second.Part)
+	require.Equal(t, "second", second.Part.EventID)
 
 	output, err := store.ListTaskEvents(context.Background(), &ListTaskEventsRequest{
 		TaskID: secondAttempt.Spec.ID,
 	})
 	require.NoError(t, err)
-	require.Len(t, output.Events, 2)
-	require.NotNil(t, output.Events[0])
-	require.NotNil(t, output.Events[1])
+	require.Len(t, output.Parts, 2)
+	require.NotNil(t, output.Parts[0])
+	require.NotNil(t, output.Parts[1])
 	require.Equal(t, []string{"first", "second"}, []string{
-		output.Events[0].EventID, output.Events[1].EventID,
+		output.Parts[0].EventID, output.Parts[1].EventID,
 	})
 	require.Equal(t, []string{"first", "second"}, []string{
-		string(output.Events[0].Data), string(output.Events[1].Data),
+		string(output.Parts[0].Data), string(output.Parts[1].Data),
 	})
 }
 
@@ -337,16 +337,16 @@ func TestAttack_EventIDIsTaskLocal(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.True(t, firstResult.Inserted)
-	require.NotNil(t, firstResult.Event)
+	require.NotNil(t, firstResult.Part)
 	secondResult, err := store.AppendTaskEvent(context.Background(), &AppendTaskEventRequest{
 		TaskID: second.Spec.ID, Attempt: second.Attempt,
 		EventID: "shared", Data: []byte("second"),
 	})
 	require.NoError(t, err)
 	require.True(t, secondResult.Inserted)
-	require.NotNil(t, secondResult.Event)
-	require.Equal(t, first.Spec.ID, firstResult.Event.TaskID)
-	require.Equal(t, second.Spec.ID, secondResult.Event.TaskID)
+	require.NotNil(t, secondResult.Part)
+	require.Equal(t, first.Spec.ID, firstResult.Part.TaskID)
+	require.Equal(t, second.Spec.ID, secondResult.Part.TaskID)
 }
 
 func TestInMemoryStoreYieldReturnsRecoverableAttemptToPending_BitsUT(t *testing.T) {
@@ -419,9 +419,9 @@ func TestInMemoryStoreTaskEventDeduplicatesAcrossAttempts_BitsUT(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.True(t, first.Inserted)
-	require.NotNil(t, first.Event)
-	require.Equal(t, "event-1", first.Event.EventID)
-	createdAt := first.Event.CreatedAt
+	require.NotNil(t, first.Part)
+	require.Equal(t, "event-1", first.Part.EventID)
+	createdAt := first.Part.CreatedAt
 
 	yielded, err := store.Yield(context.Background(), &YieldTaskRequest{
 		TaskID: started.Spec.ID, ExpectedVersion: started.Version,
@@ -437,9 +437,9 @@ func TestInMemoryStoreTaskEventDeduplicatesAcrossAttempts_BitsUT(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.False(t, replayed.Inserted)
-	require.NotNil(t, replayed.Event)
-	require.Equal(t, first.Event, replayed.Event)
-	require.Equal(t, createdAt, replayed.Event.CreatedAt)
+	require.NotNil(t, replayed.Part)
+	require.Equal(t, first.Part, replayed.Part)
+	require.Equal(t, createdAt, replayed.Part.CreatedAt)
 
 	_, err = store.AppendTaskEvent(context.Background(), &AppendTaskEventRequest{
 		TaskID: restarted.Spec.ID, Attempt: restarted.Attempt,
@@ -460,14 +460,14 @@ func TestInMemoryStoreTaskEventDeduplicatesAcrossAttempts_BitsUT(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, versionBeforeOutput, current.Version)
 
-	first.Event.Data[0] = 'X'
+	first.Part.Data[0] = 'X'
 	stored, err := store.ListTaskEvents(context.Background(), &ListTaskEventsRequest{
 		TaskID: restarted.Spec.ID,
 	})
 	require.NoError(t, err)
-	require.NotEmpty(t, stored.Events)
-	require.NotNil(t, stored.Events[0])
-	require.Equal(t, "payload", string(stored.Events[0].Data))
+	require.NotEmpty(t, stored.Parts)
+	require.NotNil(t, stored.Parts[0])
+	require.Equal(t, "payload", string(stored.Parts[0].Data))
 }
 
 func TestAttack_NewestTaskEventsIgnoreEventIDLexicalOrder(t *testing.T) {
@@ -491,11 +491,11 @@ func TestAttack_NewestTaskEventsIgnoreEventIDLexicalOrder(t *testing.T) {
 		TaskID: started.Spec.ID, Limit: 2, NewestFirst: true,
 	})
 	require.NoError(t, err)
-	require.Len(t, result.Events, 2)
-	require.NotNil(t, result.Events[0])
-	require.NotNil(t, result.Events[1])
-	require.Equal(t, "three", string(result.Events[0].Data))
-	require.Equal(t, "two", string(result.Events[1].Data))
+	require.Len(t, result.Parts, 2)
+	require.NotNil(t, result.Parts[0])
+	require.NotNil(t, result.Parts[1])
+	require.Equal(t, "three", string(result.Parts[0].Data))
+	require.Equal(t, "two", string(result.Parts[1].Data))
 }
 
 func TestInMemoryStoreListTaskEventsExhaustsStableSnapshots_BitsUT(t *testing.T) {
@@ -509,7 +509,7 @@ func TestInMemoryStoreListTaskEventsExhaustsStableSnapshots_BitsUT(t *testing.T)
 		})
 		require.NoError(t, err)
 	}
-	eventIDs := func(events []*TaskEvent) []string {
+	eventIDs := func(events []*TaskEventPart) []string {
 		t.Helper()
 		ids := make([]string, len(events))
 		for i, event := range events {
@@ -526,7 +526,7 @@ func TestInMemoryStoreListTaskEventsExhaustsStableSnapshots_BitsUT(t *testing.T)
 		TaskID: started.Spec.ID, Limit: 2,
 	})
 	require.NoError(t, err)
-	assert.Equal(t, []string{"one", "two"}, eventIDs(first.Events))
+	assert.Equal(t, []string{"one", "two"}, eventIDs(first.Parts))
 	require.NotEmpty(t, first.NextCursor)
 	appendEvent("six")
 
@@ -534,20 +534,20 @@ func TestInMemoryStoreListTaskEventsExhaustsStableSnapshots_BitsUT(t *testing.T)
 		TaskID: started.Spec.ID, Cursor: first.NextCursor, Limit: 2,
 	})
 	require.NoError(t, err)
-	assert.Equal(t, []string{"three", "four"}, eventIDs(second.Events))
+	assert.Equal(t, []string{"three", "four"}, eventIDs(second.Parts))
 	require.NotEmpty(t, second.NextCursor)
 	third, err := store.ListTaskEvents(context.Background(), &ListTaskEventsRequest{
 		TaskID: started.Spec.ID, Cursor: second.NextCursor, Limit: 2,
 	})
 	require.NoError(t, err)
-	assert.Equal(t, []string{"five"}, eventIDs(third.Events))
+	assert.Equal(t, []string{"five"}, eventIDs(third.Parts))
 	assert.Empty(t, third.NextCursor)
 
 	newest, err := store.ListTaskEvents(context.Background(), &ListTaskEventsRequest{
 		TaskID: started.Spec.ID, Limit: 2, NewestFirst: true,
 	})
 	require.NoError(t, err)
-	assert.Equal(t, []string{"six", "five"}, eventIDs(newest.Events))
+	assert.Equal(t, []string{"six", "five"}, eventIDs(newest.Parts))
 	require.NotEmpty(t, newest.NextCursor)
 	appendEvent("seven")
 
@@ -558,7 +558,7 @@ func TestInMemoryStoreListTaskEventsExhaustsStableSnapshots_BitsUT(t *testing.T)
 			TaskID: started.Spec.ID, Cursor: cursor, Limit: 2, NewestFirst: true,
 		})
 		require.NoError(t, listErr)
-		newestSnapshot = append(newestSnapshot, eventIDs(page.Events)...)
+		newestSnapshot = append(newestSnapshot, eventIDs(page.Parts)...)
 		cursor = page.NextCursor
 	}
 	assert.Equal(t, []string{"four", "three", "two", "one"}, newestSnapshot)
@@ -569,7 +569,7 @@ func TestInMemoryStoreListTaskEventsExhaustsStableSnapshots_BitsUT(t *testing.T)
 	require.NoError(t, err)
 	assert.Equal(t,
 		[]string{"one", "two", "three", "four", "five", "six", "seven"},
-		eventIDs(fresh.Events),
+		eventIDs(fresh.Parts),
 	)
 	assert.Empty(t, fresh.NextCursor)
 }
@@ -670,14 +670,14 @@ func TestInMemoryStoreListTaskEventsNormalizesLimit_BitsUT(t *testing.T) {
 		TaskID: started.Spec.ID,
 	})
 	require.NoError(t, err)
-	require.Len(t, defaultPage.Events, defaultTaskEventPageSize)
+	require.Len(t, defaultPage.Parts, defaultTaskEventPageSize)
 	require.NotEmpty(t, defaultPage.NextCursor)
 
 	cappedPage, err := store.ListTaskEvents(context.Background(), &ListTaskEventsRequest{
 		TaskID: started.Spec.ID, Limit: maxTaskEventPageSize + 1,
 	})
 	require.NoError(t, err)
-	require.Len(t, cappedPage.Events, maxTaskEventPageSize)
+	require.Len(t, cappedPage.Parts, maxTaskEventPageSize)
 	require.NotEmpty(t, cappedPage.NextCursor)
 }
 
@@ -778,9 +778,9 @@ func TestAttack_TaskEventReplayFencesStaleAttempt(t *testing.T) {
 		TaskID: started.Spec.ID, Limit: 1, NewestFirst: true,
 	})
 	require.NoError(t, err)
-	require.Len(t, page.Events, 1)
-	require.NotNil(t, page.Events[0])
-	assert.Equal(t, "second", string(page.Events[0].Data))
+	require.Len(t, page.Parts, 1)
+	require.NotNil(t, page.Parts[0])
+	assert.Equal(t, "second", string(page.Parts[0].Data))
 
 	_, err = store.AppendTaskEvent(context.Background(), &AppendTaskEventRequest{
 		TaskID: started.Spec.ID, Attempt: started.Attempt + 1,
@@ -800,7 +800,7 @@ func TestAttack_TaskEventReplayFencesStaleAttempt(t *testing.T) {
 		TaskID: started.Spec.ID,
 	})
 	require.NoError(t, err)
-	require.Len(t, page.Events, 2)
+	require.Len(t, page.Parts, 2)
 }
 
 func TestInMemoryStoreCheckpointedPauseHasNoTerminalResult_BitsUT(t *testing.T) {

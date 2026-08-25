@@ -37,7 +37,6 @@ type StartRequest[M adk.MessageType] struct {
 	Description     string
 	Input           *adk.TypedAgentInput[M]
 	StartMode       task.StartMode
-	EnableStreaming bool
 	OnEvent         func(*adk.TypedAgentEvent[M])
 }
 
@@ -106,7 +105,6 @@ type StartOptions[M adk.MessageType] struct {
 	AgentName       string
 	Description     string
 	StartMode       task.StartMode
-	EnableStreaming bool
 	OnEvent         func(*adk.TypedAgentEvent[M])
 }
 
@@ -120,13 +118,15 @@ type ContinueRequest[M adk.MessageType] struct {
 	IfIdle         *StartOptions[M]
 }
 
-// CompletionAction controls whether the finite task completes or transfers
-// to background ownership to wait for more input.
+// CompletionAction controls whether the finite task completes or suspends
+// until Continue explicitly releases it.
 type CompletionAction uint8
 
 const (
-	CompletionComplete CompletionAction = iota
-	CompletionWaitInput
+	// CompletionUnknown is the invalid zero value.
+	CompletionUnknown CompletionAction = iota
+	CompletionComplete
+	CompletionSuspend
 )
 
 // CompletionContext describes one completed child-agent turn.
@@ -142,7 +142,9 @@ type CompletionBarrier[M adk.MessageType] interface {
 	Check(context.Context, *CompletionContext[M]) (CompletionAction, error)
 }
 
-// CancellationHook owns domain-specific cancellation cleanup.
+// CancellationHook owns domain-specific cancellation cleanup. OnCancel may be
+// retried by later cancellation requests and by recovery attempts, including
+// on another worker or process, so implementations must be idempotent.
 type CancellationHook interface {
 	OnCancel(ctx context.Context, taskID, childSessionID, reason string) error
 }
@@ -155,28 +157,17 @@ type InputPreemptPolicy[M adk.MessageType] func(
 	*adk.TurnContext[*task.InputRecord, M],
 ) []adk.PushOption[*task.InputRecord, M]
 
-type runtimeContextKey struct{}
+type childSessionIDContextKey struct{}
 
-type runtimeContext struct {
-	taskID         string
-	childSessionID string
-}
-
-// WithRuntimeContext exposes the current task and persistent child session.
-func WithRuntimeContext(ctx context.Context, taskID, childSessionID string) context.Context {
-	return context.WithValue(ctx, runtimeContextKey{}, runtimeContext{
-		taskID: taskID, childSessionID: childSessionID,
-	})
-}
-
-// TaskID returns the current Sub-agent task ID.
-func TaskID(ctx context.Context) (string, bool) {
-	value, ok := ctx.Value(runtimeContextKey{}).(runtimeContext)
-	return value.taskID, ok && value.taskID != ""
+func withChildSessionID(ctx context.Context, childSessionID string) context.Context {
+	return context.WithValue(ctx, childSessionIDContextKey{}, childSessionID)
 }
 
 // ChildSessionID returns the current persistent child session ID.
 func ChildSessionID(ctx context.Context) (string, bool) {
-	value, ok := ctx.Value(runtimeContextKey{}).(runtimeContext)
-	return value.childSessionID, ok && value.childSessionID != ""
+	if ctx == nil {
+		return "", false
+	}
+	value, ok := ctx.Value(childSessionIDContextKey{}).(string)
+	return value, ok && value != ""
 }

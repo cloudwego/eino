@@ -93,8 +93,8 @@ type InMemoryStore struct {
 	mu                  sync.Mutex
 	tasks               map[string]*TaskSnapshot
 	active              map[string]memoryActiveAttempt
-	taskEvents          map[string][]TaskEvent
-	taskEventKeys       map[string]map[taskEventPartKey]TaskEvent
+	taskEvents          map[string][]TaskEventPart
+	taskEventKeys       map[string]map[taskEventPartKey]TaskEventPart
 	closedTaskEvents    map[string]map[string]struct{}
 	customNotifications map[string]map[string]Notification
 	outbox              []*memoryOutboxItem
@@ -113,8 +113,8 @@ func NewInMemoryStore(config *InMemoryStoreConfig) *InMemoryStore {
 	s := &InMemoryStore{
 		tasks:               make(map[string]*TaskSnapshot),
 		active:              make(map[string]memoryActiveAttempt),
-		taskEvents:          make(map[string][]TaskEvent),
-		taskEventKeys:       make(map[string]map[taskEventPartKey]TaskEvent),
+		taskEvents:          make(map[string][]TaskEventPart),
+		taskEventKeys:       make(map[string]map[taskEventPartKey]TaskEventPart),
 		closedTaskEvents:    make(map[string]map[string]struct{}),
 		customNotifications: make(map[string]map[string]Notification),
 		mailboxes:           make(map[string]*memoryMailbox),
@@ -533,20 +533,20 @@ func (s *InMemoryStore) AppendTaskEvent(
 			return nil, ErrTaskEventPartConflict
 		}
 		return &AppendTaskEventResult{
-			Event: cloneTaskEvent(&existing),
+			Part: cloneTaskEventPart(&existing),
 		}, nil
 	}
 	if _, closed := s.closedTaskEvents[req.TaskID][req.EventID]; closed {
 		return nil, ErrTaskEventClosed
 	}
 	events := s.taskEvents[req.TaskID]
-	event := TaskEvent{
+	event := TaskEventPart{
 		EventID: req.EventID, PartID: partID, TaskID: req.TaskID,
 		Data: cloneBytes(req.Data), Final: final, CreatedAt: s.now(),
 	}
 	s.taskEvents[req.TaskID] = append(events, event)
 	if keyed == nil {
-		keyed = make(map[taskEventPartKey]TaskEvent)
+		keyed = make(map[taskEventPartKey]TaskEventPart)
 		s.taskEventKeys[req.TaskID] = keyed
 	}
 	keyed[key] = event
@@ -559,7 +559,7 @@ func (s *InMemoryStore) AppendTaskEvent(
 		closed[req.EventID] = struct{}{}
 	}
 	return &AppendTaskEventResult{
-		Event: cloneTaskEvent(&event), Inserted: true,
+		Part: cloneTaskEventPart(&event), Inserted: true,
 	}, nil
 }
 
@@ -678,7 +678,7 @@ func (s *InMemoryStore) ListTaskEvents(
 			start = 0
 		}
 		for i := cursor.Position - 1; i >= start; i-- {
-			result.Events = append(result.Events, cloneTaskEvent(&events[i]))
+			result.Parts = append(result.Parts, cloneTaskEventPart(&events[i]))
 		}
 		if start > 0 {
 			cursor.Position = start
@@ -696,7 +696,7 @@ func (s *InMemoryStore) ListTaskEvents(
 		end = cursor.SnapshotEnd
 	}
 	for i := cursor.Position; i < end; i++ {
-		result.Events = append(result.Events, cloneTaskEvent(&events[i]))
+		result.Parts = append(result.Parts, cloneTaskEventPart(&events[i]))
 	}
 	if end < cursor.SnapshotEnd {
 		cursor.Position = end
@@ -1131,8 +1131,7 @@ func (s *InMemoryStore) enqueueParentInputLocked(
 	parent.byID[eventID] = input
 	if parent.mailbox.State == taskcore.MailboxBackground {
 		if parentTask := s.tasks[child.Spec.ParentTaskID]; parentTask != nil {
-			if parentTask.Status == StatusSuspended ||
-				parentTask.Status == StatusWaitingInput {
+			if parentTask.Status == StatusWaitingInput {
 				parentTask.Status = StatusPending
 				s.advanceLocked(parentTask)
 			}

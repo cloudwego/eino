@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -53,6 +54,19 @@ func (testContextSnapshotter) RestoreContext(ctx context.Context, snapshot []byt
 
 type failingRestoreSnapshotter struct {
 	err error
+}
+
+type cancellationAcknowledgingExecutor struct {
+	*scriptedExecutor
+	acknowledge func(context.Context, *TaskSnapshot, string) error
+}
+
+func (e *cancellationAcknowledgingExecutor) AcknowledgeCancellation(
+	ctx context.Context,
+	task *TaskSnapshot,
+	reason string,
+) error {
+	return e.acknowledge(ctx, task, reason)
 }
 
 func (f failingRestoreSnapshotter) CaptureContext(context.Context) ([]byte, error) {
@@ -97,8 +111,8 @@ func TestManagerListTaskEventsDelegatesToStore_BitsUT(t *testing.T) {
 		TaskID: started.Spec.ID,
 	})
 	require.NoError(t, err)
-	require.Len(t, result.Events, 1)
-	require.Equal(t, "record", string(result.Events[0].Data))
+	require.Len(t, result.Parts, 1)
+	require.Equal(t, "record", string(result.Parts[0].Data))
 }
 
 func TestManagerExecuteBindsTimeoutController_BitsUT(t *testing.T) {
@@ -418,6 +432,86 @@ func TestManagerCancelNonRecoverableAttempt(t *testing.T) {
 	}, <-observed)
 }
 
+func TestManagerAcknowledgesActiveCancellationOnceAndRetriesFailures(t *testing.T) {
+	for _, test := range []struct {
+		name             string
+		taskID           string
+		failFirst        bool
+		requests         int
+		wantCalls        int64
+		wantFirstFailure bool
+	}{
+		{
+			name:     "repeated request after success",
+			taskID:   "acknowledge-success",
+			requests: 2, wantCalls: 1,
+		},
+		{
+			name:      "failed acknowledgement is retried",
+			taskID:    "acknowledge-retry",
+			failFirst: true, requests: 2, wantCalls: 2, wantFirstFailure: true,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			started := make(chan struct{})
+			controlReceived := make(chan ControlRequest, 1)
+			finish := make(chan struct{})
+			var acknowledgeCalls int64
+			ackErr := errors.New("acknowledgement failed")
+			executor := &cancellationAcknowledgingExecutor{
+				scriptedExecutor: &scriptedExecutor{execute: func(
+					_ context.Context,
+					_ *TaskSnapshot,
+					runtime ExecutionRuntime,
+				) (*ExecutionResult, error) {
+					close(started)
+					controlReceived <- <-runtime.Controls()
+					<-finish
+					return &ExecutionResult{Action: ExecutionActionCancel}, nil
+				}},
+				acknowledge: func(
+					context.Context,
+					*TaskSnapshot,
+					string,
+				) error {
+					call := atomic.AddInt64(&acknowledgeCalls, 1)
+					if test.failFirst && call == 1 {
+						return ackErr
+					}
+					return nil
+				},
+			}
+			store := NewInMemoryStore(nil)
+			manager := managerWithExecutor(t, store, executor, time.Minute)
+			defer closeWithTimeout(manager)
+			task, err := manager.Submit(
+				context.Background(),
+				&SubmitRequest{Spec: validSpec(test.taskID)},
+			)
+			require.NoError(t, err)
+			executeDone := make(chan error, 1)
+			go func() {
+				executeDone <- manager.Execute(context.Background(), task.Spec.ID)
+			}()
+			<-started
+
+			for request := 0; request < test.requests; request++ {
+				_, err = manager.RequestCancel(context.Background(), task.Spec.ID)
+				if request == 0 && test.wantFirstFailure {
+					require.ErrorIs(t, err, ackErr)
+				} else {
+					require.NoError(t, err)
+				}
+			}
+			require.Equal(t, test.wantCalls, atomic.LoadInt64(&acknowledgeCalls))
+			require.Equal(t, ControlStop, (<-controlReceived).Kind)
+			close(finish)
+			require.NoError(t, <-executeDone)
+			require.Equal(t, test.wantCalls, atomic.LoadInt64(&acknowledgeCalls))
+		})
+	}
+}
+
 func TestManagerReplaysCancellationReasonToRecoveryAttempt(t *testing.T) {
 	clock := &testClock{now: time.Unix(100, 0)}
 	store := newInMemoryStoreWithClock(
@@ -436,15 +530,26 @@ func TestManagerReplaysCancellationReasonToRecoveryAttempt(t *testing.T) {
 	require.Equal(t, StatusPending, pending.Status)
 
 	observed := make(chan ControlRequest, 1)
-	executor := &scriptedExecutor{execute: func(
-		_ context.Context,
-		_ *TaskSnapshot,
-		runtime ExecutionRuntime,
-	) (*ExecutionResult, error) {
-		control := <-runtime.Controls()
-		observed <- control
-		return &ExecutionResult{Action: ExecutionActionCancel}, nil
-	}}
+	var acknowledgeCalls int64
+	executor := &cancellationAcknowledgingExecutor{
+		scriptedExecutor: &scriptedExecutor{execute: func(
+			_ context.Context,
+			_ *TaskSnapshot,
+			runtime ExecutionRuntime,
+		) (*ExecutionResult, error) {
+			control := <-runtime.Controls()
+			observed <- control
+			return &ExecutionResult{Action: ExecutionActionCancel}, nil
+		}},
+		acknowledge: func(
+			context.Context,
+			*TaskSnapshot,
+			string,
+		) error {
+			atomic.AddInt64(&acknowledgeCalls, 1)
+			return nil
+		},
+	}
 	manager := managerWithExecutor(t, store, executor, time.Minute)
 	defer closeWithTimeout(manager)
 	require.NoError(t, manager.Execute(context.Background(), started.Spec.ID))
@@ -454,6 +559,7 @@ func TestManagerReplaysCancellationReasonToRecoveryAttempt(t *testing.T) {
 	canceled, err := manager.Get(context.Background(), started.Spec.ID)
 	require.NoError(t, err)
 	require.Equal(t, "operator request", canceled.ResultError)
+	require.Equal(t, int64(1), atomic.LoadInt64(&acknowledgeCalls))
 }
 
 func TestManagerPreservesContextSnapshotAcrossMailboxWake(t *testing.T) {
@@ -664,7 +770,7 @@ func TestTaskRuntimeTranscriptFailureAndHeartbeat(t *testing.T) {
 	outputScope, outputWriter := runtime.NewTaskEventWriter("")
 	output, err := outputWriter.Append(
 		context.Background(),
-		&TaskEventPart{PartID: "event", Data: []byte("output"), Final: true},
+		&TaskEventPartInput{PartID: "event", Data: []byte("output"), Final: true},
 	)
 	require.NoError(t, err)
 	require.NotEmpty(t, outputScope.EventID)
@@ -672,7 +778,7 @@ func TestTaskRuntimeTranscriptFailureAndHeartbeat(t *testing.T) {
 	suppliedScope, suppliedWriter := runtime.NewTaskEventWriter("caller-event")
 	supplied, err := suppliedWriter.Append(
 		context.Background(),
-		&TaskEventPart{PartID: "event", Data: []byte("supplied"), Final: true},
+		&TaskEventPartInput{PartID: "event", Data: []byte("supplied"), Final: true},
 	)
 	require.NoError(t, err)
 	require.Equal(t, "caller-event", suppliedScope.EventID)

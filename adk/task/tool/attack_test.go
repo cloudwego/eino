@@ -35,7 +35,7 @@ import (
 
 type replayRuntimeStub struct {
 	inserted bool
-	parts    []*background.TaskEventPart
+	parts    []*background.TaskEventPartInput
 }
 
 func (*replayRuntimeStub) Controls() <-chan background.ControlRequest {
@@ -63,13 +63,13 @@ type replayTaskEventWriter struct {
 
 func (w replayTaskEventWriter) Append(
 	_ context.Context,
-	part *background.TaskEventPart,
+	part *background.TaskEventPartInput,
 ) (*background.AppendTaskEventResult, error) {
 	copy := *part
 	copy.Data = append([]byte(nil), part.Data...)
 	w.runtime.parts = append(w.runtime.parts, &copy)
 	return &background.AppendTaskEventResult{
-		Event: &background.TaskEvent{
+		Part: &background.TaskEventPart{
 			TaskID: w.scope.TaskID, EventID: w.scope.EventID,
 			PartID: copy.PartID, Data: copy.Data, Final: copy.Final,
 		},
@@ -86,16 +86,13 @@ func (p *customUpdateEventPersister) Persist(
 	_ background.TaskEventScope,
 	input *background.TaskEventEnvelope[*Update, *Update],
 	writer background.TaskEventWriter,
-) ([]*background.AppendTaskEventResult, error) {
+) error {
 	p.event = cloneUpdate(input.Event)
-	result, err := writer.Append(ctx, &background.TaskEventPart{
+	_, err := writer.Append(ctx, &background.TaskEventPartInput{
 		PartID: "custom", Data: append([]byte("custom:"), input.Event.Data...),
 		Final: true,
 	})
-	if err != nil {
-		return nil, err
-	}
-	return []*background.AppendTaskEventResult{result}, nil
+	return err
 }
 func (*replayRuntimeStub) ReportTranscriptFailure(context.Context, error) error { return nil }
 func (*replayRuntimeStub) ListInputs(
@@ -322,7 +319,7 @@ func TestAttack_ReplayedEventProjectsOnceMaterializesTwice(t *testing.T) {
 		TaskID: "attack-task",
 	})
 	require.NoError(t, err)
-	require.Len(t, output.Events, 1)
+	require.Len(t, output.Parts, 1)
 	materializer.mu.Lock()
 	require.Len(t, materializer.requests, 2)
 	require.Equal(t, materializer.requests[0].EventID, materializer.requests[1].EventID)

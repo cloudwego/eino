@@ -453,7 +453,8 @@ func (s *InMemoryStore) GetMailbox(
 	return cloneMailbox(current.mailbox), nil
 }
 
-// SendInput appends one input idempotently and wakes a background owner.
+// SendInput appends one input idempotently. It wakes a background owner only
+// from StatusWaitingInput; a planned suspension requires ReleaseSuspension.
 func (s *InMemoryStore) SendInput(
 	_ context.Context,
 	req *task.SendInputRequest,
@@ -502,8 +503,7 @@ func (s *InMemoryStore) SendInput(
 	current.byID[input.EventID] = input
 	if current.mailbox.State == task.MailboxBackground {
 		if backgroundTask := s.tasks[req.TaskID]; backgroundTask != nil {
-			if backgroundTask.Status == StatusSuspended ||
-				backgroundTask.Status == StatusWaitingInput {
+			if backgroundTask.Status == StatusWaitingInput {
 				backgroundTask.Status = StatusPending
 				s.advanceLocked(backgroundTask)
 			}

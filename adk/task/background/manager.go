@@ -19,11 +19,14 @@
 // executions (sub-agents, shell commands, ...) that may outlive the tool call
 // that launched them.
 //
-// Manager coordinates TaskStore-backed submission, execution, and control. It
-// is deliberately non-generic so one instance can serve heterogeneous executor
+// Manager is the runtime facade for submission, execution, and control. The
+// configured LifecycleStore remains the sole durable lifecycle and mailbox
+// authority; Manager validates requests, coordinates process-local executors,
+// and delegates every authoritative transition to that store. It is
+// deliberately non-generic so one instance can serve heterogeneous executor
 // domains under one task-ID space.
 //
-// TaskEvent is append-only progress. Spec.OutputFile and TaskSnapshot.OutputFileErr
+// Task event parts are append-only progress. Spec.OutputFile and TaskSnapshot.OutputFileErr
 // describe an optional derived transcript projection; transcript failure never
 // changes authoritative lifecycle status or replaces terminal ResultData.
 //
@@ -130,8 +133,9 @@ type ContextSnapshotter interface {
 
 // Config configures a Manager.
 type Config struct {
-	// Tasks atomically owns task lifecycle, mailbox transitions, and parent
-	// notification writes. When nil, New installs an in-memory reference provider.
+	// Tasks is the sole durable authority for task lifecycle, mailbox transitions,
+	// and parent notification writes. Manager does not mirror this state.
+	// When nil, New installs an in-memory reference provider.
 	Tasks LifecycleStore
 	// TaskEvents persists append-only serialized event parts in the same task
 	// namespace and must fence every append against the active attempt.
@@ -188,7 +192,9 @@ func WithCancellationReason(reason string) RequestCancelOption {
 	}
 }
 
-// Manager owns TaskStore-backed lifecycle and worker coordination.
+// Manager coordinates workers and exposes a facade over one LifecycleStore.
+// Its process-local attempt registry is execution plumbing, not a second source
+// of lifecycle or mailbox truth.
 type Manager struct {
 	tasks                LifecycleStore
 	taskEvents           TaskEventStore

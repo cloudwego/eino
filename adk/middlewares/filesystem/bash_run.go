@@ -19,6 +19,7 @@ package filesystem
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"path/filepath"
@@ -26,6 +27,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/cloudwego/eino/adk/filesystem"
+	"github.com/cloudwego/eino/adk/task"
 	"github.com/cloudwego/eino/adk/task/background"
 	backgroundlocal "github.com/cloudwego/eino/adk/task/local"
 	"github.com/cloudwego/eino/components/tool"
@@ -237,14 +239,11 @@ func (shellOutputEventPersister) Persist(
 	_ background.TaskEventScope,
 	input *background.TaskEventEnvelope[string, string],
 	writer background.TaskEventWriter,
-) ([]*background.AppendTaskEventResult, error) {
-	result, err := writer.Append(ctx, &background.TaskEventPart{
+) error {
+	_, err := writer.Append(ctx, &background.TaskEventPartInput{
 		PartID: "event", Data: []byte(input.Event), Final: true,
 	})
-	if err != nil {
-		return nil, err
-	}
-	return []*background.AppendTaskEventResult{result}, nil
+	return err
 }
 
 // bashWork adapts blocking shell execution into process-local managed work.
@@ -263,7 +262,8 @@ func bashWork(sb filesystem.Shell, req *filesystem.ExecuteRequest, w *bashOutput
 		if err = w.appendResult(ctx, runtime, out); err != nil {
 			return "", err
 		}
-		if out != "" {
+		execution, managed := task.ExecutionContextFromContext(ctx)
+		if out != "" && managed && execution.Owner == task.OwnerManager {
 			if _, err = background.PersistTaskEvent[string, string](
 				ctx,
 				runtime,
@@ -507,20 +507,45 @@ func newManagedBufferedExecuteTool(
 		if err != nil {
 			return "", err
 		}
-
-		switch result.Status {
-		case background.StatusCompleted:
-			if result.ResultData == nil {
-				return "", fmt.Errorf("execute task %q completed without a result", result.Spec.ID)
+		if outcome, ok := result.Foreground(); ok {
+			switch outcome.Status {
+			case task.OutcomeCompleted:
+				return string(outcome.Data), nil
+			case task.OutcomeFailed:
+				return "", fmt.Errorf("execute %q failed: %s", result.ID(), outcome.Error)
+			case task.OutcomeCanceled:
+				return "", fmt.Errorf("execute %q was canceled: %s", result.ID(), outcome.Error)
+			default:
+				return "", fmt.Errorf(
+					"execute %q returned unsupported foreground status %d",
+					result.ID(),
+					outcome.Status,
+				)
 			}
-			return string(result.ResultData), nil
+		}
+		backgroundTask, ok := result.Task()
+		if !ok {
+			return "", errors.New("execute returned an invalid local run result")
+		}
+		switch backgroundTask.Status {
+		case background.StatusCompleted:
+			if backgroundTask.ResultData == nil {
+				return "", fmt.Errorf(
+					"execute task %q completed without a result",
+					backgroundTask.Spec.ID,
+				)
+			}
+			return string(backgroundTask.ResultData), nil
 		case background.StatusPending, background.StatusRunning,
 			background.StatusWaitingInput, background.StatusSuspended:
-			msg := fmt.Sprintf("Command running in background with ID: %s.", result.Spec.ID)
+			msg := fmt.Sprintf(
+				"Command running in background with ID: %s.",
+				backgroundTask.Spec.ID,
+			)
 			if w.path != "" {
 				msg += fmt.Sprintf(" Output is being written to: %s.", w.path)
 			}
-			if result.Spec.NotifySession {
+			if backgroundTask.Spec.NotifySession {
 				msg += " You will be notified when it completes."
 			} else {
 				msg += " Use task_output to check status and retrieve the result."
@@ -530,11 +555,23 @@ func newManagedBufferedExecuteTool(
 			}
 			return msg, nil
 		case background.StatusFailed:
-			return "", fmt.Errorf("execute task %q failed: %s", result.Spec.ID, result.ResultError)
+			return "", fmt.Errorf(
+				"execute task %q failed: %s",
+				backgroundTask.Spec.ID,
+				backgroundTask.ResultError,
+			)
 		case background.StatusCanceled:
-			return "", fmt.Errorf("execute task %q was canceled", result.Spec.ID)
+			return "", fmt.Errorf(
+				"execute task %q was canceled: %s",
+				backgroundTask.Spec.ID,
+				backgroundTask.ResultError,
+			)
 		default:
-			return "", fmt.Errorf("execute task %q has unknown status %q", result.Spec.ID, result.Status)
+			return "", fmt.Errorf(
+				"execute task %q has unknown status %q",
+				backgroundTask.Spec.ID,
+				backgroundTask.Status,
+			)
 		}
 	})
 }

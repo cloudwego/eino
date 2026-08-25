@@ -363,7 +363,7 @@ func formatTask(task *bgtask.TaskSnapshot) string {
 	label := "Output transcript"
 	switch task.Spec.Kind {
 	case "subagent":
-		label = "Event transcript (JSONL)"
+		label = "Event transcript"
 	case "bash":
 		label = "Command output transcript"
 	}
