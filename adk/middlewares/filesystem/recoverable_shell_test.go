@@ -100,6 +100,13 @@ func TestRecoverableShellUsesManagedToolLifecycle(t *testing.T) {
 	tools, err := getFilesystemTools(context.Background(), config)
 	require.NoError(t, err)
 	require.Len(t, tools, 1)
+	info, err := tools[0].Info(context.Background())
+	require.NoError(t, err)
+	js, err := info.ParamsOneOf.ToJSONSchema()
+	require.NoError(t, err)
+	timeout, ok := js.Properties.Get("timeout")
+	require.True(t, ok)
+	require.Contains(t, timeout.Description, "seconds")
 	result, err := tools[0].(componenttool.EnhancedInvokableTool).InvokableRun(
 		context.Background(), &schema.ToolArgument{Text: `{"command":"echo hello"}`},
 	)
