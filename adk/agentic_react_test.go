@@ -103,6 +103,86 @@ func (t *agenticInterruptTool) InvokableRun(ctx context.Context, _ string, _ ...
 	return "resumed_no_data", nil
 }
 
+var errAgenticSandboxEscapeRequired = errors.New("sandbox escape required")
+
+type agenticLateErrorTool struct {
+	name            string
+	callCount       int32
+	sideEffectCount int32
+}
+
+func (t *agenticLateErrorTool) Info(_ context.Context) (*schema.ToolInfo, error) {
+	return &schema.ToolInfo{Name: t.name, Desc: "returns a late stream error before completing"}, nil
+}
+
+func (t *agenticLateErrorTool) StreamableRun(_ context.Context, _ string, _ ...tool.Option) (*schema.StreamReader[string], error) {
+	switch atomic.AddInt32(&t.callCount, 1) {
+	case 1:
+		r, w := schema.Pipe[string](2)
+		go func() {
+			defer w.Close()
+			w.Send("partial", nil)
+			w.Send("", errAgenticSandboxEscapeRequired)
+		}()
+		return r, nil
+	case 2:
+		atomic.AddInt32(&t.sideEffectCount, 1)
+		return schema.StreamReaderFromArray([]string{"completed"}), nil
+	default:
+		return nil, errors.New("late error tool called more than twice")
+	}
+}
+
+func agenticLateInterruptMiddleware() compose.ToolMiddleware {
+	return compose.ToolMiddleware{
+		Name: "permission",
+		Streamable: func(next compose.StreamableToolEndpoint) compose.StreamableToolEndpoint {
+			return func(ctx context.Context, input *compose.ToolInput) (*compose.StreamToolOutput, error) {
+				wasInterrupted, hasState, state := tool.GetInterruptState[string](ctx)
+				if !wasInterrupted {
+					return nil, tool.StatefulInterrupt(ctx, "first approval", "awaiting_first_approval")
+				}
+				if !hasState {
+					return nil, errors.New("permission middleware: missing interrupt state")
+				}
+				isResume, hasData, resumeData := tool.GetResumeContext[string](ctx)
+				if !isResume || !hasData {
+					return nil, errors.New("permission middleware: missing resume data")
+				}
+				expectedResumeData := map[string]string{
+					"awaiting_first_approval":  "approved_1",
+					"awaiting_second_approval": "approved_2",
+				}
+				expected, ok := expectedResumeData[state]
+				if !ok {
+					return nil, fmt.Errorf("permission middleware: unexpected interrupt state %q", state)
+				}
+				if resumeData != expected {
+					return nil, fmt.Errorf("permission middleware: state %q received resume data %q, want %q", state, resumeData, expected)
+				}
+
+				output, err := next(ctx, input)
+				if err != nil {
+					return nil, err
+				}
+				output.Result = schema.StreamReaderWithConvert(
+					output.Result,
+					func(chunk string) (string, error) {
+						return chunk, nil
+					},
+					schema.WithErrWrapper(func(streamErr error) error {
+						if errors.Is(streamErr, errAgenticSandboxEscapeRequired) {
+							return tool.StatefulInterrupt(ctx, "second approval", "awaiting_second_approval")
+						}
+						return streamErr
+					}),
+				)
+				return output, nil
+			}
+		},
+	}
+}
+
 type agenticArgCaptureTool struct {
 	name     string
 	onInvoke func(args string) string
@@ -617,6 +697,220 @@ func TestAgenticReact_DoubleInterruptResume(t *testing.T) {
 	require.NotNil(t, last.Output)
 	require.NotNil(t, last.Output.MessageOutput)
 	assert.Contains(t, agenticTextContent(last.Output.MessageOutput.Message), "all approved")
+}
+
+func TestAgenticReact_LateStreamInterruptResume(t *testing.T) {
+	for _, useTurnLoop := range []bool{false, true} {
+		for _, enableStreaming := range []bool{false, true} {
+			name := fmt.Sprintf("turn_loop_%t/streaming_%t", useTurnLoop, enableStreaming)
+			t.Run(name, func(t *testing.T) {
+				if useTurnLoop {
+					testAgenticLateStreamInterruptWithTurnLoop(t, enableStreaming)
+					return
+				}
+				testAgenticLateStreamInterruptWithRunner(t, enableStreaming)
+			})
+		}
+	}
+}
+
+func newAgenticLateStreamInterruptFixture(t *testing.T) (TypedAgent[*schema.AgenticMessage], *agenticLateErrorTool, *int32) {
+	t.Helper()
+	ctx := context.Background()
+
+	var modelCallCount int32
+	mdl := &mockAgenticModel{
+		generateFn: func(ctx context.Context, input []*schema.AgenticMessage, opts ...model.Option) (*schema.AgenticMessage, error) {
+			switch atomic.AddInt32(&modelCallCount, 1) {
+			case 1:
+				return agenticToolCallMsg("approval_tool", "c1", `"run"`), nil
+			case 2:
+				return agenticMsg("operation completed"), nil
+			default:
+				return nil, errors.New("model called more than twice")
+			}
+		},
+	}
+
+	lateErrorTool := &agenticLateErrorTool{name: "approval_tool"}
+	agent, err := NewTypedChatModelAgent(ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
+		Name:        t.Name(),
+		Description: "late stream interrupt test agent",
+		Model:       mdl,
+		ToolsConfig: ToolsConfig{
+			ToolsNodeConfig: compose.ToolsNodeConfig{
+				Tools:               []tool.BaseTool{lateErrorTool},
+				ToolCallMiddlewares: []compose.ToolMiddleware{agenticLateInterruptMiddleware()},
+			},
+		},
+	})
+	require.NoError(t, err)
+	return agent, lateErrorTool, &modelCallCount
+}
+
+func testAgenticLateStreamInterruptWithRunner(t *testing.T, enableStreaming bool) {
+	t.Helper()
+	ctx := context.Background()
+	agent, lateErrorTool, modelCallCount := newAgenticLateStreamInterruptFixture(t)
+	store := &agenticReactTestStore{m: map[string][]byte{}}
+	runner := NewTypedRunner(TypedRunnerConfig[*schema.AgenticMessage]{
+		Agent:           agent,
+		CheckPointStore: store,
+		EnableStreaming: enableStreaming,
+	})
+
+	checkpointID := "late-stream-runner"
+	events1 := drainAgenticEvents(runner.Query(ctx, "run once", WithCheckPointID(checkpointID)))
+	require.NoError(t, firstAgenticEventError(events1))
+	int1Event := findInterruptEvent(events1)
+	require.NotNil(t, int1Event, "expected first interrupt")
+	int1ID := int1Event.Action.Interrupted.InterruptContexts[0].ID
+
+	iter2, err := runner.ResumeWithParams(ctx, checkpointID, &ResumeParams{
+		Targets: map[string]any{int1ID: "approved_1"},
+	})
+	require.NoError(t, err)
+	events2 := drainAgenticEvents(iter2)
+	require.NoError(t, firstAgenticEventError(events2))
+	int2Event := findInterruptEvent(events2)
+	require.NotNil(t, int2Event, "expected second interrupt")
+	int2ID := int2Event.Action.Interrupted.InterruptContexts[0].ID
+
+	iter3, err := runner.ResumeWithParams(ctx, checkpointID, &ResumeParams{
+		Targets: map[string]any{int2ID: "approved_2"},
+	})
+	require.NoError(t, err)
+	events3 := drainAgenticEvents(iter3)
+	require.NoError(t, firstAgenticEventError(events3))
+	last := lastAgenticEvent(events3)
+	require.NotNil(t, last)
+	require.NotNil(t, last.Output)
+	require.NotNil(t, last.Output.MessageOutput)
+	finalMessage, err := last.Output.MessageOutput.GetMessage()
+	require.NoError(t, err)
+	assert.Equal(t, "operation completed", agenticTextContent(finalMessage))
+	assert.Equal(t, int32(1), atomic.LoadInt32(&lateErrorTool.sideEffectCount))
+	assert.Equal(t, int32(2), atomic.LoadInt32(modelCallCount))
+}
+
+func testAgenticLateStreamInterruptWithTurnLoop(t *testing.T, enableStreaming bool) {
+	t.Helper()
+	ctx := context.Background()
+	agent, lateErrorTool, modelCallCount := newAgenticLateStreamInterruptFixture(t)
+	store := newTestStore()
+	checkpointID := "late-stream-turn-loop"
+
+	loop1 := NewTurnLoop(TurnLoopConfig[string, *schema.AgenticMessage]{
+		Store:        store,
+		CheckpointID: checkpointID,
+		GenInput: func(_ context.Context, _ *TurnLoop[string, *schema.AgenticMessage], items []string) (*GenInputResult[string, *schema.AgenticMessage], error) {
+			return &GenInputResult[string, *schema.AgenticMessage]{
+				Input: &TypedAgentInput[*schema.AgenticMessage]{
+					Messages:        []*schema.AgenticMessage{schema.UserAgenticMessage(items[0])},
+					EnableStreaming: enableStreaming,
+				},
+				Consumed: items,
+			}, nil
+		},
+		PrepareAgent: func(_ context.Context, _ *TurnLoop[string, *schema.AgenticMessage], _ []string) (TypedAgent[*schema.AgenticMessage], error) {
+			return agent, nil
+		},
+	})
+	ok, _ := loop1.Push("run once")
+	require.True(t, ok)
+	loop1.Run(ctx)
+	firstID := requireTurnLoopInterruptID(t, loop1.Wait())
+
+	loop2 := newAgenticResumeTurnLoop(t, store, checkpointID, agent, firstID, "approved_1", nil)
+	loop2.Run(ctx)
+	secondID := requireTurnLoopInterruptID(t, loop2.Wait())
+
+	var finalEvents []*agenticAgentEvent
+	loop3 := newAgenticResumeTurnLoop(t, store, checkpointID, agent, secondID, "approved_2",
+		func(_ context.Context, tc *TurnContext[string, *schema.AgenticMessage], events *AsyncIterator[*agenticAgentEvent]) error {
+			finalEvents = drainAgenticEvents(events)
+			tc.Loop.Stop()
+			return firstAgenticEventError(finalEvents)
+		})
+	loop3.Run(ctx)
+	exit3 := loop3.Wait()
+	require.NoError(t, exit3.ExitReason)
+	require.NoError(t, exit3.CheckpointErr)
+
+	last := lastAgenticEvent(finalEvents)
+	require.NotNil(t, last)
+	require.NotNil(t, last.Output)
+	require.NotNil(t, last.Output.MessageOutput)
+	finalMessage, err := last.Output.MessageOutput.GetMessage()
+	require.NoError(t, err)
+	assert.Equal(t, "operation completed", agenticTextContent(finalMessage))
+	assert.Equal(t, int32(1), atomic.LoadInt32(&lateErrorTool.sideEffectCount))
+	assert.Equal(t, int32(2), atomic.LoadInt32(modelCallCount))
+}
+
+func newAgenticResumeTurnLoop(
+	t *testing.T,
+	store CheckPointStore,
+	checkpointID string,
+	agent TypedAgent[*schema.AgenticMessage],
+	interruptID string,
+	resumeData string,
+	onEvents func(context.Context, *TurnContext[string, *schema.AgenticMessage], *AsyncIterator[*agenticAgentEvent]) error,
+) *TurnLoop[string, *schema.AgenticMessage] {
+	t.Helper()
+	loop := NewTurnLoop(TurnLoopConfig[string, *schema.AgenticMessage]{
+		Store:        store,
+		CheckpointID: checkpointID,
+		GenInput: func(_ context.Context, _ *TurnLoop[string, *schema.AgenticMessage], items []string) (*GenInputResult[string, *schema.AgenticMessage], error) {
+			return &GenInputResult[string, *schema.AgenticMessage]{
+				Input:    &TypedAgentInput[*schema.AgenticMessage]{},
+				Consumed: items,
+			}, nil
+		},
+		GenResume: func(_ context.Context, _ *TurnLoop[string, *schema.AgenticMessage], interrupted, unhandled, newItems []string) (*GenResumeResult[string, *schema.AgenticMessage], error) {
+			return &GenResumeResult[string, *schema.AgenticMessage]{
+				ResumeParams: &ResumeParams{Targets: map[string]any{interruptID: resumeData}},
+				Consumed:     append(append([]string{}, interrupted...), newItems...),
+				Remaining:    unhandled,
+			}, nil
+		},
+		PrepareAgent: func(_ context.Context, _ *TurnLoop[string, *schema.AgenticMessage], _ []string) (TypedAgent[*schema.AgenticMessage], error) {
+			return agent, nil
+		},
+		OnAgentEvents: onEvents,
+	})
+	ok, _ := loop.Push(resumeData)
+	require.True(t, ok)
+	return loop
+}
+
+func requireTurnLoopInterruptID(t *testing.T, exit *TurnLoopExitState[string, *schema.AgenticMessage]) string {
+	t.Helper()
+	require.NoError(t, exit.CheckpointErr)
+	var interruptErr *InterruptError
+	require.ErrorAs(t, exit.ExitReason, &interruptErr)
+	require.Len(t, interruptErr.InterruptContexts, 1)
+	return interruptErr.InterruptContexts[0].ID
+}
+
+func TestAgenticReact_NilInitInputReturnsError(t *testing.T) {
+	ctx := context.Background()
+	mdl := &mockAgenticModel{
+		generateFn: func(_ context.Context, _ []*schema.AgenticMessage, _ ...model.Option) (*schema.AgenticMessage, error) {
+			return agenticMsg("unexpected"), nil
+		},
+	}
+
+	graph, err := newAgenticReact(ctx, &agenticReactConfig{
+		model:       mdl,
+		toolsConfig: &compose.ToolsNodeConfig{},
+	})
+	require.NoError(t, err)
+	runnable, err := graph.Compile(ctx)
+	require.NoError(t, err)
+
+	_, err = runnable.Invoke(ctx, nil)
+	require.ErrorContains(t, err, "agentic react: init input is nil")
 }
 
 func TestAgenticReact_ResumeThenCancelAfterChatModelCheckpoint(t *testing.T) {

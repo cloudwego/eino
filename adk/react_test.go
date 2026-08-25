@@ -98,6 +98,23 @@ func (w *testModelWrapper) WithTools(tools []*schema.ToolInfo) (model.ToolCallin
 
 // TestReact tests the newReact function with different scenarios
 func TestReact(t *testing.T) {
+	t.Run("NilInput", func(t *testing.T) {
+		ctx := context.Background()
+		ctrl := gomock.NewController(t)
+		cm := mockModel.NewMockToolCallingChatModel(ctrl)
+
+		graph, err := newReact(ctx, &reactConfig{
+			model:       cm,
+			toolsConfig: &compose.ToolsNodeConfig{},
+		})
+		require.NoError(t, err)
+		compiled, err := graph.Compile(ctx)
+		require.NoError(t, err)
+
+		_, err = compiled.Invoke(ctx, nil)
+		require.ErrorContains(t, err, "react: init input is nil")
+	})
+
 	// Basic test for newReact function
 	t.Run("Invoke", func(t *testing.T) {
 		ctx := context.Background()

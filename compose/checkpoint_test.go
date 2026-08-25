@@ -21,16 +21,20 @@ import (
 	"context"
 	"encoding/gob"
 	"errors"
+	"fmt"
 	"io"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/bytedance/sonic"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/internal/callbacks"
+	"github.com/cloudwego/eino/internal/core"
 	"github.com/cloudwego/eino/internal/generic"
 	"github.com/cloudwego/eino/internal/serialization"
 	"github.com/cloudwego/eino/schema"
@@ -1941,6 +1945,291 @@ func TestPersistRerunInputSubGraph(t *testing.T) {
 	assert.Equal(t, "test_main", receivedInput)
 	assert.Equal(t, 2, callCount)
 	mu.Unlock()
+}
+
+func TestStreamingSubGraphReinterruptPreservesNestedCheckpoint(t *testing.T) {
+	ctx := context.Background()
+	store := newInMemoryStore()
+	var sideEffectCount int32
+
+	interruptingNode := StreamableLambda(func(ctx context.Context, input string) (*schema.StreamReader[string], error) {
+		wasInterrupted, hasState, state := GetInterruptState[string](ctx)
+		if !wasInterrupted {
+			return nil, StatefulInterrupt(ctx, "first approval", "awaiting_first_approval")
+		}
+		if !hasState {
+			return nil, errors.New("missing interrupt state")
+		}
+
+		switch state {
+		case "awaiting_first_approval":
+			r, w := schema.Pipe[string](1)
+			go func() {
+				defer w.Close()
+				w.Send("", StatefulInterrupt(ctx, "second approval", "awaiting_second_approval"))
+			}()
+			return r, nil
+		case "awaiting_second_approval":
+			atomic.AddInt32(&sideEffectCount, 1)
+			return schema.StreamReaderFromArray([]string{"done"}), nil
+		default:
+			return nil, fmt.Errorf("unexpected interrupt state %q", state)
+		}
+	})
+
+	inner := NewGraph[string, string]()
+	require.NoError(t, inner.AddLambdaNode("ToolNode", interruptingNode))
+	require.NoError(t, inner.AddLambdaNode("ConsumeToolOutput", CollectableLambda(
+		func(_ context.Context, input *schema.StreamReader[string]) (string, error) {
+			return concatStreamReader(input)
+		},
+	)))
+	require.NoError(t, inner.AddEdge(START, "ToolNode"))
+	require.NoError(t, inner.AddEdge("ToolNode", "ConsumeToolOutput"))
+	require.NoError(t, inner.AddEdge("ConsumeToolOutput", END))
+
+	outer := NewGraph[string, string]()
+	require.NoError(t, outer.AddGraphNode("node_1", inner))
+	require.NoError(t, outer.AddEdge(START, "node_1"))
+	require.NoError(t, outer.AddEdge("node_1", END))
+
+	runnable, err := outer.Compile(ctx, WithCheckPointStore(store))
+	require.NoError(t, err)
+
+	_, err = runnable.Stream(ctx, "input", WithCheckPointID("stream-reinterrupt"))
+	info, ok := ExtractInterruptInfo(err)
+	require.True(t, ok)
+	require.Contains(t, info.SubGraphs, "node_1")
+	firstID := info.InterruptContexts[0].ID
+
+	resumeCtx := ResumeWithData(ctx, firstID, "approved_1")
+	_, err = runnable.Stream(resumeCtx, "", WithCheckPointID("stream-reinterrupt"))
+	info, ok = ExtractInterruptInfo(err)
+	require.True(t, ok)
+	require.Contains(t, info.SubGraphs, "node_1")
+	assert.NotContains(t, info.RerunNodes, "node_1")
+	assert.Contains(t, info.SubGraphs["node_1"].RerunNodes, "ToolNode")
+	secondID := info.InterruptContexts[0].ID
+
+	resumeCtx = ResumeWithData(ctx, secondID, "approved_2")
+	output, err := runnable.Stream(resumeCtx, "", WithCheckPointID("stream-reinterrupt"))
+	require.NoError(t, err)
+	result, err := concatStreamReader(output)
+	require.NoError(t, err)
+	assert.Equal(t, "done", result)
+	assert.Equal(t, int32(1), atomic.LoadInt32(&sideEffectCount))
+}
+
+func TestCheckpointStreamConversionIgnoresOnlyRecordedInterrupt(t *testing.T) {
+	ctx := context.Background()
+	recordedErr := StatefulInterrupt(ctx, "recorded", "state")
+	recordedSignal := &core.InterruptSignal{}
+	require.ErrorAs(t, recordedErr, &recordedSignal)
+	id2Addr, id2State := core.SignalToPersistenceMaps(recordedSignal)
+
+	newCheckpoint := func(streamErr error) (*checkpoint, *checkPointer) {
+		r, w := schema.Pipe[string](2)
+		w.Send("partial", nil)
+		w.Send("", streamErr)
+		w.Close()
+		return &checkpoint{
+				Inputs:            map[string]any{"node": packStreamReader(r)},
+				InterruptID2Addr:  id2Addr,
+				InterruptID2State: id2State,
+			}, newCheckPointer(map[string]streamConvertPair{
+				"node": defaultStreamConvertPair[string](),
+			}, nil, nil, nil)
+	}
+
+	cp, pointer := newCheckpoint(recordedErr)
+	require.NoError(t, pointer.convertCheckPoint(cp, true))
+	assert.Equal(t, "partial", cp.Inputs["node"])
+
+	cp, pointer = newCheckpoint(&subGraphInterruptError{signal: recordedSignal})
+	require.NoError(t, pointer.convertCheckPoint(cp, true))
+	assert.Equal(t, "partial", cp.Inputs["node"])
+
+	cp, pointer = newCheckpoint(errors.New("ordinary stream failure"))
+	err := pointer.convertCheckPoint(cp, true)
+	require.ErrorContains(t, err, "ordinary stream failure")
+}
+
+func TestAttack_CheckpointStreamConversionRejectsUnrecordedInterrupt(t *testing.T) {
+	ctx := context.Background()
+	recordedErr := StatefulInterrupt(ctx, "recorded", "recorded-state")
+	recordedSignal := &core.InterruptSignal{}
+	require.ErrorAs(t, recordedErr, &recordedSignal)
+	id2Addr, id2State := core.SignalToPersistenceMaps(recordedSignal)
+
+	unrecordedErr := StatefulInterrupt(ctx, "unrecorded", "unrecorded-state")
+	r, w := schema.Pipe[string](1)
+	w.Send("", unrecordedErr)
+	w.Close()
+	cp := &checkpoint{
+		Inputs:            map[string]any{"node": packStreamReader(r)},
+		InterruptID2Addr:  id2Addr,
+		InterruptID2State: id2State,
+	}
+	pointer := newCheckPointer(map[string]streamConvertPair{
+		"node": defaultStreamConvertPair[string](),
+	}, nil, nil, nil)
+
+	err := pointer.convertCheckPoint(cp, true)
+	require.Error(t, err)
+	_, isInterrupt := IsInterruptRerunError(err)
+	assert.True(t, isInterrupt)
+}
+
+func TestAttack_InterruptOriginUsesCurrentGraphBoundary(t *testing.T) {
+	ctx := AppendAddressSegment(context.Background(), AddressSegmentRunnable, "root")
+	taskCtx := AppendAddressSegment(ctx, AddressSegmentNode, "node_1")
+	r := &runner{chanSubscribeTo: map[string]*chanCall{
+		"node_1":   {},
+		"ToolNode": {},
+	}}
+	completedTask := &task{ctx: taskCtx, nodeKey: "node_1"}
+
+	t.Run("selects node at current graph boundary", func(t *testing.T) {
+		interruptAddress := Address{
+			{Type: AddressSegmentRunnable, ID: "root"},
+			{Type: AddressSegmentNode, ID: "node_1"},
+			{Type: AddressSegmentNode, ID: "ToolNode"},
+			{Type: AddressSegmentMiddleware, ID: "permission"},
+		}
+		assert.Equal(t, "node_1", r.interruptOriginNodeKey(completedTask, interruptAddress))
+	})
+
+	t.Run("falls back when address belongs to another graph", func(t *testing.T) {
+		interruptAddress := Address{
+			{Type: AddressSegmentRunnable, ID: "other"},
+			{Type: AddressSegmentNode, ID: "ToolNode"},
+		}
+		assert.Equal(t, "node_1", r.interruptOriginNodeKey(completedTask, interruptAddress))
+	})
+
+	t.Run("falls back when task has no execution address", func(t *testing.T) {
+		assert.Equal(t, "node_1", r.interruptOriginNodeKey(&task{
+			ctx:     context.Background(),
+			nodeKey: "node_1",
+		}, nil))
+	})
+
+	t.Run("falls back when addressed node is not in current graph", func(t *testing.T) {
+		interruptAddress := Address{
+			{Type: AddressSegmentRunnable, ID: "root"},
+			{Type: AddressSegmentNode, ID: "missing"},
+		}
+		assert.Equal(t, "node_1", r.interruptOriginNodeKey(completedTask, interruptAddress))
+	})
+}
+
+func TestAttack_FanOutLateInterruptIsDeduplicated(t *testing.T) {
+	ctx := context.Background()
+	producer := StreamableLambda(func(ctx context.Context, _ string) (*schema.StreamReader[string], error) {
+		interruptErr := StatefulInterrupt(ctx, "approval", "state")
+		r, w := schema.Pipe[string](1)
+		w.Send("", interruptErr)
+		w.Close()
+		return r, nil
+	})
+	consumer := func(_ context.Context, input *schema.StreamReader[string]) (string, error) {
+		return concatStreamReader(input)
+	}
+
+	graph := NewGraph[string, string]()
+	require.NoError(t, graph.AddLambdaNode("ToolNode", producer))
+	require.NoError(t, graph.AddLambdaNode("consumer_a", CollectableLambda(consumer)))
+	require.NoError(t, graph.AddLambdaNode("consumer_b", CollectableLambda(consumer)))
+	require.NoError(t, graph.AddEdge(START, "ToolNode"))
+	require.NoError(t, graph.AddEdge("ToolNode", "consumer_a"))
+	require.NoError(t, graph.AddEdge("ToolNode", "consumer_b"))
+	require.NoError(t, graph.AddEdge("consumer_a", END))
+	require.NoError(t, graph.AddEdge("consumer_b", END))
+
+	runnable, err := graph.Compile(ctx, WithCheckPointStore(newInMemoryStore()))
+	require.NoError(t, err)
+	_, err = runnable.Stream(ctx, "input", WithCheckPointID("fan-out-interrupt"))
+	info, ok := ExtractInterruptInfo(err)
+	require.True(t, ok)
+	assert.Equal(t, []string{"ToolNode"}, info.RerunNodes)
+	require.Len(t, info.InterruptContexts, 1)
+}
+
+func TestAttack_EmptyIDInterruptSignalsRemainDistinct(t *testing.T) {
+	first := &core.InterruptSignal{}
+	second := &core.InterruptSignal{}
+	tempInfo := newInterruptTempInfo()
+
+	tempInfo.appendSignal(first)
+	tempInfo.appendSignal(second)
+	tempInfo.appendSignal(first)
+
+	assert.Equal(t, []*core.InterruptSignal{first, second}, tempInfo.signals)
+}
+
+func TestRestoreRejectsInputlessSubGraphRerunCheckpoint(t *testing.T) {
+	ctx := context.Background()
+	store := newInMemoryStore()
+	var childExecuted bool
+
+	child := NewGraph[string, string]()
+	require.NoError(t, child.AddLambdaNode("child", InvokableLambda(func(_ context.Context, input string) (string, error) {
+		childExecuted = true
+		return input, nil
+	})))
+	require.NoError(t, child.AddEdge(START, "child"))
+	require.NoError(t, child.AddEdge("child", END))
+
+	parent := NewGraph[string, string]()
+	require.NoError(t, parent.AddGraphNode("nested", child))
+	require.NoError(t, parent.AddEdge(START, "nested"))
+	require.NoError(t, parent.AddEdge("nested", END))
+
+	runnable, err := parent.Compile(ctx, WithCheckPointStore(store))
+	require.NoError(t, err)
+
+	data, err := (&serialization.InternalSerializer{}).Marshal(&checkpoint{
+		Inputs:     map[string]any{},
+		RerunNodes: []string{"nested"},
+		SubGraphs:  map[string]*checkpoint{},
+	})
+	require.NoError(t, err)
+	require.NoError(t, store.Set(ctx, "malformed", data))
+
+	_, err = runnable.Invoke(ctx, "", WithCheckPointID("malformed"))
+	require.ErrorContains(t, err, `invalid checkpoint: subgraph node "nested" is marked for rerun without a nested checkpoint or persisted input`)
+	assert.False(t, childExecuted)
+
+	nestedStore := newInMemoryStore()
+	middle := NewGraph[string, string]()
+	require.NoError(t, middle.AddGraphNode("nested", child))
+	require.NoError(t, middle.AddEdge(START, "nested"))
+	require.NoError(t, middle.AddEdge("nested", END))
+
+	root := NewGraph[string, string]()
+	require.NoError(t, root.AddGraphNode("middle", middle))
+	require.NoError(t, root.AddEdge(START, "middle"))
+	require.NoError(t, root.AddEdge("middle", END))
+
+	nestedRunnable, err := root.Compile(ctx, WithCheckPointStore(nestedStore))
+	require.NoError(t, err)
+	data, err = (&serialization.InternalSerializer{}).Marshal(&checkpoint{
+		Inputs:     map[string]any{},
+		RerunNodes: []string{"middle"},
+		SubGraphs: map[string]*checkpoint{
+			"middle": {
+				Inputs:     map[string]any{},
+				RerunNodes: []string{"nested"},
+				SubGraphs:  map[string]*checkpoint{},
+			},
+		},
+	})
+	require.NoError(t, err)
+	require.NoError(t, nestedStore.Set(ctx, "nested-malformed", data))
+
+	_, err = nestedRunnable.Invoke(ctx, "", WithCheckPointID("nested-malformed"))
+	require.ErrorContains(t, err, `invalid checkpoint: subgraph node "nested" is marked for rerun without a nested checkpoint or persisted input`)
+	assert.False(t, childExecuted)
 }
 
 type longRunningToolInput struct {
