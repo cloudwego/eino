@@ -707,7 +707,7 @@ func newRecoverableExecuteTool(
 				},
 				"timeout": {
 					Type: schema.Integer,
-					Desc: "Optional foreground timeout in seconds, up to 600; ignored when run_in_background is true",
+					Desc: "Optional foreground timeout in seconds, up to 3 days; ignored when run_in_background is true",
 				},
 			}),
 		},
@@ -1241,10 +1241,10 @@ type executeManagedArgs struct {
 	// default applies. Ignored when run_in_background is true. What happens at the
 	// deadline (move to background vs. stop) is decided by the Manager's
 	// ShouldAutoBackground policy and is intentionally not surfaced to the model.
-	TimeoutSeconds int `json:"timeout,omitempty" jsonschema_description:"Optional foreground wait in seconds, up to 600. Ignored when run_in_background is true. At expiry, host policy either detaches the command or stops it. Omit to use the configured default."`
+	TimeoutSeconds int `json:"timeout,omitempty" jsonschema_description:"Optional foreground wait in seconds, up to 3 days. Ignored when run_in_background is true. At expiry, host policy either detaches the command or stops it. Omit to use the configured default."`
 }
 
-const maxToolArgumentTimeoutSeconds = 600
+const maxToolArgumentTimeoutSeconds = 3 * 24 * 60 * 60
 
 func foregroundTimeoutMsForToolArgument(seconds int) *int {
 	if seconds <= 0 {

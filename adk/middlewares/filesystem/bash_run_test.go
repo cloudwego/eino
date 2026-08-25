@@ -508,8 +508,8 @@ func TestForegroundTimeoutMsForToolArgument(t *testing.T) {
 	}{
 		{name: "omitted", seconds: 0},
 		{name: "one second", seconds: 1, want: 1000},
-		{name: "maximum", seconds: 600, want: 600000},
-		{name: "clamped", seconds: 601, want: 600000},
+		{name: "maximum", seconds: 3 * 24 * 60 * 60, want: 3 * 24 * 60 * 60 * 1000},
+		{name: "clamped", seconds: 3*24*60*60 + 1, want: 3 * 24 * 60 * 60 * 1000},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
