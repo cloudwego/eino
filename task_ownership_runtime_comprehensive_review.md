@@ -359,10 +359,36 @@ D foreground_background_notification_comprehensive_review.md
   修复的确认性复审尚未执行。
 - **不得据此勾选 Task 2，也不得宣称 Stage 1 完成。**
 
-## Stage 2: Attack Review（待本轮执行）
+## Stage 2: Attack Review
 
-本轮 Stage 1 尚未结束，因此尚未进入 Task 3。既有历史 attack 结论不作为本轮
-证据；最终 Stage 1 re-review 后从完整 `origin/alpha/10...HEAD` diff 重新执行。
+Stage 1 final approval 后，针对 Task ownership、publication、mailbox、
+stream persistence、Sub-agent recovery/continuation 和 Deep wiring 新增
+26 个攻击测试；仓库内 `TestAttack_` 总数为 167。新增测试分布在：
+
+- `adk/middlewares/subagent/stage2_attack_test.go`
+- `adk/prebuilt/deep/stage2_attack_test.go`
+- `adk/task/background/stage2_partition_a_attack_test.go`
+- `adk/task/local/stage2_attack_test.go`
+- `adk/task/subagent/stage2_attack_test.go`
+
+### Test hardening findings
+
+| ID | Finding | Verdict | 处置 |
+|---|---|---|---|
+| W1 | Deep 配置测试名声称 hooks 已到达 durable runtime，但测试实际只验证 `deepSubagentBackground` 的配置映射。 | **Fix** | 更名为 `TestAttack_DeepMapsDurableSubAgentConfiguration`，注释同步限定为配置映射与 identity preservation。 |
+| W2 | `TestAttack_StreamTimeoutStartsAfterReady` 使用 real-time timing，存在慢机抖动风险。 | **Won't Fix** | 当前 runtime 没有可注入 fake clock；测试用 1 秒 coordination bound，并让 constructor latency 达到 foreground timeout 的 2 倍，判定窗口足够宽。该用例在 `-race -count=20` 下稳定通过。 |
+| W3 | Sub-agent stream persistence failure 测试只扫描并排除 assistant message；若没有任何 message event，会 vacuous pass。 | **Fix** | `LoadEvents` 限定 `SessionEventMessage`，扫描前断言恰好一个 user message，且内容为 `"stream"`。 |
+| W4 | 5 个新增 Stage 2 attack 文件未统一执行格式化，background 文件存在两处复合字面量对齐差异。 | **Fix** | 对全部 5 个文件执行 `gofmt` 并以 `gofmt -d` 确认无剩余差异。 |
+
+### Stage 2 verification
+
+- 两个受影响 focused tests 通过；对应 package 的 `-race` focused tests 通过。
+- 5 个 Stage 2 package 的全部 `TestAttack_` 通过。
+- `TestAttack_StreamTimeoutStartsAfterReady` 在 `-race -count=20` 下通过。
+- 全仓 broad `go test ./... -run '^TestAttack_'` 按要求中止，不作为本轮通过结论。
+- `gofmt -d` 与 `git diff --check` 通过。
+
+**Stage 2 attack-test hardening verdict: APPROVE.**
 
 ## Stage 3: Test Audit（待本轮执行）
 
@@ -447,3 +473,21 @@ design findings 均已 Fix 或有明确的 Won't Fix 理由，没有剩余 block
 - 文档旧符号检查无陈旧现行 API 命中，`git diff --check` 通过。
 
 Task 2 已完成；后续工作从 Stage 2 attack review 开始。
+
+## Stage 2 Final Approval
+
+Stage 2 最终确认性复审覆盖 Task ownership、publication、mailbox、stream
+persistence、Sub-agent recovery/continuation 与 Deep wiring。新增 26 个
+`TestAttack_`，仓库内共 167 个；5 个涉及 package 的全部 attack tests 及
+对应 race 验证均通过。所有 finding 已完成 Validate、Counter-argue 和
+Fix/Won't Fix 分类，未发现修复引入的新路径问题。
+
+**Stage 2 final verdict: APPROVE.**
+
+- New attack tests: 26
+- Total attack tests: 167
+- Race verification: PASS
+- Remaining findings: 0
+- Red tests: 0
+
+Task 3 已完成；后续工作从 Stage 3 test audit 开始。
