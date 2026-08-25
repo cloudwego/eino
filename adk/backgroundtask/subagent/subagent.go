@@ -485,7 +485,7 @@ func (e *Executor[M]) Execute(
 			interrupted = event.Action.Interrupted
 		}
 		if event.Err != nil && interrupted == nil {
-			return e.handleEventError(ctx, iter, task, controlRequests, event.Err)
+			return e.handleRunError(ctx, iter, task, controlRequests, event.Err)
 		}
 		materialized := event
 		if event.Output != nil && event.Output.MessageOutput != nil {
@@ -495,7 +495,7 @@ func (e *Executor[M]) Execute(
 				if errors.As(messageErr, &retryErr) {
 					continue
 				}
-				return nil, messageErr
+				return e.handleRunError(ctx, iter, task, controlRequests, messageErr)
 			}
 			materialized = materializedEvent(event, message)
 			final = agenttool.ExtractTextContent(message)
@@ -604,7 +604,9 @@ func decodeResumeTargets(data []byte) (map[string]any, error) {
 	return targets, nil
 }
 
-func (e *Executor[M]) handleEventError(
+// handleRunError translates agent event and output materialization errors into
+// durable task lifecycle outcomes when a control request is active.
+func (e *Executor[M]) handleRunError(
 	ctx context.Context,
 	iter *adk.AsyncIterator[*adk.TypedAgentEvent[M]],
 	task *backgroundtask.Task,
@@ -613,7 +615,10 @@ func (e *Executor[M]) handleEventError(
 ) (*backgroundtask.ExecutionResult, error) {
 	control := pollControl(controlRequests)
 	var cancelError *adk.CancelError
-	if control.Kind == "" && (errors.Is(err, context.Canceled) || errors.As(err, &cancelError)) {
+	if control.Kind == "" &&
+		(errors.Is(err, context.Canceled) ||
+			errors.As(err, &cancelError) ||
+			errors.Is(err, adk.ErrStreamCanceled)) {
 		control = waitForControl(ctx, controlRequests)
 	}
 	if control.Kind != "" {
