@@ -91,6 +91,45 @@ type drainTimeoutModel struct {
 	calls   int32
 }
 
+type drainTimeoutStreamingModel struct {
+	started chan struct{}
+	release chan struct{}
+	calls   int32
+}
+
+func (m *drainTimeoutStreamingModel) Generate(
+	_ context.Context,
+	_ []*schema.Message,
+	_ ...model.Option,
+) (*schema.Message, error) {
+	if atomic.AddInt32(&m.calls, 1) == 1 {
+		return schema.AssistantMessage("unreachable", nil), nil
+	}
+	return schema.AssistantMessage("resumed", nil), nil
+}
+
+func (m *drainTimeoutStreamingModel) Stream(
+	ctx context.Context,
+	input []*schema.Message,
+	options ...model.Option,
+) (*schema.StreamReader[*schema.Message], error) {
+	if atomic.LoadInt32(&m.calls) > 0 {
+		message, err := m.Generate(ctx, input, options...)
+		if err != nil {
+			return nil, err
+		}
+		return schema.StreamReaderFromArray([]*schema.Message{message}), nil
+	}
+	atomic.AddInt32(&m.calls, 1)
+	reader, writer := schema.Pipe[*schema.Message](1)
+	close(m.started)
+	go func() {
+		<-m.release
+		writer.Close()
+	}()
+	return reader, nil
+}
+
 func (m *drainTimeoutModel) Generate(
 	ctx context.Context,
 	_ []*schema.Message,
@@ -845,7 +884,7 @@ func TestResumeControlHelpers(t *testing.T) {
 	require.Nil(t, result)
 }
 
-func TestHandleEventErrorControlOutcomes(t *testing.T) {
+func TestHandleRunErrorControlOutcomes(t *testing.T) {
 	executor := newTestExecutor(t, nil)
 	task := &backgroundtask.Task{Spec: backgroundtask.Spec{ID: "task"}}
 
@@ -853,7 +892,7 @@ func TestHandleEventErrorControlOutcomes(t *testing.T) {
 		iter, generator := adk.NewAsyncIteratorPair[*adk.AgentEvent]()
 		generator.Close()
 		wantErr := errors.New("model failed")
-		result, err := executor.handleEventError(
+		result, err := executor.handleRunError(
 			context.Background(), iter, task,
 			make(chan backgroundtask.ControlRequest), wantErr,
 		)
@@ -864,7 +903,7 @@ func TestHandleEventErrorControlOutcomes(t *testing.T) {
 	t.Run("busy child session yields", func(t *testing.T) {
 		iter, generator := adk.NewAsyncIteratorPair[*adk.AgentEvent]()
 		generator.Close()
-		result, err := executor.handleEventError(
+		result, err := executor.handleRunError(
 			context.Background(),
 			iter,
 			task,
@@ -884,7 +923,7 @@ func TestHandleEventErrorControlOutcomes(t *testing.T) {
 		generator.Close()
 		controls := make(chan backgroundtask.ControlRequest, 1)
 		controls <- backgroundtask.ControlRequest{Kind: backgroundtask.ControlStop}
-		result, err := executor.handleEventError(
+		result, err := executor.handleRunError(
 			context.Background(), iter, task, controls, context.Canceled,
 		)
 		require.NoError(t, err)
@@ -898,13 +937,52 @@ func TestHandleEventErrorControlOutcomes(t *testing.T) {
 		controls <- backgroundtask.ControlRequest{
 			Kind: backgroundtask.ControlTimeout, Reason: "deadline",
 		}
-		result, err := executor.handleEventError(
+		result, err := executor.handleRunError(
 			context.Background(), iter, task, controls, context.Canceled,
 		)
 		require.NoError(t, err)
 		require.Equal(t, backgroundtask.StatusFailed, result.Status)
 		require.Equal(t, "deadline", result.Error)
 	})
+}
+
+func TestAttack_StreamCanceledWithoutControlRemainsFailure(t *testing.T) {
+	executor := newTestExecutor(t, nil)
+	task := &backgroundtask.Task{Spec: backgroundtask.Spec{ID: "task"}}
+	iter, generator := adk.NewAsyncIteratorPair[*adk.AgentEvent]()
+	generator.Close()
+
+	result, err := executor.handleRunError(
+		context.Background(), iter, task,
+		make(chan backgroundtask.ControlRequest), adk.ErrStreamCanceled,
+	)
+
+	require.Nil(t, result)
+	require.ErrorIs(t, err, adk.ErrStreamCanceled)
+}
+
+func TestAttack_DrainControlAfterStreamCancellationSuspends(t *testing.T) {
+	store := adksession.NewInMemoryStore[*schema.Message](nil)
+	executor := newTestExecutor(t, store)
+	task := &backgroundtask.Task{Spec: backgroundtask.Spec{ID: "task"}}
+	require.NoError(t, store.Set(
+		context.Background(), checkpointID(task.Spec.ID), []byte("runner checkpoint"),
+	))
+	iter, generator := adk.NewAsyncIteratorPair[*adk.AgentEvent]()
+	generator.Close()
+	controls := make(chan backgroundtask.ControlRequest)
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		controls <- backgroundtask.ControlRequest{Kind: backgroundtask.ControlDrain}
+	}()
+
+	result, err := executor.handleRunError(
+		context.Background(), iter, task, controls, adk.ErrStreamCanceled,
+	)
+
+	require.NoError(t, err)
+	require.Equal(t, backgroundtask.StatusSuspended, result.Status)
+	require.JSONEq(t, `{"sequence":1}`, string(result.Checkpoint))
 }
 
 func TestSubagentPayloadValidation_BitsUT(t *testing.T) {
@@ -1253,6 +1331,22 @@ func TestExecutorDrainTimeoutEscalatesBlockedModelAndResumes_BitsUT(t *testing.T
 	model := &drainTimeoutModel{started: make(chan struct{})}
 	agent, err := adk.NewChatModelAgent(context.Background(), &adk.ChatModelAgentConfig{
 		Name: "worker", Description: "drain timeout test", Model: model,
+	})
+	require.NoError(t, err)
+
+	task, store := executeDrainTimeout(t, agent, model.started)
+	requireDrainCheckpointResumes(t, task, store, agent)
+	require.GreaterOrEqual(t, atomic.LoadInt32(&model.calls), int32(2))
+}
+
+func TestExecutorDrainTimeoutEscalatesBlockedModelStreamAndResumes(t *testing.T) {
+	model := &drainTimeoutStreamingModel{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	defer close(model.release)
+	agent, err := adk.NewChatModelAgent(context.Background(), &adk.ChatModelAgentConfig{
+		Name: "worker", Description: "drain timeout stream test", Model: model,
 	})
 	require.NoError(t, err)
 
