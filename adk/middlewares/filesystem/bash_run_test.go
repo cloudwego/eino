@@ -703,6 +703,7 @@ func TestManagedExecuteTool_Schema(t *testing.T) {
 	timeout, ok := js.Properties.Get("timeout")
 	assert.True(t, ok)
 	assert.Contains(t, timeout.Description, "seconds")
+	assert.Contains(t, timeout.Description, "stops unless the host allows automatic backgrounding")
 }
 
 // Without a Manager, the execute tool is command-only and untracked.

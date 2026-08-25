@@ -107,6 +107,7 @@ func TestRecoverableShellUsesManagedToolLifecycle(t *testing.T) {
 	timeout, ok := js.Properties.Get("timeout")
 	require.True(t, ok)
 	require.Contains(t, timeout.Description, "seconds")
+	require.Contains(t, timeout.Description, "stops unless the host allows automatic backgrounding")
 	result, err := tools[0].(componenttool.EnhancedInvokableTool).InvokableRun(
 		context.Background(), &schema.ToolArgument{Text: `{"command":"echo hello"}`},
 	)
