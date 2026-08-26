@@ -42,12 +42,7 @@ func TestAttack_NestedTaskPreservesDirectParentAndRoot(t *testing.T) {
 	ctx := context.Background()
 	controller, manager, _ := newControllerForTest(
 		t,
-		completionBarrierFunc[*schema.Message](func(
-			context.Context,
-			*CompletionContext[*schema.Message],
-		) (CompletionAction, error) {
-			return CompletionComplete, nil
-		}),
+		completeBarrier[*schema.Message](),
 		testEventMapper,
 	)
 	t.Cleanup(func() { closeIntegrationManager(t, manager) })
@@ -107,12 +102,7 @@ func TestAttack_ConcurrentContinueAppendsEveryInputToSingleTask(t *testing.T) {
 	controller, manager, _ := newControllerWithAgentForTest(
 		t,
 		agent,
-		completionBarrierFunc[*schema.Message](func(
-			context.Context,
-			*CompletionContext[*schema.Message],
-		) (CompletionAction, error) {
-			return CompletionComplete, nil
-		}),
+		completeBarrier[*schema.Message](),
 		testEventMapper,
 	)
 	t.Cleanup(func() { closeIntegrationManager(t, manager) })
@@ -192,12 +182,7 @@ func TestAttack_WaitingInputAndSuspendHaveDistinctReleaseSemantics(t *testing.T)
 		controller, manager, _ := newControllerWithAgentForTest(
 			t,
 			&interruptThenCompleteAgent{name: "worker"},
-			completionBarrierFunc[*schema.Message](func(
-				context.Context,
-				*CompletionContext[*schema.Message],
-			) (CompletionAction, error) {
-				return CompletionComplete, nil
-			}),
+			completeBarrier[*schema.Message](),
 			testEventMapper,
 		)
 		t.Cleanup(func() { closeIntegrationManager(t, manager) })
@@ -215,9 +200,18 @@ func TestAttack_WaitingInputAndSuspendHaveDistinctReleaseSemantics(t *testing.T)
 			return getErr == nil && snapshot.Status == background.StatusWaitingInput
 		}, time.Second, time.Millisecond)
 
+		waiting, err := manager.Get(ctx, handle.ID())
+		require.NoError(t, err)
+		checkpoint, err := decodeRuntimeCheckpoint[*schema.Message](waiting.Checkpoint)
+		require.NoError(t, err)
+		require.Len(t, checkpoint.TargetIDs, 1)
+		resumeData, err := json.Marshal(map[string]any{
+			checkpoint.TargetIDs[0]: "approved",
+		})
+		require.NoError(t, err)
 		require.NoError(t, controller.SendInput(ctx, handle.ID(), &task.Input{
 			EventID: "attack-resume", Kind: ResumeInputKind,
-			Data: []byte(`{"approve":"yes"}`),
+			Data: resumeData,
 		}))
 		result, err := controller.Wait(ctx, handle.ID())
 		require.NoError(t, err)
@@ -324,13 +318,8 @@ func TestAttack_RecoveryCancellationHookIsIdempotent(t *testing.T) {
 
 	manager1 := newIntegrationManager(t, store)
 	controller1, err := NewController(&ControllerConfig[*schema.Message]{
-		Manager: manager1,
-		Barrier: completionBarrierFunc[*schema.Message](func(
-			context.Context,
-			*CompletionContext[*schema.Message],
-		) (CompletionAction, error) {
-			return CompletionComplete, nil
-		}),
+		Manager:            manager1,
+		Barrier:            completeBarrier[*schema.Message](),
 		InputsToAgentInput: testEventMapper,
 		CancellationHook:   hook,
 		SessionStore:       sessionStore,
@@ -399,13 +388,8 @@ func TestAttack_RecoveryCancellationHookIsIdempotent(t *testing.T) {
 	manager2 := newIntegrationManager(t, store)
 	t.Cleanup(func() { closeIntegrationManager(t, manager2) })
 	controller2, err := NewController(&ControllerConfig[*schema.Message]{
-		Manager: manager2,
-		Barrier: completionBarrierFunc[*schema.Message](func(
-			context.Context,
-			*CompletionContext[*schema.Message],
-		) (CompletionAction, error) {
-			return CompletionComplete, nil
-		}),
+		Manager:            manager2,
+		Barrier:            completeBarrier[*schema.Message](),
 		InputsToAgentInput: testEventMapper,
 		CancellationHook:   hook,
 		SessionStore:       sessionStore,
@@ -440,13 +424,8 @@ func TestAttack_ProgressUsesReadAccessAndDirectParentScope(t *testing.T) {
 	t.Cleanup(func() { closeIntegrationManager(t, manager) })
 	requests := make(chan RuntimeSessionStoreRequest, 4)
 	controller, err := NewController(&ControllerConfig[*schema.Message]{
-		Manager: manager,
-		Barrier: completionBarrierFunc[*schema.Message](func(
-			context.Context,
-			*CompletionContext[*schema.Message],
-		) (CompletionAction, error) {
-			return CompletionComplete, nil
-		}),
+		Manager:            manager,
+		Barrier:            completeBarrier[*schema.Message](),
 		InputsToAgentInput: testEventMapper,
 		SessionStoreFactory: func(
 			_ context.Context,
@@ -540,12 +519,7 @@ func TestAttack_StreamPrefixReplayAndPersistenceFailure(t *testing.T) {
 		ctx := context.Background()
 		controller, manager, sessionStore := newControllerForTest(
 			t,
-			completionBarrierFunc[*schema.Message](func(
-				context.Context,
-				*CompletionContext[*schema.Message],
-			) (CompletionAction, error) {
-				return CompletionComplete, nil
-			}),
+			completeBarrier[*schema.Message](),
 			testEventMapper,
 		)
 		t.Cleanup(func() { closeIntegrationManager(t, manager) })
@@ -622,13 +596,8 @@ func TestAttack_StreamPrefixReplayAndPersistenceFailure(t *testing.T) {
 		t.Cleanup(func() { closeIntegrationManager(t, manager) })
 		persistErr := errors.New("stream event id allocation failed")
 		controller, err := NewController(&ControllerConfig[*schema.Message]{
-			Manager: manager,
-			Barrier: completionBarrierFunc[*schema.Message](func(
-				context.Context,
-				*CompletionContext[*schema.Message],
-			) (CompletionAction, error) {
-				return CompletionComplete, nil
-			}),
+			Manager:            manager,
+			Barrier:            completeBarrier[*schema.Message](),
 			InputsToAgentInput: testEventMapper,
 			SessionStore:       sessionStore,
 			CheckPointStore:    sessionStore,

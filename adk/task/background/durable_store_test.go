@@ -1008,46 +1008,172 @@ func TestInMemoryStoreRunningAttemptCanCommitCanceled_BitsUT(t *testing.T) {
 	assert.Nil(t, canceled.CancelRequestedAt)
 }
 
-func TestStoreValidationBoundaries(t *testing.T) {
-	specCases := []struct {
-		name string
-		spec Spec
+func TestValidateCreateTaskRequest(t *testing.T) {
+	for _, testCase := range []struct {
+		name        string
+		request     *CreateTaskRequest
+		wantMessage string
 	}{
-		{name: "missing identity", spec: Spec{}},
-		{name: "notification without session", spec: Spec{
-			ID: "task", ExecutorKey: "test", NotifySession: true,
-		}},
-	}
-	for _, testCase := range specCases {
+		{
+			name: "spec requires identity",
+			request: &CreateTaskRequest{
+				LeaseExpiryPolicy: LeaseExpiryRetry,
+			},
+			wantMessage: "task/background: id and executor key are required",
+		},
+		{
+			name: "notification requires session",
+			request: &CreateTaskRequest{
+				Spec: Spec{
+					ID: "task", ExecutorKey: "test", NotifySession: true,
+				},
+				LeaseExpiryPolicy: LeaseExpiryRetry,
+			},
+			wantMessage: "task/background: notification session id is required",
+		},
+		{
+			name: "rejects unsupported publication",
+			request: &CreateTaskRequest{
+				Spec:              validSpec("publication"),
+				Publication:       Publication("later"),
+				LeaseExpiryPolicy: LeaseExpiryRetry,
+			},
+			wantMessage: `task/background: unsupported publication "later"`,
+		},
+		{
+			name: "requires publish for on-background publication",
+			request: &CreateTaskRequest{
+				Spec:              validSpec("on-background"),
+				Publication:       PublicationOnBackground,
+				LeaseExpiryPolicy: LeaseExpiryRetry,
+			},
+			wantMessage: "task/background: on-background publication requires Publish",
+		},
+		{
+			name: "requires supported lease policy",
+			request: &CreateTaskRequest{
+				Spec:              validSpec("policy"),
+				LeaseExpiryPolicy: LeaseExpiryPolicy("unknown"),
+			},
+			wantMessage: `task/background: lease expiry policy must be "retry" or "fail"`,
+		},
+	} {
 		t.Run(testCase.name, func(t *testing.T) {
-			require.Error(t, validateSpec(testCase.spec))
+			require.EqualError(
+				t,
+				validateCreateTaskRequest(testCase.request),
+				testCase.wantMessage,
+			)
 		})
 	}
 
-	require.Error(t, validateCreateTaskRequest(&CreateTaskRequest{
-		Spec: validSpec("policy"), LeaseExpiryPolicy: LeaseExpiryPolicy("unknown"),
-	}))
-	require.Error(t, validateTranscriptFailure(""))
-	require.Error(t, validateTranscriptFailure(string(make([]byte, 4097))))
-
-	snapshotCases := []struct {
+	for _, testCase := range []struct {
 		name        string
-		status      Status
-		data        []byte
-		resultError string
+		publication Publication
+		policy      LeaseExpiryPolicy
 	}{
-		{name: "pending result", status: StatusPending, data: []byte("result")},
-		{name: "unsupported status", status: Status("unknown")},
-		{name: "completed error", status: StatusCompleted, resultError: "error"},
-		{name: "failed without error", status: StatusFailed},
-		{name: "canceled data", status: StatusCanceled, data: []byte("result")},
-		{name: "oversized error", status: StatusFailed, resultError: string(make([]byte, 4097))},
-	}
-	for _, testCase := range snapshotCases {
+		{
+			name:   "default publication with retry policy",
+			policy: LeaseExpiryRetry,
+		},
+		{
+			name:        "on-create publication with fail policy",
+			publication: PublicationOnCreate,
+			policy:      LeaseExpiryFail,
+		},
+		{
+			name:        "deferred publication with retry policy",
+			publication: PublicationDeferred,
+			policy:      LeaseExpiryRetry,
+		},
+	} {
 		t.Run(testCase.name, func(t *testing.T) {
-			require.Error(t, validateTaskSnapshot(
-				testCase.status, testCase.data, testCase.resultError,
-			))
+			require.NoError(t, validateCreateTaskRequest(&CreateTaskRequest{
+				Spec:              validSpec("valid"),
+				Publication:       testCase.publication,
+				LeaseExpiryPolicy: testCase.policy,
+			}))
+		})
+	}
+}
+
+func TestStoreValidationBoundaries(t *testing.T) {
+	for _, testCase := range []struct {
+		name        string
+		call        func() error
+		wantMessage string
+		wantErr     error
+	}{
+		{
+			name:        "transcript failure requires error",
+			call:        func() error { return validateTranscriptFailure("") },
+			wantMessage: "task/background: transcript failure requires an error",
+		},
+		{
+			name: "transcript failure is bounded",
+			call: func() error {
+				return validateTranscriptFailure(string(make([]byte, 4097)))
+			},
+			wantMessage: "task/background: transcript failure exceeds configured bounds",
+		},
+		{
+			name: "pending rejects result",
+			call: func() error {
+				return validateTaskSnapshot(StatusPending, []byte("result"), "")
+			},
+			wantMessage: "task/background: invalid execution result: non-terminal task cannot have a result",
+			wantErr:     ErrInvalidExecutionResult,
+		},
+		{
+			name: "rejects unsupported status",
+			call: func() error {
+				return validateTaskSnapshot(Status("unknown"), nil, "")
+			},
+			wantMessage: `task/background: invalid execution result: unsupported status "unknown"`,
+			wantErr:     ErrInvalidExecutionResult,
+		},
+		{
+			name: "completed rejects error",
+			call: func() error {
+				return validateTaskSnapshot(StatusCompleted, nil, "error")
+			},
+			wantMessage: "task/background: invalid execution result: completed result cannot carry an error",
+			wantErr:     ErrInvalidExecutionResult,
+		},
+		{
+			name: "failed requires error",
+			call: func() error {
+				return validateTaskSnapshot(StatusFailed, nil, "")
+			},
+			wantMessage: "task/background: invalid execution result: failed result requires an error",
+			wantErr:     ErrInvalidExecutionResult,
+		},
+		{
+			name: "canceled rejects data",
+			call: func() error {
+				return validateTaskSnapshot(StatusCanceled, []byte("result"), "")
+			},
+			wantMessage: "task/background: invalid execution result: canceled result cannot carry data",
+			wantErr:     ErrInvalidExecutionResult,
+		},
+		{
+			name: "result error is bounded",
+			call: func() error {
+				return validateTaskSnapshot(
+					StatusFailed,
+					nil,
+					string(make([]byte, 4097)),
+				)
+			},
+			wantMessage: "task/background: result error exceeds configured bounds",
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			err := testCase.call()
+			require.EqualError(t, err, testCase.wantMessage)
+			if testCase.wantErr != nil {
+				require.ErrorIs(t, err, testCase.wantErr)
+			}
 		})
 	}
 }

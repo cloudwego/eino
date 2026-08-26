@@ -18,6 +18,7 @@ package subagent
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -52,13 +53,8 @@ func TestRuntimeSessionStoreFactoryAccessModes(t *testing.T) {
 
 	requests := make(chan RuntimeSessionStoreRequest, 3)
 	controller, err := NewController(&ControllerConfig[*schema.Message]{
-		Manager: manager,
-		Barrier: completionBarrierFunc[*schema.Message](func(
-			context.Context,
-			*CompletionContext[*schema.Message],
-		) (CompletionAction, error) {
-			return CompletionComplete, nil
-		}),
+		Manager:            manager,
+		Barrier:            completeBarrier[*schema.Message](),
 		InputsToAgentInput: testEventMapper,
 		SessionStoreFactory: func(
 			_ context.Context,
@@ -154,6 +150,52 @@ func TestRuntimeSessionStoreFactoryAccessModes(t *testing.T) {
 	require.Equal(t, "parent-child-session", progressRequest.ParentSessionID)
 	require.NotEqual(t, snapshot.Spec.RootSessionID, progressRequest.ParentSessionID)
 	require.Same(t, snapshot, progressRequest.Task)
+}
+
+func TestRuntimeSessionStoreFactoryPropagatesErrorAndNil(t *testing.T) {
+	factoryErr := errors.New("factory failed")
+	for _, testCase := range []struct {
+		name    string
+		factory RuntimeSessionStoreFactory[*schema.Message]
+		wantErr string
+	}{
+		{
+			name: "factory error",
+			factory: func(
+				context.Context,
+				*RuntimeSessionStoreRequest,
+			) (adk.SessionEventStore[*schema.Message], error) {
+				return nil, factoryErr
+			},
+			wantErr: factoryErr.Error(),
+		},
+		{
+			name: "nil store",
+			factory: func(
+				context.Context,
+				*RuntimeSessionStoreRequest,
+			) (adk.SessionEventStore[*schema.Message], error) {
+				return nil, nil
+			},
+			wantErr: "task/subagent: runtime session store is nil",
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			controller := &Controller[*schema.Message]{
+				sessionStoreFactory: testCase.factory,
+			}
+			store, err := controller.sessionStoreFor(
+				context.Background(),
+				"task",
+				"parent",
+				"child",
+				nil,
+				RuntimeSessionStoreAccessForegroundExecute,
+			)
+			require.Nil(t, store)
+			require.EqualError(t, err, testCase.wantErr)
+		})
+	}
 }
 
 func TestRuntimeSessionStoreRequestValidation(t *testing.T) {

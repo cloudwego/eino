@@ -24,6 +24,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -65,6 +66,13 @@ func mustNewBackgroundManager(
 	manager, err := background.New(ctx, config)
 	require.NoError(t, err)
 	return manager
+}
+
+func closeDeepManager(t testing.TB, manager *background.Manager) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	require.NoError(t, manager.Close(ctx))
 }
 
 type deepCompletionBarrier struct{}
@@ -441,15 +449,29 @@ func TestDeepAgentTurn2DeduplicatesPersistedLeadingSystemMessage(t *testing.T) {
 }
 
 func TestWriteTodos(t *testing.T) {
-	m, err := buildTypedBuiltinAgentMiddlewares(context.Background(), &Config{WithoutWriteTodos: false}, nil)
+	ctx := context.Background()
+	m, err := buildTypedBuiltinAgentMiddlewares(
+		ctx,
+		&Config{WithoutWriteTodos: false},
+		nil,
+	)
 	assert.NoError(t, err)
-
-	wt := m[0].(*typedAppendPromptTool[*schema.Message]).t.(tool.InvokableTool)
+	require.Len(t, m, 1)
+	_, runCtx, err := m[0].BeforeAgent(
+		ctx,
+		&adk.ChatModelAgentContext[*schema.Message]{},
+	)
+	require.NoError(t, err)
+	require.Len(t, runCtx.Tools, 1)
+	info, err := runCtx.Tools[0].Info(ctx)
+	require.NoError(t, err)
+	require.Equal(t, "write_todos", info.Name)
+	wt := runCtx.Tools[0].(tool.InvokableTool)
 
 	todos := `[{"content":"content1","activeForm":"","status":"pending"},{"content":"content2","activeForm":"","status":"pending"}]`
 	args := fmt.Sprintf(`{"todos": %s}`, todos)
 
-	result, err := wt.InvokableRun(context.Background(), args)
+	result, err := wt.InvokableRun(ctx, args)
 	assert.NoError(t, err)
 	assert.Equal(t, fmt.Sprintf("Updated todo list to %s", todos), result)
 }
@@ -569,67 +591,6 @@ func TestDeepAgentManagerWiring(t *testing.T) {
 	assert.False(t, ok, "unmanaged execute must not expose run_in_background")
 }
 
-func TestDeepGeneratedGeneralDoesNotInheritManagedShell(t *testing.T) {
-	ctx := context.Background()
-	tests := []struct {
-		name      string
-		configure func(*TaskConfig)
-	}{
-		{
-			name: "local",
-			configure: func(tasks *TaskConfig) {
-				tasks.LocalShell = &LocalShellConfig{Shell: &deepMockShell{}}
-			},
-		},
-		{
-			name: "recoverable",
-			configure: func(tasks *TaskConfig) {
-				tasks.RecoverableShell = &RecoverableShellConfig{
-					Shell: &deepRecoverableShellStub{},
-				}
-			},
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			manager := mustNewBackgroundManager(t, ctx, nil)
-			defer func() { require.NoError(t, manager.Close(ctx)) }()
-			tasks := &TaskConfig{
-				Manager: manager,
-				SubAgents: &DurableSubAgentConfig{
-					Runtime: mustDeepController(t, manager),
-				},
-			}
-			timeoutMs := 1
-			tasks.ForegroundTimeoutMs = &timeoutMs
-			tasks.ShouldAutoBackground = func(
-				context.Context,
-				*foreground.CandidateInfo,
-			) bool {
-				return true
-			}
-			tt.configure(tasks)
-			cfg := &Config{WithoutWriteTodos: true, Tasks: tasks}
-
-			childHandlers, err := buildGeneratedGeneralAgentMiddlewares(ctx, cfg)
-			require.NoError(t, err)
-			childTools := toolsFromDeepHandlers(t, childHandlers)
-			require.Len(t, childTools, 2)
-			require.Contains(t, childTools, "task_output")
-			require.Contains(t, childTools, "task_stop")
-			require.NotContains(t, childTools, filesystem2.ToolNameExecute)
-
-			topHandlers, err := buildTypedBuiltinAgentMiddlewares(ctx, cfg, tasks)
-			require.NoError(t, err)
-			topTools := toolsFromDeepHandlers(t, topHandlers)
-			require.Len(t, topTools, 1)
-			requireRunInBackgroundField(
-				t, ctx, topTools[filesystem2.ToolNameExecute], true,
-			)
-		})
-	}
-}
-
 func TestDeepGeneratedGeneralKeepsPlainShellAndSharedTaskControls(t *testing.T) {
 	ctx := context.Background()
 	manager := mustNewBackgroundManager(t, ctx, nil)
@@ -718,13 +679,6 @@ func TestDeepRecoverableShellDoesNotCreateLocalRunner(t *testing.T) {
 
 func TestDeepTaskConfigRequiresExplicitCapabilities(t *testing.T) {
 	backgroundType := reflect.TypeOf(TaskConfig{})
-	for _, field := range []string{
-		"Manager", "SubAgents", "RecoverableShell", "LocalShell",
-		"ForegroundTimeoutMs", "ShouldAutoBackground",
-	} {
-		_, ok := backgroundType.FieldByName(field)
-		require.True(t, ok, "TaskConfig.%s must exist", field)
-	}
 	for _, field := range []string{"Local", "Durable"} {
 		_, ok := backgroundType.FieldByName(field)
 		require.False(t, ok, "TaskConfig.%s must stay removed", field)
@@ -769,45 +723,6 @@ func TestDeepTaskConfigRequiresExplicitCapabilities(t *testing.T) {
 	derived.Manager = otherManager
 	err = validateTypedConfig(&Config{Tasks: derived})
 	require.ErrorContains(t, err, "must share the same Manager")
-}
-
-func TestDeepSubAgentBackgroundForwardsRunOptionsFactories(t *testing.T) {
-	factory := func() ([]adk.AgentRunOption, error) {
-		return []adk.AgentRunOption{adk.WithTimelineEvents()}, nil
-	}
-	format := func(
-		_ context.Context,
-		agentName string,
-		message *schema.Message,
-	) (string, error) {
-		return agentName + ": " + message.Content, nil
-	}
-	manager := mustNewBackgroundManager(t, context.Background(), nil)
-	defer manager.Close(context.Background())
-	controller := mustDeepController(t, manager)
-	background := deepSubagentBackground(&TypedConfig[*schema.Message]{
-		Tasks: &TypedTaskConfig[*schema.Message]{
-			Manager:          manager,
-			TranscriptFormat: format,
-			SubAgents: &TypedDurableSubAgentConfig[*schema.Message]{
-				Runtime: controller,
-				RunOptionsFactories: map[string]durablesubagent.RunOptionsFactory{
-					"worker": factory,
-				},
-			},
-		},
-	})
-	require.NotNil(t, background.Durable)
-	require.Same(t, controller, background.Durable.Runtime)
-	require.NotNil(t, background.Durable.RunOptionsFactories["worker"])
-	options, err := background.Durable.RunOptionsFactories["worker"]()
-	require.NoError(t, err)
-	assert.Len(t, options, 1)
-	formatted, err := background.TranscriptFormat(
-		context.Background(), "worker", schema.AssistantMessage("done", nil),
-	)
-	require.NoError(t, err)
-	assert.Equal(t, "worker: done", formatted)
 }
 
 // NewTyped derives the shared Manager from the Controller and injects the

@@ -191,15 +191,45 @@ func readAllStreamResults(
 	stream *schema.StreamReader[*schema.ToolResult],
 ) []*schema.ToolResult {
 	t.Helper()
-	defer stream.Close()
-	var results []*schema.ToolResult
-	for {
-		result, err := stream.Recv()
-		if errors.Is(err, io.EOF) {
-			return results
+	results, err := readStreamResults(t, stream)
+	require.ErrorIs(t, err, io.EOF)
+	return results
+}
+
+func readStreamResults(
+	t *testing.T,
+	stream *schema.StreamReader[*schema.ToolResult],
+) ([]*schema.ToolResult, error) {
+	t.Helper()
+	type readResult struct {
+		results []*schema.ToolResult
+		err     error
+	}
+	done := make(chan readResult, 1)
+	go func() {
+		var results []*schema.ToolResult
+		for {
+			result, err := stream.Recv()
+			if result != nil {
+				results = append(results, result)
+			}
+			if err != nil {
+				done <- readResult{results: results, err: err}
+				return
+			}
 		}
-		require.NoError(t, err)
-		results = append(results, result)
+	}()
+
+	timer := time.NewTimer(time.Second)
+	defer timer.Stop()
+	select {
+	case result := <-done:
+		stream.Close()
+		return result.results, result.err
+	case <-timer.C:
+		stream.Close()
+		t.Fatal("tool result stream did not terminate within 1 second")
+		return nil, nil
 	}
 }
 

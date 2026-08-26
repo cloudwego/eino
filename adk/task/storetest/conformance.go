@@ -84,112 +84,7 @@ func RunLifecycleStoreConformance(t *testing.T, config LifecycleStoreConfig) {
 	})
 
 	runPublicationConformance(t, config.New)
-
-	t.Run("transitions_and_cas", func(t *testing.T) {
-		store := config.New(t)
-		started := createAndStart(t, store, "transitions", background.LeaseExpiryRetry)
-		_, err := store.Heartbeat(context.Background(), &background.HeartbeatRequest{
-			TaskID: started.Spec.ID, ExpectedVersion: started.Version - 1,
-		})
-		require.ErrorIs(t, err, background.ErrVersionConflict)
-		heartbeat, err := store.Heartbeat(context.Background(), &background.HeartbeatRequest{
-			TaskID: started.Spec.ID, ExpectedVersion: started.Version,
-		})
-		require.NoError(t, err)
-		completed, err := store.CompleteIfNoInputs(
-			context.Background(),
-			&background.CompleteIfNoInputsRequest{
-				TaskID: heartbeat.Spec.ID, ExpectedVersion: heartbeat.Version,
-				Attempt: heartbeat.Attempt, InputCursor: 0, ResultData: []byte("done"),
-			},
-		)
-		require.NoError(t, err)
-		require.Equal(t, background.StatusCompleted, completed.Status)
-		require.Equal(t, "done", string(completed.ResultData))
-		require.NotNil(t, completed.DoneAt)
-		_, err = store.Fail(context.Background(), &background.FailTaskRequest{
-			TaskID: completed.Spec.ID, ExpectedVersion: completed.Version, Error: "late",
-		})
-		require.Error(t, err)
-		require.True(t,
-			errors.Is(err, background.ErrAlreadyTerminal) ||
-				errors.Is(err, background.ErrLeaseLost),
-		)
-	})
-
-	t.Run("start_commit_is_owned_and_retained", func(t *testing.T) {
-		store := config.New(t)
-		started := createAndStart(
-			t,
-			store,
-			"running-checkpoint",
-			background.LeaseExpiryRetry,
-		)
-		checkpoint := []byte("recovery")
-		saved, err := store.CommitStart(
-			context.Background(),
-			&background.CommitStartRequest{
-				TaskID: started.Spec.ID, ExpectedVersion: started.Version,
-				Checkpoint: checkpoint,
-			},
-		)
-		require.NoError(t, err)
-		checkpoint[0] = 'X'
-		require.Equal(t, background.StatusRunning, saved.Status)
-		require.Equal(t, started.Version+1, saved.Version)
-		require.Equal(t, "recovery", string(saved.Checkpoint))
-		_, err = store.CommitStart(
-			context.Background(),
-			&background.CommitStartRequest{
-				TaskID: saved.Spec.ID, ExpectedVersion: started.Version,
-				Checkpoint: []byte("stale"),
-			},
-		)
-		require.ErrorIs(t, err, background.ErrVersionConflict)
-		_, err = store.CommitStart(
-			context.Background(),
-			&background.CommitStartRequest{
-				TaskID: saved.Spec.ID, ExpectedVersion: saved.Version,
-				Checkpoint: []byte("duplicate"),
-			},
-		)
-		require.ErrorIs(t, err, background.ErrIllegalTransition)
-		yielded, err := store.Yield(
-			context.Background(),
-			&background.YieldTaskRequest{
-				TaskID: saved.Spec.ID, ExpectedVersion: saved.Version,
-			},
-		)
-		require.NoError(t, err)
-		require.Equal(t, "recovery", string(yielded.Checkpoint))
-	})
-
-	t.Run("suspend_release_and_yield", func(t *testing.T) {
-		store := config.New(t)
-		started := createAndStart(t, store, "waiting", background.LeaseExpiryRetry)
-		suspended, err := store.SuspendIfNoInputs(
-			context.Background(),
-			&background.SuspendIfNoInputsRequest{
-				TaskID: started.Spec.ID, ExpectedVersion: started.Version,
-				Attempt: started.Attempt, InputCursor: 0, Checkpoint: []byte("safe"),
-			},
-		)
-		require.NoError(t, err)
-		released, err := store.ReleaseSuspension(context.Background(), &background.ReleaseSuspensionRequest{
-			TaskID: suspended.Spec.ID, ExpectedVersion: suspended.Version,
-		})
-		require.NoError(t, err)
-		started, err = store.Start(context.Background(), &background.StartTaskRequest{
-			TaskID: released.Spec.ID, ExpectedVersion: released.Version,
-		})
-		require.NoError(t, err)
-		yielded, err := store.Yield(context.Background(), &background.YieldTaskRequest{
-			TaskID: started.Spec.ID, ExpectedVersion: started.Version,
-		})
-		require.NoError(t, err)
-		require.Equal(t, background.StatusPending, yielded.Status)
-		require.Equal(t, "safe", string(yielded.Checkpoint))
-	})
+	runLifecycleExecutionConformance(t, config.New)
 
 	t.Run("ordinary_input_only_wakes_waiting_input", func(t *testing.T) {
 		store := config.New(t)
@@ -293,6 +188,118 @@ func RunLifecycleStoreConformance(t *testing.T, config LifecycleStoreConfig) {
 			}
 		})
 	}
+}
+
+func runLifecycleExecutionConformance(
+	t *testing.T,
+	newStore func(testing.TB) background.LifecycleStore,
+) {
+	t.Helper()
+	t.Run("transitions_and_cas", func(t *testing.T) {
+		store := newStore(t)
+		started := createAndStart(t, store, "transitions", background.LeaseExpiryRetry)
+		_, err := store.Heartbeat(context.Background(), &background.HeartbeatRequest{
+			TaskID: started.Spec.ID, ExpectedVersion: started.Version - 1,
+		})
+		require.ErrorIs(t, err, background.ErrVersionConflict)
+		heartbeat, err := store.Heartbeat(context.Background(), &background.HeartbeatRequest{
+			TaskID: started.Spec.ID, ExpectedVersion: started.Version,
+		})
+		require.NoError(t, err)
+		completed, err := store.CompleteIfNoInputs(
+			context.Background(),
+			&background.CompleteIfNoInputsRequest{
+				TaskID: heartbeat.Spec.ID, ExpectedVersion: heartbeat.Version,
+				Attempt: heartbeat.Attempt, InputCursor: 0, ResultData: []byte("done"),
+			},
+		)
+		require.NoError(t, err)
+		require.Equal(t, background.StatusCompleted, completed.Status)
+		require.Equal(t, "done", string(completed.ResultData))
+		require.NotNil(t, completed.DoneAt)
+		_, err = store.Fail(context.Background(), &background.FailTaskRequest{
+			TaskID: completed.Spec.ID, ExpectedVersion: completed.Version, Error: "late",
+		})
+		require.Error(t, err)
+		require.True(t,
+			errors.Is(err, background.ErrAlreadyTerminal) ||
+				errors.Is(err, background.ErrLeaseLost),
+		)
+	})
+
+	t.Run("start_commit_is_owned_and_retained", func(t *testing.T) {
+		store := newStore(t)
+		started := createAndStart(
+			t,
+			store,
+			"running-checkpoint",
+			background.LeaseExpiryRetry,
+		)
+		checkpoint := []byte("recovery")
+		saved, err := store.CommitStart(
+			context.Background(),
+			&background.CommitStartRequest{
+				TaskID: started.Spec.ID, ExpectedVersion: started.Version,
+				Checkpoint: checkpoint,
+			},
+		)
+		require.NoError(t, err)
+		checkpoint[0] = 'X'
+		require.Equal(t, background.StatusRunning, saved.Status)
+		require.Equal(t, started.Version+1, saved.Version)
+		require.Equal(t, "recovery", string(saved.Checkpoint))
+		_, err = store.CommitStart(
+			context.Background(),
+			&background.CommitStartRequest{
+				TaskID: saved.Spec.ID, ExpectedVersion: started.Version,
+				Checkpoint: []byte("stale"),
+			},
+		)
+		require.ErrorIs(t, err, background.ErrVersionConflict)
+		_, err = store.CommitStart(
+			context.Background(),
+			&background.CommitStartRequest{
+				TaskID: saved.Spec.ID, ExpectedVersion: saved.Version,
+				Checkpoint: []byte("duplicate"),
+			},
+		)
+		require.ErrorIs(t, err, background.ErrIllegalTransition)
+		yielded, err := store.Yield(
+			context.Background(),
+			&background.YieldTaskRequest{
+				TaskID: saved.Spec.ID, ExpectedVersion: saved.Version,
+			},
+		)
+		require.NoError(t, err)
+		require.Equal(t, "recovery", string(yielded.Checkpoint))
+	})
+
+	t.Run("suspend_release_and_yield", func(t *testing.T) {
+		store := newStore(t)
+		started := createAndStart(t, store, "waiting", background.LeaseExpiryRetry)
+		suspended, err := store.SuspendIfNoInputs(
+			context.Background(),
+			&background.SuspendIfNoInputsRequest{
+				TaskID: started.Spec.ID, ExpectedVersion: started.Version,
+				Attempt: started.Attempt, InputCursor: 0, Checkpoint: []byte("safe"),
+			},
+		)
+		require.NoError(t, err)
+		released, err := store.ReleaseSuspension(context.Background(), &background.ReleaseSuspensionRequest{
+			TaskID: suspended.Spec.ID, ExpectedVersion: suspended.Version,
+		})
+		require.NoError(t, err)
+		started, err = store.Start(context.Background(), &background.StartTaskRequest{
+			TaskID: released.Spec.ID, ExpectedVersion: released.Version,
+		})
+		require.NoError(t, err)
+		yielded, err := store.Yield(context.Background(), &background.YieldTaskRequest{
+			TaskID: started.Spec.ID, ExpectedVersion: started.Version,
+		})
+		require.NoError(t, err)
+		require.Equal(t, background.StatusPending, yielded.Status)
+		require.Equal(t, "safe", string(yielded.Checkpoint))
+	})
 }
 
 // RunTaskEventStoreConformance validates append ordering, cursor validation,
@@ -424,7 +431,11 @@ func RunNotificationOutboxConformance(t *testing.T, config NotificationOutboxCon
 	require.NoError(t, err)
 	require.Len(t, second.Deliveries, 1)
 	require.NotEqual(t, first.Deliveries[0].Receipt, second.Deliveries[0].Receipt)
-	require.Error(t, outbox.Ack(context.Background(), first.Deliveries[0].Receipt))
+	require.ErrorIs(
+		t,
+		outbox.Ack(context.Background(), first.Deliveries[0].Receipt),
+		background.ErrNotFound,
+	)
 	require.NoError(t, outbox.Ack(context.Background(), second.Deliveries[0].Receipt))
 
 	deferredSpec := testSpec("deferred-notification")
@@ -625,38 +636,107 @@ func RunNotificationWriterConformance(t *testing.T, config NotificationWriterCon
 		require.Equal(t, firstID, otherCustom.Record.ID)
 	})
 
+	runNotificationWriterValidationConformance(t, config.New)
+}
+
+func runNotificationWriterValidationConformance(
+	t *testing.T,
+	newStore func(testing.TB) (background.TaskStore, background.NotificationOutbox),
+) {
+	t.Helper()
 	t.Run("validation_bounds_and_nil_empty_replay", func(t *testing.T) {
-		tasks, _ := config.New(t)
-		writer := notificationWriter(t, tasks)
-		started := createParentAndStart(t, tasks, "notify-validation")
-		write := func(req *background.NotifyParentRequest) error {
-			return writer.EnqueueTaskNotification(
-				context.Background(), started.Spec.ID, started.Attempt, req,
-			)
-		}
-		for _, req := range []*background.NotifyParentRequest{
-			nil,
-			{Kind: "application.valid"},
-			{EventID: strings.Repeat("e", 1025), Kind: "application.valid"},
-			{EventID: "empty-kind"},
-			{EventID: "long-kind", Kind: background.NotificationKind(strings.Repeat("k", 65))},
-			{EventID: "lifecycle", Kind: background.NotificationCompleted},
-			{EventID: "reserved", Kind: "eino.application"},
-			{EventID: "large-data", Kind: "application.valid", Data: make([]byte, (256<<10)+1)},
+		for _, testCase := range []struct {
+			name string
+			req  *background.NotifyParentRequest
+		}{
+			{
+				name: "nil request",
+			},
+			{
+				name: "missing event id",
+				req:  &background.NotifyParentRequest{Kind: "application.valid"},
+			},
+			{
+				name: "event id exceeds bounds",
+				req: &background.NotifyParentRequest{
+					EventID: strings.Repeat("e", 1025), Kind: "application.valid",
+				},
+			},
+			{
+				name: "missing kind",
+				req:  &background.NotifyParentRequest{EventID: "empty-kind"},
+			},
+			{
+				name: "kind exceeds bounds",
+				req: &background.NotifyParentRequest{
+					EventID: "long-kind",
+					Kind:    background.NotificationKind(strings.Repeat("k", 65)),
+				},
+			},
+			{
+				name: "lifecycle kind is reserved",
+				req: &background.NotifyParentRequest{
+					EventID: "lifecycle", Kind: background.NotificationCompleted,
+				},
+			},
+			{
+				name: "framework namespace is reserved",
+				req: &background.NotifyParentRequest{
+					EventID: "reserved", Kind: "eino.application",
+				},
+			},
+			{
+				name: "data exceeds bounds",
+				req: &background.NotifyParentRequest{
+					EventID: "large-data", Kind: "application.valid",
+					Data: make([]byte, (256<<10)+1),
+				},
+			},
 		} {
-			require.Error(t, write(req))
+			t.Run(testCase.name, func(t *testing.T) {
+				tasks, _ := newStore(t)
+				writer := notificationWriter(t, tasks)
+				started := createParentAndStart(t, tasks, "notify-validation")
+				before, err := tasks.Get(context.Background(), started.Spec.ID)
+				require.NoError(t, err)
+				require.Error(t, writer.EnqueueTaskNotification(
+					context.Background(), started.Spec.ID, started.Attempt, testCase.req,
+				))
+				after, err := tasks.Get(context.Background(), started.Spec.ID)
+				require.NoError(t, err)
+				require.Equal(t, before, after)
+			})
 		}
-		require.NoError(t, write(&background.NotifyParentRequest{
-			EventID: strings.Repeat("e", 1024),
-			Kind:    background.NotificationKind(strings.Repeat("k", 64)),
-			Data:    make([]byte, 256<<10),
-		}))
-		require.NoError(t, write(&background.NotifyParentRequest{
-			EventID: "nil-empty", Kind: "application.empty",
-		}))
-		require.NoError(t, write(&background.NotifyParentRequest{
-			EventID: "nil-empty", Kind: "application.empty", Data: []byte{},
-		}))
+		t.Run("maximum bounds", func(t *testing.T) {
+			req := &background.NotifyParentRequest{
+				EventID: strings.Repeat("e", 1024),
+				Kind:    background.NotificationKind(strings.Repeat("k", 64)),
+				Data:    make([]byte, 256<<10),
+			}
+			tasks, _ := newStore(t)
+			writer := notificationWriter(t, tasks)
+			started := createParentAndStart(t, tasks, "notify-maximum-bounds")
+			require.NoError(t, writer.EnqueueTaskNotification(
+				context.Background(), started.Spec.ID, started.Attempt, req,
+			))
+		})
+		t.Run("nil and empty data replay equivalently", func(t *testing.T) {
+			tasks, _ := newStore(t)
+			writer := notificationWriter(t, tasks)
+			started := createParentAndStart(t, tasks, "notify-nil-empty")
+			write := func(data []byte) error {
+				return writer.EnqueueTaskNotification(
+					context.Background(),
+					started.Spec.ID,
+					started.Attempt,
+					&background.NotifyParentRequest{
+						EventID: "nil-empty", Kind: "application.empty", Data: data,
+					},
+				)
+			}
+			require.NoError(t, write(nil))
+			require.NoError(t, write([]byte{}))
+		})
 	})
 }
 

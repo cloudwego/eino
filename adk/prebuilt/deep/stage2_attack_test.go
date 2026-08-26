@@ -109,7 +109,7 @@ func TestAttack_GeneratedGeneralLaunchScopeExcludesManagedCapabilities(t *testin
 		t.Run(testCase.name, func(t *testing.T) {
 			manager := mustNewBackgroundManager(t, ctx, nil)
 			t.Cleanup(func() {
-				require.NoError(t, manager.Close(context.Background()))
+				closeDeepManager(t, manager)
 			})
 			tasks := &TaskConfig{
 				Manager: manager,
@@ -140,10 +140,11 @@ func TestAttack_GeneratedGeneralLaunchScopeExcludesManagedCapabilities(t *testin
 // child's task_output tool reads work from the Controller's Manager. Binding a
 // fresh Manager would expose controls that cannot observe top-level task IDs.
 func TestAttack_GeneratedGeneralControlsUseRuntimeManager(t *testing.T) {
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	manager := mustNewBackgroundManager(t, ctx, nil)
 	t.Cleanup(func() {
-		require.NoError(t, manager.Close(context.Background()))
+		closeDeepManager(t, manager)
 	})
 	controller := mustDeepController(t, manager)
 	handlers, err := buildGeneratedGeneralAgentMiddlewares(ctx, &Config{
@@ -182,8 +183,54 @@ func TestAttack_GeneratedGeneralControlsUseRuntimeManager(t *testing.T) {
 		fmt.Sprintf(`{"task_id":%q,"block":false}`, snapshot.Spec.ID),
 	)
 	require.NoError(t, err)
-	require.Contains(t, output, snapshot.Spec.ID)
-	require.Contains(t, output, "shared-manager-result")
+	require.Equal(
+		t,
+		fmt.Sprintf(
+			"Task ID: %s\nDescription: shared manager task\n"+
+				"Status: completed\nResult: shared-manager-result\nElapsed: 0s",
+			snapshot.Spec.ID,
+		),
+		output,
+	)
+
+	started := make(chan struct{})
+	blockedResult, err := runner.Run(
+		ctx,
+		&backgroundlocal.Input{
+			Description:     "stoppable task",
+			RunInBackground: true,
+		},
+		func(runCtx context.Context, _ background.ExecutionRuntime) (string, error) {
+			close(started)
+			<-runCtx.Done()
+			return "", runCtx.Err()
+		},
+	)
+	require.NoError(t, err)
+	blocked, ok := blockedResult.Task()
+	require.True(t, ok)
+	select {
+	case <-started:
+	case <-ctx.Done():
+		t.Fatalf("timed out waiting for task start: %v", ctx.Err())
+	}
+	stopTool, ok := tools["task_stop"].(tool.InvokableTool)
+	require.True(t, ok)
+	stopped, err := stopTool.InvokableRun(
+		ctx,
+		fmt.Sprintf(
+			`{"task_id":%q,"reason":"stop from generated general"}`,
+			blocked.Spec.ID,
+		),
+	)
+	require.NoError(t, err)
+	require.Equal(t, "Successfully stopped task: "+blocked.Spec.ID, stopped)
+	require.Eventually(t, func() bool {
+		current, getErr := manager.Get(ctx, blocked.Spec.ID)
+		return getErr == nil &&
+			current.Status == background.StatusCanceled &&
+			current.ResultError == "stop from generated general"
+	}, time.Second, time.Millisecond)
 }
 
 // TestAttack_PlainAndManagedShellKeepDistinctWireBehavior verifies that plain
@@ -208,7 +255,7 @@ func TestAttack_PlainAndManagedShellKeepDistinctWireBehavior(t *testing.T) {
 
 	manager := mustNewBackgroundManager(t, ctx, nil)
 	t.Cleanup(func() {
-		require.NoError(t, manager.Close(context.Background()))
+		closeDeepManager(t, manager)
 	})
 	managedHandlers, err := buildTypedBuiltinAgentMiddlewares(
 		ctx,
@@ -236,7 +283,7 @@ func TestAttack_ManagedShellWireDescriptionMatchesSchema(t *testing.T) {
 	ctx := context.Background()
 	manager := mustNewBackgroundManager(t, ctx, nil)
 	t.Cleanup(func() {
-		require.NoError(t, manager.Close(context.Background()))
+		closeDeepManager(t, manager)
 	})
 	handlers, err := buildTypedBuiltinAgentMiddlewares(
 		ctx,
@@ -286,7 +333,7 @@ func TestAttack_TaskToolWireDescriptionTracksManagedMode(t *testing.T) {
 
 	manager := mustNewBackgroundManager(t, ctx, nil)
 	t.Cleanup(func() {
-		require.NoError(t, manager.Close(context.Background()))
+		closeDeepManager(t, manager)
 	})
 	controller := mustDeepController(t, manager)
 	managedMiddleware, err := subagentmw.New(ctx, &subagentmw.Config{
@@ -325,7 +372,7 @@ func TestAttack_DeepMapsDurableSubAgentConfiguration(t *testing.T) {
 	ctx := context.Background()
 	manager := mustNewBackgroundManager(t, ctx, nil)
 	t.Cleanup(func() {
-		require.NoError(t, manager.Close(context.Background()))
+		closeDeepManager(t, manager)
 	})
 	controller := mustDeepController(t, manager)
 	factoryCalled := false
@@ -383,7 +430,7 @@ func TestAttack_NilZeroAndRuntimeOverridesFailClosed(t *testing.T) {
 
 	manager := mustNewBackgroundManager(t, ctx, nil)
 	t.Cleanup(func() {
-		require.NoError(t, manager.Close(context.Background()))
+		closeDeepManager(t, manager)
 	})
 	require.ErrorContains(t, validateTypedConfig(&Config{Tasks: &TaskConfig{
 		Manager:   manager,
@@ -410,7 +457,7 @@ func TestAttack_NilZeroAndRuntimeOverridesFailClosed(t *testing.T) {
 
 	otherManager := mustNewBackgroundManager(t, ctx, nil)
 	t.Cleanup(func() {
-		require.NoError(t, otherManager.Close(context.Background()))
+		closeDeepManager(t, otherManager)
 	})
 	derived.Manager = otherManager
 	require.ErrorContains(

@@ -26,6 +26,7 @@ import (
 
 	"github.com/cloudwego/eino/adk"
 	adksession "github.com/cloudwego/eino/adk/session"
+	taskcore "github.com/cloudwego/eino/adk/task"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
 )
@@ -65,6 +66,82 @@ func (*taskCreatedEventModel) Stream(
 	return schema.StreamReaderFromArray([]*schema.Message{message}), nil
 }
 
+func runInTaskCreatedEventRunner(
+	t *testing.T,
+	sessionID string,
+	callback func(context.Context),
+) {
+	t.Helper()
+	called := false
+	agent, err := adk.NewChatModelAgent(context.Background(), &adk.ChatModelAgentConfig{
+		Name:        "task-created-event-context-agent",
+		Instruction: "test",
+		Model:       &taskCreatedEventModel{},
+		Handlers: []adk.ChatModelAgentMiddleware{&taskCreatedSubmitMiddleware{
+			BaseChatModelAgentMiddleware: &adk.BaseChatModelAgentMiddleware{},
+			submit: func(ctx context.Context) error {
+				called = true
+				callback(ctx)
+				return nil
+			},
+		}},
+	})
+	require.NoError(t, err)
+	runner := adk.NewRunner(context.Background(), adk.RunnerConfig{
+		Agent: agent, SessionID: sessionID,
+	})
+	iterator := runner.Query(context.Background(), "invoke callback")
+	for {
+		event, ok := iterator.Next()
+		if !ok {
+			break
+		}
+		require.NoError(t, event.Err)
+	}
+	require.True(t, called)
+}
+
+func TestTaskCreatedSessionEventSenderRejectsInvalidSession(t *testing.T) {
+	sender := TaskCreatedSessionEventSender[*schema.Message]()
+	const invalidTaskMessage = "task/background: task id and parent session id are required for task-created event"
+	for _, testCase := range []struct {
+		name string
+		task *TaskSnapshot
+	}{
+		{name: "nil task"},
+		{name: "missing task id", task: &TaskSnapshot{
+			Spec: Spec{RootSessionID: "parent-session"},
+		}},
+		{name: "missing parent session id", task: &TaskSnapshot{
+			Spec: Spec{ID: "task"},
+		}},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			require.EqualError(
+				t,
+				sender(context.Background(), testCase.task),
+				invalidTaskMessage,
+			)
+		})
+	}
+
+	task := &TaskSnapshot{Spec: Spec{
+		ID: "task", RootSessionID: "parent-session",
+	}}
+	require.EqualError(
+		t,
+		sender(context.Background(), task),
+		"task/background: task-created event requires the matching parent Runner session",
+	)
+	runInTaskCreatedEventRunner(t, "other-session", func(ctx context.Context) {
+		require.EqualError(
+			t,
+			sender(ctx, task),
+			"task/background: task-created event requires the matching parent Runner session",
+		)
+	})
+}
+
 func TestManagerSubmitAppendsTaskCreatedSessionEvent_BitsUT(t *testing.T) {
 	ctx := context.Background()
 	const sessionID = "parent-session"
@@ -95,15 +172,28 @@ func TestManagerSubmitAppendsTaskCreatedSessionEvent_BitsUT(t *testing.T) {
 	runner := adk.NewRunner(ctx, adk.RunnerConfig{
 		Agent: agent, SessionID: sessionID, SessionStore: sessionStore,
 	})
-	iterator := runner.Query(ctx, "create task")
+	var liveEvent *adk.TypedAgentEvent[*schema.Message]
+	iterator := runner.Query(ctx, "create task", adk.WithTimelineEvents())
 	for {
 		event, ok := iterator.Next()
 		if !ok {
 			break
 		}
 		require.NoError(t, event.Err)
+		if event.SessionEventVariant != nil &&
+			event.SessionEventVariant.Event != nil &&
+			event.SessionEventVariant.Event.Kind == SessionEventTaskCreated {
+			liveEvent = event
+		}
 	}
 	require.NotNil(t, task)
+	require.NotNil(t, liveEvent)
+	require.Equal(t, sessionID, liveEvent.SessionEventVariant.SessionID)
+	require.Equal(
+		t,
+		TaskCreatedSessionEventID(task.Spec.ID),
+		liveEvent.SessionEventVariant.Event.EventID,
+	)
 
 	result, err := sessionStore.LoadEvents(ctx, sessionID, &adk.LoadSessionEventsRequest{
 		Kinds: []adk.SessionEventKind{SessionEventTaskCreated},
@@ -125,10 +215,12 @@ func TestManagerSubmitAppendsTaskCreatedSessionEvent_BitsUT(t *testing.T) {
 func TestManagerSubmitReturnsUndeliveredSentinelAfterCreate_BitsUT(t *testing.T) {
 	sendErr := errors.New("session timeline unavailable")
 	calls := 0
+	var sent *TaskSnapshot
 	manager := managerWithTaskCreatedSender(
 		t,
-		func(context.Context, *TaskSnapshot) error {
+		func(_ context.Context, task *TaskSnapshot) error {
 			calls++
+			sent = task
 			if calls == 1 {
 				return sendErr
 			}
@@ -140,8 +232,24 @@ func TestManagerSubmitReturnsUndeliveredSentinelAfterCreate_BitsUT(t *testing.T)
 	persisted, err := manager.Submit(context.Background(), &SubmitRequest{Spec: spec})
 	require.ErrorIs(t, err, ErrTaskCreatedEventUndelivered)
 	require.ErrorIs(t, err, sendErr)
+	require.EqualError(
+		t,
+		err,
+		`task/background: immediate task-created event was not delivered: `+
+			`send task-created session event for "task-created-repair": `+
+			`session timeline unavailable`,
+	)
 	require.NotNil(t, persisted)
 	require.Equal(t, spec.ID, persisted.Spec.ID)
+	require.Equal(t, StatusPending, persisted.Status)
+	require.Equal(t, PublicationOnCreate, persisted.Publication)
+	require.NotNil(t, sent)
+	require.NotSame(t, persisted, sent)
+	require.Equal(t, persisted.Spec, sent.Spec)
+	require.Equal(t, persisted.Status, sent.Status)
+	require.Equal(t, persisted.Publication, sent.Publication)
+	require.Equal(t, persisted.Version, sent.Version)
+	require.Equal(t, persisted.CreatedAt, sent.CreatedAt)
 
 	duplicate, err := manager.Submit(context.Background(), &SubmitRequest{Spec: spec})
 	require.Nil(t, duplicate)
@@ -177,9 +285,14 @@ func TestAttack_TaskCreatedFailureLeavesSingleRecoveryRecord(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.Len(t, recovery.Deliveries, 1)
-	require.Equal(t, NotificationTaskCreated, recovery.Deliveries[0].Record.Kind)
-	require.Equal(t, spec.ID, recovery.Deliveries[0].Record.TaskID)
-	require.Equal(t, spec.RootSessionID, recovery.Deliveries[0].Record.SessionID)
+	record := recovery.Deliveries[0].Record
+	require.Equal(t, spec.ID+":1:"+string(NotificationTaskCreated), record.ID)
+	require.Equal(t, NotificationTaskCreated, record.Kind)
+	require.Equal(t, spec.ID, record.TaskID)
+	require.Equal(t, spec.RootSessionID, record.SessionID)
+	require.Equal(t, persisted.Version, record.Version)
+	require.Equal(t, taskcore.InputQueued, record.Delivery)
+	require.Empty(t, record.Data)
 	require.NoError(t, store.Ack(context.Background(), recovery.Deliveries[0].Receipt))
 
 	retried, err := manager.Submit(context.Background(), &SubmitRequest{Spec: spec})

@@ -18,6 +18,7 @@ package subagent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -451,12 +452,7 @@ func TestIntegration_BackgroundResumeSurvivesControllerRestart(t *testing.T) {
 	ctx := context.Background()
 	store := background.NewInMemoryStore(nil)
 	sessionStore := adksession.NewInMemoryStore[*schema.Message](nil)
-	barrier := completionBarrierFunc[*schema.Message](func(
-		context.Context,
-		*CompletionContext[*schema.Message],
-	) (CompletionAction, error) {
-		return CompletionComplete, nil
-	})
+	barrier := completeBarrier[*schema.Message]()
 
 	manager1 := newIntegrationManager(t, store)
 	controller1 := newIntegrationController(
@@ -479,26 +475,43 @@ func TestIntegration_BackgroundResumeSurvivesControllerRestart(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, int64(1), waiting.Attempt)
 	require.NotEmpty(t, waiting.Checkpoint)
+	durableResume, err := decodeRuntimeCheckpoint[*schema.Message](waiting.Checkpoint)
+	require.NoError(t, err)
+	require.Equal(t, runtimeCheckpointResume, durableResume.Mode)
+	require.Len(t, durableResume.TargetIDs, 1)
 	closeIntegrationManager(t, manager1)
 
 	manager2 := newIntegrationManager(t, store)
 	t.Cleanup(func() { closeIntegrationManager(t, manager2) })
+	resumeInfos := make(chan *adk.ResumeInfo, 1)
 	controller2 := newIntegrationController(
 		t, manager2, sessionStore,
-		&interruptThenCompleteAgent{name: "worker"}, barrier, testEventMapper,
+		&interruptThenCompleteAgent{
+			name: "worker", resumeInfos: resumeInfos,
+		},
+		barrier,
+		testEventMapper,
 	)
 	handle2, err := controller2.Handle(ctx, handle1.ID())
 	require.NoError(t, err)
 	require.Equal(t, handle1.ID(), handle2.ID())
 	require.Equal(t, handle1.ChildSessionID(), handle2.ChildSessionID())
 
+	resumePayload, err := json.Marshal(map[string]any{
+		durableResume.TargetIDs[0]: "approved",
+	})
+	require.NoError(t, err)
 	require.NoError(t, handle2.SendInput(ctx, &task.Input{
 		EventID: "resume-after-restart", Kind: ResumeInputKind,
-		Data: []byte(`{"approve":"yes"}`),
+		Data: resumePayload,
 	}))
 	result, err := controller2.Wait(ctx, handle2.ID())
 	require.NoError(t, err)
 	require.Equal(t, "approved", result.FinalMessage.Content)
+	resumeInfo := awaitIntegrationValue(t, resumeInfos)
+	require.True(t, resumeInfo.WasInterrupted)
+	require.True(t, resumeInfo.IsResumeTarget)
+	require.Equal(t, "approved", resumeInfo.ResumeData)
 
 	completed, err := manager2.Get(ctx, handle2.ID())
 	require.NoError(t, err)
@@ -508,6 +521,17 @@ func TestIntegration_BackgroundResumeSurvivesControllerRestart(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, int64(2), mailbox.LatestSequence)
 	require.Equal(t, mailbox.LatestSequence, mailbox.ConsumedCursor)
+	inputs, err := manager2.ListInputs(ctx, &task.ListInputsRequest{
+		TaskID: handle2.ID(),
+	})
+	require.NoError(t, err)
+	require.Len(t, inputs.Inputs, 2)
+	require.Equal(t, ResumeInputKind, inputs.Inputs[1].Kind)
+	decodedResume, err := decodeRuntimeResumeTargets(inputs.Inputs[1].Data)
+	require.NoError(t, err)
+	require.Equal(t, map[string]any{
+		durableResume.TargetIDs[0]: "approved",
+	}, decodedResume)
 }
 
 func TestIntegration_ConcurrentContinueKeepsSingleActiveTask(t *testing.T) {
@@ -523,12 +547,7 @@ func TestIntegration_ConcurrentContinueKeepsSingleActiveTask(t *testing.T) {
 	t.Cleanup(agent.unblock)
 	controller := newIntegrationController(
 		t, manager, sessionStore, agent,
-		completionBarrierFunc[*schema.Message](func(
-			context.Context,
-			*CompletionContext[*schema.Message],
-		) (CompletionAction, error) {
-			return CompletionComplete, nil
-		}),
+		completeBarrier[*schema.Message](),
 		testEventMapper,
 	)
 

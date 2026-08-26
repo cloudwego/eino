@@ -31,6 +31,11 @@ type MailboxStoreConfig struct {
 	New func(testing.TB) task.MailboxStore
 }
 
+type waitInputsResult struct {
+	page *task.ListInputsResult
+	err  error
+}
+
 // RunMailboxStoreConformance validates replay, ordering, waiting, sealing, and
 // nested ownership.
 func RunMailboxStoreConformance( //nolint:funlen // Conformance cases stay together for provider reuse.
@@ -143,19 +148,68 @@ func RunMailboxStoreConformance( //nolint:funlen // Conformance cases stay toget
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
 		mailbox := registerMailbox(t, store, "wait")
-		result := make(chan *task.ListInputsResult, 1)
+		result := make(chan waitInputsResult, 1)
 		go func() {
-			page, _ := store.WaitInputs(ctx, &task.WaitInputsRequest{
+			page, err := store.WaitInputs(ctx, &task.WaitInputsRequest{
 				TaskID: mailbox.TaskID,
 			})
-			result <- page
+			result <- waitInputsResult{page: page, err: err}
 		}()
 		_, err := store.SendInput(ctx, &task.SendInputRequest{
 			TaskID: mailbox.TaskID,
 			Input:  task.Input{EventID: "wake", Kind: "event"},
 		})
 		require.NoError(t, err)
-		require.Len(t, (<-result).Inputs, 1)
+		var waited waitInputsResult
+		select {
+		case waited = <-result:
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for WaitInputs after input was sent")
+		}
+		require.NoError(t, waited.err)
+		require.Len(t, waited.page.Inputs, 1)
+	})
+
+	t.Run("wait_honors_context", func(t *testing.T) {
+		store := config.New(t)
+		mailbox := registerMailbox(t, store, "wait-context")
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		page, err := store.WaitInputs(ctx, &task.WaitInputsRequest{
+			TaskID: mailbox.TaskID,
+		})
+		require.Nil(t, page)
+		require.ErrorIs(t, err, context.Canceled)
+	})
+
+	t.Run("wait_observes_seal", func(t *testing.T) {
+		store := config.New(t)
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		mailbox := registerMailbox(t, store, "wait-seal")
+		result := make(chan waitInputsResult, 1)
+		go func() {
+			page, err := store.WaitInputs(ctx, &task.WaitInputsRequest{
+				TaskID: mailbox.TaskID,
+			})
+			result <- waitInputsResult{page: page, err: err}
+		}()
+
+		sealed, err := store.SealIfIdle(ctx, &task.SealMailboxRequest{
+			TaskID: mailbox.TaskID, ExpectedGeneration: mailbox.Generation,
+		})
+		require.NoError(t, err)
+		var waited waitInputsResult
+		select {
+		case waited = <-result:
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for WaitInputs after mailbox was sealed")
+		}
+		require.NoError(t, waited.err)
+		require.Empty(t, waited.page.Inputs)
+		require.Equal(t, task.MailboxSealed, waited.page.MailboxState)
+		require.Equal(t, sealed.Generation, waited.page.Generation)
 	})
 
 	t.Run("seal_if_idle_and_reject_late_input", func(t *testing.T) {
@@ -220,6 +274,8 @@ func RunMailboxStoreConformance( //nolint:funlen // Conformance cases stay toget
 			},
 		})
 		require.Error(t, err)
+		_, getErr := store.GetMailbox(ctx, "conflicting-child")
+		require.ErrorIs(t, getErr, task.ErrMailboxNotFound)
 		child, err := store.Register(ctx, &task.RegisterMailboxRequest{
 			CandidateTaskID: "child", InvocationID: "child-invocation",
 			Identity: []byte("child"),
@@ -266,6 +322,63 @@ func RunMailboxStoreConformance( //nolint:funlen // Conformance cases stay toget
 		active, err := store.GetActiveMailboxBySession(ctx, "child-session")
 		require.NoError(t, err)
 		require.Equal(t, second.Mailbox.TaskID, active.TaskID)
+	})
+
+	t.Run("not_found_errors", func(t *testing.T) {
+		store := config.New(t)
+		ctx := context.Background()
+		for _, testCase := range []struct {
+			name string
+			call func() error
+		}{
+			{
+				name: "get mailbox",
+				call: func() error {
+					_, err := store.GetMailbox(ctx, "missing")
+					return err
+				},
+			},
+			{
+				name: "send input",
+				call: func() error {
+					_, err := store.SendInput(ctx, &task.SendInputRequest{
+						TaskID: "missing",
+						Input:  task.Input{EventID: "event", Kind: "kind"},
+					})
+					return err
+				},
+			},
+			{
+				name: "list inputs",
+				call: func() error {
+					_, err := store.ListInputs(ctx, &task.ListInputsRequest{
+						TaskID: "missing",
+					})
+					return err
+				},
+			},
+			{
+				name: "wait inputs",
+				call: func() error {
+					_, err := store.WaitInputs(ctx, &task.WaitInputsRequest{
+						TaskID: "missing",
+					})
+					return err
+				},
+			},
+			{
+				name: "advance cursor",
+				call: func() error {
+					return store.AdvanceCursor(ctx, &task.AdvanceCursorRequest{
+						TaskID: "missing",
+					})
+				},
+			},
+		} {
+			t.Run(testCase.name, func(t *testing.T) {
+				require.ErrorIs(t, testCase.call(), task.ErrMailboxNotFound)
+			})
+		}
 	})
 }
 

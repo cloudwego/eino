@@ -66,6 +66,54 @@ func TestPersistedExecutorKeysRemainCompatible(t *testing.T) {
 	require.Equal(t, "eino.dev/recoverable-background-tool", RecoverableExecutorKey)
 }
 
+func TestRegisterExecutors(t *testing.T) {
+	registry := NewRegistry()
+	require.EqualError(
+		t,
+		registerExecutors(nil, registry),
+		"task/tool: manager and tool registry are required",
+	)
+	require.EqualError(
+		t,
+		registerExecutors(mustNewBackgroundManager(t, context.Background(), nil), nil),
+		"task/tool: manager and tool registry are required",
+	)
+
+	t.Run("registers both executor policies idempotently", func(t *testing.T) {
+		manager := mustNewBackgroundManager(t, context.Background(), nil)
+		require.NoError(t, registerExecutors(manager, registry))
+		require.NoError(t, registerExecutors(manager, registry))
+
+		for _, recoverable := range []bool{false, true} {
+			actual, loaded, err := manager.LoadOrRegisterExecutor(&executor{
+				registry: registry, recoverable: recoverable,
+			})
+			require.NoError(t, err)
+			require.True(t, loaded)
+			registered, ok := actual.(*executor)
+			require.True(t, ok)
+			require.Same(t, registry, registered.registry)
+			require.Equal(t, recoverable, registered.recoverable)
+		}
+	})
+
+	t.Run("rejects an incompatible existing registration", func(t *testing.T) {
+		manager := mustNewBackgroundManager(t, context.Background(), nil)
+		_, loaded, err := manager.LoadOrRegisterExecutor(&executor{
+			registry: NewRegistry(),
+		})
+		require.NoError(t, err)
+		require.False(t, loaded)
+
+		err = registerExecutors(manager, registry)
+		require.EqualError(
+			t,
+			err,
+			`task/tool: executor key "eino.dev/background-tool" is already registered incompatibly`,
+		)
+	})
+}
+
 func TestRecoveryRequestsExposeCheckpoint_BitsUT(t *testing.T) {
 	_, exists := reflect.TypeOf(RecoverRequest{}).FieldByName("Checkpoint")
 	require.True(t, exists)
@@ -73,55 +121,188 @@ func TestRecoveryRequestsExposeCheckpoint_BitsUT(t *testing.T) {
 	require.True(t, exists)
 }
 
-func TestExecutorValidationBoundaries(t *testing.T) {
+func TestExecutorValidateSpec(t *testing.T) {
 	registry := NewRegistry()
-	plain := &plainFakeTool{start: func(context.Context, *StartRequest) (Run, error) {
-		return nil, nil
-	}}
-	recoverable := &fakeTool{
-		start:   func(context.Context, *StartRequest) (Run, error) { return nil, nil },
-		recover: func(context.Context, *RecoverRequest) (Run, error) { return nil, nil },
+	plain := &plainFakeTool{}
+	recoverable := &fakeTool{}
+	validationErr := errors.New("arguments rejected")
+	validating := &submitValidationTool{
+		validate: func(arguments string) error {
+			require.Equal(t, `{"value":"rejected"}`, arguments)
+			return validationErr
+		},
 	}
 	require.NoError(t, registry.Register(&Registration{Info: toolInfo("plain"), Tool: plain}))
 	require.NoError(t, registry.Register(&Registration{Info: toolInfo("recoverable"), Tool: recoverable}))
+	require.NoError(t, registry.Register(&Registration{Info: toolInfo("validating"), Tool: validating}))
+	registry.plain["recoverable-in-plain"] = &Registration{
+		Info: toolInfo("recoverable-in-plain"), Tool: recoverable,
+	}
+	registry.recoverable["plain-in-recoverable"] = &Registration{
+		Info: toolInfo("plain-in-recoverable"), Tool: plain,
+	}
 	plainExecutor := &executor{registry: registry}
 	recoverableExecutor := &executor{registry: registry, recoverable: true}
-
-	require.NoError(t, plainExecutor.ValidateSpec(background.Spec{
-		ExecutorKey: ExecutorKey, Kind: "background_tool",
-		Payload: encodedPayload(t, "plain", `{}`),
-	}))
-	require.NoError(t, recoverableExecutor.ValidateSpec(background.Spec{
-		ExecutorKey: RecoverableExecutorKey, Kind: "background_tool",
-		Payload: encodedPayload(t, "recoverable", `{}`),
-	}))
-	for _, spec := range []background.Spec{
-		{},
-		{ExecutorKey: ExecutorKey, Kind: "wrong", Payload: encodedPayload(t, "plain", `{}`)},
-		{ExecutorKey: ExecutorKey, Kind: "background_tool", Payload: []byte(`{`)},
-		{ExecutorKey: ExecutorKey, Kind: "background_tool", Payload: []byte(`{"version":2}`)},
-		{ExecutorKey: ExecutorKey, Kind: "background_tool", Payload: encodedPayload(t, "missing", `{}`)},
-		{ExecutorKey: ExecutorKey, Kind: "background_tool", Payload: encodedPayload(t, "recoverable", `{}`)},
-	} {
-		require.Error(t, plainExecutor.ValidateSpec(spec))
+	spec := func(executorKey, toolName, arguments string) background.Spec {
+		return background.Spec{
+			ExecutorKey: executorKey,
+			Kind:        "background_tool",
+			Payload:     encodedPayload(t, toolName, arguments),
+		}
 	}
-	require.Error(t, recoverableExecutor.ValidateSpec(background.Spec{
-		ExecutorKey: RecoverableExecutorKey, Kind: "background_tool",
-		Payload: encodedPayload(t, "plain", `{}`),
+
+	require.EqualError(
+		t,
+		plainExecutor.ValidateSpec(background.Spec{}),
+		"task/tool: invalid executor key or task kind",
+	)
+	require.EqualError(
+		t,
+		plainExecutor.ValidateSpec(background.Spec{
+			ExecutorKey: ExecutorKey, Kind: "background_tool", Payload: []byte(`{`),
+		}),
+		"task/tool: decode payload: unexpected end of JSON input",
+	)
+	err := plainExecutor.ValidateSpec(background.Spec{
+		ExecutorKey: ExecutorKey,
+		Kind:        "background_tool",
+		Payload:     []byte(`{"version":2}`),
+	})
+	require.EqualError(
+		t,
+		err,
+		"task/background: unsupported executor payload version: managed-tool payload version 2",
+	)
+	require.ErrorIs(t, err, background.ErrUnsupportedExecutorPayloadVersion)
+	require.EqualError(
+		t,
+		plainExecutor.ValidateSpec(spec(ExecutorKey, "plain", "")),
+		"task/tool: payload tool name and arguments are required",
+	)
+	require.EqualError(
+		t,
+		plainExecutor.ValidateSpec(spec(ExecutorKey, "missing", `{}`)),
+		`task/tool: tool "missing" is not registered for executor "eino.dev/background-tool"`,
+	)
+	require.EqualError(
+		t,
+		plainExecutor.ValidateSpec(spec(ExecutorKey, "recoverable-in-plain", `{}`)),
+		`task/tool: recoverable tool "recoverable-in-plain" used plain executor`,
+	)
+	require.EqualError(
+		t,
+		recoverableExecutor.ValidateSpec(
+			spec(RecoverableExecutorKey, "plain-in-recoverable", `{}`),
+		),
+		`task/tool: tool "plain-in-recoverable" is not recoverable`,
+	)
+	require.ErrorIs(
+		t,
+		plainExecutor.ValidateSpec(spec(ExecutorKey, "validating", `{"value":"rejected"}`)),
+		validationErr,
+	)
+	require.NoError(t, plainExecutor.ValidateSpec(spec(ExecutorKey, "plain", `{}`)))
+	require.NoError(
+		t,
+		recoverableExecutor.ValidateSpec(
+			spec(RecoverableExecutorKey, "recoverable", `{}`),
+		),
+	)
+}
+
+func TestExecutorValidateExecution(t *testing.T) {
+	registry := NewRegistry()
+	require.NoError(t, registry.Register(&Registration{
+		Info: toolInfo("plain"), Tool: &plainFakeTool{},
 	}))
-	require.Error(t, plainExecutor.ValidateExecution(context.Background(), nil))
-	require.Error(t, plainExecutor.ValidateExecution(context.Background(), &background.TaskSnapshot{
-		Spec: background.Spec{
-			ExecutorKey: ExecutorKey, Kind: "background_tool",
-			Payload: encodedPayload(t, "missing", `{}`),
+	plainExecutor := &executor{registry: registry}
+
+	require.EqualError(
+		t,
+		plainExecutor.ValidateExecution(context.Background(), nil),
+		"task/tool: task is required",
+	)
+	require.EqualError(t, plainExecutor.ValidateExecution(
+		context.Background(),
+		&background.TaskSnapshot{
+			Spec: background.Spec{
+				ExecutorKey: ExecutorKey, Kind: "background_tool",
+				Payload: encodedPayload(t, "missing", `{}`),
+			},
 		},
-	}))
+	), `task/tool: tool "missing" is unavailable`)
 	require.NoError(t, plainExecutor.ValidateExecution(context.Background(), &background.TaskSnapshot{
 		Spec: background.Spec{
 			ExecutorKey: ExecutorKey, Kind: "background_tool",
 			Payload: encodedPayload(t, "plain", `{}`),
 		},
 	}))
+}
+
+func TestEncodeManagedCheckpointAtCursor(t *testing.T) {
+	for _, testCase := range []struct {
+		name       string
+		request    *InputRequest
+		checkpoint []byte
+		cursor     int64
+		wantErr    string
+	}{
+		{
+			name:    "negative cursor",
+			cursor:  -1,
+			wantErr: "task/tool: input cursor is invalid",
+		},
+		{
+			name:       "oversized tool checkpoint",
+			checkpoint: make([]byte, maxToolCheckpointBytes+1),
+			wantErr:    "task/tool: tool checkpoint exceeds configured bounds",
+		},
+		{
+			name:    "empty request ID",
+			request: &InputRequest{},
+			wantErr: "task/tool: waiting-input outcome requires an input request ID",
+		},
+		{
+			name:    "oversized request ID",
+			request: &InputRequest{ID: strings.Repeat("i", maxInputRequestIDBytes+1)},
+			wantErr: "task/tool: input request ID exceeds configured bounds",
+		},
+		{
+			name: "oversized request data",
+			request: &InputRequest{
+				ID: "approval", Data: make([]byte, maxInputRequestDataBytes+1),
+			},
+			wantErr: "task/tool: input request data exceeds configured bounds",
+		},
+		{
+			name:    "invalid request JSON",
+			request: &InputRequest{ID: "approval", Data: []byte(`{`)},
+			wantErr: "task/tool: input request data must be valid JSON",
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			data, err := encodeManagedCheckpointAtCursor(
+				testCase.request,
+				testCase.checkpoint,
+				testCase.cursor,
+			)
+			require.Nil(t, data)
+			require.EqualError(t, err, testCase.wantErr)
+		})
+	}
+
+	request := &InputRequest{ID: "approval", Data: json.RawMessage(`{"answer":true}`)}
+	toolCheckpoint := []byte("opaque")
+	data, err := encodeManagedCheckpointAtCursor(request, toolCheckpoint, 7)
+	require.NoError(t, err)
+	var checkpoint managedCheckpoint
+	require.NoError(t, json.Unmarshal(data, &checkpoint))
+	require.Equal(t, managedCheckpointVersion, checkpoint.Version)
+	require.True(t, checkpoint.Started)
+	require.Equal(t, int64(7), checkpoint.InputCursor)
+	require.Equal(t, []byte("opaque"), checkpoint.ToolCheckpoint)
+	require.Equal(t, "approval", checkpoint.Request.ID)
+	require.JSONEq(t, `{"answer":true}`, string(checkpoint.Request.Data))
 }
 
 func TestPayloadAndResultValidationBoundaries(t *testing.T) {
@@ -280,23 +461,114 @@ func TestPayloadAndResultValidationBoundaries(t *testing.T) {
 }
 
 func TestEncodeEventRejectsMixedVariants_BitsUT(t *testing.T) {
-	for _, event := range []*ManagedToolResponseEvent{
-		nil,
-		{Type: ManagedToolResponseEventUpdate},
-		{Type: ManagedToolResponseEventUpdate, Update: &Update{}, TaskID: "task"},
-		{Type: ManagedToolResponseEventLaunchResult},
+	for _, testCase := range []struct {
+		name  string
+		event *ManagedToolResponseEvent
+		err   string
+	}{
 		{
-			Type: ManagedToolResponseEventLaunchResult, TaskID: "task",
-			Status: background.StatusRunning, Output: "not terminal",
+			name: "nil",
+			err:  "task/tool: response event is required",
 		},
 		{
-			Type: ManagedToolResponseEventLaunchResult, TaskID: "task",
-			Status: background.StatusCompleted, Error: "bad",
+			name:  "unknown type",
+			event: &ManagedToolResponseEvent{Type: "unknown"},
+			err:   "task/tool: unknown response event type",
+		},
+		{
+			name:  "update missing payload",
+			event: &ManagedToolResponseEvent{Type: ManagedToolResponseEventUpdate},
+			err:   "task/tool: invalid update response event",
+		},
+		{
+			name: "update mixed with result fields",
+			event: &ManagedToolResponseEvent{
+				Type: ManagedToolResponseEventUpdate, Update: &Update{},
+				TaskID: "task", Status: background.StatusRunning,
+				Description: "work", Output: "output", Error: "error",
+				InputRequest: &InputRequest{ID: "request"},
+			},
+			err: "task/tool: invalid update response event",
+		},
+		{
+			name:  "launch missing id and status",
+			event: &ManagedToolResponseEvent{Type: ManagedToolResponseEventLaunchResult},
+			err:   "task/tool: invalid launch-result response event",
+		},
+		{
+			name: "launch mixed with update",
+			event: &ManagedToolResponseEvent{
+				Type: ManagedToolResponseEventLaunchResult, TaskID: "task",
+				Status: background.StatusRunning, Update: &Update{},
+			},
+			err: "task/tool: invalid launch-result response event",
+		},
+		{
+			name: "launch non-completed output",
+			event: &ManagedToolResponseEvent{
+				Type: ManagedToolResponseEventLaunchResult, TaskID: "task",
+				Status: background.StatusRunning, Output: "not terminal",
+			},
+			err: "task/tool: non-completed launch result cannot contain output",
+		},
+		{
+			name: "launch completed error",
+			event: &ManagedToolResponseEvent{
+				Type: ManagedToolResponseEventLaunchResult, TaskID: "task",
+				Status: background.StatusCompleted, Error: "bad",
+			},
+			err: "task/tool: completed launch result cannot contain error",
+		},
+		{
+			name: "launch waiting without request",
+			event: &ManagedToolResponseEvent{
+				Type: ManagedToolResponseEventLaunchResult, TaskID: "task",
+				Status: background.StatusWaitingInput,
+			},
+			err: "task/tool: waiting launch result requires only an input request",
+		},
+		{
+			name: "launch non-waiting request",
+			event: &ManagedToolResponseEvent{
+				Type: ManagedToolResponseEventLaunchResult, TaskID: "task",
+				Status:       background.StatusRunning,
+				InputRequest: &InputRequest{ID: "request"},
+			},
+			err: "task/tool: non-waiting launch result cannot contain an input request",
+		},
+		{
+			name: "foreground exposes task id",
+			event: &ManagedToolResponseEvent{
+				Type:   ManagedToolResponseEventForegroundResult,
+				TaskID: "task", Status: background.StatusCompleted,
+			},
+			err: "task/tool: invalid foreground-result response event",
+		},
+		{
+			name: "foreground non-completed output",
+			event: &ManagedToolResponseEvent{
+				Type:   ManagedToolResponseEventForegroundResult,
+				Status: background.StatusFailed, Output: "partial",
+			},
+			err: "task/tool: non-completed foreground result cannot contain output",
 		},
 	} {
-		_, err := encodeEvent(event)
-		require.Error(t, err)
+		t.Run(testCase.name, func(t *testing.T) {
+			_, err := encodeEvent(testCase.event)
+			require.EqualError(t, err, testCase.err)
+		})
 	}
+
+	encoded, err := encodeEvent(&ManagedToolResponseEvent{
+		Type: ManagedToolResponseEventLaunchResult, TaskID: "task",
+		Status: background.StatusRunning, Description: "work",
+	})
+	require.NoError(t, err)
+	require.Equal(
+		t,
+		"{\"type\":\"launch_result\",\"task_id\":\"task\",\"status\":\"running\",\"description\":\"work\"}\n",
+		encoded,
+	)
 }
 
 type reserveFailure struct {
@@ -372,17 +644,31 @@ func TestManagedToolConstructionAndSubmissionErrors(t *testing.T) {
 	}
 }
 
-func TestFormattingAndProjectionHelpers(t *testing.T) {
+func TestFormatProgressEvent(t *testing.T) {
+	require.Empty(t, formatProgressEvent(nil))
+	require.Equal(t, "not-json", formatProgressEvent(&background.TaskEventPart{
+		Data: []byte("not-json"),
+	}))
 	require.Equal(t, "[update]", formatProgressEvent(&background.TaskEventPart{
 		Data: []byte(`{"event_id":"id"}`),
 	}))
-	require.Contains(t, formatProgressEvent(&background.TaskEventPart{
-		Data: []byte(`{"event_id":"id","metadata":{"artifact":"ref"}}`),
-	}), "artifact")
-	require.Equal(t, "[update] hello", formatProgressEvent(&background.TaskEventPart{
-		Data: []byte(`{"event_id":"id","data":"aGVsbG8="}`),
+	require.Equal(t, `[update] {"artifact":"ref"}`, formatProgressEvent(
+		&background.TaskEventPart{
+			Data: []byte(`{"event_id":"id","metadata":{"artifact":"ref"}}`),
+		},
+	))
+	require.Equal(t, "[stdout] hello", formatProgressEvent(&background.TaskEventPart{
+		Data: []byte(`{"event_id":"id","kind":"stdout","data":"aGVsbG8="}`),
 	}))
+	raw := strings.Repeat("x", 1025)
+	require.Equal(
+		t,
+		strings.Repeat("x", 1024)+"...[truncated]",
+		formatProgressEvent(&background.TaskEventPart{Data: []byte(raw)}),
+	)
+}
 
+func TestProjectionHelpers(t *testing.T) {
 	require.Nil(t, cloneUpdate(nil))
 	update := &Update{Data: []byte("data"), Metadata: map[string]string{"key": "value"}}
 	cloned := cloneUpdate(update)

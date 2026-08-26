@@ -19,11 +19,14 @@ package subagent
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 
 	"github.com/cloudwego/eino/adk"
+	adksession "github.com/cloudwego/eino/adk/session"
 	"github.com/cloudwego/eino/adk/task"
 	"github.com/cloudwego/eino/adk/task/background"
 	"github.com/cloudwego/eino/schema"
@@ -33,12 +36,7 @@ func TestControllerReadProgressIsolatesPersistentSessionByTask(t *testing.T) {
 	ctx := context.Background()
 	controller, manager, sessionStore := newControllerForTest(
 		t,
-		completionBarrierFunc[*schema.Message](func(
-			context.Context,
-			*CompletionContext[*schema.Message],
-		) (CompletionAction, error) {
-			return CompletionComplete, nil
-		}),
+		completeBarrier[*schema.Message](),
 		testEventMapper,
 	)
 	metadata, err := json.Marshal(&runtimeMetadata{
@@ -106,6 +104,55 @@ func TestControllerReadProgressIsolatesPersistentSessionByTask(t *testing.T) {
 	require.Contains(t, progress, "approval")
 }
 
+func TestReadProgressEnforcesByteLimit(t *testing.T) {
+	ctx := context.Background()
+	store := adksession.NewInMemoryStore[*schema.Message](nil)
+	const (
+		sessionID = "byte-limit-session"
+		taskID    = "byte-limit-task"
+	)
+	events := []*adk.SessionEvent[*schema.Message]{{
+		EventID: "query", Kind: adk.SessionEventMessage,
+		Message: schema.UserMessage("query"),
+		Extra:   map[string]any{taskIDEventExtraKey: taskID},
+	}}
+	for index := 1; index <= 70; index++ {
+		content := fmt.Sprintf("%03d%s", index, strings.Repeat("x", 1020))
+		events = append(events, &adk.SessionEvent[*schema.Message]{
+			EventID: fmt.Sprintf("progress-%03d", index),
+			Kind:    adk.SessionEventMessage,
+			Message: schema.AssistantMessage(content, nil),
+			Extra:   map[string]any{taskIDEventExtraKey: taskID},
+		})
+	}
+	require.NoError(t, store.AppendEvents(ctx, sessionID, events))
+
+	progress, err := readProgress[*schema.Message](
+		ctx,
+		adk.SessionEventStore[*schema.Message](store),
+		&background.TaskSnapshot{
+			Spec: background.Spec{ID: taskID},
+		},
+		sessionID,
+		"worker",
+		func(_ context.Context, _ string, message *schema.Message) (string, error) {
+			return message.Content, nil
+		},
+	)
+	require.NoError(t, err)
+	lines := strings.Split(progress, "\n")
+	require.Len(t, lines, 66)
+	require.Equal(t, "Transcript:", lines[0])
+	require.Equal(t, "[transcript records omitted due to display limits]", lines[1])
+	require.True(t, strings.HasPrefix(lines[2], "007"))
+	require.True(t, strings.HasPrefix(lines[len(lines)-1], "070"))
+	require.LessOrEqual(
+		t,
+		len(strings.Join(lines[2:], "\n"))+1,
+		maxProgressBytes,
+	)
+}
+
 func TestControllerReadProgressValidation(t *testing.T) {
 	var nilController *Controller[*schema.Message]
 	_, err := nilController.ReadProgress(
@@ -119,12 +166,7 @@ func TestControllerReadProgressValidation(t *testing.T) {
 
 	controller, _, _ := newControllerForTest(
 		t,
-		completionBarrierFunc[*schema.Message](func(
-			context.Context,
-			*CompletionContext[*schema.Message],
-		) (CompletionAction, error) {
-			return CompletionComplete, nil
-		}),
+		completeBarrier[*schema.Message](),
 		testEventMapper,
 	)
 	progress, err := controller.ReadProgress(
@@ -142,12 +184,7 @@ func TestControllerReadProgressValidatesPersistedRuntimeMetadata(t *testing.T) {
 	ctx := context.Background()
 	controller, manager, _ := newControllerForTest(
 		t,
-		completionBarrierFunc[*schema.Message](func(
-			context.Context,
-			*CompletionContext[*schema.Message],
-		) (CompletionAction, error) {
-			return CompletionComplete, nil
-		}),
+		completeBarrier[*schema.Message](),
 		testEventMapper,
 	)
 	validMetadata, err := json.Marshal(&runtimeMetadata{

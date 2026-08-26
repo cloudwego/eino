@@ -101,7 +101,9 @@ func TestAttack_FormatHintMatchesTaskEventPersister(t *testing.T) {
 			require.Equal(t, testCase.wantJSONL, containsJSONLHint(result))
 
 			close(release)
-			require.NotNil(t, terminalTask(t, manager))
+			completed := terminalTask(t, manager)
+			require.NotNil(t, completed)
+			require.Equal(t, background.StatusCompleted, completed.Status)
 		})
 	}
 }

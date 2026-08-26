@@ -23,6 +23,8 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+
+	taskcore "github.com/cloudwego/eino/adk/task"
 )
 
 func TestNotifyParentRequiresManagedAttemptContext_BitsUT(t *testing.T) {
@@ -40,7 +42,7 @@ func TestNotifyParentRequiresManagedAttemptContext_BitsUT(t *testing.T) {
 	}))
 }
 
-func TestNotifyParentValidatesRequestBoundsBeforeAuthority_BitsUT(t *testing.T) {
+func TestValidateNotifyParentRequest(t *testing.T) {
 	tests := []struct {
 		name string
 		req  *NotifyParentRequest
@@ -96,10 +98,35 @@ func TestNotifyParentValidatesRequestBoundsBeforeAuthority_BitsUT(t *testing.T) 
 			},
 			err: "task/background: notification data exceeds configured bounds",
 		},
+		{
+			name: "invalid delivery",
+			req: &NotifyParentRequest{
+				EventID: "event", Kind: "application.update",
+				Delivery: taskcore.InputDelivery(99),
+			},
+			err: "task/background: notification delivery is invalid",
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			require.EqualError(t, NotifyParent(context.Background(), test.req), test.err)
+			require.EqualError(t, validateNotifyParentRequest(test.req), test.err)
+		})
+	}
+
+	for _, testCase := range []struct {
+		name     string
+		delivery taskcore.InputDelivery
+	}{
+		{name: "queued delivery", delivery: taskcore.InputQueued},
+		{name: "preempt delivery", delivery: taskcore.InputPreempt},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			require.NoError(t, validateNotifyParentRequest(&NotifyParentRequest{
+				EventID:  "event",
+				Kind:     "application.update",
+				Data:     []byte("data"),
+				Delivery: testCase.delivery,
+			}))
 		})
 	}
 }
@@ -123,7 +150,7 @@ func TestManagerBindsFreshNotifyParentAuthorityPerAttempt_BitsUT(t *testing.T) {
 			case 2:
 				require.NoError(t, NotifyParent(ctx, &NotifyParentRequest{
 					EventID: "second", Kind: "application.progress",
-					Data: []byte("second"),
+					Data: []byte("second"), Delivery: taskcore.InputPreempt,
 				}))
 				return &ExecutionResult{
 					Action: ExecutionActionComplete, Data: []byte("done"),
@@ -158,7 +185,9 @@ func TestManagerBindsFreshNotifyParentAuthorityPerAttempt_BitsUT(t *testing.T) {
 	}
 	require.Len(t, custom, 2)
 	require.Equal(t, "first", string(custom[0].Data))
+	require.Equal(t, taskcore.InputQueued, custom[0].Delivery)
 	require.Equal(t, "second", string(custom[1].Data))
+	require.Equal(t, taskcore.InputPreempt, custom[1].Delivery)
 }
 
 type notificationWriterStub struct {
@@ -195,8 +224,11 @@ func TestNotifyParentRuntimePoisonAndWriterErrorSemantics_BitsUT(t *testing.T) {
 		EventID: "event", Kind: "application.progress", Data: data,
 	}), writerErr)
 	require.Nil(t, runtime.poison)
+	require.Equal(t, "event", writer.received.EventID)
+	require.Equal(t, NotificationKind("application.progress"), writer.received.Kind)
 	require.Equal(t, "data", string(data))
 	require.Equal(t, "data", string(writer.received.Data))
+	require.Equal(t, taskcore.InputQueued, writer.received.Delivery)
 
 	runtime.poison = ErrLeaseLost
 	require.Error(t, NotifyParent(ctx, &NotifyParentRequest{

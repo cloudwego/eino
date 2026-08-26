@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -53,12 +54,43 @@ type preemptModel struct {
 	runs    int64
 }
 
+type activeLookupBarrierStore struct {
+	*background.InMemoryStore
+	found   chan struct{}
+	resume  chan struct{}
+	pause   sync.Once
+	release sync.Once
+	childID string
+}
+
+func (s *activeLookupBarrierStore) GetActiveMailboxBySession(
+	ctx context.Context,
+	childSessionID string,
+) (*task.Mailbox, error) {
+	mailbox, err := s.InMemoryStore.GetActiveMailboxBySession(ctx, childSessionID)
+	if err == nil && childSessionID == s.childID {
+		s.pause.Do(func() {
+			close(s.found)
+			select {
+			case <-s.resume:
+			case <-ctx.Done():
+			}
+		})
+	}
+	return mailbox, err
+}
+
+func (s *activeLookupBarrierStore) unblock() {
+	s.release.Do(func() { close(s.resume) })
+}
+
 type resumableTestAgent struct {
 	name string
 }
 
 type interruptThenCompleteAgent struct {
-	name string
+	name        string
+	resumeInfos chan<- *adk.ResumeInfo
 }
 
 type emptyResultAgent struct {
@@ -163,12 +195,17 @@ func (a *interruptThenCompleteAgent) Run(
 }
 func (a *interruptThenCompleteAgent) Resume(
 	_ context.Context,
-	_ *adk.ResumeInfo,
+	info *adk.ResumeInfo,
 	_ ...adk.AgentRunOption,
 ) *adk.AsyncIterator[*adk.AgentEvent] {
+	if a.resumeInfos != nil {
+		copy := *info
+		a.resumeInfos <- &copy
+	}
+	content, _ := info.ResumeData.(string)
 	iter, generator := adk.NewAsyncIteratorPair[*adk.AgentEvent]()
 	generator.Send(adk.EventFromMessage(
-		schema.AssistantMessage("approved", nil), nil, schema.Assistant, a.name,
+		schema.AssistantMessage(content, nil), nil, schema.Assistant, a.name,
 	))
 	generator.Close()
 	return iter
@@ -204,6 +241,15 @@ func (f completionBarrierFunc[M]) Check(
 	input *CompletionContext[M],
 ) (CompletionAction, error) {
 	return f(ctx, input)
+}
+
+func completeBarrier[M adk.MessageType]() CompletionBarrier[M] {
+	return completionBarrierFunc[M](func(
+		context.Context,
+		*CompletionContext[M],
+	) (CompletionAction, error) {
+		return CompletionComplete, nil
+	})
 }
 
 func newControllerForTest(
@@ -259,12 +305,7 @@ func TestControllerForegroundCompletesWithoutBackgroundRecord(t *testing.T) {
 	ctx := context.Background()
 	runtime, manager, sessionStore := newControllerForTest(
 		t,
-		completionBarrierFunc[*schema.Message](func(
-			context.Context,
-			*CompletionContext[*schema.Message],
-		) (CompletionAction, error) {
-			return CompletionComplete, nil
-		}),
+		completeBarrier[*schema.Message](),
 		testEventMapper,
 	)
 	request := &StartRequest[*schema.Message]{
@@ -288,7 +329,15 @@ func TestControllerForegroundCompletesWithoutBackgroundRecord(t *testing.T) {
 		ctx, handle.ChildSessionID(), &adk.LoadSessionEventsRequest{},
 	)
 	require.NoError(t, err)
-	require.NotEmpty(t, events.Events)
+	require.Len(t, events.Events, 4)
+	require.Equal(t, adk.SessionEventSessionStatusRunning, events.Events[0].Kind)
+	require.Equal(t, adk.SessionEventMessage, events.Events[1].Kind)
+	require.Equal(t, schema.User, events.Events[1].Message.Role)
+	require.Equal(t, "work", events.Events[1].Message.Content)
+	require.Equal(t, adk.SessionEventMessage, events.Events[2].Kind)
+	require.Equal(t, schema.Assistant, events.Events[2].Message.Role)
+	require.Equal(t, "done", events.Events[2].Message.Content)
+	require.Equal(t, adk.SessionEventSessionStatusIdle, events.Events[3].Kind)
 	replayedHandle, err := runtime.Start(ctx, request)
 	require.NoError(t, err)
 	require.Equal(t, handle.ID(), replayedHandle.ID())
@@ -308,12 +357,7 @@ func TestAttack_InactiveForegroundNotificationSurvivesReplay(t *testing.T) {
 	ctx := context.Background()
 	runtime, manager, _ := newControllerForTest(
 		t,
-		completionBarrierFunc[*schema.Message](func(
-			context.Context,
-			*CompletionContext[*schema.Message],
-		) (CompletionAction, error) {
-			return CompletionComplete, nil
-		}),
+		completeBarrier[*schema.Message](),
 		testEventMapper,
 	)
 	input := &adk.AgentInput{
@@ -374,12 +418,7 @@ func TestAttack_ForegroundTerminalCandidateSealsWithoutReplay(t *testing.T) {
 	ctx := context.Background()
 	runtime, manager, checkpointStore := newControllerForTest(
 		t,
-		completionBarrierFunc[*schema.Message](func(
-			context.Context,
-			*CompletionContext[*schema.Message],
-		) (CompletionAction, error) {
-			return CompletionComplete, nil
-		}),
+		completeBarrier[*schema.Message](),
 		testEventMapper,
 	)
 	input := &adk.AgentInput{
@@ -442,6 +481,203 @@ func TestAttack_ForegroundTerminalCandidateSealsWithoutReplay(t *testing.T) {
 	require.Equal(t, task.MailboxSealed, mailbox.State)
 }
 
+func TestRecoverForegroundResult(t *testing.T) {
+	ctx := context.Background()
+	runtime, manager, checkpointStore := newControllerForTest(
+		t,
+		completeBarrier[*schema.Message](),
+		testEventMapper,
+	)
+	metadata, err := json.Marshal(&runtimeMetadata{
+		Version: runtimeMetadataVersion, ParentSessionID: "parent",
+		RootSessionID: "parent", ChildSessionID: "recovered-child",
+		AgentName: "worker", StartMode: task.StartModeForeground,
+	})
+	require.NoError(t, err)
+	registered, err := manager.RegisterMailbox(ctx, &task.RegisterMailboxRequest{
+		CandidateTaskID: "recovered-foreground",
+		InvocationID:    "parent:recovered",
+		Identity:        metadata,
+		RootSessionID:   "parent",
+		ChildSessionID:  "recovered-child",
+	})
+	require.NoError(t, err)
+
+	_, err = runtime.recoverForegroundResult(ctx, registered.Mailbox)
+	require.EqualError(t, err, "task/subagent: foreground mailbox is not sealed")
+	sealed, err := manager.SealMailbox(ctx, &task.SealMailboxRequest{
+		TaskID:             registered.Mailbox.TaskID,
+		ExpectedCursor:     0,
+		ExpectedGeneration: registered.Mailbox.Generation,
+	})
+	require.NoError(t, err)
+	_, err = runtime.recoverForegroundResult(ctx, sealed)
+	require.EqualError(t, err, "task/subagent: sealed foreground result is unavailable")
+
+	failedCheckpoint, err := json.Marshal(&foregroundResultCheckpoint{
+		Version: foregroundResultVersion,
+		Status:  task.OutcomeFailed,
+		Error:   "persisted failure",
+	})
+	require.NoError(t, err)
+	require.NoError(t, checkpointStore.Set(
+		ctx,
+		runtimeForegroundResultCheckpointID(sealed.TaskID),
+		failedCheckpoint,
+	))
+	_, err = runtime.recoverForegroundResult(ctx, sealed)
+	require.EqualError(t, err, "persisted failure")
+
+	final, err := encodeRuntimeMessage(schema.AssistantMessage("recovered", nil))
+	require.NoError(t, err)
+	completedCheckpoint, err := json.Marshal(&foregroundResultCheckpoint{
+		Version:      foregroundResultVersion,
+		Status:       task.OutcomeCompleted,
+		FinalMessage: final,
+	})
+	require.NoError(t, err)
+	require.NoError(t, checkpointStore.Set(
+		ctx,
+		runtimeForegroundResultCheckpointID(sealed.TaskID),
+		completedCheckpoint,
+	))
+	result, err := runtime.recoverForegroundResult(ctx, sealed)
+	require.NoError(t, err)
+	require.Equal(t, sealed.TaskID, result.Handle.ID())
+	require.Equal(t, "recovered-child", result.Handle.ChildSessionID())
+	require.Equal(t, "recovered", result.FinalMessage.Content)
+}
+
+func TestSubmitTaskAdoptionIsIdempotent(t *testing.T) {
+	ctx := context.Background()
+	runtime, manager, _ := newControllerForTest(
+		t,
+		completeBarrier[*schema.Message](),
+		testEventMapper,
+	)
+	metadata := &runtimeMetadata{
+		Version: runtimeMetadataVersion, ParentSessionID: "parent",
+		RootSessionID: "parent", ChildSessionID: "adopted-child",
+		AgentName: "worker", Description: "adopt task",
+		StartMode: task.StartModeForeground,
+	}
+	identity, err := json.Marshal(metadata)
+	require.NoError(t, err)
+	registered, err := manager.RegisterMailbox(ctx, &task.RegisterMailboxRequest{
+		CandidateTaskID: "adopted-task",
+		InvocationID:    "parent:adopted",
+		Identity:        identity,
+		RootSessionID:   "parent",
+		ChildSessionID:  metadata.ChildSessionID,
+	})
+	require.NoError(t, err)
+	handle := runtime.newHandle(registered.Mailbox.TaskID, metadata.ChildSessionID)
+	checkpoint, err := encodeRuntimeCheckpoint[*schema.Message](0, nil)
+	require.NoError(t, err)
+
+	first, err := runtime.submitTask(ctx, handle, metadata, checkpoint)
+	require.NoError(t, err)
+	require.Equal(t, background.StatusSuspended, first.Status)
+	require.Equal(t, background.PublicationOnBackground, first.Publication)
+	require.Equal(t, checkpoint, first.Checkpoint)
+	require.Equal(t, metadata.Description, first.Spec.Description)
+	require.Equal(t, metadata.ChildSessionID, first.Spec.ID[:0]+handle.ChildSessionID())
+
+	replayed, err := runtime.submitTask(
+		ctx,
+		handle,
+		metadata,
+		[]byte("must not replace the persisted checkpoint"),
+	)
+	require.NoError(t, err)
+	require.Equal(t, first.Spec.ID, replayed.Spec.ID)
+	require.Equal(t, first.Version, replayed.Version)
+	require.Equal(t, checkpoint, replayed.Checkpoint)
+
+	pending, err := manager.ListSuspended(ctx, &background.ListSuspendedRequest{
+		ExecutorKeys: []string{ExecutorKey},
+	})
+	require.NoError(t, err)
+	require.Len(t, pending.Tasks, 1)
+	require.Equal(t, handle.ID(), pending.Tasks[0].Spec.ID)
+}
+
+func TestForegroundRecoveryProcessesInputPendingAtCandidateSeal(t *testing.T) {
+	ctx := context.Background()
+	runtime, manager, checkpointStore := newControllerForTest(
+		t,
+		completeBarrier[*schema.Message](),
+		testEventMapper,
+	)
+	input := &adk.AgentInput{
+		Messages: []*schema.Message{schema.UserMessage("work")},
+	}
+	inputHash, err := stableRuntimeInputHash(input)
+	require.NoError(t, err)
+	metadata, err := json.Marshal(&runtimeMetadata{
+		Version: runtimeMetadataVersion, ParentSessionID: "parent",
+		RootSessionID: "parent", ChildSessionID: "pending-child",
+		AgentName: "worker", StartMode: task.StartModeForeground, InputHash: inputHash,
+	})
+	require.NoError(t, err)
+	registered, err := manager.RegisterMailbox(ctx, &task.RegisterMailboxRequest{
+		CandidateTaskID: "pending-candidate", InvocationID: "parent:pending",
+		Identity: metadata, RootSessionID: "parent",
+		ChildSessionID: "pending-child",
+	})
+	require.NoError(t, err)
+	encoded, err := encodeTypedInput(input)
+	require.NoError(t, err)
+	initialData, err := json.Marshal(encoded)
+	require.NoError(t, err)
+	_, err = manager.SendInput(ctx, &task.SendInputRequest{
+		TaskID: registered.Mailbox.TaskID,
+		Input: task.Input{
+			EventID: "parent:pending:initial",
+			Kind:    initialSignalKind,
+			Data:    initialData,
+		},
+	})
+	require.NoError(t, err)
+	require.NoError(t, manager.AdvanceInputCursor(ctx, &task.AdvanceCursorRequest{
+		TaskID: registered.Mailbox.TaskID, ExpectedCursor: 0, Cursor: 1,
+		ExpectedGeneration: registered.Mailbox.Generation,
+	}))
+	final, err := encodeRuntimeMessage(schema.AssistantMessage("stale candidate", nil))
+	require.NoError(t, err)
+	candidate, err := json.Marshal(&foregroundResultCheckpoint{
+		Version: foregroundResultVersion, Status: task.OutcomeCompleted,
+		InputCursor: 1, FinalMessage: final,
+	})
+	require.NoError(t, err)
+	require.NoError(t, checkpointStore.Set(
+		ctx,
+		runtimeForegroundResultCheckpointID(registered.Mailbox.TaskID),
+		candidate,
+	))
+	_, err = manager.SendInput(ctx, &task.SendInputRequest{
+		TaskID: registered.Mailbox.TaskID,
+		Input: task.Input{
+			EventID: "pending-input", Kind: "external", Data: []byte("pending"),
+		},
+	})
+	require.NoError(t, err)
+
+	handle, err := runtime.Start(ctx, &StartRequest[*schema.Message]{
+		InvocationID: "parent:pending", ParentSessionID: "parent",
+		ChildSessionID: "pending-child", AgentName: "worker",
+		Input: input, StartMode: task.StartModeForeground,
+	})
+	require.NoError(t, err)
+	result, err := runtime.Wait(ctx, handle.ID())
+	require.NoError(t, err)
+	require.Equal(t, "done", result.FinalMessage.Content)
+	mailbox, err := manager.GetMailbox(ctx, handle.ID())
+	require.NoError(t, err)
+	require.Equal(t, task.MailboxSealed, mailbox.State)
+	require.Equal(t, int64(2), mailbox.ConsumedCursor)
+}
+
 func TestAttack_ForegroundFailureIsReplayableAndReleasesSession(t *testing.T) {
 	ctx := context.Background()
 	runtime, manager, _ := newControllerForTest(
@@ -496,12 +732,7 @@ func TestAttack_InactiveForegroundCancelSealsMailbox(t *testing.T) {
 	ctx := context.Background()
 	runtime, manager, _ := newControllerForTest(
 		t,
-		completionBarrierFunc[*schema.Message](func(
-			context.Context,
-			*CompletionContext[*schema.Message],
-		) (CompletionAction, error) {
-			return CompletionComplete, nil
-		}),
+		completeBarrier[*schema.Message](),
 		testEventMapper,
 	)
 	var reason string
@@ -539,14 +770,9 @@ func TestAttack_InactiveForegroundCancelSealsMailbox(t *testing.T) {
 
 func TestControllerBackgroundCompletes(t *testing.T) {
 	ctx := context.Background()
-	runtime, _, _ := newControllerForTest(
+	runtime, manager, _ := newControllerForTest(
 		t,
-		completionBarrierFunc[*schema.Message](func(
-			context.Context,
-			*CompletionContext[*schema.Message],
-		) (CompletionAction, error) {
-			return CompletionComplete, nil
-		}),
+		completeBarrier[*schema.Message](),
 		testEventMapper,
 	)
 	handle, err := runtime.Start(ctx, &StartRequest[*schema.Message]{
@@ -563,10 +789,15 @@ func TestControllerBackgroundCompletes(t *testing.T) {
 	replayed, err := runtime.Wait(ctx, handle.ID())
 	require.NoError(t, err)
 	require.Equal(t, "done", replayed.FinalMessage.Content)
+	completed, err := manager.Get(ctx, handle.ID())
+	require.NoError(t, err)
+	require.Equal(t, background.StatusCompleted, completed.Status)
+	require.Equal(t, int64(1), completed.Attempt)
 }
 
 func TestControllerActiveCancellationInvokesHookOnce(t *testing.T) {
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	agent := &blockingCaptureAgent{
 		started: make(chan struct{}),
 		release: make(chan struct{}),
@@ -575,12 +806,7 @@ func TestControllerActiveCancellationInvokesHookOnce(t *testing.T) {
 	runtime, manager, _ := newControllerWithAgentForTest(
 		t,
 		agent,
-		completionBarrierFunc[*schema.Message](func(
-			context.Context,
-			*CompletionContext[*schema.Message],
-		) (CompletionAction, error) {
-			return CompletionComplete, nil
-		}),
+		completeBarrier[*schema.Message](),
 		testEventMapper,
 	)
 	var cancellationCalls int64
@@ -601,7 +827,7 @@ func TestControllerActiveCancellationInvokesHookOnce(t *testing.T) {
 		},
 	})
 	require.NoError(t, err)
-	<-agent.started
+	awaitIntegrationValue(t, agent.started)
 
 	require.NoError(t, runtime.Cancel(ctx, handle.ID()))
 	agent.unblock()
@@ -617,12 +843,7 @@ func TestControllerForegroundInterruptResumesFromMailbox(t *testing.T) {
 	runtime, _, _ := newControllerWithAgentForTest(
 		t,
 		&interruptThenCompleteAgent{name: "worker"},
-		completionBarrierFunc[*schema.Message](func(
-			context.Context,
-			*CompletionContext[*schema.Message],
-		) (CompletionAction, error) {
-			return CompletionComplete, nil
-		}),
+		completeBarrier[*schema.Message](),
 		testEventMapper,
 	)
 	request := &StartRequest[*schema.Message]{
@@ -655,51 +876,12 @@ func TestControllerForegroundInterruptResumesFromMailbox(t *testing.T) {
 	require.Equal(t, "approved", second.FinalMessage.Content)
 }
 
-func TestAttack_BackgroundInterruptResumeWakesTask(t *testing.T) {
-	ctx := context.Background()
-	runtime, manager, _ := newControllerWithAgentForTest(
-		t,
-		&interruptThenCompleteAgent{name: "worker"},
-		completionBarrierFunc[*schema.Message](func(
-			context.Context,
-			*CompletionContext[*schema.Message],
-		) (CompletionAction, error) {
-			return CompletionComplete, nil
-		}),
-		testEventMapper,
-	)
-	handle, err := runtime.Start(ctx, &StartRequest[*schema.Message]{
-		InvocationID: "parent:background-interrupt", ParentSessionID: "parent",
-		AgentName: "worker", StartMode: task.StartModeBackground,
-		Input: &adk.AgentInput{
-			Messages: []*schema.Message{schema.UserMessage("work")},
-		},
-	})
-	require.NoError(t, err)
-	require.Eventually(t, func() bool {
-		backgroundTask, getErr := manager.Get(ctx, handle.ID())
-		return getErr == nil && backgroundTask.Status == background.StatusWaitingInput
-	}, time.Second, time.Millisecond)
-	require.NoError(t, runtime.SendInput(ctx, handle.ID(), &task.Input{
-		EventID: "resume", Kind: ResumeInputKind,
-		Data: []byte(`{"approve":"yes"}`),
-	}))
-	result, err := runtime.Wait(ctx, handle.ID())
-	require.NoError(t, err)
-	require.Equal(t, "approved", result.FinalMessage.Content)
-}
-
 func TestAttack_MultipleResumeInputsFailClosed(t *testing.T) {
 	ctx := context.Background()
 	runtime, _, _ := newControllerWithAgentForTest(
 		t,
 		&interruptThenCompleteAgent{name: "worker"},
-		completionBarrierFunc[*schema.Message](func(
-			context.Context,
-			*CompletionContext[*schema.Message],
-		) (CompletionAction, error) {
-			return CompletionComplete, nil
-		}),
+		completeBarrier[*schema.Message](),
 		testEventMapper,
 	)
 	request := &StartRequest[*schema.Message]{
@@ -726,61 +908,24 @@ func TestAttack_MultipleResumeInputsFailClosed(t *testing.T) {
 	require.ErrorContains(t, err, "multiple resume")
 }
 
-func TestControllerBarrierSuspendThenContinue(t *testing.T) {
-	ctx := context.Background()
-	var barrierCalls int64
-	runtime, manager, _ := newControllerForTest(
-		t,
-		completionBarrierFunc[*schema.Message](func(
-			context.Context,
-			*CompletionContext[*schema.Message],
-		) (CompletionAction, error) {
-			if atomic.AddInt64(&barrierCalls, 1) > 1 {
-				return CompletionComplete, nil
-			}
-			return CompletionSuspend, nil
-		}),
-		testEventMapper,
-	)
-	handle, err := runtime.Start(ctx, &StartRequest[*schema.Message]{
-		InvocationID: "parent:wait", ParentSessionID: "parent",
-		AgentName: "worker", Input: &adk.AgentInput{
-			Messages: []*schema.Message{schema.UserMessage("work")},
-		},
-		StartMode: task.StartModeForeground,
-	})
-	require.NoError(t, err)
-	require.Eventually(t, func() bool {
-		backgroundTask, getErr := manager.Get(ctx, handle.ID())
-		return getErr == nil && backgroundTask.Status == background.StatusSuspended
-	}, 3*time.Second, 10*time.Millisecond)
-	sent, err := runtime.Continue(ctx, &ContinueRequest[*schema.Message]{
-		ChildSessionID: handle.ChildSessionID(),
-		InvocationID:   "parent:wait:send",
-		Input: &adk.AgentInput{
-			Messages: []*schema.Message{schema.UserMessage("continue")},
-		},
-	})
-	require.NoError(t, err)
-	require.Equal(t, handle.ID(), sent.ID())
-	result, err := runtime.Wait(ctx, handle.ID())
-	require.NoError(t, err)
-	require.Equal(t, "done", result.FinalMessage.Content)
-}
-
 func TestAttack_CancelRacingForegroundHandoffCancelsNewBackgroundTask(t *testing.T) {
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	barrierEntered := make(chan struct{})
 	releaseBarrier := make(chan struct{})
 	runtime, manager, _ := newControllerForTest(
 		t,
 		completionBarrierFunc[*schema.Message](func(
-			context.Context,
-			*CompletionContext[*schema.Message],
+			_ context.Context,
+			_ *CompletionContext[*schema.Message],
 		) (CompletionAction, error) {
 			close(barrierEntered)
-			<-releaseBarrier
-			return CompletionSuspend, nil
+			select {
+			case <-releaseBarrier:
+				return CompletionSuspend, nil
+			case <-ctx.Done():
+				return CompletionUnknown, ctx.Err()
+			}
 		}),
 		testEventMapper,
 	)
@@ -792,7 +937,7 @@ func TestAttack_CancelRacingForegroundHandoffCancelsNewBackgroundTask(t *testing
 		},
 	})
 	require.NoError(t, err)
-	<-barrierEntered
+	awaitIntegrationValue(t, barrierEntered)
 	require.NoError(t, handle.Cancel(ctx, "cancel"))
 	close(releaseBarrier)
 	require.Eventually(t, func() bool {
@@ -808,12 +953,7 @@ func TestContinueCreatesNewTaskInPersistentChildSession(t *testing.T) {
 	ctx := context.Background()
 	runtime, _, sessionStore := newControllerForTest(
 		t,
-		completionBarrierFunc[*schema.Message](func(
-			context.Context,
-			*CompletionContext[*schema.Message],
-		) (CompletionAction, error) {
-			return CompletionComplete, nil
-		}),
+		completeBarrier[*schema.Message](),
 		testEventMapper,
 	)
 	const childSessionID = "persistent-child"
@@ -861,12 +1001,7 @@ func TestContinueCreatesNewTaskInPersistentChildSession(t *testing.T) {
 func TestContinueIdleSessionRequiresStartOptions(t *testing.T) {
 	runtime, _, _ := newControllerForTest(
 		t,
-		completionBarrierFunc[*schema.Message](func(
-			context.Context,
-			*CompletionContext[*schema.Message],
-		) (CompletionAction, error) {
-			return CompletionComplete, nil
-		}),
+		completeBarrier[*schema.Message](),
 		testEventMapper,
 	)
 	_, err := runtime.Continue(context.Background(), &ContinueRequest[*schema.Message]{
@@ -879,45 +1014,100 @@ func TestContinueIdleSessionRequiresStartOptions(t *testing.T) {
 	require.ErrorIs(t, err, task.ErrMailboxNotFound)
 }
 
-func TestNestedSubAgentMailboxUsesDirectParent(t *testing.T) {
-	ctx := context.Background()
-	runtime, manager, _ := newControllerForTest(
-		t,
-		completionBarrierFunc[*schema.Message](func(
-			context.Context,
-			*CompletionContext[*schema.Message],
-		) (CompletionAction, error) {
-			return CompletionComplete, nil
-		}),
-		testEventMapper,
-	)
-	parent, err := manager.RegisterMailbox(ctx, &task.RegisterMailboxRequest{
-		CandidateTaskID: "parent-task", InvocationID: "parent-task",
-		RootSessionID: "root-session",
-	})
-	require.NoError(t, err)
-	ctx = task.WithExecutionContext(ctx, task.ExecutionContext{
-		TaskID: parent.Mailbox.TaskID, Owner: task.OwnerParent,
-		Generation: parent.Mailbox.Generation, RootSessionID: "root-session",
-	})
-	child, err := runtime.Start(ctx, &StartRequest[*schema.Message]{
-		InvocationID: "parent-task:child", ParentSessionID: "parent-child-session",
-		AgentName: "worker", StartMode: task.StartModeForeground,
-		Input: &adk.AgentInput{
-			Messages: []*schema.Message{schema.UserMessage("work")},
+func TestContinueRetriesWhenActiveMailboxSealsBeforeSend(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	const childSessionID = "seal-race-child"
+	store := &activeLookupBarrierStore{
+		InMemoryStore: background.NewInMemoryStore(nil),
+		found:         make(chan struct{}),
+		resume:        make(chan struct{}),
+		childID:       childSessionID,
+	}
+	t.Cleanup(store.unblock)
+	manager, err := background.New(ctx, &background.Config{
+		Tasks: store, TaskEvents: store,
+		SendTaskCreatedEvent: func(context.Context, *background.TaskSnapshot) error {
+			return nil
 		},
 	})
 	require.NoError(t, err)
-	_, err = runtime.Wait(ctx, child.ID())
+	t.Cleanup(func() { closeIntegrationManager(t, manager) })
+	sessionStore := adksession.NewInMemoryStore[*schema.Message](nil)
+	runtime, err := NewController(&ControllerConfig[*schema.Message]{
+		Manager: manager, Barrier: completeBarrier[*schema.Message](),
+		InputsToAgentInput: testEventMapper,
+		SessionStore:       sessionStore, CheckPointStore: sessionStore,
+	})
 	require.NoError(t, err)
-	mailbox, err := manager.GetMailbox(ctx, child.ID())
+	require.NoError(t, runtime.RegisterAgent(
+		"worker",
+		&AgentRegistration[*schema.Message]{
+			Agent: &resumableTestAgent{name: "worker"},
+		},
+	))
+	metadata, err := json.Marshal(&runtimeMetadata{
+		Version: runtimeMetadataVersion, ParentSessionID: "parent",
+		RootSessionID: "parent", ChildSessionID: childSessionID,
+		AgentName: "worker", StartMode: task.StartModeForeground,
+	})
 	require.NoError(t, err)
-	require.Equal(t, parent.Mailbox.TaskID, mailbox.ParentTaskID)
-	require.Equal(t, "root-session", mailbox.RootSessionID)
+	old, err := manager.RegisterMailbox(ctx, &task.RegisterMailboxRequest{
+		CandidateTaskID: "sealing-task", InvocationID: "sealing-task",
+		Identity: metadata, RootSessionID: "parent",
+		ChildSessionID: childSessionID,
+	})
+	require.NoError(t, err)
+
+	type continueResult struct {
+		handle *Handle
+		err    error
+	}
+	resultCh := make(chan continueResult, 1)
+	go func() {
+		handle, continueErr := runtime.Continue(ctx, &ContinueRequest[*schema.Message]{
+			ChildSessionID: childSessionID,
+			InvocationID:   "continue-after-seal",
+			Input: &adk.AgentInput{
+				Messages: []*schema.Message{schema.UserMessage("continued")},
+			},
+			IfIdle: &StartOptions[*schema.Message]{
+				ParentSessionID: "parent", AgentName: "worker",
+				StartMode: task.StartModeBackground,
+			},
+		})
+		resultCh <- continueResult{handle: handle, err: continueErr}
+	}()
+	awaitIntegrationValue(t, store.found)
+	_, err = manager.SealMailbox(ctx, &task.SealMailboxRequest{
+		TaskID: old.Mailbox.TaskID, ExpectedCursor: 0,
+		ExpectedGeneration: old.Mailbox.Generation,
+	})
+	require.NoError(t, err)
+	store.unblock()
+
+	continued := awaitIntegrationValue(t, resultCh)
+	require.NoError(t, continued.err)
+	require.NotNil(t, continued.handle)
+	require.NotEqual(t, old.Mailbox.TaskID, continued.handle.ID())
+	inputs, err := manager.ListInputs(ctx, &task.ListInputsRequest{
+		TaskID: continued.handle.ID(),
+	})
+	require.NoError(t, err)
+	require.Len(t, inputs.Inputs, 1)
+	require.Equal(t, "continue-after-seal:initial", inputs.Inputs[0].EventID)
+	require.Equal(t, initialSignalKind, inputs.Inputs[0].Kind)
+	result, err := runtime.Wait(ctx, continued.handle.ID())
+	require.NoError(t, err)
+	require.Equal(t, "done", result.FinalMessage.Content)
+	completed, err := manager.Get(ctx, continued.handle.ID())
+	require.NoError(t, err)
+	require.Equal(t, background.StatusCompleted, completed.Status)
 }
 
 func TestForegroundInputCanPreemptActiveTurn(t *testing.T) {
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	model := &preemptModel{started: make(chan struct{})}
 	agent, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
 		Name: "worker", Description: "preempt test", Model: model,
@@ -933,13 +1123,8 @@ func TestForegroundInputCanPreemptActiveTurn(t *testing.T) {
 	})
 	require.NoError(t, err)
 	runtime, err := NewController(&ControllerConfig[*schema.Message]{
-		Manager: manager,
-		Barrier: completionBarrierFunc[*schema.Message](func(
-			context.Context,
-			*CompletionContext[*schema.Message],
-		) (CompletionAction, error) {
-			return CompletionComplete, nil
-		}),
+		Manager:            manager,
+		Barrier:            completeBarrier[*schema.Message](),
 		InputsToAgentInput: testEventMapper,
 		SessionStore:       sessionStore, CheckPointStore: sessionStore,
 		InputPreemptPolicy: func(
@@ -968,7 +1153,7 @@ func TestForegroundInputCanPreemptActiveTurn(t *testing.T) {
 		},
 	})
 	require.NoError(t, err)
-	<-model.started
+	awaitIntegrationValue(t, model.started)
 	require.NoError(t, runtime.SendInput(ctx, handle.ID(), &task.Input{
 		EventID: "urgent", Kind: "external", Delivery: task.InputPreempt,
 	}))
@@ -982,12 +1167,7 @@ func TestAttack_ReplayIdentityIgnoresFrameworkMessageID(t *testing.T) {
 	ctx := context.Background()
 	runtime, _, _ := newControllerForTest(
 		t,
-		completionBarrierFunc[*schema.Message](func(
-			context.Context,
-			*CompletionContext[*schema.Message],
-		) (CompletionAction, error) {
-			return CompletionComplete, nil
-		}),
+		completeBarrier[*schema.Message](),
 		testEventMapper,
 	)
 	request := func(messageID, tenant string) *StartRequest[*schema.Message] {
@@ -1018,12 +1198,7 @@ func TestControllerValidationAndContextHelpers(t *testing.T) {
 	require.Error(t, err)
 	runtime, _, _ := newControllerForTest(
 		t,
-		completionBarrierFunc[*schema.Message](func(
-			context.Context,
-			*CompletionContext[*schema.Message],
-		) (CompletionAction, error) {
-			return CompletionComplete, nil
-		}),
+		completeBarrier[*schema.Message](),
 		testEventMapper,
 	)
 	_, err = runtime.Start(context.Background(), nil)
@@ -1094,12 +1269,7 @@ func TestControllerRejectsInvalidCompletionAndMissingFinal(t *testing.T) {
 	emptyRuntime, _, _ := newControllerWithAgentForTest(
 		t,
 		&emptyResultAgent{name: "empty"},
-		completionBarrierFunc[*schema.Message](func(
-			context.Context,
-			*CompletionContext[*schema.Message],
-		) (CompletionAction, error) {
-			return CompletionComplete, nil
-		}),
+		completeBarrier[*schema.Message](),
 		testEventMapper,
 	)
 	empty, err := emptyRuntime.Start(ctx, &StartRequest[*schema.Message]{
@@ -1124,12 +1294,7 @@ func TestAttack_StartHonorsStreamingAndTerminalCancelIsIdempotent(t *testing.T) 
 	runtime, _, _ := newControllerWithAgentForTest(
 		t,
 		agent,
-		completionBarrierFunc[*schema.Message](func(
-			context.Context,
-			*CompletionContext[*schema.Message],
-		) (CompletionAction, error) {
-			return CompletionComplete, nil
-		}),
+		completeBarrier[*schema.Message](),
 		testEventMapper,
 	)
 	var canceled int64
@@ -1153,7 +1318,7 @@ func TestAttack_StartHonorsStreamingAndTerminalCancelIsIdempotent(t *testing.T) 
 	require.NoError(t, err)
 	_, err = runtime.Wait(ctx, handle.ID())
 	require.NoError(t, err)
-	require.True(t, <-streaming)
+	require.True(t, awaitIntegrationValue(t, streaming))
 	require.NoError(t, runtime.Cancel(ctx, handle.ID()))
 	require.Zero(t, atomic.LoadInt64(&canceled))
 }
@@ -1163,12 +1328,7 @@ func TestAttack_BackgroundAgentErrorIsDurablyFailed(t *testing.T) {
 	runtime, manager, _ := newControllerWithAgentForTest(
 		t,
 		&errorResultAgent{name: "worker"},
-		completionBarrierFunc[*schema.Message](func(
-			context.Context,
-			*CompletionContext[*schema.Message],
-		) (CompletionAction, error) {
-			return CompletionComplete, nil
-		}),
+		completeBarrier[*schema.Message](),
 		testEventMapper,
 	)
 	handle, err := runtime.Start(ctx, &StartRequest[*schema.Message]{
@@ -1190,12 +1350,7 @@ func TestAttack_BackgroundAgentErrorIsDurablyFailed(t *testing.T) {
 func TestControllerBackgroundControlResults(t *testing.T) {
 	runtime, _, _ := newControllerForTest(
 		t,
-		completionBarrierFunc[*schema.Message](func(
-			context.Context,
-			*CompletionContext[*schema.Message],
-		) (CompletionAction, error) {
-			return CompletionComplete, nil
-		}),
+		completeBarrier[*schema.Message](),
 		testEventMapper,
 	)
 	result, err := runtime.controlResult(
@@ -1235,4 +1390,33 @@ func TestControllerBackgroundControlResults(t *testing.T) {
 		},
 	)
 	require.Error(t, err)
+}
+
+func TestInterruptResultRequiresCheckpointAndTarget(t *testing.T) {
+	ctx := context.Background()
+	runtime, _, checkpointStore := newControllerForTest(
+		t,
+		completeBarrier[*schema.Message](),
+		testEventMapper,
+	)
+	runtimeTask := &background.TaskSnapshot{
+		Spec: background.Spec{ID: "interrupt-task"},
+	}
+	result := &activationResult[*schema.Message]{
+		interrupted: &adk.InterruptInfo{
+			InterruptContexts: []*adk.InterruptCtx{{ID: "target"}},
+		},
+	}
+
+	_, err := runtime.interruptResult(ctx, runtimeTask, result)
+	require.EqualError(t, err, "task/subagent: turn loop checkpoint is missing")
+
+	require.NoError(t, checkpointStore.Set(
+		ctx,
+		runtimeTurnLoopCheckpointID(runtimeTask.Spec.ID),
+		[]byte("checkpoint"),
+	))
+	result.interrupted.InterruptContexts = []*adk.InterruptCtx{{}}
+	_, err = runtime.interruptResult(ctx, runtimeTask, result)
+	require.EqualError(t, err, "task/subagent: runtime interrupt has no targets")
 }

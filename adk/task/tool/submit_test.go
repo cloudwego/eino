@@ -60,6 +60,18 @@ type countingMaterializer struct {
 	reserved []string
 }
 
+type submitGetErrorStore struct {
+	*background.InMemoryStore
+	err error
+}
+
+func (s *submitGetErrorStore) Get(
+	context.Context,
+	string,
+) (*background.TaskSnapshot, error) {
+	return nil, s.err
+}
+
 func (m *countingMaterializer) ReserveOutput(
 	_ context.Context,
 	req *ReserveOutputRequest,
@@ -266,6 +278,53 @@ func TestSubmitRejectsInvalidRequestsAndDependencyFailures_BitsUT(t *testing.T) 
 		},
 	)
 	require.ErrorIs(t, err, allocationErr)
+
+	t.Run("manager lookup error", func(t *testing.T) {
+		lookupErr := errors.New("lookup failed")
+		localManager := mustNewBackgroundManager(
+			t,
+			context.Background(),
+			&background.Config{
+				Tasks: &submitGetErrorStore{
+					InMemoryStore: background.NewInMemoryStore(nil),
+					err:           lookupErr,
+				},
+			},
+		)
+		task, submitErr := Submit(
+			context.Background(),
+			localManager,
+			registry,
+			&SubmitRequest{
+				TaskID: "task", ToolName: "direct", Arguments: "{}",
+				SessionID: "parent",
+			},
+		)
+		require.Nil(t, task)
+		require.ErrorIs(t, submitErr, lookupErr)
+	})
+
+	t.Run("manager submit error", func(t *testing.T) {
+		localManager := mustNewBackgroundManager(t, context.Background(), nil)
+		require.NoError(t, localManager.Close(context.Background()))
+
+		task, submitErr := Submit(
+			context.Background(),
+			localManager,
+			registry,
+			&SubmitRequest{
+				TaskID: "task", ToolName: "direct", Arguments: "{}",
+				SessionID: "parent",
+			},
+		)
+		require.Nil(t, task)
+		require.EqualError(
+			t,
+			submitErr,
+			"the task manager has shut down and is no longer accepting new tasks. "+
+				"Do not retry this; finish using any results you already have",
+		)
+	})
 
 	for _, test := range []struct {
 		name         string

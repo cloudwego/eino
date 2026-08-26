@@ -390,9 +390,56 @@ stream persistence、Sub-agent recovery/continuation 和 Deep wiring 新增
 
 **Stage 2 attack-test hardening verdict: APPROVE.**
 
-## Stage 3: Test Audit（待本轮执行）
+## Stage 3 Final Approval
 
-Task 4 尚未开始。既有历史 coverage 与 test-audit 结论不作为本轮结论。
+Stage 3 从头审计 `origin/alpha/10...HEAD` 范围内的测试，并复查本轮新增、
+修改和删除的测试。审计覆盖重复、断言强度、样板、逻辑分组、语义价值和
+关键覆盖缺口六个维度。
+
+### 六维审计
+
+| 维度 | 最终结论 |
+|---|---|
+| 重复 | 合并或删除重复的 reader-error、slow timeout 和构造取消用例；保留 direct 与 task-first 等 ownership 不同的语义对照。 |
+| 断言强度 | 将弱状态、错误和数量断言收紧为精确契约；JSON payload 使用 `JSONEq`，避免把格式差异当成行为差异。 |
+| 样板 | 复用 bounded wait、Manager cleanup、stream drain 和 Controller fixture helper，减少重复 setup，且不隐藏状态转换。 |
+| 逻辑分组 | 同一入口的边界条件使用 table/subtest 聚合；跨层 ownership、恢复和并发场景继续保留独立集成测试。 |
+| 语义价值 | 新增测试均锁定 publication、mailbox、attempt fencing、stream error、interrupt/resume 或恢复不变量；未新增 getter-only 测试。 |
+| 覆盖缺口 | 补齐 Manager admission/cancel、foreground adoption、Local stream、Managed Tool、Sub-agent runtime 与 middleware wiring 的关键分支。 |
+
+### Findings
+
+| ID | Finding | Validate | Counter | Verdict |
+|---|---|---|---|---|
+| S3-01 | 测试中的裸 channel receive 和忽略的 `WaitInputs` error 可能无限等待或误报通过。 | 多处同步只依赖 goroutine 最终推进，Store conformance 还丢弃了 wait error。 | 外层 context 能限制部分生产调用，但不能保证测试 goroutine 和断言本身及时结束。 | **Fix**：统一改为 bounded wait/select，并显式断言异步 error；`WaitInputs` 压测 `-count=100` 通过。 |
+| S3-02 | reader-error 与 slow timeout 用例存在重复。 | 部分用例覆盖同一入口和同一结果，只改变了 fixture 或等待方式。 | direct 与 task-first 的 owner、持久化结果不同，不能全部合并。 | **Fix**：删除或表格化真正重复项，保留 ownership 或错误边界不同的用例。 |
+| S3-03 | JSON 使用原始字符串相等断言，绑定了非契约格式。 | key 顺序或空白变化会导致语义相同的 payload 失败。 | 当前 encoder 输出稳定，但测试目标是 payload 语义，不是序列化排版。 | **Fix**：相关 checkpoint、interrupt 和 resume payload 改用 `require.JSONEq`。 |
+| S3-04 | `TestTurnLoop_PushStrategy_DuringTurn` 的结束条件缺少第二轮 agent 启动 handshake。 | 第二次 `GenInput` 已执行不等于第二轮 agent 已进入，立即 Stop 存在调度竞态。 | 常规调度下两者接近，所以历史上大多通过，但不构成 happens-before。 | **Fix**：增加 `secondAgentStarted` 信号后再 Stop，消除 flake 窗口。 |
+| S3-05 | 扩展后的 mailbox conformance 触发 `funlen`。 | 单函数承载完整 provider contract，长度超过 lint 阈值。 | 拆散会削弱 provider 复用入口和契约可发现性，且不会降低场景总复杂度。 | **Fix**：保留单一 suite，并增加局部 `nolint:funlen` 及理由。 |
+| S3-06 | 关键运行时分支覆盖不足。 | adoption、sticky writer validation、stream construction race、runtime input 和 middleware wiring 存在未覆盖分支。 | 单纯追逐行覆盖会产生低价值测试。 | **Fix**：只补充可观察状态、错误传播和恢复语义测试；重新审计未发现剩余高优先级缺口。 |
+
+### Coverage
+
+- Raw diff coverage：`87.29%`。
+- Semantic diff coverage：`85.50%`。
+- 关键范围最低 coverage：`70.97%`。
+- 达到 diff coverage `85%`、关键范围 `70%` 的门槛。
+
+### Stage 3 verification
+
+- 当前 toolchain：`go test ./...` 通过，并完成一次全仓重跑。
+- Race：Task runtime、Sub-agent middleware、task middleware 与 Deep 核心跨包
+  `-race` 通过。
+- Go 1.18：`GOTOOLCHAIN=go1.18.10 go test ./...` 通过。
+- 稳定性：`WaitInputs -count=100`、Managed Tool 新增用例 `-count=5`
+  均通过。
+- 格式与 diff：PR Go 文件 `gofmt -d` 无差异；`git diff --check` 通过。
+- `golangci-lint run ./...` 与 `go vet ./...` 均通过，`0 issues`。
+
+所有 Stage 3 findings 均已完成 Validate、Counter 和 Verdict 分类；确认项均已
+Fix，无 Won't Fix、Defer 或剩余高优先级 finding。
+
+**Stage 3 final verdict: APPROVE. Remaining findings: 0.**
 
 ## Verification
 
@@ -419,14 +466,13 @@ Task 4 尚未开始。既有历史 coverage 与 test-audit 结论不作为本轮
   ./adk/task/tool` 与对应 package `-race` 通过；当前 toolchain 及
   `GOTOOLCHAIN=go1.18.10` 的 `go test ./... -run '^$'` 全仓 compile 通过；
   `git diff --check` 通过。
-- 全仓、跨包 race、lint 与 PR CI 属于后续 Task 2 final re-review / Task 5，
-  当前不宣称通过。
+- Stage 3 已完成全仓、核心跨包 race、Go 1.18、lint 与 vet 验证；
+  PR CI 属于 Task 5，当前不宣称通过。
 
 ## Remaining Items
 
-1. 对 final re-review 修复执行确认性复审，并继续检查完整 PR 的 12 个维度。
-2. 只有确认性复审无剩余 finding 后才勾选 Task 2。
-3. 之后再进入 Stage 2 attack review 与 Stage 3 test audit。
+1. 提交本轮 Stage 3 review commit。
+2. 完成 Task 5 最终全量复审、推送与 PR 状态确认。
 
 ## Stage 1 Final Approval
 

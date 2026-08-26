@@ -74,12 +74,7 @@ func TestCompletionActionZeroValueFailsClosed(t *testing.T) {
 func TestSignalsToInputMergesMessagesAndExternalEvents(t *testing.T) {
 	runtime, _, _ := newControllerForTest(
 		t,
-		completionBarrierFunc[*schema.Message](func(
-			context.Context,
-			*CompletionContext[*schema.Message],
-		) (CompletionAction, error) {
-			return CompletionComplete, nil
-		}),
+		completeBarrier[*schema.Message](),
 		func(
 			_ context.Context,
 			inputs []*task.InputRecord,
@@ -195,12 +190,7 @@ func TestExecutorPayloadValidation(t *testing.T) {
 
 	runtime, _, _ := newControllerForTest(
 		t,
-		completionBarrierFunc[*schema.Message](func(
-			context.Context,
-			*CompletionContext[*schema.Message],
-		) (CompletionAction, error) {
-			return CompletionComplete, nil
-		}),
+		completeBarrier[*schema.Message](),
 		testEventMapper,
 	)
 	require.NotNil(t, runtime)

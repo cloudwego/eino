@@ -51,7 +51,6 @@ func TestAllocateTaskIDIsOpaqueAndDoesNotCreateRecord(t *testing.T) {
 	for id := range seen {
 		_, err := manager.Get(context.Background(), id)
 		assert.ErrorIs(t, err, ErrNotFound)
-		break
 	}
 }
 

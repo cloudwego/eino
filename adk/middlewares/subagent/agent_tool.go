@@ -46,6 +46,12 @@ const (
 	outputFileFormatHint = `JSONL — one JSON object per line, each a materialized event {agent_name, message}.`
 )
 
+func init() {
+	schema.RegisterName[runtimeAgentInterruptState](
+		"_eino_adk_subagent_runtime_interrupt_state",
+	)
+}
+
 type subagentPayloadV1 struct {
 	Version      int    `json:"version"`
 	SubAgentName string `json:"subagent_name"`
@@ -70,6 +76,7 @@ type agentDurableInput struct {
 type runtimeAgentInterruptState struct {
 	TaskID             string   `json:"task_id"`
 	ChildSessionID     string   `json:"child_session_id"`
+	InvocationID       string   `json:"invocation_id,omitempty"`
 	TargetIDs          []string `json:"target_ids"`
 	NextResumeSequence int64    `json:"next_resume_sequence"`
 }
@@ -630,6 +637,7 @@ func newControllerAgentTool[M adk.MessageType](
 			// identity and therefore cannot be replayed by the parent Runner.
 			toolCallID = uuid.NewString()
 		}
+		invocationID := parentSessionID + ":" + toolCallID
 		receivers, enableStreaming, runOptions := agenttool.ResolveInvocationOptions[
 			*adk.TypedAgentEvent[M],
 			adk.AgentRunOption,
@@ -647,6 +655,11 @@ func newControllerAgentTool[M adk.MessageType](
 		startMode := task.StartModeForeground
 		if in.RunInBackground {
 			startMode = task.StartModeBackground
+		}
+		onEvent := func(event *adk.TypedAgentEvent[M]) {
+			for _, receiver := range receivers {
+				receiver(event)
+			}
 		}
 		wasInterrupted, hasState, interruptState :=
 			tool.GetInterruptState[runtimeAgentInterruptState](callCtx)
@@ -699,17 +712,24 @@ func newControllerAgentTool[M adk.MessageType](
 			); sendErr != nil {
 				return "", sendErr
 			}
-			handle, err = runtime.Handle(callCtx, interruptState.TaskID)
+			in.ChildSessionID = interruptState.ChildSessionID
+			if interruptState.InvocationID != "" {
+				invocationID = interruptState.InvocationID
+			}
+			handle, err = runtime.Start(callCtx, &durablesubagent.StartRequest[M]{
+				InvocationID:    invocationID,
+				ParentSessionID: parentSessionID,
+				ChildSessionID:  in.ChildSessionID,
+				AgentName:       in.SubagentType,
+				Description:     in.Description,
+				Input:           newTypedUserInput[M](prompt, enableStreaming),
+				StartMode:       startMode,
+				OnEvent:         onEvent,
+			})
 			if err != nil {
 				return "", err
 			}
-			in.ChildSessionID = interruptState.ChildSessionID
 			nextResumeSequence = resumeSequence + 1
-		}
-		onEvent := func(event *adk.TypedAgentEvent[M]) {
-			for _, receiver := range receivers {
-				receiver(event)
-			}
 		}
 		if !wasInterrupted {
 			if in.ChildSessionID != "" {
@@ -717,7 +737,7 @@ func newControllerAgentTool[M adk.MessageType](
 					callCtx,
 					&durablesubagent.ContinueRequest[M]{
 						ChildSessionID: in.ChildSessionID,
-						InvocationID:   parentSessionID + ":" + toolCallID,
+						InvocationID:   invocationID,
 						Input:          newTypedUserInput[M](prompt, enableStreaming),
 						IfIdle: &durablesubagent.StartOptions[M]{
 							ParentSessionID: parentSessionID,
@@ -730,7 +750,7 @@ func newControllerAgentTool[M adk.MessageType](
 				)
 			} else {
 				handle, err = runtime.Start(callCtx, &durablesubagent.StartRequest[M]{
-					InvocationID:    parentSessionID + ":" + toolCallID,
+					InvocationID:    invocationID,
 					ParentSessionID: parentSessionID, ChildSessionID: in.ChildSessionID,
 					AgentName: in.SubagentType, Description: in.Description,
 					Input:     newTypedUserInput[M](prompt, enableStreaming),
@@ -751,7 +771,7 @@ func newControllerAgentTool[M adk.MessageType](
 		if result.Interrupted != nil {
 			state := runtimeAgentInterruptState{
 				TaskID: handle.ID(), ChildSessionID: handle.ChildSessionID(),
-				NextResumeSequence: nextResumeSequence,
+				InvocationID: invocationID, NextResumeSequence: nextResumeSequence,
 			}
 			for _, interruptContext := range result.Interrupted.InterruptContexts {
 				if interruptContext.ID != "" {

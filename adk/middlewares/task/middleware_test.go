@@ -248,14 +248,6 @@ func TestNew_NilManager(t *testing.T) {
 	assert.Error(t, err)
 }
 
-func TestNew_WithManager(t *testing.T) {
-	mgr := newBackgroundManager(t, context.Background(), nil)
-	defer closeWithTimeout(mgr)
-
-	_, err := New(context.Background(), &Config{Manager: mgr})
-	require.NoError(t, err)
-}
-
 func TestMiddleware_InjectsControlTools(t *testing.T) {
 	mgr := newBackgroundManager(t, context.Background(), &bgtask.Config{})
 	defer closeWithTimeout(mgr)

@@ -82,6 +82,27 @@ type firstReleaseConflictStore struct {
 	once sync.Once
 }
 
+type publishConflictStore struct {
+	LifecycleStore
+	conflicts  int
+	calls      int
+	onConflict func()
+}
+
+func (s *publishConflictStore) Publish(
+	ctx context.Context,
+	req *PublishTaskRequest,
+) (*TaskSnapshot, error) {
+	s.calls++
+	if s.calls <= s.conflicts {
+		if s.onConflict != nil {
+			s.onConflict()
+		}
+		return nil, ErrVersionConflict
+	}
+	return s.LifecycleStore.Publish(ctx, req)
+}
+
 func (s *firstReleaseConflictStore) ReleaseSuspension(
 	ctx context.Context,
 	req *ReleaseSuspensionRequest,
@@ -321,6 +342,97 @@ func TestManagerReleaseSuspensionRetriesVersionConflict_BitsUT(t *testing.T) {
 	require.Equal(t, "checkpoint", string(released.Checkpoint))
 }
 
+func TestManagerPublishHandlesVersionConflicts(t *testing.T) {
+	newDeferredTask := func(
+		t *testing.T,
+		store *InMemoryStore,
+		id string,
+	) *TaskSnapshot {
+		t.Helper()
+		created, err := store.Create(
+			context.Background(),
+			&CreateTaskRequest{
+				Spec:              validSpec(id),
+				Publication:       PublicationDeferred,
+				LeaseExpiryPolicy: LeaseExpiryRetry,
+			},
+		)
+		require.NoError(t, err)
+		return created
+	}
+
+	t.Run("requires task id", func(t *testing.T) {
+		manager := mustNewManager(t, context.Background(), nil)
+		defer closeWithTimeout(manager)
+
+		published, err := manager.Publish(context.Background(), "")
+		require.Nil(t, published)
+		require.EqualError(t, err, "task/background: publish task id is required")
+	})
+
+	t.Run("retries conflict", func(t *testing.T) {
+		store := NewInMemoryStore(nil)
+		created := newDeferredTask(t, store, "publish-retry")
+		conflicts := &publishConflictStore{
+			LifecycleStore: store,
+			conflicts:      1,
+		}
+		manager := mustNewManager(t, context.Background(), &Config{
+			Tasks: conflicts, TaskEvents: store,
+		})
+		defer closeWithTimeout(manager)
+
+		published, err := manager.Publish(context.Background(), created.Spec.ID)
+		require.NoError(t, err)
+		require.Equal(t, 2, conflicts.calls)
+		require.Equal(t, PublicationOnBackground, published.Publication)
+	})
+
+	t.Run("returns the eighth conflict", func(t *testing.T) {
+		store := NewInMemoryStore(nil)
+		created := newDeferredTask(t, store, "publish-exhaust")
+		conflicts := &publishConflictStore{
+			LifecycleStore: store,
+			conflicts:      8,
+		}
+		manager := mustNewManager(t, context.Background(), &Config{
+			Tasks: conflicts, TaskEvents: store,
+		})
+		defer closeWithTimeout(manager)
+
+		published, err := manager.Publish(context.Background(), created.Spec.ID)
+		require.Nil(t, published)
+		require.ErrorIs(t, err, ErrVersionConflict)
+		require.Equal(t, 8, conflicts.calls)
+		current, getErr := store.Get(context.Background(), created.Spec.ID)
+		require.NoError(t, getErr)
+		require.Equal(t, PublicationDeferred, current.Publication)
+	})
+
+	t.Run("stops retrying when context is canceled", func(t *testing.T) {
+		store := NewInMemoryStore(nil)
+		created := newDeferredTask(t, store, "publish-context")
+		ctx, cancel := context.WithCancel(context.Background())
+		conflicts := &publishConflictStore{
+			LifecycleStore: store,
+			conflicts:      8,
+			onConflict:     cancel,
+		}
+		manager := mustNewManager(t, context.Background(), &Config{
+			Tasks: conflicts, TaskEvents: store,
+		})
+		defer closeWithTimeout(manager)
+
+		published, err := manager.Publish(ctx, created.Spec.ID)
+		require.Nil(t, published)
+		require.ErrorIs(t, err, context.Canceled)
+		require.Equal(t, 1, conflicts.calls)
+		current, getErr := store.Get(context.Background(), created.Spec.ID)
+		require.NoError(t, getErr)
+		require.Equal(t, PublicationDeferred, current.Publication)
+	})
+}
+
 func TestManagerReleaseSuspensionRejectsInvalidTargets_BitsUT(t *testing.T) {
 	store := NewInMemoryStore(nil)
 	manager := managerWithExecutor(t, store, &scriptedExecutor{}, time.Minute)
@@ -510,6 +622,95 @@ func TestManagerAcknowledgesActiveCancellationOnceAndRetriesFailures(t *testing.
 			require.Equal(t, test.wantCalls, atomic.LoadInt64(&acknowledgeCalls))
 		})
 	}
+}
+
+func TestManagerCancellationAcknowledgerPanicKeepsDurableIntent(t *testing.T) {
+	started := make(chan struct{})
+	observedControl := make(chan ControlRequest, 1)
+	var acknowledgeCalls int64
+	executor := &cancellationAcknowledgingExecutor{
+		scriptedExecutor: &scriptedExecutor{execute: func(
+			_ context.Context,
+			_ *TaskSnapshot,
+			runtime ExecutionRuntime,
+		) (*ExecutionResult, error) {
+			close(started)
+			select {
+			case control := <-runtime.Controls():
+				observedControl <- control
+			case <-time.After(time.Second):
+				return nil, errors.New("timed out waiting for cancellation control")
+			}
+			return &ExecutionResult{Action: ExecutionActionCancel}, nil
+		}},
+		acknowledge: func(context.Context, *TaskSnapshot, string) error {
+			if atomic.AddInt64(&acknowledgeCalls, 1) == 1 {
+				panic("acknowledger panic")
+			}
+			return nil
+		},
+	}
+	store := NewInMemoryStore(nil)
+	manager := managerWithExecutor(t, store, executor, time.Minute)
+	defer closeWithTimeout(manager)
+	submitted, err := manager.Submit(
+		context.Background(),
+		&SubmitRequest{Spec: validSpec("cancel-hook-panic")},
+	)
+	require.NoError(t, err)
+	executeDone := make(chan error, 1)
+	go func() {
+		executeDone <- manager.Execute(context.Background(), submitted.Spec.ID)
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for task execution to start")
+	}
+
+	requested, err := manager.RequestCancel(
+		context.Background(),
+		submitted.Spec.ID,
+		WithCancellationReason("operator stop"),
+	)
+	require.ErrorContains(t, err, "acknowledger panic")
+	require.NotNil(t, requested)
+	require.Equal(t, StatusRunning, requested.Status)
+	require.NotNil(t, requested.CancelRequestedAt)
+	require.Equal(t, "operator stop", requested.CancelReason)
+	stored, getErr := manager.Get(context.Background(), submitted.Spec.ID)
+	require.NoError(t, getErr)
+	require.NotNil(t, stored.CancelRequestedAt)
+	require.Equal(t, "operator stop", stored.CancelReason)
+	select {
+	case control := <-observedControl:
+		t.Fatalf("stop control arrived before cancellation hook succeeded: %+v", control)
+	default:
+	}
+
+	retried, err := manager.RequestCancel(context.Background(), submitted.Spec.ID)
+	require.NoError(t, err)
+	require.NotNil(t, retried.CancelRequestedAt)
+	require.Equal(t, int64(2), atomic.LoadInt64(&acknowledgeCalls))
+	var control ControlRequest
+	select {
+	case control = <-observedControl:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for cancellation control")
+	}
+	require.Equal(t, ControlRequest{
+		Kind: ControlStop, Reason: "operator stop",
+	}, control)
+	select {
+	case executeErr := <-executeDone:
+		require.NoError(t, executeErr)
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for task execution to finish")
+	}
+	terminal, err := manager.Get(context.Background(), submitted.Spec.ID)
+	require.NoError(t, err)
+	require.Equal(t, StatusCanceled, terminal.Status)
+	require.Equal(t, "operator stop", terminal.ResultError)
 }
 
 func TestManagerReplaysCancellationReasonToRecoveryAttempt(t *testing.T) {

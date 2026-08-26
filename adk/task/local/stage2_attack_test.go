@@ -42,39 +42,6 @@ func (s *attackPublishErrorStore) Publish(
 	return nil, s.err
 }
 
-// TestAttack_RunResultForegroundTaskExclusivity verifies that successful runs
-// cannot expose both ownership forms. Ambiguous ownership would let callers
-// treat non-durable foreground output as an authoritative durable task.
-func TestAttack_RunResultForegroundTaskExclusivity(t *testing.T) {
-	runner, manager := newTestRunner(t)
-
-	foregroundResult, err := runner.Run(
-		context.Background(),
-		&Input{Description: "foreground"},
-		func(context.Context, background.ExecutionRuntime) (string, error) {
-			return "foreground", nil
-		},
-	)
-	require.NoError(t, err)
-	foregroundOutcome := requireForegroundResult(t, foregroundResult)
-	require.Equal(t, task.OutcomeCompleted, foregroundOutcome.Status)
-	require.Equal(t, "foreground", string(foregroundOutcome.Data))
-
-	taskResult, err := runner.Run(
-		context.Background(),
-		&Input{Description: "background", RunInBackground: true},
-		func(context.Context, background.ExecutionRuntime) (string, error) {
-			return "background", nil
-		},
-	)
-	require.NoError(t, err)
-	snapshot := requireTaskResult(t, taskResult)
-	snapshot = waitTerminal(t, manager, snapshot)
-	require.Equal(t, background.StatusCompleted, snapshot.Status)
-	require.Equal(t, "background", string(snapshot.ResultData))
-	require.NotEqual(t, foregroundResult.ID(), taskResult.ID())
-}
-
 // TestAttack_StreamConstructorCancellation verifies that caller cancellation
 // releases RunStream even when construction is uncooperative. Waiting for the
 // constructor would leak the foreground call and its mailbox ownership.
@@ -114,6 +81,11 @@ func TestAttack_StreamConstructorCancellation(t *testing.T) {
 	case <-entered:
 	case <-time.After(time.Second):
 		t.Fatal("stream constructor did not start")
+	}
+	select {
+	case result := <-returned:
+		t.Fatalf("RunStream returned before cancellation: %#v", result)
+	default:
 	}
 	cancel()
 	select {
@@ -318,6 +290,9 @@ func TestAttack_BufferedAndStreamTaskOwnershipParity(t *testing.T) {
 	require.NoError(t, err)
 	bufferedTask := requireTaskResult(t, bufferedResult)
 	require.Equal(t, background.StatusCompleted, bufferedTask.Status)
+	storedBuffered, err := manager.Get(context.Background(), bufferedResult.ID())
+	require.NoError(t, err)
+	require.Equal(t, background.PublicationDeferred, storedBuffered.Publication)
 
 	stream, err := runner.RunStream(
 		context.Background(),

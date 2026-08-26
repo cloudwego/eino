@@ -22,7 +22,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"sort"
 
 	"github.com/cloudwego/eino/adk/task"
@@ -801,10 +800,3 @@ func equalSpec(left, right Spec) bool {
 }
 
 var _ task.MailboxStore = (*InMemoryStore)(nil)
-
-func validateMailboxOwnership(mailbox *task.Mailbox) error {
-	if mailbox == nil || mailbox.TaskID == "" || mailbox.Generation <= 0 {
-		return fmt.Errorf("task/background: invalid mailbox")
-	}
-	return nil
-}

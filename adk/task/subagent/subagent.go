@@ -149,14 +149,6 @@ func (e *executor[M]) resolveRegistration(name string) (*AgentRegistration[M], e
 	return &copy, nil
 }
 
-func (e *executor[M]) resolveAgent(name string) (adk.TypedResumableAgent[M], error) {
-	registration, err := e.resolveRegistration(name)
-	if err != nil {
-		return nil, err
-	}
-	return registration.Agent, nil
-}
-
 // ValidateSpec verifies that spec contains a Controller payload.
 func (e *executor[M]) ValidateSpec(spec background.Spec) error {
 	payload, err := validateSpecPayload(spec)

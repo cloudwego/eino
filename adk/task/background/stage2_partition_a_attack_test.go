@@ -54,18 +54,19 @@ func TestAttack_PublishCompleteCancelRaceHasOneVisibleTerminal(t *testing.T) {
 		start := make(chan struct{})
 		var group sync.WaitGroup
 		group.Add(3)
+		var published, completed, cancelRequested *TaskSnapshot
 		var publishErr, completeErr, cancelErr error
 		go func() {
 			defer group.Done()
 			<-start
-			_, publishErr = store.Publish(context.Background(), &PublishTaskRequest{
+			published, publishErr = store.Publish(context.Background(), &PublishTaskRequest{
 				TaskID: started.Spec.ID, ExpectedVersion: started.Version,
 			})
 		}()
 		go func() {
 			defer group.Done()
 			<-start
-			_, completeErr = store.CompleteIfNoInputs(
+			completed, completeErr = store.CompleteIfNoInputs(
 				context.Background(),
 				&CompleteIfNoInputsRequest{
 					TaskID: started.Spec.ID, ExpectedVersion: started.Version,
@@ -77,7 +78,7 @@ func TestAttack_PublishCompleteCancelRaceHasOneVisibleTerminal(t *testing.T) {
 		go func() {
 			defer group.Done()
 			<-start
-			_, cancelErr = store.RequestCancel(
+			cancelRequested, cancelErr = store.RequestCancel(
 				context.Background(),
 				&RequestCancelRequest{
 					TaskID: started.Spec.ID, ExpectedVersion: started.Version,
@@ -91,12 +92,21 @@ func TestAttack_PublishCompleteCancelRaceHasOneVisibleTerminal(t *testing.T) {
 		terminalWinners := 0
 		if completeErr == nil {
 			terminalWinners++
+			require.NotNil(t, completed)
+			require.Equal(t, StatusCompleted, completed.Status)
+			require.Equal(t, "done", string(completed.ResultData))
 		} else {
+			require.Nil(t, completed)
 			require.ErrorIs(t, completeErr, ErrVersionConflict)
 		}
 		if cancelErr == nil {
 			terminalWinners++
+			require.NotNil(t, cancelRequested)
+			require.Equal(t, StatusRunning, cancelRequested.Status)
+			require.NotNil(t, cancelRequested.CancelRequestedAt)
+			require.Equal(t, "stop", cancelRequested.CancelReason)
 		} else {
+			require.Nil(t, cancelRequested)
 			require.ErrorIs(t, cancelErr, ErrVersionConflict)
 		}
 		require.Equal(t, 1, terminalWinners)
@@ -114,14 +124,25 @@ func TestAttack_PublishCompleteCancelRaceHasOneVisibleTerminal(t *testing.T) {
 			require.NoError(t, err)
 		}
 		require.Contains(t, []Status{StatusCompleted, StatusCanceled}, current.Status)
+		if completeErr == nil {
+			require.Equal(t, StatusCompleted, current.Status)
+			require.Equal(t, "done", string(current.ResultData))
+		} else {
+			require.NoError(t, cancelErr)
+			require.Equal(t, StatusCanceled, current.Status)
+			require.Equal(t, "stop", current.ResultError)
+		}
 
 		notifications := receiveAllNotifications(t, store)
 		if publishErr == nil {
+			require.NotNil(t, published)
+			require.Equal(t, PublicationOnBackground, published.Publication)
 			require.Equal(t, PublicationOnBackground, current.Publication)
 			require.Len(t, notifications, 2)
 			require.Equal(t, NotificationTaskBackgrounded, notifications[0].Kind)
 			require.Equal(t, eventForStatus(current.Status), notifications[1].Kind)
 		} else {
+			require.Nil(t, published)
 			require.ErrorIs(t, publishErr, ErrVersionConflict)
 			require.Equal(t, PublicationDeferred, current.Publication)
 			require.Empty(t, notifications)

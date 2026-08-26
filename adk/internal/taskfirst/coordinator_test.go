@@ -193,6 +193,30 @@ func newControlledExecutionWithStore(
 	return execution, manager
 }
 
+func TestDetachedContextValueUsesExecutionThenFallback(t *testing.T) {
+	type contextKey string
+	const (
+		sharedKey   contextKey = "shared"
+		fallbackKey contextKey = "fallback"
+		missingKey  contextKey = "missing"
+	)
+	executionCtx := context.WithValue(
+		context.Background(),
+		sharedKey,
+		"execution",
+	)
+	valuesCtx := context.WithValue(
+		context.WithValue(context.Background(), sharedKey, "caller"),
+		fallbackKey,
+		"fallback",
+	)
+	ctx := detachedContext{execution: executionCtx, values: valuesCtx}
+
+	require.Equal(t, "execution", ctx.Value(sharedKey))
+	require.Equal(t, "fallback", ctx.Value(fallbackKey))
+	require.Nil(t, ctx.Value(missingKey))
+}
+
 func TestExecutionBoundaryAndTimeoutChannelsAreStable(t *testing.T) {
 	execution, _, _ := newControlledExecution(t, &Policy{TimeoutMs: 20})
 	timeout := execution.Timeout()
@@ -207,6 +231,16 @@ func TestExecutionBoundaryAndTimeoutChannelsAreStable(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("foreground timeout was reset")
 	}
+}
+
+func TestExecutionWaitBoundaryCanceledContext(t *testing.T) {
+	execution, _, _ := newControlledExecution(t, &Policy{})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	snapshot, err := execution.WaitBoundary(ctx)
+	require.Nil(t, snapshot)
+	require.ErrorIs(t, err, context.Canceled)
 }
 
 func TestExecutionWaitingInputIsForegroundBoundary(t *testing.T) {

@@ -200,29 +200,115 @@ func TestAttack_NestedSubmitDoesNotEmitRootSessionEvent(t *testing.T) {
 	require.Equal(t, string(NotificationTaskCreated), inputs.Inputs[0].Kind)
 }
 
-func TestBackgroundParentOwnershipFencesNestedCreation(t *testing.T) {
-	store := NewInMemoryStore(nil)
+func TestParentAuthorityRejectsInvalidOwnerAttemptAndGeneration(t *testing.T) {
 	ctx := context.Background()
-	parent, err := store.Create(ctx, &CreateTaskRequest{
+	foregroundStore := NewInMemoryStore(nil)
+	foreground, err := foregroundStore.Register(
+		ctx,
+		&task.RegisterMailboxRequest{
+			CandidateTaskID: "foreground-parent",
+			InvocationID:    "foreground-parent",
+		},
+	)
+	require.NoError(t, err)
+
+	backgroundStore := NewInMemoryStore(nil)
+	parent, err := backgroundStore.Create(ctx, &CreateTaskRequest{
 		Spec:              Spec{ID: "parent", ExecutorKey: "executor"},
 		LeaseExpiryPolicy: LeaseExpiryRetry,
 	})
 	require.NoError(t, err)
-	started, err := store.Start(ctx, &StartTaskRequest{
+	started, err := backgroundStore.Start(ctx, &StartTaskRequest{
 		TaskID: parent.Spec.ID, ExpectedVersion: parent.Version,
 	})
 	require.NoError(t, err)
-	parentMailbox, err := store.GetMailbox(ctx, parent.Spec.ID)
+	parentMailbox, err := backgroundStore.GetMailbox(ctx, parent.Spec.ID)
 	require.NoError(t, err)
-	_, err = store.Register(ctx, &task.RegisterMailboxRequest{
-		CandidateTaskID: "bad-child", InvocationID: "bad-child",
-		ParentExecution: &task.ExecutionContext{
-			TaskID: parent.Spec.ID, Owner: task.OwnerManager,
-			Generation: parentMailbox.Generation, Attempt: started.Attempt + 1,
+
+	for _, testCase := range []struct {
+		name      string
+		store     *InMemoryStore
+		execution task.ExecutionContext
+		wantErr   error
+	}{
+		{
+			name:  "foreground rejects manager owner",
+			store: foregroundStore,
+			execution: task.ExecutionContext{
+				TaskID: foreground.Mailbox.TaskID, Owner: task.OwnerManager,
+				Generation: foreground.Mailbox.Generation,
+			},
+			wantErr: task.ErrOwnershipLost,
 		},
-	})
-	require.ErrorIs(t, err, ErrLeaseLost)
-	child, err := store.Register(ctx, &task.RegisterMailboxRequest{
+		{
+			name:  "foreground rejects nonzero attempt",
+			store: foregroundStore,
+			execution: task.ExecutionContext{
+				TaskID: foreground.Mailbox.TaskID, Owner: task.OwnerParent,
+				Generation: foreground.Mailbox.Generation, Attempt: 1,
+			},
+			wantErr: task.ErrOwnershipLost,
+		},
+		{
+			name:  "foreground rejects stale generation",
+			store: foregroundStore,
+			execution: task.ExecutionContext{
+				TaskID: foreground.Mailbox.TaskID, Owner: task.OwnerParent,
+				Generation: foreground.Mailbox.Generation + 1,
+			},
+			wantErr: task.ErrOwnershipLost,
+		},
+		{
+			name:  "background rejects parent owner",
+			store: backgroundStore,
+			execution: task.ExecutionContext{
+				TaskID: parent.Spec.ID, Owner: task.OwnerParent,
+				Generation: parentMailbox.Generation, Attempt: started.Attempt,
+			},
+			wantErr: task.ErrOwnershipLost,
+		},
+		{
+			name:  "background rejects zero attempt",
+			store: backgroundStore,
+			execution: task.ExecutionContext{
+				TaskID: parent.Spec.ID, Owner: task.OwnerManager,
+				Generation: parentMailbox.Generation,
+			},
+			wantErr: task.ErrOwnershipLost,
+		},
+		{
+			name:  "background rejects stale attempt",
+			store: backgroundStore,
+			execution: task.ExecutionContext{
+				TaskID: parent.Spec.ID, Owner: task.OwnerManager,
+				Generation: parentMailbox.Generation, Attempt: started.Attempt + 1,
+			},
+			wantErr: ErrLeaseLost,
+		},
+		{
+			name:  "background rejects stale generation",
+			store: backgroundStore,
+			execution: task.ExecutionContext{
+				TaskID: parent.Spec.ID, Owner: task.OwnerManager,
+				Generation: parentMailbox.Generation + 1, Attempt: started.Attempt,
+			},
+			wantErr: task.ErrOwnershipLost,
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			_, registerErr := testCase.store.Register(
+				ctx,
+				&task.RegisterMailboxRequest{
+					CandidateTaskID: "child-" + testCase.name,
+					InvocationID:    "child-" + testCase.name,
+					ParentExecution: &testCase.execution,
+				},
+			)
+			require.ErrorIs(t, registerErr, testCase.wantErr)
+		})
+	}
+
+	child, err := backgroundStore.Register(ctx, &task.RegisterMailboxRequest{
 		CandidateTaskID: "child", InvocationID: "child",
 		ParentExecution: &task.ExecutionContext{
 			TaskID: parent.Spec.ID, Owner: task.OwnerManager,
@@ -495,54 +581,166 @@ func TestWaitInputIfNoInputsPersistsCheckpointOnInputRace(t *testing.T) {
 func TestMailboxValidationBoundaries(t *testing.T) {
 	store := NewInMemoryStore(&InMemoryStoreConfig{MaxValueBytes: 4})
 	ctx := context.Background()
-	_, err := store.Register(ctx, nil)
-	require.Error(t, err)
-	_, err = store.Register(ctx, &task.RegisterMailboxRequest{
-		CandidateTaskID: "large", InvocationID: "large",
-		Identity: []byte("large"),
-	})
-	require.Error(t, err)
-	_, err = store.GetMailbox(ctx, "missing")
-	require.ErrorIs(t, err, task.ErrMailboxNotFound)
-	_, err = store.GetActiveMailboxBySession(ctx, "")
-	require.Error(t, err)
-	_, err = store.SendInput(ctx, nil)
-	require.Error(t, err)
-	_, err = store.SendInput(ctx, &task.SendInputRequest{
-		TaskID: "missing",
-		Input:  task.Input{EventID: "event", Kind: "kind"},
-	})
-	require.ErrorIs(t, err, task.ErrMailboxNotFound)
-	_, err = store.SendInput(ctx, &task.SendInputRequest{
-		TaskID: "missing",
-		Input: task.Input{
-			EventID: "event", Kind: "kind", Delivery: task.InputDelivery(99),
+	for _, testCase := range []struct {
+		name        string
+		call        func() error
+		wantMessage string
+	}{
+		{
+			name: "register requires identity",
+			call: func() error {
+				_, err := store.Register(ctx, nil)
+				return err
+			},
+			wantMessage: "task/background: mailbox task and invocation IDs are required",
 		},
-	})
-	require.Error(t, err)
-	_, err = store.ListInputs(ctx, nil)
-	require.Error(t, err)
-	_, err = store.ListInputs(ctx, &task.ListInputsRequest{TaskID: "missing"})
-	require.ErrorIs(t, err, task.ErrMailboxNotFound)
+		{
+			name: "register bounds identity",
+			call: func() error {
+				_, err := store.Register(ctx, &task.RegisterMailboxRequest{
+					CandidateTaskID: "large", InvocationID: "large",
+					Identity: []byte("large"),
+				})
+				return err
+			},
+			wantMessage: "task/background: mailbox identity exceeds configured limit",
+		},
+		{
+			name: "active mailbox requires child session",
+			call: func() error {
+				_, err := store.GetActiveMailboxBySession(ctx, "")
+				return err
+			},
+			wantMessage: "task/background: child session ID is required",
+		},
+		{
+			name: "send input requires identity",
+			call: func() error {
+				_, err := store.SendInput(ctx, nil)
+				return err
+			},
+			wantMessage: "task/background: input identity is required",
+		},
+		{
+			name: "send input validates delivery",
+			call: func() error {
+				_, err := store.SendInput(ctx, &task.SendInputRequest{
+					TaskID: "missing",
+					Input: task.Input{
+						EventID: "event", Kind: "kind",
+						Delivery: task.InputDelivery(99),
+					},
+				})
+				return err
+			},
+			wantMessage: "task/background: input delivery is invalid",
+		},
+		{
+			name: "list inputs requires request",
+			call: func() error {
+				_, err := store.ListInputs(ctx, nil)
+				return err
+			},
+			wantMessage: "task/background: list inputs request is invalid",
+		},
+		{
+			name:        "advance cursor requires request",
+			call:        func() error { return store.AdvanceCursor(ctx, nil) },
+			wantMessage: "task/background: advance cursor request is invalid",
+		},
+		{
+			name: "seal requires request",
+			call: func() error {
+				_, err := store.SealIfIdle(ctx, nil)
+				return err
+			},
+			wantMessage: "task/background: seal mailbox request is invalid",
+		},
+		{
+			name: "abandon requires request",
+			call: func() error {
+				_, err := store.Abandon(ctx, nil)
+				return err
+			},
+			wantMessage: "task/background: abandon mailbox request is invalid",
+		},
+		{
+			name: "list children requires parent",
+			call: func() error {
+				_, err := store.ListChildren(ctx, nil)
+				return err
+			},
+			wantMessage: "task/background: parent task ID is required",
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			require.EqualError(t, testCase.call(), testCase.wantMessage)
+		})
+	}
+
 	waitCtx, cancel := context.WithCancel(ctx)
 	cancel()
-	_, err = store.WaitInputs(waitCtx, &task.WaitInputsRequest{
-		TaskID: "missing",
-	})
-	require.ErrorIs(t, err, task.ErrMailboxNotFound)
-	require.Error(t, store.AdvanceCursor(ctx, nil))
-	require.ErrorIs(t, store.AdvanceCursor(ctx, &task.AdvanceCursorRequest{
-		TaskID: "missing",
-	}), task.ErrMailboxNotFound)
-	_, err = store.SealIfIdle(ctx, nil)
-	require.Error(t, err)
-	_, err = store.Abandon(ctx, nil)
-	require.Error(t, err)
-	_, err = store.ListChildren(ctx, nil)
-	require.Error(t, err)
+	for _, testCase := range []struct {
+		name    string
+		call    func() error
+		wantErr error
+	}{
+		{
+			name: "get missing mailbox",
+			call: func() error {
+				_, err := store.GetMailbox(ctx, "missing")
+				return err
+			},
+			wantErr: task.ErrMailboxNotFound,
+		},
+		{
+			name: "send input to missing mailbox",
+			call: func() error {
+				_, err := store.SendInput(ctx, &task.SendInputRequest{
+					TaskID: "missing",
+					Input:  task.Input{EventID: "event", Kind: "kind"},
+				})
+				return err
+			},
+			wantErr: task.ErrMailboxNotFound,
+		},
+		{
+			name: "list missing mailbox",
+			call: func() error {
+				_, err := store.ListInputs(ctx, &task.ListInputsRequest{
+					TaskID: "missing",
+				})
+				return err
+			},
+			wantErr: task.ErrMailboxNotFound,
+		},
+		{
+			name: "wait checks missing mailbox before context",
+			call: func() error {
+				_, err := store.WaitInputs(waitCtx, &task.WaitInputsRequest{
+					TaskID: "missing",
+				})
+				return err
+			},
+			wantErr: task.ErrMailboxNotFound,
+		},
+		{
+			name: "advance missing mailbox",
+			call: func() error {
+				return store.AdvanceCursor(ctx, &task.AdvanceCursorRequest{
+					TaskID: "missing",
+				})
+			},
+			wantErr: task.ErrMailboxNotFound,
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			require.ErrorIs(t, testCase.call(), testCase.wantErr)
+		})
+	}
 
 	mailbox := registerMailboxForTest(t, store, "mailbox")
-	_, err = store.SendInput(ctx, &task.SendInputRequest{
+	_, err := store.SendInput(ctx, &task.SendInputRequest{
 		TaskID: mailbox.TaskID,
 		Input:  task.Input{EventID: "event", Kind: "kind"},
 	})
