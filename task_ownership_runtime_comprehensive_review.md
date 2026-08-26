@@ -468,13 +468,14 @@ Fix，无 Won't Fix、Defer 或剩余高优先级 finding。
   `git diff --check` 通过。
 - Stage 3 已完成当轮全仓、核心跨包 race、Go 1.18、lint 与 vet 验证。
 - Task 5 Round 6 已完成最终 focused、全仓、race、Go 1.18、lint、vet、
-  gofmt 与 diff verification；PR checks 尚未确认。
+  gofmt 与 diff verification；修复 commit `43e65fc8` 已推送，PR #1204
+  在该 head 的 GitHub Actions、Codecov 与 CLA 全部通过。
 
-## Remaining Items
+## Final Delivery Status
 
-1. 提交并推送最终 review commit。
-2. 确认 PR #1204 GitHub Actions、Codecov 与 CLA 全部通过。
-3. 最终提交后 append progress，并清理本轮临时文件；本轮文档收尾不提前执行。
+Task 5 delivery complete：最终 review 与竞态修复均已提交并推送，PR #1204
+在修复 head `43e65fc8` 的全部 required checks 已通过，交付前工作区 clean，
+且没有遗留临时文件。
 
 ## Stage 1 Final Approval
 
@@ -612,10 +613,23 @@ GitHub Actions run `33001789391` 在 Go 1.19 的
 - Go 1.19.13 `go test -race ./...` 通过。
 - `git diff --check` 通过。
 
-上述结果只证明本地回归通过；修复 commit 尚未 push，也尚未产生新的远端
-checks 结果。
+两处测试竞态已在 commit `43e65fc8`（`test(adk): stabilize Go 1.19 CI
+races`）中修复并推送。PR #1204 在该 head 的远端结果如下：
+
+- Pull Request Check：Commit Message Check、PR Title Check、`compliant`、
+  `golangci-lint` 全部 **PASS**。
+- Eino Tests：`eino-unit-test`、`benchmark-test`、
+  `api-compatibility-check` 与 Go 1.19-1.24 compatibility matrix 全部
+  **PASS**。
+- `codecov/patch` 与 `codecov/project` 均 **PASS**。
+- `license/cla` **PASS**。
+
+提交历史同步完成：原 `1b4ebc0f` 的 `chore(git)` scope 已重写为
+`b26eb7bc` 的 `chore(adk)`；随后通过最新 alpha merge `27651f11` 合入
+`origin/alpha/10` head `9de4a9d7`。修复 push 后本地
+`feat/task-ownership-runtime` 与 upstream 无 ahead/behind，worktree clean。
 
 **Task 5 final full review verdict: APPROVE. Final code findings remaining: 0.**
 
-Task 5 的复查、汇总与本地全量门禁已完成。最终 commit/push、PR checks、
-工作区清洁和 progress append 保持待办。
+Task 5 的复查、汇总、本地全量门禁、修复 push、远端 checks 与工作区清理
+均已完成；delivery complete。
