@@ -633,3 +633,22 @@ races`）中修复并推送。PR #1204 在该 head 的远端结果如下：
 
 Task 5 的复查、汇总、本地全量门禁、修复 push、远端 checks 与工作区清理
 均已完成；delivery complete。
+
+## Round 7: API compatibility review threads
+
+本轮核对 PR #1204 中 9 条由 `github-actions` 创建的 API compatibility
+review threads。9 条均已逐条回复迁移事实或 API 设计依据。
+
+- 4 条已有客观迁移证据的 thread 已 resolve：`storetest`、`tool/tooltest`、
+  `shell` 与 `middlewares/task`。对应符号保留在新 import path，或由收敛后的
+  `LifecycleStore` conformance API 取代。
+- 5 条有意的 alpha breaking API thread 未擅自 resolve：tool handoff、
+  subagent config、filesystem config，以及两条重复的 deep config 报告。
+  代码审查结论为 **Won't Fix / 需维护者确认**；这些变更用于收敛
+  task-first ownership、统一 Task 配置面与 durable runtime authority，
+  不保留旧 alpha API shim。
+
+Round 7 未产生代码修改，code findings remaining：**0**。核对基线为 HEAD
+`a1801d8e4d3805e94b8cef7268a93cc0904328c7`；该 HEAD 的远端 checks 全绿，
+记录前 worktree clean。5 条 breaking API thread 仍等待维护者确认，本轮状态
+不表示人工 approval 已满足。
