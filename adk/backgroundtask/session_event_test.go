@@ -83,6 +83,7 @@ func TestManagerSubmitAppendsTaskCreatedSessionEvent_BitsUT(t *testing.T) {
 				spec := validSpec("task-created")
 				spec.SessionID = sessionID
 				spec.NotifySession = false
+				spec.Description = "Research task creation"
 				var submitErr error
 				task, submitErr = manager.Submit(runCtx, &SubmitRequest{Spec: spec})
 				return submitErr
@@ -118,6 +119,7 @@ func TestManagerSubmitAppendsTaskCreatedSessionEvent_BitsUT(t *testing.T) {
 	payload, ok := event.Extension.Data.(*TaskCreatedSessionEvent)
 	require.True(t, ok)
 	require.Equal(t, task.Spec.ID, payload.TaskID)
+	require.Equal(t, "Research task creation", payload.Description)
 }
 
 func TestManagerSubmitReturnsUndeliveredSentinelAfterCreate_BitsUT(t *testing.T) {
