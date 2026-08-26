@@ -221,7 +221,7 @@ func TestAttack_PublishFailureCleansLocalWork(t *testing.T) {
 			},
 		},
 	)
-	timeout := 1
+	timeout := 0
 	runner, err := New(&Config{
 		Manager:             manager,
 		ForegroundTimeoutMs: &timeout,
@@ -238,19 +238,47 @@ func TestAttack_PublishFailureCleansLocalWork(t *testing.T) {
 		defer cancel()
 		require.NoError(t, manager.Close(closeCtx))
 	})
+	workStarted := make(chan struct{})
 	workCanceled := make(chan struct{})
+	callerCtx, cancelCaller := context.WithCancel(context.Background())
+	returned := make(chan struct {
+		result *RunResult
+		err    error
+	}, 1)
 
-	result, err := runner.Run(
-		context.Background(),
-		&Input{Description: "publish failure"},
-		func(ctx context.Context, _ background.ExecutionRuntime) (string, error) {
-			<-ctx.Done()
-			close(workCanceled)
-			return "", ctx.Err()
-		},
-	)
-	require.Nil(t, result)
-	require.ErrorIs(t, err, publishErr)
+	go func() {
+		result, runErr := runner.Run(
+			callerCtx,
+			&Input{Description: "publish failure"},
+			func(ctx context.Context, _ background.ExecutionRuntime) (string, error) {
+				close(workStarted)
+				<-ctx.Done()
+				close(workCanceled)
+				return "", ctx.Err()
+			},
+		)
+		returned <- struct {
+			result *RunResult
+			err    error
+		}{result: result, err: runErr}
+	}()
+	select {
+	case <-workStarted:
+	case <-time.After(time.Second):
+		t.Fatal("local work did not start")
+	}
+	cancelCaller()
+	var runResult struct {
+		result *RunResult
+		err    error
+	}
+	select {
+	case runResult = <-returned:
+	case <-time.After(time.Second):
+		t.Fatal("publication failure cleanup did not complete")
+	}
+	require.Nil(t, runResult.result)
+	require.ErrorIs(t, runResult.err, publishErr)
 	select {
 	case <-workCanceled:
 	case <-time.After(time.Second):

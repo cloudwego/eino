@@ -583,6 +583,38 @@ Validate、Counter 和 Verdict；最终代码 finding remaining：**0**。
 | `gofmt` | **PASS** |
 | `git diff --check` | **PASS** |
 
+### CI follow-up
+
+GitHub Actions run `33001789391` 在 Go 1.19 的
+`go test -race ./...` 中暴露了两个仅存在于测试调度的竞态；该 run 的结论为
+**failure**，其余部分 compatibility matrix 因 fail-fast 被取消，不能据此
+宣称 PR checks 全绿。
+
+- `TestWithCancel_RecursiveDoesNotTargetAgentEmbeddedInMiddleware` 在 goroutine
+  内调用 `cancelFn` 后等待 handle，主测试则可能先解除 inner model 阻塞。
+  两者之间没有 happens-before，Go 1.19 race 调度下 cancel request 可能错过
+  预期 safe-point，最终报 `outer cancel did not complete`。修复为在主 goroutine
+  同步调用 `cancelFn` 并确认 `contributed=true`，以 handle 创建作为确定性
+  handshake，之后只在 goroutine 中执行 `handle.Wait()`。
+- `TestAttack_PublishFailureCleansLocalWork` 依赖 1ms foreground timer 触发
+  publication failure，但没有确认 local work 已经开始。慢调度下 cleanup 可先
+  返回，而 work goroutine 尚未进入等待 cancellation 的位置，最终报
+  `publication failure did not cancel local work`。修复为禁用 timer 竞态，
+  等待 `workStarted` 后显式取消 caller context，再等待 `Run` 返回和
+  `workCanceled`，使 work start、detach/publication failure 与 cancellation
+  observation 之间具有确定性顺序。
+
+修复后的验证：
+
+- 当前工具链 focused race：两个用例 `-count=100` 通过。
+- Go 1.19.13 focused race：两个用例 `-count=100` 通过。
+- 当前工具链 `go test -race ./...` 通过。
+- Go 1.19.13 `go test -race ./...` 通过。
+- `git diff --check` 通过。
+
+上述结果只证明本地回归通过；修复 commit 尚未 push，也尚未产生新的远端
+checks 结果。
+
 **Task 5 final full review verdict: APPROVE. Final code findings remaining: 0.**
 
 Task 5 的复查、汇总与本地全量门禁已完成。最终 commit/push、PR checks、
