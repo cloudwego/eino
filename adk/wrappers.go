@@ -547,6 +547,14 @@ func (m *typedEventSenderModel[M]) Generate(ctx context.Context, input []M, opts
 	startEvent := newModelSpanStartEvent[M](ctx, spanID, started, opts...)
 	sendSessionTimelineEvent(ctx, startEvent)
 	result, err := m.inner.Generate(ctx, input, opts...)
+	if err == nil {
+		// Symmetric with Stream below: a WrapModel handler may short-circuit the
+		// inner model and return a message that never passed through the innermost
+		// ID assignment layer. Stamp it here, before the span, draft, and live
+		// event each take an independent copy -- otherwise every consumer lazily
+		// assigns its own ID and one logical message ends up with several.
+		result = ensureMessageIDCOW(result)
+	}
 	ended := newEventTimestamp()
 	sendSessionTimelineEvent(ctx, newModelSpanEndEvent(ctx, modelSpanEndEventInput[M]{
 		spanID:       spanID,
