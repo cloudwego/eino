@@ -33,7 +33,8 @@ const SessionEventTaskCreated adk.SessionEventKind = "x.eino.background_task.cre
 // TaskCreatedSessionEvent is the extension payload for
 // SessionEventTaskCreated.
 type TaskCreatedSessionEvent struct {
-	TaskID string `json:"task_id"`
+	TaskID      string `json:"task_id"`
+	Description string `json:"description"`
 }
 
 var taskCreatedSessionEventNamespace = uuid.MustParse("fddebb92-8d8a-4ae4-a652-7a49bbb4de2e")
@@ -75,7 +76,9 @@ func TaskCreatedSessionEventSender[M adk.MessageType]() func(context.Context, *T
 					Timestamp: task.CreatedAt,
 					Kind:      SessionEventTaskCreated,
 					Extension: &adk.SessionExtensionEvent{
-						Data: &TaskCreatedSessionEvent{TaskID: task.Spec.ID},
+						Data: &TaskCreatedSessionEvent{
+							TaskID: task.Spec.ID, Description: task.Spec.Description,
+						},
 					},
 				},
 			},
