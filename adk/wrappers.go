@@ -629,6 +629,23 @@ func (m *typedEventSenderModel[M]) Stream(ctx context.Context, input []M, opts .
 		return nil, errors.New("generator is nil when sending event in Stream: ensure agent state is properly initialized")
 	}
 
+	// A WrapModel handler may short-circuit the inner model and synthesize a
+	// stream that bypasses the framework's innermost ID assignment layer. Assign
+	// the ID before Copy fans the message out to event persistence, state, and
+	// tracing consumers. Copy the first chunk before mutation because the handler
+	// may retain or concurrently inspect the message it returned.
+	first := true
+	result = schema.StreamReaderWithConvert(result, func(msg M) (M, error) {
+		if first {
+			first = false
+			if GetMessageID(msg) == "" {
+				msg = copyMessage(msg)
+				typedSetMessageID(msg, uuid.NewString())
+			}
+		}
+		return msg, nil
+	})
+
 	streams := result.Copy(3)
 
 	eventStream := streams[0]

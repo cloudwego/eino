@@ -427,6 +427,97 @@ func (w *idCheckModelWrapper) Stream(ctx context.Context, input []*schema.Messag
 	return w.inner.Stream(ctx, input, opts...)
 }
 
+type syntheticAgenticStreamHandler struct {
+	*TypedBaseChatModelAgentMiddleware[*schema.AgenticMessage]
+	message *schema.AgenticMessage
+	release <-chan struct{}
+}
+
+func (h *syntheticAgenticStreamHandler) WrapModel(
+	_ context.Context,
+	_ model.BaseModel[*schema.AgenticMessage],
+	_ *TypedModelContext[*schema.AgenticMessage],
+) (model.BaseModel[*schema.AgenticMessage], error) {
+	return &mockAgenticModel{
+		generateFn: func(context.Context, []*schema.AgenticMessage, ...model.Option) (*schema.AgenticMessage, error) {
+			return nil, errors.New("unexpected Generate call")
+		},
+		streamFn: func(context.Context, []*schema.AgenticMessage, ...model.Option) (*schema.StreamReader[*schema.AgenticMessage], error) {
+			reader, writer := schema.Pipe[*schema.AgenticMessage](1)
+			go func() {
+				defer writer.Close()
+				if writer.Send(h.message, nil) {
+					return
+				}
+				<-h.release
+			}()
+			return reader, nil
+		},
+	}, nil
+}
+
+func TestMessageID_WrapModelSyntheticAgenticStreamGetsIDBeforeFanOut(t *testing.T) {
+	ctx := context.Background()
+	release := make(chan struct{})
+	released := false
+	t.Cleanup(func() {
+		if !released {
+			close(release)
+		}
+	})
+
+	synthetic := &schema.AgenticMessage{
+		Role: schema.AgenticRoleTypeAssistant,
+		ContentBlocks: []*schema.ContentBlock{
+			schema.NewContentBlock(&schema.AssistantGenText{Text: "synthetic"}),
+		},
+	}
+	inner := &mockAgenticModel{
+		generateFn: func(context.Context, []*schema.AgenticMessage, ...model.Option) (*schema.AgenticMessage, error) {
+			return nil, errors.New("inner model should not be called")
+		},
+		streamFn: func(context.Context, []*schema.AgenticMessage, ...model.Option) (*schema.StreamReader[*schema.AgenticMessage], error) {
+			return nil, errors.New("inner model should not be called")
+		},
+	}
+	handler := &syntheticAgenticStreamHandler{
+		TypedBaseChatModelAgentMiddleware: &TypedBaseChatModelAgentMiddleware[*schema.AgenticMessage]{},
+		message:                           synthetic,
+		release:                           release,
+	}
+	agent, err := NewTypedChatModelAgent(ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
+		Name:     "synthetic-stream-message-id",
+		Model:    inner,
+		Handlers: []TypedChatModelAgentMiddleware[*schema.AgenticMessage]{handler},
+	})
+	require.NoError(t, err)
+
+	iter := agent.Run(ctx, &TypedAgentInput[*schema.AgenticMessage]{
+		Messages:        []*schema.AgenticMessage{schema.UserAgenticMessage("hi")},
+		EnableStreaming: true,
+	})
+	event, ok := iter.Next()
+	require.True(t, ok)
+	require.NoError(t, event.Err)
+	require.NotNil(t, event.Output)
+	require.NotNil(t, event.Output.MessageOutput)
+	require.True(t, event.Output.MessageOutput.IsStreaming)
+
+	chunk, err := event.Output.MessageOutput.MessageStream.Recv()
+	require.NoError(t, err)
+	assert.NotEmpty(t, GetMessageID(chunk), "synthetic stream output should have an ID before event fan-out")
+	assert.Empty(t, GetMessageID(synthetic), "assigning the framework ID should not mutate the handler-owned message")
+
+	close(release)
+	released = true
+	for {
+		_, ok = iter.Next()
+		if !ok {
+			break
+		}
+	}
+}
+
 // Scenario 7: User input messages do NOT get automatic IDs (they are external, not framework-created).
 // Only framework-created messages (model output, tool results, TypedSendEvent) get auto-assigned IDs.
 func TestMessageID_UserInputNoAutoID(t *testing.T) {
