@@ -70,10 +70,10 @@ type RuntimeSessionStoreFactory[M adk.MessageType] func(
 ) (adk.SessionEventStore[M], error)
 
 const (
-	// ExecutorKey identifies the TurnLoop task runtime protocol for durable
-	// sub-agent tasks. Its payload versions are scoped to this persisted key;
-	// version 1 is not compatible with the legacy eino.dev/subagent payload v4.
-	ExecutorKey = "eino.dev/task-subagent"
+	// ExecutorKey identifies durable sub-agent tasks using runtime checkpoint
+	// protocol v2. Workers using earlier checkpoint protocols must not register
+	// this key, so mixed rollouts cannot claim incompatible tasks.
+	ExecutorKey = "eino.dev/task-subagent-durable-v2"
 
 	// payloadVersion is the first payload version under ExecutorKey.
 	payloadVersion          = 1

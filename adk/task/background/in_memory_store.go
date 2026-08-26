@@ -1197,6 +1197,7 @@ func (s *InMemoryStore) resolveExpiredLocked(t *TaskSnapshot) {
 
 func (s *InMemoryStore) finishStoreOwnedLocked(t *TaskSnapshot) {
 	s.clearActiveLocked(t)
+	t.Checkpoint = nil
 	if mailbox := s.mailboxes[t.Spec.ID]; mailbox != nil &&
 		mailbox.mailbox.State == taskcore.MailboxBackground {
 		mailbox.mailbox.State = taskcore.MailboxSealed

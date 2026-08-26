@@ -102,14 +102,15 @@ func (s *InMemoryStore) AdoptForeground(
 	return cloneTask(backgroundTask), nil
 }
 
-// CommitInput atomically advances the mailbox cursor and checkpoints an
-// operation established from that input.
+// CommitInput atomically updates the contiguous mailbox cursor and checkpoints
+// an operation established from consumed input. The cursor may remain unchanged
+// when the checkpoint records out-of-order consumption.
 func (s *InMemoryStore) CommitInput(
 	_ context.Context,
 	req *CommitInputRequest,
 ) (*TaskSnapshot, error) {
 	if req == nil || req.TaskID == "" || req.Attempt <= 0 ||
-		req.ExpectedCursor < 0 || req.InputCursor <= req.ExpectedCursor ||
+		req.ExpectedCursor < 0 || req.InputCursor < req.ExpectedCursor ||
 		len(req.Checkpoint) == 0 {
 		return nil, errors.New("task/background: commit input request is invalid")
 	}
@@ -293,6 +294,7 @@ func (s *InMemoryStore) CompleteIfNoInputs(
 		return cloneTask(backgroundTask), task.ErrInputsPending
 	}
 	backgroundTask.Status = StatusCompleted
+	backgroundTask.Checkpoint = nil
 	backgroundTask.ResultData = cloneBytes(req.ResultData)
 	backgroundTask.ResultError = ""
 	mailbox.mailbox.State = task.MailboxSealed

@@ -192,6 +192,9 @@ func (e *taskCreatedEventUndeliveredError) Is(target error) bool {
 // retry-capable work, cancel intent that outlives an attempt remains pending so
 // a recovery attempt can stop the external operation before acknowledging
 // cancellation. Non-recoverable lease expiry resolves cancellation directly.
+// CompleteIfNoInputs, Fail, and AckCancel atomically clear Checkpoint when they
+// enter a terminal status. A CompleteIfNoInputs late-input fallback to Pending
+// retains Checkpoint because execution remains recoverable.
 type TaskStore interface {
 	Create(context.Context, *CreateTaskRequest) (*TaskSnapshot, error)
 	Publish(context.Context, *PublishTaskRequest) (*TaskSnapshot, error)

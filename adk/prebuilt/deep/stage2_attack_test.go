@@ -183,15 +183,28 @@ func TestAttack_GeneratedGeneralControlsUseRuntimeManager(t *testing.T) {
 		fmt.Sprintf(`{"task_id":%q,"block":false}`, snapshot.Spec.ID),
 	)
 	require.NoError(t, err)
-	require.Equal(
-		t,
-		fmt.Sprintf(
-			"Task ID: %s\nDescription: shared manager task\n"+
-				"Status: completed\nResult: shared-manager-result\nElapsed: 0s",
-			snapshot.Spec.ID,
-		),
-		output,
-	)
+	lines := strings.Split(output, "\n")
+	require.Len(t, lines, 5)
+	fields := make(map[string]string, len(lines))
+	for _, line := range lines {
+		key, value, found := strings.Cut(line, ": ")
+		require.Truef(t, found, "malformed task output line %q", line)
+		require.NotContains(t, fields, key, "duplicate task output field %q", key)
+		fields[key] = value
+	}
+	elapsedText, found := fields["Elapsed"]
+	require.True(t, found, "task output must include Elapsed")
+	delete(fields, "Elapsed")
+	require.Equal(t, map[string]string{
+		"Task ID":     snapshot.Spec.ID,
+		"Description": "shared manager task",
+		"Status":      "completed",
+		"Result":      "shared-manager-result",
+	}, fields)
+	elapsed, err := time.ParseDuration(elapsedText)
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, elapsed, time.Duration(0))
+	require.LessOrEqual(t, elapsed, 5*time.Second)
 
 	started := make(chan struct{})
 	blockedResult, err := runner.Run(
@@ -298,11 +311,13 @@ func TestAttack_ManagedShellWireDescriptionMatchesSchema(t *testing.T) {
 	info := attackDeepToolInfo(t, execute)
 	params, err := info.ParamsOneOf.ToJSONSchema()
 	require.NoError(t, err)
-	for _, field := range []string{"command", "run_in_background", "timeout"} {
+	for _, field := range []string{"command", "run_in_background", "timeout_seconds"} {
 		_, ok := params.Properties.Get(field)
 		require.True(t, ok, "managed execute schema must contain %q", field)
 		require.Contains(t, info.Desc, field)
 	}
+	_, hasLegacyTimeout := params.Properties.Get("timeout")
+	require.False(t, hasLegacyTimeout)
 	require.Contains(t, info.Desc, "task_output")
 	require.Contains(t, info.Desc, "task_id")
 }

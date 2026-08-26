@@ -17,9 +17,12 @@
 package subagent
 
 import (
+	"bytes"
 	"context"
+	"encoding/gob"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -32,6 +35,8 @@ import (
 	"github.com/cloudwego/eino/adk/task"
 	"github.com/cloudwego/eino/adk/task/background"
 	"github.com/cloudwego/eino/components/model"
+	componenttool "github.com/cloudwego/eino/components/tool"
+	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -52,6 +57,68 @@ func (f cancellationHookFunc) OnCancel(
 type preemptModel struct {
 	started chan struct{}
 	runs    int64
+}
+
+type drainTimeoutModel struct {
+	started chan struct{}
+	calls   int32
+}
+
+type drainTimeoutStreamingModel struct {
+	started chan struct{}
+	release chan struct{}
+	calls   int32
+}
+
+type drainTimeoutToolModel struct {
+	calls int32
+}
+
+type drainTimeoutTool struct {
+	started chan struct{}
+	calls   int32
+}
+
+type runResumeCountingAgent struct {
+	adk.ResumableAgent
+	runs     int64
+	resumes  int64
+	mu       sync.Mutex
+	inputs   [][]string
+	inputIDs [][]string
+}
+
+type recordingCheckpointStore struct {
+	store  adk.CheckPointStore
+	record func(string)
+}
+
+func (s *recordingCheckpointStore) Get(
+	ctx context.Context,
+	checkpointID string,
+) ([]byte, bool, error) {
+	return s.store.Get(ctx, checkpointID)
+}
+
+func (s *recordingCheckpointStore) Set(
+	ctx context.Context,
+	checkpointID string,
+	checkpoint []byte,
+) error {
+	s.record("set:" + checkpointID)
+	return s.store.Set(ctx, checkpointID, checkpoint)
+}
+
+func (s *recordingCheckpointStore) Delete(
+	ctx context.Context,
+	checkpointID string,
+) error {
+	s.record("delete:" + checkpointID)
+	deleter, ok := s.store.(adk.CheckPointDeleter)
+	if !ok {
+		return nil
+	}
+	return deleter.Delete(ctx, checkpointID)
 }
 
 type activeLookupBarrierStore struct {
@@ -82,6 +149,45 @@ func (s *activeLookupBarrierStore) GetActiveMailboxBySession(
 
 func (s *activeLookupBarrierStore) unblock() {
 	s.release.Do(func() { close(s.resume) })
+}
+
+type adoptionBarrierStore struct {
+	*background.InMemoryStore
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+	adopted sync.Once
+	done    chan struct{}
+	mu      sync.Mutex
+	modes   []bool
+}
+
+func (s *adoptionBarrierStore) AdoptForeground(
+	ctx context.Context,
+	req *background.AdoptForegroundStoreRequest,
+) (*background.TaskSnapshot, error) {
+	s.mu.Lock()
+	s.modes = append(s.modes, req.StartPending)
+	s.mu.Unlock()
+	if !req.StartPending {
+		s.once.Do(func() { close(s.entered) })
+		select {
+		case <-s.release:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	snapshot, err := s.InMemoryStore.AdoptForeground(ctx, req)
+	if err == nil && req.StartPending {
+		s.adopted.Do(func() { close(s.done) })
+	}
+	return snapshot, err
+}
+
+func (s *adoptionBarrierStore) startModes() []bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]bool(nil), s.modes...)
 }
 
 type resumableTestAgent struct {
@@ -236,6 +342,175 @@ func (m *preemptModel) Stream(
 	return schema.StreamReaderFromArray([]*schema.Message{message}), nil
 }
 
+func (m *drainTimeoutModel) Generate(
+	ctx context.Context,
+	_ []*schema.Message,
+	_ ...model.Option,
+) (*schema.Message, error) {
+	if atomic.AddInt32(&m.calls, 1) == 1 {
+		close(m.started)
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	return schema.AssistantMessage("resumed", nil), nil
+}
+
+func (m *drainTimeoutModel) Stream(
+	ctx context.Context,
+	input []*schema.Message,
+	options ...model.Option,
+) (*schema.StreamReader[*schema.Message], error) {
+	message, err := m.Generate(ctx, input, options...)
+	if err != nil {
+		return nil, err
+	}
+	return schema.StreamReaderFromArray([]*schema.Message{message}), nil
+}
+
+func (*drainTimeoutModel) BindTools([]*schema.ToolInfo) error { return nil }
+
+func (m *drainTimeoutStreamingModel) Generate(
+	_ context.Context,
+	_ []*schema.Message,
+	_ ...model.Option,
+) (*schema.Message, error) {
+	if atomic.AddInt32(&m.calls, 1) == 1 {
+		return schema.AssistantMessage("unreachable", nil), nil
+	}
+	return schema.AssistantMessage("resumed", nil), nil
+}
+
+func (m *drainTimeoutStreamingModel) Stream(
+	ctx context.Context,
+	input []*schema.Message,
+	options ...model.Option,
+) (*schema.StreamReader[*schema.Message], error) {
+	if atomic.LoadInt32(&m.calls) > 0 {
+		message, err := m.Generate(ctx, input, options...)
+		if err != nil {
+			return nil, err
+		}
+		return schema.StreamReaderFromArray([]*schema.Message{message}), nil
+	}
+	atomic.AddInt32(&m.calls, 1)
+	reader, writer := schema.Pipe[*schema.Message](1)
+	close(m.started)
+	go func() {
+		<-m.release
+		writer.Close()
+	}()
+	return reader, nil
+}
+
+func (m *drainTimeoutToolModel) Generate(
+	_ context.Context,
+	_ []*schema.Message,
+	_ ...model.Option,
+) (*schema.Message, error) {
+	if atomic.AddInt32(&m.calls, 1) == 1 {
+		return &schema.Message{
+			Role: schema.Assistant,
+			ToolCalls: []schema.ToolCall{{
+				ID:   "call-1",
+				Type: "function",
+				Function: schema.FunctionCall{
+					Name:      "wait",
+					Arguments: `{"input":"work"}`,
+				},
+			}},
+		}, nil
+	}
+	return schema.AssistantMessage("resumed", nil), nil
+}
+
+func (m *drainTimeoutToolModel) Stream(
+	ctx context.Context,
+	input []*schema.Message,
+	options ...model.Option,
+) (*schema.StreamReader[*schema.Message], error) {
+	message, err := m.Generate(ctx, input, options...)
+	if err != nil {
+		return nil, err
+	}
+	return schema.StreamReaderFromArray([]*schema.Message{message}), nil
+}
+
+func (*drainTimeoutToolModel) BindTools([]*schema.ToolInfo) error { return nil }
+
+func (*drainTimeoutTool) Info(context.Context) (*schema.ToolInfo, error) {
+	return &schema.ToolInfo{
+		Name: "wait",
+		Desc: "waits for cancellation",
+		ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
+			"input": {Type: schema.String},
+		}),
+	}, nil
+}
+
+func (t *drainTimeoutTool) InvokableRun(
+	ctx context.Context,
+	_ string,
+	_ ...componenttool.Option,
+) (string, error) {
+	if atomic.AddInt32(&t.calls, 1) == 1 {
+		close(t.started)
+		<-ctx.Done()
+		return "", ctx.Err()
+	}
+	return "resumed tool", nil
+}
+
+func (a *runResumeCountingAgent) Run(
+	ctx context.Context,
+	input *adk.AgentInput,
+	options ...adk.AgentRunOption,
+) *adk.AsyncIterator[*adk.AgentEvent] {
+	atomic.AddInt64(&a.runs, 1)
+	contents := make([]string, 0, len(input.Messages))
+	ids := make([]string, 0, len(input.Messages))
+	for _, message := range input.Messages {
+		if message.Role != schema.User {
+			continue
+		}
+		contents = append(contents, message.Content)
+		ids = append(ids, adk.GetMessageID(message))
+	}
+	a.mu.Lock()
+	a.inputs = append(a.inputs, contents)
+	a.inputIDs = append(a.inputIDs, ids)
+	a.mu.Unlock()
+	return a.ResumableAgent.Run(ctx, input, options...)
+}
+
+func (a *runResumeCountingAgent) Resume(
+	ctx context.Context,
+	info *adk.ResumeInfo,
+	options ...adk.AgentRunOption,
+) *adk.AsyncIterator[*adk.AgentEvent] {
+	atomic.AddInt64(&a.resumes, 1)
+	return a.ResumableAgent.Resume(ctx, info, options...)
+}
+
+func (a *runResumeCountingAgent) runInputs() [][]string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	result := make([][]string, len(a.inputs))
+	for index := range a.inputs {
+		result[index] = append([]string(nil), a.inputs[index]...)
+	}
+	return result
+}
+
+func (a *runResumeCountingAgent) runInputIDs() [][]string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	result := make([][]string, len(a.inputIDs))
+	for index := range a.inputIDs {
+		result[index] = append([]string(nil), a.inputIDs[index]...)
+	}
+	return result
+}
+
 func (f completionBarrierFunc[M]) Check(
 	ctx context.Context,
 	input *CompletionContext[M],
@@ -290,6 +565,87 @@ func newControllerWithAgentForTest(
 		&AgentRegistration[*schema.Message]{Agent: agent},
 	))
 	return runtime, manager, sessionStore
+}
+
+func executeDrainTimeoutTask(
+	t *testing.T,
+	agent adk.ResumableAgent,
+	waitUntilRunning <-chan struct{},
+) (*background.InMemoryStore, *adksession.InMemoryStore[*schema.Message], *Handle) {
+	t.Helper()
+	store := background.NewInMemoryStore(nil)
+	sessionStore := adksession.NewInMemoryStore[*schema.Message](nil)
+	manager := newIntegrationManager(t, store)
+	runtime, err := NewController(&ControllerConfig[*schema.Message]{
+		Manager: manager,
+		Barrier: completeBarrier[*schema.Message](), InputsToAgentInput: testEventMapper,
+		SessionStore: sessionStore, CheckPointStore: sessionStore,
+		DrainCancelTimeout: 20 * time.Millisecond,
+	})
+	require.NoError(t, err)
+	require.NoError(t, runtime.RegisterAgent(
+		agent.Name(context.Background()),
+		&AgentRegistration[*schema.Message]{Agent: agent},
+	))
+	handle, err := runtime.Start(context.Background(), &StartRequest[*schema.Message]{
+		InvocationID: "parent:drain-timeout", ParentSessionID: "parent",
+		AgentName: agent.Name(context.Background()), StartMode: task.StartModeBackground,
+		Input: &adk.AgentInput{
+			Messages:        []*schema.Message{schema.UserMessage("work")},
+			EnableStreaming: true,
+		},
+	})
+	require.NoError(t, err)
+	awaitIntegrationValue(t, waitUntilRunning)
+
+	closeCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	require.NoError(t, manager.Close(closeCtx))
+	suspended, err := manager.Get(context.Background(), handle.ID())
+	require.NoError(t, err)
+	require.Equal(t, background.StatusSuspended, suspended.Status)
+	require.NotEmpty(t, suspended.Checkpoint)
+	runtimeCheckpoint, err := decodeRuntimeCheckpoint[*schema.Message](
+		suspended.Checkpoint,
+	)
+	require.NoError(t, err)
+	require.NotEmpty(t, runtimeCheckpoint.TurnLoopCheckpoint)
+	_, exists, err := sessionStore.Get(
+		context.Background(),
+		runtimeTurnLoopCheckpointID(handle.ID()),
+	)
+	require.NoError(t, err)
+	require.False(t, exists)
+	return store, sessionStore, handle
+}
+
+func requireDrainCheckpointResumes(
+	t *testing.T,
+	store *background.InMemoryStore,
+	sessionStore *adksession.InMemoryStore[*schema.Message],
+	handle *Handle,
+	agent adk.ResumableAgent,
+) {
+	t.Helper()
+	manager := newIntegrationManager(t, store)
+	t.Cleanup(func() { closeIntegrationManager(t, manager) })
+	runtime, err := NewController(&ControllerConfig[*schema.Message]{
+		Manager: manager,
+		Barrier: completeBarrier[*schema.Message](), InputsToAgentInput: testEventMapper,
+		SessionStore: sessionStore, CheckPointStore: sessionStore,
+	})
+	require.NoError(t, err)
+	require.NoError(t, runtime.RegisterAgent(
+		agent.Name(context.Background()),
+		&AgentRegistration[*schema.Message]{Agent: agent},
+	))
+	released, err := manager.ReleaseSuspension(context.Background(), handle.ID())
+	require.NoError(t, err)
+	require.Equal(t, background.StatusPending, released.Status)
+	require.NoError(t, manager.Execute(context.Background(), handle.ID()))
+	result, err := runtime.Wait(context.Background(), handle.ID())
+	require.NoError(t, err)
+	require.Equal(t, "resumed", result.FinalMessage.Content)
 }
 
 func testEventMapper(
@@ -457,7 +813,8 @@ func TestAttack_ForegroundTerminalCandidateSealsWithoutReplay(t *testing.T) {
 	final, err := encodeRuntimeMessage(schema.AssistantMessage("candidate", nil))
 	require.NoError(t, err)
 	candidate, err := json.Marshal(&foregroundResultCheckpoint{
-		Version: foregroundResultVersion, Status: task.OutcomeCompleted,
+		Version: foregroundResultVersion, State: foregroundResultTerminal,
+		Status:      task.OutcomeCompleted,
 		InputCursor: 1, FinalMessage: final,
 	})
 	require.NoError(t, err)
@@ -516,6 +873,7 @@ func TestRecoverForegroundResult(t *testing.T) {
 
 	failedCheckpoint, err := json.Marshal(&foregroundResultCheckpoint{
 		Version: foregroundResultVersion,
+		State:   foregroundResultTerminal,
 		Status:  task.OutcomeFailed,
 		Error:   "persisted failure",
 	})
@@ -532,6 +890,7 @@ func TestRecoverForegroundResult(t *testing.T) {
 	require.NoError(t, err)
 	completedCheckpoint, err := json.Marshal(&foregroundResultCheckpoint{
 		Version:      foregroundResultVersion,
+		State:        foregroundResultTerminal,
 		Status:       task.OutcomeCompleted,
 		FinalMessage: final,
 	})
@@ -646,7 +1005,8 @@ func TestForegroundRecoveryProcessesInputPendingAtCandidateSeal(t *testing.T) {
 	final, err := encodeRuntimeMessage(schema.AssistantMessage("stale candidate", nil))
 	require.NoError(t, err)
 	candidate, err := json.Marshal(&foregroundResultCheckpoint{
-		Version: foregroundResultVersion, Status: task.OutcomeCompleted,
+		Version: foregroundResultVersion, State: foregroundResultTerminal,
+		Status:      task.OutcomeCompleted,
 		InputCursor: 1, FinalMessage: final,
 	})
 	require.NoError(t, err)
@@ -793,6 +1153,530 @@ func TestControllerBackgroundCompletes(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, background.StatusCompleted, completed.Status)
 	require.Equal(t, int64(1), completed.Attempt)
+}
+
+func TestControllerSuspendedHandoffRetriesPendingForRacingInput(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	store := &adoptionBarrierStore{
+		InMemoryStore: background.NewInMemoryStore(nil),
+		entered:       make(chan struct{}),
+		release:       make(chan struct{}),
+		done:          make(chan struct{}),
+	}
+	manager, err := background.New(ctx, &background.Config{
+		Tasks: store, TaskEvents: store,
+		SendTaskCreatedEvent: func(context.Context, *background.TaskSnapshot) error {
+			return nil
+		},
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { closeIntegrationManager(t, manager) })
+	sessionStore := adksession.NewInMemoryStore[*schema.Message](nil)
+	runtime, err := NewController(&ControllerConfig[*schema.Message]{
+		Manager: manager,
+		Barrier: completionBarrierFunc[*schema.Message](func(
+			context.Context,
+			*CompletionContext[*schema.Message],
+		) (CompletionAction, error) {
+			return CompletionSuspend, nil
+		}),
+		InputsToAgentInput: testEventMapper,
+		SessionStore:       sessionStore,
+		CheckPointStore:    sessionStore,
+	})
+	require.NoError(t, err)
+	require.NoError(t, runtime.RegisterAgent(
+		"worker",
+		&AgentRegistration[*schema.Message]{
+			Agent: &resumableTestAgent{name: "worker"},
+		},
+	))
+
+	handle, err := runtime.Start(ctx, &StartRequest[*schema.Message]{
+		InvocationID: "parent:adoption-race", ParentSessionID: "parent",
+		AgentName: "worker", StartMode: task.StartModeForeground,
+		Input: &adk.AgentInput{
+			Messages: []*schema.Message{schema.UserMessage("first")},
+		},
+	})
+	require.NoError(t, err)
+	awaitIntegrationValue(t, store.entered)
+	require.NoError(t, runtime.SendInput(ctx, handle.ID(), &task.Input{
+		EventID: "late", Kind: messageInputKind,
+		Data: mustEncodeAgentInput(t, "late"),
+	}))
+	close(store.release)
+	awaitIntegrationValue(t, store.done)
+
+	suspended, err := manager.WaitForTaskVersion(
+		ctx,
+		&background.WaitForTaskVersionRequest{
+			TaskID: handle.ID(), AfterVersion: 3,
+		},
+	)
+	require.NoError(t, err)
+	require.Equal(t, background.StatusSuspended, suspended.Status)
+	require.Equal(t, []bool{false, true}, store.startModes())
+	mailbox, err := manager.GetMailbox(ctx, handle.ID())
+	require.NoError(t, err)
+	require.Equal(t, int64(2), mailbox.ConsumedCursor)
+}
+
+func TestControllerDrainTimeoutCheckpointsBlockedModel(t *testing.T) {
+	model := &drainTimeoutModel{started: make(chan struct{})}
+	agent, err := adk.NewChatModelAgent(context.Background(), &adk.ChatModelAgentConfig{
+		Name: "worker", Description: "drain timeout test", Model: model,
+	})
+	require.NoError(t, err)
+
+	store, sessionStore, handle := executeDrainTimeoutTask(t, agent, model.started)
+	requireDrainCheckpointResumes(t, store, sessionStore, handle, agent)
+	require.GreaterOrEqual(t, atomic.LoadInt32(&model.calls), int32(2))
+}
+
+func TestControllerDrainTimeoutCheckpointsBlockedModelStream(t *testing.T) {
+	model := &drainTimeoutStreamingModel{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	defer close(model.release)
+	agent, err := adk.NewChatModelAgent(context.Background(), &adk.ChatModelAgentConfig{
+		Name: "worker", Description: "drain timeout stream test", Model: model,
+	})
+	require.NoError(t, err)
+
+	store, sessionStore, handle := executeDrainTimeoutTask(t, agent, model.started)
+	requireDrainCheckpointResumes(t, store, sessionStore, handle, agent)
+	require.GreaterOrEqual(t, atomic.LoadInt32(&model.calls), int32(2))
+}
+
+func TestControllerDrainTimeoutCheckpointsBlockedTool(t *testing.T) {
+	model := &drainTimeoutToolModel{}
+	blockingTool := &drainTimeoutTool{started: make(chan struct{})}
+	agent, err := adk.NewChatModelAgent(context.Background(), &adk.ChatModelAgentConfig{
+		Name: "worker", Description: "drain timeout tool test", Model: model,
+		ToolsConfig: adk.ToolsConfig{
+			ToolsNodeConfig: compose.ToolsNodeConfig{
+				Tools: []componenttool.BaseTool{blockingTool},
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	store, sessionStore, handle := executeDrainTimeoutTask(t, agent, blockingTool.started)
+	requireDrainCheckpointResumes(t, store, sessionStore, handle, agent)
+	require.GreaterOrEqual(t, atomic.LoadInt32(&model.calls), int32(2))
+}
+
+func TestControllerCommitFailureDoesNotPublishCapturedCheckpoint( //nolint:funlen // Covers the full crash-recovery boundary.
+	t *testing.T,
+) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	commitErr := errors.New("commit input failed")
+	store := &stage3FaultStore{
+		InMemoryStore:  background.NewInMemoryStore(nil),
+		commitInputErr: commitErr,
+	}
+	var operationsMu sync.Mutex
+	var operations []string
+	recordOperation := func(operation string) {
+		operationsMu.Lock()
+		operations = append(operations, operation)
+		operationsMu.Unlock()
+	}
+	store.commitInputHook = func() { recordOperation("commit_input") }
+	manager1, err := background.New(ctx, &background.Config{
+		Tasks: store, TaskEvents: store,
+		SendTaskCreatedEvent: func(context.Context, *background.TaskSnapshot) error {
+			return nil
+		},
+	})
+	require.NoError(t, err)
+	sessionStore := adksession.NewInMemoryStore[*schema.Message](nil)
+	checkpointStore := &recordingCheckpointStore{
+		store: sessionStore, record: recordOperation,
+	}
+	model := &drainTimeoutModel{started: make(chan struct{})}
+	baseAgent, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
+		Name: "worker", Description: "checkpoint replay test", Model: model,
+	})
+	require.NoError(t, err)
+	agent := &runResumeCountingAgent{ResumableAgent: baseAgent}
+	suspendBarrier := completionBarrierFunc[*schema.Message](func(
+		context.Context,
+		*CompletionContext[*schema.Message],
+	) (CompletionAction, error) {
+		return CompletionSuspend, nil
+	})
+	inputMapper := func(
+		_ context.Context,
+		inputs []*task.InputRecord,
+	) (*adk.AgentInput, error) {
+		messages := make([]*schema.Message, 0, len(inputs))
+		for _, input := range inputs {
+			messages = append(messages, schema.UserMessage(string(input.Data)))
+		}
+		return &adk.AgentInput{Messages: messages}, nil
+	}
+	controller1, err := NewController(&ControllerConfig[*schema.Message]{
+		Manager: manager1, Barrier: suspendBarrier,
+		InputsToAgentInput: inputMapper,
+		SessionStore:       sessionStore, CheckPointStore: checkpointStore,
+		DrainCancelTimeout: 5 * time.Millisecond,
+	})
+	require.NoError(t, err)
+	require.NoError(t, controller1.RegisterAgent(
+		agent.Name(ctx),
+		&AgentRegistration[*schema.Message]{Agent: agent},
+	))
+	handle, err := controller1.Start(ctx, &StartRequest[*schema.Message]{
+		InvocationID:    "parent:checkpoint-replay",
+		ParentSessionID: "parent", AgentName: agent.Name(ctx),
+		StartMode: task.StartModeBackground,
+		Input: &adk.AgentInput{
+			Messages: []*schema.Message{schema.UserMessage("sequence-1")},
+		},
+	})
+	require.NoError(t, err)
+	awaitIntegrationValue(t, model.started)
+
+	closeCtx, closeCancel := context.WithTimeout(ctx, time.Second)
+	defer closeCancel()
+	require.ErrorIs(t, manager1.Close(closeCtx), commitErr)
+	require.Equal(t, 1, store.commitInputCalls)
+	require.Len(t, store.commitInputRequests, 1)
+	failedCommitCheckpoint, err := decodeRuntimeCheckpoint[*schema.Message](
+		store.commitInputRequests[0].Checkpoint,
+	)
+	require.NoError(t, err)
+	require.NotEmpty(t, failedCommitCheckpoint.TurnLoopCheckpoint)
+	operationsMu.Lock()
+	recordedOperations := append([]string(nil), operations...)
+	operationsMu.Unlock()
+	require.Equal(t, []string{"commit_input"}, recordedOperations)
+	_, checkpointExists, err := sessionStore.Get(
+		ctx, runtimeTurnLoopCheckpointID(handle.ID()),
+	)
+	require.NoError(t, err)
+	require.False(t, checkpointExists)
+	running, err := store.Get(ctx, handle.ID())
+	require.NoError(t, err)
+	require.Equal(t, background.StatusRunning, running.Status)
+	pending, err := store.Yield(ctx, &background.YieldTaskRequest{
+		TaskID: handle.ID(), ExpectedVersion: running.Version,
+	})
+	require.NoError(t, err)
+	require.Equal(t, background.StatusPending, pending.Status)
+	mailbox, err := store.GetMailbox(ctx, handle.ID())
+	require.NoError(t, err)
+	require.Zero(t, mailbox.ConsumedCursor)
+	store.commitInputErr = nil
+
+	manager2, err := background.New(ctx, &background.Config{
+		Tasks: store, TaskEvents: store,
+		SendTaskCreatedEvent: func(context.Context, *background.TaskSnapshot) error {
+			return nil
+		},
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { closeIntegrationManager(t, manager2) })
+	controller2, err := NewController(&ControllerConfig[*schema.Message]{
+		Manager: manager2, Barrier: suspendBarrier,
+		InputsToAgentInput: inputMapper,
+		SessionStore:       sessionStore, CheckPointStore: checkpointStore,
+	})
+	require.NoError(t, err)
+	require.NoError(t, controller2.RegisterAgent(
+		agent.Name(ctx),
+		&AgentRegistration[*schema.Message]{Agent: agent},
+	))
+
+	require.NoError(t, manager2.Execute(ctx, handle.ID()))
+	suspended, err := manager2.Get(ctx, handle.ID())
+	require.NoError(t, err)
+	require.Equal(t, background.StatusSuspended, suspended.Status)
+	mailbox, err = manager2.GetMailbox(ctx, handle.ID())
+	require.NoError(t, err)
+	require.Equal(t, int64(1), mailbox.ConsumedCursor)
+	require.Equal(t, int64(2), atomic.LoadInt64(&agent.runs))
+	require.Zero(t, atomic.LoadInt64(&agent.resumes))
+
+	require.NoError(t, controller2.SendInput(ctx, handle.ID(), &task.Input{
+		EventID: "sequence-2", Kind: "external", Data: []byte("sequence-2"),
+	}))
+	released, err := manager2.ReleaseSuspension(ctx, handle.ID())
+	require.NoError(t, err)
+	require.Equal(t, background.StatusPending, released.Status)
+	require.NoError(t, manager2.Execute(ctx, handle.ID()))
+	suspended, err = manager2.Get(ctx, handle.ID())
+	require.NoError(t, err)
+	require.Equal(t, background.StatusSuspended, suspended.Status)
+	mailbox, err = manager2.GetMailbox(ctx, handle.ID())
+	require.NoError(t, err)
+	require.Equal(t, int64(2), mailbox.ConsumedCursor)
+	require.Equal(t, int64(3), atomic.LoadInt64(&agent.runs))
+	require.Zero(t, atomic.LoadInt64(&agent.resumes))
+	runInputs := agent.runInputs()
+	require.Len(t, runInputs, 3)
+	require.Equal(t, []string{"sequence-1"}, runInputs[0])
+	require.Contains(t, runInputs[1], "sequence-1")
+	require.Contains(t, runInputs[2], "sequence-2")
+}
+
+func TestMergeResumeInputRecords(t *testing.T) {
+	createdAt := time.Unix(100, 200)
+	record := func(sequence int64, kind string) *task.InputRecord {
+		return &task.InputRecord{
+			TaskID: "task", Sequence: sequence,
+			Input: task.Input{
+				EventID: fmt.Sprintf("event-%d", sequence),
+				Kind:    kind, Data: []byte(fmt.Sprintf("data-%d", sequence)),
+			},
+			CreatedAt: createdAt.Add(time.Duration(sequence)),
+		}
+	}
+	interrupted := record(1, initialSignalKind)
+	unhandled := record(2, ResumeInputKind)
+	mailbox1, mailbox2, mailbox3 := record(1, initialSignalKind),
+		record(2, ResumeInputKind), record(3, "external")
+
+	gotInterrupted, gotPending, err := mergeResumeInputRecords(
+		[]*task.InputRecord{interrupted},
+		[]*task.InputRecord{unhandled},
+		[]*task.InputRecord{mailbox1, mailbox2, mailbox3},
+		nil,
+	)
+	require.NoError(t, err)
+	require.Equal(t, []*task.InputRecord{interrupted}, gotInterrupted)
+	require.Equal(t, []*task.InputRecord{unhandled, mailbox3}, gotPending)
+	require.Same(t, interrupted, gotInterrupted[0])
+	require.Same(t, unhandled, gotPending[0])
+
+	resumed := record(3, ResumeInputKind)
+	gotInterrupted, gotPending, err = mergeResumeInputRecords(
+		[]*task.InputRecord{resumed},
+		[]*task.InputRecord{unhandled},
+		[]*task.InputRecord{mailbox2, record(3, ResumeInputKind)},
+		[]int64{3},
+	)
+	require.NoError(t, err)
+	require.Equal(t, []*task.InputRecord{resumed}, gotInterrupted)
+	require.Equal(t, []*task.InputRecord{unhandled}, gotPending)
+
+	gotInterrupted, gotPending, err = mergeResumeInputRecords(
+		nil,
+		nil,
+		[]*task.InputRecord{mailbox2, mailbox3},
+		[]int64{3},
+	)
+	require.NoError(t, err)
+	require.Empty(t, gotInterrupted)
+	require.Equal(t, []*task.InputRecord{mailbox2}, gotPending)
+
+	for _, testCase := range []struct {
+		name   string
+		mutate func(*task.InputRecord)
+	}{
+		{
+			name: "content",
+			mutate: func(input *task.InputRecord) {
+				input.Data = []byte("conflicting")
+			},
+		},
+		{
+			name: "metadata",
+			mutate: func(input *task.InputRecord) {
+				input.EventID = "conflicting"
+			},
+		},
+	} {
+		t.Run(testCase.name+" conflict fails closed", func(t *testing.T) {
+			conflict := record(1, initialSignalKind)
+			testCase.mutate(conflict)
+			_, _, mergeErr := mergeResumeInputRecords(
+				[]*task.InputRecord{interrupted}, nil,
+				[]*task.InputRecord{conflict},
+				nil,
+			)
+			require.ErrorContains(t, mergeErr, "conflicting input replay")
+		})
+	}
+
+	nilData := record(4, "external")
+	nilData.Data = nil
+	emptyData := record(4, "external")
+	emptyData.Data = []byte{}
+	require.True(t, equalInputRecords(nilData, emptyData))
+
+	var encoded bytes.Buffer
+	require.NoError(t, gob.NewEncoder(&encoded).Encode(nilData))
+	var decoded task.InputRecord
+	require.NoError(t, gob.NewDecoder(&encoded).Decode(&decoded))
+	require.True(t, equalInputRecords(&decoded, emptyData))
+}
+
+func TestControllerNoRunnerStateCheckpointMergesMailboxReplay(t *testing.T) {
+	for _, testCase := range []struct {
+		name     string
+		conflict bool
+	}{
+		{name: "duplicate is consumed once"},
+		{name: "conflict fails closed", conflict: true},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			ctx := context.Background()
+			store := background.NewInMemoryStore(nil)
+			manager, err := background.New(ctx, &background.Config{
+				Tasks: store, TaskEvents: store,
+				SendTaskCreatedEvent: func(
+					context.Context,
+					*background.TaskSnapshot,
+				) error {
+					return nil
+				},
+			})
+			require.NoError(t, err)
+			t.Cleanup(func() { closeIntegrationManager(t, manager) })
+			checkpointStore := adksession.NewInMemoryStore[*schema.Message](nil)
+			agent := &runResumeCountingAgent{
+				ResumableAgent: &resumableTestAgent{name: "worker"},
+			}
+			controller, err := NewController(&ControllerConfig[*schema.Message]{
+				Manager: manager, Barrier: completeBarrier[*schema.Message](),
+				InputsToAgentInput: testEventMapper,
+				SessionStore:       checkpointStore, CheckPointStore: checkpointStore,
+			})
+			require.NoError(t, err)
+			require.NoError(t, controller.RegisterAgent(
+				"worker",
+				&AgentRegistration[*schema.Message]{
+					Agent: agent,
+				},
+			))
+
+			taskID := "no-runner-" + testCase.name
+			metadata := &runtimeMetadata{
+				Version: runtimeMetadataVersion, ParentSessionID: "parent",
+				RootSessionID: "parent", ChildSessionID: taskID + "-child",
+				AgentName: "worker", StartMode: task.StartModeBackground,
+			}
+			identity, err := json.Marshal(metadata)
+			require.NoError(t, err)
+			reserved, err := manager.RegisterMailbox(
+				ctx,
+				&task.RegisterMailboxRequest{
+					CandidateTaskID: taskID, InvocationID: taskID,
+					Identity: identity, RootSessionID: metadata.RootSessionID,
+					ChildSessionID: metadata.ChildSessionID,
+				},
+			)
+			require.NoError(t, err)
+			input := mustEncodeAgentInput(t, "work")
+			terminal, err := controller.prepareStartMailbox(
+				ctx,
+				reserved,
+				taskID,
+				input,
+			)
+			require.NoError(t, err)
+			require.False(t, terminal)
+			signals, err := manager.ListInputs(ctx, &task.ListInputsRequest{
+				TaskID: taskID,
+			})
+			require.NoError(t, err)
+			require.Len(t, signals.Inputs, 1)
+			checkpointInput := *signals.Inputs[0]
+			checkpointInput.Data = append([]byte(nil), signals.Inputs[0].Data...)
+			if testCase.conflict {
+				checkpointInput.Data = []byte("conflicting")
+			}
+			var encoded bytes.Buffer
+			require.NoError(t, gob.NewEncoder(&encoded).Encode(&struct {
+				RunnerCheckpointID string
+				RunnerCheckpoint   []byte
+				HasRunnerState     bool
+				UnhandledItems     []*task.InputRecord
+				ResumeItems        []*task.InputRecord
+				CanceledItems      []*task.InputRecord
+			}{
+				UnhandledItems: []*task.InputRecord{&checkpointInput},
+			}))
+			require.NoError(t, checkpointStore.Set(
+				ctx,
+				runtimeTurnLoopCheckpointID(taskID),
+				encoded.Bytes(),
+			))
+			runtimeCheckpoint, err := json.Marshal(&turnLoopCheckpoint{
+				Version: legacyRuntimeCheckpointVersion,
+				Mode:    runtimeCheckpointIdle,
+			})
+			require.NoError(t, err)
+			payload, err := json.Marshal(&taskPayload{
+				Version: payloadVersion, SubAgentName: metadata.AgentName,
+				ChildSessionID: metadata.ChildSessionID,
+			})
+			require.NoError(t, err)
+			pending, err := manager.AdoptForeground(
+				ctx,
+				&background.AdoptForegroundRequest{
+					Spec: background.Spec{
+						ID: taskID, ExecutorKey: ExecutorKey, Kind: "subagent",
+						Payload: payload, RootSessionID: metadata.RootSessionID,
+					},
+					ExpectedGeneration: reserved.Mailbox.Generation,
+					InputCursor:        0,
+					InitialCheckpoint:  runtimeCheckpoint,
+					StartPending:       true,
+				},
+			)
+			require.NoError(t, err)
+			require.Equal(t, background.StatusPending, pending.Status)
+			require.NoError(t, manager.Execute(ctx, taskID))
+
+			snapshot, err := manager.Get(ctx, taskID)
+			require.NoError(t, err)
+			if testCase.conflict {
+				require.Equal(t, background.StatusFailed, snapshot.Status)
+				require.Contains(t, snapshot.ResultError, "conflicting input replay")
+				require.Zero(t, atomic.LoadInt64(&agent.runs))
+				_, exists, getErr := checkpointStore.Get(
+					ctx,
+					runtimeTurnLoopCheckpointID(taskID),
+				)
+				require.NoError(t, getErr)
+				require.True(t, exists)
+				return
+			}
+			require.Equal(t, background.StatusCompleted, snapshot.Status)
+			require.Empty(t, snapshot.Checkpoint)
+			require.Equal(t, int64(1), atomic.LoadInt64(&agent.runs))
+			require.Equal(t, [][]string{{"work"}}, agent.runInputs())
+			_, exists, getErr := checkpointStore.Get(
+				ctx,
+				runtimeTurnLoopCheckpointID(taskID),
+			)
+			require.NoError(t, getErr)
+			require.False(t, exists)
+		})
+	}
+}
+
+func TestAcknowledgeInputRecordsFoldsOnlyContiguousPrefix(t *testing.T) {
+	cursor, sparseAcks, err := acknowledgeInputRecords(
+		1, nil, []*task.InputRecord{{Sequence: 3}},
+	)
+	require.NoError(t, err)
+	require.Equal(t, int64(1), cursor)
+	require.Equal(t, []int64{3}, sparseAcks)
+
+	cursor, sparseAcks, err = acknowledgeInputRecords(
+		cursor, sparseAcks, []*task.InputRecord{{Sequence: 2}},
+	)
+	require.NoError(t, err)
+	require.Equal(t, int64(3), cursor)
+	require.Empty(t, sparseAcks)
 }
 
 func TestControllerActiveCancellationInvokesHookOnce(t *testing.T) {
@@ -1160,7 +2044,7 @@ func TestForegroundInputCanPreemptActiveTurn(t *testing.T) {
 	result, err := runtime.Wait(ctx, handle.ID())
 	require.NoError(t, err)
 	require.Equal(t, "preempted", result.FinalMessage.Content)
-	require.Equal(t, int64(2), atomic.LoadInt64(&model.runs))
+	require.Equal(t, int64(3), atomic.LoadInt64(&model.runs))
 }
 
 func TestAttack_ReplayIdentityIgnoresFrameworkMessageID(t *testing.T) {
@@ -1367,6 +2251,7 @@ func TestControllerBackgroundControlResults(t *testing.T) {
 		&activationResult[*schema.Message]{
 			control: background.ControlRequest{Kind: background.ControlDrain},
 			cursor:  3, final: schema.AssistantMessage("partial", nil),
+			turnLoopCheckpoint: []byte("opaque"),
 		},
 	)
 	require.NoError(t, err)
@@ -1374,6 +2259,7 @@ func TestControllerBackgroundControlResults(t *testing.T) {
 	checkpoint, err := decodeRuntimeCheckpoint[*schema.Message](result.Checkpoint)
 	require.NoError(t, err)
 	require.Equal(t, int64(3), checkpoint.InputCursor)
+	require.Equal(t, []byte("opaque"), checkpoint.TurnLoopCheckpoint)
 
 	result, err = runtime.controlResult(
 		&activationResult[*schema.Message]{
@@ -1394,29 +2280,32 @@ func TestControllerBackgroundControlResults(t *testing.T) {
 
 func TestInterruptResultRequiresCheckpointAndTarget(t *testing.T) {
 	ctx := context.Background()
-	runtime, _, checkpointStore := newControllerForTest(
+	runtime, _, _ := newControllerForTest(
 		t,
 		completeBarrier[*schema.Message](),
 		testEventMapper,
 	)
-	runtimeTask := &background.TaskSnapshot{
-		Spec: background.Spec{ID: "interrupt-task"},
-	}
 	result := &activationResult[*schema.Message]{
 		interrupted: &adk.InterruptInfo{
 			InterruptContexts: []*adk.InterruptCtx{{ID: "target"}},
 		},
 	}
 
-	_, err := runtime.interruptResult(ctx, runtimeTask, result)
+	_, err := runtime.interruptResult(ctx, result)
 	require.EqualError(t, err, "task/subagent: turn loop checkpoint is missing")
 
-	require.NoError(t, checkpointStore.Set(
-		ctx,
-		runtimeTurnLoopCheckpointID(runtimeTask.Spec.ID),
-		[]byte("checkpoint"),
-	))
+	result.turnLoopCheckpoint = []byte("checkpoint")
 	result.interrupted.InterruptContexts = []*adk.InterruptCtx{{}}
-	_, err = runtime.interruptResult(ctx, runtimeTask, result)
+	_, err = runtime.interruptResult(ctx, result)
 	require.EqualError(t, err, "task/subagent: runtime interrupt has no targets")
+
+	result.interrupted.InterruptContexts = []*adk.InterruptCtx{{ID: "target"}}
+	waiting, err := runtime.interruptResult(ctx, result)
+	require.NoError(t, err)
+	require.Equal(t, background.ExecutionActionWaitInput, waiting.Action)
+	checkpoint, err := decodeRuntimeCheckpoint[*schema.Message](waiting.Checkpoint)
+	require.NoError(t, err)
+	require.Equal(t, runtimeCheckpointResume, checkpoint.Mode)
+	require.Equal(t, []string{"target"}, checkpoint.TargetIDs)
+	require.Equal(t, []byte("checkpoint"), checkpoint.TurnLoopCheckpoint)
 }

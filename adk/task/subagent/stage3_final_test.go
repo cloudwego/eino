@@ -38,25 +38,51 @@ import (
 
 type stage3FaultStore struct {
 	*background.InMemoryStore
-	getMailboxErr       error
-	listInputsErr       error
-	listInputsResult    *task.ListInputsResult
-	sendInputErr        error
-	advanceCursorErr    error
-	commitInputErr      error
-	commitInputCalls    int
-	commitInputRequests []*background.CommitInputRequest
-	waitInputsFault     <-chan error
-	waitInputsStarted   chan struct{}
-	waitInputsOnce      sync.Once
-	sealMailboxHook     func(context.Context, *task.SealMailboxRequest) error
-	sealMailboxCalls    int64
+	getMailboxErr         error
+	getMailboxCalls       int
+	listInputsErr         error
+	listInputsResult      *task.ListInputsResult
+	sendInputErr          error
+	advanceCursorErr      error
+	advanceCursorHook     func(context.Context, *task.AdvanceCursorRequest) error
+	advanceCursorCalls    int
+	advanceCursorRequests []*task.AdvanceCursorRequest
+	commitInputErr        error
+	commitInputCalls      int
+	commitInputRequests   []*background.CommitInputRequest
+	commitInputHook       func()
+	completeIfNoInputsErr error
+	waitInputsFault       <-chan error
+	waitInputsStarted     chan struct{}
+	waitInputsOnce        sync.Once
+	sealMailboxHook       func(context.Context, *task.SealMailboxRequest) error
+	sealMailboxCalls      int64
+}
+
+type setOnlyCheckpointStore struct {
+	store adk.CheckPointStore
+}
+
+func (s *setOnlyCheckpointStore) Get(
+	ctx context.Context,
+	checkpointID string,
+) ([]byte, bool, error) {
+	return s.store.Get(ctx, checkpointID)
+}
+
+func (s *setOnlyCheckpointStore) Set(
+	ctx context.Context,
+	checkpointID string,
+	checkpoint []byte,
+) error {
+	return s.store.Set(ctx, checkpointID, checkpoint)
 }
 
 func (s *stage3FaultStore) GetMailbox(
 	ctx context.Context,
 	taskID string,
 ) (*task.Mailbox, error) {
+	s.getMailboxCalls++
 	if s.getMailboxErr != nil {
 		return nil, s.getMailboxErr
 	}
@@ -90,8 +116,18 @@ func (s *stage3FaultStore) AdvanceCursor(
 	ctx context.Context,
 	req *task.AdvanceCursorRequest,
 ) error {
+	s.advanceCursorCalls++
+	if req != nil {
+		cloned := *req
+		s.advanceCursorRequests = append(s.advanceCursorRequests, &cloned)
+	}
 	if s.advanceCursorErr != nil {
 		return s.advanceCursorErr
+	}
+	if s.advanceCursorHook != nil {
+		if err := s.advanceCursorHook(ctx, req); err != nil {
+			return err
+		}
 	}
 	return s.InMemoryStore.AdvanceCursor(ctx, req)
 }
@@ -100,6 +136,9 @@ func (s *stage3FaultStore) CommitInput(
 	ctx context.Context,
 	req *background.CommitInputRequest,
 ) (*background.TaskSnapshot, error) {
+	if s.commitInputHook != nil {
+		s.commitInputHook()
+	}
 	s.commitInputCalls++
 	if req != nil {
 		cloned := *req
@@ -110,6 +149,16 @@ func (s *stage3FaultStore) CommitInput(
 		return nil, s.commitInputErr
 	}
 	return s.InMemoryStore.CommitInput(ctx, req)
+}
+
+func (s *stage3FaultStore) CompleteIfNoInputs(
+	ctx context.Context,
+	req *background.CompleteIfNoInputsRequest,
+) (*background.TaskSnapshot, error) {
+	if s.completeIfNoInputsErr != nil {
+		return nil, s.completeIfNoInputsErr
+	}
+	return s.InMemoryStore.CompleteIfNoInputs(ctx, req)
 }
 
 func (s *stage3FaultStore) WaitInputs(
@@ -344,6 +393,38 @@ func prepareStage3RuntimeTask(
 }
 
 func TestControllerRunActivation(t *testing.T) {
+	t.Run("completion checkpoint survives failure before terminal commit", func(t *testing.T) {
+		ctx := context.Background()
+		terminalErr := errors.New("terminal commit unavailable")
+		store := &stage3FaultStore{
+			InMemoryStore:         background.NewInMemoryStore(nil),
+			completeIfNoInputsErr: terminalErr,
+		}
+		manager, _, handle := prepareStage3ManagedTask(
+			t,
+			store,
+			&resumableTestAgent{name: "worker"},
+			"completion-checkpoint",
+		)
+
+		err := manager.Execute(ctx, handle.ID())
+		require.ErrorIs(t, err, terminalErr)
+		require.Equal(t, 1, store.commitInputCalls)
+
+		running, err := manager.Get(ctx, handle.ID())
+		require.NoError(t, err)
+		require.Equal(t, background.StatusRunning, running.Status)
+		checkpoint, err := decodeRuntimeCheckpoint[*schema.Message](
+			running.Checkpoint,
+		)
+		require.NoError(t, err)
+		require.Equal(t, int64(1), checkpoint.InputCursor)
+		require.Equal(t, "done", checkpoint.Final.Content)
+		mailbox, err := manager.GetMailbox(ctx, handle.ID())
+		require.NoError(t, err)
+		require.Equal(t, int64(1), mailbox.ConsumedCursor)
+	})
+
 	t.Run("processes input that races with attached mailbox sealing", func(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
@@ -364,6 +445,27 @@ func TestControllerRunActivation(t *testing.T) {
 			agent.name,
 			&AgentRegistration[*schema.Message]{Agent: agent},
 		))
+		store.advanceCursorHook = func(
+			ctx context.Context,
+			req *task.AdvanceCursorRequest,
+		) error {
+			if req == nil || req.Cursor != 2 {
+				return nil
+			}
+			_, exists, getErr := sessionStore.Get(
+				ctx,
+				runtimeForegroundResultCheckpointID(req.TaskID),
+			)
+			if getErr != nil {
+				return getErr
+			}
+			if exists {
+				return errors.New(
+					"foreground result candidate survived late-input seal",
+				)
+			}
+			return nil
+		}
 
 		var injectOnce sync.Once
 		store.sealMailboxHook = func(
@@ -462,6 +564,428 @@ func TestControllerRunActivation(t *testing.T) {
 	})
 }
 
+func TestForegroundTerminalCandidateLateInputCrashHandshake(t *testing.T) {
+	ctx := context.Background()
+	store := &stage3FaultStore{InMemoryStore: background.NewInMemoryStore(nil)}
+	manager1 := newStage3Manager(t, store)
+	sessionStore := adksession.NewInMemoryStore[*schema.Message](nil)
+	checkpointStore := &setOnlyCheckpointStore{store: sessionStore}
+	controller1, err := NewController(&ControllerConfig[*schema.Message]{
+		Manager: manager1, Barrier: completeBarrier[*schema.Message](),
+		InputsToAgentInput: testEventMapper,
+		SessionStore:       sessionStore, CheckPointStore: checkpointStore,
+	})
+	require.NoError(t, err)
+	require.NoError(t, controller1.RegisterAgent(
+		"worker",
+		&AgentRegistration[*schema.Message]{
+			Agent: &resumableTestAgent{name: "worker"},
+		},
+	))
+
+	const (
+		taskID         = "foreground-candidate-crash"
+		childSessionID = "foreground-candidate-crash-child"
+	)
+	metadata, err := json.Marshal(&runtimeMetadata{
+		Version: runtimeMetadataVersion, ParentSessionID: "parent",
+		RootSessionID: "parent", ChildSessionID: childSessionID,
+		AgentName: "worker", StartMode: task.StartModeForeground,
+	})
+	require.NoError(t, err)
+	registered, err := manager1.RegisterMailbox(
+		ctx,
+		&task.RegisterMailboxRequest{
+			CandidateTaskID: taskID, InvocationID: taskID,
+			Identity: metadata, RootSessionID: "parent",
+			ChildSessionID: childSessionID,
+		},
+	)
+	require.NoError(t, err)
+	_, err = manager1.SendInput(ctx, &task.SendInputRequest{
+		TaskID: taskID,
+		Input: task.Input{
+			EventID: "sequence-1", Kind: "external", Data: []byte("sequence-1"),
+		},
+	})
+	require.NoError(t, err)
+	require.NoError(t, manager1.AdvanceInputCursor(
+		ctx,
+		&task.AdvanceCursorRequest{
+			TaskID: taskID, ExpectedCursor: 0, Cursor: 1,
+			ExpectedGeneration: registered.Mailbox.Generation,
+		},
+	))
+	require.NoError(t, sessionStore.Set(
+		ctx, runtimeTurnLoopCheckpointID(taskID), []byte("runner-resume"),
+	))
+
+	var injectLateInput sync.Once
+	store.sealMailboxHook = func(
+		ctx context.Context,
+		_ *task.SealMailboxRequest,
+	) error {
+		var sendErr error
+		injectLateInput.Do(func() {
+			_, sendErr = store.InMemoryStore.SendInput(
+				ctx,
+				&task.SendInputRequest{
+					TaskID: taskID,
+					Input: task.Input{
+						EventID: "sequence-2", Kind: "external",
+						Data: []byte("sequence-2"),
+					},
+				},
+			)
+		})
+		return sendErr
+	}
+	final1 := schema.AssistantMessage("result-1", nil)
+	_, err = controller1.completeAttached(ctx, taskID, 1, final1)
+	require.ErrorIs(t, err, task.ErrInputsPending)
+	candidateID := runtimeForegroundResultCheckpointID(taskID)
+	staleCandidate, exists, err := sessionStore.Get(ctx, candidateID)
+	require.NoError(t, err)
+	require.True(t, exists)
+	terminalCandidate, err := decodeForegroundResultCheckpoint(staleCandidate)
+	require.NoError(t, err)
+	require.Equal(t, foregroundResultTerminal, terminalCandidate.State)
+
+	require.NoError(t, controller1.invalidateForegroundCandidate(ctx, taskID))
+	invalidated, exists, err := sessionStore.Get(ctx, candidateID)
+	require.NoError(t, err)
+	require.True(t, exists)
+	marker, err := decodeForegroundResultCheckpoint(invalidated)
+	require.NoError(t, err)
+	require.Equal(t, foregroundResultInvalidated, marker.State)
+	runnerCheckpoint, exists, err := sessionStore.Get(
+		ctx, runtimeTurnLoopCheckpointID(taskID),
+	)
+	require.NoError(t, err)
+	require.True(t, exists)
+	require.Equal(t, []byte("runner-resume"), runnerCheckpoint)
+
+	require.NoError(t, manager1.AdvanceInputCursor(
+		ctx,
+		&task.AdvanceCursorRequest{
+			TaskID: taskID, ExpectedCursor: 1, Cursor: 2,
+			ExpectedGeneration: registered.Mailbox.Generation,
+		},
+	))
+
+	manager2 := newStage3Manager(t, store)
+	controller2, err := NewController(&ControllerConfig[*schema.Message]{
+		Manager: manager2, Barrier: completeBarrier[*schema.Message](),
+		InputsToAgentInput: testEventMapper,
+		SessionStore:       sessionStore, CheckPointStore: checkpointStore,
+	})
+	require.NoError(t, err)
+	mailbox, err := manager2.GetMailbox(ctx, taskID)
+	require.NoError(t, err)
+	recovered, err := controller2.recoverForegroundCandidate(ctx, mailbox)
+	require.NoError(t, err)
+	require.False(t, recovered)
+	invalidated, exists, err = sessionStore.Get(ctx, candidateID)
+	require.NoError(t, err)
+	require.True(t, exists)
+	marker, err = decodeForegroundResultCheckpoint(invalidated)
+	require.NoError(t, err)
+	require.Equal(t, foregroundResultInvalidated, marker.State)
+	runnerCheckpoint, exists, err = sessionStore.Get(
+		ctx, runtimeTurnLoopCheckpointID(taskID),
+	)
+	require.NoError(t, err)
+	require.True(t, exists)
+	require.Equal(t, []byte("runner-resume"), runnerCheckpoint)
+
+	final2 := schema.AssistantMessage("result-2", nil)
+	sealed, err := controller2.completeAttached(ctx, taskID, 2, final2)
+	require.NoError(t, err)
+	require.Equal(t, task.MailboxSealed, sealed.State)
+	result, err := controller2.recoverForegroundResult(ctx, sealed)
+	require.NoError(t, err)
+	require.Equal(t, "result-2", result.FinalMessage.Content)
+	require.Equal(t, int64(2), sealed.ConsumedCursor)
+
+	inputs, err := manager2.ListInputs(
+		ctx,
+		&task.ListInputsRequest{TaskID: taskID},
+	)
+	require.NoError(t, err)
+	require.Len(t, inputs.Inputs, 2)
+	require.Equal(t, "sequence-1", inputs.Inputs[0].EventID)
+	require.Equal(t, "sequence-2", inputs.Inputs[1].EventID)
+}
+
+type foregroundCandidateFixture struct {
+	controller      *Controller[*schema.Message]
+	manager         *background.Manager
+	store           *stage3FaultStore
+	checkpointStore adk.CheckPointStore
+	mailbox         *task.Mailbox
+	candidateID     string
+}
+
+func newForegroundCandidateFixture(
+	t *testing.T,
+	candidate []byte,
+) *foregroundCandidateFixture {
+	t.Helper()
+	ctx := context.Background()
+	store := &stage3FaultStore{InMemoryStore: background.NewInMemoryStore(nil)}
+	manager := newStage3Manager(t, store)
+	sessionStore := adksession.NewInMemoryStore[*schema.Message](nil)
+	checkpointStore := &setOnlyCheckpointStore{store: sessionStore}
+	controller, err := NewController(&ControllerConfig[*schema.Message]{
+		Manager: manager, Barrier: completeBarrier[*schema.Message](),
+		InputsToAgentInput: testEventMapper,
+		SessionStore:       sessionStore, CheckPointStore: checkpointStore,
+	})
+	require.NoError(t, err)
+	metadata, err := json.Marshal(&runtimeMetadata{
+		Version: runtimeMetadataVersion, ParentSessionID: "parent",
+		RootSessionID: "parent", ChildSessionID: "candidate-child",
+		AgentName: "worker", StartMode: task.StartModeForeground,
+	})
+	require.NoError(t, err)
+	registered, err := manager.RegisterMailbox(
+		ctx,
+		&task.RegisterMailboxRequest{
+			CandidateTaskID: "foreground-candidate",
+			InvocationID:    "foreground-candidate",
+			Identity:        metadata,
+			RootSessionID:   "parent",
+			ChildSessionID:  "candidate-child",
+		},
+	)
+	require.NoError(t, err)
+	candidateID := runtimeForegroundResultCheckpointID(registered.Mailbox.TaskID)
+	require.NoError(t, checkpointStore.Set(ctx, candidateID, candidate))
+	return &foregroundCandidateFixture{
+		controller: controller, manager: manager, store: store,
+		checkpointStore: checkpointStore, mailbox: registered.Mailbox,
+		candidateID: candidateID,
+	}
+}
+
+func foregroundCandidateForTest(
+	t *testing.T,
+	status task.OutcomeStatus,
+	cursor int64,
+	result string,
+) []byte {
+	t.Helper()
+	checkpoint := &foregroundResultCheckpoint{
+		Version: foregroundResultVersion, State: foregroundResultTerminal,
+		Status: status, InputCursor: cursor,
+	}
+	if status == task.OutcomeCompleted {
+		final, err := encodeRuntimeMessage(schema.AssistantMessage(result, nil))
+		require.NoError(t, err)
+		checkpoint.FinalMessage = final
+	} else {
+		checkpoint.Error = result
+	}
+	candidate, err := json.Marshal(checkpoint)
+	require.NoError(t, err)
+	return candidate
+}
+
+func TestRecoverForegroundCandidate(t *testing.T) {
+	t.Run("checkpoint decode failure has no side effects", func(t *testing.T) {
+		ctx := context.Background()
+		candidate := []byte(`{"version":2`)
+		fixture := newForegroundCandidateFixture(t, candidate)
+		initialGeneration := fixture.mailbox.Generation
+
+		recovered, err := fixture.controller.recoverForegroundCandidate(
+			ctx, fixture.mailbox,
+		)
+		require.False(t, recovered)
+		require.Error(t, err)
+		require.NotErrorIs(t, err, task.ErrCursorConflict)
+		require.Zero(t, atomic.LoadInt64(&fixture.store.sealMailboxCalls))
+		require.Zero(t, fixture.store.getMailboxCalls)
+
+		current, err := fixture.manager.GetMailbox(ctx, fixture.mailbox.TaskID)
+		require.NoError(t, err)
+		require.Equal(t, task.MailboxForeground, current.State)
+		require.Zero(t, current.ConsumedCursor)
+		require.Equal(t, initialGeneration, current.Generation)
+		persisted, exists, err := fixture.checkpointStore.Get(
+			ctx, fixture.candidateID,
+		)
+		require.NoError(t, err)
+		require.True(t, exists)
+		require.Equal(t, candidate, persisted)
+	})
+
+	t.Run("stale cursor persists invalidated marker without deleter", func(t *testing.T) {
+		ctx := context.Background()
+		candidate := foregroundCandidateForTest(
+			t, task.OutcomeCompleted, 0, "stale",
+		)
+		fixture := newForegroundCandidateFixture(t, candidate)
+		initialGeneration := fixture.mailbox.Generation
+		_, err := fixture.manager.SendInput(ctx, &task.SendInputRequest{
+			TaskID: fixture.mailbox.TaskID,
+			Input: task.Input{
+				EventID: "sequence-1", Kind: "external", Data: []byte("one"),
+			},
+		})
+		require.NoError(t, err)
+		require.NoError(t, fixture.manager.AdvanceInputCursor(
+			ctx,
+			&task.AdvanceCursorRequest{
+				TaskID: fixture.mailbox.TaskID, ExpectedCursor: 0, Cursor: 1,
+				ExpectedGeneration: initialGeneration,
+			},
+		))
+		current, err := fixture.manager.GetMailbox(ctx, fixture.mailbox.TaskID)
+		require.NoError(t, err)
+
+		recovered, err := fixture.controller.recoverForegroundCandidate(ctx, current)
+		require.NoError(t, err)
+		require.False(t, recovered)
+		require.Zero(t, atomic.LoadInt64(&fixture.store.sealMailboxCalls))
+
+		current, err = fixture.manager.GetMailbox(ctx, fixture.mailbox.TaskID)
+		require.NoError(t, err)
+		require.Equal(t, task.MailboxForeground, current.State)
+		require.Equal(t, int64(1), current.ConsumedCursor)
+		require.Equal(t, initialGeneration, current.Generation)
+		persisted, exists, err := fixture.checkpointStore.Get(
+			ctx, fixture.candidateID,
+		)
+		require.NoError(t, err)
+		require.True(t, exists)
+		marker, err := decodeForegroundResultCheckpoint(persisted)
+		require.NoError(t, err)
+		require.Equal(t, foregroundResultVersion, marker.Version)
+		require.Equal(t, foregroundResultInvalidated, marker.State)
+		require.Zero(t, marker.Status)
+		require.Zero(t, marker.InputCursor)
+		require.Empty(t, marker.FinalMessage)
+		require.Empty(t, marker.Error)
+	})
+
+	t.Run("error candidate abandons mailbox and preserves result", func(t *testing.T) {
+		ctx := context.Background()
+		candidate := foregroundCandidateForTest(
+			t, task.OutcomeFailed, 0, "worker failed",
+		)
+		fixture := newForegroundCandidateFixture(t, candidate)
+		initialGeneration := fixture.mailbox.Generation
+		_, err := fixture.manager.SendInput(ctx, &task.SendInputRequest{
+			TaskID: fixture.mailbox.TaskID,
+			Input: task.Input{
+				EventID: "pending", Kind: "external", Data: []byte("pending"),
+			},
+		})
+		require.NoError(t, err)
+
+		recovered, err := fixture.controller.recoverForegroundCandidate(
+			ctx, fixture.mailbox,
+		)
+		require.NoError(t, err)
+		require.True(t, recovered)
+		require.Zero(t, atomic.LoadInt64(&fixture.store.sealMailboxCalls))
+
+		current, err := fixture.manager.GetMailbox(ctx, fixture.mailbox.TaskID)
+		require.NoError(t, err)
+		require.Equal(t, task.MailboxSealed, current.State)
+		require.Equal(t, int64(1), current.ConsumedCursor)
+		require.Equal(t, initialGeneration+1, current.Generation)
+		persisted, exists, err := fixture.checkpointStore.Get(
+			ctx, fixture.candidateID,
+		)
+		require.NoError(t, err)
+		require.True(t, exists)
+		require.Equal(t, candidate, persisted)
+	})
+
+	t.Run("cursor conflict re-read invalidates newly stale candidate", func(t *testing.T) {
+		ctx := context.Background()
+		candidate := foregroundCandidateForTest(
+			t, task.OutcomeCompleted, 0, "stale after seal",
+		)
+		fixture := newForegroundCandidateFixture(t, candidate)
+		initialGeneration := fixture.mailbox.Generation
+		fixture.store.sealMailboxHook = func(
+			ctx context.Context,
+			req *task.SealMailboxRequest,
+		) error {
+			require.Equal(t, fixture.mailbox.TaskID, req.TaskID)
+			require.Zero(t, req.ExpectedCursor)
+			require.Equal(t, initialGeneration, req.ExpectedGeneration)
+			_, err := fixture.store.InMemoryStore.SendInput(
+				ctx,
+				&task.SendInputRequest{
+					TaskID: fixture.mailbox.TaskID,
+					Input: task.Input{
+						EventID: "racing-input", Kind: "external",
+						Data: []byte("racing"),
+					},
+				},
+			)
+			require.NoError(t, err)
+			return fixture.store.InMemoryStore.AdvanceCursor(
+				ctx,
+				&task.AdvanceCursorRequest{
+					TaskID:         fixture.mailbox.TaskID,
+					ExpectedCursor: 0, Cursor: 1,
+					ExpectedGeneration: initialGeneration,
+				},
+			)
+		}
+
+		recovered, err := fixture.controller.recoverForegroundCandidate(
+			ctx, fixture.mailbox,
+		)
+		require.NoError(t, err)
+		require.False(t, recovered)
+		require.Equal(t, int64(1), atomic.LoadInt64(&fixture.store.sealMailboxCalls))
+		require.Equal(t, 1, fixture.store.getMailboxCalls)
+
+		current, err := fixture.manager.GetMailbox(ctx, fixture.mailbox.TaskID)
+		require.NoError(t, err)
+		require.Equal(t, task.MailboxForeground, current.State)
+		require.Equal(t, int64(1), current.ConsumedCursor)
+		require.Equal(t, initialGeneration, current.Generation)
+		persisted, exists, err := fixture.checkpointStore.Get(
+			ctx, fixture.candidateID,
+		)
+		require.NoError(t, err)
+		require.True(t, exists)
+		marker, err := decodeForegroundResultCheckpoint(persisted)
+		require.NoError(t, err)
+		require.Equal(t, foregroundResultVersion, marker.Version)
+		require.Equal(t, foregroundResultInvalidated, marker.State)
+	})
+
+	t.Run("candidate ahead of cursor remains recoverable", func(t *testing.T) {
+		ctx := context.Background()
+		candidate := foregroundCandidateForTest(
+			t, task.OutcomeCompleted, 1, "future",
+		)
+		fixture := newForegroundCandidateFixture(t, candidate)
+
+		recovered, err := fixture.controller.recoverForegroundCandidate(
+			ctx, fixture.mailbox,
+		)
+		require.ErrorIs(t, err, task.ErrCursorConflict)
+		require.False(t, recovered)
+		require.Zero(t, atomic.LoadInt64(&fixture.store.sealMailboxCalls))
+		require.Zero(t, fixture.store.getMailboxCalls)
+		persisted, exists, err := fixture.checkpointStore.Get(
+			ctx, fixture.candidateID,
+		)
+		require.NoError(t, err)
+		require.True(t, exists)
+		require.Equal(t, candidate, persisted)
+	})
+}
+
 func TestSessionConfigForTask(t *testing.T) {
 	providerErr := errors.New("event extra failed")
 	event := &adk.SessionEvent[*schema.Message]{
@@ -539,7 +1063,7 @@ func TestTaskRuntimeCommitInput(t *testing.T) {
 		require.Equal(t, background.StatusCompleted, completed.Status)
 		require.Equal(t, int64(1), completed.Attempt)
 		require.Equal(t, int64(4), completed.Version)
-		require.Equal(t, []byte("resume-state"), completed.Checkpoint)
+		require.Empty(t, completed.Checkpoint)
 		require.Equal(t, []byte("done"), completed.ResultData)
 		require.Empty(t, completed.ResultError)
 		require.NotNil(t, completed.DoneAt)
@@ -992,8 +1516,8 @@ func TestJoinErrors(t *testing.T) {
 	require.NotErrorIs(t, combined, secondary)
 }
 
-func TestManagedAdvanceInputCursorRejectsLostOwnership(t *testing.T) {
-	t.Run("advance enforces ownership fence", func(t *testing.T) {
+func TestManagedInputCommitRejectsLostOwnership(t *testing.T) {
+	t.Run("commit enforces ownership fence", func(t *testing.T) {
 		ctx := context.Background()
 		store := &stage3FaultStore{InMemoryStore: background.NewInMemoryStore(nil)}
 		manager, _, handle := prepareStage3ManagedTask(
@@ -1002,15 +1526,15 @@ func TestManagedAdvanceInputCursorRejectsLostOwnership(t *testing.T) {
 			&resumableTestAgent{name: "worker"},
 			"ownership-task",
 		)
-		store.advanceCursorErr = task.ErrOwnershipLost
-		require.NoError(t, manager.Execute(ctx, handle.ID()))
-		failed, err := manager.Get(ctx, handle.ID())
+		store.commitInputErr = task.ErrOwnershipLost
+		require.ErrorIs(t, manager.Execute(ctx, handle.ID()), task.ErrOwnershipLost)
+		running, err := manager.Get(ctx, handle.ID())
 		require.NoError(t, err)
-		require.Equal(t, background.StatusFailed, failed.Status)
-		require.Equal(t, task.ErrOwnershipLost.Error(), failed.ResultError)
+		require.Equal(t, background.StatusRunning, running.Status)
+		require.Empty(t, running.ResultError)
 	})
 
-	t.Run("mailbox read error fails the attempt", func(t *testing.T) {
+	t.Run("commit does not require a second mailbox read", func(t *testing.T) {
 		ctx := context.Background()
 		store := &stage3FaultStore{InMemoryStore: background.NewInMemoryStore(nil)}
 		loadErr := errors.New("mailbox unavailable")
@@ -1027,9 +1551,9 @@ func TestManagedAdvanceInputCursorRejectsLostOwnership(t *testing.T) {
 		)
 		require.NoError(t, manager.Execute(ctx, handle.ID()))
 		store.getMailboxErr = nil
-		failed, err := manager.Get(ctx, handle.ID())
+		completed, err := manager.Get(ctx, handle.ID())
 		require.NoError(t, err)
-		require.Equal(t, background.StatusFailed, failed.Status)
-		require.Equal(t, loadErr.Error(), failed.ResultError)
+		require.Equal(t, background.StatusCompleted, completed.Status)
+		require.Empty(t, completed.ResultError)
 	})
 }

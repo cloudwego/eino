@@ -107,7 +107,9 @@ func TestRecoverableShellUsesManagedToolLifecycle(t *testing.T) {
 	require.Contains(t, timeout.Description, "seconds")
 	require.Contains(t, timeout.Description, "stops unless the host allows automatic backgrounding")
 	result, err := tools[0].(componenttool.EnhancedInvokableTool).InvokableRun(
-		context.Background(), &schema.ToolArgument{Text: `{"command":"echo hello"}`},
+		context.Background(), &schema.ToolArgument{
+			Text: `{"command":"echo hello","timeout":0}`,
+		},
 	)
 	require.NoError(t, err)
 	require.NotEmpty(t, result.Parts)
@@ -120,6 +122,18 @@ func TestRecoverableShellUsesManagedToolLifecycle(t *testing.T) {
 	require.NotNil(t, shell.startRequest)
 	require.Equal(t, "shell-task", shell.startRequest.TaskID)
 	require.Equal(t, int64(0), shell.startRequest.Attempt)
+	require.Equal(t, "echo hello", shell.startRequest.Command)
+
+	_, err = tools[0].(componenttool.EnhancedInvokableTool).InvokableRun(
+		context.Background(), &schema.ToolArgument{
+			Text: `{"command":"echo invalid","timeout":"not-a-number"}`,
+		},
+	)
+	require.ErrorContains(
+		t,
+		err,
+		"filesystem: invalid execute arguments",
+	)
 	require.Equal(t, "echo hello", shell.startRequest.Command)
 }
 

@@ -17,7 +17,9 @@
 package subagent
 
 import (
+	"bytes"
 	"context"
+	"encoding/gob"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -34,6 +36,7 @@ import (
 	adksession "github.com/cloudwego/eino/adk/session"
 	"github.com/cloudwego/eino/adk/task"
 	"github.com/cloudwego/eino/adk/task/background"
+	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -138,6 +141,49 @@ type blockingCaptureAgent struct {
 	mu               sync.Mutex
 	messages         map[string]string
 	identityConflict bool
+}
+
+type checkpointAuditPreemptModel struct {
+	firstStarted  chan struct{}
+	queuedStarted chan struct{}
+	calls         int64
+}
+
+func (m *checkpointAuditPreemptModel) Generate(
+	ctx context.Context,
+	messages []*schema.Message,
+	_ ...model.Option,
+) (*schema.Message, error) {
+	call := atomic.AddInt64(&m.calls, 1)
+	input := ""
+	for _, message := range messages {
+		if message.Role == schema.User {
+			input = message.Content
+		}
+	}
+	switch call {
+	case 1:
+		close(m.firstStarted)
+		<-ctx.Done()
+		return nil, ctx.Err()
+	case 3:
+		close(m.queuedStarted)
+		return schema.AssistantMessage(input, nil), nil
+	default:
+		return schema.AssistantMessage(input, nil), nil
+	}
+}
+
+func (m *checkpointAuditPreemptModel) Stream(
+	ctx context.Context,
+	messages []*schema.Message,
+	options ...model.Option,
+) (*schema.StreamReader[*schema.Message], error) {
+	message, err := m.Generate(ctx, messages, options...)
+	if err != nil {
+		return nil, err
+	}
+	return schema.StreamReaderFromArray([]*schema.Message{message}), nil
 }
 
 func (*blockingCaptureAgent) Name(context.Context) string { return "concurrent-agent" }
@@ -532,6 +578,272 @@ func TestIntegration_BackgroundResumeSurvivesControllerRestart(t *testing.T) {
 	require.Equal(t, map[string]any{
 		durableResume.TargetIDs[0]: "approved",
 	}, decodedResume)
+}
+
+func TestIntegration_AttachedPreemptPreservesQueuedInputAcrossRecovery( //nolint:funlen // Exercises the full handoff and recovery boundary.
+	t *testing.T,
+) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	memoryStore := background.NewInMemoryStore(nil)
+	sessionStore := adksession.NewInMemoryStore[*schema.Message](nil)
+	model := &checkpointAuditPreemptModel{
+		firstStarted:  make(chan struct{}),
+		queuedStarted: make(chan struct{}),
+	}
+	baseAgent, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
+		Name: "worker", Description: "checkpoint audit preempt", Model: model,
+	})
+	require.NoError(t, err)
+	agent := &runResumeCountingAgent{ResumableAgent: baseAgent}
+	var barrierCalls int32
+	barrier := completionBarrierFunc[*schema.Message](func(
+		context.Context,
+		*CompletionContext[*schema.Message],
+	) (CompletionAction, error) {
+		if atomic.AddInt32(&barrierCalls, 1) == 1 {
+			return CompletionSuspend, nil
+		}
+		return CompletionComplete, nil
+	})
+	manager1, err := background.New(ctx, &background.Config{
+		Tasks: memoryStore, TaskEvents: memoryStore,
+		SendTaskCreatedEvent: func(context.Context, *background.TaskSnapshot) error {
+			return nil
+		},
+	})
+	require.NoError(t, err)
+	controller1, err := NewController(&ControllerConfig[*schema.Message]{
+		Manager: manager1, Barrier: barrier,
+		InputsToAgentInput: testEventMapper,
+		SessionStore:       sessionStore, CheckPointStore: sessionStore,
+		DrainCancelTimeout: 5 * time.Millisecond,
+		InputPreemptPolicy: func(
+			context.Context,
+			*task.InputRecord,
+			*adk.TurnContext[*task.InputRecord, *schema.Message],
+		) []adk.PushOption[*task.InputRecord, *schema.Message] {
+			return []adk.PushOption[*task.InputRecord, *schema.Message]{
+				adk.WithPreemptTimeout[*task.InputRecord, *schema.Message](
+					adk.AnySafePoint,
+					5*time.Millisecond,
+				),
+			}
+		},
+	})
+	require.NoError(t, err)
+	require.NoError(t, controller1.RegisterAgent(
+		"worker",
+		&AgentRegistration[*schema.Message]{Agent: agent},
+	))
+	handle, err := controller1.Start(ctx, &StartRequest[*schema.Message]{
+		InvocationID: "audit:preempt", ParentSessionID: "root-session",
+		AgentName: "worker", StartMode: task.StartModeForeground,
+		Input: &adk.AgentInput{
+			Messages: []*schema.Message{schema.UserMessage("sequence-1")},
+		},
+	})
+	require.NoError(t, err)
+	awaitIntegrationValue(t, model.firstStarted)
+	require.NoError(t, controller1.SendInput(ctx, handle.ID(), &task.Input{
+		EventID: "sequence-2", Kind: messageInputKind,
+		Data: mustEncodeAgentInput(t, "sequence-2"),
+	}))
+	require.NoError(t, controller1.SendInput(ctx, handle.ID(), &task.Input{
+		EventID: "sequence-3", Kind: messageInputKind,
+		Data: mustEncodeAgentInput(t, "sequence-3"), Delivery: task.InputPreempt,
+	}))
+	awaitIntegrationValue(t, model.queuedStarted)
+	require.Eventually(t, func() bool {
+		snapshot, getErr := memoryStore.Get(ctx, handle.ID())
+		return getErr == nil && snapshot.Status == background.StatusSuspended
+	}, time.Second, time.Millisecond)
+
+	closeCtx, closeCancel := context.WithTimeout(context.Background(), time.Second)
+	require.NoError(t, manager1.Close(closeCtx))
+	closeCancel()
+	suspended, err := manager1.Get(ctx, handle.ID())
+	require.NoError(t, err)
+	require.Equal(t, background.StatusSuspended, suspended.Status)
+	suspendedCheckpoint, err := decodeRuntimeCheckpoint[*schema.Message](
+		suspended.Checkpoint,
+	)
+	require.NoError(t, err)
+	require.Equal(t, int64(3), suspendedCheckpoint.InputCursor)
+	require.Empty(t, suspendedCheckpoint.SparseAcks)
+
+	manager2 := newIntegrationManager(t, memoryStore)
+	t.Cleanup(func() { closeIntegrationManager(t, manager2) })
+	controller2, err := NewController(&ControllerConfig[*schema.Message]{
+		Manager: manager2, Barrier: barrier,
+		InputsToAgentInput: testEventMapper,
+		SessionStore:       sessionStore, CheckPointStore: sessionStore,
+	})
+	require.NoError(t, err)
+	require.NoError(t, controller2.RegisterAgent(
+		"worker",
+		&AgentRegistration[*schema.Message]{Agent: agent},
+	))
+	released, err := manager2.ReleaseSuspension(ctx, handle.ID())
+	require.NoError(t, err)
+	require.Equal(t, background.StatusPending, released.Status)
+	require.NoError(t, manager2.Execute(ctx, handle.ID()))
+	result, err := controller2.Wait(ctx, handle.ID())
+	require.NoError(t, err)
+	require.NotNil(t, result.FinalMessage)
+	runInputs := agent.runInputs()
+	runInputIDs := agent.runInputIDs()
+	eventMessageIDs := make(map[string]map[string]struct{})
+	for callIndex, input := range runInputs {
+		for messageIndex, content := range input {
+			if eventMessageIDs[content] == nil {
+				eventMessageIDs[content] = make(map[string]struct{})
+			}
+			eventMessageIDs[content][runInputIDs[callIndex][messageIndex]] = struct{}{}
+		}
+	}
+	require.Equal(
+		t, 1, len(eventMessageIDs["sequence-2"]),
+		"agent inputs: %#v, IDs: %#v", runInputs, runInputIDs,
+	)
+	require.Equal(
+		t, 1, len(eventMessageIDs["sequence-3"]),
+		"agent inputs: %#v, IDs: %#v", runInputs, runInputIDs,
+	)
+	require.NotContains(t, eventMessageIDs["sequence-2"], "")
+	require.NotContains(t, eventMessageIDs["sequence-3"], "")
+	mailbox, err := manager2.GetMailbox(ctx, handle.ID())
+	require.NoError(t, err)
+	require.Equal(t, int64(3), mailbox.ConsumedCursor)
+	inputs, err := manager2.ListInputs(ctx, &task.ListInputsRequest{
+		TaskID: handle.ID(),
+	})
+	require.NoError(t, err)
+	require.Len(t, inputs.Inputs, 3)
+	require.Equal(t, []string{
+		"audit:preempt:initial", "sequence-2", "sequence-3",
+	}, []string{
+		inputs.Inputs[0].EventID,
+		inputs.Inputs[1].EventID,
+		inputs.Inputs[2].EventID,
+	})
+	finalTask, err := manager2.Get(ctx, handle.ID())
+	require.NoError(t, err)
+	require.Empty(t, finalTask.Checkpoint)
+}
+
+func TestIntegration_BetweenTurnCheckpointSkipsSparseAckOnRecovery( //nolint:funlen // Constructs the persisted crash boundary explicitly.
+	t *testing.T,
+) {
+	ctx := context.Background()
+	store := background.NewInMemoryStore(nil)
+	manager := newIntegrationManager(t, store)
+	t.Cleanup(func() { closeIntegrationManager(t, manager) })
+	sessionStore := adksession.NewInMemoryStore[*schema.Message](nil)
+	agent := &runResumeCountingAgent{
+		ResumableAgent: &resumableTestAgent{name: "worker"},
+	}
+	controller := newIntegrationController(
+		t, manager, sessionStore, agent,
+		completeBarrier[*schema.Message](), testEventMapper,
+	)
+
+	const taskID = "between-turn-sparse-ack"
+	metadata := &runtimeMetadata{
+		Version: runtimeMetadataVersion, ParentSessionID: "root-session",
+		RootSessionID: "root-session", ChildSessionID: taskID + "-child",
+		AgentName: "worker", StartMode: task.StartModeBackground,
+	}
+	identity, err := json.Marshal(metadata)
+	require.NoError(t, err)
+	reserved, err := manager.RegisterMailbox(ctx, &task.RegisterMailboxRequest{
+		CandidateTaskID: taskID, InvocationID: taskID, Identity: identity,
+		RootSessionID: metadata.RootSessionID, ChildSessionID: metadata.ChildSessionID,
+	})
+	require.NoError(t, err)
+	require.True(t, reserved.Created)
+
+	for sequence, content := range []string{"sequence-1", "sequence-2", "sequence-3"} {
+		_, err = manager.SendInput(ctx, &task.SendInputRequest{
+			TaskID: taskID,
+			Input: task.Input{
+				EventID: fmt.Sprintf("sequence-%d", sequence+1),
+				Kind:    messageInputKind,
+				Data:    mustEncodeAgentInput(t, content),
+			},
+		})
+		require.NoError(t, err)
+	}
+	require.NoError(t, store.AdvanceCursor(ctx, &task.AdvanceCursorRequest{
+		TaskID: taskID, ExpectedCursor: 0, Cursor: 1,
+		ExpectedGeneration: reserved.Mailbox.Generation,
+	}))
+	inputs, err := manager.ListInputs(ctx, &task.ListInputsRequest{TaskID: taskID})
+	require.NoError(t, err)
+	require.Len(t, inputs.Inputs, 3)
+
+	sequence2 := *inputs.Inputs[1]
+	sequence2.Data = append([]byte(nil), sequence2.Data...)
+	var turnLoopCheckpoint bytes.Buffer
+	require.NoError(t, gob.NewEncoder(&turnLoopCheckpoint).Encode(&struct {
+		RunnerCheckpointID string
+		RunnerCheckpoint   []byte
+		HasRunnerState     bool
+		UnhandledItems     []*task.InputRecord
+		ResumeItems        []*task.InputRecord
+		CanceledItems      []*task.InputRecord
+	}{
+		UnhandledItems: []*task.InputRecord{&sequence2},
+	}))
+	runtimeCheckpoint, err := encodeRuntimeCheckpointState[*schema.Message](
+		1, []int64{3}, nil, turnLoopCheckpoint.Bytes(),
+	)
+	require.NoError(t, err)
+	payload, err := json.Marshal(&taskPayload{
+		Version: payloadVersion, SubAgentName: metadata.AgentName,
+		ChildSessionID: metadata.ChildSessionID,
+	})
+	require.NoError(t, err)
+	pending, err := manager.AdoptForeground(ctx, &background.AdoptForegroundRequest{
+		Spec: background.Spec{
+			ID: taskID, ExecutorKey: ExecutorKey, Kind: "subagent",
+			Payload: payload, RootSessionID: metadata.RootSessionID,
+		},
+		ExpectedGeneration: reserved.Mailbox.Generation,
+		InputCursor:        1,
+		InitialCheckpoint:  runtimeCheckpoint,
+		StartPending:       true,
+	})
+	require.NoError(t, err)
+	require.Equal(t, background.StatusPending, pending.Status)
+
+	require.NoError(t, manager.Execute(ctx, taskID))
+	result, err := controller.Wait(ctx, taskID)
+	require.NoError(t, err)
+	require.Equal(t, "done", result.FinalMessage.Content)
+	require.Equal(t, [][]string{{"sequence-2"}}, agent.runInputs())
+	runInputIDs := agent.runInputIDs()
+	require.Len(t, runInputIDs, 1)
+	require.Len(t, runInputIDs[0], 1)
+	require.NotEmpty(t, runInputIDs[0][0])
+
+	mailbox, err := manager.GetMailbox(ctx, taskID)
+	require.NoError(t, err)
+	require.Equal(t, int64(3), mailbox.ConsumedCursor)
+	completed, err := manager.Get(ctx, taskID)
+	require.NoError(t, err)
+	require.Empty(t, completed.Checkpoint)
+}
+
+func mustEncodeAgentInput(t *testing.T, content string) []byte {
+	t.Helper()
+	encoded, err := encodeTypedInput(&adk.AgentInput{
+		Messages: []*schema.Message{schema.UserMessage(content)},
+	})
+	require.NoError(t, err)
+	data, err := json.Marshal(encoded)
+	require.NoError(t, err)
+	return data
 }
 
 func TestIntegration_ConcurrentContinueKeepsSingleActiveTask(t *testing.T) {

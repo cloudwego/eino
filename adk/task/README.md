@@ -955,6 +955,13 @@ StartModeForeground -> parent owns -> complete or handoff
 StartModeBackground -> Manager owns immediately
 ```
 
+Durable Sub-agent v2 使用独立的 `eino.dev/task-subagent-durable-v2`
+ExecutorKey。旧 worker 不得注册该 key，也不会领取 v2 Task；新 worker 只在恢复迁移时读取
+旧的 runtime checkpoint v1 和旧 TurnLoop checkpoint key，不注册旧 ExecutorKey。
+
+Runtime checkpoint 最多保存 4096 个 `SparseAcks`。超过上限的 checkpoint 或本轮新增
+ack 会 fail closed，避免无界排序开销和 checkpoint 膨胀。
+
 ### 核心类型
 
 #### `Controller`
@@ -981,10 +988,17 @@ type ControllerConfig[M adk.MessageType] struct {
 	CheckPointStore     adk.CheckPointStore
 	SessionConfig       *adk.SessionConfig[M]
 	InputBatchSize      int
+	DrainCancelTimeout  time.Duration
 }
 ```
 
 `SessionStore` 和 `SessionStoreFactory` 必须且只能配置一个。
+
+`DrainCancelTimeout` 只控制 durable Sub-agent 收到 `ControlDrain` 后等待 TurnLoop
+安全点的时间。正值表示 graceful drain 超过该时间后升级为 immediate cancellation，
+保存 checkpoint 并把同一个 Task 置为 `Suspended`，由后续 worker 恢复；零值表示无限等待
+graceful stop。生产环境建议将正值配置为小于服务 shutdown deadline，为 checkpoint 持久化
+和 suspend 状态提交预留时间。
 
 #### `RuntimeSessionStoreAccessMode`
 

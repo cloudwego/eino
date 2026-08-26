@@ -190,7 +190,7 @@ func RunLifecycleStoreConformance(t *testing.T, config LifecycleStoreConfig) {
 	}
 }
 
-func runLifecycleExecutionConformance(
+func runLifecycleExecutionConformance( //nolint:funlen // Conformance cases stay together for provider reuse.
 	t *testing.T,
 	newStore func(testing.TB) background.LifecycleStore,
 ) {
@@ -225,6 +225,81 @@ func runLifecycleExecutionConformance(
 			errors.Is(err, background.ErrAlreadyTerminal) ||
 				errors.Is(err, background.ErrLeaseLost),
 		)
+	})
+
+	t.Run("terminal_transitions_clear_checkpoint_and_late_input_preserves_it", func(t *testing.T) {
+		ctx := context.Background()
+		saveCheckpoint := func(
+			t *testing.T,
+			store background.LifecycleStore,
+			id string,
+		) *background.TaskSnapshot {
+			t.Helper()
+			started := createAndStart(t, store, id, background.LeaseExpiryRetry)
+			saved, err := store.CommitStart(ctx, &background.CommitStartRequest{
+				TaskID: started.Spec.ID, ExpectedVersion: started.Version,
+				Checkpoint: []byte("recoverable"),
+			})
+			require.NoError(t, err)
+			return saved
+		}
+
+		completeStore := newStore(t)
+		completing := saveCheckpoint(t, completeStore, "terminal-complete")
+		completed, err := completeStore.CompleteIfNoInputs(
+			ctx,
+			&background.CompleteIfNoInputsRequest{
+				TaskID: completing.Spec.ID, ExpectedVersion: completing.Version,
+				Attempt: completing.Attempt,
+			},
+		)
+		require.NoError(t, err)
+		require.Equal(t, background.StatusCompleted, completed.Status)
+		require.Empty(t, completed.Checkpoint)
+
+		failStore := newStore(t)
+		failing := saveCheckpoint(t, failStore, "terminal-fail")
+		failed, err := failStore.Fail(ctx, &background.FailTaskRequest{
+			TaskID: failing.Spec.ID, ExpectedVersion: failing.Version, Error: "failed",
+		})
+		require.NoError(t, err)
+		require.Equal(t, background.StatusFailed, failed.Status)
+		require.Empty(t, failed.Checkpoint)
+
+		cancelStore := newStore(t)
+		canceling := saveCheckpoint(t, cancelStore, "terminal-cancel")
+		requested, err := cancelStore.RequestCancel(
+			ctx,
+			&background.RequestCancelRequest{
+				TaskID: canceling.Spec.ID, ExpectedVersion: canceling.Version,
+				Reason: "canceled",
+			},
+		)
+		require.NoError(t, err)
+		canceled, err := cancelStore.AckCancel(ctx, &background.AckCancelRequest{
+			TaskID: requested.Spec.ID, ExpectedVersion: requested.Version,
+		})
+		require.NoError(t, err)
+		require.Equal(t, background.StatusCanceled, canceled.Status)
+		require.Empty(t, canceled.Checkpoint)
+
+		lateStore := newStore(t)
+		late := saveCheckpoint(t, lateStore, "late-input")
+		_, err = lateStore.SendInput(ctx, &task.SendInputRequest{
+			TaskID: late.Spec.ID,
+			Input:  task.Input{EventID: "late", Kind: "input"},
+		})
+		require.NoError(t, err)
+		pending, err := lateStore.CompleteIfNoInputs(
+			ctx,
+			&background.CompleteIfNoInputsRequest{
+				TaskID: late.Spec.ID, ExpectedVersion: late.Version,
+				Attempt: late.Attempt,
+			},
+		)
+		require.ErrorIs(t, err, task.ErrInputsPending)
+		require.Equal(t, background.StatusPending, pending.Status)
+		require.Equal(t, []byte("recoverable"), pending.Checkpoint)
 	})
 
 	t.Run("start_commit_is_owned_and_retained", func(t *testing.T) {
@@ -272,6 +347,30 @@ func runLifecycleExecutionConformance(
 		)
 		require.NoError(t, err)
 		require.Equal(t, "recovery", string(yielded.Checkpoint))
+	})
+
+	t.Run("commit_input_can_update_checkpoint_without_advancing_cursor", func(t *testing.T) {
+		store := newStore(t)
+		started := createAndStart(
+			t,
+			store,
+			"checkpoint-only-input-commit",
+			background.LeaseExpiryRetry,
+		)
+		committed, err := store.CommitInput(
+			context.Background(),
+			&background.CommitInputRequest{
+				TaskID: started.Spec.ID, ExpectedVersion: started.Version,
+				Attempt: started.Attempt, ExpectedCursor: 0, InputCursor: 0,
+				Checkpoint: []byte("checkpoint-only"),
+			},
+		)
+		require.NoError(t, err)
+		require.Equal(t, started.Version+1, committed.Version)
+		require.Equal(t, "checkpoint-only", string(committed.Checkpoint))
+		mailbox, err := store.GetMailbox(context.Background(), started.Spec.ID)
+		require.NoError(t, err)
+		require.Equal(t, int64(0), mailbox.ConsumedCursor)
 	})
 
 	t.Run("suspend_release_and_yield", func(t *testing.T) {

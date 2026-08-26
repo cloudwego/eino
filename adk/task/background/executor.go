@@ -475,6 +475,14 @@ func (r *taskRuntime) CommitInput(
 		Checkpoint: cloneBytes(checkpoint),
 	})
 	if err != nil {
+		if errors.Is(err, ErrVersionConflict) || errors.Is(err, ErrLeaseLost) {
+			if r.cancelRequested {
+				return err
+			}
+			if reconcileErr := r.reconcileCancellationLocked(ctx); reconcileErr == nil {
+				return err
+			}
+		}
 		r.poison = err
 		return err
 	}

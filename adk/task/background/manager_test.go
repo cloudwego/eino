@@ -1022,6 +1022,66 @@ func (s heartbeatErrorStore) Heartbeat(context.Context, *HeartbeatRequest) (*Tas
 	return nil, s.err
 }
 
+type cursorReadErrorStore struct {
+	LifecycleStore
+	err                error
+	getMailboxCalls    int
+	advanceCursorCalls int
+}
+
+func (s *cursorReadErrorStore) GetMailbox(
+	context.Context,
+	string,
+) (*taskcore.Mailbox, error) {
+	s.getMailboxCalls++
+	return nil, s.err
+}
+
+func (s *cursorReadErrorStore) AdvanceCursor(
+	context.Context,
+	*taskcore.AdvanceCursorRequest,
+) error {
+	s.advanceCursorCalls++
+	return nil
+}
+
+func TestTaskRuntimeAdvanceInputCursorErrors(t *testing.T) {
+	getMailboxErr := errors.New("mailbox unavailable")
+	store := &cursorReadErrorStore{
+		LifecycleStore: NewInMemoryStore(nil),
+		err:            getMailboxErr,
+	}
+	tests := []struct {
+		name    string
+		runtime *taskRuntime
+		wantErr error
+	}{
+		{
+			name:    "requires mailbox store",
+			runtime: newTaskRuntime(nil, nil, "task", 1, 1, nil),
+			wantErr: taskcore.ErrMailboxStoreRequired,
+		},
+		{
+			name: "propagates mailbox read error",
+			runtime: newTaskRuntime(
+				store, nil, "task", 1, 1, nil,
+			),
+			wantErr: getMailboxErr,
+		},
+	}
+
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			err := testCase.runtime.AdvanceInputCursor(
+				context.Background(), 2, 3,
+			)
+			require.ErrorIs(t, err, testCase.wantErr)
+		})
+	}
+	require.Equal(t, 1, store.getMailboxCalls)
+	require.Zero(t, store.advanceCursorCalls)
+}
+
 func TestManagerHeartbeatStopsAndCancelsOnLeaseError(t *testing.T) {
 	manager := mustNewManager(t, context.Background(), nil)
 	manager.heartbeatEvery = time.Nanosecond

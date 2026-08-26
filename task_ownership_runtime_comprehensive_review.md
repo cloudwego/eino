@@ -275,9 +275,9 @@ D foreground_background_notification_comprehensive_review.md
 - Branch: `feat/task-ownership-runtime`
 - Scope: unified foreground/background Task runtime, durable mailbox,
   Sub-agent continuation, nested Task authority, managed tools, and middleware
-- Current phase: Stage 1 design review, final re-review fix pass
-- Status: **in progress**. Task 2 remains unchecked until the final Stage 1
-  re-review confirmation pass finds no remaining design issue.
+- Current phase: Task 5 final full review complete; delivery pending
+- Status: **local review approved**. Final code findings remaining: 0.
+  Commit/push and PR checks remain pending.
 
 ## Stage 1: Design Review
 
@@ -290,7 +290,7 @@ D foreground_background_notification_comprehensive_review.md
 | S1-I1-03 | `Publish` 失败后的取消清理丢失错误且可能无限等待。 | 旧路径忽略 `cancelAndWait` 返回值，也没有独立 cleanup bound。 | 只返回 publish error 更简单，但无法判断 cancel intent/hook/terminal 是否完成。 | **Fix** | `adk/internal/taskfirst/coordinator.go`；发布错误聚合与 blocked executor bounded-cleanup tests。 |
 | S1-I1-04 | `CancellationHook` 在 cancel intent 持久化前执行，失败时 Store 中没有 durable intent。 | `RequestCancel` 原先先调用 executor acknowledger，再写 Store。 | 提交前 hook 可避免记录“未清理”的取消，但进程崩溃会同时丢失 intent 与重试依据。 | **Fix** | `adk/task/background/executor.go`、`adk/task/subagent/turn_loop.go`；active/recovery/失败重试 tests。 |
 | S1-I1-05 | 普通输入或 child notification 会自动唤醒计划内 `Suspended` Task。 | Store 对 `WaitingInput` 与 `Suspended` 使用同一 wake transition。 | 自动唤醒看似方便，但绕过 completion barrier 的显式 release 决策。 | **Fix** | `adk/task/background/{mailbox,in_memory_store}.go`、`adk/task/subagent/turn_loop.go`；LifecycleStore conformance 与 Continue tests。 |
-| S1-I1-06 | 新 Sub-agent payload v1 复用 legacy key，可能把旧 v4 durable task 当成新协议解码。 | key 相同而 payload/恢复状态机不兼容。 | 增加双版本 decoder 会把旧 runtime 语义永久带入新 Controller。 | **Fix** | `adk/task/subagent/subagent.go`、`runtime_validation_test.go`；新 key 为 `eino.dev/task-subagent`，legacy v4 由旧 worker 排空。 |
+| S1-I1-06 | 新 Sub-agent payload v1 复用 legacy key，可能把旧 v4 durable task 当成新协议解码。 | key 相同而 payload/恢复状态机不兼容。 | 增加双版本 decoder 会把旧 runtime 语义永久带入新 Controller。 | **Fix** | `adk/task/subagent/subagent.go`、`runtime_validation_test.go`；当时先隔离到中间 key `eino.dev/task-subagent`，legacy v4 由旧 worker 排空；最终 v2 key 见 R6-08。 |
 | S1-I1-07 | Tool executor key 被改名会让升级后的 worker 无法领取已有 durable Tool task。 | Tool payload 协议仍兼容，没有更换 key 的必要。 | 与新 package 命名对齐不值得破坏 persisted routing contract。 | **Fix** | `adk/task/tool/types.go`、`validation_test.go`；恢复原有两个 Tool keys。 |
 | S1-I1-08 | 旧 invocation timeout 字段名暗示外部操作超时，实际只覆盖 foreground observation timeout。 | explicit background start window 不使用该值，底层 operation 也不由它终止。 | 保留短名称会继续诱导调用方把它当业务超时。 | **Fix** | `adk/task/tool/managed_tool.go`、filesystem adapter/tests；使用 `ForegroundTimeoutMsForInvocation`。 |
 | S1-I1-09 | `RuntimeSessionStoreFactory` 无法区分 TurnLoop 读写与 progress 只读访问。 | 旧布尔判别同时覆盖 detached execution 与 progress read。 | 工厂可从 `Task` 是否为空猜测，但该隐式协议脆弱且限制授权实现。 | **Fix** | `adk/task/subagent/{subagent,turn_loop,progress}.go`、`session_store_factory_test.go`；增加显式 `AccessMode`。 |
@@ -466,13 +466,15 @@ Fix，无 Won't Fix、Defer 或剩余高优先级 finding。
   ./adk/task/tool` 与对应 package `-race` 通过；当前 toolchain 及
   `GOTOOLCHAIN=go1.18.10` 的 `go test ./... -run '^$'` 全仓 compile 通过；
   `git diff --check` 通过。
-- Stage 3 已完成全仓、核心跨包 race、Go 1.18、lint 与 vet 验证；
-  PR CI 属于 Task 5，当前不宣称通过。
+- Stage 3 已完成当轮全仓、核心跨包 race、Go 1.18、lint 与 vet 验证。
+- Task 5 Round 6 已完成最终 focused、全仓、race、Go 1.18、lint、vet、
+  gofmt 与 diff verification；PR checks 尚未确认。
 
 ## Remaining Items
 
-1. 提交本轮 Stage 3 review commit。
-2. 完成 Task 5 最终全量复审、推送与 PR 状态确认。
+1. 提交并推送最终 review commit。
+2. 确认 PR #1204 GitHub Actions、Codecov 与 CLA 全部通过。
+3. 最终提交后 append progress，并清理本轮临时文件；本轮文档收尾不提前执行。
 
 ## Stage 1 Final Approval
 
@@ -536,4 +538,52 @@ Fix/Won't Fix 分类，未发现修复引入的新路径问题。
 - Remaining findings: 0
 - Red tests: 0
 
-Task 3 已完成；后续工作从 Stage 3 test audit 开始。
+Task 3 已完成；Stage 3 test audit 亦已在上文完成。
+
+## Task 5 Final Full Review（Round 6）
+
+Round 6 从头复查 `origin/alpha/10...HEAD` 的完整 PR diff，并复查当前工作树中
+Task 5 的所有代码与测试改动。该轮将上游 #1215、#1217 的行为移植到
+Task-first Sub-agent runtime，同时闭环 checkpoint durability、输入确认、
+attached lifecycle 与 filesystem timeout wire contract。以下每项均完成
+Validate、Counter 和 Verdict；最终代码 finding remaining：**0**。
+
+### Port 与 checkpoint/timeout findings
+
+| ID | Finding | Validate | Counter | Verdict |
+|---|---|---|---|---|
+| R6-01 | Port #1215：`ControlDrain` 的 graceful stop 可能无限等待 blocked model/tool。 | 零上界会耗尽 shutdown deadline，Task 来不及持久化 checkpoint 并 suspend。 | 强制 immediate cancel 会放弃正常 safe-point drain。 | **Fix**：新增 `DrainCancelTimeout`；正值超时后升级为 checkpointed immediate cancellation，零值保留 legacy unbounded graceful 行为。blocked model、model stream、tool 均验证可 suspend/resume。 |
+| R6-02 | Port #1217：drain escalation 的 stream cancellation 可能被当作普通执行失败，丢失可恢复 checkpoint。 | `adk.ErrStreamCanceled` 及 output materialization error 若绕过 control resolution，会把 Task 终态化为 failed。 | 所有 stream cancel 都视为 drain 会掩盖没有 control request 的真实失败。 | **Fix**：仅在 cancellation-shaped error 后等待已在途 control；有 `ControlDrain` 时 suspend 并保留 checkpoint，无 control 时仍返回原 failure。 |
+| R6-03 | TurnLoop checkpoint 与 lifecycle checkpoint 分开写入，崩溃可产生 cursor、ack 和 runner state 的 split-brain。 | 外部 `CheckPointStore.Set` 成功但 `CommitInput` 失败时，新 runner state 可被旧 lifecycle cursor 错误恢复。 | 保留两个 Store 写入点改动较小，但无法跨 Store 提供原子性。 | **Fix**：managed execution 使用 capture store，将 TurnLoop state inline 到 lifecycle checkpoint，并通过 `CommitInput` 原子提交 cursor、sparse ack 与 runner state；legacy v1 只作恢复迁移读取。 |
+| R6-04 | JSON runtime checkpoint 会对 opaque TurnLoop bytes 做 base64 膨胀，接近 1 MiB lifecycle 限制时无法保存。 | 随机 runner state 在 JSON/base64 下超过限制，而原始 bytes 仍可容纳。 | 提高 Store 限制会把编码开销和兼容负担转嫁给 provider。 | **Fix**：runtime checkpoint v2 使用带 magic/version、长度边界和严格尾部校验的 binary codec；保留 legacy v1 JSON decode，malformed/truncated/overflow 输入 fail closed。 |
+| R6-05 | preempt/恢复可乱序消费 mailbox input，只有 contiguous cursor 会重复执行已消费的高 sequence。 | sequence 3 先完成、cursor 仍为 1 时，恢复读取会再次投递 sequence 3。 | 只按最大 sequence 推进 cursor 会跳过尚未消费的 sequence 2。 | **Fix**：checkpoint 记录有界、排序且折叠后的 `SparseAcks`；恢复合并 checkpoint/mailbox identity，跳过已确认项并在缺口补齐后推进 contiguous cursor。上限 4096，非法、冲突或超限均 fail closed。 |
+| R6-06 | TurnLoop capture 后若没有新的 `Set` 回调，最新 cursor/ack/final 可能未提交到 lifecycle Store。 | graceful stop、turn completion 和无新 runner-state 写入路径都可能留下 `pendingCommit`。 | 仅依赖 capture callback 更简单，但 callback 是否发生不是 lifecycle durability contract。 | **Fix**：TurnLoop 退出后执行 post-capture commit，把最终 captured state 与 pending cursor/ack 一并提交；terminal commit 失败时保留可恢复 checkpoint，成功进入 terminal 时原子清空 checkpoint。 |
+| R6-07 | attached foreground terminal candidate 在 late input 竞争后可能被旧结果重新 seal；仅 Delete 对不支持 deleter 的 Store 无效。 | stale candidate cursor 落后于 mailbox cursor 时，进程重启仍可能读到旧 terminal result。 | 要求所有 `CheckPointStore` 实现 `CheckPointDeleter` 会破坏现有 SPI；忽略 Delete 失败会保留歧义状态。 | **Fix**：先持久化 v2 `invalidated` marker，再 best-effort delete；no-deleter Store 仍能稳定拒绝旧 candidate。cursor conflict 会重读 mailbox 后判定，decode failure 不产生 lifecycle side effect。 |
+| R6-08 | 是否保留中间 Sub-agent `ExecutorKey` 以兼容 v1/v2 checkpoint。 | 中间 v1 `eino.dev/task-subagent` 与 v2 checkpoint protocol 不兼容，共用 key 会让 mixed rollout worker 领取错误协议。 | 注册旧 key 或双 decoder 可兼容已持久化 Task。 | **Won't Fix**：中间 v1/v2 均未发布，不存在生产 durable Task 迁移义务；使用新 key `eino.dev/task-subagent-durable-v2` 隔离协议，旧 worker 不注册新 key，新 worker 不领取旧 key，防止混部误领。 |
+| R6-09 | managed filesystem `timeout` 以毫秒暴露给模型，单位不直观且 schema、prompt、执行转换容易分叉。 | model-facing schema/prompt 需要秒语义；已有 replay 仍可能携带 legacy millisecond `timeout`。 | 直接删除旧字段最简洁，但会破坏已持久化参数重放。 | **Fix**：公开 `timeout_seconds`，内部转换为毫秒；legacy `timeout` 继续按 ms 解码但不再出现在 schema，双字段冲突和 null/非整数 fail closed，正值上限统一 clamp 到 3 天。 |
+
+### Final coverage
+
+- Raw diff coverage：`89.32%`。
+- Semantic diff coverage：`88.51%`。
+- Changed lines：`5117`。
+- Important-scope minimum coverage：`71.43%`。
+- 满足 raw/semantic diff coverage `85%` 与关键范围 `70%` 门槛。
+
+### Final verification
+
+| Gate | Result |
+|---|---|
+| Focused tests | **PASS** |
+| Full repository tests | **PASS** |
+| Race tests | **PASS** |
+| Go 1.18 compatibility | **PASS** |
+| `golangci-lint` | **PASS** |
+| `go vet` | **PASS** |
+| `gofmt` | **PASS** |
+| `git diff --check` | **PASS** |
+
+**Task 5 final full review verdict: APPROVE. Final code findings remaining: 0.**
+
+Task 5 的复查、汇总与本地全量门禁已完成。最终 commit/push、PR checks、
+工作区清洁和 progress append 保持待办。

@@ -76,7 +76,8 @@ type TaskSnapshot struct {
 	LeaseExpiryPolicy LeaseExpiryPolicy
 	// Status is the current lifecycle status.
 	Status Status
-	// Checkpoint is the latest durable executor checkpoint.
+	// Checkpoint is the latest durable executor checkpoint. Terminal lifecycle
+	// transitions clear it atomically with the terminal status.
 	Checkpoint []byte
 	// ResultData is the terminal successful output. It is meaningful only when
 	// Status is StatusCompleted.
