@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"sync"
 	"time"
 
 	"github.com/cloudwego/eino/callbacks"
@@ -31,9 +32,14 @@ import (
 	"github.com/cloudwego/eino/components/retriever"
 )
 
-type graphCancelChanKey struct{}
-type graphCancelChanVal struct {
-	ch chan *time.Duration
+type graphCancelSignalKey struct{}
+type graphCancelSignal struct {
+	done chan struct{}
+
+	mu        sync.RWMutex
+	triggered bool
+	timeout   *time.Duration
+	deadline  *time.Time
 }
 
 type graphInterruptOptions struct {
@@ -70,22 +76,40 @@ func WithGraphInterruptTimeout(timeout time.Duration) GraphInterruptOption {
 // or resuming from an interrupt. The recommended approach is to use compose.GetInterruptState() to explicitly
 // determine whether the current execution is a first run or a resume.
 func WithGraphInterrupt(parent context.Context) (ctx context.Context, interrupt func(opts ...GraphInterruptOption)) {
-	ch := make(chan *time.Duration, 1)
-	ctx = context.WithValue(parent, graphCancelChanKey{}, &graphCancelChanVal{
-		ch: ch,
-	})
+	cancel := &graphCancelSignal{done: make(chan struct{})}
+	ctx = context.WithValue(parent, graphCancelSignalKey{}, cancel)
 	return ctx, func(opts ...GraphInterruptOption) {
 		o := &graphInterruptOptions{}
 		for _, opt := range opts {
 			opt(o)
 		}
-		ch <- o.timeout
-		close(ch)
+		cancel.trigger(o.timeout)
 	}
 }
 
-func getGraphCancel(ctx context.Context) *graphCancelChanVal {
-	val, ok := ctx.Value(graphCancelChanKey{}).(*graphCancelChanVal)
+func (c *graphCancelSignal) trigger(timeout *time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.triggered {
+		panic("compose: graph interrupt called more than once")
+	}
+	c.triggered = true
+	c.timeout = timeout
+	if timeout != nil && *timeout > 0 {
+		deadline := time.Now().Add(*timeout)
+		c.deadline = &deadline
+	}
+	close(c.done)
+}
+
+func (c *graphCancelSignal) request() (timeout *time.Duration, deadline *time.Time) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.timeout, c.deadline
+}
+
+func getGraphCancel(ctx context.Context) *graphCancelSignal {
+	val, ok := ctx.Value(graphCancelSignalKey{}).(*graphCancelSignal)
 	if !ok {
 		return nil
 	}
@@ -104,6 +128,11 @@ type Option struct {
 	writeToCheckPointID *string
 	forceNewRun         bool
 	stateModifier       StateModifier
+
+	// subGraphCheckpointPublisher is a one-hop parent-child execution option.
+	// It is injected after option extraction and intentionally omitted from
+	// deepCopy so a child graph cannot forward its parent's publisher.
+	subGraphCheckpointPublisher func(*subGraphInterruptError)
 }
 
 func (o Option) deepCopy() Option {

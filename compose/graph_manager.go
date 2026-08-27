@@ -255,15 +255,18 @@ func appendIfNotExist(s []string, elem string) []string {
 }
 
 type task struct {
-	ctx            context.Context
-	nodeKey        string
-	call           *chanCall
-	input          any
-	originalInput  any
-	output         any
-	option         []any
-	err            error
-	skipPreHandler bool
+	ctx                     context.Context
+	nodeKey                 string
+	call                    *chanCall
+	input                   any
+	originalInput           any
+	output                  any
+	option                  []any
+	err                     error
+	skipPreHandler          bool
+	syntheticRerunInput     bool
+	subGraphCheckpointReady <-chan *subGraphInterruptError
+	finished                chan struct{}
 }
 
 type taskManager struct {
@@ -275,7 +278,7 @@ type taskManager struct {
 	done         *internal.UnboundedChan[*task]
 	runningTasks map[string]*task
 
-	cancelCh chan *time.Duration
+	cancel   *graphCancelSignal
 	canceled bool
 	deadline *time.Time
 
@@ -290,6 +293,7 @@ func (t *taskManager) execute(currentTask *task) {
 			currentTask.err = safe.NewPanicErr(panicInfo, debug.Stack())
 		}
 
+		close(currentTask.finished)
 		t.done.Send(currentTask)
 	}()
 
@@ -307,8 +311,11 @@ func (t *taskManager) submit(tasks []*task) error {
 	// 2. the task manager mode is set to needAll
 	for i := 0; i < len(tasks); i++ {
 		currentTask := tasks[i]
+		if currentTask.finished == nil {
+			currentTask.finished = make(chan struct{})
+		}
 
-		if t.persistRerunInput {
+		if t.persistRerunInput && !currentTask.syntheticRerunInput {
 			if sr, ok := currentTask.input.(streamReader); ok {
 				copies := sr.copy(2)
 				currentTask.originalInput, currentTask.input = copies[0], copies[1]
@@ -324,6 +331,7 @@ func (t *taskManager) submit(tasks []*task) error {
 			tasks = append(tasks[:i], tasks[i+1:]...)
 			i--
 			t.num++
+			close(currentTask.finished)
 			t.done.Send(currentTask)
 		}
 
@@ -335,7 +343,7 @@ func (t *taskManager) submit(tasks []*task) error {
 	}
 
 	var syncTask *task
-	if t.num == 0 && (len(tasks) == 1 || t.needAll) && t.cancelCh == nil /*if graph can be interrupted by user, shouldn't sync run task*/ {
+	if t.num == 0 && (len(tasks) == 1 || t.needAll) && t.cancel == nil /*if graph can be interrupted by user, shouldn't sync run task*/ {
 		syncTask = tasks[0]
 		tasks = tasks[1:]
 	}
@@ -358,13 +366,13 @@ func (t *taskManager) wait() (tasks []*task, canceled bool, canceledTasks []*tas
 
 	ta, success, canceled := t.waitOne()
 	if canceled {
-		// has canceled and timeout, return canceled tasks
-		for _, rta := range t.runningTasks {
-			canceledTasks = append(canceledTasks, rta)
-		}
+		// A framework-owned subgraph can always observe the same graph
+		// interrupt and produce its own stable checkpoint. Wait for that
+		// handoff before the parent snapshots its state.
+		tasks, canceledTasks = t.settleCanceledSubgraphs()
 		t.runningTasks = make(map[string]*task)
 		t.num = 0
-		return nil, true, canceledTasks
+		return tasks, true, canceledTasks
 	}
 	if t.canceled {
 		// has canceled, but not timeout, wait all
@@ -383,20 +391,23 @@ func (t *taskManager) waitOne() (ta *task, success bool, canceled bool) {
 		return nil, false, false
 	}
 
-	if t.cancelCh == nil {
+	if t.cancel == nil {
 		ta, _ = t.done.Receive()
 	} else {
 		ta, _, canceled = t.receive(t.done.Receive)
 	}
 
-	t.num--
-
 	if canceled {
 		return nil, false, true
 	}
 
+	t.num--
 	delete(t.runningTasks, ta.nodeKey)
+	t.finishTask(ta)
+	return ta, true, false
+}
 
+func (t *taskManager) finishTask(ta *task) {
 	if ta.originalInput != nil && (ta.err == nil || !isInterruptError(ta.err)) {
 		if sr, ok := ta.originalInput.(streamReader); ok {
 			sr.close()
@@ -406,10 +417,47 @@ func (t *taskManager) waitOne() (ta *task, success bool, canceled bool) {
 
 	if ta.err != nil {
 		// biz error, jump post processor
-		return ta, true, false
+		return
 	}
 	runPostHandler(ta, t.runWrapper)
-	return ta, true, false
+}
+
+func (t *taskManager) settleCanceledSubgraphs() (completedTasks, canceledTasks []*task) {
+	for key, runningTask := range t.runningTasks {
+		if runningTask.subGraphCheckpointReady == nil {
+			continue
+		}
+
+		var completedTask *task
+		select {
+		case subGraphCheckpoint := <-runningTask.subGraphCheckpointReady:
+			completedTask = &task{
+				ctx:                     runningTask.ctx,
+				nodeKey:                 runningTask.nodeKey,
+				call:                    runningTask.call,
+				input:                   runningTask.input,
+				originalInput:           runningTask.originalInput,
+				option:                  runningTask.option,
+				err:                     subGraphCheckpoint,
+				skipPreHandler:          runningTask.skipPreHandler,
+				syntheticRerunInput:     runningTask.syntheticRerunInput,
+				subGraphCheckpointReady: runningTask.subGraphCheckpointReady,
+				finished:                runningTask.finished,
+			}
+		case <-runningTask.finished:
+			completedTask = runningTask
+		}
+
+		t.num--
+		delete(t.runningTasks, key)
+		t.finishTask(completedTask)
+		completedTasks = append(completedTasks, completedTask)
+	}
+
+	for _, runningTask := range t.runningTasks {
+		canceledTasks = append(canceledTasks, runningTask)
+	}
+	return completedTasks, canceledTasks
 }
 
 func (t *taskManager) waitAll() (successTasks []*task, canceledTasks []*task) {
@@ -417,12 +465,11 @@ func (t *taskManager) waitAll() (successTasks []*task, canceledTasks []*task) {
 	for {
 		ta, success, canceled := t.waitOne()
 		if canceled {
-			for _, rt := range t.runningTasks {
-				canceledTasks = append(canceledTasks, rt)
-			}
+			settledTasks, remainingTasks := t.settleCanceledSubgraphs()
+			result = append(result, settledTasks...)
 			t.runningTasks = make(map[string]*task)
 			t.num = 0
-			return result, canceledTasks
+			return result, remainingTasks
 		}
 		if !success {
 			return result, nil
@@ -441,9 +488,9 @@ func (t *taskManager) receive(recv func() (*task, bool)) (ta *task, closed bool,
 		ta, closed = recv()
 		return ta, closed, false
 	}
-	if t.cancelCh != nil {
+	if t.cancel != nil {
 		// have not canceled, receive while listening
-		ta, closed, canceled, t.canceled, t.deadline = receiveWithListening(recv, t.cancelCh)
+		ta, closed, canceled, t.canceled, t.deadline = receiveWithListening(recv, t.cancel)
 		return ta, closed, canceled
 	}
 	// won't cancel
@@ -476,7 +523,10 @@ func receiveWithDeadline(recv func() (*task, bool), deadline time.Time) (ta *tas
 	}
 }
 
-func receiveWithListening(recv func() (*task, bool), cancel chan *time.Duration) (*task, bool, bool, bool, *time.Time) {
+func receiveWithListening(
+	recv func() (*task, bool),
+	cancel *graphCancelSignal,
+) (*task, bool, bool, bool, *time.Time) {
 	type pair struct {
 		ta     *task
 		closed bool
@@ -503,10 +553,8 @@ func receiveWithListening(recv func() (*task, bool), cancel chan *time.Duration)
 		// cancel call — that residual race is inherent to unsynchronized
 		// concurrent channel signals.
 		select {
-		case timeout, ok := <-cancel:
-			if !ok {
-				return nil, false, true, true, nil
-			}
+		case <-cancel.done:
+			timeout, requestedDeadline := cancel.request()
 			if timeout == nil {
 				// Unlimited grace period: the task's real result is authoritative.
 				return p.ta, p.closed, false, true, nil
@@ -515,20 +563,12 @@ func receiveWithListening(recv func() (*task, bool), cancel chan *time.Duration)
 				now := time.Now()
 				return nil, false, true, true, &now
 			}
-			dt := time.Now().Add(*timeout)
-			return p.ta, p.closed, false, true, &dt
+			return p.ta, p.closed, false, true, requestedDeadline
 		default:
 			return p.ta, p.closed, false, false, nil
 		}
-	case timeout, ok := <-cancel:
-		if !ok {
-			// The cancel channel has been closed — this means a previous call to
-			// receiveWithListening already consumed the cancel signal (task completed
-			// at the same time as cancel, and select picked the task result). Since
-			// cancel was already issued, treat this as an immediate cancel rather than
-			// blocking forever on resultCh.
-			return nil, false, true, true, nil
-		}
+	case <-cancel.done:
+		timeout, requestedDeadline := cancel.request()
 		canceled = true
 		if timeout == nil {
 			break
@@ -546,9 +586,12 @@ func receiveWithListening(recv func() (*task, bool), cancel chan *time.Duration)
 			now := time.Now()
 			return nil, false, true, true, &now
 		}
-		timeoutCh = time.After(*timeout)
-		dt := time.Now().Add(*timeout)
-		deadline = &dt
+		deadline = requestedDeadline
+		remaining := time.Until(*deadline)
+		if remaining <= 0 {
+			return nil, false, true, true, deadline
+		}
+		timeoutCh = time.After(remaining)
 	}
 
 	if timeoutCh != nil {

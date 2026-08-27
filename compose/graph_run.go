@@ -143,6 +143,7 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 
 	// Extract CheckPointID
 	checkPointID, writeToCheckPointID, stateModifier, forceNewRun := getCheckPointInfo(opts...)
+	subGraphCheckpointPublisher := getSubGraphCheckpointPublisher(opts...)
 	if checkPointID != nil && r.checkPointer.store == nil {
 		return nil, newGraphRunError(fmt.Errorf("receive checkpoint id but have not set checkpoint store"))
 	}
@@ -236,6 +237,7 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 				isStream,
 				isSubGraph,
 				writeToCheckPointID,
+				subGraphCheckpointPublisher,
 			)
 		}
 	}
@@ -303,6 +305,7 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 				isSubGraph,
 				cm,
 				isStream,
+				subGraphCheckpointPublisher,
 			)
 		}
 
@@ -344,6 +347,7 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 					isSubGraph,
 					cm,
 					isStream,
+					subGraphCheckpointPublisher,
 				)
 			}
 
@@ -360,7 +364,16 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 			tempInfo.interruptBeforeNodes = append(tempInfo.interruptBeforeNodes, getHitKey(newNextTasks, r.interruptBeforeNodes)...)
 
 			// simple interrupt
-			return nil, r.handleInterrupt(ctx, tempInfo, append(nextTasks, newNextTasks...), cm.channels, isStream, isSubGraph, writeToCheckPointID)
+			return nil, r.handleInterrupt(
+				ctx,
+				tempInfo,
+				append(nextTasks, newNextTasks...),
+				cm.channels,
+				isStream,
+				isSubGraph,
+				writeToCheckPointID,
+				subGraphCheckpointPublisher,
+			)
 		}
 	}
 }
@@ -551,6 +564,7 @@ func (r *runner) handleInterrupt(
 	isStream bool,
 	isSubGraph bool,
 	checkPointID *string,
+	publishSubGraphCheckpoint func(*subGraphInterruptError),
 ) error {
 	cp := &checkpoint{
 		Channels:       channels,
@@ -596,11 +610,15 @@ func (r *runner) handleInterrupt(
 		return fmt.Errorf("failed to convert checkpoint: %w", err)
 	}
 	if isSubGraph {
-		return &subGraphInterruptError{
+		subGraphInterrupt := &subGraphInterruptError{
 			Info:       intInfo,
 			CheckPoint: cp,
 			signal:     is,
 		}
+		if publishSubGraphCheckpoint != nil {
+			publishSubGraphCheckpoint(subGraphInterrupt)
+		}
+		return subGraphInterrupt
 	} else if checkPointID != nil {
 		err := r.checkPointer.set(ctx, *checkPointID, cp)
 		if err != nil {
@@ -647,6 +665,7 @@ func (r *runner) handleInterruptWithSubGraphAndRerunNodes(
 	isSubGraph bool,
 	cm *channelManager,
 	isStream bool,
+	publishSubGraphCheckpoint func(*subGraphInterruptError),
 ) error {
 	var rerunTasks, subgraphTasks, otherTasks []*task
 	skipPreHandler := map[string]bool{}
@@ -748,11 +767,15 @@ func (r *runner) handleInterruptWithSubGraphAndRerunNodes(
 		return fmt.Errorf("failed to convert checkpoint: %w", err)
 	}
 	if isSubGraph {
-		return &subGraphInterruptError{
+		subGraphInterrupt := &subGraphInterruptError{
 			Info:       intInfo,
 			CheckPoint: cp,
 			signal:     is,
 		}
+		if publishSubGraphCheckpoint != nil {
+			publishSubGraphCheckpoint(subGraphInterrupt)
+		}
+		return subGraphInterrupt
 	} else if checkPointID != nil {
 		err = r.checkPointer.set(ctx, *checkPointID, cp)
 		if err != nil {
@@ -796,16 +819,23 @@ func (r *runner) createTasks(ctx context.Context, nodeMap map[string]any, optMap
 			return nil, fmt.Errorf("node[%s] has not been registered", nodeKey)
 		}
 
+		taskCtx := ctx
+		var subGraphCheckpointReady <-chan *subGraphInterruptError
+		taskOpts := optMap[nodeKey]
 		if call.action.nodeInfo != nil && call.action.nodeInfo.compileOption != nil {
-			ctx = forwardCheckPoint(ctx, nodeKey)
+			taskCtx = forwardCheckPoint(taskCtx, nodeKey)
+		}
+		if isSubGraphCall(call) {
+			taskOpts, subGraphCheckpointReady = withSubGraphCheckpointPublisher(taskOpts)
 		}
 
 		nextTasks = append(nextTasks, &task{
-			ctx:     AppendAddressSegment(ctx, AddressSegmentNode, nodeKey),
-			nodeKey: nodeKey,
-			call:    call,
-			input:   nodeInput,
-			option:  optMap[nodeKey],
+			ctx:                     AppendAddressSegment(taskCtx, AddressSegmentNode, nodeKey),
+			nodeKey:                 nodeKey,
+			call:                    call,
+			input:                   nodeInput,
+			option:                  taskOpts,
+			subGraphCheckpointReady: subGraphCheckpointReady,
 		})
 	}
 	return nextTasks, nil
@@ -838,6 +868,7 @@ func (r *runner) restoreTasks(
 	isStream bool,
 	optMap map[string][]any) ([]*task, error) {
 	ret := make([]*task, 0, len(inputs))
+	syntheticInputs := make(map[string]struct{})
 	for _, key := range rerunNodes {
 		if _, hasInput := inputs[key]; hasInput {
 			continue
@@ -852,6 +883,7 @@ func (r *runner) restoreTasks(
 		} else {
 			inputs[key] = call.action.inputZeroValue()
 		}
+		syntheticInputs[key] = struct{}{}
 	}
 	for key, input := range inputs {
 		call, ok := r.chanSubscribeTo[key]
@@ -859,23 +891,29 @@ func (r *runner) restoreTasks(
 			return nil, fmt.Errorf("channel[%s] from checkpoint is not registered", key)
 		}
 
+		taskCtx := ctx
+		var subGraphCheckpointReady <-chan *subGraphInterruptError
+		taskOpts := optMap[key]
 		if call.action.nodeInfo != nil && call.action.nodeInfo.compileOption != nil {
 			// sub graph
-			ctx = forwardCheckPoint(ctx, key)
+			taskCtx = forwardCheckPoint(taskCtx, key)
+		}
+		if isSubGraphCall(call) {
+			taskOpts, subGraphCheckpointReady = withSubGraphCheckpointPublisher(taskOpts)
 		}
 
 		newTask := &task{
-			ctx:            AppendAddressSegment(ctx, AddressSegmentNode, key),
-			nodeKey:        key,
-			call:           call,
-			input:          input,
-			option:         nil,
-			skipPreHandler: skipPreHandler[key],
+			ctx:                     AppendAddressSegment(taskCtx, AddressSegmentNode, key),
+			nodeKey:                 key,
+			call:                    call,
+			input:                   input,
+			option:                  taskOpts,
+			skipPreHandler:          skipPreHandler[key],
+			subGraphCheckpointReady: subGraphCheckpointReady,
 		}
-		if opt, ok := optMap[key]; ok {
-			newTask.option = opt
+		if _, ok := syntheticInputs[key]; ok {
+			newTask.syntheticRerunInput = true
 		}
-
 		ret = append(ret, newTask)
 	}
 	return ret, nil
@@ -884,11 +922,7 @@ func (r *runner) restoreTasks(
 func (r *runner) validateCheckpointIntegrity(cp *checkpoint) error {
 	for _, key := range cp.RerunNodes {
 		call, ok := r.chanSubscribeTo[key]
-		if !ok || call.action.meta == nil {
-			continue
-		}
-		cmp := call.action.meta.component
-		if cmp != ComponentOfGraph && cmp != ComponentOfChain && cmp != ComponentOfWorkflow {
+		if !ok || !isSubGraphCall(call) {
 			continue
 		}
 		if subCP, hasSubGraph := cp.SubGraphs[key]; hasSubGraph && subCP != nil {
@@ -900,6 +934,14 @@ func (r *runner) validateCheckpointIntegrity(cp *checkpoint) error {
 		return fmt.Errorf("subgraph node %q is marked for rerun without a nested checkpoint or persisted input", key)
 	}
 	return nil
+}
+
+func isSubGraphCall(call *chanCall) bool {
+	if call == nil || call.action == nil || call.action.meta == nil {
+		return false
+	}
+	cmp := call.action.meta.component
+	return cmp == ComponentOfGraph || cmp == ComponentOfChain || cmp == ComponentOfWorkflow
 }
 
 func (r *runner) resolveCompletedTasks(ctx context.Context, completedTasks []*task, isStream bool, cm *channelManager) (map[string]map[string]any, map[string][]string, error) {
@@ -1007,7 +1049,7 @@ func (r *runner) calculateBranch(ctx context.Context, curNodeKey string, startCh
 	return ret, nil
 }
 
-func (r *runner) initTaskManager(runWrapper runnableCallWrapper, cancelVal *graphCancelChanVal, opts ...Option) *taskManager {
+func (r *runner) initTaskManager(runWrapper runnableCallWrapper, cancelVal *graphCancelSignal, opts ...Option) *taskManager {
 	tm := &taskManager{
 		runWrapper:        runWrapper,
 		opts:              opts,
@@ -1017,7 +1059,7 @@ func (r *runner) initTaskManager(runWrapper runnableCallWrapper, cancelVal *grap
 		persistRerunInput: cancelVal != nil,
 	}
 	if cancelVal != nil {
-		tm.cancelCh = cancelVal.ch
+		tm.cancel = cancelVal
 	}
 	return tm
 }

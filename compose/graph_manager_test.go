@@ -17,11 +17,115 @@
 package compose
 
 import (
+	"context"
+	"errors"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/cloudwego/eino/internal"
 )
+
+func triggeredGraphCancel(timeout *time.Duration) *graphCancelSignal {
+	cancel := &graphCancelSignal{done: make(chan struct{})}
+	cancel.trigger(timeout)
+	return cancel
+}
+
+func TestGraphCancelBroadcast(t *testing.T) {
+	timeout := 100 * time.Millisecond
+	cancel := triggeredGraphCancel(&timeout)
+
+	for i := 0; i < 3; i++ {
+		select {
+		case <-cancel.done:
+			gotTimeout, deadline := cancel.request()
+			require.NotNil(t, gotTimeout)
+			assert.Equal(t, timeout, *gotTimeout)
+			assert.NotNil(t, deadline)
+		case <-time.After(time.Second):
+			t.Fatalf("listener %d did not observe graph cancellation", i)
+		}
+	}
+}
+
+func TestTaskManagerSettleCanceledSubgraphUsesPublishedCheckpoint(t *testing.T) {
+	ready := make(chan *subGraphInterruptError, 1)
+	published := &subGraphInterruptError{CheckPoint: &checkpoint{}}
+	ready <- published
+
+	subGraphTask := &task{
+		nodeKey:                 "subgraph",
+		subGraphCheckpointReady: ready,
+		finished:                make(chan struct{}),
+	}
+	manager := &taskManager{
+		num:          1,
+		runningTasks: map[string]*task{"subgraph": subGraphTask},
+	}
+
+	completed, canceled := manager.settleCanceledSubgraphs()
+
+	require.Len(t, completed, 1)
+	assert.Same(t, published, completed[0].err)
+	assert.Empty(t, canceled)
+}
+
+func TestAttack_SubGraphCheckpointPublisherIsOneHop(t *testing.T) {
+	rawOpts, ready := withSubGraphCheckpointPublisher(nil)
+	opts, err := convertOption[Option](rawOpts...)
+	require.NoError(t, err)
+
+	publish := getSubGraphCheckpointPublisher(opts...)
+	require.NotNil(t, publish)
+	want := &subGraphInterruptError{CheckPoint: &checkpoint{}}
+	publish(want)
+	assert.Same(t, want, <-ready)
+
+	nodes := map[string]*chanCall{
+		"nested": {action: &composableRunnable{optionType: nil}},
+	}
+	forwarded, err := extractOption(nodes, opts...)
+	assert.NoError(t, err)
+	assert.Empty(t, forwarded, "the parent publisher must not propagate into a grandchild graph")
+}
+
+func TestTaskManagerPreHandlerFailureClosesFinished(t *testing.T) {
+	wantErr := errors.New("pre-handler failed")
+	preProcessor := &composableRunnable{}
+	failedTask := &task{
+		nodeKey: "subgraph",
+		call: &chanCall{
+			action:       &composableRunnable{},
+			preProcessor: preProcessor,
+		},
+		subGraphCheckpointReady: make(chan *subGraphInterruptError),
+	}
+	manager := &taskManager{
+		runWrapper: func(_ context.Context, runnable *composableRunnable, _ any, _ ...any) (any, error) {
+			if runnable == preProcessor {
+				return nil, wantErr
+			}
+			return nil, nil
+		},
+		done:         internal.NewUnboundedChan[*task](),
+		runningTasks: make(map[string]*task),
+	}
+
+	require.NoError(t, manager.submit([]*task{failedTask}))
+	select {
+	case <-failedTask.finished:
+	case <-time.After(time.Second):
+		t.Fatal("pre-handler failure did not mark task as finished")
+	}
+
+	completed, canceled := manager.settleCanceledSubgraphs()
+	require.Len(t, completed, 1)
+	assert.ErrorIs(t, completed[0].err, wantErr)
+	assert.Empty(t, canceled)
+}
 
 // TestReceiveWithListening_ZeroTimeout_WinsAgainstDelayedTaskCompletion
 // covers https://github.com/cloudwego/eino/issues/1148 at the compose level.
@@ -49,16 +153,13 @@ func TestReceiveWithListening_ZeroTimeout_WinsAgainstDelayedTaskCompletion(t *te
 			return &task{nodeKey: "n"}, true
 		}
 
-		cancelCh := make(chan *time.Duration, 1)
-
 		go func() {
 			time.Sleep(time.Microsecond)
 			close(recvReleased)
 		}()
 		zero := time.Duration(0)
-		cancelCh <- &zero
 
-		ta, _, immediateCanceled, canceled, _ := receiveWithListening(recv, cancelCh)
+		ta, _, immediateCanceled, canceled, _ := receiveWithListening(recv, triggeredGraphCancel(&zero))
 
 		assert.True(t, canceled, "iteration %d", i)
 		assert.True(t, immediateCanceled, "iteration %d: zero-timeout cancel must win against a slightly-delayed task completion", i)
@@ -78,15 +179,12 @@ func TestReceiveWithListening_UnlimitedGrace_UsesRealTaskResult(t *testing.T) {
 		return want, true
 	}
 
-	cancelCh := make(chan *time.Duration, 1)
-	cancelCh <- nil // unlimited grace: no timeout
-
 	go func() {
 		time.Sleep(20 * time.Millisecond)
 		close(recvReleased)
 	}()
 
-	ta, _, immediateCanceled, canceled, deadline := receiveWithListening(recv, cancelCh)
+	ta, _, immediateCanceled, canceled, deadline := receiveWithListening(recv, triggeredGraphCancel(nil))
 
 	assert.True(t, canceled)
 	assert.False(t, immediateCanceled)
@@ -105,16 +203,14 @@ func TestReceiveWithListening_PositiveTimeout_TaskFinishesWithinGrace(t *testing
 		return want, true
 	}
 
-	cancelCh := make(chan *time.Duration, 1)
 	timeout := 200 * time.Millisecond
-	cancelCh <- &timeout
 
 	go func() {
 		time.Sleep(20 * time.Millisecond)
 		close(recvReleased)
 	}()
 
-	ta, _, immediateCanceled, canceled, deadline := receiveWithListening(recv, cancelCh)
+	ta, _, immediateCanceled, canceled, deadline := receiveWithListening(recv, triggeredGraphCancel(&timeout))
 
 	assert.True(t, canceled)
 	assert.False(t, immediateCanceled)
@@ -133,11 +229,9 @@ func TestReceiveWithListening_PositiveTimeout_DeadlineExpiresFirst(t *testing.T)
 	}
 	defer close(recvReleased)
 
-	cancelCh := make(chan *time.Duration, 1)
 	timeout := 20 * time.Millisecond
-	cancelCh <- &timeout
 
-	ta, _, immediateCanceled, canceled, deadline := receiveWithListening(recv, cancelCh)
+	ta, _, immediateCanceled, canceled, deadline := receiveWithListening(recv, triggeredGraphCancel(&timeout))
 
 	assert.True(t, canceled)
 	assert.True(t, immediateCanceled)
