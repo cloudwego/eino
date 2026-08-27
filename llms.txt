@@ -20,9 +20,9 @@
 
 ## Quick Start
 
-- [Simple LLM Application](https://www.cloudwego.io/docs/eino/quick_start/simple_llm_application/)
-- [Agent with Tools](https://www.cloudwego.io/docs/eino/quick_start/agent_llm_with_tools/)
-- [Eino Cookbook](https://www.cloudwego.io/docs/eino/eino-cookbook/)
+- [Chapter 1: ChatModel and Message](https://www.cloudwego.io/docs/eino/quick_start/chapter_01_chatmodel_and_message/)
+- [Chapter 4: Tools and File System Access](https://www.cloudwego.io/docs/eino/quick_start/chapter_04_tool_and_filesystem/)
+- [Eino Cookbook](https://www.cloudwego.io/docs/eino/cookbook/)
 
 ## Core Concepts — Components
 
@@ -76,8 +76,6 @@ Middleware abstractions.
 - [Agent collaboration](https://www.cloudwego.io/docs/eino/core_modules/eino_adk/agent_collaboration/)
 - [Agent implementations](https://www.cloudwego.io/docs/eino/core_modules/eino_adk/agent_implementation/)
   - [ChatModel agent](https://www.cloudwego.io/docs/eino/core_modules/eino_adk/agent_implementation/chat_model/)
-  - [Workflow agent](https://www.cloudwego.io/docs/eino/core_modules/eino_adk/agent_implementation/workflow/)
-  - [Supervisor agent](https://www.cloudwego.io/docs/eino/core_modules/eino_adk/agent_implementation/supervisor/)
   - [Plan-and-execute agent](https://www.cloudwego.io/docs/eino/core_modules/eino_adk/agent_implementation/plan_execute/)
   - [Deep agents](https://www.cloudwego.io/docs/eino/core_modules/eino_adk/agent_implementation/deepagents/)
 - [Agent extension](https://www.cloudwego.io/docs/eino/core_modules/eino_adk/agent_extension/)
