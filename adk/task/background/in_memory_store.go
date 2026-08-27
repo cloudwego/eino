@@ -37,6 +37,8 @@ type InMemoryStoreConfig struct {
 	// MaxValueBytes defaults to 1 MiB and bounds each checkpoint, successful
 	// result, resume input, and task-event data value.
 	MaxValueBytes int64
+	// Now defaults to time.Now. Tests may provide a controlled clock.
+	Now func() time.Time
 }
 
 type memoryOutboxItem struct {
@@ -90,22 +92,23 @@ type taskEventPartKey struct {
 // TaskEventStore, NotificationWriter, and NotificationOutbox. It is a
 // state-machine test double, not a durable backend.
 type InMemoryStore struct {
-	mu                  sync.Mutex
-	tasks               map[string]*TaskSnapshot
-	active              map[string]memoryActiveAttempt
-	taskEvents          map[string][]TaskEventPart
-	taskEventKeys       map[string]map[taskEventPartKey]TaskEventPart
-	closedTaskEvents    map[string]map[string]struct{}
-	customNotifications map[string]map[string]Notification
-	outbox              []*memoryOutboxItem
-	outboxLeaseID       uint64
-	mailboxes           map[string]*memoryMailbox
-	mailboxInvocations  map[mailboxInvocationKey]string
-	activeSessionTasks  map[string]string
-	notify              chan struct{}
-	now                 func() time.Time
-	activeTimeout       time.Duration
-	maxValue            int64
+	mu                           sync.Mutex
+	tasks                        map[string]*TaskSnapshot
+	active                       map[string]memoryActiveAttempt
+	taskEvents                   map[string][]TaskEventPart
+	taskEventKeys                map[string]map[taskEventPartKey]TaskEventPart
+	closedTaskEvents             map[string]map[string]struct{}
+	customNotifications          map[string]map[string]Notification
+	outbox                       []*memoryOutboxItem
+	outboxLeaseID                uint64
+	mailboxes                    map[string]*memoryMailbox
+	mailboxInvocations           map[mailboxInvocationKey]string
+	activeSessionTasks           map[string]string
+	notify                       chan struct{}
+	testHookWaitInputsRegistered func()
+	now                          func() time.Time
+	activeTimeout                time.Duration
+	maxValue                     int64
 }
 
 // NewInMemoryStore creates an in-memory reference task provider and outbox.
@@ -131,6 +134,9 @@ func NewInMemoryStore(config *InMemoryStoreConfig) *InMemoryStore {
 		}
 		if config.MaxValueBytes > 0 {
 			s.maxValue = config.MaxValueBytes
+		}
+		if config.Now != nil {
+			s.now = config.Now
 		}
 	}
 	return s

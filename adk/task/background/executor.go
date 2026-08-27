@@ -354,14 +354,17 @@ func (r *executorRegistry) keys() []string {
 }
 
 type activeAttempt struct {
-	cancel        context.CancelFunc
-	runtime       *taskRuntime
-	supportsDrain bool
-	ready         chan struct{}
-	readyOnce     sync.Once
-	done          chan error
-	drainOnReady  bool
-	drainReason   string
+	cancel                 context.CancelFunc
+	runtime                *taskRuntime
+	supportsDrain          bool
+	ready                  chan struct{}
+	readyOnce              sync.Once
+	testHookBeforeDoneWait func()
+	testHookBeforeFinish   func()
+	done                   chan struct{}
+	resultErr              error
+	drainOnReady           bool
+	drainReason            string
 }
 
 func (a *activeAttempt) signalReady() {
@@ -383,6 +386,8 @@ type taskRuntime struct {
 	cancelRequested          bool
 	cancelAcknowledged       bool
 	cancelReason             string
+	manager                  *Manager
+	handoffGate              *taskGate
 }
 
 // detachedCtx preserves values while detaching worker execution from the
@@ -743,6 +748,20 @@ func (r *taskRuntime) commit(ctx context.Context, result *ExecutionResult) (*Tas
 			Error:  r.cancelReason,
 		}
 	}
+	var gate *taskGate
+	gateHandedOff := false
+	if result.Action == ExecutionActionWaitInput && r.manager != nil {
+		var err error
+		gate, err = r.manager.acquireTaskGate(ctx, r.taskID)
+		if err != nil {
+			return nil, err
+		}
+		defer func() {
+			if !gateHandedOff {
+				r.manager.releaseTaskGate(r.taskID, gate)
+			}
+		}()
+	}
 	task, err := r.commitResult(ctx, result)
 	if errors.Is(err, ErrVersionConflict) {
 		if reconcileErr := r.reconcileCancellationLocked(ctx); reconcileErr != nil {
@@ -755,6 +774,12 @@ func (r *taskRuntime) commit(ctx context.Context, result *ExecutionResult) (*Tas
 	if err != nil {
 		r.poison = err
 		return nil, err
+	}
+	if gate != nil {
+		if task.Status == StatusWaitingInput {
+			r.handoffGate = gate
+			gateHandedOff = true
+		}
 	}
 	r.version = task.Version
 	return task, nil
@@ -1164,8 +1189,14 @@ func (m *Manager) RequestCancel(
 	}
 	if result.LeaseExpiryPolicy == LeaseExpiryFail && result.Status == StatusRunning &&
 		attempt != nil {
+		if attempt.testHookBeforeDoneWait != nil {
+			attempt.testHookBeforeDoneWait()
+		}
 		select {
-		case attemptErr := <-attempt.done:
+		case <-attempt.done:
+			m.attemptsMu.Lock()
+			attemptErr := attempt.resultErr
+			m.attemptsMu.Unlock()
 			if attemptErr != nil {
 				return result, attemptErr
 			}
@@ -1240,12 +1271,13 @@ func (m *Manager) ReleaseSuspension(ctx context.Context, taskID string) (*TaskSn
 
 // Execute claims and runs one pending task attempt on the current worker.
 func (m *Manager) Execute(ctx context.Context, taskID string) error {
-	return m.execute(ctx, taskID)
+	return m.execute(ctx, taskID, true)
 }
 
 func (m *Manager) execute(
 	ctx context.Context,
 	taskID string,
+	allowImmediateRedispatch bool,
 ) (returnErr error) {
 	redispatch := false
 	timeoutController := taskcontrol.FromContext(ctx)
@@ -1255,31 +1287,51 @@ func (m *Manager) execute(
 	if taskID == "" {
 		return errors.New("task/background: execute task id is required")
 	}
+	registrationGate, err := m.acquireTaskGate(ctx, taskID)
+	if err != nil {
+		return err
+	}
 	m.mu.Lock()
 	if m.closed {
 		m.mu.Unlock()
+		m.releaseTaskGate(taskID, registrationGate)
 		return m.closedError()
 	}
 	m.attemptsMu.Lock()
 	if _, exists := m.activeAttempts[taskID]; exists {
 		m.attemptsMu.Unlock()
 		m.mu.Unlock()
+		m.releaseTaskGate(taskID, registrationGate)
 		return errors.New("task/background: task is already executing in this manager")
 	}
-	attempt := &activeAttempt{ready: make(chan struct{}), done: make(chan error, 1)}
+	attempt := &activeAttempt{
+		ready: make(chan struct{}),
+		done:  make(chan struct{}),
+	}
 	m.activeAttempts[taskID] = attempt
 	m.attemptsMu.Unlock()
 	m.mu.Unlock()
+	m.releaseTaskGate(taskID, registrationGate)
+	var runtime *taskRuntime
 	defer func() {
 		attempt.signalReady()
-		attempt.done <- returnErr
-		close(attempt.done)
+		if attempt.testHookBeforeFinish != nil {
+			attempt.testHookBeforeFinish()
+		}
 		m.attemptsMu.Lock()
+		attempt.resultErr = returnErr
 		delete(m.activeAttempts, taskID)
+		close(attempt.done)
 		m.attemptsMu.Unlock()
-		if redispatch {
+		if runtime != nil && runtime.handoffGate != nil {
+			m.releaseTaskGate(taskID, runtime.handoffGate)
+		}
+		if redispatch && allowImmediateRedispatch {
 			go func() {
-				_ = m.execute(detachedCtx{parent: ctx}, taskID)
+				// Manager has no asynchronous error observer. A failed
+				// redispatch remains visible through durable task state and is
+				// retried by the host's ListPending scheduler.
+				_ = m.execute(detachedCtx{parent: ctx}, taskID, false)
 			}()
 		}
 	}()
@@ -1308,7 +1360,7 @@ func (m *Manager) execute(
 	if err != nil {
 		return err
 	}
-	runtime := newTaskRuntime(
+	runtime = newTaskRuntime(
 		m.tasks,
 		m.taskEvents,
 		taskID,
@@ -1316,6 +1368,7 @@ func (m *Manager) execute(
 		started.Version,
 		m.tasks,
 	)
+	runtime.manager = m
 	if acknowledger, ok := executor.(CancellationAcknowledger); ok {
 		runtime.cancellationAcknowledger = acknowledger
 	}

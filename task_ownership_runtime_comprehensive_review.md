@@ -685,3 +685,38 @@ Go 1.19-1.24 compatibility matrix、`codecov/patch`、`codecov/project`
 与 `license/cla` 全部 **PASS**。9 条 API compatibility review threads 中，
 4 条已有客观迁移证据的 thread 已 resolve；5 条有意的 breaking API thread
 仍等待维护者确认，未擅自 resolve。本轮状态不表示人工 approval 已满足。
+
+## Round 10 continuation: recovery clock and waiting-input handoff
+
+GitHub Actions run `33038699217` 在 head `9265e2c` 继续暴露了两处并发时序
+问题；该 run 不能作为 full CI 通过依据。
+
+- `TestAttack_RecoveryCancellationHookIsIdempotent` 用 10ms
+  `ActiveAttemptTimeout` 和真实时钟等待 recovery eligibility。在 Go 1.19
+  race 慢调度下，lease 是否过期取决于 wall-clock timing，属于测试竞态。
+  `InMemoryStoreConfig.Now` 仅为 in-memory test double 增加可注入时钟；测试
+  显式推进时钟后同步读取恢复状态，不改变生产 Store 或 runtime 的时钟契约。
+- `TestManagedToolStreamingInterruptResume` 暴露了生产竞态：attempt 已提交
+  `WaitingInput`、但仍注册在 Manager 中时，`SendInput` 可先将 Task 唤醒为
+  `Pending` 并触发 `Execute`；新执行会因旧 active attempt 尚未清理而失败，
+  此后没有可靠的再次 dispatch。
+- 修复为 Manager-local、per-task、reference-counted gate，线性化
+  `Execute` 的 active-attempt 注册、`SendInput` 持久化，以及
+  `WaitInput` commit 到 attempt cleanup 的 handoff。gate 只协调单进程瞬时
+  handoff，durable Store 仍是跨进程 authority。
+- `activeAttempt.done` 改为 close-only completion broadcast，执行错误写入
+  `resultErr` 后再 close，使 `RequestCancel` 与 `Close` 等多个 waiter 都能读取
+  同一结果，不再竞争消费单值 channel。
+- 每次外部 `Execute` 最多触发一次 immediate redispatch；`Complete`、
+  `Suspend` 与 `WaitInput` 的 input-race recovery 语义保留，但内部 redispatch
+  不再递归继续派发，避免持续输入形成无界 goroutine chain。未消费输入保持在
+  durable pending Task 中，由 host 的 `ListPending` scheduler 后续重试。
+- 新增 bounded、确定性的测试，覆盖 SendInput/Execute 注册顺序、
+  waiting-input commit/cleanup handoff、gate cancellation 与回收、多 waiter
+  error broadcast，以及 `Complete`/`Suspend`/`WaitInput` 的单次 redispatch
+  budget。
+
+本轮全部审计 finding 已完成 Fix，code findings remaining：**0**。focused
+race、当前工具链 task package race 与 Go 1.19 task package race 均
+**PASS**；`gofmt` 与 `git diff --check` **PASS**。修复提交后的 full CI
+尚未运行完成，因此状态为 **pending**，不宣称远端 checks 全绿。

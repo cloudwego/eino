@@ -585,6 +585,9 @@ func (s *InMemoryStore) WaitInputs(
 		}
 		wait := s.notify
 		s.mu.Unlock()
+		if s.testHookWaitInputsRegistered != nil {
+			s.testHookWaitInputsRegistered()
+		}
 		select {
 		case <-wait:
 		case <-ctx.Done():

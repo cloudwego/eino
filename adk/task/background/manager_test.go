@@ -36,6 +36,33 @@ func closeWithTimeout(manager *Manager) {
 	_ = manager.Close(ctx)
 }
 
+func awaitManagerTestValue[T any](t *testing.T, values <-chan T) T {
+	t.Helper()
+	select {
+	case value := <-values:
+		return value
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for test synchronization")
+		var zero T
+		return zero
+	}
+}
+
+func awaitManagerTestSignal(signal <-chan struct{}) {
+	select {
+	case <-signal:
+	case <-time.After(5 * time.Second):
+		panic("timed out waiting for test synchronization")
+	}
+}
+
+func requireTaskGatesEmpty(t *testing.T, manager *Manager) {
+	t.Helper()
+	manager.taskGatesMu.Lock()
+	defer manager.taskGatesMu.Unlock()
+	require.Empty(t, manager.taskGates)
+}
+
 type managerContextSnapshotKey struct{}
 
 type testContextSnapshotter struct{}
@@ -80,6 +107,124 @@ func (f failingRestoreSnapshotter) RestoreContext(context.Context, []byte) (cont
 type firstReleaseConflictStore struct {
 	LifecycleStore
 	once sync.Once
+}
+
+type waitingHandoffStore struct {
+	*InMemoryStore
+	waitingCommitted chan struct{}
+	releaseAttempt   chan struct{}
+}
+
+func (s *waitingHandoffStore) WaitInputIfNoInputs(
+	ctx context.Context,
+	req *WaitInputIfNoInputsRequest,
+) (*TaskSnapshot, error) {
+	result, err := s.InMemoryStore.WaitInputIfNoInputs(ctx, req)
+	close(s.waitingCommitted)
+	awaitManagerTestSignal(s.releaseAttempt)
+	return result, err
+}
+
+type ackCancelErrorStore struct {
+	*InMemoryStore
+	ackStarted chan struct{}
+	releaseAck chan struct{}
+	err        error
+}
+
+func (s *ackCancelErrorStore) AckCancel(
+	ctx context.Context,
+	_ *AckCancelRequest,
+) (*TaskSnapshot, error) {
+	close(s.ackStarted)
+	select {
+	case <-s.releaseAck:
+		return nil, s.err
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+type controlledSendStore struct {
+	*InMemoryStore
+	started       chan struct{}
+	releaseStart  chan struct{}
+	committed     chan struct{}
+	releaseReturn chan struct{}
+	returnNil     bool
+}
+
+func (s *controlledSendStore) SendInput(
+	ctx context.Context,
+	req *taskcore.SendInputRequest,
+) (*taskcore.SendInputResult, error) {
+	close(s.started)
+	if s.releaseStart != nil {
+		select {
+		case <-s.releaseStart:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	result, err := s.InMemoryStore.SendInput(ctx, req)
+	if s.committed != nil {
+		close(s.committed)
+	}
+	if s.releaseReturn != nil {
+		awaitManagerTestSignal(s.releaseReturn)
+	}
+	if s.returnNil {
+		return nil, err
+	}
+	return result, err
+}
+
+func awaitTaskGateRefs(
+	t *testing.T,
+	manager *Manager,
+	taskID string,
+	want int,
+) *taskGate {
+	t.Helper()
+	deadline := time.NewTimer(5 * time.Second)
+	defer deadline.Stop()
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	for {
+		manager.taskGatesMu.Lock()
+		gate := manager.taskGates[taskID]
+		refs := 0
+		if gate != nil {
+			refs = gate.refs
+		}
+		manager.taskGatesMu.Unlock()
+		if refs == want {
+			return gate
+		}
+		select {
+		case <-ticker.C:
+		case <-deadline.C:
+			t.Fatalf("timed out waiting for task gate refs: got %d, want %d", refs, want)
+		}
+	}
+}
+
+func setAttemptHooks(
+	t *testing.T,
+	manager *Manager,
+	taskID string,
+	beforeDoneWait func(),
+	beforeFinish func(),
+) {
+	t.Helper()
+	manager.attemptsMu.Lock()
+	attempt := manager.activeAttempts[taskID]
+	if attempt != nil {
+		attempt.testHookBeforeDoneWait = beforeDoneWait
+		attempt.testHookBeforeFinish = beforeFinish
+	}
+	manager.attemptsMu.Unlock()
+	require.NotNil(t, attempt)
 }
 
 type publishConflictStore struct {
@@ -738,7 +883,7 @@ func TestManagerReplaysCancellationReasonToRecoveryAttempt(t *testing.T) {
 			_ *TaskSnapshot,
 			runtime ExecutionRuntime,
 		) (*ExecutionResult, error) {
-			control := <-runtime.Controls()
+			control := awaitManagerTestValue(t, runtime.Controls())
 			observed <- control
 			return &ExecutionResult{Action: ExecutionActionCancel}, nil
 		}},
@@ -756,11 +901,14 @@ func TestManagerReplaysCancellationReasonToRecoveryAttempt(t *testing.T) {
 	require.NoError(t, manager.Execute(context.Background(), started.Spec.ID))
 	require.Equal(t, ControlRequest{
 		Kind: ControlStop, Reason: "operator request",
-	}, <-observed)
+	}, awaitManagerTestValue(t, observed))
 	canceled, err := manager.Get(context.Background(), started.Spec.ID)
 	require.NoError(t, err)
+	require.Equal(t, StatusCanceled, canceled.Status)
+	require.Equal(t, int64(2), canceled.Attempt)
 	require.Equal(t, "operator request", canceled.ResultError)
 	require.Equal(t, int64(1), atomic.LoadInt64(&acknowledgeCalls))
+	requireTaskGatesEmpty(t, manager)
 }
 
 func TestManagerPreservesContextSnapshotAcrossMailboxWake(t *testing.T) {
@@ -833,6 +981,463 @@ func TestManagerPreservesContextSnapshotAcrossMailboxWake(t *testing.T) {
 	completed, err := manager.Get(context.Background(), task.Spec.ID)
 	require.NoError(t, err)
 	require.Equal(t, StatusCompleted, completed.Status)
+}
+
+func TestManagerSendInputWakesRuntimeWaitInputs(t *testing.T) {
+	store := NewInMemoryStore(nil)
+	waitingRegistered := make(chan struct{})
+	var waitingRegisteredOnce sync.Once
+	store.testHookWaitInputsRegistered = func() {
+		waitingRegisteredOnce.Do(func() { close(waitingRegistered) })
+	}
+	executor := &scriptedExecutor{execute: func(
+		ctx context.Context,
+		_ *TaskSnapshot,
+		runtime ExecutionRuntime,
+	) (*ExecutionResult, error) {
+		inputs, err := runtime.WaitInputs(ctx, 0)
+		if err != nil {
+			return nil, err
+		}
+		if err = runtime.AdvanceInputCursor(
+			ctx,
+			inputs.ConsumedCursor,
+			inputs.LatestSequence,
+		); err != nil {
+			return nil, err
+		}
+		return &ExecutionResult{
+			Action:      ExecutionActionComplete,
+			Data:        []byte("done"),
+			InputCursor: inputs.LatestSequence,
+		}, nil
+	}}
+	manager := managerWithExecutor(t, store, executor, time.Minute)
+	defer closeWithTimeout(manager)
+	submitted, err := manager.Submit(context.Background(), &SubmitRequest{
+		Spec: validSpec("runtime-wait-inputs"),
+	})
+	require.NoError(t, err)
+
+	executeDone := make(chan error, 1)
+	go func() {
+		executeDone <- manager.Execute(context.Background(), submitted.Spec.ID)
+	}()
+	awaitManagerTestValue(t, waitingRegistered)
+	_, err = manager.SendInput(context.Background(), &taskcore.SendInputRequest{
+		TaskID: submitted.Spec.ID,
+		Input: taskcore.Input{
+			EventID: "resume", Kind: "resume",
+		},
+	})
+	require.NoError(t, err)
+	require.NoError(t, awaitManagerTestValue(t, executeDone))
+
+	completed, err := manager.Get(context.Background(), submitted.Spec.ID)
+	require.NoError(t, err)
+	require.Equal(t, StatusCompleted, completed.Status)
+	require.Equal(t, int64(1), completed.Attempt)
+	require.Equal(t, []byte("done"), completed.ResultData)
+	mailbox, err := manager.GetMailbox(context.Background(), submitted.Spec.ID)
+	require.NoError(t, err)
+	require.Equal(t, int64(1), mailbox.LatestSequence)
+	require.Equal(t, int64(1), mailbox.ConsumedCursor)
+	requireTaskGatesEmpty(t, manager)
+}
+
+func TestManagerTaskGateLinearization(t *testing.T) {
+	t.Run("send blocks execute registration even when store result is nil", func(t *testing.T) {
+		store := &controlledSendStore{
+			InMemoryStore: NewInMemoryStore(nil),
+			started:       make(chan struct{}),
+			releaseStart:  make(chan struct{}),
+			returnNil:     true,
+		}
+		executorStarted := make(chan struct{})
+		executor := &scriptedExecutor{execute: func(
+			ctx context.Context,
+			_ *TaskSnapshot,
+			runtime ExecutionRuntime,
+		) (*ExecutionResult, error) {
+			close(executorStarted)
+			inputs, err := runtime.ListInputs(ctx, 0, 1)
+			if err != nil {
+				return nil, err
+			}
+			if err = runtime.AdvanceInputCursor(
+				ctx,
+				inputs.ConsumedCursor,
+				inputs.LatestSequence,
+			); err != nil {
+				return nil, err
+			}
+			return &ExecutionResult{
+				Action:      ExecutionActionComplete,
+				Data:        []byte("done"),
+				InputCursor: inputs.LatestSequence,
+			}, nil
+		}}
+		manager := managerWithExecutor(t, store, executor, time.Minute)
+		defer closeWithTimeout(manager)
+		submitted, err := manager.Submit(context.Background(), &SubmitRequest{
+			Spec: validSpec("send-before-register"),
+		})
+		require.NoError(t, err)
+
+		sendDone := make(chan error, 1)
+		go func() {
+			result, sendErr := manager.SendInput(
+				context.Background(),
+				&taskcore.SendInputRequest{
+					TaskID: submitted.Spec.ID,
+					Input: taskcore.Input{
+						EventID: "resume", Kind: "resume",
+						Data: []byte("input"),
+					},
+				},
+			)
+			require.Nil(t, result)
+			sendDone <- sendErr
+		}()
+		awaitManagerTestValue(t, store.started)
+
+		executeDone := make(chan error, 1)
+		go func() {
+			executeDone <- manager.Execute(context.Background(), submitted.Spec.ID)
+		}()
+		awaitTaskGateRefs(t, manager, submitted.Spec.ID, 2)
+		manager.attemptsMu.Lock()
+		_, registered := manager.activeAttempts[submitted.Spec.ID]
+		manager.attemptsMu.Unlock()
+		require.False(t, registered)
+
+		close(store.releaseStart)
+		require.NoError(t, awaitManagerTestValue(t, sendDone))
+		awaitManagerTestValue(t, executorStarted)
+		require.NoError(t, awaitManagerTestValue(t, executeDone))
+
+		completed, err := manager.Get(context.Background(), submitted.Spec.ID)
+		require.NoError(t, err)
+		require.Equal(t, StatusCompleted, completed.Status)
+		require.Equal(t, int64(1), completed.Attempt)
+		require.Equal(t, []byte("done"), completed.ResultData)
+		mailbox, err := manager.GetMailbox(context.Background(), submitted.Spec.ID)
+		require.NoError(t, err)
+		require.Equal(t, int64(1), mailbox.LatestSequence)
+		require.Equal(t, int64(1), mailbox.ConsumedCursor)
+		requireTaskGatesEmpty(t, manager)
+	})
+
+	t.Run("waiting commit holds gate until active attempt is removed", func(t *testing.T) {
+		store := &waitingHandoffStore{
+			InMemoryStore:    NewInMemoryStore(nil),
+			waitingCommitted: make(chan struct{}),
+			releaseAttempt:   make(chan struct{}),
+		}
+		var attempts int32
+		executor := &scriptedExecutor{execute: func(
+			ctx context.Context,
+			_ *TaskSnapshot,
+			runtime ExecutionRuntime,
+		) (*ExecutionResult, error) {
+			if atomic.AddInt32(&attempts, 1) == 1 {
+				return &ExecutionResult{
+					Action:     ExecutionActionWaitInput,
+					Checkpoint: []byte("waiting"),
+				}, nil
+			}
+			inputs, err := runtime.ListInputs(ctx, 0, 1)
+			if err != nil {
+				return nil, err
+			}
+			if err = runtime.AdvanceInputCursor(
+				ctx,
+				inputs.ConsumedCursor,
+				inputs.LatestSequence,
+			); err != nil {
+				return nil, err
+			}
+			return &ExecutionResult{
+				Action:      ExecutionActionComplete,
+				Data:        []byte("done"),
+				InputCursor: inputs.LatestSequence,
+			}, nil
+		}}
+		manager := managerWithExecutor(t, store, executor, time.Minute)
+		defer closeWithTimeout(manager)
+		submitted, err := manager.Submit(context.Background(), &SubmitRequest{
+			Spec: validSpec("wait-handoff"),
+		})
+		require.NoError(t, err)
+
+		executeDone := make(chan error, 1)
+		go func() {
+			executeDone <- manager.Execute(context.Background(), submitted.Spec.ID)
+		}()
+		awaitManagerTestValue(t, store.waitingCommitted)
+		finishEntered := make(chan struct{})
+		releaseFinish := make(chan struct{})
+		setAttemptHooks(t, manager, submitted.Spec.ID, nil, func() {
+			close(finishEntered)
+			awaitManagerTestSignal(releaseFinish)
+		})
+		close(store.releaseAttempt)
+		awaitManagerTestValue(t, finishEntered)
+
+		sendDone := make(chan error, 1)
+		go func() {
+			_, sendErr := manager.SendInput(
+				context.Background(),
+				&taskcore.SendInputRequest{
+					TaskID: submitted.Spec.ID,
+					Input: taskcore.Input{
+						EventID: "resume", Kind: "resume",
+						Data: []byte("input"),
+					},
+				},
+			)
+			sendDone <- sendErr
+		}()
+		awaitTaskGateRefs(t, manager, submitted.Spec.ID, 2)
+		inputs, err := manager.ListInputs(
+			context.Background(),
+			&taskcore.ListInputsRequest{TaskID: submitted.Spec.ID},
+		)
+		require.NoError(t, err)
+		require.Empty(t, inputs.Inputs)
+
+		close(releaseFinish)
+		require.NoError(t, awaitManagerTestValue(t, executeDone))
+		require.NoError(t, awaitManagerTestValue(t, sendDone))
+		current, err := manager.Get(context.Background(), submitted.Spec.ID)
+		require.NoError(t, err)
+		require.Equal(t, StatusPending, current.Status)
+		require.Equal(t, int64(1), current.Attempt)
+		require.Equal(t, []byte("waiting"), current.Checkpoint)
+
+		require.NoError(t, manager.Execute(context.Background(), submitted.Spec.ID))
+		completed, err := manager.Get(context.Background(), submitted.Spec.ID)
+		require.NoError(t, err)
+		require.Equal(t, StatusCompleted, completed.Status)
+		require.Equal(t, int64(2), completed.Attempt)
+		require.Equal(t, []byte("done"), completed.ResultData)
+		mailbox, err := manager.GetMailbox(context.Background(), submitted.Spec.ID)
+		require.NoError(t, err)
+		require.Equal(t, int64(1), mailbox.LatestSequence)
+		require.Equal(t, int64(1), mailbox.ConsumedCursor)
+		requireTaskGatesEmpty(t, manager)
+	})
+
+	t.Run("canceled gate wait does not persist input", func(t *testing.T) {
+		store := NewInMemoryStore(nil)
+		manager := managerWithExecutor(
+			t,
+			store,
+			&scriptedExecutor{},
+			time.Minute,
+		)
+		defer closeWithTimeout(manager)
+		submitted, err := manager.Submit(context.Background(), &SubmitRequest{
+			Spec: validSpec("cancel-gate-wait"),
+		})
+		require.NoError(t, err)
+		gate, err := manager.acquireTaskGate(context.Background(), submitted.Spec.ID)
+		require.NoError(t, err)
+
+		sendCtx, cancelSend := context.WithCancel(context.Background())
+		sendDone := make(chan error, 1)
+		go func() {
+			_, sendErr := manager.SendInput(
+				sendCtx,
+				&taskcore.SendInputRequest{
+					TaskID: submitted.Spec.ID,
+					Input:  taskcore.Input{EventID: "resume", Kind: "resume"},
+				},
+			)
+			sendDone <- sendErr
+		}()
+		awaitTaskGateRefs(t, manager, submitted.Spec.ID, 2)
+		cancelSend()
+		require.ErrorIs(t, awaitManagerTestValue(t, sendDone), context.Canceled)
+		inputs, err := manager.ListInputs(
+			context.Background(),
+			&taskcore.ListInputsRequest{TaskID: submitted.Spec.ID},
+		)
+		require.NoError(t, err)
+		require.Empty(t, inputs.Inputs)
+		manager.releaseTaskGate(submitted.Spec.ID, gate)
+		requireTaskGatesEmpty(t, manager)
+	})
+
+	t.Run("store result wins over cancellation after persistence", func(t *testing.T) {
+		store := &controlledSendStore{
+			InMemoryStore: NewInMemoryStore(nil),
+			started:       make(chan struct{}),
+			committed:     make(chan struct{}),
+			releaseReturn: make(chan struct{}),
+		}
+		manager := managerWithExecutor(
+			t,
+			store,
+			&scriptedExecutor{},
+			time.Minute,
+		)
+		defer closeWithTimeout(manager)
+		submitted, err := manager.Submit(context.Background(), &SubmitRequest{
+			Spec: validSpec("cancel-after-store"),
+		})
+		require.NoError(t, err)
+		sendCtx, cancelSend := context.WithCancel(context.Background())
+		type sendResult struct {
+			result *taskcore.SendInputResult
+			err    error
+		}
+		sendDone := make(chan sendResult, 1)
+		go func() {
+			result, sendErr := manager.SendInput(
+				sendCtx,
+				&taskcore.SendInputRequest{
+					TaskID: submitted.Spec.ID,
+					Input: taskcore.Input{
+						EventID: "resume", Kind: "resume",
+						Data: []byte("persisted"),
+					},
+				},
+			)
+			sendDone <- sendResult{result: result, err: sendErr}
+		}()
+		awaitManagerTestValue(t, store.committed)
+		cancelSend()
+		close(store.releaseReturn)
+		send := awaitManagerTestValue(t, sendDone)
+		require.NoError(t, send.err)
+		require.NotNil(t, send.result)
+		require.True(t, send.result.Inserted)
+		require.Equal(t, int64(1), send.result.Input.Sequence)
+		require.Equal(t, []byte("persisted"), send.result.Input.Data)
+		requireTaskGatesEmpty(t, manager)
+	})
+
+	t.Run("gates are manager local and task scoped", func(t *testing.T) {
+		store := NewInMemoryStore(nil)
+		managerA := managerWithExecutor(t, store, &scriptedExecutor{}, time.Minute)
+		managerB := managerWithExecutor(t, store, &scriptedExecutor{}, time.Minute)
+		defer closeWithTimeout(managerA)
+		defer closeWithTimeout(managerB)
+		taskA, err := managerA.Submit(context.Background(), &SubmitRequest{
+			Spec: validSpec("gate-task-a"),
+		})
+		require.NoError(t, err)
+		taskB, err := managerA.Submit(context.Background(), &SubmitRequest{
+			Spec: validSpec("gate-task-b"),
+		})
+		require.NoError(t, err)
+		gate, err := managerA.acquireTaskGate(context.Background(), taskA.Spec.ID)
+		require.NoError(t, err)
+
+		resultB, err := managerA.SendInput(
+			context.Background(),
+			&taskcore.SendInputRequest{
+				TaskID: taskB.Spec.ID,
+				Input:  taskcore.Input{EventID: "task-b", Kind: "resume"},
+			},
+		)
+		require.NoError(t, err)
+		require.True(t, resultB.Inserted)
+		resultA, err := managerB.SendInput(
+			context.Background(),
+			&taskcore.SendInputRequest{
+				TaskID: taskA.Spec.ID,
+				Input:  taskcore.Input{EventID: "manager-b", Kind: "resume"},
+			},
+		)
+		require.NoError(t, err)
+		require.True(t, resultA.Inserted)
+
+		managerA.releaseTaskGate(taskA.Spec.ID, gate)
+		requireTaskGatesEmpty(t, managerA)
+		requireTaskGatesEmpty(t, managerB)
+		inputsA, err := managerA.ListInputs(
+			context.Background(),
+			&taskcore.ListInputsRequest{TaskID: taskA.Spec.ID},
+		)
+		require.NoError(t, err)
+		require.Len(t, inputsA.Inputs, 1)
+		require.Equal(t, "manager-b", inputsA.Inputs[0].EventID)
+		inputsB, err := managerA.ListInputs(
+			context.Background(),
+			&taskcore.ListInputsRequest{TaskID: taskB.Spec.ID},
+		)
+		require.NoError(t, err)
+		require.Len(t, inputsB.Inputs, 1)
+		require.Equal(t, "task-b", inputsB.Inputs[0].EventID)
+	})
+}
+
+func TestManagerCloseAndRequestCancelShareAttemptError(t *testing.T) {
+	attemptErr := errors.New("attempt failed")
+	store := &ackCancelErrorStore{
+		InMemoryStore: NewInMemoryStore(nil),
+		ackStarted:    make(chan struct{}),
+		releaseAck:    make(chan struct{}),
+		err:           attemptErr,
+	}
+	started := make(chan struct{})
+	controls := make(chan ControlKind, 2)
+	releaseExecute := make(chan struct{})
+	executor := &scriptedExecutor{
+		leaseExpiryPolicy: LeaseExpiryFail,
+		execute: func(
+			_ context.Context,
+			_ *TaskSnapshot,
+			runtime ExecutionRuntime,
+		) (*ExecutionResult, error) {
+			close(started)
+			controls <- awaitManagerTestValue(t, runtime.Controls()).Kind
+			controls <- awaitManagerTestValue(t, runtime.Controls()).Kind
+			awaitManagerTestValue(t, releaseExecute)
+			return nil, attemptErr
+		},
+	}
+	manager := managerWithExecutor(t, store, executor, time.Minute)
+	submitted, err := manager.Submit(context.Background(), &SubmitRequest{
+		Spec: validSpec("cancel-error-broadcast"),
+	})
+	require.NoError(t, err)
+
+	executeResult := make(chan error, 1)
+	go func() {
+		executeResult <- manager.Execute(context.Background(), submitted.Spec.ID)
+	}()
+	awaitManagerTestValue(t, started)
+
+	doneWaitEntered := make(chan struct{})
+	setAttemptHooks(t, manager, submitted.Spec.ID, func() {
+		close(doneWaitEntered)
+	}, nil)
+	closeCtx, cancelClose := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelClose()
+	closeResult := make(chan error, 1)
+	go func() {
+		closeResult <- manager.Close(closeCtx)
+	}()
+	require.Equal(t, ControlDrain, awaitManagerTestValue(t, controls))
+
+	cancelResult := make(chan error, 1)
+	go func() {
+		_, cancelErr := manager.RequestCancel(context.Background(), submitted.Spec.ID)
+		cancelResult <- cancelErr
+	}()
+	require.Equal(t, ControlStop, awaitManagerTestValue(t, controls))
+	awaitManagerTestValue(t, doneWaitEntered)
+	close(releaseExecute)
+	awaitManagerTestValue(t, store.ackStarted)
+	close(store.releaseAck)
+
+	require.ErrorIs(t, awaitManagerTestValue(t, executeResult), attemptErr)
+	require.ErrorIs(t, awaitManagerTestValue(t, closeResult), attemptErr)
+	require.ErrorIs(t, awaitManagerTestValue(t, cancelResult), attemptErr)
+	requireTaskGatesEmpty(t, manager)
 }
 
 func TestManagerExecuteRequiresContextSnapshotterForPersistedSnapshot(t *testing.T) {

@@ -201,6 +201,8 @@ type Manager struct {
 	taskEvents           TaskEventStore
 	executors            *executorRegistry
 	heartbeatEvery       time.Duration
+	taskGatesMu          sync.Mutex
+	taskGates            map[string]*taskGate
 	attemptsMu           sync.Mutex
 	activeAttempts       map[string]*activeAttempt
 	mu                   sync.Mutex
@@ -208,6 +210,60 @@ type Manager struct {
 	idGen                IDGenerator
 	sendTaskCreatedEvent func(context.Context, *TaskSnapshot) error
 	contextSnapshotter   ContextSnapshotter
+}
+
+type taskGate struct {
+	token chan struct{}
+	refs  int
+}
+
+func (m *Manager) pinTaskGate(taskID string) *taskGate {
+	m.taskGatesMu.Lock()
+	defer m.taskGatesMu.Unlock()
+	if m.taskGates == nil {
+		m.taskGates = make(map[string]*taskGate)
+	}
+	gate := m.taskGates[taskID]
+	if gate == nil {
+		gate = &taskGate{token: make(chan struct{}, 1)}
+		gate.token <- struct{}{}
+		m.taskGates[taskID] = gate
+	}
+	gate.refs++
+	return gate
+}
+
+func (m *Manager) unpinTaskGate(taskID string, gate *taskGate) {
+	m.taskGatesMu.Lock()
+	defer m.taskGatesMu.Unlock()
+	gate.refs--
+	if gate.refs == 0 && m.taskGates[taskID] == gate {
+		delete(m.taskGates, taskID)
+	}
+}
+
+func (m *Manager) acquireTaskGate(ctx context.Context, taskID string) (*taskGate, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	gate := m.pinTaskGate(taskID)
+	select {
+	case <-gate.token:
+		if err := ctx.Err(); err != nil {
+			gate.token <- struct{}{}
+			m.unpinTaskGate(taskID, gate)
+			return nil, err
+		}
+		return gate, nil
+	case <-ctx.Done():
+		m.unpinTaskGate(taskID, gate)
+		return nil, ctx.Err()
+	}
+}
+
+func (m *Manager) releaseTaskGate(taskID string, gate *taskGate) {
+	gate.token <- struct{}{}
+	m.unpinTaskGate(taskID, gate)
 }
 
 // New creates a Manager. A nil Config installs the in-memory reference stores
@@ -218,6 +274,7 @@ func New(_ context.Context, conf *Config) (*Manager, error) {
 	defaults := NewInMemoryStore(nil)
 	m := &Manager{
 		heartbeatEvery: 10 * time.Second,
+		taskGates:      make(map[string]*taskGate),
 		activeAttempts: make(map[string]*activeAttempt),
 		tasks:          defaults,
 		taskEvents:     defaults,
@@ -350,7 +407,10 @@ func (m *Manager) Close(ctx context.Context, options ...CloseOption) error {
 closed:
 	for _, attempt := range closingAttempts {
 		select {
-		case attemptErr := <-attempt.done:
+		case <-attempt.done:
+			m.attemptsMu.Lock()
+			attemptErr := attempt.resultErr
+			m.attemptsMu.Unlock()
 			if attemptErr != nil &&
 				!errors.Is(attemptErr, ErrDrainCheckpointUnavailable) &&
 				closeErr == nil {

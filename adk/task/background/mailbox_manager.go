@@ -61,7 +61,9 @@ func (m *Manager) GetActiveMailboxBySession(
 	return m.tasks.GetActiveMailboxBySession(ctx, childSessionID)
 }
 
-// SendInput durably sends input to either owner mode.
+// SendInput durably sends input to either owner mode. A process-local per-task
+// gate linearizes persistence with attempt registration and final waiting-input
+// commits.
 func (m *Manager) SendInput(
 	ctx context.Context,
 	req *task.SendInputRequest,
@@ -69,6 +71,17 @@ func (m *Manager) SendInput(
 	if m == nil || m.tasks == nil {
 		return nil, task.ErrMailboxStoreRequired
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if req == nil || req.TaskID == "" {
+		return m.tasks.SendInput(ctx, req)
+	}
+	gate, err := m.acquireTaskGate(ctx, req.TaskID)
+	if err != nil {
+		return nil, err
+	}
+	defer m.releaseTaskGate(req.TaskID, gate)
 	return m.tasks.SendInput(ctx, req)
 }
 

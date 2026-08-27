@@ -18,6 +18,8 @@ package background
 
 import (
 	"context"
+	"fmt"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -26,6 +28,58 @@ import (
 
 	"github.com/cloudwego/eino/adk/task"
 )
+
+type redispatchBudgetStore struct {
+	*InMemoryStore
+	action              ExecutionAction
+	commits             int64
+	secondCommitted     chan struct{}
+	releaseSecondCommit chan struct{}
+}
+
+func (s *redispatchBudgetStore) recordCommit(
+	result *TaskSnapshot,
+	err error,
+) (*TaskSnapshot, error) {
+	if atomic.AddInt64(&s.commits, 1) == 2 {
+		close(s.secondCommitted)
+		awaitManagerTestSignal(s.releaseSecondCommit)
+	}
+	return result, err
+}
+
+func (s *redispatchBudgetStore) CompleteIfNoInputs(
+	ctx context.Context,
+	req *CompleteIfNoInputsRequest,
+) (*TaskSnapshot, error) {
+	result, err := s.InMemoryStore.CompleteIfNoInputs(ctx, req)
+	if s.action != ExecutionActionComplete {
+		return result, err
+	}
+	return s.recordCommit(result, err)
+}
+
+func (s *redispatchBudgetStore) SuspendIfNoInputs(
+	ctx context.Context,
+	req *SuspendIfNoInputsRequest,
+) (*TaskSnapshot, error) {
+	result, err := s.InMemoryStore.SuspendIfNoInputs(ctx, req)
+	if s.action != ExecutionActionSuspend {
+		return result, err
+	}
+	return s.recordCommit(result, err)
+}
+
+func (s *redispatchBudgetStore) WaitInputIfNoInputs(
+	ctx context.Context,
+	req *WaitInputIfNoInputsRequest,
+) (*TaskSnapshot, error) {
+	result, err := s.InMemoryStore.WaitInputIfNoInputs(ctx, req)
+	if s.action != ExecutionActionWaitInput {
+		return result, err
+	}
+	return s.recordCommit(result, err)
+}
 
 func TestInMemoryStoreAdoptForeground(t *testing.T) {
 	store := NewInMemoryStore(nil)
@@ -391,52 +445,233 @@ func TestAttack_CompleteIfNoInputsReturnsTaskToPendingOnRace(t *testing.T) {
 }
 
 func TestAttack_ManagerRedispatchesInputRace(t *testing.T) {
-	store := NewInMemoryStore(nil)
-	var attempts int64
-	executor := &scriptedExecutor{execute: func(
-		ctx context.Context,
-		backgroundTask *TaskSnapshot,
-		runtime ExecutionRuntime,
-	) (*ExecutionResult, error) {
-		if atomic.AddInt64(&attempts, 1) == 1 {
-			_, err := store.SendInput(ctx, &task.SendInputRequest{
-				TaskID: backgroundTask.Spec.ID,
-				Input:  task.Input{EventID: "late", Kind: "event"},
+	t.Run("input first is consumed by the immediate redispatch", func(t *testing.T) {
+		store := NewInMemoryStore(nil)
+		var attempts int64
+		executor := &scriptedExecutor{execute: func(
+			ctx context.Context,
+			backgroundTask *TaskSnapshot,
+			runtime ExecutionRuntime,
+		) (*ExecutionResult, error) {
+			if atomic.AddInt64(&attempts, 1) == 1 {
+				_, err := store.SendInput(ctx, &task.SendInputRequest{
+					TaskID: backgroundTask.Spec.ID,
+					Input:  task.Input{EventID: "late", Kind: "event"},
+				})
+				require.NoError(t, err)
+				return &ExecutionResult{
+					Action:      ExecutionActionComplete,
+					InputCursor: 0,
+				}, nil
+			}
+			inputs, err := runtime.ListInputs(ctx, 0, 10)
+			if err != nil {
+				return nil, err
+			}
+			if err = runtime.AdvanceInputCursor(
+				ctx,
+				inputs.ConsumedCursor,
+				inputs.LatestSequence,
+			); err != nil {
+				return nil, err
+			}
+			return &ExecutionResult{
+				Action: ExecutionActionComplete, Data: []byte("done"),
+				InputCursor: inputs.LatestSequence,
+			}, nil
+		}}
+		manager := managerWithExecutor(t, store, executor, time.Minute)
+		defer closeWithTimeout(manager)
+		backgroundTask, err := manager.Submit(
+			context.Background(),
+			&SubmitRequest{Spec: validSpec("redispatch-input-first")},
+		)
+		require.NoError(t, err)
+		require.NoError(t, manager.Execute(context.Background(), backgroundTask.Spec.ID))
+		handle, err := manager.Handle(backgroundTask.Spec.ID)
+		require.NoError(t, err)
+		waitCtx, cancelWait := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancelWait()
+		outcome, err := handle.Wait(waitCtx)
+		require.NoError(t, err)
+		require.Equal(t, task.OutcomeCompleted, outcome.Status)
+		require.Equal(t, []byte("done"), outcome.Data)
+		require.Equal(t, int64(2), atomic.LoadInt64(&attempts))
+		completed, err := manager.Get(context.Background(), backgroundTask.Spec.ID)
+		require.NoError(t, err)
+		require.Equal(t, StatusCompleted, completed.Status)
+		require.Equal(t, int64(2), completed.Attempt)
+		require.Equal(t, []byte("done"), completed.ResultData)
+		mailbox, err := manager.GetMailbox(context.Background(), backgroundTask.Spec.ID)
+		require.NoError(t, err)
+		require.Equal(t, int64(1), mailbox.LatestSequence)
+		require.Equal(t, int64(1), mailbox.ConsumedCursor)
+		requireTaskGatesEmpty(t, manager)
+	})
+
+	testCases := []struct {
+		name               string
+		action             ExecutionAction
+		expectedCheckpoint []byte
+	}{
+		{
+			name:               "complete",
+			action:             ExecutionActionComplete,
+			expectedCheckpoint: []byte("initial"),
+		},
+		{
+			name:               "suspend",
+			action:             ExecutionActionSuspend,
+			expectedCheckpoint: []byte("checkpoint-2"),
+		},
+		{
+			name:               "wait input",
+			action:             ExecutionActionWaitInput,
+			expectedCheckpoint: []byte("checkpoint-2"),
+		},
+	}
+	for _, testCase := range testCases {
+		testCase := testCase
+		t.Run(testCase.name+" stops after one immediate redispatch", func(t *testing.T) {
+			store := &redispatchBudgetStore{
+				InMemoryStore:       NewInMemoryStore(nil),
+				action:              testCase.action,
+				secondCommitted:     make(chan struct{}),
+				releaseSecondCommit: make(chan struct{}),
+			}
+			var releaseOnce sync.Once
+			releaseSecondCommit := func() {
+				releaseOnce.Do(func() { close(store.releaseSecondCommit) })
+			}
+			var attempts int64
+			executor := &scriptedExecutor{execute: func(
+				ctx context.Context,
+				backgroundTask *TaskSnapshot,
+				runtime ExecutionRuntime,
+			) (*ExecutionResult, error) {
+				attempt := atomic.AddInt64(&attempts, 1)
+				if attempt <= 2 {
+					_, err := store.SendInput(ctx, &task.SendInputRequest{
+						TaskID: backgroundTask.Spec.ID,
+						Input: task.Input{
+							EventID: fmt.Sprintf("late-%d", attempt),
+							Kind:    "event",
+						},
+					})
+					require.NoError(t, err)
+					result := &ExecutionResult{
+						Action:      testCase.action,
+						InputCursor: 0,
+					}
+					if testCase.action != ExecutionActionComplete {
+						result.Checkpoint = []byte(fmt.Sprintf("checkpoint-%d", attempt))
+					}
+					return result, nil
+				}
+				inputs, err := runtime.ListInputs(ctx, 0, 10)
+				if err != nil {
+					return nil, err
+				}
+				if err = runtime.AdvanceInputCursor(
+					ctx,
+					inputs.ConsumedCursor,
+					inputs.LatestSequence,
+				); err != nil {
+					return nil, err
+				}
+				return &ExecutionResult{
+					Action:      ExecutionActionComplete,
+					Data:        []byte("done"),
+					InputCursor: inputs.LatestSequence,
+				}, nil
+			}}
+			manager := managerWithExecutor(t, store, executor, time.Minute)
+			t.Cleanup(func() {
+				releaseSecondCommit()
+				closeWithTimeout(manager)
+			})
+			backgroundTask, err := manager.Submit(context.Background(), &SubmitRequest{
+				Spec:              validSpec("redispatch-budget-" + testCase.name),
+				InitialCheckpoint: []byte("initial"),
 			})
 			require.NoError(t, err)
+
+			require.NoError(t, manager.Execute(context.Background(), backgroundTask.Spec.ID))
+			awaitManagerTestValue(t, store.secondCommitted)
+			manager.attemptsMu.Lock()
+			secondAttempt := manager.activeAttempts[backgroundTask.Spec.ID]
+			manager.attemptsMu.Unlock()
+			require.NotNil(t, secondAttempt)
+			releaseSecondCommit()
+			awaitManagerTestValue(t, secondAttempt.done)
+
+			current, err := manager.Get(context.Background(), backgroundTask.Spec.ID)
+			require.NoError(t, err)
+			require.Equal(t, StatusPending, current.Status)
+			require.Equal(t, int64(2), current.Attempt)
+			require.Equal(t, int64(2), atomic.LoadInt64(&attempts))
+			require.Equal(t, testCase.expectedCheckpoint, current.Checkpoint)
+			inputs, err := manager.ListInputs(context.Background(), &task.ListInputsRequest{
+				TaskID: backgroundTask.Spec.ID,
+			})
+			require.NoError(t, err)
+			require.Len(t, inputs.Inputs, 2)
+			require.Equal(t, int64(2), inputs.LatestSequence)
+			require.Equal(t, int64(0), inputs.ConsumedCursor)
+
+			pending, err := manager.ListPending(context.Background(), &ListPendingRequest{
+				ExecutorKeys: []string{"test"},
+			})
+			require.NoError(t, err)
+			require.Len(t, pending.Tasks, 1)
+			require.Equal(t, backgroundTask.Spec.ID, pending.Tasks[0].Spec.ID)
+
+			require.NoError(t, manager.Execute(context.Background(), backgroundTask.Spec.ID))
+			completed, err := manager.Get(context.Background(), backgroundTask.Spec.ID)
+			require.NoError(t, err)
+			require.Equal(t, StatusCompleted, completed.Status)
+			require.Equal(t, int64(3), completed.Attempt)
+			require.Equal(t, int64(3), atomic.LoadInt64(&attempts))
+			require.Equal(t, []byte("done"), completed.ResultData)
+			mailbox, err := manager.GetMailbox(context.Background(), backgroundTask.Spec.ID)
+			require.NoError(t, err)
+			require.Equal(t, int64(2), mailbox.LatestSequence)
+			require.Equal(t, int64(2), mailbox.ConsumedCursor)
+			requireTaskGatesEmpty(t, manager)
+		})
+	}
+
+	t.Run("yield does not redispatch", func(t *testing.T) {
+		store := NewInMemoryStore(nil)
+		var attempts int64
+		executor := &scriptedExecutor{execute: func(
+			context.Context,
+			*TaskSnapshot,
+			ExecutionRuntime,
+		) (*ExecutionResult, error) {
+			atomic.AddInt64(&attempts, 1)
 			return &ExecutionResult{
-				Action:      ExecutionActionComplete,
-				InputCursor: 0,
+				Action:     ExecutionActionYield,
+				Checkpoint: []byte("yielded"),
 			}, nil
-		}
-		inputs, err := runtime.ListInputs(ctx, 0, 10)
-		if err != nil {
-			return nil, err
-		}
-		if err = runtime.AdvanceInputCursor(
-			ctx,
-			inputs.ConsumedCursor,
-			inputs.LatestSequence,
-		); err != nil {
-			return nil, err
-		}
-		return &ExecutionResult{
-			Action: ExecutionActionComplete, Data: []byte("done"),
-			InputCursor: inputs.LatestSequence,
-		}, nil
-	}}
-	manager := managerWithExecutor(t, store, executor, time.Minute)
-	backgroundTask, err := manager.Submit(
-		context.Background(),
-		&SubmitRequest{Spec: validSpec("redispatch")},
-	)
-	require.NoError(t, err)
-	require.NoError(t, manager.Execute(context.Background(), backgroundTask.Spec.ID))
-	require.Eventually(t, func() bool {
-		current, getErr := manager.Get(context.Background(), backgroundTask.Spec.ID)
-		return getErr == nil && current.Status == StatusCompleted
-	}, time.Second, time.Millisecond)
-	require.Equal(t, int64(2), atomic.LoadInt64(&attempts))
+		}}
+		manager := managerWithExecutor(t, store, executor, time.Minute)
+		defer closeWithTimeout(manager)
+		backgroundTask, err := manager.Submit(
+			context.Background(),
+			&SubmitRequest{Spec: validSpec("redispatch-yield")},
+		)
+		require.NoError(t, err)
+
+		require.NoError(t, manager.Execute(context.Background(), backgroundTask.Spec.ID))
+		current, err := manager.Get(context.Background(), backgroundTask.Spec.ID)
+		require.NoError(t, err)
+		require.Equal(t, StatusPending, current.Status)
+		require.Equal(t, int64(1), current.Attempt)
+		require.Equal(t, int64(1), atomic.LoadInt64(&attempts))
+		require.Equal(t, []byte("yielded"), current.Checkpoint)
+		requireTaskGatesEmpty(t, manager)
+	})
 }
 
 func TestAttack_TerminalFailureSealsMailboxWithPendingInput(t *testing.T) {

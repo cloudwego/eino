@@ -291,8 +291,12 @@ func TestAttack_WaitingInputAndSuspendHaveDistinctReleaseSemantics(t *testing.T)
 // even when the first acknowledgement fails after applying it.
 func TestAttack_RecoveryCancellationHookIsIdempotent(t *testing.T) {
 	ctx := context.Background()
+	var nowNanos int64
 	store := background.NewInMemoryStore(&background.InMemoryStoreConfig{
-		ActiveAttemptTimeout: 10 * time.Millisecond,
+		ActiveAttemptTimeout: time.Second,
+		Now: func() time.Time {
+			return time.Unix(0, atomic.LoadInt64(&nowNanos))
+		},
 	})
 	sessionStore := adksession.NewInMemoryStore[*schema.Message](nil)
 	hookErr := errors.New("transient cancellation acknowledgement failure")
@@ -380,10 +384,10 @@ func TestAttack_RecoveryCancellationHookIsIdempotent(t *testing.T) {
 	err = manager1.Execute(ctx, handle.ID())
 	require.ErrorIs(t, err, hookErr)
 	closeIntegrationManager(t, manager1)
-	require.Eventually(t, func() bool {
-		current, getErr := store.Get(ctx, handle.ID())
-		return getErr == nil && current.Status == background.StatusPending
-	}, time.Second, time.Millisecond)
+	atomic.AddInt64(&nowNanos, int64(2*time.Second))
+	current, err := store.Get(ctx, handle.ID())
+	require.NoError(t, err)
+	require.Equal(t, background.StatusPending, current.Status)
 
 	manager2 := newIntegrationManager(t, store)
 	t.Cleanup(func() { closeIntegrationManager(t, manager2) })
@@ -410,7 +414,11 @@ func TestAttack_RecoveryCancellationHookIsIdempotent(t *testing.T) {
 	require.Equal(t, "operator stop", canceled.ResultError)
 	require.Equal(t, int64(2), atomic.LoadInt64(&hookCalls))
 	require.Equal(t, int64(1), atomic.LoadInt64(&sideEffects))
-	require.Equal(t, <-observed, <-observed)
+	require.Equal(
+		t,
+		awaitIntegrationValue(t, observed),
+		awaitIntegrationValue(t, observed),
+	)
 }
 
 // TestAttack_ProgressUsesReadAccessAndDirectParentScope verifies that progress
