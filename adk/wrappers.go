@@ -547,6 +547,14 @@ func (m *typedEventSenderModel[M]) Generate(ctx context.Context, input []M, opts
 	startEvent := newModelSpanStartEvent[M](ctx, spanID, started, opts...)
 	sendSessionTimelineEvent(ctx, startEvent)
 	result, err := m.inner.Generate(ctx, input, opts...)
+	if err == nil {
+		// Symmetric with Stream below: a WrapModel handler may short-circuit the
+		// inner model and return a message that never passed through the innermost
+		// ID assignment layer. Stamp it here, before the span, draft, and live
+		// event each take an independent copy -- otherwise every consumer lazily
+		// assigns its own ID and one logical message ends up with several.
+		result = ensureMessageIDCOW(result)
+	}
 	ended := newEventTimestamp()
 	sendSessionTimelineEvent(ctx, newModelSpanEndEvent(ctx, modelSpanEndEventInput[M]{
 		spanID:       spanID,
@@ -629,6 +637,12 @@ func (m *typedEventSenderModel[M]) Stream(ctx context.Context, input []M, opts .
 		return nil, errors.New("generator is nil when sending event in Stream: ensure agent state is properly initialized")
 	}
 
+	// A WrapModel handler may short-circuit the inner model and synthesize a
+	// stream that bypasses the framework's innermost ID assignment layer. Assign
+	// the ID before Copy fans the message out to event persistence, state, and
+	// tracing consumers, so they only ever share an already-identified message.
+	result = stampFirstChunkMessageID(result)
+
 	streams := result.Copy(3)
 
 	eventStream := streams[0]
@@ -649,7 +663,13 @@ func (m *typedEventSenderModel[M]) Stream(ctx context.Context, input []M, opts .
 	sc := sessionEventContextFromContext[M](ctx)
 	stampSessionEventTurnID(assistantDraft, sc.turnID)
 	if err := prepareSessionEventEnvelope(ctx, assistantDraft, sc.generator, sc.provider, sessionEventEnvelopeOptions{AllowPayloadlessDraft: true}); err != nil {
-		result.Close()
+		// result has already been fanned out, so it is the children that own the
+		// underlying stream now: parentStreamReader releases it once all of them
+		// close. Closing result directly would tear the stream down from under
+		// the children and leave the copies unclosed.
+		for _, s := range streams {
+			s.Close()
+		}
 		return nil, err
 	}
 	assistantMsgEventID := assistantDraft.EventID
@@ -923,6 +943,55 @@ func EnsureMessageID[M MessageType](msg M) {
 			v.Extra = internal.EnsureMessageID(v.Extra)
 		}
 	}
+}
+
+// ensureMessageIDCOW returns a message guaranteed to carry a framework message
+// ID, taking ownership of the struct before the ID is written. Callers must use
+// the returned value; msg itself is never modified.
+//
+// ID assignment is three layers, each adding exactly one thing:
+//
+//   - internal.SetMessageID builds a new Extra map, never touching the input map.
+//     That removes the map-level "concurrent map read and map write" panic.
+//   - EnsureMessageID assigns that map back into msg.Extra. This is an in-place
+//     field write, and it is safe only when the caller owns msg.
+//   - this function establishes that ownership by copying first, then delegates.
+//
+// In-place mutation is not the problem; mutating a struct someone else may read
+// is. The framework does not own model output -- it may be a pointer the user's
+// model implementation retains, or a message a WrapModel handler synthesized and
+// still inspects -- so it copies the struct and lets the field write land on
+// memory only this call can see. That closes the residual field-level race
+// documented on internal.SetMessageID, which cannot be fixed at the map layer.
+func ensureMessageIDCOW[M MessageType](msg M) M {
+	if isNilMessage(msg) || GetMessageID(msg) != "" {
+		return msg
+	}
+	cp := copyMessage(msg)
+	EnsureMessageID(cp)
+	return cp
+}
+
+// stampFirstChunkMessageID guarantees the first chunk of sr carries a framework
+// message ID, assigned before any downstream fan-out can hand that chunk to
+// concurrent consumers.
+//
+// Only the first chunk is stamped: ConcatMessages string-concatenates duplicate
+// Extra keys, so stamping every chunk would corrupt the ID on concat.
+//
+// The first flag needs no synchronization even when the returned reader is later
+// Copy'd: parentStreamReader.peek guards the parent Recv (and therefore this
+// convert) with a sync.Once, so it runs exactly once per element and the
+// happens-before edge covers every child reader.
+func stampFirstChunkMessageID[M MessageType](sr *schema.StreamReader[M]) *schema.StreamReader[M] {
+	first := true
+	return schema.StreamReaderWithConvert(sr, func(msg M) (M, error) {
+		if first {
+			first = false
+			return ensureMessageIDCOW(msg), nil
+		}
+		return msg, nil
+	})
 }
 
 func ensureTypedAgentEventMessageIDs[M MessageType](event *TypedAgentEvent[M]) {
@@ -1776,11 +1845,7 @@ func (w *typedStateModelWrapper[M]) wrapGenerateEndpoint(endpoint typedGenerateE
 			if err != nil {
 				return result, err
 			}
-			if GetMessageID(result) == "" {
-				result = copyMessage(result)
-				EnsureMessageID(result)
-			}
-			return result, nil
+			return ensureMessageIDCOW(result), nil
 		}
 	}
 
@@ -1848,9 +1913,9 @@ func (w *typedStateModelWrapper[M]) wrapGenerateEndpoint(endpoint typedGenerateE
 
 func (w *typedStateModelWrapper[M]) wrapStreamEndpoint(endpoint typedStreamEndpoint[M]) typedStreamEndpoint[M] {
 	// === ID Assignment layer (innermost, framework-controlled) ===
-	// Pre-allocates a UUID and injects it into the first chunk only.
-	// Only the first chunk carries the ID in Extra to avoid concatStrings corruption
-	// during ConcatMessages (which string-concatenates duplicate Extra keys).
+	// Ensures model output has a message ID before any WrapModel handler or event
+	// sender sees it. Copies the first chunk rather than writing the model's own
+	// chunk in place, matching the Generate layer above.
 	{
 		realInner := endpoint
 		endpoint = func(ctx context.Context, input []M, opts ...model.Option) (*schema.StreamReader[M], error) {
@@ -1858,17 +1923,7 @@ func (w *typedStateModelWrapper[M]) wrapStreamEndpoint(endpoint typedStreamEndpo
 			if err != nil {
 				return nil, err
 			}
-			msgID := uuid.NewString()
-			first := true
-			return schema.StreamReaderWithConvert(reader, func(msg M) (M, error) {
-				if first {
-					first = false
-					if GetMessageID(msg) == "" {
-						typedSetMessageID(msg, msgID)
-					}
-				}
-				return msg, nil
-			}), nil
+			return stampFirstChunkMessageID(reader), nil
 		}
 	}
 
@@ -2025,7 +2080,13 @@ func (w *typedStateModelWrapper[M]) Generate(ctx context.Context, _ []M, opts ..
 		})
 	}
 
-	EnsureMessageID(result)
+	// Normally a no-op: the innermost ID layer already stamped result. It is
+	// load-bearing when a WrapModel handler short-circuits the inner model from
+	// outside a user-supplied event sender (NewEventSenderModelWrapper is exported,
+	// so Handlers[0] can sit outside it) -- then result is a handler-owned message
+	// with no ID, and an in-place write here would mutate memory the handler still
+	// holds. Copy-on-write keeps that write on framework-owned memory.
+	result = ensureMessageIDCOW(result)
 	state.Messages = append(state.Messages, result)
 
 	for _, handler := range w.handlers {
@@ -2154,7 +2215,12 @@ func (w *typedStateModelWrapper[M]) Stream(ctx context.Context, _ []M, opts ...m
 		})
 	}
 
-	EnsureMessageID(result)
+	// Here the copy is provably redundant today -- result is a ConcatMessages
+	// product, which always allocates a fresh struct -- so this is the same
+	// no-op as an in-place write would be. Kept in the copy-on-write form so
+	// "the framework never writes a message it does not own" holds by reading,
+	// without depending on a concat implementation detail from another package.
+	result = ensureMessageIDCOW(result)
 	state.Messages = append(state.Messages, result)
 
 	for _, handler := range w.handlers {
