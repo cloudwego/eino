@@ -718,5 +718,10 @@ GitHub Actions run `33038699217` 在 head `9265e2c` 继续暴露了两处并发�
 
 本轮全部审计 finding 已完成 Fix，code findings remaining：**0**。focused
 race、当前工具链 task package race 与 Go 1.19 task package race 均
-**PASS**；`gofmt` 与 `git diff --check` **PASS**。修复提交后的 full CI
-尚未运行完成，因此状态为 **pending**，不宣称远端 checks 全绿。
+`git diff --check` **PASS**。
+
+rebase 前 merge head `06dbbbfb` 的 Pull Request Check、Eino Tests、
+Go 1.19-1.24、Codecov 与 CLA 均 **PASS**，mergeable；9 条 API
+compatibility review threads 为 4 resolved / 5 maintainer decision。
+该结论仅记录旧 merge head；当前 rebase 后的新 head 尚未运行 full CI，
+因此状态为 **pending**，不宣称新 head 的远端 checks 全绿。
