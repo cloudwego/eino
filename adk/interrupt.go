@@ -359,9 +359,7 @@ func newBridgeStore() *bridgeStore {
 func newResumeBridgeStore(checkPointID string, data []byte) *bridgeStore {
 	payload := append([]byte{}, data...)
 	return &bridgeStore{
-		data:        map[string][]byte{checkPointID: payload},
-		lastKey:     checkPointID,
-		lastPayload: payload,
+		data: map[string][]byte{checkPointID: payload},
 	}
 }
 
