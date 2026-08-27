@@ -118,6 +118,29 @@ type checkpoint struct {
 type stateModifierKey struct{}
 type checkPointKey struct{} // *checkpoint
 
+func withSubGraphCheckpointPublisher(opts []any) (
+	[]any,
+	<-chan *subGraphInterruptError,
+) {
+	ready := make(chan *subGraphInterruptError, 1)
+	childOpts := append([]any(nil), opts...)
+	childOpts = append(childOpts, Option{
+		subGraphCheckpointPublisher: func(checkpoint *subGraphInterruptError) {
+			ready <- checkpoint
+		},
+	})
+	return childOpts, ready
+}
+
+func getSubGraphCheckpointPublisher(opts ...Option) func(*subGraphInterruptError) {
+	for _, opt := range opts {
+		if opt.subGraphCheckpointPublisher != nil {
+			return opt.subGraphCheckpointPublisher
+		}
+	}
+	return nil
+}
+
 func getStateModifier(ctx context.Context) StateModifier {
 	if sm, ok := ctx.Value(stateModifierKey{}).(StateModifier); ok {
 		return sm
