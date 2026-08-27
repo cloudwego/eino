@@ -652,3 +652,33 @@ Round 7 未产生代码修改，code findings remaining：**0**。核对基线�
 `a1801d8e4d3805e94b8cef7268a93cc0904328c7`；该 HEAD 的远端 checks 全绿，
 记录前 worktree clean。5 条 breaking API thread 仍等待维护者确认，本轮状态
 不表示人工 approval 已满足。
+
+## Round 10: CI follow-up
+
+GitHub Actions run `33025216286` 在 head `f318cfdf` 暴露了两处并发时序问题。
+该 run 的 `eino-unit-test` 与 Go 1.19 compatibility job 失败，其他
+compatibility jobs 部分因 fail-fast 取消，因此不能宣称该 head 的 full CI
+通过。
+
+- Managed Tool buffered foreground 在 caller cancellation 与 `Run.Wait`
+  完成同时 ready 时，`select` 可能先消费 buffered wait result，并把 cancellation
+  覆盖成 completed outcome 或 wait failure。这是生产代码的真实竞态，不只是测试
+  flake；审计同时扩展到 streaming foreground 的同构路径。
+- 修复将 buffered 与 streaming 的 wait-result 决策集中到
+  `resolveForegroundWaitResult`：消费 wait result 后再次检查 caller context，
+  保证 caller cancellation 优先。`cancelForegroundRun` 统一执行一次 `Stop` 和
+  一次 mailbox `Abandon`，并移除 buffered caller 中重复的 finalization。
+- 新增确定性的 helper 测试，分别覆盖 cancellation 与 completed outcome、wait
+  error 同时存在的情况，验证 cancellation 胜出且只调用一次 `Stop`；未取消的
+  wait error 仍映射为 failed outcome。
+- Go 1.19 compatibility 中的
+  `TestRunnerTaskFirstCancelStopsUnderlyingWork` 在底层 work 真正启动前就可能发送
+  cancel，导致 cancellation request 合法完成但测试随后误判 work 未被取消。
+  测试增加 `workStarted` handshake，在请求取消前建立 work 已启动的
+  happens-before。
+
+Round 10 的 3 个代码/测试文件已完成综合 audit，结论为 **APPROVE**，code
+findings remaining：**0**。focused `-race -count=100` 与
+`./adk/task/tool`、`./adk/task/local` package race 均真实通过。
+本地全仓验证因 TRAE sandbox 禁止临时目录写入而未完成，不能记为 PASS；
+full CI 状态待本轮 push 后由远端 checks 确认。

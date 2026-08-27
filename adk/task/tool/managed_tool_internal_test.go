@@ -291,6 +291,65 @@ func TestManagedToolWaitForeground(t *testing.T) {
 	})
 }
 
+func TestResolveForegroundWaitResultCancellationWins(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		result foregroundWaitResult
+	}{
+		{
+			name: "completed outcome",
+			result: foregroundWaitResult{
+				outcome: &Outcome{Status: taskcore.OutcomeCompleted},
+			},
+		},
+		{
+			name: "wait error",
+			result: foregroundWaitResult{
+				err: errors.New("wait failed"),
+			},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			var stopCalls int32
+			start := &foregroundStart{
+				run: &fakeRun{stop: func(context.Context) error {
+					atomic.AddInt32(&stopCalls, 1)
+					return nil
+				}},
+			}
+
+			outcome, err := resolveForegroundWaitResult(ctx, start, tt.result)
+
+			require.Nil(t, outcome)
+			require.ErrorIs(t, err, context.Canceled)
+			require.Equal(t, int32(1), atomic.LoadInt32(&stopCalls))
+		})
+	}
+
+	t.Run("uncanceled wait error", func(t *testing.T) {
+		var stopCalls int32
+		start := &foregroundStart{
+			run: &fakeRun{stop: func(context.Context) error {
+				atomic.AddInt32(&stopCalls, 1)
+				return nil
+			}},
+		}
+
+		outcome, err := resolveForegroundWaitResult(
+			context.Background(),
+			start,
+			foregroundWaitResult{err: errors.New("wait failed")},
+		)
+
+		require.NoError(t, err)
+		require.Equal(t, taskcore.OutcomeFailed, outcome.Status)
+		require.Equal(t, "wait failed", outcome.Error)
+		require.Equal(t, int32(0), atomic.LoadInt32(&stopCalls))
+	})
+}
+
 func TestManagedToolStreamForeground(t *testing.T) {
 	t.Run("start error is a foreground failure and finalizes mailbox", func(t *testing.T) {
 		startErr := errors.New("start failed")
