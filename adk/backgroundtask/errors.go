@@ -20,7 +20,15 @@ import (
 	"context"
 	"fmt"
 	"time"
+
+	"github.com/cloudwego/eino/schema"
 )
+
+func init() {
+	schema.RegisterName[*ForegroundTimeoutError](
+		"_eino_adk_backgroundtask_foreground_timeout_error",
+	)
+}
 
 // ForegroundTimeoutError reports that the foreground observation budget for a
 // task expired. It unwraps to context.DeadlineExceeded for compatibility.

@@ -14,19 +14,24 @@
  * limitations under the License.
  */
 
-package backgroundtask
+package backgroundtask_test
 
 import (
+	"bytes"
 	"context"
+	"encoding/gob"
 	"errors"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/cloudwego/eino/adk"
+	"github.com/cloudwego/eino/adk/backgroundtask"
 )
 
 func TestForegroundTimeoutError(t *testing.T) {
-	err := error(&ForegroundTimeoutError{
+	err := error(&backgroundtask.ForegroundTimeoutError{
 		Timeout: 250 * time.Millisecond,
 		TaskID:  "task_123",
 	})
@@ -38,8 +43,24 @@ func TestForegroundTimeoutError(t *testing.T) {
 	)
 	require.ErrorIs(t, err, context.DeadlineExceeded)
 
-	var timeoutErr *ForegroundTimeoutError
+	var timeoutErr *backgroundtask.ForegroundTimeoutError
 	require.True(t, errors.As(err, &timeoutErr))
 	require.Equal(t, 250*time.Millisecond, timeoutErr.Timeout)
 	require.Equal(t, "task_123", timeoutErr.TaskID)
+}
+
+func TestForegroundTimeoutErrorAgentEventGobRoundTrip(t *testing.T) {
+	original := &adk.AgentEvent{Err: &backgroundtask.ForegroundTimeoutError{
+		Timeout: 3 * time.Second, TaskID: "task_checkpoint",
+	}}
+	var buf bytes.Buffer
+	require.NoError(t, gob.NewEncoder(&buf).Encode(original))
+
+	var decoded adk.AgentEvent
+	require.NoError(t, gob.NewDecoder(&buf).Decode(&decoded))
+	require.ErrorIs(t, decoded.Err, context.DeadlineExceeded)
+	var timeoutErr *backgroundtask.ForegroundTimeoutError
+	require.ErrorAs(t, decoded.Err, &timeoutErr)
+	require.Equal(t, 3*time.Second, timeoutErr.Timeout)
+	require.Equal(t, "task_checkpoint", timeoutErr.TaskID)
 }
