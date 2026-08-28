@@ -61,10 +61,9 @@ type runner struct {
 	outputType reflect.Type
 
 	// take effect as a subgraph through toComposableRunnable
-	inputStreamFilter                               streamMapFilter
-	inputConverter                                  handlerPair
-	inputFieldMappingConverter                      handlerPair
-	inputConvertStreamPair, outputConvertStreamPair streamConvertPair
+	inputStreamFilter          streamMapFilter
+	inputConverter             handlerPair
+	inputFieldMappingConverter handlerPair
 
 	*genericHelper
 
