@@ -348,6 +348,10 @@ func checkpointContainsInterrupt(cp *checkpoint, err error) bool {
 		return false
 	}
 
+	if errors.Is(err, core.ErrStreamCanceled) {
+		return len(cp.InterruptID2Addr) > 0
+	}
+
 	signal := &core.InterruptSignal{}
 	if errors.As(err, &signal) {
 		_, ok := cp.InterruptID2Addr[signal.ID]

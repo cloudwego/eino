@@ -201,6 +201,12 @@ type drainTimeoutTool struct {
 	calls   int32
 }
 
+type drainTimeoutStreamableTool struct {
+	started chan struct{}
+	release chan struct{}
+	calls   int32
+}
+
 func (*drainTimeoutTool) Info(context.Context) (*schema.ToolInfo, error) {
 	return &schema.ToolInfo{
 		Name: "wait",
@@ -222,6 +228,39 @@ func (t *drainTimeoutTool) InvokableRun(
 		return "", ctx.Err()
 	}
 	return "resumed tool", nil
+}
+
+func (t *drainTimeoutStreamableTool) Info(context.Context) (*schema.ToolInfo, error) {
+	return &schema.ToolInfo{
+		Name: "wait",
+		Desc: "streams until cancellation",
+		ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
+			"input": {Type: schema.String},
+		}),
+	}, nil
+}
+
+func (t *drainTimeoutStreamableTool) StreamableRun(
+	context.Context,
+	string,
+	...componenttool.Option,
+) (*schema.StreamReader[string], error) {
+	if atomic.AddInt32(&t.calls, 1) > 1 {
+		return schema.StreamReaderFromArray([]string{"resumed tool"}), nil
+	}
+	reader, writer := schema.Pipe[string](1)
+	go func() {
+		defer writer.Close()
+		if writer.Send("partial-1", nil) {
+			return
+		}
+		if writer.Send("partial-2", nil) {
+			return
+		}
+		close(t.started)
+		<-t.release
+	}()
+	return reader, nil
 }
 
 type historyCaptureAgent struct {
@@ -1371,6 +1410,28 @@ func TestExecutorDrainTimeoutEscalatesBlockedToolAndResumes_BitsUT(t *testing.T)
 	task, store := executeDrainTimeout(t, agent, tool.started)
 	requireDrainCheckpointResumes(t, task, store, agent)
 	require.GreaterOrEqual(t, atomic.LoadInt32(&model.calls), int32(2))
+}
+
+func TestExecutorDrainTimeoutEscalatesActiveStreamableToolAndResumes(t *testing.T) {
+	model := &drainTimeoutToolModel{}
+	tool := &drainTimeoutStreamableTool{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	defer close(tool.release)
+	agent, err := adk.NewChatModelAgent(context.Background(), &adk.ChatModelAgentConfig{
+		Name: "worker", Description: "drain timeout streamable tool test", Model: model,
+		ToolsConfig: adk.ToolsConfig{
+			ToolsNodeConfig: compose.ToolsNodeConfig{
+				Tools: []componenttool.BaseTool{tool},
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	task, store := executeDrainTimeout(t, agent, tool.started)
+	requireDrainCheckpointResumes(t, task, store, agent)
+	require.Equal(t, int32(2), atomic.LoadInt32(&model.calls))
 }
 
 func TestControlAndInterruptUseRunnerCheckpoint(t *testing.T) {

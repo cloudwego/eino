@@ -260,6 +260,13 @@ func drainEventsAndAssertNoCancelError(t *testing.T, iter *AsyncIterator[*AgentE
 	return events
 }
 
+func TestStreamCanceledErrorIs(t *testing.T) {
+	streamCanceled := &StreamCanceledError{}
+	assert.True(t, streamCanceled.Is(ErrStreamCanceled))
+	assert.ErrorIs(t, streamCanceled, ErrStreamCanceled)
+	assert.NotErrorIs(t, streamCanceled, context.Canceled)
+}
+
 func TestWithCancel_AgenticResumeStreamableToolTimeout_DoesNotPersistTypedNil(t *testing.T) {
 	ctx := context.Background()
 	store := newCancelTestStore()

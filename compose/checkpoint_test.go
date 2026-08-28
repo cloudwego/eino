@@ -2121,6 +2121,10 @@ func TestCheckpointStreamConversionIgnoresOnlyRecordedInterrupt(t *testing.T) {
 	require.NoError(t, pointer.convertCheckPoint(cp, true))
 	assert.Equal(t, "partial", cp.Inputs["node"])
 
+	cp, pointer = newCheckpoint(core.ErrStreamCanceled)
+	require.NoError(t, pointer.convertCheckPoint(cp, true))
+	assert.Equal(t, "partial", cp.Inputs["node"])
+
 	cp, pointer = newCheckpoint(errors.New("ordinary stream failure"))
 	err := pointer.convertCheckPoint(cp, true)
 	require.ErrorContains(t, err, "ordinary stream failure")
@@ -2150,6 +2154,21 @@ func TestAttack_CheckpointStreamConversionRejectsUnrecordedInterrupt(t *testing.
 	require.Error(t, err)
 	_, isInterrupt := IsInterruptRerunError(err)
 	assert.True(t, isInterrupt)
+}
+
+func TestAttack_CheckpointStreamConversionRejectsUnrecordedStreamCancellation(t *testing.T) {
+	r, w := schema.Pipe[string](1)
+	w.Send("", core.ErrStreamCanceled)
+	w.Close()
+	cp := &checkpoint{
+		Inputs: map[string]any{"node": packStreamReader(r)},
+	}
+	pointer := newCheckPointer(map[string]streamConvertPair{
+		"node": defaultStreamConvertPair[string](),
+	}, nil, nil, nil)
+
+	err := pointer.convertCheckPoint(cp, true)
+	require.ErrorContains(t, err, core.ErrStreamCanceled.Error())
 }
 
 func TestAttack_InterruptOriginUsesCurrentGraphBoundary(t *testing.T) {
