@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"runtime/debug"
 	"sort"
 	"strings"
@@ -386,6 +387,110 @@ type toolsInterruptAndRerunState struct {
 	ExecutedTools         map[string]string
 	ExecutedEnhancedTools map[string]*schema.ToolResult
 	RerunTools            []string
+}
+
+type toolStreamCheckpointError struct {
+	nodeKey string
+	input   *schema.Message
+	signal  *core.InterruptSignal
+}
+
+func (e *toolStreamCheckpointError) Error() string {
+	return e.signal.Error()
+}
+
+func (e *toolStreamCheckpointError) Unwrap() error {
+	return e.signal
+}
+
+type toolStreamCheckpointTracker struct {
+	mu sync.Mutex
+
+	input                 *schema.Message
+	executedTools         map[string]string
+	executedEnhancedTools map[string]*schema.ToolResult
+	rerunTools            map[string]struct{}
+}
+
+func newToolStreamCheckpointTracker(input *schema.Message) *toolStreamCheckpointTracker {
+	return &toolStreamCheckpointTracker{
+		input:                 input,
+		executedTools:         make(map[string]string),
+		executedEnhancedTools: make(map[string]*schema.ToolResult),
+		rerunTools:            make(map[string]struct{}),
+	}
+}
+
+func (t *toolStreamCheckpointTracker) recordTool(callID, output string) {
+	t.mu.Lock()
+	t.executedTools[callID] = output
+	t.mu.Unlock()
+}
+
+func (t *toolStreamCheckpointTracker) recordEnhancedTool(callID string, output *schema.ToolResult) {
+	t.mu.Lock()
+	t.executedEnhancedTools[callID] = output
+	t.mu.Unlock()
+}
+
+func (t *toolStreamCheckpointTracker) recordRerun(callID string) {
+	t.mu.Lock()
+	t.rerunTools[callID] = struct{}{}
+	t.mu.Unlock()
+}
+
+func (t *toolStreamCheckpointTracker) interrupt(ctx context.Context) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if len(t.rerunTools) == 0 {
+		return io.EOF
+	}
+
+	rerunTools := make([]string, 0, len(t.rerunTools))
+	for _, call := range t.input.ToolCalls {
+		if _, ok := t.rerunTools[call.ID]; ok {
+			rerunTools = append(rerunTools, call.ID)
+		}
+	}
+	executedTools := make(map[string]string, len(t.executedTools))
+	for callID, output := range t.executedTools {
+		executedTools[callID] = output
+	}
+	executedEnhancedTools := make(map[string]*schema.ToolResult, len(t.executedEnhancedTools))
+	for callID, output := range t.executedEnhancedTools {
+		executedEnhancedTools[callID] = output
+	}
+	extra := &ToolsInterruptAndRerunExtra{
+		ToolCalls:             t.input.ToolCalls,
+		ExecutedTools:         executedTools,
+		ExecutedEnhancedTools: executedEnhancedTools,
+		RerunTools:            rerunTools,
+		RerunExtraMap:         make(map[string]any),
+	}
+	state := &toolsInterruptAndRerunState{
+		Input:                 t.input,
+		ExecutedTools:         executedTools,
+		ExecutedEnhancedTools: executedEnhancedTools,
+		RerunTools:            rerunTools,
+	}
+	err := CompositeInterrupt(ctx, extra, state)
+	signal := &core.InterruptSignal{}
+	if !errors.As(err, &signal) {
+		return err
+	}
+	var nodeKey string
+	address := GetCurrentAddress(ctx)
+	for i := len(address) - 1; i >= 0; i-- {
+		if address[i].Type == AddressSegmentNode {
+			nodeKey = address[i].ID
+			break
+		}
+	}
+	return &toolStreamCheckpointError{
+		nodeKey: nodeKey,
+		input:   t.input,
+		signal:  signal,
+	}
 }
 
 type toolsTuple struct {
@@ -1381,33 +1486,106 @@ func (tn *ToolsNode) Stream(ctx context.Context, input *schema.Message,
 	}
 
 	// common return
+	tracker := newToolStreamCheckpointTracker(input)
 	sOutput := make([]*schema.StreamReader[[]*schema.Message], n)
+	sourceNames := make([]string, n)
 	for i := 0; i < n; i++ {
 		index := i
 		callID := tasks[i].callID
 		callName := tasks[i].name
+		sourceNames[i] = callID
 		if tasks[i].useEnhanced {
+			var chunks []*schema.ToolResult
+			canceled := false
 			cvt := func(tr *schema.ToolResult) ([]*schema.Message, error) {
+				chunks = append(chunks, tr)
 				ret := make([]*schema.Message, n)
 				ret[index] = schema.ToolMessage("", callID, schema.WithToolName(callName))
-				ret[index].UserInputMultiContent, err = tr.ToMessageInputParts()
-				if err != nil {
-					return nil, err
+				parts, convertErr := tr.ToMessageInputParts()
+				if convertErr != nil {
+					return nil, convertErr
 				}
+				ret[index].UserInputMultiContent = parts
 				return ret, nil
 			}
-			sOutput[i] = schema.StreamReaderWithConvert(tasks[i].enhancedSOutput, cvt)
+			sOutput[i] = schema.StreamReaderWithConvert(
+				tasks[i].enhancedSOutput,
+				cvt,
+				schema.WithErrWrapper(func(streamErr error) error {
+					if errors.Is(streamErr, core.ErrStreamCanceled) {
+						canceled = true
+						tracker.recordRerun(callID)
+						return nil
+					}
+					return streamErr
+				}),
+				schema.WithOnEOF(func() (any, error) {
+					if canceled {
+						return nil, io.EOF
+					}
+					output, concatErr := concatStreamReader(
+						schema.StreamReaderFromArray(chunks),
+					)
+					if concatErr != nil {
+						return nil, concatErr
+					}
+					tracker.recordEnhancedTool(callID, output)
+					return nil, io.EOF
+				}),
+			)
 		} else {
+			var chunks []string
+			canceled := false
 			cvt := func(s string) ([]*schema.Message, error) {
+				chunks = append(chunks, s)
 				ret := make([]*schema.Message, n)
 				ret[index] = schema.ToolMessage(s, callID, schema.WithToolName(callName))
 				return ret, nil
 			}
-			sOutput[i] = schema.StreamReaderWithConvert(tasks[i].sOutput, cvt)
+			sOutput[i] = schema.StreamReaderWithConvert(
+				tasks[i].sOutput,
+				cvt,
+				schema.WithErrWrapper(func(streamErr error) error {
+					if errors.Is(streamErr, core.ErrStreamCanceled) {
+						canceled = true
+						tracker.recordRerun(callID)
+						return nil
+					}
+					return streamErr
+				}),
+				schema.WithOnEOF(func() (any, error) {
+					if canceled {
+						return nil, io.EOF
+					}
+					output, concatErr := concatStreamReader(
+						schema.StreamReaderFromArray(chunks),
+					)
+					if concatErr != nil {
+						return nil, concatErr
+					}
+					tracker.recordTool(callID, output)
+					return nil, io.EOF
+				}),
+			)
 		}
 
 	}
-	return schema.MergeStreamReaders(sOutput), nil
+	merged := schema.InternalMergeNamedStreamReaders(sOutput, sourceNames)
+	return schema.StreamReaderWithConvert(
+		merged,
+		func(messages []*schema.Message) ([]*schema.Message, error) {
+			return messages, nil
+		},
+		schema.WithErrWrapper(func(streamErr error) error {
+			if _, ok := schema.GetSourceName(streamErr); ok {
+				return nil
+			}
+			return streamErr
+		}),
+		schema.WithOnEOF(func() (any, error) {
+			return nil, tracker.interrupt(ctx)
+		}),
+	), nil
 }
 
 // GetType returns the component type string for the Tools node.

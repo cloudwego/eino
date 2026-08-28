@@ -1611,6 +1611,69 @@ func TestEnhancedToolNode(t *testing.T) {
 	})
 }
 
+func TestAttack_EnhancedToolStreamCancellationTracksCompletedCalls(t *testing.T) {
+	ctx := AppendAddressSegment(context.Background(), AddressSegmentNode, "tools")
+	stableResult := &schema.ToolResult{
+		Parts: []schema.ToolOutputPart{{Type: schema.ToolPartTypeText, Text: "stable"}},
+	}
+	stable := &enhancedStreamableTool{
+		info: &schema.ToolInfo{Name: "stable", Desc: "stable enhanced stream"},
+		fn: func(context.Context, *schema.ToolArgument) (*schema.StreamReader[*schema.ToolResult], error) {
+			return schema.StreamReaderFromArray([]*schema.ToolResult{stableResult}), nil
+		},
+	}
+	canceled := &enhancedStreamableTool{
+		info: &schema.ToolInfo{Name: "canceled", Desc: "canceled enhanced stream"},
+		fn: func(context.Context, *schema.ToolArgument) (*schema.StreamReader[*schema.ToolResult], error) {
+			reader, writer := schema.Pipe[*schema.ToolResult](2)
+			writer.Send(&schema.ToolResult{
+				Parts: []schema.ToolOutputPart{{Type: schema.ToolPartTypeText, Text: "partial"}},
+			}, nil)
+			writer.Send(nil, core.ErrStreamCanceled)
+			writer.Close()
+			return reader, nil
+		},
+	}
+	node, err := NewToolNode(ctx, &ToolsNodeConfig{
+		Tools: []tool.BaseTool{stable, canceled},
+	})
+	require.NoError(t, err)
+	input := schema.AssistantMessage("", []schema.ToolCall{
+		{
+			ID: "call-stable",
+			Function: schema.FunctionCall{
+				Name:      "stable",
+				Arguments: "stable input",
+			},
+		},
+		{
+			ID: "call-canceled",
+			Function: schema.FunctionCall{
+				Name:      "canceled",
+				Arguments: "canceled input",
+			},
+		},
+	})
+
+	output, err := node.Stream(ctx, input)
+	require.NoError(t, err)
+	for {
+		_, err = output.Recv()
+		if err != nil {
+			break
+		}
+	}
+	var checkpointErr *toolStreamCheckpointError
+	require.ErrorAs(t, err, &checkpointErr)
+	state, ok := checkpointErr.signal.State.(*toolsInterruptAndRerunState)
+	require.True(t, ok)
+	assert.Equal(t, []string{"call-canceled"}, state.RerunTools)
+	assert.Equal(t, map[string]*schema.ToolResult{
+		"call-stable": stableResult,
+	}, state.ExecutedEnhancedTools)
+	assert.NotContains(t, state.ExecutedEnhancedTools, "call-canceled")
+}
+
 func TestEnhancedToolConversion(t *testing.T) {
 	ctx := context.Background()
 
