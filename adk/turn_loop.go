@@ -1920,10 +1920,7 @@ func (l *TurnLoop[T, M]) runAgentAndHandleEvents(
 
 	finalizeCheckpoint := func() error {
 		if store != nil && ms != nil {
-			data, ok, err := ms.Get(ctx, bridgeCheckpointID)
-			if err != nil {
-				return fmt.Errorf("failed to read runner checkpoint: %w", err)
-			}
+			_, data, ok := ms.LastCheckpoint()
 			if ok {
 				l.checkPointRunnerBytes = append([]byte{}, data...)
 			}

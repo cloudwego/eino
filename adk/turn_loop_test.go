@@ -28,6 +28,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/cloudwego/eino/components/model"
+	"github.com/cloudwego/eino/components/tool"
+	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -2600,6 +2603,215 @@ func TestTurnLoop_ResumeInterruptAgain_PreservesEnableStreamingCheckpoint(t *tes
 			assert.Equal(t, enableStreaming, info2.EnableStreaming)
 		})
 	}
+}
+
+type turnLoopTargetedResumeTimeoutModel struct {
+	calls         int32
+	secondStarted chan struct{}
+	thirdStarted  chan struct{}
+	release       chan struct{}
+}
+
+func (m *turnLoopTargetedResumeTimeoutModel) Generate(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+	reader, err := m.Stream(ctx, input, opts...)
+	if err != nil {
+		return nil, err
+	}
+	defer reader.Close()
+	msg, err := reader.Recv()
+	if err != nil {
+		return nil, err
+	}
+	return msg, nil
+}
+
+func (m *turnLoopTargetedResumeTimeoutModel) Stream(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+	switch atomic.AddInt32(&m.calls, 1) {
+	case 1:
+		return schema.StreamReaderFromArray([]*schema.Message{{
+			Role: schema.Assistant,
+			ToolCalls: []schema.ToolCall{{
+				ID:   "ask_1",
+				Type: "function",
+				Function: schema.FunctionCall{
+					Name:      "ask_user",
+					Arguments: `{"question":"continue?"}`,
+				},
+			}},
+		}}), nil
+	case 2:
+		reader, writer := schema.Pipe[*schema.Message](1)
+		go func() {
+			defer writer.Close()
+			writer.Send(schema.AssistantMessage("partial", nil), nil)
+			close(m.secondStarted)
+			<-m.release
+		}()
+		return reader, nil
+	default:
+		close(m.thirdStarted)
+		return schema.StreamReaderFromArray([]*schema.Message{schema.AssistantMessage("resumed", nil)}), nil
+	}
+}
+
+func (m *turnLoopTargetedResumeTimeoutModel) BindTools(_ []*schema.ToolInfo) error { return nil }
+
+type turnLoopTargetedResumeTool struct {
+	calls int32
+}
+
+func (t *turnLoopTargetedResumeTool) Info(_ context.Context) (*schema.ToolInfo, error) {
+	return &schema.ToolInfo{
+		Name: "ask_user",
+		ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
+			"question": {Type: schema.String},
+		}),
+	}, nil
+}
+
+func (t *turnLoopTargetedResumeTool) InvokableRun(ctx context.Context, _ string, _ ...tool.Option) (string, error) {
+	atomic.AddInt32(&t.calls, 1)
+	wasInterrupted, _, _ := tool.GetInterruptState[string](ctx)
+	isTarget, hasAnswer, answer := tool.GetResumeContext[string](ctx)
+	if wasInterrupted && isTarget && hasAnswer {
+		return answer, nil
+	}
+	return "", tool.StatefulInterrupt(ctx, "answer required", "awaiting answer")
+}
+
+type recordingTurnLoopCheckpointStore struct {
+	mu sync.Mutex
+	m  map[string][]byte
+}
+
+func (s *recordingTurnLoopCheckpointStore) Set(_ context.Context, key string, value []byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.m[key] = append([]byte{}, value...)
+	return nil
+}
+
+func (s *recordingTurnLoopCheckpointStore) Get(_ context.Context, key string) ([]byte, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	value, ok := s.m[key]
+	return append([]byte{}, value...), ok, nil
+}
+
+func TestTurnLoop_TargetedResume_TimeoutEscalationReplacesCheckpoint(t *testing.T) {
+	ctx := context.Background()
+	store := &recordingTurnLoopCheckpointStore{m: make(map[string][]byte)}
+	model := &turnLoopTargetedResumeTimeoutModel{
+		secondStarted: make(chan struct{}),
+		thirdStarted:  make(chan struct{}),
+		release:       make(chan struct{}),
+	}
+	t.Cleanup(func() { close(model.release) })
+	askUser := &turnLoopTargetedResumeTool{}
+
+	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "TargetedResumeTimeout",
+		Description: "test agent",
+		Model:       model,
+		ToolsConfig: ToolsConfig{
+			ToolsNodeConfig: compose.ToolsNodeConfig{Tools: []tool.BaseTool{askUser}},
+		},
+	})
+	require.NoError(t, err)
+
+	var interruptID string
+	observeInterrupt := func(_ context.Context, _ *TurnContext[string, *schema.Message], events *AsyncIterator[*AgentEvent]) error {
+		for {
+			event, ok := events.Next()
+			if !ok {
+				return nil
+			}
+			if event.Action != nil && event.Action.Interrupted != nil {
+				for _, interrupt := range event.Action.Interrupted.InterruptContexts {
+					if interrupt.IsRootCause {
+						interruptID = interrupt.ID
+					}
+				}
+			}
+			if event.Err != nil {
+				return event.Err
+			}
+		}
+	}
+	newLoop := func(genResume TurnLoopConfig[string, *schema.Message]) *TurnLoop[string, *schema.Message] {
+		genResume.Store = store
+		genResume.CheckpointID = "targeted-resume-timeout"
+		genResume.GenInput = func(_ context.Context, _ *TurnLoop[string, *schema.Message], items []string) (*GenInputResult[string, *schema.Message], error) {
+			return &GenInputResult[string, *schema.Message]{
+				Input: &AgentInput{
+					Messages:        []Message{schema.UserMessage(items[0])},
+					EnableStreaming: true,
+				},
+				Consumed: items,
+			}, nil
+		}
+		genResume.PrepareAgent = prepareAgent(agent)
+		genResume.OnAgentEvents = observeInterrupt
+		return NewTurnLoop(genResume)
+	}
+
+	owner1 := newLoop(TurnLoopConfig[string, *schema.Message]{})
+	owner1.Push("start")
+	owner1.Run(ctx)
+	exit1 := owner1.Wait()
+	require.ErrorAs(t, exit1.ExitReason, new(*InterruptError))
+	require.True(t, exit1.CheckpointAttempted)
+	require.NoError(t, exit1.CheckpointErr)
+	require.NotEmpty(t, interruptID)
+	firstCheckpoint, ok, err := store.Get(ctx, "targeted-resume-timeout")
+	require.NoError(t, err)
+	require.True(t, ok)
+	firstTurnLoopCheckpoint, err := unmarshalTurnLoopCheckpoint[string](firstCheckpoint)
+	require.NoError(t, err)
+
+	owner2 := newLoop(TurnLoopConfig[string, *schema.Message]{
+		GenResume: func(_ context.Context, _ *TurnLoop[string, *schema.Message], _, _, _ []string) (*GenResumeResult[string, *schema.Message], error) {
+			return &GenResumeResult[string, *schema.Message]{
+				ResumeParams: &ResumeParams{Targets: map[string]any{interruptID: "approved"}},
+			}, nil
+		},
+	})
+	owner2.Run(ctx)
+	select {
+	case <-model.secondStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("resumed model call did not begin streaming")
+	}
+	owner2.Stop(WithGracefulTimeout(20 * time.Millisecond))
+	exit2 := owner2.Wait()
+	require.True(t, exit2.CheckpointAttempted)
+	require.NoError(t, exit2.CheckpointErr)
+
+	finalCheckpoint, ok, err := store.Get(ctx, "targeted-resume-timeout")
+	require.NoError(t, err)
+	require.True(t, ok)
+	finalTurnLoopCheckpoint, err := unmarshalTurnLoopCheckpoint[string](finalCheckpoint)
+	require.NoError(t, err)
+	require.NotEqual(t, firstTurnLoopCheckpoint.RunnerCheckpoint, finalTurnLoopCheckpoint.RunnerCheckpoint,
+		"timeout escalation must replace the resumed runner checkpoint")
+
+	owner3 := newLoop(TurnLoopConfig[string, *schema.Message]{
+		GenResume: func(_ context.Context, _ *TurnLoop[string, *schema.Message], _, _, _ []string) (*GenResumeResult[string, *schema.Message], error) {
+			return &GenResumeResult[string, *schema.Message]{}, nil
+		},
+	})
+	owner3.Run(ctx)
+	select {
+	case <-model.thirdStarted:
+		owner3.Stop()
+		exit3 := owner3.Wait()
+		require.NotErrorAs(t, exit3.ExitReason, new(*InterruptError))
+	case <-owner3.done:
+		require.NotErrorAs(t, owner3.Wait().ExitReason, new(*InterruptError))
+	case <-time.After(5 * time.Second):
+		t.Fatal("targetless resume did not continue from the replacement checkpoint")
+	}
+	assert.Equal(t, int32(2), atomic.LoadInt32(&askUser.calls), "resolved tool interrupt must not be replayed")
 }
 
 func TestTurnLoop_Stop_EscalatesCancelMode(t *testing.T) {

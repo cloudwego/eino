@@ -59,6 +59,25 @@ func TestPreprocessADKCheckpoint(t *testing.T) {
 	})
 }
 
+func TestAttack_ResumeBridgeStoreRequiresFreshWrite(t *testing.T) {
+	store := newResumeBridgeStore("checkpoint", []byte("loaded"))
+	t.Log("a resume bridge must distinguish a loaded checkpoint from a replacement")
+
+	loaded, ok, err := store.Get(context.Background(), "checkpoint")
+	assert.NoError(t, err)
+	assert.True(t, ok)
+	assert.Equal(t, []byte("loaded"), loaded)
+
+	_, _, ok = store.LastCheckpoint()
+	assert.False(t, ok, "loaded checkpoints must not be reported as fresh writes")
+
+	assert.NoError(t, store.Set(context.Background(), "checkpoint", []byte("saved")))
+	key, saved, ok := store.LastCheckpoint()
+	assert.True(t, ok)
+	assert.Equal(t, "checkpoint", key)
+	assert.Equal(t, []byte("saved"), saved)
+}
+
 func (h *interruptTestToolsHandler) BeforeAgent(ctx context.Context, runCtx *ChatModelAgentContext) (context.Context, *ChatModelAgentContext, error) {
 	runCtx.Tools = append(runCtx.Tools, h.tools...)
 	return ctx, runCtx, nil

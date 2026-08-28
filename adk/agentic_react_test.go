@@ -135,7 +135,6 @@ func (t *agenticLateErrorTool) StreamableRun(_ context.Context, _ string, _ ...t
 
 func agenticLateInterruptMiddleware() compose.ToolMiddleware {
 	return compose.ToolMiddleware{
-		Name: "permission",
 		Streamable: func(next compose.StreamableToolEndpoint) compose.StreamableToolEndpoint {
 			return func(ctx context.Context, input *compose.ToolInput) (*compose.StreamToolOutput, error) {
 				wasInterrupted, hasState, state := tool.GetInterruptState[string](ctx)

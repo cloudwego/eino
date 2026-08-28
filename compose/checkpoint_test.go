@@ -2094,7 +2094,7 @@ func TestAttack_InterruptOriginUsesCurrentGraphBoundary(t *testing.T) {
 			{Type: AddressSegmentRunnable, ID: "root"},
 			{Type: AddressSegmentNode, ID: "node_1"},
 			{Type: AddressSegmentNode, ID: "ToolNode"},
-			{Type: AddressSegmentMiddleware, ID: "permission"},
+			{Type: AddressSegmentTool, ID: "permission"},
 		}
 		assert.Equal(t, "node_1", r.interruptOriginNodeKey(completedTask, interruptAddress))
 	})
