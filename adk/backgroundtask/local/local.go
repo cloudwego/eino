@@ -133,7 +133,9 @@ func (r *Runner) Manager() *backgroundtask.Manager {
 	return r.manager
 }
 
-// Run executes buffered process-local work.
+// Run executes buffered process-local work. If the configured foreground
+// timeout expires without a successful background handoff, Run returns a
+// *backgroundtask.ForegroundTimeoutError.
 func (r *Runner) Run(ctx context.Context, input *Input, work WorkFunc) (*backgroundtask.Task, error) {
 	if input == nil || work == nil {
 		return nil, errors.New("backgroundtask/local: input and work are required")
@@ -220,7 +222,10 @@ func (r *Runner) runForeground(
 			return task, nil
 		}
 		cancel()
-		return r.failedTask(spec, fmt.Sprintf("timed out after %dms", timeoutMs)), nil
+		return nil, &backgroundtask.ForegroundTimeoutError{
+			Timeout: time.Duration(timeoutMs) * time.Millisecond,
+			TaskID:  spec.ID,
+		}
 	}
 }
 
@@ -286,6 +291,8 @@ func (r *Runner) failedTask(spec backgroundtask.Spec, reason string) *background
 // durable task exists until explicit background launch or successful handoff.
 // Closing a foreground reader requests cancellation of this process-local
 // operation; closing a background preview only closes the caller projection.
+// A foreground timeout is sent through the reader as a
+// *backgroundtask.ForegroundTimeoutError.
 func (r *Runner) RunStream(
 	ctx context.Context,
 	input *Input,

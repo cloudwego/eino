@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -149,6 +150,82 @@ func waitAttackTask(t *testing.T, manager *backgroundtask.Manager) *backgroundta
 		require.True(t, time.Now().Before(deadline), "task did not finish")
 		time.Sleep(time.Millisecond)
 	}
+}
+
+func TestAttack_ForegroundTimeoutUsesOnePolicySnapshot(t *testing.T) {
+	implementation := &plainFakeTool{
+		start: func(context.Context, *StartRequest) (Run, error) {
+			return &fakeRun{
+				wait: func(ctx context.Context) (*Outcome, error) {
+					<-ctx.Done()
+					return nil, ctx.Err()
+				},
+			}, nil
+		},
+	}
+	registry := NewRegistry()
+	require.NoError(t, registry.Register(&Registration{
+		Info: toolInfo("snapshot"), Tool: implementation,
+	}))
+	executors := backgroundtask.NewExecutorRegistry()
+	manager := mustNewBackgroundManager(t, context.Background(), &backgroundtask.Config{
+		Executors: executors,
+		IDGen: func(context.Context, *backgroundtask.AllocateTaskIDRequest) (string, error) {
+			return "snapshot-task", nil
+		},
+	})
+	var calls int32
+	wrapped, err := NewManagedTool(context.Background(), &ManagedToolConfig{
+		Manager: manager, Executors: executors, Registry: registry, ToolName: "snapshot",
+		InvocationTimeoutMs: func(context.Context, string) *int {
+			call := atomic.AddInt32(&calls, 1)
+			timeoutMs := 5
+			if call > 1 {
+				timeoutMs = 5_000
+			}
+			return &timeoutMs
+		},
+	})
+	require.NoError(t, err)
+
+	result, err := wrapped.(componenttool.EnhancedInvokableTool).InvokableRun(
+		context.Background(), toolArgument(`{}`),
+	)
+	require.Nil(t, result)
+	var timeoutErr *backgroundtask.ForegroundTimeoutError
+	require.ErrorAs(t, err, &timeoutErr)
+	require.Equal(t, 5*time.Millisecond, timeoutErr.Timeout)
+	require.Equal(t, "snapshot-task", timeoutErr.TaskID)
+	require.Equal(t, int32(1), atomic.LoadInt32(&calls))
+	t.Log("the timer and structured error use the same timeout policy result")
+}
+
+func TestAttack_ForegroundTimeoutDoesNotMaskCallerDeadline(t *testing.T) {
+	release := make(chan struct{})
+	implementation := &plainFakeTool{
+		start: func(context.Context, *StartRequest) (Run, error) {
+			return &fakeRun{
+				wait: func(context.Context) (*Outcome, error) {
+					<-release
+					return &Outcome{Status: backgroundtask.StatusCompleted}, nil
+				},
+			}, nil
+		},
+	}
+	_, wrapped := newTestManagedTool(t, implementation, time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+
+	result, err := wrapped.(componenttool.EnhancedInvokableTool).InvokableRun(
+		ctx, toolArgument(`{}`),
+	)
+	close(release)
+
+	require.Nil(t, result)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	var timeoutErr *backgroundtask.ForegroundTimeoutError
+	require.False(t, errors.As(err, &timeoutErr))
+	t.Log("caller deadline retained its original error identity")
 }
 
 func TestAttack_ReplayedEventProjectsOnceMaterializesTwice(t *testing.T) {

@@ -452,7 +452,7 @@ func TestManagedExecuteTool_TimeoutMovesToBackground(t *testing.T) {
 }
 
 // Without a ShouldAutoBackground hook, a command that outlives its timeout is
-// stopped and reported as timed out.
+// stopped with a structured foreground timeout.
 func TestManagedExecuteTool_TimeoutKills(t *testing.T) {
 	mgr := newTestManager(t, context.Background())
 	defer func() {
@@ -471,7 +471,11 @@ func TestManagedExecuteTool_TimeoutKills(t *testing.T) {
 	require.NoError(t, err)
 
 	_, err = invokeTool(t, tools[0], `{"command":"sleep","timeout":1}`)
-	require.ErrorContains(t, err, "timed out after 1000ms")
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	var timeoutErr *backgroundtask.ForegroundTimeoutError
+	require.ErrorAs(t, err, &timeoutErr)
+	require.Equal(t, time.Second, timeoutErr.Timeout)
+	require.NotEmpty(t, timeoutErr.TaskID)
 }
 
 func TestShellPayloadV1AndCommandFromTask(t *testing.T) {
