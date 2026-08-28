@@ -868,8 +868,8 @@ func (g *graph) compile(ctx context.Context, opt *graphCompileOptions) (*composa
 			inputPairs[key] = c.action.inputStreamConvertPair
 			outputPairs[key] = c.action.outputStreamConvertPair
 		}
-		inputPairs[END] = r.outputConvertStreamPair
-		outputPairs[START] = r.inputConvertStreamPair
+		inputPairs[END] = r.outputStreamConvertPair
+		outputPairs[START] = r.inputStreamConvertPair
 		r.checkPointer = newCheckPointer(inputPairs, outputPairs, opt.checkPointStore, opt.serializer)
 
 		r.interruptBeforeNodes = opt.interruptBeforeNodes

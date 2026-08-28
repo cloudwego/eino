@@ -420,6 +420,9 @@ func convert(values map[string]any, convPairs map[string]streamConvertPair, isSt
 		if !ok {
 			return fmt.Errorf("checkpoint conv stream fail, node[%s] have not been registered", key)
 		}
+		if convPair.concatStream == nil {
+			return fmt.Errorf("checkpoint conv stream fail, node[%s] has no stream converter", key)
+		}
 		sr, ok := v.(streamReader)
 		if !ok {
 			return fmt.Errorf("checkpoint conv stream fail, value of [%s] isn't stream", key)
@@ -441,6 +444,9 @@ func restore(values map[string]any, convPairs map[string]streamConvertPair, isSt
 		convPair, ok := convPairs[key]
 		if !ok {
 			return fmt.Errorf("checkpoint restore stream fail, node[%s] have not been registered", key)
+		}
+		if convPair.restoreStream == nil {
+			return fmt.Errorf("checkpoint restore stream fail, node[%s] has no stream converter", key)
 		}
 		sr, err := convPair.restoreStream(v)
 		if err != nil {

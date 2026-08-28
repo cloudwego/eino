@@ -2020,6 +2020,78 @@ func TestStreamingSubGraphReinterruptPreservesNestedCheckpoint(t *testing.T) {
 	assert.Equal(t, int32(1), atomic.LoadInt32(&sideEffectCount))
 }
 
+func TestCheckpointConvertsPendingStartStream(t *testing.T) {
+	ctx := context.Background()
+	graph := NewGraph[map[string]any, map[string]any]()
+	require.NoError(t, graph.AddLambdaNode("interrupt", InvokableLambda(
+		func(ctx context.Context, _ map[string]any) (map[string]any, error) {
+			interrupted, _, _ := GetInterruptState[string](ctx)
+			if interrupted {
+				return map[string]any{"right": "done"}, nil
+			}
+			return nil, StatefulInterrupt(ctx, "pause", "state")
+		},
+	)))
+	require.NoError(t, graph.AddLambdaNode("join", InvokableLambda(
+		func(_ context.Context, input map[string]any) (map[string]any, error) {
+			return input, nil
+		},
+	)))
+	require.NoError(t, graph.AddEdge(START, "interrupt"))
+	require.NoError(t, graph.AddEdge(START, "join"))
+	require.NoError(t, graph.AddEdge("interrupt", "join"))
+	require.NoError(t, graph.AddEdge("join", END))
+
+	runnable, err := graph.Compile(ctx,
+		WithNodeTriggerMode(AllPredecessor),
+		WithCheckPointStore(newInMemoryStore()),
+	)
+	require.NoError(t, err)
+
+	require.NotPanics(t, func() {
+		_, err = runnable.Stream(ctx, map[string]any{"left": "input"}, WithCheckPointID("pending-start"))
+	})
+	_, ok := ExtractInterruptInfo(err)
+	require.True(t, ok)
+
+	output, err := runnable.Stream(ctx, nil, WithCheckPointID("pending-start"))
+	require.NoError(t, err)
+	result, err := concatStreamReader(output)
+	require.NoError(t, err)
+	require.Equal(t, map[string]any{
+		"left":  "input",
+		"right": "done",
+	}, result)
+}
+
+func TestCheckpointConversionValidation(t *testing.T) {
+	t.Run("non-stream conversion is a no-op", func(t *testing.T) {
+		require.NoError(t, convert(nil, nil, false, nil))
+		require.NoError(t, restore(nil, nil, false))
+	})
+
+	t.Run("unregistered node", func(t *testing.T) {
+		values := map[string]any{"node": "input"}
+		require.ErrorContains(t, convert(values, nil, true, nil), "node[node] have not been registered")
+		require.ErrorContains(t, restore(values, nil, true), "node[node] have not been registered")
+	})
+
+	t.Run("missing converter", func(t *testing.T) {
+		values := map[string]any{
+			"node": packStreamReader(schema.StreamReaderFromArray([]string{"input"})),
+		}
+		pairs := map[string]streamConvertPair{"node": {}}
+		require.ErrorContains(t, convert(values, pairs, true, nil), "node[node] has no stream converter")
+		require.ErrorContains(t, restore(map[string]any{"node": "input"}, pairs, true), "node[node] has no stream converter")
+	})
+
+	t.Run("invalid value", func(t *testing.T) {
+		pairs := map[string]streamConvertPair{"node": defaultStreamConvertPair[string]()}
+		require.ErrorContains(t, convert(map[string]any{"node": "input"}, pairs, true, nil), "value of [node] isn't stream")
+		require.ErrorContains(t, restore(map[string]any{"node": 1}, pairs, true), "cannot convert value[int]")
+	})
+}
+
 func TestCheckpointStreamConversionIgnoresOnlyRecordedInterrupt(t *testing.T) {
 	ctx := context.Background()
 	recordedErr := StatefulInterrupt(ctx, "recorded", "state")
