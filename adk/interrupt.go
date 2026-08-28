@@ -317,21 +317,24 @@ func newBridgeStore() *bridgeStore {
 }
 
 func newResumeBridgeStore(checkPointID string, data []byte) *bridgeStore {
+	payload := append([]byte{}, data...)
 	return &bridgeStore{
-		data: map[string][]byte{checkPointID: data},
+		data: map[string][]byte{checkPointID: payload},
 	}
 }
 
 type bridgeStore struct {
-	mu   sync.Mutex
-	data map[string][]byte
+	mu          sync.Mutex
+	data        map[string][]byte
+	lastKey     string
+	lastPayload []byte
 }
 
 func (m *bridgeStore) Get(_ context.Context, key string) ([]byte, bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if v, ok := m.data[key]; ok {
-		return v, true, nil
+		return append([]byte{}, v...), true, nil
 	}
 	return nil, false, nil
 }
@@ -342,8 +345,20 @@ func (m *bridgeStore) Set(_ context.Context, key string, checkPoint []byte) erro
 	if m.data == nil {
 		m.data = make(map[string][]byte)
 	}
-	m.data[key] = checkPoint
+	payload := append([]byte{}, checkPoint...)
+	m.data[key] = payload
+	m.lastKey = key
+	m.lastPayload = payload
 	return nil
+}
+
+func (m *bridgeStore) LastCheckpoint() (key string, payload []byte, ok bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.lastKey == "" {
+		return "", nil, false
+	}
+	return m.lastKey, append([]byte{}, m.lastPayload...), true
 }
 
 func getNextResumeAgent(ctx context.Context, _ *ResumeInfo) (string, error) {
