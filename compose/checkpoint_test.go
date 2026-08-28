@@ -2114,15 +2114,19 @@ func TestCheckpointStreamConversionIgnoresOnlyRecordedInterrupt(t *testing.T) {
 	}
 
 	cp, pointer := newCheckpoint(recordedErr)
-	require.NoError(t, pointer.convertCheckPoint(cp, true))
+	require.NoError(t, pointer.convertCheckPoint(cp, true, recordedSignal))
 	assert.Equal(t, "partial", cp.Inputs["node"])
 
 	cp, pointer = newCheckpoint(&subGraphInterruptError{signal: recordedSignal})
-	require.NoError(t, pointer.convertCheckPoint(cp, true))
+	require.NoError(t, pointer.convertCheckPoint(cp, true, recordedSignal))
 	assert.Equal(t, "partial", cp.Inputs["node"])
 
+	cp, pointer = newCheckpoint(core.ErrStreamCanceled)
+	err := pointer.convertCheckPoint(cp, true, recordedSignal)
+	require.ErrorContains(t, err, core.ErrStreamCanceled.Error())
+
 	cp, pointer = newCheckpoint(errors.New("ordinary stream failure"))
-	err := pointer.convertCheckPoint(cp, true)
+	err = pointer.convertCheckPoint(cp, true, recordedSignal)
 	require.ErrorContains(t, err, "ordinary stream failure")
 }
 
@@ -2146,10 +2150,83 @@ func TestAttack_CheckpointStreamConversionRejectsUnrecordedInterrupt(t *testing.
 		"node": defaultStreamConvertPair[string](),
 	}, nil, nil, nil)
 
-	err := pointer.convertCheckPoint(cp, true)
+	err := pointer.convertCheckPoint(cp, true, recordedSignal)
 	require.Error(t, err)
 	_, isInterrupt := IsInterruptRerunError(err)
 	assert.True(t, isInterrupt)
+}
+
+func TestAttack_CheckpointStreamConversionRejectsUnrecordedStreamCancellation(t *testing.T) {
+	r, w := schema.Pipe[string](1)
+	w.Send("", core.ErrStreamCanceled)
+	w.Close()
+	cp := &checkpoint{
+		Inputs: map[string]any{"node": packStreamReader(r)},
+	}
+	pointer := newCheckPointer(map[string]streamConvertPair{
+		"node": defaultStreamConvertPair[string](),
+	}, nil, nil, nil)
+
+	err := pointer.convertCheckPoint(cp, true, nil)
+	require.ErrorContains(t, err, core.ErrStreamCanceled.Error())
+}
+
+func TestCheckpointToolStreamCancellationRerunsProducerOnce(t *testing.T) {
+	input := &schema.Message{
+		Role: schema.Assistant,
+		ToolCalls: []schema.ToolCall{{
+			ID: "call-stream",
+			Function: schema.FunctionCall{
+				Name:      "wait",
+				Arguments: `{"input":"work"}`,
+			},
+		}},
+	}
+	state := &toolsInterruptAndRerunState{
+		Input:         input,
+		ExecutedTools: map[string]string{"call-stable": "stable tool"},
+		RerunTools:    []string{"call-stream"},
+	}
+	toolSignal := &core.InterruptSignal{
+		ID:      "tool-stream",
+		Address: Address{{Type: AddressSegmentNode, ID: "tools"}},
+		InterruptInfo: core.InterruptInfo{
+			IsRootCause: true,
+		},
+		InterruptState: core.InterruptState{State: state},
+	}
+	rootSignal := &core.InterruptSignal{ID: "root"}
+	id2Addr, id2State := core.SignalToPersistenceMaps(rootSignal)
+
+	inputs := make(map[string]any)
+	inputPairs := make(map[string]streamConvertPair)
+	for _, consumer := range []string{"consumer-a", "consumer-b"} {
+		reader, writer := schema.Pipe[string](2)
+		writer.Send("partial", nil)
+		writer.Send("", &toolStreamCheckpointError{
+			nodeKey: "tools",
+			input:   input,
+			signal:  toolSignal,
+		})
+		writer.Close()
+		inputs[consumer] = packStreamReader(reader)
+		inputPairs[consumer] = defaultStreamConvertPair[string]()
+	}
+	cp := &checkpoint{
+		Inputs:            inputs,
+		RerunNodes:        []string{"consumer-a", "consumer-b"},
+		InterruptID2Addr:  id2Addr,
+		InterruptID2State: id2State,
+	}
+	pointer := newCheckPointer(inputPairs, nil, nil, nil)
+
+	require.NoError(t, pointer.convertCheckPoint(cp, true, rootSignal))
+	assert.Equal(t, []string{"tools"}, cp.RerunNodes)
+	assert.Equal(t, map[string]any{"tools": input}, cp.Inputs)
+	require.Len(t, rootSignal.Subs, 1)
+	assert.Same(t, toolSignal, rootSignal.Subs[0])
+	assert.Equal(t, toolSignal.Address, cp.InterruptID2Addr[toolSignal.ID])
+	assert.Equal(t, state, cp.InterruptID2State[toolSignal.ID].State)
 }
 
 func TestAttack_InterruptOriginUsesCurrentGraphBoundary(t *testing.T) {

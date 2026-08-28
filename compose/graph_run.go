@@ -609,7 +609,7 @@ func (r *runner) handleInterrupt(
 	for _, t := range nextTasks {
 		cp.Inputs[t.nodeKey] = t.input
 	}
-	err = r.checkPointer.convertCheckPoint(cp, isStream)
+	err = r.checkPointer.convertCheckPoint(cp, isStream, is)
 	if err != nil {
 		return fmt.Errorf("failed to convert checkpoint: %w", err)
 	}
@@ -766,7 +766,7 @@ func (r *runner) handleInterruptWithSubGraphAndRerunNodes(
 	if err = r.validateCheckpointIntegrity(cp); err != nil {
 		return fmt.Errorf("invalid checkpoint: %w", err)
 	}
-	err = r.checkPointer.convertCheckPoint(cp, isStream)
+	err = r.checkPointer.convertCheckPoint(cp, isStream, is)
 	if err != nil {
 		return fmt.Errorf("failed to convert checkpoint: %w", err)
 	}

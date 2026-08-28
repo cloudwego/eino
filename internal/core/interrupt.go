@@ -18,11 +18,15 @@ package core
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"reflect"
 
 	"github.com/google/uuid"
 )
+
+// ErrStreamCanceled marks a stream terminated by framework cancellation.
+var ErrStreamCanceled = errors.New("stream canceled")
 
 type CheckPointStore interface {
 	Get(ctx context.Context, checkPointID string) ([]byte, bool, error)

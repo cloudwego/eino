@@ -27,6 +27,7 @@ import (
 
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/compose"
+	"github.com/cloudwego/eino/internal/core"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -222,6 +223,14 @@ type StreamCanceledError struct{}
 
 func (e *StreamCanceledError) Error() string {
 	return "stream canceled"
+}
+
+// Is identifies stream cancellation across ADK and internal checkpoint boundaries.
+func (e *StreamCanceledError) Is(target error) bool {
+	if _, ok := target.(*StreamCanceledError); ok {
+		return true
+	}
+	return target == core.ErrStreamCanceled
 }
 
 // WithCancel creates an AgentRunOption that enables cancellation for an agent run.
