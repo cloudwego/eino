@@ -516,13 +516,13 @@ func TestManagedToolStreamForeground(t *testing.T) {
 			context.Background(), toolArgument(`{"value":"x"}`),
 		)
 		require.NoError(t, err)
-		results := readAllStreamResults(t, stream)
-		require.Len(t, results, 1)
-		requireToolResultText(
-			t,
-			results[0],
-			"{\"type\":\"foreground_result\",\"status\":\"failed\",\"description\":\"External operation\",\"error\":\"timed out after 10ms\"}\n",
-		)
+		results, err := readStreamResults(t, stream)
+		require.Empty(t, results)
+		require.ErrorIs(t, err, context.DeadlineExceeded)
+		var timeoutErr *taskcore.ForegroundTimeoutError
+		require.ErrorAs(t, err, &timeoutErr)
+		require.Equal(t, 10*time.Millisecond, timeoutErr.Timeout)
+		require.Equal(t, "task-fixed", timeoutErr.TaskID)
 		require.Equal(t, int32(1), atomic.LoadInt32(&stopCalls))
 		waitForegroundMailboxState(t, manager, "task-fixed", taskcore.MailboxSealed)
 	})

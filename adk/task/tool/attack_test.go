@@ -271,7 +271,7 @@ func TestAttack_ForegroundTimeoutUsesOnePolicySnapshot(t *testing.T) {
 	var calls int32
 	wrapped, err := NewManagedTool(context.Background(), &ManagedToolConfig{
 		Manager: manager, Registry: registry, ToolName: "snapshot",
-		InvocationTimeoutMs: func(context.Context, string) *int {
+		ForegroundTimeoutMsForInvocation: func(context.Context, string) *int {
 			call := atomic.AddInt32(&calls, 1)
 			timeoutMs := 5
 			if call > 1 {
