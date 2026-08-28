@@ -161,6 +161,10 @@ type drainTimeoutToolModel struct {
 	calls int32
 }
 
+type drainTimeoutParallelToolModel struct {
+	calls int32
+}
+
 func (m *drainTimeoutToolModel) Generate(
 	_ context.Context,
 	_ []*schema.Message,
@@ -196,9 +200,78 @@ func (m *drainTimeoutToolModel) Stream(
 
 func (*drainTimeoutToolModel) BindTools([]*schema.ToolInfo) error { return nil }
 
+func (m *drainTimeoutParallelToolModel) Generate(
+	_ context.Context,
+	input []*schema.Message,
+	_ ...model.Option,
+) (*schema.Message, error) {
+	if atomic.AddInt32(&m.calls, 1) == 1 {
+		return &schema.Message{
+			Role: schema.Assistant,
+			ToolCalls: []schema.ToolCall{
+				{
+					ID:   "call-stable",
+					Type: "function",
+					Function: schema.FunctionCall{
+						Name:      "stable",
+						Arguments: `{"input":"work"}`,
+					},
+				},
+				{
+					ID:   "call-stream",
+					Type: "function",
+					Function: schema.FunctionCall{
+						Name:      "wait",
+						Arguments: `{"input":"work"}`,
+					},
+				},
+			},
+		}, nil
+	}
+	results := make(map[string]string)
+	for _, message := range input {
+		if message != nil && message.Role == schema.Tool {
+			results[message.ToolCallID] = message.Content
+		}
+	}
+	if results["call-stable"] != "stable tool" {
+		return nil, fmt.Errorf("stable tool result mismatch: %q", results["call-stable"])
+	}
+	if results["call-stream"] != "resumed tool" {
+		return nil, fmt.Errorf("streamable tool result mismatch: %q", results["call-stream"])
+	}
+	return schema.AssistantMessage("resumed", nil), nil
+}
+
+func (m *drainTimeoutParallelToolModel) Stream(
+	ctx context.Context,
+	input []*schema.Message,
+	options ...model.Option,
+) (*schema.StreamReader[*schema.Message], error) {
+	message, err := m.Generate(ctx, input, options...)
+	if err != nil {
+		return nil, err
+	}
+	return schema.StreamReaderFromArray([]*schema.Message{message}), nil
+}
+
+func (*drainTimeoutParallelToolModel) BindTools([]*schema.ToolInfo) error { return nil }
+
 type drainTimeoutTool struct {
 	started chan struct{}
 	calls   int32
+}
+
+type drainTimeoutStableTool struct {
+	completed chan struct{}
+	calls     int32
+}
+
+type drainTimeoutStreamableTool struct {
+	beforeStart <-chan struct{}
+	started     chan struct{}
+	release     chan struct{}
+	calls       int32
 }
 
 func (*drainTimeoutTool) Info(context.Context) (*schema.ToolInfo, error) {
@@ -222,6 +295,63 @@ func (t *drainTimeoutTool) InvokableRun(
 		return "", ctx.Err()
 	}
 	return "resumed tool", nil
+}
+
+func (*drainTimeoutStableTool) Info(context.Context) (*schema.ToolInfo, error) {
+	return &schema.ToolInfo{
+		Name: "stable",
+		Desc: "completes before cancellation",
+		ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
+			"input": {Type: schema.String},
+		}),
+	}, nil
+}
+
+func (t *drainTimeoutStableTool) InvokableRun(
+	context.Context,
+	string,
+	...componenttool.Option,
+) (string, error) {
+	if atomic.AddInt32(&t.calls, 1) == 1 && t.completed != nil {
+		close(t.completed)
+	}
+	return "stable tool", nil
+}
+
+func (t *drainTimeoutStreamableTool) Info(context.Context) (*schema.ToolInfo, error) {
+	return &schema.ToolInfo{
+		Name: "wait",
+		Desc: "streams until cancellation",
+		ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
+			"input": {Type: schema.String},
+		}),
+	}, nil
+}
+
+func (t *drainTimeoutStreamableTool) StreamableRun(
+	context.Context,
+	string,
+	...componenttool.Option,
+) (*schema.StreamReader[string], error) {
+	if atomic.AddInt32(&t.calls, 1) > 1 {
+		return schema.StreamReaderFromArray([]string{"resumed tool"}), nil
+	}
+	if t.beforeStart != nil {
+		<-t.beforeStart
+	}
+	reader, writer := schema.Pipe[string](1)
+	go func() {
+		defer writer.Close()
+		if writer.Send("partial-1", nil) {
+			return
+		}
+		if writer.Send("partial-2", nil) {
+			return
+		}
+		close(t.started)
+		<-t.release
+	}()
+	return reader, nil
 }
 
 type historyCaptureAgent struct {
@@ -1371,6 +1501,33 @@ func TestExecutorDrainTimeoutEscalatesBlockedToolAndResumes_BitsUT(t *testing.T)
 	task, store := executeDrainTimeout(t, agent, tool.started)
 	requireDrainCheckpointResumes(t, task, store, agent)
 	require.GreaterOrEqual(t, atomic.LoadInt32(&model.calls), int32(2))
+}
+
+func TestExecutorDrainTimeoutEscalatesParallelStreamableToolAndResumes(t *testing.T) {
+	model := &drainTimeoutParallelToolModel{}
+	stableCompleted := make(chan struct{})
+	stableTool := &drainTimeoutStableTool{completed: stableCompleted}
+	tool := &drainTimeoutStreamableTool{
+		beforeStart: stableCompleted,
+		started:     make(chan struct{}),
+		release:     make(chan struct{}),
+	}
+	defer close(tool.release)
+	agent, err := adk.NewChatModelAgent(context.Background(), &adk.ChatModelAgentConfig{
+		Name: "worker", Description: "drain timeout streamable tool test", Model: model,
+		ToolsConfig: adk.ToolsConfig{
+			ToolsNodeConfig: compose.ToolsNodeConfig{
+				Tools: []componenttool.BaseTool{stableTool, tool},
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	task, store := executeDrainTimeout(t, agent, tool.started)
+	requireDrainCheckpointResumes(t, task, store, agent)
+	require.Equal(t, int32(2), atomic.LoadInt32(&model.calls))
+	require.Equal(t, int32(1), atomic.LoadInt32(&stableTool.calls))
+	require.Equal(t, int32(2), atomic.LoadInt32(&tool.calls))
 }
 
 func TestControlAndInterruptUseRunnerCheckpoint(t *testing.T) {
