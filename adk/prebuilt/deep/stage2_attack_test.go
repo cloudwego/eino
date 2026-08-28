@@ -311,13 +311,11 @@ func TestAttack_ManagedShellWireDescriptionMatchesSchema(t *testing.T) {
 	info := attackDeepToolInfo(t, execute)
 	params, err := info.ParamsOneOf.ToJSONSchema()
 	require.NoError(t, err)
-	for _, field := range []string{"command", "run_in_background", "timeout_seconds"} {
+	for _, field := range []string{"command", "run_in_background", "timeout"} {
 		_, ok := params.Properties.Get(field)
 		require.True(t, ok, "managed execute schema must contain %q", field)
 		require.Contains(t, info.Desc, field)
 	}
-	_, hasLegacyTimeout := params.Properties.Get("timeout")
-	require.False(t, hasLegacyTimeout)
 	require.Contains(t, info.Desc, "task_output")
 	require.Contains(t, info.Desc, "task_id")
 }
