@@ -109,6 +109,9 @@ func runnableTransform(ctx context.Context, r *composableRunnable, input any, op
 func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Option) (result any, err error) {
 	haveOnStart := false // delay triggering onGraphStart until state initialization is complete, so that the state can be accessed within onGraphStart.
 	defer func() {
+		if panicValue := recover(); panicValue != nil {
+			panic(panicValue)
+		}
 		if !haveOnStart {
 			ctx, input = onGraphStart(ctx, input, isStream)
 		}
