@@ -83,7 +83,8 @@ type managedTool struct {
 // EnhancedStreamableTool. Every result includes a text control envelope;
 // completed foreground results may append rich parts through
 // Registration.RenderResult. Detaching closes only the caller projection;
-// durable persistence continues.
+// durable persistence continues. A foreground timeout without a successful
+// handoff returns a *backgroundtask.ForegroundTimeoutError.
 func NewManagedTool(
 	ctx context.Context,
 	config *ManagedToolConfig,
@@ -320,7 +321,7 @@ func (t *managedTool) streamForeground(
 			err     error
 		}{outcome: outcome, err: waitErr}
 	}()
-	timeout := t.foregroundTimeout(ctx, arguments)
+	timeout, timeoutDuration := t.foregroundTimeout(ctx, arguments)
 	for {
 		select {
 		case update, ok := <-updateResults:
@@ -383,12 +384,10 @@ func (t *managedTool) streamForeground(
 				return
 			}
 			_ = start.run.Stop(context.Background())
-			final, encodeErr := t.renderForegroundFailure(
-				ctx,
-				start.spec.Description,
-				fmt.Sprintf("timed out after %dms", t.timeoutMs(ctx, arguments)),
-			)
-			writer.Send(final, encodeErr)
+			writer.Send(nil, &backgroundtask.ForegroundTimeoutError{
+				Timeout: timeoutDuration,
+				TaskID:  start.taskID,
+			})
 			return
 		case <-ctx.Done():
 			_ = start.run.Stop(context.Background())
@@ -571,7 +570,7 @@ func (t *managedTool) waitForeground(
 			err     error
 		}{outcome: outcome, err: waitErr}
 	}()
-	timeout := t.foregroundTimeout(ctx, arguments)
+	timeout, timeoutDuration := t.foregroundTimeout(ctx, arguments)
 	for {
 		select {
 		case update, ok := <-updateResults:
@@ -602,10 +601,10 @@ func (t *managedTool) waitForeground(
 				return nil, task, nil
 			}
 			_ = start.run.Stop(context.Background())
-			return &Outcome{
-				Status: backgroundtask.StatusFailed,
-				Error:  fmt.Sprintf("timed out after %dms", t.timeoutMs(ctx, arguments)),
-			}, nil, nil
+			return nil, nil, &backgroundtask.ForegroundTimeoutError{
+				Timeout: timeoutDuration,
+				TaskID:  start.taskID,
+			}
 		case <-ctx.Done():
 			_ = start.run.Stop(context.Background())
 			return nil, nil, ctx.Err()
@@ -970,12 +969,15 @@ func (t *managedTool) timeoutMs(ctx context.Context, arguments string) int {
 	return t.policy.TimeoutMs
 }
 
-func (t *managedTool) foregroundTimeout(ctx context.Context, arguments string) <-chan time.Time {
-	timeoutMs := t.timeoutMs(ctx, arguments)
-	if timeoutMs <= 0 {
-		return nil
+func (t *managedTool) foregroundTimeout(
+	ctx context.Context,
+	arguments string,
+) (<-chan time.Time, time.Duration) {
+	timeout := time.Duration(t.timeoutMs(ctx, arguments)) * time.Millisecond
+	if timeout <= 0 {
+		return nil, timeout
 	}
-	return time.After(time.Duration(timeoutMs) * time.Millisecond)
+	return time.After(timeout), timeout
 }
 
 func (t *managedTool) renderForegroundFailure(

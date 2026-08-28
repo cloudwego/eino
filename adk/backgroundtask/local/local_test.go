@@ -155,9 +155,12 @@ func TestRunnerForegroundTimeoutPolicies_BitsUT(t *testing.T) {
 				return "", ctx.Err()
 			},
 		)
-		require.NoError(t, err)
-		assert.Equal(t, backgroundtask.StatusFailed, task.Status)
-		assert.Equal(t, "timed out after 10ms", task.ResultError)
+		require.Nil(t, task)
+		require.ErrorIs(t, err, context.DeadlineExceeded)
+		var timeoutErr *backgroundtask.ForegroundTimeoutError
+		require.ErrorAs(t, err, &timeoutErr)
+		assert.Equal(t, 10*time.Millisecond, timeoutErr.Timeout)
+		assert.Equal(t, "test_1", timeoutErr.TaskID)
 	})
 
 	t.Run("auto background", func(t *testing.T) {
@@ -179,6 +182,56 @@ func TestRunnerForegroundTimeoutPolicies_BitsUT(t *testing.T) {
 		task = waitTerminal(t, manager, task)
 		assert.Equal(t, backgroundtask.StatusCompleted, task.Status)
 	})
+
+	t.Run("stream fail", func(t *testing.T) {
+		timeout := 10
+		runner, _ := newTestRunner(t, func(config *Config) {
+			config.ForegroundTimeoutMs = &timeout
+		})
+		stream, err := runner.RunStream(
+			context.Background(),
+			&Input{Description: "stream timeout"},
+			func(ctx context.Context, _ backgroundtask.ExecutionRuntime) (*schema.StreamReader[string], error) {
+				reader, writer := schema.Pipe[string](1)
+				go func() {
+					<-ctx.Done()
+					writer.Close()
+				}()
+				return reader, nil
+			},
+		)
+		require.NoError(t, err)
+		_, err = stream.Recv()
+		require.ErrorIs(t, err, context.DeadlineExceeded)
+		var timeoutErr *backgroundtask.ForegroundTimeoutError
+		require.ErrorAs(t, err, &timeoutErr)
+		assert.Equal(t, 10*time.Millisecond, timeoutErr.Timeout)
+		assert.Equal(t, "test_1", timeoutErr.TaskID)
+	})
+}
+
+func TestAttack_ForegroundTimeoutDoesNotMaskCallerDeadline(t *testing.T) {
+	timeout := int(time.Second / time.Millisecond)
+	runner, _ := newTestRunner(t, func(config *Config) {
+		config.ForegroundTimeoutMs = &timeout
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	release := make(chan struct{})
+
+	task, err := runner.Run(ctx, &Input{Description: "caller deadline"},
+		func(context.Context, backgroundtask.ExecutionRuntime) (string, error) {
+			<-release
+			return "late", nil
+		},
+	)
+	close(release)
+
+	require.Nil(t, task)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	var timeoutErr *backgroundtask.ForegroundTimeoutError
+	require.False(t, errors.As(err, &timeoutErr))
+	t.Log("caller deadline retained its original error identity")
 }
 
 func TestRunnerStreamProjectsForegroundOutput_BitsUT(t *testing.T) {

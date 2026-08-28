@@ -579,6 +579,55 @@ func TestManagedToolFastCompletionReturnsCanonicalTaskID(t *testing.T) {
 	require.ErrorIs(t, err, backgroundtask.ErrNotFound)
 }
 
+func TestManagedToolForegroundTimeoutReturnsTypedError(t *testing.T) {
+	newTool := func(t *testing.T) (*backgroundtask.Manager, componenttool.BaseTool) {
+		t.Helper()
+		implementation := &plainFakeTool{
+			start: func(context.Context, *StartRequest) (Run, error) {
+				return &fakeRun{
+					wait: func(ctx context.Context) (*Outcome, error) {
+						<-ctx.Done()
+						return nil, ctx.Err()
+					},
+				}, nil
+			},
+		}
+		return newTestManagedTool(t, implementation, 10*time.Millisecond)
+	}
+	requireTimeout := func(t *testing.T, err error) {
+		t.Helper()
+		require.ErrorIs(t, err, context.DeadlineExceeded)
+		var timeoutErr *backgroundtask.ForegroundTimeoutError
+		require.ErrorAs(t, err, &timeoutErr)
+		require.Equal(t, 10*time.Millisecond, timeoutErr.Timeout)
+		require.Equal(t, "task-fixed", timeoutErr.TaskID)
+	}
+
+	t.Run("invoke", func(t *testing.T) {
+		manager, wrapped := newTool(t)
+		result, err := wrapped.(componenttool.EnhancedInvokableTool).InvokableRun(
+			context.Background(), toolArgument(`{"value":"invoke"}`),
+		)
+		require.Nil(t, result)
+		requireTimeout(t, err)
+		_, err = manager.Get(context.Background(), "task-fixed")
+		require.ErrorIs(t, err, backgroundtask.ErrNotFound)
+	})
+
+	t.Run("stream", func(t *testing.T) {
+		manager, wrapped := newTool(t)
+		stream, err := wrapped.(componenttool.EnhancedStreamableTool).StreamableRun(
+			context.Background(), toolArgument(`{"value":"stream"}`),
+		)
+		require.NoError(t, err)
+		result, err := stream.Recv()
+		require.Nil(t, result)
+		requireTimeout(t, err)
+		_, err = manager.Get(context.Background(), "task-fixed")
+		require.ErrorIs(t, err, backgroundtask.ErrNotFound)
+	})
+}
+
 func TestManagedToolForegroundStartCanSendParentSessionEvent(t *testing.T) {
 	ctx := context.Background()
 	const parentSessionID = "managed-tool-start-parent"

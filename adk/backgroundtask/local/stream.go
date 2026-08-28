@@ -215,7 +215,10 @@ func (r *Runner) projectForegroundStream(projection *foregroundStreamProjection)
 				return
 			}
 			cancel()
-			writer.Send("", context.DeadlineExceeded)
+			writer.Send("", &backgroundtask.ForegroundTimeoutError{
+				Timeout: time.Duration(timeoutMs) * time.Millisecond,
+				TaskID:  spec.ID,
+			})
 			return
 		case <-ctx.Done():
 			cancel()

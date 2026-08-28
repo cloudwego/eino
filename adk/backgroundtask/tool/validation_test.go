@@ -444,10 +444,12 @@ func TestManagedToolTimeoutOverrideStopsRun(t *testing.T) {
 	result, err := wrapped.(*managedTool).InvokableRun(
 		context.Background(), toolArgument(`{}`),
 	)
-	require.NoError(t, err)
-	event := decodeEvents(t, []*schema.ToolResult{result})[0]
-	require.Equal(t, backgroundtask.StatusFailed, event.Status)
-	require.Contains(t, event.Error, "timed out")
+	require.Nil(t, result)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	var timeoutErr *backgroundtask.ForegroundTimeoutError
+	require.ErrorAs(t, err, &timeoutErr)
+	require.Equal(t, 5*time.Millisecond, timeoutErr.Timeout)
+	require.NotEmpty(t, timeoutErr.TaskID)
 	select {
 	case <-stopped:
 	case <-time.After(time.Second):
