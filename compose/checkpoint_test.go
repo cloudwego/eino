@@ -2064,17 +2064,32 @@ func TestCheckpointConvertsPendingStartStream(t *testing.T) {
 	}, result)
 }
 
-func TestCheckpointConversionRejectsMissingStreamConverter(t *testing.T) {
-	values := map[string]any{
-		"node": packStreamReader(schema.StreamReaderFromArray([]string{"input"})),
-	}
-	pairs := map[string]streamConvertPair{"node": {}}
+func TestCheckpointConversionValidation(t *testing.T) {
+	t.Run("non-stream conversion is a no-op", func(t *testing.T) {
+		require.NoError(t, convert(nil, nil, false, nil))
+		require.NoError(t, restore(nil, nil, false))
+	})
 
-	err := convert(values, pairs, true, nil)
-	require.ErrorContains(t, err, "node[node] has no stream converter")
+	t.Run("unregistered node", func(t *testing.T) {
+		values := map[string]any{"node": "input"}
+		require.ErrorContains(t, convert(values, nil, true, nil), "node[node] have not been registered")
+		require.ErrorContains(t, restore(values, nil, true), "node[node] have not been registered")
+	})
 
-	err = restore(map[string]any{"node": "input"}, pairs, true)
-	require.ErrorContains(t, err, "node[node] has no stream converter")
+	t.Run("missing converter", func(t *testing.T) {
+		values := map[string]any{
+			"node": packStreamReader(schema.StreamReaderFromArray([]string{"input"})),
+		}
+		pairs := map[string]streamConvertPair{"node": {}}
+		require.ErrorContains(t, convert(values, pairs, true, nil), "node[node] has no stream converter")
+		require.ErrorContains(t, restore(map[string]any{"node": "input"}, pairs, true), "node[node] has no stream converter")
+	})
+
+	t.Run("invalid value", func(t *testing.T) {
+		pairs := map[string]streamConvertPair{"node": defaultStreamConvertPair[string]()}
+		require.ErrorContains(t, convert(map[string]any{"node": "input"}, pairs, true, nil), "value of [node] isn't stream")
+		require.ErrorContains(t, restore(map[string]any{"node": 1}, pairs, true), "cannot convert value[int]")
+	})
 }
 
 func TestCheckpointStreamConversionIgnoresOnlyRecordedInterrupt(t *testing.T) {
