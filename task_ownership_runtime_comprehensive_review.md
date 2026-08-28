@@ -725,3 +725,41 @@ Go 1.19-1.24、Codecov 与 CLA 均 **PASS**，mergeable；9 条 API
 compatibility review threads 为 4 resolved / 5 maintainer decision。
 该结论仅记录旧 merge head；当前 rebase 后的新 head 尚未运行 full CI，
 因此状态为 **pending**，不宣称新 head 的远端 checks 全绿。
+
+## Round 11: rebase onto latest alpha/10
+
+本地 `alpha/10` 通过 `git pull --rebase` 更新到 `0fb0380e`，feature 分支随后
+使用 `git rebase --rebase-merges alpha/10` 完成历史重放。冲突处理保留
+task-first runtime 语义，并采用最新基线的 filesystem `timeout` 秒制和
+structured `ForegroundTimeoutError` 契约。独立完整性审计确认 feature commits
+均已保留，未发现遗漏的产品行为。
+
+rebase 后验证发现并关闭以下问题：
+
+- `TestAttack_ForegroundTimeoutUsesOnePolicySnapshot` 仍引用已删除的
+  `InvocationTimeoutMs`，改为当前公开的
+  `ForegroundTimeoutMsForInvocation`。
+- direct local foreground cancellation 按 `RunResult.Foreground()` 返回
+  canceled outcome；旧攻击测试仍要求 Go `error`，已改为精确断言
+  `OutcomeCanceled` 与 `context deadline exceeded`。
+- Managed Tool buffered timeout 返回 structured error 前遗漏 mailbox
+  `Abandon()`，会残留 foreground mailbox。修复为组合 timeout 与 cleanup
+  error，并使 buffered/streaming 路径一致。
+- streaming timeout 旧测试仍期待 rendered failed event，已改为断言终止流的
+  `ForegroundTimeoutError`、deadline compatibility、timeout 和 TaskID。
+
+最终本地验证：
+
+- timeout focused tests `-count=20`：**PASS**。
+- `go test ./...`：**PASS**。
+- 当前工具链 `go test -race ./...`：**PASS**。
+- Go 1.18.10 `go test -race ./...`：**PASS**。
+- `golangci-lint run --timeout 5m`：**PASS**，0 issues。
+- `go vet ./...`、`gofmt`、`git diff --check`：**PASS**。
+
+代码修复提交为 `385b8136`，已从旧远端 head `179f0fb2` 使用精确
+`force-with-lease` 更新。该代码 head 的 16/16 checks、Codecov 与 CLA 全部
+**PASS**；PR 为 mergeable，base 为 `alpha/10@0fb0380e`。9 条 API
+compatibility review threads 仍为 4 resolved / 5 maintainer decision，未擅自
+resolve breaking API 决策。**Round 11 verdict: APPROVE. Findings remaining:
+0.**
