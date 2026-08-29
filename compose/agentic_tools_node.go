@@ -56,11 +56,8 @@ func (a *AgenticToolsNode) Stream(ctx context.Context, input *schema.AgenticMess
 	if err != nil {
 		return nil, err
 	}
-	result = schema.StreamReaderWithConvert(
+	return streamToolMessageToAgenticMessage(
 		result,
-		func(messages []*schema.Message) ([]*schema.Message, error) {
-			return messages, nil
-		},
 		schema.WithErrWrapper(func(streamErr error) error {
 			checkpointErr := &toolStreamCheckpointError{}
 			if !errors.As(streamErr, &checkpointErr) {
@@ -70,8 +67,7 @@ func (a *AgenticToolsNode) Stream(ctx context.Context, input *schema.AgenticMess
 			agenticCheckpointErr.rerunInput = input
 			return &agenticCheckpointErr
 		}),
-	)
-	return streamToolMessageToAgenticMessage(result), nil
+	), nil
 }
 
 func agenticMessageToToolCallMessage(input *schema.AgenticMessage) *schema.Message {
@@ -127,7 +123,10 @@ func toolMessageToAgenticMessage(input []*schema.Message) []*schema.AgenticMessa
 	return results
 }
 
-func streamToolMessageToAgenticMessage(input *schema.StreamReader[[]*schema.Message]) *schema.StreamReader[[]*schema.AgenticMessage] {
+func streamToolMessageToAgenticMessage(
+	input *schema.StreamReader[[]*schema.Message],
+	opts ...schema.ConvertOption,
+) *schema.StreamReader[[]*schema.AgenticMessage] {
 	return schema.StreamReaderWithConvert(input, func(t []*schema.Message) ([]*schema.AgenticMessage, error) {
 		results := make([]*schema.AgenticMessage, len(t))
 		for i, m := range t {
@@ -162,7 +161,7 @@ func streamToolMessageToAgenticMessage(input *schema.StreamReader[[]*schema.Mess
 			}
 		}
 		return results, nil
-	})
+	}, opts...)
 }
 
 func toolSearchResultMessageToAgenticMessage(m *schema.Message, meta *schema.StreamingMeta) (*schema.AgenticMessage, bool) {
