@@ -106,18 +106,17 @@ type BackgroundConfig struct {
 type LocalBackgroundConfig struct {
 	// Runner owns task lifecycle and process-local closures.
 	Runner *backgroundlocal.Runner
-	// ShouldAutoBackground selects the timeout semantics once, before each run
-	// with run_in_background=false. Nil preserves the legacy foreground-wait
-	// semantics. Returning true uses the tool timeout as the Manager's foreground
-	// wait before its normal auto-background decision. Returning false keeps the
-	// run attached until the shell backend returns and passes the tool timeout to
-	// filesystem.ExecuteRequest.Timeout as the command execution limit. Explicit
-	// background runs bypass this callback and ignore the tool timeout.
+	// AlwaysForeground changes the timeout semantics for runs with
+	// run_in_background=false. When false, the tool timeout limits foreground
+	// waiting before the Manager applies its normal timeout policy. When true,
+	// the run stays attached until the shell backend returns and the tool timeout
+	// is passed to filesystem.ExecuteRequest.Timeout as the command execution
+	// limit. Explicit background runs ignore this option and the tool timeout.
 	//
-	// This invocation-time selector is separate from the Runner's
-	// ShouldAutoBackground policy, which is evaluated only after a foreground wait
-	// expires and may inspect the populated foreground candidate.
-	ShouldAutoBackground func(context.Context) bool
+	// This invocation mode is separate from the Runner's ShouldAutoBackground
+	// policy, which is evaluated only after a foreground wait expires and may
+	// inspect the populated foreground candidate.
+	AlwaysForeground bool
 	// OutputStore and OutputDir optionally materialize managed output.
 	OutputStore filesystem.AppendOpener
 	OutputDir   string
@@ -678,7 +677,7 @@ func createExecuteTool(ctx context.Context, middlewareConfig *MiddlewareConfig) 
 				},
 				toolDefinition{
 					name: executeConfig.Name, desc: desc,
-					shouldAutoBackground: local.ShouldAutoBackground,
+					alwaysForeground: local.AlwaysForeground,
 				},
 			)
 		}
@@ -1253,8 +1252,8 @@ type executeManagedArgs struct {
 	executeArgs
 	RunInBackground bool `json:"run_in_background,omitempty" jsonschema_description:"Set to true to run the command in the background. Use task_output to query it and task_stop to cancel it."`
 	// TimeoutSeconds is ignored when run_in_background is true. For foreground
-	// runs its meaning is selected once by
-	// LocalBackgroundConfig.ShouldAutoBackground: it either limits command
+	// runs its meaning is selected by LocalBackgroundConfig.AlwaysForeground: it
+	// either limits command
 	// execution in the backend or limits foreground waiting before the Manager
 	// stops or automatically backgrounds the command.
 	TimeoutSeconds int `json:"timeout,omitempty" jsonschema_description:"Optional timeout in seconds, up to 3 days. Ignored when run_in_background is true. Depending on host policy, it limits command execution while the tool remains foreground, or limits foreground waiting before the command stops or moves to the background. Omit to use the configured default."`

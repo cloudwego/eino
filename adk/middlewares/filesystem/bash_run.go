@@ -86,9 +86,9 @@ type outputSink struct {
 }
 
 type toolDefinition struct {
-	name                 string
-	desc                 string
-	shouldAutoBackground func(context.Context) bool
+	name             string
+	desc             string
+	alwaysForeground bool
 }
 
 // bashOutputWriter tees a managed execute task's output to a file via a
@@ -394,20 +394,19 @@ const (
 )
 
 // resolveManagedBashRunMode chooses one lifecycle and timeout interpretation at
-// invocation start. Explicit background has priority and does not consult the
-// host policy. Nil preserves the legacy foreground-wait/auto-background mode.
+// invocation start. Explicit background has priority. False preserves the
+// legacy foreground-wait/auto-background mode.
 func resolveManagedBashRunMode(
-	ctx context.Context,
 	input executeManagedArgs,
-	shouldAutoBackground func(context.Context) bool,
+	alwaysForeground bool,
 ) managedBashRunMode {
 	if input.RunInBackground {
 		return managedBashRunModeExplicitBackground
 	}
-	if shouldAutoBackground == nil || shouldAutoBackground(ctx) {
-		return managedBashRunModeAutoBackground
+	if alwaysForeground {
+		return managedBashRunModeAlwaysForeground
 	}
-	return managedBashRunModeAlwaysForeground
+	return managedBashRunModeAutoBackground
 }
 
 // managedRunInput builds the RunInput shared by the buffered and streaming managed
@@ -471,7 +470,7 @@ func newManagedBufferedExecuteTool(
 	definition toolDefinition,
 ) (tool.BaseTool, error) {
 	return utils.InferTool(definition.name, definition.desc, func(ctx context.Context, input executeManagedArgs) (string, error) {
-		mode := resolveManagedBashRunMode(ctx, input, definition.shouldAutoBackground)
+		mode := resolveManagedBashRunMode(input, definition.alwaysForeground)
 		parentSessionID, err := sessionID(ctx)
 		if err != nil {
 			return "", err
@@ -530,7 +529,7 @@ func newManagedStreamingExecuteTool(
 	definition toolDefinition,
 ) (tool.BaseTool, error) {
 	return utils.InferStreamTool(definition.name, definition.desc, func(ctx context.Context, input executeManagedArgs) (*schema.StreamReader[string], error) {
-		mode := resolveManagedBashRunMode(ctx, input, definition.shouldAutoBackground)
+		mode := resolveManagedBashRunMode(input, definition.alwaysForeground)
 		parentSessionID, err := sessionID(ctx)
 		if err != nil {
 			return nil, err
