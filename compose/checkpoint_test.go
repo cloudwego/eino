@@ -2204,9 +2204,9 @@ func TestCheckpointToolStreamCancellationRerunsProducerOnce(t *testing.T) {
 		reader, writer := schema.Pipe[string](2)
 		writer.Send("partial", nil)
 		writer.Send("", &toolStreamCheckpointError{
-			nodeKey: "tools",
-			input:   input,
-			signal:  toolSignal,
+			nodeKey:    "tools",
+			rerunInput: input,
+			signal:     toolSignal,
 		})
 		writer.Close()
 		inputs[consumer] = packStreamReader(reader)
