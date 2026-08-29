@@ -390,9 +390,9 @@ type toolsInterruptAndRerunState struct {
 }
 
 type toolStreamCheckpointError struct {
-	nodeKey string
-	input   *schema.Message
-	signal  *core.InterruptSignal
+	nodeKey    string
+	rerunInput any
+	signal     *core.InterruptSignal
 }
 
 func (e *toolStreamCheckpointError) Error() string {
@@ -487,9 +487,9 @@ func (t *toolStreamCheckpointTracker) interrupt(ctx context.Context) error {
 		}
 	}
 	return &toolStreamCheckpointError{
-		nodeKey: nodeKey,
-		input:   t.input,
-		signal:  signal,
+		nodeKey:    nodeKey,
+		rerunInput: t.input,
+		signal:     signal,
 	}
 }
 

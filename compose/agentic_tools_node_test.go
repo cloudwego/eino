@@ -18,6 +18,7 @@ package compose
 
 import (
 	"context"
+	"errors"
 	"io"
 	"testing"
 
@@ -26,6 +27,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cloudwego/eino/components/tool"
+	"github.com/cloudwego/eino/internal/core"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -394,6 +396,95 @@ func TestAgenticToolsNodeStreamSetsStreamingMeta(t *testing.T) {
 	assert.Equal(t, "mock_tool", block.FunctionToolResult.Name)
 	require.Len(t, block.FunctionToolResult.Content, 1)
 	assert.JSONEq(t, `{"echo":"jack: 0"}`, block.FunctionToolResult.Content[0].Text.Text)
+}
+
+func TestAttack_AgenticToolsCheckpointPreservesRerunInputType(t *testing.T) {
+	ctx := AppendAddressSegment(context.Background(), AddressSegmentNode, "tools")
+	streamTool := &addressStreamTool{
+		name: "stream_tool",
+		run: func(context.Context, string) (*schema.StreamReader[string], error) {
+			reader, writer := schema.Pipe[string](2)
+			writer.Send("partial", nil)
+			writer.Send("", core.ErrStreamCanceled)
+			writer.Close()
+			return reader, nil
+		},
+	}
+	node, err := NewAgenticToolsNode(ctx, &ToolsNodeConfig{
+		Tools: []tool.BaseTool{streamTool},
+	})
+	require.NoError(t, err)
+	input := &schema.AgenticMessage{
+		Role: schema.AgenticRoleTypeAssistant,
+		ContentBlocks: []*schema.ContentBlock{{
+			Type: schema.ContentBlockTypeFunctionToolCall,
+			FunctionToolCall: &schema.FunctionToolCall{
+				CallID:    "call-1",
+				Name:      "stream_tool",
+				Arguments: `{}`,
+			},
+		}},
+	}
+
+	output, err := node.Stream(ctx, input)
+	require.NoError(t, err)
+	cp := &checkpoint{
+		Inputs:     map[string]any{"consumer": packStreamReader(output)},
+		RerunNodes: []string{"consumer"},
+	}
+	pointer := newCheckPointer(map[string]streamConvertPair{
+		"consumer": defaultStreamConvertPair[[]*schema.AgenticMessage](),
+		"tools":    defaultStreamConvertPair[*schema.AgenticMessage](),
+	}, nil, nil, nil)
+
+	require.NoError(t, pointer.convertCheckPoint(cp, true, &core.InterruptSignal{ID: "root"}))
+	require.Equal(t, []string{"tools"}, cp.RerunNodes)
+	require.NotContains(t, cp.Inputs, "consumer")
+	require.Same(t, input, cp.Inputs["tools"])
+	require.NoError(t, pointer.restoreCheckPoint(cp, true))
+	packedInput, ok := cp.Inputs["tools"].(streamReader)
+	require.True(t, ok)
+	restoredInput, ok := unpackStreamReader[*schema.AgenticMessage](packedInput)
+	require.True(t, ok)
+	defer restoredInput.Close()
+	actualInput, err := restoredInput.Recv()
+	require.NoError(t, err)
+	require.Same(t, input, actualInput)
+	_, err = restoredInput.Recv()
+	require.ErrorIs(t, err, io.EOF)
+}
+
+func TestAttack_AgenticToolsPreservesOrdinaryStreamErrors(t *testing.T) {
+	streamErr := errors.New("stream failed")
+	streamTool := &addressStreamTool{
+		name: "stream_tool",
+		run: func(context.Context, string) (*schema.StreamReader[string], error) {
+			reader, writer := schema.Pipe[string](1)
+			writer.Send("", streamErr)
+			writer.Close()
+			return reader, nil
+		},
+	}
+	node, err := NewAgenticToolsNode(context.Background(), &ToolsNodeConfig{
+		Tools: []tool.BaseTool{streamTool},
+	})
+	require.NoError(t, err)
+
+	output, err := node.Stream(context.Background(), &schema.AgenticMessage{
+		Role: schema.AgenticRoleTypeAssistant,
+		ContentBlocks: []*schema.ContentBlock{{
+			Type: schema.ContentBlockTypeFunctionToolCall,
+			FunctionToolCall: &schema.FunctionToolCall{
+				CallID:    "call-1",
+				Name:      "stream_tool",
+				Arguments: `{}`,
+			},
+		}},
+	})
+	require.NoError(t, err)
+	defer output.Close()
+	_, err = output.Recv()
+	require.ErrorIs(t, err, streamErr)
 }
 
 func testStreamToolMessageTextOnly(t *testing.T) {
