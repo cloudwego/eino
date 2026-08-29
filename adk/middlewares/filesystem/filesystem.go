@@ -106,6 +106,12 @@ type BackgroundConfig struct {
 type LocalBackgroundConfig struct {
 	// Runner owns task lifecycle and process-local closures.
 	Runner *backgroundlocal.Runner
+	// AlwaysForeground keeps runs with run_in_background=false attached until the
+	// shell backend returns. In this mode the tool's timeout is passed to
+	// filesystem.ExecuteRequest.Timeout and the Manager's foreground timer is
+	// disabled for that invocation. Explicit background runs are unchanged and
+	// ignore the tool timeout.
+	AlwaysForeground bool
 	// OutputStore and OutputDir optionally materialize managed output.
 	OutputStore filesystem.AppendOpener
 	OutputDir   string
@@ -664,7 +670,10 @@ func createExecuteTool(ctx context.Context, middlewareConfig *MiddlewareConfig) 
 				outputSink{
 					store: local.OutputStore, outputDir: local.OutputDir,
 				},
-				toolDefinition{name: executeConfig.Name, desc: desc},
+				toolDefinition{
+					name: executeConfig.Name, desc: desc,
+					alwaysForeground: local.AlwaysForeground,
+				},
 			)
 		}
 		if middlewareConfig.StreamingShell != nil {
@@ -1237,12 +1246,11 @@ type executeArgs struct {
 type executeManagedArgs struct {
 	executeArgs
 	RunInBackground bool `json:"run_in_background,omitempty" jsonschema_description:"Set to true to run the command in the background. Use task_output to query it and task_stop to cancel it."`
-	// TimeoutSeconds is the foreground timeout in seconds. When omitted, the configured
-	// default applies. Ignored when run_in_background is true. At expiry, the
-	// command stops unless the Manager's ShouldAutoBackground policy allows
-	// automatic backgrounding for this command. It intentionally does not set
-	// filesystem.ExecuteRequest.Timeout, which is an independent command execution limit.
-	TimeoutSeconds int `json:"timeout,omitempty" jsonschema_description:"Optional foreground wait in seconds, up to 3 days. Ignored when run_in_background is true. At expiry, the command stops unless the host allows automatic backgrounding for this command; then it continues as a background task. Omit to use the configured default."`
+	// TimeoutSeconds is ignored when run_in_background is true. For foreground
+	// runs its meaning is selected by LocalBackgroundConfig.AlwaysForeground: it
+	// either limits command execution in the backend or limits foreground waiting
+	// before the Manager stops or automatically backgrounds the command.
+	TimeoutSeconds int `json:"timeout,omitempty" jsonschema_description:"Optional timeout in seconds, up to 3 days. Ignored when run_in_background is true. Depending on host policy, it limits command execution while the tool remains foreground, or limits foreground waiting before the command stops or moves to the background. Omit to use the configured default."`
 }
 
 const maxToolArgumentTimeoutSeconds = 3 * 24 * 60 * 60
@@ -1256,6 +1264,17 @@ func foregroundTimeoutMsForToolArgument(seconds int) *int {
 	}
 	timeoutMs := seconds * int(time.Second/time.Millisecond)
 	return &timeoutMs
+}
+
+func commandExecutionTimeoutForToolArgument(seconds int) *time.Duration {
+	if seconds <= 0 {
+		return nil
+	}
+	if seconds > maxToolArgumentTimeoutSeconds {
+		seconds = maxToolArgumentTimeoutSeconds
+	}
+	timeout := time.Duration(seconds) * time.Second
+	return &timeout
 }
 
 func newExecuteTool(sb filesystem.Shell, name string, desc string) (tool.BaseTool, error) {
