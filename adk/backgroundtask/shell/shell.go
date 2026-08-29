@@ -21,7 +21,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"time"
 
 	backgroundtool "github.com/cloudwego/eino/adk/backgroundtask/tool"
 	"github.com/cloudwego/eino/schema"
@@ -39,7 +38,6 @@ type RecoverableShell interface {
 type StartCommandRequest struct {
 	TaskID  string
 	Command string
-	Timeout *time.Duration
 	Attempt int64
 }
 
@@ -47,7 +45,6 @@ type StartCommandRequest struct {
 type RecoverCommandRequest struct {
 	TaskID  string
 	Command string
-	Timeout *time.Duration
 	Attempt int64
 }
 
@@ -81,8 +78,7 @@ type adapter struct {
 }
 
 type arguments struct {
-	Command        string `json:"command"`
-	TimeoutSeconds int    `json:"timeout,omitempty"`
+	Command string `json:"command"`
 }
 
 func (a *adapter) ValidateArguments(value string) error {
@@ -102,8 +98,7 @@ func (a *adapter) Start(
 		return nil, err
 	}
 	run, err := a.shell.StartCommand(ctx, &StartCommandRequest{
-		TaskID: request.TaskID, Command: input.Command,
-		Timeout: timeoutFromSeconds(input.TimeoutSeconds), Attempt: request.Attempt,
+		TaskID: request.TaskID, Command: input.Command, Attempt: request.Attempt,
 	})
 	if err != nil {
 		return nil, err
@@ -123,21 +118,8 @@ func (a *adapter) Recover(
 		return nil, err
 	}
 	return a.shell.RecoverCommand(ctx, &RecoverCommandRequest{
-		TaskID: request.TaskID, Command: input.Command,
-		Timeout: timeoutFromSeconds(input.TimeoutSeconds), Attempt: request.Attempt,
+		TaskID: request.TaskID, Command: input.Command, Attempt: request.Attempt,
 	})
-}
-
-func timeoutFromSeconds(seconds int) *time.Duration {
-	if seconds <= 0 {
-		return nil
-	}
-	const maxTimeoutSeconds = 3 * 24 * 60 * 60
-	if seconds > maxTimeoutSeconds {
-		seconds = maxTimeoutSeconds
-	}
-	timeout := time.Duration(seconds) * time.Second
-	return &timeout
 }
 
 func (a *adapter) Adopt(

@@ -21,7 +21,6 @@ import (
 	"encoding/json"
 	"reflect"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -108,10 +107,9 @@ func TestRecoverableShellUsesManagedToolLifecycle(t *testing.T) {
 	timeout, ok := js.Properties.Get("timeout")
 	require.True(t, ok)
 	require.Contains(t, timeout.Description, "seconds")
-	require.Contains(t, timeout.Description, "command execution")
-	require.Contains(t, timeout.Description, "foreground and background")
+	require.Contains(t, timeout.Description, "stops unless the host allows automatic backgrounding")
 	result, err := tools[0].(componenttool.EnhancedInvokableTool).InvokableRun(
-		context.Background(), &schema.ToolArgument{Text: `{"command":"echo hello","timeout":10}`},
+		context.Background(), &schema.ToolArgument{Text: `{"command":"echo hello"}`},
 	)
 	require.NoError(t, err)
 	require.NotEmpty(t, result.Parts)
@@ -125,8 +123,6 @@ func TestRecoverableShellUsesManagedToolLifecycle(t *testing.T) {
 	require.Equal(t, "shell-task", shell.startRequest.TaskID)
 	require.Equal(t, int64(0), shell.startRequest.Attempt)
 	require.Equal(t, "echo hello", shell.startRequest.Command)
-	require.NotNil(t, shell.startRequest.Timeout)
-	require.Equal(t, 10*time.Second, *shell.startRequest.Timeout)
 }
 
 func TestRecoverableShellConfigurationIsExclusive(t *testing.T) {

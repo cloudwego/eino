@@ -149,13 +149,13 @@ When to use: creating a new file, or fully replacing one you've already Read. Ov
 
 - Working directory persists between calls, but prefer absolute paths — ` + "`" + `cd` + "`" + ` in a compound command can trigger a permission prompt. Shell state (env vars, functions) does not persist; the shell is initialized from the user's profile.
 - IMPORTANT: Avoid using this tool to run ` + "`" + `cat` + "`" + `, ` + "`" + `head` + "`" + `, ` + "`" + `tail` + "`" + `, ` + "`" + `sed` + "`" + `, ` + "`" + `awk` + "`" + `, or ` + "`" + `echo` + "`" + ` commands, unless explicitly instructed or after you have verified that a dedicated tool cannot accomplish your task. Instead, use the appropriate dedicated tool as this will provide a much better experience for the user.
-- ` + "`" + `timeout` + "`" + ` limits command execution in seconds (max 3 days) for both foreground and background runs. Omit it to use the shell backend's default.
+- ` + "`" + `timeout` + "`" + ` is in seconds: default 120, max 3 days.
 - ` + "`" + `run_in_background` + "`" + ` starts a background task immediately: the tool result returns a task_id/startup preview. Use task_output to check status and read the terminal result; the host may also deliver a completion notification when configured. No ` + "`" + `&` + "`" + ` needed. Foreground runs are synchronous and do not create a task unless the host supports safe auto-background handoff. Foreground ` + "`" + `sleep` + "`" + ` is blocked; use Monitor with an until-loop to wait on a condition.`
 
 	ManagedExecuteToolDescChinese = `执行一条 bash 命令并返回其输出。
 
 - 工作目录在多次调用间保持，但优先使用绝对路径 —— 复合命令中的 ` + "`" + `cd` + "`" + ` 可能触发权限确认。Shell 状态（环境变量、函数）不会保留；shell 以用户的 profile 初始化。
 - 重要：除非明确要求，或你已确认没有专用工具能完成任务，否则避免用本工具运行 ` + "`" + `cat` + "`" + `、` + "`" + `head` + "`" + `、` + "`" + `tail` + "`" + `、` + "`" + `sed` + "`" + `、` + "`" + `awk` + "`" + `、` + "`" + `echo` + "`" + ` 命令。请改用相应的专用工具，这会带来更好的体验。
-- ` + "`" + `timeout` + "`" + ` 限制命令执行时长，单位为秒（最长 3 天），对前台和后台运行均生效；省略时使用 shell backend 的默认值。
+- ` + "`" + `timeout` + "`" + ` 单位为秒：默认 120，最大 3 天。
 - ` + "`" + `run_in_background` + "`" + ` 会立即创建后台任务：工具结果返回 task_id/启动预览。使用 task_output 查询状态并读取终态结果；宿主配置了完成通知时也可能主动投递通知。无需 ` + "`" + `&` + "`" + `。前台运行是同步执行，除非宿主支持安全 auto-background handoff，否则不会创建 task。前台 ` + "`" + `sleep` + "`" + ` 被禁止；用 Monitor 配合 until 循环来等待某个条件。`
 )
