@@ -86,9 +86,9 @@ type outputSink struct {
 }
 
 type toolDefinition struct {
-	name             string
-	desc             string
-	alwaysForeground bool
+	name                 string
+	desc                 string
+	shouldAutoBackground func(context.Context) bool
 }
 
 // bashOutputWriter tees a managed execute task's output to a file via a
@@ -373,16 +373,41 @@ func newManagedExecuteTool(
 	if err != nil {
 		return nil, err
 	}
-	alwaysForeground := definition.alwaysForeground
-
 	if streaming != nil {
 		return newManagedStreamingExecuteTool(
-			runner, streaming, sessionID, sink, toolName, d, alwaysForeground,
+			runner, streaming, sessionID, sink, toolName, d,
+			definition.shouldAutoBackground,
 		)
 	}
 	return newManagedBufferedExecuteTool(
-		runner, sb, sessionID, sink, toolName, d, alwaysForeground,
+		runner, sb, sessionID, sink, toolName, d,
+		definition.shouldAutoBackground,
 	)
+}
+
+type managedBashRunMode uint8
+
+const (
+	managedBashRunModeAutoBackground managedBashRunMode = iota
+	managedBashRunModeAlwaysForeground
+	managedBashRunModeExplicitBackground
+)
+
+// resolveManagedBashRunMode chooses one lifecycle and timeout interpretation at
+// invocation start. Explicit background has priority and does not consult the
+// host policy. Nil preserves the legacy foreground-wait/auto-background mode.
+func resolveManagedBashRunMode(
+	ctx context.Context,
+	input executeManagedArgs,
+	shouldAutoBackground func(context.Context) bool,
+) managedBashRunMode {
+	if input.RunInBackground {
+		return managedBashRunModeExplicitBackground
+	}
+	if shouldAutoBackground == nil || shouldAutoBackground(ctx) {
+		return managedBashRunModeAutoBackground
+	}
+	return managedBashRunModeAlwaysForeground
 }
 
 // managedRunInput builds the RunInput shared by the buffered and streaming managed
@@ -392,7 +417,7 @@ func managedRunInput(
 	input executeManagedArgs,
 	writer *bashOutputWriter,
 	sessionID string,
-	alwaysForeground bool,
+	mode managedBashRunMode,
 ) (*backgroundlocal.Input, error) {
 	payload, err := json.Marshal(shellPayloadV1{Version: shellPayloadVersion, Command: input.Command})
 	if err != nil {
@@ -407,10 +432,10 @@ func managedRunInput(
 		SessionID:       sessionID,
 		NotifySession:   sessionID != "",
 	}
-	if input.RunInBackground {
+	if mode == managedBashRunModeExplicitBackground {
 		return runInput, nil
 	}
-	if alwaysForeground {
+	if mode == managedBashRunModeAlwaysForeground {
 		// The backend owns the command execution limit in this mode. Disable the
 		// Manager's foreground timer so it cannot race the backend timeout or hand
 		// the command off while the caller is waiting synchronously.
@@ -429,10 +454,10 @@ func managedRunInput(
 
 func managedExecuteRequest(
 	input executeManagedArgs,
-	alwaysForeground bool,
+	mode managedBashRunMode,
 ) *filesystem.ExecuteRequest {
 	req := &filesystem.ExecuteRequest{Command: input.Command}
-	if alwaysForeground && !input.RunInBackground {
+	if mode == managedBashRunModeAlwaysForeground {
 		req.Timeout = commandExecutionTimeoutForToolArgument(input.TimeoutSeconds)
 	}
 	return req
@@ -444,16 +469,17 @@ func newManagedBufferedExecuteTool(
 	sessionID func(context.Context) (string, error),
 	sink outputSink,
 	toolName, desc string,
-	alwaysForeground bool,
+	shouldAutoBackground func(context.Context) bool,
 ) (tool.BaseTool, error) {
 	return utils.InferTool(toolName, desc, func(ctx context.Context, input executeManagedArgs) (string, error) {
+		mode := resolveManagedBashRunMode(ctx, input, shouldAutoBackground)
 		parentSessionID, err := sessionID(ctx)
 		if err != nil {
 			return "", err
 		}
-		req := managedExecuteRequest(input, alwaysForeground)
+		req := managedExecuteRequest(input, mode)
 		w := reserveBashOutput(ctx, sink)
-		runInput, err := managedRunInput(input, w, parentSessionID, alwaysForeground)
+		runInput, err := managedRunInput(input, w, parentSessionID, mode)
 		if err != nil {
 			return "", err
 		}
@@ -503,16 +529,17 @@ func newManagedStreamingExecuteTool(
 	sessionID func(context.Context) (string, error),
 	sink outputSink,
 	toolName, desc string,
-	alwaysForeground bool,
+	shouldAutoBackground func(context.Context) bool,
 ) (tool.BaseTool, error) {
 	return utils.InferStreamTool(toolName, desc, func(ctx context.Context, input executeManagedArgs) (*schema.StreamReader[string], error) {
+		mode := resolveManagedBashRunMode(ctx, input, shouldAutoBackground)
 		parentSessionID, err := sessionID(ctx)
 		if err != nil {
 			return nil, err
 		}
-		req := managedExecuteRequest(input, alwaysForeground)
+		req := managedExecuteRequest(input, mode)
 		w := reserveBashOutput(ctx, sink)
-		runInput, err := managedRunInput(input, w, parentSessionID, alwaysForeground)
+		runInput, err := managedRunInput(input, w, parentSessionID, mode)
 		if err != nil {
 			return nil, err
 		}

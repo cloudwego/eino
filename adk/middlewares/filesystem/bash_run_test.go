@@ -365,7 +365,7 @@ func TestManagedExecuteTool_TimeoutDoesNotSetExecutionTimeout(t *testing.T) {
 	assert.Nil(t, shell.req.Timeout)
 }
 
-func TestManagedExecuteTool_AlwaysForegroundUsesCommandExecutionTimeout(t *testing.T) {
+func TestManagedExecuteTool_ShouldAutoBackgroundFalseUsesCommandExecutionTimeout(t *testing.T) {
 	mgr := newTestManager(t, context.Background())
 	defer func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
@@ -373,6 +373,7 @@ func TestManagedExecuteTool_AlwaysForegroundUsesCommandExecutionTimeout(t *testi
 		_ = mgr.Close(ctx)
 	}()
 
+	var modeChecks atomic.Int32
 	shell := &slowRecordingShell{delay: 20 * time.Millisecond, out: "done"}
 	tools, err := getFilesystemTools(context.Background(), &MiddlewareConfig{
 		Shell: shell,
@@ -385,7 +386,10 @@ func TestManagedExecuteTool_AlwaysForegroundUsesCommandExecutionTimeout(t *testi
 						return true
 					}
 				}),
-				AlwaysForeground: true,
+				ShouldAutoBackground: func(context.Context) bool {
+					modeChecks.Add(1)
+					return false
+				},
 			},
 		},
 		notificationSessionID: testNotificationSessionID,
@@ -398,9 +402,10 @@ func TestManagedExecuteTool_AlwaysForegroundUsesCommandExecutionTimeout(t *testi
 	require.NotNil(t, shell.req)
 	require.NotNil(t, shell.req.Timeout)
 	assert.Equal(t, 10*time.Second, *shell.req.Timeout)
+	assert.Equal(t, int32(1), modeChecks.Load())
 }
 
-func TestManagedExecuteTool_AlwaysForegroundExplicitBackgroundIgnoresTimeout(t *testing.T) {
+func TestManagedExecuteTool_ExplicitBackgroundBypassesModeAndTimeout(t *testing.T) {
 	mgr := newTestManager(t, context.Background())
 	defer func() {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -410,10 +415,15 @@ func TestManagedExecuteTool_AlwaysForegroundExplicitBackgroundIgnoresTimeout(t *
 
 	release := make(chan struct{})
 	shell := &gatedShell{release: release, out: "done"}
+	var modeChecks atomic.Int32
 	tools, err := getFilesystemTools(context.Background(), &MiddlewareConfig{
 		Shell: shell,
 		Background: &BackgroundConfig{Local: &LocalBackgroundConfig{
-			Runner: mustLocalRunner(t, mgr), AlwaysForeground: true,
+			Runner: mustLocalRunner(t, mgr),
+			ShouldAutoBackground: func(context.Context) bool {
+				modeChecks.Add(1)
+				return false
+			},
 		}},
 		notificationSessionID: testNotificationSessionID,
 	})
@@ -428,6 +438,7 @@ func TestManagedExecuteTool_AlwaysForegroundExplicitBackgroundIgnoresTimeout(t *
 	_ = waitTerminalTask(t, mgr)
 	require.NotNil(t, shell.req)
 	assert.Nil(t, shell.req.Timeout)
+	assert.Zero(t, modeChecks.Load())
 }
 
 func TestManagedExecuteTool_BackgroundWithoutNotificationSession(t *testing.T) {
@@ -537,6 +548,7 @@ func TestManagedExecuteTool_TimeoutMovesToBackground(t *testing.T) {
 		_ = mgr.Close(ctx)
 	}()
 
+	var modeChecks atomic.Int32
 	tools, err := getFilesystemTools(context.Background(), &MiddlewareConfig{
 		Shell: &slowShell{delay: 1200 * time.Millisecond, out: "slow done"},
 		Background: &BackgroundConfig{
@@ -546,6 +558,10 @@ func TestManagedExecuteTool_TimeoutMovesToBackground(t *testing.T) {
 						return true
 					}
 				}),
+				ShouldAutoBackground: func(context.Context) bool {
+					modeChecks.Add(1)
+					return true
+				},
 			},
 		},
 		notificationSessionID: testNotificationSessionID,
@@ -560,6 +576,7 @@ func TestManagedExecuteTool_TimeoutMovesToBackground(t *testing.T) {
 	task := waitTerminalTask(t, mgr)
 	assert.Equal(t, backgroundtask.StatusCompleted, task.Status)
 	assert.Equal(t, "slow done", string(task.ResultData))
+	assert.Equal(t, int32(1), modeChecks.Load())
 }
 
 // Without a ShouldAutoBackground hook, a command that outlives its timeout is
@@ -592,7 +609,7 @@ func TestManagedExecuteTool_TimeoutKills(t *testing.T) {
 func TestShellPayloadV1AndCommandFromTask(t *testing.T) {
 	input, err := managedRunInput(executeManagedArgs{
 		executeArgs: executeArgs{Command: "echo hello"},
-	}, &bashOutputWriter{}, "test-session", false)
+	}, &bashOutputWriter{}, "test-session", managedBashRunModeAutoBackground)
 	require.NoError(t, err)
 	task := &backgroundtask.Task{Spec: backgroundtask.Spec{
 		Kind: ExecuteTaskKind, Payload: input.Payload,
@@ -602,7 +619,7 @@ func TestShellPayloadV1AndCommandFromTask(t *testing.T) {
 	input, err = managedRunInput(executeManagedArgs{
 		executeArgs:    executeArgs{Command: "echo hello"},
 		TimeoutSeconds: 2,
-	}, &bashOutputWriter{}, "test-session", false)
+	}, &bashOutputWriter{}, "test-session", managedBashRunModeAutoBackground)
 	require.NoError(t, err)
 	require.NotNil(t, input.ForegroundTimeoutMs)
 	assert.Equal(t, 2000, *input.ForegroundTimeoutMs)
@@ -610,7 +627,7 @@ func TestShellPayloadV1AndCommandFromTask(t *testing.T) {
 	input, err = managedRunInput(executeManagedArgs{
 		executeArgs:    executeArgs{Command: "echo hello"},
 		TimeoutSeconds: 2,
-	}, &bashOutputWriter{}, "test-session", true)
+	}, &bashOutputWriter{}, "test-session", managedBashRunModeAlwaysForeground)
 	require.NoError(t, err)
 	require.NotNil(t, input.ForegroundTimeoutMs)
 	assert.Zero(t, *input.ForegroundTimeoutMs)
@@ -674,7 +691,7 @@ func TestManagedExecuteTool_StreamingForeground(t *testing.T) {
 	assert.Contains(t, got, "chunk3")
 }
 
-func TestManagedExecuteTool_StreamingAlwaysForegroundUsesCommandExecutionTimeout(t *testing.T) {
+func TestManagedExecuteTool_StreamingShouldAutoBackgroundFalseUsesCommandExecutionTimeout(t *testing.T) {
 	mgr := newTestManager(t, context.Background())
 	defer func() {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -685,7 +702,7 @@ func TestManagedExecuteTool_StreamingAlwaysForegroundUsesCommandExecutionTimeout
 	shell := &mockStreamingShell{}
 	executeTool, err := newManagedExecuteTool(
 		mustLocalRunner(t, mgr), nil, shell, testNotificationSessionID,
-		outputSink{}, toolDefinition{alwaysForeground: true},
+		outputSink{}, toolDefinition{shouldAutoBackground: func(context.Context) bool { return false }},
 	)
 	require.NoError(t, err)
 
