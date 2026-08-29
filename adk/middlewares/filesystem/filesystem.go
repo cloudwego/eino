@@ -707,7 +707,7 @@ func newRecoverableExecuteTool(
 				},
 				"timeout": {
 					Type: schema.Integer,
-					Desc: "Optional foreground timeout in seconds, up to 3 days. Ignored when run_in_background is true. At expiry, the command stops unless the host allows automatic backgrounding for this command; then it continues as a background task.",
+					Desc: "Optional command execution timeout in seconds, up to 3 days. Applies to both foreground and background runs. Omit to use the shell backend's default.",
 				},
 			}),
 		},
@@ -728,13 +728,6 @@ func newRecoverableExecuteTool(
 		RunInBackground: func(_ context.Context, arguments string) bool {
 			var input executeManagedArgs
 			return json.Unmarshal([]byte(arguments), &input) == nil && input.RunInBackground
-		},
-		InvocationTimeoutMs: func(_ context.Context, arguments string) *int {
-			var input executeManagedArgs
-			if json.Unmarshal([]byte(arguments), &input) != nil {
-				return nil
-			}
-			return foregroundTimeoutMsForToolArgument(input.TimeoutSeconds)
 		},
 	})
 }
@@ -1237,24 +1230,22 @@ type executeArgs struct {
 type executeManagedArgs struct {
 	executeArgs
 	RunInBackground bool `json:"run_in_background,omitempty" jsonschema_description:"Set to true to run the command in the background. Use task_output to query it and task_stop to cancel it."`
-	// TimeoutSeconds is the foreground timeout in seconds. When omitted, the configured
-	// default applies. Ignored when run_in_background is true. At expiry, the
-	// command stops unless the Manager's ShouldAutoBackground policy allows
-	// automatic backgrounding for this command.
-	TimeoutSeconds int `json:"timeout,omitempty" jsonschema_description:"Optional foreground wait in seconds, up to 3 days. Ignored when run_in_background is true. At expiry, the command stops unless the host allows automatic backgrounding for this command; then it continues as a background task. Omit to use the configured default."`
+	// TimeoutSeconds limits command execution in the shell backend. It is
+	// independent from foreground waiting and applies to background runs too.
+	TimeoutSeconds int `json:"timeout,omitempty" jsonschema_description:"Optional command execution timeout in seconds, up to 3 days. Applies to both foreground and background runs. Omit to use the shell backend's default."`
 }
 
 const maxToolArgumentTimeoutSeconds = 3 * 24 * 60 * 60
 
-func foregroundTimeoutMsForToolArgument(seconds int) *int {
+func executionTimeoutForToolArgument(seconds int) *time.Duration {
 	if seconds <= 0 {
 		return nil
 	}
 	if seconds > maxToolArgumentTimeoutSeconds {
 		seconds = maxToolArgumentTimeoutSeconds
 	}
-	timeoutMs := seconds * int(time.Second/time.Millisecond)
-	return &timeoutMs
+	timeout := time.Duration(seconds) * time.Second
+	return &timeout
 }
 
 func newExecuteTool(sb filesystem.Shell, name string, desc string) (tool.BaseTool, error) {

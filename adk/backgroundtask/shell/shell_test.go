@@ -20,6 +20,7 @@ import (
 	"context"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -83,14 +84,15 @@ func TestNewRegistrationAndAdapter(t *testing.T) {
 	require.Error(t, adapted.ValidateArguments(`{"command":""}`))
 	require.Error(t, adapted.ValidateArguments(`{`))
 
+	timeout := 10 * time.Second
 	started, err := adapted.Start(context.Background(), &backgroundtool.StartRequest{
-		TaskID: "task", Arguments: `{"command":"echo hello"}`, Attempt: 1,
+		TaskID: "task", Arguments: `{"command":"echo hello","timeout":10}`, Attempt: 1,
 	})
 	require.NoError(t, err)
 	require.Equal(t, backend.run, started.Run)
 	require.Empty(t, started.Checkpoint)
 	require.Equal(t, &StartCommandRequest{
-		TaskID: "task", Command: "echo hello", Attempt: 1,
+		TaskID: "task", Command: "echo hello", Timeout: &timeout, Attempt: 1,
 	}, backend.start)
 	_, err = adapted.Start(context.Background(), nil)
 	require.Error(t, err)
@@ -100,12 +102,12 @@ func TestNewRegistrationAndAdapter(t *testing.T) {
 	require.Error(t, err)
 
 	recovered, err := adapted.Recover(context.Background(), &backgroundtool.RecoverRequest{
-		TaskID: "task", Arguments: `{"command":"echo hello"}`, Attempt: 2,
+		TaskID: "task", Arguments: `{"command":"echo hello","timeout":10}`, Attempt: 2,
 	})
 	require.NoError(t, err)
 	require.Equal(t, backend.run, recovered)
 	require.Equal(t, &RecoverCommandRequest{
-		TaskID: "task", Command: "echo hello", Attempt: 2,
+		TaskID: "task", Command: "echo hello", Timeout: &timeout, Attempt: 2,
 	}, backend.recover)
 	_, err = adapted.Recover(context.Background(), nil)
 	require.Error(t, err)

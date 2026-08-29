@@ -20,6 +20,7 @@ package filesystem
 import (
 	"context"
 	"io"
+	"time"
 
 	"github.com/cloudwego/eino/schema"
 )
@@ -348,11 +349,15 @@ type Backend interface {
 
 // ExecuteRequest contains parameters for executing a command.
 //
-// Foreground/background switching and timeouts are the caller's concern (e.g. the
-// backgroundtask Manager): a backend simply runs the command and must honor ctx
-// cancellation, which is how a timed-out or canceled run is stopped.
+// Foreground/background switching is the caller's concern (e.g. the
+// backgroundtask Manager). Timeout limits command execution in the backend and
+// is independent from how long the caller waits in the foreground.
 type ExecuteRequest struct {
 	Command string // The command to execute
+	// Timeout optionally limits command execution. Nil delegates the limit to the
+	// backend. When non-nil, the backend must enforce it for both foreground and
+	// background runs.
+	Timeout *time.Duration
 }
 
 // ExecuteResponse contains the response result of command execution.
