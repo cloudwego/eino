@@ -373,7 +373,7 @@ func TestManagedExecuteTool_ShouldAutoBackgroundFalseUsesCommandExecutionTimeout
 		_ = mgr.Close(ctx)
 	}()
 
-	var modeChecks atomic.Int32
+	var modeChecks int32
 	shell := &slowRecordingShell{delay: 20 * time.Millisecond, out: "done"}
 	tools, err := getFilesystemTools(context.Background(), &MiddlewareConfig{
 		Shell: shell,
@@ -387,7 +387,7 @@ func TestManagedExecuteTool_ShouldAutoBackgroundFalseUsesCommandExecutionTimeout
 					}
 				}),
 				ShouldAutoBackground: func(context.Context) bool {
-					modeChecks.Add(1)
+					atomic.AddInt32(&modeChecks, 1)
 					return false
 				},
 			},
@@ -402,7 +402,7 @@ func TestManagedExecuteTool_ShouldAutoBackgroundFalseUsesCommandExecutionTimeout
 	require.NotNil(t, shell.req)
 	require.NotNil(t, shell.req.Timeout)
 	assert.Equal(t, 10*time.Second, *shell.req.Timeout)
-	assert.Equal(t, int32(1), modeChecks.Load())
+	assert.Equal(t, int32(1), atomic.LoadInt32(&modeChecks))
 }
 
 func TestManagedExecuteTool_ExplicitBackgroundBypassesModeAndTimeout(t *testing.T) {
@@ -415,13 +415,13 @@ func TestManagedExecuteTool_ExplicitBackgroundBypassesModeAndTimeout(t *testing.
 
 	release := make(chan struct{})
 	shell := &gatedShell{release: release, out: "done"}
-	var modeChecks atomic.Int32
+	var modeChecks int32
 	tools, err := getFilesystemTools(context.Background(), &MiddlewareConfig{
 		Shell: shell,
 		Background: &BackgroundConfig{Local: &LocalBackgroundConfig{
 			Runner: mustLocalRunner(t, mgr),
 			ShouldAutoBackground: func(context.Context) bool {
-				modeChecks.Add(1)
+				atomic.AddInt32(&modeChecks, 1)
 				return false
 			},
 		}},
@@ -438,7 +438,7 @@ func TestManagedExecuteTool_ExplicitBackgroundBypassesModeAndTimeout(t *testing.
 	_ = waitTerminalTask(t, mgr)
 	require.NotNil(t, shell.req)
 	assert.Nil(t, shell.req.Timeout)
-	assert.Zero(t, modeChecks.Load())
+	assert.Zero(t, atomic.LoadInt32(&modeChecks))
 }
 
 func TestManagedExecuteTool_BackgroundWithoutNotificationSession(t *testing.T) {
@@ -548,7 +548,7 @@ func TestManagedExecuteTool_TimeoutMovesToBackground(t *testing.T) {
 		_ = mgr.Close(ctx)
 	}()
 
-	var modeChecks atomic.Int32
+	var modeChecks int32
 	tools, err := getFilesystemTools(context.Background(), &MiddlewareConfig{
 		Shell: &slowShell{delay: 1200 * time.Millisecond, out: "slow done"},
 		Background: &BackgroundConfig{
@@ -559,7 +559,7 @@ func TestManagedExecuteTool_TimeoutMovesToBackground(t *testing.T) {
 					}
 				}),
 				ShouldAutoBackground: func(context.Context) bool {
-					modeChecks.Add(1)
+					atomic.AddInt32(&modeChecks, 1)
 					return true
 				},
 			},
@@ -576,7 +576,7 @@ func TestManagedExecuteTool_TimeoutMovesToBackground(t *testing.T) {
 	task := waitTerminalTask(t, mgr)
 	assert.Equal(t, backgroundtask.StatusCompleted, task.Status)
 	assert.Equal(t, "slow done", string(task.ResultData))
-	assert.Equal(t, int32(1), modeChecks.Load())
+	assert.Equal(t, int32(1), atomic.LoadInt32(&modeChecks))
 }
 
 // Without a ShouldAutoBackground hook, a command that outlives its timeout is
