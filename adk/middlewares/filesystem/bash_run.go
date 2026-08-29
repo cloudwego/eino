@@ -373,15 +373,15 @@ func newManagedExecuteTool(
 	if err != nil {
 		return nil, err
 	}
+	definition.name = toolName
+	definition.desc = d
 	if streaming != nil {
 		return newManagedStreamingExecuteTool(
-			runner, streaming, sessionID, sink, toolName, d,
-			definition.shouldAutoBackground,
+			runner, streaming, sessionID, sink, definition,
 		)
 	}
 	return newManagedBufferedExecuteTool(
-		runner, sb, sessionID, sink, toolName, d,
-		definition.shouldAutoBackground,
+		runner, sb, sessionID, sink, definition,
 	)
 }
 
@@ -468,11 +468,10 @@ func newManagedBufferedExecuteTool(
 	sb filesystem.Shell,
 	sessionID func(context.Context) (string, error),
 	sink outputSink,
-	toolName, desc string,
-	shouldAutoBackground func(context.Context) bool,
+	definition toolDefinition,
 ) (tool.BaseTool, error) {
-	return utils.InferTool(toolName, desc, func(ctx context.Context, input executeManagedArgs) (string, error) {
-		mode := resolveManagedBashRunMode(ctx, input, shouldAutoBackground)
+	return utils.InferTool(definition.name, definition.desc, func(ctx context.Context, input executeManagedArgs) (string, error) {
+		mode := resolveManagedBashRunMode(ctx, input, definition.shouldAutoBackground)
 		parentSessionID, err := sessionID(ctx)
 		if err != nil {
 			return "", err
@@ -528,11 +527,10 @@ func newManagedStreamingExecuteTool(
 	streaming filesystem.StreamingShell,
 	sessionID func(context.Context) (string, error),
 	sink outputSink,
-	toolName, desc string,
-	shouldAutoBackground func(context.Context) bool,
+	definition toolDefinition,
 ) (tool.BaseTool, error) {
-	return utils.InferStreamTool(toolName, desc, func(ctx context.Context, input executeManagedArgs) (*schema.StreamReader[string], error) {
-		mode := resolveManagedBashRunMode(ctx, input, shouldAutoBackground)
+	return utils.InferStreamTool(definition.name, definition.desc, func(ctx context.Context, input executeManagedArgs) (*schema.StreamReader[string], error) {
+		mode := resolveManagedBashRunMode(ctx, input, definition.shouldAutoBackground)
 		parentSessionID, err := sessionID(ctx)
 		if err != nil {
 			return nil, err
