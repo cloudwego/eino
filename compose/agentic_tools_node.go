@@ -18,6 +18,7 @@ package compose
 
 import (
 	"context"
+	"errors"
 
 	"github.com/cloudwego/eino/schema"
 )
@@ -55,6 +56,21 @@ func (a *AgenticToolsNode) Stream(ctx context.Context, input *schema.AgenticMess
 	if err != nil {
 		return nil, err
 	}
+	result = schema.StreamReaderWithConvert(
+		result,
+		func(messages []*schema.Message) ([]*schema.Message, error) {
+			return messages, nil
+		},
+		schema.WithErrWrapper(func(streamErr error) error {
+			checkpointErr := &toolStreamCheckpointError{}
+			if !errors.As(streamErr, &checkpointErr) {
+				return streamErr
+			}
+			agenticCheckpointErr := *checkpointErr
+			agenticCheckpointErr.rerunInput = input
+			return &agenticCheckpointErr
+		}),
+	)
 	return streamToolMessageToAgenticMessage(result), nil
 }
 

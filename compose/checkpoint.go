@@ -325,13 +325,13 @@ func (c *checkPointer) convertCheckPoint(
 	isStream bool,
 	interrupt *core.InterruptSignal,
 ) (err error) {
-	toolRerunInputs := make(map[string]*schema.Message)
+	toolRerunInputs := make(map[string]any)
 	handleStreamError := func(key string, err error) streamErrorAction {
 		toolStreamErr := &toolStreamCheckpointError{}
 		if errors.As(err, &toolStreamErr) {
 			applyToolStreamCheckpoint(cp, key, interrupt, toolStreamErr)
-			if toolStreamErr.nodeKey != "" && toolStreamErr.input != nil {
-				toolRerunInputs[toolStreamErr.nodeKey] = toolStreamErr.input
+			if toolStreamErr.nodeKey != "" && toolStreamErr.rerunInput != nil {
+				toolRerunInputs[toolStreamErr.nodeKey] = toolStreamErr.rerunInput
 			}
 			return streamErrorAction{ignore: true, dropValue: true}
 		}
