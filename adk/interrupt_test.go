@@ -19,6 +19,7 @@ package adk
 import (
 	"bytes"
 	"context"
+	"encoding/gob"
 	"errors"
 	"fmt"
 	"sync"
@@ -26,10 +27,12 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
+	"github.com/cloudwego/eino/internal/core"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -57,6 +60,179 @@ func TestPreprocessADKCheckpoint(t *testing.T) {
 		assert.True(t, bytes.Contains(out, []byte(lenPrefixedCompatName)))
 		assert.False(t, bytes.Contains(out, []byte(lenPrefixedReactStateName)))
 	})
+}
+
+func TestRunnerCheckpointDoesNotDuplicateChatModelState(t *testing.T) {
+	ctx := context.Background()
+	original := bytes.Repeat([]byte{0xab}, 1<<20)
+	payload := original
+	var checkpoints [][]byte
+
+	for i := 0; i < 3; i++ {
+		event := StatefulInterrupt(ctx, "interrupt", payload)
+		store := newMyStore()
+		err := runnerSaveCheckPointImpl(false, store, ctx, "checkpoint", &InterruptInfo{
+			Data: &ChatModelAgentInterruptInfo{Data: payload},
+		}, event.Action.internalInterrupted)
+		require.NoError(t, err)
+		payload = store.m["checkpoint"]
+		checkpoints = append(checkpoints, payload)
+	}
+
+	require.Less(t, len(payload), (1<<20)+(64<<10))
+
+	for i := len(checkpoints) - 1; i >= 0; i-- {
+		store := newMyStore()
+		store.m["checkpoint"] = checkpoints[i]
+		_, _, resumeInfo, err := runnerLoadCheckPointImpl(store, ctx, "checkpoint")
+		require.NoError(t, err)
+		interruptInfo, ok := resumeInfo.Data.(*ChatModelAgentInterruptInfo)
+		require.True(t, ok)
+		expected := original
+		if i > 0 {
+			expected = checkpoints[i-1]
+		}
+		assert.Equal(t, expected, interruptInfo.Data)
+	}
+}
+
+func TestAttack_RunnerCheckpointCompactionPreservesCompatibility(t *testing.T) {
+	ctx := context.Background()
+	payload := bytes.Repeat([]byte{0xab}, 128<<10)
+	event := StatefulInterrupt(ctx, "interrupt", payload)
+	legacyInfo := &ChatModelAgentInterruptInfo{Data: payload}
+	store := newMyStore()
+
+	err := runnerSaveCheckPointImpl(false, store, ctx, "checkpoint", &InterruptInfo{
+		Data: legacyInfo,
+	}, event.Action.internalInterrupted)
+	require.NoError(t, err)
+	assert.Equal(t, payload, legacyInfo.Data)
+
+	serialized := &serialization{}
+	err = gob.NewDecoder(bytes.NewReader(store.m["checkpoint"])).Decode(serialized)
+	require.NoError(t, err)
+	assert.Equal(t, event.Action.internalInterrupted.ID, serialized.InfoDataSourceInterruptID)
+	compactedInfo, ok := serialized.Info.Data.(*ChatModelAgentInterruptInfo)
+	require.True(t, ok)
+	assert.Empty(t, compactedInfo.Data)
+
+	_, _, resumeInfo, err := runnerLoadCheckPointImpl(store, ctx, "checkpoint")
+	require.NoError(t, err)
+	restoredInfo, ok := resumeInfo.Data.(*ChatModelAgentInterruptInfo)
+	require.True(t, ok)
+	assert.Equal(t, payload, restoredInfo.Data)
+	restoredInfo.Data[0] ^= 0xff
+	assert.Equal(t, byte(0xab), event.Action.internalInterrupted.State.([]byte)[0])
+}
+
+func TestAttack_RunnerCheckpointLoadsLegacyInlineChatModelData(t *testing.T) {
+	payload := []byte("legacy checkpoint")
+	state := &serialization{
+		Info: &InterruptInfo{
+			Data: &ChatModelAgentInterruptInfo{Data: payload},
+		},
+		InterruptID2State: map[string]core.InterruptState{
+			"interrupt": {State: payload},
+		},
+	}
+	buf := &bytes.Buffer{}
+	assert.NoError(t, gob.NewEncoder(buf).Encode(state))
+	store := newMyStore()
+	store.m["checkpoint"] = buf.Bytes()
+
+	_, _, resumeInfo, err := runnerLoadCheckPointImpl(store, context.Background(), "checkpoint")
+	require.NoError(t, err)
+	interruptInfo, ok := resumeInfo.Data.(*ChatModelAgentInterruptInfo)
+	require.True(t, ok)
+	assert.Equal(t, payload, interruptInfo.Data)
+}
+
+func TestAttack_RunnerCheckpointCompactionKeepsNonCanonicalData(t *testing.T) {
+	canonical := []byte("canonical")
+	cases := []struct {
+		name string
+		info *InterruptInfo
+		id   string
+	}{
+		{
+			name: "custom interrupt data",
+			info: &InterruptInfo{Data: []byte("custom")},
+			id:   "interrupt",
+		},
+		{
+			name: "mismatched chat model data",
+			info: &InterruptInfo{Data: &ChatModelAgentInterruptInfo{Data: []byte("other")}},
+			id:   "interrupt",
+		},
+		{
+			name: "missing interrupt ID",
+			info: &InterruptInfo{Data: &ChatModelAgentInterruptInfo{Data: canonical}},
+		},
+	}
+
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			signal := StatefulInterrupt(context.Background(), "interrupt", canonical).Action.internalInterrupted
+			signal.ID = tt.id
+			compacted, stateID := compactRunnerCheckpointInfoData(tt.info, signal)
+			assert.Same(t, tt.info, compacted)
+			assert.Empty(t, stateID)
+		})
+	}
+}
+
+func TestAttack_RunnerCheckpointRejectsBrokenCompactedReference(t *testing.T) {
+	cases := []struct {
+		name  string
+		state *serialization
+		err   string
+	}{
+		{
+			name:  "missing interrupt info",
+			state: &serialization{InfoDataSourceInterruptID: "interrupt"},
+			err:   "failed to decode checkpoint: compacted interrupt info is missing",
+		},
+		{
+			name: "invalid interrupt info type",
+			state: &serialization{
+				Info:                      &InterruptInfo{Data: "invalid"},
+				InfoDataSourceInterruptID: "interrupt",
+			},
+			err: "failed to decode checkpoint: compacted interrupt info has invalid type string",
+		},
+		{
+			name: "missing interrupt state",
+			state: &serialization{
+				Info:                      &InterruptInfo{Data: &ChatModelAgentInterruptInfo{}},
+				InfoDataSourceInterruptID: "interrupt",
+			},
+			err: `failed to decode checkpoint: compacted interrupt state "interrupt" is missing`,
+		},
+		{
+			name: "invalid interrupt state type",
+			state: &serialization{
+				Info:                      &InterruptInfo{Data: &ChatModelAgentInterruptInfo{}},
+				InfoDataSourceInterruptID: "interrupt",
+				InterruptID2State: map[string]core.InterruptState{
+					"interrupt": {State: "invalid"},
+				},
+			},
+			err: `failed to decode checkpoint: compacted interrupt state "interrupt" has invalid type string`,
+		},
+	}
+
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			buf := &bytes.Buffer{}
+			require.NoError(t, gob.NewEncoder(buf).Encode(tt.state))
+			store := newMyStore()
+			store.m["checkpoint"] = buf.Bytes()
+
+			_, _, _, err := runnerLoadCheckPointImpl(store, context.Background(), "checkpoint")
+			assert.EqualError(t, err, tt.err)
+		})
+	}
 }
 
 func TestAttack_ResumeBridgeStoreRequiresFreshWrite(t *testing.T) {
