@@ -59,7 +59,12 @@ type Input struct {
 	NotifySession              bool
 	RunInBackground            bool
 	BackgroundStartupPreviewMs int
-	ForegroundTimeoutMs        *int
+	// ForegroundTimeoutMs bounds how long this run is observed in the foreground.
+	// Nil falls back to Config.ForegroundTimeoutMs. A non-positive value disables
+	// the timer: the caller waits until the work returns or ctx is canceled, and
+	// Config.ShouldAutoBackground is never consulted, since it is only evaluated on
+	// timer expiry. Ignored when RunInBackground is set.
+	ForegroundTimeoutMs *int
 }
 
 // NoticeInfo carries lifecycle facts for a background stream notice. Task may
@@ -74,8 +79,13 @@ type NoticeInfo struct {
 // mutate the supplied candidate. Nil ShouldAutoBackground disables automatic
 // detachment; nil BackgroundNotice uses the default notice.
 type Config struct {
-	Manager              *backgroundtask.Manager
-	Executors            *backgroundtask.ExecutorRegistry
+	Manager   *backgroundtask.Manager
+	Executors *backgroundtask.ExecutorRegistry
+	// ForegroundTimeoutMs is the default foreground observation timeout for runs
+	// that do not set Input.ForegroundTimeoutMs. Nil uses the framework default
+	// (foreground.DefaultTimeoutMs); a non-positive value disables the timer, so
+	// runs wait until the work returns or ctx is canceled and ShouldAutoBackground
+	// is never consulted.
 	ForegroundTimeoutMs  *int
 	ShouldAutoBackground func(context.Context, *foreground.CandidateInfo) bool
 	BackgroundNotice     func(context.Context, NoticeInfo) string
