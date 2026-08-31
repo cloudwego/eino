@@ -86,8 +86,9 @@ type outputSink struct {
 }
 
 type toolDefinition struct {
-	name string
-	desc string
+	name             string
+	desc             string
+	alwaysForeground bool
 }
 
 // bashOutputWriter tees a managed execute task's output to a file via a
@@ -230,10 +231,11 @@ func outputFileName(ctx context.Context) string {
 }
 
 // bashWork adapts blocking shell execution into process-local managed work.
-// The request carries only the command; the Manager is the sole owner of
-// foreground/background/auto-background switching, so no background hint is
-// pushed down to the backend. On success it appends the result to the output file
-// (when one is configured) before returning, so it matches ResultData.
+// The request carries the command and, when the backend owns the command budget,
+// its timeout; the Manager remains the sole owner of foreground/background/
+// auto-background switching, so no background hint is pushed down to the backend.
+// On success it appends the result to the output file (when one is configured)
+// before returning, so it matches ResultData.
 func bashWork(sb filesystem.Shell, req *filesystem.ExecuteRequest, w *bashOutputWriter) backgroundlocal.WorkFunc {
 	return func(ctx context.Context, runtime backgroundtask.ExecutionRuntime) (string, error) {
 		result, err := sb.Execute(ctx, req)
@@ -282,14 +284,15 @@ func bashStreamWork(sb filesystem.StreamingShell, req *filesystem.ExecuteRequest
 			return nil, err
 		}
 
-		// exitCode/hasContent accumulate across chunks: convert writes them per
-		// chunk, the OnEOF hook reads them to build the terminal note. The convert
+		// exitCode/hasContent/timedOut accumulate across chunks: convert writes them
+		// per chunk, the OnEOF hook reads them to build the terminal note. The convert
 		// model has no per-stream state of its own, so they live in this closure.
 		// Safe without synchronization because StreamReaderWithConvert is pull-driven
 		// and single-consumer — convert, OnEOF and the error wrapper run serially on
 		// the same Recv stack.
 		var exitCode *int
 		var hasContent bool
+		var timedOut bool
 		return schema.StreamReaderWithConvert(stream,
 			func(chunk *filesystem.ExecuteResponse) (string, error) {
 				if chunk == nil {
@@ -297,6 +300,9 @@ func bashStreamWork(sb filesystem.StreamingShell, req *filesystem.ExecuteRequest
 				}
 				if chunk.ExitCode != nil {
 					exitCode = chunk.ExitCode
+				}
+				if chunk.TimedOut {
+					timedOut = true
 				}
 				text := formatExecChunk(chunk.Output, chunk.Truncated)
 				if text == "" {
@@ -309,7 +315,7 @@ func bashStreamWork(sb filesystem.StreamingShell, req *filesystem.ExecuteRequest
 				return text, nil
 			},
 			schema.WithOnEOF(func() (any, error) {
-				note := execTerminalNote(exitCode, hasContent)
+				note := execTerminalNote(exitCode, hasContent, timedOut)
 				if note != "" {
 					if err = w.append(note); err != nil {
 						return nil, err
@@ -366,17 +372,38 @@ func newManagedExecuteTool(
 		sessionID = noNotificationSessionID
 	}
 	toolName := selectToolName(definition.name, ToolNameExecute)
-	d, err := selectToolDesc(
-		definition.desc, ManagedExecuteToolDesc, ManagedExecuteToolDescChinese,
-	)
+	// The tool description is fixed at construction time (the arg schema is derived
+	// from struct tags), so the timeout argument must be explained for the mode this
+	// tool was built in: an always-foreground tool passes it to the backend as the
+	// command's own budget, otherwise it is the foreground wait before a handoff.
+	defaultDesc, defaultDescChinese := ManagedExecuteToolDesc, ManagedExecuteToolDescChinese
+	if definition.alwaysForeground {
+		defaultDesc = AlwaysForegroundManagedExecuteToolDesc
+		defaultDescChinese = AlwaysForegroundManagedExecuteToolDescChinese
+	}
+	d, err := selectToolDesc(definition.desc, defaultDesc, defaultDescChinese)
 	if err != nil {
 		return nil, err
 	}
-
+	definition.name = toolName
+	definition.desc = d
 	if streaming != nil {
-		return newManagedStreamingExecuteTool(runner, streaming, sessionID, sink, toolName, d)
+		return newManagedStreamingExecuteTool(
+			runner, streaming, sessionID, sink, definition,
+		)
 	}
-	return newManagedBufferedExecuteTool(runner, sb, sessionID, sink, toolName, d)
+	return newManagedBufferedExecuteTool(
+		runner, sb, sessionID, sink, definition,
+	)
+}
+
+// backendOwnsCommandTimeout reports whether this invocation hands the timeout
+// argument to the backend as a command execution limit, instead of using it as the
+// Manager's foreground wait before an automatic background handoff. That is only
+// true for an always-foreground run: an explicit background launch never waits in
+// the foreground, so its timeout argument is ignored either way.
+func backendOwnsCommandTimeout(input executeManagedArgs, alwaysForeground bool) bool {
+	return alwaysForeground && !input.RunInBackground
 }
 
 // managedRunInput builds the RunInput shared by the buffered and streaming managed
@@ -386,6 +413,7 @@ func managedRunInput(
 	input executeManagedArgs,
 	writer *bashOutputWriter,
 	sessionID string,
+	backendOwnsTimeout bool,
 ) (*backgroundlocal.Input, error) {
 	payload, err := json.Marshal(shellPayloadV1{Version: shellPayloadVersion, Command: input.Command})
 	if err != nil {
@@ -400,6 +428,19 @@ func managedRunInput(
 		SessionID:       sessionID,
 		NotifySession:   sessionID != "",
 	}
+	if input.RunInBackground {
+		// The Manager never waits in the foreground here, so the foreground timer is
+		// unused and the timeout argument has no meaning for this run.
+		return runInput, nil
+	}
+	if backendOwnsTimeout {
+		// The backend owns the command execution limit in this mode. Disable the
+		// Manager's foreground timer so it cannot race the backend timeout or hand
+		// the command off while the caller is waiting synchronously.
+		disabledForegroundTimeoutMs := 0
+		runInput.ForegroundTimeoutMs = &disabledForegroundTimeoutMs
+		return runInput, nil
+	}
 	// A positive timeout in seconds overrides the Manager's default foreground
 	// timeout for this command. When the deadline expires, the Manager's policy
 	// decides whether to move the task to the background or stop it.
@@ -409,21 +450,33 @@ func managedRunInput(
 	return runInput, nil
 }
 
+func managedExecuteRequest(
+	input executeManagedArgs,
+	backendOwnsTimeout bool,
+) *filesystem.ExecuteRequest {
+	req := &filesystem.ExecuteRequest{Command: input.Command}
+	if backendOwnsTimeout {
+		req.Timeout = commandExecutionTimeoutForToolArgument(input.TimeoutSeconds)
+	}
+	return req
+}
+
 func newManagedBufferedExecuteTool(
 	runner *backgroundlocal.Runner,
 	sb filesystem.Shell,
 	sessionID func(context.Context) (string, error),
 	sink outputSink,
-	toolName, desc string,
+	definition toolDefinition,
 ) (tool.BaseTool, error) {
-	return utils.InferTool(toolName, desc, func(ctx context.Context, input executeManagedArgs) (string, error) {
+	return utils.InferTool(definition.name, definition.desc, func(ctx context.Context, input executeManagedArgs) (string, error) {
+		backendOwnsTimeout := backendOwnsCommandTimeout(input, definition.alwaysForeground)
 		parentSessionID, err := sessionID(ctx)
 		if err != nil {
 			return "", err
 		}
-		req := &filesystem.ExecuteRequest{Command: input.Command}
+		req := managedExecuteRequest(input, backendOwnsTimeout)
 		w := reserveBashOutput(ctx, sink)
-		runInput, err := managedRunInput(input, w, parentSessionID)
+		runInput, err := managedRunInput(input, w, parentSessionID, backendOwnsTimeout)
 		if err != nil {
 			return "", err
 		}
@@ -472,16 +525,17 @@ func newManagedStreamingExecuteTool(
 	streaming filesystem.StreamingShell,
 	sessionID func(context.Context) (string, error),
 	sink outputSink,
-	toolName, desc string,
+	definition toolDefinition,
 ) (tool.BaseTool, error) {
-	return utils.InferStreamTool(toolName, desc, func(ctx context.Context, input executeManagedArgs) (*schema.StreamReader[string], error) {
+	return utils.InferStreamTool(definition.name, definition.desc, func(ctx context.Context, input executeManagedArgs) (*schema.StreamReader[string], error) {
+		backendOwnsTimeout := backendOwnsCommandTimeout(input, definition.alwaysForeground)
 		parentSessionID, err := sessionID(ctx)
 		if err != nil {
 			return nil, err
 		}
-		req := &filesystem.ExecuteRequest{Command: input.Command}
+		req := managedExecuteRequest(input, backendOwnsTimeout)
 		w := reserveBashOutput(ctx, sink)
-		runInput, err := managedRunInput(input, w, parentSessionID)
+		runInput, err := managedRunInput(input, w, parentSessionID, backendOwnsTimeout)
 		if err != nil {
 			return nil, err
 		}

@@ -106,6 +106,25 @@ type BackgroundConfig struct {
 type LocalBackgroundConfig struct {
 	// Runner owns task lifecycle and process-local closures.
 	Runner *backgroundlocal.Runner
+	// AlwaysForeground changes the timeout semantics for runs with
+	// run_in_background=false. When false, the tool timeout limits foreground
+	// waiting before the Manager applies its normal timeout policy. When true,
+	// the run stays attached until the shell backend returns and the tool timeout
+	// is passed to filesystem.ExecuteRequest.Timeout as the command execution
+	// limit. Explicit background runs ignore this option and the tool timeout.
+	//
+	// Setting it hands the command's time limit to the backend: the Manager's
+	// foreground timer is disabled for those runs, so nothing on this side stops a
+	// command whose Timeout the backend ignores. Canceling the invocation's context
+	// remains the only bound in that case. That handover is the point — only the
+	// backend knows when the command actually started, so only it can exclude
+	// transport and environment setup time from the limit the model asked for.
+	//
+	// This invocation mode is separate from the Runner's ShouldAutoBackground
+	// policy, which is evaluated only after a foreground wait expires and may
+	// inspect the populated foreground candidate. With AlwaysForeground the
+	// foreground wait never expires, so that policy is never consulted.
+	AlwaysForeground bool
 	// OutputStore and OutputDir optionally materialize managed output.
 	OutputStore filesystem.AppendOpener
 	OutputDir   string
@@ -664,7 +683,10 @@ func createExecuteTool(ctx context.Context, middlewareConfig *MiddlewareConfig) 
 				outputSink{
 					store: local.OutputStore, outputDir: local.OutputDir,
 				},
-				toolDefinition{name: executeConfig.Name, desc: desc},
+				toolDefinition{
+					name: executeConfig.Name, desc: desc,
+					alwaysForeground: local.AlwaysForeground,
+				},
 			)
 		}
 		if middlewareConfig.StreamingShell != nil {
@@ -707,7 +729,7 @@ func newRecoverableExecuteTool(
 				},
 				"timeout": {
 					Type: schema.Integer,
-					Desc: "Optional foreground timeout in seconds, up to 3 days. Ignored when run_in_background is true. At expiry, the command stops unless the host allows automatic backgrounding for this command; then it continues as a background task.",
+					Desc: "Optional timeout in seconds, up to 3 days. Ignored when run_in_background is true. It bounds how long this call waits for the command, not how long the command may run. At expiry, the command stops unless the host allows automatic backgrounding for this command; then it continues as a background task.",
 				},
 			}),
 		},
@@ -1237,11 +1259,16 @@ type executeArgs struct {
 type executeManagedArgs struct {
 	executeArgs
 	RunInBackground bool `json:"run_in_background,omitempty" jsonschema_description:"Set to true to run the command in the background. Use task_output to query it and task_stop to cancel it."`
-	// TimeoutSeconds is the foreground timeout in seconds. When omitted, the configured
-	// default applies. Ignored when run_in_background is true. At expiry, the
-	// command stops unless the Manager's ShouldAutoBackground policy allows
-	// automatic backgrounding for this command.
-	TimeoutSeconds int `json:"timeout,omitempty" jsonschema_description:"Optional foreground wait in seconds, up to 3 days. Ignored when run_in_background is true. At expiry, the command stops unless the host allows automatic backgrounding for this command; then it continues as a background task. Omit to use the configured default."`
+	// TimeoutSeconds is ignored when run_in_background is true. For foreground runs
+	// its meaning is selected by LocalBackgroundConfig.AlwaysForeground: it either
+	// limits command execution in the backend or limits foreground waiting before
+	// the Manager stops or automatically backgrounds the command.
+	//
+	// The schema description stays mode-neutral because it is derived from this
+	// struct tag once, for every managed execute tool. Which of the two meanings
+	// applies is stated in the tool description, which is selected per mode (see
+	// AlwaysForegroundManagedExecuteToolDesc).
+	TimeoutSeconds int `json:"timeout,omitempty" jsonschema_description:"Optional timeout in seconds, up to 3 days. Ignored when run_in_background is true. Omit to use the default. See the tool description for what this timeout bounds."`
 }
 
 const maxToolArgumentTimeoutSeconds = 3 * 24 * 60 * 60
@@ -1255,6 +1282,17 @@ func foregroundTimeoutMsForToolArgument(seconds int) *int {
 	}
 	timeoutMs := seconds * int(time.Second/time.Millisecond)
 	return &timeoutMs
+}
+
+func commandExecutionTimeoutForToolArgument(seconds int) *time.Duration {
+	if seconds <= 0 {
+		return nil
+	}
+	if seconds > maxToolArgumentTimeoutSeconds {
+		seconds = maxToolArgumentTimeoutSeconds
+	}
+	timeout := time.Duration(seconds) * time.Second
+	return &timeout
 }
 
 func newExecuteTool(sb filesystem.Shell, name string, desc string) (tool.BaseTool, error) {
@@ -1310,6 +1348,7 @@ func newStreamingExecuteToolWithRun[T any](
 
 			var hasSentContent bool
 			var exitCode *int
+			var timedOut bool
 
 			for {
 				chunk, recvErr := result.Recv()
@@ -1327,6 +1366,9 @@ func newStreamingExecuteToolWithRun[T any](
 				if chunk.ExitCode != nil {
 					exitCode = chunk.ExitCode
 				}
+				if chunk.TimedOut {
+					timedOut = true
+				}
 
 				if text := formatExecChunk(chunk.Output, chunk.Truncated); text != "" {
 					sw.Send(text, nil)
@@ -1334,7 +1376,7 @@ func newStreamingExecuteToolWithRun[T any](
 				}
 			}
 
-			if note := execTerminalNote(exitCode, hasSentContent); note != "" {
+			if note := execTerminalNote(exitCode, hasSentContent, timedOut); note != "" {
 				sw.Send(note, nil)
 			}
 		}()
@@ -1349,6 +1391,7 @@ const (
 	outputTruncatedNote = "[Output was truncated due to size limits]"
 	commandFailedFmt    = "[Command failed with exit code %d]"
 	noCommandOutputNote = "[Command executed successfully with no output]"
+	commandTimedOutNote = "[Command timed out and was stopped]"
 )
 
 // formatExecChunk renders one streamed ExecuteResponse chunk to the text to emit,
@@ -1364,10 +1407,18 @@ func formatExecChunk(output string, truncated bool) string {
 	return strings.Join(parts, "\n")
 }
 
-// execTerminalNote returns the trailing text for a finished command: a failure note
-// for a non-zero exit code, the no-output message when nothing was emitted, or ""
-// otherwise.
-func execTerminalNote(exitCode *int, hasContent bool) string {
+// execTerminalNote returns the trailing text for a finished command: a timeout note
+// when the backend stopped the command on its own budget, a failure note for a
+// non-zero exit code, the no-output message when nothing was emitted, or ""
+// otherwise. A timed-out command is usually also killed by a signal, so the timeout
+// note replaces the exit-code note: it is the one the agent can act on.
+func execTerminalNote(exitCode *int, hasContent, timedOut bool) string {
+	if timedOut {
+		if hasContent {
+			return "\n" + commandTimedOutNote
+		}
+		return commandTimedOutNote
+	}
 	if exitCode != nil && *exitCode != 0 {
 		return "\n" + fmt.Sprintf(commandFailedFmt, *exitCode)
 	}
@@ -1381,8 +1432,15 @@ func convExecuteResponse(response *filesystem.ExecuteResponse) string {
 	if response == nil {
 		return ""
 	}
-	parts := []string{response.Output}
-	if response.ExitCode != nil && *response.ExitCode != 0 {
+	var parts []string
+	// An empty Output contributes no part, so a command that only produced a note
+	// does not lead with a blank line.
+	if response.Output != "" {
+		parts = append(parts, response.Output)
+	}
+	if response.TimedOut {
+		parts = append(parts, commandTimedOutNote)
+	} else if response.ExitCode != nil && *response.ExitCode != 0 {
 		parts = append(parts, fmt.Sprintf(commandFailedFmt, *response.ExitCode))
 	}
 	if response.Truncated {

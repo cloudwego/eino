@@ -2300,6 +2300,79 @@ func TestConvExecuteResponse_NilExitCode(t *testing.T) {
 	assert.Equal(t, "some output", result)
 }
 
+func TestConvExecuteResponse_TimedOut(t *testing.T) {
+	t.Run("timeout note replaces the exit code note", func(t *testing.T) {
+		// A stopped command is usually also killed by a signal, so it carries a
+		// non-zero exit code. The timeout is the fact the agent can act on.
+		result := convExecuteResponse(&filesystem.ExecuteResponse{
+			Output:   "partial output",
+			ExitCode: ptrOf(137),
+			TimedOut: true,
+		})
+		assert.Equal(t, "partial output\n"+commandTimedOutNote, result)
+		assert.NotContains(t, result, "exit code")
+	})
+
+	t.Run("timeout with no output still reports the timeout", func(t *testing.T) {
+		result := convExecuteResponse(&filesystem.ExecuteResponse{TimedOut: true})
+		assert.Equal(t, commandTimedOutNote, result)
+	})
+
+	t.Run("timeout and truncation are both reported", func(t *testing.T) {
+		result := convExecuteResponse(&filesystem.ExecuteResponse{
+			Output:    "partial output",
+			TimedOut:  true,
+			Truncated: true,
+		})
+		assert.Equal(t, "partial output\n"+commandTimedOutNote+"\n"+outputTruncatedNote, result)
+	})
+}
+
+func TestExecTerminalNote(t *testing.T) {
+	assert.Equal(t, "", execTerminalNote(ptrOf(0), true, false))
+	assert.Equal(t, noCommandOutputNote, execTerminalNote(ptrOf(0), false, false))
+	assert.Equal(t, "\n[Command failed with exit code 2]", execTerminalNote(ptrOf(2), true, false))
+	// Timeout wins over both the exit code and the no-output message.
+	assert.Equal(t, "\n"+commandTimedOutNote, execTerminalNote(ptrOf(137), true, true))
+	assert.Equal(t, commandTimedOutNote, execTerminalNote(nil, false, true))
+}
+
+type mockStreamingShellTimedOut struct{}
+
+func (m *mockStreamingShellTimedOut) ExecuteStreaming(ctx context.Context, input *filesystem.ExecuteRequest) (*schema.StreamReader[*filesystem.ExecuteResponse], error) {
+	sr, sw := schema.Pipe[*filesystem.ExecuteResponse](10)
+	go func() {
+		defer sw.Close()
+		sw.Send(&filesystem.ExecuteResponse{Output: "partial output"}, nil)
+		sw.Send(&filesystem.ExecuteResponse{ExitCode: ptrOf(137), TimedOut: true}, nil)
+	}()
+	return sr, nil
+}
+
+func TestStreamingExecuteTool_TimedOut(t *testing.T) {
+	executeTool, err := newStreamingExecuteTool(&mockStreamingShellTimedOut{}, "", "")
+	assert.NoError(t, err)
+
+	st := executeTool.(tool.StreamableTool)
+	sr, err := st.StreamableRun(context.Background(), `{"command": "sleep 100"}`)
+	assert.NoError(t, err)
+	defer sr.Close()
+
+	var chunks []string
+	for {
+		chunk, recvErr := sr.Recv()
+		if recvErr == io.EOF {
+			break
+		}
+		assert.NoError(t, recvErr)
+		chunks = append(chunks, chunk)
+	}
+	result := strings.Join(chunks, "")
+	assert.Contains(t, result, "partial output")
+	assert.Contains(t, result, commandTimedOutNote)
+	assert.NotContains(t, result, "exit code")
+}
+
 func TestConfig_Validate(t *testing.T) {
 	t.Run("nil config returns error", func(t *testing.T) {
 		var c *Config
