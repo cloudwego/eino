@@ -54,6 +54,8 @@ type ManagedToolConfig struct {
 	ForegroundTimeoutMs *int
 	// ShouldAutoBackground is evaluated after foreground timeout. Nil means
 	// timeout the operation instead of detaching. It may be called concurrently.
+	// A non-positive ForegroundTimeoutMs therefore also disables this policy:
+	// with no timer there is no expiry to evaluate it on.
 	ShouldAutoBackground func(context.Context, *foreground.CandidateInfo) bool
 	// RunInBackground requests explicit detachment from JSON arguments. Nil
 	// never requests it and takes precedence over foreground timeout.

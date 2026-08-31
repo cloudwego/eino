@@ -149,13 +149,34 @@ When to use: creating a new file, or fully replacing one you've already Read. Ov
 
 - Working directory persists between calls, but prefer absolute paths — ` + "`" + `cd` + "`" + ` in a compound command can trigger a permission prompt. Shell state (env vars, functions) does not persist; the shell is initialized from the user's profile.
 - IMPORTANT: Avoid using this tool to run ` + "`" + `cat` + "`" + `, ` + "`" + `head` + "`" + `, ` + "`" + `tail` + "`" + `, ` + "`" + `sed` + "`" + `, ` + "`" + `awk` + "`" + `, or ` + "`" + `echo` + "`" + ` commands, unless explicitly instructed or after you have verified that a dedicated tool cannot accomplish your task. Instead, use the appropriate dedicated tool as this will provide a much better experience for the user.
-- ` + "`" + `timeout` + "`" + ` is in seconds, up to 3 days, and is ignored for explicit background runs. Depending on host policy, it limits command execution while the tool remains foreground, or limits foreground waiting before an automatic background handoff.
+- ` + "`" + `timeout` + "`" + ` is in seconds: default 120, max 3 days. It bounds how long this call waits for the command, not how long the command may run: on expiry the command keeps running and is moved to a background task. Ignored when ` + "`" + `run_in_background` + "`" + ` is true.
 - ` + "`" + `run_in_background` + "`" + ` starts a background task immediately: the tool result returns a task_id/startup preview. Use task_output to check status and read the terminal result; the host may also deliver a completion notification when configured. No ` + "`" + `&` + "`" + ` needed. Foreground runs are synchronous and do not create a task unless the host supports safe auto-background handoff. Foreground ` + "`" + `sleep` + "`" + ` is blocked; use Monitor with an until-loop to wait on a condition.`
 
 	ManagedExecuteToolDescChinese = `执行一条 bash 命令并返回其输出。
 
 - 工作目录在多次调用间保持，但优先使用绝对路径 —— 复合命令中的 ` + "`" + `cd` + "`" + ` 可能触发权限确认。Shell 状态（环境变量、函数）不会保留；shell 以用户的 profile 初始化。
 - 重要：除非明确要求，或你已确认没有专用工具能完成任务，否则避免用本工具运行 ` + "`" + `cat` + "`" + `、` + "`" + `head` + "`" + `、` + "`" + `tail` + "`" + `、` + "`" + `sed` + "`" + `、` + "`" + `awk` + "`" + `、` + "`" + `echo` + "`" + ` 命令。请改用相应的专用工具，这会带来更好的体验。
-- ` + "`" + `timeout` + "`" + ` 单位为秒，最大 3 天；显式后台运行时忽略。根据宿主策略，它用于限制始终保持前台时的命令执行时间，或限制自动转后台前的前台等待时间。
+- ` + "`" + `timeout` + "`" + ` 单位为秒：默认 120，最大 3 天。它限制的是本次调用等待命令的时长，而非命令自身可运行的时长：超时后命令继续运行，并被转为后台任务。` + "`" + `run_in_background` + "`" + ` 为 true 时忽略。
 - ` + "`" + `run_in_background` + "`" + ` 会立即创建后台任务：工具结果返回 task_id/启动预览。使用 task_output 查询状态并读取终态结果；宿主配置了完成通知时也可能主动投递通知。无需 ` + "`" + `&` + "`" + `。前台运行是同步执行，除非宿主支持安全 auto-background handoff，否则不会创建 task。前台 ` + "`" + `sleep` + "`" + ` 被禁止；用 Monitor 配合 until 循环来等待某个条件。`
+
+	// AlwaysForegroundManagedExecuteToolDesc is the ManagedExecuteToolDesc variant for
+	// a managed execute tool configured with LocalBackgroundConfig.AlwaysForeground.
+	// It differs only in the two lines the mode changes: `timeout` limits the command
+	// itself rather than the caller's wait, and a foreground run is never handed off
+	// to a background task.
+	AlwaysForegroundManagedExecuteToolDesc = `Executes a bash command and returns its output.
+
+- Working directory persists between calls, but prefer absolute paths — ` + "`" + `cd` + "`" + ` in a compound command can trigger a permission prompt. Shell state (env vars, functions) does not persist; the shell is initialized from the user's profile.
+- IMPORTANT: Avoid using this tool to run ` + "`" + `cat` + "`" + `, ` + "`" + `head` + "`" + `, ` + "`" + `tail` + "`" + `, ` + "`" + `sed` + "`" + `, ` + "`" + `awk` + "`" + `, or ` + "`" + `echo` + "`" + ` commands, unless explicitly instructed or after you have verified that a dedicated tool cannot accomplish your task. Instead, use the appropriate dedicated tool as this will provide a much better experience for the user.
+- ` + "`" + `timeout` + "`" + ` is in seconds, max 3 days. It bounds how long the command itself may run; on expiry the command is stopped and the output collected so far is returned. Omit it to use the default. Ignored when ` + "`" + `run_in_background` + "`" + ` is true.
+- ` + "`" + `run_in_background` + "`" + ` starts a background task immediately: the tool result returns a task_id/startup preview. Use task_output to check status and read the terminal result; the host may also deliver a completion notification when configured. No ` + "`" + `&` + "`" + ` needed. Foreground runs are synchronous and are never handed off to a background task. Foreground ` + "`" + `sleep` + "`" + ` is blocked; use Monitor with an until-loop to wait on a condition.`
+
+	// AlwaysForegroundManagedExecuteToolDescChinese is the Chinese counterpart of
+	// AlwaysForegroundManagedExecuteToolDesc.
+	AlwaysForegroundManagedExecuteToolDescChinese = `执行一条 bash 命令并返回其输出。
+
+- 工作目录在多次调用间保持，但优先使用绝对路径 —— 复合命令中的 ` + "`" + `cd` + "`" + ` 可能触发权限确认。Shell 状态（环境变量、函数）不会保留；shell 以用户的 profile 初始化。
+- 重要：除非明确要求，或你已确认没有专用工具能完成任务，否则避免用本工具运行 ` + "`" + `cat` + "`" + `、` + "`" + `head` + "`" + `、` + "`" + `tail` + "`" + `、` + "`" + `sed` + "`" + `、` + "`" + `awk` + "`" + `、` + "`" + `echo` + "`" + ` 命令。请改用相应的专用工具，这会带来更好的体验。
+- ` + "`" + `timeout` + "`" + ` 单位为秒，最大 3 天。它限制命令自身可运行的时长；超时后命令被终止，并返回此前已产生的输出。省略则使用默认值。` + "`" + `run_in_background` + "`" + ` 为 true 时忽略。
+- ` + "`" + `run_in_background` + "`" + ` 会立即创建后台任务：工具结果返回 task_id/启动预览。使用 task_output 查询状态并读取终态结果；宿主配置了完成通知时也可能主动投递通知。无需 ` + "`" + `&` + "`" + `。前台运行是同步执行，且永远不会被转为后台任务。前台 ` + "`" + `sleep` + "`" + ` 被禁止；用 Monitor 配合 until 循环来等待某个条件。`
 )

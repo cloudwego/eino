@@ -354,9 +354,16 @@ type Backend interface {
 // is independent from how long the caller waits in the foreground.
 type ExecuteRequest struct {
 	Command string // The command to execute
-	// Timeout optionally limits command execution. Nil delegates the limit to the
-	// backend. When non-nil, the backend must enforce it for both foreground and
-	// background runs.
+	// Timeout optionally limits how long the command itself may run. It excludes
+	// transport and environment setup time, which is why the limit is enforced by
+	// the backend rather than derived from a caller-side deadline: only the backend
+	// knows when the command actually started.
+	//
+	// Nil delegates the limit to the backend. When non-nil, the backend must
+	// enforce it for both foreground and background runs, stop the command on
+	// expiry, and report the outcome via ExecuteResponse.TimedOut. A caller may
+	// rely on this as the only bound on command execution, so a backend that
+	// ignores Timeout will block its caller until ctx is canceled.
 	Timeout *time.Duration
 }
 
@@ -365,18 +372,25 @@ type ExecuteResponse struct {
 	Output    string // Command output content
 	ExitCode  *int   // Command exit code
 	Truncated bool   // Whether the output was truncated
+	// TimedOut reports that ExecuteRequest.Timeout expired and the backend stopped
+	// the command. It describes the command's own budget only: transport and RPC
+	// deadlines, ctx cancellation and environment setup failures are not timeouts
+	// in this sense and must be reported as errors instead. Output should still
+	// carry whatever the command produced before it was stopped.
+	TimedOut bool
 }
 
-// Shell executes shell commands. Execute must honor ctx cancellation by stopping
-// the underlying command (e.g. via exec.CommandContext): a timed-out or canceled
-// run is stopped solely by canceling ctx, so an implementation that ignores it
-// will leak the process and its goroutine after the run is reported stopped.
+// Shell executes shell commands. A command is stopped by one of two paths, and an
+// implementation must honor both: canceling ctx (how the caller abandons or cancels
+// a run — an implementation that ignores it will leak the process and its goroutine
+// after the run is reported stopped) and, when ExecuteRequest.Timeout is set,
+// expiry of that command budget (see ExecuteRequest.Timeout).
 type Shell interface {
 	Execute(ctx context.Context, input *ExecuteRequest) (result *ExecuteResponse, err error)
 }
 
 // StreamingShell is the streaming counterpart of Shell. ExecuteStreaming must honor
-// ctx cancellation by stopping the underlying command, as described on Shell.
+// both stop paths described on Shell.
 type StreamingShell interface {
 	ExecuteStreaming(ctx context.Context, input *ExecuteRequest) (result *schema.StreamReader[*ExecuteResponse], err error)
 }
