@@ -210,10 +210,14 @@ func init() {
 type serialization struct {
 	RunCtx *runContext
 	// deprecated: still keep it here for backward compatibility
-	Info                *InterruptInfo
-	EnableStreaming     bool
-	InterruptID2Address map[string]Address
-	InterruptID2State   map[string]core.InterruptState
+	Info *InterruptInfo
+	// InfoDataSourceInterruptID identifies the InterruptID2State entry whose
+	// checkpoint bytes must be restored into ChatModelAgentInterruptInfo.Data.
+	// It is empty when Info.Data is stored inline.
+	InfoDataSourceInterruptID string
+	EnableStreaming           bool
+	InterruptID2Address       map[string]Address
+	InterruptID2State         map[string]core.InterruptState
 }
 
 func runnerLoadCheckPointImpl(store CheckPointStore, ctx context.Context, checkpointID string) (
@@ -232,6 +236,9 @@ func runnerLoadCheckPointImpl(store CheckPointStore, ctx context.Context, checkp
 	err = gob.NewDecoder(bytes.NewReader(data)).Decode(s)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("failed to decode checkpoint: %w", err)
+	}
+	if err = restoreRunnerCheckpointInfoData(s); err != nil {
+		return nil, nil, nil, err
 	}
 	ctx = core.PopulateInterruptState(ctx, s.InterruptID2Address, s.InterruptID2State)
 
@@ -295,19 +302,66 @@ func runnerSaveCheckPointImpl(
 	runCtx := getRunCtx(ctx)
 
 	id2Addr, id2State := core.SignalToPersistenceMaps(is)
+	info, infoDataStateID := compactRunnerCheckpointInfoData(info, is)
 
 	buf := &bytes.Buffer{}
 	err := gob.NewEncoder(buf).Encode(&serialization{
-		RunCtx:              runCtx,
-		Info:                info,
-		InterruptID2Address: id2Addr,
-		InterruptID2State:   id2State,
-		EnableStreaming:     enableStreaming,
+		RunCtx:                    runCtx,
+		Info:                      info,
+		InfoDataSourceInterruptID: infoDataStateID,
+		InterruptID2Address:       id2Addr,
+		InterruptID2State:         id2State,
+		EnableStreaming:           enableStreaming,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to encode checkpoint: %w", err)
 	}
 	return store.Set(ctx, key, buf.Bytes())
+}
+
+func compactRunnerCheckpointInfoData(info *InterruptInfo, is *core.InterruptSignal) (*InterruptInfo, string) {
+	if info == nil || is == nil || is.ID == "" {
+		return info, ""
+	}
+	chatModelInfo, ok := info.Data.(*ChatModelAgentInterruptInfo)
+	if !ok || chatModelInfo == nil {
+		return info, ""
+	}
+	state, ok := is.State.([]byte)
+	if !ok || !bytes.Equal(chatModelInfo.Data, state) {
+		return info, ""
+	}
+
+	compactedChatModelInfo := *chatModelInfo
+	compactedChatModelInfo.Data = nil
+	compactedInfo := *info
+	compactedInfo.Data = &compactedChatModelInfo
+	return &compactedInfo, is.ID
+}
+
+func restoreRunnerCheckpointInfoData(s *serialization) error {
+	if s.InfoDataSourceInterruptID == "" {
+		return nil
+	}
+	if s.Info == nil {
+		return errors.New("failed to decode checkpoint: compacted interrupt info is missing")
+	}
+	chatModelInfo, ok := s.Info.Data.(*ChatModelAgentInterruptInfo)
+	if !ok || chatModelInfo == nil {
+		return fmt.Errorf("failed to decode checkpoint: compacted interrupt info has invalid type %T", s.Info.Data)
+	}
+	state, ok := s.InterruptID2State[s.InfoDataSourceInterruptID]
+	if !ok {
+		return fmt.Errorf("failed to decode checkpoint: compacted interrupt state %q is missing",
+			s.InfoDataSourceInterruptID)
+	}
+	data, ok := state.State.([]byte)
+	if !ok {
+		return fmt.Errorf("failed to decode checkpoint: compacted interrupt state %q has invalid type %T",
+			s.InfoDataSourceInterruptID, state.State)
+	}
+	chatModelInfo.Data = append([]byte(nil), data...)
+	return nil
 }
 
 const bridgeCheckpointID = "adk_react_mock_key"
