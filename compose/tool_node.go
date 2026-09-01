@@ -437,7 +437,7 @@ func hydrateCheckpointToolsNodeState(cp *checkpoint) error {
 
 func checkpointStateMessages(state any) []*schema.Message {
 	value := reflect.ValueOf(state)
-	for value.IsValid() && value.Kind() == reflect.Ptr {
+	for value.IsValid() && value.Kind() == reflect.Pointer {
 		if value.IsNil() {
 			return nil
 		}
