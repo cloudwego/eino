@@ -34,9 +34,9 @@ func TestCheckpointLayoutV1SizeAndLegacyFailure(t *testing.T) {
 		payload   int
 		sizeLimit int
 	}{
-		{name: "single_no_subgraph", payload: 320 << 10, sizeLimit: 1_800_000},
-		{name: "agent_tool_320k", depth: 1, payload: 320 << 10, sizeLimit: 2_500_000},
-		{name: "agent_tool_1m", depth: 1, payload: 1 << 20, sizeLimit: 8_000_000},
+		{name: "single_no_subgraph", payload: 320 << 10, sizeLimit: 1 << 20},
+		{name: "agent_tool_320k", depth: 1, payload: 320 << 10, sizeLimit: 1 << 20},
+		{name: "agent_tool_1m", depth: 1, payload: 1 << 20, sizeLimit: 5 << 18},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -50,7 +50,8 @@ func TestCheckpointLayoutV1SizeAndLegacyFailure(t *testing.T) {
 			raw, interruptIDs, interruptAddresses := captureCheckpointCompatFixture(t, spec)
 			t.Logf("checkpoint bytes: %d", len(raw))
 			require.LessOrEqual(t, len(raw), tt.sizeLimit)
-			resumeCheckpointCompatCandidate(t, spec, raw, interruptIDs, len(interruptIDs), 0)
+			resumeCheckpointCompatCandidate(t, spec, raw, interruptIDs, len(interruptIDs), 0,
+				interruptAddresses)
 
 			spec.InterruptIDs = interruptIDs
 			spec.InterruptAddresses = interruptAddresses
@@ -66,11 +67,7 @@ func TestCheckpointLayoutV1SizeAndLegacyFailure(t *testing.T) {
 			cmd := exec.Command(readerBin, "-fixture-dir", tmpDir, "-fixture", spec.Name)
 			output, err := cmd.CombinedOutput()
 			require.Error(t, err)
-			if tt.depth == 0 {
-				require.Contains(t, string(output), "_eino_checkpoint_layout_v1")
-			} else {
-				require.Contains(t, string(output), "name not registered for interface")
-			}
+			require.Contains(t, string(output), "name not registered for interface")
 		})
 	}
 }

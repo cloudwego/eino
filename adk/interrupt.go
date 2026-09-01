@@ -215,6 +215,7 @@ type serialization struct {
 	// checkpoint bytes must be restored into ChatModelAgentInterruptInfo.Data.
 	// It is empty when Info.Data is stored inline.
 	InfoDataSourceInterruptID string
+	ProjectionV1              *checkpointProjectionV1
 	EnableStreaming           bool
 	InterruptID2Address       map[string]Address
 	InterruptID2State         map[string]core.InterruptState
@@ -236,6 +237,9 @@ func runnerLoadCheckPointImpl(store CheckPointStore, ctx context.Context, checkp
 	err = gob.NewDecoder(bytes.NewReader(data)).Decode(s)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("failed to decode checkpoint: %w", err)
+	}
+	if err = restoreRunnerCheckpointProjection(s); err != nil {
+		return nil, nil, nil, err
 	}
 	if err = restoreRunnerCheckpointInfoData(s); err != nil {
 		return nil, nil, nil, err
@@ -303,12 +307,21 @@ func runnerSaveCheckPointImpl(
 
 	id2Addr, id2State := core.SignalToPersistenceMaps(is)
 	info, infoDataStateID := compactRunnerCheckpointInfoData(info, is)
+	if err := validateRunnerProjectionReservedIDs(id2Addr, id2State); err != nil {
+		return err
+	}
+	runCtx, info, id2State, projection, err := projectRunnerCheckpoint(
+		runCtx, info, infoDataStateID, id2State)
+	if err != nil {
+		return fmt.Errorf("failed to project checkpoint: %w", err)
+	}
 
 	buf := &bytes.Buffer{}
-	err := gob.NewEncoder(buf).Encode(&serialization{
+	err = gob.NewEncoder(buf).Encode(&serialization{
 		RunCtx:                    runCtx,
 		Info:                      info,
 		InfoDataSourceInterruptID: infoDataStateID,
+		ProjectionV1:              projection,
 		InterruptID2Address:       id2Addr,
 		InterruptID2State:         id2State,
 		EnableStreaming:           enableStreaming,
