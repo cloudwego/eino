@@ -333,6 +333,7 @@ func TestRunnerCheckpointProjectionReusesEnhancedToolResult(t *testing.T) {
 			})
 			iter := runner.Query(context.Background(), "start", WithCheckPointID(name))
 			var interruptIDs []string
+			var liveInterruptInfo *InterruptInfo
 			for {
 				event, ok := iter.Next()
 				if !ok {
@@ -340,6 +341,7 @@ func TestRunnerCheckpointProjectionReusesEnhancedToolResult(t *testing.T) {
 				}
 				require.NoError(t, event.Err)
 				if event.Action != nil && event.Action.Interrupted != nil {
+					liveInterruptInfo = event.Action.Interrupted
 					for _, interruptCtx := range event.Action.Interrupted.InterruptContexts {
 						interruptIDs = append(interruptIDs, interruptCtx.ID)
 					}
@@ -347,6 +349,9 @@ func TestRunnerCheckpointProjectionReusesEnhancedToolResult(t *testing.T) {
 			}
 			require.Len(t, interruptIDs, 1)
 			require.Equal(t, 1, enhanced.callCount())
+			liveExtra := findCheckpointProjectionToolsExtra(t, liveInterruptInfo)
+			require.Contains(t, liveExtra.ExecutedEnhancedTools, "call-0",
+				"checkpoint projection mutated the live interrupt event")
 
 			raw, exists, err := store.Get(context.Background(), name)
 			require.NoError(t, err)
@@ -355,6 +360,11 @@ func TestRunnerCheckpointProjectionReusesEnhancedToolResult(t *testing.T) {
 			require.NoError(t, gob.NewDecoder(bytes.NewReader(raw)).Decode(&persisted))
 			require.NotNil(t, persisted.ProjectionV1)
 			require.NotEmpty(t, persisted.ProjectionV1.ToolResultRefs)
+			_, _, restoredInfo, err := runnerLoadCheckPointImpl(store, context.Background(), name)
+			require.NoError(t, err)
+			restoredExtra := findCheckpointProjectionToolsExtra(t, restoredInfo.InterruptInfo)
+			require.True(t, reflect.DeepEqual(liveExtra.ExecutedEnhancedTools,
+				restoredExtra.ExecutedEnhancedTools))
 
 			iter, err = runner.ResumeWithParams(context.Background(), name, &ResumeParams{
 				Targets: map[string]any{interruptIDs[0]: "resumed"},
@@ -371,6 +381,25 @@ func TestRunnerCheckpointProjectionReusesEnhancedToolResult(t *testing.T) {
 				"successful enhanced sibling must be restored instead of executed again")
 		})
 	}
+}
+
+func findCheckpointProjectionToolsExtra(t *testing.T,
+	info *InterruptInfo) *compose.ToolsInterruptAndRerunExtra {
+	t.Helper()
+	require.NotNil(t, info)
+	chatModelInfo, ok := info.Data.(*ChatModelAgentInterruptInfo)
+	require.True(t, ok)
+	require.NotNil(t, chatModelInfo)
+	require.NotNil(t, chatModelInfo.Info)
+	for _, interruptCtx := range chatModelInfo.Info.InterruptContexts {
+		for current := interruptCtx; current != nil; current = current.Parent {
+			if extra, ok := current.Info.(*compose.ToolsInterruptAndRerunExtra); ok {
+				return extra
+			}
+		}
+	}
+	t.Fatal("ToolsInterruptAndRerunExtra not found")
+	return nil
 }
 
 func TestRunnerCheckpointProjectionPreservesUnmatchedMessagesInline(t *testing.T) {

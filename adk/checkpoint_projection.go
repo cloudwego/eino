@@ -693,6 +693,18 @@ func cloneProjectionInfoValue(value any) any {
 		}
 		cloned := *value
 		cloned.ToolCalls = append([]schema.ToolCall(nil), value.ToolCalls...)
+		cloned.ExecutedTools = make(map[string]string, len(value.ExecutedTools))
+		for callID, result := range value.ExecutedTools {
+			cloned.ExecutedTools[callID] = result
+		}
+		cloned.ExecutedEnhancedTools = make(map[string]*schema.ToolResult, len(value.ExecutedEnhancedTools))
+		for callID, result := range value.ExecutedEnhancedTools {
+			cloned.ExecutedEnhancedTools[callID] = result
+		}
+		cloned.RerunExtraMap = make(map[string]any, len(value.RerunExtraMap))
+		for callID, extra := range value.RerunExtraMap {
+			cloned.RerunExtraMap[callID] = extra
+		}
 		return &cloned
 	case *compose.InterruptInfo:
 		return cloneComposeInterruptInfoForProjection(value)
