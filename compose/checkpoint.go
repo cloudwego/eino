@@ -248,6 +248,22 @@ func consumeCheckpointLayoutMetadata(cp *checkpoint) error {
 	return nil
 }
 
+func initializeCheckpointLayoutV1(cp *checkpoint) error {
+	cp.StateLayoutVersion = checkpointStateLayoutVersionV1
+	if cp.InterruptID2State == nil {
+		cp.InterruptID2State = make(map[string]core.InterruptState)
+	}
+	for id := range cp.InterruptID2State {
+		if isCheckpointMetadataID(id) {
+			return fmt.Errorf("interrupt ID %q uses reserved checkpoint metadata prefix", id)
+		}
+	}
+	cp.InterruptID2State[checkpointLayoutSentinelID] = core.InterruptState{
+		State: &checkpointLayoutSentinelV1{Version: checkpointStateLayoutVersionV1},
+	}
+	return nil
+}
+
 func isCheckpointMetadataID(id string) bool {
 	return strings.HasPrefix(id, "_eino_")
 }

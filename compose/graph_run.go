@@ -609,6 +609,9 @@ func (r *runner) handleInterrupt(
 	}
 
 	cp.InterruptID2Addr, cp.InterruptID2State = core.SignalToPersistenceMaps(is)
+	if err = initializeCheckpointLayoutV1(cp); err != nil {
+		return fmt.Errorf("failed to initialize checkpoint layout: %w", err)
+	}
 
 	for _, t := range nextTasks {
 		cp.Inputs[t.nodeKey] = t.input
@@ -755,12 +758,16 @@ func (r *runner) handleInterruptWithSubGraphAndRerunNodes(
 	}
 
 	cp.InterruptID2Addr, cp.InterruptID2State = core.SignalToPersistenceMaps(is)
+	if err = initializeCheckpointLayoutV1(cp); err != nil {
+		return fmt.Errorf("failed to initialize checkpoint layout: %w", err)
+	}
 
 	for _, t := range subgraphTasks {
 		cp.RerunNodes = append(cp.RerunNodes, t.nodeKey)
 		cp.SubGraphs[t.nodeKey] = tempInfo.subGraphInterrupts[t.nodeKey].CheckPoint
 		intInfo.SubGraphs[t.nodeKey] = tempInfo.subGraphInterrupts[t.nodeKey].Info
 	}
+	removeSubgraphOwnedInterruptStates(cp)
 	cp.RerunNodes = append(cp.RerunNodes, tempInfo.interruptRerunNodes...)
 	for _, t := range rerunTasks {
 		if t.originalInput != nil {
@@ -975,6 +982,23 @@ func collectCheckpointStateOwners(cp *checkpoint, owners map[string]int) {
 	}
 	for _, sub := range cp.SubGraphs {
 		collectCheckpointStateOwners(sub, owners)
+	}
+}
+
+func removeSubgraphOwnedInterruptStates(cp *checkpoint) {
+	for _, sub := range cp.SubGraphs {
+		removeCheckpointStateIDs(cp.InterruptID2State, sub)
+	}
+}
+
+func removeCheckpointStateIDs(parent map[string]core.InterruptState, child *checkpoint) {
+	for id := range child.InterruptID2State {
+		if !isCheckpointMetadataID(id) {
+			delete(parent, id)
+		}
+	}
+	for _, nested := range child.SubGraphs {
+		removeCheckpointStateIDs(parent, nested)
 	}
 }
 
