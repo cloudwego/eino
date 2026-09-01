@@ -1,0 +1,237 @@
+{
+  "producer_commit": "60e1d9929cb65c8c4814b66fba2854e29b730114",
+  "fixtures": [
+    {
+      "name": "single_invoke",
+      "file": "single_invoke.bin.gz",
+      "sha256": "139efb8e7252d95c36b6c835f5db97609425f52c24d4408f614c62c7ecf2fd05",
+      "depth": 0,
+      "payload_field": "content",
+      "payload_size": 0,
+      "interrupt_ids": [
+        "663ce51a-871d-4465-9d44-f700226fd1f4"
+      ],
+      "interrupt_addresses": [
+        "agent:RootAgent;tool:RootAgentInterrupt:call-0"
+      ]
+    },
+    {
+      "name": "single_stream",
+      "file": "single_stream.bin.gz",
+      "sha256": "e91af8cc44cee9341cc729244a4b55ae991793b3fbfe1b1fcd39d25c9c0a25fb",
+      "depth": 0,
+      "streaming": true,
+      "payload_field": "content",
+      "payload_size": 0,
+      "interrupt_ids": [
+        "b6c4ce55-ca88-47d7-b5f3-99106c558270"
+      ],
+      "interrupt_addresses": [
+        "agent:RootAgent;tool:RootAgentInterrupt:call-0"
+      ]
+    },
+    {
+      "name": "cancel_after_model",
+      "file": "cancel_after_model.bin.gz",
+      "sha256": "108a6182394be730df5a41268cf2f72bd0e164eb81de8e9abc4ecf1aa1fea222",
+      "depth": 0,
+      "cancel": true,
+      "payload_field": "content",
+      "payload_size": 0,
+      "interrupt_ids": null,
+      "interrupt_addresses": null
+    },
+    {
+      "name": "agent_tool_depth_1",
+      "file": "agent_tool_depth_1.bin.gz",
+      "sha256": "c127efcfc43c5aab076fa2bcdecd230156278aa5f2260d7d78289e41dc5c4e3e",
+      "depth": 1,
+      "payload_field": "content",
+      "payload_size": 0,
+      "interrupt_ids": [
+        "327e62bb-f6d6-471a-81df-7ff13c07d632"
+      ],
+      "interrupt_addresses": [
+        "agent:RootAgent;tool:RootAgentChild1:call-0;agent:RootAgentChild1;tool:RootAgentChild1Interrupt:call-0"
+      ]
+    },
+    {
+      "name": "agent_tool_depth_2",
+      "file": "agent_tool_depth_2.bin.gz",
+      "sha256": "a67737bf4ef31699699d8c7795db3d3de5b4ddd99944725c2973d8db0a387fd0",
+      "depth": 2,
+      "payload_field": "content",
+      "payload_size": 0,
+      "interrupt_ids": [
+        "d16be5f6-d8b6-4ce2-9938-def2428d02f1"
+      ],
+      "interrupt_addresses": [
+        "agent:RootAgent;tool:RootAgentChild2:call-0;agent:RootAgentChild2;tool:RootAgentChild2Child1:call-0;agent:RootAgentChild2Child1;tool:RootAgentChild2Child1Interrupt:call-0"
+      ]
+    },
+    {
+      "name": "agent_tool_depth_3",
+      "file": "agent_tool_depth_3.bin.gz",
+      "sha256": "99205c85c6410c0de91f5a729334df18d5ee1659ab25a4619b13ad1d95ffb6e2",
+      "depth": 3,
+      "payload_field": "content",
+      "payload_size": 0,
+      "interrupt_ids": [
+        "d703e77a-ce75-4144-9e86-a40b5105d33e"
+      ],
+      "interrupt_addresses": [
+        "agent:RootAgent;tool:RootAgentChild3:call-0;agent:RootAgentChild3;tool:RootAgentChild3Child2:call-0;agent:RootAgentChild3Child2;tool:RootAgentChild3Child2Child1:call-0;agent:RootAgentChild3Child2Child1;tool:RootAgentChild3Child2Child1Interrupt:call-0"
+      ]
+    },
+    {
+      "name": "parallel_6",
+      "file": "parallel_6.bin.gz",
+      "sha256": "7a99fe9dadf84a0c860f391bdcdb9af338f28a002f1c5c4239d188695a70ce14",
+      "depth": 0,
+      "parallel_children": 6,
+      "resume_target_count": 6,
+      "payload_field": "content",
+      "payload_size": 0,
+      "interrupt_ids": [
+        "ea0d9397-79a9-4b1a-a799-b570909459b2",
+        "4f58c6a1-d5d4-4f03-9e3c-f7f2e64ac4d6",
+        "ef7810b7-ac81-40cc-845e-09a4aad07aa6",
+        "392a84de-6d8a-492f-a295-0f419e185e8b",
+        "54813d9f-36ad-4e8f-9502-f0d29dcda745",
+        "e4a1da74-9189-4fbd-a2c3-6c46ab520348"
+      ],
+      "interrupt_addresses": [
+        "agent:ParallelParent;tool:ParallelChild0:call-0;agent:ParallelChild0;tool:ParallelChild0Interrupt:call-0",
+        "agent:ParallelParent;tool:ParallelChild1:call-1;agent:ParallelChild1;tool:ParallelChild1Interrupt:call-0",
+        "agent:ParallelParent;tool:ParallelChild2:call-2;agent:ParallelChild2;tool:ParallelChild2Interrupt:call-0",
+        "agent:ParallelParent;tool:ParallelChild3:call-3;agent:ParallelChild3;tool:ParallelChild3Interrupt:call-0",
+        "agent:ParallelParent;tool:ParallelChild4:call-4;agent:ParallelChild4;tool:ParallelChild4Interrupt:call-0",
+        "agent:ParallelParent;tool:ParallelChild5:call-5;agent:ParallelChild5;tool:ParallelChild5Interrupt:call-0"
+      ]
+    },
+    {
+      "name": "parallel_6_single_target",
+      "file": "parallel_6_single_target.bin.gz",
+      "sha256": "e4c69dbdebed9e61ca6985efe53de5faa0c83b026b0817fe26b8a5475a685d47",
+      "depth": 0,
+      "parallel_children": 6,
+      "resume_target_count": 1,
+      "expected_interrupts": 5,
+      "payload_field": "content",
+      "payload_size": 0,
+      "interrupt_ids": [
+        "6808e20b-685d-4633-877c-ab3b7d7bdd26",
+        "d2998adf-b6dc-474d-babb-9b7c74ed4555",
+        "8f644132-4571-44db-869a-e7cd393a0738",
+        "88414191-9f01-4795-a7bd-a3a6bacde19d",
+        "710c87fa-b535-485b-b18e-d2b800cfa883",
+        "0ffd928f-1577-4a83-a433-eb60b4830de2"
+      ],
+      "interrupt_addresses": [
+        "agent:ParallelParent;tool:ParallelChild0:call-0;agent:ParallelChild0;tool:ParallelChild0Interrupt:call-0",
+        "agent:ParallelParent;tool:ParallelChild1:call-1;agent:ParallelChild1;tool:ParallelChild1Interrupt:call-0",
+        "agent:ParallelParent;tool:ParallelChild2:call-2;agent:ParallelChild2;tool:ParallelChild2Interrupt:call-0",
+        "agent:ParallelParent;tool:ParallelChild3:call-3;agent:ParallelChild3;tool:ParallelChild3Interrupt:call-0",
+        "agent:ParallelParent;tool:ParallelChild4:call-4;agent:ParallelChild4;tool:ParallelChild4Interrupt:call-0",
+        "agent:ParallelParent;tool:ParallelChild5:call-5;agent:ParallelChild5;tool:ParallelChild5Interrupt:call-0"
+      ]
+    },
+    {
+      "name": "parallel_6_multi_target",
+      "file": "parallel_6_multi_target.bin.gz",
+      "sha256": "e4f71623bc502ba6d0247b94024933bbdd50bb22ae280b9664ba6fbd7253a6b6",
+      "depth": 0,
+      "parallel_children": 6,
+      "resume_target_count": 2,
+      "expected_interrupts": 4,
+      "payload_field": "content",
+      "payload_size": 0,
+      "interrupt_ids": [
+        "ca59d8cb-065e-4bbd-b0c9-3c5104a707e3",
+        "1a447392-a088-4f7a-88d1-3b40bceaeae9",
+        "f92123a0-ea66-47a5-aea9-85c0f90e1a9b",
+        "88ec826d-2d67-443e-a233-ffc7b793efbe",
+        "1160c820-3720-49d4-9827-8c9aff00e451",
+        "610d4826-441d-49a6-af6a-c50e5b7bcf21"
+      ],
+      "interrupt_addresses": [
+        "agent:ParallelParent;tool:ParallelChild0:call-0;agent:ParallelChild0;tool:ParallelChild0Interrupt:call-0",
+        "agent:ParallelParent;tool:ParallelChild1:call-1;agent:ParallelChild1;tool:ParallelChild1Interrupt:call-0",
+        "agent:ParallelParent;tool:ParallelChild2:call-2;agent:ParallelChild2;tool:ParallelChild2Interrupt:call-0",
+        "agent:ParallelParent;tool:ParallelChild3:call-3;agent:ParallelChild3;tool:ParallelChild3Interrupt:call-0",
+        "agent:ParallelParent;tool:ParallelChild4:call-4;agent:ParallelChild4;tool:ParallelChild4Interrupt:call-0",
+        "agent:ParallelParent;tool:ParallelChild5:call-5;agent:ParallelChild5;tool:ParallelChild5Interrupt:call-0"
+      ]
+    },
+    {
+      "name": "payload_content",
+      "file": "payload_content.bin.gz",
+      "sha256": "f47ff20c1beb9ae453386a129a6f2c69bbbc4ff7b9d8041ef77f1f8ca212d676",
+      "depth": 1,
+      "payload_field": "content",
+      "payload_size": 32768,
+      "interrupt_ids": [
+        "9f5cd73b-fbfb-48ec-b016-3741c15c24cf"
+      ],
+      "interrupt_addresses": [
+        "agent:RootAgent;tool:RootAgentChild1:call-0;agent:RootAgentChild1;tool:RootAgentChild1Interrupt:call-0"
+      ]
+    },
+    {
+      "name": "payload_reasoning",
+      "file": "payload_reasoning.bin.gz",
+      "sha256": "8cde19a5b15686734259057b838e08987fdaa63b96de34b798ec2e81ef6c3e51",
+      "depth": 1,
+      "payload_field": "reasoning",
+      "payload_size": 32768,
+      "interrupt_ids": [
+        "49f99840-6382-430c-8e1f-1f73c9677bb8"
+      ],
+      "interrupt_addresses": [
+        "agent:RootAgent;tool:RootAgentChild1:call-0;agent:RootAgentChild1;tool:RootAgentChild1Interrupt:call-0"
+      ]
+    },
+    {
+      "name": "payload_arguments",
+      "file": "payload_arguments.bin.gz",
+      "sha256": "753e1d940b36230ba90c7ddda47e2dfef177cd39c57b4bb4e48fb90abf76e8fc",
+      "depth": 1,
+      "payload_field": "tool_arguments",
+      "payload_size": 32768,
+      "interrupt_ids": [
+        "a61623f5-3400-4238-872b-ecfcae5a7d40"
+      ],
+      "interrupt_addresses": [
+        "agent:RootAgent;tool:RootAgentChild1:call-0;agent:RootAgentChild1;tool:RootAgentChild1Interrupt:call-0"
+      ]
+    },
+    {
+      "name": "payload_extra",
+      "file": "payload_extra.bin.gz",
+      "sha256": "4c575e9a0645846b22d1c704a7fa1e648d0dbcd1fa116aceddf194e915d67bd4",
+      "depth": 1,
+      "payload_field": "extra",
+      "payload_size": 32768,
+      "interrupt_ids": [
+        "3710fc26-094a-4c73-8b7b-415ca2b56466"
+      ],
+      "interrupt_addresses": [
+        "agent:RootAgent;tool:RootAgentChild1:call-0;agent:RootAgentChild1;tool:RootAgentChild1Interrupt:call-0"
+      ]
+    },
+    {
+      "name": "payload_multimodal",
+      "file": "payload_multimodal.bin.gz",
+      "sha256": "9cba820f852ceee44c2bc92c9058fc2bdde63d9a5e39dc9bc3430d69fce1a8e7",
+      "depth": 1,
+      "payload_field": "multimodal",
+      "payload_size": 32768,
+      "interrupt_ids": [
+        "23ccf6a6-029f-4410-8f7f-c0dce178f5c1"
+      ],
+      "interrupt_addresses": [
+        "agent:RootAgent;tool:RootAgentChild1:call-0;agent:RootAgentChild1;tool:RootAgentChild1Interrupt:call-0"
+      ]
+    }
+  ]
+}
