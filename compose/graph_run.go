@@ -970,6 +970,11 @@ func (r *runner) validateCheckpointIntegrity(cp *checkpoint) error {
 				return fmt.Errorf("interrupt ID %q has multiple checkpoint state owners", id)
 			}
 		}
+		for id := range owners {
+			if _, ok := cp.InterruptID2Addr[id]; !ok {
+				return fmt.Errorf("checkpoint state owner %q has no routing address", id)
+			}
+		}
 	}
 	return nil
 }

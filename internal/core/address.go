@@ -320,6 +320,9 @@ func PopulateInterruptState(ctx context.Context, id2Addr map[string]Address,
 	return ctx
 }
 
+// MergeInterruptState adds child-owned resume metadata without replacing state
+// that has already been populated or consumed by an outer execution layer.
+// An unconsumed empty state is a routing placeholder and may be filled.
 func MergeInterruptState(ctx context.Context, id2Addr map[string]Address,
 	id2State map[string]InterruptState) (context.Context, error) {
 	rInfo, ok := ctx.Value(globalResumeInfoKey{}).(*globalResumeInfo)

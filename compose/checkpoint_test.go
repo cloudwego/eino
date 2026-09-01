@@ -2451,6 +2451,17 @@ func TestCheckpointLayoutMetadataValidation(t *testing.T) {
 		err := validateCheckpointLayoutMetadata(&checkpoint{StateLayoutVersion: 2})
 		require.ErrorContains(t, err, "requires a newer Eino version")
 	})
+	t.Run("sentinel_version_mismatch", func(t *testing.T) {
+		err := validateCheckpointLayoutMetadata(&checkpoint{
+			StateLayoutVersion: 1,
+			InterruptID2State: map[string]core.InterruptState{
+				checkpointLayoutSentinelID: {
+					State: &checkpointLayoutSentinelV1{Version: 2},
+				},
+			},
+		})
+		require.ErrorContains(t, err, "invalid state layout sentinel")
+	})
 	t.Run("valid", func(t *testing.T) {
 		cp := &checkpoint{
 			StateLayoutVersion: 1,
@@ -2464,6 +2475,92 @@ func TestCheckpointLayoutMetadataValidation(t *testing.T) {
 		require.True(t, cp.layoutMetadataValidated)
 		require.NotContains(t, cp.InterruptID2State, checkpointLayoutSentinelID)
 	})
+	t.Run("legacy_with_sentinel", func(t *testing.T) {
+		err := validateCheckpointLayoutMetadata(&checkpoint{
+			InterruptID2State: map[string]core.InterruptState{
+				checkpointLayoutSentinelID: {
+					State: &checkpointLayoutSentinelV1{Version: 1},
+				},
+			},
+		})
+		require.ErrorContains(t, err, "legacy checkpoint contains")
+	})
+}
+
+func TestAttack_CheckpointLayoutRejectsReservedInterruptID(t *testing.T) {
+	err := initializeCheckpointLayoutV1(&checkpoint{
+		InterruptID2State: map[string]core.InterruptState{
+			"_eino_user_interrupt": {State: "user state"},
+		},
+	})
+	require.ErrorContains(t, err, "reserved checkpoint metadata prefix")
+}
+
+func TestMigrateCheckpointStatePreservesLayoutSentinel(t *testing.T) {
+	serializer := &serialization.InternalSerializer{}
+	cp := &checkpoint{
+		StateLayoutVersion: 1,
+		State:              "before",
+		InterruptID2State: map[string]core.InterruptState{
+			checkpointLayoutSentinelID: {
+				State: &checkpointLayoutSentinelV1{Version: 1},
+			},
+		},
+	}
+	data, err := serializer.Marshal(cp)
+	require.NoError(t, err)
+
+	data, err = MigrateCheckpointState(data, serializer, func(state any) (any, bool, error) {
+		if state == "before" {
+			return "after", true, nil
+		}
+		return state, false, nil
+	})
+	require.NoError(t, err)
+
+	got := &checkpoint{}
+	require.NoError(t, serializer.Unmarshal(data, got))
+	require.Equal(t, "after", got.State)
+	sentinel, ok := got.InterruptID2State[checkpointLayoutSentinelID].State.(*checkpointLayoutSentinelV1)
+	require.True(t, ok)
+	require.Equal(t, checkpointStateLayoutVersionV1, sentinel.Version)
+}
+
+func TestAttack_ForwardCheckpointRetainsChildOnMergeError(t *testing.T) {
+	parentAddress := Address{{Type: AddressSegmentNode, ID: "parent"}}
+	childAddress := Address{{Type: AddressSegmentNode, ID: "child"}}
+	child := &checkpoint{
+		StateLayoutVersion: 1,
+		InterruptID2Addr:   map[string]Address{"shared": childAddress},
+		InterruptID2State: map[string]core.InterruptState{
+			"shared":                   {State: "child"},
+			checkpointLayoutSentinelID: {State: &checkpointLayoutSentinelV1{Version: 1}},
+		},
+	}
+	parent := &checkpoint{
+		StateLayoutVersion: 1,
+		SubGraphs:          map[string]*checkpoint{"child": child},
+		InterruptID2Addr:   map[string]Address{"shared": parentAddress},
+		InterruptID2State:  map[string]core.InterruptState{"shared": {State: "parent"}},
+	}
+
+	ctx := setCheckPointToCtx(context.Background(), parent)
+	_, err := forwardCheckPoint(ctx, "child")
+	require.ErrorContains(t, err, "conflicting addresses")
+	require.Same(t, child, parent.SubGraphs["child"])
+}
+
+func TestCheckpointSparseOwnershipRejectsStateWithoutAddress(t *testing.T) {
+	cp := &checkpoint{
+		StateLayoutVersion:      1,
+		layoutMetadataValidated: true,
+		InterruptID2Addr:        map[string]Address{},
+		InterruptID2State: map[string]core.InterruptState{
+			"orphan": {State: "orphan"},
+		},
+	}
+	err := (&runner{}).validateCheckpointIntegrity(cp)
+	require.ErrorContains(t, err, "has no routing address")
 }
 
 type checkpointTestTool[I, O any] struct {

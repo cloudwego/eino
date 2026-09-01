@@ -201,7 +201,6 @@ func forwardCheckPoint(ctx context.Context, nodeKey string) (context.Context, er
 	}
 
 	if subCP, ok := cp.SubGraphs[nodeKey]; ok {
-		delete(cp.SubGraphs, nodeKey) // only forward once
 		var err error
 		if subCP.StateLayoutVersion == checkpointStateLayoutVersionV1 {
 			if err = consumeCheckpointLayoutMetadata(subCP); err != nil {
@@ -212,13 +211,20 @@ func forwardCheckPoint(ctx context.Context, nodeKey string) (context.Context, er
 				return nil, fmt.Errorf("failed to merge subgraph interrupt state: %w", err)
 			}
 		}
+		delete(cp.SubGraphs, nodeKey) // only forward once after successful validation and merge
 		return context.WithValue(ctx, checkPointKey{}, subCP), nil
 	}
 	return context.WithValue(ctx, checkPointKey{}, (*checkpoint)(nil)), nil
 }
 
 func validateCheckpointLayoutMetadata(cp *checkpoint) error {
-	if cp == nil || cp.StateLayoutVersion == 0 || cp.layoutMetadataValidated {
+	if cp == nil || cp.layoutMetadataValidated {
+		return nil
+	}
+	if cp.StateLayoutVersion == 0 {
+		if _, exists := cp.InterruptID2State[checkpointLayoutSentinelID]; exists {
+			return errors.New("legacy checkpoint contains a versioned state layout sentinel")
+		}
 		return nil
 	}
 	if cp.StateLayoutVersion != checkpointStateLayoutVersionV1 {
@@ -358,10 +364,12 @@ func isTypedNil(v any) bool {
 //   - If error is non-nil, migration stops and the error is returned to the caller.
 //
 // The original bytes are returned only if no state was changed anywhere in the checkpoint tree.
+// Checkpoint metadata and interrupt-state sentinels are preserved and are not passed to migrate.
+// A checkpoint written by a newer Eino version may fail decoding before migration can run.
 func MigrateCheckpointState(data []byte, serializer Serializer, migrate func(state any) (any, bool, error)) ([]byte, error) {
 	cp := &checkpoint{}
 	if err := serializer.Unmarshal(data, cp); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to decode checkpoint for migration; checkpoint may require a newer Eino version: %w", err)
 	}
 	changed, err := migrateCheckpoint(cp, migrate)
 	if err != nil {
