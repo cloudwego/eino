@@ -304,6 +304,7 @@ type ToolsInterruptAndRerunExtra struct {
 func init() {
 	schema.RegisterName[*ToolsInterruptAndRerunExtra]("_eino_compose_tools_interrupt_and_rerun_extra")
 	schema.RegisterName[*toolsInterruptAndRerunState]("_eino_compose_tools_interrupt_and_rerun_state")
+	schema.RegisterName[*toolsInterruptAndRerunStateV1]("_eino_compose_tools_interrupt_and_rerun_state_v1")
 }
 
 type toolsInterruptAndRerunState struct {
@@ -311,6 +312,48 @@ type toolsInterruptAndRerunState struct {
 	ExecutedTools         map[string]string
 	ExecutedEnhancedTools map[string]*schema.ToolResult
 	RerunTools            []string
+}
+
+const toolsInterruptAndRerunStateVersionV1 = 1
+
+type toolsInterruptAndRerunStateV1 struct {
+	Version               int
+	Role                  schema.RoleType
+	ToolCalls             []schema.ToolCall
+	ExecutedTools         map[string]string
+	ExecutedEnhancedTools map[string]*schema.ToolResult
+	RerunTools            []string
+}
+
+func restoreToolsInterruptState(ctx context.Context, input *schema.Message,
+	executedTools map[string]string,
+	executedEnhancedTools map[string]*schema.ToolResult,
+) (*schema.Message, map[string]string, map[string]*schema.ToolResult, error) {
+	wasInterrupted, hasState, state := GetInterruptState[any](ctx)
+	if !wasInterrupted || !hasState {
+		return input, executedTools, executedEnhancedTools, nil
+	}
+
+	switch state := state.(type) {
+	case *toolsInterruptAndRerunState:
+		if state == nil || state.Input == nil {
+			return nil, nil, nil, errors.New("tools node legacy interrupt state has nil input")
+		}
+		return state.Input, state.ExecutedTools, state.ExecutedEnhancedTools, nil
+	case *toolsInterruptAndRerunStateV1:
+		if state == nil || state.Version != toolsInterruptAndRerunStateVersionV1 {
+			return nil, nil, nil, errors.New("tools node interrupt state has unsupported version")
+		}
+		if state.Role != schema.Assistant {
+			return nil, nil, nil, fmt.Errorf("tools node interrupt state has invalid role %q", state.Role)
+		}
+		return &schema.Message{
+			Role:      state.Role,
+			ToolCalls: state.ToolCalls,
+		}, state.ExecutedTools, state.ExecutedEnhancedTools, nil
+	default:
+		return nil, nil, nil, fmt.Errorf("tools node has invalid interrupt state type %T", state)
+	}
 }
 
 type toolsTuple struct {
@@ -1058,14 +1101,11 @@ func (tn *ToolsNode) Invoke(ctx context.Context, input *schema.Message,
 
 	var executedTools map[string]string
 	var executedEnhancedTools map[string]*schema.ToolResult
-	if wasInterrupted, hasState, tnState := GetInterruptState[*toolsInterruptAndRerunState](ctx); wasInterrupted && hasState {
-		input = tnState.Input
-		if tnState.ExecutedTools != nil {
-			executedTools = tnState.ExecutedTools
-		}
-		if tnState.ExecutedEnhancedTools != nil {
-			executedEnhancedTools = tnState.ExecutedEnhancedTools
-		}
+	var stateErr error
+	input, executedTools, executedEnhancedTools, stateErr = restoreToolsInterruptState(
+		ctx, input, executedTools, executedEnhancedTools)
+	if stateErr != nil {
+		return nil, stateErr
 	}
 
 	tasks, err := tn.genToolCallTasks(ctx, tuple, input, executedTools, executedEnhancedTools, false)
@@ -1160,14 +1200,11 @@ func (tn *ToolsNode) Stream(ctx context.Context, input *schema.Message,
 
 	var executedTools map[string]string
 	var executedEnhancedTools map[string]*schema.ToolResult
-	if wasInterrupted, hasState, tnState := GetInterruptState[*toolsInterruptAndRerunState](ctx); wasInterrupted && hasState {
-		input = tnState.Input
-		if tnState.ExecutedTools != nil {
-			executedTools = tnState.ExecutedTools
-		}
-		if tnState.ExecutedEnhancedTools != nil {
-			executedEnhancedTools = tnState.ExecutedEnhancedTools
-		}
+	var stateErr error
+	input, executedTools, executedEnhancedTools, stateErr = restoreToolsInterruptState(
+		ctx, input, executedTools, executedEnhancedTools)
+	if stateErr != nil {
+		return nil, stateErr
 	}
 
 	tasks, err := tn.genToolCallTasks(ctx, tuple, input, executedTools, executedEnhancedTools, true)
