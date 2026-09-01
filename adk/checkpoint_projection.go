@@ -445,6 +445,18 @@ func projectionMessageDigest(message any) (string, bool) {
 	return hex.EncodeToString(sum[:]), true
 }
 
+func checkpointProjectionPathEqual(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
+}
+
 func (i *checkpointProjectionIndex) sourceForSchemaMessage(
 	message *schema.Message) (checkpointMessageSourceV1, bool) {
 	if message == nil {
@@ -470,7 +482,7 @@ func (i *checkpointProjectionIndex) schemaMessage(
 	for _, candidate := range candidates {
 		if candidate.source.Kind == projectionMessageKindSchema &&
 			candidate.source.Index == source.Index &&
-			reflect.DeepEqual(candidate.source.GraphPath, source.GraphPath) &&
+			checkpointProjectionPathEqual(candidate.source.GraphPath, source.GraphPath) &&
 			candidate.source.Digest == source.Digest {
 			return cloneSchemaMessageForProjection(candidate.message)
 		}
@@ -503,7 +515,7 @@ func (i *checkpointProjectionIndex) agenticMessage(
 	for _, candidate := range candidates {
 		if candidate.source.Kind == projectionMessageKindAgentic &&
 			candidate.source.Index == source.Index &&
-			reflect.DeepEqual(candidate.source.GraphPath, source.GraphPath) &&
+			checkpointProjectionPathEqual(candidate.source.GraphPath, source.GraphPath) &&
 			candidate.source.Digest == source.Digest {
 			return cloneAgenticMessageForProjection(candidate.agenticMessage)
 		}

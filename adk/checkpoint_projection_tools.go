@@ -323,7 +323,7 @@ func (i *checkpointProjectionIndex) toolResult(
 	for _, candidate := range i.toolResultsByCallID[source.ToolCallID] {
 		if candidate.source.Kind == source.Kind &&
 			candidate.source.InterruptID == source.InterruptID &&
-			reflect.DeepEqual(candidate.source.GraphPath, source.GraphPath) &&
+			checkpointProjectionPathEqual(candidate.source.GraphPath, source.GraphPath) &&
 			candidate.source.Digest == source.Digest {
 			return candidate, nil
 		}

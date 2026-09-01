@@ -190,6 +190,48 @@ func TestRunnerCheckpointProjectionMetadataValidation(t *testing.T) {
 	})
 }
 
+func TestCheckpointProjectionRootPathMetadata(t *testing.T) {
+	index := &checkpointProjectionIndex{
+		byID:                make(map[string][]canonicalCheckpointMessage),
+		toolResultsByCallID: make(map[string][]canonicalCheckpointToolResult),
+	}
+
+	message := schema.UserMessage("schema")
+	typedSetMessageID(message, "schema-root")
+	index.addSchemaMessage(nil, 0, message)
+	source, ok := index.sourceForSchemaMessage(message)
+	require.True(t, ok)
+	source.GraphPath = []string{}
+	restoredMessage, err := index.schemaMessage(source)
+	require.NoError(t, err)
+	require.Equal(t, message, restoredMessage)
+
+	agenticMessage := schema.UserAgenticMessage("agentic")
+	typedSetMessageID(agenticMessage, "agentic-root")
+	index.addAgenticMessage(nil, 0, agenticMessage)
+	agenticSource, ok := index.sourceForAgenticMessage(agenticMessage)
+	require.True(t, ok)
+	agenticSource.GraphPath = []string{}
+	restoredAgenticMessage, err := index.agenticMessage(agenticSource)
+	require.NoError(t, err)
+	require.Equal(t, agenticMessage, restoredAgenticMessage)
+
+	toolSource := checkpointToolResultSourceV1{
+		Kind:        projectionToolResultKindString,
+		InterruptID: "interrupt",
+		ToolCallID:  "tool",
+		Digest:      "digest",
+	}
+	index.toolResultsByCallID[toolSource.ToolCallID] = []canonicalCheckpointToolResult{{
+		source: toolSource,
+		text:   "result",
+	}}
+	toolSource.GraphPath = []string{}
+	restoredToolResult, err := index.toolResult(toolSource)
+	require.NoError(t, err)
+	require.Equal(t, "result", restoredToolResult.text)
+}
+
 func TestRunnerCheckpointProjectionReferenceValidation(t *testing.T) {
 	t.Run("run_context_slice_must_be_complete", func(t *testing.T) {
 		refs := []runCtxMessageProjectionV1{{
@@ -539,7 +581,9 @@ func TestRunnerCheckpointProjectionAgenticComposeValues(t *testing.T) {
 	raw, _, _ := captureCheckpointCompatFixture(t, spec)
 	var outer serialization
 	require.NoError(t, gob.NewDecoder(bytes.NewReader(raw)).Decode(&outer))
-	source := outer.InterruptID2State[outer.ProjectionV1.SourceInterruptID]
+	sourceID := outer.ProjectionV1.SourceInterruptID
+	require.NoError(t, restoreRunnerCheckpointProjection(&outer))
+	source := outer.InterruptID2State[sourceID]
 	sourceData, ok := source.State.([]byte)
 	require.True(t, ok)
 
