@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strings"
 
 	"github.com/cloudwego/eino/internal/core"
 	"github.com/cloudwego/eino/internal/serialization"
@@ -29,6 +30,7 @@ import (
 
 func init() {
 	schema.RegisterName[*checkpoint]("_eino_checkpoint")
+	schema.RegisterName[*checkpointLayoutSentinelV1]("_eino_checkpoint_layout_v1")
 	schema.RegisterName[*dagChannel]("_eino_dag_channel")
 	schema.RegisterName[*pregelChannel]("_eino_pregel_channel")
 	schema.RegisterName[dependencyState]("_eino_dependency_state")
@@ -105,7 +107,18 @@ func WithStateModifier(sm StateModifier) Option {
 	}
 }
 
+const (
+	checkpointStateLayoutVersionV1 = 1
+	checkpointLayoutSentinelID     = "_eino_checkpoint_layout"
+)
+
+type checkpointLayoutSentinelV1 struct {
+	Version int
+}
+
 type checkpoint struct {
+	StateLayoutVersion int
+
 	Channels       map[string]channel
 	Inputs         map[string] /*node key*/ any /*input*/
 	State          any
@@ -116,6 +129,8 @@ type checkpoint struct {
 
 	InterruptID2Addr  map[string]Address
 	InterruptID2State map[string]core.InterruptState
+
+	layoutMetadataValidated bool
 }
 
 type stateModifierKey struct{}
@@ -179,17 +194,62 @@ func getCheckPointFromCtx(ctx context.Context) *checkpoint {
 	return nil
 }
 
-func forwardCheckPoint(ctx context.Context, nodeKey string) context.Context {
+func forwardCheckPoint(ctx context.Context, nodeKey string) (context.Context, error) {
 	cp := getCheckPointFromCtx(ctx)
 	if cp == nil {
-		return ctx
+		return ctx, nil
 	}
 
 	if subCP, ok := cp.SubGraphs[nodeKey]; ok {
 		delete(cp.SubGraphs, nodeKey) // only forward once
-		return context.WithValue(ctx, checkPointKey{}, subCP)
+		var err error
+		if subCP.StateLayoutVersion == checkpointStateLayoutVersionV1 {
+			if err = consumeCheckpointLayoutMetadata(subCP); err != nil {
+				return nil, err
+			}
+			ctx, err = core.MergeInterruptState(ctx, subCP.InterruptID2Addr, subCP.InterruptID2State)
+			if err != nil {
+				return nil, fmt.Errorf("failed to merge subgraph interrupt state: %w", err)
+			}
+		}
+		return context.WithValue(ctx, checkPointKey{}, subCP), nil
 	}
-	return context.WithValue(ctx, checkPointKey{}, (*checkpoint)(nil))
+	return context.WithValue(ctx, checkPointKey{}, (*checkpoint)(nil)), nil
+}
+
+func validateCheckpointLayoutMetadata(cp *checkpoint) error {
+	if cp == nil || cp.StateLayoutVersion == 0 || cp.layoutMetadataValidated {
+		return nil
+	}
+	if cp.StateLayoutVersion != checkpointStateLayoutVersionV1 {
+		return fmt.Errorf("checkpoint requires a newer Eino version: unsupported state layout version %d",
+			cp.StateLayoutVersion)
+	}
+	state, ok := cp.InterruptID2State[checkpointLayoutSentinelID]
+	if !ok {
+		return errors.New("checkpoint state layout sentinel is missing")
+	}
+	sentinel, ok := state.State.(*checkpointLayoutSentinelV1)
+	if !ok || sentinel == nil || sentinel.Version != checkpointStateLayoutVersionV1 {
+		return fmt.Errorf("checkpoint has invalid state layout sentinel %T", state.State)
+	}
+	return nil
+}
+
+func consumeCheckpointLayoutMetadata(cp *checkpoint) error {
+	if err := validateCheckpointLayoutMetadata(cp); err != nil {
+		return err
+	}
+	if cp == nil || cp.StateLayoutVersion == 0 || cp.layoutMetadataValidated {
+		return nil
+	}
+	delete(cp.InterruptID2State, checkpointLayoutSentinelID)
+	cp.layoutMetadataValidated = true
+	return nil
+}
+
+func isCheckpointMetadataID(id string) bool {
+	return strings.HasPrefix(id, "_eino_")
 }
 
 func newCheckPointer(

@@ -160,6 +160,9 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 		// in subgraph, try to load checkpoint from ctx
 		initialized = true
 
+		if err = consumeCheckpointLayoutMetadata(cp); err != nil {
+			return nil, newGraphRunError(fmt.Errorf("invalid checkpoint metadata: %w", err))
+		}
 		if err = r.validateCheckpointIntegrity(cp); err != nil {
 			return nil, newGraphRunError(fmt.Errorf("invalid checkpoint: %w", err))
 		}
@@ -184,6 +187,9 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 			// load checkpoint from store
 			initialized = true
 
+			if err = consumeCheckpointLayoutMetadata(cp); err != nil {
+				return nil, newGraphRunError(fmt.Errorf("invalid checkpoint metadata: %w", err))
+			}
 			if err = r.validateCheckpointIntegrity(cp); err != nil {
 				return nil, newGraphRunError(fmt.Errorf("invalid checkpoint: %w", err))
 			}
@@ -825,7 +831,11 @@ func (r *runner) createTasks(ctx context.Context, nodeMap map[string]any, optMap
 		var subGraphCheckpointReady <-chan *subGraphInterruptError
 		taskOpts := optMap[nodeKey]
 		if call.action.nodeInfo != nil && call.action.nodeInfo.compileOption != nil {
-			taskCtx = forwardCheckPoint(taskCtx, nodeKey)
+			var err error
+			taskCtx, err = forwardCheckPoint(taskCtx, nodeKey)
+			if err != nil {
+				return nil, err
+			}
 		}
 		if isSubGraphCall(call) {
 			taskOpts, subGraphCheckpointReady = withSubGraphCheckpointPublisher(taskOpts)
@@ -898,7 +908,11 @@ func (r *runner) restoreTasks(
 		taskOpts := optMap[key]
 		if call.action.nodeInfo != nil && call.action.nodeInfo.compileOption != nil {
 			// sub graph
-			taskCtx = forwardCheckPoint(taskCtx, key)
+			var err error
+			taskCtx, err = forwardCheckPoint(taskCtx, key)
+			if err != nil {
+				return nil, err
+			}
 		}
 		if isSubGraphCall(call) {
 			taskOpts, subGraphCheckpointReady = withSubGraphCheckpointPublisher(taskOpts)
@@ -922,6 +936,9 @@ func (r *runner) restoreTasks(
 }
 
 func (r *runner) validateCheckpointIntegrity(cp *checkpoint) error {
+	if err := validateCheckpointLayoutMetadata(cp); err != nil {
+		return err
+	}
 	for _, key := range cp.RerunNodes {
 		call, ok := r.chanSubscribeTo[key]
 		if !ok || !isSubGraphCall(call) {
@@ -935,7 +952,30 @@ func (r *runner) validateCheckpointIntegrity(cp *checkpoint) error {
 		}
 		return fmt.Errorf("subgraph node %q is marked for rerun without a nested checkpoint or persisted input", key)
 	}
+	if cp.StateLayoutVersion == checkpointStateLayoutVersionV1 {
+		owners := make(map[string]int)
+		collectCheckpointStateOwners(cp, owners)
+		for id := range cp.InterruptID2Addr {
+			if owners[id] == 0 {
+				return fmt.Errorf("interrupt ID %q has no checkpoint state owner", id)
+			}
+			if owners[id] > 1 {
+				return fmt.Errorf("interrupt ID %q has multiple checkpoint state owners", id)
+			}
+		}
+	}
 	return nil
+}
+
+func collectCheckpointStateOwners(cp *checkpoint, owners map[string]int) {
+	for id := range cp.InterruptID2State {
+		if !isCheckpointMetadataID(id) {
+			owners[id]++
+		}
+	}
+	for _, sub := range cp.SubGraphs {
+		collectCheckpointStateOwners(sub, owners)
+	}
 }
 
 func isSubGraphCall(call *chanCall) bool {

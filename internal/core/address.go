@@ -320,6 +320,43 @@ func PopulateInterruptState(ctx context.Context, id2Addr map[string]Address,
 	return ctx
 }
 
+func MergeInterruptState(ctx context.Context, id2Addr map[string]Address,
+	id2State map[string]InterruptState) (context.Context, error) {
+	rInfo, ok := ctx.Value(globalResumeInfoKey{}).(*globalResumeInfo)
+	if !ok {
+		return PopulateInterruptState(ctx, id2Addr, id2State), nil
+	}
+
+	rInfo.mu.Lock()
+	defer rInfo.mu.Unlock()
+	if rInfo.id2Addr == nil {
+		rInfo.id2Addr = make(map[string]Address)
+	}
+	for id, addr := range id2Addr {
+		if current, exists := rInfo.id2Addr[id]; exists {
+			if !current.Equals(addr) {
+				return ctx, fmt.Errorf("interrupt ID %q has conflicting addresses", id)
+			}
+			continue
+		}
+		rInfo.id2Addr[id] = addr
+	}
+	if rInfo.id2State == nil {
+		rInfo.id2State = make(map[string]InterruptState)
+	}
+	for id, state := range id2State {
+		current, exists := rInfo.id2State[id]
+		if !exists {
+			rInfo.id2State[id] = state
+			continue
+		}
+		if current.State == nil && current.LayerSpecificPayload == nil && !rInfo.id2StateUsed[id] {
+			rInfo.id2State[id] = state
+		}
+	}
+	return ctx, nil
+}
+
 func getResumeInfo(ctx context.Context) (*globalResumeInfo, bool) {
 	info, ok := ctx.Value(globalResumeInfoKey{}).(*globalResumeInfo)
 	return info, ok

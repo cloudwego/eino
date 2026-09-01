@@ -2390,6 +2390,82 @@ func TestToolsNodeWithExternalGraphInterrupt(t *testing.T) {
 	mu.Unlock()
 }
 
+func TestForwardCheckpointSparseInterruptState(t *testing.T) {
+	childAddress := Address{{Type: AddressSegmentNode, ID: "child"}}
+	child := &checkpoint{
+		StateLayoutVersion: 1,
+		InterruptID2Addr:   map[string]Address{"child-id": childAddress},
+		InterruptID2State: map[string]core.InterruptState{
+			"child-id":                 {State: "child state"},
+			checkpointLayoutSentinelID: {State: &checkpointLayoutSentinelV1{Version: 1}},
+		},
+	}
+	parent := &checkpoint{
+		StateLayoutVersion: 1,
+		SubGraphs:          map[string]*checkpoint{"child": child},
+		InterruptID2Addr:   map[string]Address{"child-id": childAddress},
+		InterruptID2State:  map[string]core.InterruptState{},
+	}
+
+	ctx := setCheckPointToCtx(context.Background(), parent)
+	ctx, err := forwardCheckPoint(ctx, "child")
+	require.NoError(t, err)
+	ctx = AppendAddressSegment(ctx, AddressSegmentNode, "child")
+	wasInterrupted, hasState, state := GetInterruptState[string](ctx)
+	require.True(t, wasInterrupted)
+	require.True(t, hasState)
+	require.Equal(t, "child state", state)
+	require.NotContains(t, child.InterruptID2State, checkpointLayoutSentinelID)
+}
+
+func TestForwardCheckpointLegacyDoesNotMergeState(t *testing.T) {
+	childAddress := Address{{Type: AddressSegmentNode, ID: "child"}}
+	child := &checkpoint{
+		InterruptID2Addr:  map[string]Address{"child-id": childAddress},
+		InterruptID2State: map[string]core.InterruptState{"child-id": {State: "child state"}},
+	}
+	parent := &checkpoint{
+		SubGraphs:         map[string]*checkpoint{"child": child},
+		InterruptID2Addr:  map[string]Address{"child-id": childAddress},
+		InterruptID2State: map[string]core.InterruptState{"child-id": {State: "parent state"}},
+	}
+
+	ctx := setCheckPointToCtx(context.Background(), parent)
+	ctx, err := forwardCheckPoint(ctx, "child")
+	require.NoError(t, err)
+	ctx = AppendAddressSegment(ctx, AddressSegmentNode, "child")
+	_, hasState, state := GetInterruptState[string](ctx)
+	require.True(t, hasState)
+	require.Equal(t, "parent state", state)
+}
+
+func TestCheckpointLayoutMetadataValidation(t *testing.T) {
+	t.Run("missing_sentinel", func(t *testing.T) {
+		err := validateCheckpointLayoutMetadata(&checkpoint{
+			StateLayoutVersion: 1,
+			InterruptID2State:  map[string]core.InterruptState{},
+		})
+		require.ErrorContains(t, err, "sentinel is missing")
+	})
+	t.Run("unsupported_version", func(t *testing.T) {
+		err := validateCheckpointLayoutMetadata(&checkpoint{StateLayoutVersion: 2})
+		require.ErrorContains(t, err, "requires a newer Eino version")
+	})
+	t.Run("valid", func(t *testing.T) {
+		cp := &checkpoint{
+			StateLayoutVersion: 1,
+			InterruptID2State: map[string]core.InterruptState{
+				checkpointLayoutSentinelID: {
+					State: &checkpointLayoutSentinelV1{Version: 1},
+				},
+			},
+		}
+		require.NoError(t, consumeCheckpointLayoutMetadata(cp))
+		require.True(t, cp.layoutMetadataValidated)
+		require.NotContains(t, cp.InterruptID2State, checkpointLayoutSentinelID)
+	})
+}
+
 type checkpointTestTool[I, O any] struct {
 	info *schema.ToolInfo
 	fn   func(ctx context.Context, in I) (O, error)

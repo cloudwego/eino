@@ -341,6 +341,50 @@ func TestGetCurrentAddress(t *testing.T) {
 	})
 }
 
+func TestMergeInterruptState(t *testing.T) {
+	existingAddress := Address{{Type: AddressSegmentAgent, ID: "agent"}}
+	existingState := InterruptState{State: "existing"}
+	ctx := PopulateInterruptState(context.Background(),
+		map[string]Address{
+			"existing":         existingAddress,
+			"placeholder":      existingAddress,
+			"used-placeholder": existingAddress,
+		},
+		map[string]InterruptState{
+			"existing":         existingState,
+			"placeholder":      {},
+			"used-placeholder": {},
+		})
+	info, ok := getResumeInfo(ctx)
+	assert.True(t, ok)
+	info.id2StateUsed["existing"] = true
+	info.id2StateUsed["used-placeholder"] = true
+	info.id2ResumeDataUsed["existing"] = true
+
+	childAddress := Address{{Type: AddressSegmentAgent, ID: "agent"}, {Type: AddressSegmentNode, ID: "child"}}
+	merged, err := MergeInterruptState(ctx,
+		map[string]Address{"existing": existingAddress, "child": childAddress},
+		map[string]InterruptState{
+			"existing":         {State: "must not overwrite"},
+			"placeholder":      {State: "filled state"},
+			"used-placeholder": {State: "must not fill"},
+			"child":            {State: "child state"},
+		})
+	assert.NoError(t, err)
+	assert.Equal(t, ctx, merged)
+	assert.Equal(t, existingState, info.id2State["existing"])
+	assert.Equal(t, InterruptState{State: "filled state"}, info.id2State["placeholder"])
+	assert.Equal(t, InterruptState{}, info.id2State["used-placeholder"])
+	assert.Equal(t, InterruptState{State: "child state"}, info.id2State["child"])
+	assert.True(t, info.id2StateUsed["existing"])
+	assert.True(t, info.id2ResumeDataUsed["existing"])
+
+	_, err = MergeInterruptState(ctx,
+		map[string]Address{"existing": childAddress},
+		nil)
+	assert.ErrorContains(t, err, "conflicting addresses")
+}
+
 func TestGetNextResumptionPoints(t *testing.T) {
 	// Test Case 1: No Resume Info in Context
 	t.Run("NoResumeInfo", func(t *testing.T) {
