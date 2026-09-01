@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"sort"
 	"strings"
 
 	"github.com/cloudwego/eino/internal/core"
@@ -379,6 +380,209 @@ func MigrateCheckpointState(data []byte, serializer Serializer, migrate func(sta
 		return data, nil
 	}
 	return serializer.Marshal(cp)
+}
+
+// CheckpointValueKind identifies a value-bearing part of a checkpoint.
+type CheckpointValueKind string
+
+const (
+	// CheckpointValueState identifies a graph's local state.
+	CheckpointValueState CheckpointValueKind = "state"
+	// CheckpointValueInput identifies a persisted node input.
+	CheckpointValueInput CheckpointValueKind = "input"
+	// CheckpointValueChannel identifies a value buffered in a graph channel.
+	CheckpointValueChannel CheckpointValueKind = "channel"
+	// CheckpointValueInterruptState identifies a component's persisted interrupt state.
+	CheckpointValueInterruptState CheckpointValueKind = "interrupt_state"
+	// CheckpointValueInterruptLayerPayload identifies layer-specific interrupt metadata.
+	CheckpointValueInterruptLayerPayload CheckpointValueKind = "interrupt_layer_payload"
+)
+
+// CheckpointValueLocation identifies a value within one graph checkpoint.
+// Key is the node key for inputs and the channel key for channel values.
+// ValueKey is set only for channel values and identifies the channel predecessor.
+type CheckpointValueLocation struct {
+	Kind     CheckpointValueKind
+	Key      string
+	ValueKey string
+}
+
+// WalkCheckpointValues visits value-bearing fields in a serialized checkpoint.
+// Traversal is deterministic: input, channel, channel-value, and subgraph keys
+// are visited in lexical order. The callback must not mutate value.
+func WalkCheckpointValues(data []byte, serializer Serializer,
+	visit func(path NodePath, location CheckpointValueLocation, value any) error,
+) error {
+	if visit == nil {
+		return errors.New("checkpoint value visitor is nil")
+	}
+	if serializer == nil {
+		serializer = &serialization.InternalSerializer{}
+	}
+	cp := &checkpoint{}
+	if err := serializer.Unmarshal(data, cp); err != nil {
+		return fmt.Errorf("failed to decode checkpoint for inspection: %w", err)
+	}
+	return walkCheckpointValues(cp, nil, func(path NodePath, location CheckpointValueLocation,
+		value any) (any, bool, error) {
+		return value, false, visit(path, location, value)
+	})
+}
+
+// TransformCheckpointValues replaces selected value-bearing fields in a
+// serialized checkpoint. Unknown values can be left unchanged by returning
+// changed=false. Checkpoint metadata and interrupt routing are preserved.
+func TransformCheckpointValues(data []byte, serializer Serializer,
+	transform func(path NodePath, location CheckpointValueLocation, value any) (
+		replacement any, changed bool, err error),
+) ([]byte, error) {
+	if transform == nil {
+		return nil, errors.New("checkpoint value transformer is nil")
+	}
+	if serializer == nil {
+		serializer = &serialization.InternalSerializer{}
+	}
+	cp := &checkpoint{}
+	if err := serializer.Unmarshal(data, cp); err != nil {
+		return nil, fmt.Errorf("failed to decode checkpoint for transformation: %w", err)
+	}
+	changed, err := transformCheckpointValues(cp, nil, transform)
+	if err != nil {
+		return nil, err
+	}
+	if !changed {
+		return data, nil
+	}
+	transformed, err := serializer.Marshal(cp)
+	if err != nil {
+		return nil, fmt.Errorf("failed to encode transformed checkpoint: %w", err)
+	}
+	return transformed, nil
+}
+
+type checkpointValueTransform func(path NodePath, location CheckpointValueLocation,
+	value any) (replacement any, changed bool, err error)
+
+func walkCheckpointValues(cp *checkpoint, path []string, transform checkpointValueTransform) error {
+	_, err := transformCheckpointValues(cp, path, transform)
+	return err
+}
+
+func transformCheckpointValues(cp *checkpoint, path []string,
+	transform checkpointValueTransform) (bool, error) {
+	if cp == nil {
+		return false, nil
+	}
+	changed := false
+	nodePath := *NewNodePath(append([]string(nil), path...)...)
+
+	replacement, replaced, err := transform(nodePath,
+		CheckpointValueLocation{Kind: CheckpointValueState}, cp.State)
+	if err != nil {
+		return false, err
+	}
+	if replaced {
+		cp.State = replacement
+		changed = true
+	}
+
+	interruptIDs := sortedCheckpointMapKeys(cp.InterruptID2State)
+	for _, id := range interruptIDs {
+		if isCheckpointMetadataID(id) {
+			continue
+		}
+		state := cp.InterruptID2State[id]
+		replacement, replaced, err = transform(nodePath,
+			CheckpointValueLocation{Kind: CheckpointValueInterruptState, Key: id}, state.State)
+		if err != nil {
+			return false, err
+		}
+		if replaced {
+			state.State = replacement
+			changed = true
+		}
+		replacement, replaced, err = transform(nodePath,
+			CheckpointValueLocation{Kind: CheckpointValueInterruptLayerPayload, Key: id},
+			state.LayerSpecificPayload)
+		if err != nil {
+			return false, err
+		}
+		if replaced {
+			state.LayerSpecificPayload = replacement
+			changed = true
+		}
+		cp.InterruptID2State[id] = state
+	}
+
+	inputKeys := sortedCheckpointMapKeys(cp.Inputs)
+	for _, key := range inputKeys {
+		replacement, replaced, err = transform(nodePath,
+			CheckpointValueLocation{Kind: CheckpointValueInput, Key: key}, cp.Inputs[key])
+		if err != nil {
+			return false, err
+		}
+		if replaced {
+			cp.Inputs[key] = replacement
+			changed = true
+		}
+	}
+
+	channelKeys := make([]string, 0, len(cp.Channels))
+	for key := range cp.Channels {
+		channelKeys = append(channelKeys, key)
+	}
+	sort.Strings(channelKeys)
+	for _, channelKey := range channelKeys {
+		ch := cp.Channels[channelKey]
+		if ch == nil {
+			continue
+		}
+		err = ch.convertValues(func(values map[string]any) error {
+			valueKeys := sortedCheckpointMapKeys(values)
+			for _, valueKey := range valueKeys {
+				replacement, replaced, err = transform(nodePath, CheckpointValueLocation{
+					Kind:     CheckpointValueChannel,
+					Key:      channelKey,
+					ValueKey: valueKey,
+				}, values[valueKey])
+				if err != nil {
+					return err
+				}
+				if replaced {
+					values[valueKey] = replacement
+					changed = true
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			return false, err
+		}
+	}
+
+	subGraphKeys := make([]string, 0, len(cp.SubGraphs))
+	for key := range cp.SubGraphs {
+		subGraphKeys = append(subGraphKeys, key)
+	}
+	sort.Strings(subGraphKeys)
+	for _, key := range subGraphKeys {
+		childPath := append(append([]string(nil), path...), key)
+		childChanged, err := transformCheckpointValues(cp.SubGraphs[key], childPath, transform)
+		if err != nil {
+			return false, err
+		}
+		changed = changed || childChanged
+	}
+	return changed, nil
+}
+
+func sortedCheckpointMapKeys[V any](values map[string]V) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // migrateCheckpoint recursively applies migrate to cp.State and all SubGraphs.
