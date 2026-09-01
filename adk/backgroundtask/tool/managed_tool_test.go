@@ -30,7 +30,6 @@ import (
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/adk/backgroundtask"
-	"github.com/cloudwego/eino/adk/internal/foreground"
 	adksession "github.com/cloudwego/eino/adk/session"
 	"github.com/cloudwego/eino/components/model"
 	componenttool "github.com/cloudwego/eino/components/tool"
@@ -267,7 +266,7 @@ func newTestManagedTool(
 		SessionID:           func(context.Context) (string, error) { return "session", nil },
 	}
 	if _, ok := implementation.(ForegroundHandoffTool); ok {
-		config.ShouldAutoBackground = func(context.Context, *foreground.CandidateInfo) bool {
+		config.ShouldAutoBackground = func(context.Context, *backgroundtask.ForegroundCandidate) bool {
 			return true
 		}
 	}
@@ -1801,7 +1800,7 @@ func TestManagedToolDrainYieldsAndRecoversWithoutStop(t *testing.T) {
 	wrapped, err := NewManagedTool(context.Background(), &ManagedToolConfig{
 		Manager: managerOne, Executors: executorsOne, Registry: registry, ToolName: "external",
 		ForegroundTimeoutMs:  &timeoutMs,
-		ShouldAutoBackground: func(context.Context, *foreground.CandidateInfo) bool { return true },
+		ShouldAutoBackground: func(context.Context, *backgroundtask.ForegroundCandidate) bool { return true },
 		SessionID:            func(context.Context) (string, error) { return "session", nil },
 	})
 	require.NoError(t, err)

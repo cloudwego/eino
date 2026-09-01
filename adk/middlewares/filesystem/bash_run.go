@@ -86,9 +86,9 @@ type outputSink struct {
 }
 
 type toolDefinition struct {
-	name             string
-	desc             string
-	alwaysForeground bool
+	name                      string
+	desc                      string
+	backendOwnsCommandTimeout bool
 }
 
 // bashOutputWriter tees a managed execute task's output to a file via a
@@ -374,12 +374,12 @@ func newManagedExecuteTool(
 	toolName := selectToolName(definition.name, ToolNameExecute)
 	// The tool description is fixed at construction time (the arg schema is derived
 	// from struct tags), so the timeout argument must be explained for the mode this
-	// tool was built in: an always-foreground tool passes it to the backend as the
-	// command's own budget, otherwise it is the foreground wait before a handoff.
+	// tool was built in: a tool that hands the timeout to the backend passes it as
+	// the command's own budget, otherwise it is the foreground wait before a handoff.
 	defaultDesc, defaultDescChinese := ManagedExecuteToolDesc, ManagedExecuteToolDescChinese
-	if definition.alwaysForeground {
-		defaultDesc = AlwaysForegroundManagedExecuteToolDesc
-		defaultDescChinese = AlwaysForegroundManagedExecuteToolDescChinese
+	if definition.backendOwnsCommandTimeout {
+		defaultDesc = BackendTimeoutManagedExecuteToolDesc
+		defaultDescChinese = BackendTimeoutManagedExecuteToolDescChinese
 	}
 	d, err := selectToolDesc(definition.desc, defaultDesc, defaultDescChinese)
 	if err != nil {
@@ -397,13 +397,13 @@ func newManagedExecuteTool(
 	)
 }
 
-// backendOwnsCommandTimeout reports whether this invocation hands the timeout
+// backendOwnsTimeoutForRun reports whether this invocation hands the timeout
 // argument to the backend as a command execution limit, instead of using it as the
-// Manager's foreground wait before an automatic background handoff. That is only
-// true for an always-foreground run: an explicit background launch never waits in
-// the foreground, so its timeout argument is ignored either way.
-func backendOwnsCommandTimeout(input executeManagedArgs, alwaysForeground bool) bool {
-	return alwaysForeground && !input.RunInBackground
+// Manager's foreground wait before an automatic background handoff. Only a
+// foreground run in that mode qualifies: an explicit background launch never waits
+// in the foreground, so its timeout argument is ignored either way.
+func backendOwnsTimeoutForRun(input executeManagedArgs, backendOwnsCommandTimeout bool) bool {
+	return backendOwnsCommandTimeout && !input.RunInBackground
 }
 
 // managedRunInput builds the RunInput shared by the buffered and streaming managed
@@ -469,7 +469,7 @@ func newManagedBufferedExecuteTool(
 	definition toolDefinition,
 ) (tool.BaseTool, error) {
 	return utils.InferTool(definition.name, definition.desc, func(ctx context.Context, input executeManagedArgs) (string, error) {
-		backendOwnsTimeout := backendOwnsCommandTimeout(input, definition.alwaysForeground)
+		backendOwnsTimeout := backendOwnsTimeoutForRun(input, definition.backendOwnsCommandTimeout)
 		parentSessionID, err := sessionID(ctx)
 		if err != nil {
 			return "", err
@@ -528,7 +528,7 @@ func newManagedStreamingExecuteTool(
 	definition toolDefinition,
 ) (tool.BaseTool, error) {
 	return utils.InferStreamTool(definition.name, definition.desc, func(ctx context.Context, input executeManagedArgs) (*schema.StreamReader[string], error) {
-		backendOwnsTimeout := backendOwnsCommandTimeout(input, definition.alwaysForeground)
+		backendOwnsTimeout := backendOwnsTimeoutForRun(input, definition.backendOwnsCommandTimeout)
 		parentSessionID, err := sessionID(ctx)
 		if err != nil {
 			return nil, err
