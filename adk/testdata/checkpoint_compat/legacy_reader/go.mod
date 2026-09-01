@@ -1,6 +1,6 @@
 module checkpointlegacyreader
 
-go 1.19
+go 1.18
 
 require github.com/cloudwego/eino v0.9.18
 

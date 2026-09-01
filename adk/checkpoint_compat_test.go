@@ -17,9 +17,11 @@
 package adk
 
 import (
+	"bytes"
 	"compress/gzip"
 	"context"
 	"crypto/sha256"
+	"encoding/gob"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -45,6 +47,7 @@ const (
 	checkpointCompatGenerateEnv = "EINO_GENERATE_CHECKPOINT_COMPAT"
 	checkpointCompatDir         = "testdata/checkpoint_compat/main_60e1d992"
 	checkpointCompatPayloadSize = 32 << 10
+	checkpointCompatFormatV0    = 0
 )
 
 var checkpointCompatFrozenSHA256 = map[string]string{
@@ -65,8 +68,33 @@ var checkpointCompatFrozenSHA256 = map[string]string{
 }
 
 type checkpointCompatManifest struct {
-	ProducerCommit string                    `json:"producer_commit"`
-	Fixtures       []checkpointCompatFixture `json:"fixtures"`
+	ProducerCommit          string                    `json:"producer_commit"`
+	CheckpointFormatVersion *int                      `json:"checkpoint_format_version"`
+	Fixtures                []checkpointCompatFixture `json:"fixtures"`
+}
+
+type checkpointGobSchemaOld struct {
+	Stable  string
+	Removed string
+}
+
+type checkpointGobSchemaNew struct {
+	Stable string
+	Added  string
+}
+
+type checkpointGobSchemaString struct {
+	Value string
+}
+
+type checkpointGobSchemaStruct struct {
+	Value struct {
+		Text string
+	}
+}
+
+type checkpointCompatAnyEnvelope struct {
+	Value any
 }
 
 type checkpointCompatFixture struct {
@@ -77,6 +105,7 @@ type checkpointCompatFixture struct {
 	ParallelChildren   int      `json:"parallel_children,omitempty"`
 	Streaming          bool     `json:"streaming,omitempty"`
 	Cancel             bool     `json:"cancel,omitempty"`
+	ImplicitResume     bool     `json:"implicit_resume,omitempty"`
 	ResumeTargetCount  int      `json:"resume_target_count,omitempty"`
 	ExpectedInterrupts int      `json:"expected_interrupts,omitempty"`
 	PayloadField       string   `json:"payload_field"`
@@ -170,7 +199,8 @@ func (m *checkpointCompatModel) response(input []*schema.Message) *schema.Messag
 }
 
 type checkpointCompatInterruptTool struct {
-	name string
+	name           string
+	implicitResume bool
 }
 
 type checkpointCompatCompletionTool struct {
@@ -196,6 +226,12 @@ func (t *checkpointCompatInterruptTool) InvokableRun(ctx context.Context, _ stri
 	if !wasInterrupted {
 		return "", componenttool.StatefulInterrupt(ctx, t.name, "interrupted")
 	}
+	if !hasState {
+		return "", fmt.Errorf("checkpoint compatibility tool %s lost state", t.name)
+	}
+	if t.implicitResume {
+		return "resumed", nil
+	}
 	isTarget, hasData, data := componenttool.GetResumeContext[string](ctx)
 	if isTarget {
 		if hasData {
@@ -203,28 +239,26 @@ func (t *checkpointCompatInterruptTool) InvokableRun(ctx context.Context, _ stri
 		}
 		return "resumed", nil
 	}
-	if !hasState {
-		return "", fmt.Errorf("checkpoint compatibility tool %s lost state", t.name)
-	}
 	return "", componenttool.StatefulInterrupt(ctx, t.name, "re-interrupted")
 }
 
 func newCheckpointCompatAgent(t *testing.T, depth, parallelChildren int, payloadField string,
-	payloadSize int) Agent {
+	payloadSize int, implicitResume ...bool) Agent {
 	t.Helper()
 	payload := strings.Repeat("x", payloadSize)
+	resumeImplicitly := len(implicitResume) > 0 && implicitResume[0]
 	if parallelChildren > 0 {
 		tools := make([]componenttool.BaseTool, 0, parallelChildren)
 		names := make([]string, 0, parallelChildren)
 		for i := 0; i < parallelChildren; i++ {
 			name := fmt.Sprintf("ParallelChild%d", i)
-			child := newCheckpointCompatNestedAgent(t, name, 0, payloadField, payload)
+			child := newCheckpointCompatNestedAgent(t, name, 0, payloadField, payload, resumeImplicitly)
 			tools = append(tools, NewAgentTool(context.Background(), child))
 			names = append(names, name)
 		}
 		return newCheckpointCompatChatModelAgent(t, "ParallelParent", names, tools, "", "")
 	}
-	return newCheckpointCompatNestedAgent(t, "RootAgent", depth, payloadField, payload)
+	return newCheckpointCompatNestedAgent(t, "RootAgent", depth, payloadField, payload, resumeImplicitly)
 }
 
 func newCheckpointCompatCancelResumeAgent(t *testing.T) Agent {
@@ -235,16 +269,19 @@ func newCheckpointCompatCancelResumeAgent(t *testing.T) Agent {
 }
 
 func newCheckpointCompatNestedAgent(t *testing.T, name string, depth int, payloadField,
-	payload string) Agent {
+	payload string, implicitResume bool) Agent {
 	t.Helper()
 	if depth == 0 {
 		toolName := name + "Interrupt"
 		return newCheckpointCompatChatModelAgent(t, name, []string{toolName},
-			[]componenttool.BaseTool{&checkpointCompatInterruptTool{name: toolName}},
+			[]componenttool.BaseTool{&checkpointCompatInterruptTool{
+				name:           toolName,
+				implicitResume: implicitResume,
+			}},
 			payloadField, payload)
 	}
 	childName := fmt.Sprintf("%sChild%d", name, depth)
-	child := newCheckpointCompatNestedAgent(t, childName, depth-1, payloadField, payload)
+	child := newCheckpointCompatNestedAgent(t, childName, depth-1, payloadField, payload, implicitResume)
 	return newCheckpointCompatChatModelAgent(t, name, []string{childName},
 		[]componenttool.BaseTool{NewAgentTool(context.Background(), child)}, "", "")
 }
@@ -280,7 +317,11 @@ func captureCheckpointCompatFixture(t *testing.T, spec checkpointCompatFixture) 
 		EnableStreaming: spec.Streaming,
 		CheckPointStore: store,
 	})
-	iter := runner.Query(context.Background(), "start", WithCheckPointID(spec.Name))
+	query := "start"
+	if spec.PayloadField == "user_query" {
+		query = strings.Repeat("x", spec.PayloadSize)
+	}
+	iter := runner.Query(context.Background(), query, WithCheckPointID(spec.Name))
 	var interruptIDs []string
 	var interruptAddresses []string
 	for {
@@ -307,7 +348,11 @@ func captureCheckpointCompatCancelFixture(t *testing.T, spec checkpointCompatFix
 	t.Helper()
 	ctx := context.Background()
 	const toolName = "CancelCompletionTool"
-	blockingModel := newBlockingChatModel(toolCallMsg(toolCall("cancel-call", toolName, `{}`)))
+	modelOutput := toolCallMsg(toolCall("cancel-call", toolName, `{}`))
+	if spec.PayloadField == "content" && spec.PayloadSize > 0 {
+		modelOutput.Content = strings.Repeat("x", spec.PayloadSize)
+	}
+	blockingModel := newBlockingChatModel(modelOutput)
 	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
 		Name:        "CancelAgent",
 		Description: "checkpoint compatibility cancel agent",
@@ -391,7 +436,7 @@ func checkpointCompatSpecs() []checkpointCompatFixture {
 		{Name: "agent_tool_depth_1", File: "agent_tool_depth_1.bin.gz", Depth: 1, PayloadField: "content"},
 		{Name: "agent_tool_depth_2", File: "agent_tool_depth_2.bin.gz", Depth: 2, PayloadField: "content"},
 		{Name: "agent_tool_depth_3", File: "agent_tool_depth_3.bin.gz", Depth: 3, PayloadField: "content"},
-		{Name: "parallel_6", File: "parallel_6.bin.gz", ParallelChildren: 6, PayloadField: "content", ResumeTargetCount: 6},
+		{Name: "parallel_6", File: "parallel_6.bin.gz", ParallelChildren: 6, PayloadField: "content", ImplicitResume: true, ResumeTargetCount: 6},
 		{Name: "parallel_6_single_target", File: "parallel_6_single_target.bin.gz", ParallelChildren: 6, PayloadField: "content", ResumeTargetCount: 1, ExpectedInterrupts: 5},
 		{Name: "parallel_6_multi_target", File: "parallel_6_multi_target.bin.gz", ParallelChildren: 6, PayloadField: "content", ResumeTargetCount: 2, ExpectedInterrupts: 4},
 		{Name: "payload_content", File: "payload_content.bin.gz", Depth: 1, PayloadField: "content", PayloadSize: checkpointCompatPayloadSize},
@@ -406,7 +451,11 @@ func TestGenerateCheckpointCompatFixtures(t *testing.T) {
 	if os.Getenv(checkpointCompatGenerateEnv) != "1" {
 		t.Skip("set EINO_GENERATE_CHECKPOINT_COMPAT=1 to regenerate fixtures")
 	}
-	manifest := checkpointCompatManifest{ProducerCommit: "60e1d9929cb65c8c4814b66fba2854e29b730114"}
+	version := checkpointCompatFormatV0
+	manifest := checkpointCompatManifest{
+		ProducerCommit:          "60e1d9929cb65c8c4814b66fba2854e29b730114",
+		CheckpointFormatVersion: &version,
+	}
 	for _, spec := range checkpointCompatSpecs() {
 		raw, interruptIDs, interruptAddresses := captureCheckpointCompatFixture(t, spec)
 		spec.InterruptIDs = interruptIDs
@@ -428,6 +477,8 @@ func TestCheckpointBackwardCompatMain60e1d992(t *testing.T) {
 	var manifest checkpointCompatManifest
 	require.NoError(t, json.Unmarshal(data, &manifest))
 	require.Equal(t, "60e1d9929cb65c8c4814b66fba2854e29b730114", manifest.ProducerCommit)
+	require.NotNil(t, manifest.CheckpointFormatVersion)
+	require.Equal(t, checkpointCompatFormatV0, *manifest.CheckpointFormatVersion)
 	require.Len(t, manifest.Fixtures, len(checkpointCompatFrozenSHA256))
 
 	seen := make(map[string]struct{}, len(manifest.Fixtures))
@@ -445,7 +496,7 @@ func TestCheckpointBackwardCompatMain60e1d992(t *testing.T) {
 			store := newCheckpointCompatStore()
 			require.NoError(t, store.Set(context.Background(), fixture.Name, raw))
 			agent := newCheckpointCompatAgent(t, fixture.Depth, fixture.ParallelChildren,
-				fixture.PayloadField, fixture.PayloadSize)
+				fixture.PayloadField, fixture.PayloadSize, fixture.ImplicitResume)
 			if fixture.Cancel {
 				agent = newCheckpointCompatCancelResumeAgent(t)
 			}
@@ -457,14 +508,20 @@ func TestCheckpointBackwardCompatMain60e1d992(t *testing.T) {
 			if targetCount == 0 && !fixture.Cancel {
 				targetCount = len(fixture.InterruptIDs)
 			}
-			targets := make(map[string]any, targetCount)
-			for _, id := range fixture.InterruptIDs[:targetCount] {
-				targets[id] = "resumed"
+			var iter *AsyncIterator[*AgentEvent]
+			if fixture.ImplicitResume {
+				iter, err = runner.Resume(context.Background(), fixture.Name)
+			} else {
+				targets := make(map[string]any, targetCount)
+				for _, id := range fixture.InterruptIDs[:targetCount] {
+					targets[id] = "resumed"
+				}
+				iter, err = runner.ResumeWithParams(context.Background(), fixture.Name,
+					&ResumeParams{Targets: targets})
 			}
-			iter, err := runner.ResumeWithParams(context.Background(), fixture.Name,
-				&ResumeParams{Targets: targets})
 			require.NoError(t, err)
 			var eventCount int
+			var completed bool
 			remainingInterrupts := make(map[string]struct{})
 			for {
 				event, ok := iter.Next()
@@ -473,6 +530,13 @@ func TestCheckpointBackwardCompatMain60e1d992(t *testing.T) {
 				}
 				eventCount++
 				require.NoError(t, event.Err)
+				if event.Output != nil && event.Output.MessageOutput != nil {
+					msg, msgErr := event.Output.MessageOutput.GetMessage()
+					require.NoError(t, msgErr)
+					if msg != nil && msg.Role == schema.Assistant && msg.Content == "completed" {
+						completed = true
+					}
+				}
 				if event.Action != nil && event.Action.Interrupted != nil {
 					for _, interruptCtx := range event.Action.Interrupted.InterruptContexts {
 						remainingInterrupts[interruptCtx.Address.String()] = struct{}{}
@@ -480,6 +544,9 @@ func TestCheckpointBackwardCompatMain60e1d992(t *testing.T) {
 				}
 			}
 			assert.Positive(t, eventCount)
+			if fixture.ExpectedInterrupts == 0 {
+				assert.True(t, completed, "fully resumed fixture did not produce the terminal assistant output")
+			}
 			expectedInterrupts := make(map[string]struct{}, fixture.ExpectedInterrupts)
 			for _, address := range fixture.InterruptAddresses[targetCount:] {
 				expectedInterrupts[address] = struct{}{}
@@ -516,6 +583,20 @@ func buildCheckpointCompatLegacyReader(t *testing.T) string {
 	return readerBin
 }
 
+func assertCheckpointCompatLegacyReaderRejectsValue(t *testing.T, readerBin string,
+	value any, registeredName string) {
+	t.Helper()
+	var buf bytes.Buffer
+	require.NoError(t, gob.NewEncoder(&buf).Encode(&checkpointCompatAnyEnvelope{Value: value}))
+	path := filepath.Join(t.TempDir(), "value.gob")
+	require.NoError(t, os.WriteFile(path, buf.Bytes(), 0o644))
+	cmd := exec.Command(readerBin, "-gob-any-file", path)
+	output, err := cmd.CombinedOutput()
+	require.Error(t, err)
+	require.Contains(t, string(output), "name not registered for interface")
+	require.Contains(t, string(output), registeredName)
+}
+
 func TestAttack_CheckpointCompatRejectsTruncatedBytes(t *testing.T) {
 	const fixtureName = "single_invoke"
 	raw := readCheckpointCompatFixture(t,
@@ -531,4 +612,34 @@ func TestAttack_CheckpointCompatRejectsTruncatedBytes(t *testing.T) {
 	})
 	_, err := runner.Resume(context.Background(), fixtureName)
 	require.ErrorContains(t, err, "failed to decode checkpoint")
+}
+
+func TestCheckpointGobSchemaEvolution(t *testing.T) {
+	encode := func(t *testing.T, value any) []byte {
+		t.Helper()
+		var buf bytes.Buffer
+		require.NoError(t, gob.NewEncoder(&buf).Encode(value))
+		return buf.Bytes()
+	}
+
+	t.Run("added_and_removed_fields_are_compatible", func(t *testing.T) {
+		oldBytes := encode(t, &checkpointGobSchemaOld{Stable: "stable", Removed: "legacy"})
+		var newer checkpointGobSchemaNew
+		require.NoError(t, gob.NewDecoder(bytes.NewReader(oldBytes)).Decode(&newer))
+		require.Equal(t, "stable", newer.Stable)
+		require.Empty(t, newer.Added)
+
+		newBytes := encode(t, &checkpointGobSchemaNew{Stable: "stable", Added: "new"})
+		var older checkpointGobSchemaOld
+		require.NoError(t, gob.NewDecoder(bytes.NewReader(newBytes)).Decode(&older))
+		require.Equal(t, "stable", older.Stable)
+		require.Empty(t, older.Removed)
+	})
+
+	t.Run("changing_an_existing_field_type_fails", func(t *testing.T) {
+		data := encode(t, &checkpointGobSchemaString{Value: "legacy"})
+		var incompatible checkpointGobSchemaStruct
+		err := gob.NewDecoder(bytes.NewReader(data)).Decode(&incompatible)
+		require.ErrorContains(t, err, "type mismatch")
+	})
 }

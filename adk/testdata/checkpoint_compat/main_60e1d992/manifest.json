@@ -1,5 +1,6 @@
 {
   "producer_commit": "60e1d9929cb65c8c4814b66fba2854e29b730114",
+  "checkpoint_format_version": 0,
   "fixtures": [
     {
       "name": "single_invoke",
@@ -89,6 +90,7 @@
       "sha256": "7a99fe9dadf84a0c860f391bdcdb9af338f28a002f1c5c4239d188695a70ce14",
       "depth": 0,
       "parallel_children": 6,
+      "implicit_resume": true,
       "resume_target_count": 6,
       "payload_field": "content",
       "payload_size": 0,

@@ -17,8 +17,10 @@
 package main
 
 import (
+	"bytes"
 	"compress/gzip"
 	"context"
+	"encoding/gob"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -37,6 +39,10 @@ import (
 
 type manifest struct {
 	Fixtures []fixture `json:"fixtures"`
+}
+
+type anyEnvelope struct {
+	Value any
 }
 
 type fixture struct {
@@ -211,7 +217,16 @@ func readFixture(path string) ([]byte, error) {
 func run() error {
 	dir := flag.String("fixture-dir", "", "checkpoint fixture directory")
 	name := flag.String("fixture", "", "fixture name")
+	gobAnyFile := flag.String("gob-any-file", "", "gob-encoded any envelope")
 	flag.Parse()
+	if *gobAnyFile != "" {
+		data, err := os.ReadFile(*gobAnyFile)
+		if err != nil {
+			return err
+		}
+		var envelope anyEnvelope
+		return gob.NewDecoder(bytes.NewReader(data)).Decode(&envelope)
+	}
 	if *dir == "" || *name == "" {
 		return fmt.Errorf("-fixture-dir and -fixture are required")
 	}
