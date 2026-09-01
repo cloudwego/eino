@@ -31,7 +31,6 @@ import (
 	backgroundtool "github.com/cloudwego/eino/adk/backgroundtask/tool"
 	"github.com/cloudwego/eino/adk/filesystem"
 	"github.com/cloudwego/eino/adk/internal"
-	"github.com/cloudwego/eino/adk/internal/foreground"
 	backgroundtaskmw "github.com/cloudwego/eino/adk/middlewares/backgroundtask"
 	filesystem2 "github.com/cloudwego/eino/adk/middlewares/filesystem"
 	"github.com/cloudwego/eino/adk/middlewares/subagent"
@@ -60,7 +59,7 @@ type TypedBackgroundConfig[M adk.MessageType] struct {
 	LocalShell *LocalShellConfig
 	// ForegroundTimeoutMs and ShouldAutoBackground apply to every enabled capability.
 	ForegroundTimeoutMs  *int
-	ShouldAutoBackground func(context.Context, *foreground.CandidateInfo) bool
+	ShouldAutoBackground func(context.Context, *backgroundtask.ForegroundCandidate) bool
 	// TranscriptFormat customizes durable sub-agent session views.
 	TranscriptFormat subagent.TranscriptFormat[M]
 }

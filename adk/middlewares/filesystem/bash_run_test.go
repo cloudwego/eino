@@ -33,7 +33,6 @@ import (
 	"github.com/cloudwego/eino/adk/backgroundtask"
 	backgroundlocal "github.com/cloudwego/eino/adk/backgroundtask/local"
 	"github.com/cloudwego/eino/adk/filesystem"
-	"github.com/cloudwego/eino/adk/internal/foreground"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/schema"
 )
@@ -368,7 +367,7 @@ func TestManagedExecuteTool_TimeoutDoesNotSetExecutionTimeout(t *testing.T) {
 // A backend that stopped the command on its own budget reports TimedOut, and the
 // tool result names the timeout instead of the kill signal's exit code — that is the
 // fact the agent can act on.
-func TestManagedExecuteTool_AlwaysForegroundBackendTimedOut(t *testing.T) {
+func TestManagedExecuteTool_BackendOwnsCommandTimeoutBackendTimedOut(t *testing.T) {
 	mgr := newTestManager(t, context.Background())
 	defer func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
@@ -384,7 +383,7 @@ func TestManagedExecuteTool_AlwaysForegroundBackendTimedOut(t *testing.T) {
 	tools, err := getFilesystemTools(context.Background(), &MiddlewareConfig{
 		Shell: shell,
 		Background: &BackgroundConfig{Local: &LocalBackgroundConfig{
-			Runner: mustLocalRunner(t, mgr), AlwaysForeground: true,
+			Runner: mustLocalRunner(t, mgr), BackendOwnsCommandTimeout: true,
 		}},
 		notificationSessionID: testNotificationSessionID,
 	})
@@ -400,7 +399,7 @@ func TestManagedExecuteTool_AlwaysForegroundBackendTimedOut(t *testing.T) {
 	assert.Equal(t, time.Second, *shell.req.Timeout)
 }
 
-func TestManagedExecuteTool_AlwaysForegroundUsesCommandExecutionTimeout(t *testing.T) {
+func TestManagedExecuteTool_BackendOwnsCommandTimeoutUsesCommandExecutionTimeout(t *testing.T) {
 	mgr := newTestManager(t, context.Background())
 	defer func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
@@ -416,11 +415,11 @@ func TestManagedExecuteTool_AlwaysForegroundUsesCommandExecutionTimeout(t *testi
 				Runner: mustLocalRunner(t, mgr, func(config *backgroundlocal.Config) {
 					foregroundTimeoutMs := 5
 					config.ForegroundTimeoutMs = &foregroundTimeoutMs
-					config.ShouldAutoBackground = func(context.Context, *foreground.CandidateInfo) bool {
+					config.ShouldAutoBackground = func(context.Context, *backgroundtask.ForegroundCandidate) bool {
 						return true
 					}
 				}),
-				AlwaysForeground: true,
+				BackendOwnsCommandTimeout: true,
 			},
 		},
 		notificationSessionID: testNotificationSessionID,
@@ -435,7 +434,7 @@ func TestManagedExecuteTool_AlwaysForegroundUsesCommandExecutionTimeout(t *testi
 	assert.Equal(t, 10*time.Second, *shell.req.Timeout)
 }
 
-func TestManagedExecuteTool_AlwaysForegroundExplicitBackgroundIgnoresTimeout(t *testing.T) {
+func TestManagedExecuteTool_BackendOwnsCommandTimeoutExplicitBackgroundIgnoresTimeout(t *testing.T) {
 	mgr := newTestManager(t, context.Background())
 	defer func() {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -448,7 +447,7 @@ func TestManagedExecuteTool_AlwaysForegroundExplicitBackgroundIgnoresTimeout(t *
 	tools, err := getFilesystemTools(context.Background(), &MiddlewareConfig{
 		Shell: shell,
 		Background: &BackgroundConfig{Local: &LocalBackgroundConfig{
-			Runner: mustLocalRunner(t, mgr), AlwaysForeground: true,
+			Runner: mustLocalRunner(t, mgr), BackendOwnsCommandTimeout: true,
 		}},
 		notificationSessionID: testNotificationSessionID,
 	})
@@ -577,7 +576,7 @@ func TestManagedExecuteTool_TimeoutMovesToBackground(t *testing.T) {
 		Background: &BackgroundConfig{
 			Local: &LocalBackgroundConfig{
 				Runner: mustLocalRunner(t, mgr, func(config *backgroundlocal.Config) {
-					config.ShouldAutoBackground = func(context.Context, *foreground.CandidateInfo) bool {
+					config.ShouldAutoBackground = func(context.Context, *backgroundtask.ForegroundCandidate) bool {
 						return true
 					}
 				}),
@@ -675,18 +674,18 @@ func TestShellPayloadV1AndCommandFromTask(t *testing.T) {
 	assert.ErrorIs(t, err, backgroundtask.ErrUnsupportedExecutorPayloadVersion)
 }
 
-// Only an always-foreground run hands the timeout argument to the backend: an
-// explicit background launch ignores it in either mode.
-func TestBackendOwnsCommandTimeout(t *testing.T) {
+// Only a foreground run hands the timeout argument to the backend: an explicit
+// background launch ignores it in either mode.
+func TestBackendOwnsTimeoutForRun(t *testing.T) {
 	foreground := executeManagedArgs{executeArgs: executeArgs{Command: "cmd"}}
 	background := executeManagedArgs{
 		executeArgs: executeArgs{Command: "cmd"}, RunInBackground: true,
 	}
 
-	assert.False(t, backendOwnsCommandTimeout(foreground, false))
-	assert.True(t, backendOwnsCommandTimeout(foreground, true))
-	assert.False(t, backendOwnsCommandTimeout(background, false))
-	assert.False(t, backendOwnsCommandTimeout(background, true))
+	assert.False(t, backendOwnsTimeoutForRun(foreground, false))
+	assert.True(t, backendOwnsTimeoutForRun(foreground, true))
+	assert.False(t, backendOwnsTimeoutForRun(background, false))
+	assert.False(t, backendOwnsTimeoutForRun(background, true))
 
 	assert.Nil(t, managedExecuteRequest(foreground, false).Timeout)
 	assert.Nil(t, managedExecuteRequest(background, true).Timeout)
@@ -742,7 +741,7 @@ func TestManagedExecuteTool_StreamingBackendTimedOut(t *testing.T) {
 
 	executeTool, err := newManagedExecuteTool(
 		mustLocalRunner(t, mgr), nil, &mockStreamingShellTimedOutChunks{},
-		testNotificationSessionID, outputSink{}, toolDefinition{alwaysForeground: true},
+		testNotificationSessionID, outputSink{}, toolDefinition{backendOwnsCommandTimeout: true},
 	)
 	require.NoError(t, err)
 
@@ -794,7 +793,7 @@ func TestManagedExecuteTool_StreamingForeground(t *testing.T) {
 	assert.Contains(t, got, "chunk3")
 }
 
-func TestManagedExecuteTool_StreamingAlwaysForegroundUsesCommandExecutionTimeout(t *testing.T) {
+func TestManagedExecuteTool_StreamingBackendOwnsCommandTimeoutUsesCommandExecutionTimeout(t *testing.T) {
 	mgr := newTestManager(t, context.Background())
 	defer func() {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -805,7 +804,7 @@ func TestManagedExecuteTool_StreamingAlwaysForegroundUsesCommandExecutionTimeout
 	shell := &mockStreamingShell{}
 	executeTool, err := newManagedExecuteTool(
 		mustLocalRunner(t, mgr), nil, shell, testNotificationSessionID,
-		outputSink{}, toolDefinition{alwaysForeground: true},
+		outputSink{}, toolDefinition{backendOwnsCommandTimeout: true},
 	)
 	require.NoError(t, err)
 
@@ -984,7 +983,7 @@ func TestManagedExecuteTool_Schema(t *testing.T) {
 // The timeout argument means different things in the two modes, so the tool
 // description — fixed at construction, unlike the arg schema — must be selected
 // per mode.
-func TestManagedExecuteTool_AlwaysForegroundDesc(t *testing.T) {
+func TestManagedExecuteTool_BackendOwnsCommandTimeoutDesc(t *testing.T) {
 	mgr := newTestManager(t, context.Background())
 	defer func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
@@ -1004,7 +1003,7 @@ func TestManagedExecuteTool_AlwaysForegroundDesc(t *testing.T) {
 
 	fgTool, err := newManagedExecuteTool(
 		runner, shell, nil, testNotificationSessionID, outputSink{},
-		toolDefinition{alwaysForeground: true},
+		toolDefinition{backendOwnsCommandTimeout: true},
 	)
 	require.NoError(t, err)
 	fgInfo, err := fgTool.Info(context.Background())
@@ -1018,7 +1017,7 @@ func TestManagedExecuteTool_AlwaysForegroundDesc(t *testing.T) {
 	// An explicit description still wins over both defaults.
 	customTool, err := newManagedExecuteTool(
 		runner, shell, nil, testNotificationSessionID, outputSink{},
-		toolDefinition{desc: "custom desc", alwaysForeground: true},
+		toolDefinition{desc: "custom desc", backendOwnsCommandTimeout: true},
 	)
 	require.NoError(t, err)
 	customInfo, err := customTool.Info(context.Background())

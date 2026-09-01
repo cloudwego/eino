@@ -39,7 +39,6 @@ import (
 	backgroundtool "github.com/cloudwego/eino/adk/backgroundtask/tool"
 	"github.com/cloudwego/eino/adk/filesystem"
 	"github.com/cloudwego/eino/adk/internal"
-	"github.com/cloudwego/eino/adk/internal/foreground"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/components/tool/utils"
 	"github.com/cloudwego/eino/compose"
@@ -106,25 +105,25 @@ type BackgroundConfig struct {
 type LocalBackgroundConfig struct {
 	// Runner owns task lifecycle and process-local closures.
 	Runner *backgroundlocal.Runner
-	// AlwaysForeground changes the timeout semantics for runs with
-	// run_in_background=false. When false, the tool timeout limits foreground
-	// waiting before the Manager applies its normal timeout policy. When true,
-	// the run stays attached until the shell backend returns and the tool timeout
-	// is passed to filesystem.ExecuteRequest.Timeout as the command execution
-	// limit. Explicit background runs ignore this option and the tool timeout.
+	// BackendOwnsCommandTimeout selects what the tool timeout argument bounds for
+	// runs with run_in_background=false. When false, it bounds how long the caller
+	// waits in the foreground; on expiry the Runner's ShouldAutoBackground policy
+	// either hands the run to the background or terminates it with a
+	// *backgroundtask.ForegroundTimeoutError. When true, it is passed to
+	// filesystem.ExecuteRequest.Timeout as the command execution limit and the
+	// Manager's foreground timer is disabled, so the run stays attached until the
+	// shell backend returns. Explicit background runs ignore this option and the
+	// tool timeout argument entirely.
 	//
-	// Setting it hands the command's time limit to the backend: the Manager's
-	// foreground timer is disabled for those runs, so nothing on this side stops a
-	// command whose Timeout the backend ignores. Canceling the invocation's context
-	// remains the only bound in that case. That handover is the point — only the
-	// backend knows when the command actually started, so only it can exclude
-	// transport and environment setup time from the limit the model asked for.
+	// Moving the limit to the backend is the point: only the backend knows when the
+	// command actually started, so only it can exclude transport and environment
+	// setup time from the limit the model asked for. The cost is that nothing on
+	// this side stops a command whose Timeout the backend ignores — canceling the
+	// invocation's context becomes the only bound.
 	//
-	// This invocation mode is separate from the Runner's ShouldAutoBackground
-	// policy, which is evaluated only after a foreground wait expires and may
-	// inspect the populated foreground candidate. With AlwaysForeground the
-	// foreground wait never expires, so that policy is never consulted.
-	AlwaysForeground bool
+	// It also implies the run is never auto-backgrounded: ShouldAutoBackground is
+	// evaluated only on foreground-timer expiry, and this mode has no timer.
+	BackendOwnsCommandTimeout bool
 	// OutputStore and OutputDir optionally materialize managed output.
 	OutputStore filesystem.AppendOpener
 	OutputDir   string
@@ -142,7 +141,7 @@ type RecoverableBackgroundConfig struct {
 	// ForegroundTimeoutMs is in milliseconds. ShouldAutoBackground may be called
 	// concurrently and must not mutate the candidate.
 	ForegroundTimeoutMs  *int
-	ShouldAutoBackground func(context.Context, *foreground.CandidateInfo) bool
+	ShouldAutoBackground func(context.Context, *backgroundtask.ForegroundCandidate) bool
 }
 
 // Config is the legacy configuration for the filesystem middleware.
@@ -685,7 +684,7 @@ func createExecuteTool(ctx context.Context, middlewareConfig *MiddlewareConfig) 
 				},
 				toolDefinition{
 					name: executeConfig.Name, desc: desc,
-					alwaysForeground: local.AlwaysForeground,
+					backendOwnsCommandTimeout: local.BackendOwnsCommandTimeout,
 				},
 			)
 		}
@@ -1260,14 +1259,14 @@ type executeManagedArgs struct {
 	executeArgs
 	RunInBackground bool `json:"run_in_background,omitempty" jsonschema_description:"Set to true to run the command in the background. Use task_output to query it and task_stop to cancel it."`
 	// TimeoutSeconds is ignored when run_in_background is true. For foreground runs
-	// its meaning is selected by LocalBackgroundConfig.AlwaysForeground: it either
-	// limits command execution in the backend or limits foreground waiting before
-	// the Manager stops or automatically backgrounds the command.
+	// its meaning is selected by LocalBackgroundConfig.BackendOwnsCommandTimeout: it
+	// either limits command execution in the backend or limits foreground waiting
+	// before the Manager stops or automatically backgrounds the command.
 	//
 	// The schema description stays mode-neutral because it is derived from this
 	// struct tag once, for every managed execute tool. Which of the two meanings
 	// applies is stated in the tool description, which is selected per mode (see
-	// AlwaysForegroundManagedExecuteToolDesc).
+	// BackendTimeoutManagedExecuteToolDesc).
 	TimeoutSeconds int `json:"timeout,omitempty" jsonschema_description:"Optional timeout in seconds, up to 3 days. Ignored when run_in_background is true. Omit to use the default. See the tool description for what this timeout bounds."`
 }
 
