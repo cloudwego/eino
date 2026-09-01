@@ -25,6 +25,7 @@ import (
 
 	"github.com/cloudwego/eino/internal/core"
 	"github.com/cloudwego/eino/internal/serialization"
+	"github.com/cloudwego/eino/schema"
 )
 
 func TestWalkAndTransformCheckpointValues(t *testing.T) {
@@ -150,4 +151,168 @@ func TestCheckpointValueTraversalErrors(t *testing.T) {
 			})
 		return err
 	}(), "transform")
+}
+
+func TestCheckpointValueCallbacksHydrateToolsNodeReferences(t *testing.T) {
+	serializer := &serialization.InternalSerializer{}
+	toolCalls := []schema.ToolCall{{
+		ID: "call",
+		Function: schema.FunctionCall{
+			Name:      "tool",
+			Arguments: `{"value":"original"}`,
+		},
+	}}
+	digest, ok := checkpointToolCallsDigest(toolCalls)
+	require.True(t, ok)
+	newCheckpoint := func() []byte {
+		cp := &checkpoint{
+			State: &toolsNodeCheckpointState{Messages: []*schema.Message{
+				schema.AssistantMessage("", toolCalls),
+			}},
+			InterruptID2State: map[string]core.InterruptState{
+				"tool": {State: &toolsInterruptAndRerunStateV1{
+					Version: toolsInterruptAndRerunStateVersionV1,
+					Role:    schema.Assistant,
+					ToolCallsSource: &toolsInterruptToolCallsSourceV1{
+						MessageIndex: 0,
+						Digest:       digest,
+					},
+				}},
+			},
+		}
+		data, err := serializer.Marshal(cp)
+		require.NoError(t, err)
+		return data
+	}
+
+	t.Run("walk_observes_hydrated_state", func(t *testing.T) {
+		var visited *toolsInterruptAndRerunStateV1
+		err := WalkCheckpointValues(newCheckpoint(), serializer, func(_ NodePath,
+			location CheckpointValueLocation, value any) error {
+			if location.Kind == CheckpointValueInterruptState {
+				visited, _ = value.(*toolsInterruptAndRerunStateV1)
+			}
+			return nil
+		})
+		require.NoError(t, err)
+		require.NotNil(t, visited)
+		require.Equal(t, toolCalls, visited.ToolCalls)
+		require.Nil(t, visited.ToolCallsSource)
+	})
+
+	replacementCalls := []schema.ToolCall{{
+		ID: "replacement",
+		Function: schema.FunctionCall{
+			Name:      "replacement",
+			Arguments: `{}`,
+		},
+	}}
+	assertReferenceRebound := func(t *testing.T, data []byte) {
+		t.Helper()
+		var cp checkpoint
+		require.NoError(t, serializer.Unmarshal(data, &cp))
+		state, ok := cp.InterruptID2State["tool"].State.(*toolsInterruptAndRerunStateV1)
+		require.True(t, ok)
+		require.Equal(t, toolCalls, state.ToolCalls)
+		require.Nil(t, state.ToolCallsSource)
+		require.NoError(t, hydrateCheckpointToolsNodeState(&cp))
+	}
+
+	t.Run("transform_rebinds_reference_after_state_change", func(t *testing.T) {
+		data, err := TransformCheckpointValues(newCheckpoint(), serializer, func(_ NodePath,
+			location CheckpointValueLocation, value any) (any, bool, error) {
+			if location.Kind != CheckpointValueState {
+				return value, false, nil
+			}
+			return &toolsNodeCheckpointState{Messages: []*schema.Message{
+				schema.AssistantMessage("", replacementCalls),
+			}}, true, nil
+		})
+		require.NoError(t, err)
+		assertReferenceRebound(t, data)
+	})
+
+	t.Run("migration_rebinds_reference_after_state_change", func(t *testing.T) {
+		data, err := MigrateCheckpointState(newCheckpoint(), serializer,
+			func(any) (any, bool, error) {
+				return &toolsNodeCheckpointState{Messages: []*schema.Message{
+					schema.AssistantMessage("", replacementCalls),
+				}}, true, nil
+			})
+		require.NoError(t, err)
+		assertReferenceRebound(t, data)
+	})
+}
+
+func TestAttack_TransformCheckpointRejectsNilSubgraph(t *testing.T) {
+	serializer := &serialization.InternalSerializer{}
+	data, err := serializer.Marshal(&checkpoint{
+		State:     "old",
+		SubGraphs: map[string]*checkpoint{"child": nil},
+	})
+	require.NoError(t, err)
+
+	_, err = TransformCheckpointValues(data, serializer, func(_ NodePath,
+		location CheckpointValueLocation, value any) (any, bool, error) {
+		if location.Kind == CheckpointValueState {
+			return "new", true, nil
+		}
+		return value, false, nil
+	})
+	require.ErrorContains(t, err, `subgraph checkpoint "child" is nil`)
+}
+
+func TestCheckpointValueAPIsRejectInvalidToolsNodeReference(t *testing.T) {
+	serializer := &serialization.InternalSerializer{}
+	newData := func() []byte {
+		cp := &checkpoint{
+			State: &toolsNodeCheckpointState{Messages: []*schema.Message{
+				schema.AssistantMessage("", []schema.ToolCall{{ID: "call"}}),
+			}},
+			InterruptID2State: map[string]core.InterruptState{
+				"tool": {State: &toolsInterruptAndRerunStateV1{
+					Version: toolsInterruptAndRerunStateVersionV1,
+					Role:    schema.Assistant,
+					ToolCallsSource: &toolsInterruptToolCallsSourceV1{
+						MessageIndex: 1,
+						Digest:       "invalid",
+					},
+				}},
+			},
+		}
+		data, err := serializer.Marshal(cp)
+		require.NoError(t, err)
+		return data
+	}
+
+	t.Run("walk", func(t *testing.T) {
+		called := false
+		err := WalkCheckpointValues(newData(), serializer,
+			func(NodePath, CheckpointValueLocation, any) error {
+				called = true
+				return nil
+			})
+		require.ErrorContains(t, err, "failed to hydrate checkpoint tool state for inspection")
+		require.False(t, called)
+	})
+	t.Run("transform", func(t *testing.T) {
+		called := false
+		_, err := TransformCheckpointValues(newData(), serializer,
+			func(NodePath, CheckpointValueLocation, any) (any, bool, error) {
+				called = true
+				return nil, false, nil
+			})
+		require.ErrorContains(t, err, "failed to hydrate checkpoint tool state for transformation")
+		require.False(t, called)
+	})
+	t.Run("migrate", func(t *testing.T) {
+		called := false
+		_, err := MigrateCheckpointState(newData(), serializer,
+			func(value any) (any, bool, error) {
+				called = true
+				return value, false, nil
+			})
+		require.ErrorContains(t, err, "failed to hydrate checkpoint tool state for migration")
+		require.False(t, called)
+	})
 }

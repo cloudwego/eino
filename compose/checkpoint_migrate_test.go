@@ -114,3 +114,24 @@ func TestMigrateCheckpointState_MigrateErrorStops(t *testing.T) {
 	})
 	assert.Error(t, err)
 }
+
+func TestAttack_MigrateCheckpointRejectsNilSubgraph(t *testing.T) {
+	in := []byte("in")
+	codec := stubSerializer{
+		unmarshal: func(_ []byte, value any) error {
+			*(value.(*checkpoint)) = checkpoint{
+				SubGraphs: map[string]*checkpoint{"child": nil},
+			}
+			return nil
+		},
+		marshal: func(any) ([]byte, error) {
+			return nil, errors.New("marshal must not be reached")
+		},
+	}
+
+	_, err := MigrateCheckpointState(in, codec,
+		func(state any) (any, bool, error) {
+			return state, false, nil
+		})
+	assert.ErrorContains(t, err, `subgraph checkpoint "child" is nil`)
+}

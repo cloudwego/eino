@@ -246,7 +246,8 @@ func TestCheckpointSizeMatrix(t *testing.T) {
 		"multimodal",
 	} {
 		for _, size := range sizes {
-			for _, streaming := range []bool{false, true} {
+			modeSizes := make([]int, 2)
+			for mode, streaming := range []bool{false, true} {
 				name := fmt.Sprintf("%s_size_%d_stream_%t", field, size, streaming)
 				t.Run(name, func(t *testing.T) {
 					raw, _, _ := captureCheckpointCompatFixture(t, checkpointCompatFixture{
@@ -258,14 +259,21 @@ func TestCheckpointSizeMatrix(t *testing.T) {
 					})
 					t.Logf("field=%s payload=%d streaming=%t checkpoint=%d",
 						field, size, streaming, len(raw))
-					if field == "content" && size == 320<<10 {
-						require.Less(t, len(raw), 1<<20)
+					multiplier := 1
+					if field == "user_query" {
+						multiplier = 4
 					}
-					if field == "content" && size == 1<<20 {
-						require.Less(t, len(raw), 5<<18)
-					}
+					require.Less(t, len(raw), multiplier*size+(128<<10),
+						"checkpoint size must grow linearly with the selected payload")
+					modeSizes[mode] = len(raw)
 				})
 			}
+			delta := modeSizes[0] - modeSizes[1]
+			if delta < 0 {
+				delta = -delta
+			}
+			require.Less(t, delta, 1<<10,
+				"Invoke and Stream checkpoints must have equivalent size behavior")
 		}
 	}
 }

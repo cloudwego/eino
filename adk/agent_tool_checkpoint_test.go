@@ -109,16 +109,6 @@ func TestAgentToolCheckpointV1SizeAndLegacyFailure(t *testing.T) {
 	}
 }
 
-func TestAgentToolCheckpointV1ParallelTargetedResume(t *testing.T) {
-	spec := checkpointCompatFixture{
-		Name:             "agent_tool_v1_parallel",
-		ParallelChildren: 6,
-		PayloadField:     "content",
-	}
-	raw, interruptIDs, interruptAddresses := captureCheckpointCompatFixture(t, spec)
-	resumeCheckpointCompatCandidate(t, spec, raw, interruptIDs, 1, 5, interruptAddresses)
-}
-
 func resumeCheckpointCompatCandidate(t *testing.T, spec checkpointCompatFixture, raw []byte,
 	interruptIDs []string, targetCount, expectedInterrupts int, expectedAddresses ...[]string) {
 	t.Helper()

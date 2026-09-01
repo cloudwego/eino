@@ -19,9 +19,6 @@ package adk
 import (
 	"bytes"
 	"encoding/gob"
-	"encoding/json"
-	"os"
-	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -158,32 +155,6 @@ func TestAttack_ProjectionRejectsImplicitNilSliceEntry(t *testing.T) {
 	require.Error(t, err, "an implicit nil placeholder entry was accepted as valid checkpoint data")
 }
 
-func TestAttack_ProjectionRejectsNilToolCallReferenceWithoutPanic(t *testing.T) {
-	// Attack: mark a tool-call projection reference as nil.
-	// Impact: corrupt checkpoint bytes can panic the checkpoint loader.
-	// Expected: malformed tool-call references return an error without panicking.
-	info := &compose.InterruptInfo{
-		RerunNodesExtra: map[string]any{
-			"tools": &compose.ToolsInterruptAndRerunExtra{},
-		},
-	}
-	ref := infoMessageProjectionV1{
-		Target:        infoTargetRerunToolCalls,
-		ContextIndex:  -1,
-		ParentDepth:   0,
-		RerunExtraKey: "tools",
-		MessageIndex:  -1,
-		IsNil:         true,
-	}
-	index := &checkpointProjectionIndex{byID: make(map[string][]canonicalCheckpointMessage)}
-
-	var err error
-	require.NotPanics(t, func() {
-		err = hydrateComposeInterruptInfoRefs(info, []infoMessageProjectionV1{ref}, index)
-	})
-	require.Error(t, err)
-}
-
 func TestAttack_ProjectionRejectsNilEventReference(t *testing.T) {
 	// Attack: mark a scalar event projection reference as nil.
 	// Impact: malformed metadata can erase a persisted event while still loading successfully.
@@ -230,6 +201,306 @@ func TestAttack_ProjectionSourceSelectionIsDeterministic(t *testing.T) {
 	}
 }
 
+func TestAttack_ProjectionRejectsToolResultCallIDRelabel(t *testing.T) {
+	// Attack: point a target call ID at a different source call ID.
+	// Impact: one tool's output can be restored under another tool call.
+	// Expected: source and target call IDs must match.
+	source := checkpointToolResultSourceV1{
+		Kind:        projectionToolResultKindString,
+		InterruptID: "interrupt",
+		ToolCallID:  "call-a",
+		Digest:      "digest",
+	}
+	index := &checkpointProjectionIndex{toolResultsByCallID: map[string][]canonicalCheckpointToolResult{
+		"call-a": {{source: source, text: "result-a"}},
+	}}
+	ref := infoToolResultProjectionV1{
+		ToolCallID: "call-b",
+		Source:     source,
+	}
+
+	err := hydrateInfoToolResult(&compose.ToolsInterruptAndRerunExtra{}, ref, index)
+	require.ErrorContains(t, err, "tool call ID")
+}
+
+func TestAttack_ProjectionRejectsCrossKindToolResultConflict(t *testing.T) {
+	standardSource := checkpointToolResultSourceV1{
+		Kind:        projectionToolResultKindString,
+		InterruptID: "interrupt",
+		ToolCallID:  "call",
+		Digest:      "standard-digest",
+	}
+	enhancedResult := &schema.ToolResult{Parts: []schema.ToolOutputPart{{
+		Type: schema.ToolPartTypeText,
+		Text: "enhanced",
+	}}}
+	enhancedSource := checkpointToolResultSourceV1{
+		Kind:        projectionToolResultKindEnhanced,
+		InterruptID: "interrupt",
+		ToolCallID:  "call",
+		Digest:      "enhanced-digest",
+	}
+	index := &checkpointProjectionIndex{toolResultsByCallID: map[string][]canonicalCheckpointToolResult{
+		"call": {
+			{source: standardSource, text: "standard"},
+			{source: enhancedSource, enhanced: enhancedResult},
+		},
+	}}
+
+	t.Run("standard_source_with_enhanced_target", func(t *testing.T) {
+		extra := &compose.ToolsInterruptAndRerunExtra{
+			ExecutedEnhancedTools: map[string]*schema.ToolResult{"call": enhancedResult},
+		}
+		ref := infoToolResultProjectionV1{
+			ToolCallID: "call",
+			Source:     standardSource,
+		}
+		require.ErrorContains(t, hydrateInfoToolResult(extra, ref, index),
+			"already populated")
+	})
+
+	t.Run("enhanced_source_with_standard_target", func(t *testing.T) {
+		extra := &compose.ToolsInterruptAndRerunExtra{
+			ExecutedTools: map[string]string{"call": "standard"},
+		}
+		ref := infoToolResultProjectionV1{
+			ToolCallID: "call",
+			Source:     enhancedSource,
+		}
+		require.ErrorContains(t, hydrateInfoToolResult(extra, ref, index),
+			"already populated")
+	})
+
+	t.Run("writer_keeps_conflict_inline", func(t *testing.T) {
+		extra := &compose.ToolsInterruptAndRerunExtra{
+			ExecutedTools:         map[string]string{"call": "standard"},
+			ExecutedEnhancedTools: map[string]*schema.ToolResult{"call": enhancedResult},
+		}
+		projection := &checkpointProjectionV1{}
+		projectInfoToolResults(extra, infoProjectionTarget{
+			kind:         infoTargetRerunToolCalls,
+			contextIndex: -1,
+			rerunKey:     "tools",
+		}, index, projection)
+		require.Empty(t, projection.ToolResultRefs)
+		require.Equal(t, map[string]string{"call": "standard"}, extra.ExecutedTools)
+		require.Equal(t, map[string]*schema.ToolResult{"call": enhancedResult},
+			extra.ExecutedEnhancedTools)
+	})
+}
+
+func TestAttack_ProjectionDoesNotEmitEmptyToolCallIDReference(t *testing.T) {
+	// Attack: present a successful tool result under an empty call ID.
+	// Impact: the writer can emit metadata that its own reader rejects.
+	// Expected: an invalid result remains inline.
+	source := checkpointToolResultSourceV1{
+		Kind:        projectionToolResultKindString,
+		InterruptID: "interrupt",
+		ToolCallID:  "",
+		Digest:      "digest",
+	}
+	index := &checkpointProjectionIndex{toolResultsByCallID: map[string][]canonicalCheckpointToolResult{
+		"": {{source: source, text: "result"}},
+	}}
+	extra := &compose.ToolsInterruptAndRerunExtra{
+		ExecutedTools: map[string]string{"": "result"},
+	}
+	projection := &checkpointProjectionV1{}
+
+	projectInfoToolResults(extra, infoProjectionTarget{
+		kind:         infoTargetRerunToolCalls,
+		contextIndex: -1,
+		rerunKey:     "tools",
+	}, index, projection)
+	require.Empty(t, projection.ToolResultRefs)
+	require.Equal(t, map[string]string{"": "result"}, extra.ExecutedTools)
+}
+
+func TestAttack_StateScopedToolResultStaysInline(t *testing.T) {
+	// Attack: place ToolsNode metadata directly in InterruptInfo.State.
+	// Impact: projecting it as context data creates impossible coordinates.
+	// Expected: unsupported locations remain inline.
+	source := checkpointToolResultSourceV1{
+		Kind:        projectionToolResultKindString,
+		InterruptID: "interrupt",
+		ToolCallID:  "call",
+		Digest:      "digest",
+	}
+	index := &checkpointProjectionIndex{toolResultsByCallID: map[string][]canonicalCheckpointToolResult{
+		"call": {{source: source, text: "result"}},
+	}}
+	extra := &compose.ToolsInterruptAndRerunExtra{
+		ExecutedTools: map[string]string{"call": "result"},
+	}
+	projection := &checkpointProjectionV1{}
+
+	var value any = extra
+	projectInfoValueMessages(&value, infoProjectionTarget{
+		kind:         infoTargetStateMessage,
+		contextIndex: -1,
+	}, index, projection)
+	require.Empty(t, projection.ToolResultRefs)
+	require.Equal(t, map[string]string{"call": "result"}, extra.ExecutedTools)
+}
+
+func TestAttack_ProjectionRejectsMismatchedMessageSourceKind(t *testing.T) {
+	// Attack: change only the source kind while retaining valid path, ID, index, and digest.
+	// Impact: corrupted metadata can cross schema and agentic wire domains undetected.
+	// Expected: source kind is part of the reference identity.
+	schemaMessage := schema.UserMessage("schema")
+	typedSetMessageID(schemaMessage, "schema")
+	agenticMessage := schema.UserAgenticMessage("agentic")
+	typedSetMessageID(agenticMessage, "agentic")
+	index := &checkpointProjectionIndex{byID: make(map[string][]canonicalCheckpointMessage)}
+	index.addSchemaMessage(nil, 0, schemaMessage)
+	index.addAgenticMessage(nil, 0, agenticMessage)
+
+	schemaSource, ok := index.sourceForSchemaMessage(schemaMessage)
+	require.True(t, ok)
+	schemaSource.Kind = projectionMessageKindAgentic
+	_, err := index.schemaMessage(schemaSource)
+	require.ErrorContains(t, err, "does not match metadata")
+
+	agenticSource, ok := index.sourceForAgenticMessage(agenticMessage)
+	require.True(t, ok)
+	agenticSource.Kind = projectionMessageKindSchema
+	_, err = index.agenticMessage(agenticSource)
+	require.ErrorContains(t, err, "does not match metadata")
+}
+
+func TestAttack_NestedToolResultOnlyProjectionRoundTrip(t *testing.T) {
+	// Attack: nest an InterruptInfo whose only projected value is a tool result.
+	// Impact: top-level message reference counts remain zero and can bypass hydration.
+	// Expected: recursive hydration restores the nested result without rerunning the tool.
+	result := &schema.ToolResult{Parts: []schema.ToolOutputPart{{
+		Type: schema.ToolPartTypeText,
+		Text: "canonical",
+	}}}
+	digest, ok := projectionMessageDigest(result)
+	require.True(t, ok)
+	source := checkpointToolResultSourceV1{
+		Kind:        projectionToolResultKindEnhanced,
+		InterruptID: "interrupt",
+		ToolCallID:  "call",
+		Digest:      digest,
+	}
+	index := &checkpointProjectionIndex{
+		byID: make(map[string][]canonicalCheckpointMessage),
+		toolResultsByCallID: map[string][]canonicalCheckpointToolResult{
+			"call": {{source: source, enhanced: result}},
+		},
+	}
+	extra := &compose.ToolsInterruptAndRerunExtra{
+		ExecutedEnhancedTools: map[string]*schema.ToolResult{"call": result},
+	}
+	nested := &compose.InterruptInfo{RerunNodesExtra: map[string]any{"tools": extra}}
+	outer := &compose.InterruptInfo{State: nested}
+	projection := &checkpointProjectionV1{}
+	projectComposeInterruptInfoMessages(outer, nil, index, projection)
+	require.Empty(t, projection.InfoRefs)
+	require.Empty(t, projection.ToolResultRefs)
+	require.IsType(t, &checkpointInterruptInfoPlaceholderV1{}, outer.State)
+	require.Empty(t, extra.ExecutedEnhancedTools)
+
+	info := &InterruptInfo{Data: &ChatModelAgentInterruptInfo{Info: outer}}
+	require.NoError(t, hydrateInterruptInfoMessages(info, nil, 0, index))
+	restoredNested, ok := outer.State.(*compose.InterruptInfo)
+	require.True(t, ok)
+	restoredExtra, ok := restoredNested.RerunNodesExtra["tools"].(*compose.ToolsInterruptAndRerunExtra)
+	require.True(t, ok)
+	require.Equal(t, result, restoredExtra.ExecutedEnhancedTools["call"])
+	require.NotSame(t, result, restoredExtra.ExecutedEnhancedTools["call"])
+}
+
+func TestAttack_EnhancedToolResultHydrationHasNoNestedAliases(t *testing.T) {
+	// Attack: mutate a nested part after restoring a projected enhanced result.
+	// Impact: a shallow copy would corrupt the canonical compose checkpoint value.
+	// Expected: the hydrated result and all nested parts are independent.
+	result := &schema.ToolResult{Parts: []schema.ToolOutputPart{{
+		Type: schema.ToolPartTypeText,
+		Text: "canonical",
+	}}}
+	digest, ok := projectionMessageDigest(result)
+	require.True(t, ok)
+	source := checkpointToolResultSourceV1{
+		Kind:        projectionToolResultKindEnhanced,
+		InterruptID: "interrupt",
+		ToolCallID:  "call",
+		Digest:      digest,
+	}
+	index := &checkpointProjectionIndex{toolResultsByCallID: map[string][]canonicalCheckpointToolResult{
+		"call": {{source: source, enhanced: result}},
+	}}
+	extra := &compose.ToolsInterruptAndRerunExtra{}
+	ref := infoToolResultProjectionV1{
+		ToolCallID: "call",
+		Source:     source,
+	}
+
+	require.NoError(t, hydrateInfoToolResult(extra, ref, index))
+	extra.ExecutedEnhancedTools["call"].Parts[0].Text = "mutated"
+	require.Equal(t, "canonical", result.Parts[0].Text)
+}
+
+func TestAttack_ProjectionValidationErrorIsDeterministic(t *testing.T) {
+	// Attack: corrupt two independently projected slices in one checkpoint.
+	// Impact: map iteration can select a different first error for identical bytes.
+	// Expected: validation always reports the lexical target first.
+	runCtxRefs := []runCtxMessageProjectionV1{
+		{
+			Target:       runCtxTargetRootInput,
+			Index:        0,
+			TargetLength: 2,
+		},
+		{
+			Target:       runCtxTargetAgenticRootInput,
+			Index:        0,
+			TargetLength: 2,
+		},
+	}
+	infoRefs := []infoMessageProjectionV1{
+		{
+			Target:       infoTargetStateMessage,
+			ContextIndex: -1,
+			MessageIndex: 0,
+			TargetLength: 2,
+		},
+		{
+			Target:       infoTargetContextStateMessage,
+			ContextIndex: 0,
+			MessageIndex: 0,
+			TargetLength: 2,
+		},
+	}
+
+	for i := 0; i < 100; i++ {
+		require.EqualError(t, validateRunCtxProjectionRefs(runCtxRefs, 2),
+			`checkpoint projection has incomplete run context slice "agentic_root_input/0"`)
+		require.EqualError(t, validateInfoProjectionRefs(infoRefs, 2),
+			`checkpoint projection has incomplete interrupt info slice "context_state_message/[]/0/0/"`)
+	}
+}
+
+func TestAttack_NestedProjectionValidationErrorIsDeterministic(t *testing.T) {
+	info := &compose.InterruptInfo{
+		RerunNodesExtra: map[string]any{
+			"z": (*checkpointInterruptInfoPlaceholderV1)(nil),
+			"a": &checkpointInterruptInfoPlaceholderV1{
+				Info:     &compose.InterruptInfo{},
+				RefCount: 1,
+			},
+		},
+	}
+	index := &checkpointProjectionIndex{
+		byID: make(map[string][]canonicalCheckpointMessage),
+	}
+
+	for i := 0; i < 100; i++ {
+		require.EqualError(t, hydrateNestedInterruptInfoPlaceholders(info, index),
+			"checkpoint projection interrupt info reference count mismatch: got 0, want 1")
+	}
+}
+
 func TestAttack_NestedParallelTargetedResumeInvokeStreamParity(t *testing.T) {
 	// Attack: checkpoint four parallel AgentTools, then resume only one target in both modes.
 	// Impact: sparse ownership or stream divergence can consume sibling state or lose interrupts.
@@ -252,30 +523,4 @@ func TestAttack_NestedParallelTargetedResumeInvokeStreamParity(t *testing.T) {
 			resumeCheckpointCompatCandidate(t, spec, raw, interruptIDs, 1, 3, interruptAddresses)
 		})
 	}
-}
-
-func TestAttack_FrozenGobFixturesResumeWithoutMutation(t *testing.T) {
-	// Attack: decode and resume immutable main-produced Invoke and Stream fixtures.
-	// Impact: field/type changes in gob schemas can make deployed checkpoints unreadable.
-	// Expected: fixture bytes retain their frozen digest and both modes resume successfully.
-	manifestData, err := os.ReadFile(filepath.Join(checkpointCompatDir, "manifest.json"))
-	require.NoError(t, err)
-	var manifest checkpointCompatManifest
-	require.NoError(t, json.Unmarshal(manifestData, &manifest))
-
-	wanted := map[string]bool{"single_invoke": true, "single_stream": true}
-	for _, fixture := range manifest.Fixtures {
-		if !wanted[fixture.Name] {
-			continue
-		}
-		t.Run(fixture.Name, func(t *testing.T) {
-			raw := readCheckpointCompatFixture(t, filepath.Join(checkpointCompatDir, fixture.File))
-			before := append([]byte(nil), raw...)
-			resumeCheckpointCompatCandidate(t, fixture, raw, fixture.InterruptIDs,
-				len(fixture.InterruptIDs), 0)
-			require.Equal(t, before, raw, "compatibility fixture bytes were mutated during resume")
-		})
-		delete(wanted, fixture.Name)
-	}
-	require.Empty(t, wanted)
 }

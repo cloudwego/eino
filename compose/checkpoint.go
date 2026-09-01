@@ -260,7 +260,7 @@ func initializeCheckpointLayoutV1(cp *checkpoint) error {
 	if cp.InterruptID2State == nil {
 		cp.InterruptID2State = make(map[string]core.InterruptState)
 	}
-	for id := range cp.InterruptID2State {
+	for _, id := range sortedCheckpointMapKeys(cp.InterruptID2State) {
 		if isCheckpointMetadataID(id) {
 			return fmt.Errorf("interrupt ID %q uses reserved checkpoint metadata prefix", id)
 		}
@@ -366,11 +366,16 @@ func isTypedNil(v any) bool {
 //
 // The original bytes are returned only if no state was changed anywhere in the checkpoint tree.
 // Checkpoint metadata and interrupt-state sentinels are preserved and are not passed to migrate.
+// Compact ToolsNode references are hydrated before migrate runs. If state changes, they are
+// rebound to the new state when possible and otherwise written inline.
 // A checkpoint written by a newer Eino version may fail decoding before migration can run.
 func MigrateCheckpointState(data []byte, serializer Serializer, migrate func(state any) (any, bool, error)) ([]byte, error) {
 	cp := &checkpoint{}
 	if err := serializer.Unmarshal(data, cp); err != nil {
 		return nil, fmt.Errorf("failed to decode checkpoint for migration; checkpoint may require a newer Eino version: %w", err)
+	}
+	if err := hydrateCheckpointToolsNodeState(cp); err != nil {
+		return nil, fmt.Errorf("failed to hydrate checkpoint tool state for migration: %w", err)
 	}
 	changed, err := migrateCheckpoint(cp, migrate)
 	if err != nil {
@@ -379,10 +384,13 @@ func MigrateCheckpointState(data []byte, serializer Serializer, migrate func(sta
 	if !changed {
 		return data, nil
 	}
+	compactCheckpointToolsNodeState(cp)
 	return serializer.Marshal(cp)
 }
 
 // CheckpointValueKind identifies a value-bearing part of a checkpoint.
+// Future releases may add kinds. Visitors should ignore unknown kinds, and
+// transformers should return changed=false for them.
 type CheckpointValueKind string
 
 const (
@@ -399,17 +407,26 @@ const (
 )
 
 // CheckpointValueLocation identifies a value within one graph checkpoint.
-// Key is the node key for inputs and the channel key for channel values.
-// ValueKey is set only for channel values and identifies the channel predecessor.
 type CheckpointValueLocation struct {
-	Kind     CheckpointValueKind
-	Key      string
+	// Kind identifies the checkpoint field containing the value.
+	Kind CheckpointValueKind
+	// Key is the node key for inputs, the channel key for channel values, or
+	// the interrupt ID for interrupt state and layer payload values. It is empty
+	// for graph state.
+	Key string
+	// ValueKey is set only for channel values and identifies the channel
+	// predecessor. It is empty for every other kind.
 	ValueKey string
 }
 
 // WalkCheckpointValues visits value-bearing fields in a serialized checkpoint.
-// Traversal is deterministic: input, channel, channel-value, and subgraph keys
-// are visited in lexical order. The callback must not mutate value.
+// Within each graph it visits state, interrupt states and layer payloads,
+// inputs, and channel values before recursively visiting subgraphs. Map keys
+// and subgraph keys are visited in lexical order, and internal metadata entries
+// are skipped. A nil serializer uses Eino's internal serializer. The callback
+// must treat value and path.GetPath() as read-only. Compact ToolsNode references
+// are hydrated, so the callback observes logical values rather than their wire
+// representation.
 func WalkCheckpointValues(data []byte, serializer Serializer,
 	visit func(path NodePath, location CheckpointValueLocation, value any) error,
 ) error {
@@ -423,6 +440,9 @@ func WalkCheckpointValues(data []byte, serializer Serializer,
 	if err := serializer.Unmarshal(data, cp); err != nil {
 		return fmt.Errorf("failed to decode checkpoint for inspection: %w", err)
 	}
+	if err := hydrateCheckpointToolsNodeState(cp); err != nil {
+		return fmt.Errorf("failed to hydrate checkpoint tool state for inspection: %w", err)
+	}
 	return walkCheckpointValues(cp, nil, func(path NodePath, location CheckpointValueLocation,
 		value any) (any, bool, error) {
 		return value, false, visit(path, location, value)
@@ -431,7 +451,13 @@ func WalkCheckpointValues(data []byte, serializer Serializer,
 
 // TransformCheckpointValues replaces selected value-bearing fields in a
 // serialized checkpoint. Unknown values can be left unchanged by returning
-// changed=false. Checkpoint metadata and interrupt routing are preserved.
+// changed=false. The callback must treat the input value and path.GetPath() as
+// read-only and return a replacement for changes. Checkpoint metadata and
+// interrupt routing are preserved and internal metadata entries are not passed
+// to the callback. A nil serializer uses Eino's internal serializer. If no
+// value is replaced, the original byte slice is returned unchanged. Compact
+// ToolsNode references are hydrated before the callback and rebound or stored
+// inline after changes.
 func TransformCheckpointValues(data []byte, serializer Serializer,
 	transform func(path NodePath, location CheckpointValueLocation, value any) (
 		replacement any, changed bool, err error),
@@ -446,6 +472,9 @@ func TransformCheckpointValues(data []byte, serializer Serializer,
 	if err := serializer.Unmarshal(data, cp); err != nil {
 		return nil, fmt.Errorf("failed to decode checkpoint for transformation: %w", err)
 	}
+	if err := hydrateCheckpointToolsNodeState(cp); err != nil {
+		return nil, fmt.Errorf("failed to hydrate checkpoint tool state for transformation: %w", err)
+	}
 	changed, err := transformCheckpointValues(cp, nil, transform)
 	if err != nil {
 		return nil, err
@@ -453,6 +482,7 @@ func TransformCheckpointValues(data []byte, serializer Serializer,
 	if !changed {
 		return data, nil
 	}
+	compactCheckpointToolsNodeState(cp)
 	transformed, err := serializer.Marshal(cp)
 	if err != nil {
 		return nil, fmt.Errorf("failed to encode transformed checkpoint: %w", err)
@@ -566,6 +596,9 @@ func transformCheckpointValues(cp *checkpoint, path []string,
 	}
 	sort.Strings(subGraphKeys)
 	for _, key := range subGraphKeys {
+		if cp.SubGraphs[key] == nil {
+			return false, fmt.Errorf("subgraph checkpoint %q is nil", key)
+		}
 		childPath := append(append([]string(nil), path...), key)
 		childChanged, err := transformCheckpointValues(cp.SubGraphs[key], childPath, transform)
 		if err != nil {
@@ -587,6 +620,9 @@ func sortedCheckpointMapKeys[V any](values map[string]V) []string {
 
 // migrateCheckpoint recursively applies migrate to cp.State and all SubGraphs.
 func migrateCheckpoint(cp *checkpoint, migrate func(state any) (any, bool, error)) (bool, error) {
+	if cp == nil {
+		return false, errors.New("checkpoint is nil")
+	}
 	anyChanged := false
 	if cp.State != nil {
 		newState, changed, err := migrate(cp.State)
@@ -598,7 +634,12 @@ func migrateCheckpoint(cp *checkpoint, migrate func(state any) (any, bool, error
 			anyChanged = true
 		}
 	}
-	for _, sub := range cp.SubGraphs {
+	keys := sortedCheckpointMapKeys(cp.SubGraphs)
+	for _, key := range keys {
+		sub := cp.SubGraphs[key]
+		if sub == nil {
+			return false, fmt.Errorf("subgraph checkpoint %q is nil", key)
+		}
 		changed, err := migrateCheckpoint(sub, migrate)
 		if err != nil {
 			return false, err

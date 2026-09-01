@@ -2440,6 +2440,9 @@ func TestForwardCheckpointLegacyDoesNotMergeState(t *testing.T) {
 }
 
 func TestCheckpointLayoutMetadataValidation(t *testing.T) {
+	t.Run("nil_checkpoint", func(t *testing.T) {
+		require.ErrorContains(t, (&runner{}).validateCheckpointIntegrity(nil), "checkpoint is nil")
+	})
 	t.Run("missing_sentinel", func(t *testing.T) {
 		err := validateCheckpointLayoutMetadata(&checkpoint{
 			StateLayoutVersion: 1,
@@ -2690,6 +2693,86 @@ func TestCheckpointSparseOwnershipValidatesOwnerPath(t *testing.T) {
 		require.ErrorContains(t, (&runner{}).validateCheckpointIntegrity(cp),
 			"appears in unrelated checkpoint routing paths")
 	})
+}
+
+func TestAttack_CheckpointValidationErrorIsDeterministic(t *testing.T) {
+	t.Run("nil_subgraph", func(t *testing.T) {
+		for i := 0; i < 100; i++ {
+			cp := &checkpoint{SubGraphs: map[string]*checkpoint{
+				"z": nil,
+				"a": nil,
+			}}
+			err := validateCheckpointTreeMetadata(cp)
+			require.EqualError(t, err, `subgraph checkpoint "a" is nil`)
+		}
+	})
+
+	t.Run("reserved_interrupt_id", func(t *testing.T) {
+		for i := 0; i < 100; i++ {
+			cp := &checkpoint{InterruptID2State: map[string]core.InterruptState{
+				"_eino_z": {},
+				"_eino_a": {},
+			}}
+			require.EqualError(t, initializeCheckpointLayoutV1(cp),
+				`interrupt ID "_eino_a" uses reserved checkpoint metadata prefix`)
+		}
+	})
+
+	t.Run("conflicting_nested_routes", func(t *testing.T) {
+		rootAddress := Address{{Type: AddressSegmentNode, ID: "root"}}
+		childAddress := Address{{Type: AddressSegmentNode, ID: "child"}}
+		for i := 0; i < 100; i++ {
+			cp := &checkpoint{
+				StateLayoutVersion:      checkpointStateLayoutVersionV1,
+				layoutMetadataValidated: true,
+				InterruptID2Addr: map[string]Address{
+					"z": rootAddress,
+					"a": rootAddress,
+				},
+				InterruptID2State: map[string]core.InterruptState{
+					"z": {State: "z"},
+					"a": {State: "a"},
+				},
+				SubGraphs: map[string]*checkpoint{
+					"child": {
+						StateLayoutVersion:      checkpointStateLayoutVersionV1,
+						layoutMetadataValidated: true,
+						InterruptID2Addr: map[string]Address{
+							"z": childAddress,
+							"a": childAddress,
+						},
+					},
+				},
+			}
+			require.EqualError(t, (&runner{}).validateCheckpointIntegrity(cp),
+				`interrupt ID "a" has conflicting routing addresses "node:root" and "node:child"`)
+		}
+	})
+}
+
+func TestAttack_MixedCheckpointLayoutsAreRejected(t *testing.T) {
+	address := Address{{Type: AddressSegmentNode, ID: "child"}}
+	cp := &checkpoint{
+		InterruptID2Addr: map[string]Address{"interrupt": address},
+		InterruptID2State: map[string]core.InterruptState{
+			"interrupt": {State: "stale"},
+		},
+		SubGraphs: map[string]*checkpoint{
+			"child": {
+				StateLayoutVersion: checkpointStateLayoutVersionV1,
+				InterruptID2Addr:   map[string]Address{"interrupt": address},
+				InterruptID2State: map[string]core.InterruptState{
+					"interrupt": {State: "correct"},
+					checkpointLayoutSentinelID: {
+						State: &checkpointLayoutSentinelV1{Version: checkpointStateLayoutVersionV1},
+					},
+				},
+			},
+		},
+	}
+
+	require.ErrorContains(t, (&runner{}).validateCheckpointIntegrity(cp),
+		"mixed checkpoint state layout")
 }
 
 type checkpointTestTool[I, O any] struct {

@@ -385,10 +385,18 @@ func captureCheckpointCompatCancelFixture(t *testing.T, spec checkpointCompatFix
 
 	var interruptIDs []string
 	var interruptAddresses []string
+	var cancelEvents int
 	for {
 		event, ok := iter.Next()
 		if !ok {
 			break
+		}
+		if event.Err != nil {
+			var cancelErr *CancelError
+			require.ErrorAs(t, event.Err, &cancelErr)
+			require.NotNil(t, cancelErr.Info)
+			require.Equal(t, CancelAfterChatModel, cancelErr.Info.Mode)
+			cancelEvents++
 		}
 		if event.Action != nil && event.Action.Interrupted != nil {
 			for _, interruptCtx := range event.Action.Interrupted.InterruptContexts {
@@ -397,6 +405,7 @@ func captureCheckpointCompatCancelFixture(t *testing.T, spec checkpointCompatFix
 			}
 		}
 	}
+	require.Equal(t, 1, cancelEvents)
 	raw, ok, err := store.Get(ctx, spec.Name)
 	require.NoError(t, err)
 	require.True(t, ok)
@@ -522,7 +531,7 @@ func TestCheckpointBackwardCompatMain60e1d992(t *testing.T) {
 			}
 			require.NoError(t, err)
 			var eventCount int
-			var completed bool
+			var completedEvents int
 			remainingInterrupts := make(map[string]struct{})
 			for {
 				event, ok := iter.Next()
@@ -535,7 +544,7 @@ func TestCheckpointBackwardCompatMain60e1d992(t *testing.T) {
 					msg, msgErr := event.Output.MessageOutput.GetMessage()
 					require.NoError(t, msgErr)
 					if msg != nil && msg.Role == schema.Assistant && msg.Content == "completed" {
-						completed = true
+						completedEvents++
 					}
 				}
 				if event.Action != nil && event.Action.Interrupted != nil {
@@ -546,7 +555,8 @@ func TestCheckpointBackwardCompatMain60e1d992(t *testing.T) {
 			}
 			assert.Positive(t, eventCount)
 			if fixture.ExpectedInterrupts == 0 {
-				assert.True(t, completed, "fully resumed fixture did not produce the terminal assistant output")
+				assert.Equal(t, 1, completedEvents,
+					"fully resumed fixture must produce exactly one terminal assistant output")
 			}
 			expectedInterrupts := make(map[string]struct{}, fixture.ExpectedInterrupts)
 			for _, address := range fixture.InterruptAddresses[targetCount:] {

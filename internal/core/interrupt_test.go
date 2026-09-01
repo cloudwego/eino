@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // Define AddressSegmentType constants locally to avoid dependency cycles
@@ -342,6 +343,20 @@ func TestGetCurrentAddress(t *testing.T) {
 }
 
 func TestMergeInterruptState(t *testing.T) {
+	t.Run("initializes_resume_info", func(t *testing.T) {
+		address := Address{{Type: AddressSegmentAgent, ID: "child"}}
+		ctx, err := MergeInterruptState(context.Background(),
+			map[string]Address{"child": address},
+			map[string]InterruptState{"child": {State: "child state"}})
+		require.NoError(t, err)
+
+		ctx = AppendAddressSegment(ctx, AddressSegmentAgent, "child", "")
+		wasInterrupted, hasState, state := GetInterruptState[string](ctx)
+		require.True(t, wasInterrupted)
+		require.True(t, hasState)
+		require.Equal(t, "child state", state)
+	})
+
 	existingAddress := Address{{Type: AddressSegmentAgent, ID: "agent"}}
 	existingState := InterruptState{State: "existing"}
 	ctx := PopulateInterruptState(context.Background(),
@@ -356,7 +371,7 @@ func TestMergeInterruptState(t *testing.T) {
 			"used-placeholder": {},
 		})
 	info, ok := getResumeInfo(ctx)
-	assert.True(t, ok)
+	require.True(t, ok)
 	info.id2StateUsed["existing"] = true
 	info.id2StateUsed["used-placeholder"] = true
 	info.id2ResumeDataUsed["existing"] = true
@@ -370,8 +385,8 @@ func TestMergeInterruptState(t *testing.T) {
 			"used-placeholder": {State: "must not fill"},
 			"child":            {State: "child state"},
 		})
-	assert.NoError(t, err)
-	assert.Equal(t, ctx, merged)
+	require.NoError(t, err)
+	require.Equal(t, ctx, merged)
 	assert.Equal(t, existingState, info.id2State["existing"])
 	assert.Equal(t, InterruptState{State: "filled state"}, info.id2State["placeholder"])
 	assert.Equal(t, InterruptState{}, info.id2State["used-placeholder"])
@@ -387,6 +402,22 @@ func TestMergeInterruptState(t *testing.T) {
 		nil)
 	assert.ErrorContains(t, err, "conflicting addresses")
 	assert.NotContains(t, info.id2Addr, "must-not-merge")
+
+	t.Run("conflict_error_is_deterministic", func(t *testing.T) {
+		ctx := PopulateInterruptState(context.Background(),
+			map[string]Address{
+				"a": {{Type: AddressSegmentAgent, ID: "original-a"}},
+				"z": {{Type: AddressSegmentAgent, ID: "original-z"}},
+			}, nil)
+		incoming := map[string]Address{
+			"z": {{Type: AddressSegmentAgent, ID: "conflict-z"}},
+			"a": {{Type: AddressSegmentAgent, ID: "conflict-a"}},
+		}
+		for i := 0; i < 100; i++ {
+			_, err := MergeInterruptState(ctx, incoming, nil)
+			require.EqualError(t, err, `interrupt ID "a" has conflicting addresses`)
+		}
+	})
 }
 
 func TestGetNextResumptionPoints(t *testing.T) {

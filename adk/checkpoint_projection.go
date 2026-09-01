@@ -55,6 +55,8 @@ type runnerProjectionSentinelV1 struct {
 	Version int
 }
 
+// checkpointMessageSourceV1 identifies one canonical message by kind, graph
+// path, state index, stable message ID, and content digest.
 type checkpointMessageSourceV1 struct {
 	Kind      string
 	GraphPath []string
@@ -63,6 +65,9 @@ type checkpointMessageSourceV1 struct {
 	Digest    string
 }
 
+// runCtxMessageProjectionV1 stores either Source, Inline, or an explicit nil.
+// TargetLength applies only to root-input slices; LaneDepth applies only to
+// lane events.
 type runCtxMessageProjectionV1 struct {
 	Target        string
 	Index         int
@@ -75,6 +80,8 @@ type runCtxMessageProjectionV1 struct {
 	WasStreaming  bool
 }
 
+// infoMessageProjectionV1 stores either Source, an inline value, or an
+// explicit nil. The target determines which coordinate fields are applicable.
 type infoMessageProjectionV1 struct {
 	Target        string
 	SubGraphPath  []string
@@ -97,6 +104,8 @@ type infoProjectionTarget struct {
 	rerunKey     string
 }
 
+// checkpointProjectionV1 is persisted in serialization. RefCount fields make
+// truncation detectable before hydration mutates any logical checkpoint owner.
 type checkpointProjectionV1 struct {
 	Version            int
 	SourceInterruptID  string
@@ -189,7 +198,8 @@ func projectRunnerCheckpoint(runCtx *runContext, info *InterruptInfo, infoDataSt
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}
-	if len(projection.RunCtxRefs) == 0 && len(projection.InfoRefs) == 0 && !composeChanged {
+	if len(projection.RunCtxRefs) == 0 && len(projection.InfoRefs) == 0 &&
+		len(projection.ToolResultRefs) == 0 && !composeChanged {
 		return runCtx, info, id2State, nil, nil
 	}
 
@@ -287,12 +297,12 @@ func validateRunnerProjectionMetadata(s *serialization) error {
 
 func validateRunnerProjectionReservedIDs(id2Address map[string]Address,
 	id2State map[string]core.InterruptState) error {
-	for id := range id2Address {
+	for _, id := range sortedStringKeys(id2Address) {
 		if strings.HasPrefix(id, "_eino_") {
 			return fmt.Errorf("interrupt ID %q uses reserved checkpoint metadata prefix", id)
 		}
 	}
-	for id := range id2State {
+	for _, id := range sortedStringKeys(id2State) {
 		if strings.HasPrefix(id, "_eino_") {
 			return fmt.Errorf("interrupt ID %q uses reserved checkpoint metadata prefix", id)
 		}
@@ -322,7 +332,7 @@ func findProjectionSource(preferredID string, id2State map[string]core.Interrupt
 		if err != nil {
 			continue
 		}
-		if len(index.byID) > 0 {
+		if len(index.byID) > 0 || len(index.toolResultsByCallID) > 0 {
 			return id, data, index, nil
 		}
 	}
@@ -467,6 +477,8 @@ func (i *checkpointProjectionIndex) sourceForSchemaMessage(
 	if id == "" || len(candidates) == 0 {
 		return checkpointMessageSourceV1{}, false
 	}
+	// A duplicate ID is usable only when every candidate is the same logical
+	// message. Otherwise keeping the value inline avoids an ambiguous reference.
 	for _, candidate := range candidates {
 		if candidate.source.Kind != projectionMessageKindSchema ||
 			!reflect.DeepEqual(candidate.message, message) {
@@ -480,7 +492,8 @@ func (i *checkpointProjectionIndex) schemaMessage(
 	source checkpointMessageSourceV1) (*schema.Message, error) {
 	candidates := i.byID[source.MessageID]
 	for _, candidate := range candidates {
-		if candidate.source.Kind == projectionMessageKindSchema &&
+		if source.Kind == projectionMessageKindSchema &&
+			candidate.source.Kind == source.Kind &&
 			candidate.source.Index == source.Index &&
 			checkpointProjectionPathEqual(candidate.source.GraphPath, source.GraphPath) &&
 			candidate.source.Digest == source.Digest {
@@ -513,7 +526,8 @@ func (i *checkpointProjectionIndex) agenticMessage(
 	source checkpointMessageSourceV1) (*schema.AgenticMessage, error) {
 	candidates := i.byID[source.MessageID]
 	for _, candidate := range candidates {
-		if candidate.source.Kind == projectionMessageKindAgentic &&
+		if source.Kind == projectionMessageKindAgentic &&
+			candidate.source.Kind == source.Kind &&
 			candidate.source.Index == source.Index &&
 			checkpointProjectionPathEqual(candidate.source.GraphPath, source.GraphPath) &&
 			candidate.source.Digest == source.Digest {
@@ -978,18 +992,12 @@ func projectInfoValueMessages(target *any, targetInfo infoProjectionTarget,
 	case *compose.InterruptInfo:
 		nestedProjection := &checkpointProjectionV1{}
 		projectComposeInterruptInfoMessages(value, nil, index, nestedProjection)
-		if len(nestedProjection.InfoRefs) > 0 {
+		if len(nestedProjection.InfoRefs) > 0 || len(nestedProjection.ToolResultRefs) > 0 {
 			*target = &checkpointInterruptInfoPlaceholderV1{
 				Info:               value,
 				RefCount:           len(nestedProjection.InfoRefs),
 				ToolResultRefCount: len(nestedProjection.ToolResultRefs),
 				Refs:               nestedProjection.InfoRefs,
-				ToolResultRefs:     nestedProjection.ToolResultRefs,
-			}
-		} else if len(nestedProjection.ToolResultRefs) > 0 {
-			*target = &checkpointInterruptInfoPlaceholderV1{
-				Info:               value,
-				ToolResultRefCount: len(nestedProjection.ToolResultRefs),
 				ToolResultRefs:     nestedProjection.ToolResultRefs,
 			}
 		}
@@ -1140,6 +1148,8 @@ func projectComposeCheckpointValues(data []byte, index *checkpointProjectionInde
 	if err != nil || !changed {
 		return transformed, changed, err
 	}
+	// Projection is accepted only if hydrating it reproduces the exact original
+	// compose bytes. This keeps optimization failures from changing resume data.
 	restored, err := hydrateComposeCheckpointValues(transformed, index)
 	if err != nil {
 		return nil, false, err
@@ -1262,7 +1272,8 @@ func validateRunCtxProjectionRefs(refs []runCtxMessageProjectionV1, expectedCoun
 		}
 		seen[key] = struct{}{}
 	}
-	for key, count := range sliceCounts {
+	for _, key := range sortedStringKeys(sliceCounts) {
+		count := sliceCounts[key]
 		if count != sliceLengths[key] {
 			return fmt.Errorf("checkpoint projection has incomplete run context slice %q", key)
 		}
@@ -1321,7 +1332,8 @@ func validateInfoProjectionRefs(refs []infoMessageProjectionV1, expectedCount in
 			sliceCounts[targetKey]++
 		}
 	}
-	for key, count := range sliceCounts {
+	for _, key := range sortedStringKeys(sliceCounts) {
+		count := sliceCounts[key]
 		if count != sliceLengths[key] {
 			return fmt.Errorf("checkpoint projection has incomplete interrupt info slice %q", key)
 		}
@@ -1488,7 +1500,14 @@ func hydrateInterruptInfoMessages(info *InterruptInfo, refs []infoMessageProject
 		return err
 	}
 	if len(refs) == 0 {
-		return nil
+		if info == nil {
+			return nil
+		}
+		chatModelInfo, ok := info.Data.(*ChatModelAgentInterruptInfo)
+		if !ok || chatModelInfo == nil || chatModelInfo.Info == nil {
+			return nil
+		}
+		return hydrateNestedInterruptInfoPlaceholders(chatModelInfo.Info, index)
 	}
 	if info == nil {
 		return errors.New("checkpoint projection interrupt info is missing")
@@ -1679,7 +1698,8 @@ func hydrateNestedInterruptInfoPlaceholders(info *compose.InterruptInfo,
 		return err
 	}
 	info.State = hydratedState
-	for key, value := range info.RerunNodesExtra {
+	for _, key := range sortedStringKeys(info.RerunNodesExtra) {
+		value := info.RerunNodesExtra[key]
 		hydrated, err := hydrateProjectionInfoValue(value, index)
 		if err != nil {
 			return err
@@ -1695,8 +1715,8 @@ func hydrateNestedInterruptInfoPlaceholders(info *compose.InterruptInfo,
 			current.Info = hydrated
 		}
 	}
-	for _, sub := range info.SubGraphs {
-		if err := hydrateNestedInterruptInfoPlaceholders(sub, index); err != nil {
+	for _, key := range sortedStringKeys(info.SubGraphs) {
+		if err := hydrateNestedInterruptInfoPlaceholders(info.SubGraphs[key], index); err != nil {
 			return err
 		}
 	}

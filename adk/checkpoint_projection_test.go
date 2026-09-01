@@ -107,7 +107,7 @@ func TestRunnerCheckpointProjectionRoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, runCtx)
 	require.NotNil(t, resumeInfo)
-	require.True(t, reflect.DeepEqual(original.Data, resumeInfo.InterruptInfo.Data))
+	require.Equal(t, original.Data, resumeInfo.InterruptInfo.Data)
 
 	restoredChatModelInfo, ok := resumeInfo.InterruptInfo.Data.(*ChatModelAgentInterruptInfo)
 	require.True(t, ok)
@@ -182,11 +182,25 @@ func TestRunnerCheckpointProjectionMetadataValidation(t *testing.T) {
 		state.InterruptID2State["source"] = core.InterruptState{State: "invalid"}
 		require.ErrorContains(t, restoreRunnerCheckpointProjection(state), "invalid type")
 	})
+	t.Run("malformed_source_bytes", func(t *testing.T) {
+		require.ErrorContains(t, restoreRunnerCheckpointProjection(valid()),
+			"failed to decode checkpoint projection source")
+	})
 	t.Run("reserved_interrupt_id", func(t *testing.T) {
 		require.ErrorContains(t, validateRunnerProjectionReservedIDs(
 			map[string]Address{"_eino_user": {}}, nil), "reserved checkpoint metadata prefix")
 		require.ErrorContains(t, validateRunnerProjectionReservedIDs(nil,
 			map[string]core.InterruptState{"_eino_user": {}}), "reserved checkpoint metadata prefix")
+	})
+	t.Run("reserved_interrupt_id_error_is_deterministic", func(t *testing.T) {
+		for i := 0; i < 100; i++ {
+			require.EqualError(t, validateRunnerProjectionReservedIDs(
+				map[string]Address{"_eino_z": {}, "_eino_a": {}}, nil),
+				`interrupt ID "_eino_a" uses reserved checkpoint metadata prefix`)
+			require.EqualError(t, validateRunnerProjectionReservedIDs(nil,
+				map[string]core.InterruptState{"_eino_z": {}, "_eino_a": {}}),
+				`interrupt ID "_eino_a" uses reserved checkpoint metadata prefix`)
+		}
 	})
 }
 
@@ -233,15 +247,6 @@ func TestCheckpointProjectionRootPathMetadata(t *testing.T) {
 }
 
 func TestRunnerCheckpointProjectionReferenceValidation(t *testing.T) {
-	t.Run("run_context_slice_must_be_complete", func(t *testing.T) {
-		refs := []runCtxMessageProjectionV1{{
-			Target:       runCtxTargetRootInput,
-			Index:        0,
-			TargetLength: 2,
-			Inline:       schema.UserMessage("first"),
-		}}
-		require.ErrorContains(t, validateRunCtxProjectionRefs(refs, 1), "incomplete")
-	})
 	t.Run("run_context_targets_must_be_unique", func(t *testing.T) {
 		ref := runCtxMessageProjectionV1{Target: runCtxTargetEvent, Index: 0}
 		require.ErrorContains(t, validateRunCtxProjectionRefs(
@@ -1083,8 +1088,46 @@ func TestRunnerCheckpointProjectionReusesEnhancedToolResult(t *testing.T) {
 			_, _, restoredInfo, err := runnerLoadCheckPointImpl(store, context.Background(), name)
 			require.NoError(t, err)
 			restoredExtra := findCheckpointProjectionToolsExtra(t, restoredInfo.InterruptInfo)
-			require.True(t, reflect.DeepEqual(liveExtra.ExecutedEnhancedTools,
-				restoredExtra.ExecutedEnhancedTools))
+			require.Equal(t, liveExtra.ExecutedEnhancedTools,
+				restoredExtra.ExecutedEnhancedTools)
+
+			if !streaming {
+				sourceID := persisted.ProjectionV1.SourceInterruptID
+				require.NoError(t, restoreRunnerCheckpointProjection(&persisted))
+				sourceState := persisted.InterruptID2State[sourceID]
+				sourceData, ok := sourceState.State.([]byte)
+				require.True(t, ok)
+				toolOnlyData, transformErr := compose.TransformCheckpointValues(sourceData,
+					&gobSerializer{}, func(_ compose.NodePath,
+						location compose.CheckpointValueLocation, value any) (any, bool, error) {
+						if location.Kind == compose.CheckpointValueState {
+							return nil, true, nil
+						}
+						return value, false, nil
+					})
+				require.NoError(t, transformErr)
+				sourceState.State = toolOnlyData
+				states := map[string]core.InterruptState{sourceID: sourceState}
+				toolOnlyExtra := &compose.ToolsInterruptAndRerunExtra{
+					ExecutedEnhancedTools: map[string]*schema.ToolResult{
+						"call-0": restoredExtra.ExecutedEnhancedTools["call-0"],
+					},
+				}
+				toolOnlyInfo := &InterruptInfo{Data: &ChatModelAgentInterruptInfo{
+					Info: &compose.InterruptInfo{RerunNodesExtra: map[string]any{
+						"tools": toolOnlyExtra,
+					}},
+				}}
+				_, projectedInfo, _, toolOnlyProjection, projectionErr :=
+					projectRunnerCheckpoint(nil, toolOnlyInfo, sourceID, states)
+				require.NoError(t, projectionErr)
+				require.NotNil(t, toolOnlyProjection)
+				require.Empty(t, toolOnlyProjection.InfoRefs)
+				require.Len(t, toolOnlyProjection.ToolResultRefs, 1)
+				projectedExtra := projectedInfo.Data.(*ChatModelAgentInterruptInfo).
+					Info.RerunNodesExtra["tools"].(*compose.ToolsInterruptAndRerunExtra)
+				require.NotContains(t, projectedExtra.ExecutedEnhancedTools, "call-0")
+			}
 
 			iter, err = runner.ResumeWithParams(context.Background(), name, &ResumeParams{
 				Targets: map[string]any{interruptIDs[0]: "resumed"},
@@ -1163,19 +1206,21 @@ func TestRunnerCheckpointProjectionRestoresCancelInput(t *testing.T) {
 	sourceState := persisted.InterruptID2State[persisted.ProjectionV1.SourceInterruptID]
 	sourceData, ok := sourceState.State.([]byte)
 	require.True(t, ok)
-	var projectedInput bool
+	var projectedInputs int
 	require.NoError(t, compose.WalkCheckpointValues(sourceData, &gobSerializer{},
 		func(_ compose.NodePath, location compose.CheckpointValueLocation, value any) error {
 			if location.Kind != compose.CheckpointValueInput {
 				return nil
 			}
-			_, projectedInput = value.(*checkpointMessagePlaceholderV1)
-			if !projectedInput {
-				_, projectedInput = value.(*checkpointMessageSlicePlaceholderV1)
+			if _, projected := value.(*checkpointMessagePlaceholderV1); projected {
+				projectedInputs++
+			}
+			if _, projected := value.(*checkpointMessageSlicePlaceholderV1); projected {
+				projectedInputs++
 			}
 			return nil
 		}))
-	require.False(t, projectedInput,
+	require.Zero(t, projectedInputs,
 		"gob re-encoding cannot project this input while preserving byte-identical ResumeInfo.Data")
 
 	store := newCheckpointCompatStore()
@@ -1186,7 +1231,7 @@ func TestRunnerCheckpointProjectionRestoresCancelInput(t *testing.T) {
 	})
 	iter, err := runner.Resume(context.Background(), spec.Name)
 	require.NoError(t, err)
-	var completed bool
+	var completedEvents int
 	for {
 		event, ok := iter.Next()
 		if !ok {
@@ -1199,10 +1244,10 @@ func TestRunnerCheckpointProjectionRestoresCancelInput(t *testing.T) {
 		message, messageErr := event.Output.MessageOutput.GetMessage()
 		require.NoError(t, messageErr)
 		if message != nil && message.Role == schema.Assistant && message.Content == "completed" {
-			completed = true
+			completedEvents++
 		}
 	}
-	require.True(t, completed)
+	require.Equal(t, 1, completedEvents)
 }
 
 func TestRunnerCheckpointProjectionRestoresEventsAndLanes(t *testing.T) {
@@ -1326,7 +1371,9 @@ func TestRunnerCheckpointProjectionRestoresNestedInterruptInfoState(t *testing.T
 	require.Empty(t, projection.InfoRefs)
 	require.IsType(t, &checkpointInterruptInfoPlaceholderV1{}, outer.State)
 
-	require.NoError(t, hydrateNestedInterruptInfoPlaceholders(outer, index))
+	info := &InterruptInfo{Data: &ChatModelAgentInterruptInfo{Info: outer}}
+	require.NoError(t, hydrateInterruptInfoMessages(info, projection.InfoRefs,
+		projection.InfoRefCount, index))
 	restored, ok := outer.State.(*compose.InterruptInfo)
 	require.True(t, ok)
 	state, ok := restored.State.(*State)

@@ -27,6 +27,7 @@ import (
 	"sort"
 
 	"github.com/cloudwego/eino/compose"
+	checkpointinternal "github.com/cloudwego/eino/internal/checkpoint"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -45,6 +46,8 @@ type checkpointToolResultSourceV1 struct {
 	Digest      string
 }
 
+// infoToolResultProjectionV1 maps one omitted result back to either a rerun
+// entry or an interrupt-context entry. Target selects the applicable fields.
 type infoToolResultProjectionV1 struct {
 	Target        string
 	SubGraphPath  []string
@@ -105,27 +108,11 @@ func (i *checkpointProjectionIndex) addCheckpointToolResults(path []string,
 
 func checkpointToolExecutionMaps(value any) (map[string]string,
 	map[string]*schema.ToolResult, bool) {
-	reflected := reflect.ValueOf(value)
-	for reflected.IsValid() && reflected.Kind() == reflect.Pointer {
-		if reflected.IsNil() {
-			return nil, nil, false
-		}
-		reflected = reflected.Elem()
-	}
-	if !reflected.IsValid() || reflected.Kind() != reflect.Struct ||
-		reflected.Type().PkgPath() != "github.com/cloudwego/eino/compose" ||
-		reflected.Type().Name() != "toolsInterruptAndRerunStateV1" {
+	state, ok := value.(*checkpointinternal.ToolsNodeInterruptStateV1)
+	if !ok || state == nil {
 		return nil, nil, false
 	}
-	standardField := reflected.FieldByName("ExecutedTools")
-	enhancedField := reflected.FieldByName("ExecutedEnhancedTools")
-	if !standardField.IsValid() || !standardField.CanInterface() ||
-		!enhancedField.IsValid() || !enhancedField.CanInterface() {
-		return nil, nil, false
-	}
-	standard, standardOK := standardField.Interface().(map[string]string)
-	enhanced, enhancedOK := enhancedField.Interface().(map[string]*schema.ToolResult)
-	return standard, enhanced, standardOK && enhancedOK
+	return state.ExecutedTools, state.ExecutedEnhancedTools, true
 }
 
 func projectInfoToolResults(extra *compose.ToolsInterruptAndRerunExtra,
@@ -134,8 +121,18 @@ func projectInfoToolResults(extra *compose.ToolsInterruptAndRerunExtra,
 	if extra == nil {
 		return
 	}
+	targetKind, ok := infoTargetForToolResult(target.kind)
+	if !ok {
+		return
+	}
 	standardIDs := sortedStringKeys(extra.ExecutedTools)
 	for _, callID := range standardIDs {
+		if callID == "" {
+			continue
+		}
+		if _, conflicts := extra.ExecutedEnhancedTools[callID]; conflicts {
+			continue
+		}
 		result := extra.ExecutedTools[callID]
 		source, ok := index.sourceForStandardToolResult(callID, result)
 		if !ok {
@@ -143,10 +140,16 @@ func projectInfoToolResults(extra *compose.ToolsInterruptAndRerunExtra,
 		}
 		delete(extra.ExecutedTools, callID)
 		projection.ToolResultRefs = append(projection.ToolResultRefs,
-			newInfoToolResultProjection(infoTargetForToolResult(target.kind), target, callID, source))
+			newInfoToolResultProjection(targetKind, target, callID, source))
 	}
 	enhancedIDs := sortedStringKeys(extra.ExecutedEnhancedTools)
 	for _, callID := range enhancedIDs {
+		if callID == "" {
+			continue
+		}
+		if _, conflicts := extra.ExecutedTools[callID]; conflicts {
+			continue
+		}
 		result := extra.ExecutedEnhancedTools[callID]
 		source, ok := index.sourceForEnhancedToolResult(callID, result)
 		if !ok {
@@ -154,7 +157,7 @@ func projectInfoToolResults(extra *compose.ToolsInterruptAndRerunExtra,
 		}
 		delete(extra.ExecutedEnhancedTools, callID)
 		projection.ToolResultRefs = append(projection.ToolResultRefs,
-			newInfoToolResultProjection(infoTargetForToolResult(target.kind), target, callID, source))
+			newInfoToolResultProjection(targetKind, target, callID, source))
 	}
 }
 
@@ -171,11 +174,14 @@ func newInfoToolResultProjection(targetKind string, target infoProjectionTarget,
 	}
 }
 
-func infoTargetForToolResult(target string) string {
+func infoTargetForToolResult(target string) (string, bool) {
 	if target == infoTargetRerunToolCalls {
-		return infoTargetRerunToolResult
+		return infoTargetRerunToolResult, true
 	}
-	return infoTargetContextToolResult
+	if target == infoTargetContextStateMessage {
+		return infoTargetContextToolResult, true
+	}
+	return "", false
 }
 
 func (i *checkpointProjectionIndex) sourceForStandardToolResult(
@@ -286,26 +292,29 @@ func hydrateComposeInterruptInfoToolResults(info *compose.InterruptInfo,
 
 func hydrateInfoToolResult(extra *compose.ToolsInterruptAndRerunExtra,
 	ref infoToolResultProjectionV1, index *checkpointProjectionIndex) error {
+	if ref.ToolCallID != ref.Source.ToolCallID {
+		return fmt.Errorf("checkpoint projection tool call ID %q does not match source %q",
+			ref.ToolCallID, ref.Source.ToolCallID)
+	}
 	candidate, err := index.toolResult(ref.Source)
 	if err != nil {
 		return err
+	}
+	if _, exists := extra.ExecutedTools[ref.ToolCallID]; exists {
+		return fmt.Errorf("checkpoint projection tool result target %q is already populated", ref.ToolCallID)
+	}
+	if _, exists := extra.ExecutedEnhancedTools[ref.ToolCallID]; exists {
+		return fmt.Errorf("checkpoint projection tool result target %q is already populated", ref.ToolCallID)
 	}
 	switch ref.Source.Kind {
 	case projectionToolResultKindString:
 		if extra.ExecutedTools == nil {
 			extra.ExecutedTools = make(map[string]string)
 		}
-		if _, exists := extra.ExecutedTools[ref.ToolCallID]; exists {
-			return fmt.Errorf("checkpoint projection tool result target %q is already populated", ref.ToolCallID)
-		}
 		extra.ExecutedTools[ref.ToolCallID] = candidate.text
 	case projectionToolResultKindEnhanced:
 		if extra.ExecutedEnhancedTools == nil {
 			extra.ExecutedEnhancedTools = make(map[string]*schema.ToolResult)
-		}
-		if _, exists := extra.ExecutedEnhancedTools[ref.ToolCallID]; exists {
-			return fmt.Errorf("checkpoint projection enhanced tool result target %q is already populated",
-				ref.ToolCallID)
 		}
 		cloned, err := cloneToolResultForProjection(candidate.enhanced)
 		if err != nil {

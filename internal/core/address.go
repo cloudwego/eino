@@ -19,6 +19,7 @@ package core
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 
@@ -335,14 +336,21 @@ func MergeInterruptState(ctx context.Context, id2Addr map[string]Address,
 	if rInfo.id2Addr == nil {
 		rInfo.id2Addr = make(map[string]Address)
 	}
-	for id, addr := range id2Addr {
+	addressIDs := make([]string, 0, len(id2Addr))
+	for id := range id2Addr {
+		addressIDs = append(addressIDs, id)
+	}
+	sort.Strings(addressIDs)
+	for _, id := range addressIDs {
+		addr := id2Addr[id]
 		if current, exists := rInfo.id2Addr[id]; exists {
 			if !current.Equals(addr) {
 				return ctx, fmt.Errorf("interrupt ID %q has conflicting addresses", id)
 			}
 		}
 	}
-	for id, addr := range id2Addr {
+	for _, id := range addressIDs {
+		addr := id2Addr[id]
 		if _, exists := rInfo.id2Addr[id]; exists {
 			continue
 		}

@@ -307,6 +307,11 @@ func TestCompactCheckpointToolsNodeState(t *testing.T) {
 		}
 		corruptCP.InterruptID2State["tool"] = core.InterruptState{State: &corrupt}
 		require.ErrorContains(t, hydrateCheckpointToolsNodeState(corruptCP), "do not match metadata")
+
+		corrupt.Role = schema.User
+		corrupt.ToolCallsSource = compacted.ToolCallsSource
+		corruptCP.InterruptID2State["tool"] = core.InterruptState{State: &corrupt}
+		require.ErrorContains(t, hydrateCheckpointToolsNodeState(corruptCP), "source role")
 	})
 }
 
@@ -420,4 +425,136 @@ func TestToolsNodeV1EnhancedSiblingResume(t *testing.T) {
 			require.Equal(t, 1, enhancedCalls, "successful enhanced sibling must be reused")
 		})
 	}
+}
+
+func TestAttack_ToolsNodeV1RejectsInlineAndReference(t *testing.T) {
+	sourceCalls := []schema.ToolCall{{
+		ID: "source",
+		Function: schema.FunctionCall{
+			Name:      "source",
+			Arguments: `{}`,
+		},
+	}}
+	inlineCalls := []schema.ToolCall{{
+		ID: "inline",
+		Function: schema.FunctionCall{
+			Name:      "inline",
+			Arguments: `{}`,
+		},
+	}}
+	digest, ok := checkpointToolCallsDigest(sourceCalls)
+	require.True(t, ok)
+	cp := &checkpoint{
+		State: &toolsNodeCheckpointState{Messages: []*schema.Message{
+			schema.AssistantMessage("", sourceCalls),
+		}},
+		InterruptID2State: map[string]core.InterruptState{
+			"tool": {State: &toolsInterruptAndRerunStateV1{
+				Version:   toolsInterruptAndRerunStateVersionV1,
+				Role:      schema.Assistant,
+				ToolCalls: inlineCalls,
+				ToolCallsSource: &toolsInterruptToolCallsSourceV1{
+					MessageIndex: 0,
+					Digest:       digest,
+				},
+			}},
+		},
+	}
+
+	require.ErrorContains(t, hydrateCheckpointToolsNodeState(cp),
+		"both inline tool calls and a source reference")
+}
+
+func TestAttack_ToolsNodeRejectsDuplicateToolCallIDs(t *testing.T) {
+	input := schema.AssistantMessage("", []schema.ToolCall{
+		{
+			ID:       "duplicate",
+			Function: schema.FunctionCall{Name: "standard"},
+		},
+		{
+			ID:       "duplicate",
+			Function: schema.FunctionCall{Name: "enhanced"},
+		},
+	})
+
+	_, err := (&ToolsNode{}).genToolCallTasks(context.Background(), &toolsTuple{}, input,
+		map[string]string{"duplicate": "completed"}, nil, false)
+	require.ErrorContains(t, err, `duplicate tool call ID "duplicate"`)
+}
+
+func TestAttack_ToolsNodeV1RejectsConflictingResultState(t *testing.T) {
+	t.Run("duplicate_tool_calls", func(t *testing.T) {
+		state := &toolsInterruptAndRerunStateV1{
+			Version: toolsInterruptAndRerunStateVersionV1,
+			Role:    schema.Assistant,
+			ToolCalls: []schema.ToolCall{
+				{ID: "duplicate"},
+				{ID: "duplicate"},
+			},
+		}
+		ctx := toolsNodeCheckpointContext(state)
+		_, _, _, err := restoreToolsInterruptState(ctx, nil, nil, nil)
+		require.ErrorContains(t, err, `duplicate tool call ID "duplicate"`)
+	})
+
+	t.Run("standard_and_enhanced", func(t *testing.T) {
+		state := &toolsInterruptAndRerunStateV1{
+			Version:               toolsInterruptAndRerunStateVersionV1,
+			Role:                  schema.Assistant,
+			ToolCalls:             []schema.ToolCall{{ID: "duplicate"}},
+			ExecutedTools:         map[string]string{"duplicate": "result"},
+			ExecutedEnhancedTools: map[string]*schema.ToolResult{"duplicate": {}},
+		}
+		ctx := toolsNodeCheckpointContext(state)
+		_, _, _, err := restoreToolsInterruptState(ctx, nil, nil, nil)
+		require.ErrorContains(t, err, `duplicate executed tool call ID "duplicate"`)
+	})
+
+	t.Run("standard_and_enhanced_error_is_deterministic", func(t *testing.T) {
+		state := &toolsInterruptAndRerunStateV1{
+			Version:   toolsInterruptAndRerunStateVersionV1,
+			Role:      schema.Assistant,
+			ToolCalls: []schema.ToolCall{{ID: "a"}, {ID: "z"}},
+			ExecutedTools: map[string]string{
+				"z": "standard-z",
+				"a": "standard-a",
+			},
+			ExecutedEnhancedTools: map[string]*schema.ToolResult{
+				"z": {},
+				"a": {},
+			},
+		}
+		for i := 0; i < 100; i++ {
+			require.EqualError(t, validateToolsInterruptAndRerunStateV1(state),
+				`tools node interrupt state has duplicate executed tool call ID "a"`)
+		}
+	})
+
+	t.Run("executed_and_rerun", func(t *testing.T) {
+		state := &toolsInterruptAndRerunStateV1{
+			Version:       toolsInterruptAndRerunStateVersionV1,
+			Role:          schema.Assistant,
+			ToolCalls:     []schema.ToolCall{{ID: "duplicate"}},
+			ExecutedTools: map[string]string{"duplicate": "result"},
+			RerunTools:    []string{"duplicate"},
+		}
+		ctx := toolsNodeCheckpointContext(state)
+		_, _, _, err := restoreToolsInterruptState(ctx, nil, nil, nil)
+		require.ErrorContains(t, err, `both executed and pending rerun`)
+	})
+
+	t.Run("duplicate_rerun", func(t *testing.T) {
+		state := &toolsInterruptAndRerunStateV1{
+			Version:   toolsInterruptAndRerunStateVersionV1,
+			Role:      schema.Assistant,
+			ToolCalls: []schema.ToolCall{{ID: "duplicate"}},
+			RerunTools: []string{
+				"duplicate",
+				"duplicate",
+			},
+		}
+		ctx := toolsNodeCheckpointContext(state)
+		_, _, _, err := restoreToolsInterruptState(ctx, nil, nil, nil)
+		require.ErrorContains(t, err, `duplicate rerun tool call ID "duplicate"`)
+	})
 }

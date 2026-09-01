@@ -995,12 +995,12 @@ func (r *runner) validateCheckpointIntegrity(cp *checkpoint) error {
 					id, owner.path, expectedPath)
 			}
 		}
-		for id := range owners {
+		for _, id := range sortedCheckpointStateOwnerIDs(owners) {
 			if _, ok := cp.InterruptID2Addr[id]; !ok {
 				return fmt.Errorf("checkpoint state owner %q has no routing address", id)
 			}
 		}
-		for id := range routes {
+		for _, id := range sortedCheckpointStateRouteIDs(routes) {
 			if _, ok := cp.InterruptID2Addr[id]; !ok {
 				return fmt.Errorf("nested routing entry %q is missing from the root routing index", id)
 			}
@@ -1019,15 +1019,50 @@ type checkpointStateRoute struct {
 	path    []string
 }
 
+func sortedCheckpointStateOwnerIDs(owners map[string]checkpointStateOwner) []string {
+	ids := make([]string, 0, len(owners))
+	for id := range owners {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+func sortedCheckpointStateRouteIDs(routes map[string][]checkpointStateRoute) []string {
+	ids := make([]string, 0, len(routes))
+	for id := range routes {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
+}
+
 func validateCheckpointTreeMetadata(cp *checkpoint) error {
+	if cp == nil {
+		return errors.New("checkpoint is nil")
+	}
+	return validateCheckpointTreeLayout(cp, cp.StateLayoutVersion)
+}
+
+func validateCheckpointTreeLayout(cp *checkpoint, expectedVersion int) error {
 	if err := validateCheckpointLayoutMetadata(cp); err != nil {
 		return err
 	}
-	for key, sub := range cp.SubGraphs {
+	if cp.StateLayoutVersion != expectedVersion {
+		return fmt.Errorf("mixed checkpoint state layout: got version %d, want %d",
+			cp.StateLayoutVersion, expectedVersion)
+	}
+	keys := make([]string, 0, len(cp.SubGraphs))
+	for key := range cp.SubGraphs {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		sub := cp.SubGraphs[key]
 		if sub == nil {
 			return fmt.Errorf("subgraph checkpoint %q is nil", key)
 		}
-		if err := validateCheckpointTreeMetadata(sub); err != nil {
+		if err := validateCheckpointTreeLayout(sub, expectedVersion); err != nil {
 			return fmt.Errorf("subgraph checkpoint %q has invalid metadata: %w", key, err)
 		}
 	}
@@ -1075,7 +1110,8 @@ func sortedAddressIDs(id2Addr map[string]Address) []string {
 
 func collectCheckpointStateRoutes(cp *checkpoint, path []string,
 	routes map[string][]checkpointStateRoute) error {
-	for id, address := range cp.InterruptID2Addr {
+	for _, id := range sortedAddressIDs(cp.InterruptID2Addr) {
+		address := cp.InterruptID2Addr[id]
 		existing := routes[id]
 		if len(existing) > 0 && !existing[0].address.Equals(address) {
 			return fmt.Errorf("interrupt ID %q has conflicting routing addresses %q and %q",
