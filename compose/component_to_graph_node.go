@@ -57,6 +57,17 @@ func toEmbeddingNode(node embedding.Embedder, opts ...GraphAddNodeOpt) (*graphNo
 		opts...)
 }
 
+func toMultiModalEmbeddingNode(node embedding.MultiModalEmbedder, opts ...GraphAddNodeOpt) (*graphNode, *graphAddNodeOpts) {
+	return toComponentNode(
+		node,
+		components.ComponentOfEmbedding,
+		node.EmbedMultiModal,
+		nil,
+		nil,
+		nil,
+		opts...)
+}
+
 func toRetrieverNode(node retriever.Retriever, opts ...GraphAddNodeOpt) (*graphNode, *graphAddNodeOpts) {
 	return toComponentNode(
 		node,
