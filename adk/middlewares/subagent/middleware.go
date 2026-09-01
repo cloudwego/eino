@@ -29,7 +29,6 @@ import (
 	durablesubagent "github.com/cloudwego/eino/adk/backgroundtask/subagent"
 	"github.com/cloudwego/eino/adk/filesystem"
 	"github.com/cloudwego/eino/adk/internal"
-	"github.com/cloudwego/eino/adk/internal/foreground"
 	"github.com/cloudwego/eino/adk/middlewares/internal/systemreminder"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/schema"
@@ -122,7 +121,7 @@ type TypedDurableBackgroundConfig[M adk.MessageType] struct {
 	// ShouldAutoBackground is reserved for a future durable checkpoint handoff
 	// implementation. Supplying it currently makes construction fail rather
 	// than pre-creating a background task for foreground execution.
-	ShouldAutoBackground func(context.Context, *foreground.CandidateInfo) bool
+	ShouldAutoBackground func(context.Context, *backgroundtask.ForegroundCandidate) bool
 	// RunOptionsFactories reconstructs deployment-owned run options by sub-agent
 	// name for every execution attempt. Every worker serving a name must configure
 	// a semantically equivalent factory for the full lifetime of resumable tasks.

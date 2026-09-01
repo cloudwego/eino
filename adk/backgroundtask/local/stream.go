@@ -21,7 +21,6 @@ import (
 	"time"
 
 	"github.com/cloudwego/eino/adk/backgroundtask"
-	"github.com/cloudwego/eino/adk/internal/foreground"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -196,7 +195,7 @@ func (r *Runner) projectForegroundStream(projection *foregroundStreamProjection)
 			}
 			return
 		case <-timeout:
-			candidate := &foreground.CandidateInfo{
+			candidate := &backgroundtask.ForegroundCandidate{
 				TaskID: spec.ID, Kind: spec.Kind, Description: spec.Description,
 				OutputFile: spec.OutputFile, StartedAt: startedAt,
 				Elapsed: time.Since(startedAt),

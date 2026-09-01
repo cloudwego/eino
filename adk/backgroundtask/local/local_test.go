@@ -31,7 +31,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cloudwego/eino/adk/backgroundtask"
-	"github.com/cloudwego/eino/adk/internal/foreground"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -167,7 +166,7 @@ func TestRunnerForegroundTimeoutPolicies_BitsUT(t *testing.T) {
 		timeout := 10
 		runner, manager := newTestRunner(t, func(config *Config) {
 			config.ForegroundTimeoutMs = &timeout
-			config.ShouldAutoBackground = func(context.Context, *foreground.CandidateInfo) bool {
+			config.ShouldAutoBackground = func(context.Context, *backgroundtask.ForegroundCandidate) bool {
 				return true
 			}
 		})
@@ -440,7 +439,7 @@ func TestRunnerStreamBackgroundNotices(t *testing.T) {
 				return fmt.Sprintf("notice:%t", info.AutoBackgrounded)
 			}
 			if auto {
-				config.ShouldAutoBackground = func(context.Context, *foreground.CandidateInfo) bool {
+				config.ShouldAutoBackground = func(context.Context, *backgroundtask.ForegroundCandidate) bool {
 					return true
 				}
 			}

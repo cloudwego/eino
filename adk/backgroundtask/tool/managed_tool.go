@@ -56,7 +56,7 @@ type ManagedToolConfig struct {
 	// timeout the operation instead of detaching. It may be called concurrently.
 	// A non-positive ForegroundTimeoutMs therefore also disables this policy:
 	// with no timer there is no expiry to evaluate it on.
-	ShouldAutoBackground func(context.Context, *foreground.CandidateInfo) bool
+	ShouldAutoBackground func(context.Context, *backgroundtask.ForegroundCandidate) bool
 	// RunInBackground requests explicit detachment from JSON arguments. Nil
 	// never requests it and takes precedence over foreground timeout.
 	RunInBackground func(context.Context, string) bool
@@ -118,7 +118,7 @@ func NewManagedTool(
 		return nil, fmt.Errorf("backgroundtask/tool: clone tool info: %w", err)
 	}
 	info.Desc += "\nSuccessful execution returns an Eino task_id for task_output and task_stop."
-	timeoutMs := foreground.DefaultTimeoutMs
+	timeoutMs := backgroundtask.DefaultForegroundTimeoutMs
 	if config.ForegroundTimeoutMs != nil {
 		timeoutMs = *config.ForegroundTimeoutMs
 	}
@@ -720,7 +720,7 @@ func (t *managedTool) tryHandoff(
 	ctx context.Context,
 	start *foregroundStart,
 ) (*backgroundtask.Task, error) {
-	candidate := &foreground.CandidateInfo{
+	candidate := &backgroundtask.ForegroundCandidate{
 		TaskID: start.taskID, Kind: start.spec.Kind,
 		Description: start.spec.Description, OutputFile: start.spec.OutputFile,
 	}

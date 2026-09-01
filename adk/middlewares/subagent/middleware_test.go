@@ -35,7 +35,6 @@ import (
 	durablesubagent "github.com/cloudwego/eino/adk/backgroundtask/subagent"
 	"github.com/cloudwego/eino/adk/filesystem"
 	"github.com/cloudwego/eino/adk/internal/agenttool"
-	"github.com/cloudwego/eino/adk/internal/foreground"
 	adksession "github.com/cloudwego/eino/adk/session"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/schema"
@@ -971,7 +970,7 @@ func TestDurableAutoBackgroundRequiresHandoffSupport(t *testing.T) {
 	agent := &mockAgent{name: "worker", desc: "done"}
 	background := durableBackground(t, manager, agent)
 	background.Durable.ForegroundTimeoutMs = &timeout
-	background.Durable.ShouldAutoBackground = func(context.Context, *foreground.CandidateInfo) bool { return true }
+	background.Durable.ShouldAutoBackground = func(context.Context, *backgroundtask.ForegroundCandidate) bool { return true }
 	_, err := New(ctx, &Config{
 		SubAgents: []adk.Agent{agent}, Background: background,
 	})

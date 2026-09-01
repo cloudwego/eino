@@ -83,11 +83,11 @@ type Config struct {
 	Executors *backgroundtask.ExecutorRegistry
 	// ForegroundTimeoutMs is the default foreground observation timeout for runs
 	// that do not set Input.ForegroundTimeoutMs. Nil uses the framework default
-	// (foreground.DefaultTimeoutMs); a non-positive value disables the timer, so
-	// runs wait until the work returns or ctx is canceled and ShouldAutoBackground
-	// is never consulted.
+	// (backgroundtask.DefaultForegroundTimeoutMs); a non-positive value disables
+	// the timer, so runs wait until the work returns or ctx is canceled and
+	// ShouldAutoBackground is never consulted.
 	ForegroundTimeoutMs  *int
-	ShouldAutoBackground func(context.Context, *foreground.CandidateInfo) bool
+	ShouldAutoBackground func(context.Context, *backgroundtask.ForegroundCandidate) bool
 	BackgroundNotice     func(context.Context, NoticeInfo) string
 }
 
@@ -104,7 +104,7 @@ func New(config *Config) (*Runner, error) {
 	if config == nil || config.Manager == nil || config.Executors == nil {
 		return nil, errors.New("backgroundtask/local: manager and executor registry are required")
 	}
-	timeoutMs := foreground.DefaultTimeoutMs
+	timeoutMs := backgroundtask.DefaultForegroundTimeoutMs
 	if config.ForegroundTimeoutMs != nil {
 		timeoutMs = *config.ForegroundTimeoutMs
 	}
@@ -216,7 +216,7 @@ func (r *Runner) runForeground(
 		cancel()
 		return nil, ctx.Err()
 	case <-timeout:
-		candidate := &foreground.CandidateInfo{
+		candidate := &backgroundtask.ForegroundCandidate{
 			TaskID: spec.ID, Kind: spec.Kind, Description: spec.Description,
 			OutputFile: spec.OutputFile, StartedAt: startedAt,
 			Elapsed: time.Since(startedAt),
