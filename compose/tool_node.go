@@ -18,9 +18,12 @@ package compose
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"runtime/debug"
 	"sort"
 	"strings"
@@ -320,9 +323,15 @@ type toolsInterruptAndRerunStateV1 struct {
 	Version               int
 	Role                  schema.RoleType
 	ToolCalls             []schema.ToolCall
+	ToolCallsSource       *toolsInterruptToolCallsSourceV1
 	ExecutedTools         map[string]string
 	ExecutedEnhancedTools map[string]*schema.ToolResult
 	RerunTools            []string
+}
+
+type toolsInterruptToolCallsSourceV1 struct {
+	MessageIndex int
+	Digest       string
 }
 
 func restoreToolsInterruptState(ctx context.Context, input *schema.Message,
@@ -347,6 +356,9 @@ func restoreToolsInterruptState(ctx context.Context, input *schema.Message,
 		if state.Role != schema.Assistant {
 			return nil, nil, nil, fmt.Errorf("tools node interrupt state has invalid role %q", state.Role)
 		}
+		if state.ToolCallsSource != nil {
+			return nil, nil, nil, errors.New("tools node interrupt state has an unresolved tool calls reference")
+		}
 		return &schema.Message{
 			Role:      state.Role,
 			ToolCalls: state.ToolCalls,
@@ -354,6 +366,120 @@ func restoreToolsInterruptState(ctx context.Context, input *schema.Message,
 	default:
 		return nil, nil, nil, fmt.Errorf("tools node has invalid interrupt state type %T", state)
 	}
+}
+
+func compactCheckpointToolsNodeState(cp *checkpoint) {
+	if cp == nil {
+		return
+	}
+	messages := checkpointStateMessages(cp.State)
+	for id, interruptState := range cp.InterruptID2State {
+		state, ok := interruptState.State.(*toolsInterruptAndRerunStateV1)
+		if !ok || state == nil || state.ToolCallsSource != nil || len(state.ToolCalls) == 0 {
+			continue
+		}
+		messageIndex, digest, ok := findCheckpointToolCallsSource(messages, state.Role, state.ToolCalls)
+		if !ok {
+			continue
+		}
+		cloned := *state
+		cloned.ToolCalls = nil
+		cloned.ToolCallsSource = &toolsInterruptToolCallsSourceV1{
+			MessageIndex: messageIndex,
+			Digest:       digest,
+		}
+		interruptState.State = &cloned
+		cp.InterruptID2State[id] = interruptState
+	}
+	for _, sub := range cp.SubGraphs {
+		compactCheckpointToolsNodeState(sub)
+	}
+}
+
+func hydrateCheckpointToolsNodeState(cp *checkpoint) error {
+	if cp == nil {
+		return nil
+	}
+	messages := checkpointStateMessages(cp.State)
+	for id, interruptState := range cp.InterruptID2State {
+		state, ok := interruptState.State.(*toolsInterruptAndRerunStateV1)
+		if !ok || state == nil || state.ToolCallsSource == nil {
+			continue
+		}
+		source := state.ToolCallsSource
+		if source.MessageIndex < 0 || source.MessageIndex >= len(messages) ||
+			messages[source.MessageIndex] == nil {
+			return fmt.Errorf("tools node interrupt state %q has invalid tool calls source index %d",
+				id, source.MessageIndex)
+		}
+		message := messages[source.MessageIndex]
+		if message.Role != state.Role {
+			return fmt.Errorf("tools node interrupt state %q source role %q does not match %q",
+				id, message.Role, state.Role)
+		}
+		digest, ok := checkpointToolCallsDigest(message.ToolCalls)
+		if !ok || digest != source.Digest {
+			return fmt.Errorf("tools node interrupt state %q source tool calls do not match metadata", id)
+		}
+		cloned := *state
+		cloned.ToolCalls = append([]schema.ToolCall(nil), message.ToolCalls...)
+		cloned.ToolCallsSource = nil
+		interruptState.State = &cloned
+		cp.InterruptID2State[id] = interruptState
+	}
+	for _, sub := range cp.SubGraphs {
+		if err := hydrateCheckpointToolsNodeState(sub); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func checkpointStateMessages(state any) []*schema.Message {
+	value := reflect.ValueOf(state)
+	for value.IsValid() && value.Kind() == reflect.Ptr {
+		if value.IsNil() {
+			return nil
+		}
+		value = value.Elem()
+	}
+	if !value.IsValid() || value.Kind() != reflect.Struct {
+		return nil
+	}
+	field := value.FieldByName("Messages")
+	if !field.IsValid() || !field.CanInterface() {
+		return nil
+	}
+	messages, _ := field.Interface().([]*schema.Message)
+	return messages
+}
+
+func findCheckpointToolCallsSource(messages []*schema.Message, role schema.RoleType,
+	toolCalls []schema.ToolCall) (int, string, bool) {
+	matched := -1
+	for i, message := range messages {
+		if message == nil || message.Role != role || !reflect.DeepEqual(message.ToolCalls, toolCalls) {
+			continue
+		}
+		if matched >= 0 {
+			return 0, "", false
+		}
+		matched = i
+	}
+	if matched < 0 {
+		return 0, "", false
+	}
+	digest, ok := checkpointToolCallsDigest(toolCalls)
+	return matched, digest, ok
+}
+
+func checkpointToolCallsDigest(toolCalls []schema.ToolCall) (string, bool) {
+	data, err := json.Marshal(toolCalls)
+	if err != nil {
+		return "", false
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:]), true
 }
 
 type toolsTuple struct {

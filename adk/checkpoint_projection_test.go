@@ -470,3 +470,28 @@ func TestRunnerCheckpointProjectionAgenticComposeValues(t *testing.T) {
 	require.Equal(t, []*schema.AgenticMessage{inline, canonical}, restored)
 	require.NotSame(t, canonical, restored[1])
 }
+
+func TestRunnerCheckpointProjectionRestoresNestedInterruptInfoState(t *testing.T) {
+	canonical := schema.AssistantMessage("canonical", nil)
+	typedSetMessageID(canonical, "nested-info-message")
+	index := &checkpointProjectionIndex{byID: make(map[string][]canonicalCheckpointMessage)}
+	index.addSchemaMessage([]string{"graph"}, 0, canonical)
+
+	nested := &compose.InterruptInfo{State: &State{
+		Messages: []*schema.Message{schema.UserMessage("inline"), canonical},
+	}}
+	outer := &compose.InterruptInfo{State: nested}
+	projection := &checkpointProjectionV1{}
+	projectComposeInterruptInfoMessages(outer, nil, index, projection)
+	require.Empty(t, projection.InfoRefs)
+	require.IsType(t, &checkpointInterruptInfoPlaceholderV1{}, outer.State)
+
+	require.NoError(t, hydrateNestedInterruptInfoPlaceholders(outer, index))
+	restored, ok := outer.State.(*compose.InterruptInfo)
+	require.True(t, ok)
+	state, ok := restored.State.(*State)
+	require.True(t, ok)
+	require.Equal(t, "inline", state.Messages[0].Content)
+	require.Equal(t, canonical, state.Messages[1])
+	require.NotSame(t, canonical, state.Messages[1])
+}

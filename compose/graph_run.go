@@ -164,6 +164,9 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 		if err = r.validateCheckpointIntegrity(cp); err != nil {
 			return nil, newGraphRunError(fmt.Errorf("invalid checkpoint: %w", err))
 		}
+		if err = hydrateCheckpointToolsNodeState(cp); err != nil {
+			return nil, newGraphRunError(fmt.Errorf("invalid checkpoint tools state: %w", err))
+		}
 		if err = consumeCheckpointLayoutMetadata(cp); err != nil {
 			return nil, newGraphRunError(fmt.Errorf("invalid checkpoint metadata: %w", err))
 		}
@@ -190,6 +193,9 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 
 			if err = r.validateCheckpointIntegrity(cp); err != nil {
 				return nil, newGraphRunError(fmt.Errorf("invalid checkpoint: %w", err))
+			}
+			if err = hydrateCheckpointToolsNodeState(cp); err != nil {
+				return nil, newGraphRunError(fmt.Errorf("invalid checkpoint tools state: %w", err))
 			}
 			if err = consumeCheckpointLayoutMetadata(cp); err != nil {
 				return nil, newGraphRunError(fmt.Errorf("invalid checkpoint metadata: %w", err))
@@ -617,6 +623,7 @@ func (r *runner) handleInterrupt(
 	for _, t := range nextTasks {
 		cp.Inputs[t.nodeKey] = t.input
 	}
+	compactCheckpointToolsNodeState(cp)
 	err = r.checkPointer.convertCheckPoint(cp, isStream)
 	if err != nil {
 		return fmt.Errorf("failed to convert checkpoint: %w", err)
@@ -775,6 +782,7 @@ func (r *runner) handleInterruptWithSubGraphAndRerunNodes(
 			cp.Inputs[t.nodeKey] = t.originalInput
 		}
 	}
+	compactCheckpointToolsNodeState(cp)
 	if err = r.validateCheckpointIntegrity(cp); err != nil {
 		return fmt.Errorf("invalid checkpoint: %w", err)
 	}

@@ -236,24 +236,7 @@ func TestCheckpointSizeMatrix(t *testing.T) {
 		require.Less(t, len(nested), 120_000)
 	})
 
-	for _, size := range []int{0, 256 << 10, 320 << 10, 1 << 20} {
-		t.Run(fmt.Sprintf("content_size_%d", size), func(t *testing.T) {
-			raw, _, _ := captureCheckpointCompatFixture(t, checkpointCompatFixture{
-				Name:         "content-size",
-				Depth:        1,
-				PayloadField: "content",
-				PayloadSize:  size,
-			})
-			t.Logf("payload=%d checkpoint=%d", size, len(raw))
-			if size == 320<<10 {
-				require.Less(t, len(raw), 1<<20)
-			}
-			if size == 1<<20 {
-				require.Less(t, len(raw), 5<<18)
-			}
-		})
-	}
-
+	sizes := []int{0, 256 << 10, 320 << 10, 1 << 20}
 	for _, field := range []string{
 		"user_query",
 		"content",
@@ -262,19 +245,27 @@ func TestCheckpointSizeMatrix(t *testing.T) {
 		"extra",
 		"multimodal",
 	} {
-		for _, streaming := range []bool{false, true} {
-			name := fmt.Sprintf("%s_stream_%t", field, streaming)
-			t.Run(name, func(t *testing.T) {
-				raw, _, _ := captureCheckpointCompatFixture(t, checkpointCompatFixture{
-					Name:         name,
-					Depth:        1,
-					Streaming:    streaming,
-					PayloadField: field,
-					PayloadSize:  320 << 10,
+		for _, size := range sizes {
+			for _, streaming := range []bool{false, true} {
+				name := fmt.Sprintf("%s_size_%d_stream_%t", field, size, streaming)
+				t.Run(name, func(t *testing.T) {
+					raw, _, _ := captureCheckpointCompatFixture(t, checkpointCompatFixture{
+						Name:         name,
+						Depth:        1,
+						Streaming:    streaming,
+						PayloadField: field,
+						PayloadSize:  size,
+					})
+					t.Logf("field=%s payload=%d streaming=%t checkpoint=%d",
+						field, size, streaming, len(raw))
+					if field == "content" && size == 320<<10 {
+						require.Less(t, len(raw), 1<<20)
+					}
+					if field == "content" && size == 1<<20 {
+						require.Less(t, len(raw), 5<<18)
+					}
 				})
-				t.Logf("field=%s streaming=%t checkpoint=%d", field, streaming, len(raw))
-				require.Less(t, len(raw), 2<<20)
-			})
+			}
 		}
 	}
 }

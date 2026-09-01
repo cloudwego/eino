@@ -22,6 +22,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -36,9 +38,10 @@ type checkpointForwardCompatAnyEnvelope struct {
 func TestCheckpointV1ConcreteTypesFailLoudlyInLegacyReader(t *testing.T) {
 	readerDir := filepath.Join("..", "adk", "testdata", "checkpoint_compat", "legacy_reader")
 	readerBin := filepath.Join(t.TempDir(), "checkpoint-legacy-reader")
-	build := exec.Command("go", "build", "-o", readerBin, ".")
+	build := exec.Command(filepath.Join(runtime.GOROOT(), "bin", "go"),
+		"build", "-o", readerBin, ".")
 	build.Dir = readerDir
-	build.Env = append(os.Environ(), "GOWORK=off")
+	build.Env = checkpointLegacyReaderEnv()
 	output, err := build.CombinedOutput()
 	require.NoError(t, err, string(output))
 
@@ -77,4 +80,18 @@ func TestCheckpointV1ConcreteTypesFailLoudlyInLegacyReader(t *testing.T) {
 			require.Contains(t, string(output), tt.registeredName)
 		})
 	}
+}
+
+func checkpointLegacyReaderEnv() []string {
+	env := os.Environ()
+	filtered := make([]string, 0, len(env)+2)
+	for _, value := range env {
+		if strings.HasPrefix(value, "GOWORK=") ||
+			strings.HasPrefix(value, "GOTOOLCHAIN=") ||
+			strings.HasPrefix(value, "GOROOT=") {
+			continue
+		}
+		filtered = append(filtered, value)
+	}
+	return append(filtered, "GOWORK=off", "GOTOOLCHAIN=local")
 }

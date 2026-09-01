@@ -1624,6 +1624,11 @@ func hydrateNestedInterruptInfoPlaceholders(info *compose.InterruptInfo,
 	if info == nil {
 		return nil
 	}
+	hydratedState, err := hydrateProjectionInfoValue(info.State, index)
+	if err != nil {
+		return err
+	}
+	info.State = hydratedState
 	for key, value := range info.RerunNodesExtra {
 		hydrated, err := hydrateProjectionInfoValue(value, index)
 		if err != nil {

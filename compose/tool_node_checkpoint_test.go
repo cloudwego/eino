@@ -212,3 +212,90 @@ func TestToolsNodeV1ResumeUsesPrehandledToolCalls(t *testing.T) {
 	require.Equal(t, `"completed"`, output[0].Content)
 	require.Equal(t, toolName, output[0].ToolName)
 }
+
+func TestCompactCheckpointToolsNodeState(t *testing.T) {
+	message := schema.AssistantMessage("", []schema.ToolCall{{
+		ID: "call",
+		Function: schema.FunctionCall{
+			Name:      "tool",
+			Arguments: `{"payload":"large"}`,
+		},
+	}})
+	state := &toolsInterruptAndRerunStateV1{
+		Version:   toolsInterruptAndRerunStateVersionV1,
+		Role:      schema.Assistant,
+		ToolCalls: append([]schema.ToolCall(nil), message.ToolCalls...),
+	}
+	cp := &checkpoint{
+		State: struct {
+			Messages []*schema.Message
+		}{Messages: []*schema.Message{schema.UserMessage("request"), message}},
+		InterruptID2State: map[string]core.InterruptState{
+			"tool": {State: state},
+		},
+	}
+
+	compactCheckpointToolsNodeState(cp)
+	compacted := cp.InterruptID2State["tool"].State.(*toolsInterruptAndRerunStateV1)
+	require.Nil(t, compacted.ToolCalls)
+	require.NotNil(t, compacted.ToolCallsSource)
+	require.Equal(t, 1, compacted.ToolCallsSource.MessageIndex)
+
+	require.NoError(t, hydrateCheckpointToolsNodeState(cp))
+	hydrated := cp.InterruptID2State["tool"].State.(*toolsInterruptAndRerunStateV1)
+	require.Equal(t, message.ToolCalls, hydrated.ToolCalls)
+	require.Nil(t, hydrated.ToolCallsSource)
+
+	t.Run("mismatch_remains_inline", func(t *testing.T) {
+		mismatch := *state
+		mismatch.ToolCalls = append([]schema.ToolCall(nil), state.ToolCalls...)
+		mismatch.ToolCalls[0].Function.Arguments = `{"different":true}`
+		mismatchCP := &checkpoint{
+			State: cp.State,
+			InterruptID2State: map[string]core.InterruptState{
+				"tool": {State: &mismatch},
+			},
+		}
+		compactCheckpointToolsNodeState(mismatchCP)
+		got := mismatchCP.InterruptID2State["tool"].State.(*toolsInterruptAndRerunStateV1)
+		require.NotEmpty(t, got.ToolCalls)
+		require.Nil(t, got.ToolCallsSource)
+	})
+
+	t.Run("duplicate_source_remains_inline", func(t *testing.T) {
+		duplicateCP := &checkpoint{
+			State: struct {
+				Messages []*schema.Message
+			}{Messages: []*schema.Message{message, message}},
+			InterruptID2State: map[string]core.InterruptState{
+				"tool": {State: state},
+			},
+		}
+		compactCheckpointToolsNodeState(duplicateCP)
+		got := duplicateCP.InterruptID2State["tool"].State.(*toolsInterruptAndRerunStateV1)
+		require.NotEmpty(t, got.ToolCalls)
+		require.Nil(t, got.ToolCallsSource)
+	})
+
+	t.Run("corrupt_source_fails", func(t *testing.T) {
+		corrupt := *compacted
+		corrupt.ToolCallsSource = &toolsInterruptToolCallsSourceV1{
+			MessageIndex: 99,
+			Digest:       compacted.ToolCallsSource.Digest,
+		}
+		corruptCP := &checkpoint{
+			State: cp.State,
+			InterruptID2State: map[string]core.InterruptState{
+				"tool": {State: &corrupt},
+			},
+		}
+		require.ErrorContains(t, hydrateCheckpointToolsNodeState(corruptCP), "invalid tool calls source")
+
+		corrupt.ToolCallsSource = &toolsInterruptToolCallsSourceV1{
+			MessageIndex: 1,
+			Digest:       "corrupt",
+		}
+		corruptCP.InterruptID2State["tool"] = core.InterruptState{State: &corrupt}
+		require.ErrorContains(t, hydrateCheckpointToolsNodeState(corruptCP), "do not match metadata")
+	})
+}

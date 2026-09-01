@@ -29,6 +29,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -575,12 +576,27 @@ func buildCheckpointCompatLegacyReader(t *testing.T) string {
 	t.Helper()
 	readerDir := filepath.Join("testdata", "checkpoint_compat", "legacy_reader")
 	readerBin := filepath.Join(t.TempDir(), "checkpoint-legacy-reader")
-	build := exec.Command("go", "build", "-o", readerBin, ".")
+	build := exec.Command(filepath.Join(runtime.GOROOT(), "bin", "go"),
+		"build", "-o", readerBin, ".")
 	build.Dir = readerDir
-	build.Env = append(os.Environ(), "GOWORK=off")
+	build.Env = checkpointCompatSubprocessEnv()
 	output, err := build.CombinedOutput()
 	require.NoError(t, err, string(output))
 	return readerBin
+}
+
+func checkpointCompatSubprocessEnv() []string {
+	env := os.Environ()
+	filtered := make([]string, 0, len(env)+2)
+	for _, value := range env {
+		if strings.HasPrefix(value, "GOWORK=") ||
+			strings.HasPrefix(value, "GOTOOLCHAIN=") ||
+			strings.HasPrefix(value, "GOROOT=") {
+			continue
+		}
+		filtered = append(filtered, value)
+	}
+	return append(filtered, "GOWORK=off", "GOTOOLCHAIN=local")
 }
 
 func assertCheckpointCompatLegacyReaderRejectsValue(t *testing.T, readerBin string,
