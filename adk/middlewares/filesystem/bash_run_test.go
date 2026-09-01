@@ -389,8 +389,10 @@ func TestNewManagedBufferedExecuteToolErrors(t *testing.T) {
 				return "", sessionErr
 			},
 			outputSink{},
-			"managed_execute",
-			"Execute a managed command.",
+			toolDefinition{
+				name: "managed_execute",
+				desc: "Execute a managed command.",
+			},
 		)
 		require.NoError(t, err)
 
@@ -448,8 +450,10 @@ func TestNewManagedBufferedExecuteToolErrors(t *testing.T) {
 				}),
 				testNotificationSessionID,
 				outputSink{},
-				"managed_execute",
-				"Execute a managed command.",
+				toolDefinition{
+					name: "managed_execute",
+					desc: "Execute a managed command.",
+				},
 			)
 			require.NoError(t, err)
 
@@ -484,8 +488,10 @@ func TestNewManagedBufferedExecuteToolErrors(t *testing.T) {
 			&mockShellBackend{resp: &filesystem.ExecuteResponse{Output: "done"}},
 			testNotificationSessionID,
 			outputSink{},
-			"managed_execute",
-			"Execute a managed command.",
+			toolDefinition{
+				name: "managed_execute",
+				desc: "Execute a managed command.",
+			},
 		)
 		require.NoError(t, err)
 
@@ -799,7 +805,7 @@ func TestManagedExecuteTool_TimeoutKills(t *testing.T) {
 func TestShellPayloadV1AndCommandFromTask(t *testing.T) {
 	input, err := managedRunInput(executeManagedArgs{
 		executeArgs: executeArgs{Command: "echo hello"},
-	}, &bashOutputWriter{}, "test-session")
+	}, &bashOutputWriter{}, "test-session", false)
 	require.NoError(t, err)
 	task := &background.TaskSnapshot{Spec: background.Spec{
 		Kind: ExecuteTaskKind, Payload: input.Payload,
@@ -809,7 +815,7 @@ func TestShellPayloadV1AndCommandFromTask(t *testing.T) {
 	input, err = managedRunInput(executeManagedArgs{
 		executeArgs:    executeArgs{Command: "echo hello"},
 		TimeoutSeconds: 2,
-	}, &bashOutputWriter{}, "test-session")
+	}, &bashOutputWriter{}, "test-session", false)
 	require.NoError(t, err)
 	require.NotNil(t, input.ForegroundTimeoutMs)
 	assert.Equal(t, 2000, *input.ForegroundTimeoutMs)

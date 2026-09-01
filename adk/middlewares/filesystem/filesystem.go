@@ -1276,6 +1276,17 @@ func foregroundTimeoutMsForToolArgument(seconds int) *int {
 	return &timeoutMs
 }
 
+func commandExecutionTimeoutForToolArgument(seconds int) *time.Duration {
+	if seconds <= 0 {
+		return nil
+	}
+	if seconds > maxToolArgumentTimeoutSeconds {
+		seconds = maxToolArgumentTimeoutSeconds
+	}
+	timeout := time.Duration(seconds) * time.Second
+	return &timeout
+}
+
 func newExecuteTool(sb filesystem.Shell, name string, desc string) (tool.BaseTool, error) {
 	toolName := selectToolName(name, ToolNameExecute)
 	d, err := selectToolDesc(desc, ExecuteToolDesc, ExecuteToolDescChinese)
@@ -1329,6 +1340,7 @@ func newStreamingExecuteToolWithRun[T any](
 
 			var hasSentContent bool
 			var exitCode *int
+			var timedOut bool
 
 			for {
 				chunk, recvErr := result.Recv()
@@ -1346,6 +1358,9 @@ func newStreamingExecuteToolWithRun[T any](
 				if chunk.ExitCode != nil {
 					exitCode = chunk.ExitCode
 				}
+				if chunk.TimedOut {
+					timedOut = true
+				}
 
 				if text := formatExecChunk(chunk.Output, chunk.Truncated); text != "" {
 					sw.Send(text, nil)
@@ -1353,7 +1368,7 @@ func newStreamingExecuteToolWithRun[T any](
 				}
 			}
 
-			if note := execTerminalNote(exitCode, hasSentContent); note != "" {
+			if note := execTerminalNote(exitCode, hasSentContent, timedOut); note != "" {
 				sw.Send(note, nil)
 			}
 		}()
@@ -1368,6 +1383,7 @@ const (
 	outputTruncatedNote = "[Output was truncated due to size limits]"
 	commandFailedFmt    = "[Command failed with exit code %d]"
 	noCommandOutputNote = "[Command executed successfully with no output]"
+	commandTimedOutNote = "[Command timed out and was stopped]"
 )
 
 // formatExecChunk renders one streamed ExecuteResponse chunk to the text to emit,
@@ -1383,10 +1399,18 @@ func formatExecChunk(output string, truncated bool) string {
 	return strings.Join(parts, "\n")
 }
 
-// execTerminalNote returns the trailing text for a finished command: a failure note
-// for a non-zero exit code, the no-output message when nothing was emitted, or ""
-// otherwise.
-func execTerminalNote(exitCode *int, hasContent bool) string {
+// execTerminalNote returns the trailing text for a finished command: a timeout note
+// when the backend stopped the command on its own budget, a failure note for a
+// non-zero exit code, the no-output message when nothing was emitted, or ""
+// otherwise. A timed-out command is usually also killed by a signal, so the timeout
+// note replaces the exit-code note: it is the one the agent can act on.
+func execTerminalNote(exitCode *int, hasContent, timedOut bool) string {
+	if timedOut {
+		if hasContent {
+			return "\n" + commandTimedOutNote
+		}
+		return commandTimedOutNote
+	}
 	if exitCode != nil && *exitCode != 0 {
 		return "\n" + fmt.Sprintf(commandFailedFmt, *exitCode)
 	}
@@ -1400,8 +1424,13 @@ func convExecuteResponse(response *filesystem.ExecuteResponse) string {
 	if response == nil {
 		return ""
 	}
-	parts := []string{response.Output}
-	if response.ExitCode != nil && *response.ExitCode != 0 {
+	var parts []string
+	if response.Output != "" {
+		parts = append(parts, response.Output)
+	}
+	if response.TimedOut {
+		parts = append(parts, commandTimedOutNote)
+	} else if response.ExitCode != nil && *response.ExitCode != 0 {
 		parts = append(parts, fmt.Sprintf(commandFailedFmt, *response.ExitCode))
 	}
 	if response.Truncated {
@@ -1409,7 +1438,7 @@ func convExecuteResponse(response *filesystem.ExecuteResponse) string {
 	}
 
 	result := strings.Join(parts, "\n")
-	if result == "" && (response.ExitCode == nil || *response.ExitCode == 0) {
+	if result == "" {
 		return noCommandOutputNote
 	}
 	return result
