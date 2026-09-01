@@ -1128,8 +1128,10 @@ func (tn *ToolsNode) Invoke(ctx context.Context, input *schema.Message,
 		ExecutedEnhancedTools: make(map[string]*schema.ToolResult),
 		RerunExtraMap:         make(map[string]any),
 	}
-	rerunState := &toolsInterruptAndRerunState{
-		Input:                 input,
+	rerunState := &toolsInterruptAndRerunStateV1{
+		Version:               toolsInterruptAndRerunStateVersionV1,
+		Role:                  input.Role,
+		ToolCalls:             input.ToolCalls,
 		ExecutedTools:         make(map[string]string),
 		ExecutedEnhancedTools: make(map[string]*schema.ToolResult),
 	}
@@ -1226,8 +1228,10 @@ func (tn *ToolsNode) Stream(ctx context.Context, input *schema.Message,
 		ExecutedEnhancedTools: make(map[string]*schema.ToolResult),
 		RerunExtraMap:         make(map[string]any),
 	}
-	rerunState := &toolsInterruptAndRerunState{
-		Input:                 input,
+	rerunState := &toolsInterruptAndRerunStateV1{
+		Version:               toolsInterruptAndRerunStateVersionV1,
+		Role:                  input.Role,
+		ToolCalls:             input.ToolCalls,
 		ExecutedTools:         make(map[string]string),
 		ExecutedEnhancedTools: make(map[string]*schema.ToolResult),
 	}

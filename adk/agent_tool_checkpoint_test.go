@@ -58,6 +58,14 @@ func TestAgentToolInterruptStateV1(t *testing.T) {
 		_, err := decodeAgentToolInterruptState("invalid", "agent")
 		require.ErrorContains(t, err, "invalid interrupt state type")
 	})
+	t.Run("legacy_reader_fails_loudly", func(t *testing.T) {
+		assertCheckpointCompatLegacyReaderRejectsValue(t, buildCheckpointCompatLegacyReader(t),
+			&agentToolInterruptStateV1{
+				Version:          agentToolInterruptStateVersion,
+				BridgeCheckpoint: []byte("checkpoint"),
+			},
+			"_eino_adk_agent_tool_interrupt_state_v1")
+	})
 }
 
 func TestAgentToolCheckpointV1SizeAndLegacyFailure(t *testing.T) {
@@ -78,8 +86,9 @@ func TestAgentToolCheckpointV1SizeAndLegacyFailure(t *testing.T) {
 			}
 			raw, interruptIDs, interruptAddresses := captureCheckpointCompatFixture(t, spec)
 			t.Logf("checkpoint bytes: %d", len(raw))
-			require.LessOrEqual(t, len(raw), 4_800_000)
-			resumeCheckpointCompatCandidate(t, spec, raw, interruptIDs, len(interruptIDs), 0)
+			require.Less(t, len(raw), 1<<20)
+			resumeCheckpointCompatCandidate(t, spec, raw, interruptIDs, len(interruptIDs), 0,
+				interruptAddresses)
 
 			spec.InterruptIDs = interruptIDs
 			spec.InterruptAddresses = interruptAddresses
@@ -106,12 +115,12 @@ func TestAgentToolCheckpointV1ParallelTargetedResume(t *testing.T) {
 		ParallelChildren: 6,
 		PayloadField:     "content",
 	}
-	raw, interruptIDs, _ := captureCheckpointCompatFixture(t, spec)
-	resumeCheckpointCompatCandidate(t, spec, raw, interruptIDs, 1, 5)
+	raw, interruptIDs, interruptAddresses := captureCheckpointCompatFixture(t, spec)
+	resumeCheckpointCompatCandidate(t, spec, raw, interruptIDs, 1, 5, interruptAddresses)
 }
 
 func resumeCheckpointCompatCandidate(t *testing.T, spec checkpointCompatFixture, raw []byte,
-	interruptIDs []string, targetCount, expectedInterrupts int) {
+	interruptIDs []string, targetCount, expectedInterrupts int, expectedAddresses ...[]string) {
 	t.Helper()
 	store := newCheckpointCompatStore()
 	require.NoError(t, store.Set(context.Background(), spec.Name, raw))
@@ -128,7 +137,7 @@ func resumeCheckpointCompatCandidate(t *testing.T, spec checkpointCompatFixture,
 	iter, err := runner.ResumeWithParams(context.Background(), spec.Name,
 		&ResumeParams{Targets: targets})
 	require.NoError(t, err)
-	remaining := 0
+	remainingAddresses := make(map[string]struct{})
 	for {
 		event, ok := iter.Next()
 		if !ok {
@@ -136,8 +145,17 @@ func resumeCheckpointCompatCandidate(t *testing.T, spec checkpointCompatFixture,
 		}
 		require.NoError(t, event.Err)
 		if event.Action != nil && event.Action.Interrupted != nil {
-			remaining += len(event.Action.Interrupted.InterruptContexts)
+			for _, interruptCtx := range event.Action.Interrupted.InterruptContexts {
+				remainingAddresses[interruptCtx.Address.String()] = struct{}{}
+			}
 		}
 	}
-	require.Equal(t, expectedInterrupts, remaining)
+	require.Len(t, remainingAddresses, expectedInterrupts)
+	if len(expectedAddresses) > 0 {
+		want := make(map[string]struct{}, expectedInterrupts)
+		for _, address := range expectedAddresses[0][targetCount:] {
+			want[address] = struct{}{}
+		}
+		require.Equal(t, want, remainingAddresses)
+	}
 }
