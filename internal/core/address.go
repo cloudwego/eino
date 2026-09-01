@@ -340,6 +340,10 @@ func MergeInterruptState(ctx context.Context, id2Addr map[string]Address,
 			if !current.Equals(addr) {
 				return ctx, fmt.Errorf("interrupt ID %q has conflicting addresses", id)
 			}
+		}
+	}
+	for id, addr := range id2Addr {
+		if _, exists := rInfo.id2Addr[id]; exists {
 			continue
 		}
 		rInfo.id2Addr[id] = addr

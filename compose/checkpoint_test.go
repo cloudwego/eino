@@ -2563,6 +2563,135 @@ func TestCheckpointSparseOwnershipRejectsStateWithoutAddress(t *testing.T) {
 	require.ErrorContains(t, err, "has no routing address")
 }
 
+func TestCheckpointSparseOwnershipValidatesOwnerPath(t *testing.T) {
+	rootAddress := Address{{Type: AddressSegmentRunnable, ID: "root"}}
+	childAddress := append(append(Address(nil), rootAddress...),
+		AddressSegment{Type: AddressSegmentNode, ID: "child"},
+		AddressSegment{Type: AddressSegmentNode, ID: "worker"})
+	nestedAddress := append(append(Address(nil), rootAddress...),
+		AddressSegment{Type: AddressSegmentNode, ID: "child"},
+		AddressSegment{Type: AddressSegmentNode, ID: "nested"},
+		AddressSegment{Type: AddressSegmentNode, ID: "worker"})
+	ordinaryNodeAddress := append(append(Address(nil), rootAddress...),
+		AddressSegment{Type: AddressSegmentNode, ID: "ordinary"},
+		AddressSegment{Type: AddressSegmentTool, ID: "tool"})
+
+	newCheckpoint := func() *checkpoint {
+		return &checkpoint{
+			StateLayoutVersion:      checkpointStateLayoutVersionV1,
+			layoutMetadataValidated: true,
+			InterruptID2Addr: map[string]Address{
+				"root":     rootAddress,
+				"child":    childAddress,
+				"nested":   nestedAddress,
+				"ordinary": ordinaryNodeAddress,
+			},
+			InterruptID2State: map[string]core.InterruptState{
+				"root":     {State: "root"},
+				"ordinary": {State: "ordinary"},
+			},
+			SubGraphs: map[string]*checkpoint{
+				"child": {
+					StateLayoutVersion:      checkpointStateLayoutVersionV1,
+					layoutMetadataValidated: true,
+					InterruptID2Addr: map[string]Address{
+						"child":  childAddress,
+						"nested": nestedAddress,
+					},
+					InterruptID2State: map[string]core.InterruptState{
+						"child": {State: "child"},
+					},
+					SubGraphs: map[string]*checkpoint{
+						"nested": {
+							StateLayoutVersion:      checkpointStateLayoutVersionV1,
+							layoutMetadataValidated: true,
+							InterruptID2Addr: map[string]Address{
+								"nested": nestedAddress,
+							},
+							InterruptID2State: map[string]core.InterruptState{
+								"nested": {State: "nested"},
+							},
+						},
+					},
+				},
+			},
+		}
+	}
+
+	t.Run("valid_nested_owners", func(t *testing.T) {
+		require.NoError(t, (&runner{}).validateCheckpointIntegrity(newCheckpoint()))
+	})
+
+	t.Run("sibling_mismatch", func(t *testing.T) {
+		cp := newCheckpoint()
+		cp.SubGraphs["right"] = &checkpoint{
+			StateLayoutVersion:      checkpointStateLayoutVersionV1,
+			layoutMetadataValidated: true,
+			InterruptID2Addr:        map[string]Address{},
+			InterruptID2State: map[string]core.InterruptState{
+				"child": {State: "wrong sibling"},
+			},
+		}
+		delete(cp.SubGraphs["child"].InterruptID2State, "child")
+		require.ErrorContains(t, (&runner{}).validateCheckpointIntegrity(cp),
+			"state owner path [right] does not match routing owner path [child]")
+	})
+
+	t.Run("ancestor_mismatch", func(t *testing.T) {
+		cp := newCheckpoint()
+		cp.InterruptID2State["nested"] = cp.SubGraphs["child"].SubGraphs["nested"].InterruptID2State["nested"]
+		delete(cp.SubGraphs["child"].SubGraphs["nested"].InterruptID2State, "nested")
+		require.ErrorContains(t, (&runner{}).validateCheckpointIntegrity(cp),
+			"state owner path [] does not match routing owner path [child nested]")
+	})
+
+	t.Run("descendant_mismatch", func(t *testing.T) {
+		cp := newCheckpoint()
+		cp.SubGraphs["child"].SubGraphs["nested"].InterruptID2State["ordinary"] = cp.InterruptID2State["ordinary"]
+		delete(cp.InterruptID2State, "ordinary")
+		require.ErrorContains(t, (&runner{}).validateCheckpointIntegrity(cp),
+			"state owner path [child nested] does not match routing owner path []")
+	})
+
+	t.Run("duplicate_owner", func(t *testing.T) {
+		cp := newCheckpoint()
+		cp.InterruptID2State["child"] = core.InterruptState{State: "duplicate"}
+		require.ErrorContains(t, (&runner{}).validateCheckpointIntegrity(cp), "multiple checkpoint state owners")
+	})
+
+	t.Run("missing_owner", func(t *testing.T) {
+		cp := newCheckpoint()
+		delete(cp.SubGraphs["child"].InterruptID2State, "child")
+		require.ErrorContains(t, (&runner{}).validateCheckpointIntegrity(cp), "has no checkpoint state owner")
+	})
+
+	t.Run("nil_subgraph", func(t *testing.T) {
+		cp := newCheckpoint()
+		cp.SubGraphs["nil"] = nil
+		require.ErrorContains(t, (&runner{}).validateCheckpointIntegrity(cp), `subgraph checkpoint "nil" is nil`)
+	})
+
+	t.Run("conflicting_nested_routing_address", func(t *testing.T) {
+		cp := newCheckpoint()
+		cp.SubGraphs["child"].InterruptID2Addr["child"] =
+			Address{{Type: AddressSegmentRunnable, ID: "other"}}
+		require.ErrorContains(t, (&runner{}).validateCheckpointIntegrity(cp), "conflicting routing addresses")
+	})
+
+	t.Run("unrelated_routes_at_different_depths", func(t *testing.T) {
+		cp := newCheckpoint()
+		cp.SubGraphs["left"] = &checkpoint{
+			StateLayoutVersion:      checkpointStateLayoutVersionV1,
+			layoutMetadataValidated: true,
+			InterruptID2Addr: map[string]Address{
+				"nested": nestedAddress,
+			},
+		}
+		require.ErrorContains(t, (&runner{}).validateCheckpointIntegrity(cp),
+			"appears in unrelated checkpoint routing paths")
+	})
+}
+
 type checkpointTestTool[I, O any] struct {
 	info *schema.ToolInfo
 	fn   func(ctx context.Context, in I) (O, error)

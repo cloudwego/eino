@@ -380,9 +380,13 @@ func TestMergeInterruptState(t *testing.T) {
 	assert.True(t, info.id2ResumeDataUsed["existing"])
 
 	_, err = MergeInterruptState(ctx,
-		map[string]Address{"existing": childAddress},
+		map[string]Address{
+			"existing":       childAddress,
+			"must-not-merge": childAddress,
+		},
 		nil)
 	assert.ErrorContains(t, err, "conflicting addresses")
+	assert.NotContains(t, info.id2Addr, "must-not-merge")
 }
 
 func TestGetNextResumptionPoints(t *testing.T) {
