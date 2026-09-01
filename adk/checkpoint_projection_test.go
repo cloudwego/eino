@@ -21,15 +21,44 @@ import (
 	"context"
 	"encoding/gob"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 
+	componenttool "github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/internal/core"
 	"github.com/cloudwego/eino/schema"
 )
+
+type checkpointProjectionEnhancedTool struct {
+	name  string
+	mu    sync.Mutex
+	calls int
+}
+
+func (t *checkpointProjectionEnhancedTool) Info(context.Context) (*schema.ToolInfo, error) {
+	return &schema.ToolInfo{Name: t.name}, nil
+}
+
+func (t *checkpointProjectionEnhancedTool) InvokableRun(context.Context,
+	*schema.ToolArgument, ...componenttool.Option) (*schema.ToolResult, error) {
+	t.mu.Lock()
+	t.calls++
+	t.mu.Unlock()
+	return &schema.ToolResult{Parts: []schema.ToolOutputPart{{
+		Type: schema.ToolPartTypeText,
+		Text: strings.Repeat("result", 1024),
+	}}}, nil
+}
+
+func (t *checkpointProjectionEnhancedTool) callCount() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.calls
+}
 
 func TestRunnerCheckpointProjectionRoundTrip(t *testing.T) {
 	spec := checkpointCompatFixture{
@@ -282,6 +311,66 @@ func TestRunnerCheckpointProjectionAgenticMessages(t *testing.T) {
 	require.Equal(t, message, (*typedEvents)[0].event.Output.MessageOutput.Message)
 	require.Equal(t, "value", cloned.Session.Values["preserved"])
 	require.Equal(t, "agent", cloned.RunPath[0].String())
+}
+
+func TestRunnerCheckpointProjectionReusesEnhancedToolResult(t *testing.T) {
+	for _, streaming := range []bool{false, true} {
+		name := "invoke"
+		if streaming {
+			name = "stream"
+		}
+		t.Run(name, func(t *testing.T) {
+			enhanced := &checkpointProjectionEnhancedTool{name: "enhanced"}
+			interrupting := &checkpointCompatInterruptTool{name: "interrupt"}
+			agent := newCheckpointCompatChatModelAgent(t, "projection-enhanced",
+				[]string{"enhanced", "interrupt"},
+				[]componenttool.BaseTool{enhanced, interrupting}, "", "")
+			store := newCheckpointCompatStore()
+			runner := NewRunner(context.Background(), RunnerConfig{
+				Agent:           agent,
+				EnableStreaming: streaming,
+				CheckPointStore: store,
+			})
+			iter := runner.Query(context.Background(), "start", WithCheckPointID(name))
+			var interruptIDs []string
+			for {
+				event, ok := iter.Next()
+				if !ok {
+					break
+				}
+				require.NoError(t, event.Err)
+				if event.Action != nil && event.Action.Interrupted != nil {
+					for _, interruptCtx := range event.Action.Interrupted.InterruptContexts {
+						interruptIDs = append(interruptIDs, interruptCtx.ID)
+					}
+				}
+			}
+			require.Len(t, interruptIDs, 1)
+			require.Equal(t, 1, enhanced.callCount())
+
+			raw, exists, err := store.Get(context.Background(), name)
+			require.NoError(t, err)
+			require.True(t, exists)
+			var persisted serialization
+			require.NoError(t, gob.NewDecoder(bytes.NewReader(raw)).Decode(&persisted))
+			require.NotNil(t, persisted.ProjectionV1)
+			require.NotEmpty(t, persisted.ProjectionV1.ToolResultRefs)
+
+			iter, err = runner.ResumeWithParams(context.Background(), name, &ResumeParams{
+				Targets: map[string]any{interruptIDs[0]: "resumed"},
+			})
+			require.NoError(t, err)
+			for {
+				event, ok := iter.Next()
+				if !ok {
+					break
+				}
+				require.NoError(t, event.Err)
+			}
+			require.Equal(t, 1, enhanced.callCount(),
+				"successful enhanced sibling must be restored instead of executed again")
+		})
+	}
 }
 
 func TestRunnerCheckpointProjectionPreservesUnmatchedMessagesInline(t *testing.T) {

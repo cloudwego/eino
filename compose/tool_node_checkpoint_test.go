@@ -19,6 +19,8 @@ package compose
 import (
 	"context"
 	"errors"
+	"io"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -27,6 +29,14 @@ import (
 	"github.com/cloudwego/eino/internal/core"
 	"github.com/cloudwego/eino/schema"
 )
+
+type toolsNodeCheckpointState struct {
+	Messages []*schema.Message
+}
+
+func init() {
+	schema.RegisterName[*toolsNodeCheckpointState]("_eino_test_tools_node_checkpoint_state")
+}
 
 func toolsNodeCheckpointContext(state any) context.Context {
 	address := Address{{Type: AddressSegmentNode, ID: "tools"}}
@@ -298,4 +308,116 @@ func TestCompactCheckpointToolsNodeState(t *testing.T) {
 		corruptCP.InterruptID2State["tool"] = core.InterruptState{State: &corrupt}
 		require.ErrorContains(t, hydrateCheckpointToolsNodeState(corruptCP), "do not match metadata")
 	})
+}
+
+func TestToolsNodeV1EnhancedSiblingResume(t *testing.T) {
+	for _, streaming := range []bool{false, true} {
+		name := "invoke"
+		if streaming {
+			name = "stream"
+		}
+		t.Run(name, func(t *testing.T) {
+			const (
+				enhancedName  = "enhanced"
+				interruptName = "interrupt"
+			)
+			enhancedCalls := 0
+			enhanced := &enhancedInvokableTool{
+				info: &schema.ToolInfo{Name: enhancedName},
+				fn: func(context.Context, *schema.ToolArgument) (*schema.ToolResult, error) {
+					enhancedCalls++
+					return &schema.ToolResult{Parts: []schema.ToolOutputPart{{
+						Type: schema.ToolPartTypeText,
+						Text: strings.Repeat("result", 128),
+					}}}, nil
+				},
+			}
+			interrupting := newCheckpointTestTool(&schema.ToolInfo{Name: interruptName},
+				func(ctx context.Context, _ *longRunningToolInput) (string, error) {
+					wasInterrupted, hasState, state := GetInterruptState[string](ctx)
+					if !wasInterrupted {
+						return "", StatefulInterrupt(ctx, "interrupt", "saved")
+					}
+					if !hasState || state != "saved" {
+						return "", errors.New("interrupt state was not restored")
+					}
+					return "completed", nil
+				})
+			node, err := NewToolNode(context.Background(), &ToolsNodeConfig{
+				Tools: []componenttool.BaseTool{enhanced, interrupting},
+			})
+			require.NoError(t, err)
+
+			graph := NewGraph[*schema.Message, []*schema.Message](WithGenLocalState(
+				func(context.Context) *toolsNodeCheckpointState {
+					return &toolsNodeCheckpointState{}
+				}))
+			require.NoError(t, graph.AddToolsNode("tools", node, WithStatePreHandler(
+				func(_ context.Context, input *schema.Message,
+					state *toolsNodeCheckpointState) (*schema.Message, error) {
+					if input != nil && len(input.ToolCalls) > 0 {
+						state.Messages = []*schema.Message{input}
+					}
+					return state.Messages[len(state.Messages)-1], nil
+				})))
+			require.NoError(t, graph.AddEdge(START, "tools"))
+			require.NoError(t, graph.AddEdge("tools", END))
+			store := newInMemoryStore()
+			runnable, err := graph.Compile(context.Background(), WithCheckPointStore(store))
+			require.NoError(t, err)
+
+			input := schema.AssistantMessage("", []schema.ToolCall{
+				{
+					ID: "enhanced-call",
+					Function: schema.FunctionCall{
+						Name:      enhancedName,
+						Arguments: "input",
+					},
+				},
+				{
+					ID: "interrupt-call",
+					Function: schema.FunctionCall{
+						Name:      interruptName,
+						Arguments: `{}`,
+					},
+				},
+			})
+			if streaming {
+				_, invokeErr := runnable.Stream(context.Background(), input,
+					WithCheckPointID("enhanced-v1"))
+				require.Error(t, invokeErr)
+			} else {
+				_, err = runnable.Invoke(context.Background(), input,
+					WithCheckPointID("enhanced-v1"))
+				require.Error(t, err)
+			}
+			require.Equal(t, 1, enhancedCalls)
+
+			if streaming {
+				stream, err := runnable.Stream(context.Background(), &schema.Message{},
+					WithCheckPointID("enhanced-v1"))
+				require.NoError(t, err)
+				var output []*schema.Message
+				for {
+					chunk, receiveErr := stream.Recv()
+					if receiveErr == io.EOF {
+						break
+					}
+					require.NoError(t, receiveErr)
+					for _, message := range chunk {
+						if message != nil {
+							output = append(output, message)
+						}
+					}
+				}
+				require.Len(t, output, 2)
+			} else {
+				output, invokeErr := runnable.Invoke(context.Background(), &schema.Message{},
+					WithCheckPointID("enhanced-v1"))
+				require.NoError(t, invokeErr)
+				require.Len(t, output, 2)
+			}
+			require.Equal(t, 1, enhancedCalls, "successful enhanced sibling must be reused")
+		})
+	}
 }

@@ -98,12 +98,14 @@ type infoProjectionTarget struct {
 }
 
 type checkpointProjectionV1 struct {
-	Version           int
-	SourceInterruptID string
-	RunCtxRefCount    int
-	InfoRefCount      int
-	RunCtxRefs        []runCtxMessageProjectionV1
-	InfoRefs          []infoMessageProjectionV1
+	Version            int
+	SourceInterruptID  string
+	RunCtxRefCount     int
+	InfoRefCount       int
+	ToolResultRefCount int
+	RunCtxRefs         []runCtxMessageProjectionV1
+	InfoRefs           []infoMessageProjectionV1
+	ToolResultRefs     []infoToolResultProjectionV1
 }
 
 type checkpointMessagePlaceholderV1 struct {
@@ -135,9 +137,11 @@ type checkpointAgenticMessageSlicePlaceholderV1 struct {
 }
 
 type checkpointInterruptInfoPlaceholderV1 struct {
-	Info     *compose.InterruptInfo
-	RefCount int
-	Refs     []infoMessageProjectionV1
+	Info               *compose.InterruptInfo
+	RefCount           int
+	ToolResultRefCount int
+	Refs               []infoMessageProjectionV1
+	ToolResultRefs     []infoToolResultProjectionV1
 }
 
 type canonicalCheckpointMessage struct {
@@ -147,10 +151,12 @@ type canonicalCheckpointMessage struct {
 }
 
 type checkpointProjectionIndex struct {
-	byID map[string][]canonicalCheckpointMessage
+	byID                map[string][]canonicalCheckpointMessage
+	toolResultsByCallID map[string][]canonicalCheckpointToolResult
 }
 
 func init() {
+	schema.RegisterName[*checkpointProjectionV1]("_eino_adk_checkpoint_projection_v1")
 	schema.RegisterName[*runnerProjectionSentinelV1]("_eino_adk_runner_projection_v1")
 	schema.RegisterName[*checkpointMessagePlaceholderV1]("_eino_adk_checkpoint_message_ref_v1")
 	schema.RegisterName[*checkpointMessageSlicePlaceholderV1]("_eino_adk_checkpoint_message_slice_ref_v1")
@@ -177,6 +183,7 @@ func projectRunnerCheckpoint(runCtx *runContext, info *InterruptInfo, infoDataSt
 	projectInterruptInfoMessages(projectedInfo, index, projection)
 	projection.RunCtxRefCount = len(projection.RunCtxRefs)
 	projection.InfoRefCount = len(projection.InfoRefs)
+	projection.ToolResultRefCount = len(projection.ToolResultRefs)
 
 	projectedCompose, composeChanged, err := projectComposeCheckpointValues(sourceData, index)
 	if err != nil {
@@ -209,7 +216,8 @@ func restoreRunnerCheckpointProjection(s *serialization) error {
 
 	projection := s.ProjectionV1
 	if projection.RunCtxRefCount != len(projection.RunCtxRefs) ||
-		projection.InfoRefCount != len(projection.InfoRefs) {
+		projection.InfoRefCount != len(projection.InfoRefs) ||
+		projection.ToolResultRefCount != len(projection.ToolResultRefs) {
 		return errors.New("failed to decode checkpoint projection: reference count mismatch")
 	}
 	sourceState, ok := s.InterruptID2State[projection.SourceInterruptID]
@@ -239,6 +247,10 @@ func restoreRunnerCheckpointProjection(s *serialization) error {
 	}
 	if err = hydrateInterruptInfoMessages(s.Info, projection.InfoRefs,
 		projection.InfoRefCount, index); err != nil {
+		return err
+	}
+	if err = hydrateInterruptInfoToolResults(s.Info, projection.ToolResultRefs,
+		projection.ToolResultRefCount, index); err != nil {
 		return err
 	}
 	delete(s.InterruptID2State, runnerProjectionSentinelID)
@@ -318,7 +330,10 @@ func findProjectionSource(preferredID string, id2State map[string]core.Interrupt
 }
 
 func buildCheckpointProjectionIndex(data []byte) (*checkpointProjectionIndex, error) {
-	index := &checkpointProjectionIndex{byID: make(map[string][]canonicalCheckpointMessage)}
+	index := &checkpointProjectionIndex{
+		byID:                make(map[string][]canonicalCheckpointMessage),
+		toolResultsByCallID: make(map[string][]canonicalCheckpointToolResult),
+	}
 	if err := index.addComposeCheckpoint(data, nil); err != nil {
 		return nil, err
 	}
@@ -343,6 +358,7 @@ func (i *checkpointProjectionIndex) addComposeCheckpoint(data []byte, prefix []s
 				return nil
 			}
 			if location.Kind == compose.CheckpointValueInterruptState {
+				i.addCheckpointToolResults(fullPath, location.Key, value)
 				if state, ok := value.(*agentToolInterruptStateV1); ok && state != nil {
 					childPrefix := append(append([]string(nil), fullPath...), "@interrupt:"+location.Key)
 					if err := i.addRunnerCheckpoint(state.BridgeCheckpoint, childPrefix); err != nil {
@@ -814,6 +830,7 @@ func projectInterruptInfoMessages(info *InterruptInfo, index *checkpointProjecti
 	projection *checkpointProjectionV1) {
 	defer func() {
 		projection.InfoRefCount = len(projection.InfoRefs)
+		projection.ToolResultRefCount = len(projection.ToolResultRefs)
 	}()
 	if info == nil {
 		return
@@ -919,6 +936,7 @@ func projectInfoValueMessages(target *any, targetInfo infoProjectionTarget,
 			}
 		}
 	case *compose.ToolsInterruptAndRerunExtra:
+		projectInfoToolResults(value, targetInfo, index, projection)
 		source, ok := index.sourceForToolCalls(value.ToolCalls)
 		if !ok {
 			return
@@ -938,9 +956,17 @@ func projectInfoValueMessages(target *any, targetInfo infoProjectionTarget,
 		projectComposeInterruptInfoMessages(value, nil, index, nestedProjection)
 		if len(nestedProjection.InfoRefs) > 0 {
 			*target = &checkpointInterruptInfoPlaceholderV1{
-				Info:     value,
-				RefCount: len(nestedProjection.InfoRefs),
-				Refs:     nestedProjection.InfoRefs,
+				Info:               value,
+				RefCount:           len(nestedProjection.InfoRefs),
+				ToolResultRefCount: len(nestedProjection.ToolResultRefs),
+				Refs:               nestedProjection.InfoRefs,
+				ToolResultRefs:     nestedProjection.ToolResultRefs,
+			}
+		} else if len(nestedProjection.ToolResultRefs) > 0 {
+			*target = &checkpointInterruptInfoPlaceholderV1{
+				Info:               value,
+				ToolResultRefCount: len(nestedProjection.ToolResultRefs),
+				ToolResultRefs:     nestedProjection.ToolResultRefs,
 			}
 		}
 	}
@@ -1665,6 +1691,10 @@ func hydrateProjectionInfoValue(value any, index *checkpointProjectionIndex) (an
 		return nil, err
 	}
 	if err := hydrateComposeInterruptInfoRefs(placeholder.Info, placeholder.Refs, index); err != nil {
+		return nil, err
+	}
+	if err := hydrateComposeInterruptInfoToolResults(placeholder.Info,
+		placeholder.ToolResultRefs, placeholder.ToolResultRefCount, index); err != nil {
 		return nil, err
 	}
 	if err := hydrateNestedInterruptInfoPlaceholders(placeholder.Info, index); err != nil {
