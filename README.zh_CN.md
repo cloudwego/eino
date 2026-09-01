@@ -22,7 +22,7 @@ Eino 提供：
 - **编排**：把组件组装成图或工作流，既能独立运行，也能作为工具给智能体调用
 - **[示例](https://github.com/cloudwego/eino-examples)**：常见模式和实际场景的可运行代码
 
-![](.github/static/img/eino/eino_concept.jpeg)
+![](.github/static/img/eino/eino_project_structure_and_modules.png)
 
 # 快速上手
 
@@ -157,7 +157,7 @@ Eino 在编排中自动处理流式：拼接、装箱、合并、复制。组件
 
 # 框架结构
 
-![](.github/static/img/eino/eino_framework.jpeg)
+![](.github/static/img/eino/eino_architecture_overview.png)
 
 Eino 框架包含：
 
