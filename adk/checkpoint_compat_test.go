@@ -510,6 +510,7 @@ func buildCheckpointCompatLegacyReader(t *testing.T) string {
 	readerBin := filepath.Join(t.TempDir(), "checkpoint-legacy-reader")
 	build := exec.Command("go", "build", "-o", readerBin, ".")
 	build.Dir = readerDir
+	build.Env = append(os.Environ(), "GOWORK=off")
 	output, err := build.CombinedOutput()
 	require.NoError(t, err, string(output))
 	return readerBin
