@@ -333,6 +333,7 @@ func (t *taskManager) submit(tasks []*task) error {
 			t.num++
 			close(currentTask.finished)
 			t.done.Send(currentTask)
+			continue
 		}
 
 		t.runningTasks[currentTask.nodeKey] = currentTask
