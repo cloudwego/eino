@@ -1727,3 +1727,21 @@ func TestConcatFunctionToolResults(t *testing.T) {
 		assert.Equal(t, "http://img.png", got.Content[1].Image.URL)
 	})
 }
+
+
+func TestTruncateString(t *testing.T) {
+	// Shorter than or equal to the limit is returned unchanged.
+	assert.Equal(t, "hello", truncateString("hello", 10))
+	assert.Equal(t, "hello", truncateString("hello", 5))
+
+	// ASCII longer than the limit is truncated by character count.
+	assert.Equal(t, "hel...", truncateString("hello", 3))
+
+	// maxLen counts runes, so multi-byte characters are never split in half
+	// and the output stays valid UTF-8.
+	assert.Equal(t, "你好世界", truncateString("你好世界", 4))
+	assert.Equal(t, "你好世界...", truncateString("你好世界你好", 4))
+
+	// Non-positive maxLen does not panic.
+	assert.Equal(t, "...", truncateString("你好", 0))
+}
