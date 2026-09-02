@@ -427,6 +427,23 @@ func TestForkJoinRunCtx(t *testing.T) {
 	assert.Equal(t, []string{"A", "B", "C1", "D", "E", "F"}, getEventNames(mainRunCtx.Session.getEvents()), "After F")
 }
 
+func TestRunContextInvocationID(t *testing.T) {
+	firstCtx, firstRunCtx := initRunCtx(context.Background(), "agent", nil)
+	_, secondRunCtx := initRunCtx(context.Background(), "agent", nil)
+
+	assert.NotEmpty(t, firstRunCtx.InvocationID)
+	assert.NotEmpty(t, secondRunCtx.InvocationID)
+	assert.NotEqual(t, firstRunCtx.InvocationID, secondRunCtx.InvocationID)
+
+	firstChild := getRunCtx(updateRunPathOnly(firstCtx, "child"))
+	secondChild := getRunCtx(updateRunPathOnly(firstCtx, "child"))
+
+	assert.Equal(t, firstChild.RunPath, secondChild.RunPath)
+	assert.NotEmpty(t, firstChild.InvocationID)
+	assert.NotEmpty(t, secondChild.InvocationID)
+	assert.NotEqual(t, firstChild.InvocationID, secondChild.InvocationID)
+}
+
 // makeStreamingEventWrapper creates an agentEventWrapper with a streaming MessageOutput
 // whose stream yields the given message then terminates with streamErr (or io.EOF if nil).
 func makeStreamingEventWrapper(msg Message, streamErr error) *agentEventWrapper {

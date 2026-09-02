@@ -314,9 +314,10 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 			interruptSignal = event.Action.internalInterrupted
 			interruptContexts := core.ToInterruptContexts(interruptSignal, allowedAddressSegmentTypes)
 			event = &TypedAgentEvent[M]{
-				AgentName: event.AgentName,
-				RunPath:   event.RunPath,
-				Output:    event.Output,
+				AgentName:    event.AgentName,
+				InvocationID: event.InvocationID,
+				RunPath:      event.RunPath,
+				Output:       event.Output,
 				Action: &AgentAction{
 					Interrupted: &InterruptInfo{
 						Data:              event.Action.Interrupted.Data,
