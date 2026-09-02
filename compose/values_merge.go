@@ -57,7 +57,7 @@ func mergeValues(vs []any, opts *mergeOptions) (any, error) {
 			sri, ok_ := vs[i+1].(streamReader)
 			if !ok_ {
 				return nil, fmt.Errorf("(mergeStream) unexpected type. "+
-					"expect: %v, got: %v", t0, reflect.TypeOf(vs[i]))
+					"expect: %v, got: %v", t0, reflect.TypeOf(vs[i+1]))
 			}
 
 			if st := sri.getChunkType(); st != t {
