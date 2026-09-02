@@ -1283,6 +1283,8 @@ func mergeToolTextParts(group []ToolOutputPart) (ToolOutputPart, error) {
 
 func concatToolCalls(chunks []ToolCall) ([]ToolCall, error) {
 	var merged []ToolCall
+
+	// First pass: group chunks by Index.
 	m := make(map[int][]int)
 	for i := range chunks {
 		index := chunks[i].Index
@@ -1293,58 +1295,122 @@ func concatToolCalls(chunks []ToolCall) ([]ToolCall, error) {
 		}
 	}
 
-	var args strings.Builder
+	// Second pass: within each Index group, detect whether multiple distinct
+	// non-empty IDs exist. Some OpenAI-compatible providers (e.g. qwen, deepseek)
+	// reuse the same Index for different tool calls, distinguished only by ID.
+	// When this happens, split the group into sub-groups by ID so each tool call
+	// is merged independently, instead of returning an error.
+	type subGroup struct {
+		indices []int
+	}
+	type indexGroup struct {
+		originalIndex int
+		subs          []subGroup
+	}
+	var groups []indexGroup
 	for k, v := range m {
-		index := k
-		toolCall := ToolCall{Index: &index}
-		if len(v) > 0 {
-			toolCall = chunks[v[0]]
-		}
-
-		args.Reset()
-		toolID, toolType, toolName := "", "", "" // these field will output atomically in any chunk
-
+		distinctIDs := make(map[string]bool)
 		for _, n := range v {
-			chunk := chunks[n]
-			if chunk.ID != "" {
-				if toolID == "" {
-					toolID = chunk.ID
-				} else if toolID != chunk.ID {
-					return nil, fmt.Errorf("cannot concat ToolCalls with different tool id: '%s' '%s'", toolID, chunk.ID)
-				}
-
-			}
-
-			if chunk.Type != "" {
-				if toolType == "" {
-					toolType = chunk.Type
-				} else if toolType != chunk.Type {
-					return nil, fmt.Errorf("cannot concat ToolCalls with different tool type: '%s' '%s'", toolType, chunk.Type)
-				}
-			}
-
-			if chunk.Function.Name != "" {
-				if toolName == "" {
-					toolName = chunk.Function.Name
-				} else if toolName != chunk.Function.Name {
-					return nil, fmt.Errorf("cannot concat ToolCalls with different tool name: '%s' '%s'", toolName, chunk.Function.Name)
-				}
-			}
-
-			if chunk.Function.Arguments != "" {
-				_, err := args.WriteString(chunk.Function.Arguments)
-				if err != nil {
-					return nil, err
-				}
+			if id := chunks[n].ID; id != "" {
+				distinctIDs[id] = true
 			}
 		}
 
-		toolCall.ID = toolID
-		toolCall.Type = toolType
-		toolCall.Function.Name = toolName
-		toolCall.Function.Arguments = args.String()
+		if len(distinctIDs) <= 1 {
+			// Normal case: all chunks share the same ID (or have no ID).
+			groups = append(groups, indexGroup{originalIndex: k, subs: []subGroup{{indices: v}}})
+		} else {
+			// Multiple distinct IDs at the same Index — split by ID.
+			// Chunks with empty ID are assigned to the most recently seen non-empty ID
+			// (streaming order: ID appears in the first chunk, subsequent chunks may omit it).
+			idToSub := make(map[string]int) // id -> index in subs slice
+			var subs []subGroup
+			lastID := ""
+			for _, n := range v {
+				id := chunks[n].ID
+				if id != "" {
+					lastID = id
+				}
+				effectiveID := lastID
+				if effectiveID == "" {
+					effectiveID = "__no_id__"
+				}
+				si, ok := idToSub[effectiveID]
+				if !ok {
+					si = len(subs)
+					idToSub[effectiveID] = si
+					subs = append(subs, subGroup{})
+				}
+				subs[si].indices = append(subs[si].indices, n)
+			}
+			groups = append(groups, indexGroup{originalIndex: k, subs: subs})
+		}
+	}
 
-		merged = append(merged, toolCall)
+	// Sort groups by original index for deterministic output.
+	sort.Slice(groups, func(i, j int) bool {
+		return groups[i].originalIndex < groups[j].originalIndex
+	})
+
+	// Assign new sequential indexes to all sub-groups.
+	nextIndex := 0
+	var args strings.Builder
+	for _, g := range groups {
+		for _, sg := range g.subs {
+			v := sg.indices
+			newIndex := nextIndex
+			nextIndex++
+			toolCall := ToolCall{Index: &newIndex}
+			if len(v) > 0 {
+				toolCall = chunks[v[0]]
+				toolCall.Index = &newIndex
+			}
+
+			args.Reset()
+			toolID, toolType, toolName := "", "", "" // these field will output atomically in any chunk
+
+			for _, n := range v {
+				chunk := chunks[n]
+				if chunk.ID != "" {
+					if toolID == "" {
+						toolID = chunk.ID
+					} else if toolID != chunk.ID {
+						return nil, fmt.Errorf("cannot concat ToolCalls with different tool id: '%s' '%s'", toolID, chunk.ID)
+					}
+
+				}
+
+				if chunk.Type != "" {
+					if toolType == "" {
+						toolType = chunk.Type
+					} else if toolType != chunk.Type {
+						return nil, fmt.Errorf("cannot concat ToolCalls with different tool type: '%s' '%s'", toolType, chunk.Type)
+					}
+				}
+
+				if chunk.Function.Name != "" {
+					if toolName == "" {
+						toolName = chunk.Function.Name
+					} else if toolName != chunk.Function.Name {
+						return nil, fmt.Errorf("cannot concat ToolCalls with different tool name: '%s' '%s'", toolName, chunk.Function.Name)
+					}
+				}
+
+				if chunk.Function.Arguments != "" {
+					_, err := args.WriteString(chunk.Function.Arguments)
+					if err != nil {
+						return nil, err
+					}
+				}
+			}
+
+			toolCall.ID = toolID
+			toolCall.Type = toolType
+			toolCall.Function.Name = toolName
+			toolCall.Function.Arguments = args.String()
+
+			merged = append(merged, toolCall)
+		}
 	}
 
 	if len(merged) > 1 {
