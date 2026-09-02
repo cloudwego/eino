@@ -334,9 +334,9 @@ const userMessagesReplacedNoteZh = "部分较早的用户消息已被清除，�
 
 const skillSectionFormat = "### Skill: %s\n\n%s"
 
-const skillPreamble = "The following skills were invoked in this session. Continue to follow these guidelines:\n\n%s"
+const skillPreamble = "The following skills were invoked EARLIER in this session (before the conversation was summarized), not on the current turn. They are shown here for context only so you remain aware of their guidelines.\n\nIMPORTANT: Do NOT re-execute these skills or perform their one-time setup actions (e.g., scheduling, creating files) again. The arguments shown below reflect the original invocation — they are NOT the user's current message. Only continue to apply ongoing behavioral guidelines from these skills where still relevant.\n\n%s"
 
-const skillPreambleZh = "以下 Skill 已在本会话中被调用，请继续遵循这些指导原则：\n\n%s"
+const skillPreambleZh = "以下 Skill 是在本会话中更早的时候被调用的（在对话被总结之前），而非本轮。此处仅作为上下文展示，以便你继续了解它们的指导原则。\n\n重要：不要重新执行这些 Skill，也不要再次执行它们的一次性初始化操作（例如创建定时任务、创建文件）。下面展示的参数反映的是最初调用时的输入——它们不是用户当前的消息。仅在仍然相关时，继续遵循这些 Skill 中持续生效的行为准则。\n\n%s"
 
 func getSkillPreamble() string {
 	return internal.SelectPrompt(internal.I18nPrompts{
