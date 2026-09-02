@@ -213,6 +213,9 @@ func buildFieldMappingConverter[I any]() func(input any) (any, error) {
 	return func(input any) (any, error) {
 		in, ok := input.(map[string]any)
 		if !ok {
+			if reflect.TypeOf(input) == generic.TypeOf[I]() {
+				return input, nil
+			}
 			panic(newUnexpectedInputTypeErr(reflect.TypeOf(map[string]any{}), reflect.TypeOf(input)))
 		}
 
@@ -224,6 +227,9 @@ func buildStreamFieldMappingConverter[I any]() func(input streamReader) streamRe
 	return func(input streamReader) streamReader {
 		s, ok := unpackStreamReader[map[string]any](input)
 		if !ok {
+			if sr, ok := unpackStreamReader[I](input); ok {
+				return packStreamReader(sr)
+			}
 			panic("mappingStreamAssign incoming streamReader chunk type not map[string]any")
 		}
 
