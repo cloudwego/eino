@@ -296,6 +296,15 @@ type ToolsConfig struct {
 	// The map keys are tool names indicate whether the tool should trigger immediate return.
 	ReturnDirectly map[string]bool
 
+	// AllowRuntimeReturnDirectly lets a tool decide from its own execution result
+	// whether the agent should stop and return that result, by calling
+	// SetReturnDirectly during the tool call.
+	//
+	// It is only needed when no tool is listed in ReturnDirectly: the direct-return
+	// path is built into the agent when either of the two is set, so agents that use
+	// neither keep their original graph and pay nothing for this feature.
+	AllowRuntimeReturnDirectly bool
+
 	// EmitInternalEvents indicates whether internal events from agentTool should be emitted
 	// to the parent agent's AsyncGenerator, allowing real-time streaming of nested agent output
 	// to the end-user via Runner.
@@ -1405,9 +1414,10 @@ func (a *TypedChatModelAgent[M]) buildMessageReActRunFunc(_ context.Context, bc 
 			failoverConfig: any(a.modelFailoverConfig).(*ModelFailoverConfig[*schema.Message]),
 			toolInfos:      bc.toolInfos,
 		},
-		toolsReturnDirectly: bc.returnDirectly,
-		agentName:           a.name,
-		maxIterations:       a.maxIterations,
+		toolsReturnDirectly:        bc.returnDirectly,
+		allowRuntimeReturnDirectly: a.toolsConfig.AllowRuntimeReturnDirectly,
+		agentName:                  a.name,
+		maxIterations:              a.maxIterations,
 	}
 
 	return func(ctx context.Context, p *typedRunParams[M]) {
@@ -1541,9 +1551,10 @@ func (a *TypedChatModelAgent[M]) buildAgenticReActRunFunc(_ context.Context, bc 
 			failoverConfig: any(a.modelFailoverConfig).(*ModelFailoverConfig[*schema.AgenticMessage]),
 			toolInfos:      bc.toolInfos,
 		},
-		toolsReturnDirectly: bc.returnDirectly,
-		agentName:           a.name,
-		maxIterations:       a.maxIterations,
+		toolsReturnDirectly:        bc.returnDirectly,
+		allowRuntimeReturnDirectly: a.toolsConfig.AllowRuntimeReturnDirectly,
+		agentName:                  a.name,
+		maxIterations:              a.maxIterations,
 	}
 
 	return func(ctx context.Context, p *typedRunParams[M]) {
