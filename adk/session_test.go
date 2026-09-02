@@ -3975,6 +3975,180 @@ func TestAttack_IncompleteStreamPersistsAllTerminalErrors(t *testing.T) {
 	}
 }
 
+func TestRunnerSessionTerminalModelRejectionPersistsIncompleteStream(t *testing.T) {
+	ctx := context.Background()
+	store := newSessionHelperStore()
+	invalidArguments := `{"input":`
+	terminalErr := errors.New("invalid tool call arguments")
+	var attempts int32
+	require.False(t, json.Valid([]byte(invalidArguments)))
+
+	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "terminal-rejection-session-agent",
+		Description: "rejects invalid streamed tool calls",
+		Instruction: "You are a helpful assistant.",
+		Model: &simpleChatModel{response: schema.AssistantMessage("", []schema.ToolCall{{
+			ID:   "invalid-call",
+			Type: "function",
+			Function: schema.FunctionCall{
+				Name:      "echo",
+				Arguments: invalidArguments,
+			},
+		}})},
+		ModelRetryConfig: &ModelRetryConfig{
+			MaxRetries: 1,
+			ShouldRetry: func(_ context.Context, _ *RetryContext) *RetryDecision {
+				if atomic.AddInt32(&attempts, 1) == 1 {
+					return &RetryDecision{Retry: true}
+				}
+				return &RetryDecision{RewriteError: terminalErr}
+			},
+			BackoffFunc: instantBackoff,
+		},
+	})
+	require.NoError(t, err)
+
+	runner := NewRunner(ctx, RunnerConfig{
+		Agent:           agent,
+		EnableStreaming: true,
+		SessionID:       "terminal-rejection-session",
+		SessionStore:    store,
+	})
+
+	var sawRunTerminalErr bool
+	var sawStreamTerminalErr bool
+	for iter := runner.Query(ctx, "call the tool"); ; {
+		event, ok := iter.Next()
+		if !ok {
+			break
+		}
+		if event.Err != nil {
+			require.ErrorIs(t, event.Err, terminalErr)
+			sawRunTerminalErr = true
+			continue
+		}
+		if event.Output == nil || event.Output.MessageOutput == nil || !event.Output.MessageOutput.IsStreaming {
+			continue
+		}
+		for {
+			_, streamErr := event.Output.MessageOutput.MessageStream.Recv()
+			if streamErr == nil {
+				continue
+			}
+			if errors.Is(streamErr, terminalErr) {
+				sawStreamTerminalErr = true
+			}
+			break
+		}
+	}
+	require.True(t, sawRunTerminalErr, "runner must return the terminal RewriteError")
+	require.True(t, sawStreamTerminalErr, "terminal rejection must end the live stream with RewriteError")
+
+	persistedMessages := filterStoredSessionEvents(t, store.events, func(se *SessionEvent[*schema.Message]) bool {
+		if se.Kind != SessionEventMessage || se.Message == nil || se.Message.Role != schema.Assistant {
+			return false
+		}
+		for _, toolCall := range se.Message.ToolCalls {
+			if !json.Valid([]byte(toolCall.Function.Arguments)) {
+				return true
+			}
+		}
+		return false
+	})
+	assert.Empty(t, persistedMessages, "terminally rejected tool call must not enter durable model history")
+
+	incompleteMessages := filterStoredSessionEvents(t, store.events, func(se *SessionEvent[*schema.Message]) bool {
+		return se.Kind == SessionEventMessageStreamIncomplete &&
+			se.MessageStreamIncomplete != nil &&
+			se.MessageStreamIncomplete.Message != nil &&
+			len(se.MessageStreamIncomplete.Message.ToolCalls) == 1 &&
+			se.MessageStreamIncomplete.Message.ToolCalls[0].Function.Arguments == invalidArguments
+	})
+	require.Len(t, incompleteMessages, 2)
+}
+
+func TestRunnerSessionRetryExhaustionPersistsIncompleteStream(t *testing.T) {
+	ctx := context.Background()
+	store := newSessionHelperStore()
+	invalidArguments := `{"input":`
+	require.False(t, json.Valid([]byte(invalidArguments)))
+
+	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "retry-exhaustion-session-agent",
+		Description: "exhausts retries for invalid streamed tool calls",
+		Instruction: "You are a helpful assistant.",
+		Model: &simpleChatModel{response: schema.AssistantMessage("", []schema.ToolCall{{
+			ID:   "invalid-call",
+			Type: "function",
+			Function: schema.FunctionCall{
+				Name:      "echo",
+				Arguments: invalidArguments,
+			},
+		}})},
+		ModelRetryConfig: &ModelRetryConfig{
+			MaxRetries:  1,
+			ShouldRetry: func(context.Context, *RetryContext) *RetryDecision { return &RetryDecision{Retry: true} },
+			BackoffFunc: instantBackoff,
+		},
+	})
+	require.NoError(t, err)
+
+	runner := NewRunner(ctx, RunnerConfig{
+		Agent:           agent,
+		EnableStreaming: true,
+		SessionID:       "retry-exhaustion-session",
+		SessionStore:    store,
+	})
+
+	var sawRetryExhausted bool
+	for iter := runner.Query(ctx, "call the tool"); ; {
+		event, ok := iter.Next()
+		if !ok {
+			break
+		}
+		if event.Err != nil {
+			var exhaustedErr *RetryExhaustedError
+			require.ErrorAs(t, event.Err, &exhaustedErr)
+			sawRetryExhausted = true
+			continue
+		}
+		if event.Output == nil || event.Output.MessageOutput == nil || !event.Output.MessageOutput.IsStreaming {
+			continue
+		}
+		for {
+			_, streamErr := event.Output.MessageOutput.MessageStream.Recv()
+			if streamErr != nil {
+				var willRetryErr *WillRetryError
+				require.ErrorAs(t, streamErr, &willRetryErr)
+				break
+			}
+		}
+	}
+	require.True(t, sawRetryExhausted, "runner must report retry exhaustion")
+
+	persistedMessages := filterStoredSessionEvents(t, store.events, func(se *SessionEvent[*schema.Message]) bool {
+		if se.Kind != SessionEventMessage || se.Message == nil || se.Message.Role != schema.Assistant {
+			return false
+		}
+		for _, toolCall := range se.Message.ToolCalls {
+			if !json.Valid([]byte(toolCall.Function.Arguments)) {
+				return true
+			}
+		}
+		return false
+	})
+	assert.Empty(t, persistedMessages, "retry-exhausted tool call must not enter durable model history")
+
+	incompleteMessages := filterStoredSessionEvents(t, store.events, func(se *SessionEvent[*schema.Message]) bool {
+		return se.Kind == SessionEventMessageStreamIncomplete &&
+			se.MessageStreamIncomplete != nil &&
+			se.MessageStreamIncomplete.Message != nil &&
+			len(se.MessageStreamIncomplete.Message.ToolCalls) == 1 &&
+			se.MessageStreamIncomplete.Message.ToolCalls[0].Function.Arguments == invalidArguments
+	})
+	require.Len(t, incompleteMessages, 2)
+}
+
 func drainErroredStreamEvents(t *testing.T, iter *AsyncIterator[*AgentEvent], streamErr error) {
 	t.Helper()
 	var sawStreamErr bool

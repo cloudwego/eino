@@ -667,7 +667,7 @@ func streamWithShouldRetry[M MessageType](r *typedRetryModelWrapper[M], ctx cont
 		}
 
 		if !decision.Retry {
-			signal.ch <- retryVerdict{WillRetry: false}
+			signal.ch <- retryVerdict{WillRetry: false, Err: decision.RewriteError}
 
 			if decision.RewriteError != nil {
 				returnCopy.Close()
