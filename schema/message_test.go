@@ -1089,6 +1089,43 @@ func TestConcatToolCalls(t *testing.T) {
 		assert.ErrorContains(t, err, "cannot concat ToolCalls with different tool id")
 	})
 
+	t.Run("multiple_complete_calls_same_index", func(t *testing.T) {
+		// Some models (e.g. DeepSeek, certain Qwen variants) emit every tool call
+		// with index=0 as a standalone complete chunk rather than streaming the
+		// arguments across multiple chunks. concatToolCalls must treat a chunk with
+		// a different non-empty name as a new independent call, not an error.
+		givenToolCalls := []ToolCall{
+			{
+				Index: generic.PtrOf(0),
+				ID:    "call_111",
+				Type:  "function",
+				Function: FunctionCall{
+					Name:      "ls",
+					Arguments: `{"path":"./memory"}`,
+				},
+			},
+			{
+				Index: generic.PtrOf(0),
+				ID:    "call_222",
+				Type:  "function",
+				Function: FunctionCall{
+					Name:      "user_completed_work",
+					Arguments: `{"weeks_ago":0}`,
+				},
+			},
+		}
+
+		tc, err := concatToolCalls(givenToolCalls)
+		assert.NoError(t, err)
+		assert.Len(t, tc, 2)
+		assert.Equal(t, "call_111", tc[0].ID)
+		assert.Equal(t, "ls", tc[0].Function.Name)
+		assert.Equal(t, `{"path":"./memory"}`, tc[0].Function.Arguments)
+		assert.Equal(t, "call_222", tc[1].ID)
+		assert.Equal(t, "user_completed_work", tc[1].Function.Name)
+		assert.Equal(t, `{"weeks_ago":0}`, tc[1].Function.Arguments)
+	})
+
 	t.Run("different_tool_type", func(t *testing.T) {
 		givenToolCalls := []ToolCall{
 			{
