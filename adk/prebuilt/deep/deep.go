@@ -80,6 +80,8 @@ type TypedConfig[M adk.MessageType] struct {
 	WithoutWriteTodos bool
 	// WithoutGeneralSubAgent disables the general-purpose subagent when set to true.
 	WithoutGeneralSubAgent bool
+	// WithoutTaskPrompt disables the built-in task tool prompt injection when set to true.
+	WithoutTaskPrompt bool
 	// TaskToolDescriptionGenerator allows customizing the description for the task tool.
 	// If provided, this function generates the tool description based on available subagents.
 	TaskToolDescriptionGenerator func(ctx context.Context, availableAgents []adk.TypedAgent[M]) (string, error)
@@ -134,6 +136,7 @@ func NewTyped[M adk.MessageType](ctx context.Context, cfg *TypedConfig[M]) (adk.
 			cfg.SubAgents,
 
 			cfg.WithoutGeneralSubAgent,
+			cfg.WithoutTaskPrompt,
 			cfg.ChatModel,
 			instruction,
 			cfg.ToolsConfig,
