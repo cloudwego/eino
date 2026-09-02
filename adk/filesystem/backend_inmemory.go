@@ -697,7 +697,8 @@ func normalizePath(path string) string {
 		path = "/" + path
 	}
 
-	return filepath.Clean(path)
+	// Use ToSlash so paths always use forward-slash internally, regardless of OS.
+	return filepath.ToSlash(filepath.Clean(path))
 }
 
 type grepCollector struct {
