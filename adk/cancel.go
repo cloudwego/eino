@@ -757,7 +757,7 @@ func checkPreExecCancel[M MessageType](cc *cancelContext, gen *AsyncGenerator[*T
 			if !ok {
 				return true
 			}
-			gen.Send(&TypedAgentEvent[M]{Err: cancelErr})
+			gen.Send(&TypedAgentEvent[M]{Type: AgentEventError, Err: cancelErr})
 			return true
 		}
 	}
@@ -976,7 +976,7 @@ func wrapIterWithCancelCtx[M MessageType](iter *AsyncIterator[*TypedAgentEvent[M
 					cancelErr, ok := cancelCtx.createAndMarkCancelHandled()
 					if ok {
 						cancelErr.interruptSignal = event.Action.internalInterrupted
-						gen.Send(&TypedAgentEvent[M]{Err: cancelErr})
+						gen.Send(&TypedAgentEvent[M]{Type: AgentEventError, Err: cancelErr})
 					}
 					return
 				}

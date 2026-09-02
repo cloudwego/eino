@@ -141,7 +141,7 @@ func forwardEventsAndAppendTransfer(iter *AsyncIterator[*AgentEvent],
 
 	defer func() {
 		if panicErr := recover(); panicErr != nil {
-			generator.Send(&AgentEvent{Err: safe.NewPanicErr(panicErr, debug.Stack())})
+			generator.Send(&AgentEvent{Type: AgentEventError, Err: safe.NewPanicErr(panicErr, debug.Stack())})
 		}
 		generator.Close()
 	}()
@@ -236,7 +236,7 @@ func handleFlowAgentEvents(ctx context.Context, iter *AsyncIterator[*AgentEvent]
 
 	defer func() {
 		if panicErr := recover(); panicErr != nil {
-			generator.Send(&AgentEvent{Err: safe.NewPanicErr(panicErr, debug.Stack())})
+			generator.Send(&AgentEvent{Type: AgentEventError, Err: safe.NewPanicErr(panicErr, debug.Stack())})
 		}
 		generator.Close()
 	}()
@@ -296,6 +296,7 @@ func sendTransferEvents(generator *AsyncGenerator[*AgentEvent], toAgentNames []s
 				DestAgentName: toAgentName,
 			},
 		}
+		tEvent.Type = actionEventType(tEvent.Action)
 		generator.Send(tEvent)
 	}
 }
