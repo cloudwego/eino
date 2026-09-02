@@ -39,6 +39,17 @@ var (
 	})
 )
 
+const agentToolInterruptStateVersion = 1
+
+type agentToolInterruptStateV1 struct {
+	Version          int
+	BridgeCheckpoint []byte
+}
+
+func init() {
+	schema.RegisterName[*agentToolInterruptStateV1]("_eino_adk_agent_tool_interrupt_state_v1")
+}
+
 type AgentToolOptions struct {
 	fullChatHistoryAsInput bool
 	agentInputSchema       *schema.ParamsOneOf
@@ -161,7 +172,7 @@ func (at *typedAgentTool[M]) InvokableRun(ctx context.Context, argumentsInJSON s
 	var iter *AsyncIterator[*TypedAgentEvent[M]]
 	var err error
 
-	wasInterrupted, hasState, state := tool.GetInterruptState[[]byte](ctx)
+	wasInterrupted, hasState, state := tool.GetInterruptState[any](ctx)
 	if !wasInterrupted {
 		ms = newBridgeStore()
 
@@ -201,7 +212,11 @@ func (at *typedAgentTool[M]) InvokableRun(ctx context.Context, argumentsInJSON s
 			return "", fmt.Errorf("agent tool '%s' interrupt has happened, but cannot find interrupt state", at.agent.Name(ctx))
 		}
 
-		ms = newResumeBridgeStore(bridgeCheckpointID, state)
+		bridgeCheckpoint, stateErr := decodeAgentToolInterruptState(state, at.agent.Name(ctx))
+		if stateErr != nil {
+			return "", stateErr
+		}
+		ms = newResumeBridgeStore(bridgeCheckpointID, bridgeCheckpoint)
 
 		agentOpts := extractAndDeriveAgentToolCancelCtx(ctx, at.agent.Name(ctx), opts)
 		agentOpts = append(agentOpts, withSharedParentSession())
@@ -257,8 +272,12 @@ func (at *typedAgentTool[M]) InvokableRun(ctx context.Context, argumentsInJSON s
 			return "", fmt.Errorf("interrupt has happened, but cannot find interrupt info")
 		}
 
-		return "", tool.CompositeInterrupt(ctx, "agent tool interrupt", data,
-			lastEvent.Action.internalInterrupted)
+		state := &agentToolInterruptStateV1{
+			Version:          agentToolInterruptStateVersion,
+			BridgeCheckpoint: data,
+		}
+		subInterrupt := FromInterruptContexts(lastEvent.Action.Interrupted.InterruptContexts)
+		return "", tool.CompositeInterrupt(ctx, "agent tool interrupt", state, subInterrupt)
 	}
 
 	if lastEvent == nil {
@@ -277,6 +296,25 @@ func (at *typedAgentTool[M]) InvokableRun(ctx context.Context, argumentsInJSON s
 	}
 
 	return ret, nil
+}
+
+func decodeAgentToolInterruptState(state any, agentName string) ([]byte, error) {
+	var bridgeCheckpoint []byte
+	switch state := state.(type) {
+	case []byte:
+		bridgeCheckpoint = state
+	case *agentToolInterruptStateV1:
+		if state == nil || state.Version != agentToolInterruptStateVersion {
+			return nil, fmt.Errorf("agent tool '%s' has unsupported interrupt state version", agentName)
+		}
+		bridgeCheckpoint = state.BridgeCheckpoint
+	default:
+		return nil, fmt.Errorf("agent tool '%s' has invalid interrupt state type %T", agentName, state)
+	}
+	if len(bridgeCheckpoint) == 0 {
+		return nil, fmt.Errorf("agent tool '%s' interrupt state has empty bridge checkpoint", agentName)
+	}
+	return bridgeCheckpoint, nil
 }
 
 // agentToolOptions is a wrapper structure used to convert AgentRunOption slices to tool.Option.

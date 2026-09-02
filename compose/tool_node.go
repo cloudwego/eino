@@ -18,9 +18,12 @@ package compose
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"runtime/debug"
 	"sort"
 	"strings"
@@ -31,6 +34,7 @@ import (
 	"github.com/cloudwego/eino/callbacks"
 	"github.com/cloudwego/eino/components"
 	"github.com/cloudwego/eino/components/tool"
+	checkpointinternal "github.com/cloudwego/eino/internal/checkpoint"
 	"github.com/cloudwego/eino/internal/safe"
 	"github.com/cloudwego/eino/schema"
 )
@@ -304,6 +308,7 @@ type ToolsInterruptAndRerunExtra struct {
 func init() {
 	schema.RegisterName[*ToolsInterruptAndRerunExtra]("_eino_compose_tools_interrupt_and_rerun_extra")
 	schema.RegisterName[*toolsInterruptAndRerunState]("_eino_compose_tools_interrupt_and_rerun_state")
+	schema.RegisterName[*toolsInterruptAndRerunStateV1]("_eino_compose_tools_interrupt_and_rerun_state_v1")
 }
 
 type toolsInterruptAndRerunState struct {
@@ -311,6 +316,201 @@ type toolsInterruptAndRerunState struct {
 	ExecutedTools         map[string]string
 	ExecutedEnhancedTools map[string]*schema.ToolResult
 	RerunTools            []string
+}
+
+const toolsInterruptAndRerunStateVersionV1 = checkpointinternal.ToolsNodeInterruptStateV1Version
+
+type toolsInterruptAndRerunStateV1 = checkpointinternal.ToolsNodeInterruptStateV1
+type toolsInterruptToolCallsSourceV1 = checkpointinternal.ToolsNodeToolCallsSourceV1
+
+func restoreToolsInterruptState(ctx context.Context, input *schema.Message,
+	executedTools map[string]string,
+	executedEnhancedTools map[string]*schema.ToolResult,
+) (*schema.Message, map[string]string, map[string]*schema.ToolResult, error) {
+	wasInterrupted, hasState, state := GetInterruptState[any](ctx)
+	if !wasInterrupted || !hasState {
+		return input, executedTools, executedEnhancedTools, nil
+	}
+
+	switch state := state.(type) {
+	case *toolsInterruptAndRerunState:
+		if state == nil || state.Input == nil {
+			return nil, nil, nil, errors.New("tools node legacy interrupt state has nil input")
+		}
+		return state.Input, state.ExecutedTools, state.ExecutedEnhancedTools, nil
+	case *toolsInterruptAndRerunStateV1:
+		if state == nil || state.Version != toolsInterruptAndRerunStateVersionV1 {
+			return nil, nil, nil, errors.New("tools node interrupt state has unsupported version")
+		}
+		if state.Role != schema.Assistant {
+			return nil, nil, nil, fmt.Errorf("tools node interrupt state has invalid role %q", state.Role)
+		}
+		if state.ToolCallsSource != nil {
+			return nil, nil, nil, errors.New("tools node interrupt state has an unresolved tool calls reference")
+		}
+		if err := validateToolsInterruptAndRerunStateV1(state); err != nil {
+			return nil, nil, nil, err
+		}
+		return &schema.Message{
+			Role:      state.Role,
+			ToolCalls: state.ToolCalls,
+		}, state.ExecutedTools, state.ExecutedEnhancedTools, nil
+	default:
+		return nil, nil, nil, fmt.Errorf("tools node has invalid interrupt state type %T", state)
+	}
+}
+
+func validateToolsInterruptAndRerunStateV1(state *toolsInterruptAndRerunStateV1) error {
+	callIDs := make(map[string]struct{}, len(state.ToolCalls))
+	for _, call := range state.ToolCalls {
+		if _, exists := callIDs[call.ID]; exists {
+			return fmt.Errorf("tools node interrupt state has duplicate tool call ID %q", call.ID)
+		}
+		callIDs[call.ID] = struct{}{}
+	}
+	completed := make(map[string]struct{}, len(state.ExecutedTools)+len(state.ExecutedEnhancedTools))
+	for callID := range state.ExecutedTools {
+		completed[callID] = struct{}{}
+	}
+	for _, callID := range sortedCheckpointMapKeys(state.ExecutedEnhancedTools) {
+		if _, exists := completed[callID]; exists {
+			return fmt.Errorf("tools node interrupt state has duplicate executed tool call ID %q", callID)
+		}
+		completed[callID] = struct{}{}
+	}
+	rerun := make(map[string]struct{}, len(state.RerunTools))
+	for _, callID := range state.RerunTools {
+		if _, exists := rerun[callID]; exists {
+			return fmt.Errorf("tools node interrupt state has duplicate rerun tool call ID %q", callID)
+		}
+		if _, exists := completed[callID]; exists {
+			return fmt.Errorf("tools node interrupt state tool call ID %q is both executed and pending rerun", callID)
+		}
+		rerun[callID] = struct{}{}
+	}
+	return nil
+}
+
+func compactCheckpointToolsNodeState(cp *checkpoint) {
+	if cp == nil {
+		return
+	}
+	messages := checkpointStateMessages(cp.State)
+	for id, interruptState := range cp.InterruptID2State {
+		state, ok := interruptState.State.(*toolsInterruptAndRerunStateV1)
+		if !ok || state == nil || state.ToolCallsSource != nil || len(state.ToolCalls) == 0 {
+			continue
+		}
+		messageIndex, digest, ok := findCheckpointToolCallsSource(messages, state.Role, state.ToolCalls)
+		if !ok {
+			continue
+		}
+		cloned := *state
+		cloned.ToolCalls = nil
+		cloned.ToolCallsSource = &toolsInterruptToolCallsSourceV1{
+			MessageIndex: messageIndex,
+			Digest:       digest,
+		}
+		interruptState.State = &cloned
+		cp.InterruptID2State[id] = interruptState
+	}
+	for _, sub := range cp.SubGraphs {
+		compactCheckpointToolsNodeState(sub)
+	}
+}
+
+func hydrateCheckpointToolsNodeState(cp *checkpoint) error {
+	if cp == nil {
+		return nil
+	}
+	messages := checkpointStateMessages(cp.State)
+	interruptIDs := sortedCheckpointMapKeys(cp.InterruptID2State)
+	for _, id := range interruptIDs {
+		interruptState := cp.InterruptID2State[id]
+		state, ok := interruptState.State.(*toolsInterruptAndRerunStateV1)
+		if !ok || state == nil || state.ToolCallsSource == nil {
+			continue
+		}
+		if len(state.ToolCalls) > 0 {
+			return fmt.Errorf("tools node interrupt state %q has both inline tool calls and a source reference", id)
+		}
+		source := state.ToolCallsSource
+		if source.MessageIndex < 0 || source.MessageIndex >= len(messages) ||
+			messages[source.MessageIndex] == nil {
+			return fmt.Errorf("tools node interrupt state %q has invalid tool calls source index %d",
+				id, source.MessageIndex)
+		}
+		message := messages[source.MessageIndex]
+		if message.Role != state.Role {
+			return fmt.Errorf("tools node interrupt state %q source role %q does not match %q",
+				id, message.Role, state.Role)
+		}
+		digest, ok := checkpointToolCallsDigest(message.ToolCalls)
+		if !ok || digest != source.Digest {
+			return fmt.Errorf("tools node interrupt state %q source tool calls do not match metadata", id)
+		}
+		cloned := *state
+		cloned.ToolCalls = append([]schema.ToolCall(nil), message.ToolCalls...)
+		cloned.ToolCallsSource = nil
+		interruptState.State = &cloned
+		cp.InterruptID2State[id] = interruptState
+	}
+	subGraphKeys := sortedCheckpointMapKeys(cp.SubGraphs)
+	for _, key := range subGraphKeys {
+		if err := hydrateCheckpointToolsNodeState(cp.SubGraphs[key]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func checkpointStateMessages(state any) []*schema.Message {
+	// Graph state is user-defined, so compact only the conventional directly
+	// accessible Messages field. Unsupported or ambiguous shapes stay inline.
+	value := reflect.ValueOf(state)
+	for value.IsValid() && value.Kind() == reflect.Pointer {
+		if value.IsNil() {
+			return nil
+		}
+		value = value.Elem()
+	}
+	if !value.IsValid() || value.Kind() != reflect.Struct {
+		return nil
+	}
+	field := value.FieldByName("Messages")
+	if !field.IsValid() || !field.CanInterface() {
+		return nil
+	}
+	messages, _ := field.Interface().([]*schema.Message)
+	return messages
+}
+
+func findCheckpointToolCallsSource(messages []*schema.Message, role schema.RoleType,
+	toolCalls []schema.ToolCall) (int, string, bool) {
+	matched := -1
+	for i, message := range messages {
+		if message == nil || message.Role != role || !reflect.DeepEqual(message.ToolCalls, toolCalls) {
+			continue
+		}
+		if matched >= 0 {
+			return 0, "", false
+		}
+		matched = i
+	}
+	if matched < 0 {
+		return 0, "", false
+	}
+	digest, ok := checkpointToolCallsDigest(toolCalls)
+	return matched, digest, ok
+}
+
+func checkpointToolCallsDigest(toolCalls []schema.ToolCall) (string, bool) {
+	data, err := json.Marshal(toolCalls)
+	if err != nil {
+		return "", false
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:]), true
 }
 
 type toolsTuple struct {
@@ -785,6 +985,13 @@ func (tn *ToolsNode) genToolCallTasks(ctx context.Context, tuple *toolsTuple,
 	if n == 0 {
 		return nil, errors.New("no tool call found in input message")
 	}
+	callIDs := make(map[string]struct{}, n)
+	for _, toolCall := range input.ToolCalls {
+		if _, exists := callIDs[toolCall.ID]; exists {
+			return nil, fmt.Errorf("duplicate tool call ID %q", toolCall.ID)
+		}
+		callIDs[toolCall.ID] = struct{}{}
+	}
 
 	toolCallTasks := make([]toolCallTask, n)
 
@@ -1058,14 +1265,11 @@ func (tn *ToolsNode) Invoke(ctx context.Context, input *schema.Message,
 
 	var executedTools map[string]string
 	var executedEnhancedTools map[string]*schema.ToolResult
-	if wasInterrupted, hasState, tnState := GetInterruptState[*toolsInterruptAndRerunState](ctx); wasInterrupted && hasState {
-		input = tnState.Input
-		if tnState.ExecutedTools != nil {
-			executedTools = tnState.ExecutedTools
-		}
-		if tnState.ExecutedEnhancedTools != nil {
-			executedEnhancedTools = tnState.ExecutedEnhancedTools
-		}
+	var stateErr error
+	input, executedTools, executedEnhancedTools, stateErr = restoreToolsInterruptState(
+		ctx, input, executedTools, executedEnhancedTools)
+	if stateErr != nil {
+		return nil, stateErr
 	}
 
 	tasks, err := tn.genToolCallTasks(ctx, tuple, input, executedTools, executedEnhancedTools, false)
@@ -1088,8 +1292,10 @@ func (tn *ToolsNode) Invoke(ctx context.Context, input *schema.Message,
 		ExecutedEnhancedTools: make(map[string]*schema.ToolResult),
 		RerunExtraMap:         make(map[string]any),
 	}
-	rerunState := &toolsInterruptAndRerunState{
-		Input:                 input,
+	rerunState := &toolsInterruptAndRerunStateV1{
+		Version:               toolsInterruptAndRerunStateVersionV1,
+		Role:                  input.Role,
+		ToolCalls:             input.ToolCalls,
 		ExecutedTools:         make(map[string]string),
 		ExecutedEnhancedTools: make(map[string]*schema.ToolResult),
 	}
@@ -1160,14 +1366,11 @@ func (tn *ToolsNode) Stream(ctx context.Context, input *schema.Message,
 
 	var executedTools map[string]string
 	var executedEnhancedTools map[string]*schema.ToolResult
-	if wasInterrupted, hasState, tnState := GetInterruptState[*toolsInterruptAndRerunState](ctx); wasInterrupted && hasState {
-		input = tnState.Input
-		if tnState.ExecutedTools != nil {
-			executedTools = tnState.ExecutedTools
-		}
-		if tnState.ExecutedEnhancedTools != nil {
-			executedEnhancedTools = tnState.ExecutedEnhancedTools
-		}
+	var stateErr error
+	input, executedTools, executedEnhancedTools, stateErr = restoreToolsInterruptState(
+		ctx, input, executedTools, executedEnhancedTools)
+	if stateErr != nil {
+		return nil, stateErr
 	}
 
 	tasks, err := tn.genToolCallTasks(ctx, tuple, input, executedTools, executedEnhancedTools, true)
@@ -1189,8 +1392,10 @@ func (tn *ToolsNode) Stream(ctx context.Context, input *schema.Message,
 		ExecutedEnhancedTools: make(map[string]*schema.ToolResult),
 		RerunExtraMap:         make(map[string]any),
 	}
-	rerunState := &toolsInterruptAndRerunState{
-		Input:                 input,
+	rerunState := &toolsInterruptAndRerunStateV1{
+		Version:               toolsInterruptAndRerunStateVersionV1,
+		Role:                  input.Role,
+		ToolCalls:             input.ToolCalls,
 		ExecutedTools:         make(map[string]string),
 		ExecutedEnhancedTools: make(map[string]*schema.ToolResult),
 	}
