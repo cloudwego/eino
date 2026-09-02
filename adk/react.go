@@ -33,6 +33,13 @@ import (
 // ErrExceedMaxIterations indicates the agent reached the maximum iterations limit.
 var ErrExceedMaxIterations = errors.New("exceeds max iterations")
 
+// errReturnDirectlyNotAllowed is returned when a tool asks for a direct return
+// but the agent's graph has no direct-return path, so honoring the request is
+// impossible. Reporting it beats silently continuing the loop.
+var errReturnDirectlyNotAllowed = errors.New("requires the agent to allow returning directly: " +
+	"set ToolsConfig.AllowRuntimeReturnDirectly, or list at least one tool in " +
+	"ToolsConfig.ReturnDirectly")
+
 type typedState[M MessageType] struct {
 	Messages []M
 	Extra    map[string]any
@@ -337,43 +344,35 @@ func SendToolGenAction(ctx context.Context, toolName string, action *AgentAction
 	})
 }
 
-// errReturnDirectlyNotAllowed is returned when a tool asks for a direct return
-// but the agent's graph has no direct-return path, so honoring the request is
-// impossible. Reporting it beats silently continuing the loop.
-var errReturnDirectlyNotAllowed = errors.New("adk: SetReturnDirectly requires the agent to " +
-	"allow returning directly: set ToolsConfig.AllowRuntimeReturnDirectly, or list at least " +
-	"one tool in ToolsConfig.ReturnDirectly")
-
-// setReturnDirectlyInState narrows and sets the return-direct tool call id on
-// whichever concrete agent state the run uses. It reports back whether the flag
-// was recorded in state (false means the run is not a ChatModelAgent, or does
-// not allow direct returns).
+// setReturnDirectlyInState marks callID as the tool call to return directly on
+// whichever concrete agent state the run uses.
+//
+// found reports whether an agent state was reachable at all; allowed reports
+// whether that state permits returning directly, in which case the mark was
+// written.
 //
 // The state is generic over the agent's message type and a tool cannot know
 // which one it runs under, so both concrete states are attempted.
 func setReturnDirectlyInState(ctx context.Context, callID string) (found, allowed bool) {
-	if err := compose.ProcessState(ctx, func(_ context.Context, st *State) error {
-		if !st.returnDirectlyAllowed {
-			return errReturnDirectlyNotAllowed
+	mark := func(returnDirectlyAllowed bool, set func()) {
+		allowed = returnDirectlyAllowed
+		if allowed {
+			set()
 		}
-		st.setReturnDirectlyToolCallID(callID)
+	}
+
+	if err := compose.ProcessState(ctx, func(_ context.Context, st *State) error {
+		mark(st.returnDirectlyAllowed, func() { st.setReturnDirectlyToolCallID(callID) })
 		return nil
 	}); err == nil {
-		return true, true
-	} else if errors.Is(err, errReturnDirectlyNotAllowed) {
-		return true, false
+		return true, allowed
 	}
 
 	if err := compose.ProcessState(ctx, func(_ context.Context, st *agenticState) error {
-		if !st.returnDirectlyAllowed {
-			return errReturnDirectlyNotAllowed
-		}
-		st.setReturnDirectlyToolCallID(callID)
+		mark(st.returnDirectlyAllowed, func() { st.setReturnDirectlyToolCallID(callID) })
 		return nil
 	}); err == nil {
-		return true, true
-	} else if errors.Is(err, errReturnDirectlyNotAllowed) {
-		return true, false
+		return true, allowed
 	}
 
 	return false, false
@@ -414,13 +413,13 @@ func setReturnDirectlyInState(ctx context.Context, callID string) (found, allowe
 func SetReturnDirectly(ctx context.Context) error {
 	callID := compose.GetToolCallID(ctx)
 	if callID == "" {
-		return errors.New("adk: SetReturnDirectly must be called within a tool call")
+		return errors.New("must be called within a tool call")
 	}
 
 	found, allowed := setReturnDirectlyInState(ctx, callID)
 	if !found {
-		return errors.New("adk: SetReturnDirectly must be called within a ChatModelAgent " +
-			"tool call: agent state is unavailable")
+		return errors.New("must be called within a ChatModelAgent tool call: " +
+			"agent state is unavailable")
 	}
 	if !allowed {
 		return errReturnDirectlyNotAllowed

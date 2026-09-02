@@ -386,7 +386,7 @@ func TestSetReturnDirectly_AgenticPath(t *testing.T) {
 
 func TestSetReturnDirectly_OutsideToolCall(t *testing.T) {
 	require.ErrorContains(t, SetReturnDirectly(context.Background()),
-		"SetReturnDirectly must be called within a tool call")
+		"must be called within a tool call")
 }
 
 // TestReturnDirectlyReachable pins when the direct-return path is built, which is
