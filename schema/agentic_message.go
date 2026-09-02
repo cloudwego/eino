@@ -289,6 +289,9 @@ type Reasoning struct {
 
 	// OpenAIExtension is the extension for OpenAI.
 	OpenAIExtension *openai.ReasoningExtension `json:"openai_extension,omitempty"`
+
+	// ClaudeExtension is the extension for Claude.
+	ClaudeExtension *claude.ReasoningExtension `json:"claude_extension,omitempty"`
 }
 
 type FunctionToolCall struct {
@@ -1315,6 +1318,7 @@ func concatReasoning(reasons []*Reasoning) (ret *Reasoning, err error) {
 	ret = &Reasoning{}
 
 	openaiExtensions := make([]*openai.ReasoningExtension, 0, len(reasons))
+	claudeExtensions := make([]*claude.ReasoningExtension, 0, len(reasons))
 
 	for _, r := range reasons {
 		if r == nil {
@@ -1329,12 +1333,21 @@ func concatReasoning(reasons []*Reasoning) (ret *Reasoning, err error) {
 		if r.OpenAIExtension != nil {
 			openaiExtensions = append(openaiExtensions, r.OpenAIExtension)
 		}
+		if r.ClaudeExtension != nil {
+			claudeExtensions = append(claudeExtensions, r.ClaudeExtension)
+		}
 	}
 
 	if len(openaiExtensions) > 0 {
 		ret.OpenAIExtension, err = openai.ConcatReasoningExtensions(openaiExtensions)
 		if err != nil {
 			return nil, fmt.Errorf("failed to concat openai reasoning extensions: %w", err)
+		}
+	}
+	if len(claudeExtensions) > 0 {
+		ret.ClaudeExtension, err = claude.ConcatReasoningExtensions(claudeExtensions)
+		if err != nil {
+			return nil, fmt.Errorf("failed to concat claude reasoning extensions: %w", err)
 		}
 	}
 
