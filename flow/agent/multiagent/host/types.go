@@ -89,9 +89,7 @@ type MultiAgentConfig struct {
 	// - false if no tool calls and agent should stop
 	// Note: This field only needs to be configured when using streaming mode
 	// Note: The handler MUST close the modelOutput stream before returning
-	// Optional. By default, it checks if the first chunk contains tool calls.
-	// Note: The default implementation does not work well with Claude, which typically outputs tool calls after text content.
-	// Note: If your ChatModel doesn't output tool calls first, you can try adding prompts to constrain the model from generating extra text during the tool call.
+	// Optional. By default, it scans the stream until it finds a tool call or reaches EOF.
 	StreamToolCallChecker func(ctx context.Context, modelOutput *schema.StreamReader[*schema.Message]) (bool, error)
 
 	// Summarizer is the summarizer agent that will summarize the outputs of all the chosen specialist agents.
@@ -179,7 +177,7 @@ type Summarizer struct {
 	SystemPrompt string
 }
 
-func firstChunkStreamToolCallChecker(_ context.Context, sr *schema.StreamReader[*schema.Message]) (bool, error) {
+func defaultStreamToolCallChecker(_ context.Context, sr *schema.StreamReader[*schema.Message]) (bool, error) {
 	defer sr.Close()
 
 	for {
@@ -194,11 +192,5 @@ func firstChunkStreamToolCallChecker(_ context.Context, sr *schema.StreamReader[
 		if len(msg.ToolCalls) > 0 {
 			return true, nil
 		}
-
-		if len(msg.Content) == 0 { // skip empty chunks at the front
-			continue
-		}
-
-		return false, nil
 	}
 }
