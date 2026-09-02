@@ -62,6 +62,26 @@ func TestStream(t *testing.T) {
 	wg.Wait()
 }
 
+func TestStreamWriterClosedClosesWhenReaderCloses(t *testing.T) {
+	sr, sw := Pipe[int](0)
+
+	select {
+	case <-sw.Closed():
+		t.Fatal("writer close notification should not fire before reader closes")
+	default:
+	}
+
+	sr.Close()
+
+	select {
+	case <-sw.Closed():
+	case <-time.After(time.Second):
+		t.Fatal("writer close notification did not fire after reader closed")
+	}
+
+	assert.True(t, sw.Send(1, nil))
+}
+
 func TestStreamCopy(t *testing.T) {
 	s := newStream[string](10)
 	srs := s.asReader().Copy(2)
