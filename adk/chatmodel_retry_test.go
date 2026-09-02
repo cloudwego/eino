@@ -2928,10 +2928,11 @@ func TestRetryChatModel_ShouldRetryStreamRewriteErrorOnCleanStream(t *testing.T)
 
 	done := make(chan struct{})
 	var events []agentEvent
+	var streamTermErrs []error
 	go func() {
 		defer close(done)
 		iterator := agent.Run(ctx, input)
-		events, _ = drainStreamingAgentEvents(t, iterator)
+		events, streamTermErrs = drainStreamingAgentEvents(t, iterator)
 	}()
 
 	select {
@@ -2940,6 +2941,8 @@ func TestRetryChatModel_ShouldRetryStreamRewriteErrorOnCleanStream(t *testing.T)
 		t.Fatal("test deadlocked")
 	}
 
+	require.Len(t, streamTermErrs, 1)
+	require.ErrorIs(t, streamTermErrs[0], fatalErr)
 	var foundFatal bool
 	for _, e := range events {
 		if e.Err != nil && errors.Is(e.Err, fatalErr) {
@@ -2947,6 +2950,53 @@ func TestRetryChatModel_ShouldRetryStreamRewriteErrorOnCleanStream(t *testing.T)
 		}
 	}
 	assert.True(t, foundFatal, "RewriteError on clean stream should propagate the fatal error")
+}
+
+func TestAttack_TerminalRewriteErrorOverridesPartialStreamError(t *testing.T) {
+	// A terminal RewriteError must replace a partial stream's transport error,
+	// otherwise consumers can persist or surface the rejected partial output as a model failure.
+	ctx := context.Background()
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	cm := mockModel.NewMockToolCallingChatModel(ctrl)
+	transportErr := errors.New("connection reset mid-stream")
+	terminalErr := errors.New("invalid tool call arguments")
+	cm.EXPECT().Stream(gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(func(context.Context, []*schema.Message, ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+			reader, writer := schema.Pipe[*schema.Message](1)
+			go func() {
+				_ = writer.Send(schema.AssistantMessage("partial", nil), nil)
+				_ = writer.Send(nil, transportErr)
+			}()
+			return reader, nil
+		}).Times(1)
+
+	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "TerminalRewritePartialStreamAgent",
+		Description: "terminal rewrite error overrides a partial stream failure",
+		Instruction: "You are a helpful assistant.",
+		Model:       cm,
+		ModelRetryConfig: &ModelRetryConfig{
+			ShouldRetry: func(context.Context, *RetryContext) *RetryDecision {
+				return &RetryDecision{RewriteError: terminalErr}
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	events, streamErrs := drainStreamingAgentEvents(t, agent.Run(ctx, &AgentInput{
+		Messages:        []Message{schema.UserMessage("Hello")},
+		EnableStreaming: true,
+	}))
+
+	require.Len(t, streamErrs, 1)
+	require.ErrorIs(t, streamErrs[0], terminalErr)
+	for _, event := range events {
+		if event.Err != nil {
+			require.ErrorIs(t, event.Err, terminalErr)
+		}
+	}
 }
 
 func TestRetryChatModel_ShouldRetryConcatMessagesFailsEmptyStream(t *testing.T) {
