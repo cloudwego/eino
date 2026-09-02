@@ -778,9 +778,11 @@ func concatMessagesForSpan[M MessageType](chunks []M) (M, error) {
 //
 // Two hooks cooperate to cover all stream termination paths:
 //   - WithErrWrapper intercepts mid-stream errors. It blocks on the verdict to decide
-//     whether to wrap the error as WillRetryError (rejected attempt) or pass it through (accepted).
+//     whether to wrap the error as WillRetryError (retryable rejection), replace it with
+//     RewriteError (terminal rejection), or pass it through (accepted).
 //   - WithOnEOF intercepts clean EOF (successful stream). It blocks on the verdict to
-//     either inject a WillRetryError (rejected) or pass through io.EOF (accepted).
+//     inject a WillRetryError (retryable rejection), RewriteError (terminal rejection), or
+//     pass through io.EOF (accepted).
 //
 // Both hooks share a sync.Once-guarded reader so the verdict channel is read at most once.
 // This prevents a goroutine leak when a mid-stream error is followed by EOF: errWrapper fires
@@ -804,7 +806,7 @@ func (m *typedEventSenderModel[M]) buildStreamConvertOptions(ctx context.Context
 
 	var opts []schema.ConvertOption
 
-	var retryWrapper func(error) error
+	var retryWrapper func(error) (error, bool)
 	if m.modelRetryConfig != nil {
 		if m.modelRetryConfig.ShouldRetry != nil {
 			execCtx := getTypedChatModelAgentExecCtx[M](ctx)
@@ -824,7 +826,10 @@ func (m *typedEventSenderModel[M]) buildStreamConvertOptions(ctx context.Context
 					return cachedVerdict
 				}
 
-				retryWrapper = wrapWithCancelGuard(func(err error) error {
+				retryWrapper = func(err error) (error, bool) {
+					if errors.Is(err, ErrStreamCanceled) {
+						return err, false
+					}
 					verdict := readVerdict()
 					if verdict.WillRetry {
 						return &WillRetryError{
@@ -832,10 +837,13 @@ func (m *typedEventSenderModel[M]) buildStreamConvertOptions(ctx context.Context
 							RetryAttempt: verdict.RetryAttempt,
 							rejectReason: verdict.RejectReason,
 							err:          err,
-						}
+						}, false
 					}
-					return err
-				})
+					if verdict.Err != nil {
+						return verdict.Err, true
+					}
+					return err, false
+				}
 
 				opts = append(opts, schema.WithOnEOF(func() (any, error) {
 					verdict := readVerdict()
@@ -847,13 +855,19 @@ func (m *typedEventSenderModel[M]) buildStreamConvertOptions(ctx context.Context
 							err:          verdict.Err,
 						}
 					}
+					if verdict.Err != nil {
+						return nil, verdict.Err
+					}
 					return nil, io.EOF
 				}))
 			}
 		} else {
-			retryWrapper = wrapWithCancelGuard(
+			legacyRetryWrapper := wrapWithCancelGuard(
 				genErrWrapper(ctx, m.modelRetryConfig.MaxRetries, retryAttempt, m.modelRetryConfig.IsRetryAble),
 			)
+			retryWrapper = func(err error) (error, bool) {
+				return legacyRetryWrapper(err), false
+			}
 		}
 	}
 
@@ -871,8 +885,8 @@ func (m *typedEventSenderModel[M]) buildStreamConvertOptions(ctx context.Context
 	combinedErrWrapper := func(err error) error {
 		// If retry is configured and will retry this error, use the retry wrapper's WillRetryError.
 		if retryWrapper != nil {
-			wrapped := retryWrapper(err)
-			if errors.As(wrapped, new(*WillRetryError)) {
+			wrapped, terminalRewrite := retryWrapper(err)
+			if terminalRewrite || errors.As(wrapped, new(*WillRetryError)) {
 				return wrapped
 			}
 		}
