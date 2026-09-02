@@ -118,6 +118,47 @@ func TestLsTool(t *testing.T) {
 	}
 }
 
+func TestLsToolEntryDetails(t *testing.T) {
+	backend := setupTestBackend()
+	lsTool, err := newLsTool(backend, "", "")
+	if err != nil {
+		t.Fatalf("Failed to create ls tool: %v", err)
+	}
+
+	result, err := invokeTool(t, lsTool, `{"path": "/"}`)
+	if err != nil {
+		t.Fatalf("ls tool failed: %v", err)
+	}
+
+	// Directories must be marked with a trailing slash so the model does not
+	// mistake them for files.
+	if !strings.Contains(result, "dir1/") {
+		t.Errorf("expected directory dir1 to be marked with a trailing slash, got: %s", result)
+	}
+	// Files must include a human-readable size annotation.
+	if !strings.Contains(result, "file1.txt (") {
+		t.Errorf("expected file1.txt to include a size annotation, got: %s", result)
+	}
+}
+
+func TestFormatFileSize(t *testing.T) {
+	cases := []struct {
+		in   int64
+		want string
+	}{
+		{0, "0 B"},
+		{512, "512 B"},
+		{1024, "1.0 KB"},
+		{1536, "1.5 KB"},
+		{1048576, "1.0 MB"},
+	}
+	for _, c := range cases {
+		if got := formatFileSize(c.in); got != c.want {
+			t.Errorf("formatFileSize(%d) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
 func TestReadFileTool(t *testing.T) {
 	backend := setupTestBackend()
 	readTool, err := newReadFileTool(backend, "", "")
