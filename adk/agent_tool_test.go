@@ -908,6 +908,52 @@ func TestAgentTool_InvokableRun_FinalOnly(t *testing.T) {
 	}
 }
 
+type delayedAgentToolEventAgent struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func (a *delayedAgentToolEventAgent) Name(context.Context) string        { return "inner" }
+func (a *delayedAgentToolEventAgent) Description(context.Context) string { return "inner" }
+func (a *delayedAgentToolEventAgent) Run(context.Context, *AgentInput, ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+	it, gen := NewAsyncIteratorPair[*AgentEvent]()
+	go func() {
+		close(a.started)
+		<-a.release
+		gen.Send(EventFromMessage(schema.AssistantMessage("done", nil), nil, schema.Assistant, ""))
+		gen.Close()
+	}()
+	return it
+}
+
+func TestAgentTool_InvokableRun_ParentGeneratorClosesWhileAgentRuns(t *testing.T) {
+	ctx := context.Background()
+	agent := &delayedAgentToolEventAgent{started: make(chan struct{}), release: make(chan struct{})}
+	_, gen := NewAsyncIteratorPair[*AgentEvent]()
+	result := make(chan struct {
+		output string
+		err    error
+	})
+
+	go func() {
+		output, err := NewAgentTool(ctx, agent).(tool.InvokableTool).InvokableRun(
+			ctx, `{"request":"q"}`, withAgentToolEventGenerator(gen),
+		)
+		result <- struct {
+			output string
+			err    error
+		}{output: output, err: err}
+	}()
+
+	<-agent.started
+	gen.Close()
+	close(agent.release)
+
+	got := <-result
+	require.NoError(t, got.err)
+	assert.Equal(t, "done", got.output)
+}
+
 type streamingAgent struct{}
 
 func (s *streamingAgent) Name(context.Context) string        { return "stream" }
