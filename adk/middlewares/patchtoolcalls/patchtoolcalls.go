@@ -220,7 +220,7 @@ func buildMessageNormalizationPlan(ctx context.Context, cfg Config, messages []*
 		if msg.Role != schema.Assistant || len(msg.ToolCalls) == 0 {
 			continue
 		}
-		for _, tc := range msg.ToolCalls {
+		for callIndex, tc := range msg.ToolCalls {
 			if tc.ID == "" || hasCorrespondingKeptToolMessage(messages, keep, i+1, tc.ID) {
 				continue
 			}
@@ -229,17 +229,20 @@ func buildMessageNormalizationPlan(ctx context.Context, cfg Config, messages []*
 				return nil, err
 			}
 			adk.EnsureMessageID(toolMsg)
-			patched = append(patched, toolMsg)
 			inserted = append(inserted, &adk.SessionEvent[*schema.Message]{
 				Kind: adk.SessionEventMessageInserted,
 				MessageInserted: &adk.MessageInsertedEvent[*schema.Message]{
 					Message:         toolMsg,
-					BeforeMessageID: firstKeptMessageID(messages, keep, i+1),
+					BeforeMessageID: messageToolResultInsertionAnchor(messages, keep, i+1, msg.ToolCalls[callIndex+1:]),
 				},
 			})
 		}
 	}
 
+	patched, err := applyInsertionEvents(patched, inserted)
+	if err != nil {
+		return nil, err
+	}
 	events := make([]*adk.SessionEvent[*schema.Message], 0, len(inserted)+1)
 	events = append(events, inserted...)
 	if deletedIDs := deletedMessageIDs(messages, keep); len(deletedIDs) > 0 {
@@ -383,7 +386,8 @@ func buildAgenticNormalizationPlan(ctx context.Context, cfg Config, messages []*
 		if msg.Role != schema.AgenticRoleTypeAssistant {
 			continue
 		}
-		for _, tc := range collectAgenticToolCalls(msg) {
+		toolCalls := collectAgenticToolCalls(msg)
+		for callIndex, tc := range toolCalls {
 			if tc.callID == "" || hasCorrespondingRewrittenAgenticToolResult(rewrites, i+1, tc.callID) {
 				continue
 			}
@@ -395,17 +399,20 @@ func buildAgenticNormalizationPlan(ctx context.Context, cfg Config, messages []*
 				markSyntheticAgenticToolResult(toolMsg)
 			}
 			adk.EnsureMessageID(toolMsg)
-			patched = append(patched, toolMsg)
 			inserted = append(inserted, &adk.SessionEvent[*schema.AgenticMessage]{
 				Kind: adk.SessionEventMessageInserted,
 				MessageInserted: &adk.MessageInsertedEvent[*schema.AgenticMessage]{
 					Message:         toolMsg,
-					BeforeMessageID: firstKeptAgenticMessageID(messages, rewrites, i+1),
+					BeforeMessageID: agenticToolResultInsertionAnchor(messages, rewrites, i+1, toolCalls[callIndex+1:]),
 				},
 			})
 		}
 	}
 
+	patched, err := applyInsertionEvents(patched, inserted)
+	if err != nil {
+		return nil, err
+	}
 	events := make([]*adk.SessionEvent[*schema.AgenticMessage], 0, len(inserted)+len(updated)+1)
 	events = append(events, inserted...)
 	events = append(events, updated...)
@@ -670,24 +677,82 @@ func agenticResultCallID(block *schema.ContentBlock) (string, bool) {
 	return "", false
 }
 
-func firstKeptMessageID(messages []*schema.Message, keep []bool, start int) string {
+// Existing results arrive in tool-call order from the current run state or
+// session reconstruction. Anchor a synthetic result before the first kept
+// result for a later call, or before the next non-result message.
+func messageToolResultInsertionAnchor(messages []*schema.Message, keep []bool, start int, laterCalls []schema.ToolCall) string {
+	laterCallIDs := make(map[string]struct{}, len(laterCalls))
+	for _, toolCall := range laterCalls {
+		laterCallIDs[toolCall.ID] = struct{}{}
+	}
 	for i := start; i < len(messages); i++ {
-		if keep[i] {
-			adk.EnsureMessageID(messages[i])
+		if !keep[i] {
+			continue
+		}
+		if messages[i].Role != schema.Tool {
+			return adk.GetMessageID(messages[i])
+		}
+		if _, later := laterCallIDs[messages[i].ToolCallID]; later {
 			return adk.GetMessageID(messages[i])
 		}
 	}
 	return ""
 }
 
-func firstKeptAgenticMessageID(messages []*schema.AgenticMessage, rewrites []agenticRewrite, start int) string {
+func agenticToolResultInsertionAnchor(
+	messages []*schema.AgenticMessage,
+	rewrites []agenticRewrite,
+	start int,
+	laterCalls []agenticToolCall,
+) string {
+	laterCallIDs := make(map[string]struct{}, len(laterCalls))
+	for _, toolCall := range laterCalls {
+		laterCallIDs[toolCall.callID] = struct{}{}
+	}
 	for i := start; i < len(messages); i++ {
-		if rewrites[i].keep {
-			adk.EnsureMessageID(messages[i])
+		if !rewrites[i].keep {
+			continue
+		}
+		message := rewrites[i].message
+		if message.Role != schema.AgenticRoleTypeUser || !agenticMessageHasToolResult(message) {
 			return adk.GetMessageID(messages[i])
+		}
+		for _, block := range message.ContentBlocks {
+			callID, isResult := agenticResultCallID(block)
+			if _, later := laterCallIDs[callID]; isResult && later {
+				return adk.GetMessageID(messages[i])
+			}
 		}
 	}
 	return ""
+}
+
+func applyInsertionEvents[M adk.MessageType](
+	messages []M,
+	events []*adk.SessionEvent[M],
+) ([]M, error) {
+	for _, event := range events {
+		insertion := event.MessageInserted
+		if insertion.BeforeMessageID == "" {
+			messages = append(messages, insertion.Message)
+			continue
+		}
+		insertAt := -1
+		for i, message := range messages {
+			if adk.GetMessageID(message) == insertion.BeforeMessageID {
+				insertAt = i
+				break
+			}
+		}
+		if insertAt < 0 {
+			return nil, fmt.Errorf("patchtoolcalls: insertion anchor %q not found", insertion.BeforeMessageID)
+		}
+		var zero M
+		messages = append(messages, zero)
+		copy(messages[insertAt+1:], messages[insertAt:])
+		messages[insertAt] = insertion.Message
+	}
+	return messages, nil
 }
 
 func deletedMessageIDs(messages []*schema.Message, keep []bool) []string {
