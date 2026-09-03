@@ -33,6 +33,13 @@ import (
 // ErrExceedMaxIterations indicates the agent reached the maximum iterations limit.
 var ErrExceedMaxIterations = errors.New("exceeds max iterations")
 
+// errReturnDirectlyNotAllowed is returned when a tool asks for a direct return
+// but the agent's graph has no direct-return path, so honoring the request is
+// impossible. Reporting it beats silently continuing the loop.
+var errReturnDirectlyNotAllowed = errors.New("requires the agent to allow returning directly: " +
+	"set ToolsConfig.AllowRuntimeReturnDirectly, or list at least one tool in " +
+	"ToolsConfig.ReturnDirectly")
+
 type typedState[M MessageType] struct {
 	Messages []M
 	Extra    map[string]any
@@ -74,6 +81,15 @@ type typedState[M MessageType] struct {
 	// tCtx.CallID. Entries are inserted at start emission, retained across
 	// interrupt boundaries, and deleted when the matching end span fires.
 	ToolSpansInFlight map[string]*toolSpanInFlight
+
+	// returnDirectlyAllowed records whether this run's graph contains the
+	// direct-return path, which is what makes a runtime SetReturnDirectly
+	// observable.
+	//
+	// Deliberately unexported: gob skips unexported fields, so this adds nothing
+	// to the checkpoint wire format. It is therefore lost across a resume and is
+	// refreshed from live config on every tool iteration.
+	returnDirectlyAllowed bool
 }
 
 // toolSpanInFlight holds identity for a tool_call_start span that has been
@@ -328,6 +344,89 @@ func SendToolGenAction(ctx context.Context, toolName string, action *AgentAction
 	})
 }
 
+// setReturnDirectlyInState marks callID as the tool call to return directly on
+// whichever concrete agent state the run uses.
+//
+// found reports whether an agent state was reachable at all; allowed reports
+// whether that state permits returning directly, in which case the mark was
+// written.
+//
+// The state is generic over the agent's message type and a tool cannot know
+// which one it runs under, so both concrete states are attempted.
+func setReturnDirectlyInState(ctx context.Context, callID string) (found, allowed bool) {
+	mark := func(returnDirectlyAllowed bool, set func()) {
+		allowed = returnDirectlyAllowed
+		if allowed {
+			set()
+		}
+	}
+
+	if err := compose.ProcessState(ctx, func(_ context.Context, st *State) error {
+		mark(st.returnDirectlyAllowed, func() { st.setReturnDirectlyToolCallID(callID) })
+		return nil
+	}); err == nil {
+		return true, allowed
+	}
+
+	if err := compose.ProcessState(ctx, func(_ context.Context, st *agenticState) error {
+		mark(st.returnDirectlyAllowed, func() { st.setReturnDirectlyToolCallID(callID) })
+		return nil
+	}); err == nil {
+		return true, allowed
+	}
+
+	return false, false
+}
+
+// SetReturnDirectly signals the ChatModelAgent to stop its ReAct loop once the
+// current tool call finishes, and to return that tool call's result as the
+// agent's final output.
+//
+// This is the runtime counterpart of the static ToolsConfig.ReturnDirectly: it
+// lets a tool decide from its own execution result whether the loop should stop,
+// so the same tool can return directly for some arguments and keep the loop
+// running for others.
+//
+// Where/when to use:
+//   - Invoke within a tool's Run (Invokable/Streamable) implementation, after the
+//     tool has determined that its own result is the final answer and no further
+//     model reasoning is needed.
+//   - For a Streamable tool, call it before returning the stream reader.
+//
+// Prerequisite:
+//   - The agent must be able to reach the direct-return path. That holds when at
+//     least one tool is listed in ToolsConfig.ReturnDirectly, or when
+//     ToolsConfig.AllowRuntimeReturnDirectly is set. Otherwise this returns an
+//     error rather than silently doing nothing.
+//
+// Priority:
+//   - Takes priority over ToolsConfig.ReturnDirectly and over
+//     ChatModelAgentContext.ReturnDirectly set by a BeforeAgent handler.
+//
+// Concurrency:
+//   - When tool calls run in parallel and more than one requests a direct return
+//     in the same iteration, the last request wins.
+//
+// Limitation:
+//   - Only usable within ChatModelAgent runs. It relies on ChatModelAgent's
+//     internal state, which is not available in other agent types.
+func SetReturnDirectly(ctx context.Context) error {
+	callID := compose.GetToolCallID(ctx)
+	if callID == "" {
+		return errors.New("must be called within a tool call")
+	}
+
+	found, allowed := setReturnDirectlyInState(ctx, callID)
+	if !found {
+		return errors.New("must be called within a ChatModelAgent tool call: " +
+			"agent state is unavailable")
+	}
+	if !allowed {
+		return errReturnDirectlyNotAllowed
+	}
+	return nil
+}
+
 type reactInput struct {
 	Messages []Message
 }
@@ -340,6 +439,11 @@ type typedReactConfig[M MessageType] struct {
 
 	toolsReturnDirectly map[string]bool
 
+	// allowRuntimeReturnDirectly forces the return-direct branch into the graph
+	// even when no tool is statically configured in toolsReturnDirectly, so that
+	// SetReturnDirectly can take effect at runtime.
+	allowRuntimeReturnDirectly bool
+
 	agentName string
 
 	maxIterations int
@@ -349,6 +453,16 @@ type typedReactConfig[M MessageType] struct {
 	// afterAgentFunc is called when the agent reaches a successful terminal state.
 	// It runs as a graph node, so compose.ProcessState is available.
 	afterAgentFunc func(ctx context.Context, msg M) (M, error)
+}
+
+// returnDirectlyReachable reports whether the graph should contain the
+// direct-return path: either a tool is statically configured to return directly,
+// or the agent explicitly allows a tool to decide at runtime.
+//
+// Agents that do neither keep their original topology, so they pay nothing for
+// this feature.
+func (c *typedReactConfig[M]) returnDirectlyReachable() bool {
+	return len(c.toolsReturnDirectly) > 0 || c.allowRuntimeReturnDirectly
 }
 
 type reactConfig = typedReactConfig[*schema.Message]
@@ -384,7 +498,8 @@ func getReturnDirectlyToolCallID(ctx context.Context) (string, bool) {
 func genReactState(config *reactConfig) func(ctx context.Context) *State {
 	return func(ctx context.Context) *State {
 		st := &State{
-			AgentName: config.agentName,
+			AgentName:             config.agentName,
+			returnDirectlyAllowed: config.returnDirectlyReachable(),
 		}
 		maxIter := 20
 		if config.maxIterations > 0 {
@@ -458,6 +573,10 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 
 	toolPreHandle := func(ctx context.Context, _ Message, st *State) (Message, error) {
 		input := st.Messages[len(st.Messages)-1]
+		// Refreshed from live config on every iteration so that a run resumed from
+		// a checkpoint written before this field existed still reflects the agent's
+		// actual topology.
+		st.returnDirectlyAllowed = config.returnDirectlyReachable()
 		returnDirectly := config.toolsReturnDirectly
 		if execCtx := getTypedChatModelAgentExecCtx[*schema.Message](ctx); execCtx != nil && len(execCtx.runtimeReturnDirectly) > 0 {
 			returnDirectly = execCtx.runtimeReturnDirectly
@@ -564,7 +683,7 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 	_ = g.AddEdge(toolNode_, afterToolCallsNode_)
 	_ = g.AddEdge(afterToolCallsNode_, afterToolCallsCancelCheckNode_)
 
-	if len(config.toolsReturnDirectly) > 0 {
+	if config.returnDirectlyReachable() {
 		const (
 			toolNodeToEndConverter = "ToolNodeToEndConverter"
 		)
@@ -625,7 +744,8 @@ func getAgenticReturnDirectlyToolCallID(ctx context.Context) (string, bool) {
 func genAgenticReactState(config *agenticReactConfig) func(ctx context.Context) *agenticState {
 	return func(ctx context.Context) *agenticState {
 		st := &agenticState{
-			AgentName: config.agentName,
+			AgentName:             config.agentName,
+			returnDirectlyAllowed: config.returnDirectlyReachable(),
 		}
 		maxIter := 20
 		if config.maxIterations > 0 {
@@ -707,6 +827,10 @@ func newAgenticReact(ctx context.Context, config *agenticReactConfig) (agenticRe
 
 	toolPreHandle := func(ctx context.Context, _ *schema.AgenticMessage, st *agenticState) (*schema.AgenticMessage, error) {
 		input := st.Messages[len(st.Messages)-1]
+		// Refreshed from live config on every iteration so that a run resumed from
+		// a checkpoint written before this field existed still reflects the agent's
+		// actual topology.
+		st.returnDirectlyAllowed = config.returnDirectlyReachable()
 		returnDirectly := config.toolsReturnDirectly
 		if execCtx := getTypedChatModelAgentExecCtx[*schema.AgenticMessage](ctx); execCtx != nil && len(execCtx.runtimeReturnDirectly) > 0 {
 			returnDirectly = execCtx.runtimeReturnDirectly
@@ -809,7 +933,7 @@ func newAgenticReact(ctx context.Context, config *agenticReactConfig) (agenticRe
 	_ = g.AddEdge(toolNode_, afterToolCallsNode_)
 	_ = g.AddEdge(afterToolCallsNode_, afterToolCallsCancelCheckNode_)
 
-	if len(config.toolsReturnDirectly) > 0 {
+	if config.returnDirectlyReachable() {
 		const (
 			toolNodeToEndConverter = "ToolNodeToEndConverter"
 		)
