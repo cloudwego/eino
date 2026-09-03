@@ -2415,15 +2415,15 @@ func TestAttack_ReorderParallelToolResults(t *testing.T) {
 			testToolCallMessage("call-1", "call-2"),
 			schema.ToolMessage("second", "call-2"),
 			schema.ToolMessage("first", "call-1"),
-			testToolCallMessage("call-3", "call-4"),
-			schema.ToolMessage("fourth", "call-4"),
-			schema.ToolMessage("third", "call-3"),
+			testToolCallMessage("call-1", "call-2"),
+			schema.ToolMessage("second again", "call-2"),
+			schema.ToolMessage("first again", "call-1"),
 		}
 
 		reorderParallelToolResults(messages)
 
 		require.Equal(t, []string{"call-1", "call-2"}, toolResultCallIDs(messages[1:3]))
-		require.Equal(t, []string{"call-3", "call-4"}, toolResultCallIDs(messages[4:]))
+		require.Equal(t, []string{"call-1", "call-2"}, toolResultCallIDs(messages[4:]))
 	})
 
 	t.Run("agentic message reorders function and tool search results", func(t *testing.T) {
@@ -2448,7 +2448,7 @@ func TestAttack_ReorderParallelToolResults(t *testing.T) {
 		assert.Equal(t, "call-2", secondID)
 	})
 
-	t.Run("unknown result keeps physical order", func(t *testing.T) {
+	t.Run("unknown result keeps position while known results reorder", func(t *testing.T) {
 		messages := []*schema.Message{
 			testToolCallMessage("call-1", "call-2"),
 			schema.ToolMessage("second", "call-2"),
@@ -2458,7 +2458,26 @@ func TestAttack_ReorderParallelToolResults(t *testing.T) {
 
 		reorderParallelToolResults(messages)
 
-		require.Equal(t, []string{"call-2", "call-other", "call-1"}, toolResultCallIDs(messages[1:]))
+		require.Equal(t, []string{"call-1", "call-other", "call-2"}, toolResultCallIDs(messages[1:]))
+	})
+
+	t.Run("agentic unknown result keeps position while known results reorder", func(t *testing.T) {
+		messages := []*schema.AgenticMessage{
+			testAgenticToolCallMessage("call-1", "call-2"),
+			agenticToolResultMessage("call-2", "second", "second"),
+			agenticToolResultMessage("call-other", "other", "other"),
+			agenticToolResultMessage("call-1", "first", "first"),
+		}
+
+		reorderParallelToolResults(messages)
+
+		var resultIDs []string
+		for _, message := range messages[1:] {
+			callID, isResult := messageToolResultCallID(message)
+			require.True(t, isResult)
+			resultIDs = append(resultIDs, callID)
+		}
+		require.Equal(t, []string{"call-1", "call-other", "call-2"}, resultIDs)
 	})
 
 	t.Run("ordinary message terminates result group", func(t *testing.T) {
@@ -2486,6 +2505,21 @@ func TestAttack_ReorderParallelToolResults(t *testing.T) {
 		reorderParallelToolResults(messages)
 
 		require.Equal(t, []string{"call-1", "call-3"}, toolResultCallIDs(messages[1:]))
+	})
+
+	t.Run("duplicate results preserve completion order within one call", func(t *testing.T) {
+		messages := []*schema.Message{
+			testToolCallMessage("call-1", "call-2"),
+			schema.ToolMessage("second first result", "call-2"),
+			schema.ToolMessage("first result", "call-1"),
+			schema.ToolMessage("second duplicate result", "call-2"),
+		}
+
+		reorderParallelToolResults(messages)
+
+		require.Equal(t, []string{"call-1", "call-2", "call-2"}, toolResultCallIDs(messages[1:]))
+		assert.Equal(t, "second first result", messages[2].Content)
+		assert.Equal(t, "second duplicate result", messages[3].Content)
 	})
 
 	t.Run("duplicate call ID keeps physical order", func(t *testing.T) {
@@ -2562,6 +2596,84 @@ func TestAttack_ReorderParallelToolResults(t *testing.T) {
 		require.Equal(t, []string{"call-1", "call-2"}, toolResultCallIDs(state.Messages[1:]))
 		require.Equal(t, []string{"call-2", "call-1"}, toolResultCallIDs(replacement[1:]))
 	})
+}
+
+func TestAttack_ReconstructParallelToolResultsAcrossPaginationAndDeletion(t *testing.T) {
+	ctx := context.Background()
+	store := newSessionHelperStore()
+	sid := "parallel-tool-result-pagination-deletion"
+	assistant := testToolCallMessage("call-1", "call-2", "call-3")
+	result1 := schema.ToolMessage("first", "call-1")
+	result2 := schema.ToolMessage("second", "call-2")
+	result3 := schema.ToolMessage("third", "call-3")
+	for _, message := range []*schema.Message{assistant, result3, result2, result1} {
+		EnsureMessageID(message)
+		appendTestSessionEvent(t, ctx, store, sid, &SessionEvent[*schema.Message]{
+			Kind:    SessionEventMessage,
+			Message: message,
+		})
+	}
+	appendTestSessionEvent(t, ctx, store, sid, &SessionEvent[*schema.Message]{
+		Kind: SessionEventMessagesDeleted,
+		MessagesDeleted: &MessagesDeletedEvent{
+			MessageIDs: []string{GetMessageID(result2)},
+		},
+	})
+
+	result, err := reconstructSessionState[*schema.Message](ctx, store, sid, 2)
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.NotNil(t, result.state)
+	require.Len(t, result.state.Messages, 3)
+	require.Equal(t, []string{"call-1", "call-3"}, toolResultCallIDs(result.state.Messages[1:]))
+}
+
+func TestAttack_ReconstructParallelToolResultsAfterUpdateAndRollback(t *testing.T) {
+	ctx := context.Background()
+	store := newSessionHelperStore()
+	sid := "parallel-tool-result-update-rollback"
+	assistant := testToolCallMessage("call-1", "call-2")
+	EnsureMessageID(assistant)
+	updatedAssistant := *assistant
+	updatedAssistant.ToolCalls = []schema.ToolCall{{ID: "call-2"}, {ID: "call-1"}}
+	result1 := schema.ToolMessage("first", "call-1")
+	result2 := schema.ToolMessage("second", "call-2")
+	for _, message := range []*schema.Message{assistant, result1, result2} {
+		EnsureMessageID(message)
+		appendTestSessionEvent(t, ctx, store, sid, &SessionEvent[*schema.Message]{
+			Kind:    SessionEventMessage,
+			Message: message,
+		})
+	}
+	appendTestSessionEvent(t, ctx, store, sid, &SessionEvent[*schema.Message]{
+		Kind: SessionEventMessageUpdated,
+		MessageUpdated: &MessageUpdatedEvent[*schema.Message]{
+			MessageID: GetMessageID(assistant),
+			Message:   &updatedAssistant,
+		},
+	})
+	firstTurn := withTestCommittedIdle[*schema.Message]("turn-1")
+	require.NoError(t, store.AppendEventsForSession(ctx, sid, []*SessionEvent[*schema.Message]{firstTurn}))
+	appendTestSessionEvent(t, ctx, store, sid, &SessionEvent[*schema.Message]{
+		Kind:    SessionEventMessage,
+		Message: schema.UserMessage("rolled back"),
+	})
+	require.NoError(t, store.AppendEventsForSession(ctx, sid, []*SessionEvent[*schema.Message]{
+		withTestCommittedIdle[*schema.Message]("turn-2"),
+	}))
+	require.NoError(t, RollbackSession[*schema.Message](ctx, store, sid, firstTurn.EventID))
+
+	result, err := reconstructSessionState[*schema.Message](ctx, store, sid, 2)
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.NotNil(t, result.state)
+	require.Len(t, result.state.Messages, 3)
+	require.Equal(t, []string{"call-2", "call-1"}, toolResultCallIDs(result.state.Messages[1:]))
+	for _, message := range result.state.Messages {
+		assert.NotEqual(t, "rolled back", message.Content)
+	}
 }
 
 func TestReconstructFromEventLog_CorruptEventReturnsError(t *testing.T) {

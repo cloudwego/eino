@@ -466,6 +466,60 @@ func TestPatchToolCallsIntegration_InsertsMissingParallelResultInCallOrder(t *te
 	require.Equal(t, []string{"call-1", "call-2", "call-3"}, toolResultIDs(chatModel.lastInput))
 }
 
+func TestAttack_PatchToolCallsOrphanRemovalPreservesKnownResultOrder(t *testing.T) {
+	ctx := context.Background()
+	store := session.NewInMemoryStore[*schema.Message](nil)
+	sid := "patchtoolcalls-orphan-order"
+
+	messages := []*schema.Message{
+		schema.AssistantMessage("", []schema.ToolCall{
+			{ID: "call-1", Function: schema.FunctionCall{Name: "first", Arguments: "{}"}},
+			{ID: "call-2", Function: schema.FunctionCall{Name: "second", Arguments: "{}"}},
+		}),
+		schema.ToolMessage("second result", "call-2", schema.WithToolName("second")),
+		schema.ToolMessage("orphan result", "call-orphan", schema.WithToolName("orphan")),
+		schema.ToolMessage("first result", "call-1", schema.WithToolName("first")),
+	}
+	for _, message := range messages {
+		adk.EnsureMessageID(message)
+		require.NoError(t, store.AppendEvents(ctx, sid, []*adk.SessionEvent[*schema.Message]{
+			{EventID: uuid.NewString(), Kind: adk.SessionEventMessage, Message: message},
+		}))
+	}
+
+	mw, err := patchtoolcalls.New(ctx, &patchtoolcalls.Config{RemoveOrphanResults: true})
+	require.NoError(t, err)
+	chatModel := &stubChatModel{reply: "done"}
+	agent, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
+		Name:        "patchtoolcalls-orphan-order",
+		Description: "remove orphan without disrupting known result order",
+		Model:       chatModel,
+		Handlers:    []adk.ChatModelAgentMiddleware{mw},
+	})
+	require.NoError(t, err)
+	runner := adk.NewRunner(ctx, adk.RunnerConfig{
+		Agent:        agent,
+		SessionID:    sid,
+		SessionStore: store,
+	})
+
+	for iter := runner.Query(ctx, "next turn"); ; {
+		event, ok := iter.Next()
+		if !ok {
+			break
+		}
+		require.NoError(t, event.Err)
+	}
+
+	var toolResultIDs []string
+	for _, message := range chatModel.lastInput {
+		if message.Role == schema.Tool {
+			toolResultIDs = append(toolResultIDs, message.ToolCallID)
+		}
+	}
+	assert.Equal(t, []string{"call-1", "call-2"}, toolResultIDs)
+}
+
 // TestReductionIntegration_PersistsBothMessageUpdated seeds the session log
 // with two rounds of (assistant tool call → tool result). With reduction's
 // ClearRetentionSuffixLimit=1 (the framework default), the LAST round is

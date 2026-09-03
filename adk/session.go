@@ -1878,8 +1878,8 @@ func replayDurableContextEvents[M MessageType](events []*SessionEvent[M]) (*reco
 
 // reorderParallelToolResults canonicalizes reconstructed model context without
 // changing the completion-ordered session log or live event delivery. It only
-// reorders a contiguous result group when every result belongs to the preceding
-// multi-tool assistant message; malformed or unfamiliar history is left intact.
+// reorders results belonging to the preceding multi-tool assistant message;
+// unrecognized results keep their original positions.
 func reorderParallelToolResults[M MessageType](messages []M) {
 	for i := 0; i < len(messages); i++ {
 		callIDs, ok := messageToolCallIDs(messages[i])
@@ -1919,24 +1919,29 @@ func reorderParallelToolResults[M MessageType](messages []M) {
 			continue
 		}
 		resultsByCallID := make(map[string][]M, len(resultIDs))
-		for _, callID := range resultIDs {
-			if _, exists := knownCallIDs[callID]; !exists {
-				validGroup = false
-				break
+		knownResultCount := 0
+		for offset, callID := range resultIDs {
+			if _, exists := knownCallIDs[callID]; exists {
+				resultsByCallID[callID] = append(resultsByCallID[callID], messages[resultStart+offset])
+				knownResultCount++
 			}
 		}
-		if !validGroup {
+		if knownResultCount < 2 {
 			continue
 		}
-		for offset, callID := range resultIDs {
-			resultsByCallID[callID] = append(resultsByCallID[callID], messages[resultStart+offset])
-		}
 
-		ordered := make([]M, 0, len(resultIDs))
+		ordered := make([]M, 0, knownResultCount)
 		for _, callID := range callIDs {
 			ordered = append(ordered, resultsByCallID[callID]...)
 		}
-		copy(messages[resultStart:resultEnd], ordered)
+		orderedIndex := 0
+		for offset, callID := range resultIDs {
+			if _, exists := knownCallIDs[callID]; !exists {
+				continue
+			}
+			messages[resultStart+offset] = ordered[orderedIndex]
+			orderedIndex++
+		}
 		i = resultEnd - 1
 	}
 }

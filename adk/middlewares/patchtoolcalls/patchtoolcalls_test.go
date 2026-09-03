@@ -720,6 +720,37 @@ func TestAttack_PatchToolCallsMultipleMissingResultsShareLaterAnchor(t *testing.
 	assert.Equal(t, []string{"call_1", "call_2", "call_3", "call_4"}, collectToolResultIDs(plan.messages))
 }
 
+func TestAttack_PatchToolCallsAgenticInsertionAnchorsRewrittenResult(t *testing.T) {
+	ctx := context.Background()
+	assistant := makeAssistantMsgWithToolCalls[*schema.AgenticMessage]("", []testToolCall{
+		{ID: "call_1", Name: "tool_a", Arguments: "{}"},
+		{ID: "call_2", Name: "tool_b", Arguments: "{}"},
+	})
+	mixed := &schema.AgenticMessage{
+		Role: schema.AgenticRoleTypeUser,
+		ContentBlocks: []*schema.ContentBlock{
+			schema.NewContentBlock(&schema.FunctionToolResult{CallID: "call_orphan", Name: "tool_orphan"}),
+			schema.NewContentBlock(&schema.FunctionToolResult{CallID: "call_2", Name: "tool_b"}),
+		},
+	}
+	adk.EnsureMessageID(mixed)
+
+	plan, err := buildAgenticNormalizationPlan(
+		ctx,
+		Config{RemoveOrphanResults: true},
+		[]*schema.AgenticMessage{assistant, mixed},
+	)
+
+	require.NoError(t, err)
+	require.Len(t, plan.messages, 3)
+	assert.Equal(t, []string{"call_1", "call_2"}, collectToolResultIDs(plan.messages))
+	require.Len(t, plan.events, 2)
+	require.NotNil(t, plan.events[0].MessageInserted)
+	assert.Equal(t, adk.GetMessageID(mixed), plan.events[0].MessageInserted.BeforeMessageID)
+	require.NotNil(t, plan.events[1].MessageUpdated)
+	assert.Equal(t, adk.GetMessageID(mixed), plan.events[1].MessageUpdated.MessageID)
+}
+
 func TestPatchToolCallsAgenticToolSearchResult(t *testing.T) {
 	ctx := context.Background()
 	mw, err := NewTyped[*schema.AgenticMessage](ctx, nil)
