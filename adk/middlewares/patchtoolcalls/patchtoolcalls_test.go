@@ -220,7 +220,7 @@ func testPatchToolCallsGeneric[M adk.MessageType](t *testing.T) {
 				makeToolResultMsg[M]("result_a", "call_1", "tool_a"),
 			},
 			wantLen:        4,
-			checkPatchedAt: 2,
+			checkPatchedAt: 3,
 			wantCallID:     "call_2",
 			wantToolName:   "tool_b",
 			wantContent:    fmt.Sprintf(defaultPatchedToolMessageTemplate, "tool_b", "call_2"),
@@ -241,7 +241,7 @@ func testPatchToolCallsGeneric[M adk.MessageType](t *testing.T) {
 				makeToolResultMsg[M]("result_a", "call_1", "tool_a"),
 			},
 			wantLen:        4,
-			checkPatchedAt: 2,
+			checkPatchedAt: 3,
 			wantCallID:     "call_2",
 			wantToolName:   "tool_b",
 			wantContent:    "123 tool_b call_2",
@@ -268,7 +268,7 @@ func testPatchToolCallsGeneric[M adk.MessageType](t *testing.T) {
 				makeToolResultMsg[M]("result_a", "call_1", "tool_a"),
 			},
 			wantLen:        4,
-			checkPatchedAt: 2,
+			checkPatchedAt: 3,
 			wantCallID:     "call_2",
 			wantToolName:   "tool_b",
 			wantContent:    `result tool_b call_2 {"x":1}`,
@@ -652,17 +652,19 @@ func TestPatchToolCallsInsertionEventAnchorsReplayOrder(t *testing.T) {
 	assistant := makeAssistantMsgWithToolCalls[*schema.Message]("", []testToolCall{
 		{ID: "call_1", Name: "tool_a", Arguments: "{}"},
 		{ID: "call_2", Name: "tool_b", Arguments: "{}"},
+		{ID: "call_3", Name: "tool_c", Arguments: "{}"},
 	})
-	result := makeToolResultMsg[*schema.Message]("result", "call_1", "tool_a")
-	messages := []*schema.Message{assistant, result}
+	result1 := makeToolResultMsg[*schema.Message]("result 1", "call_1", "tool_a")
+	result3 := makeToolResultMsg[*schema.Message]("result 3", "call_3", "tool_c")
+	messages := []*schema.Message{assistant, result1, result3}
 
 	plan, err := buildMessageNormalizationPlan(ctx, Config{}, messages)
 	require.NoError(t, err)
-	require.Len(t, plan.messages, 3)
+	require.Len(t, plan.messages, 4)
 	require.Len(t, plan.events, 1)
 	event := plan.events[0]
 	require.Equal(t, adk.SessionEventMessageInserted, event.Kind)
-	assert.Equal(t, adk.GetMessageID(result), event.MessageInserted.BeforeMessageID)
+	assert.Equal(t, adk.GetMessageID(result3), event.MessageInserted.BeforeMessageID)
 
 	replayed := append([]*schema.Message{}, messages...)
 	for i, msg := range replayed {
@@ -673,8 +675,80 @@ func TestPatchToolCallsInsertionEventAnchorsReplayOrder(t *testing.T) {
 			break
 		}
 	}
-	assert.Equal(t, []string{"call_2", "call_1"}, collectToolResultIDs(replayed))
-	assert.Equal(t, []string{"call_2", "call_1"}, collectToolResultIDs(plan.messages))
+	assert.Equal(t, []string{"call_1", "call_2", "call_3"}, collectToolResultIDs(replayed))
+	assert.Equal(t, []string{"call_1", "call_2", "call_3"}, collectToolResultIDs(plan.messages))
+}
+
+func TestPatchToolCallsAgenticInsertionEventAnchorsReplayOrder(t *testing.T) {
+	ctx := context.Background()
+	assistant := makeAssistantMsgWithToolCalls[*schema.AgenticMessage]("", []testToolCall{
+		{ID: "call_1", Name: "tool_a", Arguments: "{}"},
+		{ID: "call_2", Name: "tool_b", Arguments: "{}"},
+		{ID: "call_3", Name: "tool_c", Arguments: "{}"},
+	})
+	result1 := makeToolResultMsg[*schema.AgenticMessage]("result 1", "call_1", "tool_a")
+	result3 := makeToolResultMsg[*schema.AgenticMessage]("result 3", "call_3", "tool_c")
+	messages := []*schema.AgenticMessage{assistant, result1, result3}
+
+	plan, err := buildAgenticNormalizationPlan(ctx, Config{}, messages)
+	require.NoError(t, err)
+	require.Len(t, plan.messages, 4)
+	require.Len(t, plan.events, 1)
+	event := plan.events[0]
+	require.Equal(t, adk.SessionEventMessageInserted, event.Kind)
+	assert.Equal(t, adk.GetMessageID(result3), event.MessageInserted.BeforeMessageID)
+	assert.Equal(t, []string{"call_1", "call_2", "call_3"}, collectToolResultIDs(plan.messages))
+}
+
+func TestAttack_PatchToolCallsMultipleMissingResultsShareLaterAnchor(t *testing.T) {
+	ctx := context.Background()
+	assistant := makeAssistantMsgWithToolCalls[*schema.Message]("", []testToolCall{
+		{ID: "call_1", Name: "tool_a", Arguments: "{}"},
+		{ID: "call_2", Name: "tool_b", Arguments: "{}"},
+		{ID: "call_3", Name: "tool_c", Arguments: "{}"},
+		{ID: "call_4", Name: "tool_d", Arguments: "{}"},
+	})
+	result1 := makeToolResultMsg[*schema.Message]("result 1", "call_1", "tool_a")
+	result4 := makeToolResultMsg[*schema.Message]("result 4", "call_4", "tool_d")
+
+	plan, err := buildMessageNormalizationPlan(ctx, Config{}, []*schema.Message{assistant, result1, result4})
+
+	require.NoError(t, err)
+	require.Len(t, plan.events, 2)
+	assert.Equal(t, adk.GetMessageID(result4), plan.events[0].MessageInserted.BeforeMessageID)
+	assert.Equal(t, adk.GetMessageID(result4), plan.events[1].MessageInserted.BeforeMessageID)
+	assert.Equal(t, []string{"call_1", "call_2", "call_3", "call_4"}, collectToolResultIDs(plan.messages))
+}
+
+func TestAttack_PatchToolCallsAgenticInsertionAnchorsRewrittenResult(t *testing.T) {
+	ctx := context.Background()
+	assistant := makeAssistantMsgWithToolCalls[*schema.AgenticMessage]("", []testToolCall{
+		{ID: "call_1", Name: "tool_a", Arguments: "{}"},
+		{ID: "call_2", Name: "tool_b", Arguments: "{}"},
+	})
+	mixed := &schema.AgenticMessage{
+		Role: schema.AgenticRoleTypeUser,
+		ContentBlocks: []*schema.ContentBlock{
+			schema.NewContentBlock(&schema.FunctionToolResult{CallID: "call_orphan", Name: "tool_orphan"}),
+			schema.NewContentBlock(&schema.FunctionToolResult{CallID: "call_2", Name: "tool_b"}),
+		},
+	}
+	adk.EnsureMessageID(mixed)
+
+	plan, err := buildAgenticNormalizationPlan(
+		ctx,
+		Config{RemoveOrphanResults: true},
+		[]*schema.AgenticMessage{assistant, mixed},
+	)
+
+	require.NoError(t, err)
+	require.Len(t, plan.messages, 3)
+	assert.Equal(t, []string{"call_1", "call_2"}, collectToolResultIDs(plan.messages))
+	require.Len(t, plan.events, 2)
+	require.NotNil(t, plan.events[0].MessageInserted)
+	assert.Equal(t, adk.GetMessageID(mixed), plan.events[0].MessageInserted.BeforeMessageID)
+	require.NotNil(t, plan.events[1].MessageUpdated)
+	assert.Equal(t, adk.GetMessageID(mixed), plan.events[1].MessageUpdated.MessageID)
 }
 
 func TestPatchToolCallsAgenticToolSearchResult(t *testing.T) {

@@ -1872,7 +1872,136 @@ func replayDurableContextEvents[M MessageType](events []*SessionEvent[M]) (*reco
 		}
 	}
 	state.Messages = replay.visibleMessages()
+	reorderParallelToolResults(state.Messages)
 	return state, nil
+}
+
+// reorderParallelToolResults canonicalizes reconstructed model context without
+// changing the completion-ordered session log or live event delivery. It only
+// reorders results belonging to the preceding multi-tool assistant message;
+// unrecognized results keep their original positions.
+func reorderParallelToolResults[M MessageType](messages []M) {
+	for i := 0; i < len(messages); i++ {
+		callIDs, ok := messageToolCallIDs(messages[i])
+		if !ok || len(callIDs) < 2 {
+			continue
+		}
+
+		resultStart := i + 1
+		resultEnd := resultStart
+		resultIDs := make([]string, 0, len(callIDs))
+		for resultEnd < len(messages) {
+			callID, isResult := messageToolResultCallID(messages[resultEnd])
+			if !isResult {
+				break
+			}
+			resultIDs = append(resultIDs, callID)
+			resultEnd++
+		}
+		if len(resultIDs) < 2 {
+			continue
+		}
+
+		knownCallIDs := make(map[string]struct{}, len(callIDs))
+		validGroup := true
+		for _, callID := range callIDs {
+			if callID == "" {
+				validGroup = false
+				break
+			}
+			if _, exists := knownCallIDs[callID]; exists {
+				validGroup = false
+				break
+			}
+			knownCallIDs[callID] = struct{}{}
+		}
+		if !validGroup {
+			continue
+		}
+		resultsByCallID := make(map[string][]M, len(resultIDs))
+		knownResultCount := 0
+		for offset, callID := range resultIDs {
+			if _, exists := knownCallIDs[callID]; exists {
+				resultsByCallID[callID] = append(resultsByCallID[callID], messages[resultStart+offset])
+				knownResultCount++
+			}
+		}
+		if knownResultCount < 2 {
+			continue
+		}
+
+		ordered := make([]M, 0, knownResultCount)
+		for _, callID := range callIDs {
+			ordered = append(ordered, resultsByCallID[callID]...)
+		}
+		orderedIndex := 0
+		for offset, callID := range resultIDs {
+			if _, exists := knownCallIDs[callID]; !exists {
+				continue
+			}
+			messages[resultStart+offset] = ordered[orderedIndex]
+			orderedIndex++
+		}
+		i = resultEnd - 1
+	}
+}
+
+func messageToolCallIDs[M MessageType](message M) ([]string, bool) {
+	switch msg := any(message).(type) {
+	case *schema.Message:
+		if msg == nil || msg.Role != schema.Assistant || len(msg.ToolCalls) == 0 {
+			return nil, false
+		}
+		callIDs := make([]string, 0, len(msg.ToolCalls))
+		for _, toolCall := range msg.ToolCalls {
+			callIDs = append(callIDs, toolCall.ID)
+		}
+		return callIDs, true
+	case *schema.AgenticMessage:
+		if msg == nil || msg.Role != schema.AgenticRoleTypeAssistant {
+			return nil, false
+		}
+		var callIDs []string
+		for _, block := range msg.ContentBlocks {
+			if block != nil && block.Type == schema.ContentBlockTypeFunctionToolCall && block.FunctionToolCall != nil {
+				callIDs = append(callIDs, block.FunctionToolCall.CallID)
+			}
+		}
+		return callIDs, len(callIDs) > 0
+	default:
+		return nil, false
+	}
+}
+
+func messageToolResultCallID[M MessageType](message M) (string, bool) {
+	switch msg := any(message).(type) {
+	case *schema.Message:
+		if msg == nil || msg.Role != schema.Tool {
+			return "", false
+		}
+		return msg.ToolCallID, true
+	case *schema.AgenticMessage:
+		if msg == nil || msg.Role != schema.AgenticRoleTypeUser || len(msg.ContentBlocks) != 1 {
+			return "", false
+		}
+		block := msg.ContentBlocks[0]
+		if block == nil {
+			return "", false
+		}
+		switch block.Type {
+		case schema.ContentBlockTypeFunctionToolResult:
+			if block.FunctionToolResult != nil {
+				return block.FunctionToolResult.CallID, true
+			}
+		case schema.ContentBlockTypeToolSearchResult:
+			if block.ToolSearchFunctionToolResult != nil {
+				return block.ToolSearchFunctionToolResult.CallID, true
+			}
+		}
+		return "", false
+	default:
+		return "", false
+	}
 }
 
 func isCommittedIdleEvent[M MessageType](event *SessionEvent[M]) bool {
