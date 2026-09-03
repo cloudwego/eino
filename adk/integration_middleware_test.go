@@ -393,6 +393,79 @@ func TestPatchToolCallsIntegration_PersistsMessageInserted(t *testing.T) {
 		"patchtoolcalls middleware must persist a MessageInserted event for the synthetic tool result")
 }
 
+func TestPatchToolCallsIntegration_InsertsMissingParallelResultInCallOrder(t *testing.T) {
+	ctx := context.Background()
+	store := session.NewInMemoryStore[*schema.Message](nil)
+	sid := "patchtoolcalls-parallel-order"
+
+	user := schema.UserMessage("run parallel tools")
+	assistant := schema.AssistantMessage("", []schema.ToolCall{
+		{ID: "call-1", Function: schema.FunctionCall{Name: "first", Arguments: "{}"}},
+		{ID: "call-2", Function: schema.FunctionCall{Name: "second", Arguments: "{}"}},
+		{ID: "call-3", Function: schema.FunctionCall{Name: "third", Arguments: "{}"}},
+	})
+	result1 := schema.ToolMessage("first result", "call-1", schema.WithToolName("first"))
+	result3 := schema.ToolMessage("third result", "call-3", schema.WithToolName("third"))
+	for _, message := range []*schema.Message{user, assistant, result3, result1} {
+		adk.EnsureMessageID(message)
+		require.NoError(t, store.AppendEvents(ctx, sid, []*adk.SessionEvent[*schema.Message]{
+			{EventID: uuid.NewString(), Kind: adk.SessionEventMessage, Message: message},
+		}))
+	}
+
+	mw, err := patchtoolcalls.New(ctx, nil)
+	require.NoError(t, err)
+	chatModel := &stubChatModel{reply: "done"}
+	agent, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
+		Name:        "patchtoolcalls-parallel-order",
+		Description: "patch parallel tool result order",
+		Model:       chatModel,
+		Handlers:    []adk.ChatModelAgentMiddleware{mw},
+	})
+	require.NoError(t, err)
+	runner := adk.NewRunner(ctx, adk.RunnerConfig{
+		Agent:        agent,
+		SessionID:    sid,
+		SessionStore: store,
+	})
+
+	drainEvents := func(query string) {
+		for iter := runner.Query(ctx, query); ; {
+			event, ok := iter.Next()
+			if !ok {
+				return
+			}
+			require.NoError(t, event.Err)
+		}
+	}
+	toolResultIDs := func(messages []*schema.Message) []string {
+		var ids []string
+		for _, message := range messages {
+			if message.Role == schema.Tool {
+				ids = append(ids, message.ToolCallID)
+			}
+		}
+		return ids
+	}
+
+	drainEvents("first new turn")
+	require.Equal(t, []string{"call-1", "call-2", "call-3"}, toolResultIDs(chatModel.lastInput))
+
+	events, err := store.LoadEvents(ctx, sid, &adk.LoadSessionEventsRequest{})
+	require.NoError(t, err)
+	var inserted []*adk.MessageInsertedEvent[*schema.Message]
+	for _, event := range events.Events {
+		if event.MessageInserted != nil && event.MessageInserted.Message.ToolCallID == "call-2" {
+			inserted = append(inserted, event.MessageInserted)
+		}
+	}
+	require.Len(t, inserted, 1)
+	assert.Equal(t, adk.GetMessageID(result3), inserted[0].BeforeMessageID)
+
+	drainEvents("second new turn")
+	require.Equal(t, []string{"call-1", "call-2", "call-3"}, toolResultIDs(chatModel.lastInput))
+}
+
 // TestReductionIntegration_PersistsBothMessageUpdated seeds the session log
 // with two rounds of (assistant tool call → tool result). With reduction's
 // ClearRetentionSuffixLimit=1 (the framework default), the LAST round is
