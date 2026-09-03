@@ -36,6 +36,13 @@ func (ai *AsyncIterator[T]) Next() (T, bool) {
 	return ai.ch.Receive()
 }
 
+// NextWithContext is like Next but returns when ctx is done. When the context
+// is canceled, it returns the zero value and false; callers can inspect
+// ctx.Err() to distinguish cancellation from a closed iterator.
+func (ai *AsyncIterator[T]) NextWithContext(ctx context.Context) (T, bool) {
+	return ai.ch.ReceiveWithContext(ctx)
+}
+
 type AsyncGenerator[T any] struct {
 	ch *internal.UnboundedChan[T]
 }
