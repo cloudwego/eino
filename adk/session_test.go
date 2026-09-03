@@ -711,6 +711,71 @@ func TestRunnerSessionModeSkipsDuplicateToolModelContext(t *testing.T) {
 	require.Len(t, result.Events, 0)
 }
 
+func TestRunnerSessionModeReordersParallelToolResultsByToolCallOrder(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	store := newSessionHelperStore()
+	sessionID := "parallel-tool-result-order"
+	releaseFirst := make(chan struct{})
+	model := &parallelToolSessionModel{}
+	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "parallel-tool-session-agent",
+		Description: "parallel tool result order test agent",
+		Model:       model,
+		ToolsConfig: ToolsConfig{
+			ToolsNodeConfig: compose.ToolsNodeConfig{
+				Tools: []tool.BaseTool{
+					sessionOrderTool{name: "first", result: "first result", wait: releaseFirst},
+					sessionOrderTool{name: "second", result: "second result"},
+				},
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	runner := NewRunner(ctx, RunnerConfig{
+		Agent:        agent,
+		SessionID:    sessionID,
+		SessionStore: store,
+	})
+	iter := runner.Query(ctx, "first turn")
+	secondResultCount := 0
+	for {
+		event, ok := iter.Next()
+		if !ok {
+			break
+		}
+		require.NoError(t, event.Err)
+		if event.Output == nil || event.Output.MessageOutput == nil {
+			continue
+		}
+		msg, err := event.Output.MessageOutput.GetMessage()
+		require.NoError(t, err)
+		if msg.Role == schema.Tool && msg.ToolCallID == "call-2" {
+			if secondResultCount == 0 {
+				close(releaseFirst)
+			}
+			secondResultCount++
+		}
+	}
+	require.Equal(t, 1, secondResultCount, "second tool result must complete once before the first tool is released")
+
+	var persistedToolCallIDs []string
+	for _, event := range decodeStoredSessionEvents(t, store.events) {
+		if event.Message != nil && event.Message.Role == schema.Tool {
+			persistedToolCallIDs = append(persistedToolCallIDs, event.Message.ToolCallID)
+		}
+	}
+	require.Equal(t, []string{"call-2", "call-1"}, persistedToolCallIDs)
+	require.Len(t, model.inputs, 2)
+	require.Equal(t, []string{"call-1", "call-2"}, toolResultCallIDs(model.inputs[1]))
+
+	drainSessionEvents(t, runner.Query(ctx, "second turn"))
+
+	require.Len(t, model.inputs, 3)
+	require.Equal(t, []string{"call-1", "call-2"}, toolResultCallIDs(model.inputs[2]))
+}
+
 func TestAttack_SessionEventIDGeneratorCoversRunnerEvents(t *testing.T) {
 	ctx := context.Background()
 	store := newSessionHelperStore()
@@ -2342,6 +2407,161 @@ func TestReconstructFromEventLog_MultiTurn(t *testing.T) {
 	assert.Equal(t, "A1", result2.state.Messages[1].Content)
 	assert.Equal(t, "Q2", result2.state.Messages[2].Content)
 	assert.Equal(t, "A2", result2.state.Messages[3].Content)
+}
+
+func TestAttack_ReorderParallelToolResults(t *testing.T) {
+	t.Run("message reorders each result group", func(t *testing.T) {
+		messages := []*schema.Message{
+			testToolCallMessage("call-1", "call-2"),
+			schema.ToolMessage("second", "call-2"),
+			schema.ToolMessage("first", "call-1"),
+			testToolCallMessage("call-3", "call-4"),
+			schema.ToolMessage("fourth", "call-4"),
+			schema.ToolMessage("third", "call-3"),
+		}
+
+		reorderParallelToolResults(messages)
+
+		require.Equal(t, []string{"call-1", "call-2"}, toolResultCallIDs(messages[1:3]))
+		require.Equal(t, []string{"call-3", "call-4"}, toolResultCallIDs(messages[4:]))
+	})
+
+	t.Run("agentic message reorders function and tool search results", func(t *testing.T) {
+		messages := []*schema.AgenticMessage{
+			testAgenticToolCallMessage("call-1", "call-2"),
+			{
+				Role: schema.AgenticRoleTypeUser,
+				ContentBlocks: []*schema.ContentBlock{
+					schema.NewContentBlock(&schema.ToolSearchFunctionToolResult{CallID: "call-2", Name: "second"}),
+				},
+			},
+			agenticToolResultMessage("call-1", "first", "first"),
+		}
+
+		reorderParallelToolResults(messages)
+
+		firstID, firstIsResult := messageToolResultCallID(messages[1])
+		secondID, secondIsResult := messageToolResultCallID(messages[2])
+		require.True(t, firstIsResult)
+		require.True(t, secondIsResult)
+		assert.Equal(t, "call-1", firstID)
+		assert.Equal(t, "call-2", secondID)
+	})
+
+	t.Run("unknown result keeps physical order", func(t *testing.T) {
+		messages := []*schema.Message{
+			testToolCallMessage("call-1", "call-2"),
+			schema.ToolMessage("second", "call-2"),
+			schema.ToolMessage("unknown", "call-other"),
+			schema.ToolMessage("first", "call-1"),
+		}
+
+		reorderParallelToolResults(messages)
+
+		require.Equal(t, []string{"call-2", "call-other", "call-1"}, toolResultCallIDs(messages[1:]))
+	})
+
+	t.Run("ordinary message terminates result group", func(t *testing.T) {
+		messages := []*schema.Message{
+			testToolCallMessage("call-1", "call-2"),
+			schema.ToolMessage("second", "call-2"),
+			schema.UserMessage("next input"),
+			schema.ToolMessage("first", "call-1"),
+		}
+
+		reorderParallelToolResults(messages)
+
+		assert.Equal(t, "call-2", messages[1].ToolCallID)
+		assert.Equal(t, schema.User, messages[2].Role)
+		assert.Equal(t, "call-1", messages[3].ToolCallID)
+	})
+
+	t.Run("partial result group follows relative call order", func(t *testing.T) {
+		messages := []*schema.Message{
+			testToolCallMessage("call-1", "call-2", "call-3"),
+			schema.ToolMessage("third", "call-3"),
+			schema.ToolMessage("first", "call-1"),
+		}
+
+		reorderParallelToolResults(messages)
+
+		require.Equal(t, []string{"call-1", "call-3"}, toolResultCallIDs(messages[1:]))
+	})
+
+	t.Run("duplicate call ID keeps physical order", func(t *testing.T) {
+		messages := []*schema.Message{
+			testToolCallMessage("call-1", "call-1"),
+			schema.ToolMessage("second physical result", "call-1"),
+			schema.ToolMessage("first physical result", "call-1"),
+		}
+
+		reorderParallelToolResults(messages)
+
+		assert.Equal(t, "second physical result", messages[1].Content)
+		assert.Equal(t, "first physical result", messages[2].Content)
+	})
+
+	t.Run("empty call ID keeps physical order", func(t *testing.T) {
+		messages := []*schema.Message{
+			testToolCallMessage("", "call-2"),
+			schema.ToolMessage("second", "call-2"),
+			schema.ToolMessage("empty", ""),
+		}
+
+		reorderParallelToolResults(messages)
+
+		assert.Equal(t, "second", messages[1].Content)
+		assert.Equal(t, "empty", messages[2].Content)
+	})
+
+	t.Run("mixed agentic user message terminates result group", func(t *testing.T) {
+		mixed := agenticToolResultMessage("call-2", "second", "second")
+		mixed.ContentBlocks = append(mixed.ContentBlocks, schema.NewContentBlock(&schema.UserInputText{Text: "user text"}))
+		messages := []*schema.AgenticMessage{
+			testAgenticToolCallMessage("call-1", "call-2"),
+			mixed,
+			agenticToolResultMessage("call-1", "first", "first"),
+		}
+
+		reorderParallelToolResults(messages)
+
+		assert.Same(t, mixed, messages[1])
+	})
+
+	t.Run("malformed agentic result terminates result group", func(t *testing.T) {
+		malformed := &schema.AgenticMessage{
+			Role: schema.AgenticRoleTypeUser,
+			ContentBlocks: []*schema.ContentBlock{
+				{Type: schema.ContentBlockTypeFunctionToolResult},
+			},
+		}
+		messages := []*schema.AgenticMessage{
+			testAgenticToolCallMessage("call-1", "call-2"),
+			malformed,
+			agenticToolResultMessage("call-1", "first", "first"),
+		}
+
+		reorderParallelToolResults(messages)
+
+		assert.Same(t, malformed, messages[1])
+	})
+
+	t.Run("replacement payload is normalized without mutation", func(t *testing.T) {
+		replacement := []*schema.Message{
+			testToolCallMessage("call-1", "call-2"),
+			schema.ToolMessage("second", "call-2"),
+			schema.ToolMessage("first", "call-1"),
+		}
+		events := []*SessionEvent[*schema.Message]{
+			{MessagesReplaced: &replacement},
+		}
+
+		state, err := replayDurableContextEvents(events)
+
+		require.NoError(t, err)
+		require.Equal(t, []string{"call-1", "call-2"}, toolResultCallIDs(state.Messages[1:]))
+		require.Equal(t, []string{"call-2", "call-1"}, toolResultCallIDs(replacement[1:]))
+	})
 }
 
 func TestReconstructFromEventLog_CorruptEventReturnsError(t *testing.T) {
@@ -5577,6 +5797,80 @@ func (m *sessionToolCallingModel) Stream(ctx context.Context, input []*schema.Me
 
 func (m *sessionToolCallingModel) WithTools(_ []*schema.ToolInfo) (model.ToolCallingChatModel, error) {
 	return m, nil
+}
+
+type parallelToolSessionModel struct {
+	inputs [][]*schema.Message
+}
+
+func (m *parallelToolSessionModel) Generate(_ context.Context, input []*schema.Message, _ ...model.Option) (*schema.Message, error) {
+	m.inputs = append(m.inputs, append([]*schema.Message{}, input...))
+	if len(m.inputs) == 1 {
+		return schema.AssistantMessage("", []schema.ToolCall{
+			{ID: "call-1", Function: schema.FunctionCall{Name: "first", Arguments: "{}"}},
+			{ID: "call-2", Function: schema.FunctionCall{Name: "second", Arguments: "{}"}},
+		}), nil
+	}
+	return schema.AssistantMessage("done", nil), nil
+}
+
+func (m *parallelToolSessionModel) Stream(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+	msg, err := m.Generate(ctx, input, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return schema.StreamReaderFromArray([]*schema.Message{msg}), nil
+}
+
+func (m *parallelToolSessionModel) WithTools(_ []*schema.ToolInfo) (model.ToolCallingChatModel, error) {
+	return m, nil
+}
+
+type sessionOrderTool struct {
+	name   string
+	result string
+	wait   <-chan struct{}
+}
+
+func (t sessionOrderTool) Info(context.Context) (*schema.ToolInfo, error) {
+	return &schema.ToolInfo{Name: t.name, Desc: t.name}, nil
+}
+
+func (t sessionOrderTool) InvokableRun(ctx context.Context, _ string, _ ...tool.Option) (string, error) {
+	if t.wait != nil {
+		select {
+		case <-t.wait:
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
+	}
+	return t.result, nil
+}
+
+func testToolCallMessage(callIDs ...string) *schema.Message {
+	toolCalls := make([]schema.ToolCall, 0, len(callIDs))
+	for _, callID := range callIDs {
+		toolCalls = append(toolCalls, schema.ToolCall{ID: callID})
+	}
+	return schema.AssistantMessage("", toolCalls)
+}
+
+func testAgenticToolCallMessage(callIDs ...string) *schema.AgenticMessage {
+	blocks := make([]*schema.ContentBlock, 0, len(callIDs))
+	for _, callID := range callIDs {
+		blocks = append(blocks, schema.NewContentBlock(&schema.FunctionToolCall{CallID: callID, Name: callID}))
+	}
+	return &schema.AgenticMessage{Role: schema.AgenticRoleTypeAssistant, ContentBlocks: blocks}
+}
+
+func toolResultCallIDs(messages []*schema.Message) []string {
+	var ids []string
+	for _, message := range messages {
+		if message != nil && message.Role == schema.Tool {
+			ids = append(ids, message.ToolCallID)
+		}
+	}
+	return ids
 }
 
 type modelContextExtraTool struct{}
