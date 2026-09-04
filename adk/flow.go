@@ -508,6 +508,10 @@ func (a *flowAgent) run(
 		if !ok {
 			break
 		}
+		if event == nil {
+			generator.Send(&AgentEvent{Err: fmt.Errorf("agent '%s' returned nil event", a.Name(ctx))})
+			return
+		}
 
 		// RunPath ownership: the eino framework sets RunPath exactly once.
 		// If event.RunPath is already set (e.g., by agentTool), we don't modify it.
@@ -752,6 +756,10 @@ func (a *typedFlowAgent[M]) run(
 		event, ok := aIter.Next()
 		if !ok {
 			break
+		}
+		if event == nil {
+			generator.Send(&TypedAgentEvent[M]{Err: fmt.Errorf("agent '%s' returned nil event", a.Name(ctx))})
+			return
 		}
 
 		if len(event.RunPath) == 0 {
