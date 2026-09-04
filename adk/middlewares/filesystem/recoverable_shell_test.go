@@ -24,10 +24,11 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/cloudwego/eino/adk/backgroundtask"
-	backgroundlocal "github.com/cloudwego/eino/adk/backgroundtask/local"
-	backgroundshell "github.com/cloudwego/eino/adk/backgroundtask/shell"
-	backgroundtool "github.com/cloudwego/eino/adk/backgroundtask/tool"
+	"github.com/cloudwego/eino/adk/task"
+	"github.com/cloudwego/eino/adk/task/background"
+	backgroundlocal "github.com/cloudwego/eino/adk/task/local"
+	backgroundshell "github.com/cloudwego/eino/adk/task/shell"
+	backgroundtool "github.com/cloudwego/eino/adk/task/tool"
 	componenttool "github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/schema"
 )
@@ -73,25 +74,22 @@ type recoverableShellRun struct{}
 
 func (recoverableShellRun) Wait(context.Context) (*backgroundtool.Outcome, error) {
 	return &backgroundtool.Outcome{
-		Status: backgroundtask.StatusCompleted, Data: []byte("command output"),
+		Status: task.OutcomeCompleted, Data: []byte("command output"),
 	}, nil
 }
 func (recoverableShellRun) Stop(context.Context) error { return nil }
 
 func TestRecoverableShellUsesManagedToolLifecycle(t *testing.T) {
 	shell := &recoverableShellStub{}
-	executors := backgroundtask.NewExecutorRegistry()
-	manager := mustNewBackgroundManager(t, context.Background(), &backgroundtask.Config{
-		Executors: executors,
-		IDGen: func(context.Context, *backgroundtask.AllocateTaskIDRequest) (string, error) {
+	manager := mustNewBackgroundManager(t, context.Background(), &background.Config{
+		IDGen: func(context.Context, *background.AllocateTaskIDRequest) (string, error) {
 			return "shell-task", nil
 		},
 	})
 	config := &MiddlewareConfig{
 		Background: &BackgroundConfig{
 			Recoverable: &RecoverableBackgroundConfig{
-				Shell: shell, Manager: manager, Executors: executors,
-			},
+				Shell: shell, Manager: manager},
 		},
 		notificationSessionID: func(context.Context) (string, error) {
 			return "session", nil
@@ -109,7 +107,9 @@ func TestRecoverableShellUsesManagedToolLifecycle(t *testing.T) {
 	require.Contains(t, timeout.Description, "seconds")
 	require.Contains(t, timeout.Description, "stops unless the host allows automatic backgrounding")
 	result, err := tools[0].(componenttool.EnhancedInvokableTool).InvokableRun(
-		context.Background(), &schema.ToolArgument{Text: `{"command":"echo hello"}`},
+		context.Background(), &schema.ToolArgument{
+			Text: `{"command":"echo hello","timeout":0}`,
+		},
 	)
 	require.NoError(t, err)
 	require.NotEmpty(t, result.Parts)
@@ -117,11 +117,23 @@ func TestRecoverableShellUsesManagedToolLifecycle(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(result.Parts[0].Text), &event))
 	require.Equal(t, backgroundtool.ManagedToolResponseEventForegroundResult, event.Type)
 	require.Empty(t, event.TaskID)
-	require.Equal(t, backgroundtask.StatusCompleted, event.Status)
+	require.Equal(t, background.StatusCompleted, event.Status)
 	require.Equal(t, "command output", event.Output)
 	require.NotNil(t, shell.startRequest)
 	require.Equal(t, "shell-task", shell.startRequest.TaskID)
 	require.Equal(t, int64(0), shell.startRequest.Attempt)
+	require.Equal(t, "echo hello", shell.startRequest.Command)
+
+	_, err = tools[0].(componenttool.EnhancedInvokableTool).InvokableRun(
+		context.Background(), &schema.ToolArgument{
+			Text: `{"command":"echo invalid","timeout":"not-a-number"}`,
+		},
+	)
+	require.ErrorContains(
+		t,
+		err,
+		"filesystem: invalid execute arguments",
+	)
 	require.Equal(t, "echo hello", shell.startRequest.Command)
 }
 
@@ -130,9 +142,8 @@ func TestRecoverableShellConfigurationIsExclusive(t *testing.T) {
 		Shell: &mockShellBackend{},
 		Background: &BackgroundConfig{
 			Recoverable: &RecoverableBackgroundConfig{
-				Shell:     &recoverableShellStub{},
-				Manager:   mustNewBackgroundManager(t, context.Background(), nil),
-				Executors: backgroundtask.NewExecutorRegistry(),
+				Shell:   &recoverableShellStub{},
+				Manager: mustNewBackgroundManager(t, context.Background(), nil),
 			},
 		},
 	}
@@ -141,10 +152,10 @@ func TestRecoverableShellConfigurationIsExclusive(t *testing.T) {
 	config = &MiddlewareConfig{Background: &BackgroundConfig{
 		Recoverable: &RecoverableBackgroundConfig{Shell: &recoverableShellStub{}},
 	}}
-	require.ErrorContains(t, config.Validate(), "Shell, Manager, and Executors are required")
+	require.ErrorContains(t, config.Validate(), "Shell and Manager are required")
 
 	managerOne := mustNewBackgroundManager(t, context.Background(), nil)
-	runner, err := backgroundlocal.New(&backgroundlocal.Config{Manager: managerOne, Executors: backgroundtask.NewExecutorRegistry()})
+	runner, err := backgroundlocal.New(&backgroundlocal.Config{Manager: managerOne})
 	require.NoError(t, err)
 	config = &MiddlewareConfig{
 		Shell: &mockShellBackend{},
@@ -152,7 +163,6 @@ func TestRecoverableShellConfigurationIsExclusive(t *testing.T) {
 			Local: &LocalBackgroundConfig{Runner: runner},
 			Recoverable: &RecoverableBackgroundConfig{
 				Shell: &recoverableShellStub{}, Manager: managerOne,
-				Executors: backgroundtask.NewExecutorRegistry(),
 			},
 		},
 	}
@@ -164,7 +174,6 @@ func TestRecoverableShellConstructor(t *testing.T) {
 	middleware, err := New(context.Background(), &MiddlewareConfig{
 		Background: &BackgroundConfig{Recoverable: &RecoverableBackgroundConfig{
 			Shell: &recoverableShellStub{}, Manager: manager,
-			Executors: backgroundtask.NewExecutorRegistry(),
 		}},
 	})
 	require.NoError(t, err)

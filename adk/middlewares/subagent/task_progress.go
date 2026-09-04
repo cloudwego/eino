@@ -21,42 +21,42 @@ import (
 	"errors"
 
 	"github.com/cloudwego/eino/adk"
-	"github.com/cloudwego/eino/adk/backgroundtask"
-	durablesubagent "github.com/cloudwego/eino/adk/backgroundtask/subagent"
+	"github.com/cloudwego/eino/adk/task/background"
+	durablesubagent "github.com/cloudwego/eino/adk/task/subagent"
 )
 
-// DurableTaskProgressReader projects a durable sub-agent's child session for
+// DurableProgressReader projects a durable sub-agent's child session for
 // task_output without exposing its session store.
-type DurableTaskProgressReader[M adk.MessageType] struct {
-	executor *durablesubagent.Executor[M]
-	format   TranscriptFormat[M]
+type DurableProgressReader[M adk.MessageType] struct {
+	controller *durablesubagent.Controller[M]
+	format     TranscriptFormat[M]
 }
 
-// NewDurableTaskProgressReader constructs a durable sub-agent progress reader
-// from the executor that owns the matching child-session authority.
-func NewDurableTaskProgressReader[M adk.MessageType](
-	executor *durablesubagent.Executor[M],
+// NewDurableProgressReader constructs a durable sub-agent progress reader
+// from the Controller that owns the matching child-session authority.
+func NewDurableProgressReader[M adk.MessageType](
+	controller *durablesubagent.Controller[M],
 	format TranscriptFormat[M],
-) (*DurableTaskProgressReader[M], error) {
-	if executor == nil {
-		return nil, errors.New("subagent: durable executor is required to read task progress")
+) (*DurableProgressReader[M], error) {
+	if controller == nil {
+		return nil, errors.New("subagent: durable Controller is required to read task progress")
 	}
 	if format == nil {
 		format = defaultTranscriptFormat[M]
 	}
-	return &DurableTaskProgressReader[M]{executor: executor, format: format}, nil
+	return &DurableProgressReader[M]{controller: controller, format: format}, nil
 }
 
 // ReadProgress returns a bounded transcript for a matching durable sub-agent
 // task and an empty string for tasks owned by other executors.
-func (r *DurableTaskProgressReader[M]) ReadProgress(
+func (r *DurableProgressReader[M]) ReadProgress(
 	ctx context.Context,
-	task *backgroundtask.Task,
+	task *background.TaskSnapshot,
 ) (string, error) {
-	if r == nil || r.executor == nil {
-		return "", errors.New("subagent: durable executor is required to read task progress")
+	if r == nil || r.controller == nil {
+		return "", errors.New("subagent: durable Controller is required to read task progress")
 	}
-	return r.executor.ReadProgress(
+	return r.controller.ReadProgress(
 		ctx,
 		task,
 		r.format,
