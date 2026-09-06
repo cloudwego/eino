@@ -871,6 +871,7 @@ func (g *graph) compile(ctx context.Context, opt *graphCompileOptions) (*composa
 		inputPairs[END] = r.outputStreamConvertPair
 		outputPairs[START] = r.inputStreamConvertPair
 		r.checkPointer = newCheckPointer(inputPairs, outputPairs, opt.checkPointStore, opt.serializer)
+		r.checkPointer.chunkSize = opt.checkpointChunkSize
 
 		r.interruptBeforeNodes = opt.interruptBeforeNodes
 		r.interruptAfterNodes = opt.interruptAfterNodes

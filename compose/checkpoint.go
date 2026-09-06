@@ -17,7 +17,9 @@
 package compose
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
@@ -51,6 +53,10 @@ func RegisterSerializableType[T any](name string) (err error) {
 }
 
 type CheckPointStore = core.CheckPointStore
+
+// CheckPointDeleter is an optional interface that CheckPointStore
+// implementations can implement to support explicit checkpoint deletion.
+type CheckPointDeleter = core.CheckPointDeleter
 
 type Serializer interface {
 	Marshal(v any) ([]byte, error)
@@ -102,6 +108,59 @@ type StateModifier func(ctx context.Context, path NodePath, state any) error
 func WithStateModifier(sm StateModifier) Option {
 	return Option{
 		stateModifier: sm,
+	}
+}
+
+// WithComponentCheckpoint enables saving a checkpoint at each node boundary
+// without interrupting the run.
+//
+// By default, a checkpoint is only persisted when an interrupt occurs. Enabling
+// this option additionally persists progress after every batch of nodes
+// completes and the next tasks have been determined — while the run keeps
+// going (no interrupt is raised, no resume is needed to continue).
+//
+// This is useful for crash resilience: if the process dies mid-run, the last
+// node-boundary checkpoint can be used to resume from that point instead of
+// restarting from the beginning.
+//
+// Notes:
+//   - Requires a checkpoint store (WithCheckPointStore) and a checkpoint ID
+//     (WithCheckPointID / WithWriteToCheckPointID) to take effect.
+//   - Currently only supported in non-streaming (Invoke/Transform) runs,
+//     because persisting streaming channel values would consume the in-flight
+//     streams that the remaining graph execution still needs. Streaming runs
+//     silently skip node-boundary checkpoints (interrupts still checkpoint).
+//   - Interrupts still take precedence: when a node boundary coincides with an
+//     interrupt, the interrupt path handles the checkpoint.
+func WithComponentCheckpoint() GraphCompileOption {
+	return func(o *graphCompileOptions) {
+		o.componentCheckpoint = true
+	}
+}
+
+// WithCheckpointChunkSize sets the maximum size (in bytes) of a single value
+// written to the checkpoint store.
+//
+// Some KV stores impose an upper bound on a value's size (e.g. etcd's default
+// ~1.5MB limit). When a serialized checkpoint exceeds this size and chunking is
+// enabled, the checkpoint is split into multiple keys so that each stored value
+// stays within the limit.
+//
+// Layout when chunking kicks in:
+//
+//	<id>      → a small header describing the chunk count and total size
+//	<id>#0    → first chunk
+//	<id>#1    → second chunk
+//	...
+//
+// Reading is transparent and backward compatible: checkpoints written as a
+// single value (or by older versions) are still read correctly — the header is
+// detected by a magic prefix.
+//
+// A size <= 0 (the default) disables chunking.
+func WithCheckpointChunkSize(size int) GraphCompileOption {
+	return func(o *graphCompileOptions) {
+		o.checkpointChunkSize = size
 	}
 }
 
@@ -211,12 +270,40 @@ type checkPointer struct {
 	sc         *streamConverter
 	store      CheckPointStore
 	serializer Serializer
+
+	// chunkSize is the max size of a single value written to the store.
+	// <= 0 disables chunking (a checkpoint is stored as one value).
+	chunkSize int
+}
+
+// chunkedMagic prefixes the chunk-header value stored under the checkpoint id.
+// Checkpoint payloads produced by the serializer never start with this, so a
+// plain (non-chunked) checkpoint is still readable.
+const chunkedMagic = "_eino_chunked_cp_v1_"
+
+// chunkHeader describes a chunked checkpoint stored across multiple keys.
+type chunkHeader struct {
+	Chunks int `json:"chunks"`
+	Size   int `json:"size"`
+}
+
+func chunkKey(id string, idx int) string {
+	return fmt.Sprintf("%s#%d", id, idx)
 }
 
 func (c *checkPointer) get(ctx context.Context, id string) (*checkpoint, bool, error) {
 	data, existed, err := c.store.Get(ctx, id)
 	if err != nil || existed == false {
 		return nil, existed, err
+	}
+
+	// A chunked checkpoint stores a header under the id and the payload across
+	// <id>#N keys. Reassemble before unmarshalling.
+	if bytes.HasPrefix(data, []byte(chunkedMagic)) {
+		data, err = c.getChunked(ctx, id, data[len(chunkedMagic):])
+		if err != nil {
+			return nil, false, err
+		}
 	}
 
 	cp := &checkpoint{}
@@ -228,6 +315,40 @@ func (c *checkPointer) get(ctx context.Context, id string) (*checkpoint, bool, e
 	return cp, true, nil
 }
 
+// getChunked reads and concatenates all chunks described by the header bytes.
+func (c *checkPointer) getChunked(ctx context.Context, id string, headerBytes []byte) ([]byte, error) {
+	var h chunkHeader
+	if err := json.Unmarshal(headerBytes, &h); err != nil {
+		return nil, fmt.Errorf("failed to decode chunked checkpoint header: %w, checkPointID: %s", err, id)
+	}
+	if h.Chunks <= 0 {
+		return nil, fmt.Errorf("invalid chunked checkpoint header: chunks=%d, checkPointID: %s", h.Chunks, id)
+	}
+	if h.Size < 0 {
+		return nil, fmt.Errorf("invalid chunked checkpoint header: size=%d, checkPointID: %s", h.Size, id)
+	}
+
+	data := make([]byte, 0, h.Size)
+	for i := 0; i < h.Chunks; i++ {
+		chunk, existed, err := c.store.Get(ctx, chunkKey(id, i))
+		if err != nil {
+			return nil, fmt.Errorf("failed to get checkpoint chunk %d/%d: %w, checkPointID: %s",
+				i, h.Chunks, err, id)
+		}
+		if !existed {
+			return nil, fmt.Errorf("checkpoint chunk %d/%d missing: %s", i, h.Chunks, chunkKey(id, i))
+		}
+		data = append(data, chunk...)
+	}
+
+	if len(data) != h.Size {
+		return nil, fmt.Errorf("checkpoint chunk size mismatch: got %d, want %d, checkPointID: %s",
+			len(data), h.Size, id)
+	}
+
+	return data, nil
+}
+
 func (c *checkPointer) set(ctx context.Context, id string, cp *checkpoint) error {
 	normalizeCheckpointTypedNilInputs(cp)
 
@@ -236,7 +357,68 @@ func (c *checkPointer) set(ctx context.Context, id string, cp *checkpoint) error
 		return err
 	}
 
-	return c.store.Set(ctx, id, data)
+	if c.chunkSize <= 0 || len(data) <= c.chunkSize {
+		return c.store.Set(ctx, id, data)
+	}
+
+	return c.setChunked(ctx, id, data)
+}
+
+// setChunked splits data into <= chunkSize pieces and stores them under
+// <id>#N keys, with a header under <id>.
+func (c *checkPointer) setChunked(ctx context.Context, id string, data []byte) error {
+	chunks := (len(data) + c.chunkSize - 1) / c.chunkSize
+
+	for i := 0; i < chunks; i++ {
+		start := i * c.chunkSize
+		end := start + c.chunkSize
+		if end > len(data) {
+			end = len(data)
+		}
+		if err := c.store.Set(ctx, chunkKey(id, i), data[start:end]); err != nil {
+			return fmt.Errorf("failed to set checkpoint chunk %d/%d: %w, checkPointID: %s",
+				i, chunks, err, id)
+		}
+	}
+
+	h := chunkHeader{Chunks: chunks, Size: len(data)}
+	hb, err := json.Marshal(&h)
+	if err != nil {
+		return fmt.Errorf("failed to encode chunked checkpoint header: %w, checkPointID: %s", err, id)
+	}
+
+	// Overwrites any previous single-value or header payload under this id.
+	return c.store.Set(ctx, id, append([]byte(chunkedMagic), hb...))
+}
+
+// delete removes a checkpoint, including its chunks when chunking was used.
+// Best-effort: if the store does not implement CheckPointDeleter, only the
+// main key is left (chunks are cleaned when the store is a deleter).
+func (c *checkPointer) delete(ctx context.Context, id string) error {
+	d, ok := c.store.(CheckPointDeleter)
+	if !ok {
+		return nil
+	}
+
+	chunks := 0
+	if data, existed, err := c.store.Get(ctx, id); err == nil && existed &&
+		bytes.HasPrefix(data, []byte(chunkedMagic)) {
+		var h chunkHeader
+		if err := json.Unmarshal(data[len(chunkedMagic):], &h); err == nil {
+			chunks = h.Chunks
+		}
+	}
+
+	if err := d.Delete(ctx, id); err != nil {
+		return err
+	}
+	for i := 0; i < chunks; i++ {
+		if err := d.Delete(ctx, chunkKey(id, i)); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 func normalizeCheckpointTypedNilInputs(cp *checkpoint) {

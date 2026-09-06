@@ -377,7 +377,76 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 				subGraphCheckpointPublisher,
 			)
 		}
+
+		// The current batch of nodes completed and the next tasks are determined.
+		// Persist progress without interrupting so a crash can be recovered from
+		// the last node boundary.
+		if err = r.saveComponentCheckpoint(ctx, nextTasks, cm.channels, isStream, isSubGraph, writeToCheckPointID); err != nil {
+			return nil, newGraphRunError(err)
+		}
 	}
+}
+
+// saveComponentCheckpoint persists the current progress at a node boundary
+// without raising an interrupt, so the run continues normally.
+//
+// It is a no-op unless enabled via WithComponentCheckpoint, a checkpoint store
+// and a write-to checkpoint id are configured, and the graph is not running as
+// a subgraph (whose checkpoints are published to the parent instead).
+//
+// Streaming runs are skipped: converting in-flight channel streams into
+// persisted values would consume the very streams the remaining execution
+// still needs.
+func (r *runner) saveComponentCheckpoint(
+	ctx context.Context,
+	nextTasks []*task,
+	channels map[string]channel,
+	isStream bool,
+	isSubGraph bool,
+	checkPointID *string,
+) error {
+	if !r.options.componentCheckpoint {
+		return nil
+	}
+	if isSubGraph || checkPointID == nil || r.checkPointer == nil {
+		return nil
+	}
+	if isStream {
+		// Persisting would consume in-flight streams needed by downstream nodes.
+		return nil
+	}
+
+	cp := &checkpoint{
+		Channels:       channels,
+		Inputs:         make(map[string]any),
+		SkipPreHandler: map[string]bool{},
+	}
+	if r.runCtx != nil {
+		// current graph has enabled state
+		if state, ok := ctx.Value(stateKey{}).(*internalState); ok {
+			state.mu.Lock()
+			copiedState, err := deepCopyState(state.state)
+			state.mu.Unlock()
+			if err != nil {
+				return fmt.Errorf("failed to copy state: %w", err)
+			}
+			cp.State = copiedState
+		}
+	}
+
+	for _, t := range nextTasks {
+		cp.Inputs[t.nodeKey] = t.input
+	}
+
+	if err := r.checkPointer.convertCheckPoint(cp, isStream); err != nil {
+		return fmt.Errorf("failed to convert checkpoint: %w", err)
+	}
+
+	if err := r.checkPointer.set(ctx, *checkPointID, cp); err != nil {
+		return fmt.Errorf("failed to set checkpoint: %w, checkPointID: %s", err, *checkPointID)
+	}
+
+	return nil
 }
 
 func (r *runner) resolveMaxSteps(maxSteps int, opts []Option) (int, error) {
