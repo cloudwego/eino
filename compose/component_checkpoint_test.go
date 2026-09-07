@@ -203,6 +203,31 @@ func buildComponentCheckpointGraph() *Graph[string, string] {
 	return g
 }
 
+func TestComponentCheckpointSkipsSaveWhenNoPendingNodes(t *testing.T) {
+	store := newChunkTestStore()
+	ctx := context.Background()
+
+	r := &runner{
+		options:      graphCompileOptions{componentCheckpoint: true},
+		checkPointer: newCheckPointer(nil, nil, store, nil),
+	}
+
+	// no pending nodes: nothing to run at this boundary, must not persist
+	cpID := "run1"
+	err := r.saveComponentCheckpoint(ctx, nil, map[string]channel{}, false, false, &cpID)
+	require.NoError(t, err)
+	_, existed := store.m["run1"]
+	assert.False(t, existed, "no snapshot should be persisted without pending nodes")
+
+	// sanity check: with a pending node the snapshot is persisted
+	err = r.saveComponentCheckpoint(ctx, []*task{{nodeKey: "b", input: "in"}}, map[string]channel{}, false, false, &cpID)
+	require.NoError(t, err)
+	cp, existed, err := newCheckPointer(nil, nil, store, nil).get(ctx, "run1")
+	require.NoError(t, err)
+	require.True(t, existed)
+	assert.Equal(t, map[string]any{"b": "in"}, cp.Inputs)
+}
+
 func TestComponentCheckpointRunCompletes(t *testing.T) {
 	store := newChunkTestStore()
 	ctx := context.Background()

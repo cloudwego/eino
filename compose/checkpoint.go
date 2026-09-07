@@ -119,6 +119,10 @@ func WithStateModifier(sm StateModifier) Option {
 // completes and the next tasks have been determined — while the run keeps
 // going (no interrupt is raised, no resume is needed to continue).
 //
+// A node-boundary snapshot is only persisted while the workflow still has
+// nodes pending to run; boundaries with no remaining tasks do not produce a
+// snapshot.
+//
 // This is useful for crash resilience: if the process dies mid-run, the last
 // node-boundary checkpoint can be used to resume from that point instead of
 // restarting from the beginning.
