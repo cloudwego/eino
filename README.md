@@ -22,7 +22,7 @@ Eino provides:
 - **Composition**: connect components into graphs and workflows that can run standalone or be exposed as tools for agents.
 - **[Examples](https://github.com/cloudwego/eino-examples)**: working code for common patterns and real-world use cases.
 
-![](.github/static/img/eino/eino_concept.jpeg)
+![](.github/static/img/eino/eino_project_structure_and_modules.png)
 
 # Quick Start
 
@@ -157,7 +157,7 @@ Any agent or tool can pause execution for human input and resume from checkpoint
 
 # Framework Structure
 
-![](.github/static/img/eino/eino_framework.jpeg)
+![](.github/static/img/eino/eino_architecture_overview.png)
 
 The Eino framework consists of:
 
