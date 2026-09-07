@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"sort"
 	"strings"
 
 	"github.com/cloudwego/eino/internal"
@@ -163,6 +164,12 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 		if err = r.validateCheckpointIntegrity(cp); err != nil {
 			return nil, newGraphRunError(fmt.Errorf("invalid checkpoint: %w", err))
 		}
+		if err = hydrateCheckpointToolsNodeState(cp); err != nil {
+			return nil, newGraphRunError(fmt.Errorf("invalid checkpoint tools state: %w", err))
+		}
+		if err = consumeCheckpointLayoutMetadata(cp); err != nil {
+			return nil, newGraphRunError(fmt.Errorf("invalid checkpoint metadata: %w", err))
+		}
 		ctx, err = r.restoreCheckPointState(ctx, *path, getStateModifier(ctx), cp, isStream, cm)
 		if err != nil {
 			return nil, err
@@ -186,6 +193,12 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 
 			if err = r.validateCheckpointIntegrity(cp); err != nil {
 				return nil, newGraphRunError(fmt.Errorf("invalid checkpoint: %w", err))
+			}
+			if err = hydrateCheckpointToolsNodeState(cp); err != nil {
+				return nil, newGraphRunError(fmt.Errorf("invalid checkpoint tools state: %w", err))
+			}
+			if err = consumeCheckpointLayoutMetadata(cp); err != nil {
+				return nil, newGraphRunError(fmt.Errorf("invalid checkpoint metadata: %w", err))
 			}
 			ctx = setStateModifier(ctx, stateModifier)
 			ctx = setCheckPointToCtx(ctx, cp)
@@ -603,10 +616,14 @@ func (r *runner) handleInterrupt(
 	}
 
 	cp.InterruptID2Addr, cp.InterruptID2State = core.SignalToPersistenceMaps(is)
+	if err = initializeCheckpointLayoutV1(cp); err != nil {
+		return fmt.Errorf("failed to initialize checkpoint layout: %w", err)
+	}
 
 	for _, t := range nextTasks {
 		cp.Inputs[t.nodeKey] = t.input
 	}
+	compactCheckpointToolsNodeState(cp)
 	err = r.checkPointer.convertCheckPoint(cp, isStream)
 	if err != nil {
 		return fmt.Errorf("failed to convert checkpoint: %w", err)
@@ -749,18 +766,23 @@ func (r *runner) handleInterruptWithSubGraphAndRerunNodes(
 	}
 
 	cp.InterruptID2Addr, cp.InterruptID2State = core.SignalToPersistenceMaps(is)
+	if err = initializeCheckpointLayoutV1(cp); err != nil {
+		return fmt.Errorf("failed to initialize checkpoint layout: %w", err)
+	}
 
 	for _, t := range subgraphTasks {
 		cp.RerunNodes = append(cp.RerunNodes, t.nodeKey)
 		cp.SubGraphs[t.nodeKey] = tempInfo.subGraphInterrupts[t.nodeKey].CheckPoint
 		intInfo.SubGraphs[t.nodeKey] = tempInfo.subGraphInterrupts[t.nodeKey].Info
 	}
+	removeSubgraphOwnedInterruptStates(cp)
 	cp.RerunNodes = append(cp.RerunNodes, tempInfo.interruptRerunNodes...)
 	for _, t := range rerunTasks {
 		if t.originalInput != nil {
 			cp.Inputs[t.nodeKey] = t.originalInput
 		}
 	}
+	compactCheckpointToolsNodeState(cp)
 	if err = r.validateCheckpointIntegrity(cp); err != nil {
 		return fmt.Errorf("invalid checkpoint: %w", err)
 	}
@@ -825,7 +847,11 @@ func (r *runner) createTasks(ctx context.Context, nodeMap map[string]any, optMap
 		var subGraphCheckpointReady <-chan *subGraphInterruptError
 		taskOpts := optMap[nodeKey]
 		if call.action.nodeInfo != nil && call.action.nodeInfo.compileOption != nil {
-			taskCtx = forwardCheckPoint(taskCtx, nodeKey)
+			var err error
+			taskCtx, err = forwardCheckPoint(taskCtx, nodeKey)
+			if err != nil {
+				return nil, err
+			}
 		}
 		if isSubGraphCall(call) {
 			taskOpts, subGraphCheckpointReady = withSubGraphCheckpointPublisher(taskOpts)
@@ -898,7 +924,11 @@ func (r *runner) restoreTasks(
 		taskOpts := optMap[key]
 		if call.action.nodeInfo != nil && call.action.nodeInfo.compileOption != nil {
 			// sub graph
-			taskCtx = forwardCheckPoint(taskCtx, key)
+			var err error
+			taskCtx, err = forwardCheckPoint(taskCtx, key)
+			if err != nil {
+				return nil, err
+			}
 		}
 		if isSubGraphCall(call) {
 			taskOpts, subGraphCheckpointReady = withSubGraphCheckpointPublisher(taskOpts)
@@ -922,6 +952,9 @@ func (r *runner) restoreTasks(
 }
 
 func (r *runner) validateCheckpointIntegrity(cp *checkpoint) error {
+	if err := validateCheckpointTreeMetadata(cp); err != nil {
+		return err
+	}
 	for _, key := range cp.RerunNodes {
 		call, ok := r.chanSubscribeTo[key]
 		if !ok || !isSubGraphCall(call) {
@@ -935,7 +968,224 @@ func (r *runner) validateCheckpointIntegrity(cp *checkpoint) error {
 		}
 		return fmt.Errorf("subgraph node %q is marked for rerun without a nested checkpoint or persisted input", key)
 	}
+	if cp.StateLayoutVersion == checkpointStateLayoutVersionV1 {
+		owners := make(map[string]checkpointStateOwner)
+		if err := collectCheckpointStateOwners(cp, nil, owners); err != nil {
+			return err
+		}
+		routes := make(map[string][]checkpointStateRoute)
+		if err := collectCheckpointStateRoutes(cp, nil, routes); err != nil {
+			return err
+		}
+		ids := sortedAddressIDs(cp.InterruptID2Addr)
+		for _, id := range ids {
+			owner := owners[id]
+			if owner.count == 0 {
+				return fmt.Errorf("interrupt ID %q has no checkpoint state owner", id)
+			}
+			if owner.count > 1 {
+				return fmt.Errorf("interrupt ID %q has multiple checkpoint state owners", id)
+			}
+			expectedPath, err := deepestCheckpointRoutePath(id, routes[id])
+			if err != nil {
+				return err
+			}
+			if !reflect.DeepEqual(owner.path, expectedPath) {
+				return fmt.Errorf("interrupt ID %q state owner path %v does not match routing owner path %v",
+					id, owner.path, expectedPath)
+			}
+		}
+		for _, id := range sortedCheckpointStateOwnerIDs(owners) {
+			if _, ok := cp.InterruptID2Addr[id]; !ok {
+				return fmt.Errorf("checkpoint state owner %q has no routing address", id)
+			}
+		}
+		for _, id := range sortedCheckpointStateRouteIDs(routes) {
+			if _, ok := cp.InterruptID2Addr[id]; !ok {
+				return fmt.Errorf("nested routing entry %q is missing from the root routing index", id)
+			}
+		}
+	}
 	return nil
+}
+
+type checkpointStateOwner struct {
+	count int
+	path  []string
+}
+
+type checkpointStateRoute struct {
+	address Address
+	path    []string
+}
+
+func sortedCheckpointStateOwnerIDs(owners map[string]checkpointStateOwner) []string {
+	ids := make([]string, 0, len(owners))
+	for id := range owners {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+func sortedCheckpointStateRouteIDs(routes map[string][]checkpointStateRoute) []string {
+	ids := make([]string, 0, len(routes))
+	for id := range routes {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+func validateCheckpointTreeMetadata(cp *checkpoint) error {
+	if cp == nil {
+		return errors.New("checkpoint is nil")
+	}
+	return validateCheckpointTreeLayout(cp, cp.StateLayoutVersion)
+}
+
+func validateCheckpointTreeLayout(cp *checkpoint, expectedVersion int) error {
+	if err := validateCheckpointLayoutMetadata(cp); err != nil {
+		return err
+	}
+	if cp.StateLayoutVersion != expectedVersion {
+		return fmt.Errorf("mixed checkpoint state layout: got version %d, want %d",
+			cp.StateLayoutVersion, expectedVersion)
+	}
+	keys := make([]string, 0, len(cp.SubGraphs))
+	for key := range cp.SubGraphs {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		sub := cp.SubGraphs[key]
+		if sub == nil {
+			return fmt.Errorf("subgraph checkpoint %q is nil", key)
+		}
+		if err := validateCheckpointTreeLayout(sub, expectedVersion); err != nil {
+			return fmt.Errorf("subgraph checkpoint %q has invalid metadata: %w", key, err)
+		}
+	}
+	return nil
+}
+
+func collectCheckpointStateOwners(cp *checkpoint, path []string,
+	owners map[string]checkpointStateOwner) error {
+	for id := range cp.InterruptID2State {
+		if !isCheckpointMetadataID(id) {
+			owner := owners[id]
+			owner.count++
+			if owner.count == 1 {
+				owner.path = append([]string(nil), path...)
+			}
+			owners[id] = owner
+		}
+	}
+	keys := make([]string, 0, len(cp.SubGraphs))
+	for key := range cp.SubGraphs {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		sub := cp.SubGraphs[key]
+		if sub == nil {
+			return fmt.Errorf("subgraph checkpoint %q is nil", key)
+		}
+		childPath := append(append([]string(nil), path...), key)
+		if err := collectCheckpointStateOwners(sub, childPath, owners); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func sortedAddressIDs(id2Addr map[string]Address) []string {
+	ids := make([]string, 0, len(id2Addr))
+	for id := range id2Addr {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+func collectCheckpointStateRoutes(cp *checkpoint, path []string,
+	routes map[string][]checkpointStateRoute) error {
+	for _, id := range sortedAddressIDs(cp.InterruptID2Addr) {
+		address := cp.InterruptID2Addr[id]
+		existing := routes[id]
+		if len(existing) > 0 && !existing[0].address.Equals(address) {
+			return fmt.Errorf("interrupt ID %q has conflicting routing addresses %q and %q",
+				id, existing[0].address.String(), address.String())
+		}
+		routes[id] = append(existing, checkpointStateRoute{
+			address: address,
+			path:    append([]string(nil), path...),
+		})
+	}
+	keys := make([]string, 0, len(cp.SubGraphs))
+	for key := range cp.SubGraphs {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		sub := cp.SubGraphs[key]
+		if sub == nil {
+			return fmt.Errorf("subgraph checkpoint %q is nil", key)
+		}
+		childPath := append(append([]string(nil), path...), key)
+		if err := collectCheckpointStateRoutes(sub, childPath, routes); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func deepestCheckpointRoutePath(id string, routes []checkpointStateRoute) ([]string, error) {
+	if len(routes) == 0 {
+		return nil, fmt.Errorf("interrupt ID %q has no routing entry", id)
+	}
+	deepest := routes[0].path
+	for _, route := range routes[1:] {
+		if len(route.path) > len(deepest) {
+			deepest = route.path
+		}
+	}
+	for _, route := range routes {
+		if !checkpointPathIsPrefix(route.path, deepest) {
+			return nil, fmt.Errorf("interrupt ID %q appears in unrelated checkpoint routing paths %v and %v",
+				id, deepest, route.path)
+		}
+	}
+	return deepest, nil
+}
+
+func checkpointPathIsPrefix(prefix, path []string) bool {
+	if len(prefix) > len(path) {
+		return false
+	}
+	for i := range prefix {
+		if prefix[i] != path[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func removeSubgraphOwnedInterruptStates(cp *checkpoint) {
+	for _, sub := range cp.SubGraphs {
+		removeCheckpointStateIDs(cp.InterruptID2State, sub)
+	}
+}
+
+func removeCheckpointStateIDs(parent map[string]core.InterruptState, child *checkpoint) {
+	for id := range child.InterruptID2State {
+		if !isCheckpointMetadataID(id) {
+			delete(parent, id)
+		}
+	}
+	for _, nested := range child.SubGraphs {
+		removeCheckpointStateIDs(parent, nested)
+	}
 }
 
 func isSubGraphCall(call *chanCall) bool {
