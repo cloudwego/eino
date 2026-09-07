@@ -357,6 +357,25 @@ func TestMergeInterruptState(t *testing.T) {
 		require.Equal(t, "child state", state)
 	})
 
+	t.Run("merges_into_batch_resume_info", func(t *testing.T) {
+		address := Address{{Type: AddressSegmentAgent, ID: "child"}}
+		ctx := BatchResumeWithData(context.Background(), map[string]any{"child": "approved"})
+		ctx, err := MergeInterruptState(ctx,
+			map[string]Address{"child": address},
+			map[string]InterruptState{"child": {State: "saved"}})
+		require.NoError(t, err)
+
+		ctx = AppendAddressSegment(ctx, AddressSegmentAgent, "child", "")
+		wasInterrupted, hasState, state := GetInterruptState[string](ctx)
+		require.True(t, wasInterrupted)
+		require.True(t, hasState)
+		require.Equal(t, "saved", state)
+		isTarget, hasData, data := GetResumeContext[string](ctx)
+		require.True(t, isTarget)
+		require.True(t, hasData)
+		require.Equal(t, "approved", data)
+	})
+
 	existingAddress := Address{{Type: AddressSegmentAgent, ID: "agent"}}
 	existingState := InterruptState{State: "existing"}
 	ctx := PopulateInterruptState(context.Background(),

@@ -41,6 +41,8 @@ var (
 
 const agentToolInterruptStateVersion = 1
 
+// agentToolInterruptStateV1 CheckpointSchema: persisted as an interrupt state
+// via gob. Keep existing fields backward compatible; add optional fields only.
 type agentToolInterruptStateV1 struct {
 	Version          int
 	BridgeCheckpoint []byte

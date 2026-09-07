@@ -27,11 +27,13 @@ import (
 
 	componenttool "github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/internal/core"
+	"github.com/cloudwego/eino/internal/serialization"
 	"github.com/cloudwego/eino/schema"
 )
 
 type toolsNodeCheckpointState struct {
-	Messages []*schema.Message
+	Messages  []*schema.Message
+	Unrelated string
 }
 
 func init() {
@@ -60,19 +62,26 @@ func TestRestoreToolsInterruptState(t *testing.T) {
 	})
 
 	t.Run("v1", func(t *testing.T) {
-		toolCalls := []schema.ToolCall{{ID: "rewritten"}}
+		toolCalls := []schema.ToolCall{
+			{ID: "standard"},
+			{ID: "enhanced"},
+			{ID: "rerun"},
+		}
 		enhanced := map[string]*schema.ToolResult{"enhanced": {}}
 		ctx := toolsNodeCheckpointContext(&toolsInterruptAndRerunStateV1{
 			Version:               toolsInterruptAndRerunStateVersionV1,
 			Role:                  schema.Assistant,
 			ToolCalls:             toolCalls,
+			ExecutedTools:         map[string]string{"standard": "result"},
 			ExecutedEnhancedTools: enhanced,
+			RerunTools:            []string{"rerun"},
 		})
-		got, _, gotEnhanced, err := restoreToolsInterruptState(ctx, nil, nil, nil)
+		got, gotStandard, gotEnhanced, err := restoreToolsInterruptState(ctx, nil, nil, nil)
 		require.NoError(t, err)
 		require.Equal(t, schema.Assistant, got.Role)
 		require.Equal(t, toolCalls, got.ToolCalls)
 		require.Empty(t, got.Content)
+		require.Equal(t, map[string]string{"standard": "result"}, gotStandard)
 		require.Equal(t, enhanced, gotEnhanced)
 	})
 
@@ -165,6 +174,177 @@ func TestToolsNodeWritesV1InterruptState(t *testing.T) {
 	}
 }
 
+func TestAttack_ToolsNodeV1RoundTripsSingleEmptyToolCallID(t *testing.T) {
+	const toolName = "interrupting"
+	interruptingTool := newCheckpointTestTool(&schema.ToolInfo{Name: toolName},
+		func(ctx context.Context, _ *longRunningToolInput) (string, error) {
+			return "", StatefulInterrupt(ctx, "interrupt", "state")
+		})
+	node, err := NewToolNode(context.Background(), &ToolsNodeConfig{
+		Tools: []componenttool.BaseTool{interruptingTool},
+	})
+	require.NoError(t, err)
+	input := schema.AssistantMessage("", []schema.ToolCall{{
+		Function: schema.FunctionCall{
+			Name:      toolName,
+			Arguments: `{}`,
+		},
+	}})
+
+	tests := []struct {
+		name string
+		run  func(context.Context, *schema.Message) error
+	}{
+		{
+			name: "invoke",
+			run: func(ctx context.Context, input *schema.Message) error {
+				_, invokeErr := node.Invoke(ctx, input)
+				return invokeErr
+			},
+		},
+		{
+			name: "stream",
+			run: func(ctx context.Context, input *schema.Message) error {
+				_, streamErr := node.Stream(ctx, input)
+				return streamErr
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.run(context.Background(), input)
+			var signal *core.InterruptSignal
+			require.ErrorAs(t, err, &signal)
+			state, ok := signal.State.(*toolsInterruptAndRerunStateV1)
+			require.True(t, ok)
+			require.Equal(t, []schema.ToolCall(input.ToolCalls), state.ToolCalls)
+			require.Equal(t, []string{""}, state.RerunTools)
+
+			restored, executed, enhanced, err := restoreToolsInterruptState(
+				toolsNodeCheckpointContext(state), nil, nil, nil)
+			require.NoError(t, err)
+			require.Equal(t, input.ToolCalls, restored.ToolCalls)
+			require.Empty(t, executed)
+			require.Empty(t, enhanced)
+		})
+	}
+}
+
+func TestAttack_ToolsNodeStreamSingleRestoredExecutedTool(t *testing.T) {
+	const (
+		toolName       = "already-executed"
+		standardResult = "persisted standard result"
+		enhancedText   = "persisted enhanced result"
+	)
+	enhancedResult := &schema.ToolResult{Parts: []schema.ToolOutputPart{{
+		Type: schema.ToolPartTypeText,
+		Text: enhancedText,
+	}}}
+	enhancedMessageParts, err := enhancedResult.ToMessageInputParts()
+	require.NoError(t, err)
+
+	resultForms := []struct {
+		name             string
+		enhanced         bool
+		wantContent      string
+		wantMessageParts []schema.MessageInputPart
+	}{
+		{
+			name:        "standard",
+			wantContent: standardResult,
+		},
+		{
+			name:             "enhanced",
+			enhanced:         true,
+			wantMessageParts: enhancedMessageParts,
+		},
+	}
+	runModes := []struct {
+		name       string
+		stream     bool
+		sequential bool
+	}{
+		{name: "invoke"},
+		{name: "stream_parallel", stream: true},
+		{name: "stream_sequential", stream: true, sequential: true},
+	}
+
+	for _, resultForm := range resultForms {
+		t.Run(resultForm.name, func(t *testing.T) {
+			for _, runMode := range runModes {
+				t.Run(runMode.name, func(t *testing.T) {
+					var endpointCalls int
+					var testTool componenttool.BaseTool
+					if resultForm.enhanced {
+						testTool = &enhancedInvokableTool{
+							info: &schema.ToolInfo{Name: toolName},
+							fn: func(context.Context, *schema.ToolArgument) (*schema.ToolResult, error) {
+								endpointCalls++
+								return &schema.ToolResult{}, nil
+							},
+						}
+					} else {
+						testTool = newCheckpointTestTool(&schema.ToolInfo{Name: toolName},
+							func(context.Context, *longRunningToolInput) (string, error) {
+								endpointCalls++
+								return "rerun result", nil
+							})
+					}
+					node, err := NewToolNode(context.Background(), &ToolsNodeConfig{
+						Tools:               []componenttool.BaseTool{testTool},
+						ExecuteSequentially: runMode.sequential,
+					})
+					require.NoError(t, err)
+
+					state := &toolsInterruptAndRerunStateV1{
+						Version: toolsInterruptAndRerunStateVersionV1,
+						Role:    schema.Assistant,
+						ToolCalls: []schema.ToolCall{{
+							Function: schema.FunctionCall{
+								Name:      toolName,
+								Arguments: `{}`,
+							},
+						}},
+					}
+					if resultForm.enhanced {
+						state.ExecutedEnhancedTools = map[string]*schema.ToolResult{"": enhancedResult}
+					} else {
+						state.ExecutedTools = map[string]string{"": standardResult}
+					}
+
+					var output []*schema.Message
+					ctx := toolsNodeCheckpointContext(state)
+					if runMode.stream {
+						var stream *schema.StreamReader[[]*schema.Message]
+						require.NotPanics(t, func() {
+							stream, err = node.Stream(ctx, nil)
+						})
+						require.NoError(t, err)
+						defer stream.Close()
+						output, err = stream.Recv()
+						require.NoError(t, err)
+						_, err = stream.Recv()
+						require.ErrorIs(t, err, io.EOF)
+					} else {
+						require.NotPanics(t, func() {
+							output, err = node.Invoke(ctx, nil)
+						})
+						require.NoError(t, err)
+					}
+
+					require.Zero(t, endpointCalls)
+					require.Len(t, output, 1)
+					require.Equal(t, schema.Tool, output[0].Role)
+					require.Empty(t, output[0].ToolCallID)
+					require.Equal(t, toolName, output[0].ToolName)
+					require.Equal(t, resultForm.wantContent, output[0].Content)
+					require.Equal(t, resultForm.wantMessageParts, output[0].UserInputMultiContent)
+				})
+			}
+		})
+	}
+}
+
 func TestToolsNodeV1ResumeUsesPrehandledToolCalls(t *testing.T) {
 	const toolName = "rewritten"
 	var preHandlerCalls int
@@ -211,7 +391,8 @@ func TestToolsNodeV1ResumeUsesPrehandledToolCalls(t *testing.T) {
 		},
 	}})
 	_, err = runnable.Invoke(context.Background(), input, WithCheckPointID("tools-v1"))
-	require.Error(t, err)
+	var interruptErr *interruptError
+	require.ErrorAs(t, err, &interruptErr)
 	require.Equal(t, 1, preHandlerCalls)
 
 	output, err := runnable.Invoke(context.Background(), &schema.Message{},
@@ -313,6 +494,96 @@ func TestCompactCheckpointToolsNodeState(t *testing.T) {
 		corruptCP.InterruptID2State["tool"] = core.InterruptState{State: &corrupt}
 		require.ErrorContains(t, hydrateCheckpointToolsNodeState(corruptCP), "source role")
 	})
+
+	t.Run("clone_failure_is_reported", func(t *testing.T) {
+		unregistered := struct {
+			Value string `json:"value"`
+		}{Value: "unsupported"}
+		unclonableMessage := schema.AssistantMessage("", []schema.ToolCall{{
+			ID:    "unclonable",
+			Extra: map[string]any{"unregistered": unregistered},
+		}})
+		unclonableCP := &checkpoint{
+			State: &toolsNodeCheckpointState{
+				Messages: []*schema.Message{unclonableMessage},
+			},
+			InterruptID2State: map[string]core.InterruptState{
+				"tool": {
+					State: &toolsInterruptAndRerunStateV1{
+						Version:   toolsInterruptAndRerunStateVersionV1,
+						Role:      schema.Assistant,
+						ToolCalls: unclonableMessage.ToolCalls,
+					},
+				},
+			},
+		}
+		compactCheckpointToolsNodeState(unclonableCP)
+		got := unclonableCP.InterruptID2State["tool"].State.(*toolsInterruptAndRerunStateV1)
+		require.NotNil(t, got.ToolCallsSource)
+
+		err := hydrateCheckpointToolsNodeState(unclonableCP)
+		require.ErrorContains(t, err,
+			`tools node interrupt state "tool" failed to clone source tool calls: failed to marshal tool calls`)
+	})
+}
+
+func TestAttack_HydratedToolsNodeToolCallsDoNotAliasGraphState(t *testing.T) {
+	index := 1
+	message := schema.AssistantMessage("", []schema.ToolCall{{
+		Index: &index,
+		ID:    "call",
+		Extra: map[string]any{
+			"top": "source",
+			"nested_map": map[string]any{
+				"value": "source",
+			},
+			"nested_slice": []any{"source"},
+		},
+	}})
+	cp := &checkpoint{
+		State: &toolsNodeCheckpointState{
+			Messages: []*schema.Message{message},
+		},
+		InterruptID2State: map[string]core.InterruptState{
+			"tool": {
+				State: &toolsInterruptAndRerunStateV1{
+					Version:   toolsInterruptAndRerunStateVersionV1,
+					Role:      schema.Assistant,
+					ToolCalls: append([]schema.ToolCall(nil), message.ToolCalls...),
+				},
+			},
+		},
+	}
+
+	compactCheckpointToolsNodeState(cp)
+	compacted := cp.InterruptID2State["tool"].State.(*toolsInterruptAndRerunStateV1)
+	require.Nil(t, compacted.ToolCalls)
+	require.NotNil(t, compacted.ToolCallsSource)
+
+	serializer := &serialization.InternalSerializer{}
+	data, err := serializer.Marshal(cp)
+	require.NoError(t, err)
+	var decoded checkpoint
+	require.NoError(t, serializer.Unmarshal(data, &decoded))
+	decodedCompacted := decoded.InterruptID2State["tool"].State.(*toolsInterruptAndRerunStateV1)
+	require.Nil(t, decodedCompacted.ToolCalls)
+	require.NotNil(t, decodedCompacted.ToolCallsSource)
+	require.NoError(t, hydrateCheckpointToolsNodeState(&decoded))
+
+	source := decoded.State.(*toolsNodeCheckpointState).Messages[0].ToolCalls[0]
+	hydrated := decoded.InterruptID2State["tool"].State.(*toolsInterruptAndRerunStateV1)
+	require.Nil(t, hydrated.ToolCallsSource)
+	require.Len(t, hydrated.ToolCalls, 1)
+
+	*hydrated.ToolCalls[0].Index = 2
+	hydrated.ToolCalls[0].Extra["top"] = "hydrated"
+	hydrated.ToolCalls[0].Extra["nested_map"].(map[string]any)["value"] = "hydrated"
+	hydrated.ToolCalls[0].Extra["nested_slice"].([]any)[0] = "hydrated"
+
+	require.Equal(t, 1, *source.Index)
+	require.Equal(t, "source", source.Extra["top"])
+	require.Equal(t, "source", source.Extra["nested_map"].(map[string]any)["value"])
+	require.Equal(t, "source", source.Extra["nested_slice"].([]any)[0])
 }
 
 func TestToolsNodeV1EnhancedSiblingResume(t *testing.T) {
@@ -327,14 +598,17 @@ func TestToolsNodeV1EnhancedSiblingResume(t *testing.T) {
 				interruptName = "interrupt"
 			)
 			enhancedCalls := 0
+			enhancedResult := &schema.ToolResult{Parts: []schema.ToolOutputPart{{
+				Type: schema.ToolPartTypeText,
+				Text: strings.Repeat("result", 128),
+			}}}
+			wantEnhancedParts, err := enhancedResult.ToMessageInputParts()
+			require.NoError(t, err)
 			enhanced := &enhancedInvokableTool{
 				info: &schema.ToolInfo{Name: enhancedName},
 				fn: func(context.Context, *schema.ToolArgument) (*schema.ToolResult, error) {
 					enhancedCalls++
-					return &schema.ToolResult{Parts: []schema.ToolOutputPart{{
-						Type: schema.ToolPartTypeText,
-						Text: strings.Repeat("result", 128),
-					}}}, nil
+					return enhancedResult, nil
 				},
 			}
 			interrupting := newCheckpointTestTool(&schema.ToolInfo{Name: interruptName},
@@ -387,22 +661,24 @@ func TestToolsNodeV1EnhancedSiblingResume(t *testing.T) {
 					},
 				},
 			})
+			var setupErr error
 			if streaming {
-				_, invokeErr := runnable.Stream(context.Background(), input,
+				_, setupErr = runnable.Stream(context.Background(), input,
 					WithCheckPointID("enhanced-v1"))
-				require.Error(t, invokeErr)
 			} else {
-				_, err = runnable.Invoke(context.Background(), input,
+				_, setupErr = runnable.Invoke(context.Background(), input,
 					WithCheckPointID("enhanced-v1"))
-				require.Error(t, err)
 			}
+			var interruptErr *interruptError
+			require.ErrorAs(t, setupErr, &interruptErr)
 			require.Equal(t, 1, enhancedCalls)
 
+			var output []*schema.Message
 			if streaming {
 				stream, err := runnable.Stream(context.Background(), &schema.Message{},
 					WithCheckPointID("enhanced-v1"))
 				require.NoError(t, err)
-				var output []*schema.Message
+				defer stream.Close()
 				for {
 					chunk, receiveErr := stream.Recv()
 					if receiveErr == io.EOF {
@@ -415,14 +691,25 @@ func TestToolsNodeV1EnhancedSiblingResume(t *testing.T) {
 						}
 					}
 				}
-				require.Len(t, output, 2)
 			} else {
-				output, invokeErr := runnable.Invoke(context.Background(), &schema.Message{},
+				output, err = runnable.Invoke(context.Background(), &schema.Message{},
 					WithCheckPointID("enhanced-v1"))
-				require.NoError(t, invokeErr)
-				require.Len(t, output, 2)
+				require.NoError(t, err)
 			}
+			require.Len(t, output, 2)
 			require.Equal(t, 1, enhancedCalls, "successful enhanced sibling must be reused")
+
+			byCallID := make(map[string]*schema.Message, len(output))
+			for _, message := range output {
+				require.NotNil(t, message)
+				byCallID[message.ToolCallID] = message
+			}
+			enhancedOutput, ok := byCallID["enhanced-call"]
+			require.True(t, ok)
+			require.Equal(t, wantEnhancedParts, enhancedOutput.UserInputMultiContent)
+			interruptOutput, ok := byCallID["interrupt-call"]
+			require.True(t, ok)
+			require.Equal(t, `"completed"`, interruptOutput.Content)
 		})
 	}
 }
@@ -557,4 +844,73 @@ func TestAttack_ToolsNodeV1RejectsConflictingResultState(t *testing.T) {
 		_, _, _, err := restoreToolsInterruptState(ctx, nil, nil, nil)
 		require.ErrorContains(t, err, `duplicate rerun tool call ID "duplicate"`)
 	})
+}
+
+func TestAttack_ToolsNodeV1RequiresExactResultPartition(t *testing.T) {
+	tests := []struct {
+		name    string
+		state   *toolsInterruptAndRerunStateV1
+		wantErr string
+	}{
+		{
+			name: "unknown_standard_result",
+			state: &toolsInterruptAndRerunStateV1{
+				ToolCalls:     []schema.ToolCall{{ID: "known"}},
+				ExecutedTools: map[string]string{"unknown": "result"},
+				RerunTools:    []string{"known"},
+			},
+			wantErr: `result for unknown tool call ID "unknown"`,
+		},
+		{
+			name: "unknown_enhanced_result",
+			state: &toolsInterruptAndRerunStateV1{
+				ToolCalls:             []schema.ToolCall{{ID: "known"}},
+				ExecutedEnhancedTools: map[string]*schema.ToolResult{"unknown": {}},
+				RerunTools:            []string{"known"},
+			},
+			wantErr: `result for unknown tool call ID "unknown"`,
+		},
+		{
+			name: "unknown_rerun_marker",
+			state: &toolsInterruptAndRerunStateV1{
+				ToolCalls:  []schema.ToolCall{{ID: "known"}},
+				RerunTools: []string{"known", "unknown"},
+			},
+			wantErr: `rerun marker for unknown tool call ID "unknown"`,
+		},
+		{
+			name: "missing_classification",
+			state: &toolsInterruptAndRerunStateV1{
+				ToolCalls:     []schema.ToolCall{{ID: "executed"}, {ID: "missing"}},
+				ExecutedTools: map[string]string{"executed": "result"},
+			},
+			wantErr: `tool call ID "missing" has neither an executed result nor a rerun marker`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tt.state.Version = toolsInterruptAndRerunStateVersionV1
+			tt.state.Role = schema.Assistant
+			ctx := toolsNodeCheckpointContext(tt.state)
+			_, _, _, err := restoreToolsInterruptState(ctx, nil, nil, nil)
+			require.ErrorContains(t, err, tt.wantErr)
+		})
+	}
+}
+
+func TestAttack_ToolsNodeV1PartitionValidationInvokeStreamParity(t *testing.T) {
+	state := &toolsInterruptAndRerunStateV1{
+		Version:   toolsInterruptAndRerunStateVersionV1,
+		Role:      schema.Assistant,
+		ToolCalls: []schema.ToolCall{{ID: "missing"}},
+	}
+	ctx := toolsNodeCheckpointContext(state)
+	node := &ToolsNode{}
+
+	_, invokeErr := node.Invoke(ctx, nil)
+	_, streamErr := node.Stream(ctx, nil)
+	require.EqualError(t, invokeErr,
+		`tools node interrupt state tool call ID "missing" has neither an executed result nor a rerun marker`)
+	require.EqualError(t, streamErr, invokeErr.Error())
 }

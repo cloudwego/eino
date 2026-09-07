@@ -310,26 +310,68 @@ func runnerSaveCheckPointImpl(
 	if err := validateRunnerProjectionReservedIDs(id2Addr, id2State); err != nil {
 		return err
 	}
-	runCtx, info, id2State, projection, err := projectRunnerCheckpoint(
+	unprojected := &serialization{
+		RunCtx:                    runCtx,
+		Info:                      info,
+		InfoDataSourceInterruptID: infoDataStateID,
+		InterruptID2Address:       id2Addr,
+		InterruptID2State:         id2State,
+		EnableStreaming:           enableStreaming,
+	}
+	projectedRunCtx, projectedInfo, projectedStates, projection, err := projectRunnerCheckpoint(
 		runCtx, info, infoDataStateID, id2State)
 	if err != nil {
 		return fmt.Errorf("failed to project checkpoint: %w", err)
 	}
 
-	buf := &bytes.Buffer{}
-	err = gob.NewEncoder(buf).Encode(&serialization{
-		RunCtx:                    runCtx,
-		Info:                      info,
-		InfoDataSourceInterruptID: infoDataStateID,
-		ProjectionV1:              projection,
-		InterruptID2Address:       id2Addr,
-		InterruptID2State:         id2State,
-		EnableStreaming:           enableStreaming,
-	})
+	var projected *serialization
+	if projection != nil {
+		unprojected.RunCtx = cloneRunContextForCheckpointProjection(runCtx)
+		unprojected.Info = cloneInterruptInfoForCheckpointProjection(info)
+		unprojected.InterruptID2State = cloneInterruptStateMap(id2State)
+		projected = &serialization{
+			RunCtx:                    projectedRunCtx,
+			Info:                      projectedInfo,
+			InfoDataSourceInterruptID: infoDataStateID,
+			ProjectionV1:              projection,
+			InterruptID2Address:       id2Addr,
+			InterruptID2State:         projectedStates,
+			EnableStreaming:           enableStreaming,
+		}
+	}
+	data, err := encodeRunnerCheckpointWithProfitableProjection(unprojected, projected)
 	if err != nil {
 		return fmt.Errorf("failed to encode checkpoint: %w", err)
 	}
-	return store.Set(ctx, key, buf.Bytes())
+	return store.Set(ctx, key, data)
+}
+
+func encodeRunnerCheckpointWithProfitableProjection(unprojected,
+	projected *serialization) ([]byte, error) {
+	unprojectedData, err := encodeRunnerCheckpoint(unprojected)
+	if err != nil {
+		return nil, err
+	}
+	if projected == nil {
+		return unprojectedData, nil
+	}
+	projectedData, err := encodeRunnerCheckpoint(projected)
+	if err != nil {
+		return nil, err
+	}
+	if len(projectedData) < len(unprojectedData) {
+		return projectedData, nil
+	}
+	return unprojectedData, nil
+}
+
+func encodeRunnerCheckpoint(checkpoint *serialization) ([]byte, error) {
+	buf := &bytes.Buffer{}
+	err := gob.NewEncoder(buf).Encode(checkpoint)
+	if err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
 }
 
 func compactRunnerCheckpointInfoData(info *InterruptInfo, is *core.InterruptSignal) (*InterruptInfo, string) {

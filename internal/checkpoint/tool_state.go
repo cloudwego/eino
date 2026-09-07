@@ -23,6 +23,7 @@ import "github.com/cloudwego/eino/schema"
 const ToolsNodeInterruptStateV1Version = 1
 
 // ToolsNodeInterruptStateV1 is the versioned ToolsNode checkpoint wire state.
+// CheckpointSchema: persisted as gob; keep existing fields backward compatible.
 // ToolCalls and ToolCallsSource are mutually exclusive in persisted data.
 type ToolsNodeInterruptStateV1 struct {
 	// Version must equal ToolsNodeInterruptStateV1Version.
@@ -44,6 +45,7 @@ type ToolsNodeInterruptStateV1 struct {
 }
 
 // ToolsNodeToolCallsSourceV1 identifies ToolCalls in the owning graph state.
+// CheckpointSchema: persisted as part of ToolsNodeInterruptStateV1.
 type ToolsNodeToolCallsSourceV1 struct {
 	// MessageIndex is the zero-based index in the owning graph state's Messages slice.
 	MessageIndex int

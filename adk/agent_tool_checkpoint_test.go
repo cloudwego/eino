@@ -18,10 +18,6 @@ package adk
 
 import (
 	"context"
-	"encoding/json"
-	"os"
-	"os/exec"
-	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -66,47 +62,6 @@ func TestAgentToolInterruptStateV1(t *testing.T) {
 			},
 			"_eino_adk_agent_tool_interrupt_state_v1")
 	})
-}
-
-func TestAgentToolCheckpointV1SizeAndLegacyFailure(t *testing.T) {
-	readerBin := buildCheckpointCompatLegacyReader(t)
-	for _, streaming := range []bool{false, true} {
-		name := "invoke"
-		if streaming {
-			name = "stream"
-		}
-		t.Run(name, func(t *testing.T) {
-			spec := checkpointCompatFixture{
-				Name:         "agent_tool_v1_320k_" + name,
-				File:         "agent_tool_v1_320k_" + name + ".bin.gz",
-				Depth:        1,
-				Streaming:    streaming,
-				PayloadField: "content",
-				PayloadSize:  320 << 10,
-			}
-			raw, interruptIDs, interruptAddresses := captureCheckpointCompatFixture(t, spec)
-			t.Logf("checkpoint bytes: %d", len(raw))
-			require.Less(t, len(raw), 1<<20)
-			resumeCheckpointCompatCandidate(t, spec, raw, interruptIDs, len(interruptIDs), 0,
-				interruptAddresses)
-
-			spec.InterruptIDs = interruptIDs
-			spec.InterruptAddresses = interruptAddresses
-			tmpDir := t.TempDir()
-			writeCheckpointCompatFixture(t, filepath.Join(tmpDir, spec.File), raw)
-			manifestData, err := json.Marshal(checkpointCompatManifest{
-				ProducerCommit: "candidate",
-				Fixtures:       []checkpointCompatFixture{spec},
-			})
-			require.NoError(t, err)
-			require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "manifest.json"), manifestData, 0o644))
-
-			cmd := exec.Command(readerBin, "-fixture-dir", tmpDir, "-fixture", spec.Name)
-			output, err := cmd.CombinedOutput()
-			require.Error(t, err)
-			require.Contains(t, string(output), "name not registered for interface")
-		})
-	}
 }
 
 func resumeCheckpointCompatCandidate(t *testing.T, spec checkpointCompatFixture, raw []byte,

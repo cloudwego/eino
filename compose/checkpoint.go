@@ -113,6 +113,7 @@ const (
 	checkpointLayoutSentinelID     = "_eino_checkpoint_layout"
 )
 
+// checkpointLayoutSentinelV1 CheckpointSchema: persisted via gob; keep existing fields backward compatible.
 type checkpointLayoutSentinelV1 struct {
 	Version int
 }
@@ -374,8 +375,8 @@ func MigrateCheckpointState(data []byte, serializer Serializer, migrate func(sta
 	if err := serializer.Unmarshal(data, cp); err != nil {
 		return nil, fmt.Errorf("failed to decode checkpoint for migration; checkpoint may require a newer Eino version: %w", err)
 	}
-	if err := hydrateCheckpointToolsNodeState(cp); err != nil {
-		return nil, fmt.Errorf("failed to hydrate checkpoint tool state for migration: %w", err)
+	if err := prepareCheckpointForCallback(cp, "migration"); err != nil {
+		return nil, err
 	}
 	changed, err := migrateCheckpoint(cp, migrate)
 	if err != nil {
@@ -440,8 +441,8 @@ func WalkCheckpointValues(data []byte, serializer Serializer,
 	if err := serializer.Unmarshal(data, cp); err != nil {
 		return fmt.Errorf("failed to decode checkpoint for inspection: %w", err)
 	}
-	if err := hydrateCheckpointToolsNodeState(cp); err != nil {
-		return fmt.Errorf("failed to hydrate checkpoint tool state for inspection: %w", err)
+	if err := prepareCheckpointForCallback(cp, "inspection"); err != nil {
+		return err
 	}
 	return walkCheckpointValues(cp, nil, func(path NodePath, location CheckpointValueLocation,
 		value any) (any, bool, error) {
@@ -472,8 +473,8 @@ func TransformCheckpointValues(data []byte, serializer Serializer,
 	if err := serializer.Unmarshal(data, cp); err != nil {
 		return nil, fmt.Errorf("failed to decode checkpoint for transformation: %w", err)
 	}
-	if err := hydrateCheckpointToolsNodeState(cp); err != nil {
-		return nil, fmt.Errorf("failed to hydrate checkpoint tool state for transformation: %w", err)
+	if err := prepareCheckpointForCallback(cp, "transformation"); err != nil {
+		return nil, err
 	}
 	changed, err := transformCheckpointValues(cp, nil, transform)
 	if err != nil {
@@ -488,6 +489,40 @@ func TransformCheckpointValues(data []byte, serializer Serializer,
 		return nil, fmt.Errorf("failed to encode transformed checkpoint: %w", err)
 	}
 	return transformed, nil
+}
+
+func prepareCheckpointForCallback(cp *checkpoint, operation string) error {
+	if err := validateCheckpointTreeMetadata(cp); err != nil {
+		return fmt.Errorf("invalid checkpoint format for %s: %w", operation, err)
+	}
+	if err := validateCheckpointToolsNodeVersions(cp); err != nil {
+		return fmt.Errorf("invalid checkpoint format for %s: %w", operation, err)
+	}
+	if err := hydrateCheckpointToolsNodeState(cp); err != nil {
+		return fmt.Errorf("failed to hydrate checkpoint tool state for %s: %w", operation, err)
+	}
+	return nil
+}
+
+func validateCheckpointToolsNodeVersions(cp *checkpoint) error {
+	for _, id := range sortedCheckpointMapKeys(cp.InterruptID2State) {
+		state, ok := cp.InterruptID2State[id].State.(*toolsInterruptAndRerunStateV1)
+		if !ok {
+			continue
+		}
+		if state == nil {
+			return fmt.Errorf("tools node interrupt state %q is nil", id)
+		}
+		if state.Version != toolsInterruptAndRerunStateVersionV1 {
+			return fmt.Errorf("tools node interrupt state %q has unsupported version %d", id, state.Version)
+		}
+	}
+	for _, key := range sortedCheckpointMapKeys(cp.SubGraphs) {
+		if err := validateCheckpointToolsNodeVersions(cp.SubGraphs[key]); err != nil {
+			return fmt.Errorf("subgraph checkpoint %q has invalid tools node state: %w", key, err)
+		}
+	}
+	return nil
 }
 
 type checkpointValueTransform func(path NodePath, location CheckpointValueLocation,

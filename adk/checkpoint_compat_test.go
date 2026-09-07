@@ -368,6 +368,7 @@ func captureCheckpointCompatCancelFixture(t *testing.T, spec checkpointCompatFix
 	store := newCheckpointCompatStore()
 	runner := NewRunner(ctx, RunnerConfig{Agent: agent, CheckPointStore: store})
 	cancelOpt, cancelFn := WithCancel()
+	cancelCtx := getCommonOptions(nil, cancelOpt).cancelCtx
 	iter := runner.Query(ctx, "start", WithCheckPointID(spec.Name), cancelOpt)
 
 	select {
@@ -380,8 +381,18 @@ func captureCheckpointCompatCancelFixture(t *testing.T, spec checkpointCompatFix
 		handle, _ := cancelFn(WithAgentCancelMode(CancelAfterChatModel))
 		done <- handle.Wait()
 	}()
+	select {
+	case <-cancelCtx.cancelChan:
+	case <-time.After(5 * time.Second):
+		t.Fatal("cancel request was not registered")
+	}
 	close(blockingModel.unblockCh)
-	require.NoError(t, <-done)
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("cancel request did not complete")
+	}
 
 	var interruptIDs []string
 	var interruptAddresses []string
@@ -493,12 +504,17 @@ func TestCheckpointBackwardCompatMain60e1d992(t *testing.T) {
 
 	seen := make(map[string]struct{}, len(manifest.Fixtures))
 	for _, fixture := range manifest.Fixtures {
+		frozenSHA, exists := checkpointCompatFrozenSHA256[fixture.Name]
+		require.True(t, exists, "fixture is not part of the frozen set")
+		require.NotContains(t, seen, fixture.Name, "duplicate fixture")
+		require.Equal(t, frozenSHA, fixture.SHA256,
+			"frozen fixture metadata changed; add a new fixture version instead")
+		seen[fixture.Name] = struct{}{}
+	}
+	require.Len(t, seen, len(checkpointCompatFrozenSHA256))
+
+	for _, fixture := range manifest.Fixtures {
 		t.Run(fixture.Name, func(t *testing.T) {
-			frozenSHA, exists := checkpointCompatFrozenSHA256[fixture.Name]
-			require.True(t, exists, "fixture is not part of the frozen set")
-			require.Equal(t, frozenSHA, fixture.SHA256,
-				"frozen fixture metadata changed; add a new fixture version instead")
-			seen[fixture.Name] = struct{}{}
 			raw := readCheckpointCompatFixture(t, filepath.Join(checkpointCompatDir, fixture.File))
 			sum := sha256.Sum256(raw)
 			require.Equal(t, fixture.SHA256, hex.EncodeToString(sum[:]))
@@ -565,7 +581,6 @@ func TestCheckpointBackwardCompatMain60e1d992(t *testing.T) {
 			assert.Equal(t, expectedInterrupts, remainingInterrupts)
 		})
 	}
-	require.Len(t, seen, len(checkpointCompatFrozenSHA256))
 }
 
 func TestCheckpointLegacyReaderMain60e1d992(t *testing.T) {

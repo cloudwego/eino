@@ -38,6 +38,8 @@ const (
 	infoTargetContextToolResult      = "context_tool_result"
 )
 
+// checkpointToolResultSourceV1 CheckpointSchema: nested Runner projection V1
+// source identifying a canonical tool result.
 type checkpointToolResultSourceV1 struct {
 	Kind        string
 	GraphPath   []string
@@ -46,8 +48,8 @@ type checkpointToolResultSourceV1 struct {
 	Digest      string
 }
 
-// infoToolResultProjectionV1 maps one omitted result back to either a rerun
-// entry or an interrupt-context entry. Target selects the applicable fields.
+// infoToolResultProjectionV1 CheckpointSchema: nested Runner projection V1
+// metadata mapping an omitted result to a rerun or interrupt-context entry.
 type infoToolResultProjectionV1 struct {
 	Target        string
 	SubGraphPath  []string
@@ -244,17 +246,36 @@ func hydrateComposeInterruptInfoToolResults(info *compose.InterruptInfo,
 		return fmt.Errorf("checkpoint projection tool result reference count mismatch: got %d, want %d",
 			len(refs), expectedCount)
 	}
-	seen := make(map[string]struct{}, len(refs))
+	type targetCoordinates struct {
+		target        string
+		contextIndex  int
+		parentDepth   int
+		rerunExtraKey string
+		toolCallID    string
+	}
+	seen := make(map[targetCoordinates][][]string, len(refs))
 	for _, ref := range refs {
 		if ref.ParentDepth < 0 || ref.ToolCallID == "" {
 			return errors.New("checkpoint projection has invalid tool result coordinates")
 		}
-		key := fmt.Sprintf("%s/%q/%d/%d/%s/%s", ref.Target, ref.SubGraphPath,
-			ref.ContextIndex, ref.ParentDepth, ref.RerunExtraKey, ref.ToolCallID)
-		if _, exists := seen[key]; exists {
-			return fmt.Errorf("checkpoint projection has duplicate tool result target %q", key)
+		if err := validateInfoToolResultProjectionTarget(ref); err != nil {
+			return err
 		}
-		seen[key] = struct{}{}
+		coordinates := targetCoordinates{
+			target:        ref.Target,
+			contextIndex:  ref.ContextIndex,
+			parentDepth:   ref.ParentDepth,
+			rerunExtraKey: ref.RerunExtraKey,
+			toolCallID:    ref.ToolCallID,
+		}
+		for _, path := range seen[coordinates] {
+			if checkpointProjectionPathEqual(path, ref.SubGraphPath) {
+				return fmt.Errorf("checkpoint projection has duplicate tool result target %q",
+					ref.ToolCallID)
+			}
+		}
+		seen[coordinates] = append(seen[coordinates],
+			append([]string(nil), ref.SubGraphPath...))
 
 		targetInfo, err := composeInterruptInfoAtPath(info, ref.SubGraphPath)
 		if err != nil {
@@ -263,21 +284,13 @@ func hydrateComposeInterruptInfoToolResults(info *compose.InterruptInfo,
 		var target any
 		switch ref.Target {
 		case infoTargetRerunToolResult:
-			if ref.ContextIndex != -1 || ref.RerunExtraKey == "" {
-				return errors.New("checkpoint projection has invalid rerun tool result target")
-			}
 			target = targetInfo.RerunNodesExtra[ref.RerunExtraKey]
 		case infoTargetContextToolResult:
-			if ref.ContextIndex < 0 {
-				return errors.New("checkpoint projection has invalid context tool result target")
-			}
 			contextInfo, err := interruptContextAt(targetInfo, ref.ContextIndex, ref.ParentDepth)
 			if err != nil {
 				return err
 			}
 			target = contextInfo.Info
-		default:
-			return fmt.Errorf("checkpoint projection has unsupported tool result target %q", ref.Target)
 		}
 		extra, ok := target.(*compose.ToolsInterruptAndRerunExtra)
 		if !ok || extra == nil {
@@ -286,6 +299,22 @@ func hydrateComposeInterruptInfoToolResults(info *compose.InterruptInfo,
 		if err := hydrateInfoToolResult(extra, ref, index); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+func validateInfoToolResultProjectionTarget(ref infoToolResultProjectionV1) error {
+	switch ref.Target {
+	case infoTargetRerunToolResult:
+		if ref.ContextIndex != -1 || ref.ParentDepth != 0 || ref.RerunExtraKey == "" {
+			return errors.New("checkpoint projection has invalid rerun tool result target")
+		}
+	case infoTargetContextToolResult:
+		if ref.ContextIndex < 0 || ref.RerunExtraKey != "" {
+			return errors.New("checkpoint projection has invalid context tool result target")
+		}
+	default:
+		return fmt.Errorf("checkpoint projection has unsupported tool result target %q", ref.Target)
 	}
 	return nil
 }

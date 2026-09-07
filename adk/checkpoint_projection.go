@@ -51,12 +51,14 @@ const (
 	infoTargetContextToolCalls    = "context_tool_calls"
 )
 
+// runnerProjectionSentinelV1 CheckpointSchema: Runner projection V1 sentinel
+// persisted via gob. Keep existing fields compatible; add optional fields only.
 type runnerProjectionSentinelV1 struct {
 	Version int
 }
 
-// checkpointMessageSourceV1 identifies one canonical message by kind, graph
-// path, state index, stable message ID, and content digest.
+// checkpointMessageSourceV1 CheckpointSchema: nested Runner projection V1
+// source identifying a canonical message.
 type checkpointMessageSourceV1 struct {
 	Kind      string
 	GraphPath []string
@@ -65,9 +67,9 @@ type checkpointMessageSourceV1 struct {
 	Digest    string
 }
 
-// runCtxMessageProjectionV1 stores either Source, Inline, or an explicit nil.
-// TargetLength applies only to root-input slices; LaneDepth applies only to
-// lane events.
+// runCtxMessageProjectionV1 CheckpointSchema: nested Runner projection V1
+// metadata storing Source, Inline, or an explicit nil. TargetLength applies to
+// root-input slices; LaneDepth applies to lane events.
 type runCtxMessageProjectionV1 struct {
 	Target        string
 	Index         int
@@ -80,8 +82,9 @@ type runCtxMessageProjectionV1 struct {
 	WasStreaming  bool
 }
 
-// infoMessageProjectionV1 stores either Source, an inline value, or an
-// explicit nil. The target determines which coordinate fields are applicable.
+// infoMessageProjectionV1 CheckpointSchema: nested Runner projection V1
+// metadata storing Source, an inline value, or an explicit nil. Target selects
+// the applicable coordinate fields.
 type infoMessageProjectionV1 struct {
 	Target        string
 	SubGraphPath  []string
@@ -104,8 +107,8 @@ type infoProjectionTarget struct {
 	rerunKey     string
 }
 
-// checkpointProjectionV1 is persisted in serialization. RefCount fields make
-// truncation detectable before hydration mutates any logical checkpoint owner.
+// checkpointProjectionV1 CheckpointSchema: Runner projection V1 metadata
+// persisted in serialization. RefCount fields detect truncation before hydration.
 type checkpointProjectionV1 struct {
 	Version            int
 	SourceInterruptID  string
@@ -117,34 +120,48 @@ type checkpointProjectionV1 struct {
 	ToolResultRefs     []infoToolResultProjectionV1
 }
 
+// checkpointMessagePlaceholderV1 CheckpointSchema: persisted schema-message
+// placeholder in Runner projection V1.
 type checkpointMessagePlaceholderV1 struct {
 	Source checkpointMessageSourceV1
 }
 
+// checkpointMessageSliceEntryV1 CheckpointSchema: nested persisted entry in a
+// schema-message slice placeholder.
 type checkpointMessageSliceEntryV1 struct {
 	Inline *schema.Message
 	Source *checkpointMessageSourceV1
 	IsNil  bool
 }
 
+// checkpointMessageSlicePlaceholderV1 CheckpointSchema: persisted
+// schema-message slice placeholder in Runner projection V1.
 type checkpointMessageSlicePlaceholderV1 struct {
 	Entries []checkpointMessageSliceEntryV1
 }
 
+// checkpointAgenticMessagePlaceholderV1 CheckpointSchema: persisted agentic
+// message placeholder in Runner projection V1.
 type checkpointAgenticMessagePlaceholderV1 struct {
 	Source checkpointMessageSourceV1
 }
 
+// checkpointAgenticMessageSliceEntryV1 CheckpointSchema: nested persisted
+// entry in an agentic-message slice placeholder.
 type checkpointAgenticMessageSliceEntryV1 struct {
 	Inline *schema.AgenticMessage
 	Source *checkpointMessageSourceV1
 	IsNil  bool
 }
 
+// checkpointAgenticMessageSlicePlaceholderV1 CheckpointSchema: persisted
+// agentic-message slice placeholder in Runner projection V1.
 type checkpointAgenticMessageSlicePlaceholderV1 struct {
 	Entries []checkpointAgenticMessageSliceEntryV1
 }
 
+// checkpointInterruptInfoPlaceholderV1 CheckpointSchema: persisted interrupt
+// info placeholder in Runner projection V1.
 type checkpointInterruptInfoPlaceholderV1 struct {
 	Info               *compose.InterruptInfo
 	RefCount           int
@@ -1087,6 +1104,17 @@ func (i *checkpointProjectionIndex) projectAgenticMessages(
 	return entries, projected
 }
 
+func (i *checkpointProjectionIndex) projectComposeAgenticMessages(
+	messages []*schema.AgenticMessage) ([]checkpointAgenticMessageSliceEntryV1, bool) {
+	// Gob cannot re-encode nil pointer elements after compose-value hydration.
+	for _, message := range messages {
+		if message == nil {
+			return nil, false
+		}
+	}
+	return i.projectAgenticMessages(messages)
+}
+
 func checkpointAgenticMessageEntrySource(
 	entry checkpointAgenticMessageSliceEntryV1) checkpointMessageSourceV1 {
 	if entry.Source == nil {
@@ -1135,7 +1163,7 @@ func projectComposeCheckpointValues(data []byte, index *checkpointProjectionInde
 				changed = true
 				return &checkpointAgenticMessagePlaceholderV1{Source: source}, true, nil
 			case []*schema.AgenticMessage:
-				entries, projected := index.projectAgenticMessages(value)
+				entries, projected := index.projectComposeAgenticMessages(value)
 				if !projected {
 					return value, false, nil
 				}
@@ -1181,8 +1209,16 @@ func hydrateComposeCheckpointValues(data []byte, index *checkpointProjectionInde
 							"checkpoint projection cannot restore a nil message into a compose value")
 					}
 					if entry.Source == nil {
+						if entry.Inline == nil {
+							return nil, false, errors.New(
+								"checkpoint projection inline message is missing")
+						}
 						messages[i] = entry.Inline
 						continue
+					}
+					if entry.Inline != nil {
+						return nil, false, errors.New(
+							"checkpoint projection message has both inline data and a source reference")
 					}
 					message, err := index.schemaMessage(*entry.Source)
 					if err != nil {
@@ -1208,8 +1244,16 @@ func hydrateComposeCheckpointValues(data []byte, index *checkpointProjectionInde
 							"checkpoint projection cannot restore a nil agentic message into a compose value")
 					}
 					if entry.Source == nil {
+						if entry.Inline == nil {
+							return nil, false, errors.New(
+								"checkpoint projection inline agentic message is missing")
+						}
 						messages[i] = entry.Inline
 						continue
+					}
+					if entry.Inline != nil {
+						return nil, false, errors.New(
+							"checkpoint projection agentic message has both inline data and a source reference")
 					}
 					message, err := index.agenticMessage(*entry.Source)
 					if err != nil {
@@ -1237,34 +1281,16 @@ func validateRunCtxProjectionRefs(refs []runCtxMessageProjectionV1, expectedCoun
 			return fmt.Errorf("checkpoint projection has invalid run context coordinates %d/%d",
 				ref.LaneDepth, ref.Index)
 		}
-		switch ref.Target {
-		case runCtxTargetRootInput, runCtxTargetAgenticRootInput:
+		if err := validateRunCtxProjectionTarget(ref); err != nil {
+			return err
+		}
+		if ref.Target == runCtxTargetRootInput || ref.Target == runCtxTargetAgenticRootInput {
 			key := runCtxProjectionTargetKey(ref.Target, ref.LaneDepth)
-			if ref.TargetLength <= 0 {
-				return fmt.Errorf("checkpoint projection target %q has invalid length %d",
-					ref.Target, ref.TargetLength)
-			}
-			if ref.Index >= ref.TargetLength {
-				return fmt.Errorf("checkpoint projection target %q index %d exceeds length %d",
-					ref.Target, ref.Index, ref.TargetLength)
-			}
 			if length, exists := sliceLengths[key]; exists && length != ref.TargetLength {
 				return fmt.Errorf("checkpoint projection target %q has inconsistent lengths", key)
 			}
 			sliceLengths[key] = ref.TargetLength
 			sliceCounts[key]++
-		case runCtxTargetEvent, runCtxTargetTypedEvent:
-			if ref.LaneDepth != 0 || ref.TargetLength != 0 || ref.IsNil {
-				return fmt.Errorf("checkpoint projection target %q has invalid lane depth %d",
-					ref.Target, ref.LaneDepth)
-			}
-		case runCtxTargetLaneEvent:
-			if ref.TargetLength != 0 || ref.IsNil {
-				return fmt.Errorf("checkpoint projection target %q has unexpected slice length",
-					ref.Target)
-			}
-		default:
-			return fmt.Errorf("checkpoint projection has unsupported run context target %q", ref.Target)
 		}
 		key := fmt.Sprintf("%s/%d/%d", ref.Target, ref.LaneDepth, ref.Index)
 		if _, exists := seen[key]; exists {
@@ -1277,6 +1303,89 @@ func validateRunCtxProjectionRefs(refs []runCtxMessageProjectionV1, expectedCoun
 		if count != sliceLengths[key] {
 			return fmt.Errorf("checkpoint projection has incomplete run context slice %q", key)
 		}
+	}
+	for _, ref := range refs {
+		kind := projectionMessageKindSchema
+		if ref.Target == runCtxTargetAgenticRootInput || ref.Target == runCtxTargetTypedEvent {
+			kind = projectionMessageKindAgentic
+		}
+		if err := validateProjectionMessagePayload(
+			ref.Source, ref.Inline, ref.AgenticInline, ref.IsNil, kind); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateRunCtxProjectionTarget(ref runCtxMessageProjectionV1) error {
+	switch ref.Target {
+	case runCtxTargetRootInput, runCtxTargetAgenticRootInput:
+		if ref.LaneDepth != 0 {
+			return fmt.Errorf("checkpoint projection target %q has invalid lane depth %d",
+				ref.Target, ref.LaneDepth)
+		}
+		if ref.TargetLength <= 0 {
+			return fmt.Errorf("checkpoint projection target %q has invalid length %d",
+				ref.Target, ref.TargetLength)
+		}
+		if ref.Index >= ref.TargetLength {
+			return fmt.Errorf("checkpoint projection target %q index %d exceeds length %d",
+				ref.Target, ref.Index, ref.TargetLength)
+		}
+		if ref.WasStreaming {
+			return fmt.Errorf("checkpoint projection target %q has unexpected streaming state",
+				ref.Target)
+		}
+	case runCtxTargetEvent, runCtxTargetTypedEvent:
+		if ref.LaneDepth != 0 || ref.TargetLength != 0 || ref.IsNil {
+			return fmt.Errorf("checkpoint projection target %q has invalid lane depth %d",
+				ref.Target, ref.LaneDepth)
+		}
+	case runCtxTargetLaneEvent:
+		if ref.TargetLength != 0 || ref.IsNil {
+			return fmt.Errorf("checkpoint projection target %q has unexpected slice length",
+				ref.Target)
+		}
+	default:
+		return fmt.Errorf("checkpoint projection has unsupported run context target %q", ref.Target)
+	}
+	return nil
+}
+
+func validateProjectionMessagePayload(source checkpointMessageSourceV1, inline *schema.Message,
+	agenticInline *schema.AgenticMessage, isNil bool, kind string) error {
+	sourceActive := source.MessageID != ""
+	sourceHasMetadata := sourceActive || source.Kind != "" || len(source.GraphPath) != 0 ||
+		source.Index != 0 || source.Digest != ""
+	formCount := 0
+	if sourceActive {
+		formCount++
+	}
+	if inline != nil {
+		formCount++
+	}
+	if agenticInline != nil {
+		formCount++
+	}
+	if isNil {
+		formCount++
+	}
+
+	matchingInline := inline != nil
+	if kind == projectionMessageKindAgentic {
+		matchingInline = agenticInline != nil
+	}
+	if !sourceHasMetadata && !matchingInline && !isNil && formCount == 0 {
+		if kind == projectionMessageKindAgentic {
+			return errors.New("checkpoint projection inline agentic message is missing")
+		}
+		return errors.New("checkpoint projection inline message is missing")
+	}
+	if sourceHasMetadata != sourceActive || formCount != 1 ||
+		(kind == projectionMessageKindSchema && agenticInline != nil) ||
+		(kind == projectionMessageKindAgentic && inline != nil) {
+		return fmt.Errorf("checkpoint projection %s message payload must contain exactly one of source, inline, or explicit nil",
+			kind)
 	}
 	return nil
 }
@@ -1293,29 +1402,8 @@ func validateInfoProjectionRefs(refs []infoMessageProjectionV1, expectedCount in
 		if ref.ParentDepth < 0 {
 			return fmt.Errorf("checkpoint projection has invalid parent depth %d", ref.ParentDepth)
 		}
-		switch ref.Target {
-		case infoTargetStateMessage:
-			if ref.ContextIndex != -1 || ref.MessageIndex < 0 ||
-				ref.TargetLength <= 0 || ref.MessageIndex >= ref.TargetLength {
-				return errors.New("checkpoint projection has invalid interrupt state coordinates")
-			}
-		case infoTargetContextStateMessage:
-			if ref.ContextIndex < 0 || ref.MessageIndex < 0 ||
-				ref.TargetLength <= 0 || ref.MessageIndex >= ref.TargetLength {
-				return errors.New("checkpoint projection has invalid context state coordinates")
-			}
-		case infoTargetRerunToolCalls:
-			if ref.ContextIndex != -1 || ref.MessageIndex != -1 ||
-				ref.RerunExtraKey == "" || ref.TargetLength != 0 || ref.IsNil {
-				return errors.New("checkpoint projection has invalid rerun tool calls coordinates")
-			}
-		case infoTargetContextToolCalls:
-			if ref.ContextIndex < 0 || ref.MessageIndex != -1 ||
-				ref.TargetLength != 0 || ref.IsNil {
-				return errors.New("checkpoint projection has invalid context tool calls coordinates")
-			}
-		default:
-			return fmt.Errorf("checkpoint projection has unsupported interrupt info target %q", ref.Target)
+		if err := validateInfoProjectionTarget(ref); err != nil {
+			return err
 		}
 		key := fmt.Sprintf("%s/%q/%d/%d/%s/%d", ref.Target, ref.SubGraphPath,
 			ref.ContextIndex, ref.ParentDepth, ref.RerunExtraKey, ref.MessageIndex)
@@ -1337,6 +1425,34 @@ func validateInfoProjectionRefs(refs []infoMessageProjectionV1, expectedCount in
 		if count != sliceLengths[key] {
 			return fmt.Errorf("checkpoint projection has incomplete interrupt info slice %q", key)
 		}
+	}
+	return nil
+}
+
+func validateInfoProjectionTarget(ref infoMessageProjectionV1) error {
+	switch ref.Target {
+	case infoTargetStateMessage:
+		if ref.ContextIndex != -1 || ref.ParentDepth != 0 || ref.RerunExtraKey != "" ||
+			ref.MessageIndex < 0 || ref.TargetLength <= 0 || ref.MessageIndex >= ref.TargetLength {
+			return errors.New("checkpoint projection has invalid interrupt state coordinates")
+		}
+	case infoTargetContextStateMessage:
+		if ref.ContextIndex < 0 || ref.RerunExtraKey != "" || ref.MessageIndex < 0 ||
+			ref.TargetLength <= 0 || ref.MessageIndex >= ref.TargetLength {
+			return errors.New("checkpoint projection has invalid context state coordinates")
+		}
+	case infoTargetRerunToolCalls:
+		if ref.ContextIndex != -1 || ref.ParentDepth != 0 || ref.MessageIndex != -1 ||
+			ref.RerunExtraKey == "" || ref.TargetLength != 0 || ref.IsNil {
+			return errors.New("checkpoint projection has invalid rerun tool calls coordinates")
+		}
+	case infoTargetContextToolCalls:
+		if ref.ContextIndex < 0 || ref.RerunExtraKey != "" || ref.MessageIndex != -1 ||
+			ref.TargetLength != 0 || ref.IsNil {
+			return errors.New("checkpoint projection has invalid context tool calls coordinates")
+		}
+	default:
+		return fmt.Errorf("checkpoint projection has unsupported interrupt info target %q", ref.Target)
 	}
 	return nil
 }
@@ -1525,6 +1641,11 @@ func hydrateInterruptInfoMessages(info *InterruptInfo, refs []infoMessageProject
 func hydrateComposeInterruptInfoRefs(info *compose.InterruptInfo, refs []infoMessageProjectionV1,
 	index *checkpointProjectionIndex) error {
 	for _, ref := range refs {
+		if err := validateComposeInterruptInfoRefPayload(info, ref); err != nil {
+			return err
+		}
+	}
+	for _, ref := range refs {
 		targetInfo, err := composeInterruptInfoAtPath(info, ref.SubGraphPath)
 		if err != nil {
 			return err
@@ -1578,8 +1699,51 @@ func hydrateComposeInterruptInfoRefs(info *compose.InterruptInfo, refs []infoMes
 	return nil
 }
 
+func validateComposeInterruptInfoRefPayload(info *compose.InterruptInfo,
+	ref infoMessageProjectionV1) error {
+	targetInfo, err := composeInterruptInfoAtPath(info, ref.SubGraphPath)
+	if err != nil {
+		return err
+	}
+	switch ref.Target {
+	case infoTargetStateMessage:
+		return validateInfoStateMessagePayload(targetInfo.State, ref)
+	case infoTargetContextStateMessage, infoTargetContextToolCalls:
+		contextInfo, err := interruptContextAt(targetInfo, ref.ContextIndex, ref.ParentDepth)
+		if err != nil {
+			return err
+		}
+		if ref.Target == infoTargetContextStateMessage {
+			return validateInfoStateMessagePayload(contextInfo.Info, ref)
+		}
+		return validateProjectionMessagePayload(
+			ref.Source, ref.Inline, ref.AgenticInline, ref.IsNil, projectionMessageKindSchema)
+	case infoTargetRerunToolCalls:
+		return validateProjectionMessagePayload(
+			ref.Source, ref.Inline, ref.AgenticInline, ref.IsNil, projectionMessageKindSchema)
+	default:
+		return fmt.Errorf("checkpoint projection has unsupported interrupt info target %q", ref.Target)
+	}
+}
+
+func validateInfoStateMessagePayload(target any, ref infoMessageProjectionV1) error {
+	switch target.(type) {
+	case *State:
+		return validateProjectionMessagePayload(
+			ref.Source, ref.Inline, ref.AgenticInline, ref.IsNil, projectionMessageKindSchema)
+	case *agenticState:
+		return validateProjectionMessagePayload(
+			ref.Source, ref.Inline, ref.AgenticInline, ref.IsNil, projectionMessageKindAgentic)
+	default:
+		return fmt.Errorf("checkpoint projection has invalid state message target type %T", target)
+	}
+}
+
 func hydrateInfoStateMessage(target any, ref infoMessageProjectionV1,
 	targetLength int, index *checkpointProjectionIndex) error {
+	if err := validateInfoStateMessagePayload(target, ref); err != nil {
+		return err
+	}
 	switch state := target.(type) {
 	case *State:
 		message, err := projectedSchemaMessage(ref.Source, ref.Inline, ref.IsNil, index)

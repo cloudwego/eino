@@ -90,6 +90,339 @@ func TestAttack_ProjectionRejectsNegativeLaneDepth(t *testing.T) {
 		"negative lane depth must not select the root lane")
 }
 
+func TestAttack_ProjectionRejectsIgnoredMessageTargetCoordinates(t *testing.T) {
+	tests := []struct {
+		name string
+		ref  runCtxMessageProjectionV1
+		err  string
+	}{
+		{
+			name: "schema_root_input_lane_depth",
+			ref: runCtxMessageProjectionV1{
+				Target:       runCtxTargetRootInput,
+				Index:        0,
+				LaneDepth:    1,
+				TargetLength: 1,
+			},
+			err: `checkpoint projection target "root_input" has invalid lane depth 1`,
+		},
+		{
+			name: "agentic_root_input_lane_depth",
+			ref: runCtxMessageProjectionV1{
+				Target:       runCtxTargetAgenticRootInput,
+				Index:        0,
+				LaneDepth:    1,
+				TargetLength: 1,
+			},
+			err: `checkpoint projection target "agentic_root_input" has invalid lane depth 1`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.EqualError(t, validateRunCtxProjectionRefs(
+				[]runCtxMessageProjectionV1{tt.ref}, 1), tt.err)
+		})
+	}
+
+	infoTests := []struct {
+		name string
+		ref  infoMessageProjectionV1
+		err  string
+	}{
+		{
+			name: "state_parent_depth",
+			ref: infoMessageProjectionV1{
+				Target:       infoTargetStateMessage,
+				ContextIndex: -1,
+				ParentDepth:  1,
+				MessageIndex: 0,
+				TargetLength: 1,
+			},
+			err: "checkpoint projection has invalid interrupt state coordinates",
+		},
+		{
+			name: "state_rerun_extra_key",
+			ref: infoMessageProjectionV1{
+				Target:        infoTargetStateMessage,
+				ContextIndex:  -1,
+				RerunExtraKey: "ignored",
+				MessageIndex:  0,
+				TargetLength:  1,
+			},
+			err: "checkpoint projection has invalid interrupt state coordinates",
+		},
+		{
+			name: "context_state_rerun_extra_key",
+			ref: infoMessageProjectionV1{
+				Target:        infoTargetContextStateMessage,
+				ContextIndex:  0,
+				RerunExtraKey: "ignored",
+				MessageIndex:  0,
+				TargetLength:  1,
+			},
+			err: "checkpoint projection has invalid context state coordinates",
+		},
+		{
+			name: "rerun_tool_calls_parent_depth",
+			ref: infoMessageProjectionV1{
+				Target:        infoTargetRerunToolCalls,
+				ContextIndex:  -1,
+				ParentDepth:   1,
+				RerunExtraKey: "tools",
+				MessageIndex:  -1,
+			},
+			err: "checkpoint projection has invalid rerun tool calls coordinates",
+		},
+		{
+			name: "context_tool_calls_rerun_extra_key",
+			ref: infoMessageProjectionV1{
+				Target:        infoTargetContextToolCalls,
+				ContextIndex:  0,
+				RerunExtraKey: "ignored",
+				MessageIndex:  -1,
+			},
+			err: "checkpoint projection has invalid context tool calls coordinates",
+		},
+	}
+	for _, tt := range infoTests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.EqualError(t, validateInfoProjectionRefs(
+				[]infoMessageProjectionV1{tt.ref}, 1), tt.err)
+		})
+	}
+}
+
+func TestAttack_ProjectionRejectsConflictingAndIgnoredPayloadFields(t *testing.T) {
+	schemaCanonical := schema.UserMessage("schema canonical")
+	typedSetMessageID(schemaCanonical, "schema-canonical")
+	agenticCanonical := schema.UserAgenticMessage("agentic canonical")
+	typedSetMessageID(agenticCanonical, "agentic-canonical")
+	schemaInline := schema.UserMessage("schema inline")
+	agenticInline := schema.UserAgenticMessage("agentic inline")
+
+	index := &checkpointProjectionIndex{byID: make(map[string][]canonicalCheckpointMessage)}
+	index.addSchemaMessage(nil, 0, schemaCanonical)
+	index.addAgenticMessage(nil, 0, agenticCanonical)
+	schemaSource, ok := index.sourceForSchemaMessage(schemaCanonical)
+	require.True(t, ok)
+	agenticSource, ok := index.sourceForAgenticMessage(agenticCanonical)
+	require.True(t, ok)
+
+	t.Run("valid_run_context_forms", func(t *testing.T) {
+		tests := []struct {
+			name    string
+			agentic bool
+			ref     runCtxMessageProjectionV1
+		}{
+			{
+				name: "schema_source",
+				ref: runCtxMessageProjectionV1{
+					Target: runCtxTargetRootInput, TargetLength: 1, Source: schemaSource,
+				},
+			},
+			{
+				name: "schema_inline",
+				ref: runCtxMessageProjectionV1{
+					Target: runCtxTargetRootInput, TargetLength: 1, Inline: schemaInline,
+				},
+			},
+			{
+				name: "schema_explicit_nil",
+				ref: runCtxMessageProjectionV1{
+					Target: runCtxTargetRootInput, TargetLength: 1, IsNil: true,
+				},
+			},
+			{
+				name:    "agentic_source",
+				agentic: true,
+				ref: runCtxMessageProjectionV1{
+					Target: runCtxTargetAgenticRootInput, TargetLength: 1, Source: agenticSource,
+				},
+			},
+			{
+				name:    "agentic_inline",
+				agentic: true,
+				ref: runCtxMessageProjectionV1{
+					Target: runCtxTargetAgenticRootInput, TargetLength: 1, AgenticInline: agenticInline,
+				},
+			},
+			{
+				name:    "agentic_explicit_nil",
+				agentic: true,
+				ref: runCtxMessageProjectionV1{
+					Target: runCtxTargetAgenticRootInput, TargetLength: 1, IsNil: true,
+				},
+			},
+		}
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				runCtx := &runContext{RootInput: &AgentInput{}}
+				if tt.agentic {
+					runCtx.AgenticRootInput = &TypedAgentInput[*schema.AgenticMessage]{}
+				}
+				require.NoError(t, hydrateRunContextMessages(
+					runCtx, []runCtxMessageProjectionV1{tt.ref}, 1, index))
+			})
+		}
+	})
+
+	t.Run("invalid_run_context_forms", func(t *testing.T) {
+		const schemaPayloadError = "checkpoint projection schema message payload must contain exactly one of source, inline, or explicit nil"
+		const agenticPayloadError = "checkpoint projection agentic message payload must contain exactly one of source, inline, or explicit nil"
+		tests := []struct {
+			name    string
+			agentic bool
+			ref     runCtxMessageProjectionV1
+			err     string
+		}{
+			{
+				name: "schema_matching_and_opposite_inline",
+				ref: runCtxMessageProjectionV1{
+					Target: runCtxTargetRootInput, TargetLength: 1,
+					Inline: schemaInline, AgenticInline: agenticInline,
+				},
+				err: schemaPayloadError,
+			},
+			{
+				name: "schema_source_and_opposite_inline",
+				ref: runCtxMessageProjectionV1{
+					Target: runCtxTargetRootInput, TargetLength: 1,
+					Source: schemaSource, AgenticInline: agenticInline,
+				},
+				err: schemaPayloadError,
+			},
+			{
+				name: "schema_nil_and_matching_inline",
+				ref: runCtxMessageProjectionV1{
+					Target: runCtxTargetRootInput, TargetLength: 1,
+					Inline: schemaInline, IsNil: true,
+				},
+				err: schemaPayloadError,
+			},
+			{
+				name: "schema_nil_and_opposite_inline",
+				ref: runCtxMessageProjectionV1{
+					Target: runCtxTargetRootInput, TargetLength: 1,
+					AgenticInline: agenticInline, IsNil: true,
+				},
+				err: schemaPayloadError,
+			},
+			{
+				name: "schema_partial_source",
+				ref: runCtxMessageProjectionV1{
+					Target: runCtxTargetRootInput, TargetLength: 1,
+					Source: checkpointMessageSourceV1{Kind: projectionMessageKindSchema},
+					Inline: schemaInline,
+				},
+				err: schemaPayloadError,
+			},
+			{
+				name: "schema_ignored_streaming",
+				ref: runCtxMessageProjectionV1{
+					Target: runCtxTargetRootInput, TargetLength: 1,
+					Inline: schemaInline, WasStreaming: true,
+				},
+				err: `checkpoint projection target "root_input" has unexpected streaming state`,
+			},
+			{
+				name:    "agentic_matching_and_opposite_inline",
+				agentic: true,
+				ref: runCtxMessageProjectionV1{
+					Target: runCtxTargetAgenticRootInput, TargetLength: 1,
+					Inline: schemaInline, AgenticInline: agenticInline,
+				},
+				err: agenticPayloadError,
+			},
+			{
+				name:    "agentic_source_and_opposite_inline",
+				agentic: true,
+				ref: runCtxMessageProjectionV1{
+					Target: runCtxTargetAgenticRootInput, TargetLength: 1,
+					Source: agenticSource, Inline: schemaInline,
+				},
+				err: agenticPayloadError,
+			},
+			{
+				name:    "agentic_nil_and_matching_inline",
+				agentic: true,
+				ref: runCtxMessageProjectionV1{
+					Target: runCtxTargetAgenticRootInput, TargetLength: 1,
+					AgenticInline: agenticInline, IsNil: true,
+				},
+				err: agenticPayloadError,
+			},
+			{
+				name:    "agentic_nil_and_opposite_inline",
+				agentic: true,
+				ref: runCtxMessageProjectionV1{
+					Target: runCtxTargetAgenticRootInput, TargetLength: 1,
+					Inline: schemaInline, IsNil: true,
+				},
+				err: agenticPayloadError,
+			},
+			{
+				name:    "agentic_partial_source",
+				agentic: true,
+				ref: runCtxMessageProjectionV1{
+					Target: runCtxTargetAgenticRootInput, TargetLength: 1,
+					Source:        checkpointMessageSourceV1{Digest: "partial"},
+					AgenticInline: agenticInline,
+				},
+				err: agenticPayloadError,
+			},
+			{
+				name:    "agentic_ignored_streaming",
+				agentic: true,
+				ref: runCtxMessageProjectionV1{
+					Target: runCtxTargetAgenticRootInput, TargetLength: 1,
+					AgenticInline: agenticInline, WasStreaming: true,
+				},
+				err: `checkpoint projection target "agentic_root_input" has unexpected streaming state`,
+			},
+		}
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				runCtx := &runContext{RootInput: &AgentInput{}}
+				if tt.agentic {
+					runCtx.AgenticRootInput = &TypedAgentInput[*schema.AgenticMessage]{}
+				}
+				require.EqualError(t, hydrateRunContextMessages(
+					runCtx, []runCtxMessageProjectionV1{tt.ref}, 1, index), tt.err)
+				require.Nil(t, runCtx.RootInput.Messages)
+				if tt.agentic {
+					require.Nil(t, runCtx.AgenticRootInput.(*TypedAgentInput[*schema.AgenticMessage]).Messages)
+				}
+			})
+		}
+	})
+
+	t.Run("interrupt_state_opposite_inline", func(t *testing.T) {
+		schemaState := &State{}
+		schemaRef := infoMessageProjectionV1{
+			Target: infoTargetStateMessage, ContextIndex: -1,
+			MessageIndex: 0, TargetLength: 1,
+			Inline: schemaInline, AgenticInline: agenticInline,
+		}
+		require.EqualError(t, hydrateComposeInterruptInfoRefs(
+			&compose.InterruptInfo{State: schemaState},
+			[]infoMessageProjectionV1{schemaRef}, index),
+			"checkpoint projection schema message payload must contain exactly one of source, inline, or explicit nil")
+		require.Nil(t, schemaState.Messages)
+
+		agenticState := &agenticState{}
+		agenticRef := infoMessageProjectionV1{
+			Target: infoTargetStateMessage, ContextIndex: -1,
+			MessageIndex: 0, TargetLength: 1,
+			Inline: schemaInline, AgenticInline: agenticInline,
+		}
+		require.EqualError(t, hydrateComposeInterruptInfoRefs(
+			&compose.InterruptInfo{State: agenticState},
+			[]infoMessageProjectionV1{agenticRef}, index),
+			"checkpoint projection agentic message payload must contain exactly one of source, inline, or explicit nil")
+		require.Nil(t, agenticState.Messages)
+	})
+}
+
 func TestAttack_ProjectionRejectsMissingSliceReference(t *testing.T) {
 	// Attack: remove the final reference from a projected two-message root input.
 	// Impact: hydration can silently truncate chat history without any decode error.
@@ -112,7 +445,7 @@ func TestAttack_ProjectionRejectsMissingSliceReference(t *testing.T) {
 	projection.RunCtxRefCount--
 	err := hydrateRunContextMessages(projected, projection.RunCtxRefs[:1],
 		projection.RunCtxRefCount, index)
-	require.Error(t, err, "a missing projection entry silently truncated the root input")
+	require.ErrorContains(t, err, "incomplete run context slice")
 }
 
 func TestAttack_ProjectionRejectsImplicitNilSliceEntry(t *testing.T) {
@@ -152,7 +485,137 @@ func TestAttack_ProjectionRejectsImplicitNilSliceEntry(t *testing.T) {
 	require.True(t, replaced)
 
 	_, err = hydrateComposeCheckpointValues(corrupt, index)
-	require.Error(t, err, "an implicit nil placeholder entry was accepted as valid checkpoint data")
+	require.ErrorContains(t, err, "inline message is missing")
+
+	replaced = false
+	corrupt, err = compose.TransformCheckpointValues(sourceData, &gobSerializer{},
+		func(_ compose.NodePath, location compose.CheckpointValueLocation, value any) (any, bool, error) {
+			if replaced || location.Kind == compose.CheckpointValueState {
+				return value, false, nil
+			}
+			replaced = true
+			return &checkpointAgenticMessageSlicePlaceholderV1{
+				Entries: []checkpointAgenticMessageSliceEntryV1{{}},
+			}, true, nil
+		})
+	require.NoError(t, err)
+	require.True(t, replaced)
+
+	_, err = hydrateComposeCheckpointValues(corrupt, index)
+	require.ErrorContains(t, err, "inline agentic message is missing")
+}
+
+func TestAttack_ProjectionRejectsConflictingComposeSliceEntryPayloads(t *testing.T) {
+	spec := checkpointCompatFixture{
+		Name:         "attack-conflicting-compose-slice-entry",
+		Depth:        1,
+		PayloadField: "content",
+		PayloadSize:  1024,
+	}
+	raw, _, _ := captureCheckpointCompatFixture(t, spec)
+	var outer serialization
+	require.NoError(t, gob.NewDecoder(bytes.NewReader(raw)).Decode(&outer))
+	require.NotNil(t, outer.ProjectionV1)
+
+	sourceData, ok := outer.InterruptID2State[outer.ProjectionV1.SourceInterruptID].State.([]byte)
+	require.True(t, ok)
+	index, err := buildCheckpointProjectionIndex(sourceData)
+	require.NoError(t, err)
+
+	schemaMessage := schema.UserMessage("schema")
+	typedSetMessageID(schemaMessage, "conflicting-schema-message")
+	index.addSchemaMessage(nil, 0, schemaMessage)
+	schemaSource, ok := index.sourceForSchemaMessage(schemaMessage)
+	require.True(t, ok)
+
+	agenticMessage := schema.UserAgenticMessage("agentic")
+	typedSetMessageID(agenticMessage, "conflicting-agentic-message")
+	index.addAgenticMessage(nil, 0, agenticMessage)
+	agenticSource, ok := index.sourceForAgenticMessage(agenticMessage)
+	require.True(t, ok)
+
+	tests := []struct {
+		name        string
+		replacement any
+	}{
+		{
+			name: "schema",
+			replacement: &checkpointMessageSlicePlaceholderV1{
+				Entries: []checkpointMessageSliceEntryV1{{
+					Source: &schemaSource,
+					Inline: schemaMessage,
+				}},
+			},
+		},
+		{
+			name: "agentic",
+			replacement: &checkpointAgenticMessageSlicePlaceholderV1{
+				Entries: []checkpointAgenticMessageSliceEntryV1{{
+					Source: &agenticSource,
+					Inline: agenticMessage,
+				}},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			replaced := false
+			corrupt, transformErr := compose.TransformCheckpointValues(sourceData, &gobSerializer{},
+				func(_ compose.NodePath, location compose.CheckpointValueLocation,
+					value any) (any, bool, error) {
+					if replaced || location.Kind == compose.CheckpointValueState {
+						return value, false, nil
+					}
+					replaced = true
+					return tt.replacement, true, nil
+				})
+			require.NoError(t, transformErr)
+			require.True(t, replaced)
+
+			_, hydrateErr := hydrateComposeCheckpointValues(corrupt, index)
+			require.ErrorContains(t, hydrateErr, "both inline data and a source reference",
+				"a compose slice entry with both source and inline payload was accepted")
+		})
+	}
+}
+
+func TestAttack_ProjectionKeepsNilAgenticComposeSliceInline(t *testing.T) {
+	spec := checkpointCompatFixture{
+		Name:         "attack-nil-agentic-compose-slice",
+		Cancel:       true,
+		PayloadField: "content",
+		PayloadSize:  1024,
+	}
+	raw, _, _ := captureCheckpointCompatFixture(t, spec)
+	var outer serialization
+	require.NoError(t, gob.NewDecoder(bytes.NewReader(raw)).Decode(&outer))
+	require.NotNil(t, outer.ProjectionV1)
+	sourceID := outer.ProjectionV1.SourceInterruptID
+	require.NoError(t, restoreRunnerCheckpointProjection(&outer))
+	sourceData, ok := outer.InterruptID2State[sourceID].State.([]byte)
+	require.True(t, ok)
+
+	canonical := schema.UserAgenticMessage("canonical")
+	typedSetMessageID(canonical, "nil-agentic-canonical")
+	prepared, err := compose.TransformCheckpointValues(sourceData, &gobSerializer{},
+		func(_ compose.NodePath, location compose.CheckpointValueLocation, value any) (any, bool, error) {
+			if location.Kind == compose.CheckpointValueState {
+				return &agenticState{Messages: []*schema.AgenticMessage{canonical}}, true, nil
+			}
+			return value, false, nil
+		})
+	require.NoError(t, err)
+
+	index, err := buildCheckpointProjectionIndex(prepared)
+	require.NoError(t, err)
+	messages := []*schema.AgenticMessage{nil, canonical}
+	entries, projected := index.projectComposeAgenticMessages(messages)
+	require.False(t, projected,
+		"a compose slice containing nil must remain inline instead of producing an unhydratable projection")
+	require.Nil(t, entries)
+	require.Len(t, messages, 2)
+	require.Nil(t, messages[0])
+	require.Equal(t, canonical, messages[1])
 }
 
 func TestAttack_ProjectionRejectsNilEventReference(t *testing.T) {
@@ -172,7 +635,8 @@ func TestAttack_ProjectionRejectsNilEventReference(t *testing.T) {
 	index := &checkpointProjectionIndex{byID: make(map[string][]canonicalCheckpointMessage)}
 
 	err := hydrateRunContextMessages(runCtx, []runCtxMessageProjectionV1{ref}, 1, index)
-	require.Error(t, err, "a scalar event reference accepted an impossible nil projection")
+	require.EqualError(t, err,
+		`checkpoint projection target "event" has invalid lane depth 0`)
 }
 
 func TestAttack_ProjectionSourceSelectionIsDeterministic(t *testing.T) {
@@ -187,7 +651,12 @@ func TestAttack_ProjectionSourceSelectionIsDeterministic(t *testing.T) {
 	raw, _, _ := captureCheckpointCompatFixture(t, spec)
 	var outer serialization
 	require.NoError(t, gob.NewDecoder(bytes.NewReader(raw)).Decode(&outer))
-	sourceData := outer.InterruptID2State[outer.ProjectionV1.SourceInterruptID].State.([]byte)
+	require.NotNil(t, outer.ProjectionV1)
+	sourceID := outer.ProjectionV1.SourceInterruptID
+	source, exists := outer.InterruptID2State[sourceID]
+	require.True(t, exists)
+	sourceData, ok := source.State.([]byte)
+	require.True(t, ok)
 
 	states := map[string]core.InterruptState{
 		"z-source": {State: sourceData},
@@ -221,6 +690,106 @@ func TestAttack_ProjectionRejectsToolResultCallIDRelabel(t *testing.T) {
 
 	err := hydrateInfoToolResult(&compose.ToolsInterruptAndRerunExtra{}, ref, index)
 	require.ErrorContains(t, err, "tool call ID")
+}
+
+func TestAttack_ToolResultProjectionCoordinatesDoNotAlias(t *testing.T) {
+	firstSource := checkpointToolResultSourceV1{
+		Kind:        projectionToolResultKindString,
+		InterruptID: "interrupt",
+		ToolCallID:  "b/c",
+		Digest:      "first-digest",
+	}
+	secondSource := checkpointToolResultSourceV1{
+		Kind:        projectionToolResultKindString,
+		InterruptID: "interrupt",
+		ToolCallID:  "c",
+		Digest:      "second-digest",
+	}
+	index := &checkpointProjectionIndex{toolResultsByCallID: map[string][]canonicalCheckpointToolResult{
+		"b/c": {{source: firstSource, text: "first-result"}},
+		"c":   {{source: secondSource, text: "second-result"}},
+	}}
+	firstTarget := &compose.ToolsInterruptAndRerunExtra{}
+	secondTarget := &compose.ToolsInterruptAndRerunExtra{}
+	info := &compose.InterruptInfo{RerunNodesExtra: map[string]any{
+		"a":   firstTarget,
+		"a/b": secondTarget,
+	}}
+	refs := []infoToolResultProjectionV1{
+		{
+			Target:        infoTargetRerunToolResult,
+			ContextIndex:  -1,
+			RerunExtraKey: "a",
+			ToolCallID:    "b/c",
+			Source:        firstSource,
+		},
+		{
+			Target:        infoTargetRerunToolResult,
+			ContextIndex:  -1,
+			RerunExtraKey: "a/b",
+			ToolCallID:    "c",
+			Source:        secondSource,
+		},
+	}
+
+	require.NoError(t, hydrateComposeInterruptInfoToolResults(info, refs, len(refs), index))
+	require.Equal(t, map[string]string{"b/c": "first-result"}, firstTarget.ExecutedTools)
+	require.Equal(t, map[string]string{"c": "second-result"}, secondTarget.ExecutedTools)
+}
+
+func TestAttack_ProjectionRejectsIgnoredToolResultTargetCoordinates(t *testing.T) {
+	source := checkpointToolResultSourceV1{
+		Kind:        projectionToolResultKindString,
+		InterruptID: "interrupt",
+		ToolCallID:  "call",
+		Digest:      "digest",
+	}
+	index := &checkpointProjectionIndex{toolResultsByCallID: map[string][]canonicalCheckpointToolResult{
+		"call": {{source: source, text: "result"}},
+	}}
+
+	tests := []struct {
+		name string
+		ref  infoToolResultProjectionV1
+		info *compose.InterruptInfo
+		err  string
+	}{
+		{
+			name: "rerun_parent_depth",
+			ref: infoToolResultProjectionV1{
+				Target:        infoTargetRerunToolResult,
+				ContextIndex:  -1,
+				ParentDepth:   1,
+				RerunExtraKey: "tools",
+				ToolCallID:    "call",
+				Source:        source,
+			},
+			info: &compose.InterruptInfo{RerunNodesExtra: map[string]any{
+				"tools": &compose.ToolsInterruptAndRerunExtra{},
+			}},
+			err: "checkpoint projection has invalid rerun tool result target",
+		},
+		{
+			name: "context_rerun_extra_key",
+			ref: infoToolResultProjectionV1{
+				Target:        infoTargetContextToolResult,
+				ContextIndex:  0,
+				RerunExtraKey: "ignored",
+				ToolCallID:    "call",
+				Source:        source,
+			},
+			info: &compose.InterruptInfo{InterruptContexts: []*InterruptCtx{{
+				Info: &compose.ToolsInterruptAndRerunExtra{},
+			}}},
+			err: "checkpoint projection has invalid context tool result target",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.EqualError(t, hydrateComposeInterruptInfoToolResults(
+				tt.info, []infoToolResultProjectionV1{tt.ref}, 1, index), tt.err)
+		})
+	}
 }
 
 func TestAttack_ProjectionRejectsCrossKindToolResultConflict(t *testing.T) {

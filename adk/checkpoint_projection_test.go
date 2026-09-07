@@ -127,6 +127,120 @@ func TestRunnerCheckpointProjectionRoundTrip(t *testing.T) {
 		"checkpoint projection must not mutate the live interrupt event")
 }
 
+func TestRunnerCheckpointProjectionProfitability(t *testing.T) {
+	tests := []struct {
+		name           string
+		payloadSize    int
+		wantProjection bool
+	}{
+		{name: "small", payloadSize: 64},
+		{name: "large", payloadSize: 320 << 10, wantProjection: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			spec := checkpointCompatFixture{
+				Name:         "projection-profitability-" + tt.name,
+				Depth:        1,
+				PayloadField: "content",
+				PayloadSize:  tt.payloadSize,
+			}
+			raw, interruptIDs, _ := captureCheckpointCompatFixture(t, spec)
+			var persisted serialization
+			require.NoError(t, gob.NewDecoder(bytes.NewReader(raw)).Decode(&persisted))
+
+			var projectedData, unprojectedData []byte
+			if tt.wantProjection {
+				require.NotNil(t, persisted.ProjectionV1)
+				require.Contains(t, persisted.InterruptID2State, runnerProjectionSentinelID)
+				projectedData = raw
+
+				require.NoError(t, restoreRunnerCheckpointProjection(&persisted))
+				persisted.ProjectionV1 = nil
+				var err error
+				unprojectedData, err = encodeRunnerCheckpoint(&persisted)
+				require.NoError(t, err)
+
+				require.Less(t, len(projectedData), len(unprojectedData))
+				require.Less(t, len(projectedData), 1<<20,
+					"large payload checkpoint must retain its linear size bound")
+			} else {
+				require.Nil(t, persisted.ProjectionV1)
+				require.NotContains(t, persisted.InterruptID2State, runnerProjectionSentinelID)
+				unprojectedData = raw
+
+				projectedRunCtx, projectedInfo, projectedStates, projection, err :=
+					projectRunnerCheckpoint(persisted.RunCtx, persisted.Info,
+						persisted.InfoDataSourceInterruptID, persisted.InterruptID2State)
+				require.NoError(t, err)
+				require.NotNil(t, projection, "small fixture must exercise the profitability gate")
+				projectedData, err = encodeRunnerCheckpoint(&serialization{
+					RunCtx:                    projectedRunCtx,
+					Info:                      projectedInfo,
+					InfoDataSourceInterruptID: persisted.InfoDataSourceInterruptID,
+					ProjectionV1:              projection,
+					EnableStreaming:           persisted.EnableStreaming,
+					InterruptID2Address:       persisted.InterruptID2Address,
+					InterruptID2State:         projectedStates,
+				})
+				require.NoError(t, err)
+				require.LessOrEqual(t, len(unprojectedData), len(projectedData),
+					"projection must not enlarge the persisted checkpoint")
+			}
+			t.Logf("payload=%d unprojected=%d projected=%d projection_persisted=%t",
+				tt.payloadSize, len(unprojectedData), len(projectedData), tt.wantProjection)
+
+			projectedMessages := resumeCheckpointProjectionFixture(
+				t, spec, projectedData, interruptIDs)
+			unprojectedMessages := resumeCheckpointProjectionFixture(
+				t, spec, unprojectedData, interruptIDs)
+			require.Equal(t, unprojectedMessages, projectedMessages)
+			require.NotEmpty(t, projectedMessages)
+			require.Equal(t, "completed", projectedMessages[len(projectedMessages)-1].Content)
+		})
+	}
+}
+
+func resumeCheckpointProjectionFixture(t *testing.T, spec checkpointCompatFixture,
+	raw []byte, interruptIDs []string) []*schema.Message {
+	t.Helper()
+	store := newCheckpointCompatStore()
+	require.NoError(t, store.Set(context.Background(), spec.Name, raw))
+	runner := NewRunner(context.Background(), RunnerConfig{
+		Agent: newCheckpointCompatAgent(t, spec.Depth, spec.ParallelChildren,
+			spec.PayloadField, spec.PayloadSize),
+		CheckPointStore: store,
+	})
+	targets := make(map[string]any, len(interruptIDs))
+	for _, id := range interruptIDs {
+		targets[id] = "resumed"
+	}
+	iter, err := runner.ResumeWithParams(context.Background(), spec.Name,
+		&ResumeParams{Targets: targets})
+	require.NoError(t, err)
+
+	var messages []*schema.Message
+	for {
+		event, ok := iter.Next()
+		if !ok {
+			break
+		}
+		require.NoError(t, event.Err)
+		require.True(t, event.Action == nil || event.Action.Interrupted == nil,
+			"fully resumed checkpoint must not interrupt again")
+		if event.Output == nil || event.Output.MessageOutput == nil {
+			continue
+		}
+		message, messageErr := event.Output.MessageOutput.GetMessage()
+		require.NoError(t, messageErr)
+		if message != nil {
+			typedSetMessageID(message, "")
+			messages = append(messages, message)
+		}
+	}
+	return messages
+}
+
 func TestRunnerCheckpointProjectionMetadataValidation(t *testing.T) {
 	valid := func() *serialization {
 		return &serialization{
@@ -888,6 +1002,7 @@ func TestCheckpointToolResultProjectionValidation(t *testing.T) {
 
 		ref.Target = infoTargetContextToolResult
 		ref.ContextIndex = -1
+		ref.RerunExtraKey = ""
 		err = hydrateComposeInterruptInfoToolResults(&compose.InterruptInfo{},
 			[]infoToolResultProjectionV1{ref}, 1, index)
 		require.ErrorContains(t, err, "invalid context tool result target")
@@ -1009,7 +1124,13 @@ func TestRunnerCheckpointProjectionAgenticMessages(t *testing.T) {
 	index.addAgenticMessage([]string{"graph"}, 0, message)
 
 	event := EventFromAgenticMessage(message, nil, schema.AgenticRoleTypeUser)
-	events := []*typedAgentEventWrapper[*schema.AgenticMessage]{{event: event}}
+	streamEvent := EventFromAgenticMessage(nil,
+		schema.StreamReaderFromArray([]*schema.AgenticMessage{message}),
+		schema.AgenticRoleTypeUser)
+	events := []*typedAgentEventWrapper[*schema.AgenticMessage]{
+		{event: event},
+		{event: streamEvent},
+	}
 	runCtx := &runContext{
 		AgenticRootInput: &TypedAgentInput[*schema.AgenticMessage]{
 			Messages: []*schema.AgenticMessage{message},
@@ -1024,18 +1145,50 @@ func TestRunnerCheckpointProjectionAgenticMessages(t *testing.T) {
 	cloned := cloneRunContextForCheckpointProjection(runCtx)
 	projection := &checkpointProjectionV1{}
 	projectRunContextMessages(cloned, index, projection)
-	require.Len(t, projection.RunCtxRefs, 2)
+	require.Len(t, projection.RunCtxRefs, 3)
 	rootInput := cloned.AgenticRootInput.(*TypedAgentInput[*schema.AgenticMessage])
 	require.Nil(t, rootInput.Messages)
 	typedEvents := cloned.Session.TypedEvents.(*[]*typedAgentEventWrapper[*schema.AgenticMessage])
 	require.Nil(t, (*typedEvents)[0].event.Output.MessageOutput.Message)
+	require.False(t, (*typedEvents)[1].event.Output.MessageOutput.IsStreaming)
+	require.Nil(t, (*typedEvents)[1].event.Output.MessageOutput.MessageStream)
 
 	require.NoError(t, hydrateRunContextMessages(cloned, projection.RunCtxRefs,
 		projection.RunCtxRefCount, index))
 	require.Equal(t, []*schema.AgenticMessage{message}, rootInput.Messages)
 	require.Equal(t, message, (*typedEvents)[0].event.Output.MessageOutput.Message)
+	require.True(t, (*typedEvents)[1].event.Output.MessageOutput.IsStreaming)
+	restoredStreamMessage, err := (*typedEvents)[1].event.Output.MessageOutput.GetMessage()
+	require.NoError(t, err)
+	require.Equal(t, message, restoredStreamMessage)
 	require.Equal(t, "value", cloned.Session.Values["preserved"])
 	require.Equal(t, "agent", cloned.RunPath[0].String())
+
+	liveTypedEvents := runCtx.Session.TypedEvents.(*[]*typedAgentEventWrapper[*schema.AgenticMessage])
+	liveStreamMessage, err := (*liveTypedEvents)[1].event.Output.MessageOutput.GetMessage()
+	require.NoError(t, err)
+	require.Equal(t, message, liveStreamMessage,
+		"projection must leave an independently readable stream on the live Agentic event")
+}
+
+func TestRunnerCheckpointProjectionAgenticInterruptState(t *testing.T) {
+	canonical := schema.UserAgenticMessage("canonical")
+	typedSetMessageID(canonical, "agentic-state-message")
+	inline := schema.UserAgenticMessage("inline")
+	index := &checkpointProjectionIndex{byID: make(map[string][]canonicalCheckpointMessage)}
+	index.addAgenticMessage([]string{"graph"}, 0, canonical)
+
+	state := &agenticState{Messages: []*schema.AgenticMessage{inline, canonical}}
+	info := &compose.InterruptInfo{State: state}
+	projection := &checkpointProjectionV1{}
+	projectComposeInterruptInfoMessages(info, nil, index, projection)
+	require.Len(t, projection.InfoRefs, 2)
+	require.Nil(t, state.Messages)
+
+	require.NoError(t, hydrateComposeInterruptInfoRefs(info, projection.InfoRefs, index))
+	require.Equal(t, []*schema.AgenticMessage{inline, canonical}, state.Messages)
+	require.NotSame(t, inline, state.Messages[0])
+	require.NotSame(t, canonical, state.Messages[1])
 }
 
 func TestRunnerCheckpointProjectionReusesEnhancedToolResult(t *testing.T) {
@@ -1191,6 +1344,39 @@ func TestRunnerCheckpointProjectionPreservesUnmatchedMessagesInline(t *testing.T
 	require.Equal(t, []*schema.Message{nil, inline, canonical}, cloned.RootInput.Messages)
 }
 
+func TestRunnerCheckpointProjectionAgenticRootInputExplicitNilRoundTrip(t *testing.T) {
+	canonical := schema.UserAgenticMessage("canonical")
+	typedSetMessageID(canonical, "agentic-message")
+	index := &checkpointProjectionIndex{byID: make(map[string][]canonicalCheckpointMessage)}
+	index.addAgenticMessage(nil, 0, canonical)
+
+	inline := schema.UserAgenticMessage("inline")
+	runCtx := &runContext{AgenticRootInput: &TypedAgentInput[*schema.AgenticMessage]{
+		Messages: []*schema.AgenticMessage{nil, inline, canonical},
+	}}
+	cloned := cloneRunContextForCheckpointProjection(runCtx)
+	projection := &checkpointProjectionV1{}
+	projectRunContextMessages(cloned, index, projection)
+	rootInput := cloned.AgenticRootInput.(*TypedAgentInput[*schema.AgenticMessage])
+	require.Nil(t, rootInput.Messages)
+	require.Len(t, projection.RunCtxRefs, 3)
+	require.True(t, projection.RunCtxRefs[0].IsNil)
+	require.Same(t, inline, projection.RunCtxRefs[1].AgenticInline)
+	require.Empty(t, projection.RunCtxRefs[1].Source.MessageID)
+	require.Nil(t, projection.RunCtxRefs[2].AgenticInline)
+	require.Equal(t, "agentic-message", projection.RunCtxRefs[2].Source.MessageID)
+
+	var encoded bytes.Buffer
+	require.NoError(t, gob.NewEncoder(&encoded).Encode(projection))
+	var persisted checkpointProjectionV1
+	require.NoError(t, gob.NewDecoder(&encoded).Decode(&persisted))
+	require.True(t, persisted.RunCtxRefs[0].IsNil)
+
+	require.NoError(t, hydrateRunContextMessages(cloned, persisted.RunCtxRefs,
+		persisted.RunCtxRefCount, index))
+	require.Equal(t, []*schema.AgenticMessage{nil, inline, canonical}, rootInput.Messages)
+}
+
 func TestRunnerCheckpointProjectionRestoresCancelInput(t *testing.T) {
 	spec := checkpointCompatFixture{
 		Name:         "projection-cancel-input",
@@ -1203,25 +1389,42 @@ func TestRunnerCheckpointProjectionRestoresCancelInput(t *testing.T) {
 	require.Less(t, len(raw), 2<<20)
 	var persisted serialization
 	require.NoError(t, gob.NewDecoder(bytes.NewReader(raw)).Decode(&persisted))
-	sourceState := persisted.InterruptID2State[persisted.ProjectionV1.SourceInterruptID]
+	require.NotNil(t, persisted.ProjectionV1)
+	sourceID := persisted.ProjectionV1.SourceInterruptID
+	sourceState, exists := persisted.InterruptID2State[sourceID]
+	require.True(t, exists)
 	sourceData, ok := sourceState.State.([]byte)
 	require.True(t, ok)
-	var projectedInputs int
-	require.NoError(t, compose.WalkCheckpointValues(sourceData, &gobSerializer{},
-		func(_ compose.NodePath, location compose.CheckpointValueLocation, value any) error {
-			if location.Kind != compose.CheckpointValueInput {
+	countInputs := func(data []byte) (visited, projected int) {
+		require.NoError(t, compose.WalkCheckpointValues(data, &gobSerializer{},
+			func(_ compose.NodePath, location compose.CheckpointValueLocation, value any) error {
+				if location.Kind != compose.CheckpointValueInput {
+					return nil
+				}
+				visited++
+				if _, ok := value.(*checkpointMessagePlaceholderV1); ok {
+					projected++
+				}
+				if _, ok := value.(*checkpointMessageSlicePlaceholderV1); ok {
+					projected++
+				}
 				return nil
-			}
-			if _, projected := value.(*checkpointMessagePlaceholderV1); projected {
-				projectedInputs++
-			}
-			if _, projected := value.(*checkpointMessageSlicePlaceholderV1); projected {
-				projectedInputs++
-			}
-			return nil
-		}))
+			}))
+		return visited, projected
+	}
+	visitedInputs, projectedInputs := countInputs(sourceData)
+	require.Positive(t, visitedInputs, "fixture must contain a persisted input")
 	require.Zero(t, projectedInputs,
-		"gob re-encoding cannot project this input while preserving byte-identical ResumeInfo.Data")
+		"cancel input stays inline because projection must preserve byte-identical ResumeInfo.Data")
+
+	require.NoError(t, restoreRunnerCheckpointProjection(&persisted))
+	sourceState, exists = persisted.InterruptID2State[sourceID]
+	require.True(t, exists)
+	sourceData, ok = sourceState.State.([]byte)
+	require.True(t, ok)
+	visitedInputs, projectedInputs = countInputs(sourceData)
+	require.Positive(t, visitedInputs, "restored checkpoint must contain a persisted input")
+	require.Zero(t, projectedInputs, "restored checkpoint input must not retain projection placeholders")
 
 	store := newCheckpointCompatStore()
 	require.NoError(t, store.Set(context.Background(), spec.Name, raw))
@@ -1304,43 +1507,65 @@ func TestRunnerCheckpointProjectionAgenticComposeValues(t *testing.T) {
 	raw, _, _ := captureCheckpointCompatFixture(t, spec)
 	var outer serialization
 	require.NoError(t, gob.NewDecoder(bytes.NewReader(raw)).Decode(&outer))
+	require.NotNil(t, outer.ProjectionV1)
 	sourceID := outer.ProjectionV1.SourceInterruptID
+	_, exists := outer.InterruptID2State[sourceID]
+	require.True(t, exists)
 	require.NoError(t, restoreRunnerCheckpointProjection(&outer))
-	source := outer.InterruptID2State[sourceID]
+	source, exists := outer.InterruptID2State[sourceID]
+	require.True(t, exists)
 	sourceData, ok := source.State.([]byte)
 	require.True(t, ok)
 
 	canonical := schema.UserAgenticMessage("canonical")
 	typedSetMessageID(canonical, "agentic-canonical")
 	inline := schema.UserAgenticMessage("inline")
-	prepared, err := compose.TransformCheckpointValues(sourceData, &gobSerializer{},
+	var fixture struct {
+		Inputs map[string]any
+		State  any
+	}
+	require.NoError(t, gob.NewDecoder(bytes.NewReader(sourceData)).Decode(&fixture))
+	fixture.Inputs = map[string]any{
+		"agentic-input": []*schema.AgenticMessage{inline, canonical},
+	}
+	fixture.State = &agenticState{Messages: []*schema.AgenticMessage{canonical}}
+	var fixtureData bytes.Buffer
+	require.NoError(t, gob.NewEncoder(&fixtureData).Encode(&fixture))
+
+	var preparedInputs int
+	var valueLocation compose.CheckpointValueLocation
+	prepared, err := compose.TransformCheckpointValues(fixtureData.Bytes(), &gobSerializer{},
 		func(_ compose.NodePath, location compose.CheckpointValueLocation, value any) (any, bool, error) {
-			if location.Kind == compose.CheckpointValueState {
-				return &agenticState{Messages: []*schema.AgenticMessage{canonical}}, true, nil
+			if location.Kind != compose.CheckpointValueInput {
+				return value, false, nil
 			}
-			return value, false, nil
+			valueLocation = location
+			preparedInputs++
+			return value, true, nil
 		})
 	require.NoError(t, err)
+	require.Equal(t, 1, preparedInputs)
 
 	index, err := buildCheckpointProjectionIndex(prepared)
 	require.NoError(t, err)
-	var projected bool
-	var valueLocation compose.CheckpointValueLocation
-	projectedData, err := compose.TransformCheckpointValues(prepared, &gobSerializer{},
-		func(_ compose.NodePath, location compose.CheckpointValueLocation, value any) (any, bool, error) {
-			if projected || (location.Kind != compose.CheckpointValueInput &&
-				location.Kind != compose.CheckpointValueChannel) {
-				return value, false, nil
-			}
-			entries, hasProjection := index.projectAgenticMessages(
-				[]*schema.AgenticMessage{inline, canonical})
-			require.True(t, hasProjection)
-			valueLocation = location
-			projected = true
-			return &checkpointAgenticMessageSlicePlaceholderV1{Entries: entries}, true, nil
-		})
+
+	projectedData, changed, err := projectComposeCheckpointValues(prepared, index)
 	require.NoError(t, err)
-	require.True(t, projected)
+	require.True(t, changed)
+	var projectedValue any
+	require.NoError(t, compose.WalkCheckpointValues(projectedData, &gobSerializer{},
+		func(_ compose.NodePath, location compose.CheckpointValueLocation, value any) error {
+			if reflect.DeepEqual(location, valueLocation) {
+				projectedValue = value
+			}
+			return nil
+		}))
+	placeholder, ok := projectedValue.(*checkpointAgenticMessageSlicePlaceholderV1)
+	require.True(t, ok)
+	require.Len(t, placeholder.Entries, 2)
+	require.Equal(t, inline, placeholder.Entries[0].Inline)
+	require.NotNil(t, placeholder.Entries[1].Source)
+	require.Nil(t, placeholder.Entries[1].Inline)
 
 	hydrated, err := hydrateComposeCheckpointValues(projectedData, index)
 	require.NoError(t, err)

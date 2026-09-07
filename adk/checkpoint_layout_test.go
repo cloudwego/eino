@@ -31,11 +31,14 @@ func TestCheckpointLayoutV1SizeAndLegacyFailure(t *testing.T) {
 	tests := []struct {
 		name      string
 		depth     int
+		streaming bool
 		payload   int
 		sizeLimit int
 	}{
 		{name: "single_no_subgraph", payload: 320 << 10, sizeLimit: 1 << 20},
 		{name: "agent_tool_320k", depth: 1, payload: 320 << 10, sizeLimit: 1 << 20},
+		{name: "agent_tool_320k_stream", depth: 1, streaming: true,
+			payload: 320 << 10, sizeLimit: 1 << 20},
 		{name: "agent_tool_1m", depth: 1, payload: 1 << 20, sizeLimit: 5 << 18},
 	}
 	for _, tt := range tests {
@@ -44,6 +47,7 @@ func TestCheckpointLayoutV1SizeAndLegacyFailure(t *testing.T) {
 				Name:         tt.name,
 				File:         tt.name + ".bin.gz",
 				Depth:        tt.depth,
+				Streaming:    tt.streaming,
 				PayloadField: "content",
 				PayloadSize:  tt.payload,
 			}

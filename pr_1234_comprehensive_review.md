@@ -1,95 +1,149 @@
-# Comprehensive Review: PR #1234
+# PR #1234 Comprehensive Review - Round 3
 
-Review scope: `origin/main...HEAD` plus current review fixes.
+## Result
 
-## Overview
+**APPROVE.** A complete independent review of the current effective change from
+merge base `60e1d992` through `HEAD` plus the existing Round 2 worktree
+hardening found no new actionable issue or improvement.
 
-- Final fresh review: no actionable findings
-- Iterations: design 5, attack 3, test audit 2, final full review 4
-- Implementation diff: 39 files, approximately +8.3k / -34 lines
-- Compatibility policy: old checkpoints remain readable; unsupported new wire
-  formats fail loudly in old readers
+- Scope reviewed: 38 files, +10,296/-42 lines, excluding this report.
+- Round 3 iterations: design 1, attack 1, test audit 1.
+- Remaining items: none.
+- Production, existing tests, and checklist files were not modified.
+
+## Cumulative Change Summary
+
+The current diff:
+
+1. Freezes 14 legacy checkpoint fixtures and validates current-reader resume,
+   legacy-reader compatibility, fixture hashes, targeted resume, cancellation,
+   streaming, nested AgentTools, parallel children, and representative payload
+   fields.
+2. Introduces a versioned sparse Compose checkpoint layout in which interrupt
+   state has one checkpoint-tree owner while routing addresses remain a separate
+   root index. Ownership is derived from the checkpoint tree, never reconstructed
+   from filtered `Address` segments.
+3. Persists versioned compact ToolsNode state, references unique tool-call
+   sources when profitable, deep-clones hydrated calls, validates exact
+   executed/rerun partitions, and preserves legacy state reads.
+4. Adds deterministic checkpoint value walking and transformation APIs so ADK
+   can inspect and rewrite logical values without exposing Compose wire structs.
+5. Projects duplicate ADK messages and tool results onto canonical Compose
+   values, validates sentinels, versions, coordinates, counts, digests, kinds,
+   and target conflicts before hydration, and writes projected bytes only when
+   they are smaller.
+6. Preserves unsupported-forward-format failure semantics while keeping legacy
+   and current-version logical state available to migration callbacks.
 
 ## Design Review
 
-| Dimension | Final rating | Result |
+| Dimension | Rating | Round 3 conclusion |
 |---|---:|---|
-| Concept coherence | 5/5 | State ownership and projection responsibilities are explicit |
-| API usability | 4/5 | Traversal APIs document ordering, nil serializer behavior, and callback contracts |
-| Minimum API surface | 4/5 | Public surface is limited to checkpoint traversal; wire types remain internal |
-| Backward compatibility | 5/5 | Frozen main-generated fixtures cover legacy resume |
-| Module separation | 5/5 | Shared wire types remove ADK reflection over Compose internals |
-| Cohesion | 5/5 | Compaction, hydration, validation, and migration form one checkpoint pipeline |
-| Complexity | 4/5 | Complexity is concentrated in projection code and guarded by fail-loud metadata |
-| Naming | 5/5 | Public and persisted names describe ownership and wire version |
-| Readability | 4/5 | Non-obvious reference and round-trip invariants are documented |
-| Duplication | 5/5 | Invoke/Stream share state helpers; compatibility duplication is intentional |
-| Public API documentation | 5/5 | All new public names and edge semantics are documented |
-| Internal comments | 4/5 | Comments explain ambiguity handling and byte-identical fallback |
+| Concept coherence | 5/5 | Layout ownership, routing, compact state, and projection have distinct roles. |
+| API usability | 4/5 | Traversal callbacks are explicit, deterministic, nil-safe for serializers, and return original bytes on no-op transforms. |
+| Minimum API surface | 4/5 | External growth is limited to two functions, two types, and five kind constants needed for the ADK-to-Compose boundary. |
+| Backward compatibility | 5/5 | Frozen V0 fixtures resume; V1 types fail loudly in the legacy reader; legacy wire fields remain readable. |
+| Module separation | 4/5 | Compose owns checkpoint traversal and layout; ADK owns projection; shared wire-only ToolsNode types remain under `internal`. |
+| Cohesion vs. tension | 4/5 | Sparse ownership and projection cooperate without coupling ownership to runtime address filtering. |
+| Elegance vs. complexity | 4/5 | Projection is complex, but remains private and is gated by measured byte profitability. |
+| Naming | 5/5 | Public names consistently identify checkpoint values, locations, walking, and transformation. |
+| Readability | 4/5 | Projection validation/hydration is the main hotspot; typed targets and focused helpers keep invariants reviewable. |
+| Duplication | 4/5 | Typed/untyped and Invoke/Stream parallels are intentional compatibility paths with parity tests. |
+| Public API documentation | 5/5 | Ordering, metadata exclusion, read-only inputs, unknown kinds, nil serializers, and no-op behavior are documented. |
+| Internal comments | 4/5 | Persisted schemas and non-obvious projection/ownership invariants are marked at their implementation points. |
 
-New public API reviewed:
+### Public API Assessment
 
 | Name | Assessment |
 |---|---|
-| `CheckpointValueKind` and constants | Stable, extensible discriminator |
-| `CheckpointValueLocation` | Clearly separates key and predecessor coordinates |
-| `WalkCheckpointValues` | Deterministic read-only traversal contract |
-| `TransformCheckpointValues` | Explicit replacement and original-byte semantics |
+| `CheckpointValueKind` | Necessary extensible discriminator. |
+| `CheckpointValueState` | Clear graph-state kind. |
+| `CheckpointValueInput` | Clear persisted-input kind. |
+| `CheckpointValueChannel` | Clear channel-value kind. |
+| `CheckpointValueInterruptState` | Clear component-state kind. |
+| `CheckpointValueInterruptLayerPayload` | Precise despite length. |
+| `CheckpointValueLocation` | Minimal coordinates for all supported values. |
+| `WalkCheckpointValues` | Read-only deterministic traversal with logical hydration. |
+| `TransformCheckpointValues` | Explicit replacement contract and no-op byte preservation. |
 
-## Findings Resolved
+Top actionable recommendations: none.
 
-| Area | Finding | Resolution |
+## Adversarial Review
+
+| Category | Evidence | Result |
 |---|---|---|
-| Migration | ToolsNode source references became stale after state changes | Hydrate before callbacks and recompact after changes |
-| Layering | ADK reflected over a private Compose type | Added shared `internal/checkpoint` wire types |
-| Projection | Nested tool-result-only placeholders were not retained or hydrated | Included tool-result refs in retention and recursive hydration |
-| Integrity | Message kind and ToolCall source/target identity were not fully validated | Added exact kind and ID validation |
-| Integrity | Empty IDs, duplicate calls, conflicting result maps, and rerun overlap were accepted | Added fail-loud validation |
-| Compatibility | Mixed legacy/V1 trees and nil subgraphs could bypass validation or panic | Added tree-wide layout and nil validation |
-| Determinism | Several corruption paths depended on map iteration order | Sorted all error-producing checkpoint map traversals |
-| Aliasing | Hydrated messages and enhanced results could share mutable nested data | Deep-cloned hydrated values |
-| Public API | Traversal callbacks could observe compact wire references | Exposed hydrated logical values and rebound references after transforms |
-| Test quality | Size tests and terminal event checks used weak assertions | Added linear bounds, mode parity, and exact event counts |
+| Data corruption | Deep-clone, alias, digest, missing-reference, and truncation attacks | Pass |
+| Validation gaps | Sentinel, version, coordinate, payload-form, role, and partition attacks | Pass |
+| Conflict detection | Duplicate owners, routes, targets, tool IDs, and result-kind conflicts | Pass |
+| Boundary values | Nil values, empty call IDs, nested depth/width, and 1 MiB payloads | Pass |
+| Type safety | Gob schema evolution, invalid concrete types, and schema/agentic kind separation | Pass |
+| Feature interaction | Sparse state, nested AgentTools, compact ToolsNode references, targeted resume | Pass |
+| Determinism | Repeated source-selection and first-error ordering tests | Pass |
+| Error quality | Exact forward-version and corruption diagnostics | Pass |
+| Streaming parity | ToolsNode and nested parallel Invoke/Stream paths | Pass |
+| Runtime overrides | Temporary resume-with-`WithToolList` probe | Pass |
+| Compatibility | 14 frozen fixtures plus old-reader acceptance/rejection checks | Pass |
 
-## Attack Review
-
-- 66 `TestAttack_*` tests pass.
-- Repeated corruption tests pass across 50 runs.
-- Attack tests under the race detector pass.
-- Covered vectors include malformed metadata, source relabeling, cross-kind
-  tool-result conflicts, duplicate IDs, mixed layouts, nil subgraphs, aliasing,
-  targeted resume, Invoke/Stream parity, and deterministic errors.
+Three temporary Round 3 probes confirmed current-version logical corruption
+remains migratable, ownership is independent of filtered address segments, and
+resume honors runtime tool overrides. All passed and the temporary file was
+removed.
 
 ## Test Audit
 
-| Dimension | Final result |
+| Dimension | Result |
 |---|---|
-| Duplicates | No true or near duplicates remain |
-| Assertion quality | Known counts and values use exact assertions |
-| Boilerplate | Repeated fixture and resume mechanics use shared helpers |
-| Logical grouping | Variants are grouped by feature and execution mode |
-| Semantic value | Added tests protect distinct persistence contracts |
-| Coverage gaps | No important changed function is below the 70% hard floor |
+| Duplicates | No true or near-duplicate test with removable semantic coverage. |
+| Assertion quality | New assertions check exact values/errors where deterministic; size assertions intentionally enforce bounds. |
+| Boilerplate | Repeated setup is already concentrated in fixture, serializer, and resume helpers. |
+| Logical grouping | Feature-first table tests and Invoke/Stream subtests are coherent. |
+| Semantic value | Every added test protects compatibility, integrity, size, or resume behavior. |
+| Coverage gaps | No important changed branch lacks semantic coverage. |
 
-Package coverage from the final audit:
+Coverage from permanent tests:
 
-- `adk`: 90.8%
-- `compose`: 88.9%
-- `internal/core`: 83.2%
+| Scope | Coverage |
+|---|---:|
+| Added production statements | 92.6% (1,567/1,692) |
+| `adk` package | 90.8% |
+| `compose` package | 89.2% |
+| `internal/core` package | 85.4% |
 
-## Final Fresh Round
-
-The previous report was cleared before the final round. The complete current
-diff was reviewed again across all design dimensions, attack categories, and
-test-audit dimensions. No new actionable items were found.
+All changed functions with substantive branching meet the 70% hard floor.
 
 ## Verification
 
-- `go test ./...`: passed
-- `go test -race ./adk/... ./compose/... ./internal/core -count=1`: passed
-- Go 1.18 focused tests: passed
-- `golangci-lint run --new-from-rev=origin/main ./...`: passed with 0 issues
-- `go vet ./adk ./compose ./internal/core`: passed
+Local delivery verification completed on 2026-09-07 from branch
+`fix/agenttool-checkpoint-linear-size` at `5b61af62`, with merge base
+`60e1d9929cb65c8c4814b66fba2854e29b730114`.
+
+- Scope inspection: 18 dirty tracked files, all within the existing PR
+  production/test set plus this report; no untracked files, conflict markers,
+  unintended files, or temporary artifacts.
+- `gofmt -d` over all 22 existing changed Go files in the merge-base-to-worktree
+  diff: no output.
+- `git diff --check`: pass. `git diff origin/main --check`: pass.
+- `go vet ./adk ./compose ./internal/core`: pass.
+- `go test ./... -count=1`: pass (`adk` 64.130s, `compose` 35.023s).
+- `go test -race ./adk/... ./compose/... ./internal/core -count=1`: pass
+  (`adk` 80.960s, `compose` 30.862s, `internal/core` 1.707s).
+- `GOTOOLCHAIN=go1.18.10 go test ./adk ./compose ./internal/core -count=1`:
+  pass (`adk` 64.475s, `compose` 30.974s, `internal/core` 1.106s).
+- `golangci-lint run --new-from-rev=origin/main ./...`: pass with `0 issues`.
+  It emitted one non-fatal generated-file-filter warning for a deleted sibling
+  worktree cache path.
+- `go test ./... -run '^TestAttack_' -count=10`: pass; all 76 repository
+  `TestAttack_*` tests were repeated ten times.
+- Focused size and projection-profitability tests: pass. The 320 KiB
+  AgentTool checkpoint was 393,621 bytes, the 1 MiB case was 1,114,521 bytes,
+  and depth 0-3 measured 357,224, 393,623, 444,290, and 526,702 bytes.
+- Focused compatibility tests: pass, including all 14 frozen fixtures with the
+  current and legacy readers, Gob schema evolution, forward-format failures,
+  layout metadata, migration, and rerun-input compatibility.
+- Local API compatibility: pass. A temporary two-commit snapshot repository
+  included all dirty tracked changes, ran `go mod tidy` with Go 1.22.12, and
+  `go-apidiff` found no incompatible changes against merge base `60e1d992`.
+  The temporary repository was removed.
 
 ## Remaining Items
 

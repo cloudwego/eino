@@ -36,6 +36,7 @@ import (
 	"github.com/cloudwego/eino/components/tool"
 	checkpointinternal "github.com/cloudwego/eino/internal/checkpoint"
 	"github.com/cloudwego/eino/internal/safe"
+	"github.com/cloudwego/eino/internal/serialization"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -388,6 +389,25 @@ func validateToolsInterruptAndRerunStateV1(state *toolsInterruptAndRerunStateV1)
 		}
 		rerun[callID] = struct{}{}
 	}
+	for _, callID := range sortedCheckpointMapKeys(completed) {
+		if _, exists := callIDs[callID]; !exists {
+			return fmt.Errorf("tools node interrupt state has result for unknown tool call ID %q", callID)
+		}
+	}
+	for _, callID := range state.RerunTools {
+		if _, exists := callIDs[callID]; !exists {
+			return fmt.Errorf("tools node interrupt state has rerun marker for unknown tool call ID %q", callID)
+		}
+	}
+	for _, call := range state.ToolCalls {
+		if _, exists := completed[call.ID]; exists {
+			continue
+		}
+		if _, exists := rerun[call.ID]; !exists {
+			return fmt.Errorf("tools node interrupt state tool call ID %q has neither an executed result nor a rerun marker",
+				call.ID)
+		}
+	}
 	return nil
 }
 
@@ -449,8 +469,12 @@ func hydrateCheckpointToolsNodeState(cp *checkpoint) error {
 		if !ok || digest != source.Digest {
 			return fmt.Errorf("tools node interrupt state %q source tool calls do not match metadata", id)
 		}
+		toolCalls, err := cloneCheckpointToolCalls(message.ToolCalls)
+		if err != nil {
+			return fmt.Errorf("tools node interrupt state %q failed to clone source tool calls: %w", id, err)
+		}
 		cloned := *state
-		cloned.ToolCalls = append([]schema.ToolCall(nil), message.ToolCalls...)
+		cloned.ToolCalls = toolCalls
 		cloned.ToolCallsSource = nil
 		interruptState.State = &cloned
 		cp.InterruptID2State[id] = interruptState
@@ -462,6 +486,19 @@ func hydrateCheckpointToolsNodeState(cp *checkpoint) error {
 		}
 	}
 	return nil
+}
+
+func cloneCheckpointToolCalls(toolCalls []schema.ToolCall) ([]schema.ToolCall, error) {
+	serializer := &serialization.InternalSerializer{}
+	data, err := serializer.Marshal(toolCalls)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal tool calls: %w", err)
+	}
+	var cloned []schema.ToolCall
+	if err := serializer.Unmarshal(data, &cloned); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal tool calls: %w", err)
+	}
+	return cloned, nil
 }
 
 func checkpointStateMessages(state any) []*schema.Message {
@@ -1192,11 +1229,6 @@ func sequentialRunToolCall(ctx context.Context,
 func parallelRunToolCall(ctx context.Context,
 	run func(ctx2 context.Context, callTask *toolCallTask, opts ...tool.Option),
 	tasks []toolCallTask, opts ...tool.Option) {
-
-	if len(tasks) == 1 {
-		run(ctx, &tasks[0], opts...)
-		return
-	}
 
 	var wg sync.WaitGroup
 	for i := 1; i < len(tasks); i++ {

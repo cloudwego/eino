@@ -2748,6 +2748,28 @@ func TestAttack_CheckpointValidationErrorIsDeterministic(t *testing.T) {
 				`interrupt ID "a" has conflicting routing addresses "node:root" and "node:child"`)
 		}
 	})
+
+	t.Run("child_routes_missing_from_root_index", func(t *testing.T) {
+		childAddress := Address{{Type: AddressSegmentNode, ID: "child"}}
+		for i := 0; i < 100; i++ {
+			cp := &checkpoint{
+				StateLayoutVersion:      checkpointStateLayoutVersionV1,
+				layoutMetadataValidated: true,
+				SubGraphs: map[string]*checkpoint{
+					"child": {
+						StateLayoutVersion:      checkpointStateLayoutVersionV1,
+						layoutMetadataValidated: true,
+						InterruptID2Addr: map[string]Address{
+							"z": childAddress,
+							"a": childAddress,
+						},
+					},
+				},
+			}
+			require.EqualError(t, (&runner{}).validateCheckpointIntegrity(cp),
+				`nested routing entry "a" is missing from the root routing index`)
+		}
+	})
 }
 
 func TestAttack_MixedCheckpointLayoutsAreRejected(t *testing.T) {
