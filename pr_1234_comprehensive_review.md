@@ -11,6 +11,14 @@ hardening found no new actionable issue or improvement.
 - Remaining items: none.
 - Production, existing tests, and checklist files were not modified.
 
+## Fresh-Round Reset Audit Trail
+
+| Round | Reset evidence | Retained result |
+|---|---|---|
+| 1 | The parent of `5b61af62` has no report; `5b61af62` first adds the report after the completed design, attack, and test-audit loops. | Only the cumulative validated fixes and clear result entered history. |
+| 2 | Completed Tasks 2-4 each record clearing the previous report before a fresh full-scope discipline review. The resulting hardening is the Round 2 worktree change later committed by `3aebf546`; no intermediate Round 2 report is retained. | Only accepted production and test changes feed the cumulative summary below. |
+| 3 | Completed Task 5 records another clear before the final full review. `git diff 5b61af62..3aebf546 -- pr_1234_comprehensive_review.md` shows the prior report removed and replaced by this Round 3 report. | One design, one attack, and one test-audit pass found no new actionable item; only this final clear round remains. |
+
 ## Cumulative Change Summary
 
 The current diff:
@@ -34,6 +42,22 @@ The current diff:
    they are smaller.
 6. Preserves unsupported-forward-format failure semantics while keeping legacy
    and current-version logical state available to migration callbacks.
+
+## Accepted Review-Commit Design Changes
+
+Review commit `3aebf546` introduced the following accepted production design
+changes. Comment-only checkpoint-schema annotations and test-only changes are
+excluded.
+
+| Finding/change | Exposed API or conceptual cost | Checkpoint-size impact | Compatibility impact | Counterargument | Why accepted |
+|---|---|---|---|---|---|
+| Persist a Runner projection only when its encoded bytes are smaller than the unprojected form. | No API growth; privately encodes two candidates, adding save-time CPU and temporary memory. | Prevents projection metadata from enlarging small checkpoints; retained projection measured 393,621 bytes at 320 KiB and 1,114,521 bytes at 1 MiB. | Current readers already accept projected and unprojected forms; logical resume is unchanged. | Always projecting is simpler and encodes once. | The measured small-payload regression made a size-profitability gate necessary, while large payloads retain the linear-size benefit. |
+| Validate all Projection V1 target coordinates and exactly-one-of source/inline/nil payload forms before hydration, using typed coordinate keys for duplicate tool-result targets. | No API growth; adds private validators and stricter V1 invariants. | Byte-neutral. | Valid V1 and legacy data are unchanged; malformed or ambiguous V1 data now fails before partial mutation. | Ignoring unused fields can appear more forward-compatible. | Those fields select hydration targets; accepting contradictory forms or aliased coordinates can silently restore data to the wrong location. |
+| Keep Compose agentic-message slices containing nil elements inline instead of projecting them. | No API growth; adds one private projection eligibility rule. | Such slices forgo deduplication and may be larger, but remain linear and use the existing inline form. | Preserves nil elements and Gob round trips; non-nil slices still project. | Add another placeholder encoding so nil-bearing slices can also deduplicate. | The extra wire concept was not justified for a case Gob cannot safely re-encode after hydration; inline fallback is simpler and lossless. |
+| Preflight checkpoint-tree metadata and ToolsNode state versions before migration, walk, or transform callbacks. | Public signatures are unchanged; callbacks now have one explicit fail-before-callback format gate. | Byte-neutral. | Valid legacy/current checkpoints still expose hydrated logical values; nil or unsupported forward state fails deterministically before callbacks run. | Migration callbacks could be allowed to inspect unknown versions. | Unknown compact state cannot be hydrated safely, and the documented compatibility policy requires unsupported forward formats to fail loudly. |
+| Require every compact ToolsNode call to belong to exactly one executed or rerun partition, with no unknown result or rerun IDs. | No API growth; tightens one private persisted-state invariant. | Byte-neutral. | Valid legacy and V1 resumes are unchanged; corrupt or incomplete V1 state is rejected instead of being inferred. | Missing classifications could default to rerun. | Inference can duplicate an already executed side effect or omit required work; exact partition evidence is required for safe resume. |
+| Deep-clone ToolCalls hydrated from their canonical graph-state message. | No API growth; adds serializer work and a possible explicit clone error. | Persisted bytes are unchanged. | Logical values are unchanged, but callback/runtime mutation can no longer alias canonical checkpoint state. | A slice copy is faster if nested ToolCall data is treated as immutable. | ToolCalls contain nested mutable values; the alias attack proved a shallow copy does not preserve checkpoint ownership. |
+| Route a single restored ToolsNode task through the same executed-task guard as multi-task parallel dispatch. | No API or wire growth; removes a special case. | Byte-neutral. | Fresh execution is unchanged; a restored single executed tool is no longer invoked again in Stream mode. | The one-task fast path avoids scheduler bookkeeping. | The fast path bypassed the restored `executed` check; removing it is simpler and prevents duplicate tool side effects. |
 
 ## Design Review
 

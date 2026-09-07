@@ -264,22 +264,26 @@ func TestRunnerCheckpointProjectionMetadataValidation(t *testing.T) {
 	t.Run("sentinel_without_metadata", func(t *testing.T) {
 		state := valid()
 		state.ProjectionV1 = nil
-		require.ErrorContains(t, validateRunnerProjectionMetadata(state), "metadata is missing")
+		require.EqualError(t, validateRunnerProjectionMetadata(state),
+			"failed to decode checkpoint projection: metadata is missing")
 	})
 	t.Run("metadata_without_sentinel", func(t *testing.T) {
 		state := valid()
 		delete(state.InterruptID2State, runnerProjectionSentinelID)
-		require.ErrorContains(t, validateRunnerProjectionMetadata(state), "sentinel is missing")
+		require.EqualError(t, validateRunnerProjectionMetadata(state),
+			"failed to decode checkpoint projection: sentinel is missing")
 	})
 	t.Run("unsupported_version", func(t *testing.T) {
 		state := valid()
 		state.ProjectionV1.Version++
-		require.ErrorContains(t, validateRunnerProjectionMetadata(state), "requires a newer Eino version")
+		require.EqualError(t, validateRunnerProjectionMetadata(state),
+			"checkpoint requires a newer Eino version: unsupported projection version 2")
 	})
 	t.Run("sentinel_with_address", func(t *testing.T) {
 		state := valid()
 		state.InterruptID2Address[runnerProjectionSentinelID] = Address{}
-		require.ErrorContains(t, validateRunnerProjectionMetadata(state), "must not have a routing address")
+		require.EqualError(t, validateRunnerProjectionMetadata(state),
+			"failed to decode checkpoint projection: sentinel must not have a routing address")
 	})
 	t.Run("invalid_sentinel", func(t *testing.T) {
 		state := valid()
@@ -289,7 +293,8 @@ func TestRunnerCheckpointProjectionMetadataValidation(t *testing.T) {
 	t.Run("missing_source", func(t *testing.T) {
 		state := valid()
 		delete(state.InterruptID2State, "source")
-		require.ErrorContains(t, restoreRunnerCheckpointProjection(state), "source interrupt state")
+		require.EqualError(t, restoreRunnerCheckpointProjection(state),
+			`failed to decode checkpoint projection: source interrupt state "source" is missing`)
 	})
 	t.Run("invalid_source_type", func(t *testing.T) {
 		state := valid()
@@ -301,10 +306,12 @@ func TestRunnerCheckpointProjectionMetadataValidation(t *testing.T) {
 			"failed to decode checkpoint projection source")
 	})
 	t.Run("reserved_interrupt_id", func(t *testing.T) {
-		require.ErrorContains(t, validateRunnerProjectionReservedIDs(
-			map[string]Address{"_eino_user": {}}, nil), "reserved checkpoint metadata prefix")
-		require.ErrorContains(t, validateRunnerProjectionReservedIDs(nil,
-			map[string]core.InterruptState{"_eino_user": {}}), "reserved checkpoint metadata prefix")
+		require.EqualError(t, validateRunnerProjectionReservedIDs(
+			map[string]Address{"_eino_user": {}}, nil),
+			`interrupt ID "_eino_user" uses reserved checkpoint metadata prefix`)
+		require.EqualError(t, validateRunnerProjectionReservedIDs(nil,
+			map[string]core.InterruptState{"_eino_user": {}}),
+			`interrupt ID "_eino_user" uses reserved checkpoint metadata prefix`)
 	})
 	t.Run("reserved_interrupt_id_error_is_deterministic", func(t *testing.T) {
 		for i := 0; i < 100; i++ {
@@ -363,8 +370,9 @@ func TestCheckpointProjectionRootPathMetadata(t *testing.T) {
 func TestRunnerCheckpointProjectionReferenceValidation(t *testing.T) {
 	t.Run("run_context_targets_must_be_unique", func(t *testing.T) {
 		ref := runCtxMessageProjectionV1{Target: runCtxTargetEvent, Index: 0}
-		require.ErrorContains(t, validateRunCtxProjectionRefs(
-			[]runCtxMessageProjectionV1{ref, ref}, 2), "duplicate")
+		require.EqualError(t, validateRunCtxProjectionRefs(
+			[]runCtxMessageProjectionV1{ref, ref}, 2),
+			`checkpoint projection has duplicate run context target "event/0/0"`)
 	})
 	t.Run("info_slice_must_be_complete", func(t *testing.T) {
 		refs := []infoMessageProjectionV1{{
@@ -374,7 +382,8 @@ func TestRunnerCheckpointProjectionReferenceValidation(t *testing.T) {
 			TargetLength: 2,
 			Inline:       schema.UserMessage("first"),
 		}}
-		require.ErrorContains(t, validateInfoProjectionRefs(refs, 1), "incomplete")
+		require.EqualError(t, validateInfoProjectionRefs(refs, 1),
+			`checkpoint projection has incomplete interrupt info slice "state_message/[]/-1/0/"`)
 	})
 	t.Run("negative_parent_depth", func(t *testing.T) {
 		refs := []infoMessageProjectionV1{{
@@ -385,7 +394,8 @@ func TestRunnerCheckpointProjectionReferenceValidation(t *testing.T) {
 			TargetLength: 1,
 			Inline:       schema.UserMessage("first"),
 		}}
-		require.ErrorContains(t, validateInfoProjectionRefs(refs, 1), "parent depth")
+		require.EqualError(t, validateInfoProjectionRefs(refs, 1),
+			"checkpoint projection has invalid parent depth -1")
 	})
 	t.Run("run_context_invalid_coordinates", func(t *testing.T) {
 		refs := []runCtxMessageProjectionV1{{
@@ -393,14 +403,16 @@ func TestRunnerCheckpointProjectionReferenceValidation(t *testing.T) {
 			Index:        -1,
 			TargetLength: 1,
 		}}
-		require.ErrorContains(t, validateRunCtxProjectionRefs(refs, 1), "coordinates")
+		require.EqualError(t, validateRunCtxProjectionRefs(refs, 1),
+			"checkpoint projection has invalid run context coordinates 0/-1")
 	})
 	t.Run("run_context_invalid_length", func(t *testing.T) {
 		refs := []runCtxMessageProjectionV1{{
 			Target: runCtxTargetRootInput,
 			Index:  0,
 		}}
-		require.ErrorContains(t, validateRunCtxProjectionRefs(refs, 1), "invalid length")
+		require.EqualError(t, validateRunCtxProjectionRefs(refs, 1),
+			`checkpoint projection target "root_input" has invalid length 0`)
 	})
 	t.Run("run_context_index_exceeds_length", func(t *testing.T) {
 		refs := []runCtxMessageProjectionV1{{
@@ -408,14 +420,16 @@ func TestRunnerCheckpointProjectionReferenceValidation(t *testing.T) {
 			Index:        1,
 			TargetLength: 1,
 		}}
-		require.ErrorContains(t, validateRunCtxProjectionRefs(refs, 1), "exceeds length")
+		require.EqualError(t, validateRunCtxProjectionRefs(refs, 1),
+			`checkpoint projection target "root_input" index 1 exceeds length 1`)
 	})
 	t.Run("run_context_inconsistent_lengths", func(t *testing.T) {
 		refs := []runCtxMessageProjectionV1{
 			{Target: runCtxTargetRootInput, Index: 0, TargetLength: 2},
 			{Target: runCtxTargetRootInput, Index: 1, TargetLength: 3},
 		}
-		require.ErrorContains(t, validateRunCtxProjectionRefs(refs, 2), "inconsistent lengths")
+		require.EqualError(t, validateRunCtxProjectionRefs(refs, 2),
+			`checkpoint projection target "root_input/0" has inconsistent lengths`)
 	})
 	t.Run("run_context_scalar_has_slice_metadata", func(t *testing.T) {
 		refs := []runCtxMessageProjectionV1{{
@@ -423,7 +437,8 @@ func TestRunnerCheckpointProjectionReferenceValidation(t *testing.T) {
 			Index:     0,
 			LaneDepth: 1,
 		}}
-		require.ErrorContains(t, validateRunCtxProjectionRefs(refs, 1), "invalid lane depth")
+		require.EqualError(t, validateRunCtxProjectionRefs(refs, 1),
+			`checkpoint projection target "event" has invalid lane depth 1`)
 	})
 	t.Run("run_context_lane_has_slice_metadata", func(t *testing.T) {
 		refs := []runCtxMessageProjectionV1{{
@@ -431,14 +446,17 @@ func TestRunnerCheckpointProjectionReferenceValidation(t *testing.T) {
 			Index:        0,
 			TargetLength: 1,
 		}}
-		require.ErrorContains(t, validateRunCtxProjectionRefs(refs, 1), "unexpected slice length")
+		require.EqualError(t, validateRunCtxProjectionRefs(refs, 1),
+			`checkpoint projection target "lane_event" has unexpected slice length`)
 	})
 	t.Run("run_context_unsupported_target", func(t *testing.T) {
 		refs := []runCtxMessageProjectionV1{{Target: "unknown"}}
-		require.ErrorContains(t, validateRunCtxProjectionRefs(refs, 1), "unsupported")
+		require.EqualError(t, validateRunCtxProjectionRefs(refs, 1),
+			`checkpoint projection has unsupported run context target "unknown"`)
 	})
 	t.Run("info_count_mismatch", func(t *testing.T) {
-		require.ErrorContains(t, validateInfoProjectionRefs(nil, 1), "reference count mismatch")
+		require.EqualError(t, validateInfoProjectionRefs(nil, 1),
+			"checkpoint projection interrupt info reference count mismatch: got 0, want 1")
 	})
 	t.Run("info_state_invalid_coordinates", func(t *testing.T) {
 		refs := []infoMessageProjectionV1{{
@@ -447,7 +465,8 @@ func TestRunnerCheckpointProjectionReferenceValidation(t *testing.T) {
 			MessageIndex: 0,
 			TargetLength: 1,
 		}}
-		require.ErrorContains(t, validateInfoProjectionRefs(refs, 1), "invalid interrupt state coordinates")
+		require.EqualError(t, validateInfoProjectionRefs(refs, 1),
+			"checkpoint projection has invalid interrupt state coordinates")
 	})
 	t.Run("info_context_invalid_coordinates", func(t *testing.T) {
 		refs := []infoMessageProjectionV1{{
@@ -456,7 +475,8 @@ func TestRunnerCheckpointProjectionReferenceValidation(t *testing.T) {
 			MessageIndex: 0,
 			TargetLength: 1,
 		}}
-		require.ErrorContains(t, validateInfoProjectionRefs(refs, 1), "invalid context state coordinates")
+		require.EqualError(t, validateInfoProjectionRefs(refs, 1),
+			"checkpoint projection has invalid context state coordinates")
 	})
 	t.Run("info_rerun_tool_calls_invalid_coordinates", func(t *testing.T) {
 		refs := []infoMessageProjectionV1{{
@@ -465,7 +485,8 @@ func TestRunnerCheckpointProjectionReferenceValidation(t *testing.T) {
 			MessageIndex:  -1,
 			RerunExtraKey: "tools",
 		}}
-		require.ErrorContains(t, validateInfoProjectionRefs(refs, 1), "invalid rerun tool calls coordinates")
+		require.EqualError(t, validateInfoProjectionRefs(refs, 1),
+			"checkpoint projection has invalid rerun tool calls coordinates")
 	})
 	t.Run("info_context_tool_calls_invalid_coordinates", func(t *testing.T) {
 		refs := []infoMessageProjectionV1{{
@@ -473,11 +494,13 @@ func TestRunnerCheckpointProjectionReferenceValidation(t *testing.T) {
 			ContextIndex: -1,
 			MessageIndex: -1,
 		}}
-		require.ErrorContains(t, validateInfoProjectionRefs(refs, 1), "invalid context tool calls coordinates")
+		require.EqualError(t, validateInfoProjectionRefs(refs, 1),
+			"checkpoint projection has invalid context tool calls coordinates")
 	})
 	t.Run("info_unsupported_target", func(t *testing.T) {
 		refs := []infoMessageProjectionV1{{Target: "unknown"}}
-		require.ErrorContains(t, validateInfoProjectionRefs(refs, 1), "unsupported")
+		require.EqualError(t, validateInfoProjectionRefs(refs, 1),
+			`checkpoint projection has unsupported interrupt info target "unknown"`)
 	})
 	t.Run("info_duplicate_target", func(t *testing.T) {
 		ref := infoMessageProjectionV1{
@@ -486,8 +509,9 @@ func TestRunnerCheckpointProjectionReferenceValidation(t *testing.T) {
 			MessageIndex:  -1,
 			RerunExtraKey: "tools",
 		}
-		require.ErrorContains(t, validateInfoProjectionRefs(
-			[]infoMessageProjectionV1{ref, ref}, 2), "duplicate")
+		require.EqualError(t, validateInfoProjectionRefs(
+			[]infoMessageProjectionV1{ref, ref}, 2),
+			`checkpoint projection has duplicate interrupt info target "rerun_tool_calls/[]/-1/0/tools/-1"`)
 	})
 	t.Run("info_inconsistent_lengths", func(t *testing.T) {
 		refs := []infoMessageProjectionV1{
@@ -504,7 +528,8 @@ func TestRunnerCheckpointProjectionReferenceValidation(t *testing.T) {
 				TargetLength: 3,
 			},
 		}
-		require.ErrorContains(t, validateInfoProjectionRefs(refs, 2), "inconsistent lengths")
+		require.EqualError(t, validateInfoProjectionRefs(refs, 2),
+			`checkpoint projection target "state_message/[]/-1/0/" has inconsistent lengths`)
 	})
 }
 
@@ -528,11 +553,11 @@ func TestProjectedCheckpointMessages(t *testing.T) {
 	})
 	t.Run("schema_nil_with_payload", func(t *testing.T) {
 		_, err := projectedSchemaMessage(schemaSource, nil, true, index)
-		require.ErrorContains(t, err, "nil message has payload")
+		require.EqualError(t, err, "checkpoint projection nil message has payload")
 	})
 	t.Run("schema_inline_missing", func(t *testing.T) {
 		_, err := projectedSchemaMessage(checkpointMessageSourceV1{}, nil, false, index)
-		require.ErrorContains(t, err, "inline message is missing")
+		require.EqualError(t, err, "checkpoint projection inline message is missing")
 	})
 	t.Run("schema_inline", func(t *testing.T) {
 		message, err := projectedSchemaMessage(checkpointMessageSourceV1{},
@@ -543,13 +568,15 @@ func TestProjectedCheckpointMessages(t *testing.T) {
 	})
 	t.Run("schema_inline_and_source", func(t *testing.T) {
 		_, err := projectedSchemaMessage(schemaSource, schemaMessage, false, index)
-		require.ErrorContains(t, err, "both inline data and a source reference")
+		require.EqualError(t, err,
+			"checkpoint projection message has both inline data and a source reference")
 	})
 	t.Run("schema_source_mismatch", func(t *testing.T) {
 		corrupt := schemaSource
 		corrupt.Digest = "corrupt"
 		_, err := projectedSchemaMessage(corrupt, nil, false, index)
-		require.ErrorContains(t, err, "does not match metadata")
+		require.EqualError(t, err,
+			`checkpoint projection source message "schema-message" does not match metadata`)
 	})
 	t.Run("agentic_nil", func(t *testing.T) {
 		message, err := projectedAgenticMessage(checkpointMessageSourceV1{}, nil, true, index)
@@ -558,11 +585,11 @@ func TestProjectedCheckpointMessages(t *testing.T) {
 	})
 	t.Run("agentic_nil_with_payload", func(t *testing.T) {
 		_, err := projectedAgenticMessage(agenticSource, nil, true, index)
-		require.ErrorContains(t, err, "nil agentic message has payload")
+		require.EqualError(t, err, "checkpoint projection nil agentic message has payload")
 	})
 	t.Run("agentic_inline_missing", func(t *testing.T) {
 		_, err := projectedAgenticMessage(checkpointMessageSourceV1{}, nil, false, index)
-		require.ErrorContains(t, err, "inline agentic message is missing")
+		require.EqualError(t, err, "checkpoint projection inline agentic message is missing")
 	})
 	t.Run("agentic_inline", func(t *testing.T) {
 		message, err := projectedAgenticMessage(checkpointMessageSourceV1{},
@@ -573,13 +600,15 @@ func TestProjectedCheckpointMessages(t *testing.T) {
 	})
 	t.Run("agentic_inline_and_source", func(t *testing.T) {
 		_, err := projectedAgenticMessage(agenticSource, agenticMessage, false, index)
-		require.ErrorContains(t, err, "both inline data and a source reference")
+		require.EqualError(t, err,
+			"checkpoint projection agentic message has both inline data and a source reference")
 	})
 	t.Run("agentic_source_mismatch", func(t *testing.T) {
 		corrupt := agenticSource
 		corrupt.Digest = "corrupt"
 		_, err := projectedAgenticMessage(corrupt, nil, false, index)
-		require.ErrorContains(t, err, "does not match metadata")
+		require.EqualError(t, err,
+			`checkpoint projection source agentic message "agentic-message" does not match metadata`)
 	})
 	t.Run("unsupported_digest_value", func(t *testing.T) {
 		_, ok := projectionMessageDigest(make(chan int))
@@ -629,7 +658,7 @@ func TestHydrateRunContextMessageTargets(t *testing.T) {
 			Inline: schemaMessage,
 			Index:  0,
 		}, 1, index)
-		require.ErrorContains(t, err, "invalid root input target")
+		require.EqualError(t, err, "checkpoint projection has invalid root input target 0")
 	})
 	t.Run("root_input_occupied", func(t *testing.T) {
 		runCtx := &runContext{RootInput: &AgentInput{
@@ -639,34 +668,35 @@ func TestHydrateRunContextMessageTargets(t *testing.T) {
 			Inline: schemaMessage,
 			Index:  0,
 		}, 1, index)
-		require.ErrorContains(t, err, "invalid root input target")
+		require.EqualError(t, err, "checkpoint projection has invalid root input target 0")
 	})
 	t.Run("root_input_source_error", func(t *testing.T) {
 		source := schemaSource
 		source.Digest = "corrupt"
 		err := hydrateRunCtxRootInput(&runContext{RootInput: &AgentInput{}},
 			runCtxMessageProjectionV1{Source: source}, 1, index)
-		require.ErrorContains(t, err, "does not match metadata")
+		require.EqualError(t, err,
+			`checkpoint projection source message "schema-message" does not match metadata`)
 	})
 	t.Run("event_missing", func(t *testing.T) {
 		err := hydrateRunCtxEvent(nil, runCtxMessageProjectionV1{
 			Inline: schemaMessage,
 			Index:  0,
 		}, index)
-		require.ErrorContains(t, err, "invalid event target")
+		require.EqualError(t, err, "checkpoint projection has invalid event target 0")
 	})
 	t.Run("event_target_occupied", func(t *testing.T) {
 		event := &agentEventWrapper{
 			AgentEvent: EventFromMessage(schemaMessage, nil, schema.User, ""),
 		}
 		err := hydrateAgentEventMessage(event, schemaMessage, false)
-		require.ErrorContains(t, err, "invalid event message target")
+		require.EqualError(t, err, "checkpoint projection has invalid event message target")
 	})
 	t.Run("lane_session_missing", func(t *testing.T) {
 		err := hydrateRunCtxLaneEvent(nil, runCtxMessageProjectionV1{
 			Inline: schemaMessage,
 		}, index)
-		require.ErrorContains(t, err, "lane event session is missing")
+		require.EqualError(t, err, "checkpoint projection lane event session is missing")
 	})
 	t.Run("lane_depth_missing", func(t *testing.T) {
 		runCtx := &runContext{Session: &runSession{LaneEvents: &laneEvents{}}}
@@ -674,18 +704,18 @@ func TestHydrateRunContextMessageTargets(t *testing.T) {
 			Inline:    schemaMessage,
 			LaneDepth: 1,
 		}, index)
-		require.ErrorContains(t, err, "invalid lane event target")
+		require.EqualError(t, err, "checkpoint projection has invalid lane event target 1/0")
 	})
 	t.Run("agentic_root_input_missing", func(t *testing.T) {
 		err := hydrateRunCtxAgenticRootInput(nil, runCtxMessageProjectionV1{
 			AgenticInline: agenticMessage,
 		}, 1, index)
-		require.ErrorContains(t, err, "invalid agentic root input target")
+		require.EqualError(t, err, "checkpoint projection has invalid agentic root input target 0")
 	})
 	t.Run("agentic_root_input_wrong_type", func(t *testing.T) {
 		err := hydrateRunCtxAgenticRootInput(&runContext{AgenticRootInput: "invalid"},
 			runCtxMessageProjectionV1{AgenticInline: agenticMessage}, 1, index)
-		require.ErrorContains(t, err, "invalid agentic root input target")
+		require.EqualError(t, err, "checkpoint projection has invalid agentic root input target 0")
 	})
 	t.Run("agentic_root_input_occupied", func(t *testing.T) {
 		runCtx := &runContext{AgenticRootInput: &TypedAgentInput[*schema.AgenticMessage]{
@@ -693,7 +723,7 @@ func TestHydrateRunContextMessageTargets(t *testing.T) {
 		}}
 		err := hydrateRunCtxAgenticRootInput(runCtx,
 			runCtxMessageProjectionV1{AgenticInline: agenticMessage}, 1, index)
-		require.ErrorContains(t, err, "invalid agentic root input target")
+		require.EqualError(t, err, "checkpoint projection has invalid agentic root input target 0")
 	})
 	t.Run("agentic_root_input_source_error", func(t *testing.T) {
 		source := agenticSource
@@ -701,27 +731,28 @@ func TestHydrateRunContextMessageTargets(t *testing.T) {
 		runCtx := &runContext{AgenticRootInput: &TypedAgentInput[*schema.AgenticMessage]{}}
 		err := hydrateRunCtxAgenticRootInput(runCtx,
 			runCtxMessageProjectionV1{Source: source}, 1, index)
-		require.ErrorContains(t, err, "does not match metadata")
+		require.EqualError(t, err,
+			`checkpoint projection source agentic message "agentic-message" does not match metadata`)
 	})
 	t.Run("typed_event_session_missing", func(t *testing.T) {
 		err := hydrateRunCtxTypedEvent(nil, runCtxMessageProjectionV1{
 			AgenticInline: agenticMessage,
 		}, index)
-		require.ErrorContains(t, err, "typed event session is missing")
+		require.EqualError(t, err, "checkpoint projection typed event session is missing")
 	})
 	t.Run("typed_event_collection_invalid", func(t *testing.T) {
 		runCtx := &runContext{Session: &runSession{TypedEvents: "invalid"}}
 		err := hydrateRunCtxTypedEvent(runCtx, runCtxMessageProjectionV1{
 			AgenticInline: agenticMessage,
 		}, index)
-		require.ErrorContains(t, err, "invalid typed event target")
+		require.EqualError(t, err, "checkpoint projection has invalid typed event target 0")
 	})
 	t.Run("typed_event_target_occupied", func(t *testing.T) {
 		event := &typedAgentEventWrapper[*schema.AgenticMessage]{
 			event: EventFromAgenticMessage(agenticMessage, nil, schema.AgenticRoleTypeUser),
 		}
 		err := hydrateTypedAgentEventMessage(event, agenticMessage, false)
-		require.ErrorContains(t, err, "invalid typed event message target")
+		require.EqualError(t, err, "checkpoint projection has invalid typed event message target")
 	})
 }
 
@@ -761,10 +792,11 @@ func TestHydrateInterruptInfoMessageTargets(t *testing.T) {
 
 	t.Run("outer_reference_validation", func(t *testing.T) {
 		err := hydrateInterruptInfoMessages(nil, []infoMessageProjectionV1{stateRef}, 0, index)
-		require.ErrorContains(t, err, "reference count mismatch")
+		require.EqualError(t, err,
+			"checkpoint projection interrupt info reference count mismatch: got 1, want 0")
 		require.NoError(t, hydrateInterruptInfoMessages(nil, nil, 0, index))
 		err = hydrateInterruptInfoMessages(nil, []infoMessageProjectionV1{stateRef}, 1, index)
-		require.ErrorContains(t, err, "interrupt info is missing")
+		require.EqualError(t, err, "checkpoint projection interrupt info is missing")
 		err = hydrateInterruptInfoMessages(&InterruptInfo{Data: "invalid"},
 			[]infoMessageProjectionV1{stateRef}, 1, index)
 		require.ErrorContains(t, err, "invalid type")
@@ -779,7 +811,7 @@ func TestHydrateInterruptInfoMessageTargets(t *testing.T) {
 	t.Run("missing_context", func(t *testing.T) {
 		err := hydrateComposeInterruptInfoRefs(&compose.InterruptInfo{},
 			[]infoMessageProjectionV1{contextRef}, index)
-		require.ErrorContains(t, err, "interrupt context index")
+		require.EqualError(t, err, "checkpoint projection interrupt context index 0 is invalid")
 	})
 	t.Run("context_tool_calls_nil_source", func(t *testing.T) {
 		info := &compose.InterruptInfo{InterruptContexts: []*InterruptCtx{{Info: &compose.ToolsInterruptAndRerunExtra{}}}}
@@ -787,13 +819,13 @@ func TestHydrateInterruptInfoMessageTargets(t *testing.T) {
 		ref.Inline = nil
 		ref.IsNil = true
 		err := hydrateComposeInterruptInfoRefs(info, []infoMessageProjectionV1{ref}, index)
-		require.ErrorContains(t, err, "source is nil")
+		require.EqualError(t, err, "checkpoint projection context tool calls source is nil")
 	})
 	t.Run("context_tool_calls_invalid_target", func(t *testing.T) {
 		info := &compose.InterruptInfo{InterruptContexts: []*InterruptCtx{{Info: "invalid"}}}
 		err := hydrateComposeInterruptInfoRefs(info,
 			[]infoMessageProjectionV1{contextToolCallsRef}, index)
-		require.ErrorContains(t, err, "invalid context tool calls target")
+		require.EqualError(t, err, "checkpoint projection has invalid context tool calls target")
 	})
 	t.Run("rerun_tool_calls_nil_source", func(t *testing.T) {
 		info := &compose.InterruptInfo{RerunNodesExtra: map[string]any{
@@ -803,37 +835,39 @@ func TestHydrateInterruptInfoMessageTargets(t *testing.T) {
 		ref.Inline = nil
 		ref.IsNil = true
 		err := hydrateComposeInterruptInfoRefs(info, []infoMessageProjectionV1{ref}, index)
-		require.ErrorContains(t, err, "source is nil")
+		require.EqualError(t, err, "checkpoint projection rerun tool calls source is nil")
 	})
 	t.Run("rerun_tool_calls_invalid_target", func(t *testing.T) {
 		info := &compose.InterruptInfo{RerunNodesExtra: map[string]any{"tools": "invalid"}}
 		err := hydrateComposeInterruptInfoRefs(info,
 			[]infoMessageProjectionV1{rerunToolCallsRef}, index)
-		require.ErrorContains(t, err, "invalid rerun tool calls target")
+		require.EqualError(t, err, "checkpoint projection has invalid rerun tool calls target")
 	})
 	t.Run("unsupported_target", func(t *testing.T) {
 		ref := stateRef
 		ref.Target = "unknown"
 		err := hydrateComposeInterruptInfoRefs(&compose.InterruptInfo{},
 			[]infoMessageProjectionV1{ref}, index)
-		require.ErrorContains(t, err, "unsupported")
+		require.EqualError(t, err,
+			`checkpoint projection has unsupported interrupt info target "unknown"`)
 	})
 	t.Run("state_message_source_error", func(t *testing.T) {
 		ref := stateRef
 		ref.Inline = nil
 		ref.Source = checkpointMessageSourceV1{MessageID: "missing"}
 		err := hydrateInfoStateMessage(&State{}, ref, 1, index)
-		require.ErrorContains(t, err, "does not match metadata")
+		require.EqualError(t, err,
+			`checkpoint projection source message "missing" does not match metadata`)
 	})
 	t.Run("state_message_nil_target", func(t *testing.T) {
 		var state *State
 		err := hydrateInfoStateMessage(state, stateRef, 1, index)
-		require.ErrorContains(t, err, "invalid state message target")
+		require.EqualError(t, err, "checkpoint projection has invalid state message target")
 	})
 	t.Run("state_message_occupied", func(t *testing.T) {
 		state := &State{Messages: []*schema.Message{schema.UserMessage("occupied")}}
 		err := hydrateInfoStateMessage(state, stateRef, 1, index)
-		require.ErrorContains(t, err, "invalid state message target")
+		require.EqualError(t, err, "checkpoint projection has invalid state message target")
 	})
 	t.Run("agentic_state_message_nil_target", func(t *testing.T) {
 		var state *agenticState
@@ -841,7 +875,7 @@ func TestHydrateInterruptInfoMessageTargets(t *testing.T) {
 		ref.Inline = nil
 		ref.AgenticInline = schema.UserAgenticMessage("agentic")
 		err := hydrateInfoStateMessage(state, ref, 1, index)
-		require.ErrorContains(t, err, "invalid agentic state message target")
+		require.EqualError(t, err, "checkpoint projection has invalid agentic state message target")
 	})
 	t.Run("invalid_state_type", func(t *testing.T) {
 		err := hydrateInfoStateMessage("invalid", stateRef, 1, index)
@@ -850,7 +884,7 @@ func TestHydrateInterruptInfoMessageTargets(t *testing.T) {
 	t.Run("nested_placeholder_validation", func(t *testing.T) {
 		value, err := hydrateProjectionInfoValue(
 			(*checkpointInterruptInfoPlaceholderV1)(nil), index)
-		require.ErrorContains(t, err, "nil interrupt info reference")
+		require.EqualError(t, err, "checkpoint projection contains a nil interrupt info reference")
 		require.Nil(t, value)
 
 		value, err = hydrateProjectionInfoValue("inline", index)
@@ -862,7 +896,8 @@ func TestHydrateInterruptInfoMessageTargets(t *testing.T) {
 			RefCount: 1,
 		}
 		_, err = hydrateProjectionInfoValue(placeholder, index)
-		require.ErrorContains(t, err, "reference count mismatch")
+		require.EqualError(t, err,
+			"checkpoint projection interrupt info reference count mismatch: got 0, want 1")
 	})
 	t.Run("nested_info_paths", func(t *testing.T) {
 		require.NoError(t, hydrateNestedInterruptInfoPlaceholders(nil, index))
@@ -873,11 +908,11 @@ func TestHydrateInterruptInfoMessageTargets(t *testing.T) {
 			[]string{"missing"})
 		require.ErrorContains(t, err, "path")
 		_, err = interruptContextAt(&compose.InterruptInfo{}, 0, 0)
-		require.ErrorContains(t, err, "index")
+		require.EqualError(t, err, "checkpoint projection interrupt context index 0 is invalid")
 		_, err = interruptContextAt(&compose.InterruptInfo{
 			InterruptContexts: []*InterruptCtx{{}},
 		}, 0, 1)
-		require.ErrorContains(t, err, "parent depth")
+		require.EqualError(t, err, "checkpoint projection interrupt context parent depth 1 is invalid")
 	})
 }
 
@@ -959,11 +994,12 @@ func TestCheckpointToolResultProjectionValidation(t *testing.T) {
 	t.Run("outer_validation", func(t *testing.T) {
 		err := hydrateInterruptInfoToolResults(nil, []infoToolResultProjectionV1{rerunRef},
 			0, index)
-		require.ErrorContains(t, err, "reference count mismatch")
+		require.EqualError(t, err,
+			"checkpoint projection tool result reference count mismatch: got 1, want 0")
 		require.NoError(t, hydrateInterruptInfoToolResults(nil, nil, 0, index))
 		err = hydrateInterruptInfoToolResults(nil, []infoToolResultProjectionV1{rerunRef},
 			1, index)
-		require.ErrorContains(t, err, "interrupt info is missing")
+		require.EqualError(t, err, "checkpoint projection tool result interrupt info is missing")
 		err = hydrateInterruptInfoToolResults(&InterruptInfo{Data: "invalid"},
 			[]infoToolResultProjectionV1{rerunRef}, 1, index)
 		require.ErrorContains(t, err, "invalid type")
@@ -974,17 +1010,18 @@ func TestCheckpointToolResultProjectionValidation(t *testing.T) {
 		}}
 		err := hydrateComposeInterruptInfoToolResults(info,
 			[]infoToolResultProjectionV1{rerunRef}, 0, index)
-		require.ErrorContains(t, err, "reference count mismatch")
+		require.EqualError(t, err,
+			"checkpoint projection tool result reference count mismatch: got 1, want 0")
 
 		invalidCoordinates := rerunRef
 		invalidCoordinates.ParentDepth = -1
 		err = hydrateComposeInterruptInfoToolResults(info,
 			[]infoToolResultProjectionV1{invalidCoordinates}, 1, index)
-		require.ErrorContains(t, err, "invalid tool result coordinates")
+		require.EqualError(t, err, "checkpoint projection has invalid tool result coordinates")
 
 		err = hydrateComposeInterruptInfoToolResults(info,
 			[]infoToolResultProjectionV1{rerunRef, rerunRef}, 2, index)
-		require.ErrorContains(t, err, "duplicate tool result target")
+		require.EqualError(t, err, `checkpoint projection has duplicate tool result target "call"`)
 	})
 	t.Run("missing_subgraph_path", func(t *testing.T) {
 		ref := rerunRef
@@ -998,26 +1035,27 @@ func TestCheckpointToolResultProjectionValidation(t *testing.T) {
 		ref.ContextIndex = 0
 		err := hydrateComposeInterruptInfoToolResults(&compose.InterruptInfo{},
 			[]infoToolResultProjectionV1{ref}, 1, index)
-		require.ErrorContains(t, err, "invalid rerun tool result target")
+		require.EqualError(t, err, "checkpoint projection has invalid rerun tool result target")
 
 		ref.Target = infoTargetContextToolResult
 		ref.ContextIndex = -1
 		ref.RerunExtraKey = ""
 		err = hydrateComposeInterruptInfoToolResults(&compose.InterruptInfo{},
 			[]infoToolResultProjectionV1{ref}, 1, index)
-		require.ErrorContains(t, err, "invalid context tool result target")
+		require.EqualError(t, err, "checkpoint projection has invalid context tool result target")
 
 		ref.ContextIndex = 0
 		err = hydrateComposeInterruptInfoToolResults(&compose.InterruptInfo{},
 			[]infoToolResultProjectionV1{ref}, 1, index)
-		require.ErrorContains(t, err, "interrupt context index")
+		require.EqualError(t, err, "checkpoint projection interrupt context index 0 is invalid")
 	})
 	t.Run("unsupported_target", func(t *testing.T) {
 		ref := rerunRef
 		ref.Target = "unknown"
 		err := hydrateComposeInterruptInfoToolResults(&compose.InterruptInfo{},
 			[]infoToolResultProjectionV1{ref}, 1, index)
-		require.ErrorContains(t, err, "unsupported tool result target")
+		require.EqualError(t, err,
+			`checkpoint projection has unsupported tool result target "unknown"`)
 	})
 	t.Run("invalid_target_type", func(t *testing.T) {
 		info := &compose.InterruptInfo{RerunNodesExtra: map[string]any{"tools": "invalid"}}
@@ -1029,8 +1067,8 @@ func TestCheckpointToolResultProjectionValidation(t *testing.T) {
 		extra := &compose.ToolsInterruptAndRerunExtra{}
 		require.NoError(t, hydrateInfoToolResult(extra, rerunRef, index))
 		require.Equal(t, "result", extra.ExecutedTools[stringSource.ToolCallID])
-		require.ErrorContains(t, hydrateInfoToolResult(extra, rerunRef, index),
-			"already populated")
+		require.EqualError(t, hydrateInfoToolResult(extra, rerunRef, index),
+			`checkpoint projection tool result target "call" is already populated`)
 	})
 	t.Run("enhanced_result", func(t *testing.T) {
 		ref := rerunRef
@@ -1040,13 +1078,15 @@ func TestCheckpointToolResultProjectionValidation(t *testing.T) {
 		require.NoError(t, hydrateInfoToolResult(extra, ref, index))
 		require.Equal(t, enhancedResult, extra.ExecutedEnhancedTools[enhancedSource.ToolCallID])
 		require.NotSame(t, enhancedResult, extra.ExecutedEnhancedTools[enhancedSource.ToolCallID])
-		require.ErrorContains(t, hydrateInfoToolResult(extra, ref, index), "already populated")
+		require.EqualError(t, hydrateInfoToolResult(extra, ref, index),
+			`checkpoint projection tool result target "enhanced-call" is already populated`)
 	})
 	t.Run("source_and_kind_errors", func(t *testing.T) {
 		ref := rerunRef
 		ref.Source.Digest = "missing"
-		require.ErrorContains(t, hydrateInfoToolResult(
-			&compose.ToolsInterruptAndRerunExtra{}, ref, index), "does not match metadata")
+		require.EqualError(t, hydrateInfoToolResult(
+			&compose.ToolsInterruptAndRerunExtra{}, ref, index),
+			`checkpoint projection tool result "call" does not match metadata`)
 
 		unsupportedSource := checkpointToolResultSourceV1{
 			Kind:        "unknown",
@@ -1058,8 +1098,9 @@ func TestCheckpointToolResultProjectionValidation(t *testing.T) {
 			[]canonicalCheckpointToolResult{{source: unsupportedSource}}
 		ref.ToolCallID = unsupportedSource.ToolCallID
 		ref.Source = unsupportedSource
-		require.ErrorContains(t, hydrateInfoToolResult(
-			&compose.ToolsInterruptAndRerunExtra{}, ref, index), "unsupported tool result kind")
+		require.EqualError(t, hydrateInfoToolResult(
+			&compose.ToolsInterruptAndRerunExtra{}, ref, index),
+			`checkpoint projection has unsupported tool result kind "unknown"`)
 	})
 	t.Run("clone_nil", func(t *testing.T) {
 		result, err := cloneToolResultForProjection(nil)

@@ -88,7 +88,7 @@ func TestRestoreToolsInterruptState(t *testing.T) {
 	t.Run("nil_legacy_input", func(t *testing.T) {
 		ctx := toolsNodeCheckpointContext(&toolsInterruptAndRerunState{})
 		_, _, _, err := restoreToolsInterruptState(ctx, nil, nil, nil)
-		require.ErrorContains(t, err, "nil input")
+		require.EqualError(t, err, "tools node legacy interrupt state has nil input")
 	})
 
 	t.Run("unsupported_version", func(t *testing.T) {
@@ -97,13 +97,13 @@ func TestRestoreToolsInterruptState(t *testing.T) {
 			Role:    schema.Assistant,
 		})
 		_, _, _, err := restoreToolsInterruptState(ctx, nil, nil, nil)
-		require.ErrorContains(t, err, "unsupported version")
+		require.EqualError(t, err, "tools node interrupt state has unsupported version")
 	})
 
 	t.Run("typed_nil_v1", func(t *testing.T) {
 		ctx := toolsNodeCheckpointContext((*toolsInterruptAndRerunStateV1)(nil))
 		_, _, _, err := restoreToolsInterruptState(ctx, nil, nil, nil)
-		require.ErrorContains(t, err, "unsupported version")
+		require.EqualError(t, err, "tools node interrupt state has unsupported version")
 	})
 
 	t.Run("invalid_role", func(t *testing.T) {
@@ -112,7 +112,7 @@ func TestRestoreToolsInterruptState(t *testing.T) {
 			Role:    schema.User,
 		})
 		_, _, _, err := restoreToolsInterruptState(ctx, nil, nil, nil)
-		require.ErrorContains(t, err, "invalid role")
+		require.EqualError(t, err, `tools node interrupt state has invalid role "user"`)
 	})
 
 	t.Run("invalid_type", func(t *testing.T) {
@@ -480,19 +480,22 @@ func TestCompactCheckpointToolsNodeState(t *testing.T) {
 				"tool": {State: &corrupt},
 			},
 		}
-		require.ErrorContains(t, hydrateCheckpointToolsNodeState(corruptCP), "invalid tool calls source")
+		require.EqualError(t, hydrateCheckpointToolsNodeState(corruptCP),
+			`tools node interrupt state "tool" has invalid tool calls source index 99`)
 
 		corrupt.ToolCallsSource = &toolsInterruptToolCallsSourceV1{
 			MessageIndex: 1,
 			Digest:       "corrupt",
 		}
 		corruptCP.InterruptID2State["tool"] = core.InterruptState{State: &corrupt}
-		require.ErrorContains(t, hydrateCheckpointToolsNodeState(corruptCP), "do not match metadata")
+		require.EqualError(t, hydrateCheckpointToolsNodeState(corruptCP),
+			`tools node interrupt state "tool" source tool calls do not match metadata`)
 
 		corrupt.Role = schema.User
 		corrupt.ToolCallsSource = compacted.ToolCallsSource
 		corruptCP.InterruptID2State["tool"] = core.InterruptState{State: &corrupt}
-		require.ErrorContains(t, hydrateCheckpointToolsNodeState(corruptCP), "source role")
+		require.EqualError(t, hydrateCheckpointToolsNodeState(corruptCP),
+			`tools node interrupt state "tool" source role "assistant" does not match "user"`)
 	})
 
 	t.Run("clone_failure_is_reported", func(t *testing.T) {
@@ -748,8 +751,8 @@ func TestAttack_ToolsNodeV1RejectsInlineAndReference(t *testing.T) {
 		},
 	}
 
-	require.ErrorContains(t, hydrateCheckpointToolsNodeState(cp),
-		"both inline tool calls and a source reference")
+	require.EqualError(t, hydrateCheckpointToolsNodeState(cp),
+		`tools node interrupt state "tool" has both inline tool calls and a source reference`)
 }
 
 func TestAttack_ToolsNodeRejectsDuplicateToolCallIDs(t *testing.T) {
@@ -766,7 +769,7 @@ func TestAttack_ToolsNodeRejectsDuplicateToolCallIDs(t *testing.T) {
 
 	_, err := (&ToolsNode{}).genToolCallTasks(context.Background(), &toolsTuple{}, input,
 		map[string]string{"duplicate": "completed"}, nil, false)
-	require.ErrorContains(t, err, `duplicate tool call ID "duplicate"`)
+	require.EqualError(t, err, `duplicate tool call ID "duplicate"`)
 }
 
 func TestAttack_ToolsNodeV1RejectsConflictingResultState(t *testing.T) {
@@ -781,7 +784,8 @@ func TestAttack_ToolsNodeV1RejectsConflictingResultState(t *testing.T) {
 		}
 		ctx := toolsNodeCheckpointContext(state)
 		_, _, _, err := restoreToolsInterruptState(ctx, nil, nil, nil)
-		require.ErrorContains(t, err, `duplicate tool call ID "duplicate"`)
+		require.EqualError(t, err,
+			`tools node interrupt state has duplicate tool call ID "duplicate"`)
 	})
 
 	t.Run("standard_and_enhanced", func(t *testing.T) {
@@ -794,7 +798,8 @@ func TestAttack_ToolsNodeV1RejectsConflictingResultState(t *testing.T) {
 		}
 		ctx := toolsNodeCheckpointContext(state)
 		_, _, _, err := restoreToolsInterruptState(ctx, nil, nil, nil)
-		require.ErrorContains(t, err, `duplicate executed tool call ID "duplicate"`)
+		require.EqualError(t, err,
+			`tools node interrupt state has duplicate executed tool call ID "duplicate"`)
 	})
 
 	t.Run("standard_and_enhanced_error_is_deterministic", func(t *testing.T) {
@@ -827,7 +832,8 @@ func TestAttack_ToolsNodeV1RejectsConflictingResultState(t *testing.T) {
 		}
 		ctx := toolsNodeCheckpointContext(state)
 		_, _, _, err := restoreToolsInterruptState(ctx, nil, nil, nil)
-		require.ErrorContains(t, err, `both executed and pending rerun`)
+		require.EqualError(t, err,
+			`tools node interrupt state tool call ID "duplicate" is both executed and pending rerun`)
 	})
 
 	t.Run("duplicate_rerun", func(t *testing.T) {
@@ -842,7 +848,8 @@ func TestAttack_ToolsNodeV1RejectsConflictingResultState(t *testing.T) {
 		}
 		ctx := toolsNodeCheckpointContext(state)
 		_, _, _, err := restoreToolsInterruptState(ctx, nil, nil, nil)
-		require.ErrorContains(t, err, `duplicate rerun tool call ID "duplicate"`)
+		require.EqualError(t, err,
+			`tools node interrupt state has duplicate rerun tool call ID "duplicate"`)
 	})
 }
 
@@ -859,7 +866,7 @@ func TestAttack_ToolsNodeV1RequiresExactResultPartition(t *testing.T) {
 				ExecutedTools: map[string]string{"unknown": "result"},
 				RerunTools:    []string{"known"},
 			},
-			wantErr: `result for unknown tool call ID "unknown"`,
+			wantErr: `tools node interrupt state has result for unknown tool call ID "unknown"`,
 		},
 		{
 			name: "unknown_enhanced_result",
@@ -868,7 +875,7 @@ func TestAttack_ToolsNodeV1RequiresExactResultPartition(t *testing.T) {
 				ExecutedEnhancedTools: map[string]*schema.ToolResult{"unknown": {}},
 				RerunTools:            []string{"known"},
 			},
-			wantErr: `result for unknown tool call ID "unknown"`,
+			wantErr: `tools node interrupt state has result for unknown tool call ID "unknown"`,
 		},
 		{
 			name: "unknown_rerun_marker",
@@ -876,7 +883,7 @@ func TestAttack_ToolsNodeV1RequiresExactResultPartition(t *testing.T) {
 				ToolCalls:  []schema.ToolCall{{ID: "known"}},
 				RerunTools: []string{"known", "unknown"},
 			},
-			wantErr: `rerun marker for unknown tool call ID "unknown"`,
+			wantErr: `tools node interrupt state has rerun marker for unknown tool call ID "unknown"`,
 		},
 		{
 			name: "missing_classification",
@@ -884,7 +891,7 @@ func TestAttack_ToolsNodeV1RequiresExactResultPartition(t *testing.T) {
 				ToolCalls:     []schema.ToolCall{{ID: "executed"}, {ID: "missing"}},
 				ExecutedTools: map[string]string{"executed": "result"},
 			},
-			wantErr: `tool call ID "missing" has neither an executed result nor a rerun marker`,
+			wantErr: `tools node interrupt state tool call ID "missing" has neither an executed result nor a rerun marker`,
 		},
 	}
 
@@ -894,7 +901,7 @@ func TestAttack_ToolsNodeV1RequiresExactResultPartition(t *testing.T) {
 			tt.state.Role = schema.Assistant
 			ctx := toolsNodeCheckpointContext(tt.state)
 			_, _, _, err := restoreToolsInterruptState(ctx, nil, nil, nil)
-			require.ErrorContains(t, err, tt.wantErr)
+			require.EqualError(t, err, tt.wantErr)
 		})
 	}
 }

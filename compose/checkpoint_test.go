@@ -2072,8 +2072,10 @@ func TestCheckpointConversionValidation(t *testing.T) {
 
 	t.Run("unregistered node", func(t *testing.T) {
 		values := map[string]any{"node": "input"}
-		require.ErrorContains(t, convert(values, nil, true, nil), "node[node] have not been registered")
-		require.ErrorContains(t, restore(values, nil, true), "node[node] have not been registered")
+		require.EqualError(t, convert(values, nil, true, nil),
+			"checkpoint conv stream fail, node[node] have not been registered")
+		require.EqualError(t, restore(values, nil, true),
+			"checkpoint restore stream fail, node[node] have not been registered")
 	})
 
 	t.Run("missing converter", func(t *testing.T) {
@@ -2081,13 +2083,16 @@ func TestCheckpointConversionValidation(t *testing.T) {
 			"node": packStreamReader(schema.StreamReaderFromArray([]string{"input"})),
 		}
 		pairs := map[string]streamConvertPair{"node": {}}
-		require.ErrorContains(t, convert(values, pairs, true, nil), "node[node] has no stream converter")
-		require.ErrorContains(t, restore(map[string]any{"node": "input"}, pairs, true), "node[node] has no stream converter")
+		require.EqualError(t, convert(values, pairs, true, nil),
+			"checkpoint conv stream fail, node[node] has no stream converter")
+		require.EqualError(t, restore(map[string]any{"node": "input"}, pairs, true),
+			"checkpoint restore stream fail, node[node] has no stream converter")
 	})
 
 	t.Run("invalid value", func(t *testing.T) {
 		pairs := map[string]streamConvertPair{"node": defaultStreamConvertPair[string]()}
-		require.ErrorContains(t, convert(map[string]any{"node": "input"}, pairs, true, nil), "value of [node] isn't stream")
+		require.EqualError(t, convert(map[string]any{"node": "input"}, pairs, true, nil),
+			"checkpoint conv stream fail, value of [node] isn't stream")
 		require.ErrorContains(t, restore(map[string]any{"node": 1}, pairs, true), "cannot convert value[int]")
 	})
 }
@@ -2441,18 +2446,19 @@ func TestForwardCheckpointLegacyDoesNotMergeState(t *testing.T) {
 
 func TestCheckpointLayoutMetadataValidation(t *testing.T) {
 	t.Run("nil_checkpoint", func(t *testing.T) {
-		require.ErrorContains(t, (&runner{}).validateCheckpointIntegrity(nil), "checkpoint is nil")
+		require.EqualError(t, (&runner{}).validateCheckpointIntegrity(nil), "checkpoint is nil")
 	})
 	t.Run("missing_sentinel", func(t *testing.T) {
 		err := validateCheckpointLayoutMetadata(&checkpoint{
 			StateLayoutVersion: 1,
 			InterruptID2State:  map[string]core.InterruptState{},
 		})
-		require.ErrorContains(t, err, "sentinel is missing")
+		require.EqualError(t, err, "checkpoint state layout sentinel is missing")
 	})
 	t.Run("unsupported_version", func(t *testing.T) {
 		err := validateCheckpointLayoutMetadata(&checkpoint{StateLayoutVersion: 2})
-		require.ErrorContains(t, err, "requires a newer Eino version")
+		require.EqualError(t, err,
+			"checkpoint requires a newer Eino version: unsupported state layout version 2")
 	})
 	t.Run("sentinel_version_mismatch", func(t *testing.T) {
 		err := validateCheckpointLayoutMetadata(&checkpoint{
@@ -2486,7 +2492,7 @@ func TestCheckpointLayoutMetadataValidation(t *testing.T) {
 				},
 			},
 		})
-		require.ErrorContains(t, err, "legacy checkpoint contains")
+		require.EqualError(t, err, "legacy checkpoint contains a versioned state layout sentinel")
 	})
 }
 
@@ -2496,7 +2502,8 @@ func TestAttack_CheckpointLayoutRejectsReservedInterruptID(t *testing.T) {
 			"_eino_user_interrupt": {State: "user state"},
 		},
 	})
-	require.ErrorContains(t, err, "reserved checkpoint metadata prefix")
+	require.EqualError(t, err,
+		`interrupt ID "_eino_user_interrupt" uses reserved checkpoint metadata prefix`)
 }
 
 func TestMigrateCheckpointStatePreservesLayoutSentinel(t *testing.T) {
@@ -2563,7 +2570,7 @@ func TestCheckpointSparseOwnershipRejectsStateWithoutAddress(t *testing.T) {
 		},
 	}
 	err := (&runner{}).validateCheckpointIntegrity(cp)
-	require.ErrorContains(t, err, "has no routing address")
+	require.EqualError(t, err, `checkpoint state owner "orphan" has no routing address`)
 }
 
 func TestCheckpointSparseOwnershipValidatesOwnerPath(t *testing.T) {
@@ -2636,49 +2643,52 @@ func TestCheckpointSparseOwnershipValidatesOwnerPath(t *testing.T) {
 			},
 		}
 		delete(cp.SubGraphs["child"].InterruptID2State, "child")
-		require.ErrorContains(t, (&runner{}).validateCheckpointIntegrity(cp),
-			"state owner path [right] does not match routing owner path [child]")
+		require.EqualError(t, (&runner{}).validateCheckpointIntegrity(cp),
+			`interrupt ID "child" state owner path [right] does not match routing owner path [child]`)
 	})
 
 	t.Run("ancestor_mismatch", func(t *testing.T) {
 		cp := newCheckpoint()
 		cp.InterruptID2State["nested"] = cp.SubGraphs["child"].SubGraphs["nested"].InterruptID2State["nested"]
 		delete(cp.SubGraphs["child"].SubGraphs["nested"].InterruptID2State, "nested")
-		require.ErrorContains(t, (&runner{}).validateCheckpointIntegrity(cp),
-			"state owner path [] does not match routing owner path [child nested]")
+		require.EqualError(t, (&runner{}).validateCheckpointIntegrity(cp),
+			`interrupt ID "nested" state owner path [] does not match routing owner path [child nested]`)
 	})
 
 	t.Run("descendant_mismatch", func(t *testing.T) {
 		cp := newCheckpoint()
 		cp.SubGraphs["child"].SubGraphs["nested"].InterruptID2State["ordinary"] = cp.InterruptID2State["ordinary"]
 		delete(cp.InterruptID2State, "ordinary")
-		require.ErrorContains(t, (&runner{}).validateCheckpointIntegrity(cp),
-			"state owner path [child nested] does not match routing owner path []")
+		require.EqualError(t, (&runner{}).validateCheckpointIntegrity(cp),
+			`interrupt ID "ordinary" state owner path [child nested] does not match routing owner path []`)
 	})
 
 	t.Run("duplicate_owner", func(t *testing.T) {
 		cp := newCheckpoint()
 		cp.InterruptID2State["child"] = core.InterruptState{State: "duplicate"}
-		require.ErrorContains(t, (&runner{}).validateCheckpointIntegrity(cp), "multiple checkpoint state owners")
+		require.EqualError(t, (&runner{}).validateCheckpointIntegrity(cp),
+			`interrupt ID "child" has multiple checkpoint state owners`)
 	})
 
 	t.Run("missing_owner", func(t *testing.T) {
 		cp := newCheckpoint()
 		delete(cp.SubGraphs["child"].InterruptID2State, "child")
-		require.ErrorContains(t, (&runner{}).validateCheckpointIntegrity(cp), "has no checkpoint state owner")
+		require.EqualError(t, (&runner{}).validateCheckpointIntegrity(cp),
+			`interrupt ID "child" has no checkpoint state owner`)
 	})
 
 	t.Run("nil_subgraph", func(t *testing.T) {
 		cp := newCheckpoint()
 		cp.SubGraphs["nil"] = nil
-		require.ErrorContains(t, (&runner{}).validateCheckpointIntegrity(cp), `subgraph checkpoint "nil" is nil`)
+		require.EqualError(t, (&runner{}).validateCheckpointIntegrity(cp), `subgraph checkpoint "nil" is nil`)
 	})
 
 	t.Run("conflicting_nested_routing_address", func(t *testing.T) {
 		cp := newCheckpoint()
 		cp.SubGraphs["child"].InterruptID2Addr["child"] =
 			Address{{Type: AddressSegmentRunnable, ID: "other"}}
-		require.ErrorContains(t, (&runner{}).validateCheckpointIntegrity(cp), "conflicting routing addresses")
+		require.EqualError(t, (&runner{}).validateCheckpointIntegrity(cp),
+			`interrupt ID "child" has conflicting routing addresses "runnable:root;node:child;node:worker" and "runnable:other"`)
 	})
 
 	t.Run("unrelated_routes_at_different_depths", func(t *testing.T) {

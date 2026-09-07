@@ -419,7 +419,7 @@ func TestMergeInterruptState(t *testing.T) {
 			"must-not-merge": childAddress,
 		},
 		nil)
-	assert.ErrorContains(t, err, "conflicting addresses")
+	assert.EqualError(t, err, `interrupt ID "existing" has conflicting addresses`)
 	assert.NotContains(t, info.id2Addr, "must-not-merge")
 
 	t.Run("conflict_error_is_deterministic", func(t *testing.T) {

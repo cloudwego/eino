@@ -86,7 +86,7 @@ func TestAttack_ProjectionRejectsNegativeLaneDepth(t *testing.T) {
 
 	err := hydrateRunContextMessages(projected, projection.RunCtxRefs,
 		projection.RunCtxRefCount, index)
-	require.ErrorContains(t, err, "invalid run context coordinates",
+	require.EqualError(t, err, "checkpoint projection has invalid run context coordinates -1/0",
 		"negative lane depth must not select the root lane")
 }
 
@@ -445,7 +445,7 @@ func TestAttack_ProjectionRejectsMissingSliceReference(t *testing.T) {
 	projection.RunCtxRefCount--
 	err := hydrateRunContextMessages(projected, projection.RunCtxRefs[:1],
 		projection.RunCtxRefCount, index)
-	require.ErrorContains(t, err, "incomplete run context slice")
+	require.EqualError(t, err, `checkpoint projection has incomplete run context slice "root_input/0"`)
 }
 
 func TestAttack_ProjectionRejectsImplicitNilSliceEntry(t *testing.T) {
@@ -485,7 +485,7 @@ func TestAttack_ProjectionRejectsImplicitNilSliceEntry(t *testing.T) {
 	require.True(t, replaced)
 
 	_, err = hydrateComposeCheckpointValues(corrupt, index)
-	require.ErrorContains(t, err, "inline message is missing")
+	require.EqualError(t, err, "checkpoint projection inline message is missing")
 
 	replaced = false
 	corrupt, err = compose.TransformCheckpointValues(sourceData, &gobSerializer{},
@@ -502,7 +502,7 @@ func TestAttack_ProjectionRejectsImplicitNilSliceEntry(t *testing.T) {
 	require.True(t, replaced)
 
 	_, err = hydrateComposeCheckpointValues(corrupt, index)
-	require.ErrorContains(t, err, "inline agentic message is missing")
+	require.EqualError(t, err, "checkpoint projection inline agentic message is missing")
 }
 
 func TestAttack_ProjectionRejectsConflictingComposeSliceEntryPayloads(t *testing.T) {
@@ -537,6 +537,7 @@ func TestAttack_ProjectionRejectsConflictingComposeSliceEntryPayloads(t *testing
 	tests := []struct {
 		name        string
 		replacement any
+		wantErr     string
 	}{
 		{
 			name: "schema",
@@ -546,6 +547,7 @@ func TestAttack_ProjectionRejectsConflictingComposeSliceEntryPayloads(t *testing
 					Inline: schemaMessage,
 				}},
 			},
+			wantErr: "checkpoint projection message has both inline data and a source reference",
 		},
 		{
 			name: "agentic",
@@ -555,6 +557,7 @@ func TestAttack_ProjectionRejectsConflictingComposeSliceEntryPayloads(t *testing
 					Inline: agenticMessage,
 				}},
 			},
+			wantErr: "checkpoint projection agentic message has both inline data and a source reference",
 		},
 	}
 	for _, tt := range tests {
@@ -573,7 +576,7 @@ func TestAttack_ProjectionRejectsConflictingComposeSliceEntryPayloads(t *testing
 			require.True(t, replaced)
 
 			_, hydrateErr := hydrateComposeCheckpointValues(corrupt, index)
-			require.ErrorContains(t, hydrateErr, "both inline data and a source reference",
+			require.EqualError(t, hydrateErr, tt.wantErr,
 				"a compose slice entry with both source and inline payload was accepted")
 		})
 	}
@@ -689,7 +692,7 @@ func TestAttack_ProjectionRejectsToolResultCallIDRelabel(t *testing.T) {
 	}
 
 	err := hydrateInfoToolResult(&compose.ToolsInterruptAndRerunExtra{}, ref, index)
-	require.ErrorContains(t, err, "tool call ID")
+	require.EqualError(t, err, `checkpoint projection tool call ID "call-b" does not match source "call-a"`)
 }
 
 func TestAttack_ToolResultProjectionCoordinatesDoNotAlias(t *testing.T) {
@@ -824,8 +827,8 @@ func TestAttack_ProjectionRejectsCrossKindToolResultConflict(t *testing.T) {
 			ToolCallID: "call",
 			Source:     standardSource,
 		}
-		require.ErrorContains(t, hydrateInfoToolResult(extra, ref, index),
-			"already populated")
+		require.EqualError(t, hydrateInfoToolResult(extra, ref, index),
+			`checkpoint projection tool result target "call" is already populated`)
 	})
 
 	t.Run("enhanced_source_with_standard_target", func(t *testing.T) {
@@ -836,8 +839,8 @@ func TestAttack_ProjectionRejectsCrossKindToolResultConflict(t *testing.T) {
 			ToolCallID: "call",
 			Source:     enhancedSource,
 		}
-		require.ErrorContains(t, hydrateInfoToolResult(extra, ref, index),
-			"already populated")
+		require.EqualError(t, hydrateInfoToolResult(extra, ref, index),
+			`checkpoint projection tool result target "call" is already populated`)
 	})
 
 	t.Run("writer_keeps_conflict_inline", func(t *testing.T) {
@@ -928,13 +931,13 @@ func TestAttack_ProjectionRejectsMismatchedMessageSourceKind(t *testing.T) {
 	require.True(t, ok)
 	schemaSource.Kind = projectionMessageKindAgentic
 	_, err := index.schemaMessage(schemaSource)
-	require.ErrorContains(t, err, "does not match metadata")
+	require.EqualError(t, err, `checkpoint projection source message "schema" does not match metadata`)
 
 	agenticSource, ok := index.sourceForAgenticMessage(agenticMessage)
 	require.True(t, ok)
 	agenticSource.Kind = projectionMessageKindSchema
 	_, err = index.agenticMessage(agenticSource)
-	require.ErrorContains(t, err, "does not match metadata")
+	require.EqualError(t, err, `checkpoint projection source agentic message "agentic" does not match metadata`)
 }
 
 func TestAttack_NestedToolResultOnlyProjectionRoundTrip(t *testing.T) {

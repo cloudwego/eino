@@ -42,13 +42,13 @@ func TestAgentToolInterruptStateV1(t *testing.T) {
 			Version:          agentToolInterruptStateVersion + 1,
 			BridgeCheckpoint: []byte("v1"),
 		}, "agent")
-		require.ErrorContains(t, err, "unsupported interrupt state version")
+		require.EqualError(t, err, "agent tool 'agent' has unsupported interrupt state version")
 	})
 	t.Run("empty_checkpoint", func(t *testing.T) {
 		_, err := decodeAgentToolInterruptState(&agentToolInterruptStateV1{
 			Version: agentToolInterruptStateVersion,
 		}, "agent")
-		require.ErrorContains(t, err, "empty bridge checkpoint")
+		require.EqualError(t, err, "agent tool 'agent' interrupt state has empty bridge checkpoint")
 	})
 	t.Run("invalid_type", func(t *testing.T) {
 		_, err := decodeAgentToolInterruptState("invalid", "agent")

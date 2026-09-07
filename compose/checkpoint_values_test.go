@@ -161,19 +161,20 @@ func TestCheckpointValueAPIsUseDefaultSerializer(t *testing.T) {
 
 func TestCheckpointValueTraversalErrors(t *testing.T) {
 	serializer := &serialization.InternalSerializer{}
-	require.ErrorContains(t, WalkCheckpointValues(nil, serializer, nil), "visitor is nil")
+	require.EqualError(t, WalkCheckpointValues(nil, serializer, nil),
+		"checkpoint value visitor is nil")
 	_, err := TransformCheckpointValues(nil, serializer, nil)
-	require.ErrorContains(t, err, "transformer is nil")
+	require.EqualError(t, err, "checkpoint value transformer is nil")
 	require.ErrorContains(t, WalkCheckpointValues([]byte("invalid"), serializer,
 		func(NodePath, CheckpointValueLocation, any) error { return nil }),
 		"failed to decode checkpoint for inspection")
-	require.ErrorContains(t, func() error {
+	require.EqualError(t, func() error {
 		data, err := serializer.Marshal(&checkpoint{State: "state"})
 		require.NoError(t, err)
 		return WalkCheckpointValues(data, serializer,
 			func(NodePath, CheckpointValueLocation, any) error { return errors.New("visit") })
 	}(), "visit")
-	require.ErrorContains(t, func() error {
+	require.EqualError(t, func() error {
 		data, err := serializer.Marshal(&checkpoint{State: "state"})
 		require.NoError(t, err)
 		_, err = TransformCheckpointValues(data, serializer,
