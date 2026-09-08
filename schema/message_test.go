@@ -571,6 +571,125 @@ func TestConcatMessage(t *testing.T) {
 		assert.Equal(t, expectedContent, mergedMsg.AssistantGenMultiContent)
 	})
 
+	t.Run("concat audio stream followed by nil audio part does not panic", func(t *testing.T) {
+		base64Audio := "dGVzdF9hdWRpb18x"
+
+		msgs := []*Message{
+			{
+				Role: Assistant,
+				AssistantGenMultiContent: []MessageOutputPart{
+					{Type: ChatMessagePartTypeAudioURL, Audio: &MessageOutputAudio{MessagePartCommon: MessagePartCommon{Base64Data: &base64Audio}}},
+				},
+			},
+			{
+				Role: Assistant,
+				AssistantGenMultiContent: []MessageOutputPart{
+					{Type: ChatMessagePartTypeAudioURL, Audio: nil},
+				},
+			},
+		}
+
+		mergedMsg, err := ConcatMessages(msgs)
+		assert.NoError(t, err)
+
+		expectedContent := []MessageOutputPart{
+			{Type: ChatMessagePartTypeAudioURL, Audio: &MessageOutputAudio{MessagePartCommon: MessagePartCommon{Base64Data: &base64Audio}}},
+			{Type: ChatMessagePartTypeAudioURL, Audio: nil},
+		}
+
+		assert.Equal(t, expectedContent, mergedMsg.AssistantGenMultiContent)
+	})
+
+	t.Run("concat base64 audio stream does not swallow trailing url audio part", func(t *testing.T) {
+		base64Audio := "dGVzdF9hdWRpb18x"
+		audioURL := "https://example.com/audio.wav"
+
+		msgs := []*Message{
+			{
+				Role: Assistant,
+				AssistantGenMultiContent: []MessageOutputPart{
+					{Type: ChatMessagePartTypeAudioURL, Audio: &MessageOutputAudio{MessagePartCommon: MessagePartCommon{Base64Data: &base64Audio, MIMEType: "audio/wav"}}},
+				},
+			},
+			{
+				Role: Assistant,
+				AssistantGenMultiContent: []MessageOutputPart{
+					{Type: ChatMessagePartTypeAudioURL, Audio: &MessageOutputAudio{MessagePartCommon: MessagePartCommon{URL: &audioURL, MIMEType: "audio/wav"}}},
+				},
+			},
+		}
+
+		mergedMsg, err := ConcatMessages(msgs)
+		assert.NoError(t, err)
+
+		expectedContent := []MessageOutputPart{
+			{Type: ChatMessagePartTypeAudioURL, Audio: &MessageOutputAudio{MessagePartCommon: MessagePartCommon{Base64Data: &base64Audio, MIMEType: "audio/wav"}}},
+			{Type: ChatMessagePartTypeAudioURL, Audio: &MessageOutputAudio{MessagePartCommon: MessagePartCommon{URL: &audioURL, MIMEType: "audio/wav"}}},
+		}
+
+		assert.Equal(t, expectedContent, mergedMsg.AssistantGenMultiContent)
+	})
+
+	t.Run("concat url audio stream followed by base64 audio part keeps both", func(t *testing.T) {
+		base64Audio := "dGVzdF9hdWRpb18x"
+		audioURL := "https://example.com/audio.wav"
+
+		msgs := []*Message{
+			{
+				Role: Assistant,
+				AssistantGenMultiContent: []MessageOutputPart{
+					{Type: ChatMessagePartTypeAudioURL, Audio: &MessageOutputAudio{MessagePartCommon: MessagePartCommon{URL: &audioURL}}},
+				},
+			},
+			{
+				Role: Assistant,
+				AssistantGenMultiContent: []MessageOutputPart{
+					{Type: ChatMessagePartTypeAudioURL, Audio: &MessageOutputAudio{MessagePartCommon: MessagePartCommon{Base64Data: &base64Audio}}},
+				},
+			},
+		}
+
+		mergedMsg, err := ConcatMessages(msgs)
+		assert.NoError(t, err)
+
+		expectedContent := []MessageOutputPart{
+			{Type: ChatMessagePartTypeAudioURL, Audio: &MessageOutputAudio{MessagePartCommon: MessagePartCommon{URL: &audioURL}}},
+			{Type: ChatMessagePartTypeAudioURL, Audio: &MessageOutputAudio{MessagePartCommon: MessagePartCommon{Base64Data: &base64Audio}}},
+		}
+
+		assert.Equal(t, expectedContent, mergedMsg.AssistantGenMultiContent)
+	})
+
+	t.Run("concat audio stream interrupted by distinct streaming indexes", func(t *testing.T) {
+		base64Audio1 := "dGVzdF9hdWRpb18x"
+		base64Audio2 := "dGVzdF9hdWRpb18y"
+
+		msgs := []*Message{
+			{
+				Role: Assistant,
+				AssistantGenMultiContent: []MessageOutputPart{
+					{Type: ChatMessagePartTypeAudioURL, Audio: &MessageOutputAudio{MessagePartCommon: MessagePartCommon{Base64Data: &base64Audio1}}, StreamingMeta: &MessageStreamingMeta{Index: 0}},
+				},
+			},
+			{
+				Role: Assistant,
+				AssistantGenMultiContent: []MessageOutputPart{
+					{Type: ChatMessagePartTypeAudioURL, Audio: &MessageOutputAudio{MessagePartCommon: MessagePartCommon{Base64Data: &base64Audio2}}, StreamingMeta: &MessageStreamingMeta{Index: 1}},
+				},
+			},
+		}
+
+		mergedMsg, err := ConcatMessages(msgs)
+		assert.NoError(t, err)
+
+		expectedContent := []MessageOutputPart{
+			{Type: ChatMessagePartTypeAudioURL, Audio: &MessageOutputAudio{MessagePartCommon: MessagePartCommon{Base64Data: &base64Audio1}}, StreamingMeta: &MessageStreamingMeta{Index: 0}},
+			{Type: ChatMessagePartTypeAudioURL, Audio: &MessageOutputAudio{MessagePartCommon: MessagePartCommon{Base64Data: &base64Audio2}}, StreamingMeta: &MessageStreamingMeta{Index: 1}},
+		}
+
+		assert.Equal(t, expectedContent, mergedMsg.AssistantGenMultiContent)
+	})
+
 	t.Run("concat text parts with extra", func(t *testing.T) {
 		msgs := []*Message{
 			{
