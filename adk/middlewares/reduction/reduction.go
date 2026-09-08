@@ -1752,27 +1752,18 @@ func copyAgenticMessages(msgs []*schema.AgenticMessage) []*schema.AgenticMessage
 									t := *rb.Text
 									rbCopy.Text = &t
 								}
+								rbCopy.Extra = cloneStringAnyMap(rb.Extra)
 								ftr.Content[k] = &rbCopy
 							}
 						}
 					}
 					cb.FunctionToolResult = &ftr
 				}
-				if block.Extra != nil {
-					cb.Extra = make(map[string]any, len(block.Extra))
-					for k, v := range block.Extra {
-						cb.Extra[k] = v
-					}
-				}
+				cb.Extra = cloneStringAnyMap(block.Extra)
 				copied.ContentBlocks[j] = &cb
 			}
 		}
-		if msg.Extra != nil {
-			copied.Extra = make(map[string]any, len(msg.Extra))
-			for k, v := range msg.Extra {
-				copied.Extra[k] = v
-			}
-		}
+		copied.Extra = cloneStringAnyMap(msg.Extra)
 		resp[i] = copied
 	}
 	return resp
@@ -1801,12 +1792,7 @@ func copyMessages(msgs []*schema.Message) []*schema.Message {
 		if msg.ToolCalls != nil {
 			copied.ToolCalls = append(make([]schema.ToolCall, 0, len(msg.ToolCalls)), msg.ToolCalls...)
 		}
-		if msg.Extra != nil {
-			copied.Extra = make(map[string]any, len(msg.Extra))
-			for k, v := range msg.Extra {
-				copied.Extra[k] = v
-			}
-		}
+		copied.Extra = cloneStringAnyMap(msg.Extra)
 		resp[i] = copied
 	}
 	return resp
@@ -2150,40 +2136,71 @@ func convMessageInputPartToToolOutputPart(msgPart schema.MessageInputPart) (sche
 	switch msgPart.Type {
 	case schema.ChatMessagePartTypeText:
 		return schema.ToolOutputPart{
-			Type: schema.ToolPartTypeText,
-			Text: msgPart.Text,
+			Type:  schema.ToolPartTypeText,
+			Text:  msgPart.Text,
+			Extra: cloneStringAnyMap(msgPart.Extra),
 		}, nil
 	case schema.ChatMessagePartTypeImageURL:
 		return schema.ToolOutputPart{
 			Type: schema.ToolPartTypeImage,
 			Image: &schema.ToolOutputImage{
-				MessagePartCommon: msgPart.Image.MessagePartCommon,
+				MessagePartCommon: cloneMessagePartCommon(msgPart.Image.MessagePartCommon),
 			},
+			Extra: cloneStringAnyMap(msgPart.Extra),
 		}, nil
 	case schema.ChatMessagePartTypeAudioURL:
 		return schema.ToolOutputPart{
 			Type: schema.ToolPartTypeAudio,
 			Audio: &schema.ToolOutputAudio{
-				MessagePartCommon: msgPart.Audio.MessagePartCommon,
+				MessagePartCommon: cloneMessagePartCommon(msgPart.Audio.MessagePartCommon),
 			},
+			Extra: cloneStringAnyMap(msgPart.Extra),
 		}, nil
 	case schema.ChatMessagePartTypeVideoURL:
 		return schema.ToolOutputPart{
 			Type: schema.ToolPartTypeVideo,
 			Video: &schema.ToolOutputVideo{
-				MessagePartCommon: msgPart.Video.MessagePartCommon,
+				MessagePartCommon: cloneMessagePartCommon(msgPart.Video.MessagePartCommon),
 			},
+			Extra: cloneStringAnyMap(msgPart.Extra),
 		}, nil
 	case schema.ChatMessagePartTypeFileURL:
 		return schema.ToolOutputPart{
 			Type: schema.ToolPartTypeFile,
 			File: &schema.ToolOutputFile{
-				MessagePartCommon: msgPart.File.MessagePartCommon,
+				MessagePartCommon: cloneMessagePartCommon(msgPart.File.MessagePartCommon),
 			},
+			Extra: cloneStringAnyMap(msgPart.Extra),
 		}, nil
 	default:
 		return schema.ToolOutputPart{}, fmt.Errorf("unknown msg part type: %v", msgPart.Type)
 	}
+}
+
+func cloneMessagePartCommon(common schema.MessagePartCommon) schema.MessagePartCommon {
+	common.URL = cloneStringPtr(common.URL)
+	common.Base64Data = cloneStringPtr(common.Base64Data)
+	common.Extra = cloneStringAnyMap(common.Extra)
+	return common
+}
+
+func cloneStringPtr(value *string) *string {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	return &cloned
+}
+
+func cloneStringAnyMap(source map[string]any) map[string]any {
+	if source == nil {
+		return nil
+	}
+	cloned := make(map[string]any, len(source))
+	for key, value := range source {
+		cloned[key] = value
+	}
+	return cloned
 }
 
 // toolResultToOutputParts converts a FunctionToolResult's Content blocks to ToolOutputPart slice.
@@ -2194,26 +2211,50 @@ func toolResultToOutputParts(f *schema.FunctionToolResult) []schema.ToolOutputPa
 			continue
 		}
 		if block.Text != nil {
-			parts = append(parts, schema.ToolOutputPart{Type: schema.ToolPartTypeText, Text: block.Text.Text})
+			parts = append(parts, schema.ToolOutputPart{
+				Type:  schema.ToolPartTypeText,
+				Text:  block.Text.Text,
+				Extra: cloneStringAnyMap(block.Extra),
+			})
 		} else if block.Image != nil {
 			parts = append(parts, schema.ToolOutputPart{
-				Type:  schema.ToolPartTypeImage,
-				Image: &schema.ToolOutputImage{MessagePartCommon: schema.MessagePartCommon{URL: strPtr(block.Image.URL), MIMEType: block.Image.MIMEType}},
+				Type: schema.ToolPartTypeImage,
+				Image: &schema.ToolOutputImage{MessagePartCommon: schema.MessagePartCommon{
+					URL:        strPtr(block.Image.URL),
+					Base64Data: strPtr(block.Image.Base64Data),
+					MIMEType:   block.Image.MIMEType,
+				}},
+				Extra: cloneStringAnyMap(block.Extra),
 			})
 		} else if block.Audio != nil {
 			parts = append(parts, schema.ToolOutputPart{
-				Type:  schema.ToolPartTypeAudio,
-				Audio: &schema.ToolOutputAudio{MessagePartCommon: schema.MessagePartCommon{URL: strPtr(block.Audio.URL), MIMEType: block.Audio.MIMEType}},
+				Type: schema.ToolPartTypeAudio,
+				Audio: &schema.ToolOutputAudio{MessagePartCommon: schema.MessagePartCommon{
+					URL:        strPtr(block.Audio.URL),
+					Base64Data: strPtr(block.Audio.Base64Data),
+					MIMEType:   block.Audio.MIMEType,
+				}},
+				Extra: cloneStringAnyMap(block.Extra),
 			})
 		} else if block.Video != nil {
 			parts = append(parts, schema.ToolOutputPart{
-				Type:  schema.ToolPartTypeVideo,
-				Video: &schema.ToolOutputVideo{MessagePartCommon: schema.MessagePartCommon{URL: strPtr(block.Video.URL), MIMEType: block.Video.MIMEType}},
+				Type: schema.ToolPartTypeVideo,
+				Video: &schema.ToolOutputVideo{MessagePartCommon: schema.MessagePartCommon{
+					URL:        strPtr(block.Video.URL),
+					Base64Data: strPtr(block.Video.Base64Data),
+					MIMEType:   block.Video.MIMEType,
+				}},
+				Extra: cloneStringAnyMap(block.Extra),
 			})
 		} else if block.File != nil {
 			parts = append(parts, schema.ToolOutputPart{
 				Type: schema.ToolPartTypeFile,
-				File: &schema.ToolOutputFile{MessagePartCommon: schema.MessagePartCommon{URL: strPtr(block.File.URL), MIMEType: block.File.MIMEType}},
+				File: &schema.ToolOutputFile{MessagePartCommon: schema.MessagePartCommon{
+					URL:        strPtr(block.File.URL),
+					Base64Data: strPtr(block.File.Base64Data),
+					MIMEType:   block.File.MIMEType,
+				}},
+				Extra: cloneStringAnyMap(block.Extra),
 			})
 		}
 	}
@@ -2228,35 +2269,56 @@ func setToolResultFromOutputParts(f *schema.FunctionToolResult, parts []schema.T
 		switch part.Type {
 		case schema.ToolPartTypeText:
 			newBlocks = append(newBlocks, &schema.FunctionToolResultContentBlock{
-				Type: schema.FunctionToolResultContentBlockTypeText,
-				Text: &schema.UserInputText{Text: part.Text},
+				Type:  schema.FunctionToolResultContentBlockTypeText,
+				Text:  &schema.UserInputText{Text: part.Text},
+				Extra: cloneStringAnyMap(part.Extra),
 			})
 		case schema.ToolPartTypeImage:
 			if part.Image != nil {
 				newBlocks = append(newBlocks, &schema.FunctionToolResultContentBlock{
-					Type:  schema.FunctionToolResultContentBlockTypeImage,
-					Image: &schema.UserInputImage{URL: ptrStr(part.Image.URL), MIMEType: part.Image.MIMEType},
+					Type: schema.FunctionToolResultContentBlockTypeImage,
+					Image: &schema.UserInputImage{
+						URL:        ptrStr(part.Image.URL),
+						Base64Data: ptrStr(part.Image.Base64Data),
+						MIMEType:   part.Image.MIMEType,
+					},
+					Extra: cloneStringAnyMap(part.Extra),
 				})
 			}
 		case schema.ToolPartTypeAudio:
 			if part.Audio != nil {
 				newBlocks = append(newBlocks, &schema.FunctionToolResultContentBlock{
-					Type:  schema.FunctionToolResultContentBlockTypeAudio,
-					Audio: &schema.UserInputAudio{URL: ptrStr(part.Audio.URL), MIMEType: part.Audio.MIMEType},
+					Type: schema.FunctionToolResultContentBlockTypeAudio,
+					Audio: &schema.UserInputAudio{
+						URL:        ptrStr(part.Audio.URL),
+						Base64Data: ptrStr(part.Audio.Base64Data),
+						MIMEType:   part.Audio.MIMEType,
+					},
+					Extra: cloneStringAnyMap(part.Extra),
 				})
 			}
 		case schema.ToolPartTypeVideo:
 			if part.Video != nil {
 				newBlocks = append(newBlocks, &schema.FunctionToolResultContentBlock{
-					Type:  schema.FunctionToolResultContentBlockTypeVideo,
-					Video: &schema.UserInputVideo{URL: ptrStr(part.Video.URL), MIMEType: part.Video.MIMEType},
+					Type: schema.FunctionToolResultContentBlockTypeVideo,
+					Video: &schema.UserInputVideo{
+						URL:        ptrStr(part.Video.URL),
+						Base64Data: ptrStr(part.Video.Base64Data),
+						MIMEType:   part.Video.MIMEType,
+					},
+					Extra: cloneStringAnyMap(part.Extra),
 				})
 			}
 		case schema.ToolPartTypeFile:
 			if part.File != nil {
 				newBlocks = append(newBlocks, &schema.FunctionToolResultContentBlock{
 					Type: schema.FunctionToolResultContentBlockTypeFile,
-					File: &schema.UserInputFile{URL: ptrStr(part.File.URL), MIMEType: part.File.MIMEType},
+					File: &schema.UserInputFile{
+						URL:        ptrStr(part.File.URL),
+						Base64Data: ptrStr(part.File.Base64Data),
+						MIMEType:   part.File.MIMEType,
+					},
+					Extra: cloneStringAnyMap(part.Extra),
 				})
 			}
 		}
