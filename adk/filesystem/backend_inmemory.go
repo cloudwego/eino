@@ -496,6 +496,10 @@ func matchFileType(ext, fileType string) bool {
 }
 
 // applyContext adds context lines around matches.
+// Locking: it must only be called with b.mu already held for reading (GrepRaw
+// does this for its whole duration). It must not acquire b.mu itself: a nested
+// RLock deadlocks once a writer is queued behind the outer read lock, because
+// sync.RWMutex blocks new readers when a writer is waiting.
 func (b *InMemoryBackend) applyContext(matches []GrepMatch, req *GrepRequest) []GrepMatch {
 	if len(matches) == 0 {
 		return matches
@@ -534,10 +538,8 @@ func (b *InMemoryBackend) applyContext(matches []GrepMatch, req *GrepRequest) []
 	for _, filePath := range fileOrder {
 		fileMatches := matchesByFile[filePath]
 
-		// Get file content once per file
-		b.mu.RLock()
+		// Get file content once per file; b.mu is already held by GrepRaw.
 		entry, exists := b.files[filePath]
-		b.mu.RUnlock()
 
 		if !exists {
 			// If file doesn't exist, keep original matches
