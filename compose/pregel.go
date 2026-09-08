@@ -18,14 +18,24 @@ package compose
 
 import "fmt"
 
-func pregelChannelBuilder(_ []string, _ []string, _ func() any, _ func() streamReader) channel {
-	return &pregelChannel{Values: make(map[string]any)}
+func pregelChannelBuilder(controlDependencies []string, _ []string, _ func() any, _ func() streamReader) channel {
+	deps := make(map[string]dependencyState, len(controlDependencies))
+	for _, dep := range controlDependencies {
+		deps[dep] = dependencyStateWaiting
+	}
+	return &pregelChannel{Values: make(map[string]any), controlPredecessors: deps}
 }
 
 type pregelChannel struct {
 	Values map[string]any
 
 	mergeConfig FanInMergeConfig
+
+	// controlPredecessors only tracks branch-skip state, so that skip reports
+	// can propagate through this node to downstream nodes that wait for all
+	// predecessors (see WithTriggerMode). It never affects when this channel
+	// fires: any reported value still triggers the node immediately.
+	controlPredecessors map[string]dependencyState
 }
 
 func (ch *pregelChannel) setMergeConfig(cfg FanInMergeConfig) {
@@ -87,8 +97,25 @@ func (ch *pregelChannel) get(isStream bool, name string, edgeHandler *edgeHandle
 	return v, true, nil
 }
 
-func (ch *pregelChannel) reportSkip(_ []string) bool {
-	return false
+func (ch *pregelChannel) reportSkip(keys []string) bool {
+	for _, k := range keys {
+		if _, ok := ch.controlPredecessors[k]; ok {
+			ch.controlPredecessors[k] = dependencyStateSkipped
+		}
+	}
+
+	// Propagate the skip downstream only when every control predecessor has
+	// been skipped, i.e. this node can never fire. Nodes without control
+	// predecessors (e.g. reached through data-only edges) never propagate.
+	if len(ch.controlPredecessors) == 0 {
+		return false
+	}
+	for _, state := range ch.controlPredecessors {
+		if state != dependencyStateSkipped {
+			return false
+		}
+	}
+	return true
 }
 func (ch *pregelChannel) reportDependencies(_ []string) {
 	return

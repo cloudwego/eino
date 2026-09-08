@@ -44,6 +44,8 @@ type nodeOptions struct {
 	outputKey string
 
 	graphCompileOption []GraphCompileOption // when this node is itself an AnyGraph, this option will be used to compile the node as a nested graph
+
+	triggerMode NodeTriggerMode // per-node trigger mode, empty means following the graph-level trigger mode
 }
 
 // WithNodeName sets the name of the node.
@@ -86,6 +88,33 @@ func WithOutputKey(k string) GraphAddNodeOpt {
 func WithGraphCompileOptions(opts ...GraphCompileOption) GraphAddNodeOpt {
 	return func(o *graphAddNodeOpts) {
 		o.nodeOptions.graphCompileOption = opts
+	}
+}
+
+// WithTriggerMode sets the trigger mode for this specific node, overriding the
+// graph-level trigger mode (see WithNodeTriggerMode) for this node only.
+//
+// The supported use case is marking selected nodes as AllPredecessor within an
+// AnyPredecessor (default) Graph: such a node is triggered only after ALL of its
+// predecessors have finished, instead of being triggered whenever ANY predecessor
+// finishes. This saves users from manually aligning super-step lengths with
+// passthrough nodes when only a few nodes need all-predecessor semantics.
+//
+// Notes:
+//   - Only Graph supports this option; Chain and Workflow reject it at compile time.
+//   - Setting AnyPredecessor on a node is a no-op when the graph runs in
+//     AnyPredecessor mode, and is rejected when the graph runs in AllPredecessor
+//     (DAG) mode, where every node already waits for all predecessors.
+//   - An AllPredecessor node inside a cycle waits for all of its predecessors in
+//     every super step; if one of them can only fire after the node itself, the
+//     graph run ends with a max-run-steps error instead of completing.
+//
+// e.g.
+//
+//	graph.AddNode("join", joiner, compose.WithTriggerMode(compose.AllPredecessor))
+func WithTriggerMode(triggerMode NodeTriggerMode) GraphAddNodeOpt {
+	return func(o *graphAddNodeOpts) {
+		o.nodeOptions.triggerMode = triggerMode
 	}
 }
 
