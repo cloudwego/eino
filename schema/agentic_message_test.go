@@ -170,6 +170,119 @@ func TestConcatAgenticMessages(t *testing.T) {
 		assert.Equal(t, "Part1-Part3", result.ContentBlocks[0].Reasoning.Text)
 	})
 
+	t.Run("concat reasoning keeps last non-empty signature", func(t *testing.T) {
+		// The signature is an opaque integrity token, not appendable content:
+		// adapters commonly repeat the same signature in every chunk, and
+		// concatenating it corrupts verification. The last non-empty one wins,
+		// matching mergeReasoningParts for *Message.
+		msgs := []*AgenticMessage{
+			{
+				Role: AgenticRoleTypeAssistant,
+				ContentBlocks: []*ContentBlock{
+					{
+						Type: ContentBlockTypeReasoning,
+						Reasoning: &Reasoning{
+							Text:      "First ",
+							Signature: "sig-abc",
+						},
+						StreamingMeta: &StreamingMeta{Index: 0},
+					},
+				},
+			},
+			{
+				Role: AgenticRoleTypeAssistant,
+				ContentBlocks: []*ContentBlock{
+					{
+						Type: ContentBlockTypeReasoning,
+						Reasoning: &Reasoning{
+							Text:      "Second",
+							Signature: "sig-abc",
+						},
+						StreamingMeta: &StreamingMeta{Index: 0},
+					},
+				},
+			},
+		}
+
+		result, err := ConcatAgenticMessages(msgs)
+		assert.NoError(t, err)
+		assert.Len(t, result.ContentBlocks, 1)
+		assert.Equal(t, "First Second", result.ContentBlocks[0].Reasoning.Text)
+		assert.Equal(t, "sig-abc", result.ContentBlocks[0].Reasoning.Signature)
+	})
+
+	t.Run("concat reasoning signature falls back to later non-empty chunk", func(t *testing.T) {
+		msgs := []*AgenticMessage{
+			{
+				Role: AgenticRoleTypeAssistant,
+				ContentBlocks: []*ContentBlock{
+					{
+						Type: ContentBlockTypeReasoning,
+						Reasoning: &Reasoning{
+							Text:      "First ",
+							Signature: "sig-first",
+						},
+						StreamingMeta: &StreamingMeta{Index: 0},
+					},
+				},
+			},
+			{
+				Role: AgenticRoleTypeAssistant,
+				ContentBlocks: []*ContentBlock{
+					{
+						Type: ContentBlockTypeReasoning,
+						Reasoning: &Reasoning{
+							Text: "Second",
+						},
+						StreamingMeta: &StreamingMeta{Index: 0},
+					},
+				},
+			},
+		}
+
+		result, err := ConcatAgenticMessages(msgs)
+		assert.NoError(t, err)
+		assert.Equal(t, "sig-first", result.ContentBlocks[0].Reasoning.Signature)
+	})
+
+	t.Run("concat mcp tool result appends streamed content chunks", func(t *testing.T) {
+		// Streamed MCP tool results arrive in chunks; concatenation must append
+		// them (like MCPToolCall.Arguments) instead of keeping only the last one.
+		msgs := []*AgenticMessage{
+			{
+				Role: AgenticRoleTypeAssistant,
+				ContentBlocks: []*ContentBlock{
+					{
+						Type: ContentBlockTypeMCPToolResult,
+						MCPToolResult: &MCPToolResult{
+							CallID:  "mcp_call_1",
+							Name:    "mcp_func",
+							Content: `{"part1":`,
+						},
+						StreamingMeta: &StreamingMeta{Index: 0},
+					},
+				},
+			},
+			{
+				Role: AgenticRoleTypeAssistant,
+				ContentBlocks: []*ContentBlock{
+					{
+						Type: ContentBlockTypeMCPToolResult,
+						MCPToolResult: &MCPToolResult{
+							Content: `"value"}`,
+						},
+						StreamingMeta: &StreamingMeta{Index: 0},
+					},
+				},
+			},
+		}
+
+		result, err := ConcatAgenticMessages(msgs)
+		assert.NoError(t, err)
+		assert.Len(t, result.ContentBlocks, 1)
+		assert.Equal(t, `{"part1":"value"}`, result.ContentBlocks[0].MCPToolResult.Content)
+	})
+
 	t.Run("concat user input text", func(t *testing.T) {
 		msgs := []*AgenticMessage{
 			{
@@ -681,7 +794,7 @@ func TestConcatAgenticMessages(t *testing.T) {
 		assert.Equal(t, "mcp-server", result.ContentBlocks[0].MCPToolResult.ServerLabel)
 		assert.Equal(t, "mcp_call_1", result.ContentBlocks[0].MCPToolResult.CallID)
 		assert.Equal(t, "mcp_func", result.ContentBlocks[0].MCPToolResult.Name)
-		assert.Equal(t, `Second`, result.ContentBlocks[0].MCPToolResult.Content)
+		assert.Equal(t, `FirstSecond`, result.ContentBlocks[0].MCPToolResult.Content)
 	})
 
 	t.Run("concat mcp list tools", func(t *testing.T) {
