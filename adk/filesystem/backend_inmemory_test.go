@@ -2034,6 +2034,66 @@ func TestInMemoryBackend_GrepRaw_Concurrent(t *testing.T) {
 	})
 }
 
+func TestInMemoryBackend_GrepRaw_NoDeadlockWithConcurrentWriter(t *testing.T) {
+	// Regression test: GrepRaw holds b.mu for reading and applyContext used to
+	// re-acquire it. A writer queued between the two read locks wedged the
+	// mutex permanently (sync.RWMutex forbids recursive read locking).
+	ctx := context.Background()
+
+	for _, files := range []int{1, 20} { // single-file and multi-file grep paths
+		backend := NewInMemoryBackend()
+		for i := 0; i < files; i++ {
+			err := backend.Write(ctx, &WriteRequest{
+				FilePath: fmt.Sprintf("/dir/file%d.txt", i),
+				Content:  "hello\nworld\nhello again\n",
+			})
+			if err != nil {
+				t.Fatalf("Write failed: %v", err)
+			}
+		}
+
+		stop := make(chan struct{})
+		writerDone := make(chan struct{})
+		go func() {
+			defer close(writerDone)
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+					_ = backend.Edit(ctx, &EditRequest{
+						FilePath:  "/dir/file0.txt",
+						OldString: "world",
+						NewString: "world",
+					})
+				}
+			}
+		}()
+
+		grepDone := make(chan struct{})
+		go func() {
+			defer close(grepDone)
+			_, err := backend.GrepRaw(ctx, &GrepRequest{
+				Pattern:    "hello",
+				Path:       "/dir",
+				AfterLines: 1,
+			})
+			if err != nil {
+				t.Errorf("GrepRaw failed: %v", err)
+			}
+		}()
+
+		select {
+		case <-grepDone:
+		case <-time.After(10 * time.Second):
+			t.Fatalf("GrepRaw with %d file(s) deadlocked against a concurrent writer", files)
+		}
+
+		close(stop)
+		<-writerDone
+	}
+}
+
 func BenchmarkInMemoryBackend_GrepRaw(b *testing.B) {
 	backend := NewInMemoryBackend()
 	ctx := context.Background()
