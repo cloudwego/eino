@@ -460,9 +460,11 @@ func TestWithCancel_RecursiveDoesNotTargetAgentEmbeddedInMiddleware(t *testing.T
 		t.Fatal("middleware's embedded agent did not start")
 	}
 
+	handle, contributed := cancelFn(WithAgentCancelMode(CancelAfterChatModel), WithRecursive())
+	require.True(t, contributed)
+
 	cancelDone := make(chan error, 1)
 	go func() {
-		handle, _ := cancelFn(WithAgentCancelMode(CancelAfterChatModel), WithRecursive())
 		cancelDone <- handle.Wait()
 	}()
 

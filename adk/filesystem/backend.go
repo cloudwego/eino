@@ -382,15 +382,16 @@ type ExecuteResponse struct {
 
 // Shell executes shell commands. A command is stopped by one of two paths, and an
 // implementation must honor both: canceling ctx (how the caller abandons or cancels
-// a run — an implementation that ignores it will leak the process and its goroutine
+// a run - an implementation that ignores it will leak the process and its goroutine
 // after the run is reported stopped) and, when ExecuteRequest.Timeout is set,
 // expiry of that command budget (see ExecuteRequest.Timeout).
 type Shell interface {
 	Execute(ctx context.Context, input *ExecuteRequest) (result *ExecuteResponse, err error)
 }
 
-// StreamingShell is the streaming counterpart of Shell. ExecuteStreaming must honor
-// both stop paths described on Shell.
+// StreamingShell is the streaming counterpart of Shell. ExecuteStreaming must
+// report command-budget expiry via a chunk with ExecuteResponse.TimedOut, because
+// stream errors are reserved for execution or transport failures.
 type StreamingShell interface {
 	ExecuteStreaming(ctx context.Context, input *ExecuteRequest) (result *schema.StreamReader[*ExecuteResponse], err error)
 }

@@ -20,6 +20,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -30,32 +32,40 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cloudwego/eino/adk"
-	"github.com/cloudwego/eino/adk/backgroundtask"
-	backgroundlocal "github.com/cloudwego/eino/adk/backgroundtask/local"
-	durablesubagent "github.com/cloudwego/eino/adk/backgroundtask/subagent"
 	"github.com/cloudwego/eino/adk/filesystem"
 	"github.com/cloudwego/eino/adk/internal/agenttool"
 	adksession "github.com/cloudwego/eino/adk/session"
+	"github.com/cloudwego/eino/adk/task"
+	"github.com/cloudwego/eino/adk/task/background"
+	backgroundlocal "github.com/cloudwego/eino/adk/task/local"
+	durablesubagent "github.com/cloudwego/eino/adk/task/subagent"
+	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/schema"
 )
 
+func init() {
+	schema.RegisterName[*adk.InterruptInfo](
+		"_eino_adk_subagent_test_interrupt_info",
+	)
+}
+
 func mustNewBackgroundManager(
 	t testing.TB,
 	ctx context.Context,
-	config *backgroundtask.Config,
-) *backgroundtask.Manager {
+	config *background.Config,
+) *background.Manager {
 	t.Helper()
 	if config == nil {
-		config = &backgroundtask.Config{}
+		config = &background.Config{}
 	} else {
 		copy := *config
 		config = &copy
 	}
 	if config.SendTaskCreatedEvent == nil {
-		config.SendTaskCreatedEvent = func(context.Context, *backgroundtask.Task) error { return nil }
+		config.SendTaskCreatedEvent = func(context.Context, *background.TaskSnapshot) error { return nil }
 	}
-	manager, err := backgroundtask.New(ctx, config)
+	manager, err := background.New(ctx, config)
 	require.NoError(t, err)
 	return manager
 }
@@ -67,29 +77,199 @@ type mockAgent struct {
 	runOptions func([]adk.AgentRunOption)
 }
 
+type interruptingMockAgent struct {
+	name string
+}
+
+type runtimeIdentity struct {
+	taskID         string
+	childSessionID string
+}
+
+type checkpointInterruptAgent struct {
+	name        string
+	identities  chan<- runtimeIdentity
+	resumeInfos chan<- *adk.ResumeInfo
+	runCalls    int64
+	resumeCalls int64
+}
+
+type controllerToolModel struct {
+	response *schema.Message
+	inputs   chan<- []*schema.Message
+}
+
+type countingMailboxStore struct {
+	*background.InMemoryStore
+	created int64
+}
+
+func awaitMiddlewareValue[T any](
+	t *testing.T,
+	ctx context.Context,
+	values <-chan T,
+) T {
+	t.Helper()
+	select {
+	case value := <-values:
+		return value
+	case <-ctx.Done():
+		t.Fatalf("timed out waiting for middleware test value: %v", ctx.Err())
+		var zero T
+		return zero
+	}
+}
+
+func (s *countingMailboxStore) Register(
+	ctx context.Context,
+	req *task.RegisterMailboxRequest,
+) (*task.RegisterMailboxResult, error) {
+	result, err := s.InMemoryStore.Register(ctx, req)
+	if err == nil && result.Created {
+		atomic.AddInt64(&s.created, 1)
+	}
+	return result, err
+}
+
+func (m *controllerToolModel) Generate(
+	_ context.Context,
+	input []*schema.Message,
+	_ ...model.Option,
+) (*schema.Message, error) {
+	if m.inputs != nil {
+		m.inputs <- append([]*schema.Message(nil), input...)
+	}
+	return m.response, nil
+}
+
+func (m *controllerToolModel) Stream(
+	ctx context.Context,
+	input []*schema.Message,
+	options ...model.Option,
+) (*schema.StreamReader[*schema.Message], error) {
+	message, err := m.Generate(ctx, input, options...)
+	if err != nil {
+		return nil, err
+	}
+	return schema.StreamReaderFromArray([]*schema.Message{message}), nil
+}
+
+func (m *controllerToolModel) WithTools(
+	[]*schema.ToolInfo,
+) (model.ToolCallingChatModel, error) {
+	return m, nil
+}
+
+func (a *checkpointInterruptAgent) Name(context.Context) string { return a.name }
+
+func (*checkpointInterruptAgent) Description(context.Context) string {
+	return "checkpoint interrupt worker"
+}
+
+func (a *checkpointInterruptAgent) captureIdentity(ctx context.Context) {
+	execution, executionOK := task.ExecutionContextFromContext(ctx)
+	childSessionID, childOK := durablesubagent.ChildSessionID(ctx)
+	if executionOK && childOK && a.identities != nil {
+		a.identities <- runtimeIdentity{
+			taskID: execution.TaskID, childSessionID: childSessionID,
+		}
+	}
+}
+
+func (a *checkpointInterruptAgent) Run(
+	ctx context.Context,
+	_ *adk.AgentInput,
+	_ ...adk.AgentRunOption,
+) *adk.AsyncIterator[*adk.AgentEvent] {
+	atomic.AddInt64(&a.runCalls, 1)
+	a.captureIdentity(ctx)
+	iter, generator := adk.NewAsyncIteratorPair[*adk.AgentEvent]()
+	generator.Send(adk.Interrupt(ctx, "approval required"))
+	generator.Close()
+	return iter
+}
+
+func (a *checkpointInterruptAgent) Resume(
+	ctx context.Context,
+	info *adk.ResumeInfo,
+	_ ...adk.AgentRunOption,
+) *adk.AsyncIterator[*adk.AgentEvent] {
+	atomic.AddInt64(&a.resumeCalls, 1)
+	a.captureIdentity(ctx)
+	if a.resumeInfos != nil {
+		copy := *info
+		a.resumeInfos <- &copy
+	}
+	content, _ := info.ResumeData.(string)
+	iter, generator := adk.NewAsyncIteratorPair[*adk.AgentEvent]()
+	generator.Send(adk.EventFromMessage(
+		schema.AssistantMessage(content, nil),
+		nil,
+		schema.Assistant,
+		a.name,
+	))
+	generator.Close()
+	return iter
+}
+
+func (a *interruptingMockAgent) Name(context.Context) string { return a.name }
+
+func (*interruptingMockAgent) Description(context.Context) string {
+	return "interrupting worker"
+}
+
+func (a *interruptingMockAgent) Run(
+	ctx context.Context,
+	_ *adk.AgentInput,
+	_ ...adk.AgentRunOption,
+) *adk.AsyncIterator[*adk.AgentEvent] {
+	iter, generator := adk.NewAsyncIteratorPair[*adk.AgentEvent]()
+	generator.Send(adk.Interrupt(ctx, "approval required"))
+	generator.Close()
+	return iter
+}
+
+func (a *interruptingMockAgent) Resume(
+	_ context.Context,
+	_ *adk.ResumeInfo,
+	_ ...adk.AgentRunOption,
+) *adk.AsyncIterator[*adk.AgentEvent] {
+	iter, generator := adk.NewAsyncIteratorPair[*adk.AgentEvent]()
+	generator.Send(adk.EventFromMessage(
+		schema.AssistantMessage("approved", nil),
+		nil,
+		schema.Assistant,
+		a.name,
+	))
+	generator.Close()
+	return iter
+}
+
 type middlewareRunOptions struct {
 	value string
 }
 
-var testManagerStores sync.Map
-var testManagerExecutors sync.Map
+type runtimeBarrierFunc func(
+	context.Context,
+	*durablesubagent.CompletionContext[*schema.Message],
+) (durablesubagent.CompletionAction, error)
 
-func newTestManager(t testing.TB, ctx context.Context) *backgroundtask.Manager {
-	store := backgroundtask.NewInMemoryStore(nil)
-	executors := backgroundtask.NewExecutorRegistry()
-	manager := mustNewBackgroundManager(t, ctx, &backgroundtask.Config{
-		Tasks: store, Executors: executors,
-	})
-	testManagerStores.Store(manager, store)
-	testManagerExecutors.Store(manager, executors)
-	return manager
+func (f runtimeBarrierFunc) Check(
+	ctx context.Context,
+	input *durablesubagent.CompletionContext[*schema.Message],
+) (durablesubagent.CompletionAction, error) {
+	return f(ctx, input)
 }
 
-func executorsForTest(t *testing.T, manager *backgroundtask.Manager) *backgroundtask.ExecutorRegistry {
-	t.Helper()
-	executors, ok := testManagerExecutors.Load(manager)
-	require.True(t, ok)
-	return executors.(*backgroundtask.ExecutorRegistry)
+var testManagerStores sync.Map
+
+func newTestManager(t testing.TB, ctx context.Context) *background.Manager {
+	store := background.NewInMemoryStore(nil)
+	manager := mustNewBackgroundManager(t, ctx, &background.Config{
+		Tasks: store,
+	})
+	testManagerStores.Store(manager, store)
+	return manager
 }
 
 func (m *mockAgent) Name(context.Context) string        { return m.name }
@@ -111,43 +291,302 @@ func (m *mockAgent) Resume(ctx context.Context, _ *adk.ResumeInfo, opts ...adk.A
 	return m.Run(ctx, &adk.AgentInput{}, opts...)
 }
 
-func durableExecutor(t *testing.T) *durablesubagent.Executor[*schema.Message] {
-	t.Helper()
-	store := adksession.NewInMemoryStore[*schema.Message](nil)
-	executor, err := durablesubagent.NewExecutor(&durablesubagent.ExecutorConfig[*schema.Message]{
-		SessionStore: store, CheckPointStore: store,
+func TestControllerAgentToolForeground(t *testing.T) {
+	ctx := runnerEnvironmentContext(t)
+	manager := newTestManager(t, ctx)
+	sessionStore := adksession.NewInMemoryStore[*schema.Message](nil)
+	controller, err := durablesubagent.NewController(
+		&durablesubagent.ControllerConfig[*schema.Message]{
+			Manager: manager,
+			Barrier: runtimeBarrierFunc(func(
+				context.Context,
+				*durablesubagent.CompletionContext[*schema.Message],
+			) (durablesubagent.CompletionAction, error) {
+				return durablesubagent.CompletionComplete, nil
+			}),
+			InputsToAgentInput: func(
+				context.Context,
+				[]*task.InputRecord,
+			) (*adk.AgentInput, error) {
+				return &adk.AgentInput{
+					Messages: []*schema.Message{schema.UserMessage("event")},
+				}, nil
+			},
+			SessionStore: sessionStore, CheckPointStore: sessionStore,
+		},
+	)
+	require.NoError(t, err)
+	agent := &mockAgent{name: "worker", desc: "runtime result"}
+	middleware, err := New(ctx, &Config{
+		SubAgents: []adk.Agent{agent},
+		Tasks: &TaskConfig{Durable: &DurableTaskConfig{
+			Runtime: controller,
+		}},
 	})
 	require.NoError(t, err)
-	return executor
+	_, runCtx, err := middleware.BeforeAgent(
+		ctx,
+		&adk.ChatModelAgentContext[*schema.Message]{},
+	)
+	require.NoError(t, err)
+	result, err := runCtx.Tools[0].(tool.InvokableTool).InvokableRun(
+		ctx,
+		`{"subagent_type":"worker","prompt":"work","description":"test"}`,
+	)
+	require.NoError(t, err)
+	decoded := decodeDurableAgentToolResult(t, result)
+	require.Equal(t, "runtime result", decoded.Result)
+	require.NotEmpty(t, decoded.TaskID)
+	require.NotEmpty(t, decoded.ChildSessionID)
+	require.Equal(t, background.StatusCompleted, decoded.Status)
+	secondRaw, err := runCtx.Tools[0].(tool.InvokableTool).InvokableRun(
+		ctx,
+		fmt.Sprintf(
+			`{"subagent_type":"worker","prompt":"again","description":"test","child_session_id":%q}`,
+			decoded.ChildSessionID,
+		),
+	)
+	require.NoError(t, err)
+	second := decodeDurableAgentToolResult(t, secondRaw)
+	require.NotEqual(t, decoded.TaskID, second.TaskID)
+	require.Equal(t, decoded.ChildSessionID, second.ChildSessionID)
 }
 
-func durableBackground(t *testing.T, mgr *backgroundtask.Manager, agents ...adk.Agent) *BackgroundConfig {
+func TestControllerAgentToolRunnerCheckpointResumeAfterControllerRestart(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	lifecycleStore := &countingMailboxStore{
+		InMemoryStore: background.NewInMemoryStore(nil),
+	}
+	runnerStore := adksession.NewInMemoryStore[*schema.Message](nil)
+	runtimeSessionStore := adksession.NewInMemoryStore[*schema.Message](nil)
+	newManager := func() *background.Manager {
+		return mustNewBackgroundManager(t, ctx, &background.Config{
+			Tasks: lifecycleStore, TaskEvents: lifecycleStore,
+		})
+	}
+	newRunner := func(
+		manager *background.Manager,
+		agent adk.Agent,
+		chatModel model.ToolCallingChatModel,
+	) *adk.Runner {
+		controller, err := durablesubagent.NewController(
+			&durablesubagent.ControllerConfig[*schema.Message]{
+				Manager: manager,
+				Barrier: runtimeBarrierFunc(func(
+					context.Context,
+					*durablesubagent.CompletionContext[*schema.Message],
+				) (durablesubagent.CompletionAction, error) {
+					return durablesubagent.CompletionComplete, nil
+				}),
+				InputsToAgentInput: func(
+					context.Context,
+					[]*task.InputRecord,
+				) (*adk.AgentInput, error) {
+					return &adk.AgentInput{
+						Messages: []*schema.Message{schema.UserMessage("resume")},
+					}, nil
+				},
+				SessionStore: runtimeSessionStore, CheckPointStore: runtimeSessionStore,
+			},
+		)
+		require.NoError(t, err)
+		middleware, err := New(ctx, &Config{
+			SubAgents: []adk.Agent{agent},
+			Tasks: &TaskConfig{Durable: &DurableTaskConfig{
+				Runtime: controller,
+			}},
+		})
+		require.NoError(t, err)
+		root, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
+			Name: "root", Description: "root", Model: chatModel,
+			Handlers: []adk.ChatModelAgentMiddleware{middleware},
+		})
+		require.NoError(t, err)
+		return adk.NewRunner(ctx, adk.RunnerConfig{
+			Agent: root, CheckPointStore: runnerStore,
+			SessionID: "parent-session",
+		})
+	}
+
+	const args = `{"subagent_type":"worker","prompt":"work","description":"approval"}`
+	firstIdentities := make(chan runtimeIdentity, 1)
+	firstAgent := &checkpointInterruptAgent{
+		name: "worker", identities: firstIdentities,
+	}
+	manager1 := newManager()
+	runner1 := newRunner(
+		manager1,
+		firstAgent,
+		&controllerToolModel{response: schema.AssistantMessage("", []schema.ToolCall{{
+			ID: "call-1", Type: "function",
+			Function: schema.FunctionCall{Name: agentToolName, Arguments: args},
+		}})},
+	)
+	const checkpointID = "controller-tool-interrupt"
+	iter := runner1.Query(ctx, "delegate", adk.WithCheckPointID(checkpointID))
+	var interrupt *adk.InterruptInfo
+	for {
+		event, ok := iter.Next()
+		if !ok {
+			break
+		}
+		require.NoError(t, event.Err)
+		if event.Action != nil && event.Action.Interrupted != nil {
+			interrupt = event.Action.Interrupted
+		}
+	}
+	require.NotNil(t, interrupt)
+	require.NotEmpty(t, interrupt.InterruptContexts)
+	original := awaitMiddlewareValue(t, ctx, firstIdentities)
+	require.NotEmpty(t, original.taskID)
+	require.NotEmpty(t, original.childSessionID)
+	require.Equal(t, int64(1), atomic.LoadInt64(&firstAgent.runCalls))
+	require.Zero(t, atomic.LoadInt64(&firstAgent.resumeCalls))
+	checkpoint, exists, err := runnerStore.Get(ctx, checkpointID)
+	require.NoError(t, err)
+	require.True(t, exists)
+	require.NotEmpty(t, checkpoint)
+
+	closeCtx, closeCancel := context.WithTimeout(context.Background(), time.Second)
+	require.NoError(t, manager1.Close(closeCtx))
+	closeCancel()
+
+	resumedIdentities := make(chan runtimeIdentity, 1)
+	resumeInfos := make(chan *adk.ResumeInfo, 1)
+	resumedAgent := &checkpointInterruptAgent{
+		name: "worker", identities: resumedIdentities, resumeInfos: resumeInfos,
+	}
+	modelInputs := make(chan []*schema.Message, 1)
+	manager2 := newManager()
+	t.Cleanup(func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(
+			context.Background(), time.Second,
+		)
+		defer cleanupCancel()
+		require.NoError(t, manager2.Close(cleanupCtx))
+	})
+	runner2 := newRunner(
+		manager2,
+		resumedAgent,
+		&controllerToolModel{
+			response: schema.AssistantMessage("parent complete", nil),
+			inputs:   modelInputs,
+		},
+	)
+	var interruptID string
+	for _, interruptContext := range interrupt.InterruptContexts {
+		if interruptContext.IsRootCause {
+			interruptID = interruptContext.ID
+			break
+		}
+	}
+	require.NotEmpty(t, interruptID)
+	resumed, err := runner2.ResumeWithParams(
+		ctx,
+		checkpointID,
+		&adk.ResumeParams{Targets: map[string]any{interruptID: "approved"}},
+	)
+	require.NoError(t, err)
+	var final string
+	for {
+		event, ok := resumed.Next()
+		if !ok {
+			break
+		}
+		require.NoError(t, event.Err)
+		if event.Output != nil && event.Output.MessageOutput != nil &&
+			event.Output.MessageOutput.Message != nil {
+			final = event.Output.MessageOutput.Message.Content
+		}
+	}
+	require.Equal(t, "parent complete", final)
+	resumedIdentity := awaitMiddlewareValue(t, ctx, resumedIdentities)
+	require.Equal(t, original, resumedIdentity)
+	require.Zero(t, atomic.LoadInt64(&resumedAgent.runCalls))
+	require.Equal(t, int64(1), atomic.LoadInt64(&resumedAgent.resumeCalls))
+	require.Equal(t, int64(1), atomic.LoadInt64(&lifecycleStore.created))
+	resumeInfo := awaitMiddlewareValue(t, ctx, resumeInfos)
+	require.True(t, resumeInfo.WasInterrupted)
+	require.True(t, resumeInfo.IsResumeTarget)
+	require.Equal(t, "approved", resumeInfo.ResumeData)
+
+	inputs := awaitMiddlewareValue(t, ctx, modelInputs)
+	require.NotEmpty(t, inputs)
+	toolResult := inputs[len(inputs)-1]
+	require.Equal(t, schema.Tool, toolResult.Role)
+	require.Contains(t, toolResult.Content, original.taskID)
+	require.Contains(t, toolResult.Content, original.childSessionID)
+	require.Contains(t, toolResult.Content, "approved")
+
+	mailbox, err := manager2.GetMailbox(ctx, original.taskID)
+	require.NoError(t, err)
+	require.Equal(t, task.MailboxSealed, mailbox.State)
+	require.Equal(t, original.childSessionID, mailbox.ChildSessionID)
+	inputRecords, err := manager2.ListInputs(ctx, &task.ListInputsRequest{
+		TaskID: original.taskID,
+	})
+	require.NoError(t, err)
+	require.Len(t, inputRecords.Inputs, 2)
+	require.Equal(t, int64(2), inputRecords.LatestSequence)
+	require.Equal(t, inputRecords.LatestSequence, inputRecords.ConsumedCursor)
+	require.Equal(
+		t,
+		durablesubagent.ResumeInputKind,
+		inputRecords.Inputs[1].Kind,
+	)
+	var resumeTargets map[string]any
+	require.NoError(t, sonic.Unmarshal(inputRecords.Inputs[1].Data, &resumeTargets))
+	require.Len(t, resumeTargets, 1)
+	for targetID, resumeData := range resumeTargets {
+		require.NotEmpty(t, targetID)
+		require.Equal(t, "approved", resumeData)
+	}
+}
+
+func durableBackground(t *testing.T, mgr *background.Manager, agents ...adk.Agent) *TaskConfig {
 	t.Helper()
-	_ = agents
-	executors, ok := testManagerExecutors.Load(mgr)
-	require.True(t, ok)
-	return &BackgroundConfig{
-		Durable: &DurableBackgroundConfig{
-			Manager: mgr, Executors: executors.(*backgroundtask.ExecutorRegistry),
-			Executor: durableExecutor(t),
+	sessionStore := adksession.NewInMemoryStore[*schema.Message](nil)
+	controller, err := durablesubagent.NewController(
+		&durablesubagent.ControllerConfig[*schema.Message]{
+			Manager: mgr,
+			Barrier: runtimeBarrierFunc(func(
+				context.Context,
+				*durablesubagent.CompletionContext[*schema.Message],
+			) (durablesubagent.CompletionAction, error) {
+				return durablesubagent.CompletionComplete, nil
+			}),
+			InputsToAgentInput: func(
+				context.Context,
+				[]*task.InputRecord,
+			) (*adk.AgentInput, error) {
+				return &adk.AgentInput{
+					Messages: []*schema.Message{schema.UserMessage("event")},
+				}, nil
+			},
+			SessionStore: sessionStore, CheckPointStore: sessionStore,
+		},
+	)
+	require.NoError(t, err)
+	return &TaskConfig{
+		Durable: &DurableTaskConfig{
+			Runtime: controller,
 		},
 	}
 }
 
-func mustLocalRunner(t *testing.T, manager *backgroundtask.Manager) *backgroundlocal.Runner {
+func mustLocalRunner(t *testing.T, manager *background.Manager) *backgroundlocal.Runner {
 	t.Helper()
-	executors, ok := testManagerExecutors.Load(manager)
-	require.True(t, ok)
 	runner, err := backgroundlocal.New(&backgroundlocal.Config{
-		Manager: manager, Executors: executors.(*backgroundtask.ExecutorRegistry),
+		Manager: manager,
 	})
 	require.NoError(t, err)
 	return runner
 }
 
-func localBackground(t *testing.T, manager *backgroundtask.Manager) *BackgroundConfig {
-	return &BackgroundConfig{
-		Local: &LocalBackgroundConfig{Runner: mustLocalRunner(t, manager)},
+func localBackground(t *testing.T, manager *background.Manager) *TaskConfig {
+	return &TaskConfig{
+		Local: &LocalTaskConfig{Runner: mustLocalRunner(t, manager)},
 	}
 }
 
@@ -173,14 +612,14 @@ func runnerEnvironmentContext(t *testing.T) context.Context {
 	return captured
 }
 
-func terminalTask(t *testing.T, mgr *backgroundtask.Manager) *backgroundtask.Task {
+func terminalTask(t *testing.T, mgr *background.Manager) *background.TaskSnapshot {
 	t.Helper()
 	store, ok := testManagerStores.Load(mgr)
 	require.True(t, ok, "test Manager Store is unavailable")
-	outbox := store.(backgroundtask.NotificationOutbox)
+	outbox := store.(background.NotificationOutbox)
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
-		result, err := outbox.Receive(context.Background(), &backgroundtask.ReceiveNotificationsRequest{
+		result, err := outbox.Receive(context.Background(), &background.ReceiveNotificationsRequest{
 			Limit: 100, LeaseDuration: time.Millisecond,
 		})
 		require.NoError(t, err)
@@ -188,9 +627,9 @@ func terminalTask(t *testing.T, mgr *backgroundtask.Manager) *backgroundtask.Tas
 			record := result.Deliveries[i].Record
 			task, getErr := mgr.Get(context.Background(), record.TaskID)
 			require.NoError(t, getErr)
-			if task.Status == backgroundtask.StatusCompleted ||
-				task.Status == backgroundtask.StatusFailed ||
-				task.Status == backgroundtask.StatusCanceled {
+			if task.Status == background.StatusCompleted ||
+				task.Status == background.StatusFailed ||
+				task.Status == background.StatusCanceled {
 				return task
 			}
 		}
@@ -199,15 +638,15 @@ func terminalTask(t *testing.T, mgr *backgroundtask.Manager) *backgroundtask.Tas
 	return nil
 }
 
-func waitTaskTerminalByID(t *testing.T, mgr *backgroundtask.Manager, taskID string) *backgroundtask.Task {
+func waitTaskTerminalByID(t *testing.T, mgr *background.Manager, taskID string) *background.TaskSnapshot {
 	t.Helper()
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
 		task, err := mgr.Get(context.Background(), taskID)
 		require.NoError(t, err)
-		if task.Status == backgroundtask.StatusCompleted ||
-			task.Status == backgroundtask.StatusFailed ||
-			task.Status == backgroundtask.StatusCanceled {
+		if task.Status == background.StatusCompleted ||
+			task.Status == background.StatusFailed ||
+			task.Status == background.StatusCanceled {
 			return task
 		}
 		time.Sleep(time.Millisecond)
@@ -227,33 +666,33 @@ func TestConfigValidation(t *testing.T) {
 
 	agent := &mockAgent{name: "worker"}
 	_, err = New(context.Background(), &Config{
-		SubAgents:  []adk.Agent{agent},
-		Background: &BackgroundConfig{},
+		SubAgents: []adk.Agent{agent},
+		Tasks:     &TaskConfig{},
 	})
 	assert.Error(t, err)
 
 	manager := newTestManager(t, context.Background())
 	_, err = New(context.Background(), &Config{
 		SubAgents: []adk.Agent{agent},
-		Background: &BackgroundConfig{
-			Local:   &LocalBackgroundConfig{Runner: mustLocalRunner(t, manager)},
-			Durable: &DurableBackgroundConfig{Manager: manager, Executors: executorsForTest(t, manager)},
+		Tasks: &TaskConfig{
+			Local:   &LocalTaskConfig{Runner: mustLocalRunner(t, manager)},
+			Durable: &DurableTaskConfig{},
 		},
 	})
 	require.ErrorContains(t, err, "exactly one")
 
 	_, err = New(context.Background(), &Config{
 		SubAgents: []adk.Agent{agent},
-		Background: &BackgroundConfig{
-			Durable: &DurableBackgroundConfig{Manager: manager, Executors: executorsForTest(t, manager)},
+		Tasks: &TaskConfig{
+			Durable: &DurableTaskConfig{},
 		},
 	})
-	require.ErrorContains(t, err, "Manager, executor registry, and Executor")
+	require.ErrorContains(t, err, "Controller")
 
 	_, err = New(context.Background(), &Config{
 		SubAgents: []adk.Agent{agent},
-		Background: &BackgroundConfig{
-			Local: &LocalBackgroundConfig{Runner: mustLocalRunner(t, manager)},
+		Tasks: &TaskConfig{
+			Local: &LocalTaskConfig{Runner: mustLocalRunner(t, manager)},
 		},
 	})
 	require.NoError(t, err)
@@ -298,35 +737,16 @@ func TestAgentToolForegroundRouting(t *testing.T) {
 	assert.Equal(t, "second result", result)
 }
 
-func TestDurableAgentToolForeground(t *testing.T) {
-	ctx := runnerEnvironmentContext(t)
-	mgr := newTestManager(t, ctx)
-	agent := &mockAgent{name: "worker", desc: "durable result"}
-	mw, err := New(ctx, &Config{
-		SubAgents: []adk.Agent{agent}, Background: durableBackground(t, mgr, agent),
-	})
-	require.NoError(t, err)
-	_, runCtx, err := mw.BeforeAgent(ctx, &adk.ChatModelAgentContext[*schema.Message]{})
-	require.NoError(t, err)
-
-	result, err := runCtx.Tools[0].(tool.InvokableTool).InvokableRun(ctx,
-		`{"subagent_type":"worker","prompt":"work","description":"test"}`)
-	require.NoError(t, err)
-	assert.Contains(t, result, "durable result")
-	task := terminalTask(t, mgr)
-	require.Nil(t, task)
-}
-
 func TestOnlyDurableAgentToolExposesPersistentChildSession(t *testing.T) {
 	agent := &mockAgent{name: "worker", desc: "does work"}
 	localManager := newTestManager(t, context.Background())
 	durableManager := newTestManager(t, context.Background())
 	local, err := New(context.Background(), &Config{
-		SubAgents: []adk.Agent{agent}, Background: localBackground(t, localManager),
+		SubAgents: []adk.Agent{agent}, Tasks: localBackground(t, localManager),
 	})
 	require.NoError(t, err)
 	durable, err := New(context.Background(), &Config{
-		SubAgents: []adk.Agent{agent}, Background: durableBackground(t, durableManager, agent),
+		SubAgents: []adk.Agent{agent}, Tasks: durableBackground(t, durableManager, agent),
 	})
 	require.NoError(t, err)
 	_, localCtx, err := local.BeforeAgent(
@@ -366,64 +786,6 @@ func decodeDurableAgentToolResult(
 	return &result
 }
 
-func TestFormatManagedAgentResultPreservesDescriptionInErrors(t *testing.T) {
-	task := &backgroundtask.Task{
-		Spec: backgroundtask.Spec{
-			ID: "subagent_secret", Description: "review implementation",
-		},
-		Status:      backgroundtask.StatusFailed,
-		ResultError: "model failed",
-	}
-	_, err := formatManagedAgentResult("reviewer", task, "")
-	assert.EqualError(
-		t, err,
-		`subagent "reviewer" task "subagent_secret" (review implementation) failed: model failed`,
-	)
-
-	task.Status = backgroundtask.StatusCanceled
-	_, err = formatManagedAgentResult("reviewer", task, "")
-	assert.EqualError(
-		t, err,
-		`subagent "reviewer" task "subagent_secret" (review implementation) was canceled`,
-	)
-}
-
-func TestAttack_DurableTerminalResultPreservesChildSessionIdentity(t *testing.T) {
-	ctx := runnerEnvironmentContext(t)
-	manager := newTestManager(t, ctx)
-	agent := &mockAgent{name: "worker", desc: "done"}
-	middleware, err := New(ctx, &Config{
-		SubAgents:  []adk.Agent{agent},
-		Background: durableBackground(t, manager, agent),
-	})
-	require.NoError(t, err)
-	_, runCtx, err := middleware.BeforeAgent(
-		ctx,
-		&adk.ChatModelAgentContext[*schema.Message]{},
-	)
-	require.NoError(t, err)
-	_, err = runCtx.Tools[0].(tool.InvokableTool).InvokableRun(
-		ctx,
-		`{"subagent_type":"worker","prompt":"work","description":"test","run_in_background":true}`,
-	)
-	require.NoError(t, err)
-	task := terminalTask(t, manager)
-	require.NotNil(t, task)
-
-	for _, status := range []backgroundtask.Status{
-		backgroundtask.StatusFailed,
-		backgroundtask.StatusCanceled,
-	} {
-		task.Status = status
-		task.ResultError = "terminal error"
-		raw, formatErr := formatDurableAgentResult("worker", task)
-		require.NoError(t, formatErr)
-		result := decodeDurableAgentToolResult(t, raw)
-		require.Equal(t, status, result.Status)
-		require.Equal(t, "terminal error", result.Error)
-	}
-}
-
 func TestDurableAgentToolBackgroundPreservesParentContextValues(t *testing.T) {
 	type traceKey struct{}
 	const traceValue = "trace-123"
@@ -444,8 +806,8 @@ func TestDurableAgentToolBackgroundPreservesParentContextValues(t *testing.T) {
 		return "done"
 	}}
 	middleware, err := New(parentCtx, &Config{
-		SubAgents:  []adk.Agent{agent},
-		Background: durableBackground(t, manager, agent),
+		SubAgents: []adk.Agent{agent},
+		Tasks:     durableBackground(t, manager, agent),
 	})
 	require.NoError(t, err)
 	_, runCtx, err := middleware.BeforeAgent(
@@ -463,46 +825,140 @@ func TestDurableAgentToolBackgroundPreservesParentContextValues(t *testing.T) {
 	close(release)
 	task := terminalTask(t, manager)
 	require.NotNil(t, task)
-	require.Equal(t, backgroundtask.StatusCompleted, task.Status)
+	require.Equal(t, background.StatusCompleted, task.Status)
 	require.Equal(t, traceValue, <-seenValue)
 	require.NoError(t, <-seenErr)
 }
 
 func TestFormatManagedAgentResultLifecycleStates(t *testing.T) {
-	task := &backgroundtask.Task{
-		Spec: backgroundtask.Spec{
-			ID: "subagent_task", Description: "research",
-			OutputFile: "/tasks/output",
+	ctx := context.Background()
+	manager := newTestManager(t, ctx)
+	runner := mustLocalRunner(t, manager)
+	t.Cleanup(func() {
+		require.NoError(t, manager.Close(context.Background()))
+	})
+	for _, testCase := range []struct {
+		name      string
+		work      backgroundlocal.WorkFunc
+		want      string
+		wantError func(string) string
+	}{
+		{
+			name: "foreground completed",
+			work: func(context.Context, background.ExecutionRuntime) (string, error) {
+				return "done", nil
+			},
+			want: "done",
 		},
-	}
-	task.Status = backgroundtask.StatusCompleted
-	task.ResultData = []byte("done")
-	result, err := formatManagedAgentResult("worker", task, "")
-	require.NoError(t, err)
-	require.Equal(t, "done", result)
-
-	for _, status := range []backgroundtask.Status{
-		backgroundtask.StatusPending, backgroundtask.StatusRunning,
+		{
+			name: "foreground failed",
+			work: func(context.Context, background.ExecutionRuntime) (string, error) {
+				return "", errors.New("model failed")
+			},
+			wantError: func(id string) string {
+				return fmt.Sprintf(`subagent "worker" execution %q failed: model failed`, id)
+			},
+		},
+		{
+			name: "foreground canceled",
+			work: func(context.Context, background.ExecutionRuntime) (string, error) {
+				return "", context.Canceled
+			},
+			wantError: func(id string) string {
+				return fmt.Sprintf(`subagent "worker" execution %q was canceled: context canceled`, id)
+			},
+		},
 	} {
-		task.Status = status
-		result, err = formatManagedAgentResult("worker", task, "JSONL")
-		require.NoError(t, err)
-		require.Contains(t, result, "Agent running in background")
-		require.Contains(t, result, "/tasks/output")
-		require.Contains(t, result, "JSONL")
+		t.Run(testCase.name, func(t *testing.T) {
+			runResult, err := runner.Run(
+				ctx,
+				&backgroundlocal.Input{Description: testCase.name},
+				testCase.work,
+			)
+			require.NoError(t, err)
+			got, err := formatManagedAgentResult("worker", runResult, "")
+			if testCase.wantError != nil {
+				require.Empty(t, got)
+				require.EqualError(t, err, testCase.wantError(runResult.ID()))
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, testCase.want, got)
+		})
 	}
 
-	task.Status = backgroundtask.StatusWaitingInput
-	result, err = formatManagedAgentResult("worker", task, "")
-	require.NoError(t, err)
-	require.Contains(t, result, "requires input")
-	task.Status = backgroundtask.StatusSuspended
-	result, err = formatManagedAgentResult("worker", task, "")
-	require.NoError(t, err)
-	require.Contains(t, result, "suspended")
-	task.Status = backgroundtask.Status("unknown")
-	_, err = formatManagedAgentResult("worker", task, "")
-	require.ErrorContains(t, err, `unknown status "unknown"`)
+	for _, testCase := range []struct {
+		status    background.Status
+		format    string
+		want      string
+		wantError string
+	}{
+		{status: background.StatusCompleted, want: "done"},
+		{
+			status: background.StatusPending, format: "JSONL",
+			want: "Agent running in background with ID: subagent_task. " +
+				"Output is being written to: /tasks/output. " +
+				"You will be notified when it completes. " +
+				"To check interim output, use Read on that file path (JSONL).",
+		},
+		{
+			status: background.StatusRunning, format: "JSONL",
+			want: "Agent running in background with ID: subagent_task. " +
+				"Output is being written to: /tasks/output. " +
+				"You will be notified when it completes. " +
+				"To check interim output, use Read on that file path (JSONL).",
+		},
+		{
+			status: background.StatusWaitingInput,
+			want: "Agent task subagent_task requires input. " +
+				"Use task_output to inspect the request.",
+		},
+		{
+			status: background.StatusSuspended,
+			want:   "Agent task subagent_task is suspended.",
+		},
+		{
+			status: background.StatusCanceled,
+			wantError: `subagent "worker" task "subagent_task" ` +
+				`(review implementation) was canceled`,
+		},
+		{
+			status: background.StatusFailed,
+			wantError: `subagent "worker" task "subagent_task" ` +
+				`(review implementation) failed: model failed`,
+		},
+		{
+			status:    background.Status("unknown"),
+			wantError: `subagent "worker" task "subagent_task" has unknown status "unknown"`,
+		},
+	} {
+		t.Run("task "+string(testCase.status), func(t *testing.T) {
+			runResult := &background.TaskSnapshot{
+				Spec: background.Spec{
+					ID: "subagent_task", Description: "review implementation",
+					OutputFile: "/tasks/output",
+				},
+				Status: testCase.status, ResultData: []byte("done"),
+				ResultError: "model failed",
+			}
+			got, err := formatManagedAgentTaskResult(
+				"worker",
+				runResult,
+				testCase.format,
+			)
+			if testCase.wantError != "" {
+				require.Empty(t, got)
+				require.EqualError(t, err, testCase.wantError)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, testCase.want, got)
+		})
+	}
+
+	got, err := formatManagedAgentResult("worker", nil, "")
+	require.Empty(t, got)
+	require.EqualError(t, err, "subagent: invalid local run result")
 }
 
 func TestManagedEventReceiverTransformDetachesParentOnly(t *testing.T) {
@@ -526,6 +982,238 @@ func TestManagedEventReceiverTransformDetachesParentOnly(t *testing.T) {
 	require.False(t, signalClosed(make(chan struct{})))
 }
 
+type agentEventErrorWriter struct {
+	err error
+}
+
+func (w agentEventErrorWriter) Write([]byte) (int, error) {
+	return 0, w.err
+}
+
+type agentEventRuntimeStub struct {
+	writer *agentEventTaskWriter
+}
+
+func (*agentEventRuntimeStub) Controls() <-chan background.ControlRequest {
+	return make(chan background.ControlRequest)
+}
+
+func (r *agentEventRuntimeStub) NewTaskEventWriter(
+	eventID string,
+) (background.TaskEventScope, background.TaskEventWriter) {
+	if eventID == "" {
+		eventID = "generated"
+	}
+	scope := background.TaskEventScope{
+		TaskID: "task", Attempt: 1, EventID: eventID,
+	}
+	r.writer.scope = scope
+	return scope, r.writer
+}
+
+func (*agentEventRuntimeStub) ReportTranscriptFailure(context.Context, error) error {
+	return nil
+}
+
+func (*agentEventRuntimeStub) ListInputs(
+	context.Context,
+	int64,
+	int,
+) (*task.ListInputsResult, error) {
+	return &task.ListInputsResult{}, nil
+}
+
+func (*agentEventRuntimeStub) WaitInputs(
+	context.Context,
+	int64,
+) (*task.ListInputsResult, error) {
+	return &task.ListInputsResult{}, nil
+}
+
+func (*agentEventRuntimeStub) AdvanceInputCursor(context.Context, int64, int64) error {
+	return nil
+}
+
+func (*agentEventRuntimeStub) CommitInput(context.Context, int64, int64, []byte) error {
+	return nil
+}
+
+func (*agentEventRuntimeStub) CommitStart(context.Context, []byte) error {
+	return nil
+}
+
+type agentEventTaskWriter struct {
+	scope     background.TaskEventScope
+	parts     []*background.TaskEventPartInput
+	persisted map[string]*background.TaskEventPart
+	appendErr error
+}
+
+func (w *agentEventTaskWriter) Append(
+	_ context.Context,
+	part *background.TaskEventPartInput,
+) (*background.AppendTaskEventResult, error) {
+	if w.appendErr != nil {
+		return nil, w.appendErr
+	}
+	copy := *part
+	copy.Data = append([]byte(nil), part.Data...)
+	w.parts = append(w.parts, &copy)
+	key := w.scope.EventID + "\x00" + copy.PartID
+	if persisted := w.persisted[key]; persisted != nil {
+		replayed := *persisted
+		replayed.Data = append([]byte(nil), persisted.Data...)
+		return &background.AppendTaskEventResult{Part: &replayed}, nil
+	}
+	if w.persisted == nil {
+		w.persisted = make(map[string]*background.TaskEventPart)
+	}
+	persisted := &background.TaskEventPart{
+		TaskID: w.scope.TaskID, EventID: w.scope.EventID,
+		PartID: copy.PartID, Data: copy.Data, Final: copy.Final,
+	}
+	w.persisted[key] = persisted
+	return &background.AppendTaskEventResult{
+		Part:     persisted,
+		Inserted: true,
+	}, nil
+}
+
+func TestAgentTaskEventPersisterFormatterWriterAndEmptyRecord(t *testing.T) {
+	event := &adk.AgentEvent{
+		AgentName: "worker",
+		Output: &adk.AgentOutput{MessageOutput: &adk.MessageVariant{
+			Message: schema.AssistantMessage("done", nil),
+		}},
+	}
+	input := &background.TaskEventEnvelope[*adk.AgentEvent, *schema.Message]{
+		Event: event,
+	}
+
+	t.Run("formatter error", func(t *testing.T) {
+		formatErr := errors.New("format failed")
+		writer := &agentEventTaskWriter{}
+		err := (agentTaskEventPersister[*schema.Message]{
+			format: func(context.Context, string, *schema.Message) (string, error) {
+				return "", formatErr
+			},
+		}).Persist(context.Background(), background.TaskEventScope{}, input, writer)
+		require.ErrorIs(t, err, formatErr)
+		require.Empty(t, writer.parts)
+	})
+
+	t.Run("writer error", func(t *testing.T) {
+		writeErr := errors.New("append failed")
+		writer := &agentEventTaskWriter{appendErr: writeErr}
+		err := (agentTaskEventPersister[*schema.Message]{
+			format: func(context.Context, string, *schema.Message) (string, error) {
+				return "record", nil
+			},
+		}).Persist(context.Background(), background.TaskEventScope{}, input, writer)
+		require.ErrorIs(t, err, writeErr)
+		require.Empty(t, writer.parts)
+	})
+
+	t.Run("empty record", func(t *testing.T) {
+		writer := &agentEventTaskWriter{}
+		err := (agentTaskEventPersister[*schema.Message]{
+			format: func(context.Context, string, *schema.Message) (string, error) {
+				return "", nil
+			},
+		}).Persist(context.Background(), background.TaskEventScope{}, input, writer)
+		require.NoError(t, err)
+		require.Empty(t, writer.parts)
+	})
+
+	t.Run("record", func(t *testing.T) {
+		writer := &agentEventTaskWriter{}
+		err := (agentTaskEventPersister[*schema.Message]{
+			format: func(context.Context, string, *schema.Message) (string, error) {
+				return "record", nil
+			},
+		}).Persist(context.Background(), background.TaskEventScope{}, input, writer)
+		require.NoError(t, err)
+		require.Equal(t, []*background.TaskEventPartInput{{
+			PartID: "event", Data: []byte("record\n"), Final: true,
+		}}, writer.parts)
+	})
+
+	t.Run("non-message event", func(t *testing.T) {
+		writer := &agentEventTaskWriter{}
+		err := (agentTaskEventPersister[*schema.Message]{
+			format: func(context.Context, string, *schema.Message) (string, error) {
+				t.Fatal("formatter must not be called")
+				return "", nil
+			},
+		}).Persist(
+			context.Background(),
+			background.TaskEventScope{},
+			&background.TaskEventEnvelope[*adk.AgentEvent, *schema.Message]{
+				Event: &adk.AgentEvent{AgentName: "worker"},
+			},
+			writer,
+		)
+		require.NoError(t, err)
+		require.Empty(t, writer.parts)
+	})
+}
+
+type capturingAgentEventPersister struct {
+	event  *adk.AgentEvent
+	chunks []string
+}
+
+type prefixThenStreamErrorPersister struct{}
+
+func (prefixThenStreamErrorPersister) Persist(
+	ctx context.Context,
+	_ background.TaskEventScope,
+	input *background.TaskEventEnvelope[*adk.AgentEvent, *schema.Message],
+	writer background.TaskEventWriter,
+) error {
+	message, err := input.Stream.Recv()
+	if err != nil {
+		return err
+	}
+	if _, err = writer.Append(ctx, &background.TaskEventPartInput{
+		PartID: "chunk-0", Data: []byte(message.Content),
+	}); err != nil {
+		return err
+	}
+	_, err = input.Stream.Recv()
+	return err
+}
+
+func (p *capturingAgentEventPersister) Persist(
+	ctx context.Context,
+	_ background.TaskEventScope,
+	input *background.TaskEventEnvelope[*adk.AgentEvent, *schema.Message],
+	writer background.TaskEventWriter,
+) error {
+	p.event = input.Event
+	if input.Stream != nil {
+		for {
+			message, err := input.Stream.Recv()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				return err
+			}
+			p.chunks = append(p.chunks, message.Content)
+		}
+	}
+	data := strings.Join(p.chunks, "")
+	if data == "" {
+		data = input.Event.AgentName
+	}
+	_, err := writer.Append(ctx, &background.TaskEventPartInput{
+		PartID: "event", Data: []byte(data),
+		Final: true,
+	})
+	return err
+}
+
 func TestAgentEventFileReceiverFailurePaths(t *testing.T) {
 	event := &adk.AgentEvent{
 		AgentName: "worker",
@@ -534,7 +1222,7 @@ func TestAgentEventFileReceiverFailurePaths(t *testing.T) {
 		}},
 	}
 	reportErr := errors.New("report failed")
-	receiver := &agentEventFileReceiver[*schema.Message]{
+	receiver := &agentEventPersistenceReceiver[*schema.Message]{
 		ctx: context.Background(),
 		format: func(context.Context, string, *schema.Message) (string, error) {
 			return "", errors.New("format failed")
@@ -550,18 +1238,19 @@ func TestAgentEventFileReceiverFailurePaths(t *testing.T) {
 	require.ErrorIs(t, receiver.reportErr, reportErr)
 
 	recordErr := errors.New("record failed")
-	receiver = &agentEventFileReceiver[*schema.Message]{
+	receiver = &agentEventPersistenceReceiver[*schema.Message]{
 		ctx: context.Background(),
 		format: func(context.Context, string, *schema.Message) (string, error) {
 			return "record", nil
 		},
-		onRecord: func([]byte) error { return recordErr },
+		writer:  agentEventErrorWriter{err: recordErr},
+		onError: func(err error) error { return err },
 	}
 	receiver.receive(event)
 	require.True(t, receiver.failed)
 	require.ErrorIs(t, receiver.reportErr, recordErr)
 
-	receiver = &agentEventFileReceiver[*schema.Message]{
+	receiver = &agentEventPersistenceReceiver[*schema.Message]{
 		ctx: context.Background(),
 		format: func(context.Context, string, *schema.Message) (string, error) {
 			return "", nil
@@ -572,7 +1261,7 @@ func TestAgentEventFileReceiverFailurePaths(t *testing.T) {
 	receiver.receive(event)
 	require.False(t, receiver.failed)
 
-	receiver = &agentEventFileReceiver[*schema.Message]{
+	receiver = &agentEventPersistenceReceiver[*schema.Message]{
 		ctx: context.Background(),
 		format: func(context.Context, string, *schema.Message) (string, error) {
 			return "record", nil
@@ -591,6 +1280,129 @@ func TestAgentEventFileReceiverFailurePaths(t *testing.T) {
 		}},
 	})
 	require.True(t, receiver.failed)
+}
+
+func TestAgentEventPersisterReceivesRawEventAndSeparateStream(t *testing.T) {
+	stream, writer := schema.Pipe[*schema.Message](2)
+	writer.Send(schema.AssistantMessage("hello ", nil), nil)
+	writer.Send(schema.AssistantMessage("world", nil), nil)
+	writer.Close()
+	event := &adk.AgentEvent{
+		AgentName: "worker",
+		Output: &adk.AgentOutput{MessageOutput: &adk.MessageVariant{
+			IsStreaming: true, MessageStream: stream,
+		}},
+		SessionEventVariant: &adk.SessionEventVariant[*schema.Message]{
+			MessageStreamRef: &adk.MessageStreamRef{
+				EventID: "stream-event",
+				Kind:    adk.SessionEventMessage,
+			},
+		},
+	}
+	taskWriter := &agentEventTaskWriter{}
+	persister := &capturingAgentEventPersister{}
+	var transcript strings.Builder
+	receiver := &agentEventPersistenceReceiver[*schema.Message]{
+		ctx: context.Background(), writer: &transcript,
+		format:    defaultTranscriptFormat[*schema.Message],
+		runtime:   &agentEventRuntimeStub{writer: taskWriter},
+		persister: persister,
+	}
+
+	receiver.receive(event)
+
+	require.False(t, receiver.failed)
+	require.NotNil(t, persister.event)
+	require.Nil(t, persister.event.Output.MessageOutput.MessageStream)
+	require.Equal(t, []string{"hello ", "world"}, persister.chunks)
+	require.Equal(t, "stream-event", taskWriter.scope.EventID)
+	require.Len(t, taskWriter.parts, 1)
+	require.Equal(t, "hello world", string(taskWriter.parts[0].Data))
+	require.Equal(t, "hello world", transcript.String())
+
+	stream, writer = schema.Pipe[*schema.Message](2)
+	writer.Send(schema.AssistantMessage("persist ", nil), nil)
+	writer.Send(schema.AssistantMessage("only", nil), nil)
+	writer.Close()
+	persister = &capturingAgentEventPersister{}
+	taskWriter = &agentEventTaskWriter{}
+	receiver = &agentEventPersistenceReceiver[*schema.Message]{
+		ctx:       context.Background(),
+		format:    defaultTranscriptFormat[*schema.Message],
+		runtime:   &agentEventRuntimeStub{writer: taskWriter},
+		persister: persister,
+	}
+	receiver.receive(&adk.AgentEvent{
+		AgentName: "worker",
+		Output: &adk.AgentOutput{MessageOutput: &adk.MessageVariant{
+			IsStreaming: true, MessageStream: stream,
+		}},
+	})
+	require.False(t, receiver.failed)
+	require.Equal(t, []string{"persist ", "only"}, persister.chunks)
+
+	persister = &capturingAgentEventPersister{}
+	taskWriter = &agentEventTaskWriter{}
+	receiver = &agentEventPersistenceReceiver[*schema.Message]{
+		ctx:       context.Background(),
+		format:    defaultTranscriptFormat[*schema.Message],
+		runtime:   &agentEventRuntimeStub{writer: taskWriter},
+		persister: persister,
+	}
+	receiver.receive(&adk.AgentEvent{
+		AgentName: "custom",
+		Output: &adk.AgentOutput{
+			CustomizedOutput: "state",
+		},
+	})
+	require.False(t, receiver.failed)
+	require.Equal(t, "custom", persister.event.AgentName)
+	require.Empty(t, persister.chunks)
+}
+
+func TestAgentEventPersistenceReceiverMaterializesInsertedPrefixOnceOnStreamError(
+	t *testing.T,
+) {
+	streamErr := errors.New("stream failed")
+	newEvent := func() *adk.AgentEvent {
+		stream, writer := schema.Pipe[*schema.Message](2)
+		writer.Send(schema.AssistantMessage("persisted-prefix", nil), nil)
+		writer.Send(nil, streamErr)
+		writer.Close()
+		return &adk.AgentEvent{
+			AgentName: "worker",
+			Output: &adk.AgentOutput{MessageOutput: &adk.MessageVariant{
+				IsStreaming: true, MessageStream: stream,
+			}},
+			SessionEventVariant: &adk.SessionEventVariant[*schema.Message]{
+				MessageStreamRef: &adk.MessageStreamRef{
+					EventID: "stream-error", Kind: adk.SessionEventMessage,
+				},
+			},
+		}
+	}
+	taskWriter := &agentEventTaskWriter{}
+	var transcript strings.Builder
+	newReceiver := func() *agentEventPersistenceReceiver[*schema.Message] {
+		return &agentEventPersistenceReceiver[*schema.Message]{
+			ctx: context.Background(), writer: &transcript,
+			runtime:   &agentEventRuntimeStub{writer: taskWriter},
+			persister: prefixThenStreamErrorPersister{},
+		}
+	}
+
+	first := newReceiver()
+	first.receive(newEvent())
+	require.True(t, first.failed)
+	require.ErrorIs(t, first.reportErr, streamErr)
+	require.Equal(t, "persisted-prefix", transcript.String())
+
+	replayed := newReceiver()
+	replayed.receive(newEvent())
+	require.True(t, replayed.failed)
+	require.ErrorIs(t, replayed.reportErr, streamErr)
+	require.Equal(t, "persisted-prefix", transcript.String())
+	require.Len(t, taskWriter.parts, 2)
 }
 
 func TestSanitizedMessageValueAndTaskName(t *testing.T) {
@@ -613,12 +1425,12 @@ func TestSanitizedMessageValueAndTaskName(t *testing.T) {
 	require.NotNil(t, agentic.Extra)
 
 	require.Empty(t, NameFromTask(nil))
-	require.Empty(t, NameFromTask(&backgroundtask.Task{}))
-	require.Empty(t, NameFromTask(&backgroundtask.Task{Spec: backgroundtask.Spec{
+	require.Empty(t, NameFromTask(&background.TaskSnapshot{}))
+	require.Empty(t, NameFromTask(&background.TaskSnapshot{Spec: background.Spec{
 		Kind: TaskKindSubagent, Payload: []byte(`{`),
 	}}))
-	require.Equal(t, "worker", NameFromTask(&backgroundtask.Task{
-		Spec: backgroundtask.Spec{
+	require.Equal(t, "worker", NameFromTask(&background.TaskSnapshot{
+		Spec: background.Spec{
 			Kind:    TaskKindSubagent,
 			Payload: []byte(`{"version":1,"subagent_name":"worker"}`),
 		},
@@ -640,7 +1452,7 @@ func TestLocalAgentToolWritesEventTranscript(t *testing.T) {
 	agent := &mockAgent{name: "worker", desc: "local output"}
 	middleware, err := New(ctx, &Config{
 		SubAgents: []adk.Agent{agent},
-		Background: &BackgroundConfig{Local: &LocalBackgroundConfig{
+		Tasks: &TaskConfig{Local: &LocalTaskConfig{
 			Runner: mustLocalRunner(t, manager), OutputStore: backend, OutputDir: "/tasks",
 		}, TranscriptFormat: func(
 			_ context.Context,
@@ -660,20 +1472,20 @@ func TestLocalAgentToolWritesEventTranscript(t *testing.T) {
 	assert.Contains(t, result, "running in background")
 	task := terminalTask(t, manager)
 	require.NotNil(t, task)
-	assert.Equal(t, "parent-session", task.Spec.SessionID)
+	assert.Equal(t, "parent-session", task.Spec.RootSessionID)
 	assert.True(t, task.Spec.NotifySession)
 	require.NotEmpty(t, task.Spec.OutputFile)
 	content, err := backend.Read(ctx, &filesystem.ReadRequest{FilePath: task.Spec.OutputFile})
 	require.NoError(t, err)
 	assert.Equal(t, "worker: local output\n", content.Content)
-	feed, err := manager.ListTaskEvents(ctx, &backgroundtask.ListTaskEventsRequest{
+	feed, err := manager.ListTaskEvents(ctx, &background.ListTaskEventsRequest{
 		TaskID: task.Spec.ID,
 	})
 	require.NoError(t, err)
-	require.Len(t, feed.Events, 1)
-	require.NotNil(t, feed.Events[0])
-	require.NotEmpty(t, feed.Events[0].EventID)
-	assert.Equal(t, "worker: local output\n", string(feed.Events[0].Data))
+	require.Len(t, feed.Parts, 1)
+	require.NotNil(t, feed.Parts[0])
+	require.NotEmpty(t, feed.Parts[0].EventID)
+	assert.Equal(t, "worker: local output\n", string(feed.Parts[0].Data))
 }
 
 func TestDurableAgentToolBackgroundSurvivesCaller(t *testing.T) {
@@ -684,7 +1496,7 @@ func TestDurableAgentToolBackgroundSurvivesCaller(t *testing.T) {
 		return "done"
 	}}
 	mw, err := New(ctx, &Config{
-		SubAgents: []adk.Agent{agent}, Background: durableBackground(t, mgr, agent),
+		SubAgents: []adk.Agent{agent}, Tasks: durableBackground(t, mgr, agent),
 	})
 	require.NoError(t, err)
 	_, runCtx, err := mw.BeforeAgent(ctx, &adk.ChatModelAgentContext[*schema.Message]{})
@@ -693,13 +1505,13 @@ func TestDurableAgentToolBackgroundSurvivesCaller(t *testing.T) {
 		`{"subagent_type":"slow","prompt":"work","description":"test","run_in_background":true}`)
 	require.NoError(t, err)
 	decoded := decodeDurableAgentToolResult(t, result)
-	assert.Contains(t, []backgroundtask.Status{
-		backgroundtask.StatusPending,
-		backgroundtask.StatusRunning,
+	assert.Contains(t, []background.Status{
+		background.StatusPending,
+		background.StatusRunning,
 	}, decoded.Status)
 	require.Eventually(t, func() bool {
 		task := terminalTask(t, mgr)
-		return task != nil && task.Status == backgroundtask.StatusCompleted
+		return task != nil && task.Status == background.StatusCompleted
 	}, time.Second, 10*time.Millisecond)
 }
 
@@ -719,8 +1531,8 @@ func TestDurableAgentToolReusesChildSessionAcrossTasks_BitsUT(t *testing.T) {
 		return fmt.Sprintf("reply-%d", len(runs))
 	}}
 	middleware, err := New(ctx, &Config{
-		SubAgents:  []adk.Agent{agent},
-		Background: durableBackground(t, manager, agent),
+		SubAgents: []adk.Agent{agent},
+		Tasks:     durableBackground(t, manager, agent),
 	})
 	require.NoError(t, err)
 	_, runCtx, err := middleware.BeforeAgent(
@@ -735,12 +1547,12 @@ func TestDurableAgentToolReusesChildSessionAcrossTasks_BitsUT(t *testing.T) {
 	)
 	require.NoError(t, err)
 	first := decodeDurableAgentToolResult(t, firstRaw)
-	require.Contains(t, []backgroundtask.Status{
-		backgroundtask.StatusPending,
-		backgroundtask.StatusRunning,
+	require.Contains(t, []background.Status{
+		background.StatusPending,
+		background.StatusRunning,
 	}, first.Status)
 	firstTask := waitTaskTerminalByID(t, manager, first.TaskID)
-	require.Equal(t, "reply-1", string(firstTask.ResultData))
+	require.Contains(t, string(firstTask.ResultData), `"content":"reply-1"`)
 
 	secondRaw, err := invokable.InvokableRun(
 		ctx,
@@ -751,12 +1563,12 @@ func TestDurableAgentToolReusesChildSessionAcrossTasks_BitsUT(t *testing.T) {
 	)
 	require.NoError(t, err)
 	second := decodeDurableAgentToolResult(t, secondRaw)
-	require.Contains(t, []backgroundtask.Status{
-		backgroundtask.StatusPending,
-		backgroundtask.StatusRunning,
+	require.Contains(t, []background.Status{
+		background.StatusPending,
+		background.StatusRunning,
 	}, second.Status)
 	secondTask := waitTaskTerminalByID(t, manager, second.TaskID)
-	require.Equal(t, "reply-2", string(secondTask.ResultData))
+	require.Contains(t, string(secondTask.ResultData), `"content":"reply-2"`)
 	require.NotEqual(t, first.TaskID, second.TaskID)
 	require.Equal(t, first.ChildSessionID, second.ChildSessionID)
 	require.Equal(t, [][]string{
@@ -770,27 +1582,25 @@ func TestDurableAgentRegistrationRejectsDuplicateExactIdentity(t *testing.T) {
 	mgr := newTestManager(t, ctx)
 	first := &mockAgent{name: "worker", desc: "first"}
 	second := &mockAgent{name: "worker", desc: "second"}
-	background := durableBackground(t, mgr, first)
+	backgroundConfig := durableBackground(t, mgr, first)
 	_, err := New(ctx, &Config{
-		SubAgents: []adk.Agent{first}, Background: background,
+		SubAgents: []adk.Agent{first}, Tasks: backgroundConfig,
 	})
 	require.NoError(t, err)
 	_, err = New(ctx, &Config{
-		SubAgents: []adk.Agent{second}, Background: background,
+		SubAgents: []adk.Agent{second}, Tasks: backgroundConfig,
 	})
-	assert.ErrorIs(t, err, backgroundtask.ErrAlreadyExists)
+	assert.ErrorIs(t, err, background.ErrAlreadyExists)
 }
 
 func TestDurableTaskProgressReadsSessionTranscript(t *testing.T) {
 	ctx := runnerEnvironmentContext(t)
 	manager := newTestManager(t, context.Background())
 	agent := &mockAgent{name: "worker", desc: "durable output"}
-	executor := durableExecutor(t)
+	tasks := durableBackground(t, manager, agent)
 	middleware, err := New(ctx, &Config{
 		SubAgents: []adk.Agent{agent},
-		Background: &BackgroundConfig{Durable: &DurableBackgroundConfig{
-			Manager: manager, Executors: executorsForTest(t, manager), Executor: executor,
-		}},
+		Tasks:     tasks,
 	})
 	require.NoError(t, err)
 	_, runCtx, err := middleware.BeforeAgent(ctx, &adk.ChatModelAgentContext[*schema.Message]{})
@@ -800,17 +1610,17 @@ func TestDurableTaskProgressReadsSessionTranscript(t *testing.T) {
 	)
 	require.NoError(t, err)
 	decoded := decodeDurableAgentToolResult(t, result)
-	assert.Contains(t, []backgroundtask.Status{
-		backgroundtask.StatusPending,
-		backgroundtask.StatusRunning,
+	assert.Contains(t, []background.Status{
+		background.StatusPending,
+		background.StatusRunning,
 	}, decoded.Status)
 	task := waitTaskTerminalByID(t, manager, decoded.TaskID)
 	assert.Empty(t, task.Spec.OutputFile)
-	feed, err := manager.ListTaskEvents(ctx, &backgroundtask.ListTaskEventsRequest{TaskID: task.Spec.ID})
+	feed, err := manager.ListTaskEvents(ctx, &background.ListTaskEventsRequest{TaskID: task.Spec.ID})
 	require.NoError(t, err)
-	assert.Empty(t, feed.Events)
-	reader, err := NewDurableTaskProgressReader(
-		executor, TranscriptFormat[*schema.Message](nil),
+	assert.Empty(t, feed.Parts)
+	reader, err := NewDurableProgressReader(
+		tasks.Durable.Runtime, TranscriptFormat[*schema.Message](nil),
 	)
 	require.NoError(t, err)
 	progress, err := reader.ReadProgress(ctx, task)
@@ -824,15 +1634,14 @@ func TestDurableTaskProgressUsesSharedFormatter(t *testing.T) {
 	ctx := runnerEnvironmentContext(t)
 	manager := newTestManager(t, context.Background())
 	agent := &mockAgent{name: "worker", desc: "durable output"}
-	executor := durableExecutor(t)
+	tasks := durableBackground(t, manager, agent)
 	format := func(_ context.Context, agentName string, message *schema.Message) (string, error) {
 		return agentName + ": " + message.Content, nil
 	}
+	tasks.TranscriptFormat = format
 	middleware, err := New(ctx, &Config{
 		SubAgents: []adk.Agent{agent},
-		Background: &BackgroundConfig{Durable: &DurableBackgroundConfig{
-			Manager: manager, Executors: executorsForTest(t, manager), Executor: executor,
-		}, TranscriptFormat: format},
+		Tasks:     tasks,
 	})
 	require.NoError(t, err)
 	_, runCtx, err := middleware.BeforeAgent(ctx, &adk.ChatModelAgentContext[*schema.Message]{})
@@ -842,15 +1651,15 @@ func TestDurableTaskProgressUsesSharedFormatter(t *testing.T) {
 	)
 	require.NoError(t, err)
 	decoded := decodeDurableAgentToolResult(t, result)
-	assert.Contains(t, []backgroundtask.Status{
-		backgroundtask.StatusPending,
-		backgroundtask.StatusRunning,
+	assert.Contains(t, []background.Status{
+		background.StatusPending,
+		background.StatusRunning,
 	}, decoded.Status)
 	task := waitTaskTerminalByID(t, manager, decoded.TaskID)
-	assert.Equal(t, backgroundtask.StatusCompleted, task.Status)
-	assert.Equal(t, "durable output", string(task.ResultData))
-	reader, err := NewDurableTaskProgressReader(
-		executor, format,
+	assert.Equal(t, background.StatusCompleted, task.Status)
+	assert.Contains(t, string(task.ResultData), `"content":"durable output"`)
+	reader, err := NewDurableProgressReader(
+		tasks.Durable.Runtime, format,
 	)
 	require.NoError(t, err)
 	progress, err := reader.ReadProgress(ctx, task)
@@ -864,7 +1673,7 @@ func TestDurableForegroundProjectionStopsAtBackgroundBoundary(t *testing.T) {
 	manager := newTestManager(t, context.Background())
 	agent := &mockAgent{name: "worker", desc: "done"}
 	middleware, err := New(ctx, &Config{
-		SubAgents: []adk.Agent{agent}, Background: durableBackground(t, manager, agent),
+		SubAgents: []adk.Agent{agent}, Tasks: durableBackground(t, manager, agent),
 	})
 	require.NoError(t, err)
 	_, runCtx, err := middleware.BeforeAgent(ctx, &adk.ChatModelAgentContext[*schema.Message]{})
@@ -880,7 +1689,7 @@ func TestDurableForegroundProjectionStopsAtBackgroundBoundary(t *testing.T) {
 		ctx, `{"subagent_type":"worker","prompt":"work","description":"foreground"}`, receiver,
 	)
 	require.NoError(t, err)
-	assert.Positive(t, atomic.LoadInt64(&calls))
+	assert.Equal(t, int64(1), atomic.LoadInt64(&calls))
 	atomic.StoreInt64(&calls, 0)
 	_, err = invokable.InvokableRun(
 		ctx,
@@ -891,7 +1700,7 @@ func TestDurableForegroundProjectionStopsAtBackgroundBoundary(t *testing.T) {
 	require.Eventually(t, func() bool {
 		task := terminalTask(t, manager)
 		return task != nil && task.Spec.Description == "background" &&
-			task.Status == backgroundtask.StatusCompleted
+			task.Status == background.StatusCompleted
 	}, time.Second, 10*time.Millisecond)
 	assert.Zero(t, atomic.LoadInt64(&calls))
 }
@@ -901,7 +1710,7 @@ func TestDurableAgentToolRejectsInvocationScopedRunOptions(t *testing.T) {
 	manager := newTestManager(t, context.Background())
 	agent := &mockAgent{name: "worker", desc: "done"}
 	middleware, err := New(ctx, &Config{
-		SubAgents: []adk.Agent{agent}, Background: durableBackground(t, manager, agent),
+		SubAgents: []adk.Agent{agent}, Tasks: durableBackground(t, manager, agent),
 	})
 	require.NoError(t, err)
 	_, runCtx, err := middleware.BeforeAgent(ctx, &adk.ChatModelAgentContext[*schema.Message]{})
@@ -918,7 +1727,7 @@ func TestDurableAgentToolRejectsInvocationScopedRunOptions(t *testing.T) {
 	require.ErrorContains(t, err, "configure RunOptionsFactories")
 	pending, listErr := manager.ListPending(
 		context.Background(),
-		&backgroundtask.ListPendingRequest{ExecutorKeys: []string{durablesubagent.ExecutorKey}},
+		&background.ListPendingRequest{ExecutorKeys: []string{durablesubagent.ExecutorKey}},
 	)
 	require.NoError(t, listErr)
 	assert.Empty(t, pending.Tasks)
@@ -934,21 +1743,19 @@ func TestDurableAgentToolUsesRegisteredRunOptionsFactory(t *testing.T) {
 			got.Store(adk.GetImplSpecificOptions[middlewareRunOptions](nil, options...).value)
 		},
 	}
-	executor := durableExecutor(t)
+	tasks := durableBackground(t, manager, agent)
+	tasks.Durable.RunOptionsFactories = map[string]durablesubagent.RunOptionsFactory{
+		"worker": func() ([]adk.AgentRunOption, error) {
+			return []adk.AgentRunOption{adk.WrapImplSpecificOptFn(
+				func(options *middlewareRunOptions) {
+					options.value = "registered"
+				},
+			)}, nil
+		},
+	}
 	middleware, err := New(ctx, &Config{
 		SubAgents: []adk.Agent{agent},
-		Background: &BackgroundConfig{Durable: &DurableBackgroundConfig{
-			Manager: manager, Executors: executorsForTest(t, manager), Executor: executor,
-			RunOptionsFactories: map[string]durablesubagent.RunOptionsFactory{
-				"worker": func() ([]adk.AgentRunOption, error) {
-					return []adk.AgentRunOption{adk.WrapImplSpecificOptFn(
-						func(options *middlewareRunOptions) {
-							options.value = "registered"
-						},
-					)}, nil
-				},
-			},
-		}},
+		Tasks:     tasks,
 	})
 	require.NoError(t, err)
 	_, runCtx, err := middleware.BeforeAgent(ctx, &adk.ChatModelAgentContext[*schema.Message]{})
@@ -963,18 +1770,16 @@ func TestDurableAgentToolUsesRegisteredRunOptionsFactory(t *testing.T) {
 	}, time.Second, time.Millisecond)
 }
 
-func TestDurableAutoBackgroundRequiresHandoffSupport(t *testing.T) {
+func TestDurableTaskConfigRequiresController(t *testing.T) {
 	ctx := runnerEnvironmentContext(t)
-	timeout := 20
 	manager := newTestManager(t, context.Background())
 	agent := &mockAgent{name: "worker", desc: "done"}
 	background := durableBackground(t, manager, agent)
-	background.Durable.ForegroundTimeoutMs = &timeout
-	background.Durable.ShouldAutoBackground = func(context.Context, *backgroundtask.ForegroundCandidate) bool { return true }
+	background.Durable.Runtime = nil
 	_, err := New(ctx, &Config{
-		SubAgents: []adk.Agent{agent}, Background: background,
+		SubAgents: []adk.Agent{agent}, Tasks: background,
 	})
-	require.ErrorContains(t, err, "durable auto-background requires checkpoint handoff support")
+	require.ErrorContains(t, err, "durable Controller is required")
 }
 
 func TestSubagentReminderInsertedOnce(t *testing.T) {

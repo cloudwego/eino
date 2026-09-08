@@ -24,20 +24,23 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/mock/gomock"
 
 	"github.com/cloudwego/eino/adk"
-	"github.com/cloudwego/eino/adk/backgroundtask"
-	backgroundshell "github.com/cloudwego/eino/adk/backgroundtask/shell"
-	durablesubagent "github.com/cloudwego/eino/adk/backgroundtask/subagent"
-	backgroundtool "github.com/cloudwego/eino/adk/backgroundtask/tool"
 	"github.com/cloudwego/eino/adk/filesystem"
 	filesystem2 "github.com/cloudwego/eino/adk/middlewares/filesystem"
 	"github.com/cloudwego/eino/adk/prebuilt/planexecute"
 	adksession "github.com/cloudwego/eino/adk/session"
+	"github.com/cloudwego/eino/adk/task"
+	"github.com/cloudwego/eino/adk/task/background"
+	"github.com/cloudwego/eino/adk/task/foreground"
+	backgroundshell "github.com/cloudwego/eino/adk/task/shell"
+	durablesubagent "github.com/cloudwego/eino/adk/task/subagent"
+	backgroundtool "github.com/cloudwego/eino/adk/task/tool"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
@@ -48,35 +51,62 @@ import (
 func mustNewBackgroundManager(
 	t testing.TB,
 	ctx context.Context,
-	config *backgroundtask.Config,
-) *backgroundtask.Manager {
+	config *background.Config,
+) *background.Manager {
 	t.Helper()
 	if config == nil {
-		config = &backgroundtask.Config{}
+		config = &background.Config{}
 	} else {
 		copy := *config
 		config = &copy
 	}
 	if config.SendTaskCreatedEvent == nil {
-		config.SendTaskCreatedEvent = func(context.Context, *backgroundtask.Task) error { return nil }
+		config.SendTaskCreatedEvent = func(context.Context, *background.TaskSnapshot) error { return nil }
 	}
-	manager, err := backgroundtask.New(ctx, config)
+	manager, err := background.New(ctx, config)
 	require.NoError(t, err)
 	return manager
 }
 
-func mustDeepDurableExecutor(
+func closeDeepManager(t testing.TB, manager *background.Manager) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	require.NoError(t, manager.Close(ctx))
+}
+
+type deepCompletionBarrier struct{}
+
+func (deepCompletionBarrier) Check(
+	context.Context,
+	*durablesubagent.CompletionContext[*schema.Message],
+) (durablesubagent.CompletionAction, error) {
+	return durablesubagent.CompletionComplete, nil
+}
+
+func mustDeepController(
 	t *testing.T,
-) *durablesubagent.Executor[*schema.Message] {
+	manager *background.Manager,
+) *durablesubagent.Controller[*schema.Message] {
 	t.Helper()
 	store := adksession.NewInMemoryStore[*schema.Message](nil)
-	executor, err := durablesubagent.NewExecutor(
-		&durablesubagent.ExecutorConfig[*schema.Message]{
+	controller, err := durablesubagent.NewController(
+		&durablesubagent.ControllerConfig[*schema.Message]{
+			Manager: manager,
+			Barrier: deepCompletionBarrier{},
+			InputsToAgentInput: func(
+				context.Context,
+				[]*task.InputRecord,
+			) (*adk.AgentInput, error) {
+				return &adk.AgentInput{
+					Messages: []*schema.Message{schema.UserMessage("event")},
+				}, nil
+			},
 			SessionStore: store, CheckPointStore: store,
 		},
 	)
 	require.NoError(t, err)
-	return executor
+	return controller
 }
 
 type sequentialAgenticModel struct {
@@ -216,6 +246,45 @@ func (*deepRecoverableShellStub) RecoverCommand(
 	*backgroundshell.RecoverCommandRequest,
 ) (backgroundtool.Run, error) {
 	return nil, nil
+}
+
+func toolsFromDeepHandlers(
+	t *testing.T,
+	handlers []adk.ChatModelAgentMiddleware,
+) map[string]tool.BaseTool {
+	t.Helper()
+	ctx := context.Background()
+	runCtx := &adk.ChatModelAgentContext[*schema.Message]{}
+	for _, handler := range handlers {
+		var err error
+		ctx, runCtx, err = handler.BeforeAgent(ctx, runCtx)
+		require.NoError(t, err)
+		require.NotNil(t, runCtx)
+	}
+	tools := make(map[string]tool.BaseTool, len(runCtx.Tools))
+	for _, tl := range runCtx.Tools {
+		info, err := tl.Info(ctx)
+		require.NoError(t, err)
+		require.NotContains(t, tools, info.Name)
+		tools[info.Name] = tl
+	}
+	return tools
+}
+
+func requireRunInBackgroundField(
+	t *testing.T,
+	ctx context.Context,
+	tl tool.BaseTool,
+	want bool,
+) {
+	t.Helper()
+	require.NotNil(t, tl)
+	info, err := tl.Info(ctx)
+	require.NoError(t, err)
+	js, err := info.ParamsOneOf.ToJSONSchema()
+	require.NoError(t, err)
+	_, ok := js.Properties.Get("run_in_background")
+	require.Equal(t, want, ok)
 }
 
 func TestGenModelInput(t *testing.T) {
@@ -380,15 +449,29 @@ func TestDeepAgentTurn2DeduplicatesPersistedLeadingSystemMessage(t *testing.T) {
 }
 
 func TestWriteTodos(t *testing.T) {
-	m, err := buildTypedBuiltinAgentMiddlewares(context.Background(), &Config{WithoutWriteTodos: false}, nil)
+	ctx := context.Background()
+	m, err := buildTypedBuiltinAgentMiddlewares(
+		ctx,
+		&Config{WithoutWriteTodos: false},
+		nil,
+	)
 	assert.NoError(t, err)
-
-	wt := m[0].(*typedAppendPromptTool[*schema.Message]).t.(tool.InvokableTool)
+	require.Len(t, m, 1)
+	_, runCtx, err := m[0].BeforeAgent(
+		ctx,
+		&adk.ChatModelAgentContext[*schema.Message]{},
+	)
+	require.NoError(t, err)
+	require.Len(t, runCtx.Tools, 1)
+	info, err := runCtx.Tools[0].Info(ctx)
+	require.NoError(t, err)
+	require.Equal(t, "write_todos", info.Name)
+	wt := runCtx.Tools[0].(tool.InvokableTool)
 
 	todos := `[{"content":"content1","activeForm":"","status":"pending"},{"content":"content2","activeForm":"","status":"pending"}]`
 	args := fmt.Sprintf(`{"todos": %s}`, todos)
 
-	result, err := wt.InvokableRun(context.Background(), args)
+	result, err := wt.InvokableRun(ctx, args)
 	assert.NoError(t, err)
 	assert.Equal(t, fmt.Sprintf("Updated todo list to %s", todos), result)
 }
@@ -468,14 +551,13 @@ func TestDeepAgentManagerWiring(t *testing.T) {
 
 	// With a Manager, the top-level built-in handlers route execute through it, so
 	// the execute tool gains a run_in_background field.
-	mgr := mustNewBackgroundManager(t, ctx, &backgroundtask.Config{})
+	mgr := mustNewBackgroundManager(t, ctx, &background.Config{})
 	defer func() { _ = mgr.Close(ctx) }()
 
 	handlers, err := buildTypedBuiltinAgentMiddlewares(ctx, &Config{
 		WithoutWriteTodos: true,
-	}, &BackgroundConfig{
+	}, &TaskConfig{
 		Manager:    mgr,
-		Executors:  backgroundtask.NewExecutorRegistry(),
 		LocalShell: &LocalShellConfig{Shell: &deepMockShell{}},
 	})
 	assert.NoError(t, err)
@@ -509,13 +591,72 @@ func TestDeepAgentManagerWiring(t *testing.T) {
 	assert.False(t, ok, "unmanaged execute must not expose run_in_background")
 }
 
+func TestDeepGeneratedGeneralKeepsPlainShellAndSharedTaskControls(t *testing.T) {
+	ctx := context.Background()
+	manager := mustNewBackgroundManager(t, ctx, nil)
+	defer func() { require.NoError(t, manager.Close(ctx)) }()
+	timeoutMs := 1
+	cfg := &Config{
+		WithoutWriteTodos: true,
+		Shell:             &deepMockShell{},
+		Tasks: &TaskConfig{
+			Manager: manager,
+			SubAgents: &DurableSubAgentConfig{
+				Runtime: mustDeepController(t, manager),
+			},
+			ForegroundTimeoutMs: &timeoutMs,
+			ShouldAutoBackground: func(
+				context.Context,
+				*foreground.CandidateInfo,
+			) bool {
+				return true
+			},
+		},
+	}
+
+	handlers, err := buildGeneratedGeneralAgentMiddlewares(ctx, cfg)
+	require.NoError(t, err)
+	tools := toolsFromDeepHandlers(t, handlers)
+	require.Len(t, tools, 3)
+	require.Contains(t, tools, "task_output")
+	require.Contains(t, tools, "task_stop")
+	requireRunInBackgroundField(
+		t, ctx, tools[filesystem2.ToolNameExecute], false,
+	)
+}
+
+func TestDeepUserSubAgentsAreNotInjected(t *testing.T) {
+	ctx := context.Background()
+	manager := mustNewBackgroundManager(t, ctx, nil)
+	defer func() { require.NoError(t, manager.Close(ctx)) }()
+	userSubAgent := &spySubAgent{}
+	cfg := &Config{
+		ChatModel: &recordingDeepModel{},
+		SubAgents: []adk.Agent{userSubAgent},
+		Tasks: &TaskConfig{
+			Manager: manager,
+			SubAgents: &DurableSubAgentConfig{
+				Runtime: mustDeepController(t, manager),
+			},
+			LocalShell: &LocalShellConfig{Shell: &deepMockShell{}},
+		},
+	}
+	handlers, err := buildGeneratedGeneralAgentMiddlewares(ctx, cfg)
+	require.NoError(t, err)
+
+	subAgents, err := buildSubAgentsList(ctx, cfg, "instruction", handlers)
+	require.NoError(t, err)
+	require.Len(t, subAgents, 2)
+	require.Equal(t, generalAgentName, subAgents[0].Name(ctx))
+	require.Same(t, userSubAgent, subAgents[1])
+}
+
 func TestDeepRecoverableShellDoesNotCreateLocalRunner(t *testing.T) {
 	manager := mustNewBackgroundManager(t, context.Background(), nil)
 	defer manager.Close(context.Background())
 	shell := &deepRecoverableShellStub{}
-	background := &BackgroundConfig{
-		Manager:   manager,
-		Executors: backgroundtask.NewExecutorRegistry(),
+	background := &TaskConfig{
+		Manager: manager,
 		RecoverableShell: &RecoverableShellConfig{
 			Shell: shell,
 		},
@@ -536,92 +677,63 @@ func TestDeepRecoverableShellDoesNotCreateLocalRunner(t *testing.T) {
 	require.Len(t, handlers, 1)
 }
 
-func TestDeepBackgroundConfigRequiresExplicitCapabilities(t *testing.T) {
-	backgroundType := reflect.TypeOf(BackgroundConfig{})
-	for _, field := range []string{
-		"Manager", "SubAgents", "RecoverableShell", "LocalShell",
-		"ForegroundTimeoutMs", "ShouldAutoBackground",
-	} {
-		_, ok := backgroundType.FieldByName(field)
-		require.True(t, ok, "BackgroundConfig.%s must exist", field)
-	}
+func TestDeepTaskConfigRequiresExplicitCapabilities(t *testing.T) {
+	backgroundType := reflect.TypeOf(TaskConfig{})
 	for _, field := range []string{"Local", "Durable"} {
 		_, ok := backgroundType.FieldByName(field)
-		require.False(t, ok, "BackgroundConfig.%s must stay removed", field)
+		require.False(t, ok, "TaskConfig.%s must stay removed", field)
 	}
 	_, hasLegacyRecoverableShell := reflect.TypeOf(Config{}).FieldByName("RecoverableShell")
 	require.False(t, hasLegacyRecoverableShell)
 
-	_, err := New(context.Background(), &Config{Background: &BackgroundConfig{}})
+	_, err := New(context.Background(), &Config{Tasks: &TaskConfig{}})
 	require.ErrorContains(t, err, "Manager is required")
 
 	manager := mustNewBackgroundManager(t, context.Background(), nil)
-	_, err = New(context.Background(), &Config{Background: &BackgroundConfig{
-		Manager:   manager,
-		Executors: backgroundtask.NewExecutorRegistry(),
+	_, err = New(context.Background(), &Config{Tasks: &TaskConfig{
+		Manager: manager,
 	}})
 	require.ErrorContains(t, err, "at least one background capability is required")
 
-	_, err = New(context.Background(), &Config{Background: &BackgroundConfig{
+	_, err = New(context.Background(), &Config{Tasks: &TaskConfig{
 		Manager:    manager,
-		Executors:  backgroundtask.NewExecutorRegistry(),
 		LocalShell: &LocalShellConfig{},
 	}})
 	require.ErrorContains(t, err, "requires Shell or StreamingShell")
 
-	_, err = New(context.Background(), &Config{Background: &BackgroundConfig{
+	_, err = New(context.Background(), &Config{Tasks: &TaskConfig{
 		Manager:   manager,
-		Executors: backgroundtask.NewExecutorRegistry(),
 		SubAgents: &TypedDurableSubAgentConfig[*schema.Message]{},
 	}})
-	require.ErrorContains(t, err, "Executor is required")
+	require.ErrorContains(t, err, "Controller is required")
 
-}
-
-func TestDeepSubAgentBackgroundForwardsRunOptionsFactories(t *testing.T) {
-	factory := func() ([]adk.AgentRunOption, error) {
-		return []adk.AgentRunOption{adk.WithTimelineEvents()}, nil
-	}
-	format := func(
-		_ context.Context,
-		agentName string,
-		message *schema.Message,
-	) (string, error) {
-		return agentName + ": " + message.Content, nil
-	}
-	manager := mustNewBackgroundManager(t, context.Background(), nil)
-	defer manager.Close(context.Background())
-	background := deepSubagentBackground(&TypedConfig[*schema.Message]{
-		Background: &TypedBackgroundConfig[*schema.Message]{
-			Manager:          manager,
-			Executors:        backgroundtask.NewExecutorRegistry(),
-			TranscriptFormat: format,
-			SubAgents: &TypedDurableSubAgentConfig[*schema.Message]{
-				Executor: mustDeepDurableExecutor(t),
-				RunOptionsFactories: map[string]durablesubagent.RunOptionsFactory{
-					"worker": factory,
-				},
-			},
+	controllerManager := mustNewBackgroundManager(t, context.Background(), nil)
+	defer controllerManager.Close(context.Background())
+	controller := mustDeepController(t, controllerManager)
+	derived := &TaskConfig{
+		SubAgents: &TypedDurableSubAgentConfig[*schema.Message]{
+			Runtime: controller,
 		},
-	})
-	require.NotNil(t, background.Durable)
-	require.NotNil(t, background.Durable.RunOptionsFactories["worker"])
-	options, err := background.Durable.RunOptionsFactories["worker"]()
-	require.NoError(t, err)
-	assert.Len(t, options, 1)
-	formatted, err := background.TranscriptFormat(
-		context.Background(), "worker", schema.AssistantMessage("done", nil),
-	)
-	require.NoError(t, err)
-	assert.Equal(t, "worker: done", formatted)
+	}
+	require.NoError(t, validateTypedConfig(&Config{Tasks: derived}))
+	require.Same(t, controllerManager, deepBackgroundManager(derived))
+
+	otherManager := mustNewBackgroundManager(t, context.Background(), nil)
+	defer otherManager.Close(context.Background())
+	derived.Manager = otherManager
+	err = validateTypedConfig(&Config{Tasks: derived})
+	require.ErrorContains(t, err, "must share the same Manager")
 }
 
-// NewTyped with a Manager injects the task_output/task_stop control tools and a
-// background-capable subagent tool exactly once at the top level.
-func TestDeepAgentNewTypedWithManager(t *testing.T) {
+// NewTyped derives the shared Manager from the Controller and injects the
+// task_output/task_stop control tools exactly once at the top level.
+func TestDeepAgentNewTypedWithControllerManager(t *testing.T) {
 	ctx := context.Background()
-	mgr := mustNewBackgroundManager(t, ctx, &backgroundtask.Config{})
+	store := background.NewInMemoryStore(nil)
+	mgr := mustNewBackgroundManager(t, ctx, &background.Config{
+		Tasks: store, TaskEvents: store})
 	defer func() { _ = mgr.Close(ctx) }()
+	controller := mustDeepController(t, mgr)
 
 	cm := mockModel.NewMockToolCallingChatModel(gomock.NewController(t))
 	agent, err := New(ctx, &Config{
@@ -629,11 +741,9 @@ func TestDeepAgentNewTypedWithManager(t *testing.T) {
 		Description: "deep agent",
 		ChatModel:   cm,
 		Shell:       &deepMockShell{},
-		Background: &BackgroundConfig{
-			Manager:   mgr,
-			Executors: backgroundtask.NewExecutorRegistry(),
+		Tasks: &TaskConfig{
 			SubAgents: &TypedDurableSubAgentConfig[*schema.Message]{
-				Executor: mustDeepDurableExecutor(t),
+				Runtime: controller,
 			},
 		},
 	})

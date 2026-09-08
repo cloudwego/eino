@@ -441,7 +441,7 @@ func DeleteRunLocalValue(ctx context.Context, key string) error {
 // references the message by ID.
 //
 // During an explicit background managed-tool launch, TypedSendEvent also
-// supports synchronous events emitted from BackgroundTool.Start. That start
+// supports synchronous events emitted from task/tool.Tool.Start. That start
 // window closes when Start reaches its durable boundary, the parent context is
 // canceled, or the configured foreground timeout expires. After the sender-backed
 // window closes, TypedSendEvent returns ErrStartWindowClosed. Events emitted

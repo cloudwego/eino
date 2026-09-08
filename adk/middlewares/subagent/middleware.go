@@ -24,12 +24,12 @@ import (
 	"github.com/slongfield/pyfmt"
 
 	"github.com/cloudwego/eino/adk"
-	"github.com/cloudwego/eino/adk/backgroundtask"
-	backgroundlocal "github.com/cloudwego/eino/adk/backgroundtask/local"
-	durablesubagent "github.com/cloudwego/eino/adk/backgroundtask/subagent"
 	"github.com/cloudwego/eino/adk/filesystem"
 	"github.com/cloudwego/eino/adk/internal"
 	"github.com/cloudwego/eino/adk/middlewares/internal/systemreminder"
+	"github.com/cloudwego/eino/adk/task/background"
+	backgroundlocal "github.com/cloudwego/eino/adk/task/local"
+	durablesubagent "github.com/cloudwego/eino/adk/task/subagent"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/schema"
 )
@@ -64,10 +64,10 @@ type TypedConfig[M adk.MessageType] struct {
 	// output whose Reminder is "" suppresses the reminder message entirely.
 	CustomFormatReminder func(ctx context.Context, in *FormatReminderInput[M]) (*FormatReminderOutput, error)
 
-	// Background configures background-task execution for sub-agent runs. When nil,
+	// Tasks configures task execution for sub-agent runs. When nil,
 	// only foreground (blocking) agent execution is available and runs are NOT
-	// tracked. See BackgroundConfig.
-	Background *TypedBackgroundConfig[M]
+	// tracked. See TaskConfig.
+	Tasks *TypedTaskConfig[M]
 }
 
 // FormatReminderInput is the input to TypedConfig.CustomFormatReminder.
@@ -82,46 +82,42 @@ type FormatReminderOutput struct {
 	Reminder string
 }
 
-// BackgroundConfig enables background-task execution for the standard
+// TaskConfig enables background-task execution for the standard
 // *schema.Message agent tool.
-type BackgroundConfig = TypedBackgroundConfig[*schema.Message]
+type TaskConfig = TypedTaskConfig[*schema.Message]
 
-// TypedBackgroundConfig enables background-task execution for the agent tool.
+// TypedTaskConfig enables background-task execution for the agent tool.
 //
-// When set, ALL agent runs (foreground and background) are managed by the Manager,
-// making them visible via Get/List, and the Agent tool gains a run_in_background
-// parameter.
-type TypedBackgroundConfig[M adk.MessageType] struct {
-	Local   *TypedLocalBackgroundConfig[M]
-	Durable *TypedDurableBackgroundConfig[M]
+// When set, the Agent tool gains a run_in_background parameter. Local mode
+// manages all runs through its Runner. Durable Controller execution keeps
+// foreground work parent-owned until its completion barrier requests handoff.
+type TypedTaskConfig[M adk.MessageType] struct {
+	Local   *TypedLocalTaskConfig[M]
+	Durable *TypedDurableTaskConfig[M]
 	// TranscriptFormat formats one materialized sub-agent message for both local
 	// output persistence and durable task_output session views.
 	TranscriptFormat TranscriptFormat[M]
 }
 
-type LocalBackgroundConfig = TypedLocalBackgroundConfig[*schema.Message]
+type LocalTaskConfig = TypedLocalTaskConfig[*schema.Message]
 
-// TypedLocalBackgroundConfig configures process-local managed sub-agent runs.
-type TypedLocalBackgroundConfig[M adk.MessageType] struct {
+// TypedLocalTaskConfig configures process-local managed sub-agent runs.
+type TypedLocalTaskConfig[M adk.MessageType] struct {
 	Runner      *backgroundlocal.Runner
 	OutputStore filesystem.AppendOpener
 	OutputDir   string
+	// EventPersister receives the original AgentEvent metadata. For a streaming
+	// Sub-agent event, Stream is an independent persistence-owned copy; otherwise
+	// Stream is nil. Nil uses TranscriptFormat.
+	EventPersister background.TaskEventPersister[*adk.TypedAgentEvent[M], M]
 }
 
-type DurableBackgroundConfig = TypedDurableBackgroundConfig[*schema.Message]
+type DurableTaskConfig = TypedDurableTaskConfig[*schema.Message]
 
-// TypedDurableBackgroundConfig configures reconstructable sub-agent runs.
-type TypedDurableBackgroundConfig[M adk.MessageType] struct {
-	Manager   *backgroundtask.Manager
-	Executors *backgroundtask.ExecutorRegistry
-	// Executor owns the durable session dependencies and must be the same
-	// instance on every middleware sharing Manager.
-	Executor            *durablesubagent.Executor[M]
-	ForegroundTimeoutMs *int
-	// ShouldAutoBackground is reserved for a future durable checkpoint handoff
-	// implementation. Supplying it currently makes construction fail rather
-	// than pre-creating a background task for foreground execution.
-	ShouldAutoBackground func(context.Context, *backgroundtask.ForegroundCandidate) bool
+// TypedDurableTaskConfig configures reconstructable sub-agent runs.
+type TypedDurableTaskConfig[M adk.MessageType] struct {
+	// Runtime owns foreground execution and background handoff.
+	Runtime *durablesubagent.Controller[M]
 	// RunOptionsFactories reconstructs deployment-owned run options by sub-agent
 	// name for every execution attempt. Every worker serving a name must configure
 	// a semantically equivalent factory for the full lifetime of resumable tasks.
@@ -140,11 +136,11 @@ type TranscriptFormat[M adk.MessageType] func(
 
 // New creates a ChatModelAgentMiddleware that injects sub-agent tools into the agent context.
 //
-// The middleware injects an Agent tool for spawning sub-agents. When Background
+// The middleware injects an Agent tool for spawning sub-agents. When Tasks
 // is configured, agent runs are tracked by the shared background-task Manager and
 // the Agent tool gains a run_in_background parameter. The task_output/task_stop
-// control tools are NOT injected here; wire the backgroundtask control middleware
-// (adk/middlewares/backgroundtask) once, bound to the same Manager.
+// control tools are NOT injected here; wire the task control middleware
+// (adk/middlewares/task) once, bound to the same Manager.
 func New(ctx context.Context, config *Config) (adk.ChatModelAgentMiddleware, error) {
 	return NewTyped[*schema.Message](ctx, config)
 }
@@ -185,7 +181,7 @@ func NewTyped[M adk.MessageType](ctx context.Context, config *TypedConfig[M]) (a
 	}
 
 	backgroundPrompt := ""
-	if config.Background != nil {
+	if config.Tasks != nil {
 		backgroundPrompt = internal.SelectPrompt(internal.I18nPrompts{
 			English: agentToolBackgroundPrompt,
 			Chinese: agentToolBackgroundPromptChinese,
@@ -199,19 +195,20 @@ func NewTyped[M adk.MessageType](ctx context.Context, config *TypedConfig[M]) (a
 	// With a Manager, the tool exposes run_in_background and routes through the
 	// Manager; without one it is a plain foreground spawn.
 	var at tool.BaseTool
-	if config.Background != nil {
-		if config.Background.Local != nil {
+	if config.Tasks != nil {
+		if config.Tasks.Local != nil {
 			at, err = newManagedAgentTool[M](
-				config.Background.Local.Runner, subAgentToolMap,
+				config.Tasks.Local.Runner, subAgentToolMap,
 				agentOutput[M]{
-					store:     config.Background.Local.OutputStore,
-					outputDir: config.Background.Local.OutputDir,
-					format:    config.Background.TranscriptFormat,
+					store:     config.Tasks.Local.OutputStore,
+					outputDir: config.Tasks.Local.OutputDir,
+					format:    config.Tasks.TranscriptFormat,
+					persister: config.Tasks.Local.EventPersister,
 				},
 				toolName, desc,
 			)
 		} else {
-			at, err = newDurableAgentTool[M](ctx, config.Background.Durable, config.SubAgents, toolName, desc)
+			at, err = newDurableAgentTool[M](ctx, config.Tasks.Durable, config.SubAgents, toolName, desc)
 		}
 	} else {
 		at, err = newAgentTool(subAgentToolMap, toolName, desc)
@@ -327,20 +324,16 @@ func validate[M adk.MessageType](ctx context.Context, c *TypedConfig[M]) error {
 		}
 		names[name] = struct{}{}
 	}
-	if c.Background != nil {
-		if (c.Background.Local == nil) == (c.Background.Durable == nil) {
-			return fmt.Errorf("subagent: exactly one of Background.Local or Background.Durable is required")
+	if c.Tasks != nil {
+		if (c.Tasks.Local == nil) == (c.Tasks.Durable == nil) {
+			return fmt.Errorf("subagent: exactly one of Tasks.Local or Tasks.Durable is required")
 		}
-		if c.Background.Local != nil && c.Background.Local.Runner == nil {
+		if c.Tasks.Local != nil && c.Tasks.Local.Runner == nil {
 			return fmt.Errorf("subagent: local background Runner is required")
 		}
-		if c.Background.Durable != nil {
-			if c.Background.Durable.Manager == nil ||
-				c.Background.Durable.Executors == nil ||
-				c.Background.Durable.Executor == nil {
-				return fmt.Errorf(
-					"subagent: durable background Manager, executor registry, and Executor are required",
-				)
+		if c.Tasks.Durable != nil {
+			if c.Tasks.Durable.Runtime == nil {
+				return fmt.Errorf("subagent: durable Controller is required")
 			}
 			for _, agent := range c.SubAgents {
 				if _, ok := agent.(adk.TypedResumableAgent[M]); !ok {

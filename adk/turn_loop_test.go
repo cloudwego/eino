@@ -4639,16 +4639,20 @@ func TestTurnLoop_TurnContext_BothPreemptedAndStopped(t *testing.T) {
 
 func TestTurnLoop_PushStrategy_DuringTurn(t *testing.T) {
 	agentStarted := make(chan struct{})
-	agentStartedOnce := sync.Once{}
+	secondAgentStarted := make(chan struct{})
+	agentRunCalls := int32(0)
 	agentCancelled := make(chan struct{})
 	agentCancelledOnce := sync.Once{}
 
 	agent := &turnLoopCancellableMockAgent{
 		name: "test",
 		runFunc: func(ctx context.Context, input *AgentInput) (*AgentOutput, error) {
-			agentStartedOnce.Do(func() {
+			switch atomic.AddInt32(&agentRunCalls, 1) {
+			case 1:
 				close(agentStarted)
-			})
+			case 2:
+				close(secondAgentStarted)
+			}
 			<-ctx.Done()
 			agentCancelledOnce.Do(func() {
 				close(agentCancelled)
@@ -4694,6 +4698,7 @@ func TestTurnLoop_PushStrategy_DuringTurn(t *testing.T) {
 	waitOrFail(t, agentCancelled, "agent was not cancelled by strategy-returned preempt")
 
 	waitOrFail(t, secondGenInputCalled, "second GenInput was not called after preempt")
+	waitOrFail(t, secondAgentStarted, "second agent turn did not start after preempt")
 
 	loop.Stop(WithImmediate())
 	loop.Wait()
