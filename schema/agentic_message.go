@@ -1323,8 +1323,12 @@ func concatReasoning(reasons []*Reasoning) (ret *Reasoning, err error) {
 		if r.Text != "" {
 			ret.Text += r.Text
 		}
+		// Signature is an opaque integrity token for the reasoning text, not
+		// appendable content: when the same signature repeats across chunks,
+		// concatenating it corrupts verification. Keep the last non-empty one,
+		// matching mergeReasoningParts for *Message.
 		if r.Signature != "" {
-			ret.Signature += r.Signature
+			ret.Signature = r.Signature
 		}
 		if r.OpenAIExtension != nil {
 			openaiExtensions = append(openaiExtensions, r.OpenAIExtension)
@@ -1817,9 +1821,9 @@ func concatMCPToolResults(results []*MCPToolResult) (*MCPToolResult, error) {
 			continue
 		}
 
-		if r.Content != "" {
-			ret.Content = r.Content
-		}
+		// Content streams in chunks across messages, so append it like
+		// MCPToolCall.Arguments instead of overwriting previous chunks.
+		ret.Content += r.Content
 
 		if ret.ServerLabel == "" {
 			ret.ServerLabel = r.ServerLabel
