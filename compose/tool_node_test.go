@@ -18,11 +18,13 @@ package compose
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/bytedance/sonic"
 	"github.com/stretchr/testify/assert"
@@ -33,6 +35,185 @@ import (
 	"github.com/cloudwego/eino/internal/generic"
 	"github.com/cloudwego/eino/schema"
 )
+
+var errStreamTool = errors.New("stream tool failed")
+
+type blockingStreamTool struct {
+	reader       *schema.StreamReader[string]
+	producerDone chan struct{}
+}
+
+func (t *blockingStreamTool) Info(context.Context) (*schema.ToolInfo, error) {
+	return &schema.ToolInfo{Name: "blocking_stream"}, nil
+}
+
+func (t *blockingStreamTool) StreamableRun(context.Context, string, ...tool.Option) (*schema.StreamReader[string], error) {
+	reader, writer := schema.Pipe[string](0)
+	t.reader = reader
+	t.producerDone = make(chan struct{})
+	go func() {
+		defer close(t.producerDone)
+		defer writer.Close()
+		writer.Send("blocked until reader is closed", nil)
+	}()
+	return reader, nil
+}
+
+type blockingEnhancedStreamTool struct {
+	reader       *schema.StreamReader[*schema.ToolResult]
+	producerDone chan struct{}
+}
+
+func (t *blockingEnhancedStreamTool) Info(context.Context) (*schema.ToolInfo, error) {
+	return &schema.ToolInfo{Name: "blocking_enhanced_stream"}, nil
+}
+
+func (t *blockingEnhancedStreamTool) StreamableRun(context.Context, *schema.ToolArgument, ...tool.Option) (*schema.StreamReader[*schema.ToolResult], error) {
+	reader, writer := schema.Pipe[*schema.ToolResult](0)
+	t.reader = reader
+	t.producerDone = make(chan struct{})
+	go func() {
+		defer close(t.producerDone)
+		defer writer.Close()
+		writer.Send(&schema.ToolResult{}, nil)
+	}()
+	return reader, nil
+}
+
+type failingStreamTool struct{}
+
+func (failingStreamTool) Info(context.Context) (*schema.ToolInfo, error) {
+	return &schema.ToolInfo{Name: "failing_stream"}, nil
+}
+
+func (failingStreamTool) StreamableRun(context.Context, string, ...tool.Option) (*schema.StreamReader[string], error) {
+	return nil, errStreamTool
+}
+
+type interruptingStreamTool struct{}
+
+func (interruptingStreamTool) Info(context.Context) (*schema.ToolInfo, error) {
+	return &schema.ToolInfo{Name: "interrupting_stream"}, nil
+}
+
+func (interruptingStreamTool) StreamableRun(ctx context.Context, _ string, _ ...tool.Option) (*schema.StreamReader[string], error) {
+	return nil, tool.Interrupt(ctx, "rerun")
+}
+
+type emptyStreamTool struct{}
+
+func (emptyStreamTool) Info(context.Context) (*schema.ToolInfo, error) {
+	return &schema.ToolInfo{Name: "empty_stream"}, nil
+}
+
+func (emptyStreamTool) StreamableRun(context.Context, string, ...tool.Option) (*schema.StreamReader[string], error) {
+	return schema.StreamReaderFromArray([]string{}), nil
+}
+
+type emptyEnhancedStreamTool struct{}
+
+func (emptyEnhancedStreamTool) Info(context.Context) (*schema.ToolInfo, error) {
+	return &schema.ToolInfo{Name: "empty_enhanced_stream"}, nil
+}
+
+func (emptyEnhancedStreamTool) StreamableRun(context.Context, *schema.ToolArgument, ...tool.Option) (*schema.StreamReader[*schema.ToolResult], error) {
+	return schema.StreamReaderFromArray([]*schema.ToolResult{}), nil
+}
+
+func assertProducerDone(t *testing.T, readerClose func(), producerDone <-chan struct{}) {
+	t.Helper()
+	t.Cleanup(func() {
+		select {
+		case <-producerDone:
+		default:
+			readerClose()
+		}
+	})
+	assert.Eventually(t, func() bool {
+		select {
+		case <-producerDone:
+			return true
+		default:
+			return false
+		}
+	}, time.Second, 10*time.Millisecond)
+}
+
+func TestToolsNodeStreamClosesSuccessfulStreamsOnError(t *testing.T) {
+	ctx := context.Background()
+
+	for _, sequential := range []bool{false, true} {
+		mode := "parallel"
+		if sequential {
+			mode = "sequential"
+		}
+		t.Run("standard/"+mode, func(t *testing.T) {
+			blockingTool := &blockingStreamTool{}
+			node, err := NewToolNode(ctx, &ToolsNodeConfig{
+				Tools: []tool.BaseTool{blockingTool, failingStreamTool{}}, ExecuteSequentially: sequential,
+			})
+			assert.NoError(t, err)
+
+			_, err = node.Stream(ctx, schema.AssistantMessage("", []schema.ToolCall{
+				{ID: "blocking", Function: schema.FunctionCall{Name: "blocking_stream", Arguments: "{}"}},
+				{ID: "failing", Function: schema.FunctionCall{Name: "failing_stream", Arguments: "{}"}},
+			}))
+			assert.ErrorIs(t, err, errStreamTool)
+			assertProducerDone(t, blockingTool.reader.Close, blockingTool.producerDone)
+		})
+
+		t.Run("enhanced/"+mode, func(t *testing.T) {
+			blockingTool := &blockingEnhancedStreamTool{}
+			node, err := NewToolNode(ctx, &ToolsNodeConfig{
+				Tools: []tool.BaseTool{blockingTool, failingStreamTool{}}, ExecuteSequentially: sequential,
+			})
+			assert.NoError(t, err)
+
+			_, err = node.Stream(ctx, schema.AssistantMessage("", []schema.ToolCall{
+				{ID: "blocking", Function: schema.FunctionCall{Name: "blocking_enhanced_stream", Arguments: "{}"}},
+				{ID: "failing", Function: schema.FunctionCall{Name: "failing_stream", Arguments: "{}"}},
+			}))
+			assert.ErrorIs(t, err, errStreamTool)
+			assertProducerDone(t, blockingTool.reader.Close, blockingTool.producerDone)
+		})
+	}
+}
+
+func TestToolsNodeStreamClosesPendingStreamsOnInterruptConcatError(t *testing.T) {
+	tests := []struct {
+		name           string
+		concatTool     tool.BaseTool
+		concatToolName string
+		sequential     bool
+	}{
+		{name: "standard/parallel", concatTool: emptyStreamTool{}, concatToolName: "empty_stream"},
+		{name: "enhanced/parallel", concatTool: emptyEnhancedStreamTool{}, concatToolName: "empty_enhanced_stream"},
+		{name: "standard/sequential", concatTool: emptyStreamTool{}, concatToolName: "empty_stream", sequential: true},
+		{name: "enhanced/sequential", concatTool: emptyEnhancedStreamTool{}, concatToolName: "empty_enhanced_stream", sequential: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			blockingTool := &blockingStreamTool{}
+			blockingEnhancedTool := &blockingEnhancedStreamTool{}
+			node, err := NewToolNode(ctx, &ToolsNodeConfig{
+				Tools:               []tool.BaseTool{interruptingStreamTool{}, tt.concatTool, blockingTool, blockingEnhancedTool},
+				ExecuteSequentially: tt.sequential,
+			})
+			assert.NoError(t, err)
+
+			_, err = node.Stream(ctx, schema.AssistantMessage("", []schema.ToolCall{
+				{ID: "interrupting", Function: schema.FunctionCall{Name: "interrupting_stream", Arguments: "{}"}},
+				{ID: "empty", Function: schema.FunctionCall{Name: tt.concatToolName, Arguments: "{}"}},
+				{ID: "blocking", Function: schema.FunctionCall{Name: "blocking_stream", Arguments: "{}"}},
+				{ID: "blocking_enhanced", Function: schema.FunctionCall{Name: "blocking_enhanced_stream", Arguments: "{}"}},
+			}))
+			assert.ErrorContains(t, err, "failed to concat")
+			assertProducerDone(t, blockingTool.reader.Close, blockingTool.producerDone)
+			assertProducerDone(t, blockingEnhancedTool.reader.Close, blockingEnhancedTool.producerDone)
+		})
+	}
+}
 
 const (
 	toolNameOfUserCompany = "user_company"
