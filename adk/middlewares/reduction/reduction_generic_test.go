@@ -18,6 +18,7 @@ package reduction
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -574,7 +575,10 @@ func TestCopyAgenticMessages_DeepCopy(t *testing.T) {
 						CallID: "call_1",
 						Name:   "tool_a",
 						Content: []*schema.FunctionToolResultContentBlock{
-							{Text: &schema.UserInputText{Text: "original result"}},
+							{
+								Text:  &schema.UserInputText{Text: "original result"},
+								Extra: map[string]any{"result_key": "result_value"},
+							},
 						},
 					},
 					Extra: map[string]any{"meta": "data"},
@@ -595,6 +599,10 @@ func TestCopyAgenticMessages_DeepCopy(t *testing.T) {
 	copied[0].ContentBlocks[1].FunctionToolResult.Content[0].Text.Text = "modified result"
 	assert.Equal(t, "original result", original[0].ContentBlocks[1].FunctionToolResult.Content[0].Text.Text,
 		"original FunctionToolResult text must not be affected")
+
+	copied[0].ContentBlocks[1].FunctionToolResult.Content[0].Extra["result_key"] = "changed"
+	assert.Equal(t, "result_value", original[0].ContentBlocks[1].FunctionToolResult.Content[0].Extra["result_key"],
+		"original FunctionToolResult content Extra must not be affected")
 
 	copied[0].ContentBlocks[1].Extra["meta"] = "changed"
 	assert.Equal(t, "data", original[0].ContentBlocks[1].Extra["meta"],
@@ -799,6 +807,412 @@ func TestToolResultFromMsgGeneric_MediaBlocks(t *testing.T) {
 	require.NotNil(t, result.Parts[3].File)
 	require.NotNil(t, result.Parts[3].File.URL)
 	assert.Equal(t, fileURL, *result.Parts[3].File.URL)
+}
+
+func TestToolResultContentRoundTripPreservesMediaSourcesAndExtra(t *testing.T) {
+	tests := []struct {
+		name  string
+		block *schema.FunctionToolResultContentBlock
+	}{
+		{
+			name: "text",
+			block: &schema.FunctionToolResultContentBlock{
+				Type: schema.FunctionToolResultContentBlockTypeText,
+				Text: &schema.UserInputText{Text: "text content"},
+			},
+		},
+		{
+			name: "image URL",
+			block: &schema.FunctionToolResultContentBlock{
+				Type:  schema.FunctionToolResultContentBlockTypeImage,
+				Image: &schema.UserInputImage{URL: "https://example.com/image.png", MIMEType: "image/png"},
+			},
+		},
+		{
+			name: "image base64",
+			block: &schema.FunctionToolResultContentBlock{
+				Type:  schema.FunctionToolResultContentBlockTypeImage,
+				Image: &schema.UserInputImage{Base64Data: "aW1hZ2U=", MIMEType: "image/png"},
+			},
+		},
+		{
+			name: "audio URL",
+			block: &schema.FunctionToolResultContentBlock{
+				Type:  schema.FunctionToolResultContentBlockTypeAudio,
+				Audio: &schema.UserInputAudio{URL: "https://example.com/audio.wav", MIMEType: "audio/wav"},
+			},
+		},
+		{
+			name: "audio base64",
+			block: &schema.FunctionToolResultContentBlock{
+				Type:  schema.FunctionToolResultContentBlockTypeAudio,
+				Audio: &schema.UserInputAudio{Base64Data: "YXVkaW8=", MIMEType: "audio/wav"},
+			},
+		},
+		{
+			name: "video URL",
+			block: &schema.FunctionToolResultContentBlock{
+				Type:  schema.FunctionToolResultContentBlockTypeVideo,
+				Video: &schema.UserInputVideo{URL: "https://example.com/video.mp4", MIMEType: "video/mp4"},
+			},
+		},
+		{
+			name: "video base64",
+			block: &schema.FunctionToolResultContentBlock{
+				Type:  schema.FunctionToolResultContentBlockTypeVideo,
+				Video: &schema.UserInputVideo{Base64Data: "dmlkZW8=", MIMEType: "video/mp4"},
+			},
+		},
+		{
+			name: "file URL",
+			block: &schema.FunctionToolResultContentBlock{
+				Type: schema.FunctionToolResultContentBlockTypeFile,
+				File: &schema.UserInputFile{URL: "https://example.com/file.pdf", MIMEType: "application/pdf"},
+			},
+		},
+		{
+			name: "file base64",
+			block: &schema.FunctionToolResultContentBlock{
+				Type: schema.FunctionToolResultContentBlockTypeFile,
+				File: &schema.UserInputFile{Base64Data: "ZmlsZQ==", MIMEType: "application/pdf"},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tt.block.Extra = map[string]any{"source": tt.name}
+			parts := toolResultToOutputParts(&schema.FunctionToolResult{
+				Content: []*schema.FunctionToolResultContentBlock{tt.block},
+			})
+			require.Len(t, parts, 1)
+			parts[0].Extra["handler"] = "updated"
+			assert.NotContains(t, tt.block.Extra, "handler")
+
+			restored := &schema.FunctionToolResult{}
+			setToolResultFromOutputParts(restored, parts)
+			require.Len(t, restored.Content, 1)
+			assert.Equal(t, "updated", restored.Content[0].Extra["handler"])
+			parts[0].Extra["after_restore"] = true
+			assert.NotContains(t, restored.Content[0].Extra, "after_restore")
+		})
+	}
+}
+
+func TestMessageToolResultRoundTripPreservesPartExtra(t *testing.T) {
+	imageURL := "https://example.com/image.png"
+	audioData := "YXVkaW8="
+	videoURL := "https://example.com/video.mp4"
+	fileData := "ZmlsZQ=="
+	parts := []schema.MessageInputPart{
+		{
+			Type:  schema.ChatMessagePartTypeText,
+			Text:  "text content",
+			Extra: map[string]any{"source": "text"},
+		},
+		{
+			Type: schema.ChatMessagePartTypeImageURL,
+			Image: &schema.MessageInputImage{MessagePartCommon: schema.MessagePartCommon{
+				URL:      &imageURL,
+				MIMEType: "image/png",
+			}},
+			Extra: map[string]any{"source": "image"},
+		},
+		{
+			Type: schema.ChatMessagePartTypeAudioURL,
+			Audio: &schema.MessageInputAudio{MessagePartCommon: schema.MessagePartCommon{
+				Base64Data: &audioData,
+				MIMEType:   "audio/wav",
+			}},
+			Extra: map[string]any{"source": "audio"},
+		},
+		{
+			Type: schema.ChatMessagePartTypeVideoURL,
+			Video: &schema.MessageInputVideo{MessagePartCommon: schema.MessagePartCommon{
+				URL:      &videoURL,
+				MIMEType: "video/mp4",
+			}},
+			Extra: map[string]any{"source": "video"},
+		},
+		{
+			Type: schema.ChatMessagePartTypeFileURL,
+			File: &schema.MessageInputFile{MessagePartCommon: schema.MessagePartCommon{
+				Base64Data: &fileData,
+				MIMEType:   "application/pdf",
+			}},
+			Extra: map[string]any{"source": "file"},
+		},
+	}
+	msg := &schema.Message{
+		Role:                  schema.Tool,
+		ToolCallID:            "call_1",
+		UserInputMultiContent: parts,
+	}
+
+	result, fromContent, err := toolResultFromMessage(msg)
+	require.NoError(t, err)
+	assert.False(t, fromContent)
+	require.Len(t, result.Parts, len(parts))
+	for i := range parts {
+		assert.Equal(t, parts[i].Extra, result.Parts[i].Extra)
+	}
+
+	result.Parts[0].Extra["handler"] = "updated"
+	*result.Parts[1].Image.URL = "https://example.com/updated.png"
+	assert.NotContains(t, msg.UserInputMultiContent[0].Extra, "handler")
+	assert.Equal(t, imageURL, *msg.UserInputMultiContent[1].Image.URL)
+
+	setToolResultContent(msg, result, false)
+	require.Len(t, msg.UserInputMultiContent, len(parts))
+	assert.Equal(t, "updated", msg.UserInputMultiContent[0].Extra["handler"])
+	for i := 1; i < len(parts); i++ {
+		assert.Equal(t, parts[i].Extra, msg.UserInputMultiContent[i].Extra)
+	}
+}
+
+func TestClearHandlerExtraMutationDoesNotLeakWithoutCommit(t *testing.T) {
+	tests := []struct {
+		name               string
+		clearAtLeastTokens int64
+		handlerResult      func(*ToolDetail) (*ClearResult, error)
+		wantErr            bool
+	}{
+		{
+			name:               "clear threshold abort",
+			clearAtLeastTokens: 10,
+			handlerResult: func(detail *ToolDetail) (*ClearResult, error) {
+				return &ClearResult{
+					NeedClear:    true,
+					ToolArgument: detail.ToolArgument,
+					ToolResult:   detail.ToolResult,
+				}, nil
+			},
+		},
+		{
+			name: "handler declines clear",
+			handlerResult: func(*ToolDetail) (*ClearResult, error) {
+				return &ClearResult{NeedClear: false}, nil
+			},
+		},
+		{
+			name: "handler returns error",
+			handlerResult: func(*ToolDetail) (*ClearResult, error) {
+				return nil, errors.New("handler failed")
+			},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			sourceExtra := map[string]any{"storage_key": "object-key"}
+			messages := []*schema.AgenticMessage{
+				schema.SystemAgenticMessage("system"),
+				makeAssistantMsgWithToolCallsG[*schema.AgenticMessage]([]testToolCall{
+					{ID: "call_old", Name: "media_tool", Arguments: `{}`},
+				}),
+				{
+					Role: schema.AgenticRoleTypeUser,
+					ContentBlocks: []*schema.ContentBlock{
+						schema.NewContentBlock(&schema.FunctionToolResult{
+							CallID: "call_old",
+							Name:   "media_tool",
+							Content: []*schema.FunctionToolResultContentBlock{
+								{
+									Type:  schema.FunctionToolResultContentBlockTypeText,
+									Text:  &schema.UserInputText{Text: "tool result"},
+									Extra: sourceExtra,
+								},
+							},
+						}),
+					},
+				},
+				makeAssistantMsgWithToolCallsG[*schema.AgenticMessage]([]testToolCall{
+					{ID: "call_new", Name: "new_tool", Arguments: `{}`},
+				}),
+			}
+			for _, message := range messages {
+				adk.EnsureMessageID(message)
+			}
+			tokenCountCalls := 0
+			mw, err := NewTyped(ctx, &TypedConfig[*schema.AgenticMessage]{
+				SkipTruncation:            true,
+				MaxTokensForClear:         1,
+				ClearRetentionSuffixLimit: 1,
+				ClearAtLeastTokens:        tt.clearAtLeastTokens,
+				TokenCounter: func(context.Context, []*schema.AgenticMessage, []*schema.ToolInfo) (int64, error) {
+					tokenCountCalls++
+					if tokenCountCalls == 1 {
+						return 1000, nil
+					}
+					return 999, nil
+				},
+				ToolConfig: map[string]*ToolReductionConfig{
+					"media_tool": {
+						ClearHandler: func(_ context.Context, detail *ToolDetail) (*ClearResult, error) {
+							detail.ToolResult.Parts[0].Extra["processed_by_handler"] = true
+							return tt.handlerResult(detail)
+						},
+					},
+				},
+			})
+			require.NoError(t, err)
+
+			state := &adk.TypedChatModelAgentState[*schema.AgenticMessage]{Messages: messages}
+			_, resultState, err := mw.BeforeModelRewriteState(
+				ctx,
+				state,
+				&adk.TypedModelContext[*schema.AgenticMessage]{},
+			)
+			if tt.wantErr {
+				require.EqualError(t, err, "handler failed")
+			} else {
+				require.NoError(t, err)
+			}
+			assert.NotContains(t, sourceExtra, "processed_by_handler")
+			result := resultState.Messages[2].ContentBlocks[0].FunctionToolResult
+			require.NotNil(t, result)
+			assert.NotContains(t, result.Content[0].Extra, "processed_by_handler")
+		})
+	}
+}
+
+func TestDefaultClearPreservesAgenticMediaSourcesAndExtra(t *testing.T) {
+	ctx := context.Background()
+	imageExtra := map[string]any{"source": "/workspace/image.png"}
+	textExtra := map[string]any{"storage_key": "object-key"}
+	toolResult := &schema.AgenticMessage{
+		Role: schema.AgenticRoleTypeUser,
+		ContentBlocks: []*schema.ContentBlock{
+			schema.NewContentBlock(&schema.FunctionToolResult{
+				CallID: "call_old",
+				Name:   "read_file",
+				Content: []*schema.FunctionToolResultContentBlock{
+					{
+						Type:  schema.FunctionToolResultContentBlockTypeText,
+						Text:  &schema.UserInputText{Text: "large text result"},
+						Extra: textExtra,
+					},
+					{
+						Type:  schema.FunctionToolResultContentBlockTypeImage,
+						Image: &schema.UserInputImage{Base64Data: "aW1hZ2U=", MIMEType: "image/png"},
+						Extra: imageExtra,
+					},
+				},
+			}),
+		},
+	}
+	mw, err := NewTyped(ctx, &TypedConfig[*schema.AgenticMessage]{
+		SkipTruncation:            true,
+		MaxTokensForClear:         1,
+		ClearRetentionSuffixLimit: 1,
+		TokenCounter: func(context.Context, []*schema.AgenticMessage, []*schema.ToolInfo) (int64, error) {
+			return 1000, nil
+		},
+	})
+	require.NoError(t, err)
+
+	state := &adk.TypedChatModelAgentState[*schema.AgenticMessage]{
+		Messages: []*schema.AgenticMessage{
+			schema.SystemAgenticMessage("system"),
+			makeAssistantMsgWithToolCallsG[*schema.AgenticMessage]([]testToolCall{
+				{ID: "call_old", Name: "read_file", Arguments: `{"file_path":"/workspace/image.png"}`},
+			}),
+			toolResult,
+			makeAssistantMsgWithToolCallsG[*schema.AgenticMessage]([]testToolCall{
+				{ID: "call_new", Name: "new_tool", Arguments: `{}`},
+			}),
+		},
+	}
+
+	_, resultState, err := mw.BeforeModelRewriteState(
+		ctx,
+		state,
+		&adk.TypedModelContext[*schema.AgenticMessage]{},
+	)
+	require.NoError(t, err)
+	require.Len(t, resultState.Messages, 4)
+
+	result := resultState.Messages[2].ContentBlocks[0].FunctionToolResult
+	require.NotNil(t, result)
+	require.Len(t, result.Content, 2)
+	require.NotNil(t, result.Content[0].Text)
+	assert.NotEqual(t, "large text result", result.Content[0].Text.Text)
+	assert.Equal(t, textExtra, result.Content[0].Extra)
+	require.NotNil(t, result.Content[1].Image)
+	assert.Equal(t, "aW1hZ2U=", result.Content[1].Image.Base64Data)
+	assert.Equal(t, "image/png", result.Content[1].Image.MIMEType)
+	assert.Equal(t, imageExtra, result.Content[1].Extra)
+}
+
+func TestClearAtLeastTokensAbortPreservesAgenticMedia(t *testing.T) {
+	ctx := context.Background()
+	originalImage := &schema.FunctionToolResultContentBlock{
+		Type:  schema.FunctionToolResultContentBlockTypeImage,
+		Image: &schema.UserInputImage{Base64Data: "aW1hZ2U=", MIMEType: "image/png"},
+		Extra: map[string]any{"source": "/workspace/image.png"},
+	}
+	toolResult := &schema.AgenticMessage{
+		Role: schema.AgenticRoleTypeUser,
+		ContentBlocks: []*schema.ContentBlock{
+			schema.NewContentBlock(&schema.FunctionToolResult{
+				CallID: "call_old",
+				Name:   "read_file",
+				Content: []*schema.FunctionToolResultContentBlock{
+					{
+						Type: schema.FunctionToolResultContentBlockTypeText,
+						Text: &schema.UserInputText{Text: "large text result"},
+					},
+					originalImage,
+				},
+			}),
+		},
+	}
+	tokenCountCalls := 0
+	mw, err := NewTyped(ctx, &TypedConfig[*schema.AgenticMessage]{
+		SkipTruncation:            true,
+		MaxTokensForClear:         1,
+		ClearRetentionSuffixLimit: 1,
+		ClearAtLeastTokens:        10,
+		TokenCounter: func(context.Context, []*schema.AgenticMessage, []*schema.ToolInfo) (int64, error) {
+			tokenCountCalls++
+			if tokenCountCalls == 1 {
+				return 1000, nil
+			}
+			return 999, nil
+		},
+	})
+	require.NoError(t, err)
+
+	state := &adk.TypedChatModelAgentState[*schema.AgenticMessage]{
+		Messages: []*schema.AgenticMessage{
+			schema.SystemAgenticMessage("system"),
+			makeAssistantMsgWithToolCallsG[*schema.AgenticMessage]([]testToolCall{
+				{ID: "call_old", Name: "read_file", Arguments: `{"file_path":"/workspace/image.png"}`},
+			}),
+			toolResult,
+			makeAssistantMsgWithToolCallsG[*schema.AgenticMessage]([]testToolCall{
+				{ID: "call_new", Name: "new_tool", Arguments: `{}`},
+			}),
+		},
+	}
+
+	_, resultState, err := mw.BeforeModelRewriteState(
+		ctx,
+		state,
+		&adk.TypedModelContext[*schema.AgenticMessage]{},
+	)
+	require.NoError(t, err)
+	require.Len(t, resultState.Messages, 4)
+
+	result := resultState.Messages[2].ContentBlocks[0].FunctionToolResult
+	require.NotNil(t, result)
+	require.Len(t, result.Content, 2)
+	assert.Equal(t, "large text result", result.Content[0].Text.Text)
+	assert.Equal(t, originalImage, result.Content[1])
+	assert.Equal(t, "aW1hZ2U=", originalImage.Image.Base64Data)
+	assert.Equal(t, map[string]any{"source": "/workspace/image.png"}, originalImage.Extra)
 }
 
 func TestSetToolResultContent_MediaBlocks(t *testing.T) {
