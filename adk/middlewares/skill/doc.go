@@ -33,6 +33,14 @@
 //   - fork: runs the skill with a new sub-agent without parent message history
 //   - fork_with_context: runs the skill with a new sub-agent carrying parent message history
 //
+// # Preloading
+//
+// By default, a skill's full instructions are loaded on demand: the model calls the
+// skill tool, and the content is returned as the tool result. Config.PreloadSkills
+// preloads the listed skills instead: their full content is inlined into the system
+// instruction when the middleware is created, so the model starts with them without
+// a tool call. Skills running in fork or fork_with_context modes cannot be preloaded.
+//
 // # Extension points
 //
 //   - CustomToolParams customizes the tool parameter schema.
