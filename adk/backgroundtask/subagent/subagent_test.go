@@ -987,6 +987,12 @@ func TestResumeControlHelpers(t *testing.T) {
 	require.Equal(t, backgroundtask.ControlStop,
 		waitForControl(context.Background(), controls).Kind)
 
+	require.NoError(t, waitForDrainCancelOutcome(
+		context.Background(),
+		backgroundtask.ControlRequest{Kind: backgroundtask.ControlDrain},
+		nil,
+	))
+
 	executor := newTestExecutor(t, nil)
 	task := &backgroundtask.Task{Spec: backgroundtask.Spec{ID: "task"}}
 	result, controlErr, controlled := executor.controlResult(
@@ -1024,7 +1030,7 @@ func TestHandleRunErrorControlOutcomes(t *testing.T) {
 		wantErr := errors.New("model failed")
 		result, err := executor.handleRunError(
 			context.Background(), iter, task,
-			make(chan backgroundtask.ControlRequest), wantErr,
+			make(chan backgroundtask.ControlRequest), nil, wantErr,
 		)
 		require.ErrorIs(t, err, wantErr)
 		require.Nil(t, result)
@@ -1038,6 +1044,7 @@ func TestHandleRunErrorControlOutcomes(t *testing.T) {
 			iter,
 			task,
 			make(chan backgroundtask.ControlRequest),
+			nil,
 			adk.ErrSessionBusy,
 		)
 		require.NoError(t, err)
@@ -1054,7 +1061,7 @@ func TestHandleRunErrorControlOutcomes(t *testing.T) {
 		controls := make(chan backgroundtask.ControlRequest, 1)
 		controls <- backgroundtask.ControlRequest{Kind: backgroundtask.ControlStop}
 		result, err := executor.handleRunError(
-			context.Background(), iter, task, controls, context.Canceled,
+			context.Background(), iter, task, controls, nil, context.Canceled,
 		)
 		require.NoError(t, err)
 		require.Equal(t, backgroundtask.StatusCanceled, result.Status)
@@ -1068,11 +1075,28 @@ func TestHandleRunErrorControlOutcomes(t *testing.T) {
 			Kind: backgroundtask.ControlTimeout, Reason: "deadline",
 		}
 		result, err := executor.handleRunError(
-			context.Background(), iter, task, controls, context.Canceled,
+			context.Background(), iter, task, controls, nil, context.Canceled,
 		)
 		require.NoError(t, err)
 		require.Equal(t, backgroundtask.StatusFailed, result.Status)
 		require.Equal(t, "deadline", result.Error)
+	})
+
+	t.Run("drain loses race to fatal error", func(t *testing.T) {
+		iter, generator := adk.NewAsyncIteratorPair[*adk.AgentEvent]()
+		generator.Close()
+		controls := make(chan backgroundtask.ControlRequest, 1)
+		controls <- backgroundtask.ControlRequest{Kind: backgroundtask.ControlDrain}
+		cancelOutcomes := make(chan error, 1)
+		cancelOutcomes <- adk.ErrExecutionEnded
+		wantErr := errors.New("model failed")
+
+		result, err := executor.handleRunError(
+			context.Background(), iter, task, controls, cancelOutcomes, wantErr,
+		)
+
+		require.ErrorIs(t, err, wantErr)
+		require.Nil(t, result)
 	})
 }
 
@@ -1084,7 +1108,7 @@ func TestAttack_StreamCanceledWithoutControlRemainsFailure(t *testing.T) {
 
 	result, err := executor.handleRunError(
 		context.Background(), iter, task,
-		make(chan backgroundtask.ControlRequest), adk.ErrStreamCanceled,
+		make(chan backgroundtask.ControlRequest), nil, adk.ErrStreamCanceled,
 	)
 
 	require.Nil(t, result)
@@ -1101,13 +1125,15 @@ func TestAttack_DrainControlAfterStreamCancellationSuspends(t *testing.T) {
 	iter, generator := adk.NewAsyncIteratorPair[*adk.AgentEvent]()
 	generator.Close()
 	controls := make(chan backgroundtask.ControlRequest)
+	cancelOutcomes := make(chan error, 1)
+	cancelOutcomes <- nil
 	go func() {
 		time.Sleep(10 * time.Millisecond)
 		controls <- backgroundtask.ControlRequest{Kind: backgroundtask.ControlDrain}
 	}()
 
 	result, err := executor.handleRunError(
-		context.Background(), iter, task, controls, adk.ErrStreamCanceled,
+		context.Background(), iter, task, controls, cancelOutcomes, adk.ErrStreamCanceled,
 	)
 
 	require.NoError(t, err)
@@ -1444,6 +1470,108 @@ func TestStopControlWinsOverLateFinalMessage_BitsUT(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, backgroundtask.StatusCanceled, canceled.Status)
 	assert.NotEqual(t, "late completion", string(canceled.ResultData))
+}
+
+func TestResolveRunOutcomeDrainLostRace_BitsUT(t *testing.T) {
+	store := adksession.NewInMemoryStore[*schema.Message](nil)
+	executor := newTestExecutor(t, store)
+	task := &backgroundtask.Task{Spec: backgroundtask.Spec{ID: "task"}}
+	agent := &cancelThenMessageAgent{
+		name: "worker", started: make(chan struct{}), release: make(chan struct{}),
+	}
+	cancelOption, cancelRun := adk.WithCancel()
+	runner := adk.NewRunner(context.Background(), adk.RunnerConfig{Agent: agent})
+	iter := runner.Run(context.Background(), nil, cancelOption)
+	<-agent.started
+	close(agent.release)
+
+	var final string
+	for {
+		event, open := iter.Next()
+		if !open {
+			break
+		}
+		require.NoError(t, event.Err)
+		if event.Output == nil || event.Output.MessageOutput == nil {
+			continue
+		}
+		message, messageErr := event.Output.MessageOutput.GetMessage()
+		require.NoError(t, messageErr)
+		final = message.Content
+	}
+
+	control := backgroundtask.ControlRequest{Kind: backgroundtask.ControlDrain}
+	cancelOutcome := requestCancelAndWait(control, cancelRun, time.Second)
+	require.ErrorIs(t, cancelOutcome, adk.ErrExecutionEnded)
+	result, err := executor.resolveRunOutcome(
+		context.Background(),
+		task,
+		control,
+		cancelOutcome,
+		subagentRunOutcome{final: final},
+	)
+
+	require.NoError(t, err)
+	require.Equal(t, backgroundtask.StatusCompleted, result.Status)
+	require.Equal(t, "late completion", string(result.Data))
+	_, checkpointExists, err := store.Get(
+		context.Background(),
+		checkpointID(task.Spec.ID),
+	)
+	require.NoError(t, err)
+	require.False(t, checkpointExists)
+}
+
+func TestDrainControlDefersToNaturalCompletionE2E_BitsUT(t *testing.T) {
+	store := adksession.NewInMemoryStore[*schema.Message](nil)
+	agent := &cancelThenMessageAgent{
+		name: "worker", started: make(chan struct{}), release: make(chan struct{}),
+	}
+	executor, err := NewExecutor(&ExecutorConfig[*schema.Message]{
+		SessionStore: store, CheckPointStore: store, DrainCancelTimeout: time.Second,
+	})
+	require.NoError(t, err)
+	require.NoError(t, executor.Register(
+		agent.name, &AgentRegistration[*schema.Message]{Agent: agent},
+	))
+	registry := backgroundtask.NewExecutorRegistry()
+	require.NoError(t, registry.Register(executor))
+	manager := mustNewBackgroundManager(
+		t, context.Background(), &backgroundtask.Config{Executors: registry},
+	)
+	task, err := Submit(context.Background(), manager, &SubmitRequest[*schema.Message]{
+		SubAgentName: agent.name, Input: textInput("work"), Description: "work",
+		SessionID: "parent",
+	})
+	require.NoError(t, err)
+
+	executeDone := make(chan error, 1)
+	go func() {
+		executeDone <- manager.Execute(context.Background(), task.Spec.ID)
+	}()
+	<-agent.started
+
+	closeDone := make(chan error, 1)
+	go func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		closeDone <- manager.Close(closeCtx)
+	}()
+	time.Sleep(20 * time.Millisecond)
+	close(agent.release)
+
+	require.NoError(t, <-executeDone)
+	require.NoError(t, <-closeDone)
+	completed, err := manager.Get(context.Background(), task.Spec.ID)
+	require.NoError(t, err)
+	require.Equal(t, backgroundtask.StatusCompleted, completed.Status)
+	require.Equal(t, "late completion", string(completed.ResultData))
+	_, checkpointExists, err := store.Get(
+		context.Background(),
+		checkpointID(task.Spec.ID),
+	)
+	require.NoError(t, err)
+	require.False(t, checkpointExists)
 }
 
 func TestExecutorDrainUsesDurableRunnerCheckpoint_BitsUT(t *testing.T) {
