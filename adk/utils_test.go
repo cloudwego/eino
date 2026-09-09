@@ -18,7 +18,9 @@ package adk
 
 import (
 	"bytes"
+	"context"
 	"encoding/gob"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sync"
@@ -26,9 +28,26 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/cloudwego/eino/schema"
 )
+
+func TestGenTransferMessagesJSONArguments(t *testing.T) {
+	for _, name := range []string{"MainAgent", "", "agent\"\\\n\t", "助手"} {
+		t.Run(name, func(t *testing.T) {
+			assistant, result := GenTransferMessages(context.Background(), name)
+			require.Len(t, assistant.ToolCalls, 1)
+			call := assistant.ToolCalls[0]
+			var args map[string]string
+			require.NoError(t, json.Unmarshal([]byte(call.Function.Arguments), &args))
+			assert.Equal(t, map[string]string{"agent_name": name}, args)
+			assert.Equal(t, TransferToAgentToolName, call.Function.Name)
+			assert.Equal(t, call.ID, result.ToolCallID)
+			assert.Equal(t, transferToAgentToolOutput(name), result.Content)
+		})
+	}
+}
 
 func TestAsyncIteratorPair_Basic(t *testing.T) {
 	// Create a new iterator-generator pair
