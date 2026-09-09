@@ -125,8 +125,9 @@ type Executor interface {
 	// ValidateExecution performs side-effect-free validation immediately before
 	// an attempt is claimed.
 	ValidateExecution(context.Context, *Task) error
-	// SupportsDrain reports whether Execute handles ControlDrain by returning a
-	// resumable suspended or yielded result.
+	// SupportsDrain reports whether Execute handles ControlDrain. When drain
+	// cancellation takes effect, Execute returns a resumable suspended or yielded
+	// result; a run that terminates first may preserve its own outcome.
 	SupportsDrain() bool
 	// Execute owns the attempt until it returns. It must observe ctx and runtime
 	// controls and return exactly one legal ExecutionResult variant.

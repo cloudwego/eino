@@ -262,8 +262,9 @@ func (e *Executor[M]) ValidateExecution(_ context.Context, task *backgroundtask.
 	return e.ValidateSpec(task.Spec)
 }
 
-// SupportsDrain reports true because sub-agent drain captures an ADK Runner
-// checkpoint before returning a suspended result.
+// SupportsDrain reports true because an effective sub-agent drain captures an
+// ADK Runner checkpoint and returns a suspended result. If the run terminates
+// before drain cancellation takes effect, its own outcome is preserved.
 func (e *Executor[M]) SupportsDrain() bool { return true }
 
 func validateSpecPayload(spec backgroundtask.Spec) (*taskPayload, error) {
@@ -444,26 +445,16 @@ func (e *Executor[M]) Execute(
 	})
 	cancelOption, cancelRun := adk.WithCancel()
 	controlRequests := make(chan backgroundtask.ControlRequest, 1)
+	cancelOutcomes := make(chan error, 1)
 	controlWatchDone := make(chan struct{})
 	defer close(controlWatchDone)
 	go func() {
 		select {
 		case control := <-runtime.Controls():
 			controlRequests <- control
-			cancelOptions := []adk.AgentCancelOption{adk.WithRecursive()}
-			if control.Kind == backgroundtask.ControlDrain {
-				cancelOptions = append(cancelOptions,
-					adk.WithAgentCancelMode(adk.CancelAfterChatModel|adk.CancelAfterToolCalls))
-				if e.drainCancelTimeout > 0 {
-					cancelOptions = append(cancelOptions,
-						adk.WithAgentCancelTimeout(e.drainCancelTimeout))
-				}
-			} else {
-				cancelOptions = append(cancelOptions, adk.WithAgentCancelMode(adk.CancelImmediate))
-			}
-			if handle, accepted := cancelRun(cancelOptions...); accepted {
-				_ = handle.Wait()
-			}
+			cancelOutcomes <- requestCancelAndWait(
+				control, cancelRun, e.drainCancelTimeout,
+			)
 		case <-controlWatchDone:
 		case <-ctx.Done():
 		}
@@ -485,7 +476,9 @@ func (e *Executor[M]) Execute(
 			interrupted = event.Action.Interrupted
 		}
 		if event.Err != nil && interrupted == nil {
-			return e.handleRunError(ctx, iter, task, controlRequests, event.Err)
+			return e.handleRunError(
+				ctx, iter, task, controlRequests, cancelOutcomes, event.Err,
+			)
 		}
 		materialized := event
 		if event.Output != nil && event.Output.MessageOutput != nil {
@@ -495,7 +488,9 @@ func (e *Executor[M]) Execute(
 				if errors.As(messageErr, &retryErr) {
 					continue
 				}
-				return e.handleRunError(ctx, iter, task, controlRequests, messageErr)
+				return e.handleRunError(
+					ctx, iter, task, controlRequests, cancelOutcomes, messageErr,
+				)
 			}
 			materialized = materializedEvent(event, message)
 			final = agenttool.ExtractTextContent(message)
@@ -504,15 +499,49 @@ func (e *Executor[M]) Execute(
 			materialized, foregroundcoord.ProjectionDetached(ctx), copyMaterializedEvent[M],
 		)
 	}
-	if controlResult, controlErr, controlled := e.controlResult(ctx, task, pollControl(controlRequests)); controlled {
-		return controlResult, controlErr
+	control := pollControl(controlRequests)
+	cancelOutcome := waitForDrainCancelOutcome(ctx, control, cancelOutcomes)
+	return e.resolveRunOutcome(ctx, task, control, cancelOutcome, subagentRunOutcome{
+		final:       final,
+		interrupted: interrupted,
+	})
+}
+
+type subagentRunOutcome struct {
+	final       string
+	interrupted *adk.InterruptInfo
+	err         error
+}
+
+func (e *Executor[M]) resolveRunOutcome(
+	ctx context.Context,
+	task *backgroundtask.Task,
+	control backgroundtask.ControlRequest,
+	cancelOutcome error,
+	run subagentRunOutcome,
+) (*backgroundtask.ExecutionResult, error) {
+	drainLostRace := control.Kind == backgroundtask.ControlDrain &&
+		errors.Is(cancelOutcome, adk.ErrExecutionEnded)
+	if !drainLostRace {
+		if result, controlErr, controlled := e.controlResult(ctx, task, control); controlled {
+			return result, controlErr
+		}
 	}
-	if interrupted != nil {
-		return e.interruptResult(ctx, task, interrupted)
+	if run.err != nil {
+		if errors.Is(run.err, adk.ErrSessionBusy) {
+			return &backgroundtask.ExecutionResult{
+				Directive:  backgroundtask.ExecutionDirectiveYield,
+				Checkpoint: append([]byte(nil), task.Checkpoint...),
+			}, nil
+		}
+		return nil, run.err
+	}
+	if run.interrupted != nil {
+		return e.interruptResult(ctx, task, run.interrupted)
 	}
 	return &backgroundtask.ExecutionResult{
 		Status: backgroundtask.StatusCompleted,
-		Data:   []byte(final),
+		Data:   []byte(run.final),
 	}, nil
 }
 
@@ -604,6 +633,28 @@ func decodeResumeTargets(data []byte) (map[string]any, error) {
 	return targets, nil
 }
 
+func requestCancelAndWait(
+	control backgroundtask.ControlRequest,
+	cancelRun adk.AgentCancelFunc,
+	drainCancelTimeout time.Duration,
+) error {
+	cancelOptions := []adk.AgentCancelOption{adk.WithRecursive()}
+	if control.Kind == backgroundtask.ControlDrain {
+		cancelOptions = append(cancelOptions,
+			adk.WithAgentCancelMode(adk.CancelAfterChatModel|adk.CancelAfterToolCalls))
+		if drainCancelTimeout > 0 {
+			cancelOptions = append(cancelOptions,
+				adk.WithAgentCancelTimeout(drainCancelTimeout))
+		}
+	} else {
+		cancelOptions = append(cancelOptions, adk.WithAgentCancelMode(adk.CancelImmediate))
+	}
+	// accepted is intentionally ignored: a rejected cancellation still returns
+	// a handle whose Wait reports the terminal run outcome.
+	handle, _ := cancelRun(cancelOptions...)
+	return handle.Wait()
+}
+
 // handleRunError translates agent event and output materialization errors into
 // durable task lifecycle outcomes when a control request is active.
 func (e *Executor[M]) handleRunError(
@@ -611,6 +662,7 @@ func (e *Executor[M]) handleRunError(
 	iter *adk.AsyncIterator[*adk.TypedAgentEvent[M]],
 	task *backgroundtask.Task,
 	controlRequests <-chan backgroundtask.ControlRequest,
+	cancelOutcomes <-chan error,
 	err error,
 ) (*backgroundtask.ExecutionResult, error) {
 	control := pollControl(controlRequests)
@@ -628,16 +680,8 @@ func (e *Executor[M]) handleRunError(
 			}
 		}
 	}
-	if result, controlErr, controlled := e.controlResult(ctx, task, control); controlled {
-		return result, controlErr
-	}
-	if errors.Is(err, adk.ErrSessionBusy) {
-		return &backgroundtask.ExecutionResult{
-			Directive:  backgroundtask.ExecutionDirectiveYield,
-			Checkpoint: append([]byte(nil), task.Checkpoint...),
-		}, nil
-	}
-	return nil, err
+	cancelOutcome := waitForDrainCancelOutcome(ctx, control, cancelOutcomes)
+	return e.resolveRunOutcome(ctx, task, control, cancelOutcome, subagentRunOutcome{err: err})
 }
 
 func waitForControl(
@@ -651,6 +695,25 @@ func waitForControl(
 		return backgroundtask.ControlRequest{}
 	case <-time.After(100 * time.Millisecond):
 		return backgroundtask.ControlRequest{}
+	}
+}
+
+// waitForDrainCancelOutcome must be called only after the run iterator has been
+// fully drained. Draining closes the cancellation lifecycle and guarantees that
+// a pending CancelHandle.Wait can complete.
+func waitForDrainCancelOutcome(
+	ctx context.Context,
+	control backgroundtask.ControlRequest,
+	outcomes <-chan error,
+) error {
+	if control.Kind != backgroundtask.ControlDrain || outcomes == nil {
+		return nil
+	}
+	select {
+	case err := <-outcomes:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 
