@@ -299,6 +299,41 @@ func stateV080ToState(sc *stateV080) *State {
 	return s
 }
 
+// SetToolReturnDirectly requests that the current ChatModelAgent run finish with
+// this tool call's result, without another model call. It must be called using
+// the tool execution context before InvokableRun or StreamableRun returns; for
+// streaming tools, call it before returning the stream, not from its producer.
+// No ToolsConfig.ReturnDirectly entry is required. Other tool calls in the same
+// batch still finish normally, and tool errors and interrupts retain their usual
+// behavior.
+//
+// A tool already selected by ToolsConfig.ReturnDirectly takes precedence.
+// Otherwise the first concurrent call to this function wins; subsequent calls
+// are no-ops. The request does not emit an Exit action or stop a parent agent.
+// It supports both Message and AgenticMessage agents and returns an error when
+// called outside a ChatModelAgent tool execution context.
+func SetToolReturnDirectly(ctx context.Context) error {
+	callID := compose.GetToolCallID(ctx)
+	if callID == "" {
+		return errors.New("SetToolReturnDirectly must be called within a ChatModelAgent tool execution")
+	}
+	if getTypedChatModelAgentExecCtx[*schema.Message](ctx) == nil &&
+		getTypedChatModelAgentExecCtx[*schema.AgenticMessage](ctx) == nil {
+		return errors.New("SetToolReturnDirectly must be called within a ChatModelAgent tool execution")
+	}
+	// Resolve the nearest agent state, including when nested agents use different
+	// message types. ProcessState serializes concurrent requests under its lock.
+	return compose.ProcessState(ctx, func(_ context.Context, st interface {
+		getReturnDirectlyToolCallID() string
+		setReturnDirectlyToolCallID(string)
+	}) error {
+		if st.getReturnDirectlyToolCallID() == "" {
+			st.setReturnDirectlyToolCallID(callID)
+		}
+		return nil
+	})
+}
+
 // SendToolGenAction attaches an AgentAction to the next tool event emitted for the
 // current tool execution.
 //
@@ -564,7 +599,7 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 	_ = g.AddEdge(toolNode_, afterToolCallsNode_)
 	_ = g.AddEdge(afterToolCallsNode_, afterToolCallsCancelCheckNode_)
 
-	if len(config.toolsReturnDirectly) > 0 {
+	{ // Always install the branch so tools can request direct return at runtime.
 		const (
 			toolNodeToEndConverter = "ToolNodeToEndConverter"
 		)
@@ -598,8 +633,6 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 		returnDirectBranch := compose.NewGraphBranch(checkReturnDirect,
 			map[string]bool{toolNodeToEndConverter: true, chatModel_: true})
 		_ = g.AddBranch(afterToolCallsCancelCheckNode_, returnDirectBranch)
-	} else {
-		_ = g.AddEdge(afterToolCallsCancelCheckNode_, chatModel_)
 	}
 
 	return g, nil
@@ -809,7 +842,7 @@ func newAgenticReact(ctx context.Context, config *agenticReactConfig) (agenticRe
 	_ = g.AddEdge(toolNode_, afterToolCallsNode_)
 	_ = g.AddEdge(afterToolCallsNode_, afterToolCallsCancelCheckNode_)
 
-	if len(config.toolsReturnDirectly) > 0 {
+	{ // Always install the branch so tools can request direct return at runtime.
 		const (
 			toolNodeToEndConverter = "ToolNodeToEndConverter"
 		)
@@ -843,8 +876,6 @@ func newAgenticReact(ctx context.Context, config *agenticReactConfig) (agenticRe
 		returnDirectBranch := compose.NewGraphBranch(checkReturnDirect,
 			map[string]bool{toolNodeToEndConverter: true, chatModel_: true})
 		_ = g.AddBranch(afterToolCallsCancelCheckNode_, returnDirectBranch)
-	} else {
-		_ = g.AddEdge(afterToolCallsCancelCheckNode_, chatModel_)
 	}
 
 	return g, nil
