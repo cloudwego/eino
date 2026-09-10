@@ -60,9 +60,12 @@ type TypedBackgroundConfig[M adk.MessageType] struct {
 	// ForegroundTimeoutMs and ShouldAutoBackground apply to every enabled capability.
 	ForegroundTimeoutMs  *int
 	ShouldAutoBackground func(context.Context, *backgroundtask.ForegroundCandidate) bool
-	// DispatchPending submits newly persisted pending tasks to host-managed
-	// execution and provides the task_output fallback starter. Nil preserves all
-	// existing framework-owned execution behavior.
+	// DispatchPending synchronously submits newly persisted pending tasks to
+	// host-managed execution and provides the task_output fallback starter. It
+	// may be called concurrently and must not mutate the task. Nil preserves all
+	// existing framework-owned execution behavior. A returned error rejects a
+	// launch without rolling back its task; task_output additionally treats
+	// ErrAlreadyExecuting as accepted admission.
 	DispatchPending func(context.Context, *backgroundtask.Task) error
 	// TranscriptFormat customizes durable sub-agent session views.
 	TranscriptFormat subagent.TranscriptFormat[M]
