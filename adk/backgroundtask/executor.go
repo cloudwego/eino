@@ -274,30 +274,46 @@ type taskRuntimeLeaseConfig struct {
 	tolerateHeartbeatErrors bool
 }
 
+type taskRuntimeConfig struct {
+	tasks              TaskStore
+	taskEvents         TaskEventStore
+	notificationWriter NotificationWriter
+	taskID             string
+	attempt            int64
+	version            int64
+	lease              taskRuntimeLeaseConfig
+}
+
 func newTaskRuntime(
 	tasks TaskStore,
 	taskEvents TaskEventStore,
 	taskID string,
 	attempt, version int64,
 	notificationWriter NotificationWriter,
-	leaseConfigs ...taskRuntimeLeaseConfig,
 ) *taskRuntime {
-	runtime := &taskRuntime{
+	return newTaskRuntimeWithConfig(taskRuntimeConfig{
 		tasks: tasks, taskEvents: taskEvents,
 		notificationWriter: notificationWriter,
 		taskID:             taskID, attempt: attempt, version: version,
-		controls:       make(chan ControlRequest, 1),
-		stateChanged:   make(chan struct{}),
-		heartbeatAbort: make(chan struct{}),
+	})
+}
+
+func newTaskRuntimeWithConfig(config taskRuntimeConfig) *taskRuntime {
+	runtime := &taskRuntime{
+		tasks: config.tasks, taskEvents: config.taskEvents,
+		notificationWriter: config.notificationWriter,
+		taskID:             config.taskID,
+		attempt:            config.attempt,
+		version:            config.version,
+		controls:           make(chan ControlRequest, 1),
+		stateChanged:       make(chan struct{}),
+		heartbeatAbort:     make(chan struct{}),
 	}
-	if len(leaseConfigs) > 0 {
-		config := leaseConfigs[0]
-		runtime.leaseDuration = config.duration
-		runtime.leaseSafetyMargin = config.safetyMargin
-		runtime.tolerateHeartbeatErrors = config.tolerateHeartbeatErrors
-		if config.tolerateHeartbeatErrors {
-			runtime.leaseExpiresAt = config.confirmedAt.Add(config.duration)
-		}
+	runtime.leaseDuration = config.lease.duration
+	runtime.leaseSafetyMargin = config.lease.safetyMargin
+	runtime.tolerateHeartbeatErrors = config.lease.tolerateHeartbeatErrors
+	if config.lease.tolerateHeartbeatErrors {
+		runtime.leaseExpiresAt = config.lease.confirmedAt.Add(config.lease.duration)
 	}
 	return runtime
 }
@@ -1277,20 +1293,20 @@ func (m *Manager) execute(
 	if err != nil {
 		return err
 	}
-	runtime := newTaskRuntime(
-		m.tasks,
-		m.taskEvents,
-		taskID,
-		started.Attempt,
-		started.Version,
-		m.notificationWriter,
-		taskRuntimeLeaseConfig{
+	runtime := newTaskRuntimeWithConfig(taskRuntimeConfig{
+		tasks:              m.tasks,
+		taskEvents:         m.taskEvents,
+		taskID:             taskID,
+		attempt:            started.Attempt,
+		version:            started.Version,
+		notificationWriter: m.notificationWriter,
+		lease: taskRuntimeLeaseConfig{
 			confirmedAt:             leaseConfirmedAt,
 			duration:                m.leaseDuration,
 			safetyMargin:            m.heartbeatSafetyMargin,
 			tolerateHeartbeatErrors: m.tolerateHeartbeatErrors,
 		},
-	)
+	})
 	if started.CancelRequestedAt != nil {
 		if err = runtime.acceptCancellation(started, 0); err != nil {
 			return err

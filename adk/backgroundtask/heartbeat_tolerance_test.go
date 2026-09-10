@@ -77,20 +77,19 @@ func tolerantRuntime(
 	interval time.Duration,
 	leaseDuration time.Duration,
 ) *taskRuntime {
-	return newTaskRuntime(
-		tasks,
-		events,
-		started.Spec.ID,
-		started.Attempt,
-		started.Version,
-		nil,
-		taskRuntimeLeaseConfig{
+	return newTaskRuntimeWithConfig(taskRuntimeConfig{
+		tasks:      tasks,
+		taskEvents: events,
+		taskID:     started.Spec.ID,
+		attempt:    started.Attempt,
+		version:    started.Version,
+		lease: taskRuntimeLeaseConfig{
 			confirmedAt:             confirmedAt,
 			duration:                leaseDuration,
 			safetyMargin:            interval / 2,
 			tolerateHeartbeatErrors: true,
 		},
-	)
+	})
 }
 
 func TestHeartbeatResponseLossConfirmsSameAttemptAndReleasesWrites(t *testing.T) {
@@ -169,15 +168,16 @@ func TestHeartbeatTransientFailuresUseRegularCadenceAndSafetyDeadline(t *testing
 		return nil, errors.New("temporary storage failure")
 	}
 	confirmedAt := time.Now()
-	runtime := newTaskRuntime(
-		store, base, started.Spec.ID, started.Attempt, started.Version, nil,
-		taskRuntimeLeaseConfig{
+	runtime := newTaskRuntimeWithConfig(taskRuntimeConfig{
+		tasks: store, taskEvents: base,
+		taskID: started.Spec.ID, attempt: started.Attempt, version: started.Version,
+		lease: taskRuntimeLeaseConfig{
 			confirmedAt:             confirmedAt,
 			duration:                leaseDuration,
 			safetyMargin:            safetyMargin,
 			tolerateHeartbeatErrors: true,
 		},
-	)
+	})
 	manager := &Manager{heartbeatEvery: interval}
 	runCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -255,15 +255,16 @@ func TestHeartbeatSafetyDeadlineCancelsBlockedStoreRequest(t *testing.T) {
 		<-release
 		return base.Heartbeat(ctx, req)
 	}
-	runtime := newTaskRuntime(
-		store, base, started.Spec.ID, started.Attempt, started.Version, nil,
-		taskRuntimeLeaseConfig{
+	runtime := newTaskRuntimeWithConfig(taskRuntimeConfig{
+		tasks: store, taskEvents: base,
+		taskID: started.Spec.ID, attempt: started.Attempt, version: started.Version,
+		lease: taskRuntimeLeaseConfig{
 			confirmedAt:             time.Now(),
 			duration:                leaseDuration,
 			safetyMargin:            safetyMargin,
 			tolerateHeartbeatErrors: true,
 		},
-	)
+	})
 	manager := &Manager{heartbeatEvery: interval}
 	runCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
