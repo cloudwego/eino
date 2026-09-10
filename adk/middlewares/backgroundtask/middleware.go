@@ -80,6 +80,12 @@ type TypedConfig[M adk.MessageType] struct {
 	// ProgressReadersByExecutorKey selects progress projections by persisted ExecutorKey.
 	// Readers may be called concurrently and must not mutate task lifecycle state.
 	ProgressReadersByExecutorKey map[string]TaskProgressReader
+	// StartPendingTask is an optional synchronous fallback invoked by task_output
+	// after its first Get returns a pending task. It may be called concurrently
+	// and must not mutate the task. Nil preserves read-only behavior. A nil error
+	// or ErrAlreadyExecuting means the task was accepted; any other error is
+	// returned to the caller without entering the blocking wait.
+	StartPendingTask func(context.Context, *bgtask.Task) error
 
 	// TaskOutputToolConfig configures the task_output tool. Optional.
 	TaskOutputToolConfig *ToolConfig
@@ -126,7 +132,12 @@ func NewTyped[M adk.MessageType](ctx context.Context, config *TypedConfig[M]) (a
 				progressReaders[key] = reader
 			}
 		}
-		outputTool, err := newTaskOutputTool(mgr, config.TaskOutputToolConfig, progressReaders)
+		outputTool, err := newTaskOutputTool(
+			mgr,
+			config.TaskOutputToolConfig,
+			progressReaders,
+			config.StartPendingTask,
+		)
 		if err != nil {
 			return nil, fmt.Errorf("backgroundtask: failed to create task_output tool: %w", err)
 		}
@@ -247,11 +258,22 @@ func newTaskOutputTool(
 	mgr *bgtask.Manager,
 	cfg *ToolConfig,
 	progressReaders map[string]TaskProgressReader,
+	startPendingTask func(context.Context, *bgtask.Task) error,
 ) (tool.InvokableTool, error) {
 	name := selectToolName(cfg, taskOutputToolName)
 	desc := selectToolDesc(cfg, taskOutputToolDescription, taskOutputToolDescriptionChinese)
 	return utils.InferTool(name, desc, func(ctx context.Context, input taskOutputInput) (string, error) {
 		if task, err := mgr.Get(ctx, input.TaskID); err == nil {
+			if task.Status == bgtask.StatusPending && startPendingTask != nil {
+				if startErr := startPendingTask(ctx, task); startErr != nil &&
+					!errors.Is(startErr, bgtask.ErrAlreadyExecuting) {
+					return "", fmt.Errorf(
+						"backgroundtask: start pending task %q: %w",
+						task.Spec.ID,
+						startErr,
+					)
+				}
+			}
 			return resolveDurableTaskWithReaders(
 				ctx, mgr, task, input, progressReaders,
 			)

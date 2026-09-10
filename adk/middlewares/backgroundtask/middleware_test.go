@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -432,6 +433,212 @@ func TestTaskOutputTool_NotFound(t *testing.T) {
 	result, err := tl.InvokableRun(context.Background(), `{"task_id":"nonexistent"}`)
 	require.NoError(t, err)
 	assert.Contains(t, result, "not found")
+}
+
+func TestTaskOutputStartsPendingTaskBeforeBlocking_BitsUT(t *testing.T) {
+	store := bgtask.NewInMemoryStore(nil)
+	pending, err := store.Create(context.Background(), &bgtask.CreateTaskRequest{
+		Spec: bgtask.Spec{
+			ID: "pending-fallback", ExecutorKey: "test", Description: "fallback",
+		},
+		LeaseExpiryPolicy: bgtask.LeaseExpiryRetry,
+	})
+	require.NoError(t, err)
+	mgr := newBackgroundManager(t, context.Background(), &bgtask.Config{
+		Tasks: store, TaskEvents: store,
+	})
+	defer closeWithTimeout(mgr)
+	startCalls := 0
+	mw, err := New(context.Background(), &Config{
+		Manager: mgr,
+		StartPendingTask: func(_ context.Context, task *bgtask.Task) error {
+			startCalls++
+			require.Equal(t, pending.Spec.ID, task.Spec.ID)
+			started, startErr := store.Start(context.Background(), &bgtask.StartTaskRequest{
+				TaskID: task.Spec.ID, ExpectedVersion: task.Version,
+			})
+			require.NoError(t, startErr)
+			_, completeErr := store.Complete(context.Background(), &bgtask.CompleteTaskRequest{
+				TaskID: task.Spec.ID, ExpectedVersion: started.Version, Data: []byte("done"),
+			})
+			return completeErr
+		},
+	})
+	require.NoError(t, err)
+	_, runCtx, err := mw.BeforeAgent(
+		context.Background(),
+		&adk.ChatModelAgentContext[*schema.Message]{},
+	)
+	require.NoError(t, err)
+	outputTool := findTool(t, runCtx.Tools, taskOutputToolName)
+
+	output, err := outputTool.InvokableRun(
+		context.Background(),
+		fmt.Sprintf(`{"task_id":%q}`, pending.Spec.ID),
+	)
+	require.NoError(t, err)
+	require.Equal(t, 1, startCalls)
+	lines := strings.Split(output, "\n")
+	require.Len(t, lines, 5)
+	require.Equal(
+		t,
+		[]string{
+			"Task ID: pending-fallback",
+			"Description: fallback",
+			"Status: completed",
+			"Result: done",
+		},
+		lines[:4],
+	)
+	require.Regexp(t, `^Elapsed: (0s|[0-9]+ms)$`, lines[4])
+}
+
+func TestTaskOutputStartPendingTaskErrorSemantics_BitsUT(t *testing.T) {
+	newPendingTool := func(
+		t *testing.T,
+		start func(context.Context, *bgtask.Task) error,
+	) tool.InvokableTool {
+		t.Helper()
+		store := bgtask.NewInMemoryStore(nil)
+		_, err := store.Create(context.Background(), &bgtask.CreateTaskRequest{
+			Spec:              bgtask.Spec{ID: "pending", ExecutorKey: "test"},
+			LeaseExpiryPolicy: bgtask.LeaseExpiryRetry,
+		})
+		require.NoError(t, err)
+		mgr := newBackgroundManager(t, context.Background(), &bgtask.Config{
+			Tasks: store, TaskEvents: store,
+		})
+		t.Cleanup(func() {
+			closeWithTimeout(mgr)
+		})
+		mw, err := New(context.Background(), &Config{
+			Manager: mgr, StartPendingTask: start,
+		})
+		require.NoError(t, err)
+		_, runCtx, err := mw.BeforeAgent(
+			context.Background(),
+			&adk.ChatModelAgentContext[*schema.Message]{},
+		)
+		require.NoError(t, err)
+		return findTool(t, runCtx.Tools, taskOutputToolName)
+	}
+	block := false
+
+	t.Run("already executing is accepted", func(t *testing.T) {
+		outputTool := newPendingTool(
+			t,
+			func(context.Context, *bgtask.Task) error {
+				return bgtask.ErrAlreadyExecuting
+			},
+		)
+		output, err := outputTool.InvokableRun(
+			context.Background(),
+			fmt.Sprintf(`{"task_id":"pending","block":%t}`, block),
+		)
+		require.NoError(t, err)
+		require.Contains(t, output, "Status: pending")
+	})
+
+	t.Run("host unavailable is preserved", func(t *testing.T) {
+		unavailable := errors.New("host is closing")
+		outputTool := newPendingTool(
+			t,
+			func(context.Context, *bgtask.Task) error {
+				return unavailable
+			},
+		)
+		output, err := outputTool.InvokableRun(
+			context.Background(),
+			fmt.Sprintf(`{"task_id":"pending","block":%t}`, block),
+		)
+		require.Empty(t, output)
+		require.ErrorIs(t, err, unavailable)
+	})
+}
+
+func TestTaskOutputStartsOnlyPendingTasks_BitsUT(t *testing.T) {
+	store := bgtask.NewInMemoryStore(nil)
+	statuses := []bgtask.Status{
+		bgtask.StatusRunning,
+		bgtask.StatusWaitingInput,
+		bgtask.StatusSuspended,
+		bgtask.StatusCompleted,
+		bgtask.StatusFailed,
+		bgtask.StatusCanceled,
+	}
+	for _, status := range statuses {
+		task, err := store.Create(context.Background(), &bgtask.CreateTaskRequest{
+			Spec: bgtask.Spec{
+				ID: string(status), ExecutorKey: "test", Description: string(status),
+			},
+			LeaseExpiryPolicy: bgtask.LeaseExpiryRetry,
+		})
+		require.NoError(t, err)
+		task, err = store.Start(context.Background(), &bgtask.StartTaskRequest{
+			TaskID: task.Spec.ID, ExpectedVersion: task.Version,
+		})
+		require.NoError(t, err)
+		switch status {
+		case bgtask.StatusWaitingInput:
+			_, err = store.WaitInput(context.Background(), &bgtask.WaitInputTaskRequest{
+				TaskID: task.Spec.ID, ExpectedVersion: task.Version, Checkpoint: []byte("checkpoint"),
+			})
+		case bgtask.StatusSuspended:
+			_, err = store.Suspend(context.Background(), &bgtask.SuspendTaskRequest{
+				TaskID: task.Spec.ID, ExpectedVersion: task.Version, Checkpoint: []byte("checkpoint"),
+			})
+		case bgtask.StatusCompleted:
+			_, err = store.Complete(context.Background(), &bgtask.CompleteTaskRequest{
+				TaskID: task.Spec.ID, ExpectedVersion: task.Version,
+			})
+		case bgtask.StatusFailed:
+			_, err = store.Fail(context.Background(), &bgtask.FailTaskRequest{
+				TaskID: task.Spec.ID, ExpectedVersion: task.Version, Error: "failed",
+			})
+		case bgtask.StatusCanceled:
+			task, err = store.RequestCancel(context.Background(), &bgtask.RequestCancelRequest{
+				TaskID: task.Spec.ID, ExpectedVersion: task.Version,
+			})
+			require.NoError(t, err)
+			_, err = store.AckCancel(context.Background(), &bgtask.AckCancelRequest{
+				TaskID: task.Spec.ID, ExpectedVersion: task.Version,
+			})
+		}
+		require.NoError(t, err)
+	}
+	mgr := newBackgroundManager(t, context.Background(), &bgtask.Config{
+		Tasks: store, TaskEvents: store,
+	})
+	defer closeWithTimeout(mgr)
+	startCalls := 0
+	mw, err := New(context.Background(), &Config{
+		Manager: mgr,
+		StartPendingTask: func(context.Context, *bgtask.Task) error {
+			startCalls++
+			return nil
+		},
+	})
+	require.NoError(t, err)
+	_, runCtx, err := mw.BeforeAgent(
+		context.Background(),
+		&adk.ChatModelAgentContext[*schema.Message]{},
+	)
+	require.NoError(t, err)
+	outputTool := findTool(t, runCtx.Tools, taskOutputToolName)
+
+	for _, status := range statuses {
+		_, err = outputTool.InvokableRun(
+			context.Background(),
+			fmt.Sprintf(`{"task_id":%q,"block":false}`, status),
+		)
+		require.NoError(t, err)
+	}
+	_, err = outputTool.InvokableRun(
+		context.Background(),
+		`{"task_id":"missing","block":false}`,
+	)
+	require.NoError(t, err)
+	require.Zero(t, startCalls)
 }
 
 func TestTaskOutputTool_NonBlockingRunningThenTerminal(t *testing.T) {

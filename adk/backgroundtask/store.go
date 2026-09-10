@@ -40,6 +40,8 @@ var (
 	ErrInvalidExecutionResult = errors.New("backgroundtask: invalid execution result")
 	// ErrAlreadyTerminal reports that a task has already reached a terminal status.
 	ErrAlreadyTerminal = errors.New("backgroundtask: task is already terminal")
+	// ErrAlreadyExecuting reports that this Manager is already executing the task.
+	ErrAlreadyExecuting = errors.New("backgroundtask: task is already executing in this manager")
 	// ErrDrainCheckpointUnavailable reports that a planned drain could not
 	// produce or locate a safe compatible checkpoint. Manager stops renewing the
 	// current lease so expiry can redispatch from the last durable checkpoint.

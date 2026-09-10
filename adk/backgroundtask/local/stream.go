@@ -204,6 +204,11 @@ func (r *Runner) projectForegroundStream(projection *foregroundStreamProjection)
 				r.policy.ShouldAutoBackground(ctx, candidate) {
 				task, err := r.adoptForeground(ctx, spec, resultCh)
 				if err != nil {
+					if task != nil {
+						go discardStreamChunks(chunks)
+						writer.Send("", err)
+						return
+					}
 					cancel()
 					writer.Send("", err)
 					return
@@ -230,6 +235,14 @@ func (r *Runner) projectForegroundStream(projection *foregroundStreamProjection)
 			}
 			return
 		}
+	}
+}
+
+func discardStreamChunks(chunks <-chan streamChunk) {
+	if chunks == nil {
+		return
+	}
+	for range chunks {
 	}
 }
 

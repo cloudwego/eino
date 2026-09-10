@@ -703,6 +703,54 @@ func TestDurableAgentToolBackgroundSurvivesCaller(t *testing.T) {
 	}, time.Second, 10*time.Millisecond)
 }
 
+func TestDurableAgentToolDispatchesPendingTaskThroughHost_BitsUT(t *testing.T) {
+	ctx := runnerEnvironmentContext(t)
+	manager := newTestManager(t, context.Background())
+	started := make(chan struct{}, 1)
+	agent := &mockAgent{name: "worker", run: func(
+		context.Context,
+		*adk.AgentInput,
+	) string {
+		started <- struct{}{}
+		return "done"
+	}}
+	background := durableBackground(t, manager, agent)
+	dispatched := make(chan *backgroundtask.Task, 1)
+	background.Durable.DispatchPending = func(
+		_ context.Context,
+		task *backgroundtask.Task,
+	) error {
+		dispatched <- task
+		return nil
+	}
+	middleware, err := New(ctx, &Config{
+		SubAgents: []adk.Agent{agent}, Background: background,
+	})
+	require.NoError(t, err)
+	_, runCtx, err := middleware.BeforeAgent(
+		ctx,
+		&adk.ChatModelAgentContext[*schema.Message]{},
+	)
+	require.NoError(t, err)
+
+	result, err := runCtx.Tools[0].(tool.InvokableTool).InvokableRun(
+		ctx,
+		`{"subagent_type":"worker","prompt":"work","description":"test","run_in_background":true}`,
+	)
+	require.NoError(t, err)
+	task := <-dispatched
+	require.Equal(t, task.Spec.ID, decodeDurableAgentToolResult(t, result).TaskID)
+	require.Equal(t, backgroundtask.StatusPending, task.Status)
+	select {
+	case <-started:
+		t.Fatal("subagent executed a task accepted by DispatchPending")
+	default:
+	}
+
+	require.NoError(t, manager.Execute(context.Background(), task.Spec.ID))
+	require.Equal(t, backgroundtask.StatusCompleted, terminalTask(t, manager).Status)
+}
+
 func TestDurableAgentToolReusesChildSessionAcrossTasks_BitsUT(t *testing.T) {
 	ctx := runnerEnvironmentContext(t)
 	manager := newTestManager(t, context.Background())

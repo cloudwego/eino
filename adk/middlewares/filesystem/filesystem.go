@@ -142,6 +142,11 @@ type RecoverableBackgroundConfig struct {
 	// concurrently and must not mutate the candidate.
 	ForegroundTimeoutMs  *int
 	ShouldAutoBackground func(context.Context, *backgroundtask.ForegroundCandidate) bool
+	// DispatchPending synchronously submits newly persisted pending tasks to
+	// host-managed execution. It may be called concurrently and must not mutate
+	// the task. Nil preserves the managed tool's internal goroutine. A returned
+	// error rejects dispatch but does not roll back the persisted task.
+	DispatchPending func(context.Context, *backgroundtask.Task) error
 }
 
 // Config is the legacy configuration for the filesystem middleware.
@@ -746,6 +751,7 @@ func newRecoverableExecuteTool(
 		ForegroundTimeoutMs:  background.ForegroundTimeoutMs,
 		ShouldAutoBackground: background.ShouldAutoBackground,
 		SessionID:            middlewareConfig.notificationSessionID,
+		DispatchPending:      background.DispatchPending,
 		RunInBackground: func(_ context.Context, arguments string) bool {
 			var input executeManagedArgs
 			return json.Unmarshal([]byte(arguments), &input) == nil && input.RunInBackground
