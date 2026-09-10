@@ -38,7 +38,10 @@ import (
 	"time"
 )
 
-const defaultHeartbeatInterval = 10 * time.Second
+const (
+	defaultHeartbeatInterval = 10 * time.Second
+	defaultLeaseDuration     = 30 * time.Second
+)
 
 // Status represents the durable lifecycle status of a task.
 type Status string
@@ -144,10 +147,21 @@ type Config struct {
 	// lease. It should be shorter than the task store's active-attempt timeout.
 	// Non-positive values default to 10 seconds.
 	HeartbeatInterval time.Duration
-	// ActiveAttemptTimeout controls lease expiry for the default in-memory task
-	// store. Non-positive values default to 30 seconds. This field is ignored
-	// when Tasks is supplied.
-	ActiveAttemptTimeout time.Duration
+	// LeaseDuration is the active-attempt lease duration used to derive the
+	// local safety deadline. It also configures the default in-memory task store.
+	// When transient-heartbeat tolerance is enabled, custom task stores must use
+	// the same duration. Non-positive values default to 30 seconds.
+	LeaseDuration time.Duration
+	// TolerateTransientHeartbeatErrors keeps an attempt running after an
+	// unclassified heartbeat storage error while its last confirmed lease is
+	// still safe. The Manager does not retry faster than HeartbeatInterval and
+	// cancels execution with a safety margin of half HeartbeatInterval before
+	// LeaseDuration expires. LeaseDuration must leave room for at least two
+	// heartbeat intervals plus that margin. The zero value preserves the legacy
+	// behavior of canceling on the first heartbeat error. ErrLeaseLost,
+	// ErrNotFound, ErrIllegalTransition, ErrAlreadyTerminal, and an unverified
+	// version conflict always terminate immediately.
+	TolerateTransientHeartbeatErrors bool
 	// SendTaskCreatedEvent emits a TaskCreated timeline event after a task is
 	// durably created. It may be called concurrently. Tasks without a parent
 	// SessionID do not emit this event. Use TaskCreatedSessionEventSender so the
@@ -198,18 +212,21 @@ func WithCancellationReason(reason string) RequestCancelOption {
 
 // Manager owns TaskStore-backed lifecycle and worker coordination.
 type Manager struct {
-	tasks                TaskStore
-	taskEvents           TaskEventStore
-	notificationWriter   NotificationWriter
-	executors            *ExecutorRegistry
-	heartbeatEvery       time.Duration
-	attemptsMu           sync.Mutex
-	activeAttempts       map[string]*activeAttempt
-	mu                   sync.Mutex
-	closed               bool
-	idGen                IDGenerator
-	sendTaskCreatedEvent func(context.Context, *Task) error
-	contextSnapshotter   ContextSnapshotter
+	tasks                   TaskStore
+	taskEvents              TaskEventStore
+	notificationWriter      NotificationWriter
+	executors               *ExecutorRegistry
+	heartbeatEvery          time.Duration
+	leaseDuration           time.Duration
+	heartbeatSafetyMargin   time.Duration
+	tolerateHeartbeatErrors bool
+	attemptsMu              sync.Mutex
+	activeAttempts          map[string]*activeAttempt
+	mu                      sync.Mutex
+	closed                  bool
+	idGen                   IDGenerator
+	sendTaskCreatedEvent    func(context.Context, *Task) error
+	contextSnapshotter      ContextSnapshotter
 }
 
 // New creates a Manager. A nil Config installs the in-memory reference stores
@@ -217,20 +234,41 @@ type Manager struct {
 // must also implement TaskEventStore. The context is reserved for constructor
 // symmetry; Manager does not retain it or derive task lifetime from it.
 func New(_ context.Context, conf *Config) (*Manager, error) {
-	defaultStoreConfig := &InMemoryStoreConfig{}
 	heartbeatInterval := defaultHeartbeatInterval
+	leaseDuration := defaultLeaseDuration
+	tolerateHeartbeatErrors := false
 	if conf != nil {
-		defaultStoreConfig.ActiveAttemptTimeout = conf.ActiveAttemptTimeout
 		if conf.HeartbeatInterval > 0 {
 			heartbeatInterval = conf.HeartbeatInterval
 		}
+		if conf.LeaseDuration > 0 {
+			leaseDuration = conf.LeaseDuration
+		}
+		tolerateHeartbeatErrors = conf.TolerateTransientHeartbeatErrors
 	}
-	defaults := NewInMemoryStore(defaultStoreConfig)
+	defaults := NewInMemoryStore(&InMemoryStoreConfig{
+		ActiveAttemptTimeout: leaseDuration,
+	})
+	safetyMargin := heartbeatInterval / 2
+	if safetyMargin <= 0 {
+		safetyMargin = time.Nanosecond
+	}
+	safeWindow := leaseDuration - safetyMargin
+	if tolerateHeartbeatErrors &&
+		(safeWindow <= heartbeatInterval ||
+			safeWindow-heartbeatInterval <= heartbeatInterval) {
+		return nil, errors.New(
+			"backgroundtask: lease duration must cover two heartbeat intervals plus the safety margin",
+		)
+	}
 	m := &Manager{
-		heartbeatEvery: heartbeatInterval,
-		activeAttempts: make(map[string]*activeAttempt),
-		tasks:          defaults,
-		taskEvents:     defaults,
+		heartbeatEvery:          heartbeatInterval,
+		leaseDuration:           leaseDuration,
+		heartbeatSafetyMargin:   safetyMargin,
+		tolerateHeartbeatErrors: tolerateHeartbeatErrors,
+		activeAttempts:          make(map[string]*activeAttempt),
+		tasks:                   defaults,
+		taskEvents:              defaults,
 	}
 	m.executors = NewExecutorRegistry()
 	if conf != nil {

@@ -73,29 +73,32 @@ func TestManagerConfiguresLifecycleIntervals(t *testing.T) {
 		config            *Config
 		heartbeatInterval time.Duration
 		activeTimeout     time.Duration
+		tolerateErrors    bool
 	}{
 		{
 			name:              "defaults",
 			heartbeatInterval: defaultHeartbeatInterval,
-			activeTimeout:     defaultActiveAttemptTimeout,
+			activeTimeout:     defaultLeaseDuration,
 		},
 		{
 			name: "configured",
 			config: &Config{
-				HeartbeatInterval:    2 * time.Second,
-				ActiveAttemptTimeout: 7 * time.Second,
+				HeartbeatInterval:                30 * time.Second,
+				LeaseDuration:                    90 * time.Second,
+				TolerateTransientHeartbeatErrors: true,
 			},
-			heartbeatInterval: 2 * time.Second,
-			activeTimeout:     7 * time.Second,
+			heartbeatInterval: 30 * time.Second,
+			activeTimeout:     90 * time.Second,
+			tolerateErrors:    true,
 		},
 		{
 			name: "non-positive values use defaults",
 			config: &Config{
-				HeartbeatInterval:    -time.Second,
-				ActiveAttemptTimeout: -time.Second,
+				HeartbeatInterval: -time.Second,
+				LeaseDuration:     -time.Second,
 			},
 			heartbeatInterval: defaultHeartbeatInterval,
-			activeTimeout:     defaultActiveAttemptTimeout,
+			activeTimeout:     defaultLeaseDuration,
 		},
 	}
 	for _, test := range tests {
@@ -104,11 +107,27 @@ func TestManagerConfiguresLifecycleIntervals(t *testing.T) {
 			defer closeWithTimeout(manager)
 
 			require.Equal(t, test.heartbeatInterval, manager.heartbeatEvery)
+			require.Equal(t, test.heartbeatInterval/2, manager.heartbeatSafetyMargin)
+			require.Equal(t, test.activeTimeout, manager.leaseDuration)
+			require.Equal(t, test.tolerateErrors, manager.tolerateHeartbeatErrors)
 			store, ok := manager.tasks.(*InMemoryStore)
 			require.True(t, ok)
 			require.Equal(t, test.activeTimeout, store.activeTimeout)
 		})
 	}
+}
+
+func TestManagerRejectsUnsafeHeartbeatToleranceWindow(t *testing.T) {
+	_, err := New(context.Background(), &Config{
+		HeartbeatInterval:                30 * time.Second,
+		LeaseDuration:                    60 * time.Second,
+		TolerateTransientHeartbeatErrors: true,
+	})
+	require.EqualError(
+		t,
+		err,
+		"backgroundtask: lease duration must cover two heartbeat intervals plus the safety margin",
+	)
 }
 
 func (s *firstReleaseConflictStore) ReleaseSuspension(
@@ -806,7 +825,7 @@ func TestRuntimeCancellationReconciliationRejectsInvalidState(t *testing.T) {
 	store := NewInMemoryStore(nil)
 	runtime := newTaskRuntime(store, store, "missing", 1, 1, nil)
 	require.ErrorIs(
-		t, runtime.reconcileCancellationLocked(context.Background()), ErrNotFound,
+		t, runtime.reconcileCancellation(context.Background(), 1), ErrNotFound,
 	)
 	require.ErrorIs(t, runtime.poison, ErrNotFound)
 
@@ -815,7 +834,7 @@ func TestRuntimeCancellationReconciliationRejectsInvalidState(t *testing.T) {
 		store, store, started.Spec.ID, started.Attempt, started.Version, nil,
 	)
 	require.ErrorIs(
-		t, runtime.reconcileCancellationLocked(context.Background()), ErrLeaseLost,
+		t, runtime.reconcileCancellation(context.Background(), started.Version), ErrLeaseLost,
 	)
 	require.ErrorIs(t, runtime.poison, ErrLeaseLost)
 }
