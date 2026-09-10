@@ -156,12 +156,25 @@ omitted the post-persistence error behavior. Both comments were clarified.
 The complete diff was reviewed again from scratch. No new item to fix or improve
 was found.
 
+### CI Repair and Final Fresh Review Round 3
+
+The Go 1.18 race/coverage job exposed a pre-existing time-sensitive conformance
+test: a 20ms in-memory active-attempt lease expired while the instrumented test
+validated and copied a 256KiB notification. The legal follow-up write then
+returned `ErrLeaseLost`. The notification-writer conformance timeout was raised
+to one second; its explicit expiry test remains intact and now sleeps past that
+lease deliberately. The exact CI-shaped package test passed 10 consecutive
+runs.
+
+The complete diff was reviewed once more from scratch after this repair. No new
+item to fix or improve was found.
+
 ## Comprehensive Review Summary
 
 - Stage 1 iterations: 2
 - Stage 2 iterations: 2
 - Stage 3 iterations: 2
-- Final fresh review rounds: 2
+- Final fresh review rounds: 3
 
 ### Findings Resolved
 
@@ -174,6 +187,7 @@ was found.
 | T2 | Test audit | Managed-tool stream handoff rejection lacked parity coverage. | Added retained-run attack coverage. |
 | T3 | Test audit | task_output fallback assertions were weak. | Assert exact stable output fields and bounded elapsed format. |
 | F1 | Final review | Deep/filesystem docs did not distinguish launch and fallback error semantics. | Clarified rejection, rollback, and `ErrAlreadyExecuting` behavior. |
+| F2 | CI repair | A 20ms conformance-test lease expired under race/coverage instrumentation. | Raised only the notification-writer test lease to one second while retaining explicit expiry coverage. |
 
 ### Attack Results
 
