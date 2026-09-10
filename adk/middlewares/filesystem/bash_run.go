@@ -92,11 +92,11 @@ type toolDefinition struct {
 }
 
 // bashOutputWriter tees a managed execute task's output to a file via a
-// filesystem.AppendOpener. It is built per invocation: when both an AppendOpener
-// and an outputDir are configured it reserves outputDir/<uuid>.output (created empty
-// up front) and opens an append stream when the work starts; otherwise it is
-// disabled and every method is a no-op, so the task has no output file. There is no
-// rewrite fallback — output files require an AppendOpener.
+// filesystem.AppendOpener. It is built per invocation: eligible runs with both an
+// AppendOpener and an outputDir reserve outputDir/<uuid>.output (created empty up
+// front) and open an append stream when the work starts; otherwise it is disabled
+// and every method is a no-op, so the task has no output file. There is no rewrite
+// fallback — output files require an AppendOpener.
 //
 // The execute tool — not the Manager — owns writing, so streaming runs tee interim
 // output as chunks arrive. It is single-consumer: append is called serially on
@@ -139,6 +139,21 @@ func reserveBashOutput(ctx context.Context, sink outputSink) *bashOutputWriter {
 		store: sink.store,
 		path:  path,
 	}
+}
+
+// prepareBashOutput skips transcript materialization only when the backend owns
+// the timeout for a foreground run. That mode disables the Manager's foreground
+// timer, so the run cannot be handed off to the background. Explicit background
+// runs and foreground runs that may be auto-backgrounded still reserve output.
+func prepareBashOutput(
+	ctx context.Context,
+	sink outputSink,
+	backendOwnsTimeout bool,
+) *bashOutputWriter {
+	if backendOwnsTimeout {
+		return &bashOutputWriter{}
+	}
+	return reserveBashOutput(ctx, sink)
 }
 
 func (w *bashOutputWriter) fail(err error) error {
@@ -475,7 +490,7 @@ func newManagedBufferedExecuteTool(
 			return "", err
 		}
 		req := managedExecuteRequest(input, backendOwnsTimeout)
-		w := reserveBashOutput(ctx, sink)
+		w := prepareBashOutput(ctx, sink, backendOwnsTimeout)
 		runInput, err := managedRunInput(input, w, parentSessionID, backendOwnsTimeout)
 		if err != nil {
 			return "", err
@@ -534,7 +549,7 @@ func newManagedStreamingExecuteTool(
 			return nil, err
 		}
 		req := managedExecuteRequest(input, backendOwnsTimeout)
-		w := reserveBashOutput(ctx, sink)
+		w := prepareBashOutput(ctx, sink, backendOwnsTimeout)
 		runInput, err := managedRunInput(input, w, parentSessionID, backendOwnsTimeout)
 		if err != nil {
 			return nil, err
