@@ -60,6 +60,10 @@ type TypedBackgroundConfig[M adk.MessageType] struct {
 	// ForegroundTimeoutMs and ShouldAutoBackground apply to every enabled capability.
 	ForegroundTimeoutMs  *int
 	ShouldAutoBackground func(context.Context, *backgroundtask.ForegroundCandidate) bool
+	// DispatchPending submits newly persisted pending tasks to host-managed
+	// execution and provides the task_output fallback starter. Nil preserves all
+	// existing framework-owned execution behavior.
+	DispatchPending func(context.Context, *backgroundtask.Task) error
 	// TranscriptFormat customizes durable sub-agent session views.
 	TranscriptFormat subagent.TranscriptFormat[M]
 }
@@ -310,6 +314,7 @@ func NewTyped[M adk.MessageType](ctx context.Context, cfg *TypedConfig[M]) (adk.
 		progressReaders[backgroundtool.RecoverableExecutorKey] = reader
 		controlMW, err := backgroundtaskmw.NewTyped(ctx, &backgroundtaskmw.TypedConfig[M]{
 			Manager: manager, ProgressReadersByExecutorKey: progressReaders,
+			StartPendingTask: cfg.Background.DispatchPending,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("failed to create background-task control middleware: %w", err)
@@ -451,6 +456,7 @@ func buildTypedBuiltinAgentMiddlewares[M adk.MessageType](ctx context.Context, c
 						OutputMaterializer:   background.RecoverableShell.OutputMaterializer,
 						ForegroundTimeoutMs:  background.ForegroundTimeoutMs,
 						ShouldAutoBackground: background.ShouldAutoBackground,
+						DispatchPending:      background.DispatchPending,
 					},
 				}
 			} else {
@@ -500,6 +506,7 @@ func deepLocalShellRunner[M adk.MessageType](
 		Executors:            background.Executors,
 		ForegroundTimeoutMs:  background.ForegroundTimeoutMs,
 		ShouldAutoBackground: background.ShouldAutoBackground,
+		DispatchPending:      background.DispatchPending,
 	})
 }
 
@@ -549,6 +556,7 @@ func deepSubagentBackground[M adk.MessageType](
 			Executor:             cfg.Background.SubAgents.Executor,
 			ForegroundTimeoutMs:  cfg.Background.ForegroundTimeoutMs,
 			ShouldAutoBackground: cfg.Background.ShouldAutoBackground,
+			DispatchPending:      cfg.Background.DispatchPending,
 			RunOptionsFactories:  cfg.Background.SubAgents.RunOptionsFactories,
 		},
 	}

@@ -118,6 +118,10 @@ type TypedDurableBackgroundConfig[M adk.MessageType] struct {
 	// instance on every middleware sharing Manager.
 	Executor            *durablesubagent.Executor[M]
 	ForegroundTimeoutMs *int
+	// DispatchPending submits a newly persisted pending task to host-managed
+	// execution. When nil, the middleware starts Manager.Execute in its own
+	// goroutine. A returned error rejects dispatch but does not roll back the task.
+	DispatchPending func(context.Context, *backgroundtask.Task) error
 	// ShouldAutoBackground is reserved for a future durable checkpoint handoff
 	// implementation. Supplying it currently makes construction fail rather
 	// than pre-creating a background task for foreground execution.

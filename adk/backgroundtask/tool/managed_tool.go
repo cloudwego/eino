@@ -67,6 +67,10 @@ type ManagedToolConfig struct {
 	// result disables session-routed lifecycle notifications. Nil uses the
 	// current Runner session when one exists and otherwise disables notification.
 	SessionID func(context.Context) (string, error)
+	// DispatchPending submits a newly persisted pending task to host-managed
+	// execution. When nil, the managed tool starts Manager.Execute in its own
+	// goroutine. A returned error rejects dispatch but does not roll back the task.
+	DispatchPending func(context.Context, *backgroundtask.Task) error
 }
 
 type managedTool struct {
@@ -79,6 +83,7 @@ type managedTool struct {
 	runInBackground   func(context.Context, string) bool
 	invocationTimeout func(context.Context, string) *int
 	sessionID         func(context.Context) (string, error)
+	dispatchPending   func(context.Context, *backgroundtask.Task) error
 }
 
 // NewManagedTool creates a wrapper implementing EnhancedInvokableTool and
@@ -133,7 +138,7 @@ func NewManagedTool(
 			TimeoutMs: timeoutMs, ShouldAutoBackground: config.ShouldAutoBackground,
 		},
 		runInBackground: config.RunInBackground, invocationTimeout: config.InvocationTimeoutMs,
-		sessionID: sessionID,
+		sessionID: sessionID, dispatchPending: config.DispatchPending,
 	}, nil
 }
 
@@ -162,7 +167,9 @@ func (t *managedTool) InvokableRun(
 		if err != nil {
 			return nil, err
 		}
-		t.executeBackgroundUntilStart(ctx, task.Spec.ID)
+		if err = t.executeBackgroundUntilStart(ctx, task); err != nil {
+			return nil, err
+		}
 		return t.renderLaunchResult(ctx, task)
 	}
 	return t.runForeground(ctx, arguments)
@@ -197,11 +204,18 @@ func (t *managedTool) StreamableRun(
 			return nil, err
 		}
 		runDone := make(chan launchResult, 1)
-		_, window := t.startBackgroundExecution(ctx, task.Spec.ID)
+		window, dispatchErr := t.startBackgroundExecution(ctx, task)
+		if dispatchErr != nil {
+			t.registry.projections.remove(task.Spec.ID)
+			writer.Close()
+			return nil, dispatchErr
+		}
 		// The projection must drain updates before waiting on Start; otherwise
 		// the executor can stall on the projection buffer before detach.
 		go t.project(context.Background(), task.Spec.ID, projection, runDone, writer)
-		_ = window.Wait(ctx, t.startWindowTimeout())
+		if window != nil {
+			_ = window.Wait(ctx, t.startWindowTimeout())
+		}
 		runDone <- launchResult{task: task}
 		return reader, nil
 	}
@@ -231,18 +245,40 @@ func (detachedContext) Done() <-chan struct{}       { return nil }
 func (detachedContext) Err() error                  { return nil }
 func (c detachedContext) Value(key any) any         { return c.parent.Value(key) }
 
-func (t *managedTool) executeBackgroundUntilStart(ctx context.Context, taskID string) {
-	_, window := t.startBackgroundExecution(ctx, taskID)
-	_ = window.Wait(ctx, t.startWindowTimeout())
+func (t *managedTool) executeBackgroundUntilStart(
+	ctx context.Context,
+	task *backgroundtask.Task,
+) error {
+	window, err := t.startBackgroundExecution(ctx, task)
+	if err != nil {
+		return err
+	}
+	if window != nil {
+		_ = window.Wait(ctx, t.startWindowTimeout())
+	}
+	return nil
 }
 
-func (t *managedTool) startBackgroundExecution(ctx context.Context, taskID string) (context.Context, *startwindow.Window) {
+func (t *managedTool) startBackgroundExecution(
+	ctx context.Context,
+	task *backgroundtask.Task,
+) (*startwindow.Window, error) {
+	if t.dispatchPending != nil {
+		if err := t.dispatchPending(ctx, task); err != nil {
+			return nil, fmt.Errorf(
+				"backgroundtask/tool: dispatch pending task %q: %w",
+				task.Spec.ID,
+				err,
+			)
+		}
+		return nil, nil
+	}
 	backgroundCtx, window := startwindow.Open(detachedContext{parent: ctx})
 	go func() {
 		defer startwindow.Signal(backgroundCtx)
-		_ = t.manager.Execute(backgroundCtx, taskID)
+		_ = t.manager.Execute(backgroundCtx, task.Spec.ID)
 	}()
-	return backgroundCtx, window
+	return window, nil
 }
 
 func (t *managedTool) startWindowTimeout() time.Duration {
@@ -383,6 +419,10 @@ func (t *managedTool) streamForeground(
 			if handoffErr == nil && task != nil {
 				final, encodeErr := t.renderLaunchResult(ctx, task)
 				writer.Send(final, encodeErr)
+				return
+			}
+			if task != nil {
+				writer.Send(nil, handoffErr)
 				return
 			}
 			_ = start.run.Stop(context.Background())
@@ -602,6 +642,9 @@ func (t *managedTool) waitForeground(
 			if err == nil && task != nil {
 				return nil, task, nil
 			}
+			if task != nil {
+				return nil, task, err
+			}
 			_ = start.run.Stop(context.Background())
 			return nil, nil, &backgroundtask.ForegroundTimeoutError{
 				Timeout: timeoutDuration,
@@ -760,9 +803,15 @@ func (t *managedTool) tryHandoff(
 		_ = adopted.Run.Stop(context.Background())
 		return nil, err
 	}
-	go func() {
-		_ = t.manager.Execute(detachedContext{parent: ctx}, task.Spec.ID)
-	}()
+	if t.dispatchPending != nil {
+		if _, err = t.startBackgroundExecution(ctx, task); err != nil {
+			return task, err
+		}
+	} else {
+		go func() {
+			_ = t.manager.Execute(detachedContext{parent: ctx}, task.Spec.ID)
+		}()
+	}
 	return task, nil
 }
 

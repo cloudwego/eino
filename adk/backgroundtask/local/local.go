@@ -89,6 +89,10 @@ type Config struct {
 	ForegroundTimeoutMs  *int
 	ShouldAutoBackground func(context.Context, *backgroundtask.ForegroundCandidate) bool
 	BackgroundNotice     func(context.Context, NoticeInfo) string
+	// DispatchPending submits a newly persisted pending task to host-managed
+	// execution. When nil, Runner starts Manager.Execute in its own goroutine.
+	// A returned error rejects dispatch but does not roll back the persisted task.
+	DispatchPending func(context.Context, *backgroundtask.Task) error
 }
 
 // Runner owns one process-local closure registry for a Manager.
@@ -97,6 +101,7 @@ type Runner struct {
 	executor         *executor
 	policy           foreground.Policy
 	backgroundNotice func(context.Context, NoticeInfo) string
+	dispatchPending  func(context.Context, *backgroundtask.Task) error
 }
 
 // New constructs a Runner and registers its process-local executor.
@@ -128,6 +133,7 @@ func New(config *Config) (*Runner, error) {
 			TimeoutMs: timeoutMs, ShouldAutoBackground: config.ShouldAutoBackground,
 		},
 		backgroundNotice: config.BackgroundNotice,
+		dispatchPending:  config.DispatchPending,
 	}
 	if runner.backgroundNotice == nil {
 		runner.backgroundNotice = defaultBackgroundNotice
@@ -159,10 +165,7 @@ func (r *Runner) Run(ctx context.Context, input *Input, work WorkFunc) (*backgro
 		if err != nil {
 			return nil, err
 		}
-		go func() {
-			_ = r.manager.Execute(detachedContext{parent: ctx}, task.Spec.ID)
-		}()
-		return task, nil
+		return task, r.dispatch(ctx, task)
 	}
 	return r.runForeground(ctx, input, spec, work)
 }
@@ -225,6 +228,10 @@ func (r *Runner) runForeground(
 			r.policy.ShouldAutoBackground(ctx, candidate) {
 			task, err := r.adoptForeground(ctx, spec, resultCh)
 			if err != nil {
+				if task != nil {
+					adopted = true
+					return task, err
+				}
 				cancel()
 				return r.failedTask(spec, fmt.Sprintf("handoff failed after %dms: %v", timeoutMs, err)), nil
 			}
@@ -257,18 +264,12 @@ func (r *Runner) adoptForeground(
 	task, err := r.manager.Submit(ctx, &backgroundtask.SubmitRequest{Spec: spec})
 	if err != nil {
 		if errors.Is(err, backgroundtask.ErrTaskCreatedEventUndelivered) && task != nil {
-			go func() {
-				_ = r.manager.Execute(detachedContext{parent: ctx}, task.Spec.ID)
-			}()
-			return task, nil
+			return task, r.dispatch(ctx, task)
 		}
 		r.executor.remove(spec.ID)
 		return nil, err
 	}
-	go func() {
-		_ = r.manager.Execute(detachedContext{parent: ctx}, task.Spec.ID)
-	}()
-	return task, nil
+	return task, r.dispatch(ctx, task)
 }
 
 func (r *Runner) resultTask(spec backgroundtask.Spec, value string, err error) *backgroundtask.Task {
@@ -374,14 +375,20 @@ func (r *Runner) RunStream(
 		return nil, err
 	}
 	runDone := make(chan runResult, 1)
-	go func() {
-		runErr := r.manager.Execute(detachedContext{parent: ctx}, task.Spec.ID)
-		current, getErr := r.manager.Get(context.Background(), task.Spec.ID)
-		if runErr == nil {
-			runErr = getErr
+	if r.dispatchPending != nil {
+		if err = r.dispatch(ctx, task); err != nil {
+			return nil, err
 		}
-		runDone <- runResult{task: current, err: runErr}
-	}()
+	} else {
+		go func() {
+			runErr := r.manager.Execute(detachedContext{parent: ctx}, task.Spec.ID)
+			current, getErr := r.manager.Get(context.Background(), task.Spec.ID)
+			if runErr == nil {
+				runErr = getErr
+			}
+			runDone <- runResult{task: current, err: runErr}
+		}()
+	}
 	reader, writer := schema.Pipe[string](streamBufferCap)
 	// A successful submission is the acknowledgement boundary for an explicit
 	// background run. In particular, a StreamingShell may block while creating
@@ -475,6 +482,23 @@ func (r *Runner) submitSpec(
 		)
 	}
 	return task, nil
+}
+
+func (r *Runner) dispatch(ctx context.Context, task *backgroundtask.Task) error {
+	if r.dispatchPending != nil {
+		if err := r.dispatchPending(ctx, task); err != nil {
+			return fmt.Errorf(
+				"backgroundtask/local: dispatch pending task %q: %w",
+				task.Spec.ID,
+				err,
+			)
+		}
+		return nil
+	}
+	go func() {
+		_ = r.manager.Execute(detachedContext{parent: ctx}, task.Spec.ID)
+	}()
+	return nil
 }
 
 func (r *Runner) removeUnstarted(taskID string) {

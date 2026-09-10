@@ -871,7 +871,7 @@ func (m *Manager) execute(
 	if _, exists := m.activeAttempts[taskID]; exists {
 		m.attemptsMu.Unlock()
 		m.mu.Unlock()
-		return errors.New("backgroundtask: task is already executing in this manager")
+		return ErrAlreadyExecuting
 	}
 	attempt := &activeAttempt{ready: make(chan struct{}), done: make(chan error, 1)}
 	m.activeAttempts[taskID] = attempt
