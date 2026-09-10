@@ -67,8 +67,9 @@ type ManagedToolConfig struct {
 	// result disables session-routed lifecycle notifications. Nil uses the
 	// current Runner session when one exists and otherwise disables notification.
 	SessionID func(context.Context) (string, error)
-	// DispatchPending submits a newly persisted pending task to host-managed
-	// execution. When nil, the managed tool starts Manager.Execute in its own
+	// DispatchPending synchronously submits a newly persisted pending task to
+	// host-managed execution. It may be called concurrently and must not mutate
+	// the task. When nil, the managed tool starts Manager.Execute in its own
 	// goroutine. A returned error rejects dispatch but does not roll back the task.
 	DispatchPending func(context.Context, *backgroundtask.Task) error
 }

@@ -263,6 +263,9 @@ func (e *executor) Execute( //nolint:cyclop,funlen // execution coordinates the 
 		select {
 		case result := <-waitResult:
 			if result.err != nil {
+				if e.recoverable && errors.Is(result.err, ctx.Err()) {
+					return suspendOrYieldResult(task, toolCheckpoint)
+				}
 				return nil, result.err
 			}
 			if updateResults != nil {
@@ -302,7 +305,7 @@ func (e *executor) Execute( //nolint:cyclop,funlen // execution coordinates the 
 					return nil, errors.New("backgroundtask/tool: plain tool cannot drain")
 				}
 				cancelWait()
-				return pausedResult(task, toolCheckpoint)
+				return suspendOrYieldResult(task, toolCheckpoint)
 			case backgroundtask.ControlStop:
 				if err = run.Stop(context.Background()); err != nil {
 					return nil, fmt.Errorf("backgroundtask/tool: stop operation: %w", err)
@@ -328,14 +331,14 @@ func (e *executor) Execute( //nolint:cyclop,funlen // execution coordinates the 
 		case <-ctx.Done():
 			cancelWait()
 			if e.recoverable {
-				return pausedResult(task, toolCheckpoint)
+				return suspendOrYieldResult(task, toolCheckpoint)
 			}
 			return nil, ctx.Err()
 		}
 	}
 }
 
-func pausedResult(
+func suspendOrYieldResult(
 	task *backgroundtask.Task,
 	toolCheckpoint []byte,
 ) (*backgroundtask.ExecutionResult, error) {

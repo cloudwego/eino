@@ -283,6 +283,42 @@ func TestRunnerAutoBackgroundPreservesTaskAfterDispatchRejection_BitsUT(t *testi
 	require.Equal(t, backgroundtask.StatusCompleted, waitTerminal(t, manager, task).Status)
 }
 
+func TestAttack_StreamAutoBackgroundDispatchRejectionRetainsWork(t *testing.T) {
+	timeout := 1
+	dispatchErr := errors.New("worker is full")
+	runner, manager := newTestRunner(t, func(config *Config) {
+		config.ForegroundTimeoutMs = &timeout
+		config.ShouldAutoBackground = func(
+			context.Context,
+			*backgroundtask.ForegroundCandidate,
+		) bool {
+			return true
+		}
+		config.DispatchPending = func(
+			context.Context,
+			*backgroundtask.Task,
+		) error {
+			return dispatchErr
+		}
+	})
+	release := make(chan struct{})
+
+	stream, err := runner.RunStream(
+		context.Background(),
+		&Input{Description: "rejected stream handoff"},
+		gatedStreamWork(release),
+	)
+	require.NoError(t, err)
+	_, err = stream.Recv()
+	require.ErrorIs(t, err, dispatchErr)
+	task := onlyTask(t, manager)
+	require.Equal(t, backgroundtask.StatusPending, task.Status)
+
+	close(release)
+	require.NoError(t, manager.Execute(context.Background(), task.Spec.ID))
+	require.Equal(t, backgroundtask.StatusCompleted, waitTerminal(t, manager, task).Status)
+}
+
 func TestRunnerForegroundTimeoutPolicies_BitsUT(t *testing.T) {
 	t.Run("fail", func(t *testing.T) {
 		timeout := 10

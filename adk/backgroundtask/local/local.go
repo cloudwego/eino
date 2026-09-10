@@ -89,9 +89,10 @@ type Config struct {
 	ForegroundTimeoutMs  *int
 	ShouldAutoBackground func(context.Context, *backgroundtask.ForegroundCandidate) bool
 	BackgroundNotice     func(context.Context, NoticeInfo) string
-	// DispatchPending submits a newly persisted pending task to host-managed
-	// execution. When nil, Runner starts Manager.Execute in its own goroutine.
-	// A returned error rejects dispatch but does not roll back the persisted task.
+	// DispatchPending synchronously submits a newly persisted pending task to
+	// host-managed execution. It may be called concurrently and must not mutate
+	// the task. When nil, Runner starts Manager.Execute in its own goroutine. A
+	// returned error rejects dispatch but does not roll back the persisted task.
 	DispatchPending func(context.Context, *backgroundtask.Task) error
 }
 

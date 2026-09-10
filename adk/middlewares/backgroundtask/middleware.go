@@ -80,10 +80,11 @@ type TypedConfig[M adk.MessageType] struct {
 	// ProgressReadersByExecutorKey selects progress projections by persisted ExecutorKey.
 	// Readers may be called concurrently and must not mutate task lifecycle state.
 	ProgressReadersByExecutorKey map[string]TaskProgressReader
-	// StartPendingTask is an optional fallback invoked by task_output after its
-	// first Get returns a pending task. Nil preserves read-only behavior. Nil and
-	// ErrAlreadyExecuting mean the task was accepted; any other error is returned
-	// to the caller without entering the blocking wait.
+	// StartPendingTask is an optional synchronous fallback invoked by task_output
+	// after its first Get returns a pending task. It may be called concurrently
+	// and must not mutate the task. Nil preserves read-only behavior. A nil error
+	// or ErrAlreadyExecuting means the task was accepted; any other error is
+	// returned to the caller without entering the blocking wait.
 	StartPendingTask func(context.Context, *bgtask.Task) error
 
 	// TaskOutputToolConfig configures the task_output tool. Optional.

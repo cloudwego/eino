@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -477,8 +478,19 @@ func TestTaskOutputStartsPendingTaskBeforeBlocking_BitsUT(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.Equal(t, 1, startCalls)
-	require.Contains(t, output, "Status: completed")
-	require.Contains(t, output, "Result: done")
+	lines := strings.Split(output, "\n")
+	require.Len(t, lines, 5)
+	require.Equal(
+		t,
+		[]string{
+			"Task ID: pending-fallback",
+			"Description: fallback",
+			"Status: completed",
+			"Result: done",
+		},
+		lines[:4],
+	)
+	require.Regexp(t, `^Elapsed: (0s|[0-9]+ms)$`, lines[4])
 }
 
 func TestTaskOutputStartPendingTaskErrorSemantics_BitsUT(t *testing.T) {

@@ -142,8 +142,10 @@ type RecoverableBackgroundConfig struct {
 	// concurrently and must not mutate the candidate.
 	ForegroundTimeoutMs  *int
 	ShouldAutoBackground func(context.Context, *backgroundtask.ForegroundCandidate) bool
-	// DispatchPending submits newly persisted pending tasks to host-managed
-	// execution. Nil preserves the managed tool's internal goroutine.
+	// DispatchPending synchronously submits newly persisted pending tasks to
+	// host-managed execution. It may be called concurrently and must not mutate
+	// the task. Nil preserves the managed tool's internal goroutine. A returned
+	// error rejects dispatch but does not roll back the persisted task.
 	DispatchPending func(context.Context, *backgroundtask.Task) error
 }
 
