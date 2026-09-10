@@ -161,6 +161,41 @@ func TestManagerExecuteClosesTimeoutControllerOnEarlyFailure_BitsUT(t *testing.T
 	)
 }
 
+func TestManagerExecuteReportsAlreadyExecutingSentinel_BitsUT(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	executor := &scriptedExecutor{
+		execute: func(
+			context.Context,
+			*Task,
+			ExecutionRuntime,
+		) (*ExecutionResult, error) {
+			close(started)
+			<-release
+			return &ExecutionResult{Status: StatusCompleted}, nil
+		},
+	}
+	manager := managerWithExecutor(t, NewInMemoryStore(nil), executor, time.Minute)
+	defer closeWithTimeout(manager)
+	task, err := manager.Submit(
+		context.Background(),
+		&SubmitRequest{Spec: validSpec("already-executing")},
+	)
+	require.NoError(t, err)
+
+	executeDone := make(chan error, 1)
+	go func() {
+		executeDone <- manager.Execute(context.Background(), task.Spec.ID)
+	}()
+	<-started
+
+	err = manager.Execute(context.Background(), task.Spec.ID)
+	require.ErrorIs(t, err, ErrAlreadyExecuting)
+
+	close(release)
+	require.NoError(t, <-executeDone)
+}
+
 func TestManagerCloseDrainsActiveAttempt(t *testing.T) {
 	started := make(chan struct{})
 	observed := make(chan ControlRequest, 1)

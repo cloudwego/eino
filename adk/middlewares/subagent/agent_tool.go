@@ -518,9 +518,19 @@ func newDurableAgentTool[M adk.MessageType](
 		if err != nil && !(errors.Is(err, backgroundtask.ErrTaskCreatedEventUndelivered) && task != nil) {
 			return "", err
 		}
-		go func() {
-			_ = config.Manager.Execute(detachedExecutionContext{parent: callCtx}, task.Spec.ID)
-		}()
+		if config.DispatchPending != nil {
+			if err = config.DispatchPending(callCtx, task); err != nil {
+				return "", fmt.Errorf(
+					"subagent: dispatch pending task %q: %w",
+					task.Spec.ID,
+					err,
+				)
+			}
+		} else {
+			go func() {
+				_ = config.Manager.Execute(detachedExecutionContext{parent: callCtx}, task.Spec.ID)
+			}()
+		}
 		return formatDurableAgentResult(in.SubagentType, task)
 	})
 }

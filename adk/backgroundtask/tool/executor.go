@@ -302,9 +302,7 @@ func (e *executor) Execute( //nolint:cyclop,funlen // execution coordinates the 
 					return nil, errors.New("backgroundtask/tool: plain tool cannot drain")
 				}
 				cancelWait()
-				return &backgroundtask.ExecutionResult{
-					Directive: backgroundtask.ExecutionDirectiveYield,
-				}, nil
+				return pausedResult(task, toolCheckpoint)
 			case backgroundtask.ControlStop:
 				if err = run.Stop(context.Background()); err != nil {
 					return nil, fmt.Errorf("backgroundtask/tool: stop operation: %w", err)
@@ -330,13 +328,35 @@ func (e *executor) Execute( //nolint:cyclop,funlen // execution coordinates the 
 		case <-ctx.Done():
 			cancelWait()
 			if e.recoverable {
-				return &backgroundtask.ExecutionResult{
-					Directive: backgroundtask.ExecutionDirectiveYield,
-				}, nil
+				return pausedResult(task, toolCheckpoint)
 			}
 			return nil, ctx.Err()
 		}
 	}
+}
+
+func pausedResult(
+	task *backgroundtask.Task,
+	toolCheckpoint []byte,
+) (*backgroundtask.ExecutionResult, error) {
+	// Suspend consumes PendingResume. Until the tool returns a later checkpoint,
+	// yield must retain both the request checkpoint and its idempotent reply.
+	if len(task.PendingResume) > 0 {
+		return &backgroundtask.ExecutionResult{
+			Directive:  backgroundtask.ExecutionDirectiveYield,
+			Checkpoint: append([]byte(nil), task.Checkpoint...),
+		}, nil
+	}
+	checkpoint, err := encodeManagedCheckpoint(nil, toolCheckpoint)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"backgroundtask/tool: encode suspended checkpoint: %w",
+			err,
+		)
+	}
+	return &backgroundtask.ExecutionResult{
+		Status: backgroundtask.StatusSuspended, Checkpoint: checkpoint,
+	}, nil
 }
 
 func (e *executor) startRun(
