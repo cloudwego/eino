@@ -294,6 +294,7 @@ type ToolsConfig struct {
 
 	// ReturnDirectly specifies tools that cause the agent to return immediately when called.
 	// The map keys are tool names indicate whether the tool should trigger immediate return.
+	// Tools can also request direct return dynamically with SetToolReturnDirectly.
 	ReturnDirectly map[string]bool
 
 	// EmitInternalEvents indicates whether internal events from agentTool should be emitted
