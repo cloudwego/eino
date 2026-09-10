@@ -95,7 +95,7 @@ func NewInMemoryStore(config *InMemoryStoreConfig) *InMemoryStore {
 		customNotifications: make(map[string]map[string]Notification),
 		notify:              make(chan struct{}),
 		now:                 time.Now,
-		activeTimeout:       30 * time.Second,
+		activeTimeout:       defaultLeaseDuration,
 		maxValue:            1 << 20,
 	}
 	if config != nil {

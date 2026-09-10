@@ -28,6 +28,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/cloudwego/eino/adk/internal/taskcontrol"
+	"github.com/cloudwego/eino/internal/core"
 	"github.com/cloudwego/eino/internal/safe"
 )
 
@@ -112,6 +113,15 @@ type ExecutionRuntime interface {
 // compatibility for custom executors and test doubles.
 type StartCommitRuntime interface {
 	CommitStart(context.Context, []byte) error
+}
+
+// LeaseGateRuntime is an optional execution capability that waits until the
+// Manager has confirmed that the current attempt still owns a safe lease.
+// Built-in agent tool dispatch observes this gate automatically. Custom
+// executors should call it before starting a new external side effect. Calls
+// return promptly when transient-heartbeat tolerance is disabled.
+type LeaseGateRuntime interface {
+	WaitForLease(context.Context) error
 }
 
 // Executor reconstructs and runs durable work from a task Spec.
@@ -212,18 +222,31 @@ func (a *activeAttempt) signalReady() {
 }
 
 type taskRuntime struct {
-	mu                 sync.Mutex
-	controlMu          sync.Mutex
-	tasks              TaskStore
-	taskEvents         TaskEventStore
-	notificationWriter NotificationWriter
-	taskID             string
-	attempt            int64
-	version            int64
-	controls           chan ControlRequest
-	poison             error
-	cancelRequested    bool
-	cancelReason       string
+	mu                      sync.Mutex
+	controlMu               sync.Mutex
+	tasks                   TaskStore
+	taskEvents              TaskEventStore
+	notificationWriter      NotificationWriter
+	taskID                  string
+	attempt                 int64
+	version                 int64
+	controls                chan ControlRequest
+	poison                  error
+	cancelRequested         bool
+	cancelReason            string
+	stateChanged            chan struct{}
+	heartbeatAbort          chan struct{}
+	heartbeatAborted        bool
+	versionWriteActive      bool
+	heartbeatPending        bool
+	heartbeatToken          uint64
+	heartbeatSequence       uint64
+	leaseUncertain          bool
+	unconfirmedAt           time.Time
+	leaseExpiresAt          time.Time
+	leaseDuration           time.Duration
+	leaseSafetyMargin       time.Duration
+	tolerateHeartbeatErrors bool
 }
 
 // detachedCtx preserves values while detaching worker execution from the
@@ -239,7 +262,27 @@ func (detachedCtx) Done() <-chan struct{}       { return nil }
 func (detachedCtx) Err() error                  { return nil }
 func (c detachedCtx) Value(key any) any         { return c.parent.Value(key) }
 
-var errHeartbeatStopped = errors.New("backgroundtask: heartbeat stopped")
+var (
+	errHeartbeatRetry   = errors.New("backgroundtask: heartbeat retry at regular interval")
+	errHeartbeatStopped = errors.New("backgroundtask: heartbeat stopped")
+)
+
+type taskRuntimeLeaseConfig struct {
+	confirmedAt             time.Time
+	duration                time.Duration
+	safetyMargin            time.Duration
+	tolerateHeartbeatErrors bool
+}
+
+type taskRuntimeConfig struct {
+	tasks              TaskStore
+	taskEvents         TaskEventStore
+	notificationWriter NotificationWriter
+	taskID             string
+	attempt            int64
+	version            int64
+	lease              taskRuntimeLeaseConfig
+}
 
 func newTaskRuntime(
 	tasks TaskStore,
@@ -248,15 +291,332 @@ func newTaskRuntime(
 	attempt, version int64,
 	notificationWriter NotificationWriter,
 ) *taskRuntime {
-	return &taskRuntime{
+	return newTaskRuntimeWithConfig(taskRuntimeConfig{
 		tasks: tasks, taskEvents: taskEvents,
 		notificationWriter: notificationWriter,
 		taskID:             taskID, attempt: attempt, version: version,
-		controls: make(chan ControlRequest, 1),
+	})
+}
+
+func newTaskRuntimeWithConfig(config taskRuntimeConfig) *taskRuntime {
+	runtime := &taskRuntime{
+		tasks: config.tasks, taskEvents: config.taskEvents,
+		notificationWriter: config.notificationWriter,
+		taskID:             config.taskID,
+		attempt:            config.attempt,
+		version:            config.version,
+		controls:           make(chan ControlRequest, 1),
+		stateChanged:       make(chan struct{}),
+		heartbeatAbort:     make(chan struct{}),
 	}
+	runtime.leaseDuration = config.lease.duration
+	runtime.leaseSafetyMargin = config.lease.safetyMargin
+	runtime.tolerateHeartbeatErrors = config.lease.tolerateHeartbeatErrors
+	if config.lease.tolerateHeartbeatErrors {
+		runtime.leaseExpiresAt = config.lease.confirmedAt.Add(config.lease.duration)
+	}
+	return runtime
 }
 
 func (r *taskRuntime) Controls() <-chan ControlRequest { return r.controls }
+
+func (r *taskRuntime) signalStateChangedLocked() {
+	close(r.stateChanged)
+	r.stateChanged = make(chan struct{})
+}
+
+func (r *taskRuntime) abortHeartbeatLocked() {
+	if !r.heartbeatAborted {
+		close(r.heartbeatAbort)
+		r.heartbeatAborted = true
+	}
+}
+
+// WaitForLease blocks new side effects while a heartbeat result is uncertain.
+func (r *taskRuntime) WaitForLease(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		r.mu.Lock()
+		if r.poison != nil {
+			err := r.poison
+			r.mu.Unlock()
+			return err
+		}
+		if r.cancelRequested {
+			r.mu.Unlock()
+			return ErrLeaseLost
+		}
+		if !r.tolerateHeartbeatErrors ||
+			(!r.heartbeatPending && r.heartbeatToken == 0 && !r.leaseUncertain) {
+			r.mu.Unlock()
+			return nil
+		}
+		changed := r.stateChanged
+		r.mu.Unlock()
+		select {
+		case <-changed:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+}
+
+func (r *taskRuntime) beginVersionWrite(
+	ctx context.Context,
+	allowCanceled bool,
+) (int64, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	for {
+		if err := ctx.Err(); err != nil {
+			return 0, err
+		}
+		r.mu.Lock()
+		if r.poison != nil {
+			err := r.poison
+			r.mu.Unlock()
+			return 0, err
+		}
+		if r.cancelRequested && !allowCanceled {
+			r.mu.Unlock()
+			return 0, ErrLeaseLost
+		}
+		leaseBlocked := r.heartbeatPending || r.heartbeatToken != 0 ||
+			(r.tolerateHeartbeatErrors && r.leaseUncertain)
+		if !r.versionWriteActive && !leaseBlocked {
+			r.versionWriteActive = true
+			version := r.version
+			r.mu.Unlock()
+			return version, nil
+		}
+		changed := r.stateChanged
+		r.mu.Unlock()
+		select {
+		case <-changed:
+		case <-ctx.Done():
+			return 0, ctx.Err()
+		}
+	}
+}
+
+func (r *taskRuntime) finishVersionWrite(task *Task) {
+	r.mu.Lock()
+	if task != nil && r.poison == nil && task.Version > r.version {
+		r.version = task.Version
+	}
+	r.versionWriteActive = false
+	r.signalStateChangedLocked()
+	r.mu.Unlock()
+}
+
+func (r *taskRuntime) beginHeartbeat(
+	ctx context.Context,
+	startedAt time.Time,
+) (uint64, int64, time.Time, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return 0, 0, time.Time{}, err
+	}
+	r.mu.Lock()
+	if r.poison != nil {
+		err := r.poison
+		r.mu.Unlock()
+		return 0, 0, time.Time{}, err
+	}
+	if r.cancelRequested {
+		r.mu.Unlock()
+		return 0, 0, time.Time{}, errHeartbeatStopped
+	}
+	r.heartbeatPending = true
+	r.signalStateChangedLocked()
+	for r.versionWriteActive || r.heartbeatToken != 0 {
+		changed := r.stateChanged
+		r.mu.Unlock()
+		select {
+		case <-changed:
+		case <-ctx.Done():
+			r.mu.Lock()
+			r.heartbeatPending = false
+			r.signalStateChangedLocked()
+			r.mu.Unlock()
+			return 0, 0, time.Time{}, ctx.Err()
+		}
+		r.mu.Lock()
+		if r.poison != nil {
+			err := r.poison
+			r.heartbeatPending = false
+			r.signalStateChangedLocked()
+			r.mu.Unlock()
+			return 0, 0, time.Time{}, err
+		}
+		if r.cancelRequested {
+			r.heartbeatPending = false
+			r.signalStateChangedLocked()
+			r.mu.Unlock()
+			return 0, 0, time.Time{}, errHeartbeatStopped
+		}
+	}
+	r.heartbeatSequence++
+	token := r.heartbeatSequence
+	r.heartbeatToken = token
+	r.heartbeatPending = false
+	unconfirmedAt := time.Time{}
+	if r.tolerateHeartbeatErrors {
+		if r.leaseUncertain {
+			unconfirmedAt = r.unconfirmedAt
+		} else {
+			r.unconfirmedAt = startedAt
+		}
+		r.leaseUncertain = true
+	}
+	version := r.version
+	r.signalStateChangedLocked()
+	r.mu.Unlock()
+	return token, version, unconfirmedAt, nil
+}
+
+func definitiveHeartbeatError(err error) bool {
+	return errors.Is(err, ErrLeaseLost) ||
+		errors.Is(err, ErrNotFound) ||
+		errors.Is(err, ErrIllegalTransition) ||
+		errors.Is(err, ErrAlreadyTerminal)
+}
+
+func (r *taskRuntime) finishHeartbeatError(token uint64, heartbeatErr error) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if token != r.heartbeatToken {
+		return errHeartbeatStopped
+	}
+	r.heartbeatToken = 0
+	if r.tolerateHeartbeatErrors && !definitiveHeartbeatError(heartbeatErr) {
+		r.leaseUncertain = true
+		r.signalStateChangedLocked()
+		return errHeartbeatRetry
+	}
+	r.poison = heartbeatErr
+	r.leaseUncertain = false
+	r.unconfirmedAt = time.Time{}
+	r.signalStateChangedLocked()
+	return heartbeatErr
+}
+
+func (r *taskRuntime) confirmHeartbeat(
+	token uint64,
+	expectedVersion int64,
+	confirmedAt time.Time,
+	task *Task,
+) error {
+	if task == nil || task.Status != StatusRunning || task.Attempt != r.attempt ||
+		task.CancelRequestedAt != nil || task.Version != expectedVersion+1 {
+		return r.finishHeartbeatError(token, ErrLeaseLost)
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if token != r.heartbeatToken {
+		return errHeartbeatStopped
+	}
+	if r.tolerateHeartbeatErrors &&
+		!time.Now().Before(r.leaseExpiresAt.Add(-r.leaseSafetyMargin)) {
+		r.poison = ErrLeaseLost
+		r.heartbeatToken = 0
+		r.leaseUncertain = false
+		r.unconfirmedAt = time.Time{}
+		r.signalStateChangedLocked()
+		return ErrLeaseLost
+	}
+	r.version = task.Version
+	r.heartbeatToken = 0
+	r.leaseUncertain = false
+	r.unconfirmedAt = time.Time{}
+	r.leaseExpiresAt = confirmedAt.Add(r.leaseDuration)
+	r.signalStateChangedLocked()
+	return nil
+}
+
+func (r *taskRuntime) acceptCancellation(task *Task, expectedVersion int64) error {
+	if task == nil || task.Status != StatusRunning || task.Attempt != r.attempt ||
+		task.CancelRequestedAt == nil ||
+		(expectedVersion > 0 && task.Version != expectedVersion) {
+		r.loseLease(ErrLeaseLost)
+		return ErrLeaseLost
+	}
+	r.mu.Lock()
+	if r.poison != nil {
+		err := r.poison
+		r.mu.Unlock()
+		return err
+	}
+	if task.Version < r.version {
+		r.mu.Unlock()
+		r.loseLease(ErrLeaseLost)
+		return ErrLeaseLost
+	}
+	r.version = task.Version
+	r.cancelRequested = true
+	r.cancelReason = task.CancelReason
+	r.heartbeatToken = 0
+	r.heartbeatPending = false
+	r.leaseUncertain = false
+	r.unconfirmedAt = time.Time{}
+	r.abortHeartbeatLocked()
+	r.signalStateChangedLocked()
+	r.mu.Unlock()
+	r.requestControlWithReason(ControlStop, task.CancelReason)
+	return nil
+}
+
+func (r *taskRuntime) loseLease(cause error) {
+	if cause == nil {
+		cause = ErrLeaseLost
+	}
+	r.mu.Lock()
+	if r.poison == nil {
+		r.poison = cause
+	}
+	r.heartbeatSequence++
+	r.heartbeatToken = 0
+	r.heartbeatPending = false
+	r.leaseUncertain = false
+	r.unconfirmedAt = time.Time{}
+	r.signalStateChangedLocked()
+	r.mu.Unlock()
+}
+
+func (r *taskRuntime) stopHeartbeat() {
+	r.mu.Lock()
+	r.heartbeatSequence++
+	r.heartbeatToken = 0
+	r.heartbeatPending = false
+	r.leaseUncertain = false
+	r.unconfirmedAt = time.Time{}
+	r.signalStateChangedLocked()
+	r.mu.Unlock()
+}
+
+func (r *taskRuntime) leaseSafetyDeadline() (time.Time, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.tolerateHeartbeatErrors || r.leaseExpiresAt.IsZero() ||
+		r.poison != nil || r.cancelRequested {
+		return time.Time{}, false
+	}
+	return r.leaseExpiresAt.Add(-r.leaseSafetyMargin), true
+}
+
+func (r *taskRuntime) leaseNeedsConfirmation() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.heartbeatPending || r.heartbeatToken != 0 || r.leaseUncertain
+}
 
 // NotifyParent emits one idempotent application notification using authority
 // bound to the current managed attempt context. It returns
@@ -283,19 +643,24 @@ func (r *taskRuntime) notifyParent(
 	req *NotifyParentRequest,
 ) error {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	if r.poison != nil {
-		return r.poison
+		err := r.poison
+		r.mu.Unlock()
+		return err
 	}
-	if r.notificationWriter == nil {
+	writer := r.notificationWriter
+	taskID := r.taskID
+	attempt := r.attempt
+	r.mu.Unlock()
+	if writer == nil {
 		return ErrNotificationUnavailable
 	}
 	cloned := *req
 	cloned.Data = cloneBytes(req.Data)
-	return r.notificationWriter.EnqueueTaskNotification(
+	return writer.EnqueueTaskNotification(
 		ctx,
-		r.taskID,
-		r.attempt,
+		taskID,
+		attempt,
 		&cloned,
 	)
 }
@@ -306,15 +671,20 @@ func (r *taskRuntime) EmitProgress(
 	data []byte,
 ) (ProgressEmission, error) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	if r.poison != nil {
-		return ProgressEmission{}, r.poison
+		err := r.poison
+		r.mu.Unlock()
+		return ProgressEmission{}, err
 	}
+	taskEvents := r.taskEvents
+	taskID := r.taskID
+	attempt := r.attempt
+	r.mu.Unlock()
 	if eventID == "" {
 		eventID = uuid.NewString()
 	}
-	result, err := r.taskEvents.AppendTaskEvent(ctx, &AppendTaskEventRequest{
-		TaskID: r.taskID, Attempt: r.attempt, EventID: eventID, Data: cloneBytes(data),
+	result, err := taskEvents.AppendTaskEvent(ctx, &AppendTaskEventRequest{
+		TaskID: taskID, Attempt: attempt, EventID: eventID, Data: cloneBytes(data),
 	})
 	if err != nil {
 		return ProgressEmission{}, err
@@ -368,18 +738,17 @@ func controlPriority(kind ControlKind) int {
 }
 
 func (r *taskRuntime) ReportTranscriptFailure(ctx context.Context, cause error) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.poison != nil {
-		return r.poison
-	}
-	task, err := r.tasks.ReportTranscriptFailure(ctx, &ReportTranscriptFailureRequest{
-		TaskID: r.taskID, ExpectedVersion: r.version, Error: boundedError(cause),
-	})
+	version, err := r.beginVersionWrite(ctx, false)
 	if err != nil {
 		return err
 	}
-	r.version = task.Version
+	task, err := r.tasks.ReportTranscriptFailure(ctx, &ReportTranscriptFailureRequest{
+		TaskID: r.taskID, ExpectedVersion: version, Error: boundedError(cause),
+	})
+	r.finishVersionWrite(task)
+	if err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -387,103 +756,121 @@ func (r *taskRuntime) CommitStart(
 	ctx context.Context,
 	checkpoint []byte,
 ) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.poison != nil {
-		return r.poison
-	}
-	task, err := r.tasks.CommitStart(ctx, &CommitStartRequest{
-		TaskID: r.taskID, ExpectedVersion: r.version,
-		Checkpoint: cloneBytes(checkpoint),
-	})
+	version, err := r.beginVersionWrite(ctx, false)
 	if err != nil {
 		return err
 	}
-	r.version = task.Version
+	task, err := r.tasks.CommitStart(ctx, &CommitStartRequest{
+		TaskID: r.taskID, ExpectedVersion: version,
+		Checkpoint: cloneBytes(checkpoint),
+	})
+	r.finishVersionWrite(task)
+	if err != nil {
+		return err
+	}
 	return nil
 }
 
 func (r *taskRuntime) heartbeat(ctx context.Context) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.poison != nil {
-		return r.poison
-	}
-	if r.cancelRequested {
-		return errHeartbeatStopped
+	requestStartedAt := time.Now()
+	token, version, unconfirmedAt, err := r.beginHeartbeat(ctx, requestStartedAt)
+	if err != nil {
+		return err
 	}
 	task, err := r.tasks.Heartbeat(ctx, &HeartbeatRequest{
-		TaskID: r.taskID, ExpectedVersion: r.version,
+		TaskID: r.taskID, ExpectedVersion: version,
 	})
-	if err != nil {
-		if errors.Is(err, ErrVersionConflict) {
-			if reconcileErr := r.reconcileCancellationLocked(ctx); reconcileErr != nil {
-				return reconcileErr
+	if err == nil {
+		return r.confirmHeartbeat(token, version, requestStartedAt, task)
+	}
+	if errors.Is(err, ErrVersionConflict) {
+		current, getErr := r.tasks.Get(ctx, r.taskID)
+		if getErr != nil {
+			return r.finishHeartbeatError(token, getErr)
+		}
+		if current != nil && current.Status == StatusRunning &&
+			current.Attempt == r.attempt &&
+			current.CancelRequestedAt != nil {
+			expectedCancellationVersion := version + 1
+			if r.tolerateHeartbeatErrors {
+				expectedCancellationVersion = 0
+			}
+			if acceptErr := r.acceptCancellation(
+				current,
+				expectedCancellationVersion,
+			); acceptErr != nil {
+				return acceptErr
 			}
 			return errHeartbeatStopped
 		}
-		r.poison = err
-		return err
+		if current != nil && r.tolerateHeartbeatErrors && !unconfirmedAt.IsZero() &&
+			current.Status == StatusRunning &&
+			current.Attempt == r.attempt && current.CancelRequestedAt == nil &&
+			current.Version == version+1 {
+			return r.confirmHeartbeat(token, version, unconfirmedAt, current)
+		}
+		return r.finishHeartbeatError(token, ErrLeaseLost)
 	}
-	r.version = task.Version
-	return nil
+	return r.finishHeartbeatError(token, err)
 }
 
-func (r *taskRuntime) reconcileCancellationLocked(ctx context.Context) error {
+func (r *taskRuntime) reconcileCancellation(ctx context.Context, expectedVersion int64) error {
 	task, err := r.tasks.Get(ctx, r.taskID)
 	if err != nil {
-		r.poison = err
+		r.loseLease(err)
 		return err
 	}
-	if task.Status != StatusRunning || task.CancelRequestedAt == nil ||
-		task.Version != r.version+1 {
-		r.poison = ErrLeaseLost
-		return r.poison
-	}
-	r.version = task.Version
-	r.cancelRequested = true
-	r.cancelReason = task.CancelReason
-	r.requestControlWithReason(ControlStop, r.cancelReason)
-	return nil
+	return r.acceptCancellation(task, expectedVersion+1)
 }
 
 func (r *taskRuntime) commit(ctx context.Context, result *ExecutionResult) (*Task, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.poison != nil {
-		return nil, r.poison
-	}
 	if result == nil {
 		return nil, errors.New("backgroundtask: executor returned nil result")
 	}
+	version, err := r.beginVersionWrite(ctx, true)
+	if err != nil {
+		return nil, err
+	}
+	var committed *Task
+	defer func() { r.finishVersionWrite(committed) }()
+	r.mu.Lock()
 	if r.cancelRequested {
 		result = &ExecutionResult{Status: StatusCanceled, Error: r.cancelReason}
 	}
-	task, err := r.commitResult(ctx, result)
+	r.mu.Unlock()
+	task, err := r.commitResult(ctx, version, result)
 	if errors.Is(err, ErrVersionConflict) {
-		if reconcileErr := r.reconcileCancellationLocked(ctx); reconcileErr != nil {
+		if reconcileErr := r.reconcileCancellation(ctx, version); reconcileErr != nil {
 			return nil, reconcileErr
 		}
-		task, err = r.commitResult(ctx, &ExecutionResult{
-			Status: StatusCanceled, Error: r.cancelReason,
+		r.mu.Lock()
+		version = r.version
+		cancelReason := r.cancelReason
+		r.mu.Unlock()
+		task, err = r.commitResult(ctx, version, &ExecutionResult{
+			Status: StatusCanceled, Error: cancelReason,
 		})
 	}
 	if err != nil {
-		r.poison = err
+		r.loseLease(err)
 		return nil, err
 	}
-	r.version = task.Version
+	committed = task
 	return task, nil
 }
 
-func (r *taskRuntime) commitResult(ctx context.Context, result *ExecutionResult) (*Task, error) {
+func (r *taskRuntime) commitResult(
+	ctx context.Context,
+	version int64,
+	result *ExecutionResult,
+) (*Task, error) {
 	if result.Directive != "" {
 		if result.Directive != ExecutionDirectiveYield || result.Status != "" ||
 			len(result.Data) != 0 || result.Error != "" {
 			return nil, fmt.Errorf("%w: conflicting executor directive and lifecycle result", ErrInvalidExecutionResult)
 		}
 		return r.tasks.Yield(ctx, &YieldTaskRequest{
-			TaskID: r.taskID, ExpectedVersion: r.version,
+			TaskID: r.taskID, ExpectedVersion: version,
 			Checkpoint: cloneBytes(result.Checkpoint),
 		})
 	}
@@ -493,35 +880,35 @@ func (r *taskRuntime) commitResult(ctx context.Context, result *ExecutionResult)
 			return nil, fmt.Errorf("%w: completed result contains checkpoint or error", ErrInvalidExecutionResult)
 		}
 		return r.tasks.Complete(ctx, &CompleteTaskRequest{
-			TaskID: r.taskID, ExpectedVersion: r.version, Data: cloneBytes(result.Data),
+			TaskID: r.taskID, ExpectedVersion: version, Data: cloneBytes(result.Data),
 		})
 	case StatusFailed:
 		if len(result.Checkpoint) != 0 || len(result.Data) != 0 {
 			return nil, fmt.Errorf("%w: failed result contains checkpoint or data", ErrInvalidExecutionResult)
 		}
 		return r.tasks.Fail(ctx, &FailTaskRequest{
-			TaskID: r.taskID, ExpectedVersion: r.version, Error: result.Error,
+			TaskID: r.taskID, ExpectedVersion: version, Error: result.Error,
 		})
 	case StatusCanceled:
 		if len(result.Checkpoint) != 0 || len(result.Data) != 0 {
 			return nil, fmt.Errorf("%w: canceled result contains checkpoint or data", ErrInvalidExecutionResult)
 		}
 		return r.tasks.AckCancel(ctx, &AckCancelRequest{
-			TaskID: r.taskID, ExpectedVersion: r.version, Reason: result.Error,
+			TaskID: r.taskID, ExpectedVersion: version, Reason: result.Error,
 		})
 	case StatusWaitingInput:
 		if len(result.Data) != 0 || result.Error != "" {
 			return nil, fmt.Errorf("%w: waiting-input result contains data or error", ErrInvalidExecutionResult)
 		}
 		return r.tasks.WaitInput(ctx, &WaitInputTaskRequest{
-			TaskID: r.taskID, ExpectedVersion: r.version, Checkpoint: cloneBytes(result.Checkpoint),
+			TaskID: r.taskID, ExpectedVersion: version, Checkpoint: cloneBytes(result.Checkpoint),
 		})
 	case StatusSuspended:
 		if len(result.Data) != 0 || result.Error != "" {
 			return nil, fmt.Errorf("%w: suspended result contains data or error", ErrInvalidExecutionResult)
 		}
 		return r.tasks.Suspend(ctx, &SuspendTaskRequest{
-			TaskID: r.taskID, ExpectedVersion: r.version, Checkpoint: cloneBytes(result.Checkpoint),
+			TaskID: r.taskID, ExpectedVersion: version, Checkpoint: cloneBytes(result.Checkpoint),
 		})
 	default:
 		return nil, fmt.Errorf("%w: unsupported executor result status %q", ErrInvalidExecutionResult, result.Status)
@@ -754,12 +1141,7 @@ func (m *Manager) RequestCancel(
 			return result, ctx.Err()
 		}
 		if attempt.runtime != nil {
-			attempt.runtime.mu.Lock()
-			if !attempt.runtime.cancelRequested {
-				err = attempt.runtime.reconcileCancellationLocked(ctx)
-			}
-			attempt.runtime.mu.Unlock()
-			if err != nil {
+			if err = attempt.runtime.acceptCancellation(result, 0); err != nil {
 				return result, err
 			}
 		}
@@ -904,26 +1286,36 @@ func (m *Manager) execute(
 	if err = executor.ValidateExecution(ctx, cloneTask(task)); err != nil {
 		return fmt.Errorf("backgroundtask: validate execution: %w", err)
 	}
+	leaseConfirmedAt := time.Now()
 	started, err := m.tasks.Start(ctx, &StartTaskRequest{
 		TaskID: taskID, ExpectedVersion: task.Version,
 	})
 	if err != nil {
 		return err
 	}
-	runtime := newTaskRuntime(
-		m.tasks,
-		m.taskEvents,
-		taskID,
-		started.Attempt,
-		started.Version,
-		m.notificationWriter,
-	)
+	runtime := newTaskRuntimeWithConfig(taskRuntimeConfig{
+		tasks:              m.tasks,
+		taskEvents:         m.taskEvents,
+		taskID:             taskID,
+		attempt:            started.Attempt,
+		version:            started.Version,
+		notificationWriter: m.notificationWriter,
+		lease: taskRuntimeLeaseConfig{
+			confirmedAt:             leaseConfirmedAt,
+			duration:                m.leaseDuration,
+			safetyMargin:            m.heartbeatSafetyMargin,
+			tolerateHeartbeatErrors: m.tolerateHeartbeatErrors,
+		},
+	})
 	if started.CancelRequestedAt != nil {
-		runtime.cancelRequested = true
-		runtime.cancelReason = started.CancelReason
-		runtime.requestControlWithReason(ControlStop, runtime.cancelReason)
+		if err = runtime.acceptCancellation(started, 0); err != nil {
+			return err
+		}
 	}
 	runCtx, cancel := context.WithCancel(ctx)
+	if m.tolerateHeartbeatErrors {
+		runCtx = core.WithExecutionGate(runCtx, runtime.WaitForLease)
+	}
 	runCtx = context.WithValue(
 		runCtx,
 		notifyParentContextKey{},
@@ -1002,6 +1394,103 @@ func (m *Manager) heartbeat(
 	done chan<- struct{},
 ) {
 	defer close(done)
+	if !runtime.tolerateHeartbeatErrors {
+		m.heartbeatLegacy(ctx, cancel, runtime, stop)
+		return
+	}
+	interval := m.heartbeatEvery
+	if interval <= 0 {
+		interval = time.Nanosecond
+	}
+	heartbeatTimer := time.NewTimer(interval)
+	defer heartbeatTimer.Stop()
+	heartbeatC := heartbeatTimer.C
+	var resultC <-chan error
+	stopC := stop
+	stopRequested := false
+	for {
+		var safetyTimer *time.Timer
+		var safetyC <-chan time.Time
+		if deadline, ok := runtime.leaseSafetyDeadline(); ok {
+			delay := time.Until(deadline)
+			if delay < 0 {
+				delay = 0
+			}
+			safetyTimer = time.NewTimer(delay)
+			safetyC = safetyTimer.C
+		}
+		select {
+		case <-heartbeatC:
+			heartbeatC = nil
+			result := make(chan error, 1)
+			resultC = result
+			go func() {
+				result <- runtime.heartbeat(ctx)
+			}()
+		case err := <-resultC:
+			resultC = nil
+			switch {
+			case err == nil:
+				if stopRequested {
+					if safetyTimer != nil {
+						safetyTimer.Stop()
+					}
+					return
+				}
+			case errors.Is(err, errHeartbeatRetry):
+			case errors.Is(err, errHeartbeatStopped):
+				if safetyTimer != nil {
+					safetyTimer.Stop()
+				}
+				return
+			default:
+				if !errors.Is(err, context.Canceled) {
+					cancel()
+				}
+				if safetyTimer != nil {
+					safetyTimer.Stop()
+				}
+				return
+			}
+			heartbeatTimer.Reset(interval)
+			heartbeatC = heartbeatTimer.C
+		case <-ctx.Done():
+			runtime.stopHeartbeat()
+			if safetyTimer != nil {
+				safetyTimer.Stop()
+			}
+			return
+		case <-runtime.heartbeatAbort:
+			if safetyTimer != nil {
+				safetyTimer.Stop()
+			}
+			return
+		case <-stopC:
+			stopRequested = true
+			stopC = nil
+			if resultC == nil && !runtime.leaseNeedsConfirmation() {
+				if safetyTimer != nil {
+					safetyTimer.Stop()
+				}
+				return
+			}
+		case <-safetyC:
+			runtime.loseLease(ErrLeaseLost)
+			cancel()
+			return
+		}
+		if safetyTimer != nil {
+			safetyTimer.Stop()
+		}
+	}
+}
+
+func (m *Manager) heartbeatLegacy(
+	ctx context.Context,
+	cancel context.CancelFunc,
+	runtime *taskRuntime,
+	stop <-chan struct{},
+) {
 	interval := m.heartbeatEvery
 	if interval <= 0 {
 		interval = time.Nanosecond
@@ -1054,5 +1543,6 @@ func boundedError(err error) string {
 
 var (
 	_ ExecutionRuntime   = (*taskRuntime)(nil)
+	_ LeaseGateRuntime   = (*taskRuntime)(nil)
 	_ StartCommitRuntime = (*taskRuntime)(nil)
 )
