@@ -67,6 +67,50 @@ type firstReleaseConflictStore struct {
 	once sync.Once
 }
 
+func TestManagerConfiguresLifecycleIntervals(t *testing.T) {
+	tests := []struct {
+		name              string
+		config            *Config
+		heartbeatInterval time.Duration
+		activeTimeout     time.Duration
+	}{
+		{
+			name:              "defaults",
+			heartbeatInterval: defaultHeartbeatInterval,
+			activeTimeout:     defaultActiveAttemptTimeout,
+		},
+		{
+			name: "configured",
+			config: &Config{
+				HeartbeatInterval:    2 * time.Second,
+				ActiveAttemptTimeout: 7 * time.Second,
+			},
+			heartbeatInterval: 2 * time.Second,
+			activeTimeout:     7 * time.Second,
+		},
+		{
+			name: "non-positive values use defaults",
+			config: &Config{
+				HeartbeatInterval:    -time.Second,
+				ActiveAttemptTimeout: -time.Second,
+			},
+			heartbeatInterval: defaultHeartbeatInterval,
+			activeTimeout:     defaultActiveAttemptTimeout,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			manager := mustNewManager(t, context.Background(), test.config)
+			defer closeWithTimeout(manager)
+
+			require.Equal(t, test.heartbeatInterval, manager.heartbeatEvery)
+			store, ok := manager.tasks.(*InMemoryStore)
+			require.True(t, ok)
+			require.Equal(t, test.activeTimeout, store.activeTimeout)
+		})
+	}
+}
+
 func (s *firstReleaseConflictStore) ReleaseSuspension(
 	ctx context.Context,
 	req *ReleaseSuspensionRequest,
@@ -709,8 +753,9 @@ func (s heartbeatErrorStore) Heartbeat(context.Context, *HeartbeatRequest) (*Tas
 }
 
 func TestManagerHeartbeatStopsAndCancelsOnLeaseError(t *testing.T) {
-	manager := mustNewManager(t, context.Background(), nil)
-	manager.heartbeatEvery = time.Nanosecond
+	manager := mustNewManager(t, context.Background(), &Config{
+		HeartbeatInterval: time.Nanosecond,
+	})
 	events := NewInMemoryStore(nil)
 	runtime := newTaskRuntime(
 		heartbeatErrorStore{TaskStore: NewInMemoryStore(nil), err: ErrLeaseLost},

@@ -38,6 +38,8 @@ import (
 	"time"
 )
 
+const defaultHeartbeatInterval = 10 * time.Second
+
 // Status represents the durable lifecycle status of a task.
 type Status string
 
@@ -138,6 +140,14 @@ type Config struct {
 	TaskEvents TaskEventStore
 	// Executors resolves serialized task intent to local implementations.
 	Executors *ExecutorRegistry
+	// HeartbeatInterval controls how often Manager renews an active attempt
+	// lease. It should be shorter than the task store's active-attempt timeout.
+	// Non-positive values default to 10 seconds.
+	HeartbeatInterval time.Duration
+	// ActiveAttemptTimeout controls lease expiry for the default in-memory task
+	// store. Non-positive values default to 30 seconds. This field is ignored
+	// when Tasks is supplied.
+	ActiveAttemptTimeout time.Duration
 	// SendTaskCreatedEvent emits a TaskCreated timeline event after a task is
 	// durably created. It may be called concurrently. Tasks without a parent
 	// SessionID do not emit this event. Use TaskCreatedSessionEventSender so the
@@ -207,9 +217,17 @@ type Manager struct {
 // must also implement TaskEventStore. The context is reserved for constructor
 // symmetry; Manager does not retain it or derive task lifetime from it.
 func New(_ context.Context, conf *Config) (*Manager, error) {
-	defaults := NewInMemoryStore(nil)
+	defaultStoreConfig := &InMemoryStoreConfig{}
+	heartbeatInterval := defaultHeartbeatInterval
+	if conf != nil {
+		defaultStoreConfig.ActiveAttemptTimeout = conf.ActiveAttemptTimeout
+		if conf.HeartbeatInterval > 0 {
+			heartbeatInterval = conf.HeartbeatInterval
+		}
+	}
+	defaults := NewInMemoryStore(defaultStoreConfig)
 	m := &Manager{
-		heartbeatEvery: 10 * time.Second,
+		heartbeatEvery: heartbeatInterval,
 		activeAttempts: make(map[string]*activeAttempt),
 		tasks:          defaults,
 		taskEvents:     defaults,

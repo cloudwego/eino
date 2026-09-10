@@ -48,8 +48,9 @@ type memoryActiveAttempt struct {
 }
 
 const (
-	defaultTaskEventPageSize = 100
-	maxTaskEventPageSize     = 1000
+	defaultActiveAttemptTimeout = 30 * time.Second
+	defaultTaskEventPageSize    = 100
+	maxTaskEventPageSize        = 1000
 )
 
 type taskEventCursor struct {
@@ -95,7 +96,7 @@ func NewInMemoryStore(config *InMemoryStoreConfig) *InMemoryStore {
 		customNotifications: make(map[string]map[string]Notification),
 		notify:              make(chan struct{}),
 		now:                 time.Now,
-		activeTimeout:       30 * time.Second,
+		activeTimeout:       defaultActiveAttemptTimeout,
 		maxValue:            1 << 20,
 	}
 	if config != nil {
