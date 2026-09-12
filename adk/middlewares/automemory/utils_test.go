@@ -17,11 +17,13 @@
 package automemory
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -87,4 +89,53 @@ func TestConcatMessageStream_WithToolCalls(t *testing.T) {
 	assert.Equal(t, "thinking...", msg.Content)
 	require.Len(t, msg.ToolCalls, 1)
 	assert.Equal(t, "search", msg.ToolCalls[0].Function.Name)
+}
+
+func TestTopicMemoryQueryScope(t *testing.T) {
+	t.Run("message", testTopicMemoryQueryScope[*schema.Message])
+	t.Run("agentic_message", testTopicMemoryQueryScope[*schema.AgenticMessage])
+}
+
+func testTopicMemoryQueryScope[M adk.MessageType](t *testing.T) {
+	query := makeUserMsg[M]("refund rules")
+	key := topicMemoryQueryKey([]M{query})
+	topic := newMemoryMessage[M]("<!-- automemory -->refund notes")
+	copyAndSetMsgExtra(topic, topicMemoryQueryExtraKey, key)
+	index := newMemoryIndexMessage[M]("<!-- automemory:index -->index")
+	reminder := makeUserMsg[M]("<system-reminder>other middleware</system-reminder>")
+	var nilMsg M
+	for _, messages := range [][]M{
+		{index, topic, query}, // Sync inserts before the query.
+		{index, query, topic}, // Async appends after the query.
+		{nilMsg, index, query, topic, reminder},
+	} {
+		require.True(t, hasTopicMemoryInjected(messages))
+		data, err := json.Marshal(messages)
+		require.NoError(t, err)
+		var restored []M
+		require.NoError(t, json.Unmarshal(data, &restored))
+		require.True(t, hasTopicMemoryInjected(restored))
+		// A consecutive query must not inherit an earlier async reminder,
+		// even when there is no assistant response between the two queries.
+		require.False(t, hasTopicMemoryInjected(append(restored, makeUserMsg[M]("change appointment"))))
+		require.False(t, hasTopicMemoryInjected(append(messages, makeUserMsg[M]("refund rules"))))
+	}
+	require.False(t, hasTopicMemoryInjected([]M{nilMsg, index, topic}))
+	require.False(t, hasTopicMemoryInjected([]M{newMemoryMessage[M]("legacy topic"), query}))
+}
+
+func TestTopicMemoryQueryScopeIgnoresAgenticToolResults(t *testing.T) {
+	query := schema.UserAgenticMessage("refund rules")
+	key := topicMemoryQueryKey([]*schema.AgenticMessage{query})
+	topic := newMemoryMessage[*schema.AgenticMessage]("<!-- automemory -->refund notes")
+	copyAndSetMsgExtra(topic, topicMemoryQueryExtraKey, key)
+	result := &schema.AgenticMessage{
+		Role: schema.AgenticRoleTypeUser,
+		ContentBlocks: []*schema.ContentBlock{
+			schema.NewContentBlock(&schema.FunctionToolResult{CallID: "call-1", Name: "lookup"}),
+		},
+	}
+	messages := []*schema.AgenticMessage{topic, query, result}
+	require.True(t, hasTopicMemoryInjected(messages))
+	require.Equal(t, 1, lastUserQueryMessageIndex(messages))
 }
