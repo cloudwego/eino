@@ -19,7 +19,7 @@ package filesystem
 import (
 	"context"
 	"fmt"
-	"path/filepath"
+	"path"
 	"regexp"
 	"strings"
 	"sync"
@@ -53,7 +53,7 @@ func (b *InMemoryBackend) LsInfo(ctx context.Context, req *LsInfoRequest) ([]Fil
 	defer b.mu.RUnlock()
 
 	// Normalize path
-	path := normalizePath(req.Path)
+	dir := normalizePath(req.Path)
 
 	var result []FileInfo
 	seen := make(map[string]bool)
@@ -63,16 +63,16 @@ func (b *InMemoryBackend) LsInfo(ctx context.Context, req *LsInfoRequest) ([]Fil
 		normalizedFilePath := normalizePath(filePath)
 
 		// Check if file is under the given path
-		if path == "/" || strings.HasPrefix(normalizedFilePath, path+"/") || normalizedFilePath == path {
+		if dir == "/" || strings.HasPrefix(normalizedFilePath, dir+"/") || normalizedFilePath == dir {
 			// For directory listing, we want to show immediate children
-			relativePath := strings.TrimPrefix(normalizedFilePath, path)
+			relativePath := strings.TrimPrefix(normalizedFilePath, dir)
 			relativePath = strings.TrimPrefix(relativePath, "/")
 
 			if relativePath == "" {
 				// The path itself is a file
 				if !seen[normalizedFilePath] {
 					result = append(result, FileInfo{
-						Path:       filepath.Base(normalizedFilePath),
+						Path:       path.Base(normalizedFilePath),
 						IsDir:      false,
 						Size:       int64(len(entry.content)),
 						ModifiedAt: entry.modifiedAt.Format(time.RFC3339Nano),
@@ -85,8 +85,8 @@ func (b *InMemoryBackend) LsInfo(ctx context.Context, req *LsInfoRequest) ([]Fil
 			// Get the first segment (immediate child)
 			parts := strings.SplitN(relativePath, "/", 2)
 			if len(parts) > 0 {
-				childPath := path
-				if path != "/" {
+				childPath := dir
+				if dir != "/" {
 					childPath += "/"
 				}
 				childPath += parts[0]
@@ -378,7 +378,7 @@ func (b *InMemoryBackend) filterByGlob(files []string, searchPath string, globPa
 				matchPath = strings.TrimPrefix(filePath, searchPath+"/")
 			}
 		} else {
-			matchPath = filepath.Base(filePath)
+			matchPath = path.Base(filePath)
 		}
 
 		matched, err := doublestar.Match(globPattern, matchPath)
@@ -397,7 +397,7 @@ func (b *InMemoryBackend) filterByFileType(files []string, fileType string) []st
 	var result []string
 
 	for _, filePath := range files {
-		ext := strings.TrimPrefix(filepath.Ext(filePath), ".")
+		ext := strings.TrimPrefix(path.Ext(filePath), ".")
 		if matchFileType(ext, fileType) {
 			result = append(result, filePath)
 		}
@@ -687,17 +687,22 @@ func (b *InMemoryBackend) Edit(ctx context.Context, req *EditRequest) error {
 }
 
 // normalizePath normalizes a file path by ensuring it starts with "/" and removing trailing slashes.
-func normalizePath(path string) string {
-	if path == "" {
+//
+// Paths in this backend are virtual and slash-separated, so they are cleaned
+// with the slash-only path package: filepath.Clean would rewrite them with the
+// host separator (e.g. backslashes on Windows) and every glob/prefix match that
+// assumes "/" would then miss.
+func normalizePath(p string) string {
+	if p == "" {
 		return "/"
 	}
 
 	// Ensure path starts with "/"
-	if !strings.HasPrefix(path, "/") {
-		path = "/" + path
+	if !strings.HasPrefix(p, "/") {
+		p = "/" + p
 	}
 
-	return filepath.Clean(path)
+	return path.Clean(p)
 }
 
 type grepCollector struct {
