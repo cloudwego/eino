@@ -19,7 +19,7 @@ package skill
 import (
 	"context"
 	"fmt"
-	"path/filepath"
+	"path"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -106,8 +106,8 @@ func (b *filesystemBackend) list(ctx context.Context) ([]Skill, error) {
 
 	for _, entry := range entries {
 		filePath := entry.Path
-		if !filepath.IsAbs(filePath) {
-			filePath = filepath.Join(b.baseDir, filePath)
+		if !path.IsAbs(filePath) {
+			filePath = path.Join(b.baseDir, filePath)
 		}
 		skill, loadErr := b.loadSkillFromFile(ctx, filePath)
 		if loadErr != nil {
@@ -120,9 +120,9 @@ func (b *filesystemBackend) list(ctx context.Context) ([]Skill, error) {
 	return skills, nil
 }
 
-func (b *filesystemBackend) loadSkillFromFile(ctx context.Context, path string) (Skill, error) {
+func (b *filesystemBackend) loadSkillFromFile(ctx context.Context, filePath string) (Skill, error) {
 	fileContent, err := b.backend.Read(ctx, &filesystem.ReadRequest{
-		FilePath: path,
+		FilePath: filePath,
 	})
 	if err != nil {
 		return Skill{}, fmt.Errorf("failed to read file: %w", err)
@@ -140,7 +140,7 @@ func (b *filesystemBackend) loadSkillFromFile(ctx context.Context, path string) 
 		return Skill{}, fmt.Errorf("failed to unmarshal frontmatter: %w", err)
 	}
 
-	absDir := filepath.Dir(path)
+	absDir := path.Dir(filePath)
 
 	return Skill{
 		FrontMatter:   fm,

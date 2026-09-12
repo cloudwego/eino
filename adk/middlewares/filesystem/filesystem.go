@@ -22,7 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"path/filepath"
+	"path"
 	"runtime/debug"
 	"sort"
 	"strconv"
@@ -955,7 +955,7 @@ func newGrepTool(fs filesystem.Backend, name string, desc string) (tool.BaseTool
 	}
 	return utils.InferTool(toolName, d, func(ctx context.Context, input grepArgs) (string, error) {
 		// Extract string parameters
-		path := valueOrDefault(input.Path, "")
+		filePath := valueOrDefault(input.Path, "")
 		glob := valueOrDefault(input.Glob, "")
 		fileType := valueOrDefault(input.FileType, "")
 		var beforeLines, afterLines int
@@ -979,7 +979,7 @@ func newGrepTool(fs filesystem.Backend, name string, desc string) (tool.BaseTool
 
 		matches, err := fs.GrepRaw(ctx, &filesystem.GrepRequest{
 			Pattern:         input.Pattern,
-			Path:            path,
+			Path:            filePath,
 			Glob:            glob,
 			FileType:        fileType,
 			CaseInsensitive: caseInsensitive,
@@ -992,7 +992,7 @@ func newGrepTool(fs filesystem.Backend, name string, desc string) (tool.BaseTool
 		}
 
 		sort.SliceStable(matches, func(i, j int) bool {
-			return filepath.Base(matches[i].Path) < filepath.Base(matches[j].Path)
+			return path.Base(matches[i].Path) < path.Base(matches[j].Path)
 		})
 
 		switch input.OutputMode {

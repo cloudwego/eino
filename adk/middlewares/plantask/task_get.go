@@ -19,7 +19,7 @@ package plantask
 import (
 	"context"
 	"fmt"
-	"path/filepath"
+	"path"
 	"strings"
 	"sync"
 
@@ -78,7 +78,7 @@ func (t *taskGetTool) InvokableRun(ctx context.Context, argumentsInJSON string, 
 	}
 
 	taskFileName := fmt.Sprintf("%s.json", params.TaskID)
-	taskFilePath := filepath.Join(t.BaseDir, taskFileName)
+	taskFilePath := path.Join(t.BaseDir, taskFileName)
 
 	content, err := t.Backend.Read(ctx, &ReadRequest{
 		FilePath: taskFilePath,

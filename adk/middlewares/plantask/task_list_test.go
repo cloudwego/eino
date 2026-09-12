@@ -18,7 +18,7 @@ package plantask
 
 import (
 	"context"
-	"path/filepath"
+	"path"
 	"sync"
 	"testing"
 
@@ -45,11 +45,11 @@ func TestTaskListTool(t *testing.T) {
 
 	task1 := &task{ID: "1", Subject: "Task 1", Status: taskStatusPending, BlockedBy: []string{"2"}}
 	task1JSON, _ := sonic.MarshalString(task1)
-	_ = backend.Write(ctx, &WriteRequest{FilePath: filepath.Join(baseDir, "1.json"), Content: task1JSON})
+	_ = backend.Write(ctx, &WriteRequest{FilePath: path.Join(baseDir, "1.json"), Content: task1JSON})
 
 	task2 := &task{ID: "2", Subject: "Task 2", Status: taskStatusInProgress, Owner: "agent1"}
 	task2JSON, _ := sonic.MarshalString(task2)
-	_ = backend.Write(ctx, &WriteRequest{FilePath: filepath.Join(baseDir, "2.json"), Content: task2JSON})
+	_ = backend.Write(ctx, &WriteRequest{FilePath: path.Join(baseDir, "2.json"), Content: task2JSON})
 
 	result, err = tool.InvokableRun(ctx, `{}`)
 	assert.NoError(t, err)

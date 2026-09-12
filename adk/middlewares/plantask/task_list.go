@@ -19,7 +19,7 @@ package plantask
 import (
 	"context"
 	"fmt"
-	"path/filepath"
+	"path"
 	"sort"
 	"strings"
 	"sync"
@@ -64,7 +64,7 @@ func listTasks(ctx context.Context, backend Backend, baseDir string) ([]*task, e
 
 	var tasks []*task
 	for _, file := range files {
-		fileName := filepath.Base(file.Path)
+		fileName := path.Base(file.Path)
 		if !strings.HasSuffix(fileName, ".json") {
 			continue
 		}

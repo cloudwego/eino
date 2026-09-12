@@ -21,7 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"path/filepath"
+	"path"
 	"strings"
 	"unicode/utf8"
 
@@ -272,7 +272,7 @@ func (t *TypedConfig[M]) copyAndFillDefaults() (*TypedConfig[M], error) {
 			if tcID == "" {
 				tcID = uuid.NewString()
 			}
-			return filepath.Join(cfg.RootDir, "trunc", tcID), nil
+			return path.Join(cfg.RootDir, "trunc", tcID), nil
 		}
 	}
 	if cfg.GenClearOffloadFilePath == nil {
@@ -281,7 +281,7 @@ func (t *TypedConfig[M]) copyAndFillDefaults() (*TypedConfig[M], error) {
 			if tcID == "" {
 				tcID = uuid.NewString()
 			}
-			return filepath.Join(cfg.RootDir, "clear", tcID), nil
+			return path.Join(cfg.RootDir, "clear", tcID), nil
 		}
 	}
 	if cfg.MaxLengthForTrunc == 0 {

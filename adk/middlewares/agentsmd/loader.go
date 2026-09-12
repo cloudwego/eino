@@ -22,7 +22,7 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"path/filepath"
+	"path"
 	"regexp"
 	"strings"
 	"unicode/utf8"
@@ -130,7 +130,7 @@ func (cfg *loaderConfig) load(ctx context.Context) (string, error) {
 		if l.stopped {
 			// The budget was exhausted by an earlier file; the rest never load.
 			for _, p := range l.files[i:] {
-				omitted = append(omitted, filepath.Clean(p))
+				omitted = append(omitted, path.Clean(p))
 			}
 			break
 		}
@@ -144,7 +144,7 @@ func (cfg *loaderConfig) load(ctx context.Context) (string, error) {
 
 		// This file crossed the budget and was dropped whole (truncated files stay in parts).
 		if l.stopped && len(parts) == before {
-			omitted = append(omitted, filepath.Clean(filePath))
+			omitted = append(omitted, path.Clean(filePath))
 		}
 	}
 
@@ -157,7 +157,7 @@ func (cfg *loaderConfig) load(ctx context.Context) (string, error) {
 // visited tracks the current ancestor chain to detect circular imports.
 // seen tracks globally loaded files to avoid duplicate reads and byte counting.
 func (l *loader) loadFile(ctx context.Context, filePath string, depth int, visited map[string]bool, seen map[string]bool) ([]loadedFile, error) {
-	filePath = filepath.Clean(filePath)
+	filePath = path.Clean(filePath)
 
 	if depth > maxImportDepth {
 		l.onWarning(filePath, fmt.Errorf("@import depth exceeds maximum of %d", maxImportDepth))
@@ -270,7 +270,7 @@ func (l *loader) applyBudget(filePath, content string) (string, bool) {
 // Non-fatal errors (file not found, depth exceeded, circular import) are reported
 // via onWarning and skipped. Fatal errors (e.g. I/O) are returned.
 func (l *loader) collectImports(ctx context.Context, hostPath, content string, depth int, visited map[string]bool, seen map[string]bool) ([]loadedFile, error) {
-	dir := filepath.Dir(hostPath)
+	dir := path.Dir(hostPath)
 	var imports []loadedFile
 
 	matches := importRegex.FindAllStringSubmatch(content, -1)
@@ -282,13 +282,13 @@ func (l *loader) collectImports(ctx context.Context, hostPath, content string, d
 
 		// Only treat as import if path contains "/" or ends with an allowed extension.
 		// This avoids false positives on email addresses and social mentions.
-		if !strings.Contains(rawPath, "/") && !allowedImportExts[filepath.Ext(rawPath)] {
+		if !strings.Contains(rawPath, "/") && !allowedImportExts[path.Ext(rawPath)] {
 			continue
 		}
 
 		importPath := rawPath
-		if !filepath.IsAbs(importPath) {
-			importPath = filepath.Join(dir, importPath)
+		if !path.IsAbs(importPath) {
+			importPath = path.Join(dir, importPath)
 		}
 
 		if seen[importPath] {

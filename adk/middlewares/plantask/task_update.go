@@ -19,7 +19,7 @@ package plantask
 import (
 	"context"
 	"fmt"
-	"path/filepath"
+	"path"
 	"strings"
 	"sync"
 
@@ -134,7 +134,7 @@ func (t *taskUpdateTool) InvokableRun(ctx context.Context, argumentsInJSON strin
 	}
 
 	taskFileName := fmt.Sprintf("%s.json", params.TaskID)
-	taskFilePath := filepath.Join(t.BaseDir, taskFileName)
+	taskFilePath := path.Join(t.BaseDir, taskFileName)
 
 	if params.Status == taskStatusDeleted {
 		if removeErr := t.removeTaskFromDependencies(ctx, params.TaskID); removeErr != nil {
@@ -322,7 +322,7 @@ func (t *taskUpdateTool) removeTaskFromDependencies(ctx context.Context, deleted
 				return fmt.Errorf("failed to marshal task #%s: %w", taskData.ID, err)
 			}
 
-			taskFilePath := filepath.Join(t.BaseDir, fmt.Sprintf("%s.json", taskData.ID))
+			taskFilePath := path.Join(t.BaseDir, fmt.Sprintf("%s.json", taskData.ID))
 			if err := t.Backend.Write(ctx, &WriteRequest{FilePath: taskFilePath, Content: updatedContent}); err != nil {
 				return fmt.Errorf("failed to write task #%s: %w", taskData.ID, err)
 			}
@@ -333,7 +333,7 @@ func (t *taskUpdateTool) removeTaskFromDependencies(ctx context.Context, deleted
 }
 
 func (t *taskUpdateTool) addBlockedByToTask(ctx context.Context, targetTaskID, blockerTaskID string) error {
-	taskFilePath := filepath.Join(t.BaseDir, fmt.Sprintf("%s.json", targetTaskID))
+	taskFilePath := path.Join(t.BaseDir, fmt.Sprintf("%s.json", targetTaskID))
 
 	content, err := t.Backend.Read(ctx, &ReadRequest{FilePath: taskFilePath})
 	if err != nil {
@@ -360,7 +360,7 @@ func (t *taskUpdateTool) addBlockedByToTask(ctx context.Context, targetTaskID, b
 }
 
 func (t *taskUpdateTool) addBlocksToTask(ctx context.Context, targetTaskID, blockedTaskID string) error {
-	taskFilePath := filepath.Join(t.BaseDir, fmt.Sprintf("%s.json", targetTaskID))
+	taskFilePath := path.Join(t.BaseDir, fmt.Sprintf("%s.json", targetTaskID))
 
 	content, err := t.Backend.Read(ctx, &ReadRequest{FilePath: taskFilePath})
 	if err != nil {
@@ -401,7 +401,7 @@ func (t *taskUpdateTool) checkIfNeedDeleteAllTasks(ctx context.Context) error {
 
 	for _, task := range tasks {
 		err := t.Backend.Delete(ctx, &DeleteRequest{
-			FilePath: filepath.Join(t.BaseDir, task.ID+".json"),
+			FilePath: path.Join(t.BaseDir, task.ID+".json"),
 		})
 		if err != nil {
 			return err
