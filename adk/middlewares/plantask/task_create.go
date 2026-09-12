@@ -19,7 +19,7 @@ package plantask
 import (
 	"context"
 	"fmt"
-	"path/filepath"
+	"path"
 	"sync"
 
 	"github.com/bytedance/sonic"
@@ -104,7 +104,7 @@ func (t *taskCreateTool) InvokableRun(ctx context.Context, argumentsInJSON strin
 
 	highwatermark := int64(0)
 	for _, file := range files {
-		fileName := filepath.Base(file.Path)
+		fileName := path.Base(file.Path)
 		if fileName == highWatermarkFileName {
 			content, readErr := t.Backend.Read(ctx, &ReadRequest{
 				FilePath: file.Path,
@@ -126,7 +126,7 @@ func (t *taskCreateTool) InvokableRun(ctx context.Context, argumentsInJSON strin
 	taskFileName := fmt.Sprintf("%d.json", taskID)
 
 	for _, file := range files {
-		fileName := filepath.Base(file.Path)
+		fileName := path.Base(file.Path)
 		if fileName == taskFileName {
 			return "", fmt.Errorf("task #%d already exists", taskID)
 		}
@@ -149,7 +149,7 @@ func (t *taskCreateTool) InvokableRun(ctx context.Context, argumentsInJSON strin
 	}
 
 	//  Write highwatermark file first
-	highwatermarkPath := filepath.Join(t.BaseDir, highWatermarkFileName)
+	highwatermarkPath := path.Join(t.BaseDir, highWatermarkFileName)
 	err = t.Backend.Write(ctx, &WriteRequest{
 		FilePath: highwatermarkPath,
 		Content:  fmt.Sprintf("%d", taskID),
@@ -158,7 +158,7 @@ func (t *taskCreateTool) InvokableRun(ctx context.Context, argumentsInJSON strin
 		return "", fmt.Errorf("%s update highwatermark file %s failed, err: %w", TaskCreateToolName, highwatermarkPath, err)
 	}
 
-	taskFilePath := filepath.Join(t.BaseDir, taskFileName)
+	taskFilePath := path.Join(t.BaseDir, taskFileName)
 	err = t.Backend.Write(ctx, &WriteRequest{
 		FilePath: taskFilePath,
 		Content:  taskData,

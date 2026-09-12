@@ -18,7 +18,7 @@ package plantask
 
 import (
 	"context"
-	"path/filepath"
+	"path"
 	"sync"
 	"testing"
 
@@ -41,7 +41,7 @@ func TestTaskGetTool(t *testing.T) {
 		BlockedBy:   []string{"4"},
 	}
 	taskJSON, _ := sonic.MarshalString(taskData)
-	_ = backend.Write(ctx, &WriteRequest{FilePath: filepath.Join(baseDir, "1.json"), Content: taskJSON})
+	_ = backend.Write(ctx, &WriteRequest{FilePath: path.Join(baseDir, "1.json"), Content: taskJSON})
 
 	tool := newTaskGetTool(backend, baseDir, lock)
 

@@ -627,14 +627,14 @@ func TestLoader_RelativeTopLevelWithDotDotImport(t *testing.T) {
 	if !strings.Contains(content, "SHARED X") {
 		t.Fatalf("expected imported content, got %q", content)
 	}
-	// filepath.Clean should normalize "sub/../shared/x.md" to "shared/x.md"
+	// path.Clean should normalize "sub/../shared/x.md" to "shared/x.md"
 	if !strings.Contains(content, "Contents of shared/x.md") {
 		t.Fatalf("expected normalized path in section header, got %q", content)
 	}
 }
 
 func TestLoader_RelativeTopLevelDedup(t *testing.T) {
-	// Two top-level relative paths that resolve to the same file via filepath.Clean
+	// Two top-level relative paths that resolve to the same file via path.Clean
 	// should be deduped (loaded only once).
 	b := newMemBackend()
 	b.set("sub/a.md", "CONTENT A")
@@ -683,7 +683,7 @@ func TestLoader_AbsoluteTopLevelWithDotDotImport(t *testing.T) {
 	if !strings.Contains(content, "SHARED") {
 		t.Fatalf("expected imported content, got %q", content)
 	}
-	// filepath.Clean normalizes "/project/sub/../shared/x.md" to "/project/shared/x.md"
+	// path.Clean normalizes "/project/sub/../shared/x.md" to "/project/shared/x.md"
 	if !strings.Contains(content, "Contents of /project/shared/x.md") {
 		t.Fatalf("expected normalized path in section header, got %q", content)
 	}
@@ -691,7 +691,7 @@ func TestLoader_AbsoluteTopLevelWithDotDotImport(t *testing.T) {
 
 func TestLoader_RelativeImportDedup(t *testing.T) {
 	// Two different relative @import paths that resolve to the same file
-	// should be deduped via filepath.Clean.
+	// should be deduped via path.Clean.
 	b := newMemBackend()
 	b.set("/a/main.md", "first @/a/b/shared.md second @../a/b/shared.md end")
 	b.set("/a/b/shared.md", "SHARED ONCE")

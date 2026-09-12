@@ -19,7 +19,7 @@ package filesystem
 import (
 	"context"
 	"fmt"
-	"path/filepath"
+	"path"
 	"strconv"
 	"strings"
 	"testing"
@@ -2209,7 +2209,7 @@ func TestInMemoryBackend_GrepRaw_ComplexScenarios(t *testing.T) {
 			t.Fatalf("GrepRaw failed: %v", err)
 		}
 		for _, match := range matches {
-			if filepath.Base(match.Path) != "main.go" {
+			if path.Base(match.Path) != "main.go" {
 				t.Errorf("Expected filename 'main.go', got: %s", match.Path)
 			}
 		}

@@ -18,7 +18,7 @@ package plantask
 
 import (
 	"context"
-	"path/filepath"
+	"path"
 	"sync"
 	"testing"
 
@@ -43,7 +43,7 @@ func TestTaskCreateTool(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, `{"result":"Task #1 created successfully: Test Task"}`, result)
 
-	content, err := backend.Read(ctx, &ReadRequest{FilePath: filepath.Join(baseDir, "1.json")})
+	content, err := backend.Read(ctx, &ReadRequest{FilePath: path.Join(baseDir, "1.json")})
 	assert.NoError(t, err)
 
 	var taskData task
@@ -55,7 +55,7 @@ func TestTaskCreateTool(t *testing.T) {
 	assert.Equal(t, taskStatusPending, taskData.Status)
 	assert.Equal(t, "Testing", taskData.ActiveForm)
 
-	hwContent, err := backend.Read(ctx, &ReadRequest{FilePath: filepath.Join(baseDir, highWatermarkFileName)})
+	hwContent, err := backend.Read(ctx, &ReadRequest{FilePath: path.Join(baseDir, highWatermarkFileName)})
 	assert.NoError(t, err)
 	assert.Equal(t, "1", hwContent.Content)
 
@@ -63,7 +63,7 @@ func TestTaskCreateTool(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, `{"result":"Task #2 created successfully: Second Task"}`, result)
 
-	hwContent, err = backend.Read(ctx, &ReadRequest{FilePath: filepath.Join(baseDir, highWatermarkFileName)})
+	hwContent, err = backend.Read(ctx, &ReadRequest{FilePath: path.Join(baseDir, highWatermarkFileName)})
 	assert.NoError(t, err)
 	assert.Equal(t, "2", hwContent.Content)
 }
@@ -80,7 +80,7 @@ func TestTaskCreateToolWithMetadata(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Contains(t, result, "Task #1 created successfully")
 
-	content, err := backend.Read(ctx, &ReadRequest{FilePath: filepath.Join(baseDir, "1.json")})
+	content, err := backend.Read(ctx, &ReadRequest{FilePath: path.Join(baseDir, "1.json")})
 	assert.NoError(t, err)
 
 	var taskData task

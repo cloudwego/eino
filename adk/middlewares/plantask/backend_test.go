@@ -19,7 +19,7 @@ package plantask
 import (
 	"context"
 	"errors"
-	"path/filepath"
+	"path"
 	"strings"
 	"sync"
 
@@ -43,10 +43,10 @@ func (b *inMemoryBackend) LsInfo(ctx context.Context, req *LsInfoRequest) ([]Fil
 
 	reqPath := strings.TrimSuffix(req.Path, "/")
 	var result []FileInfo
-	for path := range b.files {
-		dir := filepath.Dir(path)
+	for p := range b.files {
+		dir := path.Dir(p)
 		if dir == reqPath {
-			result = append(result, FileInfo{Path: path})
+			result = append(result, FileInfo{Path: p})
 		}
 	}
 	return result, nil
