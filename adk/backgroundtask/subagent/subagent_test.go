@@ -1459,7 +1459,7 @@ func TestExecutorInterruptPropagatesCheckpointWriteFailureWithoutReadback(t *tes
 	failed, err := manager.Get(context.Background(), task.Spec.ID)
 	require.NoError(t, err)
 	require.Equal(t, backgroundtask.StatusFailed, failed.Status)
-	require.Contains(t, failed.ResultError, adk.ErrCheckpointSave.Error())
+	require.Contains(t, failed.ResultError, "checkpoint storage unavailable")
 }
 
 func TestExecutorMessageBecomesTerminalResult_BitsUT(t *testing.T) {
