@@ -1413,6 +1413,55 @@ func TestExecutorInterruptBecomesWaitingInput_BitsUT(t *testing.T) {
 	assert.True(t, exists)
 }
 
+func TestExecutorInterruptPropagatesCheckpointWriteFailureWithoutReadback(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	agent := &resumableTestAgent{name: "worker", eventFactory: func(ctx context.Context) *adk.AgentEvent {
+		close(started)
+		<-release
+		return adk.Interrupt(ctx, "approve")
+	}}
+	sessionStore := adksession.NewInMemoryStore[*schema.Message](nil)
+	checkpointStore := &recordingCheckpointStore{
+		store:  sessionStore,
+		setErr: errors.New("checkpoint storage unavailable"),
+	}
+	executor, err := NewExecutor(&ExecutorConfig[*schema.Message]{
+		SessionStore: sessionStore, CheckPointStore: checkpointStore,
+	})
+	require.NoError(t, err)
+	require.NoError(t, executor.Register(
+		agent.name, &AgentRegistration[*schema.Message]{Agent: agent},
+	))
+	executors := backgroundtask.NewExecutorRegistry()
+	require.NoError(t, executors.Register(executor))
+	manager := mustNewBackgroundManager(
+		t,
+		context.Background(),
+		&backgroundtask.Config{Executors: executors},
+	)
+	task, err := Submit(context.Background(), manager, &SubmitRequest[*schema.Message]{
+		SubAgentName: agent.name, Input: textInput("work"), Description: "work",
+		SessionID: "parent",
+	})
+	require.NoError(t, err)
+	executeDone := make(chan error, 1)
+	go func() {
+		executeDone <- manager.Execute(context.Background(), task.Spec.ID)
+	}()
+	<-started
+	checkpointStore.getCount.Store(0)
+	close(release)
+
+	require.NoError(t, <-executeDone)
+	require.Positive(t, checkpointStore.setCount.Load())
+	require.Zero(t, checkpointStore.getCount.Load())
+	failed, err := manager.Get(context.Background(), task.Spec.ID)
+	require.NoError(t, err)
+	require.Equal(t, backgroundtask.StatusFailed, failed.Status)
+	require.Contains(t, failed.ResultError, adk.ErrCheckpointSave.Error())
+}
+
 func TestExecutorMessageBecomesTerminalResult_BitsUT(t *testing.T) {
 	message := adk.EventFromMessage(
 		schema.AssistantMessage("progress", nil), nil, schema.Assistant, "worker",

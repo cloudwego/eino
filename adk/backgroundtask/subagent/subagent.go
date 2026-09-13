@@ -744,17 +744,11 @@ func waitForDrainCancelOutcome(
 	}
 }
 
-func (e *Executor[M]) interruptResult(
-	ctx context.Context,
+func (*Executor[M]) interruptResult(
+	_ context.Context,
 	task *backgroundtask.Task,
 	interrupted *adk.InterruptInfo,
 ) (*backgroundtask.ExecutionResult, error) {
-	if _, exists, err := e.checkPointStore.Get(ctx, checkpointID(task.Spec.ID)); err != nil || !exists {
-		if err == nil {
-			err = errors.New("backgroundtask/subagent: runner checkpoint is missing")
-		}
-		return nil, err
-	}
 	state := checkpointState{
 		Sequence: nextCheckpointSequence(task.Checkpoint),
 	}
