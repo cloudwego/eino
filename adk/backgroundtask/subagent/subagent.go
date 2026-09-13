@@ -692,8 +692,8 @@ func (e *Executor[M]) handleRunError(
 			if !open {
 				break
 			}
-			if errors.Is(event.Err, adk.ErrCheckpointSave) {
-				checkpointErr = errors.Join(checkpointErr, event.Err)
+			if checkpointErr == nil && errors.Is(event.Err, adk.ErrCheckpointSave) {
+				checkpointErr = event.Err
 			}
 		}
 	}

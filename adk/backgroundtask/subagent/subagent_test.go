@@ -168,15 +168,15 @@ type drainTimeoutParallelToolModel struct {
 type recordingCheckpointStore struct {
 	store    adk.CheckPointStore
 	setErr   error
-	getCount atomic.Int32
-	setCount atomic.Int32
+	getCount int32
+	setCount int32
 }
 
 func (s *recordingCheckpointStore) Get(
 	ctx context.Context,
 	key string,
 ) ([]byte, bool, error) {
-	s.getCount.Add(1)
+	atomic.AddInt32(&s.getCount, 1)
 	return s.store.Get(ctx, key)
 }
 
@@ -185,7 +185,7 @@ func (s *recordingCheckpointStore) Set(
 	key string,
 	value []byte,
 ) error {
-	s.setCount.Add(1)
+	atomic.AddInt32(&s.setCount, 1)
 	if s.setErr != nil {
 		return s.setErr
 	}
@@ -1450,12 +1450,12 @@ func TestExecutorInterruptPropagatesCheckpointWriteFailureWithoutReadback(t *tes
 		executeDone <- manager.Execute(context.Background(), task.Spec.ID)
 	}()
 	<-started
-	checkpointStore.getCount.Store(0)
+	atomic.StoreInt32(&checkpointStore.getCount, 0)
 	close(release)
 
 	require.NoError(t, <-executeDone)
-	require.Positive(t, checkpointStore.setCount.Load())
-	require.Zero(t, checkpointStore.getCount.Load())
+	require.Positive(t, atomic.LoadInt32(&checkpointStore.setCount))
+	require.Zero(t, atomic.LoadInt32(&checkpointStore.getCount))
 	failed, err := manager.Get(context.Background(), task.Spec.ID)
 	require.NoError(t, err)
 	require.Equal(t, backgroundtask.StatusFailed, failed.Status)
@@ -1707,14 +1707,14 @@ func TestExecutorDrainUsesCheckpointWriteResultWithoutReadback(t *testing.T) {
 		executeDone <- manager.Execute(context.Background(), task.Spec.ID)
 	}()
 	<-model.started
-	checkpointStore.getCount.Store(0)
+	atomic.StoreInt32(&checkpointStore.getCount, 0)
 
 	closeCtx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	require.NoError(t, manager.Close(closeCtx))
 	require.NoError(t, <-executeDone)
-	require.Positive(t, checkpointStore.setCount.Load())
-	require.Zero(t, checkpointStore.getCount.Load())
+	require.Positive(t, atomic.LoadInt32(&checkpointStore.setCount))
+	require.Zero(t, atomic.LoadInt32(&checkpointStore.getCount))
 
 	suspended, err := manager.Get(context.Background(), task.Spec.ID)
 	require.NoError(t, err)
@@ -1758,14 +1758,14 @@ func TestExecutorDrainPropagatesCheckpointWriteFailureWithoutReadback(t *testing
 		executeDone <- manager.Execute(context.Background(), task.Spec.ID)
 	}()
 	<-model.started
-	checkpointStore.getCount.Store(0)
+	atomic.StoreInt32(&checkpointStore.getCount, 0)
 
 	closeCtx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	require.NoError(t, manager.Close(closeCtx))
 	require.ErrorIs(t, <-executeDone, backgroundtask.ErrDrainCheckpointUnavailable)
-	require.Positive(t, checkpointStore.setCount.Load())
-	require.Zero(t, checkpointStore.getCount.Load())
+	require.Positive(t, atomic.LoadInt32(&checkpointStore.setCount))
+	require.Zero(t, atomic.LoadInt32(&checkpointStore.getCount))
 
 	running, err := manager.Get(context.Background(), task.Spec.ID)
 	require.NoError(t, err)
