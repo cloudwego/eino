@@ -85,6 +85,24 @@ type CheckPointStore = core.CheckPointStore
 
 type CheckPointDeleter = core.CheckPointDeleter
 
+// ErrCheckpointSave identifies a Runner checkpoint persistence failure.
+var ErrCheckpointSave = errors.New("adk: checkpoint save failed")
+
+type checkpointSaveError struct {
+	label string
+	cause error
+}
+
+func (e *checkpointSaveError) Error() string { return fmt.Sprintf("%s: %v", e.label, e.cause) }
+
+func (e *checkpointSaveError) Unwrap() error { return e.cause }
+
+func (e *checkpointSaveError) Is(target error) bool { return target == ErrCheckpointSave }
+
+func newCheckpointSaveError(label string, cause error) error {
+	return &checkpointSaveError{label: label, cause: cause}
+}
+
 type TypedRunnerConfig[M MessageType] struct {
 	Agent           TypedAgent[M]
 	EnableStreaming bool
@@ -964,7 +982,7 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 			return
 		}
 		if err := saveRunnerCheckpoint(enableStreaming, store, ctx, *checkPointID, info, sig, sessionState); err != nil {
-			gen.Send(&TypedAgentEvent[M]{Err: fmt.Errorf("%s: %w", errLabel, err)})
+			gen.Send(&TypedAgentEvent[M]{Err: newCheckpointSaveError(errLabel, err)})
 		}
 	}
 
@@ -1310,10 +1328,14 @@ func (r *sessionTurnResult[M]) finalize(ctx context.Context) error {
 	// resume cannot load a checkpoint that points to a corrupt event log.
 	if r.pendingCheckpoint != nil && r.checkPointID != nil {
 		if r.persistErr != nil {
-			return fmt.Errorf("%s: skipped because session event persistence failed: %w", r.pendingCheckpoint.errLabel, r.persistErr)
+			return newCheckpointSaveError(
+				r.pendingCheckpoint.errLabel+
+					": skipped because session event persistence failed",
+				r.persistErr,
+			)
 		}
 		if err := saveRunnerCheckpoint(r.enableStreaming, r.store, ctx, *r.checkPointID, r.pendingCheckpoint.info, r.pendingCheckpoint.signal, r.sessionState); err != nil {
-			return fmt.Errorf("%s: %w", r.pendingCheckpoint.errLabel, err)
+			return newCheckpointSaveError(r.pendingCheckpoint.errLabel, err)
 		}
 	}
 	if r.persistErr != nil {

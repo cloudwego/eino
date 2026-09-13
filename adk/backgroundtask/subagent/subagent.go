@@ -475,6 +475,18 @@ func (e *Executor[M]) Execute(
 		if event.Action != nil && event.Action.Interrupted != nil {
 			interrupted = event.Action.Interrupted
 		}
+		if errors.Is(event.Err, adk.ErrCheckpointSave) {
+			control := pollControl(controlRequests)
+			_ = waitForDrainCancelOutcome(ctx, control, cancelOutcomes)
+			if control.Kind == backgroundtask.ControlDrain {
+				return nil, fmt.Errorf(
+					"%w: %v",
+					backgroundtask.ErrDrainCheckpointUnavailable,
+					event.Err,
+				)
+			}
+			return nil, event.Err
+		}
 		if event.Err != nil && interrupted == nil {
 			return e.handleRunError(
 				ctx, iter, task, controlRequests, cancelOutcomes, event.Err,
@@ -673,14 +685,29 @@ func (e *Executor[M]) handleRunError(
 			errors.Is(err, adk.ErrStreamCanceled)) {
 		control = waitForControl(ctx, controlRequests)
 	}
+	var checkpointErr error
 	if control.Kind != "" {
 		for {
-			if _, open := iter.Next(); !open {
+			event, open := iter.Next()
+			if !open {
 				break
+			}
+			if checkpointErr == nil && errors.Is(event.Err, adk.ErrCheckpointSave) {
+				checkpointErr = event.Err
 			}
 		}
 	}
 	cancelOutcome := waitForDrainCancelOutcome(ctx, control, cancelOutcomes)
+	if checkpointErr != nil {
+		if control.Kind == backgroundtask.ControlDrain {
+			return nil, fmt.Errorf(
+				"%w: %v",
+				backgroundtask.ErrDrainCheckpointUnavailable,
+				checkpointErr,
+			)
+		}
+		return nil, checkpointErr
+	}
 	return e.resolveRunOutcome(ctx, task, control, cancelOutcome, subagentRunOutcome{err: err})
 }
 
@@ -717,17 +744,11 @@ func waitForDrainCancelOutcome(
 	}
 }
 
-func (e *Executor[M]) interruptResult(
-	ctx context.Context,
+func (*Executor[M]) interruptResult(
+	_ context.Context,
 	task *backgroundtask.Task,
 	interrupted *adk.InterruptInfo,
 ) (*backgroundtask.ExecutionResult, error) {
-	if _, exists, err := e.checkPointStore.Get(ctx, checkpointID(task.Spec.ID)); err != nil || !exists {
-		if err == nil {
-			err = errors.New("backgroundtask/subagent: runner checkpoint is missing")
-		}
-		return nil, err
-	}
 	state := checkpointState{
 		Sequence: nextCheckpointSequence(task.Checkpoint),
 	}
@@ -749,7 +770,7 @@ func (e *Executor[M]) interruptResult(
 	}, nil
 }
 
-func (e *Executor[M]) controlResult(
+func (*Executor[M]) controlResult(
 	_ context.Context,
 	task *backgroundtask.Task,
 	control backgroundtask.ControlRequest,
@@ -765,14 +786,6 @@ func (e *Executor[M]) controlResult(
 			Error:  reason,
 		}, nil, true
 	case backgroundtask.ControlDrain:
-		if _, exists, err := e.checkPointStore.Get(
-			context.Background(), checkpointID(task.Spec.ID),
-		); err != nil || !exists {
-			if err == nil {
-				err = errors.New("runner checkpoint is missing")
-			}
-			return nil, fmt.Errorf("%w: %v", backgroundtask.ErrDrainCheckpointUnavailable, err), true
-		}
 		stateBytes, err := json.Marshal(checkpointState{
 			Sequence: nextCheckpointSequence(task.Checkpoint),
 		})

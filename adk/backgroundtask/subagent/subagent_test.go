@@ -165,6 +165,33 @@ type drainTimeoutParallelToolModel struct {
 	calls int32
 }
 
+type recordingCheckpointStore struct {
+	store    adk.CheckPointStore
+	setErr   error
+	getCount int32
+	setCount int32
+}
+
+func (s *recordingCheckpointStore) Get(
+	ctx context.Context,
+	key string,
+) ([]byte, bool, error) {
+	atomic.AddInt32(&s.getCount, 1)
+	return s.store.Get(ctx, key)
+}
+
+func (s *recordingCheckpointStore) Set(
+	ctx context.Context,
+	key string,
+	value []byte,
+) error {
+	atomic.AddInt32(&s.setCount, 1)
+	if s.setErr != nil {
+		return s.setErr
+	}
+	return s.store.Set(ctx, key, value)
+}
+
 func (m *drainTimeoutToolModel) Generate(
 	_ context.Context,
 	_ []*schema.Message,
@@ -1009,8 +1036,8 @@ func TestResumeControlHelpers(t *testing.T) {
 		backgroundtask.ControlRequest{Kind: backgroundtask.ControlDrain},
 	)
 	require.True(t, controlled)
-	require.ErrorIs(t, controlErr, backgroundtask.ErrDrainCheckpointUnavailable)
-	require.Nil(t, result)
+	require.NoError(t, controlErr)
+	require.Equal(t, backgroundtask.StatusSuspended, result.Status)
 
 	result, controlErr, controlled = executor.controlResult(
 		context.Background(), task, backgroundtask.ControlRequest{},
@@ -1386,6 +1413,55 @@ func TestExecutorInterruptBecomesWaitingInput_BitsUT(t *testing.T) {
 	assert.True(t, exists)
 }
 
+func TestExecutorInterruptPropagatesCheckpointWriteFailureWithoutReadback(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	agent := &resumableTestAgent{name: "worker", eventFactory: func(ctx context.Context) *adk.AgentEvent {
+		close(started)
+		<-release
+		return adk.Interrupt(ctx, "approve")
+	}}
+	sessionStore := adksession.NewInMemoryStore[*schema.Message](nil)
+	checkpointStore := &recordingCheckpointStore{
+		store:  sessionStore,
+		setErr: errors.New("checkpoint storage unavailable"),
+	}
+	executor, err := NewExecutor(&ExecutorConfig[*schema.Message]{
+		SessionStore: sessionStore, CheckPointStore: checkpointStore,
+	})
+	require.NoError(t, err)
+	require.NoError(t, executor.Register(
+		agent.name, &AgentRegistration[*schema.Message]{Agent: agent},
+	))
+	executors := backgroundtask.NewExecutorRegistry()
+	require.NoError(t, executors.Register(executor))
+	manager := mustNewBackgroundManager(
+		t,
+		context.Background(),
+		&backgroundtask.Config{Executors: executors},
+	)
+	task, err := Submit(context.Background(), manager, &SubmitRequest[*schema.Message]{
+		SubAgentName: agent.name, Input: textInput("work"), Description: "work",
+		SessionID: "parent",
+	})
+	require.NoError(t, err)
+	executeDone := make(chan error, 1)
+	go func() {
+		executeDone <- manager.Execute(context.Background(), task.Spec.ID)
+	}()
+	<-started
+	atomic.StoreInt32(&checkpointStore.getCount, 0)
+	close(release)
+
+	require.NoError(t, <-executeDone)
+	require.Positive(t, atomic.LoadInt32(&checkpointStore.setCount))
+	require.Zero(t, atomic.LoadInt32(&checkpointStore.getCount))
+	failed, err := manager.Get(context.Background(), task.Spec.ID)
+	require.NoError(t, err)
+	require.Equal(t, backgroundtask.StatusFailed, failed.Status)
+	require.Contains(t, failed.ResultError, "checkpoint storage unavailable")
+}
+
 func TestExecutorMessageBecomesTerminalResult_BitsUT(t *testing.T) {
 	message := adk.EventFromMessage(
 		schema.AssistantMessage("progress", nil), nil, schema.Assistant, "worker",
@@ -1597,6 +1673,105 @@ func TestExecutorDrainTimeoutEscalatesBlockedModelAndResumes_BitsUT(t *testing.T
 	require.GreaterOrEqual(t, atomic.LoadInt32(&model.calls), int32(2))
 }
 
+func TestExecutorDrainUsesCheckpointWriteResultWithoutReadback(t *testing.T) {
+	model := &drainTimeoutModel{started: make(chan struct{})}
+	agent, err := adk.NewChatModelAgent(context.Background(), &adk.ChatModelAgentConfig{
+		Name: "worker", Description: "drain checkpoint test", Model: model,
+	})
+	require.NoError(t, err)
+	sessionStore := adksession.NewInMemoryStore[*schema.Message](nil)
+	checkpointStore := &recordingCheckpointStore{store: sessionStore}
+	executor, err := NewExecutor(&ExecutorConfig[*schema.Message]{
+		SessionStore:       sessionStore,
+		CheckPointStore:    checkpointStore,
+		DrainCancelTimeout: 20 * time.Millisecond,
+	})
+	require.NoError(t, err)
+	require.NoError(t, executor.Register(
+		"worker", &AgentRegistration[*schema.Message]{Agent: agent},
+	))
+	executors := backgroundtask.NewExecutorRegistry()
+	require.NoError(t, executors.Register(executor))
+	manager := mustNewBackgroundManager(
+		t,
+		context.Background(),
+		&backgroundtask.Config{Executors: executors},
+	)
+	task, err := Submit(context.Background(), manager, &SubmitRequest[*schema.Message]{
+		SubAgentName: "worker", Input: textInput("work"), Description: "work",
+		SessionID: "parent",
+	})
+	require.NoError(t, err)
+	executeDone := make(chan error, 1)
+	go func() {
+		executeDone <- manager.Execute(context.Background(), task.Spec.ID)
+	}()
+	<-model.started
+	atomic.StoreInt32(&checkpointStore.getCount, 0)
+
+	closeCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	require.NoError(t, manager.Close(closeCtx))
+	require.NoError(t, <-executeDone)
+	require.Positive(t, atomic.LoadInt32(&checkpointStore.setCount))
+	require.Zero(t, atomic.LoadInt32(&checkpointStore.getCount))
+
+	suspended, err := manager.Get(context.Background(), task.Spec.ID)
+	require.NoError(t, err)
+	require.Equal(t, backgroundtask.StatusSuspended, suspended.Status)
+}
+
+func TestExecutorDrainPropagatesCheckpointWriteFailureWithoutReadback(t *testing.T) {
+	model := &drainTimeoutModel{started: make(chan struct{})}
+	agent, err := adk.NewChatModelAgent(context.Background(), &adk.ChatModelAgentConfig{
+		Name: "worker", Description: "drain checkpoint failure test", Model: model,
+	})
+	require.NoError(t, err)
+	sessionStore := adksession.NewInMemoryStore[*schema.Message](nil)
+	checkpointStore := &recordingCheckpointStore{
+		store:  sessionStore,
+		setErr: errors.New("checkpoint storage unavailable"),
+	}
+	executor, err := NewExecutor(&ExecutorConfig[*schema.Message]{
+		SessionStore:       sessionStore,
+		CheckPointStore:    checkpointStore,
+		DrainCancelTimeout: 20 * time.Millisecond,
+	})
+	require.NoError(t, err)
+	require.NoError(t, executor.Register(
+		"worker", &AgentRegistration[*schema.Message]{Agent: agent},
+	))
+	executors := backgroundtask.NewExecutorRegistry()
+	require.NoError(t, executors.Register(executor))
+	manager := mustNewBackgroundManager(
+		t,
+		context.Background(),
+		&backgroundtask.Config{Executors: executors},
+	)
+	task, err := Submit(context.Background(), manager, &SubmitRequest[*schema.Message]{
+		SubAgentName: "worker", Input: textInput("work"), Description: "work",
+		SessionID: "parent",
+	})
+	require.NoError(t, err)
+	executeDone := make(chan error, 1)
+	go func() {
+		executeDone <- manager.Execute(context.Background(), task.Spec.ID)
+	}()
+	<-model.started
+	atomic.StoreInt32(&checkpointStore.getCount, 0)
+
+	closeCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	require.NoError(t, manager.Close(closeCtx))
+	require.ErrorIs(t, <-executeDone, backgroundtask.ErrDrainCheckpointUnavailable)
+	require.Positive(t, atomic.LoadInt32(&checkpointStore.setCount))
+	require.Zero(t, atomic.LoadInt32(&checkpointStore.getCount))
+
+	running, err := manager.Get(context.Background(), task.Spec.ID)
+	require.NoError(t, err)
+	require.Equal(t, backgroundtask.StatusRunning, running.Status)
+}
+
 func TestExecutorDrainTimeoutEscalatesBlockedModelStreamAndResumes(t *testing.T) {
 	model := &drainTimeoutStreamingModel{
 		started: make(chan struct{}),
@@ -1694,8 +1869,8 @@ func TestControlAndInterruptUseRunnerCheckpoint(t *testing.T) {
 		runCtx, task, backgroundtask.ControlRequest{Kind: backgroundtask.ControlDrain},
 	)
 	require.True(t, controlled)
-	require.ErrorIs(t, controlErr, backgroundtask.ErrDrainCheckpointUnavailable)
-	require.Nil(t, result)
+	require.NoError(t, controlErr)
+	require.Equal(t, backgroundtask.StatusSuspended, result.Status)
 
 	require.NoError(t, store.Set(
 		context.Background(), checkpointID(task.Spec.ID), []byte("runner checkpoint"),
