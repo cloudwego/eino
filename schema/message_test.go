@@ -944,6 +944,58 @@ func TestConcatMessage(t *testing.T) {
 
 		assert.Equal(t, expectedMultiContent, mergedMsg.MultiContent)
 	})
+
+	t.Run("concat user input text parts with extra", func(t *testing.T) {
+		// ToolsNode.Stream converts each enhanced ToolResult chunk via
+		// ToMessageInputParts, then ConcatMessages merges consecutive text parts.
+		msgs := []*Message{
+			{
+				Role:       Tool,
+				ToolCallID: "call_1",
+				ToolName:   "search",
+				UserInputMultiContent: []MessageInputPart{
+					{Type: ChatMessagePartTypeText, Text: "Hello ", Extra: map[string]any{"k1": "v1"}},
+				},
+			},
+			{
+				Role:       Tool,
+				ToolCallID: "call_1",
+				ToolName:   "search",
+				UserInputMultiContent: []MessageInputPart{
+					{Type: ChatMessagePartTypeText, Text: "World", Extra: map[string]any{"k2": "v2"}},
+				},
+			},
+		}
+
+		mergedMsg, err := ConcatMessages(msgs)
+		assert.NoError(t, err)
+		assert.Equal(t, []MessageInputPart{
+			{Type: ChatMessagePartTypeText, Text: "Hello World", Extra: map[string]any{"k1": "v1", "k2": "v2"}},
+		}, mergedMsg.UserInputMultiContent)
+	})
+
+	t.Run("concat user input text parts with single extra", func(t *testing.T) {
+		msgs := []*Message{
+			{
+				Role: Tool,
+				UserInputMultiContent: []MessageInputPart{
+					{Type: ChatMessagePartTypeText, Text: "Hello ", Extra: map[string]any{"k1": "v1"}},
+				},
+			},
+			{
+				Role: Tool,
+				UserInputMultiContent: []MessageInputPart{
+					{Type: ChatMessagePartTypeText, Text: "World"},
+				},
+			},
+		}
+
+		mergedMsg, err := ConcatMessages(msgs)
+		assert.NoError(t, err)
+		assert.Equal(t, []MessageInputPart{
+			{Type: ChatMessagePartTypeText, Text: "Hello World", Extra: map[string]any{"k1": "v1"}},
+		}, mergedMsg.UserInputMultiContent)
+	})
 }
 
 func TestConcatToolCalls(t *testing.T) {
@@ -1759,7 +1811,7 @@ func TestConcatToolResults(t *testing.T) {
 		assert.Contains(t, err.Error(), "conflicting")
 		assert.Contains(t, err.Error(), "file")
 	})
-	
+
 	t.Run("same_chunk_text_merged", func(t *testing.T) {
 		chunks := []*ToolResult{
 			{
