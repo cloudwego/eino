@@ -93,7 +93,9 @@ type checkpointSaveError struct {
 	cause error
 }
 
-func (e *checkpointSaveError) Error() string { return fmt.Sprintf("%s: %v", e.label, e.cause) }
+func (e *checkpointSaveError) Error() string {
+	return fmt.Sprintf("%s: %s: %v", ErrCheckpointSave, e.label, e.cause)
+}
 
 func (e *checkpointSaveError) Unwrap() error { return e.cause }
 
