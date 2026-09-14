@@ -1144,32 +1144,6 @@ func TestHandleRunErrorControlOutcomes(t *testing.T) {
 		require.Equal(t, backgroundtask.StatusCanceled, result.Status)
 	})
 
-	t.Run("session persistence error fails despite prior drain checkpoint", func(t *testing.T) {
-		iter, generator := adk.NewAsyncIteratorPair[*adk.AgentEvent]()
-		generator.Send(&adk.AgentEvent{
-			Err: fmt.Errorf("%w: interrupt event storage unavailable", adk.ErrSessionEventPersistence),
-		})
-		generator.Close()
-		controls := make(chan backgroundtask.ControlRequest, 1)
-		controls <- backgroundtask.ControlRequest{Kind: backgroundtask.ControlDrain}
-		taskWithCheckpoint := *task
-		taskWithCheckpoint.Checkpoint = []byte(`{"sequence":1}`)
-
-		result, err := executor.handleRunError(
-			context.Background(),
-			iter,
-			&taskWithCheckpoint,
-			controls,
-			nil,
-			nil,
-			context.Canceled,
-		)
-
-		require.Nil(t, result)
-		require.ErrorIs(t, err, adk.ErrSessionEventPersistence)
-		require.NotErrorIs(t, err, backgroundtask.ErrDrainCheckpointUnavailable)
-	})
-
 	t.Run("timeout", func(t *testing.T) {
 		iter, generator := adk.NewAsyncIteratorPair[*adk.AgentEvent]()
 		generator.Close()
@@ -1265,6 +1239,30 @@ func TestAttack_DrainCheckpointWriteFailureFailsCurrentAttempt(t *testing.T) {
 
 	require.Nil(t, result)
 	require.ErrorIs(t, err, adk.ErrCheckpointSave)
+	require.NotErrorIs(t, err, backgroundtask.ErrDrainCheckpointUnavailable)
+}
+
+func TestAttack_DrainSessionPersistenceFailureFailsCurrentAttempt(t *testing.T) {
+	t.Log("partial current-attempt session events make historical checkpoint rewind unsafe")
+	executor := newTestExecutor(t, nil)
+	task := &backgroundtask.Task{
+		Spec:       backgroundtask.Spec{ID: "task"},
+		Checkpoint: []byte(`{"sequence":1}`),
+	}
+	iter, generator := adk.NewAsyncIteratorPair[*adk.AgentEvent]()
+	generator.Send(&adk.AgentEvent{
+		Err: fmt.Errorf("%w: interrupt event storage unavailable", adk.ErrSessionEventPersistence),
+	})
+	generator.Close()
+	controls := make(chan backgroundtask.ControlRequest, 1)
+	controls <- backgroundtask.ControlRequest{Kind: backgroundtask.ControlDrain}
+
+	result, err := executor.handleRunError(
+		context.Background(), iter, task, controls, nil, nil, context.Canceled,
+	)
+
+	require.Nil(t, result)
+	require.ErrorIs(t, err, adk.ErrSessionEventPersistence)
 	require.NotErrorIs(t, err, backgroundtask.ErrDrainCheckpointUnavailable)
 }
 
