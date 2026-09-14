@@ -518,10 +518,7 @@ func (e *Executor[M]) Execute(
 				return result, controlErr
 			}
 			if control.Kind == backgroundtask.ControlDrain {
-				if errors.Is(event.Err, adk.ErrCheckpointSave) {
-					return nil, event.Err
-				}
-				return nil, drainCheckpointError(task, event.Err)
+				return nil, event.Err
 			}
 			return nil, event.Err
 		}
@@ -578,9 +575,8 @@ func (e *Executor[M]) resolveRunOutcome(
 		errors.Is(cancelOutcome, adk.ErrExecutionEnded)
 	if control.Kind == backgroundtask.ControlDrain && !drainLostRace &&
 		!run.checkpointSaved {
-		return nil, drainCheckpointError(
-			task,
-			errors.New("backgroundtask/subagent: cancel completed without a checkpoint write acknowledgement"),
+		return nil, errors.New(
+			"backgroundtask/subagent: cancel completed without a checkpoint write acknowledgement",
 		)
 	}
 	if !drainLostRace {
@@ -763,10 +759,7 @@ func (e *Executor[M]) handleRunError(
 			)
 		}
 		if control.Kind == backgroundtask.ControlDrain {
-			if errors.Is(persistenceErr, adk.ErrCheckpointSave) {
-				return nil, persistenceErr
-			}
-			return nil, drainCheckpointError(task, persistenceErr)
+			return nil, persistenceErr
 		}
 		return nil, persistenceErr
 	}
@@ -774,13 +767,6 @@ func (e *Executor[M]) handleRunError(
 		err:             err,
 		checkpointSaved: checkpointStore != nil && checkpointStore.checkpointSaved(),
 	})
-}
-
-func drainCheckpointError(task *backgroundtask.Task, cause error) error {
-	if task == nil || len(task.Checkpoint) == 0 {
-		return cause
-	}
-	return fmt.Errorf("%w: %v", backgroundtask.ErrDrainCheckpointUnavailable, cause)
 }
 
 func waitForControl(

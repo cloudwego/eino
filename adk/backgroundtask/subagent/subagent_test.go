@@ -1144,7 +1144,7 @@ func TestHandleRunErrorControlOutcomes(t *testing.T) {
 		require.Equal(t, backgroundtask.StatusCanceled, result.Status)
 	})
 
-	t.Run("session persistence error preserves prior drain checkpoint", func(t *testing.T) {
+	t.Run("session persistence error fails despite prior drain checkpoint", func(t *testing.T) {
 		iter, generator := adk.NewAsyncIteratorPair[*adk.AgentEvent]()
 		generator.Send(&adk.AgentEvent{
 			Err: fmt.Errorf("%w: interrupt event storage unavailable", adk.ErrSessionEventPersistence),
@@ -1166,7 +1166,8 @@ func TestHandleRunErrorControlOutcomes(t *testing.T) {
 		)
 
 		require.Nil(t, result)
-		require.ErrorIs(t, err, backgroundtask.ErrDrainCheckpointUnavailable)
+		require.ErrorIs(t, err, adk.ErrSessionEventPersistence)
+		require.NotErrorIs(t, err, backgroundtask.ErrDrainCheckpointUnavailable)
 	})
 
 	t.Run("timeout", func(t *testing.T) {
@@ -1239,7 +1240,7 @@ func TestAttack_DrainControlWithoutCheckpointWriteFailsClosed(t *testing.T) {
 	)
 
 	require.Nil(t, result)
-	require.ErrorIs(t, err, backgroundtask.ErrDrainCheckpointUnavailable)
+	require.NotErrorIs(t, err, backgroundtask.ErrDrainCheckpointUnavailable)
 	require.ErrorContains(t, err, "without a checkpoint write acknowledgement")
 }
 
