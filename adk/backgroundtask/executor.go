@@ -1002,21 +1002,18 @@ func (m *Manager) heartbeat(
 	done chan<- struct{},
 ) {
 	defer close(done)
-	interval := m.heartbeatEvery
-	if interval <= 0 {
-		interval = time.Nanosecond
-	}
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
+	timer := time.NewTimer(m.nextHeartbeatInterval())
+	defer timer.Stop()
 	for {
 		select {
-		case <-ticker.C:
+		case <-timer.C:
 			if err := runtime.heartbeat(ctx); err != nil {
 				if !errors.Is(err, errHeartbeatStopped) {
 					cancel()
 				}
 				return
 			}
+			timer.Reset(m.nextHeartbeatInterval())
 		case <-ctx.Done():
 			return
 		case <-stop:
