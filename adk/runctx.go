@@ -92,9 +92,21 @@ func (e *typedAgentEventWrapper[M]) GobEncode() ([]byte, error) {
 		}
 	}
 
+	// Build a detached copy of the event with gob-encodable error values, see
+	// gobSafeError. The live event is shared with consumers and must not be
+	// mutated here.
+	var eventCopy *TypedAgentEvent[M]
+	if e.event != nil {
+		ev := *e.event
+		if ev.Err != nil {
+			ev.Err = &gobSafeError{Msg: ev.Err.Error()}
+		}
+		eventCopy = &ev
+	}
+
 	buf := &bytes.Buffer{}
 	err := gob.NewEncoder(buf).Encode(&typedAgentEventWrapperForGob[M]{
-		Event: e.event,
+		Event: eventCopy,
 		TS:    e.TS,
 	})
 	if err != nil {
@@ -170,6 +182,24 @@ func (e *typedAgentEventWrapper[M]) consumeStream() {
 
 type otherAgentEventWrapperForEncode agentEventWrapper
 
+// gobSafeError is a gob-encodable error that preserves only the error message.
+// AgentEvent.Err may hold arbitrary concrete error types, e.g. the unexported
+// compose.internalError produced when a node fails inside an agent. gob cannot
+// encode such interface values ("type not registered for interface: ..."),
+// which breaks the whole checkpoint save and, with it, the interrupt/resume
+// flow. Before encoding, error values carried by an event are replaced with
+// gobSafeError so that the persisted checkpoint depends only on the error
+// message, never on the concrete error type.
+type gobSafeError struct {
+	Msg string
+}
+
+func (e *gobSafeError) Error() string { return e.Msg }
+
+func init() {
+	gob.RegisterName("_eino_adk_gobSafeError", &gobSafeError{})
+}
+
 func (a *agentEventWrapper) GobEncode() ([]byte, error) {
 	if a.Output != nil && a.Output.MessageOutput != nil && a.Output.MessageOutput.IsStreaming {
 		// Materialize the stream before encoding. An unconsumed stream that
@@ -181,8 +211,28 @@ func (a *agentEventWrapper) GobEncode() ([]byte, error) {
 		}
 	}
 
+	// Build a detached copy of the event with gob-encodable error values, see
+	// gobSafeError. The live event is shared with consumers and must not be
+	// mutated here.
+	var eventCopy *AgentEvent
+	if a.AgentEvent != nil {
+		ev := *a.AgentEvent
+		if ev.Err != nil {
+			ev.Err = &gobSafeError{Msg: ev.Err.Error()}
+		}
+		eventCopy = &ev
+	}
+	streamErr := a.StreamErr
+	if streamErr != nil {
+		streamErr = &gobSafeError{Msg: a.StreamErr.Error()}
+	}
+
 	buf := &bytes.Buffer{}
-	err := gob.NewEncoder(buf).Encode((*otherAgentEventWrapperForEncode)(a))
+	err := gob.NewEncoder(buf).Encode(&otherAgentEventWrapperForEncode{
+		AgentEvent: eventCopy,
+		TS:         a.TS,
+		StreamErr:  streamErr,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to gob encode agent event wrapper: %w", err)
 	}
