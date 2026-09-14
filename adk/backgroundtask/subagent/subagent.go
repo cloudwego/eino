@@ -518,6 +518,9 @@ func (e *Executor[M]) Execute(
 				return result, controlErr
 			}
 			if control.Kind == backgroundtask.ControlDrain {
+				if errors.Is(event.Err, adk.ErrCheckpointSave) {
+					return nil, event.Err
+				}
 				return nil, drainCheckpointError(task, event.Err)
 			}
 			return nil, event.Err
@@ -760,6 +763,9 @@ func (e *Executor[M]) handleRunError(
 			)
 		}
 		if control.Kind == backgroundtask.ControlDrain {
+			if errors.Is(persistenceErr, adk.ErrCheckpointSave) {
+				return nil, persistenceErr
+			}
 			return nil, drainCheckpointError(task, persistenceErr)
 		}
 		return nil, persistenceErr

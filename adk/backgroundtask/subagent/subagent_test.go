@@ -1144,10 +1144,10 @@ func TestHandleRunErrorControlOutcomes(t *testing.T) {
 		require.Equal(t, backgroundtask.StatusCanceled, result.Status)
 	})
 
-	t.Run("late checkpoint error preserves prior drain checkpoint", func(t *testing.T) {
+	t.Run("session persistence error preserves prior drain checkpoint", func(t *testing.T) {
 		iter, generator := adk.NewAsyncIteratorPair[*adk.AgentEvent]()
 		generator.Send(&adk.AgentEvent{
-			Err: fmt.Errorf("%w: checkpoint storage unavailable", adk.ErrCheckpointSave),
+			Err: fmt.Errorf("%w: interrupt event storage unavailable", adk.ErrSessionEventPersistence),
 		})
 		generator.Close()
 		controls := make(chan backgroundtask.ControlRequest, 1)
@@ -1241,6 +1241,44 @@ func TestAttack_DrainControlWithoutCheckpointWriteFailsClosed(t *testing.T) {
 	require.Nil(t, result)
 	require.ErrorIs(t, err, backgroundtask.ErrDrainCheckpointUnavailable)
 	require.ErrorContains(t, err, "without a checkpoint write acknowledgement")
+}
+
+func TestAttack_DrainCheckpointWriteFailureFailsCurrentAttempt(t *testing.T) {
+	t.Log("a failed Set must not redispatch through a possibly overwritten checkpoint")
+	executor := newTestExecutor(t, nil)
+	task := &backgroundtask.Task{
+		Spec:       backgroundtask.Spec{ID: "task"},
+		Checkpoint: []byte(`{"sequence":1}`),
+	}
+	iter, generator := adk.NewAsyncIteratorPair[*adk.AgentEvent]()
+	generator.Send(&adk.AgentEvent{
+		Err: fmt.Errorf("%w: checkpoint storage unavailable", adk.ErrCheckpointSave),
+	})
+	generator.Close()
+	controls := make(chan backgroundtask.ControlRequest, 1)
+	controls <- backgroundtask.ControlRequest{Kind: backgroundtask.ControlDrain}
+
+	result, err := executor.handleRunError(
+		context.Background(), iter, task, controls, nil, nil, context.Canceled,
+	)
+
+	require.Nil(t, result)
+	require.ErrorIs(t, err, adk.ErrCheckpointSave)
+	require.NotErrorIs(t, err, backgroundtask.ErrDrainCheckpointUnavailable)
+}
+
+func TestAttack_AttemptCheckpointStoreRequiresTaskCheckpointKey(t *testing.T) {
+	t.Log("only the task checkpoint's successful write may authorize suspension")
+	inner := adksession.NewInMemoryStore[*schema.Message](nil)
+	store := &attemptCheckpointStore{
+		CheckPointStore: inner,
+		key:             "task/checkpoint",
+	}
+
+	require.NoError(t, store.Set(context.Background(), "other/checkpoint", []byte("other")))
+	require.False(t, store.checkpointSaved())
+	require.NoError(t, store.Set(context.Background(), "task/checkpoint", []byte("task")))
+	require.True(t, store.checkpointSaved())
 }
 
 func TestSubagentPayloadValidation_BitsUT(t *testing.T) {
@@ -1529,7 +1567,7 @@ func TestExecutorInterruptPropagatesCheckpointWriteFailureWithoutReadback(t *tes
 	close(release)
 
 	require.NoError(t, <-executeDone)
-	require.Positive(t, atomic.LoadInt32(&checkpointStore.setCount))
+	require.Equal(t, int32(1), atomic.LoadInt32(&checkpointStore.setCount))
 	require.Zero(t, atomic.LoadInt32(&checkpointStore.getCount))
 	failed, err := manager.Get(context.Background(), task.Spec.ID)
 	require.NoError(t, err)
@@ -1826,7 +1864,7 @@ func TestExecutorDrainUsesCheckpointWriteResultWithoutReadback(t *testing.T) {
 	defer cancel()
 	require.NoError(t, manager.Close(closeCtx))
 	require.NoError(t, <-executeDone)
-	require.Positive(t, atomic.LoadInt32(&checkpointStore.setCount))
+	require.Equal(t, int32(1), atomic.LoadInt32(&checkpointStore.setCount))
 	require.Zero(t, atomic.LoadInt32(&checkpointStore.getCount))
 
 	suspended, err := manager.Get(context.Background(), task.Spec.ID)
@@ -1877,7 +1915,7 @@ func TestExecutorDrainPropagatesCheckpointWriteFailureWithoutReadback(t *testing
 	defer cancel()
 	require.NoError(t, manager.Close(closeCtx))
 	require.NoError(t, <-executeDone)
-	require.Positive(t, atomic.LoadInt32(&checkpointStore.setCount))
+	require.Equal(t, int32(1), atomic.LoadInt32(&checkpointStore.setCount))
 	require.Zero(t, atomic.LoadInt32(&checkpointStore.getCount))
 
 	failed, err := manager.Get(context.Background(), task.Spec.ID)
