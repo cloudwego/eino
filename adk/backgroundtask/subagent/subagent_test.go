@@ -698,7 +698,7 @@ func executeDrainTimeout(
 
 	suspended, err := manager.Get(context.Background(), task.Spec.ID)
 	require.NoError(t, err)
-	require.Equal(t, backgroundtask.StatusSuspended, suspended.Status)
+	require.Equal(t, backgroundtask.StatusSuspended, suspended.Status, suspended.ResultError)
 	_, exists, err := store.Get(context.Background(), checkpointID(task.Spec.ID))
 	require.NoError(t, err)
 	require.True(t, exists)
@@ -1083,7 +1083,7 @@ func TestHandleRunErrorControlOutcomes(t *testing.T) {
 		wantErr := errors.New("model failed")
 		result, err := executor.handleRunError(
 			context.Background(), iter, task,
-			make(chan backgroundtask.ControlRequest), nil, wantErr,
+			make(chan backgroundtask.ControlRequest), nil, nil, wantErr,
 		)
 		require.ErrorIs(t, err, wantErr)
 		require.Nil(t, result)
@@ -1097,6 +1097,7 @@ func TestHandleRunErrorControlOutcomes(t *testing.T) {
 			iter,
 			task,
 			make(chan backgroundtask.ControlRequest),
+			nil,
 			nil,
 			adk.ErrSessionBusy,
 		)
@@ -1114,13 +1115,13 @@ func TestHandleRunErrorControlOutcomes(t *testing.T) {
 		controls := make(chan backgroundtask.ControlRequest, 1)
 		controls <- backgroundtask.ControlRequest{Kind: backgroundtask.ControlStop}
 		result, err := executor.handleRunError(
-			context.Background(), iter, task, controls, nil, context.Canceled,
+			context.Background(), iter, task, controls, nil, nil, context.Canceled,
 		)
 		require.NoError(t, err)
 		require.Equal(t, backgroundtask.StatusCanceled, result.Status)
 	})
 
-	t.Run("late checkpoint error overrides stop", func(t *testing.T) {
+	t.Run("late checkpoint error does not override stop", func(t *testing.T) {
 		iter, generator := adk.NewAsyncIteratorPair[*adk.AgentEvent]()
 		generator.Send(&adk.AgentEvent{
 			Err: fmt.Errorf("%w: checkpoint storage unavailable", adk.ErrCheckpointSave),
@@ -1135,11 +1136,37 @@ func TestHandleRunErrorControlOutcomes(t *testing.T) {
 			task,
 			controls,
 			nil,
+			nil,
+			context.Canceled,
+		)
+
+		require.NoError(t, err)
+		require.Equal(t, backgroundtask.StatusCanceled, result.Status)
+	})
+
+	t.Run("late checkpoint error preserves prior drain checkpoint", func(t *testing.T) {
+		iter, generator := adk.NewAsyncIteratorPair[*adk.AgentEvent]()
+		generator.Send(&adk.AgentEvent{
+			Err: fmt.Errorf("%w: checkpoint storage unavailable", adk.ErrCheckpointSave),
+		})
+		generator.Close()
+		controls := make(chan backgroundtask.ControlRequest, 1)
+		controls <- backgroundtask.ControlRequest{Kind: backgroundtask.ControlDrain}
+		taskWithCheckpoint := *task
+		taskWithCheckpoint.Checkpoint = []byte(`{"sequence":1}`)
+
+		result, err := executor.handleRunError(
+			context.Background(),
+			iter,
+			&taskWithCheckpoint,
+			controls,
+			nil,
+			nil,
 			context.Canceled,
 		)
 
 		require.Nil(t, result)
-		require.ErrorIs(t, err, adk.ErrCheckpointSave)
+		require.ErrorIs(t, err, backgroundtask.ErrDrainCheckpointUnavailable)
 	})
 
 	t.Run("timeout", func(t *testing.T) {
@@ -1150,7 +1177,7 @@ func TestHandleRunErrorControlOutcomes(t *testing.T) {
 			Kind: backgroundtask.ControlTimeout, Reason: "deadline",
 		}
 		result, err := executor.handleRunError(
-			context.Background(), iter, task, controls, nil, context.Canceled,
+			context.Background(), iter, task, controls, nil, nil, context.Canceled,
 		)
 		require.NoError(t, err)
 		require.Equal(t, backgroundtask.StatusFailed, result.Status)
@@ -1167,7 +1194,7 @@ func TestHandleRunErrorControlOutcomes(t *testing.T) {
 		wantErr := errors.New("model failed")
 
 		result, err := executor.handleRunError(
-			context.Background(), iter, task, controls, cancelOutcomes, wantErr,
+			context.Background(), iter, task, controls, cancelOutcomes, nil, wantErr,
 		)
 
 		require.ErrorIs(t, err, wantErr)
@@ -1183,20 +1210,20 @@ func TestAttack_StreamCanceledWithoutControlRemainsFailure(t *testing.T) {
 
 	result, err := executor.handleRunError(
 		context.Background(), iter, task,
-		make(chan backgroundtask.ControlRequest), nil, adk.ErrStreamCanceled,
+		make(chan backgroundtask.ControlRequest), nil, nil, adk.ErrStreamCanceled,
 	)
 
 	require.Nil(t, result)
 	require.ErrorIs(t, err, adk.ErrStreamCanceled)
 }
 
-func TestAttack_DrainControlAfterStreamCancellationSuspends(t *testing.T) {
+func TestAttack_DrainControlWithoutCheckpointWriteFailsClosed(t *testing.T) {
 	store := adksession.NewInMemoryStore[*schema.Message](nil)
 	executor := newTestExecutor(t, store)
-	task := &backgroundtask.Task{Spec: backgroundtask.Spec{ID: "task"}}
-	require.NoError(t, store.Set(
-		context.Background(), checkpointID(task.Spec.ID), []byte("runner checkpoint"),
-	))
+	task := &backgroundtask.Task{
+		Spec:       backgroundtask.Spec{ID: "task"},
+		Checkpoint: []byte(`{"sequence":1}`),
+	}
 	iter, generator := adk.NewAsyncIteratorPair[*adk.AgentEvent]()
 	generator.Close()
 	controls := make(chan backgroundtask.ControlRequest)
@@ -1208,12 +1235,12 @@ func TestAttack_DrainControlAfterStreamCancellationSuspends(t *testing.T) {
 	}()
 
 	result, err := executor.handleRunError(
-		context.Background(), iter, task, controls, cancelOutcomes, adk.ErrStreamCanceled,
+		context.Background(), iter, task, controls, cancelOutcomes, nil, adk.ErrStreamCanceled,
 	)
 
-	require.NoError(t, err)
-	require.Equal(t, backgroundtask.StatusSuspended, result.Status)
-	require.JSONEq(t, `{"sequence":1}`, string(result.Checkpoint))
+	require.Nil(t, result)
+	require.ErrorIs(t, err, backgroundtask.ErrDrainCheckpointUnavailable)
+	require.ErrorContains(t, err, "without a checkpoint write acknowledgement")
 }
 
 func TestSubagentPayloadValidation_BitsUT(t *testing.T) {
@@ -1507,7 +1534,7 @@ func TestExecutorInterruptPropagatesCheckpointWriteFailureWithoutReadback(t *tes
 	failed, err := manager.Get(context.Background(), task.Spec.ID)
 	require.NoError(t, err)
 	require.Equal(t, backgroundtask.StatusFailed, failed.Status)
-	require.Contains(t, failed.ResultError, adk.ErrCheckpointSave.Error())
+	require.Contains(t, failed.ResultError, "failed to save checkpoint")
 	require.Contains(t, failed.ResultError, "checkpoint storage unavailable")
 }
 
@@ -1543,7 +1570,8 @@ func TestExecutorInterruptSessionPersistenceFailureFailsWithoutCheckpoint(t *tes
 	failed, err := manager.Get(context.Background(), task.Spec.ID)
 	require.NoError(t, err)
 	require.Equal(t, backgroundtask.StatusFailed, failed.Status)
-	require.Contains(t, failed.ResultError, adk.ErrCheckpointSave.Error())
+	require.NotContains(t, failed.ResultError, adk.ErrCheckpointSave.Error())
+	require.Contains(t, failed.ResultError, "session event persistence failed")
 	require.Contains(t, failed.ResultError, "interrupt event storage unavailable")
 }
 
@@ -1848,13 +1876,15 @@ func TestExecutorDrainPropagatesCheckpointWriteFailureWithoutReadback(t *testing
 	closeCtx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	require.NoError(t, manager.Close(closeCtx))
-	require.ErrorIs(t, <-executeDone, backgroundtask.ErrDrainCheckpointUnavailable)
+	require.NoError(t, <-executeDone)
 	require.Positive(t, atomic.LoadInt32(&checkpointStore.setCount))
 	require.Zero(t, atomic.LoadInt32(&checkpointStore.getCount))
 
-	running, err := manager.Get(context.Background(), task.Spec.ID)
+	failed, err := manager.Get(context.Background(), task.Spec.ID)
 	require.NoError(t, err)
-	require.Equal(t, backgroundtask.StatusRunning, running.Status)
+	require.Equal(t, backgroundtask.StatusFailed, failed.Status)
+	require.Contains(t, failed.ResultError, "failed to save checkpoint on cancel")
+	require.Contains(t, failed.ResultError, "checkpoint storage unavailable")
 }
 
 func TestExecutorDrainTimeoutEscalatesBlockedModelStreamAndResumes(t *testing.T) {

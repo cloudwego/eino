@@ -96,9 +96,19 @@ func TestCheckpointSaveErrorPreservesSentinelAndCause(t *testing.T) {
 
 	require.ErrorIs(t, err, ErrCheckpointSave)
 	require.ErrorIs(t, err, cause)
-	assert.Contains(t, err.Error(), ErrCheckpointSave.Error())
-	assert.Contains(t, err.Error(), "failed to save checkpoint")
-	assert.Contains(t, err.Error(), cause.Error())
+	assert.Equal(t, "failed to save checkpoint: checkpoint storage unavailable", err.Error())
+	assert.NotContains(t, err.Error(), ErrCheckpointSave.Error())
+	require.NotErrorIs(t, err, ErrSessionEventPersistence)
+}
+
+func TestSessionEventPersistenceErrorPreservesSentinelAndCause(t *testing.T) {
+	cause := errors.New("session event storage unavailable")
+	err := newSessionEventPersistenceError("failed to persist session events", cause)
+
+	require.ErrorIs(t, err, ErrSessionEventPersistence)
+	require.ErrorIs(t, err, cause)
+	assert.Equal(t, "failed to persist session events: session event storage unavailable", err.Error())
+	require.NotErrorIs(t, err, ErrCheckpointSave)
 }
 
 func TestRunnerSessionID(t *testing.T) {

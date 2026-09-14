@@ -81,6 +81,8 @@ func (r *TypedRunner[M]) withRunnerSession(ctx context.Context) context.Context 
 	return context.WithValue(ctx, runnerSessionIDContextKey{}, r.sessionID)
 }
 
+// CheckPointStore persists Runner checkpoints. A successful Set must mean that
+// the checkpoint is durable and immediately visible to subsequent Get calls.
 type CheckPointStore = core.CheckPointStore
 
 type CheckPointDeleter = core.CheckPointDeleter
@@ -88,13 +90,18 @@ type CheckPointDeleter = core.CheckPointDeleter
 // ErrCheckpointSave identifies a Runner checkpoint persistence failure.
 var ErrCheckpointSave = errors.New("adk: checkpoint save failed")
 
+// ErrSessionEventPersistence identifies a Runner session-event persistence
+// failure. It is distinct from ErrCheckpointSave because retrying a checkpoint
+// write cannot repair an incomplete session event log.
+var ErrSessionEventPersistence = errors.New("adk: session event persistence failed")
+
 type checkpointSaveError struct {
 	label string
 	cause error
 }
 
 func (e *checkpointSaveError) Error() string {
-	return fmt.Sprintf("%s: %s: %v", ErrCheckpointSave, e.label, e.cause)
+	return fmt.Sprintf("%s: %v", e.label, e.cause)
 }
 
 func (e *checkpointSaveError) Unwrap() error { return e.cause }
@@ -103,6 +110,25 @@ func (e *checkpointSaveError) Is(target error) bool { return target == ErrCheckp
 
 func newCheckpointSaveError(label string, cause error) error {
 	return &checkpointSaveError{label: label, cause: cause}
+}
+
+type sessionEventPersistenceError struct {
+	label string
+	cause error
+}
+
+func (e *sessionEventPersistenceError) Error() string {
+	return fmt.Sprintf("%s: %v", e.label, e.cause)
+}
+
+func (e *sessionEventPersistenceError) Unwrap() error { return e.cause }
+
+func (e *sessionEventPersistenceError) Is(target error) bool {
+	return target == ErrSessionEventPersistence
+}
+
+func newSessionEventPersistenceError(label string, cause error) error {
+	return &sessionEventPersistenceError{label: label, cause: cause}
 }
 
 type TypedRunnerConfig[M MessageType] struct {
@@ -1330,7 +1356,7 @@ func (r *sessionTurnResult[M]) finalize(ctx context.Context) error {
 	// resume cannot load a checkpoint that points to a corrupt event log.
 	if r.pendingCheckpoint != nil && r.checkPointID != nil {
 		if r.persistErr != nil {
-			return newCheckpointSaveError(
+			return newSessionEventPersistenceError(
 				r.pendingCheckpoint.errLabel+
 					": skipped because session event persistence failed",
 				r.persistErr,
@@ -1341,7 +1367,10 @@ func (r *sessionTurnResult[M]) finalize(ctx context.Context) error {
 		}
 	}
 	if r.persistErr != nil {
-		return fmt.Errorf("failed to persist session events: %w", r.persistErr)
+		return newSessionEventPersistenceError(
+			"failed to persist session events",
+			r.persistErr,
+		)
 	}
 	if r.interrupted || r.cancelled {
 		return nil
