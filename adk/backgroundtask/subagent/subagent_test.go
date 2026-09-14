@@ -172,6 +172,32 @@ type recordingCheckpointStore struct {
 	setCount int32
 }
 
+type interruptFailingSessionStore struct {
+	inner *adksession.InMemoryStore[*schema.Message]
+	err   error
+}
+
+func (s *interruptFailingSessionStore) LoadEvents(
+	ctx context.Context,
+	sessionID string,
+	req *adk.LoadSessionEventsRequest,
+) (*adk.LoadSessionEventsResult[*schema.Message], error) {
+	return s.inner.LoadEvents(ctx, sessionID, req)
+}
+
+func (s *interruptFailingSessionStore) AppendEvents(
+	ctx context.Context,
+	sessionID string,
+	events []*adk.SessionEvent[*schema.Message],
+) error {
+	for _, event := range events {
+		if event != nil && event.Kind == adk.SessionEventInterrupt {
+			return s.err
+		}
+	}
+	return s.inner.AppendEvents(ctx, sessionID, events)
+}
+
 func (s *recordingCheckpointStore) Get(
 	ctx context.Context,
 	key string,
@@ -1094,6 +1120,28 @@ func TestHandleRunErrorControlOutcomes(t *testing.T) {
 		require.Equal(t, backgroundtask.StatusCanceled, result.Status)
 	})
 
+	t.Run("late checkpoint error overrides stop", func(t *testing.T) {
+		iter, generator := adk.NewAsyncIteratorPair[*adk.AgentEvent]()
+		generator.Send(&adk.AgentEvent{
+			Err: fmt.Errorf("%w: checkpoint storage unavailable", adk.ErrCheckpointSave),
+		})
+		generator.Close()
+		controls := make(chan backgroundtask.ControlRequest, 1)
+		controls <- backgroundtask.ControlRequest{Kind: backgroundtask.ControlStop}
+
+		result, err := executor.handleRunError(
+			context.Background(),
+			iter,
+			task,
+			controls,
+			nil,
+			context.Canceled,
+		)
+
+		require.Nil(t, result)
+		require.ErrorIs(t, err, adk.ErrCheckpointSave)
+	})
+
 	t.Run("timeout", func(t *testing.T) {
 		iter, generator := adk.NewAsyncIteratorPair[*adk.AgentEvent]()
 		generator.Close()
@@ -1461,6 +1509,42 @@ func TestExecutorInterruptPropagatesCheckpointWriteFailureWithoutReadback(t *tes
 	require.Equal(t, backgroundtask.StatusFailed, failed.Status)
 	require.Contains(t, failed.ResultError, adk.ErrCheckpointSave.Error())
 	require.Contains(t, failed.ResultError, "checkpoint storage unavailable")
+}
+
+func TestExecutorInterruptSessionPersistenceFailureFailsWithoutCheckpoint(t *testing.T) {
+	sessionStore := adksession.NewInMemoryStore[*schema.Message](nil)
+	checkpointStore := &recordingCheckpointStore{store: sessionStore}
+	executor, err := NewExecutor(&ExecutorConfig[*schema.Message]{
+		SessionStore: &interruptFailingSessionStore{
+			inner: sessionStore,
+			err:   errors.New("interrupt event storage unavailable"),
+		},
+		CheckPointStore: checkpointStore,
+	})
+	require.NoError(t, err)
+	agent := &resumableTestAgent{
+		name: "worker",
+		eventFactory: func(ctx context.Context) *adk.AgentEvent {
+			return adk.Interrupt(ctx, "approve")
+		},
+	}
+	require.NoError(t, executor.Register(agent.name, &AgentRegistration[*schema.Message]{Agent: agent}))
+	executors := backgroundtask.NewExecutorRegistry()
+	require.NoError(t, executors.Register(executor))
+	manager := mustNewBackgroundManager(t, context.Background(), &backgroundtask.Config{Executors: executors})
+	task, err := Submit(context.Background(), manager, &SubmitRequest[*schema.Message]{
+		SubAgentName: agent.name, Input: textInput("work"), Description: "work", SessionID: "parent",
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, manager.Execute(context.Background(), task.Spec.ID))
+	require.Zero(t, atomic.LoadInt32(&checkpointStore.setCount))
+
+	failed, err := manager.Get(context.Background(), task.Spec.ID)
+	require.NoError(t, err)
+	require.Equal(t, backgroundtask.StatusFailed, failed.Status)
+	require.Contains(t, failed.ResultError, adk.ErrCheckpointSave.Error())
+	require.Contains(t, failed.ResultError, "interrupt event storage unavailable")
 }
 
 func TestExecutorMessageBecomesTerminalResult_BitsUT(t *testing.T) {

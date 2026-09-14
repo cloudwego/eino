@@ -18,6 +18,7 @@ package adk
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -87,6 +88,17 @@ func TestNewRunner(t *testing.T) {
 
 	// Verify that a non-nil runner is returned
 	assert.NotNil(t, runner)
+}
+
+func TestCheckpointSaveErrorPreservesSentinelAndCause(t *testing.T) {
+	cause := errors.New("checkpoint storage unavailable")
+	err := newCheckpointSaveError("failed to save checkpoint", cause)
+
+	require.ErrorIs(t, err, ErrCheckpointSave)
+	require.ErrorIs(t, err, cause)
+	assert.Contains(t, err.Error(), ErrCheckpointSave.Error())
+	assert.Contains(t, err.Error(), "failed to save checkpoint")
+	assert.Contains(t, err.Error(), cause.Error())
 }
 
 func TestRunnerSessionID(t *testing.T) {
