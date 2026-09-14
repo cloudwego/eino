@@ -28,6 +28,7 @@ import (
 	"io"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/cloudwego/eino/adk"
@@ -148,6 +149,34 @@ type Executor[M adk.MessageType] struct {
 
 	mu            sync.RWMutex
 	registrations map[string]*AgentRegistration[M]
+}
+
+type attemptCheckpointStore struct {
+	adk.CheckPointStore
+	key   string
+	saved int32
+}
+
+func (s *attemptCheckpointStore) Set(ctx context.Context, key string, checkpoint []byte) error {
+	if err := s.CheckPointStore.Set(ctx, key, checkpoint); err != nil {
+		return err
+	}
+	if key == s.key {
+		atomic.StoreInt32(&s.saved, 1)
+	}
+	return nil
+}
+
+func (s *attemptCheckpointStore) Delete(ctx context.Context, key string) error {
+	deleter, ok := s.CheckPointStore.(adk.CheckPointDeleter)
+	if !ok {
+		return nil
+	}
+	return deleter.Delete(ctx, key)
+}
+
+func (s *attemptCheckpointStore) checkpointSaved() bool {
+	return atomic.LoadInt32(&s.saved) == 1
 }
 
 // NewExecutor constructs a durable sub-agent executor with explicit session
@@ -428,11 +457,15 @@ func (e *Executor[M]) Execute(
 			)
 		}
 	}
+	checkpointStore := &attemptCheckpointStore{
+		CheckPointStore: e.checkPointStore,
+		key:             checkpointID(task.Spec.ID),
+	}
 	runner := adk.NewTypedRunner(adk.TypedRunnerConfig[M]{
 		Agent: registration.Agent,
 		EnableStreaming: foreground.EnableStreaming() ||
 			(initialInput != nil && initialInput.EnableStreaming),
-		CheckPointStore: e.checkPointStore,
+		CheckPointStore: checkpointStore,
 		SessionID:       payload.ChildSessionID, SessionStore: sessionStore,
 		SessionConfig: e.sessionConfigForTask(task.Spec.ID),
 	})
@@ -475,9 +508,24 @@ func (e *Executor[M]) Execute(
 		if event.Action != nil && event.Action.Interrupted != nil {
 			interrupted = event.Action.Interrupted
 		}
+		if errors.Is(event.Err, adk.ErrCheckpointSave) ||
+			errors.Is(event.Err, adk.ErrSessionEventPersistence) {
+			control := pollControl(controlRequests)
+			_ = waitForDrainCancelOutcome(ctx, control, cancelOutcomes)
+			if control.Kind == backgroundtask.ControlStop &&
+				errors.Is(event.Err, adk.ErrCheckpointSave) {
+				result, controlErr, _ := e.controlResult(ctx, task, control)
+				return result, controlErr
+			}
+			if control.Kind == backgroundtask.ControlDrain {
+				return nil, event.Err
+			}
+			return nil, event.Err
+		}
 		if event.Err != nil && interrupted == nil {
 			return e.handleRunError(
-				ctx, iter, task, controlRequests, cancelOutcomes, event.Err,
+				ctx, iter, task, controlRequests, cancelOutcomes,
+				checkpointStore, event.Err,
 			)
 		}
 		materialized := event
@@ -489,7 +537,8 @@ func (e *Executor[M]) Execute(
 					continue
 				}
 				return e.handleRunError(
-					ctx, iter, task, controlRequests, cancelOutcomes, messageErr,
+					ctx, iter, task, controlRequests, cancelOutcomes,
+					checkpointStore, messageErr,
 				)
 			}
 			materialized = materializedEvent(event, message)
@@ -502,15 +551,17 @@ func (e *Executor[M]) Execute(
 	control := pollControl(controlRequests)
 	cancelOutcome := waitForDrainCancelOutcome(ctx, control, cancelOutcomes)
 	return e.resolveRunOutcome(ctx, task, control, cancelOutcome, subagentRunOutcome{
-		final:       final,
-		interrupted: interrupted,
+		final:           final,
+		interrupted:     interrupted,
+		checkpointSaved: checkpointStore.checkpointSaved(),
 	})
 }
 
 type subagentRunOutcome struct {
-	final       string
-	interrupted *adk.InterruptInfo
-	err         error
+	final           string
+	interrupted     *adk.InterruptInfo
+	err             error
+	checkpointSaved bool
 }
 
 func (e *Executor[M]) resolveRunOutcome(
@@ -522,6 +573,12 @@ func (e *Executor[M]) resolveRunOutcome(
 ) (*backgroundtask.ExecutionResult, error) {
 	drainLostRace := control.Kind == backgroundtask.ControlDrain &&
 		errors.Is(cancelOutcome, adk.ErrExecutionEnded)
+	if control.Kind == backgroundtask.ControlDrain && !drainLostRace &&
+		!run.checkpointSaved {
+		return nil, errors.New(
+			"backgroundtask/subagent: cancel completed without a checkpoint write acknowledgement",
+		)
+	}
 	if !drainLostRace {
 		if result, controlErr, controlled := e.controlResult(ctx, task, control); controlled {
 			return result, controlErr
@@ -657,12 +714,15 @@ func requestCancelAndWait(
 
 // handleRunError translates agent event and output materialization errors into
 // durable task lifecycle outcomes when a control request is active.
+//
+//nolint:revive // Cancellation state and persistence evidence are independent inputs.
 func (e *Executor[M]) handleRunError(
 	ctx context.Context,
 	iter *adk.AsyncIterator[*adk.TypedAgentEvent[M]],
 	task *backgroundtask.Task,
 	controlRequests <-chan backgroundtask.ControlRequest,
 	cancelOutcomes <-chan error,
+	checkpointStore *attemptCheckpointStore,
 	err error,
 ) (*backgroundtask.ExecutionResult, error) {
 	control := pollControl(controlRequests)
@@ -673,15 +733,40 @@ func (e *Executor[M]) handleRunError(
 			errors.Is(err, adk.ErrStreamCanceled)) {
 		control = waitForControl(ctx, controlRequests)
 	}
+	var persistenceErr error
 	if control.Kind != "" {
 		for {
-			if _, open := iter.Next(); !open {
+			event, open := iter.Next()
+			if !open {
 				break
+			}
+			if persistenceErr == nil &&
+				(errors.Is(event.Err, adk.ErrCheckpointSave) ||
+					errors.Is(event.Err, adk.ErrSessionEventPersistence)) {
+				persistenceErr = event.Err
 			}
 		}
 	}
 	cancelOutcome := waitForDrainCancelOutcome(ctx, control, cancelOutcomes)
-	return e.resolveRunOutcome(ctx, task, control, cancelOutcome, subagentRunOutcome{err: err})
+	if persistenceErr != nil {
+		if control.Kind == backgroundtask.ControlStop &&
+			errors.Is(persistenceErr, adk.ErrCheckpointSave) {
+			return e.resolveRunOutcome(
+				ctx, task, control, cancelOutcome, subagentRunOutcome{
+					err:             err,
+					checkpointSaved: checkpointStore != nil && checkpointStore.checkpointSaved(),
+				},
+			)
+		}
+		if control.Kind == backgroundtask.ControlDrain {
+			return nil, persistenceErr
+		}
+		return nil, persistenceErr
+	}
+	return e.resolveRunOutcome(ctx, task, control, cancelOutcome, subagentRunOutcome{
+		err:             err,
+		checkpointSaved: checkpointStore != nil && checkpointStore.checkpointSaved(),
+	})
 }
 
 func waitForControl(
@@ -717,17 +802,11 @@ func waitForDrainCancelOutcome(
 	}
 }
 
-func (e *Executor[M]) interruptResult(
-	ctx context.Context,
+func (*Executor[M]) interruptResult(
+	_ context.Context,
 	task *backgroundtask.Task,
 	interrupted *adk.InterruptInfo,
 ) (*backgroundtask.ExecutionResult, error) {
-	if _, exists, err := e.checkPointStore.Get(ctx, checkpointID(task.Spec.ID)); err != nil || !exists {
-		if err == nil {
-			err = errors.New("backgroundtask/subagent: runner checkpoint is missing")
-		}
-		return nil, err
-	}
 	state := checkpointState{
 		Sequence: nextCheckpointSequence(task.Checkpoint),
 	}
@@ -749,7 +828,7 @@ func (e *Executor[M]) interruptResult(
 	}, nil
 }
 
-func (e *Executor[M]) controlResult(
+func (*Executor[M]) controlResult(
 	_ context.Context,
 	task *backgroundtask.Task,
 	control backgroundtask.ControlRequest,
@@ -765,14 +844,6 @@ func (e *Executor[M]) controlResult(
 			Error:  reason,
 		}, nil, true
 	case backgroundtask.ControlDrain:
-		if _, exists, err := e.checkPointStore.Get(
-			context.Background(), checkpointID(task.Spec.ID),
-		); err != nil || !exists {
-			if err == nil {
-				err = errors.New("runner checkpoint is missing")
-			}
-			return nil, fmt.Errorf("%w: %v", backgroundtask.ErrDrainCheckpointUnavailable, err), true
-		}
 		stateBytes, err := json.Marshal(checkpointState{
 			Sequence: nextCheckpointSequence(task.Checkpoint),
 		})
