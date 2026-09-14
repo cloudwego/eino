@@ -18,6 +18,7 @@ package automemory
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -1130,7 +1131,7 @@ func TestMiddleware_BeforeAgent_GenInstructionRendersAndIndexInjectedOnce(t *tes
 	require.Equal(t, 1, countMemoryIndexMessages(out3.AgentInput.Messages))
 }
 
-func TestMiddleware_BeforeAgent_TopicMemoryInjectedOncePerSession(t *testing.T) {
+func TestMiddleware_BeforeAgent_TopicMemoryInjectedOncePerQuery(t *testing.T) {
 	ctx := context.Background()
 	b := NewInMemoryBackend()
 	now := time.Now()
@@ -1167,9 +1168,9 @@ func TestMiddleware_BeforeAgent_TopicMemoryInjectedOncePerSession(t *testing.T) 
 		AgentInput:  &adk.AgentInput{Messages: nextMessages},
 	})
 	require.NoError(t, err)
-	require.EqualValues(t, 1, atomic.LoadInt32(&selModel.calls))
+	require.EqualValues(t, 2, atomic.LoadInt32(&selModel.calls))
 	require.Equal(t, 1, countMemoryIndexMessages(out2.AgentInput.Messages))
-	require.Equal(t, 1, countTopicMemoryMessages(out2.AgentInput.Messages))
+	require.Equal(t, 2, countTopicMemoryMessages(out2.AgentInput.Messages))
 }
 
 func TestMiddleware_LastUserMessageSkipsSystemReminderPrefix(t *testing.T) {
@@ -1575,4 +1576,121 @@ func TestMiddleware_AfterAgent_AsyncSetsPendingSnapshotWhenLockHeld(t *testing.T
 	topic, err := b.Read(ctx, &ReadRequest{FilePath: "/mem/topic.md"})
 	require.NoError(t, err)
 	require.Equal(t, "remember pending", topic.Content)
+}
+
+// topicRefreshModel returns different memories as the conversation progresses.
+type topicRefreshModel struct {
+	fixedModel
+	calls int32
+}
+
+func (m *topicRefreshModel) Stream(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+	path := "appointment.md"
+	if atomic.AddInt32(&m.calls, 1) == 1 {
+		path = "refund.md"
+	}
+	selected := &fixedModel{out: fmt.Sprintf(`{"selected_memories":["%s"]}`, path)}
+	return selected.Stream(ctx, input, opts...)
+}
+
+func TestMiddleware_TopicMemoryRefreshesForNewQuery(t *testing.T) {
+	for _, mode := range []ReadMode{ReadModeSync, ReadModeAsync} {
+		t.Run(string(mode), func(t *testing.T) {
+			ctx := context.Background()
+			b := NewInMemoryBackend()
+			now := time.Now()
+			b.put("/mem/MEMORY.md", "refund.md\nappointment.md", now)
+			b.put("/mem/refund.md", "---\ndescription: refund rules\n---\nRefund within 7 days.", now)
+			b.put("/mem/appointment.md", "---\ndescription: change appointments\n---\nChange appointments 24 hours ahead.", now)
+			sel := &topicRefreshModel{}
+			mw, err := New(ctx, &Config[*schema.Message]{
+				MemoryDirectory: "/mem", MemoryBackend: b, Model: sel,
+				Read: &ReadConfig[*schema.Message]{Mode: mode},
+			})
+			require.NoError(t, err)
+			run := func(messages []*schema.Message) []*schema.Message {
+				t.Helper()
+				var out *adk.ChatModelAgentContext[*schema.Message]
+				ctx, out, err = mw.BeforeAgent(ctx, &adk.ChatModelAgentContext[*schema.Message]{
+					AgentInput: &adk.AgentInput{Messages: messages},
+				})
+				require.NoError(t, err)
+				st := &adk.ChatModelAgentState{Messages: out.AgentInput.Messages}
+				if mode == ReadModeAsync {
+					fut, _ := ctx.Value(ctxKeySelectionFuture{}).(*selectionFuture)
+					if fut != nil {
+						select {
+						case <-fut.done:
+						case <-time.After(5 * time.Second):
+							t.Fatal("topic selection did not complete")
+						}
+					}
+					_, st, err = mw.BeforeModelRewriteState(ctx, st, nil)
+					require.NoError(t, err)
+				}
+				return st.Messages
+			}
+			messages := run([]*schema.Message{schema.UserMessage("What are the refund rules?")})
+			require.EqualValues(t, 1, atomic.LoadInt32(&sel.calls))
+			require.Equal(t, 1, countTopicMemoryMessages(messages))
+			var originalMemory *schema.Message
+			for _, msg := range messages {
+				if isTopicMemoryMessage(msg) {
+					originalMemory = msg
+				}
+			}
+			require.NotNil(t, originalMemory)
+			originalContent := originalMemory.Content
+			require.Contains(t, originalContent, "Refund within 7 days.")
+			messages = run(messages)
+			require.EqualValues(t, 1, atomic.LoadInt32(&sel.calls), "same query must not select again")
+			messages = append(messages, schema.AssistantMessage("ack", nil), schema.UserMessage("How do I change my appointment?"))
+			messages = run(messages)
+			require.EqualValues(t, 2, atomic.LoadInt32(&sel.calls), "a new query must select again")
+			require.Equal(t, 2, countTopicMemoryMessages(messages))
+			require.Equal(t, 1, countMemoryIndexMessages(messages))
+			var latest *schema.Message
+			for _, msg := range messages {
+				if isTopicMemoryMessage(msg) {
+					latest = msg
+				}
+			}
+			require.Contains(t, latest.Content, "Change appointments 24 hours ahead.")
+			require.Equal(t, originalContent, originalMemory.Content)
+			messages = run(messages)
+			require.EqualValues(t, 2, atomic.LoadInt32(&sel.calls))
+			require.Equal(t, 2, countTopicMemoryMessages(messages))
+			var historyFound bool
+			for _, msg := range messages {
+				if msg.Content == originalContent {
+					historyFound = true
+				}
+			}
+			require.True(t, historyFound, "historical topic memory must not be rewritten")
+			// Persisted message extras must retain same-query deduplication without
+			// depending on the in-process future or pointer identity.
+			data, err := json.Marshal(messages)
+			require.NoError(t, err)
+			require.NoError(t, json.Unmarshal(data, &messages))
+			ctx = context.Background()
+			messages = run(messages)
+			require.EqualValues(t, 2, atomic.LoadInt32(&sel.calls))
+			require.Equal(t, 2, countTopicMemoryMessages(messages))
+
+			// Even identical query text in a later turn should read updated files.
+			b.put("/mem/appointment.md", "---\ndescription: change appointments\n---\nChange appointments 12 hours ahead.", now.Add(time.Minute))
+			messages = append(messages, schema.AssistantMessage("ack", nil), schema.UserMessage("How do I change my appointment?"))
+			messages = run(messages)
+			require.EqualValues(t, 3, atomic.LoadInt32(&sel.calls))
+			require.Equal(t, 3, countTopicMemoryMessages(messages))
+			var updatedFound bool
+			for _, msg := range messages {
+				if isTopicMemoryMessage(msg) && strings.Contains(msg.Content, "Change appointments 12 hours ahead.") {
+					updatedFound = true
+				}
+			}
+			require.True(t, updatedFound)
+
+		})
+	}
 }

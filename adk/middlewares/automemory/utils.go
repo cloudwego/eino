@@ -18,6 +18,7 @@ package automemory
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -519,9 +520,51 @@ func messageToolNames[M adk.MessageType](msg M) []string {
 	}
 }
 
-func hasTopicMemoryInjected[M adk.MessageType](msgs []M) bool {
+// Agentic tool results also use the user role, but do not start a new query.
+func isUserQueryMessage[M adk.MessageType](msg M) bool {
+	if isNilMessage(msg) || !isUserRole(msg) || isAutomemoryReminderMessage(msg) {
+		return false
+	}
+	if agentic, ok := any(msg).(*schema.AgenticMessage); ok {
+		for _, block := range agentic.ContentBlocks {
+			if block != nil && (block.UserInputText != nil || block.UserInputImage != nil ||
+				block.UserInputAudio != nil || block.UserInputVideo != nil || block.UserInputFile != nil) {
+				return true
+			}
+		}
+		return false
+	}
+	return true
+}
+
+// topicMemoryQueryKey identifies the current occurrence of a user query. Include
+// preceding user queries so asking the same question in a later turn refreshes
+// memory too. Ignore reminders and model/tool messages, which can change within
+// a turn. Transcript truncation may cause a harmless fresh selection.
+func topicMemoryQueryKey[M adk.MessageType](msgs []M) string {
+	h := sha256.New()
+	found := false
 	for _, msg := range msgs {
-		if isTopicMemoryMessage(msg) {
+		if !isUserQueryMessage(msg) {
+			continue
+		}
+		content := userMessageTextContent(msg)
+		fmt.Fprintf(h, "%d:%s", len(content), content)
+		found = true
+	}
+	if !found {
+		return ""
+	}
+	return fmt.Sprintf("%x", h.Sum(nil))
+}
+
+func hasTopicMemoryInjected[M adk.MessageType](msgs []M) bool {
+	queryKey := topicMemoryQueryKey(msgs)
+	if queryKey == "" {
+		return false
+	}
+	for _, msg := range msgs {
+		if isTopicMemoryMessage(msg) && getMsgExtra(msg)[topicMemoryQueryExtraKey] == queryKey {
 			return true
 		}
 	}
@@ -555,7 +598,7 @@ func insertMessagesBeforeLastUserQuery[M adk.MessageType](msgs []M, inserts []M)
 func lastUserQueryMessageIndex[M adk.MessageType](msgs []M) int {
 	for i := len(msgs) - 1; i >= 0; i-- {
 		msg := msgs[i]
-		if isNilMessage(msg) || !isUserRole(msg) || isAutomemoryReminderMessage(msg) {
+		if !isUserQueryMessage(msg) {
 			continue
 		}
 		return i
@@ -638,7 +681,7 @@ func newMemoryIndexMessage[M adk.MessageType](content string) M {
 	return msg
 }
 
-func ensureMemoryMsgUnchanged[M adk.MessageType](state *adk.TypedChatModelAgentState[M], expectedContent string) *adk.TypedChatModelAgentState[M] {
+func ensureMemoryMsgUnchanged[M adk.MessageType](state *adk.TypedChatModelAgentState[M], expectedContent, queryKey string) *adk.TypedChatModelAgentState[M] {
 	if state == nil || strings.TrimSpace(expectedContent) == "" {
 		return state
 	}
@@ -647,12 +690,13 @@ func ensureMemoryMsgUnchanged[M adk.MessageType](state *adk.TypedChatModelAgentS
 	out.Messages = append([]M{}, state.Messages...)
 
 	for i, m := range out.Messages {
-		if !isTopicMemoryMessage(m) {
+		if !isTopicMemoryMessage(m) || getMsgExtra(m)[topicMemoryQueryExtraKey] != queryKey {
 			continue
 		}
 		extra := getMsgExtra(m)
 		if userMessageTextContent(m) != expectedContent || extra == nil || extra[memoryExtraKey] == nil {
 			out.Messages[i] = newMemoryMessage[M](expectedContent)
+			copyAndSetMsgExtra(out.Messages[i], topicMemoryQueryExtraKey, queryKey)
 			changed = true
 		}
 	}
@@ -869,7 +913,7 @@ func (m *middleware[M]) lastUserMessage(agentIn *adk.TypedAgentInput[M]) (M, boo
 	}
 	for i := len(agentIn.Messages) - 1; i >= 0; i-- {
 		msg := agentIn.Messages[i]
-		if isNilMessage(msg) || !isUserRole(msg) || isAutomemoryReminderMessage(msg) {
+		if !isUserQueryMessage(msg) {
 			continue
 		}
 		return msg, true
