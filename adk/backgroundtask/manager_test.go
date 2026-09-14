@@ -708,6 +708,82 @@ func (s heartbeatErrorStore) Heartbeat(context.Context, *HeartbeatRequest) (*Tas
 	return nil, s.err
 }
 
+type heartbeatRecordingStore struct {
+	TaskStore
+	calls   chan struct{}
+	release <-chan struct{}
+}
+
+func (s heartbeatRecordingStore) Heartbeat(
+	_ context.Context,
+	req *HeartbeatRequest,
+) (*Task, error) {
+	s.calls <- struct{}{}
+	<-s.release
+	return &Task{
+		Spec:    Spec{ID: req.TaskID},
+		Status:  StatusRunning,
+		Version: req.ExpectedVersion + 1,
+	}, nil
+}
+
+func TestManagerHeartbeatUsesDynamicInterval(t *testing.T) {
+	var mu sync.Mutex
+	interval := time.Millisecond
+	manager := mustNewManager(t, context.Background(), &Config{
+		HeartbeatInterval: func() time.Duration {
+			mu.Lock()
+			defer mu.Unlock()
+			return interval
+		},
+	})
+	calls := make(chan struct{}, 2)
+	release := make(chan struct{})
+	events := NewInMemoryStore(nil)
+	runtime := newTaskRuntime(
+		heartbeatRecordingStore{
+			TaskStore: NewInMemoryStore(nil),
+			calls:     calls,
+			release:   release,
+		},
+		events,
+		"task",
+		1,
+		1,
+		nil,
+	)
+	runCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	stop := make(chan struct{})
+	go manager.heartbeat(runCtx, cancel, runtime, stop, done)
+
+	select {
+	case <-calls:
+	case <-time.After(time.Second):
+		t.Fatal("first heartbeat did not use configured interval")
+	}
+	mu.Lock()
+	interval = time.Hour
+	mu.Unlock()
+	close(release)
+
+	select {
+	case <-calls:
+		t.Fatal("heartbeat interval was not re-evaluated after success")
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(stop)
+	<-done
+}
+
+func TestManagerHeartbeatIntervalFallback(t *testing.T) {
+	manager := mustNewManager(t, context.Background(), &Config{
+		HeartbeatInterval: func() time.Duration { return 0 },
+	})
+	require.Equal(t, 10*time.Second, manager.nextHeartbeatInterval())
+}
+
 func TestManagerHeartbeatStopsAndCancelsOnLeaseError(t *testing.T) {
 	manager := mustNewManager(t, context.Background(), nil)
 	manager.heartbeatEvery = time.Nanosecond
