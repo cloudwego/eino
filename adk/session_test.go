@@ -3384,17 +3384,18 @@ func TestRunnerSessionInterruptCheckpointSkippedOnPersistFailure(t *testing.T) {
 		SessionStore:    store,
 	})
 	iter := runner.Query(ctx, "go")
-	var sawErr bool
+	var persistErr error
 	for {
 		ev, ok := iter.Next()
 		if !ok {
 			break
 		}
 		if ev.Err != nil {
-			sawErr = true
+			persistErr = ev.Err
 		}
 	}
-	require.True(t, sawErr, "expected runner to surface the persistence error")
+	require.ErrorIs(t, persistErr, ErrSessionEventPersistence)
+	require.NotErrorIs(t, persistErr, ErrCheckpointSave)
 
 	cpKey := sessionRunnerCheckpointID("interrupt-persist-fail")
 	calls := store.callsSnapshot()
