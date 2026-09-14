@@ -154,6 +154,11 @@ type Config struct {
 	// for background execution and later recovery. Snapshots are captured during
 	// Submit, Resume, and ReleaseSuspension, then restored before task execution.
 	ContextSnapshotter ContextSnapshotter
+	// HeartbeatInterval returns the delay before the next active-attempt
+	// heartbeat. It may be called concurrently and is re-evaluated after every
+	// successful heartbeat so deployments can adjust the interval dynamically.
+	// Nil or non-positive results use the default 10-second interval.
+	HeartbeatInterval func() time.Duration
 }
 
 type closeOptions struct {
@@ -200,6 +205,7 @@ type Manager struct {
 	idGen                IDGenerator
 	sendTaskCreatedEvent func(context.Context, *Task) error
 	contextSnapshotter   ContextSnapshotter
+	heartbeatInterval    func() time.Duration
 }
 
 // New creates a Manager. A nil Config installs the in-memory reference stores
@@ -237,9 +243,22 @@ func New(_ context.Context, conf *Config) (*Manager, error) {
 		m.sendTaskCreatedEvent = conf.SendTaskCreatedEvent
 		m.idGen = conf.IDGen
 		m.contextSnapshotter = conf.ContextSnapshotter
+		m.heartbeatInterval = conf.HeartbeatInterval
 	}
 	m.notificationWriter, _ = m.tasks.(NotificationWriter)
 	return m, nil
+}
+
+func (m *Manager) nextHeartbeatInterval() time.Duration {
+	if m.heartbeatInterval != nil {
+		if interval := m.heartbeatInterval(); interval > 0 {
+			return interval
+		}
+	}
+	if m.heartbeatEvery > 0 {
+		return m.heartbeatEvery
+	}
+	return 10 * time.Second
 }
 
 // Close performs bounded graceful shutdown. When any attempt is active, ctx must

@@ -140,7 +140,8 @@ func TestSimplifiedPublicModelHasNoOverlappingStateFields_BitsUT(t *testing.T) {
 		"TaskID", "Cursor", "Limit", "NewestFirst")
 	assertFieldsPresent(t, reflect.TypeOf(ListTaskEventsResult{}), "Events", "NextCursor")
 	assertFieldsPresent(t, reflect.TypeOf(Config{}),
-		"Tasks", "TaskEvents", "Executors", "SendTaskCreatedEvent", "IDGen", "ContextSnapshotter")
+		"Tasks", "TaskEvents", "Executors", "SendTaskCreatedEvent", "IDGen",
+		"ContextSnapshotter", "HeartbeatInterval")
 	assertFieldsAbsent(t, reflect.TypeOf(Config{}), "Store", "NotificationWriter")
 	assertMethodsAbsent(t, reflect.TypeOf((*TaskStore)(nil)).Elem(),
 		"AppendTaskEvent", "ListTaskEvents", "ReadRecentTaskEvents", "ReportOutputFailure",
