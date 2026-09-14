@@ -715,6 +715,8 @@ func requestCancelAndWait(
 
 // handleRunError translates agent event and output materialization errors into
 // durable task lifecycle outcomes when a control request is active.
+//
+//nolint:revive // Cancellation state and persistence evidence are independent inputs.
 func (e *Executor[M]) handleRunError(
 	ctx context.Context,
 	iter *adk.AsyncIterator[*adk.TypedAgentEvent[M]],
