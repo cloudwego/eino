@@ -283,6 +283,26 @@ func TestMiddleware_ToolConfig_NameOverrideAndDisable(t *testing.T) {
 	assert.Equal(t, customDesc, info.Desc)
 }
 
+func TestMiddleware_ToolConfig_DisableTaskOutput(t *testing.T) {
+	mgr := newBackgroundManager(t, context.Background(), &bgtask.Config{})
+	defer closeWithTimeout(mgr)
+
+	mw, err := New(context.Background(), &Config{
+		Manager:              mgr,
+		TaskOutputToolConfig: &ToolConfig{Disable: true},
+	})
+	require.NoError(t, err)
+	_, runCtx, err := mw.BeforeAgent(
+		context.Background(),
+		&adk.ChatModelAgentContext[*schema.Message]{},
+	)
+	require.NoError(t, err)
+	require.Len(t, runCtx.Tools, 1)
+	findTool(t, runCtx.Tools, taskStopToolName)
+	assert.NotContains(t, runCtx.Instruction, taskOutputToolName)
+	assert.Contains(t, runCtx.Instruction, taskStopToolName)
+}
+
 func TestMiddleware_ToolConfig_DisableBoth(t *testing.T) {
 	mgr := newBackgroundManager(t, context.Background(), &bgtask.Config{})
 	defer closeWithTimeout(mgr)
