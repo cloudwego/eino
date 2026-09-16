@@ -54,6 +54,12 @@ func unmarshalTurnLoopCheckpoint[T any](data []byte) (*turnLoopCheckpoint[T], er
 	return &c, nil
 }
 
+func takeRunnerCheckpoint[T any](cp *turnLoopCheckpoint[T]) []byte {
+	runnerCheckpoint := cp.RunnerCheckpoint
+	cp.RunnerCheckpoint = nil
+	return runnerCheckpoint
+}
+
 func (l *TurnLoop[T, M]) saveTurnLoopCheckpoint(ctx context.Context, checkPointID string, c *turnLoopCheckpoint[T]) error {
 	if l.config.Store == nil {
 		return errors.New("checkpoint store is nil")
@@ -139,7 +145,7 @@ func (l *TurnLoop[T, M]) tryLoadCheckpoint(ctx context.Context) error {
 			resumeItems:        resumeItems,
 			resumeSubmitted:    resumeSubmitted,
 			resumeCheckpointID: resumeCheckpointID,
-			resumeBytes:        append([]byte{}, cp.RunnerCheckpoint...),
+			resumeBytes:        takeRunnerCheckpoint(cp),
 		}
 	} else {
 		items := make([]T, 0, len(cp.UnhandledItems)+len(newItems))
