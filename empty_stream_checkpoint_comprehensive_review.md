@@ -59,7 +59,7 @@ Coverage:
 - `adk` statement coverage: 90.6%
 - `emptyMessageStreamError.Error`: 100%
 - `agentEventWrapper.GobEncode`: 100%
-- `agentEventWrapper.GobDecode`: 88.9%
+- `agentEventWrapper.GobDecode`: 100%
 - No changed function is below the 70% hard floor.
 
 ## Cumulative Changes

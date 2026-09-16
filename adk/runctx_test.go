@@ -538,6 +538,12 @@ func TestAttack_EmptyMessageStreamCheckpointCompatibility(t *testing.T) {
 }
 
 func TestGobEncodeStreamErrors(t *testing.T) {
+	t.Run("malformed_wrapper_GobDecode_returns_error", func(t *testing.T) {
+		decoded := &agentEventWrapper{}
+		err := decoded.GobDecode([]byte("not-gob"))
+		require.Error(t, err)
+	})
+
 	t.Run("WillRetryError_unconsumed_stream_succeeds_GobEncode", func(t *testing.T) {
 		// An agentEventWrapper whose stream yields a message then WillRetryError.
 		// Without pre-consuming (no getMessageFromWrappedEvent call), GobEncode
