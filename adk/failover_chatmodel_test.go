@@ -20,8 +20,10 @@ import (
 	"context"
 	"errors"
 	"io"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -743,4 +745,243 @@ func agenticChunk(text string) *schema.AgenticMessage {
 			schema.NewContentBlock(&schema.AssistantGenText{Text: text}),
 		},
 	}
+}
+
+// agenticUserText reads the text of a user message, which is what these tests
+// assert on: agenticTextContent only reads assistant output.
+func agenticUserText(msg *schema.AgenticMessage) string {
+	for _, b := range msg.ContentBlocks {
+		if b.UserInputText != nil {
+			return b.UserInputText.Text
+		}
+	}
+	return ""
+}
+
+// failoverInputProbe records, per model, the input each call was made with.
+type failoverInputProbe struct {
+	mu     sync.Mutex
+	inputs map[string][][]*schema.AgenticMessage
+}
+
+func newFailoverInputProbe() *failoverInputProbe {
+	return &failoverInputProbe{inputs: map[string][][]*schema.AgenticMessage{}}
+}
+
+func (p *failoverInputProbe) record(name string, input []*schema.AgenticMessage) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.inputs[name] = append(p.inputs[name], append([]*schema.AgenticMessage(nil), input...))
+}
+
+func (p *failoverInputProbe) calls(name string) [][]*schema.AgenticMessage {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.inputs[name]
+}
+
+// A retry that rewrote its input and asked for the rewrite to be persisted has
+// concluded the input itself was at fault. Everything after it must therefore
+// be sent the rewrite -- including the model failed over to, which is otherwise
+// handed the very payload the retry just faulted, and spends the rest of the
+// failover budget re-sending it.
+func TestFailoverUsesRetryPersistedInput(t *testing.T) {
+	ctx := context.Background()
+
+	rejected := errors.New("provider rejected the request payload")
+	const repairedText = "hello (attachment omitted)"
+	probe := newFailoverInputProbe()
+
+	m1 := &mockAgenticModel{
+		generateFn: func(_ context.Context, input []*schema.AgenticMessage, _ ...model.Option) (*schema.AgenticMessage, error) {
+			probe.record("m1", input)
+			return nil, rejected
+		},
+	}
+	m2 := &mockAgenticModel{
+		generateFn: func(_ context.Context, input []*schema.AgenticMessage, _ ...model.Option) (*schema.AgenticMessage, error) {
+			probe.record("m2", input)
+			return agenticMsg("failover ok"), nil
+		},
+	}
+
+	var failoverInput []*schema.AgenticMessage
+	agent, err := NewTypedChatModelAgent(ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
+		Name:        "failover-persisted-input-agent",
+		Description: "failover reads the input a retry persisted",
+		Model:       m1,
+		ModelRetryConfig: &TypedModelRetryConfig[*schema.AgenticMessage]{
+			MaxRetries: 1,
+			ShouldRetry: func(_ context.Context, retryCtx *TypedRetryContext[*schema.AgenticMessage]) *TypedRetryDecision[*schema.AgenticMessage] {
+				if !errors.Is(retryCtx.Err, rejected) {
+					return &TypedRetryDecision[*schema.AgenticMessage]{Retry: false}
+				}
+				return &TypedRetryDecision[*schema.AgenticMessage]{
+					Retry:                        true,
+					ModifiedInputMessages:        []*schema.AgenticMessage{schema.UserAgenticMessage(repairedText)},
+					PersistModifiedInputMessages: true,
+				}
+			},
+			BackoffFunc: func(context.Context, int) time.Duration { return 0 },
+		},
+		ModelFailoverConfig: &ModelFailoverConfig[*schema.AgenticMessage]{
+			MaxRetries:     1,
+			ShouldFailover: func(_ context.Context, _ *schema.AgenticMessage, err error) bool { return err != nil },
+			GetFailoverModel: func(_ context.Context, failoverCtx *FailoverContext[*schema.AgenticMessage]) (
+				model.BaseModel[*schema.AgenticMessage], []*schema.AgenticMessage, error) {
+				failoverInput = failoverCtx.InputMessages
+				return m2, nil, nil
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	runner := NewTypedRunner(TypedRunnerConfig[*schema.AgenticMessage]{Agent: agent})
+	msg := drainTypedAgenticEvents(t, runner.Run(ctx, []*schema.AgenticMessage{schema.UserAgenticMessage("hello")}))
+	require.NotNil(t, msg)
+	assert.Equal(t, "failover ok", agenticTextContent(msg))
+
+	// The retry itself behaves as before: original input, then the rewrite.
+	m1Calls := probe.calls("m1")
+	require.Len(t, m1Calls, 2)
+	assert.Equal(t, "hello", agenticUserText(m1Calls[0][0]))
+	assert.Equal(t, repairedText, agenticUserText(m1Calls[1][0]))
+
+	// What this test exists for: the failover target sees the rewrite, both in
+	// the context it selects from and in the call it is actually made with.
+	require.Len(t, failoverInput, 1)
+	assert.Equal(t, repairedText, agenticUserText(failoverInput[0]))
+	m2Calls := probe.calls("m2")
+	require.Len(t, m2Calls, 1)
+	require.Len(t, m2Calls[0], 1)
+	assert.Equal(t, repairedText, agenticUserText(m2Calls[0][0]))
+}
+
+// Same, in streaming mode: both attempt loops read the state, not just the one
+// Generate happens to use.
+func TestFailoverUsesRetryPersistedInput_Stream(t *testing.T) {
+	ctx := context.Background()
+
+	rejected := errors.New("provider rejected the request payload")
+	const repairedText = "hello (attachment omitted)"
+	probe := newFailoverInputProbe()
+
+	m1 := &mockAgenticModel{
+		streamFn: func(_ context.Context, input []*schema.AgenticMessage, _ ...model.Option) (
+			*schema.StreamReader[*schema.AgenticMessage], error) {
+			probe.record("m1", input)
+			return nil, rejected
+		},
+	}
+	m2 := &mockAgenticModel{
+		streamFn: func(_ context.Context, input []*schema.AgenticMessage, _ ...model.Option) (
+			*schema.StreamReader[*schema.AgenticMessage], error) {
+			probe.record("m2", input)
+			return agenticStreamOK([]*schema.AgenticMessage{agenticMsg("failover stream ok")}), nil
+		},
+	}
+
+	var failoverInput []*schema.AgenticMessage
+	agent, err := NewTypedChatModelAgent(ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
+		Name:        "failover-persisted-input-stream-agent",
+		Description: "failover reads the input a retry persisted, in stream mode",
+		Model:       m1,
+		ModelRetryConfig: &TypedModelRetryConfig[*schema.AgenticMessage]{
+			MaxRetries: 1,
+			ShouldRetry: func(_ context.Context, retryCtx *TypedRetryContext[*schema.AgenticMessage]) *TypedRetryDecision[*schema.AgenticMessage] {
+				if !errors.Is(retryCtx.Err, rejected) {
+					return &TypedRetryDecision[*schema.AgenticMessage]{Retry: false}
+				}
+				return &TypedRetryDecision[*schema.AgenticMessage]{
+					Retry:                        true,
+					ModifiedInputMessages:        []*schema.AgenticMessage{schema.UserAgenticMessage(repairedText)},
+					PersistModifiedInputMessages: true,
+				}
+			},
+			BackoffFunc: func(context.Context, int) time.Duration { return 0 },
+		},
+		ModelFailoverConfig: &ModelFailoverConfig[*schema.AgenticMessage]{
+			MaxRetries:     1,
+			ShouldFailover: func(_ context.Context, _ *schema.AgenticMessage, err error) bool { return err != nil },
+			GetFailoverModel: func(_ context.Context, failoverCtx *FailoverContext[*schema.AgenticMessage]) (
+				model.BaseModel[*schema.AgenticMessage], []*schema.AgenticMessage, error) {
+				failoverInput = failoverCtx.InputMessages
+				return m2, nil, nil
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	runner := NewTypedRunner(TypedRunnerConfig[*schema.AgenticMessage]{Agent: agent, EnableStreaming: true})
+	msg := drainTypedAgenticEvents(t, runner.Run(ctx, []*schema.AgenticMessage{schema.UserAgenticMessage("hello")}))
+	require.NotNil(t, msg)
+	assert.Contains(t, agenticTextContent(msg), "failover stream ok")
+
+	require.Len(t, failoverInput, 1)
+	assert.Equal(t, repairedText, agenticUserText(failoverInput[0]))
+	m2Calls := probe.calls("m2")
+	require.Len(t, m2Calls, 1)
+	require.Len(t, m2Calls[0], 1)
+	assert.Equal(t, repairedText, agenticUserText(m2Calls[0][0]))
+}
+
+// The other side of the flag: a rewrite the retry kept to itself stays scoped
+// to the model that made it, and the failover target is sent the input the call
+// was made with. Reading the state must not turn every rewrite into a global
+// one -- that decision stays with PersistModifiedInputMessages.
+func TestFailoverKeepsCallInputWhenRetryDoesNotPersist(t *testing.T) {
+	ctx := context.Background()
+
+	rejected := errors.New("provider rejected the request payload")
+	probe := newFailoverInputProbe()
+
+	m1 := &mockAgenticModel{
+		generateFn: func(_ context.Context, input []*schema.AgenticMessage, _ ...model.Option) (*schema.AgenticMessage, error) {
+			probe.record("m1", input)
+			return nil, rejected
+		},
+	}
+	m2 := &mockAgenticModel{
+		generateFn: func(_ context.Context, input []*schema.AgenticMessage, _ ...model.Option) (*schema.AgenticMessage, error) {
+			probe.record("m2", input)
+			return agenticMsg("failover ok"), nil
+		},
+	}
+
+	agent, err := NewTypedChatModelAgent(ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
+		Name:        "failover-unpersisted-input-agent",
+		Description: "failover keeps the call input when the retry did not persist",
+		Model:       m1,
+		ModelRetryConfig: &TypedModelRetryConfig[*schema.AgenticMessage]{
+			MaxRetries: 1,
+			ShouldRetry: func(_ context.Context, retryCtx *TypedRetryContext[*schema.AgenticMessage]) *TypedRetryDecision[*schema.AgenticMessage] {
+				if !errors.Is(retryCtx.Err, rejected) {
+					return &TypedRetryDecision[*schema.AgenticMessage]{Retry: false}
+				}
+				return &TypedRetryDecision[*schema.AgenticMessage]{
+					Retry:                 true,
+					ModifiedInputMessages: []*schema.AgenticMessage{schema.UserAgenticMessage("attempt-local rewrite")},
+				}
+			},
+			BackoffFunc: func(context.Context, int) time.Duration { return 0 },
+		},
+		ModelFailoverConfig: &ModelFailoverConfig[*schema.AgenticMessage]{
+			MaxRetries:     1,
+			ShouldFailover: func(_ context.Context, _ *schema.AgenticMessage, err error) bool { return err != nil },
+			GetFailoverModel: func(_ context.Context, _ *FailoverContext[*schema.AgenticMessage]) (
+				model.BaseModel[*schema.AgenticMessage], []*schema.AgenticMessage, error) {
+				return m2, nil, nil
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	runner := NewTypedRunner(TypedRunnerConfig[*schema.AgenticMessage]{Agent: agent})
+	msg := drainTypedAgenticEvents(t, runner.Run(ctx, []*schema.AgenticMessage{schema.UserAgenticMessage("hello")}))
+	require.NotNil(t, msg)
+
+	m2Calls := probe.calls("m2")
+	require.Len(t, m2Calls, 1)
+	require.Len(t, m2Calls[0], 1)
+	assert.Equal(t, "hello", agenticUserText(m2Calls[0][0]))
 }
