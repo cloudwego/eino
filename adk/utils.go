@@ -18,7 +18,6 @@ package adk
 
 import (
 	"context"
-	"errors"
 	"io"
 	"strings"
 
@@ -200,7 +199,7 @@ func (e *agentEventWrapper) consumeStream() {
 	}
 
 	if len(msgs) == 0 {
-		e.StreamErr = errors.New("no messages in MessageVariant.MessageStream")
+		e.StreamErr = &emptyMessageStreamError{streamName: "MessageVariant.MessageStream"}
 		// Defensively replace the stream. The defer s.Close() above already
 		// ensures subsequent Recv() returns io.EOF, but we replace it anyway
 		// to make the invariant explicit: after consumeStream, MessageStream

@@ -30,6 +30,14 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
+type emptyMessageStreamError struct {
+	streamName string
+}
+
+func (e *emptyMessageStreamError) Error() string {
+	return "no messages in " + e.streamName
+}
+
 // runSession CheckpointSchema: persisted via serialization.RunCtx (gob).
 type runSession struct {
 	Values    map[string]any
@@ -168,7 +176,14 @@ func (e *typedAgentEventWrapper[M]) consumeStream() {
 	e.event.Output.MessageOutput.MessageStream = schema.StreamReaderFromArray([]M{e.concatenatedMessage})
 }
 
-type otherAgentEventWrapperForEncode agentEventWrapper
+// agentEventWrapperForGob stores the empty-stream error outside the error
+// interface so older decoders can ignore it and still restore the event.
+type agentEventWrapperForGob struct {
+	AgentEvent             *AgentEvent
+	TS                     int64
+	StreamErr              error
+	EmptyMessageStreamName string
+}
 
 func (a *agentEventWrapper) GobEncode() ([]byte, error) {
 	if a.Output != nil && a.Output.MessageOutput != nil && a.Output.MessageOutput.IsStreaming {
@@ -181,8 +196,20 @@ func (a *agentEventWrapper) GobEncode() ([]byte, error) {
 		}
 	}
 
+	streamErr := a.StreamErr
+	var emptyMessageStreamName string
+	if emptyErr, ok := streamErr.(*emptyMessageStreamError); ok {
+		emptyMessageStreamName = emptyErr.streamName
+		streamErr = nil
+	}
+
 	buf := &bytes.Buffer{}
-	err := gob.NewEncoder(buf).Encode((*otherAgentEventWrapperForEncode)(a))
+	err := gob.NewEncoder(buf).Encode(&agentEventWrapperForGob{
+		AgentEvent:             a.AgentEvent,
+		TS:                     a.TS,
+		StreamErr:              streamErr,
+		EmptyMessageStreamName: emptyMessageStreamName,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to gob encode agent event wrapper: %w", err)
 	}
@@ -190,7 +217,17 @@ func (a *agentEventWrapper) GobEncode() ([]byte, error) {
 }
 
 func (a *agentEventWrapper) GobDecode(b []byte) error {
-	return gob.NewDecoder(bytes.NewReader(b)).Decode((*otherAgentEventWrapperForEncode)(a))
+	s := &agentEventWrapperForGob{}
+	if err := gob.NewDecoder(bytes.NewReader(b)).Decode(s); err != nil {
+		return err
+	}
+	a.AgentEvent = s.AgentEvent
+	a.TS = s.TS
+	a.StreamErr = s.StreamErr
+	if s.EmptyMessageStreamName != "" {
+		a.StreamErr = &emptyMessageStreamError{streamName: s.EmptyMessageStreamName}
+	}
+	return nil
 }
 
 func newRunSession() *runSession {

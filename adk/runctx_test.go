@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/cloudwego/eino/schema"
 )
@@ -451,8 +452,93 @@ func makeStreamingEventWrapper(msg Message, streamErr error) *agentEventWrapper 
 	}
 }
 
+type legacyAgentEventWrapperForGob struct {
+	*AgentEvent
+	TS        int64
+	StreamErr error
+}
+
+func makeEmptyStreamingEventWrapper() *agentEventWrapper {
+	return &agentEventWrapper{
+		AgentEvent: &AgentEvent{
+			AgentName: "empty-stream-agent",
+			Output: &AgentOutput{
+				MessageOutput: &MessageVariant{
+					IsStreaming:   true,
+					MessageStream: schema.StreamReaderFromArray([]Message{}),
+					Role:          schema.Assistant,
+				},
+			},
+		},
+		TS: 42,
+	}
+}
+
+func TestAttack_EmptyMessageStreamCheckpointCompatibility(t *testing.T) {
+	t.Run("runner checkpoint round trip", func(t *testing.T) {
+		session := newRunSession()
+		session.Events = []*agentEventWrapper{makeEmptyStreamingEventWrapper()}
+		ctx := setRunCtx(context.Background(), &runContext{Session: session})
+		store := newMyStore()
+
+		err := runnerSaveCheckPointImpl(false, store, ctx, "empty-stream", &InterruptInfo{}, nil)
+		require.NoError(t, err)
+
+		_, restoredRunCtx, _, err := runnerLoadCheckPointImpl(store, ctx, "empty-stream")
+		require.NoError(t, err)
+		require.Len(t, restoredRunCtx.Session.Events, 1)
+
+		_, err = getMessageFromWrappedEvent(restoredRunCtx.Session.Events[0])
+		require.EqualError(t, err, "no messages in MessageVariant.MessageStream")
+		var emptyErr *emptyMessageStreamError
+		require.ErrorAs(t, err, &emptyErr)
+		assert.Equal(t, "MessageVariant.MessageStream", emptyErr.streamName)
+	})
+
+	t.Run("new payload remains readable by legacy decoder", func(t *testing.T) {
+		data, err := makeEmptyStreamingEventWrapper().GobEncode()
+		require.NoError(t, err)
+
+		legacy := &legacyAgentEventWrapperForGob{}
+		err = gob.NewDecoder(bytes.NewReader(data)).Decode(legacy)
+		require.NoError(t, err)
+		require.NotNil(t, legacy.AgentEvent)
+		assert.Equal(t, "empty-stream-agent", legacy.AgentName)
+		assert.Equal(t, int64(42), legacy.TS)
+		assert.NoError(t, legacy.StreamErr)
+	})
+
+	t.Run("legacy payload remains readable by new decoder", func(t *testing.T) {
+		legacy := &legacyAgentEventWrapperForGob{
+			AgentEvent: &AgentEvent{
+				AgentName: "legacy-agent",
+				Output: &AgentOutput{
+					MessageOutput: &MessageVariant{
+						Message: schema.AssistantMessage("legacy response", nil),
+						Role:    schema.Assistant,
+					},
+				},
+			},
+			TS:        24,
+			StreamErr: &WillRetryError{ErrStr: "legacy stream error", RetryAttempt: 2},
+		}
+		var buf bytes.Buffer
+		require.NoError(t, gob.NewEncoder(&buf).Encode(legacy))
+
+		decoded := &agentEventWrapper{}
+		require.NoError(t, decoded.GobDecode(buf.Bytes()))
+		require.NotNil(t, decoded.AgentEvent)
+		assert.Equal(t, "legacy-agent", decoded.AgentName)
+		assert.Equal(t, int64(24), decoded.TS)
+		var retryErr *WillRetryError
+		require.ErrorAs(t, decoded.StreamErr, &retryErr)
+		assert.Equal(t, "legacy stream error", retryErr.ErrStr)
+		assert.Equal(t, 2, retryErr.RetryAttempt)
+	})
+}
+
 func TestGobEncodeStreamErrors(t *testing.T) {
-	t.Run("WillRetryError_unconsumed_stream_fails_GobEncode", func(t *testing.T) {
+	t.Run("WillRetryError_unconsumed_stream_succeeds_GobEncode", func(t *testing.T) {
 		// An agentEventWrapper whose stream yields a message then WillRetryError.
 		// Without pre-consuming (no getMessageFromWrappedEvent call), GobEncode
 		// reaches MessageVariant.GobEncode which treats non-EOF errors as fatal.
@@ -465,8 +551,8 @@ func TestGobEncodeStreamErrors(t *testing.T) {
 		assert.NoError(t, err, "GobEncode should handle WillRetryError streams gracefully")
 	})
 
-	t.Run("ErrStreamCanceled_unconsumed_stream_fails_GobEncode", func(t *testing.T) {
-		// Same scenario but with ErrStreamCanceled (*errors.errorString).
+	t.Run("ErrStreamCanceled_unconsumed_stream_succeeds_GobEncode", func(t *testing.T) {
+		// Same scenario but with the registered StreamCanceledError.
 		wrapper := makeStreamingEventWrapper(
 			schema.AssistantMessage("partial", nil),
 			ErrStreamCanceled,

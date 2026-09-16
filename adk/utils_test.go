@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/cloudwego/eino/schema"
 )
@@ -449,7 +450,9 @@ func TestConsumeStream_EdgeCases(t *testing.T) {
 
 		wrapper.consumeStream()
 		assert.Nil(t, wrapper.concatenatedMessage)
-		assert.Error(t, wrapper.StreamErr)
-		assert.Contains(t, wrapper.StreamErr.Error(), "no messages")
+		var emptyErr *emptyMessageStreamError
+		require.ErrorAs(t, wrapper.StreamErr, &emptyErr)
+		assert.Equal(t, "MessageVariant.MessageStream", emptyErr.streamName)
+		assert.EqualError(t, emptyErr, "no messages in MessageVariant.MessageStream")
 	})
 }
