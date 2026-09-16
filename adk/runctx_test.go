@@ -21,6 +21,7 @@ import (
 	"context"
 	"encoding/gob"
 	"errors"
+	"io"
 	"testing"
 	"time"
 
@@ -723,4 +724,98 @@ func TestGobEncodeStreamErrors(t *testing.T) {
 		err := gob.NewEncoder(&buf).Encode(session)
 		assert.NoError(t, err, "encoding runSession with WillRetryError stream should succeed")
 	})
+}
+
+func TestTypedAgentEventWrapperStreamMaterialization(t *testing.T) {
+	newWrapper := func(messages ...*schema.AgenticMessage) *typedAgentEventWrapper[*schema.AgenticMessage] {
+		return &typedAgentEventWrapper[*schema.AgenticMessage]{
+			event: &TypedAgentEvent[*schema.AgenticMessage]{
+				AgentName: "typed-agent",
+				Output: &TypedAgentOutput[*schema.AgenticMessage]{
+					MessageOutput: &TypedMessageVariant[*schema.AgenticMessage]{
+						IsStreaming:   true,
+						MessageStream: schema.StreamReaderFromArray(messages),
+					},
+				},
+			},
+		}
+	}
+
+	t.Run("empty stream caches an error and remains replayable", func(t *testing.T) {
+		wrapper := newWrapper()
+
+		wrapper.consumeStream()
+
+		require.EqualError(t, wrapper.StreamErr, "no messages in typedAgentEventWrapper.MessageStream")
+		_, err := wrapper.event.Output.MessageOutput.MessageStream.Recv()
+		assert.ErrorIs(t, err, io.EOF)
+	})
+
+	t.Run("successful materialization is idempotent", func(t *testing.T) {
+		expected := schema.UserAgenticMessage("hello")
+		wrapper := newWrapper(expected)
+
+		wrapper.consumeStream()
+		wrapper.consumeStream()
+
+		assert.Same(t, expected, wrapper.concatenatedMessage)
+		assert.NoError(t, wrapper.StreamErr)
+		actual, err := wrapper.event.Output.MessageOutput.MessageStream.Recv()
+		require.NoError(t, err)
+		assert.Same(t, expected, actual)
+	})
+
+	t.Run("concat failure preserves the original stream", func(t *testing.T) {
+		systemMessage := schema.SystemAgenticMessage("instructions")
+		userMessage := schema.UserAgenticMessage("request")
+		wrapper := newWrapper(systemMessage, userMessage)
+
+		wrapper.consumeStream()
+
+		require.EqualError(t, wrapper.StreamErr,
+			"cannot concat messages with different roles: got 'system' and 'user'")
+		first, err := wrapper.event.Output.MessageOutput.MessageStream.Recv()
+		require.NoError(t, err)
+		second, err := wrapper.event.Output.MessageOutput.MessageStream.Recv()
+		require.NoError(t, err)
+		assert.Same(t, systemMessage, first)
+		assert.Same(t, userMessage, second)
+	})
+
+	t.Run("malformed gob payload returns a typed decode error", func(t *testing.T) {
+		decoded := &typedAgentEventWrapper[*schema.AgenticMessage]{}
+
+		err := decoded.GobDecode([]byte("not-gob"))
+
+		require.Error(t, err)
+		assert.ErrorContains(t, err, "failed to gob decode generic agent event wrapper")
+	})
+}
+
+func TestTypedRunCtxMessageCompatibility(t *testing.T) {
+	input := &TypedAgentInput[*schema.Message]{
+		Messages: []*schema.Message{schema.UserMessage("hello")},
+	}
+	ctx, runCtx := initTypedRunCtx(context.Background(), "root", input)
+
+	assert.Same(t, input, runCtx.RootInput)
+	assert.Nil(t, runCtx.AgenticRootInput)
+
+	event := &TypedAgentEvent[*schema.Message]{AgentName: "message-agent"}
+	addTypedEvent(runCtx.Session, event)
+	require.Len(t, runCtx.Session.Events, 1)
+	assert.Same(t, event, runCtx.Session.Events[0].AgentEvent)
+	assert.Nil(t, runCtx.Session.TypedEvents)
+
+	childCtx := forkRunCtx(ctx)
+	getRunCtx(childCtx).Session.addEvent(&AgentEvent{AgentName: "child"})
+	joinRunCtxs(ctx)
+	assert.Len(t, runCtx.Session.Events, 1)
+	joinRunCtxs(ctx, childCtx)
+	require.Len(t, runCtx.Session.Events, 2)
+	assert.Equal(t, "child", runCtx.Session.Events[1].AgentName)
+
+	clearedCtx := ClearRunCtx(ctx)
+	assert.Nil(t, getRunCtx(clearedCtx))
+	assert.Same(t, runCtx, getRunCtx(ctx))
 }

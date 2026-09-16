@@ -51,12 +51,12 @@ All attacks passed with `go test -race ./adk -run '^TestAttack_EmptyMessageStrea
 | Assertion Quality | New tests assert write success, restored error type, exact message, metadata, and both compatibility directions. | Keep | No weakening. |
 | Boilerplate | Helpers are used by multiple compatibility subtests and remain local. | Keep | No additional abstraction. |
 | Logical Grouping | Compatibility attacks belong under one top-level attack test. | Keep | Grouped as subtests. |
-| Semantic Value | Every new test protects a distinct checkpoint contract. | Keep | No coverage-only tests. |
+| Semantic Value | Every new test protects a distinct checkpoint or run-context contract. | Keep | Added typed stream materialization, default message routing, single-branch join, and context isolation coverage. |
 | Existing Test Clarity | Two subtest names said gob encoding failed while asserting success; one comment named the old error type incorrectly. | Fix | Renamed the subtests and corrected the comment. |
 
 Coverage:
 
-- `adk` statement coverage: 90.6%
+- `adk` statement coverage: 90.9%
 - `emptyMessageStreamError.Error`: 100%
 - `agentEventWrapper.GobEncode`: 100%
 - `agentEventWrapper.GobDecode`: 100%
@@ -69,7 +69,7 @@ Coverage:
 | Runtime | Represent empty-stream failures with a package-private semantic error. |
 | Checkpoint wire format | Persist the stream source outside the `error` interface and reconstruct it on decode. |
 | Compatibility | Preserve both new-to-old and old-to-new gob decoding. |
-| Tests | Cover runner checkpoint round-trip, wire compatibility, error identity, and test-description accuracy. |
+| Tests | Cover runner checkpoint round-trip, wire compatibility, error identity, typed stream materialization, and run-context compatibility. |
 
 ## Remaining Items
 
