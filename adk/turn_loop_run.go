@@ -523,7 +523,7 @@ func (l *TurnLoop[T, M]) runAgentAndHandleEvents(
 			key, data, ok := ms.LastCheckpoint()
 			if ok {
 				exec.checkpointID = key
-				exec.checkpointBytes = append([]byte{}, data...)
+				exec.checkpointBytes = data
 			}
 		}
 		return nil
