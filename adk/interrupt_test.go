@@ -26,6 +26,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
@@ -59,23 +60,43 @@ func TestPreprocessADKCheckpoint(t *testing.T) {
 	})
 }
 
-func TestAttack_ResumeBridgeStoreRequiresFreshWrite(t *testing.T) {
-	store := newResumeBridgeStore("checkpoint", []byte("loaded"))
-	t.Log("a resume bridge must distinguish a loaded checkpoint from a replacement")
+func TestAttack_BridgeStoreTransfersCheckpointOwnership(t *testing.T) {
+	initial := []byte("loaded")
+	store := newResumeBridgeStore("checkpoint", initial)
+	t.Log("bridge checkpoints stay internal and transfer immutable buffers without copying")
 
 	loaded, ok, err := store.Get(context.Background(), "checkpoint")
-	assert.NoError(t, err)
-	assert.True(t, ok)
+	require.NoError(t, err)
+	require.True(t, ok)
 	assert.Equal(t, []byte("loaded"), loaded)
+	assert.True(t, &initial[0] == &loaded[0])
 
 	_, _, ok = store.LastCheckpoint()
 	assert.False(t, ok, "loaded checkpoints must not be reported as fresh writes")
 
-	assert.NoError(t, store.Set(context.Background(), "checkpoint", []byte("saved")))
+	replacement := []byte("saved")
+	require.NoError(t, store.Set(context.Background(), "checkpoint", replacement))
 	key, saved, ok := store.LastCheckpoint()
-	assert.True(t, ok)
+	require.True(t, ok)
 	assert.Equal(t, "checkpoint", key)
 	assert.Equal(t, []byte("saved"), saved)
+	assert.True(t, &replacement[0] == &saved[0])
+	loaded, ok, err = store.Get(context.Background(), "checkpoint")
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.True(t, &replacement[0] == &loaded[0])
+}
+
+func TestAttack_TurnLoopResumeBridgeRunnerDecodeDoesNotMutateCheckpoint(t *testing.T) {
+	checkpoint, err := encodeRunnerCheckPointWithRunCtx(false, nil, nil, nil)
+	require.NoError(t, err)
+	original := append([]byte(nil), checkpoint...)
+	store := newResumeBridgeStore("checkpoint", checkpoint)
+
+	_, _, _, err = runnerLoadCheckPointImpl(store, context.Background(), "checkpoint")
+
+	require.NoError(t, err)
+	assert.Equal(t, original, checkpoint)
 }
 
 func (h *interruptTestToolsHandler) BeforeAgent(ctx context.Context, runCtx *ChatModelAgentContext[*schema.Message]) (context.Context, *ChatModelAgentContext[*schema.Message], error) {

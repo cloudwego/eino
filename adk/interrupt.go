@@ -357,12 +357,13 @@ func newBridgeStore() *bridgeStore {
 }
 
 func newResumeBridgeStore(checkPointID string, data []byte) *bridgeStore {
-	payload := append([]byte{}, data...)
 	return &bridgeStore{
-		data: map[string][]byte{checkPointID: payload},
+		data: map[string][]byte{checkPointID: data},
 	}
 }
 
+// bridgeStore transfers immutable checkpoint bytes between ADK and Compose.
+// Callers must not mutate buffers after Set or buffers returned by Get or LastCheckpoint.
 type bridgeStore struct {
 	mu          sync.Mutex
 	data        map[string][]byte
@@ -374,7 +375,7 @@ func (m *bridgeStore) Get(_ context.Context, key string) ([]byte, bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if v, ok := m.data[key]; ok {
-		return append([]byte{}, v...), true, nil
+		return v, true, nil
 	}
 	return nil, false, nil
 }
@@ -385,10 +386,9 @@ func (m *bridgeStore) Set(_ context.Context, key string, checkPoint []byte) erro
 	if m.data == nil {
 		m.data = make(map[string][]byte)
 	}
-	payload := append([]byte{}, checkPoint...)
-	m.data[key] = payload
+	m.data[key] = checkPoint
 	m.lastKey = key
-	m.lastPayload = payload
+	m.lastPayload = checkPoint
 	return nil
 }
 
@@ -398,7 +398,7 @@ func (m *bridgeStore) LastCheckpoint() (key string, payload []byte, ok bool) {
 	if m.lastKey == "" {
 		return "", nil, false
 	}
-	return m.lastKey, append([]byte{}, m.lastPayload...), true
+	return m.lastKey, m.lastPayload, true
 }
 
 func getNextResumeAgent(ctx context.Context, _ *ResumeInfo) (string, error) {

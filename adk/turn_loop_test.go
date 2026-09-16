@@ -6720,6 +6720,121 @@ func TestSetupBridgeStore_NilStore_Resume(t *testing.T) {
 	assert.Equal(t, []byte("runner-bytes"), data)
 }
 
+func TestAttack_TurnLoopResumeReusesCheckpointBuffer(t *testing.T) {
+	t.Log("TurnLoop resume bytes are immutable framework state and should cross the bridge without full-size copies")
+	resumeBytes := []byte("runner-checkpoint")
+	l := &TurnLoop[string, *schema.Message]{}
+	spec := &turnRunSpec[string, *schema.Message]{
+		isResume:           true,
+		resumeCheckpointID: "runner-cp",
+		resumeBytes:        resumeBytes,
+	}
+
+	_, store, err := l.setupBridgeStore(spec, nil)
+	require.NoError(t, err)
+	loaded, existed, err := store.Get(context.Background(), "runner-cp")
+	require.NoError(t, err)
+	require.True(t, existed)
+	require.NotEmpty(t, loaded)
+	assert.True(t, &resumeBytes[0] == &loaded[0], "TurnLoop owns immutable resume bytes and should not copy them through the bridge")
+
+	replacement := []byte("replacement")
+	require.NoError(t, store.Set(context.Background(), "runner-cp", replacement))
+	loaded, existed, err = store.Get(context.Background(), "runner-cp")
+	require.NoError(t, err)
+	require.True(t, existed)
+	assert.Equal(t, []byte("replacement"), loaded)
+	assert.True(t, &replacement[0] == &loaded[0], "fresh writes should transfer their immutable buffer to the bridge")
+}
+
+func TestAttack_TurnLoopCheckpointTransfersRunnerBuffer(t *testing.T) {
+	t.Log("the decoded envelope should transfer ownership of its runner checkpoint buffer")
+	cp := &turnLoopCheckpoint[string]{RunnerCheckpoint: []byte("runner-checkpoint")}
+	original := &cp.RunnerCheckpoint[0]
+
+	resumeBytes := takeRunnerCheckpoint(cp)
+
+	require.NotEmpty(t, resumeBytes)
+	assert.True(t, original == &resumeBytes[0], "decoded runner checkpoint should transfer without copying")
+	assert.Nil(t, cp.RunnerCheckpoint)
+}
+
+func TestAttack_TurnLoopResumeBridgeConcurrentReadAndReplacement(t *testing.T) {
+	t.Log("replacing a shared resume checkpoint must not race with readers of the immutable original")
+	const readers = 32
+	resumeBytes := []byte("runner-checkpoint")
+	store := newResumeBridgeStore("runner-cp", resumeBytes)
+
+	start := make(chan struct{})
+	errCh := make(chan error, readers+1)
+	var wg sync.WaitGroup
+	wg.Add(readers + 1)
+	for i := 0; i < readers; i++ {
+		go func() {
+			defer wg.Done()
+			<-start
+			loaded, existed, err := store.Get(context.Background(), "runner-cp")
+			if err != nil {
+				errCh <- err
+				return
+			}
+			if !existed {
+				errCh <- errors.New("checkpoint does not exist")
+				return
+			}
+			if value := string(loaded); value != "runner-checkpoint" && value != "replacement" {
+				errCh <- fmt.Errorf("checkpoint = %q", value)
+			}
+		}()
+	}
+	go func() {
+		defer wg.Done()
+		<-start
+		if err := store.Set(context.Background(), "runner-cp", []byte("replacement")); err != nil {
+			errCh <- err
+		}
+	}()
+
+	close(start)
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		assert.NoError(t, err)
+	}
+
+	loaded, existed, err := store.Get(context.Background(), "runner-cp")
+	require.NoError(t, err)
+	require.True(t, existed)
+	assert.Equal(t, []byte("replacement"), loaded)
+}
+
+func BenchmarkTurnLoopResumeCheckpointBufferHandoff(b *testing.B) {
+	const checkpointSize = 1 << 20
+	resumeBytes := make([]byte, checkpointSize)
+	l := &TurnLoop[string, *schema.Message]{}
+	spec := &turnRunSpec[string, *schema.Message]{
+		isResume:           true,
+		resumeCheckpointID: "runner-cp",
+		resumeBytes:        resumeBytes,
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, store, err := l.setupBridgeStore(spec, nil)
+		if err != nil {
+			b.Fatal(err)
+		}
+		loaded, existed, err := store.Get(context.Background(), "runner-cp")
+		if err != nil {
+			b.Fatal(err)
+		}
+		if !existed || len(loaded) != checkpointSize {
+			b.Fatalf("loaded checkpoint = (%d, %t), want (%d, true)", len(loaded), existed, checkpointSize)
+		}
+	}
+}
+
 // TestTurnLoop_Preempt_LoopStalledAfterSecondPreemptPush covers a liveness
 // regression where a preempted turn was followed by another preemptive Push and
 // the loop stopped making progress before processing the later item.
