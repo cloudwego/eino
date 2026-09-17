@@ -661,6 +661,28 @@ func lastBusinessUserBeforePrompt(input []*schema.Message, promptIdx int) string
 	return "unknown"
 }
 
+func TestToolInfoOverrideMiddleware_ExtractionToolInfoTakesPrecedence(t *testing.T) {
+	mainSearch := &schema.ToolInfo{Name: "search", Desc: "main search"}
+	mainRead := &schema.ToolInfo{Name: "read_file", Desc: "main filesystem"}
+	extractionRead := &schema.ToolInfo{Name: "read_file", Desc: "memory filesystem"}
+	extractionWrite := &schema.ToolInfo{Name: "write_file", Desc: "memory filesystem"}
+
+	mw := &toolInfoOverrideMiddleware[*schema.Message]{
+		toolInfos: []*schema.ToolInfo{mainSearch, mainRead},
+	}
+	state := &adk.ChatModelAgentState{
+		ToolInfos: []*schema.ToolInfo{extractionRead, extractionWrite},
+	}
+
+	_, got, err := mw.BeforeModelRewriteState(context.Background(), state, nil)
+	require.NoError(t, err)
+	require.Equal(t, []*schema.ToolInfo{
+		mainSearch,
+		extractionRead,
+		extractionWrite,
+	}, got.ToolInfos)
+}
+
 func TestMiddleware_TopicSelection_SmallCandidateSetUsesModel(t *testing.T) {
 	ctx := context.Background()
 	b := NewInMemoryBackend()
