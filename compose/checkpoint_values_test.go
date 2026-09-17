@@ -48,6 +48,10 @@ func TestWalkAndTransformCheckpointValues(t *testing.T) {
 				State:                "interrupt-state",
 				LayerSpecificPayload: "layer-payload",
 			},
+			"_eino_custom": {
+				State:                "custom-interrupt-state",
+				LayerSpecificPayload: "custom-layer-payload",
+			},
 			checkpointLayoutSentinelID: {
 				State: &checkpointLayoutSentinelV1{Version: checkpointStateLayoutVersionV1},
 			},
@@ -77,6 +81,8 @@ func TestWalkAndTransformCheckpointValues(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []string{
 		"[]/state//=root-state",
+		"[]/interrupt_state/_eino_custom/=custom-interrupt-state",
+		"[]/interrupt_layer_payload/_eino_custom/=custom-layer-payload",
 		"[]/interrupt_state/interrupt/=interrupt-state",
 		"[]/interrupt_layer_payload/interrupt/=layer-payload",
 		"[]/input/a/=input-a",
@@ -114,6 +120,8 @@ func TestWalkAndTransformCheckpointValues(t *testing.T) {
 	}))
 	require.Equal(t, []string{
 		"root-state-projected",
+		"custom-interrupt-state-projected",
+		"custom-layer-payload-projected",
 		"interrupt-state-projected",
 		"layer-payload-projected",
 		"input-a-projected",
@@ -273,6 +281,59 @@ func TestCheckpointValueAPIsValidateFormatBeforeCallbacks(t *testing.T) {
 				State:              "root",
 			},
 			want: "checkpoint state layout sentinel is missing",
+		},
+		{
+			name: "sentinel_address_with_layout",
+			cp: &checkpoint{
+				StateLayoutVersion: checkpointStateLayoutVersionV1,
+				State:              "root",
+				InterruptID2Addr: map[string]Address{
+					checkpointLayoutSentinelID: {},
+				},
+				InterruptID2State: map[string]core.InterruptState{
+					checkpointLayoutSentinelID: {
+						State: &checkpointLayoutSentinelV1{Version: checkpointStateLayoutVersionV1},
+					},
+				},
+			},
+			want: "checkpoint state layout sentinel must not have a routing address",
+		},
+		{
+			name: "sentinel_address_without_layout",
+			cp: &checkpoint{
+				State: "root",
+				InterruptID2Addr: map[string]Address{
+					checkpointLayoutSentinelID: {},
+				},
+			},
+			want: "checkpoint state layout sentinel must not have a routing address",
+		},
+		{
+			name: "sentinel_payload_with_layout",
+			cp: &checkpoint{
+				StateLayoutVersion: checkpointStateLayoutVersionV1,
+				State:              "root",
+				InterruptID2State: map[string]core.InterruptState{
+					checkpointLayoutSentinelID: {
+						State:                &checkpointLayoutSentinelV1{Version: checkpointStateLayoutVersionV1},
+						LayerSpecificPayload: "payload",
+					},
+				},
+			},
+			want: "checkpoint state layout sentinel must not have a layer-specific payload",
+		},
+		{
+			name: "sentinel_payload_without_layout",
+			cp: &checkpoint{
+				State: "root",
+				InterruptID2State: map[string]core.InterruptState{
+					checkpointLayoutSentinelID: {
+						State:                &checkpointLayoutSentinelV1{Version: checkpointStateLayoutVersionV1},
+						LayerSpecificPayload: "payload",
+					},
+				},
+			},
+			want: "checkpoint state layout sentinel must not have a layer-specific payload",
 		},
 		{
 			name: "mixed",

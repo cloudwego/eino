@@ -2093,7 +2093,8 @@ func TestCheckpointConversionValidation(t *testing.T) {
 		pairs := map[string]streamConvertPair{"node": defaultStreamConvertPair[string]()}
 		require.EqualError(t, convert(map[string]any{"node": "input"}, pairs, true, nil),
 			"checkpoint conv stream fail, value of [node] isn't stream")
-		require.ErrorContains(t, restore(map[string]any{"node": 1}, pairs, true), "cannot convert value[int]")
+		require.EqualError(t, restore(map[string]any{"node": 1}, pairs, true),
+			"cannot convert value[int] to streamReader[string]")
 	})
 }
 
@@ -2460,6 +2461,66 @@ func TestCheckpointLayoutMetadataValidation(t *testing.T) {
 		require.EqualError(t, err,
 			"checkpoint requires a newer Eino version: unsupported state layout version 2")
 	})
+	t.Run("sentinel_structure", func(t *testing.T) {
+		valid := func() *checkpoint {
+			return &checkpoint{
+				StateLayoutVersion: checkpointStateLayoutVersionV1,
+				InterruptID2State: map[string]core.InterruptState{
+					checkpointLayoutSentinelID: {
+						State: &checkpointLayoutSentinelV1{Version: checkpointStateLayoutVersionV1},
+					},
+				},
+			}
+		}
+		tests := []struct {
+			name   string
+			mutate func(*checkpoint)
+			want   string
+		}{
+			{
+				name: "address_with_layout",
+				mutate: func(cp *checkpoint) {
+					cp.InterruptID2Addr = map[string]Address{checkpointLayoutSentinelID: {}}
+				},
+				want: "checkpoint state layout sentinel must not have a routing address",
+			},
+			{
+				name: "address_without_layout",
+				mutate: func(cp *checkpoint) {
+					cp.StateLayoutVersion = 0
+					delete(cp.InterruptID2State, checkpointLayoutSentinelID)
+					cp.InterruptID2Addr = map[string]Address{checkpointLayoutSentinelID: {}}
+				},
+				want: "checkpoint state layout sentinel must not have a routing address",
+			},
+			{
+				name: "payload_with_layout",
+				mutate: func(cp *checkpoint) {
+					sentinel := cp.InterruptID2State[checkpointLayoutSentinelID]
+					sentinel.LayerSpecificPayload = "payload"
+					cp.InterruptID2State[checkpointLayoutSentinelID] = sentinel
+				},
+				want: "checkpoint state layout sentinel must not have a layer-specific payload",
+			},
+			{
+				name: "payload_without_layout",
+				mutate: func(cp *checkpoint) {
+					cp.StateLayoutVersion = 0
+					sentinel := cp.InterruptID2State[checkpointLayoutSentinelID]
+					sentinel.LayerSpecificPayload = "payload"
+					cp.InterruptID2State[checkpointLayoutSentinelID] = sentinel
+				},
+				want: "checkpoint state layout sentinel must not have a layer-specific payload",
+			},
+		}
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				cp := valid()
+				tt.mutate(cp)
+				require.EqualError(t, validateCheckpointLayoutMetadata(cp), tt.want)
+			})
+		}
+	})
 	t.Run("sentinel_version_mismatch", func(t *testing.T) {
 		err := validateCheckpointLayoutMetadata(&checkpoint{
 			StateLayoutVersion: 1,
@@ -2469,7 +2530,8 @@ func TestCheckpointLayoutMetadataValidation(t *testing.T) {
 				},
 			},
 		})
-		require.ErrorContains(t, err, "invalid state layout sentinel")
+		require.EqualError(t, err,
+			"checkpoint has invalid state layout sentinel *compose.checkpointLayoutSentinelV1")
 	})
 	t.Run("valid", func(t *testing.T) {
 		cp := &checkpoint{
@@ -2484,6 +2546,38 @@ func TestCheckpointLayoutMetadataValidation(t *testing.T) {
 		require.True(t, cp.layoutMetadataValidated)
 		require.NotContains(t, cp.InterruptID2State, checkpointLayoutSentinelID)
 	})
+	t.Run("deep_tree_consumes_every_node", func(t *testing.T) {
+		const nodeCount = 512
+		nodes := make([]*checkpoint, nodeCount)
+		for depth := range nodes {
+			nodes[depth] = &checkpoint{
+				StateLayoutVersion: checkpointStateLayoutVersionV1,
+				InterruptID2State: map[string]core.InterruptState{
+					checkpointLayoutSentinelID: {
+						State: &checkpointLayoutSentinelV1{Version: checkpointStateLayoutVersionV1},
+					},
+				},
+			}
+			if depth > 0 {
+				nodes[depth-1].SubGraphs = map[string]*checkpoint{"child": nodes[depth]}
+			}
+		}
+
+		require.NoError(t, (&runner{}).prepareCheckpointForResume(nodes[0], nil))
+		ctx := setCheckPointToCtx(context.Background(), nodes[0])
+		for depth := 1; depth < len(nodes); depth++ {
+			nextCtx, err := forwardCheckPoint(ctx, "child")
+			require.NoError(t, err)
+			ctx = nextCtx
+			require.Same(t, nodes[depth], getCheckPointFromCtx(ctx))
+		}
+		for depth, cp := range nodes {
+			require.Truef(t, cp.layoutMetadataValidated,
+				"layout metadata at depth %d was not validated", depth)
+			require.NotContainsf(t, cp.InterruptID2State, checkpointLayoutSentinelID,
+				"layout sentinel at depth %d was not consumed", depth)
+		}
+	})
 	t.Run("legacy_with_sentinel", func(t *testing.T) {
 		err := validateCheckpointLayoutMetadata(&checkpoint{
 			InterruptID2State: map[string]core.InterruptState{
@@ -2497,13 +2591,21 @@ func TestCheckpointLayoutMetadataValidation(t *testing.T) {
 }
 
 func TestAttack_CheckpointLayoutRejectsReservedInterruptID(t *testing.T) {
+	cp := &checkpoint{
+		InterruptID2State: map[string]core.InterruptState{
+			"_eino_custom": {State: "user state"},
+		},
+	}
+	require.NoError(t, initializeCheckpointLayoutV1(cp))
+	require.Equal(t, "user state", cp.InterruptID2State["_eino_custom"].State)
+
 	err := initializeCheckpointLayoutV1(&checkpoint{
 		InterruptID2State: map[string]core.InterruptState{
-			"_eino_user_interrupt": {State: "user state"},
+			checkpointLayoutSentinelID: {State: "user state"},
 		},
 	})
 	require.EqualError(t, err,
-		`interrupt ID "_eino_user_interrupt" uses reserved checkpoint metadata prefix`)
+		`interrupt ID "_eino_checkpoint_layout" is reserved for checkpoint metadata`)
 }
 
 func TestMigrateCheckpointStatePreservesLayoutSentinel(t *testing.T) {
@@ -2556,7 +2658,8 @@ func TestAttack_ForwardCheckpointRetainsChildOnMergeError(t *testing.T) {
 
 	ctx := setCheckPointToCtx(context.Background(), parent)
 	_, err := forwardCheckPoint(ctx, "child")
-	require.ErrorContains(t, err, "conflicting addresses")
+	require.EqualError(t, err,
+		`failed to merge subgraph interrupt state: interrupt ID "shared" has conflicting addresses`)
 	require.Same(t, child, parent.SubGraphs["child"])
 }
 
@@ -2566,11 +2669,33 @@ func TestCheckpointSparseOwnershipRejectsStateWithoutAddress(t *testing.T) {
 		layoutMetadataValidated: true,
 		InterruptID2Addr:        map[string]Address{},
 		InterruptID2State: map[string]core.InterruptState{
-			"orphan": {State: "orphan"},
+			"_eino_custom": {State: "orphan"},
 		},
 	}
 	err := (&runner{}).validateCheckpointIntegrity(cp)
-	require.EqualError(t, err, `checkpoint state owner "orphan" has no routing address`)
+	require.EqualError(t, err, `checkpoint state owner "_eino_custom" has no routing address`)
+}
+
+func TestRemoveSubgraphOwnedInterruptStates(t *testing.T) {
+	parent := &checkpoint{
+		InterruptID2State: map[string]core.InterruptState{
+			"_eino_custom":             {State: "parent copy"},
+			checkpointLayoutSentinelID: {State: &checkpointLayoutSentinelV1{Version: 1}},
+		},
+		SubGraphs: map[string]*checkpoint{
+			"child": {
+				InterruptID2State: map[string]core.InterruptState{
+					"_eino_custom":             {State: "child owner"},
+					checkpointLayoutSentinelID: {State: &checkpointLayoutSentinelV1{Version: 1}},
+				},
+			},
+		},
+	}
+
+	removeSubgraphOwnedInterruptStates(parent)
+
+	require.NotContains(t, parent.InterruptID2State, "_eino_custom")
+	require.Contains(t, parent.InterruptID2State, checkpointLayoutSentinelID)
 }
 
 func TestCheckpointSparseOwnershipValidatesOwnerPath(t *testing.T) {
@@ -2700,8 +2825,8 @@ func TestCheckpointSparseOwnershipValidatesOwnerPath(t *testing.T) {
 				"nested": nestedAddress,
 			},
 		}
-		require.ErrorContains(t, (&runner{}).validateCheckpointIntegrity(cp),
-			"appears in unrelated checkpoint routing paths")
+		require.EqualError(t, (&runner{}).validateCheckpointIntegrity(cp),
+			`interrupt ID "nested" appears in unrelated checkpoint routing paths [child nested] and [left]`)
 	})
 }
 
@@ -2714,17 +2839,6 @@ func TestAttack_CheckpointValidationErrorIsDeterministic(t *testing.T) {
 			}}
 			err := validateCheckpointTreeMetadata(cp)
 			require.EqualError(t, err, `subgraph checkpoint "a" is nil`)
-		}
-	})
-
-	t.Run("reserved_interrupt_id", func(t *testing.T) {
-		for i := 0; i < 100; i++ {
-			cp := &checkpoint{InterruptID2State: map[string]core.InterruptState{
-				"_eino_z": {},
-				"_eino_a": {},
-			}}
-			require.EqualError(t, initializeCheckpointLayoutV1(cp),
-				`interrupt ID "_eino_a" uses reserved checkpoint metadata prefix`)
 		}
 	})
 
@@ -2803,8 +2917,8 @@ func TestAttack_MixedCheckpointLayoutsAreRejected(t *testing.T) {
 		},
 	}
 
-	require.ErrorContains(t, (&runner{}).validateCheckpointIntegrity(cp),
-		"mixed checkpoint state layout")
+	require.EqualError(t, (&runner{}).validateCheckpointIntegrity(cp),
+		`subgraph checkpoint "child" has invalid metadata: mixed checkpoint state layout: got version 1, want 0`)
 }
 
 type checkpointTestTool[I, O any] struct {

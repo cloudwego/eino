@@ -49,6 +49,7 @@ type ToolsNodeInterruptStateV1 struct {
 type ToolsNodeToolCallsSourceV1 struct {
 	// MessageIndex is the zero-based index in the owning graph state's Messages slice.
 	MessageIndex int
-	// Digest is the lowercase hex SHA-256 digest of the referenced ToolCalls JSON.
+	// Digest is the lowercase hex SHA-256 digest of the referenced ToolCalls'
+	// deterministic Gob-semantic canonical form.
 	Digest string
 }

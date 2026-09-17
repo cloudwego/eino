@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/cloudwego/eino/internal"
@@ -108,9 +109,13 @@ func runnableTransform(ctx context.Context, r *composableRunnable, input any, op
 
 func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Option) (result any, err error) {
 	haveOnStart := false // delay triggering onGraphStart until state initialization is complete, so that the state can be accessed within onGraphStart.
+	skipGraphCallbacks := false
 	defer func() {
 		if panicValue := recover(); panicValue != nil {
 			panic(panicValue)
+		}
+		if skipGraphCallbacks {
+			return
 		}
 		if !haveOnStart {
 			ctx, input = onGraphStart(ctx, input, isStream)
@@ -161,14 +166,9 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 		// in subgraph, try to load checkpoint from ctx
 		initialized = true
 
-		if err = r.validateCheckpointIntegrity(cp); err != nil {
-			return nil, newGraphRunError(fmt.Errorf("invalid checkpoint: %w", err))
-		}
-		if err = hydrateCheckpointToolsNodeState(cp); err != nil {
-			return nil, newGraphRunError(fmt.Errorf("invalid checkpoint tools state: %w", err))
-		}
-		if err = consumeCheckpointLayoutMetadata(cp); err != nil {
-			return nil, newGraphRunError(fmt.Errorf("invalid checkpoint metadata: %w", err))
+		if err = r.prepareCheckpointForResume(cp, GetCurrentAddress(ctx)); err != nil {
+			skipGraphCallbacks = true
+			return nil, newGraphRunError(err)
 		}
 		ctx, err = r.restoreCheckPointState(ctx, *path, getStateModifier(ctx), cp, isStream, cm)
 		if err != nil {
@@ -191,14 +191,9 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 			// load checkpoint from store
 			initialized = true
 
-			if err = r.validateCheckpointIntegrity(cp); err != nil {
-				return nil, newGraphRunError(fmt.Errorf("invalid checkpoint: %w", err))
-			}
-			if err = hydrateCheckpointToolsNodeState(cp); err != nil {
-				return nil, newGraphRunError(fmt.Errorf("invalid checkpoint tools state: %w", err))
-			}
-			if err = consumeCheckpointLayoutMetadata(cp); err != nil {
-				return nil, newGraphRunError(fmt.Errorf("invalid checkpoint metadata: %w", err))
+			if err = r.prepareCheckpointForResume(cp, GetCurrentAddress(ctx)); err != nil {
+				skipGraphCallbacks = true
+				return nil, newGraphRunError(err)
 			}
 			ctx = setStateModifier(ctx, stateModifier)
 			ctx = setCheckPointToCtx(ctx, cp)
@@ -391,6 +386,28 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 			)
 		}
 	}
+}
+
+func (r *runner) prepareCheckpointForResume(cp *checkpoint, baseAddress Address) error {
+	if err := validateCheckpointTreeMetadata(cp); err != nil {
+		return fmt.Errorf("invalid checkpoint: %w", err)
+	}
+	if err := validateCheckpointToolsNodeVersions(cp); err != nil {
+		return fmt.Errorf("invalid checkpoint: %w", err)
+	}
+	if err := hydrateCheckpointToolsNodeState(cp); err != nil {
+		return fmt.Errorf("invalid checkpoint tools state: %w", err)
+	}
+	if err := r.validateCheckpointToolsNodeStates(cp, baseAddress); err != nil {
+		return fmt.Errorf("invalid checkpoint tools state: %w", err)
+	}
+	if err := r.validateCheckpointIntegrity(cp); err != nil {
+		return fmt.Errorf("invalid checkpoint: %w", err)
+	}
+	if err := consumeCheckpointLayoutMetadata(cp); err != nil {
+		return fmt.Errorf("invalid checkpoint metadata: %w", err)
+	}
+	return nil
 }
 
 func (r *runner) resolveMaxSteps(maxSteps int, opts []Option) (int, error) {
@@ -955,6 +972,9 @@ func (r *runner) validateCheckpointIntegrity(cp *checkpoint) error {
 	if err := validateCheckpointTreeMetadata(cp); err != nil {
 		return err
 	}
+	if err := validateCheckpointToolsNodeVersions(cp); err != nil {
+		return err
+	}
 	for _, key := range cp.RerunNodes {
 		call, ok := r.chanSubscribeTo[key]
 		if !ok || !isSubGraphCall(call) {
@@ -1009,9 +1029,207 @@ func (r *runner) validateCheckpointIntegrity(cp *checkpoint) error {
 	return nil
 }
 
+func (r *runner) validateCheckpointToolsNodeStates(cp *checkpoint, baseAddress Address) error {
+	routeMatches := make(map[string]checkpointToolsNodeRouteMatch, len(cp.InterruptID2Addr))
+	for _, id := range sortedAddressIDs(cp.InterruptID2Addr) {
+		routeMatches[id] = r.classifyCheckpointToolsNodeRoute(cp.InterruptID2Addr[id], baseAddress)
+	}
+
+	owners := make(map[string]checkpointStateOwner)
+	if err := collectCheckpointStateOwners(cp, nil, owners); err != nil {
+		return err
+	}
+
+	ids := make(map[string]struct{}, len(routeMatches)+len(owners))
+	for id := range routeMatches {
+		ids[id] = struct{}{}
+	}
+	for id := range owners {
+		ids[id] = struct{}{}
+	}
+	sortedIDs := make([]string, 0, len(ids))
+	for id := range ids {
+		sortedIDs = append(sortedIDs, id)
+	}
+	sort.Strings(sortedIDs)
+
+	toolsNodeRouteOwners := make(map[string]string)
+	for _, id := range sortedIDs {
+		owner, hasOwner := owners[id]
+		address, hasRoute := cp.InterruptID2Addr[id]
+		match := routeMatches[id]
+		isToolsState := hasOwner && checkpointStateIsToolsNodeState(owner.state.State)
+
+		if !hasRoute {
+			if isToolsState {
+				return wrapCheckpointToolsNodeOwnerError(owner.path, fmt.Errorf(
+					"tools node interrupt state %q at owner path %v has no routing address",
+					id, owner.path))
+			}
+			continue
+		}
+
+		switch match {
+		case checkpointRouteNotToolsNode:
+			if isToolsState {
+				return wrapCheckpointToolsNodeOwnerError(owner.path, fmt.Errorf(
+					"tools node interrupt state %q at owner path %v has route %q "+
+						"that does not target a compiled ToolsNode",
+					id, owner.path, address.String()))
+			}
+		case checkpointRouteToolsNodeAddressMismatch:
+			return wrapCheckpointToolsNodeOwnerError(owner.path,
+				checkpointToolsNodeAddressMismatchError(id, owner.path, address))
+		case checkpointRouteToolsNodeExact:
+			if !hasOwner {
+				return fmt.Errorf("tools node interrupt state %q is missing", id)
+			}
+			if err := validateCheckpointToolsNodeState(id, owner.state); err != nil {
+				return wrapCheckpointToolsNodeOwnerError(owner.path, err)
+			}
+			if !checkpointToolsNodeRouteMatchesOwner(address, baseAddress, owner.path) {
+				return wrapCheckpointToolsNodeOwnerError(owner.path, fmt.Errorf(
+					"tools node interrupt state %q at owner path %v has route %q "+
+						"that does not target a compiled ToolsNode",
+					id, owner.path, address.String()))
+			}
+			routeKey := checkpointAddressKey(address)
+			if firstID, exists := toolsNodeRouteOwners[routeKey]; exists && firstID != id {
+				return fmt.Errorf("tools node interrupt states %q and %q share route %q",
+					firstID, id, address.String())
+			}
+			toolsNodeRouteOwners[routeKey] = id
+		}
+	}
+	return nil
+}
+
+func checkpointStateIsToolsNodeState(state any) bool {
+	switch state.(type) {
+	case *toolsInterruptAndRerunState, *toolsInterruptAndRerunStateV1:
+		return true
+	default:
+		return false
+	}
+}
+
+func validateCheckpointToolsNodeState(id string, interruptState core.InterruptState) error {
+	if interruptState.State == nil {
+		return fmt.Errorf("tools node interrupt state %q is missing", id)
+	}
+	switch state := interruptState.State.(type) {
+	case *toolsInterruptAndRerunState:
+		if err := validateToolsInterruptAndRerunStateLegacyForRestore(state); err != nil {
+			return fmt.Errorf("tools node interrupt state %q is invalid: %w", id, err)
+		}
+	case *toolsInterruptAndRerunStateV1:
+		if err := validateToolsInterruptAndRerunStateV1ForRestore(state); err != nil {
+			return fmt.Errorf("tools node interrupt state %q is invalid: %w", id, err)
+		}
+	default:
+		return fmt.Errorf("tools node interrupt state %q has invalid type %T", id, interruptState.State)
+	}
+	return nil
+}
+
+func wrapCheckpointToolsNodeOwnerError(path []string, err error) error {
+	for i := len(path) - 1; i >= 0; i-- {
+		err = fmt.Errorf("subgraph checkpoint %q has invalid tools node state: %w", path[i], err)
+	}
+	return err
+}
+
+func checkpointToolsNodeRouteMatchesOwner(address, baseAddress Address, path []string) bool {
+	if len(path) == 0 {
+		return true
+	}
+	if len(address) <= len(baseAddress)+len(path) {
+		return false
+	}
+	for i, key := range path {
+		segment := address[len(baseAddress)+i]
+		if segment.Type != AddressSegmentNode || segment.ID != key {
+			return false
+		}
+	}
+	return true
+}
+
+type checkpointToolsNodeRouteMatch uint8
+
+const (
+	checkpointRouteNotToolsNode checkpointToolsNodeRouteMatch = iota
+	checkpointRouteToolsNodeAddressMismatch
+	checkpointRouteToolsNodeExact
+)
+
+func (r *runner) classifyCheckpointToolsNodeRoute(address, baseAddress Address) checkpointToolsNodeRouteMatch {
+	if len(address) <= len(baseAddress) {
+		return checkpointRouteNotToolsNode
+	}
+
+	current := r
+	for i := len(baseAddress); i < len(address); i++ {
+		segment := address[i]
+		if segment.Type != AddressSegmentNode {
+			return checkpointRouteNotToolsNode
+		}
+		call := current.chanSubscribeTo[segment.ID]
+		if call == nil || call.action == nil || call.action.meta == nil {
+			return checkpointRouteNotToolsNode
+		}
+		cmp := call.action.meta.component
+		isToolsNode := cmp == ComponentOfToolsNode || cmp == ComponentOfAgenticToolsNode
+		if isToolsNode {
+			if i != len(address)-1 {
+				if address[i+1].Type == AddressSegmentTool {
+					return checkpointRouteNotToolsNode
+				}
+				return checkpointRouteToolsNodeAddressMismatch
+			}
+			if !Address(address[:len(baseAddress)]).Equals(baseAddress) {
+				return checkpointRouteToolsNodeAddressMismatch
+			}
+			for _, graphNodeSegment := range address[len(baseAddress) : i+1] {
+				if graphNodeSegment.SubID != "" {
+					return checkpointRouteToolsNodeAddressMismatch
+				}
+			}
+			return checkpointRouteToolsNodeExact
+		}
+		if i == len(address)-1 {
+			return checkpointRouteNotToolsNode
+		}
+		if !isSubGraphCall(call) || call.action.graphRunner == nil {
+			return checkpointRouteNotToolsNode
+		}
+		current = call.action.graphRunner
+	}
+	return checkpointRouteNotToolsNode
+}
+
+func checkpointToolsNodeAddressMismatchError(id string, path []string, address Address) error {
+	return fmt.Errorf("tools node interrupt state %q at owner path %v has route %q "+
+		"with an incompatible complete address for a compiled ToolsNode", id, path, address.String())
+}
+
+func checkpointAddressKey(address Address) string {
+	var builder strings.Builder
+	for _, segment := range address {
+		parts := [...]string{string(segment.Type), segment.ID, segment.SubID}
+		for _, part := range parts {
+			builder.WriteString(strconv.Itoa(len(part)))
+			builder.WriteByte(':')
+			builder.WriteString(part)
+		}
+	}
+	return builder.String()
+}
+
 type checkpointStateOwner struct {
 	count int
 	path  []string
+	state core.InterruptState
 }
 
 type checkpointStateRoute struct {
@@ -1077,6 +1295,7 @@ func collectCheckpointStateOwners(cp *checkpoint, path []string,
 			owner.count++
 			if owner.count == 1 {
 				owner.path = append([]string(nil), path...)
+				owner.state = cp.InterruptID2State[id]
 			}
 			owners[id] = owner
 		}
@@ -1382,6 +1601,7 @@ func (r *runner) toComposableRunnable() *composableRunnable {
 		inputType:     r.inputType,
 		outputType:    r.outputType,
 		genericHelper: r.genericHelper,
+		graphRunner:   r,
 		optionType:    nil, // if option type is nil, graph will transmit all options.
 	}
 

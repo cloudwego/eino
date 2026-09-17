@@ -708,10 +708,13 @@ func TestAttack_ToolResultProjectionCoordinatesDoNotAlias(t *testing.T) {
 		ToolCallID:  "c",
 		Digest:      "second-digest",
 	}
-	index := &checkpointProjectionIndex{toolResultsByCallID: map[string][]canonicalCheckpointToolResult{
-		"b/c": {{source: firstSource, text: "first-result"}},
-		"c":   {{source: secondSource, text: "second-result"}},
-	}}
+	index := &checkpointProjectionIndex{
+		version: checkpointProjectionVersionV1,
+		toolResultsByCallID: map[string][]canonicalCheckpointToolResult{
+			"b/c": {{source: firstSource, text: "first-result"}},
+			"c":   {{source: secondSource, text: "second-result"}},
+		},
+	}
 	firstTarget := &compose.ToolsInterruptAndRerunExtra{}
 	secondTarget := &compose.ToolsInterruptAndRerunExtra{}
 	info := &compose.InterruptInfo{RerunNodesExtra: map[string]any{
@@ -812,12 +815,15 @@ func TestAttack_ProjectionRejectsCrossKindToolResultConflict(t *testing.T) {
 		ToolCallID:  "call",
 		Digest:      "enhanced-digest",
 	}
-	index := &checkpointProjectionIndex{toolResultsByCallID: map[string][]canonicalCheckpointToolResult{
-		"call": {
-			{source: standardSource, text: "standard"},
-			{source: enhancedSource, enhanced: enhancedResult},
+	index := &checkpointProjectionIndex{
+		version: checkpointProjectionVersionV1,
+		toolResultsByCallID: map[string][]canonicalCheckpointToolResult{
+			"call": {
+				{source: standardSource, text: "standard"},
+				{source: enhancedSource, enhanced: enhancedResult},
+			},
 		},
-	}}
+	}
 
 	t.Run("standard_source_with_enhanced_target", func(t *testing.T) {
 		extra := &compose.ToolsInterruptAndRerunExtra{
@@ -923,7 +929,10 @@ func TestAttack_ProjectionRejectsMismatchedMessageSourceKind(t *testing.T) {
 	typedSetMessageID(schemaMessage, "schema")
 	agenticMessage := schema.UserAgenticMessage("agentic")
 	typedSetMessageID(agenticMessage, "agentic")
-	index := &checkpointProjectionIndex{byID: make(map[string][]canonicalCheckpointMessage)}
+	index := &checkpointProjectionIndex{
+		byID:    make(map[string][]canonicalCheckpointMessage),
+		version: checkpointProjectionVersionV2,
+	}
 	index.addSchemaMessage(nil, 0, schemaMessage)
 	index.addAgenticMessage(nil, 0, agenticMessage)
 
@@ -948,7 +957,7 @@ func TestAttack_NestedToolResultOnlyProjectionRoundTrip(t *testing.T) {
 		Type: schema.ToolPartTypeText,
 		Text: "canonical",
 	}}}
-	digest, ok := projectionMessageDigest(result)
+	digest, ok := checkpointProjectionValueDigest(result)
 	require.True(t, ok)
 	source := checkpointToolResultSourceV1{
 		Kind:        projectionToolResultKindEnhanced,
@@ -957,7 +966,8 @@ func TestAttack_NestedToolResultOnlyProjectionRoundTrip(t *testing.T) {
 		Digest:      digest,
 	}
 	index := &checkpointProjectionIndex{
-		byID: make(map[string][]canonicalCheckpointMessage),
+		byID:    make(map[string][]canonicalCheckpointMessage),
+		version: checkpointProjectionVersionV1,
 		toolResultsByCallID: map[string][]canonicalCheckpointToolResult{
 			"call": {{source: source, enhanced: result}},
 		},
@@ -976,6 +986,7 @@ func TestAttack_NestedToolResultOnlyProjectionRoundTrip(t *testing.T) {
 
 	info := &InterruptInfo{Data: &ChatModelAgentInterruptInfo{Info: outer}}
 	require.NoError(t, hydrateInterruptInfoMessages(info, nil, 0, index))
+	require.NoError(t, hydrateInterruptInfoContextPrefixes(info, index))
 	restoredNested, ok := outer.State.(*compose.InterruptInfo)
 	require.True(t, ok)
 	restoredExtra, ok := restoredNested.RerunNodesExtra["tools"].(*compose.ToolsInterruptAndRerunExtra)
@@ -992,7 +1003,7 @@ func TestAttack_EnhancedToolResultHydrationHasNoNestedAliases(t *testing.T) {
 		Type: schema.ToolPartTypeText,
 		Text: "canonical",
 	}}}
-	digest, ok := projectionMessageDigest(result)
+	digest, ok := checkpointProjectionValueDigest(result)
 	require.True(t, ok)
 	source := checkpointToolResultSourceV1{
 		Kind:        projectionToolResultKindEnhanced,
@@ -1000,9 +1011,12 @@ func TestAttack_EnhancedToolResultHydrationHasNoNestedAliases(t *testing.T) {
 		ToolCallID:  "call",
 		Digest:      digest,
 	}
-	index := &checkpointProjectionIndex{toolResultsByCallID: map[string][]canonicalCheckpointToolResult{
-		"call": {{source: source, enhanced: result}},
-	}}
+	index := &checkpointProjectionIndex{
+		version: checkpointProjectionVersionV1,
+		toolResultsByCallID: map[string][]canonicalCheckpointToolResult{
+			"call": {{source: source, enhanced: result}},
+		},
+	}
 	extra := &compose.ToolsInterruptAndRerunExtra{}
 	ref := infoToolResultProjectionV1{
 		ToolCallID: "call",

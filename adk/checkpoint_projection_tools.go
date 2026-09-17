@@ -23,7 +23,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"reflect"
 	"sort"
 
 	"github.com/cloudwego/eino/compose"
@@ -38,18 +37,22 @@ const (
 	infoTargetContextToolResult      = "context_tool_result"
 )
 
-// checkpointToolResultSourceV1 CheckpointSchema: nested Runner projection V1
-// source identifying a canonical tool result.
+// checkpointToolResultSourceV1 CheckpointSchema: stable nested Runner
+// projection source identifying a canonical tool result in V1 or V2.
 type checkpointToolResultSourceV1 struct {
-	Kind        string
-	GraphPath   []string
-	InterruptID string
-	ToolCallID  string
-	Digest      string
+	// SourceOrdinal is a V2-only compact coordinate. A legacy V1 payload omits
+	// it, so Gob decodes zero and V1 uses GraphPath instead.
+	SourceOrdinal int
+	Kind          string
+	GraphPath     []string
+	InterruptID   string
+	ToolCallID    string
+	Digest        string
 }
 
-// infoToolResultProjectionV1 CheckpointSchema: nested Runner projection V1
-// metadata mapping an omitted result to a rerun or interrupt-context entry.
+// infoToolResultProjectionV1 CheckpointSchema: stable nested Runner projection
+// metadata used by V1 and V2 to map an omitted result to a rerun or
+// interrupt-context entry.
 type infoToolResultProjectionV1 struct {
 	Target        string
 	SubGraphPath  []string
@@ -75,36 +78,50 @@ func (i *checkpointProjectionIndex) addCheckpointToolResults(path []string,
 	if i.toolResultsByCallID == nil {
 		i.toolResultsByCallID = make(map[string][]canonicalCheckpointToolResult)
 	}
-	for callID, result := range standard {
+	for _, callID := range sortedStringKeys(standard) {
+		result := standard[callID]
+		// result is an already-materialized plain string. Hashing its bytes
+		// cannot invoke a user-controlled marshaler.
 		digest := sha256.Sum256([]byte(result))
-		i.toolResultsByCallID[callID] = append(i.toolResultsByCallID[callID],
-			canonicalCheckpointToolResult{
-				source: checkpointToolResultSourceV1{
-					Kind:        projectionToolResultKindString,
-					GraphPath:   append([]string(nil), path...),
-					InterruptID: interruptID,
-					ToolCallID:  callID,
-					Digest:      hex.EncodeToString(digest[:]),
-				},
-				text: result,
-			})
+		canonical := canonicalCheckpointToolResult{
+			source: checkpointToolResultSourceV1{
+				SourceOrdinal: i.nextOrdinal(),
+				Kind:          projectionToolResultKindString,
+				GraphPath:     append([]string(nil), path...),
+				InterruptID:   interruptID,
+				ToolCallID:    callID,
+				Digest:        hex.EncodeToString(digest[:]),
+			},
+			text: result,
+		}
+		i.toolResultsByCallID[callID] = append(i.toolResultsByCallID[callID], canonical)
+		if i.toolResultsByOrdinal == nil {
+			i.toolResultsByOrdinal = make(map[int]canonicalCheckpointToolResult)
+		}
+		i.toolResultsByOrdinal[canonical.source.SourceOrdinal] = canonical
 	}
-	for callID, result := range enhanced {
-		digest, ok := projectionMessageDigest(result)
+	for _, callID := range sortedStringKeys(enhanced) {
+		result := enhanced[callID]
+		digest, ok := checkpointProjectionValueDigest(result)
 		if !ok {
 			continue
 		}
-		i.toolResultsByCallID[callID] = append(i.toolResultsByCallID[callID],
-			canonicalCheckpointToolResult{
-				source: checkpointToolResultSourceV1{
-					Kind:        projectionToolResultKindEnhanced,
-					GraphPath:   append([]string(nil), path...),
-					InterruptID: interruptID,
-					ToolCallID:  callID,
-					Digest:      digest,
-				},
-				enhanced: result,
-			})
+		canonical := canonicalCheckpointToolResult{
+			source: checkpointToolResultSourceV1{
+				SourceOrdinal: i.nextOrdinal(),
+				Kind:          projectionToolResultKindEnhanced,
+				GraphPath:     append([]string(nil), path...),
+				InterruptID:   interruptID,
+				ToolCallID:    callID,
+				Digest:        digest,
+			},
+			enhanced: result,
+		}
+		i.toolResultsByCallID[callID] = append(i.toolResultsByCallID[callID], canonical)
+		if i.toolResultsByOrdinal == nil {
+			i.toolResultsByOrdinal = make(map[int]canonicalCheckpointToolResult)
+		}
+		i.toolResultsByOrdinal[canonical.source.SourceOrdinal] = canonical
 	}
 }
 
@@ -190,7 +207,7 @@ func (i *checkpointProjectionIndex) sourceForStandardToolResult(
 	callID, result string) (checkpointToolResultSourceV1, bool) {
 	for _, candidate := range i.sortedToolResultCandidates(callID) {
 		if candidate.source.Kind == projectionToolResultKindString && candidate.text == result {
-			return candidate.source, true
+			return compactCheckpointToolResultSource(candidate.source), true
 		}
 	}
 	return checkpointToolResultSourceV1{}, false
@@ -198,18 +215,31 @@ func (i *checkpointProjectionIndex) sourceForStandardToolResult(
 
 func (i *checkpointProjectionIndex) sourceForEnhancedToolResult(callID string,
 	result *schema.ToolResult) (checkpointToolResultSourceV1, bool) {
+	digest, ok := checkpointProjectionValueDigest(result)
+	if !ok {
+		return checkpointToolResultSourceV1{}, false
+	}
 	for _, candidate := range i.sortedToolResultCandidates(callID) {
 		if candidate.source.Kind == projectionToolResultKindEnhanced &&
-			reflect.DeepEqual(candidate.enhanced, result) {
-			return candidate.source, true
+			candidate.source.Digest == digest &&
+			gobSemanticEqual(candidate.enhanced, result) {
+			return compactCheckpointToolResultSource(candidate.source), true
 		}
 	}
 	return checkpointToolResultSourceV1{}, false
 }
 
+func compactCheckpointToolResultSource(
+	source checkpointToolResultSourceV1) checkpointToolResultSourceV1 {
+	if source.SourceOrdinal > 0 {
+		source.GraphPath = nil
+	}
+	return source
+}
+
 func (i *checkpointProjectionIndex) sortedToolResultCandidates(
 	callID string) []canonicalCheckpointToolResult {
-	candidates := append([]canonicalCheckpointToolResult(nil), i.toolResultsByCallID[callID]...)
+	candidates := i.toolResultCandidates(callID)
 	sort.Slice(candidates, func(left, right int) bool {
 		leftKey := fmt.Sprintf("%q/%s/%s", candidates[left].source.GraphPath,
 			candidates[left].source.InterruptID, candidates[left].source.Kind)
@@ -358,7 +388,22 @@ func hydrateInfoToolResult(extra *compose.ToolsInterruptAndRerunExtra,
 
 func (i *checkpointProjectionIndex) toolResult(
 	source checkpointToolResultSourceV1) (canonicalCheckpointToolResult, error) {
-	for _, candidate := range i.toolResultsByCallID[source.ToolCallID] {
+	if err := validateCheckpointToolResultSource(source, i.version); err != nil {
+		return canonicalCheckpointToolResult{}, err
+	}
+	if source.SourceOrdinal > 0 {
+		candidate, ok := i.toolResultByOrdinal(source.SourceOrdinal)
+		if ok && candidate.source.SourceOrdinal == source.SourceOrdinal &&
+			candidate.source.Kind == source.Kind &&
+			candidate.source.InterruptID == source.InterruptID &&
+			candidate.source.ToolCallID == source.ToolCallID &&
+			candidate.source.Digest == source.Digest {
+			return candidate, nil
+		}
+		return canonicalCheckpointToolResult{},
+			fmt.Errorf("checkpoint projection tool result %q does not match metadata", source.ToolCallID)
+	}
+	for _, candidate := range i.toolResultCandidates(source.ToolCallID) {
 		if candidate.source.Kind == source.Kind &&
 			candidate.source.InterruptID == source.InterruptID &&
 			checkpointProjectionPathEqual(candidate.source.GraphPath, source.GraphPath) &&
@@ -368,6 +413,26 @@ func (i *checkpointProjectionIndex) toolResult(
 	}
 	return canonicalCheckpointToolResult{},
 		fmt.Errorf("checkpoint projection tool result %q does not match metadata", source.ToolCallID)
+}
+
+func validateCheckpointToolResultSource(source checkpointToolResultSourceV1, version int) error {
+	if source.Kind == "" || source.InterruptID == "" || source.ToolCallID == "" ||
+		source.Digest == "" || source.SourceOrdinal < 0 {
+		return errors.New("checkpoint projection tool result source metadata is incomplete")
+	}
+	if version == checkpointProjectionVersionV1 {
+		if source.SourceOrdinal != 0 {
+			return errors.New("checkpoint projection V1 tool result source contains V2 metadata")
+		}
+		return nil
+	}
+	if source.SourceOrdinal == 0 {
+		return errors.New("checkpoint projection V2 tool result source metadata is incomplete")
+	}
+	if len(source.GraphPath) != 0 {
+		return errors.New("checkpoint projection V2 tool result source contains V1 metadata")
+	}
+	return nil
 }
 
 func cloneToolResultForProjection(result *schema.ToolResult) (*schema.ToolResult, error) {

@@ -1,5 +1,7 @@
 {
   "producer_commit": "60e1d9929cb65c8c4814b66fba2854e29b730114",
+  "producer_version": "v0.9.18",
+  "generator_commit": "3e3e994e7b10955c336ae38a610ddbff5e371521",
   "checkpoint_format_version": 0,
   "fixtures": [
     {

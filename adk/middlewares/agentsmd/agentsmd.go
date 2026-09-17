@@ -40,11 +40,17 @@ type Config struct {
 	// Supports @import syntax inside files for recursive inclusion (max depth 5).
 	AgentsMDFiles []string
 
-	// AllAgentsMDMaxBytes limits the total byte size of all loaded Agents.md content.
-	// Files are loaded in order; once the cumulative size exceeds this limit,
-	// remaining files are skipped. Each individual file is always loaded in full.
-	// 0 means no limit.
+	// AllAgentsMDMaxBytes limits the total byte size of all loaded Agents.md content,
+	// counting top-level files and their @imported files alike. The limit applies to
+	// every file, including the first. When loading a file would exceed the limit, that
+	// file is truncated to fit, and no further files are loaded. 0 means no limit.
 	AllAgentsMDMaxBytes int
+
+	// PerAgentsMDMaxBytes limits the byte size of each individual Agents.md file,
+	// applied to every loaded file including @imported ones. A file larger than this
+	// is truncated to the limit (with a notice appended) before the cumulative
+	// AllAgentsMDMaxBytes budget is applied. 0 means no per-file limit.
+	PerAgentsMDMaxBytes int
 
 	// OnLoadWarning is an optional callback invoked when a non-fatal error occurs
 	// during Agents.md file loading (e.g. file not found, circular @import, depth
@@ -69,7 +75,7 @@ func NewTyped[M adk.MessageType](_ context.Context, cfg *Config) (adk.TypedChatM
 	}
 
 	return &typedMiddleware[M]{
-		loader: newLoaderConfig(cfg.Backend, cfg.AgentsMDFiles, cfg.AllAgentsMDMaxBytes, cfg.OnLoadWarning),
+		loader: newLoaderConfig(cfg.Backend, cfg.AgentsMDFiles, cfg.AllAgentsMDMaxBytes, cfg.PerAgentsMDMaxBytes, cfg.OnLoadWarning),
 	}, nil
 }
 
@@ -207,7 +213,10 @@ func (c *Config) validate() error {
 		return fmt.Errorf("[agentsmd]: at least one agent file path is required")
 	}
 	if c.AllAgentsMDMaxBytes < 0 {
-		return fmt.Errorf("[agentsmd]: AllAgentMDDocsMaxBytes must be non-negative")
+		return fmt.Errorf("[agentsmd]: AllAgentsMDMaxBytes must be non-negative")
+	}
+	if c.PerAgentsMDMaxBytes < 0 {
+		return fmt.Errorf("[agentsmd]: PerAgentsMDMaxBytes must be non-negative")
 	}
 	return nil
 }

@@ -150,7 +150,12 @@ func (r *TypedRunner[M]) ResumeWithParams(ctx context.Context, checkPointID stri
 
 func (r *TypedRunner[M]) resumeInternal(ctx context.Context, checkPointID string, resumeData map[string]any,
 	opts ...AgentRunOption) (*AsyncIterator[*TypedAgentEvent[M]], error) {
-	return typedRunnerResumeInternalImpl(r.a, r.store, ctx, checkPointID, resumeData, opts...)
+	return typedRunnerResumeInternalImpl(r.a, r.store, ctx, checkPointID, resumeData, false, opts...)
+}
+
+func (r *TypedRunner[M]) resumeInNewScope(ctx context.Context, checkPointID string,
+	opts ...AgentRunOption) (*AsyncIterator[*TypedAgentEvent[M]], error) {
+	return typedRunnerResumeInternalImpl(r.a, r.store, ctx, checkPointID, nil, true, opts...)
 }
 
 func typedRunnerRunImpl[M MessageType](a TypedAgent[M], enableStreaming bool, store CheckPointStore, ctx context.Context, messages []M, opts ...AgentRunOption) *AsyncIterator[*TypedAgentEvent[M]] {
@@ -202,13 +207,14 @@ func typedRunnerRunImpl[M MessageType](a TypedAgent[M], enableStreaming bool, st
 	return niter
 }
 
-func typedRunnerResumeInternalImpl[M MessageType](a TypedAgent[M], store CheckPointStore, ctx context.Context, checkPointID string, resumeData map[string]any, //nolint:revive // argument-limit
+func typedRunnerResumeInternalImpl[M MessageType](a TypedAgent[M], store CheckPointStore, ctx context.Context, checkPointID string, resumeData map[string]any, newResumeScope bool, //nolint:revive // argument-limit
 	opts ...AgentRunOption) (*AsyncIterator[*TypedAgentEvent[M]], error) {
 	if store == nil {
 		return nil, fmt.Errorf("failed to resume: store is nil")
 	}
 
-	ctx, runCtx, resumeInfo, err := runnerLoadCheckPointImpl(store, ctx, checkPointID)
+	ctx, runCtx, resumeInfo, err := runnerLoadCheckPointWithResumeScopeImpl(
+		store, ctx, checkPointID, newResumeScope)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load from checkpoint: %w", err)
 	}

@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+// Package main verifies that the pinned legacy Eino release can resume frozen checkpoints.
 package main
 
 import (
@@ -27,6 +28,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
+	"sort"
 	"strings"
 	"sync"
 
@@ -45,17 +48,31 @@ type anyEnvelope struct {
 	Value any
 }
 
+const (
+	resumeMethodImplicit = "resume"
+	resumeMethodTargeted = "resume_with_params"
+)
+
 type fixture struct {
-	Name              string   `json:"name"`
-	File              string   `json:"file"`
-	Depth             int      `json:"depth"`
-	ParallelChildren  int      `json:"parallel_children,omitempty"`
-	Streaming         bool     `json:"streaming,omitempty"`
-	Cancel            bool     `json:"cancel,omitempty"`
-	ResumeTargetCount int      `json:"resume_target_count,omitempty"`
-	PayloadField      string   `json:"payload_field"`
-	PayloadSize       int      `json:"payload_size"`
-	InterruptIDs      []string `json:"interrupt_ids"`
+	Name               string   `json:"name"`
+	File               string   `json:"file"`
+	Depth              int      `json:"depth"`
+	ParallelChildren   int      `json:"parallel_children,omitempty"`
+	Streaming          bool     `json:"streaming,omitempty"`
+	Cancel             bool     `json:"cancel,omitempty"`
+	ImplicitResume     bool     `json:"implicit_resume,omitempty"`
+	ResumeTargetCount  int      `json:"resume_target_count,omitempty"`
+	ExpectedInterrupts int      `json:"expected_interrupts,omitempty"`
+	PayloadField       string   `json:"payload_field"`
+	PayloadSize        int      `json:"payload_size"`
+	InterruptIDs       []string `json:"interrupt_ids"`
+	InterruptAddresses []string `json:"interrupt_addresses"`
+}
+
+type resumeOutcome struct {
+	TerminalOutputs             int      `json:"terminal_outputs"`
+	RemainingInterruptAddresses []string `json:"remaining_interrupt_addresses"`
+	ResumeMethod                string   `json:"resume_method"`
 }
 
 type store struct {
@@ -113,7 +130,8 @@ func (m *chatModel) response(input []*schema.Message) *schema.Message {
 }
 
 type interruptTool struct {
-	name string
+	name           string
+	implicitResume bool
 }
 
 type completionTool struct {
@@ -139,23 +157,26 @@ func (t *interruptTool) InvokableRun(ctx context.Context, _ string,
 	if !wasInterrupted {
 		return "", componenttool.StatefulInterrupt(ctx, t.name, "interrupted")
 	}
+	if !hasState {
+		return "", fmt.Errorf("legacy reader lost interrupt state for %s", t.name)
+	}
+	if t.implicitResume {
+		return "resumed", nil
+	}
 	isTarget, _, _ := componenttool.GetResumeContext[string](ctx)
 	if isTarget {
 		return "resumed", nil
 	}
-	if !hasState {
-		return "", fmt.Errorf("legacy reader lost interrupt state for %s", t.name)
-	}
 	return "", componenttool.StatefulInterrupt(ctx, t.name, "re-interrupted")
 }
 
-func newAgent(depth, parallelChildren int) (adk.Agent, error) {
+func newAgent(depth, parallelChildren int, implicitResume bool) (adk.Agent, error) {
 	if parallelChildren > 0 {
 		tools := make([]componenttool.BaseTool, 0, parallelChildren)
 		names := make([]string, 0, parallelChildren)
 		for i := 0; i < parallelChildren; i++ {
 			name := fmt.Sprintf("ParallelChild%d", i)
-			child, err := newNestedAgent(name, 0)
+			child, err := newNestedAgent(name, 0, implicitResume)
 			if err != nil {
 				return nil, err
 			}
@@ -164,7 +185,7 @@ func newAgent(depth, parallelChildren int) (adk.Agent, error) {
 		}
 		return newChatModelAgent("ParallelParent", names, tools)
 	}
-	return newNestedAgent("RootAgent", depth)
+	return newNestedAgent("RootAgent", depth, implicitResume)
 }
 
 func newCancelResumeAgent() (adk.Agent, error) {
@@ -173,14 +194,17 @@ func newCancelResumeAgent() (adk.Agent, error) {
 		[]componenttool.BaseTool{&completionTool{name: toolName}})
 }
 
-func newNestedAgent(name string, depth int) (adk.Agent, error) {
+func newNestedAgent(name string, depth int, implicitResume bool) (adk.Agent, error) {
 	if depth == 0 {
 		toolName := name + "Interrupt"
 		return newChatModelAgent(name, []string{toolName},
-			[]componenttool.BaseTool{&interruptTool{name: toolName}})
+			[]componenttool.BaseTool{&interruptTool{
+				name:           toolName,
+				implicitResume: implicitResume,
+			}})
 	}
 	childName := fmt.Sprintf("%sChild%d", name, depth)
-	child, err := newNestedAgent(childName, depth-1)
+	child, err := newNestedAgent(childName, depth-1, implicitResume)
 	if err != nil {
 		return nil, err
 	}
@@ -214,13 +238,111 @@ func readFixture(path string) ([]byte, error) {
 	return io.ReadAll(reader)
 }
 
-func run() error {
-	dir := flag.String("fixture-dir", "", "checkpoint fixture directory")
-	name := flag.String("fixture", "", "fixture name")
-	gobAnyFile := flag.String("gob-any-file", "", "gob-encoded any envelope")
-	flag.Parse()
+type checkpointResumer interface {
+	Resume(context.Context, string, ...adk.AgentRunOption) (
+		*adk.AsyncIterator[*adk.AgentEvent], error)
+	ResumeWithParams(context.Context, string, *adk.ResumeParams, ...adk.AgentRunOption) (
+		*adk.AsyncIterator[*adk.AgentEvent], error)
+}
+
+func validateFixture(selected fixture) (int, error) {
+	if selected.Depth < 0 {
+		return 0, fmt.Errorf("fixture %q has invalid depth %d", selected.Name, selected.Depth)
+	}
+	if selected.ParallelChildren < 0 {
+		return 0, fmt.Errorf("fixture %q has invalid parallel children %d",
+			selected.Name, selected.ParallelChildren)
+	}
+	if selected.ResumeTargetCount < 0 {
+		return 0, fmt.Errorf("fixture %q has invalid resume target count %d",
+			selected.Name, selected.ResumeTargetCount)
+	}
+	targetCount := selected.ResumeTargetCount
+	if targetCount == 0 && !selected.Cancel {
+		targetCount = len(selected.InterruptIDs)
+	}
+	if targetCount > len(selected.InterruptIDs) {
+		return 0, fmt.Errorf("fixture %q resume target count %d exceeds interrupt IDs length %d",
+			selected.Name, targetCount, len(selected.InterruptIDs))
+	}
+	if targetCount > len(selected.InterruptAddresses) {
+		return 0, fmt.Errorf(
+			"fixture %q resume target count %d exceeds interrupt addresses length %d",
+			selected.Name, targetCount, len(selected.InterruptAddresses))
+	}
+	if selected.ExpectedInterrupts < 0 {
+		return 0, fmt.Errorf("fixture %q has invalid expected interrupts %d",
+			selected.Name, selected.ExpectedInterrupts)
+	}
+	remainingInterrupts := len(selected.InterruptAddresses) - targetCount
+	if remainingInterrupts != selected.ExpectedInterrupts {
+		return 0, fmt.Errorf(
+			"fixture %q metadata declares %d remaining interrupts, but has %d addresses",
+			selected.Name, selected.ExpectedInterrupts, remainingInterrupts)
+	}
+	return targetCount, nil
+}
+
+func resumeFixture(ctx context.Context, runner checkpointResumer, selected fixture, targetCount int) (
+	iter *adk.AsyncIterator[*adk.AgentEvent], method string, err error) {
+	if selected.ImplicitResume {
+		iter, err = runner.Resume(ctx, selected.Name)
+		return iter, resumeMethodImplicit, err
+	}
+	targets := make(map[string]any, targetCount)
+	for _, id := range selected.InterruptIDs[:targetCount] {
+		targets[id] = "resumed"
+	}
+	iter, err = runner.ResumeWithParams(ctx, selected.Name, &adk.ResumeParams{Targets: targets})
+	return iter, resumeMethodTargeted, err
+}
+
+type runDependencies struct {
+	readFile    func(string) ([]byte, error)
+	readFixture func(string) ([]byte, error)
+	newResumer  func(context.Context, fixture, []byte) (checkpointResumer, error)
+}
+
+func defaultRunDependencies() runDependencies {
+	return runDependencies{
+		readFile:    os.ReadFile,
+		readFixture: readFixture,
+		newResumer: func(ctx context.Context, selected fixture,
+			raw []byte) (checkpointResumer, error) {
+			var (
+				agent adk.Agent
+				err   error
+			)
+			if selected.Cancel {
+				agent, err = newCancelResumeAgent()
+			} else {
+				agent, err = newAgent(
+					selected.Depth, selected.ParallelChildren, selected.ImplicitResume)
+			}
+			if err != nil {
+				return nil, err
+			}
+			s := &store{data: map[string][]byte{selected.Name: raw}}
+			return adk.NewRunner(ctx, adk.RunnerConfig{
+				Agent:           agent,
+				EnableStreaming: selected.Streaming,
+				CheckPointStore: s,
+			}), nil
+		},
+	}
+}
+
+func run(args []string, stdout io.Writer, dependencies runDependencies) error {
+	flags := flag.NewFlagSet("checkpoint-legacy-reader", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	dir := flags.String("fixture-dir", "", "checkpoint fixture directory")
+	name := flags.String("fixture", "", "fixture name")
+	gobAnyFile := flags.String("gob-any-file", "", "gob-encoded any envelope")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
 	if *gobAnyFile != "" {
-		data, err := os.ReadFile(*gobAnyFile)
+		data, err := dependencies.readFile(*gobAnyFile)
 		if err != nil {
 			return err
 		}
@@ -231,7 +353,7 @@ func run() error {
 		return fmt.Errorf("-fixture-dir and -fixture are required")
 	}
 
-	data, err := os.ReadFile(filepath.Join(*dir, "manifest.json"))
+	data, err := dependencies.readFile(filepath.Join(*dir, "manifest.json"))
 	if err != nil {
 		return err
 	}
@@ -249,56 +371,77 @@ func run() error {
 	if selected == nil {
 		return fmt.Errorf("fixture %q not found", *name)
 	}
-	raw, err := readFixture(filepath.Join(*dir, selected.File))
+	targetCount, err := validateFixture(*selected)
 	if err != nil {
 		return err
 	}
-	var agent adk.Agent
-	if selected.Cancel {
-		agent, err = newCancelResumeAgent()
-	} else {
-		agent, err = newAgent(selected.Depth, selected.ParallelChildren)
-	}
+	raw, err := dependencies.readFixture(filepath.Join(*dir, selected.File))
 	if err != nil {
 		return err
 	}
-	s := &store{data: map[string][]byte{selected.Name: raw}}
-	runner := adk.NewRunner(context.Background(), adk.RunnerConfig{
-		Agent:           agent,
-		EnableStreaming: selected.Streaming,
-		CheckPointStore: s,
-	})
-	targetCount := selected.ResumeTargetCount
-	if targetCount == 0 && !selected.Cancel {
-		targetCount = len(selected.InterruptIDs)
+	ctx := context.Background()
+	runner, err := dependencies.newResumer(ctx, *selected, raw)
+	if err != nil {
+		return err
 	}
-	targets := make(map[string]any, targetCount)
-	for _, id := range selected.InterruptIDs[:targetCount] {
-		targets[id] = "resumed"
-	}
-	iter, err := runner.ResumeWithParams(context.Background(), selected.Name,
-		&adk.ResumeParams{Targets: targets})
+	iter, resumeMethod, err := resumeFixture(ctx, runner, *selected, targetCount)
 	if err != nil {
 		return err
 	}
 	var errs []string
+	var eventCount int
+	outcome := resumeOutcome{ResumeMethod: resumeMethod}
 	for {
 		event, ok := iter.Next()
 		if !ok {
 			break
 		}
+		eventCount++
 		if event.Err != nil {
 			errs = append(errs, event.Err.Error())
+		}
+		if event.Output != nil && event.Output.MessageOutput != nil {
+			msg, msgErr := event.Output.MessageOutput.GetMessage()
+			if msgErr != nil {
+				errs = append(errs, msgErr.Error())
+			} else if msg != nil && msg.Role == schema.Assistant && msg.Content == "completed" {
+				outcome.TerminalOutputs++
+			}
+		}
+		if event.Action != nil && event.Action.Interrupted != nil {
+			for _, interruptCtx := range event.Action.Interrupted.InterruptContexts {
+				outcome.RemainingInterruptAddresses = append(
+					outcome.RemainingInterruptAddresses, interruptCtx.Address.String())
+			}
 		}
 	}
 	if len(errs) > 0 {
 		return fmt.Errorf("resume events failed: %s", strings.Join(errs, "; "))
 	}
-	return nil
+	if eventCount == 0 {
+		return fmt.Errorf("fixture %q resume produced no events", selected.Name)
+	}
+	expectedAddresses := append([]string(nil), selected.InterruptAddresses[targetCount:]...)
+	sort.Strings(expectedAddresses)
+	sort.Strings(outcome.RemainingInterruptAddresses)
+	if !reflect.DeepEqual(outcome.RemainingInterruptAddresses, expectedAddresses) {
+		return fmt.Errorf("fixture %q remaining interrupt addresses = %q, want %q",
+			selected.Name, outcome.RemainingInterruptAddresses, expectedAddresses)
+	}
+	if selected.ExpectedInterrupts == 0 {
+		if outcome.TerminalOutputs != 1 {
+			return fmt.Errorf("fixture %q terminal outputs = %d, want 1",
+				selected.Name, outcome.TerminalOutputs)
+		}
+	} else if outcome.TerminalOutputs != 0 {
+		return fmt.Errorf("partial fixture %q terminal outputs = %d, want 0",
+			selected.Name, outcome.TerminalOutputs)
+	}
+	return json.NewEncoder(stdout).Encode(&outcome)
 }
 
 func main() {
-	if err := run(); err != nil {
+	if err := run(os.Args[1:], os.Stdout, defaultRunDependencies()); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}

@@ -108,6 +108,46 @@ func GetCurrentAddress(ctx context.Context) Address {
 	return nil
 }
 
+// ClearCurrentAddress starts an independently persisted nested execution while
+// preserving resume data carried elsewhere in the context.
+func ClearCurrentAddress(ctx context.Context) context.Context {
+	return context.WithValue(ctx, addrCtxKey{}, &addrCtx{})
+}
+
+// NewResumeScope creates an independent state-consumption namespace and moves
+// the requested, still-pending resume targets into it.
+func NewResumeScope(ctx context.Context, targetIDs map[string]struct{}) context.Context {
+	scoped := &globalResumeInfo{
+		id2ResumeData:     make(map[string]any),
+		id2ResumeDataUsed: make(map[string]bool),
+		id2State:          make(map[string]InterruptState),
+		id2StateUsed:      make(map[string]bool),
+		id2Addr:           make(map[string]Address),
+	}
+	parent, ok := getResumeInfo(ctx)
+	if !ok || len(targetIDs) == 0 {
+		return context.WithValue(ctx, globalResumeInfoKey{}, scoped)
+	}
+
+	parent.mu.Lock()
+	defer parent.mu.Unlock()
+	if parent.id2ResumeDataUsed == nil {
+		parent.id2ResumeDataUsed = make(map[string]bool)
+	}
+	for id := range targetIDs {
+		if parent.id2ResumeDataUsed[id] {
+			continue
+		}
+		data, exists := parent.id2ResumeData[id]
+		if !exists {
+			continue
+		}
+		scoped.id2ResumeData[id] = data
+		parent.id2ResumeDataUsed[id] = true
+	}
+	return context.WithValue(ctx, globalResumeInfoKey{}, scoped)
+}
+
 // AppendAddressSegment creates a new execution context for a sub-component (e.g., a graph node or a tool call).
 //
 // It extends the current context's address with a new segment and populates the new context with the

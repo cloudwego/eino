@@ -46,6 +46,8 @@ type InterruptSignal struct {
 	InterruptInfo
 	InterruptState
 	Subs []*InterruptSignal
+
+	persistenceBoundary bool
 }
 
 func (is *InterruptSignal) Error() string {
@@ -293,6 +295,15 @@ func ToInterruptContexts(is *InterruptSignal, allowedSegmentTypes []AddressSegme
 	return rootCauseContexts
 }
 
+// MarkInterruptPersistenceBoundary keeps a nested execution's routing and
+// state in its own checkpoint while preserving the complete in-memory signal
+// tree for user-facing interrupt contexts.
+func MarkInterruptPersistenceBoundary(signal *InterruptSignal) {
+	if signal != nil {
+		signal.persistenceBoundary = true
+	}
+}
+
 func filterParentChain(ctx *InterruptCtx, allowedSet map[AddressSegmentType]bool) {
 	if ctx == nil {
 		return
@@ -338,6 +349,9 @@ func SignalToPersistenceMaps(is *InterruptSignal) (map[string]Address, map[strin
 		id2addr[signal.ID] = signal.Address
 		id2state[signal.ID] = signal.InterruptState // The embedded struct
 
+		if signal.persistenceBoundary {
+			return
+		}
 		// Recurse into children.
 		for _, sub := range signal.Subs {
 			traverse(sub)

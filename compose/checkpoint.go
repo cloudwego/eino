@@ -22,7 +22,6 @@ import (
 	"fmt"
 	"reflect"
 	"sort"
-	"strings"
 
 	"github.com/cloudwego/eino/internal/core"
 	"github.com/cloudwego/eino/internal/serialization"
@@ -220,11 +219,21 @@ func forwardCheckPoint(ctx context.Context, nodeKey string) (context.Context, er
 }
 
 func validateCheckpointLayoutMetadata(cp *checkpoint) error {
-	if cp == nil || cp.layoutMetadataValidated {
+	if cp == nil {
+		return nil
+	}
+	state, hasSentinel := cp.InterruptID2State[checkpointLayoutSentinelID]
+	if _, exists := cp.InterruptID2Addr[checkpointLayoutSentinelID]; exists {
+		return errors.New("checkpoint state layout sentinel must not have a routing address")
+	}
+	if hasSentinel && state.LayerSpecificPayload != nil {
+		return errors.New("checkpoint state layout sentinel must not have a layer-specific payload")
+	}
+	if cp.layoutMetadataValidated {
 		return nil
 	}
 	if cp.StateLayoutVersion == 0 {
-		if _, exists := cp.InterruptID2State[checkpointLayoutSentinelID]; exists {
+		if hasSentinel {
 			return errors.New("legacy checkpoint contains a versioned state layout sentinel")
 		}
 		return nil
@@ -233,8 +242,7 @@ func validateCheckpointLayoutMetadata(cp *checkpoint) error {
 		return fmt.Errorf("checkpoint requires a newer Eino version: unsupported state layout version %d",
 			cp.StateLayoutVersion)
 	}
-	state, ok := cp.InterruptID2State[checkpointLayoutSentinelID]
-	if !ok {
+	if !hasSentinel {
 		return errors.New("checkpoint state layout sentinel is missing")
 	}
 	sentinel, ok := state.State.(*checkpointLayoutSentinelV1)
@@ -263,7 +271,7 @@ func initializeCheckpointLayoutV1(cp *checkpoint) error {
 	}
 	for _, id := range sortedCheckpointMapKeys(cp.InterruptID2State) {
 		if isCheckpointMetadataID(id) {
-			return fmt.Errorf("interrupt ID %q uses reserved checkpoint metadata prefix", id)
+			return fmt.Errorf("interrupt ID %q is reserved for checkpoint metadata", id)
 		}
 	}
 	cp.InterruptID2State[checkpointLayoutSentinelID] = core.InterruptState{
@@ -273,7 +281,7 @@ func initializeCheckpointLayoutV1(cp *checkpoint) error {
 }
 
 func isCheckpointMetadataID(id string) bool {
-	return strings.HasPrefix(id, "_eino_")
+	return id == checkpointLayoutSentinelID
 }
 
 func newCheckPointer(

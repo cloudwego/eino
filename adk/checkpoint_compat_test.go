@@ -30,12 +30,12 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/cloudwego/eino/components/model"
@@ -45,10 +45,12 @@ import (
 )
 
 const (
-	checkpointCompatGenerateEnv = "EINO_GENERATE_CHECKPOINT_COMPAT"
-	checkpointCompatDir         = "testdata/checkpoint_compat/main_60e1d992"
-	checkpointCompatPayloadSize = 32 << 10
-	checkpointCompatFormatV0    = 0
+	checkpointCompatDir             = "testdata/checkpoint_compat/main_60e1d992"
+	checkpointCompatFormatV0        = 0
+	checkpointCompatImplicitFixture = "parallel_6"
+	checkpointCompatProducerCommit  = "60e1d9929cb65c8c4814b66fba2854e29b730114"
+	checkpointCompatProducerVersion = "v0.9.18"
+	checkpointCompatGeneratorCommit = "3e3e994e7b10955c336ae38a610ddbff5e371521"
 )
 
 var checkpointCompatFrozenSHA256 = map[string]string{
@@ -70,8 +72,18 @@ var checkpointCompatFrozenSHA256 = map[string]string{
 
 type checkpointCompatManifest struct {
 	ProducerCommit          string                    `json:"producer_commit"`
+	ProducerVersion         string                    `json:"producer_version"`
+	GeneratorCommit         string                    `json:"generator_commit"`
 	CheckpointFormatVersion *int                      `json:"checkpoint_format_version"`
 	Fixtures                []checkpointCompatFixture `json:"fixtures"`
+}
+
+type checkpointCompatResumeOutcome struct {
+	TerminalOutputs             int               `json:"terminal_outputs"`
+	RemainingInterruptAddresses []string          `json:"remaining_interrupt_addresses"`
+	RemainingInterruptIDs       []string          `json:"-"`
+	RemainingAddressesByID      map[string]string `json:"-"`
+	ResumeMethod                string            `json:"resume_method"`
 }
 
 type checkpointGobSchemaOld struct {
@@ -113,6 +125,7 @@ type checkpointCompatFixture struct {
 	PayloadSize        int      `json:"payload_size"`
 	InterruptIDs       []string `json:"interrupt_ids"`
 	InterruptAddresses []string `json:"interrupt_addresses"`
+	StableDepthNames   bool     `json:"-"`
 }
 
 type checkpointCompatStore struct {
@@ -287,6 +300,27 @@ func newCheckpointCompatNestedAgent(t *testing.T, name string, depth int, payloa
 		[]componenttool.BaseTool{NewAgentTool(context.Background(), child)}, "", "")
 }
 
+func newCheckpointCompatStableDepthAgent(t *testing.T, depth int, payloadField string,
+	payloadSize int) Agent {
+	t.Helper()
+	payload := strings.Repeat("x", payloadSize)
+	var build func(int) Agent
+	build = func(level int) Agent {
+		name := fmt.Sprintf("DepthAgent%02d", level)
+		if level == depth {
+			toolName := fmt.Sprintf("DepthTool%02d", level)
+			return newCheckpointCompatChatModelAgent(t, name, []string{toolName},
+				[]componenttool.BaseTool{&checkpointCompatInterruptTool{name: toolName}},
+				payloadField, payload)
+		}
+		child := build(level + 1)
+		childName := fmt.Sprintf("DepthAgent%02d", level+1)
+		return newCheckpointCompatChatModelAgent(t, name, []string{childName},
+			[]componenttool.BaseTool{NewAgentTool(context.Background(), child)}, "", "")
+	}
+	return build(0)
+}
+
 func newCheckpointCompatChatModelAgent(t *testing.T, name string, toolNames []string,
 	tools []componenttool.BaseTool, payloadField, payload string) Agent {
 	t.Helper()
@@ -312,9 +346,14 @@ func captureCheckpointCompatFixture(t *testing.T, spec checkpointCompatFixture) 
 		return captureCheckpointCompatCancelFixture(t, spec)
 	}
 	store := newCheckpointCompatStore()
+	agent := newCheckpointCompatAgent(t, spec.Depth, spec.ParallelChildren,
+		spec.PayloadField, spec.PayloadSize)
+	if spec.StableDepthNames {
+		agent = newCheckpointCompatStableDepthAgent(
+			t, spec.Depth, spec.PayloadField, spec.PayloadSize)
+	}
 	runner := NewRunner(context.Background(), RunnerConfig{
-		Agent: newCheckpointCompatAgent(t, spec.Depth, spec.ParallelChildren,
-			spec.PayloadField, spec.PayloadSize),
+		Agent:           agent,
 		EnableStreaming: spec.Streaming,
 		CheckPointStore: store,
 	})
@@ -449,47 +488,289 @@ func readCheckpointCompatFixture(t *testing.T, path string) []byte {
 	return raw
 }
 
-func checkpointCompatSpecs() []checkpointCompatFixture {
-	return []checkpointCompatFixture{
-		{Name: "single_invoke", File: "single_invoke.bin.gz", PayloadField: "content"},
-		{Name: "single_stream", File: "single_stream.bin.gz", Streaming: true, PayloadField: "content"},
-		{Name: "cancel_after_model", File: "cancel_after_model.bin.gz", Cancel: true, PayloadField: "content"},
-		{Name: "agent_tool_depth_1", File: "agent_tool_depth_1.bin.gz", Depth: 1, PayloadField: "content"},
-		{Name: "agent_tool_depth_2", File: "agent_tool_depth_2.bin.gz", Depth: 2, PayloadField: "content"},
-		{Name: "agent_tool_depth_3", File: "agent_tool_depth_3.bin.gz", Depth: 3, PayloadField: "content"},
-		{Name: "parallel_6", File: "parallel_6.bin.gz", ParallelChildren: 6, PayloadField: "content", ImplicitResume: true, ResumeTargetCount: 6},
-		{Name: "parallel_6_single_target", File: "parallel_6_single_target.bin.gz", ParallelChildren: 6, PayloadField: "content", ResumeTargetCount: 1, ExpectedInterrupts: 5},
-		{Name: "parallel_6_multi_target", File: "parallel_6_multi_target.bin.gz", ParallelChildren: 6, PayloadField: "content", ResumeTargetCount: 2, ExpectedInterrupts: 4},
-		{Name: "payload_content", File: "payload_content.bin.gz", Depth: 1, PayloadField: "content", PayloadSize: checkpointCompatPayloadSize},
-		{Name: "payload_reasoning", File: "payload_reasoning.bin.gz", Depth: 1, PayloadField: "reasoning", PayloadSize: checkpointCompatPayloadSize},
-		{Name: "payload_arguments", File: "payload_arguments.bin.gz", Depth: 1, PayloadField: "tool_arguments", PayloadSize: checkpointCompatPayloadSize},
-		{Name: "payload_extra", File: "payload_extra.bin.gz", Depth: 1, PayloadField: "extra", PayloadSize: checkpointCompatPayloadSize},
-		{Name: "payload_multimodal", File: "payload_multimodal.bin.gz", Depth: 1, PayloadField: "multimodal", PayloadSize: checkpointCompatPayloadSize},
+func collectCheckpointCompatResumeOutcome(t *testing.T,
+	iter *AsyncIterator[*AgentEvent]) checkpointCompatResumeOutcome {
+	t.Helper()
+	var eventCount int
+	outcome := checkpointCompatResumeOutcome{
+		RemainingAddressesByID: make(map[string]string),
+	}
+	for {
+		event, ok := iter.Next()
+		if !ok {
+			break
+		}
+		eventCount++
+		require.NoError(t, event.Err)
+		if event.Output != nil && event.Output.MessageOutput != nil {
+			msg, err := event.Output.MessageOutput.GetMessage()
+			require.NoError(t, err)
+			if msg != nil && msg.Role == schema.Assistant && msg.Content == "completed" {
+				outcome.TerminalOutputs++
+			}
+		}
+		if event.Action != nil && event.Action.Interrupted != nil {
+			for _, interruptCtx := range event.Action.Interrupted.InterruptContexts {
+				outcome.RemainingInterruptAddresses = append(
+					outcome.RemainingInterruptAddresses, interruptCtx.Address.String())
+				outcome.RemainingInterruptIDs = append(
+					outcome.RemainingInterruptIDs, interruptCtx.ID)
+				outcome.RemainingAddressesByID[interruptCtx.ID] = interruptCtx.Address.String()
+			}
+		}
+	}
+	require.Positive(t, eventCount)
+	sort.Strings(outcome.RemainingInterruptAddresses)
+	return outcome
+}
+
+func TestCollectCheckpointCompatResumeOutcomePreservesAddressMultiplicity(t *testing.T) {
+	iter, generator := NewAsyncIteratorPair[*AgentEvent]()
+	address := Address{{Type: AddressSegmentAgent, ID: "duplicate"}}
+	generator.Send(&AgentEvent{Action: &AgentAction{Interrupted: &InterruptInfo{
+		InterruptContexts: []*InterruptCtx{
+			{Address: address},
+			{Address: address},
+		},
+	}}})
+	generator.Close()
+
+	outcome := collectCheckpointCompatResumeOutcome(t, iter)
+	require.Equal(t, []string{"agent:duplicate", "agent:duplicate"},
+		outcome.RemainingInterruptAddresses)
+}
+
+func TestCheckpointLegacyAgentToolPartialResumeReinterruptsWithAbsoluteState(t *testing.T) {
+	manifestData, err := os.ReadFile(filepath.Join(checkpointCompatDir, "manifest.json"))
+	require.NoError(t, err)
+	var manifest checkpointCompatManifest
+	require.NoError(t, json.Unmarshal(manifestData, &manifest))
+	fixtures := make(map[string]checkpointCompatFixture, len(manifest.Fixtures))
+	for _, fixture := range manifest.Fixtures {
+		fixtures[fixture.File] = fixture
+	}
+
+	tests := []struct {
+		name      string
+		fixture   string
+		streaming bool
+		v1        bool
+	}{
+		{name: "legacy_invoke_nested", fixture: "parallel_6.bin.gz"},
+		{name: "v1_invoke_nested", fixture: "parallel_6.bin.gz", v1: true},
+		{name: "legacy_stream_nested", fixture: "parallel_6.bin.gz", streaming: true},
+		{name: "v1_stream_nested", fixture: "parallel_6.bin.gz", streaming: true, v1: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fixture, exists := fixtures[tt.fixture]
+			require.True(t, exists)
+			require.Len(t, fixture.InterruptAddresses, 6)
+			require.Len(t, fixture.InterruptIDs, 6)
+			activeIDs := cloneSlice(fixture.InterruptIDs)
+			raw := readCheckpointCompatFixture(t, filepath.Join(checkpointCompatDir, tt.fixture))
+			raw = rewriteCheckpointCompatAgentToolStates(t, raw, tt.streaming, tt.v1)
+			legacyCount, v1Count, v2Count := countCheckpointCompatAgentToolStates(t, raw)
+			if tt.v1 {
+				require.Zero(t, legacyCount)
+				require.Equal(t, 2*len(fixture.InterruptIDs), v1Count)
+			} else {
+				require.Equal(t, 2*len(fixture.InterruptIDs), legacyCount)
+				require.Zero(t, v1Count)
+			}
+			require.Zero(t, v2Count)
+
+			const checkpointID = "legacy-agent-tool-reinterrupt"
+			store := newCheckpointCompatStore()
+			require.NoError(t, store.Set(context.Background(), checkpointID, raw))
+			runner := NewRunner(context.Background(), RunnerConfig{
+				Agent: newCheckpointCompatAgent(
+					t, fixture.Depth, fixture.ParallelChildren,
+					fixture.PayloadField, fixture.PayloadSize),
+				EnableStreaming: tt.streaming,
+				CheckPointStore: store,
+			})
+
+			addressByID := make(map[string]string, len(activeIDs))
+			remainingAddresses := make(map[string]struct{}, len(activeIDs))
+			for i, id := range activeIDs {
+				addressByID[id] = fixture.InterruptAddresses[i]
+				remainingAddresses[fixture.InterruptAddresses[i]] = struct{}{}
+			}
+			expectedActiveCounts := []int{6, 4, 2, 0}
+			stageTargetCounts := []int{2, 2}
+			for stage, targetCount := range stageTargetCounts {
+				require.Len(t, activeIDs, expectedActiveCounts[stage])
+				targets := make(map[string]any, targetCount)
+				for _, targetID := range activeIDs[:targetCount] {
+					targets[targetID] = "resumed"
+					delete(remainingAddresses, addressByID[targetID])
+				}
+				iter, resumeErr := runner.ResumeWithParams(context.Background(), checkpointID,
+					&ResumeParams{Targets: targets})
+				require.NoError(t, resumeErr)
+				partial := collectCheckpointCompatResumeOutcome(t, iter)
+				require.Len(t, remainingAddresses, expectedActiveCounts[stage+1])
+				require.Len(t, partial.RemainingInterruptIDs, expectedActiveCounts[stage+1])
+				require.Len(t, partial.RemainingAddressesByID, expectedActiveCounts[stage+1])
+				expectedAddresses := make([]string, 0, len(remainingAddresses))
+				for address := range remainingAddresses {
+					expectedAddresses = append(expectedAddresses, address)
+				}
+				requireCheckpointCompatResumeOutcome(
+					t, partial, len(remainingAddresses), expectedAddresses)
+				activeIDs = partial.RemainingInterruptIDs
+				addressByID = partial.RemainingAddressesByID
+
+				rewritten, exists, getErr := store.Get(context.Background(), checkpointID)
+				require.NoError(t, getErr)
+				require.True(t, exists)
+				legacyCount, v1Count, v2Count =
+					countCheckpointCompatAgentToolStates(t, rewritten)
+				require.Zero(t, legacyCount)
+				require.Equal(t, len(remainingAddresses), v1Count)
+				require.Zero(t, v2Count,
+					"absolute AgentTool checkpoints must not be relabeled as V2")
+				_, _, _, loadErr := runnerLoadCheckPointImpl(
+					store, context.Background(), checkpointID)
+				require.NoError(t, loadErr,
+					"stage %d checkpoint must remain readable after re-interrupt", stage+1)
+			}
+
+			require.Len(t, activeIDs, expectedActiveCounts[len(stageTargetCounts)])
+			targets := make(map[string]any, len(activeIDs))
+			for _, id := range activeIDs {
+				targets[id] = "resumed"
+			}
+			iter, err := runner.ResumeWithParams(context.Background(), checkpointID,
+				&ResumeParams{Targets: targets})
+			require.NoError(t, err)
+			outcome := collectCheckpointCompatResumeOutcome(t, iter)
+			require.Len(t, outcome.RemainingInterruptIDs,
+				expectedActiveCounts[len(expectedActiveCounts)-1])
+			requireCheckpointCompatResumeOutcome(t, outcome, 0, nil)
+		})
 	}
 }
 
-func TestGenerateCheckpointCompatFixtures(t *testing.T) {
-	if os.Getenv(checkpointCompatGenerateEnv) != "1" {
-		t.Skip("set EINO_GENERATE_CHECKPOINT_COMPAT=1 to regenerate fixtures")
+func rewriteCheckpointCompatAgentToolStates(t *testing.T, raw []byte,
+	streaming, useV1 bool) []byte {
+	t.Helper()
+	var rewriteRunner func([]byte) ([]byte, bool)
+	rewriteRunner = func(data []byte) ([]byte, bool) {
+		var checkpoint serialization
+		if err := gob.NewDecoder(bytes.NewReader(data)).Decode(&checkpoint); err != nil ||
+			checkpoint.RunCtx == nil {
+			return nil, false
+		}
+		checkpoint.EnableStreaming = streaming
+		for id, state := range checkpoint.InterruptID2State {
+			composeData, ok := state.State.([]byte)
+			if !ok {
+				continue
+			}
+			rewritten, err := compose.TransformCheckpointValues(composeData, &gobSerializer{},
+				func(_ compose.NodePath, location compose.CheckpointValueLocation,
+					value any) (any, bool, error) {
+					if location.Kind != compose.CheckpointValueInterruptState {
+						return value, false, nil
+					}
+					var bridge []byte
+					switch value := value.(type) {
+					case []byte:
+						bridge = value
+					case *agentToolInterruptStateV1:
+						if value != nil {
+							bridge = value.BridgeCheckpoint
+						}
+					case *agentToolInterruptStateV2:
+						if value != nil {
+							bridge = value.BridgeCheckpoint
+						}
+					}
+					child, childOK := rewriteRunner(bridge)
+					if !childOK {
+						return value, false, nil
+					}
+					if useV1 {
+						return &agentToolInterruptStateV1{
+							Version:          agentToolInterruptStateVersionV1,
+							BridgeCheckpoint: child,
+						}, true, nil
+					}
+					return child, true, nil
+				})
+			require.NoError(t, err)
+			state.State = rewritten
+			checkpoint.InterruptID2State[id] = state
+		}
+		encoded, err := encodeRunnerCheckpoint(&checkpoint)
+		require.NoError(t, err)
+		return encoded, true
 	}
-	version := checkpointCompatFormatV0
-	manifest := checkpointCompatManifest{
-		ProducerCommit:          "60e1d9929cb65c8c4814b66fba2854e29b730114",
-		CheckpointFormatVersion: &version,
+	rewritten, ok := rewriteRunner(raw)
+	require.True(t, ok)
+	return rewritten
+}
+
+func countCheckpointCompatAgentToolStates(t *testing.T, raw []byte) (
+	legacy, v1, v2 int) {
+	t.Helper()
+	var countRunner func([]byte)
+	countRunner = func(data []byte) {
+		var checkpoint serialization
+		require.NoError(t, gob.NewDecoder(bytes.NewReader(data)).Decode(&checkpoint))
+		for _, state := range checkpoint.InterruptID2State {
+			composeData, ok := state.State.([]byte)
+			if !ok {
+				continue
+			}
+			require.NoError(t, compose.WalkCheckpointValues(composeData, &gobSerializer{},
+				func(_ compose.NodePath, location compose.CheckpointValueLocation,
+					value any) error {
+					if location.Kind != compose.CheckpointValueInterruptState {
+						return nil
+					}
+					switch value := value.(type) {
+					case []byte:
+						var child serialization
+						if err := gob.NewDecoder(bytes.NewReader(value)).Decode(&child); err == nil &&
+							child.RunCtx != nil {
+							legacy++
+							countRunner(value)
+						}
+					case *agentToolInterruptStateV1:
+						if value != nil {
+							v1++
+							countRunner(value.BridgeCheckpoint)
+						}
+					case *agentToolInterruptStateV2:
+						if value != nil {
+							v2++
+							countRunner(value.BridgeCheckpoint)
+						}
+					}
+					return nil
+				}))
+		}
 	}
-	for _, spec := range checkpointCompatSpecs() {
-		raw, interruptIDs, interruptAddresses := captureCheckpointCompatFixture(t, spec)
-		spec.InterruptIDs = interruptIDs
-		spec.InterruptAddresses = interruptAddresses
-		sum := sha256.Sum256(raw)
-		spec.SHA256 = hex.EncodeToString(sum[:])
-		writeCheckpointCompatFixture(t, filepath.Join(checkpointCompatDir, spec.File), raw)
-		manifest.Fixtures = append(manifest.Fixtures, spec)
+	countRunner(raw)
+	return legacy, v1, v2
+}
+
+func requireCheckpointCompatResumeOutcome(t *testing.T, outcome checkpointCompatResumeOutcome,
+	expectedInterrupts int, expectedAddresses []string) {
+	t.Helper()
+	expectedTerminalOutputs := 0
+	if expectedInterrupts == 0 {
+		expectedTerminalOutputs = 1
 	}
-	data, err := json.MarshalIndent(manifest, "", "  ")
-	require.NoError(t, err)
-	require.NoError(t, os.WriteFile(filepath.Join(checkpointCompatDir, "manifest.json"),
-		append(data, '\n'), 0o644))
+	require.Equal(t, expectedTerminalOutputs, outcome.TerminalOutputs)
+
+	wantAddresses := append([]string(nil), expectedAddresses...)
+	sort.Strings(wantAddresses)
+	require.Len(t, wantAddresses, expectedInterrupts)
+	require.Equal(t, wantAddresses, outcome.RemainingInterruptAddresses)
 }
 
 func TestCheckpointBackwardCompatMain60e1d992(t *testing.T) {
@@ -497,7 +778,9 @@ func TestCheckpointBackwardCompatMain60e1d992(t *testing.T) {
 	require.NoError(t, err)
 	var manifest checkpointCompatManifest
 	require.NoError(t, json.Unmarshal(data, &manifest))
-	require.Equal(t, "60e1d9929cb65c8c4814b66fba2854e29b730114", manifest.ProducerCommit)
+	require.Equal(t, checkpointCompatProducerCommit, manifest.ProducerCommit)
+	require.Equal(t, checkpointCompatProducerVersion, manifest.ProducerVersion)
+	require.Equal(t, checkpointCompatGeneratorCommit, manifest.GeneratorCommit)
 	require.NotNil(t, manifest.CheckpointFormatVersion)
 	require.Equal(t, checkpointCompatFormatV0, *manifest.CheckpointFormatVersion)
 	require.Len(t, manifest.Fixtures, len(checkpointCompatFrozenSHA256))
@@ -519,10 +802,13 @@ func TestCheckpointBackwardCompatMain60e1d992(t *testing.T) {
 			sum := sha256.Sum256(raw)
 			require.Equal(t, fixture.SHA256, hex.EncodeToString(sum[:]))
 
+			implicitResume := fixture.Name == checkpointCompatImplicitFixture
+			require.Equal(t, implicitResume, fixture.ImplicitResume,
+				"only %s may declare implicit resume", checkpointCompatImplicitFixture)
 			store := newCheckpointCompatStore()
 			require.NoError(t, store.Set(context.Background(), fixture.Name, raw))
 			agent := newCheckpointCompatAgent(t, fixture.Depth, fixture.ParallelChildren,
-				fixture.PayloadField, fixture.PayloadSize, fixture.ImplicitResume)
+				fixture.PayloadField, fixture.PayloadSize, implicitResume)
 			if fixture.Cancel {
 				agent = newCheckpointCompatCancelResumeAgent(t)
 			}
@@ -535,7 +821,7 @@ func TestCheckpointBackwardCompatMain60e1d992(t *testing.T) {
 				targetCount = len(fixture.InterruptIDs)
 			}
 			var iter *AsyncIterator[*AgentEvent]
-			if fixture.ImplicitResume {
+			if implicitResume {
 				iter, err = runner.Resume(context.Background(), fixture.Name)
 			} else {
 				targets := make(map[string]any, targetCount)
@@ -546,39 +832,9 @@ func TestCheckpointBackwardCompatMain60e1d992(t *testing.T) {
 					&ResumeParams{Targets: targets})
 			}
 			require.NoError(t, err)
-			var eventCount int
-			var completedEvents int
-			remainingInterrupts := make(map[string]struct{})
-			for {
-				event, ok := iter.Next()
-				if !ok {
-					break
-				}
-				eventCount++
-				require.NoError(t, event.Err)
-				if event.Output != nil && event.Output.MessageOutput != nil {
-					msg, msgErr := event.Output.MessageOutput.GetMessage()
-					require.NoError(t, msgErr)
-					if msg != nil && msg.Role == schema.Assistant && msg.Content == "completed" {
-						completedEvents++
-					}
-				}
-				if event.Action != nil && event.Action.Interrupted != nil {
-					for _, interruptCtx := range event.Action.Interrupted.InterruptContexts {
-						remainingInterrupts[interruptCtx.Address.String()] = struct{}{}
-					}
-				}
-			}
-			assert.Positive(t, eventCount)
-			if fixture.ExpectedInterrupts == 0 {
-				assert.Equal(t, 1, completedEvents,
-					"fully resumed fixture must produce exactly one terminal assistant output")
-			}
-			expectedInterrupts := make(map[string]struct{}, fixture.ExpectedInterrupts)
-			for _, address := range fixture.InterruptAddresses[targetCount:] {
-				expectedInterrupts[address] = struct{}{}
-			}
-			assert.Equal(t, expectedInterrupts, remainingInterrupts)
+			outcome := collectCheckpointCompatResumeOutcome(t, iter)
+			requireCheckpointCompatResumeOutcome(t, outcome, fixture.ExpectedInterrupts,
+				fixture.InterruptAddresses[targetCount:])
 		})
 	}
 }
@@ -588,13 +844,41 @@ func TestCheckpointLegacyReaderMain60e1d992(t *testing.T) {
 
 	fixtureDir, err := filepath.Abs(checkpointCompatDir)
 	require.NoError(t, err)
-	for _, fixture := range checkpointCompatSpecs() {
+	data, err := os.ReadFile(filepath.Join(checkpointCompatDir, "manifest.json"))
+	require.NoError(t, err)
+	var manifest checkpointCompatManifest
+	require.NoError(t, json.Unmarshal(data, &manifest))
+	var implicitResumeFixtures, targetedResumeFixtures int
+	for _, fixture := range manifest.Fixtures {
 		t.Run(fixture.Name, func(t *testing.T) {
 			cmd := exec.Command(readerBin, "-fixture-dir", fixtureDir, "-fixture", fixture.Name)
-			output, err := cmd.CombinedOutput()
-			require.NoError(t, err, string(output))
+			var stderr bytes.Buffer
+			cmd.Stderr = &stderr
+			output, err := cmd.Output()
+			require.NoError(t, err, "stderr: %s\nstdout: %s", stderr.String(), output)
+			var outcome checkpointCompatResumeOutcome
+			require.NoError(t, json.Unmarshal(output, &outcome), string(output))
+			targetCount := fixture.ResumeTargetCount
+			if targetCount == 0 && !fixture.Cancel {
+				targetCount = len(fixture.InterruptIDs)
+			}
+			implicitResume := fixture.Name == checkpointCompatImplicitFixture
+			expectedResumeMethod := "resume_with_params"
+			if implicitResume {
+				expectedResumeMethod = "resume"
+				implicitResumeFixtures++
+			} else {
+				targetedResumeFixtures++
+			}
+			require.Equal(t, implicitResume, fixture.ImplicitResume,
+				"only %s may declare implicit resume", checkpointCompatImplicitFixture)
+			require.Equal(t, expectedResumeMethod, outcome.ResumeMethod)
+			requireCheckpointCompatResumeOutcome(t, outcome, fixture.ExpectedInterrupts,
+				fixture.InterruptAddresses[targetCount:])
 		})
 	}
+	require.Equal(t, 1, implicitResumeFixtures)
+	require.Equal(t, len(manifest.Fixtures)-1, targetedResumeFixtures)
 }
 
 func buildCheckpointCompatLegacyReader(t *testing.T) string {
