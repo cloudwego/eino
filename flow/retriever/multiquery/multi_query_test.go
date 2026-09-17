@@ -19,6 +19,7 @@ package multiquery
 import (
 	"context"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/cloudwego/eino/components/model"
@@ -114,5 +115,44 @@ func TestMultiQueryRetriever(t *testing.T) {
 	}
 	if len(result) != 3 {
 		t.Fatal("default llm retrieve result is unexpected")
+	}
+}
+
+type optionCapturingRetriever struct {
+	mu   sync.Mutex
+	topK *int
+}
+
+func (m *optionCapturingRetriever) Retrieve(ctx context.Context, query string, opts ...retriever.Option) ([]*schema.Document, error) {
+	options := retriever.GetCommonOptions(&retriever.Options{}, opts...)
+	m.mu.Lock()
+	m.topK = options.TopK
+	m.mu.Unlock()
+	return []*schema.Document{{ID: query}}, nil
+}
+
+func TestMultiQueryRetrieverForwardsOptions(t *testing.T) {
+	ctx := context.Background()
+	orig := &optionCapturingRetriever{}
+
+	mqr, err := NewRetriever(ctx, &Config{
+		RewriteHandler: func(ctx context.Context, query string) ([]string, error) {
+			return []string{"1"}, nil
+		},
+		OrigRetriever: orig,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err = mqr.Retrieve(ctx, "query", retriever.WithTopK(7)); err != nil {
+		t.Fatal(err)
+	}
+
+	if orig.topK == nil {
+		t.Fatal("retrieve options were not forwarded to the underlying retriever")
+	}
+	if *orig.topK != 7 {
+		t.Fatalf("expected forwarded TopK 7, got %d", *orig.topK)
 	}
 }
