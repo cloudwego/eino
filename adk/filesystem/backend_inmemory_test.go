@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -119,6 +120,61 @@ func TestInMemoryBackend_LsInfo(t *testing.T) {
 	if len(infos) != 2 { // file3.txt, subdir
 		t.Errorf("Expected 2 items in /dir1, got %d", len(infos))
 	}
+}
+
+func TestInMemoryBackend_QueryResultsAreDeterministic(t *testing.T) {
+	backend := NewInMemoryBackend()
+	ctx := context.Background()
+	for _, filePath := range []string{"/z.txt", "/a.txt", "/m.txt"} {
+		err := backend.Write(ctx, &WriteRequest{
+			FilePath: filePath,
+			Content:  "before\nneedle\nafter",
+		})
+		if err != nil {
+			t.Fatalf("Write(%q) failed: %v", filePath, err)
+		}
+	}
+
+	infos, err := backend.LsInfo(ctx, &LsInfoRequest{Path: "/"})
+	if err != nil {
+		t.Fatalf("LsInfo failed: %v", err)
+	}
+	if got, want := fileInfoPaths(infos), []string{"a.txt", "m.txt", "z.txt"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("LsInfo paths = %v, want %v", got, want)
+	}
+
+	infos, err = backend.GlobInfo(ctx, &GlobInfoRequest{Path: "/", Pattern: "*.txt"})
+	if err != nil {
+		t.Fatalf("GlobInfo failed: %v", err)
+	}
+	if got, want := fileInfoPaths(infos), []string{"a.txt", "m.txt", "z.txt"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("GlobInfo paths = %v, want %v", got, want)
+	}
+
+	matches, err := backend.GrepRaw(ctx, &GrepRequest{
+		Pattern:    "needle",
+		Path:       "/",
+		AfterLines: 1,
+	})
+	if err != nil {
+		t.Fatalf("GrepRaw failed: %v", err)
+	}
+	gotMatches := make([]string, 0, len(matches))
+	for _, match := range matches {
+		gotMatches = append(gotMatches, fmt.Sprintf("%s:%d", match.Path, match.Line))
+	}
+	wantMatches := []string{"/a.txt:2", "/a.txt:3", "/m.txt:2", "/m.txt:3", "/z.txt:2", "/z.txt:3"}
+	if !reflect.DeepEqual(gotMatches, wantMatches) {
+		t.Fatalf("GrepRaw matches = %v, want %v", gotMatches, wantMatches)
+	}
+}
+
+func fileInfoPaths(infos []FileInfo) []string {
+	paths := make([]string, len(infos))
+	for i, info := range infos {
+		paths[i] = info.Path
+	}
+	return paths
 }
 
 func TestInMemoryBackend_Edit(t *testing.T) {

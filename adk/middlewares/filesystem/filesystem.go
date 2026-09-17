@@ -22,7 +22,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"path/filepath"
 	"runtime/debug"
 	"sort"
 	"strconv"
@@ -889,6 +888,7 @@ func newGlobTool(fs filesystem.Backend, name string, desc string) (tool.BaseTool
 		for _, fi := range infos {
 			paths = append(paths, fi.Path)
 		}
+		sort.Strings(paths)
 		return strings.Join(paths, "\n"), nil
 	})
 }
@@ -992,7 +992,10 @@ func newGrepTool(fs filesystem.Backend, name string, desc string) (tool.BaseTool
 		}
 
 		sort.SliceStable(matches, func(i, j int) bool {
-			return filepath.Base(matches[i].Path) < filepath.Base(matches[j].Path)
+			if matches[i].Path != matches[j].Path {
+				return matches[i].Path < matches[j].Path
+			}
+			return matches[i].Line < matches[j].Line
 		})
 
 		switch input.OutputMode {
