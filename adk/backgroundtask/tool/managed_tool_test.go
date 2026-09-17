@@ -275,6 +275,155 @@ func newTestManagedTool(
 	return manager, wrapped
 }
 
+func TestManagedToolDispatchesPendingTaskThroughHost_BitsUT(t *testing.T) {
+	newTool := func(
+		t *testing.T,
+		dispatch func(context.Context, *backgroundtask.Task) error,
+	) (*backgroundtask.Manager, componenttool.BaseTool, <-chan struct{}) {
+		t.Helper()
+		started := make(chan struct{}, 1)
+		implementation := &plainFakeTool{
+			start: func(context.Context, *StartRequest) (Run, error) {
+				started <- struct{}{}
+				return &fakeRun{wait: func(context.Context) (*Outcome, error) {
+					return &Outcome{Status: backgroundtask.StatusCompleted}, nil
+				}}, nil
+			},
+		}
+		registry := NewRegistry()
+		require.NoError(t, registry.Register(&Registration{
+			Info: toolInfo("external"), Tool: implementation,
+		}))
+		executors := backgroundtask.NewExecutorRegistry()
+		manager := mustNewBackgroundManager(t, context.Background(), &backgroundtask.Config{
+			Executors: executors,
+			IDGen: func(context.Context, *backgroundtask.AllocateTaskIDRequest) (string, error) {
+				return "host-dispatched", nil
+			},
+		})
+		wrapped, err := NewManagedTool(context.Background(), &ManagedToolConfig{
+			Manager: manager, Executors: executors, Registry: registry, ToolName: "external",
+			RunInBackground: func(context.Context, string) bool { return true },
+			DispatchPending: dispatch,
+		})
+		require.NoError(t, err)
+		return manager, wrapped, started
+	}
+
+	t.Run("accepted", func(t *testing.T) {
+		dispatched := make(chan *backgroundtask.Task, 1)
+		manager, wrapped, started := newTool(
+			t,
+			func(_ context.Context, task *backgroundtask.Task) error {
+				dispatched <- task
+				return nil
+			},
+		)
+		result, err := wrapped.(componenttool.EnhancedInvokableTool).InvokableRun(
+			context.Background(), toolArgument(`{"value":"x"}`),
+		)
+		require.NoError(t, err)
+		require.Equal(t, "host-dispatched", (<-dispatched).Spec.ID)
+		require.Equal(
+			t,
+			ManagedToolResponseEventLaunchResult,
+			decodeEvents(t, []*schema.ToolResult{result})[0].Type,
+		)
+		select {
+		case <-started:
+			t.Fatal("managed tool executed a task accepted by DispatchPending")
+		default:
+		}
+		task, getErr := manager.Get(context.Background(), "host-dispatched")
+		require.NoError(t, getErr)
+		require.Equal(t, backgroundtask.StatusPending, task.Status)
+
+		require.NoError(t, manager.Execute(context.Background(), task.Spec.ID))
+		require.Equal(t, backgroundtask.StatusCompleted, waitTaskTerminal(
+			t,
+			manager,
+			task.Spec.ID,
+		).Status)
+	})
+
+	t.Run("rejected", func(t *testing.T) {
+		dispatchErr := errors.New("worker is full")
+		manager, wrapped, started := newTool(
+			t,
+			func(context.Context, *backgroundtask.Task) error {
+				return dispatchErr
+			},
+		)
+		result, err := wrapped.(componenttool.EnhancedInvokableTool).InvokableRun(
+			context.Background(), toolArgument(`{"value":"x"}`),
+		)
+		require.Nil(t, result)
+		require.ErrorIs(t, err, dispatchErr)
+		select {
+		case <-started:
+			t.Fatal("managed tool executed a rejected task")
+		default:
+		}
+		task, getErr := manager.Get(context.Background(), "host-dispatched")
+		require.NoError(t, getErr)
+		require.Equal(t, backgroundtask.StatusPending, task.Status)
+	})
+}
+
+func TestManagedToolAutoBackgroundPreservesTaskAfterDispatchRejection_BitsUT(t *testing.T) {
+	dispatchErr := errors.New("worker is full")
+	release := make(chan struct{})
+	var stopCalls int
+	var mu sync.Mutex
+	implementation := &handoffFakeTool{fakeTool: &fakeTool{
+		start: func(context.Context, *StartRequest) (Run, error) {
+			return &fakeRun{
+				wait: func(context.Context) (*Outcome, error) {
+					<-release
+					return &Outcome{Status: backgroundtask.StatusCompleted}, nil
+				},
+				stop: func(context.Context) error {
+					mu.Lock()
+					stopCalls++
+					mu.Unlock()
+					return nil
+				},
+			}, nil
+		},
+	}}
+	manager, wrapped := newTestManagedTool(t, implementation, time.Millisecond)
+	managed := wrapped.(*managedTool)
+	dispatched := make(chan *backgroundtask.Task, 1)
+	managed.dispatchPending = func(
+		_ context.Context,
+		task *backgroundtask.Task,
+	) error {
+		dispatched <- task
+		return dispatchErr
+	}
+
+	result, err := wrapped.(componenttool.EnhancedInvokableTool).InvokableRun(
+		context.Background(), toolArgument(`{"value":"x"}`),
+	)
+	require.Nil(t, result)
+	require.ErrorIs(t, err, dispatchErr)
+	task := <-dispatched
+	persisted, getErr := manager.Get(context.Background(), task.Spec.ID)
+	require.NoError(t, getErr)
+	require.Equal(t, backgroundtask.StatusPending, persisted.Status)
+	mu.Lock()
+	require.Zero(t, stopCalls)
+	mu.Unlock()
+
+	close(release)
+	require.NoError(t, manager.Execute(context.Background(), task.Spec.ID))
+	require.Equal(t, backgroundtask.StatusCompleted, waitTaskTerminal(
+		t,
+		manager,
+		task.Spec.ID,
+	).Status)
+}
+
 func toolArgument(text string) *schema.ToolArgument {
 	return &schema.ToolArgument{Text: text}
 }
@@ -1750,7 +1899,7 @@ func TestManagedToolStreamPersistsBeforeNDJSONProjection(t *testing.T) {
 	require.ErrorIs(t, err, backgroundtask.ErrNotFound)
 }
 
-func TestManagedToolDrainYieldsAndRecoversWithoutStop(t *testing.T) {
+func TestManagedToolDrainSuspendsAndRecoversWithoutStop(t *testing.T) {
 	store := backgroundtask.NewInMemoryStore(nil)
 	registry := NewRegistry()
 	started := make(chan struct{})
@@ -1814,16 +1963,19 @@ func TestManagedToolDrainYieldsAndRecoversWithoutStop(t *testing.T) {
 	closeCtx, cancel := context.WithTimeout(context.Background(), time.Second)
 	require.NoError(t, managerOne.Close(closeCtx))
 	cancel()
-	yielded, err := managerOne.Get(context.Background(), "recover-task")
+	suspended, err := managerOne.Get(context.Background(), "recover-task")
 	require.NoError(t, err)
-	require.Equal(t, backgroundtask.StatusPending, yielded.Status)
-	require.NotEmpty(t, yielded.Checkpoint)
+	require.Equal(t, backgroundtask.StatusSuspended, suspended.Status)
+	require.NotEmpty(t, suspended.Checkpoint)
 
 	executorsTwo := backgroundtask.NewExecutorRegistry()
 	managerTwo := mustNewBackgroundManager(t, context.Background(), &backgroundtask.Config{
 		Tasks: store, Executors: executorsTwo,
 	})
 	require.NoError(t, RegisterExecutors(executorsTwo, registry))
+	released, err := managerTwo.ReleaseSuspension(context.Background(), "recover-task")
+	require.NoError(t, err)
+	require.Equal(t, backgroundtask.StatusPending, released.Status)
 	require.NoError(t, managerTwo.Execute(context.Background(), "recover-task"))
 	request := <-recovered
 	require.Equal(t, "recover-task", request.TaskID)
@@ -1836,6 +1988,69 @@ func TestManagedToolDrainYieldsAndRecoversWithoutStop(t *testing.T) {
 	mu.Lock()
 	require.Zero(t, stopCalls)
 	mu.Unlock()
+}
+
+func TestRecoverableExecutorContextCancellationSuspendsWithCheckpoint_BitsUT(t *testing.T) {
+	toolCheckpoint := []byte(`{"run_id":"business-run"}`)
+	recovered := make(chan struct{})
+	releaseWait := make(chan struct{})
+	implementation := &fakeTool{
+		recover: func(
+			context.Context,
+			*RecoverRequest,
+		) (Run, error) {
+			close(recovered)
+			return &fakeRun{
+				wait: func(context.Context) (*Outcome, error) {
+					<-releaseWait
+					return &Outcome{Status: backgroundtask.StatusCompleted}, nil
+				},
+			}, nil
+		},
+	}
+	registry := NewRegistry()
+	require.NoError(t, registry.Register(&Registration{
+		Info: toolInfo("external"), Tool: implementation,
+	}))
+	checkpoint, err := encodeManagedCheckpoint(nil, toolCheckpoint)
+	require.NoError(t, err)
+	payload := encodedPayload(t, "external", `{"value":"recover"}`)
+	ctx, cancel := context.WithCancel(context.Background())
+	type executeResult struct {
+		result *backgroundtask.ExecutionResult
+		err    error
+	}
+	done := make(chan executeResult, 1)
+	go func() {
+		result, executeErr := (&executor{
+			registry: registry, recoverable: true,
+		}).Execute(
+			ctx,
+			&backgroundtask.Task{
+				Spec: backgroundtask.Spec{
+					ID: "recover-task", ExecutorKey: RecoverableExecutorKey,
+					Kind: "background_tool", Payload: payload,
+				},
+				Status: backgroundtask.StatusRunning, Attempt: 2,
+				Checkpoint: checkpoint,
+			},
+			&replayRuntimeStub{},
+		)
+		done <- executeResult{result: result, err: executeErr}
+	}()
+	<-recovered
+	cancel()
+	executed := <-done
+	close(releaseWait)
+	require.NoError(t, executed.err)
+	require.Equal(t, backgroundtask.StatusSuspended, executed.result.Status)
+	request, gotCheckpoint, started, err := decodeManagedCheckpoint(
+		executed.result.Checkpoint,
+	)
+	require.NoError(t, err)
+	require.Nil(t, request)
+	require.True(t, started)
+	require.Equal(t, toolCheckpoint, gotCheckpoint)
 }
 
 func TestRecoverWithoutCheckpointUsesPersistedStartedGate(t *testing.T) {
