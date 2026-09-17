@@ -57,6 +57,11 @@ type Config[M adk.MessageType] struct {
 	// Required.
 	Model model.BaseModel[M]
 
+	// Handlers contains additional middleware for the internal dream agent.
+	// The built-in memory filesystem middleware runs first, followed by Handlers in order.
+	// Optional.
+	Handlers []adk.TypedChatModelAgentMiddleware[M]
+
 	// SessionID is the current logical session ID.
 	// Optional. When empty, dream runs without cross-turn session grouping.
 	SessionID string
@@ -129,6 +134,7 @@ func cloneConfig[M adk.MessageType](cfg *Config[M]) *Config[M] {
 	}
 
 	cp := *cfg
+	cp.Handlers = append([]adk.TypedChatModelAgentMiddleware[M](nil), cfg.Handlers...)
 	if cfg.Schedule != nil {
 		scheduleCopy := *cfg.Schedule
 		cp.Schedule = &scheduleCopy
