@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -123,6 +124,9 @@ func (b *InMemoryBackend) LsInfo(ctx context.Context, req *LsInfoRequest) ([]Fil
 	for _, info := range dirInfo {
 		result = append(result, *info)
 	}
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].Path < result[j].Path
+	})
 
 	return result, nil
 }
@@ -229,7 +233,9 @@ func (b *InMemoryBackend) GrepRaw(ctx context.Context, req *GrepRequest) ([]Grep
 		collector := newGrepCollector()
 		entry := b.files[filteredFiles[0]]
 		collector.processFile(filteredFiles[0], entry.content, re, req)
-		return collector.buildResults(b, req)
+		matches := collector.buildResults(b, req)
+		sortGrepMatches(matches)
+		return matches, nil
 	}
 
 	matches, err := b.grepFilesInParallel(filteredFiles, re, req)
@@ -240,8 +246,18 @@ func (b *InMemoryBackend) GrepRaw(ctx context.Context, req *GrepRequest) ([]Grep
 	if req.BeforeLines > 0 || req.AfterLines > 0 {
 		matches = b.applyContext(matches, req)
 	}
+	sortGrepMatches(matches)
 
 	return matches, nil
+}
+
+func sortGrepMatches(matches []GrepMatch) {
+	sort.SliceStable(matches, func(i, j int) bool {
+		if matches[i].Path != matches[j].Path {
+			return matches[i].Path < matches[j].Path
+		}
+		return matches[i].Line < matches[j].Line
+	})
 }
 
 func (b *InMemoryBackend) grepFilesInParallel(filteredFiles []string, re *regexp.Regexp, req *GrepRequest) ([]GrepMatch, error) {
@@ -622,6 +638,9 @@ func (b *InMemoryBackend) GlobInfo(ctx context.Context, req *GlobInfoRequest) ([
 			})
 		}
 	}
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].Path < result[j].Path
+	})
 
 	return result, nil
 }
@@ -761,8 +780,8 @@ func (c *grepCollector) findSingleLineMatches(filePath, content string, re *rege
 	return fileMatches
 }
 
-func (c *grepCollector) buildResults(b *InMemoryBackend, req *GrepRequest) ([]GrepMatch, error) {
-	return c.buildContentResult(b, req), nil
+func (c *grepCollector) buildResults(b *InMemoryBackend, req *GrepRequest) []GrepMatch {
+	return c.buildContentResult(b, req)
 }
 
 func (c *grepCollector) buildContentResult(b *InMemoryBackend, req *GrepRequest) []GrepMatch {
