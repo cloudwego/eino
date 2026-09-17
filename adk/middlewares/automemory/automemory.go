@@ -204,6 +204,8 @@ type selectionFuture struct {
 	done chan struct{}
 	mu   sync.Mutex
 
+	queryKey string // Immutable query scope, also used when reusing a context.
+
 	// Store an immutable snapshot to avoid being mutated via shared pointers.
 	content string
 	err     error
@@ -213,7 +215,8 @@ type selectionFuture struct {
 type ctxKeySelectionFuture struct{}
 
 const (
-	memoryExtraKey = "__eino_automemory__"
+	memoryExtraKey           = "__eino_automemory__"
+	topicMemoryQueryExtraKey = "__eino_automemory_query__"
 )
 
 type memoryExtra struct {
@@ -329,7 +332,7 @@ func (m *middleware[M]) BeforeAgent(ctx context.Context, runCtx *adk.ChatModelAg
 		}
 	}
 
-	// 3) Topic memories: sync mode selects from the original user query.
+	// 3) Topic memories: select once per user query, not once per session.
 	if !hasTopicMemoryInjected(nRunCtx.AgentInput.Messages) &&
 		m.cfg.Read.Mode == ReadModeSync && m.topicSelectionEnabled() {
 		memMsg, err := m.selectAndBuildTopicMemoryMessage(ctx, nRunCtx.AgentInput)
@@ -349,8 +352,10 @@ func (m *middleware[M]) BeforeAgent(ctx context.Context, runCtx *adk.ChatModelAg
 	// 4) Topic memories: async mode starts selection here (cannot use RunLocalValue in BeforeAgent).
 	if !hasTopicMemoryInjected(nRunCtx.AgentInput.Messages) &&
 		m.cfg.Read.Mode == ReadModeAsync && m.topicSelectionEnabled() {
-		if existing, _ := ctx.Value(ctxKeySelectionFuture{}).(*selectionFuture); existing == nil {
-			fut := &selectionFuture{done: make(chan struct{})}
+		queryKey := topicMemoryQueryKey(nRunCtx.AgentInput.Messages)
+		if existing, _ := ctx.Value(ctxKeySelectionFuture{}).(*selectionFuture); queryKey != "" &&
+			(existing == nil || existing.queryKey != queryKey) {
+			fut := &selectionFuture{done: make(chan struct{}), queryKey: queryKey}
 			ctx = context.WithValue(ctx, ctxKeySelectionFuture{}, fut)
 
 			// Snapshot current messages for selection; async path is best-effort.
@@ -378,6 +383,10 @@ func (m *middleware[M]) BeforeModelRewriteState(ctx context.Context, state *adk.
 	if state == nil {
 		return ctx, state, nil
 	}
+	future, _ := ctx.Value(ctxKeySelectionFuture{}).(*selectionFuture)
+	if future != nil && future.queryKey != topicMemoryQueryKey(state.Messages) {
+		return ctx, state, nil
+	}
 	// Best-effort protection: if automemory content has been injected before and later
 	// mutated by other components, restore it using the immutable snapshot stored in the future.
 	if fut, _ := ctx.Value(ctxKeySelectionFuture{}).(*selectionFuture); fut != nil {
@@ -385,7 +394,7 @@ func (m *middleware[M]) BeforeModelRewriteState(ctx context.Context, state *adk.
 		expected := fut.content
 		fut.mu.Unlock()
 		if strings.TrimSpace(expected) != "" {
-			state = ensureMemoryMsgUnchanged(state, expected)
+			state = ensureMemoryMsgUnchanged(state, expected, fut.queryKey)
 		}
 	}
 	if m.cfg.Read.Mode != ReadModeAsync {
@@ -420,6 +429,7 @@ func (m *middleware[M]) BeforeModelRewriteState(ctx context.Context, state *adk.
 	var msgs []M
 	if strings.TrimSpace(content) != "" {
 		memMsg := newMemoryMessage[M](content)
+		copyAndSetMsgExtra(memMsg, topicMemoryQueryExtraKey, fut.queryKey)
 		m.sendTopicMemoryEvent(ctx, state.Messages, memMsg)
 		msgs = append(msgs, state.Messages...)
 		msgs = append(msgs, memMsg)
@@ -530,7 +540,9 @@ func (m *middleware[M]) selectAndBuildTopicMemoryMessage(ctx context.Context, ag
 		return nil, nil
 	}
 
-	return newMemoryMessage[M]("<!-- automemory -->\n" + buildTopicMemoryReminder(topics)), nil
+	msg := newMemoryMessage[M]("<!-- automemory -->\n" + buildTopicMemoryReminder(topics))
+	copyAndSetMsgExtra(msg, topicMemoryQueryExtraKey, topicMemoryQueryKey(agentIn.Messages))
+	return msg, nil
 }
 
 func (m *middleware[M]) listTopicCandidates(ctx context.Context) (map[string]topicCandidateBundle, []string, []string, error) {
