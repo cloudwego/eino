@@ -302,6 +302,35 @@ func TestAgenticRunnerQuery(t *testing.T) {
 	assert.False(t, ok)
 }
 
+type nilEventAgenticAgent struct{}
+
+func (a *nilEventAgenticAgent) Name(context.Context) string        { return "nil-event-agentic" }
+func (a *nilEventAgenticAgent) Description(context.Context) string { return "nil-event-agentic" }
+func (a *nilEventAgenticAgent) Run(context.Context, *TypedAgentInput[*schema.AgenticMessage], ...AgentRunOption) *AsyncIterator[*TypedAgentEvent[*schema.AgenticMessage]] {
+	iter, gen := NewAsyncIteratorPair[*TypedAgentEvent[*schema.AgenticMessage]]()
+	go func() {
+		defer gen.Close()
+		gen.Send(nil)
+	}()
+	return iter
+}
+
+func TestAgenticRunnerNilEvent(t *testing.T) {
+	ctx := context.Background()
+	runner := NewTypedRunner(TypedRunnerConfig[*schema.AgenticMessage]{
+		Agent: &nilEventAgenticAgent{},
+	})
+
+	iter := runner.Query(ctx, "query")
+	event, ok := iter.Next()
+	require.True(t, ok)
+	require.NotNil(t, event)
+	assert.EqualError(t, event.Err, "agent 'nil-event-agentic' returned nil event")
+
+	_, ok = iter.Next()
+	assert.False(t, ok)
+}
+
 func agenticAssistantMessage(text string) *schema.AgenticMessage {
 	return &schema.AgenticMessage{
 		Role: schema.AgenticRoleTypeAssistant,
