@@ -2019,6 +2019,59 @@ func TestChatModelAgent_PrepareExecContextError(t *testing.T) {
 	})
 }
 
+func TestChatModelAgent_ResumeInvalidInputReturnsError(t *testing.T) {
+	ctx := context.Background()
+
+	ctrl := gomock.NewController(t)
+	cm := mockModel.NewMockToolCallingChatModel(ctrl)
+	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "TestAgent",
+		Description: "Test agent",
+		Model:       cm,
+	})
+	require.NoError(t, err)
+
+	tests := []struct {
+		name string
+		info *ResumeInfo
+		want string
+	}{
+		{
+			name: "nil resume info",
+			info: nil,
+			want: "info is nil",
+		},
+		{
+			name: "missing interrupt state",
+			info: &ResumeInfo{},
+			want: "has no state",
+		},
+		{
+			name: "invalid interrupt state type",
+			info: &ResumeInfo{InterruptState: "invalid"},
+			want: "invalid interrupt state type",
+		},
+		{
+			name: "invalid resume data type",
+			info: &ResumeInfo{InterruptState: []byte("dummy"), ResumeData: "invalid"},
+			want: "invalid resume data type",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			iter := agent.Resume(ctx, tt.info)
+			event, ok := iter.Next()
+			require.True(t, ok)
+			require.NotNil(t, event)
+			require.Error(t, event.Err)
+			assert.Contains(t, event.Err.Error(), tt.want)
+			_, ok = iter.Next()
+			assert.False(t, ok)
+		})
+	}
+}
+
 // fakeEnhancedInvokableToolForTest implements tool.EnhancedInvokableTool for testing.
 type fakeEnhancedInvokableToolForTest struct{}
 
