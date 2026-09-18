@@ -970,6 +970,21 @@ func runToolCallTaskByStream(ctx context.Context, task *toolCallTask, opts ...to
 	}
 }
 
+func closeToolCallTaskStreams(tasks []toolCallTask) {
+	for i := range tasks {
+		if !tasks[i].executed {
+			continue
+		}
+		if tasks[i].useEnhanced {
+			if tasks[i].enhancedSOutput != nil {
+				tasks[i].enhancedSOutput.Close()
+			}
+		} else if tasks[i].sOutput != nil {
+			tasks[i].sOutput.Close()
+		}
+	}
+}
+
 func sequentialRunToolCall(ctx context.Context,
 	run func(ctx2 context.Context, callTask *toolCallTask, opts ...tool.Option),
 	tasks []toolCallTask, opts ...tool.Option) {
@@ -1200,6 +1215,7 @@ func (tn *ToolsNode) Stream(ctx context.Context, input *schema.Message,
 		if tasks[i].err != nil {
 			info, ok := IsInterruptRerunError(tasks[i].err)
 			if !ok {
+				closeToolCallTaskStreams(tasks)
 				return nil, fmt.Errorf("failed to stream tool call %s: %w", tasks[i].callID, tasks[i].err)
 			}
 
@@ -1217,11 +1233,13 @@ func (tn *ToolsNode) Stream(ctx context.Context, input *schema.Message,
 
 	if len(errs) > 0 {
 		// concat and save tool output
-		for _, t := range tasks {
+		for i := range tasks {
+			t := &tasks[i]
 			if t.executed {
 				if t.useEnhanced {
 					eo, err_ := concatStreamReader(t.enhancedSOutput)
 					if err_ != nil {
+						closeToolCallTaskStreams(tasks[i+1:])
 						return nil, fmt.Errorf("failed to concat enhanced tool[name:%s id:%s]'s stream output: %w", t.name, t.callID, err_)
 					}
 					rerunExtra.ExecutedEnhancedTools[t.callID] = eo
@@ -1230,6 +1248,7 @@ func (tn *ToolsNode) Stream(ctx context.Context, input *schema.Message,
 				} else {
 					o, err_ := concatStreamReader(t.sOutput)
 					if err_ != nil {
+						closeToolCallTaskStreams(tasks[i+1:])
 						return nil, fmt.Errorf("failed to concat tool[name:%s id:%s]'s stream output: %w", t.name, t.callID, err_)
 					}
 					rerunExtra.ExecutedTools[t.callID] = o
