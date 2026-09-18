@@ -18,6 +18,7 @@ package adk
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"strings"
@@ -95,7 +96,10 @@ func concatInstructions(instructions ...string) string {
 // or DeepAgent instead for most multi-agent scenarios.
 func GenTransferMessages(_ context.Context, destAgentName string) (Message, Message) {
 	toolCallID := uuid.NewString()
-	tooCall := schema.ToolCall{ID: toolCallID, Function: schema.FunctionCall{Name: TransferToAgentToolName, Arguments: destAgentName}}
+	// Match the transfer tool's object schema, including when these messages
+	// are replayed as conversation history. Marshaling strings cannot fail.
+	arguments, _ := json.Marshal(map[string]string{"agent_name": destAgentName})
+	tooCall := schema.ToolCall{ID: toolCallID, Function: schema.FunctionCall{Name: TransferToAgentToolName, Arguments: string(arguments)}}
 	assistantMessage := schema.AssistantMessage("", []schema.ToolCall{tooCall})
 	msg := transferToAgentToolOutput(destAgentName)
 	toolMessage := schema.ToolMessage(msg, toolCallID, schema.WithToolName(TransferToAgentToolName))
