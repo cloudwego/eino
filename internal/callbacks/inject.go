@@ -78,6 +78,17 @@ func On[T any](ctx context.Context, inOut T, handle Handle[T], timing CallbackTi
 	}
 	nMgr := *mgr
 
+	// Deep copy handlers to avoid sharing the underlying array with the original manager.
+	// When AppendHandlers runs concurrently with On (which can happen during parallel
+	// graph node execution), the shared handler slice backing array causes data races,
+	// potentially corrupting other context values stored alongside the handlers.
+	handlers := make([]Handler, len(nMgr.handlers))
+	copy(handlers, nMgr.handlers)
+	nMgr.handlers = handlers
+	globalHandlers := make([]Handler, len(nMgr.globalHandlers))
+	copy(globalHandlers, nMgr.globalHandlers)
+	nMgr.globalHandlers = globalHandlers
+
 	var info *RunInfo
 	if start {
 		info = nMgr.runInfo
