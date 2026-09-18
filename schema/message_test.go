@@ -1064,14 +1064,18 @@ func TestConcatToolCalls(t *testing.T) {
 		assert.EqualValues(t, expectedToolCall, tc[0])
 	})
 
-	t.Run("different_tool_id", func(t *testing.T) {
+	t.Run("different_tool_id_same_index_split_into_separate_calls", func(t *testing.T) {
+		// Some OpenAI-compatible providers (e.g. qwen, deepseek) reuse the same
+		// Index for different tool calls, distinguished only by ID.
+		// concatToolCalls should treat them as separate tool calls instead of erroring.
 		givenToolCalls := []ToolCall{
 			{
 				Index: generic.PtrOf(0),
 				ID:    "tool_call_id",
 				Type:  "function",
 				Function: FunctionCall{
-					Name: "tool_name",
+					Name:      "tool_a",
+					Arguments: `{"arg":"val_a"}`,
 				},
 			},
 			{
@@ -1079,14 +1083,21 @@ func TestConcatToolCalls(t *testing.T) {
 				ID:    "tool_call_id_1",
 				Type:  "function",
 				Function: FunctionCall{
-					Name:      "tool_name",
-					Arguments: "call me please",
+					Name:      "tool_b",
+					Arguments: `{"arg":"val_b"}`,
 				},
 			},
 		}
 
-		_, err := concatToolCalls(givenToolCalls)
-		assert.ErrorContains(t, err, "cannot concat ToolCalls with different tool id")
+		tc, err := concatToolCalls(givenToolCalls)
+		assert.NoError(t, err)
+		assert.Len(t, tc, 2)
+		assert.Equal(t, "tool_call_id", tc[0].ID)
+		assert.Equal(t, "tool_a", tc[0].Function.Name)
+		assert.Equal(t, `{"arg":"val_a"}`, tc[0].Function.Arguments)
+		assert.Equal(t, "tool_call_id_1", tc[1].ID)
+		assert.Equal(t, "tool_b", tc[1].Function.Name)
+		assert.Equal(t, `{"arg":"val_b"}`, tc[1].Function.Arguments)
 	})
 
 	t.Run("different_tool_type", func(t *testing.T) {
