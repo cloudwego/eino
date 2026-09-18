@@ -18,6 +18,7 @@ package schema
 
 import (
 	"context"
+	"encoding/json"
 	"reflect"
 	"sync"
 	"testing"
@@ -26,6 +27,25 @@ import (
 
 	"github.com/cloudwego/eino/internal/generic"
 )
+
+func TestPromptTokenDetailsJSON(t *testing.T) {
+	details := PromptTokenDetails{
+		CachedTokens:        3,
+		CacheCreationTokens: 5,
+	}
+
+	data, err := json.Marshal(details)
+	assert.NoError(t, err)
+	assert.JSONEq(t, `{"cached_tokens":3,"cache_creation_tokens":5}`, string(data))
+
+	var decoded PromptTokenDetails
+	assert.NoError(t, json.Unmarshal(data, &decoded))
+	assert.Equal(t, details, decoded)
+
+	var legacy PromptTokenDetails
+	assert.NoError(t, json.Unmarshal([]byte(`{"cached_tokens":3}`), &legacy))
+	assert.Equal(t, PromptTokenDetails{CachedTokens: 3}, legacy)
+}
 
 func TestMessageTemplate(t *testing.T) {
 	pyFmtMessage := UserMessage("input: {question}")
@@ -157,7 +177,8 @@ func TestConcatMessage(t *testing.T) {
 					CompletionTokens: 15,
 					PromptTokens:     30,
 					PromptTokenDetails: PromptTokenDetails{
-						CachedTokens: 15,
+						CachedTokens:        15,
+						CacheCreationTokens: 20,
 					},
 					CompletionTokensDetails: CompletionTokensDetails{
 						ReasoningTokens: 8,
@@ -179,7 +200,8 @@ func TestConcatMessage(t *testing.T) {
 						CompletionTokens: 10,
 						PromptTokens:     20,
 						PromptTokenDetails: PromptTokenDetails{
-							CachedTokens: 10,
+							CachedTokens:        10,
+							CacheCreationTokens: 20,
 						},
 						CompletionTokensDetails: CompletionTokensDetails{
 							ReasoningTokens: 5,
@@ -201,7 +223,8 @@ func TestConcatMessage(t *testing.T) {
 						CompletionTokens: 15,
 						PromptTokens:     30,
 						PromptTokenDetails: PromptTokenDetails{
-							CachedTokens: 15,
+							CachedTokens:        15,
+							CacheCreationTokens: 12,
 						},
 						CompletionTokensDetails: CompletionTokensDetails{
 							ReasoningTokens: 8,
