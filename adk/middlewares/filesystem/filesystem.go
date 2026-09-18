@@ -1006,11 +1006,13 @@ func newGrepTool(fs filesystem.Backend, name string, desc string) (tool.BaseTool
 		case "count":
 			return formatCountMatches(matches, offset, headLimit), nil
 
-		case "files_with_matches":
-			return formatFileMatchesForSearch(ctx, fs, path, glob, fileType, matches, offset, headLimit), nil
-
 		default:
-			return formatFileMatchesForSearch(ctx, fs, path, glob, fileType, matches, offset, headLimit), nil
+			if len(matches) == 0 && path != "" && glob == "" && fileType == "" {
+				if _, err := fs.Read(ctx, &filesystem.ReadRequest{FilePath: path, Offset: 1, Limit: 1}); err == nil {
+					return fmt.Sprintf("%s in %s", noMatchesFound, path), nil
+				}
+			}
+			return formatFileMatches(matches, offset, headLimit), nil
 		}
 	})
 }
@@ -1182,15 +1184,6 @@ func formatFileMatches(matches []filesystem.GrepMatch, offset, headLimit int) st
 		fileWord = "file"
 	}
 	return fmt.Sprintf("Found %d %s\n%s", totalFiles, fileWord, strings.Join(uniquePaths, "\n"))
-}
-
-func formatFileMatchesForSearch(ctx context.Context, fs filesystem.Backend, path, glob, fileType string, matches []filesystem.GrepMatch, offset, headLimit int) string {
-	if len(matches) == 0 && path != "" && glob == "" && fileType == "" {
-		if _, err := fs.Read(ctx, &filesystem.ReadRequest{FilePath: path, Offset: 1, Limit: 1}); err == nil {
-			return fmt.Sprintf("%s in %s", noMatchesFound, path)
-		}
-	}
-	return formatFileMatches(matches, offset, headLimit)
 }
 
 func formatContentMatches(matches []filesystem.GrepMatch, showLineNum bool) string {
