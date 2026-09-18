@@ -610,16 +610,17 @@ func (g *graph) updateToValidateMap() error {
 					g.fieldMappingRecords[endNode.endNode] = append(g.fieldMappingRecords[endNode.endNode], endNode.mappings...)
 
 					// field mapping check
-					checker, uncheckedSourcePaths, err := validateFieldMapping(g.getNodeOutputType(startNode), g.getNodeInputType(endNode.endNode), endNode.mappings)
+					checker, uncheckedSourcePaths, err := validateFieldMapping(g.getNodeOutputType(startNode),
+						g.getNodeInputType(endNode.endNode), endNode.mappings, startNode, endNode.endNode)
 					if err != nil {
 						return err
 					}
 
 					g.handlerOnEdges[startNode][endNode.endNode] = append(g.handlerOnEdges[startNode][endNode.endNode], handlerPair{
 						invoke: func(value any) (any, error) {
-							return fieldMap(endNode.mappings, false, uncheckedSourcePaths)(value)
+							return fieldMap(endNode.mappings, false, uncheckedSourcePaths, startNode, endNode.endNode)(value)
 						},
-						transform: streamFieldMap(endNode.mappings, uncheckedSourcePaths),
+						transform: streamFieldMap(endNode.mappings, uncheckedSourcePaths, startNode, endNode.endNode),
 					})
 
 					if checker != nil {
