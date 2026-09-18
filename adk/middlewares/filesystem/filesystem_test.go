@@ -928,6 +928,16 @@ func TestGrepToolDirectFileNoMatch(t *testing.T) {
 			assert.Equal(t, tt.want, result)
 		})
 	}
+
+	t.Run("nil read result", func(t *testing.T) {
+		backend := &nilReadBackend{InMemoryBackend: setupTestBackend()}
+		grepTool, err := newGrepTool(backend, "", "")
+		assert.NoError(t, err)
+
+		result, err := invokeTool(t, grepTool, `{"pattern": "missing-token", "path": "/file1.txt"}`)
+		assert.NoError(t, err)
+		assert.Equal(t, "No files found", result)
+	})
 }
 
 type unorderedQueryBackend struct {
