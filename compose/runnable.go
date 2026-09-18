@@ -52,6 +52,7 @@ type composableRunnable struct {
 	optionType reflect.Type
 
 	*genericHelper
+	graphRunner *runner
 
 	isPassthrough bool
 

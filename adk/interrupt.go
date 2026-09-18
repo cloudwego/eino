@@ -22,8 +22,10 @@ import (
 	"encoding/gob"
 	"errors"
 	"fmt"
+	"reflect"
 	"sync"
 
+	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/internal/core"
 	"github.com/cloudwego/eino/schema"
 )
@@ -215,13 +217,23 @@ type serialization struct {
 	// checkpoint bytes must be restored into ChatModelAgentInterruptInfo.Data.
 	// It is empty when Info.Data is stored inline.
 	InfoDataSourceInterruptID string
-	EnableStreaming           bool
-	InterruptID2Address       map[string]Address
-	InterruptID2State         map[string]core.InterruptState
+	// ProjectionV1 is the stable Gob field name for Runner projection metadata.
+	// Despite its legacy name, the nested Version selects V1 or V2 semantics;
+	// nil means this checkpoint has no projection metadata.
+	ProjectionV1        *checkpointProjectionV1
+	EnableStreaming     bool
+	InterruptID2Address map[string]Address
+	InterruptID2State   map[string]core.InterruptState
 }
 
 func runnerLoadCheckPointImpl(store CheckPointStore, ctx context.Context, checkpointID string) (
 	context.Context, *runContext, *ResumeInfo, error) {
+	return runnerLoadCheckPointWithResumeScopeImpl(store, ctx, checkpointID, false)
+}
+
+func runnerLoadCheckPointWithResumeScopeImpl(store CheckPointStore, ctx context.Context,
+	checkpointID string, newResumeScope bool,
+) (context.Context, *runContext, *ResumeInfo, error) {
 	data, existed, err := store.Get(ctx, checkpointID)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("failed to get checkpoint from store: %w", err)
@@ -237,8 +249,14 @@ func runnerLoadCheckPointImpl(store CheckPointStore, ctx context.Context, checkp
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("failed to decode checkpoint: %w", err)
 	}
+	if err = restoreRunnerCheckpointProjection(s); err != nil {
+		return nil, nil, nil, err
+	}
 	if err = restoreRunnerCheckpointInfoData(s); err != nil {
 		return nil, nil, nil, err
+	}
+	if newResumeScope {
+		ctx = core.NewResumeScope(ctx, runnerCheckpointResumeTargetIDs(s))
 	}
 	ctx = core.PopulateInterruptState(ctx, s.InterruptID2Address, s.InterruptID2State)
 
@@ -246,6 +264,134 @@ func runnerLoadCheckPointImpl(store CheckPointStore, ctx context.Context, checkp
 		EnableStreaming: s.EnableStreaming,
 		InterruptInfo:   s.Info,
 	}, nil
+}
+
+func runnerCheckpointResumeTargetIDs(checkpoint *serialization) map[string]struct{} {
+	if checkpoint == nil {
+		return map[string]struct{}{}
+	}
+	ids := make(map[string]struct{}, len(checkpoint.InterruptID2Address))
+	for id := range checkpoint.InterruptID2Address {
+		ids[id] = struct{}{}
+	}
+	if checkpoint.Info == nil {
+		return ids
+	}
+
+	collector := &runnerResumeTargetCollector{
+		ids:             ids,
+		visitedContexts: make(map[*InterruptCtx]struct{}),
+		visitedValues:   make(map[runnerResumeTargetVisit]struct{}),
+	}
+	collector.collectContexts(checkpoint.Info.InterruptContexts)
+	if chatModelInfo, ok := checkpoint.Info.Data.(*ChatModelAgentInterruptInfo); ok &&
+		chatModelInfo != nil {
+		collector.collectComposeInfo(chatModelInfo.Info)
+	}
+	return ids
+}
+
+type runnerResumeTargetVisit struct {
+	typ      reflect.Type
+	pointer  uintptr
+	length   int
+	capacity int
+}
+
+type runnerResumeTargetCollector struct {
+	ids             map[string]struct{}
+	visitedContexts map[*InterruptCtx]struct{}
+	visitedValues   map[runnerResumeTargetVisit]struct{}
+}
+
+var composeInterruptInfoPointerType = reflect.TypeOf((*compose.InterruptInfo)(nil))
+
+func (c *runnerResumeTargetCollector) collectContexts(contexts []*InterruptCtx) {
+	for _, interruptCtx := range contexts {
+		for current := interruptCtx; current != nil; current = current.Parent {
+			if _, ok := c.visitedContexts[current]; ok {
+				break
+			}
+			c.visitedContexts[current] = struct{}{}
+			if current.ID != "" {
+				c.ids[current.ID] = struct{}{}
+			}
+			c.collectValue(reflect.ValueOf(current.Info))
+		}
+	}
+}
+
+func (c *runnerResumeTargetCollector) collectComposeInfo(info *compose.InterruptInfo) {
+	if info == nil || c.markVisited(reflect.ValueOf(info)) {
+		return
+	}
+	c.collectContexts(info.InterruptContexts)
+	c.collectValue(reflect.ValueOf(info.State))
+	c.collectValue(reflect.ValueOf(info.RerunNodesExtra))
+	for _, subGraph := range info.SubGraphs {
+		c.collectComposeInfo(subGraph)
+	}
+}
+
+func (c *runnerResumeTargetCollector) collectValue(value reflect.Value) {
+	if !value.IsValid() || !value.CanInterface() {
+		return
+	}
+	if value.Type() == composeInterruptInfoPointerType {
+		c.collectComposeInfo(value.Interface().(*compose.InterruptInfo))
+		return
+	}
+
+	switch value.Kind() {
+	case reflect.Interface:
+		if !value.IsNil() {
+			c.collectValue(value.Elem())
+		}
+	case reflect.Pointer:
+		if !value.IsNil() && !c.markVisited(value) {
+			c.collectValue(value.Elem())
+		}
+	case reflect.Struct:
+		for i := 0; i < value.NumField(); i++ {
+			c.collectValue(value.Field(i))
+		}
+	case reflect.Map:
+		if value.IsNil() || c.markVisited(value) {
+			return
+		}
+		iter := value.MapRange()
+		for iter.Next() {
+			c.collectValue(iter.Key())
+			c.collectValue(iter.Value())
+		}
+	case reflect.Slice:
+		if value.IsNil() || c.markVisited(value) {
+			return
+		}
+		for i := 0; i < value.Len(); i++ {
+			c.collectValue(value.Index(i))
+		}
+	case reflect.Array:
+		for i := 0; i < value.Len(); i++ {
+			c.collectValue(value.Index(i))
+		}
+	}
+}
+
+func (c *runnerResumeTargetCollector) markVisited(value reflect.Value) bool {
+	visit := runnerResumeTargetVisit{
+		typ:     value.Type(),
+		pointer: value.Pointer(),
+	}
+	if value.Kind() == reflect.Slice {
+		visit.length = value.Len()
+		visit.capacity = value.Cap()
+	}
+	if _, ok := c.visitedValues[visit]; ok {
+		return true
+	}
+	c.visitedValues[visit] = struct{}{}
+	return false
 }
 
 // preprocessADKCheckpoint fixes a gob incompatibility when resuming old ChatModelAgent/DeepAgents checkpoints.
@@ -303,20 +449,72 @@ func runnerSaveCheckPointImpl(
 
 	id2Addr, id2State := core.SignalToPersistenceMaps(is)
 	info, infoDataStateID := compactRunnerCheckpointInfoData(info, is)
-
-	buf := &bytes.Buffer{}
-	err := gob.NewEncoder(buf).Encode(&serialization{
+	compactRunnerCheckpointNestedInterrupts(infoDataStateID, id2Addr, id2State)
+	if err := validateRunnerProjectionReservedIDs(id2Addr, id2State); err != nil {
+		return err
+	}
+	unprojected := &serialization{
 		RunCtx:                    runCtx,
 		Info:                      info,
 		InfoDataSourceInterruptID: infoDataStateID,
 		InterruptID2Address:       id2Addr,
 		InterruptID2State:         id2State,
 		EnableStreaming:           enableStreaming,
-	})
+	}
+	projectedRunCtx, projectedInfo, projectedStates, projection, err := projectRunnerCheckpoint(
+		runCtx, info, infoDataStateID, id2State)
+	if err != nil {
+		return fmt.Errorf("failed to project checkpoint: %w", err)
+	}
+
+	var projected *serialization
+	if projection != nil {
+		unprojected.RunCtx = cloneRunContextForCheckpointProjection(runCtx)
+		unprojected.Info = cloneInterruptInfoForCheckpointProjection(info)
+		unprojected.InterruptID2State = cloneInterruptStateMap(id2State)
+		projected = &serialization{
+			RunCtx:                    projectedRunCtx,
+			Info:                      projectedInfo,
+			InfoDataSourceInterruptID: infoDataStateID,
+			ProjectionV1:              projection,
+			InterruptID2Address:       id2Addr,
+			InterruptID2State:         projectedStates,
+			EnableStreaming:           enableStreaming,
+		}
+	}
+	data, err := encodeRunnerCheckpointWithProfitableProjection(unprojected, projected)
 	if err != nil {
 		return fmt.Errorf("failed to encode checkpoint: %w", err)
 	}
-	return store.Set(ctx, key, buf.Bytes())
+	return store.Set(ctx, key, data)
+}
+
+func encodeRunnerCheckpointWithProfitableProjection(unprojected,
+	projected *serialization) ([]byte, error) {
+	unprojectedData, err := encodeRunnerCheckpoint(unprojected)
+	if err != nil {
+		return nil, err
+	}
+	if projected == nil {
+		return unprojectedData, nil
+	}
+	projectedData, err := encodeRunnerCheckpoint(projected)
+	if err != nil {
+		return nil, err
+	}
+	if len(projectedData) < len(unprojectedData) {
+		return projectedData, nil
+	}
+	return unprojectedData, nil
+}
+
+func encodeRunnerCheckpoint(checkpoint *serialization) ([]byte, error) {
+	buf := &bytes.Buffer{}
+	err := gob.NewEncoder(buf).Encode(checkpoint)
+	if err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
 }
 
 func compactRunnerCheckpointInfoData(info *InterruptInfo, is *core.InterruptSignal) (*InterruptInfo, string) {

@@ -19,10 +19,13 @@ jobs:
       repository-projects: write
     env:
       COVERAGE_FILE: coverage.out
+      REGENERATION_COVERAGE_FILE: regeneration.coverage.out
       BREAKDOWN_FILE: main.breakdown
       
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
@@ -38,6 +41,25 @@ jobs:
           for module in $modules; do go work use $module; list=$module"/... "$list; coverpkg=$module"/...,"$coverpkg; done
           go work sync
           go test -race -v -coverprofile=${{ env.COVERAGE_FILE }} -gcflags="all=-l -N" -coverpkg=$coverpkg $list
+          sed -i.bak \
+            's#^checkpointlegacyreader/#./adk/testdata/checkpoint_compat/legacy_reader/#' \
+            "${{ env.COVERAGE_FILE }}"
+          rm "${{ env.COVERAGE_FILE }}.bak"
+          ! grep -q '^checkpointlegacyreader/' "${{ env.COVERAGE_FILE }}"
+          grep -q '^\./adk/testdata/checkpoint_compat/legacy_reader/' \
+            "${{ env.COVERAGE_FILE }}"
+          EINO_RUN_HISTORICAL_REGENERATION=1 go test -race -v \
+            -coverprofile=${{ env.REGENERATION_COVERAGE_FILE }} -gcflags="all=-l -N" \
+            -coverpkg=./adk/testdata/checkpoint_compat/regenerate \
+            ./adk/testdata/checkpoint_compat/regenerate
+          test "$(head -n 1 "${{ env.REGENERATION_COVERAGE_FILE }}")" = \
+            "$(head -n 1 "${{ env.COVERAGE_FILE }}")"
+          tail -n +2 "${{ env.REGENERATION_COVERAGE_FILE }}" >> "${{ env.COVERAGE_FILE }}"
+          for goos in windows freebsd; do
+            GOOS=$goos GOARCH=amd64 go test -c \
+              -o "$RUNNER_TEMP/checkpoint-regenerate-$goos.test" \
+              ./adk/testdata/checkpoint_compat/regenerate
+          done
           
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v5
@@ -47,6 +69,19 @@ jobs:
           files: ${{ env.COVERAGE_FILE }}
           token: ${{ secrets.CODECOV_TOKEN }}
           codecov_yml_path: ./github/.codecov.yml
+
+  checkpoint-publication-darwin:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.DEFAULT_GO_VERSION }}
+      - name: Test Darwin checkpoint publication
+        run: go test -race ./adk/testdata/checkpoint_compat/regenerate
 
   benchmark-test:
     runs-on: ubuntu-latest

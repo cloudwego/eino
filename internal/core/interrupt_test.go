@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // Define AddressSegmentType constants locally to avoid dependency cycles
@@ -203,6 +204,59 @@ func TestSignalToPersistenceMaps(t *testing.T) {
 		assert.Equal(t, child2.InterruptState, id2state["child2"])
 	})
 
+	t.Run("PersistenceBoundary", func(t *testing.T) {
+		leaf := &InterruptSignal{
+			ID:      "leaf",
+			Address: Address{{Type: AddressSegmentTool, ID: "leaf"}},
+			InterruptInfo: InterruptInfo{
+				Info: "leaf data",
+			},
+			InterruptState: InterruptState{
+				State:                "leaf state",
+				LayerSpecificPayload: "leaf payload",
+			},
+		}
+		boundary := &InterruptSignal{
+			ID:      "boundary",
+			Address: Address{{Type: AddressSegmentTool, ID: "boundary"}},
+			InterruptState: InterruptState{
+				State:                "boundary state",
+				LayerSpecificPayload: "boundary payload",
+			},
+			Subs: []*InterruptSignal{leaf},
+		}
+		root := &InterruptSignal{
+			ID:      "root",
+			Address: Address{{Type: AddressSegmentAgent, ID: "root"}},
+			InterruptState: InterruptState{
+				State:                "root state",
+				LayerSpecificPayload: "root payload",
+			},
+			Subs: []*InterruptSignal{boundary},
+		}
+		MarkInterruptPersistenceBoundary(boundary)
+
+		id2addr, id2state := SignalToPersistenceMaps(root)
+		assert.Equal(t, map[string]Address{
+			"root":     root.Address,
+			"boundary": boundary.Address,
+		}, id2addr)
+		assert.Equal(t, map[string]InterruptState{
+			"root":     root.InterruptState,
+			"boundary": boundary.InterruptState,
+		}, id2state)
+
+		contexts := ToInterruptContexts(root, nil)
+		require.Len(t, contexts, 0)
+		leaf.InterruptInfo.IsRootCause = true
+		contexts = ToInterruptContexts(root, nil)
+		require.Len(t, contexts, 1)
+		assert.Equal(t, "leaf", contexts[0].ID)
+		assert.Equal(t, "leaf data", contexts[0].Info)
+		require.NotNil(t, contexts[0].Parent)
+		assert.Equal(t, "boundary", contexts[0].Parent.ID)
+	})
+
 	// Test Case 4: Deeply Nested Tree
 	t.Run("DeeplyNestedTree", func(t *testing.T) {
 		leaf1 := &InterruptSignal{
@@ -338,6 +392,160 @@ func TestGetCurrentAddress(t *testing.T) {
 
 		addr := GetCurrentAddress(ctx)
 		assert.Equal(t, expectedAddr, addr)
+	})
+}
+
+func TestClearCurrentAddress(t *testing.T) {
+	resumeAddress := Address{{Type: AddressSegmentAgent, ID: "resume-target"}}
+	resumeState := InterruptState{
+		State:                "saved state",
+		LayerSpecificPayload: "saved payload",
+	}
+	resumeData := map[string]any{"decision": "approved"}
+
+	ctx := BatchResumeWithData(context.Background(), map[string]any{"resume-target": resumeData})
+	var err error
+	ctx, err = MergeInterruptState(ctx,
+		map[string]Address{"resume-target": resumeAddress},
+		map[string]InterruptState{"resume-target": resumeState})
+	require.NoError(t, err)
+	ctx = AppendAddressSegment(ctx, AddressSegmentAgent, "active-parent", "")
+	require.Equal(t, Address{{Type: AddressSegmentAgent, ID: "active-parent"}}, GetCurrentAddress(ctx))
+
+	before, ok := getResumeInfo(ctx)
+	require.True(t, ok)
+	expectedResumeData := map[string]any{"resume-target": resumeData}
+	expectedState := map[string]InterruptState{"resume-target": resumeState}
+	expectedAddress := map[string]Address{"resume-target": resumeAddress}
+
+	cleared := ClearCurrentAddress(ctx)
+	assert.Nil(t, GetCurrentAddress(cleared))
+
+	after, ok := getResumeInfo(cleared)
+	require.True(t, ok)
+	assert.Same(t, before, after)
+	assert.Equal(t, expectedResumeData, after.id2ResumeData)
+	assert.Equal(t, expectedState, after.id2State)
+	assert.Equal(t, expectedAddress, after.id2Addr)
+	assert.Empty(t, after.id2ResumeDataUsed)
+	assert.Empty(t, after.id2StateUsed)
+
+	cleared = AppendAddressSegment(cleared, AddressSegmentAgent, "resume-target", "")
+	wasInterrupted, hasState, state := GetInterruptState[string](cleared)
+	assert.True(t, wasInterrupted)
+	assert.True(t, hasState)
+	assert.Equal(t, "saved state", state)
+	isTarget, hasData, data := GetResumeContext[map[string]any](cleared)
+	assert.True(t, isTarget)
+	assert.True(t, hasData)
+	assert.Equal(t, resumeData, data)
+}
+
+func TestMergeInterruptState(t *testing.T) {
+	t.Run("initializes_resume_info", func(t *testing.T) {
+		address := Address{{Type: AddressSegmentAgent, ID: "child"}}
+		ctx, err := MergeInterruptState(context.Background(),
+			map[string]Address{"child": address},
+			map[string]InterruptState{"child": {State: "child state"}})
+		require.NoError(t, err)
+
+		ctx = AppendAddressSegment(ctx, AddressSegmentAgent, "child", "")
+		wasInterrupted, hasState, state := GetInterruptState[string](ctx)
+		require.True(t, wasInterrupted)
+		require.True(t, hasState)
+		require.Equal(t, "child state", state)
+	})
+
+	t.Run("merges_into_batch_resume_info", func(t *testing.T) {
+		address := Address{{Type: AddressSegmentAgent, ID: "child"}}
+		ctx := BatchResumeWithData(context.Background(), map[string]any{"child": "approved"})
+		ctx, err := MergeInterruptState(ctx,
+			map[string]Address{"child": address},
+			map[string]InterruptState{"child": {State: "saved"}})
+		require.NoError(t, err)
+
+		ctx = AppendAddressSegment(ctx, AddressSegmentAgent, "child", "")
+		wasInterrupted, hasState, state := GetInterruptState[string](ctx)
+		require.True(t, wasInterrupted)
+		require.True(t, hasState)
+		require.Equal(t, "saved", state)
+		isTarget, hasData, data := GetResumeContext[string](ctx)
+		require.True(t, isTarget)
+		require.True(t, hasData)
+		require.Equal(t, "approved", data)
+	})
+
+	t.Run("preserves_existing_and_used_state", func(t *testing.T) {
+		existingAddress := Address{{Type: AddressSegmentAgent, ID: "agent"}}
+		existingState := InterruptState{State: "existing"}
+		ctx := PopulateInterruptState(context.Background(),
+			map[string]Address{
+				"existing":         existingAddress,
+				"placeholder":      existingAddress,
+				"used-placeholder": existingAddress,
+			},
+			map[string]InterruptState{
+				"existing":         existingState,
+				"placeholder":      {},
+				"used-placeholder": {},
+			})
+		info, ok := getResumeInfo(ctx)
+		require.True(t, ok)
+		info.id2StateUsed["existing"] = true
+		info.id2StateUsed["used-placeholder"] = true
+		info.id2ResumeDataUsed["existing"] = true
+
+		childAddress := Address{{Type: AddressSegmentAgent, ID: "agent"}, {Type: AddressSegmentNode, ID: "child"}}
+		merged, err := MergeInterruptState(ctx,
+			map[string]Address{"existing": existingAddress, "child": childAddress},
+			map[string]InterruptState{
+				"existing":         {State: "must not overwrite"},
+				"placeholder":      {State: "filled state"},
+				"used-placeholder": {State: "must not fill"},
+				"child":            {State: "child state"},
+			})
+		require.NoError(t, err)
+		require.Equal(t, ctx, merged)
+		assert.Equal(t, existingState, info.id2State["existing"])
+		assert.Equal(t, InterruptState{State: "filled state"}, info.id2State["placeholder"])
+		assert.Equal(t, InterruptState{}, info.id2State["used-placeholder"])
+		assert.Equal(t, InterruptState{State: "child state"}, info.id2State["child"])
+		assert.True(t, info.id2StateUsed["existing"])
+		assert.True(t, info.id2ResumeDataUsed["existing"])
+	})
+
+	t.Run("conflict_is_atomic", func(t *testing.T) {
+		existingAddress := Address{{Type: AddressSegmentAgent, ID: "agent"}}
+		childAddress := Address{{Type: AddressSegmentAgent, ID: "agent"}, {Type: AddressSegmentNode, ID: "child"}}
+		ctx := PopulateInterruptState(context.Background(),
+			map[string]Address{"existing": existingAddress}, nil)
+		info, ok := getResumeInfo(ctx)
+		require.True(t, ok)
+
+		_, err := MergeInterruptState(ctx,
+			map[string]Address{
+				"existing":       childAddress,
+				"must-not-merge": childAddress,
+			},
+			nil)
+		assert.EqualError(t, err, `interrupt ID "existing" has conflicting addresses`)
+		assert.NotContains(t, info.id2Addr, "must-not-merge")
+	})
+
+	t.Run("conflict_error_is_deterministic", func(t *testing.T) {
+		ctx := PopulateInterruptState(context.Background(),
+			map[string]Address{
+				"a": {{Type: AddressSegmentAgent, ID: "original-a"}},
+				"z": {{Type: AddressSegmentAgent, ID: "original-z"}},
+			}, nil)
+		incoming := map[string]Address{
+			"z": {{Type: AddressSegmentAgent, ID: "conflict-z"}},
+			"a": {{Type: AddressSegmentAgent, ID: "conflict-a"}},
+		}
+		for i := 0; i < 100; i++ {
+			_, err := MergeInterruptState(ctx, incoming, nil)
+			require.EqualError(t, err, `interrupt ID "a" has conflicting addresses`)
+		}
 	})
 }
 
@@ -484,6 +692,73 @@ func TestBatchResumeWithData(t *testing.T) {
 		assert.True(t, ok)
 		assert.NotNil(t, rInfo)
 		assert.Empty(t, rInfo.id2ResumeData)
+	})
+}
+
+func TestNewResumeScope(t *testing.T) {
+	t.Run("without_parent", func(t *testing.T) {
+		ctx := NewResumeScope(context.Background(), map[string]struct{}{"target": {}})
+		info, ok := getResumeInfo(ctx)
+		require.True(t, ok)
+		require.Empty(t, info.id2ResumeData)
+		require.Empty(t, info.id2Addr)
+		require.Empty(t, info.id2State)
+	})
+
+	t.Run("claims_only_requested_pending_targets", func(t *testing.T) {
+		parent := BatchResumeWithData(context.Background(), map[string]any{
+			"target-a": "payload-a",
+			"target-b": "payload-b",
+			"target-c": nil,
+		})
+		parentInfo, ok := getResumeInfo(parent)
+		require.True(t, ok)
+		parentInfo.id2ResumeDataUsed["target-b"] = true
+
+		child := NewResumeScope(parent, map[string]struct{}{
+			"target-a": {},
+			"target-b": {},
+			"missing":  {},
+		})
+		childInfo, ok := getResumeInfo(child)
+		require.True(t, ok)
+		require.Equal(t, map[string]any{"target-a": "payload-a"}, childInfo.id2ResumeData)
+		require.Equal(t, map[string]bool{
+			"target-a": true,
+			"target-b": true,
+		}, parentInfo.id2ResumeDataUsed)
+		require.NotSame(t, parentInfo, childInfo)
+	})
+
+	t.Run("isolates_identical_local_addresses", func(t *testing.T) {
+		parent := BatchResumeWithData(context.Background(), map[string]any{
+			"target-a": "payload-a",
+			"target-b": "payload-b",
+		})
+		address := Address{{Type: AddressSegmentAgent, ID: "same-child"}}
+		childA := NewResumeScope(parent, map[string]struct{}{"target-a": {}})
+		childA = PopulateInterruptState(childA,
+			map[string]Address{"target-a": address},
+			map[string]InterruptState{"target-a": {State: "state-a"}})
+		childB := NewResumeScope(parent, map[string]struct{}{"target-b": {}})
+		childB = PopulateInterruptState(childB,
+			map[string]Address{"target-b": address},
+			map[string]InterruptState{"target-b": {State: "state-b"}})
+
+		assertScope := func(ctx context.Context, wantState, wantData string) {
+			t.Helper()
+			ctx = AppendAddressSegment(ctx, AddressSegmentAgent, "same-child", "")
+			wasInterrupted, hasState, state := GetInterruptState[string](ctx)
+			require.True(t, wasInterrupted)
+			require.True(t, hasState)
+			require.Equal(t, wantState, state)
+			isTarget, hasData, data := GetResumeContext[string](ctx)
+			require.True(t, isTarget)
+			require.True(t, hasData)
+			require.Equal(t, wantData, data)
+		}
+		assertScope(childA, "state-a", "payload-a")
+		assertScope(childB, "state-b", "payload-b")
 	})
 }
 

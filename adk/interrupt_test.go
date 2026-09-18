@@ -41,6 +41,18 @@ type interruptTestToolsHandler struct {
 	tools []tool.BaseTool
 }
 
+type resumeTargetTraversalWrapper struct {
+	Value  any
+	Next   any
+	Calls  *int32
+	hidden any
+}
+
+func (w *resumeTargetTraversalWrapper) String() string {
+	atomic.AddInt32(w.Calls, 1)
+	return "resume target traversal wrapper"
+}
+
 func TestPreprocessADKCheckpoint(t *testing.T) {
 	t.Run("no-op when missing markers", func(t *testing.T) {
 		in := []byte("random")
@@ -60,6 +72,298 @@ func TestPreprocessADKCheckpoint(t *testing.T) {
 		assert.True(t, bytes.Contains(out, []byte(lenPrefixedCompatName)))
 		assert.False(t, bytes.Contains(out, []byte(lenPrefixedReactStateName)))
 	})
+}
+
+func TestRunnerCheckpointResumeTargetIDsTraversesNestedComposeInfo(t *testing.T) {
+	newTarget := func(id string) *compose.InterruptInfo {
+		return &compose.InterruptInfo{
+			InterruptContexts: []*InterruptCtx{{ID: id}},
+		}
+	}
+	type structWrapper struct {
+		Value any
+	}
+	wrappers := []struct {
+		name string
+		wrap func(*compose.InterruptInfo) any
+	}{
+		{name: "direct", wrap: func(info *compose.InterruptInfo) any { return info }},
+		{name: "pointer", wrap: func(info *compose.InterruptInfo) any {
+			return &structWrapper{Value: info}
+		}},
+		{name: "interface", wrap: func(info *compose.InterruptInfo) any {
+			return structWrapper{Value: any(info)}
+		}},
+		{name: "struct", wrap: func(info *compose.InterruptInfo) any {
+			return struct{ Info *compose.InterruptInfo }{Info: info}
+		}},
+		{name: "map_key", wrap: func(info *compose.InterruptInfo) any {
+			return map[*compose.InterruptInfo]string{info: "target"}
+		}},
+		{name: "map_value", wrap: func(info *compose.InterruptInfo) any {
+			return map[string]any{"target": info}
+		}},
+		{name: "slice", wrap: func(info *compose.InterruptInfo) any {
+			return []any{info}
+		}},
+		{name: "array", wrap: func(info *compose.InterruptInfo) any {
+			return [1]any{info}
+		}},
+	}
+	sources := []struct {
+		name string
+		set  func(*compose.InterruptInfo, any)
+	}{
+		{name: "state", set: func(root *compose.InterruptInfo, value any) {
+			root.State = value
+		}},
+		{name: "rerun_nodes_extra", set: func(root *compose.InterruptInfo, value any) {
+			root.RerunNodesExtra = map[string]any{"target": value}
+		}},
+		{name: "context_info", set: func(root *compose.InterruptInfo, value any) {
+			root.InterruptContexts = []*InterruptCtx{{Info: value}}
+		}},
+	}
+
+	t.Run("wrapper_matrix", func(t *testing.T) {
+		for _, source := range sources {
+			for _, wrapper := range wrappers {
+				t.Run(source.name+"/"+wrapper.name, func(t *testing.T) {
+					id := source.name + "-" + wrapper.name
+					root := &compose.InterruptInfo{}
+					source.set(root, wrapper.wrap(newTarget(id)))
+					checkpoint := &serialization{
+						Info: &InterruptInfo{
+							Data: &ChatModelAgentInterruptInfo{Info: root},
+						},
+					}
+					require.Equal(t, map[string]struct{}{id: {}},
+						runnerCheckpointResumeTargetIDs(checkpoint))
+				})
+			}
+		}
+	})
+
+	t.Run("direct_context_and_subgraph_behavior", func(t *testing.T) {
+		contextInfo := newTarget("context-info")
+		stateInfo := newTarget("state")
+		rerunInfo := newTarget("rerun")
+		subGraphInfo := newTarget("subgraph")
+		chatModelInfo := newTarget("chat-model")
+		root := &compose.InterruptInfo{
+			State: stateInfo,
+			RerunNodesExtra: map[string]any{
+				"target": rerunInfo,
+			},
+			SubGraphs: map[string]*compose.InterruptInfo{
+				"child": subGraphInfo,
+			},
+			InterruptContexts: []*InterruptCtx{{
+				ID:   "context",
+				Info: contextInfo,
+			}},
+		}
+
+		checkpoint := &serialization{
+			Info: &InterruptInfo{
+				Data:              &ChatModelAgentInterruptInfo{Info: chatModelInfo},
+				InterruptContexts: []*InterruptCtx{{ID: "runner", Info: root}},
+			},
+			InterruptID2Address: map[string]Address{
+				"persisted-address": nil,
+			},
+		}
+
+		require.Equal(t, map[string]struct{}{
+			"chat-model":        {},
+			"context":           {},
+			"context-info":      {},
+			"persisted-address": {},
+			"rerun":             {},
+			"runner":            {},
+			"state":             {},
+			"subgraph":          {},
+		}, runnerCheckpointResumeTargetIDs(checkpoint))
+	})
+
+	t.Run("cycles_nils_shared_ids_and_inaccessible_fields", func(t *testing.T) {
+		pointerCycle := &resumeTargetTraversalWrapper{}
+		pointerCycle.Value = newTarget("pointer-cycle")
+		pointerCycle.Next = pointerCycle
+		mapCycle := make(map[string]any)
+		mapCycle["self"] = mapCycle
+		sliceCycle := make([]any, 1, 2)
+		sliceCycle[0] = sliceCycle
+		sliceCycle = append(sliceCycle, newTarget("slice-cycle"))
+		shared := newTarget("shared")
+		var methodCalls int32
+		methodWrapper := &resumeTargetTraversalWrapper{
+			Value: newTarget("method-wrapper"),
+			Calls: &methodCalls,
+		}
+		inaccessible := &resumeTargetTraversalWrapper{
+			Value:  newTarget("exported"),
+			Calls:  &methodCalls,
+			hidden: newTarget("hidden"),
+		}
+		var (
+			nilPointer *resumeTargetTraversalWrapper
+			nilMap     map[string]any
+			nilSlice   []any
+			nilInfo    *compose.InterruptInfo
+		)
+		root := &compose.InterruptInfo{
+			State: []any{
+				pointerCycle,
+				mapCycle,
+				sliceCycle,
+				shared,
+				shared,
+				newTarget("shared"),
+				methodWrapper,
+				inaccessible,
+				nilPointer,
+				nilMap,
+				nilSlice,
+				nilInfo,
+				nil,
+			},
+		}
+		mapCycle["target"] = newTarget("map-cycle")
+		pointerCycle.hidden = newTarget("pointer-hidden")
+
+		require.NotPanics(t, func() {
+			require.Equal(t, map[string]struct{}{
+				"exported":       {},
+				"map-cycle":      {},
+				"method-wrapper": {},
+				"pointer-cycle":  {},
+				"shared":         {},
+				"slice-cycle":    {},
+			}, runnerCheckpointResumeTargetIDs(&serialization{
+				Info: &InterruptInfo{
+					Data: &ChatModelAgentInterruptInfo{Info: root},
+				},
+			}))
+		})
+		require.Zero(t, atomic.LoadInt32(&methodCalls))
+	})
+
+	t.Run("nil_checkpoint_fields", func(t *testing.T) {
+		require.Empty(t, runnerCheckpointResumeTargetIDs(nil))
+		require.Empty(t, runnerCheckpointResumeTargetIDs(&serialization{}))
+		require.Empty(t, runnerCheckpointResumeTargetIDs(&serialization{
+			Info: &InterruptInfo{
+				Data: &ChatModelAgentInterruptInfo{},
+			},
+		}))
+	})
+}
+
+func TestRunnerCheckpointResumeTargetsMoveToChildScope(t *testing.T) {
+	type nestedSource struct {
+		name string
+		set  func(*compose.InterruptInfo, *compose.InterruptInfo)
+	}
+	sources := []nestedSource{
+		{
+			name: "state",
+			set: func(root, target *compose.InterruptInfo) {
+				root.State = target
+			},
+		},
+		{
+			name: "rerun_nodes_extra",
+			set: func(root, target *compose.InterruptInfo) {
+				root.RerunNodesExtra = map[string]any{
+					"ordinary": "ignored",
+					"target":   target,
+				}
+			},
+		},
+		{
+			name: "interrupt_context_info",
+			set: func(root, target *compose.InterruptInfo) {
+				root.InterruptContexts = []*InterruptCtx{{ID: "container", Info: target}}
+			},
+		},
+		{
+			name: "subgraphs",
+			set: func(root, target *compose.InterruptInfo) {
+				root.SubGraphs = map[string]*compose.InterruptInfo{"target": target}
+			},
+		},
+	}
+
+	for _, streaming := range []bool{false, true} {
+		mode := "invoke"
+		if streaming {
+			mode = "stream"
+		}
+		for _, source := range sources {
+			t.Run(mode+"/"+source.name, func(t *testing.T) {
+				const (
+					targetID    = "child-target"
+					targetData  = "child-data"
+					siblingID   = "parent-sibling"
+					siblingData = "sibling-data"
+				)
+				targetInfo := &compose.InterruptInfo{
+					InterruptContexts: []*InterruptCtx{{ID: targetID}},
+				}
+				rootInfo := &compose.InterruptInfo{}
+				source.set(rootInfo, targetInfo)
+				data, err := encodeRunnerCheckpoint(&serialization{
+					Info: &InterruptInfo{
+						Data: &ChatModelAgentInterruptInfo{Info: rootInfo},
+					},
+					EnableStreaming: streaming,
+				})
+				require.NoError(t, err)
+				store := newResumeBridgeStore("checkpoint", data)
+				parent := core.BatchResumeWithData(context.Background(), map[string]any{
+					targetID:  targetData,
+					siblingID: siblingData,
+				})
+
+				child, _, resumeInfo, err := runnerLoadCheckPointWithResumeScopeImpl(
+					store, parent, "checkpoint", true)
+				require.NoError(t, err)
+				require.Equal(t, streaming, resumeInfo.EnableStreaming)
+
+				targetAddress := Address{{Type: AddressSegmentAgent, ID: "target"}}
+				child = core.PopulateInterruptState(child,
+					map[string]Address{targetID: targetAddress},
+					map[string]core.InterruptState{targetID: {State: "target-state"}})
+				child = core.AppendAddressSegment(child, AddressSegmentAgent, "target", "")
+				isTarget, hasData, gotData := core.GetResumeContext[string](child)
+				require.True(t, isTarget)
+				require.True(t, hasData)
+				require.Equal(t, targetData, gotData)
+
+				parentTarget := core.PopulateInterruptState(parent,
+					map[string]Address{targetID: targetAddress},
+					map[string]core.InterruptState{targetID: {State: "target-state"}})
+				parentTarget = core.AppendAddressSegment(
+					parentTarget, AddressSegmentAgent, "target", "")
+				isTarget, hasData, gotData = core.GetResumeContext[string](parentTarget)
+				require.False(t, isTarget)
+				require.False(t, hasData)
+				require.Empty(t, gotData)
+
+				siblingAddress := Address{{Type: AddressSegmentAgent, ID: "sibling"}}
+				parentSibling := core.PopulateInterruptState(parent,
+					map[string]Address{siblingID: siblingAddress},
+					map[string]core.InterruptState{siblingID: {State: "sibling-state"}})
+				parentSibling = core.AppendAddressSegment(
+					parentSibling, AddressSegmentAgent, "sibling", "")
+				isTarget, hasData, gotData = core.GetResumeContext[string](parentSibling)
+				require.True(t, isTarget)
+				require.True(t, hasData)
+				require.Equal(t, siblingData, gotData)
+			})
+		}
+	}
 }
 
 func TestRunnerCheckpointDoesNotDuplicateChatModelState(t *testing.T) {
