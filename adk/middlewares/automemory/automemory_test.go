@@ -223,11 +223,15 @@ func TestMiddleware_IndexInjection_CustomInstructionKeepsDirectoryManifest(t *te
 func TestMiddleware_IndexInjection_CustomInstructionErrorReportsRenderStage(t *testing.T) {
 	ctx := context.Background()
 	b := NewInMemoryBackend()
+	now := time.Now()
+	b.put("/mem/MEMORY.md", "- [notes.md](notes.md) - notes\n", now)
+	b.put("/mem/notes.md", "some notes", now)
 	var stages []ErrorStage
 
 	mw, err := New(ctx, &Config[*schema.Message]{
 		MemoryDirectory: "/mem",
 		MemoryBackend:   b,
+		Model:           &responseFormatSelectionModel{plainOutput: `{"selected_memories":["notes.md"]}`},
 		GenInstruction: func(ctx context.Context) (string, error) {
 			return "", fmt.Errorf("custom instruction failed")
 		},
@@ -246,6 +250,7 @@ func TestMiddleware_IndexInjection_CustomInstructionErrorReportsRenderStage(t *t
 	require.NoError(t, err)
 	require.Equal(t, "base", out.Instruction)
 	require.Equal(t, []ErrorStage{OnErrorStageRenderInstruction}, stages)
+	require.Len(t, out.AgentInput.Messages, 1)
 }
 
 func TestNew_DoesNotMutateConfig(t *testing.T) {
@@ -1575,4 +1580,107 @@ func TestMiddleware_AfterAgent_AsyncSetsPendingSnapshotWhenLockHeld(t *testing.T
 	topic, err := b.Read(ctx, &ReadRequest{FilePath: "/mem/topic.md"})
 	require.NoError(t, err)
 	require.Equal(t, "remember pending", topic.Content)
+}
+
+type responseFormatSelectionModel struct {
+	formats      []*schema.ResponseFormat
+	plainOutput  string
+	schemaOutput string
+	schemaErr    error
+	objectOutput string
+}
+
+func (m *responseFormatSelectionModel) Generate(_ context.Context, _ []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+	responseFormat := model.GetCommonOptions(nil, opts...).ResponseFormat
+	m.formats = append(m.formats, responseFormat)
+
+	if responseFormat == nil {
+		return schema.AssistantMessage(m.plainOutput, nil), nil
+	}
+	switch responseFormat.Type {
+	case schema.ResponseFormatTypeJSONSchema:
+		if m.schemaErr != nil {
+			return nil, m.schemaErr
+		}
+		return schema.AssistantMessage(m.schemaOutput, nil), nil
+	case schema.ResponseFormatTypeJSONObject:
+		return schema.AssistantMessage(m.objectOutput, nil), nil
+	default:
+		return nil, fmt.Errorf("unexpected response format: %q", responseFormat.Type)
+	}
+}
+
+func (m *responseFormatSelectionModel) Stream(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+	msg, err := m.Generate(ctx, input, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return schema.StreamReaderFromArray([]*schema.Message{msg}), nil
+}
+
+func TestMiddleware_TopicSelection_ResponseFormatFallback(t *testing.T) {
+	ctx := context.Background()
+	backend := NewInMemoryBackend()
+	now := time.Now()
+	backend.put("/mem/MEMORY.md", "- [debugging.md](debugging.md) - notes\n", now)
+	backend.put("/mem/debugging.md", "debug notes", now)
+
+	selectionModel := &responseFormatSelectionModel{
+		plainOutput:  "not JSON",
+		schemaErr:    fmt.Errorf("json_schema unsupported"),
+		objectOutput: `{"selected_memories":["debugging.md"]}`,
+	}
+	mw, err := New(ctx, &Config[*schema.Message]{
+		MemoryDirectory: "/mem",
+		MemoryBackend:   backend,
+		Model:           selectionModel,
+		Read:            &ReadConfig[*schema.Message]{Mode: ReadModeSync},
+	})
+	require.NoError(t, err)
+
+	_, out, err := mw.BeforeAgent(ctx, &adk.ChatModelAgentContext[*schema.Message]{
+		Instruction: "base",
+		AgentInput:  &adk.AgentInput{Messages: []adk.Message{schema.UserMessage("How do I debug?")}},
+	})
+	require.NoError(t, err)
+	require.Equal(t, 1, countTopicMemoryMessages(out.AgentInput.Messages))
+	require.Len(t, selectionModel.formats, 3)
+	require.Nil(t, selectionModel.formats[0])
+	require.Equal(t, schema.ResponseFormatTypeJSONSchema, selectionModel.formats[1].Type)
+	require.NotNil(t, selectionModel.formats[1].JSONSchema)
+	require.NotNil(t, selectionModel.formats[1].JSONSchema.Schema)
+	require.Equal(t, schema.ResponseFormatTypeJSONObject, selectionModel.formats[2].Type)
+}
+
+func TestMiddleware_TopicSelection_FixedOutputMode(t *testing.T) {
+	ctx := context.Background()
+	backend := NewInMemoryBackend()
+	now := time.Now()
+	backend.put("/mem/MEMORY.md", "- [debugging.md](debugging.md) - notes\n", now)
+	backend.put("/mem/debugging.md", "debug notes", now)
+
+	selectionModel := &responseFormatSelectionModel{
+		objectOutput: `{"selected_memories":["debugging.md"]}`,
+	}
+	mw, err := New(ctx, &Config[*schema.Message]{
+		MemoryDirectory: "/mem",
+		MemoryBackend:   backend,
+		Model:           selectionModel,
+		Read: &ReadConfig[*schema.Message]{
+			Mode: ReadModeSync,
+			TopicSelection: &TopicSelectionConfig{
+				OutputMode: TopicSelectionOutputModeJSONObject,
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	_, out, err := mw.BeforeAgent(ctx, &adk.ChatModelAgentContext[*schema.Message]{
+		Instruction: "base",
+		AgentInput:  &adk.AgentInput{Messages: []adk.Message{schema.UserMessage("How do I debug?")}},
+	})
+	require.NoError(t, err)
+	require.Equal(t, 1, countTopicMemoryMessages(out.AgentInput.Messages))
+	require.Len(t, selectionModel.formats, 1)
+	require.Equal(t, schema.ResponseFormatTypeJSONObject, selectionModel.formats[0].Type)
 }

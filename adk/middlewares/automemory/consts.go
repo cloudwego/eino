@@ -47,6 +47,7 @@ const (
 	OnErrorStageTopicSelectionSync    ErrorStage = "topic_selection_sync"
 	OnErrorStageTopicSelectionAsync   ErrorStage = "topic_selection_async"
 	OnErrorStageRenderInstruction     ErrorStage = "render_instruction"
+	OnErrorStageReadMemoryIndex       ErrorStage = "read_memory_index"
 	OnErrorStageResolveSessionID      ErrorStage = "resolve_session_id"
 	OnErrorStageMemoryWriteSync       ErrorStage = "memory_write_sync"
 	OnErrorStageSnapshotMarshal       ErrorStage = "snapshot_marshal"

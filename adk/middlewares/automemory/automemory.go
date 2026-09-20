@@ -150,7 +150,21 @@ type TopicSelectionConfig struct {
 	// MaxTotalBytes caps the total rendered topic memory reminder.
 	// Optional. Defaults to 16k.
 	MaxTotalBytes int
+
+	// OutputMode constrains the response format used for topic selection.
+	// Supported values are TopicSelectionOutputModeJSONSchema and
+	// TopicSelectionOutputModeJSONObject. When empty, topic selection first
+	// attempts a plain model call, then falls back to those response formats.
+	OutputMode TopicSelectionOutputMode
 }
+
+// TopicSelectionOutputMode specifies a structured response format for topic selection.
+type TopicSelectionOutputMode string
+
+const (
+	TopicSelectionOutputModeJSONSchema TopicSelectionOutputMode = "json_schema"
+	TopicSelectionOutputModeJSONObject TopicSelectionOutputMode = "json_object"
+)
 
 type WriteMode string
 
@@ -304,13 +318,14 @@ func (m *middleware[M]) BeforeAgent(ctx context.Context, runCtx *adk.ChatModelAg
 		}
 	}
 
-	// 1) System prompt: inject stable auto memory instruction and directory manifest (best-effort).
+	// 1) System prompt: inject stable auto memory instruction and directory manifest.
+	// If this fails, skip all subsequent memory injection to avoid partial context.
 	instruction, err := m.renderInstruction(ctx, nRunCtx.Instruction)
 	if err != nil {
 		m.onErr(ctx, OnErrorStageRenderInstruction, err)
-	} else {
-		nRunCtx.Instruction = instruction
+		return ctx, &nRunCtx, nil
 	}
+	nRunCtx.Instruction = instruction
 
 	if nRunCtx.AgentInput == nil || len(nRunCtx.AgentInput.Messages) == 0 {
 		return ctx, &nRunCtx, nil
@@ -322,9 +337,8 @@ func (m *middleware[M]) BeforeAgent(ctx context.Context, runCtx *adk.ChatModelAg
 	if !hasMemoryIndexInjected(nRunCtx.AgentInput.Messages) {
 		indexMsg, err := m.buildMemoryIndexMessage(ctx)
 		if err != nil {
-			m.onErr(ctx, OnErrorStageRenderInstruction, err)
+			m.onErr(ctx, OnErrorStageReadMemoryIndex, err)
 		} else if !isNilMessage(indexMsg) {
-			m.sendTopicMemoryEvent(ctx, nRunCtx.AgentInput.Messages, indexMsg)
 			reminders = append(reminders, indexMsg)
 		}
 	}
@@ -336,12 +350,14 @@ func (m *middleware[M]) BeforeAgent(ctx context.Context, runCtx *adk.ChatModelAg
 		if err != nil {
 			m.onErr(ctx, OnErrorStageTopicSelectionSync, err)
 		} else if !isNilMessage(memMsg) {
-			m.sendTopicMemoryEvent(ctx, nRunCtx.AgentInput.Messages, memMsg)
 			reminders = append(reminders, memMsg)
 		}
 	}
 
 	if len(reminders) > 0 {
+		for _, reminder := range reminders {
+			m.sendTopicMemoryEvent(ctx, nRunCtx.AgentInput.Messages, reminder)
+		}
 		msgs := insertMessagesBeforeLastUserQuery(nRunCtx.AgentInput.Messages, reminders)
 		nRunCtx.AgentInput = &adk.TypedAgentInput[M]{Messages: msgs, EnableStreaming: nRunCtx.AgentInput.EnableStreaming}
 	}
@@ -630,14 +646,40 @@ func (m *middleware[M]) selectTopicCandidates(
 		return nil, err
 	}
 
-	toolInfo := topicSelectionToolInfo()
+	valid := make(map[string]struct{}, len(relToBundle))
+	for k := range relToBundle {
+		valid[k] = struct{}{}
+	}
+
+	mode := m.cfg.Read.TopicSelection.OutputMode
+	if mode != "" {
+		return m.selectTopicWithResponseFormat(ctx, mode, userMsg, valid, topK)
+	}
+
+	selected, err := m.selectTopicPlain(ctx, userMsg, valid, topK)
+	if err == nil {
+		return selected, nil
+	}
+
+	selected, err = m.selectTopicWithResponseFormat(ctx, TopicSelectionOutputModeJSONSchema, userMsg, valid, topK)
+	if err == nil {
+		return selected, nil
+	}
+	return m.selectTopicWithResponseFormat(ctx, TopicSelectionOutputModeJSONObject, userMsg, valid, topK)
+}
+
+func (m *middleware[M]) selectTopicPlain(
+	ctx context.Context,
+	userMsg string,
+	valid map[string]struct{},
+	topK int,
+) ([]string, error) {
 	respStream, err := m.topicSelectionModel.Stream(
 		ctx,
 		[]M{
-			makeSystemMsg[M](getTopicSelectionSystemPrompt()),
+			makeSystemMsg[M](getTopicSelectionSystemPrompt() + "\n\n" + getTopicSelectionJSONOutputHint()),
 			makeUserMsg[M](userMsg),
 		},
-		makeToolChoiceForced[M](toolInfo.Name),
 	)
 	if err != nil {
 		return nil, err
@@ -648,13 +690,58 @@ func (m *middleware[M]) selectTopicCandidates(
 		return nil, err
 	}
 
-	valid := make(map[string]struct{}, len(relToBundle))
-	for k := range relToBundle {
-		valid[k] = struct{}{}
+	return m.parseTopicSelectionResponse(resp, valid, topK)
+}
+
+func (m *middleware[M]) selectTopicWithResponseFormat(
+	ctx context.Context,
+	mode TopicSelectionOutputMode,
+	userMsg string,
+	valid map[string]struct{},
+	topK int,
+) ([]string, error) {
+	var responseFormat *schema.ResponseFormat
+	switch mode {
+	case TopicSelectionOutputModeJSONSchema:
+		responseFormat = &schema.ResponseFormat{
+			Type: schema.ResponseFormatTypeJSONSchema,
+			JSONSchema: &schema.ResponseFormatJSONSchema{
+				Schema: topicSelectionJSONSchema(),
+			},
+		}
+	case TopicSelectionOutputModeJSONObject:
+		responseFormat = &schema.ResponseFormat{Type: schema.ResponseFormatTypeJSONObject}
+	default:
+		return nil, fmt.Errorf("unsupported topic selection output mode: %q", mode)
 	}
-	selected, err := parseTopicSelectionFromToolCall(resp, valid)
+
+	respStream, err := m.topicSelectionModel.Stream(
+		ctx,
+		[]M{
+			makeSystemMsg[M](getTopicSelectionSystemPrompt() + "\n\n" + getTopicSelectionJSONOutputHint()),
+			makeUserMsg[M](userMsg),
+		},
+		model.WithResponseFormat(responseFormat),
+	)
 	if err != nil {
 		return nil, err
+	}
+
+	resp, err := concatMessageStream(respStream)
+	if err != nil {
+		return nil, err
+	}
+
+	return m.parseTopicSelectionResponse(resp, valid, topK)
+}
+
+func (m *middleware[M]) parseTopicSelectionResponse(resp M, valid map[string]struct{}, topK int) ([]string, error) {
+	selected, err := parseTopicSelectionFromToolCall(resp, valid)
+	if err != nil {
+		selected, err = parseTopicSelectionFromContent(resp, valid)
+		if err != nil {
+			return nil, err
+		}
 	}
 	if len(selected) > topK {
 		return selected[:topK], nil

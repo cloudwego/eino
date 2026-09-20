@@ -88,3 +88,61 @@ func TestConcatMessageStream_WithToolCalls(t *testing.T) {
 	require.Len(t, msg.ToolCalls, 1)
 	assert.Equal(t, "search", msg.ToolCalls[0].Function.Name)
 }
+
+func TestParseTopicSelectionFromContent(t *testing.T) {
+	valid := map[string]struct{}{
+		"debugging.md": {},
+		"patterns.md":  {},
+	}
+
+	tests := []struct {
+		name    string
+		content string
+		want    []string
+		wantErr string
+	}{
+		{
+			name:    "pure JSON",
+			content: `{"selected_memories":["debugging.md","missing.md"]}`,
+			want:    []string{"debugging.md"},
+		},
+		{
+			name:    "markdown code block",
+			content: "Result:\n```json\n{\"selected_memories\":[\"patterns.md\"]}\n```",
+			want:    []string{"patterns.md"},
+		},
+		{
+			name:    "empty selection",
+			content: `{"selected_memories":[]}`,
+			want:    []string{},
+		},
+		{
+			name:    "no JSON",
+			content: "No relevant memory.",
+			wantErr: "no JSON found",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			msg := &schema.Message{Role: schema.Assistant, Content: tt.content}
+			got, err := parseTopicSelectionFromContent(msg, valid)
+			if tt.wantErr != "" {
+				require.ErrorContains(t, err, tt.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestTopicSelectionJSONSchema(t *testing.T) {
+	result := topicSelectionJSONSchema()
+	require.NotNil(t, result)
+	assert.Equal(t, "object", result.Type)
+
+	selected, ok := result.Properties.Get("selected_memories")
+	require.True(t, ok)
+	assert.Equal(t, "array", selected.Type)
+}

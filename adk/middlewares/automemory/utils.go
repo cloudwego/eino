@@ -26,11 +26,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/eino-contrib/jsonschema"
 	"gopkg.in/yaml.v3"
 
 	"github.com/cloudwego/eino/adk"
 	adkfs "github.com/cloudwego/eino/adk/middlewares/filesystem"
-	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -247,6 +247,16 @@ func topicSelectionToolInfo() *schema.ToolInfo {
 	}
 }
 
+func topicSelectionJSONSchema() *jsonschema.Schema {
+	reflector := &jsonschema.Reflector{
+		Anonymous:      true,
+		DoNotReference: true,
+	}
+	result := reflector.Reflect(&topicSelectionResp{})
+	result.Version = ""
+	return result
+}
+
 func parseTopicSelectionFromToolCall[M adk.MessageType](msg M, valid map[string]struct{}) ([]string, error) {
 	toolCalls := messageToolCalls(msg)
 	if len(toolCalls) == 0 {
@@ -388,6 +398,86 @@ func userMessageTextContent[M adk.MessageType](msg M) string {
 	}
 }
 
+func assistantTextContent[M adk.MessageType](msg M) string {
+	switch m := any(msg).(type) {
+	case *schema.Message:
+		if m == nil {
+			return ""
+		}
+		return m.Content
+	case *schema.AgenticMessage:
+		if m == nil {
+			return ""
+		}
+		parts := make([]string, 0, len(m.ContentBlocks))
+		for _, block := range m.ContentBlocks {
+			if block != nil && block.AssistantGenText != nil {
+				parts = append(parts, block.AssistantGenText.Text)
+			}
+		}
+		return strings.Join(parts, "\n")
+	default:
+		panic("unreachable")
+	}
+}
+
+func parseTopicSelectionFromContent[M adk.MessageType](msg M, valid map[string]struct{}) ([]string, error) {
+	content := assistantTextContent(msg)
+	if content == "" {
+		return nil, fmt.Errorf("empty response content")
+	}
+
+	jsonStr := extractJSON(content)
+	if jsonStr == "" {
+		return nil, fmt.Errorf("no JSON found in response content")
+	}
+
+	var parsed topicSelectionResp
+	if err := json.Unmarshal([]byte(jsonStr), &parsed); err != nil {
+		return nil, fmt.Errorf("failed to parse JSON from content: %w", err)
+	}
+
+	selected := normalizeSelected(parsed.SelectedMemories)
+	filtered := make([]string, 0, len(selected))
+	for _, path := range selected {
+		if _, ok := valid[path]; ok {
+			filtered = append(filtered, path)
+		}
+	}
+	return filtered, nil
+}
+
+func extractJSON(s string) string {
+	s = strings.TrimSpace(s)
+
+	if start := strings.Index(s, "```json"); start != -1 {
+		body := s[start+7:]
+		if end := strings.Index(body, "```"); end != -1 {
+			return strings.TrimSpace(body[:end])
+		}
+	}
+	if start := strings.Index(s, "```"); start != -1 {
+		body := s[start+3:]
+		if newline := strings.IndexByte(body, '\n'); newline != -1 {
+			body = body[newline+1:]
+		}
+		if end := strings.Index(body, "```"); end != -1 {
+			candidate := strings.TrimSpace(body[:end])
+			if strings.HasPrefix(candidate, "{") {
+				return candidate
+			}
+		}
+	}
+
+	if start := strings.IndexByte(s, '{'); start != -1 {
+		candidate := s[start:]
+		if end := strings.LastIndexByte(candidate, '}'); end != -1 {
+			return candidate[:end+1]
+		}
+	}
+	return ""
+}
+
 func getMsgExtra[M adk.MessageType](msg M) map[string]any {
 	switch m := any(msg).(type) {
 	case *schema.Message:
@@ -442,23 +532,6 @@ func makeSystemMsg[M adk.MessageType](text string) M {
 		return any(schema.SystemMessage(text)).(M)
 	case *schema.AgenticMessage:
 		return any(schema.SystemAgenticMessage(text)).(M)
-	default:
-		panic("unreachable")
-	}
-}
-
-func makeToolChoiceForced[M adk.MessageType](name string) model.Option {
-	var zero M
-	switch any(zero).(type) {
-	case *schema.Message:
-		return model.WithToolChoice(schema.ToolChoiceForced, name)
-	case *schema.AgenticMessage:
-		return model.WithAgenticToolChoice(&schema.AgenticToolChoice{
-			Type: schema.ToolChoiceForced,
-			Forced: &schema.AgenticForcedToolChoice{
-				Tools: []*schema.AllowedTool{{FunctionName: name}},
-			},
-		})
 	default:
 		panic("unreachable")
 	}
