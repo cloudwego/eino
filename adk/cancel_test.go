@@ -204,6 +204,13 @@ func drainEventsAndAssertNoCancelError(t *testing.T, iter *AsyncIterator[*AgentE
 	return events
 }
 
+func TestStreamCanceledErrorIs(t *testing.T) {
+	streamCanceled := &StreamCanceledError{}
+	assert.True(t, streamCanceled.Is(ErrStreamCanceled))
+	assert.ErrorIs(t, streamCanceled, ErrStreamCanceled)
+	assert.NotErrorIs(t, streamCanceled, context.Canceled)
+}
+
 func TestCancelContext(t *testing.T) {
 	t.Run("BasicCancelContext", func(t *testing.T) {
 		cc := newCancelContext()
