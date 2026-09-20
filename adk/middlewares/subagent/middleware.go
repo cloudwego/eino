@@ -275,7 +275,9 @@ func (m *typedSubagentMiddleware[M]) BeforeAgent(ctx context.Context, runCtx *ad
 	}
 
 	nRunCtx := *runCtx
-	nRunCtx.Instruction += "\n\n" + m.instruction
+	if m.instruction != "" {
+		nRunCtx.Instruction += "\n\n" + m.instruction
+	}
 	nRunCtx.Tools = append(nRunCtx.Tools, m.tools...)
 	return ctx, &nRunCtx, nil
 }
