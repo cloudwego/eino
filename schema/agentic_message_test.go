@@ -811,7 +811,8 @@ func TestConcatAgenticMessages(t *testing.T) {
 						PromptTokens:     10,
 						CompletionTokens: 5,
 						PromptTokenDetails: PromptTokenDetails{
-							CachedTokens: 3,
+							CachedTokens:        3,
+							CacheCreationTokens: 7,
 						},
 						CompletionTokensDetails: CompletionTokensDetails{
 							ReasoningTokens: 2,
@@ -827,7 +828,8 @@ func TestConcatAgenticMessages(t *testing.T) {
 						PromptTokens:     8,
 						CompletionTokens: 15,
 						PromptTokenDetails: PromptTokenDetails{
-							CachedTokens: 5,
+							CachedTokens:        5,
+							CacheCreationTokens: 4,
 						},
 						CompletionTokensDetails: CompletionTokensDetails{
 							ReasoningTokens: 4,
@@ -845,6 +847,7 @@ func TestConcatAgenticMessages(t *testing.T) {
 		assert.Equal(t, 10, result.ResponseMeta.TokenUsage.PromptTokens)
 		assert.Equal(t, 23, result.ResponseMeta.TokenUsage.TotalTokens)
 		assert.Equal(t, 5, result.ResponseMeta.TokenUsage.PromptTokenDetails.CachedTokens)
+		assert.Equal(t, 7, result.ResponseMeta.TokenUsage.PromptTokenDetails.CacheCreationTokens)
 		assert.Equal(t, 4, result.ResponseMeta.TokenUsage.CompletionTokensDetails.ReasoningTokens)
 	})
 
