@@ -142,6 +142,183 @@ func TestRunnerBufferedForegroundAndBackground_BitsUT(t *testing.T) {
 	assert.Equal(t, "later", string(background.ResultData))
 }
 
+func TestRunnerDispatchesPendingTaskThroughHost_BitsUT(t *testing.T) {
+	dispatched := make(chan *backgroundtask.Task, 1)
+	workStarted := make(chan struct{}, 1)
+	runner, manager := newTestRunner(t, func(config *Config) {
+		config.DispatchPending = func(
+			_ context.Context,
+			task *backgroundtask.Task,
+		) error {
+			dispatched <- task
+			return nil
+		}
+	})
+
+	task, err := runner.Run(context.Background(), &Input{
+		Description: "host dispatched", RunInBackground: true,
+	}, func(context.Context, backgroundtask.ExecutionRuntime) (string, error) {
+		workStarted <- struct{}{}
+		return "done", nil
+	})
+	require.NoError(t, err)
+	require.Equal(t, task.Spec.ID, (<-dispatched).Spec.ID)
+	require.Equal(t, backgroundtask.StatusPending, task.Status)
+	select {
+	case <-workStarted:
+		t.Fatal("Runner executed a task accepted by DispatchPending")
+	default:
+	}
+
+	require.NoError(t, manager.Execute(context.Background(), task.Spec.ID))
+	require.Equal(t, backgroundtask.StatusCompleted, waitTerminal(t, manager, task).Status)
+}
+
+func TestRunnerPreservesDispatchPendingError_BitsUT(t *testing.T) {
+	dispatchErr := errors.New("worker is closing")
+	runner, manager := newTestRunner(t, func(config *Config) {
+		config.DispatchPending = func(
+			context.Context,
+			*backgroundtask.Task,
+		) error {
+			return dispatchErr
+		}
+	})
+
+	task, err := runner.Run(context.Background(), &Input{
+		Description: "rejected", RunInBackground: true,
+	}, func(context.Context, backgroundtask.ExecutionRuntime) (string, error) {
+		return "unexpected", nil
+	})
+	require.ErrorIs(t, err, dispatchErr)
+	require.NotNil(t, task)
+	persisted, getErr := manager.Get(context.Background(), task.Spec.ID)
+	require.NoError(t, getErr)
+	require.Equal(t, backgroundtask.StatusPending, persisted.Status)
+}
+
+func TestRunnerAutoBackgroundDispatchesThroughHost_BitsUT(t *testing.T) {
+	timeout := 1
+	dispatched := make(chan *backgroundtask.Task, 1)
+	runner, manager := newTestRunner(t, func(config *Config) {
+		config.ForegroundTimeoutMs = &timeout
+		config.ShouldAutoBackground = func(
+			context.Context,
+			*backgroundtask.ForegroundCandidate,
+		) bool {
+			return true
+		}
+		config.DispatchPending = func(
+			_ context.Context,
+			task *backgroundtask.Task,
+		) error {
+			dispatched <- task
+			return nil
+		}
+	})
+	release := make(chan struct{})
+
+	task, err := runner.Run(
+		context.Background(),
+		&Input{Description: "auto background"},
+		func(context.Context, backgroundtask.ExecutionRuntime) (string, error) {
+			<-release
+			return "done", nil
+		},
+	)
+	require.NoError(t, err)
+	require.Equal(t, task.Spec.ID, (<-dispatched).Spec.ID)
+	require.Equal(t, backgroundtask.StatusPending, task.Status)
+
+	close(release)
+	require.NoError(t, manager.Execute(context.Background(), task.Spec.ID))
+	require.Equal(t, backgroundtask.StatusCompleted, waitTerminal(t, manager, task).Status)
+}
+
+func TestRunnerAutoBackgroundPreservesTaskAfterDispatchRejection_BitsUT(t *testing.T) {
+	timeout := 1
+	dispatchErr := errors.New("worker is full")
+	runner, manager := newTestRunner(t, func(config *Config) {
+		config.ForegroundTimeoutMs = &timeout
+		config.ShouldAutoBackground = func(
+			context.Context,
+			*backgroundtask.ForegroundCandidate,
+		) bool {
+			return true
+		}
+		config.DispatchPending = func(
+			context.Context,
+			*backgroundtask.Task,
+		) error {
+			return dispatchErr
+		}
+	})
+	release := make(chan struct{})
+	canceled := make(chan struct{}, 1)
+
+	task, err := runner.Run(
+		context.Background(),
+		&Input{Description: "rejected auto background"},
+		func(ctx context.Context, _ backgroundtask.ExecutionRuntime) (string, error) {
+			select {
+			case <-release:
+				return "done", nil
+			case <-ctx.Done():
+				canceled <- struct{}{}
+				return "", ctx.Err()
+			}
+		},
+	)
+	require.ErrorIs(t, err, dispatchErr)
+	require.NotNil(t, task)
+	require.Equal(t, backgroundtask.StatusPending, task.Status)
+	select {
+	case <-canceled:
+		t.Fatal("persisted auto-background work was canceled after dispatch rejection")
+	default:
+	}
+
+	close(release)
+	require.NoError(t, manager.Execute(context.Background(), task.Spec.ID))
+	require.Equal(t, backgroundtask.StatusCompleted, waitTerminal(t, manager, task).Status)
+}
+
+func TestAttack_StreamAutoBackgroundDispatchRejectionRetainsWork(t *testing.T) {
+	timeout := 1
+	dispatchErr := errors.New("worker is full")
+	runner, manager := newTestRunner(t, func(config *Config) {
+		config.ForegroundTimeoutMs = &timeout
+		config.ShouldAutoBackground = func(
+			context.Context,
+			*backgroundtask.ForegroundCandidate,
+		) bool {
+			return true
+		}
+		config.DispatchPending = func(
+			context.Context,
+			*backgroundtask.Task,
+		) error {
+			return dispatchErr
+		}
+	})
+	release := make(chan struct{})
+
+	stream, err := runner.RunStream(
+		context.Background(),
+		&Input{Description: "rejected stream handoff"},
+		gatedStreamWork(release),
+	)
+	require.NoError(t, err)
+	_, err = stream.Recv()
+	require.ErrorIs(t, err, dispatchErr)
+	task := onlyTask(t, manager)
+	require.Equal(t, backgroundtask.StatusPending, task.Status)
+
+	close(release)
+	require.NoError(t, manager.Execute(context.Background(), task.Spec.ID))
+	require.Equal(t, backgroundtask.StatusCompleted, waitTerminal(t, manager, task).Status)
+}
+
 func TestRunnerForegroundTimeoutPolicies_BitsUT(t *testing.T) {
 	t.Run("fail", func(t *testing.T) {
 		timeout := 10
@@ -457,6 +634,34 @@ func TestRunnerStreamBackgroundNotices(t *testing.T) {
 		close(release)
 		require.Equal(t, backgroundtask.StatusCompleted,
 			waitTerminal(t, manager, onlyTask(t, manager)).Status)
+	})
+
+	t.Run("host dispatch", func(t *testing.T) {
+		dispatched := make(chan *backgroundtask.Task, 1)
+		runner, manager := newTestRunner(t, func(config *Config) {
+			config.BackgroundNotice = func(_ context.Context, info NoticeInfo) string {
+				return fmt.Sprintf("notice:%t", info.AutoBackgrounded)
+			}
+			config.DispatchPending = func(
+				_ context.Context,
+				task *backgroundtask.Task,
+			) error {
+				dispatched <- task
+				return nil
+			}
+		})
+		stream, err := runner.RunStream(context.Background(), &Input{
+			Description: "host dispatched stream", RunInBackground: true,
+		}, streamWork("done"))
+		require.NoError(t, err)
+		require.Equal(t, "notice:false", drain(t, stream))
+
+		task := <-dispatched
+		pending, err := manager.Get(context.Background(), task.Spec.ID)
+		require.NoError(t, err)
+		require.Equal(t, backgroundtask.StatusPending, pending.Status)
+		require.NoError(t, manager.Execute(context.Background(), task.Spec.ID))
+		require.Equal(t, backgroundtask.StatusCompleted, waitTerminal(t, manager, task).Status)
 	})
 
 	t.Run("preview expires", func(t *testing.T) {
