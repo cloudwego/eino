@@ -1081,16 +1081,27 @@ type toolInfoOverrideMiddleware[M adk.MessageType] struct {
 func (t *toolInfoOverrideMiddleware[M]) BeforeModelRewriteState(ctx context.Context, state *adk.TypedChatModelAgentState[M], _ *adk.TypedModelContext[M]) (
 	context.Context, *adk.TypedChatModelAgentState[M], error) {
 
-	toolNameMapping := make(map[string]struct{}, len(t.toolInfos))
-	for _, tool := range t.toolInfos {
-		toolNameMapping[tool.Name] = struct{}{}
+	extractionTools := make(map[string]*schema.ToolInfo, len(state.ToolInfos))
+	for _, tool := range state.ToolInfos {
+		extractionTools[tool.Name] = tool
 	}
 
-	overrideTools := append([]*schema.ToolInfo{}, t.toolInfos...)
-	for _, tool := range state.ToolInfos {
-		if _, ok := toolNameMapping[tool.Name]; !ok {
+	overrideTools := make([]*schema.ToolInfo, 0, len(t.toolInfos)+len(state.ToolInfos))
+	mergedTools := make(map[string]struct{}, len(t.toolInfos)+len(state.ToolInfos))
+	for _, tool := range t.toolInfos {
+		if extractionTool, ok := extractionTools[tool.Name]; ok {
+			overrideTools = append(overrideTools, extractionTool)
+		} else {
 			overrideTools = append(overrideTools, tool)
 		}
+		mergedTools[tool.Name] = struct{}{}
+	}
+	for _, tool := range state.ToolInfos {
+		if _, ok := mergedTools[tool.Name]; ok {
+			continue
+		}
+		overrideTools = append(overrideTools, tool)
+		mergedTools[tool.Name] = struct{}{}
 	}
 	state.ToolInfos = overrideTools
 

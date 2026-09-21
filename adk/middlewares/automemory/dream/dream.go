@@ -41,7 +41,7 @@ type middleware[M adk.MessageType] struct {
 
 	cfg               *Config[M]
 	resolvedMemoryDir string
-	fsHandler         adk.TypedChatModelAgentMiddleware[M]
+	handlers          []adk.TypedChatModelAgentMiddleware[M]
 	sessionSearchTool tool.BaseTool
 	now               func() time.Time
 }
@@ -102,6 +102,9 @@ func newMiddleware[M adk.MessageType](ctx context.Context, cfg *Config[M]) (*mid
 	if err != nil {
 		return nil, err
 	}
+	handlers := []adk.TypedChatModelAgentMiddleware[M]{fsHandler}
+	handlers = append(handlers, cfg.Handlers...)
+
 	var sessionSearchTool tool.BaseTool
 	if cfg.SessionStore != nil {
 		sessionSearchTool, err = newSessionHistoryGrepTool(cfg.SessionStore)
@@ -110,7 +113,7 @@ func newMiddleware[M adk.MessageType](ctx context.Context, cfg *Config[M]) (*mid
 		TypedBaseChatModelAgentMiddleware: adk.TypedBaseChatModelAgentMiddleware[M]{},
 		cfg:                               cfg,
 		resolvedMemoryDir:                 resolvedMemoryDir,
-		fsHandler:                         fsHandler,
+		handlers:                          handlers,
 		sessionSearchTool:                 sessionSearchTool,
 		now:                               time.Now,
 	}
@@ -229,7 +232,7 @@ func (m *middleware[M]) newDreamAgent(ctx context.Context) (*adk.TypedChatModelA
 		Name:          "automemory_dream",
 		Description:   "Internal auto dream consolidation agent",
 		Model:         m.cfg.Model,
-		Handlers:      []adk.TypedChatModelAgentMiddleware[M]{m.fsHandler},
+		Handlers:      m.handlers,
 		ToolsConfig:   adk.ToolsConfig{ToolsNodeConfig: compose.ToolsNodeConfig{Tools: tools}},
 		MaxIterations: 12,
 	})
