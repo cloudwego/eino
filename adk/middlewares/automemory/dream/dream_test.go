@@ -30,6 +30,8 @@ import (
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/adk/middlewares/automemory"
+	"github.com/cloudwego/eino/adk/middlewares/reduction"
+	"github.com/cloudwego/eino/adk/middlewares/summarization"
 	adksession "github.com/cloudwego/eino/adk/session"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
@@ -117,6 +119,20 @@ func (m *mainAgentModel) WithTools([]*schema.ToolInfo) (model.ToolCallingChatMod
 	return m, nil
 }
 
+type customDreamMiddleware struct {
+	*adk.BaseChatModelAgentMiddleware
+	beforeModel func()
+}
+
+func (m *customDreamMiddleware) BeforeModelRewriteState(ctx context.Context, state *adk.ChatModelAgentState, _ *adk.ModelContext) (
+	context.Context, *adk.ChatModelAgentState, error) {
+
+	if m.beforeModel != nil {
+		m.beforeModel()
+	}
+	return ctx, state, nil
+}
+
 func drainIterator(t *testing.T, iter *adk.AsyncIterator[*adk.AgentEvent]) []*adk.AgentEvent {
 	t.Helper()
 	var out []*adk.AgentEvent
@@ -186,6 +202,79 @@ func TestNew_DoesNotMutateConfig(t *testing.T) {
 	require.Zero(t, cfg.Schedule.ScanInterval)
 	require.Zero(t, cfg.Schedule.LockTTL)
 	require.Nil(t, cfg.Schedule.Store)
+}
+
+func TestNew_ConfiguresDreamAgentHandlers(t *testing.T) {
+	ctx := context.Background()
+	model := &dreamModel{}
+	var (
+		orderMu sync.Mutex
+		order   []string
+	)
+	recordOrder := func(name string) {
+		orderMu.Lock()
+		defer orderMu.Unlock()
+		order = append(order, name)
+	}
+	customHandler := &customDreamMiddleware{
+		BaseChatModelAgentMiddleware: &adk.BaseChatModelAgentMiddleware{},
+		beforeModel: func() {
+			recordOrder("custom")
+		},
+	}
+	reductionHandler, err := reduction.New(ctx, &reduction.Config{
+		SkipTruncation: true,
+		SkipClear:      true,
+		TokenCounter: func(context.Context, []*schema.Message, []*schema.ToolInfo) (int64, error) {
+			recordOrder("reduction")
+			return 0, nil
+		},
+	})
+	require.NoError(t, err)
+	summarizationHandler, err := summarization.New(ctx, &summarization.Config{
+		Model: model,
+		TokenCounter: func(context.Context, *summarization.TokenCounterInput) (int, error) {
+			recordOrder("summarization")
+			return 0, nil
+		},
+	})
+	require.NoError(t, err)
+	cfg := &Config[*schema.Message]{
+		MemoryDirectory: "/mem",
+		MemoryBackend:   automemory.NewInMemoryBackend(),
+		Model:           model,
+		Handlers: []adk.ChatModelAgentMiddleware{
+			reductionHandler,
+			summarizationHandler,
+			customHandler,
+		},
+	}
+
+	mw, err := New(ctx, cfg)
+	require.NoError(t, err)
+	impl := mw.(*middleware[*schema.Message])
+	require.Len(t, impl.handlers, 4)
+	require.Same(t, reductionHandler, impl.handlers[1])
+	require.Same(t, summarizationHandler, impl.handlers[2])
+	require.Same(t, customHandler, impl.handlers[3])
+
+	cfg.Handlers[0] = &customDreamMiddleware{
+		BaseChatModelAgentMiddleware: &adk.BaseChatModelAgentMiddleware{},
+	}
+	require.Same(t, reductionHandler, impl.cfg.Handlers[0])
+
+	agent, err := impl.newDreamAgent(ctx)
+	require.NoError(t, err)
+	events := drainIterator(t, agent.Run(ctx, &adk.AgentInput{
+		Messages: []adk.Message{schema.UserMessage("consolidate memory")},
+	}))
+	require.NotEmpty(t, events)
+	require.NoError(t, events[len(events)-1].Err)
+
+	orderMu.Lock()
+	defer orderMu.Unlock()
+	require.GreaterOrEqual(t, len(order), 3)
+	require.Equal(t, []string{"reduction", "summarization", "custom"}, order[:3])
 }
 
 func TestMiddleware_AfterAgent_RunInlineWithSessionStore(t *testing.T) {
