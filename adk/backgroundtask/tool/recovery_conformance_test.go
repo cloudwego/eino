@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-package tooltest
+package tool
 
 import (
 	"context"
@@ -22,35 +22,27 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
-
-	backgroundtool "github.com/cloudwego/eino/adk/backgroundtask/tool"
 )
 
 type conformanceToolStub struct {
 	validateErr        error
-	start              func() (backgroundtool.Run, error)
+	start              func() (Run, error)
 	startCheckpoint    []byte
-	recover            func() (backgroundtool.Run, error)
-	recoverWithRequest func(*backgroundtool.RecoverRequest) (backgroundtool.Run, error)
+	recover            func() (Run, error)
+	recoverWithRequest func(*RecoverRequest) (Run, error)
 }
 
 func (t *conformanceToolStub) ValidateArguments(string) error { return t.validateErr }
-func (t *conformanceToolStub) Start(
-	context.Context,
-	*backgroundtool.StartRequest,
-) (*backgroundtool.StartResult, error) {
+func (t *conformanceToolStub) Start(context.Context, *StartRequest) (*StartResult, error) {
 	run, err := t.start()
 	if err != nil {
 		return nil, err
 	}
-	return &backgroundtool.StartResult{
+	return &StartResult{
 		Run: run, Checkpoint: append([]byte(nil), t.startCheckpoint...),
 	}, nil
 }
-func (t *conformanceToolStub) Recover(
-	_ context.Context,
-	request *backgroundtool.RecoverRequest,
-) (backgroundtool.Run, error) {
+func (t *conformanceToolStub) Recover(_ context.Context, request *RecoverRequest) (Run, error) {
 	if t.recoverWithRequest != nil {
 		return t.recoverWithRequest(request)
 	}
@@ -61,26 +53,22 @@ type conformanceRunStub struct {
 	stopErr error
 }
 
-func (*conformanceRunStub) Wait(context.Context) (*backgroundtool.Outcome, error) {
+func (*conformanceRunStub) Wait(context.Context) (*Outcome, error) {
 	return nil, nil
 }
 func (r *conformanceRunStub) Stop(context.Context) error { return r.stopErr }
 
-func conformanceConfig(
-	tools []backgroundtool.RecoverableBackgroundTool,
-	snapshots []*RecoverySnapshot,
-	snapshotErrAt int,
-) *RecoveryConformanceConfig {
+func conformanceConfig(tools []RecoverableBackgroundTool, snapshots []*recoverySnapshot, snapshotErrAt int) *recoveryConformanceConfig {
 	toolIndex := 0
 	snapshotIndex := 0
-	return &RecoveryConformanceConfig{
+	return &recoveryConformanceConfig{
 		TaskID: "task", Arguments: `{"value":"x"}`,
-		NewTool: func() backgroundtool.RecoverableBackgroundTool {
+		NewTool: func() RecoverableBackgroundTool {
 			tool := tools[toolIndex]
 			toolIndex++
 			return tool
 		},
-		Snapshot: func(context.Context, string) (*RecoverySnapshot, error) {
+		Snapshot: func(context.Context, string) (*recoverySnapshot, error) {
 			if snapshotIndex == snapshotErrAt {
 				return nil, errors.New("snapshot failed")
 			}
@@ -91,30 +79,30 @@ func conformanceConfig(
 	}
 }
 
-func healthyConformanceTools(stopErr error) []backgroundtool.RecoverableBackgroundTool {
-	newTool := func() backgroundtool.RecoverableBackgroundTool {
+func healthyConformanceTools(stopErr error) []RecoverableBackgroundTool {
+	newTool := func() RecoverableBackgroundTool {
 		return &conformanceToolStub{
-			start: func() (backgroundtool.Run, error) {
+			start: func() (Run, error) {
 				return &conformanceRunStub{}, nil
 			},
-			recover: func() (backgroundtool.Run, error) {
+			recover: func() (Run, error) {
 				return &conformanceRunStub{stopErr: stopErr}, nil
 			},
 		}
 	}
-	return []backgroundtool.RecoverableBackgroundTool{newTool(), newTool(), newTool()}
+	return []RecoverableBackgroundTool{newTool(), newTool(), newTool()}
 }
 
-func stableSnapshots() []*RecoverySnapshot {
-	update := &backgroundtool.Update{EventID: "event", Data: []byte("same")}
-	return []*RecoverySnapshot{
-		{LogicalOperationID: "operation", Updates: []*backgroundtool.Update{update}},
-		{LogicalOperationID: "operation", Updates: []*backgroundtool.Update{cloneUpdate(update)}},
-		{LogicalOperationID: "operation", Updates: []*backgroundtool.Update{cloneUpdate(update)}},
+func stableSnapshots() []*recoverySnapshot {
+	update := &Update{EventID: "event", Data: []byte("same")}
+	return []*recoverySnapshot{
+		{LogicalOperationID: "operation", Updates: []*Update{update}},
+		{LogicalOperationID: "operation", Updates: []*Update{cloneConformanceUpdate(update)}},
+		{LogicalOperationID: "operation", Updates: []*Update{cloneConformanceUpdate(update)}},
 	}
 }
 
-func cloneUpdate(update *backgroundtool.Update) *backgroundtool.Update {
+func cloneConformanceUpdate(update *Update) *Update {
 	if update == nil {
 		return nil
 	}
@@ -124,48 +112,46 @@ func cloneUpdate(update *backgroundtool.Update) *backgroundtool.Update {
 }
 
 func TestCheckRecoveryConformance(t *testing.T) {
-	require.NoError(t, CheckRecoveryConformance(
+	require.NoError(t, checkRecoveryConformance(
 		context.Background(),
 		conformanceConfig(healthyConformanceTools(nil), stableSnapshots(), -1),
 	))
 
-	for _, config := range []*RecoveryConformanceConfig{
+	for _, config := range []*recoveryConformanceConfig{
 		nil,
 		{},
 		{
 			TaskID: "task", Arguments: "{}",
-			NewTool: func() backgroundtool.RecoverableBackgroundTool { return nil },
-			Snapshot: func(context.Context, string) (*RecoverySnapshot, error) {
+			NewTool: func() RecoverableBackgroundTool { return nil },
+			Snapshot: func(context.Context, string) (*recoverySnapshot, error) {
 				return nil, nil
 			},
 		},
 	} {
-		require.Error(t, CheckRecoveryConformance(context.Background(), config))
+		require.Error(t, checkRecoveryConformance(context.Background(), config))
 	}
 }
 
 func TestCheckRecoveryConformancePassesStableCheckpoint(t *testing.T) {
 	checkpoint := []byte(`{"run_id":"business-run"}`)
-	newStartingTool := func() backgroundtool.RecoverableBackgroundTool {
+	newStartingTool := func() RecoverableBackgroundTool {
 		return &conformanceToolStub{
 			startCheckpoint: append([]byte(nil), checkpoint...),
-			start: func() (backgroundtool.Run, error) {
+			start: func() (Run, error) {
 				return &conformanceRunStub{}, nil
 			},
 		}
 	}
 	recovering := &conformanceToolStub{
-		recoverWithRequest: func(
-			request *backgroundtool.RecoverRequest,
-		) (backgroundtool.Run, error) {
+		recoverWithRequest: func(request *RecoverRequest) (Run, error) {
 			require.Equal(t, checkpoint, request.Checkpoint)
 			return &conformanceRunStub{}, nil
 		},
 	}
-	require.NoError(t, CheckRecoveryConformance(
+	require.NoError(t, checkRecoveryConformance(
 		context.Background(),
 		conformanceConfig(
-			[]backgroundtool.RecoverableBackgroundTool{
+			[]RecoverableBackgroundTool{
 				newStartingTool(),
 				newStartingTool(),
 				recovering,
@@ -180,76 +166,76 @@ func TestCheckRecoveryConformanceFailures(t *testing.T) {
 	t.Run("validate", func(t *testing.T) {
 		tools := healthyConformanceTools(nil)
 		tools[0].(*conformanceToolStub).validateErr = errors.New("invalid")
-		require.ErrorContains(t, CheckRecoveryConformance(
+		require.ErrorContains(t, checkRecoveryConformance(
 			context.Background(), conformanceConfig(tools, stableSnapshots(), -1),
 		), "validate conformance arguments")
 	})
 	t.Run("first start", func(t *testing.T) {
 		tools := healthyConformanceTools(nil)
-		tools[0].(*conformanceToolStub).start = func() (backgroundtool.Run, error) {
+		tools[0].(*conformanceToolStub).start = func() (Run, error) {
 			return nil, errors.New("start failed")
 		}
-		require.ErrorContains(t, CheckRecoveryConformance(
+		require.ErrorContains(t, checkRecoveryConformance(
 			context.Background(), conformanceConfig(tools, stableSnapshots(), -1),
 		), "first start")
 		tools = healthyConformanceTools(nil)
-		tools[0].(*conformanceToolStub).start = func() (backgroundtool.Run, error) {
+		tools[0].(*conformanceToolStub).start = func() (Run, error) {
 			return nil, nil
 		}
-		require.ErrorContains(t, CheckRecoveryConformance(
+		require.ErrorContains(t, checkRecoveryConformance(
 			context.Background(), conformanceConfig(tools, stableSnapshots(), -1),
 		), "nil run")
 	})
 	t.Run("snapshots", func(t *testing.T) {
-		require.ErrorContains(t, CheckRecoveryConformance(
+		require.ErrorContains(t, checkRecoveryConformance(
 			context.Background(),
 			conformanceConfig(healthyConformanceTools(nil), stableSnapshots(), 0),
 		), "snapshot after first start")
 		snapshots := stableSnapshots()
 		snapshots[1].LogicalOperationID = "duplicate"
-		require.ErrorContains(t, CheckRecoveryConformance(
+		require.ErrorContains(t, checkRecoveryConformance(
 			context.Background(),
 			conformanceConfig(healthyConformanceTools(nil), snapshots, -1),
 		), "logical operation changed")
 		snapshots = stableSnapshots()
 		snapshots[2].Updates = nil
-		require.ErrorContains(t, CheckRecoveryConformance(
+		require.ErrorContains(t, checkRecoveryConformance(
 			context.Background(),
 			conformanceConfig(healthyConformanceTools(nil), snapshots, -1),
 		), "lost records")
 	})
 	t.Run("duplicate start", func(t *testing.T) {
 		tools := healthyConformanceTools(nil)
-		tools[1].(*conformanceToolStub).start = func() (backgroundtool.Run, error) {
+		tools[1].(*conformanceToolStub).start = func() (Run, error) {
 			return nil, errors.New("duplicate failed")
 		}
-		require.ErrorContains(t, CheckRecoveryConformance(
+		require.ErrorContains(t, checkRecoveryConformance(
 			context.Background(), conformanceConfig(tools, stableSnapshots(), -1),
 		), "duplicate start")
 		tools = healthyConformanceTools(nil)
-		tools[1].(*conformanceToolStub).start = func() (backgroundtool.Run, error) {
+		tools[1].(*conformanceToolStub).start = func() (Run, error) {
 			return nil, nil
 		}
-		require.ErrorContains(t, CheckRecoveryConformance(
+		require.ErrorContains(t, checkRecoveryConformance(
 			context.Background(), conformanceConfig(tools, stableSnapshots(), -1),
 		), "nil run")
 	})
 	t.Run("recover and stop", func(t *testing.T) {
 		tools := healthyConformanceTools(nil)
-		tools[2].(*conformanceToolStub).recover = func() (backgroundtool.Run, error) {
+		tools[2].(*conformanceToolStub).recover = func() (Run, error) {
 			return nil, errors.New("recover failed")
 		}
-		require.ErrorContains(t, CheckRecoveryConformance(
+		require.ErrorContains(t, checkRecoveryConformance(
 			context.Background(), conformanceConfig(tools, stableSnapshots(), -1),
 		), "recover")
 		tools = healthyConformanceTools(nil)
-		tools[2].(*conformanceToolStub).recover = func() (backgroundtool.Run, error) {
+		tools[2].(*conformanceToolStub).recover = func() (Run, error) {
 			return nil, nil
 		}
-		require.ErrorContains(t, CheckRecoveryConformance(
+		require.ErrorContains(t, checkRecoveryConformance(
 			context.Background(), conformanceConfig(tools, stableSnapshots(), -1),
 		), "nil run")
-		require.ErrorContains(t, CheckRecoveryConformance(
+		require.ErrorContains(t, checkRecoveryConformance(
 			context.Background(),
 			conformanceConfig(
 				healthyConformanceTools(errors.New("stop failed")),
@@ -263,25 +249,25 @@ func TestCheckRecoveryConformanceFailures(t *testing.T) {
 func TestCompareRecoverySnapshotsRejectsInvalidUpdates(t *testing.T) {
 	require.Error(t, compareRecoverySnapshots(nil, nil))
 	require.Error(t, compareRecoverySnapshots(
-		&RecoverySnapshot{
+		&recoverySnapshot{
 			LogicalOperationID: "operation",
-			Updates:            []*backgroundtool.Update{nil},
+			Updates:            []*Update{nil},
 		},
-		&RecoverySnapshot{
+		&recoverySnapshot{
 			LogicalOperationID: "operation",
-			Updates:            []*backgroundtool.Update{nil},
+			Updates:            []*Update{nil},
 		},
 	))
 	require.Error(t, compareRecoverySnapshots(
-		&RecoverySnapshot{
+		&recoverySnapshot{
 			LogicalOperationID: "operation",
-			Updates: []*backgroundtool.Update{{
+			Updates: []*Update{{
 				EventID: "event", Data: []byte("one"),
 			}},
 		},
-		&RecoverySnapshot{
+		&recoverySnapshot{
 			LogicalOperationID: "operation",
-			Updates: []*backgroundtool.Update{{
+			Updates: []*Update{{
 				EventID: "event", Data: []byte("two"),
 			}},
 		},

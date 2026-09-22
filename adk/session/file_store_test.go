@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-package session_test
+package session
 
 import (
 	"context"
@@ -29,20 +29,19 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cloudwego/eino/adk"
-	"github.com/cloudwego/eino/adk/session"
 	"github.com/cloudwego/eino/schema"
 )
 
 func TestFileStoreConformance(t *testing.T) {
-	session.RunConformanceTests[*schema.Message](t, func(t testing.TB) adk.SessionEventStore[*schema.Message] {
-		store, err := session.NewFileStore[*schema.Message](t.TempDir(), nil)
+	runConformanceTests[*schema.Message](t, func(t testing.TB) adk.SessionEventStore[*schema.Message] {
+		store, err := NewFileStore[*schema.Message](t.TempDir(), nil)
 		require.NoError(t, err)
 		return store
 	}, func(content string) *schema.Message {
 		return schema.UserMessage(content)
 	})
-	session.RunSerializerConformanceTests[*schema.Message](t, func(t testing.TB, serializer schema.Serializer) adk.SessionEventStore[*schema.Message] {
-		store, err := session.NewFileStore[*schema.Message](t.TempDir(), &session.FileStoreConfig{EventSerializer: serializer})
+	runSerializerConformanceTests[*schema.Message](t, func(t testing.TB, serializer schema.Serializer) adk.SessionEventStore[*schema.Message] {
+		store, err := NewFileStore[*schema.Message](t.TempDir(), &FileStoreConfig{EventSerializer: serializer})
 		require.NoError(t, err)
 		return store
 	}, func(content string) *schema.Message {
@@ -53,7 +52,7 @@ func TestFileStoreConformance(t *testing.T) {
 func TestFileStorePersistsAcrossInstances(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	store, err := session.NewFileStore[*schema.Message](dir, nil)
+	store, err := NewFileStore[*schema.Message](dir, nil)
 	require.NoError(t, err)
 
 	first := testMessageEvent("persist-1", "first")
@@ -61,7 +60,7 @@ func TestFileStorePersistsAcrossInstances(t *testing.T) {
 	err = store.AppendEvents(ctx, "s", []*adk.SessionEvent[*schema.Message]{first, second})
 	require.NoError(t, err)
 
-	reopened, err := session.NewFileStore[*schema.Message](dir, nil)
+	reopened, err := NewFileStore[*schema.Message](dir, nil)
 	require.NoError(t, err)
 	res, err := reopened.LoadEvents(ctx, "s", &adk.LoadSessionEventsRequest{})
 	require.NoError(t, err)
@@ -73,7 +72,7 @@ func TestFileStorePersistsAcrossInstances(t *testing.T) {
 func TestFileStoreWritesHumanReadableEvlogLines(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	store, err := session.NewFileStore[*schema.Message](dir, nil)
+	store, err := NewFileStore[*schema.Message](dir, nil)
 	require.NoError(t, err)
 
 	first := testMessageEvent("line-1", "first")
@@ -101,7 +100,7 @@ func TestFileStoreWritesHumanReadableEvlogLines(t *testing.T) {
 func TestFileStoreSessionEventExtraRoundTripKeepsThreeColumnFormat(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	store, err := session.NewFileStore[*schema.Message](dir, nil)
+	store, err := NewFileStore[*schema.Message](dir, nil)
 	require.NoError(t, err)
 
 	event := testMessageEvent("extra-1", "one")
@@ -111,7 +110,7 @@ func TestFileStoreSessionEventExtraRoundTripKeepsThreeColumnFormat(t *testing.T)
 	}
 	require.NoError(t, store.AppendEvents(ctx, "s", []*adk.SessionEvent[*schema.Message]{event}))
 
-	reopened, err := session.NewFileStore[*schema.Message](dir, nil)
+	reopened, err := NewFileStore[*schema.Message](dir, nil)
 	require.NoError(t, err)
 	res, err := reopened.LoadEvents(ctx, "s", &adk.LoadSessionEventsRequest{})
 	require.NoError(t, err)
@@ -133,7 +132,7 @@ func TestFileStoreSessionEventExtraRoundTripKeepsThreeColumnFormat(t *testing.T)
 func TestFileStoreRollbackPreservesPhysicalAuditLog(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	store, err := session.NewFileStore[*schema.Message](dir, nil)
+	store, err := NewFileStore[*schema.Message](dir, nil)
 	require.NoError(t, err)
 	sessionID := "rollback-audit"
 
@@ -162,14 +161,14 @@ func TestFileStoreRollbackPreservesPhysicalAuditLog(t *testing.T) {
 }
 
 func TestFileStoreRejectsInvalidDir(t *testing.T) {
-	store, err := session.NewFileStore[*schema.Message]("", nil)
+	store, err := NewFileStore[*schema.Message]("", nil)
 	require.Error(t, err)
 	assert.Nil(t, store)
 }
 
 func TestFileStoreRejectsSerializerRawLineDelimiters(t *testing.T) {
 	ctx := context.Background()
-	store, err := session.NewFileStore[*schema.Message](t.TempDir(), &session.FileStoreConfig{
+	store, err := NewFileStore[*schema.Message](t.TempDir(), &FileStoreConfig{
 		EventSerializer: newlineSerializer{},
 	})
 	require.NoError(t, err)
@@ -182,7 +181,7 @@ func TestFileStoreRejectsSerializerRawLineDelimiters(t *testing.T) {
 func TestFileStoreAppendFailsOnCorruptedExistingLog(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	store, err := session.NewFileStore[*schema.Message](dir, nil)
+	store, err := NewFileStore[*schema.Message](dir, nil)
 	require.NoError(t, err)
 
 	path := filepath.Join(dir, url.PathEscape("s")+".evlog")
@@ -196,7 +195,7 @@ func TestFileStoreAppendFailsOnCorruptedExistingLog(t *testing.T) {
 func TestFileStoreEscapedSessionIDPath(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	store, err := session.NewFileStore[*schema.Message](dir, nil)
+	store, err := NewFileStore[*schema.Message](dir, nil)
 	require.NoError(t, err)
 
 	sessionID := "a/b %snow"
@@ -217,13 +216,13 @@ func TestFileStoreEscapedSessionIDPath(t *testing.T) {
 func TestFileStoreValidationReplayAndReversePagination(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	store, err := session.NewFileStore[*schema.Message](dir, nil)
+	store, err := NewFileStore[*schema.Message](dir, nil)
 	require.NoError(t, err)
 
-	_, err = session.NewFileStore[*schema.Message]("", nil)
+	_, err = NewFileStore[*schema.Message]("", nil)
 	require.Error(t, err)
 
-	service, err := session.NewFileStore[*schema.Message](filepath.Join(dir, "svc"), nil)
+	service, err := NewFileStore[*schema.Message](filepath.Join(dir, "svc"), nil)
 	require.NoError(t, err)
 	assert.NotNil(t, service)
 
@@ -295,7 +294,7 @@ func TestFileStoreRejectsCorruptedRecordsOnIndexRebuild(t *testing.T) {
 	for name, content := range cases {
 		t.Run(name, func(t *testing.T) {
 			dir := t.TempDir()
-			store, err := session.NewFileStore[*schema.Message](dir, nil)
+			store, err := NewFileStore[*schema.Message](dir, nil)
 			require.NoError(t, err)
 
 			if name == "empty session id" {
