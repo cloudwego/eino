@@ -25,9 +25,6 @@
 // TaskEvent is append-only progress. Spec.OutputFile and Task.OutputFileErr
 // describe an optional derived transcript projection; transcript failure never
 // changes authoritative lifecycle status or replaces terminal ResultData.
-//
-// Persistence providers should run the reusable suites in
-// adk/backgroundtask/storetest before deployment.
 package backgroundtask
 
 import (

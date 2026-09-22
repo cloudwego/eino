@@ -14,53 +14,43 @@
  * limitations under the License.
  */
 
-package storetest
+package backgroundtask
 
 import (
 	"testing"
 	"time"
-
-	"github.com/cloudwego/eino/adk/backgroundtask"
 )
 
 func TestInMemoryTaskStoreConformance(t *testing.T) {
 	const attemptTimeout = 20 * time.Millisecond
-	RunTaskStoreConformance(t, TaskStoreConfig{
-		New: func(testing.TB) backgroundtask.TaskStore {
-			return backgroundtask.NewInMemoryStore(&backgroundtask.InMemoryStoreConfig{
+	runTaskStoreConformance(t, taskStoreConformanceConfig{
+		New: func(testing.TB) TaskStore {
+			return NewInMemoryStore(&InMemoryStoreConfig{
 				ActiveAttemptTimeout: attemptTimeout,
 			})
 		},
-		ExpireActiveAttempt: func(
-			_ testing.TB,
-			_ backgroundtask.TaskStore,
-			_ *backgroundtask.Task,
-		) {
+		ExpireActiveAttempt: func(_ testing.TB, _ TaskStore, _ *Task) {
 			time.Sleep(2 * attemptTimeout)
 		},
 	})
 }
 
 func TestInMemoryTaskEventStoreConformance(t *testing.T) {
-	RunTaskEventStoreConformance(t, TaskEventStoreConfig{
-		New: func(testing.TB) (backgroundtask.TaskStore, backgroundtask.TaskEventStore) {
-			store := backgroundtask.NewInMemoryStore(nil)
+	runTaskEventStoreConformance(t, taskEventStoreConformanceConfig{
+		New: func(testing.TB) (TaskStore, TaskEventStore) {
+			store := NewInMemoryStore(nil)
 			return store, store
 		},
 	})
 }
 
 func TestInMemoryNotificationOutboxConformance(t *testing.T) {
-	RunNotificationOutboxConformance(t, NotificationOutboxConfig{
-		New: func(testing.TB) (backgroundtask.TaskStore, backgroundtask.NotificationOutbox) {
-			store := backgroundtask.NewInMemoryStore(nil)
+	runNotificationOutboxConformance(t, notificationOutboxConformanceConfig{
+		New: func(testing.TB) (TaskStore, NotificationOutbox) {
+			store := NewInMemoryStore(nil)
 			return store, store
 		},
-		ExpireLease: func(
-			_ testing.TB,
-			_ backgroundtask.NotificationOutbox,
-			duration time.Duration,
-		) {
+		ExpireLease: func(_ testing.TB, _ NotificationOutbox, duration time.Duration) {
 			time.Sleep(2 * duration)
 		},
 	})
@@ -68,21 +58,14 @@ func TestInMemoryNotificationOutboxConformance(t *testing.T) {
 
 func TestInMemoryNotificationWriterConformance(t *testing.T) {
 	const attemptTimeout = 20 * time.Millisecond
-	RunNotificationWriterConformance(t, NotificationWriterConfig{
-		New: func(testing.TB) (
-			backgroundtask.TaskStore,
-			backgroundtask.NotificationOutbox,
-		) {
-			store := backgroundtask.NewInMemoryStore(&backgroundtask.InMemoryStoreConfig{
+	runNotificationWriterConformance(t, notificationWriterConformanceConfig{
+		New: func(testing.TB) (TaskStore, NotificationOutbox) {
+			store := NewInMemoryStore(&InMemoryStoreConfig{
 				ActiveAttemptTimeout: attemptTimeout,
 			})
 			return store, store
 		},
-		ExpireActiveAttempt: func(
-			_ testing.TB,
-			_ backgroundtask.TaskStore,
-			_ *backgroundtask.Task,
-		) {
+		ExpireActiveAttempt: func(_ testing.TB, _ TaskStore, _ *Task) {
 			time.Sleep(2 * attemptTimeout)
 		},
 	})

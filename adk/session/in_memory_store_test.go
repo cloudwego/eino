@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-package session_test
+package session
 
 import (
 	"context"
@@ -25,18 +25,17 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cloudwego/eino/adk"
-	"github.com/cloudwego/eino/adk/session"
 	"github.com/cloudwego/eino/schema"
 )
 
 func TestInMemoryStoreConformance(t *testing.T) {
-	session.RunConformanceTests[*schema.Message](t, func(testing.TB) adk.SessionEventStore[*schema.Message] {
-		return session.NewInMemoryStore[*schema.Message](nil)
+	runConformanceTests[*schema.Message](t, func(testing.TB) adk.SessionEventStore[*schema.Message] {
+		return NewInMemoryStore[*schema.Message](nil)
 	}, func(content string) *schema.Message {
 		return schema.UserMessage(content)
 	})
-	session.RunSerializerConformanceTests[*schema.Message](t, func(_ testing.TB, serializer schema.Serializer) adk.SessionEventStore[*schema.Message] {
-		return session.NewInMemoryStore[*schema.Message](&session.InMemoryStoreConfig{EventSerializer: serializer})
+	runSerializerConformanceTests[*schema.Message](t, func(_ testing.TB, serializer schema.Serializer) adk.SessionEventStore[*schema.Message] {
+		return NewInMemoryStore[*schema.Message](&InMemoryStoreConfig{EventSerializer: serializer})
 	}, func(content string) *schema.Message {
 		return schema.UserMessage(content)
 	})
@@ -44,7 +43,7 @@ func TestInMemoryStoreConformance(t *testing.T) {
 
 func TestInMemoryStoreCheckpointSetGetDelete(t *testing.T) {
 	ctx := context.Background()
-	store := session.NewInMemoryStore[*schema.Message](nil)
+	store := NewInMemoryStore[*schema.Message](nil)
 
 	_, exists, err := store.Get(ctx, "missing")
 	require.NoError(t, err)
@@ -70,7 +69,7 @@ func TestInMemoryStoreCheckpointSetGetDelete(t *testing.T) {
 
 func TestInMemoryStoreKindFilterAndPagination(t *testing.T) {
 	ctx := context.Background()
-	store := session.NewInMemoryStore[*schema.Message](nil)
+	store := NewInMemoryStore[*schema.Message](nil)
 	events := []*adk.SessionEvent[*schema.Message]{
 		testMessageEvent("e1", "one"),
 		testSpanEvent("e2"),
@@ -93,7 +92,7 @@ func TestInMemoryStoreKindFilterAndPagination(t *testing.T) {
 
 func TestInMemoryStoreLoadReturnsIndependentEvents(t *testing.T) {
 	ctx := context.Background()
-	store := session.NewInMemoryStore[*schema.Message](nil)
+	store := NewInMemoryStore[*schema.Message](nil)
 	err := store.AppendEvents(ctx, "s", []*adk.SessionEvent[*schema.Message]{
 		testMessageEvent("e1", "one"),
 	})
@@ -110,7 +109,7 @@ func TestInMemoryStoreLoadReturnsIndependentEvents(t *testing.T) {
 
 func TestInMemoryStoreSessionEventExtraRoundTripAndIsolation(t *testing.T) {
 	ctx := context.Background()
-	store := session.NewInMemoryStore[*schema.Message](nil)
+	store := NewInMemoryStore[*schema.Message](nil)
 	original := testMessageEvent("extra-1", "one")
 	original.Extra = map[string]any{
 		"reason": "seed",
@@ -139,7 +138,7 @@ func TestInMemoryStoreSessionEventExtraRoundTripAndIsolation(t *testing.T) {
 
 func TestInMemoryStoreValidationReplayAndReversePagination(t *testing.T) {
 	ctx := context.Background()
-	store := session.NewInMemoryStore[*schema.Message](nil)
+	store := NewInMemoryStore[*schema.Message](nil)
 
 	require.NoError(t, store.AppendEvents(ctx, "", nil))
 

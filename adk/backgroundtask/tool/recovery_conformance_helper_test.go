@@ -14,113 +14,106 @@
  * limitations under the License.
  */
 
-// Package tooltest provides conformance checks for managed background tool
-// implementations.
-package tooltest
+package tool
 
 import (
 	"bytes"
 	"context"
 	"errors"
 	"fmt"
-
-	backgroundtool "github.com/cloudwego/eino/adk/backgroundtask/tool"
 )
 
-// RecoverySnapshot exposes backend identity and replay state to the reusable
+// recoverySnapshot exposes backend identity and replay state to the reusable
 // recovery conformance check. LogicalOperationID is backend-private test data;
 // production task APIs continue to expose only the Eino task ID.
-type RecoverySnapshot struct {
+type recoverySnapshot struct {
 	LogicalOperationID string
-	Updates            []*backgroundtool.Update
+	Updates            []*Update
 }
 
-// RecoveryConformanceConfig configures CheckRecoveryConformance.
-type RecoveryConformanceConfig struct {
+// recoveryConformanceConfig configures checkRecoveryConformance.
+type recoveryConformanceConfig struct {
 	TaskID    string
 	Arguments string
-	NewTool   func() backgroundtool.RecoverableBackgroundTool
-	Snapshot  func(context.Context, string) (*RecoverySnapshot, error)
+	NewTool   func() RecoverableBackgroundTool
+	Snapshot  func(context.Context, string) (*recoverySnapshot, error)
 }
 
-// CheckRecoveryConformance verifies that independent adapter instances share
+// checkRecoveryConformance verifies that independent adapter instances share
 // one logical operation and replay stable update identities. Backend suites may
 // add retention-specific assertions around this common check.
-func CheckRecoveryConformance(
-	ctx context.Context,
-	config *RecoveryConformanceConfig,
-) error {
+func checkRecoveryConformance(ctx context.Context, config *recoveryConformanceConfig) error {
 	if config == nil || config.TaskID == "" || config.Arguments == "" ||
 		config.NewTool == nil || config.Snapshot == nil {
-		return errors.New("backgroundtask/tool/tooltest: complete recovery conformance config is required")
+		return errors.New("backgroundtask/tool: complete recovery conformance config is required")
 	}
 	first := config.NewTool()
 	second := config.NewTool()
 	third := config.NewTool()
 	if first == nil || second == nil || third == nil {
-		return errors.New("backgroundtask/tool/tooltest: recovery factory returned nil")
+		return errors.New("backgroundtask/tool: recovery factory returned nil")
 	}
 	if err := first.ValidateArguments(config.Arguments); err != nil {
-		return fmt.Errorf("backgroundtask/tool/tooltest: validate conformance arguments: %w", err)
+		return fmt.Errorf("backgroundtask/tool: validate conformance arguments: %w", err)
 	}
-	firstResult, err := first.Start(ctx, &backgroundtool.StartRequest{
+	firstResult, err := first.Start(ctx, &StartRequest{
 		TaskID: config.TaskID, Arguments: config.Arguments, Attempt: 1,
 	})
 	if err != nil {
-		return fmt.Errorf("backgroundtask/tool/tooltest: first start: %w", err)
+		return fmt.Errorf("backgroundtask/tool: first start: %w", err)
 	}
 	if firstResult == nil || firstResult.Run == nil {
-		return errors.New("backgroundtask/tool/tooltest: first start returned nil run")
+		return errors.New("backgroundtask/tool: first start returned nil run")
 	}
 	before, err := config.Snapshot(ctx, config.TaskID)
 	if err != nil {
-		return fmt.Errorf("backgroundtask/tool/tooltest: snapshot after first start: %w", err)
+		return fmt.Errorf("backgroundtask/tool: snapshot after first start: %w", err)
 	}
-	duplicateResult, err := second.Start(ctx, &backgroundtool.StartRequest{
+	duplicateResult, err := second.Start(ctx, &StartRequest{
 		TaskID: config.TaskID, Arguments: config.Arguments, Attempt: 1,
 	})
 	if err != nil {
-		return fmt.Errorf("backgroundtask/tool/tooltest: duplicate start: %w", err)
+		return fmt.Errorf("backgroundtask/tool: duplicate start: %w", err)
 	}
 	if duplicateResult == nil || duplicateResult.Run == nil {
-		return errors.New("backgroundtask/tool/tooltest: duplicate start returned nil run")
+		return errors.New("backgroundtask/tool: duplicate start returned nil run")
 	}
 	if !bytes.Equal(firstResult.Checkpoint, duplicateResult.Checkpoint) {
 		return errors.New(
-			"backgroundtask/tool/tooltest: duplicate start changed checkpoint",
+			"backgroundtask/tool: duplicate start changed checkpoint",
 		)
 	}
 	afterDuplicate, err := config.Snapshot(ctx, config.TaskID)
 	if err != nil {
-		return fmt.Errorf("backgroundtask/tool/tooltest: snapshot after duplicate start: %w", err)
+		return fmt.Errorf("backgroundtask/tool: snapshot after duplicate start: %w", err)
 	}
 	if err = compareRecoverySnapshots(before, afterDuplicate); err != nil {
-		return fmt.Errorf("backgroundtask/tool/tooltest: duplicate start: %w", err)
+		return fmt.Errorf("backgroundtask/tool: duplicate start: %w", err)
 	}
-	recoveredRun, err := third.Recover(ctx, &backgroundtool.RecoverRequest{
+	recoveredRun, err := third.Recover(ctx, &RecoverRequest{
 		TaskID: config.TaskID, Arguments: config.Arguments, Attempt: 2,
 		Checkpoint: append([]byte(nil), firstResult.Checkpoint...),
 	})
 	if err != nil {
-		return fmt.Errorf("backgroundtask/tool/tooltest: recover: %w", err)
+		return fmt.Errorf("backgroundtask/tool: recover: %w", err)
 	}
 	if recoveredRun == nil {
-		return errors.New("backgroundtask/tool/tooltest: recover returned nil run")
+		return errors.New("backgroundtask/tool: recover returned nil run")
 	}
 	afterRecover, err := config.Snapshot(ctx, config.TaskID)
 	if err != nil {
-		return fmt.Errorf("backgroundtask/tool/tooltest: snapshot after recover: %w", err)
+		return fmt.Errorf("backgroundtask/tool: snapshot after recover: %w", err)
 	}
 	if err = compareRecoverySnapshots(before, afterRecover); err != nil {
-		return fmt.Errorf("backgroundtask/tool/tooltest: recover: %w", err)
+		return fmt.Errorf("backgroundtask/tool: recover: %w", err)
 	}
 	if err = recoveredRun.Stop(ctx); err != nil {
-		return fmt.Errorf("backgroundtask/tool/tooltest: stop recovered operation: %w", err)
+		return fmt.Errorf("backgroundtask/tool: stop recovered operation: %w", err)
 	}
 	return nil
 }
 
-func compareRecoverySnapshots(expected, actual *RecoverySnapshot) error {
+func compareRecoverySnapshots(expected, actual *recoverySnapshot) error {
 	if expected == nil || actual == nil || expected.LogicalOperationID == "" {
 		return errors.New("backend snapshot requires a logical operation id")
 	}
