@@ -14,8 +14,6 @@
  * limitations under the License.
  */
 
-// Package session provides session event stores and a reusable conformance test
-// suite for validating SessionEventStore implementations.
 package session
 
 import (
@@ -37,16 +35,7 @@ func init() {
 	schema.RegisterName[*conformanceExtensionPayload]("_eino_adk_session_conformance_extension_payload")
 }
 
-// RunConformanceTests validates the SessionEventStore contract shared by
-// provider-facing session persistence implementations.
-//
-// The contract assumes single-writer-per-session: tests do NOT exercise
-// concurrent AppendEvents calls for the same sessionID.
-func RunConformanceTests[M adk.MessageType](
-	t *testing.T,
-	factory func(testing.TB) adk.SessionEventStore[M],
-	makeMessage func(content string) M,
-) {
+func runConformanceTests[M adk.MessageType](t *testing.T, factory func(testing.TB) adk.SessionEventStore[M], makeMessage func(content string) M) {
 	t.Helper()
 
 	t.Run("AppendEvents and forward LoadEvents", func(t *testing.T) { testAppendAndForwardLoad(t, factory, makeMessage) })
@@ -65,13 +54,7 @@ func RunConformanceTests[M adk.MessageType](
 	t.Run("event body round-trips", func(t *testing.T) { testEventBodyRoundTrip(t, factory, makeMessage) })
 }
 
-// RunSerializerConformanceTests validates that a concrete SessionEventStore
-// implementation honors its implementation-local serializer configuration.
-func RunSerializerConformanceTests[M adk.MessageType](
-	t *testing.T,
-	factory func(testing.TB, schema.Serializer) adk.SessionEventStore[M],
-	makeMessage func(content string) M,
-) {
+func runSerializerConformanceTests[M adk.MessageType](t *testing.T, factory func(testing.TB, schema.Serializer) adk.SessionEventStore[M], makeMessage func(content string) M) {
 	t.Helper()
 	t.Run("custom serializer is honored", func(t *testing.T) {
 		serializer := &countingEventSerializer{inner: &schema.HumanReadableSerializer{}}
