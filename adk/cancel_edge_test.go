@@ -2029,7 +2029,8 @@ type slowStreamingTool struct {
 	chunkInterval time.Duration
 	chunks        []string
 	started       chan struct{}
-	gate          chan struct{} // if non-nil, blocks after first chunk until closed
+	parked        chan struct{}
+	gate          chan struct{} // if non-nil, blocks after the second chunk until closed
 }
 
 func (t *slowStreamingTool) Info(_ context.Context) (*schema.ToolInfo, error) {
@@ -2061,6 +2062,12 @@ func (t *slowStreamingTool) StreamableRun(_ context.Context, _ string, _ ...tool
 			// has time to receive the first chunk and forward the streaming
 			// event to the iterator, ensuring ErrStreamCanceled is observable.
 			if i == 1 && t.gate != nil {
+				if t.parked != nil {
+					select {
+					case t.parked <- struct{}{}:
+					default:
+					}
+				}
 				<-t.gate
 			}
 		}
@@ -2220,6 +2227,167 @@ func TestWithCancel_CancelImmediate_StreamableToolAborted(t *testing.T) {
 	assert.NoError(t, cancelErr)
 	assert.True(t, r.foundStreamCanceled, "expected ErrStreamCanceled on tool's MessageStream.Recv()")
 	assert.True(t, r.foundCancelError, "expected CancelError in event stream")
+}
+
+func TestWithCancel_CancelImmediate_RecursiveAgentTool_StreamableToolResume(t *testing.T) {
+	ctx := context.Background()
+	gate := make(chan struct{})
+	defer close(gate)
+
+	streamTool := &slowStreamingTool{
+		name:          "slow_tool",
+		chunkInterval: time.Millisecond,
+		chunks:        []string{"a", "b", "c"},
+		started:       make(chan struct{}, 1),
+		parked:        make(chan struct{}, 1),
+		gate:          gate,
+	}
+
+	var innerCalls int32
+	innerAgent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "InnerAgent",
+		Description: "inner agent",
+		Model: &countingChatModel{
+			callCount: &innerCalls,
+			responses: []*schema.Message{
+				toolCallMsg(toolCall("inner-call", "slow_tool", `{"input":"x"}`)),
+				schema.AssistantMessage("inner done", nil),
+			},
+		},
+		ToolsConfig: ToolsConfig{
+			ToolsNodeConfig: compose.ToolsNodeConfig{
+				Tools: []tool.BaseTool{streamTool},
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	var outerCalls int32
+	outerAgent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "OuterAgent",
+		Description: "outer agent",
+		Model: &countingChatModel{
+			callCount: &outerCalls,
+			responses: []*schema.Message{
+				toolCallMsg(toolCall("outer-call", "InnerAgent", `{"request":"work"}`)),
+				schema.AssistantMessage("outer done", nil),
+			},
+		},
+		ToolsConfig: ToolsConfig{
+			ToolsNodeConfig: compose.ToolsNodeConfig{
+				Tools: []tool.BaseTool{NewAgentTool(ctx, innerAgent)},
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	store := newCancelTestStore()
+	const checkpointID = "recursive-agent-tool-streamable-tool"
+	runner := NewRunner(ctx, RunnerConfig{
+		Agent:           outerAgent,
+		EnableStreaming: true,
+		CheckPointStore: store,
+	})
+	cancelOpt, cancelFn := WithCancel()
+	iter := runner.Run(
+		ctx,
+		[]Message{schema.UserMessage("go")},
+		cancelOpt,
+		WithCheckPointID(checkpointID),
+	)
+
+	type drainResult struct {
+		events         []*AgentEvent
+		hasCancelError bool
+	}
+	drained := make(chan drainResult, 1)
+	go func() {
+		events, hasCancelError := drainEvents(iter)
+		drained <- drainResult{events: events, hasCancelError: hasCancelError}
+	}()
+
+	select {
+	case <-streamTool.parked:
+	case <-time.After(5 * time.Second):
+		t.Fatal("inner streaming tool did not park")
+	}
+
+	handle, contributed := cancelFn(WithAgentCancelMode(CancelImmediate), WithRecursive())
+	require.True(t, contributed)
+	require.NoError(t, handle.Wait())
+
+	result := <-drained
+	require.True(t, result.hasCancelError)
+	for _, event := range result.events {
+		assert.NotErrorIs(t, event.Err, ErrStreamCanceled)
+	}
+	_, checkpointSaved, err := store.Get(ctx, checkpointID)
+	require.NoError(t, err)
+	require.True(t, checkpointSaved)
+	assert.Equal(t, int32(1), atomic.LoadInt32(&innerCalls))
+	assert.Equal(t, int32(1), atomic.LoadInt32(&outerCalls))
+
+	resumeTool := &slowStreamingTool{
+		name:          "slow_tool",
+		chunkInterval: 0,
+		chunks:        []string{"resumed tool result"},
+		started:       make(chan struct{}, 1),
+	}
+	var resumeInnerCalls int32
+	resumeInnerAgent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "InnerAgent",
+		Description: "inner agent",
+		Model: &countingChatModel{
+			callCount: &resumeInnerCalls,
+			responses: []*schema.Message{
+				schema.AssistantMessage("inner resumed", nil),
+			},
+		},
+		ToolsConfig: ToolsConfig{
+			ToolsNodeConfig: compose.ToolsNodeConfig{
+				Tools: []tool.BaseTool{resumeTool},
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	var resumeOuterCalls int32
+	resumeOuterAgent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "OuterAgent",
+		Description: "outer agent",
+		Model: &countingChatModel{
+			callCount: &resumeOuterCalls,
+			responses: []*schema.Message{
+				schema.AssistantMessage("outer resumed", nil),
+			},
+		},
+		ToolsConfig: ToolsConfig{
+			ToolsNodeConfig: compose.ToolsNodeConfig{
+				Tools: []tool.BaseTool{NewAgentTool(ctx, resumeInnerAgent)},
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	resumeRunner := NewRunner(ctx, RunnerConfig{
+		Agent:           resumeOuterAgent,
+		EnableStreaming: true,
+		CheckPointStore: store,
+	})
+	resumeIter, err := resumeRunner.Resume(ctx, checkpointID)
+	require.NoError(t, err)
+	resumeEvents, hasResumeCancelError := drainEvents(resumeIter)
+	require.False(t, hasResumeCancelError)
+	for _, event := range resumeEvents {
+		require.NoError(t, event.Err)
+	}
+	assert.Equal(t, int32(1), atomic.LoadInt32(&resumeInnerCalls))
+	assert.Equal(t, int32(1), atomic.LoadInt32(&resumeOuterCalls))
+	select {
+	case <-resumeTool.started:
+	default:
+		t.Fatal("resume did not rerun the interrupted inner streaming tool")
+	}
 }
 
 // TestWithCancel_CancelImmediate_NestedAgentTool_ResumeFromToolsNode verifies that

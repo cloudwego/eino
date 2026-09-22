@@ -103,13 +103,13 @@ When to use: creating a new file, or fully replacing one you've already Read. Ov
 
 	GlobToolDesc = `- Fast file pattern matching tool that works with any codebase size
 - Supports glob patterns like "**/*.js" or "src/**/*.ts"
-- Returns matching file paths sorted by modification time
+- Returns matching file paths sorted alphabetically by path
 - Use this tool when you need to find files by name patterns
 - When you are doing an open ended search that may require multiple rounds of globbing and grepping, use the Agent tool instead`
 
 	GlobToolDescChinese = `- 适用于任何代码库规模的快速文件模式匹配工具
 - 支持形如 "**/*.js" 或 "src/**/*.ts" 的 glob 模式
-- 返回按修改时间排序的匹配文件路径
+- 返回按路径字母顺序排序的匹配文件路径
 - 当你需要按名称模式查找文件时使用此工具
 - 当你进行可能需要多轮 glob 与 grep 的开放式搜索时，改用 Agent 工具`
 
