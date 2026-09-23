@@ -22,6 +22,7 @@ import (
 	"encoding/gob"
 	"errors"
 	"io"
+	"strings"
 
 	"github.com/cloudwego/eino/adk/internal"
 	"github.com/cloudwego/eino/components/model"
@@ -269,8 +270,8 @@ func stateV080ToState(sc *stateV080) *State {
 //
 // Limitation:
 //   - This function is intended for use within ChatModelAgent runs only. It relies
-//     on ChatModelAgent's internal State to store and pop actions, which is not
-//     available in other agent types.
+//     on ChatModelAgent's internal compose graph state to store and pop actions,
+//     which is not available in other agent types.
 func SendToolGenAction(ctx context.Context, toolName string, action *AgentAction) error {
 	key := toolName
 	toolCallID := compose.GetToolCallID(ctx)
@@ -278,10 +279,43 @@ func SendToolGenAction(ctx context.Context, toolName string, action *AgentAction
 		key = toolCallID
 	}
 
-	return compose.ProcessState(ctx, func(ctx context.Context, st *State) error {
+	setAction := func(st interface {
+		setToolGenAction(string, *AgentAction)
+	}) error {
 		st.setToolGenAction(key, action)
 		return nil
-	})
+	}
+
+	tryAgentic := func() error {
+		return compose.ProcessState(ctx, func(ctx context.Context, st *agenticState) error {
+			return setAction(st)
+		})
+	}
+	tryClassic := func() error {
+		return compose.ProcessState(ctx, func(ctx context.Context, st *State) error {
+			return setAction(st)
+		})
+	}
+
+	// Prefer the state flavor this Run actually installed. Fall back on a
+	// compose type-mismatch so ExitTool / transfer_to_agent work on both
+	// *schema.Message and *schema.AgenticMessage ChatModelAgents.
+	first, second := tryClassic, tryAgentic
+	if runCtx := getRunCtx(ctx); runCtx != nil && runCtx.AgenticRootInput != nil {
+		first, second = tryAgentic, tryClassic
+	}
+	err := first()
+	if err == nil || !isComposeStateTypeMismatch(err) {
+		return err
+	}
+	return second()
+}
+
+func isComposeStateTypeMismatch(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "cannot find state with type")
 }
 
 type reactInput struct {
