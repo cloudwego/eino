@@ -248,6 +248,53 @@ func TestRunnerStreamProjectsForegroundOutput_BitsUT(t *testing.T) {
 	require.ErrorIs(t, err, backgroundtask.ErrNotFound)
 }
 
+func TestRunnerForegroundStreamCloseReleasesSource_BitsUT(t *testing.T) {
+	timeout := 0
+	runner, _ := newTestRunner(t, func(config *Config) {
+		config.ForegroundTimeoutMs = &timeout
+	})
+	sourceWriterCh := make(chan *schema.StreamWriter[string], 1)
+	workCanceled := make(chan struct{})
+
+	stream, err := runner.RunStream(
+		context.Background(),
+		&Input{Description: "close foreground projection"},
+		func(ctx context.Context, _ backgroundtask.ExecutionRuntime) (*schema.StreamReader[string], error) {
+			reader, writer := schema.Pipe[string](streamBufferCap * 32)
+			sourceWriterCh <- writer
+			go func() {
+				<-ctx.Done()
+				close(workCanceled)
+			}()
+			return reader, nil
+		},
+	)
+	require.NoError(t, err)
+
+	sourceWriter := <-sourceWriterCh
+	stream.Close()
+	require.False(t, sourceWriter.Send("trigger-close-detection", nil))
+	select {
+	case <-workCanceled:
+	case <-time.After(time.Second):
+		t.Fatal("closing the foreground projection did not cancel the work context")
+	}
+
+	sourceClosed := false
+	for i := 0; i < streamBufferCap*4; i++ {
+		if sourceWriter.Send("queued-after-cancel", nil) {
+			sourceClosed = true
+			break
+		}
+	}
+	if sourceClosed {
+		return
+	}
+	require.Eventually(t, func() bool {
+		return sourceWriter.Send("probe", nil)
+	}, time.Second, 10*time.Millisecond, "adapter did not close its source reader after cancellation")
+}
+
 func TestRunnerStreamTimeoutStartsAfterConstruction_BitsUT(t *testing.T) {
 	timeout := 10
 	runner, _ := newTestRunner(t, func(config *Config) {
@@ -484,6 +531,41 @@ func TestRunnerStreamBackgroundNotices(t *testing.T) {
 		require.Equal(t, backgroundtask.StatusCompleted,
 			waitTerminal(t, manager, onlyTask(t, manager)).Status)
 	})
+}
+
+func TestRunnerAutoBackgroundStreamDrainsAfterProjectionCloses_BitsUT(t *testing.T) {
+	timeout := 1
+	runner, manager := newTestRunner(t, func(config *Config) {
+		config.ForegroundTimeoutMs = &timeout
+		config.ShouldAutoBackground = func(context.Context, *backgroundtask.ForegroundCandidate) bool {
+			return true
+		}
+	})
+	release := make(chan struct{})
+	const chunkCount = streamBufferCap * 4
+
+	stream, err := runner.RunStream(
+		context.Background(),
+		&Input{Description: "auto background with continued output"},
+		func(context.Context, backgroundtask.ExecutionRuntime) (*schema.StreamReader[string], error) {
+			reader, writer := schema.Pipe[string](chunkCount)
+			go func() {
+				<-release
+				for i := 0; i < chunkCount; i++ {
+					writer.Send("x", nil)
+				}
+				writer.Close()
+			}()
+			return reader, nil
+		},
+	)
+	require.NoError(t, err)
+	require.Contains(t, drain(t, stream), "moved to the background")
+
+	close(release)
+	task := waitTerminal(t, manager, onlyTask(t, manager))
+	require.Equal(t, backgroundtask.StatusCompleted, task.Status)
+	require.Equal(t, strings.Repeat("x", chunkCount), string(task.ResultData))
 }
 
 func TestRunnerStreamExplicitBackgroundReturnsBeforeStreamConstruction_BitsUT(t *testing.T) {

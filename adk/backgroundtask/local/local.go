@@ -351,15 +351,21 @@ func (r *Runner) RunStream(
 				return output.String(), nil
 			}
 			if recvErr != nil {
-				chunks <- streamChunk{err: recvErr}
+				if !sendStreamChunk(workCtx, chunks, streamChunk{err: recvErr}) {
+					return "", workCtx.Err()
+				}
 				return "", recvErr
 			}
 			if _, appendErr := runtime.EmitProgress(workCtx, "", []byte(chunk)); appendErr != nil {
-				chunks <- streamChunk{err: appendErr}
+				if !sendStreamChunk(workCtx, chunks, streamChunk{err: appendErr}) {
+					return "", workCtx.Err()
+				}
 				return "", appendErr
 			}
 			output.WriteString(chunk)
-			chunks <- streamChunk{text: chunk}
+			if !sendStreamChunk(workCtx, chunks, streamChunk{text: chunk}) {
+				return "", workCtx.Err()
+			}
 		}
 	}
 	spec, err := r.newSpec(ctx, input)
@@ -389,6 +395,19 @@ func (r *Runner) RunStream(
 	// not delay returning the persisted task to the caller.
 	go r.projectStream(ctx, input, task.Spec.ID, chunks, runDone, writer)
 	return reader, nil
+}
+
+func sendStreamChunk(
+	ctx context.Context,
+	chunks chan<- streamChunk,
+	chunk streamChunk,
+) bool {
+	select {
+	case <-ctx.Done():
+		return false
+	case chunks <- chunk:
+		return true
+	}
 }
 
 func (r *Runner) runForegroundStream(
