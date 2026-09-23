@@ -39,7 +39,7 @@ func TestSkill_BeforeAgent_AgenticMessage(t *testing.T) {
 	h := mw.(*typedSkillHandler[*schema.AgenticMessage])
 
 	user := schema.UserAgenticMessage("hi")
-	runCtx := &adk.ChatModelAgentContext[*schema.AgenticMessage]{
+	runCtx := &adk.TypedChatModelAgentContext[*schema.AgenticMessage]{
 		AgentInput: &adk.TypedAgentInput[*schema.AgenticMessage]{Messages: []*schema.AgenticMessage{user}},
 	}
 
@@ -54,7 +54,7 @@ func TestSkill_BeforeAgent_AgenticMessage(t *testing.T) {
 	empty, err := NewTyped[*schema.AgenticMessage](ctx, &TypedConfig[*schema.AgenticMessage]{Backend: &inMemoryBackend{}})
 	require.NoError(t, err)
 	hEmpty := empty.(*typedSkillHandler[*schema.AgenticMessage])
-	rcEmpty := &adk.ChatModelAgentContext[*schema.AgenticMessage]{
+	rcEmpty := &adk.TypedChatModelAgentContext[*schema.AgenticMessage]{
 		AgentInput: &adk.TypedAgentInput[*schema.AgenticMessage]{Messages: []*schema.AgenticMessage{user}},
 	}
 	_, nrcEmpty, err := hEmpty.BeforeAgent(ctx, rcEmpty)
@@ -62,7 +62,7 @@ func TestSkill_BeforeAgent_AgenticMessage(t *testing.T) {
 	assert.Len(t, nrcEmpty.AgentInput.Messages, 1)
 
 	// nil AgentInput: guarded, no panic; instruction/tools still applied.
-	rcNil := &adk.ChatModelAgentContext[*schema.AgenticMessage]{}
+	rcNil := &adk.TypedChatModelAgentContext[*schema.AgenticMessage]{}
 	_, nrcNil, err := h.BeforeAgent(ctx, rcNil)
 	require.NoError(t, err)
 	assert.Len(t, nrcNil.Tools, 1)

@@ -224,7 +224,7 @@ func TestSkill_BeforeAgentToRewriteState_Bridge(t *testing.T) {
 			{FrontMatter: FrontMatter{Name: "alpha", Description: "d-alpha"}},
 		}})
 		withRunLocalCtx(t, func(ctx context.Context) {
-			rc := &adk.ChatModelAgentContext[*schema.Message]{
+			rc := &adk.TypedChatModelAgentContext[*schema.Message]{
 				AgentInput: &adk.TypedAgentInput[*schema.Message]{Messages: []*schema.Message{schema.UserMessage("hi")}},
 			}
 			_, _, err := h.BeforeAgent(ctx, rc)
@@ -248,7 +248,7 @@ func TestSkill_BeforeAgentToRewriteState_Bridge(t *testing.T) {
 				skillsReminderExtraKey: true,
 				skillsDigestExtraKey:   []string{skillDigest(FrontMatter{Name: "alpha", Description: "d-alpha"})},
 			}
-			rc := &adk.ChatModelAgentContext[*schema.Message]{
+			rc := &adk.TypedChatModelAgentContext[*schema.Message]{
 				AgentInput: &adk.TypedAgentInput[*schema.Message]{Messages: []*schema.Message{schema.UserMessage("hi")}},
 			}
 			_, _, err := h.BeforeAgent(ctx, rc)
@@ -288,7 +288,7 @@ func TestSkill_BeforeAgent_BackendStates(t *testing.T) {
 	for name, b := range cases {
 		t.Run(name, func(t *testing.T) {
 			h := newHandler(b)
-			rc := &adk.ChatModelAgentContext[*schema.Message]{
+			rc := &adk.TypedChatModelAgentContext[*schema.Message]{
 				AgentInput: &adk.TypedAgentInput[*schema.Message]{Messages: []*schema.Message{user}},
 			}
 			_, nrc, err := h.BeforeAgent(ctx, rc)
@@ -305,7 +305,7 @@ func TestSkill_BeforeAgent_BackendStates(t *testing.T) {
 			skillsReminderExtraKey: true,
 			skillsDigestExtraKey:   []string{skillDigest(FrontMatter{Name: "alpha", Description: "d"})},
 		}
-		rc := &adk.ChatModelAgentContext[*schema.Message]{
+		rc := &adk.TypedChatModelAgentContext[*schema.Message]{
 			AgentInput: &adk.TypedAgentInput[*schema.Message]{Messages: []*schema.Message{prior, user}},
 		}
 		_, nrc, err := h.BeforeAgent(ctx, rc)

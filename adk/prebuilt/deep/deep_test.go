@@ -427,7 +427,7 @@ func TestDeepAgentFilesystemExecuteDefaults(t *testing.T) {
 			assert.NoError(t, err)
 			assert.Len(t, handlers, 1)
 
-			_, runCtx, err := handlers[0].BeforeAgent(ctx, &adk.ChatModelAgentContext[*schema.Message]{})
+			_, runCtx, err := handlers[0].BeforeAgent(ctx, &adk.TypedChatModelAgentContext[*schema.Message]{})
 			assert.NoError(t, err)
 			assert.NotNil(t, runCtx)
 			assert.Len(t, runCtx.Tools, tt.wantToolLen)
@@ -481,7 +481,7 @@ func TestDeepAgentManagerWiring(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Len(t, handlers, 1)
 
-	_, runCtx, err := handlers[0].BeforeAgent(ctx, &adk.ChatModelAgentContext[*schema.Message]{})
+	_, runCtx, err := handlers[0].BeforeAgent(ctx, &adk.TypedChatModelAgentContext[*schema.Message]{})
 	assert.NoError(t, err)
 	assert.NotNil(t, runCtx)
 	assert.Len(t, runCtx.Tools, 1)
@@ -499,7 +499,7 @@ func TestDeepAgentManagerWiring(t *testing.T) {
 		Shell:             &deepMockShell{},
 	}, nil)
 	assert.NoError(t, err)
-	_, plainCtx, err := plain[0].BeforeAgent(ctx, &adk.ChatModelAgentContext[*schema.Message]{})
+	_, plainCtx, err := plain[0].BeforeAgent(ctx, &adk.TypedChatModelAgentContext[*schema.Message]{})
 	assert.NoError(t, err)
 	plainInfo, err := plainCtx.Tools[0].Info(ctx)
 	assert.NoError(t, err)
@@ -655,7 +655,7 @@ func TestDeepAgentManualFilesystemMiddlewarePath(t *testing.T) {
 	})
 	assert.NoError(t, err)
 
-	_, runCtx, err := fsMW.BeforeAgent(ctx, &adk.ChatModelAgentContext[*schema.Message]{})
+	_, runCtx, err := fsMW.BeforeAgent(ctx, &adk.TypedChatModelAgentContext[*schema.Message]{})
 	assert.NoError(t, err)
 	assert.Len(t, runCtx.Tools, 1)
 	info, err := runCtx.Tools[0].Info(ctx)

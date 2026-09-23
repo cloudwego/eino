@@ -85,11 +85,12 @@ type TypedModelContext[M MessageType] struct {
 // ModelContext is the default model context type using *schema.Message.
 type ModelContext = TypedModelContext[*schema.Message]
 
-// ChatModelAgentContext contains runtime information passed to handlers before each ChatModelAgent run.
+// TypedChatModelAgentContext contains runtime information passed to handlers before each
+// TypedChatModelAgent run.
 // Handlers can modify Instruction, Tools, and ReturnDirectly to customize agent behavior.
 //
-// This type is specific to ChatModelAgent. Other agent types may define their own context types.
-type ChatModelAgentContext[M MessageType] struct {
+// This type is specific to TypedChatModelAgent. Other agent types may define their own context types.
+type TypedChatModelAgentContext[M MessageType] struct {
 	// Instruction is the current instruction for the Agent execution.
 	// It includes the instruction configured for the agent, additional instructions appended by framework
 	// and AgentMiddleware, and modifications applied by previous BeforeAgent handlers.
@@ -113,6 +114,9 @@ type ChatModelAgentContext[M MessageType] struct {
 	// When set by a BeforeAgent handler, the framework passes it to the model via model.WithToolSearchTool.
 	ToolSearchTool *schema.ToolInfo
 }
+
+// ChatModelAgentContext is the default agent context type using *schema.Message.
+type ChatModelAgentContext = TypedChatModelAgentContext[*schema.Message]
 
 // TypedChatModelAgentMiddleware defines the interface for customizing TypedChatModelAgent behavior.
 //
@@ -146,7 +150,7 @@ type ChatModelAgentContext[M MessageType] struct {
 type TypedChatModelAgentMiddleware[M MessageType] interface {
 	// BeforeAgent is called before each agent run, allowing modification of
 	// the agent's instruction and tools configuration.
-	BeforeAgent(ctx context.Context, runCtx *ChatModelAgentContext[M]) (context.Context, *ChatModelAgentContext[M], error)
+	BeforeAgent(ctx context.Context, runCtx *TypedChatModelAgentContext[M]) (context.Context, *TypedChatModelAgentContext[M], error)
 
 	// AfterAgent is called after the agent run reaches a successful terminal state.
 	// Successful terminal states are: final answer (model response with no tool calls),
@@ -328,7 +332,7 @@ func (b *TypedBaseChatModelAgentMiddleware[M]) WrapModel(_ context.Context, m mo
 	return m, nil
 }
 
-func (b *TypedBaseChatModelAgentMiddleware[M]) BeforeAgent(ctx context.Context, runCtx *ChatModelAgentContext[M]) (context.Context, *ChatModelAgentContext[M], error) {
+func (b *TypedBaseChatModelAgentMiddleware[M]) BeforeAgent(ctx context.Context, runCtx *TypedChatModelAgentContext[M]) (context.Context, *TypedChatModelAgentContext[M], error) {
 	return ctx, runCtx, nil
 }
 

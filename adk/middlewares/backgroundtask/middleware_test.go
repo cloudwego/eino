@@ -231,7 +231,7 @@ func injectedTools(t *testing.T, m *bgtask.Manager) []tool.BaseTool {
 	t.Helper()
 	mw, err := New(context.Background(), &Config{Manager: m})
 	require.NoError(t, err)
-	_, runCtx, err := mw.BeforeAgent(context.Background(), &adk.ChatModelAgentContext[*schema.Message]{})
+	_, runCtx, err := mw.BeforeAgent(context.Background(), &adk.TypedChatModelAgentContext[*schema.Message]{})
 	require.NoError(t, err)
 	return runCtx.Tools
 }
@@ -272,7 +272,7 @@ func TestMiddleware_ToolConfig_NameOverrideAndDisable(t *testing.T) {
 		TaskStopToolConfig:   &ToolConfig{Disable: true},
 	})
 	require.NoError(t, err)
-	_, runCtx, err := mw.BeforeAgent(context.Background(), &adk.ChatModelAgentContext[*schema.Message]{})
+	_, runCtx, err := mw.BeforeAgent(context.Background(), &adk.TypedChatModelAgentContext[*schema.Message]{})
 	require.NoError(t, err)
 
 	// task_stop disabled → only the renamed task_output remains.
@@ -293,7 +293,7 @@ func TestMiddleware_ToolConfig_DisableBoth(t *testing.T) {
 		TaskStopToolConfig:   &ToolConfig{Disable: true},
 	})
 	require.NoError(t, err)
-	_, runCtx, err := mw.BeforeAgent(context.Background(), &adk.ChatModelAgentContext[*schema.Message]{})
+	_, runCtx, err := mw.BeforeAgent(context.Background(), &adk.TypedChatModelAgentContext[*schema.Message]{})
 	require.NoError(t, err)
 	assert.Empty(t, runCtx.Tools)
 }
@@ -304,7 +304,7 @@ func TestMiddleware_InjectsInstruction(t *testing.T) {
 
 	mw, err := New(context.Background(), &Config{Manager: mgr})
 	require.NoError(t, err)
-	_, runCtx, err := mw.BeforeAgent(context.Background(), &adk.ChatModelAgentContext[*schema.Message]{Instruction: "base"})
+	_, runCtx, err := mw.BeforeAgent(context.Background(), &adk.TypedChatModelAgentContext[*schema.Message]{Instruction: "base"})
 	require.NoError(t, err)
 	assert.Contains(t, runCtx.Instruction, "base")
 	assert.Contains(t, runCtx.Instruction, "task_output")
@@ -324,7 +324,7 @@ func TestMiddleware_InstructionUsesRenamedTool(t *testing.T) {
 		TaskOutputToolConfig: &ToolConfig{Name: "get_task_result"},
 	})
 	require.NoError(t, err)
-	_, runCtx, err := mw.BeforeAgent(context.Background(), &adk.ChatModelAgentContext[*schema.Message]{})
+	_, runCtx, err := mw.BeforeAgent(context.Background(), &adk.TypedChatModelAgentContext[*schema.Message]{})
 	require.NoError(t, err)
 	assert.Contains(t, runCtx.Instruction, "get_task_result")
 	assert.NotContains(t, runCtx.Instruction, "task_output")
@@ -342,7 +342,7 @@ func TestMiddleware_InstructionOmitsDisabledTool(t *testing.T) {
 		TaskStopToolConfig: &ToolConfig{Disable: true},
 	})
 	require.NoError(t, err)
-	_, runCtx, err := mw.BeforeAgent(context.Background(), &adk.ChatModelAgentContext[*schema.Message]{})
+	_, runCtx, err := mw.BeforeAgent(context.Background(), &adk.TypedChatModelAgentContext[*schema.Message]{})
 	require.NoError(t, err)
 	assert.Contains(t, runCtx.Instruction, "task_output")
 	assert.NotContains(t, runCtx.Instruction, "task_stop")
@@ -360,7 +360,7 @@ func TestMiddleware_InstructionEmptyWhenAllDisabled(t *testing.T) {
 		TaskStopToolConfig:   &ToolConfig{Disable: true},
 	})
 	require.NoError(t, err)
-	_, runCtx, err := mw.BeforeAgent(context.Background(), &adk.ChatModelAgentContext[*schema.Message]{Instruction: "base"})
+	_, runCtx, err := mw.BeforeAgent(context.Background(), &adk.TypedChatModelAgentContext[*schema.Message]{Instruction: "base"})
 	require.NoError(t, err)
 	assert.Equal(t, "base", runCtx.Instruction)
 	assert.Empty(t, runCtx.Tools)
@@ -381,7 +381,7 @@ func TestMiddleware_CustomSystemPrompt(t *testing.T) {
 		},
 	})
 	require.NoError(t, err)
-	_, runCtx, err := mw.BeforeAgent(context.Background(), &adk.ChatModelAgentContext[*schema.Message]{Instruction: "base"})
+	_, runCtx, err := mw.BeforeAgent(context.Background(), &adk.TypedChatModelAgentContext[*schema.Message]{Instruction: "base"})
 	require.NoError(t, err)
 
 	require.NotNil(t, got)
@@ -402,7 +402,7 @@ func TestMiddleware_CustomSystemPromptEmptyInjectsNothing(t *testing.T) {
 		CustomSystemPrompt: func(context.Context, *SystemPromptInput) string { return "" },
 	})
 	require.NoError(t, err)
-	_, runCtx, err := mw.BeforeAgent(context.Background(), &adk.ChatModelAgentContext[*schema.Message]{Instruction: "base"})
+	_, runCtx, err := mw.BeforeAgent(context.Background(), &adk.TypedChatModelAgentContext[*schema.Message]{Instruction: "base"})
 	require.NoError(t, err)
 	assert.Equal(t, "base", runCtx.Instruction)
 }
