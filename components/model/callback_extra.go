@@ -44,8 +44,10 @@ type CompletionTokensDetails struct {
 
 // PromptTokenDetails provides a breakdown of prompt token usage.
 type PromptTokenDetails struct {
-	// Cached tokens present in the prompt.
+	// CachedTokens is the number of prompt tokens read from the cache.
 	CachedTokens int
+	// CacheWriteTokens is the number of prompt tokens written to the cache.
+	CacheWriteTokens int
 }
 
 // Config is the config for the model.
