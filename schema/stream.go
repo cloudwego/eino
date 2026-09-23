@@ -127,6 +127,12 @@ func (sw *StreamWriter[T]) Send(chunk T, err error) (closed bool) {
 	return sw.stm.send(chunk, err)
 }
 
+// Closed returns a channel that is closed when the stream receiver stops
+// receiving, for example after StreamReader.Close is called.
+func (sw *StreamWriter[T]) Closed() <-chan struct{} {
+	return sw.stm.closed
+}
+
 // Close notify the receiver that the stream sender has finished.
 // The stream receiver will get an error of io.EOF from StreamReader.Recv().
 // Notice: always remember to call Close() after sending all data.
