@@ -436,7 +436,7 @@ func (m *middleware[M]) BeforeModelRewriteState(ctx context.Context, state *adk.
 	var msgs []M
 	if strings.TrimSpace(content) != "" {
 		memMsg := newMemoryMessage[M](content)
-		m.sendTopicMemoryEvent(ctx, state.Messages, memMsg)
+		m.appendTopicMemoryEvent(ctx, memMsg)
 		msgs = append(msgs, state.Messages...)
 		msgs = append(msgs, memMsg)
 	} else {
