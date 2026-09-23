@@ -1693,7 +1693,7 @@ func ConcatMessages(msgs []*Message) (*Message, error) {
 				ret.ToolName = msg.ToolName
 			} else if ret.ToolName != msg.ToolName {
 				return nil, fmt.Errorf("cannot concat messages with"+
-					" different toolNames: '%s' '%s'", ret.ToolCallID, msg.ToolCallID)
+					" different toolNames: '%s' '%s'", ret.ToolName, msg.ToolName)
 			}
 		}
 
