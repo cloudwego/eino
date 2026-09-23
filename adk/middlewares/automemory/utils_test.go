@@ -17,11 +17,14 @@
 package automemory
 
 import (
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/cloudwego/eino/adk"
+	"github.com/cloudwego/eino/adk/internal/startwindow"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -87,6 +90,63 @@ func TestConcatMessageStream_WithToolCalls(t *testing.T) {
 	assert.Equal(t, "thinking...", msg.Content)
 	require.Len(t, msg.ToolCalls, 1)
 	assert.Equal(t, "search", msg.ToolCalls[0].Function.Name)
+}
+
+func TestSendTopicMemoryEventAnchorsBeforeLastUserQuery(t *testing.T) {
+	user := schema.UserMessage("question")
+	assistant := schema.AssistantMessage("working", nil)
+	toolResult := schema.ToolMessage("done", "call-1")
+	for _, msg := range []*schema.Message{user, assistant, toolResult} {
+		adk.EnsureMessageID(msg)
+	}
+
+	var captured *adk.TypedAgentEvent[*schema.Message]
+	parentCtx := startwindow.WithSender(context.Background(), func(_ context.Context, event any) error {
+		var ok bool
+		captured, ok = event.(*adk.TypedAgentEvent[*schema.Message])
+		require.True(t, ok)
+		return nil
+	})
+	sendCtx, _ := startwindow.Open(parentCtx)
+	defer startwindow.Signal(sendCtx)
+
+	m := &middleware[*schema.Message]{}
+	m.sendTopicMemoryEvent(
+		sendCtx,
+		[]*schema.Message{user, assistant, toolResult},
+		newMemoryMessage[*schema.Message]("memory"),
+	)
+
+	require.NotNil(t, captured)
+	require.NotNil(t, captured.SessionEventVariant)
+	require.NotNil(t, captured.SessionEventVariant.Event)
+	require.NotNil(t, captured.SessionEventVariant.Event.MessageInserted)
+	assert.Equal(
+		t,
+		adk.GetMessageID(user),
+		captured.SessionEventVariant.Event.MessageInserted.BeforeMessageID,
+	)
+}
+
+func TestAppendTopicMemoryEventUsesEmptyAnchor(t *testing.T) {
+	var captured *adk.TypedAgentEvent[*schema.Message]
+	parentCtx := startwindow.WithSender(context.Background(), func(_ context.Context, event any) error {
+		var ok bool
+		captured, ok = event.(*adk.TypedAgentEvent[*schema.Message])
+		require.True(t, ok)
+		return nil
+	})
+	sendCtx, _ := startwindow.Open(parentCtx)
+	defer startwindow.Signal(sendCtx)
+
+	m := &middleware[*schema.Message]{}
+	m.appendTopicMemoryEvent(sendCtx, newMemoryMessage[*schema.Message]("memory"))
+
+	require.NotNil(t, captured)
+	require.NotNil(t, captured.SessionEventVariant)
+	require.NotNil(t, captured.SessionEventVariant.Event)
+	require.NotNil(t, captured.SessionEventVariant.Event.MessageInserted)
+	assert.Empty(t, captured.SessionEventVariant.Event.MessageInserted.BeforeMessageID)
 }
 
 func TestParseTopicSelectionFromContent(t *testing.T) {

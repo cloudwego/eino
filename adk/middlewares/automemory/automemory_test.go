@@ -394,9 +394,48 @@ func TestMiddleware_TopicSelection_AsyncInjectsInBeforeModel(t *testing.T) {
 		_, next, err := mw.BeforeModelRewriteState(ctx2, st, nil)
 		require.NoError(t, err)
 		st = next
-		last := st.Messages[len(st.Messages)-1]
-		return len(st.Messages) == 2 && last.Extra != nil && last.Extra["__eino_automemory__"] != nil
+		return len(st.Messages) == 2 && isTopicMemoryMessage(st.Messages[1])
 	}, 2*time.Second, 10*time.Millisecond)
+	require.Equal(t, schema.User, st.Messages[0].Role)
+	require.Contains(t, st.Messages[0].Content, "How to run tests?")
+	requireTopicMemoryMessage(t, st.Messages[1], "Contents of /mem/debugging.md")
+}
+
+func TestMiddleware_TopicSelection_AsyncAppendsAtReadyBoundary(t *testing.T) {
+	ctx := context.Background()
+	mw, err := New(ctx, &Config[*schema.Message]{
+		MemoryDirectory: "/mem",
+		MemoryBackend:   NewInMemoryBackend(),
+		Model:           &fixedModel{out: `{"selected_memories":[]}`},
+		Read:            &ReadConfig[*schema.Message]{Mode: ReadModeAsync},
+	})
+	require.NoError(t, err)
+
+	done := make(chan struct{})
+	close(done)
+	ctx = context.WithValue(ctx, ctxKeySelectionFuture{}, &selectionFuture{
+		done:    done,
+		content: "selected memory",
+	})
+	state := &adk.ChatModelAgentState{Messages: []*schema.Message{
+		schema.SystemMessage("system"),
+		schema.UserMessage("question"),
+		schema.AssistantMessage("", []schema.ToolCall{{
+			ID: "call-1",
+			Function: schema.FunctionCall{
+				Name:      "tool",
+				Arguments: `{}`,
+			},
+		}}),
+		schema.ToolMessage("result", "call-1"),
+	}}
+
+	_, next, err := mw.BeforeModelRewriteState(ctx, state, nil)
+	require.NoError(t, err)
+	require.Len(t, next.Messages, len(state.Messages)+1)
+	require.Equal(t, state.Messages, next.Messages[:len(state.Messages)])
+	require.True(t, isTopicMemoryMessage(next.Messages[len(next.Messages)-1]))
+	require.Equal(t, "selected memory", next.Messages[len(next.Messages)-1].Content)
 }
 
 func TestMiddleware_BeforeModelRewriteState_PreservesToolInfos(t *testing.T) {
@@ -439,8 +478,7 @@ func TestMiddleware_BeforeModelRewriteState_PreservesToolInfos(t *testing.T) {
 		_, next, err := mw.BeforeModelRewriteState(ctx2, st, nil)
 		require.NoError(t, err)
 		st = next
-		last := st.Messages[len(st.Messages)-1]
-		return len(st.Messages) == 2 && last.Extra != nil && last.Extra["__eino_automemory__"] != nil
+		return len(st.Messages) == 2 && isTopicMemoryMessage(st.Messages[1])
 	}, 2*time.Second, 10*time.Millisecond)
 
 	require.Equal(t, toolInfos, st.ToolInfos)
