@@ -860,7 +860,7 @@ func TestFilesystemMiddleware_BeforeAgent(t *testing.T) {
 		m, err := New(ctx, &MiddlewareConfig{Backend: backend})
 		assert.NoError(t, err)
 
-		runCtx := &adk.ChatModelAgentContext[*schema.Message]{
+		runCtx := &adk.TypedChatModelAgentContext[*schema.Message]{
 			Instruction: "Original instruction",
 			Tools:       nil,
 		}

@@ -305,7 +305,7 @@ type typedSkillHandler[M adk.MessageType] struct {
 // runCtx.AgentInput.Messages, which holds only the current input); and run-local values
 // are backed by the compose graph State, which does not exist yet here — BeforeAgent runs
 // before the graph is invoked, so a SetRunLocalValue here is silently dropped.
-func (h *typedSkillHandler[M]) BeforeAgent(ctx context.Context, runCtx *adk.ChatModelAgentContext[M]) (context.Context, *adk.ChatModelAgentContext[M], error) {
+func (h *typedSkillHandler[M]) BeforeAgent(ctx context.Context, runCtx *adk.TypedChatModelAgentContext[M]) (context.Context, *adk.TypedChatModelAgentContext[M], error) {
 	if h.instruction != "" {
 		runCtx.Instruction = runCtx.Instruction + "\n" + h.instruction
 	}

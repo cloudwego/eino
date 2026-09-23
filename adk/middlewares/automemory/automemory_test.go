@@ -144,7 +144,7 @@ func TestMiddleware_IndexInjection_Empty(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	runCtx := &adk.ChatModelAgentContext[*schema.Message]{
+	runCtx := &adk.TypedChatModelAgentContext[*schema.Message]{
 		Instruction: "base",
 		AgentInput:  &adk.AgentInput{Messages: []adk.Message{schema.UserMessage("hi")}},
 	}
@@ -176,7 +176,7 @@ func TestMiddleware_IndexInjection_ChineseInstruction(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	runCtx := &adk.ChatModelAgentContext[*schema.Message]{
+	runCtx := &adk.TypedChatModelAgentContext[*schema.Message]{
 		Instruction: "base",
 		AgentInput:  &adk.AgentInput{Messages: []adk.Message{schema.UserMessage("hi")}},
 	}
@@ -204,7 +204,7 @@ func TestMiddleware_IndexInjection_CustomInstructionKeepsDirectoryManifest(t *te
 	})
 	require.NoError(t, err)
 
-	runCtx := &adk.ChatModelAgentContext[*schema.Message]{
+	runCtx := &adk.TypedChatModelAgentContext[*schema.Message]{
 		Instruction: "base",
 		AgentInput:  &adk.AgentInput{Messages: []adk.Message{schema.UserMessage("hi")}},
 	}
@@ -241,7 +241,7 @@ func TestMiddleware_IndexInjection_CustomInstructionErrorReportsRenderStage(t *t
 	})
 	require.NoError(t, err)
 
-	runCtx := &adk.ChatModelAgentContext[*schema.Message]{
+	runCtx := &adk.TypedChatModelAgentContext[*schema.Message]{
 		Instruction: "base",
 		AgentInput:  &adk.AgentInput{Messages: []adk.Message{schema.UserMessage("hi")}},
 	}
@@ -306,7 +306,7 @@ func TestMiddleware_TopicSelection_InsertsMemoryMessage(t *testing.T) {
 	require.NoError(t, err)
 
 	in := &adk.AgentInput{Messages: []adk.Message{schema.UserMessage("How to run tests?")}}
-	runCtx := &adk.ChatModelAgentContext[*schema.Message]{
+	runCtx := &adk.TypedChatModelAgentContext[*schema.Message]{
 		Instruction: "base",
 		AgentInput:  in,
 	}
@@ -337,7 +337,7 @@ func TestMiddleware_MemoryDirectory_IndexAndTopicSelection(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	runCtx := &adk.ChatModelAgentContext[*schema.Message]{
+	runCtx := &adk.TypedChatModelAgentContext[*schema.Message]{
 		Instruction: "base",
 		AgentInput:  &adk.AgentInput{Messages: []adk.Message{schema.UserMessage("How should I run tests?")}},
 	}
@@ -378,7 +378,7 @@ func TestMiddleware_TopicSelection_AsyncInjectsInBeforeModel(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	runCtx := &adk.ChatModelAgentContext[*schema.Message]{
+	runCtx := &adk.TypedChatModelAgentContext[*schema.Message]{
 		Instruction: "base",
 		AgentInput:  &adk.AgentInput{Messages: []adk.Message{schema.UserMessage("How to run tests?")}},
 	}
@@ -415,7 +415,7 @@ func TestMiddleware_BeforeModelRewriteState_PreservesToolInfos(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	runCtx := &adk.ChatModelAgentContext[*schema.Message]{
+	runCtx := &adk.TypedChatModelAgentContext[*schema.Message]{
 		Instruction: "base",
 		AgentInput:  &adk.AgentInput{Messages: []adk.Message{schema.UserMessage("How to run tests?")}},
 	}
@@ -711,7 +711,7 @@ func TestMiddleware_TopicSelection_SmallCandidateSetUsesModel(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	runCtx := &adk.ChatModelAgentContext[*schema.Message]{
+	runCtx := &adk.TypedChatModelAgentContext[*schema.Message]{
 		Instruction: "base",
 		AgentInput:  &adk.AgentInput{Messages: []adk.Message{schema.UserMessage("How to run tests?")}},
 	}
@@ -750,7 +750,7 @@ func TestMiddleware_TopicSelection_DisabledSkipsSelectionAndReminder(t *testing.
 			})
 			require.NoError(t, err)
 
-			runCtx := &adk.ChatModelAgentContext[*schema.Message]{
+			runCtx := &adk.TypedChatModelAgentContext[*schema.Message]{
 				Instruction: "base",
 				AgentInput:  &adk.AgentInput{Messages: []adk.Message{schema.UserMessage("How to debug?")}},
 			}
@@ -1123,7 +1123,7 @@ func TestMiddleware_BeforeAgent_GenInstructionRendersAndIndexInjectedOnce(t *tes
 	})
 	require.NoError(t, err)
 
-	runCtx := &adk.ChatModelAgentContext[*schema.Message]{
+	runCtx := &adk.TypedChatModelAgentContext[*schema.Message]{
 		Instruction: "base",
 		AgentInput:  &adk.AgentInput{Messages: []adk.Message{schema.UserMessage("hi")}},
 	}
@@ -1135,7 +1135,7 @@ func TestMiddleware_BeforeAgent_GenInstructionRendersAndIndexInjectedOnce(t *tes
 	require.Equal(t, 1, countMemoryIndexMessages(out1.AgentInput.Messages))
 
 	// Same turn with already-injected index reminder should not duplicate the reminder.
-	_, out2, err := mw.BeforeAgent(ctx, &adk.ChatModelAgentContext[*schema.Message]{
+	_, out2, err := mw.BeforeAgent(ctx, &adk.TypedChatModelAgentContext[*schema.Message]{
 		Instruction: out1.Instruction,
 		AgentInput:  &adk.AgentInput{Messages: out1.AgentInput.Messages},
 	})
@@ -1147,7 +1147,7 @@ func TestMiddleware_BeforeAgent_GenInstructionRendersAndIndexInjectedOnce(t *tes
 	// A later business user message in the same session should not get another MEMORY.md reminder.
 	nextMessages := append([]*schema.Message{}, out2.AgentInput.Messages...)
 	nextMessages = append(nextMessages, schema.AssistantMessage("ack", nil), schema.UserMessage("next turn"))
-	_, out3, err := mw.BeforeAgent(ctx, &adk.ChatModelAgentContext[*schema.Message]{
+	_, out3, err := mw.BeforeAgent(ctx, &adk.TypedChatModelAgentContext[*schema.Message]{
 		Instruction: out2.Instruction,
 		AgentInput:  &adk.AgentInput{Messages: nextMessages},
 	})
@@ -1178,7 +1178,7 @@ func TestMiddleware_BeforeAgent_TopicMemoryInjectedOncePerSession(t *testing.T) 
 	})
 	require.NoError(t, err)
 
-	_, out1, err := mw.BeforeAgent(ctx, &adk.ChatModelAgentContext[*schema.Message]{
+	_, out1, err := mw.BeforeAgent(ctx, &adk.TypedChatModelAgentContext[*schema.Message]{
 		Instruction: "base",
 		AgentInput:  &adk.AgentInput{Messages: []adk.Message{schema.UserMessage("How to debug?")}},
 	})
@@ -1189,7 +1189,7 @@ func TestMiddleware_BeforeAgent_TopicMemoryInjectedOncePerSession(t *testing.T) 
 
 	nextMessages := append([]*schema.Message{}, out1.AgentInput.Messages...)
 	nextMessages = append(nextMessages, schema.AssistantMessage("ack", nil), schema.UserMessage("How to debug again?"))
-	_, out2, err := mw.BeforeAgent(ctx, &adk.ChatModelAgentContext[*schema.Message]{
+	_, out2, err := mw.BeforeAgent(ctx, &adk.TypedChatModelAgentContext[*schema.Message]{
 		Instruction: out1.Instruction,
 		AgentInput:  &adk.AgentInput{Messages: nextMessages},
 	})
@@ -1230,7 +1230,7 @@ func TestMiddleware_BeforeAgent_InjectsInstructionWhenMessagesAlreadyContainMemo
 	require.NoError(t, err)
 
 	memMsg := newMemoryMessage[*schema.Message]("<!-- automemory -->\n<system-reminder>\n<topic-memory-1>\nContents of /mem/preloaded.md (saved now):\npreloaded\n</topic-memory-1>\n</system-reminder>")
-	runCtx := &adk.ChatModelAgentContext[*schema.Message]{
+	runCtx := &adk.TypedChatModelAgentContext[*schema.Message]{
 		Instruction: "base",
 		AgentInput:  &adk.AgentInput{Messages: []adk.Message{schema.UserMessage("hi"), memMsg}},
 	}
@@ -1261,7 +1261,7 @@ func TestMiddleware_BeforeAgent_DistributedCursorSyncIntoMessageExtra(t *testing
 	})
 	require.NoError(t, err)
 
-	runCtx := &adk.ChatModelAgentContext[*schema.Message]{
+	runCtx := &adk.TypedChatModelAgentContext[*schema.Message]{
 		Instruction: "base",
 		AgentInput: &adk.AgentInput{Messages: []adk.Message{
 			schema.UserMessage("hi"),
@@ -1294,7 +1294,7 @@ func TestMiddleware_BeforeAgent_WriteCursorDoesNotBlockInstructionInjection(t *t
 	})
 	require.NoError(t, err)
 
-	runCtx := &adk.ChatModelAgentContext[*schema.Message]{
+	runCtx := &adk.TypedChatModelAgentContext[*schema.Message]{
 		Instruction: "base",
 		AgentInput: &adk.AgentInput{Messages: []adk.Message{
 			schema.AssistantMessage("ack", nil),
@@ -1333,7 +1333,7 @@ func TestMiddleware_TopicSelection_ToolCallParsingAndFiltering(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	runCtx := &adk.ChatModelAgentContext[*schema.Message]{
+	runCtx := &adk.TypedChatModelAgentContext[*schema.Message]{
 		Instruction: "base",
 		AgentInput:  &adk.AgentInput{Messages: []adk.Message{schema.UserMessage("How to debug?")}},
 	}
@@ -1363,7 +1363,7 @@ func TestMiddleware_TopicSelection_AsyncProtectsMemoryMessageFromMutation(t *tes
 	})
 	require.NoError(t, err)
 
-	ctx2, _, err := mw.BeforeAgent(ctx, &adk.ChatModelAgentContext[*schema.Message]{
+	ctx2, _, err := mw.BeforeAgent(ctx, &adk.TypedChatModelAgentContext[*schema.Message]{
 		Instruction: "base",
 		AgentInput:  &adk.AgentInput{Messages: []adk.Message{schema.UserMessage("hi")}},
 	})
@@ -1495,7 +1495,7 @@ func TestMiddleware_BeforeAgent_RelativeMemoryDirReadsResolvedDirectoryAfterCWDC
 	other := t.TempDir()
 	require.NoError(t, os.Chdir(other))
 
-	runCtx := &adk.ChatModelAgentContext[*schema.Message]{
+	runCtx := &adk.TypedChatModelAgentContext[*schema.Message]{
 		Instruction: "base",
 		AgentInput:  &adk.AgentInput{Messages: []adk.Message{schema.UserMessage("hi")}},
 	}
@@ -1532,7 +1532,7 @@ func TestMiddleware_TopicSelection_IgnoresOutOfBoundsCandidatePaths(t *testing.T
 	})
 	require.NoError(t, err)
 
-	runCtx := &adk.ChatModelAgentContext[*schema.Message]{
+	runCtx := &adk.TypedChatModelAgentContext[*schema.Message]{
 		Instruction: "base",
 		AgentInput:  &adk.AgentInput{Messages: []adk.Message{schema.UserMessage("show memories")}},
 	}
@@ -1660,7 +1660,7 @@ func TestMiddleware_TopicSelection_ResponseFormatFallback(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	_, out, err := mw.BeforeAgent(ctx, &adk.ChatModelAgentContext[*schema.Message]{
+	_, out, err := mw.BeforeAgent(ctx, &adk.TypedChatModelAgentContext[*schema.Message]{
 		Instruction: "base",
 		AgentInput:  &adk.AgentInput{Messages: []adk.Message{schema.UserMessage("How do I debug?")}},
 	})
@@ -1697,7 +1697,7 @@ func TestMiddleware_TopicSelection_FixedOutputMode(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	_, out, err := mw.BeforeAgent(ctx, &adk.ChatModelAgentContext[*schema.Message]{
+	_, out, err := mw.BeforeAgent(ctx, &adk.TypedChatModelAgentContext[*schema.Message]{
 		Instruction: "base",
 		AgentInput:  &adk.AgentInput{Messages: []adk.Message{schema.UserMessage("How do I debug?")}},
 	})

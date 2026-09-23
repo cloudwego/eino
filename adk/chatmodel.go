@@ -1076,7 +1076,7 @@ type execContext struct {
 func (a *TypedChatModelAgent[M]) applyBeforeAgent(ctx context.Context, ec *execContext, agentInput *TypedAgentInput[M]) (
 	context.Context, *execContext, *TypedAgentInput[M], error) {
 
-	runCtx := &ChatModelAgentContext[M]{
+	runCtx := &TypedChatModelAgentContext[M]{
 		Instruction:    ec.instruction,
 		AgentInput:     agentInput,
 		Tools:          cloneSlice(ec.unwrappedTools),

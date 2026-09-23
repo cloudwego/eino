@@ -42,13 +42,13 @@ func TestBeforeAgent_AppendsContextManagementNote(t *testing.T) {
 	assert.Nil(t, rc)
 
 	// Empty instruction: the note becomes the whole instruction.
-	_, rc, err = mw.BeforeAgent(ctx, &adk.ChatModelAgentContext[*schema.Message]{})
+	_, rc, err = mw.BeforeAgent(ctx, &adk.TypedChatModelAgentContext[*schema.Message]{})
 	require.NoError(t, err)
 	require.NotNil(t, rc)
 	assert.Equal(t, note, strings.TrimSpace(rc.Instruction))
 
 	// Non-empty instruction: the note is appended after the base instruction.
-	_, rc2, err := mw.BeforeAgent(ctx, &adk.ChatModelAgentContext[*schema.Message]{Instruction: "base instruction"})
+	_, rc2, err := mw.BeforeAgent(ctx, &adk.TypedChatModelAgentContext[*schema.Message]{Instruction: "base instruction"})
 	require.NoError(t, err)
 	require.NotNil(t, rc2)
 	assert.Contains(t, rc2.Instruction, "base instruction")
@@ -64,7 +64,7 @@ func TestBeforeAgent_CustomFormatContextManagementInstruction(t *testing.T) {
 
 	t.Run("custom replaces the default note", func(t *testing.T) {
 		mw := newMW(func(context.Context) string { return "CUSTOM NOTE" })
-		_, rc, err := mw.BeforeAgent(ctx, &adk.ChatModelAgentContext[*schema.Message]{Instruction: "base"})
+		_, rc, err := mw.BeforeAgent(ctx, &adk.TypedChatModelAgentContext[*schema.Message]{Instruction: "base"})
 		require.NoError(t, err)
 		assert.Contains(t, rc.Instruction, "CUSTOM NOTE")
 		assert.NotContains(t, rc.Instruction, getContextManagementInstruction())
@@ -72,7 +72,7 @@ func TestBeforeAgent_CustomFormatContextManagementInstruction(t *testing.T) {
 
 	t.Run("empty result suppresses the note", func(t *testing.T) {
 		mw := newMW(func(context.Context) string { return "" })
-		_, rc, err := mw.BeforeAgent(ctx, &adk.ChatModelAgentContext[*schema.Message]{Instruction: "base"})
+		_, rc, err := mw.BeforeAgent(ctx, &adk.TypedChatModelAgentContext[*schema.Message]{Instruction: "base"})
 		require.NoError(t, err)
 		assert.Equal(t, "base", rc.Instruction, "empty note → instruction untouched")
 	})

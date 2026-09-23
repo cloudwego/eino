@@ -418,7 +418,7 @@ func TestBeforeAgent(t *testing.T) {
 	handler, err := NewMiddleware(ctx, &Config{Backend: backend})
 	require.NoError(t, err)
 
-	runCtx := &adk.ChatModelAgentContext[*schema.Message]{
+	runCtx := &adk.TypedChatModelAgentContext[*schema.Message]{
 		Instruction: "base instruction",
 		Tools:       []tool.BaseTool{},
 	}
@@ -1338,7 +1338,7 @@ func TestSkill_BeforeAgent_DoesNotMutateMessages(t *testing.T) {
 	}
 
 	user := schema.UserMessage("hi")
-	runCtx := &adk.ChatModelAgentContext[*schema.Message]{
+	runCtx := &adk.TypedChatModelAgentContext[*schema.Message]{
 		AgentInput: &adk.TypedAgentInput[*schema.Message]{Messages: []*schema.Message{user}},
 	}
 
@@ -1393,7 +1393,7 @@ func TestSkill_BeforeAgent_PreservesOtherMessages(t *testing.T) {
 	instruction := schema.SystemMessage("base instruction")
 	otherReminder := schema.SystemMessage("other middleware section")
 	otherReminder.Extra = map[string]any{otherKey: true}
-	runCtx := &adk.ChatModelAgentContext[*schema.Message]{
+	runCtx := &adk.TypedChatModelAgentContext[*schema.Message]{
 		AgentInput: &adk.TypedAgentInput[*schema.Message]{
 			Messages: []*schema.Message{instruction, otherReminder, schema.UserMessage("hi")},
 		},

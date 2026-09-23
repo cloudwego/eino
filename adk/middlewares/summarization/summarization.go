@@ -356,7 +356,7 @@ func (m *TypedMiddleware[M]) Summarize(ctx context.Context, state *adk.TypedChat
 	return finalMsgs, nil
 }
 
-func (m *TypedMiddleware[M]) BeforeAgent(ctx context.Context, runCtx *adk.ChatModelAgentContext[M]) (context.Context, *adk.ChatModelAgentContext[M], error) {
+func (m *TypedMiddleware[M]) BeforeAgent(ctx context.Context, runCtx *adk.TypedChatModelAgentContext[M]) (context.Context, *adk.TypedChatModelAgentContext[M], error) {
 	if runCtx == nil {
 		return ctx, runCtx, nil
 	}

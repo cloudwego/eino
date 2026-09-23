@@ -99,7 +99,7 @@ func TestAttack_TurnLoopResumeBridgeRunnerDecodeDoesNotMutateCheckpoint(t *testi
 	assert.Equal(t, original, checkpoint)
 }
 
-func (h *interruptTestToolsHandler) BeforeAgent(ctx context.Context, runCtx *ChatModelAgentContext[*schema.Message]) (context.Context, *ChatModelAgentContext[*schema.Message], error) {
+func (h *interruptTestToolsHandler) BeforeAgent(ctx context.Context, runCtx *TypedChatModelAgentContext[*schema.Message]) (context.Context, *TypedChatModelAgentContext[*schema.Message], error) {
 	runCtx.Tools = append(runCtx.Tools, h.tools...)
 	return ctx, runCtx, nil
 }

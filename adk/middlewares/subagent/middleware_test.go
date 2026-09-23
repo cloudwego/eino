@@ -263,7 +263,7 @@ func TestBeforeAgentInjectsOneTool(t *testing.T) {
 	agent := &mockAgent{name: "worker", desc: "does work"}
 	mw, err := New(context.Background(), &Config{SubAgents: []adk.Agent{agent}})
 	require.NoError(t, err)
-	_, runCtx, err := mw.BeforeAgent(context.Background(), &adk.ChatModelAgentContext[*schema.Message]{
+	_, runCtx, err := mw.BeforeAgent(context.Background(), &adk.TypedChatModelAgentContext[*schema.Message]{
 		Instruction: "base",
 	})
 	require.NoError(t, err)
@@ -288,7 +288,7 @@ func TestAgentToolForegroundRouting(t *testing.T) {
 	second := &mockAgent{name: "second", desc: "second result"}
 	mw, err := New(context.Background(), &Config{SubAgents: []adk.Agent{first, second}})
 	require.NoError(t, err)
-	_, runCtx, err := mw.BeforeAgent(context.Background(), &adk.ChatModelAgentContext[*schema.Message]{})
+	_, runCtx, err := mw.BeforeAgent(context.Background(), &adk.TypedChatModelAgentContext[*schema.Message]{})
 	require.NoError(t, err)
 	agentTool := runCtx.Tools[0].(tool.InvokableTool)
 
@@ -306,7 +306,7 @@ func TestDurableAgentToolForeground(t *testing.T) {
 		SubAgents: []adk.Agent{agent}, Background: durableBackground(t, mgr, agent),
 	})
 	require.NoError(t, err)
-	_, runCtx, err := mw.BeforeAgent(ctx, &adk.ChatModelAgentContext[*schema.Message]{})
+	_, runCtx, err := mw.BeforeAgent(ctx, &adk.TypedChatModelAgentContext[*schema.Message]{})
 	require.NoError(t, err)
 
 	result, err := runCtx.Tools[0].(tool.InvokableTool).InvokableRun(ctx,
@@ -330,11 +330,11 @@ func TestOnlyDurableAgentToolExposesPersistentChildSession(t *testing.T) {
 	})
 	require.NoError(t, err)
 	_, localCtx, err := local.BeforeAgent(
-		context.Background(), &adk.ChatModelAgentContext[*schema.Message]{},
+		context.Background(), &adk.TypedChatModelAgentContext[*schema.Message]{},
 	)
 	require.NoError(t, err)
 	_, durableCtx, err := durable.BeforeAgent(
-		context.Background(), &adk.ChatModelAgentContext[*schema.Message]{},
+		context.Background(), &adk.TypedChatModelAgentContext[*schema.Message]{},
 	)
 	require.NoError(t, err)
 	localInfo, err := localCtx.Tools[0].Info(context.Background())
@@ -399,7 +399,7 @@ func TestAttack_DurableTerminalResultPreservesChildSessionIdentity(t *testing.T)
 	require.NoError(t, err)
 	_, runCtx, err := middleware.BeforeAgent(
 		ctx,
-		&adk.ChatModelAgentContext[*schema.Message]{},
+		&adk.TypedChatModelAgentContext[*schema.Message]{},
 	)
 	require.NoError(t, err)
 	_, err = runCtx.Tools[0].(tool.InvokableTool).InvokableRun(
@@ -450,7 +450,7 @@ func TestDurableAgentToolBackgroundPreservesParentContextValues(t *testing.T) {
 	require.NoError(t, err)
 	_, runCtx, err := middleware.BeforeAgent(
 		parentCtx,
-		&adk.ChatModelAgentContext[*schema.Message]{},
+		&adk.TypedChatModelAgentContext[*schema.Message]{},
 	)
 	require.NoError(t, err)
 	_, err = runCtx.Tools[0].(tool.InvokableTool).InvokableRun(
@@ -651,7 +651,7 @@ func TestLocalAgentToolWritesEventTranscript(t *testing.T) {
 		}},
 	})
 	require.NoError(t, err)
-	_, runCtx, err := middleware.BeforeAgent(ctx, &adk.ChatModelAgentContext[*schema.Message]{})
+	_, runCtx, err := middleware.BeforeAgent(ctx, &adk.TypedChatModelAgentContext[*schema.Message]{})
 	require.NoError(t, err)
 	result, err := runCtx.Tools[0].(tool.InvokableTool).InvokableRun(
 		ctx, `{"subagent_type":"worker","prompt":"work","description":"test","run_in_background":true}`,
@@ -687,7 +687,7 @@ func TestDurableAgentToolBackgroundSurvivesCaller(t *testing.T) {
 		SubAgents: []adk.Agent{agent}, Background: durableBackground(t, mgr, agent),
 	})
 	require.NoError(t, err)
-	_, runCtx, err := mw.BeforeAgent(ctx, &adk.ChatModelAgentContext[*schema.Message]{})
+	_, runCtx, err := mw.BeforeAgent(ctx, &adk.TypedChatModelAgentContext[*schema.Message]{})
 	require.NoError(t, err)
 	result, err := runCtx.Tools[0].(tool.InvokableTool).InvokableRun(ctx,
 		`{"subagent_type":"slow","prompt":"work","description":"test","run_in_background":true}`)
@@ -724,7 +724,7 @@ func TestDurableAgentToolReusesChildSessionAcrossTasks_BitsUT(t *testing.T) {
 	})
 	require.NoError(t, err)
 	_, runCtx, err := middleware.BeforeAgent(
-		ctx, &adk.ChatModelAgentContext[*schema.Message]{},
+		ctx, &adk.TypedChatModelAgentContext[*schema.Message]{},
 	)
 	require.NoError(t, err)
 	invokable := runCtx.Tools[0].(tool.InvokableTool)
@@ -793,7 +793,7 @@ func TestDurableTaskProgressReadsSessionTranscript(t *testing.T) {
 		}},
 	})
 	require.NoError(t, err)
-	_, runCtx, err := middleware.BeforeAgent(ctx, &adk.ChatModelAgentContext[*schema.Message]{})
+	_, runCtx, err := middleware.BeforeAgent(ctx, &adk.TypedChatModelAgentContext[*schema.Message]{})
 	require.NoError(t, err)
 	result, err := runCtx.Tools[0].(tool.InvokableTool).InvokableRun(
 		ctx, `{"subagent_type":"worker","prompt":"work","description":"test","run_in_background":true}`,
@@ -835,7 +835,7 @@ func TestDurableTaskProgressUsesSharedFormatter(t *testing.T) {
 		}, TranscriptFormat: format},
 	})
 	require.NoError(t, err)
-	_, runCtx, err := middleware.BeforeAgent(ctx, &adk.ChatModelAgentContext[*schema.Message]{})
+	_, runCtx, err := middleware.BeforeAgent(ctx, &adk.TypedChatModelAgentContext[*schema.Message]{})
 	require.NoError(t, err)
 	result, err := runCtx.Tools[0].(tool.InvokableTool).InvokableRun(
 		ctx, `{"subagent_type":"worker","prompt":"work","description":"test","run_in_background":true}`,
@@ -867,7 +867,7 @@ func TestDurableForegroundProjectionStopsAtBackgroundBoundary(t *testing.T) {
 		SubAgents: []adk.Agent{agent}, Background: durableBackground(t, manager, agent),
 	})
 	require.NoError(t, err)
-	_, runCtx, err := middleware.BeforeAgent(ctx, &adk.ChatModelAgentContext[*schema.Message]{})
+	_, runCtx, err := middleware.BeforeAgent(ctx, &adk.TypedChatModelAgentContext[*schema.Message]{})
 	require.NoError(t, err)
 	invokable := runCtx.Tools[0].(tool.InvokableTool)
 	var calls int64
@@ -904,7 +904,7 @@ func TestDurableAgentToolRejectsInvocationScopedRunOptions(t *testing.T) {
 		SubAgents: []adk.Agent{agent}, Background: durableBackground(t, manager, agent),
 	})
 	require.NoError(t, err)
-	_, runCtx, err := middleware.BeforeAgent(ctx, &adk.ChatModelAgentContext[*schema.Message]{})
+	_, runCtx, err := middleware.BeforeAgent(ctx, &adk.TypedChatModelAgentContext[*schema.Message]{})
 	require.NoError(t, err)
 	invokable := runCtx.Tools[0].(tool.InvokableTool)
 
@@ -951,7 +951,7 @@ func TestDurableAgentToolUsesRegisteredRunOptionsFactory(t *testing.T) {
 		}},
 	})
 	require.NoError(t, err)
-	_, runCtx, err := middleware.BeforeAgent(ctx, &adk.ChatModelAgentContext[*schema.Message]{})
+	_, runCtx, err := middleware.BeforeAgent(ctx, &adk.TypedChatModelAgentContext[*schema.Message]{})
 	require.NoError(t, err)
 	_, err = runCtx.Tools[0].(tool.InvokableTool).InvokableRun(
 		ctx, `{"subagent_type":"worker","prompt":"work","description":"foreground","run_in_background":true}`,
