@@ -46,7 +46,7 @@ jobs:
           env_vars: GOLANG,EINO
           files: ${{ env.COVERAGE_FILE }}
           token: ${{ secrets.CODECOV_TOKEN }}
-          codecov_yml_path: ./github/.codecov.yml
+          codecov_yml_path: ./.github/.codedev.yml
 
   benchmark-test:
     runs-on: ubuntu-latest
