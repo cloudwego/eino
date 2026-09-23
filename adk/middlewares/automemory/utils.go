@@ -967,9 +967,17 @@ func (m *middleware[M]) resolveSessionID(ctx context.Context, state *adk.TypedCh
 
 func (m *middleware[M]) sendTopicMemoryEvent(ctx context.Context, msgs []M, memMsg M) {
 	var beforeID string
-	if len(msgs) > 0 && !isNilMessage(msgs[len(msgs)-1]) {
-		beforeID = adk.GetMessageID(msgs[len(msgs)-1])
+	if idx := lastUserQueryMessageIndex(msgs); idx >= 0 {
+		beforeID = adk.GetMessageID(msgs[idx])
 	}
+	m.sendTopicMemoryInsertedEvent(ctx, memMsg, beforeID)
+}
+
+func (m *middleware[M]) appendTopicMemoryEvent(ctx context.Context, memMsg M) {
+	m.sendTopicMemoryInsertedEvent(ctx, memMsg, "")
+}
+
+func (m *middleware[M]) sendTopicMemoryInsertedEvent(ctx context.Context, memMsg M, beforeID string) {
 	if sendEventErr := adk.TypedSendEvent(ctx, &adk.TypedAgentEvent[M]{
 		SessionEventVariant: &adk.SessionEventVariant[M]{
 			Event: &adk.SessionEvent[M]{
