@@ -1849,7 +1849,7 @@ func TestWithCancel_RecursiveImmediate_BeforeAgentChildAbortOnly(t *testing.T) {
 		Instruction: "outer",
 		Model:       &plainResponseModel{text: "outer done"},
 		Handlers: []ChatModelAgentMiddleware{
-			&testBeforeAgentHandler{fn: func(ctx context.Context, runCtx *ChatModelAgentContext[*schema.Message]) (context.Context, *ChatModelAgentContext[*schema.Message], error) {
+			&testBeforeAgentHandler{fn: func(ctx context.Context, runCtx *TypedChatModelAgentContext[*schema.Message]) (context.Context, *TypedChatModelAgentContext[*schema.Message], error) {
 				iter := childAgent.Run(ctx, &AgentInput{Messages: []Message{schema.UserMessage("child work")}})
 				for {
 					event, ok := iter.Next()

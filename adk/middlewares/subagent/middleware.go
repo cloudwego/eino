@@ -269,7 +269,7 @@ type typedSubagentMiddleware[M adk.MessageType] struct {
 }
 
 // BeforeAgent injects sub-agent tools and instructions into the agent context.
-func (m *typedSubagentMiddleware[M]) BeforeAgent(ctx context.Context, runCtx *adk.ChatModelAgentContext[M]) (context.Context, *adk.ChatModelAgentContext[M], error) {
+func (m *typedSubagentMiddleware[M]) BeforeAgent(ctx context.Context, runCtx *adk.TypedChatModelAgentContext[M]) (context.Context, *adk.TypedChatModelAgentContext[M], error) {
 	if runCtx == nil {
 		return ctx, runCtx, nil
 	}

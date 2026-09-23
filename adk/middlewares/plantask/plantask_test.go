@@ -62,7 +62,7 @@ func TestMiddlewareBeforeAgent(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Nil(t, runCtx)
 
-	runCtx = &adk.ChatModelAgentContext[*schema.Message]{
+	runCtx = &adk.TypedChatModelAgentContext[*schema.Message]{
 		Tools: []tool.BaseTool{},
 	}
 	ctx, newRunCtx, err := mw.BeforeAgent(ctx, runCtx)

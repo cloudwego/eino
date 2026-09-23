@@ -46,7 +46,7 @@ type typedAppendPromptTool[M adk.MessageType] struct {
 	prompt string
 }
 
-func (w *typedAppendPromptTool[M]) BeforeAgent(ctx context.Context, runCtx *adk.ChatModelAgentContext[M]) (context.Context, *adk.ChatModelAgentContext[M], error) {
+func (w *typedAppendPromptTool[M]) BeforeAgent(ctx context.Context, runCtx *adk.TypedChatModelAgentContext[M]) (context.Context, *adk.TypedChatModelAgentContext[M], error) {
 	nRunCtx := *runCtx
 	nRunCtx.Instruction += w.prompt
 	if w.t != nil {
