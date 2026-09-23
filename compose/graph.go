@@ -306,6 +306,15 @@ func (g *graph) AddEmbeddingNode(key string, node embedding.Embedder, opts ...Gr
 	return g.addNode(key, gNode, options)
 }
 
+// AddMultiModalEmbeddingNode adds a node that implements embedding.MultiModalEmbedder.
+// e.g.
+//
+//	graph.AddMultiModalEmbeddingNode("embedding_node_key", multiModalEmbeddingNode)
+func (g *graph) AddMultiModalEmbeddingNode(key string, node embedding.MultiModalEmbedder, opts ...GraphAddNodeOpt) error {
+	gNode, options := toMultiModalEmbeddingNode(node, opts...)
+	return g.addNode(key, gNode, options)
+}
+
 // AddRetrieverNode adds a node that implements retriever.Retriever.
 // e.g.
 //
