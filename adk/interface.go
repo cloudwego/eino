@@ -419,6 +419,15 @@ type runStepSerialization struct {
 type TypedAgentEvent[M MessageType] struct {
 	AgentName string
 
+	// InvocationID uniquely identifies one physical agent execution attempt.
+	// All events emitted by that invocation share the same ID. Repeated,
+	// parallel, and nested invocations receive different IDs even when their
+	// RunPath values are identical.
+	//
+	// InvocationID is framework-generated. Use SessionEvent.TurnID instead
+	// when events need to be grouped across resume attempts in one logical turn.
+	InvocationID string
+
 	// RunPath represents the execution path from root agent to the current event source.
 	// This field is managed entirely by the framework and cannot be set by end-users.
 	//
