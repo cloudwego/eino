@@ -23,6 +23,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/mock/gomock"
 
 	"github.com/cloudwego/eino/components/model"
@@ -1418,6 +1419,55 @@ func TestModelWrapper_InputModification(t *testing.T) {
 			}
 		}
 		assert.True(t, found, "Model should receive wrapper-modified input")
+	})
+}
+
+func TestGetMessages(t *testing.T) {
+	t.Run("returns current messages from middleware", func(t *testing.T) {
+		ctx := context.Background()
+		ctrl := gomock.NewController(t)
+		cm := mockModel.NewMockToolCallingChatModel(ctrl)
+
+		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			Return(schema.AssistantMessage("response", nil), nil).Times(1)
+
+		var captured []Message
+		agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+			Name:        "TestAgent",
+			Description: "Test agent",
+			Instruction: "system instruction",
+			Model:       cm,
+			Handlers: []ChatModelAgentMiddleware{
+				&testBeforeModelRewriteStateHandler{fn: func(ctx context.Context, state *ChatModelAgentState, _ *ModelContext) (context.Context, *ChatModelAgentState, error) {
+					var getErr error
+					captured, getErr = GetMessages(ctx)
+					require.NoError(t, getErr)
+					require.Equal(t, state.Messages, captured)
+
+					captured[0] = nil
+					require.NotNil(t, state.Messages[0], "returned slice must not alias state slice")
+					return ctx, state, nil
+				}},
+			},
+		})
+		require.NoError(t, err)
+
+		iter := agent.Run(ctx, &AgentInput{Messages: []Message{schema.UserMessage("test")}})
+		for {
+			event, ok := iter.Next()
+			if !ok {
+				break
+			}
+			require.NoError(t, event.Err)
+		}
+
+		require.Len(t, captured, 2)
+	})
+
+	t.Run("fails outside agent execution", func(t *testing.T) {
+		messages, err := GetMessages(context.Background())
+		assert.Nil(t, messages)
+		assert.ErrorContains(t, err, "GetMessages failed")
 	})
 }
 
