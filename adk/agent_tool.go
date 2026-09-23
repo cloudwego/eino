@@ -240,7 +240,7 @@ func (at *typedAgentTool[M]) InvokableRun(ctx context.Context, argumentsInJSON s
 					event.RunPath = rp
 				}
 				tmp := copyTypedAgentEvent(event)
-				gen.Send(event)
+				gen.trySend(event)
 				event = tmp
 			}
 		}
