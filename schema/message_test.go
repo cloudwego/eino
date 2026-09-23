@@ -157,7 +157,8 @@ func TestConcatMessage(t *testing.T) {
 					CompletionTokens: 15,
 					PromptTokens:     30,
 					PromptTokenDetails: PromptTokenDetails{
-						CachedTokens: 15,
+						CachedTokens:     15,
+						CacheWriteTokens: 12,
 					},
 					CompletionTokensDetails: CompletionTokensDetails{
 						ReasoningTokens: 8,
@@ -179,7 +180,8 @@ func TestConcatMessage(t *testing.T) {
 						CompletionTokens: 10,
 						PromptTokens:     20,
 						PromptTokenDetails: PromptTokenDetails{
-							CachedTokens: 10,
+							CachedTokens:     10,
+							CacheWriteTokens: 12,
 						},
 						CompletionTokensDetails: CompletionTokensDetails{
 							ReasoningTokens: 5,
@@ -201,7 +203,8 @@ func TestConcatMessage(t *testing.T) {
 						CompletionTokens: 15,
 						PromptTokens:     30,
 						PromptTokenDetails: PromptTokenDetails{
-							CachedTokens: 15,
+							CachedTokens:     15,
+							CacheWriteTokens: 8,
 						},
 						CompletionTokensDetails: CompletionTokensDetails{
 							ReasoningTokens: 8,

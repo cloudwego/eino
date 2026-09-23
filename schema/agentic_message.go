@@ -1126,6 +1126,9 @@ func concatTokenUsage(usages []*TokenUsage) *TokenUsage {
 		if usage.PromptTokenDetails.CachedTokens > ret.PromptTokenDetails.CachedTokens {
 			ret.PromptTokenDetails.CachedTokens = usage.PromptTokenDetails.CachedTokens
 		}
+		if usage.PromptTokenDetails.CacheWriteTokens > ret.PromptTokenDetails.CacheWriteTokens {
+			ret.PromptTokenDetails.CacheWriteTokens = usage.PromptTokenDetails.CacheWriteTokens
+		}
 		if usage.CompletionTokensDetails.ReasoningTokens > ret.CompletionTokensDetails.ReasoningTokens {
 			ret.CompletionTokensDetails.ReasoningTokens = usage.CompletionTokensDetails.ReasoningTokens
 		}
