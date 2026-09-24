@@ -17,6 +17,7 @@
 package compose
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"sort"
@@ -253,4 +254,73 @@ func Test_mergeValues(t *testing.T) {
 		assert.ErrorContains(t, err, "unsupported type")
 	})
 
+	t.Run("untyped nil values", func(t *testing.T) {
+		t.Run("nil first does not panic", func(t *testing.T) {
+			m := map[string]any{"k": "v"}
+			merged, err := mergeValues([]any{nil, m}, nil)
+			assert.NoError(t, err)
+			assert.Equal(t, m, merged)
+		})
+
+		t.Run("nil last", func(t *testing.T) {
+			m := map[string]any{"k": "v"}
+			merged, err := mergeValues([]any{m, nil}, nil)
+			assert.NoError(t, err)
+			assert.Equal(t, m, merged)
+		})
+
+		t.Run("all nil returns nil", func(t *testing.T) {
+			merged, err := mergeValues([]any{nil, nil}, nil)
+			assert.NoError(t, err)
+			assert.Nil(t, merged)
+		})
+
+		t.Run("nil between mergeable values", func(t *testing.T) {
+			m1 := map[string]any{"a": "1"}
+			m2 := map[string]any{"b": "2"}
+			merged, err := mergeValues([]any{m1, nil, m2}, nil)
+			assert.NoError(t, err)
+			assert.Equal(t, map[string]any{"a": "1", "b": "2"}, merged)
+		})
+
+		t.Run("names stay aligned after dropping nil", func(t *testing.T) {
+			opts := &mergeOptions{names: []string{"n0", "n1", "n2"}}
+			m := map[string]any{"k": "v"}
+			merged, err := mergeValues([]any{nil, m, nil}, opts)
+			assert.NoError(t, err)
+			assert.Equal(t, m, merged)
+			assert.Equal(t, []string{"n1"}, opts.names)
+		})
+	})
+
+}
+
+func TestFanInMergeWithNilNodeOutput(t *testing.T) {
+	// A fan-in predecessor returning (nil, nil) must not crash or fail the
+	// merge; the sink deterministically receives the remaining values.
+	// Run repeatedly to cover channel iteration orders.
+	for i := 0; i < 30; i++ {
+		g := NewGraph[string, any]()
+		assert.NoError(t, g.AddLambdaNode("nilnode", InvokableLambda(func(ctx context.Context, in string) (any, error) {
+			return nil, nil
+		})))
+		assert.NoError(t, g.AddLambdaNode("mapnode", InvokableLambda(func(ctx context.Context, in string) (any, error) {
+			return map[string]any{"k": "v"}, nil
+		})))
+		assert.NoError(t, g.AddLambdaNode("sink", InvokableLambda(func(ctx context.Context, in any) (any, error) {
+			return in, nil
+		})))
+		assert.NoError(t, g.AddEdge(START, "nilnode"))
+		assert.NoError(t, g.AddEdge(START, "mapnode"))
+		assert.NoError(t, g.AddEdge("nilnode", "sink"))
+		assert.NoError(t, g.AddEdge("mapnode", "sink"))
+		assert.NoError(t, g.AddEdge("sink", END))
+
+		r, err := g.Compile(context.Background())
+		require.NoError(t, err)
+
+		out, err := r.Invoke(context.Background(), "x")
+		require.NoError(t, err)
+		assert.Equal(t, map[string]any{"k": "v"}, out)
+	}
 }
