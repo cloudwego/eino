@@ -717,6 +717,8 @@ func formatMultiContent(multiContent []ChatMessagePart, vs map[string]any, forma
 			if mc.ImageURL == nil {
 				continue
 			}
+			imageURL := *mc.ImageURL
+			copiedMC[i].ImageURL = &imageURL
 			url, err := formatContent(mc.ImageURL.URL, vs, formatType)
 			if err != nil {
 				return nil, err
@@ -726,6 +728,8 @@ func formatMultiContent(multiContent []ChatMessagePart, vs map[string]any, forma
 			if mc.AudioURL == nil {
 				continue
 			}
+			audioURL := *mc.AudioURL
+			copiedMC[i].AudioURL = &audioURL
 			url, err := formatContent(mc.AudioURL.URL, vs, formatType)
 			if err != nil {
 				return nil, err
@@ -735,6 +739,8 @@ func formatMultiContent(multiContent []ChatMessagePart, vs map[string]any, forma
 			if mc.VideoURL == nil {
 				continue
 			}
+			videoURL := *mc.VideoURL
+			copiedMC[i].VideoURL = &videoURL
 			url, err := formatContent(mc.VideoURL.URL, vs, formatType)
 			if err != nil {
 				return nil, err
@@ -744,6 +750,8 @@ func formatMultiContent(multiContent []ChatMessagePart, vs map[string]any, forma
 			if mc.FileURL == nil {
 				continue
 			}
+			fileURL := *mc.FileURL
+			copiedMC[i].FileURL = &fileURL
 			url, err := formatContent(mc.FileURL.URL, vs, formatType)
 			if err != nil {
 				return nil, err
