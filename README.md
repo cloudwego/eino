@@ -47,7 +47,8 @@ for {
     if !ok {
         break
     }
-    fmt.Println(event.Message.Content)
+    msg, _ := event.Output.MessageOutput.GetMessage()
+    fmt.Println(msg.Content)
 }
 ```
 
