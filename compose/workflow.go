@@ -450,7 +450,10 @@ func (wf *Workflow[I, O]) compile(ctx context.Context, options *graphCompileOpti
 				}
 				wf.dependencies[END][wb.fromNodeKey] = branchDependency
 			} else {
-				n := wf.workflowNodes[endNode]
+				n, ok := wf.workflowNodes[endNode]
+				if !ok {
+					return nil, fmt.Errorf("branch end node '%s' needs to be added to workflow first", endNode)
+				}
 				n.dependencySetter(wb.fromNodeKey, branchDependency)
 			}
 		}
