@@ -140,6 +140,18 @@ func TestConcatAssistantGenTextExtensions(t *testing.T) {
 	})
 }
 
+func TestConcatReasoningExtensions(t *testing.T) {
+	redacted := &RedactedThinking{Data: "opaque-data"}
+
+	result, err := ConcatReasoningExtensions([]*ReasoningExtension{
+		{},
+		{RedactedThinking: redacted},
+		{},
+	})
+	assert.NoError(t, err)
+	assert.Same(t, redacted, result.RedactedThinking)
+}
+
 func TestConcatResponseMetaExtensions(t *testing.T) {
 	t.Run("multiple extensions - takes last non-empty values", func(t *testing.T) {
 		exts := []*ResponseMetaExtension{
