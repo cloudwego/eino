@@ -710,6 +710,8 @@ func formatMultiContent(multiContent []ChatMessagePart, vs map[string]any, forma
 			if mc.ImageURL == nil {
 				continue
 			}
+			imageURL := *mc.ImageURL
+			copiedMC[i].ImageURL = &imageURL
 			url, err := formatContent(mc.ImageURL.URL, vs, formatType)
 			if err != nil {
 				return nil, err
@@ -719,6 +721,8 @@ func formatMultiContent(multiContent []ChatMessagePart, vs map[string]any, forma
 			if mc.AudioURL == nil {
 				continue
 			}
+			audioURL := *mc.AudioURL
+			copiedMC[i].AudioURL = &audioURL
 			url, err := formatContent(mc.AudioURL.URL, vs, formatType)
 			if err != nil {
 				return nil, err
@@ -728,6 +732,8 @@ func formatMultiContent(multiContent []ChatMessagePart, vs map[string]any, forma
 			if mc.VideoURL == nil {
 				continue
 			}
+			videoURL := *mc.VideoURL
+			copiedMC[i].VideoURL = &videoURL
 			url, err := formatContent(mc.VideoURL.URL, vs, formatType)
 			if err != nil {
 				return nil, err
@@ -737,6 +743,8 @@ func formatMultiContent(multiContent []ChatMessagePart, vs map[string]any, forma
 			if mc.FileURL == nil {
 				continue
 			}
+			fileURL := *mc.FileURL
+			copiedMC[i].FileURL = &fileURL
 			url, err := formatContent(mc.FileURL.URL, vs, formatType)
 			if err != nil {
 				return nil, err
@@ -764,6 +772,8 @@ func formatUserInputMultiContent(userInputMultiContent []MessageInputPart, vs ma
 			if uimc.Image == nil {
 				continue
 			}
+			image := *uimc.Image
+			copiedUIMC[i].Image = &image
 			if uimc.Image.URL != nil && *uimc.Image.URL != "" {
 				url, err := formatContent(*uimc.Image.URL, vs, formatType)
 				if err != nil {
@@ -782,6 +792,8 @@ func formatUserInputMultiContent(userInputMultiContent []MessageInputPart, vs ma
 			if uimc.Audio == nil {
 				continue
 			}
+			audio := *uimc.Audio
+			copiedUIMC[i].Audio = &audio
 			if uimc.Audio.URL != nil && *uimc.Audio.URL != "" {
 				url, err := formatContent(*uimc.Audio.URL, vs, formatType)
 				if err != nil {
@@ -800,6 +812,8 @@ func formatUserInputMultiContent(userInputMultiContent []MessageInputPart, vs ma
 			if uimc.Video == nil {
 				continue
 			}
+			video := *uimc.Video
+			copiedUIMC[i].Video = &video
 			if uimc.Video.URL != nil && *uimc.Video.URL != "" {
 				url, err := formatContent(*uimc.Video.URL, vs, formatType)
 				if err != nil {
@@ -818,6 +832,8 @@ func formatUserInputMultiContent(userInputMultiContent []MessageInputPart, vs ma
 			if uimc.File == nil {
 				continue
 			}
+			file := *uimc.File
+			copiedUIMC[i].File = &file
 			if uimc.File.URL != nil && *uimc.File.URL != "" {
 				url, err := formatContent(*uimc.File.URL, vs, formatType)
 				if err != nil {

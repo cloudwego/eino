@@ -1365,6 +1365,73 @@ func TestFormatUserInputMultiContent(t *testing.T) {
 	})
 }
 
+func TestFormatDoesNotMutateTemplate(t *testing.T) {
+	makeStrPtr := func(s string) *string { return &s }
+	msg := &Message{
+		Role:    User,
+		Content: "hello {name}",
+		MultiContent: []ChatMessagePart{
+			{Type: ChatMessagePartTypeText, Text: "caption {id}"},
+			{Type: ChatMessagePartTypeImageURL, ImageURL: &ChatMessageImageURL{URL: "http://img/{id}.png"}},
+			{Type: ChatMessagePartTypeAudioURL, AudioURL: &ChatMessageAudioURL{URL: "http://audio/{id}.wav"}},
+			{Type: ChatMessagePartTypeVideoURL, VideoURL: &ChatMessageVideoURL{URL: "http://video/{id}.mp4"}},
+			{Type: ChatMessagePartTypeFileURL, FileURL: &ChatMessageFileURL{URL: "http://file/{id}.txt"}},
+		},
+		UserInputMultiContent: []MessageInputPart{
+			{Type: ChatMessagePartTypeText, Text: "user {id}"},
+			{Type: ChatMessagePartTypeImageURL, Image: &MessageInputImage{MessagePartCommon: MessagePartCommon{URL: makeStrPtr("http://uimg/{id}.png"), Base64Data: makeStrPtr("img-{id}")}}},
+			{Type: ChatMessagePartTypeAudioURL, Audio: &MessageInputAudio{MessagePartCommon: MessagePartCommon{URL: makeStrPtr("http://uaudio/{id}.wav"), Base64Data: makeStrPtr("audio-{id}")}}},
+			{Type: ChatMessagePartTypeVideoURL, Video: &MessageInputVideo{MessagePartCommon: MessagePartCommon{URL: makeStrPtr("http://uvideo/{id}.mp4"), Base64Data: makeStrPtr("video-{id}")}}},
+			{Type: ChatMessagePartTypeFileURL, File: &MessageInputFile{MessagePartCommon: MessagePartCommon{URL: makeStrPtr("http://ufile/{id}.txt"), Base64Data: makeStrPtr("file-{id}")}}},
+		},
+	}
+	first, err := msg.Format(context.Background(), map[string]any{"name": "a", "id": "1"}, FString)
+	assert.NoError(t, err)
+	second, err := msg.Format(context.Background(), map[string]any{"name": "b", "id": "2"}, FString)
+	assert.NoError(t, err)
+
+	assert.Equal(t, "hello {name}", msg.Content)
+	assert.Equal(t, "caption {id}", msg.MultiContent[0].Text)
+	assert.Equal(t, "user {id}", msg.UserInputMultiContent[0].Text)
+	assert.Equal(t, []string{"http://img/{id}.png", "http://audio/{id}.wav", "http://video/{id}.mp4", "http://file/{id}.txt"}, []string{msg.MultiContent[1].ImageURL.URL, msg.MultiContent[2].AudioURL.URL, msg.MultiContent[3].VideoURL.URL, msg.MultiContent[4].FileURL.URL})
+	assert.Equal(t, []string{"http://uimg/{id}.png", "img-{id}", "http://uaudio/{id}.wav", "audio-{id}", "http://uvideo/{id}.mp4", "video-{id}", "http://ufile/{id}.txt", "file-{id}"}, []string{*msg.UserInputMultiContent[1].Image.URL, *msg.UserInputMultiContent[1].Image.Base64Data, *msg.UserInputMultiContent[2].Audio.URL, *msg.UserInputMultiContent[2].Audio.Base64Data, *msg.UserInputMultiContent[3].Video.URL, *msg.UserInputMultiContent[3].Video.Base64Data, *msg.UserInputMultiContent[4].File.URL, *msg.UserInputMultiContent[4].File.Base64Data})
+	assert.NotSame(t, msg.MultiContent[1].ImageURL, first[0].MultiContent[1].ImageURL)
+	assert.NotSame(t, msg.UserInputMultiContent[1].Image, first[0].UserInputMultiContent[1].Image)
+	assert.Equal(t, "hello b", second[0].Content)
+	assert.Equal(t, "http://img/2.png", second[0].MultiContent[1].ImageURL.URL)
+	assert.Equal(t, "http://uimg/2.png", *second[0].UserInputMultiContent[1].Image.URL)
+	assert.Equal(t, "img-2", *second[0].UserInputMultiContent[1].Image.Base64Data)
+	assert.Equal(t, "http://img/1.png", first[0].MultiContent[1].ImageURL.URL)
+}
+
+func TestFormatSharedTemplateRace(t *testing.T) {
+	makeStrPtr := func(s string) *string { return &s }
+	msg := &Message{
+		Role: User,
+		MultiContent: []ChatMessagePart{
+			{Type: ChatMessagePartTypeImageURL, ImageURL: &ChatMessageImageURL{URL: "http://img/{id}.png"}},
+		},
+		UserInputMultiContent: []MessageInputPart{
+			{Type: ChatMessagePartTypeImageURL, Image: &MessageInputImage{MessagePartCommon: MessagePartCommon{URL: makeStrPtr("http://img/{id}.png")}}},
+		},
+	}
+	var wg sync.WaitGroup
+	for _, id := range []string{"0", "1", "2", "3", "4", "5", "6", "7"} {
+		wg.Add(1)
+		id := id
+		go func() {
+			defer wg.Done()
+			out, err := msg.Format(context.Background(), map[string]any{"id": id}, FString)
+			if assert.NoError(t, err) {
+				want := "http://img/" + id + ".png"
+				assert.Equal(t, want, out[0].MultiContent[0].ImageURL.URL)
+				assert.Equal(t, want, *out[0].UserInputMultiContent[0].Image.URL)
+			}
+		}()
+	}
+	wg.Wait()
+}
+
 func TestConcatToolResults(t *testing.T) {
 	t.Run("empty_chunks", func(t *testing.T) {
 		result, err := ConcatToolResults([]*ToolResult{})
@@ -1759,7 +1826,7 @@ func TestConcatToolResults(t *testing.T) {
 		assert.Contains(t, err.Error(), "conflicting")
 		assert.Contains(t, err.Error(), "file")
 	})
-	
+
 	t.Run("same_chunk_text_merged", func(t *testing.T) {
 		chunks := []*ToolResult{
 			{
