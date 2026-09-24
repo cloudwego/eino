@@ -150,6 +150,88 @@ func TestWriteTodos(t *testing.T) {
 	assert.Equal(t, fmt.Sprintf("Updated todo list to %s", todos), result)
 }
 
+func TestDeepAgentTaskPromptConfig(t *testing.T) {
+	ctx := context.Background()
+
+	tests := []struct {
+		name              string
+		withoutTaskPrompt bool
+		wantTaskPrompt    bool
+	}{
+		{
+			name:           "default injects task prompt",
+			wantTaskPrompt: true,
+		},
+		{
+			name:              "without task prompt keeps task tool",
+			withoutTaskPrompt: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			defer ctrl.Finish()
+
+			cm := mockModel.NewMockToolCallingChatModel(ctrl)
+
+			var capturedTools []*schema.ToolInfo
+			cm.EXPECT().WithTools(gomock.Any()).Return(cm, nil).AnyTimes()
+
+			var capturedMessages []*schema.Message
+			cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+				DoAndReturn(func(_ context.Context, msgs []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+					capturedMessages = msgs
+					options := model.GetCommonOptions(&model.Options{}, opts...)
+					capturedTools = options.Tools
+					return schema.AssistantMessage("done", nil), nil
+				}).
+				Times(1)
+
+			agent, err := New(ctx, &Config{
+				Name:                   "deep",
+				Description:            "deep agent",
+				ChatModel:              cm,
+				Instruction:            "you are deep agent",
+				SubAgents:              []adk.Agent{&spySubAgent{}},
+				MaxIteration:           2,
+				WithoutWriteTodos:      true,
+				WithoutGeneralSubAgent: true,
+				WithoutTaskPrompt:      tt.withoutTaskPrompt,
+			})
+			assert.NoError(t, err)
+
+			r := adk.NewRunner(ctx, adk.RunnerConfig{Agent: agent})
+			it := r.Run(ctx, []adk.Message{schema.UserMessage("hi")})
+			for {
+				event, ok := it.Next()
+				if !ok {
+					break
+				}
+				assert.NoError(t, event.Err)
+			}
+
+			assert.NotEmpty(t, capturedMessages)
+			assert.Equal(t, schema.System, capturedMessages[0].Role)
+			assert.Contains(t, capturedMessages[0].Content, "you are deep agent")
+			if tt.wantTaskPrompt {
+				assert.Contains(t, capturedMessages[0].Content, "# 'task' (subagent spawner)")
+			} else {
+				assert.NotContains(t, capturedMessages[0].Content, "# 'task' (subagent spawner)")
+			}
+
+			var hasTaskTool bool
+			for _, toolInfo := range capturedTools {
+				if toolInfo.Name == taskToolName {
+					hasTaskTool = true
+					break
+				}
+			}
+			assert.True(t, hasTaskTool)
+		})
+	}
+}
+
 func TestDeepSubAgentSharesSessionValues(t *testing.T) {
 	ctx := context.Background()
 	spy := &spySubAgent{}

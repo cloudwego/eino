@@ -38,6 +38,7 @@ func typedTaskToolMiddleware[M adk.MessageType](
 	subAgents []adk.TypedAgent[M],
 
 	withoutGeneralSubAgent bool,
+	withoutTaskPrompt bool,
 	cm model.BaseModel[M],
 	instruction string,
 	toolsConfig adk.ToolsConfig,
@@ -50,10 +51,13 @@ func typedTaskToolMiddleware[M adk.MessageType](
 	if err != nil {
 		return nil, err
 	}
-	prompt := internal.SelectPrompt(internal.I18nPrompts{
-		English: taskPrompt,
-		Chinese: taskPromptChinese,
-	})
+	var prompt string
+	if !withoutTaskPrompt {
+		prompt = internal.SelectPrompt(internal.I18nPrompts{
+			English: taskPrompt,
+			Chinese: taskPromptChinese,
+		})
+	}
 
 	return typedBuildAppendPromptTool[M](prompt, t), nil
 }
