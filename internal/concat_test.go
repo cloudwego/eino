@@ -49,4 +49,62 @@ func TestConcat(t *testing.T) {
 			},
 		}, m)
 	})
+
+	// nil and non-nil for the same key across chunks must concat order-
+	// independently and must never panic. See issue #1181.
+	t.Run("concat same key: nil then value does not panic", func(t *testing.T) {
+		m, err := ConcatItems([]map[string]any{
+			{"a": nil},
+			{"a": "str"},
+		})
+		assert.Nil(t, err)
+		assert.Equal(t, map[string]any{"a": "str"}, m)
+	})
+
+	t.Run("concat same key: value then nil is order-independent", func(t *testing.T) {
+		m, err := ConcatItems([]map[string]any{
+			{"a": "str"},
+			{"a": nil},
+		})
+		assert.Nil(t, err)
+		assert.Equal(t, map[string]any{"a": "str"}, m)
+	})
+
+	t.Run("concat same key: all nil preserves nil", func(t *testing.T) {
+		m, err := ConcatItems([]map[string]any{
+			{"a": nil},
+			{"a": nil},
+		})
+		assert.Nil(t, err)
+		assert.Equal(t, map[string]any{"a": nil}, m)
+	})
+
+	t.Run("concat same key: nil mixed with multiple non-nil strings", func(t *testing.T) {
+		m, err := ConcatItems([]map[string]any{
+			{"a": nil},
+			{"a": "foo"},
+			{"a": "bar"},
+			{"a": nil},
+		})
+		assert.Nil(t, err)
+		assert.Equal(t, map[string]any{"a": "foobar"}, m)
+	})
+
+	t.Run("concat same key: nested map with nil then value", func(t *testing.T) {
+		m, err := ConcatItems([]map[string]any{
+			{"a": map[string]any{"x": nil}},
+			{"a": map[string]any{"x": "v"}},
+		})
+		assert.Nil(t, err)
+		assert.Equal(t, map[string]any{"a": map[string]any{"x": "v"}}, m)
+	})
+
+	t.Run("concat same key: nested map all nil preserves nil", func(t *testing.T) {
+		m, err := ConcatItems([]map[string]any{
+			{"a": map[string]any{"x": nil}},
+			{"a": map[string]any{"x": nil}},
+		})
+		assert.Nil(t, err)
+		assert.Equal(t, map[string]any{"a": map[string]any{"x": nil}}, m)
+	})
 }
