@@ -157,7 +157,11 @@ func (r *Runner) projectForegroundStream(projection *foregroundStreamProjection)
 	resultCh := projection.resultCh
 	writer := projection.writer
 	cancel := projection.cancel
-	defer writer.Close()
+	defer func() {
+		if writer != nil {
+			writer.Close()
+		}
+	}()
 	startedAt := time.Now()
 	timeoutMs := r.policy.TimeoutMs
 	if input.ForegroundTimeoutMs != nil {
@@ -202,7 +206,7 @@ func (r *Runner) projectForegroundStream(projection *foregroundStreamProjection)
 			}
 			if r.policy.ShouldAutoBackground != nil &&
 				r.policy.ShouldAutoBackground(ctx, candidate) {
-				task, err := r.adoptForeground(ctx, spec, resultCh)
+				task, err := r.adoptForeground(ctx, spec, resultCh, cancel)
 				if err != nil {
 					cancel()
 					writer.Send("", err)
@@ -211,6 +215,12 @@ func (r *Runner) projectForegroundStream(projection *foregroundStreamProjection)
 				writer.Send(r.backgroundNotice(ctx, NoticeInfo{
 					Task: task, AutoBackgrounded: true,
 				}), nil)
+				writer.Close()
+				writer = nil
+				// The adopted task waits on resultCh, so keep draining its adapter
+				// after detaching the caller-facing projection.
+				for range chunks {
+				}
 				return
 			}
 			cancel()
