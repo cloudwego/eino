@@ -1759,7 +1759,7 @@ func TestConcatToolResults(t *testing.T) {
 		assert.Contains(t, err.Error(), "conflicting")
 		assert.Contains(t, err.Error(), "file")
 	})
-	
+
 	t.Run("same_chunk_text_merged", func(t *testing.T) {
 		chunks := []*ToolResult{
 			{
@@ -2176,6 +2176,20 @@ func TestConvToolOutputPartToMessageInputPart(t *testing.T) {
 		_, err := convToolOutputPartToMessageInputPart(toolPart)
 		assert.Error(t, err)
 		assert.ErrorContains(t, err, "file content is nil")
+	})
+
+	t.Run("tool search result part", func(t *testing.T) {
+		searchResult := &ToolSearchResult{Tools: []*ToolInfo{{Name: "get_weather"}}}
+		toolPart := ToolOutputPart{
+			Type:             ToolPartTypeToolSearchResult,
+			ToolSearchResult: searchResult,
+			Extra:            map[string]any{"search_key": "search_value"},
+		}
+		result, err := convToolOutputPartToMessageInputPart(toolPart)
+		assert.NoError(t, err)
+		assert.Equal(t, ChatMessagePartTypeToolSearchResult, result.Type)
+		assert.Equal(t, searchResult, result.ToolSearchResult)
+		assert.Equal(t, map[string]any{"search_key": "search_value"}, result.Extra)
 	})
 
 	t.Run("unknown type", func(t *testing.T) {
