@@ -18,6 +18,7 @@ package plantask
 
 import (
 	"context"
+	"path/filepath"
 	"regexp"
 
 	"github.com/cloudwego/eino/adk/middlewares/filesystem"
@@ -88,6 +89,14 @@ func appendUnique(slice []string, items ...string) []string {
 		}
 	}
 	return slice
+}
+
+func resolveListedFilePath(baseDir, listedPath string) string {
+	if filepath.IsAbs(listedPath) {
+		return listedPath
+	}
+
+	return filepath.Join(baseDir, listedPath)
 }
 
 func hasCyclicDependency(taskMap map[string]*task, blockerID, blockedID string) bool {
