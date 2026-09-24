@@ -77,9 +77,9 @@ func (a *workflowAgent) Run(ctx context.Context, _ *AgentInput, opts ...AgentRun
 			panicErr := recover()
 			if panicErr != nil {
 				e := safe.NewPanicErr(panicErr, debug.Stack())
-				generator.Send(&AgentEvent{Err: e})
+				generator.Send(&AgentEvent{Type: AgentEventError, Err: e})
 			} else if err != nil {
-				generator.Send(&AgentEvent{Err: err})
+				generator.Send(&AgentEvent{Type: AgentEventError, Err: err})
 			}
 
 			generator.Close()
@@ -129,9 +129,9 @@ func (a *workflowAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...Ag
 			panicErr := recover()
 			if panicErr != nil {
 				e := safe.NewPanicErr(panicErr, debug.Stack())
-				generator.Send(&AgentEvent{Err: e})
+				generator.Send(&AgentEvent{Type: AgentEventError, Err: e})
 			} else if err != nil {
-				generator.Send(&AgentEvent{Err: err})
+				generator.Send(&AgentEvent{Type: AgentEventError, Err: err})
 			}
 
 			generator.Close()
@@ -523,7 +523,7 @@ func (a *workflowAgent) runParallel(ctx context.Context, generator *AsyncGenerat
 				panicErr := recover()
 				if panicErr != nil {
 					e := safe.NewPanicErr(panicErr, debug.Stack())
-					generator.Send(&AgentEvent{Err: e})
+					generator.Send(&AgentEvent{Type: AgentEventError, Err: e})
 				}
 				wg.Done()
 			}()
@@ -610,7 +610,7 @@ func cancelAtTransition(ctx context.Context, info string, state any) *AgentEvent
 	is, err := core.Interrupt(ctx, info, state, nil,
 		core.WithLayerPayload(getRunCtx(ctx).RunPath))
 	if err != nil {
-		return &AgentEvent{Err: err}
+		return &AgentEvent{Type: AgentEventError, Err: err}
 	}
 
 	contexts := core.ToInterruptContexts(is, allowedAddressSegmentTypes)
