@@ -16,21 +16,32 @@
 
 package internal
 
-import "sync"
+import (
+	"context"
+	"sync"
+)
 
 // UnboundedChan represents a channel with unlimited capacity
 type UnboundedChan[T any] struct {
-	buffer   []T        // Internal buffer to store data
-	mutex    sync.Mutex // Mutex to protect buffer access
-	notEmpty *sync.Cond // Condition variable to wait for data
-	closed   bool       // Indicates if the channel has been closed
+	buffer   []T           // Internal buffer to store data
+	mutex    sync.Mutex    // Mutex to protect buffer access
+	notEmpty *sync.Cond    // Condition variable to wait for data
+	notify   chan struct{} // Notification channel for context-aware receives
+	closed   bool          // Indicates if the channel has been closed
 }
 
 // NewUnboundedChan initializes and returns an UnboundedChan
 func NewUnboundedChan[T any]() *UnboundedChan[T] {
-	ch := &UnboundedChan[T]{}
+	ch := &UnboundedChan[T]{notify: make(chan struct{}, 1)}
 	ch.notEmpty = sync.NewCond(&ch.mutex)
 	return ch
+}
+
+func (ch *UnboundedChan[T]) signal() {
+	select {
+	case ch.notify <- struct{}{}:
+	default:
+	}
 }
 
 // Send puts an item into the channel
@@ -44,6 +55,7 @@ func (ch *UnboundedChan[T]) Send(value T) {
 
 	ch.buffer = append(ch.buffer, value)
 	ch.notEmpty.Signal() // Wake up one goroutine waiting to receive
+	ch.signal()
 }
 
 // TrySend attempts to put an item into the channel.
@@ -58,6 +70,7 @@ func (ch *UnboundedChan[T]) TrySend(value T) bool {
 
 	ch.buffer = append(ch.buffer, value)
 	ch.notEmpty.Signal()
+	ch.signal()
 	return true
 }
 
@@ -82,6 +95,42 @@ func (ch *UnboundedChan[T]) Receive() (T, bool) {
 	return val, true
 }
 
+// ReceiveWithContext gets an item from the channel or returns when ctx is done.
+// It has the same closed-channel semantics as Receive.
+func (ch *UnboundedChan[T]) ReceiveWithContext(ctx context.Context) (T, bool) {
+	if ctx == nil {
+		return ch.Receive()
+	}
+
+	for {
+		ch.mutex.Lock()
+		if ctx.Err() != nil {
+			var zero T
+			ch.mutex.Unlock()
+			return zero, false
+		}
+		if len(ch.buffer) > 0 {
+			val := ch.buffer[0]
+			ch.buffer = ch.buffer[1:]
+			ch.mutex.Unlock()
+			return val, true
+		}
+		if ch.closed {
+			var zero T
+			ch.mutex.Unlock()
+			return zero, false
+		}
+		ch.mutex.Unlock()
+
+		select {
+		case <-ch.notify:
+		case <-ctx.Done():
+			var zero T
+			return zero, false
+		}
+	}
+}
+
 // Close marks the channel as closed
 func (ch *UnboundedChan[T]) Close() {
 	ch.mutex.Lock()
@@ -90,5 +139,6 @@ func (ch *UnboundedChan[T]) Close() {
 	if !ch.closed {
 		ch.closed = true
 		ch.notEmpty.Broadcast()
+		ch.signal()
 	}
 }
