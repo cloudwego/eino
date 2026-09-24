@@ -97,7 +97,7 @@ func NewRetriever(ctx context.Context, config *Config) (retriever.Retriever, err
 
 	return &routerRetriever{
 		retrievers: config.Retrievers,
-		router:     config.Router,
+		router:     router,
 		fusionFunc: fusion,
 	}, nil
 }
