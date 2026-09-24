@@ -2114,12 +2114,12 @@ func TestCheckpointStreamConversionIgnoresOnlyRecordedInterrupt(t *testing.T) {
 		w.Send("", streamErr)
 		w.Close()
 		return &checkpoint{
-			Inputs:            map[string]any{"node": packStreamReader(r)},
-			InterruptID2Addr:  id2Addr,
-			InterruptID2State: id2State,
-		}, newCheckPointer(map[string]streamConvertPair{
-			"node": defaultStreamConvertPair[string](),
-		}, nil, nil, nil)
+				Inputs:            map[string]any{"node": packStreamReader(r)},
+				InterruptID2Addr:  id2Addr,
+				InterruptID2State: id2State,
+			}, newCheckPointer(map[string]streamConvertPair{
+				"node": defaultStreamConvertPair[string](),
+			}, nil, nil, nil)
 	}
 
 	cp, pointer := newCheckpoint(recordedErr)
