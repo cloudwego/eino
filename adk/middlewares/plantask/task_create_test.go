@@ -89,3 +89,28 @@ func TestTaskCreateToolWithMetadata(t *testing.T) {
 	assert.Equal(t, "value1", taskData.Metadata["key1"])
 	assert.Equal(t, "value2", taskData.Metadata["key2"])
 }
+
+func TestTaskCreateToolWithBaseNameLsInfo(t *testing.T) {
+	ctx := context.Background()
+	backend := newBaseNameLsBackend()
+	baseDir := "/tmp/tasks"
+	lock := &sync.Mutex{}
+
+	err := backend.Write(ctx, &WriteRequest{FilePath: filepath.Join(baseDir, highWatermarkFileName), Content: "1"})
+	assert.NoError(t, err)
+
+	tool := newTaskCreateTool(backend, baseDir, lock)
+
+	result, err := tool.InvokableRun(ctx, `{"subject": "Second Task", "description": "Second description"}`)
+	assert.NoError(t, err)
+	assert.Equal(t, `{"result":"Task #2 created successfully: Second Task"}`, result)
+
+	content, err := backend.Read(ctx, &ReadRequest{FilePath: filepath.Join(baseDir, "2.json")})
+	assert.NoError(t, err)
+
+	var taskData task
+	err = sonic.UnmarshalString(content.Content, &taskData)
+	assert.NoError(t, err)
+	assert.Equal(t, "2", taskData.ID)
+	assert.Equal(t, "Second Task", taskData.Subject)
+}
