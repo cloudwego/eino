@@ -223,7 +223,7 @@ func (r *Runner) runForeground(
 		}
 		if r.policy.ShouldAutoBackground != nil &&
 			r.policy.ShouldAutoBackground(ctx, candidate) {
-			task, err := r.adoptForeground(ctx, spec, resultCh)
+			task, err := r.adoptForeground(ctx, spec, resultCh, cancel)
 			if err != nil {
 				cancel()
 				return r.failedTask(spec, fmt.Sprintf("handoff failed after %dms: %v", timeoutMs, err)), nil
@@ -246,10 +246,16 @@ func (r *Runner) adoptForeground(
 		value string
 		err   error
 	},
+	cancelWork context.CancelFunc,
 ) (*backgroundtask.Task, error) {
-	waitWork := func(context.Context, backgroundtask.ExecutionRuntime) (string, error) {
-		result := <-resultCh
-		return result.value, result.err
+	waitWork := func(ctx context.Context, _ backgroundtask.ExecutionRuntime) (string, error) {
+		defer cancelWork()
+		select {
+		case result := <-resultCh:
+			return result.value, result.err
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
 	}
 	if err := r.executor.register(spec.ID, waitWork); err != nil {
 		return nil, err
