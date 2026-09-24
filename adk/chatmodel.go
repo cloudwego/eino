@@ -1142,13 +1142,23 @@ func (a *TypedChatModelAgent[M]) buildMessageReActRunFunc(_ context.Context, bc 
 	return func(ctx context.Context, p *typedRunParams[M]) {
 		mp := any(p).(*typedRunParams[*schema.Message])
 		cancelCtx := mp.cancelCtx
-		msgConf.cancelCtx = cancelCtx
-		if msgConf.modelWrapperConf != nil {
-			msgConf.modelWrapperConf.cancelContext = cancelCtx
-		}
 		ctx = withCancelContext(ctx, cancelCtx)
 
-		g, err := newReact(ctx, msgConf)
+		// msgConf is built once per agent and shared by every concurrent Run.
+		// Shallow-copy it so the per-run cancel scope stays run-local instead
+		// of racing across runs. The copied fields are read-only after
+		// construction (buildModelWrappers snapshots the wrapper config at
+		// build time), so a copy of the struct plus the wrapper config is
+		// enough. See https://github.com/cloudwego/eino/issues/1177.
+		runConf := *msgConf
+		if msgConf.modelWrapperConf != nil {
+			mw := *msgConf.modelWrapperConf
+			mw.cancelContext = cancelCtx
+			runConf.modelWrapperConf = &mw
+		}
+		runConf.cancelCtx = cancelCtx
+
+		g, err := newReact(ctx, &runConf)
 		if err != nil {
 			mp.generator.Send(&AgentEvent{Err: err})
 			return
@@ -1272,13 +1282,21 @@ func (a *TypedChatModelAgent[M]) buildAgenticReActRunFunc(_ context.Context, bc 
 	return func(ctx context.Context, p *typedRunParams[M]) {
 		ap := any(p).(*typedRunParams[*schema.AgenticMessage])
 		cancelCtx := ap.cancelCtx
-		agenticConf.cancelCtx = cancelCtx
-		if agenticConf.modelWrapperConf != nil {
-			agenticConf.modelWrapperConf.cancelContext = cancelCtx
-		}
 		ctx = withCancelContext(ctx, cancelCtx)
 
-		g, err := newAgenticReact(ctx, agenticConf)
+		// agenticConf is built once per agent and shared by every concurrent
+		// Run. Shallow-copy it so the per-run cancel scope stays run-local
+		// instead of racing across runs. See
+		// https://github.com/cloudwego/eino/issues/1177.
+		runConf := *agenticConf
+		if agenticConf.modelWrapperConf != nil {
+			mw := *agenticConf.modelWrapperConf
+			mw.cancelContext = cancelCtx
+			runConf.modelWrapperConf = &mw
+		}
+		runConf.cancelCtx = cancelCtx
+
+		g, err := newAgenticReact(ctx, &runConf)
 		if err != nil {
 			ap.generator.Send(&TypedAgentEvent[*schema.AgenticMessage]{Err: err})
 			return
