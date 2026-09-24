@@ -981,7 +981,9 @@ func getCheckPointInfo(opts ...Option) (checkPointID *string, writeToCheckPointI
 		if opt.stateModifier != nil {
 			stateModifier = opt.stateModifier
 		}
-		forceNewRun = opt.forceNewRun
+		if opt.forceNewRun {
+			forceNewRun = true
+		}
 	}
 	if writeToCheckPointID == nil {
 		writeToCheckPointID = checkPointID
