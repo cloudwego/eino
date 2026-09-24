@@ -126,7 +126,15 @@ type FailoverContext[M MessageType] struct {
 	// FailoverAttempt is the current failover attempt number, starting from 1.
 	FailoverAttempt uint
 
-	// InputMessages is the original input messages before any transformation.
+	// InputMessages is the input this attempt will be made with, before
+	// GetFailoverModel transforms it.
+	//
+	// It is normally the input the ChatModel call was made with. It differs in
+	// one case: an inner retry rewrote the input and asked for the rewrite to be
+	// persisted (TypedRetryDecision.PersistModifiedInputMessages), in which case
+	// this carries the rewrite. That is the point of the flag -- a retry that
+	// concluded the input itself was at fault has no reason to hand the next
+	// model the input it just faulted.
 	InputMessages []M
 
 	// LastOutputMessage is the output message from the last failed attempt.
@@ -242,6 +250,37 @@ func (f *failoverModelWrapper[M]) getFailoverModel(ctx context.Context, failover
 	return currentModel, msgs, nil
 }
 
+// attemptInput returns the input the next attempt should be made with:
+// State.Messages when they can be read, and the fallback otherwise.
+//
+// Each attempt reads the state afresh rather than reusing the slice captured
+// when failover began, because one thing can change it in between: an inner
+// retry that rewrote the input and asked for the rewrite to be persisted
+// (TypedRetryDecision.PersistModifiedInputMessages). Without this read the
+// rewrite reaches only the retries of the model that was already failing, and
+// the model failed over to is handed the input that was just faulted -- for an
+// input the provider refused outright, every remaining attempt is then spent
+// re-sending the payload that caused the refusal.
+//
+// Nothing else moves underneath an attempt. The state is persisted immediately
+// before the endpoint chain is entered, this wrapper is the outermost layer of
+// that chain, and the model result is appended to the state only after the
+// chain returns -- so the first attempt reads back exactly what it was passed.
+//
+// The fallback covers the wrapper being driven outside a graph (there is no
+// state to read) and a state carrying no messages at all; an attempt is never
+// made with an empty input on account of this.
+func (f *failoverModelWrapper[M]) attemptInput(ctx context.Context, fallback []M) []M {
+	var stateMessages []M
+	if err := compose.ProcessState(ctx, func(_ context.Context, st *typedState[M]) error {
+		stateMessages = st.Messages
+		return nil
+	}); err != nil || len(stateMessages) == 0 {
+		return fallback
+	}
+	return stateMessages
+}
+
 func (f *failoverModelWrapper[M]) Generate(ctx context.Context, input []M, opts ...model.Option) (M, error) {
 	// Defensive: GetFailoverModel is validated non-nil at agent construction.
 	if f.config.GetFailoverModel == nil {
@@ -263,7 +302,7 @@ func (f *failoverModelWrapper[M]) Generate(ctx context.Context, input []M, opts 
 		modelCtx := typedSetFailoverCurrentModel(ctx, lastSuccess)
 		modelCtx = withFailoverHasMoreAttempts(modelCtx, f.config.MaxRetries > 0)
 		modelCtx = withFailoverTimeline(modelCtx, parentSpanID, timelineAttempt)
-		result, err := f.inner.Generate(modelCtx, input, opts...)
+		result, err := f.inner.Generate(modelCtx, f.attemptInput(ctx, input), opts...)
 		if err == nil {
 			return result, nil
 		}
@@ -288,7 +327,7 @@ func (f *failoverModelWrapper[M]) Generate(ctx context.Context, input []M, opts 
 
 		failoverCtx := &FailoverContext[M]{
 			FailoverAttempt:   attempt,
-			InputMessages:     input,
+			InputMessages:     f.attemptInput(ctx, input),
 			LastOutputMessage: lastOutputMessage,
 			LastErr:           lastErr,
 		}
@@ -304,7 +343,7 @@ func (f *failoverModelWrapper[M]) Generate(ctx context.Context, input []M, opts 
 		}
 
 		if currentInput == nil {
-			currentInput = input
+			currentInput = failoverCtx.InputMessages
 		}
 
 		modelCtx := typedSetFailoverCurrentModel(ctx, currentModel)
@@ -355,7 +394,7 @@ func (f *failoverModelWrapper[M]) Stream(ctx context.Context, input []M, opts ..
 		modelCtx := typedSetFailoverCurrentModel(ctx, lastSuccess)
 		modelCtx = withFailoverHasMoreAttempts(modelCtx, f.config.MaxRetries > 0)
 		modelCtx = withFailoverTimeline(modelCtx, parentSpanID, timelineAttempt)
-		stream, err := f.inner.Stream(modelCtx, input, opts...)
+		stream, err := f.inner.Stream(modelCtx, f.attemptInput(ctx, input), opts...)
 		if err != nil {
 			lastErr = err
 			var zero M
@@ -395,7 +434,7 @@ func (f *failoverModelWrapper[M]) Stream(ctx context.Context, input []M, opts ..
 
 		failoverCtx := &FailoverContext[M]{
 			FailoverAttempt:   attempt,
-			InputMessages:     input,
+			InputMessages:     f.attemptInput(ctx, input),
 			LastOutputMessage: lastOutputMessage,
 			LastErr:           lastErr,
 		}
@@ -409,7 +448,7 @@ func (f *failoverModelWrapper[M]) Stream(ctx context.Context, input []M, opts ..
 		}
 
 		if currentInput == nil {
-			currentInput = input
+			currentInput = failoverCtx.InputMessages
 		}
 
 		modelCtx := typedSetFailoverCurrentModel(ctx, currentModel)
