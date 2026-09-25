@@ -1391,6 +1391,20 @@ type reactRunInput struct {
 	instruction string
 }
 
+// MarshalJSON exposes the unexported fields so that tracing callbacks can report
+// a meaningful input for the chain and lambda nodes built by
+// buildMessageReActRunFunc. Without it encoding/json skips unexported fields and
+// the reported input is always an empty object.
+func (r reactRunInput) MarshalJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		Input       *AgentInput `json:"input"`
+		Instruction string      `json:"instruction"`
+	}{
+		Input:       r.input,
+		Instruction: r.instruction,
+	})
+}
+
 func (a *TypedChatModelAgent[M]) buildMessageReActRunFunc(_ context.Context, bc *execContext) (typedRunFunc[M], error) {
 	// safe: only called when M = *schema.Message (guarded by type switch in buildReActRunFunc)
 	msgModel := any(a.model).(model.BaseChatModel)
