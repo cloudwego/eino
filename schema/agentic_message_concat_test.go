@@ -395,3 +395,26 @@ func BenchmarkConcatMCPToolCalls(b *testing.B) {
 		}
 	}
 }
+
+type concatAssistantGenTextCustomExtension struct {
+	Chunks []string
+}
+
+func TestConcatAssistantGenTexts_OptimizedPreservesSingleCustomExtension(t *testing.T) {
+	texts := []*AssistantGenText{
+		{
+			Text:      "foo",
+			Extension: concatAssistantGenTextCustomExtension{Chunks: []string{"metadata"}},
+		},
+		{Text: "bar"},
+	}
+
+	got, err := concatAssistantGenTexts(texts)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Equal(t, "foobar", got.Text)
+
+	ext, ok := got.Extension.(concatAssistantGenTextCustomExtension)
+	require.True(t, ok, "expected custom extension type, got %T", got.Extension)
+	assert.Equal(t, []string{"metadata"}, ext.Chunks)
+}
