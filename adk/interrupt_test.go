@@ -279,6 +279,98 @@ func TestSimpleInterrupt(t *testing.T) {
 	assert.False(t, ok)
 }
 
+func TestResumeFilterOptions(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("agent", func(t *testing.T) {
+		var runValue, resumeValue string
+		agent := &myAgent{
+			name: "Agent1",
+			runFn: func(ctx context.Context, input *AgentInput, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+				runValue = GetImplSpecificOptions[myAgentOptions](nil, opts...).value
+				iter, generator := NewAsyncIteratorPair[*AgentEvent]()
+				generator.Send(StatefulInterrupt(ctx, "info", "state"))
+				generator.Close()
+				return iter
+			},
+			resumeFn: func(ctx context.Context, info *ResumeInfo, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+				assert.True(t, info.WasInterrupted)
+				resumeValue = GetImplSpecificOptions[myAgentOptions](nil, opts...).value
+				iter, generator := NewAsyncIteratorPair[*AgentEvent]()
+				generator.Close()
+				return iter
+			},
+		}
+		runner := NewRunner(ctx, RunnerConfig{
+			Agent:           agent,
+			CheckPointStore: newMyStore(),
+		})
+
+		iter := runner.Query(ctx, "hello", WithCheckPointID("1"),
+			withValue("Agent1").DesignateAgent("Agent1"), withValue("Agent2").DesignateAgent("Agent2"))
+		for {
+			if _, ok := iter.Next(); !ok {
+				break
+			}
+		}
+		assert.Equal(t, "Agent1", runValue)
+
+		iter, err := runner.Resume(ctx, "1",
+			withValue("Agent1").DesignateAgent("Agent1"), withValue("Agent2").DesignateAgent("Agent2"))
+		assert.NoError(t, err)
+		for {
+			if _, ok := iter.Next(); !ok {
+				break
+			}
+		}
+		assert.Equal(t, "Agent1", resumeValue)
+	})
+
+	t.Run("agentic agent", func(t *testing.T) {
+		var runValue, resumeValue string
+		agent := &myAgenticAgent{
+			name: "Agent1",
+			runFn: func(ctx context.Context, input *TypedAgentInput[*schema.AgenticMessage], opts ...AgentRunOption) *AsyncIterator[*TypedAgentEvent[*schema.AgenticMessage]] {
+				runValue = GetImplSpecificOptions[myAgentOptions](nil, opts...).value
+				iter, generator := NewAsyncIteratorPair[*TypedAgentEvent[*schema.AgenticMessage]]()
+				generator.Send(TypedStatefulInterrupt[*schema.AgenticMessage](ctx, "info", "state"))
+				generator.Close()
+				return iter
+			},
+			resumeFn: func(ctx context.Context, info *ResumeInfo, opts ...AgentRunOption) *AsyncIterator[*TypedAgentEvent[*schema.AgenticMessage]] {
+				assert.True(t, info.WasInterrupted)
+				resumeValue = GetImplSpecificOptions[myAgentOptions](nil, opts...).value
+				iter, generator := NewAsyncIteratorPair[*TypedAgentEvent[*schema.AgenticMessage]]()
+				generator.Close()
+				return iter
+			},
+		}
+		runner := NewTypedRunner(TypedRunnerConfig[*schema.AgenticMessage]{
+			Agent:           agent,
+			CheckPointStore: newMyStore(),
+		})
+
+		iter := runner.Run(ctx, []*schema.AgenticMessage{schema.UserAgenticMessage("hello")}, WithCheckPointID("1"),
+			withValue("Agent1").DesignateAgent("Agent1"), withValue("Agent2").DesignateAgent("Agent2"))
+		for {
+			if _, ok := iter.Next(); !ok {
+				break
+			}
+		}
+		assert.Equal(t, "Agent1", runValue)
+
+		iter, err := runner.Resume(ctx, "1",
+			withValue("Agent1").DesignateAgent("Agent1"), withValue("Agent2").DesignateAgent("Agent2"))
+		assert.NoError(t, err)
+		for {
+			if _, ok := iter.Next(); !ok {
+				break
+			}
+		}
+		assert.Equal(t, "Agent1", resumeValue)
+	})
+}
+
 func TestMultiAgentInterrupt(t *testing.T) {
 	ctx := context.Background()
 	sa1 := &myAgent{
