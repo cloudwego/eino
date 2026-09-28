@@ -603,6 +603,45 @@ func TestWorkflowWithNestedFieldMappings(t *testing.T) {
 		assert.ErrorContains(t, err, "two terminal field paths conflict")
 	})
 
+	t.Run("both to map.any.field, and to map.any", func(t *testing.T) {
+		wf := NewWorkflow[string, map[string]any]()
+		wf.End().AddInput(START, ToFieldPath([]string{"Key1", "Key2"}), ToFieldPath([]string{"Key1"}))
+		_, err := wf.Compile(ctx)
+		assert.ErrorContains(t, err, "two terminal field paths conflict")
+	})
+
+	t.Run("both to map.any.any, and to map.any.any.field", func(t *testing.T) {
+		wf := NewWorkflow[string, map[string]any]()
+		wf.End().AddInput(START, ToFieldPath([]string{"Key1", "Key2"}), ToFieldPath([]string{"Key1", "Key2", "Key3"}))
+		_, err := wf.Compile(ctx)
+		assert.ErrorContains(t, err, "two terminal field paths conflict")
+
+		wf = NewWorkflow[string, map[string]any]()
+		wf.End().AddInput(START, ToFieldPath([]string{"Key1", "Key2", "Key3"}), ToFieldPath([]string{"Key1", "Key2"}))
+		_, err = wf.Compile(ctx)
+		assert.ErrorContains(t, err, "two terminal field paths conflict")
+	})
+
+	t.Run("both to map.any.field, and static value to map.any", func(t *testing.T) {
+		wf := NewWorkflow[string, map[string]any]()
+		wf.End().AddInput(START, ToFieldPath([]string{"Key1", "Key2"})).
+			SetStaticValue(FieldPath{"Key1"}, "static")
+		_, err := wf.Compile(ctx)
+		assert.ErrorContains(t, err, "two terminal field paths conflict")
+	})
+
+	t.Run("both static value to map.any, and static value to map.any.field", func(t *testing.T) {
+		// static values are checked in map iteration order
+		for i := 0; i < 20; i++ {
+			wf := NewWorkflow[string, map[string]any]()
+			wf.End().AddInput(START, ToFieldPath([]string{"Key3"})).
+				SetStaticValue(FieldPath{"Key1"}, "v1").
+				SetStaticValue(FieldPath{"Key1", "Key2"}, "v2")
+			_, err := wf.Compile(ctx)
+			assert.ErrorContains(t, err, "two terminal field paths conflict")
+		}
+	})
+
 	t.Run("to map.any.any.field1, and to map.any.any.field2", func(t *testing.T) {
 		wf := NewWorkflow[string, map[string]any]()
 		wf.End().AddInput(START, ToFieldPath([]string{"Key1", "Key2", "key3"}), ToFieldPath([]string{"Key1", "Key2", "key4"}))
