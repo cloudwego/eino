@@ -475,6 +475,21 @@ func TestGrepTool(t *testing.T) {
 			input:    `{"pattern": "package", "path": "/dir2", "output_mode": "count"}`,
 			expected: "/dir2/file5.go:1\n\nFound 1 total occurrence across 1 file.", // only in dir2/file5.go
 		},
+		{
+			name:     "grep with count mode ignores -C",
+			input:    `{"pattern": "hello", "output_mode": "count", "-C": 1}`,
+			expected: "/dir1/file3.txt:2\n/dir1/file4.py:1\n/file2.go:1\n\nFound 4 total occurrences across 3 files.",
+		},
+		{
+			name:     "grep with count mode ignores -A and -B",
+			input:    `{"pattern": "hello", "output_mode": "count", "-A": 1, "-B": 1}`,
+			expected: "/dir1/file3.txt:2\n/dir1/file4.py:1\n/file2.go:1\n\nFound 4 total occurrences across 3 files.",
+		},
+		{
+			name:     "grep with content mode and -C",
+			input:    `{"pattern": "hello", "output_mode": "content", "-C": 1}`,
+			contains: []string{"/dir1/file3.txt:2:foo bar", "/dir1/file4.py:2:print('world')"},
+		},
 	}
 
 	for _, tt := range tests {
