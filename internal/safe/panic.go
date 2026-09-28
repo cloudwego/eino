@@ -29,6 +29,21 @@ func (p *panicErr) Error() string {
 	return fmt.Sprintf("panic error: %v, \nstack: %s", p.info, string(p.stack))
 }
 
+// PanicValue returns the value passed to panic.
+func (p *panicErr) PanicValue() any {
+	return p.info
+}
+
+// StackTrace returns a copy of the stack captured when the panic was recovered.
+func (p *panicErr) StackTrace() []byte {
+	if len(p.stack) == 0 {
+		return nil
+	}
+	stack := make([]byte, len(p.stack))
+	copy(stack, p.stack)
+	return stack
+}
+
 // NewPanicErr creates a new panic error.
 // panicErr is a wrapper of panic info and stack trace.
 // it implements the error interface, can print error message of info and stack trace.
