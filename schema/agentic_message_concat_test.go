@@ -21,6 +21,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/cloudwego/eino/internal"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -373,6 +375,63 @@ func BenchmarkConcatFunctionToolCalls(b *testing.B) {
 			})
 		}
 	}
+}
+
+type concatAssistantGenTextMergedExtension struct {
+	Chunks []string
+}
+
+func TestConcatAgenticMessages_PreservesMergedCustomAssistantGenTextExtensions(t *testing.T) {
+	internal.RegisterStreamChunkConcatFunc(func(exts []concatAssistantGenTextMergedExtension) (concatAssistantGenTextMergedExtension, error) {
+		ret := concatAssistantGenTextMergedExtension{}
+		for _, ext := range exts {
+			ret.Chunks = append(ret.Chunks, ext.Chunks...)
+		}
+		return ret, nil
+	})
+
+	msgs := []*AgenticMessage{
+		{
+			Role: AgenticRoleTypeAssistant,
+			ContentBlocks: []*ContentBlock{
+				{
+					StreamingMeta: &StreamingMeta{Index: 0},
+					Type:          ContentBlockTypeAssistantGenText,
+					AssistantGenText: &AssistantGenText{
+						Text:      "foo",
+						Extension: concatAssistantGenTextMergedExtension{Chunks: []string{"left"}},
+					},
+				},
+			},
+		},
+		{
+			Role: AgenticRoleTypeAssistant,
+			ContentBlocks: []*ContentBlock{
+				{
+					StreamingMeta: &StreamingMeta{Index: 0},
+					Type:          ContentBlockTypeAssistantGenText,
+					AssistantGenText: &AssistantGenText{
+						Text:      "bar",
+						Extension: concatAssistantGenTextMergedExtension{Chunks: []string{"right"}},
+					},
+				},
+			},
+		},
+	}
+
+	got, err := ConcatAgenticMessages(msgs)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Equal(t, AgenticRoleTypeAssistant, got.Role)
+	require.Len(t, got.ContentBlocks, 1)
+
+	gotText := got.ContentBlocks[0].AssistantGenText
+	require.NotNil(t, gotText)
+	assert.Equal(t, "foobar", gotText.Text)
+
+	ext, ok := gotText.Extension.(concatAssistantGenTextMergedExtension)
+	require.True(t, ok, "expected custom extension type, got %T", gotText.Extension)
+	assert.Equal(t, []string{"left", "right"}, ext.Chunks)
 }
 
 func BenchmarkConcatMCPToolCalls(b *testing.B) {

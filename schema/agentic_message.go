@@ -1491,7 +1491,8 @@ func concatAssistantGenTexts(texts []*AssistantGenText) (ret *AssistantGenText, 
 	}
 
 	if extensions.IsValid() && !extensions.IsZero() {
-		ext, err := internal.ConcatSliceValue(extensions)
+		var ext reflect.Value
+		ext, err = internal.ConcatSliceValue(extensions)
 		if err != nil {
 			return nil, err
 		}
