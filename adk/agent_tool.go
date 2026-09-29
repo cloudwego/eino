@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/bytedance/sonic"
 
@@ -42,6 +43,7 @@ var (
 type AgentToolOptions struct {
 	fullChatHistoryAsInput bool
 	agentInputSchema       *schema.ParamsOneOf
+	timeout                time.Duration
 }
 
 type AgentToolOption func(*AgentToolOptions)
@@ -57,6 +59,15 @@ func WithFullChatHistoryAsInput() AgentToolOption {
 func WithAgentInputSchema(schema *schema.ParamsOneOf) AgentToolOption {
 	return func(options *AgentToolOptions) {
 		options.agentInputSchema = schema
+	}
+}
+
+// WithAgentToolTimeout sets the maximum duration of an AgentTool invocation.
+// A non-positive duration disables the timeout. The timeout is applied to both
+// new and resumed agent-tool runs and preserves an earlier parent deadline.
+func WithAgentToolTimeout(timeout time.Duration) AgentToolOption {
+	return func(options *AgentToolOptions) {
+		options.timeout = timeout
 	}
 }
 
@@ -100,6 +111,7 @@ func NewAgentTool(_ context.Context, agent Agent, options ...AgentToolOption) to
 		agent:                  agent,
 		fullChatHistoryAsInput: opts.fullChatHistoryAsInput,
 		inputSchema:            opts.agentInputSchema,
+		timeout:                opts.timeout,
 	}
 }
 
@@ -114,6 +126,7 @@ func NewTypedAgentTool[M MessageType](_ context.Context, agent TypedAgent[M], op
 		agent:                  agent,
 		fullChatHistoryAsInput: opts.fullChatHistoryAsInput,
 		inputSchema:            opts.agentInputSchema,
+		timeout:                opts.timeout,
 	}
 }
 
@@ -122,6 +135,7 @@ type typedAgentTool[M MessageType] struct {
 
 	fullChatHistoryAsInput bool
 	inputSchema            *schema.ParamsOneOf
+	timeout                time.Duration
 }
 
 type agentTool = typedAgentTool[*schema.Message]
@@ -152,6 +166,13 @@ func (at *typedAgentTool[M]) Info(ctx context.Context) (*schema.ToolInfo, error)
 }
 
 func (at *typedAgentTool[M]) InvokableRun(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (string, error) {
+	if at.timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, at.timeout)
+		defer cancel()
+	}
+
+	agentName := at.agent.Name(ctx)
 	if cancelCtx := getCancelContext(ctx); cancelCtx != nil {
 		cancelCtx.markCheckpointAwareDescendant()
 	}
@@ -198,7 +219,7 @@ func (at *typedAgentTool[M]) InvokableRun(ctx context.Context, argumentsInJSON s
 			append(extractAndDeriveAgentToolCancelCtx(ctx, at.agent.Name(ctx), opts), WithCheckPointID(bridgeCheckpointID), withSharedParentSession())...)
 	} else {
 		if !hasState {
-			return "", fmt.Errorf("agent tool '%s' interrupt has happened, but cannot find interrupt state", at.agent.Name(ctx))
+			return "", fmt.Errorf("agent tool '%s' interrupt has happened, but cannot find interrupt state", agentName)
 		}
 
 		ms = newResumeBridgeStore(bridgeCheckpointID, state)
@@ -214,18 +235,27 @@ func (at *typedAgentTool[M]) InvokableRun(ctx context.Context, argumentsInJSON s
 	}
 
 	var lastEvent *TypedAgentEvent[M]
+	lastEventStreamClosed := true
+	closeLastEventStream := func() {
+		if lastEventStreamClosed || lastEvent == nil || lastEvent.Output == nil ||
+			lastEvent.Output.MessageOutput == nil || lastEvent.Output.MessageOutput.MessageStream == nil {
+			return
+		}
+		lastEvent.Output.MessageOutput.MessageStream.Close()
+		lastEventStreamClosed = true
+	}
+	defer closeLastEventStream()
+
 	for {
-		event, ok := iter.Next()
+		event, ok := iter.NextWithContext(ctx)
 		if !ok {
+			if err := ctx.Err(); err != nil {
+				return "", fmt.Errorf("agent tool '%s' context done: %w", agentName, err)
+			}
 			break
 		}
 
-		if lastEvent != nil &&
-			lastEvent.Output != nil &&
-			lastEvent.Output.MessageOutput != nil &&
-			lastEvent.Output.MessageOutput.MessageStream != nil {
-			lastEvent.Output.MessageOutput.MessageStream.Close()
-		}
+		closeLastEventStream()
 
 		if event.Err != nil {
 			return "", event.Err
@@ -246,6 +276,8 @@ func (at *typedAgentTool[M]) InvokableRun(ctx context.Context, argumentsInJSON s
 		}
 
 		lastEvent = event
+		lastEventStreamClosed = event.Output == nil || event.Output.MessageOutput == nil ||
+			event.Output.MessageOutput.MessageStream == nil
 	}
 
 	if lastEvent != nil && lastEvent.Action != nil && lastEvent.Action.Interrupted != nil {
@@ -269,6 +301,7 @@ func (at *typedAgentTool[M]) InvokableRun(ctx context.Context, argumentsInJSON s
 	if lastEvent.Output != nil {
 		if output := lastEvent.Output.MessageOutput; output != nil {
 			msg, err := output.GetMessage()
+			lastEventStreamClosed = true
 			if err != nil {
 				return "", err
 			}
