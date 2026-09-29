@@ -18,23 +18,108 @@ package supervisor
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/mock/gomock"
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/callbacks"
 	"github.com/cloudwego/eino/components"
+	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
 	mockAdk "github.com/cloudwego/eino/internal/mock/adk"
 	mockModel "github.com/cloudwego/eino/internal/mock/components/model"
 	"github.com/cloudwego/eino/schema"
 )
+
+func TestSupervisorTransferHistoryJSONArguments(t *testing.T) {
+	ctx := context.Background()
+	ctrl := gomock.NewController(t)
+	mainModel := mockModel.NewMockToolCallingChatModel(ctrl)
+	subModel := mockModel.NewMockToolCallingChatModel(ctrl)
+	mainModel.EXPECT().WithTools(gomock.Any()).Return(mainModel, nil).AnyTimes()
+	subModel.EXPECT().WithTools(gomock.Any()).Return(subModel, nil).AnyTimes()
+
+	mainModel.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).Return(
+		schema.AssistantMessage("", []schema.ToolCall{{
+			ID: "transfer", Type: "function",
+			Function: schema.FunctionCall{
+				Name: adk.TransferToAgentToolName, Arguments: `{"agent_name":"SubAgent"}`,
+			},
+		}}), nil)
+	subModel.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(schema.AssistantMessage("subagent finished", nil), nil)
+	mainModel.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(schema.AssistantMessage("done", nil), nil)
+
+	mainAgent, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
+		Name: "MainAgent", Description: "Supervisor", Model: mainModel,
+	})
+	require.NoError(t, err)
+	subAgent, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
+		Name: "SubAgent", Description: "Worker", Model: subModel,
+	})
+	require.NoError(t, err)
+	agent, err := New(ctx, &Config{Supervisor: mainAgent, SubAgents: []adk.Agent{subAgent}})
+	require.NoError(t, err)
+	runner := adk.NewRunner(ctx, adk.RunnerConfig{Agent: agent})
+
+	// Applications can collect the emitted messages and replay them next turn.
+	history := []*schema.Message{schema.UserMessage("delegate")}
+	iter := runner.Run(ctx, history)
+	for {
+		event, ok := iter.Next()
+		if !ok {
+			break
+		}
+		require.NoError(t, event.Err)
+		if event.Output != nil && event.Output.MessageOutput != nil {
+			message, getErr := event.Output.MessageOutput.GetMessage()
+			require.NoError(t, getErr)
+			history = append(history, message)
+		}
+	}
+
+	// Model adapters that decode arguments as a JSON object must also accept
+	// the framework-generated transfer back to MainAgent (issue #786).
+	mainModel.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(func(_ context.Context, messages []*schema.Message, _ ...model.Option) (*schema.Message, error) {
+			var destinations []string
+			for _, message := range messages {
+				for _, call := range message.ToolCalls {
+					var args map[string]string
+					if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {
+						return nil, fmt.Errorf("invalid tool arguments: %w", err)
+					}
+					destinations = append(destinations, args["agent_name"])
+				}
+			}
+			assert.Equal(t, []string{"SubAgent", "MainAgent"}, destinations)
+			return schema.AssistantMessage("next turn", nil), nil
+		})
+	iter = runner.Run(ctx, append(history, schema.UserMessage("hello again")))
+	var responses []string
+	for {
+		event, ok := iter.Next()
+		if !ok {
+			break
+		}
+		require.NoError(t, event.Err)
+		if event.Output != nil && event.Output.MessageOutput != nil {
+			message, getErr := event.Output.MessageOutput.GetMessage()
+			require.NoError(t, getErr)
+			responses = append(responses, message.Content)
+		}
+	}
+	assert.Contains(t, responses, "next turn")
+}
 
 // TestNewSupervisor tests the New function
 func TestNewSupervisor(t *testing.T) {
