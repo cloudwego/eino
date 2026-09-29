@@ -1598,12 +1598,25 @@ func concatUserMultiContent(parts []MessageInputPart) ([]MessageInputPart, error
 				merged = append(merged, currentPart)
 			} else {
 				var sb strings.Builder
+				extraList := make([]map[string]any, 0, end-i)
 				for k := i; k < end; k++ {
 					sb.WriteString(parts[k].Text)
+					if len(parts[k].Extra) > 0 {
+						extraList = append(extraList, parts[k].Extra)
+					}
+				}
+				var mergedExtra map[string]any
+				if len(extraList) > 0 {
+					var err error
+					mergedExtra, err = concatExtra(extraList)
+					if err != nil {
+						return nil, fmt.Errorf("failed to concat user text part extra: %w", err)
+					}
 				}
 				mergedPart := MessageInputPart{
-					Type: ChatMessagePartTypeText,
-					Text: sb.String(),
+					Type:  ChatMessagePartTypeText,
+					Text:  sb.String(),
+					Extra: mergedExtra,
 				}
 				merged = append(merged, mergedPart)
 			}
