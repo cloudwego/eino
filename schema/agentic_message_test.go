@@ -18,12 +18,34 @@ package schema
 
 import (
 	"context"
+	"encoding/json"
 	"reflect"
 	"testing"
 
+	"github.com/cloudwego/eino/schema/claude"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestClaudeRedactedThinkingJSONRoundTrip(t *testing.T) {
+	want := &AgenticMessage{
+		Role: AgenticRoleTypeAssistant,
+		ContentBlocks: []*ContentBlock{
+			NewContentBlock(&Reasoning{
+				ClaudeExtension: &claude.ReasoningExtension{
+					RedactedThinking: &claude.RedactedThinking{Data: "opaque-data"},
+				},
+			}),
+		},
+	}
+
+	data, err := json.Marshal(want)
+	require.NoError(t, err)
+
+	got := &AgenticMessage{}
+	require.NoError(t, json.Unmarshal(data, got))
+	assert.Equal(t, want, got)
+}
 
 func TestConcatAgenticMessages(t *testing.T) {
 	t.Run("single message", func(t *testing.T) {
@@ -168,6 +190,40 @@ func TestConcatAgenticMessages(t *testing.T) {
 		assert.NoError(t, err)
 		assert.Len(t, result.ContentBlocks, 1)
 		assert.Equal(t, "Part1-Part3", result.ContentBlocks[0].Reasoning.Text)
+	})
+
+	t.Run("concat claude redacted thinking extension", func(t *testing.T) {
+		msgs := []*AgenticMessage{
+			{
+				Role: AgenticRoleTypeAssistant,
+				ContentBlocks: []*ContentBlock{
+					{
+						Type: ContentBlockTypeReasoning,
+						Reasoning: &Reasoning{ClaudeExtension: &claude.ReasoningExtension{
+							RedactedThinking: &claude.RedactedThinking{Data: "opaque-data"},
+						}},
+						StreamingMeta: &StreamingMeta{Index: 0},
+					},
+				},
+			},
+			{
+				Role: AgenticRoleTypeAssistant,
+				ContentBlocks: []*ContentBlock{
+					{
+						Type:          ContentBlockTypeReasoning,
+						Reasoning:     &Reasoning{},
+						StreamingMeta: &StreamingMeta{Index: 0},
+					},
+				},
+			},
+		}
+
+		result, err := ConcatAgenticMessages(msgs)
+		require.NoError(t, err)
+		require.Len(t, result.ContentBlocks, 1)
+		require.NotNil(t, result.ContentBlocks[0].Reasoning.ClaudeExtension)
+		require.NotNil(t, result.ContentBlocks[0].Reasoning.ClaudeExtension.RedactedThinking)
+		assert.Equal(t, "opaque-data", result.ContentBlocks[0].Reasoning.ClaudeExtension.RedactedThinking.Data)
 	})
 
 	t.Run("concat user input text", func(t *testing.T) {
