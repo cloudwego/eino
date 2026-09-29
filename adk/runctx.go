@@ -27,6 +27,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -344,8 +346,9 @@ func (rs *runSession) getValue(key string) (any, bool) {
 }
 
 type runContext struct {
-	RootInput *AgentInput
-	RunPath   []RunStep
+	RootInput    *AgentInput
+	RunPath      []RunStep
+	InvocationID string
 
 	AgenticRootInput any
 
@@ -361,6 +364,7 @@ func (rc *runContext) deepCopy() *runContext {
 		RootInput:        rc.RootInput,
 		AgenticRootInput: rc.AgenticRootInput,
 		RunPath:          make([]RunStep, len(rc.RunPath)),
+		InvocationID:     rc.InvocationID,
 		Session:          rc.Session,
 	}
 
@@ -392,6 +396,7 @@ func initRunCtx(ctx context.Context, agentName string, input *AgentInput) (conte
 	}
 
 	runCtx.RunPath = append(runCtx.RunPath, RunStep{agentName: agentName})
+	runCtx.InvocationID = uuid.NewString()
 	if runCtx.isRoot() && input != nil {
 		runCtx.RootInput = input
 	}
@@ -408,6 +413,7 @@ func initTypedRunCtx[M MessageType](ctx context.Context, agentName string, input
 	}
 
 	runCtx.RunPath = append(runCtx.RunPath, RunStep{agentName: agentName})
+	runCtx.InvocationID = uuid.NewString()
 	if runCtx.isRoot() && input != nil {
 		var zero M
 		if _, ok := any(zero).(*schema.Message); ok {
@@ -498,9 +504,10 @@ func forkRunCtx(ctx context.Context) context.Context {
 
 	// Create a new runContext for the child lane, pointing to the new session.
 	childRunCtx := &runContext{
-		RootInput: parentRunCtx.RootInput,
-		RunPath:   make([]RunStep, len(parentRunCtx.RunPath)),
-		Session:   childSession,
+		RootInput:    parentRunCtx.RootInput,
+		RunPath:      make([]RunStep, len(parentRunCtx.RunPath)),
+		InvocationID: parentRunCtx.InvocationID,
+		Session:      childSession,
 	}
 	copy(childRunCtx.RunPath, parentRunCtx.RunPath)
 
@@ -521,6 +528,9 @@ func updateRunPathOnly(ctx context.Context, agentNames ...string) context.Contex
 
 	for _, agentName := range agentNames {
 		runCtx.RunPath = append(runCtx.RunPath, RunStep{agentName: agentName})
+	}
+	if len(agentNames) > 0 {
+		runCtx.InvocationID = uuid.NewString()
 	}
 
 	return setRunCtx(ctx, runCtx)

@@ -763,6 +763,54 @@ func TestNestedAgentTool_RunPath(t *testing.T) {
 	}
 }
 
+func TestAgentToolInvocationIDDistinguishesRepeatedRuns(t *testing.T) {
+	ctx := context.Background()
+	agentTool := NewAgentTool(ctx, &invocationIDAgent{}).(tool.InvokableTool)
+
+	first := invokeAgentToolAndCollectEvents(t, ctx, agentTool)
+	second := invokeAgentToolAndCollectEvents(t, ctx, agentTool)
+
+	require.Len(t, first, 2)
+	require.Len(t, second, 2)
+	require.NotEmpty(t, first[0].InvocationID)
+	require.Equal(t, first[0].InvocationID, first[1].InvocationID)
+	require.Equal(t, second[0].InvocationID, second[1].InvocationID)
+	require.Equal(t, first[0].RunPath, second[0].RunPath)
+	require.NotEqual(t, first[0].InvocationID, second[0].InvocationID)
+}
+
+type invocationIDAgent struct{}
+
+func (*invocationIDAgent) Name(context.Context) string        { return "repeated_agent" }
+func (*invocationIDAgent) Description(context.Context) string { return "emits two events" }
+func (*invocationIDAgent) Run(context.Context, *AgentInput, ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+	iter, gen := NewAsyncIteratorPair[*AgentEvent]()
+	go func() {
+		defer gen.Close()
+		gen.Send(EventFromMessage(schema.AssistantMessage("first", nil), nil, schema.Assistant, ""))
+		gen.Send(EventFromMessage(schema.AssistantMessage("second", nil), nil, schema.Assistant, ""))
+	}()
+	return iter
+}
+
+func invokeAgentToolAndCollectEvents(t *testing.T, ctx context.Context, agentTool tool.InvokableTool) []*AgentEvent {
+	t.Helper()
+
+	iter, gen := NewAsyncIteratorPair[*AgentEvent]()
+	_, err := agentTool.InvokableRun(ctx, `{"request":"test"}`, withAgentToolEventGenerator(gen))
+	require.NoError(t, err)
+	gen.Close()
+
+	var events []*AgentEvent
+	for {
+		event, ok := iter.Next()
+		if !ok {
+			return events
+		}
+		events = append(events, event)
+	}
+}
+
 func TestNestedAgentTool_NoInternalEventsWhenDisabled(t *testing.T) {
 	ctx := context.Background()
 
