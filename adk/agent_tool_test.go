@@ -1153,6 +1153,16 @@ func (n *noOutputAgent) Run(context.Context, *AgentInput, ...AgentRunOption) *As
 	return it
 }
 
+type nilEventAgent struct{}
+
+func (n *nilEventAgent) Name(context.Context) string        { return "nil-event" }
+func (n *nilEventAgent) Description(context.Context) string { return "nil-event" }
+func (n *nilEventAgent) Run(context.Context, *AgentInput, ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+	it, gen := NewAsyncIteratorPair[*AgentEvent]()
+	go func() { gen.Send(nil); gen.Close() }()
+	return it
+}
+
 func TestInvokableAgentTool_ErrorCases(t *testing.T) {
 	ctx := context.Background()
 
@@ -1165,6 +1175,11 @@ func TestInvokableAgentTool_ErrorCases(t *testing.T) {
 	out2, err := atNo.(tool.InvokableTool).InvokableRun(ctx, `{"request":"x"}`)
 	assert.NoError(t, err)
 	assert.Equal(t, "", out2)
+
+	atNil := NewAgentTool(ctx, &nilEventAgent{})
+	out3, err := atNil.(tool.InvokableTool).InvokableRun(ctx, `{"request":"x"}`)
+	assert.Equal(t, "", out3)
+	assert.EqualError(t, err, "agent 'nil-event' returned nil event")
 }
 
 func TestCrossTypeAgentToolGracefulError(t *testing.T) {
