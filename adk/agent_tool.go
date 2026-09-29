@@ -21,11 +21,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/bytedance/sonic"
 
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
+	"github.com/cloudwego/eino/internal/core"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -42,9 +44,27 @@ var (
 type AgentToolOptions struct {
 	fullChatHistoryAsInput bool
 	agentInputSchema       *schema.ParamsOneOf
+	retryConfig            *AgentToolRetryConfig
 }
 
 type AgentToolOption func(*AgentToolOptions)
+
+// AgentToolRetryConfig configures retries for an agent wrapped as a tool.
+//
+// MaxRetries is the number of additional attempts after the initial attempt.
+// Retries start a fresh child-agent run and therefore should only be enabled
+// for agents whose side effects are safe to repeat. Forwarded internal events
+// from a failed attempt remain observable.
+type AgentToolRetryConfig struct {
+	MaxRetries int
+	// IsRetryable decides whether an invocation error should be retried.
+	// If nil, all errors except cancellation, deadline, and interrupt signals
+	// are retryable.
+	IsRetryable func(ctx context.Context, err error) bool
+	// Backoff returns the delay before a retry. attempt is one-based.
+	// If nil, retries start immediately.
+	Backoff func(ctx context.Context, attempt int) time.Duration
+}
 
 // WithFullChatHistoryAsInput enables using the full chat history as input.
 func WithFullChatHistoryAsInput() AgentToolOption {
@@ -57,6 +77,21 @@ func WithFullChatHistoryAsInput() AgentToolOption {
 func WithAgentInputSchema(schema *schema.ParamsOneOf) AgentToolOption {
 	return func(options *AgentToolOptions) {
 		options.agentInputSchema = schema
+	}
+}
+
+// WithAgentToolRetry enables whole-invocation retries for an agent tool.
+//
+// A nil config disables retries. Interrupt/resume invocations are never
+// retried because they must preserve their existing checkpoint state.
+func WithAgentToolRetry(config *AgentToolRetryConfig) AgentToolOption {
+	return func(options *AgentToolOptions) {
+		if config == nil {
+			options.retryConfig = nil
+			return
+		}
+		cloned := *config
+		options.retryConfig = &cloned
 	}
 }
 
@@ -100,6 +135,7 @@ func NewAgentTool(_ context.Context, agent Agent, options ...AgentToolOption) to
 		agent:                  agent,
 		fullChatHistoryAsInput: opts.fullChatHistoryAsInput,
 		inputSchema:            opts.agentInputSchema,
+		retryConfig:            opts.retryConfig,
 	}
 }
 
@@ -114,6 +150,7 @@ func NewTypedAgentTool[M MessageType](_ context.Context, agent TypedAgent[M], op
 		agent:                  agent,
 		fullChatHistoryAsInput: opts.fullChatHistoryAsInput,
 		inputSchema:            opts.agentInputSchema,
+		retryConfig:            opts.retryConfig,
 	}
 }
 
@@ -122,6 +159,7 @@ type typedAgentTool[M MessageType] struct {
 
 	fullChatHistoryAsInput bool
 	inputSchema            *schema.ParamsOneOf
+	retryConfig            *AgentToolRetryConfig
 }
 
 type agentTool = typedAgentTool[*schema.Message]
@@ -152,6 +190,36 @@ func (at *typedAgentTool[M]) Info(ctx context.Context) (*schema.ToolInfo, error)
 }
 
 func (at *typedAgentTool[M]) InvokableRun(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (string, error) {
+	if at.retryConfig == nil {
+		return at.invokeOnce(ctx, argumentsInJSON, opts...)
+	}
+	if at.retryConfig.MaxRetries < 0 {
+		return "", errors.New("agent tool retry MaxRetries must be non-negative")
+	}
+
+	wasInterrupted, _, _ := tool.GetInterruptState[[]byte](ctx)
+	if wasInterrupted {
+		return at.invokeOnce(ctx, argumentsInJSON, opts...)
+	}
+
+	for attempt := 0; ; attempt++ {
+		result, err := at.invokeOnce(ctx, argumentsInJSON, opts...)
+		if err == nil {
+			return result, nil
+		}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return "", ctxErr
+		}
+		if attempt >= at.retryConfig.MaxRetries || !at.shouldRetry(ctx, err) {
+			return "", err
+		}
+		if err = waitAgentToolRetry(ctx, at.retryConfig, attempt+1); err != nil {
+			return "", err
+		}
+	}
+}
+
+func (at *typedAgentTool[M]) invokeOnce(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (string, error) {
 	if cancelCtx := getCancelContext(ctx); cancelCtx != nil {
 		cancelCtx.markCheckpointAwareDescendant()
 	}
@@ -277,6 +345,45 @@ func (at *typedAgentTool[M]) InvokableRun(ctx context.Context, argumentsInJSON s
 	}
 
 	return ret, nil
+}
+
+func (at *typedAgentTool[M]) shouldRetry(ctx context.Context, err error) bool {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+
+	var cancelErr *CancelError
+	if errors.As(err, &cancelErr) {
+		return false
+	}
+	var interruptSignal *core.InterruptSignal
+	if errors.As(err, &interruptSignal) {
+		return false
+	}
+	var interruptProvider core.InterruptContextsProvider
+	if errors.As(err, &interruptProvider) {
+		return false
+	}
+	return at.retryConfig.IsRetryable == nil || at.retryConfig.IsRetryable(ctx, err)
+}
+
+func waitAgentToolRetry(ctx context.Context, config *AgentToolRetryConfig, attempt int) error {
+	if config.Backoff == nil {
+		return nil
+	}
+	delay := config.Backoff(ctx, attempt)
+	if delay <= 0 {
+		return nil
+	}
+
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 // agentToolOptions is a wrapper structure used to convert AgentRunOption slices to tool.Option.
