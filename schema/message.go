@@ -1412,7 +1412,11 @@ func canMergeOutputParts(current, next MessageOutputPart) bool {
 		return false
 	}
 
-	if !isMergeableOutputPartType(current) {
+	// Both parts must be mergeable: a group headed by a mergeable part must not
+	// absorb a trailing part that cannot be merged (e.g. a base64 audio group
+	// absorbing a URL audio part would silently drop the URL, and absorbing a
+	// part with a nil payload would panic during the merge).
+	if !isMergeableOutputPartType(current) || !isMergeableOutputPartType(next) {
 		return false
 	}
 
@@ -1525,6 +1529,9 @@ func mergeAudioParts(group []MessageOutputPart) (MessageOutputPart, error) {
 
 	for _, part := range group {
 		audioPart := part.Audio
+		if !isBase64MessageOutputAudioPart(part) {
+			return MessageOutputPart{}, fmt.Errorf("cannot merge non-base64 audio part into an audio stream group")
+		}
 		if audioPart.Base64Data != nil {
 			b64Builder.WriteString(*audioPart.Base64Data)
 		}
