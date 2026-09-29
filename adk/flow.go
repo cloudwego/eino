@@ -495,7 +495,7 @@ func (a *flowAgent) run(
 		panicErr := recover()
 		if panicErr != nil {
 			e := safe.NewPanicErr(panicErr, debug.Stack())
-			generator.Send(&AgentEvent{Err: e})
+			generator.Send(&AgentEvent{Type: AgentEventError, Err: e})
 		}
 
 		cbGen.Close()
@@ -562,7 +562,7 @@ func (a *flowAgent) run(
 		if agentToRun == nil {
 			e := fmt.Errorf("transfer failed: agent '%s' not found when transferring from '%s'",
 				destName, a.Name(ctxForSubAgents))
-			generator.Send(&AgentEvent{Err: e})
+			generator.Send(&AgentEvent{Type: AgentEventError, Err: e})
 			return
 		}
 
@@ -741,7 +741,7 @@ func (a *typedFlowAgent[M]) run(
 		panicErr := recover()
 		if panicErr != nil {
 			e := safe.NewPanicErr(panicErr, debug.Stack())
-			generator.Send(&TypedAgentEvent[M]{Err: e})
+			generator.Send(&TypedAgentEvent[M]{Type: AgentEventError, Err: e})
 		}
 
 		agenticCbGen.Close()

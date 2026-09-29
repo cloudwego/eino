@@ -783,7 +783,7 @@ func setOutputToSession[M MessageType](ctx context.Context, msg M, msgStream *sc
 
 func typedErrFunc[M MessageType](err error) typedRunFunc[M] {
 	return func(ctx context.Context, p *typedRunParams[M]) {
-		p.generator.Send(&TypedAgentEvent[M]{Err: err})
+		p.generator.Send(&TypedAgentEvent[M]{Type: AgentEventError, Err: err})
 	}
 }
 
@@ -981,7 +981,7 @@ func (a *TypedChatModelAgent[M]) handleRunFuncError(
 	if cancelCtxOwned && cancelCtx != nil {
 		cancelCtx.markDone()
 	}
-	generator.Send(&TypedAgentEvent[M]{Err: err})
+	generator.Send(&TypedAgentEvent[M]{Type: AgentEventError, Err: err})
 }
 
 type typedNoToolsInput[M MessageType] struct {
@@ -1054,7 +1054,7 @@ func (a *TypedChatModelAgent[M]) buildNoToolsRunFunc(_ context.Context) (typedRu
 
 		r, err := chain.Compile(ctx, compileOptions...)
 		if err != nil {
-			p.generator.Send(&TypedAgentEvent[M]{Err: err})
+			p.generator.Send(&TypedAgentEvent[M]{Type: AgentEventError, Err: err})
 			return
 		}
 
@@ -1082,7 +1082,7 @@ func (a *TypedChatModelAgent[M]) buildNoToolsRunFunc(_ context.Context) (typedRu
 			if a.outputKey != "" {
 				err = setOutputToSession(ctx, msg, msgStream, a.outputKey)
 				if err != nil {
-					p.generator.Send(&TypedAgentEvent[M]{Err: err})
+					p.generator.Send(&TypedAgentEvent[M]{Type: AgentEventError, Err: err})
 				}
 			} else if msgStream != nil {
 				msgStream.Close()
@@ -1150,7 +1150,7 @@ func (a *TypedChatModelAgent[M]) buildMessageReActRunFunc(_ context.Context, bc 
 
 		g, err := newReact(ctx, msgConf)
 		if err != nil {
-			mp.generator.Send(&AgentEvent{Err: err})
+			mp.generator.Send(&AgentEvent{Type: AgentEventError, Err: err})
 			return
 		}
 
@@ -1183,7 +1183,7 @@ func (a *TypedChatModelAgent[M]) buildMessageReActRunFunc(_ context.Context, bc 
 
 		runnable, err_ := chain.Compile(ctx, compileOptions...)
 		if err_ != nil {
-			mp.generator.Send(&AgentEvent{Err: err_})
+			mp.generator.Send(&AgentEvent{Type: AgentEventError, Err: err_})
 			return
 		}
 
@@ -1225,7 +1225,7 @@ func (a *TypedChatModelAgent[M]) buildMessageReActRunFunc(_ context.Context, bc 
 			if a.outputKey != "" {
 				err_ = setOutputToSession[*schema.Message](ctx, msg, msgStream, a.outputKey)
 				if err_ != nil {
-					mp.generator.Send(&AgentEvent{Err: err_})
+					mp.generator.Send(&AgentEvent{Type: AgentEventError, Err: err_})
 				}
 			} else if msgStream != nil {
 				msgStream.Close()
@@ -1467,7 +1467,7 @@ func (a *TypedChatModelAgent[M]) Run(ctx context.Context, input *TypedAgentInput
 			if cancelCtxOwned && cancelCtx != nil {
 				defer cancelCtx.markDone()
 			}
-			generator.Send(&TypedAgentEvent[M]{Err: fmt.Errorf("ChatModelAgent getRunFunc error: %w", err)})
+			generator.Send(&TypedAgentEvent[M]{Type: AgentEventError, Err: fmt.Errorf("ChatModelAgent getRunFunc error: %w", err)})
 			generator.Close()
 		}()
 		return iterator
@@ -1497,7 +1497,7 @@ func (a *TypedChatModelAgent[M]) Run(ctx context.Context, input *TypedAgentInput
 			panicErr := recover()
 			if panicErr != nil {
 				e := safe.NewPanicErr(panicErr, debug.Stack())
-				generator.Send(&TypedAgentEvent[M]{Err: e})
+				generator.Send(&TypedAgentEvent[M]{Type: AgentEventError, Err: e})
 			}
 
 			generator.Close()
@@ -1556,7 +1556,7 @@ func (a *TypedChatModelAgent[M]) Resume(ctx context.Context, info *ResumeInfo, o
 			if cancelCtxOwned && cancelCtx != nil {
 				defer cancelCtx.markDone()
 			}
-			generator.Send(&TypedAgentEvent[M]{Err: fmt.Errorf("ChatModelAgent getRunFunc error: %w", err)})
+			generator.Send(&TypedAgentEvent[M]{Type: AgentEventError, Err: fmt.Errorf("ChatModelAgent getRunFunc error: %w", err)})
 			generator.Close()
 		}()
 		return iterator
@@ -1601,7 +1601,7 @@ func (a *TypedChatModelAgent[M]) Resume(ctx context.Context, info *ResumeInfo, o
 	stateByte, err = preprocessComposeCheckpoint(stateByte)
 	if err != nil {
 		go func() {
-			generator.Send(&TypedAgentEvent[M]{Err: err})
+			generator.Send(&TypedAgentEvent[M]{Type: AgentEventError, Err: err})
 			generator.Close()
 		}()
 		return iterator
@@ -1636,7 +1636,7 @@ func (a *TypedChatModelAgent[M]) Resume(ctx context.Context, info *ResumeInfo, o
 			panicErr := recover()
 			if panicErr != nil {
 				e := safe.NewPanicErr(panicErr, debug.Stack())
-				generator.Send(&TypedAgentEvent[M]{Err: e})
+				generator.Send(&TypedAgentEvent[M]{Type: AgentEventError, Err: e})
 			}
 
 			generator.Close()

@@ -303,7 +303,7 @@ func GetMessage(e *AgentEvent) (Message, *AgentEvent, error) {
 
 func typedErrorIter[M MessageType](err error) *AsyncIterator[*TypedAgentEvent[M]] {
 	iterator, generator := NewAsyncIteratorPair[*TypedAgentEvent[M]]()
-	generator.Send(&TypedAgentEvent[M]{Err: err})
+	generator.Send(&TypedAgentEvent[M]{Type: AgentEventError, Err: err})
 	generator.Close()
 	return iterator
 }

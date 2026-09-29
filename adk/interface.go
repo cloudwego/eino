@@ -247,6 +247,7 @@ func gobDecodeAgenticMessageVariant(mv *TypedMessageVariant[*schema.AgenticMessa
 func typedEventFromMessage[M MessageType](msg M, msgStream *schema.StreamReader[M],
 	role schema.RoleType, toolName string) *TypedAgentEvent[M] {
 	return &TypedAgentEvent[M]{
+		Type: messageEventType(role, msgStream != nil),
 		Output: &TypedAgentOutput[M]{
 			MessageOutput: &TypedMessageVariant[M]{
 				IsStreaming:   msgStream != nil,
@@ -257,6 +258,21 @@ func typedEventFromMessage[M MessageType](msg M, msgStream *schema.StreamReader[
 			},
 		},
 	}
+}
+
+// messageEventType maps a message role and streaming flag to the event type.
+// Tool results and model outputs are the only message kinds ADK emits today.
+func messageEventType(role schema.RoleType, streaming bool) AgentEventType {
+	if role == schema.Tool {
+		if streaming {
+			return AgentEventToolDelta
+		}
+		return AgentEventToolEnd
+	}
+	if streaming {
+		return AgentEventModelDelta
+	}
+	return AgentEventModelEnd
 }
 
 // typedModelOutputEvent creates a model-output event for the generic path.
@@ -297,6 +313,7 @@ func EventFromMessage(msg Message, msgStream *schema.StreamReader[Message],
 // In streaming mode, the role is available on the event before consuming the stream.
 func EventFromAgenticMessage(msg AgenticMessage, msgStream AgenticMessageStream, agenticRole schema.AgenticRoleType) *TypedAgentEvent[AgenticMessage] {
 	return &TypedAgentEvent[AgenticMessage]{
+		Type: agenticMessageEventType(agenticRole, msgStream != nil),
 		Output: &TypedAgentOutput[AgenticMessage]{
 			MessageOutput: &TypedMessageVariant[AgenticMessage]{
 				IsStreaming:   msgStream != nil,
@@ -306,6 +323,22 @@ func EventFromAgenticMessage(msg AgenticMessage, msgStream AgenticMessageStream,
 			},
 		},
 	}
+}
+
+// agenticMessageEventType maps an AgenticMessage role and streaming flag to
+// the event type. Tool results are carried with the user role on the
+// AgenticMessage path.
+func agenticMessageEventType(agenticRole schema.AgenticRoleType, streaming bool) AgentEventType {
+	if agenticRole == schema.AgenticRoleTypeAssistant {
+		if streaming {
+			return AgentEventModelDelta
+		}
+		return AgentEventModelEnd
+	}
+	if streaming {
+		return AgentEventToolDelta
+	}
+	return AgentEventToolEnd
 }
 
 // TransferToAgentAction represents a transfer-to-agent action.
@@ -419,6 +452,12 @@ type runStepSerialization struct {
 type TypedAgentEvent[M MessageType] struct {
 	AgentName string
 
+	// Type classifies the event into a stable taxonomy for debugging, tracing,
+	// UI rendering and durable event logs. See AgentEventType for the full list
+	// of kinds. The zero value (AgentEventUnknown) is reserved for events
+	// produced by code that predates the taxonomy.
+	Type AgentEventType
+
 	// RunPath represents the execution path from root agent to the current event source.
 	// This field is managed entirely by the framework and cannot be set by end-users.
 	//
@@ -432,6 +471,72 @@ type TypedAgentEvent[M MessageType] struct {
 	Action *AgentAction
 
 	Err error
+}
+
+// AgentEventType identifies the kind of an ADK agent event. It provides a
+// stable, documented taxonomy that applications can rely on for debugging,
+// tracing (e.g. Langfuse, Cozeloop, OpenTelemetry), UI rendering and durable
+// event stores.
+type AgentEventType string
+
+const (
+	// AgentEventUnknown is the zero value. It is reserved for events produced
+	// by code that predates the taxonomy and carries no semantic meaning.
+	AgentEventUnknown AgentEventType = ""
+
+	// AgentEventAgentEnd marks the terminal event of an agent run, produced by
+	// an Exit action.
+	AgentEventAgentEnd AgentEventType = "agent_end"
+
+	// AgentEventModelEnd marks a complete (non-streaming) model message.
+	AgentEventModelEnd AgentEventType = "model_end"
+
+	// AgentEventModelDelta marks one chunk of a streaming model message.
+	AgentEventModelDelta AgentEventType = "model_delta"
+
+	// AgentEventToolEnd marks a complete (non-streaming) tool result.
+	AgentEventToolEnd AgentEventType = "tool_end"
+
+	// AgentEventToolDelta marks one chunk of a streaming tool result.
+	AgentEventToolDelta AgentEventType = "tool_delta"
+
+	// AgentEventTransfer marks a transfer-to-agent action.
+	AgentEventTransfer AgentEventType = "transfer"
+
+	// AgentEventBreakLoop marks a break-loop action.
+	AgentEventBreakLoop AgentEventType = "break_loop"
+
+	// AgentEventInterrupt marks an interrupt action that pauses execution to
+	// request external input.
+	AgentEventInterrupt AgentEventType = "interrupt"
+
+	// AgentEventResume is reserved for future resume events. ADK currently
+	// resumes by emitting regular model/tool events after a Resume call, so no
+	// distinct resume event is emitted yet.
+	AgentEventResume AgentEventType = "resume"
+
+	// AgentEventError marks a terminal error event.
+	AgentEventError AgentEventType = "error"
+)
+
+// actionEventType returns the event type for an action, or AgentEventUnknown
+// when the action does not carry a known kind.
+func actionEventType(a *AgentAction) AgentEventType {
+	if a == nil {
+		return AgentEventUnknown
+	}
+	switch {
+	case a.Interrupted != nil:
+		return AgentEventInterrupt
+	case a.TransferToAgent != nil:
+		return AgentEventTransfer
+	case a.BreakLoop != nil:
+		return AgentEventBreakLoop
+	case a.Exit:
+		return AgentEventAgentEnd
+	default:
+		return AgentEventUnknown
+	}
 }
 
 // AgentEvent is the default event type using *schema.Message.
