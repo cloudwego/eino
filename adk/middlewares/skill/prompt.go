@@ -139,6 +139,47 @@ Important:
 {{- end }}
 </available_skills>
 `
+
+	preloadTemplate = `
+# Preloaded Skills
+
+The skills below are preloaded: their full instructions are already included here, so do not call the '{{.ToolName}}' tool for them. Follow their instructions directly when they are relevant to the task.
+
+{{- range .Skills }}
+<preloaded_skill>
+<name>
+{{ .Name }}
+</name>
+<base_directory>
+{{ .BaseDirectory }}
+</base_directory>
+<content>
+{{ .Content }}
+</content>
+</preloaded_skill>
+{{- end }}
+`
+
+	preloadTemplateChinese = `
+# 预加载 Skill
+
+以下 Skill 已预加载：完整说明已包含在此，无需为它们调用 '{{.ToolName}}' 工具。当它们与任务相关时，请直接遵循其说明。
+
+{{- range .Skills }}
+<preloaded_skill>
+<name>
+{{ .Name }}
+</name>
+<base_directory>
+{{ .BaseDirectory }}
+</base_directory>
+<content>
+{{ .Content }}
+</content>
+</preloaded_skill>
+{{- end }}
+`
+
 	toolResult        = "Launching skill: %s\n"
 	toolResultChinese = "正在启动 Skill：%s\n"
 	userContent       = `Base directory for this skill: %s
