@@ -50,8 +50,12 @@ type runner struct {
 	inputChannels *chanCall
 
 	chanBuilder chanBuilder // could be nil
-	eager       bool
-	dag         bool
+	// nodeChanBuilders overrides chanBuilder for nodes with a per-node trigger
+	// mode (WithTriggerMode), e.g. an AllPredecessor node in an AnyPredecessor
+	// graph gets a dag-style channel while the rest keep pregel channels.
+	nodeChanBuilders map[string]chanBuilder
+	eager            bool
+	dag              bool
 
 	runCtx func(ctx context.Context) context.Context
 
@@ -1074,7 +1078,11 @@ func (r *runner) initChannelManager(isStream bool) *channelManager {
 
 	chs := make(map[string]channel)
 	for ch := range r.chanSubscribeTo {
-		chs[ch] = builder(r.controlPredecessors[ch], r.dataPredecessors[ch], r.chanSubscribeTo[ch].action.inputZeroValue, r.chanSubscribeTo[ch].action.inputEmptyStream)
+		nodeBuilder := builder
+		if b, ok := r.nodeChanBuilders[ch]; ok {
+			nodeBuilder = b
+		}
+		chs[ch] = nodeBuilder(r.controlPredecessors[ch], r.dataPredecessors[ch], r.chanSubscribeTo[ch].action.inputZeroValue, r.chanSubscribeTo[ch].action.inputEmptyStream)
 	}
 
 	chs[END] = builder(r.controlPredecessors[END], r.dataPredecessors[END], r.outputZeroValue, r.outputEmptyStream)

@@ -86,6 +86,10 @@ type graph struct {
 	handlerOnEdges   map[string]map[string][]handlerPair
 	handlerPreNode   map[string][]handlerPair
 	handlerPreBranch map[string][][]handlerPair
+
+	// nodeTriggerModes records per-node trigger mode overrides set via WithTriggerMode.
+	// Only nodes present in this map deviate from the graph-level trigger mode.
+	nodeTriggerModes map[string]NodeTriggerMode
 }
 
 type newGraphConfig struct {
@@ -193,6 +197,16 @@ func (g *graph) addNode(key string, node *graphNode, options *graphAddNodeOpts) 
 		if !isChain(g.cmp) {
 			return errors.New("only chain support node key option")
 		}
+	}
+
+	if options.nodeOptions.triggerMode != "" {
+		if options.nodeOptions.triggerMode != AnyPredecessor && options.nodeOptions.triggerMode != AllPredecessor {
+			return fmt.Errorf("node '%s' has invalid trigger mode: '%s'", key, options.nodeOptions.triggerMode)
+		}
+		if g.nodeTriggerModes == nil {
+			g.nodeTriggerModes = make(map[string]NodeTriggerMode)
+		}
+		g.nodeTriggerModes[key] = options.nodeOptions.triggerMode
 	}
 	// end: check options
 
@@ -683,10 +697,34 @@ func (g *graph) compile(ctx context.Context, opt *graphCompileOptions) (*composa
 		if opt != nil && opt.nodeTriggerMode != "" {
 			return nil, errors.New(fmt.Sprintf("%s doesn't support node trigger mode option", g.cmp))
 		}
+		if len(g.nodeTriggerModes) > 0 {
+			return nil, errors.New(fmt.Sprintf("%s doesn't support per-node trigger mode option", g.cmp))
+		}
 	}
 	if (opt != nil && opt.nodeTriggerMode == AllPredecessor) || isWorkflow(g.cmp) {
 		runType = runTypeDAG
 		cb = dagChannelBuilder
+	}
+
+	// Resolve per-node trigger mode overrides: a node marked AllPredecessor in an
+	// AnyPredecessor graph gets a dag-style channel so it only triggers after all
+	// of its predecessors finish. AnyPredecessor is the graph default in pregel
+	// mode (no-op), and redundant in dag mode where every node already waits for
+	// all predecessors.
+	var nodeChanBuilders map[string]chanBuilder
+	for nodeKey, mode := range g.nodeTriggerModes {
+		if runType == runTypeDAG {
+			if mode != AllPredecessor {
+				return nil, fmt.Errorf("node '%s' trigger mode '%s' is not supported in %s run mode: all nodes already wait for all predecessors", nodeKey, mode, runType)
+			}
+			continue
+		}
+		if mode == AllPredecessor {
+			if nodeChanBuilders == nil {
+				nodeChanBuilders = make(map[string]chanBuilder)
+			}
+			nodeChanBuilders[nodeKey] = dagChannelBuilder
+		}
 	}
 
 	// get eager type
@@ -820,7 +858,8 @@ func (g *graph) compile(ctx context.Context, opt *graphCompileOptions) (*composa
 
 		eager: eager,
 
-		chanBuilder: cb,
+		chanBuilder:      cb,
+		nodeChanBuilders: nodeChanBuilders,
 
 		inputType:     g.inputType(),
 		outputType:    g.outputType(),
