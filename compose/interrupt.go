@@ -21,8 +21,6 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/google/uuid"
-
 	"github.com/cloudwego/eino/internal/core"
 	"github.com/cloudwego/eino/schema"
 )
@@ -182,7 +180,7 @@ func CompositeInterrupt(ctx context.Context, info any, state any, errs ...error)
 		if errors.As(err, &wrapped) {
 			inner := wrapped.Unwrap()
 			if errors.Is(inner, deprecatedInterruptAndRerun) {
-				id := uuid.NewString()
+				id := wrapped.ps.String()
 				cErrs = append(cErrs, &core.InterruptSignal{
 					ID:      id,
 					Address: wrapped.ps,
@@ -196,7 +194,7 @@ func CompositeInterrupt(ctx context.Context, info any, state any, errs ...error)
 
 			ire := &core.InterruptSignal{}
 			if errors.As(err, &ire) {
-				id := uuid.NewString()
+				id := wrapped.ps.String()
 				cErrs = append(cErrs, &core.InterruptSignal{
 					ID:      id,
 					Address: wrapped.ps,
