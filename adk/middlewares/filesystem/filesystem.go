@@ -1006,10 +1006,12 @@ func newGrepTool(fs filesystem.Backend, name string, desc string) (tool.BaseTool
 		case "count":
 			return formatCountMatches(matches, offset, headLimit), nil
 
-		case "files_with_matches":
-			return formatFileMatches(matches, offset, headLimit), nil
-
 		default:
+			if len(matches) == 0 && path != "" && glob == "" && fileType == "" {
+				if content, err := fs.Read(ctx, &filesystem.ReadRequest{FilePath: path, Offset: 1, Limit: 1}); err == nil && content != nil {
+					return fmt.Sprintf("%s in %s", noMatchesFound, path), nil
+				}
+			}
 			return formatFileMatches(matches, offset, headLimit), nil
 		}
 	})
