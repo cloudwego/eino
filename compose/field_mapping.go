@@ -636,7 +636,10 @@ func validateStructOrMap(t reflect.Type) bool {
 		t = t.Elem()
 		fallthrough
 	case reflect.Struct:
-		return true
+		// After dereferencing a pointer, the underlying type must still be
+		// a struct or a map (e.g. *map[string]any is acceptable, but *int is
+		// not, since it has no fields to map).
+		return t.Kind() == reflect.Struct || t.Kind() == reflect.Map
 	default:
 		return false
 	}
