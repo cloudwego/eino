@@ -171,7 +171,8 @@ func (m *multiQueryRetriever) Retrieve(ctx context.Context, query string, opts .
 	// retrieve
 	tasks := make([]*utils.RetrieveTask, len(queries))
 	for i := range queries {
-		tasks[i] = &utils.RetrieveTask{Retriever: m.origRetriever, Query: queries[i]}
+		// forward caller options to the underlying retriever, same as router.go does
+		tasks[i] = &utils.RetrieveTask{Retriever: m.origRetriever, Query: queries[i], RetrieveOptions: opts}
 	}
 	utils.ConcurrentRetrieveWithCallback(ctx, tasks)
 	result := make([][]*schema.Document, len(queries))
