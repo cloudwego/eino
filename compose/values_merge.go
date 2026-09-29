@@ -37,6 +37,22 @@ type mergeOptions struct {
 
 // the caller should ensure len(vs) > 1
 func mergeValues(vs []any, opts *mergeOptions) (any, error) {
+	// An untyped nil output carries no value: a fan-in predecessor returning
+	// (nil, nil) contributes nothing to the merge. Drop untyped nils so the
+	// outcome is deterministic — previously a nil landing at vs[0] panicked in
+	// reflect.Value.Type, while the same values in another order failed inside
+	// the type-specific merge func, and channel iteration order is random.
+	var nilFiltered bool
+	vs, opts, nilFiltered = dropNilMergeValues(vs, opts)
+	if nilFiltered {
+		if len(vs) == 0 {
+			return nil, nil
+		}
+		if len(vs) == 1 {
+			return vs[0], nil
+		}
+	}
+
 	v0 := reflect.ValueOf(vs[0])
 	t0 := v0.Type()
 
@@ -79,4 +95,40 @@ func mergeValues(vs []any, opts *mergeOptions) (any, error) {
 	}
 
 	return nil, fmt.Errorf("(mergeValues) unsupported type: %v", t0)
+}
+
+// dropNilMergeValues removes untyped nil values before merging, keeping
+// opts.names (when set) aligned with the surviving values. It reports whether
+// any value was dropped, so the caller can short-circuit empty/singleton
+// results without changing its contract for nil-free inputs.
+func dropNilMergeValues(vs []any, opts *mergeOptions) ([]any, *mergeOptions, bool) {
+	hasNil := false
+	for _, v := range vs {
+		if v == nil {
+			hasNil = true
+			break
+		}
+	}
+	if !hasNil {
+		return vs, opts, false
+	}
+
+	filtered := make([]any, 0, len(vs))
+	var filteredNames []string
+	if opts != nil && opts.names != nil {
+		filteredNames = make([]string, 0, len(opts.names))
+	}
+	for i, v := range vs {
+		if v == nil {
+			continue
+		}
+		filtered = append(filtered, v)
+		if filteredNames != nil && i < len(opts.names) {
+			filteredNames = append(filteredNames, opts.names[i])
+		}
+	}
+	if opts != nil {
+		opts.names = filteredNames
+	}
+	return filtered, opts, true
 }
