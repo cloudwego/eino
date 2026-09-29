@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/cloudwego/eino/schema"
 )
@@ -66,6 +67,107 @@ func (a *dtTestAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...Agen
 		return a.resumeFn(ctx, info, opts...)
 	}
 	return a.runFn(ctx, &AgentInput{}, opts...)
+}
+
+func TestDeterministicTransferFlowAgent_DirectRun(t *testing.T) {
+	constructors := map[string]func(context.Context, Agent) (ResumableAgent, error){
+		"sequential": func(ctx context.Context, leaf Agent) (ResumableAgent, error) {
+			return NewSequentialAgent(ctx, &SequentialAgentConfig{Name: "workflow", SubAgents: []Agent{leaf}})
+		},
+		"parallel": func(ctx context.Context, leaf Agent) (ResumableAgent, error) {
+			return NewParallelAgent(ctx, &ParallelAgentConfig{Name: "workflow", SubAgents: []Agent{leaf}})
+		},
+		"loop": func(ctx context.Context, leaf Agent) (ResumableAgent, error) {
+			return NewLoopAgent(ctx, &LoopAgentConfig{Name: "workflow", SubAgents: []Agent{leaf}, MaxIterations: 1})
+		},
+	}
+	for name, construct := range constructors {
+		t.Run(name, func(t *testing.T) {
+			for _, withParent := range []bool{false, true} {
+				caseName := "without_parent"
+				if withParent {
+					caseName = "with_parent"
+				}
+				t.Run(caseName, func(t *testing.T) {
+					ctx := context.Background()
+					input := &AgentInput{Messages: []Message{schema.UserMessage("hello")}}
+					var parentSession *runSession
+					wantPath := []RunStep{{agentName: "workflow"}, {agentName: "leaf"}}
+					if withParent {
+						ctx, _ = initRunCtx(ctx, "parent", input)
+						parentSession = getSession(ctx)
+						AddSessionValue(ctx, "shared", "parent value")
+						wantPath = append([]RunStep{{agentName: "parent"}}, wantPath...)
+					}
+					leaf := &dtTestAgent{name: "leaf", runFn: func(ctx context.Context, in *AgentInput, _ ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+						assert.Equal(t, "hello", in.Messages[0].Content)
+						assert.Equal(t, wantPath, getRunCtx(ctx).RunPath)
+						if withParent {
+							value, ok := GetSessionValue(ctx, "shared")
+							assert.True(t, ok)
+							assert.Equal(t, "parent value", value)
+							assert.NotSame(t, parentSession, getSession(ctx))
+						}
+						AddSessionValue(ctx, "result", "child value")
+						iter, gen := NewAsyncIteratorPair[*AgentEvent]()
+						go func() {
+							defer gen.Close()
+							gen.Send(EventFromMessage(schema.AssistantMessage("done", nil), nil, schema.Assistant, ""))
+						}()
+						return iter
+					}}
+					workflow, err := construct(ctx, leaf)
+					require.NoError(t, err)
+					wrapped := AgentWithDeterministicTransferTo(ctx, &DeterministicTransferConfig{Agent: workflow, ToAgentNames: []string{"next"}})
+					var events []*AgentEvent
+					require.NotPanics(t, func() {
+						iter := wrapped.Run(ctx, input)
+						for {
+							event, ok := iter.Next()
+							if !ok {
+								break
+							}
+							assert.NoError(t, event.Err)
+							events = append(events, event)
+						}
+					})
+					require.Len(t, events, 3)
+					assert.Equal(t, "done", events[0].Output.MessageOutput.Message.Content)
+					assert.Equal(t, wantPath, events[0].RunPath)
+					require.NotNil(t, events[2].Action)
+					require.NotNil(t, events[2].Action.TransferToAgent)
+					assert.Equal(t, "next", events[2].Action.TransferToAgent.DestAgentName)
+					if withParent {
+						value, ok := GetSessionValue(ctx, "result")
+						assert.True(t, ok)
+						assert.Equal(t, "child value", value)
+						assert.Len(t, parentSession.getEvents(), 1)
+						assert.Equal(t, []RunStep{{agentName: "parent"}}, getRunCtx(ctx).RunPath)
+					} else {
+						assert.Nil(t, getRunCtx(ctx), "the caller's context must not be mutated")
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestDeterministicTransferFlowAgent_ResumeWithoutRunContext(t *testing.T) {
+	ctx := context.Background()
+	workflow, err := NewSequentialAgent(ctx, &SequentialAgentConfig{Name: "workflow"})
+	require.NoError(t, err)
+	wrapped := AgentWithDeterministicTransferTo(ctx, &DeterministicTransferConfig{Agent: workflow})
+	// This checks the invalid-context boundary, not checkpoint restoration.
+	info := &ResumeInfo{WasInterrupted: true, InterruptState: &deterministicTransferState{}}
+	require.NotPanics(t, func() {
+		iter := wrapped.(ResumableAgent).Resume(ctx, info)
+		event, ok := iter.Next()
+		require.True(t, ok)
+		require.Error(t, event.Err)
+		assert.Contains(t, event.Err.Error(), "run context")
+		_, ok = iter.Next()
+		assert.False(t, ok)
+	})
 }
 
 func TestDeterministicTransferFlowAgentInterruptResume(t *testing.T) {
