@@ -30,6 +30,14 @@ type graphCompileOptions struct {
 	interruptBeforeNodes []string
 	interruptAfterNodes  []string
 
+	// componentCheckpoint enables checkpointing at node boundaries without
+	// interrupting the run. See WithComponentCheckpoint.
+	componentCheckpoint bool
+
+	// checkpointChunkSize is the max size of a single checkpoint value.
+	// <= 0 disables chunking. See WithCheckpointChunkSize.
+	checkpointChunkSize int
+
 	eagerDisabled bool
 
 	mergeConfigs map[string]FanInMergeConfig
