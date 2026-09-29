@@ -506,9 +506,92 @@ func (wf *Workflow[I, O]) compile(ctx context.Context, options *graphCompileOpti
 		}
 	}
 
-	// TODO: check indirect edges are legal
+	if err := wf.validateIndirectEdges(); err != nil {
+		return nil, err
+	}
 
 	return wf.g.compile(ctx, options)
+}
+
+// validateIndirectEdges checks that every noDirectDependency (indirect) edge has a valid
+// execution path from its source node to its target node through direct control edges
+// and branch edges in the underlying graph.
+//
+// An indirect edge (created via WithNoDirectDependency) only establishes a data mapping
+// without a direct execution dependency. The source node must still complete before the
+// target node executes, which requires an execution path through other nodes.
+//
+// The adjacency list is built from the graph's actual control edges (g.controlEdges)
+// and branch edges (g.branches), rather than wf.dependencies, because a single (from, to)
+// pair may have both a branch dependency and a noDirectDependency data mapping, and the
+// latter would overwrite the former in wf.dependencies.
+func (wf *Workflow[I, O]) validateIndirectEdges() error {
+	adjacency := wf.buildControlAdjacency()
+
+	for toNode, deps := range wf.dependencies {
+		for fromNode, depType := range deps {
+			if depType != noDirectDependency {
+				continue
+			}
+
+			if !wf.isReachable(fromNode, toNode, adjacency) {
+				return fmt.Errorf(
+					"illegal indirect edge: node '%s' declares a no-direct-dependency on node '%s', "+
+						"but no execution path exists from '%s' to '%s' through direct control edges",
+					toNode, fromNode, fromNode, toNode,
+				)
+			}
+		}
+	}
+
+	return nil
+}
+
+// buildControlAdjacency builds an adjacency list from the graph's control edges and branch edges.
+// These represent the actual execution dependencies in the compiled graph.
+func (wf *Workflow[I, O]) buildControlAdjacency() map[string][]string {
+	adjacency := make(map[string][]string)
+
+	for from, tos := range wf.g.controlEdges {
+		adjacency[from] = append(adjacency[from], tos...)
+	}
+
+	for from, branches := range wf.g.branches {
+		for _, branch := range branches {
+			for endNode := range branch.endNodes {
+				adjacency[from] = append(adjacency[from], endNode)
+			}
+		}
+	}
+
+	return adjacency
+}
+
+func (wf *Workflow[I, O]) isReachable(start, target string, adjacency map[string][]string) bool {
+	if start == target {
+		return true
+	}
+
+	visited := make(map[string]bool)
+	queue := []string{start}
+	visited[start] = true
+
+	for len(queue) > 0 {
+		current := queue[0]
+		queue = queue[1:]
+
+		for _, next := range adjacency[current] {
+			if next == target {
+				return true
+			}
+			if !visited[next] {
+				visited[next] = true
+				queue = append(queue, next)
+			}
+		}
+	}
+
+	return false
 }
 
 func (wf *Workflow[I, O]) initNode(key string) *WorkflowNode {
