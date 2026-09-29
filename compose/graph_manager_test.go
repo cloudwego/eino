@@ -238,3 +238,50 @@ func TestReceiveWithListening_PositiveTimeout_DeadlineExpiresFirst(t *testing.T)
 	assert.Nil(t, ta)
 	assert.NotNil(t, deadline)
 }
+
+// TestReceiveWithDeadline_TaskFinishesBeforeDeadline verifies the deadline form
+// still returns the task's real result when it arrives in time.
+func TestReceiveWithDeadline_TaskFinishesBeforeDeadline(t *testing.T) {
+	recvReleased := make(chan struct{})
+	want := &task{nodeKey: "n"}
+	recv := func() (*task, bool) {
+		<-recvReleased
+		return want, true
+	}
+
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		close(recvReleased)
+	}()
+
+	ta, closed, canceled := receiveWithDeadline(recv, time.Now().Add(time.Second))
+
+	assert.False(t, canceled)
+	assert.True(t, closed)
+	assert.Same(t, want, ta)
+}
+
+// TestReceiveWithDeadline_DeadlineExpiresFirst verifies the deadline discards a
+// task that has not completed in time, and that the abandoned goroutine cannot
+// write back into the returned values once it does complete.
+//
+// The second half is a `-race` regression: receiveWithDeadline used to capture
+// its named results in the goroutine (`ta, closed = recv()`), so a task
+// finishing after the deadline raced with the timeout return.
+func TestReceiveWithDeadline_DeadlineExpiresFirst(t *testing.T) {
+	recvReleased := make(chan struct{})
+	recv := func() (*task, bool) {
+		<-recvReleased
+		return &task{nodeKey: "n"}, true
+	}
+
+	ta, closed, canceled := receiveWithDeadline(recv, time.Now().Add(20*time.Millisecond))
+
+	assert.True(t, canceled)
+	assert.Nil(t, ta)
+	assert.False(t, closed)
+
+	// Let the abandoned goroutine run to completion after we already returned.
+	close(recvReleased)
+	time.Sleep(100 * time.Millisecond)
+}

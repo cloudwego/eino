@@ -506,19 +506,25 @@ func receiveWithDeadline(recv func() (*task, bool), deadline time.Time) (ta *tas
 
 	timeout := deadline.Sub(now)
 
-	resultCh := make(chan struct{}, 1)
+	type pair struct {
+		ta     *task
+		closed bool
+	}
+	resultCh := make(chan pair, 1)
 
 	go func() {
-		ta, closed = recv()
-		resultCh <- struct{}{}
+		ta, closed := recv()
+		resultCh <- pair{ta: ta, closed: closed}
 	}()
 
-	timeoutCh := time.After(timeout)
+	// NewTimer over time.After so the timer is released when recv wins.
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
 
 	select {
-	case <-resultCh:
-		return ta, closed, false
-	case <-timeoutCh:
+	case p := <-resultCh:
+		return p.ta, p.closed, false
+	case <-timer.C:
 		return nil, false, true
 	}
 }
