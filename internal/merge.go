@@ -19,18 +19,27 @@ package internal
 import (
 	"fmt"
 	"reflect"
+	"sync"
 
 	"github.com/cloudwego/eino/internal/generic"
 )
 
-var mergeFuncs = map[reflect.Type]any{}
+var (
+	mergeFuncsMu sync.RWMutex
+	mergeFuncs   = map[reflect.Type]any{}
+)
 
 func RegisterValuesMergeFunc[T any](fn func([]T) (T, error)) {
+	mergeFuncsMu.Lock()
 	mergeFuncs[generic.TypeOf[T]()] = fn
+	mergeFuncsMu.Unlock()
 }
 
 func GetMergeFunc(typ reflect.Type) func([]any) (any, error) {
-	if fn, ok := mergeFuncs[typ]; ok {
+	mergeFuncsMu.RLock()
+	fn, ok := mergeFuncs[typ]
+	mergeFuncsMu.RUnlock()
+	if ok {
 		return func(vs []any) (any, error) {
 			rvs := reflect.MakeSlice(reflect.SliceOf(typ), 0, len(vs))
 			for _, v := range vs {
