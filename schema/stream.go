@@ -17,6 +17,7 @@
 package schema
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -138,6 +139,70 @@ func (sw *StreamWriter[T]) Send(chunk T, err error) (closed bool) {
 //	}
 func (sw *StreamWriter[T]) Close() {
 	sw.stm.closeSend()
+}
+
+// Done reports when a Pipe reader is closed. Other reader types return nil.
+// For Pipe readers, this lets a producer stop when its consumer exits early.
+func (sr *StreamReader[T]) Done() <-chan struct{} {
+	if sr.typ != readerTypeStream {
+		return nil
+	}
+	return sr.st.closed
+}
+
+// ClosePipeReader signals that a Pipe reader is no longer needed. Other reader
+// types return false and must be closed by their Recv owner; their Close methods
+// may not be safe concurrently with Recv. Call at most once per Pipe reader.
+func (sr *StreamReader[T]) ClosePipeReader() bool {
+	if sr.typ != readerTypeStream {
+		return false
+	}
+	sr.st.closeRecv()
+	return true
+}
+
+// SendContext sends a value unless ctx is canceled or the reader is closed.
+func (sw *StreamWriter[T]) SendContext(ctx context.Context, chunk T, err error) (closed bool) {
+	select {
+	case <-sw.stm.closed:
+		return true
+	case <-ctx.Done():
+		return true
+	default:
+	}
+	select {
+	case <-sw.stm.closed:
+		return true
+	case <-ctx.Done():
+		return true
+	case sw.stm.items <- streamItem[T]{chunk: chunk, err: err}:
+		return false
+	}
+}
+
+// SendTerminal sends an error without waiting for a reader. It requires a Pipe
+// with capacity one and no pending normal sends. On cancellation, a pending
+// chunk is discarded so the next Recv sees the terminal error.
+func (sw *StreamWriter[T]) SendTerminal(err error) (closed bool) {
+	if err == nil || cap(sw.stm.items) != 1 {
+		panic("SendTerminal requires an error and a Pipe with capacity one")
+	}
+	select {
+	case <-sw.stm.closed:
+		return true
+	default:
+	}
+	select {
+	case <-sw.stm.items:
+	default:
+	}
+	var zero T
+	select {
+	case <-sw.stm.closed:
+		return true
+	case sw.stm.items <- streamItem[T]{chunk: zero, err: err}:
+		return false
+	}
 }
 
 // StreamReader is the consumer side of an Eino stream.
