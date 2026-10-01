@@ -1304,10 +1304,14 @@ func concatToolCalls(chunks []ToolCall) ([]ToolCall, error) {
 		}
 
 		args.Reset()
+		var extraList []map[string]any
 		toolID, toolType, toolName := "", "", "" // these field will output atomically in any chunk
 
 		for _, n := range v {
 			chunk := chunks[n]
+			if chunk.Extra != nil {
+				extraList = append(extraList, chunk.Extra)
+			}
 			if chunk.ID != "" {
 				if toolID == "" {
 					toolID = chunk.ID
@@ -1345,6 +1349,13 @@ func concatToolCalls(chunks []ToolCall) ([]ToolCall, error) {
 		toolCall.Type = toolType
 		toolCall.Function.Name = toolName
 		toolCall.Function.Arguments = args.String()
+		if len(extraList) > 0 {
+			extra, err := concatExtra(extraList)
+			if err != nil {
+				return nil, fmt.Errorf("failed to concat ToolCall Extra: %w", err)
+			}
+			toolCall.Extra = extra
+		}
 
 		merged = append(merged, toolCall)
 	}
