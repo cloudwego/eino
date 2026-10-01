@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -90,8 +91,14 @@ func listTasks(ctx context.Context, backend Backend, baseDir string) ([]*task, e
 		tasks = append(tasks, taskData)
 	}
 
-	// sort tasks by ID
+	// sort tasks by ID in numeric order; IDs are digit-only strings, so a
+	// lexicographic sort would order "10" before "2"
 	sort.Slice(tasks, func(i, j int) bool {
+		a, aerr := strconv.ParseInt(tasks[i].ID, 10, 64)
+		b, berr := strconv.ParseInt(tasks[j].ID, 10, 64)
+		if aerr == nil && berr == nil {
+			return a < b
+		}
 		return tasks[i].ID < tasks[j].ID
 	})
 
