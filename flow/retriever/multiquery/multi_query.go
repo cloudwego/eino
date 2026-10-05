@@ -73,6 +73,9 @@ func NewRetriever(ctx context.Context, config *Config) (retriever.Retriever, err
 	if config.OrigRetriever == nil {
 		return nil, fmt.Errorf("OrigRetriever is required")
 	}
+	if config.MaxQueriesNum < 0 {
+		return nil, fmt.Errorf("MaxQueriesNum must not be negative")
+	}
 	if config.RewriteHandler == nil && config.RewriteLLM == nil {
 		return nil, fmt.Errorf("at least one of RewriteHandler and RewriteLLM must not be empty")
 	}
