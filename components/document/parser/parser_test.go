@@ -20,6 +20,7 @@ import (
 	"context"
 	"io"
 	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -46,13 +47,23 @@ func TestParser(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		f, err := os.Open("testdata/test.md")
+		// Write the fixture with explicit LF bytes instead of reading the
+		// checked-in testdata file: under core.autocrlf=true (the default
+		// for Git on Windows) the working-tree copy carries CRLF endings,
+		// which would make this content assertion depend on the local git
+		// configuration rather than on the code under test.
+		mdPath := filepath.Join(t.TempDir(), "test.md")
+		if err := os.WriteFile(mdPath, []byte("# Title\nhello world"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		f, err := os.Open(mdPath)
 		if err != nil {
 			t.Fatal(err)
 		}
 		defer f.Close()
 
-		docs, err := p.Parse(ctx, f, WithURI("testdata/test.md"))
+		docs, err := p.Parse(ctx, f, WithURI(mdPath))
 		if err != nil {
 			t.Fatal(err)
 		}
