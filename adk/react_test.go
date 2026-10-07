@@ -80,6 +80,67 @@ func TestStateGetToolGenActions(t *testing.T) {
 	assert.Contains(t, st.getToolGenActions(), "k")
 }
 
+func TestSendToolGenActionStateDispatch(t *testing.T) {
+	t.Run("Message", testSendToolGenActionStateDispatch[*schema.Message])
+	t.Run("AgenticMessage", testSendToolGenActionStateDispatch[*schema.AgenticMessage])
+}
+
+func testSendToolGenActionStateDispatch[M MessageType](t *testing.T) {
+	for _, runContextType := range []string{"none", "Message", "AgenticMessage"} {
+		t.Run(runContextType, func(t *testing.T) {
+			ctx := context.Background()
+			switch runContextType {
+			case "Message":
+				ctx, _ = initRunCtx(ctx, "agent", &AgentInput{})
+			case "AgenticMessage":
+				ctx, _ = initTypedRunCtx(ctx, "agent", &TypedAgentInput[*schema.AgenticMessage]{})
+			}
+
+			state := &typedState[M]{}
+			action := &AgentAction{Exit: true}
+			graph := compose.NewGraph[string, string](compose.WithGenLocalState(func(context.Context) *typedState[M] {
+				return state
+			}))
+			require.NoError(t, graph.AddLambdaNode("send", compose.InvokableLambda(func(ctx context.Context, input string) (string, error) {
+				return input, SendToolGenAction(ctx, "exit", action)
+			})))
+			require.NoError(t, graph.AddEdge(compose.START, "send"))
+			require.NoError(t, graph.AddEdge("send", compose.END))
+			runner, err := graph.Compile(ctx)
+			require.NoError(t, err)
+
+			_, err = runner.Invoke(ctx, "")
+			require.NoError(t, err)
+			require.Len(t, state.ToolGenActions, 1)
+			assert.Same(t, action, state.ToolGenActions["exit"])
+		})
+	}
+}
+
+func TestSendToolGenActionInvalidState(t *testing.T) {
+	t.Run("no graph state", func(t *testing.T) {
+		err := SendToolGenAction(context.Background(), "exit", &AgentAction{Exit: true})
+		require.ErrorContains(t, err, "have not set state")
+	})
+
+	t.Run("unsupported graph state", func(t *testing.T) {
+		ctx := context.Background()
+		graph := compose.NewGraph[string, string](compose.WithGenLocalState(func(context.Context) *struct{} {
+			return &struct{}{}
+		}))
+		require.NoError(t, graph.AddLambdaNode("send", compose.InvokableLambda(func(ctx context.Context, input string) (string, error) {
+			return input, SendToolGenAction(ctx, "exit", &AgentAction{Exit: true})
+		})))
+		require.NoError(t, graph.AddEdge(compose.START, "send"))
+		require.NoError(t, graph.AddEdge("send", compose.END))
+		runner, err := graph.Compile(ctx)
+		require.NoError(t, err)
+
+		_, err = runner.Invoke(ctx, "")
+		require.ErrorContains(t, err, "cannot find state with type")
+	})
+}
+
 func (w *testModelWrapper) Generate(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
 	return (&stateModelWrapper{inner: w.inner, original: w.inner}).Generate(ctx, input, opts...)
 }
