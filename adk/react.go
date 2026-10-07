@@ -305,17 +305,10 @@ func SendToolGenAction(ctx context.Context, toolName string, action *AgentAction
 		first, second = tryAgentic, tryClassic
 	}
 	err := first()
-	if err == nil || !isComposeStateTypeMismatch(err) {
+	if err == nil || !strings.Contains(err.Error(), "cannot find state with type") {
 		return err
 	}
 	return second()
-}
-
-func isComposeStateTypeMismatch(err error) bool {
-	if err == nil {
-		return false
-	}
-	return strings.Contains(err.Error(), "cannot find state with type")
 }
 
 type reactInput struct {
