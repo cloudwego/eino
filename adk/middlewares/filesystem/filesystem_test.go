@@ -2602,6 +2602,79 @@ func TestMultiModalReadFileTool_TextOnly(t *testing.T) {
 	assert.Contains(t, result.Parts[0].Text, "line5")
 }
 
+func TestMultiModalReadFileTool_TextPart(t *testing.T) {
+	base := setupTestBackend()
+	eb := &multiModalBackend{
+		InMemoryBackend: base,
+		multiModalReadFunc: func(context.Context, *filesystem.MultiModalReadRequest) (*filesystem.MultiFileContent, error) {
+			return &filesystem.MultiFileContent{
+				Parts: []filesystem.FileContentPart{
+					{
+						Type: filesystem.FileContentPartTypeText,
+						Data: []byte("page text"),
+					},
+				},
+			}, nil
+		},
+	}
+
+	mmTool, err := newMultiModalReadFileTool(eb, "", "")
+	assert.NoError(t, err)
+
+	result, err := mmTool.(tool.EnhancedInvokableTool).InvokableRun(
+		context.Background(), &schema.ToolArgument{Text: `{"file_path": "/doc.pdf"}`})
+	assert.NoError(t, err)
+	if assert.NotNil(t, result) && assert.Len(t, result.Parts, 1) {
+		assert.Equal(t, schema.ToolPartTypeText, result.Parts[0].Type)
+		assert.Equal(t, "page text", result.Parts[0].Text)
+	}
+}
+
+func TestMultiModalReadFileTool_OrderedMixedParts(t *testing.T) {
+	base := setupTestBackend()
+	imgData := []byte("rawimagedata")
+	pdfData := []byte("fakepdfcontent")
+	eb := &multiModalBackend{
+		InMemoryBackend: base,
+		multiModalReadFunc: func(context.Context, *filesystem.MultiModalReadRequest) (*filesystem.MultiFileContent, error) {
+			return &filesystem.MultiFileContent{
+				Parts: []filesystem.FileContentPart{
+					{Type: filesystem.FileContentPartTypeText, Data: []byte("before image")},
+					{Type: filesystem.FileContentPartTypeImage, MIMEType: "image/png", Data: imgData},
+					{Type: filesystem.FileContentPartTypePDF, MIMEType: "application/pdf", Data: pdfData},
+					{Type: filesystem.FileContentPartTypeText, Data: []byte("after pdf")},
+				},
+			}, nil
+		},
+	}
+
+	mmTool, err := newMultiModalReadFileTool(eb, "", "")
+	assert.NoError(t, err)
+
+	result, err := mmTool.(tool.EnhancedInvokableTool).InvokableRun(
+		context.Background(), &schema.ToolArgument{Text: `{"file_path": "/doc.pdf"}`})
+	assert.NoError(t, err)
+	if assert.NotNil(t, result) && assert.Len(t, result.Parts, 4) {
+		assert.Equal(t, schema.ToolPartTypeText, result.Parts[0].Type)
+		assert.Equal(t, "before image", result.Parts[0].Text)
+
+		assert.Equal(t, schema.ToolPartTypeImage, result.Parts[1].Type)
+		if assert.NotNil(t, result.Parts[1].Image) {
+			assert.Equal(t, "image/png", result.Parts[1].Image.MIMEType)
+			assert.Equal(t, base64.StdEncoding.EncodeToString(imgData), *result.Parts[1].Image.Base64Data)
+		}
+
+		assert.Equal(t, schema.ToolPartTypeFile, result.Parts[2].Type)
+		if assert.NotNil(t, result.Parts[2].File) {
+			assert.Equal(t, "application/pdf", result.Parts[2].File.MIMEType)
+			assert.Equal(t, base64.StdEncoding.EncodeToString(pdfData), *result.Parts[2].File.Base64Data)
+		}
+
+		assert.Equal(t, schema.ToolPartTypeText, result.Parts[3].Type)
+		assert.Equal(t, "after pdf", result.Parts[3].Text)
+	}
+}
+
 func TestMultiModalReadFileTool_Multimodal(t *testing.T) {
 	base := setupTestBackend()
 	imgData := []byte("rawimagedata")

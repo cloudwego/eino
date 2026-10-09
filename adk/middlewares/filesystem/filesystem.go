@@ -991,12 +991,17 @@ func newMultiModalReadFileTool(fs filesystem.Backend, name string, desc string) 
 				if len(p.Data) == 0 {
 					return nil, fmt.Errorf("FileContentPart.Data is empty for type %s", p.Type)
 				}
-				if p.MIMEType == "" {
-					return nil, fmt.Errorf("FileContentPart.MIMEType is empty for type %s", p.Type)
-				}
-				b64 := enc.encode(p.Data)
 				switch p.Type {
+				case filesystem.FileContentPartTypeText:
+					parts = append(parts, schema.ToolOutputPart{
+						Type: schema.ToolPartTypeText,
+						Text: string(p.Data),
+					})
 				case filesystem.FileContentPartTypeImage:
+					if p.MIMEType == "" {
+						return nil, fmt.Errorf("FileContentPart.MIMEType is empty for type %s", p.Type)
+					}
+					b64 := enc.encode(p.Data)
 					parts = append(parts, schema.ToolOutputPart{
 						Type: schema.ToolPartTypeImage,
 						Image: &schema.ToolOutputImage{
@@ -1007,6 +1012,10 @@ func newMultiModalReadFileTool(fs filesystem.Backend, name string, desc string) 
 						},
 					})
 				case filesystem.FileContentPartTypePDF:
+					if p.MIMEType == "" {
+						return nil, fmt.Errorf("FileContentPart.MIMEType is empty for type %s", p.Type)
+					}
+					b64 := enc.encode(p.Data)
 					parts = append(parts, schema.ToolOutputPart{
 						Type: schema.ToolPartTypeFile,
 						File: &schema.ToolOutputFile{
