@@ -174,7 +174,7 @@ func (r *Runner) runForeground(
 	work WorkFunc,
 ) (*backgroundtask.Task, error) {
 	startedAt := time.Now()
-	workCtx, cancel := context.WithCancel(ctx)
+	workCtx, cancel := newForegroundWorkContext(ctx)
 	adopted := false
 	defer func() {
 		if !adopted {
@@ -223,6 +223,10 @@ func (r *Runner) runForeground(
 		}
 		if r.policy.ShouldAutoBackground != nil &&
 			r.policy.ShouldAutoBackground(ctx, candidate) {
+			if err := ctx.Err(); err != nil {
+				cancel()
+				return nil, err
+			}
 			task, err := r.adoptForeground(ctx, spec, resultCh, cancel)
 			if err != nil {
 				cancel()
@@ -424,7 +428,7 @@ func (r *Runner) runForegroundStream(
 	chunks <-chan streamChunk,
 	ready <-chan error,
 ) (*schema.StreamReader[string], error) {
-	workCtx, cancel := context.WithCancel(ctx)
+	workCtx, cancel := newForegroundWorkContext(ctx)
 	resultCh := make(chan struct {
 		value string
 		err   error
@@ -436,9 +440,15 @@ func (r *Runner) runForegroundStream(
 			err   error
 		}{value: value, err: err}
 	}()
-	if err := <-ready; err != nil {
+	select {
+	case err := <-ready:
+		if err != nil {
+			cancel()
+			return nil, err
+		}
+	case <-ctx.Done():
 		cancel()
-		return nil, err
+		return nil, ctx.Err()
 	}
 	reader, writer := schema.Pipe[string](streamBufferCap)
 	go r.projectForegroundStream(&foregroundStreamProjection{
@@ -516,6 +526,12 @@ type executor struct {
 
 type detachedContext struct {
 	parent context.Context
+}
+
+// newForegroundWorkContext preserves request-scoped values while making the
+// Runner the sole owner of cancellation across the foreground handoff boundary.
+func newForegroundWorkContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithCancel(detachedContext{parent: ctx})
 }
 
 func (detachedContext) Deadline() (time.Time, bool) { return time.Time{}, false }

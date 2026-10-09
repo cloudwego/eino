@@ -206,6 +206,10 @@ func (r *Runner) projectForegroundStream(projection *foregroundStreamProjection)
 			}
 			if r.policy.ShouldAutoBackground != nil &&
 				r.policy.ShouldAutoBackground(ctx, candidate) {
+				if ctx.Err() != nil {
+					cancel()
+					return
+				}
 				task, err := r.adoptForeground(ctx, spec, resultCh, cancel)
 				if err != nil {
 					cancel()
