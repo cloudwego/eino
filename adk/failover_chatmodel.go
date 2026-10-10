@@ -20,7 +20,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 
 	"github.com/google/uuid"
@@ -28,6 +27,7 @@ import (
 	"github.com/cloudwego/eino/components"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/compose"
+	internalschema "github.com/cloudwego/eino/internal/schema"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -370,7 +370,8 @@ func (f *failoverModelWrapper[M]) Stream(ctx context.Context, input []M, opts ..
 			checkCopy := copies[0]
 			returnCopy := copies[1]
 
-			outMsg, streamErr := typedConsumeStream(checkCopy)
+			// Preserve the read error and best-effort prefix; concat errors are ignored.
+			outMsg, _, streamErr, _ := internalschema.ConcatMessageStreamPrefix(checkCopy)
 			if streamErr != nil {
 				lastOutputMessage = outMsg
 				lastErr = streamErr
@@ -453,7 +454,8 @@ func (f *failoverModelWrapper[M]) Stream(ctx context.Context, input []M, opts ..
 		checkCopy := copies[0]
 		returnCopy := copies[1]
 
-		outMsg, streamErr := typedConsumeStream(checkCopy)
+		// Preserve the read error and best-effort prefix; concat errors are ignored.
+		outMsg, _, streamErr, _ := internalschema.ConcatMessageStreamPrefix(checkCopy)
 		if streamErr != nil {
 			lastOutputMessage = outMsg
 			lastErr = streamErr
@@ -504,56 +506,4 @@ func emitFailoverExhaustedTimeline[M MessageType](ctx context.Context, err error
 			RetryStatus: &RetryStatus{Type: RetryStatusExhausted},
 		},
 	})
-}
-
-func typedConsumeStream[M MessageType](stream *schema.StreamReader[M]) (M, error) {
-	var zero M
-	defer stream.Close()
-
-	switch s := any(stream).(type) {
-	case *schema.StreamReader[*schema.Message]:
-		chunks := make([]*schema.Message, 0)
-		for {
-			chunk, err := s.Recv()
-			if err == io.EOF {
-				break
-			}
-			if err != nil {
-				msg, _ := schema.ConcatMessages(chunks)
-				if msg != nil {
-					return any(msg).(M), err
-				}
-				return zero, err
-			}
-			chunks = append(chunks, chunk)
-		}
-		msg, _ := schema.ConcatMessages(chunks)
-		if msg != nil {
-			return any(msg).(M), nil
-		}
-		return zero, nil
-	case *schema.StreamReader[*schema.AgenticMessage]:
-		chunks := make([]*schema.AgenticMessage, 0)
-		for {
-			chunk, err := s.Recv()
-			if err == io.EOF {
-				break
-			}
-			if err != nil {
-				msg, _ := schema.ConcatAgenticMessages(chunks)
-				if msg != nil {
-					return any(msg).(M), err
-				}
-				return zero, err
-			}
-			chunks = append(chunks, chunk)
-		}
-		msg, _ := schema.ConcatAgenticMessages(chunks)
-		if msg != nil {
-			return any(msg).(M), nil
-		}
-		return zero, nil
-	default:
-		panic("unreachable: unknown MessageType")
-	}
 }

@@ -40,18 +40,16 @@ func ConcatMessageStream[M *schema.Message | *schema.AgenticMessage](stream *sch
 // successfully received chunks even when reading fails. It reports read and
 // concat errors separately; errors matching io.EOF mean normal completion.
 // hasChunks reports whether any chunks were received, including on concat
-// failure. An empty stream returns a zero message without attempting to concat.
+// failure. Empty streams follow the corresponding schema concat function's
+// semantics, with hasChunks set to false.
 func ConcatMessageStreamPrefix[M *schema.Message | *schema.AgenticMessage](stream *schema.StreamReader[M]) (msg M, hasChunks bool, recvErr error, concatErr error) {
 	defer stream.Close()
 	chunks, recvErr := CollectStreamPrefix(stream)
 	if errors.Is(recvErr, io.EOF) {
 		recvErr = nil
 	}
-	if len(chunks) == 0 {
-		return msg, false, recvErr, nil
-	}
 	msg, concatErr = ConcatMessages(chunks)
-	return msg, true, recvErr, concatErr
+	return msg, len(chunks) > 0, recvErr, concatErr
 }
 
 // CollectStreamPrefix reads until the first error and returns all successfully

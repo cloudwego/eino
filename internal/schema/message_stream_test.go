@@ -196,10 +196,27 @@ func testConcatMessageStreamErrorPolicies[M *schema.Message | *schema.AgenticMes
 				if hasChunks {
 					assert.Equal(t, merged, msg)
 				} else {
-					assert.Nil(t, msg)
+					assert.Equal(t, empty, msg)
 				}
 			}
 			assert.True(t, w.Send(zero, nil), "prefix concat must close the reader")
 		})
 	}
+}
+
+func TestConcatMessageStreamToolCalls(t *testing.T) {
+	chunks := []*schema.Message{
+		{Role: schema.Assistant, Content: "thinking..."},
+		{Role: schema.Assistant, ToolCalls: []schema.ToolCall{
+			{ID: "call_1", Type: "function", Function: schema.FunctionCall{Name: "search", Arguments: `{"q":"test"}`}},
+		}},
+	}
+	r := schema.StreamReaderFromArray(chunks)
+
+	msg, err := ConcatMessageStream(r)
+	require.NoError(t, err)
+	require.NotNil(t, msg)
+	assert.Equal(t, "thinking...", msg.Content)
+	require.Len(t, msg.ToolCalls, 1)
+	assert.Equal(t, "search", msg.ToolCalls[0].Function.Name)
 }

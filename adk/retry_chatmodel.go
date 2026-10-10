@@ -26,6 +26,7 @@ import (
 
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/compose"
+	internalschema "github.com/cloudwego/eino/internal/schema"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -646,7 +647,8 @@ func streamWithShouldRetry[M MessageType](r *typedRetryModelWrapper[M], ctx cont
 		checkCopy := copies[0]
 		returnCopy := copies[1]
 
-		msg, streamErr := typedConsumeStream(checkCopy)
+		// Preserve the read error and best-effort prefix; concat errors are ignored.
+		msg, _, streamErr, _ := internalschema.ConcatMessageStreamPrefix(checkCopy)
 
 		if errors.Is(streamErr, ErrStreamCanceled) {
 			signal.ch <- retryVerdict{WillRetry: false}

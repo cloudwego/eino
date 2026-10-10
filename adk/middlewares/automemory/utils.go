@@ -20,7 +20,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -31,7 +30,6 @@ import (
 
 	"github.com/cloudwego/eino/adk"
 	adkfs "github.com/cloudwego/eino/adk/middlewares/filesystem"
-	internalschema "github.com/cloudwego/eino/internal/schema"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -325,18 +323,6 @@ func isAssistantRole[M adk.MessageType](msg M) bool {
 	default:
 		panic("unreachable")
 	}
-}
-
-func concatMessageStream[M adk.MessageType](r *schema.StreamReader[M]) (M, error) {
-	chunks, recvErr := internalschema.CollectStreamPrefix(r)
-	var zero M
-	if recvErr != io.EOF {
-		return zero, recvErr
-	}
-	if len(chunks) == 0 {
-		return zero, nil
-	}
-	return internalschema.ConcatMessages(chunks)
 }
 
 func userMessageTextContent[M adk.MessageType](msg M) string {
