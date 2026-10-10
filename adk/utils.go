@@ -25,6 +25,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/cloudwego/eino/internal"
+	internalschema "github.com/cloudwego/eino/internal/schema"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -183,20 +184,12 @@ func (e *agentEventWrapper) consumeStream() {
 	}
 
 	s := e.AgentEvent.Output.MessageOutput.MessageStream
-	var msgs []Message
-
 	defer s.Close()
-	for {
-		msg, err := s.Recv()
-		if err != nil {
-			if err == io.EOF {
-				break
-			}
-			e.StreamErr = err
-			e.AgentEvent.Output.MessageOutput.MessageStream = schema.StreamReaderFromArray(msgs)
-			return
-		}
-		msgs = append(msgs, msg)
+	msgs, recvErr := internalschema.CollectStreamPrefix(s)
+	if recvErr != io.EOF {
+		e.StreamErr = recvErr
+		e.AgentEvent.Output.MessageOutput.MessageStream = schema.StreamReaderFromArray(msgs)
+		return
 	}
 
 	if len(msgs) == 0 {
@@ -213,7 +206,7 @@ func (e *agentEventWrapper) consumeStream() {
 		e.concatenatedMessage = msgs[0]
 	} else {
 		var err error
-		e.concatenatedMessage, err = schema.ConcatMessages(msgs)
+		e.concatenatedMessage, err = internalschema.ConcatMessages(msgs)
 		if err != nil {
 			e.StreamErr = err
 			e.AgentEvent.Output.MessageOutput.MessageStream = schema.StreamReaderFromArray(msgs)
@@ -301,7 +294,7 @@ func TypedGetMessage[M MessageType](e *TypedAgentEvent[M]) (M, *TypedAgentEvent[
 		ss := msgOutput.MessageStream.Copy(2)
 		e.Output.MessageOutput.MessageStream = ss[0]
 
-		msg, err := concatMessageStream(ss[1])
+		msg, err := internalschema.ConcatMessageStream(ss[1])
 
 		return msg, e, err
 	}
