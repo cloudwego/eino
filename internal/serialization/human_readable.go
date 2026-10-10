@@ -101,7 +101,11 @@ func hrMarshal(v any, fieldType reflect.Type) (any, error) {
 		rt = rt.Elem()
 	}
 
-	if checkMarshaler(rt) {
+	hasJSONMethods, err := checkJSONMethodPair(rt)
+	if err != nil {
+		return nil, err
+	}
+	if hasJSONMethods {
 		return hrMarshalJSON(rv, rt, typeUnspecific, pointerNum)
 	}
 
@@ -367,8 +371,12 @@ func hrUnmarshalValue(data any, targetType reflect.Type, interpretTypeMetadata b
 			}
 		}
 	}
-	if checkMarshaler(baseType) {
-		jsonBytes, err := sonic.Marshal(data)
+	hasJSONMethods, err := checkJSONMethodPair(baseType)
+	if err != nil {
+		return nil, err
+	}
+	if hasJSONMethods {
+		jsonBytes, err := json.Marshal(data)
 		if err != nil {
 			return nil, fmt.Errorf("failed to marshal data for custom unmarshaler: %w", err)
 		}
@@ -386,6 +394,22 @@ func hrUnmarshalValue(data any, targetType reflect.Type, interpretTypeMetadata b
 	default:
 		return hrUnmarshalPrimitive(data, targetType, baseType, ptrNum)
 	}
+}
+
+// Custom JSON handling owns the entire payload, so both directions are required.
+// t is the non-pointer type; methods on either T or *T satisfy the contract.
+func checkJSONMethodPair(t reflect.Type) (bool, error) {
+	pt := reflect.PointerTo(t)
+	hasMarshal := t.Implements(marshalerType) || pt.Implements(marshalerType)
+	hasUnmarshal := t.Implements(unmarshalerType) || pt.Implements(unmarshalerType)
+	if hasMarshal == hasUnmarshal {
+		return hasMarshal, nil
+	}
+	missing := "json.Marshaler"
+	if hasMarshal {
+		missing = "json.Unmarshaler"
+	}
+	return false, fmt.Errorf("custom JSON type %v must implement both json.Marshaler and json.Unmarshaler: missing %s", t, missing)
 }
 
 func hrUnmarshalMap(data map[string]any, targetType, baseType reflect.Type, ptrNum uint32) (any, error) {
@@ -423,10 +447,14 @@ func hrUnmarshalTyped(data map[string]any, typeStr string) (any, error) {
 		return nil, err
 	}
 
+	hasJSONMethods, err := checkJSONMethodPair(actualType)
+	if err != nil {
+		return nil, err
+	}
 	value, hasValue := data["value"]
 	// Ordinary structs store business fields inline. Other values, and structs
 	// that reserve "$type" for business data, carry a separate payload.
-	wrapped := actualType.Kind() != reflect.Struct || checkMarshaler(actualType) || hasTypeField(actualType)
+	wrapped := actualType.Kind() != reflect.Struct || hasJSONMethods || hasTypeField(actualType)
 	if hasValue && len(data) == 2 && wrapped {
 		result, unmarshalErr := hrUnmarshalValue(value, actualType, false)
 		if unmarshalErr != nil {

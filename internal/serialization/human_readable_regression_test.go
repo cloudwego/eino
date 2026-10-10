@@ -83,6 +83,9 @@ func init() {
 		GenericRegister[hrOpaqueJSON]("hr_opaque_json"),
 		GenericRegister[hrOpaqueJSONHolder]("hr_opaque_json_holder"),
 		GenericRegister[hrJSONSlice]("hr_json_slice"),
+		GenericRegister[hrMarshalOnly]("hr_marshal_only"),
+		GenericRegister[hrPointerMarshalOnly]("hr_pointer_marshal_only"),
+		GenericRegister[hrUnmarshalOnly]("hr_unmarshal_only"),
 	}
 	for _, err := range registrations {
 		if err != nil {
@@ -348,4 +351,60 @@ func TestHumanReadableSerializer_NegativeZeroInConcreteCollections(t *testing.T)
 	require.NoError(t, s.Unmarshal(data, &got32))
 	require.Len(t, got32, 1)
 	assert.Equal(t, math.Float32bits(input32[0]), math.Float32bits(got32[0]))
+}
+
+type hrMarshalOnly struct{ Value int }
+
+func (v hrMarshalOnly) MarshalJSON() ([]byte, error) { return json.Marshal(v.Value) }
+
+type hrPointerMarshalOnly hrMarshalOnly
+
+func (v *hrPointerMarshalOnly) MarshalJSON() ([]byte, error) { return json.Marshal(v.Value) }
+
+type hrUnmarshalOnly hrMarshalOnly
+
+func (v *hrUnmarshalOnly) UnmarshalJSON(data []byte) error { return json.Unmarshal(data, &v.Value) }
+
+func TestHumanReadableSerializer_IncompleteJSONMethodPair(t *testing.T) {
+	s := &HumanReadableSerializer{}
+	for _, tc := range []struct {
+		value   any
+		name    string
+		missing string
+	}{
+		{hrMarshalOnly{Value: 7}, "hr_marshal_only", "json.Unmarshaler"},
+		{hrPointerMarshalOnly{Value: 7}, "hr_pointer_marshal_only", "json.Unmarshaler"},
+		{hrUnmarshalOnly{Value: 7}, "hr_unmarshal_only", "json.Marshaler"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rt := reflect.TypeOf(tc.value)
+			pointer := reflect.New(rt)
+			pointer.Elem().Set(reflect.ValueOf(tc.value))
+			holder := reflect.New(reflect.StructOf([]reflect.StructField{{Name: "Value", Type: rt, Tag: `json:"value"`}})).Elem()
+			holder.Field(0).Set(reflect.ValueOf(tc.value))
+			envelope := `{"$type":"` + tc.name + `","Value":7}`
+			for _, position := range []struct {
+				name  string
+				input any
+				wire  string
+			}{
+				{"root", tc.value, `{"Value":7}`},
+				{"root pointer", pointer.Interface(), `{"Value":7}`},
+				{"concrete field", holder.Interface(), `{"value":{"Value":7}}`},
+				{"interface field", hrEdgeAnyContainer{V: tc.value}, `{"v":` + envelope + `}`},
+				{"map element", map[string]any{"item": tc.value}, `{"item":` + envelope + `}`},
+				{"slice element", []any{tc.value}, `[` + envelope + `]`},
+			} {
+				t.Run(position.name, func(t *testing.T) {
+					_, err := s.Marshal(position.input)
+					require.ErrorContains(t, err, "missing "+tc.missing)
+					assert.Contains(t, err.Error(), rt.String())
+					target := reflect.New(reflect.TypeOf(position.input))
+					err = s.Unmarshal([]byte(position.wire), target.Interface())
+					require.ErrorContains(t, err, "missing "+tc.missing)
+					assert.Contains(t, err.Error(), rt.String())
+				})
+			}
+		})
+	}
 }

@@ -181,6 +181,11 @@ type Serializer interface {
 // Concrete fields and envelope payloads are decoded without treating their
 // business keys as metadata.
 //
+// Custom JSON payloads are handled with encoding/json and require both
+// json.Marshaler and json.Unmarshaler, implemented by T or *T. Non-null values
+// and payloads whose type implements only one interface return an error.
+// The custom methods own the entire payload, including nested interface fields.
+//
 // Note: All custom types stored in interface{} fields must be registered using
 // schema.RegisterName[T]() or schema.Register[T]() for proper deserialization.
 type HumanReadableSerializer = serialization.HumanReadableSerializer
