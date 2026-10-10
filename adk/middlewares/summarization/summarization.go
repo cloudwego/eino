@@ -30,6 +30,7 @@ import (
 	"github.com/bytedance/sonic"
 
 	"github.com/cloudwego/eino/adk"
+	"github.com/cloudwego/eino/adk/internal"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
 )
@@ -906,11 +907,28 @@ func (m *TypedMiddleware[M]) generateAndEmit(ctx context.Context, chatModel mode
 	opts []model.Option, attempt int, phase GenerateSummaryPhase) (M, error) {
 
 	resp, err := chatModel.Generate(ctx, input, opts...)
+	if err == nil {
+		err = validateSummaryResponse(resp)
+	}
 	if emitErr := m.emitGenerateSummaryEvent(ctx, attempt, phase, resp, err); emitErr != nil {
 		var zero M
 		return zero, emitErr
 	}
 	return resp, err
+}
+
+func validateSummaryResponse[M adk.MessageType](resp M) error {
+	switch msg := any(resp).(type) {
+	case *schema.Message:
+		if msg != nil && len(msg.ToolCalls) > 0 {
+			return fmt.Errorf("summary response contains tool calls")
+		}
+	case *schema.AgenticMessage:
+		if msg != nil && internal.HasToolCall(msg.ContentBlocks) {
+			return fmt.Errorf("summary response contains tool calls")
+		}
+	}
+	return nil
 }
 
 func (m *TypedMiddleware[M]) generateWithRetry(ctx context.Context, chatModel model.BaseModel[M], input []M,
