@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"math"
 	"reflect"
 	"strconv"
 	"strings"
@@ -249,15 +250,20 @@ func hrMarshalSlice(rv reflect.Value, rt reflect.Type, typeUnspecific bool, poin
 }
 
 func hrMarshalPrimitive(rv reflect.Value, rt reflect.Type, typeUnspecific bool, pointerNum uint32) (any, error) {
+	value := rv.Interface()
+	// Sonic encodes floating-point -0 as 0; json.Number preserves its sign.
+	if (rt.Kind() == reflect.Float32 || rt.Kind() == reflect.Float64) && rv.Float() == 0 && math.Signbit(rv.Float()) {
+		value = json.Number("-0")
+	}
 	if !typeUnspecific {
-		return rv.Interface(), nil
+		return value, nil
 	}
 
 	if isPrimitiveJSONType(rt) && pointerNum == 0 {
 		return rv.Interface(), nil
 	}
 
-	return wrapWithType(rv.Interface(), rt, pointerNum, true)
+	return wrapWithType(value, rt, pointerNum, true)
 }
 
 func wrapWithType(value any, rt reflect.Type, pointerNum uint32, isSimple bool) (any, error) {
@@ -349,12 +355,12 @@ func hrUnmarshal(data any, targetType reflect.Type) (any, error) {
 
 // Only roots and interface values carry metadata. Concrete fields and envelope
 // payloads can contain arbitrary business keys, including "$type" and "value".
-func hrUnmarshalValue(data any, targetType reflect.Type, readType bool) (any, error) {
+func hrUnmarshalValue(data any, targetType reflect.Type, interpretTypeMetadata bool) (any, error) {
 	if data == nil {
 		return nil, nil
 	}
 	ptrNum, baseType := derefPointerNum(targetType)
-	if object, ok := data.(map[string]any); ok && readType {
+	if object, ok := data.(map[string]any); ok && interpretTypeMetadata {
 		if typeStr, hasType := object[typeFieldName].(string); hasType {
 			if isRegisteredTypeName(typeStr) {
 				return hrUnmarshalTyped(object, typeStr)
@@ -384,7 +390,7 @@ func hrUnmarshalValue(data any, targetType reflect.Type, readType bool) (any, er
 
 func hrUnmarshalMap(data map[string]any, targetType, baseType reflect.Type, ptrNum uint32) (any, error) {
 	if baseType.Kind() == reflect.Struct {
-		return hrUnmarshalStruct(data, targetType, baseType, ptrNum)
+		return hrUnmarshalStruct(data, targetType, baseType)
 	}
 
 	if baseType.Kind() == reflect.Map {
@@ -443,7 +449,7 @@ func hrUnmarshalTyped(data map[string]any, typeStr string) (any, error) {
 	return wrapPointers(result, ptrNum), nil
 }
 
-func hrUnmarshalStruct(data map[string]any, targetType, baseType reflect.Type, ptrNum uint32) (any, error) {
+func hrUnmarshalStruct(data map[string]any, targetType, baseType reflect.Type) (any, error) {
 	result, dResult := createValueFromType(targetType)
 
 	for i := 0; i < baseType.NumField(); i++ {
