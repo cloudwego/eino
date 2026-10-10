@@ -58,15 +58,20 @@ func TestInMemoryNotificationOutboxConformance(t *testing.T) {
 
 func TestInMemoryNotificationWriterConformance(t *testing.T) {
 	const attemptTimeout = 20 * time.Millisecond
+	// Keep lease time independent of test execution speed.
+	clock := &testClock{now: time.Unix(100, 0)}
 	runNotificationWriterConformance(t, notificationWriterConformanceConfig{
 		New: func(testing.TB) (TaskStore, NotificationOutbox) {
-			store := NewInMemoryStore(&InMemoryStoreConfig{
+			store := newInMemoryStoreWithClock(&InMemoryStoreConfig{
 				ActiveAttemptTimeout: attemptTimeout,
-			})
+			}, clock.Now)
 			return store, store
 		},
 		ExpireActiveAttempt: func(_ testing.TB, _ TaskStore, _ *Task) {
-			time.Sleep(2 * attemptTimeout)
+			clock.Advance(2 * attemptTimeout)
+		},
+		ExpireLease: func(_ testing.TB, _ NotificationOutbox, duration time.Duration) {
+			clock.Advance(2 * duration)
 		},
 	})
 }
