@@ -30,8 +30,8 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/cloudwego/eino/adk"
-	"github.com/cloudwego/eino/adk/internal"
 	adkfs "github.com/cloudwego/eino/adk/middlewares/filesystem"
+	internalschema "github.com/cloudwego/eino/internal/schema"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -328,7 +328,7 @@ func isAssistantRole[M adk.MessageType](msg M) bool {
 }
 
 func concatMessageStream[M adk.MessageType](r *schema.StreamReader[M]) (M, error) {
-	chunks, recvErr := internal.CollectStreamPrefix(r)
+	chunks, recvErr := internalschema.CollectStreamPrefix(r)
 	var zero M
 	if recvErr != io.EOF {
 		return zero, recvErr
@@ -336,7 +336,7 @@ func concatMessageStream[M adk.MessageType](r *schema.StreamReader[M]) (M, error
 	if len(chunks) == 0 {
 		return zero, nil
 	}
-	return internal.ConcatMessages(chunks)
+	return internalschema.ConcatMessages(chunks)
 }
 
 func userMessageTextContent[M adk.MessageType](msg M) string {

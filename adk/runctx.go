@@ -27,7 +27,7 @@ import (
 	"sync"
 	"time"
 
-	adkinternal "github.com/cloudwego/eino/adk/internal"
+	internalschema "github.com/cloudwego/eino/internal/schema"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -127,7 +127,7 @@ func (e *typedAgentEventWrapper[M]) consumeStream() {
 
 	s := e.event.Output.MessageOutput.MessageStream
 	defer s.Close()
-	msgs, recvErr := adkinternal.CollectStreamPrefix(s)
+	msgs, recvErr := internalschema.CollectStreamPrefix(s)
 	if recvErr != io.EOF {
 		e.StreamErr = recvErr
 		e.event.Output.MessageOutput.MessageStream = schema.StreamReaderFromArray(msgs)
@@ -144,7 +144,7 @@ func (e *typedAgentEventWrapper[M]) consumeStream() {
 		e.concatenatedMessage = msgs[0]
 	} else {
 		var err error
-		e.concatenatedMessage, err = adkinternal.ConcatMessages(msgs)
+		e.concatenatedMessage, err = internalschema.ConcatMessages(msgs)
 		if err != nil {
 			e.StreamErr = err
 			e.event.Output.MessageOutput.MessageStream = schema.StreamReaderFromArray(msgs)

@@ -33,6 +33,7 @@ import (
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/internal/generic"
+	internalschema "github.com/cloudwego/eino/internal/schema"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -722,7 +723,7 @@ func (m *typedEventSenderModel[M]) Stream(ctx context.Context, input []M, opts .
 		spanStream.Close()
 		var final M
 		if len(chunks) > 0 && streamErr == nil {
-			final, streamErr = internal.ConcatMessages(chunks)
+			final, streamErr = internalschema.ConcatMessages(chunks)
 		}
 		sendSessionTimelineEvent(ctx, newModelSpanEndEvent(ctx, modelSpanEndEventInput[M]{
 			spanID:       spanID,

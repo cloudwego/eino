@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-package internal
+package schema
 
 import "github.com/cloudwego/eino/schema"
 

@@ -25,9 +25,9 @@ import (
 	"io"
 	"time"
 
-	"github.com/cloudwego/eino/adk/internal"
 	"github.com/cloudwego/eino/components"
 	"github.com/cloudwego/eino/internal/core"
+	internalschema "github.com/cloudwego/eino/internal/schema"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -158,11 +158,11 @@ func gobEncodeMessageVariant(mv *TypedMessageVariant[*schema.Message]) ([]byte, 
 		ToolName:    mv.ToolName,
 	}
 	if mv.IsStreaming {
-		messages, recvErr := internal.CollectStreamPrefix(mv.MessageStream)
+		messages, recvErr := internalschema.CollectStreamPrefix(mv.MessageStream)
 		if recvErr != io.EOF {
 			return nil, fmt.Errorf("error receiving message stream: %w", recvErr)
 		}
-		m, err := internal.ConcatMessages(messages)
+		m, err := internalschema.ConcatMessages(messages)
 		if err != nil {
 			return nil, fmt.Errorf("failed to encode message: cannot concat message stream: %w", err)
 		}
@@ -201,11 +201,11 @@ func gobEncodeAgenticMessageVariant(mv *TypedMessageVariant[*schema.AgenticMessa
 		ToolName:    mv.ToolName,
 	}
 	if mv.IsStreaming {
-		messages, recvErr := internal.CollectStreamPrefix(mv.MessageStream)
+		messages, recvErr := internalschema.CollectStreamPrefix(mv.MessageStream)
 		if recvErr != io.EOF {
 			return nil, fmt.Errorf("error receiving agentic message stream: %w", recvErr)
 		}
-		m, err := internal.ConcatMessages(messages)
+		m, err := internalschema.ConcatMessages(messages)
 		if err != nil {
 			return nil, fmt.Errorf("failed to encode agentic message: cannot concat message stream: %w", err)
 		}
@@ -487,23 +487,23 @@ type ResumableAgent = TypedResumableAgent[*schema.Message]
 
 func concatMessageStream[M MessageType](stream *schema.StreamReader[M]) (M, error) {
 	defer stream.Close()
-	chunks, recvErr := internal.CollectStreamPrefix(stream)
+	chunks, recvErr := internalschema.CollectStreamPrefix(stream)
 	if recvErr != io.EOF {
 		var zero M
 		return zero, recvErr
 	}
-	return internal.ConcatMessages(chunks)
+	return internalschema.ConcatMessages(chunks)
 }
 
 func materializeMessageStreamPrefix[M MessageType](stream *schema.StreamReader[M]) (msg M, hasChunks bool, streamErr error, err error) {
 	defer stream.Close()
-	chunks, streamErr := internal.CollectStreamPrefix(stream)
+	chunks, streamErr := internalschema.CollectStreamPrefix(stream)
 	if errors.Is(streamErr, io.EOF) {
 		streamErr = nil
 	}
 	if len(chunks) == 0 {
 		return msg, false, streamErr, nil
 	}
-	msg, err = internal.ConcatMessages(chunks)
+	msg, err = internalschema.ConcatMessages(chunks)
 	return msg, true, streamErr, err
 }
