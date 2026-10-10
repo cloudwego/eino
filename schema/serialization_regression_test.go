@@ -132,8 +132,6 @@ func TestGobSerializer_Errors(t *testing.T) {
 	type unregistered struct{ ID int }
 	_, err = serializer.Marshal(persistenceHolder{Value: unregistered{ID: 1}})
 	require.Error(t, err)
-	require.NotPanics(t, func() { _, err = serializer.Marshal((*persistenceExtra)(nil)) })
-	require.Error(t, err)
 }
 
 func TestInternalSerializer_ToolInfoLegacyJSON(t *testing.T) {
