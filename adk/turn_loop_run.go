@@ -447,8 +447,10 @@ func (l *TurnLoop[T, M]) runAgentAndHandleEvents(
 		Stopped:   stoppedDone,
 		StopCause: l.stopCtrl.cause,
 	}
-	l.preemptCtrl.beginActiveTurn(ctx, tc)
-	l.stopCtrl.beginActiveTurn()
+	// Capture each turn's channels before launching watchers: a delayed watcher
+	// must neither consume a later turn's requests nor take its wakeup signal.
+	preemptNotify := l.preemptCtrl.beginActiveTurn(ctx, tc)
+	stopNotify := l.stopCtrl.beginActiveTurn()
 	defer func() {
 		l.stopCtrl.endActiveTurn()
 		l.preemptCtrl.endActiveTurn().ack()
@@ -515,8 +517,8 @@ func (l *TurnLoop[T, M]) runAgentAndHandleEvents(
 		}()
 		handleErr = handleEvents()
 	}()
-	go l.watchPreempt(done, agentCancelFunc, preemptDone)
-	go l.watchStop(done, agentCancelFunc, stoppedDone)
+	go l.watchPreempt(done, agentCancelFunc, preemptDone, preemptNotify)
+	go l.watchStop(done, agentCancelFunc, stoppedDone, stopNotify)
 
 	finalizeCheckpoint := func() error {
 		if ms != nil {
