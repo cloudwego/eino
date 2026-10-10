@@ -135,6 +135,45 @@ func TestHumanReadableSerializer_RegressionRoundTrips(t *testing.T) {
 	}
 }
 
+func TestHumanReadableSerializer_IntegerWireCompatibility(t *testing.T) {
+	s := &HumanReadableSerializer{}
+	for _, tc := range []struct {
+		value    any
+		typeName string
+	}{
+		{int(42), "_eino_int"}, {int8(42), "_eino_int8"},
+		{int16(42), "_eino_int16"}, {int32(42), "_eino_int32"},
+		{int64(42), "_eino_int64"}, {uint(42), "_eino_uint"},
+		{uint8(42), "_eino_uint8"}, {uint16(42), "_eino_uint16"},
+		{uint32(42), "_eino_uint32"}, {uint64(42), "_eino_uint64"},
+		{uintptr(42), "_eino_uintptr"},
+	} {
+		t.Run(tc.typeName, func(t *testing.T) {
+			primitiveWire := `{"$type":"` + tc.typeName + `","value":42}`
+			slice := reflect.MakeSlice(reflect.SliceOf(reflect.TypeOf(tc.value)), 1, 1)
+			slice.Index(0).Set(reflect.ValueOf(tc.value))
+			for _, position := range []struct {
+				name  string
+				value any
+				wire  string
+			}{
+				{"root", tc.value, primitiveWire},
+				{"interface field", hrEdgeAnyContainer{V: tc.value}, `{"$type":"hr_edge_any_container","v":` + primitiveWire + `}`},
+				{"concrete element", slice.Interface(), `{"$type":"[]` + tc.typeName + `","value":[42]}`},
+			} {
+				t.Run(position.name, func(t *testing.T) {
+					data, err := s.Marshal(position.value)
+					require.NoError(t, err)
+					assert.JSONEq(t, position.wire, string(data))
+					got := reflect.New(reflect.TypeOf(position.value))
+					require.NoError(t, s.Unmarshal(data, got.Interface()))
+					assert.Equal(t, position.value, got.Elem().Interface())
+				})
+			}
+		})
+	}
+}
+
 type hrEdgeFancyArray struct{ Array hrArrayJSON }
 
 func TestHumanReadableSerializer_ValueFieldLegacyFormat(t *testing.T) {
@@ -226,7 +265,8 @@ func TestHumanReadableSerializer_CustomJSONPayloadContract(t *testing.T) {
 		`{"$type":"_eino_int","value":7}`,
 		`{"nested":{"$type":"_eino_string","value":"business"}}`,
 		`[{"$type":"_eino_int","value":7},null]`,
-		`"escaped \\ \" 中文"`, `true`, `9223372036854775807`, `1.0`, `-0`, `-0.0`, `{}`, `[]`,
+		`"escaped \\ \" 中文 <>&"`, `true`, `9223372036854775807`, `18446744073709551615`,
+		`1e1000`, `1.0`, `-0`, `-0.0`, `{}`, `[]`,
 	} {
 		t.Run(payload, func(t *testing.T) {
 			value := hrOpaqueJSON{payload: json.RawMessage(payload)}
@@ -406,5 +446,25 @@ func TestHumanReadableSerializer_IncompleteJSONMethodPair(t *testing.T) {
 				})
 			}
 		})
+	}
+}
+
+func TestHumanReadableSerializer_DecodedStringsOwnTheirMemory(t *testing.T) {
+	data := []byte(`"retained value"`)
+	var got string
+	require.NoError(t, (&HumanReadableSerializer{}).Unmarshal(data, &got))
+	for i := range data {
+		data[i] = 'x'
+	}
+	assert.Equal(t, "retained value", got)
+}
+
+func TestHumanReadableSerializer_RejectsMalformedJSON(t *testing.T) {
+	s := &HumanReadableSerializer{}
+	for _, data := range [][]byte{
+		[]byte(`{"value":1} trailing`), []byte(`1 2`), []byte("\"unescaped\nnewline\""),
+	} {
+		var got any
+		require.Error(t, s.Unmarshal(data, &got))
 	}
 }

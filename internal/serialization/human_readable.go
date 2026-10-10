@@ -17,7 +17,6 @@
 package serialization
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -30,6 +29,12 @@ import (
 
 const typeFieldName = "$type"
 
+var humanReadableJSON = sonic.Config{
+	UseNumber:      true, // Preserve numeric tokens in the intermediate JSON tree.
+	CopyString:     true, // Avoid retaining the whole JSON buffer through decoded strings.
+	ValidateString: true,
+}.Froze()
+
 type HumanReadableSerializer struct{}
 
 func (h *HumanReadableSerializer) Marshal(v any) ([]byte, error) {
@@ -37,7 +42,7 @@ func (h *HumanReadableSerializer) Marshal(v any) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return sonic.Marshal(result)
+	return humanReadableJSON.Marshal(result)
 }
 
 func (h *HumanReadableSerializer) Unmarshal(data []byte, v any) error {
@@ -124,8 +129,7 @@ func hrMarshal(v any, fieldType reflect.Type) (any, error) {
 func hrMarshalCustomJSON(rv reflect.Value, rt reflect.Type, typeUnspecific bool, pointerNum uint32) (any, error) {
 	// Use the addressable form when possible so pointer-receiver MarshalJSON
 	// methods are invoked. Without this, custom marshalers defined on *T are
-	// silently bypassed because rv.Interface() returns a non-addressable copy
-	// and the standard json package only checks Marshaler on the value type.
+	// silently bypassed when rv.Interface() returns a non-addressable copy of T.
 	// Symptom: types like ToolInfo that store data behind unexported fields
 	// (ParamsOneOf.params / .jsonschema) round-trip with those fields lost.
 	var marshalTarget any
@@ -136,7 +140,7 @@ func hrMarshalCustomJSON(rv reflect.Value, rt reflect.Type, typeUnspecific bool,
 		tmp.Elem().Set(rv)
 		marshalTarget = tmp.Interface()
 	}
-	jsonBytes, err := json.Marshal(marshalTarget)
+	jsonBytes, err := humanReadableJSON.Marshal(marshalTarget)
 	if err != nil {
 		return nil, err
 	}
@@ -376,11 +380,13 @@ func hrUnmarshalValue(data any, targetType reflect.Type, interpretTypeMetadata b
 		return nil, err
 	}
 	if hasJSONMethods {
-		jsonBytes, err := json.Marshal(data)
+		jsonBytes, err := humanReadableJSON.Marshal(data)
 		if err != nil {
 			return nil, fmt.Errorf("failed to marshal data for custom unmarshaler: %w", err)
 		}
 		result := reflect.New(baseType)
+		// Sonic can reject a numeric payload outside float64's range before
+		// invoking UnmarshalJSON. Let the custom method own its numeric range.
 		if err := json.Unmarshal(jsonBytes, result.Interface()); err != nil {
 			return nil, fmt.Errorf("failed to unmarshal with custom unmarshaler: %w", err)
 		}
@@ -913,10 +919,8 @@ func setValueWithConversion(target, source reflect.Value) bool {
 }
 
 func decodeJSONAny(data []byte) (any, error) {
-	dec := json.NewDecoder(bytes.NewReader(data))
-	dec.UseNumber()
 	var raw any
-	if err := dec.Decode(&raw); err != nil {
+	if err := humanReadableJSON.Unmarshal(data, &raw); err != nil {
 		return nil, err
 	}
 	return raw, nil
