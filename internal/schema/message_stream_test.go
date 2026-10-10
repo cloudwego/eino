@@ -112,3 +112,94 @@ func TestConcatMessagesPreservesSchemaSemantics(t *testing.T) {
 		}
 	})
 }
+
+func TestConcatMessageStreamErrorPolicies(t *testing.T) {
+	t.Run("message", func(t *testing.T) {
+		testConcatMessageStreamErrorPolicies(t,
+			[]*schema.Message{schema.AssistantMessage("a", nil), schema.AssistantMessage("b", nil)},
+			[]*schema.Message{schema.AssistantMessage("a", nil), schema.UserMessage("b")},
+			schema.AssistantMessage("ab", nil), &schema.Message{})
+	})
+	t.Run("agentic message", func(t *testing.T) {
+		testConcatMessageStreamErrorPolicies(t,
+			[]*schema.AgenticMessage{{Role: schema.AgenticRoleTypeAssistant}, {Role: schema.AgenticRoleTypeAssistant}},
+			[]*schema.AgenticMessage{{Role: schema.AgenticRoleTypeAssistant}, {Role: schema.AgenticRoleTypeUser}},
+			&schema.AgenticMessage{Role: schema.AgenticRoleTypeAssistant}, &schema.AgenticMessage{})
+	})
+}
+
+func testConcatMessageStreamErrorPolicies[M *schema.Message | *schema.AgenticMessage](t *testing.T, valid, invalid []M, merged, empty M) {
+	readErr := errors.New("read failed")
+	wrappedEOF := fmt.Errorf("wrapped: %w", io.EOF)
+	cases := []struct {
+		name          string
+		chunks        []M
+		terminalErr   error
+		strictReadErr error
+		prefixReadErr error
+		wantConcatErr bool
+	}{
+		{name: "success", chunks: valid, terminalErr: io.EOF},
+		{name: "empty", terminalErr: io.EOF},
+		{name: "failed before first chunk", terminalErr: readErr, strictReadErr: readErr, prefixReadErr: readErr},
+		{name: "failed after prefix", chunks: valid, terminalErr: readErr, strictReadErr: readErr, prefixReadErr: readErr},
+		{name: "concat failure", chunks: invalid, terminalErr: io.EOF, wantConcatErr: true},
+		{name: "read and concat failure", chunks: invalid, terminalErr: readErr, strictReadErr: readErr, prefixReadErr: readErr, wantConcatErr: true},
+		{name: "wrapped EOF", chunks: valid, terminalErr: wrappedEOF, strictReadErr: wrappedEOF},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			newStream := func() (*schema.StreamReader[M], *schema.StreamWriter[M]) {
+				r, w := schema.Pipe[M](len(tc.chunks) + 1)
+				t.Cleanup(w.Close)
+				for _, chunk := range tc.chunks {
+					w.Send(chunk, nil)
+				}
+				var zero M
+				w.Send(zero, tc.terminalErr)
+				return r, w
+			}
+
+			r, w := newStream()
+			msg, err := ConcatMessageStream(r)
+			switch {
+			case tc.strictReadErr != nil:
+				assert.Same(t, tc.strictReadErr, err)
+				assert.Nil(t, msg)
+			case tc.wantConcatErr:
+				require.ErrorContains(t, err, "different roles")
+				assert.Nil(t, msg)
+			default:
+				require.NoError(t, err)
+				if len(tc.chunks) == 0 {
+					assert.Equal(t, empty, msg)
+				} else {
+					assert.Equal(t, merged, msg)
+				}
+			}
+			var zero M
+			assert.True(t, w.Send(zero, nil), "standard concat must close the reader")
+
+			r, w = newStream()
+			msg, hasChunks, recvErr, concatErr := ConcatMessageStreamPrefix(r)
+			assert.Equal(t, len(tc.chunks) > 0, hasChunks)
+			if tc.prefixReadErr != nil {
+				assert.Same(t, tc.prefixReadErr, recvErr)
+			} else {
+				assert.NoError(t, recvErr)
+			}
+			if tc.wantConcatErr {
+				require.ErrorContains(t, concatErr, "different roles")
+				assert.Nil(t, msg)
+			} else {
+				require.NoError(t, concatErr)
+				if hasChunks {
+					assert.Equal(t, merged, msg)
+				} else {
+					assert.Nil(t, msg)
+				}
+			}
+			assert.True(t, w.Send(zero, nil), "prefix concat must close the reader")
+		})
+	}
+}

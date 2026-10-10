@@ -294,7 +294,7 @@ func TypedGetMessage[M MessageType](e *TypedAgentEvent[M]) (M, *TypedAgentEvent[
 		ss := msgOutput.MessageStream.Copy(2)
 		e.Output.MessageOutput.MessageStream = ss[0]
 
-		msg, err := concatMessageStream(ss[1])
+		msg, err := internalschema.ConcatMessageStream(ss[1])
 
 		return msg, e, err
 	}

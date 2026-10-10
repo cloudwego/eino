@@ -2189,7 +2189,7 @@ func (w *typedStateModelWrapper[M]) Stream(ctx context.Context, _ []M, opts ...m
 	if err != nil {
 		return nil, err
 	}
-	result, err := concatMessageStream(stream)
+	result, err := internalschema.ConcatMessageStream(stream)
 	if err != nil {
 		return nil, err
 	}

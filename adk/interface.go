@@ -20,7 +20,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/gob"
-	"errors"
 	"fmt"
 	"io"
 	"time"
@@ -106,7 +105,7 @@ type TypedMessageVariant[M MessageType] struct {
 
 func (mv *TypedMessageVariant[M]) GetMessage() (M, error) {
 	if mv.IsStreaming {
-		return concatMessageStream(mv.MessageStream)
+		return internalschema.ConcatMessageStream(mv.MessageStream)
 	}
 	return mv.Message, nil
 }
@@ -484,26 +483,3 @@ type TypedResumableAgent[M MessageType] interface {
 }
 
 type ResumableAgent = TypedResumableAgent[*schema.Message]
-
-func concatMessageStream[M MessageType](stream *schema.StreamReader[M]) (M, error) {
-	defer stream.Close()
-	chunks, recvErr := internalschema.CollectStreamPrefix(stream)
-	if recvErr != io.EOF {
-		var zero M
-		return zero, recvErr
-	}
-	return internalschema.ConcatMessages(chunks)
-}
-
-func materializeMessageStreamPrefix[M MessageType](stream *schema.StreamReader[M]) (msg M, hasChunks bool, streamErr error, err error) {
-	defer stream.Close()
-	chunks, streamErr := internalschema.CollectStreamPrefix(stream)
-	if errors.Is(streamErr, io.EOF) {
-		streamErr = nil
-	}
-	if len(chunks) == 0 {
-		return msg, false, streamErr, nil
-	}
-	msg, err = internalschema.ConcatMessages(chunks)
-	return msg, true, streamErr, err
-}
