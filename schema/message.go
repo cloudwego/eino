@@ -712,38 +712,46 @@ func formatMultiContent(multiContent []ChatMessagePart, vs map[string]any, forma
 			if mc.ImageURL == nil {
 				continue
 			}
-			url, err := formatContent(mc.ImageURL.URL, vs, formatType)
+			img := *mc.ImageURL
+			url, err := formatContent(img.URL, vs, formatType)
 			if err != nil {
 				return nil, err
 			}
-			copiedMC[i].ImageURL.URL = url
+			img.URL = url
+			copiedMC[i].ImageURL = &img
 		case ChatMessagePartTypeAudioURL:
 			if mc.AudioURL == nil {
 				continue
 			}
-			url, err := formatContent(mc.AudioURL.URL, vs, formatType)
+			aud := *mc.AudioURL
+			url, err := formatContent(aud.URL, vs, formatType)
 			if err != nil {
 				return nil, err
 			}
-			copiedMC[i].AudioURL.URL = url
+			aud.URL = url
+			copiedMC[i].AudioURL = &aud
 		case ChatMessagePartTypeVideoURL:
 			if mc.VideoURL == nil {
 				continue
 			}
-			url, err := formatContent(mc.VideoURL.URL, vs, formatType)
+			vid := *mc.VideoURL
+			url, err := formatContent(vid.URL, vs, formatType)
 			if err != nil {
 				return nil, err
 			}
-			copiedMC[i].VideoURL.URL = url
+			vid.URL = url
+			copiedMC[i].VideoURL = &vid
 		case ChatMessagePartTypeFileURL:
 			if mc.FileURL == nil {
 				continue
 			}
-			url, err := formatContent(mc.FileURL.URL, vs, formatType)
+			file := *mc.FileURL
+			url, err := formatContent(file.URL, vs, formatType)
 			if err != nil {
 				return nil, err
 			}
-			copiedMC[i].FileURL.URL = url
+			file.URL = url
+			copiedMC[i].FileURL = &file
 		}
 	}
 
@@ -766,74 +774,82 @@ func formatUserInputMultiContent(userInputMultiContent []MessageInputPart, vs ma
 			if uimc.Image == nil {
 				continue
 			}
+			img := *uimc.Image
 			if uimc.Image.URL != nil && *uimc.Image.URL != "" {
 				url, err := formatContent(*uimc.Image.URL, vs, formatType)
 				if err != nil {
 					return nil, err
 				}
-				copiedUIMC[i].Image.URL = &url
+				img.URL = &url
 			}
 			if uimc.Image.Base64Data != nil && *uimc.Image.Base64Data != "" {
 				base64data, err := formatContent(*uimc.Image.Base64Data, vs, formatType)
 				if err != nil {
 					return nil, err
 				}
-				copiedUIMC[i].Image.Base64Data = &base64data
+				img.Base64Data = &base64data
 			}
+			copiedUIMC[i].Image = &img
 		case ChatMessagePartTypeAudioURL:
 			if uimc.Audio == nil {
 				continue
 			}
+			aud := *uimc.Audio
 			if uimc.Audio.URL != nil && *uimc.Audio.URL != "" {
 				url, err := formatContent(*uimc.Audio.URL, vs, formatType)
 				if err != nil {
 					return nil, err
 				}
-				copiedUIMC[i].Audio.URL = &url
+				aud.URL = &url
 			}
 			if uimc.Audio.Base64Data != nil && *uimc.Audio.Base64Data != "" {
 				base64data, err := formatContent(*uimc.Audio.Base64Data, vs, formatType)
 				if err != nil {
 					return nil, err
 				}
-				copiedUIMC[i].Audio.Base64Data = &base64data
+				aud.Base64Data = &base64data
 			}
+			copiedUIMC[i].Audio = &aud
 		case ChatMessagePartTypeVideoURL:
 			if uimc.Video == nil {
 				continue
 			}
+			vid := *uimc.Video
 			if uimc.Video.URL != nil && *uimc.Video.URL != "" {
 				url, err := formatContent(*uimc.Video.URL, vs, formatType)
 				if err != nil {
 					return nil, err
 				}
-				copiedUIMC[i].Video.URL = &url
+				vid.URL = &url
 			}
 			if uimc.Video.Base64Data != nil && *uimc.Video.Base64Data != "" {
 				base64data, err := formatContent(*uimc.Video.Base64Data, vs, formatType)
 				if err != nil {
 					return nil, err
 				}
-				copiedUIMC[i].Video.Base64Data = &base64data
+				vid.Base64Data = &base64data
 			}
+			copiedUIMC[i].Video = &vid
 		case ChatMessagePartTypeFileURL:
 			if uimc.File == nil {
 				continue
 			}
+			file := *uimc.File
 			if uimc.File.URL != nil && *uimc.File.URL != "" {
 				url, err := formatContent(*uimc.File.URL, vs, formatType)
 				if err != nil {
 					return nil, err
 				}
-				copiedUIMC[i].File.URL = &url
+				file.URL = &url
 			}
 			if uimc.File.Base64Data != nil && *uimc.File.Base64Data != "" {
 				base64data, err := formatContent(*uimc.File.Base64Data, vs, formatType)
 				if err != nil {
 					return nil, err
 				}
-				copiedUIMC[i].File.Base64Data = &base64data
+				file.Base64Data = &base64data
 			}
+			copiedUIMC[i].File = &file
 		}
 	}
 

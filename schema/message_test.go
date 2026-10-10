@@ -1368,6 +1368,102 @@ func TestFormatUserInputMultiContent(t *testing.T) {
 	})
 }
 
+func TestFormatDoesNotMutateTemplateMediaParts(t *testing.T) {
+	makeStrPtr := func(s string) *string { return &s }
+
+	t.Run("MultiContent", func(t *testing.T) {
+		msg := &Message{
+			Role:    User,
+			Content: "hello {name}",
+			MultiContent: []ChatMessagePart{
+				{Type: ChatMessagePartTypeImageURL, ImageURL: &ChatMessageImageURL{URL: "http://img/{name}.png", Detail: ImageURLDetailHigh}},
+				{Type: ChatMessagePartTypeAudioURL, AudioURL: &ChatMessageAudioURL{URL: "http://audio/{name}.wav"}},
+				{Type: ChatMessagePartTypeVideoURL, VideoURL: &ChatMessageVideoURL{URL: "http://video/{name}.mp4"}},
+				{Type: ChatMessagePartTypeFileURL, FileURL: &ChatMessageFileURL{URL: "http://file/{name}.txt"}},
+			},
+		}
+
+		out, err := msg.Format(context.Background(), map[string]any{"name": "eino"}, FString)
+		assert.NoError(t, err)
+		if assert.Len(t, out, 1) {
+			assert.Equal(t, "http://img/eino.png", out[0].MultiContent[0].ImageURL.URL)
+			assert.Equal(t, "http://audio/eino.wav", out[0].MultiContent[1].AudioURL.URL)
+			assert.Equal(t, "http://video/eino.mp4", out[0].MultiContent[2].VideoURL.URL)
+			assert.Equal(t, "http://file/eino.txt", out[0].MultiContent[3].FileURL.URL)
+
+			assert.Equal(t, "http://img/{name}.png", msg.MultiContent[0].ImageURL.URL)
+			assert.Equal(t, "http://audio/{name}.wav", msg.MultiContent[1].AudioURL.URL)
+			assert.Equal(t, "http://video/{name}.mp4", msg.MultiContent[2].VideoURL.URL)
+			assert.Equal(t, "http://file/{name}.txt", msg.MultiContent[3].FileURL.URL)
+
+			assert.Equal(t, ImageURLDetailHigh, out[0].MultiContent[0].ImageURL.Detail)
+			assert.NotSame(t, msg.MultiContent[0].ImageURL, out[0].MultiContent[0].ImageURL)
+			assert.NotSame(t, msg.MultiContent[1].AudioURL, out[0].MultiContent[1].AudioURL)
+			assert.NotSame(t, msg.MultiContent[2].VideoURL, out[0].MultiContent[2].VideoURL)
+			assert.NotSame(t, msg.MultiContent[3].FileURL, out[0].MultiContent[3].FileURL)
+		}
+	})
+
+	t.Run("UserInputMultiContent", func(t *testing.T) {
+		msg := &Message{
+			Role:    User,
+			Content: "hello {name}",
+			UserInputMultiContent: []MessageInputPart{
+				{Type: ChatMessagePartTypeImageURL, Image: &MessageInputImage{MessagePartCommon: MessagePartCommon{URL: makeStrPtr("http://img/{name}.png"), Base64Data: makeStrPtr("{b64}")}}},
+				{Type: ChatMessagePartTypeAudioURL, Audio: &MessageInputAudio{MessagePartCommon: MessagePartCommon{URL: makeStrPtr("http://audio/{name}.wav")}}},
+				{Type: ChatMessagePartTypeVideoURL, Video: &MessageInputVideo{MessagePartCommon: MessagePartCommon{URL: makeStrPtr("http://video/{name}.mp4")}}},
+				{Type: ChatMessagePartTypeFileURL, File: &MessageInputFile{MessagePartCommon: MessagePartCommon{URL: makeStrPtr("http://file/{name}.txt")}, Name: "{name}.txt"}},
+			},
+		}
+
+		out, err := msg.Format(context.Background(), map[string]any{"name": "eino", "b64": "YmFzZTY0"}, FString)
+		assert.NoError(t, err)
+		if assert.Len(t, out, 1) {
+			assert.Equal(t, "http://img/eino.png", *out[0].UserInputMultiContent[0].Image.URL)
+			assert.Equal(t, "YmFzZTY0", *out[0].UserInputMultiContent[0].Image.Base64Data)
+			assert.Equal(t, "http://audio/eino.wav", *out[0].UserInputMultiContent[1].Audio.URL)
+			assert.Equal(t, "http://video/eino.mp4", *out[0].UserInputMultiContent[2].Video.URL)
+			assert.Equal(t, "http://file/eino.txt", *out[0].UserInputMultiContent[3].File.URL)
+
+			assert.Equal(t, "http://img/{name}.png", *msg.UserInputMultiContent[0].Image.URL)
+			assert.Equal(t, "{b64}", *msg.UserInputMultiContent[0].Image.Base64Data)
+			assert.Equal(t, "http://audio/{name}.wav", *msg.UserInputMultiContent[1].Audio.URL)
+			assert.Equal(t, "http://video/{name}.mp4", *msg.UserInputMultiContent[2].Video.URL)
+			assert.Equal(t, "http://file/{name}.txt", *msg.UserInputMultiContent[3].File.URL)
+
+			assert.NotSame(t, msg.UserInputMultiContent[0].Image, out[0].UserInputMultiContent[0].Image)
+			assert.NotSame(t, msg.UserInputMultiContent[1].Audio, out[0].UserInputMultiContent[1].Audio)
+			assert.NotSame(t, msg.UserInputMultiContent[2].Video, out[0].UserInputMultiContent[2].Video)
+			assert.NotSame(t, msg.UserInputMultiContent[3].File, out[0].UserInputMultiContent[3].File)
+		}
+	})
+
+	t.Run("concurrent Format on the same template", func(t *testing.T) {
+		msg := &Message{
+			Role: User,
+			UserInputMultiContent: []MessageInputPart{
+				{Type: ChatMessagePartTypeImageURL, Image: &MessageInputImage{MessagePartCommon: MessagePartCommon{URL: makeStrPtr("http://img/{name}.png")}}},
+			},
+		}
+
+		var wg sync.WaitGroup
+		for i := 0; i < 8; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				out, err := msg.Format(context.Background(), map[string]any{"name": "eino"}, FString)
+				assert.NoError(t, err)
+				if assert.Len(t, out, 1) {
+					assert.Equal(t, "http://img/eino.png", *out[0].UserInputMultiContent[0].Image.URL)
+				}
+			}()
+		}
+		wg.Wait()
+
+		assert.Equal(t, "http://img/{name}.png", *msg.UserInputMultiContent[0].Image.URL)
+	})
+}
+
 func TestConcatToolResults(t *testing.T) {
 	t.Run("empty_chunks", func(t *testing.T) {
 		result, err := ConcatToolResults([]*ToolResult{})
