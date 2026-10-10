@@ -184,7 +184,9 @@ type Serializer interface {
 // Custom JSON payloads are handled by their JSON methods and require both
 // json.Marshaler and json.Unmarshaler, implemented by T or *T. Non-null values
 // and payloads whose type implements only one interface return an error.
-// The custom methods own the entire payload, including nested interface fields.
+// The custom methods own the entire non-null payload, including nested interface fields.
+// JSON null retains the existing nil/zero-value handling and does not invoke
+// custom UnmarshalJSON methods.
 //
 // Note: All custom types stored in interface{} fields must be registered using
 // schema.RegisterName[T]() or schema.Register[T]() for proper deserialization.
