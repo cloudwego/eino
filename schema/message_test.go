@@ -1438,6 +1438,39 @@ func TestFormatDoesNotMutateTemplateMediaParts(t *testing.T) {
 		}
 	})
 
+	t.Run("rendering the same template twice", func(t *testing.T) {
+		msg := &Message{
+			Role: User,
+			MultiContent: []ChatMessagePart{
+				{Type: ChatMessagePartTypeImageURL, ImageURL: &ChatMessageImageURL{URL: "http://img/{id}.png"}},
+			},
+			UserInputMultiContent: []MessageInputPart{
+				{Type: ChatMessagePartTypeImageURL, Image: &MessageInputImage{MessagePartCommon: MessagePartCommon{URL: makeStrPtr("http://img/{id}.png")}}},
+			},
+		}
+
+		first, err := msg.Format(context.Background(), map[string]any{"id": "1"}, FString)
+		assert.NoError(t, err)
+		if assert.Len(t, first, 1) {
+			assert.Equal(t, "http://img/1.png", first[0].MultiContent[0].ImageURL.URL)
+			assert.Equal(t, "http://img/1.png", *first[0].UserInputMultiContent[0].Image.URL)
+		}
+
+		second, err := msg.Format(context.Background(), map[string]any{"id": "2"}, FString)
+		assert.NoError(t, err)
+		if assert.Len(t, second, 1) {
+			assert.Equal(t, "http://img/2.png", second[0].MultiContent[0].ImageURL.URL)
+			assert.Equal(t, "http://img/2.png", *second[0].UserInputMultiContent[0].Image.URL)
+		}
+
+		if assert.Len(t, first, 1) {
+			assert.Equal(t, "http://img/1.png", first[0].MultiContent[0].ImageURL.URL)
+			assert.Equal(t, "http://img/1.png", *first[0].UserInputMultiContent[0].Image.URL)
+		}
+		assert.Equal(t, "http://img/{id}.png", msg.MultiContent[0].ImageURL.URL)
+		assert.Equal(t, "http://img/{id}.png", *msg.UserInputMultiContent[0].Image.URL)
+	})
+
 	t.Run("concurrent Format on the same template", func(t *testing.T) {
 		msg := &Message{
 			Role: User,
