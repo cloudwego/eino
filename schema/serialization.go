@@ -31,6 +31,7 @@ func init() {
 	RegisterName[[]*AgenticMessage]("_eino_agentic_message_slice")
 	RegisterName[*ToolInfo]("_eino_tool_info")
 	RegisterName[[]*ToolInfo]("_eino_tool_info_slice")
+	serialization.RegisterJSONCodec[ToolInfo](marshalToolInfoForPersistence, unmarshalToolInfoForPersistence)
 	RegisterName[Document]("_eino_document")
 	RegisterName[RoleType]("_eino_role_type")
 	RegisterName[ToolCall]("_eino_tool_call")
@@ -162,15 +163,24 @@ type Serializer interface {
 // HumanReadableSerializer produces clean JSON that:
 //   - Uses standard JSON field names from struct tags
 //   - Omits empty fields when `omitempty` is specified
-//   - Only adds "$type" annotations for custom registered types stored in interface{} fields
+//   - Adds "$type" annotations at the root and in interface fields when needed to preserve Go types
 //   - Produces significantly smaller output for most use cases
 //
 // Example usage:
 //
-//	graph, err := compose.NewGraph[Input, Output](
+//	graph := compose.NewGraph[Input, Output]()
+//	compiled, err := graph.Compile(ctx,
 //	    compose.WithCheckPointStore(store),
 //	    compose.WithSerializer(&schema.HumanReadableSerializer{}),
 //	)
+//
+// "$type" is reserved for type metadata at the root and in interface fields.
+// Ordinary structs keep their fields alongside "$type"; "value" remains a
+// business field. Scalars and collections use a "value" envelope. Structs with
+// a business "$type" field, and custom JSON objects with only a "value" field,
+// are wrapped separately.
+// Concrete fields and envelope payloads are decoded without treating their
+// business keys as metadata.
 //
 // Note: All custom types stored in interface{} fields must be registered using
 // schema.RegisterName[T]() or schema.Register[T]() for proper deserialization.

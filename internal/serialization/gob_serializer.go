@@ -26,6 +26,9 @@ import (
 type GobSerializer struct{}
 
 func (g *GobSerializer) Marshal(v any) ([]byte, error) {
+	if rv := reflect.ValueOf(v); rv.Kind() == reflect.Ptr && rv.IsNil() {
+		return nil, fmt.Errorf("gob marshal error: cannot encode a nil pointer")
+	}
 	var buf bytes.Buffer
 	enc := gob.NewEncoder(&buf)
 	if err := enc.Encode(v); err != nil {

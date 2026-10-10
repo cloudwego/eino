@@ -26,6 +26,8 @@ import (
 
 	"github.com/eino-contrib/jsonschema"
 	orderedmap "github.com/wk8/go-ordered-map/v2"
+
+	"github.com/cloudwego/eino/internal/serialization"
 )
 
 // DataType is the type of the parameter.
@@ -160,7 +162,7 @@ type toolInfoForGob struct {
 	JSONSchema     *string
 }
 
-func (t *ToolInfo) MarshalJSON() ([]byte, error) {
+func (t *ToolInfo) jsonValue() *toolInfoForJSON {
 	tmp := &toolInfoForJSON{
 		Name:  t.Name,
 		Desc:  t.Desc,
@@ -171,7 +173,24 @@ func (t *ToolInfo) MarshalJSON() ([]byte, error) {
 		tmp.Params = t.ParamsOneOf.params
 		tmp.JSONSchema = t.ParamsOneOf.jsonschema
 	}
-	return json.Marshal(tmp)
+	return tmp
+}
+
+func (t *ToolInfo) MarshalJSON() ([]byte, error) {
+	return json.Marshal(t.jsonValue())
+}
+
+func marshalToolInfoForPersistence(t *ToolInfo) ([]byte, error) {
+	return serialization.MarshalJSONValue(t.jsonValue())
+}
+
+func unmarshalToolInfoForPersistence(data []byte, t *ToolInfo) error {
+	tmp := &toolInfoForJSON{}
+	if err := (&serialization.HumanReadableSerializer{}).Unmarshal(data, tmp); err != nil {
+		return err
+	}
+	t.setJSONValue(tmp)
+	return nil
 }
 
 func (t *ToolInfo) UnmarshalJSON(data []byte) error {
@@ -179,6 +198,11 @@ func (t *ToolInfo) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, tmp); err != nil {
 		return err
 	}
+	t.setJSONValue(tmp)
+	return nil
+}
+
+func (t *ToolInfo) setJSONValue(tmp *toolInfoForJSON) {
 	t.Name = tmp.Name
 	t.Desc = tmp.Desc
 	t.Extra = tmp.Extra
@@ -195,7 +219,6 @@ func (t *ToolInfo) UnmarshalJSON(data []byte) error {
 			t.ParamsOneOf.params = map[string]*ParameterInfo{}
 		}
 	}
-	return nil
 }
 
 func (t *ToolInfo) GobEncode() ([]byte, error) {
