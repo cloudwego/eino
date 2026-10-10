@@ -26,15 +26,21 @@ import (
 )
 
 // InMemoryStoreConfig configures InMemoryStore.
+//
+// Experimental: intended for local experiments and testing only.
+// Do not use InMemoryStore in online or production environments.
 type InMemoryStoreConfig struct {
 	// EventSerializer encodes typed session events before storage. Defaults to
 	// schema.HumanReadableSerializer.
+	// The default serializer is experimental and intended for debugging/testing.
 	EventSerializer schema.Serializer
 }
 
 // InMemoryStore is a thread-safe, in-memory implementation of adk.SessionEventStore
-// and CheckPointStore (with Delete support). Suitable for testing and
-// single-process deployments where durability is not required.
+// and CheckPointStore (with Delete support).
+//
+// Experimental: intended for local experiments and testing only.
+// Do not use InMemoryStore in online or production environments.
 type InMemoryStore[M adk.MessageType] struct {
 	mu          sync.Mutex
 	events      map[string][][]byte
@@ -51,7 +57,8 @@ type pendingEvent struct {
 	data    []byte
 }
 
-// NewInMemoryStore creates a new InMemoryStore.
+// NewInMemoryStore creates an experimental InMemoryStore for local testing.
+// Do not use the returned store in online or production environments.
 func NewInMemoryStore[M adk.MessageType](cfg *InMemoryStoreConfig) *InMemoryStore[M] {
 	return &InMemoryStore[M]{
 		events:      make(map[string][][]byte),

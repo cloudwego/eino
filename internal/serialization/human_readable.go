@@ -17,9 +17,9 @@
 package serialization
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
+	"math"
 	"reflect"
 	"strconv"
 	"strings"
@@ -29,6 +29,17 @@ import (
 
 const typeFieldName = "$type"
 
+var humanReadableJSON = sonic.Config{
+	UseNumber:      true, // Preserve numeric tokens in the intermediate JSON tree.
+	CopyString:     true, // Avoid retaining the whole JSON buffer through decoded strings.
+	ValidateString: true,
+}.Froze()
+
+// HumanReadableSerializer produces human-readable JSON for debugging and testing.
+//
+// Experimental: this serializer is not recommended for production persistence.
+// Its encoded format and round-trip behavior are not guaranteed to remain
+// compatible across versions.
 type HumanReadableSerializer struct{}
 
 func (h *HumanReadableSerializer) Marshal(v any) ([]byte, error) {
@@ -36,7 +47,7 @@ func (h *HumanReadableSerializer) Marshal(v any) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return sonic.Marshal(result)
+	return humanReadableJSON.Marshal(result)
 }
 
 func (h *HumanReadableSerializer) Unmarshal(data []byte, v any) error {
@@ -50,7 +61,7 @@ func (h *HumanReadableSerializer) Unmarshal(data []byte, v any) error {
 		return fmt.Errorf("failed to unmarshal JSON: %w", err)
 	}
 
-	result, err := hrUnmarshal(raw, rv.Elem().Type())
+	result, err := hrUnmarshalValue(raw, rv.Elem().Type(), true)
 	if err != nil {
 		return fmt.Errorf("failed to unmarshal: %w", err)
 	}
@@ -100,6 +111,14 @@ func hrMarshal(v any, fieldType reflect.Type) (any, error) {
 		rt = rt.Elem()
 	}
 
+	hasJSONMethods, err := checkJSONMethodPair(rt)
+	if err != nil {
+		return nil, err
+	}
+	if hasJSONMethods {
+		return hrMarshalCustomJSON(rv, rt, typeUnspecific, pointerNum)
+	}
+
 	switch rt.Kind() {
 	case reflect.Struct:
 		return hrMarshalStruct(rv, rt, typeUnspecific, pointerNum)
@@ -112,37 +131,38 @@ func hrMarshal(v any, fieldType reflect.Type) (any, error) {
 	}
 }
 
-func hrMarshalStruct(rv reflect.Value, rt reflect.Type, typeUnspecific bool, pointerNum uint32) (any, error) {
-	if checkMarshaler(rt) {
-		// Use the addressable form when possible so pointer-receiver MarshalJSON
-		// methods are invoked. Without this, custom marshalers defined on *T are
-		// silently bypassed because rv.Interface() returns a non-addressable copy
-		// and the standard json package only checks Marshaler on the value type.
-		// Symptom: types like ToolInfo that store data behind unexported fields
-		// (ParamsOneOf.params / .jsonschema) round-trip with those fields lost.
-		var marshalTarget any
-		if rv.CanAddr() {
-			marshalTarget = rv.Addr().Interface()
-		} else {
-			tmp := reflect.New(rt)
-			tmp.Elem().Set(rv)
-			marshalTarget = tmp.Interface()
-		}
-		jsonBytes, err := json.Marshal(marshalTarget)
-		if err != nil {
-			return nil, err
-		}
-		result, err := decodeJSONAny(jsonBytes)
-		if err != nil {
-			return nil, err
-		}
-		if typeUnspecific {
-			_, isMap := result.(map[string]any)
-			return wrapWithType(result, rt, pointerNum, !isMap)
-		}
-		return result, nil
+func hrMarshalCustomJSON(rv reflect.Value, rt reflect.Type, typeUnspecific bool, pointerNum uint32) (any, error) {
+	// Use the addressable form when possible so pointer-receiver MarshalJSON
+	// methods are invoked. Without this, custom marshalers defined on *T are
+	// silently bypassed when rv.Interface() returns a non-addressable copy of T.
+	// Symptom: types like ToolInfo that store data behind unexported fields
+	// (ParamsOneOf.params / .jsonschema) round-trip with those fields lost.
+	var marshalTarget any
+	if rv.CanAddr() {
+		marshalTarget = rv.Addr().Interface()
+	} else {
+		tmp := reflect.New(rt)
+		tmp.Elem().Set(rv)
+		marshalTarget = tmp.Interface()
 	}
+	jsonBytes, err := humanReadableJSON.Marshal(marshalTarget)
+	if err != nil {
+		return nil, err
+	}
+	result, err := decodeJSONAny(jsonBytes)
+	if err != nil {
+		return nil, err
+	}
+	if typeUnspecific {
+		object, isMap := result.(map[string]any)
+		_, hasValue := object["value"]
+		// A one-field custom object must not look like a scalar envelope.
+		return wrapWithType(result, rt, pointerNum, !isMap || (hasValue && len(object) == 1))
+	}
+	return result, nil
+}
 
+func hrMarshalStruct(rv reflect.Value, rt reflect.Type, typeUnspecific bool, pointerNum uint32) (any, error) {
 	result := make(map[string]any)
 
 	for i := 0; i < rt.NumField(); i++ {
@@ -174,7 +194,7 @@ func hrMarshalStruct(rv reflect.Value, rt reflect.Type, typeUnspecific bool, poi
 	}
 
 	if typeUnspecific {
-		return wrapWithType(result, rt, pointerNum, false)
+		return wrapWithType(result, rt, pointerNum, hasTypeField(rt))
 	}
 
 	return result, nil
@@ -212,7 +232,7 @@ func hrMarshalMap(rv reflect.Value, rt reflect.Type, typeUnspecific bool, pointe
 	}
 
 	if typeUnspecific {
-		return wrapMapWithType(result, rt, pointerNum)
+		return wrapWithType(result, rt, pointerNum, true)
 	}
 
 	return result, nil
@@ -236,28 +256,33 @@ func hrMarshalSlice(rv reflect.Value, rt reflect.Type, typeUnspecific bool, poin
 	}
 
 	if typeUnspecific {
-		return wrapSliceWithType(result, rt, pointerNum)
+		return wrapWithType(result, rt, pointerNum, true)
 	}
 
 	return result, nil
 }
 
 func hrMarshalPrimitive(rv reflect.Value, rt reflect.Type, typeUnspecific bool, pointerNum uint32) (any, error) {
+	value := rv.Interface()
+	// Sonic encodes floating-point -0 as 0; json.Number preserves its sign.
+	if (rt.Kind() == reflect.Float32 || rt.Kind() == reflect.Float64) && rv.Float() == 0 && math.Signbit(rv.Float()) {
+		value = json.Number("-0")
+	}
 	if !typeUnspecific {
-		return rv.Interface(), nil
+		return value, nil
 	}
 
 	if isPrimitiveJSONType(rt) && pointerNum == 0 {
 		return rv.Interface(), nil
 	}
 
-	return wrapWithType(rv.Interface(), rt, pointerNum, true)
+	return wrapWithType(value, rt, pointerNum, true)
 }
 
 func wrapWithType(value any, rt reflect.Type, pointerNum uint32, isSimple bool) (any, error) {
-	key, ok := rm[rt]
-	if !ok {
-		return nil, fmt.Errorf("unknown type: %v (not registered)", rt)
+	key, err := getTypeName(rt)
+	if err != nil {
+		return nil, err
 	}
 
 	typeName := key
@@ -285,61 +310,20 @@ func wrapWithType(value any, rt reflect.Type, pointerNum uint32, isSimple bool) 
 	}, nil
 }
 
-func wrapMapWithType(value map[string]any, rt reflect.Type, pointerNum uint32) (any, error) {
-	keyType := rt.Key()
-	elemType := rt.Elem()
-
-	keyTypeName, err := getTypeName(keyType)
-	if err != nil {
-		return nil, err
-	}
-	elemTypeName, err := getTypeName(elemType)
-	if err != nil {
-		return nil, err
-	}
-
-	typeName := fmt.Sprintf("map[%s]%s", keyTypeName, elemTypeName)
-	if pointerNum > 0 {
-		typeName = strings.Repeat("*", int(pointerNum)) + typeName
-	}
-
-	return map[string]any{
-		typeFieldName: typeName,
-		"value":       value,
-	}, nil
-}
-
-func wrapSliceWithType(value []any, rt reflect.Type, pointerNum uint32) (any, error) {
-	elemType := rt.Elem()
-	elemTypeName, err := getTypeName(elemType)
-	if err != nil {
-		return nil, err
-	}
-
-	// Preserve array vs slice distinction on the wire so the type round-trips
-	// exactly. Without this branch, a [N]T value placed in an interface field
-	// would silently come back as []T.
-	var typeName string
-	if rt.Kind() == reflect.Array {
-		typeName = fmt.Sprintf("[%d]%s", rt.Len(), elemTypeName)
-	} else {
-		typeName = fmt.Sprintf("[]%s", elemTypeName)
-	}
-	if pointerNum > 0 {
-		typeName = strings.Repeat("*", int(pointerNum)) + typeName
-	}
-
-	return map[string]any{
-		typeFieldName: typeName,
-		"value":       value,
-	}, nil
-}
-
 func getTypeName(t reflect.Type) (string, error) {
 	var pointerPrefix string
 	for t.Kind() == reflect.Ptr {
 		pointerPrefix += "*"
 		t = t.Elem()
+	}
+
+	// Named collections need their registered identity, not just their shape.
+	if t.Name() != "" {
+		key, ok := rm[t]
+		if !ok {
+			return "", fmt.Errorf("unknown type: %v", t)
+		}
+		return pointerPrefix + key, nil
 	}
 
 	if t.Kind() == reflect.Map {
@@ -378,12 +362,41 @@ func getTypeName(t reflect.Type) (string, error) {
 }
 
 func hrUnmarshal(data any, targetType reflect.Type) (any, error) {
+	_, baseType := derefPointerNum(targetType)
+	return hrUnmarshalValue(data, targetType, baseType.Kind() == reflect.Interface)
+}
+
+// Only roots and interface values carry metadata. Concrete fields and envelope
+// payloads can contain arbitrary business keys, including "$type" and "value".
+func hrUnmarshalValue(data any, targetType reflect.Type, interpretTypeMetadata bool) (any, error) {
 	if data == nil {
 		return nil, nil
 	}
-
 	ptrNum, baseType := derefPointerNum(targetType)
-
+	if object, ok := data.(map[string]any); ok && interpretTypeMetadata {
+		if typeStr, hasType := object[typeFieldName].(string); hasType {
+			if isRegisteredTypeName(typeStr) {
+				return hrUnmarshalTyped(object, typeStr)
+			}
+		}
+	}
+	hasJSONMethods, err := checkJSONMethodPair(baseType)
+	if err != nil {
+		return nil, err
+	}
+	if hasJSONMethods {
+		jsonBytes, err := humanReadableJSON.Marshal(data)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal data for custom unmarshaler: %w", err)
+		}
+		result := reflect.New(baseType)
+		// Sonic can reject a numeric payload outside float64's range before
+		// invoking UnmarshalJSON. Let the custom method own its numeric range.
+		if err := json.Unmarshal(jsonBytes, result.Interface()); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal with custom unmarshaler: %w", err)
+		}
+		return wrapPointers(result.Elem().Interface(), ptrNum), nil
+	}
 	switch v := data.(type) {
 	case map[string]any:
 		return hrUnmarshalMap(v, targetType, baseType, ptrNum)
@@ -394,15 +407,25 @@ func hrUnmarshal(data any, targetType reflect.Type) (any, error) {
 	}
 }
 
-func hrUnmarshalMap(data map[string]any, targetType, baseType reflect.Type, ptrNum uint32) (any, error) {
-	if typeStr, hasType := data[typeFieldName].(string); hasType {
-		if shouldTreatAsTypeEnvelope(data, baseType, typeStr) {
-			return hrUnmarshalTyped(data, typeStr)
-		}
+// Custom JSON handling owns the entire payload, so both directions are required.
+// t is the non-pointer type; methods on either T or *T satisfy the contract.
+func checkJSONMethodPair(t reflect.Type) (bool, error) {
+	pt := reflect.PointerTo(t)
+	hasMarshal := t.Implements(marshalerType) || pt.Implements(marshalerType)
+	hasUnmarshal := t.Implements(unmarshalerType) || pt.Implements(unmarshalerType)
+	if hasMarshal == hasUnmarshal {
+		return hasMarshal, nil
 	}
+	missing := "json.Marshaler"
+	if hasMarshal {
+		missing = "json.Unmarshaler"
+	}
+	return false, fmt.Errorf("custom JSON type %v must implement both json.Marshaler and json.Unmarshaler: missing %s", t, missing)
+}
 
+func hrUnmarshalMap(data map[string]any, targetType, baseType reflect.Type, ptrNum uint32) (any, error) {
 	if baseType.Kind() == reflect.Struct {
-		return hrUnmarshalStruct(data, targetType, baseType, ptrNum)
+		return hrUnmarshalStruct(data, targetType, baseType)
 	}
 
 	if baseType.Kind() == reflect.Map {
@@ -424,15 +447,9 @@ func hrUnmarshalMap(data map[string]any, targetType, baseType reflect.Type, ptrN
 	return nil, fmt.Errorf("cannot unmarshal map to %v", targetType)
 }
 
-func shouldTreatAsTypeEnvelope(data map[string]any, baseType reflect.Type, typeStr string) bool {
-	if _, _, err := parseTypeName(typeStr); err != nil {
-		return false
-	}
-	if baseType.Kind() == reflect.Interface {
-		return true
-	}
-	_, hasValue := data["value"]
-	return hasValue && len(data) == 2
+func isRegisteredTypeName(typeStr string) bool {
+	_, _, err := parseTypeName(typeStr)
+	return err == nil
 }
 
 func hrUnmarshalTyped(data map[string]any, typeStr string) (any, error) {
@@ -441,9 +458,16 @@ func hrUnmarshalTyped(data map[string]any, typeStr string) (any, error) {
 		return nil, err
 	}
 
+	hasJSONMethods, err := checkJSONMethodPair(actualType)
+	if err != nil {
+		return nil, err
+	}
 	value, hasValue := data["value"]
-	if hasValue && len(data) == 2 {
-		result, unmarshalErr := hrUnmarshal(value, actualType)
+	// Ordinary structs store business fields inline. Other values, and structs
+	// that reserve "$type" for business data, carry a separate payload.
+	wrapped := actualType.Kind() != reflect.Struct || hasJSONMethods || hasTypeField(actualType)
+	if hasValue && len(data) == 2 && wrapped {
+		result, unmarshalErr := hrUnmarshalValue(value, actualType, false)
 		if unmarshalErr != nil {
 			return nil, unmarshalErr
 		}
@@ -457,26 +481,14 @@ func hrUnmarshalTyped(data map[string]any, typeStr string) (any, error) {
 		}
 	}
 
-	result, err := hrUnmarshal(dataCopy, actualType)
+	result, err := hrUnmarshalValue(dataCopy, actualType, false)
 	if err != nil {
 		return nil, err
 	}
 	return wrapPointers(result, ptrNum), nil
 }
 
-func hrUnmarshalStruct(data map[string]any, targetType, baseType reflect.Type, ptrNum uint32) (any, error) {
-	if checkMarshaler(baseType) {
-		jsonBytes, err := sonic.Marshal(data)
-		if err != nil {
-			return nil, fmt.Errorf("failed to marshal data for custom unmarshaler: %w", err)
-		}
-		result := reflect.New(baseType)
-		if err := json.Unmarshal(jsonBytes, result.Interface()); err != nil {
-			return nil, fmt.Errorf("failed to unmarshal with custom unmarshaler: %w", err)
-		}
-		return wrapPointers(result.Elem().Interface(), ptrNum), nil
-	}
-
+func hrUnmarshalStruct(data map[string]any, targetType, baseType reflect.Type) (any, error) {
 	result, dResult := createValueFromType(targetType)
 
 	for i := 0; i < baseType.NumField(); i++ {
@@ -526,7 +538,7 @@ func hrUnmarshalMapValue(data map[string]any, targetType, baseType reflect.Type,
 	for k, v := range data {
 		var keyValue reflect.Value
 		if keyType.Kind() == reflect.String {
-			keyValue = reflect.ValueOf(k)
+			keyValue = reflect.ValueOf(k).Convert(keyType)
 		} else {
 			keyPtr := reflect.New(keyType)
 			if err := sonic.UnmarshalString(k, keyPtr.Interface()); err != nil {
@@ -687,7 +699,15 @@ func hrUnmarshalPrimitive(data any, targetType, baseType reflect.Type, ptrNum ui
 
 func parseTypeName(typeStr string) (reflect.Type, uint32, error) {
 	var ptrNum uint32
-	for strings.HasPrefix(typeStr, "*") {
+	for {
+		// Register[*T] uses a wire name that itself starts with "*". Resolve
+		// registered names before consuming additional pointer prefixes.
+		if rt, ok := m[typeStr]; ok {
+			return rt, ptrNum, nil
+		}
+		if !strings.HasPrefix(typeStr, "*") {
+			break
+		}
 		ptrNum++
 		typeStr = typeStr[1:]
 	}
@@ -904,10 +924,8 @@ func setValueWithConversion(target, source reflect.Value) bool {
 }
 
 func decodeJSONAny(data []byte) (any, error) {
-	dec := json.NewDecoder(bytes.NewReader(data))
-	dec.UseNumber()
 	var raw any
-	if err := dec.Decode(&raw); err != nil {
+	if err := humanReadableJSON.Unmarshal(data, &raw); err != nil {
 		return nil, err
 	}
 	return raw, nil
@@ -946,12 +964,21 @@ func isEmptyValue(v reflect.Value) bool {
 	return false
 }
 
+// Only these exact types round-trip through unannotated JSON without losing
+// their Go identity. Even an integral float64 would otherwise become an int.
 func isPrimitiveJSONType(t reflect.Type) bool {
-	switch t.Kind() {
-	case reflect.Bool, reflect.String,
-		reflect.Float32, reflect.Float64:
-		return true
-	default:
+	return t == reflect.TypeOf(false) || t == reflect.TypeOf("")
+}
+
+func hasTypeField(t reflect.Type) bool {
+	if t.Kind() != reflect.Struct {
 		return false
 	}
+	for i := 0; i < t.NumField(); i++ {
+		field := t.Field(i)
+		if field.PkgPath == "" && getJSONFieldName(field.Name, field.Tag.Get("json")) == typeFieldName {
+			return true
+		}
+	}
+	return false
 }

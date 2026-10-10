@@ -155,22 +155,43 @@ type Serializer interface {
 	Unmarshal(data []byte, v any) error
 }
 
-// HumanReadableSerializer produces clean, human-readable JSON output for serialization.
-// It can be used with compose.WithSerializer() to store checkpoints in a human-readable format.
+// HumanReadableSerializer produces human-readable JSON for debugging and testing.
+//
+// Experimental: this serializer is intended for development and debugging.
+// It is not recommended for production persistence, including checkpoints and
+// session events. Its encoded format and round-trip behavior are not guaranteed
+// to remain compatible across versions.
+// For production graph checkpoints, use compose's default serializer.
 //
 // Unlike the default InternalSerializer which uses verbose wrapper structures for type preservation,
 // HumanReadableSerializer produces clean JSON that:
 //   - Uses standard JSON field names from struct tags
 //   - Omits empty fields when `omitempty` is specified
-//   - Only adds "$type" annotations for custom registered types stored in interface{} fields
+//   - Adds "$type" annotations at the root and in interface fields when needed to preserve Go types
 //   - Produces significantly smaller output for most use cases
 //
-// Example usage:
+// Example usage for debugging only:
 //
-//	graph, err := compose.NewGraph[Input, Output](
+//	graph := compose.NewGraph[Input, Output]()
+//	compiled, err := graph.Compile(ctx,
 //	    compose.WithCheckPointStore(store),
 //	    compose.WithSerializer(&schema.HumanReadableSerializer{}),
 //	)
+//
+// "$type" is reserved for type metadata at the root and in interface fields.
+// Ordinary structs keep their fields alongside "$type"; "value" remains a
+// business field. Scalars and collections use a "value" envelope. Structs with
+// a business "$type" field, and custom JSON objects with only a "value" field,
+// are wrapped separately.
+// Concrete fields and envelope payloads are decoded without treating their
+// business keys as metadata.
+//
+// Custom JSON payloads are handled by their JSON methods and require both
+// json.Marshaler and json.Unmarshaler, implemented by T or *T. Non-null values
+// and payloads whose type implements only one interface return an error.
+// The custom methods own the entire non-null payload, including nested interface fields.
+// JSON null retains the existing nil/zero-value handling and does not invoke
+// custom UnmarshalJSON methods.
 //
 // Note: All custom types stored in interface{} fields must be registered using
 // schema.RegisterName[T]() or schema.Register[T]() for proper deserialization.
