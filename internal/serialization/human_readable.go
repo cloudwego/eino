@@ -131,7 +131,7 @@ func hrMarshalJSON(rv reflect.Value, rt reflect.Type, typeUnspecific bool, point
 		tmp.Elem().Set(rv)
 		marshalTarget = tmp.Interface()
 	}
-	jsonBytes, err := marshalJSON(marshalTarget)
+	jsonBytes, err := json.Marshal(marshalTarget)
 	if err != nil {
 		return nil, err
 	}
@@ -367,7 +367,7 @@ func hrUnmarshalValue(data any, targetType reflect.Type, readType bool) (any, er
 			return nil, fmt.Errorf("failed to marshal data for custom unmarshaler: %w", err)
 		}
 		result := reflect.New(baseType)
-		if err := unmarshalJSON(jsonBytes, result.Interface()); err != nil {
+		if err := json.Unmarshal(jsonBytes, result.Interface()); err != nil {
 			return nil, fmt.Errorf("failed to unmarshal with custom unmarshaler: %w", err)
 		}
 		return wrapPointers(result.Elem().Interface(), ptrNum), nil

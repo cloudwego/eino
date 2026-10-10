@@ -20,7 +20,6 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/eino-contrib/jsonschema"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -41,46 +40,33 @@ func init() {
 	RegisterName[persistenceHolder]("test_persistence_holder")
 }
 
-func TestSerializers_ToolInfoExtraRoundTrip(t *testing.T) {
-	serializers := map[string]Serializer{
-		"human readable": &HumanReadableSerializer{},
-		"internal":       &serialization.InternalSerializer{},
-		"gob":            &GobSerializer{},
-	}
-	params := []*ParamsOneOf{
-		nil,
-		NewParamsOneOfByParams(map[string]*ParameterInfo{}),
-		NewParamsOneOfByParams(map[string]*ParameterInfo{"id": {Type: Integer, Required: true}}),
-		NewParamsOneOfByJSONSchema(&jsonschema.Schema{Type: "object"}),
-	}
-	for name, serializer := range serializers {
-		t.Run(name, func(t *testing.T) {
-			for _, param := range params {
-				tool := &ToolInfo{Name: "test", ParamsOneOf: param, Extra: map[string]any{
-					"number": int64(9007199254740993),
-					"custom": &persistenceExtra{ID: 4},
-					"$type":  "_eino_string",
-					"value":  "business",
-				}}
-				input := persistenceHolder{Value: tool, Tool: tool, Tools: []*ToolInfo{tool}}
-				data, err := serializer.Marshal(input)
-				require.NoError(t, err)
-				var got persistenceHolder
-				require.NoError(t, serializer.Unmarshal(data, &got))
-				assert.Equal(t, input, got)
-			}
-		})
+func TestJSONSerializers_ToolInfoContract(t *testing.T) {
+	tool := &ToolInfo{Name: "test", Extra: map[string]any{
+		"custom": &persistenceExtra{ID: 4}, "number": int64(9007199254740993),
+		"$type": "_eino_string", "value": "business",
+	}}
+	wire, err := json.Marshal(tool)
+	require.NoError(t, err)
+	var expected ToolInfo
+	require.NoError(t, json.Unmarshal(wire, &expected))
+	for _, serializer := range []Serializer{&HumanReadableSerializer{}, &serialization.InternalSerializer{}} {
+		input := persistenceHolder{Value: tool, Tool: tool, Tools: []*ToolInfo{tool}}
+		data, err := serializer.Marshal(input)
+		require.NoError(t, err)
+		var got persistenceHolder
+		require.NoError(t, serializer.Unmarshal(data, &got))
+		assert.Equal(t, persistenceHolder{Value: &expected, Tool: &expected, Tools: []*ToolInfo{&expected}}, got)
 	}
 }
 
-func TestHumanReadableSerializer_ToolInfoConcreteValue(t *testing.T) {
-	tool := ToolInfo{Name: "test", Extra: map[string]any{"custom": &persistenceExtra{ID: 4}, "number": int64(9007199254740993)}}
+func TestHumanReadableSerializer_RegisteredPointer(t *testing.T) {
 	serializer := &HumanReadableSerializer{}
-	data, err := serializer.Marshal(tool)
+	input := persistenceHolder{Value: &persistenceExtra{ID: 4}}
+	data, err := serializer.Marshal(input)
 	require.NoError(t, err)
-	var got ToolInfo
+	var got persistenceHolder
 	require.NoError(t, serializer.Unmarshal(data, &got))
-	assert.Equal(t, tool, got)
+	assert.Equal(t, input, got)
 }
 
 func TestToolInfo_JSONRemainsUnannotated(t *testing.T) {

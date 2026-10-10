@@ -316,7 +316,7 @@ func internalMarshal(v any, fieldType reflect.Type) (*internalStruct, error) {
 				tmp.Elem().Set(rv)
 				marshalTarget = tmp.Interface()
 			}
-			jsonBytes, err := marshalJSON(marshalTarget)
+			jsonBytes, err := json.Marshal(marshalTarget)
 			if err != nil {
 				return nil, err
 			}
@@ -435,7 +435,7 @@ func internalUnmarshal(v *internalStruct, typ reflect.Type) (any, error) {
 		// specific type
 		if checkMarshaler(typ) {
 			pv := reflect.New(typ)
-			err := unmarshalJSON(v.JSONValue, pv.Interface())
+			err := json.Unmarshal(v.JSONValue, pv.Interface())
 			if err != nil {
 				return nil, err
 			}
@@ -451,12 +451,7 @@ func internalUnmarshal(v *internalStruct, typ reflect.Type) (any, error) {
 			return nil, fmt.Errorf("unknown type key: %v", v.Type)
 		}
 		pResult := reflect.New(resolvePointerNum(v.Type.PointerNum, t))
-		var err error
-		if _, hasCodec := jsonCodecs[t]; hasCodec {
-			err = unmarshalJSON(v.JSONValue, pResult.Interface())
-		} else {
-			err = sonic.Unmarshal(v.JSONValue, pResult.Interface())
-		}
+		err := sonic.Unmarshal(v.JSONValue, pResult.Interface())
 		if err != nil {
 			return nil, fmt.Errorf("unmarshal type[%s] fail: %v, data: %s", t.String(), err, string(v.JSONValue))
 		}
