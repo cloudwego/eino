@@ -18,7 +18,9 @@ package skill
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log"
 	"path/filepath"
 	"strings"
 
@@ -30,8 +32,9 @@ import (
 const skillFileName = "SKILL.md"
 
 type filesystemBackend struct {
-	backend filesystem.Backend
-	baseDir string
+	backend       filesystem.Backend
+	baseDir       string
+	onLoadWarning func(filePath string, err error)
 }
 
 // BackendFromFilesystemConfig contains configuration for NewBackendFromFilesystem.
@@ -41,6 +44,10 @@ type BackendFromFilesystemConfig struct {
 	// BaseDir is the base directory where skill directories are located.
 	// Each skill should be in a subdirectory containing a SKILL.md file.
 	BaseDir string
+
+	// OnLoadWarning is an optional callback invoked when a malformed SKILL.md
+	// file is skipped during loading. If nil, warnings are logged via log.Printf.
+	OnLoadWarning func(filePath string, err error)
 }
 
 // NewBackendFromFilesystem creates a new Backend implementation that reads skills from a filesystem.
@@ -57,9 +64,17 @@ func NewBackendFromFilesystem(_ context.Context, config *BackendFromFilesystemCo
 		return nil, fmt.Errorf("baseDir is required")
 	}
 
+	onLoadWarning := config.OnLoadWarning
+	if onLoadWarning == nil {
+		onLoadWarning = func(filePath string, err error) {
+			log.Printf("[skill] warning: %s: %v", filePath, err)
+		}
+	}
+
 	return &filesystemBackend{
-		backend: config.Backend,
-		baseDir: config.BaseDir,
+		backend:       config.Backend,
+		baseDir:       config.BaseDir,
+		onLoadWarning: onLoadWarning,
 	}, nil
 }
 
@@ -111,6 +126,11 @@ func (b *filesystemBackend) list(ctx context.Context) ([]Skill, error) {
 		}
 		skill, loadErr := b.loadSkillFromFile(ctx, filePath)
 		if loadErr != nil {
+			var malformedErr *malformedSkillFileError
+			if errors.As(loadErr, &malformedErr) {
+				b.warnLoadFailure(filePath, loadErr)
+				continue
+			}
 			return nil, fmt.Errorf("failed to load skill from %s: %w", filePath, loadErr)
 		}
 
@@ -118,6 +138,27 @@ func (b *filesystemBackend) list(ctx context.Context) ([]Skill, error) {
 	}
 
 	return skills, nil
+}
+
+func (b *filesystemBackend) warnLoadFailure(filePath string, err error) {
+	if b.onLoadWarning != nil {
+		b.onLoadWarning(filePath, err)
+		return
+	}
+
+	log.Printf("[skill] warning: %s: %v", filePath, err)
+}
+
+type malformedSkillFileError struct {
+	err error
+}
+
+func (e *malformedSkillFileError) Error() string {
+	return e.err.Error()
+}
+
+func (e *malformedSkillFileError) Unwrap() error {
+	return e.err
 }
 
 func (b *filesystemBackend) loadSkillFromFile(ctx context.Context, path string) (Skill, error) {
@@ -132,12 +173,16 @@ func (b *filesystemBackend) loadSkillFromFile(ctx context.Context, path string) 
 
 	frontmatter, content, err := parseFrontmatter(data)
 	if err != nil {
-		return Skill{}, fmt.Errorf("failed to parse frontmatter: %w", err)
+		return Skill{}, &malformedSkillFileError{
+			err: fmt.Errorf("failed to parse frontmatter: %w", err),
+		}
 	}
 
 	var fm FrontMatter
 	if err = yaml.Unmarshal([]byte(frontmatter), &fm); err != nil {
-		return Skill{}, fmt.Errorf("failed to unmarshal frontmatter: %w", err)
+		return Skill{}, &malformedSkillFileError{
+			err: fmt.Errorf("failed to unmarshal frontmatter: %w", err),
+		}
 	}
 
 	absDir := filepath.Dir(path)
