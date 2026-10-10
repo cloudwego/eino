@@ -34,13 +34,21 @@ import (
 )
 
 // FileStoreConfig configures FileStore.
+//
+// Experimental: intended for local experiments and testing only.
+// Do not use FileStore in online or production environments.
 type FileStoreConfig struct {
 	// EventSerializer encodes typed session events before storage. Defaults to
 	// schema.HumanReadableSerializer. Output must not contain raw CR/LF bytes.
+	// The default serializer is experimental and intended for debugging/testing.
 	EventSerializer schema.Serializer
 }
 
 // FileStore is a process-local, file-backed implementation of adk.SessionEventStore.
+//
+// Experimental: intended for local experiments and testing only.
+// Do not use FileStore in online or production environments.
+//
 // Each session is stored as one event log file under the configured directory:
 //
 //	<root>/<url.PathEscape(sessionID)>.evlog
@@ -81,7 +89,8 @@ type fileSessionIndex struct {
 	eventIDToLine map[string]int
 }
 
-// NewFileStore creates a file-backed SessionEventStore rooted at dir.
+// NewFileStore creates an experimental file-backed SessionEventStore rooted at dir.
+// Do not use the returned store in online or production environments.
 func NewFileStore[M adk.MessageType](dir string, cfg *FileStoreConfig) (*FileStore[M], error) {
 	if dir == "" {
 		return nil, errorsNewEmptyFileStoreDir()

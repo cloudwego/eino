@@ -50,10 +50,12 @@ type notificationOutboxConformanceConfig struct {
 
 // notificationWriterConformanceConfig configures NotificationWriter conformance. New
 // returns lifecycle and outbox capabilities sharing one task namespace; the
-// returned TaskStore must also implement NotificationWriter.
+// returned TaskStore must also implement NotificationWriter. ExpireLease must
+// wait for or advance the outbox past the requested lease.
 type notificationWriterConformanceConfig struct {
 	New                 func(testing.TB) (TaskStore, NotificationOutbox)
 	ExpireActiveAttempt func(testing.TB, TaskStore, *Task)
+	ExpireLease         func(testing.TB, NotificationOutbox, time.Duration)
 }
 
 // runTaskStoreConformance checks lifecycle transitions, CAS, cancellation,
@@ -350,6 +352,7 @@ func runNotificationWriterConformance(t *testing.T, config notificationWriterCon
 	t.Helper()
 	require.NotNil(t, config.New)
 	require.NotNil(t, config.ExpireActiveAttempt)
+	require.NotNil(t, config.ExpireLease)
 
 	t.Run("replay_follows_authorization_and_survives_ack", func(t *testing.T) {
 		tasks, outbox := config.New(t)
@@ -454,7 +457,7 @@ func runNotificationWriterConformance(t *testing.T, config notificationWriterCon
 		require.Equal(t, "data", string(custom.Record.Data))
 		firstID := custom.Record.ID
 		custom.Record.Data[0] = 'X'
-		time.Sleep(2 * time.Millisecond)
+		config.ExpireLease(t, outbox, time.Millisecond)
 		redelivered, _ := receiveNotificationKinds(t, outbox)
 		require.Equal(t, firstID, redelivered.Record.ID)
 		require.Equal(t, "data", string(redelivered.Record.Data))
