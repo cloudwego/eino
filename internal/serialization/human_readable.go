@@ -106,7 +106,7 @@ func hrMarshal(v any, fieldType reflect.Type) (any, error) {
 		return nil, err
 	}
 	if hasJSONMethods {
-		return hrMarshalJSON(rv, rt, typeUnspecific, pointerNum)
+		return hrMarshalCustomJSON(rv, rt, typeUnspecific, pointerNum)
 	}
 
 	switch rt.Kind() {
@@ -121,7 +121,7 @@ func hrMarshal(v any, fieldType reflect.Type) (any, error) {
 	}
 }
 
-func hrMarshalJSON(rv reflect.Value, rt reflect.Type, typeUnspecific bool, pointerNum uint32) (any, error) {
+func hrMarshalCustomJSON(rv reflect.Value, rt reflect.Type, typeUnspecific bool, pointerNum uint32) (any, error) {
 	// Use the addressable form when possible so pointer-receiver MarshalJSON
 	// methods are invoked. Without this, custom marshalers defined on *T are
 	// silently bypassed because rv.Interface() returns a non-addressable copy
