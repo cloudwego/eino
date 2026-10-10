@@ -722,7 +722,7 @@ func (m *typedEventSenderModel[M]) Stream(ctx context.Context, input []M, opts .
 		spanStream.Close()
 		var final M
 		if len(chunks) > 0 && streamErr == nil {
-			final, streamErr = concatMessagesForSpan(chunks)
+			final, streamErr = internal.ConcatMessages(chunks)
 		}
 		sendSessionTimelineEvent(ctx, newModelSpanEndEvent(ctx, modelSpanEndEventInput[M]{
 			spanID:       spanID,
@@ -737,34 +737,6 @@ func (m *typedEventSenderModel[M]) Stream(ctx context.Context, input []M, opts .
 	}()
 
 	return streams[1], nil
-}
-
-func concatMessagesForSpan[M MessageType](chunks []M) (M, error) {
-	var zero M
-	switch any(zero).(type) {
-	case *schema.Message:
-		msgs := make([]*schema.Message, 0, len(chunks))
-		for _, chunk := range chunks {
-			msgs = append(msgs, any(chunk).(*schema.Message))
-		}
-		msg, err := schema.ConcatMessages(msgs)
-		if err != nil {
-			return zero, err
-		}
-		return any(msg).(M), nil
-	case *schema.AgenticMessage:
-		msgs := make([]*schema.AgenticMessage, 0, len(chunks))
-		for _, chunk := range chunks {
-			msgs = append(msgs, any(chunk).(*schema.AgenticMessage))
-		}
-		msg, err := schema.ConcatAgenticMessages(msgs)
-		if err != nil {
-			return zero, err
-		}
-		return any(msg).(M), nil
-	default:
-		return zero, nil
-	}
 }
 
 // buildStreamConvertOptions constructs ConvertOption hooks that gate stream termination behind

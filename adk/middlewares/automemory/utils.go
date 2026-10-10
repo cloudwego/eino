@@ -30,6 +30,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/cloudwego/eino/adk"
+	"github.com/cloudwego/eino/adk/internal"
 	adkfs "github.com/cloudwego/eino/adk/middlewares/filesystem"
 	"github.com/cloudwego/eino/schema"
 )
@@ -327,40 +328,15 @@ func isAssistantRole[M adk.MessageType](msg M) bool {
 }
 
 func concatMessageStream[M adk.MessageType](r *schema.StreamReader[M]) (M, error) {
-	var chunks []M
-	for {
-		chunk, err := r.Recv()
-		if err != nil {
-			if err == io.EOF {
-				break
-			}
-			var zero M
-			return zero, err
-		}
-		chunks = append(chunks, chunk)
-	}
-
+	chunks, recvErr := internal.CollectStreamPrefix(r)
 	var zero M
+	if recvErr != io.EOF {
+		return zero, recvErr
+	}
 	if len(chunks) == 0 {
 		return zero, nil
 	}
-
-	switch any(zero).(type) {
-	case *schema.Message:
-		msg, err := schema.ConcatMessages(any(chunks).([]*schema.Message))
-		if err != nil {
-			return zero, err
-		}
-		return any(msg).(M), nil
-	case *schema.AgenticMessage:
-		msg, err := schema.ConcatAgenticMessages(any(chunks).([]*schema.AgenticMessage))
-		if err != nil {
-			return zero, err
-		}
-		return any(msg).(M), nil
-	default:
-		panic("unreachable")
-	}
+	return internal.ConcatMessages(chunks)
 }
 
 func userMessageTextContent[M adk.MessageType](msg M) string {

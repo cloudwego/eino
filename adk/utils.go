@@ -24,6 +24,7 @@ import (
 
 	"github.com/google/uuid"
 
+	adkinternal "github.com/cloudwego/eino/adk/internal"
 	"github.com/cloudwego/eino/internal"
 	"github.com/cloudwego/eino/schema"
 )
@@ -183,20 +184,12 @@ func (e *agentEventWrapper) consumeStream() {
 	}
 
 	s := e.AgentEvent.Output.MessageOutput.MessageStream
-	var msgs []Message
-
 	defer s.Close()
-	for {
-		msg, err := s.Recv()
-		if err != nil {
-			if err == io.EOF {
-				break
-			}
-			e.StreamErr = err
-			e.AgentEvent.Output.MessageOutput.MessageStream = schema.StreamReaderFromArray(msgs)
-			return
-		}
-		msgs = append(msgs, msg)
+	msgs, recvErr := adkinternal.CollectStreamPrefix(s)
+	if recvErr != io.EOF {
+		e.StreamErr = recvErr
+		e.AgentEvent.Output.MessageOutput.MessageStream = schema.StreamReaderFromArray(msgs)
+		return
 	}
 
 	if len(msgs) == 0 {
@@ -213,7 +206,7 @@ func (e *agentEventWrapper) consumeStream() {
 		e.concatenatedMessage = msgs[0]
 	} else {
 		var err error
-		e.concatenatedMessage, err = schema.ConcatMessages(msgs)
+		e.concatenatedMessage, err = adkinternal.ConcatMessages(msgs)
 		if err != nil {
 			e.StreamErr = err
 			e.AgentEvent.Output.MessageOutput.MessageStream = schema.StreamReaderFromArray(msgs)

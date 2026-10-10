@@ -25,6 +25,7 @@ import (
 	"io"
 	"time"
 
+	"github.com/cloudwego/eino/adk/internal"
 	"github.com/cloudwego/eino/components"
 	"github.com/cloudwego/eino/internal/core"
 	"github.com/cloudwego/eino/schema"
@@ -157,18 +158,11 @@ func gobEncodeMessageVariant(mv *TypedMessageVariant[*schema.Message]) ([]byte, 
 		ToolName:    mv.ToolName,
 	}
 	if mv.IsStreaming {
-		var messages []Message
-		for {
-			frame, err := mv.MessageStream.Recv()
-			if err == io.EOF {
-				break
-			}
-			if err != nil {
-				return nil, fmt.Errorf("error receiving message stream: %w", err)
-			}
-			messages = append(messages, frame)
+		messages, recvErr := internal.CollectStreamPrefix(mv.MessageStream)
+		if recvErr != io.EOF {
+			return nil, fmt.Errorf("error receiving message stream: %w", recvErr)
 		}
-		m, err := schema.ConcatMessages(messages)
+		m, err := internal.ConcatMessages(messages)
 		if err != nil {
 			return nil, fmt.Errorf("failed to encode message: cannot concat message stream: %w", err)
 		}
@@ -207,18 +201,11 @@ func gobEncodeAgenticMessageVariant(mv *TypedMessageVariant[*schema.AgenticMessa
 		ToolName:    mv.ToolName,
 	}
 	if mv.IsStreaming {
-		var messages []*schema.AgenticMessage
-		for {
-			frame, err := mv.MessageStream.Recv()
-			if err == io.EOF {
-				break
-			}
-			if err != nil {
-				return nil, fmt.Errorf("error receiving agentic message stream: %w", err)
-			}
-			messages = append(messages, frame)
+		messages, recvErr := internal.CollectStreamPrefix(mv.MessageStream)
+		if recvErr != io.EOF {
+			return nil, fmt.Errorf("error receiving agentic message stream: %w", recvErr)
 		}
-		m, err := schema.ConcatAgenticMessages(messages)
+		m, err := internal.ConcatMessages(messages)
 		if err != nil {
 			return nil, fmt.Errorf("failed to encode agentic message: cannot concat message stream: %w", err)
 		}
@@ -499,85 +486,24 @@ type TypedResumableAgent[M MessageType] interface {
 type ResumableAgent = TypedResumableAgent[*schema.Message]
 
 func concatMessageStream[M MessageType](stream *schema.StreamReader[M]) (M, error) {
-	var zero M
-	switch s := any(stream).(type) {
-	case *schema.StreamReader[*schema.Message]:
-		result, err := schema.ConcatMessageStream(s)
-		if err != nil {
-			return zero, err
-		}
-		return any(result).(M), nil
-	case *schema.StreamReader[*schema.AgenticMessage]:
-		defer s.Close()
-		var msgs []*schema.AgenticMessage
-		for {
-			frame, err := s.Recv()
-			if err == io.EOF {
-				break
-			}
-			if err != nil {
-				return zero, err
-			}
-			msgs = append(msgs, frame)
-		}
-		result, err := schema.ConcatAgenticMessages(msgs)
-		if err != nil {
-			return zero, err
-		}
-		return any(result).(M), nil
-	default:
-		panic("unreachable: unknown MessageType")
+	defer stream.Close()
+	chunks, recvErr := internal.CollectStreamPrefix(stream)
+	if recvErr != io.EOF {
+		var zero M
+		return zero, recvErr
 	}
+	return internal.ConcatMessages(chunks)
 }
 
 func materializeMessageStreamPrefix[M MessageType](stream *schema.StreamReader[M]) (msg M, hasChunks bool, streamErr error, err error) {
-	var zero M
-	switch s := any(stream).(type) {
-	case *schema.StreamReader[*schema.Message]:
-		defer s.Close()
-		var msgs []*schema.Message
-		for {
-			frame, recvErr := s.Recv()
-			if errors.Is(recvErr, io.EOF) {
-				break
-			}
-			if recvErr != nil {
-				streamErr = recvErr
-				break
-			}
-			msgs = append(msgs, frame)
-		}
-		if len(msgs) == 0 {
-			return zero, false, streamErr, nil
-		}
-		result, concatErr := schema.ConcatMessages(msgs)
-		if concatErr != nil {
-			return zero, true, streamErr, concatErr
-		}
-		return any(result).(M), true, streamErr, nil
-	case *schema.StreamReader[*schema.AgenticMessage]:
-		defer s.Close()
-		var msgs []*schema.AgenticMessage
-		for {
-			frame, recvErr := s.Recv()
-			if errors.Is(recvErr, io.EOF) {
-				break
-			}
-			if recvErr != nil {
-				streamErr = recvErr
-				break
-			}
-			msgs = append(msgs, frame)
-		}
-		if len(msgs) == 0 {
-			return zero, false, streamErr, nil
-		}
-		result, concatErr := schema.ConcatAgenticMessages(msgs)
-		if concatErr != nil {
-			return zero, true, streamErr, concatErr
-		}
-		return any(result).(M), true, streamErr, nil
-	default:
-		panic("unreachable: unknown MessageType")
+	defer stream.Close()
+	chunks, streamErr := internal.CollectStreamPrefix(stream)
+	if errors.Is(streamErr, io.EOF) {
+		streamErr = nil
 	}
+	if len(chunks) == 0 {
+		return msg, false, streamErr, nil
+	}
+	msg, err = internal.ConcatMessages(chunks)
+	return msg, true, streamErr, err
 }
