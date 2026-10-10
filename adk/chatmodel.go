@@ -38,6 +38,7 @@ import (
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/internal/safe"
+	internalschema "github.com/cloudwego/eino/internal/schema"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -1036,7 +1037,7 @@ func setOutputToSession[M MessageType](ctx context.Context, msg M, msgStream *sc
 		return nil
 	}
 
-	concatenated, err := concatMessageStream(msgStream)
+	concatenated, err := internalschema.ConcatMessageStream(msgStream)
 	if err != nil {
 		return err
 	}

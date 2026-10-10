@@ -27,6 +27,7 @@ import (
 	"sync"
 	"time"
 
+	internalschema "github.com/cloudwego/eino/internal/schema"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -116,12 +117,6 @@ func (e *typedAgentEventWrapper[M]) GobDecode(b []byte) error {
 // consumeStream drains the typed message stream, setting concatenatedMessage on success
 // or StreamErr on failure. The stream is replaced with a materialized version safe for
 // gob encoding.
-//
-// NOTE: This method parallels agentEventWrapper.consumeStream in utils.go. The two
-// implementations exist because agentEventWrapper is non-generic (uses *schema.Message
-// directly) while typedAgentEventWrapper[M] is generic. They cannot be unified without
-// making the non-generic wrapper generic, which would cascade through the entire
-// non-generic event storage layer.
 func (e *typedAgentEventWrapper[M]) consumeStream() {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -131,20 +126,12 @@ func (e *typedAgentEventWrapper[M]) consumeStream() {
 	}
 
 	s := e.event.Output.MessageOutput.MessageStream
-	var msgs []M
-
 	defer s.Close()
-	for {
-		msg, err := s.Recv()
-		if err != nil {
-			if err == io.EOF {
-				break
-			}
-			e.StreamErr = err
-			e.event.Output.MessageOutput.MessageStream = schema.StreamReaderFromArray(msgs)
-			return
-		}
-		msgs = append(msgs, msg)
+	msgs, recvErr := internalschema.CollectStreamPrefix(s)
+	if recvErr != io.EOF {
+		e.StreamErr = recvErr
+		e.event.Output.MessageOutput.MessageStream = schema.StreamReaderFromArray(msgs)
+		return
 	}
 
 	if len(msgs) == 0 {
@@ -157,7 +144,7 @@ func (e *typedAgentEventWrapper[M]) consumeStream() {
 		e.concatenatedMessage = msgs[0]
 	} else {
 		var err error
-		e.concatenatedMessage, err = concatMessageStream(schema.StreamReaderFromArray(msgs))
+		e.concatenatedMessage, err = internalschema.ConcatMessages(msgs)
 		if err != nil {
 			e.StreamErr = err
 			e.event.Output.MessageOutput.MessageStream = schema.StreamReaderFromArray(msgs)

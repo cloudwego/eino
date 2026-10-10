@@ -33,6 +33,7 @@ import (
 	fsmw "github.com/cloudwego/eino/adk/middlewares/filesystem"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/compose"
+	internalschema "github.com/cloudwego/eino/internal/schema"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -685,7 +686,7 @@ func (m *middleware[M]) selectTopicPlain(
 		return nil, err
 	}
 
-	resp, err := concatMessageStream(respStream)
+	resp, err := internalschema.ConcatMessageStream(respStream)
 	if err != nil {
 		return nil, err
 	}
@@ -727,7 +728,7 @@ func (m *middleware[M]) selectTopicWithResponseFormat(
 		return nil, err
 	}
 
-	resp, err := concatMessageStream(respStream)
+	resp, err := internalschema.ConcatMessageStream(respStream)
 	if err != nil {
 		return nil, err
 	}

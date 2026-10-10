@@ -18,6 +18,7 @@ package automemory
 
 import (
 	"context"
+	"io"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -25,72 +26,9 @@ import (
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/adk/internal/startwindow"
+	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
 )
-
-func TestConcatMessageStream_MultipleChunks(t *testing.T) {
-	chunks := []*schema.Message{
-		{Role: schema.Assistant, Content: "hello "},
-		{Role: schema.Assistant, Content: "world"},
-	}
-	r := schema.StreamReaderFromArray(chunks)
-
-	msg, err := concatMessageStream(r)
-	require.NoError(t, err)
-	require.NotNil(t, msg)
-	assert.Equal(t, schema.Assistant, msg.Role)
-	assert.Equal(t, "hello world", msg.Content)
-}
-
-func TestConcatMessageStream_SingleChunk(t *testing.T) {
-	chunks := []*schema.Message{
-		{Role: schema.Assistant, Content: "only one"},
-	}
-	r := schema.StreamReaderFromArray(chunks)
-
-	msg, err := concatMessageStream(r)
-	require.NoError(t, err)
-	require.NotNil(t, msg)
-	assert.Equal(t, "only one", msg.Content)
-}
-
-func TestConcatMessageStream_EmptyStream(t *testing.T) {
-	r := schema.StreamReaderFromArray([]*schema.Message{})
-
-	msg, err := concatMessageStream(r)
-	require.NoError(t, err)
-	assert.Nil(t, msg)
-}
-
-func TestConcatMessageStream_ConcatError(t *testing.T) {
-	chunks := []*schema.Message{
-		{Role: schema.Assistant, Content: "a"},
-		{Role: schema.User, Content: "b"},
-	}
-	r := schema.StreamReaderFromArray(chunks)
-
-	msg, err := concatMessageStream(r)
-	require.Error(t, err)
-	assert.Nil(t, msg)
-	assert.Contains(t, err.Error(), "different roles")
-}
-
-func TestConcatMessageStream_WithToolCalls(t *testing.T) {
-	chunks := []*schema.Message{
-		{Role: schema.Assistant, Content: "thinking..."},
-		{Role: schema.Assistant, ToolCalls: []schema.ToolCall{
-			{ID: "call_1", Type: "function", Function: schema.FunctionCall{Name: "search", Arguments: `{"q":"test"}`}},
-		}},
-	}
-	r := schema.StreamReaderFromArray(chunks)
-
-	msg, err := concatMessageStream(r)
-	require.NoError(t, err)
-	require.NotNil(t, msg)
-	assert.Equal(t, "thinking...", msg.Content)
-	require.Len(t, msg.ToolCalls, 1)
-	assert.Equal(t, "search", msg.ToolCalls[0].Function.Name)
-}
 
 func TestSendTopicMemoryEventAnchorsBeforeLastUserQuery(t *testing.T) {
 	user := schema.UserMessage("question")
@@ -205,4 +143,40 @@ func TestTopicSelectionJSONSchema(t *testing.T) {
 	selected, ok := result.Properties.Get("selected_memories")
 	require.True(t, ok)
 	assert.Equal(t, "array", selected.Type)
+}
+
+// Embedding fixedModel supplies the unused Generate endpoint.
+type emptyTopicSelectionModel struct {
+	fixedModel
+	writer *schema.StreamWriter[*schema.Message]
+}
+
+func (m *emptyTopicSelectionModel) Stream(context.Context, []*schema.Message, ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+	r, w := schema.Pipe[*schema.Message](1)
+	m.writer = w
+	w.Send(nil, io.EOF)
+	return r, nil
+}
+
+func TestTopicSelectionEmptyStream(t *testing.T) {
+	for _, mode := range []TopicSelectionOutputMode{"", TopicSelectionOutputModeJSONObject} {
+		name := string(mode)
+		if name == "" {
+			name = "plain"
+		}
+		t.Run(name, func(t *testing.T) {
+			selectionModel := &emptyTopicSelectionModel{}
+			mw := &middleware[*schema.Message]{topicSelectionModel: selectionModel}
+			var err error
+			if mode == "" {
+				_, err = mw.selectTopicPlain(context.Background(), "question", nil, 1)
+			} else {
+				_, err = mw.selectTopicWithResponseFormat(context.Background(), mode, "question", nil, 1)
+			}
+			require.ErrorContains(t, err, "empty response content")
+			require.NotNil(t, selectionModel.writer)
+			defer selectionModel.writer.Close()
+			assert.True(t, selectionModel.writer.Send(nil, nil), "topic selection must close the consumed stream")
+		})
+	}
 }

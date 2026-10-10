@@ -29,6 +29,7 @@ import (
 
 	"github.com/cloudwego/eino/internal/core"
 	"github.com/cloudwego/eino/internal/safe"
+	internalschema "github.com/cloudwego/eino/internal/schema"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -1142,7 +1143,7 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 					}
 					liveDelivered = true
 
-					persistedMsg, hasChunks, streamErr, err := materializeMessageStreamPrefix(copies[0])
+					persistedMsg, hasChunks, streamErr, err := internalschema.ConcatMessageStreamPrefix(copies[0])
 					if err != nil {
 						// Prefix projection is best-effort replay data. A concat failure
 						// should not fail the turn after the source stream already failed.
