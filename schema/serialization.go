@@ -155,8 +155,13 @@ type Serializer interface {
 	Unmarshal(data []byte, v any) error
 }
 
-// HumanReadableSerializer produces clean, human-readable JSON output for serialization.
-// It can be used with compose.WithSerializer() to store checkpoints in a human-readable format.
+// HumanReadableSerializer produces human-readable JSON for debugging and testing.
+//
+// Experimental: this serializer is intended for development and debugging.
+// It is not recommended for production persistence, including checkpoints and
+// session events. Its encoded format and round-trip behavior are not guaranteed
+// to remain compatible across versions.
+// For production graph checkpoints, use compose's default serializer.
 //
 // Unlike the default InternalSerializer which uses verbose wrapper structures for type preservation,
 // HumanReadableSerializer produces clean JSON that:
@@ -165,7 +170,7 @@ type Serializer interface {
 //   - Adds "$type" annotations at the root and in interface fields when needed to preserve Go types
 //   - Produces significantly smaller output for most use cases
 //
-// Example usage:
+// Example usage for debugging only:
 //
 //	graph := compose.NewGraph[Input, Output]()
 //	compiled, err := graph.Compile(ctx,

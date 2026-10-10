@@ -35,6 +35,11 @@ var humanReadableJSON = sonic.Config{
 	ValidateString: true,
 }.Froze()
 
+// HumanReadableSerializer produces human-readable JSON for debugging and testing.
+//
+// Experimental: this serializer is not recommended for production persistence.
+// Its encoded format and round-trip behavior are not guaranteed to remain
+// compatible across versions.
 type HumanReadableSerializer struct{}
 
 func (h *HumanReadableSerializer) Marshal(v any) ([]byte, error) {

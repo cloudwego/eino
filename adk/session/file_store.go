@@ -37,6 +37,9 @@ import (
 type FileStoreConfig struct {
 	// EventSerializer encodes typed session events before storage. Defaults to
 	// schema.HumanReadableSerializer. Output must not contain raw CR/LF bytes.
+	// The default serializer is experimental and intended for debugging/testing.
+	// For production persistence, provide a serializer with a stable encoded format
+	// that satisfies the CR/LF constraint above.
 	EventSerializer schema.Serializer
 }
 

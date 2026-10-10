@@ -29,6 +29,8 @@ import (
 type InMemoryStoreConfig struct {
 	// EventSerializer encodes typed session events before storage. Defaults to
 	// schema.HumanReadableSerializer.
+	// The default serializer is experimental and intended for debugging/testing.
+	// For production use, provide a serializer with a stable encoded format.
 	EventSerializer schema.Serializer
 }
 
