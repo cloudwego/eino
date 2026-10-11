@@ -2181,6 +2181,30 @@ func TestConvToolOutputPartToMessageInputPart(t *testing.T) {
 		assert.ErrorContains(t, err, "file content is nil")
 	})
 
+	t.Run("tool search result part", func(t *testing.T) {
+		toolPart := ToolOutputPart{
+			Type:             ToolPartTypeToolSearchResult,
+			ToolSearchResult: &ToolSearchResult{Tools: []*ToolInfo{{Name: "get_weather"}}},
+			Extra:            map[string]any{"search_key": "search_value"},
+		}
+		result, err := convToolOutputPartToMessageInputPart(toolPart)
+		assert.NoError(t, err)
+		assert.Equal(t, ChatMessagePartTypeToolSearchResult, result.Type)
+		assert.Same(t, toolPart.ToolSearchResult, result.ToolSearchResult)
+		assert.Equal(t, map[string]any{"search_key": "search_value"}, result.Extra)
+	})
+
+	t.Run("tool search result part nil content", func(t *testing.T) {
+		toolPart := ToolOutputPart{
+			Type:             ToolPartTypeToolSearchResult,
+			ToolSearchResult: nil,
+			Extra:            map[string]any{"search_key": "search_value"},
+		}
+		_, err := convToolOutputPartToMessageInputPart(toolPart)
+		assert.Error(t, err)
+		assert.ErrorContains(t, err, "tool search result is nil")
+	})
+
 	t.Run("unknown type", func(t *testing.T) {
 		toolPart := ToolOutputPart{
 			Type: "unknown_type",
