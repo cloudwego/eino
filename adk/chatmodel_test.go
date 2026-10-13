@@ -2671,3 +2671,36 @@ func TestDefaultGenModelInput_LeadingSystemStrip(t *testing.T) {
 		assert.Equal(t, schema.User, got[2].Role)
 	})
 }
+
+// TestReactRunInputMarshalJSON verifies that the input of the Chain and Lambda nodes
+// created by buildMessageReActRunFunc is serializable. Those nodes consume reactRunInput,
+// whose fields are unexported, so without a MarshalJSON method callbacks that serialize
+// observation inputs (e.g. the Langfuse callback) report an empty object.
+func TestReactRunInputMarshalJSON(t *testing.T) {
+	in := reactRunInput{
+		input: &AgentInput{
+			Messages:        []Message{schema.UserMessage("hello")},
+			EnableStreaming: true,
+		},
+		instruction: "you are a helpful assistant",
+	}
+
+	got, err := json.Marshal(in)
+	require.NoError(t, err)
+
+	// The whole point of the method: encoding/json must not silently drop both fields.
+	assert.NotEqual(t, "{}", string(got))
+
+	var decoded struct {
+		Input       *AgentInput `json:"input"`
+		Instruction string      `json:"instruction"`
+	}
+	require.NoError(t, json.Unmarshal(got, &decoded))
+
+	// Round-trip must preserve the data instead of emitting a shape that only looks right.
+	require.NotNil(t, decoded.Input)
+	assert.Equal(t, in.instruction, decoded.Instruction)
+	assert.Equal(t, in.input.EnableStreaming, decoded.Input.EnableStreaming)
+	require.Len(t, decoded.Input.Messages, 1)
+	assert.Equal(t, "hello", decoded.Input.Messages[0].Content)
+}
