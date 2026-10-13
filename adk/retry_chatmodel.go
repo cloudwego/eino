@@ -118,6 +118,17 @@ type TypedRetryContext[M MessageType] struct {
 	// For the first retry decision (after the initial call), this is 1.
 	RetryAttempt int
 
+	// IsLastAttempt reports whether this is the final decision of the retry cycle.
+	// When true, answering Retry: true will not produce another model call: the
+	// decision's ModifiedInputMessages, PersistModifiedInputMessages,
+	// AdditionalOptions and Backoff are ignored, and the cycle ends with
+	// RetryExhaustedError.
+	//
+	// Answering Retry: false instead is not equivalent; it returns the raw model
+	// error or output rather than RetryExhaustedError, so callers that classify
+	// exhaustion via errors.Is(err, ErrExceedMaxRetries) would no longer see it.
+	IsLastAttempt bool
+
 	// InputMessages is the input messages that were sent to the model for the current attempt.
 	InputMessages []M
 
@@ -476,6 +487,7 @@ func generateWithShouldRetry[M MessageType](r *typedRetryModelWrapper[M], ctx co
 
 		retryCtx := &TypedRetryContext[M]{
 			RetryAttempt:  attempt + 1,
+			IsLastAttempt: attempt >= r.config.MaxRetries,
 			InputMessages: currentInput,
 			Options:       currentOpts,
 			OutputMessage: out,
@@ -607,6 +619,7 @@ func streamWithShouldRetry[M MessageType](r *typedRetryModelWrapper[M], ctx cont
 
 			retryCtx := &TypedRetryContext[M]{
 				RetryAttempt:  attempt + 1,
+				IsLastAttempt: attempt >= r.config.MaxRetries,
 				InputMessages: currentInput,
 				Options:       currentOpts,
 				Err:           err,
@@ -658,6 +671,7 @@ func streamWithShouldRetry[M MessageType](r *typedRetryModelWrapper[M], ctx cont
 
 		retryCtx := &TypedRetryContext[M]{
 			RetryAttempt:  attempt + 1,
+			IsLastAttempt: attempt >= r.config.MaxRetries,
 			InputMessages: currentInput,
 			Options:       currentOpts,
 			OutputMessage: msg,
