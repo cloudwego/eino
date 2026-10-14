@@ -18,11 +18,15 @@ package schema
 
 import (
 	"context"
+	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/cloudwego/eino/internal"
 )
 
 func TestConcatAgenticMessages(t *testing.T) {
@@ -1666,34 +1670,56 @@ func TestNewContentBlockChunk_NilMeta(t *testing.T) {
 	}, "NewContentBlockChunk should handle nil meta without panic")
 }
 
-func TestConcatAssistantGenTexts_ExtensionOverwrite(t *testing.T) {
+func TestConcatAssistantGenTexts_Extension(t *testing.T) {
 	type testExtension struct {
 		Value string
 	}
 
-	texts := []*AssistantGenText{
-		{Text: "Hello ", Extension: &testExtension{Value: "ext1"}},
-		{Text: "world", Extension: &testExtension{Value: "ext2"}},
-	}
-
-	result, err := concatAssistantGenTexts(texts)
-	if err != nil {
-		t.Logf("Concat error (may be expected if ConcatSliceValue doesn't handle this type): %v", err)
-		t.Skip("Skipping: ConcatSliceValue doesn't support test type")
-	}
-	require.NotNil(t, result)
-
-	assert.Equal(t, "Hello world", result.Text)
-
-	if result.Extension != nil {
-		t.Logf("Extension type: %T, value: %v", result.Extension, result.Extension)
-		_, isSlice := result.Extension.([]*testExtension)
-		if isSlice {
-			t.Log("WARNING: Extension is a raw slice instead of a concatenated value. " +
-				"Line 1381 in agentic_message.go overwrites the ConcatSliceValue result " +
-				"with extensions.Interface(), discarding the concatenation.")
+	t.Run("single extension chunk", func(t *testing.T) {
+		texts := []*AssistantGenText{
+			{Text: "Hello ", Extension: &testExtension{Value: "ext"}},
+			{Text: "world"},
 		}
-	}
+
+		result, err := concatAssistantGenTexts(texts)
+		require.NoError(t, err)
+		assert.Equal(t, "Hello world", result.Text)
+
+		ext, ok := result.Extension.(*testExtension)
+		require.True(t, ok, "Extension should keep its original type, got %T", result.Extension)
+		assert.Equal(t, "ext", ext.Value)
+
+		bs, err := json.Marshal(result.Extension)
+		require.NoError(t, err)
+		assert.JSONEq(t, `{"Value":"ext"}`, string(bs))
+	})
+
+	t.Run("multiple extension chunks with registered concat func", func(t *testing.T) {
+		internal.RegisterStreamChunkConcatFunc(func(exts []*testExtension) (*testExtension, error) {
+			var sb strings.Builder
+			for _, e := range exts {
+				sb.WriteString(e.Value)
+			}
+			return &testExtension{Value: sb.String()}, nil
+		})
+
+		texts := []*AssistantGenText{
+			{Text: "Hello ", Extension: &testExtension{Value: "ext1"}},
+			{Text: "world", Extension: &testExtension{Value: "ext2"}},
+		}
+
+		result, err := concatAssistantGenTexts(texts)
+		require.NoError(t, err)
+		assert.Equal(t, "Hello world", result.Text)
+
+		ext, ok := result.Extension.(*testExtension)
+		require.True(t, ok, "Extension should keep its original type, got %T", result.Extension)
+		assert.Equal(t, "ext1ext2", ext.Value)
+
+		bs, err := json.Marshal(result.Extension)
+		require.NoError(t, err)
+		assert.JSONEq(t, `{"Value":"ext1ext2"}`, string(bs))
+	})
 }
 
 func TestFunctionToolResultBlockString(t *testing.T) {

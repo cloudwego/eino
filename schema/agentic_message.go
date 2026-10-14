@@ -1463,10 +1463,12 @@ func concatAssistantGenTexts(texts []*AssistantGenText) (ret *AssistantGenText, 
 	}
 
 	if extensions.IsValid() && !extensions.IsZero() {
-		ret.Extension, err = internal.ConcatSliceValue(extensions)
+		var extension reflect.Value
+		extension, err = internal.ConcatSliceValue(extensions)
 		if err != nil {
 			return nil, err
 		}
+		ret.Extension = extension.Interface()
 	}
 
 	if len(openaiExtensions) > 0 {
