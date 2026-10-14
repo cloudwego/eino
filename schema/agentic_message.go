@@ -1327,7 +1327,7 @@ func concatReasoning(reasons []*Reasoning) (ret *Reasoning, err error) {
 			ret.Text += r.Text
 		}
 		if r.Signature != "" {
-			ret.Signature += r.Signature
+			ret.Signature = r.Signature
 		}
 		if r.OpenAIExtension != nil {
 			openaiExtensions = append(openaiExtensions, r.OpenAIExtension)
@@ -1822,9 +1822,7 @@ func concatMCPToolResults(results []*MCPToolResult) (*MCPToolResult, error) {
 			continue
 		}
 
-		if r.Content != "" {
-			ret.Content = r.Content
-		}
+		ret.Content += r.Content
 
 		if ret.ServerLabel == "" {
 			ret.ServerLabel = r.ServerLabel
