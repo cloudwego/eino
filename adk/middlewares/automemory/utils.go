@@ -18,13 +18,13 @@ package automemory
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"sort"
 	"strings"
 	"time"
 
+	"github.com/bytedance/sonic"
 	"github.com/eino-contrib/jsonschema"
 	"gopkg.in/yaml.v3"
 
@@ -266,7 +266,7 @@ func parseTopicSelectionFromToolCall[M adk.MessageType](msg M, valid map[string]
 		return nil, fmt.Errorf("unexpected tool call: %s", tc.Function.Name)
 	}
 	var parsed topicSelectionResp
-	if err := json.Unmarshal([]byte(tc.Function.Arguments), &parsed); err != nil {
+	if err := sonic.Unmarshal([]byte(tc.Function.Arguments), &parsed); err != nil {
 		return nil, err
 	}
 	out := normalizeSelected(parsed.SelectedMemories)
@@ -395,7 +395,7 @@ func parseTopicSelectionFromContent[M adk.MessageType](msg M, valid map[string]s
 	}
 
 	var parsed topicSelectionResp
-	if err := json.Unmarshal([]byte(jsonStr), &parsed); err != nil {
+	if err := sonic.Unmarshal([]byte(jsonStr), &parsed); err != nil {
 		return nil, fmt.Errorf("failed to parse JSON from content: %w", err)
 	}
 
@@ -699,7 +699,7 @@ func ensureMemoryMsgUnchanged[M adk.MessageType](state *adk.TypedChatModelAgentS
 
 func extractFilePath(args string) (string, bool) {
 	var m map[string]any
-	if err := json.Unmarshal([]byte(args), &m); err != nil {
+	if err := sonic.Unmarshal([]byte(args), &m); err != nil {
 		return "", false
 	}
 	if v, ok := m["file_path"]; ok {
@@ -887,13 +887,13 @@ func countModelVisibleMessages[M adk.MessageType](msgs []M) int {
 }
 
 func buildPendingSnapshot[M adk.MessageType](messages []M, cursor int, toolInfos []*schema.ToolInfo) (*PendingSnapshot, error) {
-	raw, err := json.Marshal(messages)
+	raw, err := sonic.Marshal(messages)
 	if err != nil {
 		return nil, err
 	}
-	var rawToolInfos json.RawMessage
+	var rawToolInfos []byte
 	if toolInfos != nil {
-		rawToolInfos, err = json.Marshal(toolInfos)
+		rawToolInfos, err = sonic.Marshal(toolInfos)
 		if err != nil {
 			return nil, err
 		}
@@ -906,12 +906,12 @@ func decodePendingSnapshot[M adk.MessageType](snapshot *PendingSnapshot) ([]M, i
 		return nil, 0, nil, nil
 	}
 	var msgs []M
-	if err := json.Unmarshal(snapshot.Messages, &msgs); err != nil {
+	if err := sonic.Unmarshal(snapshot.Messages, &msgs); err != nil {
 		return nil, 0, nil, err
 	}
 	var toolInfos []*schema.ToolInfo
 	if len(snapshot.ToolInfos) > 0 {
-		if err := json.Unmarshal(snapshot.ToolInfos, &toolInfos); err != nil {
+		if err := sonic.Unmarshal(snapshot.ToolInfos, &toolInfos); err != nil {
 			return nil, 0, nil, err
 		}
 	}

@@ -20,10 +20,11 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"sync"
 	"time"
+
+	"github.com/bytedance/sonic"
 
 	"github.com/cloudwego/eino/adk"
 )
@@ -198,7 +199,7 @@ func getCoordinatorWriteProgress(ctx context.Context, c Coordinator, key string)
 	}
 	if ok {
 		var progress coordinatorWriteProgress
-		if err = json.Unmarshal(raw, &progress); err != nil {
+		if err = sonic.Unmarshal(raw, &progress); err != nil {
 			return nil, false, err
 		}
 		if progress.Version != coordinatorWriteProgressVersion || progress.AnchorMessageID == "" {
@@ -222,7 +223,7 @@ func setCoordinatorWriteProgress(ctx context.Context, c Coordinator, key, anchor
 		Version:         coordinatorWriteProgressVersion,
 		AnchorMessageID: anchorMessageID,
 	}
-	raw, err := json.Marshal(&progress)
+	raw, err := sonic.Marshal(&progress)
 	if err != nil {
 		return err
 	}
@@ -240,14 +241,14 @@ func popCoordinatorPendingSnapshot(ctx context.Context, c Coordinator, key strin
 		return nil, err
 	}
 	var snapshot PendingSnapshot
-	if err := json.Unmarshal(raw, &snapshot); err != nil {
+	if err := sonic.Unmarshal(raw, &snapshot); err != nil {
 		return nil, err
 	}
 	return &snapshot, nil
 }
 
 func setCoordinatorPendingSnapshot(ctx context.Context, c Coordinator, key string, snapshot *PendingSnapshot, ttl time.Duration) error {
-	raw, err := json.Marshal(snapshot)
+	raw, err := sonic.Marshal(snapshot)
 	if err != nil {
 		return err
 	}
