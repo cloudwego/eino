@@ -17,7 +17,10 @@
 package compose
 
 import (
+	"context"
+
 	"github.com/cloudwego/eino/components"
+	"github.com/cloudwego/eino/components/decision"
 	"github.com/cloudwego/eino/components/document"
 	"github.com/cloudwego/eino/components/embedding"
 	"github.com/cloudwego/eino/components/indexer"
@@ -62,6 +65,19 @@ func toRetrieverNode(node retriever.Retriever, opts ...GraphAddNodeOpt) (*graphN
 		node,
 		components.ComponentOfRetriever,
 		node.Retrieve,
+		nil,
+		nil,
+		nil,
+		opts...)
+}
+
+func toDecisionNode(node decision.Decider, opts ...GraphAddNodeOpt) (*graphNode, *graphAddNodeOpts) {
+	return toComponentNode(
+		node,
+		components.ComponentOfDecision,
+		func(ctx context.Context, input *decision.NodeInput, opts ...decision.Option) (map[string]*decision.Answer, error) {
+			return node.Decide(ctx, input.State, input.Questions, opts...)
+		},
 		nil,
 		nil,
 		nil,

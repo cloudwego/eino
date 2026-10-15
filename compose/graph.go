@@ -23,6 +23,7 @@ import (
 	"reflect"
 	"strings"
 
+	"github.com/cloudwego/eino/components/decision"
 	"github.com/cloudwego/eino/components/document"
 	"github.com/cloudwego/eino/components/embedding"
 	"github.com/cloudwego/eino/components/indexer"
@@ -314,6 +315,17 @@ func (g *graph) AddEmbeddingNode(key string, node embedding.Embedder, opts ...Gr
 //	graph.AddRetrieverNode("retriever_node_key", retrieverNode)
 func (g *graph) AddRetrieverNode(key string, node retriever.Retriever, opts ...GraphAddNodeOpt) error {
 	gNode, options := toRetrieverNode(node, opts...)
+	return g.addNode(key, gNode, options)
+}
+
+// AddDecisionNode adds a node that implements decision.Decider.
+// e.g.
+//
+//	decider, err := jev.NewClient(ctx, &jev.Config{})
+//
+//	graph.AddDecisionNode("decision_node_key", decider)
+func (g *graph) AddDecisionNode(key string, node decision.Decider, opts ...GraphAddNodeOpt) error {
+	gNode, options := toDecisionNode(node, opts...)
 	return g.addNode(key, gNode, options)
 }
 
