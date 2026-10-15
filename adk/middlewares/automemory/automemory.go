@@ -306,7 +306,7 @@ func (m *middleware[M]) BeforeAgent(ctx context.Context, runCtx *adk.TypedChatMo
 	if nRunCtx.AgentInput != nil && len(nRunCtx.AgentInput.Messages) > 0 && m.coordination != nil && m.coordination.Coordinator != nil {
 		if sessionID, err := m.resolveSessionID(ctx, &adk.TypedChatModelAgentState[M]{Messages: nRunCtx.AgentInput.Messages}); err == nil && sessionID != "" {
 			coordKey := m.coordinatorKey(sessionID)
-			if cursor, remoteAhead := m.resolveWriteCursor(ctx, nRunCtx.AgentInput.Messages, coordKey); remoteAhead {
+			if cursor, remoteAhead, _ := m.resolveWriteCursor(ctx, nRunCtx.AgentInput.Messages, coordKey); remoteAhead {
 				st := markWriteCursor(&adk.TypedChatModelAgentState[M]{Messages: nRunCtx.AgentInput.Messages}, cursor)
 				if st != nil {
 					nRunCtx.AgentInput = &adk.TypedAgentInput[M]{
@@ -833,7 +833,7 @@ func (m *middleware[M]) AfterAgent(ctx context.Context, state *adk.TypedChatMode
 	}
 	coordKey := m.coordinatorKey(sessionID)
 
-	cursor, remoteAhead := m.resolveWriteCursor(ctx, state.Messages, coordKey)
+	cursor, remoteAhead, transcriptRebased := m.resolveWriteCursor(ctx, state.Messages, coordKey)
 	if remoteAhead {
 		state = markWriteCursor(state, cursor)
 	}
@@ -842,7 +842,9 @@ func (m *middleware[M]) AfterAgent(ctx context.Context, state *adk.TypedChatMode
 	}
 
 	// Skip background extraction if the main agent already wrote memory files in this range.
-	if hasMemoryWritesSince(state.Messages, cursor, m.resolvedMemoryDirectory) {
+	// After a transcript rebase there is no reliable range boundary, so historical
+	// writes must not suppress at-least-once extraction of the current snapshot.
+	if !transcriptRebased && hasMemoryWritesSince(state.Messages, cursor, m.resolvedMemoryDirectory) {
 		end := len(state.Messages)
 		m.commitWriteProgress(ctx, state, coordKey, end)
 		return ctx, nil

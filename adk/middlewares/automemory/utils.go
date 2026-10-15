@@ -867,31 +867,35 @@ func markWriteCursor[M adk.MessageType](state *adk.TypedChatModelAgentState[M], 
 	return state
 }
 
-func (m *middleware[M]) resolveWriteCursor(ctx context.Context, msgs []M, coordKey string) (cursor int, remoteAhead bool) {
+func (m *middleware[M]) resolveWriteCursor(
+	ctx context.Context,
+	msgs []M,
+	coordKey string,
+) (cursor int, remoteAhead bool, transcriptRebased bool) {
 	localCursor, localValid := getLocalWriteCursor(msgs)
 	if !localValid {
-		return 0, false
+		return 0, false, true
 	}
 	if coordKey == "" || m.coordination == nil || m.coordination.Coordinator == nil {
-		return localCursor, false
+		return localCursor, false, false
 	}
 
 	progress, ok, err := getCoordinatorWriteProgress(ctx, m.coordination.Coordinator, coordKey)
 	if err != nil || !ok || progress.Version != coordinatorWriteProgressVersion {
 		// A legacy remote cursor has no transcript identity. The local marker is
 		// still safe to use, but the integer alone must not skip messages.
-		return localCursor, false
+		return localCursor, false, false
 	}
 	remoteCursor, valid := resolveWriteProgressAnchor(msgs, progress.AnchorMessageID)
 	if !valid {
 		// The transcript was rebased (for example, by summarization). Reprocess
 		// the current snapshot rather than silently skipping new content.
-		return 0, false
+		return 0, false, true
 	}
 	if remoteCursor > localCursor {
-		return remoteCursor, true
+		return remoteCursor, true, false
 	}
-	return localCursor, false
+	return localCursor, false, false
 }
 
 func (m *middleware[M]) commitWriteProgress(

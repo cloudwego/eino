@@ -970,6 +970,29 @@ func TestMiddleware_AfterAgent_ReextractsAfterTranscriptRebase(t *testing.T) {
 				schema.AssistantMessage("new answer", nil),
 			},
 		},
+		{
+			name: "historical memory write does not suppress rebased extraction",
+			first: []*schema.Message{
+				schema.UserMessage("old information"),
+				schema.AssistantMessage("ack old information", nil),
+			},
+			replacement: []*schema.Message{
+				schema.UserMessage("summary"),
+				schema.AssistantMessage("", []schema.ToolCall{
+					{
+						ID:   "historical-memory-write",
+						Type: "function",
+						Function: schema.FunctionCall{
+							Name:      "write_file",
+							Arguments: `{"file_path":"/mem/old.md","content":"old information"}`,
+						},
+					},
+				}),
+				schema.ToolMessage("ok", "historical-memory-write", schema.WithToolName("write_file")),
+				schema.UserMessage("new information"),
+				schema.AssistantMessage("ack new information", nil),
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -1012,7 +1035,7 @@ func TestMiddleware_AfterAgent_ReextractsAfterTranscriptRebase(t *testing.T) {
 			extModel.mu.Lock()
 			lastPrompt := extModel.promptSeen[len(extModel.promptSeen)-1]
 			extModel.mu.Unlock()
-			require.Contains(t, lastPrompt, fmt.Sprintf("~%d messages", len(tt.replacement)))
+			require.Contains(t, lastPrompt, fmt.Sprintf("~%d messages", countModelVisibleMessages(tt.replacement)))
 		})
 	}
 }
