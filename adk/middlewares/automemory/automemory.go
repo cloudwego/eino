@@ -25,6 +25,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/slongfield/pyfmt"
 
@@ -236,6 +237,14 @@ type memoryExtra struct {
 	Cursor          int
 	AnchorMessageID string
 }
+
+type asyncExtractionContext struct {
+	context.Context
+}
+
+func (asyncExtractionContext) Deadline() (time.Time, bool) { return time.Time{}, false }
+func (asyncExtractionContext) Done() <-chan struct{}       { return nil }
+func (asyncExtractionContext) Err() error                  { return nil }
 
 // New creates an automemory middleware from the provided configuration.
 func New[M adk.MessageType](ctx context.Context, config *Config[M]) (adk.TypedChatModelAgentMiddleware[M], error) {
@@ -892,7 +901,11 @@ func (m *middleware[M]) AfterAgent(ctx context.Context, state *adk.TypedChatMode
 		if !ok {
 			if err := setCoordinatorPendingSnapshot(ctx, m.coordination.Coordinator, coordKey, snap, m.coordination.LockTTL); err != nil {
 				m.onErr(ctx, OnErrorStageStashPendingSnapshot, err)
+				return ctx, nil
 			}
+			// Coordinator cannot atomically publish pending work and hand it
+			// to the exiting lock holder, so every publisher provides a waiter.
+			go m.awaitPendingExtractionHandoff(asyncExtractionContext{Context: ctx}, coordKey)
 			return ctx, nil
 		}
 		go m.runExtractionDrain(ctx, coordKey, unlock, snap)
@@ -900,6 +913,46 @@ func (m *middleware[M]) AfterAgent(ctx context.Context, state *adk.TypedChatMode
 
 	default:
 		return ctx, nil
+	}
+}
+
+func (m *middleware[M]) awaitPendingExtractionHandoff(ctx context.Context, coordKey string) {
+	ttl := m.coordination.LockTTL
+	retryInterval := 10 * time.Millisecond
+	if ttl < retryInterval {
+		retryInterval = ttl / 2
+		if retryInterval <= 0 {
+			retryInterval = time.Millisecond
+		}
+	}
+	deadline := time.Now().Add(ttl + retryInterval)
+
+	for {
+		unlock, ok, err := m.coordination.Coordinator.AcquireLock(ctx, coordKey, ttl)
+		if err != nil {
+			m.onErr(ctx, OnErrorStageAcquireExtractionLock, err)
+			return
+		}
+		if ok {
+			pending, loadErr := popCoordinatorPendingSnapshot(ctx, m.coordination.Coordinator, coordKey)
+			if loadErr != nil {
+				m.onErr(ctx, OnErrorStageLoadPendingSnapshot, loadErr)
+			}
+			if pending == nil || loadErr != nil {
+				if releaseErr := unlock(ctx); releaseErr != nil {
+					m.onErr(ctx, OnErrorStageReleaseExtractionLock, releaseErr)
+				}
+				return
+			}
+			m.runExtractionDrain(ctx, coordKey, unlock, pending)
+			return
+		}
+		if !time.Now().Before(deadline) {
+			m.onErr(ctx, OnErrorStageAcquireExtractionLock, fmt.Errorf("timed out waiting to drain pending memory snapshot"))
+			return
+		}
+		timer := time.NewTimer(retryInterval)
+		<-timer.C
 	}
 }
 

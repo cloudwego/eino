@@ -602,6 +602,24 @@ type extractionModel struct {
 	generateCallings int32
 }
 
+type emptyPendingPopBarrierCoordinator struct {
+	Coordinator
+	once       sync.Once
+	popReached chan struct{}
+	releasePop chan struct{}
+}
+
+func (c *emptyPendingPopBarrierCoordinator) GetAndDelete(ctx context.Context, key string) ([]byte, bool, error) {
+	value, ok, err := c.Coordinator.GetAndDelete(ctx, key)
+	if err == nil && !ok && strings.HasSuffix(key, "::pending_snapshot") {
+		c.once.Do(func() {
+			close(c.popReached)
+			<-c.releasePop
+		})
+	}
+	return value, ok, err
+}
+
 type countingBackend struct {
 	*InMemoryBackend
 	writeCalls    int32
@@ -1330,6 +1348,73 @@ func TestMiddleware_AfterAgent_AsyncExtractionKeepsLatestPendingSnapshot(t *test
 		return cursor == len(state2.Messages) &&
 			progress.Version == coordinatorWriteProgressVersion &&
 			progress.AnchorMessageID == adk.GetMessageID(state2.Messages[len(state2.Messages)-1])
+	}, 2*time.Second, 10*time.Millisecond)
+}
+
+func TestMiddleware_AfterAgent_AsyncPendingSnapshotIsHandedOffWhenWorkerExits(t *testing.T) {
+	ctx := context.Background()
+	b := NewInMemoryBackend()
+	b.put("/mem/MEMORY.md", "", time.Now())
+
+	coordinator := &emptyPendingPopBarrierCoordinator{
+		Coordinator: NewLocalCoordinator(),
+		popReached:  make(chan struct{}),
+		releasePop:  make(chan struct{}),
+	}
+	coord := &CoordinationConfig[*schema.Message]{
+		SessionID:   "handoff-session",
+		Coordinator: coordinator,
+		LockTTL:     time.Second,
+	}
+	extModel := &extractionModel{}
+	mw, err := New(ctx, &Config[*schema.Message]{
+		MemoryDirectory: "/mem",
+		MemoryBackend:   b,
+		Write: &WriteConfig[*schema.Message]{
+			Mode:  WriteModeAsync,
+			Model: extModel,
+		},
+		Coordination: coord,
+	})
+	require.NoError(t, err)
+
+	first := &adk.TypedChatModelAgentState[*schema.Message]{
+		Messages: []*schema.Message{
+			schema.UserMessage("remember first"),
+			schema.AssistantMessage("ack first", nil),
+		},
+	}
+	_, err = mw.AfterAgent(ctx, first)
+	require.NoError(t, err)
+
+	select {
+	case <-coordinator.popReached:
+	case <-time.After(2 * time.Second):
+		t.Fatal("worker did not reach final empty pending pop")
+	}
+
+	second := &adk.TypedChatModelAgentState[*schema.Message]{
+		Messages: []*schema.Message{
+			schema.UserMessage("remember first"),
+			schema.AssistantMessage("ack first", nil),
+			schema.UserMessage("remember second"),
+			schema.AssistantMessage("ack second", nil),
+		},
+	}
+	_, err = mw.AfterAgent(ctx, second)
+	require.NoError(t, err)
+	close(coordinator.releasePop)
+
+	require.Eventually(t, func() bool {
+		topic, readErr := b.Read(ctx, &ReadRequest{FilePath: "/mem/topic.md"})
+		if readErr != nil || topic == nil || topic.Content != "remember second" {
+			return false
+		}
+		_, pending, pendingErr := coordinator.Get(
+			ctx,
+			coordinatorPendingSnapshotKey("/mem::handoff-session"),
+		)
+		return pendingErr == nil && !pending
 	}, 2*time.Second, 10*time.Millisecond)
 }
 
