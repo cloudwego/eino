@@ -421,6 +421,7 @@ func prepareRunnerSessionResume[M MessageType]( //nolint:revive // argument-limi
 	if reconstructResult != nil && reconstructResult.state != nil {
 		state.latestState = reconstructResult.state
 	}
+	state.latestState.Messages = nil
 	// Pick the checkpoint ID: caller-provided takes precedence over the implicit
 	// session-scoped one. The session-scoped key still drives existence checks
 	// when the caller did not supply a checkpoint.
@@ -635,6 +636,7 @@ func typedRunnerRunImpl[M MessageType](a TypedAgent[M], enableStreaming bool, st
 		// emitted as session events at turn start so they appear in the event log.
 		sessionState.inputMessages = append([]M{}, messages...)
 		messages = append(append([]M{}, sessionState.latestState.Messages...), sessionState.inputMessages...)
+		sessionState.latestState.Messages = nil
 		// Assign IDs before messages can be both persisted and inspected by
 		// middleware, avoiding concurrent lazy ID mutation during event snapshotting.
 		for _, msg := range messages {

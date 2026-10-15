@@ -1703,17 +1703,36 @@ func concatAdjacentFunctionToolResultBlocks(blocks []*ContentBlock) ([]*ContentB
 	}
 
 	ret := make([]*ContentBlock, 0, len(blocks))
-	for _, block := range blocks {
-		if len(ret) == 0 || !canConcatFunctionToolResultBlocks(ret[len(ret)-1], block) {
+	for start := 0; start < len(blocks); {
+		block := blocks[start]
+		if block == nil || block.Type != ContentBlockTypeFunctionToolResult || block.FunctionToolResult == nil {
 			ret = append(ret, block)
+			start++
 			continue
 		}
 
-		merged, err := concatFunctionToolResultBlocks(ret[len(ret)-1], block)
+		// Track the entire run's identity without rebuilding its content or extras.
+		identity := &FunctionToolResult{CallID: block.FunctionToolResult.CallID, Name: block.FunctionToolResult.Name}
+		runBlock := NewContentBlock(identity)
+		end := start + 1
+		for end < len(blocks) && canConcatFunctionToolResultBlocks(runBlock, blocks[end]) {
+			result := blocks[end].FunctionToolResult
+			if identity.CallID == "" {
+				identity.CallID = result.CallID
+			}
+			if identity.Name == "" {
+				identity.Name = result.Name
+			}
+			end++
+		}
+
+		run := blocks[start:end]
+		merged, err := concatFunctionToolResultBlocks(run)
 		if err != nil {
 			return nil, err
 		}
-		ret[len(ret)-1] = merged
+		ret = append(ret, merged)
+		start = end
 	}
 
 	return ret, nil
@@ -1741,20 +1760,26 @@ func canConcatFunctionToolResultBlocks(a, b *ContentBlock) bool {
 		(a.FunctionToolResult.Name != "" && a.FunctionToolResult.Name == b.FunctionToolResult.Name)
 }
 
-func concatFunctionToolResultBlocks(a, b *ContentBlock) (*ContentBlock, error) {
-	result, err := concatFunctionToolResults([]*FunctionToolResult{a.FunctionToolResult, b.FunctionToolResult})
+func concatFunctionToolResultBlocks(blocks []*ContentBlock) (*ContentBlock, error) {
+	if len(blocks) == 1 {
+		return blocks[0], nil
+	}
+
+	results := make([]*FunctionToolResult, 0, len(blocks))
+	extras := make([]map[string]any, 0, len(blocks))
+	for _, block := range blocks {
+		results = append(results, block.FunctionToolResult)
+		if len(block.Extra) > 0 {
+			extras = append(extras, block.Extra)
+		}
+	}
+
+	result, err := concatFunctionToolResults(results)
 	if err != nil {
 		return nil, err
 	}
 
 	block := NewContentBlock(result)
-	var extras []map[string]any
-	if len(a.Extra) > 0 {
-		extras = append(extras, a.Extra)
-	}
-	if len(b.Extra) > 0 {
-		extras = append(extras, b.Extra)
-	}
 	if len(extras) > 0 {
 		block.Extra, err = concatExtra(extras)
 		if err != nil {

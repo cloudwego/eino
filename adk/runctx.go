@@ -398,6 +398,11 @@ func sanitizeRunSessionForSessionCheckpoint[M MessageType](rs *runSession) *runS
 	rs.mtx.Lock()
 	events = append(events, rs.Events...)
 	typedEvents = rs.TypedEvents
+	store, hasTypedEvents := typedEvents.(*[]*typedAgentEventWrapper[M])
+	if store != nil {
+		snapshot := append([]*typedAgentEventWrapper[M](nil), (*store)...)
+		store = &snapshot
+	}
 	rs.mtx.Unlock()
 
 	for _, event := range events {
@@ -407,7 +412,7 @@ func sanitizeRunSessionForSessionCheckpoint[M MessageType](rs *runSession) *runS
 	}
 	copied.LaneEvents = sanitizeLaneEventsForSessionCheckpoint(rs.LaneEvents)
 
-	if store, ok := typedEvents.(*[]*typedAgentEventWrapper[M]); ok {
+	if hasTypedEvents {
 		if store == nil {
 			copied.TypedEvents = store
 			return copied
