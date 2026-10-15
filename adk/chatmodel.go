@@ -19,11 +19,9 @@ package adk
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
-	"reflect"
 	"runtime/debug"
 	"sync"
 	"sync/atomic"
@@ -59,11 +57,8 @@ type typedChatModelAgentExecCtx[M MessageType] struct {
 	retryVerdictSignal *retryVerdictSignal
 
 	afterToolCallsHook     func(ctx context.Context) error
-	sessionEvents          bool
 	timelineEvents         bool
 	internalTimelineEvents bool
-	lastModelContext       *ModelContextEvent
-	sawModelContext        bool
 }
 
 func (e *typedChatModelAgentExecCtx[M]) send(ctx context.Context, event *TypedAgentEvent[M]) {
@@ -102,79 +97,6 @@ func (e *typedChatModelAgentExecCtx[M]) send(ctx context.Context, event *TypedAg
 	e.generator.trySend(event)
 }
 
-func copyModelContextEvent(event *ModelContextEvent) *ModelContextEvent {
-	if event == nil {
-		return nil
-	}
-	return &ModelContextEvent{
-		ToolInfos:         cloneToolInfos(event.ToolInfos),
-		DeferredToolInfos: cloneToolInfos(event.DeferredToolInfos),
-	}
-}
-
-func cloneToolInfos(infos []*schema.ToolInfo) []*schema.ToolInfo {
-	if infos == nil {
-		return nil
-	}
-	return append([]*schema.ToolInfo{}, infos...)
-}
-
-func modelContextEventEqual(a, b *ModelContextEvent) bool {
-	if a == nil || b == nil {
-		return a == b
-	}
-	return toolInfosEqual(a.ToolInfos, b.ToolInfos) &&
-		toolInfosEqual(a.DeferredToolInfos, b.DeferredToolInfos)
-}
-
-func toolInfosEqual(a, b []*schema.ToolInfo) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if !toolInfoEqual(a[i], b[i]) {
-			return false
-		}
-	}
-	return true
-}
-
-func toolInfoEqual(a, b *schema.ToolInfo) bool {
-	if reflect.DeepEqual(a, b) {
-		return true
-	}
-	aBytes, aErr := json.Marshal(a)
-	bBytes, bErr := json.Marshal(b)
-	if aErr != nil || bErr != nil {
-		return false
-	}
-	return bytes.Equal(aBytes, bBytes)
-}
-
-func syncModelContextSessionEvent[M MessageType](ctx context.Context, state *TypedChatModelAgentState[M]) {
-	execCtx := getTypedChatModelAgentExecCtx[M](ctx)
-	if execCtx == nil || !execCtx.sessionEvents || state == nil {
-		return
-	}
-	current := &ModelContextEvent{
-		ToolInfos:         cloneToolInfos(state.ToolInfos),
-		DeferredToolInfos: cloneToolInfos(state.DeferredToolInfos),
-	}
-	changed := !execCtx.sawModelContext || !modelContextEventEqual(execCtx.lastModelContext, current)
-	if changed {
-		execCtx.send(ctx, &TypedAgentEvent[M]{
-			SessionEventVariant: &SessionEventVariant[M]{
-				Event: &SessionEvent[M]{
-					Kind:         SessionEventModelContext,
-					ModelContext: copyModelContextEvent(current),
-				},
-			},
-		})
-	}
-	execCtx.lastModelContext = copyModelContextEvent(current)
-	execCtx.sawModelContext = true
-}
-
 type chatModelAgentExecCtx = typedChatModelAgentExecCtx[*schema.Message]
 
 type typedChatModelAgentExecCtxKey[M MessageType] struct{}
@@ -190,31 +112,17 @@ func getTypedChatModelAgentExecCtx[M MessageType](ctx context.Context) *typedCha
 	return nil
 }
 
-func newTypedChatModelAgentExecCtx[M MessageType](
-	generator *AsyncGenerator[*TypedAgentEvent[M]],
-	cancelCtx *cancelContext,
-	sessionEvents bool,
-	timelineEvents bool,
-	internalTimelineEvents bool,
-) *typedChatModelAgentExecCtx[M] {
+func newTypedChatModelAgentExecCtx[M MessageType](generator *AsyncGenerator[*TypedAgentEvent[M]], cancelCtx *cancelContext, timelineEvents bool, internalTimelineEvents bool) *typedChatModelAgentExecCtx[M] {
 	return &typedChatModelAgentExecCtx[M]{
 		generator:              generator,
 		cancelCtx:              cancelCtx,
-		sessionEvents:          sessionEvents,
 		timelineEvents:         timelineEvents,
 		internalTimelineEvents: internalTimelineEvents,
 	}
 }
 
-func initTypedChatModelAgentExecCtx[M MessageType](
-	ctx context.Context,
-	generator *AsyncGenerator[*TypedAgentEvent[M]],
-	cancelCtx *cancelContext,
-	sessionEvents bool,
-	timelineEvents bool,
-	internalTimelineEvents bool,
-) (context.Context, *typedChatModelAgentExecCtx[M]) {
-	execCtx := newTypedChatModelAgentExecCtx(generator, cancelCtx, sessionEvents, timelineEvents, internalTimelineEvents)
+func initTypedChatModelAgentExecCtx[M MessageType](ctx context.Context, generator *AsyncGenerator[*TypedAgentEvent[M]], cancelCtx *cancelContext, timelineEvents bool, internalTimelineEvents bool) (context.Context, *typedChatModelAgentExecCtx[M]) {
+	execCtx := newTypedChatModelAgentExecCtx(generator, cancelCtx, timelineEvents, internalTimelineEvents)
 	ctx = withTypedChatModelAgentExecCtx(ctx, execCtx)
 	sender := startwindow.EventSender(func(parentCtx context.Context, event any) error {
 		typedEvent, ok := event.(*TypedAgentEvent[M])
@@ -235,19 +143,7 @@ type chatModelAgentRunOptions struct {
 
 	historyModifier func(context.Context, []Message) []Message
 
-	afterToolCallsHook     func(ctx context.Context) error
-	initialModelContext    *ModelContextEvent
-	sawInitialModelContext bool
-}
-
-func withInitialModelContext(event *ModelContextEvent, saw bool) AgentRunOption {
-	return WrapImplSpecificOptFn(func(t *chatModelAgentRunOptions) {
-		if !saw {
-			return
-		}
-		t.initialModelContext = copyModelContextEvent(event)
-		t.sawInitialModelContext = true
-	})
+	afterToolCallsHook func(ctx context.Context) error
 }
 
 // WithChatModelOptions sets options for the underlying chat model.
@@ -1744,7 +1640,7 @@ func (a *TypedChatModelAgent[M]) Run(ctx context.Context, input *TypedAgentInput
 	if cancelCtxOwned && cancelCtx != nil && cancelCtx.abortOnly {
 		ctx, abortOnlyCancel = withAbortOnlyCancelContext(ctx, cancelCtx)
 	}
-	ctx, execCtx := initTypedChatModelAgentExecCtx(ctx, generator, cancelCtx, o.enableSessionEvents, o.enableTimelineEvents, o.enableInternalTimelineEvents)
+	ctx, execCtx := initTypedChatModelAgentExecCtx(ctx, generator, cancelCtx, o.enableTimelineEvents, o.enableInternalTimelineEvents)
 	execCtx.failoverLastSuccessModel = a.model
 
 	ctx, run, bc, input, err := a.getRunFunc(ctx, input)
@@ -1765,10 +1661,6 @@ func (a *TypedChatModelAgent[M]) Run(ctx context.Context, input *TypedAgentInput
 	co := getComposeOptions(opts)
 	co = append(co, compose.WithCheckPointID(bridgeCheckpointID))
 	runOps := GetImplSpecificOptions[chatModelAgentRunOptions](nil, opts...)
-	if execCtx := getTypedChatModelAgentExecCtx[M](ctx); execCtx != nil {
-		execCtx.lastModelContext = copyModelContextEvent(runOps.initialModelContext)
-		execCtx.sawModelContext = runOps.sawInitialModelContext
-	}
 
 	if bc != nil {
 		if len(bc.toolInfos) > 0 {
@@ -1837,7 +1729,7 @@ func (a *TypedChatModelAgent[M]) Resume(ctx context.Context, info *ResumeInfo, o
 	if cancelCtxOwned && cancelCtx != nil && cancelCtx.abortOnly {
 		ctx, abortOnlyCancel = withAbortOnlyCancelContext(ctx, cancelCtx)
 	}
-	ctx, execCtx := initTypedChatModelAgentExecCtx(ctx, generator, cancelCtx, o.enableSessionEvents, o.enableTimelineEvents, o.enableInternalTimelineEvents)
+	ctx, execCtx := initTypedChatModelAgentExecCtx(ctx, generator, cancelCtx, o.enableTimelineEvents, o.enableInternalTimelineEvents)
 	execCtx.failoverLastSuccessModel = a.model
 
 	ctx, run, bc, _, err := a.getRunFunc(ctx, nil)
@@ -1858,10 +1750,6 @@ func (a *TypedChatModelAgent[M]) Resume(ctx context.Context, info *ResumeInfo, o
 	co := getComposeOptions(opts)
 	co = append(co, compose.WithCheckPointID(bridgeCheckpointID))
 	resumeRunOps := GetImplSpecificOptions[chatModelAgentRunOptions](nil, opts...)
-	if execCtx := getTypedChatModelAgentExecCtx[M](ctx); execCtx != nil {
-		execCtx.lastModelContext = copyModelContextEvent(resumeRunOps.initialModelContext)
-		execCtx.sawModelContext = resumeRunOps.sawInitialModelContext
-	}
 
 	if bc != nil {
 		if len(bc.toolInfos) > 0 {
