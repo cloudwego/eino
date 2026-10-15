@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"reflect"
 
+	"github.com/cloudwego/eino/components/decision"
 	"github.com/cloudwego/eino/components/document"
 	"github.com/cloudwego/eino/components/embedding"
 	"github.com/cloudwego/eino/components/indexer"
@@ -296,6 +297,18 @@ func (c *Chain[I, O]) AppendEmbedding(node embedding.Embedder, opts ...GraphAddN
 //		chain.AppendRetriever(retriever)
 func (c *Chain[I, O]) AppendRetriever(node retriever.Retriever, opts ...GraphAddNodeOpt) *Chain[I, O] {
 	gNode, options := toRetrieverNode(node, opts...)
+	c.addNode(gNode, options)
+	return c
+}
+
+// AppendDecision add a Decision node to the chain.
+// e.g.
+//
+//	decider, err := jev.NewClient(ctx, &jev.Config{})
+//	if err != nil {...}
+//	chain.AppendDecision(decider)
+func (c *Chain[I, O]) AppendDecision(node decision.Decider, opts ...GraphAddNodeOpt) *Chain[I, O] {
+	gNode, options := toDecisionNode(node, opts...)
 	c.addNode(gNode, options)
 	return c
 }
