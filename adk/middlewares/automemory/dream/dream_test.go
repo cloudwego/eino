@@ -38,10 +38,11 @@ import (
 )
 
 type dreamModel struct {
-	mu        sync.Mutex
-	prompts   []string
-	toolNames [][]string
-	calls     int32
+	mu              sync.Mutex
+	prompts         []string
+	toolNames       [][]string
+	calls           int32
+	onFirstGenerate func()
 }
 
 func (m *dreamModel) BindTools(tools []*schema.ToolInfo) []string {
@@ -56,6 +57,9 @@ func (m *dreamModel) BindTools(tools []*schema.ToolInfo) []string {
 
 func (m *dreamModel) Generate(_ context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
 	callCount := atomic.AddInt32(&m.calls, 1)
+	if callCount == 1 && m.onFirstGenerate != nil {
+		m.onFirstGenerate()
+	}
 	toolList := model.GetCommonOptions(nil, opts...).Tools
 	m.mu.Lock()
 	m.toolNames = append(m.toolNames, m.BindTools(toolList))
