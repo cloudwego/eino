@@ -447,6 +447,10 @@ func prepareRunnerSessionResume[M MessageType]( //nolint:revive // argument-limi
 		}
 		return nil, "", fmt.Errorf("checkpoint[%s] not exist", effectiveCheckPointID)
 	}
+	if cp.SessionID != "" && cp.SessionID != sessionID {
+		_ = state.sessionHandle.close(ctx)
+		return nil, "", fmt.Errorf("checkpoint[%s] belongs to session %q, not %q", effectiveCheckPointID, cp.SessionID, sessionID)
+	}
 	resumeEvent := &SessionEvent[M]{
 		Timestamp: newEventTimestamp(),
 		Kind:      SessionEventKind(SessionEventExtensionPrefix + "resume.request_started"),
