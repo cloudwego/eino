@@ -107,7 +107,7 @@ func TestChatModelAgentRun(t *testing.T) {
 		input := &AgentInput{Messages: []Message{schema.UserMessage("remember this")}}
 		ctx = ctxWithNewTypedRunCtx(ctx, input, false)
 
-		iterator := agent.Run(ctx, input, withEnableSessionEvents())
+		iterator := agent.Run(ctx, input, withEnableSessionEvents(), WithTimelineEvents())
 		var events []*AgentEvent
 		for {
 			event, ok := iterator.Next()
@@ -115,6 +115,9 @@ func TestChatModelAgentRun(t *testing.T) {
 				break
 			}
 			require.NoError(t, event.Err)
+			if se := event.SessionEventVariant; se != nil && se.Event != nil && se.Event.Span != nil {
+				continue
+			}
 			events = append(events, event)
 		}
 
@@ -282,7 +285,7 @@ func TestChatModelAgentRun(t *testing.T) {
 		input := &AgentInput{Messages: []Message{schema.UserMessage("use tool")}}
 		ctx = ctxWithNewTypedRunCtx(ctx, input, false)
 
-		iterator := agent.Run(ctx, input, withEnableSessionEvents())
+		iterator := agent.Run(ctx, input, withEnableSessionEvents(), WithTimelineEvents())
 		var events []*AgentEvent
 		for {
 			event, ok := iterator.Next()
@@ -290,6 +293,9 @@ func TestChatModelAgentRun(t *testing.T) {
 				break
 			}
 			require.NoError(t, event.Err)
+			if se := event.SessionEventVariant; se != nil && se.Event != nil && se.Event.Span != nil {
+				continue
+			}
 			events = append(events, event)
 		}
 

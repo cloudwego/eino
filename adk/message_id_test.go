@@ -579,11 +579,16 @@ func TestMessageID_WrapModelSyntheticAgenticGenerateGetsSingleID(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	iter := agent.Run(ctx, &TypedAgentInput[*schema.AgenticMessage]{
+	input := &TypedAgentInput[*schema.AgenticMessage]{
 		Messages:        []*schema.AgenticMessage{schema.UserAgenticMessage("hi")},
 		EnableStreaming: false,
-	})
+	}
+	iter := agent.Run(ctx, input, WithTimelineEvents())
 	event, ok := iter.Next()
+	for ok && event.Output == nil {
+		require.NoError(t, event.Err)
+		event, ok = iter.Next()
+	}
 	require.True(t, ok)
 	require.NoError(t, event.Err)
 	require.NotNil(t, event.Output)
