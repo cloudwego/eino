@@ -89,7 +89,7 @@ func (b *filesystemBackend) Get(ctx context.Context, name string) (Skill, error)
 		}
 	}
 
-	return Skill{}, fmt.Errorf("skill not found: %s", name)
+	return Skill{}, fmt.Errorf("%w: %s", ErrSkillNotFound, name)
 }
 
 func (b *filesystemBackend) list(ctx context.Context) ([]Skill, error) {
