@@ -53,12 +53,19 @@ type PendingSnapshot struct {
 	ToolInfos []byte `json:"tool_infos,omitempty"`
 }
 
+const coordinatorWriteProgressVersion = 2
+
+type coordinatorWriteProgress struct {
+	Version         int    `json:"version"`
+	AnchorMessageID string `json:"anchor_message_id,omitempty"`
+}
+
 type CoordinationConfig[M adk.MessageType] struct {
 	// SessionID is the logical session ID used to build the coordinator key.
 	// Optional. When empty, cross-turn coordination is disabled.
 	SessionID string
 
-	// Coordinator stores cursor/pending state and coordinates async extraction locks.
+	// Coordinator stores write progress/pending state and coordinates async extraction locks.
 	// Optional. Defaults to NewLocalCoordinator().
 	Coordinator Coordinator
 
@@ -160,6 +167,10 @@ func coordinatorCursorKey(key string) string {
 	return key + "::cursor"
 }
 
+func coordinatorWriteProgressKey(key string) string {
+	return key + "::progress_v2"
+}
+
 func coordinatorPendingSnapshotKey(key string) string {
 	return key + "::pending_snapshot"
 }
@@ -178,6 +189,49 @@ func getCoordinatorCursor(ctx context.Context, c Coordinator, key string) (int, 
 
 func setCoordinatorCursor(ctx context.Context, c Coordinator, key string, cursor int) error {
 	return c.Set(ctx, coordinatorCursorKey(key), []byte(fmt.Sprintf("%d", cursor)), 0)
+}
+
+func getCoordinatorWriteProgress(ctx context.Context, c Coordinator, key string) (*coordinatorWriteProgress, bool, error) {
+	raw, ok, err := c.Get(ctx, coordinatorWriteProgressKey(key))
+	if err != nil {
+		return nil, false, err
+	}
+	if ok {
+		var progress coordinatorWriteProgress
+		if err = json.Unmarshal(raw, &progress); err != nil {
+			return nil, false, err
+		}
+		if progress.Version != coordinatorWriteProgressVersion || progress.AnchorMessageID == "" {
+			return nil, false, fmt.Errorf("invalid coordinator write progress")
+		}
+		return &progress, true, nil
+	}
+
+	_, ok, err = getCoordinatorCursor(ctx, c, key)
+	if err != nil || !ok {
+		return nil, ok, err
+	}
+	return &coordinatorWriteProgress{Version: 1}, true, nil
+}
+
+func setCoordinatorWriteProgress(ctx context.Context, c Coordinator, key, anchorMessageID string, cursor int) error {
+	if anchorMessageID == "" {
+		return fmt.Errorf("invalid coordinator write progress: empty anchor message ID")
+	}
+	progress := coordinatorWriteProgress{
+		Version:         coordinatorWriteProgressVersion,
+		AnchorMessageID: anchorMessageID,
+	}
+	raw, err := json.Marshal(&progress)
+	if err != nil {
+		return err
+	}
+	if err := c.Set(ctx, coordinatorWriteProgressKey(key), raw, 0); err != nil {
+		return err
+	}
+
+	// Keep the legacy cursor updated while old and new instances coexist.
+	return setCoordinatorCursor(ctx, c, key, cursor)
 }
 
 func popCoordinatorPendingSnapshot(ctx context.Context, c Coordinator, key string) (*PendingSnapshot, error) {

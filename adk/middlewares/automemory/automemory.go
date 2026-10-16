@@ -232,8 +232,9 @@ const (
 )
 
 type memoryExtra struct {
-	Type   string
-	Cursor int
+	Type            string
+	Cursor          int
+	AnchorMessageID string
 }
 
 // New creates an automemory middleware from the provided configuration.
@@ -301,14 +302,13 @@ func (m *middleware[M]) BeforeAgent(ctx context.Context, runCtx *adk.TypedChatMo
 	}
 	nRunCtx := *runCtx
 
-	// Sync distributed write cursor back into message extras so later runs on other
-	// machines still carry a transcript-local marker.
+	// Sync distributed write progress back into message extras so later runs on
+	// other machines still carry a transcript-local marker.
 	if nRunCtx.AgentInput != nil && len(nRunCtx.AgentInput.Messages) > 0 && m.coordination != nil && m.coordination.Coordinator != nil {
 		if sessionID, err := m.resolveSessionID(ctx, &adk.TypedChatModelAgentState[M]{Messages: nRunCtx.AgentInput.Messages}); err == nil && sessionID != "" {
-			localCursor := getWriteCursorFromMessages(nRunCtx.AgentInput.Messages)
 			coordKey := m.coordinatorKey(sessionID)
-			if remoteCursor, ok, err := getCoordinatorCursor(ctx, m.coordination.Coordinator, coordKey); err == nil && ok && remoteCursor > localCursor {
-				st := markWriteCursor(&adk.TypedChatModelAgentState[M]{Messages: nRunCtx.AgentInput.Messages}, remoteCursor)
+			if cursor, remoteAhead, _ := m.resolveWriteCursor(ctx, nRunCtx.AgentInput.Messages, coordKey); remoteAhead {
+				st := markWriteCursor(&adk.TypedChatModelAgentState[M]{Messages: nRunCtx.AgentInput.Messages}, cursor)
 				if st != nil {
 					nRunCtx.AgentInput = &adk.TypedAgentInput[M]{
 						Messages:        st.Messages,
@@ -834,33 +834,26 @@ func (m *middleware[M]) AfterAgent(ctx context.Context, state *adk.TypedChatMode
 	}
 	coordKey := m.coordinatorKey(sessionID)
 
-	cursor := getWriteCursorFromMessages(state.Messages)
-	if coordKey != "" {
-		if remoteCursor, ok, err := getCoordinatorCursor(ctx, m.coordination.Coordinator, coordKey); err == nil && ok && remoteCursor > cursor {
-			cursor = remoteCursor
-			state = markWriteCursor(state, cursor)
-		}
+	cursor, remoteAhead, transcriptRebased := m.resolveWriteCursor(ctx, state.Messages, coordKey)
+	if remoteAhead {
+		state = markWriteCursor(state, cursor)
 	}
 	if cursor >= len(state.Messages) {
 		return ctx, nil
 	}
 
 	// Skip background extraction if the main agent already wrote memory files in this range.
-	if hasMemoryWritesSince(state.Messages, cursor, m.resolvedMemoryDirectory) {
+	// After a transcript rebase there is no reliable range boundary, so historical
+	// writes must not suppress at-least-once extraction of the current snapshot.
+	if !transcriptRebased && hasMemoryWritesSince(state.Messages, cursor, m.resolvedMemoryDirectory) {
 		end := len(state.Messages)
-		if coordKey != "" {
-			_ = setCoordinatorCursor(ctx, m.coordination.Coordinator, coordKey, end)
-		}
-		state = markWriteCursor(state, end)
+		m.commitWriteProgress(ctx, state, coordKey, end)
 		return ctx, nil
 	}
 
 	if countModelVisibleMessages(state.Messages[cursor:]) == 0 {
 		end := len(state.Messages)
-		if coordKey != "" {
-			_ = setCoordinatorCursor(ctx, m.coordination.Coordinator, coordKey, end)
-		}
-		state = markWriteCursor(state, end)
+		m.commitWriteProgress(ctx, state, coordKey, end)
 		return ctx, nil
 	}
 
@@ -875,10 +868,7 @@ func (m *middleware[M]) AfterAgent(ctx context.Context, state *adk.TypedChatMode
 			m.onErr(ctx, OnErrorStageMemoryWriteSync, err)
 			return ctx, nil
 		}
-		if coordKey != "" {
-			_ = setCoordinatorCursor(ctx, m.coordination.Coordinator, coordKey, end)
-		}
-		state = markWriteCursor(state, end)
+		m.commitWriteProgress(ctx, state, coordKey, end)
 		return ctx, nil
 
 	case WriteModeAsync:
@@ -887,9 +877,10 @@ func (m *middleware[M]) AfterAgent(ctx context.Context, state *adk.TypedChatMode
 				m.onErr(ctx, OnErrorStageMemoryWriteSync, err)
 				return ctx, nil
 			}
-			state = markWriteCursor(state, len(state.Messages))
+			m.commitWriteProgress(ctx, state, "", len(state.Messages))
 			return ctx, nil
 		}
+		ensureWriteProgressAnchor(state.Messages, len(state.Messages))
 		snap, err := buildPendingSnapshot(state.Messages, cursor, state.ToolInfos)
 		if err != nil {
 			m.onErr(ctx, OnErrorStageSnapshotMarshal, err)
@@ -932,7 +923,7 @@ func (m *middleware[M]) runExtractionDrain(ctx context.Context, coordKey string,
 		} else if err := m.runMemoryExtractionAgent(ctx, msgs, cursor, toolInfos); err != nil {
 			m.onErr(ctx, OnErrorStageMemoryWriteAsync, err)
 		} else {
-			_ = setCoordinatorCursor(ctx, m.coordination.Coordinator, coordKey, len(msgs))
+			m.commitWriteProgress(ctx, &adk.TypedChatModelAgentState[M]{Messages: msgs}, coordKey, len(msgs))
 		}
 
 		next, loadErr := popCoordinatorPendingSnapshot(ctx, m.coordination.Coordinator, coordKey)
