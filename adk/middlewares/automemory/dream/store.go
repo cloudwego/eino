@@ -18,6 +18,9 @@ package dream
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"fmt"
 	"sync"
 	"time"
 )
@@ -31,14 +34,27 @@ type ScheduleState struct {
 	NextCheckAt time.Time
 }
 
+// SessionTouch identifies one version of a session's pending dream signal.
+type SessionTouch struct {
+	SessionID string
+	TouchedAt time.Time
+	// Version must change every time RecordSessionTouch updates the session.
+	Version string
+}
+
 // Store persists middleware scheduling state for one resolved `MemoryDirectory`,
 // including touched sessions, backoff state, and the run lock.
 type Store interface {
 	// RecordSessionTouch records that a session produced new signal.
 	RecordSessionTouch(ctx context.Context, memoryDir, sessionID string, at time.Time) error
 
-	// ListSessionsTouchedSince returns distinct sessions touched after `since`.
-	ListSessionsTouchedSince(ctx context.Context, memoryDir string, since time.Time) ([]string, error)
+	// ListSessionTouches returns a stable snapshot containing the latest
+	// unacknowledged touch for each session.
+	ListSessionTouches(ctx context.Context, memoryDir string) ([]SessionTouch, error)
+
+	// AcknowledgeSessionTouches atomically removes only touch versions that still
+	// match. A session touched again during a dream run must remain pending.
+	AcknowledgeSessionTouches(ctx context.Context, memoryDir string, touches []SessionTouch) error
 
 	// GetScheduleState loads the scheduling state for one memory directory.
 	GetScheduleState(ctx context.Context, memoryDir string) (*ScheduleState, error)
@@ -54,18 +70,23 @@ type Store interface {
 
 type localStore struct {
 	mu      sync.Mutex
-	touches map[string]map[string]time.Time
+	touches map[string]map[string]SessionTouch
 	states  map[string]ScheduleState
-	locks   map[string]time.Time
+	locks   map[string]localRunLock
+}
+
+type localRunLock struct {
+	token  string
+	expiry time.Time
 }
 
 // NewLocalStore returns an in-process `Store`.
 // It is suitable for tests and single-process use only.
 func NewLocalStore() Store {
 	return &localStore{
-		touches: make(map[string]map[string]time.Time),
+		touches: make(map[string]map[string]SessionTouch),
 		states:  make(map[string]ScheduleState),
-		locks:   make(map[string]time.Time),
+		locks:   make(map[string]localRunLock),
 	}
 }
 
@@ -73,9 +94,13 @@ func (s *localStore) RecordSessionTouch(_ context.Context, memoryDir, sessionID 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.touches[memoryDir] == nil {
-		s.touches[memoryDir] = make(map[string]time.Time)
+		s.touches[memoryDir] = make(map[string]SessionTouch)
 	}
-	s.touches[memoryDir][sessionID] = at
+	s.touches[memoryDir][sessionID] = SessionTouch{
+		SessionID: sessionID,
+		TouchedAt: at,
+		Version:   newStoreToken(),
+	}
 	st := s.states[memoryDir]
 	if st.NextCheckAt.IsZero() {
 		st.NextCheckAt = at
@@ -84,20 +109,33 @@ func (s *localStore) RecordSessionTouch(_ context.Context, memoryDir, sessionID 
 	return nil
 }
 
-func (s *localStore) ListSessionsTouchedSince(_ context.Context, memoryDir string, since time.Time) ([]string, error) {
+func (s *localStore) ListSessionTouches(_ context.Context, memoryDir string) ([]SessionTouch, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	items := s.touches[memoryDir]
 	if len(items) == 0 {
 		return nil, nil
 	}
-	out := make([]string, 0, len(items))
-	for sessionID, touchedAt := range items {
-		if touchedAt.After(since) {
-			out = append(out, sessionID)
-		}
+	out := make([]SessionTouch, 0, len(items))
+	for _, touch := range items {
+		out = append(out, touch)
 	}
 	return out, nil
+}
+
+func (s *localStore) AcknowledgeSessionTouches(_ context.Context, memoryDir string, touches []SessionTouch) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	current := s.touches[memoryDir]
+	for _, touch := range touches {
+		if latest, ok := current[touch.SessionID]; ok && latest.Version == touch.Version {
+			delete(current, touch.SessionID)
+		}
+	}
+	if len(current) == 0 {
+		delete(s.touches, memoryDir)
+	}
+	return nil
 }
 
 func (s *localStore) GetScheduleState(_ context.Context, memoryDir string) (*ScheduleState, error) {
@@ -122,14 +160,29 @@ func (s *localStore) SetScheduleState(_ context.Context, memoryDir string, state
 func (s *localStore) AcquireRunLock(_ context.Context, memoryDir string, ttl time.Duration) (func(context.Context) error, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if until, ok := s.locks[memoryDir]; ok && until.After(time.Now()) {
+	now := time.Now()
+	if lock, ok := s.locks[memoryDir]; ok && lock.expiry.After(now) {
 		return nil, false, nil
 	}
-	s.locks[memoryDir] = time.Now().Add(ttl)
+	token := newStoreToken()
+	s.locks[memoryDir] = localRunLock{token: token, expiry: now.Add(ttl)}
 	return func(context.Context) error {
 		s.mu.Lock()
 		defer s.mu.Unlock()
+		lock, ok := s.locks[memoryDir]
+		if !ok {
+			return nil
+		}
+		if lock.token != token {
+			return fmt.Errorf("dream: lock token mismatch")
+		}
 		delete(s.locks, memoryDir)
 		return nil
 	}, true, nil
+}
+
+func newStoreToken() string {
+	var value [8]byte
+	_, _ = rand.Read(value[:])
+	return hex.EncodeToString(value[:])
 }
