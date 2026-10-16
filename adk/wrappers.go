@@ -557,28 +557,45 @@ func (m *typedEventSenderModel[M]) Generate(ctx context.Context, input []M, opts
 		result = ensureMessageIDCOW(result)
 	}
 	ended := newEventTimestamp()
-	sendSessionTimelineEvent(ctx, newModelSpanEndEvent(ctx, modelSpanEndEventInput[M]{
+	completion := modelSpanEndEventInput[M]{
 		spanID:       spanID,
 		startEventID: startEvent.EventID,
 		started:      started,
 		ended:        ended,
 		msg:          result,
 		err:          err,
-		accepted:     err == nil,
-	}, opts...))
+	}
 	if err != nil {
+		sendSessionTimelineEvent(ctx, newModelSpanEndEvent(ctx, completion, opts...))
 		var zero M
 		return zero, err
 	}
-	timestamp := newEventTimestamp()
-
+	complete := func(accepted bool, verdictErr error) error {
+		completion.accepted = accepted
+		completion.err = verdictErr
+		sendSessionTimelineEvent(ctx, newModelSpanEndEvent(ctx, completion, opts...))
+		if !accepted {
+			return nil
+		}
+		return sendGenerateOutput(ctx, spanID, result)
+	}
 	execCtx := getTypedChatModelAgentExecCtx[M](ctx)
 	if execCtx != nil && execCtx.suppressEventSend {
+		execCtx.completeGenerate = complete
 		return result, nil
 	}
-	if execCtx == nil || execCtx.generator == nil {
+	if completionErr := complete(true, nil); completionErr != nil {
 		var zero M
-		return zero, errors.New("generator is nil when sending event in Generate: ensure agent state is properly initialized")
+		return zero, completionErr
+	}
+	return result, nil
+}
+
+func sendGenerateOutput[M MessageType](ctx context.Context, spanID string, result M) error {
+	timestamp := newEventTimestamp()
+	execCtx := getTypedChatModelAgentExecCtx[M](ctx)
+	if execCtx == nil || execCtx.generator == nil {
+		return errors.New("generator is nil when sending event in Generate: ensure agent state is properly initialized")
 	}
 
 	// Build a SessionEventMessage draft for the assistant message and route
@@ -588,9 +605,9 @@ func (m *typedEventSenderModel[M]) Generate(ctx context.Context, input []M, opts
 	assistantDraft := &SessionEvent[M]{Timestamp: timestamp, Kind: SessionEventMessage, Message: copyMessage(result)}
 	sc := sessionEventContextFromContext[M](ctx)
 	stampSessionEventTurnID(assistantDraft, sc.turnID)
-	if err := prepareSessionEventEnvelope(ctx, assistantDraft, sc.generator, sc.provider, sessionEventEnvelopeOptions{}); err != nil {
-		var zero M
-		return zero, err
+	envelopeOptions := sessionEventEnvelopeOptions{}
+	if err := prepareSessionEventEnvelope(ctx, assistantDraft, sc.generator, sc.provider, envelopeOptions); err != nil {
+		return err
 	}
 	assistantMsgEventID := assistantDraft.EventID
 
@@ -610,7 +627,7 @@ func (m *typedEventSenderModel[M]) Generate(ctx context.Context, input []M, opts
 	event.SessionEventVariant = &SessionEventVariant[M]{Event: assistantDraft}
 	execCtx.send(ctx, event)
 
-	return result, nil
+	return nil
 }
 
 func (m *typedEventSenderModel[M]) Stream(ctx context.Context, input []M, opts ...model.Option) (*schema.StreamReader[M], error) {

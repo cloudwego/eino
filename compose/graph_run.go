@@ -592,7 +592,6 @@ func (r *runner) handleInterrupt(
 		State:           cp.State,
 		AfterNodes:      tempInfo.interruptAfterNodes,
 		BeforeNodes:     tempInfo.interruptBeforeNodes,
-		RerunNodes:      tempInfo.interruptRerunNodes,
 		RerunNodesExtra: tempInfo.interruptRerunExtra,
 		SubGraphs:       make(map[string]*InterruptInfo),
 	}
@@ -613,6 +612,8 @@ func (r *runner) handleInterrupt(
 	if err != nil {
 		return fmt.Errorf("failed to convert checkpoint: %w", err)
 	}
+	// Materializing tool streams can replace downstream reruns with the producer.
+	intInfo.RerunNodes = cp.RerunNodes
 	if isSubGraph {
 		subGraphInterrupt := &subGraphInterruptError{
 			Info:       intInfo,
@@ -738,7 +739,6 @@ func (r *runner) handleInterruptWithSubGraphAndRerunNodes(
 		State:           cp.State,
 		BeforeNodes:     tempInfo.interruptBeforeNodes,
 		AfterNodes:      tempInfo.interruptAfterNodes,
-		RerunNodes:      tempInfo.interruptRerunNodes,
 		RerunNodesExtra: tempInfo.interruptRerunExtra,
 		SubGraphs:       make(map[string]*InterruptInfo),
 	}
@@ -769,6 +769,13 @@ func (r *runner) handleInterruptWithSubGraphAndRerunNodes(
 	err = r.checkPointer.convertCheckPoint(cp, isStream, is)
 	if err != nil {
 		return fmt.Errorf("failed to convert checkpoint: %w", err)
+	}
+	// Nested resumptions are exposed through SubGraphs, not RerunNodes.
+	for _, nodeKey := range cp.RerunNodes {
+		if _, hasSubGraph := intInfo.SubGraphs[nodeKey]; hasSubGraph {
+			continue
+		}
+		intInfo.RerunNodes = append(intInfo.RerunNodes, nodeKey)
 	}
 	if isSubGraph {
 		subGraphInterrupt := &subGraphInterruptError{

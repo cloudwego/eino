@@ -5494,7 +5494,7 @@ func TestSessionEvent_StreamCopyConcat_ByteIdentical(t *testing.T) {
 
 // TestExplicitCheckpointResume_WithSessionMode verifies that when a caller passes
 // an explicit checkpoint ID alongside a configured SessionID/SessionStore[*schema.Message], the
-// resume path still loads reconstructed session state.
+// resume path restores model context without retaining reconstructed messages.
 func TestExplicitCheckpointResume_WithSessionMode(t *testing.T) {
 	ctx := context.Background()
 	store := newSessionHelperStore()
@@ -5510,6 +5510,12 @@ func TestExplicitCheckpointResume_WithSessionMode(t *testing.T) {
 		se := withTestEventID(&SessionEvent[*schema.Message]{Message: m})
 		require.NoError(t, store.AppendEventsForSession(ctx, sid, []*SessionEvent[*schema.Message]{se}))
 	}
+	modelContext := &ModelContextEvent{
+		ToolInfos:         []*schema.ToolInfo{{Name: "lookup"}},
+		DeferredToolInfos: []*schema.ToolInfo{{Name: "search"}},
+	}
+	contextEvent := withTestEventID(&SessionEvent[*schema.Message]{ModelContext: modelContext})
+	require.NoError(t, store.AppendEventsForSession(ctx, sid, []*SessionEvent[*schema.Message]{contextEvent}))
 	committedIdleSE := withTestCommittedIdle[*schema.Message]("turn-1")
 	require.NoError(t, store.AppendEventsForSession(ctx, sid, []*SessionEvent[*schema.Message]{committedIdleSE}))
 
@@ -5526,8 +5532,10 @@ func TestExplicitCheckpointResume_WithSessionMode(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, state.enabled, "session mode must remain enabled when an explicit checkpoint ID is supplied")
 	require.NotNil(t, state.latestState)
-	assert.Equal(t, 2, len(state.latestState.Messages),
-		"latest snapshot must be loaded for explicit-checkpoint resume in session mode")
+	assert.Nil(t, state.latestState.Messages)
+	assert.True(t, state.latestState.sawModelContext)
+	assert.Equal(t, modelContext.ToolInfos, state.latestState.ToolInfos)
+	assert.Equal(t, modelContext.DeferredToolInfos, state.latestState.DeferredToolInfos)
 	assert.Equal(t, explicitCheckpointID, effective,
 		"caller-supplied checkpoint ID must be preserved")
 }
@@ -5555,8 +5563,8 @@ func TestPrepareRunnerSessionResume_LegacyCheckpointUsesResumeEventTurnID(t *tes
 	assert.Equal(t, resumeEvent.EventID, resumeEvent.TurnID)
 }
 
-// TestResumePath_TailReplay verifies that the resume path also performs tail
-// replay (uses the same fast path as the run path).
+// TestResumePath_TailReplay verifies that resume restores model context from the
+// log tail without retaining the reconstructed message history.
 func TestResumePath_TailReplay(t *testing.T) {
 	ctx := context.Background()
 	store := newSessionHelperStore()
@@ -5578,6 +5586,12 @@ func TestResumePath_TailReplay(t *testing.T) {
 	EnsureMessageID(tailMsg)
 	se := withTestEventID(&SessionEvent[*schema.Message]{Message: tailMsg})
 	require.NoError(t, store.AppendEventsForSession(ctx, sid, []*SessionEvent[*schema.Message]{se}))
+	modelContext := &ModelContextEvent{
+		ToolInfos:         []*schema.ToolInfo{{Name: "lookup"}},
+		DeferredToolInfos: []*schema.ToolInfo{{Name: "search"}},
+	}
+	contextEvent := withTestEventID(&SessionEvent[*schema.Message]{ModelContext: modelContext})
+	require.NoError(t, store.AppendEventsForSession(ctx, sid, []*SessionEvent[*schema.Message]{contextEvent}))
 
 	// Seed a runner session checkpoint so the resume path finds something to load.
 	cpStore := newSessionHelperStore()
@@ -5589,11 +5603,10 @@ func TestResumePath_TailReplay(t *testing.T) {
 
 	state, _, err := prepareRunnerSessionResume[*schema.Message](ctx, cpStore, sid, store, nil, "")
 	require.NoError(t, err)
-	require.Len(t, state.latestState.Messages, 3,
-		"resume boot state should include durable context events through the log tail")
-	assert.Equal(t, "Q", state.latestState.Messages[0].Content)
-	assert.Equal(t, "A", state.latestState.Messages[1].Content)
-	assert.Equal(t, "post-snapshot", state.latestState.Messages[2].Content)
+	assert.Nil(t, state.latestState.Messages)
+	assert.True(t, state.latestState.sawModelContext)
+	assert.Equal(t, modelContext.ToolInfos, state.latestState.ToolInfos)
+	assert.Equal(t, modelContext.DeferredToolInfos, state.latestState.DeferredToolInfos)
 }
 
 // Ensure the io package import is used (for compile when chunks are empty).

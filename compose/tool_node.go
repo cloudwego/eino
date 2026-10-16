@@ -81,7 +81,7 @@ func WithToolAliases(toolAliases map[string]ToolAliasConfig) ToolsNodeOption {
 type ToolsNode struct {
 	tuple                             *toolsTuple
 	tools                             []tool.BaseTool
-	unknownToolHandler                func(ctx context.Context, name, input string) (string, error)
+	unknownToolEndpoint               InvokableToolEndpoint
 	executeSequentially               bool
 	toolArgumentsHandler              func(ctx context.Context, name, input string) (string, error)
 	toolCallMiddlewares               []invokableToolMiddlewareSpec
@@ -325,11 +325,15 @@ func NewToolNode(ctx context.Context, conf *ToolsNodeConfig) (*ToolsNode, error)
 	if err != nil {
 		return nil, err
 	}
+	var unknownToolEndpoint InvokableToolEndpoint
+	if conf.UnknownToolsHandler != nil {
+		unknownToolEndpoint = wrapUnknownToolCall(conf.UnknownToolsHandler, middlewares)
+	}
 
 	return &ToolsNode{
 		tuple:                             tuple,
 		tools:                             conf.Tools,
-		unknownToolHandler:                conf.UnknownToolsHandler,
+		unknownToolEndpoint:               unknownToolEndpoint,
 		executeSequentially:               conf.ExecuteSequentially,
 		toolArgumentsHandler:              conf.ToolArgumentsHandler,
 		toolCallMiddlewares:               middlewares,
@@ -833,12 +837,13 @@ func wrapInvokableToolMiddleware(spec invokableToolMiddlewareSpec, next Invokabl
 	if spec.name == "" {
 		return spec.fn(next)
 	}
+	inner := func(ctx context.Context, input *ToolInput) (*ToolOutput, error) {
+		return next(core.PopAddressSegment(ctx), input)
+	}
+	wrapped := spec.fn(inner)
 	return func(ctx context.Context, input *ToolInput) (*ToolOutput, error) {
 		mwCtx := core.AppendAddressSegment(ctx, AddressSegmentMiddleware, spec.name, "")
-		inner := func(ctx context.Context, input *ToolInput) (*ToolOutput, error) {
-			return next(core.PopAddressSegment(ctx), input)
-		}
-		return spec.fn(inner)(mwCtx, input)
+		return wrapped(mwCtx, input)
 	}
 }
 
@@ -846,12 +851,13 @@ func wrapStreamableToolMiddleware(spec streamableToolMiddlewareSpec, next Stream
 	if spec.name == "" {
 		return spec.fn(next)
 	}
+	inner := func(ctx context.Context, input *ToolInput) (*StreamToolOutput, error) {
+		return next(core.PopAddressSegment(ctx), input)
+	}
+	wrapped := spec.fn(inner)
 	return func(ctx context.Context, input *ToolInput) (*StreamToolOutput, error) {
 		mwCtx := core.AppendAddressSegment(ctx, AddressSegmentMiddleware, spec.name, "")
-		inner := func(ctx context.Context, input *ToolInput) (*StreamToolOutput, error) {
-			return next(core.PopAddressSegment(ctx), input)
-		}
-		return spec.fn(inner)(mwCtx, input)
+		return wrapped(mwCtx, input)
 	}
 }
 
@@ -859,12 +865,13 @@ func wrapEnhancedInvokableToolMiddleware(spec enhancedInvokableToolMiddlewareSpe
 	if spec.name == "" {
 		return spec.fn(next)
 	}
+	inner := func(ctx context.Context, input *ToolInput) (*EnhancedInvokableToolOutput, error) {
+		return next(core.PopAddressSegment(ctx), input)
+	}
+	wrapped := spec.fn(inner)
 	return func(ctx context.Context, input *ToolInput) (*EnhancedInvokableToolOutput, error) {
 		mwCtx := core.AppendAddressSegment(ctx, AddressSegmentMiddleware, spec.name, "")
-		inner := func(ctx context.Context, input *ToolInput) (*EnhancedInvokableToolOutput, error) {
-			return next(core.PopAddressSegment(ctx), input)
-		}
-		return spec.fn(inner)(mwCtx, input)
+		return wrapped(mwCtx, input)
 	}
 }
 
@@ -872,12 +879,13 @@ func wrapEnhancedStreamableToolMiddleware(spec enhancedStreamableToolMiddlewareS
 	if spec.name == "" {
 		return spec.fn(next)
 	}
+	inner := func(ctx context.Context, input *ToolInput) (*EnhancedStreamableToolOutput, error) {
+		return next(core.PopAddressSegment(ctx), input)
+	}
+	wrapped := spec.fn(inner)
 	return func(ctx context.Context, input *ToolInput) (*EnhancedStreamableToolOutput, error) {
 		mwCtx := core.AppendAddressSegment(ctx, AddressSegmentMiddleware, spec.name, "")
-		inner := func(ctx context.Context, input *ToolInput) (*EnhancedStreamableToolOutput, error) {
-			return next(core.PopAddressSegment(ctx), input)
-		}
-		return spec.fn(inner)(mwCtx, input)
+		return wrapped(mwCtx, input)
 	}
 }
 
@@ -1050,15 +1058,14 @@ func (tn *ToolsNode) genToolCallTasks(ctx context.Context, tuple *toolsTuple,
 		}
 		index, ok := tuple.indexes[toolCall.Function.Name]
 		if !ok {
-			if tn.unknownToolHandler == nil {
+			if tn.unknownToolEndpoint == nil {
 				return nil, fmt.Errorf("tool %s not found in toolsNode indexes", toolCall.Function.Name)
 			}
 			toolCallTasks[i] = newUnknownToolTask(
 				toolCall.Function.Name,
 				toolCall.Function.Arguments,
 				toolCall.ID,
-				tn.unknownToolHandler,
-				tn.toolCallMiddlewares,
+				tn.unknownToolEndpoint,
 			)
 		} else {
 			toolCallTasks[i].meta = tuple.meta[index]
@@ -1103,11 +1110,7 @@ func (tn *ToolsNode) genToolCallTasks(ctx context.Context, tuple *toolsTuple,
 	return toolCallTasks, nil
 }
 
-func newUnknownToolTask(
-	name, arg, callID string,
-	unknownToolHandler func(ctx context.Context, name, input string) (string, error),
-	middlewares []invokableToolMiddlewareSpec,
-) toolCallTask {
+func wrapUnknownToolCall(unknownToolHandler func(ctx context.Context, name, input string) (string, error), middlewares []invokableToolMiddlewareSpec) InvokableToolEndpoint {
 	endpoint := func(ctx context.Context, input *ToolInput) (*ToolOutput, error) {
 		result, err := unknownToolHandler(ctx, input.Name, input.Arguments)
 		if err != nil {
@@ -1120,6 +1123,10 @@ func newUnknownToolTask(
 	for i := len(middlewares) - 1; i >= 0; i-- {
 		endpoint = wrapInvokableToolMiddleware(middlewares[i], endpoint)
 	}
+	return endpoint
+}
+
+func newUnknownToolTask(name, arg, callID string, endpoint InvokableToolEndpoint) toolCallTask {
 	return toolCallTask{
 		endpoint:       endpoint,
 		streamEndpoint: invokableToStreamable(endpoint),

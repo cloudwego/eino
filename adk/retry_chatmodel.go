@@ -453,22 +453,23 @@ func generateWithShouldRetry[M MessageType](r *typedRetryModelWrapper[M], ctx co
 			return nil
 		})
 
-		// Suppress event sending during Generate: the ShouldRetry callback must decide whether
-		// to accept or reject the result before any event is emitted. If accepted, the event
-		// is sent explicitly below (lines after decision check). If rejected, no event leaks.
+		// Defer span completion and output submission until ShouldRetry decides.
 		if execCtx != nil {
 			execCtx.suppressEventSend = true
+			execCtx.completeGenerate = nil
 		}
 		out, err := r.inner.Generate(ctx, currentInput, currentOpts...)
+		var complete func(bool, error) error
 		if execCtx != nil {
 			execCtx.suppressEventSend = false
+			complete = execCtx.completeGenerate
+			execCtx.completeGenerate = nil
 		}
 
 		if err != nil {
 			if _, ok := compose.ExtractInterruptInfo(err); ok {
 				return zero, err
 			}
-
 			if errors.Is(err, ErrStreamCanceled) {
 				return zero, err
 			}
@@ -486,24 +487,27 @@ func generateWithShouldRetry[M MessageType](r *typedRetryModelWrapper[M], ctx co
 			decision = &TypedRetryDecision[M]{}
 		}
 
+		verdictErr := err
+		if !decision.Retry && decision.RewriteError != nil {
+			verdictErr = decision.RewriteError
+		}
+		if decision.Retry && verdictErr == nil {
+			verdictErr = fmt.Errorf("model output rejected by ShouldRetry at attempt %d", attempt+1)
+		}
+		if complete != nil {
+			if completionErr := complete(!decision.Retry && verdictErr == nil, verdictErr); completionErr != nil {
+				return zero, completionErr
+			}
+		}
+
 		if !decision.Retry {
-			if decision.RewriteError != nil {
-				return zero, decision.RewriteError
-			}
-			if err != nil {
-				return zero, err
-			}
-			if execCtx != nil && execCtx.generator != nil && out != nil {
-				event := typedModelOutputEvent(out, nil)
-				execCtx.send(ctx, event)
+			if verdictErr != nil {
+				return zero, verdictErr
 			}
 			return out, nil
 		}
 
-		lastErr = err
-		if lastErr == nil {
-			lastErr = fmt.Errorf("model output rejected by ShouldRetry at attempt %d", attempt+1)
-		}
+		lastErr = verdictErr
 
 		if attempt >= r.config.MaxRetries {
 			break

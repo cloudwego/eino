@@ -52,10 +52,9 @@ type typedChatModelAgentExecCtx[M MessageType] struct {
 
 	failoverLastSuccessModel model.BaseModel[M]
 
-	// suppressEventSend prevents eventSenderModel from emitting AgentEvents for the current
-	// Generate call. Set to true before each rejected retry attempt and reset to false after.
-	// Invariant: any code path that emits model output events MUST check this flag.
+	// Successful Generate calls wait for ShouldRetry before ending the span or accepting output.
 	suppressEventSend  bool
+	completeGenerate   func(accepted bool, verdictErr error) error
 	retryVerdictSignal *retryVerdictSignal
 
 	afterToolCallsHook     func(ctx context.Context) error
@@ -75,6 +74,12 @@ func (e *typedChatModelAgentExecCtx[M]) send(ctx context.Context, event *TypedAg
 	}
 	if event == nil {
 		return
+	}
+	if !e.timelineEvents && !e.internalTimelineEvents {
+		event = stripSessionEventFields(event)
+		if event == nil {
+			return
+		}
 	}
 	ensureTypedAgentEventMessageIDs(event)
 	sc := sessionEventContextFromContext[M](ctx)
