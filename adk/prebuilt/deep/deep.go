@@ -148,7 +148,8 @@ type TypedConfig[M adk.MessageType] struct {
 	// WithoutGeneralSubAgent disables the general-purpose subagent when set to true.
 	WithoutGeneralSubAgent bool
 	// TaskToolDescriptionGenerator allows customizing the description for the task tool.
-	// If provided, this function generates the tool description based on available subagents.
+	// If provided, this function returns the complete tool description based on available
+	// subagents. The returned string is used verbatim.
 	TaskToolDescriptionGenerator func(ctx context.Context, availableAgents []adk.TypedAgent[M]) (string, error)
 
 	Middlewares []adk.AgentMiddleware
