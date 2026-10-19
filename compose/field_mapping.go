@@ -332,6 +332,13 @@ func assignOne(destValue reflect.Value, taken any, to string) reflect.Value {
 			if !valueValue.IsValid() {
 				valueValue = newInstanceByType(destValue.Type().Elem())
 				destValue.SetMapIndex(keyValue, valueValue)
+			} else if !valueValue.CanAddr() {
+				// Values read back from a map are not addressable, so assigning
+				// to a nested field would panic. Copy into an addressable value;
+				// it is written back via SetMapIndex once the field is set.
+				addr := reflect.New(destValue.Type().Elem()).Elem()
+				addr.Set(valueValue)
+				valueValue = addr
 			}
 
 			if parentMap.IsValid() {
