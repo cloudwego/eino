@@ -1086,17 +1086,26 @@ func TestLegacyInterrupt(t *testing.T) {
 	assert.True(t, isInterrupt2)
 	assert.Len(t, info2.InterruptContexts, 3, "Should have the same number of interrupts on re-run")
 
+	// Collect the latest interrupt IDs from the second invocation.
+	// Legacy interrupts have deterministic address-based IDs (stable across runs),
+	// but modern interrupts (Interrupt()) use random UUIDs that change on each run.
+	// We must use the IDs from the most recent invocation to match the checkpoint state.
+	addrToID2 := make(map[string]string)
+	for _, iCtx := range info2.InterruptContexts {
+		addrToID2[iCtx.Address.String()] = iCtx.ID
+	}
+
 	// 7. Third invocation - Resume all three interrupt points with specific data
 	resumeData := map[string]any{
-		addrToID[expectedID1]: "output1",
-		addrToID[expectedID2]: "output2",
-		addrToID[expectedID3]: "output3",
+		addrToID2[expectedID1]: "output1",
+		addrToID2[expectedID2]: "output2",
+		addrToID2[expectedID3]: "output3",
 	}
 	resumeCtx := BatchResumeWithData(context.Background(), resumeData)
-	// TODO: The legacy interrupt wrapping does not currently work correctly with BatchResumeWithData.
-	// The graph re-interrupts instead of completing. This should be fixed in the core framework.
-	_, err = compiledGraph.Invoke(resumeCtx, "input", WithCheckPointID(checkPointID))
-	assert.Error(t, err)
+	finalOutput, err := compiledGraph.Invoke(resumeCtx, "input", WithCheckPointID(checkPointID))
+	assert.NoError(t, err)
+	// Each sub-process returns its resume data, and the composite lambda appends " " + its own data (empty).
+	assert.Equal(t, "output1output2output3 ", finalOutput)
 }
 
 type wrapperToolForTest struct {
