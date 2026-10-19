@@ -348,11 +348,6 @@ func typedGenModelInput[M adk.MessageType](_ context.Context, instruction string
 		msgs := make([]*schema.Message, 0, len(input.Messages)+1)
 		inputMessages := input.Messages
 		if instruction != "" {
-			if len(inputMessages) > 0 {
-				if msg, ok := any(inputMessages[0]).(*schema.Message); ok && msg.Role == schema.System {
-					inputMessages = inputMessages[1:]
-				}
-			}
 			msgs = append(msgs, schema.SystemMessage(instruction))
 		}
 		// Type assertion is safe here because M = *schema.Message.
@@ -368,11 +363,6 @@ func typedGenModelInput[M adk.MessageType](_ context.Context, instruction string
 		msgs := make([]*schema.AgenticMessage, 0, len(input.Messages)+1)
 		inputMessages := input.Messages
 		if instruction != "" {
-			if len(inputMessages) > 0 {
-				if msg, ok := any(inputMessages[0]).(*schema.AgenticMessage); ok && msg.Role == schema.AgenticRoleTypeSystem {
-					inputMessages = inputMessages[1:]
-				}
-			}
 			msgs = append(msgs, schema.SystemAgenticMessage(instruction))
 		}
 		for _, m := range inputMessages {

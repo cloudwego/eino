@@ -237,7 +237,7 @@ func TestGenModelInput(t *testing.T) {
 		assert.Equal(t, "hello", msgs[1].Content)
 	})
 
-	t.Run("WithInstructionStripsLeadingSystemMessage", func(t *testing.T) {
+	t.Run("WithInstructionPreservesLeadingSystemMessage", func(t *testing.T) {
 		input := &adk.AgentInput{
 			Messages: []*schema.Message{
 				schema.SystemMessage("old"),
@@ -247,11 +247,11 @@ func TestGenModelInput(t *testing.T) {
 
 		msgs, err := typedGenModelInput(ctx, "new", input)
 		assert.NoError(t, err)
-		assert.Len(t, msgs, 2)
+		assert.Len(t, msgs, 3)
 		assert.Equal(t, schema.System, msgs[0].Role)
 		assert.Equal(t, "new", msgs[0].Content)
-		assert.Equal(t, schema.User, msgs[1].Role)
-		assert.Equal(t, "hello", msgs[1].Content)
+		assert.Same(t, input.Messages[0], msgs[1])
+		assert.Same(t, input.Messages[1], msgs[2])
 
 		systemCount := 0
 		for _, msg := range msgs {
@@ -259,10 +259,10 @@ func TestGenModelInput(t *testing.T) {
 				systemCount++
 			}
 		}
-		assert.Equal(t, 1, systemCount)
+		assert.Equal(t, 2, systemCount)
 	})
 
-	t.Run("WithInstructionStripsLeadingAgenticSystemMessage", func(t *testing.T) {
+	t.Run("WithInstructionPreservesLeadingAgenticSystemMessage", func(t *testing.T) {
 		input := &adk.TypedAgentInput[*schema.AgenticMessage]{
 			Messages: []*schema.AgenticMessage{
 				schema.SystemAgenticMessage("old"),
@@ -272,11 +272,11 @@ func TestGenModelInput(t *testing.T) {
 
 		msgs, err := typedGenModelInput(ctx, "new", input)
 		assert.NoError(t, err)
-		assert.Len(t, msgs, 2)
+		assert.Len(t, msgs, 3)
 		assert.Equal(t, schema.AgenticRoleTypeSystem, msgs[0].Role)
 		assert.Equal(t, "new", readAgenticInputText(msgs[0]))
-		assert.Equal(t, schema.AgenticRoleTypeUser, msgs[1].Role)
-		assert.Equal(t, "hello", readAgenticInputText(msgs[1]))
+		assert.Same(t, input.Messages[0], msgs[1])
+		assert.Same(t, input.Messages[1], msgs[2])
 
 		systemCount := 0
 		for _, msg := range msgs {
@@ -284,7 +284,7 @@ func TestGenModelInput(t *testing.T) {
 				systemCount++
 			}
 		}
-		assert.Equal(t, 1, systemCount)
+		assert.Equal(t, 2, systemCount)
 	})
 
 	t.Run("WithoutInstruction", func(t *testing.T) {
