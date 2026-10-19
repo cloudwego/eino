@@ -1379,7 +1379,7 @@ func concatReasoning(reasons []*Reasoning) (ret *Reasoning, err error) {
 			ret.Text += r.Text
 		}
 		if r.Signature != "" {
-			ret.Signature += r.Signature
+			ret.Signature = r.Signature
 		}
 		if r.OpenAIExtension != nil {
 			openaiExtensions = append(openaiExtensions, r.OpenAIExtension)
@@ -1515,10 +1515,12 @@ func concatAssistantGenTexts(texts []*AssistantGenText) (ret *AssistantGenText, 
 	}
 
 	if extensions.IsValid() && !extensions.IsZero() {
-		ret.Extension, err = internal.ConcatSliceValue(extensions)
+		var extension reflect.Value
+		extension, err = internal.ConcatSliceValue(extensions)
 		if err != nil {
 			return nil, err
 		}
+		ret.Extension = extension.Interface()
 	}
 
 	if len(openaiExtensions) > 0 {
@@ -1872,9 +1874,7 @@ func concatMCPToolResults(results []*MCPToolResult) (*MCPToolResult, error) {
 			continue
 		}
 
-		if r.Content != "" {
-			ret.Content = r.Content
-		}
+		ret.Content += r.Content
 
 		if ret.ServerLabel == "" {
 			ret.ServerLabel = r.ServerLabel
