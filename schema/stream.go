@@ -792,7 +792,7 @@ type cpStreamElement[T any] struct {
 func copyStreamReaders[T any](sr *StreamReader[T], n int) []*StreamReader[T] {
 	cpsr := &parentStreamReader[T]{
 		sr:            sr,
-		subStreamList: make([]*cpStreamElement[T], n),
+		subStreamList: make([]atomic.Value, n),
 		closedNum:     0,
 	}
 
@@ -803,7 +803,7 @@ func copyStreamReaders[T any](sr *StreamReader[T], n int) []*StreamReader[T] {
 	elem := &cpStreamElement[T]{}
 
 	for i := range cpsr.subStreamList {
-		cpsr.subStreamList[i] = elem
+		cpsr.subStreamList[i].Store(elem)
 	}
 
 	ret := make([]*StreamReader[T], n)
@@ -825,8 +825,10 @@ type parentStreamReader[T any] struct {
 	sr *StreamReader[T]
 
 	// subStreamList maps each child's index to its latest read chunk.
-	// Each value comes from a hidden linked list of cpStreamElement.
-	subStreamList []*cpStreamElement[T]
+	// Each value stores a *cpStreamElement[T] from the hidden linked list.
+	// A typed nil pointer marks a closed child. Atomic access lets Close run
+	// concurrently with Recv without reopening a child when Recv finishes.
+	subStreamList []atomic.Value
 
 	// closedNum is the count of closed children.
 	closedNum uint32
@@ -834,8 +836,9 @@ type parentStreamReader[T any] struct {
 
 // peek is not safe for concurrent use with the same idx but is safe for different idx.
 // Ensure that each child StreamReader uses a for-loop in a single goroutine.
+// Closing the child concurrently is safe.
 func (p *parentStreamReader[T]) peek(idx int) (t T, err error) {
-	elem := p.subStreamList[idx]
+	elem := p.subStreamList[idx].Load().(*cpStreamElement[T])
 	if elem == nil {
 		// Unexpected call to receive after the child has been closed.
 		return t, ErrRecvAfterClosed
@@ -850,7 +853,6 @@ func (p *parentStreamReader[T]) peek(idx int) (t T, err error) {
 		elem.item = streamItem[T]{chunk: t, err: err}
 		if err != io.EOF {
 			elem.next = &cpStreamElement[T]{}
-			p.subStreamList[idx] = elem.next
 		}
 	})
 
@@ -859,18 +861,16 @@ func (p *parentStreamReader[T]) peek(idx int) (t T, err error) {
 	t = elem.item.chunk
 	err = elem.item.err
 	if err != io.EOF {
-		p.subStreamList[idx] = elem.next
+		p.subStreamList[idx].CompareAndSwap(elem, elem.next)
 	}
 
 	return t, err
 }
 
 func (p *parentStreamReader[T]) close(idx int) {
-	if p.subStreamList[idx] == nil {
+	if p.subStreamList[idx].Swap((*cpStreamElement[T])(nil)).(*cpStreamElement[T]) == nil {
 		return // avoid close multiple times
 	}
-
-	p.subStreamList[idx] = nil
 
 	curClosedNum := atomic.AddUint32(&p.closedNum, 1)
 

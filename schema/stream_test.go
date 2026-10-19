@@ -119,6 +119,86 @@ func TestStreamCopy(t *testing.T) {
 	t.Log("done")
 }
 
+func TestStreamCopyCloseDuringRecv(t *testing.T) {
+	r, w := Pipe[int](1)
+	w.Send(7, nil)
+	w.Close()
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	defer releaseOnce.Do(func() { close(release) })
+	source := StreamReaderWithConvert(r, func(value int) (int, error) {
+		close(entered)
+		<-release
+		return value, nil
+	})
+	copies := source.Copy(2)
+	defer copies[0].Close()
+	defer copies[1].Close()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		value, err := copies[0].Recv()
+		assert.NoError(t, err)
+		assert.Equal(t, 7, value)
+	}()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("copied reader did not enter the source receive")
+	}
+	copies[0].Close()
+	releaseOnce.Do(func() { close(release) })
+	<-done
+
+	// Finishing an in-flight receive must not reopen a closed copy.
+	_, err := copies[0].Recv()
+	assert.ErrorIs(t, err, ErrRecvAfterClosed)
+	copies[0].Close()
+	assert.Equal(t, uint32(1), copies[0].csr.parent.closedNum)
+	select {
+	case <-r.st.closed:
+		t.Error("closing one copy closed the source while its sibling was still open")
+	default:
+	}
+	value, err := copies[1].Recv()
+	assert.NoError(t, err)
+	assert.Equal(t, 7, value)
+	_, err = copies[1].Recv()
+	assert.ErrorIs(t, err, io.EOF)
+}
+
+func TestStreamCopyConcurrentClose(t *testing.T) {
+	r, w := Pipe[int](0)
+	defer w.Close()
+	copies := r.Copy(2)
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < 32; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			copies[0].Close()
+		}()
+	}
+	close(start)
+	wg.Wait()
+	assert.Equal(t, uint32(1), copies[0].csr.parent.closedNum)
+	select {
+	case <-r.st.closed:
+		t.Error("closing one copy closed the source while its sibling was still open")
+	default:
+	}
+	copies[1].Close()
+	assert.Equal(t, uint32(2), copies[0].csr.parent.closedNum)
+	select {
+	case <-r.st.closed:
+	default:
+		t.Error("closing every copy did not close the source")
+	}
+}
+
 func TestNewStreamCopy(t *testing.T) {
 	t.Run("test one index recv channel blocked while other indexes could recv", func(t *testing.T) {
 		s := newStream[string](1)
