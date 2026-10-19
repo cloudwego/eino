@@ -760,6 +760,7 @@ func formatUserInputMultiContent(userInputMultiContent []MessageInputPart, vs ma
 	copy(copiedUIMC, userInputMultiContent)
 
 	for i, uimc := range copiedUIMC {
+		var common *MessagePartCommon
 		switch uimc.Type {
 		case ChatMessagePartTypeText:
 			text, err := formatContent(uimc.Text, vs, formatType)
@@ -772,117 +773,52 @@ func formatUserInputMultiContent(userInputMultiContent []MessageInputPart, vs ma
 				continue
 			}
 			media := *uimc.Image
-			uimc.Image = &media
 			copiedUIMC[i].Image = &media
-			if uimc.Image.URL != nil && *uimc.Image.URL != "" {
-				url, err := formatContent(*uimc.Image.URL, vs, formatType)
-				if err != nil {
-					return nil, err
-				}
-				copiedUIMC[i].Image.URL = &url
-			}
-			if uimc.Image.FileID != nil && *uimc.Image.FileID != "" {
-				fileID, err := formatContent(*uimc.Image.FileID, vs, formatType)
-				if err != nil {
-					return nil, err
-				}
-				copiedUIMC[i].Image.FileID = &fileID
-			}
-			if uimc.Image.Base64Data != nil && *uimc.Image.Base64Data != "" {
-				base64data, err := formatContent(*uimc.Image.Base64Data, vs, formatType)
-				if err != nil {
-					return nil, err
-				}
-				copiedUIMC[i].Image.Base64Data = &base64data
-			}
+			common = &media.MessagePartCommon
 		case ChatMessagePartTypeAudioURL:
 			if uimc.Audio == nil {
 				continue
 			}
 			media := *uimc.Audio
-			uimc.Audio = &media
 			copiedUIMC[i].Audio = &media
-			if uimc.Audio.URL != nil && *uimc.Audio.URL != "" {
-				url, err := formatContent(*uimc.Audio.URL, vs, formatType)
-				if err != nil {
-					return nil, err
-				}
-				copiedUIMC[i].Audio.URL = &url
-			}
-			if uimc.Audio.FileID != nil && *uimc.Audio.FileID != "" {
-				fileID, err := formatContent(*uimc.Audio.FileID, vs, formatType)
-				if err != nil {
-					return nil, err
-				}
-				copiedUIMC[i].Audio.FileID = &fileID
-			}
-			if uimc.Audio.Base64Data != nil && *uimc.Audio.Base64Data != "" {
-				base64data, err := formatContent(*uimc.Audio.Base64Data, vs, formatType)
-				if err != nil {
-					return nil, err
-				}
-				copiedUIMC[i].Audio.Base64Data = &base64data
-			}
+			common = &media.MessagePartCommon
 		case ChatMessagePartTypeVideoURL:
 			if uimc.Video == nil {
 				continue
 			}
 			media := *uimc.Video
-			uimc.Video = &media
 			copiedUIMC[i].Video = &media
-			if uimc.Video.URL != nil && *uimc.Video.URL != "" {
-				url, err := formatContent(*uimc.Video.URL, vs, formatType)
-				if err != nil {
-					return nil, err
-				}
-				copiedUIMC[i].Video.URL = &url
-			}
-			if uimc.Video.FileID != nil && *uimc.Video.FileID != "" {
-				fileID, err := formatContent(*uimc.Video.FileID, vs, formatType)
-				if err != nil {
-					return nil, err
-				}
-				copiedUIMC[i].Video.FileID = &fileID
-			}
-			if uimc.Video.Base64Data != nil && *uimc.Video.Base64Data != "" {
-				base64data, err := formatContent(*uimc.Video.Base64Data, vs, formatType)
-				if err != nil {
-					return nil, err
-				}
-				copiedUIMC[i].Video.Base64Data = &base64data
-			}
+			common = &media.MessagePartCommon
 		case ChatMessagePartTypeFileURL:
 			if uimc.File == nil {
 				continue
 			}
 			media := *uimc.File
-			uimc.File = &media
 			copiedUIMC[i].File = &media
-			if uimc.File.URL != nil && *uimc.File.URL != "" {
-				url, err := formatContent(*uimc.File.URL, vs, formatType)
-				if err != nil {
-					return nil, err
-				}
-				copiedUIMC[i].File.URL = &url
-			}
-			if uimc.File.FileID != nil && *uimc.File.FileID != "" {
-				fileID, err := formatContent(*uimc.File.FileID, vs, formatType)
-				if err != nil {
-					return nil, err
-				}
-				copiedUIMC[i].File.FileID = &fileID
-			}
-			if uimc.File.Base64Data != nil && *uimc.File.Base64Data != "" {
-				base64data, err := formatContent(*uimc.File.Base64Data, vs, formatType)
-				if err != nil {
-					return nil, err
-				}
-				copiedUIMC[i].File.Base64Data = &base64data
+			common = &media.MessagePartCommon
+		}
+		if common != nil {
+			if err := formatMessagePartSources(common, vs, formatType); err != nil {
+				return nil, err
 			}
 		}
 	}
-
 	return copiedUIMC, nil
+}
+
+func formatMessagePartSources(common *MessagePartCommon, vs map[string]any, formatType FormatType) error {
+	// Replace fields in the copied media struct; keep the original strings intact.
+	for _, source := range []**string{&common.URL, &common.Base64Data, &common.FileID} {
+		if *source == nil || **source == "" {
+			continue
+		}
+		formatted, err := formatContent(**source, vs, formatType)
+		if err != nil {
+			return err
+		}
+		*source = &formatted
+	}
+	return nil
 }
 
 // String returns the string representation of the message.
