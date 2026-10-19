@@ -24,6 +24,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/bmatcuk/doublestar/v4"
@@ -32,6 +33,8 @@ import (
 // LocalBackend implements Backend on the local OS filesystem.
 // It is intentionally minimal (Read + GlobInfo) to match the "方案一" storage abstraction.
 type LocalBackend struct{}
+
+var localBackendPathLocks sync.Map
 
 // NewLocalBackend returns a filesystem-backed Backend implementation.
 func NewLocalBackend() *LocalBackend {
@@ -152,23 +155,49 @@ func (b *LocalBackend) Write(_ context.Context, req *WriteRequest) error {
 		return fmt.Errorf("write: invalid request")
 	}
 	path := filepath.Clean(req.FilePath)
+	unlock := lockLocalBackendPath(path)
+	defer unlock()
+
+	return writeLocalFile(path, req.Content)
+}
+
+func writeLocalFile(path, content string) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
 
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, []byte(req.Content), 0o644); err != nil {
+	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp-*")
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	tmpPath := tmp.Name()
+	defer func() {
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
+	}()
+
+	if err = tmp.Chmod(0o644); err != nil {
+		return err
+	}
+	if _, err = tmp.WriteString(content); err != nil {
+		return err
+	}
+	if err = tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpPath, path)
 }
 
 func (b *LocalBackend) Edit(ctx context.Context, req *EditRequest) error {
 	if req == nil || req.FilePath == "" {
 		return fmt.Errorf("edit: invalid request")
 	}
-	fc, err := b.Read(ctx, &ReadRequest{FilePath: req.FilePath})
+	path := filepath.Clean(req.FilePath)
+	unlock := lockLocalBackendPath(path)
+	defer unlock()
+
+	fc, err := b.Read(ctx, &ReadRequest{FilePath: path})
 	if err != nil {
 		return err
 	}
@@ -188,5 +217,16 @@ func (b *LocalBackend) Edit(ctx context.Context, req *EditRequest) error {
 		}
 		out = strings.Replace(out, req.OldString, req.NewString, 1)
 	}
-	return b.Write(ctx, &WriteRequest{FilePath: req.FilePath, Content: out})
+	return writeLocalFile(path, out)
+}
+
+func lockLocalBackendPath(path string) func() {
+	key := path
+	if absolute, err := filepath.Abs(path); err == nil {
+		key = absolute
+	}
+	value, _ := localBackendPathLocks.LoadOrStore(key, &sync.Mutex{})
+	lock := value.(*sync.Mutex)
+	lock.Lock()
+	return lock.Unlock
 }

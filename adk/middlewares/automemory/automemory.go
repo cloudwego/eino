@@ -57,9 +57,10 @@ type Config[M adk.MessageType] struct {
 	// Optional. Defaults to the built-in auto memory instruction.
 	GenInstruction func(ctx context.Context) (string, error)
 
-	// Model is the default model used by topic selection and memory extraction.
-	// Per-read/per-write overrides can be configured in Read.Model / Write.Model.
-	// Optional. Defaults to nil; topic selection and extraction must then provide their own models.
+	// Model is the model used by topic selection and memory extraction.
+	// Extraction replays the main conversation as a prefix, so it must be the same
+	// model that serves the agent to keep the prefix cache warm.
+	// Optional. Defaults to nil; topic selection and extraction stay disabled without it.
 	Model model.BaseModel[M]
 
 	// Read controls how memories are loaded and injected.
@@ -70,9 +71,15 @@ type Config[M adk.MessageType] struct {
 	// Optional. Default: disabled.
 	Write *WriteConfig[M]
 
-	// Coordination controls session identity and distributed async extraction coordination.
+	// Coordination overrides the default in-process lock/state store used by async
+	// write extraction. The coordination key is built from the ADK Runner session ID.
 	// Optional. Defaults to a local in-process coordinator.
 	Coordination *CoordinationConfig[M]
+
+	// Dream enables explicit single-run consolidation through RunDream.
+	// Optional. Nil leaves Dream unconfigured; it never runs automatically.
+	// Backend, resolved directory and index file are bound from this Config.
+	Dream *DreamOptions[M]
 
 	// OnError is called when automemory encounters an error. Errors are best-effort by default:
 	// the middleware will skip memory injection and allow the agent to continue.
@@ -90,17 +97,14 @@ const (
 type ReadConfig[M adk.MessageType] struct {
 	Mode ReadMode
 
-	// Model is used for topic selection. Defaults to Config.Model.
-	Model model.BaseModel[M]
-
 	// Index controls whether and how MEMORY.md is loaded as a memory index reminder.
 	// Optional. Defaults to enabled with MEMORY.md as the index file.
 	Index *IndexConfig
 
 	// TopicSelection controls the "LLM select topics" path.
 	// Optional. If nil, default topic selection settings are applied.
-	// Topic selection becomes active when Read.Model is available.
-	TopicSelection *TopicSelectionConfig
+	// Topic selection becomes active when TopicSelection.Model (or Config.Model) is available.
+	TopicSelection *TopicSelectionConfig[M]
 }
 
 type IndexConfig struct {
@@ -117,24 +121,15 @@ type IndexConfig struct {
 	MaxBytes int
 }
 
-type TopicSelectionConfig struct {
+type TopicSelectionConfig[M adk.MessageType] struct {
+	// Model is used for topic selection only. Extraction always uses Config.Model.
+	// Optional. Defaults to Config.Model.
+	Model model.BaseModel[M]
+
 	// Enable controls whether topic memory selection is enabled.
 	// When false, automemory will not query, rank, read, or inject topic memories.
 	// Optional. Defaults to true when nil.
 	Enable *bool
-
-	// CandidateGlob is matched against the RELATIVE path under MemoryDirectory.
-	// Example: "**/*.md"
-	// Optional. Defaults to CandidateGlobPattern.
-	CandidateGlob string
-
-	// CandidateLimit caps the number of candidate topic files considered for selection.
-	// Optional. Defaults to 200.
-	CandidateLimit int
-
-	// CandidatePreviewLines are read from each candidate to parse YAML frontmatter.
-	// Optional. Defaults to 30.
-	CandidatePreviewLines int
 
 	// TopK caps the number of topic memory files selected for injection.
 	// Optional. Defaults to 5.
@@ -144,42 +139,32 @@ type TopicSelectionConfig struct {
 	// Optional. Defaults to 200.
 	MaxLines int
 
-	// MaxBytes caps single topic memory file read bytes.
-	// Optional. Defaults to 4k.
-	MaxBytes int
-
 	// MaxTotalBytes caps the total rendered topic memory reminder.
 	// Optional. Defaults to 16k.
 	MaxTotalBytes int
-
-	// OutputMode constrains the response format used for topic selection.
-	// Supported values are TopicSelectionOutputModeJSONSchema and
-	// TopicSelectionOutputModeJSONObject. When empty, topic selection first
-	// attempts a plain model call, then falls back to those response formats.
-	OutputMode TopicSelectionOutputMode
 }
 
-// TopicSelectionOutputMode specifies a structured response format for topic selection.
-type TopicSelectionOutputMode string
+// topicSelectionOutputMode is the response format tried when a plain model call
+// does not yield a usable selection. It is an implementation detail: callers
+// cannot configure the fallback order.
+type topicSelectionOutputMode string
 
 const (
-	TopicSelectionOutputModeJSONSchema TopicSelectionOutputMode = "json_schema"
-	TopicSelectionOutputModeJSONObject TopicSelectionOutputMode = "json_object"
+	topicSelectionOutputModeJSONSchema topicSelectionOutputMode = "json_schema"
+	topicSelectionOutputModeJSONObject topicSelectionOutputMode = "json_object"
 )
 
 type WriteMode string
 
 const (
-	WriteModeDisabled WriteMode = "disabled"
-	WriteModeAsync    WriteMode = "async"
-	WriteModeSync     WriteMode = "sync"
+	WriteModeAsync WriteMode = "async"
+	WriteModeSync  WriteMode = "sync"
 )
 
 type WriteConfig[M adk.MessageType] struct {
+	// Mode selects blocking (sync) or background (async) extraction.
+	// Optional. Defaults to sync when Write is set; leave Write nil to disable extraction.
 	Mode WriteMode
-
-	// Model is used for memory extraction. Defaults to Config.Model.
-	Model model.BaseModel[M]
 
 	// MaxTurns caps the extractor's tool-call loop.
 	MaxTurns int
@@ -201,7 +186,9 @@ type WriteConfig[M adk.MessageType] struct {
 	HandleExtractionIterator func(ctx context.Context, iter *adk.AsyncIterator[*adk.TypedAgentEvent[M]]) error
 }
 
-type middleware[M adk.MessageType] struct {
+// Middleware injects and extracts memories around agent runs. Construct it with New.
+// RunDream explicitly consolidates memories when Config.Dream is configured.
+type Middleware[M adk.MessageType] struct {
 	adk.TypedBaseChatModelAgentMiddleware[M]
 
 	cfg *Config[M]
@@ -213,6 +200,7 @@ type middleware[M adk.MessageType] struct {
 	extractionHandler   adk.TypedChatModelAgentMiddleware[M]
 	topicSelectionTool  *schema.ToolInfo
 	coordination        *CoordinationConfig[M]
+	dream               *dreamRunner[M]
 }
 
 type selectionFuture struct {
@@ -232,16 +220,18 @@ const (
 )
 
 type memoryExtra struct {
-	Type   string
-	Cursor int
+	Type            string
+	Cursor          int
+	AnchorMessageID string
 }
 
 // New creates an automemory middleware from the provided configuration.
-func New[M adk.MessageType](ctx context.Context, config *Config[M]) (adk.TypedChatModelAgentMiddleware[M], error) {
+func New[M adk.MessageType](ctx context.Context, config *Config[M]) (*Middleware[M], error) {
 	if config == nil {
 		return nil, fmt.Errorf("auto memory config: invalid")
 	}
 
+	explicitTopicSelection := config.Read != nil && config.Read.TopicSelection != nil
 	cfg := cloneConfig(config)
 	if cfg.MemoryDirectory == "" || cfg.MemoryBackend == nil {
 		return nil, fmt.Errorf("auto memory config: invalid")
@@ -263,8 +253,11 @@ func New[M adk.MessageType](ctx context.Context, config *Config[M]) (adk.TypedCh
 		cfg.Read = &ReadConfig[M]{}
 	}
 	applyReadDefaults(cfg)
+	if err := validateConfig(cfg, explicitTopicSelection); err != nil {
+		return nil, err
+	}
 
-	m := &middleware[M]{
+	m := &Middleware[M]{
 		TypedBaseChatModelAgentMiddleware: adk.TypedBaseChatModelAgentMiddleware[M]{},
 		cfg:                               cfg,
 		resolvedMemoryDirectory:           resolvedMemoryDir,
@@ -273,14 +266,14 @@ func New[M adk.MessageType](ctx context.Context, config *Config[M]) (adk.TypedCh
 	}
 
 	m.topicSelectionTool = topicSelectionToolInfo()
-	if topicSelectionConfigEnabled(cfg.Read.TopicSelection) && cfg.Read.Model != nil {
+	if topicSelectionConfigEnabled(cfg.Read.TopicSelection) && cfg.Read.TopicSelection.Model != nil {
 		m.topicSelectionModel = &modelWithTools[M]{
-			base:  cfg.Read.Model,
+			base:  cfg.Read.TopicSelection.Model,
 			tools: []*schema.ToolInfo{m.topicSelectionTool},
 		}
 	}
 
-	if cfg.Write.Mode != WriteModeDisabled && cfg.Write.Model != nil {
+	if cfg.Write != nil && cfg.Model != nil {
 		fileSystemMiddleware, err := fsmw.NewTyped[M](ctx, &fsmw.MiddlewareConfig{
 			Backend:        boundedMemoryBackend,
 			LsToolConfig:   &fsmw.ToolConfig{Disable: true},
@@ -292,23 +285,30 @@ func New[M adk.MessageType](ctx context.Context, config *Config[M]) (adk.TypedCh
 		m.extractionHandler = fileSystemMiddleware
 	}
 
+	if cfg.Dream != nil {
+		dream, err := newDreamRunner(ctx, resolvedMemoryDir, cfg.MemoryBackend, cfg.Read.Index.FileName, cfg.Dream, cfg.Model)
+		if err != nil {
+			return nil, err
+		}
+		m.dream = dream
+	}
+
 	return m, nil
 }
 
-func (m *middleware[M]) BeforeAgent(ctx context.Context, runCtx *adk.TypedChatModelAgentContext[M]) (context.Context, *adk.TypedChatModelAgentContext[M], error) {
+func (m *Middleware[M]) BeforeAgent(ctx context.Context, runCtx *adk.TypedChatModelAgentContext[M]) (context.Context, *adk.TypedChatModelAgentContext[M], error) {
 	if runCtx == nil {
 		return ctx, runCtx, nil
 	}
 	nRunCtx := *runCtx
 
-	// Sync distributed write cursor back into message extras so later runs on other
-	// machines still carry a transcript-local marker.
+	// Sync distributed write progress back into message extras so later runs on
+	// other machines still carry a transcript-local marker.
 	if nRunCtx.AgentInput != nil && len(nRunCtx.AgentInput.Messages) > 0 && m.coordination != nil && m.coordination.Coordinator != nil {
-		if sessionID, err := m.resolveSessionID(ctx, &adk.TypedChatModelAgentState[M]{Messages: nRunCtx.AgentInput.Messages}); err == nil && sessionID != "" {
-			localCursor := getWriteCursorFromMessages(nRunCtx.AgentInput.Messages)
+		if sessionID := m.resolveSessionID(ctx); sessionID != "" {
 			coordKey := m.coordinatorKey(sessionID)
-			if remoteCursor, ok, err := getCoordinatorCursor(ctx, m.coordination.Coordinator, coordKey); err == nil && ok && remoteCursor > localCursor {
-				st := markWriteCursor(&adk.TypedChatModelAgentState[M]{Messages: nRunCtx.AgentInput.Messages}, remoteCursor)
+			if cursor, remoteAhead, _ := m.resolveWriteCursor(ctx, nRunCtx.AgentInput.Messages, coordKey); remoteAhead {
+				st := markWriteCursor(&adk.TypedChatModelAgentState[M]{Messages: nRunCtx.AgentInput.Messages}, cursor)
 				if st != nil {
 					nRunCtx.AgentInput = &adk.TypedAgentInput[M]{
 						Messages:        st.Messages,
@@ -391,7 +391,7 @@ func (m *middleware[M]) BeforeAgent(ctx context.Context, runCtx *adk.TypedChatMo
 	return ctx, &nRunCtx, nil
 }
 
-func (m *middleware[M]) BeforeModelRewriteState(ctx context.Context, state *adk.TypedChatModelAgentState[M], _ *adk.TypedModelContext[M]) (context.Context, *adk.TypedChatModelAgentState[M], error) {
+func (m *Middleware[M]) BeforeModelRewriteState(ctx context.Context, state *adk.TypedChatModelAgentState[M], _ *adk.TypedModelContext[M]) (context.Context, *adk.TypedChatModelAgentState[M], error) {
 	if state == nil {
 		return ctx, state, nil
 	}
@@ -458,7 +458,7 @@ type topicSelectionResp struct {
 	SelectedMemories []string `json:"selected_memories"`
 }
 
-func (m *middleware[M]) renderInstruction(ctx context.Context, baseInstruction string) (string, error) {
+func (m *Middleware[M]) renderInstruction(ctx context.Context, baseInstruction string) (string, error) {
 	// Custom instruction: append the "## Memory directory" manifest so the memory path
 	// is still surfaced (a custom instruction is not expected to embed the path itself).
 	if m.cfg.GenInstruction != nil {
@@ -482,7 +482,7 @@ func (m *middleware[M]) renderInstruction(ctx context.Context, baseInstruction s
 	return baseInstruction + "\n\n" + memDesc, nil
 }
 
-func (m *middleware[M]) buildMemoryIndexMessage(ctx context.Context) (M, error) {
+func (m *Middleware[M]) buildMemoryIndexMessage(ctx context.Context) (M, error) {
 	indexPath := filepath.Join(m.resolvedMemoryDirectory, m.cfg.Read.Index.FileName)
 	indexContent := ""
 	totalLines := 0
@@ -525,7 +525,7 @@ type topicMemoryPromptInfo struct {
 	Content         string
 }
 
-func (m *middleware[M]) selectAndBuildTopicMemoryMessage(ctx context.Context, agentIn *adk.TypedAgentInput[M]) (M, error) {
+func (m *Middleware[M]) selectAndBuildTopicMemoryMessage(ctx context.Context, agentIn *adk.TypedAgentInput[M]) (M, error) {
 	last, ok := m.lastUserMessage(agentIn)
 	if !ok {
 		return nil, nil
@@ -550,7 +550,7 @@ func (m *middleware[M]) selectAndBuildTopicMemoryMessage(ctx context.Context, ag
 	return newMemoryMessage[M]("<!-- automemory -->\n" + buildTopicMemoryReminder(topics)), nil
 }
 
-func (m *middleware[M]) listTopicCandidates(ctx context.Context) (map[string]topicCandidateBundle, []string, []string, error) {
+func (m *Middleware[M]) listTopicCandidates(ctx context.Context) (map[string]topicCandidateBundle, []string, []string, error) {
 	candidates, err := m.topicSelectionCandidates(ctx)
 	if err != nil || len(candidates) == 0 {
 		return nil, nil, nil, err
@@ -573,9 +573,9 @@ func (m *middleware[M]) listTopicCandidates(ctx context.Context) (map[string]top
 	return relToBundle, available, orderedRel, nil
 }
 
-func (m *middleware[M]) topicSelectionCandidates(ctx context.Context) ([]topicCandidateBundle, error) {
+func (m *Middleware[M]) topicSelectionCandidates(ctx context.Context) ([]topicCandidateBundle, error) {
 	files, err := m.boundedMemoryBackend.GlobInfo(ctx, &GlobInfoRequest{
-		Pattern: m.cfg.Read.TopicSelection.CandidateGlob,
+		Pattern: candidateGlobPattern,
 		Path:    m.resolvedMemoryDirectory,
 	})
 	if err != nil {
@@ -607,16 +607,16 @@ func (m *middleware[M]) topicSelectionCandidates(ctx context.Context) ([]topicCa
 	sort.Slice(candidates, func(i, j int) bool {
 		return parseRFC3339NanoBestEffort(candidates[i].Info.ModifiedAt).After(parseRFC3339NanoBestEffort(candidates[j].Info.ModifiedAt))
 	})
-	if len(candidates) > m.cfg.Read.TopicSelection.CandidateLimit {
-		candidates = candidates[:m.cfg.Read.TopicSelection.CandidateLimit]
+	if len(candidates) > defaultCandidateLimit {
+		candidates = candidates[:defaultCandidateLimit]
 	}
 	return candidates, nil
 }
 
-func (m *middleware[M]) buildTopicCandidateBundle(ctx context.Context, bundle topicCandidateBundle) (topicCandidateBundle, string, bool) {
+func (m *Middleware[M]) buildTopicCandidateBundle(ctx context.Context, bundle topicCandidateBundle) (topicCandidateBundle, string, bool) {
 	preview, err := m.boundedMemoryBackend.Read(ctx, &ReadRequest{
 		FilePath: bundle.AbsPath,
-		Limit:    m.cfg.Read.TopicSelection.CandidatePreviewLines,
+		Limit:    defaultCandidatePreviewLine,
 	})
 	if err != nil || preview == nil || isFileNotFoundContent(preview.Content) {
 		return topicCandidateBundle{}, "", false
@@ -627,7 +627,7 @@ func (m *middleware[M]) buildTopicCandidateBundle(ctx context.Context, bundle to
 	return bundle, manifestLine, true
 }
 
-func (m *middleware[M]) selectTopicCandidates(
+func (m *Middleware[M]) selectTopicCandidates(
 	ctx context.Context,
 	agentIn *adk.TypedAgentInput[M],
 	userQuery string,
@@ -652,24 +652,19 @@ func (m *middleware[M]) selectTopicCandidates(
 		valid[k] = struct{}{}
 	}
 
-	mode := m.cfg.Read.TopicSelection.OutputMode
-	if mode != "" {
-		return m.selectTopicWithResponseFormat(ctx, mode, userMsg, valid, topK)
-	}
-
 	selected, err := m.selectTopicPlain(ctx, userMsg, valid, topK)
 	if err == nil {
 		return selected, nil
 	}
 
-	selected, err = m.selectTopicWithResponseFormat(ctx, TopicSelectionOutputModeJSONSchema, userMsg, valid, topK)
+	selected, err = m.selectTopicWithResponseFormat(ctx, topicSelectionOutputModeJSONSchema, userMsg, valid, topK)
 	if err == nil {
 		return selected, nil
 	}
-	return m.selectTopicWithResponseFormat(ctx, TopicSelectionOutputModeJSONObject, userMsg, valid, topK)
+	return m.selectTopicWithResponseFormat(ctx, topicSelectionOutputModeJSONObject, userMsg, valid, topK)
 }
 
-func (m *middleware[M]) selectTopicPlain(
+func (m *Middleware[M]) selectTopicPlain(
 	ctx context.Context,
 	userMsg string,
 	valid map[string]struct{},
@@ -694,23 +689,23 @@ func (m *middleware[M]) selectTopicPlain(
 	return m.parseTopicSelectionResponse(resp, valid, topK)
 }
 
-func (m *middleware[M]) selectTopicWithResponseFormat(
+func (m *Middleware[M]) selectTopicWithResponseFormat(
 	ctx context.Context,
-	mode TopicSelectionOutputMode,
+	mode topicSelectionOutputMode,
 	userMsg string,
 	valid map[string]struct{},
 	topK int,
 ) ([]string, error) {
 	var responseFormat *schema.ResponseFormat
 	switch mode {
-	case TopicSelectionOutputModeJSONSchema:
+	case topicSelectionOutputModeJSONSchema:
 		responseFormat = &schema.ResponseFormat{
 			Type: schema.ResponseFormatTypeJSONSchema,
 			JSONSchema: &schema.ResponseFormatJSONSchema{
 				Schema: topicSelectionJSONSchema(),
 			},
 		}
-	case TopicSelectionOutputModeJSONObject:
+	case topicSelectionOutputModeJSONObject:
 		responseFormat = &schema.ResponseFormat{Type: schema.ResponseFormatTypeJSONObject}
 	default:
 		return nil, fmt.Errorf("unsupported topic selection output mode: %q", mode)
@@ -736,7 +731,7 @@ func (m *middleware[M]) selectTopicWithResponseFormat(
 	return m.parseTopicSelectionResponse(resp, valid, topK)
 }
 
-func (m *middleware[M]) parseTopicSelectionResponse(resp M, valid map[string]struct{}, topK int) ([]string, error) {
+func (m *Middleware[M]) parseTopicSelectionResponse(resp M, valid map[string]struct{}, topK int) ([]string, error) {
 	selected, err := parseTopicSelectionFromToolCall(resp, valid)
 	if err != nil {
 		selected, err = parseTopicSelectionFromContent(resp, valid)
@@ -750,7 +745,7 @@ func (m *middleware[M]) parseTopicSelectionResponse(resp M, valid map[string]str
 	return selected, nil
 }
 
-func (m *middleware[M]) renderTopicMemories(
+func (m *Middleware[M]) renderTopicMemories(
 	ctx context.Context,
 	selected []string,
 	relToBundle map[string]topicCandidateBundle,
@@ -791,13 +786,13 @@ func (m *middleware[M]) renderTopicMemories(
 	return rendered
 }
 
-func (m *middleware[M]) renderTopicMemory(ctx context.Context, bundle topicCandidateBundle) (topicMemoryPromptInfo, bool) {
+func (m *Middleware[M]) renderTopicMemory(ctx context.Context, bundle topicCandidateBundle) (topicMemoryPromptInfo, bool) {
 	full, err := m.boundedMemoryBackend.Read(ctx, &ReadRequest{FilePath: bundle.AbsPath})
 	if err != nil || full == nil || isFileNotFoundContent(full.Content) {
 		return topicMemoryPromptInfo{}, false
 	}
 
-	content, truncReason, truncated := linesOrSizeTrunc(full.Content, m.cfg.Read.TopicSelection.MaxLines, m.cfg.Read.TopicSelection.MaxBytes)
+	content, truncReason, truncated := linesOrSizeTrunc(full.Content, m.cfg.Read.TopicSelection.MaxLines, defaultTopicMaxBytes)
 	if truncated {
 		truncNotify, err := pyfmt.Fmt(getTopicMemoryTruncNotify(), map[string]any{
 			"reason":   truncReason,
@@ -816,92 +811,75 @@ func (m *middleware[M]) renderTopicMemory(ctx context.Context, bundle topicCandi
 	}, true
 }
 
-func (m *middleware[M]) AfterAgent(ctx context.Context, state *adk.TypedChatModelAgentState[M]) (context.Context, error) {
-	if m.cfg == nil || m.cfg.Write == nil || m.cfg.Write.Mode == WriteModeDisabled {
+func (m *Middleware[M]) AfterAgent(ctx context.Context, state *adk.TypedChatModelAgentState[M]) (context.Context, error) {
+	if m.cfg == nil || m.cfg.Write == nil {
 		return ctx, nil
 	}
-	if m.cfg.Write.Model == nil || m.extractionHandler == nil {
+	if m.cfg.Model == nil || m.extractionHandler == nil {
 		return ctx, nil
 	}
 	if state == nil || len(state.Messages) == 0 {
 		return ctx, nil
 	}
 
-	sessionID, err := m.resolveSessionID(ctx, state)
-	if err != nil {
-		m.onErr(ctx, OnErrorStageResolveSessionID, err)
-		return ctx, nil
-	}
+	sessionID := m.resolveSessionID(ctx)
 	coordKey := m.coordinatorKey(sessionID)
 
-	cursor := getWriteCursorFromMessages(state.Messages)
-	if coordKey != "" {
-		if remoteCursor, ok, err := getCoordinatorCursor(ctx, m.coordination.Coordinator, coordKey); err == nil && ok && remoteCursor > cursor {
-			cursor = remoteCursor
-			state = markWriteCursor(state, cursor)
-		}
+	cursor, remoteAhead, transcriptRebased := m.resolveWriteCursor(ctx, state.Messages, coordKey)
+	if remoteAhead {
+		state = markWriteCursor(state, cursor)
 	}
 	if cursor >= len(state.Messages) {
 		return ctx, nil
 	}
 
 	// Skip background extraction if the main agent already wrote memory files in this range.
-	if hasMemoryWritesSince(state.Messages, cursor, m.resolvedMemoryDirectory) {
+	// After a transcript rebase there is no reliable range boundary, so historical
+	// writes must not suppress at-least-once extraction of the current snapshot.
+	if !transcriptRebased && hasMemoryWritesSince(state.Messages, cursor, m.resolvedMemoryDirectory) {
 		end := len(state.Messages)
-		if coordKey != "" {
-			_ = setCoordinatorCursor(ctx, m.coordination.Coordinator, coordKey, end)
-		}
-		state = markWriteCursor(state, end)
+		m.commitWriteProgress(ctx, state, coordKey, end)
 		return ctx, nil
 	}
 
 	if countModelVisibleMessages(state.Messages[cursor:]) == 0 {
 		end := len(state.Messages)
-		if coordKey != "" {
-			_ = setCoordinatorCursor(ctx, m.coordination.Coordinator, coordKey, end)
-		}
-		state = markWriteCursor(state, end)
+		m.commitWriteProgress(ctx, state, coordKey, end)
 		return ctx, nil
 	}
 
 	switch m.cfg.Write.Mode {
-	case WriteModeDisabled:
-		// do nothing
-		return ctx, nil
-
 	case WriteModeSync:
 		end := len(state.Messages)
 		if err := m.runMemoryExtractionAgent(ctx, state.Messages, cursor, state.ToolInfos); err != nil {
 			m.onErr(ctx, OnErrorStageMemoryWriteSync, err)
 			return ctx, nil
 		}
-		if coordKey != "" {
-			_ = setCoordinatorCursor(ctx, m.coordination.Coordinator, coordKey, end)
-		}
-		state = markWriteCursor(state, end)
+		m.commitWriteProgress(ctx, state, coordKey, end)
 		return ctx, nil
 
 	case WriteModeAsync:
 		if coordKey == "" {
-			if err := m.runMemoryExtractionAgent(ctx, state.Messages, cursor, state.ToolInfos); err != nil {
-				m.onErr(ctx, OnErrorStageMemoryWriteSync, err)
-				return ctx, nil
-			}
-			state = markWriteCursor(state, len(state.Messages))
+			// Async extraction needs the Runner session ID to name the extraction lock.
+			// Without it the middleware cannot coordinate with other writers, so it
+			// reports the problem instead of silently degrading to a blocking write.
+			m.onErr(ctx, OnErrorStageResolveSessionID, fmt.Errorf("auto memory async extraction requires an ADK Runner session ID"))
 			return ctx, nil
 		}
+		ensureWriteProgressAnchor(state.Messages, len(state.Messages))
 		snap, err := buildPendingSnapshot(state.Messages, cursor, state.ToolInfos)
 		if err != nil {
 			m.onErr(ctx, OnErrorStageSnapshotMarshal, err)
 			return ctx, nil
 		}
-		unlock, ok, err := m.coordination.Coordinator.AcquireLock(ctx, coordKey, m.coordination.LockTTL)
+		lockTTL := extractionLockTTL(m.cfg.Write.MaxTurns)
+		unlock, ok, err := m.coordination.Coordinator.AcquireLock(ctx, coordKey, lockTTL)
 		if err != nil {
 			m.onErr(ctx, OnErrorStageAcquireExtractionLock, err)
 			return ctx, nil
 		}
 		if !ok {
-			if err := setCoordinatorPendingSnapshot(ctx, m.coordination.Coordinator, coordKey, snap, m.coordination.LockTTL); err != nil {
+			if err := setCoordinatorPendingSnapshot(ctx, m.coordination.Coordinator, coordKey, snap, pendingSnapshotTTL(lockTTL)); err != nil {
 				m.onErr(ctx, OnErrorStageStashPendingSnapshot, err)
 			}
 			return ctx, nil
@@ -914,7 +892,7 @@ func (m *middleware[M]) AfterAgent(ctx context.Context, state *adk.TypedChatMode
 	}
 }
 
-func (m *middleware[M]) runExtractionDrain(ctx context.Context, coordKey string, unlock func(context.Context) error, initial *PendingSnapshot) {
+func (m *Middleware[M]) runExtractionDrain(ctx context.Context, coordKey string, unlock func(context.Context) error, initial *PendingSnapshot) {
 	defer func() {
 		if unlock == nil {
 			return
@@ -932,7 +910,7 @@ func (m *middleware[M]) runExtractionDrain(ctx context.Context, coordKey string,
 		} else if err := m.runMemoryExtractionAgent(ctx, msgs, cursor, toolInfos); err != nil {
 			m.onErr(ctx, OnErrorStageMemoryWriteAsync, err)
 		} else {
-			_ = setCoordinatorCursor(ctx, m.coordination.Coordinator, coordKey, len(msgs))
+			m.commitWriteProgress(ctx, &adk.TypedChatModelAgentState[M]{Messages: msgs}, coordKey, len(msgs))
 		}
 
 		next, loadErr := popCoordinatorPendingSnapshot(ctx, m.coordination.Coordinator, coordKey)
@@ -944,9 +922,9 @@ func (m *middleware[M]) runExtractionDrain(ctx context.Context, coordKey string,
 	}
 }
 
-func (m *middleware[M]) newExtractionAgent(ctx context.Context, toolInfos []*schema.ToolInfo) (*adk.TypedChatModelAgent[M], error) {
-	if m.cfg == nil || m.cfg.Write == nil || m.cfg.Write.Model == nil {
-		return nil, fmt.Errorf("auto memory extraction agent init failed: missing write model")
+func (m *Middleware[M]) newExtractionAgent(ctx context.Context, toolInfos []*schema.ToolInfo) (*adk.TypedChatModelAgent[M], error) {
+	if m.cfg == nil || m.cfg.Write == nil || m.cfg.Model == nil {
+		return nil, fmt.Errorf("auto memory extraction agent init failed: missing model")
 	}
 	if m.extractionHandler == nil {
 		return nil, fmt.Errorf("auto memory extraction agent init failed: missing extraction handler")
@@ -954,7 +932,7 @@ func (m *middleware[M]) newExtractionAgent(ctx context.Context, toolInfos []*sch
 
 	agent, err := adk.NewTypedChatModelAgent[M](ctx, &adk.TypedChatModelAgentConfig[M]{
 		Name:  "automemory_extractor",
-		Model: m.cfg.Write.Model,
+		Model: m.cfg.Model,
 		Handlers: []adk.TypedChatModelAgentMiddleware[M]{
 			m.extractionHandler, // fs middleware
 			&toolInfoOverrideMiddleware[M]{toolInfos: toolInfos}, // tool info override, for prefix cache
@@ -975,7 +953,7 @@ func (m *middleware[M]) newExtractionAgent(ctx context.Context, toolInfos []*sch
 	return agent, nil
 }
 
-func (m *middleware[M]) runMemoryExtractionAgent(ctx context.Context, snapshot []M, cursor int, toolInfos []*schema.ToolInfo) error {
+func (m *Middleware[M]) runMemoryExtractionAgent(ctx context.Context, snapshot []M, cursor int, toolInfos []*schema.ToolInfo) error {
 	if len(snapshot) == 0 || cursor >= len(snapshot) {
 		return nil
 	}
@@ -1018,7 +996,7 @@ func (m *middleware[M]) runMemoryExtractionAgent(ctx context.Context, snapshot [
 	}
 }
 
-func (m *middleware[M]) extractSavePolicyInstruction(ctx context.Context) (string, error) {
+func (m *Middleware[M]) extractSavePolicyInstruction(ctx context.Context) (string, error) {
 	if m.cfg == nil || m.cfg.Write == nil || m.cfg.Write.GenInstruction == nil {
 		return "", nil
 	}
@@ -1029,7 +1007,7 @@ func (m *middleware[M]) extractSavePolicyInstruction(ctx context.Context) (strin
 	return strings.TrimSpace(custom), nil
 }
 
-func (m *middleware[M]) extractionMemoryDirectoryPrompt() string {
+func (m *Middleware[M]) extractionMemoryDirectoryPrompt() string {
 	index := &memoryIndexPromptInfo{
 		FileName: m.cfg.Read.Index.FileName,
 		Path:     filepath.Join(m.resolvedMemoryDirectory, m.cfg.Read.Index.FileName),
@@ -1037,9 +1015,9 @@ func (m *middleware[M]) extractionMemoryDirectoryPrompt() string {
 	return buildMemoryDirectoryManifest(m.resolvedMemoryDirectory, index)
 }
 
-func (m *middleware[M]) buildMemoryManifest(ctx context.Context) (string, error) {
+func (m *Middleware[M]) buildMemoryManifest(ctx context.Context) (string, error) {
 	files, err := m.boundedMemoryBackend.GlobInfo(ctx, &GlobInfoRequest{
-		Pattern: CandidateGlobPattern,
+		Pattern: candidateGlobPattern,
 		Path:    m.resolvedMemoryDirectory,
 	})
 	if err != nil {
