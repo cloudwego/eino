@@ -399,25 +399,25 @@ const (
 )
 
 // ToolOutputImage represents an image in tool output.
-// It contains URL or Base64-encoded data along with MIME type information.
+// Choose exactly one of URL, Base64Data or FileID, along with MIME type information.
 type ToolOutputImage struct {
 	MessagePartCommon
 }
 
 // ToolOutputAudio represents an audio file in tool output.
-// It contains URL or Base64-encoded data along with MIME type information.
+// Choose exactly one of URL, Base64Data or FileID, along with MIME type information.
 type ToolOutputAudio struct {
 	MessagePartCommon
 }
 
 // ToolOutputVideo represents a video file in tool output.
-// It contains URL or Base64-encoded data along with MIME type information.
+// Choose exactly one of URL, Base64Data or FileID, along with MIME type information.
 type ToolOutputVideo struct {
 	MessagePartCommon
 }
 
 // ToolOutputFile represents a generic file in tool output.
-// It contains URL or Base64-encoded data along with MIME type information.
+// Choose exactly one of URL, Base64Data or FileID, along with MIME type information.
 type ToolOutputFile struct {
 	MessagePartCommon
 }

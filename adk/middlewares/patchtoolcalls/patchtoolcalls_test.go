@@ -844,3 +844,23 @@ func TestDerefString(t *testing.T) {
 	s := "x"
 	assert.Equal(t, "x", derefString(&s))
 }
+
+func TestToolResultFileID(t *testing.T) {
+
+	fileID := "provider-file-123"
+	common := schema.MessagePartCommon{FileID: &fileID}
+	result := &schema.ToolResult{Parts: []schema.ToolOutputPart{
+		{Type: schema.ToolPartTypeImage, Image: &schema.ToolOutputImage{MessagePartCommon: common}},
+		{Type: schema.ToolPartTypeAudio, Audio: &schema.ToolOutputAudio{MessagePartCommon: common}},
+		{Type: schema.ToolPartTypeVideo, Video: &schema.ToolOutputVideo{MessagePartCommon: common}},
+		{Type: schema.ToolPartTypeFile, File: &schema.ToolOutputFile{MessagePartCommon: common}},
+	}}
+	blocks, err := toolResultToFunctionBlocks(result)
+	require.NoError(t, err)
+
+	require.Len(t, blocks, 4)
+	require.Equal(t, fileID, blocks[0].Image.FileID)
+	require.Equal(t, fileID, blocks[1].Audio.FileID)
+	require.Equal(t, fileID, blocks[2].Video.FileID)
+	require.Equal(t, fileID, blocks[3].File.FileID)
+}

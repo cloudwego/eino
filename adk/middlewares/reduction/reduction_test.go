@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/adk/filesystem"
@@ -3563,4 +3564,28 @@ func TestNewTypedAgenticMessage(t *testing.T) {
 	assert.NotNil(t, mw)
 
 	var _ adk.TypedChatModelAgentMiddleware[*schema.AgenticMessage] = mw
+}
+
+func TestToolResultMediaSourceRoundTrip(t *testing.T) {
+	for _, source := range []string{"file_id", "base64"} {
+		t.Run(source, func(t *testing.T) {
+			common := schema.MessagePartCommon{MIMEType: "application/octet-stream"}
+			value := "provider-file-123"
+			if source == "file_id" {
+				common.FileID = &value
+			} else {
+				value = "YmluYXJ5"
+				common.Base64Data = &value
+			}
+			parts := []schema.ToolOutputPart{
+				{Type: schema.ToolPartTypeImage, Image: &schema.ToolOutputImage{MessagePartCommon: common}},
+				{Type: schema.ToolPartTypeAudio, Audio: &schema.ToolOutputAudio{MessagePartCommon: common}},
+				{Type: schema.ToolPartTypeVideo, Video: &schema.ToolOutputVideo{MessagePartCommon: common}},
+				{Type: schema.ToolPartTypeFile, File: &schema.ToolOutputFile{MessagePartCommon: common}},
+			}
+			result := &schema.FunctionToolResult{}
+			setToolResultFromOutputParts(result, parts)
+			require.Equal(t, parts, toolResultToOutputParts(result))
+		})
+	}
 }

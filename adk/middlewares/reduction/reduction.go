@@ -2001,22 +2001,22 @@ func toolResultToOutputParts(f *schema.FunctionToolResult) []schema.ToolOutputPa
 		} else if block.Image != nil {
 			parts = append(parts, schema.ToolOutputPart{
 				Type:  schema.ToolPartTypeImage,
-				Image: &schema.ToolOutputImage{MessagePartCommon: schema.MessagePartCommon{URL: strPtr(block.Image.URL), MIMEType: block.Image.MIMEType}},
+				Image: &schema.ToolOutputImage{MessagePartCommon: schema.MessagePartCommon{URL: strPtr(block.Image.URL), Base64Data: strPtr(block.Image.Base64Data), FileID: strPtr(block.Image.FileID), MIMEType: block.Image.MIMEType}},
 			})
 		} else if block.Audio != nil {
 			parts = append(parts, schema.ToolOutputPart{
 				Type:  schema.ToolPartTypeAudio,
-				Audio: &schema.ToolOutputAudio{MessagePartCommon: schema.MessagePartCommon{URL: strPtr(block.Audio.URL), MIMEType: block.Audio.MIMEType}},
+				Audio: &schema.ToolOutputAudio{MessagePartCommon: schema.MessagePartCommon{URL: strPtr(block.Audio.URL), Base64Data: strPtr(block.Audio.Base64Data), FileID: strPtr(block.Audio.FileID), MIMEType: block.Audio.MIMEType}},
 			})
 		} else if block.Video != nil {
 			parts = append(parts, schema.ToolOutputPart{
 				Type:  schema.ToolPartTypeVideo,
-				Video: &schema.ToolOutputVideo{MessagePartCommon: schema.MessagePartCommon{URL: strPtr(block.Video.URL), MIMEType: block.Video.MIMEType}},
+				Video: &schema.ToolOutputVideo{MessagePartCommon: schema.MessagePartCommon{URL: strPtr(block.Video.URL), Base64Data: strPtr(block.Video.Base64Data), FileID: strPtr(block.Video.FileID), MIMEType: block.Video.MIMEType}},
 			})
 		} else if block.File != nil {
 			parts = append(parts, schema.ToolOutputPart{
 				Type: schema.ToolPartTypeFile,
-				File: &schema.ToolOutputFile{MessagePartCommon: schema.MessagePartCommon{URL: strPtr(block.File.URL), MIMEType: block.File.MIMEType}},
+				File: &schema.ToolOutputFile{MessagePartCommon: schema.MessagePartCommon{URL: strPtr(block.File.URL), Base64Data: strPtr(block.File.Base64Data), FileID: strPtr(block.File.FileID), MIMEType: block.File.MIMEType}},
 			})
 		}
 	}
@@ -2038,28 +2038,28 @@ func setToolResultFromOutputParts(f *schema.FunctionToolResult, parts []schema.T
 			if part.Image != nil {
 				newBlocks = append(newBlocks, &schema.FunctionToolResultContentBlock{
 					Type:  schema.FunctionToolResultContentBlockTypeImage,
-					Image: &schema.UserInputImage{URL: ptrStr(part.Image.URL), MIMEType: part.Image.MIMEType},
+					Image: &schema.UserInputImage{URL: ptrStr(part.Image.URL), Base64Data: ptrStr(part.Image.Base64Data), FileID: ptrStr(part.Image.FileID), MIMEType: part.Image.MIMEType},
 				})
 			}
 		case schema.ToolPartTypeAudio:
 			if part.Audio != nil {
 				newBlocks = append(newBlocks, &schema.FunctionToolResultContentBlock{
 					Type:  schema.FunctionToolResultContentBlockTypeAudio,
-					Audio: &schema.UserInputAudio{URL: ptrStr(part.Audio.URL), MIMEType: part.Audio.MIMEType},
+					Audio: &schema.UserInputAudio{URL: ptrStr(part.Audio.URL), Base64Data: ptrStr(part.Audio.Base64Data), FileID: ptrStr(part.Audio.FileID), MIMEType: part.Audio.MIMEType},
 				})
 			}
 		case schema.ToolPartTypeVideo:
 			if part.Video != nil {
 				newBlocks = append(newBlocks, &schema.FunctionToolResultContentBlock{
 					Type:  schema.FunctionToolResultContentBlockTypeVideo,
-					Video: &schema.UserInputVideo{URL: ptrStr(part.Video.URL), MIMEType: part.Video.MIMEType},
+					Video: &schema.UserInputVideo{URL: ptrStr(part.Video.URL), Base64Data: ptrStr(part.Video.Base64Data), FileID: ptrStr(part.Video.FileID), MIMEType: part.Video.MIMEType},
 				})
 			}
 		case schema.ToolPartTypeFile:
 			if part.File != nil {
 				newBlocks = append(newBlocks, &schema.FunctionToolResultContentBlock{
 					Type: schema.FunctionToolResultContentBlockTypeFile,
-					File: &schema.UserInputFile{URL: ptrStr(part.File.URL), MIMEType: part.File.MIMEType},
+					File: &schema.UserInputFile{URL: ptrStr(part.File.URL), Base64Data: ptrStr(part.File.Base64Data), FileID: ptrStr(part.File.FileID), MIMEType: part.File.MIMEType},
 				})
 			}
 		}

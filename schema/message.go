@@ -166,6 +166,11 @@ type MessagePartCommon struct {
 	// Base64Data represents the binary data in Base64 encoded string format.
 	Base64Data *string `json:"base64data,omitempty"`
 
+	// FileID is an opaque reference to a file hosted by the model provider.
+	// It may be a file ID or a provider-specific file URI. Support depends on the model and API.
+	// Choose exactly one of URL, Base64Data or FileID when providing media input.
+	FileID *string `json:"file_id,omitempty"`
+
 	// MIMEType is the mime type , eg."image/png",""audio/wav" etc.
 	MIMEType string `json:"mime_type,omitempty"`
 
@@ -174,7 +179,7 @@ type MessagePartCommon struct {
 }
 
 // MessageInputImage is used to represent an image part in message.
-// Choose either URL or Base64Data.
+// Choose exactly one of URL, Base64Data or FileID.
 type MessageInputImage struct {
 	MessagePartCommon
 
@@ -183,19 +188,19 @@ type MessageInputImage struct {
 }
 
 // MessageInputAudio is used to represent an audio part in message.
-// Choose either URL or Base64Data.
+// Choose exactly one of URL, Base64Data or FileID.
 type MessageInputAudio struct {
 	MessagePartCommon
 }
 
 // MessageInputVideo is used to represent a video part in message.
-// Choose either URL or Base64Data.
+// Choose exactly one of URL, Base64Data or FileID.
 type MessageInputVideo struct {
 	MessagePartCommon
 }
 
 // MessageInputFile is used to represent a file part in message.
-// Choose either URL or Base64Data.
+// Choose exactly one of URL, Base64Data or FileID.
 type MessageInputFile struct {
 	MessagePartCommon
 
@@ -766,12 +771,22 @@ func formatUserInputMultiContent(userInputMultiContent []MessageInputPart, vs ma
 			if uimc.Image == nil {
 				continue
 			}
+			media := *uimc.Image
+			uimc.Image = &media
+			copiedUIMC[i].Image = &media
 			if uimc.Image.URL != nil && *uimc.Image.URL != "" {
 				url, err := formatContent(*uimc.Image.URL, vs, formatType)
 				if err != nil {
 					return nil, err
 				}
 				copiedUIMC[i].Image.URL = &url
+			}
+			if uimc.Image.FileID != nil && *uimc.Image.FileID != "" {
+				fileID, err := formatContent(*uimc.Image.FileID, vs, formatType)
+				if err != nil {
+					return nil, err
+				}
+				copiedUIMC[i].Image.FileID = &fileID
 			}
 			if uimc.Image.Base64Data != nil && *uimc.Image.Base64Data != "" {
 				base64data, err := formatContent(*uimc.Image.Base64Data, vs, formatType)
@@ -784,12 +799,22 @@ func formatUserInputMultiContent(userInputMultiContent []MessageInputPart, vs ma
 			if uimc.Audio == nil {
 				continue
 			}
+			media := *uimc.Audio
+			uimc.Audio = &media
+			copiedUIMC[i].Audio = &media
 			if uimc.Audio.URL != nil && *uimc.Audio.URL != "" {
 				url, err := formatContent(*uimc.Audio.URL, vs, formatType)
 				if err != nil {
 					return nil, err
 				}
 				copiedUIMC[i].Audio.URL = &url
+			}
+			if uimc.Audio.FileID != nil && *uimc.Audio.FileID != "" {
+				fileID, err := formatContent(*uimc.Audio.FileID, vs, formatType)
+				if err != nil {
+					return nil, err
+				}
+				copiedUIMC[i].Audio.FileID = &fileID
 			}
 			if uimc.Audio.Base64Data != nil && *uimc.Audio.Base64Data != "" {
 				base64data, err := formatContent(*uimc.Audio.Base64Data, vs, formatType)
@@ -802,12 +827,22 @@ func formatUserInputMultiContent(userInputMultiContent []MessageInputPart, vs ma
 			if uimc.Video == nil {
 				continue
 			}
+			media := *uimc.Video
+			uimc.Video = &media
+			copiedUIMC[i].Video = &media
 			if uimc.Video.URL != nil && *uimc.Video.URL != "" {
 				url, err := formatContent(*uimc.Video.URL, vs, formatType)
 				if err != nil {
 					return nil, err
 				}
 				copiedUIMC[i].Video.URL = &url
+			}
+			if uimc.Video.FileID != nil && *uimc.Video.FileID != "" {
+				fileID, err := formatContent(*uimc.Video.FileID, vs, formatType)
+				if err != nil {
+					return nil, err
+				}
+				copiedUIMC[i].Video.FileID = &fileID
 			}
 			if uimc.Video.Base64Data != nil && *uimc.Video.Base64Data != "" {
 				base64data, err := formatContent(*uimc.Video.Base64Data, vs, formatType)
@@ -820,12 +855,22 @@ func formatUserInputMultiContent(userInputMultiContent []MessageInputPart, vs ma
 			if uimc.File == nil {
 				continue
 			}
+			media := *uimc.File
+			uimc.File = &media
+			copiedUIMC[i].File = &media
 			if uimc.File.URL != nil && *uimc.File.URL != "" {
 				url, err := formatContent(*uimc.File.URL, vs, formatType)
 				if err != nil {
 					return nil, err
 				}
 				copiedUIMC[i].File.URL = &url
+			}
+			if uimc.File.FileID != nil && *uimc.File.FileID != "" {
+				fileID, err := formatContent(*uimc.File.FileID, vs, formatType)
+				if err != nil {
+					return nil, err
+				}
+				copiedUIMC[i].File.FileID = &fileID
 			}
 			if uimc.File.Base64Data != nil && *uimc.File.Base64Data != "" {
 				base64data, err := formatContent(*uimc.File.Base64Data, vs, formatType)
@@ -936,6 +981,9 @@ func formatMessageInputMedia[T MessageInputImage | MessageInputAudio | MessageIn
 		if v.URL != nil {
 			parts = append(parts, fmt.Sprintf("url=%s", *v.URL))
 		}
+		if v.FileID != nil {
+			parts = append(parts, fmt.Sprintf("file_id=%s", *v.FileID))
+		}
 		if v.Base64Data != nil {
 			parts = append(parts, fmt.Sprintf("base64[%d bytes]", len(*v.Base64Data)))
 		}
@@ -952,6 +1000,9 @@ func formatMessageInputMedia[T MessageInputImage | MessageInputAudio | MessageIn
 		if v.URL != nil {
 			parts = append(parts, fmt.Sprintf("url=%s", *v.URL))
 		}
+		if v.FileID != nil {
+			parts = append(parts, fmt.Sprintf("file_id=%s", *v.FileID))
+		}
 		if v.Base64Data != nil {
 			parts = append(parts, fmt.Sprintf("base64[%d bytes]", len(*v.Base64Data)))
 		}
@@ -964,6 +1015,9 @@ func formatMessageInputMedia[T MessageInputImage | MessageInputAudio | MessageIn
 	case *MessageInputVideo:
 		if v.URL != nil {
 			parts = append(parts, fmt.Sprintf("url=%s", *v.URL))
+		}
+		if v.FileID != nil {
+			parts = append(parts, fmt.Sprintf("file_id=%s", *v.FileID))
 		}
 		if v.Base64Data != nil {
 			parts = append(parts, fmt.Sprintf("base64[%d bytes]", len(*v.Base64Data)))
@@ -988,6 +1042,9 @@ func formatMessageInputFile(file *MessageInputFile) string {
 	var parts []string
 	if file.URL != nil {
 		parts = append(parts, fmt.Sprintf("url=%s", *file.URL))
+	}
+	if file.FileID != nil {
+		parts = append(parts, fmt.Sprintf("file_id=%s", *file.FileID))
 	}
 	if file.Base64Data != nil {
 		parts = append(parts, fmt.Sprintf("base64[%d bytes]", len(*file.Base64Data)))
@@ -1032,6 +1089,9 @@ func formatMessageOutputMedia[T MessageOutputImage | MessageOutputAudio | Messag
 		if v.URL != nil {
 			parts = append(parts, fmt.Sprintf("url=%s", *v.URL))
 		}
+		if v.FileID != nil {
+			parts = append(parts, fmt.Sprintf("file_id=%s", *v.FileID))
+		}
 		if v.Base64Data != nil {
 			parts = append(parts, fmt.Sprintf("base64[%d bytes]", len(*v.Base64Data)))
 		}
@@ -1045,6 +1105,9 @@ func formatMessageOutputMedia[T MessageOutputImage | MessageOutputAudio | Messag
 		if v.URL != nil {
 			parts = append(parts, fmt.Sprintf("url=%s", *v.URL))
 		}
+		if v.FileID != nil {
+			parts = append(parts, fmt.Sprintf("file_id=%s", *v.FileID))
+		}
 		if v.Base64Data != nil {
 			parts = append(parts, fmt.Sprintf("base64[%d bytes]", len(*v.Base64Data)))
 		}
@@ -1057,6 +1120,9 @@ func formatMessageOutputMedia[T MessageOutputImage | MessageOutputAudio | Messag
 	case *MessageOutputVideo:
 		if v.URL != nil {
 			parts = append(parts, fmt.Sprintf("url=%s", *v.URL))
+		}
+		if v.FileID != nil {
+			parts = append(parts, fmt.Sprintf("file_id=%s", *v.FileID))
 		}
 		if v.Base64Data != nil {
 			parts = append(parts, fmt.Sprintf("base64[%d bytes]", len(*v.Base64Data)))
