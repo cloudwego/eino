@@ -103,3 +103,43 @@ func TestToolResultFileID(t *testing.T) {
 		require.Equal(t, fileID, *source)
 	}
 }
+
+func TestMessageMediaTemplateReuse(t *testing.T) {
+	makeMessage := func(common MessagePartCommon) *Message {
+		return &Message{Role: User, UserInputMultiContent: []MessageInputPart{
+			{Type: ChatMessagePartTypeImageURL, Image: &MessageInputImage{MessagePartCommon: common, Detail: ImageURLDetailHigh}},
+			{Type: ChatMessagePartTypeAudioURL, Audio: &MessageInputAudio{MessagePartCommon: common}},
+			{Type: ChatMessagePartTypeVideoURL, Video: &MessageInputVideo{MessagePartCommon: common}},
+			{Type: ChatMessagePartTypeFileURL, File: &MessageInputFile{MessagePartCommon: common, Name: "document.pdf"}},
+		}}
+	}
+	for _, source := range []struct {
+		name   string
+		common func(string) MessagePartCommon
+	}{
+		{"url", func(value string) MessagePartCommon { return MessagePartCommon{URL: &value} }},
+		{"base64", func(value string) MessagePartCommon { return MessagePartCommon{Base64Data: &value} }},
+		{"file_id", func(value string) MessagePartCommon { return MessagePartCommon{FileID: &value} }},
+	} {
+		t.Run(source.name, func(t *testing.T) {
+			template := makeMessage(source.common("{value}"))
+			first, err := template.Format(context.Background(), map[string]any{"value": "first"}, FString)
+			require.NoError(t, err)
+			second, err := template.Format(context.Background(), map[string]any{"value": "second"}, FString)
+			require.NoError(t, err)
+			require.Equal(t, makeMessage(source.common("first")), first[0])
+			require.Equal(t, makeMessage(source.common("second")), second[0])
+			require.Equal(t, makeMessage(source.common("{value}")), template)
+
+			// An earlier part may format successfully before a later part fails.
+			template.UserInputMultiContent[1].Audio.MessagePartCommon = source.common("{missing}")
+			before, err := json.Marshal(template)
+			require.NoError(t, err)
+			_, err = template.Format(context.Background(), map[string]any{"value": "first"}, FString)
+			require.Error(t, err)
+			after, err := json.Marshal(template)
+			require.NoError(t, err)
+			require.Equal(t, string(before), string(after))
+		})
+	}
+}
