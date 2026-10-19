@@ -187,6 +187,7 @@ func messageInputPartsToFunctionToolBlocks(parts []schema.MessageInputPart) []*s
 				block = newFuncToolResultContentBlock(&schema.UserInputImage{
 					URL:        derefString(p.Image.URL),
 					Base64Data: derefString(p.Image.Base64Data),
+					FileID:     derefString(p.Image.FileID),
 					MIMEType:   p.Image.MIMEType,
 					Detail:     p.Image.Detail,
 				})
@@ -197,6 +198,7 @@ func messageInputPartsToFunctionToolBlocks(parts []schema.MessageInputPart) []*s
 				block = newFuncToolResultContentBlock(&schema.UserInputAudio{
 					URL:        derefString(p.Audio.URL),
 					Base64Data: derefString(p.Audio.Base64Data),
+					FileID:     derefString(p.Audio.FileID),
 					MIMEType:   p.Audio.MIMEType,
 				})
 				block.Extra = p.Extra
@@ -206,6 +208,7 @@ func messageInputPartsToFunctionToolBlocks(parts []schema.MessageInputPart) []*s
 				block = newFuncToolResultContentBlock(&schema.UserInputVideo{
 					URL:        derefString(p.Video.URL),
 					Base64Data: derefString(p.Video.Base64Data),
+					FileID:     derefString(p.Video.FileID),
 					MIMEType:   p.Video.MIMEType,
 				})
 				block.Extra = p.Extra
@@ -215,6 +218,7 @@ func messageInputPartsToFunctionToolBlocks(parts []schema.MessageInputPart) []*s
 				block = newFuncToolResultContentBlock(&schema.UserInputFile{
 					URL:        derefString(p.File.URL),
 					Base64Data: derefString(p.File.Base64Data),
+					FileID:     derefString(p.File.FileID),
 					Name:       p.File.Name,
 					MIMEType:   p.File.MIMEType,
 				})

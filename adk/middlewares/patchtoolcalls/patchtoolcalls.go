@@ -454,6 +454,7 @@ func toolResultToFunctionBlocks(result *schema.ToolResult) ([]*schema.FunctionTo
 				Image: &schema.UserInputImage{
 					URL:        derefString(p.Image.URL),
 					Base64Data: derefString(p.Image.Base64Data),
+					FileID:     derefString(p.Image.FileID),
 					MIMEType:   p.Image.MIMEType,
 				},
 				Extra: p.Extra,
@@ -467,6 +468,7 @@ func toolResultToFunctionBlocks(result *schema.ToolResult) ([]*schema.FunctionTo
 				Audio: &schema.UserInputAudio{
 					URL:        derefString(p.Audio.URL),
 					Base64Data: derefString(p.Audio.Base64Data),
+					FileID:     derefString(p.Audio.FileID),
 					MIMEType:   p.Audio.MIMEType,
 				},
 				Extra: p.Extra,
@@ -480,6 +482,7 @@ func toolResultToFunctionBlocks(result *schema.ToolResult) ([]*schema.FunctionTo
 				Video: &schema.UserInputVideo{
 					URL:        derefString(p.Video.URL),
 					Base64Data: derefString(p.Video.Base64Data),
+					FileID:     derefString(p.Video.FileID),
 					MIMEType:   p.Video.MIMEType,
 				},
 				Extra: p.Extra,
@@ -493,6 +496,7 @@ func toolResultToFunctionBlocks(result *schema.ToolResult) ([]*schema.FunctionTo
 				File: &schema.UserInputFile{
 					URL:        derefString(p.File.URL),
 					Base64Data: derefString(p.File.Base64Data),
+					FileID:     derefString(p.File.FileID),
 					MIMEType:   p.File.MIMEType,
 				},
 				Extra: p.Extra,

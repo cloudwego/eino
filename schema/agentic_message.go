@@ -182,12 +182,18 @@ type UserInputText struct {
 	Text string `json:"text,omitempty"`
 }
 
+// UserInputImage represents image input.
+// Choose exactly one of URL, Base64Data or FileID.
 type UserInputImage struct {
 	// URL is the HTTP/HTTPS link.
 	URL string `json:"url,omitempty"`
 
 	// Base64Data is the binary data in Base64 encoded string format.
 	Base64Data string `json:"base64_data,omitempty"`
+
+	// FileID is an opaque file ID or file URI issued by the model provider.
+	// Support depends on the model and API.
+	FileID string `json:"file_id,omitempty"`
 
 	// MIMEType is the mime type, e.g. "image/png".
 	MIMEType string `json:"mime_type,omitempty"`
@@ -196,6 +202,8 @@ type UserInputImage struct {
 	Detail ImageURLDetail `json:"detail,omitempty"`
 }
 
+// UserInputAudio represents audio input.
+// Choose exactly one of URL, Base64Data or FileID.
 type UserInputAudio struct {
 	// URL is the HTTP/HTTPS link.
 	URL string `json:"url,omitempty"`
@@ -203,10 +211,16 @@ type UserInputAudio struct {
 	// Base64Data is the binary data in Base64 encoded string format.
 	Base64Data string `json:"base64_data,omitempty"`
 
+	// FileID is an opaque file ID or file URI issued by the model provider.
+	// Support depends on the model and API.
+	FileID string `json:"file_id,omitempty"`
+
 	// MIMEType is the mime type, e.g. "audio/wav".
 	MIMEType string `json:"mime_type,omitempty"`
 }
 
+// UserInputVideo represents video input.
+// Choose exactly one of URL, Base64Data or FileID.
 type UserInputVideo struct {
 	// URL is the HTTP/HTTPS link.
 	URL string `json:"url,omitempty"`
@@ -214,10 +228,16 @@ type UserInputVideo struct {
 	// Base64Data is the binary data in Base64 encoded string format.
 	Base64Data string `json:"base64_data,omitempty"`
 
+	// FileID is an opaque file ID or file URI issued by the model provider.
+	// Support depends on the model and API.
+	FileID string `json:"file_id,omitempty"`
+
 	// MIMEType is the mime type, e.g. "video/mp4".
 	MIMEType string `json:"mime_type,omitempty"`
 }
 
+// UserInputFile represents file input.
+// Choose exactly one of URL, Base64Data or FileID.
 type UserInputFile struct {
 	// URL is the HTTP/HTTPS link.
 	URL string `json:"url,omitempty"`
@@ -227,6 +247,10 @@ type UserInputFile struct {
 
 	// Base64Data is the binary data in Base64 encoded string format.
 	Base64Data string `json:"base64_data,omitempty"`
+
+	// FileID is an opaque file ID or file URI issued by the model provider.
+	// Support depends on the model and API.
+	FileID string `json:"file_id,omitempty"`
 
 	// MIMEType is the mime type, e.g. "application/pdf".
 	MIMEType string `json:"mime_type,omitempty"`
@@ -818,6 +842,13 @@ func formatUserInputImage(uii *UserInputImage, vs map[string]any, formatType For
 		}
 		copied.URL = url
 	}
+	if uii.FileID != "" {
+		fileID, err := formatContent(uii.FileID, vs, formatType)
+		if err != nil {
+			return nil, err
+		}
+		copied.FileID = fileID
+	}
 	if uii.Base64Data != "" {
 		base64data, err := formatContent(uii.Base64Data, vs, formatType)
 		if err != nil {
@@ -837,6 +868,13 @@ func formatUserInputAudio(uia *UserInputAudio, vs map[string]any, formatType For
 		}
 		copied.URL = url
 	}
+	if uia.FileID != "" {
+		fileID, err := formatContent(uia.FileID, vs, formatType)
+		if err != nil {
+			return nil, err
+		}
+		copied.FileID = fileID
+	}
 	if uia.Base64Data != "" {
 		base64data, err := formatContent(uia.Base64Data, vs, formatType)
 		if err != nil {
@@ -855,6 +893,13 @@ func formatUserInputVideo(uiv *UserInputVideo, vs map[string]any, formatType For
 			return nil, err
 		}
 		copied.URL = url
+	}
+	if uiv.FileID != "" {
+		fileID, err := formatContent(uiv.FileID, vs, formatType)
+		if err != nil {
+			return nil, err
+		}
+		copied.FileID = fileID
 	}
 	if uiv.Base64Data != "" {
 		base64data, err := formatContent(uiv.Base64Data, vs, formatType)
@@ -881,6 +926,13 @@ func formatUserInputFile(uif *UserInputFile, vs map[string]any, formatType Forma
 			return nil, err
 		}
 		copied.Name = name
+	}
+	if uif.FileID != "" {
+		fileID, err := formatContent(uif.FileID, vs, formatType)
+		if err != nil {
+			return nil, err
+		}
+		copied.FileID = fileID
 	}
 	if uif.Base64Data != "" {
 		base64data, err := formatContent(uif.Base64Data, vs, formatType)
@@ -2065,17 +2117,17 @@ func (u *UserInputText) String() string {
 
 // String returns the string representation of UserInputImage.
 func (u *UserInputImage) String() string {
-	return formatMediaString(u.URL, u.Base64Data, u.MIMEType, string(u.Detail))
+	return formatMediaString(u.URL, u.Base64Data, u.FileID, u.MIMEType, string(u.Detail))
 }
 
 // String returns the string representation of UserInputAudio.
 func (u *UserInputAudio) String() string {
-	return formatMediaString(u.URL, u.Base64Data, u.MIMEType, "")
+	return formatMediaString(u.URL, u.Base64Data, u.FileID, u.MIMEType, "")
 }
 
 // String returns the string representation of UserInputVideo.
 func (u *UserInputVideo) String() string {
-	return formatMediaString(u.URL, u.Base64Data, u.MIMEType, "")
+	return formatMediaString(u.URL, u.Base64Data, u.FileID, u.MIMEType, "")
 }
 
 // String returns the string representation of UserInputFile.
@@ -2084,7 +2136,7 @@ func (u *UserInputFile) String() string {
 	if u.Name != "" {
 		sb.WriteString(fmt.Sprintf("      name: %s\n", u.Name))
 	}
-	sb.WriteString(formatMediaString(u.URL, u.Base64Data, u.MIMEType, ""))
+	sb.WriteString(formatMediaString(u.URL, u.Base64Data, u.FileID, u.MIMEType, ""))
 	return sb.String()
 }
 
@@ -2095,17 +2147,17 @@ func (a *AssistantGenText) String() string {
 
 // String returns the string representation of AssistantGenImage.
 func (a *AssistantGenImage) String() string {
-	return formatMediaString(a.URL, a.Base64Data, a.MIMEType, "")
+	return formatMediaString(a.URL, a.Base64Data, "", a.MIMEType, "")
 }
 
 // String returns the string representation of AssistantGenAudio.
 func (a *AssistantGenAudio) String() string {
-	return formatMediaString(a.URL, a.Base64Data, a.MIMEType, "")
+	return formatMediaString(a.URL, a.Base64Data, "", a.MIMEType, "")
 }
 
 // String returns the string representation of AssistantGenVideo.
 func (a *AssistantGenVideo) String() string {
-	return formatMediaString(a.URL, a.Base64Data, a.MIMEType, "")
+	return formatMediaString(a.URL, a.Base64Data, "", a.MIMEType, "")
 }
 
 // String returns the string representation of FunctionToolCall.
@@ -2238,11 +2290,14 @@ func truncateString(s string, maxLen int) string {
 	return s[:maxLen] + "..."
 }
 
-// formatMediaString formats URL, Base64Data, MIMEType and Detail for media content
-func formatMediaString(url, base64Data string, mimeType string, detail string) string {
+// formatMediaString formats the media source and metadata.
+func formatMediaString(url, base64Data, fileID, mimeType, detail string) string {
 	sb := &strings.Builder{}
 	if url != "" {
 		sb.WriteString(fmt.Sprintf("      url: %s\n", truncateString(url, 100)))
+	}
+	if fileID != "" {
+		sb.WriteString(fmt.Sprintf("      file_id: %s\n", fileID))
 	}
 	if base64Data != "" {
 		// Only show first few characters of base64 data

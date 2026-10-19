@@ -659,6 +659,7 @@ func toolResultToBlocks(tr *schema.ToolResult) []*schema.FunctionToolResultConte
 					Image: &schema.UserInputImage{
 						URL:        derefString(p.Image.URL),
 						Base64Data: derefString(p.Image.Base64Data),
+						FileID:     derefString(p.Image.FileID),
 						MIMEType:   p.Image.MIMEType,
 					},
 					Extra: p.Extra,
@@ -671,6 +672,7 @@ func toolResultToBlocks(tr *schema.ToolResult) []*schema.FunctionToolResultConte
 					Audio: &schema.UserInputAudio{
 						URL:        derefString(p.Audio.URL),
 						Base64Data: derefString(p.Audio.Base64Data),
+						FileID:     derefString(p.Audio.FileID),
 						MIMEType:   p.Audio.MIMEType,
 					},
 					Extra: p.Extra,
@@ -683,6 +685,7 @@ func toolResultToBlocks(tr *schema.ToolResult) []*schema.FunctionToolResultConte
 					Video: &schema.UserInputVideo{
 						URL:        derefString(p.Video.URL),
 						Base64Data: derefString(p.Video.Base64Data),
+						FileID:     derefString(p.Video.FileID),
 						MIMEType:   p.Video.MIMEType,
 					},
 					Extra: p.Extra,
@@ -695,6 +698,7 @@ func toolResultToBlocks(tr *schema.ToolResult) []*schema.FunctionToolResultConte
 					File: &schema.UserInputFile{
 						URL:        derefString(p.File.URL),
 						Base64Data: derefString(p.File.Base64Data),
+						FileID:     derefString(p.File.FileID),
 						MIMEType:   p.File.MIMEType,
 					},
 					Extra: p.Extra,
