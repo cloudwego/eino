@@ -84,4 +84,6 @@ const (
 	ComponentOfTransformer Component = "DocumentTransformer"
 	// ComponentOfTool identifies tool components.
 	ComponentOfTool Component = "Tool"
+	// ComponentOfDecision identifies decision components.
+	ComponentOfDecision Component = "Decision"
 )

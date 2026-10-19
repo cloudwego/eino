@@ -23,6 +23,7 @@ import (
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/callbacks"
 	"github.com/cloudwego/eino/components"
+	"github.com/cloudwego/eino/components/decision"
 	"github.com/cloudwego/eino/components/document"
 	"github.com/cloudwego/eino/components/embedding"
 	"github.com/cloudwego/eino/components/indexer"
@@ -60,6 +61,7 @@ type HandlerHelper struct {
 	embeddingHandler        *EmbeddingCallbackHandler
 	indexerHandler          *IndexerCallbackHandler
 	retrieverHandler        *RetrieverCallbackHandler
+	decisionHandler         *DecisionCallbackHandler
 	loaderHandler           *LoaderCallbackHandler
 	transformerHandler      *TransformerCallbackHandler
 	toolHandler             *ToolCallbackHandler
@@ -104,6 +106,12 @@ func (c *HandlerHelper) Indexer(handler *IndexerCallbackHandler) *HandlerHelper 
 // Retriever sets the retriever handler for the handler helper, which will be called when the retriever component is executed.
 func (c *HandlerHelper) Retriever(handler *RetrieverCallbackHandler) *HandlerHelper {
 	c.retrieverHandler = handler
+	return c
+}
+
+// Decision sets the decision handler for the handler helper, which will be called when the decision component is executed.
+func (c *HandlerHelper) Decision(handler *DecisionCallbackHandler) *HandlerHelper {
+	c.decisionHandler = handler
 	return c
 }
 
@@ -201,6 +209,8 @@ func (c *handlerTemplate) OnStart(ctx context.Context, info *callbacks.RunInfo, 
 		return c.indexerHandler.OnStart(ctx, info, indexer.ConvCallbackInput(input))
 	case components.ComponentOfRetriever:
 		return c.retrieverHandler.OnStart(ctx, info, retriever.ConvCallbackInput(input))
+	case components.ComponentOfDecision:
+		return c.decisionHandler.OnStart(ctx, info, decision.ConvCallbackInput(input))
 	case components.ComponentOfLoader:
 		return c.loaderHandler.OnStart(ctx, info, document.ConvLoaderCallbackInput(input))
 	case components.ComponentOfTransformer:
@@ -242,6 +252,8 @@ func (c *handlerTemplate) OnEnd(ctx context.Context, info *callbacks.RunInfo, ou
 		return c.indexerHandler.OnEnd(ctx, info, indexer.ConvCallbackOutput(output))
 	case components.ComponentOfRetriever:
 		return c.retrieverHandler.OnEnd(ctx, info, retriever.ConvCallbackOutput(output))
+	case components.ComponentOfDecision:
+		return c.decisionHandler.OnEnd(ctx, info, decision.ConvCallbackOutput(output))
 	case components.ComponentOfLoader:
 		return c.loaderHandler.OnEnd(ctx, info, document.ConvLoaderCallbackOutput(output))
 	case components.ComponentOfTransformer:
@@ -283,6 +295,8 @@ func (c *handlerTemplate) OnError(ctx context.Context, info *callbacks.RunInfo, 
 		return c.indexerHandler.OnError(ctx, info, err)
 	case components.ComponentOfRetriever:
 		return c.retrieverHandler.OnError(ctx, info, err)
+	case components.ComponentOfDecision:
+		return c.decisionHandler.OnError(ctx, info, err)
 	case components.ComponentOfLoader:
 		return c.loaderHandler.OnError(ctx, info, err)
 	case components.ComponentOfTransformer:
@@ -393,6 +407,10 @@ func (c *handlerTemplate) Needed(ctx context.Context, info *callbacks.RunInfo, t
 		}
 	case components.ComponentOfRetriever:
 		if c.retrieverHandler != nil && c.retrieverHandler.Needed(ctx, info, timing) {
+			return true
+		}
+	case components.ComponentOfDecision:
+		if c.decisionHandler != nil && c.decisionHandler.Needed(ctx, info, timing) {
 			return true
 		}
 	case components.ComponentOfTool:
@@ -580,6 +598,30 @@ type RetrieverCallbackHandler struct {
 
 // Needed checks if the callback handler is needed for the given timing.
 func (ch *RetrieverCallbackHandler) Needed(ctx context.Context, runInfo *callbacks.RunInfo, timing callbacks.CallbackTiming) bool {
+	switch timing {
+	case callbacks.TimingOnStart:
+		return ch.OnStart != nil
+	case callbacks.TimingOnEnd:
+		return ch.OnEnd != nil
+	case callbacks.TimingOnError:
+		return ch.OnError != nil
+	default:
+		return false
+	}
+}
+
+// DecisionCallbackHandler is the handler for the decision callback.
+type DecisionCallbackHandler struct {
+	// OnStart is the callback function for the start of the decider.
+	OnStart func(ctx context.Context, runInfo *callbacks.RunInfo, input *decision.CallbackInput) context.Context
+	// OnEnd is the callback function for the end of the decider.
+	OnEnd func(ctx context.Context, runInfo *callbacks.RunInfo, output *decision.CallbackOutput) context.Context
+	// OnError is the callback function for the error of the decider.
+	OnError func(ctx context.Context, runInfo *callbacks.RunInfo, err error) context.Context
+}
+
+// Needed checks if the callback handler is needed for the given timing.
+func (ch *DecisionCallbackHandler) Needed(ctx context.Context, runInfo *callbacks.RunInfo, timing callbacks.CallbackTiming) bool {
 	switch timing {
 	case callbacks.TimingOnStart:
 		return ch.OnStart != nil

@@ -26,6 +26,7 @@ import (
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/callbacks"
 	"github.com/cloudwego/eino/components"
+	"github.com/cloudwego/eino/components/decision"
 	"github.com/cloudwego/eino/components/document"
 	"github.com/cloudwego/eino/components/embedding"
 	"github.com/cloudwego/eino/components/indexer"
@@ -515,6 +516,9 @@ func TestNewComponentTemplate(t *testing.T) {
 			Retriever(&RetrieverCallbackHandler{OnStart: func(ctx context.Context, info *callbacks.RunInfo, input *retriever.CallbackInput) context.Context {
 				return ctx
 			}}).
+			Decision(&DecisionCallbackHandler{OnStart: func(ctx context.Context, info *callbacks.RunInfo, input *decision.CallbackInput) context.Context {
+				return ctx
+			}}).
 			Embedding(&EmbeddingCallbackHandler{OnStart: func(ctx context.Context, info *callbacks.RunInfo, input *embedding.CallbackInput) context.Context {
 				return ctx
 			}}).
@@ -529,6 +533,7 @@ func TestNewComponentTemplate(t *testing.T) {
 		assert.True(t, checker.Needed(ctx, &callbacks.RunInfo{Component: components.ComponentOfLoader}, callbacks.TimingOnStart))
 		assert.True(t, checker.Needed(ctx, &callbacks.RunInfo{Component: components.ComponentOfIndexer}, callbacks.TimingOnStart))
 		assert.True(t, checker.Needed(ctx, &callbacks.RunInfo{Component: components.ComponentOfRetriever}, callbacks.TimingOnStart))
+		assert.True(t, checker.Needed(ctx, &callbacks.RunInfo{Component: components.ComponentOfDecision}, callbacks.TimingOnStart))
 		assert.True(t, checker.Needed(ctx, &callbacks.RunInfo{Component: components.ComponentOfEmbedding}, callbacks.TimingOnStart))
 		assert.True(t, checker.Needed(ctx, &callbacks.RunInfo{Component: components.ComponentOfTool}, callbacks.TimingOnStart))
 
@@ -538,6 +543,7 @@ func TestNewComponentTemplate(t *testing.T) {
 		assert.False(t, emptyH.Needed(ctx, &callbacks.RunInfo{Component: components.ComponentOfLoader}, callbacks.TimingOnStart))
 		assert.False(t, emptyH.Needed(ctx, &callbacks.RunInfo{Component: components.ComponentOfIndexer}, callbacks.TimingOnStart))
 		assert.False(t, emptyH.Needed(ctx, &callbacks.RunInfo{Component: components.ComponentOfRetriever}, callbacks.TimingOnStart))
+		assert.False(t, emptyH.Needed(ctx, &callbacks.RunInfo{Component: components.ComponentOfDecision}, callbacks.TimingOnStart))
 		assert.False(t, emptyH.Needed(ctx, &callbacks.RunInfo{Component: components.ComponentOfEmbedding}, callbacks.TimingOnStart))
 		assert.False(t, emptyH.Needed(ctx, &callbacks.RunInfo{Component: components.ComponentOfTool}, callbacks.TimingOnStart))
 

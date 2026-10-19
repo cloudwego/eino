@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"reflect"
 
+	"github.com/cloudwego/eino/components/decision"
 	"github.com/cloudwego/eino/components/document"
 	"github.com/cloudwego/eino/components/embedding"
 	"github.com/cloudwego/eino/components/indexer"
@@ -122,6 +123,12 @@ func (wf *Workflow[I, O]) AddAgenticToolsNode(key string, tools *AgenticToolsNod
 // AddRetrieverNode adds a retriever node and returns it.
 func (wf *Workflow[I, O]) AddRetrieverNode(key string, retriever retriever.Retriever, opts ...GraphAddNodeOpt) *WorkflowNode {
 	_ = wf.g.AddRetrieverNode(key, retriever, opts...)
+	return wf.initNode(key)
+}
+
+// AddDecisionNode adds a decision node and returns it.
+func (wf *Workflow[I, O]) AddDecisionNode(key string, decider decision.Decider, opts ...GraphAddNodeOpt) *WorkflowNode {
+	_ = wf.g.AddDecisionNode(key, decider, opts...)
 	return wf.initNode(key)
 }
 
