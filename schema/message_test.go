@@ -1255,6 +1255,164 @@ func TestConcatToolCalls(t *testing.T) {
 		assert.NoError(t, err)
 		assert.EqualValues(t, expectedToolCall, tc)
 	})
+
+	t.Run("extra_in_later_chunk", func(t *testing.T) {
+		givenToolCalls := []ToolCall{
+			{
+				Index: generic.PtrOf(0),
+				ID:    "tool_call_id_0",
+				Type:  "function",
+				Function: FunctionCall{
+					Name:      "tool_name_0",
+					Arguments: `{"arg0": "`,
+				},
+			},
+			{
+				Index: generic.PtrOf(1),
+				ID:    "tool_call_id_1",
+				Type:  "function",
+				Function: FunctionCall{
+					Name:      "tool_name_1",
+					Arguments: `{"arg1": 1}`,
+				},
+			},
+			{
+				Index: generic.PtrOf(0),
+				Function: FunctionCall{
+					Arguments: `value"}`,
+				},
+				Extra: map[string]any{
+					"signature": "sig_value",
+				},
+			},
+		}
+
+		expectedToolCalls := []ToolCall{
+			{
+				Index: generic.PtrOf(0),
+				ID:    "tool_call_id_0",
+				Type:  "function",
+				Function: FunctionCall{
+					Name:      "tool_name_0",
+					Arguments: `{"arg0": "value"}`,
+				},
+				Extra: map[string]any{
+					"signature": "sig_value",
+				},
+			},
+			{
+				Index: generic.PtrOf(1),
+				ID:    "tool_call_id_1",
+				Type:  "function",
+				Function: FunctionCall{
+					Name:      "tool_name_1",
+					Arguments: `{"arg1": 1}`,
+				},
+			},
+		}
+
+		tc, err := concatToolCalls(givenToolCalls)
+		assert.NoError(t, err)
+		assert.EqualValues(t, expectedToolCalls, tc)
+	})
+
+	t.Run("input_extra_not_modified", func(t *testing.T) {
+		extra0 := map[string]any{"signature": "sig_0"}
+		extra1 := map[string]any{"signature": "sig_1"}
+		givenToolCalls := []ToolCall{
+			{
+				Index: generic.PtrOf(0),
+				ID:    "tool_call_id",
+				Type:  "function",
+				Function: FunctionCall{
+					Name: "tool_name",
+				},
+				Extra: extra0,
+			},
+			{
+				Index: generic.PtrOf(0),
+				Function: FunctionCall{
+					Arguments: "call me please",
+				},
+				Extra: extra1,
+			},
+		}
+
+		tc, err := concatToolCalls(givenToolCalls)
+		assert.NoError(t, err)
+		assert.Len(t, tc, 1)
+		assert.EqualValues(t, map[string]any{"signature": "sig_0sig_1"}, tc[0].Extra)
+		assert.EqualValues(t, map[string]any{"signature": "sig_0"}, extra0)
+		assert.EqualValues(t, map[string]any{"signature": "sig_1"}, extra1)
+
+		tc[0].Extra["signature"] = "mutated"
+		assert.EqualValues(t, "sig_0", extra0["signature"])
+		assert.EqualValues(t, "sig_1", extra1["signature"])
+	})
+
+	t.Run("extra_string_fragments_concatenated", func(t *testing.T) {
+		givenToolCalls := []ToolCall{
+			{
+				Index: generic.PtrOf(0),
+				ID:    "tool_call_id",
+				Type:  "function",
+				Function: FunctionCall{
+					Name: "tool_name",
+				},
+				Extra: map[string]any{
+					"signature": "sig_part_0",
+				},
+			},
+			{
+				Index: generic.PtrOf(0),
+				Function: FunctionCall{
+					Arguments: "call me please",
+				},
+				Extra: map[string]any{
+					"signature": "_sig_part_1",
+				},
+			},
+			{
+				Index: generic.PtrOf(0),
+				Extra: map[string]any{
+					"signature": "_sig_part_2",
+				},
+			},
+		}
+
+		tc, err := concatToolCalls(givenToolCalls)
+		assert.NoError(t, err)
+		assert.Len(t, tc, 1)
+		assert.EqualValues(t, map[string]any{"signature": "sig_part_0_sig_part_1_sig_part_2"}, tc[0].Extra)
+	})
+
+	t.Run("incompatible_extra_types", func(t *testing.T) {
+		givenToolCalls := []ToolCall{
+			{
+				Index: generic.PtrOf(0),
+				ID:    "tool_call_id",
+				Type:  "function",
+				Function: FunctionCall{
+					Name: "tool_name",
+				},
+				Extra: map[string]any{
+					"signature": "sig_value",
+				},
+			},
+			{
+				Index: generic.PtrOf(0),
+				Function: FunctionCall{
+					Arguments: "call me please",
+				},
+				Extra: map[string]any{
+					"signature": 42,
+				},
+			},
+		}
+
+		_, err := concatToolCalls(givenToolCalls)
+		assert.ErrorContains(t, err, "failed to concat tool call extra")
+	})
 }
 
 func TestFormatMultiContent(t *testing.T) {
@@ -1762,7 +1920,7 @@ func TestConcatToolResults(t *testing.T) {
 		assert.Contains(t, err.Error(), "conflicting")
 		assert.Contains(t, err.Error(), "file")
 	})
-	
+
 	t.Run("same_chunk_text_merged", func(t *testing.T) {
 		chunks := []*ToolResult{
 			{
