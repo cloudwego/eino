@@ -49,4 +49,28 @@ func TestConcat(t *testing.T) {
 			},
 		}, m)
 	})
+
+	t.Run("concat map with nil value in first chunk and non-nil in second", func(t *testing.T) {
+		c1 := map[string]any{"key": nil}
+		c2 := map[string]any{"key": "value"}
+		m, err := ConcatItems([]map[string]any{c1, c2})
+		assert.Nil(t, err)
+		assert.Equal(t, map[string]any{"key": "value"}, m)
+	})
+
+	t.Run("concat map with non-nil value in first chunk and nil in second", func(t *testing.T) {
+		c1 := map[string]any{"key": "value"}
+		c2 := map[string]any{"key": nil}
+		m, err := ConcatItems([]map[string]any{c1, c2})
+		assert.Nil(t, err)
+		assert.Equal(t, map[string]any{"key": "value"}, m)
+	})
+
+	t.Run("concat flat map with mixed nil values", func(t *testing.T) {
+		c1 := map[string]any{"a": nil, "b": "hello"}
+		c2 := map[string]any{"a": "world", "b": "hello2"}
+		m, err := ConcatItems([]map[string]any{c1, c2})
+		assert.Nil(t, err)
+		assert.Equal(t, map[string]any{"a": "world", "b": "hellohello2"}, m)
+	})
 }
