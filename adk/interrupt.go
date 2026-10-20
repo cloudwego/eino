@@ -66,12 +66,13 @@ func TypedInterrupt[M MessageType](ctx context.Context, info any) *TypedAgentEve
 	is, err := core.Interrupt(ctx, info, nil, nil,
 		core.WithLayerPayload(rp))
 	if err != nil {
-		return &TypedAgentEvent[M]{Err: err}
+		return &TypedAgentEvent[M]{Type: AgentEventError, Err: err}
 	}
 
 	contexts := core.ToInterruptContexts(is, allowedAddressSegmentTypes)
 
 	return &TypedAgentEvent[M]{
+		Type: AgentEventInterrupt,
 		Action: &AgentAction{
 			Interrupted: &InterruptInfo{
 				InterruptContexts: contexts,
@@ -101,12 +102,13 @@ func TypedStatefulInterrupt[M MessageType](ctx context.Context, info any, state 
 	is, err := core.Interrupt(ctx, info, state, nil,
 		core.WithLayerPayload(rp))
 	if err != nil {
-		return &TypedAgentEvent[M]{Err: err}
+		return &TypedAgentEvent[M]{Type: AgentEventError, Err: err}
 	}
 
 	contexts := core.ToInterruptContexts(is, allowedAddressSegmentTypes)
 
 	return &TypedAgentEvent[M]{
+		Type: AgentEventInterrupt,
 		Action: &AgentAction{
 			Interrupted: &InterruptInfo{
 				InterruptContexts: contexts,
@@ -137,12 +139,13 @@ func TypedCompositeInterrupt[M MessageType](ctx context.Context, info any, state
 	is, err := core.Interrupt(ctx, info, state, subInterruptSignals,
 		core.WithLayerPayload(rp))
 	if err != nil {
-		return &TypedAgentEvent[M]{Err: err}
+		return &TypedAgentEvent[M]{Type: AgentEventError, Err: err}
 	}
 
 	contexts := core.ToInterruptContexts(is, allowedAddressSegmentTypes)
 
 	return &TypedAgentEvent[M]{
+		Type: AgentEventInterrupt,
 		Action: &AgentAction{
 			Interrupted: &InterruptInfo{
 				InterruptContexts: contexts,

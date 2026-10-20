@@ -30,7 +30,7 @@ import (
 
 func errorIterator[M MessageType](err error) *AsyncIterator[*TypedAgentEvent[M]] {
 	iter, gen := NewAsyncIteratorPair[*TypedAgentEvent[M]]()
-	gen.Send(&TypedAgentEvent[M]{Err: err})
+	gen.Send(&TypedAgentEvent[M]{Type: AgentEventError, Err: err})
 	gen.Close()
 	return iter
 }
@@ -274,7 +274,7 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 		panicErr := recover()
 		if panicErr != nil {
 			e := safe.NewPanicErr(panicErr, debug.Stack())
-			gen.Send(&TypedAgentEvent[M]{Err: e})
+			gen.Send(&TypedAgentEvent[M]{Type: AgentEventError, Err: e})
 		}
 
 		gen.Close()
@@ -299,7 +299,7 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 					cancelErr.InterruptContexts = core.ToInterruptContexts(cancelErr.interruptSignal, allowedAddressSegmentTypes)
 					err := runnerSaveCheckPointImpl(enableStreaming, store, ctx, *checkPointID, &InterruptInfo{}, cancelErr.interruptSignal)
 					if err != nil {
-						gen.Send(&TypedAgentEvent[M]{Err: fmt.Errorf("failed to save checkpoint on cancel: %w", err)})
+						gen.Send(&TypedAgentEvent[M]{Type: AgentEventError, Err: fmt.Errorf("failed to save checkpoint on cancel: %w", err)})
 					}
 				}
 				gen.Send(event)
@@ -315,6 +315,7 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 			interruptContexts := core.ToInterruptContexts(interruptSignal, allowedAddressSegmentTypes)
 			event = &TypedAgentEvent[M]{
 				AgentName: event.AgentName,
+				Type:      AgentEventInterrupt,
 				RunPath:   event.RunPath,
 				Output:    event.Output,
 				Action: &AgentAction{
@@ -332,7 +333,7 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 					Data: legacyData,
 				}, interruptSignal)
 				if err != nil {
-					gen.Send(&TypedAgentEvent[M]{Err: fmt.Errorf("failed to save checkpoint: %w", err)})
+					gen.Send(&TypedAgentEvent[M]{Type: AgentEventError, Err: fmt.Errorf("failed to save checkpoint: %w", err)})
 				}
 			}
 		}
